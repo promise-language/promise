@@ -4,6 +4,8 @@
 
 **Promise** is a systems-aware, statically-typed programming language with Dart-inspired syntax, Rust-inspired ownership semantics, and a rich type system featuring inheritance, generics, and algebraic error handling. The toolchain (compiler + package manager) is a single Go binary called `promise`, uses ANTLR4 for parsing, and targets LLVM IR for code generation.
 
+**No macros, no conditional compilation.** All code is fully defined and understandable in the source file — there are no preprocessor directives, procedural macros, or build flags that alter semantics. This is a deliberate design choice: Promise is intended for AI agents, where hidden code generation and flag-dependent behavior create costly inference overhead. It also maximizes compiled unit reuse — a compilation unit always produces the same output, so incremental builds stay fast.
+
 ---
 
 ## 2. Toolchain Architecture
@@ -168,6 +170,20 @@ A field annotated with `` `raw `` uses an LLVM type identifier directly as its t
 ```promise
 type Int {
   i64 `raw `value;
+
+  +(Int other) Int `native;
+  -(Int other) Int `native;
+  *(Int other) Int `native;
+  /(Int other) Int `native;
+  %(Int other) Int `native;
+  ==(Int other) Bool `native;
+  !=(Int other) Bool `native;
+  <(Int other) Bool `native;
+  >(Int other) Bool `native;
+  <=(Int other) Bool `native;
+  >=(Int other) Bool `native;
+  -() Int `native;                // unary negation
+  toString() String `native;
 }
 
 type Int8 {
@@ -220,6 +236,31 @@ type Bool {
 ```
 
 The `` `raw `` meta marks a field as mapping directly to its LLVM IR type. The `` `value `` meta places the field in the Value struct (see Section 5.2). These are independent — `i64 `raw;` is valid and places the raw field in the Instance struct (the default). This unifies the type system — there is no distinction between "primitive" and "user-defined" types.
+
+#### Operator Overloading
+
+Operators are ordinary methods whose name is the operator symbol. The compiler does **not** generate any built-in operator code — all operators for all types (including primitives) are defined as methods in the standard library.
+
+Methods marked `` `native `` have no Promise body; the runtime/compiler backend provides the implementation directly (e.g. mapping `Int.+` to an LLVM `add` instruction).
+
+Any user-defined type can define operators the same way:
+
+```promise
+type Vec2 {
+  Float64 x `value;
+  Float64 y `value;
+
+  +(Vec2 other) Vec2 {
+    return Vec2(x: this.x + other.x, y: this.y + other.y);
+  }
+
+  ==(Vec2 other) Bool {
+    return this.x == other.x && this.y == other.y;
+  }
+}
+```
+
+Supported operator method names: `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `>`, `<=`, `>=`. Unary operators use the same symbol with no parameters (e.g. `-() Int` for negation).
 
 ### 5.2 The Four-Struct Model
 
@@ -356,26 +397,26 @@ List[Int] numbers = [1, 2, 3];
 Map[String, Int] scores = {"alice": 100, "bob": 85};
 ```
 
-Type inference with `var`:
+Type inference with `:=`:
 
 ```promise
-var x = 42;             // inferred as Int
-var name = "Alice";     // inferred as String
+x := 42;                // inferred as Int
+name := "Alice";        // inferred as String
 ```
 
 ### 5.4 Inheritance
 
-Single inheritance with `extends`. A type can implement multiple **interfaces** with `impl`.
+A type declares its parent types with `is`. There is no distinction between inheritance and interface implementation — both use the same keyword.
 
 ```promise
 type Shape {
   Float64 x;
   Float64 y;
 
-  area() Float64;
+  area() Float64 `abstract;
 }
 
-type Circle extends Shape {
+type Circle is Shape {
   Float64 radius;
 
   area() Float64 `instance {
@@ -383,11 +424,11 @@ type Circle extends Shape {
   }
 }
 
-interface Drawable {
-  draw(Canvas &canvas);
+type Drawable {
+  draw(Canvas &canvas) `abstract;
 }
 
-type Circle extends Shape impl Drawable {
+type Circle is Shape, Drawable {
   Float64 radius;
 
   area() Float64 `instance { ... }
@@ -400,7 +441,7 @@ type Circle extends Shape impl Drawable {
 
 ### 5.5 Generics
 
-Generics use **square brackets** `[]`. Constraints are expressed with `where` clauses or inline bounds.
+Generics use **square brackets** `[]`. Constraints are expressed inline in the type parameter list.
 
 ```promise
 type Map[K: Hashable + Eq, V] {
@@ -410,8 +451,7 @@ type Map[K: Hashable + Eq, V] {
   set(K key, V value) `instance { ... }
 }
 
-// Alternative where-clause syntax:
-sort[T](T[] &mut list) where T: Ord {
+sort[T: Ord](T[] ~list) {
   ...
 }
 ```
@@ -447,7 +487,7 @@ Promise uses Rust-style ownership with borrowing and lifetimes.
 
 1. Every value has exactly **one owner**.
 2. When the owner goes out of scope, the value is **dropped** (destructor called, memory freed).
-3. You can have **either** one mutable reference (`&mut T`) **or** any number of shared references (`&T`) — never both simultaneously.
+3. You can have **either** one mutable reference (`T~`) **or** any number of shared references (`T&`) — never both simultaneously.
 4. References must not outlive their referent.
 
 ### 6.2 Syntax
@@ -457,7 +497,7 @@ process(String &data) {              // shared borrow
   io.println(data);
 }
 
-modify(String &mut data) {           // mutable borrow
+modify(String ~data) {               // mutable borrow
   data.append(" world");
 }
 
@@ -468,16 +508,27 @@ consume(String data) {               // takes ownership
 main() {
   String s = String("hello");
   process(&s);          // borrow
-  modify(&mut s);       // mutable borrow
+  modify(~s);           // mutable borrow
   consume(s);           // move — s is no longer valid after this line
 }
 ```
 
 ### 6.3 Lifetimes
 
-Explicit lifetimes when the compiler cannot infer:
+The compiler uses **aggressive lifetime elision** — in practice, explicit lifetime annotations are almost never needed. The elision rules:
+
+1. Each reference parameter gets its own lifetime.
+2. If there is exactly one input reference, its lifetime is assigned to all output references.
+3. If there is a `&this` or `~this`, its lifetime is assigned to all output references.
+4. If multiple input lifetimes exist and none of the above rules apply, the compiler analyzes the function body to infer the relationship. Only when the body is ambiguous (e.g. conditionally returning one of multiple references) does the compiler require an explicit annotation.
 
 ```promise
+// All of these are inferred — no annotations needed:
+first(String &a, String &b) String& { return a; }  // inferred: output borrows from a
+name(&this) String& { return this.name; }           // inferred: output borrows from this
+
+// Rare case: compiler cannot determine which input the output borrows from.
+// Explicit annotation required:
 longest['a](String &'a a, String &'a b) String &'a {
   if a.len() > b.len() { return a; }
   return b;
@@ -487,9 +538,9 @@ longest['a](String &'a a, String &'a b) String &'a {
 ### 6.4 Clone and Copy Traits
 
 ```promise
-interface Copy {}      // Marker — bitwise copy is safe (primitives, small value types)
-interface Clone {
-  clone() Self;
+type Copy {}           // Marker — bitwise copy is safe (primitives, small value types)
+type Clone {
+  clone() Self `abstract;
 }
 ```
 
@@ -536,15 +587,13 @@ main() {
 ### 7.3 Error Types
 
 ```promise
-interface Error {
-  message() String;
+type Error {
+  message() String `abstract;
 }
 
-type FileNotFoundError {
+type FileNotFoundError is Error {
   String path;
-}
 
-impl Error for FileNotFoundError {
   message() String {
     return "file not found: {this.path}";
   }
@@ -620,6 +669,8 @@ testAddition() `test {
 | `` `packed `` | types          | Pack fields without padding                      |
 | `` `extern(abi)``| functions   | Foreign function interface                       |
 | `` `unsafe `` | functions/blocks| Mark as unsafe code                             |
+| `` `abstract ``| methods        | Method has no body; must be implemented by subtypes |
+| `` `native `` | methods         | Method has no Promise body; provided by the runtime/compiler backend |
 
 User-defined metas are available through the type system at compile time for meta-programming and code generation.
 
@@ -651,8 +702,8 @@ type Point {
   Float64 y `value;
 
   distanceTo(this, Point other) Float64 {
-    var dx = this.x - other.x;
-    var dy = this.y - other.y;
+    dx := this.x - other.x;
+    dy := this.y - other.y;
     return math.sqrt(dx * dx + dy * dy);
   }
 }
@@ -660,13 +711,13 @@ type Point {
 
 #### Instance Methods (`` `instance ``)
 
-Instance methods receive a **pointer to the instance struct**. They can access instance fields but **not** `` `value `` fields (compile error). Use `&this` for shared borrow, `&mut this` for mutable borrow.
+Instance methods receive a **pointer to the instance struct**. They can access instance fields but **not** `` `value `` fields (compile error). Use `&this` for shared borrow, `~this` for mutable borrow.
 
 ```promise
 type Counter {
   Int value;
 
-  increment(&mut this) `instance {
+  increment(~this) `instance {
     this.value += 1;
   }
 
@@ -710,15 +761,15 @@ Counter c = Counter.new();
 ### 9.4 Lambdas / Closures
 
 ```promise
-var add = |Int a, Int b| -> Int { return a + b; };
-var doubled = list.map(|x| x * 2);
+add := |Int a, Int b| -> Int { return a + b; };
+doubled := list.map(|x| x * 2);
 ```
 
 Closures capture by reference by default. Use `move` to capture by value:
 
 ```promise
 String greeting = "hello";
-var closure = move |String name| -> String {
+closure := move |String name| -> String {
   return "{greeting}, {name}";
 };
 ```
@@ -749,7 +800,7 @@ if x > 0 {
 }
 
 // If as expression
-var abs = if x >= 0 { x } else { -x };
+abs := if x >= 0 { x } else { -x };
 ```
 
 ### 10.2 Match (Pattern Matching)
@@ -763,7 +814,7 @@ match color {
 }
 
 // Match as expression
-var label = match status {
+label := match status {
   200 => "OK",
   404 => "Not Found",
   _ => "Unknown",
@@ -839,7 +890,7 @@ Map[String, Int] scores = {
 
 // Tuple
 (Int, String) pair = (42, "answer");
-var (num, label) = pair;   // destructuring
+(num, label) := pair;      // destructuring
 ```
 
 ---
@@ -854,13 +905,13 @@ find(Int id) ?User {            // shorthand for Option[User]
   return none;                   // Option.None
 }
 
-var user = find(42);
+user := find(42);
 if user is Some(u) {
   io.println(u.name);
 }
 
 // Or with `?.` chaining
-var name = find(42)?.name;
+name := find(42)?.name;
 ```
 
 ---
@@ -871,7 +922,7 @@ Promise allows unsafe blocks for low-level operations:
 
 ```promise
 rawPointer() `unsafe {
-  var ptr = unsafe {
+  ptr := unsafe {
     Int* raw = alloc[Int]();
     *raw = 42;
     raw
@@ -918,7 +969,7 @@ type Todo `serializable {
 
   Bool done;
 
-  toggle(&mut this) `instance {
+  toggle(~this) `instance {
     this.done = !this.done;
   }
 
@@ -930,7 +981,7 @@ type Todo `serializable {
 type TodoList {
   Todo[] items;
 
-  add(&mut this, String title) `instance {
+  add(~this, String title) `instance {
     Int id = this.items.len() + 1;
     this.items.push(Todo.new(id, title));
   }
@@ -956,7 +1007,7 @@ main() {
   todos.add("Build the compiler");
 
   for i, todo in todos.items {
-    var status = if todo.done { "done" } else { "    " };
+    status := if todo.done { "done" } else { "    " };
     io.println("[{status}] {todo.title}");
   }
 }
@@ -979,7 +1030,6 @@ declaration
     : typeDecl
     | funcDecl
     | enumDecl
-    | interfaceDecl
     ;
 
 metaAnnotation: '`' IDENT ('(' metaParams ')')?;
@@ -987,7 +1037,7 @@ metaParams: metaParam (',' metaParam)*;
 metaParam: expression | IDENT ':' expression;
 
 typeDecl
-    : 'type' IDENT typeParams? ('extends' typeRef)? ('impl' typeRef (',' typeRef)*)?
+    : 'type' IDENT typeParams? ('is' typeRef (',' typeRef)*)?
       metaAnnotation* '{' typeMember* '}'
     ;
 
@@ -997,24 +1047,25 @@ typeConstraint: typeRef ('+' typeRef)*;
 
 typeMember: fieldDecl | methodDecl;
 fieldDecl: typeRef metaAnnotation* ';';
-methodDecl: IDENT '(' params ')' returnType? metaAnnotation* block;
+methodDecl: IDENT '(' params ')' returnType? metaAnnotation* (block | ';');
 
-funcDecl: IDENT typeParams? '(' params ')' returnType? metaAnnotation* whereClause? block;
+funcDecl: IDENT typeParams? '(' params ')' returnType? metaAnnotation* block;
 returnType: typeRef '!'?;
 param: typeRef refMod? IDENT;
-refMod: '&' 'mut'?;
+refMod: '&' | '~';
 
 enumDecl: 'enum' IDENT typeParams? metaAnnotation* '{' enumVariant (',' enumVariant)* ','? '}';
 enumVariant: IDENT ('(' enumFields ')')?;
 enumFields: enumField (',' enumField)*;
 enumField: typeRef IDENT;
 
-interfaceDecl: 'interface' IDENT typeParams? metaAnnotation* '{' interfaceMember* '}';
-interfaceMember: IDENT '(' params ')' typeRef? ';';
+// Abstract methods use `abstract meta — no separate interface construct
+// methodDecl with `abstract has no block: IDENT '(' params ')' returnType? '`abstract' ';'
 
 // Type references
 typeRef
-    : typeRef '&' 'mut'?                // reference (postfix)
+    : typeRef '&'                        // shared reference (postfix)
+    | typeRef '~'                        // mutable reference (postfix)
     | typeRef '*'                        // raw pointer (postfix)
     | '?' typeRef                        // optional
     | typeRef '[' ']'                    // slice
@@ -1064,18 +1115,6 @@ Single binary `promise` with the following internal packages:
 
 ## 20. Open Design Questions
 
-1. **Lifetime elision rules** — How aggressive should we be with lifetime inference? Rust's rules work well; should we adopt them verbatim or simplify further?
+1. **Async/await vs. goroutine model** — The concurrency section shows a spawn/channel model. Should we also support `async`/`await` syntax?
 
-2. **Interface vs trait naming** — The proposal uses `interface` (Dart/Go-like). Should we use `trait` (Rust-like) instead for consistency with the ownership model?
-
-3. **Operator overloading** — Should types be able to define `+`, `-`, `==` etc. via interface implementations?
-
-4. **Async/await vs. goroutine model** — The concurrency section shows a spawn/channel model. Should we also support `async`/`await` syntax?
-
-5. **Macro system** — Should compile-time meta annotations be able to generate code (procedural macros)?
-
-6. **REPL** — Should the toolchain include an interpreter/REPL for rapid prototyping?
-
-7. **Semicolons** — The proposal uses semicolons as statement terminators (Dart/C++ style). Should they be optional (inferred by newline, like Go)?
-
-8. **Reference syntax** — The proposal uses `Type &name` in params and `Type&` as a type modifier. Should references be prefix (`&Type`) like Rust, or postfix (`Type&`) like C++? Current proposal uses postfix for consistency with the type-first declaration style.
+2. **REPL** — Should the toolchain include an interpreter/REPL for rapid prototyping?

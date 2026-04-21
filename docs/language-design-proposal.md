@@ -69,14 +69,35 @@ myproject/
 │   ├── models/
 │   │   ├── promise.mod      # Sub-module
 │   │   ├── user.pr
+│   │   ├── user_test.pr     # Test file alongside source
 │   │   └── account.pr
 │   └── utils/
 │       ├── promise.mod
 │       └── strings.pr
-└── test/
-    └── models/
-        └── user_test.pr
 ```
+
+### 3.1 Testing Convention
+
+Tests live alongside the code they test. Any function annotated with `` `test `` is a test function. There are two approaches:
+
+1. **Inline tests** — write `` `test `` functions directly in the production file:
+
+```promise
+// user.pr
+type User {
+  String name;
+  Int age;
+}
+
+testUserCreation() `test {
+  User u = User(name: "Alice", age: 30);
+  assert(u.name == "Alice");
+}
+```
+
+2. **Separate test files** — create a `<name>_test.pr` file next to the source file (e.g., `user_test.pr` alongside `user.pr`). Test files follow the same convention — all `` `test ``-annotated functions are collected by `promise test`.
+
+The `promise test` command discovers and runs all `` `test ``-annotated functions across the project. Test-annotated functions are excluded from production builds.
 
 ---
 
@@ -96,30 +117,31 @@ Version segments are parsed left-to-right as `major`, `minor`, `patch`.
 
 ### 4.2 promise.mod File
 
+The module file declares only the module's own identity:
+
 ```
 module github.com/acme/myapp/1
-
-require {
-  github.com/std/io/1
-  github.com/acme/collections/2/1
-}
 ```
+
+There is no `require` block. Dependencies are inferred from `use` declarations in source files. This keeps the module file minimal and avoids duplication between the module file and source code.
 
 ### 4.3 `use` Declarations
 
-At the top of any `.pr` file, `use` imports a module with a local alias. The URL is a **string literal**:
+At the top of any `.pr` file, `use` imports a module with a local alias. The URL is a **string literal** and is the single source of truth for that dependency:
 
 ```promise
 use io "github.com/std/io/1"
 use col "github.com/acme/collections/2/1"
 
-fn main() {
+main() {
   io.println("hello")
   col.List[Int] list = col.List[Int]()
 }
 ```
 
 The identifier before the URL is **mandatory** and is the only way to reference that module's exports in the file.
+
+**Design rationale:** Each source file is self-contained — you can read a `.pr` file and understand every reference without consulting other files. The full URL next to the alias makes it immediately clear what `io.println` or `col.List` refers to. This optimizes for reading and understanding code locally, which is the most common operation.
 
 ### 4.4 Visibility
 
@@ -133,103 +155,104 @@ For now, everything is public. In a future revision, declarations will be **priv
 
 ### 5.1 Primitive Types — Defined as Regular Types
 
-Promise does **not** have a separate namespace for primitive types. Instead, primitives are defined as regular `type` declarations whose fields are annotated with `` `raw `` to map directly to LLVM types. This means `Int`, `Float64`, `Bool`, etc. are all types in the standard library, not compiler magic.
+Promise does **not** have a separate namespace for primitive types. Instead, primitives are defined as regular `type` declarations that contain a `` `raw `` field mapping directly to an LLVM type. This means `Int`, `Float64`, `Bool`, etc. are all types in the standard library, not compiler magic.
+
+#### Raw Fields
+
+A field annotated with `` `raw `` uses an LLVM type identifier directly as its type instead of a Promise type. LLVM type identifiers (`i1`, `i8`, `i16`, `i32`, `i64`, `float`, `double`, etc.) are valid identifiers in Promise and can appear as the type of a `` `raw `` field.
+
+`` `raw `` is only supported on field definitions. Everywhere else — variable declarations, function parameters, return types — you must use a Promise-defined type. This keeps the type system simple: only field definitions need special handling for raw values.
 
 #### Standard Library Primitive Definitions
 
 ```promise
 type Int {
-  `raw("i64") `value
-  i Int;
+  i64 `raw `value;
 }
 
 type Int8 {
-  `raw("i8") `value
-  i Int8;
+  i8 `raw `value;
 }
 
 type Int16 {
-  `raw("i16") `value
-  i Int16;
+  i16 `raw `value;
 }
 
 type Int32 {
-  `raw("i32") `value
-  i Int32;
+  i32 `raw `value;
 }
 
 type Int64 {
-  `raw("i64") `value
-  i Int64;
+  i64 `raw `value;
 }
 
 type UInt {
-  `raw("i64") `value
-  i UInt;
+  i64 `raw `value;
 }
 
 type UInt8 {
-  `raw("i8") `value
-  i UInt8;
+  i8 `raw `value;
 }
 
 type UInt16 {
-  `raw("i16") `value
-  i UInt16;
+  i16 `raw `value;
 }
 
 type UInt32 {
-  `raw("i32") `value
-  i UInt32;
+  i32 `raw `value;
 }
 
 type UInt64 {
-  `raw("i64") `value
-  i UInt64;
+  i64 `raw `value;
 }
 
 type Float32 {
-  `raw("float") `value
-  f Float32;
+  float `raw `value;
 }
 
 type Float64 {
-  `raw("double") `value
-  f Float64;
+  double `raw `value;
 }
 
 type Bool {
-  `raw("i1") `value
-  b Bool;
+  i1 `raw `value;
 }
 ```
 
-The `` `raw("llvm_type") `` meta tells the compiler this field maps directly to the specified LLVM IR type. The `` `value `` meta places the field in the Value struct (see Section 5.2). This unifies the type system — there is no distinction between "primitive" and "user-defined" types.
+The `` `raw `` meta marks a field as mapping directly to its LLVM IR type. The `` `value `` meta places the field in the Value struct (see Section 5.2). These are independent — `i64 `raw;` is valid and places the raw field in the Instance struct (the default). This unifies the type system — there is no distinction between "primitive" and "user-defined" types.
 
 ### 5.2 The Four-Struct Model
 
-Every type declaration `T` produces four LLVM structs at compile time. These structs form a linked chain: **Value → Instance → Variant → Type**.
+Every type declaration `T` produces four LLVM structs at compile time. These structs form a chain: **Value → Instance → Variant → Type**.
 
-#### 1. **Value Struct** (`T_val`)
-- Contains the data fields (those with no struct annotation, or explicitly annotated `` `value ``).
-- **Always has a pointer to the Instance struct** that owns it (may be optimized out later).
+#### Allocation Model
+
+- **Value struct** — contains only explicitly `` `value ``-annotated fields. Allocated on the stack, embedded in other value/instance structs, or passed as function parameters and return values. Always copied on assignment (value semantics).
+- **Instance struct** — always heap-allocated. This is the standard "object" representation.
+- **Variant struct** — generated at compile time. One per unique monomorphization. Never dynamically allocated.
+- **Type struct** — generated at compile time. One per `type` declaration. Never dynamically allocated.
+
+#### 1. **Value Struct** (`T#v`)
+- Contains **only** fields explicitly annotated with `` `value ``. Unannotated fields go to the Instance struct.
+- Fields in the value struct can be raw LLVM types (`` `raw `value ``) or Promise types (`` `value ``). When a Promise type is placed in the value struct, its own value struct is embedded (concatenated) inline — no pointer indirection.
+- Has a **pointer to the Instance struct** that owns it (may be optimized out later).
 - **Always copied** on assignment (value semantics).
 - For types with ownership fields, a copy performs a deep clone (or is disallowed if the type is not `Clone`).
 
-#### 2. **Instance Struct** (`T_inst`)
-- Contains a **pointer to its Value struct** (heap-allocated data) and a **pointer to its Variant**.
-- This is the default representation when you use a type — the standard "object".
-- Fields annotated with no meta (default) live here in the instance struct.
+#### 2. **Instance Struct** (`T#i`)
+- Contains the instance fields (unannotated / default) and a single **pointer to its Variant**.
+- Always heap-allocated. This is the default representation when you use a type — the standard "object".
+- Does **not** contain a pointer to its Value — values reference the instance, not the other way around.
 - Subject to ownership rules.
 
-#### 3. **Variant Struct** (`T_variant`)
+#### 3. **Variant Struct** (`T#m`)
 - Represents **one concrete monomorphization** of a generic type (all generic parameters resolved).
 - Contains the vtable, method pointers, resolved generic type info, and a **pointer to the Type struct**.
 - Shared across all instances of `T[ConcreteG1, ConcreteG2]`.
-- Created once per unique set of type arguments (interned at compile time).
+- Generated once per unique set of type arguments at compile time.
 - Fields annotated with `` `variant `` live here.
 
-#### 4. **Type Struct** (`T_type`)
+#### 4. **Type Struct** (`T#t`)
 - Matches the source-code type **declaration** 1:1.
 - Contains the unresolved/generic metadata: name, generic parameter descriptors, inheritance chain, field layout info, meta annotations.
 - Used for reflection and compile-time meta-programming.
@@ -238,19 +261,17 @@ Every type declaration `T` produces four LLVM structs at compile time. These str
 
 #### The Pointer Chain
 
-Every struct in the chain has a pointer to the next, making all four always reachable from any starting point:
-
 ```
-T_val  ──ptr──▶  T_inst  ──ptr──▶  T_variant  ──ptr──▶  T_type
+T#v  ──ptr──▶  T#i  ──ptr──▶  T#m  ──ptr──▶  T#t
 ```
 
-Given a value, you can always reach the instance, variant, and type. Given an instance, you can reach its value, variant, and type. And so on.
+A value always points to its owning instance. The instance points to its variant. The variant points to its type. Given a value, you can reach all four structs by following pointers. The chain is one-directional — instance does not point back to value.
 
 #### Diagram
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  T_type  (1 per source declaration)                              │
+│  T#t  (1 per source declaration, compile-time generated)         │
 │  - name: "List"                                                  │
 │  - generic_params: [E]                                           │
 │  - fields: [...]                                                 │
@@ -259,28 +280,28 @@ Given a value, you can always reach the instance, variant, and type. Given an in
 │  - `type fields live here                                        │
 │                                                                  │
 │  ┌────────────────────────────────────────────────────────────┐  │
-│  │ T_variant[Int]  (1 per monomorphization)                   │  │
+│  │ T#m[Int]  (1 per monomorphization, compile-time gen)       │  │
 │  │ - resolved_params: {E: Int}                                │  │
 │  │ - vtable: [method_ptrs...]                                 │  │
-│  │ - type_ptr: → T_type ◀──────────────────────────────────── │  │
+│  │ - type_ptr: → T#t ◀───────────────────────────────────── │  │
 │  │ - `variant fields live here                                │  │
-│  │                                                            │  │
-│  │  ┌──────────────────────────────────────────────────────┐  │  │
-│  │  │ T_inst (1 per live object)                           │  │  │
-│  │  │ - variant_ptr: → T_variant[Int] ◀──────────────────  │  │  │
-│  │  │ - value_ptr: → T_val (see below)                     │  │  │
-│  │  │ - default (unannotated) fields live here             │  │  │
-│  │  │                                                      │  │  │
-│  │  │  ┌────────────────────────────────────────────────┐  │  │  │
-│  │  │  │ T_val  (the actual data, always copied)        │  │  │  │
-│  │  │  │ - instance_ptr: → T_inst ◀──────────────────── │  │  │  │
-│  │  │  │ - `value fields live here                      │  │  │  │
-│  │  │  │ - items: [1, 2, 3]                             │  │  │  │
-│  │  │  │ - count: 3                                     │  │  │  │
-│  │  │  └────────────────────────────────────────────────┘  │  │  │
-│  │  └──────────────────────────────────────────────────────┘  │  │
 │  └────────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────┐
+│ T#i (1 per live object, heap-allocated)                       │
+│ - variant_ptr: → T#m[Int]                                     │
+│ - default (unannotated) instance fields live here             │
+└──────────────────────────────────────────────────────────────┘
+        ▲
+        │ instance_ptr
+┌──────────────────────────────────────────────────────────────┐
+│ T#v  (stack-allocated, copied on assignment)                  │
+│ - instance_ptr: → T#i                                         │
+│ - `value fields live here                                     │
+│ - items: [1, 2, 3]                                            │
+│ - count: 3                                                    │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 #### Field Placement Annotations
@@ -293,19 +314,15 @@ type Player {
   String name;
   Int health;
 
-  // Value field — lives in T_val, copied with the value struct
-  `value
-  Float64 x;
-  `value
-  Float64 y;
+  // Value field — lives in T#v, copied with the value struct
+  Float64 x `value;
+  Float64 y `value;
 
   // Variant field — shared across all instances of this monomorphization
-  `variant
-  String spritePath;
+  String spritePath `variant;
 
   // Type field — shared across all instances of this type declaration
-  `type
-  String typeName;
+  String typeName `type;
 }
 ```
 
@@ -315,16 +332,15 @@ Since primitives are regular types, `Int` works like:
 
 ```promise
 type Int {
-  `raw("i64") `value
-  i Int;    // The actual i64 value lives in Int_val
+  i64 `raw `value;    // The actual i64 value lives in Int#v
 }
 ```
 
 Resulting LLVM structs:
-- `Int_val` = `{ i64, Int_inst* }` — the raw i64 plus a pointer to the instance
-- `Int_inst` = `{ Int_val*, Int_variant* }` — pointers to value and variant
-- `Int_variant` = `{ vtable, Int_type* }` — method dispatch + pointer to type
-- `Int_type` = `{ metadata }` — name, reflection info
+- `Int#v` = `{ i64, Int#i* }` — the raw i64 plus a pointer to the owning instance
+- `Int#i` = `{ Int#m* }` — pointer to variant (no pointer back to value)
+- `Int#m` = `{ vtable, Int#t* }` — method dispatch + pointer to type (compile-time generated)
+- `Int#t` = `{ metadata }` — name, reflection info (compile-time generated)
 
 For performance, the compiler will optimize away unnecessary indirection for primitives (e.g., `Int` on the stack is just an `i64` in practice, with the instance/variant/type pointers elided when not needed).
 
@@ -356,27 +372,27 @@ type Shape {
   Float64 x;
   Float64 y;
 
-  fn area() Float64;
+  area() Float64;
 }
 
 type Circle extends Shape {
   Float64 radius;
 
-  fn area() Float64 {
+  area() Float64 `instance {
     return 3.14159 * this.radius * this.radius;
   }
 }
 
 interface Drawable {
-  fn draw(Canvas &canvas);
+  draw(Canvas &canvas);
 }
 
 type Circle extends Shape impl Drawable {
   Float64 radius;
 
-  fn area() Float64 { ... }
+  area() Float64 `instance { ... }
 
-  fn draw(Canvas &canvas) {
+  draw(Canvas &canvas) `instance {
     canvas.drawEllipse(this.x, this.y, this.radius);
   }
 }
@@ -390,12 +406,12 @@ Generics use **square brackets** `[]`. Constraints are expressed with `where` cl
 type Map[K: Hashable + Eq, V] {
   Bucket[K, V][] buckets;
 
-  fn get(K &key) ?V& { ... }
-  fn set(K key, V value) { ... }
+  get(K &key) ?V& `instance { ... }
+  set(K key, V value) `instance { ... }
 }
 
 // Alternative where-clause syntax:
-fn sort[T](T[] &mut list) where T: Ord {
+sort[T](T[] &mut list) where T: Ord {
   ...
 }
 ```
@@ -437,19 +453,19 @@ Promise uses Rust-style ownership with borrowing and lifetimes.
 ### 6.2 Syntax
 
 ```promise
-fn process(String &data) {           // shared borrow
+process(String &data) {              // shared borrow
   io.println(data);
 }
 
-fn modify(String &mut data) {        // mutable borrow
+modify(String &mut data) {           // mutable borrow
   data.append(" world");
 }
 
-fn consume(String data) {            // takes ownership
+consume(String data) {               // takes ownership
   // data is dropped at end of scope
 }
 
-fn main() {
+main() {
   String s = String("hello");
   process(&s);          // borrow
   modify(&mut s);       // mutable borrow
@@ -462,7 +478,7 @@ fn main() {
 Explicit lifetimes when the compiler cannot infer:
 
 ```promise
-fn longest['a](String &'a a, String &'a b) String &'a {
+longest['a](String &'a a, String &'a b) String &'a {
   if a.len() > b.len() { return a; }
   return b;
 }
@@ -473,7 +489,7 @@ fn longest['a](String &'a a, String &'a b) String &'a {
 ```promise
 interface Copy {}      // Marker — bitwise copy is safe (primitives, small value types)
 interface Clone {
-  fn clone() Self;
+  clone() Self;
 }
 ```
 
@@ -488,7 +504,7 @@ Types that are `Copy` are implicitly copied on assignment. Others are moved.
 Functions that can fail use `!` after the return type. Under the hood, this desugars to a result struct — a pair of `(value, error)`.
 
 ```promise
-fn readFile(String &path) String! {
+readFile(String &path) String! {
   // On success:
   return contents;
 
@@ -502,7 +518,7 @@ The `!` suffix on the return type means: "this function returns `(String, Error)
 ### 7.2 Calling Failable Functions
 
 ```promise
-fn main() {
+main() {
   // Option 1: Propagate with `?`
   String content = readFile("data.txt")?;   // returns error to caller if failed
 
@@ -521,7 +537,7 @@ fn main() {
 
 ```promise
 interface Error {
-  fn message() String;
+  message() String;
 }
 
 type FileNotFoundError {
@@ -529,7 +545,7 @@ type FileNotFoundError {
 }
 
 impl Error for FileNotFoundError {
-  fn message() String {
+  message() String {
     return "file not found: {this.path}";
   }
 }
@@ -540,7 +556,7 @@ impl Error for FileNotFoundError {
 `raise` is used to return an error from a `!`-function. It is **not** an exception — it is sugar for returning the error half of the result struct.
 
 ```promise
-fn divide(Float64 a, Float64 b) Float64! {
+divide(Float64 a, Float64 b) Float64! {
   if b == 0.0 {
     raise MathError("division by zero");
   }
@@ -552,7 +568,7 @@ fn divide(Float64 a, Float64 b) Float64! {
 
 ## 8. Meta Annotations (Backtick Attributes)
 
-Backtick `` ` `` provides metadata on declarations.
+Backtick `` ` `` provides metadata on declarations. Meta annotations are placed **after** the definition name (and any parameters/return type) and **before** the body or statement terminator.
 
 ### 8.1 Syntax
 
@@ -562,28 +578,26 @@ MetaParams     = MetaParam ( ',' MetaParam )* ;
 MetaParam      = Expression | Identifier ':' Expression ;
 ```
 
+Meta annotations appear in post-definition position:
+
+- **Types**: `type Foo `meta { ... }`
+- **Fields**: `String name `meta;`
+- **Methods**: `greet() String `meta { ... }`
+- **Functions**: `add(Int a, Int b) Int `meta { ... }`
+
 ### 8.2 Examples
 
 ```promise
-`serializable
-`version(2)
-`deprecated(since: "1.3", message: "Use newMethod instead")
-type OldThing {
-  `json(name: "user_name")
-  `required
-  String name;
-
-  `json(name: "user_age")
-  Int age;
+type OldThing `serializable `version(2) `deprecated(since: "1.3", message: "Use newMethod instead") {
+  String name `json(name: "user_name") `required;
+  Int age `json(name: "user_age");
 }
 
-`inline
-fn fastAdd(Int a, Int b) Int {
+fastAdd(Int a, Int b) Int `inline {
   return a + b;
 }
 
-`test
-fn testAddition() {
+testAddition() `test {
   assert(fastAdd(1, 2) == 3);
 }
 ```
@@ -592,10 +606,11 @@ fn testAddition() {
 
 | Meta          | Applies To     | Description                                      |
 |---------------|----------------|--------------------------------------------------|
-| `` `raw(t) `` | fields         | Map field directly to LLVM type `t`              |
-| `` `value ``  | fields         | Place field in the Value struct                  |
-| `` `variant ``| fields         | Place field in the Variant struct                |
-| `` `type ``   | fields         | Place field in the Type struct                   |
+| `` `raw ``    | fields         | Field uses an LLVM type identifier directly      |
+| `` `value ``  | fields, methods| Place field in Value struct; method receives value as `this` (default for methods) |
+| `` `instance ``| methods       | Method receives pointer to Instance struct as `this` |
+| `` `variant ``| fields, methods| Place field in Variant struct; method receives variant as `this` |
+| `` `type ``   | fields, methods| Place field in Type struct; method is a namespaced function (no `this`) |
 | `` `public `` | any decl       | Mark as exported (future: when private-by-default)|
 | `` `inline `` | functions      | Hint to inline the function                      |
 | `` `deprecated`` | any         | Mark as deprecated with optional message         |
@@ -612,46 +627,84 @@ User-defined metas are available through the type system at compile time for met
 
 ## 9. Functions & Methods
 
+Functions are declared without a keyword — the name, parameter list, and optional return type are sufficient to identify a function declaration. This follows the Dart/C++/Java convention.
+
 ### 9.1 Free Functions
 
 ```promise
-fn greet(String &name) String {
+greet(String &name) String {
   return "Hello, {name}!";
 }
 ```
 
 ### 9.2 Methods
 
-Methods are defined inside the type body. `this` is the receiver.
+Methods are defined inside the type body and correspond to the four struct levels. The method's level determines what `this` refers to and which fields are accessible.
+
+#### Value Methods (default)
+
+By default, `this` is the **value struct**, copied when the method is called. Value methods can access `` `value `` fields only.
+
+```promise
+type Point {
+  Float64 x `value;
+  Float64 y `value;
+
+  distanceTo(this, Point other) Float64 {
+    var dx = this.x - other.x;
+    var dy = this.y - other.y;
+    return math.sqrt(dx * dx + dy * dy);
+  }
+}
+```
+
+#### Instance Methods (`` `instance ``)
+
+Instance methods receive a **pointer to the instance struct**. They can access instance fields but **not** `` `value `` fields (compile error). Use `&this` for shared borrow, `&mut this` for mutable borrow.
 
 ```promise
 type Counter {
   Int value;
 
-  fn increment(&mut this) {
+  increment(&mut this) `instance {
     this.value += 1;
   }
 
-  fn current(&this) Int {
-    return this.value;
-  }
-
-  fn intoValue(this) Int {   // consumes self
+  current(&this) Int `instance {
     return this.value;
   }
 }
 ```
 
-### 9.3 Static Methods
+#### Variant Methods (`` `variant ``)
+
+Variant methods receive the **variant struct**. One method copy exists per monomorphization. They can access `` `variant `` fields only.
+
+```promise
+type Collection[T] {
+  String typeName `variant;
+
+  describeType() String `variant {
+    return "Collection of {this.typeName}";
+  }
+}
+```
+
+#### Type Methods (`` `type ``)
+
+Type methods are effectively **namespaced functions**. No `this` is passed at call time — the type struct is static and known at compile time. They can access `` `type `` fields only. These replace the `static` keyword.
 
 ```promise
 type Counter {
   Int value;
 
-  static fn new() Counter {
+  new() Counter `type {
     return Counter(value: 0);
   }
 }
+
+// Called as:
+Counter c = Counter.new();
 ```
 
 ### 9.4 Lambdas / Closures
@@ -668,6 +721,16 @@ String greeting = "hello";
 var closure = move |String name| -> String {
   return "{greeting}, {name}";
 };
+```
+
+### 9.5 Function Types
+
+Function types use arrow syntax instead of a keyword:
+
+```promise
+(Int, Int) -> Int                  // function taking two Ints, returning Int
+(String&) -> Bool                  // function taking a borrowed String, returning Bool
+() -> ()                           // function taking nothing, returning nothing
 ```
 
 ---
@@ -786,7 +849,7 @@ var (num, label) = pair;   // destructuring
 Promise does not have null. Optional values use `Option[T]`, with sugar `?T`:
 
 ```promise
-fn find(Int id) ?User {         // shorthand for Option[User]
+find(Int id) ?User {            // shorthand for Option[User]
   // ...
   return none;                   // Option.None
 }
@@ -807,8 +870,7 @@ var name = find(42)?.name;
 Promise allows unsafe blocks for low-level operations:
 
 ```promise
-`unsafe
-fn rawPointer() {
+rawPointer() `unsafe {
   var ptr = unsafe {
     Int* raw = alloc[Int]();
     *raw = 42;
@@ -824,7 +886,7 @@ fn rawPointer() {
 Lightweight coroutines with ownership-safe channels:
 
 ```promise
-fn main() {
+main() {
   Channel[Int] ch = Channel[Int].new(capacity: 10);
 
   spawn {
@@ -850,21 +912,17 @@ Ownership rules apply across spawned tasks — data is either moved into the tas
 use io "github.com/promise-lang/std/io/1"
 use json "github.com/promise-lang/std/json/1"
 
-`serializable
-type Todo {
-  `json(name: "id")
-  Int id;
-
-  `json(name: "title")
-  String title;
+type Todo `serializable {
+  Int id `json(name: "id");
+  String title `json(name: "title");
 
   Bool done;
 
-  fn toggle(&mut this) {
+  toggle(&mut this) `instance {
     this.done = !this.done;
   }
 
-  static fn new(Int id, String title) Todo {
+  new(Int id, String title) Todo `type {
     return Todo(id: id, title: title, done: false);
   }
 }
@@ -872,23 +930,23 @@ type Todo {
 type TodoList {
   Todo[] items;
 
-  fn add(&mut this, String title) {
+  add(&mut this, String title) `instance {
     Int id = this.items.len() + 1;
     this.items.push(Todo.new(id, title));
   }
 
-  fn pending(&this) Todo&[] {
+  pending(&this) Todo&[] `instance {
     return this.items.filter(|t| !t.done);
   }
 }
 
-fn loadFromFile(String &path) TodoList! {
+loadFromFile(String &path) TodoList! {
   String content = io.readFile(path)?;
   Todo[] items = json.decode[Todo[]](content)?;
   return TodoList(items: items);
 }
 
-fn main() {
+main() {
   TodoList todos = loadFromFile("todos.json") catch err {
     io.println("Starting fresh: {err.message()}");
     TodoList(items: []);
@@ -918,10 +976,10 @@ compilationUnit: useDecl* declaration* EOF;
 useDecl: 'use' IDENT STRING_LITERAL ';';
 
 declaration
-    : metaAnnotation* typeDecl
-    | metaAnnotation* fnDecl
-    | metaAnnotation* enumDecl
-    | metaAnnotation* interfaceDecl
+    : typeDecl
+    | funcDecl
+    | enumDecl
+    | interfaceDecl
     ;
 
 metaAnnotation: '`' IDENT ('(' metaParams ')')?;
@@ -930,30 +988,29 @@ metaParam: expression | IDENT ':' expression;
 
 typeDecl
     : 'type' IDENT typeParams? ('extends' typeRef)? ('impl' typeRef (',' typeRef)*)?
-      '{' typeMember* '}'
+      metaAnnotation* '{' typeMember* '}'
     ;
 
 typeParams: '[' typeParam (',' typeParam)* ']';
 typeParam: IDENT (':' typeConstraint)?;
 typeConstraint: typeRef ('+' typeRef)*;
 
-typeMember: metaAnnotation* (fieldDecl | methodDecl | staticMethodDecl);
-fieldDecl: typeRef IDENT ';';
-methodDecl: 'fn' IDENT '(' params ')' typeRef? block;
-staticMethodDecl: 'static' 'fn' IDENT '(' params ')' typeRef? block;
+typeMember: fieldDecl | methodDecl;
+fieldDecl: typeRef metaAnnotation* ';';
+methodDecl: IDENT '(' params ')' returnType? metaAnnotation* block;
 
-fnDecl: 'fn' IDENT typeParams? '(' params ')' returnType? whereClause? block;
+funcDecl: IDENT typeParams? '(' params ')' returnType? metaAnnotation* whereClause? block;
 returnType: typeRef '!'?;
 param: typeRef refMod? IDENT;
 refMod: '&' 'mut'?;
 
-enumDecl: 'enum' IDENT typeParams? '{' enumVariant (',' enumVariant)* ','? '}';
+enumDecl: 'enum' IDENT typeParams? metaAnnotation* '{' enumVariant (',' enumVariant)* ','? '}';
 enumVariant: IDENT ('(' enumFields ')')?;
 enumFields: enumField (',' enumField)*;
 enumField: typeRef IDENT;
 
-interfaceDecl: 'interface' IDENT typeParams? '{' interfaceMember* '}';
-interfaceMember: 'fn' IDENT '(' params ')' typeRef? ';';
+interfaceDecl: 'interface' IDENT typeParams? metaAnnotation* '{' interfaceMember* '}';
+interfaceMember: IDENT '(' params ')' typeRef? ';';
 
 // Type references
 typeRef
@@ -964,7 +1021,7 @@ typeRef
     | typeRef '[' INT_LITERAL ']'        // fixed array
     | IDENT typeArgs?                    // named type
     | '(' typeRef (',' typeRef)* ')'     // tuple
-    | 'fn' '(' typeRefList? ')' typeRef? // function type
+    | '(' typeRefList ')' '->' typeRef   // function type (arrow syntax)
     ;
 
 typeArgs: '[' typeRef (',' typeRef)* ']';
@@ -997,6 +1054,7 @@ Single binary `promise` with the following internal packages:
 
 ### Dependency Resolution
 
+- Dependencies are discovered by scanning all `use` declarations in source files — no separate dependency manifest.
 - Modules fetched from their URL (git clone / HTTP archive).
 - Version segments in the URL are the version specifier — no separate version field.
 - Lockfile (`promise.lock`) pins exact commit hashes.

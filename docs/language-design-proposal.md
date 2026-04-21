@@ -278,7 +278,7 @@ Every type declaration `T` produces four LLVM structs at compile time. These str
 - Fields in the value struct can be raw LLVM types (`` `raw `value ``) or Promise types (`` `value ``). When a Promise type is placed in the value struct, its own value struct is embedded (concatenated) inline — no pointer indirection.
 - Has a **pointer to the Instance struct** that owns it (may be optimized out later).
 - **Always copied** on assignment (value semantics).
-- For types with ownership fields, a copy performs a deep clone (or is disallowed if the type is not `Clone`).
+- For types with ownership fields, a copy performs a deep clone (or is disallowed if the type is not `` `clone ``).
 
 #### 2. **Instance Struct** (`T#i`)
 - Contains the instance fields (unannotated / default) and a single **pointer to its Variant**.
@@ -535,16 +535,36 @@ longest['a](String &'a a, String &'a b) String &'a {
 }
 ```
 
-### 6.4 Clone and Copy Traits
+### 6.4 Copy and Clone
+
+`` `copy `` and `` `clone `` are built-in meta annotations that control assignment semantics:
 
 ```promise
-type Copy {}           // Marker — bitwise copy is safe (primitives, small value types)
-type Clone {
-  clone() Self `abstract;
+// Bitwise copy — compiler verifies all fields are also `copy
+type Point `copy {
+  Float64 x `value;
+  Float64 y `value;
+}
+
+// Auto-generated deep clone — compiler generates clone() Self method
+type Document `clone {
+  String title;
+  String[] pages;
+}
+
+// Custom clone — just define the method, no meta needed
+type Connection {
+  Socket socket;
+
+  clone() Self {
+    return Connection(socket: this.socket.duplicate());
+  }
 }
 ```
 
-Types that are `Copy` are implicitly copied on assignment. Others are moved.
+- `` `copy ``: Bitwise copy on assignment (primitives, small value types). The compiler verifies all fields are themselves `` `copy ``. No method generated — the copy is a direct memory copy.
+- `` `clone ``: The compiler auto-generates a `clone() Self` method that deep-copies all fields. If the type also defines an explicit `clone() Self` method, the explicit method takes precedence.
+- Types that are `` `copy `` are implicitly copied on assignment. Others are moved.
 
 ---
 
@@ -671,8 +691,35 @@ testAddition() `test {
 | `` `unsafe `` | functions/blocks| Mark as unsafe code                             |
 | `` `abstract ``| methods        | Method has no body; must be implemented by subtypes |
 | `` `native `` | methods         | Method has no Promise body; provided by the runtime/compiler backend |
+| `` `copy ``  | types           | Bitwise copy on assignment; compiler verifies all fields are `copy |
+| `` `clone `` | types           | Auto-generate `clone() Self` method (deep copy)   |
+| `` `doc ``   | any             | AST-attached documentation (see Section 8.4)      |
 
 User-defined metas are available through the type system at compile time for meta-programming and code generation.
+
+### 8.4 Documentation (`` `doc ``)
+
+`` `doc `` attaches documentation directly to the AST node. Unlike comments, `` `doc `` is preserved in the parsed tree, unambiguously bound to its declaration, and available to tooling, IDE support, and AI agents at compile time.
+
+```promise
+type HttpClient `doc("HTTP client with connection pooling and automatic retry.") {
+  Int maxRetries `doc("Maximum number of retry attempts before failing.");
+  Duration timeout `doc("Per-request timeout.");
+
+  get(~this, String url) Response! `doc("Perform a GET request. Returns the response or an error.") `instance {
+    ...
+  }
+}
+
+divide(Float64 a, Float64 b) Float64! `doc("Divide a by b. Raises MathError on division by zero.") {
+  if b == 0.0 {
+    raise MathError("division by zero");
+  }
+  return a / b;
+}
+```
+
+The parameter is a plain string. Tooling can extract structured sections (parameters, return values, errors) from the text by convention, but the language itself treats it as an opaque string. This keeps the meta simple while giving AI agents a reliable, parseable documentation source that is always in sync with the code structure.
 
 ---
 
@@ -839,8 +886,8 @@ for i, item in collection {
   // ...
 }
 
-// Infinite loop
-loop {
+// Infinite loop (no condition — Go style)
+for {
   if done { break; }
 }
 

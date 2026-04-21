@@ -1,0 +1,15 @@
+repo_path: /home/djabi/gd/prog/go
+base_branch: master
+max_concurrent: 10
+claude_model: Opus 4.6
+verifier_model: Opus 4.6
+max_turns: 50
+max_budget_usd: 5
+toolchains: []
+started_at: "2026-02-06"
+tasks:
+    - id: language-design
+      branch: tasks/2026-02-06/language-design
+      instruction: "Design a programming language and build a compiler / package manager. The language must have the following properties\nUse llvm as compiler framework\nFor parsing use antlr4\nWrite the compiler/package manager in golang\n\nSyntax similar to dart (but feel free to deviate from java)\n\nTypes with inheritance & generics. Each class defines 4 structs - one for the values (always copied), one for instance (value struct has a pointer to it), one for variant (the type with all generic parameters resolved) and one for the type (matches 1:1 with the source code “type” definition. \nIn the language, allow for “`” (backtick) to provide meta info (similar to attributes). Where the meta can be a simple identifier or identifier(params), where params can be just a value or name:value pairs). \n\nMemory management like rust\nError handling in the language where functions/methods that can return an error return a struct of (type_value, error_value)\n\nModules defined by a mod file and all source files in the directory. Module identity is a url with a valid identifier for the path. Any path segment that is a number is considered a version. Modules are “used” the other modules ba “use id url” where “id” is how this module is accessed from this file. \nWrite up a detailed proposal and I’ll answer questions and guide you.\n"
+      acceptance_criteria: |
+        - Human in the loop must review and approve the langauge design

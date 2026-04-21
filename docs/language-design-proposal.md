@@ -932,20 +932,68 @@ rawPointer() `unsafe {
 
 ---
 
-## 15. Concurrency (Future Direction)
+## 15. Concurrency
 
-Lightweight coroutines with ownership-safe channels:
+Promise uses goroutine-style lightweight coroutines. The runtime multiplexes goroutines onto OS threads and transparently handles I/O scheduling — all blocking I/O calls automatically suspend the current goroutine and resume it when the operation completes. There is **no function coloring**: functions that perform I/O have normal signatures and look identical to pure functions.
+
+### 15.1 Transparent I/O
+
+Functions are never declared as "async". The runtime is the async engine — any function that performs I/O automatically yields the goroutine during the blocking operation:
+
+```promise
+// This function does I/O but has a normal signature.
+// The runtime suspends the goroutine during httpGet, not the OS thread.
+fetchUser(Int id) User! {
+  data := httpGet("/users/{id}")?;
+  return User.fromJson(data)?;
+}
+
+// Callers just call it normally:
+user := fetchUser(42)?;
+```
+
+### 15.2 Explicit Concurrency with `go`
+
+`go` is an **expression** that launches a goroutine and returns a `Task[T]`, where `T` is the result type of the block or call. The `<-` operator receives the result, suspending the current goroutine until it is ready.
+
+```promise
+// Fire-and-forget (Task[Void] result ignored)
+go {
+  logAnalytics(event);
+};
+
+// Value-returning task
+task := go fetchUser(42);          // task : Task[User!]
+user := <-task;                    // suspends until result ready
+
+// Inline: launch + receive
+user := <-go fetchUser(42);        // equivalent to "await"
+
+// Fan out, fan in — structured concurrency
+t1 := go fetchUser(id);
+t2 := go fetchPosts(id);
+t3 := go fetchComments(id);
+user := <-t1;                      // all three ran concurrently
+posts := <-t2;
+comments := <-t3;
+```
+
+`Task[T]` is a runtime-internal type returned by `go` expressions — it never appears in function signatures. Concurrency is always a **caller-side decision**.
+
+### 15.3 Channels
+
+Channels are the primary synchronization primitive for streaming data between goroutines:
 
 ```promise
 main() {
-  Channel[Int] ch = Channel[Int].new(capacity: 10);
+  ch := Channel[Int].new(capacity: 10);
 
-  spawn {
+  go {
     for i in 0..100 {
       ch.send(i);
     }
     ch.close();
-  }
+  };
 
   for value in ch {
     io.println("{value}");
@@ -953,7 +1001,28 @@ main() {
 }
 ```
 
-Ownership rules apply across spawned tasks — data is either moved into the task or shared via `Arc[T]` (atomic reference counting).
+The `<-` operator also works on channels: `value := <-ch;` receives the next value.
+
+### 15.4 Ownership Across Goroutines
+
+Ownership rules apply across goroutines — data is either **moved** into the goroutine or shared via `Arc[T]` (atomic reference counting):
+
+```promise
+main() {
+  data := loadData();
+
+  // data is moved into the goroutine — no longer valid in main
+  go {
+    process(data);
+  };
+
+  // Shared access requires Arc
+  Arc[Config] config = Arc.new(loadConfig());
+  go {
+    serve(config.clone());
+  };
+}
+```
 
 ---
 
@@ -1077,6 +1146,9 @@ typeRef
 
 typeArgs: '[' typeRef (',' typeRef)* ']';
 
+goExpr: 'go' (block | expression);    // returns Task[T]
+receiveExpr: '<-' expression;          // receive from Task[T] or Channel[T]
+
 lifetime: '\'' IDENT;
 ```
 
@@ -1115,6 +1187,4 @@ Single binary `promise` with the following internal packages:
 
 ## 20. Open Design Questions
 
-1. **Async/await vs. goroutine model** — The concurrency section shows a spawn/channel model. Should we also support `async`/`await` syntax?
-
-2. **REPL** — Should the toolchain include an interpreter/REPL for rapid prototyping?
+1. **REPL** — Should the toolchain include an interpreter/REPL for rapid prototyping?

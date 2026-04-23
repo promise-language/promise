@@ -66,19 +66,34 @@ promise lock                 # Regenerate lockfile
 myproject/
 ├── promise.mod              # Module definition file
 ├── promise.lock             # Lockfile (generated)
-├── src/
-│   ├── main.pr              # Entry point
-│   ├── models/
-│   │   ├── promise.mod      # Sub-module
-│   │   ├── user.pr
-│   │   ├── user_test.pr     # Test file alongside source
-│   │   └── account.pr
-│   └── utils/
-│       ├── promise.mod
-│       └── strings.pr
+├── main.pr                  # Entry point
+├── helpers.pr               # Other source files at top level
+├── models/
+│   ├── promise.mod          # Separate module (excluded from myproject)
+│   ├── user.pr
+│   ├── user_test.pr         # Test file alongside source
+│   └── account.pr
+└── utils/
+    ├── promise.mod          # Separate module (excluded from myproject)
+    └── strings.pr
 ```
 
-### 3.1 Testing Convention
+Source files (`.pr`) and directories live directly inside the module root — there is no required `src/` directory. This keeps the layout flat and avoids an extra level of nesting that adds no information. The module root is wherever `promise.mod` is.
+
+### 3.1 Module Boundaries
+
+There is no concept of "sub-modules." Every `promise.mod` file defines a standalone module. When the compiler scans a module's directory tree, any subdirectory that contains its own `promise.mod` is **excluded** — it is a separate module, not part of the parent. Directories without a `promise.mod` are just organizational folders whose `.pr` files belong to the enclosing module.
+
+In the layout above, `myproject/`, `models/`, and `utils/` are three independent modules that happen to be nested on disk. The `myproject` module contains `main.pr` and `helpers.pr`. It does **not** contain anything inside `models/` or `utils/` — those are their own modules with their own identities, dependencies, and compilation scopes.
+
+This means a `promise.mod` file serves exactly one purpose: **it marks the root of a module.** The compiler needs this marker because:
+
+1. **No guessing.** Without it, the compiler cannot distinguish "this directory is a separate module" from "this directory just organizes files." An explicit marker removes ambiguity — you can freely create directories for readability without accidentally splitting your module.
+2. **Independent compilation.** Each module is a separate compilation unit with its own dependency graph. The `promise.mod` file tells the compiler "start a new compilation scope here."
+3. **Visibility boundaries.** Visibility rules apply at module boundaries. Without a `promise.mod`, a directory has no boundary — its files are part of the parent module and share its namespace.
+4. **Tooling clarity.** Tools, IDEs, and AI agents identify module structure by scanning for `promise.mod` files. No heuristics, no configuration — the file system is the source of truth.
+
+### 3.2 Testing Convention
 
 Tests live alongside the code they test. Any function annotated with `` `test `` is a test function. There are two approaches:
 
@@ -99,7 +114,7 @@ testUserCreation() `test {
 
 2. **Separate test files** — create a `<name>_test.pr` file next to the source file (e.g., `user_test.pr` alongside `user.pr`). Test files follow the same convention — all `` `test ``-annotated functions are collected by `promise test`.
 
-The `promise test` command discovers and runs all `` `test ``-annotated functions across the project. Test-annotated functions are excluded from production builds.
+The `promise test` command discovers and runs all `` `test ``-annotated functions across the project. Any declaration annotated with `` `test `` — functions, types, or anything else — is excluded from production builds. Entire `_test.pr` files are also excluded from production builds.
 
 ---
 
@@ -268,15 +283,17 @@ Every type declaration `T` produces four LLVM structs at compile time. These str
 
 #### Allocation Model
 
-- **Value struct** — contains only explicitly `` `value ``-annotated fields. Allocated on the stack, embedded in other value/instance structs, or passed as function parameters and return values. Always copied on assignment (value semantics).
+- **Value struct** — the unit of passing. Contains a vtable pointer, an instance pointer, and explicitly `` `value ``-annotated fields. Allocated on the stack, embedded in other value/instance structs, or passed as function parameters and return values. Always copied on assignment (value semantics).
 - **Instance struct** — always heap-allocated. This is the standard "object" representation.
 - **Variant struct** — generated at compile time. One per unique monomorphization. Never dynamically allocated.
 - **Type struct** — generated at compile time. One per `type` declaration. Never dynamically allocated.
 
 #### 1. **Value Struct** (`T#v`)
+- The **unit of passing** — all function parameters, return values, and variable bindings are value structs.
+- Contains a **vtable pointer** that determines how fields and methods are dispatched (see Section 5.2.1).
+- Contains a **pointer to the Instance struct** that owns it.
 - Contains **only** fields explicitly annotated with `` `value ``. Unannotated fields go to the Instance struct.
 - Fields in the value struct can be raw LLVM types (`` `raw `value ``) or Promise types (`` `value ``). When a Promise type is placed in the value struct, its own value struct is embedded (concatenated) inline — no pointer indirection.
-- Has a **pointer to the Instance struct** that owns it (may be optimized out later).
 - **Always copied** on assignment (value semantics).
 - For types with ownership fields, a copy performs a deep clone (or is disallowed if the type is not `` `clone ``).
 
@@ -288,7 +305,7 @@ Every type declaration `T` produces four LLVM structs at compile time. These str
 
 #### 3. **Variant Struct** (`T#m`)
 - Represents **one concrete monomorphization** of a generic type (all generic parameters resolved).
-- Contains the vtable, method pointers, resolved generic type info, and a **pointer to the Type struct**.
+- Contains resolved generic type info and a **pointer to the Type struct**.
 - Shared across all instances of `T[ConcreteG1, ConcreteG2]`.
 - Generated once per unique set of type arguments at compile time.
 - Fields annotated with `` `variant `` live here.
@@ -304,9 +321,11 @@ Every type declaration `T` produces four LLVM structs at compile time. These str
 
 ```
 T#v  ──ptr──▶  T#i  ──ptr──▶  T#m  ──ptr──▶  T#t
+ │
+ └── vtable_ptr ──▶  view-specific vtable (compile-time generated)
 ```
 
-A value always points to its owning instance. The instance points to its variant. The variant points to its type. Given a value, you can reach all four structs by following pointers. The chain is one-directional — instance does not point back to value.
+A value always points to its owning instance. The instance points to its variant. The variant points to its type. Given a value, you can reach all four structs by following pointers. The chain is one-directional — instance does not point back to value. The vtable pointer in the value struct points to a **view-specific vtable** (see Section 5.2.1) that is separate from the pointer chain.
 
 #### Diagram
 
@@ -323,7 +342,6 @@ A value always points to its owning instance. The instance points to its variant
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │ T#m[Int]  (1 per monomorphization, compile-time gen)       │  │
 │  │ - resolved_params: {E: Int}                                │  │
-│  │ - vtable: [method_ptrs...]                                 │  │
 │  │ - type_ptr: → T#t ◀───────────────────────────────────── │  │
 │  │ - `variant fields live here                                │  │
 │  └────────────────────────────────────────────────────────────┘  │
@@ -338,12 +356,178 @@ A value always points to its owning instance. The instance points to its variant
         │ instance_ptr
 ┌──────────────────────────────────────────────────────────────┐
 │ T#v  (stack-allocated, copied on assignment)                  │
+│ - vtable_ptr: → view-specific vtable (see 5.2.1)             │
 │ - instance_ptr: → T#i                                         │
 │ - `value fields live here                                     │
 │ - items: [1, 2, 3]                                            │
 │ - count: 3                                                    │
 └──────────────────────────────────────────────────────────────┘
+
+    vtable_ptr ──▶
+┌──────────────────────────────────────────────────────────────┐
+│ Vtable  (compile-time generated, one per view)                │
+│ - get_field_0: fn(T#v) -> FieldType                           │
+│ - set_field_0: fn(T#v, FieldType)                             │
+│ - method_0:    fn(T#v) -> ReturnType                          │
+│ - ...                                                         │
+└──────────────────────────────────────────────────────────────┘
 ```
+
+#### 5.2.1 Vtable Dispatch Model
+
+The vtable pointer in the value struct is the **sole mechanism** for field access and method dispatch. Every field produces a getter and setter slot in the vtable. Every method produces a method slot. The call site accesses fields and calls methods exclusively through the vtable — it never directly reads memory from the instance or value struct.
+
+**Vtable structure for a type:**
+
+```promise
+type Animal {
+  String name;
+  Int age;
+  speak() String `abstract;
+}
+```
+
+The compiler generates:
+
+```
+Animal_vtable = {
+  [0] get_name:  fn(Animal#v) -> String
+  [1] set_name:  fn(Animal#v, String)
+  [2] get_age:   fn(Animal#v) -> Int
+  [3] set_age:   fn(Animal#v, Int)
+  [4] speak:     fn(Animal#v) -> String
+}
+```
+
+At the call site, `animal.name` compiles to `vtable[0](animal_value)` and `animal.speak()` compiles to `vtable[4](animal_value)`. The call site does not know or care whether `name` is a stored field or a computed getter — the vtable function handles it.
+
+**Why fields go through the vtable:**
+
+This decouples the call site from the concrete implementation. A parent type can declare a field `String name`, and a child type can satisfy it with either a stored field or a computed getter — the call site code is identical in both cases. This is what enables interfaces to declare data fields that concrete types can implement however they choose (see Section 5.4).
+
+**Inheritance extends the vtable:**
+
+```promise
+type Dog is Animal {
+  String breed;
+  speak() String { return "Woof!"; }
+}
+```
+
+Dog's vtable **starts with** Animal's layout and appends new slots:
+
+```
+Dog_vtable = {
+  // Animal slots (same positions — prefix-compatible)
+  [0] get_name:  fn(Dog#v) -> String      → Dog's name field getter
+  [1] set_name:  fn(Dog#v, String)        → Dog's name field setter
+  [2] get_age:   fn(Dog#v) -> Int         → Dog's age field getter
+  [3] set_age:   fn(Dog#v, Int)           → Dog's age field setter
+  [4] speak:     fn(Dog#v) -> String      → Dog.speak
+
+  // Dog-specific slots (appended)
+  [5] get_breed: fn(Dog#v) -> String      → Dog's breed field getter
+  [6] set_breed: fn(Dog#v, String)        → Dog's breed field setter
+}
+```
+
+For single inheritance, the child's vtable is prefix-compatible with the parent's — a Dog vtable pointer works wherever an Animal vtable pointer is expected, because slots 0–4 are at the same positions.
+
+**Multiple inheritance — per-view vtables:**
+
+When a type has multiple parents, the compiler generates a **separate vtable for each parent view**. This is necessary because different parents have different slot layouts.
+
+```promise
+type Named {
+  String name;
+  greet() String { return "Hi, I'm {this.name}"; }
+}
+
+type Audible {
+  volume() Int `abstract;
+  speak() String `abstract;
+}
+
+type Dog is Named, Audible {
+  String breed;
+  Int loudness;
+
+  speak() String { return "Woof!"; }
+  volume() Int { return this.loudness; }
+}
+```
+
+The compiler generates three vtables:
+
+```
+Named_vtable_for_Dog = {
+  [0] get_name  → Dog's name getter
+  [1] set_name  → Dog's name setter
+  [2] greet     → Named.greet (default impl, accesses name through vtable)
+}
+
+Audible_vtable_for_Dog = {
+  [0] volume    → Dog.volume
+  [1] speak     → Dog.speak
+}
+
+Dog_vtable = {
+  [0] get_name  → ...
+  [1] set_name  → ...
+  [2] greet     → Named.greet
+  [3] volume    → Dog.volume
+  [4] speak     → Dog.speak
+  [5] get_breed → ...
+  [6] set_breed → ...
+  [7] get_loudness → ...
+  [8] set_loudness → ...
+}
+```
+
+When a Dog value is passed where `Named` is expected, the vtable pointer in the value struct is set to `Named_vtable_for_Dog`. When passed where `Audible` is expected, it is set to `Audible_vtable_for_Dog`. The call site always sees the vtable layout it expects.
+
+**Interfaces with data fields:**
+
+Because fields are accessed through vtable getter/setter slots, an interface (a type with abstract methods) can also declare data fields. Concrete types satisfy the interface by providing the field — either as stored data or as computed getters/setters:
+
+```promise
+type Positioned {
+  Float64 x;
+  Float64 y;
+  distanceTo(Positioned &other) Float64 {
+    dx := this.x - other.x;
+    dy := this.y - other.y;
+    return math.sqrt(dx * dx + dy * dy);
+  }
+}
+
+type Player is Positioned {
+  // Stores x, y as real fields — vtable getters read from instance memory
+  Float64 x;
+  Float64 y;
+  String name;
+}
+
+type CameraTarget is Positioned {
+  // No stored x, y — computed from tracked entity
+  Entity tracked;
+
+  x() Float64 { return this.tracked.position().x; }
+  y() Float64 { return this.tracked.position().y; }
+}
+```
+
+Both satisfy `Positioned`. The call site `pos.x` compiles to `vtable.get_x(pos_value)` — it does not know or care whether `x` is a stored field or a computed property. The `distanceTo` default implementation works for both because it accesses `x` and `y` through the vtable.
+
+**Optimization:**
+
+The vtable dispatch model is the **semantic model** — all access conceptually goes through the vtable. In practice, when the compiler knows the concrete type at a call site, an optimization pass can:
+
+- **Devirtualize**: replace vtable dispatch with direct function calls.
+- **Inline field access**: replace `vtable.get_x(value)` with a direct memory load.
+- **Elide the vtable pointer**: remove it entirely for non-polymorphic values.
+
+The code structure prioritizes flexibility over performance. Optimizations are layered on top without compromising the model.
 
 #### Field Placement Annotations
 
@@ -378,12 +562,12 @@ type Int {
 ```
 
 Resulting LLVM structs:
-- `Int#v` = `{ i64, Int#i* }` — the raw i64 plus a pointer to the owning instance
+- `Int#v` = `{ vtable*, Int#i*, i64 }` — vtable pointer, instance pointer, and the raw i64 value
 - `Int#i` = `{ Int#m* }` — pointer to variant (no pointer back to value)
-- `Int#m` = `{ vtable, Int#t* }` — method dispatch + pointer to type (compile-time generated)
+- `Int#m` = `{ Int#t* }` — pointer to type (compile-time generated)
 - `Int#t` = `{ metadata }` — name, reflection info (compile-time generated)
 
-For performance, the compiler will optimize away unnecessary indirection for primitives (e.g., `Int` on the stack is just an `i64` in practice, with the instance/variant/type pointers elided when not needed).
+The Int vtable contains getter/setter for the raw value field plus all operator methods (`+`, `-`, `==`, etc.). For performance, the compiler will optimize away unnecessary indirection for primitives (e.g., `Int` on the stack is just an `i64` in practice, with the vtable/instance/variant/type pointers elided when not needed).
 
 ### 5.3 Variable Declarations
 
@@ -406,7 +590,7 @@ name := "Alice";        // inferred as String
 
 ### 5.4 Inheritance
 
-A type declares its parent types with `is`. There is no distinction between inheritance and interface implementation — both use the same keyword.
+A type declares its parent types with `is`. There is no distinction between inheritance and interface implementation — both use the same keyword. An interface is simply a type whose methods are all `` `abstract `` — it uses the same `is` keyword and the same vtable machinery.
 
 ```promise
 type Shape {
@@ -419,9 +603,7 @@ type Shape {
 type Circle is Shape {
   Float64 radius;
 
-  area() Float64 `instance {
-    return 3.14159 * this.radius * this.radius;
-  }
+  area() Float64 { return 3.14159 * this.radius * this.radius; }
 }
 
 type Drawable {
@@ -431,13 +613,22 @@ type Drawable {
 type Circle is Shape, Drawable {
   Float64 radius;
 
-  area() Float64 `instance { ... }
+  area() Float64 { ... }
 
-  draw(Canvas &canvas) `instance {
+  draw(Canvas &canvas) {
     canvas.drawEllipse(this.x, this.y, this.radius);
   }
 }
 ```
+
+#### How Inheritance Maps to Vtables
+
+When a type inherits from a parent, the child's vtable **extends** the parent's layout — the parent's slots appear first at the same positions, and the child appends its own new slots (see Section 5.2.1). This means:
+
+- **Single inheritance**: the child's vtable is prefix-compatible with the parent's. A Circle vtable pointer works wherever a Shape vtable pointer is expected.
+- **Multiple inheritance**: the compiler generates a **per-view vtable** for each parent. When a Circle is passed where `Shape` is expected, the value carries a Shape-view vtable. When passed where `Drawable` is expected, it carries a Drawable-view vtable. Each call site sees the slot layout it expects.
+- **Field inheritance**: parent fields become getter/setter slots in the vtable. A child can inherit them as stored fields, override them with computed getters/setters, or provide them from a completely different source — the parent's call sites are unaffected.
+- **Default method implementations**: a parent type can provide method bodies. These become concrete function pointers in the child's vtable. The child can override them by providing its own implementation, which replaces the function pointer in the vtable slot.
 
 ### 5.5 Generics
 

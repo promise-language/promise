@@ -1032,7 +1032,7 @@ sendEmail(
     ?String cc,                   // optional — skippable, receives none
     Int priority = 3              // has default — skippable
 ) Bool! {
-  // cc is Option[String] — test with: if cc is Some(addr) { ... }
+  // cc is Option[String] — test with: if cc { ... } (see Section 13)
   ...
 }
 ```
@@ -1291,15 +1291,88 @@ find(Int id) ?User {            // shorthand for Option[User]
   // ...
   return none;                   // Option.None
 }
+```
 
-user := find(42);
-if user is Some(u) {
-  io.println(u.name);
+### 13.1 Working with Optionals
+
+There are three ways to test and unwrap optional values, from lightest to most explicit.
+
+#### Truthiness narrowing
+
+When a `?T` value appears as an `if` condition, it is treated as a presence check. Inside the block, the compiler **narrows** the type from `?T` to `T`:
+
+```promise
+?String cc = getCC();
+
+if cc {
+  io.println(cc);              // cc is String here, not ?String
 }
 
-// Or with `?.` chaining
-name := find(42)?.name;
+if !cc {
+  io.println("no value");
+  io.println(cc);               // ERROR: cc is known to be none here
+}
 ```
+
+Inside the `if cc` block, `cc` is narrowed to `T`. Inside the `if !cc` block, `cc` is known to be `none` — any use of `cc` as type `T` is a **compile-time error**.
+
+This works for any `?T` where `T` is not `Bool`. For `?Bool`, the compiler emits an error because the intent is ambiguous — use `is present` instead (see below).
+
+#### `is present` / `is absent`
+
+For explicit presence testing that works with **any** `?T` — including `?Bool` — use the `is present` and `is absent` patterns. These are contextual keywords: `present` and `absent` are only special after `is` in pattern position; in all other contexts they are normal identifiers.
+
+```promise
+?Bool verbose = getFlag();
+
+if verbose is present {
+  // verbose is Bool here — narrowed from ?Bool
+  if verbose { enableLogging(); }
+} else {
+  io.println(verbose);           // ERROR: verbose is known to be none here
+}
+
+if verbose is absent {
+  io.println("no flag provided");
+  io.println(verbose);           // ERROR: verbose is known to be none here
+}
+```
+
+As with truthiness narrowing, the inverse blocks enforce negative narrowing: inside `is absent` or the `else` of `is present`, the variable is known to be `none` and any use of it as type `T` is a **compile-time error**.
+
+`is present` and `is absent` extend the existing `is` pattern matching keyword. They cannot collide with type names — `is` in pattern position (inside `if`/`match` expressions) is syntactically distinct from `is` in type declarations (`type Dog is Animal`).
+
+#### Unwrap binding with `:=`
+
+When you want to unwrap into a **new name**, use `:=` inside an `if` condition:
+
+```promise
+?User user = find(42);
+
+if u := user {
+  io.println(u.name);          // u is User — unwrapped
+}
+```
+
+If the right side is `none`, the condition is false. If it holds a value, the left side is bound to the unwrapped value and the block executes. This is useful when you want a shorter or more descriptive name than the original variable.
+
+### 13.2 Other Optional Operations
+
+```promise
+// `?.` chaining — short-circuits to none if the receiver is absent
+name := find(42)?.name;
+
+// `?:` default operator — returns the right side if the left is none
+name := find(42)?.name ?: "unknown";
+
+// match for complex enum patterns
+match result {
+  Ok(value) => process(value),
+  Err(e) => log(e),
+}
+```
+
+### 13.3 Optional Parameters
 
 When `?T` is used as a **function/method parameter type**, the parameter is implicitly optional — the caller may omit it, and the function receives `none` (see Section 9.3). To declare a required parameter of type `Option[T]`, use `Option[T]` explicitly instead of the `?T` sugar.
 
@@ -1545,6 +1618,17 @@ typeArgs: '[' typeRef (',' typeRef)* ']';
 
 goExpr: 'go' (block | expression);    // returns Task[T]
 receiveExpr: '<-' expression;          // receive from Task[T] or Channel[T]
+
+// Optional patterns (contextual keywords in pattern position)
+isExpr: expression 'is' pattern;
+pattern
+    : IDENT '(' patternFields ')'       // enum destructuring: Some(u), Ok(v)
+    | 'present'                          // ?T presence check with narrowing
+    | 'absent'                           // ?T absence check
+    ;
+
+// Unwrap binding in if condition
+ifUnwrap: 'if' IDENT ':=' expression block ('else' block)?;
 
 lifetime: '\'' IDENT;
 ```

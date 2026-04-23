@@ -1032,7 +1032,7 @@ sendEmail(
     ?String cc,                   // optional — skippable, receives none
     Int priority = 3              // has default — skippable
 ) Bool! {
-  // cc is Option[String] — test with: if cc { ... } (see Section 13)
+  // cc is Option[String] — test with: if cc { ... } (see Section 14)
   ...
 }
 ```
@@ -1216,14 +1216,29 @@ while condition {
   // ...
 }
 
-// For-in (iterators)
+// While with unwrap binding — loops while the expression is not none,
+// binding the unwrapped value each iteration (see Section 14.1)
+while item := optionalExpr {
+  // item is the unwrapped T, not ?T
+}
+
+// For-in — iterates any Stream[T] (see Section 12)
 for item in collection {
   // ...
 }
 
-// For-in with index
+// For-in with index — desugars to enumerate() (see Section 12.2)
 for i, item in collection {
   // ...
+}
+
+// For-in with range
+for i in 0..10 {
+  // i takes values 0, 1, 2, ..., 9 (exclusive end)
+}
+
+for i in 0..=10 {
+  // i takes values 0, 1, 2, ..., 10 (inclusive end)
 }
 
 // Infinite loop (no condition — Go style)
@@ -1236,6 +1251,8 @@ for Int i = 0; i < 10; i += 1 {
   // ...
 }
 ```
+
+The `for item in expr` loop works on any value whose type implements `Stream[T]` — it calls `expr.iter()` to obtain an `Iter[T]`, then loops calling `next()` until `none` is returned. See Section 12 for the full iteration protocol.
 
 ---
 
@@ -1257,7 +1274,241 @@ String slices (`&str` equivalent) use `String&` for borrowed string data.
 
 ---
 
-## 12. Collections
+## 12. Streams, Ranges & Generators
+
+Promise provides a unified iteration and streaming abstraction through two core interfaces: `Stream[T]` (a reusable factory that produces cursors) and `Iter[T]` (a single-pass cursor that yields elements one at a time). Because Promise has no function coloring and uses goroutine-based transparent I/O, a single `Stream[T]` type handles both synchronous and asynchronous data sources — a generator that performs I/O simply suspends its goroutine during the blocking operation, with no change to its type signature.
+
+### 12.1 Core Interfaces
+
+```promise
+type Iter[T] {
+  next() ?T `abstract;
+}
+```
+
+`Iter[T]` is the stateful cursor. Each call to `next()` returns the next element wrapped in `?T`, or `none` when the sequence is exhausted. This combines the traditional `hasNext()` + `next()` two-method pattern into a single call, leveraging Promise's optional type system.
+
+```promise
+type Stream[T] {
+  iter() Iter[T] `abstract;
+
+  // Intermediate combinators — lazy, return a new Stream
+  map[R]((T) -> R transform) Stream[R] { ... }
+  filter((T) -> Bool predicate) Stream[T] { ... }
+  flatMap[R]((T) -> Stream[R] transform) Stream[R] { ... }
+  take(Int count) Stream[T] { ... }
+  skip(Int count) Stream[T] { ... }
+  takeWhile((T) -> Bool predicate) Stream[T] { ... }
+  skipWhile((T) -> Bool predicate) Stream[T] { ... }
+  zip[U](Stream[U] other) Stream[(T, U)] { ... }
+  chain(Stream[T] other) Stream[T] { ... }
+  enumerate() Stream[(Int, T)] { ... }
+  scan[R](R initial, (R, T) -> R accumulate) Stream[R] { ... }
+  chunk(Int size) Stream[T[]] { ... }
+  distinct() Stream[T] { ... }
+
+  // Terminal operations — eager, consume the stream
+  fold[R](R initial, (R, T) -> R accumulate) R { ... }
+  reduce((T, T) -> T combine) ?T { ... }
+  collect() T[] { ... }
+  count() Int { ... }
+  any((T) -> Bool predicate) Bool { ... }
+  every((T) -> Bool predicate) Bool { ... }
+  contains(T value) Bool { ... }
+  first() ?T { ... }
+  last() ?T { ... }
+  find((T) -> Bool predicate) ?T { ... }
+  min() ?T { ... }
+  max() ?T { ... }
+  forEach((T) action) { ... }
+  join(String separator = "") String { ... }
+}
+```
+
+**Key design properties:**
+
+- **`Stream[T]` is a factory.** Each call to `iter()` produces a fresh, independent cursor. This means streams are reusable — you can iterate the same stream multiple times and get the same elements each time (for deterministic sources).
+- **`Iter[T]` is a single-pass cursor.** Once `next()` returns `none`, the iterator is exhausted. There is no `reset()`.
+- **Intermediate operations are lazy.** Calling `stream.map(fn)` does not execute `fn` — it returns a new `Stream[T]` that applies `fn` on demand when iterated. Multiple intermediate operations compose into a single pass over the data.
+- **Terminal operations are eager.** Calling `stream.collect()` or `stream.count()` consumes the stream and produces a result.
+- **Constraint-dependent combinators**: `distinct()` requires `T: Eq`. `min()` and `max()` require `T: Ord`. These constraints are enforced at the call site via generic bounds.
+
+### 12.2 For-in Desugaring
+
+The `for item in expr` loop desugars into `Stream[T]` and `Iter[T]` operations:
+
+```promise
+for item in stream { body }
+
+// Desugars to:
+{
+  Iter[T] _iter = stream.iter();
+  while item := _iter.next() {
+    body
+  }
+}
+```
+
+This uses `while ... :=` unwrap binding (see Section 10.3): the loop continues as long as `_iter.next()` returns a value, binding the unwrapped element to `item` each iteration.
+
+The indexed form desugars through `enumerate()`:
+
+```promise
+for i, item in collection { body }
+
+// Desugars to:
+for (i, item) in collection.enumerate() { body }
+```
+
+### 12.3 Ranges
+
+The `..` operator constructs a `Range` value. `..` produces a half-open (exclusive end) range; `..=` produces an inclusive range:
+
+```promise
+0..10       // 0, 1, 2, ..., 9     (exclusive end — half-open)
+0..=10      // 0, 1, 2, ..., 10    (inclusive end)
+1..1        // empty range
+5..=5       // single element: 5
+```
+
+`Range` is a type that implements `Stream[Int]`:
+
+```promise
+type Range is Stream[Int] {
+  Int start;
+  Int end;
+  Bool inclusive;
+
+  iter() Iter[Int] { ... }
+
+  // Derived ranges
+  step(Int n) Stream[Int] { ... }
+
+  // O(1) membership test — overrides the O(n) default from Stream
+  contains(Int value) Bool {
+    if this.inclusive {
+      return value >= this.start && value <= this.end;
+    }
+    return value >= this.start && value < this.end;
+  }
+}
+```
+
+Ranges compose naturally with stream combinators:
+
+```promise
+// Even numbers from 0 to 98
+evens := (0..100).filter((n) -> n % 2 == 0);
+
+// Every third number from 0 to 99
+thirds := (0..100).step(3);
+
+// Sum of 1 to 100
+total := (1..=100).fold(0, (acc, n) -> acc + n);
+```
+
+### 12.4 Generator Functions
+
+A function whose return type is `Stream[T]` and whose body contains `yield` is a **generator function**. The compiler transforms its body into a state machine that implements `Iter[T]`. No special modifier keyword is needed — the return type plus the presence of `yield` is sufficient.
+
+```promise
+fibonacci() Stream[Int] {
+  Int a = 0;
+  Int b = 1;
+  for {
+    yield a;
+    Int temp = a;
+    a = b;
+    b = temp + b;
+  }
+}
+
+// Consuming:
+for n in fibonacci() {
+  if n > 100 { break; }
+  io.println("{n}");
+}
+```
+
+**`yield*` delegates to another stream**, yielding all of its elements inline:
+
+```promise
+oneThenTwo() Stream[Int] {
+  yield* 1..=3;     // yields 1, 2, 3
+  yield* 7..=9;     // yields 7, 8, 9
+}
+```
+
+**Generators with I/O** work transparently — no function coloring needed:
+
+```promise
+fetchPages(String url) Stream[Page] {
+  ?String nextUrl = url;
+  while nextUrl {
+    Page page = http.get(nextUrl)?;  // goroutine suspends during I/O
+    yield page;
+    nextUrl = page.nextLink;
+  }
+}
+```
+
+**Restrictions:** `yield` must appear directly in the generator function body — it cannot appear inside a nested closure or lambda. Use a `for` loop instead:
+
+```promise
+// ERROR — yield inside a closure
+example() Stream[Int] {
+  items.forEach(|item| { yield item; });  // compile error
+}
+
+// OK — yield in a for loop
+example() Stream[Int] {
+  for item in items { yield item; }
+}
+```
+
+The compiler transforms each `yield` point into a state in a state machine. Local variables are captured as fields of the generated type. The `next()` method resumes execution from the last yield point and runs until the next `yield` or until the function body completes (returning `none`). This transformation is purely a compiler concern — generators look and feel like ordinary functions to the caller.
+
+### 12.5 Collections as Streams
+
+Built-in collection types implement `Stream[T]`, giving them all stream combinators for free:
+
+| Collection      | Stream Implementation           |
+|----------------|---------------------------------|
+| `T[]` (slice)   | `Stream[T]` — iterates elements in order |
+| `T[N]` (array)  | `Stream[T]` — iterates elements in order |
+| `Set[T]`        | `Stream[T]` — iteration order is implementation-defined |
+| `Map[K, V]`     | `Stream[(K, V)]` — iterates key-value pairs |
+| `Channel[T]`    | `Stream[T]` — receives from channel until closed |
+| `Range`         | `Stream[Int]` — see Section 12.3 |
+| `String`        | `Stream[Char]` — iterates Unicode scalar values |
+
+`Map[K, V]` also provides `.keys() Stream[K]` and `.values() Stream[V]` for iterating only keys or values.
+
+### 12.6 Channels as Streams
+
+Because `Channel[T]` implements `Stream[T]`, channels receive all stream combinators:
+
+```promise
+ch := Channel[Int].new(capacity: 10);
+go {
+  for i in 0..100 { ch.send(i); }
+  ch.close();
+};
+
+// Use stream combinators on channel
+evens := ch.filter((n) -> n % 2 == 0);
+for n in evens {
+  io.println("{n}");
+}
+```
+
+**Important difference from other streams:** Channel iteration is **destructive**. Values are consumed from the shared buffer — there is no way to re-iterate a channel. Calling `iter()` on a channel returns an iterator that receives from the channel; `next()` blocks (suspends the goroutine) until a value is available or the channel is closed. When the channel is closed and empty, `next()` returns `none`.
+
+Calling `ch.iter()` multiple times does **not** produce independent cursors over the same data — each iterator draws from the same underlying channel buffer. This is the expected behavior for a concurrent data-passing primitive.
+
+---
+
+## 13. Collections
 
 Built-in collection types with generic support:
 
@@ -1280,9 +1531,17 @@ Map[String, Int] scores = {
 (num, label) := pair;      // destructuring
 ```
 
+All collection types implement `Stream[T]` (see Section 12.5), providing lazy combinators like `map`, `filter`, `fold`, and more:
+
+```promise
+Int[] numbers = [1, 2, 3, 4, 5];
+squares := numbers.map((n) -> n * n).collect();   // [1, 4, 9, 16, 25]
+sum := numbers.fold(0, (acc, n) -> acc + n);       // 15
+```
+
 ---
 
-## 13. Nullable Types
+## 14. Nullable Types
 
 Promise does not have null. Optional values use `Option[T]`, with sugar `?T`:
 
@@ -1293,7 +1552,7 @@ find(Int id) ?User {            // shorthand for Option[User]
 }
 ```
 
-### 13.1 Working with Optionals
+### 14.1 Working with Optionals
 
 There are three ways to test and unwrap optional values, from lightest to most explicit.
 
@@ -1356,7 +1615,17 @@ if u := user {
 
 If the right side is `none`, the condition is false. If it holds a value, the left side is bound to the unwrapped value and the block executes. This is useful when you want a shorter or more descriptive name than the original variable.
 
-### 13.2 Other Optional Operations
+The `:=` unwrap binding also works in `while` conditions, looping as long as the expression produces a value:
+
+```promise
+while item := iter.next() {
+  process(item);              // item is T, not ?T
+}
+```
+
+This is the mechanism underlying `for-in` loop desugaring (see Section 12.2).
+
+### 14.2 Other Optional Operations
 
 ```promise
 // `?.` chaining — short-circuits to none if the receiver is absent
@@ -1372,13 +1641,13 @@ match result {
 }
 ```
 
-### 13.3 Optional Parameters
+### 14.3 Optional Parameters
 
-When `?T` is used as a **function/method parameter type**, the parameter is implicitly optional — the caller may omit it, and the function receives `none` (see Section 9.3). To declare a required parameter of type `Option[T]`, use `Option[T]` explicitly instead of the `?T` sugar.
+When `?T` is used as a **function/method parameter type**, the parameter is implicitly optional — the caller may omit it, and the function receives `none` (see Section 9.3). To declare a required parameter of type `Option[T]`, use `Option[T]` explicitly instead of the `?T` sugar. For how `?T` interacts with stream iteration, see Section 12.
 
 ---
 
-## 14. Unsafe Code
+## 15. Unsafe Code
 
 Promise allows unsafe blocks for low-level operations:
 
@@ -1394,11 +1663,11 @@ rawPointer() `unsafe {
 
 ---
 
-## 15. Concurrency
+## 16. Concurrency
 
 Promise uses goroutine-style lightweight coroutines. The runtime multiplexes goroutines onto OS threads and transparently handles I/O scheduling — all blocking I/O calls automatically suspend the current goroutine and resume it when the operation completes. There is **no function coloring**: functions that perform I/O have normal signatures and look identical to pure functions.
 
-### 15.1 Transparent I/O
+### 16.1 Transparent I/O
 
 Functions are never declared as "async". The runtime is the async engine — any function that performs I/O automatically yields the goroutine during the blocking operation:
 
@@ -1414,7 +1683,7 @@ fetchUser(Int id) User! {
 user := fetchUser(42)?;
 ```
 
-### 15.2 Explicit Concurrency with `go`
+### 16.2 Explicit Concurrency with `go`
 
 `go` is an **expression** that launches a goroutine and returns a `Task[T]`, where `T` is the result type of the block or call. The `<-` operator receives the result, suspending the current goroutine until it is ready.
 
@@ -1442,7 +1711,7 @@ comments := <-t3;
 
 `Task[T]` is a runtime-internal type returned by `go` expressions — it never appears in function signatures. Concurrency is always a **caller-side decision**.
 
-### 15.3 Channels
+### 16.3 Channels
 
 Channels are the primary synchronization primitive for streaming data between goroutines:
 
@@ -1465,7 +1734,9 @@ main() {
 
 The `<-` operator also works on channels: `value := <-ch;` receives the next value.
 
-### 15.4 Ownership Across Goroutines
+Because `Channel[T]` implements `Stream[T]`, channels gain all stream combinators — `map`, `filter`, `fold`, etc. — for free. See Section 12.6 for details and caveats about destructive iteration.
+
+### 16.4 Ownership Across Goroutines
 
 Ownership rules apply across goroutines — data is either **moved** into the goroutine or shared via `Arc[T]` (atomic reference counting):
 
@@ -1488,7 +1759,7 @@ main() {
 
 ---
 
-## 16. Complete Example
+## 17. Complete Example
 
 ```promise
 use io "github.com/promise-lang/std/io/1"
@@ -1516,8 +1787,8 @@ type TodoList {
     this.items.push(Todo.new(id, title));
   }
 
-  pending(&this) Todo&[] `instance {
-    return this.items.filter(|t| !t.done);
+  pending(&this) Todo[] `instance {
+    return this.items.filter(|t| !t.done).collect();
   }
 }
 
@@ -1545,7 +1816,7 @@ main() {
 
 ---
 
-## 17. Grammar Sketch (ANTLR4)
+## 18. Grammar Sketch (ANTLR4)
 
 Key productions (simplified):
 
@@ -1619,6 +1890,13 @@ typeArgs: '[' typeRef (',' typeRef)* ']';
 goExpr: 'go' (block | expression);    // returns Task[T]
 receiveExpr: '<-' expression;          // receive from Task[T] or Channel[T]
 
+// Range expressions
+rangeExpr: expression '..' '='? expression;    // 0..10 (exclusive) or 0..=10 (inclusive)
+
+// Yield (only valid inside generator functions returning Stream[T])
+yieldStmt: 'yield' expression ';';
+yieldDelegateStmt: 'yield' '*' expression ';';
+
 // Optional patterns (contextual keywords in pattern position)
 isExpr: expression 'is' pattern;
 pattern
@@ -1627,15 +1905,16 @@ pattern
     | 'absent'                           // ?T absence check
     ;
 
-// Unwrap binding in if condition
+// Unwrap binding in if/while conditions
 ifUnwrap: 'if' IDENT ':=' expression block ('else' block)?;
+whileUnwrap: 'while' IDENT ':=' expression block;
 
 lifetime: '\'' IDENT;
 ```
 
 ---
 
-## 18. Compiler Implementation Plan (Go)
+## 19. Compiler Implementation Plan (Go)
 
 Single binary `promise` with the following internal packages:
 
@@ -1654,7 +1933,7 @@ Single binary `promise` with the following internal packages:
 
 ---
 
-## 19. Package Manager (integrated into `promise` binary)
+## 20. Package Manager (integrated into `promise` binary)
 
 ### Dependency Resolution
 
@@ -1666,6 +1945,9 @@ Single binary `promise` with the following internal packages:
 
 ---
 
-## 20. Open Design Questions
+## 21. Open Design Questions
 
 1. **REPL** — Should the toolchain include an interpreter/REPL for rapid prototyping?
+2. **Stream backpressure** — When a generator yields into a channel-backed consumer, should there be built-in backpressure beyond Channel's existing capacity mechanism?
+3. **Parallel stream execution** — Should `Stream[T]` have a `.parallel()` combinator that distributes work across goroutines? If so, how does ordering work?
+4. **Stream error handling** — Should `Stream[T]` support `Stream[T!]` where individual elements can carry errors? Or should a failing generator terminate the stream entirely?

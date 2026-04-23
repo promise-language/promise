@@ -405,6 +405,28 @@ At the call site, `animal.name` compiles to `vtable[0](animal_value)` and `anima
 
 This decouples the call site from the concrete implementation. A parent type can declare a field `String name`, and a child type can satisfy it with either a stored field or a computed getter — the call site code is identical in both cases. This is what enables interfaces to declare data fields that concrete types can implement however they choose (see Section 5.4).
 
+**Getter/setter syntactic sugar:**
+
+Since all field access goes through vtable getter/setter calls, the language provides syntactic sugar so that field access looks like direct member access, not function calls. The dot operator (`.`) on a field name desugars to the corresponding vtable getter or setter:
+
+```promise
+// Reading — dot access desugars to getter call
+animal.name                       // → vtable.get_name(animal_value)
+player.position.x                 // → vtable.get_x(vtable.get_position(player_value))
+
+// Writing — assignment through dot desugars to setter call
+animal.name = "Rex";              // → vtable.set_name(animal_value, "Rex")
+
+// Compound assignment — desugars to get + operator + set
+player.health += 10;              // → vtable.set_health(pv, vtable.get_health(pv) + 10)
+player.score *= 2;                // → vtable.set_score(pv, vtable.get_score(pv) * 2)
+
+// Chained access
+game.world.player.health += 1;   // each dot is a getter; final assignment is a setter
+```
+
+This sugar is essential because without it, code would require explicit getter/setter calls (`animal.getName()`, `animal.setName("Rex")`), and operators on fields would be impossible — you cannot write `animal.getName() += 10`. The dot syntax makes vtable-dispatched access indistinguishable from direct field access at the call site.
+
 **Inheritance extends the vtable:**
 
 ```promise

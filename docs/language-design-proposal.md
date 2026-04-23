@@ -1312,15 +1312,11 @@ abs := if x >= 0 { x } else { -x };
 
 ### 10.2 Match (Pattern Matching)
 
-```promise
-match color {
-  Color.Red => io.println("red"),
-  Color.Green => io.println("green"),
-  Color.Custom(r, g, b) => io.println("rgb({r},{g},{b})"),
-  _ => io.println("other"),
-}
+`match` tests a value against a series of patterns. Arms are checked top-to-bottom; the first match executes. The compiler verifies **exhaustiveness** — all possible cases must be covered (use `_` as a catch-all).
 
-// Match as expression
+#### Literal patterns
+
+```promise
 label := match status {
   200 => "OK",
   404 => "Not Found",
@@ -1328,7 +1324,125 @@ label := match status {
 };
 ```
 
-### 10.3 Loops
+#### Enum destructuring
+
+```promise
+match color {
+  Color.Red => io.println("red"),
+  Color.Green => io.println("green"),
+  Color.Custom(r, g, b) => io.println("rgb({r},{g},{b})"),
+  _ => io.println("other"),
+}
+```
+
+#### Type patterns
+
+Match by runtime type. The binding variable is scoped to the arm:
+
+```promise
+match shape {
+  Circle c => math.pi * c.radius * c.radius,
+  Rect r => r.width * r.height,
+  _ => 0.0,
+}
+```
+
+A type pattern without binding just checks the type:
+
+```promise
+match animal {
+  Dog => io.println("it's a dog"),
+  Cat => io.println("it's a cat"),
+  _ => io.println("something else"),
+}
+```
+
+#### Guards
+
+Add `if` after a pattern for an additional condition:
+
+```promise
+match n {
+  x if x > 0 => "positive",
+  0 => "zero",
+  _ => "negative",
+}
+```
+
+Guards can combine with type patterns:
+
+```promise
+match animal {
+  Dog d if d.age > 10 => "old dog",
+  Dog d => "young dog",
+  Cat => "cat",
+  _ => "other",
+}
+```
+
+#### Match rules
+
+- **Exhaustive**: every possible value must be covered. Omitting `_` when cases are incomplete is a compile error.
+- **First match wins**: arms are checked top-to-bottom.
+- **Expression or statement**: `match` can appear as an expression (returns a value) or a statement. When used as an expression, all arms must produce the same type.
+- **Bindings are scoped**: a binding like `d` in `Dog d =>` is only valid in that arm's body.
+- **No fallthrough**: each arm is independent. There is no implicit fallthrough between arms.
+
+### 10.3 Type Checking with `is` and Casting with `as`
+
+#### `is` — runtime type check with narrowing
+
+The `is` keyword tests whether a value is an instance of a given type. Inside the `if` block, the compiler **narrows** the variable to the checked type:
+
+```promise
+Animal animal = getDog();
+
+if animal is Dog {
+  animal.bark();              // animal is narrowed to Dog here
+}
+```
+
+This follows the same narrowing pattern as optional truthiness (`if cc { ... }` narrows `?T` to `T`). The `else` branch does **not** narrow — `animal` remains `Animal`.
+
+`is` works in any boolean context:
+
+```promise
+if animal is Dog && animal.age > 5 {
+  // animal is Dog here — narrowed before the && guard
+}
+
+Bool isDog = animal is Dog;   // no narrowing — just a bool test
+```
+
+#### `as` — type casting
+
+`as` performs a safe cast, returning an optional. `as!` performs an unsafe cast that panics on failure:
+
+```promise
+?Dog dog = animal as Dog;     // safe — returns none if animal is not a Dog
+Dog dog = animal as! Dog;     // unsafe — panics if animal is not a Dog
+```
+
+`as` composes with optional chaining:
+
+```promise
+animal as Dog ?: defaultDog;            // cast or default
+(animal as Dog)?.bark();                // cast and chain
+```
+
+#### `is` keyword disambiguation
+
+The `is` keyword appears in three contexts. The parser disambiguates by syntactic position:
+
+| Context | Example | How it's recognized |
+|---------|---------|---------------------|
+| Type declaration | `type Dog is Animal` | After `type IDENT` |
+| Optional pattern | `x is present` / `x is absent` | `present`/`absent` are contextual keywords after `is` |
+| Type check | `animal is Dog` | Expression context, IDENT after `is` is a type name |
+
+These never conflict — type declarations and expression patterns occupy different syntactic positions.
+
+### 10.4 Loops
 
 ```promise
 // While
@@ -1726,7 +1840,7 @@ if verbose is absent {
 
 As with truthiness narrowing, the inverse blocks enforce negative narrowing: inside `is absent` or the `else` of `is present`, the variable is known to be `none` and any use of it as type `T` is a **compile-time error**.
 
-`is present` and `is absent` extend the existing `is` pattern matching keyword. They cannot collide with type names — `is` in pattern position (inside `if`/`match` expressions) is syntactically distinct from `is` in type declarations (`type Dog is Animal`).
+`is present` and `is absent` extend the existing `is` pattern matching keyword (see Section 10.3 for the full `is` keyword disambiguation table). They cannot collide with type names — `present` and `absent` are contextual keywords recognized only after `is` in pattern position.
 
 #### Unwrap binding with `:=`
 
@@ -2024,6 +2138,7 @@ expression: primary | expression binOp expression | unaryOp expression
           | expression '.' IDENT | expression '(' args ')'
           | expression '?' IDENT? block             // error handler
           | expression '?' | expression '!'         // propagate / unwrap
+          | expression 'as' '!'? typeRef            // type cast: safe (as) or unsafe (as!)
           | goExpr | receiveExpr | rangeExpr | isExpr
           | ifExpr | matchExpr | '(' expression ')';
 
@@ -2051,12 +2166,22 @@ rangeExpr: expression '..' '='? expression;    // 0..10 (exclusive) or 0..=10 (i
 yieldStmt: 'yield' expression ';';
 yieldDelegateStmt: 'yield' '*' expression ';';
 
-// Optional patterns (contextual keywords in pattern position)
+// Pattern matching — `is` expression and `match` expression
 isExpr: expression 'is' pattern;
+matchExpr: 'match' expression '{' matchArm (',' matchArm)* ','? '}';
+matchArm: matchPattern ('if' expression)? '=>' (expression | block);
+
+matchPattern
+    : '_'                                    // wildcard
+    | LITERAL                                // literal (int, string, bool)
+    | IDENT '.' IDENT                        // enum variant: Color.Red
+    | IDENT '.' IDENT '(' patternFields ')'  // enum destructure: Color.Custom(r, g, b)
+    | IDENT IDENT?                           // type pattern with optional binding: Dog d
+    ;
+
 pattern
     : IDENT '(' patternFields ')'       // enum destructuring: Some(u), Ok(v)
-    | 'present'                          // ?T presence check with narrowing
-    | 'absent'                           // ?T absence check
+    | IDENT                              // type check: Dog, or contextual: present, absent
     ;
 patternFields: patternField (',' patternField)*;
 patternField: IDENT;

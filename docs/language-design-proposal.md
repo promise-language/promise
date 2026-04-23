@@ -1018,11 +1018,125 @@ type Counter {
 Counter c = Counter.new();
 ```
 
+### 9.3 Named Arguments, Defaults & Optional Parameters
+
+#### Definition Syntax
+
+Any parameter can have a **default value** with `= expression`. Parameters whose type uses the `?T` sugar are **optional** — when omitted at the call site, the function receives `none`.
+
+```promise
+sendEmail(
+    String to,                    // required
+    String subject,               // required
+    String body = "",             // has default — skippable
+    ?String cc,                   // optional — skippable, receives none
+    Int priority = 3              // has default — skippable
+) Bool! {
+  // cc is Option[String] — test with: if cc is Some(addr) { ... }
+  ...
+}
+```
+
+There is no ordering constraint on required, defaulted, and optional parameters in the definition — any order is valid. The `this`/`&this`/`~this` receiver is unaffected: it is never named, never defaulted, and always implicit.
+
+**`?T` vs `Option[T]`:** Only the `?T` sugar triggers skippability. If a parameter is declared with `Option[T]` explicitly, it is a required parameter of optional type — the caller must provide it.
+
+#### Call-Site Syntax
+
+At any call site, an argument can be passed by name using `name: expression`, where `name` matches a parameter name from the definition.
+
+The argument list is structured as up to three segments: an optional named prefix, one contiguous positional block, and an optional named suffix. All positional arguments must appear together — they cannot be split by named arguments.
+
+```promise
+// All positional
+sendEmail("bob@ex.com", "Hi");
+
+// Positional then named
+sendEmail("bob@ex.com", "Hi", priority: 1);
+
+// All named
+sendEmail(to: "bob@ex.com", subject: "Hi", cc: "a@ex.com");
+
+// Named, then positional, then named
+sendEmail(cc: "a@ex.com", "bob@ex.com", "Hi", priority: 1);
+
+// Named then positional
+sendEmail(priority: 1, "bob@ex.com", "Hi");
+
+// ERROR — positional split by named (two positional blocks):
+sendEmail("bob@ex.com", cc: "a@ex.com", "Hi");
+
+// ERROR — interleaving (named, positional, named, positional):
+sendEmail(cc: "a@ex.com", "bob@ex.com", priority: 1, "Hi");
+```
+
+Valid patterns: `[named...] [positional...] [named...]` — each segment optional, but positional must be one contiguous block.
+
+#### Argument Matching
+
+The compiler resolves arguments in this order:
+
+1. **Validate structure**: scan the argument list and verify positional arguments form one contiguous block. If positional arguments are split by named arguments, emit a compile error.
+2. **Match named arguments first**: resolve all named arguments by name lookup. Mark each matched parameter as filled. Error on unknown names or duplicate names.
+3. **Match positional arguments**: fill remaining unclaimed parameters left-to-right in declaration order (skipping the receiver and any parameters already claimed by name). Error if a positional argument targets a parameter already filled by a named argument.
+4. **Fill defaults and optionals**: for each unfilled parameter — if it has a default value, insert the default expression; if its type is `?T`, insert `none`; otherwise emit a "missing required argument" error.
+
+#### Skipping Parameters
+
+A parameter can be omitted at the call site if it has a default value or its type is `?T`. When using positional arguments, you cannot skip a parameter and provide a later one positionally — you must use named arguments to target specific parameters while skipping others:
+
+```promise
+// Skip body and cc, provide priority by name:
+sendEmail("bob@ex.com", "Hi", priority: 1);
+
+// Skip body, provide cc by name:
+sendEmail("bob@ex.com", "Hi", cc: "alice@ex.com");
+```
+
+#### Default Value Evaluation
+
+Default value expressions are evaluated **at the call site** each time the argument is omitted. This avoids the "mutable default" problem — each call gets a fresh evaluation. Default expressions can reference literals, constants, pure function calls, and module-level values. They **cannot** reference sibling parameters from the same function call.
+
+```promise
+// VALID defaults:
+connect(String host, Int port = 8080) Connection! { ... }
+createId(String prefix, String id = Uuid.generate()) Thing { ... }
+
+// INVALID — referencing sibling parameter:
+range(Int start, Int end = start + 10) { ... }  // compile error
+```
+
+#### Constructor Defaults
+
+Constructor parameters mirror field declarations. Fields with `= expression` defaults become default constructor parameters. Fields with `?T` type become optional constructor parameters.
+
+```promise
+type Config {
+  String host;
+  Int port = 8080;
+  ?String logFile;
+}
+
+Config("localhost");                          // port=8080, logFile=none
+Config("localhost", logFile: "/var/log/app"); // port=8080, logFile=Some(...)
+Config(host: "localhost", port: 9090);        // logFile=none
+```
+
 ### 9.4 Lambdas / Closures
 
 ```promise
 add := |Int a, Int b| -> Int { return a + b; };
 doubled := list.map(|x| x * 2);
+```
+
+Lambdas support default parameter values:
+
+```promise
+greet := |String name, String greeting = "Hello"| -> String {
+  return "{greeting}, {name}!";
+};
+greet("Alice");            // greeting uses default
+greet("Alice", "Hi");      // greeting = "Hi"
 ```
 
 Closures capture by reference by default. Use `move` to capture by value:
@@ -1034,6 +1148,8 @@ closure := move |String name| -> String {
 };
 ```
 
+Named arguments are **not available** when calling through a function-type variable, because function types erase parameter names (see Section 9.5). Named arguments only work when calling a known function or lambda directly.
+
 ### 9.5 Function Types
 
 Function types use arrow syntax instead of a keyword:
@@ -1042,6 +1158,17 @@ Function types use arrow syntax instead of a keyword:
 (Int, Int) -> Int                  // function taking two Ints, returning Int
 (String&) -> Bool                  // function taking a borrowed String, returning Bool
 () -> ()                           // function taking nothing, returning nothing
+```
+
+Function types **erase parameter names and default values**. Only the types and borrow modifiers are part of the function type signature. This means named arguments and default-value skipping are only available when calling a function by its declared name — not when calling through a function-type variable:
+
+```promise
+add(Int a, Int b) Int { return a + b; }
+
+add(a: 1, b: 2);          // VALID: calling by name, names available
+(Int, Int) -> Int fn = add;
+fn(1, 2);                  // VALID: positional through function-type variable
+fn(a: 1, b: 2);            // ERROR: function type has no parameter names
 ```
 
 ---
@@ -1174,6 +1301,8 @@ if user is Some(u) {
 name := find(42)?.name;
 ```
 
+When `?T` is used as a **function/method parameter type**, the parameter is implicitly optional — the caller may omit it, and the function receives `none` (see Section 9.3). To declare a required parameter of type `Option[T]`, use `Option[T]` explicitly instead of the `?T` sugar.
+
 ---
 
 ## 14. Unsafe Code
@@ -1295,22 +1424,21 @@ use json "github.com/promise-lang/std/json/1"
 type Todo `serializable {
   Int id `json(name: "id");
   String title `json(name: "title");
-
-  Bool done;
+  Bool done = false;                     // field default — constructor can skip
 
   toggle(~this) `instance {
     this.done = !this.done;
   }
 
   new(Int id, String title) Todo `type {
-    return Todo(id: id, title: title, done: false);
+    return Todo(id: id, title: title);   // done defaults to false
   }
 }
 
 type TodoList {
   Todo[] items;
 
-  add(~this, String title) `instance {
+  add(~this, String title, Int priority = 0) `instance {
     Int id = this.items.len() + 1;
     this.items.push(Todo.new(id, title));
   }
@@ -1320,7 +1448,7 @@ type TodoList {
   }
 }
 
-loadFromFile(String &path) TodoList! {
+loadFromFile(String &path, ?String encoding) TodoList! {
   String content = io.readFile(path)?;
   Todo[] items = json.decode[Todo[]](content)?;
   return TodoList(items: items);
@@ -1333,7 +1461,7 @@ main() {
   };
 
   todos.add("Design Promise language");
-  todos.add("Build the compiler");
+  todos.add("Build the compiler", priority: 1);   // named arg
 
   for i, todo in todos.items {
     status := if todo.done { "done" } else { "    " };
@@ -1375,13 +1503,22 @@ typeParam: IDENT (':' typeConstraint)?;
 typeConstraint: typeRef ('+' typeRef)*;
 
 typeMember: fieldDecl | methodDecl;
-fieldDecl: typeRef metaAnnotation* ';';
+fieldDecl: typeRef IDENT metaAnnotation* ('=' expression)? ';';
 methodDecl: IDENT '(' params ')' returnType? metaAnnotation* (block | ';');
 
 funcDecl: IDENT typeParams? '(' params ')' returnType? metaAnnotation* block;
 returnType: typeRef '!'?;
-param: typeRef refMod? IDENT;
+
+// Parameters (definition side)
+params: paramList?;
+paramList: receiverParam (',' param)* | param (',' param)*;
+receiverParam: refMod? 'this';
+param: typeRef refMod? IDENT ('=' expression)?;
 refMod: '&' | '~';
+
+// Arguments (call site)
+args: (arg (',' arg)*)?;
+arg: (IDENT ':')? expression;             // named (IDENT ':') or positional
 
 enumDecl: 'enum' IDENT typeParams? metaAnnotation* '{' enumVariant (',' enumVariant)* ','? '}';
 enumVariant: IDENT ('(' enumFields ')')?;

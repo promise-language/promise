@@ -275,7 +275,25 @@ type Vec2 {
 }
 ```
 
-Supported operator method names: `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `>`, `<=`, `>=`. Unary operators use the same symbol with no parameters (e.g. `-() Int` for negation).
+Supported operator method names: `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `>`, `<=`, `>=`. Unary operators use the same symbol with no parameters (e.g. `-() Int` for negation). Both unary and binary forms can coexist on the same type — the compiler disambiguates by argument count.
+
+#### Operator Precedence
+
+Operator precedence is fixed by the language and cannot be overridden by user-defined types. From highest to lowest:
+
+| Precedence | Operators | Associativity |
+|-----------|-----------|---------------|
+| 1 (highest) | `.` `()` `[]` | Left |
+| 2 | Unary `-` `!` | Right (prefix) |
+| 3 | `*` `/` `%` | Left |
+| 4 | `+` `-` | Left |
+| 5 | `..` `..=` | Non-associative |
+| 6 | `<` `>` `<=` `>=` | Non-associative |
+| 7 | `==` `!=` | Non-associative |
+| 8 | `&&` | Left |
+| 9 | `\|\|` | Left |
+| 10 | `?.` `?:` | Left |
+| 11 (lowest) | `=` `+=` `-=` `*=` `/=` | Right |
 
 ### 5.2 The Four-Struct Model
 
@@ -326,6 +344,8 @@ T#v  ──ptr──▶  T#i  ──ptr──▶  T#m  ──ptr──▶  T#t
 ```
 
 A value always points to its owning instance. The instance points to its variant. The variant points to its type. Given a value, you can reach all four structs by following pointers. The chain is one-directional — instance does not point back to value. The vtable pointer in the value struct points to a **view-specific vtable** (see Section 5.2.1) that is separate from the pointer chain.
+
+A **view** is the perspective through which a value is accessed via a particular type in its inheritance chain. When a `Dog` value is passed where `Animal` is expected, the `Animal` view of `Dog` is used — the vtable pointer is set to the `Animal`-layout vtable generated for `Dog`, exposing only `Animal`'s fields and methods.
 
 #### Diagram
 
@@ -400,6 +420,8 @@ Animal_vtable = {
 ```
 
 At the call site, `animal.name` compiles to `vtable[0](animal_value)` and `animal.speak()` compiles to `vtable[4](animal_value)`. The call site does not know or care whether `name` is a stored field or a computed getter — the vtable function handles it.
+
+**Slot assignment:** Slots are assigned in **declaration order** within each inheritance level, with parent slots always forming a **prefix**. When a child extends a parent, the parent's slots occupy the first N positions (unchanged), and the child's new fields and methods are appended after. This ensures that a parent's vtable layout is a prefix of every child's vtable layout — maximizing vtable reuse across types that share the same parent. Multiple types inheriting from the same parent share identical slot positions for the parent's fields and methods.
 
 **Why fields go through the vtable:**
 
@@ -573,6 +595,11 @@ type Player {
 }
 ```
 
+- **Instance fields** (default): per-object, heap-allocated. Each instance has its own copy.
+- **`` `value `` fields**: live in the value struct. Copied every time the value is passed or assigned. Best for small, frequently-accessed data (coordinates, flags).
+- **`` `variant `` fields**: shared across all instances of the same generic monomorphization. Useful for per-specialization metadata (e.g., a sprite path shared by all `Player[Warrior]` instances). Mutable only at initialization.
+- **`` `type `` fields**: shared across all instances of the type declaration regardless of generic parameters. Useful for reflection metadata. Mutable only at initialization.
+
 #### Primitives in the Four-Struct Model
 
 Since primitives are regular types, `Int` works like:
@@ -650,7 +677,8 @@ When a type inherits from a parent, the child's vtable **extends** the parent's 
 - **Single inheritance**: the child's vtable is prefix-compatible with the parent's. A Circle vtable pointer works wherever a Shape vtable pointer is expected.
 - **Multiple inheritance**: the compiler generates a **per-view vtable** for each parent. When a Circle is passed where `Shape` is expected, the value carries a Shape-view vtable. When passed where `Drawable` is expected, it carries a Drawable-view vtable. Each call site sees the slot layout it expects.
 - **Field inheritance**: parent fields become getter/setter slots in the vtable. A child can inherit them as stored fields, override them with computed getters/setters, or provide them from a completely different source — the parent's call sites are unaffected.
-- **Default method implementations**: a parent type can provide method bodies. These become concrete function pointers in the child's vtable. The child can override them by providing its own implementation, which replaces the function pointer in the vtable slot.
+- **Default method implementations**: a parent type can provide method bodies. These become concrete function pointers in the child's vtable. The child can override them by providing its own implementation, which replaces the function pointer in the vtable slot. `` `abstract `` and a method body are **mutually exclusive**: `` `abstract `` means no body and the child must override; a body means a default implementation that the child may optionally override.
+- **Field placement inheritance**: when a child inherits from a parent, field placement annotations (`` `value ``, `` `variant ``, `` `type ``) are inherited as declared. If the parent declares `Float64 x `value`, the child's value struct also contains `x`.
 
 ### 5.5 Generics
 
@@ -668,6 +696,30 @@ sort[T: Ord](T[] ~list) {
   ...
 }
 ```
+
+#### Standard Constraint Interfaces
+
+The standard library provides these interfaces for use as generic constraints:
+
+```promise
+type Eq {
+  ==(Self &other) Bool `abstract;
+  !=(Self &other) Bool { return !(this == other); }
+}
+
+type Ord is Eq {
+  <(Self &other) Bool `abstract;
+  >(Self &other) Bool { return other < this; }
+  <=(Self &other) Bool { return !(this > other); }
+  >=(Self &other) Bool { return !(this < other); }
+}
+
+type Hashable {
+  hash() Int `abstract;
+}
+```
+
+All primitive types (`Int`, `Float64`, `String`, `Bool`, etc.) implement `Eq` and `Ord`. `String` and `Int` also implement `Hashable`. User-defined types can implement these interfaces to participate in generic algorithms like `sort`, `Map` key lookup, and stream combinators like `distinct()`, `min()`, and `max()`.
 
 ### 5.6 Enums (Algebraic Data Types)
 
@@ -971,8 +1023,9 @@ testAddition() `test {
 | `` `unsafe `` | functions/blocks| Mark as unsafe code                             |
 | `` `abstract ``| methods        | Method has no body; must be implemented by subtypes |
 | `` `native `` | methods         | Method has no Promise body; provided by the runtime/compiler backend |
-| `` `copy ``  | types           | Bitwise copy on assignment; compiler verifies all fields are `copy |
+| `` `copy ``  | types           | Bitwise copy on assignment; compiler verifies all fields are also `` `copy `` |
 | `` `clone `` | types           | Auto-generate `clone() Self` method (deep copy)   |
+| `` `required ``| fields         | Field must be present during deserialization; validation error otherwise |
 | `` `doc ``   | any             | AST-attached documentation (see Section 8.4)      |
 
 User-defined metas are available through the type system at compile time for meta-programming and code generation.
@@ -1099,7 +1152,7 @@ sendEmail(
     ?String cc,                   // optional — skippable, receives none
     Int priority = 3              // has default — skippable
 ) Bool! {
-  // cc is Option[String] — test with: if cc { ... } (see Section 14)
+  // cc is Option[String] — test with: if cc { ... } (see Section 14.1)
   ...
 }
 ```
@@ -1512,7 +1565,7 @@ oneThenTwo() Stream[Int] {
 fetchPages(String url) Stream[Page] {
   ?String nextUrl = url;
   while nextUrl {
-    Page page = http.get(nextUrl)?;  // goroutine suspends during I/O
+    Page page = http.get(nextUrl) ? { break; };  // stop stream on error
     yield page;
     nextUrl = page.nextLink;
   }
@@ -1617,6 +1670,13 @@ find(Int id) ?User {            // shorthand for Option[User]
   // ...
   return none;                   // Option.None
 }
+```
+
+A value of type `T` is **implicitly convertible** to `?T`. No wrapping syntax is needed:
+
+```promise
+String name = "Alice";
+?String maybeName = name;       // OK — implicit T → ?T
 ```
 
 ### 14.1 Working with Optionals
@@ -1776,7 +1836,7 @@ posts := <-t2;
 comments := <-t3;
 ```
 
-`Task[T]` is a runtime-internal type returned by `go` expressions — it never appears in function signatures. Concurrency is always a **caller-side decision**.
+`Task[T]` is a first-class type returned by `go` expressions. It can be stored in variables, fields, and collections, passed as arguments, and returned from functions. The `<-` operator receives the result from a task, suspending the current goroutine until the task completes. Concurrency is always a **caller-side decision** — the callee does not know or care whether it runs in a goroutine.
 
 ### 16.3 Channels
 
@@ -1859,7 +1919,7 @@ type TodoList {
   }
 }
 
-loadFromFile(String &path, ?String encoding) TodoList! {
+loadFromFile(String &path) TodoList! {
   String content = io.readFile(path);          // auto-propagates on error
   Todo[] items = json.decode[Todo[]](content); // auto-propagates on error
   return TodoList(items: items);
@@ -1953,6 +2013,27 @@ typeRef
     ;
 
 typeArgs: '[' typeRef (',' typeRef)* ']';
+typeRefList: typeRef (',' typeRef)*;
+
+// Core expression and statement productions (simplified)
+block: '{' statement* '}';
+statement: expression ';' | varDecl | assignment | returnStmt | raiseStmt
+         | ifStmt | forStmt | whileStmt | yieldStmt | yieldDelegateStmt;
+
+expression: primary | expression binOp expression | unaryOp expression
+          | expression '.' IDENT | expression '(' args ')'
+          | expression '?' IDENT? block             // error handler
+          | expression '?' | expression '!'         // propagate / unwrap
+          | goExpr | receiveExpr | rangeExpr | isExpr
+          | ifExpr | matchExpr | '(' expression ')';
+
+// Control flow
+ifStmt: 'if' expression block ('else' (ifStmt | block))?;
+ifExpr: 'if' expression block 'else' block;
+whileStmt: 'while' expression block;
+forInStmt: 'for' IDENT (',' IDENT)? 'in' expression block;
+classicForStmt: 'for' varDecl ';' expression ';' expression block;
+forStmt: forInStmt | classicForStmt | 'for' block;   // infinite loop
 
 goExpr: 'go' (block | expression);    // returns Task[T]
 receiveExpr: '<-' expression;          // receive from Task[T] or Channel[T]
@@ -1977,6 +2058,8 @@ pattern
     | 'present'                          // ?T presence check with narrowing
     | 'absent'                           // ?T absence check
     ;
+patternFields: patternField (',' patternField)*;
+patternField: IDENT;
 
 // Unwrap binding in if/while conditions
 ifUnwrap: 'if' IDENT ':=' expression block ('else' block)?;

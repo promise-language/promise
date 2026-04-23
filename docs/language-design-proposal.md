@@ -801,21 +801,88 @@ The `!` suffix on the return type means: "this function returns `(String, Error)
 
 ### 7.2 Calling Failable Functions
 
+In a **failable function** (return type has `!`), a naked call to another failable function **auto-propagates** the error — if the callee fails, the caller immediately returns the error to its own caller. This is the most common case and requires no extra syntax:
+
+```promise
+process() String! {
+  String content = readFile("data.txt");    // auto-propagates on error
+  return content.trim();
+}
+```
+
+The explicit `?` suffix is allowed for self-documentation but has the same effect:
+
+```promise
+  String content = readFile("data.txt")?;   // same as above — explicit propagation
+```
+
+In a **non-failable function**, calling a failable function without handling is a **compile-time error** — there is nowhere to propagate to. The caller must handle the error with `?` or unwrap with `!`:
+
 ```promise
 main() {
-  // Option 1: Propagate with `?`
-  String content = readFile("data.txt")?;   // returns error to caller if failed
-
-  // Option 2: Handle explicitly with `catch`
-  String content = readFile("data.txt") catch err {
-    io.println("Failed: {err}");
+  // Handle with ? — block must provide recovery value or diverge (return/panic)
+  String content = readFile("data.txt") ? e {
+    io.println("Failed: {e.message()}");
     return;
   };
 
-  // Option 3: Unwrap (panics on error — for prototyping only)
+  // Handle with ? — error value not needed
+  String content = readFile("data.txt") ? {
+    return;
+  };
+
+  // Unwrap (panics on error — for prototyping only)
   String content = readFile("data.txt")!;
 }
 ```
+
+#### Error handler syntax
+
+The `? e { ... }` form handles errors inline. The error binding is optional:
+
+| Form | Meaning |
+|------|---------|
+| `expr ? e { ... }` | Handle error, bind error value to `e` |
+| `expr ? { ... }` | Handle error, discard error value |
+
+The handler block must either produce a **recovery value** of the expected type, or **diverge** (`return`, `break`, `panic`). If it produces a value, that value is used in place of the failed call:
+
+```promise
+// Recovery value
+String content = readFile("data.txt") ? { "" };    // use empty string on failure
+
+// Diverge
+String content = readFile("data.txt") ? e {
+  io.println("Error: {e.message()}");
+  return;
+};
+```
+
+#### Capturing the raw result
+
+To inspect both the value and error without propagation, destructure into a tuple:
+
+```promise
+(content, err) := readFile("data.txt");
+if err is present {
+  io.println("Failed: {err.message()}");
+} else {
+  io.println(content);
+}
+```
+
+#### Summary
+
+| Call form | Behavior | Context |
+|-----------|----------|---------|
+| `foo()` | Auto-propagate error | `!` function only |
+| `foo()?` | Explicit propagate (same as naked) | `!` function only |
+| `foo() ? e { ... }` | Handle error, bind to `e` | Any function |
+| `foo() ? { ... }` | Handle error, discard error value | Any function |
+| `foo()!` | Panic on error | Any function |
+| `(val, err) := foo()` | Capture raw result | Any function |
+
+**Note:** Auto-propagation does not cross lambda boundaries. Inside a non-`!` lambda, failable calls must be handled explicitly with `?` or `!`.
 
 ### 7.3 Error Types
 
@@ -1793,13 +1860,13 @@ type TodoList {
 }
 
 loadFromFile(String &path, ?String encoding) TodoList! {
-  String content = io.readFile(path)?;
-  Todo[] items = json.decode[Todo[]](content)?;
+  String content = io.readFile(path);          // auto-propagates on error
+  Todo[] items = json.decode[Todo[]](content); // auto-propagates on error
   return TodoList(items: items);
 }
 
 main() {
-  TodoList todos = loadFromFile("todos.json") catch err {
+  TodoList todos = loadFromFile("todos.json") ? err {
     io.println("Starting fresh: {err.message()}");
     TodoList(items: []);
   };
@@ -1889,6 +1956,12 @@ typeArgs: '[' typeRef (',' typeRef)* ']';
 
 goExpr: 'go' (block | expression);    // returns Task[T]
 receiveExpr: '<-' expression;          // receive from Task[T] or Channel[T]
+
+// Error handling
+errorPropagate: expression '?';                          // explicit propagate
+errorHandler: expression '?' IDENT? block;               // ? e { ... } or ? { ... }
+errorUnwrap: expression '!';                             // panic on error
+resultDestructure: '(' IDENT ',' IDENT ')' ':=' expression;  // (val, err) := expr
 
 // Range expressions
 rangeExpr: expression '..' '='? expression;    // 0..10 (exclusive) or 0..=10 (inclusive)

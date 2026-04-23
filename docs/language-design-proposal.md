@@ -688,7 +688,7 @@ Generics use **square brackets** `[]`. Constraints are expressed inline in the t
 type Map[K: Hashable + Eq, V] {
   Bucket[K, V][] buckets;
 
-  get(K &key) ?V& `instance { ... }
+  get(K &key) V&? `instance { ... }
   set(K key, V value) `instance { ... }
 }
 
@@ -1142,14 +1142,14 @@ Counter c = Counter.new();
 
 #### Definition Syntax
 
-Any parameter can have a **default value** with `= expression`. Parameters whose type uses the `?T` sugar are **optional** — when omitted at the call site, the function receives `none`.
+Any parameter can have a **default value** with `= expression`. Parameters whose type uses the `T?` sugar are **optional** — when omitted at the call site, the function receives `none`.
 
 ```promise
 sendEmail(
     String to,                    // required
     String subject,               // required
     String body = "",             // has default — skippable
-    ?String cc,                   // optional — skippable, receives none
+    String? cc,                   // optional — skippable, receives none
     Int priority = 3              // has default — skippable
 ) Bool! {
   // cc is Option[String] — test with: if cc { ... } (see Section 14.1)
@@ -1159,7 +1159,7 @@ sendEmail(
 
 There is no ordering constraint on required, defaulted, and optional parameters in the definition — any order is valid. The `this`/`&this`/`~this` receiver is unaffected: it is never named, never defaulted, and always implicit.
 
-**`?T` vs `Option[T]`:** Only the `?T` sugar triggers skippability. If a parameter is declared with `Option[T]` explicitly, it is a required parameter of optional type — the caller must provide it.
+**`T?` vs `Option[T]`:** Only the `T?` sugar triggers skippability. If a parameter is declared with `Option[T]` explicitly, it is a required parameter of optional type — the caller must provide it.
 
 #### Call-Site Syntax
 
@@ -1199,11 +1199,11 @@ The compiler resolves arguments in this order:
 1. **Validate structure**: scan the argument list and verify positional arguments form one contiguous block. If positional arguments are split by named arguments, emit a compile error.
 2. **Match named arguments first**: resolve all named arguments by name lookup. Mark each matched parameter as filled. Error on unknown names or duplicate names.
 3. **Match positional arguments**: fill remaining unclaimed parameters left-to-right in declaration order (skipping the receiver and any parameters already claimed by name). Error if a positional argument targets a parameter already filled by a named argument.
-4. **Fill defaults and optionals**: for each unfilled parameter — if it has a default value, insert the default expression; if its type is `?T`, insert `none`; otherwise emit a "missing required argument" error.
+4. **Fill defaults and optionals**: for each unfilled parameter — if it has a default value, insert the default expression; if its type is `T?`, insert `none`; otherwise emit a "missing required argument" error.
 
 #### Skipping Parameters
 
-A parameter can be omitted at the call site if it has a default value or its type is `?T`. When using positional arguments, you cannot skip a parameter and provide a later one positionally — you must use named arguments to target specific parameters while skipping others:
+A parameter can be omitted at the call site if it has a default value or its type is `T?`. When using positional arguments, you cannot skip a parameter and provide a later one positionally — you must use named arguments to target specific parameters while skipping others:
 
 ```promise
 // Skip body and cc, provide priority by name:
@@ -1228,13 +1228,13 @@ range(Int start, Int end = start + 10) { ... }  // compile error
 
 #### Constructor Defaults
 
-Constructor parameters mirror field declarations. Fields with `= expression` defaults become default constructor parameters. Fields with `?T` type become optional constructor parameters.
+Constructor parameters mirror field declarations. Fields with `= expression` defaults become default constructor parameters. Fields with `T?` type become optional constructor parameters.
 
 ```promise
 type Config {
   String host;
   Int port = 8080;
-  ?String logFile;
+  String? logFile;
 }
 
 Config("localhost");                          // port=8080, logFile=none
@@ -1402,7 +1402,7 @@ if animal is Dog {
 }
 ```
 
-This follows the same narrowing pattern as optional truthiness (`if cc { ... }` narrows `?T` to `T`). The `else` branch does **not** narrow — `animal` remains `Animal`.
+This follows the same narrowing pattern as optional truthiness (`if cc { ... }` narrows `T?` to `T`). The `else` branch does **not** narrow — `animal` remains `Animal`.
 
 `is` works in any boolean context:
 
@@ -1419,7 +1419,7 @@ Bool isDog = animal is Dog;   // no narrowing — just a bool test
 `as` performs a safe cast, returning an optional. `as!` performs an unsafe cast that panics on failure:
 
 ```promise
-?Dog dog = animal as Dog;     // safe — returns none if animal is not a Dog
+Dog? dog = animal as Dog;     // safe — returns none if animal is not a Dog
 Dog dog = animal as! Dog;     // unsafe — panics if animal is not a Dog
 ```
 
@@ -1453,7 +1453,7 @@ while condition {
 // While with unwrap binding — loops while the expression is not none,
 // binding the unwrapped value each iteration (see Section 14.1)
 while item := optionalExpr {
-  // item is the unwrapped T, not ?T
+  // item is the unwrapped T, not T?
 }
 
 // For-in — iterates any Stream[T] (see Section 12)
@@ -1516,11 +1516,11 @@ Promise provides a unified iteration and streaming abstraction through two core 
 
 ```promise
 type Iter[T] {
-  next() ?T `abstract;
+  next() T? `abstract;
 }
 ```
 
-`Iter[T]` is the stateful cursor. Each call to `next()` returns the next element wrapped in `?T`, or `none` when the sequence is exhausted. This combines the traditional `hasNext()` + `next()` two-method pattern into a single call, leveraging Promise's optional type system.
+`Iter[T]` is the stateful cursor. Each call to `next()` returns the next element wrapped in `T?`, or `none` when the sequence is exhausted. This combines the traditional `hasNext()` + `next()` two-method pattern into a single call, leveraging Promise's optional type system.
 
 ```promise
 type Stream[T] {
@@ -1543,17 +1543,17 @@ type Stream[T] {
 
   // Terminal operations — eager, consume the stream
   fold[R](R initial, (R, T) -> R accumulate) R { ... }
-  reduce((T, T) -> T combine) ?T { ... }
+  reduce((T, T) -> T combine) T? { ... }
   collect() T[] { ... }
   count() Int { ... }
   any((T) -> Bool predicate) Bool { ... }
   every((T) -> Bool predicate) Bool { ... }
   contains(T value) Bool { ... }
-  first() ?T { ... }
-  last() ?T { ... }
-  find((T) -> Bool predicate) ?T { ... }
-  min() ?T { ... }
-  max() ?T { ... }
+  first() T? { ... }
+  last() T? { ... }
+  find((T) -> Bool predicate) T? { ... }
+  min() T? { ... }
+  max() T? { ... }
   forEach((T) action) { ... }
   join(String separator = "") String { ... }
 }
@@ -1677,7 +1677,7 @@ oneThenTwo() Stream[Int] {
 
 ```promise
 fetchPages(String url) Stream[Page] {
-  ?String nextUrl = url;
+  String? nextUrl = url;
   while nextUrl {
     Page page = http.get(nextUrl) ? { break; };  // stop stream on error
     yield page;
@@ -1777,20 +1777,20 @@ sum := numbers.fold(0, (acc, n) -> acc + n);       // 15
 
 ## 14. Nullable Types
 
-Promise does not have null. Optional values use `Option[T]`, with sugar `?T`:
+Promise does not have null. Optional values use `Option[T]`, with sugar `T?`:
 
 ```promise
-find(Int id) ?User {            // shorthand for Option[User]
+find(Int id) User? {            // shorthand for Option[User]
   // ...
   return none;                   // Option.None
 }
 ```
 
-A value of type `T` is **implicitly convertible** to `?T`. No wrapping syntax is needed:
+A value of type `T` is **implicitly convertible** to `T?`. No wrapping syntax is needed:
 
 ```promise
 String name = "Alice";
-?String maybeName = name;       // OK — implicit T → ?T
+String? maybeName = name;       // OK — implicit T → T?
 ```
 
 ### 14.1 Working with Optionals
@@ -1799,13 +1799,13 @@ There are three ways to test and unwrap optional values, from lightest to most e
 
 #### Truthiness narrowing
 
-When a `?T` value appears as an `if` condition, it is treated as a presence check. Inside the block, the compiler **narrows** the type from `?T` to `T`:
+When a `T?` value appears as an `if` condition, it is treated as a presence check. Inside the block, the compiler **narrows** the type from `T?` to `T`:
 
 ```promise
-?String cc = getCC();
+String? cc = getCC();
 
 if cc {
-  io.println(cc);              // cc is String here, not ?String
+  io.println(cc);              // cc is String here, not String?
 }
 
 if !cc {
@@ -1816,17 +1816,17 @@ if !cc {
 
 Inside the `if cc` block, `cc` is narrowed to `T`. Inside the `if !cc` block, `cc` is known to be `none` — any use of `cc` as type `T` is a **compile-time error**.
 
-This works for any `?T` where `T` is not `Bool`. For `?Bool`, the compiler emits an error because the intent is ambiguous — use `is present` instead (see below).
+This works for any `T?` where `T` is not `Bool`. For `Bool?`, the compiler emits an error because the intent is ambiguous — use `is present` instead (see below).
 
 #### `is present` / `is absent`
 
-For explicit presence testing that works with **any** `?T` — including `?Bool` — use the `is present` and `is absent` patterns. These are contextual keywords: `present` and `absent` are only special after `is` in pattern position; in all other contexts they are normal identifiers.
+For explicit presence testing that works with **any** `T?` — including `Bool?` — use the `is present` and `is absent` patterns. These are contextual keywords: `present` and `absent` are only special after `is` in pattern position; in all other contexts they are normal identifiers.
 
 ```promise
-?Bool verbose = getFlag();
+Bool? verbose = getFlag();
 
 if verbose is present {
-  // verbose is Bool here — narrowed from ?Bool
+  // verbose is Bool here — narrowed from Bool?
   if verbose { enableLogging(); }
 } else {
   io.println(verbose);           // ERROR: verbose is known to be none here
@@ -1847,7 +1847,7 @@ As with truthiness narrowing, the inverse blocks enforce negative narrowing: ins
 When you want to unwrap into a **new name**, use `:=` inside an `if` condition:
 
 ```promise
-?User user = find(42);
+User? user = find(42);
 
 if u := user {
   io.println(u.name);          // u is User — unwrapped
@@ -1860,7 +1860,7 @@ The `:=` unwrap binding also works in `while` conditions, looping as long as the
 
 ```promise
 while item := iter.next() {
-  process(item);              // item is T, not ?T
+  process(item);              // item is T, not T?
 }
 ```
 
@@ -1884,7 +1884,7 @@ match result {
 
 ### 14.3 Optional Parameters
 
-When `?T` is used as a **function/method parameter type**, the parameter is implicitly optional — the caller may omit it, and the function receives `none` (see Section 9.3). To declare a required parameter of type `Option[T]`, use `Option[T]` explicitly instead of the `?T` sugar. For how `?T` interacts with stream iteration, see Section 12.
+When `T?` is used as a **function/method parameter type**, the parameter is implicitly optional — the caller may omit it, and the function receives `none` (see Section 9.3). To declare a required parameter of type `Option[T]`, use `Option[T]` explicitly instead of the `T?` sugar. For how `T?` interacts with stream iteration, see Section 12.
 
 ---
 
@@ -2118,7 +2118,7 @@ typeRef
     : typeRef '&'                        // shared reference (postfix)
     | typeRef '~'                        // mutable reference (postfix)
     | typeRef '*'                        // raw pointer (postfix)
-    | '?' typeRef                        // optional
+    | typeRef '?'                        // optional (postfix)
     | typeRef '[' ']'                    // slice
     | typeRef '[' INT_LITERAL ']'        // fixed array
     | IDENT typeArgs?                    // named type

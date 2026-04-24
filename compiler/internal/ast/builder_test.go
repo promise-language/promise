@@ -1017,13 +1017,1094 @@ func TestBuildMatchPatterns(t *testing.T) {
 	}
 }
 
+// TestBuildBinaryOperators verifies all binary operator variants.
+func TestBuildBinaryOperators(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+		op   BinaryOp
+	}{
+		{"add", `f() { x := a + b; }`, BinAdd},
+		{"sub", `f() { x := a - b; }`, BinSub},
+		{"mul", `f() { x := a * b; }`, BinMul},
+		{"div", `f() { x := a / b; }`, BinDiv},
+		{"mod", `f() { x := a % b; }`, BinMod},
+		{"eq", `f() { x := a == b; }`, BinEq},
+		{"neq", `f() { x := a != b; }`, BinNeq},
+		{"lt", `f() { x := a < b; }`, BinLt},
+		{"gt", `f() { x := a > b; }`, BinGt},
+		{"lte", `f() { x := a <= b; }`, BinLte},
+		{"gte", `f() { x := a >= b; }`, BinGte},
+		{"and", `f() { x := a && b; }`, BinAnd},
+		{"or", `f() { x := a || b; }`, BinOr},
+		{"elvis", `f() { x := a ?: b; }`, BinElvis},
+		{"exclusive_range", `f() { x := a..b; }`, BinExclusiveRange},
+		{"inclusive_range", `f() { x := a..=b; }`, BinInclusiveRange},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := parseAndBuild(t, tt.src)
+			fn := file.Decls[0].(*FuncDecl)
+			vd := fn.Body.Stmts[0].(*InferredVarDecl)
+			be := vd.Value.(*BinaryExpr)
+			assertEqual(t, be.Op, tt.op)
+		})
+	}
+}
+
+// TestBuildUnaryOperators verifies all unary operator variants.
+func TestBuildUnaryOperators(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+		op   UnaryOp
+	}{
+		{"neg", `f() { x := -a; }`, UnaryNeg},
+		{"not", `f() { x := !a; }`, UnaryNot},
+		{"receive", `f() { x := <-a; }`, UnaryReceive},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := parseAndBuild(t, tt.src)
+			fn := file.Decls[0].(*FuncDecl)
+			vd := fn.Body.Stmts[0].(*InferredVarDecl)
+			ue := vd.Value.(*UnaryExpr)
+			assertEqual(t, ue.Op, tt.op)
+		})
+	}
+}
+
+// TestBuildAssignOperators verifies all assignment operator variants.
+func TestBuildAssignOperators(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+		op   AssignOp
+	}{
+		{"assign", `f() { x = 1; }`, OpAssign},
+		{"add_assign", `f() { x += 1; }`, OpAddAssign},
+		{"sub_assign", `f() { x -= 1; }`, OpSubAssign},
+		{"mul_assign", `f() { x *= 1; }`, OpMulAssign},
+		{"div_assign", `f() { x /= 1; }`, OpDivAssign},
+		{"mod_assign", `f() { x %= 1; }`, OpModAssign},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := parseAndBuild(t, tt.src)
+			fn := file.Decls[0].(*FuncDecl)
+			as := fn.Body.Stmts[0].(*AssignStmt)
+			assertEqual(t, as.Op, tt.op)
+		})
+	}
+}
+
+// TestBuildPrecedence verifies operator precedence in various combinations.
+func TestBuildPrecedence(t *testing.T) {
+	tests := []struct {
+		name    string
+		src     string
+		rootOp  BinaryOp
+		leftOp  BinaryOp // -1 means left is not a BinaryExpr
+		rightOp BinaryOp // -1 means right is not a BinaryExpr
+	}{
+		{
+			name:    "mul_before_add",
+			src:     `f() { x := 1 + 2 * 3; }`,
+			rootOp:  BinAdd,
+			leftOp:  -1,
+			rightOp: BinMul,
+		},
+		{
+			name:    "div_before_sub",
+			src:     `f() { x := a - b / c; }`,
+			rootOp:  BinSub,
+			leftOp:  -1,
+			rightOp: BinDiv,
+		},
+		{
+			name:    "add_before_comparison",
+			src:     `f() { x := a + b < c + d; }`,
+			rootOp:  BinLt,
+			leftOp:  BinAdd,
+			rightOp: BinAdd,
+		},
+		{
+			name:    "comparison_before_equality",
+			src:     `f() { x := a < b == c > d; }`,
+			rootOp:  BinEq,
+			leftOp:  BinLt,
+			rightOp: BinGt,
+		},
+		{
+			name:    "equality_before_and",
+			src:     `f() { x := a == b && c != d; }`,
+			rootOp:  BinAnd,
+			leftOp:  BinEq,
+			rightOp: BinNeq,
+		},
+		{
+			name:    "and_before_or",
+			src:     `f() { x := a && b || c && d; }`,
+			rootOp:  BinOr,
+			leftOp:  BinAnd,
+			rightOp: BinAnd,
+		},
+		{
+			name:    "or_before_elvis",
+			src:     `f() { x := a || b ?: c || d; }`,
+			rootOp:  BinElvis,
+			leftOp:  BinOr,
+			rightOp: BinOr,
+		},
+		{
+			name:    "add_before_range",
+			src:     `f() { x := a + b..c + d; }`,
+			rootOp:  BinExclusiveRange,
+			leftOp:  BinAdd,
+			rightOp: BinAdd,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := parseAndBuild(t, tt.src)
+			fn := file.Decls[0].(*FuncDecl)
+			vd := fn.Body.Stmts[0].(*InferredVarDecl)
+			be := vd.Value.(*BinaryExpr)
+			assertEqual(t, be.Op, tt.rootOp)
+			if tt.leftOp >= 0 {
+				lbe := be.Left.(*BinaryExpr)
+				assertEqual(t, lbe.Op, tt.leftOp)
+			}
+			if tt.rightOp >= 0 {
+				rbe := be.Right.(*BinaryExpr)
+				assertEqual(t, rbe.Op, tt.rightOp)
+			}
+		})
+	}
+}
+
+// TestBuildStringLiterals verifies all string literal variants.
+func TestBuildStringLiterals(t *testing.T) {
+	tests := []struct {
+		name  string
+		src   string
+		check func(t *testing.T, sl *StringLit)
+	}{
+		{
+			name: "regular",
+			src:  `f() { x := "hello"; }`,
+			check: func(t *testing.T, sl *StringLit) {
+				assertEqual(t, sl.Kind, StringRegular)
+				assertTrue(t, len(sl.Parts) > 0)
+			},
+		},
+		{
+			name: "raw",
+			src:  `f() { x := r"no\escapes"; }`,
+			check: func(t *testing.T, sl *StringLit) {
+				assertEqual(t, sl.Kind, StringRaw)
+			},
+		},
+		{
+			name: "triple",
+			src:  "f() { x := \"\"\"multi\nline\"\"\"; }",
+			check: func(t *testing.T, sl *StringLit) {
+				assertEqual(t, sl.Kind, StringTriple)
+			},
+		},
+		{
+			name: "raw_always_has_raw_text",
+			src:  `f() { x := "hello"; }`,
+			check: func(t *testing.T, sl *StringLit) {
+				assertTrue(t, sl.Raw != "")
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := parseAndBuild(t, tt.src)
+			fn := file.Decls[0].(*FuncDecl)
+			vd := fn.Body.Stmts[0].(*InferredVarDecl)
+			sl := vd.Value.(*StringLit)
+			tt.check(t, sl)
+		})
+	}
+}
+
+// TestBuildCharLiteral verifies character literal AST structure.
+func TestBuildCharLiteral(t *testing.T) {
+	file := parseAndBuild(t, `f() { x := 'a'; }`)
+	fn := file.Decls[0].(*FuncDecl)
+	vd := fn.Body.Stmts[0].(*InferredVarDecl)
+	cl := vd.Value.(*CharLit)
+	assertEqual(t, cl.Raw, "'a'")
+}
+
+// TestBuildIdentExpr verifies identifier expression AST structure.
+func TestBuildIdentExpr(t *testing.T) {
+	file := parseAndBuild(t, `f() { x := foo; }`)
+	fn := file.Decls[0].(*FuncDecl)
+	vd := fn.Body.Stmts[0].(*InferredVarDecl)
+	id := vd.Value.(*IdentExpr)
+	assertEqual(t, id.Name, "foo")
+}
+
+// TestBuildParenExpr verifies parenthesized expression AST structure.
+func TestBuildParenExpr(t *testing.T) {
+	file := parseAndBuild(t, `f() { x := (a + b); }`)
+	fn := file.Decls[0].(*FuncDecl)
+	vd := fn.Body.Stmts[0].(*InferredVarDecl)
+	pe := vd.Value.(*ParenExpr)
+	be := pe.Expr.(*BinaryExpr)
+	assertEqual(t, be.Op, BinAdd)
+}
+
+// TestBuildTypeRefsExtended verifies remaining type reference variants.
+func TestBuildTypeRefsExtended(t *testing.T) {
+	tests := []struct {
+		name  string
+		src   string
+		check func(t *testing.T, file *File)
+	}{
+		{
+			name: "tuple_type",
+			src:  `f() { (Int, String) x = (1, "a"); }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*TypedVarDecl)
+				tt := vd.Type.(*TupleTypeRef)
+				assertLen(t, tt.Elements, 2)
+				e0 := tt.Elements[0].(*NamedTypeRef)
+				assertEqual(t, e0.Name, "Int")
+				e1 := tt.Elements[1].(*NamedTypeRef)
+				assertEqual(t, e1.Name, "String")
+			},
+		},
+		{
+			name: "function_type",
+			src:  `f() { (Int, Int) -> Bool x = |a, b| -> a > b; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*TypedVarDecl)
+				ft := vd.Type.(*FunctionTypeRef)
+				assertLen(t, ft.Params, 2)
+				ret := ft.Return.(*NamedTypeRef)
+				assertEqual(t, ret.Name, "Bool")
+			},
+		},
+		{
+			name: "mut_ref",
+			src:  `f(Int~ x) {}`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				mrt := fn.Params[0].Type.(*MutRefTypeRef)
+				nt := mrt.Inner.(*NamedTypeRef)
+				assertEqual(t, nt.Name, "Int")
+			},
+		},
+		{
+			name: "pointer",
+			src:  `f(Int* x) {}`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				pt := fn.Params[0].Type.(*PointerTypeRef)
+				nt := pt.Inner.(*NamedTypeRef)
+				assertEqual(t, nt.Name, "Int")
+			},
+		},
+		{
+			name: "multi_type_args",
+			src:  `f() { Map[String, Int] x = {"key": 1}; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*TypedVarDecl)
+				nt := vd.Type.(*NamedTypeRef)
+				assertEqual(t, nt.Name, "Map")
+				assertLen(t, nt.TypeArgs, 2)
+			},
+		},
+		{
+			name: "optional_slice",
+			src:  `f() { Int[]? x = none; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*TypedVarDecl)
+				opt := vd.Type.(*OptionalTypeRef)
+				_ = opt.Inner.(*SliceTypeRef)
+			},
+		},
+		{
+			name: "nested_generic",
+			src:  `f() { List[List[Int]] x = []; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*TypedVarDecl)
+				outer := vd.Type.(*NamedTypeRef)
+				assertEqual(t, outer.Name, "List")
+				assertLen(t, outer.TypeArgs, 1)
+				inner := outer.TypeArgs[0].(*NamedTypeRef)
+				assertEqual(t, inner.Name, "List")
+				assertLen(t, inner.TypeArgs, 1)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := parseAndBuild(t, tt.src)
+			tt.check(t, file)
+		})
+	}
+}
+
+// TestBuildDeclDetails verifies declaration details not covered by basic tests.
+func TestBuildDeclDetails(t *testing.T) {
+	tests := []struct {
+		name  string
+		src   string
+		check func(t *testing.T, file *File)
+	}{
+		{
+			name: "field_default",
+			src:  `type Config { Int timeout = 30; }`,
+			check: func(t *testing.T, file *File) {
+				td := file.Decls[0].(*TypeDecl)
+				assertLen(t, td.Fields, 1)
+				assertEqual(t, td.Fields[0].Name, "timeout")
+				assertNotNil(t, td.Fields[0].Default)
+				il := td.Fields[0].Default.(*IntLit)
+				assertEqual(t, il.Raw, "30")
+			},
+		},
+		{
+			name: "field_annotations",
+			src:  "type T { Int x `deprecated; }",
+			check: func(t *testing.T, file *File) {
+				td := file.Decls[0].(*TypeDecl)
+				assertLen(t, td.Fields[0].Annotations, 1)
+				assertEqual(t, td.Fields[0].Annotations[0].Name, "deprecated")
+			},
+		},
+		{
+			name: "abstract_method",
+			src:  `type Shape { area(&this) Float; }`,
+			check: func(t *testing.T, file *File) {
+				td := file.Decls[0].(*TypeDecl)
+				assertLen(t, td.Methods, 1)
+				assertEqual(t, td.Methods[0].Name, "area")
+				assertNil(t, td.Methods[0].Body)
+			},
+		},
+		{
+			name: "receiver_mut",
+			src:  `type T { reset(~this) { } }`,
+			check: func(t *testing.T, file *File) {
+				td := file.Decls[0].(*TypeDecl)
+				assertNotNil(t, td.Methods[0].Receiver)
+				assertEqual(t, td.Methods[0].Receiver.RefMod, RefMut)
+			},
+		},
+		{
+			name: "receiver_none",
+			src:  `type T { info(this) String { return ""; } }`,
+			check: func(t *testing.T, file *File) {
+				td := file.Decls[0].(*TypeDecl)
+				assertNotNil(t, td.Methods[0].Receiver)
+				assertEqual(t, td.Methods[0].Receiver.RefMod, RefNone)
+			},
+		},
+		{
+			name: "type_constraint_single",
+			src:  `f[T: Comparable](T a, T b) Bool { return a == b; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				assertLen(t, fn.TypeParams, 1)
+				assertEqual(t, fn.TypeParams[0].Name, "T")
+				assertLen(t, fn.TypeParams[0].Constraint, 1)
+				c := fn.TypeParams[0].Constraint[0].(*NamedTypeRef)
+				assertEqual(t, c.Name, "Comparable")
+			},
+		},
+		{
+			name: "type_constraint_multi",
+			src:  `f[T: Hashable + Comparable](T x) {}`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				assertLen(t, fn.TypeParams[0].Constraint, 2)
+			},
+		},
+		{
+			name: "param_default",
+			src:  `f(Int x = 0) {}`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				assertLen(t, fn.Params, 1)
+				assertEqual(t, fn.Params[0].Name, "x")
+				assertNotNil(t, fn.Params[0].Default)
+			},
+		},
+		{
+			name: "param_discard",
+			src:  `f(Int _) {}`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				assertEqual(t, fn.Params[0].Name, "_")
+			},
+		},
+		{
+			name: "meta_annotation_named_params",
+			src:  "f() `deprecated(since: \"1.0\", reason: \"use g\") {}",
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				assertLen(t, fn.Annotations, 1)
+				a := fn.Annotations[0]
+				assertEqual(t, a.Name, "deprecated")
+				assertLen(t, a.Params, 2)
+				assertEqual(t, a.Params[0].Name, "since")
+				assertEqual(t, a.Params[1].Name, "reason")
+			},
+		},
+		{
+			name: "meta_annotation_positional",
+			src:  "f() `doc(\"Does nothing\") {}",
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				a := fn.Annotations[0]
+				assertEqual(t, a.Name, "doc")
+				assertLen(t, a.Params, 1)
+				assertEqual(t, a.Params[0].Name, "")
+			},
+		},
+		{
+			name: "multiple_annotations",
+			src:  "f() `deprecated `inline {}",
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				assertLen(t, fn.Annotations, 2)
+				assertEqual(t, fn.Annotations[0].Name, "deprecated")
+				assertEqual(t, fn.Annotations[1].Name, "inline")
+			},
+		},
+		{
+			name: "enum_annotations",
+			src:  "enum Color `serializable { Red, Green, Blue }",
+			check: func(t *testing.T, file *File) {
+				ed := file.Decls[0].(*EnumDecl)
+				assertLen(t, ed.Annotations, 1)
+				assertEqual(t, ed.Annotations[0].Name, "serializable")
+			},
+		},
+		{
+			name: "multi_inherit",
+			src:  `type Hybrid is Flyable, Swimmable { }`,
+			check: func(t *testing.T, file *File) {
+				td := file.Decls[0].(*TypeDecl)
+				assertLen(t, td.Inherits, 2)
+			},
+		},
+		{
+			name: "method_type_params",
+			src:  `type T { convert[U](&this) U { return this as! U; } }`,
+			check: func(t *testing.T, file *File) {
+				td := file.Decls[0].(*TypeDecl)
+				assertLen(t, td.Methods[0].TypeParams, 1)
+				assertEqual(t, td.Methods[0].TypeParams[0].Name, "U")
+			},
+		},
+		{
+			name: "multiple_use_decls",
+			src:  `use io "std/io"; use fmt "std/fmt"; f() {}`,
+			check: func(t *testing.T, file *File) {
+				assertLen(t, file.Uses, 2)
+				assertEqual(t, file.Uses[0].Alias, "io")
+				assertEqual(t, file.Uses[0].Path, "std/io")
+				assertEqual(t, file.Uses[1].Alias, "fmt")
+				assertEqual(t, file.Uses[1].Path, "std/fmt")
+			},
+		},
+		{
+			name: "all_operator_overloads",
+			src: `type V {
+				+(&this, V o) V { return this; }
+				-(&this, V o) V { return this; }
+				*(&this, V o) V { return this; }
+				/(&this, V o) V { return this; }
+				%(&this, V o) V { return this; }
+				==(&this, V o) Bool { return true; }
+				!=(&this, V o) Bool { return false; }
+				<(&this, V o) Bool { return false; }
+				>(&this, V o) Bool { return false; }
+				<=(&this, V o) Bool { return false; }
+				>=(&this, V o) Bool { return false; }
+			}`,
+			check: func(t *testing.T, file *File) {
+				td := file.Decls[0].(*TypeDecl)
+				assertLen(t, td.Methods, 11)
+				names := []string{"+", "-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">="}
+				for i, want := range names {
+					assertEqual(t, td.Methods[i].Name, want)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := parseAndBuild(t, tt.src)
+			tt.check(t, file)
+		})
+	}
+}
+
+// TestBuildPatternsExtended verifies pattern types not covered by basic tests.
+func TestBuildPatternsExtended(t *testing.T) {
+	tests := []struct {
+		name  string
+		src   string
+		check func(t *testing.T, file *File)
+	}{
+		{
+			name: "type_binding",
+			src:  `f() { match shape { Circle c => consume(c), _ => none, } }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				es := fn.Body.Stmts[0].(*ExprStmt)
+				me := es.Expr.(*MatchExpr)
+				tb := me.Arms[0].Pattern.(*TypeBindingMatchPattern)
+				assertEqual(t, tb.TypeName, "Circle")
+				assertEqual(t, tb.Binding, "c")
+			},
+		},
+		{
+			name: "name_pattern",
+			src:  `f() { match x { val => consume(val), } }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				es := fn.Body.Stmts[0].(*ExprStmt)
+				me := es.Expr.(*MatchExpr)
+				np := me.Arms[0].Pattern.(*NameMatchPattern)
+				assertEqual(t, np.Name, "val")
+			},
+		},
+		{
+			name: "bool_literal_pattern",
+			src:  `f() { match b { true => a(), false => b(), } }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				es := fn.Body.Stmts[0].(*ExprStmt)
+				me := es.Expr.(*MatchExpr)
+				lp0 := me.Arms[0].Pattern.(*LiteralMatchPattern)
+				bl0 := lp0.Value.(*BoolLit)
+				assertTrue(t, bl0.Value)
+				lp1 := me.Arms[1].Pattern.(*LiteralMatchPattern)
+				bl1 := lp1.Value.(*BoolLit)
+				assertFalse(t, bl1.Value)
+			},
+		},
+		{
+			name: "none_literal_pattern",
+			src:  `f() { match opt { none => a(), _ => b(), } }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				es := fn.Body.Stmts[0].(*ExprStmt)
+				me := es.Expr.(*MatchExpr)
+				lp := me.Arms[0].Pattern.(*LiteralMatchPattern)
+				_ = lp.Value.(*NoneLit)
+			},
+		},
+		{
+			name: "string_literal_pattern",
+			src:  `f() { match s { "hello" => a(), _ => b(), } }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				es := fn.Body.Stmts[0].(*ExprStmt)
+				me := es.Expr.(*MatchExpr)
+				lp := me.Arms[0].Pattern.(*LiteralMatchPattern)
+				_ = lp.Value.(*StringLit)
+			},
+		},
+		{
+			name: "float_literal_pattern",
+			src:  `f() { match x { 3.14 => a(), _ => b(), } }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				es := fn.Body.Stmts[0].(*ExprStmt)
+				me := es.Expr.(*MatchExpr)
+				lp := me.Arms[0].Pattern.(*LiteralMatchPattern)
+				fl := lp.Value.(*FloatLit)
+				assertEqual(t, fl.Raw, "3.14")
+			},
+		},
+		{
+			name: "is_destructure",
+			src:  `f() { x := val is Some(inner); }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*InferredVarDecl)
+				ie := vd.Value.(*IsExpr)
+				dp := ie.Pattern.(*DestructureIsPattern)
+				assertEqual(t, dp.TypeName, "Some")
+				assertLen(t, dp.Bindings, 1)
+				assertEqual(t, dp.Bindings[0], "inner")
+			},
+		},
+		{
+			name: "match_with_block_body",
+			src:  `f() { match x { 0 => { a(); b(); }, _ => c(), } }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				es := fn.Body.Stmts[0].(*ExprStmt)
+				me := es.Expr.(*MatchExpr)
+				arm := me.Arms[0]
+				assertNotNil(t, arm.Block)
+				assertNil(t, arm.Body)
+				assertLen(t, arm.Block.Stmts, 2)
+			},
+		},
+		{
+			name: "match_guard_with_block",
+			src:  `f() { match x { n if n > 0 => { positive(); }, _ => negative(), } }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				es := fn.Body.Stmts[0].(*ExprStmt)
+				me := es.Expr.(*MatchExpr)
+				arm := me.Arms[0]
+				assertNotNil(t, arm.Guard)
+				assertNotNil(t, arm.Block)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := parseAndBuild(t, tt.src)
+			tt.check(t, file)
+		})
+	}
+}
+
+// TestBuildLambdaExtended verifies additional lambda variants.
+func TestBuildLambdaExtended(t *testing.T) {
+	tests := []struct {
+		name  string
+		src   string
+		check func(t *testing.T, file *File)
+	}{
+		{
+			name: "typed_params",
+			src:  `f() { x := |Int a, Int b| -> a + b; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*InferredVarDecl)
+				le := vd.Value.(*LambdaExpr)
+				assertLen(t, le.Params, 2)
+				assertNotNil(t, le.Params[0].Type)
+				nt := le.Params[0].Type.(*NamedTypeRef)
+				assertEqual(t, nt.Name, "Int")
+				assertEqual(t, le.Params[0].Name, "a")
+			},
+		},
+		{
+			name: "with_return_type",
+			src:  `f() { x := |Int a| -> Int { return a; }; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*InferredVarDecl)
+				le := vd.Value.(*LambdaExpr)
+				assertNotNil(t, le.ReturnType)
+				rt := le.ReturnType.(*NamedTypeRef)
+				assertEqual(t, rt.Name, "Int")
+				assertNotNil(t, le.Body)
+			},
+		},
+		{
+			name: "no_params_block",
+			src:  `f() { x := || { return 42; }; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*InferredVarDecl)
+				le := vd.Value.(*LambdaExpr)
+				assertLen(t, le.Params, 0)
+				assertNotNil(t, le.Body)
+				assertNil(t, le.ExprBody)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := parseAndBuild(t, tt.src)
+			tt.check(t, file)
+		})
+	}
+}
+
+// TestBuildGoExprExtended verifies go expression variants.
+func TestBuildGoExprExtended(t *testing.T) {
+	tests := []struct {
+		name  string
+		src   string
+		check func(t *testing.T, file *File)
+	}{
+		{
+			name: "go_expression",
+			src:  `f() { x := go compute(); }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*InferredVarDecl)
+				ge := vd.Value.(*GoExpr)
+				assertNotNil(t, ge.Expr)
+				assertNil(t, ge.Block)
+			},
+		},
+		{
+			name: "go_block",
+			src:  `f() { x := go { compute(); }; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*InferredVarDecl)
+				ge := vd.Value.(*GoExpr)
+				assertNil(t, ge.Expr)
+				assertNotNil(t, ge.Block)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := parseAndBuild(t, tt.src)
+			tt.check(t, file)
+		})
+	}
+}
+
+// TestBuildChainedExpressions verifies chained member access and calls.
+func TestBuildChainedExpressions(t *testing.T) {
+	tests := []struct {
+		name  string
+		src   string
+		check func(t *testing.T, file *File)
+	}{
+		{
+			name: "chained_member_access",
+			src:  `f() { x := a.b.c; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*InferredVarDecl)
+				// a.b.c → MemberExpr(.c, MemberExpr(.b, a))
+				outer := vd.Value.(*MemberExpr)
+				assertEqual(t, outer.Field, "c")
+				inner := outer.Target.(*MemberExpr)
+				assertEqual(t, inner.Field, "b")
+				id := inner.Target.(*IdentExpr)
+				assertEqual(t, id.Name, "a")
+			},
+		},
+		{
+			name: "method_chain",
+			src:  `f() { x := a.foo().bar().baz(); }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*InferredVarDecl)
+				// a.foo().bar().baz() → Call(Member(.baz, Call(Member(.bar, Call(Member(.foo, a))))))
+				c3 := vd.Value.(*CallExpr)
+				m3 := c3.Callee.(*MemberExpr)
+				assertEqual(t, m3.Field, "baz")
+				c2 := m3.Target.(*CallExpr)
+				m2 := c2.Callee.(*MemberExpr)
+				assertEqual(t, m2.Field, "bar")
+				c1 := m2.Target.(*CallExpr)
+				m1 := c1.Callee.(*MemberExpr)
+				assertEqual(t, m1.Field, "foo")
+				id := m1.Target.(*IdentExpr)
+				assertEqual(t, id.Name, "a")
+			},
+		},
+		{
+			name: "call_with_index",
+			src:  `f() { x := items[0].name; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*InferredVarDecl)
+				me := vd.Value.(*MemberExpr)
+				assertEqual(t, me.Field, "name")
+				ie := me.Target.(*IndexExpr)
+				id := ie.Target.(*IdentExpr)
+				assertEqual(t, id.Name, "items")
+			},
+		},
+		{
+			name: "optional_chain_mixed",
+			src:  `f() { x := a?.b.c; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*InferredVarDecl)
+				outer := vd.Value.(*MemberExpr)
+				assertEqual(t, outer.Field, "c")
+				inner := outer.Target.(*OptionalChainExpr)
+				assertEqual(t, inner.Field, "b")
+			},
+		},
+		{
+			name: "optional_chain_call",
+			src:  `f() { x := getValue()?.process(); }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*InferredVarDecl)
+				call := vd.Value.(*CallExpr)
+				oc := call.Callee.(*OptionalChainExpr)
+				assertEqual(t, oc.Field, "process")
+				inner := oc.Target.(*CallExpr)
+				callee := inner.Callee.(*IdentExpr)
+				assertEqual(t, callee.Name, "getValue")
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := parseAndBuild(t, tt.src)
+			tt.check(t, file)
+		})
+	}
+}
+
+// TestBuildErrorHandling verifies error handling expression variants.
+func TestBuildErrorHandling(t *testing.T) {
+	tests := []struct {
+		name  string
+		src   string
+		check func(t *testing.T, file *File)
+	}{
+		{
+			name: "handler_with_binding",
+			src:  `f() { x := getValue() ? e { log(e); }; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*InferredVarDecl)
+				eh := vd.Value.(*ErrorHandlerExpr)
+				assertEqual(t, eh.Binding, "e")
+				assertNotNil(t, eh.Body)
+			},
+		},
+		{
+			name: "handler_with_discard",
+			src:  `f() { x := getValue() ? _ { fallback(); }; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*InferredVarDecl)
+				eh := vd.Value.(*ErrorHandlerExpr)
+				assertEqual(t, eh.Binding, "_")
+			},
+		},
+		{
+			name: "handler_no_binding",
+			src:  `f() { x := getValue() ? { fallback(); }; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*InferredVarDecl)
+				eh := vd.Value.(*ErrorHandlerExpr)
+				assertEqual(t, eh.Binding, "")
+			},
+		},
+		{
+			name: "propagate_then_unwrap",
+			src:  `f() { x := a()?; y := b()!; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd1 := fn.Body.Stmts[0].(*InferredVarDecl)
+				_ = vd1.Value.(*ErrorPropagateExpr)
+				vd2 := fn.Body.Stmts[1].(*InferredVarDecl)
+				_ = vd2.Value.(*ErrorUnwrapExpr)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := parseAndBuild(t, tt.src)
+			tt.check(t, file)
+		})
+	}
+}
+
+// TestBuildEmptyCollections verifies empty collection literals.
+func TestBuildEmptyCollections(t *testing.T) {
+	tests := []struct {
+		name  string
+		src   string
+		check func(t *testing.T, file *File)
+	}{
+		{
+			name: "empty_array",
+			src:  `f() { x := []; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*InferredVarDecl)
+				al := vd.Value.(*ArrayLit)
+				assertLen(t, al.Elements, 0)
+			},
+		},
+		{
+			name: "single_element_array",
+			src:  `f() { x := [1]; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*InferredVarDecl)
+				al := vd.Value.(*ArrayLit)
+				assertLen(t, al.Elements, 1)
+			},
+		},
+		{
+			name: "trailing_comma_array",
+			src:  `f() { x := [1, 2, 3,]; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*InferredVarDecl)
+				al := vd.Value.(*ArrayLit)
+				assertLen(t, al.Elements, 3)
+			},
+		},
+		{
+			name: "single_entry_map",
+			src:  `f() { x := {"key": 1}; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*InferredVarDecl)
+				ml := vd.Value.(*MapLit)
+				assertLen(t, ml.Entries, 1)
+			},
+		},
+		{
+			name: "trailing_comma_map",
+			src:  `f() { x := {"a": 1, "b": 2,}; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*InferredVarDecl)
+				ml := vd.Value.(*MapLit)
+				assertLen(t, ml.Entries, 2)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := parseAndBuild(t, tt.src)
+			tt.check(t, file)
+		})
+	}
+}
+
+// TestBuildComplexPrograms verifies AST building on multi-declaration programs.
+func TestBuildComplexPrograms(t *testing.T) {
+	tests := []struct {
+		name  string
+		src   string
+		check func(t *testing.T, file *File)
+	}{
+		{
+			name: "multiple_decls",
+			src: `
+				use io "std/io";
+				type Point { Float x; Float y; }
+				enum Color { Red, Green, Blue }
+				main() { }
+			`,
+			check: func(t *testing.T, file *File) {
+				assertLen(t, file.Uses, 1)
+				assertLen(t, file.Decls, 3)
+				_ = file.Decls[0].(*TypeDecl)
+				_ = file.Decls[1].(*EnumDecl)
+				_ = file.Decls[2].(*FuncDecl)
+			},
+		},
+		{
+			name: "nested_control_flow",
+			src: `f() {
+				for i in items {
+					if i > 0 {
+						while x < 10 {
+							x += 1;
+						}
+					} else {
+						break;
+					}
+				}
+			}`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				fi := fn.Body.Stmts[0].(*ForInStmt)
+				is := fi.Body.Stmts[0].(*IfStmt)
+				ws := is.Body.Stmts[0].(*WhileStmt)
+				as := ws.Body.Stmts[0].(*AssignStmt)
+				assertEqual(t, as.Op, OpAddAssign)
+				elseBlock := is.Else.(*Block)
+				_ = elseBlock.Stmts[0].(*BreakStmt)
+			},
+		},
+		{
+			name: "complex_expression",
+			src:  `f() { x := a.b(c + d, e: f).g[0]?; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				vd := fn.Body.Stmts[0].(*InferredVarDecl)
+				// x := a.b(c + d, e: f).g[0]?
+				ep := vd.Value.(*ErrorPropagateExpr)
+				idx := ep.Expr.(*IndexExpr)
+				mg := idx.Target.(*MemberExpr)
+				assertEqual(t, mg.Field, "g")
+				call := mg.Target.(*CallExpr)
+				assertLen(t, call.Args, 2)
+				assertEqual(t, call.Args[0].Name, "")
+				assertEqual(t, call.Args[1].Name, "e")
+				mb := call.Callee.(*MemberExpr)
+				assertEqual(t, mb.Field, "b")
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := parseAndBuild(t, tt.src)
+			tt.check(t, file)
+		})
+	}
+}
+
 // TestBuildPosition verifies source position tracking.
 func TestBuildPosition(t *testing.T) {
-	file := parseAndBuild(t, `f() { return 42; }`)
-	fn := file.Decls[0].(*FuncDecl)
-	pos := fn.Pos()
-	assertEqual(t, pos.File, "test.pr")
-	assertEqual(t, pos.Line, 1)
+	tests := []struct {
+		name  string
+		src   string
+		check func(t *testing.T, file *File)
+	}{
+		{
+			name: "func_position",
+			src:  `f() { return 42; }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				pos := fn.Pos()
+				assertEqual(t, pos.File, "test.pr")
+				assertEqual(t, pos.Line, 1)
+				assertEqual(t, pos.Column, 0)
+			},
+		},
+		{
+			name: "multiline_positions",
+			src: "f() {\n  return 42;\n}",
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				rs := fn.Body.Stmts[0].(*ReturnStmt)
+				assertEqual(t, rs.Pos().Line, 2)
+			},
+		},
+		{
+			name: "end_position",
+			src:  `f() {}`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				end := fn.End()
+				assertTrue(t, end.Line > 0)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := parseAndBuild(t, tt.src)
+			tt.check(t, file)
+		})
+	}
 }
 
 // Test helpers

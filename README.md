@@ -51,6 +51,7 @@ Upcoming stages: AST builder, semantic analysis (type checking, ownership analys
 Prerequisites: Go 1.22+, Java (for ANTLR4 code generation).
 
 ```sh
+cd compiler
 make              # download ANTLR4 JAR, generate parser, build binary
 make test         # run tests
 make clean        # remove generated code and binary
@@ -68,7 +69,7 @@ make fmt              # go fmt
 ## Usage
 
 ```sh
-./promise path/to/file.pr
+./compiler/promise path/to/file.pr
 ```
 
 Prints the LISP-style parse tree to stdout. Syntax errors are reported to stderr as `file:line:col: message`.
@@ -77,20 +78,23 @@ Prints the LISP-style parse tree to stdout. Syntax errors are reported to stderr
 
 ```
 promise_lang/
-├── grammar/
-│   ├── PromiseLexer.g4          # Lexer: keywords, operators, literals, string interpolation
-│   └── PromiseParser.g4         # Parser: declarations, statements, expressions
-├── cmd/promise/
-│   ├── main.go                  # CLI entry point
-│   └── parse_test.go            # Test suite (266 tests)
-├── internal/parser/             # ANTLR4-generated Go code (gitignored)
-├── testdata/
-│   ├── valid/                   # 16 valid fixture files by feature area
-│   └── invalid/                 # 15 invalid fixture files for error detection
+├── compiler/                    # Go compiler (single binary)
+│   ├── go.mod
+│   ├── Makefile
+│   ├── cmd/promise/
+│   │   ├── main.go             # CLI entry point
+│   │   └── parse_test.go       # Test suite (266 tests)
+│   ├── grammar/
+│   │   ├── PromiseLexer.g4     # Lexer: keywords, operators, literals, string interpolation
+│   │   └── PromiseParser.g4    # Parser: declarations, statements, expressions
+│   ├── internal/parser/         # ANTLR4-generated Go code (gitignored)
+│   ├── testdata/
+│   │   ├── valid/              # 16 valid fixture files by feature area
+│   │   └── invalid/            # 15 invalid fixture files for error detection
+│   └── tools/                  # ANTLR4 JAR (gitignored)
 ├── docs/
 │   └── language-design.md
-├── Makefile
-└── go.mod
+└── README.md
 ```
 
 ## Design Document

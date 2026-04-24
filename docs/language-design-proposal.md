@@ -1291,6 +1291,24 @@ fn(1, 2);                  // VALID: positional through function-type variable
 fn(a: 1, b: 2);            // ERROR: function type has no parameter names
 ```
 
+### 9.6 No Function/Method Overloading
+
+Promise does not support **function or method overloading** — defining multiple functions or methods with the same name but different parameter signatures. Each function name within a scope must be unique.
+
+```promise
+// NOT ALLOWED — same name, different signatures:
+parse(String s) Document { ... }
+parse(Bytes b) Document { ... }   // compile error: 'parse' already defined
+
+// Use distinct names instead:
+parseString(String s) Document { ... }
+parseBytes(Bytes b) Document { ... }
+```
+
+**Rationale:** Overloading interacts poorly with type inference (`:=`), first-class functions (which overload does `callback = parse` refer to?), and error-type resolution. Default parameters and optional parameters (`T?`) already cover the common "fewer arguments" use case, while generics and interfaces handle the "different types" case. Keeping dispatch unambiguous simplifies both the compiler and the developer's mental model.
+
+Note that **operator overloading** (defining `+`, `==`, etc. as methods inside a type body) is supported — see Section 5.7. This is not name-based overloading; each operator symbol has exactly one definition per type.
+
 ---
 
 ## 10. Control Flow

@@ -9,10 +9,12 @@ import (
 
 	"djabi.dev/go/promise_lang/internal/ast"
 	"djabi.dev/go/promise_lang/internal/parser"
+	"djabi.dev/go/promise_lang/internal/sema"
 )
 
 func main() {
 	showAST := flag.Bool("ast", false, "build and print the AST instead of the parse tree")
+	runCheck := flag.Bool("check", false, "run semantic analysis (type checking)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: promise [flags] <file.pr>\n")
 		flag.PrintDefaults()
@@ -50,7 +52,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if *showAST {
+	if *showAST || *runCheck {
 		file, errs := ast.Build(filename, tree)
 		if len(errs) > 0 {
 			for _, e := range errs {
@@ -58,7 +60,20 @@ func main() {
 			}
 			os.Exit(1)
 		}
-		ast.Print(os.Stdout, file)
+
+		if *runCheck {
+			info, errs := sema.Check(file)
+			if len(errs) > 0 {
+				for _, e := range errs {
+					fmt.Fprintln(os.Stderr, e)
+				}
+				os.Exit(1)
+			}
+			fmt.Printf("OK: %d types, %d objects, %d scopes\n",
+				len(info.Types), len(info.Objects), len(info.Scopes))
+		} else {
+			ast.Print(os.Stdout, file)
+		}
 	} else {
 		fmt.Println(tree.ToStringTree(nil, p))
 	}

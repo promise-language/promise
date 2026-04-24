@@ -1,0 +1,194 @@
+package sema
+
+import (
+	"djabi.dev/go/promise_lang/internal/ast"
+	"djabi.dev/go/promise_lang/internal/types"
+)
+
+// Checker performs semantic analysis on a parsed AST file.
+type Checker struct {
+	file      *ast.File
+	info      *Info
+	errors    []error
+	fileScope *types.Scope    // file-level scope (child of Universe)
+	scope     *types.Scope    // current scope during traversal
+	curFunc   *types.Signature // current function being checked (for return/raise)
+	inLoop    int             // nesting depth of loop constructs
+}
+
+// Check performs semantic analysis on the given AST file.
+// It returns type information and any semantic errors found.
+func Check(file *ast.File) (*Info, []error) {
+	c := &Checker{
+		file: file,
+		info: &Info{
+			Types:   make(map[ast.Expr]types.Type),
+			Objects: make(map[*ast.IdentExpr]types.Object),
+			Scopes:  make(map[ast.Node]*types.Scope),
+		},
+	}
+
+	initBuiltins()
+
+	c.fileScope = types.NewScope(
+		types.Universe, tpos(file.Pos()), tpos(file.End()), "file",
+	)
+	c.scope = c.fileScope
+	c.info.Scopes[file] = c.fileScope
+
+	c.declare(file) // Pass 1: collect all declarations
+	c.define(file)  // Pass 2: resolve types, populate type structures
+	c.check(file)   // Pass 3: type-check function/method bodies
+
+	return c.info, c.errors
+}
+
+// tpos converts an ast.Pos to a types.Pos.
+func tpos(p ast.Pos) types.Pos {
+	return types.Pos{File: p.File, Line: p.Line, Column: p.Column}
+}
+
+// openScope creates a new child scope and makes it the current scope.
+func (c *Checker) openScope(node ast.Node, comment string) {
+	s := types.NewScope(c.scope, tpos(node.Pos()), tpos(node.End()), comment)
+	c.scope = s
+	c.info.Scopes[node] = s
+}
+
+// closeScope pops back to the parent scope.
+func (c *Checker) closeScope() {
+	c.scope = c.scope.Parent()
+}
+
+// lookup searches for a name in the current scope chain.
+func (c *Checker) lookup(name string) types.Object {
+	obj, _ := c.scope.LookupParent(name)
+	return obj
+}
+
+// insert adds an object to the current scope.
+// Returns true on success, false and reports error on duplicate.
+func (c *Checker) insert(obj types.Object) bool {
+	if existing := c.scope.Insert(obj); existing != nil {
+		p := obj.Pos()
+		c.errorf(ast.Pos{File: p.File, Line: p.Line, Column: p.Column},
+			"%s redeclared in this scope (previous at %s)", obj.Name(), existing.Pos())
+		return false
+	}
+	return true
+}
+
+// check performs Pass 3: type-check all function and method bodies.
+func (c *Checker) check(file *ast.File) {
+	for _, decl := range file.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			c.checkFuncDecl(d)
+		case *ast.TypeDecl:
+			c.checkTypeDecl(d)
+		case *ast.EnumDecl:
+			c.checkEnumDecl(d)
+		}
+	}
+}
+
+// checkFuncDecl type-checks a function body.
+func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
+	if d.Body == nil {
+		return // native or abstract
+	}
+
+	obj := c.lookup(d.Name)
+	if obj == nil {
+		return // error already reported
+	}
+	fn, ok := obj.(*types.Func)
+	if !ok {
+		return
+	}
+	if fn.Type() == nil {
+		return // signature couldn't be resolved
+	}
+	sig, ok := fn.Type().(*types.Signature)
+	if !ok || sig == nil {
+		return
+	}
+
+	saved := c.curFunc
+	c.curFunc = sig
+	defer func() { c.curFunc = saved }()
+
+	c.openScope(d.Body, "func:"+d.Name)
+
+	// Bind parameters into scope
+	for _, p := range sig.Params() {
+		if p.Name() != "" && p.Name() != "_" {
+			c.insert(types.NewVar(tpos(d.Pos()), p.Name(), p.Type()))
+		}
+	}
+
+	c.checkBlock(d.Body)
+	c.closeScope()
+}
+
+// checkTypeDecl type-checks method bodies in a type declaration.
+func (c *Checker) checkTypeDecl(d *ast.TypeDecl) {
+	obj := c.lookup(d.Name)
+	if obj == nil {
+		return
+	}
+	tn, ok := obj.(*types.TypeName)
+	if !ok {
+		return
+	}
+	named, ok := tn.Type().(*types.Named)
+	if !ok {
+		return
+	}
+
+	for _, md := range d.Methods {
+		if md.Body == nil {
+			continue
+		}
+		m := named.LookupMethod(md.Name)
+		if m == nil || m.Sig() == nil {
+			continue
+		}
+		c.checkMethodBody(d.Name, md, m)
+	}
+}
+
+func (c *Checker) checkMethodBody(typeName string, md *ast.MethodDecl, m *types.Method) {
+	saved := c.curFunc
+	c.curFunc = m.Sig()
+	defer func() { c.curFunc = saved }()
+
+	c.openScope(md.Body, "method:"+typeName+"."+md.Name)
+
+	// Bind receiver as "this"
+	if m.Sig().Recv() != nil {
+		c.insert(types.NewVar(tpos(md.Pos()), "this", m.Sig().Recv().Type()))
+	}
+	// Bind parameters
+	for _, p := range m.Sig().Params() {
+		if p.Name() != "" && p.Name() != "_" {
+			c.insert(types.NewVar(tpos(md.Pos()), p.Name(), p.Type()))
+		}
+	}
+
+	c.checkBlock(md.Body)
+	c.closeScope()
+}
+
+// checkEnumDecl type-checks method bodies in an enum declaration.
+func (c *Checker) checkEnumDecl(d *ast.EnumDecl) {
+	// Enum methods are not yet supported in the AST
+	// This is a placeholder for future implementation
+}
+
+// checkBlock type-checks a block of statements.
+func (c *Checker) checkBlock(block *ast.Block) {
+	for _, stmt := range block.Stmts {
+		c.checkStmt(stmt)
+	}
+}

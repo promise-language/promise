@@ -21,6 +21,12 @@ func (tp *TypeParam) Constraint() Type { return tp.constraint }
 func (tp *TypeParam) Index() int       { return tp.index }
 func (tp *TypeParam) Underlying() Type { return tp }
 
+// SetConstraint sets the constraint for this type parameter.
+// Used when constraints are resolved after initial declaration.
+func (tp *TypeParam) SetConstraint(c Type) {
+	tp.constraint = c
+}
+
 func (tp *TypeParam) String() string {
 	return tp.obj.Name()
 }

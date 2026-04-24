@@ -43,6 +43,12 @@ func NewFunc(pos Pos, name string, sig *Signature) *Func {
 	return &Func{objBase: objBase{pos: pos, name: name, typ: sig}}
 }
 
+// SetType sets the type (Signature) for this function.
+// Used when the signature is resolved after initial declaration.
+func (f *Func) SetType(typ Type) {
+	f.typ = typ
+}
+
 // TypeName represents a type declaration.
 type TypeName struct {
 	objBase

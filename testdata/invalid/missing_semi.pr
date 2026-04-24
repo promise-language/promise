@@ -1,0 +1,5 @@
+// Missing semicolons on statements.
+main() {
+  Int x = 1
+  Int y = 2
+}

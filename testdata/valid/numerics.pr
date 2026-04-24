@@ -1,0 +1,59 @@
+// Numeric literals: decimal, hex, octal, binary, float, underscores.
+
+numericExamples() {
+  // Decimal integers
+  Int zero = 0;
+  Int one = 1;
+  Int big = 999999;
+  Int underscore = 1_000_000;
+  Int underscore2 = 1_2_3;
+
+  // Hex
+  Int hex_lower = 0xff;
+  Int hex_upper = 0xFF;
+  Int hex_X = 0XAB;
+  Int hex_mixed = 0xDeAdBeEf;
+  Int hex_underscore = 0xFF_FF;
+  Int hex_single = 0x0;
+  Int hex_long = 0x1234_5678_9ABC_DEF0;
+
+  // Octal
+  Int oct1 = 0o0;
+  Int oct2 = 0o7;
+  Int oct3 = 0o77;
+  Int oct4 = 0o777;
+  Int oct_upper = 0O77;
+  Int oct_underscore = 0o77_77;
+
+  // Binary
+  Int bin1 = 0b0;
+  Int bin2 = 0b1;
+  Int bin3 = 0b1010;
+  Int bin_upper = 0B1100;
+  Int bin_underscore = 0b1111_0000;
+  Int bin_long = 0b1010_1010_1010_1010;
+
+  // Float — simple
+  Float f1 = 0.0;
+  Float f2 = 1.0;
+  Float f3 = 3.14;
+  Float f4 = 99.99;
+
+  // Float — with exponent
+  Float e1 = 1e5;
+  Float e2 = 1E5;
+  Float e3 = 1e+5;
+  Float e4 = 1e-5;
+  Float e5 = 2.5e10;
+  Float e6 = 2.5e-3;
+  Float e7 = 2.5e+3;
+  Float e8 = 0e0;
+
+  // Float — with underscores in mantissa
+  Float fu1 = 1_000.5;
+  Float fu2 = 1_000_000.123_456;
+
+  // Float — zero forms
+  Float fz1 = 0.1;
+  Float fz2 = 0.0;
+}

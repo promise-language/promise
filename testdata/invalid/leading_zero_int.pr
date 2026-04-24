@@ -1,0 +1,4 @@
+// Leading zeros in decimal integer.
+main() {
+  Int x = 0123;
+}

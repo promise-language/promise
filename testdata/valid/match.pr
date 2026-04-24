@@ -1,0 +1,160 @@
+// Match expressions: patterns, guards, destructuring, as statement and expression.
+
+enum Shape {
+  Circle(Float radius),
+  Rect(Float w, Float h),
+  Triangle(Float a, Float b, Float c)
+}
+
+enum Result[T, E] {
+  Ok(T value),
+  Err(E error)
+}
+
+matchExamples() {
+  // Match on integer literals
+  Int x = 5;
+  match x {
+    0 => zero(),
+    1 => one(),
+    _ => other(),
+  }
+
+  // Match on bool
+  Bool b = true;
+  match b {
+    true => yes(),
+    false => no(),
+  }
+
+  // Match on none
+  Int? opt = none;
+  match opt {
+    none => absent(),
+    _ => present(),
+  }
+
+  // Match on string
+  String cmd = "quit";
+  match cmd {
+    "quit" => quit(),
+    "help" => help(),
+    "version" => version(),
+    _ => unknown(),
+  }
+
+  // Enum variant patterns
+  Shape s = Shape.Circle(radius: 5.0);
+  match s {
+    Shape.Circle(r) => circleArea(r),
+    Shape.Rect(w, h) => rectArea(w, h),
+    Shape.Triangle(a, b, c) => triArea(a, b, c),
+  }
+
+  // Short destructure (without enum prefix)
+  match s {
+    Circle(r) => circleArea(r),
+    Rect(w, h) => rectArea(w, h),
+    _ => other(),
+  }
+
+  // Enum variant without destructure
+  match s {
+    Shape.Circle => isCircle(),
+    Shape.Rect => isRect(),
+    Shape.Triangle => isTriangle(),
+  }
+
+  // Type binding pattern
+  match s {
+    Circle c => useCircle(c),
+    Rect r => useRect(r),
+    _ => other(),
+  }
+
+  // Name pattern (catch-all with binding)
+  match x {
+    0 => zero(),
+    val => useVal(val),
+  }
+
+  // Guards
+  match x {
+    n if n > 100 => huge(),
+    n if n > 10 => big(),
+    n if n > 0 => positive(),
+    0 => zero(),
+    n => negative(),
+  }
+
+  // Complex guard expressions
+  match x {
+    n if n > 0 && n % 2 == 0 => evenPositive(),
+    n if n > 0 => oddPositive(),
+    _ => nonPositive(),
+  }
+
+  // Block arms
+  match x {
+    0 => {
+      setup();
+      handleZero();
+    },
+    n if n > 0 => {
+      log("positive");
+      handlePositive(n);
+    },
+    _ => handleOther(),
+  }
+
+  // Match as expression (used in varDecl)
+  String label = match x {
+    0 => "zero",
+    1 => "one",
+    _ => "other",
+  };
+
+  // Nested match
+  match a {
+    0 => match b {
+      0 => bothZero(),
+      _ => onlyAZero(),
+    },
+    _ => match b {
+      0 => onlyBZero(),
+      _ => neitherZero(),
+    },
+  }
+
+  // Match as statement (no trailing semicolon)
+  match x {
+    0 => doZero(),
+    _ => doOther(),
+  }
+  nextStatement();
+
+  // Result pattern
+  Result[Int, String] result = Result.Ok(value: 42);
+  match result {
+    Result.Ok(v) => success(v),
+    Result.Err(e) => failure(e),
+  }
+
+  // Wildcard in destructure
+  match s {
+    Shape.Rect(_, h) => useHeight(h),
+    _ => other(),
+  }
+
+  // No trailing comma
+  match x {
+    0 => a(),
+    _ => b()
+  }
+
+  // Float patterns
+  match f {
+    0.0 => zero(),
+    _ => nonZero(),
+  }
+}

@@ -1,0 +1,126 @@
+// Edge cases: unusual but valid syntax, boundary conditions.
+
+// Empty compilation unit is valid (tested separately),
+// but a file with only use declarations is also valid.
+use io "std/io";
+
+// Function with empty body
+emptyFunc() {}
+
+// Function returning nothing explicitly
+earlyReturn() {
+  return;
+}
+
+// Deeply nested expressions
+deepNesting() {
+  Int x = ((((((1 + 2))))));
+  Bool b = ((true && false) || (true && true));
+}
+
+// Very long member chains
+longChain() {
+  a.b.c.d.e.f.g.h.i.j();
+  a?.b?.c?.d?.e?.f;
+}
+
+// Multiple variable declarations
+manyVars() {
+  Int a = 1;
+  Int b = 2;
+  Int c = 3;
+  Int d = 4;
+  Int e = 5;
+  a = b;
+  b = c;
+  c = d;
+  d = e;
+  e = a;
+}
+
+// All assignment operators
+allAssignments() {
+  Int x = 0;
+  x = 1;
+  x += 2;
+  x -= 1;
+  x *= 3;
+  x /= 2;
+  x %= 5;
+}
+
+// Complex type references
+complexTypes() {
+  Int[] slice = [];
+  Int[10] fixed = [];
+  Int[][] nested = [];
+  Int[]? optSlice = none;
+  Int?[] sliceOfOpt = [];
+  (Int, String) tuple = (0, "");
+  (Int, Int) -> Bool func = |a, b| -> a > b;
+}
+
+// Multiple meta annotations
+type Heavy `doc("heavy type") `deprecated `serializable {
+  String name `validate(pattern: ".*") `default("unnamed") `doc("Name field");
+}
+
+// Comments in various positions
+/* block at top */
+// line at top
+
+type Commented /* inline block */ {
+  // field comment
+  Int x; // trailing comment
+  /* block before field */
+  Int y;
+}
+
+// If expression (not statement)
+ifAsExpr() {
+  Int x = if true { 1; } else { 0; };
+  String s = if x > 0 { "pos"; } else { "neg"; };
+}
+
+// Match as expression
+matchAsExpr() {
+  Int x = match n {
+    0 => 100,
+    _ => 200,
+  };
+}
+
+// Yield in generator
+gen() Stream[Int] {
+  yield 1;
+  yield 2;
+  yield 3;
+}
+
+// Yield delegate
+genDelegate() Stream[Int] {
+  yield* gen();
+  yield* gen();
+}
+
+// Named and positional arguments mixed
+namedArgs() {
+  f(1, 2, 3);
+  f(x: 1, y: 2);
+  f(1, y: 2, z: 3);
+}
+
+// Walrus in various contexts
+walrusUsage() {
+  // Inferred variable
+  x := 42;
+  y := "hello";
+  z := [1, 2, 3];
+
+  // Tuple destructure
+  (a, b) := (10, 20);
+
+  // Discard bindings
+  _ := expensive();
+  (_, val) := getTuple();
+}

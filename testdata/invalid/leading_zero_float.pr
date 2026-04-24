@@ -1,0 +1,4 @@
+// Leading zeros in float literal.
+main() {
+  Float x = 00.5;
+}

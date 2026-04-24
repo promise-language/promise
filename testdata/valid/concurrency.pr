@@ -1,0 +1,41 @@
+// Concurrency: go expressions, receive operator.
+
+compute() Int {
+  return 42;
+}
+
+work(Int x) Int {
+  return x * 2;
+}
+
+concurrencyExamples() {
+  // Go with function call
+  Task[Int] t1 = go compute();
+
+  // Go with arguments
+  Task[Int] t2 = go work(21);
+
+  // Go with block
+  Task[Int] t3 = go {
+    Int a = 10;
+    Int b = 20;
+    return a + b;
+  };
+
+  // Receive
+  Int r1 = <-t1;
+  Int r2 = <-t2;
+  Int r3 = <-t3;
+
+  // Receive in expression
+  Int sum = <-t1 + <-t2;
+
+  // Go and immediate receive
+  Int immediate = <-go compute();
+
+  // Multiple tasks
+  Task[Int] tasks1 = go work(1);
+  Task[Int] tasks2 = go work(2);
+  Task[Int] tasks3 = go work(3);
+  Int total = <-tasks1 + <-tasks2 + <-tasks3;
+}

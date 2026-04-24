@@ -1,0 +1,79 @@
+// Lambda expressions: all forms of pipe-delimited syntax.
+
+lambdaForms() {
+  // Single untyped param, expression body
+  f1 := |x| -> x + 1;
+
+  // Multiple untyped params
+  f2 := |a, b| -> a + b;
+
+  // Typed params
+  f3 := |Int a, Int b| -> a + b;
+
+  // Mixed typed and untyped — typed wins
+  f4 := |Int a, String b| -> a;
+
+  // Block body
+  f5 := |x| {
+    Int y = x * 2;
+    return y + 1;
+  };
+
+  // No params with || token
+  f6 := || { return 42; };
+
+  // No params, expression body
+  f7 := || -> 42;
+
+  // Move capture
+  String name = "world";
+  f8 := move |x| -> name + x;
+
+  // Move with block
+  f9 := move |x| {
+    return name + x;
+  };
+
+  // Discard param
+  f10 := |_| -> 0;
+
+  // Multiple with discard
+  f11 := |_, b| -> b;
+  f12 := |a, _| -> a;
+
+  // Typed return with block body
+  f13 := |Int x| -> Int {
+    return x + 1;
+  };
+
+  // Ref param
+  f14 := |String &s| -> s.length();
+
+  // Mut ref param
+  f15 := |Int[] ~arr| {
+    arr[0] = 0;
+  };
+
+  // Lambda as argument
+  items.forEach(|x| {
+    process(x);
+  });
+
+  // Chained lambdas
+  Int[] numbers = [1, 2, 3, 4, 5];
+  result := numbers
+    .filter(|n| -> n > 2)
+    .map(|n| -> n * 10)
+    .fold(0, |acc, n| -> acc + n);
+
+  // Nested lambdas
+  f16 := |x| -> |y| -> x + y;
+
+  // Lambda returning lambda
+  f17 := |Int x| -> (Int) -> Int {
+    return |y| -> x + y;
+  };
+
+  // Immediately invoked
+  Int val = (|x| -> x * 2)(21);
+}

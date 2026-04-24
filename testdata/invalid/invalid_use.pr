@@ -1,0 +1,3 @@
+// Use after declarations (use must come before declarations).
+main() {}
+use io "std/io";

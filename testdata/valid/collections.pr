@@ -1,0 +1,67 @@
+// Collections: arrays, maps, tuples, indexing.
+
+collectionExamples() {
+  // Empty array
+  Int[] empty = [];
+
+  // Array literal
+  Int[] nums = [1, 2, 3, 4, 5];
+
+  // Trailing comma
+  Int[] nums2 = [
+    10,
+    20,
+    30,
+  ];
+
+  // Single element
+  Int[] single = [42];
+
+  // Nested arrays
+  Int[][] matrix = [
+    [1, 2, 3],
+    [4, 5, 6],
+    [7, 8, 9],
+  ];
+
+  // Array indexing
+  Int first = nums[0];
+  Int last = nums[4];
+  Int nested = matrix[0][1];
+
+  // Array assignment
+  nums[0] = 99;
+  matrix[1][2] = 0;
+
+  // Map literals
+  m1 := {"name": "Alice", "city": "NYC"};
+  m2 := {1: "one", 2: "two", 3: "three"};
+  m3 := {true: "yes", false: "no"};
+
+  // Map with trailing comma
+  m4 := {
+    "a": 1,
+    "b": 2,
+    "c": 3,
+  };
+
+  // Single entry map
+  m5 := {"key": "value"};
+
+  // Tuple literals
+  t1 := (1, "hello");
+  t2 := (1, 2, 3);
+  t3 := (true, 3.14, "text");
+
+  // Tuple destructuring
+  (a, b) := (10, 20);
+
+  // Array types
+  Int[] slice = [];
+  Int[3] fixed = [1, 2, 3];
+  String[][] nested_slices = [];
+
+  // Complex type expressions
+  Int[]? maybe_arr = none;
+  Int?[] arr_of_opt = [none];
+}

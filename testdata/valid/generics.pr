@@ -1,0 +1,102 @@
+// Generics: type params, constraints, generic functions and types.
+
+// Simple generic type
+type Container[T] {
+  T value;
+
+  get(&this) T `instance {
+    return this.value;
+  }
+
+  set(~this, T val) `instance {
+    this.value = val;
+  }
+}
+
+// Multiple type params
+type Pair[A, B] {
+  A first;
+  B second;
+
+  swap(&this) Pair[B, A] `instance {
+    return Pair(first: this.second, second: this.first);
+  }
+}
+
+// Triple
+type Triple[A, B, C] {
+  A first;
+  B second;
+  C third;
+}
+
+// Constrained generic
+type SortedList[T: Comparable] {
+  T[] items;
+
+  add(~this, T item) `instance {
+    return;
+  }
+
+  contains(&this, T item) Bool `instance {
+    return false;
+  }
+}
+
+// Multiple constraints
+type Printable {
+  toString(&this) String `abstract;
+}
+
+type Serializable {
+  toBytes(&this) Bytes `abstract;
+}
+
+type Fancy[T: Printable + Serializable] {
+  T value;
+}
+
+// Generic enum
+enum Either[L, R] {
+  Left(L value),
+  Right(R value)
+}
+
+enum Tree[T] {
+  Leaf(T value),
+  Node(Tree[T] left, Tree[T] right)
+}
+
+// Generic functions
+identity[T](T x) T {
+  return x;
+}
+
+first[A, B](Pair[A, B] &p) A {
+  return p.first;
+}
+
+mapOption[T, U](Option[T] opt, (T) -> U fn) Option[U] {
+  match opt {
+    Option.Some(val) => {
+      return Option.Some(value: fn(val));
+    },
+    Option.None => {
+      return Option.None;
+    },
+  }
+}
+
+// Using generic types
+useGenerics() {
+  Container[Int] box = Container(value: 42);
+  Int val = box.get();
+
+  Pair[String, Int] p = Pair(first: "age", second: 30);
+  Pair[Int, String] swapped = p.swap();
+
+  Either[String, Int] e = Either.Right(value: 42);
+
+  Option[Int] opt = Option.Some(value: 10);
+  Option[String] mapped = mapOption(opt, |x| -> x.toString());
+}

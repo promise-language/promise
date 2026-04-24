@@ -1,0 +1,55 @@
+// String literals: regular, raw, triple-quoted, interpolation, escapes.
+
+stringExamples() {
+  // Empty string
+  String empty = "";
+
+  // Simple string
+  String hello = "hello world";
+
+  // Escape sequences
+  String tab = "col1\tcol2";
+  String newline = "line1\nline2";
+  String cr = "text\r";
+  String backspace = "text\b";
+  String backslash = "path\\to\\file";
+  String quote = "she said \"hi\"";
+  String null = "null\0char";
+  String brace = "literal \{brace";
+
+  // String interpolation
+  String name = "Alice";
+  String greeting = "Hello, {name}!";
+  String expr = "result: {1 + 2}";
+  String multi = "{a} and {b} and {c}";
+  String method = "{name.length()}";
+  String nested_access = "{obj.field}";
+
+  // Raw strings
+  String path = r"C:\Users\alice\Documents";
+  String regex = r"^\d+\.\d+$";
+  String raw_empty = r"";
+  String raw_simple = r"no escapes here";
+
+  // Triple-quoted strings
+  String multiline = """
+    This is a
+    multiline string
+    with indentation
+  """;
+
+  String triple_empty = """""";
+
+  // Char literals
+  Char a = 'a';
+  Char space = ' ';
+  Char newlineChar = '\n';
+  Char tabChar = '\t';
+  Char crChar = '\r';
+  Char bsChar = '\b';
+  Char bslash = '\\';
+  Char sq = '\'';
+  Char nullChar = '\0';
+  Char digit = '9';
+  Char upper = 'Z';
+}

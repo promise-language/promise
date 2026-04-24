@@ -1,0 +1,150 @@
+// Control flow: if, for, while, match, break, continue.
+
+testBranches() {
+  Int x = 10;
+
+  // Simple if
+  if x > 0 {
+    consume(x);
+  }
+
+  // If-else
+  if x > 5 {
+    big();
+  } else {
+    small();
+  }
+
+  // If-else-if chain
+  if x > 100 {
+    huge();
+  } else if x > 10 {
+    big();
+  } else if x > 0 {
+    small();
+  } else {
+    zero();
+  }
+
+  // If unwrap binding
+  Int? maybe = 42;
+  if val := maybe {
+    consume(val);
+  }
+
+  // If unwrap with else
+  if val := maybe {
+    consume(val);
+  } else {
+    handleNone();
+  }
+
+  // If unwrap discard
+  if _ := maybe {
+    present();
+  }
+
+  // Nested if
+  if x > 0 {
+    if x > 10 {
+      veryBig();
+    }
+  }
+}
+
+testLoops() {
+  // For-in
+  Int[] items = [1, 2, 3];
+  for x in items {
+    consume(x);
+  }
+
+  // For-in with index
+  for i, x in items {
+    consume(i, x);
+  }
+
+  // For-in with discard
+  for _, x in items {
+    consume(x);
+  }
+
+  // For-in range
+  for x in 0..10 {
+    consume(x);
+  }
+
+  // For-in inclusive range
+  for x in 0..=9 {
+    consume(x);
+  }
+
+  // Classic for — typed init, assignment update
+  for Int i = 0; i < 100; i += 1 {
+    consume(i);
+  }
+
+  // Classic for — inferred init
+  for i := 0; i < 50; i += 1 {
+    consume(i);
+  }
+
+  // Classic for — expression update
+  for i := 0; i < 10; next(i) {
+    consume(i);
+  }
+
+  // Classic for — compound assignments
+  for i := 100; i > 0; i -= 10 {
+    consume(i);
+  }
+
+  for i := 1; i < 1000; i *= 2 {
+    consume(i);
+  }
+
+  // Infinite loop
+  for {
+    break;
+  }
+
+  // Nested loops with break/continue
+  for i in 0..10 {
+    for j in 0..10 {
+      if i == j {
+        continue;
+      }
+      if i + j > 15 {
+        break;
+      }
+      consume(i, j);
+    }
+  }
+}
+
+testWhile() {
+  // Simple while
+  Int x = 0;
+  while x < 100 {
+    x += 1;
+  }
+
+  // While with complex condition
+  while x > 0 && x < 1000 {
+    x *= 2;
+  }
+
+  // While unwrap
+  while val := getNext() {
+    process(val);
+  }
+
+  // Nested while
+  while x > 0 {
+    Int y = x;
+    while y > 0 {
+      y -= 1;
+    }
+    x -= 1;
+  }
+}

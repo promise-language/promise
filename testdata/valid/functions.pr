@@ -1,0 +1,80 @@
+// Function declarations: params, defaults, return types, error returns.
+
+// No params, no return
+noop() {}
+
+// Simple params and return
+add(Int a, Int b) Int {
+  return a + b;
+}
+
+// Borrow params
+strlen(String &s) Int {
+  return s.length();
+}
+
+// Mutable borrow
+clear(Int[] ~arr) {
+  arr[0] = 0;
+}
+
+// Default params
+greet(String name, String greeting = "Hello") String {
+  return "{greeting}, {name}!";
+}
+
+// Optional params
+connect(String host, Int port = 8080, String? auth) {
+  return;
+}
+
+// Error-returning function
+readFile(String path) String! {
+  return "";
+}
+
+// Multiple params with mixed modifiers
+process(Int count, String &label, Float[] ~data, Bool verbose = false) Int! {
+  return count;
+}
+
+// Generic function
+identity[T](T value) T {
+  return value;
+}
+
+// Generic with constraint
+maxOf[T: Comparable](T a, T b) T {
+  if a > b {
+    return a;
+  }
+  return b;
+}
+
+// Generator function
+range(Int start, Int end) Stream[Int] {
+  for i in start..end {
+    yield i;
+  }
+}
+
+// Generator with yield delegate
+concat[T](Stream[T] a, Stream[T] b) Stream[T] {
+  yield* a;
+  yield* b;
+}
+
+// Function with complex body
+fibonacci(Int n) Int {
+  if n <= 1 {
+    return n;
+  }
+  Int a = 0;
+  Int b = 1;
+  for i := 2; i <= n; i += 1 {
+    Int temp = b;
+    b = a + b;
+    a = temp;
+  }
+  return b;
+}

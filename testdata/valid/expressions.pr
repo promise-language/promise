@@ -1,0 +1,88 @@
+// Expressions: all operators, precedence, chaining.
+
+precedence() {
+  // Arithmetic
+  Int a = 1 + 2;
+  Int b = 3 - 4;
+  Int c = 5 * 6;
+  Int d = 7 / 8;
+  Int e = 9 % 10;
+
+  // Combined arithmetic precedence: * before +
+  Int f = 1 + 2 * 3;
+  Int g = (1 + 2) * 3;
+
+  // Unary
+  Int neg = -a;
+  Bool not = !true;
+
+  // Comparison
+  Bool lt = a < b;
+  Bool gt = a > b;
+  Bool lte = a <= b;
+  Bool gte = a >= b;
+
+  // Equality
+  Bool eq = a == b;
+  Bool neq = a != b;
+
+  // Logical
+  Bool and = true && false;
+  Bool or = true || false;
+  Bool complex = a > 0 && b < 10 || c == 5;
+
+  // Ranges
+  r1 := 0..10;
+  r2 := 0..=9;
+  r3 := (a + 1)..(b + 2);
+
+  // Elvis
+  Int val = maybe ?: 0;
+  Int chained = a ?: b ?: c;
+
+  // Is / As
+  Bool check = obj is Circle;
+  Circle? safe = obj as Circle;
+  Circle forced = obj as! Circle;
+
+  // Postfix error ops
+  Int unwrapped = result!;
+  Int propagated = result?;
+
+  // Member access
+  Int len = str.length();
+  String upper = str.toUpper().trim();
+
+  // Optional chaining
+  Int? mlen = maybeStr?.length();
+  String? deep = a?.b?.c?.d;
+
+  // Index
+  Int first = arr[0];
+  Int nested = matrix[0][1];
+
+  // Call with args
+  Int sum = add(1, 2);
+  Int named = add(a: 1, b: 2);
+
+  // Mixed precedence: postfix binds tightest
+  Int x = getResult()! + 1;
+  Float y = vec?.length() + 1.0;
+  Int z = arr[0] * 2 + 1;
+
+  // Complex chains
+  result.unwrap().process().toInt();
+  arr.filter(|x| -> x > 0).map(|x| -> x * 2).fold(0, |a, b| -> a + b);
+
+  // Receive operator
+  Int received = <-channel;
+
+  // Parenthesized
+  Int p = (a + b) * (c - d);
+  Int q = ((((a))));
+
+  // Error handler in expression
+  Int handled = compute() ? e {
+    return 0;
+  };
+}

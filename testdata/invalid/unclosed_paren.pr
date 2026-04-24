@@ -1,0 +1,4 @@
+// Unclosed parenthesis in call.
+main() {
+  f(1, 2;
+}

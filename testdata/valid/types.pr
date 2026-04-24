@@ -1,0 +1,126 @@
+// Type declarations: fields, methods, inheritance, generics, operator overloading.
+
+type Empty {}
+
+type Point {
+  Float x;
+  Float y;
+}
+
+type Point3D is Point {
+  Float z;
+}
+
+type Named {
+  String name;
+  Int age = 0;
+  String? bio;
+}
+
+type Printable {
+  toString(&this) String `abstract;
+}
+
+type Serializable {
+  serialize(&this) Bytes `abstract;
+  deserialize(Bytes data) This `abstract;
+}
+
+type Widget is Printable, Serializable {
+  String id;
+  String label;
+
+  toString(&this) String `instance {
+    return "{this.id}: {this.label}";
+  }
+
+  serialize(&this) Bytes `instance {
+    return Bytes.from(this.toString());
+  }
+
+  deserialize(Bytes data) Widget `static {
+    return Widget(id: "?", label: data.toString());
+  }
+}
+
+// Generic types
+type Box[T] {
+  T value;
+
+  get(&this) T `instance {
+    return this.value;
+  }
+
+  map[U](&this, (T) -> U fn) Box[U] `instance {
+    return Box(value: fn(this.value));
+  }
+}
+
+type Pair[A, B] {
+  A first;
+  B second;
+}
+
+// Constrained generics
+type Sortable[T: Comparable] {
+  T[] items;
+
+  sort(~this) `instance {
+    return;
+  }
+}
+
+type MultiConstraint[T: Printable + Serializable] {
+  T value;
+}
+
+// Operator overloading
+type Vec2 {
+  Float x;
+  Float y;
+
+  +(Vec2 &a, Vec2 &b) Vec2 `static {
+    return Vec2(x: a.x + b.x, y: a.y + b.y);
+  }
+
+  -(Vec2 &a, Vec2 &b) Vec2 `static {
+    return Vec2(x: a.x - b.x, y: a.y - b.y);
+  }
+
+  *(Vec2 &v, Float s) Vec2 `static {
+    return Vec2(x: v.x * s, y: v.y * s);
+  }
+
+  ==(Vec2 &a, Vec2 &b) Bool `static {
+    return a.x == b.x && a.y == b.y;
+  }
+
+  !=(Vec2 &a, Vec2 &b) Bool `static {
+    return a.x != b.x || a.y != b.y;
+  }
+
+  <(Vec2 &a, Vec2 &b) Bool `static {
+    return a.length() < b.length();
+  }
+
+  length(&this) Float `instance {
+    return this.x * this.x + this.y * this.y;
+  }
+}
+
+// Method levels
+type Counter {
+  Int count;
+
+  new() Counter `static {
+    return Counter(count: 0);
+  }
+
+  increment(~this) `instance {
+    this.count += 1;
+  }
+
+  current(&this) Int `instance {
+    return this.count;
+  }
+}

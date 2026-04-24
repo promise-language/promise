@@ -1,0 +1,2 @@
+// Function without body (not a method, so block is required).
+main()

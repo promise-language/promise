@@ -1,0 +1,67 @@
+// Ownership: borrows, mut borrows, move, unsafe, pointer types.
+
+type Resource {
+  String data;
+
+  read(&this) String `instance {
+    return this.data;
+  }
+
+  update(~this, String val) `instance {
+    this.data = val;
+  }
+}
+
+// Shared borrow parameter
+readLen(String &s) Int {
+  return s.length();
+}
+
+// Mutable borrow parameter
+appendBang(String ~s) {
+  s = s + "!";
+}
+
+// Mutable borrow of slice
+clearFirst(Int[] ~arr) {
+  arr[0] = 0;
+}
+
+// Shared borrow of interface
+describeShape(Shape &s) String {
+  return s.toString();
+}
+
+ownershipExamples() {
+  // Shared reference variable
+  String original = "hello";
+  String &ref = original;
+  Int len = ref.length();
+
+  // Mutable reference variable
+  Int[] data = [1, 2, 3];
+  Int[] ~mref = data;
+  mref[0] = 99;
+
+  // Pointer type
+  Int* ptr = addr;
+
+  // Optional borrow
+  Shape&? maybeRef = none;
+
+  // Move in lambda
+  String[] items = ["a", "b", "c"];
+  f := move |x| {
+    return items;
+  };
+
+  // Unsafe block as statement
+  unsafe {
+    Int raw = 42;
+  }
+
+  // Unsafe block in expression context
+  Int val = unsafe {
+    return 42;
+  };
+}

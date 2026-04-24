@@ -1,0 +1,46 @@
+// Meta annotations: on types, fields, methods, enums.
+
+type Server `doc("HTTP server") {
+  String host `default("localhost");
+  Int port `default(8080);
+  Bool debug `doc("Enable debug logging") `deprecated;
+  String? logFile `doc("Optional log file path");
+  Int maxConnections `range(min: 1, max: 10000) `default(100);
+}
+
+type Endpoint {
+  handle(&this, Request req) Response `instance `inline {
+    return Response.ok();
+  }
+
+  validate(&this) Bool `instance `pure {
+    return true;
+  }
+}
+
+type OldApi `deprecated {
+  call() `abstract;
+}
+
+enum Status `serializable {
+  Active,
+  Inactive,
+  Pending
+}
+
+// Method-level annotations
+type Cache {
+  get(String key) String? `instance `inline {
+    return none;
+  }
+
+  set(~this, String key, String value) `instance `synchronized {
+    return;
+  }
+}
+
+// Multiple annotations with params
+type Config {
+  String name `validate(pattern: "[a-z]+") `doc("Config name");
+  Int version `range(min: 1, max: 99) `default(1);
+}

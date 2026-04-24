@@ -1,0 +1,4 @@
+// Else without matching if.
+main() {
+  else { x(); }
+}

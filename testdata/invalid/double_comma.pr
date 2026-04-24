@@ -1,0 +1,4 @@
+// Double comma in array literal.
+main() {
+  Int[] a = [1,, 2];
+}

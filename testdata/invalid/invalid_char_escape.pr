@@ -1,0 +1,4 @@
+// Invalid escape sequence in char literal.
+main() {
+  Char c = '\x';
+}

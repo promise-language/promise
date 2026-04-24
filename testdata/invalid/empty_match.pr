@@ -1,0 +1,4 @@
+// Match with no arms.
+main() {
+  match x {}
+}

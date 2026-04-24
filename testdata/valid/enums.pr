@@ -1,0 +1,54 @@
+// Enum declarations: simple, with fields, generic, trailing commas.
+
+enum Direction {
+  North,
+  South,
+  East,
+  West,
+}
+
+enum Color {
+  Red,
+  Green,
+  Blue,
+  Custom(Int r, Int g, Int b)
+}
+
+enum Option[T] {
+  Some(T value),
+  None
+}
+
+enum Result[T, E] {
+  Ok(T value),
+  Err(E error)
+}
+
+enum Token {
+  Eof,
+  Number(Int value),
+  Ident(String name),
+  StringLit(String value),
+  Operator(String op)
+}
+
+enum Weekday {
+  Monday,
+  Tuesday,
+  Wednesday,
+  Thursday,
+  Friday,
+  Saturday,
+  Sunday
+}
+
+// Single variant
+enum Unit {
+  Value
+}
+
+// Two variants, no fields
+enum Bool2 {
+  True,
+  False
+}

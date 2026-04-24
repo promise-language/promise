@@ -166,7 +166,6 @@ func (c *Checker) checkArrayLit(e *ast.ArrayLit) types.Type {
 }
 
 func (c *Checker) checkMapLit(e *ast.MapLit) types.Type {
-	// Map type is not yet in the universe — check entries for consistency but return nil
 	if len(e.Entries) == 0 {
 		c.errorf(e.Pos(), "cannot infer type of empty map literal")
 		return nil
@@ -189,8 +188,10 @@ func (c *Checker) checkMapLit(e *ast.MapLit) types.Type {
 		}
 	}
 
-	// TODO: return proper Map type once it exists in universe
-	return nil
+	if keyType == nil || valType == nil {
+		return nil
+	}
+	return types.NewMap(keyType, valType)
 }
 
 func (c *Checker) checkBinaryExpr(e *ast.BinaryExpr) types.Type {
@@ -231,8 +232,7 @@ func (c *Checker) checkBinaryExpr(e *ast.BinaryExpr) types.Type {
 		if !types.Identical(right, types.TypInt) {
 			c.errorf(e.Right.Pos(), "range operator requires int, got %s", right)
 		}
-		// TODO: return Range type once it exists
-		return nil
+		return types.TypRange
 
 	default:
 		// Arithmetic and comparison: lookup operator method on left type
@@ -290,9 +290,16 @@ func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr) types.Type {
 		return c.checkUnaryOperator(e.Pos(), operand, "-")
 
 	case ast.UnaryReceive:
-		// <-expr: operand should be Task[T], result is T
-		// TODO: validate once Task type exists
-		c.errorf(e.Pos(), "receive operator (<-) not yet supported in type checking")
+		// <-expr: operand should be Task[T] or Channel[T], result is T
+		if inst, ok := operand.(*types.Instance); ok {
+			origin := inst.Origin()
+			if origin == types.TypTask || origin == types.TypChannel {
+				if len(inst.TypeArgs()) > 0 {
+					return inst.TypeArgs()[0]
+				}
+			}
+		}
+		c.errorf(e.Pos(), "receive operator (<-) requires Task[T] or Channel[T], got %s", operand)
 		return nil
 
 	default:
@@ -467,6 +474,12 @@ func (c *Checker) checkIndexExpr(e *ast.IndexExpr) types.Type {
 		}
 		return t.Elem()
 
+	case *types.Map:
+		if index != nil && !types.AssignableTo(index, t.Key()) {
+			c.errorf(e.Index.Pos(), "map key type mismatch: expected %s, got %s", t.Key(), index)
+		}
+		return types.NewOptional(t.Val())
+
 	default:
 		c.errorf(e.Pos(), "cannot index type %s", target)
 		return nil
@@ -622,6 +635,9 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr) types.Type {
 		}
 	}
 
+	// Check exhaustiveness
+	c.checkMatchExhaustiveness(e, subjectType)
+
 	return resultType
 }
 
@@ -683,8 +699,19 @@ func (c *Checker) checkMatchPattern(pat ast.MatchPattern, subjectType types.Type
 		}
 
 	case *ast.ShortDestructureMatchPattern:
-		// Short form: Ok(val) — could be enum variant or type constructor
-		// Validate the name exists
+		// Short form: Ok(val) — check if it's a variant of the match subject enum
+		if subjectType != nil {
+			if enum, ok := subjectType.(*types.Enum); ok {
+				if v := enum.LookupVariant(p.Name); v != nil {
+					if len(p.Bindings) != v.NumFields() {
+						c.errorf(p.Pos(), "variant %s has %d fields, got %d bindings",
+							p.Name, v.NumFields(), len(p.Bindings))
+					}
+					return
+				}
+			}
+		}
+		// Fallback: look up as a standalone name
 		obj := c.lookup(p.Name)
 		if obj == nil {
 			c.errorf(p.Pos(), "undefined: %s", p.Name)
@@ -756,15 +783,24 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) types.Type {
 }
 
 func (c *Checker) checkGoExpr(e *ast.GoExpr) types.Type {
+	var innerType types.Type
 	if e.Expr != nil {
-		c.checkExpr(e.Expr)
+		innerType = c.checkExpr(e.Expr)
 	} else if e.Block != nil {
 		c.openScope(e.Block, "go")
 		c.checkBlock(e.Block)
 		c.closeScope()
+		// Block form: infer T from last expression statement
+		if len(e.Block.Stmts) > 0 {
+			if es, ok := e.Block.Stmts[len(e.Block.Stmts)-1].(*ast.ExprStmt); ok {
+				innerType = c.info.Types[es.Expr]
+			}
+		}
 	}
-	// TODO: return Task[T] once Task type exists in universe
-	return nil
+	if innerType == nil {
+		innerType = types.TypVoid
+	}
+	return types.NewInstance(types.TypTask, []types.Type{innerType})
 }
 
 func (c *Checker) checkUnsafeExpr(e *ast.UnsafeExpr) types.Type {

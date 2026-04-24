@@ -294,9 +294,18 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 			elemType = t.Elem()
 		case *types.Array:
 			elemType = t.Elem()
+		case *types.Map:
+			// Iterating a map yields (key, value) tuples
+			elemType = types.NewTuple([]types.Type{t.Key(), t.Val()})
 		default:
-			// TODO: support Iterable interface once defined
-			elemType = iterType
+			if types.Identical(iterType, types.TypRange) {
+				elemType = types.TypInt
+			} else if types.Identical(iterType, types.TypString) {
+				elemType = types.TypChar
+			} else {
+				c.errorf(s.Iterable.Pos(), "cannot iterate over type %s", iterType)
+				elemType = iterType
+			}
 		}
 
 		if s.Binding != "_" {

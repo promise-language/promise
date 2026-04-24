@@ -10,10 +10,10 @@ type Checker struct {
 	file      *ast.File
 	info      *Info
 	errors    []error
-	fileScope *types.Scope    // file-level scope (child of Universe)
-	scope     *types.Scope    // current scope during traversal
+	fileScope *types.Scope     // file-level scope (child of Universe)
+	scope     *types.Scope     // current scope during traversal
 	curFunc   *types.Signature // current function being checked (for return/raise)
-	inLoop    int             // nesting depth of loop constructs
+	inLoop    int              // nesting depth of loop constructs
 }
 
 // Check performs semantic analysis on the given AST file.
@@ -36,9 +36,10 @@ func Check(file *ast.File) (*Info, []error) {
 	c.scope = c.fileScope
 	c.info.Scopes[file] = c.fileScope
 
-	c.declare(file) // Pass 1: collect all declarations
-	c.define(file)  // Pass 2: resolve types, populate type structures
-	c.check(file)   // Pass 3: type-check function/method bodies
+	c.declare(file)            // Pass 1: collect all declarations
+	c.define(file)             // Pass 2: resolve types, populate type structures
+	c.check(file)              // Pass 3: type-check function/method bodies
+	c.checkMissingReturn(file) // Pass 4: verify non-void functions return
 
 	return c.info, c.errors
 }

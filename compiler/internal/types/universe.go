@@ -24,6 +24,14 @@ var (
 	TypVoid   *Named
 	TypNone   *Named
 	TypError  *Named
+
+	// Generic stdlib types
+	TypTask    *Named // Task[T] — concurrency handle from go expressions
+	TypChannel *Named // Channel[T] — channel type
+	TypIter    *Named // Iter[T] — synchronous iterator interface
+	TypStream  *Named // Stream[T] — asynchronous iterator interface
+	TypMap     *Named // Map[K, V] — map container type
+	TypRange   *Named // Range — integer range from .. and ..= operators
 )
 
 func init() {
@@ -32,6 +40,18 @@ func init() {
 	defNamed := func(name string) *Named {
 		tn := NewTypeName(Pos{}, name, nil)
 		n := NewNamed(tn, nil)
+		Universe.Insert(tn)
+		return n
+	}
+
+	defGeneric := func(name string, paramNames ...string) *Named {
+		tn := NewTypeName(Pos{}, name, nil)
+		params := make([]*TypeParam, len(paramNames))
+		for i, pn := range paramNames {
+			ptn := NewTypeName(Pos{}, pn, nil)
+			params[i] = NewTypeParam(ptn, nil, i)
+		}
+		n := NewNamed(tn, params)
 		Universe.Insert(tn)
 		return n
 	}
@@ -54,4 +74,17 @@ func init() {
 	TypVoid = defNamed("void")
 	TypNone = defNamed("none")
 	TypError = defNamed("error")
+
+	// Generic stdlib types
+	TypTask = defGeneric("Task", "T")
+	TypChannel = defGeneric("Channel", "T")
+	TypIter = defGeneric("Iter", "T")
+	TypStream = defGeneric("Stream", "T")
+	TypMap = defGeneric("Map", "K", "V")
+
+	TypRange = defNamed("Range")
+	// Range fields for accessing bounds
+	TypRange.AddField(NewField(Pos{}, "start", TypInt, PlaceValue, false, false))
+	TypRange.AddField(NewField(Pos{}, "end", TypInt, PlaceValue, false, false))
+	TypRange.AddField(NewField(Pos{}, "inclusive", TypBool, PlaceValue, false, false))
 }

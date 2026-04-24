@@ -851,3 +851,498 @@ func TestIsTypeName(t *testing.T) {
 		}
 	`)
 }
+
+// --- Map Literal Tests ---
+
+func TestMapLiteral(t *testing.T) {
+	info := checkOK(t, `test() { m := {"a": 1, "b": 2}; }`)
+	// Verify a Map type was recorded
+	for _, typ := range info.Types {
+		if m, ok := typ.(*types.Map); ok {
+			assertType(t, info, m.Key(), "string")
+			assertType(t, info, m.Val(), "int")
+			return
+		}
+	}
+	t.Error("no Map type recorded")
+}
+
+func TestMapLiteralKeyMismatch(t *testing.T) {
+	errs := checkErrs(t, `test() { m := {"a": 1, 2: 3}; }`)
+	expectError(t, errs, "map key type mismatch")
+}
+
+func TestMapLiteralValueMismatch(t *testing.T) {
+	errs := checkErrs(t, `test() { m := {"a": 1, "b": "two"}; }`)
+	expectError(t, errs, "map value type mismatch")
+}
+
+// Note: empty map literal {} is ambiguous with empty block in the grammar.
+// The sema layer handles the case via checkMapLit, but it requires
+// at least one entry to parse as a map literal.
+
+func TestMapIndex(t *testing.T) {
+	checkOK(t, `
+		test() {
+			m := {"a": 1, "b": 2};
+			v := m["a"];
+		}
+	`)
+}
+
+// --- Range Operator Tests ---
+
+func TestRangeExclusive(t *testing.T) {
+	info := checkOK(t, `test() { r := 0..10; }`)
+	for _, typ := range info.Types {
+		if typ == types.TypRange {
+			return
+		}
+	}
+	t.Error("no Range type recorded")
+}
+
+func TestRangeInclusive(t *testing.T) {
+	checkOK(t, `test() { r := 0..=10; }`)
+}
+
+func TestRangeNonInt(t *testing.T) {
+	errs := checkErrs(t, `test() { r := "a".."z"; }`)
+	expectError(t, errs, "range operator requires int")
+}
+
+func TestRangeForIn(t *testing.T) {
+	checkOK(t, `
+		test() {
+			for i in 0..10 {
+				int x = i;
+			}
+		}
+	`)
+}
+
+// --- Go Expression Tests ---
+
+func TestGoExprReturnsTask(t *testing.T) {
+	info := checkOK(t, `
+		compute() int { return 42; }
+		test() { t := go compute(); }
+	`)
+	for _, typ := range info.Types {
+		if inst, ok := typ.(*types.Instance); ok {
+			if inst.Origin() == types.TypTask {
+				return
+			}
+		}
+	}
+	t.Error("no Task type recorded for go expression")
+}
+
+func TestGoBlockExpr(t *testing.T) {
+	checkOK(t, `
+		test() {
+			t := go { 42; };
+		}
+	`)
+}
+
+// --- Receive Operator Tests ---
+
+func TestReceiveFromTask(t *testing.T) {
+	checkOK(t, `
+		compute() int { return 42; }
+		test() {
+			t := go compute();
+			result := <-t;
+		}
+	`)
+}
+
+func TestReceiveFromNonTask(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			int x = 42;
+			y := <-x;
+		}
+	`)
+	expectError(t, errs, "requires Task[T] or Channel[T]")
+}
+
+// --- Missing Return Tests ---
+
+func TestMissingReturnDetected(t *testing.T) {
+	errs := checkErrs(t, `foo() int { int x = 42; }`)
+	expectError(t, errs, "missing return")
+}
+
+func TestReturnPresent(t *testing.T) {
+	checkOK(t, `foo() int { return 42; }`)
+}
+
+func TestReturnInBothIfBranches(t *testing.T) {
+	checkOK(t, `
+		foo(bool b) int {
+			if b {
+				return 1;
+			} else {
+				return 2;
+			}
+		}
+	`)
+}
+
+func TestMissingReturnIfNoElse(t *testing.T) {
+	errs := checkErrs(t, `
+		foo(bool b) int {
+			if b {
+				return 1;
+			}
+		}
+	`)
+	expectError(t, errs, "missing return")
+}
+
+func TestMissingReturnMethod(t *testing.T) {
+	errs := checkErrs(t, `
+		type Dog {
+			string name;
+			getName() string { string x = this.name; }
+		}
+	`)
+	expectError(t, errs, "missing return")
+}
+
+func TestVoidFunctionNoReturnOK(t *testing.T) {
+	checkOK(t, `foo() { int x = 42; }`)
+}
+
+// --- Match Exhaustiveness Tests ---
+
+func TestMatchExhaustiveEnum(t *testing.T) {
+	checkOK(t, `
+		enum Color { Red, Green, Blue }
+		test() {
+			Color c = Color.Red;
+			x := match c {
+				Color.Red => 1,
+				Color.Green => 2,
+				Color.Blue => 3,
+			};
+		}
+	`)
+}
+
+func TestMatchNonExhaustiveEnum(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Color { Red, Green, Blue }
+		test() {
+			Color c = Color.Red;
+			x := match c {
+				Color.Red => 1,
+				Color.Green => 2,
+			};
+		}
+	`)
+	expectError(t, errs, "not exhaustive")
+}
+
+func TestMatchWithWildcard(t *testing.T) {
+	checkOK(t, `
+		enum Color { Red, Green, Blue }
+		test() {
+			Color c = Color.Red;
+			x := match c {
+				Color.Red => 1,
+				_ => 0,
+			};
+		}
+	`)
+}
+
+func TestMatchIntRequiresWildcard(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			int x = 42;
+			y := match x {
+				1 => "one",
+				2 => "two",
+			};
+		}
+	`)
+	expectError(t, errs, "must include a wildcard")
+}
+
+func TestMatchIntWithWildcard(t *testing.T) {
+	checkOK(t, `
+		test() {
+			int x = 42;
+			y := match x {
+				1 => "one",
+				_ => "other",
+			};
+		}
+	`)
+}
+
+// --- String Iteration Test ---
+
+func TestStringForIn(t *testing.T) {
+	checkOK(t, `
+		test() {
+			for ch in "hello" {
+				char c = ch;
+			}
+		}
+	`)
+}
+
+// --- Generic Universe Types Exist ---
+
+func TestUniverseTaskType(t *testing.T) {
+	if types.TypTask == nil {
+		t.Fatal("TypTask is nil")
+	}
+	if len(types.TypTask.TypeParams()) != 1 {
+		t.Errorf("Task should have 1 type param, got %d", len(types.TypTask.TypeParams()))
+	}
+}
+
+func TestUniverseChannelType(t *testing.T) {
+	if types.TypChannel == nil {
+		t.Fatal("TypChannel is nil")
+	}
+	if len(types.TypChannel.TypeParams()) != 1 {
+		t.Errorf("Channel should have 1 type param, got %d", len(types.TypChannel.TypeParams()))
+	}
+}
+
+func TestUniverseRangeType(t *testing.T) {
+	if types.TypRange == nil {
+		t.Fatal("TypRange is nil")
+	}
+}
+
+func TestUniverseMapType(t *testing.T) {
+	if types.TypMap == nil {
+		t.Fatal("TypMap is nil")
+	}
+	if len(types.TypMap.TypeParams()) != 2 {
+		t.Errorf("Map should have 2 type params, got %d", len(types.TypMap.TypeParams()))
+	}
+}
+
+// --- Map For-In Test ---
+
+func TestMapForIn(t *testing.T) {
+	checkOK(t, `
+		test() {
+			m := {"a": 1, "b": 2};
+			for entry in m {
+			}
+		}
+	`)
+}
+
+// --- Receive Extracts Inner Type ---
+
+func TestReceiveExtractsType(t *testing.T) {
+	checkOK(t, `
+		compute() int { return 42; }
+		test() {
+			t := go compute();
+			result := <-t;
+			int x = result;
+		}
+	`)
+}
+
+// --- Go Block Type Inference ---
+
+func TestGoBlockExprType(t *testing.T) {
+	checkOK(t, `
+		test() {
+			t := go { 42; };
+			result := <-t;
+			int x = result;
+		}
+	`)
+}
+
+// --- Infinite Loop Returns ---
+
+func TestInfiniteLoopReturns(t *testing.T) {
+	checkOK(t, `
+		foo() int {
+			for {
+				return 1;
+			}
+		}
+	`)
+}
+
+// --- Short Destructure Exhaustiveness ---
+
+func TestMatchShortDestructureExhaustive(t *testing.T) {
+	checkOK(t, `
+		enum Result { Ok(int value), Err(string msg) }
+		test() {
+			Result r = Result.Ok(42);
+			x := match r {
+				Ok(v) => 0,
+				Err(m) => 1,
+			};
+		}
+	`)
+}
+
+func TestMatchShortDestructureNonExhaustive(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Result { Ok(int value), Err(string msg) }
+		test() {
+			Result r = Result.Ok(42);
+			x := match r {
+				Ok(v) => 0,
+			};
+		}
+	`)
+	expectError(t, errs, "not exhaustive")
+}
+
+// --- For-In Non-Iterable ---
+
+func TestForInNonIterable(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			for x in 42 {
+			}
+		}
+	`)
+	expectError(t, errs, "cannot iterate")
+}
+
+func TestForInBoolNotIterable(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			for x in true {
+			}
+		}
+	`)
+	expectError(t, errs, "cannot iterate")
+}
+
+// --- Map Type Annotation ---
+
+func TestMapTypeAnnotation(t *testing.T) {
+	checkOK(t, `
+		test() {
+			Map[string, int] m = {"a": 1, "b": 2};
+		}
+	`)
+}
+
+func TestMapTypeAnnotationAsParam(t *testing.T) {
+	checkOK(t, `
+		lookup(Map[string, int] m) {
+		}
+	`)
+}
+
+// --- Range Field Access ---
+
+func TestRangeFieldAccess(t *testing.T) {
+	checkOK(t, `
+		test() {
+			r := 0..10;
+			s := r.start;
+			e := r.end;
+			i := r.inclusive;
+			int x = s;
+			int y = e;
+			bool z = i;
+		}
+	`)
+}
+
+// --- Infinite Loop Break Detection ---
+
+func TestInfiniteLoopBreakInMatch(t *testing.T) {
+	errs := checkErrs(t, `
+		foo(int x) int {
+			for {
+				match x {
+					_ => { break; }
+				}
+			}
+		}
+	`)
+	expectError(t, errs, "missing return")
+}
+
+func TestInfiniteLoopBreakInBlock(t *testing.T) {
+	errs := checkErrs(t, `
+		foo() int {
+			for {
+				{
+					break;
+				}
+			}
+		}
+	`)
+	expectError(t, errs, "missing return")
+}
+
+func TestInfiniteLoopBreakInElseIf(t *testing.T) {
+	errs := checkErrs(t, `
+		foo(bool a, bool b) int {
+			for {
+				if a {
+				} else {
+					if b {
+						break;
+					}
+				}
+			}
+		}
+	`)
+	expectError(t, errs, "missing return")
+}
+
+func TestNonExhaustiveMatchNotReturning(t *testing.T) {
+	errs := checkErrs(t, `
+		foo(int x) int {
+			match x {
+				1 => { return 1; },
+				2 => { return 2; },
+			}
+		}
+	`)
+	expectError(t, errs, "missing return")
+}
+
+func TestExhaustiveEnumMatchReturns(t *testing.T) {
+	checkOK(t, `
+		enum Color { Red, Green, Blue }
+		foo(Color c) int {
+			match c {
+				Color.Red => { return 1; },
+				Color.Green => { return 2; },
+				Color.Blue => { return 3; },
+			}
+		}
+	`)
+}
+
+func TestInfiniteLoopNestedLoopBreakOK(t *testing.T) {
+	// Break inside a nested loop only breaks the inner loop,
+	// so the outer infinite loop still "returns".
+	checkOK(t, `
+		foo() int {
+			for {
+				while true {
+					break;
+				}
+				return 1;
+			}
+		}
+	`)
+}

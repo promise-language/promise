@@ -66,3 +66,22 @@ func (s *Slice) Underlying() Type { return s }
 func (s *Slice) String() string {
 	return s.elem.String() + "[]"
 }
+
+// Map represents a map type: Map[K, V].
+type Map struct {
+	key Type
+	val Type
+}
+
+// NewMap creates a new map type.
+func NewMap(key, val Type) *Map {
+	return &Map{key: key, val: val}
+}
+
+func (m *Map) Key() Type        { return m.key }
+func (m *Map) Val() Type        { return m.val }
+func (m *Map) Underlying() Type { return m }
+
+func (m *Map) String() string {
+	return fmt.Sprintf("Map[%s, %s]", m.key.String(), m.val.String())
+}

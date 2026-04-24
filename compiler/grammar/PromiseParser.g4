@@ -316,10 +316,9 @@ whileStmt
 // ============================================================
 // Expressions
 // ============================================================
-// ANTLR4 precedence climbing: first alternative = lowest precedence,
-// last alternative = highest precedence.
+// ANTLR4 precedence climbing: first alternative = highest precedence.
 //
-// Precedence table (from design doc Section 5.3):
+// Precedence table (1 = highest, 10 = lowest):
 //   1 (highest): . ?. () [] ? ! (? handler)
 //   2: Unary - ! <-
 //   3: * / %
@@ -333,42 +332,11 @@ whileStmt
 //  Assignment is NOT an expression — handled as assignmentStmt.
 
 expression
-    // --- Lowest precedence (listed first) ---
+    // ANTLR4 gives higher precedence to alternatives listed first.
+    // Listed from highest precedence to lowest.
 
-    // Precedence 10: Elvis
-    : expression QUESTION_COLON expression                     # elvisExpr
-
-    // Precedence 9: Logical OR
-    | expression OR expression                                 # logicalOrExpr
-
-    // Precedence 8: Logical AND
-    | expression AND expression                                # logicalAndExpr
-
-    // Precedence 7: Equality
-    | expression (EQ | NEQ) expression                         # equalityExpr
-
-    // Precedence 6: Comparison + type check/cast
-    | expression (LT | GT | LTE | GTE) expression             # comparisonExpr
-    | expression IS pattern                                    # isExpr
-    | expression AS BANG? typeRef                               # castExpr
-
-    // Precedence 5: Range
-    | expression DOTDOT expression                             # exclusiveRangeExpr
-    | expression DOTDOTEQ expression                           # inclusiveRangeExpr
-
-    // Precedence 4: Additive
-    | expression (PLUS | MINUS) expression                     # additiveExpr
-
-    // Precedence 3: Multiplicative
-    | expression (STAR | SLASH | PERCENT) expression           # multiplicativeExpr
-
-    // Precedence 2: Unary prefix
-    | MINUS expression                                         # unaryNegExpr
-    | BANG expression                                          # unaryNotExpr
-    | LT MINUS expression                                      # receiveExpr
-
-    // Precedence 1: Postfix member access, calls, indexing, error ops (highest)
-    | expression DOT IDENT                                     # memberAccessExpr
+    // Precedence 1 (highest): Postfix — member access, calls, indexing, error ops
+    : expression DOT IDENT                                     # memberAccessExpr
     | expression QUESTION_DOT IDENT                            # optionalChainExpr
     | expression LPAREN args RPAREN                            # callExpr
     | expression LBRACKET expression RBRACKET                  # indexExpr
@@ -376,9 +344,39 @@ expression
     | expression QUESTION                                      # errorPropagateExpr
     | expression BANG                                          # errorUnwrapExpr
 
-    // --- Highest precedence (listed last) ---
+    // Precedence 2: Unary prefix
+    | MINUS expression                                         # unaryNegExpr
+    | BANG expression                                          # unaryNotExpr
+    | LT MINUS expression                                      # receiveExpr
 
-    // Primary atoms (not left-recursive)
+    // Precedence 3: Multiplicative
+    | expression (STAR | SLASH | PERCENT) expression           # multiplicativeExpr
+
+    // Precedence 4: Additive
+    | expression (PLUS | MINUS) expression                     # additiveExpr
+
+    // Precedence 5: Range
+    | expression DOTDOT expression                             # exclusiveRangeExpr
+    | expression DOTDOTEQ expression                           # inclusiveRangeExpr
+
+    // Precedence 6: Comparison + type check/cast
+    | expression (LT | GT | LTE | GTE) expression             # comparisonExpr
+    | expression IS pattern                                    # isExpr
+    | expression AS BANG? typeRef                               # castExpr
+
+    // Precedence 7: Equality
+    | expression (EQ | NEQ) expression                         # equalityExpr
+
+    // Precedence 8: Logical AND
+    | expression AND expression                                # logicalAndExpr
+
+    // Precedence 9: Logical OR
+    | expression OR expression                                 # logicalOrExpr
+
+    // Precedence 10 (lowest): Elvis
+    | expression QUESTION_COLON expression                     # elvisExpr
+
+    // Primary atoms (not left-recursive — always highest precedence)
     | primary                                                  # primaryExpr
     ;
 

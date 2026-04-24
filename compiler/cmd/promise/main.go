@@ -1,21 +1,30 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 
 	"github.com/antlr4-go/antlr/v4"
 
+	"djabi.dev/go/promise_lang/internal/ast"
 	"djabi.dev/go/promise_lang/internal/parser"
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "Usage: promise <file.pr>")
+	showAST := flag.Bool("ast", false, "build and print the AST instead of the parse tree")
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: promise [flags] <file.pr>\n")
+		flag.PrintDefaults()
+	}
+	flag.Parse()
+
+	if flag.NArg() < 1 {
+		flag.Usage()
 		os.Exit(1)
 	}
 
-	filename := os.Args[1]
+	filename := flag.Arg(0)
 
 	input, err := antlr.NewFileStream(filename)
 	if err != nil {
@@ -41,7 +50,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Println(tree.ToStringTree(nil, p))
+	if *showAST {
+		file, errs := ast.Build(filename, tree)
+		if len(errs) > 0 {
+			for _, e := range errs {
+				fmt.Fprintln(os.Stderr, e)
+			}
+			os.Exit(1)
+		}
+		ast.Print(os.Stdout, file)
+	} else {
+		fmt.Println(tree.ToStringTree(nil, p))
+	}
 }
 
 type errorListener struct {

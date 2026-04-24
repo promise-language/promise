@@ -1,0 +1,493 @@
+parser grammar PromiseParser;
+
+options { tokenVocab = PromiseLexer; }
+
+// ============================================================
+// Top Level
+// ============================================================
+
+compilationUnit
+    : useDecl* declaration* EOF
+    ;
+
+useDecl
+    : USE IDENT stringLiteral SEMI
+    ;
+
+declaration
+    : typeDecl
+    | enumDecl
+    | funcDecl
+    ;
+
+// ============================================================
+// Binding Names (identifiers or _ discard)
+// ============================================================
+
+bindingName
+    : IDENT
+    | UNDERSCORE
+    ;
+
+// ============================================================
+// String Literal (handles interpolation segments)
+// ============================================================
+
+stringLiteral
+    : STRING_OPEN stringPart* STRING_CLOSE
+    | RAW_STRING
+    | TRIPLE_STRING
+    ;
+
+stringPart
+    : STRING_TEXT
+    | STRING_ESCAPE
+    | STRING_INTERP
+    ;
+
+// ============================================================
+// Type Declarations
+// ============================================================
+
+typeDecl
+    : TYPE IDENT typeParams? inheritance? metaAnnotation* LBRACE typeMember* RBRACE
+    ;
+
+inheritance
+    : IS typeRef (COMMA typeRef)*
+    ;
+
+typeParams
+    : LBRACKET typeParam (COMMA typeParam)* RBRACKET
+    ;
+
+typeParam
+    : IDENT (COLON typeConstraint)?
+    ;
+
+typeConstraint
+    : typeRef (PLUS typeRef)*
+    ;
+
+typeMember
+    : fieldDecl
+    | methodDecl
+    ;
+
+fieldDecl
+    : typeRef IDENT metaAnnotation* (ASSIGN expression)? SEMI
+    ;
+
+methodDecl
+    : methodName typeParams? LPAREN params RPAREN returnType? metaAnnotation* (block | SEMI)
+    ;
+
+// Method name: identifier or operator symbol (for operator overloading)
+methodName
+    : IDENT
+    | PLUS | MINUS | STAR | SLASH | PERCENT
+    | EQ | NEQ | LT | GT | LTE | GTE
+    ;
+
+// ============================================================
+// Enum Declarations
+// ============================================================
+
+enumDecl
+    : ENUM IDENT typeParams? metaAnnotation* LBRACE enumVariant (COMMA enumVariant)* COMMA? RBRACE
+    ;
+
+enumVariant
+    : IDENT (LPAREN enumField (COMMA enumField)* RPAREN)?
+    ;
+
+enumField
+    : typeRef IDENT
+    ;
+
+// ============================================================
+// Function Declarations
+// ============================================================
+
+funcDecl
+    : IDENT typeParams? LPAREN params RPAREN returnType? metaAnnotation* block
+    ;
+
+returnType
+    : typeRef BANG?
+    ;
+
+// ============================================================
+// Parameters
+// ============================================================
+
+params
+    : paramList?
+    ;
+
+paramList
+    : receiverParam (COMMA param)*
+    | param (COMMA param)*
+    ;
+
+receiverParam
+    : refMod? THIS
+    ;
+
+param
+    : typeRef refMod? bindingName (ASSIGN expression)?
+    ;
+
+refMod
+    : AMP
+    | TILDE
+    ;
+
+// ============================================================
+// Arguments (call site)
+// ============================================================
+
+args
+    : argList?
+    ;
+
+argList
+    : arg (COMMA arg)*
+    ;
+
+arg
+    : (IDENT COLON)? expression
+    ;
+
+// ============================================================
+// Meta Annotations
+// ============================================================
+
+metaAnnotation
+    : BACKTICK IDENT (LPAREN metaParams RPAREN)?
+    ;
+
+metaParams
+    : metaParam (COMMA metaParam)*
+    ;
+
+metaParam
+    : IDENT COLON expression                                   // named
+    | expression                                               // positional
+    ;
+
+// ============================================================
+// Type References
+// ============================================================
+
+typeRef
+    : IDENT typeArgs?                                          # namedType
+    | LPAREN typeRef (COMMA typeRef)+ RPAREN                   # tupleType
+    | LPAREN typeRefList RPAREN ARROW typeRef                  # functionType
+    | LPAREN typeRef RPAREN                                    # parenType
+    | typeRef AMP                                              # sharedRefType
+    | typeRef TILDE                                            # mutRefType
+    | typeRef STAR                                             # pointerType
+    | typeRef QUESTION                                         # optionalType
+    | typeRef LBRACKET RBRACKET                                # sliceType
+    | typeRef LBRACKET INT_LITERAL RBRACKET                    # arrayType
+    ;
+
+typeArgs
+    : LBRACKET typeRef (COMMA typeRef)* RBRACKET
+    ;
+
+typeRefList
+    : typeRef (COMMA typeRef)*
+    ;
+
+// ============================================================
+// Blocks and Statements
+// ============================================================
+
+block
+    : LBRACE statement* RBRACE
+    ;
+
+statement
+    : varDecl
+    | returnStmt
+    | raiseStmt
+    | yieldStmt
+    | yieldDelegateStmt
+    | breakStmt
+    | continueStmt
+    | ifStmt
+    | forStmt
+    | whileStmt
+    | matchExpr                                                // block-terminated, no ;
+    | unsafeBlock                                              // block-terminated, no ;
+    | assignmentStmt
+    | expressionStmt
+    ;
+
+varDecl
+    : typeRef refMod? bindingName ASSIGN expression SEMI       # typedVarDecl
+    | bindingName WALRUS expression SEMI                       # inferredVarDecl
+    | LPAREN bindingName COMMA bindingName RPAREN WALRUS expression SEMI   # destructureVarDecl
+    ;
+
+assignmentStmt
+    : expression assignOp expression SEMI
+    ;
+
+assignOp
+    : ASSIGN
+    | PLUS_ASSIGN
+    | MINUS_ASSIGN
+    | STAR_ASSIGN
+    | SLASH_ASSIGN
+    | PERCENT_ASSIGN
+    ;
+
+returnStmt
+    : RETURN expression? SEMI
+    ;
+
+raiseStmt
+    : RAISE expression SEMI
+    ;
+
+breakStmt
+    : BREAK SEMI
+    ;
+
+continueStmt
+    : CONTINUE SEMI
+    ;
+
+yieldStmt
+    : YIELD expression SEMI
+    ;
+
+yieldDelegateStmt
+    : YIELD STAR expression SEMI
+    ;
+
+expressionStmt
+    : expression SEMI
+    ;
+
+// ============================================================
+// Control Flow
+// ============================================================
+
+ifStmt
+    : IF ifCondition block elseClause?
+    ;
+
+ifCondition
+    : bindingName WALRUS expression                            # ifUnwrapCond
+    | expression                                               # ifExprCond
+    ;
+
+elseClause
+    : ELSE (ifStmt | block)
+    ;
+
+forStmt
+    : FOR bindingName (COMMA bindingName)? IN expression block # forInStmt
+    | FOR forInit expression SEMI forUpdate block              # classicForStmt
+    | FOR block                                                # infiniteLoopStmt
+    ;
+
+// Classic for-loop initializer (semicolon-terminated)
+forInit
+    : typeRef IDENT ASSIGN expression SEMI                     # forInitTyped
+    | IDENT WALRUS expression SEMI                             # forInitInferred
+    ;
+
+// Classic for-loop update (allows assignment or bare expression)
+forUpdate
+    : expression assignOp expression                           # forUpdateAssign
+    | expression                                               # forUpdateExpr
+    ;
+
+whileStmt
+    : WHILE bindingName WALRUS expression block                # whileUnwrapStmt
+    | WHILE expression block                                   # whileExprStmt
+    ;
+
+// ============================================================
+// Expressions
+// ============================================================
+// ANTLR4 precedence climbing: first alternative = lowest precedence,
+// last alternative = highest precedence.
+//
+// Precedence table (from design doc Section 5.3):
+//   1 (highest): . ?. () [] ? ! (? handler)
+//   2: Unary - ! <-
+//   3: * / %
+//   4: + -
+//   5: .. ..=
+//   6: < > <= >= is as
+//   7: == !=
+//   8: &&
+//   9: ||
+//  10 (low): ?:
+//  Assignment is NOT an expression — handled as assignmentStmt.
+
+expression
+    // --- Lowest precedence (listed first) ---
+
+    // Precedence 10: Elvis
+    : expression QUESTION_COLON expression                     # elvisExpr
+
+    // Precedence 9: Logical OR
+    | expression OR expression                                 # logicalOrExpr
+
+    // Precedence 8: Logical AND
+    | expression AND expression                                # logicalAndExpr
+
+    // Precedence 7: Equality
+    | expression (EQ | NEQ) expression                         # equalityExpr
+
+    // Precedence 6: Comparison + type check/cast
+    | expression (LT | GT | LTE | GTE) expression             # comparisonExpr
+    | expression IS pattern                                    # isExpr
+    | expression AS BANG? typeRef                               # castExpr
+
+    // Precedence 5: Range
+    | expression DOTDOT expression                             # exclusiveRangeExpr
+    | expression DOTDOTEQ expression                           # inclusiveRangeExpr
+
+    // Precedence 4: Additive
+    | expression (PLUS | MINUS) expression                     # additiveExpr
+
+    // Precedence 3: Multiplicative
+    | expression (STAR | SLASH | PERCENT) expression           # multiplicativeExpr
+
+    // Precedence 2: Unary prefix
+    | MINUS expression                                         # unaryNegExpr
+    | BANG expression                                          # unaryNotExpr
+    | LT MINUS expression                                      # receiveExpr
+
+    // Precedence 1: Postfix member access, calls, indexing, error ops (highest)
+    | expression DOT IDENT                                     # memberAccessExpr
+    | expression QUESTION_DOT IDENT                            # optionalChainExpr
+    | expression LPAREN args RPAREN                            # callExpr
+    | expression LBRACKET expression RBRACKET                  # indexExpr
+    | expression QUESTION bindingName? block                   # errorHandlerExpr
+    | expression QUESTION                                      # errorPropagateExpr
+    | expression BANG                                          # errorUnwrapExpr
+
+    // --- Highest precedence (listed last) ---
+
+    // Primary atoms (not left-recursive)
+    | primary                                                  # primaryExpr
+    ;
+
+primary
+    : INT_LITERAL                                              # intLiteral
+    | FLOAT_LITERAL                                            # floatLiteral
+    | TRUE                                                     # trueLiteral
+    | FALSE                                                    # falseLiteral
+    | NONE                                                     # noneLiteral
+    | CHAR_LITERAL                                             # charLiteral
+    | stringLiteral                                            # stringLit
+    | IDENT                                                    # identExpr
+    | THIS                                                     # thisExpr
+    | LPAREN expression RPAREN                                 # parenExpr
+    | LPAREN expression COMMA expression (COMMA expression)* RPAREN  # tupleLiteral
+    | LBRACKET (expression (COMMA expression)* COMMA?)? RBRACKET     # arrayLiteral
+    | LBRACE mapEntry (COMMA mapEntry)* COMMA? RBRACE          # mapLiteral
+    | lambdaExpr                                               # lambda
+    | ifExpr                                                   # ifExpression
+    | matchExpr                                                # matchExpression
+    | goExpr                                                   # goExpression
+    | unsafeBlock                                              # unsafeExpression
+    ;
+
+// ============================================================
+// Map Literal
+// ============================================================
+
+mapEntry
+    : expression COLON expression
+    ;
+
+// ============================================================
+// Lambda Expressions (pipe-delimited parameters)
+// ============================================================
+
+lambdaExpr
+    : MOVE? PIPE lambdaParams? PIPE (ARROW typeRef)? block     // with params, block body
+    | MOVE? PIPE lambdaParams? PIPE ARROW expression           // with params, expression body
+    | MOVE? OR (ARROW typeRef)? block                          // no params (||), block body
+    | MOVE? OR ARROW expression                                // no params (||), expression body
+    ;
+
+lambdaParams
+    : lambdaParam (COMMA lambdaParam)*
+    ;
+
+lambdaParam
+    : typeRef refMod? bindingName                              # typedLambdaParam
+    | bindingName                                              # untypedLambdaParam
+    ;
+
+// ============================================================
+// If Expression (must have else — produces a value)
+// ============================================================
+
+ifExpr
+    : IF expression block ELSE block
+    ;
+
+// ============================================================
+// Match Expression
+// ============================================================
+
+matchExpr
+    : MATCH expression LBRACE matchArm (COMMA matchArm)* COMMA? RBRACE
+    ;
+
+matchArm
+    : matchPattern (IF expression)? FAT_ARROW (expression | block)
+    ;
+
+matchPattern
+    : IDENT DOT IDENT LPAREN patternFields RPAREN             # enumDestructurePattern
+    | IDENT DOT IDENT                                          # enumVariantPattern
+    | IDENT bindingName                                        # typeBindingPattern
+    | IDENT LPAREN patternFields RPAREN                        # shortDestructurePattern
+    | IDENT                                                    # namePattern
+    | INT_LITERAL                                              # intLiteralPattern
+    | FLOAT_LITERAL                                            # floatLiteralPattern
+    | TRUE                                                     # trueLiteralPattern
+    | FALSE                                                    # falseLiteralPattern
+    | NONE                                                     # noneLiteralPattern
+    | stringLiteral                                            # stringLiteralPattern
+    | UNDERSCORE                                               # wildcardPattern
+    ;
+
+// Pattern for 'is' expressions
+pattern
+    : IDENT LPAREN patternFields RPAREN                        # destructureIsPattern
+    | IDENT                                                    # identIsPattern
+    ;
+
+patternFields
+    : bindingName (COMMA bindingName)*
+    ;
+
+// ============================================================
+// Go Expression
+// ============================================================
+
+goExpr
+    : GO (block | expression)
+    ;
+
+// ============================================================
+// Unsafe Block
+// ============================================================
+
+unsafeBlock
+    : UNSAFE block
+    ;

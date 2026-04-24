@@ -1,2 +1,11 @@
 .agent-org-run.json
 logs/*
+
+# ANTLR4 tool
+tools/antlr-*.jar
+
+# Generated parser code
+internal/parser/
+
+# Binary
+/promise

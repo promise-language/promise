@@ -1,0 +1,14 @@
+use io "github.com/promise-lang/std/io/1";
+
+type Greeter {
+  String name;
+
+  greet(&this) String `instance {
+    return "Hello, {this.name}!";
+  }
+}
+
+main() {
+  Greeter g = Greeter(name: "World");
+  io.println(g.greet());
+}

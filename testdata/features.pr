@@ -1,0 +1,101 @@
+use io "std/io";
+use math "std/math";
+
+type Shape {
+  area() Float `abstract;
+}
+
+type Circle is Shape {
+  Float radius;
+
+  area(&this) Float `instance {
+    return math.pi * this.radius * this.radius;
+  }
+}
+
+type Rectangle is Shape {
+  Float width;
+  Float height;
+
+  area(&this) Float `instance {
+    return this.width * this.height;
+  }
+}
+
+enum Color {
+  Red,
+  Green,
+  Blue,
+  Custom(Int r, Int g, Int b)
+}
+
+enum Option[T] {
+  Some(T value),
+  None
+}
+
+describeShape(Shape &shape) String! {
+  name := shape is Circle;
+  Float a = shape.area();
+  if a > 100.0 {
+    return "large shape";
+  } else {
+    return "small shape";
+  }
+}
+
+fibonacci() Stream[Int] {
+  Int a = 0;
+  Int b = 1;
+  for {
+    yield a;
+    Int temp = a;
+    a = b;
+    b = temp + b;
+  }
+}
+
+main() {
+  Circle c = Circle(radius: 5.0);
+  Rectangle r = Rectangle(width: 3.0, height: 4.0);
+
+  io.println(c.area());
+  io.println(r.area());
+
+  Color color = Color.Blue;
+  match color {
+    Color.Red => io.println("red"),
+    Color.Green => io.println("green"),
+    Color.Blue => io.println("blue"),
+    Color.Custom(r, g, b) => io.println("custom"),
+  }
+
+  Int[] numbers = [1, 2, 3, 4, 5];
+  for i, n in numbers {
+    io.println("{i}: {n}");
+  }
+
+  for x in 0..10 {
+    io.println(x);
+  }
+
+  Shape &s = c;
+  if s is Circle {
+    io.println("it's a circle");
+  }
+
+  Circle? maybeCircle = s as Circle;
+  if mc := maybeCircle {
+    io.println(mc.radius);
+  }
+
+  Task[Int] task = go computeValue();
+  Int result = <-task;
+
+  Int sum = numbers.filter(|n| -> n > 2).fold(0, |acc, n| -> acc + n);
+  io.println(sum);
+}
+
+computeValue() Int {
+  return 42;
+}

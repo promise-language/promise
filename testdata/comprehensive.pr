@@ -1,0 +1,453 @@
+// Comprehensive test file covering all grammar features.
+use io "std/io";
+use fs "std/fs";
+
+// ============================================================
+// Type declarations with meta annotations and operator overloading
+// ============================================================
+
+type Vec2 {
+  Float x;
+  Float y;
+
+  +(Vec2 &a, Vec2 &b) Vec2 `static {
+    return Vec2(x: a.x + b.x, y: a.y + b.y);
+  }
+
+  ==(Vec2 &a, Vec2 &b) Bool `static {
+    return a.x == b.x && a.y == b.y;
+  }
+
+  length(&this) Float `instance {
+    return (this.x * this.x + this.y * this.y);
+  }
+}
+
+type Animal {
+  speak() String `abstract;
+}
+
+type Dog is Animal {
+  String name;
+  Int age = 0;
+
+  speak(&this) String `instance {
+    return "Woof!";
+  }
+}
+
+// ============================================================
+// Enum with generics
+// ============================================================
+
+enum Result[T, E] {
+  Ok(T value),
+  Err(E error)
+}
+
+enum Direction {
+  North,
+  South,
+  East,
+  West
+}
+
+// ============================================================
+// Error handling: ?, !, ? handler
+// ============================================================
+
+readFile(String path) String! {
+  File f = fs.open(path)?;
+  String content = f.readAll()?;
+  return content;
+}
+
+processFile(String path) String! {
+  String content = readFile(path) ? e {
+    return "failed: " + e.message();
+  };
+  return content;
+}
+
+forceRead(String path) String {
+  return readFile(path)!;
+}
+
+// ============================================================
+// Ownership: borrows, moves, unsafe
+// ============================================================
+
+borrowExample(String &s) Int {
+  return s.length();
+}
+
+mutBorrowExample(Int[] ~arr) {
+  arr[0] = 42;
+}
+
+moveExample() {
+  String[] data = ["hello", "world"];
+  String[] moved = move |data| { return data; };
+}
+
+unsafeExample() {
+  unsafe {
+    Int x = 42;
+  }
+}
+
+// ============================================================
+// Concurrency: go, <-
+// ============================================================
+
+asyncWork() Int {
+  return 42;
+}
+
+concurrencyExample() {
+  Task[Int] t1 = go asyncWork();
+  Task[Int] t2 = go {
+    return 100;
+  };
+  Int r1 = <-t1;
+  Int r2 = <-t2;
+  io.println(r1 + r2);
+}
+
+// ============================================================
+// Control flow
+// ============================================================
+
+controlFlowExamples() {
+  // While loop
+  Int x = 0;
+  while x < 10 {
+    x += 1;
+  }
+
+  // While unwrap
+  // while val := getNext() {
+  //   io.println(val);
+  // }
+
+  // Classic for loop with assignment update
+  for Int i = 0; i < 10; i += 1 {
+    io.println(i);
+  }
+
+  // Inferred classic for
+  for j := 0; j < 5; j += 1 {
+    io.println(j);
+  }
+
+  // For-in with index
+  String[] names = ["alice", "bob"];
+  for i, name in names {
+    io.println("{i}: {name}");
+  }
+
+  // For-in with discard
+  for _, name in names {
+    io.println(name);
+  }
+
+  // Range
+  for x in 0..10 {
+    io.println(x);
+  }
+
+  // Inclusive range
+  for x in 0..=9 {
+    io.println(x);
+  }
+
+  // Infinite loop
+  for {
+    break;
+  }
+
+  // If-else
+  if x > 5 {
+    io.println("big");
+  } else if x > 2 {
+    io.println("medium");
+  } else {
+    io.println("small");
+  }
+
+  // If unwrap binding
+  Int? maybe = 42;
+  if val := maybe {
+    io.println(val);
+  }
+
+  // If with discard binding
+  if _ := maybe {
+    io.println("present");
+  }
+}
+
+// ============================================================
+// Match expressions with guards and patterns
+// ============================================================
+
+matchExamples() {
+  Direction dir = Direction.North;
+  match dir {
+    Direction.North => io.println("north"),
+    Direction.South => io.println("south"),
+    Direction.East => io.println("east"),
+    Direction.West => io.println("west"),
+  }
+
+  Int value = 42;
+  match value {
+    0 => io.println("zero"),
+    1 => io.println("one"),
+    _ => io.println("other"),
+  }
+
+  Result[Int, String] res = Result.Ok(value: 42);
+  match res {
+    Result.Ok(v) => io.println(v),
+    Result.Err(e) => io.println(e),
+  }
+
+  // Match with guard
+  Int n = 15;
+  match n {
+    x if x > 10 => io.println("large"),
+    x if x > 0 => io.println("positive"),
+    _ => io.println("non-positive"),
+  }
+
+  // Match with block arm
+  match n {
+    x if x > 10 => {
+      io.println("large: {x}");
+    },
+    _ => io.println("small"),
+  }
+}
+
+// ============================================================
+// Optional chaining, elvis, type checks, casts
+// ============================================================
+
+optionalExamples() {
+  Dog? maybeDog = Dog(name: "Rex");
+
+  // Optional chaining
+  String? n = maybeDog?.name;
+
+  // Elvis operator
+  String name = n ?: "unknown";
+
+  // Type check
+  Animal &a = Dog(name: "Buddy");
+  if a is Dog {
+    io.println("is a dog");
+  }
+
+  // Safe cast
+  Dog? d = a as Dog;
+
+  // Force cast
+  Dog forced = a as! Dog;
+}
+
+// ============================================================
+// Lambdas (pipe syntax)
+// ============================================================
+
+lambdaExamples() {
+  // Expression body with single param
+  fn1 := |x| -> x * 2;
+
+  // Expression body with typed params
+  fn2 := |Int a, Int b| -> a + b;
+
+  // Block body
+  fn3 := |x| {
+    io.println(x);
+    return x + 1;
+  };
+
+  // No params
+  fn4 := || { return 42; };
+
+  // No params, expression body
+  fn5 := || -> 42;
+
+  // Move capture
+  String name = "hello";
+  fn6 := move |x| -> name + x;
+
+  // Discard param
+  fn7 := |_| -> 0;
+
+  // Lambda with type annotation
+  fn8 := |Int x| -> Int { return x + 1; };
+
+  // Chained
+  Int[] numbers = [1, 2, 3, 4, 5];
+  Int sum = numbers
+    .filter(|n| -> n > 2)
+    .fold(0, |acc, n| -> acc + n);
+  io.println(sum);
+}
+
+// ============================================================
+// Generators / Streams
+// ============================================================
+
+countdown(Int n) Stream[Int] {
+  for x in 0..n {
+    yield n - x;
+  }
+}
+
+// ============================================================
+// String types
+// ============================================================
+
+stringExamples() {
+  // Regular string with interpolation
+  String name = "world";
+  String greeting = "Hello, {name}!";
+
+  // Escape sequences
+  String escapes = "tab:\tnewline:\n";
+
+  // Raw string (no escape processing)
+  String path = r"C:\Users\alice\docs";
+
+  // Triple-quoted string (multiline)
+  String multi = """
+    This is a
+    multiline string
+  """;
+
+  // Char literal
+  Char c = 'a';
+  Char newline = '\n';
+  Char null = '\0';
+}
+
+// ============================================================
+// Map literals
+// ============================================================
+
+mapExamples() {
+  m := {"name": "Alice", "age": "30"};
+  m2 := {1: "one", 2: "two", 3: "three"};
+}
+
+// ============================================================
+// Array literals and indexing
+// ============================================================
+
+arrayExamples() {
+  Int[] arr = [1, 2, 3];
+  Int first = arr[0];
+  arr[0] = 10;
+
+  // Empty array
+  Int[] empty = [];
+
+  // Trailing comma
+  Int[] nums = [
+    1,
+    2,
+    3,
+  ];
+}
+
+// ============================================================
+// Tuple literals
+// ============================================================
+
+tupleExamples() {
+  t := (1, "hello");
+  (a, b) := (10, 20);
+  io.println(a + b);
+}
+
+// ============================================================
+// Meta annotations
+// ============================================================
+
+type Config {
+  String host `default("localhost");
+  Int port `default(8080);
+  Bool debug `doc("Enable debug mode") `deprecated;
+}
+
+// ============================================================
+// Numeric literals
+// ============================================================
+
+numericExamples() {
+  // Decimal
+  Int a = 0;
+  Int b = 42;
+  Int c = 1_000_000;
+
+  // Hex
+  Int h = 0xFF;
+  Int h2 = 0x1_00;
+
+  // Octal
+  Int o = 0o77;
+
+  // Binary
+  Int bin = 0b1010;
+  Int bin2 = 0b1111_0000;
+
+  // Float
+  Float f = 3.14;
+  Float f2 = 1.0e10;
+  Float f3 = 2.5e-3;
+  Float f4 = 1e5;
+}
+
+// ============================================================
+// Expression precedence tests
+// ============================================================
+
+precedenceExamples() {
+  // Postfix ? and ! bind tighter than binary operators
+  Int a = getResult()! + 1;
+  Int b = getResult()? + 1;
+
+  // Optional chaining binds tighter than arithmetic
+  Float len = vec?.length() + 1.0;
+
+  // Member access and call chaining
+  String s = obj.method().field.toString();
+
+  // Unary operators
+  Int neg = -a;
+  Bool not = !true;
+
+  // Receive
+  Int val = <-channel;
+
+  // Combined: receive, member access, call
+  String msg = <-channel;
+}
+
+// Entry point
+main() {
+  controlFlowExamples();
+  matchExamples();
+  optionalExamples();
+  lambdaExamples();
+  stringExamples();
+  mapExamples();
+  arrayExamples();
+  tupleExamples();
+  numericExamples();
+  precedenceExamples();
+  concurrencyExample();
+}

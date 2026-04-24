@@ -2082,7 +2082,7 @@ func TestBuildPosition(t *testing.T) {
 		},
 		{
 			name: "multiline_positions",
-			src: "f() {\n  return 42;\n}",
+			src:  "f() {\n  return 42;\n}",
 			check: func(t *testing.T, file *File) {
 				fn := file.Decls[0].(*FuncDecl)
 				rs := fn.Body.Stmts[0].(*ReturnStmt)

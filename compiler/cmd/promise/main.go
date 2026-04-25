@@ -8,6 +8,7 @@ import (
 	"github.com/antlr4-go/antlr/v4"
 
 	"djabi.dev/go/promise_lang/internal/ast"
+	"djabi.dev/go/promise_lang/internal/ownership"
 	"djabi.dev/go/promise_lang/internal/parser"
 	"djabi.dev/go/promise_lang/internal/sema"
 )
@@ -65,6 +66,13 @@ func main() {
 			info, errs := sema.Check(file)
 			if len(errs) > 0 {
 				for _, e := range errs {
+					fmt.Fprintln(os.Stderr, e)
+				}
+				os.Exit(1)
+			}
+			ownerErrs := ownership.Check(file, info)
+			if len(ownerErrs) > 0 {
+				for _, e := range ownerErrs {
 					fmt.Fprintln(os.Stderr, e)
 				}
 				os.Exit(1)

@@ -12,7 +12,8 @@ Implementation stages for the Promise compiler pipeline.
 | 4 | `compiler/internal/sema/` | Semantic analysis: type checking, name resolution, returns, exhaustiveness | Done |
 | 5a | `compiler/internal/sema/` | Generic type substitution, constraint validation, instance tracking | Done |
 | 5b | `compiler/internal/sema/` | Match bindings, unreachable code, multi-constraint, Iter/Stream, use decls | Done |
-| 6 | `compiler/internal/ownership/` | Borrow checker: move semantics, lifetime inference | Next |
+| 6a | `compiler/internal/ownership/` | Move semantics, use-after-move, copy exemption, borrow conflicts, unsafe pointer | Done |
+| 6b | `compiler/internal/ownership/` | Lifetime inference, NLL, advanced borrow tracking | Next |
 | 7 | `compiler/internal/meta/` | Meta annotation processing and validation | Planned |
 | 8 | `compiler/internal/codegen/` | LLVM IR generation | Planned |
 | 9 | `compiler/internal/module/` | Module resolution, dependency graph | Planned |
@@ -127,16 +128,32 @@ Completes remaining semantic analysis features before ownership checking.
 
 ---
 
-## Stage 6 — Borrow Checker (Planned)
+## Stage 6a — Move Semantics & Ownership (Done)
 
-Ownership and lifetime analysis.
+Separate post-sema pass for ownership analysis.
 
-- Move semantics: track ownership transfers, error on use-after-move
-- Borrow rules: at most one `~` (mutable) OR any number of `&` (shared) at a time
+**Files:** 6 Go files in `compiler/internal/ownership/`, ~500 LOC, 20 tests
+
+- **Move tracking**: every value has one owner; assignment, function call (value params), constructor args, and return all transfer ownership. Use-after-move reported with source position.
+- **Copy exemption**: primitives (`int`, `bool`, `f64`, `char`, `none`, `void`, all sized ints/floats) and references (`&T`, `~T`) are implicitly copied — never moved.
+- **Resurrection**: assigning to a moved variable restores it to `Owned` state.
+- **Conservative control flow**: if/else uses state merge (moved in either branch = moved after). Loops merge loop-body state with pre-loop state. Match merges all arm states.
+- **Borrow conflict detection**: at call sites, detects when the same variable is passed as `~` (mutable borrow) alongside any other borrow. Multiple shared borrows OK.
+- **Unsafe pointer validation**: `TypedVarDecl` with pointer type ref (`T*`) outside `unsafe` block reports error.
+- **CLI integration**: ownership errors reported after sema in `--check` mode.
+- **Known limitations**: sema doesn't yet support implicit `T` → `T&`/`T~` coercion at call sites (borrow tests use unit-level verification), and pointer value construction isn't sema-supported (pointer tests use direct AST construction).
+
+---
+
+## Stage 6b — Lifetime Inference (Planned)
+
+Advanced borrow checking and lifetime analysis.
+
 - Lifetime inference: determine reference validity scopes
+- Non-lexical lifetimes (NLL)
 - Lifetime elision rules (function params → result)
-- Validate raw pointer (`*`) usage only inside `unsafe` blocks
-- Integration with sema pass 3 (ownership errors alongside type errors)
+- Implicit borrow coercion (`T` → `T&`/`T~`) at call sites
+- Drop semantics and destructor ordering
 
 ## Stage 7 — Meta Annotations (Planned)
 

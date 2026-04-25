@@ -1,0 +1,27 @@
+// Stage 8a end-to-end test: primitives, arithmetic, control flow, functions, print.
+printInt(int x) `extern;
+printF64(f64 x) `extern;
+printBool(bool x) `extern;
+
+fib(int n) int {
+    if n <= 1 {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+isEven(int x) bool {
+    return x % 2 == 0;
+}
+
+main() {
+    printInt(fib(10));
+    printBool(isEven(42));
+    printF64(3.14 * 2.0);
+
+    int sum = 0;
+    for i in 0..10 {
+        sum += i;
+    }
+    printInt(sum);
+}

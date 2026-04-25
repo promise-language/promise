@@ -15,7 +15,7 @@ Implementation stages for the Promise compiler pipeline.
 | 6a | `compiler/internal/ownership/` | Move semantics, use-after-move, copy exemption, borrow conflicts, unsafe pointer | Done |
 | 6b | `compiler/internal/ownership/` | Borrow tracking, implicit coercion, return safety | Done |
 | 7 | `compiler/internal/sema/` | Meta annotation processing and validation | Done |
-| 8 | `compiler/internal/codegen/` | LLVM IR generation | Planned |
+| 8a | `compiler/internal/codegen/` | LLVM IR: primitives, control flow, functions | Done |
 | 9 | `compiler/internal/module/` | Module resolution, dependency graph | Planned |
 | 10 | `cmd/promise/` | CLI entry point (build, run, test, fmt, etc.) | Planned |
 | 11 | `pkg/` | Package manager: fetch, resolve, lock | Planned |
@@ -177,18 +177,34 @@ Validates and processes built-in meta annotations, wiring them into the type sys
 - **Warning system**: `warnf` added to checker for non-fatal diagnostic messages (prefixed with "warning:").
 - **Deferred metas**: `inline`, `packed`, `align`, `extern`, `serializable`, `public`, `unsafe` are validated for target correctness but processing deferred to later stages (codegen/module system).
 
-## Stage 8 — Code Generation (Planned)
+## Stage 8a — LLVM Codegen: Primitives & Control Flow (Done)
 
-LLVM IR generation from type-checked AST.
+Type-system-driven LLVM IR generation for primitive types, arithmetic, control flow, and functions.
 
-- Four-struct memory layout (value/instance/variant/type structs)
-- Vtable generation and dispatch
-- Ownership-aware memory management (stack vs heap, automatic free)
-- Generic monomorphization at IR level
-- Error handling codegen (dual-return `(value, error)`)
-- Concurrency runtime integration (goroutine scheduling, channels)
-- String interpolation lowering
-- Operator overloading dispatch
+**Files:** 6 new Go files in `compiler/internal/codegen/` (~900 LOC), `runtime/runtime.c` (7 LOC); updated `cmd/promise/main.go`, `grammar/PromiseParser.g4`; 32 codegen tests
+
+- **Architecture**: `github.com/llir/llvm` (pure Go) builds IR in-memory, serializes to `.ll` text, compiled to native binary via `clang`.
+- **Type-system-driven dispatch**: operators are methods on `*types.Named`, resolved via `LookupMethod(op)` → `IsNative()` → native emitter dispatch table. Codegen never hardcodes "if int and +, emit add."
+- **TypeCategory classification** (`types.go`): types grouped into `CatSignedInt`, `CatUnsignedInt`, `CatFloat`, `CatBool`. Single comparison point against universe type singletons.
+- **Native emitter table** (`native.go`): maps (TypeCategory, operator) → LLVM instruction emitter. Signed uses `sdiv`/`srem`/`slt`, unsigned uses `udiv`/`urem`/`ult`, float uses `fadd`/`fdiv`/`fcmp`, etc.
+- **Short-circuit `&&`/`||`**: intercepted at AST level with phi-node branching (control flow, not single instruction).
+- **Variable handling**: alloca + mem2reg strategy — every local gets `alloca`, reads use `load`, writes use `store`. LLVM's `mem2reg` pass promotes to SSA.
+- **Two-pass compilation** (`compiler.go`): pass 1 declares all functions, pass 2 generates bodies.
+- **Extern functions**: `funcDecl` with `(block | SEMI)` grammar — bodyless functions mapped to runtime print functions.
+- **C runtime** (`runtime/runtime.c`): `promise_print_int`, `promise_print_f64`, `promise_print_bool`, `promise_panic`.
+- **CLI**: `promise build file.pr [-o output]` and `promise run file.pr` compile through the full pipeline (parse → sema → ownership → codegen → clang).
+- **Scope**: `int`/`i8`–`i64`/`uint`/`u8`–`u64`/`f32`/`f64`/`bool`, all arithmetic/comparison/logical ops, if/else, while, for-in (range), classic for, infinite loop, break/continue, function calls, compound assignment.
+
+### Deferred sub-stages
+
+- **8b**: Strings (representation, literals, concatenation, interpolation, print)
+- **8c**: User types (four-struct layout, constructors, field access, vtable dispatch)
+- **8d**: Enums and pattern matching
+- **8e**: Error handling (`!`, `?`, `raise`, error handlers)
+- **8f**: Generic monomorphization
+- **8g**: Containers (Array, Slice, Map, Tuple), lambdas, optionals
+- **8h**: Ownership-aware memory management (free/drop)
+- **8i**: Concurrency (go, Task, Channel, `<-`)
 
 ## Stage 9 — Module System (Planned)
 

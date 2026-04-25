@@ -110,7 +110,7 @@ enumField
 // ============================================================
 
 funcDecl
-    : IDENT typeParams? LPAREN params RPAREN returnType? metaAnnotation* block
+    : IDENT typeParams? LPAREN params RPAREN returnType? metaAnnotation* (block | SEMI)
     ;
 
 returnType

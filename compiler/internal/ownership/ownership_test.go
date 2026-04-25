@@ -139,17 +139,6 @@ func TestBoolIsCopy(t *testing.T) {
 	`)
 }
 
-func TestStringMoves(t *testing.T) {
-	errs := ownerErrs(t, `
-		test() {
-			string s = "hi";
-			string t = s;
-			string u = s;
-		}
-	`)
-	expectOwnerError(t, errs, "use of moved variable 's'")
-}
-
 // === Resurrection ===
 
 func TestAssignResurrects(t *testing.T) {
@@ -451,5 +440,336 @@ func TestIsCopyType(t *testing.T) {
 		if isCopyType(typ) {
 			t.Errorf("expected %v to NOT be copy type", typ)
 		}
+	}
+}
+
+// === Inferred var decl (:=) ===
+
+func TestInferredVarDeclMove(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(string s) {}
+		test() {
+			s := "hi";
+			consume(s);
+			consume(s);
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+func TestInferredVarDeclCopy(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			x := 42;
+			int y = x;
+			int z = x;
+		}
+	`)
+}
+
+// === Destructure var decl ===
+
+func TestDestructureVarDeclMove(t *testing.T) {
+	errs := ownerErrs(t, `
+		pair() (string, string) { return ("a", "b"); }
+		test() {
+			(a, b) := pair();
+			string c = a;
+			string d = a;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'a'")
+}
+
+func TestDestructureVarDeclCopy(t *testing.T) {
+	ownerOK(t, `
+		pair() (int, int) { return (1, 2); }
+		test() {
+			(a, b) := pair();
+			int c = a;
+			int d = a;
+		}
+	`)
+}
+
+// === For-in loop ===
+
+func TestForInMoveInsideBody(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(string s) {}
+		test() {
+			string s = "hi";
+			for i in 0..3 {
+				consume(s);
+			}
+			string t = s;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+func TestForInBindingOK(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			for i in 0..10 {
+				int x = i;
+			}
+		}
+	`)
+}
+
+// === Classic for loop ===
+
+func TestClassicForMoveInBody(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(string s) {}
+		test() {
+			string s = "hi";
+			for int i = 0; i < 3; i += 1 {
+				consume(s);
+			}
+			string t = s;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+// === Infinite loop ===
+
+func TestInfiniteLoopMove(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(string s) {}
+		test() {
+			string s = "hi";
+			for {
+				consume(s);
+				break;
+			}
+			string t = s;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+// === Match expression ===
+
+func TestMatchPatternBindingOK(t *testing.T) {
+	ownerOK(t, `
+		enum Option { Some(int value), None }
+		test() {
+			Option o = Option.Some(42);
+			x := match o {
+				Some(v) => v + 1,
+				None => 0,
+			};
+		}
+	`)
+}
+
+func TestMatchMoveInOneArm(t *testing.T) {
+	errs := ownerErrs(t, `
+		enum Color { Red, Green, Blue }
+		consume(string s) {}
+		test() {
+			Color c = Color.Red;
+			string s = "hi";
+			int x = match c {
+				Color.Red => { consume(s); 1; },
+				Color.Green => 2,
+				Color.Blue => 3,
+			};
+			string t = s;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+// === If-expression ===
+
+func TestIfExprMoveInBranch(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(string s) {}
+		test() {
+			string s = "hi";
+			bool b = true;
+			int x = if b { consume(s); 1; } else { 2; };
+			string t = s;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+// === Method body ===
+
+func TestMethodBodyOwnership(t *testing.T) {
+	ownerOK(t, `
+		type Dog {
+			string name;
+			bark() string {
+				return this.name;
+			}
+		}
+	`)
+}
+
+func TestMethodBodyUseAfterMove(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Dog {
+			string name;
+			test() {
+				string s = "hi";
+				string t = s;
+				string u = s;
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+// === Lambda expression ===
+
+func TestLambdaParamOwnership(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			f := |int x| -> x + 1;
+		}
+	`)
+}
+
+func TestLambdaDoesNotLeakMoveState(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			string s = "hi";
+			f := |int x| -> x + 1;
+			string t = s;
+		}
+	`)
+}
+
+// === Expression branches ===
+
+func TestBinaryExprMovedOperand(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			string s = "hi";
+			string t = s;
+			string u = s + "world";
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+func TestParenExprMovedInner(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			string s = "hi";
+			string t = s;
+			string u = (s);
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+func TestTupleLitMoveElements(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			string s = "hi";
+			x := (s, s);
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+func TestArrayLitMoveElements(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			string a = "a";
+			string b = "b";
+			x := [a, b];
+			string c = a;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'a'")
+}
+
+func TestMapLitMoveValues(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			string v = "val";
+			m := {"key": v};
+			string x = v;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'v'")
+}
+
+func TestIndexExprMovedTarget(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(int[] a) {}
+		test() {
+			int[] items = [1, 2, 3];
+			consume(items);
+			int x = items[0];
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'items'")
+}
+
+// === Assignment targets ===
+
+func TestAssignTargetMemberExpr(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Dog { string name; }
+		test() {
+			string s = "hi";
+			string t = s;
+			Dog d = Dog(name: "Rex");
+			d.name = s;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 's'")
+}
+
+func TestCompoundAssignReadsTarget(t *testing.T) {
+	// int is copy so no error — just exercises the compound assign code path.
+	ownerOK(t, `
+		test() {
+			int x = 1;
+			int y = 2;
+			x += y;
+		}
+	`)
+}
+
+func TestWhileUnwrapStmt(t *testing.T) {
+	// Unit test: construct WhileUnwrapStmt directly since sema syntax support is limited.
+	c := &Checker{
+		state: make(StateMap),
+		info:  &sema.Info{Types: make(map[ast.Expr]types.Type), Objects: make(map[*ast.IdentExpr]types.Object), Scopes: make(map[ast.Node]*types.Scope)},
+	}
+
+	// Simulate: while val := expr { <use s> }
+	// Register "s" as owned non-copy var.
+	sIdent := &ast.IdentExpr{Name: "s"}
+	sVar := types.NewVar(types.Pos{}, "s", types.TypString)
+	c.info.Objects[sIdent] = sVar
+	c.state["s"] = Owned
+
+	// Build a WhileUnwrapStmt with binding "val" and body that uses "s".
+	stmt := &ast.WhileUnwrapStmt{
+		Binding: "val",
+		Value:   &ast.IntLit{Raw: "1"},
+		Body: &ast.Block{
+			Stmts: []ast.Stmt{
+				&ast.ExprStmt{Expr: sIdent},
+			},
+		},
+	}
+	c.checkWhileUnwrapStmt(stmt)
+
+	// After the loop, "s" should still be usable (conservative merge with pre-loop),
+	// but the binding "val" should be registered as Owned.
+	if c.state["val"] != Owned {
+		t.Errorf("expected binding 'val' to be Owned, got %v", c.state["val"])
 	}
 }

@@ -118,6 +118,11 @@ func (c *Checker) checkIdentExpr(e *ast.IdentExpr) types.Type {
 		c.errorf(e.Pos(), "undefined: %s", e.Name)
 		return nil
 	}
+	// Module aliases are placeholders — module loading is not yet implemented
+	if _, ok := obj.(*types.Module); ok {
+		c.errorf(e.Pos(), "module %s is not loaded (module loading not yet implemented)", e.Name)
+		return nil
+	}
 	c.recordObject(e, obj)
 	return obj.Type()
 }
@@ -759,7 +764,9 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr) types.Type {
 
 	var resultType types.Type
 	for _, arm := range e.Arms {
+		c.openScope(arm, "match-arm")
 		c.checkMatchPattern(arm.Pattern, subjectType)
+		c.insertPatternBindings(arm.Pattern, subjectType)
 
 		if arm.Guard != nil {
 			gt := c.checkExpr(arm.Guard)
@@ -772,10 +779,10 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr) types.Type {
 		if arm.Body != nil {
 			armType = c.checkExpr(arm.Body)
 		} else if arm.Block != nil {
-			c.openScope(arm.Block, "match-arm")
 			c.checkBlock(arm.Block)
-			c.closeScope()
 		}
+
+		c.closeScope()
 
 		if resultType == nil {
 			resultType = armType
@@ -881,6 +888,132 @@ func (c *Checker) checkMatchPattern(pat ast.MatchPattern, subjectType types.Type
 
 	case *ast.WildcardMatchPattern:
 		// Always valid
+	}
+}
+
+// insertPatternBindings inserts variables from match pattern bindings into the current scope.
+// Called after checkMatchPattern has validated the pattern structure.
+func (c *Checker) insertPatternBindings(pat ast.MatchPattern, subjectType types.Type) {
+	if pat == nil {
+		return
+	}
+
+	switch p := pat.(type) {
+	case *ast.ShortDestructureMatchPattern:
+		c.insertDestructureBindings(p.Pos(), p.Bindings, c.lookupVariantFields(p.Name, subjectType))
+
+	case *ast.EnumDestructureMatchPattern:
+		c.insertEnumDestructureBindings(p, subjectType)
+
+	case *ast.NameMatchPattern:
+		if p.Name != "_" && subjectType != nil {
+			c.insert(types.NewVar(tpos(p.Pos()), p.Name, subjectType))
+		}
+
+	case *ast.TypeBindingMatchPattern:
+		if p.Binding != "_" {
+			obj := c.lookup(p.TypeName)
+			if obj != nil {
+				if tn, ok := obj.(*types.TypeName); ok && tn.Type() != nil {
+					c.insert(types.NewVar(tpos(p.Pos()), p.Binding, tn.Type()))
+				}
+			}
+		}
+	}
+}
+
+// lookupVariantFields returns the field types for a variant matched via short destructure.
+// Handles both direct Enum and generic Instance subjects.
+func (c *Checker) lookupVariantFields(variantName string, subjectType types.Type) []types.Type {
+	if subjectType == nil {
+		return nil
+	}
+	var enum *types.Enum
+	var subst map[*types.TypeParam]types.Type
+
+	switch st := subjectType.(type) {
+	case *types.Enum:
+		enum = st
+	case *types.Instance:
+		if e, ok := st.Origin().(*types.Enum); ok {
+			enum = e
+			subst = types.BuildSubstMap(e.TypeParams(), st.TypeArgs())
+		}
+	}
+	if enum == nil {
+		return nil
+	}
+	v := enum.LookupVariant(variantName)
+	if v == nil {
+		return nil
+	}
+	fieldTypes := make([]types.Type, v.NumFields())
+	for i, f := range v.Fields() {
+		ft := f.Type()
+		if subst != nil {
+			ft = types.Substitute(ft, subst)
+		}
+		fieldTypes[i] = ft
+	}
+	return fieldTypes
+}
+
+// insertDestructureBindings inserts bindings with corresponding field types into scope.
+func (c *Checker) insertDestructureBindings(pos ast.Pos, bindings []string, fieldTypes []types.Type) {
+	if fieldTypes == nil {
+		return
+	}
+	n := len(bindings)
+	if n > len(fieldTypes) {
+		n = len(fieldTypes)
+	}
+	for i := 0; i < n; i++ {
+		if bindings[i] != "_" {
+			c.insert(types.NewVar(tpos(pos), bindings[i], fieldTypes[i]))
+		}
+	}
+}
+
+// insertEnumDestructureBindings handles Enum.Variant(a, b) pattern bindings.
+// Uses subjectType to build a substitution map for generic enum instances.
+func (c *Checker) insertEnumDestructureBindings(p *ast.EnumDestructureMatchPattern, subjectType types.Type) {
+	obj := c.lookup(p.Enum)
+	if obj == nil {
+		return
+	}
+	tn, ok := obj.(*types.TypeName)
+	if !ok {
+		return
+	}
+	enum, ok := tn.Type().(*types.Enum)
+	if !ok {
+		return
+	}
+	v := enum.LookupVariant(p.Variant)
+	if v == nil {
+		return
+	}
+
+	// Build substitution map if the subject is a generic instance of this enum
+	var subst map[*types.TypeParam]types.Type
+	if inst, ok := subjectType.(*types.Instance); ok {
+		if origin, ok := inst.Origin().(*types.Enum); ok && origin == enum {
+			subst = types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+		}
+	}
+
+	n := len(p.Bindings)
+	if n > v.NumFields() {
+		n = v.NumFields()
+	}
+	for i := 0; i < n; i++ {
+		if p.Bindings[i] != "_" {
+			ft := v.Fields()[i].Type()
+			if subst != nil {
+				ft = types.Substitute(ft, subst)
+			}
+			c.insert(types.NewVar(tpos(p.Pos()), p.Bindings[i], ft))
+		}
 	}
 }
 

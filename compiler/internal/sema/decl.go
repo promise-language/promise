@@ -6,8 +6,14 @@ import (
 )
 
 // declare performs Pass 1: walk top-level declarations and insert names into file scope.
-// This creates TypeName and Func objects so that forward references resolve.
+// This creates TypeName, Func, and Module objects so that forward references resolve.
 func (c *Checker) declare(file *ast.File) {
+	// Process use declarations first — reserve alias names
+	for _, u := range file.Uses {
+		mod := types.NewModule(tpos(u.Pos()), u.Alias, u.Path)
+		c.insert(mod)
+	}
+
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
 		case *ast.TypeDecl:
@@ -286,15 +292,21 @@ func (c *Checker) resolveFuncSignature(d *ast.FuncDecl) *types.Signature {
 }
 
 // resolveTypeParamConstraints resolves constraints for type parameters.
+// Supports multiple constraints: T: A + B resolves all constraint types.
 func (c *Checker) resolveTypeParamConstraints(astParams []*ast.TypeParam, tparams []*types.TypeParam) {
 	for i, ap := range astParams {
 		if len(ap.Constraint) == 0 {
 			continue
 		}
-		// For now, use the first constraint only (single constraint support)
-		ct := c.resolveType(ap.Constraint[0])
-		if ct != nil {
-			tparams[i].SetConstraint(ct)
+		var resolved []types.Type
+		for _, cr := range ap.Constraint {
+			ct := c.resolveType(cr)
+			if ct != nil {
+				resolved = append(resolved, ct)
+			}
+		}
+		if len(resolved) > 0 {
+			tparams[i].SetConstraints(resolved)
 		}
 	}
 }

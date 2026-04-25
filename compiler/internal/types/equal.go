@@ -173,10 +173,12 @@ func AssignableTo(x, y Type) bool {
 		}
 	}
 
-	// Rule 5: TypeParam assignable to its constraint
+	// Rule 5: TypeParam assignable to any of its constraints
 	if tp, ok := x.(*TypeParam); ok {
-		if tp.constraint != nil && Identical(tp.constraint, y) {
-			return true
+		for _, c := range tp.Constraints() {
+			if Identical(c, y) {
+				return true
+			}
 		}
 	}
 

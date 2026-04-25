@@ -161,7 +161,7 @@ func (c *Checker) resolveNamedType(r *ast.NamedTypeRef) types.Type {
 	return inst
 }
 
-// validateConstraints checks that each type argument satisfies its type parameter's constraint.
+// validateConstraints checks that each type argument satisfies all of its type parameter's constraints.
 func (c *Checker) validateConstraints(pos ast.Pos, origin types.Type, typeArgs []types.Type) {
 	var tparams []*types.TypeParam
 	switch t := origin.(type) {
@@ -173,21 +173,20 @@ func (c *Checker) validateConstraints(pos ast.Pos, origin types.Type, typeArgs [
 		return
 	}
 	for i, tp := range tparams {
-		if tp.Constraint() == nil {
+		if len(tp.Constraints()) == 0 {
 			continue
 		}
 		arg := typeArgs[i]
-		constraint := tp.Constraint()
-		// Check if the type arg satisfies the constraint
-		if types.AssignableTo(arg, constraint) {
-			continue
+		for _, constraint := range tp.Constraints() {
+			if types.AssignableTo(arg, constraint) {
+				continue
+			}
+			if cn, ok := constraint.(*types.Named); ok && types.Implements(arg, cn) {
+				continue
+			}
+			c.errorf(pos, "type %s does not satisfy constraint %s for type parameter %s",
+				arg, constraint, tp.Obj().Name())
 		}
-		// Check interface implementation
-		if cn, ok := constraint.(*types.Named); ok && types.Implements(arg, cn) {
-			continue
-		}
-		c.errorf(pos, "type %s does not satisfy constraint %s for type parameter %s",
-			arg, constraint, tp.Obj().Name())
 	}
 }
 

@@ -60,6 +60,9 @@ func initBuiltins() {
 		addBinaryOp(types.TypChar, ">", types.TypChar, types.TypBool)
 		addBinaryOp(types.TypChar, "<=", types.TypChar, types.TypBool)
 		addBinaryOp(types.TypChar, ">=", types.TypChar, types.TypBool)
+
+		// Iter[T] and Stream[T] abstract methods
+		populateIterStream()
 	})
 }
 
@@ -96,5 +99,40 @@ func addUnaryOp(recv *types.Named, op string, resultType *types.Named) {
 		types.PlaceValue,
 		false, // not abstract
 		true,  // native
+	))
+}
+
+// populateIterStream adds abstract next() methods to Iter[T] and Stream[T].
+func populateIterStream() {
+	// Iter[T].next() T? — returns Optional(T)
+	iterT := types.TypIter.TypeParams()[0]
+	types.TypIter.AddMethod(types.NewMethod(
+		types.Pos{},
+		"next",
+		types.NewSignature(
+			types.NewParam("this", types.TypIter, types.RefNone),
+			nil,
+			types.NewOptional(iterT),
+			false,
+		),
+		types.PlaceInstance,
+		true,  // abstract
+		false, // not native
+	))
+
+	// Stream[T].next() Task[T?] — returns Instance(Task, [Optional(T)])
+	streamT := types.TypStream.TypeParams()[0]
+	types.TypStream.AddMethod(types.NewMethod(
+		types.Pos{},
+		"next",
+		types.NewSignature(
+			types.NewParam("this", types.TypStream, types.RefNone),
+			nil,
+			types.NewInstance(types.TypTask, []types.Type{types.NewOptional(streamT)}),
+			false,
+		),
+		types.PlaceInstance,
+		true,  // abstract
+		false, // not native
 	))
 }

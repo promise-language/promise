@@ -75,3 +75,17 @@ type Label struct {
 func NewLabel(pos Pos, name string) *Label {
 	return &Label{objBase: objBase{pos: pos, name: name}}
 }
+
+// Module represents an imported module alias (placeholder until Stage 9 module loading).
+type Module struct {
+	objBase
+	path string // import path, e.g. "std/io"
+}
+
+// NewModule creates a new module object.
+func NewModule(pos Pos, name string, path string) *Module {
+	return &Module{objBase: objBase{pos: pos, name: name}, path: path}
+}
+
+// Path returns the import path of the module.
+func (m *Module) Path() string { return m.path }

@@ -11,8 +11,8 @@ Implementation stages for the Promise compiler pipeline.
 | 3 | `compiler/internal/types/` | Type system: Named, Enum, Signature, Scope, Universe | Done |
 | 4 | `compiler/internal/sema/` | Semantic analysis: type checking, name resolution, returns, exhaustiveness | Done |
 | 5a | `compiler/internal/sema/` | Generic type substitution, constraint validation, instance tracking | Done |
-| 5b | `compiler/internal/sema/` | Use declarations, multi-constraint, Iter/Stream, unreachable code | Next |
-| 6 | `compiler/internal/ownership/` | Borrow checker: move semantics, lifetime inference | Planned |
+| 5b | `compiler/internal/sema/` | Match bindings, unreachable code, multi-constraint, Iter/Stream, use decls | Done |
+| 6 | `compiler/internal/ownership/` | Borrow checker: move semantics, lifetime inference | Next |
 | 7 | `compiler/internal/meta/` | Meta annotation processing and validation | Planned |
 | 8 | `compiler/internal/codegen/` | LLVM IR generation | Planned |
 | 9 | `compiler/internal/module/` | Module resolution, dependency graph | Planned |
@@ -113,59 +113,17 @@ Type substitution engine and integration into the semantic checker.
 
 ---
 
-## Stage 5b — Sema Completion (Next)
+## Stage 5b — Sema Completion (Done)
 
-Remaining semantic analysis features.
+Completes remaining semantic analysis features before ownership checking.
 
-### Use declarations
+**Files:** Updates to `sema/expr.go`, `sema/check.go`, `sema/decl.go`, `sema/resolve.go`, `sema/builtins.go`, `types/typeparam.go`, `types/equal.go`, `types/object.go`; ~23 new tests
 
-AST support exists (`UseDecl` with Alias/Path, `File.Uses`), grammar works (`use io "std/io"`), but sema ignores `file.Uses` entirely.
-
-| Task | Description | Files |
-|------|-------------|-------|
-| Add `Module` object type | New types.Object representing an imported module alias | `types/object.go` |
-| Process `file.Uses` in Pass 1 | Create Module objects and insert aliases into file scope | `sema/decl.go` |
-| Module member access | Detect `alias.name` in checkMemberExpr; report "module not loaded" | `sema/expr.go` |
-| Duplicate alias detection | Module alias conflicts with other declarations caught by existing insert() | already works |
-
-**Note:** Actual module loading deferred to Stage 9. Stage 5b creates placeholders only.
-
-### Multi-constraint resolution
-
-Currently `resolveTypeParamConstraints` only uses `ap.Constraint[0]`. AST supports `T: A + B` via `TypeParam.Constraint []TypeRef`.
-
-| Task | Description | Files |
-|------|-------------|-------|
-| Add `constraints []Type` to TypeParam | Store all resolved constraints, not just first | `types/typeparam.go` |
-| Resolve all constraints | Loop over `ap.Constraint` slice in define pass | `sema/decl.go` |
-| Validate all constraints | Check type arg satisfies ALL constraints at instantiation | `sema/resolve.go` |
-| Update AssignableTo | TypeParam assignable to any of its constraints | `types/equal.go` |
-
-### Iter[T] and Stream[T] population
-
-Currently empty generic stubs in Universe. Need abstract methods for interface checking and for-in support.
-
-| Task | Description | Files |
-|------|-------------|-------|
-| Iter[T].next() T? | Abstract method returning optional element | `types/universe.go` |
-| Stream[T].next() Task[T?] | Abstract async next method | `types/universe.go` |
-| For-in via Iter | Check `next()` method existence on iterable types | `sema/stmt.go` |
-
-### Unreachable code detection
-
-| Task | Description | Files |
-|------|-------------|-------|
-| Detect dead code | After return/raise/break/continue, flag following statements | `sema/stmt.go` |
-| Report warnings | "unreachable code after return/raise/break/continue" | `sema/stmt.go` |
-
-### Match pattern bindings
-
-Match arm pattern bindings (e.g., `Some(v) => v`) are not inserted into scope — patterns are validated but bindings aren't available in the arm body. This blocks using destructured enum values in match results.
-
-| Task | Description | Files |
-|------|-------------|-------|
-| Insert pattern bindings | Open scope per arm, insert bindings from ShortDestructure/EnumDestructure patterns | `sema/expr.go` |
-| Type bindings from substitution | For generic enum Instance, substitute variant field types for binding types | `sema/expr.go` |
+- **Match pattern bindings**: `Some(v) => v` works — scope opened per arm, bindings inserted from ShortDestructure/EnumDestructure/Name/TypeBinding patterns. For generic enum Instance subjects, variant field types are substituted via `BuildSubstMap`.
+- **Unreachable code detection**: `checkBlock` tracks dead-code state — statements after `return`, `raise`, `break`, `continue` flagged as unreachable. Recognizes if/else where both branches exit, exhaustive match with all arms exiting, and infinite loops without break.
+- **Multi-constraint resolution**: `T: A + B` fully supported — `TypeParam.constraints []Type` stores all constraints, `resolveTypeParamConstraints` resolves the full constraint list, `validateConstraints` checks type args against ALL constraints, `AssignableTo` allows TypeParam assignment to any of its constraints.
+- **Iter[T] and Stream[T] abstract methods**: `Iter[T].next() T?` and `Stream[T].next() Task[T?]` populated via `populateIterStream()` in builtins — enables iteration protocol interface checking.
+- **Use declaration placeholders**: `Module` object type added, `file.Uses` processed in Pass 1 (alias reserved in scope), bare module reference reports "module not loaded" error. Actual module loading deferred to Stage 9.
 
 ---
 

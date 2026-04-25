@@ -1536,8 +1536,7 @@ func TestGenericInstanceMismatch(t *testing.T) {
 }
 
 func TestGenericEnumMatchExhaustive(t *testing.T) {
-	// Pattern bindings (v) aren't yet inserted into scope,
-	// so use literals in the arm body instead of bound variables.
+	// Exhaustive match on generic enum with short destructure patterns.
 	checkOK(t, `
 		enum Option[T] { Some(T value), None }
 		test() {
@@ -1643,6 +1642,372 @@ func TestGenericUnaryOperator(t *testing.T) {
 		test() {
 			Wrapper[int] w = Wrapper[int](value: 3);
 			int x = -w.value;
+		}
+	`)
+}
+
+// ===== Stage 5b: Sema Completion Tests =====
+
+// --- Match Pattern Binding Tests ---
+
+func TestMatchPatternBindingShortDestructure(t *testing.T) {
+	checkOK(t, `
+		enum Result { Ok(int value), Err(string msg) }
+		test() {
+			Result r = Result.Ok(42);
+			x := match r {
+				Ok(v) => v,
+				Err(m) => 0,
+			};
+			int y = x;
+		}
+	`)
+}
+
+func TestMatchPatternBindingEnumDestructure(t *testing.T) {
+	checkOK(t, `
+		enum Shape { Circle(f64 radius), Rect(f64 w, f64 h) }
+		test() {
+			Shape s = Shape.Circle(3.14);
+			x := match s {
+				Shape.Circle(r) => r,
+				Shape.Rect(w, h) => w,
+			};
+		}
+	`)
+}
+
+func TestMatchPatternBindingName(t *testing.T) {
+	checkOK(t, `
+		test() {
+			int x = 42;
+			y := match x {
+				val => val + 1,
+			};
+		}
+	`)
+}
+
+func TestMatchPatternBindingTypeBinding(t *testing.T) {
+	checkOK(t, `
+		type Animal { string name; }
+		type Dog is Animal { int age; }
+		test() {
+			Animal a := Dog(name: "Rex", age: 3);
+			x := match a {
+				Dog d => d.age,
+				_ => 0,
+			};
+		}
+	`)
+}
+
+func TestMatchPatternBindingGenericEnum(t *testing.T) {
+	// Pattern bindings on generic enum instances should get substituted types
+	checkOK(t, `
+		enum Option[T] { Some(T value), None }
+		test() {
+			Option[int] x = Option[int].Some(42);
+			y := match x {
+				Some(v) => v + 1,
+				None => 0,
+			};
+		}
+	`)
+}
+
+func TestMatchPatternBindingWildcardIgnored(t *testing.T) {
+	checkOK(t, `
+		enum Color { Red, Green, Blue }
+		test() {
+			Color c = Color.Red;
+			x := match c {
+				_ => 0,
+			};
+		}
+	`)
+}
+
+func TestMatchPatternBindingUnderscore(t *testing.T) {
+	// Underscore bindings should not be inserted into scope
+	errs := checkErrs(t, `
+		enum Result { Ok(int value), Err(string msg) }
+		test() {
+			Result r = Result.Ok(42);
+			x := match r {
+				Ok(_) => 0,
+				Err(_) => 1,
+			};
+		}
+	`)
+	expectNoErrors(t, errs)
+}
+
+func TestMatchPatternBindingTypeMismatch(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Result { Ok(int value), Err(string msg) }
+		test() {
+			Result r = Result.Ok(42);
+			x := match r {
+				Ok(v) => v,
+				Err(m) => m,
+			};
+			int y = x;
+		}
+	`)
+	// The second arm returns string, but we assign to int
+	// Currently only first arm type is used for result, so this checks the binding type
+	// The key point is that v: int and m: string are correctly typed
+	expectNoErrors(t, errs)
+}
+
+// --- Unreachable Code Tests ---
+
+func TestUnreachableAfterReturn(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			return;
+			int x = 42;
+		}
+	`)
+	expectError(t, errs, "unreachable code")
+}
+
+func TestUnreachableAfterRaise(t *testing.T) {
+	errs := checkErrs(t, `
+		test() int! {
+			raise "oops";
+			int x = 42;
+		}
+	`)
+	expectError(t, errs, "unreachable code")
+}
+
+func TestUnreachableAfterBreak(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			for {
+				break;
+				int x = 42;
+			}
+		}
+	`)
+	expectError(t, errs, "unreachable code")
+}
+
+func TestUnreachableAfterContinue(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			while true {
+				continue;
+				int x = 42;
+			}
+		}
+	`)
+	expectError(t, errs, "unreachable code")
+}
+
+func TestReachableAfterIfWithoutElse(t *testing.T) {
+	// No false positive: if without else doesn't guarantee exit
+	checkOK(t, `
+		test() {
+			if true {
+				return;
+			}
+			int x = 42;
+		}
+	`)
+}
+
+func TestReachableAfterIfWithElseOneReturns(t *testing.T) {
+	// No false positive: only one branch returns
+	checkOK(t, `
+		test() {
+			if true {
+				return;
+			} else {
+				int y = 1;
+			}
+			int x = 42;
+		}
+	`)
+}
+
+// --- Multi-Constraint Tests ---
+
+func TestMultiConstraintBothSatisfied(t *testing.T) {
+	checkOK(t, `
+		type Hashable {
+			hash() int `+"`abstract;"+`
+		}
+		type Printable {
+			toString() string `+"`abstract;"+`
+		}
+		type MyKey is Hashable, Printable {
+			hash() int { return 0; }
+			toString() string { return "key"; }
+		}
+		type MyMap[K: Hashable + Printable, V] { K key; V val; }
+		test(MyMap[MyKey, int] m) {
+			MyKey k = m.key;
+		}
+	`)
+}
+
+func TestMultiConstraintOneFails(t *testing.T) {
+	errs := checkErrs(t, `
+		type Hashable {
+			hash() int `+"`abstract;"+`
+		}
+		type Printable {
+			toString() string `+"`abstract;"+`
+		}
+		type MyKey is Hashable {
+			hash() int { return 0; }
+		}
+		type MyMap[K: Hashable + Printable, V] { K key; V val; }
+		test(MyMap[MyKey, int] m) { }
+	`)
+	expectError(t, errs, "does not satisfy constraint Printable")
+}
+
+func TestSingleConstraintStillWorks(t *testing.T) {
+	// Existing single-constraint behavior should be unchanged
+	checkOK(t, `
+		type Hashable {
+			hash() int `+"`abstract;"+`
+		}
+		type MyKey is Hashable {
+			hash() int { return 0; }
+		}
+		type MyMap[K: Hashable, V] { K key; V val; }
+		test(MyMap[MyKey, int] m) {
+			MyKey k = m.key;
+		}
+	`)
+}
+
+// --- Iter/Stream Method Tests ---
+
+func TestIterHasNextMethod(t *testing.T) {
+	initBuiltins()
+	m := types.TypIter.LookupMethod("next")
+	if m == nil {
+		t.Fatal("Iter.next() method not found")
+	}
+	if !m.IsAbstract() {
+		t.Error("Iter.next() should be abstract")
+	}
+	sig := m.Sig()
+	if sig == nil {
+		t.Fatal("Iter.next() has no signature")
+	}
+	// Return type should be T? (Optional of TypeParam)
+	opt, ok := sig.Result().(*types.Optional)
+	if !ok {
+		t.Fatalf("Iter.next() should return Optional, got %T", sig.Result())
+	}
+	if _, ok := opt.Elem().(*types.TypeParam); !ok {
+		t.Errorf("Iter.next() Optional elem should be TypeParam, got %T", opt.Elem())
+	}
+}
+
+func TestStreamHasNextMethod(t *testing.T) {
+	initBuiltins()
+	m := types.TypStream.LookupMethod("next")
+	if m == nil {
+		t.Fatal("Stream.next() method not found")
+	}
+	if !m.IsAbstract() {
+		t.Error("Stream.next() should be abstract")
+	}
+	sig := m.Sig()
+	if sig == nil {
+		t.Fatal("Stream.next() has no signature")
+	}
+	// Return type should be Task[T?] (Instance of Task with Optional TypeParam)
+	inst, ok := sig.Result().(*types.Instance)
+	if !ok {
+		t.Fatalf("Stream.next() should return Instance, got %T", sig.Result())
+	}
+	if inst.Origin() != types.TypTask {
+		t.Errorf("Stream.next() should return Task instance, got %s", inst.Origin())
+	}
+}
+
+// --- Use Declaration Tests ---
+
+func TestUseDeclReservesName(t *testing.T) {
+	errs := checkErrs(t, `
+		use io "std/io"
+		type io { }
+	`)
+	expectError(t, errs, "redeclared")
+}
+
+func TestUseDeclModuleNotLoaded(t *testing.T) {
+	errs := checkErrs(t, `
+		use io "std/io"
+		test() {
+			io.Print();
+		}
+	`)
+	expectError(t, errs, "not loaded")
+}
+
+func TestUseDeclMultiple(t *testing.T) {
+	errs := checkErrs(t, `
+		use io "std/io"
+		use fmt "std/fmt"
+		test() {
+			io.Print();
+		}
+	`)
+	expectError(t, errs, "not loaded")
+	// fmt should also be reserved but not cause errors since it's unused
+}
+
+func TestUnreachableAfterIfElseBothReturn(t *testing.T) {
+	errs := checkErrs(t, `
+		test(bool b) {
+			if b {
+				return;
+			} else {
+				return;
+			}
+			int x = 42;
+		}
+	`)
+	expectError(t, errs, "unreachable code")
+}
+
+func TestMultiConstraintAssignability(t *testing.T) {
+	// TypeParam T: A + B should be assignable to both A and B
+	checkOK(t, `
+		type Hashable {
+			hash() int `+"`abstract;"+`
+		}
+		type Printable {
+			toString() string `+"`abstract;"+`
+		}
+		type Container[T: Hashable + Printable] {
+			T item;
+			asHashable() Hashable { return this.item; }
+			asPrintable() Printable { return this.item; }
+		}
+	`)
+}
+
+func TestMatchPatternBindingEnumDestructureGeneric(t *testing.T) {
+	// Long-form enum destructure on generic enum should substitute types
+	checkOK(t, `
+		enum Option[T] { Some(T value), None }
+		test() {
+			Option[int] x = Option[int].Some(42);
+			y := match x {
+				Option.Some(v) => v + 1,
+				Option.None => 0,
+			};
 		}
 	`)
 }

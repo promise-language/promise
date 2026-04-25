@@ -188,8 +188,64 @@ func (c *Checker) checkEnumDecl(d *ast.EnumDecl) {
 }
 
 // checkBlock type-checks a block of statements.
+// Detects unreachable code after statements that always exit (return/raise/break/continue).
 func (c *Checker) checkBlock(block *ast.Block) {
+	dead := false
 	for _, stmt := range block.Stmts {
+		if dead {
+			c.errorf(stmt.Pos(), "unreachable code")
+			break // report once per block
+		}
 		c.checkStmt(stmt)
+		dead = c.stmtAlwaysExits(stmt)
 	}
+}
+
+// stmtAlwaysExits reports whether a statement guarantees control never falls through.
+// Used for unreachable code detection. Broader than stmtReturns (in returns.go)
+// because break/continue also prevent fallthrough.
+func (c *Checker) stmtAlwaysExits(stmt ast.Stmt) bool {
+	switch s := stmt.(type) {
+	case *ast.ReturnStmt:
+		return true
+	case *ast.RaiseStmt:
+		return true
+	case *ast.BreakStmt:
+		return true
+	case *ast.ContinueStmt:
+		return true
+	case *ast.Block:
+		if len(s.Stmts) == 0 {
+			return false
+		}
+		return c.stmtAlwaysExits(s.Stmts[len(s.Stmts)-1])
+	case *ast.IfStmt:
+		if s.Else == nil {
+			return false
+		}
+		return c.blockAlwaysExits(s.Body) && c.stmtAlwaysExits(s.Else)
+	case *ast.ExprStmt:
+		if me, ok := s.Expr.(*ast.MatchExpr); ok {
+			for _, arm := range me.Arms {
+				if arm.Block == nil || !c.blockAlwaysExits(arm.Block) {
+					return false
+				}
+			}
+			subjectType := c.info.Types[me.Subject]
+			return c.matchIsExhaustive(me, subjectType)
+		}
+		return false
+	case *ast.InfiniteLoop:
+		return !c.blockHasBreak(s.Body)
+	default:
+		return false
+	}
+}
+
+// blockAlwaysExits reports whether a block's last statement always exits.
+func (c *Checker) blockAlwaysExits(block *ast.Block) bool {
+	if block == nil || len(block.Stmts) == 0 {
+		return false
+	}
+	return c.stmtAlwaysExits(block.Stmts[len(block.Stmts)-1])
 }

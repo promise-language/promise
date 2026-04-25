@@ -4,27 +4,48 @@ import "strings"
 
 // TypeParam represents a generic type parameter: T, K: Hashable, etc.
 type TypeParam struct {
-	obj        *TypeName
-	constraint Type // nil means unconstrained
-	index      int  // position in the type parameter list
+	obj         *TypeName
+	constraints []Type // nil means unconstrained; supports T: A + B
+	index       int    // position in the type parameter list
 }
 
 // NewTypeParam creates a new type parameter.
 func NewTypeParam(obj *TypeName, constraint Type, index int) *TypeParam {
-	tp := &TypeParam{obj: obj, constraint: constraint, index: index}
+	tp := &TypeParam{obj: obj, index: index}
+	if constraint != nil {
+		tp.constraints = []Type{constraint}
+	}
 	obj.SetType(tp)
 	return tp
 }
 
-func (tp *TypeParam) Obj() *TypeName   { return tp.obj }
-func (tp *TypeParam) Constraint() Type { return tp.constraint }
-func (tp *TypeParam) Index() int       { return tp.index }
-func (tp *TypeParam) Underlying() Type { return tp }
+func (tp *TypeParam) Obj() *TypeName { return tp.obj }
 
-// SetConstraint sets the constraint for this type parameter.
-// Used when constraints are resolved after initial declaration.
+// Constraint returns the first constraint or nil. For single-constraint callers.
+func (tp *TypeParam) Constraint() Type {
+	if len(tp.constraints) == 0 {
+		return nil
+	}
+	return tp.constraints[0]
+}
+
+// Constraints returns all constraints (may be nil for unconstrained).
+func (tp *TypeParam) Constraints() []Type { return tp.constraints }
+func (tp *TypeParam) Index() int          { return tp.index }
+func (tp *TypeParam) Underlying() Type    { return tp }
+
+// SetConstraint sets a single constraint for this type parameter.
 func (tp *TypeParam) SetConstraint(c Type) {
-	tp.constraint = c
+	if c == nil {
+		tp.constraints = nil
+	} else {
+		tp.constraints = []Type{c}
+	}
+}
+
+// SetConstraints sets multiple constraints for this type parameter.
+func (tp *TypeParam) SetConstraints(cs []Type) {
+	tp.constraints = cs
 }
 
 func (tp *TypeParam) String() string {

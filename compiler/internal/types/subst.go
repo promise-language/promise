@@ -155,6 +155,53 @@ func substList(list []Type, subst map[*TypeParam]Type) []Type {
 	return result
 }
 
+// ContainsTypeParam reports whether typ contains any TypeParam.
+// Used to distinguish concrete instantiations (e.g., Box[int]) from
+// non-concrete ones (e.g., Box[T]) that arise during type definition.
+func ContainsTypeParam(typ Type) bool {
+	if typ == nil {
+		return false
+	}
+	switch t := typ.(type) {
+	case *TypeParam:
+		return true
+	case *Instance:
+		for _, arg := range t.typeArgs {
+			if ContainsTypeParam(arg) {
+				return true
+			}
+		}
+	case *Optional:
+		return ContainsTypeParam(t.elem)
+	case *SharedRef:
+		return ContainsTypeParam(t.elem)
+	case *MutRef:
+		return ContainsTypeParam(t.elem)
+	case *Pointer:
+		return ContainsTypeParam(t.elem)
+	case *Tuple:
+		for _, e := range t.elems {
+			if ContainsTypeParam(e) {
+				return true
+			}
+		}
+	case *Array:
+		return ContainsTypeParam(t.elem)
+	case *Slice:
+		return ContainsTypeParam(t.elem)
+	case *Map:
+		return ContainsTypeParam(t.key) || ContainsTypeParam(t.val)
+	case *Signature:
+		for _, p := range t.params {
+			if ContainsTypeParam(p.typ) {
+				return true
+			}
+		}
+		return ContainsTypeParam(t.result)
+	}
+	return false
+}
+
 func typeSliceEq(a, b []Type) bool {
 	if len(a) != len(b) {
 		return false

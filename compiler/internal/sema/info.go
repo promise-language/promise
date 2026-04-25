@@ -34,3 +34,14 @@ func (c *Checker) recordObject(ident *ast.IdentExpr, obj types.Object) {
 		c.info.Objects[ident] = obj
 	}
 }
+
+// recordInstance records a concrete generic instantiation for later monomorphization.
+// Non-concrete instances (containing TypeParams from type definitions) are skipped.
+func (c *Checker) recordInstance(inst *types.Instance) {
+	for _, arg := range inst.TypeArgs() {
+		if types.ContainsTypeParam(arg) {
+			return
+		}
+	}
+	c.info.Instances = append(c.info.Instances, inst)
+}

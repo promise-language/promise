@@ -1556,7 +1556,7 @@ func TestGenericEnumMatchNonExhaustive(t *testing.T) {
 		test() {
 			Option[int] x = Option[int].Some(42);
 			y := match x {
-				Some(v) => v,
+				Some(v) => 1,
 			};
 		}
 	`)
@@ -1573,4 +1573,76 @@ func TestInstancesRecordedInInfo(t *testing.T) {
 	if len(info.Instances) == 0 {
 		t.Error("expected at least one Instance recorded")
 	}
+}
+
+func TestInstancesOnlyConcreteRecorded(t *testing.T) {
+	// Non-concrete instances (from field type resolution during define, e.g. Tree[T]?)
+	// should not be recorded — only concrete instantiations like Tree[int].
+	info := checkOK(t, `
+		type Tree[T] {
+			T value;
+			Tree[T]? left;
+			Tree[T]? right;
+		}
+		test() {
+			Tree[int] t = Tree[int](value: 1, left: none, right: none);
+		}
+	`)
+	for _, inst := range info.Instances {
+		for _, arg := range inst.TypeArgs() {
+			if types.ContainsTypeParam(arg) {
+				t.Errorf("non-concrete Instance recorded: %s", inst)
+			}
+		}
+	}
+	if len(info.Instances) == 0 {
+		t.Error("expected at least one concrete Instance recorded")
+	}
+}
+
+func TestGenericOptionalChaining(t *testing.T) {
+	checkOK(t, `
+		type Box[T] { T value; }
+		test() {
+			Box[int]? b = Box[int](value: 42);
+			int? v = b?.value;
+		}
+	`)
+}
+
+func TestGenericOptionalChainingTypeMismatch(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box[T] { T value; }
+		test() {
+			Box[int]? b = Box[int](value: 42);
+			string? v = b?.value;
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+func TestGenericBinaryOperator(t *testing.T) {
+	// Operator dispatch on a generic Instance type should substitute
+	// the method signature, so + on Box[int]'s inner int value works.
+	checkOK(t, `
+		type Wrapper[T] {
+			T value;
+		}
+		test() {
+			Wrapper[int] w = Wrapper[int](value: 3);
+			int x = w.value + 1;
+		}
+	`)
+}
+
+func TestGenericUnaryOperator(t *testing.T) {
+	checkOK(t, `
+		type Wrapper[T] {
+			T value;
+		}
+		test() {
+			Wrapper[int] w = Wrapper[int](value: 3);
+			int x = -w.value;
+		}
+	`)
 }

@@ -157,7 +157,7 @@ func (c *Checker) resolveNamedType(r *ast.NamedTypeRef) types.Type {
 	c.validateConstraints(r.Pos(), typ, typeArgs)
 
 	inst := types.NewInstance(typ, typeArgs)
-	c.info.Instances = append(c.info.Instances, inst)
+	c.recordInstance(inst)
 	return inst
 }
 

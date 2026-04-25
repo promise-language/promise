@@ -619,15 +619,9 @@ func (c *Checker) instantiateFromIndex(e *ast.IndexExpr, origin types.Type, tpar
 		return nil
 	}
 
-	// Special case: Map[K,V] — but Map needs 2 args so won't match here
-	if named, ok := origin.(*types.Named); ok && named == types.TypMap {
-		c.errorf(e.Pos(), "Map requires 2 type arguments")
-		return nil
-	}
-
 	c.validateConstraints(e.Pos(), origin, []types.Type{typeArg})
 	inst := types.NewInstance(origin, []types.Type{typeArg})
-	c.info.Instances = append(c.info.Instances, inst)
+	c.recordInstance(inst)
 	return inst
 }
 

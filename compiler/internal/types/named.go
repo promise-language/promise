@@ -8,6 +8,9 @@ type Named struct {
 	parents    []*Named // inheritance via `is`
 	fields     []*Field
 	methods    []*Method
+	isCopy     bool   // `copy meta — bitwise copy on assignment
+	doc        string // `doc meta — documentation string
+	deprecated string // `deprecated meta — empty means not deprecated
 }
 
 // NewNamed creates a new named type and sets the TypeName's type to it.
@@ -23,6 +26,12 @@ func (n *Named) Parents() []*Named        { return n.parents }
 func (n *Named) Fields() []*Field         { return n.fields }
 func (n *Named) Methods() []*Method       { return n.methods }
 func (n *Named) Underlying() Type         { return n }
+func (n *Named) IsCopy() bool             { return n.isCopy }
+func (n *Named) SetCopy(v bool)           { n.isCopy = v }
+func (n *Named) Doc() string              { return n.doc }
+func (n *Named) SetDoc(s string)          { n.doc = s }
+func (n *Named) Deprecated() string       { return n.deprecated }
+func (n *Named) SetDeprecated(s string)   { n.deprecated = s }
 
 func (n *Named) String() string {
 	return n.obj.Name()

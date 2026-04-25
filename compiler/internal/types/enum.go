@@ -37,6 +37,9 @@ type Enum struct {
 	typeParams []*TypeParam
 	variants   []*Variant
 	methods    []*Method
+	isCopy     bool   // `copy meta — bitwise copy on assignment
+	doc        string // `doc meta — documentation string
+	deprecated string // `deprecated meta — empty means not deprecated
 }
 
 // NewEnum creates a new enum type and sets the TypeName's type to it.
@@ -51,6 +54,12 @@ func (e *Enum) TypeParams() []*TypeParam { return e.typeParams }
 func (e *Enum) Variants() []*Variant     { return e.variants }
 func (e *Enum) Methods() []*Method       { return e.methods }
 func (e *Enum) Underlying() Type         { return e }
+func (e *Enum) IsCopy() bool             { return e.isCopy }
+func (e *Enum) SetCopy(v bool)           { e.isCopy = v }
+func (e *Enum) Doc() string              { return e.doc }
+func (e *Enum) SetDoc(s string)          { e.doc = s }
+func (e *Enum) Deprecated() string       { return e.deprecated }
+func (e *Enum) SetDeprecated(s string)   { e.deprecated = s }
 
 func (e *Enum) String() string {
 	return e.obj.Name()

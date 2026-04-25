@@ -126,6 +126,15 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 	for _, md := range d.Methods {
 		c.defineMethod(named, md, d.Name)
 	}
+
+	// Process meta annotations
+	c.validateMetas(d.Annotations, TargetType)
+	if c.hasAnnotation(d.Annotations, "copy") {
+		named.SetCopy(true)
+		c.validateCopyType(named, d)
+	}
+	named.SetDoc(extractDoc(d.Annotations))
+	named.SetDeprecated(extractDeprecated(d.Annotations))
 }
 
 func (c *Checker) defineField(named *types.Named, fd *ast.FieldDecl) {
@@ -137,7 +146,11 @@ func (c *Checker) defineField(named *types.Named, fd *ast.FieldDecl) {
 	isRaw := c.hasAnnotation(fd.Annotations, "raw")
 	hasDef := fd.Default != nil
 
-	named.AddField(types.NewField(tpos(fd.Pos()), fd.Name, typ, placement, isRaw, hasDef))
+	f := types.NewField(tpos(fd.Pos()), fd.Name, typ, placement, isRaw, hasDef)
+	c.validateMetas(fd.Annotations, TargetField)
+	f.SetDoc(extractDoc(fd.Annotations))
+	f.SetDeprecated(extractDeprecated(fd.Annotations))
+	named.AddField(f)
 }
 
 func (c *Checker) defineMethod(named *types.Named, md *ast.MethodDecl, typeName string) {
@@ -162,7 +175,11 @@ func (c *Checker) defineMethod(named *types.Named, md *ast.MethodDecl, typeName 
 		c.errorf(md.Pos(), "method %s.%s must have a body (or be marked `abstract or `native)", typeName, md.Name)
 	}
 
-	named.AddMethod(types.NewMethod(tpos(md.Pos()), md.Name, sig, placement, abstract, native))
+	m := types.NewMethod(tpos(md.Pos()), md.Name, sig, placement, abstract, native)
+	c.validateMetas(md.Annotations, TargetMethod)
+	m.SetDoc(extractDoc(md.Annotations))
+	m.SetDeprecated(extractDeprecated(md.Annotations))
+	named.AddMethod(m)
 }
 
 func (c *Checker) resolveMethodSignature(named *types.Named, md *ast.MethodDecl) *types.Signature {
@@ -236,6 +253,15 @@ func (c *Checker) defineEnum(d *ast.EnumDecl) {
 		}
 		enum.AddVariant(types.NewVariant(v.Name, fields))
 	}
+
+	// Process meta annotations
+	c.validateMetas(d.Annotations, TargetEnum)
+	if c.hasAnnotation(d.Annotations, "copy") {
+		enum.SetCopy(true)
+		c.validateCopyEnum(enum, d)
+	}
+	enum.SetDoc(extractDoc(d.Annotations))
+	enum.SetDeprecated(extractDeprecated(d.Annotations))
 }
 
 func (c *Checker) defineFunc(d *ast.FuncDecl) {
@@ -263,6 +289,15 @@ func (c *Checker) defineFunc(d *ast.FuncDecl) {
 	sig := c.resolveFuncSignature(d)
 	if sig != nil {
 		fn.SetType(sig)
+	}
+
+	// Process meta annotations
+	c.validateMetas(d.Annotations, TargetFunc)
+	fn.SetDoc(extractDoc(d.Annotations))
+	fn.SetDeprecated(extractDeprecated(d.Annotations))
+	if c.hasAnnotation(d.Annotations, "test") {
+		fn.SetTest(true)
+		c.info.Tests = append(c.info.Tests, fn)
 	}
 }
 

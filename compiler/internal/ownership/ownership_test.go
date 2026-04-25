@@ -773,3 +773,47 @@ func TestWhileUnwrapStmt(t *testing.T) {
 		t.Errorf("expected binding 'val' to be Owned, got %v", c.state["val"])
 	}
 }
+
+// === Copy meta integration ===
+
+func TestUserCopyTypeNeverMoves(t *testing.T) {
+	ownerOK(t, `
+		type Point `+"`copy"+` {
+			int x;
+			int y;
+		}
+		test() {
+			Point p = Point(x: 1, y: 2);
+			Point q = p;
+			Point r = p;
+		}
+	`)
+}
+
+func TestUserNonCopyTypeMoves(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Dog {
+			string name;
+		}
+		test() {
+			Dog d = Dog(name: "Rex");
+			Dog e = d;
+			Dog f = d;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'd'")
+}
+
+func TestUserCopyInCall(t *testing.T) {
+	ownerOK(t, `
+		type Pt `+"`copy"+` {
+			int x;
+		}
+		take(Pt p) {}
+		test() {
+			Pt p = Pt(x: 1);
+			take(p);
+			take(p);
+		}
+	`)
+}

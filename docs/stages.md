@@ -14,7 +14,7 @@ Implementation stages for the Promise compiler pipeline.
 | 5b | `compiler/internal/sema/` | Match bindings, unreachable code, multi-constraint, Iter/Stream, use decls | Done |
 | 6a | `compiler/internal/ownership/` | Move semantics, use-after-move, copy exemption, borrow conflicts, unsafe pointer | Done |
 | 6b | `compiler/internal/ownership/` | Lifetime inference, NLL, advanced borrow tracking | Next |
-| 7 | `compiler/internal/meta/` | Meta annotation processing and validation | Planned |
+| 7 | `compiler/internal/sema/` | Meta annotation processing and validation | Done |
 | 8 | `compiler/internal/codegen/` | LLVM IR generation | Planned |
 | 9 | `compiler/internal/module/` | Module resolution, dependency graph | Planned |
 | 10 | `cmd/promise/` | CLI entry point (build, run, test, fmt, etc.) | Planned |
@@ -155,14 +155,19 @@ Advanced borrow checking and lifetime analysis.
 - Implicit borrow coercion (`T` → `T&`/`T~`) at call sites
 - Drop semantics and destructor ordering
 
-## Stage 7 — Meta Annotations (Planned)
+## Stage 7 — Meta Annotation Processing (Done)
 
-Process and validate meta annotations.
+Validates and processes built-in meta annotations, wiring them into the type system and ownership checker.
 
-- Built-in metas: `abstract`, `native`, `raw`, `value`, `instance`, `variant`, `type`, `doc`, `deprecated`, `test`, `inline`, `packed`
-- Validate meta targets (e.g. `abstract` only on methods, `raw` only on fields)
-- Extract `doc` annotations into documentation model
-- User-defined meta support (custom annotations that survive to codegen)
+**Files:** New `sema/meta.go` (~170 LOC); updates to `sema/decl.go`, `sema/expr.go`, `sema/error.go`, `sema/info.go`, `types/named.go`, `types/field.go`, `types/enum.go`, `types/object.go`, `ownership/copy.go`; 21 new tests across sema + ownership
+
+- **Meta target validation**: 18 built-in metas (`value`, `instance`, `variant`, `type`, `raw`, `abstract`, `native`, `copy`, `doc`, `deprecated`, `test`, `inline`, `packed`, `align`, `extern`, `serializable`, `public`, `unsafe`) mapped to allowed declaration targets. Unknown metas, wrong targets, and duplicates reported as errors.
+- **`copy` meta**: Marks `Named`/`Enum` types as bitwise-copy, exempting them from move semantics. Transitive field validation ensures all fields of a `copy` type are themselves copy types. Ownership checker's `isCopyType` reads `Named.IsCopy()` / `Enum.IsCopy()`.
+- **`doc` meta**: Extracts documentation strings from `\`doc("text")` annotations and stores on `Named`, `Field`, `Method`, `Func`, `Enum` types.
+- **`deprecated` meta**: Stores deprecation messages. Usage warnings emitted when deprecated types, functions, fields, or methods are referenced in expressions.
+- **`test` meta**: Tracks test functions in `Info.Tests` for future `promise test` runner.
+- **Warning system**: `warnf` added to checker for non-fatal diagnostic messages (prefixed with "warning:").
+- **Deferred metas**: `inline`, `packed`, `align`, `extern`, `serializable`, `public`, `unsafe` are validated for target correctness but processing deferred to later stages (codegen/module system).
 
 ## Stage 8 — Code Generation (Planned)
 

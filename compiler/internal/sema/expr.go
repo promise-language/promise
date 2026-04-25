@@ -124,6 +124,10 @@ func (c *Checker) checkIdentExpr(e *ast.IdentExpr) types.Type {
 		return nil
 	}
 	c.recordObject(e, obj)
+
+	// Check for deprecated usage
+	c.checkDeprecatedObj(e.Pos(), obj)
+
 	return obj.Type()
 }
 
@@ -485,9 +489,15 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 	case *types.Named:
 		// Check fields first, then methods
 		if f := t.LookupField(e.Field); f != nil {
+			if f.Deprecated() != "" {
+				c.warnf(e.Pos(), "use of deprecated field '%s'", e.Field)
+			}
 			return f.Type()
 		}
 		if m := t.LookupMethod(e.Field); m != nil {
+			if m.Deprecated() != "" {
+				c.warnf(e.Pos(), "use of deprecated method '%s'", e.Field)
+			}
 			return m.Sig()
 		}
 		c.errorf(e.Pos(), "type %s has no field or method %s", t, e.Field)
@@ -506,6 +516,9 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 			return types.NewSignature(nil, params, t, false)
 		}
 		if m := t.LookupMethod(e.Field); m != nil {
+			if m.Deprecated() != "" {
+				c.warnf(e.Pos(), "use of deprecated method '%s'", e.Field)
+			}
 			return m.Sig()
 		}
 		c.errorf(e.Pos(), "enum %s has no variant or method %s", t, e.Field)
@@ -526,9 +539,15 @@ func (c *Checker) resolveInstanceMember(pos ast.Pos, inst *types.Instance, name 
 	case *types.Named:
 		subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
 		if f := origin.LookupField(name); f != nil {
+			if f.Deprecated() != "" {
+				c.warnf(pos, "use of deprecated field '%s'", name)
+			}
 			return types.Substitute(f.Type(), subst)
 		}
 		if m := origin.LookupMethod(name); m != nil {
+			if m.Deprecated() != "" {
+				c.warnf(pos, "use of deprecated method '%s'", name)
+			}
 			return types.Substitute(m.Sig(), subst)
 		}
 		c.errorf(pos, "type %s has no field or method %s", inst, name)
@@ -558,6 +577,9 @@ func (c *Checker) resolveEnumMemberInst(pos ast.Pos, enum *types.Enum, name stri
 		return types.NewSignature(nil, params, inst, false)
 	}
 	if m := enum.LookupMethod(name); m != nil {
+		if m.Deprecated() != "" {
+			c.warnf(pos, "use of deprecated method '%s'", name)
+		}
 		return types.Substitute(m.Sig(), subst)
 	}
 	c.errorf(pos, "enum %s has no variant or method %s", inst, name)

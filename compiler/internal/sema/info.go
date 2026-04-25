@@ -19,6 +19,9 @@ type Info struct {
 
 	// Instances records all concrete generic instantiations for later monomorphization.
 	Instances []*types.Instance
+
+	// Tests records functions annotated with `test.
+	Tests []*types.Func
 }
 
 // recordType stores the resolved type for an expression.

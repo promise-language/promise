@@ -23,3 +23,11 @@ func (c *Checker) errorf(pos ast.Pos, format string, args ...any) {
 		Msg: fmt.Sprintf(format, args...),
 	})
 }
+
+// warnf records a semantic warning at the given position.
+func (c *Checker) warnf(pos ast.Pos, format string, args ...any) {
+	c.errors = append(c.errors, &Error{
+		Pos: pos,
+		Msg: "warning: " + fmt.Sprintf(format, args...),
+	})
+}

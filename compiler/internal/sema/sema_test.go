@@ -2011,3 +2011,264 @@ func TestMatchPatternBindingEnumDestructureGeneric(t *testing.T) {
 		}
 	`)
 }
+
+// === Meta annotation validation ===
+
+func TestMetaCopyOnType(t *testing.T) {
+	checkOK(t, `
+		type Point `+"`copy"+` {
+			int x;
+			int y;
+		}
+	`)
+}
+
+func TestMetaCopyOnFunc(t *testing.T) {
+	errs := checkErrs(t, `
+		test() `+"`copy"+` {}
+	`)
+	expectError(t, errs, "cannot be applied to function")
+}
+
+func TestMetaAbstractOnField(t *testing.T) {
+	errs := checkErrs(t, `
+		type T {
+			int x `+"`abstract"+`;
+		}
+	`)
+	expectError(t, errs, "cannot be applied to field")
+}
+
+func TestMetaTestOnFunc(t *testing.T) {
+	info := checkOK(t, `
+		myTest() `+"`test"+` {}
+	`)
+	if len(info.Tests) != 1 {
+		t.Fatalf("expected 1 test function, got %d", len(info.Tests))
+	}
+	if info.Tests[0].Name() != "myTest" {
+		t.Errorf("expected test function 'myTest', got '%s'", info.Tests[0].Name())
+	}
+}
+
+func TestMetaTestNotOnType(t *testing.T) {
+	errs := checkErrs(t, `
+		type T `+"`test"+` {}
+	`)
+	expectError(t, errs, "cannot be applied to type")
+}
+
+func TestMetaUnknown(t *testing.T) {
+	errs := checkErrs(t, `
+		type T `+"`foobar"+` {
+			int x;
+		}
+	`)
+	expectError(t, errs, "unknown meta annotation")
+}
+
+func TestMetaDuplicate(t *testing.T) {
+	errs := checkErrs(t, `
+		type T `+"`copy `copy"+` {
+			int x;
+		}
+	`)
+	expectError(t, errs, "duplicate meta annotation")
+}
+
+// === Copy validation ===
+
+func TestCopyTypeAllPrimitiveFields(t *testing.T) {
+	checkOK(t, `
+		type Point `+"`copy"+` {
+			int x;
+			int y;
+		}
+	`)
+}
+
+func TestCopyTypeWithStringField(t *testing.T) {
+	errs := checkErrs(t, `
+		type Bad `+"`copy"+` {
+			string name;
+		}
+	`)
+	expectError(t, errs, "non-copy type string")
+}
+
+func TestCopyTypeWithCopyNestedField(t *testing.T) {
+	checkOK(t, `
+		type Inner `+"`copy"+` {
+			int v;
+		}
+		type Outer `+"`copy"+` {
+			Inner i;
+		}
+	`)
+}
+
+func TestCopyTypeWithNonCopyNestedField(t *testing.T) {
+	errs := checkErrs(t, `
+		type Inner {
+			string v;
+		}
+		type Outer `+"`copy"+` {
+			Inner i;
+		}
+	`)
+	expectError(t, errs, "non-copy type Inner")
+}
+
+func TestCopyEnumOK(t *testing.T) {
+	checkOK(t, `
+		enum Dir `+"`copy"+` { N, S, E, W }
+	`)
+}
+
+// === Doc extraction ===
+
+func TestDocOnType(t *testing.T) {
+	info := checkOK(t, `
+		type Server `+"`doc(\"HTTP server\")"+` {}
+	`)
+	scope := info.Scopes[findFile(t, info)]
+	obj := scope.Lookup("Server")
+	named := obj.(*types.TypeName).Type().(*types.Named)
+	if named.Doc() != "HTTP server" {
+		t.Errorf("expected doc 'HTTP server', got %q", named.Doc())
+	}
+}
+
+func TestDocOnFunc(t *testing.T) {
+	info := checkOK(t, `
+		bar() `+"`doc(\"a func\")"+` {}
+	`)
+	scope := info.Scopes[findFile(t, info)]
+	fn := scope.Lookup("bar").(*types.Func)
+	if fn.Doc() != "a func" {
+		t.Errorf("expected doc 'a func', got %q", fn.Doc())
+	}
+}
+
+// findFile returns the *ast.File from info.Scopes keys.
+func findFile(t *testing.T, info *Info) *ast.File {
+	t.Helper()
+	for node := range info.Scopes {
+		if f, ok := node.(*ast.File); ok {
+			return f
+		}
+	}
+	t.Fatal("no file scope found")
+	return nil
+}
+
+// === Deprecated ===
+
+func TestDeprecatedType(t *testing.T) {
+	info := checkOK(t, `
+		type Old `+"`deprecated"+` {}
+	`)
+	scope := info.Scopes[findFile(t, info)]
+	named := scope.Lookup("Old").(*types.TypeName).Type().(*types.Named)
+	if named.Deprecated() == "" {
+		t.Error("expected type to be marked deprecated")
+	}
+}
+
+func TestDeprecatedWithMessage(t *testing.T) {
+	info := checkOK(t, `
+		type Old `+"`deprecated(\"use New\")"+` {}
+	`)
+	scope := info.Scopes[findFile(t, info)]
+	named := scope.Lookup("Old").(*types.TypeName).Type().(*types.Named)
+	if named.Deprecated() != "use New" {
+		t.Errorf("expected deprecated message 'use New', got %q", named.Deprecated())
+	}
+}
+
+func TestDeprecatedWarningOnUse(t *testing.T) {
+	errs := checkErrs(t, `
+		type Old `+"`deprecated"+` {}
+		test() {
+			Old o = Old();
+		}
+	`)
+	expectError(t, errs, "deprecated type 'Old'")
+}
+
+func TestDeprecatedFunc(t *testing.T) {
+	errs := checkErrs(t, `
+		old() `+"`deprecated"+` {}
+		test() {
+			old();
+		}
+	`)
+	expectError(t, errs, "deprecated function 'old'")
+}
+
+func TestDeprecatedEnum(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Status `+"`deprecated"+` { On, Off }
+		test() {
+			Status s = Status.On;
+		}
+	`)
+	expectError(t, errs, "deprecated enum 'Status'")
+}
+
+func TestDeprecatedField(t *testing.T) {
+	errs := checkErrs(t, `
+		type T {
+			int x `+"`deprecated"+`;
+		}
+		test() {
+			T t = T(x: 1);
+			int v = t.x;
+		}
+	`)
+	expectError(t, errs, "deprecated field 'x'")
+}
+
+func TestDeprecatedMethod(t *testing.T) {
+	errs := checkErrs(t, `
+		type T {
+			foo() `+"`deprecated"+` {}
+		}
+		test() {
+			T t = T();
+			t.foo();
+		}
+	`)
+	expectError(t, errs, "deprecated method 'foo'")
+}
+
+// === Doc on method ===
+
+func TestDocOnMethod(t *testing.T) {
+	info := checkOK(t, `
+		type T {
+			foo() `+"`doc(\"does stuff\")"+` {}
+		}
+	`)
+	scope := info.Scopes[findFile(t, info)]
+	named := scope.Lookup("T").(*types.TypeName).Type().(*types.Named)
+	m := named.LookupMethod("foo")
+	if m.Doc() != "does stuff" {
+		t.Errorf("expected doc 'does stuff', got %q", m.Doc())
+	}
+}
+
+// === Copy enum with variant fields ===
+
+func TestCopyEnumWithNonCopyVariantField(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Bad `+"`copy"+` { X(string s) }
+	`)
+	expectError(t, errs, "non-copy field type string")
+}
+
+func TestCopyEnumWithCopyVariantFields(t *testing.T) {
+	checkOK(t, `
+		enum Expr `+"`copy"+` { Lit(int v), Neg(int v) }
+	`)
+}

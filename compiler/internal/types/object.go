@@ -36,6 +36,9 @@ func NewVar(pos Pos, name string, typ Type) *Var {
 // Func represents a function declaration.
 type Func struct {
 	objBase
+	doc        string
+	deprecated string
+	isTest     bool // `test meta — marks test function
 }
 
 // NewFunc creates a new function object.
@@ -48,6 +51,13 @@ func NewFunc(pos Pos, name string, sig *Signature) *Func {
 func (f *Func) SetType(typ Type) {
 	f.typ = typ
 }
+
+func (f *Func) Doc() string            { return f.doc }
+func (f *Func) SetDoc(s string)        { f.doc = s }
+func (f *Func) Deprecated() string     { return f.deprecated }
+func (f *Func) SetDeprecated(s string) { f.deprecated = s }
+func (f *Func) IsTest() bool           { return f.isTest }
+func (f *Func) SetTest(v bool)         { f.isTest = v }
 
 // TypeName represents a type declaration.
 type TypeName struct {

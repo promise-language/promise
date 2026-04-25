@@ -132,7 +132,7 @@ Completes remaining semantic analysis features before ownership checking.
 
 Separate post-sema pass for ownership analysis.
 
-**Files:** 6 Go files in `compiler/internal/ownership/`, ~500 LOC, 20 tests
+**Files:** 7 Go files in `compiler/internal/ownership/`, ~790 LOC + 775 LOC tests, 44 tests (81% coverage)
 
 - **Move tracking**: every value has one owner; assignment, function call (value params), constructor args, and return all transfer ownership. Use-after-move reported with source position.
 - **Copy exemption**: primitives (`int`, `bool`, `f64`, `char`, `none`, `void`, all sized ints/floats) and references (`&T`, `~T`) are implicitly copied — never moved.

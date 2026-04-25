@@ -4,8 +4,9 @@ logs/*
 # Compiler: ANTLR4 tool
 compiler/tools/antlr-*.jar
 
-# Compiler: generated parser code
-compiler/internal/parser/
+# Compiler: generated parser (non-Go artifacts)
+compiler/internal/parser/*.interp
+compiler/internal/parser/*.tokens
 
 # Compiler: binary
 compiler/promise

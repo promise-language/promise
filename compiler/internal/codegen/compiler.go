@@ -15,13 +15,14 @@ import (
 
 // Compiler generates LLVM IR from a type-checked Promise AST.
 type Compiler struct {
-	module       *ir.Module
-	info         *sema.Info
-	fn           *ir.Func                  // current function being generated
-	block        *ir.Block                 // current basic block
-	locals       map[string]*ir.InstAlloca // local variable allocas
-	funcs        map[string]*ir.Func       // declared Promise functions by name
-	runtimeFuncs map[string]*ir.Func       // external runtime functions
+	module  *ir.Module
+	info    *sema.Info
+	fn      *ir.Func                         // current function being generated
+	block   *ir.Block                        // current basic block
+	locals  map[string]*ir.InstAlloca        // local variable allocas
+	funcs   map[string]*ir.Func              // declared Promise functions by name
+	layouts map[*types.Named]*TypeDeclLayout // type layouts for extern ABI
+	externs map[string]*ExternFunc           // extern functions by Promise name
 
 	// Loop control targets for break/continue
 	breakTarget    *ir.Block
@@ -29,26 +30,50 @@ type Compiler struct {
 }
 
 // Compile generates an LLVM IR module from a type-checked Promise AST.
-func Compile(file *ast.File, info *sema.Info) *ir.Module {
+func Compile(file *ast.File, info *sema.Info) *CompileResult {
 	c := &Compiler{
 		module: ir.NewModule(),
 		info:   info,
 		funcs:  make(map[string]*ir.Func),
 	}
 
-	c.declareRuntime()
+	// Collect extern declarations and compute type layouts
+	externList := collectExterns(file, info)
+	c.layouts = computeLayouts(c.module, externList)
+
+	// Build externs map by Promise name
+	c.externs = make(map[string]*ExternFunc, len(externList))
+	for _, ext := range externList {
+		c.externs[ext.PromiseName] = ext
+	}
+
+	c.declareIntrinsics()
+	c.declareExterns(externList, c.layouts)
 	c.declareFuncs(file)
 	c.defineFuncs(file)
 
-	return c.module
+	return &CompileResult{
+		Module:  c.module,
+		Layouts: c.layouts,
+		Externs: externList,
+	}
 }
 
-// declareFuncs creates LLVM function declarations for all FuncDecl nodes (pass 1).
+// declareIntrinsics declares compiler-intrinsic runtime functions (not user-declared externs).
+func (c *Compiler) declareIntrinsics() {
+	c.funcs["promise_panic"] = c.module.NewFunc("promise_panic",
+		irtypes.Void, ir.NewParam("msg", irtypes.I8Ptr))
+}
+
+// declareFuncs creates LLVM function declarations for all FuncDecl nodes with bodies (pass 1).
 func (c *Compiler) declareFuncs(file *ast.File) {
 	for _, decl := range file.Decls {
 		fd, ok := decl.(*ast.FuncDecl)
 		if !ok {
 			continue
+		}
+		if fd.Body == nil {
+			continue // extern — already handled by declareExterns
 		}
 
 		obj := c.lookupFunc(fd.Name)
@@ -57,12 +82,6 @@ func (c *Compiler) declareFuncs(file *ast.File) {
 		}
 		sig, ok := obj.Type().(*types.Signature)
 		if !ok {
-			continue
-		}
-
-		if fd.Body == nil {
-			// Extern function — map to runtime print if applicable
-			c.declareExternFunc(fd, sig)
 			continue
 		}
 
@@ -83,29 +102,6 @@ func (c *Compiler) declareFuncs(file *ast.File) {
 
 		fn := c.module.NewFunc(fd.Name, retType, params...)
 		c.funcs[fd.Name] = fn
-	}
-}
-
-// declareExternFunc handles extern function declarations by mapping to runtime functions.
-func (c *Compiler) declareExternFunc(fd *ast.FuncDecl, sig *types.Signature) {
-	// Check if this is a print-like function (1 arg, void return)
-	if sig.Result() == nil && len(sig.Params()) == 1 {
-		argType := sig.Params()[0].Type()
-		named := extractNamed(argType)
-		if named != nil {
-			cat := classify(named)
-			switch cat {
-			case CatSignedInt, CatUnsignedInt:
-				c.funcs[fd.Name] = c.runtimeFuncs["promise_print_int"]
-				return
-			case CatFloat:
-				c.funcs[fd.Name] = c.runtimeFuncs["promise_print_f64"]
-				return
-			case CatBool:
-				c.funcs[fd.Name] = c.runtimeFuncs["promise_print_bool"]
-				return
-			}
-		}
 	}
 }
 

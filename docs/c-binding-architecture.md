@@ -63,12 +63,14 @@ type TypeDeclLayout struct {
 
 // StructLayout describes one of the four C-ABI-compatible struct representations.
 type StructLayout struct {
-    CName    string            // C identifier: "promise_Point_v", "promise_Point_i"
-    Suffix   string            // "_v", "_i", "_m", "_t"
-    Size     int64             // total size in bytes
-    Align    int64             // alignment in bytes
-    Fields   []FieldLayout     // ordered fields including internal pointers
-    LLVMType irtypes.Type      // resolved LLVM struct type
+    CName        string            // C identifier: "promise_Point_v", "promise_Point_i"
+    Suffix       string            // "_v", "_i", "_m", "_t"
+    Size         int64             // size of FIXED part in bytes (excludes flexible array)
+    Align        int64             // alignment in bytes
+    Fields       []FieldLayout     // ordered fields including internal pointers
+    LLVMType     irtypes.Type      // resolved LLVM struct type
+    IsFlexible   bool              // true if last field is a C99 flexible array member
+    FlexElemType *TypeDeclLayout   // element type of the flexible member (nil if !IsFlexible)
 }
 
 type FieldLayout struct {
@@ -293,51 +295,91 @@ typedef struct {
 
 The `_instance` is null at runtime because there are no instance fields. C code works entirely with the value struct fields (`x`, `y`). No special case — the same layout computation applies.
 
+#### Flexible array members (inline data)
+
+Strings and containers use **C99 flexible array members** to store variable-length data inline in the Instance struct, eliminating a separate heap allocation for the data buffer. The last field of the Instance struct is declared with `[]` syntax (zero-length in C, `[0 x T]` in LLVM IR) and the allocation is sized to accommodate the actual data:
+
+```c
+// C99 flexible array member
+typedef struct {
+    int64_t len;
+    char    data[];   // flexible — sizeof(struct) excludes this
+} my_string;
+
+// Allocation: malloc(sizeof(my_string) + len)
+```
+
+In LLVM IR, the corresponding type uses a zero-length array:
+
+```llvm
+%my_string = type { i64, [0 x i8] }
+; Allocation: call ptr @malloc(i64 %total)  where total = sizeof_fixed + len
+; Access:     getelementptr %my_string, ptr %s, i32 0, i32 1, i64 %idx
+```
+
+This pattern applies to strings (inline character data) and arrays/slices (inline elements). The `StructLayout` tracks this via `IsFlexible` and `FlexElemType`.
+
+**Implications:**
+- Instance structs with flexible array members cannot be copied with struct assignment — use `memcpy` with the correct total size.
+- `sizeof()` in C returns only the fixed part. The true allocated size is `sizeof(fixed) + count * sizeof(element)`.
+- These types are **immutable in-place** — appending or resizing requires allocating a new instance. This is desirable for strings (immutable by design) and acceptable for growable arrays (amortized reallocation).
+
 #### Strings
 
-`string` gets a dedicated C representation. Which of the four structs holds the data depends on the stdlib definition. If string is:
+`string` stores its length and character data in the Instance struct, with the data inline via a flexible array member. The Value struct is a lightweight handle (just `_vtable` + `_instance`):
 
 ```promise
-type string {
-    int len `value;
-    u8* data `value;
+type string `intrinsic {
+    int len;    // PlaceInstance (default) → Instance struct
+    // char data[] is compiler-managed inline storage
 }
 ```
 
-Then:
 ```c
 typedef struct { } promise_string_t;
 typedef struct { promise_string_t* _type; } promise_string_m;
-typedef struct { promise_string_m* _variant; } promise_string_i;
+typedef struct {
+    promise_string_m*  _variant;
+    int64_t            len;
+    char               data[];    // C99 flexible array member — UTF-8 encoded
+} promise_string_i;
 typedef struct {
     void*              _vtable;
-    promise_string_i*  _instance;   // null (no instance data for strings)
-    int64_t            len;
-    const char*        data;        // UTF-8, NOT null-terminated (use len)
+    promise_string_i*  _instance;
 } promise_string_v;
 ```
 
-LLVM: `{ i8*, %promise_string_i*, i64, i8* }`
+LLVM: Value is `{ i8*, %promise_string_i* }`, Instance is `{ %promise_string_m*, i64, [0 x i8] }`
 
-Whether the string data is null-terminated for C convenience is a design choice. Recommendation: store `len+1` bytes with a trailing `\0` so C functions can use the pointer directly, but the length field is authoritative.
+The Instance struct is allocated with `sizeof(promise_string_i) + len` bytes — exactly enough for the data, **no trailing null terminator**. Promise strings may contain embedded `\0` characters, so null termination is meaningless and mixing length-based and null-terminated conventions is a dangerous source of bugs. C runtime code must always use `len` to determine string boundaries. Strings are **immutable** — modifying a string requires allocating a new instance.
+
+C code accesses string data naturally:
+
+```c
+void promise_print_string(promise_string_v s) {
+    // s._instance->len  — string length
+    // s._instance->data — UTF-8 character data (NOT null-terminated, may contain \0)
+    fwrite(s._instance->data, 1, s._instance->len, stdout);
+}
+```
 
 #### Fixed arrays (`T[N]`) and slices (`T[]`)
 
-These are generic instances. Each produces four structs. The field placement in the stdlib definition determines which struct holds what:
+These are generic instances. Each produces four structs. Elements are stored **inline** in the Instance struct via a flexible array member, following the same pattern as strings:
 
 ```c
-// Array[int] — all four structs, instance holds heap data
+// Array[int] — elements inline in instance
 typedef struct { } promise_Array_int_t;
 typedef struct { promise_Array_int_t* _type; } promise_Array_int_m;
 typedef struct {
     promise_Array_int_m* _variant;
-    int64_t              cap;
-    int64_t*             data;      // heap-allocated element buffer
+    int64_t              len;
+    int64_t              cap;       // allocated capacity (for growable arrays)
+    int64_t              data[];    // inline elements (C99 flexible array member)
 } promise_Array_int_i;
 typedef struct {
     void*                _vtable;
-    promise_Array_int_i* _instance;  // C follows _instance->data to read elements
-    int64_t              len;
+    promise_Array_int_i* _instance;
 } promise_Array_int_v;
 ```
 
@@ -347,17 +389,21 @@ typedef struct { } promise_Slice_int_t;
 typedef struct { promise_Slice_int_t* _type; } promise_Slice_int_m;
 typedef struct {
     promise_Slice_int_m* _variant;
+    int64_t              len;
     int64_t              cap;
-    int64_t*             data;
+    int64_t              data[];    // inline elements
 } promise_Slice_int_i;
 typedef struct {
     void*                _vtable;
     promise_Slice_int_i* _instance;
-    int64_t              len;
 } promise_Slice_int_v;
 ```
 
-The exact field placement depends on the stdlib type definitions. The layout computation reads the actual `value`/`instance` annotations and distributes fields to the correct struct.
+LLVM: Instance is `{ %promise_Array_int_m*, i64, i64, [0 x i64] }`, Value is `{ i8*, %promise_Array_int_i* }`
+
+The Instance struct is allocated with `sizeof(promise_Array_int_i) + cap * sizeof(int64_t)` bytes. Growing a mutable array requires `realloc` of the entire instance, then updating the value's `_instance` pointer. With unique ownership, only one pointer needs updating; shared references require the ownership system to track aliasing.
+
+C code accesses elements naturally via `arr._instance->data[i]`.
 
 #### Enums (tagged unions)
 
@@ -563,15 +609,17 @@ typedef struct {
 // Compound types (only those reachable from extern functions)
 // ============================================================
 
-// string
+// string (data inline in instance via C99 flexible array member)
 typedef struct { } promise_string_t;
 typedef struct { promise_string_t* _type; } promise_string_m;
-typedef struct { promise_string_m* _variant; } promise_string_i;
+typedef struct {
+    promise_string_m*  _variant;
+    int64_t            len;
+    char               data[];
+} promise_string_i;
 typedef struct {
     void*              _vtable;
     promise_string_i*  _instance;
-    int64_t            len;
-    const char*        data;
 } promise_string_v;
 
 // Point (all `value fields)
@@ -926,9 +974,10 @@ For large value structs, the C compiler's own ABI rules handle whether the struc
 
 ### Stage 8b (strings)
 
-- `layout.go` gains string `TypeDeclLayout` with Value struct: `{ vtable_ptr, instance_ptr, len, data }`
-- `headergen.go` emits `promise_string_v` typedef
-- `runtime_string.c` includes the header, implements string operations
+- `layout.go` gains string `TypeDeclLayout` with Instance struct: `{ variant_ptr, len, data[] }` (flexible array member) and Value struct: `{ vtable_ptr, instance_ptr }`
+- `headergen.go` emits `promise_string_i` with C99 flexible array member and minimal `promise_string_v`
+- `runtime_string.c` includes the header, implements string operations using `s._instance->data` for data access
+- String instances are allocated with `sizeof(promise_string_i) + len` (no null terminator — strings may contain `\0`)
 - The header guarantees layout consistency
 
 ### Stage 8c (user types)
@@ -939,9 +988,10 @@ For large value structs, the C compiler's own ABI rules handle whether the struc
 
 ### Stage 8g (containers)
 
-- `layout.go` computes array/slice/map layouts — monomorphized, all four levels
-- `headergen.go` emits monomorphized container typedefs (e.g., `promise_Array_int_v`, `promise_Array_int_i`)
-- Variable-size types are handled correctly because the header encodes the exact layout including element type and sizes, and the instance struct holds the heap-allocated data
+- `layout.go` computes array/slice/map layouts — monomorphized, all four levels, with `IsFlexible` for instance structs
+- `headergen.go` emits monomorphized container typedefs with flexible array members (e.g., `promise_Array_int_i` with inline `data[]`)
+- Instance structs use C99 flexible array members for inline element storage, allocated with `sizeof(fixed) + cap * sizeof(element)`
+- Growing arrays use `realloc` on the entire instance; ownership system tracks which values need `_instance` pointer updates
 
 ---
 
@@ -954,7 +1004,7 @@ For large value structs, the C compiler's own ABI rules handle whether the struc
 | Four-struct model | Ignored | Every type emits all 4 struct levels |
 | Passing convention | Primitives as scalars, special cases | Always `promise_T_v`, no special cases |
 | ABI coercion | Per-function special cases | Uniform pack/unpack via `coerceToCABI`/`coerceFromCABI` |
-| Compound types | Not supported | `TypeDeclLayout` computation + header generation |
+| Compound types | Not supported | `TypeDeclLayout` computation + header generation (flexible array members for inline data) |
 | Internal pointers | N/A | Typed (`promise_T_i*`), C navigates naturally |
 | Adding new externs | Edit 3 files | Write C implementation, declare in Promise |
 | Runtime compilation | `clang -c runtime.c` | `clang -c runtime.c -include promise_bindings.h` |

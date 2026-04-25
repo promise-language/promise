@@ -11,10 +11,10 @@ type TypeCategory int
 
 const (
 	CatUnknown     TypeCategory = iota
-	CatSignedInt                       // int, i8, i16, i32, i64
-	CatUnsignedInt                     // uint, u8, u16, u32, u64
-	CatFloat                           // f32, f64
-	CatBool                            // bool
+	CatSignedInt                // int, i8, i16, i32, i64
+	CatUnsignedInt              // uint, u8, u16, u32, u64
+	CatFloat                    // f32, f64
+	CatBool                     // bool
 )
 
 // classify returns the backend category for a Named type.
@@ -84,8 +84,17 @@ func llvmNamedType(n *types.Named) irtypes.Type {
 	}
 }
 
+// isRefType returns true if the type is a shared or mutable reference.
+func isRefType(typ types.Type) bool {
+	switch typ.(type) {
+	case *types.SharedRef, *types.MutRef:
+		return true
+	}
+	return false
+}
+
 // extractNamed returns the *Named type from a Promise type,
-// unwrapping Instance if necessary.
+// unwrapping Instance, SharedRef, and MutRef if necessary.
 func extractNamed(typ types.Type) *types.Named {
 	switch t := typ.(type) {
 	case *types.Named:
@@ -94,6 +103,10 @@ func extractNamed(typ types.Type) *types.Named {
 		if n, ok := t.Origin().(*types.Named); ok {
 			return n
 		}
+	case *types.SharedRef:
+		return extractNamed(t.Elem())
+	case *types.MutRef:
+		return extractNamed(t.Elem())
 	}
 	return nil
 }

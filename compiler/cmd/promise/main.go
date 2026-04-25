@@ -145,7 +145,7 @@ func runBuild(args []string) {
 	}
 
 	file, info := compileFrontend(filename)
-	mod := codegen.Compile(file, info)
+	result := codegen.Compile(file, info)
 
 	// Write .ll to temp file
 	llFile, err := os.CreateTemp("", "promise-*.ll")
@@ -155,11 +155,25 @@ func runBuild(args []string) {
 	}
 	defer os.Remove(llFile.Name())
 
-	if _, err := fmt.Fprint(llFile, mod.String()); err != nil {
+	if _, err := fmt.Fprint(llFile, result.Module.String()); err != nil {
 		fmt.Fprintf(os.Stderr, "error writing IR: %v\n", err)
 		os.Exit(1)
 	}
 	llFile.Close()
+
+	// Generate C header for runtime type verification
+	headerFile, err := os.CreateTemp("", "promise_bindings-*.h")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error creating header file: %v\n", err)
+		os.Exit(1)
+	}
+	defer os.Remove(headerFile.Name())
+
+	if err := codegen.GenerateHeader(headerFile, result.Layouts, result.Externs); err != nil {
+		fmt.Fprintf(os.Stderr, "error generating header: %v\n", err)
+		os.Exit(1)
+	}
+	headerFile.Close()
 
 	// Find runtime.c relative to the binary or in known locations
 	runtimeC := findRuntime()
@@ -168,7 +182,7 @@ func runBuild(args []string) {
 		os.Exit(1)
 	}
 
-	// Compile runtime to object file
+	// Compile runtime to object file with generated header
 	runtimeO, err := os.CreateTemp("", "promise-runtime-*.o")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
@@ -177,7 +191,7 @@ func runBuild(args []string) {
 	defer os.Remove(runtimeO.Name())
 	runtimeO.Close()
 
-	clangCmd := exec.Command("clang", "-c", runtimeC, "-o", runtimeO.Name())
+	clangCmd := exec.Command("clang", "-c", runtimeC, "-include", headerFile.Name(), "-o", runtimeO.Name())
 	clangCmd.Stderr = os.Stderr
 	if err := clangCmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error compiling runtime: %v\n", err)

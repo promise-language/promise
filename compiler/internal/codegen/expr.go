@@ -272,15 +272,9 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 		panic(fmt.Sprintf("codegen: unsupported callee type %T", e.Callee))
 	}
 
-	// Check if this function is mapped to a runtime print function.
-	// Use genPrintCall for proper type coercion (e.g., i1 → i8 for bool).
-	if len(argVals) == 1 {
-		if fn, ok := c.funcs[ident.Name]; ok && c.isRuntimePrintFunc(fn) {
-			result := c.genPrintCall(argTypes[0], argVals[0])
-			if result != nil {
-				return result
-			}
-		}
+	// Extern function — pack args into value structs, call, unpack return
+	if ext, ok := c.externs[ident.Name]; ok {
+		return c.genExternCall(ext, argVals, argTypes)
 	}
 
 	// Regular function call

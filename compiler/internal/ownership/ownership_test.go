@@ -1163,3 +1163,240 @@ func TestStoredBorrowInferredVarDecl(t *testing.T) {
 	`)
 	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
 }
+
+// ===== Coverage: unit tests for uncovered branches =====
+
+// newUnitChecker creates a Checker suitable for unit tests.
+func newUnitChecker() *Checker {
+	return &Checker{
+		state: make(StateMap),
+		info: &sema.Info{
+			Types:   make(map[ast.Expr]types.Type),
+			Objects: make(map[*ast.IdentExpr]types.Object),
+			Scopes:  make(map[ast.Node]*types.Scope),
+		},
+	}
+}
+
+// movedIdent registers a string variable as Moved and returns its IdentExpr.
+func movedIdent(c *Checker, name string) *ast.IdentExpr {
+	ident := &ast.IdentExpr{Name: name}
+	c.info.Objects[ident] = types.NewVar(types.Pos{}, name, types.TypString)
+	c.state[name] = Moved
+	return ident
+}
+
+// ownedIdent registers a string variable as Owned and returns its IdentExpr.
+func ownedIdent(c *Checker, name string) *ast.IdentExpr {
+	ident := &ast.IdentExpr{Name: name}
+	c.info.Objects[ident] = types.NewVar(types.Pos{}, name, types.TypString)
+	c.state[name] = Owned
+	return ident
+}
+
+// --- BorrowSet ---
+
+func TestActiveBorrowsOf(t *testing.T) {
+	bs := NewBorrowSet()
+	bs.Add(&Borrow{Origin: "s", Kind: BorrowShared, Borrower: "r"})
+	bs.Add(&Borrow{Origin: "t", Kind: BorrowMut})
+	bs.Add(&Borrow{Origin: "s", Kind: BorrowMut, Borrower: "q"})
+
+	if got := len(bs.ActiveBorrowsOf("s")); got != 2 {
+		t.Errorf("expected 2 borrows of 's', got %d", got)
+	}
+	if got := len(bs.ActiveBorrowsOf("t")); got != 1 {
+		t.Errorf("expected 1 borrow of 't', got %d", got)
+	}
+	if got := len(bs.ActiveBorrowsOf("x")); got != 0 {
+		t.Errorf("expected 0 borrows of 'x', got %d", got)
+	}
+}
+
+// --- checkExpr: expression branches ---
+
+func TestThisExprMoved(t *testing.T) {
+	c := newUnitChecker()
+	c.state["this"] = Moved
+	c.checkExpr(&ast.ThisExpr{})
+	expectOwnerError(t, c.errors, "use of moved variable 'this'")
+}
+
+func TestOptionalChainOnMovedVar(t *testing.T) {
+	c := newUnitChecker()
+	ident := movedIdent(c, "s")
+	c.checkExpr(&ast.OptionalChainExpr{Target: ident, Field: "length"})
+	expectOwnerError(t, c.errors, "use of moved variable 's'")
+}
+
+func TestIsExprOnMovedVar(t *testing.T) {
+	c := newUnitChecker()
+	ident := movedIdent(c, "s")
+	c.checkExpr(&ast.IsExpr{Expr: ident})
+	expectOwnerError(t, c.errors, "use of moved variable 's'")
+}
+
+func TestCastExprOnMovedVar(t *testing.T) {
+	c := newUnitChecker()
+	ident := movedIdent(c, "s")
+	c.checkExpr(&ast.CastExpr{Expr: ident})
+	expectOwnerError(t, c.errors, "use of moved variable 's'")
+}
+
+func TestErrorPropagateOnMovedVar(t *testing.T) {
+	c := newUnitChecker()
+	ident := movedIdent(c, "s")
+	c.checkExpr(&ast.ErrorPropagateExpr{Expr: ident})
+	expectOwnerError(t, c.errors, "use of moved variable 's'")
+}
+
+func TestErrorUnwrapOnMovedVar(t *testing.T) {
+	c := newUnitChecker()
+	ident := movedIdent(c, "s")
+	c.checkExpr(&ast.ErrorUnwrapExpr{Expr: ident})
+	expectOwnerError(t, c.errors, "use of moved variable 's'")
+}
+
+func TestErrorHandlerBindingOwnership(t *testing.T) {
+	c := newUnitChecker()
+	c.checkExpr(&ast.ErrorHandlerExpr{
+		Expr:    &ast.IntLit{Raw: "1"},
+		Binding: "err",
+		Body:    &ast.Block{},
+	})
+	if c.state["err"] != Owned {
+		t.Errorf("expected 'err' to be Owned, got %v", c.state["err"])
+	}
+}
+
+func TestGoExprBlockMoveTracking(t *testing.T) {
+	c := newUnitChecker()
+	ident := movedIdent(c, "s")
+	c.checkExpr(&ast.GoExpr{
+		Block: &ast.Block{
+			Stmts: []ast.Stmt{&ast.ExprStmt{Expr: ident}},
+		},
+	})
+	expectOwnerError(t, c.errors, "use of moved variable 's'")
+}
+
+func TestGoExprExprMoveTracking(t *testing.T) {
+	c := newUnitChecker()
+	ident := movedIdent(c, "s")
+	c.checkExpr(&ast.GoExpr{Expr: ident})
+	expectOwnerError(t, c.errors, "use of moved variable 's'")
+}
+
+func TestUnsafeExprMoveTracking(t *testing.T) {
+	c := newUnitChecker()
+	ident := movedIdent(c, "s")
+	c.checkExpr(&ast.UnsafeExpr{
+		Body: &ast.Block{
+			Stmts: []ast.Stmt{&ast.ExprStmt{Expr: ident}},
+		},
+	})
+	expectOwnerError(t, c.errors, "use of moved variable 's'")
+}
+
+// --- checkStmt: statement branches ---
+
+func TestRaiseStmtMoveTracking(t *testing.T) {
+	c := newUnitChecker()
+	ident := ownedIdent(c, "s")
+	c.checkStmt(&ast.RaiseStmt{Value: ident})
+	if c.state["s"] != Moved {
+		t.Errorf("expected 's' to be Moved after raise, got %v", c.state["s"])
+	}
+}
+
+func TestYieldStmtMoveTracking(t *testing.T) {
+	c := newUnitChecker()
+	ident := ownedIdent(c, "s")
+	c.checkStmt(&ast.YieldStmt{Value: ident})
+	if c.state["s"] != Moved {
+		t.Errorf("expected 's' to be Moved after yield, got %v", c.state["s"])
+	}
+}
+
+func TestYieldDelegateStmtMoveTracking(t *testing.T) {
+	c := newUnitChecker()
+	ident := ownedIdent(c, "s")
+	c.checkStmt(&ast.YieldDelegateStmt{Value: ident})
+	if c.state["s"] != Moved {
+		t.Errorf("expected 's' to be Moved after yield*, got %v", c.state["s"])
+	}
+}
+
+func TestNestedBlockStmt(t *testing.T) {
+	c := newUnitChecker()
+	ident := ownedIdent(c, "s")
+	c.checkStmt(&ast.Block{
+		Stmts: []ast.Stmt{
+			&ast.InferredVarDecl{Name: "t", Value: ident},
+		},
+	})
+	if c.state["s"] != Moved {
+		t.Errorf("expected 's' to be Moved after nested block, got %v", c.state["s"])
+	}
+}
+
+// --- registerPatternBindings ---
+
+func TestEnumDestructurePatternBindings(t *testing.T) {
+	c := newUnitChecker()
+	c.registerPatternBindings(&ast.EnumDestructureMatchPattern{
+		Enum:     "Color",
+		Variant:  "Custom",
+		Bindings: []string{"r", "g", "_"},
+	})
+	if c.state["r"] != Owned {
+		t.Errorf("expected 'r' to be Owned")
+	}
+	if c.state["g"] != Owned {
+		t.Errorf("expected 'g' to be Owned")
+	}
+	if _, exists := c.state["_"]; exists {
+		t.Error("'_' should not be registered in state")
+	}
+}
+
+func TestTypeBindingPatternBindings(t *testing.T) {
+	c := newUnitChecker()
+	c.registerPatternBindings(&ast.TypeBindingMatchPattern{
+		TypeName: "Circle",
+		Binding:  "c",
+	})
+	if c.state["c"] != Owned {
+		t.Errorf("expected 'c' to be Owned")
+	}
+}
+
+// --- checkAssignTarget: IndexExpr branch ---
+
+func TestAssignTargetIndexExpr(t *testing.T) {
+	c := newUnitChecker()
+	target := movedIdent(c, "arr")
+	index := movedIdent(c, "idx")
+	c.checkAssignTarget(&ast.IndexExpr{Target: target, Index: index})
+	if len(c.errors) != 2 {
+		t.Fatalf("expected 2 use-after-move errors, got %d: %v", len(c.errors), c.errors)
+	}
+}
+
+// --- checkForInStmt: index binding ---
+
+func TestForInIndexBinding(t *testing.T) {
+	c := newUnitChecker()
+	c.checkStmt(&ast.ForInStmt{
+		Binding:  "v",
+		Index:    "i",
+		Iterable: &ast.IntLit{Raw: "0"},
+		Body:     &ast.Block{},
+	})
+	if c.state["v"] != Owned {
+		t.Errorf("expected 'v' to be Owned")
+	}
+	if c.state["i"] != Owned {
+		t.Errorf("expected 'i' to be Owned")
+	}
+}

@@ -297,6 +297,19 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 		case *types.Map:
 			// Iterating a map yields (key, value) tuples
 			elemType = types.NewTuple([]types.Type{t.Key(), t.Val()})
+		case *types.Instance:
+			// Iter[T] yields T, Stream[T] yields T
+			origin := t.Origin()
+			if origin == types.TypIter || origin == types.TypStream {
+				if len(t.TypeArgs()) > 0 {
+					elemType = t.TypeArgs()[0]
+				} else {
+					elemType = iterType
+				}
+			} else {
+				c.errorf(s.Iterable.Pos(), "cannot iterate over type %s", iterType)
+				elemType = iterType
+			}
 		default:
 			if types.Identical(iterType, types.TypRange) {
 				elemType = types.TypInt

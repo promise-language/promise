@@ -1346,3 +1346,231 @@ func TestInfiniteLoopNestedLoopBreakOK(t *testing.T) {
 		}
 	`)
 }
+
+// ===== Stage 5a: Generic Type Substitution Tests =====
+
+func TestGenericFieldAccess(t *testing.T) {
+	checkOK(t, `
+		type Box[T] { T value; }
+		test() {
+			Box[int] b = Box[int](value: 42);
+			int x = b.value;
+		}
+	`)
+}
+
+func TestGenericFieldAccessTypeMismatch(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box[T] { T value; }
+		test() {
+			Box[int] b = Box[int](value: 42);
+			string x = b.value;
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+func TestGenericMethodCall(t *testing.T) {
+	checkOK(t, `
+		type Box[T] {
+			T value;
+			get() T { return this.value; }
+		}
+		test() {
+			Box[string] b = Box[string](value: "hello");
+			string s = b.get();
+		}
+	`)
+}
+
+func TestGenericMethodReturnTypeMismatch(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box[T] {
+			T value;
+			get() T { return this.value; }
+		}
+		test() {
+			Box[int] b = Box[int](value: 42);
+			string s = b.get();
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+func TestGenericMethodParamCheck(t *testing.T) {
+	checkOK(t, `
+		type Stack[T] {
+			T[] items;
+			push(T item) { }
+		}
+		test() {
+			Stack[int] s = Stack[int](items: [1, 2, 3]);
+			s.push(4);
+		}
+	`)
+}
+
+func TestGenericMethodParamMismatch(t *testing.T) {
+	errs := checkErrs(t, `
+		type Stack[T] {
+			T[] items;
+			push(T item) { }
+		}
+		test() {
+			Stack[int] s = Stack[int](items: [1, 2, 3]);
+			s.push("wrong");
+		}
+	`)
+	expectError(t, errs, "not assignable")
+}
+
+func TestGenericConstructorValidation(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box[T] { T value; }
+		test() {
+			Box[int] b = Box[int](value: "wrong");
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+func TestNestedGenericInstance(t *testing.T) {
+	// Multi-arg generics in expression context aren't supported (grammar limitation),
+	// so use type annotation via function parameter.
+	checkOK(t, `
+		type Box[T] { T value; }
+		type Pair[A, B] { A first; B second; }
+		test(Pair[int, Box[string]] p) {
+			Box[string] b = p.second;
+			string s = b.value;
+			int x = p.first;
+		}
+	`)
+}
+
+func TestGenericEnumVariantAccess(t *testing.T) {
+	checkOK(t, `
+		enum Option[T] { Some(T value), None }
+		test() {
+			Option[int] x = Option[int].Some(42);
+			Option[int] y = Option[int].None;
+		}
+	`)
+}
+
+func TestGenericEnumVariantConstructorType(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Option[T] { Some(T value), None }
+		test() {
+			Option[int] x = Option[int].Some("wrong");
+		}
+	`)
+	expectError(t, errs, "not assignable")
+}
+
+func TestConstraintValidationFails(t *testing.T) {
+	errs := checkErrs(t, `
+		type Hashable {
+			hash() int `+"`abstract;"+`
+		}
+		type MyMap[K: Hashable, V] { K key; V val; }
+		type NoHash { }
+		test() {
+			MyMap[NoHash, int] m = MyMap[NoHash, int](key: NoHash(), val: 1);
+		}
+	`)
+	expectError(t, errs, "does not satisfy constraint")
+}
+
+func TestConstraintValidationPasses(t *testing.T) {
+	// Multi-arg generics use type annotation (function parameter) since
+	// expression-context multi-arg is a grammar limitation.
+	checkOK(t, `
+		type Hashable {
+			hash() int `+"`abstract;"+`
+		}
+		type MyKey is Hashable {
+			hash() int { return 0; }
+		}
+		type MyMap[K: Hashable, V] { K key; V val; }
+		test(MyMap[MyKey, int] m) {
+			MyKey k = m.key;
+			int v = m.val;
+		}
+	`)
+}
+
+func TestRecursiveGenericType(t *testing.T) {
+	checkOK(t, `
+		type Tree[T] {
+			T value;
+			Tree[T]? left;
+			Tree[T]? right;
+		}
+		test() {
+			Tree[int] t = Tree[int](value: 1, left: none, right: none);
+		}
+	`)
+}
+
+func TestGenericInstanceIdentity(t *testing.T) {
+	// Box[int] should be assignable to Box[int]
+	checkOK(t, `
+		type Box[T] { T value; }
+		test() {
+			Box[int] a = Box[int](value: 1);
+			Box[int] b = a;
+		}
+	`)
+}
+
+func TestGenericInstanceMismatch(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box[T] { T value; }
+		test() {
+			Box[int] a = Box[int](value: 1);
+			Box[string] b = a;
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+func TestGenericEnumMatchExhaustive(t *testing.T) {
+	// Pattern bindings (v) aren't yet inserted into scope,
+	// so use literals in the arm body instead of bound variables.
+	checkOK(t, `
+		enum Option[T] { Some(T value), None }
+		test() {
+			Option[int] x = Option[int].Some(42);
+			y := match x {
+				Some(v) => 1,
+				None => 0,
+			};
+		}
+	`)
+}
+
+func TestGenericEnumMatchNonExhaustive(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Option[T] { Some(T value), None }
+		test() {
+			Option[int] x = Option[int].Some(42);
+			y := match x {
+				Some(v) => v,
+			};
+		}
+	`)
+	expectError(t, errs, "not exhaustive")
+}
+
+func TestInstancesRecordedInInfo(t *testing.T) {
+	info := checkOK(t, `
+		type Box[T] { T value; }
+		test() {
+			Box[int] b = Box[int](value: 42);
+		}
+	`)
+	if len(info.Instances) == 0 {
+		t.Error("expected at least one Instance recorded")
+	}
+}

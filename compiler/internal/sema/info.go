@@ -16,6 +16,9 @@ type Info struct {
 
 	// Scopes maps scope-creating AST nodes (File, Block, etc.) to their scope.
 	Scopes map[ast.Node]*types.Scope
+
+	// Instances records all concrete generic instantiations for later monomorphization.
+	Instances []*types.Instance
 }
 
 // recordType stores the resolved type for an expression.

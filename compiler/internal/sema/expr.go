@@ -243,8 +243,21 @@ func (c *Checker) checkBinaryExpr(e *ast.BinaryExpr) types.Type {
 // checkOperator looks up a binary operator method on the left type
 // and validates the right operand matches.
 func (c *Checker) checkOperator(pos ast.Pos, left types.Type, op string, right types.Type) types.Type {
-	named, ok := left.(*types.Named)
-	if !ok {
+	var named *types.Named
+	var subst map[*types.TypeParam]types.Type
+
+	switch t := left.(type) {
+	case *types.Named:
+		named = t
+	case *types.Instance:
+		origin, ok := t.Origin().(*types.Named)
+		if !ok {
+			c.errorf(pos, "operator %s not defined on type %s", op, left)
+			return nil
+		}
+		named = origin
+		subst = types.BuildSubstMap(origin.TypeParams(), t.TypeArgs())
+	default:
 		c.errorf(pos, "operator %s not defined on type %s", op, left)
 		return nil
 	}
@@ -256,6 +269,9 @@ func (c *Checker) checkOperator(pos ast.Pos, left types.Type, op string, right t
 	}
 
 	sig := m.Sig()
+	if subst != nil {
+		sig = types.Substitute(sig, subst).(*types.Signature)
+	}
 	if len(sig.Params()) != 1 {
 		c.errorf(pos, "operator %s has invalid signature", op)
 		return nil
@@ -309,8 +325,21 @@ func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr) types.Type {
 }
 
 func (c *Checker) checkUnaryOperator(pos ast.Pos, operand types.Type, op string) types.Type {
-	named, ok := operand.(*types.Named)
-	if !ok {
+	var named *types.Named
+	var subst map[*types.TypeParam]types.Type
+
+	switch t := operand.(type) {
+	case *types.Named:
+		named = t
+	case *types.Instance:
+		origin, ok := t.Origin().(*types.Named)
+		if !ok {
+			c.errorf(pos, "operator %s not defined on type %s", op, operand)
+			return nil
+		}
+		named = origin
+		subst = types.BuildSubstMap(origin.TypeParams(), t.TypeArgs())
+	default:
 		c.errorf(pos, "operator %s not defined on type %s", op, operand)
 		return nil
 	}
@@ -328,8 +357,12 @@ func (c *Checker) checkUnaryOperator(pos ast.Pos, operand types.Type, op string)
 		return nil
 	}
 
-	if m.Sig().Result() != nil {
-		return m.Sig().Result()
+	result := m.Sig().Result()
+	if subst != nil && result != nil {
+		result = types.Substitute(result, subst)
+	}
+	if result != nil {
+		return result
 	}
 	return types.TypVoid
 }
@@ -353,6 +386,32 @@ func (c *Checker) checkConstructorCall(e *ast.CallExpr, named *types.Named) type
 	return named
 }
 
+// checkInstanceConstructorCall handles constructor calls on generic instances: Box[int](value: 42).
+func (c *Checker) checkInstanceConstructorCall(e *ast.CallExpr, inst *types.Instance) types.Type {
+	origin, ok := inst.Origin().(*types.Named)
+	if !ok {
+		c.errorf(e.Pos(), "cannot construct %s", inst)
+		return nil
+	}
+	subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+	for _, arg := range e.Args {
+		argType := c.checkExpr(arg.Value)
+		if arg.Name != "" {
+			f := origin.LookupField(arg.Name)
+			if f == nil {
+				c.errorf(arg.Pos(), "type %s has no field %s", inst, arg.Name)
+			} else if argType != nil {
+				fieldType := types.Substitute(f.Type(), subst)
+				if !types.AssignableTo(argType, fieldType) {
+					c.errorf(arg.Pos(), "cannot assign %s to field %s of type %s",
+						argType, arg.Name, fieldType)
+				}
+			}
+		}
+	}
+	return inst
+}
+
 func (c *Checker) checkCallExpr(e *ast.CallExpr) types.Type {
 	calleeType := c.checkExpr(e.Callee)
 	if calleeType == nil {
@@ -363,6 +422,8 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) types.Type {
 	switch t := calleeType.(type) {
 	case *types.Named:
 		return c.checkConstructorCall(e, t)
+	case *types.Instance:
+		return c.checkInstanceConstructorCall(e, t)
 	case *types.Enum:
 		// Enum constructors aren't called directly (use Enum.Variant syntax)
 		c.errorf(e.Pos(), "cannot construct enum %s directly; use Enum.Variant syntax", t)
@@ -430,11 +491,9 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 	case *types.Enum:
 		// Check for variant access (Enum.VariantName)
 		if v := t.LookupVariant(e.Field); v != nil {
-			// Variant with no fields acts as a value of the enum type
 			if v.NumFields() == 0 {
 				return t
 			}
-			// Variant with fields is a constructor — return a function type
 			params := make([]*types.Param, v.NumFields())
 			for i, f := range v.Fields() {
 				params[i] = types.NewParam(f.Name(), f.Type(), types.RefNone)
@@ -447,19 +506,79 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 		c.errorf(e.Pos(), "enum %s has no variant or method %s", t, e.Field)
 		return nil
 
+	case *types.Instance:
+		return c.resolveInstanceMember(e.Pos(), t, e.Field)
+
 	default:
 		c.errorf(e.Pos(), "cannot access member on type %s", target)
 		return nil
 	}
 }
 
+// resolveInstanceMember resolves field/method/variant access on a generic Instance.
+func (c *Checker) resolveInstanceMember(pos ast.Pos, inst *types.Instance, name string) types.Type {
+	switch origin := inst.Origin().(type) {
+	case *types.Named:
+		subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+		if f := origin.LookupField(name); f != nil {
+			return types.Substitute(f.Type(), subst)
+		}
+		if m := origin.LookupMethod(name); m != nil {
+			return types.Substitute(m.Sig(), subst)
+		}
+		c.errorf(pos, "type %s has no field or method %s", inst, name)
+		return nil
+
+	case *types.Enum:
+		subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+		// Override the result type so variant values/constructors return Instance, not raw Enum
+		return c.resolveEnumMemberInst(pos, origin, name, subst, inst)
+
+	default:
+		c.errorf(pos, "cannot access member on type %s", inst)
+		return nil
+	}
+}
+
+// resolveEnumMemberInst resolves variant/method on a generic enum, using inst as return type.
+func (c *Checker) resolveEnumMemberInst(pos ast.Pos, enum *types.Enum, name string, subst map[*types.TypeParam]types.Type, inst *types.Instance) types.Type {
+	if v := enum.LookupVariant(name); v != nil {
+		if v.NumFields() == 0 {
+			return inst
+		}
+		params := make([]*types.Param, v.NumFields())
+		for i, f := range v.Fields() {
+			params[i] = types.NewParam(f.Name(), types.Substitute(f.Type(), subst), types.RefNone)
+		}
+		return types.NewSignature(nil, params, inst, false)
+	}
+	if m := enum.LookupMethod(name); m != nil {
+		return types.Substitute(m.Sig(), subst)
+	}
+	c.errorf(pos, "enum %s has no variant or method %s", inst, name)
+	return nil
+}
+
 func (c *Checker) checkIndexExpr(e *ast.IndexExpr) types.Type {
 	target := c.checkExpr(e.Target)
-	index := c.checkExpr(e.Index)
-
 	if target == nil {
 		return nil
 	}
+
+	// Generic instantiation: Type[Arg] in expression context.
+	// When target is a generic Named/Enum, treat [index] as type argument.
+	switch t := target.(type) {
+	case *types.Named:
+		if len(t.TypeParams()) > 0 {
+			return c.instantiateFromIndex(e, t, t.TypeParams())
+		}
+	case *types.Enum:
+		if len(t.TypeParams()) > 0 {
+			return c.instantiateFromIndex(e, t, t.TypeParams())
+		}
+	}
+
+	index := c.checkExpr(e.Index)
 
 	switch t := target.(type) {
 	case *types.Array:
@@ -486,6 +605,32 @@ func (c *Checker) checkIndexExpr(e *ast.IndexExpr) types.Type {
 	}
 }
 
+// instantiateFromIndex handles Type[Arg] in expression context as generic instantiation.
+// The index expression is reinterpreted as a type argument.
+func (c *Checker) instantiateFromIndex(e *ast.IndexExpr, origin types.Type, tparams []*types.TypeParam) types.Type {
+	// The index is a type name used as a type argument
+	typeArg := c.checkExpr(e.Index)
+	if typeArg == nil {
+		return nil
+	}
+
+	if len(tparams) != 1 {
+		c.errorf(e.Pos(), "type %s expects %d type arguments, got 1", origin, len(tparams))
+		return nil
+	}
+
+	// Special case: Map[K,V] — but Map needs 2 args so won't match here
+	if named, ok := origin.(*types.Named); ok && named == types.TypMap {
+		c.errorf(e.Pos(), "Map requires 2 type arguments")
+		return nil
+	}
+
+	c.validateConstraints(e.Pos(), origin, []types.Type{typeArg})
+	inst := types.NewInstance(origin, []types.Type{typeArg})
+	c.info.Instances = append(c.info.Instances, inst)
+	return inst
+}
+
 func (c *Checker) checkOptionalChainExpr(e *ast.OptionalChainExpr) types.Type {
 	target := c.checkExpr(e.Target)
 	if target == nil {
@@ -499,21 +644,29 @@ func (c *Checker) checkOptionalChainExpr(e *ast.OptionalChainExpr) types.Type {
 	}
 
 	inner := opt.Elem()
-	named, ok := inner.(*types.Named)
-	if !ok {
-		c.errorf(e.Pos(), "cannot access field on non-named type %s", inner)
+
+	switch t := inner.(type) {
+	case *types.Named:
+		if f := t.LookupField(e.Field); f != nil {
+			return types.NewOptional(f.Type())
+		}
+		if m := t.LookupMethod(e.Field); m != nil {
+			return types.NewOptional(m.Sig())
+		}
+		c.errorf(e.Pos(), "type %s has no field or method %s", t, e.Field)
+		return nil
+
+	case *types.Instance:
+		result := c.resolveInstanceMember(e.Pos(), t, e.Field)
+		if result != nil {
+			return types.NewOptional(result)
+		}
+		return nil
+
+	default:
+		c.errorf(e.Pos(), "cannot access field on type %s", inner)
 		return nil
 	}
-
-	if f := named.LookupField(e.Field); f != nil {
-		return types.NewOptional(f.Type())
-	}
-	if m := named.LookupMethod(e.Field); m != nil {
-		return types.NewOptional(m.Sig())
-	}
-
-	c.errorf(e.Pos(), "type %s has no field or method %s", named, e.Field)
-	return nil
 }
 
 func (c *Checker) checkIsExpr(e *ast.IsExpr) types.Type {
@@ -701,7 +854,16 @@ func (c *Checker) checkMatchPattern(pat ast.MatchPattern, subjectType types.Type
 	case *ast.ShortDestructureMatchPattern:
 		// Short form: Ok(val) — check if it's a variant of the match subject enum
 		if subjectType != nil {
-			if enum, ok := subjectType.(*types.Enum); ok {
+			var enum *types.Enum
+			switch st := subjectType.(type) {
+			case *types.Enum:
+				enum = st
+			case *types.Instance:
+				if e, ok := st.Origin().(*types.Enum); ok {
+					enum = e
+				}
+			}
+			if enum != nil {
 				if v := enum.LookupVariant(p.Name); v != nil {
 					if len(p.Bindings) != v.NumFields() {
 						c.errorf(p.Pos(), "variant %s has %d fields, got %d bindings",

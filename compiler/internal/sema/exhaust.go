@@ -24,8 +24,8 @@ func (c *Checker) checkMatchExhaustiveness(e *ast.MatchExpr, subjectType types.T
 	}
 
 	// For enum types, check variant coverage
-	enum, ok := subjectType.(*types.Enum)
-	if !ok {
+	enum := extractEnum(subjectType)
+	if enum == nil {
 		// Non-enum match without wildcard — warn
 		c.errorf(e.Pos(), "match on non-enum type %s must include a wildcard (_) or binding pattern", subjectType)
 		return
@@ -103,8 +103,8 @@ func (c *Checker) matchIsExhaustive(e *ast.MatchExpr, subjectType types.Type) bo
 	if subjectType == nil {
 		return false
 	}
-	enum, ok := subjectType.(*types.Enum)
-	if !ok {
+	enum := extractEnum(subjectType)
+	if enum == nil {
 		return false
 	}
 	covered := make(map[string]bool)
@@ -117,6 +117,20 @@ func (c *Checker) matchIsExhaustive(e *ast.MatchExpr, subjectType types.Type) bo
 		}
 	}
 	return true
+}
+
+// extractEnum returns the underlying Enum from a type, handling both
+// direct *Enum and *Instance wrapping an Enum origin.
+func extractEnum(typ types.Type) *types.Enum {
+	switch t := typ.(type) {
+	case *types.Enum:
+		return t
+	case *types.Instance:
+		if e, ok := t.Origin().(*types.Enum); ok {
+			return e
+		}
+	}
+	return nil
 }
 
 // matchesEnum checks if a pattern's enum name matches the given enum type.

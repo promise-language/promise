@@ -10,7 +10,8 @@ Implementation stages for the Promise compiler pipeline.
 | 2 | `compiler/internal/ast/` | AST builder: parse tree → typed AST nodes | Done |
 | 3 | `compiler/internal/types/` | Type system: Named, Enum, Signature, Scope, Universe | Done |
 | 4 | `compiler/internal/sema/` | Semantic analysis: type checking, name resolution, returns, exhaustiveness | Done |
-| 5 | `compiler/internal/sema/` | Semantic analysis completion: generic substitution, use declarations | Next |
+| 5a | `compiler/internal/sema/` | Generic type substitution, constraint validation, instance tracking | Done |
+| 5b | `compiler/internal/sema/` | Use declarations, multi-constraint, Iter/Stream, unreachable code | Next |
 | 6 | `compiler/internal/ownership/` | Borrow checker: move semantics, lifetime inference | Planned |
 | 7 | `compiler/internal/meta/` | Meta annotation processing and validation | Planned |
 | 8 | `compiler/internal/codegen/` | LLVM IR generation | Planned |
@@ -91,34 +92,80 @@ Four-pass analysis: declare → define → check → verify.
 
 ---
 
-## Stage 5 — Sema Completion (Next)
+## Stage 5a — Generic Type Substitution (Done)
 
-Complete semantic analysis with generic substitution and use declarations.
+Type substitution engine and integration into the semantic checker.
 
-### 5a. Generic substitution
+**Files:** `types/subst.go` (new), updates to `sema/expr.go`, `sema/resolve.go`, `sema/stmt.go`, `sema/exhaust.go`, `sema/info.go`
 
-Implement type substitution for generic instantiation:
+- **Substitution engine** (`types/subst.go`): `Substitute(typ, subst)` recursively replaces TypeParam with concrete types across all type kinds (Named, Enum, Instance, Signature, Optional, Ref, Pointer, Tuple, Array, Slice, Map)
+- **Field access on Instance**: `box.value` where `box: Box[int]` resolves `T` → `int` via substitution
+- **Method calls on Instance**: method signatures substituted — params and return types use concrete types
+- **Constructor calls on Instance**: `Box[int](value: 42)` validates field types with substitution
+- **Operator dispatch on Instance**: binary/unary operators resolved through origin type with substitution
+- **Constraint validation**: type arguments checked against TypeParam constraints at instantiation
+- **Expression-context instantiation**: `Box[int]` in expression context (parsed as IndexExpr) reinterpreted as generic instantiation for single-type-arg generics
+- **Instance tracking**: `Info.Instances` records all concrete instantiations for later monomorphization
+- **Exhaustiveness for generic enums**: `Option[int]` match checks work via Instance → Enum extraction
+- **Optional chaining on Instance**: `box?.value` resolves member through substitution
+- **For-in on Iter/Stream instances**: `Iter[T]` iteration yields `T`
+- **Known limitation**: multi-arg generics (e.g., `Pair[int, string]`) only work in type annotation position (function params, variable types), not in expression context — grammar allows only single expression inside `[]`
 
-| Task | Description |
-|------|-------------|
-| Type substitution | Replace `TypeParam` with concrete types during instantiation |
-| Monomorphization | Generate concrete types/functions for each unique set of type args |
-| Constraint validation | Check that concrete types satisfy `T: Constraint` bounds |
-| Nested generics | Handle `Map[String, List[Int]]` correctly |
+---
 
-### 5b. Use declarations
+## Stage 5b — Sema Completion (Next)
 
-| Task | Description |
-|------|-------------|
-| Process `use` decls | Register imported names at file scope |
-| Module-qualified names | Resolve `alias.name` member expressions |
-| Placeholder loading | Stub for actual module resolution (Stage 9) |
+Remaining semantic analysis features.
 
-### 5c. Remaining items
+### Use declarations
 
-- Populate `Iter[T]` and `Stream[T]` with abstract methods (for interface checking)
-- Multi-constraint resolution (`T: A + B` — currently only first constraint used)
-- Unreachable code detection after `return`, `raise`, `break`, `continue`
+AST support exists (`UseDecl` with Alias/Path, `File.Uses`), grammar works (`use io "std/io"`), but sema ignores `file.Uses` entirely.
+
+| Task | Description | Files |
+|------|-------------|-------|
+| Add `Module` object type | New types.Object representing an imported module alias | `types/object.go` |
+| Process `file.Uses` in Pass 1 | Create Module objects and insert aliases into file scope | `sema/decl.go` |
+| Module member access | Detect `alias.name` in checkMemberExpr; report "module not loaded" | `sema/expr.go` |
+| Duplicate alias detection | Module alias conflicts with other declarations caught by existing insert() | already works |
+
+**Note:** Actual module loading deferred to Stage 9. Stage 5b creates placeholders only.
+
+### Multi-constraint resolution
+
+Currently `resolveTypeParamConstraints` only uses `ap.Constraint[0]`. AST supports `T: A + B` via `TypeParam.Constraint []TypeRef`.
+
+| Task | Description | Files |
+|------|-------------|-------|
+| Add `constraints []Type` to TypeParam | Store all resolved constraints, not just first | `types/typeparam.go` |
+| Resolve all constraints | Loop over `ap.Constraint` slice in define pass | `sema/decl.go` |
+| Validate all constraints | Check type arg satisfies ALL constraints at instantiation | `sema/resolve.go` |
+| Update AssignableTo | TypeParam assignable to any of its constraints | `types/equal.go` |
+
+### Iter[T] and Stream[T] population
+
+Currently empty generic stubs in Universe. Need abstract methods for interface checking and for-in support.
+
+| Task | Description | Files |
+|------|-------------|-------|
+| Iter[T].next() T? | Abstract method returning optional element | `types/universe.go` |
+| Stream[T].next() Task[T?] | Abstract async next method | `types/universe.go` |
+| For-in via Iter | Check `next()` method existence on iterable types | `sema/stmt.go` |
+
+### Unreachable code detection
+
+| Task | Description | Files |
+|------|-------------|-------|
+| Detect dead code | After return/raise/break/continue, flag following statements | `sema/stmt.go` |
+| Report warnings | "unreachable code after return/raise/break/continue" | `sema/stmt.go` |
+
+### Match pattern bindings
+
+Match arm pattern bindings (e.g., `Some(v) => v`) are not inserted into scope — patterns are validated but bindings aren't available in the arm body. This blocks using destructured enum values in match results.
+
+| Task | Description | Files |
+|------|-------------|-------|
+| Insert pattern bindings | Open scope per arm, insert bindings from ShortDestructure/EnumDestructure patterns | `sema/expr.go` |
+| Type bindings from substitution | For generic enum Instance, substitute variant field types for binding types | `sema/expr.go` |
 
 ---
 

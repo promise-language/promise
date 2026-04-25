@@ -153,7 +153,42 @@ func (c *Checker) resolveNamedType(r *ast.NamedTypeRef) types.Type {
 		return types.NewMap(typeArgs[0], typeArgs[1])
 	}
 
-	return types.NewInstance(typ, typeArgs)
+	// Validate type argument constraints
+	c.validateConstraints(r.Pos(), typ, typeArgs)
+
+	inst := types.NewInstance(typ, typeArgs)
+	c.info.Instances = append(c.info.Instances, inst)
+	return inst
+}
+
+// validateConstraints checks that each type argument satisfies its type parameter's constraint.
+func (c *Checker) validateConstraints(pos ast.Pos, origin types.Type, typeArgs []types.Type) {
+	var tparams []*types.TypeParam
+	switch t := origin.(type) {
+	case *types.Named:
+		tparams = t.TypeParams()
+	case *types.Enum:
+		tparams = t.TypeParams()
+	default:
+		return
+	}
+	for i, tp := range tparams {
+		if tp.Constraint() == nil {
+			continue
+		}
+		arg := typeArgs[i]
+		constraint := tp.Constraint()
+		// Check if the type arg satisfies the constraint
+		if types.AssignableTo(arg, constraint) {
+			continue
+		}
+		// Check interface implementation
+		if cn, ok := constraint.(*types.Named); ok && types.Implements(arg, cn) {
+			continue
+		}
+		c.errorf(pos, "type %s does not satisfy constraint %s for type parameter %s",
+			arg, constraint, tp.Obj().Name())
+	}
 }
 
 // resolveRefMod converts an ast.RefModifier to a types.RefMod.

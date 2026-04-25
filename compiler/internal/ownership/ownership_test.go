@@ -817,3 +817,349 @@ func TestUserCopyInCall(t *testing.T) {
 		}
 	`)
 }
+
+// ===== Stage 6b: Borrow Tracking =====
+
+// === Call-scoped borrow expiry ===
+
+func TestCallScopedBorrowExpires(t *testing.T) {
+	// Passing a variable by shared borrow should not prevent subsequent moves.
+	// The borrow expires at the statement boundary.
+	ownerOK(t, `
+		read(string &s) {}
+		consume(string s) {}
+		test() {
+			string s = "a";
+			read(s);
+			consume(s);
+		}
+	`)
+}
+
+func TestSequentialMutBorrowsOK(t *testing.T) {
+	// Each mutable borrow expires at statement boundary, so sequential calls are OK.
+	ownerOK(t, `
+		modify(string ~s) {}
+		test() {
+			string s = "a";
+			modify(s);
+			modify(s);
+		}
+	`)
+}
+
+func TestSequentialSharedThenMutOK(t *testing.T) {
+	// Shared borrow expires before mutable borrow starts.
+	ownerOK(t, `
+		read(string &s) {}
+		modify(string ~s) {}
+		test() {
+			string s = "a";
+			read(s);
+			modify(s);
+		}
+	`)
+}
+
+// === Cross-statement borrow conflicts (variable-scoped borrows) ===
+
+func TestStoredBorrowBlocksMove(t *testing.T) {
+	// When a function returns a ref type and the result is stored,
+	// borrow is promoted to variable-scoped. Moving the origin is blocked.
+	errs := ownerErrs(t, `
+		getRef(string &s) string& { return s; }
+		consume(string s) {}
+		test() {
+			string s = "hello";
+			string &r = getRef(s);
+			consume(s);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
+}
+
+func TestStoredBorrowBlocksMutBorrow(t *testing.T) {
+	// Stored shared borrow blocks a subsequent mutable borrow.
+	errs := ownerErrs(t, `
+		getRef(string &s) string& { return s; }
+		modify(string ~s) {}
+		test() {
+			string s = "hello";
+			string &r = getRef(s);
+			modify(s);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot borrow 's' as mutable")
+}
+
+func TestStoredMutBorrowBlocksShared(t *testing.T) {
+	// Stored mutable borrow blocks a subsequent shared borrow.
+	errs := ownerErrs(t, `
+		getMut(string ~s) string~ { return s; }
+		read(string &s) {}
+		test() {
+			string s = "hello";
+			string ~r = getMut(s);
+			read(s);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot borrow 's' as shared")
+}
+
+// === Move-while-borrowed ===
+
+func TestMoveWhileBorrowedAssign(t *testing.T) {
+	// Assigning a borrowed variable to another variable is a move.
+	errs := ownerErrs(t, `
+		getRef(string &s) string& { return s; }
+		test() {
+			string s = "hello";
+			string &r = getRef(s);
+			string t = s;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
+}
+
+// === Assignment-while-borrowed ===
+
+func TestAssignWhileBorrowed(t *testing.T) {
+	// Cannot reassign a variable while it is borrowed by another variable.
+	errs := ownerErrs(t, `
+		getRef(string &s) string& { return s; }
+		test() {
+			string s = "hello";
+			string &r = getRef(s);
+			s = "world";
+		}
+	`)
+	expectOwnerError(t, errs, "cannot assign to 's' while it is borrowed")
+}
+
+func TestBorrowerReassignExpiresBorrow(t *testing.T) {
+	// When the borrower variable is reassigned, the old borrow expires.
+	// However, if r is reassigned to a new borrow of s, s is still borrowed.
+	errs := ownerErrs(t, `
+		getRef(string &s) string& { return s; }
+		consume(string s) {}
+		test() {
+			string s = "hello";
+			string &r = getRef(s);
+			r = getRef(s);
+			consume(s);
+		}
+	`)
+	// s is still borrowed through the new r
+	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
+}
+
+// === Return reference safety ===
+
+func TestReturnRefToLocal(t *testing.T) {
+	// Cannot return a reference to a local variable — would create a dangling reference.
+	errs := ownerErrs(t, `
+		bad() string& {
+			string s = "hello";
+			return s;
+		}
+	`)
+	expectOwnerError(t, errs, "cannot return reference to local variable 's'")
+}
+
+func TestReturnRefToParam(t *testing.T) {
+	// Returning a reference to a parameter is OK — the caller still owns it.
+	ownerOK(t, `
+		good(string &s) string& { return s; }
+	`)
+}
+
+func TestReturnNonRefOK(t *testing.T) {
+	// Returning a non-ref type local is fine (it's a move, not a dangling ref).
+	ownerOK(t, `
+		ok() string {
+			string s = "hello";
+			return s;
+		}
+	`)
+}
+
+// === Method receiver borrows ===
+
+func TestMethodSharedReceiverCallScoped(t *testing.T) {
+	// Calling a shared-receiver method creates a call-scoped borrow that expires.
+	ownerOK(t, `
+		type T {
+			int x;
+			read(&this) int { return this.x; }
+		}
+		consume(T t) {}
+		test() {
+			T t = T(x: 1);
+			t.read();
+			consume(t);
+		}
+	`)
+}
+
+func TestMethodMutReceiverCallScoped(t *testing.T) {
+	// Calling a mut-receiver method creates a call-scoped borrow that expires.
+	ownerOK(t, `
+		type T {
+			int x;
+			mutate(~this) { this.x = 2; }
+		}
+		consume(T t) {}
+		test() {
+			T t = T(x: 1);
+			t.mutate();
+			consume(t);
+		}
+	`)
+}
+
+func TestMethodReceiverStoredBorrow(t *testing.T) {
+	// Method returning a ref type creates a stored borrow on the receiver.
+	errs := ownerErrs(t, `
+		type T {
+			int x;
+			getRef(&this) int& { return this.x; }
+		}
+		consume(T t) {}
+		test() {
+			T t = T(x: 1);
+			int &r = t.getRef();
+			consume(t);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move 't' while it is borrowed")
+}
+
+// === Control flow and borrows ===
+
+func TestBorrowInIfBranch(t *testing.T) {
+	// Conservative: stored borrow created in then-branch persists after if.
+	errs := ownerErrs(t, `
+		getRef(string &s) string& { return s; }
+		consume(string s) {}
+		test() {
+			string s = "hello";
+			bool b = true;
+			string &r = "";
+			if b {
+				r = getRef(s);
+			}
+			consume(s);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
+}
+
+func TestBorrowInLoop(t *testing.T) {
+	// Conservative: stored borrow created in loop body persists after loop.
+	errs := ownerErrs(t, `
+		getRef(string &s) string& { return s; }
+		consume(string s) {}
+		test() {
+			string s = "hello";
+			string &r = "";
+			while true {
+				r = getRef(s);
+				break;
+			}
+			consume(s);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
+}
+
+func TestBorrowInBothBranches(t *testing.T) {
+	// Conservative: stored borrow in both branches → borrow persists.
+	errs := ownerErrs(t, `
+		getRef(string &s) string& { return s; }
+		consume(string s) {}
+		test() {
+			string s = "hello";
+			bool b = true;
+			string &r = "";
+			if b {
+				r = getRef(s);
+			} else {
+				r = getRef(s);
+			}
+			consume(s);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
+}
+
+// === Copy types and borrows ===
+
+func TestCopyTypeNoBorrowTracking(t *testing.T) {
+	// Copy types don't need borrow tracking — borrows of copy types are allowed freely.
+	ownerOK(t, `
+		read(int &x) {}
+		test() {
+			int x = 1;
+			read(x);
+			int y = x;
+		}
+	`)
+}
+
+func TestBorrowDoesNotMoveValue(t *testing.T) {
+	// Passing by borrow does NOT consume the value — the variable can still be used.
+	ownerOK(t, `
+		read(string &s) {}
+		consume(string s) {}
+		test() {
+			string s = "hello";
+			read(s);
+			read(s);
+			consume(s);
+		}
+	`)
+}
+
+// === Borrow parameter does not move ===
+
+func TestBorrowParamMultipleCalls(t *testing.T) {
+	// Multiple shared borrow calls on same variable should work (borrows expire).
+	ownerOK(t, `
+		read(string &s) {}
+		test() {
+			string s = "hello";
+			read(s);
+			read(s);
+			read(s);
+		}
+	`)
+}
+
+func TestMutBorrowParamDoesNotMove(t *testing.T) {
+	// Passing by mutable borrow does NOT consume the value.
+	ownerOK(t, `
+		modify(string ~s) {}
+		consume(string s) {}
+		test() {
+			string s = "hello";
+			modify(s);
+			consume(s);
+		}
+	`)
+}
+
+// === Cross-statement borrow: inferred var decl ===
+
+func TestStoredBorrowInferredVarDecl(t *testing.T) {
+	// Borrow promotion should also work with inferred var decls.
+	errs := ownerErrs(t, `
+		getRef(string &s) string& { return s; }
+		consume(string s) {}
+		test() {
+			string s = "hello";
+			r := getRef(s);
+			consume(s);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
+}

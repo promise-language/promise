@@ -13,7 +13,7 @@ Implementation stages for the Promise compiler pipeline.
 | 5a | `compiler/internal/sema/` | Generic type substitution, constraint validation, instance tracking | Done |
 | 5b | `compiler/internal/sema/` | Match bindings, unreachable code, multi-constraint, Iter/Stream, use decls | Done |
 | 6a | `compiler/internal/ownership/` | Move semantics, use-after-move, copy exemption, borrow conflicts, unsafe pointer | Done |
-| 6b | `compiler/internal/ownership/` | Lifetime inference, NLL, advanced borrow tracking | Next |
+| 6b | `compiler/internal/ownership/` | Borrow tracking, implicit coercion, return safety | Done |
 | 7 | `compiler/internal/sema/` | Meta annotation processing and validation | Done |
 | 8 | `compiler/internal/codegen/` | LLVM IR generation | Planned |
 | 9 | `compiler/internal/module/` | Module resolution, dependency graph | Planned |
@@ -141,19 +141,27 @@ Separate post-sema pass for ownership analysis.
 - **Borrow conflict detection**: at call sites, detects when the same variable is passed as `~` (mutable borrow) alongside any other borrow. Multiple shared borrows OK.
 - **Unsafe pointer validation**: `TypedVarDecl` with pointer type ref (`T*`) outside `unsafe` block reports error.
 - **CLI integration**: ownership errors reported after sema in `--check` mode.
-- **Known limitations**: sema doesn't yet support implicit `T` → `T&`/`T~` coercion at call sites (borrow tests use unit-level verification), and pointer value construction isn't sema-supported (pointer tests use direct AST construction).
+- **Known limitations**: pointer value construction isn't sema-supported (pointer tests use direct AST construction). Implicit borrow coercion addressed in Stage 6b.
 
 ---
 
-## Stage 6b — Lifetime Inference (Planned)
+## Stage 6b — Borrow Tracking & Return Safety (Done)
 
-Advanced borrow checking and lifetime analysis.
+Cross-statement borrow tracking, implicit borrow coercion, and return reference safety.
 
-- Lifetime inference: determine reference validity scopes
-- Non-lexical lifetimes (NLL)
-- Lifetime elision rules (function params → result)
-- Implicit borrow coercion (`T` → `T&`/`T~`) at call sites
-- Drop semantics and destructor ordering
+**Files:** New `ownership/borrow.go` (~155 LOC); updates to `ownership/check.go`, `ownership/expr.go`, `ownership/stmt.go`, `types/equal.go`; 21 new ownership tests, 8 new types tests
+
+- **Implicit borrow coercion**: `AssignableTo` extended with three rules — `T` → `T&` (shared), `T` → `T~` (mutable), `T~` → `T&` (mut-to-shared downgrade). Uses recursive `AssignableTo` for inheritance compatibility.
+- **BorrowSet data structure**: tracks active borrows orthogonally to move state. Each `Borrow` records origin variable, kind (shared/mutable), borrower variable (empty for call-scoped), and source position. All methods nil-safe for backward compatibility.
+- **Call-scoped borrows**: passing a variable to a borrow parameter (`string &s`, `string ~s`) creates a borrow that expires at statement boundary. Sequential borrows of the same variable work correctly.
+- **Variable-scoped borrows**: when a function returning a ref type (`string&`, `string~`) has its result stored in a variable, pending call-scoped borrows are promoted to variable-scoped. The borrow persists until the borrower variable is reassigned or goes out of scope.
+- **Move-while-borrowed detection**: `tryMove` checks for active borrows before marking a variable as moved.
+- **Assignment-while-borrowed detection**: reassigning a borrowed-from variable reports an error. Reassigning a borrower variable expires its borrows.
+- **Method receiver borrows**: calling a `&this` or `~this` method creates a borrow on the receiver variable.
+- **Return reference safety**: returning a reference to a local (non-parameter) variable from a function with ref return type is an error.
+- **Control flow propagation**: borrows are saved/restored/merged (union) across all control flow constructs (if/else, while, for-in, for, match, lambda, infinite loops) in parallel with move state.
+- **Parameter borrow detection**: handles ANTLR grammar ambiguity where `string &s` parses as `typeRef=string&` (not separate refMod) by checking parameter types for `SharedRef`/`MutRef` in addition to `Ref()`.
+- **Deferred**: explicit lifetime annotations, stored references in structs, full NLL last-use analysis, drop ordering, disjoint field borrows.
 
 ## Stage 7 — Meta Annotation Processing (Done)
 

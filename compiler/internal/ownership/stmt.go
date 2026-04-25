@@ -1,14 +1,21 @@
 package ownership
 
-import "djabi.dev/go/promise_lang/internal/ast"
+import (
+	"djabi.dev/go/promise_lang/internal/ast"
+	"djabi.dev/go/promise_lang/internal/types"
+)
 
 // checkBlock walks all statements in a block sequentially.
+// After each statement, call-scoped borrows are expired.
 func (c *Checker) checkBlock(block *ast.Block) {
 	if block == nil {
 		return
 	}
 	for _, stmt := range block.Stmts {
 		c.checkStmt(stmt)
+		if c.borrows != nil {
+			c.borrows.ExpireCallScoped()
+		}
 	}
 }
 
@@ -37,6 +44,7 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 		if s.Value != nil {
 			c.checkExpr(s.Value)
 			c.tryMove(s.Value)
+			c.checkReturnRefSafety(s)
 		}
 
 	case *ast.RaiseStmt:
@@ -84,6 +92,7 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 	}
 	if s.Name != "_" {
 		c.state[s.Name] = Owned
+		c.promoteCallBorrows(s.Name, s.Value)
 	}
 	// Raw pointer types are only allowed inside unsafe blocks.
 	if c.inUnsafe == 0 && isPointerTypeRef(s.Type) {
@@ -102,6 +111,7 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 	c.tryMove(s.Value)
 	if s.Name != "_" {
 		c.state[s.Name] = Owned
+		c.promoteCallBorrows(s.Name, s.Value)
 	}
 }
 
@@ -113,6 +123,35 @@ func (c *Checker) checkDestructureVarDecl(s *ast.DestructureVarDecl) {
 			c.state[name] = Owned
 		}
 	}
+}
+
+// promoteCallBorrows promotes pending call-scoped borrows to variable-scoped
+// when a function returning a reference type stores its result in a variable.
+func (c *Checker) promoteCallBorrows(varName string, value ast.Expr) {
+	if value == nil || c.borrows == nil {
+		return
+	}
+	typ := c.info.Types[value]
+	if !isRefType(typ) {
+		return
+	}
+	for _, b := range c.borrows.borrows {
+		if b.Borrower == "" {
+			b.Borrower = varName
+		}
+	}
+}
+
+// isRefType returns true if the type is a reference type (SharedRef or MutRef).
+func isRefType(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	switch t.(type) {
+	case *types.SharedRef, *types.MutRef:
+		return true
+	}
+	return false
 }
 
 func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
@@ -131,9 +170,19 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 	// Simple assignment resurrects the target variable.
 	if s.Op == ast.OpAssign {
 		if ident, ok := s.Target.(*ast.IdentExpr); ok {
+			// Cannot reassign a variable that is actively borrowed by others
+			if c.borrows != nil && c.borrows.HasAnyBorrow(ident.Name) {
+				c.errorf(s.Pos(), "cannot assign to '%s' while it is borrowed", ident.Name)
+			}
+			// Expire borrows where this variable is the borrower
+			if c.borrows != nil {
+				c.borrows.ExpireBorrower(ident.Name)
+			}
 			if _, tracked := c.state[ident.Name]; tracked {
 				c.state[ident.Name] = Owned
 			}
+			// Promote call-scoped borrows if the RHS returns a ref type
+			c.promoteCallBorrows(ident.Name, s.Value)
 		}
 	}
 }
@@ -152,6 +201,24 @@ func (c *Checker) checkAssignTarget(target ast.Expr) {
 	}
 }
 
+// checkReturnRefSafety validates that returned references don't point to locals.
+func (c *Checker) checkReturnRefSafety(s *ast.ReturnStmt) {
+	if c.curSig == nil || c.curSig.Result() == nil {
+		return
+	}
+	if !isRefType(c.curSig.Result()) {
+		return
+	}
+	ident, ok := s.Value.(*ast.IdentExpr)
+	if !ok {
+		return
+	}
+	// A variable is local if it's not a parameter of the current function.
+	if c.params != nil && !c.params[ident.Name] {
+		c.errorf(s.Pos(), "cannot return reference to local variable '%s'", ident.Name)
+	}
+}
+
 // --- Control flow statements ---
 
 func (c *Checker) checkIfStmt(s *ast.IfStmt) {
@@ -163,29 +230,37 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 		c.checkExpr(s.Cond)
 	}
 
-	saved := c.state.clone()
+	savedState := c.state.clone()
+	savedBorrows := c.borrows.Clone()
 	if s.Binding != "" && s.Binding != "_" {
 		c.state[s.Binding] = Owned
 	}
 	c.checkBlock(s.Body)
 	thenState := c.state
+	thenBorrows := c.borrows
 
 	if s.Else != nil {
-		c.state = saved.clone()
+		c.state = savedState.clone()
+		c.borrows = savedBorrows.Clone()
 		c.checkStmt(s.Else)
 		elseState := c.state
+		elseBorrows := c.borrows
 		c.state = merge(thenState, elseState)
+		c.borrows = MergeBorrowSets(thenBorrows, elseBorrows)
 	} else {
 		// No else: conservative merge with pre-if state.
-		c.state = merge(saved, thenState)
+		c.state = merge(savedState, thenState)
+		c.borrows = MergeBorrowSets(savedBorrows, thenBorrows)
 	}
 }
 
 func (c *Checker) checkWhileStmt(s *ast.WhileStmt) {
 	c.checkExpr(s.Cond)
-	saved := c.state.clone()
+	savedState := c.state.clone()
+	savedBorrows := c.borrows.Clone()
 	c.checkBlock(s.Body)
-	c.state = merge(saved, c.state)
+	c.state = merge(savedState, c.state)
+	c.borrows = MergeBorrowSets(savedBorrows, c.borrows)
 }
 
 func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
@@ -193,9 +268,11 @@ func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	if s.Binding != "" && s.Binding != "_" {
 		c.state[s.Binding] = Owned
 	}
-	saved := c.state.clone()
+	savedState := c.state.clone()
+	savedBorrows := c.borrows.Clone()
 	c.checkBlock(s.Body)
-	c.state = merge(saved, c.state)
+	c.state = merge(savedState, c.state)
+	c.borrows = MergeBorrowSets(savedBorrows, c.borrows)
 }
 
 func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
@@ -207,9 +284,11 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 	if s.Index != "" && s.Index != "_" {
 		c.state[s.Index] = Owned
 	}
-	saved := c.state.clone()
+	savedState := c.state.clone()
+	savedBorrows := c.borrows.Clone()
 	c.checkBlock(s.Body)
-	c.state = merge(saved, c.state)
+	c.state = merge(savedState, c.state)
+	c.borrows = MergeBorrowSets(savedBorrows, c.borrows)
 }
 
 func (c *Checker) checkClassicForStmt(s *ast.ClassicForStmt) {
@@ -221,7 +300,8 @@ func (c *Checker) checkClassicForStmt(s *ast.ClassicForStmt) {
 		c.state[s.InitName] = Owned
 	}
 
-	saved := c.state.clone()
+	savedState := c.state.clone()
+	savedBorrows := c.borrows.Clone()
 	if s.Cond != nil {
 		c.checkExpr(s.Cond)
 	}
@@ -229,11 +309,14 @@ func (c *Checker) checkClassicForStmt(s *ast.ClassicForStmt) {
 	if s.UpdateValue != nil {
 		c.checkExpr(s.UpdateValue)
 	}
-	c.state = merge(saved, c.state)
+	c.state = merge(savedState, c.state)
+	c.borrows = MergeBorrowSets(savedBorrows, c.borrows)
 }
 
 func (c *Checker) checkInfiniteLoop(s *ast.InfiniteLoop) {
-	saved := c.state.clone()
+	savedState := c.state.clone()
+	savedBorrows := c.borrows.Clone()
 	c.checkBlock(s.Body)
-	c.state = merge(saved, c.state)
+	c.state = merge(savedState, c.state)
+	c.borrows = MergeBorrowSets(savedBorrows, c.borrows)
 }

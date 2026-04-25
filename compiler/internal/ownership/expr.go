@@ -125,8 +125,8 @@ func (c *Checker) checkIdentUse(e *ast.IdentExpr) {
 }
 
 // tryMove marks the variable referenced by expr as Moved, if it is a
-// non-copy variable tracked in the current state. Does not report errors;
-// use-after-move is caught by checkIdentUse.
+// non-copy variable tracked in the current state. Also checks that the
+// variable is not actively borrowed.
 func (c *Checker) tryMove(expr ast.Expr) {
 	ident, ok := expr.(*ast.IdentExpr)
 	if !ok {
@@ -146,27 +146,60 @@ func (c *Checker) tryMove(expr ast.Expr) {
 	if _, tracked := c.state[ident.Name]; !tracked {
 		return
 	}
+	// Cannot move while borrowed
+	if c.borrows != nil && c.borrows.HasAnyBorrow(ident.Name) {
+		c.errorf(ident.Pos(), "cannot move '%s' while it is borrowed", ident.Name)
+	}
 	c.state[ident.Name] = Moved
 }
 
 // --- Call expressions ---
 
+// paramBorrowKind determines whether a parameter is a borrow parameter by
+// checking both the explicit Ref() modifier and whether the parameter type
+// is a reference type (SharedRef/MutRef). The grammar parses `string &s` as
+// typeRef=string& with refMod=none, so we must check the type as well.
+func paramBorrowKind(p *types.Param) BorrowKind {
+	// Check explicit Ref() first (used by receiver params)
+	switch p.Ref() {
+	case types.RefShared:
+		return BorrowShared
+	case types.RefMut:
+		return BorrowMut
+	}
+	// Check if the parameter type is a reference type
+	switch p.Type().(type) {
+	case *types.SharedRef:
+		return BorrowShared
+	case *types.MutRef:
+		return BorrowMut
+	}
+	return BorrowNone
+}
+
 // checkCallExpr handles function calls and constructor calls.
-// For function calls, arguments matched to value parameters trigger moves.
+// For function calls, arguments matched to value parameters trigger moves;
+// arguments matched to borrow parameters create borrows.
 // For constructor calls, all arguments are consumed.
 func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 	c.checkExpr(e.Callee)
 
 	sig := c.calleeSignature(e.Callee)
 	if sig != nil {
-		// Function/method call: process args left-to-right with move tracking.
+		// Function/method call: process args left-to-right.
 		params := sig.Params()
 		for i, arg := range e.Args {
 			c.checkExpr(arg.Value)
-			if i < len(params) && params[i].Ref() == types.RefNone {
-				c.tryMove(arg.Value)
+			if i < len(params) {
+				kind := paramBorrowKind(params[i])
+				if kind == BorrowNone {
+					c.tryMove(arg.Value)
+				} else {
+					c.createBorrowWithKind(arg.Value, kind, e.Pos())
+				}
 			}
 		}
+		c.checkReceiverBorrow(e.Callee, sig, e.Pos())
 		c.checkBorrowConflicts(e, sig)
 	} else {
 		// Constructor or unresolved call — all args are consumed.
@@ -175,6 +208,57 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 			c.tryMove(arg.Value)
 		}
 	}
+}
+
+// createBorrowWithKind checks for borrow conflicts with existing borrows and registers a new borrow.
+func (c *Checker) createBorrowWithKind(expr ast.Expr, kind BorrowKind, pos ast.Pos) {
+	ident, ok := expr.(*ast.IdentExpr)
+	if !ok {
+		return
+	}
+	name := ident.Name
+	if c.borrows == nil {
+		return
+	}
+	// Copy types don't need borrow tracking
+	if obj := c.info.Objects[ident]; obj != nil {
+		if v, ok := obj.(*types.Var); ok && isCopyType(v.Type()) {
+			return
+		}
+	}
+
+	// Check against existing borrows
+	if kind == BorrowMut && c.borrows.HasAnyBorrow(name) {
+		c.errorf(pos, "cannot borrow '%s' as mutable — it is already borrowed", name)
+		return
+	}
+	if kind == BorrowShared && c.borrows.HasMutBorrow(name) {
+		c.errorf(pos, "cannot borrow '%s' as shared — it is mutably borrowed", name)
+		return
+	}
+
+	c.borrows.Add(&Borrow{Origin: name, Kind: kind, Pos: pos})
+}
+
+// checkReceiverBorrow creates a borrow for method calls with &this or ~this receivers.
+func (c *Checker) checkReceiverBorrow(callee ast.Expr, sig *types.Signature, pos ast.Pos) {
+	if sig.Recv() == nil {
+		return
+	}
+	// Receiver uses Ref() (grammar: receiverParam : refMod? THIS)
+	recvKind := paramBorrowKind(sig.Recv())
+	if recvKind == BorrowNone {
+		return
+	}
+	member, ok := callee.(*ast.MemberExpr)
+	if !ok {
+		return
+	}
+	ident, ok := member.Target.(*ast.IdentExpr)
+	if !ok {
+		return
+	}
+	c.createBorrowWithKind(ident, recvKind, pos)
 }
 
 // calleeSignature extracts the Signature from a callee expression's type.
@@ -191,7 +275,7 @@ func (c *Checker) calleeSignature(callee ast.Expr) *types.Signature {
 
 type borrowEntry struct {
 	name string
-	ref  types.RefMod
+	kind BorrowKind
 }
 
 // checkBorrowConflicts detects conflicting borrows at a single call site.
@@ -205,15 +289,15 @@ func (c *Checker) checkBorrowConflicts(e *ast.CallExpr, sig *types.Signature) {
 		if i >= len(params) {
 			break
 		}
-		ref := params[i].Ref()
-		if ref == types.RefNone {
+		kind := paramBorrowKind(params[i])
+		if kind == BorrowNone {
 			continue
 		}
 		ident, ok := arg.Value.(*ast.IdentExpr)
 		if !ok {
 			continue
 		}
-		borrows = append(borrows, borrowEntry{name: ident.Name, ref: ref})
+		borrows = append(borrows, borrowEntry{name: ident.Name, kind: kind})
 	}
 
 	for i := 0; i < len(borrows); i++ {
@@ -221,24 +305,24 @@ func (c *Checker) checkBorrowConflicts(e *ast.CallExpr, sig *types.Signature) {
 			if borrows[i].name != borrows[j].name {
 				continue
 			}
-			if borrows[i].ref == types.RefMut || borrows[j].ref == types.RefMut {
-				other := borrows[i].ref
-				if borrows[i].ref == types.RefMut {
-					other = borrows[j].ref
+			if borrows[i].kind == BorrowMut || borrows[j].kind == BorrowMut {
+				other := borrows[i].kind
+				if borrows[i].kind == BorrowMut {
+					other = borrows[j].kind
 				}
 				c.errorf(e.Pos(), "cannot borrow '%s' as mutable because it is also borrowed as %s in the same call",
-					borrows[i].name, refLabel(other))
+					borrows[i].name, borrowKindLabel(other))
 				return
 			}
 		}
 	}
 }
 
-func refLabel(r types.RefMod) string {
-	switch r {
-	case types.RefShared:
+func borrowKindLabel(k BorrowKind) string {
+	switch k {
+	case BorrowShared:
 		return "shared"
-	case types.RefMut:
+	case BorrowMut:
 		return "mutable"
 	default:
 		return "value"
@@ -249,13 +333,18 @@ func refLabel(r types.RefMod) string {
 
 func (c *Checker) checkIfExpr(e *ast.IfExpr) {
 	c.checkExpr(e.Cond)
-	saved := c.state.clone()
+	savedState := c.state.clone()
+	savedBorrows := c.borrows.Clone()
 	c.checkBlock(e.Then)
 	thenState := c.state
-	c.state = saved.clone()
+	thenBorrows := c.borrows
+	c.state = savedState.clone()
+	c.borrows = savedBorrows.Clone()
 	c.checkBlock(e.Else)
 	elseState := c.state
+	elseBorrows := c.borrows
 	c.state = merge(thenState, elseState)
+	c.borrows = MergeBorrowSets(thenBorrows, elseBorrows)
 }
 
 func (c *Checker) checkMatchExpr(e *ast.MatchExpr) {
@@ -264,11 +353,14 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr) {
 		return
 	}
 
-	saved := c.state.clone()
+	savedState := c.state.clone()
+	savedBorrows := c.borrows.Clone()
 	var states []StateMap
+	var borrowSets []*BorrowSet
 
 	for _, arm := range e.Arms {
-		c.state = saved.clone()
+		c.state = savedState.clone()
+		c.borrows = savedBorrows.Clone()
 		c.registerPatternBindings(arm.Pattern)
 		if arm.Guard != nil {
 			c.checkExpr(arm.Guard)
@@ -280,13 +372,17 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr) {
 			c.checkBlock(arm.Block)
 		}
 		states = append(states, c.state)
+		borrowSets = append(borrowSets, c.borrows)
 	}
 
-	result := states[0]
-	for _, s := range states[1:] {
-		result = merge(result, s)
+	resultState := states[0]
+	resultBorrows := borrowSets[0]
+	for i := 1; i < len(states); i++ {
+		resultState = merge(resultState, states[i])
+		resultBorrows = MergeBorrowSets(resultBorrows, borrowSets[i])
 	}
-	c.state = result
+	c.state = resultState
+	c.borrows = resultBorrows
 }
 
 func (c *Checker) registerPatternBindings(pat ast.MatchPattern) {
@@ -320,7 +416,8 @@ func (c *Checker) registerPatternBindings(pat ast.MatchPattern) {
 // --- Lambda expressions ---
 
 func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) {
-	saved := c.state.clone()
+	savedState := c.state.clone()
+	savedBorrows := c.borrows.Clone()
 	for _, p := range e.Params {
 		if p.Name != "_" {
 			c.state[p.Name] = Owned
@@ -332,5 +429,6 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) {
 	if e.ExprBody != nil {
 		c.checkExpr(e.ExprBody)
 	}
-	c.state = saved
+	c.state = savedState
+	c.borrows = savedBorrows
 }

@@ -182,6 +182,29 @@ func AssignableTo(x, y Type) bool {
 		}
 	}
 
+	// Rule 6: T is assignable to T& (implicit shared borrow coercion)
+	if sr, ok := y.(*SharedRef); ok {
+		if AssignableTo(x, sr.elem) {
+			return true
+		}
+	}
+
+	// Rule 7: T is assignable to T~ (implicit mutable borrow coercion)
+	if mr, ok := y.(*MutRef); ok {
+		if AssignableTo(x, mr.elem) {
+			return true
+		}
+	}
+
+	// Rule 8: T~ is assignable to T& (mutable ref coerces to shared ref)
+	if sr, ok := y.(*SharedRef); ok {
+		if mr, ok := x.(*MutRef); ok {
+			if Identical(mr.elem, sr.elem) {
+				return true
+			}
+		}
+	}
+
 	return false
 }
 

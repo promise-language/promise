@@ -12,6 +12,9 @@ type Checker struct {
 	info     *sema.Info
 	errors   []error
 	state    StateMap
+	borrows  *BorrowSet       // active borrow tracking
+	params   map[string]bool  // parameter names for current function
+	curSig   *types.Signature // current function signature (for return checks)
 	inUnsafe int
 }
 
@@ -54,17 +57,29 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 		return
 	}
 
-	saved := c.state
+	savedState := c.state
+	savedBorrows := c.borrows
+	savedParams := c.params
+	savedSig := c.curSig
+
 	c.state = make(StateMap)
+	c.borrows = NewBorrowSet()
+	c.params = make(map[string]bool)
+	c.curSig = sig
 
 	for _, p := range sig.Params() {
 		if p.Name() != "" && p.Name() != "_" {
 			c.state[p.Name()] = Owned
+			c.params[p.Name()] = true
 		}
 	}
 
 	c.checkBlock(d.Body)
-	c.state = saved
+
+	c.state = savedState
+	c.borrows = savedBorrows
+	c.params = savedParams
+	c.curSig = savedSig
 }
 
 func (c *Checker) checkTypeDecl(d *ast.TypeDecl) {
@@ -94,20 +109,33 @@ func (c *Checker) checkTypeDecl(d *ast.TypeDecl) {
 }
 
 func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
-	saved := c.state
+	savedState := c.state
+	savedBorrows := c.borrows
+	savedParams := c.params
+	savedSig := c.curSig
+
 	c.state = make(StateMap)
+	c.borrows = NewBorrowSet()
+	c.params = make(map[string]bool)
+	c.curSig = m.Sig()
 
 	if m.Sig().Recv() != nil {
 		c.state["this"] = Owned
+		c.params["this"] = true
 	}
 	for _, p := range m.Sig().Params() {
 		if p.Name() != "" && p.Name() != "_" {
 			c.state[p.Name()] = Owned
+			c.params[p.Name()] = true
 		}
 	}
 
 	c.checkBlock(md.Body)
-	c.state = saved
+
+	c.state = savedState
+	c.borrows = savedBorrows
+	c.params = savedParams
+	c.curSig = savedSig
 }
 
 // lookupFileScope finds an object in the file-level scope.

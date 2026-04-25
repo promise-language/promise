@@ -984,6 +984,21 @@ func TestAssignableTo(t *testing.T) {
 			true,
 		},
 
+		// Rule 6: T assignable to T& (implicit shared borrow)
+		{"string_to_shared_ref", TypString, NewSharedRef(TypString), true},
+		{"int_to_shared_ref", TypInt, NewSharedRef(TypInt), true},
+		{"dog_to_shared_ref_animal", dog, NewSharedRef(animal), true},
+		{"int_to_shared_ref_string", TypInt, NewSharedRef(TypString), false},
+
+		// Rule 7: T assignable to T~ (implicit mutable borrow)
+		{"string_to_mut_ref", TypString, NewMutRef(TypString), true},
+		{"int_to_mut_ref", TypInt, NewMutRef(TypInt), true},
+		{"int_to_mut_ref_string", TypInt, NewMutRef(TypString), false},
+
+		// Rule 8: T~ assignable to T& (mut ref coerces to shared ref)
+		{"mut_ref_to_shared_ref", NewMutRef(TypString), NewSharedRef(TypString), true},
+		{"mut_ref_to_shared_ref_mismatch", NewMutRef(TypInt), NewSharedRef(TypString), false},
+
 		// Not assignable
 		{"int_to_string", TypInt, TypString, false},
 		{"unrelated_types", makeNamed("Cat"), makeNamed("Fish"), false},

@@ -172,7 +172,16 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 		case ast.OpModAssign:
 			op = "%"
 		}
-		c.checkOperator(s.Pos(), targetType, op, valType)
+		// Map index compound assignment: m["key"] += val operates on the
+		// unwrapped value type, not the Optional returned by index access
+		opTarget := targetType
+		if idx, ok := s.Target.(*ast.IndexExpr); ok {
+			idxTargetType := c.info.Types[idx.Target]
+			if m, ok := idxTargetType.(*types.Map); ok {
+				opTarget = m.Val()
+			}
+		}
+		c.checkOperator(s.Pos(), opTarget, op, valType)
 	}
 }
 

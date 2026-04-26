@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -29,6 +30,8 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		return c.genBoolLit(e)
 	case *ast.StringLit:
 		return c.genStringLit(e)
+	case *ast.CharLit:
+		return c.genCharLit(e)
 	case *ast.IdentExpr:
 		return c.genIdentExpr(e)
 	case *ast.ParenExpr:
@@ -119,6 +122,36 @@ func (c *Compiler) genBoolLit(e *ast.BoolLit) value.Value {
 		return constant.NewInt(irtypes.I1, 1)
 	}
 	return constant.NewInt(irtypes.I1, 0)
+}
+
+func (c *Compiler) genCharLit(e *ast.CharLit) value.Value {
+	raw := e.Raw
+	inner := raw[1 : len(raw)-1] // strip surrounding quotes
+	var cp int32
+	if len(inner) > 1 && inner[0] == '\\' {
+		switch inner[1] {
+		case 'n':
+			cp = '\n'
+		case 'r':
+			cp = '\r'
+		case 't':
+			cp = '\t'
+		case 'b':
+			cp = '\b'
+		case '\\':
+			cp = '\\'
+		case '\'':
+			cp = '\''
+		case '0':
+			cp = 0
+		default:
+			cp = int32(inner[1])
+		}
+	} else {
+		r, _ := utf8.DecodeRuneInString(inner)
+		cp = int32(r)
+	}
+	return constant.NewInt(irtypes.I32, int64(cp))
 }
 
 func (c *Compiler) genStringLit(e *ast.StringLit) value.Value {
@@ -229,6 +262,8 @@ func (c *Compiler) convertToString(val value.Value, typ types.Type) value.Value 
 	case types.TypBool:
 		i8Val := c.block.NewZExt(val, irtypes.I8)
 		return c.block.NewCall(c.funcs["promise_bool_to_string"], i8Val)
+	case types.TypChar:
+		return c.block.NewCall(c.funcs["promise_char_to_string"], val)
 	default:
 		panic(fmt.Sprintf("codegen: cannot convert %s to string for interpolation", typ))
 	}
@@ -631,6 +666,19 @@ func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 		targetType = types.Substitute(targetType, c.typeSubst)
 	}
 
+	// Container .len property (string, slice, array, map)
+	if e.Field == "len" {
+		if named := extractNamed(targetType); named == types.TypString {
+			return c.genStringLen(e)
+		}
+		switch targetType.(type) {
+		case *types.Slice, *types.Array:
+			return c.genSliceLen(e)
+		case *types.Map:
+			return c.genMapLen(e)
+		}
+	}
+
 	// Enum variant access: Color.Red or Option[int].None
 	if enumLayout := c.lookupEnumLayout(targetType); enumLayout != nil {
 		return c.genEnumVariantValueLayout(enumLayout, e.Field)
@@ -647,6 +695,22 @@ func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 	}
 
 	panic(fmt.Sprintf("codegen: member %s on type %s is not a field (method references not yet supported)", e.Field, named))
+}
+
+// genSliceLen loads the length from a slice/array header.
+func (c *Compiler) genSliceLen(e *ast.MemberExpr) value.Value {
+	slicePtr := c.genExpr(e.Target)
+	headerType := sliceHeaderType()
+	headerPtr := c.block.NewBitCast(slicePtr, irtypes.NewPointer(headerType))
+	lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	return c.block.NewLoad(irtypes.I64, lenPtr)
+}
+
+// genMapLen returns the length of a map via the runtime.
+func (c *Compiler) genMapLen(e *ast.MemberExpr) value.Value {
+	mapPtr := c.genExpr(e.Target)
+	return c.block.NewCall(c.funcs["promise_map_len"], mapPtr)
 }
 
 // genFieldAccess loads a field value from a user type instance.
@@ -721,6 +785,22 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 	}
 
 	return c.block.NewCall(fn, args...)
+}
+
+// genStringLen loads the length field from a string instance struct.
+// String instance layout: { i8* _variant, i64 len, [0 x i8] data }
+func (c *Compiler) genStringLen(e *ast.MemberExpr) value.Value {
+	strPtr := c.genExpr(e.Target)
+	// Build string instance struct type: { i8*, i64, [0 x i8] }
+	strInstanceType := irtypes.NewStruct(
+		irtypes.I8Ptr,                   // _variant
+		irtypes.I64,                     // len
+		irtypes.NewArray(0, irtypes.I8), // data (flexible array)
+	)
+	typedPtr := c.block.NewBitCast(strPtr, irtypes.NewPointer(strInstanceType))
+	lenPtr := c.block.NewGetElementPtr(strInstanceType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	return c.block.NewLoad(irtypes.I64, lenPtr)
 }
 
 // --- Enum variant values ---

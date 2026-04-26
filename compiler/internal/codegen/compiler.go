@@ -169,6 +169,14 @@ func (c *Compiler) declareIntrinsics() {
 	c.funcs["promise_bool_to_string"] = c.module.NewFunc("promise_bool_to_string",
 		irtypes.I8Ptr, ir.NewParam("x", irtypes.I8))
 
+	c.funcs["promise_char_to_string"] = c.module.NewFunc("promise_char_to_string",
+		irtypes.I8Ptr, ir.NewParam("cp", irtypes.I32))
+
+	c.funcs["promise_string_next_char"] = c.module.NewFunc("promise_string_next_char",
+		irtypes.I32,
+		ir.NewParam("s", irtypes.I8Ptr),
+		ir.NewParam("pos", irtypes.NewPointer(irtypes.I64)))
+
 	// String hash/eq for map keys (dereferences i8* to hash/compare content)
 	c.funcs["promise_hash_string"] = c.module.NewFunc("promise_hash_string",
 		irtypes.I64,

@@ -2712,3 +2712,181 @@ func TestBoolEquality(t *testing.T) {
 	assertContains(t, ir, "icmp eq i1")
 	assertContains(t, ir, "icmp ne i1")
 }
+
+// --- Stage 8i: Char literals, container .len, string iteration, map compound assignment ---
+
+func TestCharLiteral(t *testing.T) {
+	ir := generateIR(t, `main() { char c = 'a'; }`)
+	assertContains(t, ir, "store i32 97")
+}
+
+func TestCharEscape(t *testing.T) {
+	ir := generateIR(t, `main() { char c = '\n'; }`)
+	assertContains(t, ir, "store i32 10")
+}
+
+func TestCharEscapeNull(t *testing.T) {
+	ir := generateIR(t, `main() { char c = '\0'; }`)
+	assertContains(t, ir, "store i32 0")
+}
+
+func TestCharEscapeBackslash(t *testing.T) {
+	ir := generateIR(t, `main() { char c = '\\'; }`)
+	assertContains(t, ir, "store i32 92")
+}
+
+func TestCharMultiByte(t *testing.T) {
+	ir := generateIR(t, `main() { char c = '€'; }`)
+	// € is U+20AC = 8364
+	assertContains(t, ir, "store i32 8364")
+}
+
+func TestCharEquality(t *testing.T) {
+	ir := generateIR(t, `
+		check(char a, char b) bool { return a == b; }
+		main() { }
+	`)
+	assertContains(t, ir, "icmp eq i32")
+}
+
+func TestCharComparison(t *testing.T) {
+	ir := generateIR(t, `
+		check(char a, char b) bool { return a < b; }
+		main() { }
+	`)
+	assertContains(t, ir, "icmp slt i32")
+}
+
+func TestCharInterpolation(t *testing.T) {
+	ir := generateIR(t, `
+		main() { char c = 'X'; string s = "char: {c}"; }
+	`)
+	assertContains(t, ir, "call i8* @promise_char_to_string(i32")
+}
+
+func TestSliceLen(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[] arr = [1, 2, 3];
+			int n = arr.len;
+		}
+	`)
+	// Should GEP into slice header and load length
+	assertContains(t, ir, "getelementptr { i64, i64 }")
+	assertContains(t, ir, "load i64")
+}
+
+func TestArrayLen(t *testing.T) {
+	ir := generateIR(t, `
+		check(int[3] arr) int { return arr.len; }
+		main() { }
+	`)
+	assertContains(t, ir, "getelementptr { i64, i64 }")
+	assertContains(t, ir, "load i64")
+}
+
+func TestMapLen(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := {"a": 1};
+			int n = m.len;
+		}
+	`)
+	assertContains(t, ir, "call i64 @promise_map_len(")
+}
+
+func TestStringLen(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string s = "hello";
+			int n = s.len;
+		}
+	`)
+	// Should GEP to string instance len field and load
+	assertContains(t, ir, "load i64")
+}
+
+func TestSliceLenInCondition(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[] arr = [1, 2, 3];
+			if arr.len > 0 { }
+		}
+	`)
+	assertContains(t, ir, "getelementptr { i64, i64 }")
+	assertContains(t, ir, "icmp sgt i64")
+}
+
+func TestForInString(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			for ch in "abc" { }
+		}
+	`)
+	assertContains(t, ir, "call i32 @promise_string_next_char(")
+	assertContains(t, ir, "forin.str.header")
+	assertContains(t, ir, "forin.str.body")
+	assertContains(t, ir, "forin.str.exit")
+	// Should compare return value with -1
+	assertContains(t, ir, "icmp eq i32")
+}
+
+func TestForInStringIndexed(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			for i, ch in "abc" { }
+		}
+	`)
+	assertContains(t, ir, "call i32 @promise_string_next_char(")
+	// Index variable should be allocated and incremented
+	assertContains(t, ir, "%i = alloca i64")
+	assertContains(t, ir, "add i64")
+}
+
+func TestForInStringVariable(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string s = "hello";
+			for ch in s { }
+		}
+	`)
+	assertContains(t, ir, "call i32 @promise_string_next_char(")
+	assertContains(t, ir, "forin.str.header")
+}
+
+func TestForInStringEmpty(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			for ch in "" { }
+		}
+	`)
+	assertContains(t, ir, "call i32 @promise_string_next_char(")
+	assertContains(t, ir, "forin.str.header")
+}
+
+func TestMapCompoundAssign(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := {"a": 1};
+			m["a"] += 1;
+		}
+	`)
+	// Should get, add, then set
+	assertContains(t, ir, "call i8* @promise_map_get(")
+	assertContains(t, ir, "mapcomp.ok")
+	assertContains(t, ir, "mapcomp.panic")
+	assertContains(t, ir, "add i64")
+	assertContains(t, ir, "call void @promise_map_set(")
+}
+
+func TestMapCompoundAssignMul(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := {"x": 2};
+			m["x"] *= 3;
+		}
+	`)
+	assertContains(t, ir, "call i8* @promise_map_get(")
+	assertContains(t, ir, "mul i64")
+	assertContains(t, ir, "call void @promise_map_set(")
+}

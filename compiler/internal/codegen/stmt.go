@@ -499,6 +499,13 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 		mapPtr := c.genExpr(s.Iterable)
 		c.genForInMap(s, mapPtr, t)
 	default:
+		// String iteration
+		named := extractNamed(iterableType)
+		if named == types.TypString {
+			strPtr := c.genExpr(s.Iterable)
+			c.genForInString(s, strPtr)
+			return
+		}
 		// Range iteration (existing behavior)
 		c.genForInRange(s)
 	}
@@ -702,9 +709,10 @@ func (c *Compiler) genIndexAssign(target *ast.IndexExpr, op ast.AssignOp, val va
 		c.genSliceIndexAssign(target, types.NewSlice(t.Elem()), op, val)
 	case *types.Map:
 		if op != ast.OpAssign {
-			panic("codegen: compound assignment on map index not yet supported")
+			c.genMapCompoundAssign(target, t, op, val)
+		} else {
+			c.genMapIndexAssign(target, t, val)
 		}
-		c.genMapIndexAssign(target, t, val)
 	default:
 		panic(fmt.Sprintf("codegen: cannot assign to index of type %s", targetType))
 	}
@@ -765,6 +773,50 @@ func (c *Compiler) genMapIndexAssign(target *ast.IndexExpr, mapType *types.Map, 
 	c.block.NewStore(val, valAlloca)
 	valPtr := c.block.NewBitCast(valAlloca, irtypes.I8Ptr)
 
+	c.block.NewCall(c.funcs["promise_map_set"], mapPtr, keyPtr, valPtr)
+}
+
+// genMapCompoundAssign handles m["key"] += val by getting, applying op, and setting back.
+//
+// BUG: val is evaluated by the caller (genAssignStmt) before this function runs,
+// so the evaluation order is RHS → map target → key. The correct semantic order
+// should be map target → key → RHS. This matters when expressions have side effects
+// (e.g. m[f()] += g()  would call g() before f()). Fixing this requires refactoring
+// genAssignStmt to defer RHS evaluation for compound index assignments.
+func (c *Compiler) genMapCompoundAssign(target *ast.IndexExpr, mapType *types.Map, op ast.AssignOp, val value.Value) {
+	mapPtr := c.genExpr(target.Target)
+	keyVal := c.genExpr(target.Index)
+	keyLLVM := c.resolveType(mapType.Key())
+	valLLVM := c.resolveType(mapType.Val())
+
+	// Alloca key
+	keyAlloca := c.block.NewAlloca(keyLLVM)
+	c.block.NewStore(keyVal, keyAlloca)
+	keyPtr := c.block.NewBitCast(keyAlloca, irtypes.I8Ptr)
+
+	// Get current value
+	resultPtr := c.block.NewCall(c.funcs["promise_map_get"], mapPtr, keyPtr)
+	isNull := c.block.NewICmp(enum.IPredEQ, resultPtr, constant.NewNull(irtypes.I8Ptr))
+	okBlock := c.newBlock("mapcomp.ok")
+	panicBlock := c.newBlock("mapcomp.panic")
+	c.block.NewCondBr(isNull, panicBlock, okBlock)
+
+	// Panic block: compound assignment requires existing key
+	c.block = panicBlock
+	panicMsg := c.makeGlobalString("compound assignment on missing map key")
+	c.block.NewCall(c.funcs["promise_panic"], panicMsg)
+	c.block.NewUnreachable()
+
+	// OK: load current, apply op, store back
+	c.block = okBlock
+	typedPtr := c.block.NewBitCast(resultPtr, irtypes.NewPointer(valLLVM))
+	current := c.block.NewLoad(valLLVM, typedPtr)
+	result := c.genCompoundOp(op, current, val)
+
+	// Store via promise_map_set
+	valAlloca := c.block.NewAlloca(valLLVM)
+	c.block.NewStore(result, valAlloca)
+	valPtr := c.block.NewBitCast(valAlloca, irtypes.I8Ptr)
 	c.block.NewCall(c.funcs["promise_map_set"], mapPtr, keyPtr, valPtr)
 }
 
@@ -967,6 +1019,64 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapPtr value.Value, mapType *ty
 		c.block.NewStore(nextIdx, idxAlloca)
 	}
 	c.block.NewBr(headerBlock)
+
+	c.breakTarget = savedBreak
+	c.continueTarget = savedContinue
+	c.block = exitBlock
+}
+
+// --- For-in over strings ---
+
+func (c *Compiler) genForInString(s *ast.ForInStmt, strPtr value.Value) {
+	// Alloca for byte position
+	posAlloca := c.block.NewAlloca(irtypes.I64)
+	c.block.NewStore(constant.NewInt(irtypes.I64, 0), posAlloca)
+
+	// Index variable if present
+	if s.Index != "" {
+		indexAlloca := c.block.NewAlloca(irtypes.I64)
+		indexAlloca.SetName(s.Index)
+		c.block.NewStore(constant.NewInt(irtypes.I64, 0), indexAlloca)
+		c.locals[s.Index] = indexAlloca
+	}
+
+	headerBlock := c.newBlock("forin.str.header")
+	bodyBlock := c.newBlock("forin.str.body")
+	exitBlock := c.newBlock("forin.str.exit")
+
+	c.block.NewBr(headerBlock)
+
+	// Header: call promise_string_next_char, check for -1
+	c.block = headerBlock
+	cp := c.block.NewCall(c.funcs["promise_string_next_char"], strPtr, posAlloca)
+	done := c.block.NewICmp(enum.IPredEQ, cp, constant.NewInt(irtypes.I32, -1))
+	c.block.NewCondBr(done, exitBlock, bodyBlock)
+
+	// Body: bind char to loop variable
+	savedBreak := c.breakTarget
+	savedContinue := c.continueTarget
+	c.breakTarget = exitBlock
+	c.continueTarget = headerBlock
+
+	c.block = bodyBlock
+	alloca := c.block.NewAlloca(irtypes.I32)
+	alloca.SetName(s.Binding)
+	c.block.NewStore(cp, alloca)
+	c.locals[s.Binding] = alloca
+
+	c.genBlock(s.Body)
+
+	// Increment index after body, before looping back
+	if s.Index != "" && c.block.Term == nil {
+		idxAlloca := c.locals[s.Index]
+		curIdx := c.block.NewLoad(irtypes.I64, idxAlloca)
+		nextIdx := c.block.NewAdd(curIdx, constant.NewInt(irtypes.I64, 1))
+		c.block.NewStore(nextIdx, idxAlloca)
+	}
+
+	if c.block.Term == nil {
+		c.block.NewBr(headerBlock)
+	}
 
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue

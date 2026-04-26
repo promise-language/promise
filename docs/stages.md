@@ -23,6 +23,8 @@ Implementation stages for the Promise compiler pipeline.
 | 8f | `compiler/internal/codegen/` | Generic monomorphization: type-specialized layouts and methods | Done |
 | 8g | `compiler/internal/codegen/` | Containers: tuples, optionals, slices, maps, lambdas | Done |
 | 8h | `compiler/internal/codegen/` | Optional patterns, string interpolation, expression completeness | Done |
+| 8i | `compiler/internal/codegen/` | Char literals, container `.len`, string iteration, map compound assignment | Done |
+| 8j | `compiler/internal/types/`, `sema/`, `codegen/` | Unify compound types with Named types | Deferred |
 | 9 | `compiler/internal/module/` | Module resolution, dependency graph | Planned |
 | 10 | `cmd/promise/` | CLI entry point (build, run, test, fmt, etc.) | Planned |
 | 11 | `pkg/` | Package manager: fetch, resolve, lock | Planned |
@@ -323,7 +325,7 @@ Codegen for container types (tuples, optionals, slices, maps) and non-capturing 
 - **Lambda calls**: `genCallExpr` detects local variables with `*types.Signature` type before regular function lookup. Loads `i8*`, bitcasts to typed function pointer, indirect call via `genIndirectCall`.
 - **Intrinsics** (`compiler.go`): 7 new map runtime functions declared in `declareIntrinsics`. `lambdaCounter` and `targetType` fields added to Compiler.
 - **Scope**: Tuple literals/destructure/return, optional none/some/wrapping/elvis, array literals, slice/array indexing (read/write/compound), for-in over slices/arrays/maps, map literals/indexing/assignment, non-capturing lambdas (expression/block body, indirect calls).
-- **Deferred**: Capturing lambdas/closures, slice growth (`.push()`), map/slice methods (`.len`, `.contains`), fixed-size arrays as stack-allocated `[N x T]`, `llvmTypeSize` struct alignment (current implementation sums without padding — correct for primitive elements, under-allocates for struct-typed slice elements). String interpolation, if-unwrap/while-unwrap, optional chaining, and unsafe blocks completed in Stage 8h.
+- **Deferred**: Capturing lambdas/closures, slice growth (`.push()`), container methods (`.contains`), fixed-size arrays as stack-allocated `[N x T]`, `llvmTypeSize` struct alignment (current implementation sums without padding — correct for primitive elements, under-allocates for struct-typed slice elements). String interpolation, if-unwrap/while-unwrap, optional chaining, and unsafe blocks completed in Stage 8h. Container `.len` completed in Stage 8i.
 
 ## Stage 8h — Optional Patterns, String Interpolation & Expression Completeness (Done)
 
@@ -343,7 +345,49 @@ Codegen for if-unwrap, while-unwrap, optional chaining, string interpolation, an
   - **Intrinsics**: 3 new conversion functions declared in `declareIntrinsics`.
 - **Unsafe blocks**: `genUnsafeExpr` trivially generates block contents. Ownership analysis handles the "unsafe" semantics, not codegen.
 - **Scope**: If-unwrap (with/without else), while-unwrap (with break/continue), optional chaining on user type fields, string interpolation with identifiers/literals/expressions/multiple parts, unsafe blocks.
-- **Deferred**: `is`/`as` expressions (need RTTI), generators (`yield`), concurrency (`go`, `Task`, `Channel`), container methods (`.len`, `.push`), user type `toString()` for interpolation.
+- **Deferred**: `is`/`as` expressions (need RTTI), generators (`yield`), concurrency (`go`, `Task`, `Channel`), container methods (`.push`, `.pop`, `.contains`), user type `toString()` for interpolation. Container `.len` completed in Stage 8i.
+
+## Stage 8i — Char Literals, Container `.len`, String Iteration & Map Compound Assignment (Done)
+
+Codegen for char literals, `.len` property on all containers (string, slice, array, map), for-in over strings, and map compound assignment.
+
+**Files:** Updates to `codegen/expr.go`, `codegen/stmt.go`, `codegen/compiler.go`, `codegen/types.go`, `codegen/native.go`, `sema/expr.go`, `sema/stmt.go`, `runtime/runtime_string.c`, `types/container.go`; 25 new tests (19 codegen → 227 total, 6 sema → 214 total)
+
+- **Char literals**: `genCharLit` parses raw text including escape sequences (`\n`, `\t`, `\r`, `\b`, `\\`, `\'`, `\0`), returns i32 constant. `CatChar` classification added to `types.go` with signed i32 comparisons in `native.go`.
+- **Container `.len` property**: Uniform property access across all container types — `arr.len`, `m.len`, `s.len`. Slice/array reads i64 from heap header (GEP index 0). Map calls `promise_map_len`. String reads i64 from instance struct (GEP index 1). Sema extended with `Slice`/`Array`/`Map` cases in `checkMemberExpr` and `TypString` special case in Named handler.
+- **For-in over strings**: `genForInString` iterates UTF-8 codepoints via `promise_string_next_char` runtime function. Byte position tracked in i64 alloca, -1 sentinel for end. Index variable (`for i, ch in s`) supported with separate counter.
+- **Map compound assignment**: `genMapCompoundAssign` gets current value via `promise_map_get`, NULL-checks with panic on missing key, applies operator, stores back via `promise_map_set`. Sema fix unwraps Optional for operator lookup on map value type.
+- **Char interpolation**: `convertToString` extended with `TypChar` case calling `promise_char_to_string` (UTF-8 encode).
+- **Deferred**: Evaluation order bug in compound index assignment (RHS evaluated before LHS target/key — see comment in `genMapCompoundAssign`).
+
+## Stage 8j — Unify Compound Types with Named Types (Deferred)
+
+Reconcile the structural gap between Named types and built-in compound types (Slice, Array, Map).
+
+**Problem:** Named types (`*types.Named`) support fields, methods, inheritance, type parameters, documentation, and deprecation. Compound container types (`*types.Slice`, `*types.Array`, `*types.Map`) are minimal structs with only element type information. This creates an asymmetry throughout the compiler:
+
+- **Sema**: `.len` is hard-coded as a special case in `checkMemberExpr` for each compound type, rather than being a real field or method lookup.
+- **Codegen**: `genMemberExpr` has parallel special-case branches for compound types vs the general Named field/method dispatch.
+- **No user extensibility**: Users cannot add methods to containers, inherit from them, or document them with meta annotations.
+- **IDE gap**: Compound types have no type signature to display — no doc, no field list, no method list for hover/autocomplete.
+
+**Goals:**
+
+1. **Type system**: Promote Slice, Array, and Map to Named types (or a shared Named-compatible base) with proper type parameters, so `int[]` resolves to `Slice[int]` which is a Named type with a `len` field and methods like `push`, `pop`, `contains`.
+2. **Sema unification**: Remove special-case branches in `checkMemberExpr` — field/method lookup on containers should go through the same `LookupField`/`LookupMethod` path as user types.
+3. **Codegen unification**: Container `.len` and future methods should use the standard method/field dispatch, with native annotations for runtime-backed implementations.
+4. **Documentation**: Container type declarations become the canonical place for doc annotations, enabling IDE hover, signature help, and go-to-definition.
+5. **Extensibility**: Users could define `type MyList is int[] { fn sum() -> int { ... } }` — inheriting from a container type.
+
+**Approach:**
+
+- Define `Slice[T]`, `Array[T, N]`, `Map[K, V]` as universe Named types in `builtins.go`, similar to how `string`, `int`, etc. are defined today.
+- Add native fields (`len`, `cap`) and native methods (`push`, `pop`, `get`, `set`, `contains`, `keys`, `values`) to these types.
+- Migrate sema special cases into the standard Named type lookup path.
+- Migrate codegen special cases into the standard native method dispatch (possibly extending the `nativeOps` table or adding a `nativeMethods` table).
+- Preserve backward compatibility: `int[]` syntax continues to work, resolving to `Slice[int]`.
+
+**Dependencies:** Stage 8f (generics) is complete, providing the monomorphization infrastructure needed for generic container types.
 
 ## Stage 9 — Module System (Planned)
 

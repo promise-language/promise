@@ -22,6 +22,7 @@ func init() {
 		CatUnsignedInt: unsignedIntOps(),
 		CatFloat:       floatOps(),
 		CatBool:        boolOps(),
+		CatChar:        charOps(),
 	}
 }
 
@@ -95,6 +96,17 @@ func boolOps() map[string]nativeEmitter {
 		"!": func(b *ir.Block, l, _ value.Value) value.Value {
 			return b.NewXor(l, constant.NewInt(irtypes.I1, 1))
 		},
+	}
+}
+
+func charOps() map[string]nativeEmitter {
+	return map[string]nativeEmitter{
+		"==": func(b *ir.Block, l, r value.Value) value.Value { return b.NewICmp(enum.IPredEQ, l, r) },
+		"!=": func(b *ir.Block, l, r value.Value) value.Value { return b.NewICmp(enum.IPredNE, l, r) },
+		"<":  func(b *ir.Block, l, r value.Value) value.Value { return b.NewICmp(enum.IPredSLT, l, r) },
+		">":  func(b *ir.Block, l, r value.Value) value.Value { return b.NewICmp(enum.IPredSGT, l, r) },
+		"<=": func(b *ir.Block, l, r value.Value) value.Value { return b.NewICmp(enum.IPredSLE, l, r) },
+		">=": func(b *ir.Block, l, r value.Value) value.Value { return b.NewICmp(enum.IPredSGE, l, r) },
 	}
 }
 

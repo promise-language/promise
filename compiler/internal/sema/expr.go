@@ -492,6 +492,10 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 
 	switch t := target.(type) {
 	case *types.Named:
+		// Built-in properties
+		if t == types.TypString && e.Field == "len" {
+			return types.TypInt
+		}
 		// Check fields first, then methods
 		if f := t.LookupField(e.Field); f != nil {
 			if f.Deprecated() != "" {
@@ -531,6 +535,27 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 
 	case *types.Instance:
 		return c.resolveInstanceMember(e.Pos(), t, e.Field)
+
+	case *types.Slice:
+		if e.Field == "len" {
+			return types.TypInt
+		}
+		c.errorf(e.Pos(), "type %s has no member %s", t, e.Field)
+		return nil
+
+	case *types.Array:
+		if e.Field == "len" {
+			return types.TypInt
+		}
+		c.errorf(e.Pos(), "type %s has no member %s", t, e.Field)
+		return nil
+
+	case *types.Map:
+		if e.Field == "len" {
+			return types.TypInt
+		}
+		c.errorf(e.Pos(), "type %s has no member %s", t, e.Field)
+		return nil
 
 	default:
 		c.errorf(e.Pos(), "cannot access member on type %s", target)

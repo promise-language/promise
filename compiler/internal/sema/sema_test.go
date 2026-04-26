@@ -2375,3 +2375,59 @@ func TestGenericFuncStringResult(t *testing.T) {
 		t.Fatalf("expected result string, got %s", fi.Sig.Result())
 	}
 }
+
+// --- Stage 8i: container .len property sema tests ---
+
+func TestSliceLenProperty(t *testing.T) {
+	checkOK(t, `
+		main() {
+			int[] arr = [1, 2, 3];
+			int n = arr.len;
+		}
+	`)
+}
+
+func TestArrayLenProperty(t *testing.T) {
+	checkOK(t, `
+		check(int[3] arr) int { return arr.len; }
+		main() { }
+	`)
+}
+
+func TestMapLenProperty(t *testing.T) {
+	checkOK(t, `
+		main() {
+			m := {"a": 1};
+			int n = m.len;
+		}
+	`)
+}
+
+func TestStringLenProperty(t *testing.T) {
+	checkOK(t, `
+		main() {
+			string s = "hello";
+			int n = s.len;
+		}
+	`)
+}
+
+func TestSliceInvalidMember(t *testing.T) {
+	errs := checkErrs(t, `
+		main() {
+			int[] arr = [1, 2];
+			int n = arr.foo;
+		}
+	`)
+	expectError(t, errs, "no member")
+}
+
+func TestMapInvalidMember(t *testing.T) {
+	errs := checkErrs(t, `
+		main() {
+			m := {"a": 1};
+			int n = m.foo;
+		}
+	`)
+	expectError(t, errs, "no member")
+}

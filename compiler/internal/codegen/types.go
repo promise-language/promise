@@ -15,6 +15,7 @@ const (
 	CatUnsignedInt              // uint, u8, u16, u32, u64
 	CatFloat                    // f32, f64
 	CatBool                     // bool
+	CatChar                     // char (i32 codepoint, signed comparisons)
 )
 
 // classify returns the backend category for a Named type.
@@ -29,6 +30,8 @@ func classify(n *types.Named) TypeCategory {
 		return CatFloat
 	case types.TypBool:
 		return CatBool
+	case types.TypChar:
+		return CatChar
 	default:
 		return CatUnknown
 	}

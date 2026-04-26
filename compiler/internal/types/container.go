@@ -1,5 +1,21 @@
 package types
 
+// TODO(stage-8j): Unify compound container types (Slice, Array, Map) with Named types.
+//
+// Currently compound types are minimal structs with no fields, methods, inheritance,
+// type parameters, or documentation. This creates an asymmetry where:
+//   - Named types support methods, fields, inheritance, doc, deprecation, placement
+//   - Compound types are hard-coded with special-case handling throughout sema and codegen
+//     (e.g. .len is wired as a built-in property, not a real field/method)
+//
+// Promoting compound types to Named types (or a shared base) would:
+//   - Allow user-defined methods and inheritance on containers
+//   - Provide a natural place for documentation and IDE support (hover, signature help)
+//   - Eliminate special-case branches in sema/expr.go and codegen/expr.go
+//   - Enable a single codepath for field/method lookup across all types
+//
+// See Stage 8j in docs/stages.md for the full plan.
+
 import (
 	"fmt"
 	"strings"

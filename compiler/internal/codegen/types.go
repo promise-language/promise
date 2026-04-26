@@ -144,6 +144,29 @@ func (c *Compiler) resolveType(typ types.Type) irtypes.Type {
 	return llvmType(typ)
 }
 
+// computeResultType builds the result struct type for a failable function.
+// Non-void T!: { i1, T, i8* }. Void !: { i1, i8* }.
+func computeResultType(innerType irtypes.Type) *irtypes.StructType {
+	if _, ok := innerType.(*irtypes.VoidType); ok {
+		return irtypes.NewStruct(irtypes.I1, irtypes.I8Ptr)
+	}
+	return irtypes.NewStruct(irtypes.I1, innerType, irtypes.I8Ptr)
+}
+
+// isVoidResult returns true if the result struct has no ok value field (void failable).
+func isVoidResult(resultType *irtypes.StructType) bool {
+	return len(resultType.Fields) == 2
+}
+
+// resultErrIdx returns the index of the error pointer field in a result struct.
+// Void: { i1, i8* } → index 1. Non-void: { i1, T, i8* } → index 2.
+func resultErrIdx(resultType *irtypes.StructType) uint64 {
+	if isVoidResult(resultType) {
+		return 1
+	}
+	return 2
+}
+
 // llvmTypeSize returns the byte size of an LLVM type on a 64-bit target.
 // Used for computing enum variant data sizes.
 func llvmTypeSize(typ irtypes.Type) int {

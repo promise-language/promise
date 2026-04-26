@@ -1497,3 +1497,218 @@ func TestEnumHeaderData(t *testing.T) {
 	assertContains(t, header, "int32_t              tag;")
 	assertContains(t, header, "uint8_t              data[16];")
 }
+
+// ── Error handling tests ──────────────────────────────────────────
+
+func TestFailableDeclaration(t *testing.T) {
+	ir := generateIR(t, `
+		parse(string s) int! { return 0; }
+		main() { }
+	`)
+	// Return type should be result struct { i1, i64, i8* }
+	assertContains(t, ir, "define { i1, i64, i8* } @parse(i8* %s)")
+}
+
+func TestReturnInFailable(t *testing.T) {
+	ir := generateIR(t, `
+		parse(string s) int! { return 42; }
+		main() { }
+	`)
+	// Should wrap value in Ok result: tag=false, value, null error
+	assertContains(t, ir, "insertvalue { i1, i64, i8* }")
+	assertContains(t, ir, "i1 false")
+	assertContains(t, ir, "ret { i1, i64, i8* }")
+}
+
+func TestRaiseStmt(t *testing.T) {
+	ir := generateIR(t, `
+		parse(string s) int! { raise "parse error"; }
+		main() { }
+	`)
+	// Should wrap error in Error result: tag=true
+	assertContains(t, ir, "i1 true")
+	assertContains(t, ir, "ret { i1, i64, i8* }")
+	// Should create the error string
+	assertContains(t, ir, `c"parse error"`)
+}
+
+func TestErrorPropagate(t *testing.T) {
+	ir := generateIR(t, `
+		parse(string s) int! { return 0; }
+		process() int! {
+			x := parse("42")?;
+			return x;
+		}
+		main() { }
+	`)
+	// Should have propagation and ok blocks
+	assertContains(t, ir, "error.propagate")
+	assertContains(t, ir, "error.ok")
+	// Should extract tag from result
+	assertContains(t, ir, "extractvalue { i1, i64, i8* }")
+}
+
+func TestErrorUnwrap(t *testing.T) {
+	ir := generateIR(t, `
+		parse(string s) int! { return 0; }
+		main() {
+			x := parse("42")!;
+		}
+	`)
+	// Should have panic and ok blocks
+	assertContains(t, ir, "error.panic")
+	assertContains(t, ir, "error.ok")
+	// Should call promise_panic
+	assertContains(t, ir, "call void @promise_panic(")
+	assertContains(t, ir, "unreachable")
+}
+
+func TestErrorHandler(t *testing.T) {
+	ir := generateIR(t, `
+		parse(string s) int! { return 0; }
+		main() {
+			x := parse("42") ? e { 0 };
+		}
+	`)
+	// Should have handler, ok, and merge blocks
+	assertContains(t, ir, "error.handler")
+	assertContains(t, ir, "error.ok")
+	assertContains(t, ir, "error.merge")
+}
+
+func TestErrorHandlerDiscard(t *testing.T) {
+	ir := generateIR(t, `
+		parse(string s) int! { return 0; }
+		main() {
+			x := parse("42") ? _ { 0 };
+		}
+	`)
+	assertContains(t, ir, "error.handler")
+	assertContains(t, ir, "error.ok")
+}
+
+func TestVoidFailable(t *testing.T) {
+	ir := generateIR(t, `
+		validate(string s) void! { return; }
+		main() { }
+	`)
+	// Return type should be { i1, i8* }
+	assertContains(t, ir, "define { i1, i8* } @validate(i8* %s)")
+}
+
+func TestVoidRaise(t *testing.T) {
+	ir := generateIR(t, `
+		validate(string s) void! { raise "invalid"; }
+		main() { }
+	`)
+	assertContains(t, ir, "i1 true")
+	assertContains(t, ir, "ret { i1, i8* }")
+}
+
+func TestFailableMethod(t *testing.T) {
+	ir := generateIR(t, `
+		type Parser {
+			string input;
+			parse(this) int! {
+				return 42;
+			}
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "define { i1, i64, i8* } @Parser.parse(i8* %this)")
+}
+
+func TestFailableAutoTerminator(t *testing.T) {
+	ir := generateIR(t, `
+		validate(string s) void! {
+			if true {
+				return;
+			}
+		}
+		main() { }
+	`)
+	// Auto-terminator on fall-through path should wrap in Ok (tag=false)
+	assertContains(t, ir, "i1 false")
+	assertContains(t, ir, "ret { i1, i8* }")
+}
+
+func TestVoidFailablePropagate(t *testing.T) {
+	ir := generateIR(t, `
+		validate(string s) void! { raise "invalid"; }
+		process() void! {
+			validate("x")?;
+		}
+		main() { }
+	`)
+	// Should propagate error from void failable callee
+	assertContains(t, ir, "error.propagate")
+	assertContains(t, ir, "error.ok")
+	// Callee returns { i1, i8* }, caller also returns { i1, i8* }
+	assertContains(t, ir, "extractvalue { i1, i8* }")
+}
+
+func TestVoidFailableUnwrap(t *testing.T) {
+	ir := generateIR(t, `
+		validate(string s) void! { raise "invalid"; }
+		main() {
+			validate("x")!;
+		}
+	`)
+	assertContains(t, ir, "error.panic")
+	assertContains(t, ir, "error.ok")
+	assertContains(t, ir, "call void @promise_panic(")
+}
+
+func TestVoidFailableHandler(t *testing.T) {
+	ir := generateIR(t, `
+		validate(string s) void! { raise "invalid"; }
+		main() {
+			validate("x") ? e { };
+		}
+	`)
+	assertContains(t, ir, "error.handler")
+	assertContains(t, ir, "error.ok")
+	assertContains(t, ir, "error.merge")
+}
+
+func TestNestedErrorPropagation(t *testing.T) {
+	ir := generateIR(t, `
+		a() int! { return 1; }
+		b() int! { return a()?; }
+		c() int! { return b()?; }
+		main() { }
+	`)
+	// Both b and c should have propagation blocks
+	assertContains(t, ir, "error.propagate")
+	assertContains(t, ir, "error.ok")
+}
+
+func TestErrorHandlerWithReturn(t *testing.T) {
+	ir := generateIR(t, `
+		parse(string s) int! { return 0; }
+		process(string s) int {
+			x := parse(s) ? e { return -1; };
+			return x;
+		}
+		main() { }
+	`)
+	// Handler block should contain a return (terminator)
+	assertContains(t, ir, "error.handler")
+	assertContains(t, ir, "error.ok")
+}
+
+func TestFailableConditionalRaiseReturn(t *testing.T) {
+	ir := generateIR(t, `
+		parse(string s) int! {
+			if s == "" {
+				raise "empty";
+			}
+			return 42;
+		}
+		main() { }
+	`)
+	// Should have both Ok and Error paths
+	assertContains(t, ir, "i1 true")
+	assertContains(t, ir, "i1 false")
+	assertContains(t, ir, "ret { i1, i64, i8* }")
+}

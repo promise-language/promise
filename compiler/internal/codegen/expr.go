@@ -46,6 +46,12 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		return c.genIfExpr(e)
 	case *ast.MatchExpr:
 		return c.genMatchExpr(e)
+	case *ast.ErrorPropagateExpr:
+		return c.genErrorPropagateExpr(e)
+	case *ast.ErrorUnwrapExpr:
+		return c.genErrorUnwrapExpr(e)
+	case *ast.ErrorHandlerExpr:
+		return c.genErrorHandlerExpr(e)
 	default:
 		panic(fmt.Sprintf("codegen: unhandled expression type %T", expr))
 	}
@@ -929,4 +935,115 @@ func (c *Compiler) genIfExpr(e *ast.IfExpr) value.Value {
 	}
 
 	return nil
+}
+
+// --- Error handling expressions ---
+
+// genErrorPropagateExpr generates the `expr?` operator.
+// Evaluates the inner failable call, checks the tag, propagates the error
+// to the caller on error, or extracts the Ok value on success.
+func (c *Compiler) genErrorPropagateExpr(e *ast.ErrorPropagateExpr) value.Value {
+	result := c.genExpr(e.Expr)
+	calleeResultType := result.Type().(*irtypes.StructType)
+
+	tag := c.block.NewExtractValue(result, 0)
+
+	propagateBlock := c.newBlock("error.propagate")
+	okBlock := c.newBlock("error.ok")
+	c.block.NewCondBr(tag, propagateBlock, okBlock)
+
+	// Error path: extract error, wrap in caller's result type, early return
+	c.block = propagateBlock
+	errVal := c.block.NewExtractValue(result, resultErrIdx(calleeResultType))
+	callerResultType := c.currentResultType()
+	c.block.NewRet(c.wrapError(errVal, callerResultType))
+
+	// Ok path: extract value
+	c.block = okBlock
+	if !isVoidResult(calleeResultType) {
+		return c.block.NewExtractValue(result, 1)
+	}
+	return nil
+}
+
+// genErrorUnwrapExpr generates the `expr!` operator.
+// Evaluates the inner failable call, panics on error, or extracts the Ok value.
+func (c *Compiler) genErrorUnwrapExpr(e *ast.ErrorUnwrapExpr) value.Value {
+	result := c.genExpr(e.Expr)
+	resultType := result.Type().(*irtypes.StructType)
+
+	tag := c.block.NewExtractValue(result, 0)
+
+	panicBlock := c.newBlock("error.panic")
+	okBlock := c.newBlock("error.ok")
+	c.block.NewCondBr(tag, panicBlock, okBlock)
+
+	// Error: call promise_panic, unreachable
+	c.block = panicBlock
+	errMsg := c.block.NewExtractValue(result, resultErrIdx(resultType))
+	c.block.NewCall(c.funcs["promise_panic"], errMsg)
+	c.block.NewUnreachable()
+
+	// Ok: extract value
+	c.block = okBlock
+	if !isVoidResult(resultType) {
+		return c.block.NewExtractValue(result, 1)
+	}
+	return nil
+}
+
+// genErrorHandlerExpr generates the `expr ? binding { body }` operator.
+// Evaluates the inner failable call, runs the handler on error (with optional
+// error binding), or extracts the Ok value on success. Merges with phi if
+// both branches produce values.
+func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
+	result := c.genExpr(e.Expr)
+	resultType := result.Type().(*irtypes.StructType)
+
+	tag := c.block.NewExtractValue(result, 0)
+
+	handlerBlock := c.newBlock("error.handler")
+	okBlock := c.newBlock("error.ok")
+	mergeBlock := c.newBlock("error.merge")
+	c.block.NewCondBr(tag, handlerBlock, okBlock)
+
+	// Handler block: bind error variable, generate body
+	c.block = handlerBlock
+	if e.Binding != "" && e.Binding != "_" {
+		errVal := c.block.NewExtractValue(result, resultErrIdx(resultType))
+		alloca := c.block.NewAlloca(irtypes.I8Ptr)
+		alloca.SetName(e.Binding)
+		c.block.NewStore(errVal, alloca)
+		c.locals[e.Binding] = alloca
+	}
+	c.genBlock(e.Body)
+	var handlerVal value.Value
+	if len(e.Body.Stmts) > 0 {
+		if es, ok := e.Body.Stmts[len(e.Body.Stmts)-1].(*ast.ExprStmt); ok {
+			handlerVal = c.genExpr(es.Expr)
+		}
+	}
+	handlerEnd := c.block
+	if c.block.Term == nil {
+		c.block.NewBr(mergeBlock)
+	}
+
+	// Ok path: extract value
+	c.block = okBlock
+	var okVal value.Value
+	if !isVoidResult(resultType) {
+		okVal = c.block.NewExtractValue(result, 1)
+	}
+	c.block.NewBr(mergeBlock)
+	okEnd := c.block
+
+	// Merge with phi if both paths produce values
+	c.block = mergeBlock
+	if okVal != nil && handlerVal != nil {
+		return mergeBlock.NewPhi(
+			&ir.Incoming{X: okVal, Pred: okEnd},
+			&ir.Incoming{X: handlerVal, Pred: handlerEnd},
+		)
+	}
+	return okVal
 }

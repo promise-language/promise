@@ -53,6 +53,8 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 		c.genBreakStmt()
 	case *ast.ContinueStmt:
 		c.genContinueStmt()
+	case *ast.RaiseStmt:
+		c.genRaiseStmt(s)
 	case *ast.Block:
 		c.genBlock(s)
 	default:
@@ -217,12 +219,30 @@ func (c *Compiler) namedFromLLVMType(typ irtypes.Type) *types.Named {
 // --- Return ---
 
 func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
+	if c.canError {
+		resultType := c.currentResultType()
+		if s.Value == nil {
+			c.block.NewRet(c.wrapOk(nil, resultType))
+		} else {
+			val := c.genExpr(s.Value)
+			c.block.NewRet(c.wrapOk(val, resultType))
+		}
+		return
+	}
 	if s.Value == nil {
 		c.block.NewRet(nil)
 	} else {
 		val := c.genExpr(s.Value)
 		c.block.NewRet(val)
 	}
+}
+
+// --- Raise ---
+
+func (c *Compiler) genRaiseStmt(s *ast.RaiseStmt) {
+	errVal := c.genExpr(s.Value)
+	resultType := c.currentResultType()
+	c.block.NewRet(c.wrapError(errVal, resultType))
 }
 
 // --- If statement ---

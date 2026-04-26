@@ -29,6 +29,9 @@ type Compiler struct {
 	breakTarget    *ir.Block
 	continueTarget *ir.Block
 
+	// Error handling: true if current function is failable (returns result struct)
+	canError bool
+
 	// String literal counter for unique global names
 	strCounter int
 }
@@ -128,13 +131,16 @@ func (c *Compiler) declareFuncs(file *ast.File) {
 		if sig.Result() != nil {
 			retType = c.resolveType(sig.Result())
 		}
+		if sig.CanError() {
+			retType = computeResultType(retType)
+		}
 
 		var params []*ir.Param
 		for _, p := range sig.Params() {
 			params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
 		}
 
-		// C ABI requires main to return i32
+		// C ABI requires main to return i32 (overrides canError)
 		if fd.Name == "main" {
 			retType = irtypes.I32
 		}
@@ -179,6 +185,8 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 	if !ok {
 		return
 	}
+	c.canError = sig.CanError()
+
 	for i, p := range sig.Params() {
 		if p.Name() == "" || p.Name() == "_" {
 			continue
@@ -193,10 +201,16 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 
 	// Ensure the function ends with a terminator
 	if c.block != nil && c.block.Term == nil {
-		if _, ok := fn.Sig.RetType.(*irtypes.VoidType); ok {
+		if c.canError {
+			resultType := c.currentResultType()
+			if isVoidResult(resultType) {
+				c.block.NewRet(c.wrapOk(nil, resultType))
+			} else {
+				c.block.NewRet(c.wrapOk(c.zeroValue(resultType.Fields[1]), resultType))
+			}
+		} else if _, ok := fn.Sig.RetType.(*irtypes.VoidType); ok {
 			c.block.NewRet(nil)
 		} else {
-			// Return zero value for non-void functions missing a return
 			c.block.NewRet(c.zeroValue(fn.Sig.RetType))
 		}
 	}
@@ -224,9 +238,42 @@ func (c *Compiler) zeroValue(typ irtypes.Type) constant.Constant {
 		return constant.NewFloat(t, 0.0)
 	case *irtypes.PointerType:
 		return constant.NewNull(t)
+	case *irtypes.StructType:
+		return constant.NewZeroInitializer(t)
 	default:
 		return constant.NewInt(irtypes.I64, 0)
 	}
+}
+
+// currentResultType returns the result struct type of the current failable function.
+func (c *Compiler) currentResultType() *irtypes.StructType {
+	return c.fn.Sig.RetType.(*irtypes.StructType)
+}
+
+// wrapOk builds an Ok result struct: { false, val, null } or { false, null } for void.
+func (c *Compiler) wrapOk(val value.Value, resultType *irtypes.StructType) value.Value {
+	var agg value.Value = constant.NewUndef(resultType)
+	agg = c.block.NewInsertValue(agg, constant.NewInt(irtypes.I1, 0), 0)
+	if isVoidResult(resultType) {
+		agg = c.block.NewInsertValue(agg, constant.NewNull(irtypes.I8Ptr), 1)
+	} else {
+		agg = c.block.NewInsertValue(agg, val, 1)
+		agg = c.block.NewInsertValue(agg, constant.NewNull(irtypes.I8Ptr), 2)
+	}
+	return agg
+}
+
+// wrapError builds an Error result struct: { true, zero, errVal } or { true, errVal } for void.
+func (c *Compiler) wrapError(errVal value.Value, resultType *irtypes.StructType) value.Value {
+	var agg value.Value = constant.NewUndef(resultType)
+	agg = c.block.NewInsertValue(agg, constant.NewInt(irtypes.I1, 1), 0)
+	if isVoidResult(resultType) {
+		agg = c.block.NewInsertValue(agg, errVal, 1)
+	} else {
+		agg = c.block.NewInsertValue(agg, c.zeroValue(resultType.Fields[1]), 1)
+		agg = c.block.NewInsertValue(agg, errVal, 2)
+	}
+	return agg
 }
 
 // newBlock creates a new basic block in the current function.
@@ -280,12 +327,15 @@ func (c *Compiler) declareTypeMethods(file *ast.File) {
 				params = append(params, ir.NewParam("this", irtypes.I8Ptr))
 			}
 			for _, p := range m.Sig().Params() {
-				params = append(params, ir.NewParam(p.Name(), llvmType(p.Type())))
+				params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
 			}
 
 			retType := irtypes.Type(irtypes.Void)
 			if m.Sig().Result() != nil {
-				retType = llvmType(m.Sig().Result())
+				retType = c.resolveType(m.Sig().Result())
+			}
+			if m.Sig().CanError() {
+				retType = computeResultType(retType)
 			}
 
 			fn := c.module.NewFunc(mangledName, retType, params...)
@@ -330,6 +380,7 @@ func (c *Compiler) defineTypeMethods(file *ast.File) {
 func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.Func) {
 	c.fn = fn
 	c.locals = make(map[string]*ir.InstAlloca)
+	c.canError = m.Sig().CanError()
 
 	entry := fn.NewBlock("entry")
 	c.block = entry
@@ -351,7 +402,7 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 			paramIdx++
 			continue
 		}
-		lt := llvmType(p.Type())
+		lt := c.resolveType(p.Type())
 		alloca := entry.NewAlloca(lt)
 		alloca.SetName(p.Name() + ".addr")
 		entry.NewStore(fn.Params[paramIdx], alloca)
@@ -363,7 +414,14 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 
 	// Ensure the function ends with a terminator
 	if c.block != nil && c.block.Term == nil {
-		if _, ok := fn.Sig.RetType.(*irtypes.VoidType); ok {
+		if c.canError {
+			resultType := c.currentResultType()
+			if isVoidResult(resultType) {
+				c.block.NewRet(c.wrapOk(nil, resultType))
+			} else {
+				c.block.NewRet(c.wrapOk(c.zeroValue(resultType.Fields[1]), resultType))
+			}
+		} else if _, ok := fn.Sig.RetType.(*irtypes.VoidType); ok {
 			c.block.NewRet(nil)
 		} else {
 			c.block.NewRet(c.zeroValue(fn.Sig.RetType))

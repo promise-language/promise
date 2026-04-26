@@ -175,31 +175,44 @@ func runBuild(args []string) {
 	}
 	headerFile.Close()
 
-	// Find runtime.c relative to the binary or in known locations
-	runtimeC := findRuntime()
-	if runtimeC == "" {
-		fmt.Fprintln(os.Stderr, "error: cannot find runtime/runtime.c")
+	// Find runtime directory relative to the binary or in known locations
+	runtimeDir := findRuntimeDir()
+	if runtimeDir == "" {
+		fmt.Fprintln(os.Stderr, "error: cannot find runtime/ directory")
 		os.Exit(1)
 	}
 
-	// Compile runtime to object file with generated header
-	runtimeO, err := os.CreateTemp("", "promise-runtime-*.o")
+	// Compile all .c files in the runtime directory with generated header
+	runtimeCFiles, err := findRuntimeCFiles(runtimeDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error reading runtime directory: %v\n", err)
 		os.Exit(1)
 	}
-	defer os.Remove(runtimeO.Name())
-	runtimeO.Close()
 
-	clangCmd := exec.Command("clang", "-c", runtimeC, "-include", headerFile.Name(), "-o", runtimeO.Name())
-	clangCmd.Stderr = os.Stderr
-	if err := clangCmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "error compiling runtime: %v\n", err)
-		os.Exit(1)
+	var runtimeObjs []string
+	for _, cFile := range runtimeCFiles {
+		objFile, err := os.CreateTemp("", "promise-runtime-*.o")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
+			os.Exit(1)
+		}
+		objFile.Close()
+		defer os.Remove(objFile.Name())
+
+		clangCmd := exec.Command("clang", "-c", cFile, "-include", headerFile.Name(), "-o", objFile.Name())
+		clangCmd.Stderr = os.Stderr
+		if err := clangCmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "error compiling %s: %v\n", filepath.Base(cFile), err)
+			os.Exit(1)
+		}
+		runtimeObjs = append(runtimeObjs, objFile.Name())
 	}
 
 	// Link
-	linkCmd := exec.Command("clang", llFile.Name(), runtimeO.Name(), "-o", outputFile)
+	linkArgs := []string{llFile.Name()}
+	linkArgs = append(linkArgs, runtimeObjs...)
+	linkArgs = append(linkArgs, "-o", outputFile)
+	linkCmd := exec.Command("clang", linkArgs...)
 	linkCmd.Stderr = os.Stderr
 	if err := linkCmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error linking: %v\n", err)
@@ -303,26 +316,27 @@ func compileFrontend(filename string) (*ast.File, *sema.Info) {
 	return file, info
 }
 
-// findRuntime searches for runtime/runtime.c in standard locations.
-func findRuntime() string {
+// findRuntimeDir searches for the runtime/ directory in standard locations.
+func findRuntimeDir() string {
 	candidates := []string{
-		"runtime/runtime.c",
-		"../runtime/runtime.c",
-		"../../runtime/runtime.c",
+		"runtime",
+		"../runtime",
+		"../../runtime",
 	}
 
 	// Check relative to executable
 	if execPath, err := os.Executable(); err == nil {
 		dir := filepath.Dir(execPath)
 		candidates = append(candidates,
-			filepath.Join(dir, "runtime", "runtime.c"),
-			filepath.Join(dir, "..", "runtime", "runtime.c"),
-			filepath.Join(dir, "..", "..", "runtime", "runtime.c"),
+			filepath.Join(dir, "runtime"),
+			filepath.Join(dir, "..", "runtime"),
+			filepath.Join(dir, "..", "..", "runtime"),
 		)
 	}
 
 	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
+		info, err := os.Stat(c)
+		if err == nil && info.IsDir() {
 			abs, err := filepath.Abs(c)
 			if err == nil {
 				return abs
@@ -331,6 +345,21 @@ func findRuntime() string {
 		}
 	}
 	return ""
+}
+
+// findRuntimeCFiles returns all .c files in the runtime directory, sorted.
+func findRuntimeCFiles(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".c") {
+			files = append(files, filepath.Join(dir, e.Name()))
+		}
+	}
+	return files, nil
 }
 
 type errorListener struct {

@@ -77,6 +77,8 @@ func llvmNamedType(n *types.Named) irtypes.Type {
 		return irtypes.I1
 	case types.TypChar:
 		return irtypes.I32 // Unicode codepoint
+	case types.TypString:
+		return irtypes.I8Ptr // opaque pointer to promise_string_i
 	case types.TypVoid, types.TypNone:
 		return irtypes.Void
 	default:

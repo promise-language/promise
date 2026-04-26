@@ -697,3 +697,133 @@ func TestHeaderGeneration(t *testing.T) {
 	assertContains(t, header, "void promise_print_int(promise_int_v x);")
 	assertContains(t, header, "void promise_print_f64(promise_f64_v x);")
 }
+
+// --- String tests ---
+
+func TestStringLiteral(t *testing.T) {
+	ir := generateIR(t, `
+		print_string(string s) `+"`"+`extern("promise_print_string");
+		main() { print_string("hello"); }
+	`)
+	// Global string constant
+	assertContains(t, ir, `c"hello"`)
+	// Call to promise_string_new
+	assertContains(t, ir, "call i8* @promise_string_new(")
+	// Packing into value struct
+	assertContains(t, ir, "insertvalue %promise_string_v")
+	// Call to extern
+	assertContains(t, ir, "call void @promise_print_string(")
+}
+
+func TestStringVariable(t *testing.T) {
+	ir := generateIR(t, `main() { s := "hello"; }`)
+	// Alloca for i8* (string pointer)
+	assertContains(t, ir, "alloca i8*")
+	// Call to promise_string_new
+	assertContains(t, ir, "call i8* @promise_string_new(")
+	// Store i8* into alloca
+	assertContains(t, ir, "store i8*")
+}
+
+func TestStringConcat(t *testing.T) {
+	ir := generateIR(t, `main() { s := "hello" + " world"; }`)
+	// Two string literals
+	assertContains(t, ir, `c"hello"`)
+	assertContains(t, ir, `c" world"`)
+	// Concat intrinsic
+	assertContains(t, ir, "call i8* @promise_string_concat(")
+}
+
+func TestStringEquality(t *testing.T) {
+	ir := generateIR(t, `main() { b := "a" == "b"; }`)
+	assertContains(t, ir, "call i1 @promise_string_eq(")
+}
+
+func TestStringNotEqual(t *testing.T) {
+	ir := generateIR(t, `main() { b := "a" != "b"; }`)
+	assertContains(t, ir, "call i1 @promise_string_eq(")
+	assertContains(t, ir, "xor i1")
+}
+
+func TestStringExternPacking(t *testing.T) {
+	ir := generateIR(t, `
+		print_string(string s) `+"`"+`extern("promise_print_string");
+		main() { print_string("hello"); }
+	`)
+	// Bitcast i8* to promise_string_i*
+	assertContains(t, ir, "bitcast i8* %")
+	// Insert into value struct
+	assertContains(t, ir, "insertvalue %promise_string_v")
+}
+
+func TestStringLayout(t *testing.T) {
+	// String layout struct types should always be present
+	ir := generateIR(t, `main() { x := 42; }`)
+	assertContains(t, ir, "%promise_string_t = type {}")
+	assertContains(t, ir, "%promise_string_m = type { %promise_string_t* }")
+	assertContains(t, ir, "%promise_string_i = type { %promise_string_m*, i64, [0 x i8] }")
+	assertContains(t, ir, "%promise_string_v = type { i8*, %promise_string_i* }")
+}
+
+func TestStringHeader(t *testing.T) {
+	result := compileResult(t, `
+		print_string(string s) `+"`"+`extern("promise_print_string");
+		main() { print_string("hello"); }
+	`)
+
+	var buf bytes.Buffer
+	if err := GenerateHeader(&buf, result.Layouts, result.Externs); err != nil {
+		t.Fatalf("GenerateHeader error: %v", err)
+	}
+	header := buf.String()
+
+	// String layout with flexible array member
+	assertContains(t, header, "typedef struct { } promise_string_t;")
+	assertContains(t, header, "promise_string_m;")
+	assertContains(t, header, "char                 data[];")
+	assertContains(t, header, "promise_string_i;")
+	assertContains(t, header, "promise_string_v;")
+
+	// Extern declaration using string value struct
+	assertContains(t, header, "void promise_print_string(promise_string_v s);")
+}
+
+func TestStringEscapes(t *testing.T) {
+	ir := generateIR(t, `main() { s := "hello\nworld"; }`)
+	// The global should contain the actual newline character
+	assertContains(t, ir, `c"hello\0Aworld"`)
+}
+
+func TestStringExternReturn(t *testing.T) {
+	ir := generateIR(t, `
+		get_greeting() string `+"`"+`extern("promise_get_greeting");
+		main() { s := get_greeting(); }
+	`)
+	// Extern returns promise_string_v
+	assertContains(t, ir, "define i32 @main()")
+	// Unpack: extractvalue + bitcast back to i8*
+	assertContains(t, ir, "extractvalue %promise_string_v")
+	assertContains(t, ir, "bitcast %promise_string_i*")
+}
+
+func TestStringEmpty(t *testing.T) {
+	ir := generateIR(t, `main() { s := ""; }`)
+	// Empty string: [0 x i8] global constant
+	assertContains(t, ir, "call i8* @promise_string_new(")
+	// Length argument should be 0
+	assertContains(t, ir, "i64 0)")
+}
+
+func TestStringEscapeBrace(t *testing.T) {
+	ir := generateIR(t, `main() { s := "a\{b"; }`)
+	// \{ should resolve to literal {
+	assertContains(t, ir, `c"a{b"`)
+}
+
+func TestStringIntrinsicsDeclared(t *testing.T) {
+	ir := generateIR(t, `main() { x := 42; }`)
+	// String intrinsics should always be declared
+	assertContains(t, ir, "declare i8* @promise_string_new(i8* %data, i64 %len)")
+	assertContains(t, ir, "declare i8* @promise_string_concat(i8* %a, i8* %b)")
+	assertContains(t, ir, "declare i1 @promise_string_eq(i8* %a, i8* %b)")
+}

@@ -27,6 +27,9 @@ type Compiler struct {
 	// Loop control targets for break/continue
 	breakTarget    *ir.Block
 	continueTarget *ir.Block
+
+	// String literal counter for unique global names
+	strCounter int
 }
 
 // Compile generates an LLVM IR module from a type-checked Promise AST.
@@ -63,6 +66,25 @@ func Compile(file *ast.File, info *sema.Info) *CompileResult {
 func (c *Compiler) declareIntrinsics() {
 	c.funcs["promise_panic"] = c.module.NewFunc("promise_panic",
 		irtypes.Void, ir.NewParam("msg", irtypes.I8Ptr))
+
+	// String intrinsics — declared with i8* params/returns for internal use.
+	// The C implementations (runtime_string.c) use typed promise_string_i* pointers.
+	// This is ABI-compatible since all pointers are the same size; the type mismatch
+	// is invisible at the linker level and avoids threading struct types through llvmNamedType.
+	c.funcs["promise_string_new"] = c.module.NewFunc("promise_string_new",
+		irtypes.I8Ptr,
+		ir.NewParam("data", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+
+	c.funcs["promise_string_concat"] = c.module.NewFunc("promise_string_concat",
+		irtypes.I8Ptr,
+		ir.NewParam("a", irtypes.I8Ptr),
+		ir.NewParam("b", irtypes.I8Ptr))
+
+	c.funcs["promise_string_eq"] = c.module.NewFunc("promise_string_eq",
+		irtypes.I1,
+		ir.NewParam("a", irtypes.I8Ptr),
+		ir.NewParam("b", irtypes.I8Ptr))
 }
 
 // declareFuncs creates LLVM function declarations for all FuncDecl nodes with bodies (pass 1).
@@ -183,6 +205,8 @@ func (c *Compiler) zeroValue(typ irtypes.Type) constant.Constant {
 		return constant.NewInt(t, 0)
 	case *irtypes.FloatType:
 		return constant.NewFloat(t, 0.0)
+	case *irtypes.PointerType:
+		return constant.NewNull(t)
 	default:
 		return constant.NewInt(irtypes.I64, 0)
 	}

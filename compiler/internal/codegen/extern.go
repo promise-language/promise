@@ -91,10 +91,14 @@ func (c *Compiler) genExternCall(ext *ExternFunc, argVals []value.Value, argType
 
 // packToValueStruct packs a Promise internal value into a promise_T_v struct.
 func (c *Compiler) packToValueStruct(val value.Value, named *types.Named, layout *TypeDeclLayout) value.Value {
-	if layout.Kind == LayoutPrimitive {
+	switch layout.Kind {
+	case LayoutPrimitive:
 		return c.packPrimitive(val, named, layout)
+	case LayoutString:
+		return c.packString(val, layout)
+	default:
+		panic(fmt.Sprintf("codegen: packing type %s (kind %d) not yet implemented", named, layout.Kind))
 	}
-	panic(fmt.Sprintf("codegen: packing non-primitive type %s not yet implemented", named))
 }
 
 // packPrimitive packs a scalar into a primitive value struct using insertvalue.
@@ -121,16 +125,45 @@ func (c *Compiler) packPrimitive(val value.Value, named *types.Named, layout *Ty
 
 // unpackFromValueStruct extracts the internal representation from a promise_T_v return.
 func (c *Compiler) unpackFromValueStruct(val value.Value, named *types.Named, layout *TypeDeclLayout) value.Value {
-	if layout.Kind == LayoutPrimitive {
+	switch layout.Kind {
+	case LayoutPrimitive:
 		return c.unpackPrimitive(val, named, layout)
+	case LayoutString:
+		return c.unpackString(val, layout)
+	default:
+		panic(fmt.Sprintf("codegen: unpacking type %s (kind %d) not yet implemented", named, layout.Kind))
 	}
-	panic(fmt.Sprintf("codegen: unpacking non-primitive type %s not yet implemented", named))
 }
 
 // unpackPrimitive extracts the raw scalar from a primitive value struct.
 func (c *Compiler) unpackPrimitive(val value.Value, named *types.Named, layout *TypeDeclLayout) value.Value {
 	rawVal := c.block.NewExtractValue(val, 2)
 	return c.coerceFromRaw(rawVal, named, layout)
+}
+
+// packString packs an i8* instance pointer into a promise_string_v struct.
+// Result: { null, bitcast(val) }
+func (c *Compiler) packString(val value.Value, layout *TypeDeclLayout) value.Value {
+	valueStructType := layout.Value.LLVMType
+	var agg value.Value = constant.NewUndef(valueStructType)
+
+	// Field 0: _vtable = null (i8*)
+	agg = c.block.NewInsertValue(agg, constant.NewNull(irtypes.I8Ptr), 0)
+
+	// Field 1: _instance = bitcast i8* to promise_string_i*
+	instancePtrType := layout.Value.Fields[1].LLVMType.(*irtypes.PointerType)
+	inst := c.block.NewBitCast(val, instancePtrType)
+	agg = c.block.NewInsertValue(agg, inst, 1)
+
+	return agg
+}
+
+// unpackString extracts the i8* instance pointer from a promise_string_v return.
+func (c *Compiler) unpackString(val value.Value, layout *TypeDeclLayout) value.Value {
+	// extractvalue field 1 → promise_string_i*
+	inst := c.block.NewExtractValue(val, 1)
+	// bitcast back to i8*
+	return c.block.NewBitCast(inst, irtypes.I8Ptr)
 }
 
 // coerceToRaw converts an internal Promise value to the raw field type.

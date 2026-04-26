@@ -123,9 +123,16 @@ func emitStructTypedef(w io.Writer, sl *StructLayout) error {
 	if _, err := fmt.Fprintf(w, "typedef struct {\n"); err != nil {
 		return err
 	}
-	for _, f := range sl.Fields {
-		if _, err := fmt.Fprintf(w, "    %-20s %s;\n", f.CType, f.Name); err != nil {
-			return err
+	for i, f := range sl.Fields {
+		if sl.IsFlexible && i == len(sl.Fields)-1 {
+			// C99 flexible array member
+			if _, err := fmt.Fprintf(w, "    %-20s %s[];\n", sl.FlexElemCType, f.Name); err != nil {
+				return err
+			}
+		} else {
+			if _, err := fmt.Fprintf(w, "    %-20s %s;\n", f.CType, f.Name); err != nil {
+				return err
+			}
 		}
 	}
 	_, err := fmt.Fprintf(w, "} %s;\n", sl.CName)

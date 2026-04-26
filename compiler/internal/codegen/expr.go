@@ -26,6 +26,8 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		return c.genFloatLit(e)
 	case *ast.BoolLit:
 		return c.genBoolLit(e)
+	case *ast.StringLit:
+		return c.genStringLit(e)
 	case *ast.IdentExpr:
 		return c.genIdentExpr(e)
 	case *ast.ParenExpr:
@@ -89,6 +91,67 @@ func (c *Compiler) genBoolLit(e *ast.BoolLit) value.Value {
 	return constant.NewInt(irtypes.I1, 0)
 }
 
+func (c *Compiler) genStringLit(e *ast.StringLit) value.Value {
+	// Resolve string parts into a byte string
+	var buf strings.Builder
+	for _, part := range e.Parts {
+		switch p := part.(type) {
+		case ast.StringText:
+			buf.WriteString(p.Text)
+		case ast.StringEscape:
+			buf.WriteString(resolveEscape(p.Sequence))
+		case ast.StringInterp:
+			// String interpolation not yet supported in codegen
+			panic("codegen: string interpolation not yet implemented")
+		}
+	}
+	str := buf.String()
+
+	// Create global constant with string data
+	data := constant.NewCharArrayFromString(str)
+	globalName := fmt.Sprintf(".str.%d", c.strCounter)
+	c.strCounter++
+	global := c.module.NewGlobalDef(globalName, data)
+	global.Immutable = true
+
+	// GEP to get i8* pointer to the data
+	ptr := c.block.NewGetElementPtr(global.ContentType, global,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+
+	// Call promise_string_new(ptr, len) → i8*
+	return c.block.NewCall(c.funcs["promise_string_new"],
+		ptr, constant.NewInt(irtypes.I64, int64(len(str))))
+}
+
+// resolveEscape converts an escape sequence token to its string value.
+// The seq parameter contains the full lexer token (e.g., `\n` for a newline escape).
+func resolveEscape(seq string) string {
+	// Strip leading backslash if present (lexer includes it in the token)
+	if len(seq) > 1 && seq[0] == '\\' {
+		seq = seq[1:]
+	}
+	switch seq {
+	case "n":
+		return "\n"
+	case "t":
+		return "\t"
+	case "r":
+		return "\r"
+	case "b":
+		return "\b"
+	case "\\":
+		return "\\"
+	case "\"":
+		return "\""
+	case "0":
+		return "\x00"
+	case "{":
+		return "{"
+	default:
+		return "\\" + seq
+	}
+}
+
 // --- Identifiers ---
 
 func (c *Compiler) genIdentExpr(e *ast.IdentExpr) value.Value {
@@ -134,11 +197,30 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 	}
 
 	if method.IsNative() {
+		// String operators dispatch to runtime intrinsics
+		if named == types.TypString {
+			return c.genStringOp(op, left, right)
+		}
 		return c.emitNativeOp(named, op, left, right)
 	}
 
 	// Non-native method call (future stages)
 	panic(fmt.Sprintf("codegen: non-native operator %s.%s not yet implemented", named, op))
+}
+
+// genStringOp dispatches a string binary operator to the appropriate runtime intrinsic.
+func (c *Compiler) genStringOp(op string, left, right value.Value) value.Value {
+	switch op {
+	case "+":
+		return c.block.NewCall(c.funcs["promise_string_concat"], left, right)
+	case "==":
+		return c.block.NewCall(c.funcs["promise_string_eq"], left, right)
+	case "!=":
+		eq := c.block.NewCall(c.funcs["promise_string_eq"], left, right)
+		return c.block.NewXor(eq, constant.NewInt(irtypes.I1, 1))
+	default:
+		panic(fmt.Sprintf("codegen: string operator %q not yet implemented", op))
+	}
 }
 
 // --- Unary expressions ---

@@ -14,10 +14,10 @@ type LayoutKind int
 
 const (
 	LayoutPrimitive LayoutKind = iota
+	LayoutString
 	// Future stages:
 	// LayoutStruct
 	// LayoutEnum
-	// LayoutString
 	// LayoutArray
 	// LayoutSlice
 	// LayoutTuple
@@ -39,10 +39,12 @@ type TypeDeclLayout struct {
 
 // StructLayout describes one of the four C-ABI-compatible struct representations.
 type StructLayout struct {
-	CName    string              // C identifier: "promise_int_v"
-	Suffix   string              // "_v", "_i", "_m", "_t"
-	Fields   []FieldLayout       // ordered fields
-	LLVMType *irtypes.StructType // resolved LLVM named struct type
+	CName         string              // C identifier: "promise_int_v"
+	Suffix        string              // "_v", "_i", "_m", "_t"
+	Fields        []FieldLayout       // ordered fields
+	LLVMType      *irtypes.StructType // resolved LLVM named struct type
+	IsFlexible    bool                // true if last field is a C99 flexible array member
+	FlexElemCType string              // C element type of flexible member ("char")
 }
 
 // FieldLayout describes a single field in a struct layout.
@@ -184,10 +186,88 @@ func computePrimitiveLayout(module *ir.Module, named *types.Named) *TypeDeclLayo
 	}
 }
 
+// computeStringLayout creates a TypeDeclLayout for the string type.
+// String uses a flexible array member in the Instance struct for inline UTF-8 data.
+func computeStringLayout(module *ir.Module) *TypeDeclLayout {
+	name := "string"
+
+	// Type struct: empty {}
+	typeStruct := irtypes.NewStruct()
+	typeStruct.SetName("promise_" + name + "_t")
+	module.NewTypeDef("promise_"+name+"_t", typeStruct)
+
+	typePtr := irtypes.NewPointer(typeStruct)
+
+	// Variant struct: { promise_string_t* _type }
+	variantStruct := irtypes.NewStruct(typePtr)
+	variantStruct.SetName("promise_" + name + "_m")
+	module.NewTypeDef("promise_"+name+"_m", variantStruct)
+
+	variantPtr := irtypes.NewPointer(variantStruct)
+
+	// Instance struct: { promise_string_m* _variant, i64 len, [0 x i8] data }
+	flexArray := irtypes.NewArray(0, irtypes.I8)
+	instanceStruct := irtypes.NewStruct(variantPtr, irtypes.I64, flexArray)
+	instanceStruct.SetName("promise_" + name + "_i")
+	module.NewTypeDef("promise_"+name+"_i", instanceStruct)
+
+	instancePtr := irtypes.NewPointer(instanceStruct)
+
+	// Value struct: { i8* _vtable, promise_string_i* _instance } — NO raw field
+	valueStruct := irtypes.NewStruct(irtypes.I8Ptr, instancePtr)
+	valueStruct.SetName("promise_" + name + "_v")
+	module.NewTypeDef("promise_"+name+"_v", valueStruct)
+
+	return &TypeDeclLayout{
+		PromiseName: name,
+		Kind:        LayoutString,
+		RawLLVM:     nil, // no raw field for strings
+		RawCType:    "",
+		IsSigned:    false,
+		Type: &StructLayout{
+			CName:    "promise_" + name + "_t",
+			Suffix:   "_t",
+			Fields:   []FieldLayout{},
+			LLVMType: typeStruct,
+		},
+		Variant: &StructLayout{
+			CName:  "promise_" + name + "_m",
+			Suffix: "_m",
+			Fields: []FieldLayout{
+				{Name: "_type", CType: "promise_" + name + "_t*", LLVMType: typePtr, IsInternal: true},
+			},
+			LLVMType: variantStruct,
+		},
+		Instance: &StructLayout{
+			CName:  "promise_" + name + "_i",
+			Suffix: "_i",
+			Fields: []FieldLayout{
+				{Name: "_variant", CType: "promise_" + name + "_m*", LLVMType: variantPtr, IsInternal: true},
+				{Name: "len", CType: "int64_t", LLVMType: irtypes.I64, IsInternal: false},
+				{Name: "data", CType: "char", LLVMType: flexArray, IsInternal: false},
+			},
+			LLVMType:      instanceStruct,
+			IsFlexible:    true,
+			FlexElemCType: "char",
+		},
+		Value: &StructLayout{
+			CName:  "promise_" + name + "_v",
+			Suffix: "_v",
+			Fields: []FieldLayout{
+				{Name: "_vtable", CType: "void*", LLVMType: irtypes.I8Ptr, IsInternal: true},
+				{Name: "_instance", CType: "promise_" + name + "_i*", LLVMType: instancePtr, IsInternal: true},
+			},
+			LLVMType: valueStruct,
+		},
+	}
+}
+
 // computeLayouts computes TypeDeclLayout for all types reachable from extern signatures.
-// For Stage 8a, only primitive types are supported.
 func computeLayouts(module *ir.Module, externs []*ExternFunc) map[*types.Named]*TypeDeclLayout {
 	layouts := make(map[*types.Named]*TypeDeclLayout)
+
+	// Always compute string layout — intrinsics need the struct types
+	layouts[types.TypString] = computeStringLayout(module)
 
 	for _, ext := range externs {
 		// Collect all Named types from parameters and result

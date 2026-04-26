@@ -10,6 +10,7 @@ void promise_panic(const char* msg)       { fprintf(stderr, "panic: %s\n", msg);
 /* RTTI: type info struct stored in the _variant pointer of each instance. */
 #include <stdint.h>
 typedef struct {
+    void*   vtable_ptr;
     int32_t type_id;
     int32_t num_parents;
     int32_t parent_ids[];

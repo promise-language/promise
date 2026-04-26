@@ -171,8 +171,8 @@ func (c *Compiler) unpackString(val value.Value, layout *TypeDeclLayout) value.V
 	return c.block.NewBitCast(inst, irtypes.I8Ptr)
 }
 
-// packUserType packs an i8* instance pointer into a promise_T_v struct.
-// Same pattern as packString: { null_vtable, bitcast(i8* → T_i*) }.
+// packUserType packs an internal value struct { vtable, instance } into a promise_T_v struct.
+// Extracts instance from value struct, bitcasts to typed instance pointer.
 func (c *Compiler) packUserType(val value.Value, layout *TypeDeclLayout) value.Value {
 	valueStructType := layout.Value.LLVMType
 	var agg value.Value = constant.NewUndef(valueStructType)
@@ -180,20 +180,29 @@ func (c *Compiler) packUserType(val value.Value, layout *TypeDeclLayout) value.V
 	// Field 0: _vtable = null (i8*)
 	agg = c.block.NewInsertValue(agg, constant.NewNull(irtypes.I8Ptr), 0)
 
-	// Field 1: _instance = bitcast i8* to promise_T_i*
+	// Field 1: _instance = bitcast(extracted instance i8* → promise_T_i*)
+	instance := c.extractInstancePtr(val)
 	instancePtrType := layout.Value.Fields[1].LLVMType.(*irtypes.PointerType)
-	inst := c.block.NewBitCast(val, instancePtrType)
+	inst := c.block.NewBitCast(instance, instancePtrType)
 	agg = c.block.NewInsertValue(agg, inst, 1)
 
 	return agg
 }
 
-// unpackUserType extracts the i8* instance pointer from a promise_T_v return.
+// unpackUserType extracts the internal value struct from a promise_T_v return.
+// Builds { vtable, instance } from the C ABI struct { i8* vtable, promise_T_i* instance }.
 func (c *Compiler) unpackUserType(val value.Value, layout *TypeDeclLayout) value.Value {
-	// extractvalue field 1 → promise_T_i*
+	// Extract vtable (field 0) — i8*
+	vtable := c.block.NewExtractValue(val, 0)
+	// Extract instance (field 1) — promise_T_i*, bitcast to i8*
 	inst := c.block.NewExtractValue(val, 1)
-	// bitcast back to i8*
-	return c.block.NewBitCast(inst, irtypes.I8Ptr)
+	instancePtr := c.block.NewBitCast(inst, irtypes.I8Ptr)
+
+	// Build internal value struct { i8*, i8* }
+	var agg value.Value = constant.NewUndef(userValueType())
+	agg = c.block.NewInsertValue(agg, vtable, 0)
+	agg = c.block.NewInsertValue(agg, instancePtr, 1)
+	return agg
 }
 
 // packEnum packs an enum internal value into a promise_T_v struct.

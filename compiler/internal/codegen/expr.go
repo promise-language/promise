@@ -567,6 +567,13 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 		panic(fmt.Sprintf("codegen: undefined function %q", ident.Name))
 	}
 
+	// Coerce arguments when crossing type boundaries
+	if callee := c.lookupFunc(ident.Name); callee != nil {
+		if sig, ok := callee.Type().(*types.Signature); ok {
+			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params())
+		}
+	}
+
 	return c.block.NewCall(fn, argVals...)
 }
 
@@ -592,8 +599,17 @@ func (c *Compiler) genGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr) value
 	}
 
 	var argVals []value.Value
+	var argTypes []types.Type
 	for _, arg := range e.Args {
 		argVals = append(argVals, c.genExpr(arg.Value))
+		argTypes = append(argTypes, c.info.Types[arg.Value])
+	}
+
+	// Coerce arguments when crossing type boundaries
+	if callee := c.lookupFunc(ident.Name); callee != nil {
+		if sig, ok := callee.Type().(*types.Signature); ok {
+			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params())
+		}
 	}
 
 	return c.block.NewCall(fn, argVals...)
@@ -666,7 +682,17 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 		c.block.NewStore(c.zeroValue(layout.Instance.Fields[fieldIdx].LLVMType), fieldPtr)
 	}
 
-	return rawPtr
+	// Build value struct: { vtable_ptr, instance_ptr }
+	var vtablePtr value.Value
+	if vtGlobal, ok := c.vtableGlobals[named]; ok && vtGlobal != nil {
+		vtablePtr = constant.NewBitCast(vtGlobal, irtypes.I8Ptr)
+	} else {
+		vtablePtr = constant.NewNull(irtypes.I8Ptr)
+	}
+	var valStruct value.Value = constant.NewUndef(userValueType())
+	valStruct = c.block.NewInsertValue(valStruct, vtablePtr, 0)
+	valStruct = c.block.NewInsertValue(valStruct, rawPtr, 1)
+	return valStruct
 }
 
 // --- Member access ---
@@ -740,8 +766,10 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 		panic(fmt.Sprintf("codegen: field %s not in instance layout for %s", field.Name(), typ))
 	}
 
-	target := c.genExpr(e.Target)
-	typedPtr := c.block.NewBitCast(target, layout.InstancePtrType)
+	targetVal := c.genExpr(e.Target)
+	// Extract instance pointer from value struct
+	instance := c.extractInstancePtr(targetVal)
+	typedPtr := c.block.NewBitCast(instance, layout.InstancePtrType)
 
 	fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
@@ -779,17 +807,21 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 		panic(fmt.Sprintf("codegen: no method %s on type %s", member.Field, named))
 	}
 
-	// Resolve method mangling: for inherited methods, find the defining type.
+	// Virtual dispatch: if the static type needs vtable and the method is not native,
+	// emit an indirect call through the vtable so the correct override is called.
+	if c.needsVtable(named) && !method.IsNative() {
+		return c.genVirtualMethodCall(e, member, named, method)
+	}
+
+	// Direct dispatch: resolve method to a compile-time-known function.
 	// For mono/generic types, use resolveTypeName (handles Instance → mono name).
 	// For regular Named types with inheritance, use resolveMethodOwner to find
 	// the parent that actually defines the method.
 	var mangledName string
 	ownerName := c.resolveMethodOwner(named, member.Field)
 	if ownerName != named.Obj().Name() {
-		// Inherited from a parent — use parent's name directly
 		mangledName = ownerName + "." + member.Field
 	} else {
-		// Defined on this type — use resolveTypeName for mono awareness
 		mangledName = c.resolveTypeName(targetType) + "." + member.Field
 	}
 
@@ -798,17 +830,79 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 		panic(fmt.Sprintf("codegen: undeclared method %s", mangledName))
 	}
 
-	// Build args: receiver first (if method has one), then regular args
 	var args []value.Value
 	if method.Sig().Recv() != nil {
 		target := c.genExpr(member.Target)
-		args = append(args, target)
+		// Extract instance pointer from value struct — methods expect i8* receiver
+		args = append(args, c.extractInstancePtr(target))
 	}
+	var argVals []value.Value
+	var argTypes []types.Type
 	for _, arg := range e.Args {
-		args = append(args, c.genExpr(arg.Value))
+		argVals = append(argVals, c.genExpr(arg.Value))
+		argTypes = append(argTypes, c.info.Types[arg.Value])
 	}
+	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params())
+	args = append(args, argVals...)
 
 	return c.block.NewCall(fn, args...)
+}
+
+// genVirtualMethodCall emits an indirect call through the vtable.
+// Reads vtable pointer from the value struct (field 0), indexes into it
+// to get the function pointer, casts it, and calls.
+func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
+	named *types.Named, method *types.Method) value.Value {
+
+	// 1. Evaluate receiver — now a value struct { vtable, instance }
+	receiverVal := c.genExpr(member.Target)
+
+	// 2. Extract vtable and instance from value struct
+	vtableRaw := c.extractVtablePtr(receiverVal)
+	instance := c.extractInstancePtr(receiverVal)
+
+	// 3. Index into vtable — use the STATIC type's slot layout
+	slotIndex := named.VirtualMethodIndex(member.Field)
+	if slotIndex < 0 {
+		panic(fmt.Sprintf("codegen: method %s not in vtable for %s", member.Field, named))
+	}
+	vtablePtr := c.block.NewBitCast(vtableRaw, irtypes.NewPointer(irtypes.I8Ptr))
+	fnSlotPtr := c.block.NewGetElementPtr(irtypes.I8Ptr, vtablePtr,
+		constant.NewInt(irtypes.I32, int64(slotIndex)))
+	fnRaw := c.block.NewLoad(irtypes.I8Ptr, fnSlotPtr)
+
+	// 4. Build the correct function type and bitcast
+	retType := irtypes.Type(irtypes.Void)
+	if method.Sig().Result() != nil {
+		retType = c.resolveType(method.Sig().Result())
+	}
+	if method.Sig().CanError() {
+		retType = computeResultType(retType)
+	}
+	var paramTypes []irtypes.Type
+	if method.Sig().Recv() != nil {
+		paramTypes = append(paramTypes, irtypes.I8Ptr)
+	}
+	for _, p := range method.Sig().Params() {
+		paramTypes = append(paramTypes, c.resolveType(p.Type()))
+	}
+	funcType := irtypes.NewFunc(retType, paramTypes...)
+	fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))
+
+	// 5. Call — receiver is instance (i8*), not the value struct
+	var args []value.Value
+	if method.Sig().Recv() != nil {
+		args = append(args, instance)
+	}
+	var argVals []value.Value
+	var argTypes []types.Type
+	for _, arg := range e.Args {
+		argVals = append(argVals, c.genExpr(arg.Value))
+		argTypes = append(argTypes, c.info.Types[arg.Value])
+	}
+	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params())
+	args = append(args, argVals...)
+	return c.block.NewCall(fnTyped, args...)
 }
 
 // genStringLen loads the length field from a string instance struct.
@@ -1609,11 +1703,13 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	savedBlock := c.block
 	savedLocals := c.locals
 	savedCanError := c.canError
+	savedRetType := c.currentRetType
 
 	// Generate lambda body
 	c.fn = fn
 	c.locals = make(map[string]*ir.InstAlloca)
 	c.canError = false
+	c.currentRetType = sig.Result()
 
 	entry := fn.NewBlock("entry")
 	c.block = entry
@@ -1653,6 +1749,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.block = savedBlock
 	c.locals = savedLocals
 	c.canError = savedCanError
+	c.currentRetType = savedRetType
 
 	// Return function pointer as i8*
 	return c.block.NewBitCast(fn, irtypes.I8Ptr)
@@ -1828,7 +1925,9 @@ func (c *Compiler) genIsNamedType(expr ast.Expr, typeName string) value.Value {
 	}
 	targetID := c.assignTypeID(targetNamed)
 
-	variantPtr := c.loadVariantPtr(subject)
+	// Extract instance pointer from value struct for RTTI check
+	instance := c.extractInstancePtr(subject)
+	variantPtr := c.loadVariantPtr(instance)
 
 	// Call promise_type_is(variant_ptr, expected_id) and convert i32 result to i1
 	result := c.block.NewCall(c.funcs["promise_type_is"],
@@ -1836,8 +1935,18 @@ func (c *Compiler) genIsNamedType(expr ast.Expr, typeName string) value.Value {
 	return c.block.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 0))
 }
 
+// extractInstancePtr extracts the i8* instance pointer (field 1) from a user type value struct.
+func (c *Compiler) extractInstancePtr(val value.Value) value.Value {
+	return c.block.NewExtractValue(val, 1)
+}
+
+// extractVtablePtr extracts the i8* vtable pointer (field 0) from a user type value struct.
+func (c *Compiler) extractVtablePtr(val value.Value) value.Value {
+	return c.block.NewExtractValue(val, 0)
+}
+
 // loadVariantPtr loads the _variant pointer (RTTI info) from a user type instance.
-// All user types are i8*; the first field of any instance struct is the variant pointer.
+// The instance must be an i8* pointer; the first field of any instance struct is the variant pointer.
 func (c *Compiler) loadVariantPtr(subject value.Value) value.Value {
 	variantPtrStruct := irtypes.NewStruct(irtypes.I8Ptr)
 	typedPtr := c.block.NewBitCast(subject, irtypes.NewPointer(variantPtrStruct))
@@ -1860,14 +1969,16 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 	targetID := c.assignTypeID(targetNamed)
 
 	subject := c.genExpr(e.Expr)
-	variantPtr := c.loadVariantPtr(subject)
+	// Extract instance pointer from value struct for RTTI check
+	instance := c.extractInstancePtr(subject)
+	variantPtr := c.loadVariantPtr(instance)
 
 	result := c.block.NewCall(c.funcs["promise_type_is"],
 		variantPtr, constant.NewInt(irtypes.I32, int64(targetID)))
 	isMatch := c.block.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 0))
 
 	if e.Force {
-		// as! — panic if no match, return the value directly
+		// as! — panic if no match, return the value struct directly
 		okBlock := c.newBlock("cast.ok")
 		panicBlock := c.newBlock("cast.panic")
 		c.block.NewCondBr(isMatch, okBlock, panicBlock)
@@ -1878,18 +1989,17 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 		c.block.NewUnreachable()
 
 		c.block = okBlock
-		return subject // same i8* pointer, type is verified
+		return subject // same value struct, type is verified
 	}
 
-	// as — wrap in Optional { i1, i8* }. All Named types use the four-struct ABI
-	// where instances are heap-allocated i8* pointers, so the optional payload is always i8*.
+	// as — wrap in Optional { i1, { i8*, i8* } }. User types use value struct representation.
 	someBlock := c.newBlock("cast.some")
 	noneBlock := c.newBlock("cast.none")
 	mergeBlock := c.newBlock("cast.merge")
 	c.block.NewCondBr(isMatch, someBlock, noneBlock)
 
 	c.block = someBlock
-	optType := irtypes.NewStruct(irtypes.I1, irtypes.I8Ptr)
+	optType := irtypes.NewStruct(irtypes.I1, userValueType())
 	someResult := c.wrapOptional(subject, optType)
 	c.block.NewBr(mergeBlock)
 	someEnd := c.block

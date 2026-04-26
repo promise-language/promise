@@ -152,6 +152,25 @@ func extractEnum(typ types.Type) *types.Enum {
 	return nil
 }
 
+// userValueType returns the value struct layout for user-defined types.
+// All user types share this layout: { i8* _vtable, i8* _instance }.
+// This is the unit of passing per the four-struct model (T#v).
+func userValueType() *irtypes.StructType {
+	return irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
+}
+
+// instanceFieldLLVMType returns the LLVM type for an instance struct field.
+// User-defined types are stored as value structs { vtable, instance } to
+// preserve vtable information for dispatch. All other types use llvmType.
+func instanceFieldLLVMType(typ types.Type) irtypes.Type {
+	if n := extractNamed(typ); n != nil && classify(n) == CatUnknown {
+		if n != types.TypString && n != types.TypVoid && n != types.TypNone {
+			return userValueType()
+		}
+	}
+	return llvmType(typ)
+}
+
 // resolveType maps a Promise type to its LLVM IR type, with enum and mono awareness.
 // Unlike llvmType (which is standalone), this method applies typeSubst for
 // monomorphic codegen and looks up enum/mono layouts for correct internal types.
@@ -185,7 +204,13 @@ func (c *Compiler) resolveType(typ types.Type) irtypes.Type {
 		if layout := c.monoEnumLayouts[monoName(inst)]; layout != nil {
 			return layout.EnumInternalType
 		}
-		// Instance wrapping Named → i8Ptr (heap pointer)
+		// Instance wrapping Named user type → value struct
+		if origin, ok := inst.Origin().(*types.Named); ok {
+			if classify(origin) == CatUnknown && origin != types.TypString && origin != types.TypVoid && origin != types.TypNone {
+				return userValueType()
+			}
+		}
+		// Instance wrapping primitive Named → delegate to llvmType
 		return irtypes.I8Ptr
 	}
 
@@ -203,7 +228,26 @@ func (c *Compiler) resolveType(typ types.Type) irtypes.Type {
 		}
 		return irtypes.I32
 	}
+	// User-defined Named types → value struct { vtable, instance }
+	if n := extractNamed(typ); n != nil && classify(n) == CatUnknown {
+		if n != types.TypString && n != types.TypVoid && n != types.TypNone {
+			return userValueType()
+		}
+	}
+
 	return llvmType(typ)
+}
+
+// isUserValueType returns true if typ resolves to a user value struct.
+func (c *Compiler) isUserValueType(typ types.Type) bool {
+	n := extractNamed(typ)
+	if n == nil {
+		return false
+	}
+	if classify(n) != CatUnknown {
+		return false
+	}
+	return n != types.TypString && n != types.TypVoid && n != types.TypNone
 }
 
 // computeResultType builds the result struct type for a failable function.

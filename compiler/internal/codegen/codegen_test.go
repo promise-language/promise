@@ -1060,9 +1060,9 @@ func TestUserTypeNestedField(t *testing.T) {
 			o := Outer(child: i);
 		}
 	`)
-	// Inner stored as i8* in Outer's instance struct
+	// Inner stored as value struct { i8*, i8* } in Outer's instance struct
 	assertContains(t, ir, "%promise_Inner_i = type { %promise_Inner_m*, i64 }")
-	assertContains(t, ir, "%promise_Outer_i = type { %promise_Outer_m*, i8* }")
+	assertContains(t, ir, "%promise_Outer_i = type { %promise_Outer_m*, { i8*, i8* } }")
 	// Both should be allocated via malloc
 	assertContains(t, ir, "call i8* @malloc(i64")
 }
@@ -1077,9 +1077,9 @@ func TestUserTypeNestedFieldAccess(t *testing.T) {
 			c := o.child;
 		}
 	`)
-	// Should GEP into Outer to load the child i8*
+	// Should GEP into Outer to load the child value struct
 	assertContains(t, ir, "getelementptr %promise_Outer_i")
-	assertContains(t, ir, "load i8*")
+	assertContains(t, ir, "load { i8*, i8* }")
 }
 
 func TestUserTypeZeroArgConstructor(t *testing.T) {
@@ -3254,4 +3254,354 @@ func TestIsPresentStringOptional(t *testing.T) {
 	`)
 	// Should extractvalue on { i1, i8* } optional
 	assertContains(t, ir, "extractvalue { i1, i8* }")
+}
+
+// --- VTable dispatch tests (Stage 8l) ---
+
+func TestVtableGlobalEmitted(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal {
+			string name;
+			speak() string { return "..."; }
+		}
+		type Dog is Animal {
+			speak() string { return "woof"; }
+		}
+		main() {
+			Dog d = Dog(name: "Rex");
+		}
+	`)
+	// Both types have virtual methods, vtable globals should be emitted
+	assertContains(t, ir, "@promise_vtable_Animal")
+	assertContains(t, ir, "@promise_vtable_Dog")
+}
+
+func TestAbstractMethodVirtualDispatch(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal {
+			string name;
+			speak() string `+"`"+`abstract;
+		}
+		type Dog is Animal {
+			speak() string { return "woof"; }
+		}
+		main() {
+			Animal a = Dog(name: "Rex");
+			string s = a.speak();
+		}
+	`)
+	// Virtual dispatch: should NOT directly call @Animal.speak (abstract, doesn't exist)
+	assertNotContains(t, ir, "call i8* @Animal.speak")
+	// Should load function pointer from vtable (indirect call)
+	assertContains(t, ir, "@promise_vtable_Animal")
+	assertContains(t, ir, "@promise_vtable_Dog")
+}
+
+func TestConcreteOverrideVirtualDispatch(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal {
+			string name;
+			speak() string { return "..."; }
+		}
+		type Dog is Animal {
+			speak() string { return "woof"; }
+		}
+		main() {
+			Animal a = Dog(name: "Rex");
+			string s = a.speak();
+		}
+	`)
+	// When calling through Animal variable, should use vtable dispatch
+	// (not direct call to Animal.speak)
+	assertNotContains(t, ir, "call i8* @Animal.speak")
+	// Vtable globals should exist for both types
+	assertContains(t, ir, "@promise_vtable_Animal")
+	assertContains(t, ir, "@promise_vtable_Dog")
+}
+
+func TestDirectDispatchPreserved(t *testing.T) {
+	ir := generateIR(t, `
+		type Dog {
+			string name;
+			speak() string { return "woof"; }
+		}
+		main() {
+			Dog d = Dog(name: "Rex");
+			string s = d.speak();
+		}
+	`)
+	// Dog has no children → direct dispatch, no vtable indirection
+	assertContains(t, ir, "call i8* @Dog.speak")
+}
+
+func TestMultipleAbstractParentsVtable(t *testing.T) {
+	ir := generateIR(t, `
+		type Speakable {
+			speak() string `+"`"+`abstract;
+		}
+		type Movable {
+			walk() string `+"`"+`abstract;
+		}
+		type Robot is Speakable, Movable {
+			speak() string { return "beep"; }
+			walk() string { return "roll"; }
+		}
+		main() {
+			Speakable s = Robot();
+			string x = s.speak();
+		}
+	`)
+	// Robot's vtable should cover both speak and move
+	assertContains(t, ir, "@promise_vtable_Robot")
+	assertContains(t, ir, "@promise_vtable_Speakable")
+}
+
+func TestDeepHierarchyVtable(t *testing.T) {
+	ir := generateIR(t, `
+		type A {
+			greet() string `+"`"+`abstract;
+		}
+		type B is A {
+			greet() string { return "hello from B"; }
+		}
+		type C is B {
+			greet() string { return "hello from C"; }
+		}
+		main() {
+			A a = C();
+			string s = a.greet();
+		}
+	`)
+	// A→B→C chain: all get vtable globals
+	assertContains(t, ir, "@promise_vtable_A")
+	assertContains(t, ir, "@promise_vtable_B")
+	assertContains(t, ir, "@promise_vtable_C")
+	// Should NOT directly call @A.greet (abstract)
+	assertNotContains(t, ir, "call i8* @A.greet")
+}
+
+// --- Stage 8l: Value struct dispatch model tests ---
+
+func TestValueStructRepresentation(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal {
+			string name;
+			speak() string { return "..."; }
+		}
+		main() {
+			Animal a = Animal(name: "Rex");
+		}
+	`)
+	// Variables of user types should be value struct { i8*, i8* }
+	assertContains(t, ir, "alloca { i8*, i8* }")
+	// Constructor returns value struct with insertvalue
+	assertContains(t, ir, "insertvalue { i8*, i8* }")
+}
+
+func TestFirstParentPrefixCompatible(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal {
+			string name;
+			speak() string { return "..."; }
+		}
+		type Dog is Animal {
+			speak() string { return "woof"; }
+		}
+		main() {
+			Animal a = Dog(name: "Rex");
+			string s = a.speak();
+		}
+	`)
+	// Animal is first parent of Dog — no view vtable needed
+	assertNotContains(t, ir, "@promise_vtable_Dog_as_Animal")
+	// Dispatch through vtable from value struct (extractvalue, GEP, load, bitcast, call)
+	assertContains(t, ir, "extractvalue { i8*, i8* }")
+}
+
+func TestSecondParentViewVtable(t *testing.T) {
+	ir := generateIR(t, `
+		type Speakable {
+			speak() string `+"`"+`abstract;
+		}
+		type Movable {
+			walk() string `+"`"+`abstract;
+		}
+		type Robot is Speakable, Movable {
+			speak() string { return "beep"; }
+			walk() string { return "roll"; }
+		}
+		main() {
+			Movable m = Robot();
+		}
+	`)
+	// Movable is second parent of Robot — needs a view-specific vtable
+	assertContains(t, ir, "@promise_vtable_Robot_as_Movable")
+}
+
+func TestMultiParentVtableDispatch(t *testing.T) {
+	ir := generateIR(t, `
+		type Speakable {
+			speak() string `+"`"+`abstract;
+		}
+		type Movable {
+			walk() string `+"`"+`abstract;
+		}
+		type Robot is Speakable, Movable {
+			speak() string { return "beep"; }
+			walk() string { return "roll"; }
+		}
+		main() {
+			Movable m = Robot();
+			string s = m.walk();
+		}
+	`)
+	// Should emit view vtable for Robot-as-Movable
+	assertContains(t, ir, "@promise_vtable_Robot_as_Movable")
+	// Dispatch should use vtable from value struct (not typeinfo chain)
+	assertContains(t, ir, "extractvalue { i8*, i8* }")
+}
+
+func TestIsExpressionWithValueStruct(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal {
+			string name;
+			speak() string `+"`"+`abstract;
+		}
+		type Dog is Animal {
+			speak() string { return "woof"; }
+		}
+		main() {
+			Animal a = Dog(name: "Rex");
+			bool b = a is Dog;
+		}
+	`)
+	// Should extract instance pointer from value struct for RTTI check
+	assertContains(t, ir, "extractvalue { i8*, i8* }")
+	assertContains(t, ir, "@promise_type_is")
+}
+
+func TestFieldAccessThroughValueStruct(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal {
+			string name;
+		}
+		main() {
+			Animal a = Animal(name: "Rex");
+			string n = a.name;
+		}
+	`)
+	// Should extract instance from value struct, then GEP to field
+	assertContains(t, ir, "extractvalue { i8*, i8* }")
+	assertContains(t, ir, "getelementptr %promise_Animal_i")
+}
+
+func TestConcreteDirectDispatchPreserved(t *testing.T) {
+	ir := generateIR(t, `
+		type Point {
+			int x;
+			int y;
+			sum() int { return this.x + this.y; }
+		}
+		main() {
+			Point p = Point(x: 1, y: 2);
+			int s = p.sum();
+		}
+	`)
+	// Concrete type with no parents that needs vtable — should use direct dispatch
+	assertContains(t, ir, "call i64 @Point.sum")
+}
+
+func TestStructuralSatisfactionWithMeta(t *testing.T) {
+	ir := generateIR(t, `
+		type Printable `+"`"+`structural {
+			print() string `+"`"+`abstract;
+		}
+		type Doc {
+			print() string { return "doc"; }
+		}
+		main() {
+			Printable p = Doc();
+			string s = p.print();
+		}
+	`)
+	// Should emit view vtable for Doc-as-Printable (structural satisfaction)
+	assertContains(t, ir, "@promise_vtable_Doc_as_Printable")
+}
+
+func TestStructuralSatisfactionWithoutMetaFails(t *testing.T) {
+	// Without `structural meta, explicit `is is required
+	src := `
+		type Printable {
+			print() string ` + "`" + `abstract;
+		}
+		type Doc {
+			print() string { return "doc"; }
+		}
+		main() {
+			Printable p = Doc();
+		}
+	`
+	input := antlr.NewInputStream(src)
+	lexer := parser.NewPromiseLexer(input)
+	lexer.RemoveErrorListeners()
+	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+	pr := parser.NewPromiseParser(stream)
+	pr.RemoveErrorListeners()
+	tree := pr.CompilationUnit()
+	file, errs := ast.Build("test.pr", tree)
+	if len(errs) > 0 {
+		t.Fatalf("AST build errors: %v", errs)
+	}
+	_, errs = sema.Check(file)
+	if len(errs) == 0 {
+		t.Error("expected sema error for assigning Doc to Printable without `structural, got none")
+	}
+}
+
+func TestReturnCoercionSecondParent(t *testing.T) {
+	ir := generateIR(t, `
+		type Speakable {
+			speak() string `+"`"+`abstract;
+		}
+		type Movable {
+			walk() string `+"`"+`abstract;
+		}
+		type Robot is Speakable, Movable {
+			speak() string { return "beep"; }
+			walk() string { return "roll"; }
+		}
+		makeMovable() Movable {
+			return Robot();
+		}
+		main() {
+			Movable m = makeMovable();
+			string s = m.walk();
+		}
+	`)
+	// Returning Robot as Movable (second parent) should emit view vtable
+	assertContains(t, ir, "@promise_vtable_Robot_as_Movable")
+}
+
+func TestArgCoercionSecondParent(t *testing.T) {
+	ir := generateIR(t, `
+		type Speakable {
+			speak() string `+"`"+`abstract;
+		}
+		type Movable {
+			walk() string `+"`"+`abstract;
+		}
+		type Robot is Speakable, Movable {
+			speak() string { return "beep"; }
+			walk() string { return "roll"; }
+		}
+		useMovable(Movable m) string {
+			return m.walk();
+		}
+		main() {
+			Robot r = Robot();
+			string s = useMovable(r);
+		}
+	`)
+	// Passing Robot as Movable arg (second parent) should emit view vtable
+	assertContains(t, ir, "@promise_vtable_Robot_as_Movable")
 }

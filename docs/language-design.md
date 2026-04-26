@@ -680,6 +680,33 @@ When a type inherits from a parent, the child's vtable **extends** the parent's 
 - **Default method implementations**: a parent type can provide method bodies. These become concrete function pointers in the child's vtable. The child can override them by providing its own implementation, which replaces the function pointer in the vtable slot. `` `abstract `` and a method body are **mutually exclusive**: `` `abstract `` means no body and the child must override; a body means a default implementation that the child may optionally override.
 - **Field placement inheritance**: when a child inherits from a parent, field placement annotations (`` `value ``, `` `variant ``, `` `type ``) are inherited as declared. If the parent declares `Float64 x `value`, the child's value struct also contains `x`.
 
+#### Structural Interface Satisfaction
+
+By default, a type must declare `is Interface` to be assignable to an interface type. This keeps intent explicit and prevents accidental satisfaction.
+
+For lightweight, widely-satisfied interfaces (e.g. `Printable`, `Hashable`), the `` `structural `` meta tag on the interface enables **structural satisfaction**: any type that provides concrete implementations for all of the interface's abstract methods — with matching signatures — is automatically assignable to that interface, even without `is`.
+
+```promise
+type Printable `structural {
+  toString() String `abstract;
+}
+
+type Point {
+  Int x;
+  Int y;
+
+  // No `is Printable` — but satisfies Printable structurally
+  toString() String { return "(" + this.x.toString() + ", " + this.y.toString() + ")"; }
+}
+
+Printable p = Point(x: 1, y: 2);  // OK — Point has toString() with matching signature
+p.toString();                       // dispatches to Point.toString via view-specific vtable
+```
+
+Structural satisfaction requires an **exact signature match**: parameter types, return type, and error capability must all be identical. A method with the same name but different parameters does not satisfy the interface.
+
+When a value crosses a type boundary through structural satisfaction (or through a second+ parent), the compiler emits a **view-specific vtable** ordered by the target interface's slot layout. The value struct's vtable pointer is swapped to this view vtable at the coercion point (variable declaration, assignment, function argument, or return statement).
+
 ### 5.5 Generics
 
 Generics use **square brackets** `[]`. Constraints are expressed inline in the type parameter list.

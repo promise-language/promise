@@ -9,6 +9,7 @@ type Named struct {
 	fields     []*Field
 	methods    []*Method
 	isCopy     bool   // `copy meta — bitwise copy on assignment
+	structural bool   // `structural meta — allows structural interface satisfaction
 	doc        string // `doc meta — documentation string
 	deprecated string // `deprecated meta — empty means not deprecated
 }
@@ -28,6 +29,8 @@ func (n *Named) Methods() []*Method       { return n.methods }
 func (n *Named) Underlying() Type         { return n }
 func (n *Named) IsCopy() bool             { return n.isCopy }
 func (n *Named) SetCopy(v bool)           { n.isCopy = v }
+func (n *Named) IsStructural() bool       { return n.structural }
+func (n *Named) SetStructural(v bool)     { n.structural = v }
 func (n *Named) Doc() string              { return n.doc }
 func (n *Named) SetDoc(s string)          { n.doc = s }
 func (n *Named) Deprecated() string       { return n.deprecated }
@@ -148,6 +151,43 @@ func (n *Named) lookupOwnMethod(name string) *Method {
 		}
 	}
 	return nil
+}
+
+// AllVirtualMethods returns an ordered, deduplicated list of all non-native methods
+// across the inheritance hierarchy. Parent methods come first (depth-first, left-to-right),
+// then own methods. Each method name appears exactly once at its first-introduced position.
+// Used for vtable slot assignment.
+func (n *Named) AllVirtualMethods() []*Method {
+	seen := make(map[string]bool)
+	var result []*Method
+	for _, p := range n.parents {
+		for _, m := range p.AllVirtualMethods() {
+			if !seen[m.Name()] {
+				seen[m.Name()] = true
+				result = append(result, m)
+			}
+		}
+	}
+	for _, m := range n.methods {
+		if m.IsNative() {
+			continue
+		}
+		if !seen[m.Name()] {
+			seen[m.Name()] = true
+			result = append(result, m)
+		}
+	}
+	return result
+}
+
+// VirtualMethodIndex returns the vtable slot index for a method name, or -1 if not found.
+func (n *Named) VirtualMethodIndex(name string) int {
+	for i, m := range n.AllVirtualMethods() {
+		if m.Name() == name {
+			return i
+		}
+	}
+	return -1
 }
 
 // allAbstractMethods returns all abstract methods from this type

@@ -205,6 +205,16 @@ func AssignableTo(x, y Type) bool {
 		}
 	}
 
+	// Rule 9: structural interface satisfaction (meta-tag gated)
+	// T is assignable to Interface if the interface is marked `structural
+	// and T has concrete implementations for all of its abstract methods.
+	// Without `structural, explicit `is is required.
+	if yn, ok := y.(*Named); ok && yn.IsAbstract() && yn.IsStructural() {
+		if Implements(x, yn) {
+			return true
+		}
+	}
+
 	return false
 }
 
@@ -223,6 +233,8 @@ func isChild(child, parent *Named) bool {
 
 // Implements reports whether type x implements interface iface.
 // An interface is a Named type where all methods are abstract.
+// The concrete type must provide methods with matching names AND signatures
+// (same parameter types, return type, and error capability).
 func Implements(x Type, iface *Named) bool {
 	if !iface.IsAbstract() {
 		return false
@@ -232,11 +244,16 @@ func Implements(x Type, iface *Named) bool {
 	abstractMethods := iface.allAbstractMethods()
 
 	// x must provide concrete implementations for all abstract methods
+	// with matching signatures (excluding receiver type).
 	switch xt := x.(type) {
 	case *Named:
 		for _, am := range abstractMethods {
 			m := xt.LookupMethod(am.name)
 			if m == nil || m.abstract {
+				return false
+			}
+			// Verify signatures match (params, result, canError — not receiver)
+			if !identicalSignatures(m.sig, am.sig) {
 				return false
 			}
 		}

@@ -38,6 +38,9 @@ type Compiler struct {
 	// Error handling: true if current function is failable (returns result struct)
 	canError bool
 
+	// Return type of the current function/method (Promise-level, for coercion)
+	currentRetType types.Type
+
 	// String literal counter for unique global names
 	strCounter int
 
@@ -51,6 +54,17 @@ type Compiler struct {
 	typeIDs         map[*types.Named]int32
 	nextTypeID      int32
 	typeInfoGlobals map[*types.Named]*ir.Global
+
+	// VTable state
+	hasChildren   map[*types.Named]bool        // true if any type declares `is ThisType`
+	vtableGlobals map[*types.Named]*ir.Global  // type → @promise_vtable_TypeName
+	viewVtables   map[viewVtableKey]*ir.Global // (concrete, view) → view-specific vtable
+}
+
+// viewVtableKey identifies a view-specific vtable for a (concrete, view) pair.
+type viewVtableKey struct {
+	concrete *types.Named
+	view     *types.Named
 }
 
 // Compile generates an LLVM IR module from a type-checked Promise AST.
@@ -64,6 +78,9 @@ func Compile(file *ast.File, info *sema.Info) *CompileResult {
 		typeIDs:         make(map[*types.Named]int32),
 		nextTypeID:      1, // 0 reserved for "no type info"
 		typeInfoGlobals: make(map[*types.Named]*ir.Global),
+		hasChildren:     make(map[*types.Named]bool),
+		vtableGlobals:   make(map[*types.Named]*ir.Global),
+		viewVtables:     make(map[viewVtableKey]*ir.Global),
 	}
 
 	// Collect extern declarations and compute type layouts
@@ -83,9 +100,6 @@ func Compile(file *ast.File, info *sema.Info) *CompileResult {
 	// Compute user type layouts (after built-in and enum layouts are ready)
 	c.computeUserTypeLayouts(file)
 
-	// Emit RTTI type info globals for all user types (after layouts are ready)
-	c.emitTypeInfoGlobals(file)
-
 	// Compute monomorphic layouts for all concrete generic instantiations
 	monoInstances := collectMonoInstances(info)
 	c.computeMonoLayouts(monoInstances)
@@ -95,8 +109,18 @@ func Compile(file *ast.File, info *sema.Info) *CompileResult {
 	// declareExterns must run after computeUserTypeLayouts so that user type
 	// layouts are available when resolving extern parameter/return types.
 	c.declareExterns(externList, c.layouts)
+
+	// Declare method stubs before vtable/typeinfo emission (vtable needs function pointers)
 	c.declareTypeMethods(file)
 	c.declareMonoMethods(file, monoInstances)
+
+	// Compute vtable info and emit vtable globals (after method stubs are declared)
+	c.computeVtableInfo(file)
+	c.emitVtableGlobals(file)
+
+	// Emit RTTI type info globals (after vtable globals, since typeinfo includes vtable ptr)
+	c.emitTypeInfoGlobals(file)
+
 	c.declareFuncs(file)
 	c.declareMonoFuncs(file, monoFuncInstances)
 	c.defineTypeMethods(file)
@@ -294,6 +318,7 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 		return
 	}
 	c.canError = sig.CanError()
+	c.currentRetType = sig.Result()
 
 	for i, p := range sig.Params() {
 		if p.Name() == "" || p.Name() == "_" {
@@ -531,6 +556,7 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 	c.fn = fn
 	c.locals = make(map[string]*ir.InstAlloca)
 	c.canError = m.Sig().CanError()
+	c.currentRetType = m.Sig().Result()
 
 	entry := fn.NewBlock("entry")
 	c.block = entry
@@ -694,6 +720,38 @@ func (c *Compiler) resolveMethodOwner(named *types.Named, methodName string) str
 		}
 	}
 	return named.Obj().Name() // fallback
+}
+
+// computeVtableInfo scans all type declarations and marks types that have children.
+// A type has children if any other type inherits from it (directly or transitively).
+func (c *Compiler) computeVtableInfo(file *ast.File) {
+	for _, decl := range file.Decls {
+		td, ok := decl.(*ast.TypeDecl)
+		if !ok {
+			continue
+		}
+		named := c.lookupNamedType(td.Name)
+		if named == nil {
+			continue
+		}
+		if len(named.TypeParams()) > 0 {
+			continue
+		}
+		var markParents func(n *types.Named)
+		markParents = func(n *types.Named) {
+			for _, p := range n.Parents() {
+				c.hasChildren[p] = true
+				markParents(p)
+			}
+		}
+		markParents(named)
+	}
+}
+
+// needsVtable reports whether a type needs virtual dispatch.
+// True if the type has children (someone inherits from it) or is abstract.
+func (c *Compiler) needsVtable(named *types.Named) bool {
+	return c.hasChildren[named] || named.IsAbstract()
 }
 
 // emitNativeOp dispatches a native operator to the LLVM instruction table.

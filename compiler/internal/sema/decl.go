@@ -145,6 +145,9 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 		named.SetCopy(true)
 		c.validateCopyType(named, d)
 	}
+	if c.hasAnnotation(d.Annotations, "structural") {
+		named.SetStructural(true)
+	}
 	named.SetDoc(extractDoc(d.Annotations))
 	named.SetDeprecated(extractDeprecated(d.Annotations))
 }

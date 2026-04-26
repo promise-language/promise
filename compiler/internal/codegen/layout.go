@@ -304,7 +304,7 @@ func computeUserTypeLayout(module *ir.Module, named *types.Named, allLayouts map
 		if f.Placement() != types.PlaceInstance {
 			panic("codegen: non-instance field placement not yet supported for " + name + "." + f.Name())
 		}
-		llvmFT := llvmType(f.Type())
+		llvmFT := instanceFieldLLVMType(f.Type())
 		cType := userFieldCType(f.Type(), allLayouts)
 		instanceLLVMFields = append(instanceLLVMFields, llvmFT)
 		idx := len(fieldLayouts) // GEP index

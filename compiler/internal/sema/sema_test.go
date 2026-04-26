@@ -2494,3 +2494,64 @@ func TestMultipleAbstractParentsOK(t *testing.T) {
 		main() { Doc d = Doc(name: "hi"); }
 	`)
 }
+
+// --- Stage 8l: Structural interface satisfaction tests ---
+
+func TestStructuralSatisfactionWithMeta(t *testing.T) {
+	checkOK(t, `
+		type Printable `+"`structural"+` {
+			print() string `+"`abstract;"+`
+		}
+		type Doc {
+			print() string { return "doc"; }
+		}
+		main() {
+			Printable p = Doc();
+		}
+	`)
+}
+
+func TestStructuralSatisfactionWithoutMetaFails(t *testing.T) {
+	errs := checkErrs(t, `
+		type Printable {
+			print() string `+"`abstract;"+`
+		}
+		type Doc {
+			print() string { return "doc"; }
+		}
+		main() {
+			Printable p = Doc();
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+func TestStructuralSatisfactionMissingMethodFails(t *testing.T) {
+	errs := checkErrs(t, `
+		type Printable `+"`structural"+` {
+			print() string `+"`abstract;"+`
+		}
+		type Doc {
+			save() string { return "saved"; }
+		}
+		main() {
+			Printable p = Doc();
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+func TestStructuralSatisfactionSignatureMismatchFails(t *testing.T) {
+	errs := checkErrs(t, `
+		type Printable `+"`structural"+` {
+			print() string `+"`abstract;"+`
+		}
+		type Doc {
+			print(int x) string { return "doc"; }
+		}
+		main() {
+			Printable p = Doc();
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}

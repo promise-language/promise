@@ -101,6 +101,16 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 		}
 	}
 
+	// Coerce value struct vtable when crossing type boundaries (e.g. Dog → Animal)
+	coerceTarget := declType
+	if coerceTarget == nil {
+		// For non-Optional typed declarations, look up the declared type from sema scopes
+		coerceTarget = c.lookupVarType(s.Name)
+	}
+	if coerceTarget != nil {
+		val = c.coerceToView(val, exprType, coerceTarget)
+	}
+
 	c.block.NewStore(val, alloca)
 	c.locals[s.Name] = alloca
 }
@@ -153,6 +163,10 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			panic(fmt.Sprintf("codegen: undefined variable %q in assignment", target.Name))
 		}
 		if s.Op == ast.OpAssign {
+			// Coerce value struct vtable when crossing type boundaries
+			exprType := c.info.Types[s.Value]
+			targetType := c.info.Types[target]
+			val = c.coerceToView(val, exprType, targetType)
 			c.block.NewStore(val, alloca)
 			return
 		}
@@ -202,7 +216,9 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 	}
 
 	obj := c.genExpr(target.Target)
-	typedPtr := c.block.NewBitCast(obj, layout.InstancePtrType)
+	// Extract instance pointer from value struct
+	instance := c.extractInstancePtr(obj)
+	typedPtr := c.block.NewBitCast(instance, layout.InstancePtrType)
 
 	fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
@@ -289,6 +305,11 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 			c.block.NewRet(c.wrapOk(nil, resultType))
 		} else {
 			val := c.genExpr(s.Value)
+			// Coerce value struct vtable when returning through a parent type
+			if c.currentRetType != nil {
+				exprType := c.info.Types[s.Value]
+				val = c.coerceToView(val, exprType, c.currentRetType)
+			}
 			c.block.NewRet(c.wrapOk(val, resultType))
 		}
 		return
@@ -297,6 +318,11 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		c.block.NewRet(nil)
 	} else {
 		val := c.genExpr(s.Value)
+		// Coerce value struct vtable when returning through a parent type
+		if c.currentRetType != nil {
+			exprType := c.info.Types[s.Value]
+			val = c.coerceToView(val, exprType, c.currentRetType)
+		}
 		c.block.NewRet(val)
 	}
 }

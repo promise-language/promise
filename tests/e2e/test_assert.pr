@@ -1,0 +1,13 @@
+test_addition() `test {
+  assert(1 + 1 == 2, "basic addition");
+}
+
+test_math() `test {
+  assert(min(3, 7) == 3, "min");
+  assert(max(3, 7) == 7, "max");
+  assert(abs(0 - 5) == 5, "abs");
+}
+
+test_strings() `test {
+  assert("hello" + " world" == "hello world", "string concat");
+}

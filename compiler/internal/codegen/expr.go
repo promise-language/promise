@@ -504,6 +504,10 @@ func (c *Compiler) rangeStructType() *irtypes.StructType {
 func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 	// Method call or enum variant constructor: callee is MemberExpr
 	if member, ok := e.Callee.(*ast.MemberExpr); ok {
+		// Handle std.X() — treat as a regular function call to X
+		if ident, ok := member.Target.(*ast.IdentExpr); ok && ident.Name == "std" {
+			return c.genStdCall(e, member.Field)
+		}
 		targetType := c.info.Types[member.Target]
 		// Apply typeSubst for mono context
 		if c.typeSubst != nil {
@@ -571,6 +575,40 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 	if callee := c.lookupFunc(ident.Name); callee != nil {
 		if sig, ok := callee.Type().(*types.Signature); ok {
 			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params())
+		}
+	}
+
+	return c.block.NewCall(fn, argVals...)
+}
+
+// genStdCall handles std.X() calls — resolves X in std scope, bypassing user shadows.
+func (c *Compiler) genStdCall(e *ast.CallExpr, funcName string) value.Value {
+	var argVals []value.Value
+	var argTypes []types.Type
+	for _, arg := range e.Args {
+		argVals = append(argVals, c.genExpr(arg.Value))
+		argTypes = append(argTypes, c.info.Types[arg.Value])
+	}
+
+	// Std extern function
+	if ext, ok := c.stdExterns[funcName]; ok {
+		return c.genExternCall(ext, argVals, argTypes)
+	}
+
+	// Std regular function — must be in stdFuncs
+	fn, ok := c.stdFuncs[funcName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undefined std function %q", funcName))
+	}
+
+	// Look up signature from std scope directly (not general scope chain)
+	if c.info.StdScope != nil {
+		if obj := c.info.StdScope.Lookup(funcName); obj != nil {
+			if callee, ok := obj.(*types.Func); ok {
+				if sig, ok := callee.Type().(*types.Signature); ok {
+					argVals = c.coerceCallArgs(argVals, argTypes, sig.Params())
+				}
+			}
 		}
 	}
 

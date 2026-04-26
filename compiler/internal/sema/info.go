@@ -24,6 +24,9 @@ type Info struct {
 	// Scopes maps scope-creating AST nodes (File, Block, etc.) to their scope.
 	Scopes map[ast.Node]*types.Scope
 
+	// StdScope is the std library scope (parent of file scope). Nil if no std loaded.
+	StdScope *types.Scope
+
 	// Instances records all concrete generic type instantiations for later monomorphization.
 	Instances []*types.Instance
 

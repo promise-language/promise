@@ -74,6 +74,7 @@ type ExternFunc struct {
 	ParamTypes  []types.Type     // Promise types of each parameter
 	ResultType  types.Type       // Promise return type (nil for void)
 	HasSret     bool             // true if return uses sret pointer (large struct return)
+	IsStd       bool             // true if this extern comes from the std library
 }
 
 // CompileResult bundles the output of compilation for downstream consumers.
@@ -82,6 +83,7 @@ type CompileResult struct {
 	Layouts     map[*types.Named]*TypeDeclLayout
 	EnumLayouts map[*types.Enum]*TypeDeclLayout
 	Externs     []*ExternFunc
+	compiler    *Compiler // internal reference for GenerateTestMain
 }
 
 // primitiveRawType returns the raw LLVM type, C type string, and signedness
@@ -454,6 +456,7 @@ func collectExterns(file *ast.File, info *sema.Info) []*ExternFunc {
 			Sig:         sig,
 			ParamTypes:  paramTypes,
 			ResultType:  sig.Result(),
+			IsStd:       fd.IsStd,
 		})
 	}
 	return externs
@@ -611,6 +614,16 @@ func computeEnumLayout(module *ir.Module, enum *types.Enum) *TypeDeclLayout {
 func lookupFuncSig(name string, info *sema.Info) *types.Signature {
 	for _, scope := range info.Scopes {
 		if obj := scope.Lookup(name); obj != nil {
+			if fn, ok := obj.(*types.Func); ok {
+				if sig, ok := fn.Type().(*types.Signature); ok {
+					return sig
+				}
+			}
+		}
+	}
+	// Check std scope
+	if info.StdScope != nil {
+		if obj := info.StdScope.Lookup(name); obj != nil {
 			if fn, ok := obj.(*types.Func); ok {
 				if sig, ok := fn.Type().(*types.Signature); ok {
 					return sig

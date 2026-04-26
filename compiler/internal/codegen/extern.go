@@ -26,12 +26,26 @@ func (c *Compiler) lookupLayout(typ types.Type) *TypeDeclLayout {
 // Value params are passed by pointer (i8*); ref params as typed pointers.
 // Struct returns use sret pattern (void return, first param is result pointer).
 func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Named]*TypeDeclLayout) {
-	for _, ext := range externs {
-		var params []*ir.Param
+	// Track declared C functions to deduplicate
+	cFuncs := make(map[string]*ir.Func)
 
+	for _, ext := range externs {
 		// Struct return: use sret pattern (return void, first param is pointer to result).
 		// This matches C ABI on ARM64 where large structs are returned via pointer.
 		hasSret := ext.ResultType != nil
+
+		// Deduplicate by C name — multiple Promise externs may map to the same C function
+		if fn, ok := cFuncs[ext.CName]; ok {
+			ext.IRFunc = fn
+			ext.HasSret = hasSret
+			c.funcs[ext.PromiseName] = fn
+			if ext.IsStd {
+				c.stdExterns[ext.PromiseName] = ext
+			}
+			continue
+		}
+
+		var params []*ir.Param
 		if hasSret {
 			params = append(params, ir.NewParam("sret", irtypes.I8Ptr))
 		}
@@ -58,6 +72,11 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 		ext.IRFunc = fn
 		ext.HasSret = hasSret
 		c.funcs[ext.PromiseName] = fn
+		cFuncs[ext.CName] = fn
+
+		if ext.IsStd {
+			c.stdExterns[ext.PromiseName] = ext
+		}
 	}
 }
 

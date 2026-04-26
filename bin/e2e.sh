@@ -52,6 +52,59 @@ for prfile in "$TEST_DIR"/*.pr; do
   fi
 done
 
+# --- promise test: all-pass ---
+test_name="test_assert (promise test)"
+actual=$("$WORKDIR/promise" test "$TEST_DIR/test_assert.pr" 2>&1) || true
+expected_text="PASS test_addition
+PASS test_math
+PASS test_strings
+
+3 passed, 0 failed"
+if [ "$actual" = "$expected_text" ]; then
+  echo "PASS $test_name"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL $test_name"
+  echo "  expected: $(echo "$expected_text" | head -3)"
+  echo "  actual:   $(echo "$actual" | head -3)"
+  FAIL=$((FAIL + 1))
+fi
+
+# --- promise test: mixed pass/fail ---
+test_name="test_fail (promise test)"
+exit_code=0
+actual=$("$WORKDIR/promise" test "$TEST_DIR/test_fail.pr" 2>&1) || exit_code=$?
+expected_text="PASS test_pass
+panic: deliberate failure
+FAIL test_fail
+
+1 passed, 1 failed"
+if [ "$actual" = "$expected_text" ] && [ "$exit_code" -ne 0 ]; then
+  echo "PASS $test_name"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL $test_name"
+  echo "  expected: $(echo "$expected_text" | head -3)"
+  echo "  actual:   $(echo "$actual" | head -3)"
+  if [ "$exit_code" -eq 0 ]; then
+    echo "  (expected non-zero exit code, got 0)"
+  fi
+  FAIL=$((FAIL + 1))
+fi
+
+# --- promise test: no tests found ---
+test_name="no_tests_found (promise test)"
+actual=$("$WORKDIR/promise" test "$TEST_DIR/std_basics.pr" 2>&1) || true
+if echo "$actual" | grep -q "no tests found"; then
+  echo "PASS $test_name"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL $test_name"
+  echo "  expected output containing 'no tests found'"
+  echo "  actual:   $(echo "$actual" | head -3)"
+  FAIL=$((FAIL + 1))
+fi
+
 echo ""
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

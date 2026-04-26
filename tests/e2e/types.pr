@@ -1,6 +1,3 @@
-print_int(int x) `extern("promise_print_int");
-print_string(string s) `extern("promise_print_string");
-
 type Point {
   int x;
   int y;
@@ -38,20 +35,20 @@ main() {
 
   // Inheritance + virtual dispatch
   Dog d = Dog(name: "Rex");
-  print_string(d.name);
-  print_string(d.speak());
+  println(d.name);
+  println(d.speak());
 
   Cat c = Cat(name: "Whiskers");
-  print_string(c.name);
-  print_string(c.speak());
+  println(c.name);
+  println(c.speak());
 
   // Polymorphic: Animal variable holding Dog
   Animal a = Dog(name: "Buddy");
-  print_string(a.name);
-  print_string(a.speak());
+  println(a.name);
+  println(a.speak());
 
   // Polymorphic: Animal variable holding Cat
   Animal a2 = Cat(name: "Luna");
-  print_string(a2.name);
-  print_string(a2.speak());
+  println(a2.name);
+  println(a2.speak());
 }

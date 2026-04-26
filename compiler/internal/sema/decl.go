@@ -5,8 +5,8 @@ import (
 	"djabi.dev/go/promise_lang/internal/types"
 )
 
-// declare performs Pass 1: walk top-level declarations and insert names into file scope.
-// This creates TypeName, Func, and Module objects so that forward references resolve.
+// declare performs Pass 1: walk top-level declarations and insert names.
+// Std library declarations go into stdScope; user declarations go into fileScope.
 func (c *Checker) declare(file *ast.File) {
 	// Process use declarations first — reserve alias names
 	for _, u := range file.Uses {
@@ -15,6 +15,15 @@ func (c *Checker) declare(file *ast.File) {
 	}
 
 	for _, decl := range file.Decls {
+		isStd := isDeclStd(decl)
+
+		// Route std declarations to stdScope, user declarations to fileScope
+		if isStd {
+			c.scope = c.stdScope
+		} else {
+			c.scope = c.fileScope
+		}
+
 		switch d := decl.(type) {
 		case *ast.TypeDecl:
 			c.declareType(d)
@@ -24,9 +33,29 @@ func (c *Checker) declare(file *ast.File) {
 			c.declareFunc(d)
 		}
 	}
+
+	// Restore scope to fileScope
+	c.scope = c.fileScope
+}
+
+// isDeclStd returns true if a declaration has the IsStd flag set.
+func isDeclStd(decl ast.Decl) bool {
+	switch d := decl.(type) {
+	case *ast.TypeDecl:
+		return d.IsStd
+	case *ast.EnumDecl:
+		return d.IsStd
+	case *ast.FuncDecl:
+		return d.IsStd
+	}
+	return false
 }
 
 func (c *Checker) declareType(d *ast.TypeDecl) {
+	if !d.IsStd && d.Name == "std" {
+		c.errorf(d.Pos(), "'std' is reserved for the standard library namespace")
+		return
+	}
 	tn := types.NewTypeName(tpos(d.Pos()), d.Name, nil)
 	if !c.insert(tn) {
 		return
@@ -36,6 +65,10 @@ func (c *Checker) declareType(d *ast.TypeDecl) {
 }
 
 func (c *Checker) declareEnum(d *ast.EnumDecl) {
+	if !d.IsStd && d.Name == "std" {
+		c.errorf(d.Pos(), "'std' is reserved for the standard library namespace")
+		return
+	}
 	tn := types.NewTypeName(tpos(d.Pos()), d.Name, nil)
 	if !c.insert(tn) {
 		return
@@ -45,6 +78,10 @@ func (c *Checker) declareEnum(d *ast.EnumDecl) {
 }
 
 func (c *Checker) declareFunc(d *ast.FuncDecl) {
+	if !d.IsStd && d.Name == "std" {
+		c.errorf(d.Pos(), "'std' is reserved for the standard library namespace")
+		return
+	}
 	fn := types.NewFunc(tpos(d.Pos()), d.Name, nil)
 	c.insert(fn)
 }
@@ -67,6 +104,13 @@ func (c *Checker) declareTypeParams(astParams []*ast.TypeParam) []*types.TypePar
 // define performs Pass 2: resolve type structures, populate fields/methods/variants.
 func (c *Checker) define(file *ast.File) {
 	for _, decl := range file.Decls {
+		// Set scope to match where the decl was declared
+		if isDeclStd(decl) {
+			c.scope = c.stdScope
+		} else {
+			c.scope = c.fileScope
+		}
+
 		switch d := decl.(type) {
 		case *ast.TypeDecl:
 			c.defineType(d)
@@ -76,6 +120,7 @@ func (c *Checker) define(file *ast.File) {
 			c.defineFunc(d)
 		}
 	}
+	c.scope = c.fileScope
 }
 
 func (c *Checker) defineType(d *ast.TypeDecl) {
@@ -317,6 +362,21 @@ func (c *Checker) defineFunc(d *ast.FuncDecl) {
 	fn.SetDoc(extractDoc(d.Annotations))
 	fn.SetDeprecated(extractDeprecated(d.Annotations))
 	if c.hasAnnotation(d.Annotations, "test") {
+		// Validate test function constraints: must be zero-arity, non-failable, non-generic
+		if sig != nil {
+			if len(sig.Params()) > 0 {
+				c.errorf(d.Pos(), "test function '%s' must have no parameters", d.Name)
+			}
+			if sig.Result() != nil && !types.Identical(sig.Result(), types.TypVoid) {
+				c.errorf(d.Pos(), "test function '%s' must not have a return type", d.Name)
+			}
+			if sig.CanError() {
+				c.errorf(d.Pos(), "test function '%s' must not be failable", d.Name)
+			}
+			if len(sig.TypeParams()) > 0 {
+				c.errorf(d.Pos(), "test function '%s' must not be generic", d.Name)
+			}
+		}
 		fn.SetTest(true)
 		c.info.Tests = append(c.info.Tests, fn)
 	}

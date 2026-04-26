@@ -2,12 +2,11 @@ package codegen
 
 import (
 	"fmt"
-	"os/exec"
 	"runtime"
-	"strings"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
+	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
 
@@ -24,6 +23,8 @@ type Compiler struct {
 	block       *ir.Block                        // current basic block
 	locals      map[string]*ir.InstAlloca        // local variable allocas
 	funcs       map[string]*ir.Func              // declared Promise functions by name
+	stdFuncs    map[string]*ir.Func              // std library functions by name (for std.X)
+	stdExterns  map[string]*ExternFunc           // std library externs by name (for std.X)
 	layouts     map[*types.Named]*TypeDeclLayout // type layouts for extern ABI
 	enumLayouts map[*types.Enum]*TypeDeclLayout  // enum type layouts
 	externs     map[string]*ExternFunc           // extern functions by Promise name
@@ -74,14 +75,9 @@ type viewVtableKey struct {
 }
 
 // hostTargetTriple returns the LLVM target triple for the host platform.
-// Queries clang first for accuracy, falls back to Go runtime detection.
-func hostTargetTriple() string {
-	if out, err := exec.Command("clang", "--print-target-triple").Output(); err == nil {
-		if triple := strings.TrimSpace(string(out)); triple != "" {
-			return triple
-		}
-	}
-	// Fallback: map Go runtime to LLVM triples
+// Uses stable minimum deployment targets to avoid version mismatch warnings
+// between IR modules and clang-compiled object files.
+func HostTargetTriple() string {
 	switch runtime.GOOS {
 	case "darwin":
 		if runtime.GOARCH == "arm64" {
@@ -101,12 +97,14 @@ func hostTargetTriple() string {
 // Compile generates an LLVM IR module from a type-checked Promise AST.
 func Compile(file *ast.File, info *sema.Info) *CompileResult {
 	module := ir.NewModule()
-	module.TargetTriple = hostTargetTriple()
+	module.TargetTriple = HostTargetTriple()
 
 	c := &Compiler{
 		module:          module,
 		info:            info,
 		funcs:           make(map[string]*ir.Func),
+		stdFuncs:        make(map[string]*ir.Func),
+		stdExterns:      make(map[string]*ExternFunc),
 		monoLayouts:     make(map[string]*TypeDeclLayout),
 		monoEnumLayouts: make(map[string]*TypeDeclLayout),
 		typeIDs:         make(map[*types.Named]int32),
@@ -167,7 +165,105 @@ func Compile(file *ast.File, info *sema.Info) *CompileResult {
 		Layouts:     c.layouts,
 		EnumLayouts: c.enumLayouts,
 		Externs:     externList,
+		compiler:    c,
 	}
+}
+
+// GenerateTestMain replaces the user's main() with a test runner that calls
+// each `test function via promise_test_run for fork-based isolation.
+func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
+	c := r.compiler
+
+	// Declare test runner C functions
+	testRunFn := c.module.NewFunc("promise_test_run",
+		irtypes.I32,
+		ir.NewParam("fn", irtypes.I8Ptr),
+	)
+	testPrintFn := c.module.NewFunc("promise_test_print_result",
+		irtypes.Void,
+		ir.NewParam("name", irtypes.I8Ptr),
+		ir.NewParam("failed", irtypes.I32),
+	)
+	testSummaryFn := c.module.NewFunc("promise_test_summary",
+		irtypes.Void,
+		ir.NewParam("passed", irtypes.I32),
+		ir.NewParam("failed", irtypes.I32),
+	)
+
+	// Remove existing main if present, then create test main
+	// The existing main is already compiled. We replace it with a new one.
+	mainFn := c.funcs["main"]
+	if mainFn != nil {
+		// Clear existing blocks
+		mainFn.Blocks = nil
+	} else {
+		mainFn = c.module.NewFunc("main", irtypes.I32)
+		c.funcs["main"] = mainFn
+	}
+
+	entry := mainFn.NewBlock("entry")
+
+	// Allocate counters: passed and failed
+	passedAlloca := entry.NewAlloca(irtypes.I32)
+	failedAlloca := entry.NewAlloca(irtypes.I32)
+	entry.NewStore(constant.NewInt(irtypes.I32, 0), passedAlloca)
+	entry.NewStore(constant.NewInt(irtypes.I32, 0), failedAlloca)
+
+	for _, test := range tests {
+		// Look up the IR function — tests are always user code
+		testFn := c.funcs[test.Name()]
+		if testFn == nil {
+			continue
+		}
+
+		// Create global string constant for the test name
+		nameStr := test.Name()
+		nameGlobal := c.module.NewGlobalDef(
+			fmt.Sprintf(".test_name_%s", nameStr),
+			constant.NewCharArrayFromString(nameStr+"\x00"),
+		)
+		nameGlobal.Immutable = true
+
+		// Bitcast test function to i8* for promise_test_run
+		fnPtr := entry.NewBitCast(testFn, irtypes.I8Ptr)
+
+		// Call promise_test_run(fn) -> i32 (0=pass, 1=fail)
+		result := entry.NewCall(testRunFn, fnPtr)
+
+		// Get name pointer
+		namePtr := entry.NewGetElementPtr(
+			constant.NewCharArrayFromString(nameStr+"\x00").Typ,
+			nameGlobal,
+			constant.NewInt(irtypes.I64, 0),
+			constant.NewInt(irtypes.I64, 0),
+		)
+
+		// Print result
+		entry.NewCall(testPrintFn, namePtr, result)
+
+		// Update counters
+		currentPassed := entry.NewLoad(irtypes.I32, passedAlloca)
+		currentFailed := entry.NewLoad(irtypes.I32, failedAlloca)
+
+		// result == 0 means passed
+		isPass := entry.NewICmp(enum.IPredEQ, result, constant.NewInt(irtypes.I32, 0))
+		passIncr := entry.NewAdd(currentPassed, constant.NewInt(irtypes.I32, 1))
+		failIncr := entry.NewAdd(currentFailed, constant.NewInt(irtypes.I32, 1))
+		newPassed := entry.NewSelect(isPass, passIncr, currentPassed)
+		newFailed := entry.NewSelect(isPass, currentFailed, failIncr)
+		entry.NewStore(newPassed, passedAlloca)
+		entry.NewStore(newFailed, failedAlloca)
+	}
+
+	// Print summary
+	finalPassed := entry.NewLoad(irtypes.I32, passedAlloca)
+	finalFailed := entry.NewLoad(irtypes.I32, failedAlloca)
+	entry.NewCall(testSummaryFn, finalPassed, finalFailed)
+
+	// Return 0 if all passed, 1 if any failed
+	hasFailures := entry.NewICmp(enum.IPredSGT, finalFailed, constant.NewInt(irtypes.I32, 0))
+	retVal := entry.NewSelect(hasFailures, constant.NewInt(irtypes.I32, 1), constant.NewInt(irtypes.I32, 0))
+	entry.NewRet(retVal)
 }
 
 // declareIntrinsics declares compiler-intrinsic runtime functions (not user-declared externs).
@@ -267,6 +363,7 @@ func (c *Compiler) declareIntrinsics() {
 
 // declareFuncs creates LLVM function declarations for all FuncDecl nodes with bodies (pass 1).
 // Generic functions (with TypeParams) are skipped — handled by declareMonoFuncs.
+// Std functions get mangled LLVM names (__std_X) to avoid collisions with user functions.
 func (c *Compiler) declareFuncs(file *ast.File) {
 	for _, decl := range file.Decls {
 		fd, ok := decl.(*ast.FuncDecl)
@@ -307,8 +404,24 @@ func (c *Compiler) declareFuncs(file *ast.File) {
 			retType = irtypes.I32
 		}
 
-		fn := c.module.NewFunc(fd.Name, retType, params...)
-		c.funcs[fd.Name] = fn
+		// Std functions use mangled LLVM names to avoid collision with user functions
+		irName := fd.Name
+		if fd.IsStd {
+			irName = "__std_" + fd.Name
+		}
+
+		fn := c.module.NewFunc(irName, retType, params...)
+
+		if fd.IsStd {
+			// Always register in stdFuncs for std.X access
+			c.stdFuncs[fd.Name] = fn
+			// Also register in funcs if no user function shadows it
+			if _, shadowed := c.funcs[fd.Name]; !shadowed {
+				c.funcs[fd.Name] = fn
+			}
+		} else {
+			c.funcs[fd.Name] = fn
+		}
 	}
 }
 
@@ -326,8 +439,14 @@ func (c *Compiler) defineFuncs(file *ast.File) {
 		if len(fd.TypeParams) > 0 {
 			continue // generic — handled by monomorphization
 		}
-		fn, ok := c.funcs[fd.Name]
-		if !ok {
+		// Std functions use stdFuncs map; user functions use funcs map
+		var fn *ir.Func
+		if fd.IsStd {
+			fn = c.stdFuncs[fd.Name]
+		} else {
+			fn = c.funcs[fd.Name]
+		}
+		if fn == nil {
 			continue
 		}
 		c.defineFunc(fd, fn)
@@ -386,9 +505,17 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 
 // lookupFunc finds a function object in sema info by name.
 func (c *Compiler) lookupFunc(name string) *types.Func {
-	// Walk the file scope looking for the function
+	// Walk all recorded scopes
 	for _, scope := range c.info.Scopes {
 		if obj := scope.Lookup(name); obj != nil {
+			if fn, ok := obj.(*types.Func); ok {
+				return fn
+			}
+		}
+	}
+	// Check std scope
+	if c.info.StdScope != nil {
+		if obj := c.info.StdScope.Lookup(name); obj != nil {
 			if fn, ok := obj.(*types.Func); ok {
 				return fn
 			}
@@ -653,6 +780,15 @@ func (c *Compiler) lookupNamedType(name string) *types.Named {
 			}
 		}
 	}
+	if c.info.StdScope != nil {
+		if obj := c.info.StdScope.Lookup(name); obj != nil {
+			if tn, ok := obj.(*types.TypeName); ok {
+				if named, ok := tn.Type().(*types.Named); ok {
+					return named
+				}
+			}
+		}
+	}
 	return nil
 }
 
@@ -660,6 +796,15 @@ func (c *Compiler) lookupNamedType(name string) *types.Named {
 func (c *Compiler) lookupEnumType(name string) *types.Enum {
 	for _, scope := range c.info.Scopes {
 		if obj := scope.Lookup(name); obj != nil {
+			if tn, ok := obj.(*types.TypeName); ok {
+				if enum, ok := tn.Type().(*types.Enum); ok {
+					return enum
+				}
+			}
+		}
+	}
+	if c.info.StdScope != nil {
+		if obj := c.info.StdScope.Lookup(name); obj != nil {
 			if tn, ok := obj.(*types.TypeName); ok {
 				if enum, ok := tn.Type().(*types.Enum); ok {
 					return enum

@@ -498,6 +498,11 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) types.Type {
 }
 
 func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
+	// Handle std.X — resolve against stdScope directly
+	if ident, ok := e.Target.(*ast.IdentExpr); ok && ident.Name == "std" {
+		return c.resolveStdMember(e)
+	}
+
 	target := c.checkExpr(e.Target)
 	if target == nil {
 		return nil
@@ -1238,4 +1243,19 @@ func (c *Checker) checkUnsafeExpr(e *ast.UnsafeExpr) types.Type {
 	c.closeScope()
 	// Unsafe block type is the last expression's type (if any)
 	return types.TypVoid
+}
+
+// resolveStdMember handles std.X expressions by looking up X in the std scope.
+// TODO: test std.X used as a value expression (not a callee) when first-class functions are supported
+func (c *Checker) resolveStdMember(e *ast.MemberExpr) types.Type {
+	if c.stdScope == nil {
+		c.errorf(e.Pos(), "std library is not available")
+		return nil
+	}
+	obj := c.stdScope.Lookup(e.Field)
+	if obj == nil {
+		c.errorf(e.Pos(), "std has no member '%s'", e.Field)
+		return nil
+	}
+	return obj.Type()
 }

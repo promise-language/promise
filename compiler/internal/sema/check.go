@@ -10,7 +10,8 @@ type Checker struct {
 	file      *ast.File
 	info      *Info
 	errors    []error
-	fileScope *types.Scope     // file-level scope (child of Universe)
+	stdScope  *types.Scope     // std library scope (child of Universe, parent of fileScope)
+	fileScope *types.Scope     // file-level scope (child of stdScope)
 	scope     *types.Scope     // current scope during traversal
 	curFunc   *types.Signature // current function being checked (for return/raise)
 	inLoop    int              // nesting depth of loop constructs
@@ -30,11 +31,15 @@ func Check(file *ast.File) (*Info, []error) {
 
 	initBuiltins()
 
+	c.stdScope = types.NewScope(
+		types.Universe, tpos(file.Pos()), tpos(file.End()), "std",
+	)
 	c.fileScope = types.NewScope(
-		types.Universe, tpos(file.Pos()), tpos(file.End()), "file",
+		c.stdScope, tpos(file.Pos()), tpos(file.End()), "file",
 	)
 	c.scope = c.fileScope
 	c.info.Scopes[file] = c.fileScope
+	c.info.StdScope = c.stdScope
 
 	c.declare(file)            // Pass 1: collect all declarations
 	c.define(file)             // Pass 2: resolve types, populate type structures
@@ -82,6 +87,13 @@ func (c *Checker) insert(obj types.Object) bool {
 // check performs Pass 3: type-check all function and method bodies.
 func (c *Checker) check(file *ast.File) {
 	for _, decl := range file.Decls {
+		// Route scope so std decl bodies resolve names against stdScope
+		if isDeclStd(decl) {
+			c.scope = c.stdScope
+		} else {
+			c.scope = c.fileScope
+		}
+
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
 			c.checkFuncDecl(d)
@@ -91,6 +103,7 @@ func (c *Checker) check(file *ast.File) {
 			c.checkEnumDecl(d)
 		}
 	}
+	c.scope = c.fileScope
 }
 
 // checkFuncDecl type-checks a function body.

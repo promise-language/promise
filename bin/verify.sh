@@ -17,5 +17,8 @@ go build ./... 2>&1
 echo "Running all tests..."
 go test ./... || exit 1
 
+echo "Running e2e tests..."
+bash ../bin/e2e.sh || exit 1
+
 echo ""
 echo "✅ OK to Commit"

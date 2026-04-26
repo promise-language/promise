@@ -1,0 +1,13 @@
+main() {
+  print_int(42);
+  print_int(min(3, 7));
+  print_int(max(3, 7));
+  print_int(abs(0 - 5));
+  print_int(clamp(10, 0, 5));
+  print_int(clamp(0 - 3, 0, 5));
+  print_int(clamp(3, 0, 5));
+  print_f64(3.14);
+  print_bool(true);
+  print_bool(false);
+  println("hello from std");
+}

@@ -1,5 +1,3 @@
-print_int(int x) `extern("promise_print_int");
-
 safe_div(int a, int b) int! {
   if b == 0 {
     raise "division by zero";

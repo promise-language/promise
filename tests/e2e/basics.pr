@@ -1,8 +1,3 @@
-print_int(int x) `extern("promise_print_int");
-print_f64(f64 x) `extern("promise_print_f64");
-print_bool(bool x) `extern("promise_print_bool");
-print_string(string s) `extern("promise_print_string");
-
 main() {
   // Integers
   print_int(42);
@@ -16,7 +11,7 @@ main() {
   print_bool(false);
 
   // String
-  print_string("hello world");
+  println("hello world");
 
   // Variables and arithmetic
   int x = 10;
@@ -26,13 +21,13 @@ main() {
   // String concat
   string a = "foo";
   string b = "bar";
-  print_string(a + b);
+  println(a + b);
 
   // If/else
   if x < y {
-    print_string("x < y");
+    println("x < y");
   } else {
-    print_string("x >= y");
+    println("x >= y");
   }
 
   // While loop

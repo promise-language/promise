@@ -1,0 +1,21 @@
+// std/math.pr — Pure Promise math utilities
+min(int a, int b) int {
+  if a < b { return a; }
+  return b;
+}
+
+max(int a, int b) int {
+  if a > b { return a; }
+  return b;
+}
+
+abs(int x) int {
+  if x < 0 { return 0 - x; }
+  return x;
+}
+
+clamp(int x, int lo, int hi) int {
+  if x < lo { return lo; }
+  if x > hi { return hi; }
+  return x;
+}

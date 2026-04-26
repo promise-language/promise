@@ -2555,3 +2555,184 @@ func TestStructuralSatisfactionSignatureMismatchFails(t *testing.T) {
 	`)
 	expectError(t, errs, "cannot assign")
 }
+
+// --- Stage 9: Reserved std name tests ---
+
+func TestReservedStdNameFunc(t *testing.T) {
+	errs := checkErrs(t, `std() {}`)
+	expectError(t, errs, "'std' is reserved")
+}
+
+func TestReservedStdNameType(t *testing.T) {
+	errs := checkErrs(t, `type std {}`)
+	expectError(t, errs, "'std' is reserved")
+}
+
+func TestReservedStdNameEnum(t *testing.T) {
+	errs := checkErrs(t, `enum std { A, B }`)
+	expectError(t, errs, "'std' is reserved")
+}
+
+// --- Stage 9: Std scope and test annotation tests ---
+
+// checkSourceWithStd parses stdSrc as std declarations (IsStd=true) and userSrc as
+// user declarations, merges them (std first), and runs sema.Check.
+func checkSourceWithStd(t *testing.T, stdSrc, userSrc string) (*Info, []error) {
+	t.Helper()
+	// Parse std
+	stdInput := antlr.NewInputStream(stdSrc)
+	stdLexer := parser.NewPromiseLexer(stdInput)
+	stdLexer.RemoveErrorListeners()
+	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
+	stdP := parser.NewPromiseParser(stdStream)
+	stdP.RemoveErrorListeners()
+	stdTree := stdP.CompilationUnit()
+	stdFile, errs := ast.Build("std.pr", stdTree)
+	if len(errs) > 0 {
+		t.Fatalf("std AST build errors: %v", errs)
+	}
+	// Tag std decls
+	for _, d := range stdFile.Decls {
+		switch dd := d.(type) {
+		case *ast.FuncDecl:
+			dd.IsStd = true
+		case *ast.TypeDecl:
+			dd.IsStd = true
+		case *ast.EnumDecl:
+			dd.IsStd = true
+		}
+	}
+
+	// Parse user
+	userInput := antlr.NewInputStream(userSrc)
+	userLexer := parser.NewPromiseLexer(userInput)
+	userLexer.RemoveErrorListeners()
+	userStream := antlr.NewCommonTokenStream(userLexer, antlr.TokenDefaultChannel)
+	userP := parser.NewPromiseParser(userStream)
+	userP.RemoveErrorListeners()
+	userTree := userP.CompilationUnit()
+	userFile, errs := ast.Build("test.pr", userTree)
+	if len(errs) > 0 {
+		t.Fatalf("user AST build errors: %v", errs)
+	}
+
+	// Merge: std decls first, then user decls
+	merged := make([]ast.Decl, 0, len(stdFile.Decls)+len(userFile.Decls))
+	merged = append(merged, stdFile.Decls...)
+	merged = append(merged, userFile.Decls...)
+	userFile.Decls = merged
+
+	return Check(userFile)
+}
+
+func TestStdScopeIsPopulated(t *testing.T) {
+	info, errs := checkSourceWithStd(t,
+		`helper() int { return 42; }`,
+		`main() { x := helper(); }`,
+	)
+	expectNoErrors(t, errs)
+	if info.StdScope == nil {
+		t.Fatal("expected StdScope to be non-nil")
+	}
+	if obj := info.StdScope.Lookup("helper"); obj == nil {
+		t.Error("expected 'helper' to be in StdScope")
+	}
+}
+
+func TestStdMemberUndefined(t *testing.T) {
+	_, errs := checkSourceWithStd(t,
+		`helper() {}`,
+		`main() { std.nonexistent(); }`,
+	)
+	expectError(t, errs, "std has no member 'nonexistent'")
+}
+
+func TestStdIsStdBypassesReservedName(t *testing.T) {
+	// A std-marked declaration named "std" would bypass the reserved check,
+	// but in practice the std library never declares "std". Verify no error.
+	info, errs := checkSourceWithStd(t,
+		`helper() int { return 1; }`,
+		`main() { x := helper(); }`,
+	)
+	expectNoErrors(t, errs)
+	if info.StdScope == nil {
+		t.Fatal("expected StdScope to be non-nil")
+	}
+}
+
+func TestMultipleTestsAccumulation(t *testing.T) {
+	info := checkOK(t, `
+		test_a() `+"`test"+` {}
+		test_b() `+"`test"+` {}
+		test_c() `+"`test"+` {}
+	`)
+	if len(info.Tests) != 3 {
+		t.Fatalf("expected 3 test functions, got %d", len(info.Tests))
+	}
+	names := make(map[string]bool)
+	for _, fn := range info.Tests {
+		names[fn.Name()] = true
+	}
+	for _, name := range []string{"test_a", "test_b", "test_c"} {
+		if !names[name] {
+			t.Errorf("expected test function '%s' in Tests", name)
+		}
+	}
+}
+
+func TestTestFuncWithParamsFails(t *testing.T) {
+	errs := checkErrs(t, `myTest(int x) `+"`test"+` {}`)
+	expectError(t, errs, "must have no parameters")
+}
+
+func TestTestFuncWithReturnTypeFails(t *testing.T) {
+	errs := checkErrs(t, `myTest() int `+"`test"+` { return 1; }`)
+	expectError(t, errs, "must not have a return type")
+}
+
+func TestTestFuncFailableFails(t *testing.T) {
+	errs := checkErrs(t, `myTest() int! `+"`test"+` { return 1; }`)
+	expectError(t, errs, "must not be failable")
+}
+
+func TestTestFuncGenericFails(t *testing.T) {
+	errs := checkErrs(t, `myTest[T]() `+"`test"+` {}`)
+	expectError(t, errs, "must not be generic")
+}
+
+func TestStdScopeRouting(t *testing.T) {
+	// Std function that calls another std function should resolve correctly
+	info, errs := checkSourceWithStd(t,
+		`
+		inner() int { return 42; }
+		outer() int { return inner(); }
+		`,
+		`main() { x := outer(); }`,
+	)
+	expectNoErrors(t, errs)
+	if info.StdScope.Lookup("inner") == nil {
+		t.Error("expected 'inner' in stdScope")
+	}
+	if info.StdScope.Lookup("outer") == nil {
+		t.Error("expected 'outer' in stdScope")
+	}
+}
+
+func TestStdFuncMissingReturnDetected(t *testing.T) {
+	// Std function with missing return should be caught by checkMissingReturn
+	_, errs := checkSourceWithStd(t,
+		`broken() int { }`,
+		`main() {}`,
+	)
+	expectError(t, errs, "missing return")
+}
+
+func TestStdScopeDoesNotLeakToUser(t *testing.T) {
+	// Std function should not see user functions (stdScope is parent of fileScope,
+	// so lookups from stdScope do NOT descend into fileScope)
+	_, errs := checkSourceWithStd(t,
+		`stdFunc() int { return userFunc(); }`,
+		`userFunc() int { return 1; }`,
+	)
+	expectError(t, errs, "undefined")
+}

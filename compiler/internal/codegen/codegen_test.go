@@ -3606,3 +3606,250 @@ func TestArgCoercionSecondParent(t *testing.T) {
 	// Passing Robot as Movable arg (second parent) should emit view vtable
 	assertContains(t, ir, "@promise_vtable_Robot_as_Movable")
 }
+
+// --- Stage 9: Std library and test runner codegen tests ---
+
+// generateIRWithStd compiles with std declarations (IsStd=true) merged before user code.
+func generateIRWithStd(t *testing.T, stdSrc, userSrc string) string {
+	t.Helper()
+	// Parse std
+	stdInput := antlr.NewInputStream(stdSrc)
+	stdLexer := parser.NewPromiseLexer(stdInput)
+	stdLexer.RemoveErrorListeners()
+	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
+	stdP := parser.NewPromiseParser(stdStream)
+	stdP.RemoveErrorListeners()
+	stdTree := stdP.CompilationUnit()
+	stdFile, errs := ast.Build("std.pr", stdTree)
+	if len(errs) > 0 {
+		t.Fatalf("std AST build errors: %v", errs)
+	}
+	for _, d := range stdFile.Decls {
+		switch dd := d.(type) {
+		case *ast.FuncDecl:
+			dd.IsStd = true
+		case *ast.TypeDecl:
+			dd.IsStd = true
+		case *ast.EnumDecl:
+			dd.IsStd = true
+		}
+	}
+
+	// Parse user
+	userInput := antlr.NewInputStream(userSrc)
+	userLexer := parser.NewPromiseLexer(userInput)
+	userLexer.RemoveErrorListeners()
+	userStream := antlr.NewCommonTokenStream(userLexer, antlr.TokenDefaultChannel)
+	userP := parser.NewPromiseParser(userStream)
+	userP.RemoveErrorListeners()
+	userTree := userP.CompilationUnit()
+	userFile, errs := ast.Build("test.pr", userTree)
+	if len(errs) > 0 {
+		t.Fatalf("user AST build errors: %v", errs)
+	}
+
+	// Merge
+	merged := make([]ast.Decl, 0, len(stdFile.Decls)+len(userFile.Decls))
+	merged = append(merged, stdFile.Decls...)
+	merged = append(merged, userFile.Decls...)
+	userFile.Decls = merged
+
+	info, errs := sema.Check(userFile)
+	if len(errs) > 0 {
+		t.Fatalf("sema errors: %v", errs)
+	}
+	result := Compile(userFile, info)
+	return result.Module.String()
+}
+
+// compileResultWithStd compiles with std declarations and returns the CompileResult.
+func compileResultWithStd(t *testing.T, stdSrc, userSrc string) *CompileResult {
+	t.Helper()
+	stdInput := antlr.NewInputStream(stdSrc)
+	stdLexer := parser.NewPromiseLexer(stdInput)
+	stdLexer.RemoveErrorListeners()
+	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
+	stdP := parser.NewPromiseParser(stdStream)
+	stdP.RemoveErrorListeners()
+	stdTree := stdP.CompilationUnit()
+	stdFile, errs := ast.Build("std.pr", stdTree)
+	if len(errs) > 0 {
+		t.Fatalf("std AST build errors: %v", errs)
+	}
+	for _, d := range stdFile.Decls {
+		switch dd := d.(type) {
+		case *ast.FuncDecl:
+			dd.IsStd = true
+		case *ast.TypeDecl:
+			dd.IsStd = true
+		case *ast.EnumDecl:
+			dd.IsStd = true
+		}
+	}
+
+	userInput := antlr.NewInputStream(userSrc)
+	userLexer := parser.NewPromiseLexer(userInput)
+	userLexer.RemoveErrorListeners()
+	userStream := antlr.NewCommonTokenStream(userLexer, antlr.TokenDefaultChannel)
+	userP := parser.NewPromiseParser(userStream)
+	userP.RemoveErrorListeners()
+	userTree := userP.CompilationUnit()
+	userFile, errs := ast.Build("test.pr", userTree)
+	if len(errs) > 0 {
+		t.Fatalf("user AST build errors: %v", errs)
+	}
+
+	merged := make([]ast.Decl, 0, len(stdFile.Decls)+len(userFile.Decls))
+	merged = append(merged, stdFile.Decls...)
+	merged = append(merged, userFile.Decls...)
+	userFile.Decls = merged
+
+	info, errs := sema.Check(userFile)
+	if len(errs) > 0 {
+		t.Fatalf("sema errors: %v", errs)
+	}
+	return Compile(userFile, info)
+}
+
+func TestStdFuncMangledName(t *testing.T) {
+	// Std functions should get __std_ prefix in LLVM IR
+	ir := generateIRWithStd(t,
+		`helper() int { return 42; }`,
+		`main() { x := helper(); }`,
+	)
+	assertContains(t, ir, "define i64 @__std_helper")
+	assertContains(t, ir, "call i64 @__std_helper")
+}
+
+func TestStdUserNameCollision(t *testing.T) {
+	// When user defines same-name function, user version goes to funcs, std to stdFuncs
+	ir := generateIRWithStd(t,
+		`helper() int { return 42; }`,
+		`
+		helper() int { return 99; }
+		main() { x := helper(); }
+		`,
+	)
+	// Both functions should exist with different names
+	assertContains(t, ir, "define i64 @__std_helper")
+	assertContains(t, ir, "define i64 @helper")
+	// main calls the user version (not the std version)
+	assertContains(t, ir, "call i64 @helper()")
+}
+
+func TestStdCallViaStdPrefix(t *testing.T) {
+	// std.X() should call the std-mangled version
+	ir := generateIRWithStd(t,
+		`helper() int { return 42; }`,
+		`
+		helper() int { return 99; }
+		main() {
+			x := helper();
+			y := std.helper();
+		}
+		`,
+	)
+	// User call goes to @helper, std call goes to @__std_helper
+	assertContains(t, ir, "call i64 @helper()")
+	assertContains(t, ir, "call i64 @__std_helper()")
+}
+
+func TestGenerateTestMainNoExistingMain(t *testing.T) {
+	// GenerateTestMain should create a new main when none exists
+	result := compileResult(t, `
+		myTest() `+"`test"+` { }
+	`)
+	info, _ := sema.Check(func() *ast.File {
+		input := antlr.NewInputStream(`myTest() ` + "`test" + ` { }`)
+		lexer := parser.NewPromiseLexer(input)
+		lexer.RemoveErrorListeners()
+		stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+		p := parser.NewPromiseParser(stream)
+		p.RemoveErrorListeners()
+		tree := p.CompilationUnit()
+		file, _ := ast.Build("test.pr", tree)
+		return file
+	}())
+	result.GenerateTestMain(info.Tests)
+	ir := result.Module.String()
+	assertContains(t, ir, "define i32 @main")
+	assertContains(t, ir, "call i32 @promise_test_run")
+}
+
+func TestGenerateTestMainReplacesExistingMain(t *testing.T) {
+	// GenerateTestMain should replace user main's blocks
+	result := compileResult(t, `
+		myTest() `+"`test"+` { }
+		main() { }
+	`)
+	info, _ := sema.Check(func() *ast.File {
+		input := antlr.NewInputStream(`myTest() ` + "`test" + ` { } main() { }`)
+		lexer := parser.NewPromiseLexer(input)
+		lexer.RemoveErrorListeners()
+		stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+		p := parser.NewPromiseParser(stream)
+		p.RemoveErrorListeners()
+		tree := p.CompilationUnit()
+		file, _ := ast.Build("test.pr", tree)
+		return file
+	}())
+	result.GenerateTestMain(info.Tests)
+	ir := result.Module.String()
+	// Should still have main but with test runner content
+	assertContains(t, ir, "define i32 @main")
+	assertContains(t, ir, "call i32 @promise_test_run")
+	assertContains(t, ir, "call void @promise_test_summary")
+}
+
+func TestHostTargetTriple(t *testing.T) {
+	triple := HostTargetTriple()
+	if triple == "" {
+		t.Fatal("HostTargetTriple returned empty string")
+	}
+	// Should contain a known arch
+	if !strings.Contains(triple, "arm64") && !strings.Contains(triple, "x86_64") && !strings.Contains(triple, "aarch64") {
+		t.Errorf("unexpected target triple: %s", triple)
+	}
+}
+
+func TestHostTargetTripleInModule(t *testing.T) {
+	ir := generateIR(t, `main() {}`)
+	triple := HostTargetTriple()
+	assertContains(t, ir, "target triple = \""+triple+"\"")
+}
+
+func TestStdExternRegistration(t *testing.T) {
+	// Std externs should be callable via std.X() and normal call
+	ir := generateIRWithStd(t,
+		`_do_thing(int x) `+"`"+`extern("c_do_thing");`,
+		`main() { _do_thing(42); }`,
+	)
+	// The C function should be declared
+	assertContains(t, ir, "declare void @c_do_thing")
+}
+
+func TestStdExternDedupWithUserExtern(t *testing.T) {
+	// User extern with same C name as std extern should share the IR declaration
+	ir := generateIRWithStd(t,
+		`_std_thing(int x) `+"`"+`extern("c_shared_fn");`,
+		`
+		my_thing(int x) `+"`"+`extern("c_shared_fn");
+		main() { my_thing(42); }
+		`,
+	)
+	// Only one C declaration (not two)
+	count := strings.Count(ir, "declare void @c_shared_fn")
+	if count != 1 {
+		t.Errorf("expected 1 declaration of @c_shared_fn, got %d", count)
+	}
+}
+
+func TestStdFuncUnshadowed(t *testing.T) {
+	// When no user function shadows, std function is accessible by plain name
+	ir := generateIRWithStd(t,
+		`helper() int { return 42; }`,
+		`main() { x := helper(); }`,
+	)
+	// Call should go to the __std_helper function
+	assertContains(t, ir, "call i64 @__std_helper")
+}

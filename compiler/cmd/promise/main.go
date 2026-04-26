@@ -22,6 +22,7 @@ func usage() {
 Commands:
   build   Compile a Promise source file to an executable
   run     Compile and run a Promise source file
+  test    Discover and run test functions
   check   Run semantic analysis (type checking)
   ast     Print the AST
 
@@ -49,6 +50,8 @@ func main() {
 		runBuild(os.Args[2:])
 	case "run":
 		runRun(os.Args[2:])
+	case "test":
+		runTest(os.Args[2:])
 	case "check":
 		if len(os.Args) < 3 {
 			fmt.Fprintln(os.Stderr, "usage: promise check <file.pr>")
@@ -147,78 +150,7 @@ func runBuild(args []string) {
 	file, info := compileFrontend(filename)
 	result := codegen.Compile(file, info)
 
-	// Write .ll to temp file
-	llFile, err := os.CreateTemp("", "promise-*.ll")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
-		os.Exit(1)
-	}
-	defer os.Remove(llFile.Name())
-
-	if _, err := fmt.Fprint(llFile, result.Module.String()); err != nil {
-		fmt.Fprintf(os.Stderr, "error writing IR: %v\n", err)
-		os.Exit(1)
-	}
-	llFile.Close()
-
-	// Generate C header for runtime type verification
-	headerFile, err := os.CreateTemp("", "promise_bindings-*.h")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating header file: %v\n", err)
-		os.Exit(1)
-	}
-	defer os.Remove(headerFile.Name())
-
-	if err := codegen.GenerateHeader(headerFile, result.Layouts, result.EnumLayouts, result.Externs); err != nil {
-		fmt.Fprintf(os.Stderr, "error generating header: %v\n", err)
-		os.Exit(1)
-	}
-	headerFile.Close()
-
-	// Find runtime directory relative to the binary or in known locations.
-	runtimeDir := findRuntimeDir()
-	if runtimeDir == "" {
-		fmt.Fprintln(os.Stderr, "error: cannot find runtime/ directory")
-		os.Exit(1)
-	}
-
-	// Compile all .c files in the runtime directory with generated header
-	runtimeCFiles, err := findRuntimeCFiles(runtimeDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error reading runtime directory: %v\n", err)
-		os.Exit(1)
-	}
-
-	var runtimeObjs []string
-	for _, cFile := range runtimeCFiles {
-		objFile, err := os.CreateTemp("", "promise-runtime-*.o")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
-			os.Exit(1)
-		}
-		objFile.Close()
-		defer os.Remove(objFile.Name())
-
-		clangCmd := exec.Command("clang", "-c", cFile, "-include", headerFile.Name(), "-o", objFile.Name())
-		clangCmd.Stderr = os.Stderr
-		if err := clangCmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "error compiling %s: %v\n", filepath.Base(cFile), err)
-			os.Exit(1)
-		}
-		runtimeObjs = append(runtimeObjs, objFile.Name())
-	}
-
-	// Link
-	linkArgs := []string{llFile.Name()}
-	linkArgs = append(linkArgs, runtimeObjs...)
-	linkArgs = append(linkArgs, "-o", outputFile)
-	linkCmd := exec.Command("clang", linkArgs...)
-	linkCmd.Stderr = os.Stderr
-	if err := linkCmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "error linking: %v\n", err)
-		os.Exit(1)
-	}
-
+	compileAndLink(result, outputFile, false)
 	fmt.Printf("Compiled %s → %s\n", filename, outputFile)
 }
 
@@ -252,6 +184,125 @@ func runRun(args []string) {
 			os.Exit(exitErr.ExitCode())
 		}
 		fmt.Fprintf(os.Stderr, "error running: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runTest discovers and runs `test annotated functions in a .pr file.
+func runTest(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: promise test <file.pr>")
+		os.Exit(1)
+	}
+
+	filename := args[0]
+
+	// Frontend compilation (parse + merge std + sema + ownership)
+	file, info := compileFrontend(filename)
+
+	if len(info.Tests) == 0 {
+		fmt.Println("no tests found")
+		return
+	}
+
+	// Codegen
+	result := codegen.Compile(file, info)
+
+	// Generate test main (replaces user main)
+	result.GenerateTestMain(info.Tests)
+
+	// Link to temp binary (include runtime_test.c for fork isolation)
+	tmpOutput, err := os.CreateTemp("", "promise-test-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
+		os.Exit(1)
+	}
+	tmpOutput.Close()
+	defer os.Remove(tmpOutput.Name())
+
+	compileAndLink(result, tmpOutput.Name(), true)
+
+	// Execute test binary
+	cmd := exec.Command(tmpOutput.Name())
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		}
+		fmt.Fprintf(os.Stderr, "error running tests: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// compileAndLink writes the IR to a temp file, compiles the C runtime,
+// and links everything into the output binary.
+func compileAndLink(result *codegen.CompileResult, outputFile string, testMode bool) {
+	llFile, err := os.CreateTemp("", "promise-*.ll")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
+		os.Exit(1)
+	}
+	defer os.Remove(llFile.Name())
+
+	if _, err := fmt.Fprint(llFile, result.Module.String()); err != nil {
+		fmt.Fprintf(os.Stderr, "error writing IR: %v\n", err)
+		os.Exit(1)
+	}
+	llFile.Close()
+
+	headerFile, err := os.CreateTemp("", "promise_bindings-*.h")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error creating header file: %v\n", err)
+		os.Exit(1)
+	}
+	defer os.Remove(headerFile.Name())
+
+	if err := codegen.GenerateHeader(headerFile, result.Layouts, result.EnumLayouts, result.Externs); err != nil {
+		fmt.Fprintf(os.Stderr, "error generating header: %v\n", err)
+		os.Exit(1)
+	}
+	headerFile.Close()
+
+	runtimeDir := findRuntimeDir()
+	if runtimeDir == "" {
+		fmt.Fprintln(os.Stderr, "error: cannot find runtime/ directory")
+		os.Exit(1)
+	}
+
+	runtimeCFiles, err := findRuntimeCFiles(runtimeDir, testMode)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error reading runtime directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	target := codegen.HostTargetTriple()
+	var runtimeObjs []string
+	for _, cFile := range runtimeCFiles {
+		objFile, err := os.CreateTemp("", "promise-runtime-*.o")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
+			os.Exit(1)
+		}
+		objFile.Close()
+		defer os.Remove(objFile.Name())
+
+		clangCmd := exec.Command("clang", "-target", target, "-c", cFile, "-include", headerFile.Name(), "-o", objFile.Name())
+		clangCmd.Stderr = os.Stderr
+		if err := clangCmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "error compiling %s: %v\n", filepath.Base(cFile), err)
+			os.Exit(1)
+		}
+		runtimeObjs = append(runtimeObjs, objFile.Name())
+	}
+
+	linkArgs := []string{"-target", target, llFile.Name()}
+	linkArgs = append(linkArgs, runtimeObjs...)
+	linkArgs = append(linkArgs, "-o", outputFile)
+	linkCmd := exec.Command("clang", linkArgs...)
+	linkCmd.Stderr = os.Stderr
+	if err := linkCmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "error linking: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -293,9 +344,16 @@ func parseSourceFile(filename string) *ast.File {
 	return file
 }
 
-// compileFrontend runs the full frontend pipeline: parse → sema → ownership.
+// compileFrontend runs the full frontend pipeline: parse → merge std → sema → ownership.
 func compileFrontend(filename string) (*ast.File, *sema.Info) {
 	file := parseSourceFile(filename)
+
+	// Merge standard library declarations
+	stdDir := findStdDir()
+	if stdDir != "" {
+		stdFiles := parseStdFiles(stdDir)
+		file = mergeStdDecls(file, stdFiles)
+	}
 
 	info, errs := sema.Check(file)
 	if len(errs) > 0 {
@@ -314,6 +372,80 @@ func compileFrontend(filename string) (*ast.File, *sema.Info) {
 	}
 
 	return file, info
+}
+
+// findStdDir searches for the std/ directory containing standard library .pr files.
+func findStdDir() string {
+	candidates := []string{
+		"std",
+		"../std",
+		"../../std",
+	}
+
+	// Check relative to executable
+	if execPath, err := os.Executable(); err == nil {
+		dir := filepath.Dir(execPath)
+		candidates = append(candidates,
+			filepath.Join(dir, "std"),
+			filepath.Join(dir, "..", "std"),
+			filepath.Join(dir, "..", "..", "std"),
+		)
+	}
+
+	for _, c := range candidates {
+		info, err := os.Stat(c)
+		if err == nil && info.IsDir() {
+			abs, err := filepath.Abs(c)
+			if err == nil {
+				return abs
+			}
+			return c
+		}
+	}
+	return ""
+}
+
+// parseStdFiles parses all .pr files in the std directory.
+// TODO: OS errors (unreadable dir) and parse errors in std files silently return nil — add error reporting
+func parseStdFiles(stdDir string) []*ast.File {
+	entries, err := os.ReadDir(stdDir)
+	if err != nil {
+		return nil
+	}
+	var files []*ast.File
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".pr") {
+			f := parseSourceFile(filepath.Join(stdDir, e.Name()))
+			files = append(files, f)
+		}
+	}
+	return files
+}
+
+// mergeStdDecls prepends std library declarations into the user file, tagging them with IsStd.
+func mergeStdDecls(userFile *ast.File, stdFiles []*ast.File) *ast.File {
+	var stdDecls []ast.Decl
+	for _, sf := range stdFiles {
+		for _, d := range sf.Decls {
+			// Tag each declaration as coming from std
+			switch decl := d.(type) {
+			case *ast.FuncDecl:
+				decl.IsStd = true
+			case *ast.TypeDecl:
+				decl.IsStd = true
+			case *ast.EnumDecl:
+				decl.IsStd = true // TODO: no std enums exist yet; add test when one is added
+			}
+			stdDecls = append(stdDecls, d)
+		}
+	}
+
+	// Prepend std declarations before user declarations
+	merged := make([]ast.Decl, 0, len(stdDecls)+len(userFile.Decls))
+	merged = append(merged, stdDecls...)
+	merged = append(merged, userFile.Decls...)
+	userFile.Decls = merged
+	return userFile
 }
 
 // findRuntimeDir searches for the runtime/ directory in standard locations.
@@ -347,8 +479,9 @@ func findRuntimeDir() string {
 	return ""
 }
 
-// findRuntimeCFiles returns all .c files in the runtime directory, sorted.
-func findRuntimeCFiles(dir string) ([]string, error) {
+// findRuntimeCFiles returns .c files in the runtime directory.
+// If testMode is true, includes runtime_test.c; otherwise excludes it.
+func findRuntimeCFiles(dir string, testMode bool) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -356,6 +489,9 @@ func findRuntimeCFiles(dir string) ([]string, error) {
 	var files []string
 	for _, e := range entries {
 		if !e.IsDir() && strings.HasSuffix(e.Name(), ".c") {
+			if !testMode && e.Name() == "runtime_test.c" {
+				continue
+			}
 			files = append(files, filepath.Join(dir, e.Name()))
 		}
 	}

@@ -102,7 +102,7 @@ Tests live alongside the code they test. Any function annotated with `` `test ``
 ```promise
 // user.pr
 type User {
-  String name;
+  string name;
   Int age;
 }
 
@@ -198,7 +198,7 @@ type Int {
   <=(Int other) Bool `native;
   >=(Int other) Bool `native;
   -() Int `native;                // unary negation
-  toString() String `native;
+  toString() string `native;
 }
 
 type Int8 {
@@ -401,9 +401,9 @@ The vtable pointer in the value struct is the **sole mechanism** for field acces
 
 ```promise
 type Animal {
-  String name;
+  string name;
   Int age;
-  speak() String `abstract;
+  speak() string `abstract;
 }
 ```
 
@@ -411,11 +411,11 @@ The compiler generates:
 
 ```
 Animal_vtable = {
-  [0] get_name:  fn(Animal#v) -> String
-  [1] set_name:  fn(Animal#v, String)
+  [0] get_name:  fn(Animal#v) -> string
+  [1] set_name:  fn(Animal#v, string)
   [2] get_age:   fn(Animal#v) -> Int
   [3] set_age:   fn(Animal#v, Int)
-  [4] speak:     fn(Animal#v) -> String
+  [4] speak:     fn(Animal#v) -> string
 }
 ```
 
@@ -425,7 +425,7 @@ At the call site, `animal.name` compiles to `vtable[0](animal_value)` and `anima
 
 **Why fields go through the vtable:**
 
-This decouples the call site from the concrete implementation. A parent type can declare a field `String name`, and a child type can satisfy it with either a stored field or a computed getter — the call site code is identical in both cases. This is what enables interfaces to declare data fields that concrete types can implement however they choose (see Section 5.4).
+This decouples the call site from the concrete implementation. A parent type can declare a field `string name`, and a child type can satisfy it with either a stored field or a computed getter — the call site code is identical in both cases. This is what enables interfaces to declare data fields that concrete types can implement however they choose (see Section 5.4).
 
 **Getter/setter syntactic sugar:**
 
@@ -453,8 +453,8 @@ This sugar is essential because without it, code would require explicit getter/s
 
 ```promise
 type Dog is Animal {
-  String breed;
-  speak() String { return "Woof!"; }
+  string breed;
+  speak() string { return "Woof!"; }
 }
 ```
 
@@ -463,15 +463,15 @@ Dog's vtable **starts with** Animal's layout and appends new slots:
 ```
 Dog_vtable = {
   // Animal slots (same positions — prefix-compatible)
-  [0] get_name:  fn(Dog#v) -> String      → Dog's name field getter
-  [1] set_name:  fn(Dog#v, String)        → Dog's name field setter
+  [0] get_name:  fn(Dog#v) -> string      → Dog's name field getter
+  [1] set_name:  fn(Dog#v, string)        → Dog's name field setter
   [2] get_age:   fn(Dog#v) -> Int         → Dog's age field getter
   [3] set_age:   fn(Dog#v, Int)           → Dog's age field setter
-  [4] speak:     fn(Dog#v) -> String      → Dog.speak
+  [4] speak:     fn(Dog#v) -> string      → Dog.speak
 
   // Dog-specific slots (appended)
-  [5] get_breed: fn(Dog#v) -> String      → Dog's breed field getter
-  [6] set_breed: fn(Dog#v, String)        → Dog's breed field setter
+  [5] get_breed: fn(Dog#v) -> string      → Dog's breed field getter
+  [6] set_breed: fn(Dog#v, string)        → Dog's breed field setter
 }
 ```
 
@@ -483,20 +483,20 @@ When a type has multiple parents, the compiler generates a **separate vtable for
 
 ```promise
 type Named {
-  String name;
-  greet() String { return "Hi, I'm {this.name}"; }
+  string name;
+  greet() string { return "Hi, I'm {this.name}"; }
 }
 
 type Audible {
   volume() Int `abstract;
-  speak() String `abstract;
+  speak() string `abstract;
 }
 
 type Dog is Named, Audible {
-  String breed;
+  string breed;
   Int loudness;
 
-  speak() String { return "Woof!"; }
+  speak() string { return "Woof!"; }
   volume() Int { return this.loudness; }
 }
 ```
@@ -549,7 +549,7 @@ type Player is Positioned {
   // Stores x, y as real fields — vtable getters read from instance memory
   Float64 x;
   Float64 y;
-  String name;
+  string name;
 }
 
 type CameraTarget is Positioned {
@@ -580,7 +580,7 @@ When defining a field in a type, the field goes into the **Instance struct** by 
 ```promise
 type Player {
   // Instance fields (default — no annotation needed)
-  String name;
+  string name;
   Int health;
 
   // Value field — lives in T#v, copied with the value struct
@@ -588,10 +588,10 @@ type Player {
   Float64 y `value;
 
   // Variant field — shared across all instances of this monomorphization
-  String spritePath `variant;
+  string spritePath `variant;
 
   // Type field — shared across all instances of this type declaration
-  String typeName `type;
+  string typeName `type;
 }
 ```
 
@@ -624,17 +624,17 @@ Variable declarations use **type-first** syntax (Dart/C++ style):
 
 ```promise
 Int x = 42;
-String name = "Alice";
+string name = "Alice";
 Float64 pi = 3.14159;
 List[Int] numbers = [1, 2, 3];
-Map[String, Int] scores = {"alice": 100, "bob": 85};
+map[string, Int] scores = {"alice": 100, "bob": 85};
 ```
 
 Type inference with `:=`:
 
 ```promise
 x := 42;                // inferred as Int
-name := "Alice";        // inferred as String
+name := "Alice";        // inferred as string
 ```
 
 ### 5.4 Inheritance
@@ -688,7 +688,7 @@ For lightweight, widely-satisfied interfaces (e.g. `Printable`, `Hashable`), the
 
 ```promise
 type Printable `structural {
-  toString() String `abstract;
+  toString() string `abstract;
 }
 
 type Point {
@@ -696,7 +696,7 @@ type Point {
   Int y;
 
   // No `is Printable` — but satisfies Printable structurally
-  toString() String { return "(" + this.x.toString() + ", " + this.y.toString() + ")"; }
+  toString() string { return "(" + this.x.toString() + ", " + this.y.toString() + ")"; }
 }
 
 Printable p = Point(x: 1, y: 2);  // OK — Point has toString() with matching signature
@@ -712,7 +712,7 @@ When a value crosses a type boundary through structural satisfaction (or through
 Generics use **square brackets** `[]`. Constraints are expressed inline in the type parameter list.
 
 ```promise
-type Map[K: Hashable + Eq, V] {
+type map[K: Hashable + Eq, V] {
   Bucket[K, V][] buckets;
 
   get(K &key) V&? `instance { ... }
@@ -746,7 +746,7 @@ type Hashable {
 }
 ```
 
-All primitive types (`Int`, `Float64`, `String`, `Bool`, etc.) implement `Eq` and `Ord`. `String` and `Int` also implement `Hashable`. User-defined types can implement these interfaces to participate in generic algorithms like `sort`, `Map` key lookup, and stream combinators like `distinct()`, `min()`, and `max()`.
+All primitive types (`Int`, `Float64`, `string`, `Bool`, etc.) implement `Eq` and `Ord`. `string` and `Int` also implement `Hashable`. User-defined types can implement these interfaces to participate in generic algorithms like `sort`, `Map` key lookup, and stream combinators like `distinct()`, `min()`, and `max()`.
 
 ### 5.6 Enums (Algebraic Data Types)
 
@@ -785,20 +785,20 @@ Promise uses Rust-style ownership with borrowing and lifetimes.
 ### 6.2 Syntax
 
 ```promise
-process(String &data) {              // shared borrow
+process(string &data) {              // shared borrow
   io.println(data);
 }
 
-modify(String ~data) {               // mutable borrow
+modify(string ~data) {               // mutable borrow
   data.append(" world");
 }
 
-consume(String data) {               // takes ownership
+consume(string data) {               // takes ownership
   // data is dropped at end of scope
 }
 
 main() {
-  String s = String("hello");
+  string s = string("hello");
   process(&s);          // borrow
   modify(~s);           // mutable borrow
   consume(s);           // move — s is no longer valid after this line
@@ -816,12 +816,12 @@ The compiler uses **aggressive lifetime elision** — in practice, explicit life
 
 ```promise
 // All of these are inferred — no annotations needed:
-first(String &a, String &b) String& { return a; }  // inferred: output borrows from a
-name(&this) String& { return this.name; }           // inferred: output borrows from this
+first(string &a, string &b) string& { return a; }  // inferred: output borrows from a
+name(&this) string& { return this.name; }           // inferred: output borrows from this
 
 // Rare case: compiler cannot determine which input the output borrows from.
 // Explicit annotation required:
-longest['a](String &'a a, String &'a b) String &'a {
+longest['a](string &'a a, string &'a b) string &'a {
   if a.len() > b.len() { return a; }
   return b;
 }
@@ -840,8 +840,8 @@ type Point `copy {
 
 // Auto-generated deep clone — compiler generates clone() Self method
 type Document `clone {
-  String title;
-  String[] pages;
+  string title;
+  string[] pages;
 }
 
 // Custom clone — just define the method, no meta needed
@@ -867,7 +867,7 @@ type Connection {
 Functions that can fail use `!` after the return type. Under the hood, this desugars to a result struct — a pair of `(value, error)`.
 
 ```promise
-readFile(String &path) String! {
+readFile(string &path) string! {
   // On success:
   return contents;
 
@@ -876,15 +876,15 @@ readFile(String &path) String! {
 }
 ```
 
-The `!` suffix on the return type means: "this function returns `(String, Error)`".
+The `!` suffix on the return type means: "this function returns `(string, Error)`".
 
 ### 7.2 Calling Failable Functions
 
 In a **failable function** (return type has `!`), a naked call to another failable function **auto-propagates** the error — if the callee fails, the caller immediately returns the error to its own caller. This is the most common case and requires no extra syntax:
 
 ```promise
-process() String! {
-  String content = readFile("data.txt");    // auto-propagates on error
+process() string! {
+  string content = readFile("data.txt");    // auto-propagates on error
   return content.trim();
 }
 ```
@@ -892,7 +892,7 @@ process() String! {
 The explicit `?` suffix is allowed for self-documentation but has the same effect:
 
 ```promise
-  String content = readFile("data.txt")?;   // same as above — explicit propagation
+  string content = readFile("data.txt")?;   // same as above — explicit propagation
 ```
 
 In a **non-failable function**, calling a failable function without handling is a **compile-time error** — there is nowhere to propagate to. The caller must handle the error with `?` or unwrap with `!`:
@@ -900,18 +900,18 @@ In a **non-failable function**, calling a failable function without handling is 
 ```promise
 main() {
   // Handle with ? — block must provide recovery value or diverge (return/panic)
-  String content = readFile("data.txt") ? e {
+  string content = readFile("data.txt") ? e {
     io.println("Failed: {e.message()}");
     return;
   };
 
   // Handle with ? — error value not needed
-  String content = readFile("data.txt") ? {
+  string content = readFile("data.txt") ? {
     return;
   };
 
   // Unwrap (panics on error — for prototyping only)
-  String content = readFile("data.txt")!;
+  string content = readFile("data.txt")!;
 }
 ```
 
@@ -928,10 +928,10 @@ The handler block must either produce a **recovery value** of the expected type,
 
 ```promise
 // Recovery value
-String content = readFile("data.txt") ? { "" };    // use empty string on failure
+string content = readFile("data.txt") ? { "" };    // use empty string on failure
 
 // Diverge
-String content = readFile("data.txt") ? e {
+string content = readFile("data.txt") ? e {
   io.println("Error: {e.message()}");
   return;
 };
@@ -967,13 +967,13 @@ if err is present {
 
 ```promise
 type Error {
-  message() String `abstract;
+  message() string `abstract;
 }
 
 type FileNotFoundError is Error {
-  String path;
+  string path;
 
-  message() String {
+  message() string {
     return "file not found: {this.path}";
   }
 }
@@ -1009,15 +1009,15 @@ MetaParam      = Expression | Identifier ':' Expression ;
 Meta annotations appear in post-definition position:
 
 - **Types**: `type Foo `meta { ... }`
-- **Fields**: `String name `meta;`
-- **Methods**: `greet() String `meta { ... }`
+- **Fields**: `string name `meta;`
+- **Methods**: `greet() string `meta { ... }`
 - **Functions**: `add(Int a, Int b) Int `meta { ... }`
 
 ### 8.2 Examples
 
 ```promise
 type OldThing `serializable `version(2) `deprecated(since: "1.3", message: "Use newMethod instead") {
-  String name `json(name: "user_name") `required;
+  string name `json(name: "user_name") `required;
   Int age `json(name: "user_age");
 }
 
@@ -1066,7 +1066,7 @@ type HttpClient `doc("HTTP client with connection pooling and automatic retry.")
   Int maxRetries `doc("Maximum number of retry attempts before failing.");
   Duration timeout `doc("Per-request timeout.");
 
-  get(~this, String url) Response! `doc("Perform a GET request. Returns the response or an error.") `instance {
+  get(~this, string url) Response! `doc("Perform a GET request. Returns the response or an error.") `instance {
     ...
   }
 }
@@ -1090,7 +1090,7 @@ Functions are declared without a keyword — the name, parameter list, and optio
 ### 9.1 Free Functions
 
 ```promise
-greet(String &name) String {
+greet(string &name) string {
   return "Hello, {name}!";
 }
 ```
@@ -1140,9 +1140,9 @@ Variant methods receive the **variant struct**. One method copy exists per monom
 
 ```promise
 type Collection[T] {
-  String typeName `variant;
+  string typeName `variant;
 
-  describeType() String `variant {
+  describeType() string `variant {
     return "Collection of {this.typeName}";
   }
 }
@@ -1173,13 +1173,13 @@ Any parameter can have a **default value** with `= expression`. Parameters whose
 
 ```promise
 sendEmail(
-    String to,                    // required
-    String subject,               // required
-    String body = "",             // has default — skippable
-    String? cc,                   // optional — skippable, receives none
+    string to,                    // required
+    string subject,               // required
+    string body = "",             // has default — skippable
+    string? cc,                   // optional — skippable, receives none
     Int priority = 3              // has default — skippable
 ) Bool! {
-  // cc is Option[String] — test with: if cc { ... } (see Section 14.1)
+  // cc is Option[string] — test with: if cc { ... } (see Section 14.1)
   ...
 }
 ```
@@ -1246,8 +1246,8 @@ Default value expressions are evaluated **at the call site** each time the argum
 
 ```promise
 // VALID defaults:
-connect(String host, Int port = 8080) Connection! { ... }
-createId(String prefix, String id = Uuid.generate()) Thing { ... }
+connect(string host, Int port = 8080) Connection! { ... }
+createId(string prefix, string id = Uuid.generate()) Thing { ... }
 
 // INVALID — referencing sibling parameter:
 range(Int start, Int end = start + 10) { ... }  // compile error
@@ -1259,9 +1259,9 @@ Constructor parameters mirror field declarations. Fields with `= expression` def
 
 ```promise
 type Config {
-  String host;
+  string host;
   Int port = 8080;
-  String? logFile;
+  string? logFile;
 }
 
 Config("localhost");                          // port=8080, logFile=none
@@ -1279,7 +1279,7 @@ doubled := list.map(|x| x * 2);
 Lambdas support default parameter values:
 
 ```promise
-greet := |String name, String greeting = "Hello"| -> String {
+greet := |string name, string greeting = "Hello"| -> string {
   return "{greeting}, {name}!";
 };
 greet("Alice");            // greeting uses default
@@ -1289,8 +1289,8 @@ greet("Alice", "Hi");      // greeting = "Hi"
 Closures capture by reference by default. Use `move` to capture by value:
 
 ```promise
-String greeting = "hello";
-closure := move |String name| -> String {
+string greeting = "hello";
+closure := move |string name| -> string {
   return "{greeting}, {name}";
 };
 ```
@@ -1303,7 +1303,7 @@ Function types use arrow syntax instead of a keyword:
 
 ```promise
 (Int, Int) -> Int                  // function taking two Ints, returning Int
-(String&) -> Bool                  // function taking a borrowed String, returning Bool
+(string&) -> Bool                  // function taking a borrowed string, returning Bool
 () -> ()                           // function taking nothing, returning nothing
 ```
 
@@ -1324,11 +1324,11 @@ Promise does not support **function or method overloading** — defining multipl
 
 ```promise
 // NOT ALLOWED — same name, different signatures:
-parse(String s) Document { ... }
+parse(string s) Document { ... }
 parse(Bytes b) Document { ... }   // compile error: 'parse' already defined
 
 // Use distinct names instead:
-parseString(String s) Document { ... }
+parseString(string s) Document { ... }
 parseBytes(Bytes b) Document { ... }
 ```
 
@@ -1535,21 +1535,21 @@ The `for item in expr` loop works on any value whose type implements `Stream[T]`
 
 ---
 
-## 11. Strings & Interpolation
+## 11. strings & Interpolation
 
-Strings are UTF-8 encoded, owned, and heap-allocated.
+strings are UTF-8 encoded, owned, and heap-allocated.
 
 ```promise
-String name = "world";
-String msg = "hello, {name}!";           // string interpolation with {}
-String raw = r"no \n escape here";        // raw string
-String multi = """
+string name = "world";
+string msg = "hello, {name}!";           // string interpolation with {}
+string raw = r"no \n escape here";        // raw string
+string multi = """
   multi-line
   string literal
 """;
 ```
 
-String slices (`&str` equivalent) use `String&` for borrowed string data.
+string slices (`&str` equivalent) use `string&` for borrowed string data.
 
 ---
 
@@ -1600,7 +1600,7 @@ type Stream[T] {
   min() T? { ... }
   max() T? { ... }
   forEach((T) action) { ... }
-  join(String separator = "") String { ... }
+  join(string separator = "") string { ... }
 }
 ```
 
@@ -1641,7 +1641,7 @@ for (i, item) in collection.enumerate() { body }
 
 ### 12.3 Ranges
 
-The `..` operator constructs a `Range` value. `..` produces a half-open (exclusive end) range; `..=` produces an inclusive range:
+The `..` operator constructs a `range` value. `..` produces a half-open (exclusive end) range; `..=` produces an inclusive range:
 
 ```promise
 0..10       // 0, 1, 2, ..., 9     (exclusive end — half-open)
@@ -1650,21 +1650,21 @@ The `..` operator constructs a `Range` value. `..` produces a half-open (exclusi
 5..=5       // single element: 5
 ```
 
-`Range` is a type that implements `Stream[Int]`:
+`range` is a type that implements `Stream[int]`:
 
 ```promise
-type Range is Stream[Int] {
-  Int start;
-  Int end;
-  Bool inclusive;
+type range is Stream[int] {
+  int start;
+  int end;
+  bool inclusive;
 
-  iter() Iter[Int] { ... }
+  iter() Iter[int] { ... }
 
   // Derived ranges
-  step(Int n) Stream[Int] { ... }
+  step(int n) Stream[int] { ... }
 
   // O(1) membership test — overrides the O(n) default from Stream
-  contains(Int value) Bool {
+  contains(int value) bool {
     if this.inclusive {
       return value >= this.start && value <= this.end;
     }
@@ -1721,8 +1721,8 @@ oneThenTwo() Stream[Int] {
 **Generators with I/O** work transparently — no function coloring needed:
 
 ```promise
-fetchPages(String url) Stream[Page] {
-  String? nextUrl = url;
+fetchPages(string url) Stream[Page] {
+  string? nextUrl = url;
   while nextUrl {
     Page page = http.get(nextUrl) ? { break; };  // stop stream on error
     yield page;
@@ -1755,20 +1755,20 @@ Built-in collection types implement `Stream[T]`, giving them all stream combinat
 |----------------|---------------------------------|
 | `T[]` (slice)   | `Stream[T]` — iterates elements in order |
 | `T[N]` (array)  | `Stream[T]` — iterates elements in order |
-| `Set[T]`        | `Stream[T]` — iteration order is implementation-defined |
-| `Map[K, V]`     | `Stream[(K, V)]` — iterates key-value pairs |
-| `Channel[T]`    | `Stream[T]` — receives from channel until closed |
-| `Range`         | `Stream[Int]` — see Section 12.3 |
-| `String`        | `Stream[Char]` — iterates Unicode scalar values |
+| `set[T]`        | `Stream[T]` — iteration order is implementation-defined |
+| `map[K, V]`     | `Stream[(K, V)]` — iterates key-value pairs |
+| `channel[T]`    | `Stream[T]` — receives from channel until closed |
+| `range`         | `Stream[int]` — see Section 12.3 |
+| `string`        | `Stream[char]` — iterates Unicode scalar values |
 
-`Map[K, V]` also provides `.keys() Stream[K]` and `.values() Stream[V]` for iterating only keys or values.
+`map[K, V]` also provides `.keys() Stream[K]` and `.values() Stream[V]` for iterating only keys or values.
 
 ### 12.6 Channels as Streams
 
-Because `Channel[T]` implements `Stream[T]`, channels receive all stream combinators:
+Because `channel[T]` implements `Stream[T]`, channels receive all stream combinators:
 
 ```promise
-ch := Channel[Int].new(capacity: 10);
+ch := channel[int].new(capacity: 10);
 go {
   for i in 0..100 { ch.send(i); }
   ch.close();
@@ -1781,7 +1781,7 @@ for n in evens {
 }
 ```
 
-**Important difference from other streams:** Channel iteration is **destructive**. Values are consumed from the shared buffer — there is no way to re-iterate a channel. Calling `iter()` on a channel returns an iterator that receives from the channel; `next()` blocks (suspends the goroutine) until a value is available or the channel is closed. When the channel is closed and empty, `next()` returns `none`.
+**Important difference from other streams:** channel iteration is **destructive**. Values are consumed from the shared buffer — there is no way to re-iterate a channel. Calling `iter()` on a channel returns an iterator that receives from the channel; `next()` blocks (suspends the goroutine) until a value is available or the channel is closed. When the channel is closed and empty, `next()` returns `none`.
 
 Calling `ch.iter()` multiple times does **not** produce independent cursors over the same data — each iterator draws from the same underlying channel buffer. This is the expected behavior for a concurrent data-passing primitive.
 
@@ -1800,13 +1800,13 @@ Int[] list = [1, 2, 3, 4, 5];
 list.push(6);
 
 // Map
-Map[String, Int] scores = {
+map[string, Int] scores = {
   "alice": 100,
   "bob": 85,
 };
 
 // Tuple
-(Int, String) pair = (42, "answer");
+(Int, string) pair = (42, "answer");
 (num, label) := pair;      // destructuring
 ```
 
@@ -1834,8 +1834,8 @@ find(Int id) User? {            // shorthand for Option[User]
 A value of type `T` is **implicitly convertible** to `T?`. No wrapping syntax is needed:
 
 ```promise
-String name = "Alice";
-String? maybeName = name;       // OK — implicit T → T?
+string name = "Alice";
+string? maybeName = name;       // OK — implicit T → T?
 ```
 
 ### 14.1 Working with Optionals
@@ -1847,10 +1847,10 @@ There are three ways to test and unwrap optional values, from lightest to most e
 When a `T?` value appears as an `if` condition, it is treated as a presence check. Inside the block, the compiler **narrows** the type from `T?` to `T`:
 
 ```promise
-String? cc = getCC();
+string? cc = getCC();
 
 if cc {
-  io.println(cc);              // cc is String here, not String?
+  io.println(cc);              // cc is string here, not string?
 }
 
 if !cc {
@@ -2003,7 +2003,7 @@ Channels are the primary synchronization primitive for streaming data between go
 
 ```promise
 main() {
-  ch := Channel[Int].new(capacity: 10);
+  ch := channel[int].new(capacity: 10);
 
   go {
     for i in 0..100 {
@@ -2020,7 +2020,7 @@ main() {
 
 The `<-` operator also works on channels: `value := <-ch;` receives the next value.
 
-Because `Channel[T]` implements `Stream[T]`, channels gain all stream combinators — `map`, `filter`, `fold`, etc. — for free. See Section 12.6 for details and caveats about destructive iteration.
+Because `channel[T]` implements `Stream[T]`, channels gain all stream combinators — `map`, `filter`, `fold`, etc. — for free. See Section 12.6 for details and caveats about destructive iteration.
 
 ### 16.4 Ownership Across Goroutines
 
@@ -2053,14 +2053,14 @@ use json "github.com/promise-lang/std/json/1"
 
 type Todo `serializable {
   Int id `json(name: "id");
-  String title `json(name: "title");
+  string title `json(name: "title");
   Bool done = false;                     // field default — constructor can skip
 
   toggle(~this) `instance {
     this.done = !this.done;
   }
 
-  new(Int id, String title) Todo `type {
+  new(Int id, string title) Todo `type {
     return Todo(id: id, title: title);   // done defaults to false
   }
 }
@@ -2068,7 +2068,7 @@ type Todo `serializable {
 type TodoList {
   Todo[] items;
 
-  add(~this, String title, Int priority = 0) `instance {
+  add(~this, string title, Int priority = 0) `instance {
     Int id = this.items.len() + 1;
     this.items.push(Todo.new(id, title));
   }
@@ -2078,8 +2078,8 @@ type TodoList {
   }
 }
 
-loadFromFile(String &path) TodoList! {
-  String content = io.readFile(path);          // auto-propagates on error
+loadFromFile(string &path) TodoList! {
+  string content = io.readFile(path);          // auto-propagates on error
   Todo[] items = json.decode[Todo[]](content); // auto-propagates on error
   return TodoList(items: items);
 }
@@ -2196,7 +2196,7 @@ classicForStmt: 'for' varDecl ';' expression ';' expression block;
 forStmt: forInStmt | classicForStmt | 'for' block;   // infinite loop
 
 goExpr: 'go' (block | expression);    // returns Task[T]
-receiveExpr: '<-' expression;          // receive from Task[T] or Channel[T]
+receiveExpr: '<-' expression;          // receive from Task[T] or channel[T]
 
 // Error handling
 errorPropagate: expression '?';                          // explicit propagate
@@ -2204,7 +2204,7 @@ errorHandler: expression '?' IDENT? block;               // ? e { ... } or ? { .
 errorUnwrap: expression '!';                             // panic on error
 resultDestructure: '(' IDENT ',' IDENT ')' ':=' expression;  // (val, err) := expr
 
-// Range expressions
+// range expressions
 rangeExpr: expression '..' '='? expression;    // 0..10 (exclusive) or 0..=10 (inclusive)
 
 // Yield (only valid inside generator functions returning Stream[T])
@@ -2274,6 +2274,6 @@ Single binary `promise` with the following internal packages:
 ## 21. Open Design Questions
 
 1. **REPL** — Should the toolchain include an interpreter/REPL for rapid prototyping?
-2. **Stream backpressure** — When a generator yields into a channel-backed consumer, should there be built-in backpressure beyond Channel's existing capacity mechanism?
+2. **Stream backpressure** — When a generator yields into a channel-backed consumer, should there be built-in backpressure beyond channel's existing capacity mechanism?
 3. **Parallel stream execution** — Should `Stream[T]` have a `.parallel()` combinator that distributes work across goroutines? If so, how does ordering work?
 4. **Stream error handling** — Should `Stream[T]` support `Stream[T!]` where individual elements can carry errors? Or should a failing generator terminate the stream entirely?

@@ -90,12 +90,12 @@ Four-pass analysis: declare → define → check → verify.
 - Constructor calls with named field validation
 - Enum variant access and constructor signatures
 - Operator dispatch via method lookup on named types
-- **Map literals** resolve to `Map[K, V]` type with key/value consistency checking
-- **Range operators** (`..`, `..=`) resolve to `Range` type
+- **Map literals** resolve to `map[K, V]` type with key/value consistency checking
+- **Range operators** (`..`, `..=`) resolve to `range` type
 - **Go expressions** resolve to `Task[T]` with inner type inference
-- **Receive operator** (`<-`) extracts `T` from `Task[T]` or `Channel[T]`
-- **Map indexing** returns `V?` (optional) for `Map[K, V]`
-- **For-in** supports `Slice`, `Array`, `Map`, `Range`, and `String` iteration
+- **Receive operator** (`<-`) extracts `T` from `Task[T]` or `channel[T]`
+- **Map indexing** returns `V?` (optional) for `map[K, V]`
+- **For-in** supports `slice`, array, `map`, `range`, and `string` iteration
 - **Match exhaustiveness** checking for enum types (variant coverage) and non-enum types (wildcard required)
 - **Missing return** detection across if/else chains, match expressions, and infinite loops
 - Error reporting with source positions
@@ -376,19 +376,19 @@ Codegen for inherited field layouts, static method dispatch through inheritance 
 
 ## Stage 8j — Unify Compound Types with Named Types + Collection Methods (Done)
 
-Promoted `Slice[T]` and `Map[K,V]` from structural placeholder types (`*types.Slice`, `*types.Map`) to real Named types in the universe scope, represented as `Instance{TypSlice, [T]}` and `Instance{TypMap, [K, V]}`. Method/field lookup flows through the existing `resolveInstanceMember` → `LookupMethod` → type substitution path — the same path used for user-defined generic types.
+Promoted `slice[T]` and `map[K,V]` from structural placeholder types (`*types.Slice`, `*types.Map`) to real Named types in the universe scope, represented as `Instance{TypSlice, [T]}` and `Instance{TypMap, [K, V]}`. Method/field lookup flows through the existing `resolveInstanceMember` → `LookupMethod` → type substitution path — the same path used for user-defined generic types.
 
 **Type System Changes:**
-- Added `TypSlice = defGeneric("Slice", "T")` to universe scope
+- Added `TypSlice = defGeneric("slice", "T")` to universe scope
 - Deleted `Slice` and `Map` structs from `types/container.go`
 - `NewSlice(elem)` and `NewMap(key, val)` now return `*Instance`
 - Added helper functions `IsSlice`, `AsSlice`, `IsMap`, `AsMap` for clean migration
-- `Instance.String()` overridden so `Slice[int]` displays as `int[]`
+- `Instance.String()` overridden so `slice[int]` displays as `int[]`
 - Deleted `case *Slice:` and `case *Map:` from `equal.go` and `subst.go`
 
 **Native Methods Registered in `builtins.go`:**
-- **Slice[T]**: `len` field, `push(T)`, `pop() → T?`, `contains(T) → bool`, `remove(int)`
-- **Map[K,V]**: `len` field, `contains(K) → bool`, `remove(K) → bool`, `keys() → K[]`, `values() → V[]`
+- **slice[T]**: `len` field, `push(T)`, `pop() → T?`, `contains(T) → bool`, `remove(int)`
+- **map[K,V]**: `len` field, `contains(K) → bool`, `remove(K) → bool`, `keys() → K[]`, `values() → V[]`
 - **string**: `len` field, `contains(string) → bool`, `starts_with(string) → bool`, `ends_with(string) → bool`, `index_of(string) → int?`, `trim() → string`, `split(string) → string[]`
 
 **Runtime:**

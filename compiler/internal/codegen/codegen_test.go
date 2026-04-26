@@ -11,7 +11,7 @@ import (
 	antlr "github.com/antlr4-go/antlr/v4"
 )
 
-// stdContainers provides native type declarations for Slice, Map, and string.
+// stdContainers provides native type declarations for slice, map, and string.
 const stdContainers = `
 type string ` + "`" + `native {
 	int len;
@@ -22,14 +22,14 @@ type string ` + "`" + `native {
 	trim() string ` + "`" + `native;
 	split(string sep) string[] ` + "`" + `native;
 }
-type Slice[T] ` + "`" + `native {
+type slice[T] ` + "`" + `native {
 	int len;
 	push(T elem) ` + "`" + `native;
 	pop() T? ` + "`" + `native;
 	contains(T elem) bool ` + "`" + `native;
 	remove(int index) ` + "`" + `native;
 }
-type Map[K, V] ` + "`" + `native {
+type map[K, V] ` + "`" + `native {
 	int len;
 	contains(K key) bool ` + "`" + `native;
 	remove(K key) bool ` + "`" + `native;

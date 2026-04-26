@@ -12,6 +12,6 @@ main() {
   print_bool(empty.is_empty());   // true
 
   // --- Map is_empty ---
-  Map[string, int] m = {"a": 1};
+  map[string, int] m = {"a": 1};
   print_bool(m.is_empty());       // false
 }

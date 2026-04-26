@@ -1,5 +1,5 @@
-// std/slice.pr — Slice[T] type methods
-type Slice[T] `native {
+// std/slice.pr — slice[T] type methods
+type slice[T] `native {
     int len;
 
     push(T elem) `native;

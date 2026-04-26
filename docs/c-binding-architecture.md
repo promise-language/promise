@@ -371,40 +371,40 @@ void promise_print_string(promise_string_v *s) {
 These are generic instances. Each produces four structs. Elements are stored **inline** in the Instance struct via a flexible array member, following the same pattern as strings:
 
 ```c
-// Array[int] — elements inline in instance
-typedef struct { } promise_Array_int_t;
-typedef struct { promise_Array_int_t* _type; } promise_Array_int_m;
+// array[int] — elements inline in instance
+typedef struct { } promise_array_int_t;
+typedef struct { promise_array_int_t* _type; } promise_array_int_m;
 typedef struct {
-    promise_Array_int_m* _variant;
+    promise_array_int_m* _variant;
     int64_t              len;
     int64_t              cap;       // allocated capacity (for growable arrays)
     int64_t              data[];    // inline elements (C99 flexible array member)
-} promise_Array_int_i;
+} promise_array_int_i;
 typedef struct {
     void*                _vtable;
-    promise_Array_int_i* _instance;
-} promise_Array_int_v;
+    promise_array_int_i* _instance;
+} promise_array_int_v;
 ```
 
 For slices (`int[]`):
 ```c
-typedef struct { } promise_Slice_int_t;
-typedef struct { promise_Slice_int_t* _type; } promise_Slice_int_m;
+typedef struct { } promise_slice_int_t;
+typedef struct { promise_slice_int_t* _type; } promise_slice_int_m;
 typedef struct {
-    promise_Slice_int_m* _variant;
+    promise_slice_int_m* _variant;
     int64_t              len;
     int64_t              cap;
     int64_t              data[];    // inline elements
-} promise_Slice_int_i;
+} promise_slice_int_i;
 typedef struct {
     void*                _vtable;
-    promise_Slice_int_i* _instance;
-} promise_Slice_int_v;
+    promise_slice_int_i* _instance;
+} promise_slice_int_v;
 ```
 
-LLVM: Instance is `{ %promise_Array_int_m*, i64, i64, [0 x i64] }`, Value is `{ i8*, %promise_Array_int_i* }`
+LLVM: Instance is `{ %promise_array_int_m*, i64, i64, [0 x i64] }`, Value is `{ i8*, %promise_array_int_i* }`
 
-The Instance struct is allocated with `sizeof(promise_Array_int_i) + cap * sizeof(int64_t)` bytes. Growing a mutable array requires `realloc` of the entire instance, then updating the value's `_instance` pointer. With unique ownership, only one pointer needs updating; shared references require the ownership system to track aliasing.
+The Instance struct is allocated with `sizeof(promise_array_int_i) + cap * sizeof(int64_t)` bytes. Growing a mutable array requires `realloc` of the entire instance, then updating the value's `_instance` pointer. With unique ownership, only one pointer needs updating; shared references require the ownership system to track aliasing.
 
 C code accesses elements naturally via `arr._instance->data[i]`.
 
@@ -470,16 +470,16 @@ typedef struct {
 
 #### Generic instances
 
-Generic instantiations are monomorphized. `Array[int]` and `Array[f64]` produce separate `TypeDeclLayout`s, each with four structs:
+Generic instantiations are monomorphized. `array[int]` and `array[f64]` produce separate `TypeDeclLayout`s, each with four structs:
 
 ```c
-typedef struct { ... } promise_Array_int_v;
-typedef struct { ... } promise_Array_int_i;
-typedef struct { ... } promise_Array_f64_v;
-typedef struct { ... } promise_Array_f64_i;
+typedef struct { ... } promise_array_int_v;
+typedef struct { ... } promise_array_int_i;
+typedef struct { ... } promise_array_f64_v;
+typedef struct { ... } promise_array_f64_i;
 ```
 
-The mangling scheme: `promise_TypeName_Arg1_Arg2_{suffix}`. Nested generics: `promise_Map_string_Array_int_v`.
+The mangling scheme: `promise_TypeName_Arg1_Arg2_{suffix}`. Nested generics: `promise_map_string_array_int_v`.
 
 ### Future optimization: eliding internal pointers
 
@@ -702,7 +702,7 @@ The `extern` meta annotation gains an optional string parameter for the C symbol
 - Named instance struct: `promise_<TypeName>_i` (e.g., `promise_Player_i`)
 - Named variant struct: `promise_<TypeName>_m` (e.g., `promise_Player_m`)
 - Named type struct: `promise_<TypeName>_t` (e.g., `promise_Player_t`)
-- Generic instances: `promise_<TypeName>_<Arg1>_<Arg2>_<suffix>` (e.g., `promise_Array_int_v`)
+- Generic instances: `promise_<TypeName>_<Arg1>_<Arg2>_<suffix>` (e.g., `promise_array_int_v`)
 - Enums: `promise_<EnumName>_v` (e.g., `promise_Shape_v`)
 - Tuples: `promise_tuple_<T1>_<T2>_v` (e.g., `promise_tuple_int_f64_v`)
 - Optional: `promise_optional_<T>_v` (e.g., `promise_optional_int_v`)
@@ -1013,7 +1013,7 @@ Passing all value params by pointer avoids ARM64 ABI issues where structs >16 by
 ### Stage 8g (containers)
 
 - `layout.go` computes array/slice/map layouts — monomorphized, all four levels, with `IsFlexible` for instance structs
-- `headergen.go` emits monomorphized container typedefs with flexible array members (e.g., `promise_Array_int_i` with inline `data[]`)
+- `headergen.go` emits monomorphized container typedefs with flexible array members (e.g., `promise_array_int_i` with inline `data[]`)
 - Instance structs use C99 flexible array members for inline element storage, allocated with `sizeof(fixed) + cap * sizeof(element)`
 - Growing arrays use `realloc` on the entire instance; ownership system tracks which values need `_instance` pointer updates
 

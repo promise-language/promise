@@ -1,5 +1,5 @@
-// std/map.pr — Map[K, V] type methods
-type Map[K, V] `native {
+// std/map.pr — map[K, V] type methods
+type map[K, V] `native {
     int len;
 
     contains(K key) bool `native;

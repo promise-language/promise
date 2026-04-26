@@ -38,7 +38,7 @@ main() {
   print_bool(got_none);   // true
 
   // --- Map contains ---
-  Map[string, int] m = {"a": 1, "b": 2, "c": 3};
+  map[string, int] m = {"a": 1, "b": 2, "c": 3};
   print_bool(m.contains("a"));  // true
   print_bool(m.contains("z"));  // false
 
@@ -49,7 +49,7 @@ main() {
   print_bool(m.contains("b"));  // false
 
   // --- Map keys/values ---
-  Map[string, int] m2 = {"x": 10};
+  map[string, int] m2 = {"x": 10};
   string[] keys = m2.keys();
   print_int(keys.len);           // 1
   println(keys[0]);              // x

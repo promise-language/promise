@@ -1314,12 +1314,12 @@ func TestBuildTypeRefsExtended(t *testing.T) {
 		},
 		{
 			name: "multi_type_args",
-			src:  `f() { Map[String, Int] x = {"key": 1}; }`,
+			src:  `f() { map[String, Int] x = {"key": 1}; }`,
 			check: func(t *testing.T, file *File) {
 				fn := file.Decls[0].(*FuncDecl)
 				vd := fn.Body.Stmts[0].(*TypedVarDecl)
 				nt := vd.Type.(*NamedTypeRef)
-				assertEqual(t, nt.Name, "Map")
+				assertEqual(t, nt.Name, "map")
 				assertLen(t, nt.TypeArgs, 2)
 			},
 		},

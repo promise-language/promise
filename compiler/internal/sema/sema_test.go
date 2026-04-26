@@ -12,7 +12,7 @@ import (
 
 // --- Test helpers ---
 
-// stdContainers provides native type declarations for Slice, Map, and string
+// stdContainers provides native type declarations for slice, map, and string
 // used by tests that need container methods after the migration from initBuiltins.
 const stdContainers = `
 type string ` + "`" + `native {
@@ -25,7 +25,7 @@ type string ` + "`" + `native {
 	split(string sep) string[] ` + "`" + `native;
 	is_empty() bool { return this.len == 0; }
 }
-type Slice[T] ` + "`" + `native {
+type slice[T] ` + "`" + `native {
 	int len;
 	push(T elem) ` + "`" + `native;
 	pop() T? ` + "`" + `native;
@@ -33,7 +33,7 @@ type Slice[T] ` + "`" + `native {
 	remove(int index) ` + "`" + `native;
 	is_empty() bool { return this.len == 0; }
 }
-type Map[K, V] ` + "`" + `native {
+type map[K, V] ` + "`" + `native {
 	int len;
 	contains(K key) bool ` + "`" + `native;
 	remove(K key) bool ` + "`" + `native;
@@ -1175,7 +1175,7 @@ func TestUniverseMapType(t *testing.T) {
 		t.Fatal("TypMap is nil")
 	}
 	if len(types.TypMap.TypeParams()) != 2 {
-		t.Errorf("Map should have 2 type params, got %d", len(types.TypMap.TypeParams()))
+		t.Errorf("map should have 2 type params, got %d", len(types.TypMap.TypeParams()))
 	}
 }
 
@@ -1283,14 +1283,14 @@ func TestForInBoolNotIterable(t *testing.T) {
 func TestMapTypeAnnotation(t *testing.T) {
 	checkOK(t, `
 		test() {
-			Map[string, int] m = {"a": 1, "b": 2};
+			map[string, int] m = {"a": 1, "b": 2};
 		}
 	`)
 }
 
 func TestMapTypeAnnotationAsParam(t *testing.T) {
 	checkOK(t, `
-		lookup(Map[string, int] m) {
+		lookup(map[string, int] m) {
 		}
 	`)
 }

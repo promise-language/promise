@@ -637,9 +637,9 @@ func TestTypeParam(t *testing.T) {
 		{
 			name: "instance_multi_args",
 			check: func(t *testing.T) {
-				mp := makeNamed("Map")
+				mp := makeNamed("map")
 				inst := NewInstance(mp, []Type{TypString, TypInt})
-				assertEqual(t, inst.String(), "Map[string, int]")
+				assertEqual(t, inst.String(), "map[string, int]")
 			},
 		},
 	}

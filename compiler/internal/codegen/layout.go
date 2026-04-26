@@ -262,15 +262,27 @@ func computeStringLayout(module *ir.Module) *TypeDeclLayout {
 	}
 }
 
-// computeLayouts computes TypeDeclLayout for all types reachable from extern signatures.
+// computeLayouts computes TypeDeclLayout for all built-in types and any additional
+// types reachable from extern signatures. All built-in types are always included
+// so the generated header is complete for runtime compilation and IDE support.
 func computeLayouts(module *ir.Module, externs []*ExternFunc) map[*types.Named]*TypeDeclLayout {
 	layouts := make(map[*types.Named]*TypeDeclLayout)
 
-	// Always compute string layout — intrinsics need the struct types
+	// Always compute layouts for all built-in types
 	layouts[types.TypString] = computeStringLayout(module)
 
+	builtins := []*types.Named{
+		types.TypBool, types.TypChar,
+		types.TypF32, types.TypF64,
+		types.TypI8, types.TypI16, types.TypI32, types.TypI64, types.TypInt,
+		types.TypU8, types.TypU16, types.TypU32, types.TypU64, types.TypUint,
+	}
+	for _, named := range builtins {
+		layouts[named] = computePrimitiveLayout(module, named)
+	}
+
+	// Also compute layouts for any non-builtin types in extern signatures
 	for _, ext := range externs {
-		// Collect all Named types from parameters and result
 		var namedTypes []*types.Named
 		for _, pt := range ext.ParamTypes {
 			if n := extractNamed(pt); n != nil {
@@ -285,7 +297,7 @@ func computeLayouts(module *ir.Module, externs []*ExternFunc) map[*types.Named]*
 
 		for _, named := range namedTypes {
 			if _, ok := layouts[named]; ok {
-				continue // already computed
+				continue // already computed (built-in or duplicate)
 			}
 			layout := computePrimitiveLayout(module, named)
 			if layout == nil {

@@ -1,6 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
-// promise_bindings.h is auto-included via clang -include flag
+#include "promise_bindings.h"
 
 void promise_print_int(promise_int_v x)   { printf("%lld\n", (long long)x.raw); }
 void promise_print_f64(promise_f64_v x)   { printf("%g\n", x.raw); }

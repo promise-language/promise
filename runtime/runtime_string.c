@@ -1,7 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-// promise_bindings.h is auto-included via clang -include flag
+#include "promise_bindings.h"
 
 promise_string_i* promise_string_new(const char* data, int64_t len) {
     promise_string_i* s = (promise_string_i*)malloc(sizeof(promise_string_i) + len);

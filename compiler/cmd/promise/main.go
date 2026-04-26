@@ -175,11 +175,18 @@ func runBuild(args []string) {
 	}
 	headerFile.Close()
 
-	// Find runtime directory relative to the binary or in known locations
+	// Find runtime directory relative to the binary or in known locations.
+	// Also update the reference header for IDE support (types only, no externs).
 	runtimeDir := findRuntimeDir()
 	if runtimeDir == "" {
 		fmt.Fprintln(os.Stderr, "error: cannot find runtime/ directory")
 		os.Exit(1)
+	}
+
+	// Best-effort: refresh runtime/promise_bindings.h with current type layouts
+	if refFile, err := os.Create(filepath.Join(runtimeDir, "promise_bindings.h")); err == nil {
+		_ = codegen.GenerateHeader(refFile, result.Layouts, nil)
+		refFile.Close()
 	}
 
 	// Compile all .c files in the runtime directory with generated header

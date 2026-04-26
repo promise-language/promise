@@ -16,6 +16,8 @@ Implementation stages for the Promise compiler pipeline.
 | 6b | `compiler/internal/ownership/` | Borrow tracking, implicit coercion, return safety | Done |
 | 7 | `compiler/internal/sema/` | Meta annotation processing and validation | Done |
 | 8a | `compiler/internal/codegen/` | LLVM IR: primitives, control flow, functions | Done |
+| 8b | `compiler/internal/codegen/` | Strings: representation, literals, concat, extern ABI | Done |
+| 8c | `compiler/internal/codegen/` | User types: layout, constructors, fields, methods | Done |
 | 9 | `compiler/internal/module/` | Module resolution, dependency graph | Planned |
 | 10 | `cmd/promise/` | CLI entry point (build, run, test, fmt, etc.) | Planned |
 | 11 | `pkg/` | Package manager: fetch, resolve, lock | Planned |
@@ -197,14 +199,49 @@ Type-system-driven LLVM IR generation for primitive types, arithmetic, control f
 
 ### Deferred sub-stages
 
-- **8b**: Strings (representation, literals, concatenation, interpolation, print)
-- **8c**: User types (four-struct layout, constructors, field access, vtable dispatch)
 - **8d**: Enums and pattern matching
 - **8e**: Error handling (`!`, `?`, `raise`, error handlers)
 - **8f**: Generic monomorphization
 - **8g**: Containers (Array, Slice, Map, Tuple), lambdas, optionals
 - **8h**: Ownership-aware memory management (free/drop)
 - **8i**: Concurrency (go, Task, Channel, `<-`)
+
+## Stage 8b — Strings (Done)
+
+String type codegen: representation, literals, concatenation, equality, extern ABI packing.
+
+**Files:** Updates to `codegen/layout.go`, `codegen/compiler.go`, `codegen/expr.go`, `codegen/extern.go`, `codegen/types.go`, `codegen/headergen.go`; new `runtime/runtime_string.c`; 18 string-related tests
+
+- **Internal representation**: Strings are `i8*` internally — opaque pointer to heap-allocated `promise_string_i` instance struct. `llvmNamedType(TypString)` returns `i8Ptr`.
+- **String layout** (`layout.go`): Four-struct model with flexible array member. Instance struct `{ promise_string_m* _variant, i64 len, [0 x i8] data }` stores length + inline UTF-8 data. Value struct `{ i8* _vtable, promise_string_i* _instance }` is a lightweight handle. No `raw` field.
+- **String literals** (`expr.go`): Compile to global constant + `call @promise_string_new(ptr, len)` → `i8*`. Escape sequences resolved at compile time (`\n`, `\t`, `\{`, etc.).
+- **String concatenation**: `"a" + "b"` dispatches to `@promise_string_concat(i8*, i8*)` → `i8*` via native string operator path.
+- **String equality**: `==` dispatches to `@promise_string_eq(i8*, i8*)` → `i1`. `!=` is `xor(eq, 1)`.
+- **Extern ABI packing** (`extern.go`): `packString` wraps `i8*` → `%promise_string_v { null_vtable, bitcast(i8* → string_i*) }` via `insertvalue`. `unpackString` extracts field 1 + bitcasts back to `i8*`.
+- **C runtime** (`runtime_string.c`): `promise_string_new` (malloc + memcpy), `promise_string_concat`, `promise_string_eq`, `promise_print_string` (fwrite). No null terminator — uses `len` field exclusively.
+- **Header generation**: String layout always emitted (built-in type). Instance struct uses C99 flexible array member `char data[]`.
+- **Scope**: Literals, variables, concatenation (`+`), equality (`==`, `!=`), extern passing/returning, empty strings.
+- **Deferred**: String interpolation, methods (`.len`, `.contains`, etc.), slicing, Unicode normalization.
+
+## Stage 8c — User Types (Done)
+
+User-defined type codegen: four-struct layout, constructors, field access/assignment, method declaration/definition/calls, `this` keyword, extern ABI.
+
+**Files:** Updates to `codegen/layout.go`, `codegen/compiler.go`, `codegen/expr.go`, `codegen/stmt.go`, `codegen/extern.go`; 20 user type tests (90 total codegen tests)
+
+- **Internal representation**: User types are `i8*` internally — opaque pointer to heap-allocated `promise_T_i` instance struct. Same as strings. `llvmNamedType` returns `i8Ptr` via the default case.
+- **Type layout** (`layout.go`): `computeUserTypeLayout` creates four LLVM struct types. Instance struct holds `{ promise_T_m* _variant, field1, field2, ... }` with field types from `llvmType()` (i64 for int, i8* for strings/user types, etc.). Value struct is `{ i8* _vtable, promise_T_i* _instance }` — no user fields. `InstanceFieldIndex` maps field names to GEP indices (1-indexed, `_variant` at 0). `InstancePtrType` caches the pointer-to-instance type.
+- **C header field types**: Primitives use raw C types (`int64_t`, `uint8_t`); strings and user types use `void*` to avoid forward-declaration ordering issues.
+- **Constructors** (`expr.go`): Detected when `info.Types[callee]` is `*types.Named`. Heap-allocate via `malloc(sizeof)` using GEP-from-null trick, bitcast to `%T_i*`, zero-initialize `_variant`, store named args by field index, zero-initialize unprovided fields. Returns `i8*`.
+- **Field access** (`expr.go`): `d.age` → load `i8*`, bitcast to `%T_i*`, GEP to field index, load field value.
+- **Field assignment** (`stmt.go`): `d.age = 5` → same as access but store. Compound assignment (`d.age += 1`) loads current value, applies operator via type system dispatch, stores result.
+- **Method declaration** (`compiler.go`): Two-pass. `declareTypeMethods` creates LLVM function stubs with mangled names (`TypeName.methodName`). Receiver (if present) is first `i8*` parameter. `defineTypeMethods` generates bodies with `this` alloca.
+- **Method calls** (`expr.go`): `d.getAge()` → resolve method from target type, prepend receiver as first arg, call `@TypeName.methodName`.
+- **`this` keyword** (`expr.go`): Inside methods, `this` stored as `c.locals["this"]` alloca for `i8*`. `genThisExpr` loads from it.
+- **Extern ABI** (`extern.go`): `packUserType`/`unpackUserType` follow same pattern as strings — `{ null_vtable, bitcast(i8* → T_i*) }` via insertvalue/extractvalue.
+- **Compilation order**: `computeLayouts` → `computeUserTypeLayouts` → `declareIntrinsics` → `declareExterns` → `declareTypeMethods` → `declareFuncs` → `defineTypeMethods` → `defineFuncs`.
+- **Scope**: Type layout, constructors (named args), field read/write, compound field assignment, methods with receiver (`this`/`&this`/`~this`), method calls, nested user type fields, extern pack/unpack.
+- **Deferred**: Vtable/virtual dispatch, inheritance (parent fields/methods), static method calls (`Type.method()`), operator overloading on user types, non-instance field placements (`value`/`variant`/`type`), generic user types, default field values.
 
 ## Stage 9 — Module System (Planned)
 

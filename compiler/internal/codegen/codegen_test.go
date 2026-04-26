@@ -827,3 +827,307 @@ func TestStringIntrinsicsDeclared(t *testing.T) {
 	assertContains(t, ir, "declare i8* @promise_string_concat(i8* %a, i8* %b)")
 	assertContains(t, ir, "declare i1 @promise_string_eq(i8* %a, i8* %b)")
 }
+
+// === User Type Tests ===
+
+func TestUserTypeLayout(t *testing.T) {
+	ir := generateIR(t, `
+		type Dog { string name; int age; }
+		main() { }
+	`)
+	assertContains(t, ir, "%promise_Dog_t = type {}")
+	assertContains(t, ir, "%promise_Dog_m = type { %promise_Dog_t* }")
+	assertContains(t, ir, "%promise_Dog_i = type { %promise_Dog_m*, i8*, i64 }")
+	assertContains(t, ir, "%promise_Dog_v = type { i8*, %promise_Dog_i* }")
+}
+
+func TestUserTypeConstructor(t *testing.T) {
+	ir := generateIR(t, `
+		type Dog { int age; }
+		main() { d := Dog(age: 3); }
+	`)
+	// Should allocate via malloc
+	assertContains(t, ir, "call i8* @malloc(i64")
+	// Should bitcast to typed pointer
+	assertContains(t, ir, "bitcast i8*")
+	// Should store field value
+	assertContains(t, ir, "store i64 3")
+}
+
+func TestUserTypeFieldAccess(t *testing.T) {
+	ir := generateIR(t, `
+		type Dog { int age; }
+		main() {
+			d := Dog(age: 3);
+			x := d.age;
+		}
+	`)
+	// Should bitcast and GEP to access field
+	assertContains(t, ir, "getelementptr %promise_Dog_i")
+	assertContains(t, ir, "load i64")
+}
+
+func TestUserTypeFieldAssign(t *testing.T) {
+	ir := generateIR(t, `
+		type Dog { int age; }
+		main() {
+			d := Dog(age: 3);
+			d.age = 5;
+		}
+	`)
+	assertContains(t, ir, "store i64 5")
+}
+
+func TestUserTypeCompoundAssign(t *testing.T) {
+	ir := generateIR(t, `
+		type Counter { int value; }
+		main() {
+			c := Counter(value: 0);
+			c.value += 1;
+		}
+	`)
+	// Should load, add, store
+	assertContains(t, ir, "getelementptr %promise_Counter_i")
+	assertContains(t, ir, "add i64")
+}
+
+func TestUserTypeMethod(t *testing.T) {
+	ir := generateIR(t, `
+		type Dog {
+			int age;
+			getAge(this) int {
+				return this.age;
+			}
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "define i64 @Dog.getAge(i8* %this)")
+}
+
+func TestUserTypeMethodCall(t *testing.T) {
+	ir := generateIR(t, `
+		type Dog {
+			int age;
+			getAge(this) int {
+				return this.age;
+			}
+		}
+		main() {
+			d := Dog(age: 3);
+			x := d.getAge();
+		}
+	`)
+	assertContains(t, ir, "call i64 @Dog.getAge(i8*")
+}
+
+func TestUserTypeMethodWithReceiver(t *testing.T) {
+	ir := generateIR(t, `
+		type Counter {
+			int value;
+			increment(~this) {
+				this.value += 1;
+			}
+		}
+		main() {
+			c := Counter(value: 0);
+			c.increment();
+		}
+	`)
+	assertContains(t, ir, "define void @Counter.increment(i8* %this)")
+	assertContains(t, ir, "call void @Counter.increment(i8*")
+}
+
+func TestThisExpr(t *testing.T) {
+	ir := generateIR(t, `
+		type Box {
+			int value;
+			get(this) int {
+				return this.value;
+			}
+		}
+		main() {
+			b := Box(value: 42);
+			x := b.get();
+		}
+	`)
+	// Method should load this from alloca
+	assertContains(t, ir, "%this.addr = alloca i8*")
+}
+
+func TestUserTypeMultipleFields(t *testing.T) {
+	ir := generateIR(t, `
+		type Point { int x; int y; int z; }
+		main() {
+			p := Point(x: 1, y: 2, z: 3);
+		}
+	`)
+	assertContains(t, ir, "%promise_Point_i = type { %promise_Point_m*, i64, i64, i64 }")
+	// All three field stores
+	assertContains(t, ir, "store i64 1")
+	assertContains(t, ir, "store i64 2")
+	assertContains(t, ir, "store i64 3")
+}
+
+func TestUserTypeStringField(t *testing.T) {
+	ir := generateIR(t, `
+		type Dog { string name; }
+		main() {
+			d := Dog(name: "Rex");
+		}
+	`)
+	// String field stored as i8*
+	assertContains(t, ir, "%promise_Dog_i = type { %promise_Dog_m*, i8* }")
+	// Should call promise_string_new for the literal
+	assertContains(t, ir, "call i8* @promise_string_new")
+}
+
+func TestUserTypeExternPacking(t *testing.T) {
+	ir := generateIR(t, `
+		type Dog { int age; }
+		print_dog(Dog d) `+"`"+`extern("print_dog");
+		main() {
+			d := Dog(age: 3);
+			print_dog(d);
+		}
+	`)
+	// Should pack into value struct
+	assertContains(t, ir, "insertvalue %promise_Dog_v")
+}
+
+func TestUserTypeHeader(t *testing.T) {
+	result := compileResult(t, `
+		type Dog { string name; int age; }
+		main() { }
+	`)
+
+	var buf bytes.Buffer
+	if err := GenerateHeader(&buf, result.Layouts, result.Externs); err != nil {
+		t.Fatalf("GenerateHeader error: %v", err)
+	}
+	header := buf.String()
+
+	assertContains(t, header, "promise_Dog_t")
+	assertContains(t, header, "promise_Dog_m")
+	assertContains(t, header, "promise_Dog_i")
+	assertContains(t, header, "promise_Dog_v")
+	// int field should use raw C type
+	assertContains(t, header, "int64_t")
+}
+
+func TestUserTypeMethodWithParams(t *testing.T) {
+	ir := generateIR(t, `
+		type Adder {
+			int base;
+			add(&this, int n) int {
+				return this.base + n;
+			}
+		}
+		main() {
+			a := Adder(base: 10);
+			x := a.add(5);
+		}
+	`)
+	assertContains(t, ir, "define i64 @Adder.add(i8* %this, i64 %n)")
+	assertContains(t, ir, "call i64 @Adder.add(i8*")
+}
+
+func TestMallocDeclared(t *testing.T) {
+	ir := generateIR(t, `main() { x := 42; }`)
+	assertContains(t, ir, "declare i8* @malloc(i64 %size)")
+}
+
+func TestUserTypeExternUnpacking(t *testing.T) {
+	ir := generateIR(t, `
+		type Dog { int age; }
+		get_dog() Dog `+"`"+`extern("get_dog");
+		main() {
+			d := get_dog();
+		}
+	`)
+	// Extern returns promise_Dog_v
+	assertContains(t, ir, "declare %promise_Dog_v @get_dog()")
+	// Unpack: extractvalue field 1 + bitcast back to i8*
+	assertContains(t, ir, "extractvalue %promise_Dog_v")
+	assertContains(t, ir, "bitcast %promise_Dog_i*")
+}
+
+func TestUserTypeNestedField(t *testing.T) {
+	ir := generateIR(t, `
+		type Inner { int value; }
+		type Outer { Inner child; }
+		main() {
+			i := Inner(value: 42);
+			o := Outer(child: i);
+		}
+	`)
+	// Inner stored as i8* in Outer's instance struct
+	assertContains(t, ir, "%promise_Inner_i = type { %promise_Inner_m*, i64 }")
+	assertContains(t, ir, "%promise_Outer_i = type { %promise_Outer_m*, i8* }")
+	// Both should be allocated via malloc
+	assertContains(t, ir, "call i8* @malloc(i64")
+}
+
+func TestUserTypeNestedFieldAccess(t *testing.T) {
+	ir := generateIR(t, `
+		type Inner { int value; }
+		type Outer { Inner child; }
+		main() {
+			i := Inner(value: 42);
+			o := Outer(child: i);
+			c := o.child;
+		}
+	`)
+	// Should GEP into Outer to load the child i8*
+	assertContains(t, ir, "getelementptr %promise_Outer_i")
+	assertContains(t, ir, "load i8*")
+}
+
+func TestUserTypeZeroArgConstructor(t *testing.T) {
+	ir := generateIR(t, `
+		type Point { int x; int y; }
+		main() {
+			p := Point();
+		}
+	`)
+	// Should allocate and zero-initialize both fields
+	assertContains(t, ir, "call i8* @malloc(i64")
+	// Both fields should get zero-initialized (store i64 0)
+	assertContains(t, ir, "store i64 0")
+}
+
+func TestUserTypeHeaderFieldTypes(t *testing.T) {
+	result := compileResult(t, `
+		type Person { string name; int age; bool active; }
+		main() { }
+	`)
+
+	var buf bytes.Buffer
+	if err := GenerateHeader(&buf, result.Layouts, result.Externs); err != nil {
+		t.Fatalf("GenerateHeader error: %v", err)
+	}
+	header := buf.String()
+
+	// Verify instance struct field types
+	assertContains(t, header, "void*                name;")
+	assertContains(t, header, "int64_t              age;")
+	assertContains(t, header, "uint8_t              active;")
+}
+
+func TestUserTypeMethodMutatesField(t *testing.T) {
+	ir := generateIR(t, `
+		type Counter {
+			int value;
+			set(~this, int n) {
+				this.value = n;
+			}
+		}
+		main() {
+			c := Counter(value: 0);
+			c.set(42);
+		}
+	`)
+	assertContains(t, ir, "define void @Counter.set(i8* %this, i64 %n)")
+	// Should store into this.value
+	assertContains(t, ir, "getelementptr %promise_Counter_i")
+	assertContains(t, ir, "store i64")
+}

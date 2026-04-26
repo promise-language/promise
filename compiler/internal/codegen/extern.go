@@ -96,6 +96,8 @@ func (c *Compiler) packToValueStruct(val value.Value, named *types.Named, layout
 		return c.packPrimitive(val, named, layout)
 	case LayoutString:
 		return c.packString(val, layout)
+	case LayoutUserType:
+		return c.packUserType(val, layout)
 	default:
 		panic(fmt.Sprintf("codegen: packing type %s (kind %d) not yet implemented", named, layout.Kind))
 	}
@@ -130,6 +132,8 @@ func (c *Compiler) unpackFromValueStruct(val value.Value, named *types.Named, la
 		return c.unpackPrimitive(val, named, layout)
 	case LayoutString:
 		return c.unpackString(val, layout)
+	case LayoutUserType:
+		return c.unpackUserType(val, layout)
 	default:
 		panic(fmt.Sprintf("codegen: unpacking type %s (kind %d) not yet implemented", named, layout.Kind))
 	}
@@ -161,6 +165,31 @@ func (c *Compiler) packString(val value.Value, layout *TypeDeclLayout) value.Val
 // unpackString extracts the i8* instance pointer from a promise_string_v return.
 func (c *Compiler) unpackString(val value.Value, layout *TypeDeclLayout) value.Value {
 	// extractvalue field 1 → promise_string_i*
+	inst := c.block.NewExtractValue(val, 1)
+	// bitcast back to i8*
+	return c.block.NewBitCast(inst, irtypes.I8Ptr)
+}
+
+// packUserType packs an i8* instance pointer into a promise_T_v struct.
+// Same pattern as packString: { null_vtable, bitcast(i8* → T_i*) }.
+func (c *Compiler) packUserType(val value.Value, layout *TypeDeclLayout) value.Value {
+	valueStructType := layout.Value.LLVMType
+	var agg value.Value = constant.NewUndef(valueStructType)
+
+	// Field 0: _vtable = null (i8*)
+	agg = c.block.NewInsertValue(agg, constant.NewNull(irtypes.I8Ptr), 0)
+
+	// Field 1: _instance = bitcast i8* to promise_T_i*
+	instancePtrType := layout.Value.Fields[1].LLVMType.(*irtypes.PointerType)
+	inst := c.block.NewBitCast(val, instancePtrType)
+	agg = c.block.NewInsertValue(agg, inst, 1)
+
+	return agg
+}
+
+// unpackUserType extracts the i8* instance pointer from a promise_T_v return.
+func (c *Compiler) unpackUserType(val value.Value, layout *TypeDeclLayout) value.Value {
+	// extractvalue field 1 → promise_T_i*
 	inst := c.block.NewExtractValue(val, 1)
 	// bitcast back to i8*
 	return c.block.NewBitCast(inst, irtypes.I8Ptr)

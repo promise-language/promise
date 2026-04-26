@@ -38,6 +38,10 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		return c.genUnaryExpr(e)
 	case *ast.CallExpr:
 		return c.genCallExpr(e)
+	case *ast.MemberExpr:
+		return c.genMemberExpr(e)
+	case *ast.ThisExpr:
+		return c.genThisExpr()
 	case *ast.IfExpr:
 		return c.genIfExpr(e)
 	default:
@@ -340,6 +344,19 @@ func (c *Compiler) rangeStructType() *irtypes.StructType {
 // --- Call expressions ---
 
 func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
+	// Method call: callee is MemberExpr (e.g., d.getAge())
+	if member, ok := e.Callee.(*ast.MemberExpr); ok {
+		return c.genMethodCall(e, member)
+	}
+
+	// Constructor call: callee resolves to a Named type
+	calleeType := c.info.Types[e.Callee]
+	if named, ok := calleeType.(*types.Named); ok {
+		if _, isIdent := e.Callee.(*ast.IdentExpr); isIdent {
+			return c.genConstructorCall(e, named)
+		}
+	}
+
 	// Evaluate arguments
 	var argVals []value.Value
 	var argTypes []types.Type
@@ -366,6 +383,160 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 	}
 
 	return c.block.NewCall(fn, argVals...)
+}
+
+// --- Constructor calls ---
+
+// genConstructorCall generates a heap-allocated instance of a user type.
+func (c *Compiler) genConstructorCall(e *ast.CallExpr, named *types.Named) value.Value {
+	layout := c.layouts[named]
+	if layout == nil {
+		panic(fmt.Sprintf("codegen: no layout for type %s", named))
+	}
+
+	instanceStructType := layout.Instance.LLVMType
+	instancePtrType := layout.InstancePtrType
+
+	// Compute size via GEP-from-null trick:
+	// %size_ptr = getelementptr %T_i, %T_i* null, i32 1
+	// %size = ptrtoint %T_i* %size_ptr to i64
+	nullPtr := constant.NewNull(instancePtrType)
+	sizePtr := c.block.NewGetElementPtr(instanceStructType, nullPtr,
+		constant.NewInt(irtypes.I32, 1))
+	size := c.block.NewPtrToInt(sizePtr, irtypes.I64)
+
+	// Allocate: call i8* @malloc(i64 %size)
+	rawPtr := c.block.NewCall(c.funcs["malloc"], size)
+
+	// Bitcast to instance struct pointer for field stores
+	typedPtr := c.block.NewBitCast(rawPtr, instancePtrType)
+
+	// Zero-initialize _variant pointer (field 0)
+	variantFieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	variantPtrType := layout.Instance.Fields[0].LLVMType.(*irtypes.PointerType)
+	c.block.NewStore(constant.NewNull(variantPtrType), variantFieldPtr)
+
+	// Build set of provided field names (constructors require named args)
+	provided := make(map[string]bool)
+	for _, arg := range e.Args {
+		if arg.Name == "" {
+			panic(fmt.Sprintf("codegen: positional constructor args not supported for %s", named))
+		}
+		provided[arg.Name] = true
+		fieldIdx, ok := layout.InstanceFieldIndex[arg.Name]
+		if !ok {
+			panic(fmt.Sprintf("codegen: unknown field %s on type %s", arg.Name, named))
+		}
+		val := c.genExpr(arg.Value)
+		fieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+		c.block.NewStore(val, fieldPtr)
+	}
+
+	// Zero-initialize any fields not provided in constructor args
+	for _, f := range named.Fields() {
+		if provided[f.Name()] {
+			continue
+		}
+		fieldIdx := layout.InstanceFieldIndex[f.Name()]
+		fieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+		c.block.NewStore(c.zeroValue(llvmType(f.Type())), fieldPtr)
+	}
+
+	// Return i8* (the internal representation for user types)
+	return rawPtr
+}
+
+// --- Member access ---
+
+// genMemberExpr generates a field access on a user type instance.
+func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
+	targetType := c.info.Types[e.Target]
+	named := extractNamed(targetType)
+	if named == nil {
+		panic(fmt.Sprintf("codegen: cannot resolve type for member access on %T", targetType))
+	}
+
+	field := named.LookupField(e.Field)
+	if field != nil {
+		return c.genFieldAccess(e, named, field)
+	}
+
+	panic(fmt.Sprintf("codegen: member %s on type %s is not a field (method references not yet supported)", e.Field, named))
+}
+
+// genFieldAccess loads a field value from a user type instance.
+func (c *Compiler) genFieldAccess(e *ast.MemberExpr, named *types.Named, field *types.Field) value.Value {
+	layout := c.layouts[named]
+	if layout == nil {
+		panic(fmt.Sprintf("codegen: no layout for type %s", named))
+	}
+
+	fieldIdx, ok := layout.InstanceFieldIndex[field.Name()]
+	if !ok {
+		panic(fmt.Sprintf("codegen: field %s not in instance layout for %s", field.Name(), named))
+	}
+
+	// Load the i8* from the target variable
+	target := c.genExpr(e.Target)
+
+	// Bitcast i8* to promise_T_i*
+	typedPtr := c.block.NewBitCast(target, layout.InstancePtrType)
+
+	// GEP to the field
+	fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+
+	// Load the field value
+	return c.block.NewLoad(llvmType(field.Type()), fieldPtr)
+}
+
+// --- ThisExpr ---
+
+func (c *Compiler) genThisExpr() value.Value {
+	alloca, ok := c.locals["this"]
+	if !ok {
+		panic("codegen: 'this' used but not in method context")
+	}
+	return c.block.NewLoad(alloca.ElemType, alloca)
+}
+
+// --- Method calls ---
+
+// genMethodCall generates a method call on a user type instance.
+func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.Value {
+	targetType := c.info.Types[member.Target]
+	named := extractNamed(targetType)
+	if named == nil {
+		panic(fmt.Sprintf("codegen: cannot resolve type for method call on %T", targetType))
+	}
+
+	method := named.LookupMethod(member.Field)
+	if method == nil {
+		panic(fmt.Sprintf("codegen: no method %s on type %s", member.Field, named))
+	}
+
+	typeName := named.Obj().Name()
+	mangledName := typeName + "." + member.Field
+
+	fn, ok := c.funcs[mangledName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undeclared method %s", mangledName))
+	}
+
+	// Build args: receiver first (if method has one), then regular args
+	var args []value.Value
+	if method.Sig().Recv() != nil {
+		target := c.genExpr(member.Target)
+		args = append(args, target)
+	}
+	for _, arg := range e.Args {
+		args = append(args, c.genExpr(arg.Value))
+	}
+
+	return c.block.NewCall(fn, args...)
 }
 
 // --- If expressions ---

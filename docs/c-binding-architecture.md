@@ -972,19 +972,21 @@ For large value structs, the C compiler's own ABI rules handle whether the struc
 6. **Update `main.go`** — generate header, compile runtime with `-include`
 7. **Update `runtime.c`** — `#include "promise_bindings.h"`, change types to use aliases
 
-### Stage 8b (strings)
+### Stage 8b (strings) — Done
 
-- `layout.go` gains string `TypeDeclLayout` with Instance struct: `{ variant_ptr, len, data[] }` (flexible array member) and Value struct: `{ vtable_ptr, instance_ptr }`
-- `headergen.go` emits `promise_string_i` with C99 flexible array member and minimal `promise_string_v`
-- `runtime_string.c` includes the header, implements string operations using `s._instance->data` for data access
-- String instances are allocated with `sizeof(promise_string_i) + len` (no null terminator — strings may contain `\0`)
-- The header guarantees layout consistency
+- `layout.go`: `computeStringLayout` produces Instance struct `{ variant_ptr, len, [0 x i8] data }` (flexible array member) and Value struct `{ vtable_ptr, instance_ptr }`. No `raw` field.
+- `headergen.go` emits `promise_string_i` with C99 flexible array member (`char data[]`) and minimal `promise_string_v`.
+- `runtime_string.c` includes the header, implements `promise_string_new`, `promise_string_concat`, `promise_string_eq`, `promise_print_string` using `s._instance->data` and `s._instance->len`.
+- String instances allocated with `sizeof(promise_string_i) + len` (no null terminator — strings may contain `\0`).
+- `extern.go`: `packString`/`unpackString` coerce `i8*` ↔ `promise_string_v` via bitcast + insertvalue/extractvalue.
 
-### Stage 8c (user types)
+### Stage 8c (user types) — Done
 
-- `layout.go` computes all four struct layouts from Named type fields (reading `field.Placement()`)
-- `headergen.go` emits `_v`, `_i`, `_m`, `_t` struct typedefs for each level that's reachable
-- C code can work with any struct level it needs
+- `layout.go`: `computeUserTypeLayout` creates all four struct layouts from Named type fields. Only `PlaceInstance` fields supported (default placement). Instance struct: `{ variant_ptr, field1, field2, ... }`. Value struct: `{ vtable_ptr, instance_ptr }` — no user fields. `InstanceFieldIndex` maps field names to GEP indices. Primitive fields use raw C types; pointer fields use `void*` to avoid forward-declaration issues.
+- `headergen.go` emits `_t`, `_m`, `_i`, `_v` struct typedefs for each user type — handled generically by existing `emitStructTypedef`.
+- `compiler.go`: `malloc` intrinsic declared. Methods compiled as LLVM functions with mangled names (`TypeName.methodName`), receiver as first `i8*` param. Two-pass: declare stubs, then generate bodies.
+- `expr.go`: Constructors via `malloc` + GEP field stores. Field access via bitcast + GEP + load. Method calls via direct dispatch to mangled function. `this` keyword loads from alloca.
+- `extern.go`: `packUserType`/`unpackUserType` follow same pattern as strings — `{ null_vtable, bitcast(i8* → T_i*) }`.
 
 ### Stage 8g (containers)
 

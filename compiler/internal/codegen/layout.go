@@ -15,8 +15,8 @@ type LayoutKind int
 const (
 	LayoutPrimitive LayoutKind = iota
 	LayoutString
+	LayoutUserType
 	// Future stages:
-	// LayoutStruct
 	// LayoutEnum
 	// LayoutArray
 	// LayoutSlice
@@ -26,15 +26,17 @@ const (
 
 // TypeDeclLayout holds the four struct layouts for a Promise type declaration.
 type TypeDeclLayout struct {
-	PromiseName string
-	Kind        LayoutKind
-	Value       *StructLayout // T#v — vtable_ptr + instance_ptr + value fields
-	Instance    *StructLayout // T#i — variant_ptr + default fields
-	Variant     *StructLayout // T#m — type_ptr + variant fields
-	Type        *StructLayout // T#t — type fields + metadata
-	RawLLVM     irtypes.Type  // raw LLVM scalar type (i64, double, i8 for bool)
-	RawCType    string        // C type string ("int64_t", "double", "uint8_t")
-	IsSigned    bool          // for integer widening in coercion
+	PromiseName        string
+	Kind               LayoutKind
+	Value              *StructLayout        // T#v — vtable_ptr + instance_ptr + value fields
+	Instance           *StructLayout        // T#i — variant_ptr + default fields
+	Variant            *StructLayout        // T#m — type_ptr + variant fields
+	Type               *StructLayout        // T#t — type fields + metadata
+	RawLLVM            irtypes.Type         // raw LLVM scalar type (i64, double, i8 for bool)
+	RawCType           string               // C type string ("int64_t", "double", "uint8_t")
+	IsSigned           bool                 // for integer widening in coercion
+	InstanceFieldIndex map[string]int       // field name → GEP index in instance struct (user types)
+	InstancePtrType    *irtypes.PointerType // cached pointer to instance struct (user types + string)
 }
 
 // StructLayout describes one of the four C-ABI-compatible struct representations.
@@ -262,6 +264,111 @@ func computeStringLayout(module *ir.Module) *TypeDeclLayout {
 	}
 }
 
+// computeUserTypeLayout creates a TypeDeclLayout for a user-defined Named type.
+// It registers four named LLVM struct types in the module: _t, _m, _i, _v.
+// Only PlaceInstance fields are supported; other placements panic.
+func computeUserTypeLayout(module *ir.Module, named *types.Named, allLayouts map[*types.Named]*TypeDeclLayout) *TypeDeclLayout {
+	name := named.Obj().Name()
+
+	// Type struct: empty {}
+	typeStruct := irtypes.NewStruct()
+	typeStruct.SetName("promise_" + name + "_t")
+	module.NewTypeDef("promise_"+name+"_t", typeStruct)
+
+	typePtr := irtypes.NewPointer(typeStruct)
+
+	// Variant struct: { promise_T_t* _type }
+	variantStruct := irtypes.NewStruct(typePtr)
+	variantStruct.SetName("promise_" + name + "_m")
+	module.NewTypeDef("promise_"+name+"_m", variantStruct)
+
+	variantPtr := irtypes.NewPointer(variantStruct)
+
+	// Instance struct: { promise_T_m* _variant, field1, field2, ... }
+	instanceLLVMFields := []irtypes.Type{variantPtr}
+	fieldLayouts := []FieldLayout{
+		{Name: "_variant", CType: "promise_" + name + "_m*", LLVMType: variantPtr, IsInternal: true},
+	}
+	fieldIndex := map[string]int{}
+
+	for _, f := range named.Fields() {
+		if f.Placement() != types.PlaceInstance {
+			panic("codegen: non-instance field placement not yet supported for " + name + "." + f.Name())
+		}
+		llvmFT := llvmType(f.Type())
+		cType := userFieldCType(f.Type(), allLayouts)
+		instanceLLVMFields = append(instanceLLVMFields, llvmFT)
+		idx := len(fieldLayouts) // GEP index
+		fieldLayouts = append(fieldLayouts, FieldLayout{
+			Name: f.Name(), CType: cType, LLVMType: llvmFT, IsInternal: false,
+		})
+		fieldIndex[f.Name()] = idx
+	}
+
+	instanceStruct := irtypes.NewStruct(instanceLLVMFields...)
+	instanceStruct.SetName("promise_" + name + "_i")
+	module.NewTypeDef("promise_"+name+"_i", instanceStruct)
+
+	instancePtr := irtypes.NewPointer(instanceStruct)
+
+	// Value struct: { i8* _vtable, promise_T_i* _instance } — no user fields
+	valueStruct := irtypes.NewStruct(irtypes.I8Ptr, instancePtr)
+	valueStruct.SetName("promise_" + name + "_v")
+	module.NewTypeDef("promise_"+name+"_v", valueStruct)
+
+	return &TypeDeclLayout{
+		PromiseName:        name,
+		Kind:               LayoutUserType,
+		RawLLVM:            nil,
+		RawCType:           "",
+		IsSigned:           false,
+		InstanceFieldIndex: fieldIndex,
+		InstancePtrType:    instancePtr,
+		Type: &StructLayout{
+			CName:    "promise_" + name + "_t",
+			Suffix:   "_t",
+			Fields:   []FieldLayout{},
+			LLVMType: typeStruct,
+		},
+		Variant: &StructLayout{
+			CName:  "promise_" + name + "_m",
+			Suffix: "_m",
+			Fields: []FieldLayout{
+				{Name: "_type", CType: "promise_" + name + "_t*", LLVMType: typePtr, IsInternal: true},
+			},
+			LLVMType: variantStruct,
+		},
+		Instance: &StructLayout{
+			CName:    "promise_" + name + "_i",
+			Suffix:   "_i",
+			Fields:   fieldLayouts,
+			LLVMType: instanceStruct,
+		},
+		Value: &StructLayout{
+			CName:  "promise_" + name + "_v",
+			Suffix: "_v",
+			Fields: []FieldLayout{
+				{Name: "_vtable", CType: "void*", LLVMType: irtypes.I8Ptr, IsInternal: true},
+				{Name: "_instance", CType: "promise_" + name + "_i*", LLVMType: instancePtr, IsInternal: true},
+			},
+			LLVMType: valueStruct,
+		},
+	}
+}
+
+// userFieldCType returns the C type string for a user type field.
+// Primitives use their raw C type; strings and user types use "void*".
+func userFieldCType(typ types.Type, allLayouts map[*types.Named]*TypeDeclLayout) string {
+	named := extractNamed(typ)
+	if named == nil {
+		return "void*"
+	}
+	if layout, ok := allLayouts[named]; ok && layout.RawCType != "" {
+		return layout.RawCType
+	}
+	return "void*"
+}
+
 // computeLayouts computes TypeDeclLayout for all built-in types and any additional
 // types reachable from extern signatures. All built-in types are always included
 // so the generated header is complete for runtime compilation and IDE support.
@@ -297,13 +404,13 @@ func computeLayouts(module *ir.Module, externs []*ExternFunc) map[*types.Named]*
 
 		for _, named := range namedTypes {
 			if _, ok := layouts[named]; ok {
-				continue // already computed (built-in or duplicate)
+				continue // already computed (built-in, user type, or duplicate)
 			}
 			layout := computePrimitiveLayout(module, named)
-			if layout == nil {
-				panic("codegen: non-primitive type " + named.Obj().Name() + " in extern signature not yet supported")
+			if layout != nil {
+				layouts[named] = layout
 			}
-			layouts[named] = layout
+			// User types in extern signatures are handled by computeUserTypeLayouts
 		}
 	}
 

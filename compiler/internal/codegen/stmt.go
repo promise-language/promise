@@ -87,25 +87,70 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 	val := c.genExpr(s.Value)
 
-	ident, ok := s.Target.(*ast.IdentExpr)
-	if !ok {
+	switch target := s.Target.(type) {
+	case *ast.IdentExpr:
+		alloca, ok := c.locals[target.Name]
+		if !ok {
+			panic(fmt.Sprintf("codegen: undefined variable %q in assignment", target.Name))
+		}
+		if s.Op == ast.OpAssign {
+			c.block.NewStore(val, alloca)
+			return
+		}
+		// Compound assignment: load current value, apply operator, store result
+		current := c.block.NewLoad(alloca.ElemType, alloca)
+		result := c.genCompoundOp(s.Op, current, val)
+		c.block.NewStore(result, alloca)
+
+	case *ast.MemberExpr:
+		c.genMemberAssign(target, s.Op, val)
+
+	default:
 		panic(fmt.Sprintf("codegen: unsupported assignment target %T", s.Target))
 	}
+}
 
-	alloca, ok := c.locals[ident.Name]
-	if !ok {
-		panic(fmt.Sprintf("codegen: undefined variable %q in assignment", ident.Name))
+// genMemberAssign handles assignment to a field on a user type instance.
+func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val value.Value) {
+	targetType := c.info.Types[target.Target]
+	named := extractNamed(targetType)
+	if named == nil {
+		panic("codegen: cannot resolve type for member assignment")
 	}
 
-	if s.Op == ast.OpAssign {
-		c.block.NewStore(val, alloca)
+	layout := c.layouts[named]
+	if layout == nil {
+		panic(fmt.Sprintf("codegen: no layout for type %s", named))
+	}
+
+	field := named.LookupField(target.Field)
+	if field == nil {
+		panic(fmt.Sprintf("codegen: no field %s on type %s", target.Field, named))
+	}
+
+	fieldIdx, ok := layout.InstanceFieldIndex[field.Name()]
+	if !ok {
+		panic(fmt.Sprintf("codegen: field %s not in layout for %s", field.Name(), named))
+	}
+
+	// Get pointer to the instance
+	obj := c.genExpr(target.Target)
+	typedPtr := c.block.NewBitCast(obj, layout.InstancePtrType)
+
+	// GEP to the field
+	fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+
+	if op == ast.OpAssign {
+		c.block.NewStore(val, fieldPtr)
 		return
 	}
 
-	// Compound assignment: load current value, apply operator, store result
-	current := c.block.NewLoad(alloca.ElemType, alloca)
-	result := c.genCompoundOp(s.Op, current, val)
-	c.block.NewStore(result, alloca)
+	// Compound assignment: load, compute, store
+	fieldLLVMType := llvmType(field.Type())
+	current := c.block.NewLoad(fieldLLVMType, fieldPtr)
+	result := c.genCompoundOp(op, current, val)
+	c.block.NewStore(result, fieldPtr)
 }
 
 // genCompoundOp applies a compound assignment operator through the type system.
@@ -147,6 +192,8 @@ func (c *Compiler) genCompoundOp(op ast.AssignOp, current, val value.Value) valu
 
 // namedFromLLVMType reverse-maps an LLVM type to the most common Promise Named type.
 // Used for compound assignments where we need the type system for operator dispatch.
+// NOTE: Does not handle pointer types (i8*) — compound assignment on string/user-type
+// fields is not supported until those types define operator methods.
 func (c *Compiler) namedFromLLVMType(typ irtypes.Type) *types.Named {
 	switch typ {
 	case irtypes.I64:

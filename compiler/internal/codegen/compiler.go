@@ -50,9 +50,16 @@ func Compile(file *ast.File, info *sema.Info) *CompileResult {
 		c.externs[ext.PromiseName] = ext
 	}
 
+	// Compute user type layouts (after built-in layouts are ready)
+	c.computeUserTypeLayouts(file)
+
 	c.declareIntrinsics()
+	// declareExterns must run after computeUserTypeLayouts so that user type
+	// layouts are available when resolving extern parameter/return types.
 	c.declareExterns(externList, c.layouts)
+	c.declareTypeMethods(file)
 	c.declareFuncs(file)
+	c.defineTypeMethods(file)
 	c.defineFuncs(file)
 
 	return &CompileResult{
@@ -66,6 +73,10 @@ func Compile(file *ast.File, info *sema.Info) *CompileResult {
 func (c *Compiler) declareIntrinsics() {
 	c.funcs["promise_panic"] = c.module.NewFunc("promise_panic",
 		irtypes.Void, ir.NewParam("msg", irtypes.I8Ptr))
+
+	// malloc for heap allocation of user type instances
+	c.funcs["malloc"] = c.module.NewFunc("malloc",
+		irtypes.I8Ptr, ir.NewParam("size", irtypes.I64))
 
 	// String intrinsics — declared with i8* params/returns for internal use.
 	// The C implementations (runtime_string.c) use typed promise_string_i* pointers.
@@ -215,6 +226,157 @@ func (c *Compiler) zeroValue(typ irtypes.Type) constant.Constant {
 // newBlock creates a new basic block in the current function.
 func (c *Compiler) newBlock(name string) *ir.Block {
 	return c.fn.NewBlock(name)
+}
+
+// computeUserTypeLayouts computes layouts for all user-declared types in the file.
+func (c *Compiler) computeUserTypeLayouts(file *ast.File) {
+	for _, decl := range file.Decls {
+		td, ok := decl.(*ast.TypeDecl)
+		if !ok {
+			continue
+		}
+		named := c.lookupNamedType(td.Name)
+		if named == nil {
+			continue
+		}
+		if _, exists := c.layouts[named]; exists {
+			continue // skip built-in types
+		}
+		c.layouts[named] = computeUserTypeLayout(c.module, named, c.layouts)
+	}
+}
+
+// declareTypeMethods creates LLVM function stubs for all methods with bodies (pass 1).
+func (c *Compiler) declareTypeMethods(file *ast.File) {
+	for _, decl := range file.Decls {
+		td, ok := decl.(*ast.TypeDecl)
+		if !ok {
+			continue
+		}
+		named := c.lookupNamedType(td.Name)
+		if named == nil {
+			continue
+		}
+
+		for _, md := range td.Methods {
+			if md.Body == nil {
+				continue // abstract or native
+			}
+			m := named.LookupMethod(md.Name)
+			if m == nil || m.Sig() == nil {
+				continue
+			}
+
+			mangledName := td.Name + "." + md.Name
+
+			var params []*ir.Param
+			if m.Sig().Recv() != nil {
+				params = append(params, ir.NewParam("this", irtypes.I8Ptr))
+			}
+			for _, p := range m.Sig().Params() {
+				params = append(params, ir.NewParam(p.Name(), llvmType(p.Type())))
+			}
+
+			retType := irtypes.Type(irtypes.Void)
+			if m.Sig().Result() != nil {
+				retType = llvmType(m.Sig().Result())
+			}
+
+			fn := c.module.NewFunc(mangledName, retType, params...)
+			c.funcs[mangledName] = fn
+		}
+	}
+}
+
+// defineTypeMethods generates method bodies (pass 2).
+func (c *Compiler) defineTypeMethods(file *ast.File) {
+	for _, decl := range file.Decls {
+		td, ok := decl.(*ast.TypeDecl)
+		if !ok {
+			continue
+		}
+		named := c.lookupNamedType(td.Name)
+		if named == nil {
+			continue
+		}
+
+		for _, md := range td.Methods {
+			if md.Body == nil {
+				continue
+			}
+			m := named.LookupMethod(md.Name)
+			if m == nil || m.Sig() == nil {
+				continue
+			}
+
+			mangledName := td.Name + "." + md.Name
+			fn, ok := c.funcs[mangledName]
+			if !ok {
+				continue
+			}
+
+			c.defineMethodFunc(md, m, fn)
+		}
+	}
+}
+
+// defineMethodFunc generates the body of a single method.
+func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.Func) {
+	c.fn = fn
+	c.locals = make(map[string]*ir.InstAlloca)
+
+	entry := fn.NewBlock("entry")
+	c.block = entry
+
+	paramIdx := 0
+
+	// Allocate receiver as "this"
+	if m.Sig().Recv() != nil {
+		alloca := entry.NewAlloca(irtypes.I8Ptr)
+		alloca.SetName("this.addr")
+		entry.NewStore(fn.Params[paramIdx], alloca)
+		c.locals["this"] = alloca
+		paramIdx++
+	}
+
+	// Allocate regular parameters
+	for _, p := range m.Sig().Params() {
+		if p.Name() == "" || p.Name() == "_" {
+			paramIdx++
+			continue
+		}
+		lt := llvmType(p.Type())
+		alloca := entry.NewAlloca(lt)
+		alloca.SetName(p.Name() + ".addr")
+		entry.NewStore(fn.Params[paramIdx], alloca)
+		c.locals[p.Name()] = alloca
+		paramIdx++
+	}
+
+	c.genBlock(md.Body)
+
+	// Ensure the function ends with a terminator
+	if c.block != nil && c.block.Term == nil {
+		if _, ok := fn.Sig.RetType.(*irtypes.VoidType); ok {
+			c.block.NewRet(nil)
+		} else {
+			c.block.NewRet(c.zeroValue(fn.Sig.RetType))
+		}
+	}
+}
+
+// lookupNamedType finds a Named type in sema info by name.
+func (c *Compiler) lookupNamedType(name string) *types.Named {
+	for _, scope := range c.info.Scopes {
+		if obj := scope.Lookup(name); obj != nil {
+			if tn, ok := obj.(*types.TypeName); ok {
+				if named, ok := tn.Type().(*types.Named); ok {
+					return named
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // emitNativeOp dispatches a native operator to the LLVM instruction table.

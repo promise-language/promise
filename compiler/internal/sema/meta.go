@@ -41,7 +41,7 @@ var builtinMetas = map[string][]MetaTarget{
 	"type":         {TargetField, TargetMethod},
 	"raw":          {TargetField},
 	"abstract":     {TargetMethod},
-	"native":       {TargetMethod},
+	"native":       {TargetMethod, TargetType},
 	"copy":         {TargetType, TargetEnum},
 	"structural":   {TargetType},
 	"doc":          {TargetType, TargetField, TargetMethod, TargetFunc, TargetEnum},

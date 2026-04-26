@@ -1,0 +1,17 @@
+main() {
+  // --- String is_empty ---
+  s := "hello";
+  print_bool(s.is_empty());       // false
+  print_bool("".is_empty());      // true
+
+  // --- Slice is_empty ---
+  int[] nums = [1, 2];
+  print_bool(nums.is_empty());    // false
+  int[] empty = [1];
+  empty.pop();
+  print_bool(empty.is_empty());   // true
+
+  // --- Map is_empty ---
+  Map[string, int] m = {"a": 1};
+  print_bool(m.is_empty());       // false
+}

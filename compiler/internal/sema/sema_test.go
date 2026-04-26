@@ -12,6 +12,37 @@ import (
 
 // --- Test helpers ---
 
+// stdContainers provides native type declarations for Slice, Map, and string
+// used by tests that need container methods after the migration from initBuiltins.
+const stdContainers = `
+type string ` + "`" + `native {
+	int len;
+	contains(string sub) bool ` + "`" + `native;
+	starts_with(string prefix) bool ` + "`" + `native;
+	ends_with(string suffix) bool ` + "`" + `native;
+	index_of(string sub) int? ` + "`" + `native;
+	trim() string ` + "`" + `native;
+	split(string sep) string[] ` + "`" + `native;
+	is_empty() bool { return this.len == 0; }
+}
+type Slice[T] ` + "`" + `native {
+	int len;
+	push(T elem) ` + "`" + `native;
+	pop() T? ` + "`" + `native;
+	contains(T elem) bool ` + "`" + `native;
+	remove(int index) ` + "`" + `native;
+	is_empty() bool { return this.len == 0; }
+}
+type Map[K, V] ` + "`" + `native {
+	int len;
+	contains(K key) bool ` + "`" + `native;
+	remove(K key) bool ` + "`" + `native;
+	keys() K[] ` + "`" + `native;
+	values() V[] ` + "`" + `native;
+	is_empty() bool { return this.len == 0; }
+}
+`
+
 func checkSource(t *testing.T, src string) (*Info, []error) {
 	t.Helper()
 	input := antlr.NewInputStream(src)
@@ -51,6 +82,23 @@ func expectError(t *testing.T, errs []error, substr string) {
 		}
 	}
 	t.Errorf("expected error containing %q, got %v", substr, errs)
+}
+
+// checkOKWithStd parses stdSrc as std and userSrc as user code, expecting no errors.
+func checkOKWithStd(t *testing.T, stdSrc, userSrc string) *Info {
+	t.Helper()
+	info, errs := checkSourceWithStd(t, stdSrc, userSrc)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	return info
+}
+
+// checkErrsWithStd parses stdSrc as std and userSrc as user code, returning errors.
+func checkErrsWithStd(t *testing.T, stdSrc, userSrc string) []error {
+	t.Helper()
+	_, errs := checkSourceWithStd(t, stdSrc, userSrc)
+	return errs
 }
 
 func expectNoErrors(t *testing.T, errs []error) {
@@ -2379,7 +2427,7 @@ func TestGenericFuncStringResult(t *testing.T) {
 // --- Stage 8i: container .len property sema tests ---
 
 func TestSliceLenProperty(t *testing.T) {
-	checkOK(t, `
+	checkOKWithStd(t, stdContainers, `
 		main() {
 			int[] arr = [1, 2, 3];
 			int n = arr.len;
@@ -2388,33 +2436,33 @@ func TestSliceLenProperty(t *testing.T) {
 }
 
 func TestArrayLenProperty(t *testing.T) {
-	checkOK(t, `
+	checkOKWithStd(t, stdContainers, `
 		check(int[3] arr) int { return arr.len; }
 		main() { }
 	`)
 }
 
 func TestArrayContains(t *testing.T) {
-	checkOK(t, `
+	checkOKWithStd(t, stdContainers, `
 		check(int[3] arr) bool { return arr.contains(1); }
 		main() { }
 	`)
 }
 
 func TestArrayMutatingMethodsRejected(t *testing.T) {
-	errs := checkErrs(t, `
+	errs := checkErrsWithStd(t, stdContainers, `
 		check(int[3] arr) { arr.push(1); }
 		main() { }
 	`)
 	expectError(t, errs, "cannot push on fixed-size array")
 
-	errs = checkErrs(t, `
+	errs = checkErrsWithStd(t, stdContainers, `
 		check(int[3] arr) { arr.remove(0); }
 		main() { }
 	`)
 	expectError(t, errs, "cannot remove on fixed-size array")
 
-	errs = checkErrs(t, `
+	errs = checkErrsWithStd(t, stdContainers, `
 		check(int[3] arr) { arr.pop(); }
 		main() { }
 	`)
@@ -2422,7 +2470,7 @@ func TestArrayMutatingMethodsRejected(t *testing.T) {
 }
 
 func TestMapLenProperty(t *testing.T) {
-	checkOK(t, `
+	checkOKWithStd(t, stdContainers, `
 		main() {
 			m := {"a": 1};
 			int n = m.len;
@@ -2431,7 +2479,7 @@ func TestMapLenProperty(t *testing.T) {
 }
 
 func TestStringLenProperty(t *testing.T) {
-	checkOK(t, `
+	checkOKWithStd(t, stdContainers, `
 		main() {
 			string s = "hello";
 			int n = s.len;
@@ -2762,4 +2810,56 @@ func TestStdScopeDoesNotLeakToUser(t *testing.T) {
 		`userFunc() int { return 1; }`,
 	)
 	expectError(t, errs, "undefined")
+}
+
+// --- Stage 8k: Native type declaration tests ---
+
+func TestNativeTypeStringMethod(t *testing.T) {
+	// Non-native method on a native type (string) with a Promise body
+	_, errs := checkSourceWithStd(t,
+		`type string `+"`"+`native {
+			int len;
+			is_empty() bool {
+				return this.len == 0;
+			}
+		}`,
+		`main() {
+			s := "hello";
+			b := s.is_empty();
+		}`,
+	)
+	expectNoErrors(t, errs)
+}
+
+func TestNativeTypeWithNativeMethod(t *testing.T) {
+	// Native method on a native type — no body required
+	_, errs := checkSourceWithStd(t,
+		`type string `+"`"+`native {
+			contains(string sub) bool `+"`"+`native;
+		}`,
+		`main() {
+			b := "hello".contains("ell");
+		}`,
+	)
+	expectNoErrors(t, errs)
+}
+
+func TestNativeTypeNotInUniverse(t *testing.T) {
+	// Error: declaring a native type that doesn't exist in the universe
+	errs := checkErrs(t,
+		`type Foo `+"`"+`native {}`,
+	)
+	expectError(t, errs, "native type 'Foo' not found in universe")
+}
+
+func TestNativeTypeMissingReturnDetected(t *testing.T) {
+	// Missing return in a non-native method on native type should be caught
+	_, errs := checkSourceWithStd(t,
+		`type string `+"`"+`native {
+			int len;
+			is_empty() bool {}
+		}`,
+		`main() {}`,
+	)
+	expectError(t, errs, "missing return")
 }

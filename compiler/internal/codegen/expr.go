@@ -744,14 +744,16 @@ func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 	}
 
 	// Container .len property (string, slice, array, map)
+	// Check both Instance wrappers (user code: Slice[int]) and bare Named (method body: this is TypSlice)
 	if e.Field == "len" {
-		if named := extractNamed(targetType); named == types.TypString {
+		named := extractNamed(targetType)
+		if named == types.TypString {
 			return c.genStringLen(e)
 		}
-		if _, ok := types.AsSlice(targetType); ok {
+		if _, ok := types.AsSlice(targetType); ok || named == types.TypSlice {
 			return c.genSliceLen(e)
 		}
-		if types.IsMap(targetType) {
+		if types.IsMap(targetType) || named == types.TypMap {
 			return c.genMapLen(e)
 		}
 	}
@@ -882,8 +884,12 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 	var args []value.Value
 	if method.Sig().Recv() != nil {
 		target := c.genExpr(member.Target)
-		// `this` is already i8* (instance pointer); other targets are value structs
+		// Container types (Slice, Map, string) are already i8* pointers — pass directly.
+		// `this` in a method body is also i8*.
+		// Regular user types are value structs — extract the instance pointer.
 		if _, isThis := member.Target.(*ast.ThisExpr); isThis {
+			args = append(args, target)
+		} else if isContainerType(targetType) {
 			args = append(args, target)
 		} else {
 			args = append(args, c.extractInstancePtr(target))
@@ -973,27 +979,64 @@ func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 
 // genContainerMethodCall dispatches native method calls on Slice, Map, and string.
 // Returns (result, true) if handled, (nil, false) otherwise.
+// Non-native methods (with Promise bodies) fall through to the regular call path.
+// Handles both Instance wrappers (user code: Slice[int]) and bare Named types
+// (method body: this is TypSlice) by resolving type args from typeSubst.
 func (c *Compiler) genContainerMethodCall(e *ast.CallExpr, member *ast.MemberExpr, targetType types.Type) (value.Value, bool) {
-	method := member.Field
+	methodName := member.Field
+
+	// Check if the method is native — only native methods are handled here.
+	// Non-native methods (like is_empty()) fall through to the regular user method path.
+	named := extractNamed(targetType)
+	if named == types.TypSlice || named == types.TypMap || named == types.TypString {
+		m := named.LookupMethod(methodName)
+		if m == nil || !m.IsNative() {
+			return nil, false // fall through to regular method dispatch
+		}
+	}
 
 	// Slice methods: push, pop, contains, remove
 	if elem, ok := types.AsSlice(targetType); ok {
-		return c.genSliceMethodCall(e, member, elem, method), true
+		return c.genSliceMethodCall(e, member, elem, methodName), true
+	}
+	// Bare TypSlice (inside a method body on Slice): resolve T from typeSubst
+	if named == types.TypSlice {
+		if elem := c.resolveTypeParam(types.TypSlice.TypeParams()[0]); elem != nil {
+			return c.genSliceMethodCall(e, member, elem, methodName), true
+		}
 	}
 
 	// Map methods: contains, remove, keys, values
 	if key, val, ok := types.AsMap(targetType); ok {
-		return c.genMapMethodCall(e, member, key, val, method), true
+		return c.genMapMethodCall(e, member, key, val, methodName), true
+	}
+	// Bare TypMap (inside a method body on Map): resolve K, V from typeSubst
+	if named == types.TypMap {
+		tparams := types.TypMap.TypeParams()
+		key := c.resolveTypeParam(tparams[0])
+		val := c.resolveTypeParam(tparams[1])
+		if key != nil && val != nil {
+			return c.genMapMethodCall(e, member, key, val, methodName), true
+		}
 	}
 
 	// String methods: contains, starts_with, ends_with, index_of, trim, split
-	if named := extractNamed(targetType); named == types.TypString {
-		if result, ok := c.genStringMethodCall(e, member, method); ok {
+	if named == types.TypString {
+		if result, ok := c.genStringMethodCall(e, member, methodName); ok {
 			return result, true
 		}
 	}
 
 	return nil, false
+}
+
+// resolveTypeParam looks up a type parameter in the current typeSubst map.
+// Returns nil if not in a monomorphic context or the param is not mapped.
+func (c *Compiler) resolveTypeParam(tp *types.TypeParam) types.Type {
+	if c.typeSubst == nil {
+		return nil
+	}
+	return c.typeSubst[tp]
 }
 
 func (c *Compiler) genSliceMethodCall(e *ast.CallExpr, member *ast.MemberExpr, elemType types.Type, method string) value.Value {

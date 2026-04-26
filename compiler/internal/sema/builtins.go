@@ -61,9 +61,6 @@ func initBuiltins() {
 		addBinaryOp(types.TypChar, "<=", types.TypChar, types.TypBool)
 		addBinaryOp(types.TypChar, ">=", types.TypChar, types.TypBool)
 
-		// Container len fields and native methods
-		populateContainerTypes()
-
 		// Iter[T] and Stream[T] abstract methods
 		populateIterStream()
 	})
@@ -103,88 +100,6 @@ func addUnaryOp(recv *types.Named, op string, resultType *types.Named) {
 		false, // not abstract
 		true,  // native
 	))
-}
-
-// addNativeMethod adds a native method to a Named type.
-func addNativeMethod(recv *types.Named, name string, sig *types.Signature) {
-	recv.AddMethod(types.NewMethod(types.Pos{}, name, sig, types.PlaceInstance, false, true))
-}
-
-// populateContainerTypes registers len fields and native methods on Slice, Map, and string.
-func populateContainerTypes() {
-	// Slice[T] — len field
-	sliceT := types.TypSlice.TypeParams()[0] // T
-	types.TypSlice.AddField(types.NewField(types.Pos{}, "len", types.TypInt, types.PlaceValue, false, false))
-
-	// Slice[T] methods
-	addNativeMethod(types.TypSlice, "push", types.NewSignature(
-		types.NewParam("this", types.TypSlice, types.RefNone),
-		[]*types.Param{types.NewParam("elem", sliceT, types.RefNone)},
-		types.TypVoid, false))
-	addNativeMethod(types.TypSlice, "pop", types.NewSignature(
-		types.NewParam("this", types.TypSlice, types.RefNone),
-		nil,
-		types.NewOptional(sliceT), false))
-	addNativeMethod(types.TypSlice, "contains", types.NewSignature(
-		types.NewParam("this", types.TypSlice, types.RefNone),
-		[]*types.Param{types.NewParam("elem", sliceT, types.RefNone)},
-		types.TypBool, false))
-	addNativeMethod(types.TypSlice, "remove", types.NewSignature(
-		types.NewParam("this", types.TypSlice, types.RefNone),
-		[]*types.Param{types.NewParam("index", types.TypInt, types.RefNone)},
-		types.TypVoid, false))
-
-	// Map[K, V] — len field
-	mapK := types.TypMap.TypeParams()[0] // K
-	mapV := types.TypMap.TypeParams()[1] // V
-	types.TypMap.AddField(types.NewField(types.Pos{}, "len", types.TypInt, types.PlaceValue, false, false))
-
-	// Map[K, V] methods
-	addNativeMethod(types.TypMap, "contains", types.NewSignature(
-		types.NewParam("this", types.TypMap, types.RefNone),
-		[]*types.Param{types.NewParam("key", mapK, types.RefNone)},
-		types.TypBool, false))
-	addNativeMethod(types.TypMap, "remove", types.NewSignature(
-		types.NewParam("this", types.TypMap, types.RefNone),
-		[]*types.Param{types.NewParam("key", mapK, types.RefNone)},
-		types.TypBool, false))
-	addNativeMethod(types.TypMap, "keys", types.NewSignature(
-		types.NewParam("this", types.TypMap, types.RefNone),
-		nil,
-		types.NewSlice(mapK), false))
-	addNativeMethod(types.TypMap, "values", types.NewSignature(
-		types.NewParam("this", types.TypMap, types.RefNone),
-		nil,
-		types.NewSlice(mapV), false))
-
-	// string — len field
-	types.TypString.AddField(types.NewField(types.Pos{}, "len", types.TypInt, types.PlaceValue, false, false))
-
-	// string methods
-	addNativeMethod(types.TypString, "contains", types.NewSignature(
-		types.NewParam("this", types.TypString, types.RefNone),
-		[]*types.Param{types.NewParam("sub", types.TypString, types.RefNone)},
-		types.TypBool, false))
-	addNativeMethod(types.TypString, "starts_with", types.NewSignature(
-		types.NewParam("this", types.TypString, types.RefNone),
-		[]*types.Param{types.NewParam("prefix", types.TypString, types.RefNone)},
-		types.TypBool, false))
-	addNativeMethod(types.TypString, "ends_with", types.NewSignature(
-		types.NewParam("this", types.TypString, types.RefNone),
-		[]*types.Param{types.NewParam("suffix", types.TypString, types.RefNone)},
-		types.TypBool, false))
-	addNativeMethod(types.TypString, "index_of", types.NewSignature(
-		types.NewParam("this", types.TypString, types.RefNone),
-		[]*types.Param{types.NewParam("sub", types.TypString, types.RefNone)},
-		types.NewOptional(types.TypInt), false))
-	addNativeMethod(types.TypString, "trim", types.NewSignature(
-		types.NewParam("this", types.TypString, types.RefNone),
-		nil,
-		types.TypString, false))
-	addNativeMethod(types.TypString, "split", types.NewSignature(
-		types.NewParam("this", types.TypString, types.RefNone),
-		[]*types.Param{types.NewParam("sep", types.TypString, types.RefNone)},
-		types.NewSlice(types.TypString), false))
 }
 
 // populateIterStream adds abstract next() methods to Iter[T] and Stream[T].

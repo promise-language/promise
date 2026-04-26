@@ -11,6 +11,33 @@ import (
 	antlr "github.com/antlr4-go/antlr/v4"
 )
 
+// stdContainers provides native type declarations for Slice, Map, and string.
+const stdContainers = `
+type string ` + "`" + `native {
+	int len;
+	contains(string sub) bool ` + "`" + `native;
+	starts_with(string prefix) bool ` + "`" + `native;
+	ends_with(string suffix) bool ` + "`" + `native;
+	index_of(string sub) int? ` + "`" + `native;
+	trim() string ` + "`" + `native;
+	split(string sep) string[] ` + "`" + `native;
+}
+type Slice[T] ` + "`" + `native {
+	int len;
+	push(T elem) ` + "`" + `native;
+	pop() T? ` + "`" + `native;
+	contains(T elem) bool ` + "`" + `native;
+	remove(int index) ` + "`" + `native;
+}
+type Map[K, V] ` + "`" + `native {
+	int len;
+	contains(K key) bool ` + "`" + `native;
+	remove(K key) bool ` + "`" + `native;
+	keys() K[] ` + "`" + `native;
+	values() V[] ` + "`" + `native;
+}
+`
+
 // generateIR runs the full pipeline: parse → sema → codegen, returns LLVM IR text.
 func generateIR(t *testing.T, src string) string {
 	t.Helper()
@@ -2766,7 +2793,7 @@ func TestCharInterpolation(t *testing.T) {
 }
 
 func TestSliceLen(t *testing.T) {
-	ir := generateIR(t, `
+	ir := generateIRWithStd(t, stdContainers, `
 		main() {
 			int[] arr = [1, 2, 3];
 			int n = arr.len;
@@ -2778,7 +2805,7 @@ func TestSliceLen(t *testing.T) {
 }
 
 func TestArrayLen(t *testing.T) {
-	ir := generateIR(t, `
+	ir := generateIRWithStd(t, stdContainers, `
 		check(int[3] arr) int { return arr.len; }
 		main() { }
 	`)
@@ -2787,7 +2814,7 @@ func TestArrayLen(t *testing.T) {
 }
 
 func TestMapLen(t *testing.T) {
-	ir := generateIR(t, `
+	ir := generateIRWithStd(t, stdContainers, `
 		main() {
 			m := {"a": 1};
 			int n = m.len;
@@ -2797,7 +2824,7 @@ func TestMapLen(t *testing.T) {
 }
 
 func TestStringLen(t *testing.T) {
-	ir := generateIR(t, `
+	ir := generateIRWithStd(t, stdContainers, `
 		main() {
 			string s = "hello";
 			int n = s.len;
@@ -2808,7 +2835,7 @@ func TestStringLen(t *testing.T) {
 }
 
 func TestSliceLenInCondition(t *testing.T) {
-	ir := generateIR(t, `
+	ir := generateIRWithStd(t, stdContainers, `
 		main() {
 			int[] arr = [1, 2, 3];
 			if arr.len > 0 { }

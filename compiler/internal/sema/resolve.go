@@ -79,7 +79,9 @@ func (c *Checker) resolveType(ref ast.TypeRef) types.Type {
 		if elem == nil {
 			return nil
 		}
-		return types.NewSlice(elem)
+		inst := types.NewSlice(elem)
+		c.recordInstance(inst)
+		return inst
 
 	case *ast.ArrayTypeRef:
 		elem := c.resolveType(r.Element)

@@ -114,6 +114,24 @@ func isRefType(typ types.Type) bool {
 	return false
 }
 
+// isContainerType returns true for Slice, Map, and string types,
+// which are represented as i8* pointers (not value structs) in codegen.
+// Checks both Instance wrappers (user code: Slice[int]) and bare Named
+// types (method body: this is TypSlice).
+func isContainerType(typ types.Type) bool {
+	named := extractNamed(typ)
+	if _, ok := types.AsSlice(typ); ok || named == types.TypSlice {
+		return true
+	}
+	if _, _, ok := types.AsMap(typ); ok || named == types.TypMap {
+		return true
+	}
+	if named == types.TypString {
+		return true
+	}
+	return false
+}
+
 // extractNamed returns the *Named type from a Promise type,
 // unwrapping Instance, SharedRef, and MutRef if necessary.
 func extractNamed(typ types.Type) *types.Named {

@@ -176,7 +176,9 @@ func (c *Checker) checkArrayLit(e *ast.ArrayLit) types.Type {
 		}
 	}
 
-	return types.NewSlice(elemType)
+	inst := types.NewSlice(elemType)
+	c.recordInstance(inst)
+	return inst
 }
 
 func (c *Checker) checkMapLit(e *ast.MapLit) types.Type {
@@ -205,7 +207,9 @@ func (c *Checker) checkMapLit(e *ast.MapLit) types.Type {
 	if keyType == nil || valType == nil {
 		return nil
 	}
-	return types.NewMap(keyType, valType)
+	inst := types.NewMap(keyType, valType)
+	c.recordInstance(inst)
+	return inst
 }
 
 func (c *Checker) checkBinaryExpr(e *ast.BinaryExpr) types.Type {

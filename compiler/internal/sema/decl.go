@@ -56,6 +56,20 @@ func (c *Checker) declareType(d *ast.TypeDecl) {
 		c.errorf(d.Pos(), "'std' is reserved for the standard library namespace")
 		return
 	}
+
+	// Native type: look up existing type from Universe scope instead of creating a new one.
+	if c.hasAnnotation(d.Annotations, "native") {
+		obj := types.Universe.Lookup(d.Name)
+		if obj == nil {
+			c.errorf(d.Pos(), "native type '%s' not found in universe", d.Name)
+			return
+		}
+		// Insert into current scope so define() can find it via scope.Lookup.
+		// Scope.Insert returns existing if already present (no error).
+		c.scope.Insert(obj)
+		return
+	}
+
 	tn := types.NewTypeName(tpos(d.Pos()), d.Name, nil)
 	if !c.insert(tn) {
 		return
@@ -137,15 +151,38 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 		return
 	}
 
+	isNative := c.hasAnnotation(d.Annotations, "native")
+
 	// Open type-params scope if generic
 	if len(named.TypeParams()) > 0 {
 		c.openScope(d, "typeparams:"+d.Name)
 		for _, tp := range named.TypeParams() {
 			c.insert(tp.Obj())
 		}
-		// Resolve constraints now that params are in scope
-		c.resolveTypeParamConstraints(d.TypeParams, named.TypeParams())
+		// Resolve constraints only for non-native types (native types already have params)
+		if !isNative {
+			c.resolveTypeParamConstraints(d.TypeParams, named.TypeParams())
+		}
 		defer c.closeScope()
+	}
+
+	if isNative {
+		// Native type: only process fields and methods, skip inheritance.
+		// Skip already-registered fields/methods to avoid duplicates when the
+		// same global Named singleton is processed multiple times (e.g. across
+		// test runs in the same process).
+		for _, fd := range d.Fields {
+			if named.LookupField(fd.Name) == nil {
+				c.defineField(named, fd)
+			}
+		}
+		for _, md := range d.Methods {
+			if named.LookupMethod(md.Name) == nil {
+				c.defineMethod(named, md, d.Name)
+			}
+		}
+		c.validateMetas(d.Annotations, TargetType)
+		return
 	}
 
 	// Resolve parent types (is clauses)

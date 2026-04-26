@@ -1,0 +1,13 @@
+// std/slice.pr — Slice[T] type methods
+type Slice[T] `native {
+    int len;
+
+    push(T elem) `native;
+    pop() T? `native;
+    contains(T elem) bool `native;
+    remove(int index) `native;
+
+    is_empty() bool {
+        return this.len == 0;
+    }
+}

@@ -1,0 +1,15 @@
+// std/string.pr — String type methods
+type string `native {
+    int len;
+
+    contains(string sub) bool `native;
+    starts_with(string prefix) bool `native;
+    ends_with(string suffix) bool `native;
+    index_of(string sub) int? `native;
+    trim() string `native;
+    split(string sep) string[] `native;
+
+    is_empty() bool {
+        return this.len == 0;
+    }
+}

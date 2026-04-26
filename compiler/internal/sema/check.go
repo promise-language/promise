@@ -169,6 +169,15 @@ func (c *Checker) checkTypeDecl(d *ast.TypeDecl) {
 		return
 	}
 
+	// For generic types, open type param scope so method bodies can reference T, K, V, etc.
+	if len(named.TypeParams()) > 0 {
+		c.openScope(d, "typeparams:"+d.Name)
+		for _, tp := range named.TypeParams() {
+			c.insert(tp.Obj())
+		}
+		defer c.closeScope()
+	}
+
 	for _, md := range d.Methods {
 		if md.Body == nil {
 			continue

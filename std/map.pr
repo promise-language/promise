@@ -1,0 +1,13 @@
+// std/map.pr — Map[K, V] type methods
+type Map[K, V] `native {
+    int len;
+
+    contains(K key) bool `native;
+    remove(K key) bool `native;
+    keys() K[] `native;
+    values() V[] `native;
+
+    is_empty() bool {
+        return this.len == 0;
+    }
+}

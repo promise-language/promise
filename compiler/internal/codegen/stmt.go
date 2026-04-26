@@ -190,50 +190,22 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 // Uses lookupTypeLayout for layout-driven field types that work for both
 // regular and monomorphic types.
 func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val value.Value) {
-	targetType := c.info.Types[target.Target]
-	// Apply typeSubst for mono context
-	if c.typeSubst != nil {
-		targetType = types.Substitute(targetType, c.typeSubst)
-	}
-	named := extractNamed(targetType)
-	if named == nil {
-		panic("codegen: cannot resolve type for member assignment")
-	}
-
-	layout := c.lookupTypeLayout(targetType)
-	if layout == nil {
-		panic(fmt.Sprintf("codegen: no layout for type %s", targetType))
-	}
-
-	field := named.LookupField(target.Field)
-	if field == nil {
-		panic(fmt.Sprintf("codegen: no field %s on type %s", target.Field, named))
-	}
-
-	fieldIdx, ok := layout.InstanceFieldIndex[field.Name()]
-	if !ok {
-		panic(fmt.Sprintf("codegen: field %s not in layout for %s", field.Name(), named))
-	}
-
-	obj := c.genExpr(target.Target)
-	// `this` is already i8* (instance pointer); other targets are value structs
-	var instance value.Value
-	if _, isThis := target.Target.(*ast.ThisExpr); isThis {
-		instance = obj
-	} else {
-		instance = c.extractInstancePtr(obj)
-	}
-	typedPtr := c.block.NewBitCast(instance, layout.InstancePtrType)
-
-	fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+	fieldPtr := c.genFieldPtr(target)
 
 	if op == ast.OpAssign {
 		c.block.NewStore(val, fieldPtr)
 		return
 	}
 
-	// Compound assignment: use layout field type for load
+	// Compound assignment: resolve field LLVM type for load
+	targetType := c.info.Types[target.Target]
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+	layout := c.lookupTypeLayout(targetType)
+	named := extractNamed(targetType)
+	field := named.LookupField(target.Field)
+	fieldIdx := layout.InstanceFieldIndex[field.Name()]
 	fieldLLVMType := layout.Instance.Fields[fieldIdx].LLVMType
 	current := c.block.NewLoad(fieldLLVMType, fieldPtr)
 	result := c.genCompoundOp(op, current, val)
@@ -519,17 +491,13 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 		iterableType = types.Substitute(iterableType, c.typeSubst)
 	}
 
-	switch t := iterableType.(type) {
-	case *types.Slice:
+	if elem, ok := types.AsSlice(iterableType); ok {
 		slicePtr := c.genExpr(s.Iterable)
-		c.genForInSlice(s, slicePtr, t)
-	case *types.Array:
-		slicePtr := c.genExpr(s.Iterable)
-		c.genForInSlice(s, slicePtr, types.NewSlice(t.Elem()))
-	case *types.Map:
+		c.genForInSlice(s, slicePtr, elem)
+	} else if key, val, ok := types.AsMap(iterableType); ok {
 		mapPtr := c.genExpr(s.Iterable)
-		c.genForInMap(s, mapPtr, t)
-	default:
+		c.genForInMap(s, mapPtr, key, val)
+	} else {
 		// String iteration
 		named := extractNamed(iterableType)
 		if named == types.TypString {
@@ -733,27 +701,24 @@ func (c *Compiler) genIndexAssign(target *ast.IndexExpr, op ast.AssignOp, val va
 		targetType = types.Substitute(targetType, c.typeSubst)
 	}
 
-	switch t := targetType.(type) {
-	case *types.Slice:
-		c.genSliceIndexAssign(target, t, op, val)
-	case *types.Array:
-		c.genSliceIndexAssign(target, types.NewSlice(t.Elem()), op, val)
-	case *types.Map:
+	if elem, ok := types.AsSlice(targetType); ok {
+		c.genSliceIndexAssign(target, elem, op, val)
+	} else if key, valT, ok := types.AsMap(targetType); ok {
 		if op != ast.OpAssign {
-			c.genMapCompoundAssign(target, t, op, val)
+			c.genMapCompoundAssign(target, key, valT, op, val)
 		} else {
-			c.genMapIndexAssign(target, t, val)
+			c.genMapIndexAssign(target, key, valT, val)
 		}
-	default:
+	} else {
 		panic(fmt.Sprintf("codegen: cannot assign to index of type %s", targetType))
 	}
 }
 
 // genSliceIndexAssign handles arr[i] = val with bounds check.
-func (c *Compiler) genSliceIndexAssign(target *ast.IndexExpr, sliceType *types.Slice, op ast.AssignOp, val value.Value) {
+func (c *Compiler) genSliceIndexAssign(target *ast.IndexExpr, elemType types.Type, op ast.AssignOp, val value.Value) {
 	slicePtr := c.genExpr(target.Target)
 	idx := c.genExpr(target.Index)
-	elemLLVM := c.resolveType(sliceType.Elem())
+	elemLLVM := c.resolveType(elemType)
 
 	// Bounds check
 	headerType := sliceHeaderType()
@@ -790,11 +755,11 @@ func (c *Compiler) genSliceIndexAssign(target *ast.IndexExpr, sliceType *types.S
 }
 
 // genMapIndexAssign handles m[k] = val via promise_map_set.
-func (c *Compiler) genMapIndexAssign(target *ast.IndexExpr, mapType *types.Map, val value.Value) {
+func (c *Compiler) genMapIndexAssign(target *ast.IndexExpr, keyType, valType types.Type, val value.Value) {
 	mapPtr := c.genExpr(target.Target)
 	keyVal := c.genExpr(target.Index)
-	keyLLVM := c.resolveType(mapType.Key())
-	valLLVM := c.resolveType(mapType.Val())
+	keyLLVM := c.resolveType(keyType)
+	valLLVM := c.resolveType(valType)
 
 	keyAlloca := c.block.NewAlloca(keyLLVM)
 	c.block.NewStore(keyVal, keyAlloca)
@@ -814,11 +779,11 @@ func (c *Compiler) genMapIndexAssign(target *ast.IndexExpr, mapType *types.Map, 
 // should be map target → key → RHS. This matters when expressions have side effects
 // (e.g. m[f()] += g()  would call g() before f()). Fixing this requires refactoring
 // genAssignStmt to defer RHS evaluation for compound index assignments.
-func (c *Compiler) genMapCompoundAssign(target *ast.IndexExpr, mapType *types.Map, op ast.AssignOp, val value.Value) {
+func (c *Compiler) genMapCompoundAssign(target *ast.IndexExpr, keyType, valType types.Type, op ast.AssignOp, val value.Value) {
 	mapPtr := c.genExpr(target.Target)
 	keyVal := c.genExpr(target.Index)
-	keyLLVM := c.resolveType(mapType.Key())
-	valLLVM := c.resolveType(mapType.Val())
+	keyLLVM := c.resolveType(keyType)
+	valLLVM := c.resolveType(valType)
 
 	// Alloca key
 	keyAlloca := c.block.NewAlloca(keyLLVM)
@@ -896,8 +861,8 @@ func (c *Compiler) lookupVarType(name string) types.Type {
 
 // --- For-in over slices ---
 
-func (c *Compiler) genForInSlice(s *ast.ForInStmt, slicePtr value.Value, sliceType *types.Slice) {
-	elemLLVM := c.resolveType(sliceType.Elem())
+func (c *Compiler) genForInSlice(s *ast.ForInStmt, slicePtr value.Value, elemType types.Type) {
+	elemLLVM := c.resolveType(elemType)
 
 	// Load length from header
 	headerType := sliceHeaderType()
@@ -978,9 +943,9 @@ func (c *Compiler) genForInSlice(s *ast.ForInStmt, slicePtr value.Value, sliceTy
 
 // --- For-in over maps ---
 
-func (c *Compiler) genForInMap(s *ast.ForInStmt, mapPtr value.Value, mapType *types.Map) {
-	keyLLVM := c.resolveType(mapType.Key())
-	valLLVM := c.resolveType(mapType.Val())
+func (c *Compiler) genForInMap(s *ast.ForInStmt, mapPtr value.Value, keyType, valType types.Type) {
+	keyLLVM := c.resolveType(keyType)
+	valLLVM := c.resolveType(valType)
 
 	// Build tuple type for the binding (K, V)
 	tupleType := irtypes.NewStruct(keyLLVM, valLLVM)

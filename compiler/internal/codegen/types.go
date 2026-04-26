@@ -59,12 +59,10 @@ func llvmType(typ types.Type) irtypes.Type {
 			return irtypes.I1
 		}
 		return irtypes.NewStruct(irtypes.I1, inner)
-	case *types.Slice:
-		return irtypes.I8Ptr // opaque pointer to heap-allocated header + data
 	case *types.Array:
 		return irtypes.I8Ptr // treated as heap-allocated slice for now
-	case *types.Map:
-		return irtypes.I8Ptr // opaque pointer to runtime hash table
+	case *types.Instance:
+		return irtypes.I8Ptr // Slice[T], Map[K,V], and other generic instances
 	default:
 		return irtypes.I8Ptr // opaque pointer placeholder for future types
 	}
@@ -204,8 +202,12 @@ func (c *Compiler) resolveType(typ types.Type) irtypes.Type {
 		if layout := c.monoEnumLayouts[monoName(inst)]; layout != nil {
 			return layout.EnumInternalType
 		}
-		// Instance wrapping Named user type → value struct
+		// Container instances (Slice, Map) → opaque pointer
 		if origin, ok := inst.Origin().(*types.Named); ok {
+			if origin == types.TypSlice || origin == types.TypMap {
+				return irtypes.I8Ptr
+			}
+			// Instance wrapping Named user type → value struct
 			if classify(origin) == CatUnknown && origin != types.TypString && origin != types.TypVoid && origin != types.TypNone {
 				return userValueType()
 			}

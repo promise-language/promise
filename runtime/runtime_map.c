@@ -2,21 +2,28 @@
 #include <string.h>
 #include <stdint.h>
 
+extern void promise_panic(const char* msg);
+
 // Type-erased open-addressing hash table for Promise maps.
 // Keys and values are stored inline as raw bytes.
+// Entry flags: 0=empty, 1=used, 2=tombstone
 
 typedef struct {
     int64_t key_size;
     int64_t val_size;
     int64_t count;
     int64_t capacity;
-    uint8_t* entries;       // array of { used_flag (1 byte), key_bytes, val_bytes }
+    uint8_t* entries;       // array of { flag (1 byte), key_bytes, val_bytes }
     void*    hash_fn;       // int64_t (*)(const void* key, int64_t key_size) or NULL
     void*    eq_fn;         // int32_t (*)(const void* a, const void* b, int64_t key_size) or NULL
 } promise_map_t;
 
 typedef int64_t (*hash_func_t)(const void* key, int64_t key_size);
 typedef int32_t (*eq_func_t)(const void* a, const void* b, int64_t key_size);
+
+#define FLAG_EMPTY     0
+#define FLAG_USED      1
+#define FLAG_TOMBSTONE 2
 
 // Default FNV-1a hash over raw key bytes.
 static int64_t default_hash(const void* key, int64_t key_size) {
@@ -34,7 +41,7 @@ static int32_t default_eq(const void* a, const void* b, int64_t key_size) {
     return memcmp(a, b, key_size) == 0 ? 1 : 0;
 }
 
-// Entry layout: [used:1][key:key_size][val:val_size]
+// Entry layout: [flag:1][key:key_size][val:val_size]
 static inline int64_t entry_size(promise_map_t* m) {
     return 1 + m->key_size + m->val_size;
 }
@@ -66,6 +73,7 @@ static void map_rehash(promise_map_t* m);
 // promise_map_new creates a new map with the given key/value sizes.
 void* promise_map_new(int64_t key_size, int64_t val_size, void* hash_fn, void* eq_fn) {
     promise_map_t* m = (promise_map_t*)malloc(sizeof(promise_map_t));
+    if (!m) promise_panic("out of memory");
     m->key_size = key_size;
     m->val_size = val_size;
     m->count = 0;
@@ -73,6 +81,7 @@ void* promise_map_new(int64_t key_size, int64_t val_size, void* hash_fn, void* e
     m->hash_fn = hash_fn;
     m->eq_fn = eq_fn;
     m->entries = (uint8_t*)calloc(m->capacity, entry_size(m));
+    if (!m->entries) promise_panic("out of memory");
     return m;
 }
 
@@ -87,18 +96,24 @@ void promise_map_set(void* mp, const void* key, const void* val) {
 
     int64_t hash = map_hash(m, key);
     int64_t idx = (uint64_t)hash % (uint64_t)m->capacity;
+    int64_t first_tombstone = -1;
 
     for (;;) {
         uint8_t* e = entry_at(m, idx);
-        if (!e[0]) {
-            // Empty slot: insert
-            e[0] = 1;
+        if (e[0] == FLAG_EMPTY) {
+            // Use tombstone slot if we passed one
+            if (first_tombstone >= 0) {
+                e = entry_at(m, first_tombstone);
+            }
+            e[0] = FLAG_USED;
             memcpy(entry_key(m, e), key, m->key_size);
             memcpy(entry_val(m, e), val, m->val_size);
             m->count++;
             return;
         }
-        if (map_eq(m, entry_key(m, e), key)) {
+        if (e[0] == FLAG_TOMBSTONE) {
+            if (first_tombstone < 0) first_tombstone = idx;
+        } else if (map_eq(m, entry_key(m, e), key)) {
             // Key exists: update value
             memcpy(entry_val(m, e), val, m->val_size);
             return;
@@ -117,8 +132,8 @@ void* promise_map_get(void* mp, const void* key) {
 
     for (;;) {
         uint8_t* e = entry_at(m, idx);
-        if (!e[0]) return NULL;  // empty slot = not found
-        if (map_eq(m, entry_key(m, e), key)) {
+        if (e[0] == FLAG_EMPTY) return NULL;
+        if (e[0] == FLAG_USED && map_eq(m, entry_key(m, e), key)) {
             return entry_val(m, e);
         }
         idx = ((uint64_t)idx + 1) % (uint64_t)m->capacity;
@@ -138,7 +153,7 @@ int32_t promise_map_iter_next(void* mp, int64_t* state, void* key_out, void* val
     while (*state < m->capacity) {
         uint8_t* e = entry_at(m, *state);
         (*state)++;
-        if (e[0]) {
+        if (e[0] == FLAG_USED) {
             memcpy(key_out, entry_key(m, e), m->key_size);
             memcpy(val_out, entry_val(m, e), m->val_size);
             return 1;
@@ -147,17 +162,86 @@ int32_t promise_map_iter_next(void* mp, int64_t* state, void* key_out, void* val
     return 0;
 }
 
+// promise_map_remove removes a key. Returns 1 if removed, 0 if not found.
+int32_t promise_map_remove(void* mp, const void* key) {
+    promise_map_t* m = (promise_map_t*)mp;
+    if (m->count == 0) return 0;
+
+    int64_t hash = map_hash(m, key);
+    int64_t idx = (uint64_t)hash % (uint64_t)m->capacity;
+
+    for (;;) {
+        uint8_t* e = entry_at(m, idx);
+        if (e[0] == FLAG_EMPTY) return 0;
+        if (e[0] == FLAG_USED && map_eq(m, entry_key(m, e), key)) {
+            e[0] = FLAG_TOMBSTONE;
+            m->count--;
+            return 1;
+        }
+        idx = ((uint64_t)idx + 1) % (uint64_t)m->capacity;
+    }
+}
+
+// promise_map_contains checks if a key exists. Returns 1 if found, 0 if not.
+int8_t promise_map_contains(void* mp, const void* key) {
+    return promise_map_get(mp, key) != NULL ? 1 : 0;
+}
+
+// promise_map_keys returns a new slice containing all keys.
+// Slice layout: [len:i64, cap:i64, data...]
+void* promise_map_keys(void* mp, int64_t key_size) {
+    promise_map_t* m = (promise_map_t*)mp;
+    int64_t header = 16; // sizeof(len) + sizeof(cap)
+    void* slice = malloc(header + m->count * key_size);
+    if (!slice) promise_panic("out of memory");
+    int64_t* hdr = (int64_t*)slice;
+    hdr[0] = m->count; // len
+    hdr[1] = m->count; // cap
+    uint8_t* dst = (uint8_t*)slice + header;
+    int64_t pos = 0;
+    for (int64_t i = 0; i < m->capacity; i++) {
+        uint8_t* e = entry_at(m, i);
+        if (e[0] == FLAG_USED) {
+            memcpy(dst + pos * key_size, entry_key(m, e), key_size);
+            pos++;
+        }
+    }
+    return slice;
+}
+
+// promise_map_values returns a new slice containing all values.
+void* promise_map_values(void* mp, int64_t val_size) {
+    promise_map_t* m = (promise_map_t*)mp;
+    int64_t header = 16;
+    void* slice = malloc(header + m->count * val_size);
+    if (!slice) promise_panic("out of memory");
+    int64_t* hdr = (int64_t*)slice;
+    hdr[0] = m->count; // len
+    hdr[1] = m->count; // cap
+    uint8_t* dst = (uint8_t*)slice + header;
+    int64_t pos = 0;
+    for (int64_t i = 0; i < m->capacity; i++) {
+        uint8_t* e = entry_at(m, i);
+        if (e[0] == FLAG_USED) {
+            memcpy(dst + pos * val_size, entry_val(m, e), val_size);
+            pos++;
+        }
+    }
+    return slice;
+}
+
 static void map_rehash(promise_map_t* m) {
     int64_t old_cap = m->capacity;
     uint8_t* old_entries = m->entries;
 
     m->capacity *= 2;
     m->entries = (uint8_t*)calloc(m->capacity, entry_size(m));
+    if (!m->entries) promise_panic("out of memory");
     m->count = 0;
 
     for (int64_t i = 0; i < old_cap; i++) {
         uint8_t* e = old_entries + i * entry_size(m);
-        if (e[0]) {
+        if (e[0] == FLAG_USED) {
             promise_map_set(m, entry_key(m, e), entry_val(m, e));
         }
     }

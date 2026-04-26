@@ -35,11 +35,11 @@ func TestSubstSlice(t *testing.T) {
 	sl := NewSlice(tp)
 	subst := map[*TypeParam]Type{tp: TypInt}
 	result := Substitute(sl, subst)
-	rsl, ok := result.(*Slice)
+	elem, ok := AsSlice(result)
 	if !ok {
-		t.Fatalf("expected Slice, got %T", result)
+		t.Fatalf("expected Slice instance, got %T", result)
 	}
-	if rsl.Elem() != TypInt {
+	if elem != TypInt {
 		t.Errorf("expected int[], got %s", result)
 	}
 }
@@ -125,19 +125,19 @@ func TestSubstNestedGenerics(t *testing.T) {
 	m := NewMap(tp, innerSlice)
 	subst := map[*TypeParam]Type{tp: TypInt}
 	result := Substitute(m, subst)
-	rm, ok := result.(*Map)
+	rKey, rVal, ok := AsMap(result)
 	if !ok {
-		t.Fatalf("expected Map, got %T", result)
+		t.Fatalf("expected Map instance, got %T", result)
 	}
-	if rm.Key() != TypInt {
-		t.Errorf("expected key int, got %s", rm.Key())
+	if rKey != TypInt {
+		t.Errorf("expected key int, got %s", rKey)
 	}
-	rsl, ok := rm.Val().(*Slice)
+	rslElem, ok := AsSlice(rVal)
 	if !ok {
-		t.Fatalf("expected val Slice, got %T", rm.Val())
+		t.Fatalf("expected val Slice instance, got %T", rVal)
 	}
-	if rsl.Elem() != TypInt {
-		t.Errorf("expected slice elem int, got %s", rsl.Elem())
+	if rslElem != TypInt {
+		t.Errorf("expected slice elem int, got %s", rslElem)
 	}
 }
 

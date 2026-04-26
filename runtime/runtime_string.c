@@ -3,8 +3,11 @@
 #include <stdio.h>
 #include "promise_bindings.h"
 
+extern void promise_panic(const char* msg);
+
 promise_string_i* promise_string_new(const char* data, int64_t len) {
     promise_string_i* s = (promise_string_i*)malloc(sizeof(promise_string_i) + len);
+    if (!s) promise_panic("out of memory");
     s->_variant = NULL;
     s->len = len;
     memcpy(s->data, data, len);
@@ -14,6 +17,7 @@ promise_string_i* promise_string_new(const char* data, int64_t len) {
 promise_string_i* promise_string_concat(promise_string_i* a, promise_string_i* b) {
     int64_t total = a->len + b->len;
     promise_string_i* s = (promise_string_i*)malloc(sizeof(promise_string_i) + total);
+    if (!s) promise_panic("out of memory");
     s->_variant = NULL;
     s->len = total;
     memcpy(s->data, a->data, a->len);
@@ -76,6 +80,98 @@ promise_string_i* promise_char_to_string(int32_t cp) {
         len = 4;
     }
     return promise_string_new(buf, len);
+}
+
+// --- String methods ---
+
+// promise_string_contains checks if sub is a substring of s.
+int8_t promise_string_contains(promise_string_i* s, promise_string_i* sub) {
+    if (sub->len == 0) return 1;
+    if (sub->len > s->len) return 0;
+    for (int64_t i = 0; i <= s->len - sub->len; i++) {
+        if (memcmp(s->data + i, sub->data, sub->len) == 0) return 1;
+    }
+    return 0;
+}
+
+// promise_string_starts_with checks if s starts with prefix.
+int8_t promise_string_starts_with(promise_string_i* s, promise_string_i* prefix) {
+    if (prefix->len > s->len) return 0;
+    return memcmp(s->data, prefix->data, prefix->len) == 0 ? 1 : 0;
+}
+
+// promise_string_ends_with checks if s ends with suffix.
+int8_t promise_string_ends_with(promise_string_i* s, promise_string_i* suffix) {
+    if (suffix->len > s->len) return 0;
+    return memcmp(s->data + s->len - suffix->len, suffix->data, suffix->len) == 0 ? 1 : 0;
+}
+
+// promise_string_index_of finds the first occurrence of sub in s.
+// Returns the byte index or -1 if not found.
+int64_t promise_string_index_of(promise_string_i* s, promise_string_i* sub) {
+    if (sub->len == 0) return 0;
+    if (sub->len > s->len) return -1;
+    for (int64_t i = 0; i <= s->len - sub->len; i++) {
+        if (memcmp(s->data + i, sub->data, sub->len) == 0) return i;
+    }
+    return -1;
+}
+
+// promise_string_trim returns a new string with leading/trailing whitespace removed.
+promise_string_i* promise_string_trim(promise_string_i* s) {
+    int64_t start = 0;
+    int64_t end = s->len;
+    while (start < end && (s->data[start] == ' ' || s->data[start] == '\t' ||
+                           s->data[start] == '\n' || s->data[start] == '\r'))
+        start++;
+    while (end > start && (s->data[end-1] == ' ' || s->data[end-1] == '\t' ||
+                           s->data[end-1] == '\n' || s->data[end-1] == '\r'))
+        end--;
+    return promise_string_new(s->data + start, end - start);
+}
+
+// promise_string_split splits s by sep and returns a slice of strings.
+// Slice layout: [len:i64, cap:i64, data...] where each element is an i8* (promise_string_i*)
+void* promise_string_split(promise_string_i* s, promise_string_i* sep) {
+    // Count splits first
+    int64_t count = 1;
+    if (sep->len > 0) {
+        for (int64_t i = 0; i <= s->len - sep->len; i++) {
+            if (memcmp(s->data + i, sep->data, sep->len) == 0) {
+                count++;
+                i += sep->len - 1;
+            }
+        }
+    }
+
+    // Allocate slice: header (16 bytes) + count * sizeof(pointer)
+    int64_t elem_size = sizeof(void*);
+    int64_t header = 16;
+    void* slice = malloc(header + count * elem_size);
+    if (!slice) promise_panic("out of memory");
+    int64_t* hdr = (int64_t*)slice;
+    hdr[0] = count; // len
+    hdr[1] = count; // cap
+    void** elems = (void**)((uint8_t*)slice + header);
+
+    // Split
+    int64_t pos = 0;
+    int64_t idx = 0;
+    if (sep->len == 0) {
+        // Empty separator: return the whole string as a single element
+        elems[0] = promise_string_new(s->data, s->len);
+    } else {
+        for (int64_t i = 0; i <= s->len - sep->len; i++) {
+            if (memcmp(s->data + i, sep->data, sep->len) == 0) {
+                elems[idx++] = promise_string_new(s->data + pos, i - pos);
+                pos = i + sep->len;
+                i += sep->len - 1;
+            }
+        }
+        elems[idx] = promise_string_new(s->data + pos, s->len - pos);
+    }
+
+    return slice;
 }
 
 // --- String character iteration (UTF-8 decode) ---

@@ -324,6 +324,89 @@ func (c *Compiler) declareIntrinsics() {
 		ir.NewParam("key_out", irtypes.I8Ptr),
 		ir.NewParam("val_out", irtypes.I8Ptr))
 
+	// Map methods
+	c.funcs["promise_map_remove"] = c.module.NewFunc("promise_map_remove",
+		irtypes.I32,
+		ir.NewParam("m", irtypes.I8Ptr),
+		ir.NewParam("key", irtypes.I8Ptr))
+
+	c.funcs["promise_map_contains"] = c.module.NewFunc("promise_map_contains",
+		irtypes.I8,
+		ir.NewParam("m", irtypes.I8Ptr),
+		ir.NewParam("key", irtypes.I8Ptr))
+
+	c.funcs["promise_map_keys"] = c.module.NewFunc("promise_map_keys",
+		irtypes.I8Ptr,
+		ir.NewParam("m", irtypes.I8Ptr),
+		ir.NewParam("key_size", irtypes.I64))
+
+	c.funcs["promise_map_values"] = c.module.NewFunc("promise_map_values",
+		irtypes.I8Ptr,
+		ir.NewParam("m", irtypes.I8Ptr),
+		ir.NewParam("val_size", irtypes.I64))
+
+	// Slice methods
+	c.funcs["promise_slice_push"] = c.module.NewFunc("promise_slice_push",
+		irtypes.I8Ptr,
+		ir.NewParam("slice", irtypes.I8Ptr),
+		ir.NewParam("elem", irtypes.I8Ptr),
+		ir.NewParam("elem_size", irtypes.I64))
+
+	c.funcs["promise_slice_pop"] = c.module.NewFunc("promise_slice_pop",
+		irtypes.I32,
+		ir.NewParam("slice", irtypes.I8Ptr),
+		ir.NewParam("out_elem", irtypes.I8Ptr),
+		ir.NewParam("elem_size", irtypes.I64))
+
+	c.funcs["promise_slice_contains"] = c.module.NewFunc("promise_slice_contains",
+		irtypes.I8,
+		ir.NewParam("slice", irtypes.I8Ptr),
+		ir.NewParam("elem", irtypes.I8Ptr),
+		ir.NewParam("elem_size", irtypes.I64),
+		ir.NewParam("eq_fn", irtypes.I8Ptr))
+
+	c.funcs["promise_slice_remove"] = c.module.NewFunc("promise_slice_remove",
+		irtypes.Void,
+		ir.NewParam("slice", irtypes.I8Ptr),
+		ir.NewParam("index", irtypes.I64),
+		ir.NewParam("elem_size", irtypes.I64))
+
+	// String methods
+	c.funcs["promise_string_contains"] = c.module.NewFunc("promise_string_contains",
+		irtypes.I8,
+		ir.NewParam("s", irtypes.I8Ptr),
+		ir.NewParam("sub", irtypes.I8Ptr))
+
+	c.funcs["promise_string_starts_with"] = c.module.NewFunc("promise_string_starts_with",
+		irtypes.I8,
+		ir.NewParam("s", irtypes.I8Ptr),
+		ir.NewParam("prefix", irtypes.I8Ptr))
+
+	c.funcs["promise_string_ends_with"] = c.module.NewFunc("promise_string_ends_with",
+		irtypes.I8,
+		ir.NewParam("s", irtypes.I8Ptr),
+		ir.NewParam("suffix", irtypes.I8Ptr))
+
+	c.funcs["promise_string_index_of"] = c.module.NewFunc("promise_string_index_of",
+		irtypes.I64,
+		ir.NewParam("s", irtypes.I8Ptr),
+		ir.NewParam("sub", irtypes.I8Ptr))
+
+	c.funcs["promise_string_trim"] = c.module.NewFunc("promise_string_trim",
+		irtypes.I8Ptr,
+		ir.NewParam("s", irtypes.I8Ptr))
+
+	c.funcs["promise_string_split"] = c.module.NewFunc("promise_string_split",
+		irtypes.I8Ptr,
+		ir.NewParam("s", irtypes.I8Ptr),
+		ir.NewParam("sep", irtypes.I8Ptr))
+
+	// Realloc for slice growth
+	c.funcs["realloc"] = c.module.NewFunc("realloc",
+		irtypes.I8Ptr,
+		ir.NewParam("ptr", irtypes.I8Ptr),
+		ir.NewParam("size", irtypes.I64))
+
 	// Value-to-string conversion for string interpolation
 	c.funcs["promise_int_to_string"] = c.module.NewFunc("promise_int_to_string",
 		irtypes.I8Ptr, ir.NewParam("x", irtypes.I64))

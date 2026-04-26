@@ -177,8 +177,8 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 		opTarget := targetType
 		if idx, ok := s.Target.(*ast.IndexExpr); ok {
 			idxTargetType := c.info.Types[idx.Target]
-			if m, ok := idxTargetType.(*types.Map); ok {
-				opTarget = m.Val()
+			if _, val, ok := types.AsMap(idxTargetType); ok {
+				opTarget = val
 			}
 		}
 		c.checkOperator(s.Pos(), opTarget, op, valType)
@@ -298,20 +298,17 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 	if iterType != nil {
 		// Determine element type from iterable
 		var elemType types.Type
-		switch t := iterType.(type) {
-		case *types.Slice:
-			elemType = t.Elem()
-		case *types.Array:
-			elemType = t.Elem()
-		case *types.Map:
+		if elem, ok := types.AsSlice(iterType); ok {
+			elemType = elem
+		} else if key, val, ok := types.AsMap(iterType); ok {
 			// Iterating a map yields (key, value) tuples
-			elemType = types.NewTuple([]types.Type{t.Key(), t.Val()})
-		case *types.Instance:
+			elemType = types.NewTuple([]types.Type{key, val})
+		} else if inst, ok := iterType.(*types.Instance); ok {
 			// Iter[T] yields T, Stream[T] yields T
-			origin := t.Origin()
+			origin := inst.Origin()
 			if origin == types.TypIter || origin == types.TypStream {
-				if len(t.TypeArgs()) > 0 {
-					elemType = t.TypeArgs()[0]
+				if len(inst.TypeArgs()) > 0 {
+					elemType = inst.TypeArgs()[0]
 				} else {
 					elemType = iterType
 				}
@@ -319,7 +316,7 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 				c.errorf(s.Iterable.Pos(), "cannot iterate over type %s", iterType)
 				elemType = iterType
 			}
-		default:
+		} else {
 			if types.Identical(iterType, types.TypRange) {
 				elemType = types.TypInt
 			} else if types.Identical(iterType, types.TypString) {

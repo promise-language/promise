@@ -858,9 +858,9 @@ func TestMapLiteral(t *testing.T) {
 	info := checkOK(t, `test() { m := {"a": 1, "b": 2}; }`)
 	// Verify a Map type was recorded
 	for _, typ := range info.Types {
-		if m, ok := typ.(*types.Map); ok {
-			assertType(t, info, m.Key(), "string")
-			assertType(t, info, m.Val(), "int")
+		if key, val, ok := types.AsMap(typ); ok {
+			assertType(t, info, key, "string")
+			assertType(t, info, val, "int")
 			return
 		}
 	}
@@ -2394,6 +2394,33 @@ func TestArrayLenProperty(t *testing.T) {
 	`)
 }
 
+func TestArrayContains(t *testing.T) {
+	checkOK(t, `
+		check(int[3] arr) bool { return arr.contains(1); }
+		main() { }
+	`)
+}
+
+func TestArrayMutatingMethodsRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		check(int[3] arr) { arr.push(1); }
+		main() { }
+	`)
+	expectError(t, errs, "cannot push on fixed-size array")
+
+	errs = checkErrs(t, `
+		check(int[3] arr) { arr.remove(0); }
+		main() { }
+	`)
+	expectError(t, errs, "cannot remove on fixed-size array")
+
+	errs = checkErrs(t, `
+		check(int[3] arr) { arr.pop(); }
+		main() { }
+	`)
+	expectError(t, errs, "cannot pop on fixed-size array")
+}
+
 func TestMapLenProperty(t *testing.T) {
 	checkOK(t, `
 		main() {
@@ -2419,7 +2446,7 @@ func TestSliceInvalidMember(t *testing.T) {
 			int n = arr.foo;
 		}
 	`)
-	expectError(t, errs, "no member")
+	expectError(t, errs, "no field or method")
 }
 
 func TestMapInvalidMember(t *testing.T) {
@@ -2429,7 +2456,7 @@ func TestMapInvalidMember(t *testing.T) {
 			int n = m.foo;
 		}
 	`)
-	expectError(t, errs, "no member")
+	expectError(t, errs, "no field or method")
 }
 
 // --- Inheritance Validation Tests (Stage 8k) ---

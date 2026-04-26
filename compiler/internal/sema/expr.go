@@ -510,10 +510,6 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 
 	switch t := target.(type) {
 	case *types.Named:
-		// Built-in properties
-		if t == types.TypString && e.Field == "len" {
-			return types.TypInt
-		}
 		// Check fields first, then methods
 		if f := t.LookupField(e.Field); f != nil {
 			if f.Deprecated() != "" {
@@ -554,23 +550,18 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 	case *types.Instance:
 		return c.resolveInstanceMember(e.Pos(), t, e.Field)
 
-	case *types.Slice:
-		if e.Field == "len" {
-			return types.TypInt
-		}
-		c.errorf(e.Pos(), "type %s has no member %s", t, e.Field)
-		return nil
-
 	case *types.Array:
-		if e.Field == "len" {
-			return types.TypInt
+		// Arrays delegate to TypSlice for field/method lookup
+		subst := types.BuildSubstMap(types.TypSlice.TypeParams(), []types.Type{t.Elem()})
+		if f := types.TypSlice.LookupField(e.Field); f != nil {
+			return types.Substitute(f.Type(), subst)
 		}
-		c.errorf(e.Pos(), "type %s has no member %s", t, e.Field)
-		return nil
-
-	case *types.Map:
-		if e.Field == "len" {
-			return types.TypInt
+		if m := types.TypSlice.LookupMethod(e.Field); m != nil {
+			if e.Field == "push" || e.Field == "pop" || e.Field == "remove" {
+				c.errorf(e.Pos(), "cannot %s on fixed-size array", e.Field)
+				return nil
+			}
+			return types.Substitute(m.Sig(), subst)
 		}
 		c.errorf(e.Pos(), "type %s has no member %s", t, e.Field)
 		return nil
@@ -666,19 +657,21 @@ func (c *Checker) checkIndexExpr(e *ast.IndexExpr) types.Type {
 		}
 		return t.Elem()
 
-	case *types.Slice:
-		if index != nil && !types.Identical(index, types.TypInt) {
-			c.errorf(e.Index.Pos(), "slice index must be int, got %s", index)
-		}
-		return t.Elem()
-
-	case *types.Map:
-		if index != nil && !types.AssignableTo(index, t.Key()) {
-			c.errorf(e.Index.Pos(), "map key type mismatch: expected %s, got %s", t.Key(), index)
-		}
-		return types.NewOptional(t.Val())
-
 	default:
+		// Slice indexing: int[] → elem type
+		if elem, ok := types.AsSlice(target); ok {
+			if index != nil && !types.Identical(index, types.TypInt) {
+				c.errorf(e.Index.Pos(), "slice index must be int, got %s", index)
+			}
+			return elem
+		}
+		// Map indexing: Map[K,V] → V?
+		if key, val, ok := types.AsMap(target); ok {
+			if index != nil && !types.AssignableTo(index, key) {
+				c.errorf(e.Index.Pos(), "map key type mismatch: expected %s, got %s", key, index)
+			}
+			return types.NewOptional(val)
+		}
 		c.errorf(e.Pos(), "cannot index type %s", target)
 		return nil
 	}

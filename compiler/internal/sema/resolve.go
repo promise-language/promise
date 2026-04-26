@@ -148,11 +148,6 @@ func (c *Checker) resolveNamedType(r *ast.NamedTypeRef) types.Type {
 		return nil
 	}
 
-	// Special case: Map[K, V] → structural Map type for consistency with map literals
-	if named, ok := typ.(*types.Named); ok && named == types.TypMap {
-		return types.NewMap(typeArgs[0], typeArgs[1])
-	}
-
 	// Validate type argument constraints
 	c.validateConstraints(r.Pos(), typ, typeArgs)
 

@@ -1,21 +1,5 @@
 package types
 
-// TODO(stage-8j): Unify compound container types (Slice, Array, Map) with Named types.
-//
-// Currently compound types are minimal structs with no fields, methods, inheritance,
-// type parameters, or documentation. This creates an asymmetry where:
-//   - Named types support methods, fields, inheritance, doc, deprecation, placement
-//   - Compound types are hard-coded with special-case handling throughout sema and codegen
-//     (e.g. .len is wired as a built-in property, not a real field/method)
-//
-// Promoting compound types to Named types (or a shared base) would:
-//   - Allow user-defined methods and inheritance on containers
-//   - Provide a natural place for documentation and IDE support (hover, signature help)
-//   - Eliminate special-case branches in sema/expr.go and codegen/expr.go
-//   - Enable a single codepath for field/method lookup across all types
-//
-// See Stage 8j in docs/stages.md for the full plan.
-
 import (
 	"fmt"
 	"strings"
@@ -66,38 +50,45 @@ func (a *Array) String() string {
 	return fmt.Sprintf("%s[%d]", a.elem.String(), a.size)
 }
 
-// Slice represents a dynamic slice type: T[].
-type Slice struct {
-	elem Type
+// NewSlice creates a slice type as Instance{TypSlice, [elem]}.
+func NewSlice(elem Type) *Instance {
+	return NewInstance(TypSlice, []Type{elem})
 }
 
-// NewSlice creates a new slice type.
-func NewSlice(elem Type) *Slice {
-	return &Slice{elem: elem}
+// NewMap creates a map type as Instance{TypMap, [key, val]}.
+func NewMap(key, val Type) *Instance {
+	return NewInstance(TypMap, []Type{key, val})
 }
 
-func (s *Slice) Elem() Type       { return s.elem }
-func (s *Slice) Underlying() Type { return s }
-
-func (s *Slice) String() string {
-	return s.elem.String() + "[]"
+// IsSlice reports whether t is a Slice instance (Instance{TypSlice, _}).
+func IsSlice(t Type) bool {
+	inst, ok := t.(*Instance)
+	return ok && inst.origin == TypSlice
 }
 
-// Map represents a map type: Map[K, V].
-type Map struct {
-	key Type
-	val Type
+// AsSlice extracts the element type from a Slice instance or Array.
+// Returns (elem, true) for Slice instances and Arrays, (nil, false) otherwise.
+func AsSlice(t Type) (elem Type, ok bool) {
+	if inst, ok := t.(*Instance); ok && inst.origin == TypSlice {
+		return inst.typeArgs[0], true
+	}
+	if arr, ok := t.(*Array); ok {
+		return arr.elem, true
+	}
+	return nil, false
 }
 
-// NewMap creates a new map type.
-func NewMap(key, val Type) *Map {
-	return &Map{key: key, val: val}
+// IsMap reports whether t is a Map instance (Instance{TypMap, _}).
+func IsMap(t Type) bool {
+	inst, ok := t.(*Instance)
+	return ok && inst.origin == TypMap
 }
 
-func (m *Map) Key() Type        { return m.key }
-func (m *Map) Val() Type        { return m.val }
-func (m *Map) Underlying() Type { return m }
-
-func (m *Map) String() string {
-	return fmt.Sprintf("Map[%s, %s]", m.key.String(), m.val.String())
+// AsMap extracts key and value types from a Map instance.
+// Returns (key, val, true) for Map instances, (nil, nil, false) otherwise.
+func AsMap(t Type) (key, val Type, ok bool) {
+	if inst, ok := t.(*Instance); ok && inst.origin == TypMap {
+		return inst.typeArgs[0], inst.typeArgs[1], true
+	}
+	return nil, nil, false
 }

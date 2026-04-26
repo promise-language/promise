@@ -521,7 +521,11 @@ func TestContainers(t *testing.T) {
 			check: func(t *testing.T) {
 				sl := NewSlice(TypString)
 				assertEqual(t, sl.String(), "string[]")
-				assertEqual(t, sl.Elem(), Type(TypString))
+				elem, ok := AsSlice(sl)
+				if !ok {
+					t.Fatal("expected Slice instance")
+				}
+				assertEqual(t, elem, Type(TypString))
 			},
 		},
 		{

@@ -1,0 +1,35 @@
+main() {
+  string s = "hello world";
+
+  // contains
+  print_bool(s.contains("world"));  // true
+  print_bool(s.contains("xyz"));    // false
+
+  // starts_with / ends_with
+  print_bool(s.starts_with("hello")); // true
+  print_bool(s.ends_with("world"));   // true
+  print_bool(s.starts_with("world")); // false
+
+  // index_of
+  if idx := s.index_of("world") {
+    print_int(idx);                    // 6
+  }
+
+  bool found = false;
+  if idx2 := s.index_of("xyz") {
+    found = true;
+  }
+  print_bool(found);                   // false
+
+  // trim
+  string padded = "  hi  ";
+  println(padded.trim());             // hi
+
+  // split
+  string csv = "a,b,c";
+  string[] parts = csv.split(",");
+  print_int(parts.len);               // 3
+  println(parts[0]);                   // a
+  println(parts[1]);                   // b
+  println(parts[2]);                   // c
+}

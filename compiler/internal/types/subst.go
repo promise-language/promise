@@ -88,21 +88,6 @@ func doSubst(typ Type, subst map[*TypeParam]Type) Type {
 		}
 		return NewArray(elem, t.size)
 
-	case *Slice:
-		elem := doSubst(t.elem, subst)
-		if elem == t.elem {
-			return t
-		}
-		return NewSlice(elem)
-
-	case *Map:
-		key := doSubst(t.key, subst)
-		val := doSubst(t.val, subst)
-		if key == t.key && val == t.val {
-			return t
-		}
-		return NewMap(key, val)
-
 	default:
 		return typ
 	}
@@ -198,10 +183,6 @@ func ContainsTypeParam(typ Type) bool {
 		}
 	case *Array:
 		return ContainsTypeParam(t.elem)
-	case *Slice:
-		return ContainsTypeParam(t.elem)
-	case *Map:
-		return ContainsTypeParam(t.key) || ContainsTypeParam(t.val)
 	case *Signature:
 		for _, p := range t.params {
 			if ContainsTypeParam(p.typ) {

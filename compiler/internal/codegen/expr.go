@@ -748,10 +748,10 @@ func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 		if named := extractNamed(targetType); named == types.TypString {
 			return c.genStringLen(e)
 		}
-		switch targetType.(type) {
-		case *types.Slice, *types.Array:
+		if _, ok := types.AsSlice(targetType); ok {
 			return c.genSliceLen(e)
-		case *types.Map:
+		}
+		if types.IsMap(targetType) {
 			return c.genMapLen(e)
 		}
 	}
@@ -840,6 +840,12 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 	if c.typeSubst != nil {
 		targetType = types.Substitute(targetType, c.typeSubst)
 	}
+
+	// Container native method dispatch (Slice, Map, string)
+	if result, ok := c.genContainerMethodCall(e, member, targetType); ok {
+		return result
+	}
+
 	named := extractNamed(targetType)
 	if named == nil {
 		panic(fmt.Sprintf("codegen: cannot resolve type for method call on %T", targetType))
@@ -963,6 +969,258 @@ func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params())
 	args = append(args, argVals...)
 	return c.block.NewCall(fnTyped, args...)
+}
+
+// genContainerMethodCall dispatches native method calls on Slice, Map, and string.
+// Returns (result, true) if handled, (nil, false) otherwise.
+func (c *Compiler) genContainerMethodCall(e *ast.CallExpr, member *ast.MemberExpr, targetType types.Type) (value.Value, bool) {
+	method := member.Field
+
+	// Slice methods: push, pop, contains, remove
+	if elem, ok := types.AsSlice(targetType); ok {
+		return c.genSliceMethodCall(e, member, elem, method), true
+	}
+
+	// Map methods: contains, remove, keys, values
+	if key, val, ok := types.AsMap(targetType); ok {
+		return c.genMapMethodCall(e, member, key, val, method), true
+	}
+
+	// String methods: contains, starts_with, ends_with, index_of, trim, split
+	if named := extractNamed(targetType); named == types.TypString {
+		if result, ok := c.genStringMethodCall(e, member, method); ok {
+			return result, true
+		}
+	}
+
+	return nil, false
+}
+
+func (c *Compiler) genSliceMethodCall(e *ast.CallExpr, member *ast.MemberExpr, elemType types.Type, method string) value.Value {
+	slicePtr := c.genExpr(member.Target)
+	elemLLVM := c.resolveType(elemType)
+	elemSize := int64(llvmTypeSize(elemLLVM))
+
+	switch method {
+	case "push":
+		argVal := c.genExpr(e.Args[0].Value)
+		argAlloca := c.block.NewAlloca(elemLLVM)
+		// Zero-initialize before store to clear padding bytes for memcmp correctness
+		c.block.NewStore(constant.NewZeroInitializer(elemLLVM), argAlloca)
+		c.block.NewStore(argVal, argAlloca)
+		argPtr := c.block.NewBitCast(argAlloca, irtypes.I8Ptr)
+		newSlice := c.block.NewCall(c.funcs["promise_slice_push"],
+			slicePtr, argPtr, constant.NewInt(irtypes.I64, elemSize))
+		// Store the (possibly reallocated) pointer back
+		c.storeBackSlicePtr(member.Target, newSlice)
+		return newSlice
+
+	case "pop":
+		outAlloca := c.block.NewAlloca(elemLLVM)
+		outPtr := c.block.NewBitCast(outAlloca, irtypes.I8Ptr)
+		found := c.block.NewCall(c.funcs["promise_slice_pop"],
+			slicePtr, outPtr, constant.NewInt(irtypes.I64, elemSize))
+		// Build Optional: {i1, T}
+		optType := irtypes.NewStruct(irtypes.I1, elemLLVM)
+		isFound := c.block.NewTrunc(found, irtypes.I1)
+		someBlock := c.newBlock("pop.some")
+		noneBlock := c.newBlock("pop.none")
+		mergeBlock := c.newBlock("pop.merge")
+		c.block.NewCondBr(isFound, someBlock, noneBlock)
+
+		c.block = someBlock
+		val := c.block.NewLoad(elemLLVM, outAlloca)
+		someOpt := c.wrapOptional(val, optType)
+		c.block.NewBr(mergeBlock)
+		someEnd := c.block
+
+		c.block = noneBlock
+		noneOpt := constant.NewZeroInitializer(optType)
+		c.block.NewBr(mergeBlock)
+		noneEnd := c.block
+
+		c.block = mergeBlock
+		phi := c.block.NewPhi(ir.NewIncoming(someOpt, someEnd), ir.NewIncoming(noneOpt, noneEnd))
+		return phi
+
+	case "contains":
+		argVal := c.genExpr(e.Args[0].Value)
+		argAlloca := c.block.NewAlloca(elemLLVM)
+		// Zero-initialize before store to clear padding bytes for memcmp correctness
+		c.block.NewStore(constant.NewZeroInitializer(elemLLVM), argAlloca)
+		c.block.NewStore(argVal, argAlloca)
+		argPtr := c.block.NewBitCast(argAlloca, irtypes.I8Ptr)
+		// Use string equality for string elements
+		var eqFn value.Value
+		if extractNamed(elemType) == types.TypString {
+			eqFn = c.block.NewBitCast(c.funcs["promise_eq_string"], irtypes.I8Ptr)
+		} else {
+			eqFn = constant.NewNull(irtypes.I8Ptr)
+		}
+		result := c.block.NewCall(c.funcs["promise_slice_contains"],
+			slicePtr, argPtr, constant.NewInt(irtypes.I64, elemSize), eqFn)
+		return c.block.NewTrunc(result, irtypes.I1)
+
+	case "remove":
+		idx := c.genExpr(e.Args[0].Value)
+		c.block.NewCall(c.funcs["promise_slice_remove"],
+			slicePtr, idx, constant.NewInt(irtypes.I64, elemSize))
+		return nil
+
+	default:
+		panic(fmt.Sprintf("codegen: unknown slice method %s", method))
+	}
+}
+
+// storeBackSlicePtr stores the new slice pointer back into the variable that holds the slice.
+// This is needed because push may realloc.
+func (c *Compiler) storeBackSlicePtr(target ast.Expr, newPtr value.Value) {
+	switch t := target.(type) {
+	case *ast.IdentExpr:
+		if alloca, ok := c.locals[t.Name]; ok {
+			c.block.NewStore(newPtr, alloca)
+		}
+	case *ast.MemberExpr:
+		fieldPtr := c.genFieldPtr(t)
+		c.block.NewStore(newPtr, fieldPtr)
+	case *ast.IndexExpr:
+		panic("codegen: push on nested slice (e.g. slices[i].push) not yet supported")
+	}
+}
+
+// genFieldPtr computes a pointer to a field on a user type instance.
+// Used by storeBackSlicePtr and genMemberAssign.
+func (c *Compiler) genFieldPtr(target *ast.MemberExpr) value.Value {
+	targetType := c.info.Types[target.Target]
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+	named := extractNamed(targetType)
+	if named == nil {
+		panic("codegen: cannot resolve type for field pointer")
+	}
+
+	layout := c.lookupTypeLayout(targetType)
+	if layout == nil {
+		panic(fmt.Sprintf("codegen: no layout for type %s", targetType))
+	}
+
+	field := named.LookupField(target.Field)
+	if field == nil {
+		panic(fmt.Sprintf("codegen: no field %s on type %s", target.Field, named))
+	}
+
+	fieldIdx, ok := layout.InstanceFieldIndex[field.Name()]
+	if !ok {
+		panic(fmt.Sprintf("codegen: field %s not in layout for %s", field.Name(), named))
+	}
+
+	obj := c.genExpr(target.Target)
+	var instance value.Value
+	if _, isThis := target.Target.(*ast.ThisExpr); isThis {
+		instance = obj
+	} else {
+		instance = c.extractInstancePtr(obj)
+	}
+	typedPtr := c.block.NewBitCast(instance, layout.InstancePtrType)
+
+	return c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+}
+
+func (c *Compiler) genMapMethodCall(e *ast.CallExpr, member *ast.MemberExpr, keyType, valType types.Type, method string) value.Value {
+	mapPtr := c.genExpr(member.Target)
+	keyLLVM := c.resolveType(keyType)
+	valLLVM := c.resolveType(valType)
+
+	switch method {
+	case "contains":
+		argVal := c.genExpr(e.Args[0].Value)
+		keyAlloca := c.block.NewAlloca(keyLLVM)
+		c.block.NewStore(argVal, keyAlloca)
+		keyPtr := c.block.NewBitCast(keyAlloca, irtypes.I8Ptr)
+		result := c.block.NewCall(c.funcs["promise_map_contains"], mapPtr, keyPtr)
+		return c.block.NewTrunc(result, irtypes.I1)
+
+	case "remove":
+		argVal := c.genExpr(e.Args[0].Value)
+		keyAlloca := c.block.NewAlloca(keyLLVM)
+		c.block.NewStore(argVal, keyAlloca)
+		keyPtr := c.block.NewBitCast(keyAlloca, irtypes.I8Ptr)
+		result := c.block.NewCall(c.funcs["promise_map_remove"], mapPtr, keyPtr)
+		return c.block.NewTrunc(result, irtypes.I1)
+
+	case "keys":
+		keySize := int64(llvmTypeSize(keyLLVM))
+		return c.block.NewCall(c.funcs["promise_map_keys"],
+			mapPtr, constant.NewInt(irtypes.I64, keySize))
+
+	case "values":
+		valSize := int64(llvmTypeSize(valLLVM))
+		return c.block.NewCall(c.funcs["promise_map_values"],
+			mapPtr, constant.NewInt(irtypes.I64, valSize))
+
+	default:
+		panic(fmt.Sprintf("codegen: unknown map method %s", method))
+	}
+}
+
+func (c *Compiler) genStringMethodCall(e *ast.CallExpr, member *ast.MemberExpr, method string) (value.Value, bool) {
+	strPtr := c.genExpr(member.Target)
+
+	switch method {
+	case "contains":
+		argVal := c.genExpr(e.Args[0].Value)
+		result := c.block.NewCall(c.funcs["promise_string_contains"], strPtr, argVal)
+		return c.block.NewTrunc(result, irtypes.I1), true
+
+	case "starts_with":
+		argVal := c.genExpr(e.Args[0].Value)
+		result := c.block.NewCall(c.funcs["promise_string_starts_with"], strPtr, argVal)
+		return c.block.NewTrunc(result, irtypes.I1), true
+
+	case "ends_with":
+		argVal := c.genExpr(e.Args[0].Value)
+		result := c.block.NewCall(c.funcs["promise_string_ends_with"], strPtr, argVal)
+		return c.block.NewTrunc(result, irtypes.I1), true
+
+	case "index_of":
+		argVal := c.genExpr(e.Args[0].Value)
+		rawIdx := c.block.NewCall(c.funcs["promise_string_index_of"], strPtr, argVal)
+		// Wrap in Optional: -1 → none, otherwise some(idx)
+		isNeg := c.block.NewICmp(enum.IPredSLT, rawIdx, constant.NewInt(irtypes.I64, 0))
+		optType := irtypes.NewStruct(irtypes.I1, irtypes.I64)
+		someBlock := c.newBlock("indexof.some")
+		noneBlock := c.newBlock("indexof.none")
+		mergeBlock := c.newBlock("indexof.merge")
+		c.block.NewCondBr(isNeg, noneBlock, someBlock)
+
+		c.block = someBlock
+		someOpt := c.wrapOptional(rawIdx, optType)
+		c.block.NewBr(mergeBlock)
+		someEnd := c.block
+
+		c.block = noneBlock
+		noneOpt := constant.NewZeroInitializer(optType)
+		c.block.NewBr(mergeBlock)
+		noneEnd := c.block
+
+		c.block = mergeBlock
+		phi := c.block.NewPhi(ir.NewIncoming(someOpt, someEnd), ir.NewIncoming(noneOpt, noneEnd))
+		return phi, true
+
+	case "trim":
+		result := c.block.NewCall(c.funcs["promise_string_trim"], strPtr)
+		return result, true
+
+	case "split":
+		argVal := c.genExpr(e.Args[0].Value)
+		result := c.block.NewCall(c.funcs["promise_string_split"], strPtr, argVal)
+		return result, true
+
+	default:
+		return nil, false
+	}
 }
 
 // genStringLen loads the length field from a string instance struct.
@@ -1531,11 +1789,11 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 	if c.typeSubst != nil {
 		typ = types.Substitute(typ, c.typeSubst)
 	}
-	sliceType, ok := typ.(*types.Slice)
+	elem, ok := types.AsSlice(typ)
 	if !ok {
-		panic(fmt.Sprintf("codegen: array literal type is %T, want *types.Slice", typ))
+		panic(fmt.Sprintf("codegen: array literal type is %T, want Slice instance", typ))
 	}
-	elemLLVM := c.resolveType(sliceType.Elem())
+	elemLLVM := c.resolveType(elem)
 	elemSize := int64(llvmTypeSize(elemLLVM))
 	n := int64(len(e.Elements))
 
@@ -1580,22 +1838,19 @@ func (c *Compiler) genIndexExpr(e *ast.IndexExpr) value.Value {
 		targetType = types.Substitute(targetType, c.typeSubst)
 	}
 
-	switch t := targetType.(type) {
-	case *types.Slice:
-		return c.genSliceIndex(e, t)
-	case *types.Array:
-		return c.genSliceIndex(e, types.NewSlice(t.Elem()))
-	case *types.Map:
-		return c.genMapIndex(e, t)
-	default:
-		panic(fmt.Sprintf("codegen: cannot index type %s", targetType))
+	if elem, ok := types.AsSlice(targetType); ok {
+		return c.genSliceIndex(e, elem)
 	}
+	if key, val, ok := types.AsMap(targetType); ok {
+		return c.genMapIndex(e, key, val)
+	}
+	panic(fmt.Sprintf("codegen: cannot index type %s", targetType))
 }
 
-func (c *Compiler) genSliceIndex(e *ast.IndexExpr, sliceType *types.Slice) value.Value {
+func (c *Compiler) genSliceIndex(e *ast.IndexExpr, elemType types.Type) value.Value {
 	slicePtr := c.genExpr(e.Target)
 	idx := c.genExpr(e.Index)
-	elemLLVM := c.resolveType(sliceType.Elem())
+	elemLLVM := c.resolveType(elemType)
 
 	// Bounds check: load len, compare index
 	headerType := sliceHeaderType()
@@ -1642,18 +1897,18 @@ func (c *Compiler) genMapLit(e *ast.MapLit) value.Value {
 	if c.typeSubst != nil {
 		typ = types.Substitute(typ, c.typeSubst)
 	}
-	mapType, ok := typ.(*types.Map)
+	keyType, valType, ok := types.AsMap(typ)
 	if !ok {
-		panic(fmt.Sprintf("codegen: map literal type is %T, want *types.Map", typ))
+		panic(fmt.Sprintf("codegen: map literal type is %T, want Map instance", typ))
 	}
-	keyLLVM := c.resolveType(mapType.Key())
-	valLLVM := c.resolveType(mapType.Val())
+	keyLLVM := c.resolveType(keyType)
+	valLLVM := c.resolveType(valType)
 	keySize := int64(llvmTypeSize(keyLLVM))
 	valSize := int64(llvmTypeSize(valLLVM))
 
 	// Determine hash/eq function pointers (string keys need content-based comparison)
 	var hashFn, eqFn value.Value
-	if extractNamed(mapType.Key()) == types.TypString {
+	if extractNamed(keyType) == types.TypString {
 		hashFn = c.block.NewBitCast(c.funcs["promise_hash_string"], irtypes.I8Ptr)
 		eqFn = c.block.NewBitCast(c.funcs["promise_eq_string"], irtypes.I8Ptr)
 	} else {
@@ -1686,11 +1941,11 @@ func (c *Compiler) genMapLit(e *ast.MapLit) value.Value {
 	return mapPtr
 }
 
-func (c *Compiler) genMapIndex(e *ast.IndexExpr, mapType *types.Map) value.Value {
+func (c *Compiler) genMapIndex(e *ast.IndexExpr, keyType, valType types.Type) value.Value {
 	mapPtr := c.genExpr(e.Target)
 	keyVal := c.genExpr(e.Index)
-	keyLLVM := c.resolveType(mapType.Key())
-	valLLVM := c.resolveType(mapType.Val())
+	keyLLVM := c.resolveType(keyType)
+	valLLVM := c.resolveType(valType)
 
 	// Alloca key for type-erased call
 	keyAlloca := c.block.NewAlloca(keyLLVM)

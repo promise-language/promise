@@ -24,7 +24,7 @@ Implementation stages for the Promise compiler pipeline.
 | 8g | `compiler/internal/codegen/` | Containers: tuples, optionals, slices, maps, lambdas | Done |
 | 8h | `compiler/internal/codegen/` | Optional patterns, string interpolation, expression completeness | Done |
 | 8i | `compiler/internal/codegen/` | Char literals, container `.len`, string iteration, map compound assignment | Done |
-| 8j | `compiler/internal/types/`, `sema/`, `codegen/` | Unify compound types with Named types | Deferred |
+| 8j | `compiler/internal/types/`, `sema/`, `codegen/`, `runtime/` | Unify compound types with Named types + collection/string methods | Done |
 | 9 | `compiler/internal/module/` | Module resolution, dependency graph | Planned |
 | 10 | `cmd/promise/` | CLI entry point (build, run, test, fmt, etc.) | Planned |
 | 11 | `pkg/` | Package manager: fetch, resolve, lock | Planned |
@@ -374,34 +374,32 @@ Codegen for inherited field layouts, static method dispatch through inheritance 
 - **as expressions**: `a as Dog` (safe) → RTTI check, branch to `cast.some` (wrap in Optional) or `cast.none` (zeroinitializer), phi merge. `a as! Dog` (force) → RTTI check, branch to `cast.ok` or `cast.panic` (calls `promise_panic`).
 - **Deferred**: Virtual dispatch (vtable), destructure is-patterns (`x is Dog(name)`), generic type RTTI.
 
-## Stage 8j — Unify Compound Types with Named Types (Deferred)
+## Stage 8j — Unify Compound Types with Named Types + Collection Methods (Done)
 
-Reconcile the structural gap between Named types and built-in compound types (Slice, Array, Map).
+Promoted `Slice[T]` and `Map[K,V]` from structural placeholder types (`*types.Slice`, `*types.Map`) to real Named types in the universe scope, represented as `Instance{TypSlice, [T]}` and `Instance{TypMap, [K, V]}`. Method/field lookup flows through the existing `resolveInstanceMember` → `LookupMethod` → type substitution path — the same path used for user-defined generic types.
 
-**Problem:** Named types (`*types.Named`) support fields, methods, inheritance, type parameters, documentation, and deprecation. Compound container types (`*types.Slice`, `*types.Array`, `*types.Map`) are minimal structs with only element type information. This creates an asymmetry throughout the compiler:
+**Type System Changes:**
+- Added `TypSlice = defGeneric("Slice", "T")` to universe scope
+- Deleted `Slice` and `Map` structs from `types/container.go`
+- `NewSlice(elem)` and `NewMap(key, val)` now return `*Instance`
+- Added helper functions `IsSlice`, `AsSlice`, `IsMap`, `AsMap` for clean migration
+- `Instance.String()` overridden so `Slice[int]` displays as `int[]`
+- Deleted `case *Slice:` and `case *Map:` from `equal.go` and `subst.go`
 
-- **Sema**: `.len` is hard-coded as a special case in `checkMemberExpr` for each compound type, rather than being a real field or method lookup.
-- **Codegen**: `genMemberExpr` has parallel special-case branches for compound types vs the general Named field/method dispatch.
-- **No user extensibility**: Users cannot add methods to containers, inherit from them, or document them with meta annotations.
-- **IDE gap**: Compound types have no type signature to display — no doc, no field list, no method list for hover/autocomplete.
+**Native Methods Registered in `builtins.go`:**
+- **Slice[T]**: `len` field, `push(T)`, `pop() → T?`, `contains(T) → bool`, `remove(int)`
+- **Map[K,V]**: `len` field, `contains(K) → bool`, `remove(K) → bool`, `keys() → K[]`, `values() → V[]`
+- **string**: `len` field, `contains(string) → bool`, `starts_with(string) → bool`, `ends_with(string) → bool`, `index_of(string) → int?`, `trim() → string`, `split(string) → string[]`
 
-**Goals:**
+**Runtime:**
+- New `runtime_slice.c`: push (with realloc growth), pop, contains, remove
+- Updated `runtime_map.c`: tombstone support (0=empty, 1=used, 2=tombstone), remove, contains, keys, values
+- Updated `runtime_string.c`: contains, starts_with, ends_with, index_of, trim, split
 
-1. **Type system**: Promote Slice, Array, and Map to Named types (or a shared Named-compatible base) with proper type parameters, so `int[]` resolves to `Slice[int]` which is a Named type with a `len` field and methods like `push`, `pop`, `contains`.
-2. **Sema unification**: Remove special-case branches in `checkMemberExpr` — field/method lookup on containers should go through the same `LookupField`/`LookupMethod` path as user types.
-3. **Codegen unification**: Container `.len` and future methods should use the standard method/field dispatch, with native annotations for runtime-backed implementations.
-4. **Documentation**: Container type declarations become the canonical place for doc annotations, enabling IDE hover, signature help, and go-to-definition.
-5. **Extensibility**: Users could define `type MyList is int[] { fn sum() -> int { ... } }` — inheriting from a container type.
-
-**Approach:**
-
-- Define `Slice[T]`, `Array[T, N]`, `Map[K, V]` as universe Named types in `builtins.go`, similar to how `string`, `int`, etc. are defined today.
-- Add native fields (`len`, `cap`) and native methods (`push`, `pop`, `get`, `set`, `contains`, `keys`, `values`) to these types.
-- Migrate sema special cases into the standard Named type lookup path.
-- Migrate codegen special cases into the standard native method dispatch (possibly extending the `nativeOps` table or adding a `nativeMethods` table).
-- Preserve backward compatibility: `int[]` syntax continues to work, resolving to `Slice[int]`.
-
-**Dependencies:** Stage 8f (generics) is complete, providing the monomorphization infrastructure needed for generic container types.
+**Sema/Codegen Migration:**
+- ~35 `case *types.Slice:` / `case *types.Map:` switch cases migrated to `AsSlice`/`AsMap` helpers
+- `.len` removed as special case — now a real field lookup
+- Array delegates field/method lookup to TypSlice (rejects mutating methods like `push`/`remove`)
 
 ## Stage 9 — Module System (Planned)
 

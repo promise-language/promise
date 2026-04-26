@@ -50,20 +50,6 @@ func Identical(x, y Type) bool {
 		}
 		return xt.size == yt.size && Identical(xt.elem, yt.elem)
 
-	case *Slice:
-		yt, ok := y.(*Slice)
-		if !ok {
-			return false
-		}
-		return Identical(xt.elem, yt.elem)
-
-	case *Map:
-		yt, ok := y.(*Map)
-		if !ok {
-			return false
-		}
-		return Identical(xt.key, yt.key) && Identical(xt.val, yt.val)
-
 	case *Optional:
 		yt, ok := y.(*Optional)
 		if !ok {

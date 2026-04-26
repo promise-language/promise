@@ -767,8 +767,13 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 	}
 
 	targetVal := c.genExpr(e.Target)
-	// Extract instance pointer from value struct
-	instance := c.extractInstancePtr(targetVal)
+	// `this` in methods is already an i8* instance pointer, not a value struct
+	var instance value.Value
+	if _, isThis := e.Target.(*ast.ThisExpr); isThis {
+		instance = targetVal
+	} else {
+		instance = c.extractInstancePtr(targetVal)
+	}
 	typedPtr := c.block.NewBitCast(instance, layout.InstancePtrType)
 
 	fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
@@ -833,8 +838,12 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 	var args []value.Value
 	if method.Sig().Recv() != nil {
 		target := c.genExpr(member.Target)
-		// Extract instance pointer from value struct — methods expect i8* receiver
-		args = append(args, c.extractInstancePtr(target))
+		// `this` is already i8* (instance pointer); other targets are value structs
+		if _, isThis := member.Target.(*ast.ThisExpr); isThis {
+			args = append(args, target)
+		} else {
+			args = append(args, c.extractInstancePtr(target))
+		}
 	}
 	var argVals []value.Value
 	var argTypes []types.Type
@@ -854,12 +863,25 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 	named *types.Named, method *types.Method) value.Value {
 
-	// 1. Evaluate receiver — now a value struct { vtable, instance }
+	// 1. Evaluate receiver
 	receiverVal := c.genExpr(member.Target)
 
-	// 2. Extract vtable and instance from value struct
-	vtableRaw := c.extractVtablePtr(receiverVal)
-	instance := c.extractInstancePtr(receiverVal)
+	// 2. Extract vtable and instance
+	var vtableRaw, instance value.Value
+	if _, isThis := member.Target.(*ast.ThisExpr); isThis {
+		// `this` is already i8* — load vtable from typeinfo chain
+		instance = receiverVal
+		variantPtr := c.loadVariantPtr(receiverVal)
+		// typeinfo field 0 is vtable_ptr
+		typeinfoStruct := irtypes.NewStruct(irtypes.I8Ptr)
+		typeinfoPtr := c.block.NewBitCast(variantPtr, irtypes.NewPointer(typeinfoStruct))
+		vtableFieldPtr := c.block.NewGetElementPtr(typeinfoStruct, typeinfoPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		vtableRaw = c.block.NewLoad(irtypes.I8Ptr, vtableFieldPtr)
+	} else {
+		vtableRaw = c.extractVtablePtr(receiverVal)
+		instance = c.extractInstancePtr(receiverVal)
+	}
 
 	// 3. Index into vtable — use the STATIC type's slot layout
 	slotIndex := named.VirtualMethodIndex(member.Field)
@@ -1175,7 +1197,6 @@ func (c *Compiler) bindMatchPattern(pat ast.MatchPattern, subject value.Value, e
 		if p.Name != "_" {
 			lt := subject.Type()
 			alloca := c.block.NewAlloca(lt)
-			alloca.SetName(p.Name)
 			c.block.NewStore(subject, alloca)
 			c.locals[p.Name] = alloca
 		}
@@ -1225,7 +1246,6 @@ func (c *Compiler) bindEnumDestructure(bindings []string, variantName string, su
 		val := c.block.NewLoad(fieldType, fieldPtr)
 
 		bindAlloca := c.block.NewAlloca(fieldType)
-		bindAlloca.SetName(binding)
 		c.block.NewStore(val, bindAlloca)
 		c.locals[binding] = bindAlloca
 	}
@@ -1708,6 +1728,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	// Generate lambda body
 	c.fn = fn
 	c.locals = make(map[string]*ir.InstAlloca)
+	c.blockCounter = 0
 	c.canError = false
 	c.currentRetType = sig.Result()
 

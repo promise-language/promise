@@ -1,0 +1,38 @@
+print_string(string s) `extern("promise_print_string");
+
+enum Color { Red, Green, Blue }
+
+enum Shape {
+  Circle(f64 radius),
+  Rect(f64 w, f64 h),
+}
+
+color_name(Color c) string {
+  return match c {
+    Color.Red => "red",
+    Color.Green => "green",
+    Color.Blue => "blue",
+  };
+}
+
+main() {
+  // Fieldless enum + match
+  print_string(color_name(Color.Red));
+  print_string(color_name(Color.Green));
+  print_string(color_name(Color.Blue));
+
+  // Data enum + match
+  Shape s = Shape.Circle(3.14);
+  string desc = match s {
+    Shape.Circle(r) => "circle",
+    Shape.Rect(w, h) => "rect",
+  };
+  print_string(desc);
+
+  Shape s2 = Shape.Rect(10.0, 20.0);
+  string desc2 = match s2 {
+    Shape.Circle(r) => "circle",
+    Shape.Rect(w, h) => "rect",
+  };
+  print_string(desc2);
+}

@@ -1,0 +1,57 @@
+print_int(int x) `extern("promise_print_int");
+print_string(string s) `extern("promise_print_string");
+
+type Point {
+  int x;
+  int y;
+
+  sum(&this) int {
+    return this.x + this.y;
+  }
+}
+
+type Animal {
+  string name;
+  speak(&this) string `abstract;
+}
+
+type Dog is Animal {
+  speak(&this) string {
+    return "woof";
+  }
+}
+
+type Cat is Animal {
+  speak(&this) string {
+    return "meow";
+  }
+}
+
+main() {
+  // Constructor + field access
+  p := Point(x: 3, y: 4);
+  print_int(p.x);
+  print_int(p.y);
+
+  // Method call
+  print_int(p.sum());
+
+  // Inheritance + virtual dispatch
+  Dog d = Dog(name: "Rex");
+  print_string(d.name);
+  print_string(d.speak());
+
+  Cat c = Cat(name: "Whiskers");
+  print_string(c.name);
+  print_string(c.speak());
+
+  // Polymorphic: Animal variable holding Dog
+  Animal a = Dog(name: "Buddy");
+  print_string(a.name);
+  print_string(a.speak());
+
+  // Polymorphic: Animal variable holding Cat
+  Animal a2 = Cat(name: "Luna");
+  print_string(a2.name);
+  print_string(a2.speak());
+}

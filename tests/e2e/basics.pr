@@ -1,0 +1,53 @@
+print_int(int x) `extern("promise_print_int");
+print_f64(f64 x) `extern("promise_print_f64");
+print_bool(bool x) `extern("promise_print_bool");
+print_string(string s) `extern("promise_print_string");
+
+main() {
+  // Integers
+  print_int(42);
+  print_int(-7);
+
+  // Float
+  print_f64(3.14);
+
+  // Bool
+  print_bool(true);
+  print_bool(false);
+
+  // String
+  print_string("hello world");
+
+  // Variables and arithmetic
+  int x = 10;
+  int y = 20;
+  print_int(x + y);
+
+  // String concat
+  string a = "foo";
+  string b = "bar";
+  print_string(a + b);
+
+  // If/else
+  if x < y {
+    print_string("x < y");
+  } else {
+    print_string("x >= y");
+  }
+
+  // While loop
+  int i = 0;
+  int sum = 0;
+  while i < 5 {
+    sum += i;
+    i += 1;
+  }
+  print_int(sum);
+
+  // For range
+  int total = 0;
+  for n in 0..10 {
+    total += n;
+  }
+  print_int(total);
+}

@@ -50,6 +50,9 @@ type Compiler struct {
 	// Lambda counter for unique anonymous function names
 	lambdaCounter int
 
+	// Block counter for unique basic block names within a function
+	blockCounter int
+
 	// Target type for contextual type resolution (e.g., NoneLit needs Optional(T))
 	targetType types.Type
 
@@ -335,6 +338,7 @@ func (c *Compiler) defineFuncs(file *ast.File) {
 func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 	c.fn = fn
 	c.locals = make(map[string]*ir.InstAlloca)
+	c.blockCounter = 0
 
 	entry := fn.NewBlock("entry")
 	c.block = entry
@@ -442,7 +446,8 @@ func (c *Compiler) wrapError(errVal value.Value, resultType *irtypes.StructType)
 
 // newBlock creates a new basic block in the current function.
 func (c *Compiler) newBlock(name string) *ir.Block {
-	return c.fn.NewBlock(name)
+	c.blockCounter++
+	return c.fn.NewBlock(fmt.Sprintf("%s.%d", name, c.blockCounter))
 }
 
 // computeUserTypeLayouts computes layouts for all user-declared types in the file.
@@ -586,6 +591,7 @@ func (c *Compiler) defineTypeMethods(file *ast.File) {
 func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.Func) {
 	c.fn = fn
 	c.locals = make(map[string]*ir.InstAlloca)
+	c.blockCounter = 0
 	c.canError = m.Sig().CanError()
 	c.currentRetType = m.Sig().Result()
 

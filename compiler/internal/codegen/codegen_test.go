@@ -3122,9 +3122,9 @@ func TestAsSafeCast(t *testing.T) {
 	`)
 	// Should have RTTI check, then cast.some/cast.none/cast.merge blocks
 	assertContains(t, ir, "call i32 @promise_type_is")
-	assertContains(t, ir, "cast.some:")
-	assertContains(t, ir, "cast.none:")
-	assertContains(t, ir, "cast.merge:")
+	assertContains(t, ir, "cast.some.")
+	assertContains(t, ir, "cast.none.")
+	assertContains(t, ir, "cast.merge.")
 }
 
 func TestAsForcecast(t *testing.T) {
@@ -3138,8 +3138,8 @@ func TestAsForcecast(t *testing.T) {
 	`)
 	// Should have RTTI check, then cast.ok/cast.panic blocks
 	assertContains(t, ir, "call i32 @promise_type_is")
-	assertContains(t, ir, "cast.ok:")
-	assertContains(t, ir, "cast.panic:")
+	assertContains(t, ir, "cast.ok.")
+	assertContains(t, ir, "cast.panic.")
 	assertContains(t, ir, "call void @promise_panic")
 }
 

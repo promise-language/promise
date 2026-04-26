@@ -216,8 +216,13 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 	}
 
 	obj := c.genExpr(target.Target)
-	// Extract instance pointer from value struct
-	instance := c.extractInstancePtr(obj)
+	// `this` is already i8* (instance pointer); other targets are value structs
+	var instance value.Value
+	if _, isThis := target.Target.(*ast.ThisExpr); isThis {
+		instance = obj
+	} else {
+		instance = c.extractInstancePtr(obj)
+	}
 	typedPtr := c.block.NewBitCast(instance, layout.InstancePtrType)
 
 	fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,

@@ -42,9 +42,18 @@ main() {
 
 ## Status
 
-**Stage 1 (current):** Grammar and scaffolding. The ANTLR4 lexer and parser grammars are complete. The `promise` binary can parse `.pr` files, print parse trees, and report syntax errors. 266 tests cover all language constructs.
+**Stage 8h (current):** The compiler pipeline is functional through code generation. Stages 1–8h are complete:
 
-Upcoming stages: AST builder, semantic analysis (type checking, ownership analysis), LLVM IR code generation.
+- **Stages 1–2:** ANTLR4 grammar, CST → AST builder
+- **Stages 3–4:** Type system, semantic analysis (type checking, name resolution, exhaustiveness)
+- **Stage 5:** Generic type substitution, constraint validation, instance tracking
+- **Stage 6:** Ownership analysis (move semantics, borrow tracking, return safety)
+- **Stage 7:** Meta annotation processing
+- **Stage 8a–8h:** LLVM IR codegen — primitives, strings, user types, enums, error handling, generic monomorphization, containers (tuples, optionals, slices, maps, lambdas), optional patterns, string interpolation
+
+The `promise build file.pr` command compiles Promise source to native binaries via LLVM IR + clang. 400+ tests across all packages.
+
+Upcoming stages: module system, full CLI, package manager.
 
 ## Building
 
@@ -81,19 +90,22 @@ promise_lang/
 ├── compiler/                    # Go compiler (single binary)
 │   ├── go.mod
 │   ├── Makefile
-│   ├── cmd/promise/
-│   │   ├── main.go             # CLI entry point
-│   │   └── parse_test.go       # Test suite (266 tests)
-│   ├── grammar/
-│   │   ├── PromiseLexer.g4     # Lexer: keywords, operators, literals, string interpolation
-│   │   └── PromiseParser.g4    # Parser: declarations, statements, expressions
-│   ├── internal/parser/         # ANTLR4-generated Go code (gitignored)
-│   ├── testdata/
-│   │   ├── valid/              # 16 valid fixture files by feature area
-│   │   └── invalid/            # 15 invalid fixture files for error detection
-│   └── tools/                  # ANTLR4 JAR (gitignored)
+│   ├── cmd/promise/             # CLI entry point (build, run, check)
+│   ├── grammar/                 # ANTLR4 lexer/parser grammars
+│   ├── internal/
+│   │   ├── ast/                 # AST builder (CST → typed AST)
+│   │   ├── types/               # Type system (Named, Enum, Scope, generics)
+│   │   ├── sema/                # Semantic analysis (type checking, resolution)
+│   │   ├── ownership/           # Ownership analysis (moves, borrows)
+│   │   ├── codegen/             # LLVM IR code generation
+│   │   └── parser/              # ANTLR4-generated Go code (gitignored)
+│   ├── testdata/                # Parse test fixtures
+│   └── tools/                   # ANTLR4 JAR (gitignored)
+├── runtime/                     # C runtime (strings, maps, print, panic)
 ├── docs/
-│   └── language-design.md
+│   ├── language-design.md       # Full language specification
+│   ├── stages.md                # Compiler implementation roadmap
+│   └── c-binding-architecture.md
 └── README.md
 ```
 

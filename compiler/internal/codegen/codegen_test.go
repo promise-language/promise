@@ -2288,3 +2288,427 @@ func TestLambdaVariable(t *testing.T) {
 	assertContains(t, ir, "alloca i8*")
 	assertContains(t, ir, "store i8*")
 }
+
+// ================================================================
+// Stage 8h — Optional Patterns, String Interpolation & Expression Completeness
+// ================================================================
+
+// --- Part A: If-unwrap ---
+
+func TestIfUnwrap(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int? x = 42;
+			if val := x {
+				int y = val + 1;
+			}
+		}
+	`)
+	assertContains(t, ir, "extractvalue")
+	assertContains(t, ir, "ifunwrap.then")
+	assertContains(t, ir, "ifunwrap.end")
+}
+
+func TestIfUnwrapElse(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int? x = none;
+			if val := x {
+				int y = val;
+			} else {
+				int z = 0;
+			}
+		}
+	`)
+	assertContains(t, ir, "ifunwrap.then")
+	assertContains(t, ir, "ifunwrap.else")
+	assertContains(t, ir, "ifunwrap.end")
+}
+
+// --- Part B: While-unwrap ---
+
+func TestWhileUnwrap(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int? x = 42;
+			while val := x {
+				break;
+			}
+		}
+	`)
+	assertContains(t, ir, "whileunwrap.header")
+	assertContains(t, ir, "whileunwrap.body")
+	assertContains(t, ir, "whileunwrap.exit")
+	assertContains(t, ir, "extractvalue")
+}
+
+func TestWhileUnwrapBreak(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int? x = 10;
+			while val := x {
+				break;
+			}
+		}
+	`)
+	// break should jump to exit block
+	assertContains(t, ir, "br label %whileunwrap.exit")
+}
+
+// --- Part C: Optional chaining ---
+
+func TestOptionalChain(t *testing.T) {
+	ir := generateIR(t, `
+		type Dog { int age; }
+		main() {
+			Dog? d = Dog(age: 3);
+			int? a = d?.age;
+		}
+	`)
+	assertContains(t, ir, "optchain.some")
+	assertContains(t, ir, "optchain.none")
+	assertContains(t, ir, "optchain.merge")
+}
+
+func TestOptionalChainNone(t *testing.T) {
+	ir := generateIR(t, `
+		type Dog { int age; }
+		main() {
+			Dog? d = none;
+			int? a = d?.age;
+		}
+	`)
+	assertContains(t, ir, "optchain.some")
+	assertContains(t, ir, "optchain.none")
+	assertContains(t, ir, "phi")
+}
+
+// --- Part D: String interpolation ---
+
+func TestStringInterpolationIdent(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string name = "world";
+			string msg = "hello {name}";
+		}
+	`)
+	// Should call promise_string_concat
+	assertContains(t, ir, "call i8* @promise_string_concat")
+}
+
+func TestStringInterpolationInt(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int x = 42;
+			string msg = "x = {x}";
+		}
+	`)
+	assertContains(t, ir, "call i8* @promise_int_to_string")
+	assertContains(t, ir, "call i8* @promise_string_concat")
+}
+
+func TestStringInterpolationBool(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			bool flag = true;
+			string msg = "flag: {flag}";
+		}
+	`)
+	assertContains(t, ir, "call i8* @promise_bool_to_string")
+	assertContains(t, ir, "call i8* @promise_string_concat")
+}
+
+func TestStringInterpolationExpr(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string msg = "result: {1 + 2}";
+		}
+	`)
+	assertContains(t, ir, "add i64")
+	assertContains(t, ir, "call i8* @promise_int_to_string")
+	assertContains(t, ir, "call i8* @promise_string_concat")
+}
+
+func TestStringInterpolationMultiple(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int a = 1;
+			int b = 2;
+			string msg = "{a} and {b}";
+		}
+	`)
+	// Two int-to-string conversions and multiple concats
+	count := strings.Count(ir, "call i8* @promise_int_to_string")
+	if count < 2 {
+		t.Errorf("expected at least 2 calls to promise_int_to_string, got %d", count)
+	}
+}
+
+// --- Part E: Unsafe blocks ---
+
+func TestUnsafeBlock(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			unsafe {
+				int x = 42;
+			}
+		}
+	`)
+	assertContains(t, ir, "store i64 42")
+}
+
+// --- Coverage gap tests ---
+
+// genIfExpr: if-as-expression with phi merge
+func TestIfExpression(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int x = if true { 1; } else { 2; };
+		}
+	`)
+	assertContains(t, ir, "if.then")
+	assertContains(t, ir, "if.else")
+	assertContains(t, ir, "if.merge")
+	assertContains(t, ir, "phi i64")
+}
+
+// genClassicForStmt: C-style for loop
+func TestClassicFor(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			for i := 0; i < 10; i += 1 {
+				int x = i;
+			}
+		}
+	`)
+	assertContains(t, ir, "for.header")
+	assertContains(t, ir, "for.body")
+	assertContains(t, ir, "for.update")
+	assertContains(t, ir, "for.exit")
+	assertContains(t, ir, "icmp slt i64")
+	assertContains(t, ir, "add i64")
+}
+
+// genClassicForStmt with typed init
+func TestClassicForTypedInit(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			for int i = 0; i < 5; i += 1 {
+				int x = i;
+			}
+		}
+	`)
+	assertContains(t, ir, "for.header")
+	assertContains(t, ir, "for.exit")
+}
+
+// genContinueStmt
+func TestContinueStmt(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			for i := 0; i < 10; i += 1 {
+				if i < 5 {
+					continue;
+				}
+			}
+		}
+	`)
+	// continue should branch to for.update
+	assertContains(t, ir, "br label %for.update")
+}
+
+// genContinueStmt in while loop
+func TestContinueInWhile(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int i = 0;
+			while i < 10 {
+				i += 1;
+				if i < 5 {
+					continue;
+				}
+			}
+		}
+	`)
+	// continue should branch to while.header
+	assertContains(t, ir, "br label %while.header")
+}
+
+// convertToString: f64 interpolation
+func TestStringInterpolationF64(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			f64 x = 3.14;
+			string msg = "pi is {x}";
+		}
+	`)
+	assertContains(t, ir, "call i8* @promise_f64_to_string")
+	assertContains(t, ir, "call i8* @promise_string_concat")
+}
+
+// convertToString: string passthrough in interpolation
+func TestStringInterpolationStringVar(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string name = "world";
+			string msg = "hello {name}";
+		}
+	`)
+	// No conversion call needed — string is passed directly to concat
+	assertNotContains(t, ir, "call i8* @promise_int_to_string")
+	assertNotContains(t, ir, "call i8* @promise_f64_to_string")
+	assertContains(t, ir, "call i8* @promise_string_concat")
+}
+
+// convertToString: f32 interpolation (fpext to double)
+func TestStringInterpolationF32(t *testing.T) {
+	ir := generateIR(t, `
+		show(f32 x) {
+			string msg = "val: {x}";
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "fpext float")
+	assertContains(t, ir, "call i8* @promise_f64_to_string")
+}
+
+// convertToString: i32 interpolation (sext to i64)
+func TestStringInterpolationI32(t *testing.T) {
+	ir := generateIR(t, `
+		show(i32 x) {
+			string msg = "val: {x}";
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "sext i32")
+	assertContains(t, ir, "call i8* @promise_int_to_string")
+}
+
+// convertToString: u32 interpolation (zext to i64)
+func TestStringInterpolationU32(t *testing.T) {
+	ir := generateIR(t, `
+		show(u32 x) {
+			string msg = "val: {x}";
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "zext i32")
+	assertContains(t, ir, "call i8* @promise_int_to_string")
+}
+
+// unsignedIntOps: basic unsigned arithmetic
+func TestUnsignedIntArithmetic(t *testing.T) {
+	ir := generateIR(t, `
+		compute(uint a, uint b) {
+			uint sum = a + b;
+			uint diff = a - b;
+			uint prod = a * b;
+			uint quot = a / b;
+			uint rem = a % b;
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "add i64")
+	assertContains(t, ir, "sub i64")
+	assertContains(t, ir, "mul i64")
+	assertContains(t, ir, "udiv i64")
+	assertContains(t, ir, "urem i64")
+}
+
+// unsignedIntOps: comparison operators
+func TestUnsignedIntComparison(t *testing.T) {
+	ir := generateIR(t, `
+		compare(uint a, uint b) {
+			bool lt = a < b;
+			bool le = a <= b;
+			bool gt = a > b;
+			bool ge = a >= b;
+			bool eq = a == b;
+			bool ne = a != b;
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "icmp ult i64")
+	assertContains(t, ir, "icmp ule i64")
+	assertContains(t, ir, "icmp ugt i64")
+	assertContains(t, ir, "icmp uge i64")
+	assertContains(t, ir, "icmp eq i64")
+	assertContains(t, ir, "icmp ne i64")
+}
+
+// floatOps: float arithmetic (full coverage)
+func TestFloatArithmeticFull(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			f64 a = 3.14;
+			f64 b = 2.0;
+			f64 sum = a + b;
+			f64 diff = a - b;
+			f64 prod = a * b;
+			f64 quot = a / b;
+		}
+	`)
+	assertContains(t, ir, "fadd double")
+	assertContains(t, ir, "fsub double")
+	assertContains(t, ir, "fmul double")
+	assertContains(t, ir, "fdiv double")
+}
+
+// floatOps: float comparison operators (full coverage)
+func TestFloatComparisonFull(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			f64 a = 3.14;
+			f64 b = 2.0;
+			bool lt = a < b;
+			bool gt = a > b;
+			bool eq = a == b;
+			bool ne = a != b;
+		}
+	`)
+	assertContains(t, ir, "fcmp olt double")
+	assertContains(t, ir, "fcmp ogt double")
+	assertContains(t, ir, "fcmp oeq double")
+	assertContains(t, ir, "fcmp one double")
+}
+
+// resolveEscape: additional escape sequences
+func TestStringEscapeSequences(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string a = "hello\tworld";
+			string b = "line1\rline2";
+			string c = "back\\slash";
+			string d = "null\0end";
+			string e = "quote\"mark";
+		}
+	`)
+	// Each should produce a global string constant
+	assertContains(t, ir, "call i8* @promise_string_new")
+}
+
+// unaryExpr: negation
+func TestUnaryNegation(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int x = -42;
+			f64 y = -3.14;
+		}
+	`)
+	assertContains(t, ir, "sub i64 0")
+	assertContains(t, ir, "fneg double")
+}
+
+// boolOps: boolean equality/inequality
+func TestBoolEquality(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			bool a = true;
+			bool b = false;
+			bool eq = a == b;
+			bool ne = a != b;
+		}
+	`)
+	assertContains(t, ir, "icmp eq i1")
+	assertContains(t, ir, "icmp ne i1")
+}

@@ -43,6 +43,8 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 		c.genIfStmt(s)
 	case *ast.WhileStmt:
 		c.genWhileStmt(s)
+	case *ast.WhileUnwrapStmt:
+		c.genWhileUnwrapStmt(s)
 	case *ast.ForInStmt:
 		c.genForInStmt(s)
 	case *ast.ClassicForStmt:
@@ -310,6 +312,11 @@ func (c *Compiler) genRaiseStmt(s *ast.RaiseStmt) {
 // --- If statement ---
 
 func (c *Compiler) genIfStmt(s *ast.IfStmt) {
+	if s.Binding != "" {
+		c.genIfUnwrapStmt(s)
+		return
+	}
+
 	cond := c.genExpr(s.Cond)
 
 	thenBlock := c.newBlock("if.then")
@@ -331,6 +338,59 @@ func (c *Compiler) genIfStmt(s *ast.IfStmt) {
 	}
 
 	// Else branch
+	if s.Else != nil {
+		c.block = elseBlock
+		c.genStmt(s.Else)
+		if c.block.Term == nil {
+			c.block.NewBr(mergeBlock)
+		}
+	}
+
+	c.block = mergeBlock
+}
+
+// genIfUnwrapStmt handles if-unwrap: if val := optExpr { } else { }
+// Evaluates the optional, checks the present flag, binds the unwrapped value in the then block.
+func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
+	optVal := c.genExpr(s.Init)
+
+	// Extract flag (field 0 of { i1, T } struct)
+	flag := c.block.NewExtractValue(optVal, 0)
+
+	thenBlock := c.newBlock("ifunwrap.then")
+	mergeBlock := c.newBlock("ifunwrap.end")
+
+	var elseBlock *ir.Block
+	if s.Else != nil {
+		elseBlock = c.newBlock("ifunwrap.else")
+		c.block.NewCondBr(flag, thenBlock, elseBlock)
+	} else {
+		c.block.NewCondBr(flag, thenBlock, mergeBlock)
+	}
+
+	// Then: unwrap value, bind to local (scoped to then-block only)
+	c.block = thenBlock
+	innerVal := c.block.NewExtractValue(optVal, 1)
+	innerType := innerVal.Type()
+	alloca := c.block.NewAlloca(innerType)
+	alloca.SetName(s.Binding)
+	c.block.NewStore(innerVal, alloca)
+	prev, hadPrev := c.locals[s.Binding]
+	c.locals[s.Binding] = alloca
+
+	c.genBlock(s.Body)
+	if c.block.Term == nil {
+		c.block.NewBr(mergeBlock)
+	}
+
+	// Remove binding from scope (it's only visible in the then-block)
+	if hadPrev {
+		c.locals[s.Binding] = prev
+	} else {
+		delete(c.locals, s.Binding)
+	}
+
+	// Else (optional)
 	if s.Else != nil {
 		c.block = elseBlock
 		c.genStmt(s.Else)
@@ -366,6 +426,53 @@ func (c *Compiler) genWhileStmt(s *ast.WhileStmt) {
 	c.genBlock(s.Body)
 	if c.block.Term == nil {
 		c.block.NewBr(headerBlock)
+	}
+
+	c.breakTarget = savedBreak
+	c.continueTarget = savedContinue
+	c.block = exitBlock
+}
+
+// genWhileUnwrapStmt handles while-unwrap: while val := optExpr { }
+// Each iteration evaluates the optional; loop continues while present.
+func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
+	headerBlock := c.newBlock("whileunwrap.header")
+	bodyBlock := c.newBlock("whileunwrap.body")
+	exitBlock := c.newBlock("whileunwrap.exit")
+
+	c.block.NewBr(headerBlock)
+
+	// Header: evaluate optional, check flag
+	c.block = headerBlock
+	optVal := c.genExpr(s.Value)
+	flag := c.block.NewExtractValue(optVal, 0)
+	c.block.NewCondBr(flag, bodyBlock, exitBlock)
+
+	// Body: unwrap value, bind to local
+	savedBreak := c.breakTarget
+	savedContinue := c.continueTarget
+	c.breakTarget = exitBlock
+	c.continueTarget = headerBlock
+
+	c.block = bodyBlock
+	innerVal := c.block.NewExtractValue(optVal, 1)
+	innerType := innerVal.Type()
+	alloca := c.block.NewAlloca(innerType)
+	alloca.SetName(s.Binding)
+	c.block.NewStore(innerVal, alloca)
+	prev, hadPrev := c.locals[s.Binding]
+	c.locals[s.Binding] = alloca
+
+	c.genBlock(s.Body)
+	if c.block.Term == nil {
+		c.block.NewBr(headerBlock)
+	}
+
+	// Remove binding from scope (it's only visible in the loop body)
+	if hadPrev {
+		c.locals[s.Binding] = prev
+	} else {
+		delete(c.locals, s.Binding)
 	}
 
 	c.breakTarget = savedBreak

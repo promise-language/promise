@@ -159,6 +159,16 @@ func (c *Compiler) declareIntrinsics() {
 		ir.NewParam("key_out", irtypes.I8Ptr),
 		ir.NewParam("val_out", irtypes.I8Ptr))
 
+	// Value-to-string conversion for string interpolation
+	c.funcs["promise_int_to_string"] = c.module.NewFunc("promise_int_to_string",
+		irtypes.I8Ptr, ir.NewParam("x", irtypes.I64))
+
+	c.funcs["promise_f64_to_string"] = c.module.NewFunc("promise_f64_to_string",
+		irtypes.I8Ptr, ir.NewParam("x", irtypes.Double))
+
+	c.funcs["promise_bool_to_string"] = c.module.NewFunc("promise_bool_to_string",
+		irtypes.I8Ptr, ir.NewParam("x", irtypes.I8))
+
 	// String hash/eq for map keys (dereferences i8* to hash/compare content)
 	c.funcs["promise_hash_string"] = c.module.NewFunc("promise_hash_string",
 		irtypes.I64,

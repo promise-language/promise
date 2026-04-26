@@ -28,6 +28,11 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 		typ = types.TypChar
 
 	case *ast.StringLit:
+		for _, part := range e.Parts {
+			if interp, ok := part.(ast.StringInterp); ok && interp.Expr != nil {
+				c.checkExpr(interp.Expr)
+			}
+		}
 		typ = types.TypString
 
 	case *ast.NoneLit:

@@ -21,6 +21,8 @@ Implementation stages for the Promise compiler pipeline.
 | 8d | `compiler/internal/codegen/` | Enums: tagged unions, pattern matching, destructure bindings | Done |
 | 8e | `compiler/internal/codegen/` | Error handling: raise, propagation, unwrap, handlers | Done |
 | 8f | `compiler/internal/codegen/` | Generic monomorphization: type-specialized layouts and methods | Done |
+| 8g | `compiler/internal/codegen/` | Containers: tuples, optionals, slices, maps, lambdas | Done |
+| 8h | `compiler/internal/codegen/` | Optional patterns, string interpolation, expression completeness | Done |
 | 9 | `compiler/internal/module/` | Module resolution, dependency graph | Planned |
 | 10 | `cmd/promise/` | CLI entry point (build, run, test, fmt, etc.) | Planned |
 | 11 | `pkg/` | Package manager: fetch, resolve, lock | Planned |
@@ -202,7 +204,6 @@ Type-system-driven LLVM IR generation for primitive types, arithmetic, control f
 
 ### Deferred sub-stages
 
-- **8g**: Containers (Array, Slice, Map, Tuple), lambdas, optionals
 - **8h**: Ownership-aware memory management (free/drop)
 - **8i**: Concurrency (go, Task, Channel, `<-`)
 
@@ -221,7 +222,7 @@ String type codegen: representation, literals, concatenation, equality, extern A
 - **C runtime** (`runtime_string.c`): `promise_string_new` (malloc + memcpy), `promise_string_concat`, `promise_string_eq`, `promise_print_string` (fwrite). No null terminator — uses `len` field exclusively.
 - **Header generation**: String layout always emitted (built-in type). Instance struct uses C99 flexible array member `char data[]`.
 - **Scope**: Literals, variables, concatenation (`+`), equality (`==`, `!=`), extern passing/returning, empty strings.
-- **Deferred**: String interpolation, methods (`.len`, `.contains`, etc.), slicing, Unicode normalization.
+- **Deferred**: Methods (`.len`, `.contains`, etc.), slicing, Unicode normalization. String interpolation completed in Stage 8h.
 
 ## Stage 8c — User Types (Done)
 
@@ -274,7 +275,7 @@ Error handling codegen: failable function declarations, raise statements, error 
 - **Error handler** (`? binding { body }`): `genErrorHandlerExpr` branches to handler block (binds error, generates body) or ok block, merges with phi node.
 - **Auto-terminator**: Failable functions without explicit terminator return an Ok-wrapped zero value.
 - **Scope**: Failable functions/methods, raise, `?` propagation, `!` unwrap, `? binding { body }` handlers, void failables.
-- **Deferred**: Failable extern functions (C ABI for errors), if-unwrap/while-unwrap (optional types — Stage 8g).
+- **Deferred**: Failable extern functions (C ABI for errors). If-unwrap/while-unwrap completed in Stage 8h.
 
 ## Stage 8f — Generic Monomorphization (Done)
 
@@ -301,6 +302,48 @@ Generic function sema support and type-specialized code generation for all gener
 - **Layout-driven field types**: All field load/store/zero-init operations use `layout.Instance.Fields[idx].LLVMType` instead of `llvmType(field.Type())`, which correctly handles TypeParam substitution.
 - **Scope**: Generic user type instantiation (layout, constructor, field access/assignment, methods), generic enum instantiation (tagged union, variant values/constructors, pattern matching, destructure bindings), generic functions (single type parameter, void/non-void/failable), multiple instantiations of same generic.
 - **Deferred**: Type argument inference (explicit type args only), multi-arg generics in expression context (grammar limitation), extern ABI for generic types, C header generation for monomorphic types, container types (Array, Slice, Map, Tuple — Stage 8g).
+
+## Stage 8g — Container Codegen (Done)
+
+Codegen for container types (tuples, optionals, slices, maps) and non-capturing lambdas.
+
+**Files:** Updates to `codegen/compiler.go`, `codegen/types.go`, `codegen/expr.go`, `codegen/stmt.go`; new `runtime/runtime_map.c` (~205 LOC); 29 new tests (119 total codegen tests)
+
+- **Tuples**: Value type, LLVM struct `{ T0, T1, ... }`. Literals via `insertvalue`, destructuring (`(a, b) := expr`) via `extractvalue`. Mixed-type tuples supported.
+- **Optionals**: Value type, `{ i1, T }` struct. `none` = zeroinitializer, some = `{ true, val }`. `targetType` field on Compiler resolves contextual type for `NoneLit` (sema records `TypNone` but codegen needs `Optional(T)`). `lookupLocalType` detects `OptionalTypeRef` annotations and resolves declared types from sema scopes.
+- **Elvis operator** (`?:`): `genElvis` extracts flag, condBr → some block (extract value) / none block (evaluate default), phi merge.
+- **Optional wrapping**: Assigning `T` to `T?` variable auto-wraps via `wrapOptional` (insertvalue `{ true, val }`).
+- **Slices / Array literals**: Heap-allocated `i8*` → `{ i64 len, i64 cap, [data...] }`. 16-byte header + inline elements. `genArrayLit` mallocs, stores header via GEP, stores elements via typed GEP past header. Both `*types.Slice` and `*types.Array` map to `i8Ptr`.
+- **Slice indexing**: Bounds-checked with `icmp ult` (unsigned, catches negative indices). Out-of-bounds calls `promise_panic` + `unreachable`. Read via `genSliceIndex`, write via `genSliceIndexAssign` (supports compound assignment like `arr[i] += 1`).
+- **Maps**: Type-erased C runtime hash table (`runtime/runtime_map.c`). Open-addressing with FNV-1a hash, 75% load rehash. Entry layout: `[used:1][key_bytes][val_bytes]` inline. Functions: `promise_map_new`, `promise_map_set`, `promise_map_get`, `promise_map_len`, `promise_map_iter_next`.
+- **String map keys**: Content-based hashing via `promise_hash_string` / `promise_eq_string` function pointers (dereference `i8*` to read string header). Byte-level hash/compare for primitive keys (NULL function pointers → default).
+- **Map indexing**: `m["key"]` returns `Optional(V)` — calls `promise_map_get`, checks NULL, wraps in `{ i1, V }` via phi merge. Assignment via `promise_map_set`.
+- **For-in iteration**: `genForInStmt` dispatches on iterable type. Slices: counter loop with bounds check per element. Maps: `promise_map_iter_next` loop building `(K, V)` tuple per entry. Ranges: existing `genForInRange` extracted.
+- **Lambdas (non-capturing)**: Anonymous LLVM functions (`.lambda.N`) with resolved param/return types. Compiler state saved/restored (fn, block, locals, canError). Returned as `i8*` via bitcast. Handles both expression body (`|x| -> x + 1`) and block body (`|x| -> int { return x * 2; }`).
+- **Lambda calls**: `genCallExpr` detects local variables with `*types.Signature` type before regular function lookup. Loads `i8*`, bitcasts to typed function pointer, indirect call via `genIndirectCall`.
+- **Intrinsics** (`compiler.go`): 7 new map runtime functions declared in `declareIntrinsics`. `lambdaCounter` and `targetType` fields added to Compiler.
+- **Scope**: Tuple literals/destructure/return, optional none/some/wrapping/elvis, array literals, slice/array indexing (read/write/compound), for-in over slices/arrays/maps, map literals/indexing/assignment, non-capturing lambdas (expression/block body, indirect calls).
+- **Deferred**: Capturing lambdas/closures, slice growth (`.push()`), map/slice methods (`.len`, `.contains`), fixed-size arrays as stack-allocated `[N x T]`, `llvmTypeSize` struct alignment (current implementation sums without padding — correct for primitive elements, under-allocates for struct-typed slice elements). String interpolation, if-unwrap/while-unwrap, optional chaining, and unsafe blocks completed in Stage 8h.
+
+## Stage 8h — Optional Patterns, String Interpolation & Expression Completeness (Done)
+
+Codegen for if-unwrap, while-unwrap, optional chaining, string interpolation, and unsafe blocks.
+
+**Files:** Updates to `codegen/expr.go`, `codegen/stmt.go`, `codegen/compiler.go`, `ast/expr.go`, `ast/visit_expr.go`, `sema/expr.go`, `runtime/runtime_string.c`; 12 new tests (131 total codegen tests)
+
+- **If-unwrap**: `if val := optExpr { }` — `genIfUnwrapStmt` extracts flag from `{ i1, T }` optional, condBr to then-block where inner value is extracted and bound to a scoped local. Optional else-block. Binding variable saved/restored to prevent scope leak.
+- **While-unwrap**: `while val := optExpr { }` — `genWhileUnwrapStmt` with header/body/exit blocks. Optional re-evaluated each iteration in header. break/continue targets set correctly. Same scope-leak fix as if-unwrap.
+- **Optional chaining**: `x?.field` — `genOptionalChainExpr` checks optional flag, accesses field on inner value in some-block, wraps result in `Optional(FieldType)`. None-block produces zeroinitializer. Phi merge at end. `genFieldOnValue` helper extracted for field access on raw values.
+- **String interpolation** (cross-cutting):
+  - **AST**: `StringInterp` gains `Expr` field (parsed expression from `{expr}` syntax).
+  - **AST builder**: `parseInterpolationExpr` re-lexes/re-parses expression text via fresh ANTLR lexer/parser. `offsetExprPositions` recursively adjusts AST node positions to match original source locations.
+  - **Sema**: StringLit case extended to type-check interpolation expressions.
+  - **Runtime**: `promise_int_to_string`, `promise_f64_to_string`, `promise_bool_to_string` conversion functions in `runtime_string.c` using `snprintf`.
+  - **Codegen**: `genStringLit` split into `genStaticString` (compile-time, no interpolation) and `genInterpolatedString` (runtime). `convertToString` handles all primitive types with sext/zext/fpext as needed. Parts concatenated via `promise_string_concat`.
+  - **Intrinsics**: 3 new conversion functions declared in `declareIntrinsics`.
+- **Unsafe blocks**: `genUnsafeExpr` trivially generates block contents. Ownership analysis handles the "unsafe" semantics, not codegen.
+- **Scope**: If-unwrap (with/without else), while-unwrap (with break/continue), optional chaining on user type fields, string interpolation with identifiers/literals/expressions/multiple parts, unsafe blocks.
+- **Deferred**: `is`/`as` expressions (need RTTI), generators (`yield`), concurrency (`go`, `Task`, `Channel`), container methods (`.len`, `.push`), user type `toString()` for interpolation.
 
 ## Stage 9 — Module System (Planned)
 

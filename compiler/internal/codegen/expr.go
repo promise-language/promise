@@ -65,6 +65,11 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		return c.genIndexExpr(e)
 	case *ast.LambdaExpr:
 		return c.genLambdaExpr(e)
+	case *ast.OptionalChainExpr:
+		return c.genOptionalChainExpr(e)
+	case *ast.UnsafeExpr:
+		c.genBlock(e.Body)
+		return nil
 	default:
 		panic(fmt.Sprintf("codegen: unhandled expression type %T", expr))
 	}
@@ -117,7 +122,14 @@ func (c *Compiler) genBoolLit(e *ast.BoolLit) value.Value {
 }
 
 func (c *Compiler) genStringLit(e *ast.StringLit) value.Value {
-	// Resolve string parts into a byte string
+	if hasInterpolation(e.Parts) {
+		return c.genInterpolatedString(e)
+	}
+	return c.genStaticString(e)
+}
+
+// genStaticString handles strings with no interpolation — compile-time constant path.
+func (c *Compiler) genStaticString(e *ast.StringLit) value.Value {
 	var buf strings.Builder
 	for _, part := range e.Parts {
 		switch p := part.(type) {
@@ -125,27 +137,111 @@ func (c *Compiler) genStringLit(e *ast.StringLit) value.Value {
 			buf.WriteString(p.Text)
 		case ast.StringEscape:
 			buf.WriteString(resolveEscape(p.Sequence))
-		case ast.StringInterp:
-			// String interpolation not yet supported in codegen
-			panic("codegen: string interpolation not yet implemented")
 		}
 	}
-	str := buf.String()
+	return c.makeRuntimeString(buf.String())
+}
 
-	// Create global constant with string data
-	data := constant.NewCharArrayFromString(str)
+// genInterpolatedString handles strings with interpolation — runtime concatenation path.
+func (c *Compiler) genInterpolatedString(e *ast.StringLit) value.Value {
+	var parts []value.Value
+	var staticBuf strings.Builder
+
+	for _, part := range e.Parts {
+		switch p := part.(type) {
+		case ast.StringText:
+			staticBuf.WriteString(p.Text)
+		case ast.StringEscape:
+			staticBuf.WriteString(resolveEscape(p.Sequence))
+		case ast.StringInterp:
+			// Flush static buffer as a string
+			if staticBuf.Len() > 0 {
+				parts = append(parts, c.makeRuntimeString(staticBuf.String()))
+				staticBuf.Reset()
+			}
+			// Evaluate expression and convert to string
+			val := c.genExpr(p.Expr)
+			strVal := c.convertToString(val, c.info.Types[p.Expr])
+			parts = append(parts, strVal)
+		}
+	}
+	// Flush remaining static text
+	if staticBuf.Len() > 0 {
+		parts = append(parts, c.makeRuntimeString(staticBuf.String()))
+	}
+
+	// Concatenate all parts
+	if len(parts) == 0 {
+		return c.makeRuntimeString("")
+	}
+	result := parts[0]
+	for _, part := range parts[1:] {
+		result = c.block.NewCall(c.funcs["promise_string_concat"], result, part)
+	}
+	return result
+}
+
+// makeRuntimeString creates a global string constant and calls promise_string_new.
+func (c *Compiler) makeRuntimeString(s string) value.Value {
+	data := constant.NewCharArrayFromString(s)
 	globalName := fmt.Sprintf(".str.%d", c.strCounter)
 	c.strCounter++
 	global := c.module.NewGlobalDef(globalName, data)
 	global.Immutable = true
 
-	// GEP to get i8* pointer to the data
 	ptr := c.block.NewGetElementPtr(global.ContentType, global,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 
-	// Call promise_string_new(ptr, len) → i8*
 	return c.block.NewCall(c.funcs["promise_string_new"],
-		ptr, constant.NewInt(irtypes.I64, int64(len(str))))
+		ptr, constant.NewInt(irtypes.I64, int64(len(s))))
+}
+
+// convertToString converts a value to a string (i8*) for interpolation.
+func (c *Compiler) convertToString(val value.Value, typ types.Type) value.Value {
+	named := extractNamed(typ)
+	if named == nil {
+		panic(fmt.Sprintf("codegen: cannot convert %s to string for interpolation", typ))
+	}
+	switch named {
+	case types.TypString:
+		return val // already a string
+	case types.TypInt, types.TypI64:
+		return c.block.NewCall(c.funcs["promise_int_to_string"], val)
+	case types.TypI32:
+		ext := c.block.NewSExt(val, irtypes.I64)
+		return c.block.NewCall(c.funcs["promise_int_to_string"], ext)
+	case types.TypI16:
+		ext := c.block.NewSExt(val, irtypes.I64)
+		return c.block.NewCall(c.funcs["promise_int_to_string"], ext)
+	case types.TypI8:
+		ext := c.block.NewSExt(val, irtypes.I64)
+		return c.block.NewCall(c.funcs["promise_int_to_string"], ext)
+	case types.TypUint, types.TypU64:
+		return c.block.NewCall(c.funcs["promise_int_to_string"], val)
+	case types.TypU32, types.TypU16, types.TypU8:
+		ext := c.block.NewZExt(val, irtypes.I64)
+		return c.block.NewCall(c.funcs["promise_int_to_string"], ext)
+	case types.TypF64:
+		return c.block.NewCall(c.funcs["promise_f64_to_string"], val)
+	case types.TypF32:
+		ext := c.block.NewFPExt(val, irtypes.Double)
+		return c.block.NewCall(c.funcs["promise_f64_to_string"], ext)
+	case types.TypBool:
+		i8Val := c.block.NewZExt(val, irtypes.I8)
+		return c.block.NewCall(c.funcs["promise_bool_to_string"], i8Val)
+	default:
+		panic(fmt.Sprintf("codegen: cannot convert %s to string for interpolation", typ))
+	}
+}
+
+// hasInterpolation checks if a string literal contains any interpolation parts.
+func hasInterpolation(parts []ast.StringPart) bool {
+	for _, part := range parts {
+		if _, ok := part.(ast.StringInterp); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveEscape converts an escape sequence token to its string value.
@@ -1456,6 +1552,92 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 
 	// Return function pointer as i8*
 	return c.block.NewBitCast(fn, irtypes.I8Ptr)
+}
+
+// --- Optional Chaining ---
+
+// genOptionalChainExpr generates x?.field — checks if the optional is present,
+// accesses the field on the inner value in the some-block, returns none in the none-block.
+func (c *Compiler) genOptionalChainExpr(e *ast.OptionalChainExpr) value.Value {
+	optVal := c.genExpr(e.Target)
+
+	// Extract flag (field 0)
+	flag := c.block.NewExtractValue(optVal, 0)
+
+	someBlock := c.newBlock("optchain.some")
+	noneBlock := c.newBlock("optchain.none")
+	mergeBlock := c.newBlock("optchain.merge")
+
+	c.block.NewCondBr(flag, someBlock, noneBlock)
+
+	// Some: extract inner value, access field, wrap in Optional
+	c.block = someBlock
+	innerVal := c.block.NewExtractValue(optVal, 1)
+
+	// Resolve the inner type from sema
+	targetType := c.info.Types[e.Target]
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+	optType := targetType.(*types.Optional)
+	innerType := optType.Elem()
+
+	// Access field on inner value
+	fieldVal := c.genFieldOnValue(innerVal, innerType, e.Field)
+
+	// Determine the result Optional type from sema
+	resultType := c.info.Types[e]
+	if c.typeSubst != nil {
+		resultType = types.Substitute(resultType, c.typeSubst)
+	}
+	resultLLVM := c.resolveType(resultType).(*irtypes.StructType)
+
+	someResult := c.wrapOptional(fieldVal, resultLLVM)
+	c.block.NewBr(mergeBlock)
+	someEnd := c.block
+
+	// None: zeroinit Optional
+	c.block = noneBlock
+	noneResult := constant.NewZeroInitializer(resultLLVM)
+	c.block.NewBr(mergeBlock)
+	noneEnd := c.block
+
+	// Merge
+	c.block = mergeBlock
+	return mergeBlock.NewPhi(
+		&ir.Incoming{X: someResult, Pred: someEnd},
+		&ir.Incoming{X: noneResult, Pred: noneEnd},
+	)
+}
+
+// genFieldOnValue accesses a field on a value of a known type.
+// For user types (i8* pointers), it does bitcast + GEP. For other types, panics.
+func (c *Compiler) genFieldOnValue(val value.Value, typ types.Type, fieldName string) value.Value {
+	named := extractNamed(typ)
+	if named == nil {
+		panic(fmt.Sprintf("codegen: cannot access field %s on type %s", fieldName, typ))
+	}
+
+	field := named.LookupField(fieldName)
+	if field == nil {
+		panic(fmt.Sprintf("codegen: no field %s on type %s", fieldName, named))
+	}
+
+	layout := c.lookupTypeLayout(typ)
+	if layout == nil {
+		panic(fmt.Sprintf("codegen: no layout for type %s", typ))
+	}
+
+	fieldIdx, ok := layout.InstanceFieldIndex[field.Name()]
+	if !ok {
+		panic(fmt.Sprintf("codegen: field %s not in instance layout for %s", field.Name(), typ))
+	}
+
+	typedPtr := c.block.NewBitCast(val, layout.InstancePtrType)
+	fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+
+	return c.block.NewLoad(layout.Instance.Fields[fieldIdx].LLVMType, fieldPtr)
 }
 
 // genIndirectCall calls a function through a function pointer (i8*).

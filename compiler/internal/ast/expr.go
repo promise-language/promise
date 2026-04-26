@@ -251,7 +251,8 @@ func (StringEscape) stringPartTag() {}
 
 // StringInterp is an interpolation segment in a string.
 type StringInterp struct {
-	Raw string // text between { }
+	Raw  string // text between { } (for debugging)
+	Expr Expr   // parsed expression (nil if parse failed)
 }
 
 func (StringInterp) stringPartTag() {}

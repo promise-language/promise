@@ -30,3 +30,24 @@ void promise_print_string(promise_string_v s) {
     fwrite(s._instance->data, 1, s._instance->len, stdout);
     putchar('\n');
 }
+
+// --- Value-to-string conversion for string interpolation ---
+
+promise_string_i* promise_int_to_string(int64_t x) {
+    char buf[32];
+    int len = snprintf(buf, sizeof(buf), "%lld", (long long)x);
+    return promise_string_new(buf, len);
+}
+
+promise_string_i* promise_f64_to_string(double x) {
+    char buf[64];
+    int len = snprintf(buf, sizeof(buf), "%g", x);
+    return promise_string_new(buf, len);
+}
+
+promise_string_i* promise_bool_to_string(int8_t x) {
+    if (x) {
+        return promise_string_new("true", 4);
+    }
+    return promise_string_new("false", 5);
+}

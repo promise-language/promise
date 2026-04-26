@@ -1,6 +1,9 @@
 package ast
 
-import "djabi.dev/go/promise_lang/internal/parser"
+import (
+	"djabi.dev/go/promise_lang/internal/parser"
+	antlr "github.com/antlr4-go/antlr/v4"
+)
 
 // Binary expression visitors
 
@@ -299,7 +302,11 @@ func (b *Builder) VisitStringLiteral(ctx *parser.StringLiteralContext) interface
 		} else if e := spc.STRING_ESCAPE(); e != nil {
 			node.Parts = append(node.Parts, StringEscape{Sequence: e.GetText()})
 		} else if i := spc.STRING_INTERP(); i != nil {
-			node.Parts = append(node.Parts, StringInterp{Raw: i.GetText()})
+			raw := i.GetText()
+			exprText := raw[1 : len(raw)-1] // strip { }
+			tok := i.GetSymbol()
+			expr := b.parseInterpolationExpr(exprText, tok.GetLine(), tok.GetColumn()+1)
+			node.Parts = append(node.Parts, StringInterp{Raw: raw, Expr: expr})
 		}
 	}
 	return node
@@ -518,4 +525,84 @@ func (b *Builder) VisitArg(ctx *parser.ArgContext) interface{} {
 		node.Name = id.GetText()
 	}
 	return node
+}
+
+// parseInterpolationExpr re-lexes/re-parses the text between {} in a string interpolation.
+// outerLine and outerCol are the position of the expression text in the original source file,
+// used to offset the re-parsed AST node positions.
+func (b *Builder) parseInterpolationExpr(text string, outerLine, outerCol int) Expr {
+	input := antlr.NewInputStream(text)
+	lexer := parser.NewPromiseLexer(input)
+	lexer.RemoveErrorListeners()
+	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+	p := parser.NewPromiseParser(stream)
+	p.RemoveErrorListeners()
+	tree := p.Expression()
+	result := tree.Accept(b)
+	if expr, ok := result.(Expr); ok {
+		offsetExprPositions(expr, outerLine-1, outerCol)
+		return expr
+	}
+	return nil
+}
+
+// offsetExprPositions adjusts the position of an expression node to account for
+// being parsed from a string interpolation context. lineOffset is added to line numbers,
+// and colOffset is added to column numbers for nodes on the first line (line 1).
+func offsetExprPositions(expr Expr, lineOffset, colOffset int) {
+	if expr == nil {
+		return
+	}
+	adjustPos := func(p *Pos) {
+		if p.Line == 1 {
+			p.Column += colOffset
+		}
+		p.Line += lineOffset
+	}
+	switch e := expr.(type) {
+	case *IdentExpr:
+		adjustPos(&e.pos)
+		adjustPos(&e.end)
+	case *IntLit:
+		adjustPos(&e.pos)
+		adjustPos(&e.end)
+	case *FloatLit:
+		adjustPos(&e.pos)
+		adjustPos(&e.end)
+	case *BoolLit:
+		adjustPos(&e.pos)
+		adjustPos(&e.end)
+	case *StringLit:
+		adjustPos(&e.pos)
+		adjustPos(&e.end)
+	case *BinaryExpr:
+		adjustPos(&e.pos)
+		adjustPos(&e.end)
+		offsetExprPositions(e.Left, lineOffset, colOffset)
+		offsetExprPositions(e.Right, lineOffset, colOffset)
+	case *UnaryExpr:
+		adjustPos(&e.pos)
+		adjustPos(&e.end)
+		offsetExprPositions(e.Operand, lineOffset, colOffset)
+	case *ParenExpr:
+		adjustPos(&e.pos)
+		adjustPos(&e.end)
+		offsetExprPositions(e.Expr, lineOffset, colOffset)
+	case *CallExpr:
+		adjustPos(&e.pos)
+		adjustPos(&e.end)
+		offsetExprPositions(e.Callee, lineOffset, colOffset)
+		for _, arg := range e.Args {
+			offsetExprPositions(arg.Value, lineOffset, colOffset)
+		}
+	case *MemberExpr:
+		adjustPos(&e.pos)
+		adjustPos(&e.end)
+		offsetExprPositions(e.Target, lineOffset, colOffset)
+	case *IndexExpr:
+		adjustPos(&e.pos)
+		adjustPos(&e.end)
+		offsetExprPositions(e.Target, lineOffset, colOffset)
+		offsetExprPositions(e.Index, lineOffset, colOffset)
+	}
 }

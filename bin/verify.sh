@@ -5,6 +5,15 @@ trap 'if [ $? -ne 0 ]; then echo "----------------------------------------------
 
 cd "$(dirname "$0")/../compiler"
 
+echo "Formatting..."
+gofmt -w .
+
+echo "Vetting..."
+go vet $(go list ./... | grep -v /internal/parser)
+
+echo "Building all packages..."
+go build ./... 2>&1
+
 echo "Running all tests..."
 go test ./... || exit 1
 

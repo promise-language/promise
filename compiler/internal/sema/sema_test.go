@@ -2272,3 +2272,106 @@ func TestCopyEnumWithCopyVariantFields(t *testing.T) {
 		enum Expr `+"`copy"+` { Lit(int v), Neg(int v) }
 	`)
 }
+
+// --- Generic function tests ---
+
+func TestGenericFuncDecl(t *testing.T) {
+	info := checkOK(t, `
+		identity[T](T x) T { return x; }
+		main() { }
+	`)
+	// Verify that identity has a Signature with TypeParams
+	for _, scope := range info.Scopes {
+		if obj := scope.Lookup("identity"); obj != nil {
+			fn, ok := obj.(*types.Func)
+			if !ok {
+				t.Fatal("identity is not a Func")
+			}
+			sig, ok := fn.Type().(*types.Signature)
+			if !ok || sig == nil {
+				t.Fatal("identity has no signature")
+			}
+			if len(sig.TypeParams()) != 1 {
+				t.Fatalf("expected 1 type param, got %d", len(sig.TypeParams()))
+			}
+			if sig.TypeParams()[0].Obj().Name() != "T" {
+				t.Fatalf("expected type param T, got %s", sig.TypeParams()[0].Obj().Name())
+			}
+			return
+		}
+	}
+	t.Fatal("identity function not found")
+}
+
+func TestGenericFuncCall(t *testing.T) {
+	info := checkOK(t, `
+		identity[T](T x) T { return x; }
+		main() {
+			int r := identity[int](42);
+		}
+	`)
+	if len(info.FuncInstances) != 1 {
+		t.Fatalf("expected 1 FuncInstance, got %d", len(info.FuncInstances))
+	}
+	fi := info.FuncInstances[0]
+	if fi.Func.Name() != "identity" {
+		t.Fatalf("expected func identity, got %s", fi.Func.Name())
+	}
+	if len(fi.TypeArgs) != 1 {
+		t.Fatalf("expected 1 type arg, got %d", len(fi.TypeArgs))
+	}
+	if fi.Sig.Result() != types.TypInt {
+		t.Fatalf("expected result int, got %s", fi.Sig.Result())
+	}
+}
+
+func TestGenericFuncBodyTypeCheck(t *testing.T) {
+	checkOK(t, `
+		identity[T](T x) T {
+			T y := x;
+			return y;
+		}
+		main() {
+			int r := identity[int](42);
+		}
+	`)
+}
+
+func TestGenericFuncCallWrongType(t *testing.T) {
+	errs := checkErrs(t, `
+		identity[T](T x) T { return x; }
+		main() {
+			int r := identity[int]("hello");
+		}
+	`)
+	expectError(t, errs, "not assignable")
+}
+
+func TestGenericFuncMultipleInstances(t *testing.T) {
+	info := checkOK(t, `
+		identity[T](T x) T { return x; }
+		main() {
+			int a := identity[int](42);
+			string b := identity[string]("hi");
+		}
+	`)
+	if len(info.FuncInstances) != 2 {
+		t.Fatalf("expected 2 FuncInstances, got %d", len(info.FuncInstances))
+	}
+}
+
+func TestGenericFuncStringResult(t *testing.T) {
+	info := checkOK(t, `
+		identity[T](T x) T { return x; }
+		main() {
+			string s := identity[string]("hello");
+		}
+	`)
+	if len(info.FuncInstances) != 1 {
+		t.Fatalf("expected 1 FuncInstance, got %d", len(info.FuncInstances))
+	}
+	fi := info.FuncInstances[0]
+	if fi.Sig.Result() != types.TypString {
+		t.Fatalf("expected result string, got %s", fi.Sig.Result())
+	}
+}

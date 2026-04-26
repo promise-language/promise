@@ -119,6 +119,15 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.curFunc = sig
 	defer func() { c.curFunc = saved }()
 
+	// Open type-param scope if generic (so T resolves during body checking)
+	if len(sig.TypeParams()) > 0 {
+		c.openScope(d, "typeparams:"+d.Name)
+		for _, tp := range sig.TypeParams() {
+			c.insert(tp.Obj())
+		}
+		defer c.closeScope()
+	}
+
 	c.openScope(d.Body, "func:"+d.Name)
 
 	// Bind parameters into scope

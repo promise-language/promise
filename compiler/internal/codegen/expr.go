@@ -355,18 +355,32 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 	// Method call or enum variant constructor: callee is MemberExpr
 	if member, ok := e.Callee.(*ast.MemberExpr); ok {
 		targetType := c.info.Types[member.Target]
-		if enum := extractEnum(targetType); enum != nil {
-			return c.genEnumVariantCall(e, member, enum)
+		// Apply typeSubst for mono context
+		if c.typeSubst != nil {
+			targetType = types.Substitute(targetType, c.typeSubst)
+		}
+		if enumLayout := c.lookupEnumLayout(targetType); enumLayout != nil {
+			return c.genEnumVariantCallLayout(e, member, enumLayout)
 		}
 		return c.genMethodCall(e, member)
 	}
 
-	// Constructor call: callee resolves to a Named type
+	// Constructor call: callee resolves to a Named type or Instance
 	calleeType := c.info.Types[e.Callee]
+	if inst, ok := calleeType.(*types.Instance); ok {
+		if _, ok := inst.Origin().(*types.Named); ok {
+			return c.genConstructorCallMono(e, calleeType)
+		}
+	}
 	if named, ok := calleeType.(*types.Named); ok {
 		if _, isIdent := e.Callee.(*ast.IdentExpr); isIdent {
-			return c.genConstructorCall(e, named)
+			return c.genConstructorCallMono(e, named)
 		}
+	}
+
+	// Generic function call: callee is IndexExpr (identity[int](42))
+	if idx, ok := e.Callee.(*ast.IndexExpr); ok {
+		return c.genGenericFuncCall(e, idx)
 	}
 
 	// Evaluate arguments
@@ -397,30 +411,57 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 	return c.block.NewCall(fn, argVals...)
 }
 
+// genGenericFuncCall generates a call to a monomorphic generic function instance.
+func (c *Compiler) genGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr) value.Value {
+	// Resolve the type argument to build the mangled name
+	typeArgType := c.info.Types[idx.Index]
+	// Apply typeSubst so generic-in-generic calls resolve correctly
+	if c.typeSubst != nil && typeArgType != nil {
+		typeArgType = types.Substitute(typeArgType, c.typeSubst)
+	}
+
+	ident, ok := idx.Target.(*ast.IdentExpr)
+	if !ok {
+		panic(fmt.Sprintf("codegen: generic function target is not IdentExpr: %T", idx.Target))
+	}
+
+	mangledName := ident.Name + "__" + typeArgSuffix(typeArgType)
+
+	fn, ok := c.funcs[mangledName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undefined monomorphic function %q", mangledName))
+	}
+
+	var argVals []value.Value
+	for _, arg := range e.Args {
+		argVals = append(argVals, c.genExpr(arg.Value))
+	}
+
+	return c.block.NewCall(fn, argVals...)
+}
+
 // --- Constructor calls ---
 
-// genConstructorCall generates a heap-allocated instance of a user type.
-func (c *Compiler) genConstructorCall(e *ast.CallExpr, named *types.Named) value.Value {
-	layout := c.layouts[named]
+// genConstructorCallMono generates a heap-allocated instance of a user type.
+// Handles both regular Named types and generic Instance types via lookupTypeLayout.
+func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value.Value {
+	named := extractNamed(typ)
+	layout := c.lookupTypeLayout(typ)
 	if layout == nil {
-		panic(fmt.Sprintf("codegen: no layout for type %s", named))
+		panic(fmt.Sprintf("codegen: no layout for type %s", typ))
 	}
 
 	instanceStructType := layout.Instance.LLVMType
 	instancePtrType := layout.InstancePtrType
 
-	// Compute size via GEP-from-null trick:
-	// %size_ptr = getelementptr %T_i, %T_i* null, i32 1
-	// %size = ptrtoint %T_i* %size_ptr to i64
+	// Compute size via GEP-from-null trick
 	nullPtr := constant.NewNull(instancePtrType)
 	sizePtr := c.block.NewGetElementPtr(instanceStructType, nullPtr,
 		constant.NewInt(irtypes.I32, 1))
 	size := c.block.NewPtrToInt(sizePtr, irtypes.I64)
 
-	// Allocate: call i8* @malloc(i64 %size)
+	// Allocate
 	rawPtr := c.block.NewCall(c.funcs["malloc"], size)
-
-	// Bitcast to instance struct pointer for field stores
 	typedPtr := c.block.NewBitCast(rawPtr, instancePtrType)
 
 	// Zero-initialize _variant pointer (field 0)
@@ -429,16 +470,16 @@ func (c *Compiler) genConstructorCall(e *ast.CallExpr, named *types.Named) value
 	variantPtrType := layout.Instance.Fields[0].LLVMType.(*irtypes.PointerType)
 	c.block.NewStore(constant.NewNull(variantPtrType), variantFieldPtr)
 
-	// Build set of provided field names (constructors require named args)
+	// Build set of provided field names
 	provided := make(map[string]bool)
 	for _, arg := range e.Args {
 		if arg.Name == "" {
-			panic(fmt.Sprintf("codegen: positional constructor args not supported for %s", named))
+			panic(fmt.Sprintf("codegen: positional constructor args not supported for %s", typ))
 		}
 		provided[arg.Name] = true
 		fieldIdx, ok := layout.InstanceFieldIndex[arg.Name]
 		if !ok {
-			panic(fmt.Sprintf("codegen: unknown field %s on type %s", arg.Name, named))
+			panic(fmt.Sprintf("codegen: unknown field %s on type %s", arg.Name, typ))
 		}
 		val := c.genExpr(arg.Value)
 		fieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
@@ -446,7 +487,7 @@ func (c *Compiler) genConstructorCall(e *ast.CallExpr, named *types.Named) value
 		c.block.NewStore(val, fieldPtr)
 	}
 
-	// Zero-initialize any fields not provided in constructor args
+	// Zero-initialize any fields not provided — use layout field types (not llvmType(f.Type()))
 	for _, f := range named.Fields() {
 		if provided[f.Name()] {
 			continue
@@ -454,10 +495,9 @@ func (c *Compiler) genConstructorCall(e *ast.CallExpr, named *types.Named) value
 		fieldIdx := layout.InstanceFieldIndex[f.Name()]
 		fieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
-		c.block.NewStore(c.zeroValue(llvmType(f.Type())), fieldPtr)
+		c.block.NewStore(c.zeroValue(layout.Instance.Fields[fieldIdx].LLVMType), fieldPtr)
 	}
 
-	// Return i8* (the internal representation for user types)
 	return rawPtr
 }
 
@@ -466,10 +506,14 @@ func (c *Compiler) genConstructorCall(e *ast.CallExpr, named *types.Named) value
 // genMemberExpr generates a field access on a user type instance or an enum variant value.
 func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 	targetType := c.info.Types[e.Target]
+	// Apply typeSubst for mono context
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
 
-	// Enum variant access: Color.Red
-	if enum := extractEnum(targetType); enum != nil {
-		return c.genEnumVariantValue(enum, e.Field)
+	// Enum variant access: Color.Red or Option[int].None
+	if enumLayout := c.lookupEnumLayout(targetType); enumLayout != nil {
+		return c.genEnumVariantValueLayout(enumLayout, e.Field)
 	}
 
 	named := extractNamed(targetType)
@@ -479,36 +523,34 @@ func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 
 	field := named.LookupField(e.Field)
 	if field != nil {
-		return c.genFieldAccess(e, named, field)
+		return c.genFieldAccess(e, targetType, field)
 	}
 
 	panic(fmt.Sprintf("codegen: member %s on type %s is not a field (method references not yet supported)", e.Field, named))
 }
 
 // genFieldAccess loads a field value from a user type instance.
-func (c *Compiler) genFieldAccess(e *ast.MemberExpr, named *types.Named, field *types.Field) value.Value {
-	layout := c.layouts[named]
+// Uses lookupTypeLayout for layout-driven field types that work for both
+// regular and monomorphic types.
+func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *types.Field) value.Value {
+	layout := c.lookupTypeLayout(typ)
 	if layout == nil {
-		panic(fmt.Sprintf("codegen: no layout for type %s", named))
+		panic(fmt.Sprintf("codegen: no layout for type %s", typ))
 	}
 
 	fieldIdx, ok := layout.InstanceFieldIndex[field.Name()]
 	if !ok {
-		panic(fmt.Sprintf("codegen: field %s not in instance layout for %s", field.Name(), named))
+		panic(fmt.Sprintf("codegen: field %s not in instance layout for %s", field.Name(), typ))
 	}
 
-	// Load the i8* from the target variable
 	target := c.genExpr(e.Target)
-
-	// Bitcast i8* to promise_T_i*
 	typedPtr := c.block.NewBitCast(target, layout.InstancePtrType)
 
-	// GEP to the field
 	fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
 
-	// Load the field value
-	return c.block.NewLoad(llvmType(field.Type()), fieldPtr)
+	// Use layout field type (not llvmType(field.Type()) which fails for TypeParams)
+	return c.block.NewLoad(layout.Instance.Fields[fieldIdx].LLVMType, fieldPtr)
 }
 
 // --- ThisExpr ---
@@ -526,6 +568,10 @@ func (c *Compiler) genThisExpr() value.Value {
 // genMethodCall generates a method call on a user type instance.
 func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.Value {
 	targetType := c.info.Types[member.Target]
+	// Apply typeSubst for mono context
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
 	named := extractNamed(targetType)
 	if named == nil {
 		panic(fmt.Sprintf("codegen: cannot resolve type for method call on %T", targetType))
@@ -536,7 +582,7 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 		panic(fmt.Sprintf("codegen: no method %s on type %s", member.Field, named))
 	}
 
-	typeName := named.Obj().Name()
+	typeName := c.resolveTypeName(targetType)
 	mangledName := typeName + "." + member.Field
 
 	fn, ok := c.funcs[mangledName]
@@ -559,55 +605,38 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 
 // --- Enum variant values ---
 
-// genEnumVariantValue generates a fieldless enum variant value (e.g., Color.Red → i32 0).
-func (c *Compiler) genEnumVariantValue(enum *types.Enum, variantName string) value.Value {
-	layout := c.enumLayouts[enum]
-	if layout == nil {
-		panic(fmt.Sprintf("codegen: no layout for enum %s", enum))
-	}
-
+// genEnumVariantValueLayout generates a fieldless enum variant value using layout dispatch.
+func (c *Compiler) genEnumVariantValueLayout(layout *TypeDeclLayout, variantName string) value.Value {
 	tag, ok := layout.VariantTag[variantName]
 	if !ok {
 		panic(fmt.Sprintf("codegen: variant %q not found in enum layout", variantName))
 	}
 
 	if layout.MaxVariantDataSize == 0 {
-		// Fieldless enum: internal type is i32
 		return constant.NewInt(irtypes.I32, int64(tag))
 	}
 
-	// Data enum, but this particular variant has no fields: build struct with tag + zeroed data.
-	// EnumInternalType is guaranteed to be a struct for data enums (MaxVariantDataSize > 0).
 	internalType := layout.EnumInternalType.(*irtypes.StructType)
 	var agg value.Value = constant.NewZeroInitializer(internalType)
 	agg = c.block.NewInsertValue(agg, constant.NewInt(irtypes.I32, int64(tag)), 0)
 	return agg
 }
 
-// genEnumVariantCall generates a variant constructor call (e.g., Shape.Circle(3.14)).
-func (c *Compiler) genEnumVariantCall(e *ast.CallExpr, member *ast.MemberExpr, enum *types.Enum) value.Value {
-	layout := c.enumLayouts[enum]
-	if layout == nil {
-		panic(fmt.Sprintf("codegen: no layout for enum %s", enum))
-	}
-
+// genEnumVariantCallLayout generates a variant constructor call using layout dispatch.
+func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberExpr, layout *TypeDeclLayout) value.Value {
 	tag, ok := layout.VariantTag[member.Field]
 	if !ok {
 		panic(fmt.Sprintf("codegen: variant %q not found in enum layout", member.Field))
 	}
 	dataType := layout.VariantDataTypes[member.Field]
 
-	// EnumInternalType is guaranteed to be a struct for data enums (genEnumVariantCall
-	// is only reached for call expressions, which implies the variant has fields).
 	internalType := layout.EnumInternalType.(*irtypes.StructType)
 	alloca := c.block.NewAlloca(internalType)
 
-	// Store tag at index 0
 	tagPtr := c.block.NewGetElementPtr(internalType, alloca,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	c.block.NewStore(constant.NewInt(irtypes.I32, int64(tag)), tagPtr)
 
-	// Store fields in data area at index 1
 	if dataType != nil && len(e.Args) > 0 {
 		dataPtr := c.block.NewGetElementPtr(internalType, alloca,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
@@ -631,21 +660,21 @@ func (c *Compiler) genEnumVariantCall(e *ast.CallExpr, member *ast.MemberExpr, e
 func (c *Compiler) genMatchExpr(e *ast.MatchExpr) value.Value {
 	subject := c.genExpr(e.Subject)
 	subjectType := c.info.Types[e.Subject]
+	// Apply typeSubst for mono context
+	if c.typeSubst != nil {
+		subjectType = types.Substitute(subjectType, c.typeSubst)
+	}
 
-	if enum := extractEnum(subjectType); enum != nil {
-		return c.genEnumMatch(e, subject, enum)
+	if enumLayout := c.lookupEnumLayout(subjectType); enumLayout != nil {
+		enum := extractEnum(subjectType)
+		return c.genEnumMatch(e, subject, enum, enumLayout)
 	}
 
 	return c.genValueMatch(e, subject, subjectType)
 }
 
 // genEnumMatch generates a match expression on an enum value using an LLVM switch instruction.
-func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *types.Enum) value.Value {
-	layout := c.enumLayouts[enum]
-	if layout == nil {
-		panic(fmt.Sprintf("codegen: no layout for enum %s in match", enum))
-	}
-
+func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *types.Enum, layout *TypeDeclLayout) value.Value {
 	// Extract tag from subject
 	var tag value.Value
 	if layout.MaxVariantDataSize == 0 {
@@ -709,7 +738,6 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *typ
 		defaultTarget = mergeBlock
 	}
 
-	// Emit switch in the block that computed the tag
 	switchBlock.NewSwitch(tag, defaultTarget, cases...)
 
 	c.block = mergeBlock
@@ -872,7 +900,8 @@ func (c *Compiler) bindEnumDestructure(bindings []string, variantName string, su
 		if i >= variant.NumFields() {
 			break
 		}
-		fieldType := llvmType(variant.Fields()[i].Type())
+		// Use layout data type fields (already substituted for mono types)
+		fieldType := dataType.Fields[i]
 		fieldPtr := c.block.NewGetElementPtr(dataType, typedDataPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
 		val := c.block.NewLoad(fieldType, fieldPtr)

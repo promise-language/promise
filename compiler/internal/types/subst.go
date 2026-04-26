@@ -111,6 +111,17 @@ func doSubst(typ Type, subst map[*TypeParam]Type) Type {
 func substSignature(sig *Signature, subst map[*TypeParam]Type) *Signature {
 	changed := false
 
+	// If the signature has typeParams that are being substituted,
+	// we must strip them (producing a concrete signature).
+	if len(sig.typeParams) > 0 {
+		for _, tp := range sig.typeParams {
+			if _, ok := subst[tp]; ok {
+				changed = true
+				break
+			}
+		}
+	}
+
 	var newRecv *Param
 	if sig.recv != nil {
 		rt := doSubst(sig.recv.typ, subst)

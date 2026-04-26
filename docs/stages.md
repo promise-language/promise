@@ -18,6 +18,9 @@ Implementation stages for the Promise compiler pipeline.
 | 8a | `compiler/internal/codegen/` | LLVM IR: primitives, control flow, functions | Done |
 | 8b | `compiler/internal/codegen/` | Strings: representation, literals, concat, extern ABI | Done |
 | 8c | `compiler/internal/codegen/` | User types: layout, constructors, fields, methods | Done |
+| 8d | `compiler/internal/codegen/` | Enums: tagged unions, pattern matching, destructure bindings | Done |
+| 8e | `compiler/internal/codegen/` | Error handling: raise, propagation, unwrap, handlers | Done |
+| 8f | `compiler/internal/codegen/` | Generic monomorphization: type-specialized layouts and methods | Done |
 | 9 | `compiler/internal/module/` | Module resolution, dependency graph | Planned |
 | 10 | `cmd/promise/` | CLI entry point (build, run, test, fmt, etc.) | Planned |
 | 11 | `pkg/` | Package manager: fetch, resolve, lock | Planned |
@@ -199,9 +202,6 @@ Type-system-driven LLVM IR generation for primitive types, arithmetic, control f
 
 ### Deferred sub-stages
 
-- **8d**: Enums and pattern matching
-- **8e**: Error handling (`!`, `?`, `raise`, error handlers)
-- **8f**: Generic monomorphization
 - **8g**: Containers (Array, Slice, Map, Tuple), lambdas, optionals
 - **8h**: Ownership-aware memory management (free/drop)
 - **8i**: Concurrency (go, Task, Channel, `<-`)
@@ -241,7 +241,66 @@ User-defined type codegen: four-struct layout, constructors, field access/assign
 - **Extern ABI** (`extern.go`): `packUserType`/`unpackUserType` follow same pattern as strings — `{ null_vtable, bitcast(i8* → T_i*) }` via insertvalue/extractvalue.
 - **Compilation order**: `computeLayouts` → `computeUserTypeLayouts` → `declareIntrinsics` → `declareExterns` → `declareTypeMethods` → `declareFuncs` → `defineTypeMethods` → `defineFuncs`.
 - **Scope**: Type layout, constructors (named args), field read/write, compound field assignment, methods with receiver (`this`/`&this`/`~this`), method calls, nested user type fields, extern pack/unpack.
-- **Deferred**: Vtable/virtual dispatch, inheritance (parent fields/methods), static method calls (`Type.method()`), operator overloading on user types, non-instance field placements (`value`/`variant`/`type`), generic user types, default field values.
+- **Deferred**: Vtable/virtual dispatch, inheritance (parent fields/methods), static method calls (`Type.method()`), operator overloading on user types, non-instance field placements (`value`/`variant`/`type`), default field values. Generic user types handled in Stage 8f.
+
+## Stage 8d — Enums and Pattern Matching (Done)
+
+Enum type codegen: tagged unions, fieldless enums, variant constructors, pattern matching with switch, destructure bindings.
+
+**Files:** Updates to `codegen/layout.go`, `codegen/compiler.go`, `codegen/expr.go`, `codegen/types.go`; 20 enum-related tests
+
+- **Fieldless enums**: Internal type is `i32` (tag only). Variant values are `i32` constants. `Color.Red` → `i32 0`.
+- **Data enums**: Internal type is `{ i32, [N x i8] }` — tag + byte array union sized to the largest variant. Per-variant data structs (e.g., `{ double }` for `Circle(f64)`) are bitcast-overlaid onto the data area.
+- **Variant constructors**: `Shape.Circle(3.14)` → alloca enum struct, store tag at index 0, bitcast data area to variant struct pointer, store fields via GEP.
+- **Pattern matching**: `match` on enum generates LLVM `switch` on tag. Each arm branches to a dedicated basic block. Wildcard/name patterns use the default target.
+- **Destructure bindings**: `Some(v) =>` extracts the data area, bitcasts to variant struct, loads fields into local allocas. Supports `EnumDestructureMatchPattern`, `ShortDestructureMatchPattern`, and `NameMatchPattern` (binding the whole subject).
+- **Enum layout** (`layout.go`): `computeEnumLayout` computes tag map, per-variant data struct types, max data size. Four-struct ABI model maintained (type/variant/instance/value structs) for future extern compatibility.
+- **Scope**: Fieldless enums, data enums with positional fields, variant values, variant constructors, match with switch, destructure bindings, wildcard/name patterns.
+- **Deferred**: Named enum fields in constructors, enum methods, extern ABI pack/unpack for enums.
+
+## Stage 8e — Error Handling (Done)
+
+Error handling codegen: failable function declarations, raise statements, error propagation (`?`), forced unwrap (`!`), error handler expressions.
+
+**Files:** Updates to `codegen/compiler.go`, `codegen/expr.go`, `codegen/stmt.go`, `codegen/types.go`; 17 error handling tests
+
+- **Result struct**: Non-void `T!` → `{ i1, T, i8* }` (tag, ok value, error pointer). Void `void!` → `{ i1, i8* }` (tag, error pointer). Tag: `i1 false` = Ok, `i1 true` = Error.
+- **Error values are `i8*`**: Same representation as strings. `raise "message"` stores the string's `i8*`.
+- **Failable declarations**: Functions/methods with `CanError()` return the result struct. `declareFuncs`/`declareTypeMethods` wrap return type with `computeResultType`.
+- **Return wrapping**: `genReturnStmt` wraps the value in an Ok result (`{ false, val, null }`) when inside a failable function.
+- **Raise statement**: `genRaiseStmt` wraps the error in an Error result (`{ true, zero, errVal }`) and returns.
+- **Error propagation** (`?`): `genErrorPropagateExpr` checks the tag via `condBr`. Error path extracts the `i8*` error, re-wraps in caller's result type, early-returns. Ok path extracts the value.
+- **Forced unwrap** (`!`): `genErrorUnwrapExpr` panics on error via `promise_panic(i8*)` + `unreachable`. Ok path extracts the value.
+- **Error handler** (`? binding { body }`): `genErrorHandlerExpr` branches to handler block (binds error, generates body) or ok block, merges with phi node.
+- **Auto-terminator**: Failable functions without explicit terminator return an Ok-wrapped zero value.
+- **Scope**: Failable functions/methods, raise, `?` propagation, `!` unwrap, `? binding { body }` handlers, void failables.
+- **Deferred**: Failable extern functions (C ABI for errors), if-unwrap/while-unwrap (optional types — Stage 8g).
+
+## Stage 8f — Generic Monomorphization (Done)
+
+Generic function sema support and type-specialized code generation for all generic instantiations.
+
+**Files:** New `codegen/mono.go` (~475 LOC); updates to `types/signature.go`, `types/subst.go`, `sema/decl.go`, `sema/check.go`, `sema/expr.go`, `sema/info.go`, `codegen/compiler.go`, `codegen/types.go`, `codegen/expr.go`, `codegen/stmt.go`; 6 new sema tests, 20 new codegen tests
+
+**Part A — Sema: Generic functions/methods** (`types/`, `sema/`)
+- **TypeParams on Signature** (`types/signature.go`): `typeParams []*TypeParam` field with `TypeParams()` accessor and `SetTypeParams()` setter. `substSignature` strips TypeParams when substituted.
+- **Generic function definition** (`sema/decl.go`): `defineFunc` opens type-param scope, creates `TypeParam` objects, resolves constraints, stores on `Signature` via `SetTypeParams`.
+- **Generic function body checking** (`sema/check.go`): `checkFuncDecl` opens type-param scope when `sig.TypeParams()` is non-empty, inserting TypeParam type names so `T` resolves during body checking.
+- **Generic function calls** (`sema/expr.go`): `checkIndexExpr` detects `*types.Signature` with TypeParams → `instantiateGenericFunc`. Resolves type arg via `resolveTypeRef`, builds substitution map, substitutes signature (stripping TypeParams), records `FuncInstance`.
+- **FuncInstance tracking** (`sema/info.go`): `FuncInstance{Func, TypeArgs, Sig}` struct records concrete generic function instantiations for codegen monomorphization.
+- **Type reference resolution** (`sema/expr.go`): `resolveTypeRef` resolves expressions as type references (for `int` in `func[int]`), recording type and object on the AST node for codegen consumption.
+
+**Part B — Codegen: Monomorphization** (`codegen/`)
+- **Monomorphization, not type erasure**: Each concrete `Instance{Box, [int]}` gets a distinct LLVM layout with correctly-typed fields (`i64` for int, not `i8*`).
+- **Naming convention**: `Box__int`, `Pair__int__string`, `Option__int` for types. `identity__int` for generic functions. Double-underscore separator — no collision with Promise identifiers.
+- **Core infrastructure** (`mono.go`): `monoContext` struct, `monoName`/`typeArgSuffix`/`monoFuncName` mangling, `collectMonoInstances`/`collectMonoFuncInstances` deduplication. Layout computation: `computeMonoUserTypeLayout` (four-struct ABI with substituted field types), `computeMonoEnumLayout` (tagged union with substituted variant fields). Method/function codegen: `declareMonoMethods`/`defineMonoMethods`/`declareMonoFuncs`/`defineMonoFuncs` with `typeSubst`+`monoCtx` scoping and `defer`-based state cleanup.
+- **Compiler integration** (`compiler.go`): New fields (`monoLayouts`, `monoEnumLayouts`, `typeSubst`, `monoCtx`). Dispatch helpers: `lookupTypeLayout`/`lookupEnumLayout` (handle Instance, monoCtx, regular types), `resolveTypeName` (mangled names for method dispatch). Generic origins skipped in existing passes; 14-step compilation pipeline.
+- **Type resolution** (`types.go`): `resolveType` applies `typeSubst` first, then handles Instance (enum → mono layout, named → `i8Ptr`), then regular enums with `monoCtx` awareness. `llvmTypeSize` handles `StructType` and `ArrayType` for correct enum data area sizing.
+- **Expression codegen** (`expr.go`): Instance constructor detection, `genConstructorCallMono` with `lookupTypeLayout`, `genFieldAccess` with layout-driven field types, `genMethodCall` with `resolveTypeName`, enum operations via `lookupEnumLayout`, `genGenericFuncCall` for `identity[int](42)` dispatch with `typeSubst` application.
+- **Statement codegen** (`stmt.go`): `genMemberAssign` uses `lookupTypeLayout` and layout field types for both regular and monomorphic types.
+- **Layout-driven field types**: All field load/store/zero-init operations use `layout.Instance.Fields[idx].LLVMType` instead of `llvmType(field.Type())`, which correctly handles TypeParam substitution.
+- **Scope**: Generic user type instantiation (layout, constructor, field access/assignment, methods), generic enum instantiation (tagged union, variant values/constructors, pattern matching, destructure bindings), generic functions (single type parameter, void/non-void/failable), multiple instantiations of same generic.
+- **Deferred**: Type argument inference (explicit type args only), multi-arg generics in expression context (grammar limitation), extern ABI for generic types, C header generation for monomorphic types, container types (Array, Slice, Map, Tuple — Stage 8g).
 
 ## Stage 9 — Module System (Planned)
 

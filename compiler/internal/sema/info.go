@@ -5,6 +5,13 @@ import (
 	"djabi.dev/go/promise_lang/internal/types"
 )
 
+// FuncInstance records a concrete instantiation of a generic function.
+type FuncInstance struct {
+	Func     *types.Func      // the generic function
+	TypeArgs []types.Type     // concrete type arguments
+	Sig      *types.Signature // substituted signature (no TypeParams)
+}
+
 // Info holds the results of semantic analysis.
 // All maps use AST nodes as keys — the AST itself is not modified.
 type Info struct {
@@ -17,8 +24,11 @@ type Info struct {
 	// Scopes maps scope-creating AST nodes (File, Block, etc.) to their scope.
 	Scopes map[ast.Node]*types.Scope
 
-	// Instances records all concrete generic instantiations for later monomorphization.
+	// Instances records all concrete generic type instantiations for later monomorphization.
 	Instances []*types.Instance
+
+	// FuncInstances records all concrete generic function instantiations for later monomorphization.
+	FuncInstances []*FuncInstance
 
 	// Tests records functions annotated with `test.
 	Tests []*types.Func

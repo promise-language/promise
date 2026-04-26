@@ -274,20 +274,26 @@ func (c *Checker) defineFunc(d *ast.FuncDecl) {
 		return
 	}
 
-	// Open type-params scope if generic
+	// Open type-params scope if generic and create TypeParam objects
+	var tparams []*types.TypeParam
 	if len(d.TypeParams) > 0 {
 		c.openScope(d, "typeparams:"+d.Name)
-		// Create type param objects
+		tparams = make([]*types.TypeParam, len(d.TypeParams))
 		for i, tp := range d.TypeParams {
 			tn := types.NewTypeName(tpos(tp.Pos()), tp.Name, nil)
-			types.NewTypeParam(tn, nil, i)
+			tparams[i] = types.NewTypeParam(tn, nil, i)
 			c.insert(tn)
 		}
+		// Resolve constraints now that params are in scope
+		c.resolveTypeParamConstraints(d.TypeParams, tparams)
 		defer c.closeScope()
 	}
 
 	sig := c.resolveFuncSignature(d)
 	if sig != nil {
+		if len(tparams) > 0 {
+			sig.SetTypeParams(tparams)
+		}
 		fn.SetType(sig)
 	}
 

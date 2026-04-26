@@ -113,16 +113,22 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 }
 
 // genMemberAssign handles assignment to a field on a user type instance.
+// Uses lookupTypeLayout for layout-driven field types that work for both
+// regular and monomorphic types.
 func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val value.Value) {
 	targetType := c.info.Types[target.Target]
+	// Apply typeSubst for mono context
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
 	named := extractNamed(targetType)
 	if named == nil {
 		panic("codegen: cannot resolve type for member assignment")
 	}
 
-	layout := c.layouts[named]
+	layout := c.lookupTypeLayout(targetType)
 	if layout == nil {
-		panic(fmt.Sprintf("codegen: no layout for type %s", named))
+		panic(fmt.Sprintf("codegen: no layout for type %s", targetType))
 	}
 
 	field := named.LookupField(target.Field)
@@ -135,11 +141,9 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 		panic(fmt.Sprintf("codegen: field %s not in layout for %s", field.Name(), named))
 	}
 
-	// Get pointer to the instance
 	obj := c.genExpr(target.Target)
 	typedPtr := c.block.NewBitCast(obj, layout.InstancePtrType)
 
-	// GEP to the field
 	fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
 
@@ -148,8 +152,8 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 		return
 	}
 
-	// Compound assignment: load, compute, store
-	fieldLLVMType := llvmType(field.Type())
+	// Compound assignment: use layout field type for load
+	fieldLLVMType := layout.Instance.Fields[fieldIdx].LLVMType
 	current := c.block.NewLoad(fieldLLVMType, fieldPtr)
 	result := c.genCompoundOp(op, current, val)
 	c.block.NewStore(result, fieldPtr)

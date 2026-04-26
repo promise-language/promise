@@ -25,6 +25,12 @@ type Compiler struct {
 	enumLayouts map[*types.Enum]*TypeDeclLayout  // enum type layouts
 	externs     map[string]*ExternFunc           // extern functions by Promise name
 
+	// Monomorphization state
+	monoLayouts     map[string]*TypeDeclLayout      // mono name → layout (user types)
+	monoEnumLayouts map[string]*TypeDeclLayout      // mono name → layout (enums)
+	typeSubst       map[*types.TypeParam]types.Type // nil outside mono codegen
+	monoCtx         *monoContext                    // nil outside mono method codegen
+
 	// Loop control targets for break/continue
 	breakTarget    *ir.Block
 	continueTarget *ir.Block
@@ -39,9 +45,11 @@ type Compiler struct {
 // Compile generates an LLVM IR module from a type-checked Promise AST.
 func Compile(file *ast.File, info *sema.Info) *CompileResult {
 	c := &Compiler{
-		module: ir.NewModule(),
-		info:   info,
-		funcs:  make(map[string]*ir.Func),
+		module:          ir.NewModule(),
+		info:            info,
+		funcs:           make(map[string]*ir.Func),
+		monoLayouts:     make(map[string]*TypeDeclLayout),
+		monoEnumLayouts: make(map[string]*TypeDeclLayout),
 	}
 
 	// Collect extern declarations and compute type layouts
@@ -61,14 +69,23 @@ func Compile(file *ast.File, info *sema.Info) *CompileResult {
 	// Compute user type layouts (after built-in and enum layouts are ready)
 	c.computeUserTypeLayouts(file)
 
+	// Compute monomorphic layouts for all concrete generic instantiations
+	monoInstances := collectMonoInstances(info)
+	c.computeMonoLayouts(monoInstances)
+	monoFuncInstances := collectMonoFuncInstances(info)
+
 	c.declareIntrinsics()
 	// declareExterns must run after computeUserTypeLayouts so that user type
 	// layouts are available when resolving extern parameter/return types.
 	c.declareExterns(externList, c.layouts)
 	c.declareTypeMethods(file)
+	c.declareMonoMethods(file, monoInstances)
 	c.declareFuncs(file)
+	c.declareMonoFuncs(file, monoFuncInstances)
 	c.defineTypeMethods(file)
+	c.defineMonoMethods(file, monoInstances)
 	c.defineFuncs(file)
+	c.defineMonoFuncs(file, monoFuncInstances)
 
 	return &CompileResult{
 		Module:      c.module,
@@ -108,6 +125,7 @@ func (c *Compiler) declareIntrinsics() {
 }
 
 // declareFuncs creates LLVM function declarations for all FuncDecl nodes with bodies (pass 1).
+// Generic functions (with TypeParams) are skipped — handled by declareMonoFuncs.
 func (c *Compiler) declareFuncs(file *ast.File) {
 	for _, decl := range file.Decls {
 		fd, ok := decl.(*ast.FuncDecl)
@@ -116,6 +134,9 @@ func (c *Compiler) declareFuncs(file *ast.File) {
 		}
 		if fd.Body == nil {
 			continue // extern — already handled by declareExterns
+		}
+		if len(fd.TypeParams) > 0 {
+			continue // generic — handled by monomorphization
 		}
 
 		obj := c.lookupFunc(fd.Name)
@@ -151,6 +172,7 @@ func (c *Compiler) declareFuncs(file *ast.File) {
 }
 
 // defineFuncs generates function bodies for all FuncDecl nodes with bodies (pass 2).
+// Generic functions (with TypeParams) are skipped — handled by defineMonoFuncs.
 func (c *Compiler) defineFuncs(file *ast.File) {
 	for _, decl := range file.Decls {
 		fd, ok := decl.(*ast.FuncDecl)
@@ -159,6 +181,9 @@ func (c *Compiler) defineFuncs(file *ast.File) {
 		}
 		if fd.Body == nil {
 			continue // native function — no body to generate
+		}
+		if len(fd.TypeParams) > 0 {
+			continue // generic — handled by monomorphization
 		}
 		fn, ok := c.funcs[fd.Name]
 		if !ok {
@@ -282,6 +307,7 @@ func (c *Compiler) newBlock(name string) *ir.Block {
 }
 
 // computeUserTypeLayouts computes layouts for all user-declared types in the file.
+// Generic types (with TypeParams) are skipped — they're handled by computeMonoLayouts.
 func (c *Compiler) computeUserTypeLayouts(file *ast.File) {
 	for _, decl := range file.Decls {
 		td, ok := decl.(*ast.TypeDecl)
@@ -295,11 +321,15 @@ func (c *Compiler) computeUserTypeLayouts(file *ast.File) {
 		if _, exists := c.layouts[named]; exists {
 			continue // skip built-in types
 		}
+		if len(named.TypeParams()) > 0 {
+			continue // generic — handled by monomorphization
+		}
 		c.layouts[named] = computeUserTypeLayout(c.module, named, c.layouts)
 	}
 }
 
 // declareTypeMethods creates LLVM function stubs for all methods with bodies (pass 1).
+// Generic types are skipped — their methods are handled by declareMonoMethods.
 func (c *Compiler) declareTypeMethods(file *ast.File) {
 	for _, decl := range file.Decls {
 		td, ok := decl.(*ast.TypeDecl)
@@ -309,6 +339,9 @@ func (c *Compiler) declareTypeMethods(file *ast.File) {
 		named := c.lookupNamedType(td.Name)
 		if named == nil {
 			continue
+		}
+		if len(named.TypeParams()) > 0 {
+			continue // generic — handled by monomorphization
 		}
 
 		for _, md := range td.Methods {
@@ -345,6 +378,7 @@ func (c *Compiler) declareTypeMethods(file *ast.File) {
 }
 
 // defineTypeMethods generates method bodies (pass 2).
+// Generic types are skipped — their methods are handled by defineMonoMethods.
 func (c *Compiler) defineTypeMethods(file *ast.File) {
 	for _, decl := range file.Decls {
 		td, ok := decl.(*ast.TypeDecl)
@@ -354,6 +388,9 @@ func (c *Compiler) defineTypeMethods(file *ast.File) {
 		named := c.lookupNamedType(td.Name)
 		if named == nil {
 			continue
+		}
+		if len(named.TypeParams()) > 0 {
+			continue // generic — handled by monomorphization
 		}
 
 		for _, md := range td.Methods {
@@ -458,6 +495,7 @@ func (c *Compiler) lookupEnumType(name string) *types.Enum {
 }
 
 // computeEnumLayouts computes layouts for all enum declarations in the file.
+// Generic enums (with TypeParams) are skipped — handled by computeMonoLayouts.
 func (c *Compiler) computeEnumLayouts(file *ast.File) {
 	for _, decl := range file.Decls {
 		ed, ok := decl.(*ast.EnumDecl)
@@ -468,8 +506,62 @@ func (c *Compiler) computeEnumLayouts(file *ast.File) {
 		if enum == nil {
 			continue
 		}
+		if len(enum.TypeParams()) > 0 {
+			continue // generic — handled by monomorphization
+		}
 		c.enumLayouts[enum] = computeEnumLayout(c.module, enum)
 	}
+}
+
+// lookupTypeLayout finds the layout for a user type, handling Instance and monoCtx.
+func (c *Compiler) lookupTypeLayout(typ types.Type) *TypeDeclLayout {
+	if inst, ok := typ.(*types.Instance); ok {
+		return c.monoLayouts[monoName(inst)]
+	}
+	if n := extractNamed(typ); n != nil {
+		// Inside a mono method body, the origin Named maps to the mono layout
+		if c.monoCtx != nil {
+			if origin, ok := c.monoCtx.origin.(*types.Named); ok && n == origin {
+				return c.monoLayouts[c.monoCtx.name]
+			}
+		}
+		return c.layouts[n]
+	}
+	return nil
+}
+
+// lookupEnumLayout finds the layout for an enum, handling Instance and monoCtx.
+func (c *Compiler) lookupEnumLayout(typ types.Type) *TypeDeclLayout {
+	if inst, ok := typ.(*types.Instance); ok {
+		return c.monoEnumLayouts[monoName(inst)]
+	}
+	if e := extractEnum(typ); e != nil {
+		if c.monoCtx != nil {
+			if origin, ok := c.monoCtx.origin.(*types.Enum); ok && e == origin {
+				return c.monoEnumLayouts[c.monoCtx.name]
+			}
+		}
+		return c.enumLayouts[e]
+	}
+	return nil
+}
+
+// resolveTypeName returns the mangled type name for method dispatch.
+func (c *Compiler) resolveTypeName(typ types.Type) string {
+	if inst, ok := typ.(*types.Instance); ok {
+		return monoName(inst)
+	}
+	if c.monoCtx != nil {
+		if n, ok := typ.(*types.Named); ok {
+			if origin, ok := c.monoCtx.origin.(*types.Named); ok && n == origin {
+				return c.monoCtx.name
+			}
+		}
+	}
+	if n := extractNamed(typ); n != nil {
+		return n.Obj().Name()
+	}
+	return ""
 }
 
 // emitNativeOp dispatches a native operator to the LLVM instruction table.

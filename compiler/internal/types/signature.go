@@ -20,10 +20,11 @@ func (p *Param) Ref() RefMod  { return p.ref }
 
 // Signature represents a function type: (params) -> result.
 type Signature struct {
-	recv     *Param   // receiver (nil for free functions)
-	params   []*Param // positional parameters
-	result   Type     // return type (nil means void)
-	canError bool     // true if function returns T! (can raise errors)
+	recv       *Param       // receiver (nil for free functions)
+	params     []*Param     // positional parameters
+	result     Type         // return type (nil means void)
+	canError   bool         // true if function returns T! (can raise errors)
+	typeParams []*TypeParam // nil for non-generic functions
 }
 
 // NewSignature creates a new function signature.
@@ -36,11 +37,15 @@ func NewSignature(recv *Param, params []*Param, result Type, canError bool) *Sig
 	}
 }
 
-func (s *Signature) Recv() *Param     { return s.recv }
-func (s *Signature) Params() []*Param { return s.params }
-func (s *Signature) Result() Type     { return s.result }
-func (s *Signature) CanError() bool   { return s.canError }
-func (s *Signature) Underlying() Type { return s }
+func (s *Signature) Recv() *Param             { return s.recv }
+func (s *Signature) Params() []*Param         { return s.params }
+func (s *Signature) Result() Type             { return s.result }
+func (s *Signature) CanError() bool           { return s.canError }
+func (s *Signature) TypeParams() []*TypeParam { return s.typeParams }
+func (s *Signature) Underlying() Type         { return s }
+
+// SetTypeParams sets the type parameters for a generic function signature.
+func (s *Signature) SetTypeParams(tps []*TypeParam) { s.typeParams = tps }
 
 func (s *Signature) String() string {
 	var b strings.Builder

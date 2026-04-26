@@ -131,11 +131,34 @@ func extractEnum(typ types.Type) *types.Enum {
 	return nil
 }
 
-// resolveType maps a Promise type to its LLVM IR type, with enum awareness.
-// Unlike llvmType (which is standalone), this method can look up enum layouts
-// to return the correct internal type for enums.
+// resolveType maps a Promise type to its LLVM IR type, with enum and mono awareness.
+// Unlike llvmType (which is standalone), this method applies typeSubst for
+// monomorphic codegen and looks up enum/mono layouts for correct internal types.
 func (c *Compiler) resolveType(typ types.Type) irtypes.Type {
+	// Apply current type substitution (inside monomorphic method/function bodies)
+	if c.typeSubst != nil {
+		typ = types.Substitute(typ, c.typeSubst)
+	}
+
+	// Handle Instance types
+	if inst, ok := typ.(*types.Instance); ok {
+		// Instance wrapping Enum → look up mono enum layout
+		if layout := c.monoEnumLayouts[monoName(inst)]; layout != nil {
+			return layout.EnumInternalType
+		}
+		// Instance wrapping Named → i8Ptr (heap pointer)
+		return irtypes.I8Ptr
+	}
+
+	// Existing enum handling
 	if enum := extractEnum(typ); enum != nil {
+		if c.monoCtx != nil {
+			if origin, ok := c.monoCtx.origin.(*types.Enum); ok && enum == origin {
+				if layout := c.monoEnumLayouts[c.monoCtx.name]; layout != nil {
+					return layout.EnumInternalType
+				}
+			}
+		}
 		if layout, ok := c.enumLayouts[enum]; ok {
 			return layout.EnumInternalType
 		}
@@ -180,6 +203,14 @@ func llvmTypeSize(typ irtypes.Type) int {
 		return 8 // double
 	case *irtypes.PointerType:
 		return 8
+	case *irtypes.StructType:
+		size := 0
+		for _, f := range t.Fields {
+			size += llvmTypeSize(f)
+		}
+		return size
+	case *irtypes.ArrayType:
+		return int(t.Len) * llvmTypeSize(t.ElemType)
 	default:
 		return 8
 	}

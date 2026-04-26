@@ -1712,3 +1712,256 @@ func TestFailableConditionalRaiseReturn(t *testing.T) {
 	assertContains(t, ir, "i1 false")
 	assertContains(t, ir, "ret { i1, i64, i8* }")
 }
+
+// --- Generic type tests ---
+
+func TestGenericTypeLayout(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] { T value; }
+		main() {
+			b := Box[int](value: 42);
+		}
+	`)
+	assertContains(t, ir, "Box__int_i")
+	assertContains(t, ir, "store i64 42")
+}
+
+func TestGenericFieldAccess(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] { T value; }
+		main() {
+			b := Box[int](value: 42);
+			int v = b.value;
+		}
+	`)
+	assertContains(t, ir, "Box__int_i")
+	// Field access should load i64 (not i8*)
+	assertContains(t, ir, "load i64")
+}
+
+func TestGenericFieldAssign(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] { T value; }
+		main() {
+			b := Box[int](value: 42);
+			b.value = 10;
+		}
+	`)
+	assertContains(t, ir, "store i64 10")
+}
+
+func TestGenericMethod(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] {
+			T value;
+			get(this) T { return this.value; }
+		}
+		main() {
+			b := Box[int](value: 42);
+			int v = b.get();
+		}
+	`)
+	assertContains(t, ir, "define i64 @Box__int.get")
+}
+
+func TestGenericMethodSet(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] {
+			T value;
+			set(~this, T val) { this.value = val; }
+		}
+		main() {
+			b := Box[int](value: 42);
+			b.set(10);
+		}
+	`)
+	assertContains(t, ir, "define void @Box__int.set")
+}
+
+func TestGenericMultipleInstances(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] { T value; }
+		main() {
+			a := Box[int](value: 42);
+			b := Box[string](value: "hi");
+		}
+	`)
+	assertContains(t, ir, "Box__int_i")
+	assertContains(t, ir, "Box__string_i")
+}
+
+func TestGenericNestedField(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] { T value; }
+		main() {
+			a := Box[int](value: 1);
+			b := Box[string](value: "hi");
+			int x = a.value;
+			string y = b.value;
+		}
+	`)
+	// Both Box[int] and Box[string] fields accessed with correct types
+	assertContains(t, ir, "Box__int_i")
+	assertContains(t, ir, "Box__string_i")
+	assertContains(t, ir, "load i64")
+	assertContains(t, ir, "load i8*")
+}
+
+func TestGenericEnum(t *testing.T) {
+	ir := generateIR(t, `
+		enum Option[T] { Some(T), None }
+		main() {
+			x := Option[int].Some(42);
+		}
+	`)
+	assertContains(t, ir, "Option__int_enum")
+	assertContains(t, ir, "store i64 42")
+}
+
+func TestGenericEnumNone(t *testing.T) {
+	ir := generateIR(t, `
+		enum Option[T] { Some(T), None }
+		main() {
+			x := Option[int].None;
+		}
+	`)
+	assertContains(t, ir, "Option__int_enum")
+}
+
+func TestGenericEnumMatch(t *testing.T) {
+	ir := generateIR(t, `
+		enum Option[T] { Some(T), None }
+		main() {
+			x := Option[int].Some(42);
+			r := match x {
+				Some(v) => v,
+				_ => 0,
+			};
+		}
+	`)
+	assertContains(t, ir, "switch i32")
+}
+
+func TestGenericEnumFieldless(t *testing.T) {
+	ir := generateIR(t, `
+		enum Dir[T] { Left, Right }
+		main() {
+			d := Dir[int].Left;
+		}
+	`)
+	// Fieldless generic enum: internal type is i32
+	assertContains(t, ir, "i32 0")
+}
+
+func TestGenericConstructorZeroInit(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] { T value; }
+		main() {
+			b := Box[int]();
+		}
+	`)
+	// Zero-init with i64 0 for the int field
+	assertContains(t, ir, "Box__int_i")
+}
+
+// --- Generic function tests ---
+
+func TestGenericFunc(t *testing.T) {
+	ir := generateIR(t, `
+		identity[T](T x) T { return x; }
+		main() {
+			int r = identity[int](42);
+		}
+	`)
+	assertContains(t, ir, "define i64 @identity__int")
+	assertContains(t, ir, "ret i64")
+}
+
+func TestGenericFuncString(t *testing.T) {
+	ir := generateIR(t, `
+		identity[T](T x) T { return x; }
+		main() {
+			string s = identity[string]("hello");
+		}
+	`)
+	assertContains(t, ir, "define i8* @identity__string")
+}
+
+func TestGenericFuncMultipleInstances(t *testing.T) {
+	ir := generateIR(t, `
+		identity[T](T x) T { return x; }
+		main() {
+			int a = identity[int](42);
+			string b = identity[string]("hi");
+		}
+	`)
+	assertContains(t, ir, "@identity__int")
+	assertContains(t, ir, "@identity__string")
+}
+
+func TestGenericMethodMutReceiverAssign(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] {
+			T value;
+			replace(~this, T newVal) { this.value = newVal; }
+		}
+		main() {
+			b := Box[int](value: 10);
+			b.replace(99);
+		}
+	`)
+	assertContains(t, ir, "define void @Box__int.replace")
+	// Should store i64 (the new value into the field)
+	assertContains(t, ir, "store i64")
+}
+
+func TestGenericFuncVoid(t *testing.T) {
+	ir := generateIR(t, `
+		consume[T](T x) { }
+		main() {
+			consume[int](42);
+		}
+	`)
+	assertContains(t, ir, "define void @consume__int")
+}
+
+func TestGenericFuncFailable(t *testing.T) {
+	ir := generateIR(t, `
+		tryIdentity[T](T x) T! {
+			return x;
+		}
+		main() {
+			int v = tryIdentity[int](42)!;
+		}
+	`)
+	assertContains(t, ir, "define { i1, i64, i8* } @tryIdentity__int")
+}
+
+func TestGenericTypeAsParam(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] { T value; }
+		unbox(Box[int] b) int {
+			return b.value;
+		}
+		main() {
+			b := Box[int](value: 99);
+			int v = unbox(b);
+		}
+	`)
+	assertContains(t, ir, "define i64 @unbox")
+	assertContains(t, ir, "load i64")
+}
+
+func TestGenericEnumMatchBlock(t *testing.T) {
+	ir := generateIR(t, `
+		enum Option[T] { Some(T), None }
+		main() {
+			x := Option[int].Some(42);
+			match x {
+				Some(v) => { int y = v; },
+				_ => { },
+			};
+		}
+	`)
+	assertContains(t, ir, "switch i32")
+}

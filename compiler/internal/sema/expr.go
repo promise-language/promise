@@ -592,7 +592,7 @@ func (c *Checker) checkIndexExpr(e *ast.IndexExpr) types.Type {
 		return nil
 	}
 
-	// Generic instantiation: Type[Arg] in expression context.
+	// Generic instantiation: Type[Arg] or func[Arg] in expression context.
 	// When target is a generic Named/Enum, treat [index] as type argument.
 	switch t := target.(type) {
 	case *types.Named:
@@ -602,6 +602,10 @@ func (c *Checker) checkIndexExpr(e *ast.IndexExpr) types.Type {
 	case *types.Enum:
 		if len(t.TypeParams()) > 0 {
 			return c.instantiateFromIndex(e, t, t.TypeParams())
+		}
+	case *types.Signature:
+		if len(t.TypeParams()) > 0 {
+			return c.instantiateGenericFunc(e, t)
 		}
 	}
 
@@ -636,7 +640,7 @@ func (c *Checker) checkIndexExpr(e *ast.IndexExpr) types.Type {
 // The index expression is reinterpreted as a type argument.
 func (c *Checker) instantiateFromIndex(e *ast.IndexExpr, origin types.Type, tparams []*types.TypeParam) types.Type {
 	// The index is a type name used as a type argument
-	typeArg := c.checkExpr(e.Index)
+	typeArg := c.resolveTypeRef(e.Index)
 	if typeArg == nil {
 		return nil
 	}
@@ -650,6 +654,58 @@ func (c *Checker) instantiateFromIndex(e *ast.IndexExpr, origin types.Type, tpar
 	inst := types.NewInstance(origin, []types.Type{typeArg})
 	c.recordInstance(inst)
 	return inst
+}
+
+// instantiateGenericFunc handles func[Arg] in expression context as generic function instantiation.
+// Returns the substituted signature (with TypeParams stripped).
+func (c *Checker) instantiateGenericFunc(e *ast.IndexExpr, sig *types.Signature) types.Type {
+	// Resolve the type argument from the index expression
+	typeArg := c.resolveTypeRef(e.Index)
+	if typeArg == nil {
+		c.errorf(e.Index.Pos(), "cannot resolve type argument")
+		return nil
+	}
+
+	tparams := sig.TypeParams()
+	if len(tparams) != 1 {
+		c.errorf(e.Pos(), "function expects %d type arguments, got 1", len(tparams))
+		return nil
+	}
+
+	// Build substitution map and substitute the signature
+	subst := types.BuildSubstMap(tparams, []types.Type{typeArg})
+	monoSig := types.Substitute(sig, subst).(*types.Signature)
+
+	// Look up the original function object for FuncInstance recording
+	if ident, ok := e.Target.(*ast.IdentExpr); ok {
+		obj := c.lookup(ident.Name)
+		if fn, ok := obj.(*types.Func); ok {
+			c.info.FuncInstances = append(c.info.FuncInstances, &FuncInstance{
+				Func:     fn,
+				TypeArgs: []types.Type{typeArg},
+				Sig:      monoSig,
+			})
+		}
+	}
+
+	return monoSig
+}
+
+// resolveTypeRef resolves an expression as a type reference.
+// Used for type arguments in generic instantiations (e.g., the "int" in func[int]).
+func (c *Checker) resolveTypeRef(expr ast.Expr) types.Type {
+	if ident, ok := expr.(*ast.IdentExpr); ok {
+		obj := c.lookup(ident.Name)
+		if obj == nil {
+			return nil
+		}
+		typ := obj.Type()
+		c.recordType(expr, typ)
+		c.recordObject(ident, obj)
+		return typ
+	}
+	// Fallback: check the expression normally
+	return c.checkExpr(expr)
 }
 
 func (c *Checker) checkOptionalChainExpr(e *ast.OptionalChainExpr) types.Type {

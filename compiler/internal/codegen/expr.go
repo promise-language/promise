@@ -7,6 +7,7 @@ import (
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
+	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
 
@@ -52,6 +53,18 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		return c.genErrorUnwrapExpr(e)
 	case *ast.ErrorHandlerExpr:
 		return c.genErrorHandlerExpr(e)
+	case *ast.TupleLit:
+		return c.genTupleLit(e)
+	case *ast.NoneLit:
+		return c.genNoneLit(e)
+	case *ast.ArrayLit:
+		return c.genArrayLit(e)
+	case *ast.MapLit:
+		return c.genMapLit(e)
+	case *ast.IndexExpr:
+		return c.genIndexExpr(e)
+	case *ast.LambdaExpr:
+		return c.genLambdaExpr(e)
 	default:
 		panic(fmt.Sprintf("codegen: unhandled expression type %T", expr))
 	}
@@ -182,12 +195,14 @@ func (c *Compiler) genIdentExpr(e *ast.IdentExpr) value.Value {
 // --- Binary expressions ---
 
 func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
-	// Short-circuit && and || at the AST level (control flow, not method dispatch)
+	// Short-circuit and special operators at the AST level
 	switch e.Op {
 	case ast.BinAnd:
 		return c.genShortCircuitAnd(e)
 	case ast.BinOr:
 		return c.genShortCircuitOr(e)
+	case ast.BinElvis:
+		return c.genElvis(e)
 	case ast.BinExclusiveRange, ast.BinInclusiveRange:
 		return c.genRange(e)
 	}
@@ -395,6 +410,15 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 	ident, ok := e.Callee.(*ast.IdentExpr)
 	if !ok {
 		panic(fmt.Sprintf("codegen: unsupported callee type %T", e.Callee))
+	}
+
+	// Lambda call: callee is a local variable holding a function pointer (i8*)
+	if alloca, ok := c.locals[ident.Name]; ok {
+		calleeType := c.info.Types[e.Callee]
+		if sig, ok := calleeType.(*types.Signature); ok {
+			fnPtr := c.block.NewLoad(alloca.ElemType, alloca)
+			return c.genIndirectCall(fnPtr, sig, argVals)
+		}
 	}
 
 	// Extern function — pack args into value structs, call, unpack return
@@ -1075,4 +1099,380 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 		)
 	}
 	return okVal
+}
+
+// --- Tuple ---
+
+func (c *Compiler) genTupleLit(e *ast.TupleLit) value.Value {
+	lt := c.resolveType(c.info.Types[e])
+	structType, ok := lt.(*irtypes.StructType)
+	if !ok {
+		panic(fmt.Sprintf("codegen: tuple type resolved to %T, want StructType", lt))
+	}
+	var agg value.Value = constant.NewZeroInitializer(structType)
+	for i, elem := range e.Elements {
+		agg = c.block.NewInsertValue(agg, c.genExpr(elem), uint64(i))
+	}
+	return agg
+}
+
+// --- Optional ---
+
+func (c *Compiler) genNoneLit(e *ast.NoneLit) value.Value {
+	if c.targetType != nil {
+		lt := c.resolveType(c.targetType)
+		return c.zeroValue(lt)
+	}
+	return constant.NewInt(irtypes.I1, 0) // void optional fallback
+}
+
+// wrapOptional wraps a value into an optional struct: { true, val }.
+func (c *Compiler) wrapOptional(val value.Value, optType *irtypes.StructType) value.Value {
+	var agg value.Value = constant.NewUndef(optType)
+	agg = c.block.NewInsertValue(agg, constant.NewInt(irtypes.I1, 1), 0)
+	agg = c.block.NewInsertValue(agg, val, 1)
+	return agg
+}
+
+func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
+	optVal := c.genExpr(e.Left)
+
+	// Extract the present flag (field 0)
+	flag := c.block.NewExtractValue(optVal, 0)
+
+	someBlock := c.newBlock("elvis.some")
+	noneBlock := c.newBlock("elvis.none")
+	mergeBlock := c.newBlock("elvis.merge")
+
+	c.block.NewCondBr(flag, someBlock, noneBlock)
+
+	// Some path: extract inner value
+	c.block = someBlock
+	someVal := c.block.NewExtractValue(optVal, 1)
+	c.block.NewBr(mergeBlock)
+	someEnd := c.block
+
+	// None path: evaluate default
+	c.block = noneBlock
+	defaultVal := c.genExpr(e.Right)
+	noneEnd := c.block
+	c.block.NewBr(mergeBlock)
+
+	// Merge
+	c.block = mergeBlock
+	return mergeBlock.NewPhi(
+		&ir.Incoming{X: someVal, Pred: someEnd},
+		&ir.Incoming{X: defaultVal, Pred: noneEnd},
+	)
+}
+
+// --- Slice / Array Literal ---
+
+const sliceHeaderSize = 16
+
+func sliceHeaderType() *irtypes.StructType {
+	return irtypes.NewStruct(irtypes.I64, irtypes.I64)
+}
+
+func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
+	typ := c.info.Types[e]
+	if c.typeSubst != nil {
+		typ = types.Substitute(typ, c.typeSubst)
+	}
+	sliceType, ok := typ.(*types.Slice)
+	if !ok {
+		panic(fmt.Sprintf("codegen: array literal type is %T, want *types.Slice", typ))
+	}
+	elemLLVM := c.resolveType(sliceType.Elem())
+	elemSize := int64(llvmTypeSize(elemLLVM))
+	n := int64(len(e.Elements))
+
+	// Total allocation: header (16 bytes) + n * elemSize
+	totalSize := int64(sliceHeaderSize) + n*elemSize
+
+	// malloc
+	rawPtr := c.block.NewCall(c.funcs["malloc"],
+		constant.NewInt(irtypes.I64, totalSize))
+
+	// Store len and cap via header GEP
+	headerType := sliceHeaderType()
+	headerPtr := c.block.NewBitCast(rawPtr, irtypes.NewPointer(headerType))
+	lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	c.block.NewStore(constant.NewInt(irtypes.I64, n), lenPtr)
+
+	capPtr := c.block.NewGetElementPtr(headerType, headerPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	c.block.NewStore(constant.NewInt(irtypes.I64, n), capPtr)
+
+	// Store elements: ptr + 16 bytes (header), then index by element type
+	dataBase := c.block.NewGetElementPtr(irtypes.I8, rawPtr,
+		constant.NewInt(irtypes.I64, int64(sliceHeaderSize)))
+	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
+
+	for i, elemExpr := range e.Elements {
+		val := c.genExpr(elemExpr)
+		elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr,
+			constant.NewInt(irtypes.I64, int64(i)))
+		c.block.NewStore(val, elemPtr)
+	}
+
+	return rawPtr // i8*
+}
+
+// --- Index Expression ---
+
+func (c *Compiler) genIndexExpr(e *ast.IndexExpr) value.Value {
+	targetType := c.info.Types[e.Target]
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+
+	switch t := targetType.(type) {
+	case *types.Slice:
+		return c.genSliceIndex(e, t)
+	case *types.Array:
+		return c.genSliceIndex(e, types.NewSlice(t.Elem()))
+	case *types.Map:
+		return c.genMapIndex(e, t)
+	default:
+		panic(fmt.Sprintf("codegen: cannot index type %s", targetType))
+	}
+}
+
+func (c *Compiler) genSliceIndex(e *ast.IndexExpr, sliceType *types.Slice) value.Value {
+	slicePtr := c.genExpr(e.Target)
+	idx := c.genExpr(e.Index)
+	elemLLVM := c.resolveType(sliceType.Elem())
+
+	// Bounds check: load len, compare index
+	headerType := sliceHeaderType()
+	headerPtr := c.block.NewBitCast(slicePtr, irtypes.NewPointer(headerType))
+	lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	length := c.block.NewLoad(irtypes.I64, lenPtr)
+
+	inBounds := c.block.NewICmp(enum.IPredULT, idx, length)
+	okBlock := c.newBlock("index.ok")
+	panicBlock := c.newBlock("index.oob")
+	c.block.NewCondBr(inBounds, okBlock, panicBlock)
+
+	// Out of bounds: panic
+	c.block = panicBlock
+	oobMsg := c.makeGlobalString("index out of bounds")
+	c.block.NewCall(c.funcs["promise_panic"], oobMsg)
+	c.block.NewUnreachable()
+
+	// In bounds: load element
+	c.block = okBlock
+	dataBase := c.block.NewGetElementPtr(irtypes.I8, slicePtr,
+		constant.NewInt(irtypes.I64, int64(sliceHeaderSize)))
+	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
+	elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, idx)
+	return c.block.NewLoad(elemLLVM, elemPtr)
+}
+
+// makeGlobalString creates a global null-terminated string constant and returns an i8* to it.
+func (c *Compiler) makeGlobalString(s string) value.Value {
+	data := constant.NewCharArrayFromString(s + "\x00")
+	globalName := fmt.Sprintf(".str.%d", c.strCounter)
+	c.strCounter++
+	global := c.module.NewGlobalDef(globalName, data)
+	global.Immutable = true
+	return c.block.NewGetElementPtr(global.ContentType, global,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+}
+
+// --- Map ---
+
+func (c *Compiler) genMapLit(e *ast.MapLit) value.Value {
+	typ := c.info.Types[e]
+	if c.typeSubst != nil {
+		typ = types.Substitute(typ, c.typeSubst)
+	}
+	mapType, ok := typ.(*types.Map)
+	if !ok {
+		panic(fmt.Sprintf("codegen: map literal type is %T, want *types.Map", typ))
+	}
+	keyLLVM := c.resolveType(mapType.Key())
+	valLLVM := c.resolveType(mapType.Val())
+	keySize := int64(llvmTypeSize(keyLLVM))
+	valSize := int64(llvmTypeSize(valLLVM))
+
+	// Determine hash/eq function pointers (string keys need content-based comparison)
+	var hashFn, eqFn value.Value
+	if extractNamed(mapType.Key()) == types.TypString {
+		hashFn = c.block.NewBitCast(c.funcs["promise_hash_string"], irtypes.I8Ptr)
+		eqFn = c.block.NewBitCast(c.funcs["promise_eq_string"], irtypes.I8Ptr)
+	} else {
+		hashFn = constant.NewNull(irtypes.I8Ptr)
+		eqFn = constant.NewNull(irtypes.I8Ptr)
+	}
+
+	// Create map
+	mapPtr := c.block.NewCall(c.funcs["promise_map_new"],
+		constant.NewInt(irtypes.I64, keySize),
+		constant.NewInt(irtypes.I64, valSize),
+		hashFn, eqFn)
+
+	// Insert entries
+	for _, entry := range e.Entries {
+		keyVal := c.genExpr(entry.Key)
+		valVal := c.genExpr(entry.Value)
+
+		keyAlloca := c.block.NewAlloca(keyLLVM)
+		c.block.NewStore(keyVal, keyAlloca)
+		keyPtr := c.block.NewBitCast(keyAlloca, irtypes.I8Ptr)
+
+		valAlloca := c.block.NewAlloca(valLLVM)
+		c.block.NewStore(valVal, valAlloca)
+		valPtr := c.block.NewBitCast(valAlloca, irtypes.I8Ptr)
+
+		c.block.NewCall(c.funcs["promise_map_set"], mapPtr, keyPtr, valPtr)
+	}
+
+	return mapPtr
+}
+
+func (c *Compiler) genMapIndex(e *ast.IndexExpr, mapType *types.Map) value.Value {
+	mapPtr := c.genExpr(e.Target)
+	keyVal := c.genExpr(e.Index)
+	keyLLVM := c.resolveType(mapType.Key())
+	valLLVM := c.resolveType(mapType.Val())
+
+	// Alloca key for type-erased call
+	keyAlloca := c.block.NewAlloca(keyLLVM)
+	c.block.NewStore(keyVal, keyAlloca)
+	keyPtr := c.block.NewBitCast(keyAlloca, irtypes.I8Ptr)
+
+	// Call promise_map_get
+	resultPtr := c.block.NewCall(c.funcs["promise_map_get"], mapPtr, keyPtr)
+
+	// Check if NULL
+	isNull := c.block.NewICmp(enum.IPredEQ, resultPtr, constant.NewNull(irtypes.I8Ptr))
+
+	someBlock := c.newBlock("map.found")
+	noneBlock := c.newBlock("map.notfound")
+	mergeBlock := c.newBlock("map.merge")
+
+	c.block.NewCondBr(isNull, noneBlock, someBlock)
+
+	// Found: load value, wrap in Optional
+	c.block = someBlock
+	typedPtr := c.block.NewBitCast(resultPtr, irtypes.NewPointer(valLLVM))
+	loadedVal := c.block.NewLoad(valLLVM, typedPtr)
+	optType := irtypes.NewStruct(irtypes.I1, valLLVM)
+	someOpt := c.wrapOptional(loadedVal, optType)
+	c.block.NewBr(mergeBlock)
+	someEnd := c.block
+
+	// Not found: none
+	c.block = noneBlock
+	noneOpt := constant.NewZeroInitializer(optType)
+	c.block.NewBr(mergeBlock)
+	noneEnd := c.block
+
+	// Merge
+	c.block = mergeBlock
+	return mergeBlock.NewPhi(
+		&ir.Incoming{X: someOpt, Pred: someEnd},
+		&ir.Incoming{X: noneOpt, Pred: noneEnd},
+	)
+}
+
+// --- Lambda ---
+
+func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
+	sig, ok := c.info.Types[e].(*types.Signature)
+	if !ok {
+		panic("codegen: lambda expression type is not *types.Signature")
+	}
+
+	// Build LLVM function type
+	retType := irtypes.Type(irtypes.Void)
+	if sig.Result() != nil {
+		retType = c.resolveType(sig.Result())
+	}
+
+	var params []*ir.Param
+	for _, p := range sig.Params() {
+		params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
+	}
+
+	// Create anonymous function
+	lambdaName := fmt.Sprintf(".lambda.%d", c.lambdaCounter)
+	c.lambdaCounter++
+	fn := c.module.NewFunc(lambdaName, retType, params...)
+
+	// Save current state
+	savedFn := c.fn
+	savedBlock := c.block
+	savedLocals := c.locals
+	savedCanError := c.canError
+
+	// Generate lambda body
+	c.fn = fn
+	c.locals = make(map[string]*ir.InstAlloca)
+	c.canError = false
+
+	entry := fn.NewBlock("entry")
+	c.block = entry
+
+	// Allocate parameters
+	for i, p := range sig.Params() {
+		if p.Name() == "" || p.Name() == "_" {
+			continue
+		}
+		alloca := entry.NewAlloca(c.resolveType(p.Type()))
+		alloca.SetName(p.Name() + ".addr")
+		entry.NewStore(fn.Params[i], alloca)
+		c.locals[p.Name()] = alloca
+	}
+
+	// Generate body
+	if e.Body != nil {
+		c.genBlock(e.Body)
+	} else if e.ExprBody != nil {
+		val := c.genExpr(e.ExprBody)
+		if val != nil && c.block.Term == nil {
+			c.block.NewRet(val)
+		}
+	}
+
+	// Ensure terminator
+	if c.block != nil && c.block.Term == nil {
+		if _, ok := fn.Sig.RetType.(*irtypes.VoidType); ok {
+			c.block.NewRet(nil)
+		} else {
+			c.block.NewRet(c.zeroValue(fn.Sig.RetType))
+		}
+	}
+
+	// Restore state
+	c.fn = savedFn
+	c.block = savedBlock
+	c.locals = savedLocals
+	c.canError = savedCanError
+
+	// Return function pointer as i8*
+	return c.block.NewBitCast(fn, irtypes.I8Ptr)
+}
+
+// genIndirectCall calls a function through a function pointer (i8*).
+func (c *Compiler) genIndirectCall(fnPtr value.Value, sig *types.Signature, args []value.Value) value.Value {
+	retType := irtypes.Type(irtypes.Void)
+	if sig.Result() != nil {
+		retType = c.resolveType(sig.Result())
+	}
+
+	var paramTypes []irtypes.Type
+	for _, p := range sig.Params() {
+		paramTypes = append(paramTypes, c.resolveType(p.Type()))
+	}
+
+	funcType := irtypes.NewFunc(retType, paramTypes...)
+	funcPtrType := irtypes.NewPointer(funcType)
+
+	typedFnPtr := c.block.NewBitCast(fnPtr, funcPtrType)
+	return c.block.NewCall(typedFnPtr, args...)
 }

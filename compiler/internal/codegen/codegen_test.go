@@ -1965,3 +1965,326 @@ func TestGenericEnumMatchBlock(t *testing.T) {
 	`)
 	assertContains(t, ir, "switch i32")
 }
+
+// === Stage 8g: Container Codegen Tests ===
+
+// --- Part A: Tuple tests ---
+
+func TestTupleLiteral(t *testing.T) {
+	ir := generateIR(t, `main() { x := (1, 2); }`)
+	// Should use insertvalue to build { i64, i64 } struct
+	assertContains(t, ir, "insertvalue { i64, i64 }")
+}
+
+func TestTupleDestructure(t *testing.T) {
+	ir := generateIR(t, `
+		pair() (int, int) { return (1, 2); }
+		main() { (a, b) := pair(); }
+	`)
+	// Should use extractvalue to destructure
+	assertContains(t, ir, "extractvalue { i64, i64 }")
+}
+
+func TestTupleDestructureSkip(t *testing.T) {
+	ir := generateIR(t, `
+		pair() (int, int) { return (1, 2); }
+		main() { (_, b) := pair(); }
+	`)
+	// Should extract second element but skip first
+	assertContains(t, ir, "extractvalue { i64, i64 }")
+	// b should be allocated
+	assertContains(t, ir, "%b = alloca i64")
+}
+
+func TestTupleMixedTypes(t *testing.T) {
+	ir := generateIR(t, `main() { x := (42, "hello", true); }`)
+	// Should produce { i64, i8*, i1 } struct
+	assertContains(t, ir, "insertvalue { i64, i8*, i1 }")
+}
+
+func TestTupleReturn(t *testing.T) {
+	ir := generateIR(t, `
+		pair() (int, bool) { return (42, true); }
+		main() { (a, b) := pair(); }
+	`)
+	assertContains(t, ir, "define { i64, i1 } @pair()")
+	assertContains(t, ir, "ret { i64, i1 }")
+}
+
+// --- Part B: Optional tests ---
+
+func TestOptionalNone(t *testing.T) {
+	ir := generateIR(t, `main() { int? x = none; }`)
+	// Should alloca { i1, i64 } and zero-initialize
+	assertContains(t, ir, "alloca { i1, i64 }")
+	assertContains(t, ir, "zeroinitializer")
+}
+
+func TestOptionalSome(t *testing.T) {
+	ir := generateIR(t, `main() { int? x = 42; }`)
+	// Should alloca { i1, i64 } and wrap: { true, 42 }
+	assertContains(t, ir, "alloca { i1, i64 }")
+	assertContains(t, ir, "insertvalue { i1, i64 }")
+	assertContains(t, ir, "i1 true")
+}
+
+func TestElvisOperator(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int? x = 42;
+			int y = x ?: 0;
+		}
+	`)
+	// Should have condBr + phi pattern
+	assertContains(t, ir, "elvis.some")
+	assertContains(t, ir, "elvis.none")
+	assertContains(t, ir, "elvis.merge")
+}
+
+func TestOptionalStringNone(t *testing.T) {
+	ir := generateIR(t, `main() { string? x = none; }`)
+	assertContains(t, ir, "alloca { i1, i8* }")
+	assertContains(t, ir, "zeroinitializer")
+}
+
+func TestOptionalVariable(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int? x = 42;
+			int? y = x;
+		}
+	`)
+	// Should load/store { i1, i64 } struct
+	assertContains(t, ir, "load { i1, i64 }")
+	assertContains(t, ir, "store { i1, i64 }")
+}
+
+// --- Part C: Slice / Array tests ---
+
+func TestArrayLiteral(t *testing.T) {
+	ir := generateIR(t, `main() { x := [1, 2, 3]; }`)
+	// Should call malloc for heap allocation
+	assertContains(t, ir, "call i8* @malloc(i64")
+	// Should store len and cap
+	assertContains(t, ir, "store i64 3")
+	// Should store elements
+	assertContains(t, ir, "store i64 1")
+	assertContains(t, ir, "store i64 2")
+}
+
+func TestArrayIndex(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[] items = [1, 2, 3];
+			int x = items[0];
+		}
+	`)
+	// Should have bounds check
+	assertContains(t, ir, "icmp ult")
+	// Should have ok and oob blocks
+	assertContains(t, ir, "index.ok")
+	assertContains(t, ir, "index.oob")
+	// Should call promise_panic on out-of-bounds
+	assertContains(t, ir, "call void @promise_panic(")
+}
+
+func TestArrayIndexAssign(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[] items = [1, 2, 3];
+			items[0] = 42;
+		}
+	`)
+	// Should have bounds check and store
+	assertContains(t, ir, "icmp ult")
+	assertContains(t, ir, "indexassign.ok")
+	assertContains(t, ir, "store i64 42")
+}
+
+func TestArrayBoundsCheck(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[] items = [1, 2, 3];
+			int x = items[0];
+		}
+	`)
+	// Bounds check uses unsigned less-than
+	assertContains(t, ir, "icmp ult")
+	// Out-of-bounds path calls promise_panic
+	assertContains(t, ir, "call void @promise_panic(")
+	assertContains(t, ir, "unreachable")
+}
+
+func TestArrayForIn(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[] items = [1, 2, 3];
+			for x in items {
+				int y = x;
+			}
+		}
+	`)
+	// Should have for-in loop blocks
+	assertContains(t, ir, "forin.header")
+	assertContains(t, ir, "forin.body")
+	assertContains(t, ir, "forin.update")
+	assertContains(t, ir, "forin.exit")
+	// Should use unsigned comparison for counter < length
+	assertContains(t, ir, "icmp ult")
+}
+
+func TestArrayStringElements(t *testing.T) {
+	ir := generateIR(t, `main() { x := ["hello", "world"]; }`)
+	// String elements stored as i8*
+	assertContains(t, ir, "call i8* @promise_string_new(")
+	assertContains(t, ir, "call i8* @malloc(i64")
+}
+
+func TestArrayVariable(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[] items = [1, 2, 3];
+			int[] copy = items;
+		}
+	`)
+	// Slice is stored/loaded as i8*
+	assertContains(t, ir, "alloca i8*")
+	assertContains(t, ir, "store i8*")
+	assertContains(t, ir, "load i8*")
+}
+
+// --- Part D: Map tests ---
+
+func TestMapLiteral(t *testing.T) {
+	ir := generateIR(t, `main() { m := {"a": 1}; }`)
+	// Should call promise_map_new and promise_map_set
+	assertContains(t, ir, "call i8* @promise_map_new(")
+	assertContains(t, ir, "call void @promise_map_set(")
+}
+
+func TestMapIndex(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := {"a": 1};
+			int? v = m["a"];
+		}
+	`)
+	// Should call promise_map_get
+	assertContains(t, ir, "call i8* @promise_map_get(")
+	// Should check for NULL
+	assertContains(t, ir, "icmp eq")
+	// Should have found/notfound/merge blocks
+	assertContains(t, ir, "map.found")
+	assertContains(t, ir, "map.notfound")
+	assertContains(t, ir, "map.merge")
+}
+
+func TestMapIndexWithElvis(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := {"a": 1};
+			int v = m["a"] ?: 0;
+		}
+	`)
+	// Should use map_get + elvis
+	assertContains(t, ir, "call i8* @promise_map_get(")
+	assertContains(t, ir, "elvis.some")
+}
+
+func TestMapIndexAssign(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := {"a": 1};
+			m["a"] = 42;
+		}
+	`)
+	// Should call promise_map_set
+	assertContains(t, ir, "call void @promise_map_set(")
+}
+
+func TestMapIntKeys(t *testing.T) {
+	ir := generateIR(t, `main() { m := {1: "one", 2: "two"}; }`)
+	// Should use null hash/eq (byte-level for int keys)
+	assertContains(t, ir, "call i8* @promise_map_new(i64 8, i64 8, i8* null, i8* null)")
+}
+
+func TestMapIntrinsics(t *testing.T) {
+	ir := generateIR(t, `main() { x := 42; }`)
+	// Map intrinsics should always be declared
+	assertContains(t, ir, "declare i8* @promise_map_new(i64 %key_size, i64 %val_size, i8* %hash_fn, i8* %eq_fn)")
+	assertContains(t, ir, "declare void @promise_map_set(i8* %m, i8* %key, i8* %val)")
+	assertContains(t, ir, "declare i8* @promise_map_get(i8* %m, i8* %key)")
+	assertContains(t, ir, "declare i64 @promise_map_len(i8* %m)")
+}
+
+func TestMapForIn(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			m := {"a": 1, "b": 2};
+			for entry in m {
+			}
+		}
+	`)
+	// Should call promise_map_iter_next
+	assertContains(t, ir, "call i32 @promise_map_iter_next(")
+	// Should have loop blocks
+	assertContains(t, ir, "forin.header")
+	assertContains(t, ir, "forin.body")
+	assertContains(t, ir, "forin.exit")
+}
+
+// --- Part E: Lambda tests ---
+
+func TestLambdaExpr(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			f := |int x| -> x + 1;
+		}
+	`)
+	// Should create anonymous function
+	assertContains(t, ir, "define i64 @.lambda.0(i64 %x)")
+	// Lambda returned as i8* via bitcast
+	assertContains(t, ir, "bitcast i64 (i64)* @.lambda.0 to i8*")
+}
+
+func TestLambdaCall(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			f := |int x| -> x + 1;
+			int y = f(42);
+		}
+	`)
+	// Should do indirect call via bitcast
+	assertContains(t, ir, "bitcast i8*")
+	assertContains(t, ir, "call i64")
+}
+
+func TestLambdaBlock(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			f := |int x| -> int { return x * 2; };
+		}
+	`)
+	assertContains(t, ir, "define i64 @.lambda.0(i64 %x)")
+	assertContains(t, ir, "mul i64")
+}
+
+func TestLambdaVoid(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			f := |int x| -> void { return; };
+		}
+	`)
+	assertContains(t, ir, "define void @.lambda.0(i64 %x)")
+}
+
+func TestLambdaVariable(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			f := |int x| -> x + 1;
+		}
+	`)
+	// Lambda stored as i8*
+	assertContains(t, ir, "alloca i8*")
+	assertContains(t, ir, "store i8*")
+}

@@ -40,6 +40,12 @@ type Compiler struct {
 
 	// String literal counter for unique global names
 	strCounter int
+
+	// Lambda counter for unique anonymous function names
+	lambdaCounter int
+
+	// Target type for contextual type resolution (e.g., NoneLit needs Optional(T))
+	targetType types.Type
 }
 
 // Compile generates an LLVM IR module from a type-checked Promise AST.
@@ -122,6 +128,48 @@ func (c *Compiler) declareIntrinsics() {
 		irtypes.I1,
 		ir.NewParam("a", irtypes.I8Ptr),
 		ir.NewParam("b", irtypes.I8Ptr))
+
+	// Map intrinsics — type-erased runtime hash table
+	c.funcs["promise_map_new"] = c.module.NewFunc("promise_map_new",
+		irtypes.I8Ptr,
+		ir.NewParam("key_size", irtypes.I64),
+		ir.NewParam("val_size", irtypes.I64),
+		ir.NewParam("hash_fn", irtypes.I8Ptr),
+		ir.NewParam("eq_fn", irtypes.I8Ptr))
+
+	c.funcs["promise_map_set"] = c.module.NewFunc("promise_map_set",
+		irtypes.Void,
+		ir.NewParam("m", irtypes.I8Ptr),
+		ir.NewParam("key", irtypes.I8Ptr),
+		ir.NewParam("val", irtypes.I8Ptr))
+
+	c.funcs["promise_map_get"] = c.module.NewFunc("promise_map_get",
+		irtypes.I8Ptr,
+		ir.NewParam("m", irtypes.I8Ptr),
+		ir.NewParam("key", irtypes.I8Ptr))
+
+	c.funcs["promise_map_len"] = c.module.NewFunc("promise_map_len",
+		irtypes.I64,
+		ir.NewParam("m", irtypes.I8Ptr))
+
+	c.funcs["promise_map_iter_next"] = c.module.NewFunc("promise_map_iter_next",
+		irtypes.I32,
+		ir.NewParam("m", irtypes.I8Ptr),
+		ir.NewParam("state", irtypes.NewPointer(irtypes.I64)),
+		ir.NewParam("key_out", irtypes.I8Ptr),
+		ir.NewParam("val_out", irtypes.I8Ptr))
+
+	// String hash/eq for map keys (dereferences i8* to hash/compare content)
+	c.funcs["promise_hash_string"] = c.module.NewFunc("promise_hash_string",
+		irtypes.I64,
+		ir.NewParam("key", irtypes.I8Ptr),
+		ir.NewParam("key_size", irtypes.I64))
+
+	c.funcs["promise_eq_string"] = c.module.NewFunc("promise_eq_string",
+		irtypes.I32,
+		ir.NewParam("a", irtypes.I8Ptr),
+		ir.NewParam("b", irtypes.I8Ptr),
+		ir.NewParam("key_size", irtypes.I64))
 }
 
 // declareFuncs creates LLVM function declarations for all FuncDecl nodes with bodies (pass 1).

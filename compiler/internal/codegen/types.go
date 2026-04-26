@@ -43,7 +43,25 @@ func llvmType(typ types.Type) irtypes.Type {
 	case *types.Named:
 		return llvmNamedType(t)
 	case *types.Signature:
-		return irtypes.I8Ptr // function pointer placeholder
+		return irtypes.I8Ptr // function pointer
+	case *types.Tuple:
+		fields := make([]irtypes.Type, len(t.Elems()))
+		for i, elem := range t.Elems() {
+			fields[i] = llvmType(elem)
+		}
+		return irtypes.NewStruct(fields...)
+	case *types.Optional:
+		inner := llvmType(t.Elem())
+		if _, ok := inner.(*irtypes.VoidType); ok {
+			return irtypes.I1
+		}
+		return irtypes.NewStruct(irtypes.I1, inner)
+	case *types.Slice:
+		return irtypes.I8Ptr // opaque pointer to heap-allocated header + data
+	case *types.Array:
+		return irtypes.I8Ptr // treated as heap-allocated slice for now
+	case *types.Map:
+		return irtypes.I8Ptr // opaque pointer to runtime hash table
 	default:
 		return irtypes.I8Ptr // opaque pointer placeholder for future types
 	}
@@ -138,6 +156,24 @@ func (c *Compiler) resolveType(typ types.Type) irtypes.Type {
 	// Apply current type substitution (inside monomorphic method/function bodies)
 	if c.typeSubst != nil {
 		typ = types.Substitute(typ, c.typeSubst)
+	}
+
+	// Handle Tuple types (elements may contain TypeParams needing substitution)
+	if tup, ok := typ.(*types.Tuple); ok {
+		fields := make([]irtypes.Type, len(tup.Elems()))
+		for i, elem := range tup.Elems() {
+			fields[i] = c.resolveType(elem)
+		}
+		return irtypes.NewStruct(fields...)
+	}
+
+	// Handle Optional types
+	if opt, ok := typ.(*types.Optional); ok {
+		inner := c.resolveType(opt.Elem())
+		if _, ok := inner.(*irtypes.VoidType); ok {
+			return irtypes.I1
+		}
+		return irtypes.NewStruct(irtypes.I1, inner)
 	}
 
 	// Handle Instance types

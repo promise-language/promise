@@ -55,6 +55,8 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 		c.genContinueStmt()
 	case *ast.RaiseStmt:
 		c.genRaiseStmt(s)
+	case *ast.DestructureVarDecl:
+		c.genDestructureVarDecl(s)
 	case *ast.Block:
 		c.genBlock(s)
 	default:
@@ -65,7 +67,47 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 // --- Variable declarations ---
 
 func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
+	// Resolve the declared type (from sema's type annotation)
+	declType := c.lookupLocalType(s)
+	exprType := c.info.Types[s.Value]
+
+	// Use declared type for alloca when available (handles NoneLit → Optional)
+	var lt irtypes.Type
+	if declType != nil {
+		lt = c.resolveType(declType)
+	} else {
+		lt = c.resolveType(exprType)
+	}
+	alloca := c.block.NewAlloca(lt)
+	alloca.SetName(s.Name)
+
+	// Set targetType for contextual type resolution (NoneLit needs Optional(T))
+	if declType != nil {
+		c.targetType = declType
+	}
+	val := c.genExpr(s.Value)
+	c.targetType = nil
+
+	// Wrap value in Optional if declared type is Optional but expr is not
+	if declType != nil {
+		if _, isOpt := declType.(*types.Optional); isOpt {
+			if _, isNone := exprType.(*types.Named); isNone && exprType == types.TypNone {
+				// NoneLit already handled via targetType
+			} else if _, exprOpt := exprType.(*types.Optional); !exprOpt {
+				val = c.wrapOptional(val, lt.(*irtypes.StructType))
+			}
+		}
+	}
+
+	c.block.NewStore(val, alloca)
+	c.locals[s.Name] = alloca
+}
+
+func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	typ := c.info.Types[s.Value]
+	if c.typeSubst != nil {
+		typ = types.Substitute(typ, c.typeSubst)
+	}
 	lt := c.resolveType(typ)
 	alloca := c.block.NewAlloca(lt)
 	alloca.SetName(s.Name)
@@ -74,14 +116,27 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	c.locals[s.Name] = alloca
 }
 
-func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
-	typ := c.info.Types[s.Value]
-	lt := c.resolveType(typ)
-	alloca := c.block.NewAlloca(lt)
-	alloca.SetName(s.Name)
-	val := c.genExpr(s.Value)
-	c.block.NewStore(val, alloca)
-	c.locals[s.Name] = alloca
+// genDestructureVarDecl handles tuple destructuring: (a, b) := expr
+func (c *Compiler) genDestructureVarDecl(s *ast.DestructureVarDecl) {
+	tupleVal := c.genExpr(s.Value)
+	tupleType := c.info.Types[s.Value]
+	if c.typeSubst != nil {
+		tupleType = types.Substitute(tupleType, c.typeSubst)
+	}
+	tup, ok := tupleType.(*types.Tuple)
+	if !ok {
+		panic(fmt.Sprintf("codegen: destructure value type is %T, want *types.Tuple", tupleType))
+	}
+	for i, name := range s.Names {
+		if name == "_" {
+			continue
+		}
+		elemType := c.resolveType(tup.Elems()[i])
+		alloca := c.block.NewAlloca(elemType)
+		alloca.SetName(name)
+		c.block.NewStore(c.block.NewExtractValue(tupleVal, uint64(i)), alloca)
+		c.locals[name] = alloca
+	}
 }
 
 // --- Assignment ---
@@ -106,6 +161,9 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 
 	case *ast.MemberExpr:
 		c.genMemberAssign(target, s.Op, val)
+
+	case *ast.IndexExpr:
+		c.genIndexAssign(target, s.Op, val)
 
 	default:
 		panic(fmt.Sprintf("codegen: unsupported assignment target %T", s.Target))
@@ -315,13 +373,34 @@ func (c *Compiler) genWhileStmt(s *ast.WhileStmt) {
 	c.block = exitBlock
 }
 
-// --- For-in loop (range iteration) ---
+// --- For-in loop ---
 
 func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
-	// Generate the range value
+	iterableType := c.info.Types[s.Iterable]
+	if c.typeSubst != nil {
+		iterableType = types.Substitute(iterableType, c.typeSubst)
+	}
+
+	switch t := iterableType.(type) {
+	case *types.Slice:
+		slicePtr := c.genExpr(s.Iterable)
+		c.genForInSlice(s, slicePtr, t)
+	case *types.Array:
+		slicePtr := c.genExpr(s.Iterable)
+		c.genForInSlice(s, slicePtr, types.NewSlice(t.Elem()))
+	case *types.Map:
+		mapPtr := c.genExpr(s.Iterable)
+		c.genForInMap(s, mapPtr, t)
+	default:
+		// Range iteration (existing behavior)
+		c.genForInRange(s)
+	}
+}
+
+// genForInRange handles for-in over a range (e.g., 0..10).
+func (c *Compiler) genForInRange(s *ast.ForInStmt) {
 	rangeVal := c.genExpr(s.Iterable)
 
-	// Extract fields: start, end, inclusive
 	rangeType := c.rangeStructType()
 	rangeAlloca := c.block.NewAlloca(rangeType)
 	c.block.NewStore(rangeVal, rangeAlloca)
@@ -338,13 +417,11 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
 	inclusive := c.block.NewLoad(irtypes.I1, inclPtr)
 
-	// Allocate loop counter (the binding variable)
 	counterAlloca := c.block.NewAlloca(irtypes.I64)
 	counterAlloca.SetName(s.Binding)
 	c.block.NewStore(start, counterAlloca)
 	c.locals[s.Binding] = counterAlloca
 
-	// Allocate index variable if present
 	if s.Index != "" {
 		indexAlloca := c.block.NewAlloca(irtypes.I64)
 		indexAlloca.SetName(s.Index)
@@ -359,18 +436,14 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 
 	c.block.NewBr(headerBlock)
 
-	// Header: check counter against end
 	c.block = headerBlock
 	counter := c.block.NewLoad(irtypes.I64, counterAlloca)
-	// For exclusive range (..): counter < end
-	// For inclusive range (..=): counter <= end
 	ltCond := c.block.NewICmp(enum.IPredSLT, counter, end)
 	eqCond := c.block.NewICmp(enum.IPredEQ, counter, end)
 	inclAndEq := c.block.NewAnd(inclusive, eqCond)
 	cond := c.block.NewOr(ltCond, inclAndEq)
 	c.block.NewCondBr(cond, bodyBlock, exitBlock)
 
-	// Body
 	savedBreak := c.breakTarget
 	savedContinue := c.continueTarget
 	c.breakTarget = exitBlock
@@ -382,7 +455,6 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 		c.block.NewBr(updateBlock)
 	}
 
-	// Update: increment counter (and index if present)
 	c.block = updateBlock
 	cur := c.block.NewLoad(irtypes.I64, counterAlloca)
 	next := c.block.NewAdd(cur, constant.NewInt(irtypes.I64, 1))
@@ -505,4 +577,291 @@ func (c *Compiler) genContinueStmt() {
 	if c.continueTarget != nil {
 		c.block.NewBr(c.continueTarget)
 	}
+}
+
+// --- Index assignment ---
+
+// genIndexAssign handles assignment to a container element: arr[i] = val, m[k] = val.
+func (c *Compiler) genIndexAssign(target *ast.IndexExpr, op ast.AssignOp, val value.Value) {
+	targetType := c.info.Types[target.Target]
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+
+	switch t := targetType.(type) {
+	case *types.Slice:
+		c.genSliceIndexAssign(target, t, op, val)
+	case *types.Array:
+		c.genSliceIndexAssign(target, types.NewSlice(t.Elem()), op, val)
+	case *types.Map:
+		if op != ast.OpAssign {
+			panic("codegen: compound assignment on map index not yet supported")
+		}
+		c.genMapIndexAssign(target, t, val)
+	default:
+		panic(fmt.Sprintf("codegen: cannot assign to index of type %s", targetType))
+	}
+}
+
+// genSliceIndexAssign handles arr[i] = val with bounds check.
+func (c *Compiler) genSliceIndexAssign(target *ast.IndexExpr, sliceType *types.Slice, op ast.AssignOp, val value.Value) {
+	slicePtr := c.genExpr(target.Target)
+	idx := c.genExpr(target.Index)
+	elemLLVM := c.resolveType(sliceType.Elem())
+
+	// Bounds check
+	headerType := sliceHeaderType()
+	headerPtr := c.block.NewBitCast(slicePtr, irtypes.NewPointer(headerType))
+	lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	length := c.block.NewLoad(irtypes.I64, lenPtr)
+
+	inBounds := c.block.NewICmp(enum.IPredULT, idx, length)
+	okBlock := c.newBlock("indexassign.ok")
+	panicBlock := c.newBlock("indexassign.oob")
+	c.block.NewCondBr(inBounds, okBlock, panicBlock)
+
+	c.block = panicBlock
+	oobMsg := c.makeGlobalString("index out of bounds")
+	c.block.NewCall(c.funcs["promise_panic"], oobMsg)
+	c.block.NewUnreachable()
+
+	c.block = okBlock
+	dataBase := c.block.NewGetElementPtr(irtypes.I8, slicePtr,
+		constant.NewInt(irtypes.I64, int64(sliceHeaderSize)))
+	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
+	elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, idx)
+
+	if op == ast.OpAssign {
+		c.block.NewStore(val, elemPtr)
+		return
+	}
+
+	// Compound assignment
+	current := c.block.NewLoad(elemLLVM, elemPtr)
+	result := c.genCompoundOp(op, current, val)
+	c.block.NewStore(result, elemPtr)
+}
+
+// genMapIndexAssign handles m[k] = val via promise_map_set.
+func (c *Compiler) genMapIndexAssign(target *ast.IndexExpr, mapType *types.Map, val value.Value) {
+	mapPtr := c.genExpr(target.Target)
+	keyVal := c.genExpr(target.Index)
+	keyLLVM := c.resolveType(mapType.Key())
+	valLLVM := c.resolveType(mapType.Val())
+
+	keyAlloca := c.block.NewAlloca(keyLLVM)
+	c.block.NewStore(keyVal, keyAlloca)
+	keyPtr := c.block.NewBitCast(keyAlloca, irtypes.I8Ptr)
+
+	valAlloca := c.block.NewAlloca(valLLVM)
+	c.block.NewStore(val, valAlloca)
+	valPtr := c.block.NewBitCast(valAlloca, irtypes.I8Ptr)
+
+	c.block.NewCall(c.funcs["promise_map_set"], mapPtr, keyPtr, valPtr)
+}
+
+// --- lookupLocalType resolves the declared type for a TypedVarDecl ---
+// It checks the TypeRef AST node to detect Optional declarations,
+// then resolves the type by looking up the variable in sema scopes.
+
+func (c *Compiler) lookupLocalType(s *ast.TypedVarDecl) types.Type {
+	// Only need special handling for Optional declarations
+	if _, ok := s.Type.(*ast.OptionalTypeRef); !ok {
+		return nil // use expression type
+	}
+
+	exprType := c.info.Types[s.Value]
+	if c.typeSubst != nil && exprType != nil {
+		exprType = types.Substitute(exprType, c.typeSubst)
+	}
+
+	// If value is NoneLit, look up the declared type from sema scopes
+	if exprType == types.TypNone || exprType == nil {
+		return c.lookupVarType(s.Name)
+	}
+
+	// Value has a concrete type — wrap in Optional
+	if _, isOpt := exprType.(*types.Optional); isOpt {
+		return exprType // already Optional
+	}
+	return types.NewOptional(exprType)
+}
+
+// lookupVarType finds a variable's declared type by walking sema scopes.
+func (c *Compiler) lookupVarType(name string) types.Type {
+	for _, scope := range c.info.Scopes {
+		if obj := scope.Lookup(name); obj != nil {
+			if v, ok := obj.(*types.Var); ok {
+				typ := v.Type()
+				if c.typeSubst != nil {
+					typ = types.Substitute(typ, c.typeSubst)
+				}
+				return typ
+			}
+		}
+	}
+	return nil
+}
+
+// --- For-in over slices ---
+
+func (c *Compiler) genForInSlice(s *ast.ForInStmt, slicePtr value.Value, sliceType *types.Slice) {
+	elemLLVM := c.resolveType(sliceType.Elem())
+
+	// Load length from header
+	headerType := sliceHeaderType()
+	headerPtr := c.block.NewBitCast(slicePtr, irtypes.NewPointer(headerType))
+	lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	length := c.block.NewLoad(irtypes.I64, lenPtr)
+
+	// Counter alloca
+	counterAlloca := c.block.NewAlloca(irtypes.I64)
+	c.block.NewStore(constant.NewInt(irtypes.I64, 0), counterAlloca)
+
+	// Element binding alloca
+	elemAlloca := c.block.NewAlloca(elemLLVM)
+	elemAlloca.SetName(s.Binding)
+	c.locals[s.Binding] = elemAlloca
+
+	// Index variable if present
+	if s.Index != "" {
+		indexAlloca := c.block.NewAlloca(irtypes.I64)
+		indexAlloca.SetName(s.Index)
+		c.block.NewStore(constant.NewInt(irtypes.I64, 0), indexAlloca)
+		c.locals[s.Index] = indexAlloca
+	}
+
+	headerBlock := c.newBlock("forin.header")
+	bodyBlock := c.newBlock("forin.body")
+	updateBlock := c.newBlock("forin.update")
+	exitBlock := c.newBlock("forin.exit")
+
+	c.block.NewBr(headerBlock)
+
+	// Header: counter < length
+	c.block = headerBlock
+	counter := c.block.NewLoad(irtypes.I64, counterAlloca)
+	cond := c.block.NewICmp(enum.IPredULT, counter, length)
+	c.block.NewCondBr(cond, bodyBlock, exitBlock)
+
+	// Body: load element, store to binding
+	savedBreak := c.breakTarget
+	savedContinue := c.continueTarget
+	c.breakTarget = exitBlock
+	c.continueTarget = updateBlock
+
+	c.block = bodyBlock
+	dataBase := c.block.NewGetElementPtr(irtypes.I8, slicePtr,
+		constant.NewInt(irtypes.I64, int64(sliceHeaderSize)))
+	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
+	curCounter := c.block.NewLoad(irtypes.I64, counterAlloca)
+	elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, curCounter)
+	elem := c.block.NewLoad(elemLLVM, elemPtr)
+	c.block.NewStore(elem, elemAlloca)
+
+	c.genBlock(s.Body)
+	if c.block.Term == nil {
+		c.block.NewBr(updateBlock)
+	}
+
+	// Update: increment counter (and index if present)
+	c.block = updateBlock
+	cur := c.block.NewLoad(irtypes.I64, counterAlloca)
+	next := c.block.NewAdd(cur, constant.NewInt(irtypes.I64, 1))
+	c.block.NewStore(next, counterAlloca)
+
+	if s.Index != "" {
+		idxAlloca := c.locals[s.Index]
+		curIdx := c.block.NewLoad(irtypes.I64, idxAlloca)
+		nextIdx := c.block.NewAdd(curIdx, constant.NewInt(irtypes.I64, 1))
+		c.block.NewStore(nextIdx, idxAlloca)
+	}
+
+	c.block.NewBr(headerBlock)
+
+	c.breakTarget = savedBreak
+	c.continueTarget = savedContinue
+	c.block = exitBlock
+}
+
+// --- For-in over maps ---
+
+func (c *Compiler) genForInMap(s *ast.ForInStmt, mapPtr value.Value, mapType *types.Map) {
+	keyLLVM := c.resolveType(mapType.Key())
+	valLLVM := c.resolveType(mapType.Val())
+
+	// Build tuple type for the binding (K, V)
+	tupleType := irtypes.NewStruct(keyLLVM, valLLVM)
+
+	// State alloca (i64, starts at 0)
+	stateAlloca := c.block.NewAlloca(irtypes.I64)
+	c.block.NewStore(constant.NewInt(irtypes.I64, 0), stateAlloca)
+
+	// Key and value output allocas for iter_next
+	keyOutAlloca := c.block.NewAlloca(keyLLVM)
+	valOutAlloca := c.block.NewAlloca(valLLVM)
+
+	// Binding alloca for the (K, V) tuple
+	bindingAlloca := c.block.NewAlloca(tupleType)
+	bindingAlloca.SetName(s.Binding)
+	c.locals[s.Binding] = bindingAlloca
+
+	// Index variable if present
+	if s.Index != "" {
+		indexAlloca := c.block.NewAlloca(irtypes.I64)
+		indexAlloca.SetName(s.Index)
+		c.block.NewStore(constant.NewInt(irtypes.I64, 0), indexAlloca)
+		c.locals[s.Index] = indexAlloca
+	}
+
+	headerBlock := c.newBlock("forin.header")
+	bodyBlock := c.newBlock("forin.body")
+	updateBlock := c.newBlock("forin.update")
+	exitBlock := c.newBlock("forin.exit")
+
+	c.block.NewBr(headerBlock)
+
+	// Header: call promise_map_iter_next
+	c.block = headerBlock
+	keyOutPtr := c.block.NewBitCast(keyOutAlloca, irtypes.I8Ptr)
+	valOutPtr := c.block.NewBitCast(valOutAlloca, irtypes.I8Ptr)
+	hasNext := c.block.NewCall(c.funcs["promise_map_iter_next"],
+		mapPtr, stateAlloca, keyOutPtr, valOutPtr)
+	cond := c.block.NewICmp(enum.IPredNE, hasNext, constant.NewInt(irtypes.I32, 0))
+	c.block.NewCondBr(cond, bodyBlock, exitBlock)
+
+	// Body: build tuple from key/val outputs, store to binding
+	savedBreak := c.breakTarget
+	savedContinue := c.continueTarget
+	c.breakTarget = exitBlock
+	c.continueTarget = updateBlock
+
+	c.block = bodyBlock
+	key := c.block.NewLoad(keyLLVM, keyOutAlloca)
+	val := c.block.NewLoad(valLLVM, valOutAlloca)
+	var tuple value.Value = constant.NewZeroInitializer(tupleType)
+	tuple = c.block.NewInsertValue(tuple, key, 0)
+	tuple = c.block.NewInsertValue(tuple, val, 1)
+	c.block.NewStore(tuple, bindingAlloca)
+
+	c.genBlock(s.Body)
+	if c.block.Term == nil {
+		c.block.NewBr(updateBlock)
+	}
+
+	// Update: increment index if present
+	c.block = updateBlock
+	if s.Index != "" {
+		idxAlloca := c.locals[s.Index]
+		curIdx := c.block.NewLoad(irtypes.I64, idxAlloca)
+		nextIdx := c.block.NewAdd(curIdx, constant.NewInt(irtypes.I64, 1))
+		c.block.NewStore(nextIdx, idxAlloca)
+	}
+	c.block.NewBr(headerBlock)
+
+	c.breakTarget = savedBreak
+	c.continueTarget = savedContinue
+	c.block = exitBlock
 }

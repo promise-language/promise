@@ -261,8 +261,8 @@ func TestPrintInt(t *testing.T) {
 	`)
 	// Struct type definition
 	assertContains(t, ir, "%promise_int_v = type")
-	// Extern declaration uses struct type
-	assertContains(t, ir, "declare void @promise_print_int(%promise_int_v")
+	// Extern declaration: all params passed as i8* (pointer) for C ABI
+	assertContains(t, ir, "declare void @promise_print_int(i8*")
 	// Struct packing via insertvalue
 	assertContains(t, ir, "insertvalue %promise_int_v")
 }
@@ -273,7 +273,7 @@ func TestPrintBool(t *testing.T) {
 		main() { print(true); }
 	`)
 	assertContains(t, ir, "%promise_bool_v = type")
-	assertContains(t, ir, "declare void @promise_print_bool(%promise_bool_v")
+	assertContains(t, ir, "declare void @promise_print_bool(i8*")
 	// Bool coercion: i1 → i8
 	assertContains(t, ir, "zext i1 true to i8")
 	assertContains(t, ir, "insertvalue %promise_bool_v")
@@ -285,7 +285,7 @@ func TestPrintF64(t *testing.T) {
 		main() { print(3.14); }
 	`)
 	assertContains(t, ir, "%promise_f64_v = type")
-	assertContains(t, ir, "declare void @promise_print_f64(%promise_f64_v")
+	assertContains(t, ir, "declare void @promise_print_f64(i8*")
 	assertContains(t, ir, "insertvalue %promise_f64_v")
 }
 
@@ -399,8 +399,8 @@ func TestExternCustomCName(t *testing.T) {
 		log_value(int x) `+"`"+`extern("my_log_int");
 		main() { log_value(99); }
 	`)
-	assertContains(t, ir, "declare void @my_log_int(%promise_int_v")
-	assertContains(t, ir, "call void @my_log_int(%promise_int_v")
+	assertContains(t, ir, "declare void @my_log_int(i8*")
+	assertContains(t, ir, "call void @my_log_int(i8*")
 }
 
 func TestExternDefaultCName(t *testing.T) {
@@ -408,7 +408,7 @@ func TestExternDefaultCName(t *testing.T) {
 		do_thing(int x) `+"`"+`extern;
 		main() { do_thing(1); }
 	`)
-	assertContains(t, ir, "declare void @promise_do_thing(%promise_int_v")
+	assertContains(t, ir, "declare void @promise_do_thing(i8*")
 }
 
 func TestExternMultipleParams(t *testing.T) {
@@ -416,7 +416,7 @@ func TestExternMultipleParams(t *testing.T) {
 		add_ext(int a, int b) `+"`"+`extern("test_add");
 		main() { add_ext(1, 2); }
 	`)
-	assertContains(t, ir, "declare void @test_add(%promise_int_v %a, %promise_int_v %b)")
+	assertContains(t, ir, "declare void @test_add(i8* %a, i8* %b)")
 	assertContains(t, ir, "call void @test_add")
 }
 
@@ -425,8 +425,9 @@ func TestExternReturnValue(t *testing.T) {
 		get_value() int `+"`"+`extern("test_get");
 		main() { x := get_value(); }
 	`)
-	assertContains(t, ir, "declare %promise_int_v @test_get()")
-	// Return value should be unpacked via extractvalue
+	// sret: struct return becomes void with first param as result pointer
+	assertContains(t, ir, "declare void @test_get(i8* %sret)")
+	// Return value should be loaded from sret alloca and unpacked
 	assertContains(t, ir, "extractvalue %promise_int_v")
 }
 
@@ -456,7 +457,7 @@ func TestExternI8Layout(t *testing.T) {
 	assertContains(t, ir, "%promise_i8_i = type { %promise_i8_m* }")
 	assertContains(t, ir, "%promise_i8_m = type { %promise_i8_t* }")
 	assertContains(t, ir, "%promise_i8_t = type {}")
-	assertContains(t, ir, "declare void @test_i8(%promise_i8_v")
+	assertContains(t, ir, "declare void @test_i8(i8*")
 }
 
 func TestExternI16Layout(t *testing.T) {
@@ -465,7 +466,7 @@ func TestExternI16Layout(t *testing.T) {
 		main() { }
 	`)
 	assertContains(t, ir, "%promise_i16_v = type { i8*, %promise_i16_i*, i16 }")
-	assertContains(t, ir, "declare void @test_i16(%promise_i16_v")
+	assertContains(t, ir, "declare void @test_i16(i8*")
 }
 
 func TestExternI32Layout(t *testing.T) {
@@ -474,7 +475,7 @@ func TestExternI32Layout(t *testing.T) {
 		main() { }
 	`)
 	assertContains(t, ir, "%promise_i32_v = type { i8*, %promise_i32_i*, i32 }")
-	assertContains(t, ir, "declare void @test_i32(%promise_i32_v")
+	assertContains(t, ir, "declare void @test_i32(i8*")
 }
 
 func TestExternU8Layout(t *testing.T) {
@@ -483,7 +484,7 @@ func TestExternU8Layout(t *testing.T) {
 		main() { }
 	`)
 	assertContains(t, ir, "%promise_u8_v = type { i8*, %promise_u8_i*, i8 }")
-	assertContains(t, ir, "declare void @test_u8(%promise_u8_v")
+	assertContains(t, ir, "declare void @test_u8(i8*")
 }
 
 func TestExternU16Layout(t *testing.T) {
@@ -492,7 +493,7 @@ func TestExternU16Layout(t *testing.T) {
 		main() { }
 	`)
 	assertContains(t, ir, "%promise_u16_v = type { i8*, %promise_u16_i*, i16 }")
-	assertContains(t, ir, "declare void @test_u16(%promise_u16_v")
+	assertContains(t, ir, "declare void @test_u16(i8*")
 }
 
 func TestExternU32Layout(t *testing.T) {
@@ -501,7 +502,7 @@ func TestExternU32Layout(t *testing.T) {
 		main() { }
 	`)
 	assertContains(t, ir, "%promise_u32_v = type { i8*, %promise_u32_i*, i32 }")
-	assertContains(t, ir, "declare void @test_u32(%promise_u32_v")
+	assertContains(t, ir, "declare void @test_u32(i8*")
 }
 
 func TestExternU64Layout(t *testing.T) {
@@ -510,7 +511,7 @@ func TestExternU64Layout(t *testing.T) {
 		main() { }
 	`)
 	assertContains(t, ir, "%promise_u64_v = type { i8*, %promise_u64_i*, i64 }")
-	assertContains(t, ir, "declare void @test_u64(%promise_u64_v")
+	assertContains(t, ir, "declare void @test_u64(i8*")
 }
 
 func TestExternI64Layout(t *testing.T) {
@@ -519,7 +520,7 @@ func TestExternI64Layout(t *testing.T) {
 		main() { }
 	`)
 	assertContains(t, ir, "%promise_i64_v = type { i8*, %promise_i64_i*, i64 }")
-	assertContains(t, ir, "declare void @test_i64(%promise_i64_v")
+	assertContains(t, ir, "declare void @test_i64(i8*")
 }
 
 func TestExternF32Layout(t *testing.T) {
@@ -528,7 +529,7 @@ func TestExternF32Layout(t *testing.T) {
 		main() { }
 	`)
 	assertContains(t, ir, "%promise_f32_v = type { i8*, %promise_f32_i*, float }")
-	assertContains(t, ir, "declare void @test_f32(%promise_f32_v")
+	assertContains(t, ir, "declare void @test_f32(i8*")
 }
 
 func TestExternCharLayout(t *testing.T) {
@@ -537,7 +538,7 @@ func TestExternCharLayout(t *testing.T) {
 		main() { }
 	`)
 	assertContains(t, ir, "%promise_char_v = type { i8*, %promise_char_i*, i32 }")
-	assertContains(t, ir, "declare void @test_char(%promise_char_v")
+	assertContains(t, ir, "declare void @test_char(i8*")
 }
 
 func TestExternUintLayout(t *testing.T) {
@@ -546,7 +547,7 @@ func TestExternUintLayout(t *testing.T) {
 		main() { }
 	`)
 	assertContains(t, ir, "%promise_uint_v = type { i8*, %promise_uint_i*, i64 }")
-	assertContains(t, ir, "declare void @test_uint(%promise_uint_v")
+	assertContains(t, ir, "declare void @test_uint(i8*")
 }
 
 // --- Header generation: return types and zero-param ---
@@ -563,14 +564,14 @@ func TestHeaderExternReturnType(t *testing.T) {
 	}
 	header := buf.String()
 
-	// Return type should be the value struct, not void
-	assertContains(t, header, "promise_int_v test_get_val(void);")
+	// Return type uses sret: void return with first param as result pointer
+	assertContains(t, header, "void test_get_val(promise_int_v *sret);")
 }
 
 func TestHeaderExternZeroParams(t *testing.T) {
 	result := compileResult(t, `
-		get_val() int `+"`"+`extern("test_get_val");
-		main() { x := get_val(); }
+		do_nothing() `+"`"+`extern("test_noop");
+		main() { do_nothing(); }
 	`)
 
 	var buf bytes.Buffer
@@ -579,8 +580,8 @@ func TestHeaderExternZeroParams(t *testing.T) {
 	}
 	header := buf.String()
 
-	// Zero-param functions should have (void) in C
-	assertContains(t, header, "(void);")
+	// Zero-param void functions should have (void) in C
+	assertContains(t, header, "void test_noop(void);")
 }
 
 func TestHeaderExternMultipleTypes(t *testing.T) {
@@ -610,10 +611,10 @@ func TestHeaderExternMultipleTypes(t *testing.T) {
 	assertContains(t, header, "typedef struct { } promise_f32_t;")
 	assertContains(t, header, "float                raw;")
 
-	// Function declarations with correct struct types
-	assertContains(t, header, "void test_log_i32(promise_i32_v x);")
-	assertContains(t, header, "void test_log_bool(promise_bool_v x);")
-	assertContains(t, header, "void test_log_f32(promise_f32_v x);")
+	// Function declarations: all params passed by pointer
+	assertContains(t, header, "void test_log_i32(promise_i32_v *x);")
+	assertContains(t, header, "void test_log_bool(promise_bool_v *x);")
+	assertContains(t, header, "void test_log_f32(promise_f32_v *x);")
 }
 
 // --- Ref param tests (shared & and mutable ~) ---
@@ -649,7 +650,7 @@ func TestHeaderExternSharedRefParam(t *testing.T) {
 	header := buf.String()
 
 	// Shared ref param should be pointer in C header
-	assertContains(t, header, "void test_modify(promise_int_v* x);")
+	assertContains(t, header, "void test_modify(promise_int_v *x);")
 }
 
 func TestHeaderExternMutRefParam(t *testing.T) {
@@ -665,7 +666,7 @@ func TestHeaderExternMutRefParam(t *testing.T) {
 	header := buf.String()
 
 	// Mutable ref param should be pointer in C header
-	assertContains(t, header, "void test_update(promise_int_v* x);")
+	assertContains(t, header, "void test_update(promise_int_v *x);")
 }
 
 func TestHeaderGeneration(t *testing.T) {
@@ -693,9 +694,9 @@ func TestHeaderGeneration(t *testing.T) {
 	assertContains(t, header, "typedef struct { } promise_f64_t;")
 	assertContains(t, header, "promise_f64_v;")
 
-	// Function declarations
-	assertContains(t, header, "void promise_print_int(promise_int_v x);")
-	assertContains(t, header, "void promise_print_f64(promise_f64_v x);")
+	// Function declarations: all params by pointer
+	assertContains(t, header, "void promise_print_int(promise_int_v *x);")
+	assertContains(t, header, "void promise_print_f64(promise_f64_v *x);")
 }
 
 // --- String tests ---
@@ -784,8 +785,8 @@ func TestStringHeader(t *testing.T) {
 	assertContains(t, header, "promise_string_i;")
 	assertContains(t, header, "promise_string_v;")
 
-	// Extern declaration using string value struct
-	assertContains(t, header, "void promise_print_string(promise_string_v s);")
+	// Extern declaration: string param by pointer
+	assertContains(t, header, "void promise_print_string(promise_string_v *s);")
 }
 
 func TestStringEscapes(t *testing.T) {
@@ -1044,9 +1045,9 @@ func TestUserTypeExternUnpacking(t *testing.T) {
 			d := get_dog();
 		}
 	`)
-	// Extern returns promise_Dog_v
-	assertContains(t, ir, "declare %promise_Dog_v @get_dog()")
-	// Unpack: extractvalue field 1 + bitcast back to i8*
+	// Extern uses sret for struct return
+	assertContains(t, ir, "declare void @get_dog(i8* %sret)")
+	// Unpack: load from sret alloca, extractvalue field 1 + bitcast back to i8*
 	assertContains(t, ir, "extractvalue %promise_Dog_v")
 	assertContains(t, ir, "bitcast %promise_Dog_i*")
 }
@@ -1330,8 +1331,8 @@ func TestEnumExternPacking(t *testing.T) {
 	`)
 	// Should pack into value struct
 	assertContains(t, ir, "insertvalue %promise_Color_v")
-	// Extern declaration uses value struct
-	assertContains(t, ir, "declare void @print_color(%promise_Color_v")
+	// Extern declaration: param passed by pointer
+	assertContains(t, ir, "declare void @print_color(i8*")
 }
 
 func TestEnumExternUnpacking(t *testing.T) {
@@ -1343,9 +1344,9 @@ func TestEnumExternUnpacking(t *testing.T) {
 		}
 		main() { }
 	`)
-	// Extern returns value struct
-	assertContains(t, ir, "declare %promise_Color_v @get_color()")
-	// Should unpack via extractvalue
+	// Extern uses sret for struct return
+	assertContains(t, ir, "declare void @get_color(i8* %sret)")
+	// Should unpack via extractvalue after loading from sret
 	assertContains(t, ir, "extractvalue %promise_Color_v")
 }
 
@@ -1398,8 +1399,8 @@ func TestEnumDataExternPacking(t *testing.T) {
 	assertContains(t, ir, "extractvalue %promise_Shape_enum")
 	// Pack into value struct
 	assertContains(t, ir, "insertvalue %promise_Shape_v")
-	// Extern declaration uses value struct
-	assertContains(t, ir, "declare void @send_shape(%promise_Shape_v")
+	// Extern declaration: param passed by pointer
+	assertContains(t, ir, "declare void @send_shape(i8*")
 }
 
 func TestEnumDataExternUnpacking(t *testing.T) {
@@ -1411,8 +1412,8 @@ func TestEnumDataExternUnpacking(t *testing.T) {
 		}
 		main() { }
 	`)
-	// Data enum unpacking: extractvalue from value struct, build internal struct
-	assertContains(t, ir, "declare %promise_Shape_v @get_shape()")
+	// Data enum unpacking: sret + extractvalue from value struct, build internal struct
+	assertContains(t, ir, "declare void @get_shape(i8* %sret)")
 	assertContains(t, ir, "extractvalue %promise_Shape_v")
 	assertContains(t, ir, "insertvalue %promise_Shape_enum")
 }

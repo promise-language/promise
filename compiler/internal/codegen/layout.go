@@ -73,6 +73,7 @@ type ExternFunc struct {
 	IRFunc      *ir.Func         // LLVM IR function declaration
 	ParamTypes  []types.Type     // Promise types of each parameter
 	ResultType  types.Type       // Promise return type (nil for void)
+	HasSret     bool             // true if return uses sret pointer (large struct return)
 }
 
 // CompileResult bundles the output of compilation for downstream consumers.

@@ -2,6 +2,9 @@ package codegen
 
 import (
 	"fmt"
+	"os/exec"
+	"runtime"
+	"strings"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -67,10 +70,38 @@ type viewVtableKey struct {
 	view     *types.Named
 }
 
+// hostTargetTriple returns the LLVM target triple for the host platform.
+// Queries clang first for accuracy, falls back to Go runtime detection.
+func hostTargetTriple() string {
+	if out, err := exec.Command("clang", "--print-target-triple").Output(); err == nil {
+		if triple := strings.TrimSpace(string(out)); triple != "" {
+			return triple
+		}
+	}
+	// Fallback: map Go runtime to LLVM triples
+	switch runtime.GOOS {
+	case "darwin":
+		if runtime.GOARCH == "arm64" {
+			return "arm64-apple-macosx11.0.0"
+		}
+		return "x86_64-apple-macosx10.15.0"
+	case "linux":
+		if runtime.GOARCH == "arm64" {
+			return "aarch64-unknown-linux-gnu"
+		}
+		return "x86_64-unknown-linux-gnu"
+	default:
+		return "x86_64-unknown-linux-gnu"
+	}
+}
+
 // Compile generates an LLVM IR module from a type-checked Promise AST.
 func Compile(file *ast.File, info *sema.Info) *CompileResult {
+	module := ir.NewModule()
+	module.TargetTriple = hostTargetTriple()
+
 	c := &Compiler{
-		module:          ir.NewModule(),
+		module:          module,
 		info:            info,
 		funcs:           make(map[string]*ir.Func),
 		monoLayouts:     make(map[string]*TypeDeclLayout),

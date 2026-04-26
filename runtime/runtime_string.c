@@ -26,8 +26,8 @@ _Bool promise_string_eq(promise_string_i* a, promise_string_i* b) {
     return memcmp(a->data, b->data, a->len) == 0;
 }
 
-void promise_print_string(promise_string_v s) {
-    fwrite(s._instance->data, 1, s._instance->len, stdout);
+void promise_print_string(promise_string_v *s) {
+    fwrite(s->_instance->data, 1, s->_instance->len, stdout);
     putchar('\n');
 }
 

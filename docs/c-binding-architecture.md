@@ -154,14 +154,16 @@ Type: {
 }
 ```
 
-### Uniform passing convention: always `promise_T_v`
+### Uniform passing convention: always `promise_T_v*` (pointer)
 
 Since the Value struct always contains `_instance` (a pointer to `T#i`), the extern boundary uses a **single rule with no special cases**:
 
-- **Always pass `promise_T_v`** — for by-value parameters and returns
-- **Always pass `promise_T_v*`** — for references (`&T`, `~T`, `T*`)
+- **Always pass `promise_T_v*`** — for all parameters (by-value and references alike)
+- **Struct returns use sret** — the function returns `void`, with the first parameter being a pointer to the result storage
 
-C code that needs instance-level data follows `val._instance->field`. No need for separate calling conventions per struct level.
+All extern params are passed **by pointer** (not by value). This ensures correct behavior on ARM64 where the C ABI passes structs >16 bytes indirectly. The LLVM IR declares all extern value params as `i8*` and generates alloca + store + bitcast-to-pointer at each call site. The generated C header declares matching `promise_T_v *param` signatures.
+
+C code that needs instance-level data follows `val->_instance->field`. No need for separate calling conventions per struct level.
 
 This applies to **all types including primitives**. For `int`, the value struct is:
 
@@ -177,12 +179,13 @@ The `_instance` pointer is null for primitives because all their data lives in t
 
 **Consequence:** the `_instance` field is **typed** (not `void*`), so the header must declare `T#i` before `T#v` for any type that has instance fields. For primitives, `_instance` is typed as `void*` (or the empty instance struct pointer) since the instance struct has no user-visible fields.
 
-| Usage in extern signature | C type | Rationale |
-|---|---|---|
-| `T` by value | `promise_T_v` | Value struct is the unit of passing |
-| `T&` shared reference | `const promise_T_v*` | Pointer to the value; C follows `_instance` for instance data |
-| `T~` mutable reference | `promise_T_v*` | Pointer to the value; C follows `_instance` for instance data |
-| `T*` raw pointer | `promise_T_v*` | Same convention |
+| Usage in extern signature | LLVM IR param | C header param | Rationale |
+|---|---|---|---|
+| `T` by value | `i8*` | `promise_T_v *x` | Pointer to value struct (ARM64 ABI compatible) |
+| `T&` shared reference | `%promise_T_v*` | `promise_T_v *x` | Typed pointer to value struct |
+| `T~` mutable reference | `%promise_T_v*` | `promise_T_v *x` | Typed pointer to value struct |
+| Return `T` | sret: `i8*` first param | `promise_T_v *sret` first param | Struct return via pointer (sret pattern) |
+| Return void | `void` | `void` | No sret needed |
 
 Since all four structs are linked (`_v` → `_i` → `_m` → `_t`), the header always emits the full chain for any reachable type. This is just struct typedefs — cheap to emit, and it ensures C code can navigate the full object graph when needed.
 
@@ -353,13 +356,13 @@ LLVM: Value is `{ i8*, %promise_string_i* }`, Instance is `{ %promise_string_m*,
 
 The Instance struct is allocated with `sizeof(promise_string_i) + len` bytes — exactly enough for the data, **no trailing null terminator**. Promise strings may contain embedded `\0` characters, so null termination is meaningless and mixing length-based and null-terminated conventions is a dangerous source of bugs. C runtime code must always use `len` to determine string boundaries. Strings are **immutable** — modifying a string requires allocating a new instance.
 
-C code accesses string data naturally:
+C code accesses string data naturally (all extern params are passed by pointer):
 
 ```c
-void promise_print_string(promise_string_v s) {
-    // s._instance->len  — string length
-    // s._instance->data — UTF-8 character data (NOT null-terminated, may contain \0)
-    fwrite(s._instance->data, 1, s._instance->len, stdout);
+void promise_print_string(promise_string_v *s) {
+    // s->_instance->len  — string length
+    // s->_instance->data — UTF-8 character data (NOT null-terminated, may contain \0)
+    fwrite(s->_instance->data, 1, s->_instance->len, stdout);
 }
 ```
 
@@ -658,25 +661,26 @@ typedef struct {
 
 // ============================================================
 // Extern function declarations
+// (all value params passed by pointer; struct returns use sret)
 // ============================================================
 
-// All extern functions use promise_T_v for value params
-void promise_print_int(promise_int_v x);
-void promise_print_f64(promise_f64_v x);
-void promise_print_bool(promise_bool_v x);
-void promise_print_string(promise_string_v s);
+void promise_print_int(promise_int_v *x);
+void promise_print_f64(promise_f64_v *x);
+void promise_print_bool(promise_bool_v *x);
+void promise_print_string(promise_string_v *s);
 void promise_panic(const char* msg);
 
 // User-declared extern functions
-promise_f64_v promise_distance(promise_Point_v a, promise_Point_v b);
-void promise_updateHealth(promise_Player_v* player, promise_int_v hp);
+// Struct return: void + sret first param
+void promise_distance(promise_f64_v *sret, promise_Point_v *a, promise_Point_v *b);
+void promise_updateHealth(promise_Player_v *player, promise_int_v *hp);
 
 #endif // PROMISE_BINDINGS_H
 ```
 
 The header always includes:
 1. **All reachable types** — primitives and compound types alike, all four struct levels, in dependency order (`_t` → `_m` → `_i` → `_v`)
-2. **Extern function declarations** — all functions with `Body == nil` and `extern` meta, using `promise_T_v` for all value params
+2. **Extern function declarations** — all functions with `Body == nil` and `extern` meta, using `promise_T_v*` (pointer) for all params and sret for struct returns
 
 ---
 
@@ -719,37 +723,55 @@ genCallExpr → isRuntimePrintFunc? → genPrintCall (hardcoded coercion)
 All extern calls go through a uniform `genExternCall` that handles ABI coercion generically:
 
 ```go
-func (c *Compiler) genExternCall(callee *ir.Func, sig *types.Signature, argVals []value.Value, argTypes []types.Type) value.Value {
-    // Coerce each argument from Promise internal representation to C ABI
-    coercedArgs := make([]value.Value, len(argVals))
+func (c *Compiler) genExternCall(ext *ExternFunc, argVals []value.Value, argTypes []types.Type) value.Value {
+    var callArgs []value.Value
+
+    // sret: allocate space for the return struct, pass pointer as first arg
+    var sretAlloca *ir.InstAlloca
+    if ext.HasSret {
+        layout := c.lookupLayout(ext.ResultType)
+        sretAlloca = c.block.NewAlloca(layout.Value.LLVMType)
+        callArgs = append(callArgs, c.block.NewBitCast(sretAlloca, irtypes.I8Ptr))
+    }
+
     for i, arg := range argVals {
-        coercedArgs[i] = c.coerceToCABI(arg, argTypes[i], sig.Params()[i])
+        // Ref params: pass the pointer directly
+        if isRefType(ext.ParamTypes[i]) {
+            callArgs = append(callArgs, arg)
+            continue
+        }
+        // Value params: pack into value struct, alloca, store, pass pointer
+        packed := c.packToValueStruct(arg, named, layout)
+        alloca := c.block.NewAlloca(layout.Value.LLVMType)
+        c.block.NewStore(packed, alloca)
+        callArgs = append(callArgs, c.block.NewBitCast(alloca, irtypes.I8Ptr))
     }
 
-    result := c.block.NewCall(callee, coercedArgs...)
+    c.block.NewCall(ext.IRFunc, callArgs...)
 
-    // Coerce return value from C ABI back to Promise internal representation
-    if sig.Result() != nil {
-        return c.coerceFromCABI(result, sig.Result())
+    // sret: load result from alloca and unpack
+    if ext.HasSret {
+        result := c.block.NewLoad(layout.Value.LLVMType, sretAlloca)
+        return c.unpackFromValueStruct(result, named, layout)
     }
-    return result
+    return nil
 }
 ```
 
 ### Coercion rules
 
-The `coerceToCABI` function maps Promise internal types to their C ABI representation:
+The codegen maps Promise internal types to their C ABI representation. All value params are passed by pointer for ARM64 compatibility:
 
-| Internal representation | C ABI | Coercion |
-|---|---|---|
-| Any `T` by value | `promise_T_v` struct | pack internal state into value struct |
-| `T&` (shared ref) | `const promise_T_v*` | pass pointer to value struct |
-| `T~` (mut ref) | `promise_T_v*` | pass pointer to value struct |
-| `T*` (raw pointer) | `promise_T_v*` | pass pointer to value struct |
+| Internal representation | LLVM IR at call site | C receives | Coercion |
+|---|---|---|---|
+| Any `T` by value | `alloca` + `store` + `bitcast` → `i8*` | `promise_T_v *x` | pack into value struct, pass pointer |
+| `T&` (shared ref) | pass pointer directly | `promise_T_v *x` | no coercion needed |
+| `T~` (mut ref) | pass pointer directly | `promise_T_v *x` | no coercion needed |
+| Return `T` | sret alloca → `i8*` first arg | `promise_T_v *sret` | load from sret, unpack |
 
-Since all types use the same `promise_T_v` representation at the extern boundary, coercion is uniform. The codegen packs `_vtable`, `_instance`, and user fields into the value struct for outgoing calls, and unpacks them for incoming returns.
+Since all types use the same `promise_T_v` representation at the extern boundary, coercion is uniform. The codegen packs `_vtable`, `_instance`, and user fields into the value struct, stores to an alloca, and passes a pointer. For returns, the sret pattern allocates space, passes a pointer as the first argument, and loads the result after the call.
 
-`coerceFromCABI` does the reverse.
+`unpackFromValueStruct` does the reverse for return values.
 
 **Note on booleans:** Internally Promise uses `i1`, but the value struct stores `uint8_t` (i8) in the `raw` field. The codegen inserts `zext i1 → i8` when packing and `trunc i8 → i1` when unpacking. This is not a special case — it's the normal `raw` field handling.
 
@@ -945,18 +967,18 @@ func externCName(fd *ast.FuncDecl) string {
 
 ## Passing Convention
 
-All types use the same convention — always `promise_T_v`:
+All types use the same convention — always `promise_T_v*` (pointer). Struct returns use sret:
 
 | Promise usage | C receives | Notes |
 |---|---|---|
-| `T` by value | `promise_T_v` | Value struct passed directly |
-| `T&` shared ref | `const promise_T_v*` | Pointer to value struct |
-| `T~` mutable ref | `promise_T_v*` | Pointer to value struct |
-| `T*` raw pointer | `promise_T_v*` | Pointer to value struct |
+| `T` by value | `promise_T_v *x` | Pointer to value struct (alloca'd at call site) |
+| `T&` shared ref | `promise_T_v *x` | Pointer to value struct |
+| `T~` mutable ref | `promise_T_v *x` | Pointer to value struct |
+| Return `T` | `promise_T_v *sret` (first param) | sret pattern; function returns `void` |
 
-C code that needs instance-level data follows `val._instance->field`. The `_instance` pointer is typed, so this is natural and type-safe.
+C code that needs instance-level data follows `val->_instance->field`. The `_instance` pointer is typed, so this is natural and type-safe.
 
-For large value structs, the C compiler's own ABI rules handle whether the struct is passed in registers or on the stack — this is transparent to the Promise codegen.
+Passing all value params by pointer avoids ARM64 ABI issues where structs >16 bytes are passed indirectly. The LLVM IR uses `i8*` for value params (with alloca + store + bitcast at the call site), and typed `%promise_T_v*` for ref params.
 
 ---
 
@@ -1004,7 +1026,7 @@ For large value structs, the C compiler's own ABI rules handle whether the struc
 | C function declarations | Hardcoded in `builtins.go` | Generated from extern AST nodes |
 | Type agreement | Trust + manual matching | Generated header verified by clang |
 | Four-struct model | Ignored | Every type emits all 4 struct levels |
-| Passing convention | Primitives as scalars, special cases | Always `promise_T_v`, no special cases |
+| Passing convention | Primitives as scalars, special cases | Always `promise_T_v*` (pointer), sret for returns |
 | ABI coercion | Per-function special cases | Uniform pack/unpack via `coerceToCABI`/`coerceFromCABI` |
 | Compound types | Not supported | `TypeDeclLayout` computation + header generation (flexible array members for inline data) |
 | Internal pointers | N/A | Typed (`promise_T_i*`), C navigates naturally |

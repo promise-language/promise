@@ -187,20 +187,26 @@ func lookupLayoutForHeadergen(typ types.Type, layouts map[*types.Named]*TypeDecl
 }
 
 // emitExternDecl writes a C function declaration for an extern function.
+// Matches the LLVM IR ABI: all value struct params are passed by pointer,
+// and struct returns use sret pattern (void return, first param is result pointer).
 func emitExternDecl(w io.Writer, ext *ExternFunc, layouts map[*types.Named]*TypeDeclLayout, enumLayouts map[*types.Enum]*TypeDeclLayout) error {
-	retCType := "void"
-	if ext.ResultType != nil {
-		if layout := lookupLayoutForHeadergen(ext.ResultType, layouts, enumLayouts); layout != nil {
-			retCType = layout.Value.CName
-		}
-	}
-
-	if _, err := fmt.Fprintf(w, "%s %s(", retCType, ext.CName); err != nil {
+	// sret: struct returns become void with first param as result pointer
+	if _, err := fmt.Fprintf(w, "void %s(", ext.CName); err != nil {
 		return err
 	}
 
+	paramIdx := 0
+	if ext.ResultType != nil {
+		if layout := lookupLayoutForHeadergen(ext.ResultType, layouts, enumLayouts); layout != nil {
+			if _, err := fmt.Fprintf(w, "%s *sret", layout.Value.CName); err != nil {
+				return err
+			}
+			paramIdx++
+		}
+	}
+
 	for i, pt := range ext.ParamTypes {
-		if i > 0 {
+		if paramIdx > 0 {
 			if _, err := fmt.Fprint(w, ", "); err != nil {
 				return err
 			}
@@ -210,21 +216,18 @@ func emitExternDecl(w io.Writer, ext *ExternFunc, layouts map[*types.Named]*Type
 			if _, err := fmt.Fprintf(w, "void* %s", ext.Sig.Params()[i].Name()); err != nil {
 				return err
 			}
+			paramIdx++
 			continue
 		}
 
-		if isRefType(pt) {
-			if _, err := fmt.Fprintf(w, "%s* %s", layout.Value.CName, ext.Sig.Params()[i].Name()); err != nil {
-				return err
-			}
-		} else {
-			if _, err := fmt.Fprintf(w, "%s %s", layout.Value.CName, ext.Sig.Params()[i].Name()); err != nil {
-				return err
-			}
+		// All params passed by pointer to match C ABI on ARM64
+		if _, err := fmt.Fprintf(w, "%s *%s", layout.Value.CName, ext.Sig.Params()[i].Name()); err != nil {
+			return err
 		}
+		paramIdx++
 	}
 
-	if len(ext.ParamTypes) == 0 {
+	if paramIdx == 0 {
 		if _, err := fmt.Fprint(w, "void"); err != nil {
 			return err
 		}

@@ -23,10 +23,19 @@ func (c *Compiler) lookupLayout(typ types.Type) *TypeDeclLayout {
 }
 
 // declareExterns creates LLVM IR function declarations for all extern functions.
-// Parameters use promise_T_v struct types; return types use promise_T_v or void.
+// Value params are passed by pointer (i8*); ref params as typed pointers.
+// Struct returns use sret pattern (void return, first param is result pointer).
 func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Named]*TypeDeclLayout) {
 	for _, ext := range externs {
 		var params []*ir.Param
+
+		// Struct return: use sret pattern (return void, first param is pointer to result).
+		// This matches C ABI on ARM64 where large structs are returned via pointer.
+		hasSret := ext.ResultType != nil
+		if hasSret {
+			params = append(params, ir.NewParam("sret", irtypes.I8Ptr))
+		}
+
 		for i, pt := range ext.ParamTypes {
 			layout := c.lookupLayout(pt)
 			if layout == nil {
@@ -39,51 +48,67 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 			if isRefType(pt) {
 				paramType = irtypes.NewPointer(layout.Value.LLVMType)
 			} else {
-				paramType = layout.Value.LLVMType
+				// All extern value struct params: pass by pointer to match C ABI
+				paramType = irtypes.I8Ptr
 			}
 			params = append(params, ir.NewParam(paramName, paramType))
 		}
 
-		retType := irtypes.Type(irtypes.Void)
-		if ext.ResultType != nil {
-			layout := c.lookupLayout(ext.ResultType)
-			if layout == nil {
-				panic(fmt.Sprintf("codegen: cannot resolve layout for return type of extern %s", ext.PromiseName))
-			}
-			retType = layout.Value.LLVMType
-		}
-
-		fn := c.module.NewFunc(ext.CName, retType, params...)
+		fn := c.module.NewFunc(ext.CName, irtypes.Void, params...)
 		ext.IRFunc = fn
+		ext.HasSret = hasSret
 		c.funcs[ext.PromiseName] = fn
 	}
 }
 
 // genExternCall generates an extern function call with ABI coercion.
-// It packs each argument into a promise_T_v struct, calls the function,
-// and unpacks the return value back to internal representation.
+// Struct params are passed by pointer and struct returns use sret pattern,
+// matching C ABI on ARM64 where large structs are passed/returned indirectly.
 func (c *Compiler) genExternCall(ext *ExternFunc, argVals []value.Value, argTypes []types.Type) value.Value {
-	coercedArgs := make([]value.Value, len(argVals))
+	var callArgs []value.Value
+
+	// sret: allocate space for the return struct, pass pointer as first arg
+	var sretAlloca *ir.InstAlloca
+	if ext.HasSret {
+		layout := c.lookupLayout(ext.ResultType)
+		sretAlloca = c.block.NewAlloca(layout.Value.LLVMType)
+		sretPtr := c.block.NewBitCast(sretAlloca, irtypes.I8Ptr)
+		callArgs = append(callArgs, sretPtr)
+	}
+
 	for i, arg := range argVals {
+		// Ref params: pass the pointer directly (already a pointer to value struct)
+		if isRefType(ext.ParamTypes[i]) {
+			callArgs = append(callArgs, arg)
+			continue
+		}
+
 		named := extractNamed(argTypes[i])
 		layout := c.lookupLayout(argTypes[i])
 		if layout == nil {
 			panic(fmt.Sprintf("codegen: cannot resolve layout for arg %d in call to %s", i, ext.PromiseName))
 		}
-		coercedArgs[i] = c.packToValueStruct(arg, named, layout)
+		packed := c.packToValueStruct(arg, named, layout)
+
+		// All extern value args: alloca, store, pass pointer (matching C ABI)
+		alloca := c.block.NewAlloca(layout.Value.LLVMType)
+		c.block.NewStore(packed, alloca)
+		callArgs = append(callArgs, c.block.NewBitCast(alloca, irtypes.I8Ptr))
 	}
 
-	result := c.block.NewCall(ext.IRFunc, coercedArgs...)
+	c.block.NewCall(ext.IRFunc, callArgs...)
 
-	if ext.ResultType != nil {
+	// sret: load result from the alloca and unpack to internal representation
+	if ext.HasSret {
 		named := extractNamed(ext.ResultType)
 		layout := c.lookupLayout(ext.ResultType)
 		if layout == nil {
 			panic(fmt.Sprintf("codegen: cannot resolve layout for return type of call to %s", ext.PromiseName))
 		}
+		result := c.block.NewLoad(layout.Value.LLVMType, sretAlloca)
 		return c.unpackFromValueStruct(result, named, layout)
 	}
-	return result
+	return nil
 }
 
 // packToValueStruct packs a Promise internal value into a promise_T_v struct.

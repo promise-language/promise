@@ -44,6 +44,8 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		return c.genThisExpr()
 	case *ast.IfExpr:
 		return c.genIfExpr(e)
+	case *ast.MatchExpr:
+		return c.genMatchExpr(e)
 	default:
 		panic(fmt.Sprintf("codegen: unhandled expression type %T", expr))
 	}
@@ -344,8 +346,12 @@ func (c *Compiler) rangeStructType() *irtypes.StructType {
 // --- Call expressions ---
 
 func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
-	// Method call: callee is MemberExpr (e.g., d.getAge())
+	// Method call or enum variant constructor: callee is MemberExpr
 	if member, ok := e.Callee.(*ast.MemberExpr); ok {
+		targetType := c.info.Types[member.Target]
+		if enum := extractEnum(targetType); enum != nil {
+			return c.genEnumVariantCall(e, member, enum)
+		}
 		return c.genMethodCall(e, member)
 	}
 
@@ -451,9 +457,15 @@ func (c *Compiler) genConstructorCall(e *ast.CallExpr, named *types.Named) value
 
 // --- Member access ---
 
-// genMemberExpr generates a field access on a user type instance.
+// genMemberExpr generates a field access on a user type instance or an enum variant value.
 func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 	targetType := c.info.Types[e.Target]
+
+	// Enum variant access: Color.Red
+	if enum := extractEnum(targetType); enum != nil {
+		return c.genEnumVariantValue(enum, e.Field)
+	}
+
 	named := extractNamed(targetType)
 	if named == nil {
 		panic(fmt.Sprintf("codegen: cannot resolve type for member access on %T", targetType))
@@ -537,6 +549,333 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 	}
 
 	return c.block.NewCall(fn, args...)
+}
+
+// --- Enum variant values ---
+
+// genEnumVariantValue generates a fieldless enum variant value (e.g., Color.Red → i32 0).
+func (c *Compiler) genEnumVariantValue(enum *types.Enum, variantName string) value.Value {
+	layout := c.enumLayouts[enum]
+	if layout == nil {
+		panic(fmt.Sprintf("codegen: no layout for enum %s", enum))
+	}
+
+	tag, ok := layout.VariantTag[variantName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: variant %q not found in enum layout", variantName))
+	}
+
+	if layout.MaxVariantDataSize == 0 {
+		// Fieldless enum: internal type is i32
+		return constant.NewInt(irtypes.I32, int64(tag))
+	}
+
+	// Data enum, but this particular variant has no fields: build struct with tag + zeroed data.
+	// EnumInternalType is guaranteed to be a struct for data enums (MaxVariantDataSize > 0).
+	internalType := layout.EnumInternalType.(*irtypes.StructType)
+	var agg value.Value = constant.NewZeroInitializer(internalType)
+	agg = c.block.NewInsertValue(agg, constant.NewInt(irtypes.I32, int64(tag)), 0)
+	return agg
+}
+
+// genEnumVariantCall generates a variant constructor call (e.g., Shape.Circle(3.14)).
+func (c *Compiler) genEnumVariantCall(e *ast.CallExpr, member *ast.MemberExpr, enum *types.Enum) value.Value {
+	layout := c.enumLayouts[enum]
+	if layout == nil {
+		panic(fmt.Sprintf("codegen: no layout for enum %s", enum))
+	}
+
+	tag, ok := layout.VariantTag[member.Field]
+	if !ok {
+		panic(fmt.Sprintf("codegen: variant %q not found in enum layout", member.Field))
+	}
+	dataType := layout.VariantDataTypes[member.Field]
+
+	// EnumInternalType is guaranteed to be a struct for data enums (genEnumVariantCall
+	// is only reached for call expressions, which implies the variant has fields).
+	internalType := layout.EnumInternalType.(*irtypes.StructType)
+	alloca := c.block.NewAlloca(internalType)
+
+	// Store tag at index 0
+	tagPtr := c.block.NewGetElementPtr(internalType, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	c.block.NewStore(constant.NewInt(irtypes.I32, int64(tag)), tagPtr)
+
+	// Store fields in data area at index 1
+	if dataType != nil && len(e.Args) > 0 {
+		dataPtr := c.block.NewGetElementPtr(internalType, alloca,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+		typedDataPtr := c.block.NewBitCast(dataPtr, irtypes.NewPointer(dataType))
+
+		for i, arg := range e.Args {
+			val := c.genExpr(arg.Value)
+			fieldPtr := c.block.NewGetElementPtr(dataType, typedDataPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
+			c.block.NewStore(val, fieldPtr)
+		}
+	}
+
+	return c.block.NewLoad(internalType, alloca)
+}
+
+// --- Match expressions ---
+
+// genMatchExpr generates a match expression. Dispatches to enum match (tag-based switch)
+// or value match (literal comparison chain) based on subject type.
+func (c *Compiler) genMatchExpr(e *ast.MatchExpr) value.Value {
+	subject := c.genExpr(e.Subject)
+	subjectType := c.info.Types[e.Subject]
+
+	if enum := extractEnum(subjectType); enum != nil {
+		return c.genEnumMatch(e, subject, enum)
+	}
+
+	return c.genValueMatch(e, subject, subjectType)
+}
+
+// genEnumMatch generates a match expression on an enum value using an LLVM switch instruction.
+func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *types.Enum) value.Value {
+	layout := c.enumLayouts[enum]
+	if layout == nil {
+		panic(fmt.Sprintf("codegen: no layout for enum %s in match", enum))
+	}
+
+	// Extract tag from subject
+	var tag value.Value
+	if layout.MaxVariantDataSize == 0 {
+		tag = subject // fieldless enum, subject IS the tag
+	} else {
+		tag = c.block.NewExtractValue(subject, 0)
+	}
+
+	switchBlock := c.block
+	mergeBlock := c.newBlock("match.end")
+
+	var defaultTarget *ir.Block
+	var cases []*ir.Case
+	var incomings []*ir.Incoming
+
+	for i, arm := range e.Arms {
+		armBlock := c.newBlock(fmt.Sprintf("match.arm%d", i))
+
+		switch p := arm.Pattern.(type) {
+		case *ast.EnumVariantMatchPattern:
+			tagVal := constant.NewInt(irtypes.I32, int64(layout.VariantTag[p.Variant]))
+			cases = append(cases, &ir.Case{X: tagVal, Target: armBlock})
+
+		case *ast.EnumDestructureMatchPattern:
+			tagVal := constant.NewInt(irtypes.I32, int64(layout.VariantTag[p.Variant]))
+			cases = append(cases, &ir.Case{X: tagVal, Target: armBlock})
+
+		case *ast.ShortDestructureMatchPattern:
+			tagVal := constant.NewInt(irtypes.I32, int64(layout.VariantTag[p.Name]))
+			cases = append(cases, &ir.Case{X: tagVal, Target: armBlock})
+
+		case *ast.WildcardMatchPattern:
+			defaultTarget = armBlock
+
+		case *ast.NameMatchPattern:
+			defaultTarget = armBlock
+		}
+
+		// Generate arm body
+		c.block = armBlock
+		c.bindMatchPattern(arm.Pattern, subject, enum, layout)
+
+		var armVal value.Value
+		if arm.Body != nil {
+			armVal = c.genExpr(arm.Body)
+		} else if arm.Block != nil {
+			c.genBlock(arm.Block)
+		}
+
+		armEnd := c.block
+		if c.block.Term == nil {
+			c.block.NewBr(mergeBlock)
+		}
+
+		if armVal != nil {
+			incomings = append(incomings, &ir.Incoming{X: armVal, Pred: armEnd})
+		}
+	}
+
+	if defaultTarget == nil {
+		defaultTarget = mergeBlock
+	}
+
+	// Emit switch in the block that computed the tag
+	switchBlock.NewSwitch(tag, defaultTarget, cases...)
+
+	c.block = mergeBlock
+	if len(incomings) > 0 {
+		return mergeBlock.NewPhi(incomings...)
+	}
+	return nil
+}
+
+// genValueMatch generates a match expression on a non-enum value using comparison chains.
+func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectType types.Type) value.Value {
+	mergeBlock := c.newBlock("match.end")
+	var incomings []*ir.Incoming
+
+	named := extractNamed(subjectType)
+
+	for i, arm := range e.Arms {
+		switch p := arm.Pattern.(type) {
+		case *ast.LiteralMatchPattern:
+			lit := c.genExpr(p.Value)
+
+			var cond value.Value
+			if named != nil {
+				method := named.LookupMethod("==")
+				if method != nil && method.IsNative() {
+					if named == types.TypString {
+						cond = c.genStringOp("==", subject, lit)
+					} else {
+						cond = c.emitNativeOp(named, "==", subject, lit)
+					}
+				}
+			}
+			if cond == nil {
+				panic(fmt.Sprintf("codegen: cannot compare match subject of type %s", subjectType))
+			}
+
+			armBlock := c.newBlock(fmt.Sprintf("match.arm%d", i))
+			nextBlock := c.newBlock(fmt.Sprintf("match.next%d", i))
+			c.block.NewCondBr(cond, armBlock, nextBlock)
+
+			c.block = armBlock
+			var armVal value.Value
+			if arm.Body != nil {
+				armVal = c.genExpr(arm.Body)
+			} else if arm.Block != nil {
+				c.genBlock(arm.Block)
+			}
+			armEnd := c.block
+			if c.block.Term == nil {
+				c.block.NewBr(mergeBlock)
+			}
+			if armVal != nil {
+				incomings = append(incomings, &ir.Incoming{X: armVal, Pred: armEnd})
+			}
+
+			c.block = nextBlock
+
+		case *ast.WildcardMatchPattern, *ast.NameMatchPattern:
+			// Default arm: always matches
+			armBlock := c.newBlock(fmt.Sprintf("match.arm%d", i))
+			c.block.NewBr(armBlock)
+
+			c.block = armBlock
+			if np, ok := p.(*ast.NameMatchPattern); ok && np.Name != "_" {
+				lt := subject.Type()
+				alloca := c.block.NewAlloca(lt)
+				alloca.SetName(np.Name)
+				c.block.NewStore(subject, alloca)
+				c.locals[np.Name] = alloca
+			}
+
+			var armVal value.Value
+			if arm.Body != nil {
+				armVal = c.genExpr(arm.Body)
+			} else if arm.Block != nil {
+				c.genBlock(arm.Block)
+			}
+			armEnd := c.block
+			if c.block.Term == nil {
+				c.block.NewBr(mergeBlock)
+			}
+			if armVal != nil {
+				incomings = append(incomings, &ir.Incoming{X: armVal, Pred: armEnd})
+			}
+
+			// After a wildcard/name pattern, no more arms need checking
+			c.block = mergeBlock
+			if len(incomings) > 0 {
+				return mergeBlock.NewPhi(incomings...)
+			}
+			return nil
+		}
+	}
+
+	// If we fell through without a default, branch to merge
+	if c.block.Term == nil {
+		c.block.NewBr(mergeBlock)
+	}
+
+	c.block = mergeBlock
+	if len(incomings) > 0 {
+		return mergeBlock.NewPhi(incomings...)
+	}
+	return nil
+}
+
+// bindMatchPattern binds pattern variables from a match arm into the current scope.
+func (c *Compiler) bindMatchPattern(pat ast.MatchPattern, subject value.Value, enum *types.Enum, layout *TypeDeclLayout) {
+	switch p := pat.(type) {
+	case *ast.EnumDestructureMatchPattern:
+		c.bindEnumDestructure(p.Bindings, p.Variant, subject, enum, layout)
+
+	case *ast.ShortDestructureMatchPattern:
+		c.bindEnumDestructure(p.Bindings, p.Name, subject, enum, layout)
+
+	case *ast.NameMatchPattern:
+		if p.Name != "_" {
+			lt := subject.Type()
+			alloca := c.block.NewAlloca(lt)
+			alloca.SetName(p.Name)
+			c.block.NewStore(subject, alloca)
+			c.locals[p.Name] = alloca
+		}
+
+	case *ast.EnumVariantMatchPattern:
+		// No bindings for fieldless variant patterns
+
+	case *ast.WildcardMatchPattern:
+		// No bindings
+	}
+}
+
+// bindEnumDestructure extracts variant data fields and binds them to local variables.
+func (c *Compiler) bindEnumDestructure(bindings []string, variantName string, subject value.Value, enum *types.Enum, layout *TypeDeclLayout) {
+	variant := enum.LookupVariant(variantName)
+	if variant == nil || variant.NumFields() == 0 {
+		return
+	}
+
+	dataType := layout.VariantDataTypes[variantName]
+	if dataType == nil {
+		return
+	}
+
+	// Alloca the subject struct and GEP to data area.
+	// EnumInternalType is guaranteed to be a struct here because we returned early
+	// above when variant has no fields (which is the only case where it would be i32).
+	internalType := layout.EnumInternalType.(*irtypes.StructType)
+	alloca := c.block.NewAlloca(internalType)
+	c.block.NewStore(subject, alloca)
+
+	dataPtr := c.block.NewGetElementPtr(internalType, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	typedDataPtr := c.block.NewBitCast(dataPtr, irtypes.NewPointer(dataType))
+
+	for i, binding := range bindings {
+		if binding == "_" {
+			continue
+		}
+		if i >= variant.NumFields() {
+			break
+		}
+		fieldType := llvmType(variant.Fields()[i].Type())
+		fieldPtr := c.block.NewGetElementPtr(dataType, typedDataPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
+		val := c.block.NewLoad(fieldType, fieldPtr)
+
+		bindAlloca := c.block.NewAlloca(fieldType)
+		bindAlloca.SetName(binding)
+		c.block.NewStore(val, bindAlloca)
+		c.locals[binding] = bindAlloca
+	}
 }
 
 // --- If expressions ---

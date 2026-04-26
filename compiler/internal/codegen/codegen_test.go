@@ -558,7 +558,7 @@ func TestHeaderExternReturnType(t *testing.T) {
 	`)
 
 	var buf bytes.Buffer
-	if err := GenerateHeader(&buf, result.Layouts, result.Externs); err != nil {
+	if err := GenerateHeader(&buf, result.Layouts, result.EnumLayouts, result.Externs); err != nil {
 		t.Fatalf("GenerateHeader error: %v", err)
 	}
 	header := buf.String()
@@ -574,7 +574,7 @@ func TestHeaderExternZeroParams(t *testing.T) {
 	`)
 
 	var buf bytes.Buffer
-	if err := GenerateHeader(&buf, result.Layouts, result.Externs); err != nil {
+	if err := GenerateHeader(&buf, result.Layouts, result.EnumLayouts, result.Externs); err != nil {
 		t.Fatalf("GenerateHeader error: %v", err)
 	}
 	header := buf.String()
@@ -593,7 +593,7 @@ func TestHeaderExternMultipleTypes(t *testing.T) {
 	`)
 
 	var buf bytes.Buffer
-	if err := GenerateHeader(&buf, result.Layouts, result.Externs); err != nil {
+	if err := GenerateHeader(&buf, result.Layouts, result.EnumLayouts, result.Externs); err != nil {
 		t.Fatalf("GenerateHeader error: %v", err)
 	}
 	header := buf.String()
@@ -643,7 +643,7 @@ func TestHeaderExternSharedRefParam(t *testing.T) {
 	`)
 
 	var buf bytes.Buffer
-	if err := GenerateHeader(&buf, result.Layouts, result.Externs); err != nil {
+	if err := GenerateHeader(&buf, result.Layouts, result.EnumLayouts, result.Externs); err != nil {
 		t.Fatalf("GenerateHeader error: %v", err)
 	}
 	header := buf.String()
@@ -659,7 +659,7 @@ func TestHeaderExternMutRefParam(t *testing.T) {
 	`)
 
 	var buf bytes.Buffer
-	if err := GenerateHeader(&buf, result.Layouts, result.Externs); err != nil {
+	if err := GenerateHeader(&buf, result.Layouts, result.EnumLayouts, result.Externs); err != nil {
 		t.Fatalf("GenerateHeader error: %v", err)
 	}
 	header := buf.String()
@@ -676,7 +676,7 @@ func TestHeaderGeneration(t *testing.T) {
 	`)
 
 	var buf bytes.Buffer
-	if err := GenerateHeader(&buf, result.Layouts, result.Externs); err != nil {
+	if err := GenerateHeader(&buf, result.Layouts, result.EnumLayouts, result.Externs); err != nil {
 		t.Fatalf("GenerateHeader error: %v", err)
 	}
 	header := buf.String()
@@ -772,7 +772,7 @@ func TestStringHeader(t *testing.T) {
 	`)
 
 	var buf bytes.Buffer
-	if err := GenerateHeader(&buf, result.Layouts, result.Externs); err != nil {
+	if err := GenerateHeader(&buf, result.Layouts, result.EnumLayouts, result.Externs); err != nil {
 		t.Fatalf("GenerateHeader error: %v", err)
 	}
 	header := buf.String()
@@ -1001,7 +1001,7 @@ func TestUserTypeHeader(t *testing.T) {
 	`)
 
 	var buf bytes.Buffer
-	if err := GenerateHeader(&buf, result.Layouts, result.Externs); err != nil {
+	if err := GenerateHeader(&buf, result.Layouts, result.EnumLayouts, result.Externs); err != nil {
 		t.Fatalf("GenerateHeader error: %v", err)
 	}
 	header := buf.String()
@@ -1102,7 +1102,7 @@ func TestUserTypeHeaderFieldTypes(t *testing.T) {
 	`)
 
 	var buf bytes.Buffer
-	if err := GenerateHeader(&buf, result.Layouts, result.Externs); err != nil {
+	if err := GenerateHeader(&buf, result.Layouts, result.EnumLayouts, result.Externs); err != nil {
 		t.Fatalf("GenerateHeader error: %v", err)
 	}
 	header := buf.String()
@@ -1130,4 +1130,370 @@ func TestUserTypeMethodMutatesField(t *testing.T) {
 	// Should store into this.value
 	assertContains(t, ir, "getelementptr %promise_Counter_i")
 	assertContains(t, ir, "store i64")
+}
+
+// === Enum Tests ===
+
+func TestEnumLayout(t *testing.T) {
+	ir := generateIR(t, `
+		enum Color { Red, Green, Blue }
+		main() { }
+	`)
+	// Four-struct layout for enum
+	assertContains(t, ir, "%promise_Color_t = type {}")
+	assertContains(t, ir, "%promise_Color_m = type { %promise_Color_t* }")
+	assertContains(t, ir, "%promise_Color_i = type { %promise_Color_m* }")
+	assertContains(t, ir, "%promise_Color_v = type { i8*, %promise_Color_i*, i32 }")
+}
+
+func TestEnumLayoutData(t *testing.T) {
+	ir := generateIR(t, `
+		enum Shape { Circle(f64 radius), Rect(f64 w, f64 h) }
+		main() { }
+	`)
+	assertContains(t, ir, "%promise_Shape_t = type {}")
+	assertContains(t, ir, "%promise_Shape_m = type { %promise_Shape_t* }")
+	assertContains(t, ir, "%promise_Shape_i = type { %promise_Shape_m* }")
+	// Value struct: vtable, instance ptr, tag, data bytes
+	assertContains(t, ir, "%promise_Shape_v = type { i8*, %promise_Shape_i*, i32,")
+	// Internal struct: tag + data area
+	assertContains(t, ir, "%promise_Shape_enum = type { i32,")
+}
+
+func TestEnumFieldlessVariant(t *testing.T) {
+	ir := generateIR(t, `
+		enum Color { Red, Green, Blue }
+		test() {
+			Color c = Color.Green;
+		}
+		main() { }
+	`)
+	// Green is tag 1
+	assertContains(t, ir, "store i32 1")
+}
+
+func TestEnumDataConstructor(t *testing.T) {
+	ir := generateIR(t, `
+		enum Shape { Circle(f64 radius), Rect(f64 w, f64 h) }
+		test() {
+			Shape s = Shape.Circle(3.14);
+		}
+		main() { }
+	`)
+	// Should store tag (Circle = 0)
+	assertContains(t, ir, "store i32 0")
+	// Should store double field via GEP + bitcast
+	assertContains(t, ir, "store double")
+	assertContains(t, ir, "bitcast")
+}
+
+func TestEnumMatchFieldless(t *testing.T) {
+	ir := generateIR(t, `
+		enum Color { Red, Green, Blue }
+		test() {
+			Color c = Color.Red;
+			x := match c {
+				Color.Red => 1,
+				Color.Green => 2,
+				Color.Blue => 3,
+			};
+		}
+		main() { }
+	`)
+	// Should use switch on i32 tag
+	assertContains(t, ir, "switch i32")
+	// Should have arm blocks
+	assertContains(t, ir, "match.arm0")
+	assertContains(t, ir, "match.arm1")
+	assertContains(t, ir, "match.arm2")
+	// Merge block with phi
+	assertContains(t, ir, "match.end")
+}
+
+func TestEnumMatchDestructure(t *testing.T) {
+	ir := generateIR(t, `
+		enum Shape { Circle(f64 radius), Rect(f64 w, f64 h) }
+		test() f64 {
+			Shape s = Shape.Circle(3.14);
+			return match s {
+				Shape.Circle(r) => r,
+				Shape.Rect(w, h) => w,
+			};
+		}
+		main() { }
+	`)
+	// Should switch on tag
+	assertContains(t, ir, "switch i32")
+	// Should bitcast + GEP to load variant data
+	assertContains(t, ir, "bitcast")
+	assertContains(t, ir, "load double")
+}
+
+func TestEnumMatchShortDestructure(t *testing.T) {
+	ir := generateIR(t, `
+		enum Result { Ok(int value), Err(int code) }
+		test() int {
+			Result r = Result.Ok(42);
+			return match r {
+				Ok(v) => v,
+				Err(c) => c,
+			};
+		}
+		main() { }
+	`)
+	// Short destructure should also produce switch
+	assertContains(t, ir, "switch i32")
+	assertContains(t, ir, "match.arm0")
+	assertContains(t, ir, "match.arm1")
+}
+
+func TestEnumMatchWildcard(t *testing.T) {
+	ir := generateIR(t, `
+		enum Color { Red, Green, Blue }
+		test() int {
+			Color c = Color.Red;
+			return match c {
+				Color.Red => 1,
+				_ => 0,
+			};
+		}
+		main() { }
+	`)
+	// Switch with default case
+	assertContains(t, ir, "switch i32")
+	assertContains(t, ir, "match.arm0")
+	assertContains(t, ir, "match.arm1")
+}
+
+func TestEnumMatchNameBinding(t *testing.T) {
+	ir := generateIR(t, `
+		enum Color { Red, Green, Blue }
+		test() int {
+			Color c = Color.Red;
+			return match c {
+				Color.Red => 1,
+				val => 0,
+			};
+		}
+		main() { }
+	`)
+	// Name binding should create alloca for the bound variable
+	assertContains(t, ir, "switch i32")
+	assertContains(t, ir, "alloca i32")
+}
+
+func TestEnumMatchBlock(t *testing.T) {
+	ir := generateIR(t, `
+		enum Color { Red, Green, Blue }
+		test() {
+			Color c = Color.Red;
+			match c {
+				Color.Red => { int x = 1; },
+				Color.Green => { int y = 2; },
+				Color.Blue => { int z = 3; },
+			};
+		}
+		main() { }
+	`)
+	// Should have switch and arm blocks (void match, no phi)
+	assertContains(t, ir, "switch i32")
+	assertContains(t, ir, "match.arm0")
+}
+
+func TestMatchIntLiteral(t *testing.T) {
+	ir := generateIR(t, `
+		test() int {
+			int n = 42;
+			return match n {
+				1 => 10,
+				2 => 20,
+				_ => 0,
+			};
+		}
+		main() { }
+	`)
+	// Should use comparison chain (icmp eq), not switch
+	assertContains(t, ir, "icmp eq")
+	assertContains(t, ir, "match.arm")
+	assertContains(t, ir, "match.next")
+}
+
+func TestEnumExternPacking(t *testing.T) {
+	ir := generateIR(t, `
+		enum Color { Red, Green, Blue }
+		print_color(Color c) `+"`"+`extern("print_color");
+		test() {
+			Color c = Color.Green;
+			print_color(c);
+		}
+		main() { }
+	`)
+	// Should pack into value struct
+	assertContains(t, ir, "insertvalue %promise_Color_v")
+	// Extern declaration uses value struct
+	assertContains(t, ir, "declare void @print_color(%promise_Color_v")
+}
+
+func TestEnumExternUnpacking(t *testing.T) {
+	ir := generateIR(t, `
+		enum Color { Red, Green, Blue }
+		get_color() Color `+"`"+`extern("get_color");
+		test() {
+			Color c = get_color();
+		}
+		main() { }
+	`)
+	// Extern returns value struct
+	assertContains(t, ir, "declare %promise_Color_v @get_color()")
+	// Should unpack via extractvalue
+	assertContains(t, ir, "extractvalue %promise_Color_v")
+}
+
+func TestEnumHeaderFieldless(t *testing.T) {
+	result := compileResult(t, `
+		enum Color { Red, Green, Blue }
+		main() { }
+	`)
+
+	var buf bytes.Buffer
+	if err := GenerateHeader(&buf, result.Layouts, result.EnumLayouts, result.Externs); err != nil {
+		t.Fatalf("GenerateHeader error: %v", err)
+	}
+	header := buf.String()
+
+	assertContains(t, header, "promise_Color_t")
+	assertContains(t, header, "promise_Color_m")
+	assertContains(t, header, "promise_Color_i")
+	assertContains(t, header, "promise_Color_v")
+	// Value struct should have tag field
+	assertContains(t, header, "int32_t")
+}
+
+func TestEnumDataFieldlessVariant(t *testing.T) {
+	// Exercises zeroinitializer path: fieldless variant in a data enum
+	ir := generateIR(t, `
+		enum Result { Ok(int value), None }
+		test() {
+			Result r = Result.None;
+		}
+		main() { }
+	`)
+	// None is tag 1, built via zeroinitializer + insertvalue (not alloca with partial store)
+	assertContains(t, ir, "insertvalue %promise_Result_enum zeroinitializer, i32 1, 0")
+	// Internal struct should exist for the data enum
+	assertContains(t, ir, "%promise_Result_enum = type { i32,")
+}
+
+func TestEnumDataExternPacking(t *testing.T) {
+	ir := generateIR(t, `
+		enum Shape { Circle(f64 radius), Rect(f64 w, f64 h) }
+		send_shape(Shape s) `+"`"+`extern("send_shape");
+		test() {
+			Shape s = Shape.Circle(3.14);
+			send_shape(s);
+		}
+		main() { }
+	`)
+	// Data enum packing: extractvalue tag and data from internal struct
+	assertContains(t, ir, "extractvalue %promise_Shape_enum")
+	// Pack into value struct
+	assertContains(t, ir, "insertvalue %promise_Shape_v")
+	// Extern declaration uses value struct
+	assertContains(t, ir, "declare void @send_shape(%promise_Shape_v")
+}
+
+func TestEnumDataExternUnpacking(t *testing.T) {
+	ir := generateIR(t, `
+		enum Shape { Circle(f64 radius), Rect(f64 w, f64 h) }
+		get_shape() Shape `+"`"+`extern("get_shape");
+		test() {
+			Shape s = get_shape();
+		}
+		main() { }
+	`)
+	// Data enum unpacking: extractvalue from value struct, build internal struct
+	assertContains(t, ir, "declare %promise_Shape_v @get_shape()")
+	assertContains(t, ir, "extractvalue %promise_Shape_v")
+	assertContains(t, ir, "insertvalue %promise_Shape_enum")
+}
+
+func TestEnumAsFunctionParam(t *testing.T) {
+	ir := generateIR(t, `
+		enum Color { Red, Green, Blue }
+		is_red(Color c) bool {
+			return match c {
+				Color.Red => true,
+				_ => false,
+			};
+		}
+		main() { }
+	`)
+	// Enum param should use i32 (fieldless enum internal type)
+	assertContains(t, ir, "define i1 @is_red(i32 %c)")
+	// Param should be alloca'd as i32
+	assertContains(t, ir, "alloca i32")
+	assertContains(t, ir, "switch i32")
+}
+
+func TestEnumAsFunctionReturn(t *testing.T) {
+	ir := generateIR(t, `
+		enum Color { Red, Green, Blue }
+		get_green() Color {
+			return Color.Green;
+		}
+		main() { }
+	`)
+	// Enum return should use i32
+	assertContains(t, ir, "define i32 @get_green()")
+	assertContains(t, ir, "ret i32 1")
+}
+
+func TestMatchValueNameBinding(t *testing.T) {
+	ir := generateIR(t, `
+		test() int {
+			int x = 42;
+			return match x {
+				val => val + 1,
+			};
+		}
+		main() { }
+	`)
+	// Name binding in value match: alloca + store the subject
+	assertContains(t, ir, "alloca i64")
+	assertContains(t, ir, "add i64")
+}
+
+func TestEnumDestructureUnderscoreSkip(t *testing.T) {
+	ir := generateIR(t, `
+		enum Pair { Both(int a, int b) }
+		test() int {
+			Pair p = Pair.Both(1, 2);
+			return match p {
+				Both(_, second) => second,
+			};
+		}
+		main() { }
+	`)
+	// Should still load the second field (index 1) but skip the first
+	assertContains(t, ir, "switch i32")
+	assertContains(t, ir, "load i64")
+}
+
+func TestEnumHeaderData(t *testing.T) {
+	result := compileResult(t, `
+		enum Shape { Circle(f64 radius), Rect(f64 w, f64 h) }
+		main() { }
+	`)
+
+	var buf bytes.Buffer
+	if err := GenerateHeader(&buf, result.Layouts, result.EnumLayouts, result.Externs); err != nil {
+		t.Fatalf("GenerateHeader error: %v", err)
+	}
+	header := buf.String()
+
+	assertContains(t, header, "promise_Shape_t")
+	assertContains(t, header, "promise_Shape_v")
+	// Data enum value struct should have tag and data fields
+	assertContains(t, header, "int32_t              tag;")
+	assertContains(t, header, "uint8_t              data[16];")
 }

@@ -11,19 +11,26 @@ import (
 	"djabi.dev/go/promise_lang/internal/types"
 )
 
+// lookupLayout resolves a TypeDeclLayout for any Promise type (named or enum).
+func (c *Compiler) lookupLayout(typ types.Type) *TypeDeclLayout {
+	if named := extractNamed(typ); named != nil {
+		return c.layouts[named]
+	}
+	if enum := extractEnum(typ); enum != nil {
+		return c.enumLayouts[enum]
+	}
+	return nil
+}
+
 // declareExterns creates LLVM IR function declarations for all extern functions.
 // Parameters use promise_T_v struct types; return types use promise_T_v or void.
 func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Named]*TypeDeclLayout) {
 	for _, ext := range externs {
 		var params []*ir.Param
 		for i, pt := range ext.ParamTypes {
-			named := extractNamed(pt)
-			if named == nil {
-				panic(fmt.Sprintf("codegen: cannot resolve type for extern param %d of %s", i, ext.PromiseName))
-			}
-			layout := layouts[named]
+			layout := c.lookupLayout(pt)
 			if layout == nil {
-				panic(fmt.Sprintf("codegen: no layout for type %s in extern %s", named, ext.PromiseName))
+				panic(fmt.Sprintf("codegen: cannot resolve layout for extern param %d of %s", i, ext.PromiseName))
 			}
 
 			paramName := ext.Sig.Params()[i].Name()
@@ -39,13 +46,9 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 
 		retType := irtypes.Type(irtypes.Void)
 		if ext.ResultType != nil {
-			named := extractNamed(ext.ResultType)
-			if named == nil {
-				panic(fmt.Sprintf("codegen: cannot resolve return type for extern %s", ext.PromiseName))
-			}
-			layout := layouts[named]
+			layout := c.lookupLayout(ext.ResultType)
 			if layout == nil {
-				panic(fmt.Sprintf("codegen: no layout for return type %s in extern %s", named, ext.PromiseName))
+				panic(fmt.Sprintf("codegen: cannot resolve layout for return type of extern %s", ext.PromiseName))
 			}
 			retType = layout.Value.LLVMType
 		}
@@ -63,12 +66,9 @@ func (c *Compiler) genExternCall(ext *ExternFunc, argVals []value.Value, argType
 	coercedArgs := make([]value.Value, len(argVals))
 	for i, arg := range argVals {
 		named := extractNamed(argTypes[i])
-		if named == nil {
-			panic(fmt.Sprintf("codegen: cannot resolve type for arg %d in call to %s", i, ext.PromiseName))
-		}
-		layout := c.layouts[named]
+		layout := c.lookupLayout(argTypes[i])
 		if layout == nil {
-			panic(fmt.Sprintf("codegen: no layout for type %s in call to %s", named, ext.PromiseName))
+			panic(fmt.Sprintf("codegen: cannot resolve layout for arg %d in call to %s", i, ext.PromiseName))
 		}
 		coercedArgs[i] = c.packToValueStruct(arg, named, layout)
 	}
@@ -77,12 +77,9 @@ func (c *Compiler) genExternCall(ext *ExternFunc, argVals []value.Value, argType
 
 	if ext.ResultType != nil {
 		named := extractNamed(ext.ResultType)
-		if named == nil {
-			panic(fmt.Sprintf("codegen: cannot resolve return type in call to %s", ext.PromiseName))
-		}
-		layout := c.layouts[named]
+		layout := c.lookupLayout(ext.ResultType)
 		if layout == nil {
-			panic(fmt.Sprintf("codegen: no layout for return type %s in call to %s", named, ext.PromiseName))
+			panic(fmt.Sprintf("codegen: cannot resolve layout for return type of call to %s", ext.PromiseName))
 		}
 		return c.unpackFromValueStruct(result, named, layout)
 	}
@@ -98,8 +95,10 @@ func (c *Compiler) packToValueStruct(val value.Value, named *types.Named, layout
 		return c.packString(val, layout)
 	case LayoutUserType:
 		return c.packUserType(val, layout)
+	case LayoutEnum:
+		return c.packEnum(val, layout)
 	default:
-		panic(fmt.Sprintf("codegen: packing type %s (kind %d) not yet implemented", named, layout.Kind))
+		panic(fmt.Sprintf("codegen: packing kind %d not yet implemented", layout.Kind))
 	}
 }
 
@@ -134,8 +133,10 @@ func (c *Compiler) unpackFromValueStruct(val value.Value, named *types.Named, la
 		return c.unpackString(val, layout)
 	case LayoutUserType:
 		return c.unpackUserType(val, layout)
+	case LayoutEnum:
+		return c.unpackEnum(val, layout)
 	default:
-		panic(fmt.Sprintf("codegen: unpacking type %s (kind %d) not yet implemented", named, layout.Kind))
+		panic(fmt.Sprintf("codegen: unpacking kind %d not yet implemented", layout.Kind))
 	}
 }
 
@@ -193,6 +194,48 @@ func (c *Compiler) unpackUserType(val value.Value, layout *TypeDeclLayout) value
 	inst := c.block.NewExtractValue(val, 1)
 	// bitcast back to i8*
 	return c.block.NewBitCast(inst, irtypes.I8Ptr)
+}
+
+// packEnum packs an enum internal value into a promise_T_v struct.
+// Fieldless: { null, null, tag }. Data: { null, null, tag, data_bytes }.
+func (c *Compiler) packEnum(val value.Value, layout *TypeDeclLayout) value.Value {
+	valueStructType := layout.Value.LLVMType
+	var agg value.Value = constant.NewUndef(valueStructType)
+
+	// Field 0: _vtable = null (i8*)
+	agg = c.block.NewInsertValue(agg, constant.NewNull(irtypes.I8Ptr), 0)
+
+	// Field 1: _instance = null (promise_T_i*)
+	instancePtrType := layout.Value.Fields[1].LLVMType.(*irtypes.PointerType)
+	agg = c.block.NewInsertValue(agg, constant.NewNull(instancePtrType), 1)
+
+	if layout.MaxVariantDataSize == 0 {
+		// Fieldless enum: internal value is i32 tag
+		agg = c.block.NewInsertValue(agg, val, 2)
+	} else {
+		// Data enum: internal value is { i32, [N x i8] }
+		tag := c.block.NewExtractValue(val, 0)
+		agg = c.block.NewInsertValue(agg, tag, 2)
+		data := c.block.NewExtractValue(val, 1)
+		agg = c.block.NewInsertValue(agg, data, 3)
+	}
+
+	return agg
+}
+
+// unpackEnum extracts the internal enum value from a promise_T_v return.
+func (c *Compiler) unpackEnum(val value.Value, layout *TypeDeclLayout) value.Value {
+	if layout.MaxVariantDataSize == 0 {
+		// Fieldless: extract tag at index 2
+		return c.block.NewExtractValue(val, 2)
+	}
+	// Data enum: build { i32, [N x i8] } from tag (index 2) and data (index 3)
+	tag := c.block.NewExtractValue(val, 2)
+	data := c.block.NewExtractValue(val, 3)
+	var agg value.Value = constant.NewUndef(layout.EnumInternalType)
+	agg = c.block.NewInsertValue(agg, tag, 0)
+	agg = c.block.NewInsertValue(agg, data, 1)
+	return agg
 }
 
 // coerceToRaw converts an internal Promise value to the raw field type.

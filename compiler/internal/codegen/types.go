@@ -112,3 +112,52 @@ func extractNamed(typ types.Type) *types.Named {
 	}
 	return nil
 }
+
+// extractEnum returns the *Enum type from a Promise type,
+// unwrapping Instance, SharedRef, and MutRef if necessary.
+func extractEnum(typ types.Type) *types.Enum {
+	switch t := typ.(type) {
+	case *types.Enum:
+		return t
+	case *types.Instance:
+		if e, ok := t.Origin().(*types.Enum); ok {
+			return e
+		}
+	case *types.SharedRef:
+		return extractEnum(t.Elem())
+	case *types.MutRef:
+		return extractEnum(t.Elem())
+	}
+	return nil
+}
+
+// resolveType maps a Promise type to its LLVM IR type, with enum awareness.
+// Unlike llvmType (which is standalone), this method can look up enum layouts
+// to return the correct internal type for enums.
+func (c *Compiler) resolveType(typ types.Type) irtypes.Type {
+	if enum := extractEnum(typ); enum != nil {
+		if layout, ok := c.enumLayouts[enum]; ok {
+			return layout.EnumInternalType
+		}
+		return irtypes.I32
+	}
+	return llvmType(typ)
+}
+
+// llvmTypeSize returns the byte size of an LLVM type on a 64-bit target.
+// Used for computing enum variant data sizes.
+func llvmTypeSize(typ irtypes.Type) int {
+	switch t := typ.(type) {
+	case *irtypes.IntType:
+		return int((t.BitSize + 7) / 8)
+	case *irtypes.FloatType:
+		if t.Kind == irtypes.FloatKindFloat {
+			return 4
+		}
+		return 8 // double
+	case *irtypes.PointerType:
+		return 8
+	default:
+		return 8
+	}
+}

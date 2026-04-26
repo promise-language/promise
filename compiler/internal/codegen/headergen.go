@@ -10,7 +10,7 @@ import (
 
 // GenerateHeader writes a C header file defining all struct types and extern
 // function declarations needed for the C runtime to match the LLVM IR.
-func GenerateHeader(w io.Writer, layouts map[*types.Named]*TypeDeclLayout, externs []*ExternFunc) error {
+func GenerateHeader(w io.Writer, layouts map[*types.Named]*TypeDeclLayout, enumLayouts map[*types.Enum]*TypeDeclLayout, externs []*ExternFunc) error {
 	p := func(format string, args ...interface{}) error {
 		_, err := fmt.Fprintf(w, format, args...)
 		return err
@@ -71,6 +71,30 @@ func GenerateHeader(w io.Writer, layouts map[*types.Named]*TypeDeclLayout, exter
 		}
 	}
 
+	// Emit enum type layouts
+	sortedEnums := sortedEnumLayouts(enumLayouts)
+	for _, entry := range sortedEnums {
+		layout := entry.layout
+		if err := p("// %s (enum)\n", layout.PromiseName); err != nil {
+			return err
+		}
+		if err := emitStructTypedef(w, layout.Type); err != nil {
+			return err
+		}
+		if err := emitStructTypedef(w, layout.Variant); err != nil {
+			return err
+		}
+		if err := emitStructTypedef(w, layout.Instance); err != nil {
+			return err
+		}
+		if err := emitStructTypedef(w, layout.Value); err != nil {
+			return err
+		}
+		if err := ln(""); err != nil {
+			return err
+		}
+	}
+
 	if len(externs) > 0 {
 		if err := ln("// === Extern Function Declarations ==="); err != nil {
 			return err
@@ -79,7 +103,7 @@ func GenerateHeader(w io.Writer, layouts map[*types.Named]*TypeDeclLayout, exter
 			return err
 		}
 		for _, ext := range externs {
-			if err := emitExternDecl(w, ext, layouts); err != nil {
+			if err := emitExternDecl(w, ext, layouts, enumLayouts); err != nil {
 				return err
 			}
 		}
@@ -99,6 +123,18 @@ type layoutEntry struct {
 
 // sortedLayouts returns layouts sorted by PromiseName for deterministic output.
 func sortedLayouts(layouts map[*types.Named]*TypeDeclLayout) []layoutEntry {
+	var entries []layoutEntry
+	for _, layout := range layouts {
+		entries = append(entries, layoutEntry{name: layout.PromiseName, layout: layout})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].name < entries[j].name
+	})
+	return entries
+}
+
+// sortedEnumLayouts returns enum layouts sorted by PromiseName for deterministic output.
+func sortedEnumLayouts(layouts map[*types.Enum]*TypeDeclLayout) []layoutEntry {
 	var entries []layoutEntry
 	for _, layout := range layouts {
 		entries = append(entries, layoutEntry{name: layout.PromiseName, layout: layout})
@@ -139,15 +175,23 @@ func emitStructTypedef(w io.Writer, sl *StructLayout) error {
 	return err
 }
 
+// lookupLayoutForHeadergen resolves a TypeDeclLayout for a type across both named and enum maps.
+func lookupLayoutForHeadergen(typ types.Type, layouts map[*types.Named]*TypeDeclLayout, enumLayouts map[*types.Enum]*TypeDeclLayout) *TypeDeclLayout {
+	if named := extractNamed(typ); named != nil {
+		return layouts[named]
+	}
+	if enum := extractEnum(typ); enum != nil {
+		return enumLayouts[enum]
+	}
+	return nil
+}
+
 // emitExternDecl writes a C function declaration for an extern function.
-func emitExternDecl(w io.Writer, ext *ExternFunc, layouts map[*types.Named]*TypeDeclLayout) error {
+func emitExternDecl(w io.Writer, ext *ExternFunc, layouts map[*types.Named]*TypeDeclLayout, enumLayouts map[*types.Enum]*TypeDeclLayout) error {
 	retCType := "void"
 	if ext.ResultType != nil {
-		named := extractNamed(ext.ResultType)
-		if named != nil {
-			if layout, ok := layouts[named]; ok {
-				retCType = layout.Value.CName
-			}
+		if layout := lookupLayoutForHeadergen(ext.ResultType, layouts, enumLayouts); layout != nil {
+			retCType = layout.Value.CName
 		}
 	}
 
@@ -161,15 +205,8 @@ func emitExternDecl(w io.Writer, ext *ExternFunc, layouts map[*types.Named]*Type
 				return err
 			}
 		}
-		named := extractNamed(pt)
-		if named == nil {
-			if _, err := fmt.Fprintf(w, "void* %s", ext.Sig.Params()[i].Name()); err != nil {
-				return err
-			}
-			continue
-		}
-		layout, ok := layouts[named]
-		if !ok {
+		layout := lookupLayoutForHeadergen(pt, layouts, enumLayouts)
+		if layout == nil {
 			if _, err := fmt.Fprintf(w, "void* %s", ext.Sig.Params()[i].Name()); err != nil {
 				return err
 			}

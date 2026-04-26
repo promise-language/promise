@@ -64,7 +64,7 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 
 func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	typ := c.info.Types[s.Value]
-	lt := llvmType(typ)
+	lt := c.resolveType(typ)
 	alloca := c.block.NewAlloca(lt)
 	alloca.SetName(s.Name)
 	val := c.genExpr(s.Value)
@@ -74,7 +74,7 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 
 func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	typ := c.info.Types[s.Value]
-	lt := llvmType(typ)
+	lt := c.resolveType(typ)
 	alloca := c.block.NewAlloca(lt)
 	alloca.SetName(s.Name)
 	val := c.genExpr(s.Value)
@@ -384,7 +384,7 @@ func (c *Compiler) genClassicForStmt(s *ast.ClassicForStmt) {
 	// Init: declare the loop variable
 	if s.InitValue != nil {
 		typ := c.info.Types[s.InitValue]
-		lt := llvmType(typ)
+		lt := c.resolveType(typ)
 		alloca := c.block.NewAlloca(lt)
 		alloca.SetName(s.InitName)
 		val := c.genExpr(s.InitValue)

@@ -169,7 +169,7 @@ func runBuild(args []string) {
 	}
 	defer os.Remove(headerFile.Name())
 
-	if err := codegen.GenerateHeader(headerFile, result.Layouts, result.Externs); err != nil {
+	if err := codegen.GenerateHeader(headerFile, result.Layouts, result.EnumLayouts, result.Externs); err != nil {
 		fmt.Fprintf(os.Stderr, "error generating header: %v\n", err)
 		os.Exit(1)
 	}
@@ -185,7 +185,7 @@ func runBuild(args []string) {
 
 	// Best-effort: refresh runtime/promise_bindings.h with current type layouts
 	if refFile, err := os.Create(filepath.Join(runtimeDir, "promise_bindings.h")); err == nil {
-		_ = codegen.GenerateHeader(refFile, result.Layouts, nil)
+		_ = codegen.GenerateHeader(refFile, result.Layouts, result.EnumLayouts, nil)
 		refFile.Close()
 	}
 

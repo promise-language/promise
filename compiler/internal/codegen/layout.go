@@ -1,6 +1,8 @@
 package codegen
 
 import (
+	"fmt"
+
 	"github.com/llir/llvm/ir"
 	irtypes "github.com/llir/llvm/ir/types"
 
@@ -16,8 +18,8 @@ const (
 	LayoutPrimitive LayoutKind = iota
 	LayoutString
 	LayoutUserType
+	LayoutEnum
 	// Future stages:
-	// LayoutEnum
 	// LayoutArray
 	// LayoutSlice
 	// LayoutTuple
@@ -37,6 +39,12 @@ type TypeDeclLayout struct {
 	IsSigned           bool                 // for integer widening in coercion
 	InstanceFieldIndex map[string]int       // field name → GEP index in instance struct (user types)
 	InstancePtrType    *irtypes.PointerType // cached pointer to instance struct (user types + string)
+
+	// Enum-specific fields
+	EnumInternalType   irtypes.Type                   // i32 (fieldless) or { i32, [N x i8] } (data enum)
+	VariantTag         map[string]int                 // variant name → tag value (0-indexed)
+	VariantDataTypes   map[string]*irtypes.StructType // variant name → data struct type (for GEP)
+	MaxVariantDataSize int                            // max variant data byte count (0 = fieldless)
 }
 
 // StructLayout describes one of the four C-ABI-compatible struct representations.
@@ -69,9 +77,10 @@ type ExternFunc struct {
 
 // CompileResult bundles the output of compilation for downstream consumers.
 type CompileResult struct {
-	Module  *ir.Module
-	Layouts map[*types.Named]*TypeDeclLayout
-	Externs []*ExternFunc
+	Module      *ir.Module
+	Layouts     map[*types.Named]*TypeDeclLayout
+	EnumLayouts map[*types.Enum]*TypeDeclLayout
+	Externs     []*ExternFunc
 }
 
 // primitiveRawType returns the raw LLVM type, C type string, and signedness
@@ -471,6 +480,130 @@ func externCName(fd *ast.FuncDecl) string {
 		}
 	}
 	return "promise_" + fd.Name
+}
+
+// computeEnumLayout creates a TypeDeclLayout for an enum type.
+// Enums are value types: data lives in the value struct (tag + union data),
+// not heap-allocated like user types. The instance struct is empty.
+func computeEnumLayout(module *ir.Module, enum *types.Enum) *TypeDeclLayout {
+	name := enum.Obj().Name()
+
+	// Compute variant tags and per-variant data struct types
+	variantTag := map[string]int{}
+	variantDataTypes := map[string]*irtypes.StructType{}
+	maxDataSize := 0
+
+	for i, v := range enum.Variants() {
+		variantTag[v.Name()] = i
+
+		if v.NumFields() > 0 {
+			var fieldTypes []irtypes.Type
+			for _, f := range v.Fields() {
+				fieldTypes = append(fieldTypes, llvmType(f.Type()))
+			}
+			dataType := irtypes.NewStruct(fieldTypes...)
+			variantDataTypes[v.Name()] = dataType
+
+			// Compute data size: sum of field sizes (conservative 8-byte per field)
+			ds := 0
+			for _, ft := range fieldTypes {
+				ds += llvmTypeSize(ft)
+			}
+			if ds > maxDataSize {
+				maxDataSize = ds
+			}
+		}
+	}
+
+	// Determine internal LLVM type
+	var enumInternalType irtypes.Type
+	if maxDataSize == 0 {
+		enumInternalType = irtypes.I32 // fieldless enum: tag only
+	} else {
+		dataArray := irtypes.NewArray(uint64(maxDataSize), irtypes.I8)
+		enumStruct := irtypes.NewStruct(irtypes.I32, dataArray)
+		enumStruct.SetName("promise_" + name + "_enum")
+		module.NewTypeDef("promise_"+name+"_enum", enumStruct)
+		enumInternalType = enumStruct
+	}
+
+	// Type struct: empty {}
+	typeStruct := irtypes.NewStruct()
+	typeStruct.SetName("promise_" + name + "_t")
+	module.NewTypeDef("promise_"+name+"_t", typeStruct)
+
+	typePtr := irtypes.NewPointer(typeStruct)
+
+	// Variant struct: { promise_T_t* _type }
+	variantStruct := irtypes.NewStruct(typePtr)
+	variantStruct.SetName("promise_" + name + "_m")
+	module.NewTypeDef("promise_"+name+"_m", variantStruct)
+
+	variantPtr := irtypes.NewPointer(variantStruct)
+
+	// Instance struct: { promise_T_m* _variant } — empty, enum data is in value struct
+	instanceStruct := irtypes.NewStruct(variantPtr)
+	instanceStruct.SetName("promise_" + name + "_i")
+	module.NewTypeDef("promise_"+name+"_i", instanceStruct)
+
+	instancePtr := irtypes.NewPointer(instanceStruct)
+
+	// Value struct: { i8* _vtable, promise_T_i* _instance, i32 tag [, [N x i8] data] }
+	valueFields := []irtypes.Type{irtypes.I8Ptr, instancePtr, irtypes.I32}
+	valueFieldLayouts := []FieldLayout{
+		{Name: "_vtable", CType: "void*", LLVMType: irtypes.I8Ptr, IsInternal: true},
+		{Name: "_instance", CType: "promise_" + name + "_i*", LLVMType: instancePtr, IsInternal: true},
+		{Name: "tag", CType: "int32_t", LLVMType: irtypes.I32, IsInternal: false},
+	}
+
+	if maxDataSize > 0 {
+		dataArray := irtypes.NewArray(uint64(maxDataSize), irtypes.I8)
+		valueFields = append(valueFields, dataArray)
+		valueFieldLayouts = append(valueFieldLayouts, FieldLayout{
+			Name: fmt.Sprintf("data[%d]", maxDataSize), CType: "uint8_t", LLVMType: dataArray, IsInternal: false,
+		})
+	}
+
+	valueStruct := irtypes.NewStruct(valueFields...)
+	valueStruct.SetName("promise_" + name + "_v")
+	module.NewTypeDef("promise_"+name+"_v", valueStruct)
+
+	return &TypeDeclLayout{
+		PromiseName:        name,
+		Kind:               LayoutEnum,
+		EnumInternalType:   enumInternalType,
+		VariantTag:         variantTag,
+		VariantDataTypes:   variantDataTypes,
+		MaxVariantDataSize: maxDataSize,
+		Type: &StructLayout{
+			CName:    "promise_" + name + "_t",
+			Suffix:   "_t",
+			Fields:   []FieldLayout{},
+			LLVMType: typeStruct,
+		},
+		Variant: &StructLayout{
+			CName:  "promise_" + name + "_m",
+			Suffix: "_m",
+			Fields: []FieldLayout{
+				{Name: "_type", CType: "promise_" + name + "_t*", LLVMType: typePtr, IsInternal: true},
+			},
+			LLVMType: variantStruct,
+		},
+		Instance: &StructLayout{
+			CName:  "promise_" + name + "_i",
+			Suffix: "_i",
+			Fields: []FieldLayout{
+				{Name: "_variant", CType: "promise_" + name + "_m*", LLVMType: variantPtr, IsInternal: true},
+			},
+			LLVMType: instanceStruct,
+		},
+		Value: &StructLayout{
+			CName:    "promise_" + name + "_v",
+			Suffix:   "_v",
+			Fields:   valueFieldLayouts,
+			LLVMType: valueStruct,
+		},
+	}
 }
 
 // lookupFuncSig finds a function's signature in sema info by name.

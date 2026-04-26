@@ -15,14 +15,15 @@ import (
 
 // Compiler generates LLVM IR from a type-checked Promise AST.
 type Compiler struct {
-	module  *ir.Module
-	info    *sema.Info
-	fn      *ir.Func                         // current function being generated
-	block   *ir.Block                        // current basic block
-	locals  map[string]*ir.InstAlloca        // local variable allocas
-	funcs   map[string]*ir.Func              // declared Promise functions by name
-	layouts map[*types.Named]*TypeDeclLayout // type layouts for extern ABI
-	externs map[string]*ExternFunc           // extern functions by Promise name
+	module      *ir.Module
+	info        *sema.Info
+	fn          *ir.Func                         // current function being generated
+	block       *ir.Block                        // current basic block
+	locals      map[string]*ir.InstAlloca        // local variable allocas
+	funcs       map[string]*ir.Func              // declared Promise functions by name
+	layouts     map[*types.Named]*TypeDeclLayout // type layouts for extern ABI
+	enumLayouts map[*types.Enum]*TypeDeclLayout  // enum type layouts
+	externs     map[string]*ExternFunc           // extern functions by Promise name
 
 	// Loop control targets for break/continue
 	breakTarget    *ir.Block
@@ -50,7 +51,11 @@ func Compile(file *ast.File, info *sema.Info) *CompileResult {
 		c.externs[ext.PromiseName] = ext
 	}
 
-	// Compute user type layouts (after built-in layouts are ready)
+	// Compute enum layouts (before user types, so enum fields resolve correctly)
+	c.enumLayouts = make(map[*types.Enum]*TypeDeclLayout)
+	c.computeEnumLayouts(file)
+
+	// Compute user type layouts (after built-in and enum layouts are ready)
 	c.computeUserTypeLayouts(file)
 
 	c.declareIntrinsics()
@@ -63,9 +68,10 @@ func Compile(file *ast.File, info *sema.Info) *CompileResult {
 	c.defineFuncs(file)
 
 	return &CompileResult{
-		Module:  c.module,
-		Layouts: c.layouts,
-		Externs: externList,
+		Module:      c.module,
+		Layouts:     c.layouts,
+		EnumLayouts: c.enumLayouts,
+		Externs:     externList,
 	}
 }
 
@@ -120,12 +126,12 @@ func (c *Compiler) declareFuncs(file *ast.File) {
 
 		retType := irtypes.Type(irtypes.Void)
 		if sig.Result() != nil {
-			retType = llvmType(sig.Result())
+			retType = c.resolveType(sig.Result())
 		}
 
 		var params []*ir.Param
 		for _, p := range sig.Params() {
-			params = append(params, ir.NewParam(p.Name(), llvmType(p.Type())))
+			params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
 		}
 
 		// C ABI requires main to return i32
@@ -177,7 +183,7 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 		if p.Name() == "" || p.Name() == "_" {
 			continue
 		}
-		alloca := entry.NewAlloca(llvmType(p.Type()))
+		alloca := entry.NewAlloca(c.resolveType(p.Type()))
 		alloca.SetName(p.Name() + ".addr")
 		entry.NewStore(fn.Params[i], alloca)
 		c.locals[p.Name()] = alloca
@@ -377,6 +383,35 @@ func (c *Compiler) lookupNamedType(name string) *types.Named {
 		}
 	}
 	return nil
+}
+
+// lookupEnumType finds an Enum type in sema info by name.
+func (c *Compiler) lookupEnumType(name string) *types.Enum {
+	for _, scope := range c.info.Scopes {
+		if obj := scope.Lookup(name); obj != nil {
+			if tn, ok := obj.(*types.TypeName); ok {
+				if enum, ok := tn.Type().(*types.Enum); ok {
+					return enum
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// computeEnumLayouts computes layouts for all enum declarations in the file.
+func (c *Compiler) computeEnumLayouts(file *ast.File) {
+	for _, decl := range file.Decls {
+		ed, ok := decl.(*ast.EnumDecl)
+		if !ok {
+			continue
+		}
+		enum := c.lookupEnumType(ed.Name)
+		if enum == nil {
+			continue
+		}
+		c.enumLayouts[enum] = computeEnumLayout(c.module, enum)
+	}
 }
 
 // emitNativeOp dispatches a native operator to the LLVM instruction table.

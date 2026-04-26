@@ -46,6 +46,11 @@ type Compiler struct {
 
 	// Target type for contextual type resolution (e.g., NoneLit needs Optional(T))
 	targetType types.Type
+
+	// RTTI: type ID assignment for Named types
+	typeIDs         map[*types.Named]int32
+	nextTypeID      int32
+	typeInfoGlobals map[*types.Named]*ir.Global
 }
 
 // Compile generates an LLVM IR module from a type-checked Promise AST.
@@ -56,6 +61,9 @@ func Compile(file *ast.File, info *sema.Info) *CompileResult {
 		funcs:           make(map[string]*ir.Func),
 		monoLayouts:     make(map[string]*TypeDeclLayout),
 		monoEnumLayouts: make(map[string]*TypeDeclLayout),
+		typeIDs:         make(map[*types.Named]int32),
+		nextTypeID:      1, // 0 reserved for "no type info"
+		typeInfoGlobals: make(map[*types.Named]*ir.Global),
 	}
 
 	// Collect extern declarations and compute type layouts
@@ -74,6 +82,9 @@ func Compile(file *ast.File, info *sema.Info) *CompileResult {
 
 	// Compute user type layouts (after built-in and enum layouts are ready)
 	c.computeUserTypeLayouts(file)
+
+	// Emit RTTI type info globals for all user types (after layouts are ready)
+	c.emitTypeInfoGlobals(file)
 
 	// Compute monomorphic layouts for all concrete generic instantiations
 	monoInstances := collectMonoInstances(info)
@@ -176,6 +187,12 @@ func (c *Compiler) declareIntrinsics() {
 		irtypes.I32,
 		ir.NewParam("s", irtypes.I8Ptr),
 		ir.NewParam("pos", irtypes.NewPointer(irtypes.I64)))
+
+	// RTTI intrinsic for runtime type checking
+	c.funcs["promise_type_is"] = c.module.NewFunc("promise_type_is",
+		irtypes.I32,
+		ir.NewParam("variant_ptr", irtypes.I8Ptr),
+		ir.NewParam("expected_id", irtypes.I32))
 
 	// String hash/eq for map keys (dereferences i8* to hash/compare content)
 	c.funcs["promise_hash_string"] = c.module.NewFunc("promise_hash_string",
@@ -374,7 +391,11 @@ func (c *Compiler) newBlock(name string) *ir.Block {
 
 // computeUserTypeLayouts computes layouts for all user-declared types in the file.
 // Generic types (with TypeParams) are skipped — they're handled by computeMonoLayouts.
+// Uses topological ordering to ensure parent layouts are computed before children.
 func (c *Compiler) computeUserTypeLayouts(file *ast.File) {
+	// Collect all user type decls that need layouts
+	pending := make(map[string]*types.Named)
+	var names []string
 	for _, decl := range file.Decls {
 		td, ok := decl.(*ast.TypeDecl)
 		if !ok {
@@ -390,7 +411,33 @@ func (c *Compiler) computeUserTypeLayouts(file *ast.File) {
 		if len(named.TypeParams()) > 0 {
 			continue // generic — handled by monomorphization
 		}
+		pending[td.Name] = named
+		names = append(names, td.Name)
+	}
+
+	// Compute layouts with dependency resolution (parents before children)
+	computed := make(map[string]bool)
+	var compute func(name string)
+	compute = func(name string) {
+		if computed[name] {
+			return
+		}
+		named := pending[name]
+		if named == nil {
+			return
+		}
+		// Ensure parent layouts are computed first
+		for _, p := range named.Parents() {
+			pName := p.Obj().Name()
+			if _, ok := pending[pName]; ok {
+				compute(pName)
+			}
+		}
 		c.layouts[named] = computeUserTypeLayout(c.module, named, c.layouts)
+		computed[name] = true
+	}
+	for _, name := range names {
+		compute(name)
 	}
 }
 
@@ -628,6 +675,25 @@ func (c *Compiler) resolveTypeName(typ types.Type) string {
 		return n.Obj().Name()
 	}
 	return ""
+}
+
+// resolveMethodOwner returns the type name of the type that actually defines the given method.
+// If the method is overridden in the child, returns the child's name. If inherited,
+// walks up the parent chain to find the defining type.
+func (c *Compiler) resolveMethodOwner(named *types.Named, methodName string) string {
+	// Check own methods first
+	for _, m := range named.Methods() {
+		if m.Name() == methodName {
+			return named.Obj().Name()
+		}
+	}
+	// Walk parents
+	for _, p := range named.Parents() {
+		if p.LookupMethod(methodName) != nil {
+			return c.resolveMethodOwner(p, methodName)
+		}
+	}
+	return named.Obj().Name() // fallback
 }
 
 // emitNativeOp dispatches a native operator to the LLVM instruction table.

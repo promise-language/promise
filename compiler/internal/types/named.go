@@ -58,6 +58,34 @@ func (n *Named) NumFields() int { return len(n.fields) }
 // NumMethods returns the number of directly declared methods.
 func (n *Named) NumMethods() int { return len(n.methods) }
 
+// AllFields returns all fields for this type's instance layout: inherited parent
+// fields first (depth-first, concrete parent chain only), then own fields.
+// If a child field shadows a parent field (same name), the parent field is omitted.
+func (n *Named) AllFields() []*Field {
+	var result []*Field
+	// Collect inherited fields from the concrete parent chain.
+	// Only the first parent with fields (or with parents that have fields) is followed.
+	// Multiple concrete parents are rejected by sema.
+	for _, p := range n.parents {
+		if p.NumFields() > 0 || len(p.parents) > 0 {
+			result = append(result, p.AllFields()...)
+			break
+		}
+	}
+	// Filter out parent fields shadowed by own fields (same name)
+	ownNames := make(map[string]bool, len(n.fields))
+	for _, f := range n.fields {
+		ownNames[f.Name()] = true
+	}
+	filtered := result[:0]
+	for _, f := range result {
+		if !ownNames[f.Name()] {
+			filtered = append(filtered, f)
+		}
+	}
+	return append(filtered, n.fields...)
+}
+
 // LookupField searches for a field by name in this type and its parents.
 // Returns nil if not found. Searches own fields first, then parents depth-first.
 func (n *Named) LookupField(name string) *Field {

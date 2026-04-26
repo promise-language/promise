@@ -73,6 +73,10 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 	case *ast.UnsafeExpr:
 		c.genBlock(e.Body)
 		return nil
+	case *ast.IsExpr:
+		return c.genIsExpr(e)
+	case *ast.CastExpr:
+		return c.genCastExpr(e)
 	default:
 		panic(fmt.Sprintf("codegen: unhandled expression type %T", expr))
 	}
@@ -619,11 +623,20 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 	rawPtr := c.block.NewCall(c.funcs["malloc"], size)
 	typedPtr := c.block.NewBitCast(rawPtr, instancePtrType)
 
-	// Zero-initialize _variant pointer (field 0)
+	// Store type info pointer in _variant slot (field 0) for RTTI
 	variantFieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	variantPtrType := layout.Instance.Fields[0].LLVMType.(*irtypes.PointerType)
-	c.block.NewStore(constant.NewNull(variantPtrType), variantFieldPtr)
+	if named != nil {
+		if tiGlobal, ok := c.typeInfoGlobals[named]; ok {
+			tiPtr := c.block.NewBitCast(tiGlobal, variantPtrType)
+			c.block.NewStore(tiPtr, variantFieldPtr)
+		} else {
+			c.block.NewStore(constant.NewNull(variantPtrType), variantFieldPtr)
+		}
+	} else {
+		c.block.NewStore(constant.NewNull(variantPtrType), variantFieldPtr)
+	}
 
 	// Build set of provided field names
 	provided := make(map[string]bool)
@@ -643,7 +656,7 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 	}
 
 	// Zero-initialize any fields not provided — use layout field types (not llvmType(f.Type()))
-	for _, f := range named.Fields() {
+	for _, f := range named.AllFields() {
 		if provided[f.Name()] {
 			continue
 		}
@@ -766,8 +779,19 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 		panic(fmt.Sprintf("codegen: no method %s on type %s", member.Field, named))
 	}
 
-	typeName := c.resolveTypeName(targetType)
-	mangledName := typeName + "." + member.Field
+	// Resolve method mangling: for inherited methods, find the defining type.
+	// For mono/generic types, use resolveTypeName (handles Instance → mono name).
+	// For regular Named types with inheritance, use resolveMethodOwner to find
+	// the parent that actually defines the method.
+	var mangledName string
+	ownerName := c.resolveMethodOwner(named, member.Field)
+	if ownerName != named.Obj().Name() {
+		// Inherited from a parent — use parent's name directly
+		mangledName = ownerName + "." + member.Field
+	} else {
+		// Defined on this type — use resolveTypeName for mono awareness
+		mangledName = c.resolveTypeName(targetType) + "." + member.Field
+	}
 
 	fn, ok := c.funcs[mangledName]
 	if !ok {
@@ -1737,4 +1761,148 @@ func (c *Compiler) genIndirectCall(fnPtr value.Value, sig *types.Signature, args
 
 	typedFnPtr := c.block.NewBitCast(fnPtr, funcPtrType)
 	return c.block.NewCall(typedFnPtr, args...)
+}
+
+// --- is/as expressions ---
+
+// genIsExpr generates code for `expr is Pattern`.
+func (c *Compiler) genIsExpr(e *ast.IsExpr) value.Value {
+	switch p := e.Pattern.(type) {
+	case *ast.IdentIsPattern:
+		return c.genIsIdentPattern(e.Expr, p)
+	case *ast.DestructureIsPattern:
+		panic("codegen: destructure is-pattern not yet implemented")
+	default:
+		panic(fmt.Sprintf("codegen: unhandled is-pattern type %T", e.Pattern))
+	}
+}
+
+func (c *Compiler) genIsIdentPattern(expr ast.Expr, p *ast.IdentIsPattern) value.Value {
+	// Optional: x is present / x is absent
+	if p.Name == "present" {
+		optVal := c.genExpr(expr)
+		return c.block.NewExtractValue(optVal, 0) // i1 flag field
+	}
+	if p.Name == "absent" {
+		optVal := c.genExpr(expr)
+		flag := c.block.NewExtractValue(optVal, 0)
+		return c.block.NewXor(flag, constant.NewInt(irtypes.I1, 1)) // negate
+	}
+
+	// Check if the subject is an enum type — use tag comparison
+	exprType := c.info.Types[expr]
+	if c.typeSubst != nil {
+		exprType = types.Substitute(exprType, c.typeSubst)
+	}
+	if enumLayout := c.lookupEnumLayout(exprType); enumLayout != nil {
+		return c.genIsEnumVariant(expr, p.Name, enumLayout)
+	}
+
+	// Named type check via RTTI
+	return c.genIsNamedType(expr, p.Name)
+}
+
+func (c *Compiler) genIsEnumVariant(expr ast.Expr, variantName string, layout *TypeDeclLayout) value.Value {
+	if _, ok := layout.VariantTag[variantName]; !ok {
+		panic(fmt.Sprintf("codegen: unknown enum variant %s", variantName))
+	}
+	subject := c.genExpr(expr)
+	// Extract tag
+	var tag value.Value
+	if layout.MaxVariantDataSize == 0 {
+		tag = subject // fieldless enum: value IS the tag
+	} else {
+		tag = c.block.NewExtractValue(subject, 0)
+	}
+	expectedTag := constant.NewInt(irtypes.I32, int64(layout.VariantTag[variantName]))
+	return c.block.NewICmp(enum.IPredEQ, tag, expectedTag)
+}
+
+func (c *Compiler) genIsNamedType(expr ast.Expr, typeName string) value.Value {
+	subject := c.genExpr(expr)
+
+	// Look up target type and its type ID
+	targetNamed := c.lookupNamedType(typeName)
+	if targetNamed == nil {
+		panic(fmt.Sprintf("codegen: undefined type %s in is-expression", typeName))
+	}
+	targetID := c.assignTypeID(targetNamed)
+
+	variantPtr := c.loadVariantPtr(subject)
+
+	// Call promise_type_is(variant_ptr, expected_id) and convert i32 result to i1
+	result := c.block.NewCall(c.funcs["promise_type_is"],
+		variantPtr, constant.NewInt(irtypes.I32, int64(targetID)))
+	return c.block.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 0))
+}
+
+// loadVariantPtr loads the _variant pointer (RTTI info) from a user type instance.
+// All user types are i8*; the first field of any instance struct is the variant pointer.
+func (c *Compiler) loadVariantPtr(subject value.Value) value.Value {
+	variantPtrStruct := irtypes.NewStruct(irtypes.I8Ptr)
+	typedPtr := c.block.NewBitCast(subject, irtypes.NewPointer(variantPtrStruct))
+	variantFieldPtr := c.block.NewGetElementPtr(variantPtrStruct, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	return c.block.NewLoad(irtypes.I8Ptr, variantFieldPtr)
+}
+
+// genCastExpr generates code for `expr as Type` and `expr as! Type`.
+func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
+	// Resolve the target Named type from the TypeRef
+	targetRef, ok := e.Type.(*ast.NamedTypeRef)
+	if !ok {
+		panic(fmt.Sprintf("codegen: unsupported cast target type %T", e.Type))
+	}
+	targetNamed := c.lookupNamedType(targetRef.Name)
+	if targetNamed == nil {
+		panic(fmt.Sprintf("codegen: undefined type %s in cast", targetRef.Name))
+	}
+	targetID := c.assignTypeID(targetNamed)
+
+	subject := c.genExpr(e.Expr)
+	variantPtr := c.loadVariantPtr(subject)
+
+	result := c.block.NewCall(c.funcs["promise_type_is"],
+		variantPtr, constant.NewInt(irtypes.I32, int64(targetID)))
+	isMatch := c.block.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 0))
+
+	if e.Force {
+		// as! — panic if no match, return the value directly
+		okBlock := c.newBlock("cast.ok")
+		panicBlock := c.newBlock("cast.panic")
+		c.block.NewCondBr(isMatch, okBlock, panicBlock)
+
+		c.block = panicBlock
+		panicMsg := c.makeGlobalString("cast failed: as! type mismatch")
+		c.block.NewCall(c.funcs["promise_panic"], panicMsg)
+		c.block.NewUnreachable()
+
+		c.block = okBlock
+		return subject // same i8* pointer, type is verified
+	}
+
+	// as — wrap in Optional { i1, i8* }. All Named types use the four-struct ABI
+	// where instances are heap-allocated i8* pointers, so the optional payload is always i8*.
+	someBlock := c.newBlock("cast.some")
+	noneBlock := c.newBlock("cast.none")
+	mergeBlock := c.newBlock("cast.merge")
+	c.block.NewCondBr(isMatch, someBlock, noneBlock)
+
+	c.block = someBlock
+	optType := irtypes.NewStruct(irtypes.I1, irtypes.I8Ptr)
+	someResult := c.wrapOptional(subject, optType)
+	c.block.NewBr(mergeBlock)
+	someEnd := c.block
+
+	c.block = noneBlock
+	noneResult := constant.NewZeroInitializer(optType)
+	c.block.NewBr(mergeBlock)
+	noneEnd := c.block
+
+	c.block = mergeBlock
+	phi := c.block.NewPhi(
+		&ir.Incoming{X: someResult, Pred: someEnd},
+		&ir.Incoming{X: noneResult, Pred: noneEnd},
+	)
+	return phi
 }

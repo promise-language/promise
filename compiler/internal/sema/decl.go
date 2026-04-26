@@ -117,6 +117,18 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 		named.AddParent(pn)
 	}
 
+	// Validate: at most one parent may have fields (concrete parent).
+	// Use AllFields() to catch transitively-inherited fields (e.g., B is A where A has fields).
+	concreteCount := 0
+	for _, pn := range named.Parents() {
+		if len(pn.AllFields()) > 0 {
+			concreteCount++
+		}
+	}
+	if concreteCount > 1 {
+		c.errorf(d.Pos(), "type %s has multiple concrete parents; at most one parent may have fields", d.Name)
+	}
+
 	// Resolve fields
 	for _, fd := range d.Fields {
 		c.defineField(named, fd)

@@ -2890,3 +2890,368 @@ func TestMapCompoundAssignMul(t *testing.T) {
 	assertContains(t, ir, "mul i64")
 	assertContains(t, ir, "call void @promise_map_set(")
 }
+
+// --- Stage 8k: Inheritance Codegen Tests ---
+
+func TestInheritedFieldLayout(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal { string name; int age; }
+		type Dog is Animal { string breed; }
+		main() {
+			Dog d = Dog(name: "Rex", age: 5, breed: "Lab");
+		}
+	`)
+	// Dog instance struct should include parent fields: _variant, name, age, breed
+	assertContains(t, ir, `%promise_Dog_i = type { %promise_Dog_m*, i8*, i64, i8* }`)
+	// Animal instance struct: _variant, name, age
+	assertContains(t, ir, `%promise_Animal_i = type { %promise_Animal_m*, i8*, i64 }`)
+}
+
+func TestInheritedFieldAccess(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal { string name; int age; }
+		type Dog is Animal { string breed; }
+		main() {
+			Dog d = Dog(name: "Rex", age: 5, breed: "Lab");
+			string n = d.name;
+			int a = d.age;
+			string b = d.breed;
+		}
+	`)
+	// Field access should use GEP on Dog instance struct
+	assertContains(t, ir, "getelementptr %promise_Dog_i")
+}
+
+func TestInheritedFieldConstructor(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal { string name; }
+		type Dog is Animal { string breed; }
+		main() {
+			Dog d = Dog(name: "Rex", breed: "Lab");
+		}
+	`)
+	// Constructor should store values for both inherited and own fields
+	assertContains(t, ir, "call i8* @malloc(")
+	assertContains(t, ir, "getelementptr %promise_Dog_i")
+}
+
+func TestInheritedMethodCall(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal {
+			string name;
+			greet() string { return this.name; }
+		}
+		type Dog is Animal { string breed; }
+		main() {
+			Dog d = Dog(name: "Rex", breed: "Lab");
+			string g = d.greet();
+		}
+	`)
+	// d.greet() should dispatch to Animal.greet (inherited method)
+	assertContains(t, ir, "call i8* @Animal.greet(i8*")
+}
+
+func TestMethodOverride(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal {
+			string name;
+			speak() string { return "..."; }
+		}
+		type Dog is Animal {
+			speak() string { return "woof"; }
+		}
+		main() {
+			Dog d = Dog(name: "Rex");
+			string s = d.speak();
+		}
+	`)
+	// d.speak() should dispatch to Dog.speak (child overrides parent)
+	assertContains(t, ir, "call i8* @Dog.speak(i8*")
+}
+
+func TestUpcastFieldAccess(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal { string name; }
+		type Dog is Animal { string breed; }
+		main() {
+			Animal a = Dog(name: "Rex", breed: "Lab");
+			string n = a.name;
+		}
+	`)
+	// Upcast Dog to Animal, then access name via Animal layout
+	assertContains(t, ir, "getelementptr %promise_Animal_i")
+}
+
+func TestTypeInfoGlobal(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal { string name; }
+		type Dog is Animal { string breed; }
+		main() {
+			Dog d = Dog(name: "Rex", breed: "Lab");
+		}
+	`)
+	// Type info globals should be emitted for both types
+	assertContains(t, ir, "@promise_typeinfo_Animal")
+	assertContains(t, ir, "@promise_typeinfo_Dog")
+}
+
+func TestConstructorStoresTypeInfo(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal { string name; }
+		main() {
+			Animal a = Animal(name: "Rex");
+		}
+	`)
+	// Constructor should store type info pointer instead of null
+	assertContains(t, ir, "@promise_typeinfo_Animal")
+	// The _variant slot should be set via bitcast of the type info global
+	assertContains(t, ir, "bitcast")
+}
+
+func TestDeepInheritance(t *testing.T) {
+	ir := generateIR(t, `
+		type A { int x; }
+		type B is A { int y; }
+		type C is B { int z; }
+		main() {
+			C c = C(x: 1, y: 2, z: 3);
+			int a = c.x;
+			int b = c.y;
+			int d = c.z;
+		}
+	`)
+	// C struct should have _variant, x, y, z (4 fields + internal = 4 GEP indices)
+	assertContains(t, ir, "%promise_C_i = type { %promise_C_m*, i64, i64, i64 }")
+}
+
+// --- Part D: is/as expression tests ---
+
+func TestIsPresent(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int? x = 42;
+			bool b = x is present;
+		}
+	`)
+	// Should extract the i1 flag from the optional struct
+	assertContains(t, ir, "extractvalue { i1, i64 }")
+}
+
+func TestIsAbsent(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int? x = none;
+			bool b = x is absent;
+		}
+	`)
+	// Should extract the i1 flag and negate via xor
+	assertContains(t, ir, "extractvalue { i1, i64 }")
+	assertContains(t, ir, "xor i1")
+}
+
+func TestIsEnumVariant(t *testing.T) {
+	ir := generateIR(t, `
+		enum Color { Red, Green, Blue }
+		test() {
+			Color c = Color.Red;
+			bool b = c is Red;
+		}
+		main() { }
+	`)
+	// Fieldless enum: value IS the tag, compare with icmp eq
+	assertContains(t, ir, "icmp eq i32")
+}
+
+func TestIsEnumVariantData(t *testing.T) {
+	ir := generateIR(t, `
+		enum Shape { Circle(f64 radius), Rect(f64 w, f64 h) }
+		test() {
+			Shape s = Shape.Circle(radius: 3.14);
+			bool b = s is Circle;
+		}
+		main() { }
+	`)
+	// Data-carrying enum: extract tag from struct, then compare
+	assertContains(t, ir, "extractvalue")
+	assertContains(t, ir, "icmp eq i32")
+}
+
+func TestIsNamedType(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal { string name; }
+		type Dog is Animal { }
+		main() {
+			Animal a = Dog(name: "Rex");
+			bool b = a is Dog;
+		}
+	`)
+	// Should call promise_type_is and convert to i1
+	assertContains(t, ir, "call i32 @promise_type_is")
+	assertContains(t, ir, "icmp ne i32")
+}
+
+func TestIsNamedTypeInheritance(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal { string name; }
+		type Dog is Animal { string breed; }
+		type Cat is Animal { }
+		main() {
+			Animal a = Dog(name: "Rex", breed: "Lab");
+			bool isDog = a is Dog;
+			bool isCat = a is Cat;
+			bool isAnimal = a is Animal;
+		}
+	`)
+	// All three checks should go through RTTI
+	assertContains(t, ir, "call i32 @promise_type_is")
+	// Type info globals for all three types
+	assertContains(t, ir, "@promise_typeinfo_Dog")
+	assertContains(t, ir, "@promise_typeinfo_Cat")
+	assertContains(t, ir, "@promise_typeinfo_Animal")
+}
+
+func TestAsSafeCast(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal { string name; }
+		type Dog is Animal { }
+		main() {
+			Animal a = Dog(name: "Rex");
+			Dog? d = a as Dog;
+		}
+	`)
+	// Should have RTTI check, then cast.some/cast.none/cast.merge blocks
+	assertContains(t, ir, "call i32 @promise_type_is")
+	assertContains(t, ir, "cast.some:")
+	assertContains(t, ir, "cast.none:")
+	assertContains(t, ir, "cast.merge:")
+}
+
+func TestAsForcecast(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal { string name; }
+		type Dog is Animal { }
+		main() {
+			Animal a = Dog(name: "Rex");
+			Dog d = a as! Dog;
+		}
+	`)
+	// Should have RTTI check, then cast.ok/cast.panic blocks
+	assertContains(t, ir, "call i32 @promise_type_is")
+	assertContains(t, ir, "cast.ok:")
+	assertContains(t, ir, "cast.panic:")
+	assertContains(t, ir, "call void @promise_panic")
+}
+
+func TestFieldShadowing(t *testing.T) {
+	ir := generateIR(t, `
+		type Base { int x; int y; }
+		type Child is Base { string x; }
+		main() {
+			Child c = Child(y: 1, x: "hi");
+			string s = c.x;
+			int n = c.y;
+		}
+	`)
+	// Child layout: _variant, y (inherited, not shadowed), x (own, shadows Base.x)
+	// y is int (i64), x is string (i8*) — parent x omitted from layout
+	assertContains(t, ir, "%promise_Child_i = type { %promise_Child_m*, i64, i8* }")
+}
+
+func TestConstructorZeroInitInheritedField(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal { string name; int age; }
+		type Dog is Animal { string breed; }
+		main() {
+			Dog d = Dog(breed: "Lab");
+		}
+	`)
+	// Constructor should zero-init name (i8*) and age (i64) from inherited fields
+	assertContains(t, ir, "getelementptr %promise_Dog_i")
+	// Should have zeroinitializer or null stores for the unprovided fields
+	assertContains(t, ir, "store i8* null")
+	assertContains(t, ir, "store i64 0")
+}
+
+func TestDeepInheritanceMethodDispatch(t *testing.T) {
+	ir := generateIR(t, `
+		type A {
+			int x;
+			getX() int { return this.x; }
+		}
+		type B is A { int y; }
+		type C is B { int z; }
+		main() {
+			C c = C(x: 1, y: 2, z: 3);
+			int v = c.getX();
+		}
+	`)
+	// c.getX() should resolve through C → B → A and call A.getX
+	assertContains(t, ir, "call i64 @A.getX(i8*")
+}
+
+func TestRTTIMultipleParents(t *testing.T) {
+	ir := generateIR(t, `
+		type Printable {
+			show() string { return "printable"; }
+		}
+		type Serializable {
+			encode() string { return "serializable"; }
+		}
+		type Doc is Printable, Serializable {
+			string name;
+		}
+		main() {
+			Doc d = Doc(name: "hi");
+		}
+	`)
+	// Type info for Doc should include both parent IDs
+	assertContains(t, ir, "@promise_typeinfo_Doc")
+	assertContains(t, ir, "@promise_typeinfo_Printable")
+	assertContains(t, ir, "@promise_typeinfo_Serializable")
+}
+
+func TestRTTIDiamondDedup(t *testing.T) {
+	ir := generateIR(t, `
+		type Base {
+			id() string { return "base"; }
+		}
+		type Left is Base { }
+		type Right is Base { }
+		type Bottom is Left, Right { }
+		main() {
+			Bottom b = Bottom();
+		}
+	`)
+	// Type info globals for all types
+	assertContains(t, ir, "@promise_typeinfo_Bottom")
+	assertContains(t, ir, "@promise_typeinfo_Left")
+	assertContains(t, ir, "@promise_typeinfo_Right")
+	assertContains(t, ir, "@promise_typeinfo_Base")
+}
+
+func TestReverseOrderTypeDeclaration(t *testing.T) {
+	ir := generateIR(t, `
+		type Dog is Animal { string breed; }
+		type Animal { string name; }
+		main() {
+			Dog d = Dog(name: "Rex", breed: "Lab");
+			string n = d.name;
+		}
+	`)
+	// Topological ordering should compute Animal layout before Dog
+	// even though Dog is declared first in source
+	assertContains(t, ir, "%promise_Dog_i = type { %promise_Dog_m*, i8*, i8* }")
+	assertContains(t, ir, "%promise_Animal_i = type { %promise_Animal_m*, i8* }")
+}
+
+func TestIsPresentStringOptional(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string? x = "hello";
+			bool b = x is present;
+			bool c = x is absent;
+		}
+	`)
+	// Should extractvalue on { i1, i8* } optional
+	assertContains(t, ir, "extractvalue { i1, i8* }")
+}

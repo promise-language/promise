@@ -114,7 +114,7 @@ func computeMonoUserTypeLayout(module *ir.Module, named *types.Named, name strin
 	}
 	fieldIndex := map[string]int{}
 
-	for _, f := range named.Fields() {
+	for _, f := range named.AllFields() {
 		// Substitute TypeParams with concrete types
 		fieldType := types.Substitute(f.Type(), subst)
 		llvmFT := llvmType(fieldType)

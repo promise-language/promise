@@ -383,6 +383,12 @@ func (c *Checker) checkUnaryOperator(pos ast.Pos, operand types.Type, op string)
 
 // checkConstructorCall handles Type(field: value, ...) constructor calls.
 func (c *Checker) checkConstructorCall(e *ast.CallExpr, named *types.Named) types.Type {
+	// Prevent instantiation of abstract types
+	if named.IsAbstract() {
+		c.errorf(e.Pos(), "cannot instantiate abstract type %s", named)
+		return named
+	}
+
 	// Check arguments against fields
 	for _, arg := range e.Args {
 		argType := c.checkExpr(arg.Value)
@@ -407,6 +413,13 @@ func (c *Checker) checkInstanceConstructorCall(e *ast.CallExpr, inst *types.Inst
 		c.errorf(e.Pos(), "cannot construct %s", inst)
 		return nil
 	}
+
+	// Prevent instantiation of abstract types
+	if origin.IsAbstract() {
+		c.errorf(e.Pos(), "cannot instantiate abstract type %s", inst)
+		return inst
+	}
+
 	subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
 	for _, arg := range e.Args {
 		argType := c.checkExpr(arg.Value)
@@ -777,7 +790,7 @@ func (c *Checker) checkOptionalChainExpr(e *ast.OptionalChainExpr) types.Type {
 }
 
 func (c *Checker) checkIsExpr(e *ast.IsExpr) types.Type {
-	c.checkExpr(e.Expr)
+	subjectType := c.checkExpr(e.Expr)
 	// Validate pattern references existing types
 	switch p := e.Pattern.(type) {
 	case *ast.IdentIsPattern:
@@ -787,7 +800,26 @@ func (c *Checker) checkIsExpr(e *ast.IsExpr) types.Type {
 		}
 		obj := c.lookup(p.Name)
 		if obj == nil {
-			c.errorf(p.Pos(), "undefined type: %s", p.Name)
+			// Check if the subject is an enum and the name is a variant.
+			// Handles both direct Enum types and generic Instance types (e.g., Option[int]).
+			isEnumVariant := false
+			if subjectType != nil {
+				switch st := subjectType.Underlying().(type) {
+				case *types.Enum:
+					if st.LookupVariant(p.Name) != nil {
+						isEnumVariant = true
+					}
+				case *types.Instance:
+					if en, ok := st.Origin().(*types.Enum); ok {
+						if en.LookupVariant(p.Name) != nil {
+							isEnumVariant = true
+						}
+					}
+				}
+			}
+			if !isEnumVariant {
+				c.errorf(p.Pos(), "undefined type: %s", p.Name)
+			}
 		}
 	case *ast.DestructureIsPattern:
 		obj := c.lookup(p.TypeName)

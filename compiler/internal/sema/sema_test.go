@@ -2431,3 +2431,66 @@ func TestMapInvalidMember(t *testing.T) {
 	`)
 	expectError(t, errs, "no member")
 }
+
+// --- Inheritance Validation Tests (Stage 8k) ---
+
+func TestAbstractInstantiationError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Shape {
+			area() f64 `+"`abstract;"+`
+		}
+		main() {
+			Shape s = Shape();
+		}
+	`)
+	expectError(t, errs, "cannot instantiate abstract type")
+}
+
+func TestMultipleConcreteParentsError(t *testing.T) {
+	errs := checkErrs(t, `
+		type A { int x; }
+		type B { int y; }
+		type C is A, B { }
+	`)
+	expectError(t, errs, "multiple concrete parents")
+}
+
+func TestMultipleConcreteParentsTransitiveError(t *testing.T) {
+	errs := checkErrs(t, `
+		type A { int x; }
+		type B is A { }
+		type D { int y; }
+		type C is B, D { }
+	`)
+	// B has no direct fields but inherits x from A — still counts as concrete
+	expectError(t, errs, "multiple concrete parents")
+}
+
+func TestAbstractGenericInstantiationError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Container[T] {
+			get() T `+"`abstract;"+`
+		}
+		main() {
+			Container[int] c = Container[int]();
+		}
+	`)
+	expectError(t, errs, "cannot instantiate abstract type")
+}
+
+func TestMultipleAbstractParentsOK(t *testing.T) {
+	checkOK(t, `
+		type Printable {
+			print() `+"`abstract;"+`
+		}
+		type Serializable {
+			serialize() string `+"`abstract;"+`
+		}
+		type Doc is Printable, Serializable {
+			string name;
+			print() { }
+			serialize() string { return "doc"; }
+		}
+		main() { Doc d = Doc(name: "hi"); }
+	`)
+}

@@ -300,7 +300,7 @@ func computeUserTypeLayout(module *ir.Module, named *types.Named, allLayouts map
 	}
 	fieldIndex := map[string]int{}
 
-	for _, f := range named.Fields() {
+	for _, f := range named.AllFields() {
 		if f.Placement() != types.PlaceInstance {
 			panic("codegen: non-instance field placement not yet supported for " + name + "." + f.Name())
 		}

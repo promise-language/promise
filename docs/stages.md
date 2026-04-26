@@ -360,6 +360,20 @@ Codegen for char literals, `.len` property on all containers (string, slice, arr
 - **Char interpolation**: `convertToString` extended with `TypChar` case calling `promise_char_to_string` (UTF-8 encode).
 - **Deferred**: Evaluation order bug in compound index assignment (RHS evaluated before LHS target/key — see comment in `genMapCompoundAssign`).
 
+## Stage 8k — Inheritance Codegen, RTTI & is/as Expressions (Done)
+
+Codegen for inherited field layouts, static method dispatch through inheritance chains, runtime type information (RTTI), and `is`/`as` expressions.
+
+**Files:** New file `codegen/rtti.go`; updates to `types/named.go`, `codegen/layout.go`, `codegen/mono.go`, `codegen/compiler.go`, `codegen/expr.go`, `sema/expr.go`, `sema/decl.go`, `runtime/runtime.c`; 27 new tests (24 codegen → 251 total, 5 sema → 219 total)
+
+- **Sema validation**: Prevent abstract type instantiation (`IsAbstract()` check in `checkConstructorCall` and `checkInstanceConstructorCall`, including generic instances). Reject multiple concrete parents (more than one parent with fields, checked transitively via `AllFields()`). Allow multiple fieldless/abstract parents. Enum variant names accepted in `is` patterns when subject is an enum type (including generic enum instances).
+- **Inherited field layout**: `AllFields()` on Named gathers parent fields first (depth-first, single concrete parent chain), then own fields. Child fields shadow parent fields with the same name. `computeUserTypeLayout` and `computeMonoUserTypeLayout` use `AllFields()` so child instance structs include inherited fields at prefix-compatible indices. Topological ordering ensures parent layouts are computed before children.
+- **Static method dispatch**: `resolveMethodOwner` walks the parent chain to find which type actually defines a method. `genMethodCall` uses the defining type's name for mangling (e.g., `Animal.greet` when called on Dog). Monomorphized method names preserved for generic types.
+- **RTTI infrastructure**: Each non-generic Named type gets a unique i32 type ID. Type info globals (`@promise_typeinfo_TypeName`) store `{ i32 type_id, i32 num_parents, [N x i32] parent_ids }` with transitive parent IDs. Constructors store the type info pointer in the `_variant` slot (index 0) instead of null. Runtime function `promise_type_is(variant_ptr, expected_id)` checks type ID and parent IDs.
+- **is expressions**: `x is present` → `extractvalue` i1 flag from optional. `x is absent` → extract + xor negate. `c is Variant` → extract enum tag, `icmp eq`. `a is Dog` → load `_variant` pointer, call `promise_type_is`, convert i32→i1.
+- **as expressions**: `a as Dog` (safe) → RTTI check, branch to `cast.some` (wrap in Optional) or `cast.none` (zeroinitializer), phi merge. `a as! Dog` (force) → RTTI check, branch to `cast.ok` or `cast.panic` (calls `promise_panic`).
+- **Deferred**: Virtual dispatch (vtable), destructure is-patterns (`x is Dog(name)`), generic type RTTI.
+
 ## Stage 8j — Unify Compound Types with Named Types (Deferred)
 
 Reconcile the structural gap between Named types and built-in compound types (Slice, Array, Map).

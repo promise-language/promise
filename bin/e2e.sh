@@ -1,38 +1,44 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # E2E test runner: compiles and runs .pr files, checks output against .expected files
-set -e
+set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-COMPILER="${SCRIPT_DIR}/../../compiler/cmd/promise"
-TMPDIR=$(mktemp -d)
-trap "rm -rf $TMPDIR" EXIT
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+TEST_DIR="$ROOT_DIR/tests/e2e"
+WORKDIR=$(mktemp -d)
+trap 'rm -rf "$WORKDIR"' EXIT
 
 # Build the compiler
-cd "${SCRIPT_DIR}/../../compiler"
-go build -o "$TMPDIR/promise" ./cmd/promise 2>/dev/null
+echo "Building compiler..."
+cd "$ROOT_DIR/compiler"
+if ! go build -o "$WORKDIR/promise" ./cmd/promise; then
+  echo "ERROR: compiler build failed"
+  exit 1
+fi
 
 PASS=0
 FAIL=0
 
-for prfile in "$SCRIPT_DIR"/*.pr; do
+for prfile in "$TEST_DIR"/*.pr; do
   [ -f "$prfile" ] || continue
   name=$(basename "$prfile" .pr)
-  expected="$SCRIPT_DIR/${name}.expected"
+  expected="$TEST_DIR/${name}.expected"
 
   if [ ! -f "$expected" ]; then
     echo "SKIP $name (no .expected file)"
     continue
   fi
 
-  # Compile
-  if ! "$TMPDIR/promise" build "$prfile" -o "$TMPDIR/$name" 2>/dev/null; then
+  # Compile (suppress "Compiled..." message, show errors on failure)
+  compile_out=$("$WORKDIR/promise" build "$prfile" -o "$WORKDIR/$name" 2>&1)
+  if [ $? -ne 0 ]; then
     echo "FAIL $name (compilation failed)"
+    echo "$compile_out" | grep -v "^Compiled " | head -5
     FAIL=$((FAIL + 1))
     continue
   fi
 
   # Run and capture output
-  actual=$("$TMPDIR/$name" 2>&1) || true
+  actual=$("$WORKDIR/$name" 2>&1) || true
   expected_text=$(cat "$expected")
 
   if [ "$actual" = "$expected_text" ]; then
@@ -48,4 +54,4 @@ done
 
 echo ""
 echo "$PASS passed, $FAIL failed"
-[ $FAIL -eq 0 ]
+[ "$FAIL" -eq 0 ]

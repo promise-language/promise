@@ -1724,6 +1724,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	savedLocals := c.locals
 	savedCanError := c.canError
 	savedRetType := c.currentRetType
+	savedBlockCounter := c.blockCounter
 
 	// Generate lambda body
 	c.fn = fn
@@ -1771,6 +1772,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.locals = savedLocals
 	c.canError = savedCanError
 	c.currentRetType = savedRetType
+	c.blockCounter = savedBlockCounter
 
 	// Return function pointer as i8*
 	return c.block.NewBitCast(fn, irtypes.I8Ptr)
@@ -1946,8 +1948,13 @@ func (c *Compiler) genIsNamedType(expr ast.Expr, typeName string) value.Value {
 	}
 	targetID := c.assignTypeID(targetNamed)
 
-	// Extract instance pointer from value struct for RTTI check
-	instance := c.extractInstancePtr(subject)
+	// Extract instance pointer — `this` is already i8*, others are value structs
+	var instance value.Value
+	if _, isThis := expr.(*ast.ThisExpr); isThis {
+		instance = subject
+	} else {
+		instance = c.extractInstancePtr(subject)
+	}
 	variantPtr := c.loadVariantPtr(instance)
 
 	// Call promise_type_is(variant_ptr, expected_id) and convert i32 result to i1
@@ -1990,8 +1997,13 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 	targetID := c.assignTypeID(targetNamed)
 
 	subject := c.genExpr(e.Expr)
-	// Extract instance pointer from value struct for RTTI check
-	instance := c.extractInstancePtr(subject)
+	// Extract instance pointer — `this` is already i8*, others are value structs
+	var instance value.Value
+	if _, isThis := e.Expr.(*ast.ThisExpr); isThis {
+		instance = subject
+	} else {
+		instance = c.extractInstancePtr(subject)
+	}
 	variantPtr := c.loadVariantPtr(instance)
 
 	result := c.block.NewCall(c.funcs["promise_type_is"],

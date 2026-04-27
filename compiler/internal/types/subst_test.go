@@ -102,7 +102,7 @@ func TestSubstSignaturePreservesCanError(t *testing.T) {
 
 func TestSubstInstance(t *testing.T) {
 	tp := makeTP("T", 0)
-	// Instance(Task, [T]) → Instance(Task, [int])
+	// Instance(task, [T]) → Instance(task, [int])
 	inst := NewInstance(TypTask, []Type{tp})
 	subst := map[*TypeParam]Type{tp: TypInt}
 	result := Substitute(inst, subst)
@@ -111,7 +111,7 @@ func TestSubstInstance(t *testing.T) {
 		t.Fatalf("expected Instance, got %T", result)
 	}
 	if rinst.Origin() != TypTask {
-		t.Errorf("expected origin Task, got %s", rinst.Origin())
+		t.Errorf("expected origin task, got %s", rinst.Origin())
 	}
 	if rinst.TypeArgs()[0] != TypInt {
 		t.Errorf("expected type arg int, got %s", rinst.TypeArgs()[0])

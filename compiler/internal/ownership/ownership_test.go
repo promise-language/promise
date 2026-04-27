@@ -1,6 +1,7 @@
 package ownership
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -13,9 +14,107 @@ import (
 
 // --- Test helpers ---
 
+// stdAll provides all builtin type declarations needed by tests.
+var stdAll string
+
+func init() {
+	var b strings.Builder
+
+	// Numeric types: arithmetic + comparison + unary negate
+	for _, name := range []string{"int", "i8", "i16", "i32", "i64", "uint", "u8", "u16", "u32", "u64", "f32", "f64"} {
+		fmt.Fprintf(&b, "type %s `native {\n", name)
+		for _, op := range []string{"+", "-", "*", "/", "%"} {
+			fmt.Fprintf(&b, "\t%s(%s other) %s `native;\n", op, name, name)
+		}
+		for _, op := range []string{"==", "!=", "<", ">", "<=", ">="} {
+			fmt.Fprintf(&b, "\t%s(%s other) bool `native;\n", op, name)
+		}
+		fmt.Fprintf(&b, "\t-() %s `native;\n}\n", name)
+	}
+
+	// Bool
+	b.WriteString("type bool `native {\n")
+	b.WriteString("\t&&(bool other) bool `native;\n")
+	b.WriteString("\t||(bool other) bool `native;\n")
+	b.WriteString("\t==(bool other) bool `native;\n")
+	b.WriteString("\t!=(bool other) bool `native;\n")
+	b.WriteString("\t!() bool `native;\n}\n")
+
+	// Char
+	b.WriteString("type char `native {\n")
+	for _, op := range []string{"==", "!=", "<", ">", "<=", ">="} {
+		fmt.Fprintf(&b, "\t%s(char other) bool `native;\n", op)
+	}
+	b.WriteString("}\n")
+
+	// String (operators + methods)
+	b.WriteString("type string `native {\n\tint len;\n")
+	b.WriteString("\t+(string other) string `native;\n")
+	for _, op := range []string{"==", "!=", "<", ">", "<=", ">="} {
+		fmt.Fprintf(&b, "\t%s(string other) bool `native;\n", op)
+	}
+	b.WriteString("\tcontains(string sub) bool `native;\n")
+	b.WriteString("\tstarts_with(string prefix) bool `native;\n")
+	b.WriteString("\tends_with(string suffix) bool `native;\n")
+	b.WriteString("\tindex_of(string sub) int? `native;\n")
+	b.WriteString("\ttrim() string `native;\n")
+	b.WriteString("\tsplit(string sep) string[] `native;\n")
+	b.WriteString("\tis_empty() bool { return this.len == 0; }\n}\n")
+
+	// Containers
+	b.WriteString("type slice[T] `native {\n\tint len;\n")
+	b.WriteString("\tpush(T elem) `native;\n")
+	b.WriteString("\tpop() T? `native;\n")
+	b.WriteString("\tcontains(T elem) bool `native;\n")
+	b.WriteString("\tremove(int index) `native;\n")
+	b.WriteString("\tis_empty() bool { return this.len == 0; }\n}\n")
+
+	b.WriteString("type map[K, V] `native {\n\tint len;\n")
+	b.WriteString("\tcontains(K key) bool `native;\n")
+	b.WriteString("\tremove(K key) bool `native;\n")
+	b.WriteString("\tkeys() K[] `native;\n")
+	b.WriteString("\tvalues() V[] `native;\n")
+	b.WriteString("\tis_empty() bool { return this.len == 0; }\n}\n")
+
+	// Iter/Stream
+	b.WriteString("type iter[T] `native {\n\tnext() T? `abstract;\n}\n")
+	b.WriteString("type stream[T] `native {\n\titer() iter[T] `abstract;\n}\n")
+
+	// Range
+	b.WriteString("type range `native {\n\tint start `value;\n\tint end `value;\n\tbool inclusive `value;\n}\n")
+
+	stdAll = b.String()
+}
+
 // checkOwnership parses source, runs sema, then runs ownership analysis.
+// It automatically includes stdAll as std declarations.
 func checkOwnership(t *testing.T, src string) []error {
 	t.Helper()
+
+	// Parse std
+	stdInput := antlr.NewInputStream(stdAll)
+	stdLexer := parser.NewPromiseLexer(stdInput)
+	stdLexer.RemoveErrorListeners()
+	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
+	stdP := parser.NewPromiseParser(stdStream)
+	stdP.RemoveErrorListeners()
+	stdTree := stdP.CompilationUnit()
+	stdFile, buildErrs := ast.Build("std.pr", stdTree)
+	if len(buildErrs) > 0 {
+		t.Fatalf("std AST build errors: %v", buildErrs)
+	}
+	for _, d := range stdFile.Decls {
+		switch dd := d.(type) {
+		case *ast.FuncDecl:
+			dd.IsStd = true
+		case *ast.TypeDecl:
+			dd.IsStd = true
+		case *ast.EnumDecl:
+			dd.IsStd = true
+		}
+	}
+
+	// Parse user
 	input := antlr.NewInputStream(src)
 	lexer := parser.NewPromiseLexer(input)
 	lexer.RemoveErrorListeners()
@@ -27,6 +126,13 @@ func checkOwnership(t *testing.T, src string) []error {
 	if len(buildErrs) > 0 {
 		t.Fatalf("AST build errors: %v", buildErrs)
 	}
+
+	// Merge: std first, then user
+	merged := make([]ast.Decl, 0, len(stdFile.Decls)+len(file.Decls))
+	merged = append(merged, stdFile.Decls...)
+	merged = append(merged, file.Decls...)
+	file.Decls = merged
+
 	info, semaErrs := sema.Check(file)
 	if len(semaErrs) > 0 {
 		t.Fatalf("sema errors: %v", semaErrs)

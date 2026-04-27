@@ -1,0 +1,9 @@
+// std/char.pr — Character type with equality and comparison operators
+type char `native {
+    ==(char other) bool `native;
+    !=(char other) bool `native;
+    <(char other) bool `native;
+    >(char other) bool `native;
+    <=(char other) bool `native;
+    >=(char other) bool `native;
+}

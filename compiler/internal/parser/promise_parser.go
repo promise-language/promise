@@ -172,7 +172,7 @@ func promiseparserParserInit() {
 		34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 64, 66, 68,
 		70, 72, 74, 76, 78, 80, 82, 84, 86, 88, 90, 92, 94, 96, 98, 100, 102, 104,
 		106, 108, 110, 112, 114, 116, 118, 120, 122, 124, 126, 128, 130, 132, 0,
-		9, 2, 0, 66, 66, 73, 73, 1, 0, 77, 79, 3, 0, 30, 33, 55, 61, 73, 73, 1,
+		9, 2, 0, 66, 66, 73, 73, 1, 0, 77, 79, 3, 0, 30, 35, 55, 62, 73, 73, 1,
 		0, 63, 64, 2, 0, 37, 41, 54, 54, 1, 0, 59, 61, 1, 0, 57, 58, 2, 0, 32,
 		33, 55, 56, 1, 0, 30, 31, 1015, 0, 137, 1, 0, 0, 0, 2, 148, 1, 0, 0, 0,
 		4, 156, 1, 0, 0, 0, 6, 158, 1, 0, 0, 0, 8, 170, 1, 0, 0, 0, 10, 172, 1,
@@ -2017,7 +2017,7 @@ func (p *PromiseParser) TypeDecl() (localctx ITypeDeclContext) {
 	}
 	_la = p.GetTokenStream().LA(1)
 
-	for (int64((_la-30)) & ^0x3f) == 0 && ((int64(1)<<(_la-30))&8800354467855) != 0 {
+	for (int64((_la-30)) & ^0x3f) == 0 && ((int64(1)<<(_la-30))&8804649435199) != 0 {
 		{
 			p.SetState(189)
 			p.TypeMember()
@@ -3539,6 +3539,9 @@ type IMethodNameContext interface {
 	GT() antlr.TerminalNode
 	LTE() antlr.TerminalNode
 	GTE() antlr.TerminalNode
+	AND() antlr.TerminalNode
+	OR() antlr.TerminalNode
+	BANG() antlr.TerminalNode
 
 	// IsMethodNameContext differentiates from other interfaces.
 	IsMethodNameContext()
@@ -3624,6 +3627,18 @@ func (s *MethodNameContext) GTE() antlr.TerminalNode {
 	return s.GetToken(PromiseParserGTE, 0)
 }
 
+func (s *MethodNameContext) AND() antlr.TerminalNode {
+	return s.GetToken(PromiseParserAND, 0)
+}
+
+func (s *MethodNameContext) OR() antlr.TerminalNode {
+	return s.GetToken(PromiseParserOR, 0)
+}
+
+func (s *MethodNameContext) BANG() antlr.TerminalNode {
+	return s.GetToken(PromiseParserBANG, 0)
+}
+
 func (s *MethodNameContext) GetRuleContext() antlr.RuleContext {
 	return s
 }
@@ -3664,7 +3679,7 @@ func (p *PromiseParser) MethodName() (localctx IMethodNameContext) {
 		p.SetState(268)
 		_la = p.GetTokenStream().LA(1)
 
-		if !((int64((_la-30)) & ^0x3f) == 0 && ((int64(1)<<(_la-30))&8800354435087) != 0) {
+		if !((int64((_la-30)) & ^0x3f) == 0 && ((int64(1)<<(_la-30))&8804649402431) != 0) {
 			p.GetErrorHandler().RecoverInline(p)
 		} else {
 			p.GetErrorHandler().ReportMatch(p)

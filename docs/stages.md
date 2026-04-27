@@ -11,7 +11,7 @@ Implementation stages for the Promise compiler pipeline.
 | 3 | `compiler/internal/types/` | Type system: Named, Enum, Signature, Scope, Universe | Done |
 | 4 | `compiler/internal/sema/` | Semantic analysis: type checking, name resolution, returns, exhaustiveness | Done |
 | 5a | `compiler/internal/sema/` | Generic type substitution, constraint validation, instance tracking | Done |
-| 5b | `compiler/internal/sema/` | Match bindings, unreachable code, multi-constraint, Iter/Stream, use decls | Done |
+| 5b | `compiler/internal/sema/` | Match bindings, unreachable code, multi-constraint, iter/stream, use decls | Done |
 | 6a | `compiler/internal/ownership/` | Move semantics, use-after-move, copy exemption, borrow conflicts, unsafe pointer | Done |
 | 6b | `compiler/internal/ownership/` | Borrow tracking, implicit coercion, return safety | Done |
 | 7 | `compiler/internal/sema/` | Meta annotation processing and validation | Done |
@@ -92,8 +92,8 @@ Four-pass analysis: declare → define → check → verify.
 - Operator dispatch via method lookup on named types
 - **Map literals** resolve to `map[K, V]` type with key/value consistency checking
 - **Range operators** (`..`, `..=`) resolve to `range` type
-- **Go expressions** resolve to `Task[T]` with inner type inference
-- **Receive operator** (`<-`) extracts `T` from `Task[T]` or `channel[T]`
+- **Go expressions** resolve to `task[T]` with inner type inference
+- **Receive operator** (`<-`) extracts `T` from `task[T]` or `channel[T]`
 - **Map indexing** returns `V?` (optional) for `map[K, V]`
 - **For-in** supports `slice`, array, `map`, `range`, and `string` iteration
 - **Match exhaustiveness** checking for enum types (variant coverage) and non-enum types (wildcard required)
@@ -118,7 +118,7 @@ Type substitution engine and integration into the semantic checker.
 - **Instance tracking**: `Info.Instances` records all concrete instantiations for later monomorphization
 - **Exhaustiveness for generic enums**: `Option[int]` match checks work via Instance → Enum extraction
 - **Optional chaining on Instance**: `box?.value` resolves member through substitution
-- **For-in on Iter/Stream instances**: `Iter[T]` iteration yields `T`
+- **For-in on iter/stream instances**: `iter[T]` iteration yields `T`
 - **Known limitation**: multi-arg generics (e.g., `Pair[int, string]`) only work in type annotation position (function params, variable types), not in expression context — grammar allows only single expression inside `[]`
 
 ---
@@ -132,7 +132,7 @@ Completes remaining semantic analysis features before ownership checking.
 - **Match pattern bindings**: `Some(v) => v` works — scope opened per arm, bindings inserted from ShortDestructure/EnumDestructure/Name/TypeBinding patterns. For generic enum Instance subjects, variant field types are substituted via `BuildSubstMap`.
 - **Unreachable code detection**: `checkBlock` tracks dead-code state — statements after `return`, `raise`, `break`, `continue` flagged as unreachable. Recognizes if/else where both branches exit, exhaustive match with all arms exiting, and infinite loops without break.
 - **Multi-constraint resolution**: `T: A + B` fully supported — `TypeParam.constraints []Type` stores all constraints, `resolveTypeParamConstraints` resolves the full constraint list, `validateConstraints` checks type args against ALL constraints, `AssignableTo` allows TypeParam assignment to any of its constraints.
-- **Iter[T] and Stream[T] abstract methods**: `Iter[T].next() T?` and `Stream[T].next() Task[T?]` populated via `populateIterStream()` in builtins — enables iteration protocol interface checking.
+- **iter[T] and stream[T] abstract methods**: `iter[T].next() T?` and `stream[T].next() task[T?]` populated via `populateIterStream()` in builtins — enables iteration protocol interface checking.
 - **Use declaration placeholders**: `Module` object type added, `file.Uses` processed in Pass 1 (alias reserved in scope), bare module reference reports "module not loaded" error. Actual module loading deferred to Stage 9.
 
 ---
@@ -207,7 +207,7 @@ Type-system-driven LLVM IR generation for primitive types, arithmetic, control f
 ### Deferred sub-stages
 
 - **8h**: Ownership-aware memory management (free/drop)
-- **8i**: Concurrency (go, Task, Channel, `<-`)
+- **8i**: Concurrency (go, task, channel, `<-`)
 
 ## Stage 8b — Strings (Done)
 
@@ -345,7 +345,7 @@ Codegen for if-unwrap, while-unwrap, optional chaining, string interpolation, an
   - **Intrinsics**: 3 new conversion functions declared in `declareIntrinsics`.
 - **Unsafe blocks**: `genUnsafeExpr` trivially generates block contents. Ownership analysis handles the "unsafe" semantics, not codegen.
 - **Scope**: If-unwrap (with/without else), while-unwrap (with break/continue), optional chaining on user type fields, string interpolation with identifiers/literals/expressions/multiple parts, unsafe blocks.
-- **Deferred**: `is`/`as` expressions (need RTTI), generators (`yield`), concurrency (`go`, `Task`, `Channel`), container methods (`.push`, `.pop`, `.contains`), user type `toString()` for interpolation. Container `.len` completed in Stage 8i.
+- **Deferred**: `is`/`as` expressions (need RTTI), generators (`yield`), concurrency (`go`, `task`, `channel`), container methods (`.push`, `.pop`, `.contains`), user type `toString()` for interpolation. Container `.len` completed in Stage 8i.
 
 ## Stage 8i — Char Literals, Container `.len`, String Iteration & Map Compound Assignment (Done)
 

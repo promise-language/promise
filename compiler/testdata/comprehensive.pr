@@ -105,8 +105,8 @@ asyncWork() Int {
 }
 
 concurrencyExample() {
-  Task[Int] t1 = go asyncWork();
-  Task[Int] t2 = go {
+  task[Int] t1 = go asyncWork();
+  task[Int] t2 = go {
     return 100;
   };
   Int r1 = <-t1;
@@ -301,7 +301,7 @@ lambdaExamples() {
 // Generators / Streams
 // ============================================================
 
-countdown(Int n) Stream[Int] {
+countdown(Int n) stream[Int] {
   for x in 0..n {
     yield n - x;
   }

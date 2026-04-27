@@ -44,7 +44,7 @@ describeShape(Shape &shape) String! {
   }
 }
 
-fibonacci() Stream[Int] {
+fibonacci() stream[Int] {
   Int a = 0;
   Int b = 1;
   for {
@@ -89,7 +89,7 @@ main() {
     io.println(mc.radius);
   }
 
-  Task[Int] task = go computeValue();
+  task[Int] task = go computeValue();
   Int result = <-task;
 
   Int sum = numbers.filter(|n| -> n > 2).fold(0, |acc, n| -> acc + n);

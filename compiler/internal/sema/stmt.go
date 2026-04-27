@@ -304,7 +304,7 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 			// Iterating a map yields (key, value) tuples
 			elemType = types.NewTuple([]types.Type{key, val})
 		} else if inst, ok := iterType.(*types.Instance); ok {
-			// Iter[T] yields T, Stream[T] yields T
+			// iter[T] yields T, stream[T] yields T
 			origin := inst.Origin()
 			if origin == types.TypIter || origin == types.TypStream {
 				if len(inst.TypeArgs()) > 0 {

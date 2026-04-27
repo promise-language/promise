@@ -1,6 +1,7 @@
 package sema
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -12,51 +13,86 @@ import (
 
 // --- Test helpers ---
 
-// stdContainers provides native type declarations for slice, map, and string
-// used by tests that need container methods after the migration from initBuiltins.
-const stdContainers = `
-type string ` + "`" + `native {
-	int len;
-	contains(string sub) bool ` + "`" + `native;
-	starts_with(string prefix) bool ` + "`" + `native;
-	ends_with(string suffix) bool ` + "`" + `native;
-	index_of(string sub) int? ` + "`" + `native;
-	trim() string ` + "`" + `native;
-	split(string sep) string[] ` + "`" + `native;
-	is_empty() bool { return this.len == 0; }
+// stdAll provides all builtin type declarations needed by tests:
+// numeric operators, bool/char/string operators, containers, iter/stream, range.
+var stdAll string
+
+func init() {
+	var b strings.Builder
+
+	// Numeric types: arithmetic + comparison + unary negate
+	for _, name := range []string{"int", "i8", "i16", "i32", "i64", "uint", "u8", "u16", "u32", "u64", "f32", "f64"} {
+		fmt.Fprintf(&b, "type %s `native {\n", name)
+		for _, op := range []string{"+", "-", "*", "/", "%"} {
+			fmt.Fprintf(&b, "\t%s(%s other) %s `native;\n", op, name, name)
+		}
+		for _, op := range []string{"==", "!=", "<", ">", "<=", ">="} {
+			fmt.Fprintf(&b, "\t%s(%s other) bool `native;\n", op, name)
+		}
+		fmt.Fprintf(&b, "\t-() %s `native;\n}\n", name)
+	}
+
+	// Bool
+	b.WriteString("type bool `native {\n")
+	b.WriteString("\t&&(bool other) bool `native;\n")
+	b.WriteString("\t||(bool other) bool `native;\n")
+	b.WriteString("\t==(bool other) bool `native;\n")
+	b.WriteString("\t!=(bool other) bool `native;\n")
+	b.WriteString("\t!() bool `native;\n}\n")
+
+	// Char
+	b.WriteString("type char `native {\n")
+	for _, op := range []string{"==", "!=", "<", ">", "<=", ">="} {
+		fmt.Fprintf(&b, "\t%s(char other) bool `native;\n", op)
+	}
+	b.WriteString("}\n")
+
+	// String (operators + methods)
+	b.WriteString("type string `native {\n\tint len;\n")
+	b.WriteString("\t+(string other) string `native;\n")
+	for _, op := range []string{"==", "!=", "<", ">", "<=", ">="} {
+		fmt.Fprintf(&b, "\t%s(string other) bool `native;\n", op)
+	}
+	b.WriteString("\tcontains(string sub) bool `native;\n")
+	b.WriteString("\tstarts_with(string prefix) bool `native;\n")
+	b.WriteString("\tends_with(string suffix) bool `native;\n")
+	b.WriteString("\tindex_of(string sub) int? `native;\n")
+	b.WriteString("\ttrim() string `native;\n")
+	b.WriteString("\tsplit(string sep) string[] `native;\n")
+	b.WriteString("\tis_empty() bool { return this.len == 0; }\n}\n")
+
+	// Containers
+	b.WriteString("type slice[T] `native {\n\tint len;\n")
+	b.WriteString("\tpush(T elem) `native;\n")
+	b.WriteString("\tpop() T? `native;\n")
+	b.WriteString("\tcontains(T elem) bool `native;\n")
+	b.WriteString("\tremove(int index) `native;\n")
+	b.WriteString("\tis_empty() bool { return this.len == 0; }\n}\n")
+
+	b.WriteString("type map[K, V] `native {\n\tint len;\n")
+	b.WriteString("\tcontains(K key) bool `native;\n")
+	b.WriteString("\tremove(K key) bool `native;\n")
+	b.WriteString("\tkeys() K[] `native;\n")
+	b.WriteString("\tvalues() V[] `native;\n")
+	b.WriteString("\tis_empty() bool { return this.len == 0; }\n}\n")
+
+	// Iter/Stream
+	b.WriteString("type iter[T] `native {\n\tnext() T? `abstract;\n}\n")
+	b.WriteString("type stream[T] `native {\n\titer() iter[T] `abstract;\n}\n")
+
+	// Range
+	b.WriteString("type range `native {\n\tint start `value;\n\tint end `value;\n\tbool inclusive `value;\n}\n")
+
+	stdAll = b.String()
 }
-type slice[T] ` + "`" + `native {
-	int len;
-	push(T elem) ` + "`" + `native;
-	pop() T? ` + "`" + `native;
-	contains(T elem) bool ` + "`" + `native;
-	remove(int index) ` + "`" + `native;
-	is_empty() bool { return this.len == 0; }
-}
-type map[K, V] ` + "`" + `native {
-	int len;
-	contains(K key) bool ` + "`" + `native;
-	remove(K key) bool ` + "`" + `native;
-	keys() K[] ` + "`" + `native;
-	values() V[] ` + "`" + `native;
-	is_empty() bool { return this.len == 0; }
-}
-`
+
+// stdContainers is kept as an alias for backward compatibility with tests
+// that pass explicit std via checkOKWithStd.
+var stdContainers = "" // subsumed by stdAll; tests using checkOKWithStd get stdAll automatically
 
 func checkSource(t *testing.T, src string) (*Info, []error) {
 	t.Helper()
-	input := antlr.NewInputStream(src)
-	lexer := parser.NewPromiseLexer(input)
-	lexer.RemoveErrorListeners()
-	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
-	p := parser.NewPromiseParser(stream)
-	p.RemoveErrorListeners()
-	tree := p.CompilationUnit()
-	file, errs := ast.Build("test.pr", tree)
-	if len(errs) > 0 {
-		t.Fatalf("AST build errors: %v", errs)
-	}
-	return Check(file)
+	return checkSourceWithStd(t, "", src)
 }
 
 func checkOK(t *testing.T, src string) *Info {
@@ -820,8 +856,8 @@ func TestOptionalAssignment(t *testing.T) {
 // --- Builtin Operator Tests ---
 
 func TestBuiltinOperatorsExist(t *testing.T) {
-	// Verify that initBuiltins populates operator methods
-	initBuiltins()
+	// Verify that std declarations populate operator methods on builtin types
+	checkOK(t, `main() { x := 1 + 2; }`)
 
 	m := types.TypInt.LookupMethod("+")
 	if m == nil {
@@ -947,7 +983,7 @@ func TestRangeExclusive(t *testing.T) {
 			return
 		}
 	}
-	t.Error("no Range type recorded")
+	t.Error("no range type recorded")
 }
 
 func TestRangeInclusive(t *testing.T) {
@@ -983,7 +1019,7 @@ func TestGoExprReturnsTask(t *testing.T) {
 			}
 		}
 	}
-	t.Error("no Task type recorded for go expression")
+	t.Error("no task type recorded for go expression")
 }
 
 func TestGoBlockExpr(t *testing.T) {
@@ -1013,7 +1049,7 @@ func TestReceiveFromNonTask(t *testing.T) {
 			y := <-x;
 		}
 	`)
-	expectError(t, errs, "requires Task[T] or Channel[T]")
+	expectError(t, errs, "requires task[T] or channel[T]")
 }
 
 // --- Missing Return Tests ---
@@ -1151,7 +1187,7 @@ func TestUniverseTaskType(t *testing.T) {
 		t.Fatal("TypTask is nil")
 	}
 	if len(types.TypTask.TypeParams()) != 1 {
-		t.Errorf("Task should have 1 type param, got %d", len(types.TypTask.TypeParams()))
+		t.Errorf("task should have 1 type param, got %d", len(types.TypTask.TypeParams()))
 	}
 }
 
@@ -1160,7 +1196,7 @@ func TestUniverseChannelType(t *testing.T) {
 		t.Fatal("TypChannel is nil")
 	}
 	if len(types.TypChannel.TypeParams()) != 1 {
-		t.Errorf("Channel should have 1 type param, got %d", len(types.TypChannel.TypeParams()))
+		t.Errorf("channel should have 1 type param, got %d", len(types.TypChannel.TypeParams()))
 	}
 }
 
@@ -1938,48 +1974,50 @@ func TestSingleConstraintStillWorks(t *testing.T) {
 // --- Iter/Stream Method Tests ---
 
 func TestIterHasNextMethod(t *testing.T) {
-	initBuiltins()
+	// Trigger std registration via checkOK
+	checkOK(t, `main() {}`)
 	m := types.TypIter.LookupMethod("next")
 	if m == nil {
-		t.Fatal("Iter.next() method not found")
+		t.Fatal("iter.next() method not found")
 	}
 	if !m.IsAbstract() {
-		t.Error("Iter.next() should be abstract")
+		t.Error("iter.next() should be abstract")
 	}
 	sig := m.Sig()
 	if sig == nil {
-		t.Fatal("Iter.next() has no signature")
+		t.Fatal("iter.next() has no signature")
 	}
 	// Return type should be T? (Optional of TypeParam)
 	opt, ok := sig.Result().(*types.Optional)
 	if !ok {
-		t.Fatalf("Iter.next() should return Optional, got %T", sig.Result())
+		t.Fatalf("iter.next() should return Optional, got %T", sig.Result())
 	}
 	if _, ok := opt.Elem().(*types.TypeParam); !ok {
-		t.Errorf("Iter.next() Optional elem should be TypeParam, got %T", opt.Elem())
+		t.Errorf("iter.next() Optional elem should be TypeParam, got %T", opt.Elem())
 	}
 }
 
-func TestStreamHasNextMethod(t *testing.T) {
-	initBuiltins()
-	m := types.TypStream.LookupMethod("next")
+func TestStreamHasIterMethod(t *testing.T) {
+	// Trigger std registration via checkOK
+	checkOK(t, `main() {}`)
+	m := types.TypStream.LookupMethod("iter")
 	if m == nil {
-		t.Fatal("Stream.next() method not found")
+		t.Fatal("stream.iter() method not found")
 	}
 	if !m.IsAbstract() {
-		t.Error("Stream.next() should be abstract")
+		t.Error("stream.iter() should be abstract")
 	}
 	sig := m.Sig()
 	if sig == nil {
-		t.Fatal("Stream.next() has no signature")
+		t.Fatal("stream.iter() has no signature")
 	}
-	// Return type should be Task[T?] (Instance of Task with Optional TypeParam)
+	// Return type should be iter[T] (Instance of Iter with TypeParam)
 	inst, ok := sig.Result().(*types.Instance)
 	if !ok {
-		t.Fatalf("Stream.next() should return Instance, got %T", sig.Result())
+		t.Fatalf("stream.iter() should return Instance, got %T", sig.Result())
 	}
-	if inst.Origin() != types.TypTask {
-		t.Errorf("Stream.next() should return Task instance, got %s", inst.Origin())
+	if inst.Origin() != types.TypIter {
+		t.Errorf("stream.iter() should return iter instance, got %s", inst.Origin())
 	}
 }
 
@@ -2654,8 +2692,10 @@ func TestReservedStdNameEnum(t *testing.T) {
 // user declarations, merges them (std first), and runs sema.Check.
 func checkSourceWithStd(t *testing.T, stdSrc, userSrc string) (*Info, []error) {
 	t.Helper()
+	// Always include stdAll; additional stdSrc is appended
+	combinedStd := stdAll + "\n" + stdSrc
 	// Parse std
-	stdInput := antlr.NewInputStream(stdSrc)
+	stdInput := antlr.NewInputStream(combinedStd)
 	stdLexer := parser.NewPromiseLexer(stdInput)
 	stdLexer.RemoveErrorListeners()
 	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
@@ -2862,4 +2902,176 @@ func TestNativeTypeMissingReturnDetected(t *testing.T) {
 		`main() {}`,
 	)
 	expectError(t, errs, "missing return")
+}
+
+// --- Stage 8f: Builtin Validation Tests ---
+
+// checkWithRawStd parses stdSrc as the ONLY std (no stdAll prepended) and
+// userSrc as user code. Used for testing validateBuiltins() error detection.
+func checkWithRawStd(t *testing.T, stdSrc, userSrc string) (*Info, []error) {
+	t.Helper()
+	stdInput := antlr.NewInputStream(stdSrc)
+	stdLexer := parser.NewPromiseLexer(stdInput)
+	stdLexer.RemoveErrorListeners()
+	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
+	stdP := parser.NewPromiseParser(stdStream)
+	stdP.RemoveErrorListeners()
+	stdTree := stdP.CompilationUnit()
+	stdFile, errs := ast.Build("std.pr", stdTree)
+	if len(errs) > 0 {
+		t.Fatalf("std AST build errors: %v", errs)
+	}
+	for _, d := range stdFile.Decls {
+		switch dd := d.(type) {
+		case *ast.FuncDecl:
+			dd.IsStd = true
+		case *ast.TypeDecl:
+			dd.IsStd = true
+		case *ast.EnumDecl:
+			dd.IsStd = true
+		}
+	}
+	userInput := antlr.NewInputStream(userSrc)
+	userLexer := parser.NewPromiseLexer(userInput)
+	userLexer.RemoveErrorListeners()
+	userStream := antlr.NewCommonTokenStream(userLexer, antlr.TokenDefaultChannel)
+	userP := parser.NewPromiseParser(userStream)
+	userP.RemoveErrorListeners()
+	userTree := userP.CompilationUnit()
+	userFile, errs := ast.Build("test.pr", userTree)
+	if len(errs) > 0 {
+		t.Fatalf("user AST build errors: %v", errs)
+	}
+	merged := make([]ast.Decl, 0, len(stdFile.Decls)+len(userFile.Decls))
+	merged = append(merged, stdFile.Decls...)
+	merged = append(merged, userFile.Decls...)
+	userFile.Decls = merged
+	return Check(userFile)
+}
+
+func TestValidateAllPresent(t *testing.T) {
+	// Full stdAll should pass validation with no errors
+	_, errs := checkWithRawStd(t, stdAll, `main() {}`)
+	expectNoErrors(t, errs)
+}
+
+// Note: testing validateBuiltins() for MISSING operators is not feasible in unit tests
+// because universe types (TypInt, TypBool, etc.) are global singletons whose methods
+// accumulate across test runs. Validation correctness is ensured by:
+// 1. TestValidateAllPresent verifying the full std passes
+// 2. E2E tests that compile with real std/ files
+// 3. The requireBinaryOp/requireUnaryOp/requireMethod/requireField helpers being trivial
+
+// --- Stage 8f: Arity-Aware Method Dedup Tests ---
+
+func TestArityAwareDedup_BinaryAndUnaryMinus(t *testing.T) {
+	// Both binary -(int) and unary -() should coexist on int
+	checkOK(t, `main() { x := 5 - 3; y := -42; }`)
+
+	// Verify both forms exist on TypInt
+	var hasBinary, hasUnary bool
+	for _, m := range types.TypInt.Methods() {
+		if m.Name() == "-" {
+			if len(m.Sig().Params()) == 1 {
+				hasBinary = true
+			}
+			if len(m.Sig().Params()) == 0 {
+				hasUnary = true
+			}
+		}
+	}
+	if !hasBinary {
+		t.Error("int should have binary - (1 param)")
+	}
+	if !hasUnary {
+		t.Error("int should have unary - (0 params)")
+	}
+}
+
+// --- Stage 8f: All Numeric Type Operator Method Tests ---
+
+func TestAllNumericTypesHaveOperators(t *testing.T) {
+	// Trigger std registration
+	checkOK(t, `main() {}`)
+
+	arithOps := []string{"+", "-", "*", "/", "%"}
+	cmpOps := []string{"==", "!=", "<", ">", "<=", ">="}
+
+	numericTypes := map[string]*types.Named{
+		"int": types.TypInt, "i8": types.TypI8, "i16": types.TypI16,
+		"i32": types.TypI32, "i64": types.TypI64, "uint": types.TypUint,
+		"u8": types.TypU8, "u16": types.TypU16, "u32": types.TypU32,
+		"u64": types.TypU64, "f32": types.TypF32, "f64": types.TypF64,
+	}
+
+	for name, nt := range numericTypes {
+		t.Run(name, func(t *testing.T) {
+			for _, op := range arithOps {
+				if nt.LookupMethod(op) == nil {
+					t.Errorf("%s missing binary operator %s", name, op)
+				}
+			}
+			for _, op := range cmpOps {
+				if nt.LookupMethod(op) == nil {
+					t.Errorf("%s missing comparison operator %s", name, op)
+				}
+			}
+			// Verify unary negate exists (0-param version)
+			hasUnary := false
+			for _, m := range nt.Methods() {
+				if m.Name() == "-" && len(m.Sig().Params()) == 0 {
+					hasUnary = true
+					break
+				}
+			}
+			if !hasUnary {
+				t.Errorf("%s missing unary operator -", name)
+			}
+		})
+	}
+}
+
+func TestBoolHasAllOperators(t *testing.T) {
+	checkOK(t, `main() {}`)
+	for _, op := range []string{"&&", "||", "==", "!="} {
+		if types.TypBool.LookupMethod(op) == nil {
+			t.Errorf("bool missing binary operator %s", op)
+		}
+	}
+	if types.TypBool.LookupMethod("!") == nil {
+		t.Error("bool missing unary operator !")
+	}
+}
+
+func TestCharHasAllOperators(t *testing.T) {
+	checkOK(t, `main() {}`)
+	for _, op := range []string{"==", "!=", "<", ">", "<=", ">="} {
+		if types.TypChar.LookupMethod(op) == nil {
+			t.Errorf("char missing comparison operator %s", op)
+		}
+	}
+}
+
+func TestStringHasAllOperators(t *testing.T) {
+	checkOK(t, `main() {}`)
+	for _, op := range []string{"+", "==", "!=", "<", ">", "<=", ">="} {
+		if types.TypString.LookupMethod(op) == nil {
+			t.Errorf("string missing operator %s", op)
+		}
+	}
+}
+
+// --- Stage 8f: Char Operator Tests ---
+
+func TestCharComparisons(t *testing.T) {
+	checkOK(t, `
+		main() {
+			bool eq = 'a' == 'b';
+			bool ne = 'a' != 'b';
+			bool lt = 'a' < 'b';
+			bool gt = 'a' > 'b';
+			bool le = 'a' <= 'b';
+			bool ge = 'a' >= 'b';
+		}
+	`)
 }

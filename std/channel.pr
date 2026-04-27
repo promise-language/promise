@@ -1,0 +1,2 @@
+// std/channel.pr — Channel type for concurrent communication
+type channel[T] `native {}

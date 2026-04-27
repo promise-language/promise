@@ -154,6 +154,15 @@ func (b *Builder) VisitMethodName(ctx *parser.MethodNameContext) interface{} {
 	if ctx.GTE() != nil {
 		return ">="
 	}
+	if ctx.AND() != nil {
+		return "&&"
+	}
+	if ctx.OR() != nil {
+		return "||"
+	}
+	if ctx.BANG() != nil {
+		return "!"
+	}
 	return ""
 }
 

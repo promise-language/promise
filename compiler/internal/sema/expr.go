@@ -324,7 +324,7 @@ func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr) types.Type {
 		return c.checkUnaryOperator(e.Pos(), operand, "-")
 
 	case ast.UnaryReceive:
-		// <-expr: operand should be Task[T] or Channel[T], result is T
+		// <-expr: operand should be task[T] or channel[T], result is T
 		if inst, ok := operand.(*types.Instance); ok {
 			origin := inst.Origin()
 			if origin == types.TypTask || origin == types.TypChannel {
@@ -333,7 +333,7 @@ func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr) types.Type {
 				}
 			}
 		}
-		c.errorf(e.Pos(), "receive operator (<-) requires Task[T] or Channel[T], got %s", operand)
+		c.errorf(e.Pos(), "receive operator (<-) requires task[T] or channel[T], got %s", operand)
 		return nil
 
 	default:

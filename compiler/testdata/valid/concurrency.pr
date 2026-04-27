@@ -10,13 +10,13 @@ work(Int x) Int {
 
 concurrencyExamples() {
   // Go with function call
-  Task[Int] t1 = go compute();
+  task[Int] t1 = go compute();
 
   // Go with arguments
-  Task[Int] t2 = go work(21);
+  task[Int] t2 = go work(21);
 
   // Go with block
-  Task[Int] t3 = go {
+  task[Int] t3 = go {
     Int a = 10;
     Int b = 20;
     return a + b;
@@ -34,8 +34,8 @@ concurrencyExamples() {
   Int immediate = <-go compute();
 
   // Multiple tasks
-  Task[Int] tasks1 = go work(1);
-  Task[Int] tasks2 = go work(2);
-  Task[Int] tasks3 = go work(3);
+  task[Int] tasks1 = go work(1);
+  task[Int] tasks2 = go work(2);
+  task[Int] tasks3 = go work(3);
   Int total = <-tasks1 + <-tasks2 + <-tasks3;
 }

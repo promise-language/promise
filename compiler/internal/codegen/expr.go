@@ -466,9 +466,9 @@ func (c *Compiler) genShortCircuitOr(e *ast.BinaryExpr) value.Value {
 	return phi
 }
 
-// --- Range construction ---
+// --- range construction ---
 
-// genRange constructs a Range struct { i64 start, i64 end, i1 inclusive }.
+// genRange constructs a range struct { i64 start, i64 end, i1 inclusive }.
 // For for-in loops, the struct fields are extracted by the loop codegen.
 func (c *Compiler) genRange(e *ast.BinaryExpr) value.Value {
 	start := c.genExpr(e.Left)
@@ -478,7 +478,7 @@ func (c *Compiler) genRange(e *ast.BinaryExpr) value.Value {
 		inclusive = constant.NewInt(irtypes.I1, 1)
 	}
 
-	// Pack into a Range struct: { i64, i64, i1 }
+	// Pack into a range struct: { i64, i64, i1 }
 	rangeType := c.rangeStructType()
 	alloca := c.block.NewAlloca(rangeType)
 	startPtr := c.block.NewGetElementPtr(rangeType, alloca,
@@ -494,7 +494,7 @@ func (c *Compiler) genRange(e *ast.BinaryExpr) value.Value {
 	return c.block.NewLoad(rangeType, alloca)
 }
 
-// rangeStructType returns the LLVM struct type for Range: { i64, i64, i1 }.
+// rangeStructType returns the LLVM struct type for range: { i64, i64, i1 }.
 func (c *Compiler) rangeStructType() *irtypes.StructType {
 	return irtypes.NewStruct(irtypes.I64, irtypes.I64, irtypes.I1)
 }
@@ -736,6 +736,9 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 // --- Member access ---
 
 // genMemberExpr generates a field access on a user type instance or an enum variant value.
+// TODO: range member access (e.g. r.start) is allowed by sema but will panic here
+// because range has no user type layout — it uses a hardcoded { i64, i64, i1 } struct.
+// When range field access is needed, add special-case handling similar to genStringLen.
 func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 	targetType := c.info.Types[e.Target]
 	// Apply typeSubst for mono context

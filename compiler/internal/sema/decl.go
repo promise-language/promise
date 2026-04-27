@@ -177,7 +177,7 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 			}
 		}
 		for _, md := range d.Methods {
-			if named.LookupMethod(md.Name) == nil {
+			if !c.nativeMethodExists(named, md) {
 				c.defineMethod(named, md, d.Name)
 			}
 		}
@@ -277,6 +277,19 @@ func (c *Checker) defineMethod(named *types.Named, md *ast.MethodDecl, typeName 
 	m.SetDoc(extractDoc(md.Annotations))
 	m.SetDeprecated(extractDeprecated(md.Annotations))
 	named.AddMethod(m)
+}
+
+// nativeMethodExists checks if a native type already has a method with the same
+// name AND arity as the AST method declaration. This is arity-aware so that
+// binary -(T other) and unary -() can coexist on the same type.
+func (c *Checker) nativeMethodExists(named *types.Named, md *ast.MethodDecl) bool {
+	arity := len(md.Params)
+	for _, m := range named.Methods() {
+		if m.Name() == md.Name && len(m.Sig().Params()) == arity {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Checker) resolveMethodSignature(named *types.Named, md *ast.MethodDecl) *types.Signature {

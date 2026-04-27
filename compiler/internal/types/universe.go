@@ -26,13 +26,13 @@ var (
 	TypError  *Named
 
 	// Generic stdlib types
-	TypTask    *Named // Task[T] — concurrency handle from go expressions
-	TypChannel *Named // Channel[T] — channel type
-	TypIter    *Named // Iter[T] — synchronous iterator interface
-	TypStream  *Named // Stream[T] — asynchronous iterator interface
+	TypTask    *Named // task[T] — concurrency handle from go expressions
+	TypChannel *Named // channel[T] — channel type
+	TypIter    *Named // iter[T] — synchronous iterator interface
+	TypStream  *Named // stream[T] — asynchronous iterator interface
 	TypSlice   *Named // slice[T] — dynamic array
 	TypMap     *Named // map[K, V] — map container type
-	TypRange   *Named // Range — integer range from .. and ..= operators
+	TypRange   *Named // range — integer range from .. and ..= operators
 )
 
 func init() {
@@ -77,16 +77,12 @@ func init() {
 	TypError = defNamed("error")
 
 	// Generic stdlib types
-	TypTask = defGeneric("Task", "T")
-	TypChannel = defGeneric("Channel", "T")
-	TypIter = defGeneric("Iter", "T")
-	TypStream = defGeneric("Stream", "T")
+	TypTask = defGeneric("task", "T")
+	TypChannel = defGeneric("channel", "T")
+	TypIter = defGeneric("iter", "T")
+	TypStream = defGeneric("stream", "T")
 	TypSlice = defGeneric("slice", "T")
 	TypMap = defGeneric("map", "K", "V")
 
-	TypRange = defNamed("Range")
-	// Range fields for accessing bounds
-	TypRange.AddField(NewField(Pos{}, "start", TypInt, PlaceValue, false, false))
-	TypRange.AddField(NewField(Pos{}, "end", TypInt, PlaceValue, false, false))
-	TypRange.AddField(NewField(Pos{}, "inclusive", TypBool, PlaceValue, false, false))
+	TypRange = defNamed("range")
 }

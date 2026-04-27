@@ -677,10 +677,13 @@ func (c *Compiler) computeUserTypeLayouts(file *ast.File) {
 			continue
 		}
 		if _, exists := c.layouts[named]; exists {
-			continue // skip built-in types
+			continue // skip built-in types with pre-computed layouts
 		}
 		if len(named.TypeParams()) > 0 {
 			continue // generic — handled by monomorphization
+		}
+		if isNativeTypeDecl(td) {
+			continue // native types have special codegen layout handling
 		}
 		pending[td.Name] = named
 		names = append(names, td.Name)
@@ -1017,6 +1020,16 @@ func (c *Compiler) computeVtableInfo(file *ast.File) {
 // True if the type has children (someone inherits from it) or is abstract.
 func (c *Compiler) needsVtable(named *types.Named) bool {
 	return c.hasChildren[named] || named.IsAbstract()
+}
+
+// isNativeTypeDecl checks if a type declaration has the `native annotation.
+func isNativeTypeDecl(td *ast.TypeDecl) bool {
+	for _, ann := range td.Annotations {
+		if ann.Name == "native" {
+			return true
+		}
+	}
+	return false
 }
 
 // emitNativeOp dispatches a native operator to the LLVM instruction table.

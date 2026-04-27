@@ -1,0 +1,8 @@
+// std/bool.pr — Boolean type with logical, equality, and unary operators
+type bool `native {
+    &&(bool other) bool `native;
+    ||(bool other) bool `native;
+    ==(bool other) bool `native;
+    !=(bool other) bool `native;
+    !() bool `native;
+}

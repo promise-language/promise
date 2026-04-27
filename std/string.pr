@@ -1,6 +1,14 @@
-// std/string.pr — String type methods
+// std/string.pr — String type with operators and methods
 type string `native {
     int len;
+
+    +(string other) string `native;
+    ==(string other) bool `native;
+    !=(string other) bool `native;
+    <(string other) bool `native;
+    >(string other) bool `native;
+    <=(string other) bool `native;
+    >=(string other) bool `native;
 
     contains(string sub) bool `native;
     starts_with(string prefix) bool `native;

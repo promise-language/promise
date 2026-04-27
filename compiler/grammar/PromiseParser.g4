@@ -87,6 +87,7 @@ methodName
     : IDENT
     | PLUS | MINUS | STAR | SLASH | PERCENT
     | EQ | NEQ | LT | GT | LTE | GTE
+    | AND | OR | BANG
     ;
 
 // ============================================================

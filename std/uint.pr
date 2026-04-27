@@ -1,0 +1,75 @@
+// std/uint.pr — Unsigned integer types with arithmetic, comparison, and unary operators
+type uint `native {
+    +(uint other) uint `native;
+    -(uint other) uint `native;
+    *(uint other) uint `native;
+    /(uint other) uint `native;
+    %(uint other) uint `native;
+    ==(uint other) bool `native;
+    !=(uint other) bool `native;
+    <(uint other) bool `native;
+    >(uint other) bool `native;
+    <=(uint other) bool `native;
+    >=(uint other) bool `native;
+    -() uint `native;
+}
+
+type u8 `native {
+    +(u8 other) u8 `native;
+    -(u8 other) u8 `native;
+    *(u8 other) u8 `native;
+    /(u8 other) u8 `native;
+    %(u8 other) u8 `native;
+    ==(u8 other) bool `native;
+    !=(u8 other) bool `native;
+    <(u8 other) bool `native;
+    >(u8 other) bool `native;
+    <=(u8 other) bool `native;
+    >=(u8 other) bool `native;
+    -() u8 `native;
+}
+
+type u16 `native {
+    +(u16 other) u16 `native;
+    -(u16 other) u16 `native;
+    *(u16 other) u16 `native;
+    /(u16 other) u16 `native;
+    %(u16 other) u16 `native;
+    ==(u16 other) bool `native;
+    !=(u16 other) bool `native;
+    <(u16 other) bool `native;
+    >(u16 other) bool `native;
+    <=(u16 other) bool `native;
+    >=(u16 other) bool `native;
+    -() u16 `native;
+}
+
+type u32 `native {
+    +(u32 other) u32 `native;
+    -(u32 other) u32 `native;
+    *(u32 other) u32 `native;
+    /(u32 other) u32 `native;
+    %(u32 other) u32 `native;
+    ==(u32 other) bool `native;
+    !=(u32 other) bool `native;
+    <(u32 other) bool `native;
+    >(u32 other) bool `native;
+    <=(u32 other) bool `native;
+    >=(u32 other) bool `native;
+    -() u32 `native;
+}
+
+type u64 `native {
+    +(u64 other) u64 `native;
+    -(u64 other) u64 `native;
+    *(u64 other) u64 `native;
+    /(u64 other) u64 `native;
+    %(u64 other) u64 `native;
+    ==(u64 other) bool `native;
+    !=(u64 other) bool `native;
+    <(u64 other) bool `native;
+    >(u64 other) bool `native;
+    <=(u64 other) bool `native;
+    >=(u64 other) bool `native;
+    -() u64 `native;
+}

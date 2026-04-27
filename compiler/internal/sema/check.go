@@ -29,8 +29,6 @@ func Check(file *ast.File) (*Info, []error) {
 		},
 	}
 
-	initBuiltins()
-
 	c.stdScope = types.NewScope(
 		types.Universe, tpos(file.Pos()), tpos(file.End()), "std",
 	)
@@ -43,6 +41,7 @@ func Check(file *ast.File) (*Info, []error) {
 
 	c.declare(file)            // Pass 1: collect all declarations
 	c.define(file)             // Pass 2: resolve types, populate type structures
+	c.validateBuiltins()       // Validate: .pr files declare all required operators/methods/fields
 	c.check(file)              // Pass 3: type-check function/method bodies
 	c.checkMissingReturn(file) // Pass 4: verify non-void functions return
 

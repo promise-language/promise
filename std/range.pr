@@ -1,0 +1,6 @@
+// std/range.pr — Range type with start, end, and inclusive fields
+type range `native {
+    int start `value;
+    int end `value;
+    bool inclusive `value;
+}

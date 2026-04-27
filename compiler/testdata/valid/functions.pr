@@ -52,14 +52,14 @@ maxOf[T: Comparable](T a, T b) T {
 }
 
 // Generator function
-range(Int start, Int end) Stream[Int] {
+range(Int start, Int end) stream[Int] {
   for i in start..end {
     yield i;
   }
 }
 
 // Generator with yield delegate
-concat[T](Stream[T] a, Stream[T] b) Stream[T] {
+concat[T](stream[T] a, stream[T] b) stream[T] {
   yield* a;
   yield* b;
 }

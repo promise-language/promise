@@ -91,14 +91,14 @@ matchAsExpr() {
 }
 
 // Yield in generator
-gen() Stream[Int] {
+gen() stream[Int] {
   yield 1;
   yield 2;
   yield 3;
 }
 
 // Yield delegate
-genDelegate() Stream[Int] {
+genDelegate() stream[Int] {
   yield* gen();
   yield* gen();
 }

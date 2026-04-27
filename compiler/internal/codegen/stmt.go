@@ -505,7 +505,7 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 			c.genForInString(s, strPtr)
 			return
 		}
-		// Range iteration (existing behavior)
+		// range iteration (existing behavior)
 		c.genForInRange(s)
 	}
 }

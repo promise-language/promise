@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -11,36 +12,106 @@ import (
 	antlr "github.com/antlr4-go/antlr/v4"
 )
 
-// stdContainers provides native type declarations for slice, map, and string.
-const stdContainers = `
-type string ` + "`" + `native {
-	int len;
-	contains(string sub) bool ` + "`" + `native;
-	starts_with(string prefix) bool ` + "`" + `native;
-	ends_with(string suffix) bool ` + "`" + `native;
-	index_of(string sub) int? ` + "`" + `native;
-	trim() string ` + "`" + `native;
-	split(string sep) string[] ` + "`" + `native;
-}
-type slice[T] ` + "`" + `native {
-	int len;
-	push(T elem) ` + "`" + `native;
-	pop() T? ` + "`" + `native;
-	contains(T elem) bool ` + "`" + `native;
-	remove(int index) ` + "`" + `native;
-}
-type map[K, V] ` + "`" + `native {
-	int len;
-	contains(K key) bool ` + "`" + `native;
-	remove(K key) bool ` + "`" + `native;
-	keys() K[] ` + "`" + `native;
-	values() V[] ` + "`" + `native;
-}
-`
+// stdAll provides all builtin type declarations needed by tests.
+var stdAll string
 
-// generateIR runs the full pipeline: parse → sema → codegen, returns LLVM IR text.
-func generateIR(t *testing.T, src string) string {
+func init() {
+	var b strings.Builder
+
+	// Numeric types: arithmetic + comparison + unary negate
+	for _, name := range []string{"int", "i8", "i16", "i32", "i64", "uint", "u8", "u16", "u32", "u64", "f32", "f64"} {
+		fmt.Fprintf(&b, "type %s `native {\n", name)
+		for _, op := range []string{"+", "-", "*", "/", "%"} {
+			fmt.Fprintf(&b, "\t%s(%s other) %s `native;\n", op, name, name)
+		}
+		for _, op := range []string{"==", "!=", "<", ">", "<=", ">="} {
+			fmt.Fprintf(&b, "\t%s(%s other) bool `native;\n", op, name)
+		}
+		fmt.Fprintf(&b, "\t-() %s `native;\n}\n", name)
+	}
+
+	// Bool
+	b.WriteString("type bool `native {\n")
+	b.WriteString("\t&&(bool other) bool `native;\n")
+	b.WriteString("\t||(bool other) bool `native;\n")
+	b.WriteString("\t==(bool other) bool `native;\n")
+	b.WriteString("\t!=(bool other) bool `native;\n")
+	b.WriteString("\t!() bool `native;\n}\n")
+
+	// Char
+	b.WriteString("type char `native {\n")
+	for _, op := range []string{"==", "!=", "<", ">", "<=", ">="} {
+		fmt.Fprintf(&b, "\t%s(char other) bool `native;\n", op)
+	}
+	b.WriteString("}\n")
+
+	// String (operators + methods)
+	b.WriteString("type string `native {\n\tint len;\n")
+	b.WriteString("\t+(string other) string `native;\n")
+	for _, op := range []string{"==", "!=", "<", ">", "<=", ">="} {
+		fmt.Fprintf(&b, "\t%s(string other) bool `native;\n", op)
+	}
+	b.WriteString("\tcontains(string sub) bool `native;\n")
+	b.WriteString("\tstarts_with(string prefix) bool `native;\n")
+	b.WriteString("\tends_with(string suffix) bool `native;\n")
+	b.WriteString("\tindex_of(string sub) int? `native;\n")
+	b.WriteString("\ttrim() string `native;\n")
+	b.WriteString("\tsplit(string sep) string[] `native;\n")
+	b.WriteString("\tis_empty() bool { return this.len == 0; }\n}\n")
+
+	// Containers
+	b.WriteString("type slice[T] `native {\n\tint len;\n")
+	b.WriteString("\tpush(T elem) `native;\n")
+	b.WriteString("\tpop() T? `native;\n")
+	b.WriteString("\tcontains(T elem) bool `native;\n")
+	b.WriteString("\tremove(int index) `native;\n")
+	b.WriteString("\tis_empty() bool { return this.len == 0; }\n}\n")
+
+	b.WriteString("type map[K, V] `native {\n\tint len;\n")
+	b.WriteString("\tcontains(K key) bool `native;\n")
+	b.WriteString("\tremove(K key) bool `native;\n")
+	b.WriteString("\tkeys() K[] `native;\n")
+	b.WriteString("\tvalues() V[] `native;\n")
+	b.WriteString("\tis_empty() bool { return this.len == 0; }\n}\n")
+
+	// Iter/Stream
+	b.WriteString("type iter[T] `native {\n\tnext() T? `abstract;\n}\n")
+	b.WriteString("type stream[T] `native {\n\titer() iter[T] `abstract;\n}\n")
+
+	// Range
+	b.WriteString("type range `native {\n\tint start `value;\n\tint end `value;\n\tbool inclusive `value;\n}\n")
+
+	stdAll = b.String()
+}
+
+// parseWithStd parses std declarations and user code, merges them, and runs sema.
+func parseWithStd(t *testing.T, src string) (*ast.File, *sema.Info) {
 	t.Helper()
+
+	// Parse std
+	stdInput := antlr.NewInputStream(stdAll)
+	stdLexer := parser.NewPromiseLexer(stdInput)
+	stdLexer.RemoveErrorListeners()
+	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
+	stdP := parser.NewPromiseParser(stdStream)
+	stdP.RemoveErrorListeners()
+	stdTree := stdP.CompilationUnit()
+	stdFile, errs := ast.Build("std.pr", stdTree)
+	if len(errs) > 0 {
+		t.Fatalf("std AST build errors: %v", errs)
+	}
+	for _, d := range stdFile.Decls {
+		switch dd := d.(type) {
+		case *ast.FuncDecl:
+			dd.IsStd = true
+		case *ast.TypeDecl:
+			dd.IsStd = true
+		case *ast.EnumDecl:
+			dd.IsStd = true
+		}
+	}
+
+	// Parse user
 	input := antlr.NewInputStream(src)
 	lexer := parser.NewPromiseLexer(input)
 	lexer.RemoveErrorListeners()
@@ -52,10 +123,24 @@ func generateIR(t *testing.T, src string) string {
 	if len(errs) > 0 {
 		t.Fatalf("AST build errors: %v", errs)
 	}
+
+	// Merge: std first, then user
+	merged := make([]ast.Decl, 0, len(stdFile.Decls)+len(file.Decls))
+	merged = append(merged, stdFile.Decls...)
+	merged = append(merged, file.Decls...)
+	file.Decls = merged
+
 	info, errs := sema.Check(file)
 	if len(errs) > 0 {
 		t.Fatalf("sema errors: %v", errs)
 	}
+	return file, info
+}
+
+// generateIR runs the full pipeline: parse → sema → codegen, returns LLVM IR text.
+func generateIR(t *testing.T, src string) string {
+	t.Helper()
+	file, info := parseWithStd(t, src)
 	result := Compile(file, info)
 	return result.Module.String()
 }
@@ -63,21 +148,7 @@ func generateIR(t *testing.T, src string) string {
 // compileResult runs the full pipeline and returns the CompileResult.
 func compileResult(t *testing.T, src string) *CompileResult {
 	t.Helper()
-	input := antlr.NewInputStream(src)
-	lexer := parser.NewPromiseLexer(input)
-	lexer.RemoveErrorListeners()
-	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
-	p := parser.NewPromiseParser(stream)
-	p.RemoveErrorListeners()
-	tree := p.CompilationUnit()
-	file, errs := ast.Build("test.pr", tree)
-	if len(errs) > 0 {
-		t.Fatalf("AST build errors: %v", errs)
-	}
-	info, errs := sema.Check(file)
-	if len(errs) > 0 {
-		t.Fatalf("sema errors: %v", errs)
-	}
+	file, info := parseWithStd(t, src)
 	return Compile(file, info)
 }
 
@@ -3637,10 +3708,16 @@ func TestArgCoercionSecondParent(t *testing.T) {
 // --- Stage 9: Std library and test runner codegen tests ---
 
 // generateIRWithStd compiles with std declarations (IsStd=true) merged before user code.
+// stdContainers is kept for backward compatibility with tests that pass it to generateIRWithStd.
+// Its contents are already included in stdAll; the dedup logic handles duplicates silently.
+const stdContainers = ""
+
 func generateIRWithStd(t *testing.T, stdSrc, userSrc string) string {
 	t.Helper()
+	// Always include stdAll; additional stdSrc is appended
+	combinedStd := stdAll + "\n" + stdSrc
 	// Parse std
-	stdInput := antlr.NewInputStream(stdSrc)
+	stdInput := antlr.NewInputStream(combinedStd)
 	stdLexer := parser.NewPromiseLexer(stdInput)
 	stdLexer.RemoveErrorListeners()
 	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)

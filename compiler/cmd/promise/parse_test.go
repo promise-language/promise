@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/antlr4-go/antlr/v4"
@@ -615,6 +616,80 @@ main() { /* inside */ Int x = 0; // end
 			errs := parseString(tc.code)
 			if errs != 0 {
 				t.Errorf("expected 0 errors, got %d for: %s", errs, tc.code)
+			}
+		})
+	}
+}
+
+// TestIsFullFile verifies the detection heuristic for full files vs expressions.
+func TestIsFullFile(t *testing.T) {
+	full := []struct {
+		name string
+		code string
+	}{
+		{"main_function", `main() { println("hi"); }`},
+		{"main_with_helper", `add(int a, int b) int { return a + b; } main() { print_int(add(1, 2)); }`},
+		{"type_decl", `type Foo { int x; } main() { Foo f = Foo(x: 1); }`},
+		{"enum_decl", `enum Dir { N, S } main() { Dir d = Dir.N; }`},
+		{"use_statement", `use io "std/io"; main() { io.println("hi"); }`},
+		{"use_only", `use io "std/io";`},
+		{"type_only", `type Point { int x; int y; }`},
+		{"enum_only", `enum Color { Red, Green, Blue }`},
+	}
+	for _, tc := range full {
+		t.Run("full/"+tc.name, func(t *testing.T) {
+			if !isFullFile(tc.code) {
+				t.Errorf("expected isFullFile=true for: %s", tc.code)
+			}
+		})
+	}
+
+	expr := []struct {
+		name string
+		code string
+	}{
+		{"bare_call", `print_int(42)`},
+		{"bare_println", `println("hello")`},
+		{"assignment", `x := 10; print_int(x)`},
+		{"multi_statement", `x := 10; y := 20; print_int(x + y)`},
+		{"if_statement", `if true { print_int(1); }`},
+		{"for_loop", `for i in 0..10 { print_int(i); }`},
+	}
+	for _, tc := range expr {
+		t.Run("expr/"+tc.name, func(t *testing.T) {
+			if isFullFile(tc.code) {
+				t.Errorf("expected isFullFile=false for: %s", tc.code)
+			}
+		})
+	}
+}
+
+// TestExecWrapCode verifies that expression wrapping produces parseable code.
+// Uses the same wrapping logic as runExec: add ";" only if source doesn't
+// already end with ";" or "}".
+func TestExecWrapCode(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+	}{
+		{"bare_call", `print_int(42)`},
+		{"with_semi", `print_int(42);`},
+		{"multi_statement", `x := 10; print_int(x);`},
+		{"string_call", `println("hello")`},
+		{"if_stmt", `if true { print_int(1); }`},
+		{"for_loop", `for i := 0; i < 3; i += 1 { print_int(i); }`},
+		{"while_loop", `while true { break; }`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			source := tc.source
+			if !strings.HasSuffix(source, ";") && !strings.HasSuffix(source, "}") {
+				source += ";"
+			}
+			wrapped := "main() {\n" + source + "\n}"
+			errs := parseString(wrapped)
+			if errs != 0 {
+				t.Errorf("wrapped code has parse errors: %s", wrapped)
 			}
 		})
 	}

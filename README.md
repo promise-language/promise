@@ -42,46 +42,71 @@ main() {
 
 ## Status
 
-**Stage 8h (current):** The compiler pipeline is functional through code generation. Stages 1–8h are complete:
+**Stage 8f (current):** The compiler pipeline is functional through code generation. Stages 1–8f are complete:
 
 - **Stages 1–2:** ANTLR4 grammar, CST → AST builder
 - **Stages 3–4:** Type system, semantic analysis (type checking, name resolution, exhaustiveness)
 - **Stage 5:** Generic type substitution, constraint validation, instance tracking
 - **Stage 6:** Ownership analysis (move semantics, borrow tracking, return safety)
 - **Stage 7:** Meta annotation processing
-- **Stage 8a–8h:** LLVM IR codegen — primitives, strings, user types, enums, error handling, generic monomorphization, containers (tuples, optionals, slices, maps, lambdas), optional patterns, string interpolation
+- **Stage 8a–8f:** LLVM IR codegen — primitives, strings, user types, enums, error handling, generic monomorphization, containers (tuples, optionals, slices, maps, lambdas), optional patterns, string interpolation, promise-first builtin types
 
-The `promise build file.pr` command compiles Promise source to native binaries via LLVM IR + clang. 400+ tests across all packages.
+The compiler produces native binaries via LLVM IR + clang. 400+ tests across all packages.
 
-Upcoming stages: module system, full CLI, package manager.
+Upcoming stages: module system, package manager.
 
 ## Building
 
-Prerequisites: Go 1.22+, Java (for ANTLR4 code generation).
+Prerequisites: Go 1.22+, Java (for ANTLR4 code generation), clang.
 
 ```sh
 cd compiler
 make              # download ANTLR4 JAR, generate parser, build binary
 make test         # run tests
+make install      # install to ~/.promise/
 make clean        # remove generated code and binary
-```
-
-Individual targets:
-
-```sh
-make download-antlr   # fetch ANTLR4 JAR to tools/
-make generate         # regenerate Go parser from grammars
-make build            # compile the promise binary
-make fmt              # go fmt
 ```
 
 ## Usage
 
 ```sh
-./compiler/promise path/to/file.pr
+promise build file.pr           # compile to executable
+promise build -o out file.pr    # compile with custom output name
+promise run file.pr             # compile and run
+promise test file.pr            # discover and run @test functions
+promise check file.pr           # type-check only
+promise ast file.pr             # print the AST
 ```
 
-Prints the LISP-style parse tree to stdout. Syntax errors are reported to stderr as `file:line:col: message`.
+### Inline execution
+
+Run Promise code directly from the command line:
+
+```sh
+promise exec 'print_int(42)'                        # expression (auto-wrapped in main)
+promise exec 'main() { println("hello"); }'         # full program
+echo 'println("hello")' | promise exec              # from stdin
+echo 'println("hello")' | promise                   # bare pipe (auto-detected)
+cat program.pr | promise                             # pipe a file
+```
+
+Errors in inline mode show the source line with a caret marker:
+
+```
+1:10: undefined: foo
+    print_int(foo);
+              ^
+```
+
+### Install
+
+Install Promise system-wide from a built binary:
+
+```sh
+promise install
+```
+
+Copies the binary to `~/.promise/bin/` and extracts the embedded standard library and runtime to `~/.promise/lib/`. The binary is self-contained — `std/` and `runtime/` files are embedded at build time via `go:embed`.
 
 ## Project Structure
 
@@ -90,7 +115,7 @@ promise_lang/
 ├── compiler/                    # Go compiler (single binary)
 │   ├── go.mod
 │   ├── Makefile
-│   ├── cmd/promise/             # CLI entry point (build, run, check)
+│   ├── cmd/promise/             # CLI entry point (build, run, exec, install)
 │   ├── grammar/                 # ANTLR4 lexer/parser grammars
 │   ├── internal/
 │   │   ├── ast/                 # AST builder (CST → typed AST)
@@ -101,6 +126,7 @@ promise_lang/
 │   │   └── parser/              # ANTLR4-generated Go code (gitignored)
 │   ├── testdata/                # Parse test fixtures
 │   └── tools/                   # ANTLR4 JAR (gitignored)
+├── std/                         # Standard library (.pr files)
 ├── runtime/                     # C runtime (strings, maps, print, panic)
 ├── docs/
 │   ├── language-design.md       # Full language specification

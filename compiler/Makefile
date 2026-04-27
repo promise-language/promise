@@ -4,8 +4,9 @@ ANTLR_URL     := https://www.antlr.org/download/antlr-$(ANTLR_VERSION)-complete.
 GRAMMAR_DIR   := grammar
 PARSER_PKG    := internal/parser
 BINARY        := promise
+RESOURCES     := cmd/promise/resources
 
-.PHONY: all generate build test clean download-antlr fmt
+.PHONY: all generate build test clean download-antlr fmt install resources
 
 all: generate build
 
@@ -31,15 +32,24 @@ generate: $(ANTLR_JAR)
 		-o ../$(PARSER_PKG) \
 		PromiseParser.g4
 
-build: generate
+resources:
+	@mkdir -p $(RESOURCES)/std $(RESOURCES)/runtime
+	@cp ../std/*.pr $(RESOURCES)/std/
+	@cp ../runtime/*.c ../runtime/*.h $(RESOURCES)/runtime/
+
+build: generate resources
 	go build -o $(BINARY) ./cmd/promise
 
-test: generate
+test: generate resources
 	go test ./...
 
 clean:
 	rm -f $(BINARY)
 	rm -rf $(PARSER_PKG)/*.go $(PARSER_PKG)/*.interp $(PARSER_PKG)/*.tokens
+	rm -rf $(RESOURCES)
+
+install: build
+	./promise install
 
 fmt:
 	go fmt ./...

@@ -47,15 +47,20 @@ Source (.pr)
 The `promise` binary serves as both compiler and package manager:
 
 ```
-promise build                # Compile the project
-promise run                  # Build and run
-promise test                 # Run tests
-promise init                 # Create new promise.mod
-promise add <url>            # Add dependency
-promise remove <url>         # Remove dependency
-promise update               # Update dependencies
-promise fmt                  # Format source code
-promise lock                 # Regenerate lockfile
+promise build file.pr        # Compile to executable
+promise run file.pr          # Build and run
+promise test file.pr         # Run @test functions
+promise check file.pr        # Type-check only
+promise ast file.pr          # Print the AST
+promise exec '<code>'        # Execute inline code
+echo '<code>' | promise      # Execute from stdin
+promise install              # Install to ~/.promise/
+promise init                 # Create new promise.mod (planned)
+promise add <url>            # Add dependency (planned)
+promise remove <url>         # Remove dependency (planned)
+promise update               # Update dependencies (planned)
+promise fmt                  # Format source code (planned)
+promise lock                 # Regenerate lockfile (planned)
 ```
 
 ---

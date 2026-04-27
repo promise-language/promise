@@ -1,7 +1,9 @@
 package main
 
 import (
+	"embed"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,23 +18,41 @@ import (
 	"djabi.dev/go/promise_lang/internal/sema"
 )
 
+//go:embed resources/std/*.pr
+var embeddedStd embed.FS
+
+//go:embed resources/runtime/*
+var embeddedRuntime embed.FS
+
 func usage() {
-	fmt.Fprintf(os.Stderr, `Usage: promise <command> [options] <file.pr>
+	fmt.Fprintf(os.Stderr, `Usage: promise <command> [options] [file.pr]
 
 Commands:
-  build   Compile a Promise source file to an executable
-  run     Compile and run a Promise source file
-  test    Discover and run test functions
-  check   Run semantic analysis (type checking)
-  ast     Print the AST
+  build     Compile a Promise source file to an executable
+  run       Compile and run a Promise source file
+  test      Discover and run test functions
+  check     Run semantic analysis (type checking)
+  ast       Print the AST
+  exec      Execute inline Promise code
+  install   Install Promise to ~/.promise/
 
 Options (build):
   -o <output>   Output file name (default: input file without extension)
+
+Inline execution:
+  promise exec 'println("hello")'
+  echo 'println("hello")' | promise exec
+  echo 'println("hello")' | promise
 `)
 }
 
 func main() {
 	if len(os.Args) < 2 {
+		// If stdin is piped, treat as inline exec
+		if info, err := os.Stdin.Stat(); err == nil && info.Mode()&os.ModeCharDevice == 0 {
+			runExec(nil)
+			return
+		}
 		usage()
 		os.Exit(1)
 	}
@@ -68,6 +88,10 @@ func main() {
 		}
 		file := parseSourceFile(os.Args[2])
 		ast.Print(os.Stdout, file)
+	case "exec":
+		runExec(os.Args[2:])
+	case "install":
+		runInstall()
 	default:
 		// Try treating as a filename for backwards compatibility
 		if strings.HasSuffix(cmd, ".pr") {
@@ -357,17 +381,13 @@ func compileFrontend(filename string) (*ast.File, *sema.Info) {
 
 	info, errs := sema.Check(file)
 	if len(errs) > 0 {
-		for _, e := range errs {
-			fmt.Fprintln(os.Stderr, e)
-		}
+		printFileErrors(filename, errs)
 		os.Exit(1)
 	}
 
 	ownerErrs := ownership.Check(file, info)
 	if len(ownerErrs) > 0 {
-		for _, e := range ownerErrs {
-			fmt.Fprintln(os.Stderr, e)
-		}
+		printFileErrors(filename, ownerErrs)
 		os.Exit(1)
 	}
 
@@ -389,6 +409,13 @@ func findStdDir() string {
 			filepath.Join(dir, "std"),
 			filepath.Join(dir, "..", "std"),
 			filepath.Join(dir, "..", "..", "std"),
+		)
+	}
+
+	// Check installed location
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates,
+			filepath.Join(homeDir, ".promise", "lib", "std"),
 		)
 	}
 
@@ -466,6 +493,13 @@ func findRuntimeDir() string {
 		)
 	}
 
+	// Check installed location
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates,
+			filepath.Join(homeDir, ".promise", "lib", "runtime"),
+		)
+	}
+
 	for _, c := range candidates {
 		info, err := os.Stat(c)
 		if err == nil && info.IsDir() {
@@ -501,6 +535,8 @@ func findRuntimeCFiles(dir string, testMode bool) ([]string, error) {
 type errorListener struct {
 	antlr.DefaultErrorListener
 	filename string
+	source   string // non-empty for inline mode: show source context
+	wrapped  bool   // if true, adjust line numbers by -1
 	errors   int
 }
 
@@ -511,6 +547,318 @@ func (l *errorListener) SyntaxError(
 	msg string,
 	_ antlr.RecognitionException,
 ) {
-	fmt.Fprintf(os.Stderr, "%s:%d:%d: %s\n", l.filename, line, column, msg)
+	if l.source != "" {
+		lines := strings.Split(l.source, "\n")
+		displayLine := line
+		if l.wrapped {
+			displayLine--
+		}
+		fmt.Fprintf(os.Stderr, "%d:%d: %s\n", displayLine, column, msg)
+		srcIdx := line - 1
+		if srcIdx >= 0 && srcIdx < len(lines) {
+			fmt.Fprintf(os.Stderr, "    %s\n", lines[srcIdx])
+			fmt.Fprintf(os.Stderr, "    %s^\n", strings.Repeat(" ", column))
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "%s:%d:%d: %s\n", l.filename, line, column, msg)
+		lines := readFileLines(l.filename)
+		if lines != nil {
+			printErrorContext(lines, line-1, column)
+		}
+	}
 	l.errors++
+}
+
+// --- Inline execution ---
+
+// runExec executes inline Promise code from CLI arguments or stdin.
+func runExec(args []string) {
+	var source string
+
+	if len(args) > 0 {
+		source = strings.Join(args, " ")
+	} else {
+		// Read from stdin
+		info, err := os.Stdin.Stat()
+		if err != nil || info.Mode()&os.ModeCharDevice != 0 {
+			fmt.Fprintln(os.Stderr, "usage: promise exec <code>")
+			fmt.Fprintln(os.Stderr, "       echo '<code>' | promise exec")
+			os.Exit(1)
+		}
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error reading stdin: %v\n", err)
+			os.Exit(1)
+		}
+		source = string(data)
+	}
+
+	source = strings.TrimSpace(source)
+	if source == "" {
+		fmt.Fprintln(os.Stderr, "error: no code provided")
+		os.Exit(1)
+	}
+
+	// Wrap in main() if needed
+	wrapped := false
+	if !isFullFile(source) {
+		if !strings.HasSuffix(source, ";") && !strings.HasSuffix(source, "}") {
+			source += ";"
+		}
+		source = "main() {\n" + source + "\n}"
+		wrapped = true
+	}
+
+	// Parse from string with inline error formatting
+	file := parseSourceString(source, wrapped)
+
+	// Merge standard library
+	stdDir := findStdDir()
+	if stdDir != "" {
+		stdFiles := parseStdFiles(stdDir)
+		file = mergeStdDecls(file, stdFiles)
+	}
+
+	// Semantic analysis
+	info, errs := sema.Check(file)
+	if len(errs) > 0 {
+		printInlineErrors(source, errs, wrapped)
+		os.Exit(1)
+	}
+
+	// Ownership analysis
+	ownerErrs := ownership.Check(file, info)
+	if len(ownerErrs) > 0 {
+		printInlineErrors(source, ownerErrs, wrapped)
+		os.Exit(1)
+	}
+
+	// Code generation
+	result := codegen.Compile(file, info)
+
+	// Compile and link to temp binary
+	tmpOutput, err := os.CreateTemp("", "promise-exec-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
+		os.Exit(1)
+	}
+	tmpOutput.Close()
+	defer os.Remove(tmpOutput.Name())
+
+	compileAndLink(result, tmpOutput.Name(), false)
+
+	// Execute
+	cmd := exec.Command(tmpOutput.Name())
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		}
+		fmt.Fprintf(os.Stderr, "error running: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// isFullFile returns true if source looks like a complete Promise file
+// with top-level declarations, false if it's just expressions/statements.
+func isFullFile(source string) bool {
+	if strings.Contains(source, "main(") {
+		return true
+	}
+	trimmed := strings.TrimSpace(source)
+	if strings.HasPrefix(trimmed, "type ") || strings.HasPrefix(trimmed, "enum ") ||
+		strings.HasPrefix(trimmed, "use ") {
+		return true
+	}
+	return false
+}
+
+// parseSourceString parses Promise source code from a string.
+// Uses inline error formatting with source context display.
+func parseSourceString(source string, wrapped bool) *ast.File {
+	input := antlr.NewInputStream(source)
+
+	el := &errorListener{source: source, wrapped: wrapped}
+
+	lexer := parser.NewPromiseLexer(input)
+	lexer.RemoveErrorListeners()
+	lexer.AddErrorListener(el)
+
+	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+	p := parser.NewPromiseParser(stream)
+	p.RemoveErrorListeners()
+	p.AddErrorListener(el)
+
+	tree := p.CompilationUnit()
+
+	if el.errors > 0 {
+		os.Exit(1)
+	}
+
+	file, errs := ast.Build("", tree)
+	if len(errs) > 0 {
+		printInlineErrors(source, errs, wrapped)
+		os.Exit(1)
+	}
+	return file
+}
+
+// printInlineErrors formats errors with source context for inline execution.
+func printInlineErrors(source string, errs []error, wrapped bool) {
+	lines := strings.Split(source, "\n")
+	lineOffset := 0
+	if wrapped {
+		lineOffset = 1
+	}
+
+	for _, e := range errs {
+		var pos ast.Pos
+		var msg string
+		switch err := e.(type) {
+		case *sema.Error:
+			pos, msg = err.Pos, err.Msg
+		case *ownership.Error:
+			pos, msg = err.Pos, err.Msg
+		default:
+			fmt.Fprintln(os.Stderr, e)
+			continue
+		}
+
+		displayLine := pos.Line - lineOffset
+		fmt.Fprintf(os.Stderr, "%d:%d: %s\n", displayLine, pos.Column, msg)
+		printErrorContext(lines, pos.Line-1, pos.Column)
+	}
+}
+
+// printErrorContext prints a source line and caret marker to stderr.
+// srcIdx is the 0-based line index, column is 0-based.
+func printErrorContext(lines []string, srcIdx, column int) {
+	if srcIdx >= 0 && srcIdx < len(lines) {
+		fmt.Fprintf(os.Stderr, "    %s\n", lines[srcIdx])
+		if column >= 0 {
+			fmt.Fprintf(os.Stderr, "    %s^\n", strings.Repeat(" ", column))
+		}
+	}
+}
+
+// fileLineCache caches file contents read for error reporting.
+var fileLineCache = map[string][]string{}
+
+// readFileLines reads a file and returns its lines, caching results.
+func readFileLines(filename string) []string {
+	if lines, ok := fileLineCache[filename]; ok {
+		return lines
+	}
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return nil
+	}
+	lines := strings.Split(string(data), "\n")
+	fileLineCache[filename] = lines
+	return lines
+}
+
+// printFileErrors formats errors with source context for file-based compilation.
+func printFileErrors(filename string, errs []error) {
+	lines := readFileLines(filename)
+
+	for _, e := range errs {
+		var pos ast.Pos
+		var msg string
+		switch err := e.(type) {
+		case *sema.Error:
+			pos, msg = err.Pos, err.Msg
+		case *ownership.Error:
+			pos, msg = err.Pos, err.Msg
+		default:
+			fmt.Fprintln(os.Stderr, e)
+			continue
+		}
+
+		fmt.Fprintf(os.Stderr, "%s:%d:%d: %s\n", pos.File, pos.Line, pos.Column, msg)
+		if lines != nil {
+			printErrorContext(lines, pos.Line-1, pos.Column)
+		}
+	}
+}
+
+// --- Install ---
+
+// runInstall installs the Promise compiler to ~/.promise/.
+func runInstall() {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	promiseDir := filepath.Join(homeDir, ".promise")
+	binDir := filepath.Join(promiseDir, "bin")
+	libDir := filepath.Join(promiseDir, "lib")
+	stdDest := filepath.Join(libDir, "std")
+	runtimeDest := filepath.Join(libDir, "runtime")
+
+	// Create directory structure
+	for _, dir := range []string{binDir, stdDest, runtimeDest} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "error creating %s: %v\n", dir, err)
+			os.Exit(1)
+		}
+	}
+
+	// Copy binary
+	execPath, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot determine executable path: %v\n", err)
+		os.Exit(1)
+	}
+	copyFile(execPath, filepath.Join(binDir, "promise"), 0755)
+
+	// Extract embedded std files
+	extractEmbedded(embeddedStd, "resources/std", stdDest)
+
+	// Extract embedded runtime files
+	extractEmbedded(embeddedRuntime, "resources/runtime", runtimeDest)
+
+	fmt.Printf("Installed Promise to %s\n\n", promiseDir)
+	fmt.Printf("Add to your shell profile:\n\n")
+	fmt.Printf("  export PATH=\"%s:$PATH\"\n", binDir)
+}
+
+// extractEmbedded writes all files from an embedded FS directory to a destination.
+func extractEmbedded(fsys embed.FS, prefix, destDir string) {
+	entries, err := fsys.ReadDir(prefix)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error reading embedded %s: %v\n", prefix, err)
+		os.Exit(1)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		data, err := fsys.ReadFile(prefix + "/" + e.Name())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error reading embedded %s/%s: %v\n", prefix, e.Name(), err)
+			os.Exit(1)
+		}
+		dst := filepath.Join(destDir, e.Name())
+		if err := os.WriteFile(dst, data, 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "error writing %s: %v\n", dst, err)
+			os.Exit(1)
+		}
+	}
+}
+
+// copyFile copies a single file from src to dst with the given permissions.
+func copyFile(src, dst string, perm os.FileMode) {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error reading %s: %v\n", src, err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(dst, data, perm); err != nil {
+		fmt.Fprintf(os.Stderr, "error writing %s: %v\n", dst, err)
+		os.Exit(1)
+	}
 }

@@ -411,15 +411,21 @@ Module resolution and dependency management.
 - Flat directory layout (no required `src/`)
 - Cycle detection
 
-## Stage 10 — CLI (Planned)
+## Stage 10 — CLI
 
-Full command-line interface.
+Command-line interface. Core commands implemented; formatter planned.
 
-- `promise build` — compile to binary
-- `promise run` — compile and execute
-- `promise check` — type-check only (exists as prototype)
-- `promise test` — discover and run `test` meta-annotated functions
-- `promise fmt` — code formatter
+- `promise build [-o output] <file.pr>` — compile to binary
+- `promise run <file.pr>` — compile and execute
+- `promise check <file.pr>` — type-check only
+- `promise test <file.pr>` — discover and run `test` meta-annotated functions
+- `promise ast <file.pr>` — print the AST
+- `promise exec <code>` — execute inline code (auto-wraps in `main()` if needed)
+- `promise install` — install compiler + std + runtime to `~/.promise/`
+- Bare pipe detection: `echo '<code>' | promise` auto-enters exec mode
+- Inline error formatting: source line + `^` caret marker, no temp filenames
+- Embedded `std/` and `runtime/` in the binary via `go:embed` for self-contained install
+- `promise fmt` — code formatter (planned)
 
 ## Stage 11 — Package Manager (Planned)
 

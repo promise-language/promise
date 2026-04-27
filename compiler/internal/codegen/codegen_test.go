@@ -2515,10 +2515,10 @@ func TestLambdaExpr(t *testing.T) {
 			f := |int x| -> x + 1;
 		}
 	`)
-	// Should create anonymous function
-	assertContains(t, ir, "define i64 @.lambda.0(i64 %x)")
-	// Lambda returned as i8* via bitcast
-	assertContains(t, ir, "bitcast i64 (i64)* @.lambda.0 to i8*")
+	// Lambda function has env (i8*) as first parameter
+	assertContains(t, ir, "define i64 @.lambda.0(i8* %env, i64 %x)")
+	// Lambda returned as fat pointer {fn_ptr, env_ptr}
+	assertContains(t, ir, "insertvalue { i8*, i8* }")
 }
 
 func TestLambdaCall(t *testing.T) {
@@ -2528,8 +2528,8 @@ func TestLambdaCall(t *testing.T) {
 			int y = f(42);
 		}
 	`)
-	// Should do indirect call via bitcast
-	assertContains(t, ir, "bitcast i8*")
+	// Should extract fn and env from fat pointer, then call with env as first arg
+	assertContains(t, ir, "extractvalue { i8*, i8* }")
 	assertContains(t, ir, "call i64")
 }
 
@@ -2539,7 +2539,7 @@ func TestLambdaBlock(t *testing.T) {
 			f := |int x| -> int { return x * 2; };
 		}
 	`)
-	assertContains(t, ir, "define i64 @.lambda.0(i64 %x)")
+	assertContains(t, ir, "define i64 @.lambda.0(i8* %env, i64 %x)")
 	assertContains(t, ir, "mul i64")
 }
 
@@ -2549,7 +2549,7 @@ func TestLambdaVoid(t *testing.T) {
 			f := |int x| -> void { return; };
 		}
 	`)
-	assertContains(t, ir, "define void @.lambda.0(i64 %x)")
+	assertContains(t, ir, "define void @.lambda.0(i8* %env, i64 %x)")
 }
 
 func TestLambdaVariable(t *testing.T) {
@@ -2558,9 +2558,119 @@ func TestLambdaVariable(t *testing.T) {
 			f := |int x| -> x + 1;
 		}
 	`)
-	// Lambda stored as i8*
-	assertContains(t, ir, "alloca i8*")
-	assertContains(t, ir, "store i8*")
+	// Lambda stored as fat pointer { i8*, i8* }
+	assertContains(t, ir, "alloca { i8*, i8* }")
+	assertContains(t, ir, "store { i8*, i8* }")
+}
+
+// --- Lambda Capture Tests ---
+
+func TestLambdaCaptureInt(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int x = 42;
+			f := |int y| -> x + y;
+		}
+	`)
+	// Env struct should be allocated via malloc
+	assertContains(t, ir, "call i8* @malloc(i64")
+	// Lambda function should have env param
+	assertContains(t, ir, "define i64 @.lambda.0(i8* %env, i64 %y)")
+	// Should load captured var from env struct inside lambda
+	assertContains(t, ir, "cap")
+}
+
+func TestLambdaCaptureMultiple(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int a = 1;
+			int b = 2;
+			f := |int x| -> a + b + x;
+		}
+	`)
+	// Env should be allocated
+	assertContains(t, ir, "call i8* @malloc(i64")
+	// Lambda should have env param
+	assertContains(t, ir, "define i64 @.lambda.0(i8* %env")
+}
+
+func TestLambdaNoCaptures(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			f := |int x| -> x + 1;
+		}
+	`)
+	// No malloc for env — null env pointer
+	assertContains(t, ir, "i8* null, 1")
+}
+
+func TestLambdaCaptureCall(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int x = 10;
+			f := |int y| -> x + y;
+			int result = f(5);
+		}
+	`)
+	// Should extract fn and env from fat pointer for indirect call
+	assertContains(t, ir, "extractvalue { i8*, i8* }")
+	assertContains(t, ir, "call i64")
+}
+
+func TestLambdaNestedCapture(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int x = 10;
+			f := |int a| -> int {
+				g := |int b| -> x + b;
+				return g(a);
+			};
+		}
+	`)
+	// Outer lambda should also capture x (propagated from inner)
+	// Both lambdas should have env params and malloc for env
+	assertContains(t, ir, "define i64 @.lambda.0(i8* %env")
+	assertContains(t, ir, "define i64 @.lambda.1(i8* %env")
+	// Two malloc calls — one for outer lambda env, one for inner
+	assertContains(t, ir, "call i8* @malloc(i64")
+}
+
+func TestLambdaEnvFree(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int x = 10;
+			f := |int y| -> x + y;
+		}
+	`)
+	// Env should be freed at scope exit
+	assertContains(t, ir, "call void @free(i8*")
+}
+
+func TestLambdaEnvFreeNullCheck(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			f := |int x| -> x + 1;
+		}
+	`)
+	// No-capture lambda: env is null, free should have null check
+	assertContains(t, ir, "env.free")
+	assertContains(t, ir, "env.skip")
+}
+
+func TestNamedFuncRefThunk(t *testing.T) {
+	ir := generateIR(t, `
+		add(int x) int { return x + 1; }
+		main() {
+			f := add;
+			int y = f(42);
+		}
+	`)
+	// Should generate a thunk for the named function reference
+	assertContains(t, ir, "define i64 @.thunk.add(i8* %env, i64 %x)")
+	// Fat pointer should use thunk, not raw @add
+	assertContains(t, ir, ".thunk.add")
+	// Should call through indirect call path
+	assertContains(t, ir, "extractvalue { i8*, i8* }")
 }
 
 // ================================================================

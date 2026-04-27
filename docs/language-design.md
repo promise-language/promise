@@ -1626,12 +1626,29 @@ greet("Alice");            // greeting uses default
 greet("Alice", "Hi");      // greeting = "Hi"
 ```
 
-Closures capture by reference by default. Use `move` to capture by value:
+Closures capture variables from enclosing scopes. `Copy` types (primitives, refs, types with `copy` meta) are automatically captured by copy. Non-`Copy` types require the `move` keyword, which transfers ownership into the closure:
 
 ```promise
 string greeting = "hello";
+// move required: string is non-Copy
 closure := move |string name| -> string {
   return "{greeting}, {name}";
+};
+// greeting is no longer usable here — it was moved into the closure
+
+int x = 42;
+// no move needed: int is Copy
+adder := |int y| -> x + y;
+// x is still usable here — it was copied into the closure
+```
+
+Nested lambdas can capture from grandparent scopes — intermediate lambdas automatically capture forwarded variables:
+
+```promise
+int x = 10;
+f := |int a| -> int {
+  g := |int b| -> x + b;  // x captured through f
+  return g(a);
 };
 ```
 

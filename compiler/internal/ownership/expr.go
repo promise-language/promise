@@ -430,8 +430,26 @@ func (c *Checker) registerPatternBindings(pat ast.MatchPattern) {
 // --- Lambda expressions ---
 
 func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) {
+	// Mark move-captured variables as moved in the enclosing scope
+	if captures := c.info.LambdaCaptures[e]; len(captures) > 0 {
+		for _, cv := range captures {
+			if cv.ByMove {
+				c.state[cv.Obj.Name()] = Moved
+			}
+		}
+	}
+
+	// Check lambda body in isolation
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
+
+	// Captured variables are fresh owned values inside the lambda
+	if captures := c.info.LambdaCaptures[e]; len(captures) > 0 {
+		for _, cv := range captures {
+			c.state[cv.Obj.Name()] = Owned
+		}
+	}
+
 	for _, p := range e.Params {
 		if p.Name != "_" {
 			c.state[p.Name] = Owned

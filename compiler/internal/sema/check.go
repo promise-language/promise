@@ -7,18 +7,22 @@ import (
 
 // Checker performs semantic analysis on a parsed AST file.
 type Checker struct {
-	file          *ast.File
-	info          *Info
-	errors        []error
-	stdScope      *types.Scope     // std library scope (child of Universe, parent of fileScope)
-	fileScope     *types.Scope     // file-level scope (child of stdScope)
-	scope         *types.Scope     // current scope during traversal
-	curFunc       *types.Signature // current function being checked (for return/raise)
-	curType       *types.Named     // current type being defined/checked (for Self resolution)
-	inNewBody     bool             // true when checking a new() constructor body
-	inFactoryBody bool             // true when checking a `factory method body
-	factoryLocals map[string]bool  // variables initialized from constructor calls in factory body
-	inLoop        int              // nesting depth of loop constructs
+	file           *ast.File
+	info           *Info
+	errors         []error
+	stdScope       *types.Scope            // std library scope (child of Universe, parent of fileScope)
+	fileScope      *types.Scope            // file-level scope (child of stdScope)
+	scope          *types.Scope            // current scope during traversal
+	curFunc        *types.Signature        // current function being checked (for return/raise)
+	curType        *types.Named            // current type being defined/checked (for Self resolution)
+	inNewBody      bool                    // true when checking a new() constructor body
+	inFactoryBody  bool                    // true when checking a `factory method body
+	factoryLocals  map[string]bool         // variables initialized from constructor calls in factory body
+	inLoop         int                     // nesting depth of loop constructs
+	lambdaDepth    int                     // nesting depth of lambdas (0 = not in lambda)
+	lambdaCaptures map[string]*CapturedVar // current lambda's captured vars (by name)
+	lambdaScope    *types.Scope            // scope at lambda definition site (capture boundary)
+	lambdaMove     bool                    // true if current lambda uses `move` keyword
 }
 
 // Check performs semantic analysis on the given AST file.
@@ -27,10 +31,11 @@ func Check(file *ast.File) (*Info, []error) {
 	c := &Checker{
 		file: file,
 		info: &Info{
-			Types:         make(map[ast.Expr]types.Type),
-			Objects:       make(map[*ast.IdentExpr]types.Object),
-			Scopes:        make(map[ast.Node]*types.Scope),
-			FieldDefaults: make(map[*types.Field]ast.Expr),
+			Types:          make(map[ast.Expr]types.Type),
+			Objects:        make(map[*ast.IdentExpr]types.Object),
+			Scopes:         make(map[ast.Node]*types.Scope),
+			FieldDefaults:  make(map[*types.Field]ast.Expr),
+			LambdaCaptures: make(map[*ast.LambdaExpr][]*CapturedVar),
 		},
 	}
 

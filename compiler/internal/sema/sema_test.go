@@ -785,6 +785,104 @@ func TestLambdaExprBody(t *testing.T) {
 	`)
 }
 
+// --- Lambda Capture Tests ---
+
+func TestLambdaCapturesCopyVar(t *testing.T) {
+	checkOK(t, `
+		test() {
+			int x = 10;
+			f := |int y| -> x + y;
+		}
+	`)
+}
+
+func TestLambdaCapturesNonCopyWithoutMoveError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo { int x; drop(~this) {} }
+		test() {
+			f := Foo(x: 1);
+			g := |int y| -> y;
+		}
+	`)
+	// No error — f is not referenced inside g
+	if len(errs) > 0 {
+		t.Fatalf("expected no errors, got: %v", errs)
+	}
+}
+
+func TestLambdaCapturesNonCopyRefError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo { int x; }
+		test() {
+			f := Foo(x: 1);
+			g := |int y| -> f.x + y;
+		}
+	`)
+	expectError(t, errs, "cannot capture non-copy variable")
+}
+
+func TestLambdaCapturesNonCopyWithMove(t *testing.T) {
+	checkOK(t, `
+		type Foo { int x; }
+		test() {
+			f := Foo(x: 1);
+			g := move |int y| -> f.x + y;
+		}
+	`)
+}
+
+func TestLambdaNoFalseCapture(t *testing.T) {
+	// Variable declared inside lambda should not trigger capture
+	checkOK(t, `
+		test() {
+			f := |int x| -> int {
+				int y = x + 1;
+				return y;
+			};
+		}
+	`)
+}
+
+func TestLambdaCapturesMultipleVars(t *testing.T) {
+	checkOK(t, `
+		test() {
+			int a = 1;
+			int b = 2;
+			f := |int x| -> a + b + x;
+		}
+	`)
+}
+
+// --- Nested Lambda Capture Tests ---
+
+func TestLambdaNestedCaptureGrandparent(t *testing.T) {
+	checkOK(t, `
+		test() {
+			int x = 10;
+			f := |int a| -> int {
+				g := |int b| -> x + b;
+				return g(a);
+			};
+		}
+	`)
+}
+
+func TestLambdaNestedCaptureTriple(t *testing.T) {
+	checkOK(t, `
+		test() {
+			int x = 10;
+			int y = 20;
+			f := |int a| -> int {
+				g := |int b| -> int {
+					h := |int c| -> x + y + c;
+					return h(b);
+				};
+				return g(a);
+			};
+		}
+	`)
+}
+
 // --- Array Literal Tests ---
 
 func TestArrayLiteral(t *testing.T) {

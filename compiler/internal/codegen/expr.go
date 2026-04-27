@@ -317,8 +317,18 @@ func resolveEscape(seq string) string {
 // --- Identifiers ---
 
 func (c *Compiler) genIdentExpr(e *ast.IdentExpr) value.Value {
-	// Check for function reference
+	// Check for function reference — wrap in fat pointer if used as a value
 	if fn, ok := c.funcs[e.Name]; ok {
+		if _, isSig := c.info.Types[e].(*types.Signature); isSig {
+			// Named function used as first-class value: generate a thunk with
+			// the env-first ABI so it can be called through genIndirectCall.
+			thunk := c.getOrCreateThunk(fn, e.Name)
+			fnPtr := c.block.NewBitCast(thunk, irtypes.I8Ptr)
+			var closure value.Value = constant.NewUndef(closureType())
+			closure = c.block.NewInsertValue(closure, fnPtr, 0)
+			closure = c.block.NewInsertValue(closure, constant.NewNull(irtypes.I8Ptr), 1)
+			return closure
+		}
 		return fn
 	}
 	// Local variable: load from alloca
@@ -562,12 +572,12 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 		panic(fmt.Sprintf("codegen: unsupported callee type %T", e.Callee))
 	}
 
-	// Lambda call: callee is a local variable holding a function pointer (i8*)
+	// Lambda call: callee is a local variable holding a fat pointer {i8*, i8*}
 	if alloca, ok := c.locals[ident.Name]; ok {
 		calleeType := c.info.Types[e.Callee]
 		if sig, ok := calleeType.(*types.Signature); ok {
-			fnPtr := c.block.NewLoad(alloca.ElemType, alloca)
-			return c.genIndirectCall(fnPtr, sig, argVals)
+			closure := c.block.NewLoad(alloca.ElemType, alloca)
+			return c.genIndirectCall(closure, sig, argVals)
 		}
 	}
 
@@ -2327,13 +2337,16 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 		panic("codegen: lambda expression type is not *types.Signature")
 	}
 
-	// Build LLVM function type
+	// Collect captures from sema info
+	captures := c.info.LambdaCaptures[e]
+
+	// Build LLVM function type — env pointer (i8*) is always the first parameter
 	retType := irtypes.Type(irtypes.Void)
 	if sig.Result() != nil {
 		retType = c.resolveType(sig.Result())
 	}
 
-	var params []*ir.Param
+	params := []*ir.Param{ir.NewParam("env", irtypes.I8Ptr)}
 	for _, p := range sig.Params() {
 		params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
 	}
@@ -2343,6 +2356,44 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.lambdaCounter++
 	fn := c.module.NewFunc(lambdaName, retType, params...)
 
+	// Build env struct type and capture values from the enclosing scope BEFORE switching context
+	var envStructType *irtypes.StructType
+	var envPtr value.Value
+	if len(captures) > 0 {
+		envFieldTypes := make([]irtypes.Type, len(captures))
+		captureVals := make([]value.Value, len(captures))
+		for i, cv := range captures {
+			captureType := c.resolveType(cv.Obj.Type())
+			envFieldTypes[i] = captureType
+			// Load the captured variable's current value from the enclosing scope
+			if alloca, ok := c.locals[cv.Obj.Name()]; ok {
+				captureVals[i] = c.block.NewLoad(captureType, alloca)
+			} else {
+				captureVals[i] = constant.NewZeroInitializer(captureType)
+			}
+			// For move captures, clear the drop flag in the enclosing scope
+			if cv.ByMove {
+				c.clearDropFlag(cv.Obj.Name())
+			}
+		}
+		envStructType = irtypes.NewStruct(envFieldTypes...)
+
+		// Allocate env struct on heap
+		envSize := int64(llvmTypeSize(envStructType))
+		rawPtr := c.block.NewCall(c.funcs["malloc"], constant.NewInt(irtypes.I64, envSize))
+		typedEnvPtr := c.block.NewBitCast(rawPtr, irtypes.NewPointer(envStructType))
+
+		// Store captured values into env struct
+		for i, val := range captureVals {
+			fieldPtr := c.block.NewGetElementPtr(envStructType, typedEnvPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
+			c.block.NewStore(val, fieldPtr)
+		}
+		envPtr = rawPtr // i8*
+	} else {
+		envPtr = constant.NewNull(irtypes.I8Ptr)
+	}
+
 	// Save current state
 	savedFn := c.fn
 	savedBlock := c.block
@@ -2350,25 +2401,50 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	savedCanError := c.canError
 	savedRetType := c.currentRetType
 	savedBlockCounter := c.blockCounter
+	savedScopeBindings := c.scopeBindings
+	savedDropFlags := c.dropFlags
+	savedLoopScopeDepth := c.loopScopeDepth
 
-	// Generate lambda body
+	// Generate lambda body with fresh scope state
 	c.fn = fn
 	c.locals = make(map[string]*ir.InstAlloca)
 	c.blockCounter = 0
 	c.canError = false
 	c.currentRetType = sig.Result()
+	c.scopeBindings = nil
+	c.dropFlags = make(map[string]*ir.InstAlloca)
+	c.loopScopeDepth = 0
 
 	entry := fn.NewBlock("entry")
 	c.block = entry
 
-	// Allocate parameters
+	// Load captured variables from env struct into local allocas
+	if len(captures) > 0 && envStructType != nil {
+		typedEnvPtr := entry.NewBitCast(fn.Params[0], irtypes.NewPointer(envStructType))
+		for i, cv := range captures {
+			captureType := c.resolveType(cv.Obj.Type())
+			fieldPtr := entry.NewGetElementPtr(envStructType, typedEnvPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
+			val := entry.NewLoad(captureType, fieldPtr)
+			alloca := entry.NewAlloca(captureType)
+			alloca.SetName(cv.Obj.Name() + ".cap")
+			entry.NewStore(val, alloca)
+			c.locals[cv.Obj.Name()] = alloca
+			// Register drop for move-captured droppable types
+			if cv.ByMove {
+				c.maybeRegisterDrop(cv.Obj.Name(), alloca, cv.Obj.Type())
+			}
+		}
+	}
+
+	// Allocate user parameters (offset by 1 due to env param)
 	for i, p := range sig.Params() {
 		if p.Name() == "" || p.Name() == "_" {
 			continue
 		}
 		alloca := entry.NewAlloca(c.resolveType(p.Type()))
 		alloca.SetName(p.Name() + ".addr")
-		entry.NewStore(fn.Params[i], alloca)
+		entry.NewStore(fn.Params[i+1], alloca) // +1 for env param
 		c.locals[p.Name()] = alloca
 	}
 
@@ -2378,12 +2454,19 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	} else if e.ExprBody != nil {
 		val := c.genExpr(e.ExprBody)
 		if val != nil && c.block.Term == nil {
+			// Clean up capture bindings before returning
+			if len(c.scopeBindings) > 0 {
+				c.emitScopeCleanup(0)
+			}
 			c.block.NewRet(val)
 		}
 	}
 
-	// Ensure terminator
+	// Ensure terminator — clean up remaining capture bindings on fallthrough
 	if c.block != nil && c.block.Term == nil {
+		if len(c.scopeBindings) > 0 {
+			c.emitScopeCleanup(0)
+		}
 		if _, ok := fn.Sig.RetType.(*irtypes.VoidType); ok {
 			c.block.NewRet(nil)
 		} else {
@@ -2398,9 +2481,16 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.canError = savedCanError
 	c.currentRetType = savedRetType
 	c.blockCounter = savedBlockCounter
+	c.scopeBindings = savedScopeBindings
+	c.dropFlags = savedDropFlags
+	c.loopScopeDepth = savedLoopScopeDepth
 
-	// Return function pointer as i8*
-	return c.block.NewBitCast(fn, irtypes.I8Ptr)
+	// Return fat pointer: {fn_ptr as i8*, env_ptr}
+	fnPtr := c.block.NewBitCast(fn, irtypes.I8Ptr)
+	var closure value.Value = constant.NewUndef(closureType())
+	closure = c.block.NewInsertValue(closure, fnPtr, 0)
+	closure = c.block.NewInsertValue(closure, envPtr, 1)
+	return closure
 }
 
 // --- Optional Chaining ---
@@ -2500,14 +2590,16 @@ func (c *Compiler) genFieldOnValue(val value.Value, typ types.Type, fieldName st
 	panic(fmt.Sprintf("codegen: no field or getter %s on type %s", fieldName, named))
 }
 
-// genIndirectCall calls a function through a function pointer (i8*).
-func (c *Compiler) genIndirectCall(fnPtr value.Value, sig *types.Signature, args []value.Value) value.Value {
+// genIndirectCall calls a function through a fat pointer {i8* fn, i8* env}.
+// Extracts the function pointer and env pointer, then calls with env as the first arg.
+func (c *Compiler) genIndirectCall(closure value.Value, sig *types.Signature, args []value.Value) value.Value {
 	retType := irtypes.Type(irtypes.Void)
 	if sig.Result() != nil {
 		retType = c.resolveType(sig.Result())
 	}
 
-	var paramTypes []irtypes.Type
+	// Function type includes env (i8*) as first parameter
+	paramTypes := []irtypes.Type{irtypes.I8Ptr}
 	for _, p := range sig.Params() {
 		paramTypes = append(paramTypes, c.resolveType(p.Type()))
 	}
@@ -2515,8 +2607,53 @@ func (c *Compiler) genIndirectCall(fnPtr value.Value, sig *types.Signature, args
 	funcType := irtypes.NewFunc(retType, paramTypes...)
 	funcPtrType := irtypes.NewPointer(funcType)
 
-	typedFnPtr := c.block.NewBitCast(fnPtr, funcPtrType)
-	return c.block.NewCall(typedFnPtr, args...)
+	// Extract fn and env from fat pointer
+	fnRaw := c.block.NewExtractValue(closure, 0)
+	envPtr := c.block.NewExtractValue(closure, 1)
+
+	typedFnPtr := c.block.NewBitCast(fnRaw, funcPtrType)
+
+	// Call with env as first arg, then user args
+	callArgs := make([]value.Value, 0, len(args)+1)
+	callArgs = append(callArgs, envPtr)
+	callArgs = append(callArgs, args...)
+	return c.block.NewCall(typedFnPtr, callArgs...)
+}
+
+// getOrCreateThunk returns a trampoline function with the env-first ABI that
+// forwards to the given named function. This allows named function references
+// to be called through the same fat-pointer indirect call path as lambdas.
+func (c *Compiler) getOrCreateThunk(fn *ir.Func, name string) *ir.Func {
+	if thunk, ok := c.thunks[name]; ok {
+		return thunk
+	}
+
+	// Build thunk params: env (i8*) + original function params
+	params := []*ir.Param{ir.NewParam("env", irtypes.I8Ptr)}
+	for _, p := range fn.Params {
+		params = append(params, ir.NewParam(p.LocalName, p.Typ))
+	}
+
+	thunkName := ".thunk." + name
+	thunk := c.module.NewFunc(thunkName, fn.Sig.RetType, params...)
+	entry := thunk.NewBlock("entry")
+
+	// Forward call to original function, skipping the env param
+	callArgs := make([]value.Value, len(fn.Params))
+	for i := range fn.Params {
+		callArgs[i] = thunk.Params[i+1]
+	}
+
+	if _, isVoid := fn.Sig.RetType.(*irtypes.VoidType); isVoid {
+		entry.NewCall(fn, callArgs...)
+		entry.NewRet(nil)
+	} else {
+		result := entry.NewCall(fn, callArgs...)
+		entry.NewRet(result)
+	}
+
+	c.thunks[name] = thunk
+	return thunk
 }
 
 // --- is/as expressions ---

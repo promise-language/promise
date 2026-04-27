@@ -55,7 +55,9 @@ Entry point: `cmd/promise/main.go` → `compileFrontend()` orchestrates parse �
 
 **Four-struct type layout**: Each user type generates up to 4 LLVM structs — Type (static), Instance (heap fields), Value (`{vtable_ptr, instance_ptr}`), and Variant (enum payload). Value structs are passed around; instance ptrs are what methods receive as `this`.
 
-**Scope cleanup stack**: `scopeBindings` is a LIFO stack of `bindingClose` (use vars) and `bindingDrop` (droppable vars). Emitted in reverse at scope exit, return, raise, break, continue. Drop bindings have an `i1` drop flag that's cleared at move sites.
+**Scope cleanup stack**: `scopeBindings` is a LIFO stack of `bindingClose` (use vars), `bindingDrop` (droppable vars), and `bindingFreeEnv` (closure env structs). Emitted in reverse at scope exit, return, raise, break, continue. Drop bindings have an `i1` drop flag that's cleared at move sites. Env free bindings null-check the env pointer before calling `free()`.
+
+**Closures/lambdas**: All function values use fat pointer `{ i8*, i8* }` (fn ptr + env ptr). Lambda functions always take `i8* %env` as first parameter. Capture analysis in sema (`checkLambdaCapture`) detects outer-scope variable references; `Copy` types auto-captured, non-`Copy` requires `move`. Nested captures propagate through intermediate lambdas. Named function references use thunks (`.thunk.name`) to adapt to env-first ABI. Env structs are heap-allocated via `malloc` and freed via `bindingFreeEnv` at scope exit.
 
 **Monomorphization**: Generic types/functions are specialized at codegen time. `mono.go` handles collecting instances, creating specialized layouts, and defining specialized methods.
 
@@ -94,6 +96,7 @@ Methods must be declared inside the type body. Numeric literals infer as `int`/`
 - `compiler/internal/codegen/stmt.go` — statement codegen, drop/close emission
 - `compiler/internal/codegen/expr.go` — expression codegen, all call variants
 - `compiler/internal/sema/check.go` — sema orchestration
+- `compiler/internal/sema/info.go` — sema output (type map, objects, lambda captures)
 - `compiler/internal/sema/decl.go` — type/method/func definition passes
 - `compiler/internal/types/named.go` — Named type with fields, methods, generics, flags
 

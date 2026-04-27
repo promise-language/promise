@@ -12,6 +12,12 @@ type FuncInstance struct {
 	Sig      *types.Signature // substituted signature (no TypeParams)
 }
 
+// CapturedVar records a variable captured by a lambda/closure.
+type CapturedVar struct {
+	Obj    types.Object // the captured variable (always *types.Var)
+	ByMove bool         // true if move-captured, false if copy-captured
+}
+
 // Info holds the results of semantic analysis.
 // All maps use AST nodes as keys — the AST itself is not modified.
 type Info struct {
@@ -39,6 +45,10 @@ type Info struct {
 	// FieldDefaults maps fields with default values to their AST default expressions.
 	// Used by codegen to evaluate defaults for omitted constructor arguments.
 	FieldDefaults map[*types.Field]ast.Expr
+
+	// LambdaCaptures maps each lambda to its captured variables (in capture order).
+	// Empty slice means no captures; nil key means lambda was not analyzed.
+	LambdaCaptures map[*ast.LambdaExpr][]*CapturedVar
 }
 
 // recordType stores the resolved type for an expression.

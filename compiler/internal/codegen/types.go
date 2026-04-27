@@ -46,7 +46,7 @@ func llvmType(typ types.Type) irtypes.Type {
 	case *types.Named:
 		return llvmNamedType(t)
 	case *types.Signature:
-		return irtypes.I8Ptr // function pointer
+		return closureType() // fat pointer: {fn_ptr, env_ptr}
 	case *types.Tuple:
 		fields := make([]irtypes.Type, len(t.Elems()))
 		for i, elem := range t.Elems() {
@@ -103,6 +103,12 @@ func llvmNamedType(n *types.Named) irtypes.Type {
 	default:
 		return irtypes.I8Ptr // user-defined type: pointer for now
 	}
+}
+
+// closureType returns the fat pointer struct type used for all function values: {i8*, i8*}.
+// Field 0 is the function pointer, field 1 is the environment pointer (null if no captures).
+func closureType() *irtypes.StructType {
+	return irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
 }
 
 // isRefType returns true if the type is a shared or mutable reference.

@@ -54,6 +54,10 @@ type Compiler struct {
 	// Lambda counter for unique anonymous function names
 	lambdaCounter int
 
+	// Thunks for named function references used as first-class values.
+	// Maps original function name to a wrapper with env-first ABI.
+	thunks map[string]*ir.Func
+
 	// Block counter for unique basic block names within a function
 	blockCounter int
 
@@ -82,8 +86,9 @@ type Compiler struct {
 type scopeBindingKind int
 
 const (
-	bindingClose scopeBindingKind = iota // use-bound: call close() at scope exit
-	bindingDrop                          // droppable: call drop() at scope exit
+	bindingClose   scopeBindingKind = iota // use-bound: call close() at scope exit
+	bindingDrop                            // droppable: call drop() at scope exit
+	bindingFreeEnv                         // closure env: free env pointer at scope exit
 )
 
 // scopeBinding tracks a variable that needs cleanup at scope exit.
@@ -144,6 +149,7 @@ func Compile(file *ast.File, info *sema.Info) *CompileResult {
 		vtableGlobals:   make(map[*types.Named]*ir.Global),
 		viewVtables:     make(map[viewVtableKey]*ir.Global),
 		dropFlags:       make(map[string]*ir.InstAlloca),
+		thunks:          make(map[string]*ir.Func),
 	}
 
 	// Collect extern declarations and compute type layouts
@@ -302,9 +308,11 @@ func (c *Compiler) declareIntrinsics() {
 	c.funcs["promise_panic"] = c.module.NewFunc("promise_panic",
 		irtypes.Void, ir.NewParam("msg", irtypes.I8Ptr))
 
-	// malloc for heap allocation of user type instances
+	// malloc/free for heap allocation
 	c.funcs["malloc"] = c.module.NewFunc("malloc",
 		irtypes.I8Ptr, ir.NewParam("size", irtypes.I64))
+	c.funcs["free"] = c.module.NewFunc("free",
+		irtypes.Void, ir.NewParam("ptr", irtypes.I8Ptr))
 
 	// String intrinsics — declared with i8* params/returns for internal use.
 	// The C implementations (runtime_string.c) use typed promise_string_i* pointers.

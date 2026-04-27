@@ -318,6 +318,15 @@ func isCopyField(typ types.Type) bool {
 		return t.IsCopy()
 	case *types.Enum:
 		return t.IsCopy()
+	case *types.Tuple:
+		for _, elem := range t.Elems() {
+			if !isCopyField(elem) {
+				return false
+			}
+		}
+		return true
+	case *types.Optional:
+		return isCopyField(t.Elem())
 	}
 	return false
 }

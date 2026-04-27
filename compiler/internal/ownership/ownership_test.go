@@ -1946,3 +1946,27 @@ func TestDroppableMoveToIndexAssignUseAfter(t *testing.T) {
 	`)
 	expectOwnerError(t, errs, "use of moved variable 'r'")
 }
+
+// === Lambda capture ownership ===
+
+func TestMoveCaptureMarksVariableMoved(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Foo { int x; drop(~this) {} }
+		test() {
+			f := Foo(x: 1);
+			g := move |int y| -> f.x + y;
+			int z = f.x;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'f'")
+}
+
+func TestCopyCaptureDoesNotMoveVariable(t *testing.T) {
+	ownerOK(t, `
+		test() {
+			int x = 42;
+			f := |int y| -> x + y;
+			int z = x + 1;
+		}
+	`)
+}

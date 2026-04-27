@@ -129,6 +129,7 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 		dropType = exprType
 	}
 	c.maybeRegisterDrop(s.Name, alloca, dropType)
+	c.maybeRegisterEnvFree(s.Name, alloca, dropType)
 }
 
 func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
@@ -143,6 +144,7 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	c.block.NewStore(val, alloca)
 	c.locals[s.Name] = alloca
 	c.maybeRegisterDrop(s.Name, alloca, typ)
+	c.maybeRegisterEnvFree(s.Name, alloca, typ)
 }
 
 // genDestructureVarDecl handles tuple destructuring: (a, b) := expr
@@ -257,6 +259,8 @@ func (c *Compiler) emitScopeCleanup(fromIdx int) {
 			c.emitCloseCall(b)
 		case bindingDrop:
 			c.emitDropCall(b)
+		case bindingFreeEnv:
+			c.emitEnvFree(b)
 		}
 	}
 }
@@ -339,6 +343,52 @@ func (c *Compiler) emitDropCallDirect(b scopeBinding) {
 		fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))
 		c.block.NewCall(fnTyped, instance)
 	}
+}
+
+// emitEnvFree frees a closure's env struct at scope exit.
+// Checks the drop flag (has the closure been moved?) and null-checks the env pointer.
+func (c *Compiler) emitEnvFree(b scopeBinding) {
+	if b.dropFlag == nil {
+		return
+	}
+	flag := c.block.NewLoad(irtypes.I1, b.dropFlag)
+	freeBlock := c.newBlock("env.free")
+	skipBlock := c.newBlock("env.skip")
+	c.block.NewCondBr(flag, freeBlock, skipBlock)
+
+	c.block = freeBlock
+	// Load closure, extract env ptr (field 1 of fat pointer)
+	closure := c.block.NewLoad(b.alloca.ElemType, b.alloca)
+	envPtr := c.block.NewExtractValue(closure, 1)
+	// If non-null, free the env struct
+	isNull := c.block.NewICmp(enum.IPredEQ, envPtr, constant.NewNull(irtypes.I8Ptr))
+	callBlock := c.newBlock("env.free.call")
+	c.block.NewCondBr(isNull, skipBlock, callBlock)
+
+	c.block = callBlock
+	c.block.NewCall(c.funcs["free"], envPtr)
+	c.block.NewBr(skipBlock)
+
+	c.block = skipBlock
+}
+
+// maybeRegisterEnvFree registers a scope binding to free the closure's env struct
+// at scope exit. Only applies to variables whose type is *types.Signature (function values).
+func (c *Compiler) maybeRegisterEnvFree(varName string, alloca *ir.InstAlloca, typ types.Type) {
+	if _, ok := typ.(*types.Signature); !ok {
+		return
+	}
+	dropFlag := c.block.NewAlloca(irtypes.I1)
+	dropFlag.SetName(varName + ".dropflag")
+	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+	c.dropFlags[varName] = dropFlag
+
+	c.scopeBindings = append(c.scopeBindings, scopeBinding{
+		kind:     bindingFreeEnv,
+		alloca:   alloca,
+		dropFlag: dropFlag,
+		varName:  varName,
+	})
 }
 
 // --- Assignment ---

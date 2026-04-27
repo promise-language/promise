@@ -25,6 +25,15 @@ func isCopyType(typ types.Type) bool {
 		return t.IsCopy()
 	case *types.Enum:
 		return t.IsCopy()
+	case *types.Tuple:
+		for _, elem := range t.Elems() {
+			if !isCopyType(elem) {
+				return false
+			}
+		}
+		return true
+	case *types.Optional:
+		return isCopyType(t.Elem())
 	}
 	return false
 }

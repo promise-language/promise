@@ -312,7 +312,7 @@ Generic function sema support and type-specialized code generation for all gener
 
 ## Stage 8g — Container Codegen (Done)
 
-Codegen for container types (tuples, optionals, slices, maps) and non-capturing lambdas.
+Codegen for container types (tuples, optionals, slices, maps) and capturing lambdas.
 
 **Files:** Updates to `codegen/compiler.go`, `codegen/types.go`, `codegen/expr.go`, `codegen/stmt.go`; new `runtime/runtime_map.c` (~205 LOC); 29 new tests (119 total codegen tests)
 
@@ -326,11 +326,15 @@ Codegen for container types (tuples, optionals, slices, maps) and non-capturing 
 - **String map keys**: Content-based hashing via `promise_hash_string` / `promise_eq_string` function pointers (dereference `i8*` to read string header). Byte-level hash/compare for primitive keys (NULL function pointers → default).
 - **Map indexing**: `m["key"]` returns `Optional(V)` — calls `promise_map_get`, checks NULL, wraps in `{ i1, V }` via phi merge. Assignment via `promise_map_set`.
 - **For-in iteration**: `genForInStmt` dispatches on iterable type. Slices: counter loop with bounds check per element. Maps: `promise_map_iter_next` loop building `(K, V)` tuple per entry. Ranges: existing `genForInRange` extracted.
-- **Lambdas (non-capturing)**: Anonymous LLVM functions (`.lambda.N`) with resolved param/return types. Compiler state saved/restored (fn, block, locals, canError). Returned as `i8*` via bitcast. Handles both expression body (`|x| -> x + 1`) and block body (`|x| -> int { return x * 2; }`).
-- **Lambda calls**: `genCallExpr` detects local variables with `*types.Signature` type before regular function lookup. Loads `i8*`, bitcasts to typed function pointer, indirect call via `genIndirectCall`.
+- **Lambdas (capturing)**: Anonymous LLVM functions (`.lambda.N`) with `i8* %env` as first parameter (uniform ABI). Fat pointer representation `{ i8*, i8* }` (fn ptr + env ptr) for all function values. Non-capturing lambdas use null env. Compiler state saved/restored (fn, block, locals, canError, scopeBindings, dropFlags). Handles both expression body (`|x| -> x + 1`) and block body (`|x| -> int { return x * 2; }`).
+- **Lambda captures**: Sema capture analysis (`checkLambdaCapture`) detects outer-scope variable references via scope chain traversal. `Copy` types auto-captured by copy; non-`Copy` types require explicit `move` keyword. Captures recorded in `info.LambdaCaptures` (deterministic order via sorted names). Nested lambda capture propagation: inner captures from grandparent scopes automatically propagate to intermediate lambdas.
+- **Lambda env struct**: Heap-allocated struct holding captured values (`malloc`). Captures loaded from enclosing scope allocas, stored into env fields. Inside lambda body, env is bitcast to typed pointer, fields extracted into local allocas. Move-captured droppable types registered for drop inside lambda body. Env struct freed at scope exit via `bindingFreeEnv` binding (drop-flag-guarded, null-checked `free()`).
+- **Lambda calls**: `genCallExpr` detects local variables with `*types.Signature` type before regular function lookup. Loads fat pointer `{ i8*, i8* }`, calls `genIndirectCall` which extracts fn/env, bitcasts to typed function pointer with env-first ABI, calls with env as first arg.
+- **Named function references**: When a named function is used as a first-class value (e.g., `f := add`), a thunk with env-first ABI is generated (`.thunk.add`) that forwards to the original function. Fat pointer uses `{ @.thunk.add, null }`.
+- **Lambda ownership**: Move captures mark the variable as `Moved` in the enclosing scope. Captured variables are `Owned` inside the lambda body. Copy captures leave the original variable usable.
 - **Intrinsics** (`compiler.go`): 7 new map runtime functions declared in `declareIntrinsics`. `lambdaCounter` and `targetType` fields added to Compiler.
-- **Scope**: Tuple literals/destructure/return, optional none/some/wrapping/elvis, array literals, slice/array indexing (read/write/compound), for-in over slices/arrays/maps, map literals/indexing/assignment, non-capturing lambdas (expression/block body, indirect calls).
-- **Deferred**: Capturing lambdas/closures, slice growth (`.push()`), container methods (`.contains`), fixed-size arrays as stack-allocated `[N x T]`, `llvmTypeSize` struct alignment (current implementation sums without padding — correct for primitive elements, under-allocates for struct-typed slice elements). String interpolation, if-unwrap/while-unwrap, optional chaining, and unsafe blocks completed in Stage 8h. Container `.len` completed in Stage 8i.
+- **Scope**: Tuple literals/destructure/return, optional none/some/wrapping/elvis, array literals, slice/array indexing (read/write/compound), for-in over slices/arrays/maps, map literals/indexing/assignment, capturing lambdas (expression/block body, indirect calls, copy/move captures, nested capture propagation, env allocation/cleanup, named function reference thunks).
+- **Deferred**: Slice growth (`.push()`), container methods (`.contains`), fixed-size arrays as stack-allocated `[N x T]`, `llvmTypeSize` struct alignment (current implementation sums without padding — correct for primitive elements, under-allocates for struct-typed slice elements). String interpolation, if-unwrap/while-unwrap, optional chaining, and unsafe blocks completed in Stage 8h. Container `.len` completed in Stage 8i.
 
 ## Stage 8h — Optional Patterns, String Interpolation & Expression Completeness (Done)
 
@@ -533,7 +537,7 @@ Consolidated list of items deferred from completed stages. Items marked ~~strike
 
 | Item | Origin | Priority |
 |------|--------|----------|
-| Capturing lambdas/closures | 8g | High |
+| ~~Capturing lambdas/closures~~ | 8g | ~~Done~~ |
 | Fixed-size arrays as stack-allocated `[N x T]` | 8g | Medium |
 | Destructure is-patterns (`x is Dog(name)`) | 8k | Medium |
 | Generic type RTTI | 8k | Medium |

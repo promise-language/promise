@@ -1,6 +1,8 @@
 package sema
 
 import (
+	"sort"
+
 	"djabi.dev/go/promise_lang/internal/ast"
 	"djabi.dev/go/promise_lang/internal/types"
 )
@@ -145,7 +147,57 @@ func (c *Checker) checkIdentExpr(e *ast.IdentExpr) types.Type {
 	// Check for deprecated usage
 	c.checkDeprecatedObj(e.Pos(), obj)
 
+	// Capture analysis: if inside a lambda, check if this variable is from an outer scope
+	if c.lambdaDepth > 0 {
+		c.checkLambdaCapture(e, obj)
+	}
+
 	return obj.Type()
+}
+
+// checkLambdaCapture detects and records when a lambda references an outer-scope variable.
+func (c *Checker) checkLambdaCapture(e *ast.IdentExpr, obj types.Object) {
+	// Only capture variables (not types, funcs, etc.)
+	v, ok := obj.(*types.Var)
+	if !ok {
+		return
+	}
+
+	// Find the scope where this variable is declared
+	_, declScope := c.scope.LookupParent(e.Name)
+	if declScope == nil {
+		return
+	}
+
+	// Check if the variable was declared outside the lambda boundary.
+	// Walk from lambdaScope upward — if declScope is lambdaScope or an ancestor, it's outer.
+	isOuter := false
+	for s := c.lambdaScope; s != nil; s = s.Parent() {
+		if s == declScope {
+			isOuter = true
+			break
+		}
+	}
+	if !isOuter {
+		return // variable is declared inside the lambda — no capture needed
+	}
+
+	// Already captured?
+	if _, already := c.lambdaCaptures[e.Name]; already {
+		return
+	}
+
+	// Determine capture mode
+	byMove := c.lambdaMove
+	if !byMove && !isCopyField(v.Type()) {
+		c.errorf(e.Pos(), "cannot capture non-copy variable '%s' without move", e.Name)
+		return
+	}
+
+	c.lambdaCaptures[e.Name] = &CapturedVar{
+		Obj:    obj,
+		ByMove: byMove,
+	}
 }
 
 func (c *Checker) checkThisExpr(e *ast.ThisExpr) types.Type {
@@ -1458,6 +1510,17 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) types.Type {
 
 	sig := types.NewSignature(nil, params, result, false)
 
+	// Save lambda capture state
+	savedLambdaDepth := c.lambdaDepth
+	savedLambdaCaptures := c.lambdaCaptures
+	savedLambdaScope := c.lambdaScope
+	savedLambdaMove := c.lambdaMove
+
+	c.lambdaDepth++
+	c.lambdaCaptures = make(map[string]*CapturedVar)
+	c.lambdaScope = c.scope // scope at lambda definition site
+	c.lambdaMove = e.Move
+
 	// Type-check body
 	saved := c.curFunc
 	c.curFunc = sig
@@ -1485,6 +1548,64 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) types.Type {
 		if result == nil && bodyType != nil {
 			// Infer return type from expression body
 			sig = types.NewSignature(nil, params, bodyType, false)
+		}
+	}
+
+	// Record captured variables for this lambda in deterministic order (by name).
+	// Map iteration order is non-deterministic; sorting ensures reproducible env struct layout.
+	captureNames := make([]string, 0, len(c.lambdaCaptures))
+	for name := range c.lambdaCaptures {
+		captureNames = append(captureNames, name)
+	}
+	sort.Strings(captureNames)
+	captures := make([]*CapturedVar, 0, len(captureNames))
+	for _, name := range captureNames {
+		captures = append(captures, c.lambdaCaptures[name])
+	}
+	c.info.LambdaCaptures[e] = captures
+
+	// Restore lambda capture state
+	c.lambdaDepth = savedLambdaDepth
+	c.lambdaCaptures = savedLambdaCaptures
+	c.lambdaScope = savedLambdaScope
+	c.lambdaMove = savedLambdaMove
+
+	// Propagate inner lambda captures to the enclosing lambda.
+	// If the inner lambda captured a variable from a grandparent scope,
+	// the enclosing lambda must also capture it to make it available.
+	if c.lambdaDepth > 0 && len(captures) > 0 {
+		for _, cv := range captures {
+			name := cv.Obj.Name()
+			if _, already := c.lambdaCaptures[name]; already {
+				continue
+			}
+			// Check if this variable is also from outside the enclosing lambda
+			_, declScope := c.scope.LookupParent(name)
+			if declScope == nil {
+				continue
+			}
+			isOuter := false
+			for s := c.lambdaScope; s != nil; s = s.Parent() {
+				if s == declScope {
+					isOuter = true
+					break
+				}
+			}
+			if !isOuter {
+				continue
+			}
+			// Enclosing lambda must also capture this variable
+			byMove := c.lambdaMove
+			if !byMove {
+				if v, ok := cv.Obj.(*types.Var); ok && !isCopyField(v.Type()) {
+					c.errorf(e.Pos(), "cannot capture non-copy variable '%s' without move", name)
+					continue
+				}
+			}
+			c.lambdaCaptures[name] = &CapturedVar{
+				Obj:    cv.Obj,
+				ByMove: byMove,
+			}
 		}
 	}
 

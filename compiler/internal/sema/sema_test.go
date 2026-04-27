@@ -3547,3 +3547,172 @@ func TestCompoundAssignmentGetterSetter(t *testing.T) {
 		}
 	`)
 }
+
+// --- drop() method validation ---
+
+func TestDropMethodValid(t *testing.T) {
+	checkOK(t, `
+		type File {
+			int fd;
+			drop(~this) {}
+		}
+		main() {
+			f := File(fd: 1);
+		}
+	`)
+}
+
+func TestDropMethodWrongReceiverValue(t *testing.T) {
+	errs := checkErrs(t, `
+		type File {
+			int fd;
+			drop(this) {}
+		}
+		main() {}
+	`)
+	expectError(t, errs, "must take ~this")
+}
+
+func TestDropMethodWrongReceiverShared(t *testing.T) {
+	errs := checkErrs(t, `
+		type File {
+			int fd;
+			drop(&this) {}
+		}
+		main() {}
+	`)
+	expectError(t, errs, "must take ~this")
+}
+
+func TestDropMethodWithParams(t *testing.T) {
+	errs := checkErrs(t, `
+		type File {
+			int fd;
+			drop(~this, int x) {}
+		}
+		main() {}
+	`)
+	expectError(t, errs, "must have no parameters")
+}
+
+func TestDropMethodWithReturn(t *testing.T) {
+	errs := checkErrs(t, `
+		type File {
+			int fd;
+			drop(~this) int { return 0; }
+		}
+		main() {}
+	`)
+	expectError(t, errs, "must not return a value")
+}
+
+func TestDropMethodFailable(t *testing.T) {
+	errs := checkErrs(t, `
+		type File {
+			int fd;
+			drop(~this) void! { raise "err"; }
+		}
+		main() {}
+	`)
+	expectError(t, errs, "must not be failable")
+}
+
+func TestDropMethodOnCopyType(t *testing.T) {
+	errs := checkErrs(t, `
+		type Point `+"`"+`copy {
+			int x;
+			int y;
+			drop(~this) {}
+		}
+		main() {}
+	`)
+	expectError(t, errs, "copy type Point cannot have a drop()")
+}
+
+func TestDropMethodAbstract(t *testing.T) {
+	errs := checkErrs(t, `
+		type Resource {
+			int id;
+			drop(~this) `+"`"+`abstract;
+		}
+		main() {}
+	`)
+	expectError(t, errs, "must not be abstract")
+}
+
+// isCopyField with SharedRef — should be copy
+func TestCopyTypeWithRefField(t *testing.T) {
+	// &T is copy since it's just a pointer
+	checkOK(t, `
+		type Wrapper `+"`"+`copy {
+			&int val;
+		}
+		main() {}
+	`)
+}
+
+// isCopyField with MutRef — should be copy
+func TestCopyTypeWithMutRefField(t *testing.T) {
+	checkOK(t, `
+		type MutWrapper `+"`"+`copy {
+			~int val;
+		}
+		main() {}
+	`)
+}
+
+// isCopyField with Named non-copy field — should error
+func TestCopyTypeWithNonCopyNamedField(t *testing.T) {
+	errs := checkErrs(t, `
+		type Inner {
+			int x;
+		}
+		type Outer `+"`"+`copy {
+			Inner inner;
+		}
+		main() {}
+	`)
+	expectError(t, errs, "non-copy type")
+}
+
+// isCopyField with copy Named field — should pass
+func TestCopyTypeWithCopyNamedField(t *testing.T) {
+	checkOK(t, `
+		type Inner `+"`"+`copy {
+			int x;
+		}
+		type Outer `+"`"+`copy {
+			Inner inner;
+		}
+		main() {}
+	`)
+}
+
+// isCopyField with copy enum
+func TestCopyTypeWithCopyEnumField(t *testing.T) {
+	checkOK(t, `
+		enum Status `+"`"+`copy {
+			Active;
+			Inactive;
+		}
+		type Wrapper `+"`"+`copy {
+			Status s;
+		}
+		main() {}
+	`)
+}
+
+// isCopyField with non-copy enum — should fail
+func TestCopyTypeWithNonCopyEnumField(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Option {
+			Some(string val);
+			None;
+		}
+		type Wrapper `+"`"+`copy {
+			Option opt;
+		}
+		main() {}
+	`)
+	expectError(t, errs, "non-copy type")
+}

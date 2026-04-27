@@ -18,18 +18,18 @@ func (c *Compiler) genBlock(block *ast.Block) {
 	if block == nil {
 		return
 	}
-	savedUseLen := len(c.useBindings)
+	savedScopeLen := len(c.scopeBindings)
 	for _, stmt := range block.Stmts {
 		if c.block == nil || c.block.Term != nil {
 			break // block already terminated (return, break, etc.)
 		}
 		c.genStmt(stmt)
 	}
-	// Emit close() calls for use bindings added in this block (fall-through exit)
-	if c.block != nil && c.block.Term == nil && len(c.useBindings) > savedUseLen {
-		c.emitUseCloseCalls(savedUseLen)
+	// Emit cleanup calls for scope bindings added in this block (fall-through exit)
+	if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > savedScopeLen {
+		c.emitScopeCleanup(savedScopeLen)
 	}
-	c.useBindings = c.useBindings[:savedUseLen]
+	c.scopeBindings = c.scopeBindings[:savedScopeLen]
 }
 
 // genStmt generates LLVM IR for a single statement.
@@ -123,6 +123,12 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 
 	c.block.NewStore(val, alloca)
 	c.locals[s.Name] = alloca
+	// Use declared type if available, otherwise fall back to expression type
+	dropType := declType
+	if dropType == nil {
+		dropType = exprType
+	}
+	c.maybeRegisterDrop(s.Name, alloca, dropType)
 }
 
 func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
@@ -136,6 +142,7 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	val := c.genExpr(s.Value)
 	c.block.NewStore(val, alloca)
 	c.locals[s.Name] = alloca
+	c.maybeRegisterDrop(s.Name, alloca, typ)
 }
 
 // genDestructureVarDecl handles tuple destructuring: (a, b) := expr
@@ -177,7 +184,8 @@ func (c *Compiler) genUseVarDecl(s *ast.UseVarDecl) {
 
 	// Track for scope-exit close() insertion
 	named := extractNamed(typ)
-	binding := useBinding{
+	binding := scopeBinding{
+		kind:    bindingClose,
 		alloca:  alloca,
 		named:   named,
 		valType: typ,
@@ -190,51 +198,161 @@ func (c *Compiler) genUseVarDecl(s *ast.UseVarDecl) {
 			binding.closeFunc = fn
 		}
 	}
-	c.useBindings = append(c.useBindings, binding)
+	c.scopeBindings = append(c.scopeBindings, binding)
 }
 
-// emitUseCloseCalls emits close() calls for all use bindings from fromIdx onwards,
-// in reverse order (LIFO). For Phase 1, close errors are silently suppressed.
-func (c *Compiler) emitUseCloseCalls(fromIdx int) {
-	for i := len(c.useBindings) - 1; i >= fromIdx; i-- {
-		b := c.useBindings[i]
-		val := c.block.NewLoad(b.alloca.ElemType, b.alloca)
+// --- drop binding ---
 
-		if b.closeFunc != nil {
-			// Direct dispatch — extract instance pointer and call
-			instance := c.extractInstancePtr(val)
-			c.block.NewCall(b.closeFunc, instance)
-		} else if b.named != nil {
-			// Virtual dispatch through vtable
-			var vtableRaw, instance value.Value
-			vtableRaw = c.extractVtablePtr(val)
-			instance = c.extractInstancePtr(val)
+// maybeRegisterDrop checks if a variable's type has a drop() method and, if so,
+// registers a drop binding: allocates a drop flag (i1, initially true), resolves
+// the drop function, and appends a scopeBinding.
+func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ types.Type) {
+	named := extractNamed(typ)
+	if named == nil || !named.HasDrop() {
+		return
+	}
 
-			slotIndex := b.named.VirtualMethodIndex("close", false) // close() is a regular method
-			if slotIndex < 0 {
-				panic(fmt.Sprintf("codegen: close method not in vtable for %s", b.named))
-			}
-			vtablePtr := c.block.NewBitCast(vtableRaw, irtypes.NewPointer(irtypes.I8Ptr))
-			fnSlotPtr := c.block.NewGetElementPtr(irtypes.I8Ptr, vtablePtr,
-				constant.NewInt(irtypes.I32, int64(slotIndex)))
-			fnRaw := c.block.NewLoad(irtypes.I8Ptr, fnSlotPtr)
+	// Allocate drop flag: i1, initialized to true (should drop)
+	dropFlag := c.block.NewAlloca(irtypes.I1)
+	dropFlag.SetName(varName + ".dropflag")
+	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+	c.dropFlags[varName] = dropFlag
 
-			// close() signature: (i8*) → void (or result struct if failable)
-			closeMethod := b.named.LookupMethod("close")
-			retType := irtypes.Type(irtypes.Void)
-			if closeMethod.Sig().CanError() {
-				retType = computeResultType(retType)
-			}
-			funcType := irtypes.NewFunc(retType, irtypes.I8Ptr)
-			fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))
-			c.block.NewCall(fnTyped, instance)
+	binding := scopeBinding{
+		kind:     bindingDrop,
+		alloca:   alloca,
+		named:    named,
+		valType:  typ,
+		dropFlag: dropFlag,
+		varName:  varName,
+	}
+
+	// Resolve drop function for direct dispatch
+	if !c.needsVtable(named) || named.LookupMethod("drop").IsNative() {
+		ownerName := c.resolveMethodOwner(named, "drop")
+		mangledName := mangleMethodName(ownerName, "drop", false)
+		if fn, ok := c.funcs[mangledName]; ok {
+			binding.dropFunc = fn
 		}
+	}
+
+	c.scopeBindings = append(c.scopeBindings, binding)
+}
+
+// clearDropFlag sets a variable's drop flag to false (indicating the value has been moved).
+func (c *Compiler) clearDropFlag(name string) {
+	if flag, ok := c.dropFlags[name]; ok {
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), flag)
+	}
+}
+
+// emitScopeCleanup emits cleanup calls for all scope bindings from fromIdx onwards,
+// in reverse order (LIFO). Close bindings call close(), drop bindings check the
+// drop flag and conditionally call drop().
+func (c *Compiler) emitScopeCleanup(fromIdx int) {
+	for i := len(c.scopeBindings) - 1; i >= fromIdx; i-- {
+		b := c.scopeBindings[i]
+		switch b.kind {
+		case bindingClose:
+			c.emitCloseCall(b)
+		case bindingDrop:
+			c.emitDropCall(b)
+		}
+	}
+}
+
+// emitCloseCall emits a close() call for a use-bound variable (direct or virtual dispatch).
+func (c *Compiler) emitCloseCall(b scopeBinding) {
+	val := c.block.NewLoad(b.alloca.ElemType, b.alloca)
+
+	if b.closeFunc != nil {
+		// Direct dispatch — extract instance pointer and call
+		instance := c.extractInstancePtr(val)
+		c.block.NewCall(b.closeFunc, instance)
+	} else if b.named != nil {
+		// Virtual dispatch through vtable
+		vtableRaw := c.extractVtablePtr(val)
+		instance := c.extractInstancePtr(val)
+
+		slotIndex := b.named.VirtualMethodIndex("close", false)
+		if slotIndex < 0 {
+			panic(fmt.Sprintf("codegen: close method not in vtable for %s", b.named))
+		}
+		vtablePtr := c.block.NewBitCast(vtableRaw, irtypes.NewPointer(irtypes.I8Ptr))
+		fnSlotPtr := c.block.NewGetElementPtr(irtypes.I8Ptr, vtablePtr,
+			constant.NewInt(irtypes.I32, int64(slotIndex)))
+		fnRaw := c.block.NewLoad(irtypes.I8Ptr, fnSlotPtr)
+
+		closeMethod := b.named.LookupMethod("close")
+		retType := irtypes.Type(irtypes.Void)
+		if closeMethod.Sig().CanError() {
+			retType = computeResultType(retType)
+		}
+		funcType := irtypes.NewFunc(retType, irtypes.I8Ptr)
+		fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))
+		c.block.NewCall(fnTyped, instance)
+	}
+}
+
+// emitDropCall emits a conditional drop() call for a droppable variable.
+// Checks the drop flag; if true (not moved), calls drop().
+func (c *Compiler) emitDropCall(b scopeBinding) {
+	if b.dropFlag == nil {
+		// No drop flag — unconditional drop
+		c.emitDropCallDirect(b)
+		return
+	}
+
+	flag := c.block.NewLoad(irtypes.I1, b.dropFlag)
+	dropBlock := c.newBlock("drop.call")
+	skipBlock := c.newBlock("drop.skip")
+	c.block.NewCondBr(flag, dropBlock, skipBlock)
+
+	c.block = dropBlock
+	c.emitDropCallDirect(b)
+	c.block.NewBr(skipBlock)
+
+	c.block = skipBlock
+}
+
+// emitDropCallDirect emits the actual drop() call (direct or virtual dispatch).
+func (c *Compiler) emitDropCallDirect(b scopeBinding) {
+	val := c.block.NewLoad(b.alloca.ElemType, b.alloca)
+
+	if b.dropFunc != nil {
+		instance := c.extractInstancePtr(val)
+		c.block.NewCall(b.dropFunc, instance)
+	} else if b.named != nil {
+		vtableRaw := c.extractVtablePtr(val)
+		instance := c.extractInstancePtr(val)
+
+		slotIndex := b.named.VirtualMethodIndex("drop", false)
+		if slotIndex < 0 {
+			panic(fmt.Sprintf("codegen: drop method not in vtable for %s", b.named))
+		}
+		vtablePtr := c.block.NewBitCast(vtableRaw, irtypes.NewPointer(irtypes.I8Ptr))
+		fnSlotPtr := c.block.NewGetElementPtr(irtypes.I8Ptr, vtablePtr,
+			constant.NewInt(irtypes.I32, int64(slotIndex)))
+		fnRaw := c.block.NewLoad(irtypes.I8Ptr, fnSlotPtr)
+
+		funcType := irtypes.NewFunc(irtypes.Void, irtypes.I8Ptr)
+		fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))
+		c.block.NewCall(fnTyped, instance)
 	}
 }
 
 // --- Assignment ---
 
 func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
+	// For compound index assignments, defer RHS evaluation to ensure correct
+	// evaluation order: target → key → RHS (not RHS → target → key).
+	if s.Op != ast.OpAssign {
+		if idx, ok := s.Target.(*ast.IndexExpr); ok {
+			c.genCompoundIndexAssign(idx, s.Op, s.Value)
+			return
+		}
+	}
+
 	val := c.genExpr(s.Value)
 
 	switch target := s.Target.(type) {
@@ -244,11 +362,21 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			panic(fmt.Sprintf("codegen: undefined variable %q in assignment", target.Name))
 		}
 		if s.Op == ast.OpAssign {
+			// TODO(drop): When reassigning a droppable variable, the old value
+			// should be dropped before storing the new one. Currently the old
+			// value is silently overwritten, which leaks it. The ownership
+			// checker allows this (resurrects the variable), so this is a
+			// resource leak, not a soundness bug. Fix in a future stage.
+
 			// Coerce value struct vtable when crossing type boundaries
 			exprType := c.info.Types[s.Value]
 			targetType := c.info.Types[target]
 			val = c.coerceToView(val, exprType, targetType)
 			c.block.NewStore(val, alloca)
+			// Clear drop flag on RHS if it's being moved
+			if ident, ok := s.Value.(*ast.IdentExpr); ok {
+				c.clearDropFlag(ident.Name)
+			}
 			return
 		}
 		// Compound assignment: load current value, apply operator, store result
@@ -258,9 +386,21 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 
 	case *ast.MemberExpr:
 		c.genMemberAssign(target, s.Op, val)
+		// Clear drop flag on RHS if it's being moved via simple assign
+		if s.Op == ast.OpAssign {
+			if ident, ok := s.Value.(*ast.IdentExpr); ok {
+				c.clearDropFlag(ident.Name)
+			}
+		}
 
 	case *ast.IndexExpr:
 		c.genIndexAssign(target, s.Op, val)
+		// Clear drop flag on RHS if it's being moved via simple assign
+		if s.Op == ast.OpAssign {
+			if ident, ok := s.Value.(*ast.IdentExpr); ok {
+				c.clearDropFlag(ident.Name)
+			}
+		}
 
 	default:
 		panic(fmt.Sprintf("codegen: unsupported assignment target %T", s.Target))
@@ -529,9 +669,15 @@ func (c *Compiler) namedFromLLVMType(typ irtypes.Type) *types.Named {
 // --- Return ---
 
 func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
-	// Emit close() for all active use bindings before returning
-	if len(c.useBindings) > 0 {
-		c.emitUseCloseCalls(0)
+	// Clear drop flag for returned variable (it's being moved out, not dropped)
+	if s.Value != nil {
+		if ident, ok := s.Value.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		}
+	}
+	// Emit cleanup for all active scope bindings before returning
+	if len(c.scopeBindings) > 0 {
+		c.emitScopeCleanup(0)
 	}
 
 	if c.canError {
@@ -566,8 +712,8 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 
 func (c *Compiler) genRaiseStmt(s *ast.RaiseStmt) {
 	// Emit close() for all active use bindings before raising
-	if len(c.useBindings) > 0 {
-		c.emitUseCloseCalls(0)
+	if len(c.scopeBindings) > 0 {
+		c.emitScopeCleanup(0)
 	}
 
 	errVal := c.genExpr(s.Value)
@@ -685,10 +831,10 @@ func (c *Compiler) genWhileStmt(s *ast.WhileStmt) {
 	// Body
 	savedBreak := c.breakTarget
 	savedContinue := c.continueTarget
-	savedLoopUseDepth := c.loopUseDepth
+	savedLoopUseDepth := c.loopScopeDepth
 	c.breakTarget = exitBlock
 	c.continueTarget = headerBlock
-	c.loopUseDepth = len(c.useBindings)
+	c.loopScopeDepth = len(c.scopeBindings)
 
 	c.block = bodyBlock
 	c.genBlock(s.Body)
@@ -698,7 +844,7 @@ func (c *Compiler) genWhileStmt(s *ast.WhileStmt) {
 
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
-	c.loopUseDepth = savedLoopUseDepth
+	c.loopScopeDepth = savedLoopUseDepth
 	c.block = exitBlock
 }
 
@@ -720,10 +866,10 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	// Body: unwrap value, bind to local
 	savedBreak := c.breakTarget
 	savedContinue := c.continueTarget
-	savedLoopUseDepth := c.loopUseDepth
+	savedLoopUseDepth := c.loopScopeDepth
 	c.breakTarget = exitBlock
 	c.continueTarget = headerBlock
-	c.loopUseDepth = len(c.useBindings)
+	c.loopScopeDepth = len(c.scopeBindings)
 
 	c.block = bodyBlock
 	innerVal := c.block.NewExtractValue(optVal, 1)
@@ -748,7 +894,7 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
-	c.loopUseDepth = savedLoopUseDepth
+	c.loopScopeDepth = savedLoopUseDepth
 	c.block = exitBlock
 }
 
@@ -828,10 +974,10 @@ func (c *Compiler) genForInRange(s *ast.ForInStmt) {
 
 	savedBreak := c.breakTarget
 	savedContinue := c.continueTarget
-	savedLoopUseDepth := c.loopUseDepth
+	savedLoopUseDepth := c.loopScopeDepth
 	c.breakTarget = exitBlock
 	c.continueTarget = updateBlock
-	c.loopUseDepth = len(c.useBindings)
+	c.loopScopeDepth = len(c.scopeBindings)
 
 	c.block = bodyBlock
 	c.genBlock(s.Body)
@@ -855,7 +1001,7 @@ func (c *Compiler) genForInRange(s *ast.ForInStmt) {
 
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
-	c.loopUseDepth = savedLoopUseDepth
+	c.loopScopeDepth = savedLoopUseDepth
 	c.block = exitBlock
 }
 
@@ -888,10 +1034,10 @@ func (c *Compiler) genClassicForStmt(s *ast.ClassicForStmt) {
 	// Body
 	savedBreak := c.breakTarget
 	savedContinue := c.continueTarget
-	savedLoopUseDepth := c.loopUseDepth
+	savedLoopUseDepth := c.loopScopeDepth
 	c.breakTarget = exitBlock
 	c.continueTarget = updateBlock
-	c.loopUseDepth = len(c.useBindings)
+	c.loopScopeDepth = len(c.scopeBindings)
 
 	c.block = bodyBlock
 	c.genBlock(s.Body)
@@ -928,7 +1074,7 @@ func (c *Compiler) genClassicForStmt(s *ast.ClassicForStmt) {
 
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
-	c.loopUseDepth = savedLoopUseDepth
+	c.loopScopeDepth = savedLoopUseDepth
 	c.block = exitBlock
 }
 
@@ -942,10 +1088,10 @@ func (c *Compiler) genInfiniteLoop(s *ast.InfiniteLoop) {
 
 	savedBreak := c.breakTarget
 	savedContinue := c.continueTarget
-	savedLoopUseDepth := c.loopUseDepth
+	savedLoopUseDepth := c.loopScopeDepth
 	c.breakTarget = exitBlock
 	c.continueTarget = bodyBlock
-	c.loopUseDepth = len(c.useBindings)
+	c.loopScopeDepth = len(c.scopeBindings)
 
 	c.block = bodyBlock
 	c.genBlock(s.Body)
@@ -955,7 +1101,7 @@ func (c *Compiler) genInfiniteLoop(s *ast.InfiniteLoop) {
 
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
-	c.loopUseDepth = savedLoopUseDepth
+	c.loopScopeDepth = savedLoopUseDepth
 	c.block = exitBlock
 }
 
@@ -964,8 +1110,8 @@ func (c *Compiler) genInfiniteLoop(s *ast.InfiniteLoop) {
 func (c *Compiler) genBreakStmt() {
 	if c.breakTarget != nil {
 		// Close use bindings added within the loop body
-		if len(c.useBindings) > c.loopUseDepth {
-			c.emitUseCloseCalls(c.loopUseDepth)
+		if len(c.scopeBindings) > c.loopScopeDepth {
+			c.emitScopeCleanup(c.loopScopeDepth)
 		}
 		c.block.NewBr(c.breakTarget)
 	}
@@ -974,8 +1120,8 @@ func (c *Compiler) genBreakStmt() {
 func (c *Compiler) genContinueStmt() {
 	if c.continueTarget != nil {
 		// Close use bindings added within the loop body
-		if len(c.useBindings) > c.loopUseDepth {
-			c.emitUseCloseCalls(c.loopUseDepth)
+		if len(c.scopeBindings) > c.loopScopeDepth {
+			c.emitScopeCleanup(c.loopScopeDepth)
 		}
 		c.block.NewBr(c.continueTarget)
 	}
@@ -993,11 +1139,7 @@ func (c *Compiler) genIndexAssign(target *ast.IndexExpr, op ast.AssignOp, val va
 	if elem, ok := types.AsSlice(targetType); ok {
 		c.genSliceIndexAssign(target, elem, op, val)
 	} else if key, valT, ok := types.AsMap(targetType); ok {
-		if op != ast.OpAssign {
-			c.genMapCompoundAssign(target, key, valT, op, val)
-		} else {
-			c.genMapIndexAssign(target, key, valT, val)
-		}
+		c.genMapIndexAssign(target, key, valT, val)
 	} else {
 		panic(fmt.Sprintf("codegen: cannot assign to index of type %s", targetType))
 	}
@@ -1061,16 +1203,62 @@ func (c *Compiler) genMapIndexAssign(target *ast.IndexExpr, keyType, valType typ
 	c.block.NewCall(c.funcs["promise_map_set"], mapPtr, keyPtr, valPtr)
 }
 
+// genCompoundIndexAssign handles compound index assignments (arr[i] += val, m[k] += val)
+// with correct evaluation order: target → key → RHS.
+func (c *Compiler) genCompoundIndexAssign(target *ast.IndexExpr, op ast.AssignOp, valueExpr ast.Expr) {
+	targetType := c.info.Types[target.Target]
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+
+	if elem, ok := types.AsSlice(targetType); ok {
+		slicePtr := c.genExpr(target.Target)
+		idx := c.genExpr(target.Index)
+		val := c.genExpr(valueExpr)
+		c.genSliceCompoundAssign(slicePtr, idx, elem, op, val)
+	} else if key, valT, ok := types.AsMap(targetType); ok {
+		mapPtr := c.genExpr(target.Target)
+		keyVal := c.genExpr(target.Index)
+		val := c.genExpr(valueExpr)
+		c.genMapCompoundAssign(mapPtr, keyVal, key, valT, op, val)
+	} else {
+		panic(fmt.Sprintf("codegen: cannot compound-assign to index of type %s", targetType))
+	}
+}
+
+// genSliceCompoundAssign handles arr[i] += val with bounds check and pre-evaluated operands.
+func (c *Compiler) genSliceCompoundAssign(slicePtr, idx value.Value, elemType types.Type, op ast.AssignOp, val value.Value) {
+	elemLLVM := c.resolveType(elemType)
+
+	headerType := sliceHeaderType()
+	headerPtr := c.block.NewBitCast(slicePtr, irtypes.NewPointer(headerType))
+	lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	length := c.block.NewLoad(irtypes.I64, lenPtr)
+
+	inBounds := c.block.NewICmp(enum.IPredULT, idx, length)
+	okBlock := c.newBlock("slicecomp.ok")
+	panicBlock := c.newBlock("slicecomp.oob")
+	c.block.NewCondBr(inBounds, okBlock, panicBlock)
+
+	c.block = panicBlock
+	oobMsg := c.makeGlobalString("index out of bounds")
+	c.block.NewCall(c.funcs["promise_panic"], oobMsg)
+	c.block.NewUnreachable()
+
+	c.block = okBlock
+	dataBase := c.block.NewGetElementPtr(irtypes.I8, slicePtr,
+		constant.NewInt(irtypes.I64, int64(sliceHeaderSize)))
+	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
+	elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, idx)
+
+	current := c.block.NewLoad(elemLLVM, elemPtr)
+	result := c.genCompoundOp(op, current, val)
+	c.block.NewStore(result, elemPtr)
+}
+
 // genMapCompoundAssign handles m["key"] += val by getting, applying op, and setting back.
-//
-// BUG: val is evaluated by the caller (genAssignStmt) before this function runs,
-// so the evaluation order is RHS → map target → key. The correct semantic order
-// should be map target → key → RHS. This matters when expressions have side effects
-// (e.g. m[f()] += g()  would call g() before f()). Fixing this requires refactoring
-// genAssignStmt to defer RHS evaluation for compound index assignments.
-func (c *Compiler) genMapCompoundAssign(target *ast.IndexExpr, keyType, valType types.Type, op ast.AssignOp, val value.Value) {
-	mapPtr := c.genExpr(target.Target)
-	keyVal := c.genExpr(target.Index)
+func (c *Compiler) genMapCompoundAssign(mapPtr, keyVal value.Value, keyType, valType types.Type, op ast.AssignOp, val value.Value) {
 	keyLLVM := c.resolveType(keyType)
 	valLLVM := c.resolveType(valType)
 
@@ -1193,10 +1381,10 @@ func (c *Compiler) genForInSlice(s *ast.ForInStmt, slicePtr value.Value, elemTyp
 	// Body: load element, store to binding
 	savedBreak := c.breakTarget
 	savedContinue := c.continueTarget
-	savedLoopUseDepth := c.loopUseDepth
+	savedLoopUseDepth := c.loopScopeDepth
 	c.breakTarget = exitBlock
 	c.continueTarget = updateBlock
-	c.loopUseDepth = len(c.useBindings)
+	c.loopScopeDepth = len(c.scopeBindings)
 
 	c.block = bodyBlock
 	dataBase := c.block.NewGetElementPtr(irtypes.I8, slicePtr,
@@ -1229,7 +1417,7 @@ func (c *Compiler) genForInSlice(s *ast.ForInStmt, slicePtr value.Value, elemTyp
 
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
-	c.loopUseDepth = savedLoopUseDepth
+	c.loopScopeDepth = savedLoopUseDepth
 	c.block = exitBlock
 }
 
@@ -1282,10 +1470,10 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapPtr value.Value, keyType, va
 	// Body: build tuple from key/val outputs, store to binding
 	savedBreak := c.breakTarget
 	savedContinue := c.continueTarget
-	savedLoopUseDepth := c.loopUseDepth
+	savedLoopUseDepth := c.loopScopeDepth
 	c.breakTarget = exitBlock
 	c.continueTarget = updateBlock
-	c.loopUseDepth = len(c.useBindings)
+	c.loopScopeDepth = len(c.scopeBindings)
 
 	c.block = bodyBlock
 	key := c.block.NewLoad(keyLLVM, keyOutAlloca)
@@ -1312,7 +1500,7 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapPtr value.Value, keyType, va
 
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
-	c.loopUseDepth = savedLoopUseDepth
+	c.loopScopeDepth = savedLoopUseDepth
 	c.block = exitBlock
 }
 
@@ -1346,10 +1534,10 @@ func (c *Compiler) genForInString(s *ast.ForInStmt, strPtr value.Value) {
 	// Body: bind char to loop variable
 	savedBreak := c.breakTarget
 	savedContinue := c.continueTarget
-	savedLoopUseDepth := c.loopUseDepth
+	savedLoopUseDepth := c.loopScopeDepth
 	c.breakTarget = exitBlock
 	c.continueTarget = headerBlock
-	c.loopUseDepth = len(c.useBindings)
+	c.loopScopeDepth = len(c.scopeBindings)
 
 	c.block = bodyBlock
 	alloca := c.block.NewAlloca(irtypes.I32)
@@ -1373,6 +1561,6 @@ func (c *Compiler) genForInString(s *ast.ForInStmt, strPtr value.Value) {
 
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
-	c.loopUseDepth = savedLoopUseDepth
+	c.loopScopeDepth = savedLoopUseDepth
 	c.block = exitBlock
 }

@@ -210,8 +210,8 @@ Type-system-driven LLVM IR generation for primitive types, arithmetic, control f
 
 ### Deferred sub-stages
 
-- **8h**: Ownership-aware memory management (free/drop)
-- **8i**: Concurrency (go, task, channel, `<-`)
+- Ownership-aware memory management (drop) → Stage 8n
+- Concurrency (go, task, channel, `<-`) → TBD
 
 ## Stage 8b — Strings (Done)
 
@@ -494,3 +494,78 @@ Dependency fetching and resolution.
 - Lockfile generation and deterministic builds
 - Diamond dependency resolution
 - Cache management
+
+---
+
+## Deferred Work Tracker
+
+Consolidated list of items deferred from completed stages. Items marked ~~strikethrough~~ were completed in later stages.
+
+### Correctness Bugs
+
+| Item | Origin | Priority |
+|------|--------|----------|
+| ~~`llvmTypeSize` struct alignment — sums field sizes without padding, under-allocates for struct-typed slice elements~~ | 8g | ~~Fixed 8n~~ |
+| ~~Evaluation order in compound index assignment — RHS evaluated before LHS target/key~~ | 8i | ~~Fixed 8n~~ |
+| Reassignment of droppable variable leaks old value — `x = newVal` overwrites without calling `drop()` on old | 8n | Medium |
+
+### Codegen Gaps
+
+| Item | Origin | Priority |
+|------|--------|----------|
+| Capturing lambdas/closures | 8g | High |
+| Fixed-size arrays as stack-allocated `[N x T]` | 8g | Medium |
+| Destructure is-patterns (`x is Dog(name)`) | 8k | Medium |
+| Generic type RTTI | 8k | Medium |
+| Failable `close()` error propagation in `use` | 8m | Medium |
+| Named enum fields in constructors | 8d | Low |
+| Enum methods | 8d | Low |
+| Extern ABI pack/unpack for enums | 8d | Low |
+| Failable extern functions (C ABI for errors) | 8e | Low |
+| Type argument inference (explicit type args only currently) | 8f | Low |
+| Multi-arg generics in expression context (grammar limitation) | 8f | Low |
+| Extern ABI for generic types | 8f | Low |
+| Non-instance field placements (`value`/`variant`/`type`) | 8c | Low |
+| Default field values | 8c | Low |
+| User type `toString()` for interpolation | 8h | Low |
+| Devirtualization optimization (direct call when concrete type known) | 8L | Low |
+
+### Ownership & Type System
+
+| Item | Origin |
+|------|--------|
+| Explicit lifetime annotations | 6b |
+| Stored references in structs | 6b |
+| Full NLL last-use analysis | 6b |
+| Drop ordering | 6b |
+| Disjoint field borrows | 6b |
+
+### Meta Annotations
+
+| Item | Origin |
+|------|--------|
+| `inline`, `packed`, `align`, `extern`, `serializable`, `public`, `unsafe` processing | 7 |
+
+### Future Stages
+
+| Item | Target |
+|------|--------|
+| Module system (URL-based imports, dependency graph) | Stage 9 |
+| CLI: `promise fmt` code formatter | Stage 10 |
+| Package manager (fetch, resolve, lock) | Stage 11 |
+| Concurrency (`go`, `task`, `channel`, `<-`) | TBD |
+| Generators (`yield`, `yield*`) | TBD |
+| String slicing, Unicode normalization | TBD |
+
+### Completed (resolved in later stages)
+
+- ~~String interpolation~~ → 8h
+- ~~If-unwrap / while-unwrap~~ → 8h
+- ~~Optional chaining, unsafe blocks~~ → 8h
+- ~~Container `.len`~~ → 8i
+- ~~Container methods `.push`, `.pop`, `.contains`~~ → 8j
+- ~~Vtable / virtual dispatch~~ → 8L
+- ~~`is` / `as` expressions~~ → 8k
+- ~~Slice growth `.push()`~~ → 8j
+- ~~`llvmTypeSize` struct alignment~~ → 8n
+- ~~Compound index assignment eval order~~ → 8n

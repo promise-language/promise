@@ -389,7 +389,7 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 			c.monoCtx = &monoContext{inst: inst, origin: named, name: name}
 			func() {
 				defer func() { c.typeSubst = nil; c.monoCtx = nil }()
-				c.defineMethodFunc(md, m, fn)
+				c.defineMethodFunc(md, m, fn, named)
 			}()
 		}
 	}

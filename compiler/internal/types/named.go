@@ -9,6 +9,7 @@ type Named struct {
 	fields     []*Field
 	methods    []*Method
 	isCopy     bool   // `copy meta — bitwise copy on assignment
+	hasDrop    bool   // type has a validated drop(~this) method
 	structural bool   // `structural meta — allows structural interface satisfaction
 	doc        string // `doc meta — documentation string
 	deprecated string // `deprecated meta — empty means not deprecated
@@ -29,6 +30,8 @@ func (n *Named) Methods() []*Method       { return n.methods }
 func (n *Named) Underlying() Type         { return n }
 func (n *Named) IsCopy() bool             { return n.isCopy }
 func (n *Named) SetCopy(v bool)           { n.isCopy = v }
+func (n *Named) HasDrop() bool            { return n.hasDrop }
+func (n *Named) SetHasDrop(v bool)        { n.hasDrop = v }
 func (n *Named) IsStructural() bool       { return n.structural }
 func (n *Named) SetStructural(v bool)     { n.structural = v }
 func (n *Named) Doc() string              { return n.doc }

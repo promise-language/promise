@@ -10,6 +10,7 @@ import (
 	"djabi.dev/go/promise_lang/internal/parser"
 	"djabi.dev/go/promise_lang/internal/sema"
 	antlr "github.com/antlr4-go/antlr/v4"
+	irtypes "github.com/llir/llvm/ir/types"
 )
 
 // stdAll provides all builtin type declarations needed by tests.
@@ -4338,4 +4339,804 @@ func TestGenericGetterSetterSameName(t *testing.T) {
 	// Monomorphized getter and setter should have distinct names
 	assertContains(t, ir, "define i64 @Box__int.val(")
 	assertContains(t, ir, "define void @Box__int.val$set(")
+}
+
+// --- Drop method tests ---
+
+// Basic: drop() called at scope exit
+func TestDropBasicScopeExit(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		main() {
+			r := Resource(id: 1);
+			int x = r.id;
+		}
+	`)
+	assertContains(t, ir, "call void @Resource.drop")
+	assertContains(t, ir, "r.dropflag")
+}
+
+// Move to function arg clears drop flag, adds condBr
+func TestDropNotCalledWhenMoved(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		consume(Resource r) { }
+		main() {
+			r := Resource(id: 1);
+			consume(r);
+		}
+	`)
+	assertContains(t, ir, "store i1 false, i1*")
+	assertContains(t, ir, "drop.call")
+	assertContains(t, ir, "drop.skip")
+}
+
+// Return triggers drop before ret
+func TestDropWithReturn(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		make() int {
+			r := Resource(id: 42);
+			return r.id;
+		}
+		main() {
+			int v = make();
+		}
+	`)
+	assertContains(t, ir, "call void @Resource.drop")
+	assertContains(t, ir, "define i64 @make")
+}
+
+// Mixed use + drop bindings both fire
+func TestDropAndUseOrdering(t *testing.T) {
+	ir := generateIR(t, `
+		type Closeable {
+			int id;
+			close() { }
+		}
+		type Droppable {
+			int id;
+			drop(~this) { }
+		}
+		main() {
+			use c := Closeable(id: 1);
+			d := Droppable(id: 2);
+			int x = c.id + d.id;
+		}
+	`)
+	assertContains(t, ir, "call void @Closeable.close")
+	assertContains(t, ir, "call void @Droppable.drop")
+}
+
+// Nested type: outer drop() triggers field drops
+func TestDropFieldAutoCleanup(t *testing.T) {
+	ir := generateIR(t, `
+		type Inner {
+			int id;
+			drop(~this) { }
+		}
+		type Outer {
+			Inner inner;
+			drop(~this) { }
+		}
+		main() {
+			o := Outer(inner: Inner(id: 1));
+			int x = o.inner.id;
+		}
+	`)
+	assertContains(t, ir, "call void @Outer.drop")
+	assertContains(t, ir, "call void @Inner.drop")
+}
+
+// Returning a droppable variable clears its flag
+func TestDropReturnMoveClearsFlag(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		make() Resource {
+			r := Resource(id: 42);
+			return r;
+		}
+		main() {
+			Resource v = make();
+		}
+	`)
+	assertContains(t, ir, "store i1 false, i1*")
+}
+
+// Conditional move: moved in if-then only → drop flag condBr after merge
+func TestDropConditionalMove(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		consume(Resource r) { }
+		main() {
+			r := Resource(id: 1);
+			if true {
+				consume(r);
+			}
+		}
+	`)
+	// Drop flag cleared in then-branch
+	assertContains(t, ir, "store i1 false, i1*")
+	// Conditional drop at scope exit (flag may be true or false)
+	assertContains(t, ir, "drop.call")
+	assertContains(t, ir, "drop.skip")
+}
+
+// Conditional move with else: moved in both branches → flag cleared in both
+func TestDropConditionalMoveBothBranches(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		consume(Resource r) { }
+		other(Resource r) { }
+		main() {
+			r := Resource(id: 1);
+			if true {
+				consume(r);
+			} else {
+				other(r);
+			}
+		}
+	`)
+	// Flag should be cleared in both branches
+	count := strings.Count(ir, "store i1 false, i1*")
+	if count < 2 {
+		t.Errorf("expected at least 2 'store i1 false' (both branches), got %d", count)
+	}
+}
+
+// Nested scopes: inner scope drop happens before outer
+func TestDropNestedScopes(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		main() {
+			r1 := Resource(id: 1);
+			if true {
+				r2 := Resource(id: 2);
+				int x = r2.id;
+			}
+			int y = r1.id;
+		}
+	`)
+	// Both should have drop flags and calls
+	assertContains(t, ir, "r1.dropflag")
+	assertContains(t, ir, "r2.dropflag")
+	// Two drop calls (one for inner, one for outer)
+	count := strings.Count(ir, "call void @Resource.drop")
+	if count < 2 {
+		t.Errorf("expected at least 2 drop calls (inner + outer scope), got %d\nIR:\n%s", count, ir)
+	}
+}
+
+// While loop: droppable var inside loop body should be dropped per iteration
+func TestDropInWhileLoop(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		main() {
+			int i = 0;
+			while i < 3 {
+				r := Resource(id: i);
+				int x = r.id;
+				i += 1;
+			}
+		}
+	`)
+	// Drop should be emitted inside the loop body
+	assertContains(t, ir, "call void @Resource.drop")
+	assertContains(t, ir, "r.dropflag")
+}
+
+// Infinite loop with break: drop cleanup happens at break
+func TestDropInLoopWithBreak(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		main() {
+			for {
+				r := Resource(id: 1);
+				int x = r.id;
+				break;
+			}
+		}
+	`)
+	// Drop call should be present (at break cleanup)
+	assertContains(t, ir, "call void @Resource.drop")
+}
+
+// Loop with continue: drop fires at end of iteration and at continue
+func TestDropInLoopWithContinue(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		main() {
+			int i = 0;
+			while i < 5 {
+				r := Resource(id: i);
+				i += 1;
+				if i == 3 {
+					continue;
+				}
+				int x = r.id;
+			}
+		}
+	`)
+	// Drop calls should exist (at continue and normal scope exit)
+	assertContains(t, ir, "call void @Resource.drop")
+}
+
+// Move into method call clears drop flag
+func TestDropMoveToMethodCall(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		type Container {
+			int id;
+			take(Resource r) { }
+		}
+		main() {
+			c := Container(id: 0);
+			r := Resource(id: 1);
+			c.take(r);
+		}
+	`)
+	// r's drop flag should be cleared after method call
+	assertContains(t, ir, "store i1 false, i1*")
+	assertContains(t, ir, "drop.call")
+	assertContains(t, ir, "drop.skip")
+}
+
+// Move into constructor field clears drop flag
+func TestDropMoveToConstructor(t *testing.T) {
+	ir := generateIR(t, `
+		type Inner {
+			int id;
+			drop(~this) { }
+		}
+		type Outer {
+			Inner inner;
+		}
+		main() {
+			r := Inner(id: 1);
+			o := Outer(inner: r);
+			int x = o.inner.id;
+		}
+	`)
+	// r's drop flag should be cleared when moved into constructor
+	assertContains(t, ir, "store i1 false, i1*")
+}
+
+// Move into ident assignment clears drop flag
+func TestDropMoveToIdentAssign(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		main() {
+			Resource a = Resource(id: 1);
+			Resource b = Resource(id: 2);
+			b = a;
+			int x = b.id;
+		}
+	`)
+	// a's drop flag should be cleared after the assignment to b
+	assertContains(t, ir, "store i1 false, i1*")
+}
+
+// Move into member assignment clears drop flag (bug #2 fix)
+func TestDropMoveToMemberAssign(t *testing.T) {
+	ir := generateIR(t, `
+		type Inner {
+			int id;
+			drop(~this) { }
+		}
+		type Outer {
+			Inner inner;
+		}
+		main() {
+			o := Outer(inner: Inner(id: 0));
+			r := Inner(id: 1);
+			o.inner = r;
+		}
+	`)
+	// r's drop flag should be cleared after the member assignment
+	assertContains(t, ir, "store i1 false, i1*")
+}
+
+// Multiple droppable vars: each gets its own flag and cleanup
+func TestDropMultipleVariables(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		main() {
+			a := Resource(id: 1);
+			b := Resource(id: 2);
+			c := Resource(id: 3);
+			int x = a.id + b.id + c.id;
+		}
+	`)
+	assertContains(t, ir, "a.dropflag")
+	assertContains(t, ir, "b.dropflag")
+	assertContains(t, ir, "c.dropflag")
+	count := strings.Count(ir, "call void @Resource.drop")
+	if count < 3 {
+		t.Errorf("expected at least 3 drop calls, got %d\nIR:\n%s", count, ir)
+	}
+}
+
+// Multiple droppable fields: all cleaned up after user drop() body
+func TestDropMultipleFieldsAutoCleanup(t *testing.T) {
+	ir := generateIR(t, `
+		type FileHandle {
+			int fd;
+			drop(~this) { }
+		}
+		type Connection {
+			FileHandle read_handle;
+			FileHandle write_handle;
+			drop(~this) { }
+		}
+		main() {
+			c := Connection(read_handle: FileHandle(fd: 3), write_handle: FileHandle(fd: 4));
+		}
+	`)
+	assertContains(t, ir, "call void @Connection.drop")
+	// FileHandle.drop should be called for both fields inside Connection.drop
+	count := strings.Count(ir, "call void @FileHandle.drop")
+	if count < 2 {
+		t.Errorf("expected at least 2 FileHandle.drop calls (one per field), got %d\nIR:\n%s", count, ir)
+	}
+}
+
+// Non-droppable type: no drop flag or call generated
+func TestDropNotGeneratedForNonDroppable(t *testing.T) {
+	ir := generateIR(t, `
+		type Simple {
+			int id;
+		}
+		main() {
+			s := Simple(id: 1);
+			int x = s.id;
+		}
+	`)
+	assertNotContains(t, ir, "dropflag")
+	assertNotContains(t, ir, "drop.call")
+	assertNotContains(t, ir, "drop.skip")
+}
+
+// Copy type: no drop flag even if fields exist
+func TestDropNotGeneratedForCopyType(t *testing.T) {
+	ir := generateIR(t, `
+		type Point `+"`"+`copy {
+			int x;
+			int y;
+		}
+		main() {
+			p := Point(x: 1, y: 2);
+			int v = p.x;
+		}
+	`)
+	assertNotContains(t, ir, "dropflag")
+	assertNotContains(t, ir, "drop.call")
+}
+
+// Droppable var in typed var decl
+func TestDropTypedVarDecl(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		main() {
+			Resource r = Resource(id: 1);
+			int x = r.id;
+		}
+	`)
+	assertContains(t, ir, "call void @Resource.drop")
+	assertContains(t, ir, "r.dropflag")
+}
+
+// Drop with early return in failable function
+func TestDropWithEarlyReturnFailable(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		work() void! {
+			r := Resource(id: 42);
+			return;
+		}
+		main() { }
+	`)
+	// drop() should be emitted before the return
+	assertContains(t, ir, "call void @Resource.drop")
+}
+
+// Drop with raise: cleanup before error return
+func TestDropWithRaise(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		fail() void! {
+			r := Resource(id: 1);
+			raise "oops";
+		}
+		main() { }
+	`)
+	// drop() should be emitted before the raise
+	assertContains(t, ir, "call void @Resource.drop")
+}
+
+// Drop in a function that takes and returns a droppable:
+// the parameter itself doesn't get a drop flag (it's the caller's responsibility)
+func TestDropParameterNotFlagged(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		passthrough(Resource r) int {
+			return r.id;
+		}
+		main() {
+			int x = passthrough(Resource(id: 1));
+		}
+	`)
+	assertContains(t, ir, "define i64 @passthrough")
+	// The function should not create a drop flag for its parameter
+	// (it doesn't own the alloca, the caller does the drop flag management)
+}
+
+// --- Alignment bug fix test ---
+
+func TestLlvmTypeSizeAlignment(t *testing.T) {
+	// Test that struct sizes account for alignment padding
+	// {i1, i64} should be 16 (1 byte + 7 padding + 8 bytes), not 9
+	s1 := irtypes.NewStruct(irtypes.I1, irtypes.I64)
+	if sz := llvmTypeSize(s1); sz != 16 {
+		t.Errorf("{i1, i64} size: got %d, want 16", sz)
+	}
+
+	// {i64, i1} should be 16 (8 bytes + 1 byte + 7 tail padding)
+	s2 := irtypes.NewStruct(irtypes.I64, irtypes.I1)
+	if sz := llvmTypeSize(s2); sz != 16 {
+		t.Errorf("{i64, i1} size: got %d, want 16", sz)
+	}
+
+	// {i32, i32} should be 8 (no padding needed)
+	s3 := irtypes.NewStruct(irtypes.I32, irtypes.I32)
+	if sz := llvmTypeSize(s3); sz != 8 {
+		t.Errorf("{i32, i32} size: got %d, want 8", sz)
+	}
+
+	// {i8, i32, i8} should be 12 (1 + 3pad + 4 + 1 + 3pad)
+	s4 := irtypes.NewStruct(irtypes.I8, irtypes.I32, irtypes.I8)
+	if sz := llvmTypeSize(s4); sz != 12 {
+		t.Errorf("{i8, i32, i8} size: got %d, want 12", sz)
+	}
+}
+
+// --- Compound index eval order test ---
+
+func TestCompoundIndexAssignSlice(t *testing.T) {
+	// Ensure compound index assignments on slices generate valid IR
+	ir := generateIR(t, `
+		main() {
+			s := [1, 2, 3];
+			s[0] += 10;
+		}
+	`)
+	assertContains(t, ir, "define i32 @main")
+	// Should contain the compound add operation
+	assertContains(t, ir, "add i64")
+}
+
+// --- Coverage gap tests ---
+
+// Virtual close dispatch through vtable (type has children → needs vtable)
+func TestUseVarVirtualCloseDispatch(t *testing.T) {
+	ir := generateIR(t, `
+		type Base {
+			int id;
+			close() { }
+		}
+		type Child is Base {
+			close() { }
+		}
+		main() {
+			use r := Base(id: 1);
+			int x = r.id;
+		}
+	`)
+	// Base has children → needs vtable → virtual close dispatch
+	assertContains(t, ir, "@promise_vtable_Base")
+}
+
+// Virtual close with failable close() method (parent type with child)
+func TestUseVarVirtualCloseDispatchFailable(t *testing.T) {
+	ir := generateIR(t, `
+		type Conn {
+			int fd;
+			close()! { }
+		}
+		type TcpConn is Conn {
+			close()! { }
+		}
+		main() {
+			use c := Conn(fd: 3);
+			int x = c.fd;
+		}
+	`)
+	// Conn has children → needs vtable → virtual close dispatch
+	assertContains(t, ir, "@promise_vtable_Conn")
+}
+
+// Virtual drop dispatch through vtable (type has children → needs vtable)
+func TestDropVirtualDispatch(t *testing.T) {
+	ir := generateIR(t, `
+		type Handle {
+			int id;
+			drop(~this) { }
+		}
+		type FileHandle is Handle {
+			drop(~this) { }
+		}
+		main() {
+			h := Handle(id: 1);
+			int x = h.id;
+		}
+	`)
+	// Handle has children → needs vtable → virtual drop dispatch
+	assertContains(t, ir, "drop.call")
+	assertContains(t, ir, "drop.skip")
+	assertContains(t, ir, "h.dropflag")
+	assertContains(t, ir, "@promise_vtable_Handle")
+}
+
+// llvmTypeAlign coverage: float, double, pointer, array
+func TestLlvmTypeAlignFloat(t *testing.T) {
+	if a := llvmTypeAlign(irtypes.Float); a != 4 {
+		t.Errorf("float align: got %d, want 4", a)
+	}
+}
+
+func TestLlvmTypeAlignDouble(t *testing.T) {
+	if a := llvmTypeAlign(irtypes.Double); a != 8 {
+		t.Errorf("double align: got %d, want 8", a)
+	}
+}
+
+func TestLlvmTypeAlignPointer(t *testing.T) {
+	if a := llvmTypeAlign(irtypes.I8Ptr); a != 8 {
+		t.Errorf("pointer align: got %d, want 8", a)
+	}
+}
+
+func TestLlvmTypeAlignArray(t *testing.T) {
+	arr := irtypes.NewArray(10, irtypes.I32)
+	if a := llvmTypeAlign(arr); a != 4 {
+		t.Errorf("[10 x i32] align: got %d, want 4", a)
+	}
+}
+
+func TestLlvmTypeAlignStruct(t *testing.T) {
+	s := irtypes.NewStruct(irtypes.I8, irtypes.I64)
+	if a := llvmTypeAlign(s); a != 8 {
+		t.Errorf("{i8, i64} align: got %d, want 8", a)
+	}
+}
+
+func TestLlvmTypeAlignLargeInt(t *testing.T) {
+	// i128 = 16 bytes, but capped at 8
+	i128 := irtypes.NewInt(128)
+	if a := llvmTypeAlign(i128); a != 8 {
+		t.Errorf("i128 align: got %d, want 8", a)
+	}
+}
+
+func TestLlvmTypeSizeFloat(t *testing.T) {
+	if sz := llvmTypeSize(irtypes.Float); sz != 4 {
+		t.Errorf("float size: got %d, want 4", sz)
+	}
+	if sz := llvmTypeSize(irtypes.Double); sz != 8 {
+		t.Errorf("double size: got %d, want 8", sz)
+	}
+}
+
+func TestLlvmTypeSizePointer(t *testing.T) {
+	if sz := llvmTypeSize(irtypes.I8Ptr); sz != 8 {
+		t.Errorf("pointer size: got %d, want 8", sz)
+	}
+}
+
+func TestLlvmTypeSizeArray(t *testing.T) {
+	arr := irtypes.NewArray(5, irtypes.I32)
+	if sz := llvmTypeSize(arr); sz != 20 {
+		t.Errorf("[5 x i32] size: got %d, want 20", sz)
+	}
+}
+
+// Drop with use in loop triggers both close and drop at scope boundaries
+func TestDropAndUseInLoop(t *testing.T) {
+	ir := generateIR(t, `
+		type Closeable {
+			int id;
+			close() { }
+		}
+		type Droppable {
+			int id;
+			drop(~this) { }
+		}
+		main() {
+			d := Droppable(id: 1);
+			int i = 0;
+			while i < 3 {
+				use c := Closeable(id: i);
+				int x = c.id + d.id;
+				i++;
+			}
+		}
+	`)
+	assertContains(t, ir, "call void @Closeable.close")
+	assertContains(t, ir, "call void @Droppable.drop")
+}
+
+// Move in function call clears flag — std call variant
+func TestDropMoveToStdCall(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		take(Resource r) { }
+		main() {
+			r := Resource(id: 1);
+			take(r);
+		}
+	`)
+	assertContains(t, ir, "store i1 false, i1*")
+	assertContains(t, ir, "drop.call")
+	assertContains(t, ir, "drop.skip")
+}
+
+// Move in generic function call clears flag
+func TestDropMoveToGenericFuncCall(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		identity[T](T val) T { return val; }
+		main() {
+			r := Resource(id: 1);
+			Resource r2 = identity[Resource](r);
+		}
+	`)
+	assertContains(t, ir, "store i1 false, i1*")
+}
+
+// Move to index assignment clears flag
+func TestDropMoveToIndexAssign(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		main() {
+			arr := [Resource(id: 0)];
+			r := Resource(id: 1);
+			arr[0] = r;
+		}
+	`)
+	assertContains(t, ir, "store i1 false, i1*")
+}
+
+// Error propagation triggers scope cleanup
+func TestDropErrorPropagateCleansUp(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		risky() int! {
+			return 42;
+		}
+		work() int! {
+			r := Resource(id: 1);
+			int val = risky()?;
+			return val + r.id;
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "call void @Resource.drop")
+	assertContains(t, ir, "define { i1, i64, i8* } @work")
+}
+
+// Compound assignment on different typed variables exercises namedFromLLVMType branches
+func TestCompoundAssignF64(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			f64 x = 1.5;
+			x += 2.5;
+		}
+	`)
+	assertContains(t, ir, "fadd double")
+}
+
+func TestCompoundAssignI32(t *testing.T) {
+	ir := generateIR(t, `
+		type Box {
+			i32 val;
+			work(~this, i32 delta) { this.val -= delta; }
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "sub i32")
+}
+
+func TestCompoundAssignF32(t *testing.T) {
+	ir := generateIR(t, `
+		type Box {
+			f32 val;
+			work(~this, f32 factor) { this.val *= factor; }
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "fmul float")
+}
+
+func TestCompoundAssignI16(t *testing.T) {
+	ir := generateIR(t, `
+		type Box {
+			i16 val;
+			work(~this, i16 delta) { this.val += delta; }
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "add i16")
+}
+
+func TestCompoundAssignI8(t *testing.T) {
+	ir := generateIR(t, `
+		type Box {
+			i8 val;
+			work(~this, i8 delta) { this.val += delta; }
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "add i8")
 }

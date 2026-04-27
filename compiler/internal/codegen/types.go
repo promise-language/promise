@@ -293,8 +293,39 @@ func resultErrIdx(resultType *irtypes.StructType) uint64 {
 	return 2
 }
 
-// llvmTypeSize returns the byte size of an LLVM type on a 64-bit target.
-// Used for computing enum variant data sizes.
+// llvmTypeAlign returns the natural alignment of an LLVM type in bytes on a 64-bit target.
+func llvmTypeAlign(typ irtypes.Type) int {
+	switch t := typ.(type) {
+	case *irtypes.IntType:
+		sz := int((t.BitSize + 7) / 8)
+		if sz > 8 {
+			return 8
+		}
+		return sz
+	case *irtypes.FloatType:
+		if t.Kind == irtypes.FloatKindFloat {
+			return 4
+		}
+		return 8
+	case *irtypes.PointerType:
+		return 8
+	case *irtypes.StructType:
+		maxAlign := 1
+		for _, f := range t.Fields {
+			if a := llvmTypeAlign(f); a > maxAlign {
+				maxAlign = a
+			}
+		}
+		return maxAlign
+	case *irtypes.ArrayType:
+		return llvmTypeAlign(t.ElemType)
+	default:
+		return 8
+	}
+}
+
+// llvmTypeSize returns the byte size of an LLVM type on a 64-bit target,
+// accounting for struct field alignment and padding.
 func llvmTypeSize(typ irtypes.Type) int {
 	switch t := typ.(type) {
 	case *irtypes.IntType:
@@ -307,11 +338,23 @@ func llvmTypeSize(typ irtypes.Type) int {
 	case *irtypes.PointerType:
 		return 8
 	case *irtypes.StructType:
-		size := 0
+		offset := 0
+		maxAlign := 1
 		for _, f := range t.Fields {
-			size += llvmTypeSize(f)
+			fieldAlign := llvmTypeAlign(f)
+			if fieldAlign > maxAlign {
+				maxAlign = fieldAlign
+			}
+			if rem := offset % fieldAlign; rem != 0 {
+				offset += fieldAlign - rem
+			}
+			offset += llvmTypeSize(f)
 		}
-		return size
+		// Pad to struct alignment
+		if rem := offset % maxAlign; rem != 0 {
+			offset += maxAlign - rem
+		}
+		return offset
 	case *irtypes.ArrayType:
 		return int(t.Len) * llvmTypeSize(t.ElemType)
 	default:

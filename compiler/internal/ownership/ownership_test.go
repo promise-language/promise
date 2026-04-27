@@ -1555,3 +1555,394 @@ func TestOwnershipGetterSetterSameName(t *testing.T) {
 		}
 	`)
 }
+
+// --- Droppable variable ownership ---
+
+func TestDroppableVariableMove(t *testing.T) {
+	ownerOK(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		consume(Resource r) { }
+		test() {
+			r := Resource(id: 1);
+			consume(r);
+		}
+	`)
+}
+
+func TestDroppableVariableUseAfterMove(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		consume(Resource r) { }
+		test() {
+			r := Resource(id: 1);
+			consume(r);
+			int x = r.id;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'r'")
+}
+
+func TestDroppableConditionalMoveUseAfter(t *testing.T) {
+	// Moving in one branch makes it "maybe moved" — use after is an error
+	errs := ownerErrs(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		consume(Resource r) { }
+		test(bool cond) {
+			r := Resource(id: 1);
+			if cond {
+				consume(r);
+			}
+			int x = r.id;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'r'")
+}
+
+func TestDroppableConditionalMoveBothBranchesOK(t *testing.T) {
+	// Moving in both branches is fine — no use after the if/else
+	ownerOK(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		consume(Resource r) { }
+		other(Resource r) { }
+		test(bool cond) {
+			r := Resource(id: 1);
+			if cond {
+				consume(r);
+			} else {
+				other(r);
+			}
+		}
+	`)
+}
+
+func TestDroppableMoveToAssignment(t *testing.T) {
+	// Moving via assignment is valid
+	ownerOK(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		test() {
+			Resource a = Resource(id: 1);
+			Resource b = a;
+			int x = b.id;
+		}
+	`)
+}
+
+func TestDroppableMoveToAssignmentUseAfter(t *testing.T) {
+	// Use after move via assignment
+	errs := ownerErrs(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		test() {
+			Resource a = Resource(id: 1);
+			Resource b = a;
+			int x = a.id;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'a'")
+}
+
+func TestDroppableMoveToMethodArg(t *testing.T) {
+	// Moving to a method argument is valid
+	ownerOK(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		type Container {
+			int id;
+			take(Resource r) { }
+		}
+		test() {
+			c := Container(id: 0);
+			r := Resource(id: 1);
+			c.take(r);
+		}
+	`)
+}
+
+func TestDroppableMoveToMethodArgUseAfter(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		type Container {
+			int id;
+			take(Resource r) { }
+		}
+		test() {
+			c := Container(id: 0);
+			r := Resource(id: 1);
+			c.take(r);
+			int x = r.id;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'r'")
+}
+
+func TestDroppableMoveToConstructorField(t *testing.T) {
+	// Moving into constructor is valid
+	ownerOK(t, `
+		type Inner {
+			int id;
+			drop(~this) { }
+		}
+		type Outer {
+			Inner inner;
+		}
+		test() {
+			r := Inner(id: 1);
+			o := Outer(inner: r);
+			int x = o.inner.id;
+		}
+	`)
+}
+
+func TestDroppableMoveToConstructorFieldUseAfter(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Inner {
+			int id;
+			drop(~this) { }
+		}
+		type Outer {
+			Inner inner;
+		}
+		test() {
+			r := Inner(id: 1);
+			o := Outer(inner: r);
+			int x = r.id;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'r'")
+}
+
+func TestDroppableReturnMove(t *testing.T) {
+	// Returning a droppable variable is a valid move
+	ownerOK(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		make() Resource {
+			r := Resource(id: 1);
+			return r;
+		}
+	`)
+}
+
+func TestDroppableReturnMoveUseAfter(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		consume(Resource r) { }
+		test() Resource {
+			r := Resource(id: 1);
+			consume(r);
+			return r;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'r'")
+}
+
+func TestDroppableMoveToMemberAssign(t *testing.T) {
+	// Moving via member assignment is valid
+	ownerOK(t, `
+		type Inner {
+			int id;
+			drop(~this) { }
+		}
+		type Outer {
+			Inner inner;
+		}
+		test() {
+			o := Outer(inner: Inner(id: 0));
+			r := Inner(id: 1);
+			o.inner = r;
+		}
+	`)
+}
+
+func TestDroppableMoveToMemberAssignUseAfter(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Inner {
+			int id;
+			drop(~this) { }
+		}
+		type Outer {
+			Inner inner;
+		}
+		test() {
+			o := Outer(inner: Inner(id: 0));
+			r := Inner(id: 1);
+			o.inner = r;
+			int x = r.id;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'r'")
+}
+
+func TestDroppableNoMoveNoError(t *testing.T) {
+	// Variable never moved — just used normally, then dropped at scope exit
+	ownerOK(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		test() {
+			r := Resource(id: 1);
+			int x = r.id;
+			int y = r.id;
+		}
+	`)
+}
+
+func TestDroppableMultipleVarsIndependentMoves(t *testing.T) {
+	// Multiple droppable vars moved independently
+	ownerOK(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		consume(Resource r) { }
+		test() {
+			a := Resource(id: 1);
+			b := Resource(id: 2);
+			consume(a);
+			consume(b);
+		}
+	`)
+}
+
+func TestDroppableReassignmentResurrects(t *testing.T) {
+	// After moving, reassigning brings the variable back to Owned
+	ownerOK(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		consume(Resource r) { }
+		test() {
+			r := Resource(id: 1);
+			consume(r);
+			r = Resource(id: 2);
+			int x = r.id;
+		}
+	`)
+}
+
+// checkAssignTarget: index expression target checks sub-expressions
+func TestAssignTargetIndexSubExpressions(t *testing.T) {
+	// arr[i] = val — should check arr is not moved
+	errs := ownerErrs(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		test() {
+			arr := [1, 2, 3];
+			consume_arr(arr);
+			arr[0] = 5;
+		}
+		consume_arr(int[] a) { }
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'arr'")
+}
+
+// checkAssignTarget: member expression target checks sub-expressions
+func TestAssignTargetMemberSubExpressions(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Box {
+			int val;
+		}
+		consume(Box b) { }
+		test() {
+			b := Box(val: 1);
+			consume(b);
+			b.val = 5;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'b'")
+}
+
+// checkAssignTarget: slice expression target
+func TestAssignTargetSliceSubExpressions(t *testing.T) {
+	errs := ownerErrs(t, `
+		test() {
+			arr := [1, 2, 3];
+			consume_arr(arr);
+			arr[0:2] = [5, 6];
+		}
+		consume_arr(int[] a) { }
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'arr'")
+}
+
+// checkAssignTarget: index expression checks both target AND index
+func TestAssignTargetIndexExprChecksIndex(t *testing.T) {
+	// The index sub-expression itself uses a moved variable
+	errs := ownerErrs(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		consume(Resource r) { }
+		test() {
+			r := Resource(id: 0);
+			consume(r);
+			arr := [1, 2, 3];
+			arr[r.id] = 5;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'r'")
+}
+
+// Move to index assignment
+func TestDroppableMoveToIndexAssign(t *testing.T) {
+	ownerOK(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		test() {
+			arr := [Resource(id: 0)];
+			r := Resource(id: 1);
+			arr[0] = r;
+		}
+	`)
+}
+
+// Use after move to index assignment
+func TestDroppableMoveToIndexAssignUseAfter(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		test() {
+			arr := [Resource(id: 0)];
+			r := Resource(id: 1);
+			arr[0] = r;
+			int x = r.id;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'r'")
+}

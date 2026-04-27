@@ -232,6 +232,12 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 	}
 	named.SetDoc(extractDoc(d.Annotations))
 	named.SetDeprecated(extractDeprecated(d.Annotations))
+
+	// Validate drop() method if present (after copy processing so IsCopy() is set)
+	if dropMethod := named.LookupMethod("drop"); dropMethod != nil {
+		c.validateDropMethod(named, dropMethod, d)
+		named.SetHasDrop(true)
+	}
 }
 
 func (c *Checker) defineField(named *types.Named, fd *ast.FieldDecl) {
@@ -319,9 +325,11 @@ func (c *Checker) resolveMethodSignature(named *types.Named, md *ast.MethodDecl)
 	var result types.Type
 	var canError bool
 	if md.ReturnType != nil {
-		result = c.resolveType(md.ReturnType.Type)
-		if result == nil {
-			return nil
+		if md.ReturnType.Type != nil {
+			result = c.resolveType(md.ReturnType.Type)
+			if result == nil {
+				return nil
+			}
 		}
 		canError = md.ReturnType.CanError
 	}
@@ -449,9 +457,11 @@ func (c *Checker) resolveFuncSignature(d *ast.FuncDecl) *types.Signature {
 	var result types.Type
 	var canError bool
 	if d.ReturnType != nil {
-		result = c.resolveType(d.ReturnType.Type)
-		if result == nil {
-			return nil
+		if d.ReturnType.Type != nil {
+			result = c.resolveType(d.ReturnType.Type)
+			if result == nil {
+				return nil
+			}
 		}
 		canError = d.ReturnType.CanError
 	}

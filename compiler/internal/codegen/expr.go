@@ -545,6 +545,10 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 	for _, arg := range e.Args {
 		argVals = append(argVals, c.genExpr(arg.Value))
 		argTypes = append(argTypes, c.info.Types[arg.Value])
+		// Clear drop flag: argument is moved into the callee
+		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		}
 	}
 
 	// Resolve callee
@@ -590,6 +594,10 @@ func (c *Compiler) genStdCall(e *ast.CallExpr, funcName string) value.Value {
 	for _, arg := range e.Args {
 		argVals = append(argVals, c.genExpr(arg.Value))
 		argTypes = append(argTypes, c.info.Types[arg.Value])
+		// Clear drop flag: argument is moved into the callee
+		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		}
 	}
 
 	// Std extern function
@@ -643,6 +651,10 @@ func (c *Compiler) genGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr) value
 	for _, arg := range e.Args {
 		argVals = append(argVals, c.genExpr(arg.Value))
 		argTypes = append(argTypes, c.info.Types[arg.Value])
+		// Clear drop flag: argument is moved into the callee
+		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		}
 	}
 
 	// Coerce arguments when crossing type boundaries
@@ -709,6 +721,10 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 		fieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
 		c.block.NewStore(val, fieldPtr)
+		// Clear drop flag: field value is moved into the constructor
+		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		}
 	}
 
 	// Zero-initialize any fields not provided — use layout field types (not llvmType(f.Type()))
@@ -910,6 +926,10 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 	for _, arg := range e.Args {
 		argVals = append(argVals, c.genExpr(arg.Value))
 		argTypes = append(argTypes, c.info.Types[arg.Value])
+		// Clear drop flag: argument is moved into the callee
+		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		}
 	}
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params())
 	args = append(args, argVals...)
@@ -1056,6 +1076,10 @@ func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 	for _, arg := range e.Args {
 		argVals = append(argVals, c.genExpr(arg.Value))
 		argTypes = append(argTypes, c.info.Types[arg.Value])
+		// Clear drop flag: argument is moved into the callee
+		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		}
 	}
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params())
 	args = append(args, argVals...)
@@ -1411,6 +1435,10 @@ func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberE
 			fieldPtr := c.block.NewGetElementPtr(dataType, typedDataPtr,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
 			c.block.NewStore(val, fieldPtr)
+			// Clear drop flag: field value is moved into the enum variant
+			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+				c.clearDropFlag(ident.Name)
+			}
 		}
 	}
 
@@ -1743,8 +1771,11 @@ func (c *Compiler) genErrorPropagateExpr(e *ast.ErrorPropagateExpr) value.Value 
 	okBlock := c.newBlock("error.ok")
 	c.block.NewCondBr(tag, propagateBlock, okBlock)
 
-	// Error path: extract error, wrap in caller's result type, early return
+	// Error path: cleanup scope bindings, extract error, wrap in caller's result type, early return
 	c.block = propagateBlock
+	if len(c.scopeBindings) > 0 {
+		c.emitScopeCleanup(0)
+	}
 	errVal := c.block.NewExtractValue(result, resultErrIdx(calleeResultType))
 	callerResultType := c.currentResultType()
 	c.block.NewRet(c.wrapError(errVal, callerResultType))

@@ -38,7 +38,6 @@ type Compiler struct {
 	// Loop control targets for break/continue
 	breakTarget    *ir.Block
 	continueTarget *ir.Block
-	loopUseDepth   int // useBindings depth at loop entry (for break/continue close insertion)
 
 	// Error handling: true if current function is failable (returns result struct)
 	canError bool
@@ -68,16 +67,32 @@ type Compiler struct {
 	vtableGlobals map[*types.Named]*ir.Global  // type → @promise_vtable_TypeName
 	viewVtables   map[viewVtableKey]*ir.Global // (concrete, view) → view-specific vtable
 
-	// use binding state: stack of active use bindings for automatic close() at scope exit
-	useBindings []useBinding
+	// Scope cleanup state: stack of active bindings for automatic close()/drop() at scope exit
+	scopeBindings  []scopeBinding
+	loopScopeDepth int // scopeBindings depth at loop entry (for break/continue cleanup)
+
+	// Drop flag tracking: maps variable name to its drop flag alloca (i1)
+	dropFlags map[string]*ir.InstAlloca
 }
 
-// useBinding tracks a use-bound variable for automatic close() insertion.
-type useBinding struct {
+// scopeBindingKind distinguishes close() bindings (use) from drop() bindings.
+type scopeBindingKind int
+
+const (
+	bindingClose scopeBindingKind = iota // use-bound: call close() at scope exit
+	bindingDrop                          // droppable: call drop() at scope exit
+)
+
+// scopeBinding tracks a variable that needs cleanup at scope exit.
+type scopeBinding struct {
+	kind      scopeBindingKind
 	alloca    *ir.InstAlloca
-	closeFunc *ir.Func     // direct dispatch function (nil if virtual dispatch needed)
-	named     *types.Named // for virtual dispatch
-	valType   types.Type   // original type (for resolving close method)
+	closeFunc *ir.Func       // direct dispatch for close() (nil if virtual)
+	dropFunc  *ir.Func       // direct dispatch for drop() (nil if virtual)
+	named     *types.Named   // for virtual dispatch
+	valType   types.Type     // original Promise type
+	dropFlag  *ir.InstAlloca // i1: true=should drop (nil for close bindings)
+	varName   string         // variable name (for drop flag lookup)
 }
 
 // viewVtableKey identifies a view-specific vtable for a (concrete, view) pair.
@@ -125,6 +140,7 @@ func Compile(file *ast.File, info *sema.Info) *CompileResult {
 		hasChildren:     make(map[*types.Named]bool),
 		vtableGlobals:   make(map[*types.Named]*ir.Global),
 		viewVtables:     make(map[viewVtableKey]*ir.Global),
+		dropFlags:       make(map[string]*ir.InstAlloca),
 	}
 
 	// Collect extern declarations and compute type layouts
@@ -552,6 +568,7 @@ func (c *Compiler) defineFuncs(file *ast.File) {
 func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 	c.fn = fn
 	c.locals = make(map[string]*ir.InstAlloca)
+	c.dropFlags = make(map[string]*ir.InstAlloca)
 	c.blockCounter = 0
 
 	entry := fn.NewBlock("entry")
@@ -807,7 +824,7 @@ func (c *Compiler) defineTypeMethods(file *ast.File) {
 				continue
 			}
 
-			c.defineMethodFunc(md, m, fn)
+			c.defineMethodFunc(md, m, fn, named)
 		}
 	}
 }
@@ -834,9 +851,10 @@ func (c *Compiler) lookupAnyMethod(named *types.Named, name string, isGetter, is
 }
 
 // defineMethodFunc generates the body of a single method.
-func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.Func) {
+func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.Func, ownerNamed ...*types.Named) {
 	c.fn = fn
 	c.locals = make(map[string]*ir.InstAlloca)
+	c.dropFlags = make(map[string]*ir.InstAlloca)
 	c.blockCounter = 0
 	c.canError = m.Sig().CanError()
 	c.currentRetType = m.Sig().Result()
@@ -871,6 +889,11 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 
 	c.genBlock(md.Body)
 
+	// For drop() methods: after the user body, automatically drop all fields that have drop()
+	if md.Name == "drop" && c.block != nil && c.block.Term == nil && len(ownerNamed) > 0 {
+		c.emitFieldDrops(ownerNamed[0])
+	}
+
 	// Ensure the function ends with a terminator
 	if c.block != nil && c.block.Term == nil {
 		if c.canError {
@@ -884,6 +907,51 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 			c.block.NewRet(nil)
 		} else {
 			c.block.NewRet(c.zeroValue(fn.Sig.RetType))
+		}
+	}
+}
+
+// emitFieldDrops emits drop() calls for all fields of a type that themselves have drop().
+// Called at the end of a user-defined drop() method to ensure fields are cleaned up.
+// Fields are dropped in reverse declaration order.
+func (c *Compiler) emitFieldDrops(named *types.Named) {
+	layout := c.lookupTypeLayout(named)
+	if layout == nil {
+		return
+	}
+
+	// Load the receiver (this is i8* in method context)
+	thisAlloca, ok := c.locals["this"]
+	if !ok {
+		return
+	}
+	thisPtr := c.block.NewLoad(thisAlloca.ElemType, thisAlloca)
+	typedPtr := c.block.NewBitCast(thisPtr, layout.InstancePtrType)
+
+	fields := named.AllFields()
+	for i := len(fields) - 1; i >= 0; i-- {
+		f := fields[i]
+		fieldNamed := extractNamed(f.Type())
+		if fieldNamed == nil || !fieldNamed.HasDrop() {
+			continue
+		}
+
+		fieldIdx, ok := layout.InstanceFieldIndex[f.Name()]
+		if !ok {
+			continue
+		}
+
+		// Load the field value (a value struct: {vtable_ptr, instance_ptr})
+		fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+		fieldVal := c.block.NewLoad(layout.Instance.Fields[fieldIdx].LLVMType, fieldPtr)
+		fieldInstance := c.extractInstancePtr(fieldVal)
+
+		// Resolve and call field type's drop() method
+		ownerName := c.resolveMethodOwner(fieldNamed, "drop")
+		mangledName := mangleMethodName(ownerName, "drop", false)
+		if dropFn, ok := c.funcs[mangledName]; ok {
+			c.block.NewCall(dropFn, fieldInstance)
 		}
 	}
 }

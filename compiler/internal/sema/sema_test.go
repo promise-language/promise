@@ -547,6 +547,15 @@ func TestCompoundAssignment(t *testing.T) {
 	checkOK(t, `test() { int x = 0; x += 1; x -= 1; x *= 2; x /= 2; x %= 3; }`)
 }
 
+func TestIncrementDecrement(t *testing.T) {
+	checkOK(t, `test() { int x = 0; x++; x--; }`)
+}
+
+func TestIncrementTypeMismatch(t *testing.T) {
+	errs := checkErrs(t, `test() { string s = "hi"; s++; }`)
+	expectError(t, errs, "cannot use int as string")
+}
+
 func TestAssignmentTypeMismatch(t *testing.T) {
 	errs := checkErrs(t, `test() { int x = 0; x = "hello"; }`)
 	expectError(t, errs, "cannot assign")

@@ -59,6 +59,10 @@ AND         : '&&';
 OR          : '||';
 PIPE        : '|';
 
+// Increment / decrement
+PLUSPLUS    : '++';
+MINUSMINUS : '--';
+
 // Compound assignment
 PLUS_ASSIGN : '+=';
 MINUS_ASSIGN: '-=';

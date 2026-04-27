@@ -320,6 +320,12 @@ func (s *BasePromiseParserListener) EnterAssignOp(ctx *AssignOpContext) {}
 // ExitAssignOp is called when production assignOp is exited.
 func (s *BasePromiseParserListener) ExitAssignOp(ctx *AssignOpContext) {}
 
+// EnterIncDecStmt is called when production incDecStmt is entered.
+func (s *BasePromiseParserListener) EnterIncDecStmt(ctx *IncDecStmtContext) {}
+
+// ExitIncDecStmt is called when production incDecStmt is exited.
+func (s *BasePromiseParserListener) ExitIncDecStmt(ctx *IncDecStmtContext) {}
+
 // EnterReturnStmt is called when production returnStmt is entered.
 func (s *BasePromiseParserListener) EnterReturnStmt(ctx *ReturnStmtContext) {}
 
@@ -421,6 +427,12 @@ func (s *BasePromiseParserListener) EnterForUpdateAssign(ctx *ForUpdateAssignCon
 
 // ExitForUpdateAssign is called when production forUpdateAssign is exited.
 func (s *BasePromiseParserListener) ExitForUpdateAssign(ctx *ForUpdateAssignContext) {}
+
+// EnterForUpdateIncDec is called when production forUpdateIncDec is entered.
+func (s *BasePromiseParserListener) EnterForUpdateIncDec(ctx *ForUpdateIncDecContext) {}
+
+// ExitForUpdateIncDec is called when production forUpdateIncDec is exited.
+func (s *BasePromiseParserListener) ExitForUpdateIncDec(ctx *ForUpdateIncDecContext) {}
 
 // EnterForUpdateExpr is called when production forUpdateExpr is entered.
 func (s *BasePromiseParserListener) EnterForUpdateExpr(ctx *ForUpdateExprContext) {}

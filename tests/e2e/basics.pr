@@ -45,4 +45,17 @@ main() {
     total += n;
   }
   print_int(total);
+
+  // Increment/decrement
+  int c = 0;
+  for j := 0; j < 5; j++ {
+    c++;
+  }
+  print_int(c);
+
+  int d = 10;
+  d--;
+  d--;
+  d--;
+  print_int(d);
 }

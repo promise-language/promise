@@ -157,6 +157,9 @@ type PromiseParserVisitor interface {
 	// Visit a parse tree produced by PromiseParser#assignOp.
 	VisitAssignOp(ctx *AssignOpContext) interface{}
 
+	// Visit a parse tree produced by PromiseParser#incDecStmt.
+	VisitIncDecStmt(ctx *IncDecStmtContext) interface{}
+
 	// Visit a parse tree produced by PromiseParser#returnStmt.
 	VisitReturnStmt(ctx *ReturnStmtContext) interface{}
 
@@ -207,6 +210,9 @@ type PromiseParserVisitor interface {
 
 	// Visit a parse tree produced by PromiseParser#forUpdateAssign.
 	VisitForUpdateAssign(ctx *ForUpdateAssignContext) interface{}
+
+	// Visit a parse tree produced by PromiseParser#forUpdateIncDec.
+	VisitForUpdateIncDec(ctx *ForUpdateIncDecContext) interface{}
 
 	// Visit a parse tree produced by PromiseParser#forUpdateExpr.
 	VisitForUpdateExpr(ctx *ForUpdateExprContext) interface{}

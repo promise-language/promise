@@ -55,6 +55,9 @@ func (b *Builder) VisitStatement(ctx *parser.StatementContext) interface{} {
 			Expr:     c.Accept(b).(Expr),
 		}
 	}
+	if c := ctx.IncDecStmt(); c != nil {
+		return c.Accept(b)
+	}
 	if c := ctx.AssignmentStmt(); c != nil {
 		return c.Accept(b)
 	}
@@ -104,6 +107,19 @@ func (b *Builder) VisitAssignmentStmt(ctx *parser.AssignmentStmtContext) interfa
 		Target:   b.visitExpr(exprs[0]),
 		Op:       b.visitAssignOp(ctx.AssignOp()),
 		Value:    b.visitExpr(exprs[1]),
+	}
+}
+
+func (b *Builder) VisitIncDecStmt(ctx *parser.IncDecStmtContext) interface{} {
+	op := OpAddAssign
+	if ctx.MINUSMINUS() != nil {
+		op = OpSubAssign
+	}
+	return &AssignStmt{
+		nodeBase: b.baseFromContext(ctx),
+		Target:   b.visitExpr(ctx.Expression()),
+		Op:       op,
+		Value:    &IntLit{nodeBase: b.baseFromContext(ctx), Raw: "1"},
 	}
 }
 
@@ -218,6 +234,14 @@ func (b *Builder) VisitClassicForStmt(ctx *parser.ClassicForStmtContext) interfa
 		node.UpdateTarget = b.visitExpr(exprs[0])
 		node.UpdateOp = b.visitAssignOp(fu.AssignOp())
 		node.UpdateValue = b.visitExpr(exprs[1])
+	case *parser.ForUpdateIncDecContext:
+		node.UpdateTarget = b.visitExpr(fu.Expression())
+		if fu.MINUSMINUS() != nil {
+			node.UpdateOp = OpSubAssign
+		} else {
+			node.UpdateOp = OpAddAssign
+		}
+		node.UpdateValue = &IntLit{nodeBase: b.baseFromContext(ctx), Raw: "1"}
 	case *parser.ForUpdateExprContext:
 		node.UpdateValue = b.visitExpr(fu.Expression())
 	}

@@ -223,6 +223,7 @@ statement
     | whileStmt
     | matchExpr                                                // block-terminated, no ;
     | unsafeBlock                                              // block-terminated, no ;
+    | incDecStmt
     | assignmentStmt
     | expressionStmt
     ;
@@ -244,6 +245,10 @@ assignOp
     | STAR_ASSIGN
     | SLASH_ASSIGN
     | PERCENT_ASSIGN
+    ;
+
+incDecStmt
+    : expression (PLUSPLUS | MINUSMINUS) SEMI
     ;
 
 returnStmt
@@ -303,9 +308,10 @@ forInit
     | IDENT WALRUS expression SEMI                             # forInitInferred
     ;
 
-// Classic for-loop update (allows assignment or bare expression)
+// Classic for-loop update (allows assignment, inc/dec, or bare expression)
 forUpdate
     : expression assignOp expression                           # forUpdateAssign
+    | expression (PLUSPLUS | MINUSMINUS)                        # forUpdateIncDec
     | expression                                               # forUpdateExpr
     ;
 

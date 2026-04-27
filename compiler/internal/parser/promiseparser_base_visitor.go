@@ -207,6 +207,10 @@ func (v *BasePromiseParserVisitor) VisitAssignOp(ctx *AssignOpContext) interface
 	return v.VisitChildren(ctx)
 }
 
+func (v *BasePromiseParserVisitor) VisitIncDecStmt(ctx *IncDecStmtContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
 func (v *BasePromiseParserVisitor) VisitReturnStmt(ctx *ReturnStmtContext) interface{} {
 	return v.VisitChildren(ctx)
 }
@@ -272,6 +276,10 @@ func (v *BasePromiseParserVisitor) VisitForInitInferred(ctx *ForInitInferredCont
 }
 
 func (v *BasePromiseParserVisitor) VisitForUpdateAssign(ctx *ForUpdateAssignContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BasePromiseParserVisitor) VisitForUpdateIncDec(ctx *ForUpdateIncDecContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 

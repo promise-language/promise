@@ -593,6 +593,11 @@ func TestEdgeCases(t *testing.T) {
 		{"long_chain", `main() { a.b.c.d.e.f.g(); }`},
 		{"long_optional_chain", `main() { a?.b?.c?.d; }`},
 		{"multiple_assignments", `main() { Int x = 0; x = 1; x += 2; x -= 1; x *= 3; x /= 2; x %= 5; }`},
+		{"increment", `main() { Int x = 0; x++; }`},
+		{"decrement", `main() { Int x = 5; x--; }`},
+		{"inc_dec_for_loop", `main() { for i := 0; i < 10; i++ { print_int(i); } }`},
+		{"dec_for_loop", `main() { for i := 10; i > 0; i-- { print_int(i); } }`},
+		{"member_increment", `type C { Int n; } main() { C c = C(n: 0); c.n++; }`},
 		{"yield_in_loop", `gen() Stream[Int] { for x in 0..10 { yield x; } }`},
 		{"yield_delegate", `gen() Stream[Int] { yield* other(); }`},
 		{"complex_type_ref", `main() { Int[][]? x = none; }`},
@@ -678,6 +683,8 @@ func TestExecWrapCode(t *testing.T) {
 		{"string_call", `println("hello")`},
 		{"if_stmt", `if true { print_int(1); }`},
 		{"for_loop", `for i := 0; i < 3; i += 1 { print_int(i); }`},
+		{"for_loop_inc", `for i := 0; i < 3; i++ { print_int(i); }`},
+		{"increment", `x := 0; x++;`},
 		{"while_loop", `while true { break; }`},
 	}
 	for _, tc := range cases {
@@ -713,6 +720,8 @@ func TestInvalidSyntax(t *testing.T) {
 		{"enum_no_brace", `enum Foo`},
 		{"invalid_top_level", `42;`},
 		{"assignment_no_lhs", `main() { = 42; }`},
+		{"prefix_increment", `main() { int x = 0; ++x; }`},
+		{"prefix_decrement", `main() { int x = 0; --x; }`},
 		{"empty_match", `main() { match x {} }`},
 	}
 	for _, tc := range cases {

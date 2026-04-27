@@ -157,6 +157,9 @@ type PromiseParserListener interface {
 	// EnterAssignOp is called when entering the assignOp production.
 	EnterAssignOp(c *AssignOpContext)
 
+	// EnterIncDecStmt is called when entering the incDecStmt production.
+	EnterIncDecStmt(c *IncDecStmtContext)
+
 	// EnterReturnStmt is called when entering the returnStmt production.
 	EnterReturnStmt(c *ReturnStmtContext)
 
@@ -207,6 +210,9 @@ type PromiseParserListener interface {
 
 	// EnterForUpdateAssign is called when entering the forUpdateAssign production.
 	EnterForUpdateAssign(c *ForUpdateAssignContext)
+
+	// EnterForUpdateIncDec is called when entering the forUpdateIncDec production.
+	EnterForUpdateIncDec(c *ForUpdateIncDecContext)
 
 	// EnterForUpdateExpr is called when entering the forUpdateExpr production.
 	EnterForUpdateExpr(c *ForUpdateExprContext)
@@ -562,6 +568,9 @@ type PromiseParserListener interface {
 	// ExitAssignOp is called when exiting the assignOp production.
 	ExitAssignOp(c *AssignOpContext)
 
+	// ExitIncDecStmt is called when exiting the incDecStmt production.
+	ExitIncDecStmt(c *IncDecStmtContext)
+
 	// ExitReturnStmt is called when exiting the returnStmt production.
 	ExitReturnStmt(c *ReturnStmtContext)
 
@@ -612,6 +621,9 @@ type PromiseParserListener interface {
 
 	// ExitForUpdateAssign is called when exiting the forUpdateAssign production.
 	ExitForUpdateAssign(c *ForUpdateAssignContext)
+
+	// ExitForUpdateIncDec is called when exiting the forUpdateIncDec production.
+	ExitForUpdateIncDec(c *ForUpdateIncDecContext)
 
 	// ExitForUpdateExpr is called when exiting the forUpdateExpr production.
 	ExitForUpdateExpr(c *ForUpdateExprContext)

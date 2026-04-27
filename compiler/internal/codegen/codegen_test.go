@@ -319,6 +319,18 @@ func TestCompoundAssignment(t *testing.T) {
 	assertContains(t, ir, "add i64")
 }
 
+func TestIncrementDecrement(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int x = 10;
+			x++;
+			x--;
+		}
+	`)
+	assertContains(t, ir, "add i64")
+	assertContains(t, ir, "sub i64")
+}
+
 // --- Function tests ---
 
 func TestFunctionDeclaration(t *testing.T) {

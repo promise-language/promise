@@ -1,6 +1,8 @@
-// std/slice.pr — slice[T] type methods
-type slice[T] `native {
+// std/vector.pr — Vector[T] type methods
+type Vector[T] `native {
     int len;
+
+    new(int capacity) `native;
 
     [](int index) T `native;
     []=(int index, T value) `native;

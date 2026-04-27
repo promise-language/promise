@@ -30,7 +30,7 @@ var (
 	TypChannel *Named // channel[T] — channel type
 	TypIter    *Named // iter[T] — synchronous iterator interface
 	TypStream  *Named // stream[T] — asynchronous iterator interface
-	TypSlice   *Named // slice[T] — dynamic array
+	TypVector  *Named // Vector[T] — dynamic array
 	TypMap     *Named // map[K, V] — map container type
 	TypRange   *Named // range — integer range from .. and ..= operators
 )
@@ -81,7 +81,7 @@ func init() {
 	TypChannel = defGeneric("channel", "T")
 	TypIter = defGeneric("iter", "T")
 	TypStream = defGeneric("stream", "T")
-	TypSlice = defGeneric("slice", "T")
+	TypVector = defGeneric("Vector", "T")
 	TypMap = defGeneric("map", "K", "V")
 
 	TypRange = defNamed("range")

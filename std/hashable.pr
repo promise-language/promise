@@ -1,0 +1,4 @@
+// std/hashable.pr — Structural hashable interface
+type Hashable `structural {
+    get hash int `abstract;
+}

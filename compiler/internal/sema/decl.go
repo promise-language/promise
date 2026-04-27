@@ -70,6 +70,21 @@ func (c *Checker) declareType(d *ast.TypeDecl) {
 		return
 	}
 
+	// Non-native std type redeclaring a universe generic (e.g., map[K,V] with
+	// Promise-implemented methods): reuse the universe Named singleton so that
+	// TypMap identity checks continue to work. The define pass will add fields,
+	// methods, and type-param constraints from the source declaration.
+	if d.IsStd {
+		if obj := types.Universe.Lookup(d.Name); obj != nil {
+			if tn, ok := obj.(*types.TypeName); ok {
+				if named, ok := tn.Type().(*types.Named); ok && len(named.TypeParams()) > 0 {
+					c.scope.Insert(obj)
+					return
+				}
+			}
+		}
+	}
+
 	tn := types.NewTypeName(tpos(d.Pos()), d.Name, nil)
 	if !c.insert(tn) {
 		return
@@ -186,6 +201,13 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 		}
 		c.validateMetas(d.Annotations, TargetType)
 		return
+	}
+
+	// For universe type singletons being redeclared from source (e.g., map),
+	// reset accumulated fields/methods from previous sema runs to avoid duplicates
+	// and stale type references (e.g., a Slot enum pointer from a prior test run).
+	if d.IsStd && types.Universe.Lookup(d.Name) != nil {
+		named.ResetMembers()
 	}
 
 	// Resolve parent types (is clauses)

@@ -61,6 +61,21 @@ func (n *Named) AddMethod(m *Method) {
 	n.methods = append(n.methods, m)
 }
 
+// ResetMembers clears all fields, methods, parents, and flags on a Named type.
+// Used when a universe type singleton is re-defined from source in a new sema run.
+// Does NOT reset typeParams (those are part of the type's identity).
+func (n *Named) ResetMembers() {
+	n.parents = nil
+	n.fields = nil
+	n.methods = nil
+	n.hasDrop = false
+	n.hasNew = false
+	n.isCopy = false
+	n.structural = false
+	n.doc = ""
+	n.deprecated = ""
+}
+
 // NumFields returns the number of directly declared fields.
 func (n *Named) NumFields() int { return len(n.fields) }
 

@@ -61,6 +61,9 @@ func monoFuncName(fi *sema.FuncInstance) string {
 }
 
 // collectMonoInstances deduplicates generic type instances by mangled name.
+// Also transitively discovers instances referenced by field types of already-collected
+// instances (e.g., map[string, int] has a Slot[K, V][] field which after substitution
+// requires Slot[string, int] to be monomorphized).
 func collectMonoInstances(info *sema.Info) []*types.Instance {
 	seen := map[string]bool{}
 	var result []*types.Instance
@@ -72,7 +75,71 @@ func collectMonoInstances(info *sema.Info) []*types.Instance {
 		seen[key] = true
 		result = append(result, inst)
 	}
+
+	// Transitively expand: walk substituted field types and collect nested Instances.
+	for i := 0; i < len(result); i++ {
+		inst := result[i]
+		switch origin := inst.Origin().(type) {
+		case *types.Named:
+			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+			for _, f := range origin.AllFields() {
+				ft := types.Substitute(f.Type(), subst)
+				discoverInstances(ft, &result, seen)
+			}
+		case *types.Enum:
+			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+			for _, v := range origin.Variants() {
+				for _, f := range v.Fields() {
+					ft := types.Substitute(f.Type(), subst)
+					discoverInstances(ft, &result, seen)
+				}
+			}
+		}
+	}
+
 	return result
+}
+
+// discoverInstances recursively walks a type and collects any concrete Instance types.
+func discoverInstances(t types.Type, result *[]*types.Instance, seen map[string]bool) {
+	if t == nil {
+		return
+	}
+	switch tt := t.(type) {
+	case *types.Instance:
+		if !types.ContainsTypeParam(tt) {
+			key := monoName(tt)
+			if !seen[key] {
+				seen[key] = true
+				*result = append(*result, tt)
+			}
+		}
+		// Also check type args for nested instances
+		for _, arg := range tt.TypeArgs() {
+			discoverInstances(arg, result, seen)
+		}
+	case *types.Optional:
+		discoverInstances(tt.Elem(), result, seen)
+	case *types.SharedRef:
+		discoverInstances(tt.Elem(), result, seen)
+	case *types.MutRef:
+		discoverInstances(tt.Elem(), result, seen)
+	case *types.Pointer:
+		discoverInstances(tt.Elem(), result, seen)
+	case *types.Array:
+		discoverInstances(tt.Elem(), result, seen)
+	case *types.Tuple:
+		for _, e := range tt.Elems() {
+			discoverInstances(e, result, seen)
+		}
+	case *types.Signature:
+		for _, p := range tt.Params() {
+			discoverInstances(p.Type(), result, seen)
+		}
+		if tt.Result() != nil {
+			discoverInstances(tt.Result(), result, seen)
+		}
+	}
 }
 
 // collectMonoFuncInstances deduplicates generic function instances by mangled name.

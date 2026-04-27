@@ -16,6 +16,7 @@ type uint `native {
     --() uint `native;
     ..(uint end) range `native;
     ..=(uint end) range `native;
+    get hash int `native;
 }
 
 type u8 `native {
@@ -35,6 +36,7 @@ type u8 `native {
     --() u8 `native;
     ..(u8 end) range `native;
     ..=(u8 end) range `native;
+    get hash int `native;
 }
 
 type u16 `native {
@@ -54,6 +56,7 @@ type u16 `native {
     --() u16 `native;
     ..(u16 end) range `native;
     ..=(u16 end) range `native;
+    get hash int `native;
 }
 
 type u32 `native {
@@ -73,6 +76,7 @@ type u32 `native {
     --() u32 `native;
     ..(u32 end) range `native;
     ..=(u32 end) range `native;
+    get hash int `native;
 }
 
 type u64 `native {
@@ -92,4 +96,5 @@ type u64 `native {
     --() u64 `native;
     ..(u64 end) range `native;
     ..=(u64 end) range `native;
+    get hash int `native;
 }

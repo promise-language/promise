@@ -102,13 +102,24 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 	}
 
 	if s.Value != nil {
-		valType := c.checkExpr(s.Value)
-		if valType != nil && !types.AssignableTo(valType, declType) {
-			c.errorf(s.Pos(), "cannot assign %s to variable of type %s", valType, declType)
+		// Special case: empty array literal [] with a typed declaration like T[] x = []
+		// Infer the element type from the declared type instead of erroring.
+		emptyArrayHandled := false
+		if arrLit, ok := s.Value.(*ast.ArrayLit); ok && len(arrLit.Elements) == 0 {
+			if _, ok := types.AsVector(declType); ok {
+				c.recordType(s.Value, declType)
+				emptyArrayHandled = true
+			}
 		}
-		// Track factory-created locals for `final field write restriction
-		if c.inFactoryBody && s.Name != "_" && isConstructorCallExpr(s.Value) {
-			c.factoryLocals[s.Name] = true
+		if !emptyArrayHandled {
+			valType := c.checkExpr(s.Value)
+			if valType != nil && !types.AssignableTo(valType, declType) {
+				c.errorf(s.Pos(), "cannot assign %s to variable of type %s", valType, declType)
+			}
+			// Track factory-created locals for `final field write restriction
+			if c.inFactoryBody && s.Name != "_" && isConstructorCallExpr(s.Value) {
+				c.factoryLocals[s.Name] = true
+			}
 		}
 	}
 
@@ -450,7 +461,7 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 	if iterType != nil {
 		// Determine element type from iterable
 		var elemType types.Type
-		if elem, ok := types.AsSlice(iterType); ok {
+		if elem, ok := types.AsVector(iterType); ok {
 			elemType = elem
 		} else if key, val, ok := types.AsMap(iterType); ok {
 			// Iterating a map yields (key, value) tuples

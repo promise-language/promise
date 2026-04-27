@@ -221,6 +221,7 @@ func isChild(child, parent *Named) bool {
 // An interface is a Named type where all methods are abstract.
 // The concrete type must provide methods with matching names AND signatures
 // (same parameter types, return type, and error capability).
+// Self-typed parameters in the interface are matched against the concrete type.
 func Implements(x Type, iface *Named) bool {
 	if !iface.IsAbstract() {
 		return false
@@ -234,12 +235,20 @@ func Implements(x Type, iface *Named) bool {
 	switch xt := x.(type) {
 	case *Named:
 		for _, am := range abstractMethods {
-			m := xt.LookupMethod(am.name)
+			// Use appropriate lookup based on method kind (getter vs setter vs regular)
+			var m *Method
+			if am.IsGetter() {
+				m = xt.LookupGetter(am.name)
+			} else if am.IsSetter() {
+				m = xt.LookupSetter(am.name)
+			} else {
+				m = xt.LookupMethod(am.name)
+			}
 			if m == nil || m.abstract {
 				return false
 			}
-			// Verify signatures match (params, result, canError — not receiver)
-			if !identicalSignatures(m.sig, am.sig) {
+			// Verify signatures match, substituting Self (iface) with concrete type (xt)
+			if !identicalSignaturesWithSelf(m.sig, am.sig, iface, xt) {
 				return false
 			}
 		}
@@ -247,4 +256,43 @@ func Implements(x Type, iface *Named) bool {
 	default:
 		return false
 	}
+}
+
+// identicalSignaturesWithSelf compares two signatures, treating occurrences of
+// the `self` type in the interface signature as equal to the `replacement` type
+// in the concrete signature. This enables structural interface satisfaction where
+// Self-typed parameters match the implementing type.
+func identicalSignaturesWithSelf(concrete, iface *Signature, self, replacement *Named) bool {
+	if len(concrete.params) != len(iface.params) {
+		return false
+	}
+	for i := range concrete.params {
+		if concrete.params[i].ref != iface.params[i].ref {
+			return false
+		}
+		if !identicalWithSelf(concrete.params[i].typ, iface.params[i].typ, self, replacement) {
+			return false
+		}
+	}
+	if concrete.canError != iface.canError {
+		return false
+	}
+	if concrete.result == nil && iface.result == nil {
+		return true
+	}
+	if concrete.result == nil || iface.result == nil {
+		return false
+	}
+	return identicalWithSelf(concrete.result, iface.result, self, replacement)
+}
+
+// identicalWithSelf is like Identical but treats the interface type (self) as
+// equal to the concrete implementing type (replacement).
+func identicalWithSelf(x, y Type, self, replacement *Named) bool {
+	if yn, ok := y.(*Named); ok && yn == self {
+		if xn, ok := x.(*Named); ok && xn == replacement {
+			return true
+		}
+	}
+	return Identical(x, y)
 }

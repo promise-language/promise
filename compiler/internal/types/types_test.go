@@ -454,7 +454,7 @@ func TestSignature(t *testing.T) {
 			check: func(t *testing.T) {
 				params := []*Param{
 					NewParam("s", TypString, RefShared),
-					NewParam("arr", NewSlice(TypInt), RefMut),
+					NewParam("arr", NewVector(TypInt), RefMut),
 				}
 				sig := NewSignature(nil, params, nil, false)
 				assertEqual(t, sig.String(), "(string&, int[]~)")
@@ -519,9 +519,9 @@ func TestContainers(t *testing.T) {
 		{
 			name: "slice",
 			check: func(t *testing.T) {
-				sl := NewSlice(TypString)
+				sl := NewVector(TypString)
 				assertEqual(t, sl.String(), "string[]")
-				elem, ok := AsSlice(sl)
+				elem, ok := AsVector(sl)
 				if !ok {
 					t.Fatal("expected Slice instance")
 				}
@@ -532,8 +532,8 @@ func TestContainers(t *testing.T) {
 			name: "nested",
 			check: func(t *testing.T) {
 				// int[][]
-				inner := NewSlice(TypInt)
-				outer := NewSlice(inner)
+				inner := NewVector(TypInt)
+				outer := NewVector(inner)
 				assertEqual(t, outer.String(), "int[][]")
 			},
 		},
@@ -569,7 +569,7 @@ func TestRefs(t *testing.T) {
 		{
 			name: "mut_ref",
 			check: func(t *testing.T) {
-				r := NewMutRef(NewSlice(TypInt))
+				r := NewMutRef(NewVector(TypInt))
 				assertEqual(t, r.String(), "int[]~")
 			},
 		},
@@ -864,8 +864,8 @@ func TestIdentical(t *testing.T) {
 		{"different_named_2", TypInt, TypString, false},
 
 		// Structural types
-		{"same_slice", NewSlice(TypInt), NewSlice(TypInt), true},
-		{"diff_slice", NewSlice(TypInt), NewSlice(TypString), false},
+		{"same_slice", NewVector(TypInt), NewVector(TypInt), true},
+		{"diff_slice", NewVector(TypInt), NewVector(TypString), false},
 		{"same_array", NewArray(TypInt, 5), NewArray(TypInt, 5), true},
 		{"diff_array_size", NewArray(TypInt, 5), NewArray(TypInt, 10), false},
 		{"diff_array_elem", NewArray(TypInt, 5), NewArray(TypString, 5), false},
@@ -927,7 +927,7 @@ func TestIdentical(t *testing.T) {
 		{"named_nil", TypInt, nil, false},
 
 		// Cross-kind
-		{"named_vs_slice", TypInt, NewSlice(TypInt), false},
+		{"named_vs_slice", TypInt, NewVector(TypInt), false},
 		{"optional_vs_named", NewOptional(TypInt), TypInt, false},
 	}
 

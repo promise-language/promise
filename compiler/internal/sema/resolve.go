@@ -79,7 +79,7 @@ func (c *Checker) resolveType(ref ast.TypeRef) types.Type {
 		if elem == nil {
 			return nil
 		}
-		inst := types.NewSlice(elem)
+		inst := types.NewVector(elem)
 		c.recordInstance(inst)
 		return inst
 

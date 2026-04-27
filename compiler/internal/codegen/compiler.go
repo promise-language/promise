@@ -333,78 +333,32 @@ func (c *Compiler) declareIntrinsics() {
 		ir.NewParam("a", irtypes.I8Ptr),
 		ir.NewParam("b", irtypes.I8Ptr))
 
-	// Map intrinsics — type-erased runtime hash table
-	c.funcs["promise_map_new"] = c.module.NewFunc("promise_map_new",
+	// Vector methods
+	c.funcs["promise_vector_with_capacity"] = c.module.NewFunc("promise_vector_with_capacity",
 		irtypes.I8Ptr,
-		ir.NewParam("key_size", irtypes.I64),
-		ir.NewParam("val_size", irtypes.I64),
-		ir.NewParam("hash_fn", irtypes.I8Ptr),
-		ir.NewParam("eq_fn", irtypes.I8Ptr))
+		ir.NewParam("capacity", irtypes.I64),
+		ir.NewParam("elem_size", irtypes.I64))
 
-	c.funcs["promise_map_set"] = c.module.NewFunc("promise_map_set",
-		irtypes.Void,
-		ir.NewParam("m", irtypes.I8Ptr),
-		ir.NewParam("key", irtypes.I8Ptr),
-		ir.NewParam("val", irtypes.I8Ptr))
-
-	c.funcs["promise_map_get"] = c.module.NewFunc("promise_map_get",
-		irtypes.I8Ptr,
-		ir.NewParam("m", irtypes.I8Ptr),
-		ir.NewParam("key", irtypes.I8Ptr))
-
-	c.funcs["promise_map_len"] = c.module.NewFunc("promise_map_len",
-		irtypes.I64,
-		ir.NewParam("m", irtypes.I8Ptr))
-
-	c.funcs["promise_map_iter_next"] = c.module.NewFunc("promise_map_iter_next",
-		irtypes.I32,
-		ir.NewParam("m", irtypes.I8Ptr),
-		ir.NewParam("state", irtypes.NewPointer(irtypes.I64)),
-		ir.NewParam("key_out", irtypes.I8Ptr),
-		ir.NewParam("val_out", irtypes.I8Ptr))
-
-	// Map methods
-	c.funcs["promise_map_remove"] = c.module.NewFunc("promise_map_remove",
-		irtypes.I32,
-		ir.NewParam("m", irtypes.I8Ptr),
-		ir.NewParam("key", irtypes.I8Ptr))
-
-	c.funcs["promise_map_contains"] = c.module.NewFunc("promise_map_contains",
-		irtypes.I8,
-		ir.NewParam("m", irtypes.I8Ptr),
-		ir.NewParam("key", irtypes.I8Ptr))
-
-	c.funcs["promise_map_keys"] = c.module.NewFunc("promise_map_keys",
-		irtypes.I8Ptr,
-		ir.NewParam("m", irtypes.I8Ptr),
-		ir.NewParam("key_size", irtypes.I64))
-
-	c.funcs["promise_map_values"] = c.module.NewFunc("promise_map_values",
-		irtypes.I8Ptr,
-		ir.NewParam("m", irtypes.I8Ptr),
-		ir.NewParam("val_size", irtypes.I64))
-
-	// Slice methods
-	c.funcs["promise_slice_push"] = c.module.NewFunc("promise_slice_push",
+	c.funcs["promise_vector_push"] = c.module.NewFunc("promise_vector_push",
 		irtypes.I8Ptr,
 		ir.NewParam("slice", irtypes.I8Ptr),
 		ir.NewParam("elem", irtypes.I8Ptr),
 		ir.NewParam("elem_size", irtypes.I64))
 
-	c.funcs["promise_slice_pop"] = c.module.NewFunc("promise_slice_pop",
+	c.funcs["promise_vector_pop"] = c.module.NewFunc("promise_vector_pop",
 		irtypes.I32,
 		ir.NewParam("slice", irtypes.I8Ptr),
 		ir.NewParam("out_elem", irtypes.I8Ptr),
 		ir.NewParam("elem_size", irtypes.I64))
 
-	c.funcs["promise_slice_contains"] = c.module.NewFunc("promise_slice_contains",
+	c.funcs["promise_vector_contains"] = c.module.NewFunc("promise_vector_contains",
 		irtypes.I8,
 		ir.NewParam("slice", irtypes.I8Ptr),
 		ir.NewParam("elem", irtypes.I8Ptr),
 		ir.NewParam("elem_size", irtypes.I64),
 		ir.NewParam("eq_fn", irtypes.I8Ptr))
 
-	c.funcs["promise_slice_remove"] = c.module.NewFunc("promise_slice_remove",
+	c.funcs["promise_vector_remove"] = c.module.NewFunc("promise_vector_remove",
 		irtypes.Void,
 		ir.NewParam("slice", irtypes.I8Ptr),
 		ir.NewParam("index", irtypes.I64),
@@ -440,7 +394,7 @@ func (c *Compiler) declareIntrinsics() {
 		ir.NewParam("s", irtypes.I8Ptr),
 		ir.NewParam("sep", irtypes.I8Ptr))
 
-	// Realloc for slice growth
+	// Realloc for vector growth
 	c.funcs["realloc"] = c.module.NewFunc("realloc",
 		irtypes.I8Ptr,
 		ir.NewParam("ptr", irtypes.I8Ptr),
@@ -470,12 +424,15 @@ func (c *Compiler) declareIntrinsics() {
 		ir.NewParam("variant_ptr", irtypes.I8Ptr),
 		ir.NewParam("expected_id", irtypes.I32))
 
-	// String hash/eq for map keys (dereferences i8* to hash/compare content)
-	c.funcs["promise_hash_string"] = c.module.NewFunc("promise_hash_string",
+	// Native hash functions for Hashable interface
+	c.funcs["promise_hash_int"] = c.module.NewFunc("promise_hash_int",
 		irtypes.I64,
-		ir.NewParam("key", irtypes.I8Ptr),
-		ir.NewParam("key_size", irtypes.I64))
+		ir.NewParam("val", irtypes.I64))
+	c.funcs["promise_hash_string_value"] = c.module.NewFunc("promise_hash_string_value",
+		irtypes.I64,
+		ir.NewParam("ptr", irtypes.I8Ptr))
 
+	// String equality comparison (used by Vector.contains for string elements)
 	c.funcs["promise_eq_string"] = c.module.NewFunc("promise_eq_string",
 		irtypes.I32,
 		ir.NewParam("a", irtypes.I8Ptr),

@@ -68,8 +68,8 @@ func (i *Instance) TypeArgs() []Type { return i.typeArgs }
 func (i *Instance) Underlying() Type { return i }
 
 func (i *Instance) String() string {
-	// Slice[T] prints as "T[]" for consistency with source syntax
-	if i.origin == TypSlice && len(i.typeArgs) == 1 {
+	// Vector[T] prints as "T[]" for consistency with source syntax
+	if i.origin == TypVector && len(i.typeArgs) == 1 {
 		return i.typeArgs[0].String() + "[]"
 	}
 	var b strings.Builder

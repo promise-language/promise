@@ -120,16 +120,14 @@ func isRefType(typ types.Type) bool {
 	return false
 }
 
-// isContainerType returns true for Slice, Map, and string types,
+// isContainerType returns true for Vector and string types,
 // which are represented as i8* pointers (not value structs) in codegen.
-// Checks both Instance wrappers (user code: Slice[int]) and bare Named
-// types (method body: this is TypSlice).
+// Map is no longer a container type — it's a user-defined type with value struct layout.
+// Checks both Instance wrappers (user code: Vector[int]) and bare Named
+// types (method body: this is TypVector).
 func isContainerType(typ types.Type) bool {
 	named := extractNamed(typ)
-	if _, ok := types.AsSlice(typ); ok || named == types.TypSlice {
-		return true
-	}
-	if _, _, ok := types.AsMap(typ); ok || named == types.TypMap {
+	if _, ok := types.AsVector(typ); ok || named == types.TypVector {
 		return true
 	}
 	if named == types.TypString {
@@ -186,7 +184,8 @@ func userValueType() *irtypes.StructType {
 // preserve vtable information for dispatch. All other types use llvmType.
 func instanceFieldLLVMType(typ types.Type) irtypes.Type {
 	if n := extractNamed(typ); n != nil && classify(n) == CatUnknown {
-		if n != types.TypString && n != types.TypVoid && n != types.TypNone {
+		if n != types.TypString && n != types.TypVoid && n != types.TypNone &&
+			n != types.TypVector && n != types.TypMap {
 			return userValueType()
 		}
 	}
@@ -226,9 +225,9 @@ func (c *Compiler) resolveType(typ types.Type) irtypes.Type {
 		if layout := c.monoEnumLayouts[monoName(inst)]; layout != nil {
 			return layout.EnumInternalType
 		}
-		// Container instances (Slice, Map) → opaque pointer
+		// Vector instances → opaque pointer (native type)
 		if origin, ok := inst.Origin().(*types.Named); ok {
-			if origin == types.TypSlice || origin == types.TypMap {
+			if origin == types.TypVector {
 				return irtypes.I8Ptr
 			}
 			// Instance wrapping Named user type → value struct

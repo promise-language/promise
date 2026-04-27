@@ -50,9 +50,9 @@ func (a *Array) String() string {
 	return fmt.Sprintf("%s[%d]", a.elem.String(), a.size)
 }
 
-// NewSlice creates a slice type as Instance{TypSlice, [elem]}.
-func NewSlice(elem Type) *Instance {
-	return NewInstance(TypSlice, []Type{elem})
+// NewVector creates a Vector type as Instance{TypVector, [elem]}.
+func NewVector(elem Type) *Instance {
+	return NewInstance(TypVector, []Type{elem})
 }
 
 // NewMap creates a map type as Instance{TypMap, [key, val]}.
@@ -60,16 +60,16 @@ func NewMap(key, val Type) *Instance {
 	return NewInstance(TypMap, []Type{key, val})
 }
 
-// IsSlice reports whether t is a Slice instance (Instance{TypSlice, _}).
-func IsSlice(t Type) bool {
+// IsVector reports whether t is a Vector instance (Instance{TypVector, _}).
+func IsVector(t Type) bool {
 	inst, ok := t.(*Instance)
-	return ok && inst.origin == TypSlice
+	return ok && inst.origin == TypVector
 }
 
-// AsSlice extracts the element type from a Slice instance or Array.
-// Returns (elem, true) for Slice instances and Arrays, (nil, false) otherwise.
-func AsSlice(t Type) (elem Type, ok bool) {
-	if inst, ok := t.(*Instance); ok && inst.origin == TypSlice {
+// AsVector extracts the element type from a Vector instance or Array.
+// Returns (elem, true) for Vector instances and Arrays, (nil, false) otherwise.
+func AsVector(t Type) (elem Type, ok bool) {
+	if inst, ok := t.(*Instance); ok && inst.origin == TypVector {
 		return inst.typeArgs[0], true
 	}
 	if arr, ok := t.(*Array); ok {

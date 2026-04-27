@@ -240,7 +240,7 @@ func (c *Checker) checkArrayLit(e *ast.ArrayLit) types.Type {
 		}
 	}
 
-	inst := types.NewSlice(elemType)
+	inst := types.NewVector(elemType)
 	c.recordInstance(inst)
 	return inst
 }
@@ -335,6 +335,43 @@ func (c *Checker) checkOperator(pos ast.Pos, left types.Type, op string, right t
 		}
 		named = origin
 		subst = types.BuildSubstMap(origin.TypeParams(), t.TypeArgs())
+	case *types.TypeParam:
+		// Look up operator on constraint types
+		for _, constraint := range t.Constraints() {
+			if cn, ok := constraint.(*types.Named); ok {
+				if m := cn.LookupMethod(op); m != nil {
+					named = cn
+					break
+				}
+			}
+		}
+		if named == nil {
+			c.errorf(pos, "operator %s not defined on type parameter %s", op, left)
+			return nil
+		}
+		// For TypeParam operators, the parameter type is Self (the constraint type).
+		// The right operand must be the same TypeParam type.
+		m := named.LookupMethod(op)
+		sig := m.Sig()
+		if len(sig.Params()) != 1 {
+			c.errorf(pos, "operator %s has invalid signature", op)
+			return nil
+		}
+		// Accept right operand if it's the same type parameter
+		if !types.Identical(left, right) {
+			c.errorf(pos, "operator %s: cannot use %s as %s", op, right, left)
+			return nil
+		}
+		if sig.Result() != nil {
+			// Substitute Self (the constraint type) with the actual TypeParam
+			// so that Self-returning operators produce T, not the interface type.
+			result := sig.Result()
+			if rn, ok := result.(*types.Named); ok && rn == named {
+				return left // return the TypeParam
+			}
+			return result
+		}
+		return types.TypVoid
 	default:
 		c.errorf(pos, "operator %s not defined on type %s", op, left)
 		return nil
@@ -771,7 +808,32 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 		return nil
 
 	case *types.Enum:
-		// Check for variant access (Enum.VariantName)
+		// For generic enums, auto-instantiate by resolving type param names from scope.
+		// E.g., Slot.Empty inside map[K, V] body resolves K, V from scope → Slot[K, V].Empty
+		if len(t.TypeParams()) > 0 {
+			args := make([]types.Type, len(t.TypeParams()))
+			allFound := true
+			for i, tp := range t.TypeParams() {
+				obj := c.lookup(tp.Obj().Name())
+				if obj == nil {
+					allFound = false
+					break
+				}
+				tn, ok := obj.(*types.TypeName)
+				if !ok {
+					allFound = false
+					break
+				}
+				args[i] = tn.Type()
+			}
+			if allFound {
+				inst := types.NewInstance(t, args)
+				c.recordInstance(inst)
+				subst := types.BuildSubstMap(t.TypeParams(), args)
+				return c.resolveEnumMemberInst(e.Pos(), t, e.Field, subst, inst)
+			}
+		}
+		// Check for variant access (Enum.VariantName) — non-generic or unresolvable
 		if v := t.LookupVariant(e.Field); v != nil {
 			if v.NumFields() == 0 {
 				return t
@@ -795,15 +857,15 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 		return c.resolveInstanceMember(e.Pos(), t, e.Field)
 
 	case *types.Array:
-		// Arrays delegate to TypSlice for field/method lookup
-		subst := types.BuildSubstMap(types.TypSlice.TypeParams(), []types.Type{t.Elem()})
-		if f := types.TypSlice.LookupField(e.Field); f != nil {
+		// Arrays delegate to TypVector for field/method lookup
+		subst := types.BuildSubstMap(types.TypVector.TypeParams(), []types.Type{t.Elem()})
+		if f := types.TypVector.LookupField(e.Field); f != nil {
 			return types.Substitute(f.Type(), subst)
 		}
-		if g := types.TypSlice.LookupGetter(e.Field); g != nil {
+		if g := types.TypVector.LookupGetter(e.Field); g != nil {
 			return types.Substitute(g.Sig().Result(), subst)
 		}
-		if m := types.TypSlice.LookupMethod(e.Field); m != nil {
+		if m := types.TypVector.LookupMethod(e.Field); m != nil {
 			if e.Field == "push" || e.Field == "pop" || e.Field == "remove" {
 				c.errorf(e.Pos(), "cannot %s on fixed-size array", e.Field)
 				return nil
@@ -811,6 +873,20 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 			return types.Substitute(m.Sig(), subst)
 		}
 		c.errorf(e.Pos(), "type %s has no member %s", t, e.Field)
+		return nil
+
+	case *types.TypeParam:
+		for _, constraint := range t.Constraints() {
+			if cn, ok := constraint.(*types.Named); ok {
+				if m := cn.LookupMethod(e.Field); m != nil {
+					return m.Sig()
+				}
+				if g := cn.LookupGetter(e.Field); g != nil {
+					return g.Sig().Result()
+				}
+			}
+		}
+		c.errorf(e.Pos(), "type parameter %s has no method or getter %s", t, e.Field)
 		return nil
 
 	default:

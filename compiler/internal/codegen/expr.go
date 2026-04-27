@@ -359,6 +359,9 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 	right := c.genExpr(e.Right)
 
 	leftType := c.info.Types[e.Left]
+	if c.typeSubst != nil {
+		leftType = types.Substitute(leftType, c.typeSubst)
+	}
 	named := extractNamed(leftType)
 	if named == nil {
 		panic(fmt.Sprintf("codegen: cannot resolve Named type from %s for operator %s", leftType, e.Op))
@@ -533,13 +536,28 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 		if enumLayout := c.lookupEnumLayout(targetType); enumLayout != nil {
 			return c.genEnumVariantCallLayout(e, member, enumLayout)
 		}
+		// Fallback for generic enum variant constructors in mono context:
+		// target is bare *types.Enum; use the call result type (Instance after subst).
+		if _, ok := targetType.(*types.Enum); ok {
+			resultType := c.info.Types[e]
+			if c.typeSubst != nil {
+				resultType = types.Substitute(resultType, c.typeSubst)
+			}
+			if enumLayout := c.lookupEnumLayout(resultType); enumLayout != nil {
+				return c.genEnumVariantCallLayout(e, member, enumLayout)
+			}
+		}
 		return c.genMethodCall(e, member)
 	}
 
 	// Constructor call: callee resolves to a Named type or Instance
 	calleeType := c.info.Types[e.Callee]
 	if inst, ok := calleeType.(*types.Instance); ok {
-		if _, ok := inst.Origin().(*types.Named); ok {
+		if origin, ok := inst.Origin().(*types.Named); ok {
+			// Vector capacity constructor: T[](capacity: n)
+			if origin == types.TypVector {
+				return c.genVectorCapacityConstructor(e, inst)
+			}
 			return c.genConstructorCallMono(e, calleeType)
 		}
 	}
@@ -943,24 +961,44 @@ func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 		targetType = types.Substitute(targetType, c.typeSubst)
 	}
 
-	// Container .len property (string, slice, array, map)
-	// Check both Instance wrappers (user code: Slice[int]) and bare Named (method body: this is TypSlice)
+	// Container .len property (string, vector)
+	// Check both Instance wrappers (user code: Vector[int]) and bare Named (method body: this is TypVector)
 	if e.Field == "len" {
 		named := extractNamed(targetType)
 		if named == types.TypString {
 			return c.genStringLen(e)
 		}
-		if _, ok := types.AsSlice(targetType); ok || named == types.TypSlice {
-			return c.genSliceLen(e)
+		if _, ok := types.AsVector(targetType); ok || named == types.TypVector {
+			return c.genVectorLen(e)
 		}
-		if types.IsMap(targetType) || named == types.TypMap {
-			return c.genMapLen(e)
+	}
+
+	// Native hash getter for Hashable interface on primitive types
+	if e.Field == "hash" {
+		named := extractNamed(targetType)
+		if named != nil {
+			if v, ok := c.genNativeHashGetter(e, named); ok {
+				return v
+			}
 		}
 	}
 
 	// Enum variant access: Color.Red or Option[int].None
 	if enumLayout := c.lookupEnumLayout(targetType); enumLayout != nil {
 		return c.genEnumVariantValueLayout(enumLayout, e.Field)
+	}
+
+	// For generic enum variants (e.g. Slot.Empty inside a generic type body),
+	// the target type is a bare *types.Enum but the result type is an Instance
+	// after mono substitution. Use the result type to find the layout.
+	if _, ok := targetType.(*types.Enum); ok {
+		resultType := c.info.Types[e]
+		if c.typeSubst != nil {
+			resultType = types.Substitute(resultType, c.typeSubst)
+		}
+		if enumLayout := c.lookupEnumLayout(resultType); enumLayout != nil {
+			return c.genEnumVariantValueLayout(enumLayout, e.Field)
+		}
 	}
 
 	named := extractNamed(targetType)
@@ -981,10 +1019,27 @@ func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 	panic(fmt.Sprintf("codegen: member %s on type %s is not a field (method references not yet supported)", e.Field, named))
 }
 
-// genSliceLen loads the length from a slice/array header.
-func (c *Compiler) genSliceLen(e *ast.MemberExpr) value.Value {
+// genVectorCapacityConstructor generates a Vector with pre-allocated capacity: T[](capacity: n).
+func (c *Compiler) genVectorCapacityConstructor(e *ast.CallExpr, inst *types.Instance) value.Value {
+	if len(e.Args) != 1 {
+		panic(fmt.Sprintf("codegen: Vector capacity constructor expects 1 argument, got %d", len(e.Args)))
+	}
+	capacity := c.genExpr(e.Args[0].Value)
+
+	// Determine element size
+	elemType := inst.TypeArgs()[0]
+	elemLLVM := c.resolveType(elemType)
+	elemSize := int64(llvmTypeSize(elemLLVM))
+
+	return c.block.NewCall(c.funcs["promise_vector_with_capacity"],
+		capacity,
+		constant.NewInt(irtypes.I64, elemSize))
+}
+
+// genVectorLen loads the length from a vector/array header.
+func (c *Compiler) genVectorLen(e *ast.MemberExpr) value.Value {
 	slicePtr := c.genExpr(e.Target)
-	headerType := sliceHeaderType()
+	headerType := vectorHeaderType()
 	headerPtr := c.block.NewBitCast(slicePtr, irtypes.NewPointer(headerType))
 	lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
@@ -992,9 +1047,47 @@ func (c *Compiler) genSliceLen(e *ast.MemberExpr) value.Value {
 }
 
 // genMapLen returns the length of a map via the runtime.
-func (c *Compiler) genMapLen(e *ast.MemberExpr) value.Value {
-	mapPtr := c.genExpr(e.Target)
-	return c.block.NewCall(c.funcs["promise_map_len"], mapPtr)
+// genNativeHashGetter emits native hash computation for primitive types.
+// Returns (value, true) if the type has a native hash getter, (nil, false) otherwise.
+func (c *Compiler) genNativeHashGetter(e *ast.MemberExpr, named *types.Named) (value.Value, bool) {
+	target := c.genExpr(e.Target)
+	switch named {
+	case types.TypInt, types.TypI64, types.TypUint, types.TypU64:
+		// Already i64 — call promise_hash_int directly
+		return c.block.NewCall(c.funcs["promise_hash_int"], target), true
+	case types.TypI32, types.TypU32:
+		// Sign/zero-extend i32 to i64
+		ext := c.block.NewSExt(target, irtypes.I64)
+		return c.block.NewCall(c.funcs["promise_hash_int"], ext), true
+	case types.TypI16, types.TypU16:
+		ext := c.block.NewSExt(target, irtypes.I64)
+		return c.block.NewCall(c.funcs["promise_hash_int"], ext), true
+	case types.TypI8, types.TypU8:
+		ext := c.block.NewSExt(target, irtypes.I64)
+		return c.block.NewCall(c.funcs["promise_hash_int"], ext), true
+	case types.TypBool:
+		// bool (i1) → zero-extend to i64
+		ext := c.block.NewZExt(target, irtypes.I64)
+		return c.block.NewCall(c.funcs["promise_hash_int"], ext), true
+	case types.TypChar:
+		// char (i32 codepoint) → zero-extend to i64
+		ext := c.block.NewZExt(target, irtypes.I64)
+		return c.block.NewCall(c.funcs["promise_hash_int"], ext), true
+	case types.TypF64:
+		// bitcast double to i64
+		bits := c.block.NewBitCast(target, irtypes.I64)
+		return c.block.NewCall(c.funcs["promise_hash_int"], bits), true
+	case types.TypF32:
+		// bitcast float to i32, then zero-extend to i64
+		bits := c.block.NewBitCast(target, irtypes.I32)
+		ext := c.block.NewZExt(bits, irtypes.I64)
+		return c.block.NewCall(c.funcs["promise_hash_int"], ext), true
+	case types.TypString:
+		// string is i8* (pointer to header) — call promise_hash_string_value
+		return c.block.NewCall(c.funcs["promise_hash_string_value"], target), true
+	default:
+		return nil, false
+	}
 }
 
 // genFieldAccess loads a field value from a user type instance.
@@ -1048,7 +1141,7 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 		targetType = types.Substitute(targetType, c.typeSubst)
 	}
 
-	// Container native method dispatch (Slice, Map, string)
+	// Container native method dispatch (Vector, Map, string)
 	if result, ok := c.genContainerMethodCall(e, member, targetType); ok {
 		return result
 	}
@@ -1089,7 +1182,7 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 	var args []value.Value
 	if method.Sig().Recv() != nil {
 		target := c.genExpr(member.Target)
-		// Container types (Slice, Map, string) are already i8* pointers — pass directly.
+		// Container types (Vector, Map, string) are already i8* pointers — pass directly.
 		// `this` in a method body is also i8*.
 		// Regular user types are value structs — extract the instance pointer.
 		if _, isThis := member.Target.(*ast.ThisExpr); isThis {
@@ -1265,46 +1358,32 @@ func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 	return c.block.NewCall(fnTyped, args...)
 }
 
-// genContainerMethodCall dispatches native method calls on Slice, Map, and string.
+// genContainerMethodCall dispatches native method calls on Vector, Map, and string.
 // Returns (result, true) if handled, (nil, false) otherwise.
 // Non-native methods (with Promise bodies) fall through to the regular call path.
-// Handles both Instance wrappers (user code: Slice[int]) and bare Named types
-// (method body: this is TypSlice) by resolving type args from typeSubst.
+// Handles both Instance wrappers (user code: Vector[int]) and bare Named types
+// (method body: this is TypVector) by resolving type args from typeSubst.
 func (c *Compiler) genContainerMethodCall(e *ast.CallExpr, member *ast.MemberExpr, targetType types.Type) (value.Value, bool) {
 	methodName := member.Field
 
 	// Check if the method is native — only native methods are handled here.
-	// Non-native methods (like is_empty()) fall through to the regular user method path.
+	// Non-native methods fall through to the regular user method path.
 	named := extractNamed(targetType)
-	if named == types.TypSlice || named == types.TypMap || named == types.TypString {
+	if named == types.TypVector || named == types.TypString {
 		m := named.LookupMethod(methodName)
 		if m == nil || !m.IsNative() {
 			return nil, false // fall through to regular method dispatch
 		}
 	}
 
-	// Slice methods: push, pop, contains, remove
-	if elem, ok := types.AsSlice(targetType); ok {
-		return c.genSliceMethodCall(e, member, elem, methodName), true
+	// Vector methods: push, pop, contains, remove
+	if elem, ok := types.AsVector(targetType); ok {
+		return c.genVectorMethodCall(e, member, elem, methodName), true
 	}
-	// Bare TypSlice (inside a method body on Slice): resolve T from typeSubst
-	if named == types.TypSlice {
-		if elem := c.resolveTypeParam(types.TypSlice.TypeParams()[0]); elem != nil {
-			return c.genSliceMethodCall(e, member, elem, methodName), true
-		}
-	}
-
-	// Map methods: contains, remove, keys, values
-	if key, val, ok := types.AsMap(targetType); ok {
-		return c.genMapMethodCall(e, member, key, val, methodName), true
-	}
-	// Bare TypMap (inside a method body on Map): resolve K, V from typeSubst
-	if named == types.TypMap {
-		tparams := types.TypMap.TypeParams()
-		key := c.resolveTypeParam(tparams[0])
-		val := c.resolveTypeParam(tparams[1])
-		if key != nil && val != nil {
-			return c.genMapMethodCall(e, member, key, val, methodName), true
+	// Bare TypVector (inside a method body on Vector): resolve T from typeSubst
+	if named == types.TypVector {
+		if elem := c.resolveTypeParam(types.TypVector.TypeParams()[0]); elem != nil {
+			return c.genVectorMethodCall(e, member, elem, methodName), true
 		}
 	}
 
@@ -1327,7 +1406,7 @@ func (c *Compiler) resolveTypeParam(tp *types.TypeParam) types.Type {
 	return c.typeSubst[tp]
 }
 
-func (c *Compiler) genSliceMethodCall(e *ast.CallExpr, member *ast.MemberExpr, elemType types.Type, method string) value.Value {
+func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, elemType types.Type, method string) value.Value {
 	slicePtr := c.genExpr(member.Target)
 	elemLLVM := c.resolveType(elemType)
 	elemSize := int64(llvmTypeSize(elemLLVM))
@@ -1340,7 +1419,7 @@ func (c *Compiler) genSliceMethodCall(e *ast.CallExpr, member *ast.MemberExpr, e
 		c.block.NewStore(constant.NewZeroInitializer(elemLLVM), argAlloca)
 		c.block.NewStore(argVal, argAlloca)
 		argPtr := c.block.NewBitCast(argAlloca, irtypes.I8Ptr)
-		newSlice := c.block.NewCall(c.funcs["promise_slice_push"],
+		newSlice := c.block.NewCall(c.funcs["promise_vector_push"],
 			slicePtr, argPtr, constant.NewInt(irtypes.I64, elemSize))
 		// Store the (possibly reallocated) pointer back
 		c.storeBackSlicePtr(member.Target, newSlice)
@@ -1349,7 +1428,7 @@ func (c *Compiler) genSliceMethodCall(e *ast.CallExpr, member *ast.MemberExpr, e
 	case "pop":
 		outAlloca := c.block.NewAlloca(elemLLVM)
 		outPtr := c.block.NewBitCast(outAlloca, irtypes.I8Ptr)
-		found := c.block.NewCall(c.funcs["promise_slice_pop"],
+		found := c.block.NewCall(c.funcs["promise_vector_pop"],
 			slicePtr, outPtr, constant.NewInt(irtypes.I64, elemSize))
 		// Build Optional: {i1, T}
 		optType := irtypes.NewStruct(irtypes.I1, elemLLVM)
@@ -1388,22 +1467,22 @@ func (c *Compiler) genSliceMethodCall(e *ast.CallExpr, member *ast.MemberExpr, e
 		} else {
 			eqFn = constant.NewNull(irtypes.I8Ptr)
 		}
-		result := c.block.NewCall(c.funcs["promise_slice_contains"],
+		result := c.block.NewCall(c.funcs["promise_vector_contains"],
 			slicePtr, argPtr, constant.NewInt(irtypes.I64, elemSize), eqFn)
 		return c.block.NewTrunc(result, irtypes.I1)
 
 	case "remove":
 		idx := c.genExpr(e.Args[0].Value)
-		c.block.NewCall(c.funcs["promise_slice_remove"],
+		c.block.NewCall(c.funcs["promise_vector_remove"],
 			slicePtr, idx, constant.NewInt(irtypes.I64, elemSize))
 		return nil
 
 	default:
-		panic(fmt.Sprintf("codegen: unknown slice method %s", method))
+		panic(fmt.Sprintf("codegen: unknown vector method %s", method))
 	}
 }
 
-// storeBackSlicePtr stores the new slice pointer back into the variable that holds the slice.
+// storeBackSlicePtr stores the new vector pointer back into the variable that holds the vector.
 // This is needed because push may realloc.
 func (c *Compiler) storeBackSlicePtr(target ast.Expr, newPtr value.Value) {
 	switch t := target.(type) {
@@ -1457,43 +1536,6 @@ func (c *Compiler) genFieldPtr(target *ast.MemberExpr) value.Value {
 
 	return c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
-}
-
-func (c *Compiler) genMapMethodCall(e *ast.CallExpr, member *ast.MemberExpr, keyType, valType types.Type, method string) value.Value {
-	mapPtr := c.genExpr(member.Target)
-	keyLLVM := c.resolveType(keyType)
-	valLLVM := c.resolveType(valType)
-
-	switch method {
-	case "contains":
-		argVal := c.genExpr(e.Args[0].Value)
-		keyAlloca := c.block.NewAlloca(keyLLVM)
-		c.block.NewStore(argVal, keyAlloca)
-		keyPtr := c.block.NewBitCast(keyAlloca, irtypes.I8Ptr)
-		result := c.block.NewCall(c.funcs["promise_map_contains"], mapPtr, keyPtr)
-		return c.block.NewTrunc(result, irtypes.I1)
-
-	case "remove":
-		argVal := c.genExpr(e.Args[0].Value)
-		keyAlloca := c.block.NewAlloca(keyLLVM)
-		c.block.NewStore(argVal, keyAlloca)
-		keyPtr := c.block.NewBitCast(keyAlloca, irtypes.I8Ptr)
-		result := c.block.NewCall(c.funcs["promise_map_remove"], mapPtr, keyPtr)
-		return c.block.NewTrunc(result, irtypes.I1)
-
-	case "keys":
-		keySize := int64(llvmTypeSize(keyLLVM))
-		return c.block.NewCall(c.funcs["promise_map_keys"],
-			mapPtr, constant.NewInt(irtypes.I64, keySize))
-
-	case "values":
-		valSize := int64(llvmTypeSize(valLLVM))
-		return c.block.NewCall(c.funcs["promise_map_values"],
-			mapPtr, constant.NewInt(irtypes.I64, valSize))
-
-	default:
-		panic(fmt.Sprintf("codegen: unknown map method %s", method))
-	}
 }
 
 func (c *Compiler) genStringMethodCall(e *ast.CallExpr, member *ast.MemberExpr, method string) (value.Value, bool) {
@@ -2082,6 +2124,34 @@ func (c *Compiler) wrapOptional(val value.Value, optType *irtypes.StructType) va
 	return agg
 }
 
+// wrapReturnOptional wraps val in an Optional struct if retType is Optional
+// but the expression type is a non-optional, non-none value.
+func (c *Compiler) wrapReturnOptional(val value.Value, expr ast.Expr, retType types.Type) value.Value {
+	if retType == nil {
+		return val
+	}
+	if _, isOpt := retType.(*types.Optional); !isOpt {
+		return val
+	}
+	exprType := c.info.Types[expr]
+	if c.typeSubst != nil {
+		exprType = types.Substitute(exprType, c.typeSubst)
+	}
+	// NoneLit already produces the correct zero value via targetType
+	if exprType == types.TypNone {
+		return val
+	}
+	// Already Optional — no wrapping needed
+	if _, exprOpt := exprType.(*types.Optional); exprOpt {
+		return val
+	}
+	lt := c.resolveType(retType)
+	if st, ok := lt.(*irtypes.StructType); ok {
+		return c.wrapOptional(val, st)
+	}
+	return val
+}
+
 func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 	optVal := c.genExpr(e.Left)
 
@@ -2114,11 +2184,11 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 	)
 }
 
-// --- Slice / Array Literal ---
+// --- Vector / Array Literal ---
 
-const sliceHeaderSize = 16
+const vectorHeaderSize = 16
 
-func sliceHeaderType() *irtypes.StructType {
+func vectorHeaderType() *irtypes.StructType {
 	return irtypes.NewStruct(irtypes.I64, irtypes.I64)
 }
 
@@ -2127,23 +2197,23 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 	if c.typeSubst != nil {
 		typ = types.Substitute(typ, c.typeSubst)
 	}
-	elem, ok := types.AsSlice(typ)
+	elem, ok := types.AsVector(typ)
 	if !ok {
-		panic(fmt.Sprintf("codegen: array literal type is %T, want Slice instance", typ))
+		panic(fmt.Sprintf("codegen: array literal type is %T, want Vector instance", typ))
 	}
 	elemLLVM := c.resolveType(elem)
 	elemSize := int64(llvmTypeSize(elemLLVM))
 	n := int64(len(e.Elements))
 
 	// Total allocation: header (16 bytes) + n * elemSize
-	totalSize := int64(sliceHeaderSize) + n*elemSize
+	totalSize := int64(vectorHeaderSize) + n*elemSize
 
 	// malloc
 	rawPtr := c.block.NewCall(c.funcs["malloc"],
 		constant.NewInt(irtypes.I64, totalSize))
 
 	// Store len and cap via header GEP
-	headerType := sliceHeaderType()
+	headerType := vectorHeaderType()
 	headerPtr := c.block.NewBitCast(rawPtr, irtypes.NewPointer(headerType))
 	lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
@@ -2155,7 +2225,7 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 
 	// Store elements: ptr + 16 bytes (header), then index by element type
 	dataBase := c.block.NewGetElementPtr(irtypes.I8, rawPtr,
-		constant.NewInt(irtypes.I64, int64(sliceHeaderSize)))
+		constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
 	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
 
 	for i, elemExpr := range e.Elements {
@@ -2180,8 +2250,8 @@ func (c *Compiler) genIndexExpr(e *ast.IndexExpr) value.Value {
 		targetType = types.Substitute(targetType, c.typeSubst)
 	}
 
-	if elem, ok := types.AsSlice(targetType); ok {
-		return c.genSliceIndex(e, elem)
+	if elem, ok := types.AsVector(targetType); ok {
+		return c.genVectorIndex(e, elem)
 	}
 	if key, val, ok := types.AsMap(targetType); ok {
 		return c.genMapIndex(e, key, val)
@@ -2189,13 +2259,13 @@ func (c *Compiler) genIndexExpr(e *ast.IndexExpr) value.Value {
 	panic(fmt.Sprintf("codegen: cannot index type %s", targetType))
 }
 
-func (c *Compiler) genSliceIndex(e *ast.IndexExpr, elemType types.Type) value.Value {
+func (c *Compiler) genVectorIndex(e *ast.IndexExpr, elemType types.Type) value.Value {
 	slicePtr := c.genExpr(e.Target)
 	idx := c.genExpr(e.Index)
 	elemLLVM := c.resolveType(elemType)
 
 	// Bounds check: load len, compare index
-	headerType := sliceHeaderType()
+	headerType := vectorHeaderType()
 	headerPtr := c.block.NewBitCast(slicePtr, irtypes.NewPointer(headerType))
 	lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
@@ -2215,7 +2285,7 @@ func (c *Compiler) genSliceIndex(e *ast.IndexExpr, elemType types.Type) value.Va
 	// In bounds: load element
 	c.block = okBlock
 	dataBase := c.block.NewGetElementPtr(irtypes.I8, slicePtr,
-		constant.NewInt(irtypes.I64, int64(sliceHeaderSize)))
+		constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
 	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
 	elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, idx)
 	return c.block.NewLoad(elemLLVM, elemPtr)
@@ -2234,99 +2304,143 @@ func (c *Compiler) makeGlobalString(s string) value.Value {
 
 // --- Map ---
 
+// genMapLit creates a map instance via its new() constructor, then inserts each entry
+// via the monomorphized []= method. Map is now a Promise-implemented user type.
 func (c *Compiler) genMapLit(e *ast.MapLit) value.Value {
 	typ := c.info.Types[e]
 	if c.typeSubst != nil {
 		typ = types.Substitute(typ, c.typeSubst)
 	}
-	keyType, valType, ok := types.AsMap(typ)
+	_, _, ok := types.AsMap(typ)
 	if !ok {
 		panic(fmt.Sprintf("codegen: map literal type is %T, want Map instance", typ))
 	}
-	keyLLVM := c.resolveType(keyType)
-	valLLVM := c.resolveType(valType)
-	keySize := int64(llvmTypeSize(keyLLVM))
-	valSize := int64(llvmTypeSize(valLLVM))
-
-	// Determine hash/eq function pointers (string keys need content-based comparison)
-	var hashFn, eqFn value.Value
-	if extractNamed(keyType) == types.TypString {
-		hashFn = c.block.NewBitCast(c.funcs["promise_hash_string"], irtypes.I8Ptr)
-		eqFn = c.block.NewBitCast(c.funcs["promise_eq_string"], irtypes.I8Ptr)
-	} else {
-		hashFn = constant.NewNull(irtypes.I8Ptr)
-		eqFn = constant.NewNull(irtypes.I8Ptr)
+	inst, ok := typ.(*types.Instance)
+	if !ok {
+		panic(fmt.Sprintf("codegen: map literal type is %T, want Instance", typ))
 	}
 
-	// Create map
-	mapPtr := c.block.NewCall(c.funcs["promise_map_new"],
-		constant.NewInt(irtypes.I64, keySize),
-		constant.NewInt(irtypes.I64, valSize),
-		hashFn, eqFn)
+	// Construct the map (allocate + call new()) — reuse genConstructorCallMono logic
+	mapVal := c.genMapConstructor(inst)
 
-	// Insert entries
-	for _, entry := range e.Entries {
-		keyVal := c.genExpr(entry.Key)
-		valVal := c.genExpr(entry.Value)
-
-		keyAlloca := c.block.NewAlloca(keyLLVM)
-		c.block.NewStore(keyVal, keyAlloca)
-		keyPtr := c.block.NewBitCast(keyAlloca, irtypes.I8Ptr)
-
-		valAlloca := c.block.NewAlloca(valLLVM)
-		c.block.NewStore(valVal, valAlloca)
-		valPtr := c.block.NewBitCast(valAlloca, irtypes.I8Ptr)
-
-		c.block.NewCall(c.funcs["promise_map_set"], mapPtr, keyPtr, valPtr)
+	// Insert entries via monomorphized []= method
+	if len(e.Entries) > 0 {
+		name := monoName(inst)
+		setFnName := mangleMethodName(name, "[]=", false)
+		setFn, ok := c.funcs[setFnName]
+		if !ok {
+			panic(fmt.Sprintf("codegen: undeclared map []= method %s", setFnName))
+		}
+		instancePtr := c.extractInstancePtr(mapVal)
+		for _, entry := range e.Entries {
+			keyVal := c.genExpr(entry.Key)
+			valVal := c.genExpr(entry.Value)
+			c.block.NewCall(setFn, instancePtr, keyVal, valVal)
+		}
 	}
 
-	return mapPtr
+	return mapVal
 }
 
+// genMapConstructor allocates a map instance and calls its new() constructor.
+func (c *Compiler) genMapConstructor(inst *types.Instance) value.Value {
+	layout := c.lookupTypeLayout(inst)
+	if layout == nil {
+		panic(fmt.Sprintf("codegen: no layout for map type %s", inst))
+	}
+
+	instanceStructType := layout.Instance.LLVMType
+	instancePtrType := layout.InstancePtrType
+
+	// Compute size via GEP-from-null trick
+	nullPtr := constant.NewNull(instancePtrType)
+	sizePtr := c.block.NewGetElementPtr(instanceStructType, nullPtr,
+		constant.NewInt(irtypes.I32, 1))
+	size := c.block.NewPtrToInt(sizePtr, irtypes.I64)
+
+	// Allocate
+	rawPtr := c.block.NewCall(c.funcs["malloc"], size)
+	typedPtr := c.block.NewBitCast(rawPtr, instancePtrType)
+
+	// Store type info pointer in _variant slot (field 0)
+	variantFieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	variantPtrType := layout.Instance.Fields[0].LLVMType.(*irtypes.PointerType)
+	named := extractNamed(inst)
+	if named != nil {
+		if tiGlobal, ok := c.typeInfoGlobals[named]; ok {
+			tiPtr := c.block.NewBitCast(tiGlobal, variantPtrType)
+			c.block.NewStore(tiPtr, variantFieldPtr)
+		} else {
+			c.block.NewStore(constant.NewNull(variantPtrType), variantFieldPtr)
+		}
+	} else {
+		c.block.NewStore(constant.NewNull(variantPtrType), variantFieldPtr)
+	}
+
+	// Zero-init all fields
+	origin := inst.Origin().(*types.Named)
+	for _, f := range origin.AllFields() {
+		fieldIdx := layout.InstanceFieldIndex[f.Name()]
+		fieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+		c.block.NewStore(c.zeroValue(layout.Instance.Fields[fieldIdx].LLVMType), fieldPtr)
+	}
+
+	// Call new() constructor
+	name := monoName(inst)
+	mangledName := mangleMethodName(name, "new", false)
+	fn, ok := c.funcs[mangledName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undeclared new() for map type %s (mangled: %s)", inst, mangledName))
+	}
+	c.block.NewCall(fn, typedPtr)
+
+	// Build value struct { vtable_ptr, instance_ptr }
+	var vtablePtr value.Value
+	if named != nil {
+		if vtableGlobal := c.vtableGlobals[named]; vtableGlobal != nil {
+			vtablePtr = c.block.NewBitCast(vtableGlobal, irtypes.I8Ptr)
+		} else {
+			vtablePtr = constant.NewNull(irtypes.I8Ptr)
+		}
+	} else {
+		vtablePtr = constant.NewNull(irtypes.I8Ptr)
+	}
+
+	var valStruct value.Value = constant.NewZeroInitializer(userValueType())
+	valStruct = c.block.NewInsertValue(valStruct, vtablePtr, 0)
+	valStruct = c.block.NewInsertValue(valStruct, c.block.NewBitCast(typedPtr, irtypes.I8Ptr), 1)
+	return valStruct
+}
+
+// genMapIndex calls the monomorphized [] method on a map instance.
+// The [] method returns V? (optional) directly.
 func (c *Compiler) genMapIndex(e *ast.IndexExpr, keyType, valType types.Type) value.Value {
-	mapPtr := c.genExpr(e.Target)
+	targetType := c.info.Types[e.Target]
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+	inst, ok := targetType.(*types.Instance)
+	if !ok {
+		panic(fmt.Sprintf("codegen: map index target is %T, want Instance", targetType))
+	}
+
+	name := monoName(inst)
+	getFnName := mangleMethodName(name, "[]", false)
+	getFn, ok := c.funcs[getFnName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undeclared map [] method %s", getFnName))
+	}
+
+	mapVal := c.genExpr(e.Target)
 	keyVal := c.genExpr(e.Index)
-	keyLLVM := c.resolveType(keyType)
-	valLLVM := c.resolveType(valType)
 
-	// Alloca key for type-erased call
-	keyAlloca := c.block.NewAlloca(keyLLVM)
-	c.block.NewStore(keyVal, keyAlloca)
-	keyPtr := c.block.NewBitCast(keyAlloca, irtypes.I8Ptr)
+	// Extract instance pointer from value struct
+	instancePtr := c.extractInstancePtr(mapVal)
 
-	// Call promise_map_get
-	resultPtr := c.block.NewCall(c.funcs["promise_map_get"], mapPtr, keyPtr)
-
-	// Check if NULL
-	isNull := c.block.NewICmp(enum.IPredEQ, resultPtr, constant.NewNull(irtypes.I8Ptr))
-
-	someBlock := c.newBlock("map.found")
-	noneBlock := c.newBlock("map.notfound")
-	mergeBlock := c.newBlock("map.merge")
-
-	c.block.NewCondBr(isNull, noneBlock, someBlock)
-
-	// Found: load value, wrap in Optional
-	c.block = someBlock
-	typedPtr := c.block.NewBitCast(resultPtr, irtypes.NewPointer(valLLVM))
-	loadedVal := c.block.NewLoad(valLLVM, typedPtr)
-	optType := irtypes.NewStruct(irtypes.I1, valLLVM)
-	someOpt := c.wrapOptional(loadedVal, optType)
-	c.block.NewBr(mergeBlock)
-	someEnd := c.block
-
-	// Not found: none
-	c.block = noneBlock
-	noneOpt := constant.NewZeroInitializer(optType)
-	c.block.NewBr(mergeBlock)
-	noneEnd := c.block
-
-	// Merge
-	c.block = mergeBlock
-	return mergeBlock.NewPhi(
-		&ir.Incoming{X: someOpt, Pred: someEnd},
-		&ir.Incoming{X: noneOpt, Pred: noneEnd},
-	)
+	// Call the monomorphized [] method — returns V? directly
+	return c.block.NewCall(getFn, instancePtr, keyVal)
 }
 
 // --- Lambda ---

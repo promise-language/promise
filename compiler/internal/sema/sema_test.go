@@ -37,6 +37,7 @@ func init() {
 			fmt.Fprintf(&b, "\t..(%s end) range `native;\n", name)
 			fmt.Fprintf(&b, "\t..=(%s end) range `native;\n", name)
 		}
+		b.WriteString("\tget hash int `native;\n")
 		b.WriteString("}\n")
 	}
 
@@ -46,7 +47,8 @@ func init() {
 	b.WriteString("\t||(bool other) bool `native;\n")
 	b.WriteString("\t==(bool other) bool `native;\n")
 	b.WriteString("\t!=(bool other) bool `native;\n")
-	b.WriteString("\t!() bool `native;\n}\n")
+	b.WriteString("\t!() bool `native;\n")
+	b.WriteString("\tget hash int `native;\n}\n")
 
 	// Char
 	b.WriteString("type char `native {\n")
@@ -55,6 +57,7 @@ func init() {
 	}
 	b.WriteString("\t..(char end) range `native;\n")
 	b.WriteString("\t..=(char end) range `native;\n")
+	b.WriteString("\tget hash int `native;\n")
 	b.WriteString("}\n")
 
 	// String (operators + methods)
@@ -71,10 +74,12 @@ func init() {
 	b.WriteString("\tsplit(string sep) string[] `native;\n")
 	b.WriteString("\t[](int index) char `native;\n")
 	b.WriteString("\t[:](int? start, int? end) string `native;\n")
+	b.WriteString("\tget hash int `native;\n")
 	b.WriteString("\tget is_empty bool => this.len == 0;\n}\n")
 
 	// Containers
-	b.WriteString("type slice[T] `native {\n\tint len;\n")
+	b.WriteString("type Vector[T] `native {\n\tint len;\n")
+	b.WriteString("\tnew(int capacity) `native;\n")
 	b.WriteString("\t[](int index) T `native;\n")
 	b.WriteString("\t[]=(int index, T value) `native;\n")
 	b.WriteString("\t[:](int? start, int? end) T[] `native;\n")
@@ -85,14 +90,168 @@ func init() {
 	b.WriteString("\tremove(int index) `native;\n")
 	b.WriteString("\tget is_empty bool => this.len == 0;\n}\n")
 
-	b.WriteString("type map[K, V] `native {\n\tint len;\n")
-	b.WriteString("\t[](K key) V? `native;\n")
-	b.WriteString("\t[]=(K key, V value) `native;\n")
-	b.WriteString("\tcontains(K key) bool `native;\n")
-	b.WriteString("\tremove(K key) bool `native;\n")
-	b.WriteString("\tkeys() K[] `native;\n")
-	b.WriteString("\tvalues() V[] `native;\n")
-	b.WriteString("\tget is_empty bool => this.len == 0;\n}\n")
+	b.WriteString(`enum Slot[K, V] {
+	Empty,
+	Tombstone,
+	Used(K key, V value),
+}
+type map[K: Hashable + Equal, V] {
+	Slot[K, V][] _buckets;
+	int _count;
+	new(~this) {
+		this._buckets = [Slot.Empty];
+		for _ in 1..16 { this._buckets.push(Slot.Empty); }
+		this._count = 0;
+	}
+	get len int => this._count;
+	get is_empty bool => this._count == 0;
+	[](K key) V? {
+		int cap = this._buckets.len;
+		int h = key.hash % cap;
+		if h < 0 { h = h + cap; }
+		for {
+			match this._buckets[h] {
+				Slot.Empty => { return none; },
+				Slot.Used(k, v) => {
+					if k == key { return v; }
+				},
+				Slot.Tombstone => {},
+			}
+			h = (h + 1) % cap;
+		}
+	}
+	[]=(K key, V value) {
+		if this._count * 4 >= this._buckets.len * 3 {
+			this._rehash();
+		}
+		int cap = this._buckets.len;
+		int h = key.hash % cap;
+		if h < 0 { h = h + cap; }
+		for {
+			match this._buckets[h] {
+				Slot.Empty => {
+					this._buckets[h] = Slot.Used(key: key, value: value);
+					this._count = this._count + 1;
+					return;
+				},
+				Slot.Used(k, _) => {
+					if k == key {
+						this._buckets[h] = Slot.Used(key: key, value: value);
+						return;
+					}
+				},
+				Slot.Tombstone => {
+					this._buckets[h] = Slot.Used(key: key, value: value);
+					this._count = this._count + 1;
+					return;
+				},
+			}
+			h = (h + 1) % cap;
+		}
+	}
+	contains(K key) bool {
+		int cap = this._buckets.len;
+		int h = key.hash % cap;
+		if h < 0 { h = h + cap; }
+		for {
+			match this._buckets[h] {
+				Slot.Empty => { return false; },
+				Slot.Used(k, _) => {
+					if k == key { return true; }
+				},
+				Slot.Tombstone => {},
+			}
+			h = (h + 1) % cap;
+		}
+	}
+	remove(K key) bool {
+		int cap = this._buckets.len;
+		int h = key.hash % cap;
+		if h < 0 { h = h + cap; }
+		for {
+			match this._buckets[h] {
+				Slot.Empty => { return false; },
+				Slot.Used(k, _) => {
+					if k == key {
+						this._buckets[h] = Slot.Tombstone;
+						this._count = this._count - 1;
+						return true;
+					}
+				},
+				Slot.Tombstone => {},
+			}
+			h = (h + 1) % cap;
+		}
+	}
+	keys() K[] {
+		K[] result = [];
+		for slot in this._buckets {
+			match slot {
+				Slot.Used(k, _) => result.push(k),
+				_ => {},
+			}
+		}
+		return result;
+	}
+	values() V[] {
+		V[] result = [];
+		for slot in this._buckets {
+			match slot {
+				Slot.Used(_, v) => result.push(v),
+				_ => {},
+			}
+		}
+		return result;
+	}
+	clear() {
+		for i in 0..this._buckets.len {
+			this._buckets[i] = Slot.Empty;
+		}
+		this._count = 0;
+	}
+	_rehash() {
+		Slot[K, V][] old = this._buckets;
+		int new_cap = old.len * 2;
+		this._buckets = [Slot.Empty];
+		for _ in 1..new_cap { this._buckets.push(Slot.Empty); }
+		this._count = 0;
+		for slot in old {
+			match slot {
+				Slot.Used(k, v) => {
+					this._set(k, v);
+				},
+				_ => {},
+			}
+		}
+	}
+	_set(K key, V value) {
+		int cap = this._buckets.len;
+		int h = key.hash % cap;
+		if h < 0 { h = h + cap; }
+		for {
+			match this._buckets[h] {
+				Slot.Empty => {
+					this._buckets[h] = Slot.Used(key: key, value: value);
+					this._count = this._count + 1;
+					return;
+				},
+				Slot.Used(k, _) => {
+					if k == key {
+						this._buckets[h] = Slot.Used(key: key, value: value);
+						return;
+					}
+				},
+				Slot.Tombstone => {
+					this._buckets[h] = Slot.Used(key: key, value: value);
+					this._count = this._count + 1;
+					return;
+				},
+			}
+			h = (h + 1) % cap;
+		}
+	}
+}
+`)
 
 	// Iter/Stream
 	b.WriteString("type iter[T] `native {\n\tnext() T? `abstract;\n}\n")
@@ -100,6 +259,11 @@ func init() {
 
 	// Range
 	b.WriteString("type range `native {\n\tint start `value;\n\tint end `value;\n\tbool inclusive `value;\n}\n")
+
+	// Constraint interfaces
+	b.WriteString("type Equal `structural {\n\t==(Self other) bool `abstract;\n\t!=(Self other) bool `abstract;\n}\n")
+	b.WriteString("type Hashable `structural {\n\tget hash int `abstract;\n}\n")
+	b.WriteString("type Ordered is Equal `structural {\n\t<(Self other) bool `abstract;\n\t>(Self other) bool `abstract;\n\t<=(Self other) bool `abstract;\n\t>=(Self other) bool `abstract;\n}\n")
 
 	stdAll = b.String()
 }
@@ -4429,4 +4593,71 @@ func TestCopyTypeWithNonCopyEnumField(t *testing.T) {
 		main() {}
 	`)
 	expectError(t, errs, "non-copy type")
+}
+
+// --- TypeParam operator dispatch tests ---
+
+func TestTypeParamEqualityOperator(t *testing.T) {
+	// == on a constrained TypeParam should work via Equal interface
+	checkOK(t, `
+		type Eq `+"`"+`structural {
+			==(Self other) bool `+"`"+`abstract;
+		}
+		eq[T: Eq](T a, T b) bool { return a == b; }
+		main() {}
+	`)
+}
+
+func TestTypeParamOperatorMissingConstraint(t *testing.T) {
+	// == on an unconstrained TypeParam should error
+	errs := checkErrs(t, `
+		eq[T](T a, T b) bool { return a == b; }
+		main() {}
+	`)
+	expectError(t, errs, "operator == not defined on type parameter")
+}
+
+func TestTypeParamOperatorTypeMismatch(t *testing.T) {
+	// == with mismatched types on TypeParam should error
+	errs := checkErrs(t, `
+		type Eq `+"`"+`structural {
+			==(Self other) bool `+"`"+`abstract;
+		}
+		eq[T: Eq, U: Eq](T a, U b) bool { return a == b; }
+		main() {}
+	`)
+	expectError(t, errs, "cannot use")
+}
+
+// --- TypeParam member access tests ---
+
+func TestTypeParamMethodAccess(t *testing.T) {
+	// Method call on a constrained TypeParam should resolve from the constraint
+	checkOK(t, `
+		type Showable `+"`"+`structural {
+			show() string `+"`"+`abstract;
+		}
+		display[T: Showable](T item) string { return item.show(); }
+		main() {}
+	`)
+}
+
+func TestTypeParamGetterAccess(t *testing.T) {
+	// Getter access on a constrained TypeParam should resolve from the constraint
+	checkOK(t, `
+		type HasLen `+"`"+`structural {
+			get length int `+"`"+`abstract;
+		}
+		getLen[T: HasLen](T item) int { return item.length; }
+		main() {}
+	`)
+}
+
+func TestTypeParamMemberAccessNoConstraint(t *testing.T) {
+	// Method call on an unconstrained TypeParam should error
+	errs := checkErrs(t, `
+		call[T](T x) string { return x.show(); }
+		main() {}
+	`)
+	expectError(t, errs, "no method")
 }

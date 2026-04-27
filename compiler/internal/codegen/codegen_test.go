@@ -36,6 +36,7 @@ func init() {
 			fmt.Fprintf(&b, "\t..(%s end) range `native;\n", name)
 			fmt.Fprintf(&b, "\t..=(%s end) range `native;\n", name)
 		}
+		b.WriteString("\tget hash int `native;\n")
 		b.WriteString("}\n")
 	}
 
@@ -45,7 +46,8 @@ func init() {
 	b.WriteString("\t||(bool other) bool `native;\n")
 	b.WriteString("\t==(bool other) bool `native;\n")
 	b.WriteString("\t!=(bool other) bool `native;\n")
-	b.WriteString("\t!() bool `native;\n}\n")
+	b.WriteString("\t!() bool `native;\n")
+	b.WriteString("\tget hash int `native;\n}\n")
 
 	// Char
 	b.WriteString("type char `native {\n")
@@ -54,6 +56,7 @@ func init() {
 	}
 	b.WriteString("\t..(char end) range `native;\n")
 	b.WriteString("\t..=(char end) range `native;\n")
+	b.WriteString("\tget hash int `native;\n")
 	b.WriteString("}\n")
 
 	// String (operators + methods)
@@ -70,10 +73,12 @@ func init() {
 	b.WriteString("\tsplit(string sep) string[] `native;\n")
 	b.WriteString("\t[](int index) char `native;\n")
 	b.WriteString("\t[:](int? start, int? end) string `native;\n")
+	b.WriteString("\tget hash int `native;\n")
 	b.WriteString("\tget is_empty bool => this.len == 0;\n}\n")
 
 	// Containers
-	b.WriteString("type slice[T] `native {\n\tint len;\n")
+	b.WriteString("type Vector[T] `native {\n\tint len;\n")
+	b.WriteString("\tnew(int capacity) `native;\n")
 	b.WriteString("\t[](int index) T `native;\n")
 	b.WriteString("\t[]=(int index, T value) `native;\n")
 	b.WriteString("\t[:](int? start, int? end) T[] `native;\n")
@@ -84,14 +89,168 @@ func init() {
 	b.WriteString("\tremove(int index) `native;\n")
 	b.WriteString("\tget is_empty bool => this.len == 0;\n}\n")
 
-	b.WriteString("type map[K, V] `native {\n\tint len;\n")
-	b.WriteString("\t[](K key) V? `native;\n")
-	b.WriteString("\t[]=(K key, V value) `native;\n")
-	b.WriteString("\tcontains(K key) bool `native;\n")
-	b.WriteString("\tremove(K key) bool `native;\n")
-	b.WriteString("\tkeys() K[] `native;\n")
-	b.WriteString("\tvalues() V[] `native;\n")
-	b.WriteString("\tget is_empty bool => this.len == 0;\n}\n")
+	b.WriteString(`enum Slot[K, V] {
+	Empty,
+	Tombstone,
+	Used(K key, V value),
+}
+type map[K: Hashable + Equal, V] {
+	Slot[K, V][] _buckets;
+	int _count;
+	new(~this) {
+		this._buckets = [Slot.Empty];
+		for _ in 1..16 { this._buckets.push(Slot.Empty); }
+		this._count = 0;
+	}
+	get len int => this._count;
+	get is_empty bool => this._count == 0;
+	[](K key) V? {
+		int cap = this._buckets.len;
+		int h = key.hash % cap;
+		if h < 0 { h = h + cap; }
+		for {
+			match this._buckets[h] {
+				Slot.Empty => { return none; },
+				Slot.Used(k, v) => {
+					if k == key { return v; }
+				},
+				Slot.Tombstone => {},
+			}
+			h = (h + 1) % cap;
+		}
+	}
+	[]=(K key, V value) {
+		if this._count * 4 >= this._buckets.len * 3 {
+			this._rehash();
+		}
+		int cap = this._buckets.len;
+		int h = key.hash % cap;
+		if h < 0 { h = h + cap; }
+		for {
+			match this._buckets[h] {
+				Slot.Empty => {
+					this._buckets[h] = Slot.Used(key: key, value: value);
+					this._count = this._count + 1;
+					return;
+				},
+				Slot.Used(k, _) => {
+					if k == key {
+						this._buckets[h] = Slot.Used(key: key, value: value);
+						return;
+					}
+				},
+				Slot.Tombstone => {
+					this._buckets[h] = Slot.Used(key: key, value: value);
+					this._count = this._count + 1;
+					return;
+				},
+			}
+			h = (h + 1) % cap;
+		}
+	}
+	contains(K key) bool {
+		int cap = this._buckets.len;
+		int h = key.hash % cap;
+		if h < 0 { h = h + cap; }
+		for {
+			match this._buckets[h] {
+				Slot.Empty => { return false; },
+				Slot.Used(k, _) => {
+					if k == key { return true; }
+				},
+				Slot.Tombstone => {},
+			}
+			h = (h + 1) % cap;
+		}
+	}
+	remove(K key) bool {
+		int cap = this._buckets.len;
+		int h = key.hash % cap;
+		if h < 0 { h = h + cap; }
+		for {
+			match this._buckets[h] {
+				Slot.Empty => { return false; },
+				Slot.Used(k, _) => {
+					if k == key {
+						this._buckets[h] = Slot.Tombstone;
+						this._count = this._count - 1;
+						return true;
+					}
+				},
+				Slot.Tombstone => {},
+			}
+			h = (h + 1) % cap;
+		}
+	}
+	keys() K[] {
+		K[] result = [];
+		for slot in this._buckets {
+			match slot {
+				Slot.Used(k, _) => result.push(k),
+				_ => {},
+			}
+		}
+		return result;
+	}
+	values() V[] {
+		V[] result = [];
+		for slot in this._buckets {
+			match slot {
+				Slot.Used(_, v) => result.push(v),
+				_ => {},
+			}
+		}
+		return result;
+	}
+	clear() {
+		for i in 0..this._buckets.len {
+			this._buckets[i] = Slot.Empty;
+		}
+		this._count = 0;
+	}
+	_rehash() {
+		Slot[K, V][] old = this._buckets;
+		int new_cap = old.len * 2;
+		this._buckets = [Slot.Empty];
+		for _ in 1..new_cap { this._buckets.push(Slot.Empty); }
+		this._count = 0;
+		for slot in old {
+			match slot {
+				Slot.Used(k, v) => {
+					this._set(k, v);
+				},
+				_ => {},
+			}
+		}
+	}
+	_set(K key, V value) {
+		int cap = this._buckets.len;
+		int h = key.hash % cap;
+		if h < 0 { h = h + cap; }
+		for {
+			match this._buckets[h] {
+				Slot.Empty => {
+					this._buckets[h] = Slot.Used(key: key, value: value);
+					this._count = this._count + 1;
+					return;
+				},
+				Slot.Used(k, _) => {
+					if k == key {
+						this._buckets[h] = Slot.Used(key: key, value: value);
+						return;
+					}
+				},
+				Slot.Tombstone => {
+					this._buckets[h] = Slot.Used(key: key, value: value);
+					this._count = this._count + 1;
+					return;
+				},
+			}
+			h = (h + 1) % cap;
+		}
+	}
+}
+`)
 
 	// Iter/Stream
 	b.WriteString("type iter[T] `native {\n\tnext() T? `abstract;\n}\n")
@@ -99,6 +258,11 @@ func init() {
 
 	// Range
 	b.WriteString("type range `native {\n\tint start `value;\n\tint end `value;\n\tbool inclusive `value;\n}\n")
+
+	// Constraint interfaces
+	b.WriteString("type Equal `structural {\n\t==(Self other) bool `abstract;\n\t!=(Self other) bool `abstract;\n}\n")
+	b.WriteString("type Hashable `structural {\n\tget hash int `abstract;\n}\n")
+	b.WriteString("type Ordered is Equal `structural {\n\t<(Self other) bool `abstract;\n\t>(Self other) bool `abstract;\n\t<=(Self other) bool `abstract;\n\t>=(Self other) bool `abstract;\n}\n")
 
 	stdAll = b.String()
 }
@@ -2431,9 +2595,9 @@ func TestArrayVariable(t *testing.T) {
 
 func TestMapLiteral(t *testing.T) {
 	ir := generateIR(t, `main() { m := {"a": 1}; }`)
-	// Should call promise_map_new and promise_map_set
-	assertContains(t, ir, "call i8* @promise_map_new(")
-	assertContains(t, ir, "call void @promise_map_set(")
+	// Should call monomorphized constructor and index assign
+	assertContains(t, ir, "call void @map__string__int.new(")
+	assertContains(t, ir, `call void @"map__string__int.[]="(`)
 }
 
 func TestMapIndex(t *testing.T) {
@@ -2443,14 +2607,8 @@ func TestMapIndex(t *testing.T) {
 			int? v = m["a"];
 		}
 	`)
-	// Should call promise_map_get
-	assertContains(t, ir, "call i8* @promise_map_get(")
-	// Should check for NULL
-	assertContains(t, ir, "icmp eq")
-	// Should have found/notfound/merge blocks
-	assertContains(t, ir, "map.found")
-	assertContains(t, ir, "map.notfound")
-	assertContains(t, ir, "map.merge")
+	// Should call monomorphized [] method (returns optional { i1, i64 })
+	assertContains(t, ir, `call { i1, i64 } @"map__string__int.[]"(`)
 }
 
 func TestMapIndexWithElvis(t *testing.T) {
@@ -2460,8 +2618,8 @@ func TestMapIndexWithElvis(t *testing.T) {
 			int v = m["a"] ?: 0;
 		}
 	`)
-	// Should use map_get + elvis
-	assertContains(t, ir, "call i8* @promise_map_get(")
+	// Should call monomorphized [] method + elvis
+	assertContains(t, ir, `call { i1, i64 } @"map__string__int.[]"(`)
 	assertContains(t, ir, "elvis.some")
 }
 
@@ -2472,23 +2630,15 @@ func TestMapIndexAssign(t *testing.T) {
 			m["a"] = 42;
 		}
 	`)
-	// Should call promise_map_set
-	assertContains(t, ir, "call void @promise_map_set(")
+	// Should call monomorphized []= method
+	assertContains(t, ir, `call void @"map__string__int.[]="(`)
 }
 
 func TestMapIntKeys(t *testing.T) {
 	ir := generateIR(t, `main() { m := {1: "one", 2: "two"}; }`)
-	// Should use null hash/eq (byte-level for int keys)
-	assertContains(t, ir, "call i8* @promise_map_new(i64 8, i64 8, i8* null, i8* null)")
-}
-
-func TestMapIntrinsics(t *testing.T) {
-	ir := generateIR(t, `main() { x := 42; }`)
-	// Map intrinsics should always be declared
-	assertContains(t, ir, "declare i8* @promise_map_new(i64 %key_size, i64 %val_size, i8* %hash_fn, i8* %eq_fn)")
-	assertContains(t, ir, "declare void @promise_map_set(i8* %m, i8* %key, i8* %val)")
-	assertContains(t, ir, "declare i8* @promise_map_get(i8* %m, i8* %key)")
-	assertContains(t, ir, "declare i64 @promise_map_len(i8* %m)")
+	// Should create monomorphized map with int keys
+	assertContains(t, ir, "call void @map__int__string.new(")
+	assertContains(t, ir, `call void @"map__int__string.[]="(`)
 }
 
 func TestMapForIn(t *testing.T) {
@@ -2499,9 +2649,7 @@ func TestMapForIn(t *testing.T) {
 			}
 		}
 	`)
-	// Should call promise_map_iter_next
-	assertContains(t, ir, "call i32 @promise_map_iter_next(")
-	// Should have loop blocks
+	// Should have for-in loop blocks
 	assertContains(t, ir, "forin.header")
 	assertContains(t, ir, "forin.body")
 	assertContains(t, ir, "forin.exit")
@@ -3176,7 +3324,8 @@ func TestMapLen(t *testing.T) {
 			int n = m.len;
 		}
 	`)
-	assertContains(t, ir, "call i64 @promise_map_len(")
+	// Should call monomorphized len getter
+	assertContains(t, ir, "call i64 @map__string__int.len(")
 }
 
 func TestStringLen(t *testing.T) {
@@ -3255,12 +3404,12 @@ func TestMapCompoundAssign(t *testing.T) {
 			m["a"] += 1;
 		}
 	`)
-	// Should get, add, then set
-	assertContains(t, ir, "call i8* @promise_map_get(")
+	// Should call [] to get, add, then []= to set
+	assertContains(t, ir, `call { i1, i64 } @"map__string__int.[]"(`)
 	assertContains(t, ir, "mapcomp.ok")
 	assertContains(t, ir, "mapcomp.panic")
 	assertContains(t, ir, "add i64")
-	assertContains(t, ir, "call void @promise_map_set(")
+	assertContains(t, ir, `call void @"map__string__int.[]="(`)
 }
 
 func TestMapCompoundAssignMul(t *testing.T) {
@@ -3270,9 +3419,9 @@ func TestMapCompoundAssignMul(t *testing.T) {
 			m["x"] *= 3;
 		}
 	`)
-	assertContains(t, ir, "call i8* @promise_map_get(")
+	assertContains(t, ir, `call { i1, i64 } @"map__string__int.[]"(`)
 	assertContains(t, ir, "mul i64")
-	assertContains(t, ir, "call void @promise_map_set(")
+	assertContains(t, ir, `call void @"map__string__int.[]="(`)
 }
 
 // --- Stage 8k: Inheritance Codegen Tests ---
@@ -5390,4 +5539,201 @@ func TestCompoundAssignI8(t *testing.T) {
 		main() { }
 	`)
 	assertContains(t, ir, "add i8")
+}
+
+// --- Hash getter tests ---
+
+func TestHashGetterInt(t *testing.T) {
+	ir := generateIR(t, `main() { x := 42; h := x.hash; }`)
+	assertContains(t, ir, "call i64 @promise_hash_int(i64")
+}
+
+func TestHashGetterBool(t *testing.T) {
+	ir := generateIR(t, `main() { b := true; h := b.hash; }`)
+	assertContains(t, ir, "zext i1")
+	assertContains(t, ir, "call i64 @promise_hash_int(i64")
+}
+
+func TestHashGetterChar(t *testing.T) {
+	ir := generateIR(t, `main() { c := 'a'; h := c.hash; }`)
+	assertContains(t, ir, "call i64 @promise_hash_int(i64")
+}
+
+func TestHashGetterString(t *testing.T) {
+	ir := generateIR(t, `main() { s := "hi"; h := s.hash; }`)
+	assertContains(t, ir, "call i64 @promise_hash_string_value(i8*")
+}
+
+func TestHashGetterFloat(t *testing.T) {
+	ir := generateIR(t, `
+		test(f64 x) int { return x.hash; }
+		main() {}
+	`)
+	assertContains(t, ir, "bitcast double")
+	assertContains(t, ir, "call i64 @promise_hash_int(i64")
+}
+
+func TestHashGetterSmallInt(t *testing.T) {
+	ir := generateIR(t, `
+		test(i8 x) int { return x.hash; }
+		main() {}
+	`)
+	assertContains(t, ir, "sext i8")
+	assertContains(t, ir, "call i64 @promise_hash_int(i64")
+}
+
+// --- Vector method tests ---
+
+func TestVectorPush(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[] nums = [1, 2];
+			nums.push(3);
+		}
+	`)
+	assertContains(t, ir, "call i8* @promise_vector_push(")
+}
+
+func TestVectorPop(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[] nums = [1, 2];
+			int? v = nums.pop();
+		}
+	`)
+	assertContains(t, ir, "call i32 @promise_vector_pop(")
+	assertContains(t, ir, "pop.some")
+	assertContains(t, ir, "pop.none")
+}
+
+func TestVectorContainsInt(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[] nums = [1, 2, 3];
+			bool has = nums.contains(2);
+		}
+	`)
+	assertContains(t, ir, "call i8 @promise_vector_contains(")
+}
+
+func TestVectorContainsString(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string[] words = ["a", "b"];
+			bool has = words.contains("a");
+		}
+	`)
+	assertContains(t, ir, "call i8 @promise_vector_contains(")
+	// String contains uses custom equality comparator
+	assertContains(t, ir, "@promise_eq_string")
+}
+
+func TestVectorRemove(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[] nums = [1, 2, 3];
+			nums.remove(0);
+		}
+	`)
+	assertContains(t, ir, "call void @promise_vector_remove(")
+}
+
+// --- Vector capacity constructor ---
+
+// TODO: Vector capacity constructor T[](capacity: n) not yet wired through sema.
+// genVectorCapacityConstructor exists in codegen but sema doesn't recognize the syntax yet.
+
+// --- String method tests ---
+
+func TestStringContains(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			s := "hello world";
+			bool has = s.contains("world");
+		}
+	`)
+	assertContains(t, ir, "call i8 @promise_string_contains(")
+}
+
+func TestStringStartsWith(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			s := "hello";
+			bool yes = s.starts_with("hel");
+		}
+	`)
+	assertContains(t, ir, "call i8 @promise_string_starts_with(")
+}
+
+func TestStringEndsWith(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			s := "hello";
+			bool yes = s.ends_with("llo");
+		}
+	`)
+	assertContains(t, ir, "call i8 @promise_string_ends_with(")
+}
+
+func TestStringIndexOf(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			s := "hello";
+			int? idx = s.index_of("ll");
+		}
+	`)
+	assertContains(t, ir, "call i64 @promise_string_index_of(")
+	assertContains(t, ir, "indexof.some")
+	assertContains(t, ir, "indexof.none")
+}
+
+func TestStringTrim(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			s := "  hi  ";
+			string trimmed = s.trim();
+		}
+	`)
+	assertContains(t, ir, "call i8* @promise_string_trim(")
+}
+
+func TestStringSplit(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			s := "a,b,c";
+			string[] parts = s.split(",");
+		}
+	`)
+	assertContains(t, ir, "call i8* @promise_string_split(")
+}
+
+// --- Return optional wrapping in monomorphized context ---
+
+func TestReturnOptionalInMonoMethod(t *testing.T) {
+	// The map [] method returns V? — returning a concrete V must wrap in Optional
+	ir := generateIR(t, `
+		main() {
+			m := {"x": 42};
+			int? v = m["x"];
+		}
+	`)
+	// The monomorphized [] method should produce { i1, i64 } return type
+	assertContains(t, ir, `define { i1, i64 } @"map__string__int.[]"(`)
+	// Should contain insertvalue for wrapping the value in Optional { true, val }
+	assertContains(t, ir, "insertvalue { i1, i64 }")
+}
+
+// --- Nested generic monomorphization (discoverInstances) ---
+
+func TestNestedGenericMonomorphization(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] { T val; }
+		type Wrapper[T] { Box[T] inner; }
+		main() {
+			w := Wrapper[int](inner: Box[int](val: 42));
+		}
+	`)
+	// Both Wrapper[int] and Box[int] should be monomorphized
+	assertContains(t, ir, "Wrapper__int")
+	assertContains(t, ir, "Box__int")
 }

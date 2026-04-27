@@ -20,5 +20,6 @@ type string `native {
     trim() string `native;
     split(string sep) string[] `native;
 
+    get hash int `native;
     get is_empty bool => this.len == 0;
 }

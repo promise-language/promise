@@ -421,6 +421,10 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// Coerce value struct vtable when crossing type boundaries
 			exprType := c.info.Types[s.Value]
 			targetType := c.info.Types[target]
+			if c.typeSubst != nil {
+				exprType = types.Substitute(exprType, c.typeSubst)
+				targetType = types.Substitute(targetType, c.typeSubst)
+			}
 			val = c.coerceToView(val, exprType, targetType)
 			c.block.NewStore(val, alloca)
 			// Clear drop flag on RHS if it's being moved
@@ -627,6 +631,9 @@ func (c *Compiler) genIncDecTarget(target ast.Expr, isInc bool) {
 		op = "--"
 	}
 	targetType := c.info.Types[target]
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
 	named := extractNamed(targetType)
 	if named == nil {
 		panic(fmt.Sprintf("codegen: cannot resolve Named type for inc/dec on %s", targetType))
@@ -650,21 +657,21 @@ func (c *Compiler) genIncDecTarget(target ast.Expr, isInc bool) {
 		result := c.emitNativeOp(named, op, current, nil)
 		c.block.NewStore(result, fieldPtr)
 	case *ast.IndexExpr:
-		// Load indexed element, apply op, store back (slice only)
+		// Load indexed element, apply op, store back (vector only)
 		indexTargetType := c.info.Types[t.Target]
 		if c.typeSubst != nil {
 			indexTargetType = types.Substitute(indexTargetType, c.typeSubst)
 		}
-		elem, ok := types.AsSlice(indexTargetType)
+		elem, ok := types.AsVector(indexTargetType)
 		if !ok {
-			panic(fmt.Sprintf("codegen: inc/dec on index of non-slice type %s", indexTargetType))
+			panic(fmt.Sprintf("codegen: inc/dec on index of non-vector type %s", indexTargetType))
 		}
 		slicePtr := c.genExpr(t.Target)
 		idx := c.genExpr(t.Index)
 		elemLLVM := c.resolveType(elem)
 
 		// Bounds check
-		headerType := sliceHeaderType()
+		headerType := vectorHeaderType()
 		headerPtr := c.block.NewBitCast(slicePtr, irtypes.NewPointer(headerType))
 		lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
@@ -681,7 +688,7 @@ func (c *Compiler) genIncDecTarget(target ast.Expr, isInc bool) {
 
 		c.block = okBlock
 		dataBase := c.block.NewGetElementPtr(irtypes.I8, slicePtr,
-			constant.NewInt(irtypes.I64, int64(sliceHeaderSize)))
+			constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
 		dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
 		elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, idx)
 		current := c.block.NewLoad(elemLLVM, elemPtr)
@@ -730,16 +737,29 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		c.emitScopeCleanup(0)
 	}
 
+	// Set targetType so NoneLit can resolve to the correct Optional struct
+	retType := c.currentRetType
+	if retType != nil && c.typeSubst != nil {
+		retType = types.Substitute(retType, c.typeSubst)
+	}
+
 	if c.canError {
 		resultType := c.currentResultType()
 		if s.Value == nil {
 			c.block.NewRet(c.wrapOk(nil, resultType))
 		} else {
+			c.targetType = retType
 			val := c.genExpr(s.Value)
+			c.targetType = nil
+			// Wrap value in Optional if return type is Optional but expr is not
+			val = c.wrapReturnOptional(val, s.Value, retType)
 			// Coerce value struct vtable when returning through a parent type
-			if c.currentRetType != nil {
+			if retType != nil {
 				exprType := c.info.Types[s.Value]
-				val = c.coerceToView(val, exprType, c.currentRetType)
+				if c.typeSubst != nil {
+					exprType = types.Substitute(exprType, c.typeSubst)
+				}
+				val = c.coerceToView(val, exprType, retType)
 			}
 			c.block.NewRet(c.wrapOk(val, resultType))
 		}
@@ -748,11 +768,18 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	if s.Value == nil {
 		c.block.NewRet(nil)
 	} else {
+		c.targetType = retType
 		val := c.genExpr(s.Value)
+		c.targetType = nil
+		// Wrap value in Optional if return type is Optional but expr is not
+		val = c.wrapReturnOptional(val, s.Value, retType)
 		// Coerce value struct vtable when returning through a parent type
-		if c.currentRetType != nil {
+		if retType != nil {
 			exprType := c.info.Types[s.Value]
-			val = c.coerceToView(val, exprType, c.currentRetType)
+			if c.typeSubst != nil {
+				exprType = types.Substitute(exprType, c.typeSubst)
+			}
+			val = c.coerceToView(val, exprType, retType)
 		}
 		c.block.NewRet(val)
 	}
@@ -956,9 +983,9 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 		iterableType = types.Substitute(iterableType, c.typeSubst)
 	}
 
-	if elem, ok := types.AsSlice(iterableType); ok {
+	if elem, ok := types.AsVector(iterableType); ok {
 		slicePtr := c.genExpr(s.Iterable)
-		c.genForInSlice(s, slicePtr, elem)
+		c.genForInVector(s, slicePtr, elem)
 	} else if key, val, ok := types.AsMap(iterableType); ok {
 		mapPtr := c.genExpr(s.Iterable)
 		c.genForInMap(s, mapPtr, key, val)
@@ -1186,8 +1213,8 @@ func (c *Compiler) genIndexAssign(target *ast.IndexExpr, op ast.AssignOp, val va
 		targetType = types.Substitute(targetType, c.typeSubst)
 	}
 
-	if elem, ok := types.AsSlice(targetType); ok {
-		c.genSliceIndexAssign(target, elem, op, val)
+	if elem, ok := types.AsVector(targetType); ok {
+		c.genVectorIndexAssign(target, elem, op, val)
 	} else if key, valT, ok := types.AsMap(targetType); ok {
 		c.genMapIndexAssign(target, key, valT, val)
 	} else {
@@ -1195,14 +1222,14 @@ func (c *Compiler) genIndexAssign(target *ast.IndexExpr, op ast.AssignOp, val va
 	}
 }
 
-// genSliceIndexAssign handles arr[i] = val with bounds check.
-func (c *Compiler) genSliceIndexAssign(target *ast.IndexExpr, elemType types.Type, op ast.AssignOp, val value.Value) {
+// genVectorIndexAssign handles vec[i] = val with bounds check.
+func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Type, op ast.AssignOp, val value.Value) {
 	slicePtr := c.genExpr(target.Target)
 	idx := c.genExpr(target.Index)
 	elemLLVM := c.resolveType(elemType)
 
 	// Bounds check
-	headerType := sliceHeaderType()
+	headerType := vectorHeaderType()
 	headerPtr := c.block.NewBitCast(slicePtr, irtypes.NewPointer(headerType))
 	lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
@@ -1220,7 +1247,7 @@ func (c *Compiler) genSliceIndexAssign(target *ast.IndexExpr, elemType types.Typ
 
 	c.block = okBlock
 	dataBase := c.block.NewGetElementPtr(irtypes.I8, slicePtr,
-		constant.NewInt(irtypes.I64, int64(sliceHeaderSize)))
+		constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
 	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
 	elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, idx)
 
@@ -1235,22 +1262,29 @@ func (c *Compiler) genSliceIndexAssign(target *ast.IndexExpr, elemType types.Typ
 	c.block.NewStore(result, elemPtr)
 }
 
-// genMapIndexAssign handles m[k] = val via promise_map_set.
+// genMapIndexAssign handles m[k] = val via the monomorphized []= method.
 func (c *Compiler) genMapIndexAssign(target *ast.IndexExpr, keyType, valType types.Type, val value.Value) {
-	mapPtr := c.genExpr(target.Target)
+	targetType := c.info.Types[target.Target]
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+	inst, ok := targetType.(*types.Instance)
+	if !ok {
+		panic(fmt.Sprintf("codegen: map index-assign target is %T, want Instance", targetType))
+	}
+
+	name := monoName(inst)
+	setFnName := mangleMethodName(name, "[]=", false)
+	setFn, ok := c.funcs[setFnName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undeclared map []= method %s", setFnName))
+	}
+
+	mapVal := c.genExpr(target.Target)
 	keyVal := c.genExpr(target.Index)
-	keyLLVM := c.resolveType(keyType)
-	valLLVM := c.resolveType(valType)
+	instancePtr := c.extractInstancePtr(mapVal)
 
-	keyAlloca := c.block.NewAlloca(keyLLVM)
-	c.block.NewStore(keyVal, keyAlloca)
-	keyPtr := c.block.NewBitCast(keyAlloca, irtypes.I8Ptr)
-
-	valAlloca := c.block.NewAlloca(valLLVM)
-	c.block.NewStore(val, valAlloca)
-	valPtr := c.block.NewBitCast(valAlloca, irtypes.I8Ptr)
-
-	c.block.NewCall(c.funcs["promise_map_set"], mapPtr, keyPtr, valPtr)
+	c.block.NewCall(setFn, instancePtr, keyVal, val)
 }
 
 // genCompoundIndexAssign handles compound index assignments (arr[i] += val, m[k] += val)
@@ -1261,26 +1295,27 @@ func (c *Compiler) genCompoundIndexAssign(target *ast.IndexExpr, op ast.AssignOp
 		targetType = types.Substitute(targetType, c.typeSubst)
 	}
 
-	if elem, ok := types.AsSlice(targetType); ok {
+	if elem, ok := types.AsVector(targetType); ok {
 		slicePtr := c.genExpr(target.Target)
 		idx := c.genExpr(target.Index)
 		val := c.genExpr(valueExpr)
-		c.genSliceCompoundAssign(slicePtr, idx, elem, op, val)
-	} else if key, valT, ok := types.AsMap(targetType); ok {
-		mapPtr := c.genExpr(target.Target)
+		c.genVectorCompoundAssign(slicePtr, idx, elem, op, val)
+	} else if _, valT, ok := types.AsMap(targetType); ok {
+		mapVal := c.genExpr(target.Target)
 		keyVal := c.genExpr(target.Index)
 		val := c.genExpr(valueExpr)
-		c.genMapCompoundAssign(mapPtr, keyVal, key, valT, op, val)
+		inst := targetType.(*types.Instance)
+		c.genMapCompoundAssign(inst, mapVal, keyVal, valT, op, val)
 	} else {
 		panic(fmt.Sprintf("codegen: cannot compound-assign to index of type %s", targetType))
 	}
 }
 
-// genSliceCompoundAssign handles arr[i] += val with bounds check and pre-evaluated operands.
-func (c *Compiler) genSliceCompoundAssign(slicePtr, idx value.Value, elemType types.Type, op ast.AssignOp, val value.Value) {
+// genVectorCompoundAssign handles vec[i] += val with bounds check and pre-evaluated operands.
+func (c *Compiler) genVectorCompoundAssign(slicePtr, idx value.Value, elemType types.Type, op ast.AssignOp, val value.Value) {
 	elemLLVM := c.resolveType(elemType)
 
-	headerType := sliceHeaderType()
+	headerType := vectorHeaderType()
 	headerPtr := c.block.NewBitCast(slicePtr, irtypes.NewPointer(headerType))
 	lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
@@ -1298,7 +1333,7 @@ func (c *Compiler) genSliceCompoundAssign(slicePtr, idx value.Value, elemType ty
 
 	c.block = okBlock
 	dataBase := c.block.NewGetElementPtr(irtypes.I8, slicePtr,
-		constant.NewInt(irtypes.I64, int64(sliceHeaderSize)))
+		constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
 	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
 	elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, idx)
 
@@ -1307,40 +1342,47 @@ func (c *Compiler) genSliceCompoundAssign(slicePtr, idx value.Value, elemType ty
 	c.block.NewStore(result, elemPtr)
 }
 
-// genMapCompoundAssign handles m["key"] += val by getting, applying op, and setting back.
-func (c *Compiler) genMapCompoundAssign(mapPtr, keyVal value.Value, keyType, valType types.Type, op ast.AssignOp, val value.Value) {
-	keyLLVM := c.resolveType(keyType)
+// genMapCompoundAssign handles m["key"] += val by calling [] to get, applying op, then []=.
+func (c *Compiler) genMapCompoundAssign(inst *types.Instance, mapVal, keyVal value.Value, valType types.Type, op ast.AssignOp, val value.Value) {
 	valLLVM := c.resolveType(valType)
+	name := monoName(inst)
 
-	// Alloca key
-	keyAlloca := c.block.NewAlloca(keyLLVM)
-	c.block.NewStore(keyVal, keyAlloca)
-	keyPtr := c.block.NewBitCast(keyAlloca, irtypes.I8Ptr)
+	getFnName := mangleMethodName(name, "[]", false)
+	getFn, ok := c.funcs[getFnName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undeclared map [] method %s", getFnName))
+	}
+	setFnName := mangleMethodName(name, "[]=", false)
+	setFn, ok := c.funcs[setFnName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undeclared map []= method %s", setFnName))
+	}
 
-	// Get current value
-	resultPtr := c.block.NewCall(c.funcs["promise_map_get"], mapPtr, keyPtr)
-	isNull := c.block.NewICmp(enum.IPredEQ, resultPtr, constant.NewNull(irtypes.I8Ptr))
+	instancePtr := c.extractInstancePtr(mapVal)
+
+	// Call [] to get V? (optional)
+	optVal := c.block.NewCall(getFn, instancePtr, keyVal)
+
+	// Check has_value flag (field 0 of optional struct)
+	hasVal := c.block.NewExtractValue(optVal, 0)
 	okBlock := c.newBlock("mapcomp.ok")
 	panicBlock := c.newBlock("mapcomp.panic")
-	c.block.NewCondBr(isNull, panicBlock, okBlock)
+	c.block.NewCondBr(hasVal, okBlock, panicBlock)
 
-	// Panic block: compound assignment requires existing key
+	// Panic: compound assignment requires existing key
 	c.block = panicBlock
 	panicMsg := c.makeGlobalString("compound assignment on missing map key")
 	c.block.NewCall(c.funcs["promise_panic"], panicMsg)
 	c.block.NewUnreachable()
 
-	// OK: load current, apply op, store back
+	// OK: extract value, apply op, call []=
 	c.block = okBlock
-	typedPtr := c.block.NewBitCast(resultPtr, irtypes.NewPointer(valLLVM))
-	current := c.block.NewLoad(valLLVM, typedPtr)
+	optType := irtypes.NewStruct(irtypes.I1, valLLVM)
+	_ = optType
+	current := c.block.NewExtractValue(optVal, 1)
 	result := c.genCompoundOp(op, current, val)
 
-	// Store via promise_map_set
-	valAlloca := c.block.NewAlloca(valLLVM)
-	c.block.NewStore(result, valAlloca)
-	valPtr := c.block.NewBitCast(valAlloca, irtypes.I8Ptr)
-	c.block.NewCall(c.funcs["promise_map_set"], mapPtr, keyPtr, valPtr)
+	c.block.NewCall(setFn, instancePtr, keyVal, result)
 }
 
 // --- lookupLocalType resolves the declared type for a TypedVarDecl ---
@@ -1386,13 +1428,13 @@ func (c *Compiler) lookupVarType(name string) types.Type {
 	return nil
 }
 
-// --- For-in over slices ---
+// --- For-in over vectors ---
 
-func (c *Compiler) genForInSlice(s *ast.ForInStmt, slicePtr value.Value, elemType types.Type) {
+func (c *Compiler) genForInVector(s *ast.ForInStmt, slicePtr value.Value, elemType types.Type) {
 	elemLLVM := c.resolveType(elemType)
 
 	// Load length from header
-	headerType := sliceHeaderType()
+	headerType := vectorHeaderType()
 	headerPtr := c.block.NewBitCast(slicePtr, irtypes.NewPointer(headerType))
 	lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
@@ -1438,7 +1480,7 @@ func (c *Compiler) genForInSlice(s *ast.ForInStmt, slicePtr value.Value, elemTyp
 
 	c.block = bodyBlock
 	dataBase := c.block.NewGetElementPtr(irtypes.I8, slicePtr,
-		constant.NewInt(irtypes.I64, int64(sliceHeaderSize)))
+		constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
 	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
 	curCounter := c.block.NewLoad(irtypes.I64, counterAlloca)
 	elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, curCounter)
@@ -1473,20 +1515,49 @@ func (c *Compiler) genForInSlice(s *ast.ForInStmt, slicePtr value.Value, elemTyp
 
 // --- For-in over maps ---
 
-func (c *Compiler) genForInMap(s *ast.ForInStmt, mapPtr value.Value, keyType, valType types.Type) {
+// genForInMap iterates a Promise-implemented map by calling keys() and values()
+// to produce vectors, then looping over them in parallel.
+func (c *Compiler) genForInMap(s *ast.ForInStmt, mapVal value.Value, keyType, valType types.Type) {
 	keyLLVM := c.resolveType(keyType)
 	valLLVM := c.resolveType(valType)
+
+	// Resolve monomorphized type name for method lookup
+	iterType := c.info.Types[s.Iterable]
+	if c.typeSubst != nil {
+		iterType = types.Substitute(iterType, c.typeSubst)
+	}
+	inst, ok := iterType.(*types.Instance)
+	if !ok {
+		panic(fmt.Sprintf("codegen: for-in map target is %T, want Instance", iterType))
+	}
+	name := monoName(inst)
+
+	// Call keys() and values() methods
+	keysFnName := mangleMethodName(name, "keys", false)
+	keysFn := c.funcs[keysFnName]
+	valuesFnName := mangleMethodName(name, "values", false)
+	valuesFn := c.funcs[valuesFnName]
+	if keysFn == nil || valuesFn == nil {
+		panic(fmt.Sprintf("codegen: undeclared map keys/values method for %s", name))
+	}
+
+	instancePtr := c.extractInstancePtr(mapVal)
+	keysVec := c.block.NewCall(keysFn, instancePtr)
+	valsVec := c.block.NewCall(valuesFn, instancePtr)
+
+	// Get length from keys vector
+	headerType := vectorHeaderType()
+	headerPtr := c.block.NewBitCast(keysVec, irtypes.NewPointer(headerType))
+	lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	length := c.block.NewLoad(irtypes.I64, lenPtr)
 
 	// Build tuple type for the binding (K, V)
 	tupleType := irtypes.NewStruct(keyLLVM, valLLVM)
 
-	// State alloca (i64, starts at 0)
-	stateAlloca := c.block.NewAlloca(irtypes.I64)
-	c.block.NewStore(constant.NewInt(irtypes.I64, 0), stateAlloca)
-
-	// Key and value output allocas for iter_next
-	keyOutAlloca := c.block.NewAlloca(keyLLVM)
-	valOutAlloca := c.block.NewAlloca(valLLVM)
+	// Counter alloca
+	counterAlloca := c.block.NewAlloca(irtypes.I64)
+	c.block.NewStore(constant.NewInt(irtypes.I64, 0), counterAlloca)
 
 	// Binding alloca for the (K, V) tuple
 	bindingAlloca := c.block.NewAlloca(tupleType)
@@ -1508,16 +1579,13 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapPtr value.Value, keyType, va
 
 	c.block.NewBr(headerBlock)
 
-	// Header: call promise_map_iter_next
+	// Header: compare counter < length
 	c.block = headerBlock
-	keyOutPtr := c.block.NewBitCast(keyOutAlloca, irtypes.I8Ptr)
-	valOutPtr := c.block.NewBitCast(valOutAlloca, irtypes.I8Ptr)
-	hasNext := c.block.NewCall(c.funcs["promise_map_iter_next"],
-		mapPtr, stateAlloca, keyOutPtr, valOutPtr)
-	cond := c.block.NewICmp(enum.IPredNE, hasNext, constant.NewInt(irtypes.I32, 0))
+	counter := c.block.NewLoad(irtypes.I64, counterAlloca)
+	cond := c.block.NewICmp(enum.IPredULT, counter, length)
 	c.block.NewCondBr(cond, bodyBlock, exitBlock)
 
-	// Body: build tuple from key/val outputs, store to binding
+	// Body: load key[i] and value[i], build tuple
 	savedBreak := c.breakTarget
 	savedContinue := c.continueTarget
 	savedLoopUseDepth := c.loopScopeDepth
@@ -1526,8 +1594,22 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapPtr value.Value, keyType, va
 	c.loopScopeDepth = len(c.scopeBindings)
 
 	c.block = bodyBlock
-	key := c.block.NewLoad(keyLLVM, keyOutAlloca)
-	val := c.block.NewLoad(valLLVM, valOutAlloca)
+	idx := c.block.NewLoad(irtypes.I64, counterAlloca)
+
+	// Load key from keys vector
+	keyDataBase := c.block.NewGetElementPtr(irtypes.I8, keysVec,
+		constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
+	keyDataPtr := c.block.NewBitCast(keyDataBase, irtypes.NewPointer(keyLLVM))
+	keyElemPtr := c.block.NewGetElementPtr(keyLLVM, keyDataPtr, idx)
+	key := c.block.NewLoad(keyLLVM, keyElemPtr)
+
+	// Load value from values vector
+	valDataBase := c.block.NewGetElementPtr(irtypes.I8, valsVec,
+		constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
+	valDataPtr := c.block.NewBitCast(valDataBase, irtypes.NewPointer(valLLVM))
+	valElemPtr := c.block.NewGetElementPtr(valLLVM, valDataPtr, idx)
+	val := c.block.NewLoad(valLLVM, valElemPtr)
+
 	var tuple value.Value = constant.NewZeroInitializer(tupleType)
 	tuple = c.block.NewInsertValue(tuple, key, 0)
 	tuple = c.block.NewInsertValue(tuple, val, 1)
@@ -1538,8 +1620,11 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapPtr value.Value, keyType, va
 		c.block.NewBr(updateBlock)
 	}
 
-	// Update: increment index if present
+	// Update: increment counter (and index if present)
 	c.block = updateBlock
+	curCount := c.block.NewLoad(irtypes.I64, counterAlloca)
+	nextCount := c.block.NewAdd(curCount, constant.NewInt(irtypes.I64, 1))
+	c.block.NewStore(nextCount, counterAlloca)
 	if s.Index != "" {
 		idxAlloca := c.locals[s.Index]
 		curIdx := c.block.NewLoad(irtypes.I64, idxAlloca)

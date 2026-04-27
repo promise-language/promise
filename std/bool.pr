@@ -5,4 +5,5 @@ type bool `native {
     ==(bool other) bool `native;
     !=(bool other) bool `native;
     !() bool `native;
+    get hash int `native;
 }

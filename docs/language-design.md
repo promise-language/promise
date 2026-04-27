@@ -774,6 +774,334 @@ enum Color {
 }
 ```
 
+### 5.7 Constructors
+
+Promise supports implicit constructors (auto-generated from fields) and explicit `new` constructors (user-defined with validation). Factory constructors provide named alternative construction paths. The `new`/`drop` pair forms a symmetric constructor/destructor lifecycle.
+
+#### Implicit Constructors
+
+For simple types with no validation needs, the compiler generates a constructor from field declarations. All arguments are named:
+
+```promise
+type User {
+  string name;           // required — no default, not optional
+  Int age;               // required
+  string? bio;           // optional — T? defaults to none
+  Int score = 0;         // optional — has default
+}
+
+User(name: "Alice", age: 30)              // OK: bio=none, score=0
+User(name: "Alice", age: 30, bio: "hi")   // OK
+User(name: "Alice")                       // ERROR: missing required field 'age'
+```
+
+A field is **required** if it is not `T?` and does not have `= default`. All required fields must be provided. Default expressions are evaluated at the call site each time the argument is omitted (see Section 9.3).
+
+#### `Self` Type Alias
+
+`Self` is a compiler-supported type alias meaning "the enclosing type with all generic parameters as-is." After monomorphization, `Self` resolves to the concrete type.
+
+| Context | `Self` resolves to |
+|---------|-------------------|
+| Inside `type Foo { ... }` | `Foo` |
+| Inside `type Box[T] { ... }` | `Box[T]` |
+| After monomorphization for `Box[Int]` | `Box[Int]` |
+| Inside `type Dog is Animal { ... }` | `Dog` (not `Animal`) |
+
+`Self` is capitalized because it is a type name, contrasting with `this` which is a value. `Self` is usable in return types, constructor calls, parameter types, and field types within type bodies:
+
+```promise
+type Point {
+  Float64 x `final;
+  Float64 y `final;
+
+  offset(Float64 dx, Float64 dy) Self {
+    return Self(x: this.x + dx, y: this.y + dy);
+  }
+}
+```
+
+#### `` `final `` Fields
+
+A field annotated `` `final `` can be assigned during construction but is frozen afterward. The compiler generates a vtable getter but **no setter**.
+
+```promise
+type Token {
+  string raw `final;
+  Int line `final;
+  Int col `final;
+}
+
+main() {
+  t := Token(raw: "if", line: 1, col: 0);
+  string s = t.raw;       // OK — getter works
+  t.raw = "else";         // ERROR: cannot assign to `final field 'raw'
+}
+```
+
+Write access rules:
+- **`new` body**: can assign `` `final `` fields
+- **`` `factory `` body**: can assign `` `final `` fields on locally-created instances only (variables initialized from constructor calls within the factory; parameter or external instances cannot have their `` `final `` fields modified)
+- **Everywhere else**: assignment is a compile error
+
+Additional rules:
+- Child types cannot shadow a `` `final `` field with a mutable one
+- `` `final `` fields can have defaults: `Int version \`final = 1;`
+- `` `final `` + `T?` is valid: `string? tag \`final;` (defaults to `none`, frozen after)
+- Defining a custom setter on a `` `final `` field name is a compile error
+- Defining a custom getter on a `` `final `` field name is allowed (overrides the generated getter)
+- `` `final `` is orthogonal to placement — `` `final \`value ``, `` `final \`variant ``, `` `final \`type `` are all valid
+- `` `copy `` types can have `` `final `` fields — bitwise copies get the same frozen values
+
+#### Explicit `new` Constructor
+
+When a type needs validation or computed initialization, define a `new` method. It **replaces** the implicit constructor.
+
+```promise
+type Percentage {
+  Int value `final;
+
+  new(Int value) {
+    if value < 0 { this.value = 0; }
+    else if value > 100 { this.value = 100; }
+    else { this.value = value; }
+  }
+}
+
+Percentage(value: 120)    // calls new(value:), clamps to 100
+Percentage(value: 50)     // calls new(value:), stores 50
+```
+
+Semantics:
+1. Compiler allocates instance (zero-initialized) and stores RTTI
+2. `new` body executes with implicit `~this` (mutable access to fresh instance)
+3. Instance returned as value struct
+
+Rules:
+- Receiver is implicitly `~this` — not written in the signature
+- Return type is implicitly `Self` — not written in the signature
+- Call site syntax is unchanged: `Type(args...)` — arguments match `new`'s parameter names (not field names)
+- When `new` is defined, the implicit constructor is gone — all construction goes through `new`
+- Every `` `final `` field must be definitely assigned on all code paths through `new`
+- Non-`` `final `` fields not assigned in `new` remain zero-initialized (or use their default)
+
+Parameters can differ from field names, enabling computed construction:
+
+```promise
+type Point {
+  Float64 x `final;
+  Float64 y `final;
+
+  // Polar constructor — param names differ from field names
+  new(Float64 radius, Float64 angle) {
+    this.x = radius * cos(angle);
+    this.y = radius * sin(angle);
+  }
+}
+
+Point(radius: 5.0, angle: 1.57)    // named after new() params
+```
+
+#### Failable `new`
+
+Append `!` to make `new` failable. The caller must handle the error using standard error handling (see Section 7).
+
+```promise
+type Port {
+  Int value `final;
+
+  new(Int value)! {
+    if value < 1 || value > 65535 {
+      raise InvalidArgError(msg: "invalid port number");
+    }
+    this.value = value;
+  }
+}
+
+Port(value: 80)!       // calls new(value:), validates, OK
+Port(value: -1)!       // calls new(value:), raises InvalidArgError
+```
+
+A failable constructor integrates with standard error handling — auto-propagation in `!` functions, explicit `?` handling, or `!` to assert-and-panic (see Section 7):
+
+```promise
+serve(Int portNum) Server! {
+  Port p = Port(value: portNum);   // auto-propagates InvalidArgError on failure
+  return Server(port: p);
+}
+```
+
+When `new` raises, the instance is never returned — no `drop()` runs on the incomplete instance. Fields assigned before the `raise` that hold non-copy values are leaked. Validation should precede field assignment to minimize this.
+
+#### Factory Constructors
+
+A factory is a method annotated `` `factory ``. It provides named alternative construction paths with special privileges:
+
+- Can modify `` `final `` fields on locally-created instances
+- Can return child types (return type is `Self` or a type that `is Self`)
+- Can be failable (`!`)
+
+`` `factory `` implies `` `variant `` placement — per-monomorphization, all generics resolved. This is necessary because a factory on `Box[T]` must know which `T` to create. A factory has **no `this` receiver**.
+
+```promise
+type Color {
+  Int r `final;
+  Int g `final;
+  Int b `final;
+
+  red() Self `factory {
+    return Self(r: 255, g: 0, b: 0);
+  }
+
+  hex(string code) Self! `factory {
+    if code.len != 7 || code[0] != '#' {
+      raise ParseError(msg: "invalid hex color");
+    }
+    c := Self(r: 0, g: 0, b: 0);
+    c.r = parseHex(code[1:3]);     // OK — `factory can set `final
+    c.g = parseHex(code[3:5]);
+    c.b = parseHex(code[5:7]);
+    return c;
+  }
+}
+
+Color c1 = Color.red();
+Color c2 = Color.hex("#FF8800")!;
+```
+
+Factories can return child types:
+
+```promise
+type Shape `abstract {
+  string color `final;
+
+  new(string color) {
+    this.color = color;
+  }
+
+  circle(string color, Float64 r) Self `factory {
+    return Circle(color: color, radius: r);
+  }
+}
+
+Shape s = Shape.circle("red", 5.0);   // returns Circle typed as Shape
+```
+
+If the type defines `new`, `Self(...)` / `Type(...)` inside the factory routes through `new` — validation always runs.
+
+#### Inheritance and Constructors
+
+When a parent type defines `new`, the child **must** also define `new` and call `super(...)` to initialize the parent.
+
+```promise
+type Animal {
+  string name `final;
+  Int age;
+
+  new(string name, Int age) {
+    this.name = name;
+    this.age = age;
+  }
+}
+
+type Dog is Animal {
+  string breed `final;
+
+  new(string name, Int age, string breed) {
+    super(name, age);       // calls Animal.new
+    this.breed = breed;
+  }
+}
+
+Dog(name: "Rex", age: 3, breed: "Lab")
+```
+
+When the parent has only the implicit constructor, `super(field: value, ...)` uses field-name syntax:
+
+```promise
+type Dog is Animal {
+  string breed `final;
+
+  new(string name, string breed) {
+    super(name: name, age: 0);    // field-name syntax for implicit parent constructor
+    this.breed = breed;
+  }
+}
+```
+
+**Relaxed `super()` rule** — `super()` does NOT need to be the first statement. Instead, two invariants apply:
+
+1. **No `this` access before `super()`** — cannot read or write any field (own or inherited) until the parent is initialized
+2. **All code paths must call `super()` exactly once** — definite-call analysis (same infrastructure as `` `final `` field definite-assignment)
+
+This enables validation before parent construction, conditional super calls, and computed arguments:
+
+```promise
+type SecureConn is Connection {
+  string cert `final;
+
+  new(string rawUrl, string cert)! {
+    // Validation before super — no this access, just params + locals
+    string normalized = normalizeUrl(rawUrl);
+    if !isValid(normalized) {
+      raise InvalidUrlError(url: rawUrl);
+    }
+    super(url: normalized, timeout: 30);
+    this.cert = cert;
+  }
+}
+```
+
+```promise
+type Logger is Output {
+  new(string target)! {
+    if target == "stdout" {
+      super(stream: stdout);
+    } else if target == "stderr" {
+      super(stream: stderr);
+    } else {
+      Stream f = openFile(target);
+      super(stream: f);
+    }
+    // all branches called super — OK
+  }
+}
+```
+
+Compile errors for `super()`:
+
+| Rule | Error |
+|------|-------|
+| `this` access before `super()` on that path | "cannot access 'this' before calling super()" |
+| Path exits `new()` without calling `super()` | "all code paths must call super()" |
+| `super()` called twice on same path | "super() already called on this path" |
+| `super()` inside a loop | "super() cannot be called inside a loop" |
+| Child omits `new()` when parent has `new()` | "type Child must define new() because parent Parent defines new()" |
+| Parent `new()` is failable but child `new()` is not | "new() on Child must be failable because parent Parent has failable new()" |
+
+Abstract types can define `new` to enforce initialization contracts — children call `super(...)` to satisfy them. Abstract types themselves still cannot be instantiated directly.
+
+#### Construction Lifecycle
+
+```
+allocate + zero-init + RTTI
+  → super() [if parent has new]
+  → new() body [if has new]
+  → `final fields frozen
+  → instance returned
+  → ... use ...
+  → drop() [if has drop, at scope exit]
+  → field drops [compiler-inserted, reverse order]
+  → free
+```
+
+#### Definite-Assignment Analysis
+
+The compiler uses flow-sensitive analysis (shared infrastructure) for three checks:
+1. Every `` `final `` field is assigned on all paths through `new`
+2. `super()` is called on all paths (exactly once, no loops)
+3. No `this` access before `super()` on any path
+
 ---
 
 ## 6. Ownership & Memory Management
@@ -1058,6 +1386,8 @@ testAddition() `test {
 | `` `copy ``  | types           | Bitwise copy on assignment; compiler verifies all fields are also `` `copy `` |
 | `` `clone `` | types           | Auto-generate `clone() Self` method (deep copy)   |
 | `` `required ``| fields         | Field must be present during deserialization; validation error otherwise |
+| `` `final `` | fields          | Immutable after construction; can only be set in `new` or `` `factory `` body (see Section 5.7) |
+| `` `factory ``| methods        | Factory constructor with `` `variant `` placement; no `this`, returns `Self` or child (see Section 5.7) |
 | `` `doc ``   | any             | AST-attached documentation (see Section 8.4)      |
 
 User-defined metas are available through the type system at compile time for meta-programming and code generation.
@@ -1161,14 +1491,16 @@ Type methods are effectively **namespaced functions**. No `this` is passed at ca
 type Counter {
   Int value;
 
-  new() Counter `type {
+  create() Counter `type {
     return Counter(value: 0);
   }
 }
 
 // Called as:
-Counter c = Counter.new();
+Counter c = Counter.create();
 ```
+
+**Note:** The name `new` is reserved for explicit constructors (see Section 5.7). Type methods that create instances should use descriptive names like `create`, `from`, or `empty`. Factory constructors (`` `factory ``) use `` `variant `` placement instead of `` `type `` — see Section 5.7.
 
 ### 9.3 Named Arguments, Defaults & Optional Parameters
 
@@ -1260,19 +1592,22 @@ range(Int start, Int end = start + 10) { ... }  // compile error
 
 #### Constructor Defaults
 
-Constructor parameters mirror field declarations. Fields with `= expression` defaults become default constructor parameters. Fields with `T?` type become optional constructor parameters.
+Constructor parameters mirror field declarations. Fields with `= expression` defaults become optional constructor parameters (the default is evaluated at the call site each time the argument is omitted). Fields with `T?` type become optional constructor parameters (defaulting to `none`). Fields without defaults and without `T?` type are **required** — omitting them is a compile error.
 
 ```promise
 type Config {
-  string host;
-  Int port = 8080;
-  string? logFile;
+  string host;           // required — must be provided
+  Int port = 8080;       // optional — default evaluated at call site
+  string? logFile;       // optional — defaults to none
 }
 
-Config("localhost");                          // port=8080, logFile=none
-Config("localhost", logFile: "/var/log/app"); // port=8080, logFile=Some(...)
-Config(host: "localhost", port: 9090);        // logFile=none
+Config(host: "localhost");                          // OK: port=8080, logFile=none
+Config(host: "localhost", logFile: "/var/log/app"); // OK: port=8080
+Config(host: "localhost", port: 9090);              // OK: logFile=none
+Config(port: 9090);                                 // ERROR: missing required field 'host'
 ```
+
+When a type defines an explicit `new` constructor, the implicit constructor is replaced — call site arguments match `new`'s parameter names instead of field names. See Section 5.7 for full constructor design including `new`, failable constructors, factories, `` `final `` fields, and inheritance.
 
 ### 9.4 Lambdas / Closures
 

@@ -121,6 +121,15 @@ func (c *Checker) checkIdentExpr(e *ast.IdentExpr) types.Type {
 		return types.TypBool
 	}
 
+	// Self resolves to the enclosing type
+	if e.Name == "Self" {
+		if c.curType == nil {
+			c.errorf(e.Pos(), "Self can only be used inside a type body")
+			return nil
+		}
+		return c.curType
+	}
+
 	obj := c.lookup(e.Name)
 	if obj == nil {
 		c.errorf(e.Pos(), "undefined: %s", e.Name)
@@ -389,10 +398,17 @@ func (c *Checker) checkConstructorCall(e *ast.CallExpr, named *types.Named) type
 		return named
 	}
 
-	// Check arguments against fields
+	// If the type has an explicit new() constructor, route through parameter checking
+	if named.HasNew() {
+		return c.checkNewConstructorCall(e, named, nil)
+	}
+
+	// Check arguments against fields (implicit constructor)
+	provided := make(map[string]bool)
 	for _, arg := range e.Args {
 		argType := c.checkExpr(arg.Value)
 		if arg.Name != "" {
+			provided[arg.Name] = true
 			// Named argument — check field exists and type matches
 			f := named.LookupField(arg.Name)
 			if f == nil {
@@ -403,7 +419,148 @@ func (c *Checker) checkConstructorCall(e *ast.CallExpr, named *types.Named) type
 			}
 		}
 	}
+
+	// Check that all required fields are provided.
+	// A field is required if it has no default value and is not optional (T?).
+	for _, f := range named.AllFields() {
+		if provided[f.Name()] {
+			continue
+		}
+		if f.HasDefault() {
+			continue
+		}
+		if _, isOpt := f.Type().(*types.Optional); isOpt {
+			continue
+		}
+		c.errorf(e.Pos(), "missing required field '%s' in constructor for %s", f.Name(), named)
+	}
 	return named
+}
+
+// checkNewConstructorCall validates a constructor call against the new() method's parameters.
+// subst is non-nil for generic instantiations.
+func (c *Checker) checkNewConstructorCall(e *ast.CallExpr, named *types.Named, subst map[*types.TypeParam]types.Type) types.Type {
+	newMethod := named.LookupMethod("new")
+	if newMethod == nil {
+		return named
+	}
+	sig := newMethod.Sig()
+	params := sig.Params()
+
+	// Check argument count
+	if len(e.Args) != len(params) {
+		c.errorf(e.Pos(), "constructor for %s expects %d arguments, got %d",
+			named, len(params), len(e.Args))
+	}
+
+	// Check each argument type
+	for i, arg := range e.Args {
+		argType := c.checkExpr(arg.Value)
+		if i >= len(params) {
+			continue
+		}
+		paramType := params[i].Type()
+		if subst != nil {
+			paramType = types.Substitute(paramType, subst)
+		}
+		if arg.Name != "" && arg.Name != params[i].Name() {
+			c.errorf(arg.Pos(), "argument name '%s' does not match parameter '%s'",
+				arg.Name, params[i].Name())
+		}
+		if argType != nil && paramType != nil && !types.AssignableTo(argType, paramType) {
+			c.errorf(arg.Pos(), "cannot assign %s to parameter %s of type %s",
+				argType, params[i].Name(), paramType)
+		}
+	}
+
+	// If failable, return type includes error potential
+	if sig.CanError() {
+		return named // failable handled by caller (Point 5)
+	}
+	return named
+}
+
+// checkSuperCall validates a super(...) call inside a new() constructor body.
+// super() calls the parent's new() or implicit constructor to initialize inherited fields.
+func (c *Checker) checkSuperCall(e *ast.CallExpr) types.Type {
+	if !c.inNewBody {
+		c.errorf(e.Pos(), "super() can only be called inside a new() constructor")
+		// Still type-check arguments
+		for _, arg := range e.Args {
+			c.checkExpr(arg.Value)
+		}
+		return types.TypVoid
+	}
+	if c.curType == nil {
+		c.errorf(e.Pos(), "super() used outside of a type")
+		return types.TypVoid
+	}
+	parents := c.curType.Parents()
+	if len(parents) == 0 {
+		c.errorf(e.Pos(), "super() called but type %s has no parent", c.curType)
+		for _, arg := range e.Args {
+			c.checkExpr(arg.Value)
+		}
+		return types.TypVoid
+	}
+	parent := parents[0] // first parent is the concrete parent
+
+	if parent.HasNew() {
+		// Parent has explicit new() — validate args against parent's new() params
+		newMethod := parent.LookupMethod("new")
+		if newMethod == nil || newMethod.Sig() == nil {
+			return types.TypVoid
+		}
+		params := newMethod.Sig().Params()
+		if len(e.Args) != len(params) {
+			c.errorf(e.Pos(), "super() expects %d arguments (parent %s new), got %d",
+				len(params), parent, len(e.Args))
+		}
+		for i, arg := range e.Args {
+			argType := c.checkExpr(arg.Value)
+			if i >= len(params) {
+				continue
+			}
+			if arg.Name != "" && arg.Name != params[i].Name() {
+				c.errorf(arg.Pos(), "argument name '%s' does not match parameter '%s'",
+					arg.Name, params[i].Name())
+			}
+			if argType != nil && params[i].Type() != nil && !types.AssignableTo(argType, params[i].Type()) {
+				c.errorf(arg.Pos(), "cannot assign %s to parameter %s of type %s",
+					argType, params[i].Name(), params[i].Type())
+			}
+		}
+	} else {
+		// Parent has implicit constructor — validate named args against parent's fields
+		provided := make(map[string]bool)
+		for _, arg := range e.Args {
+			argType := c.checkExpr(arg.Value)
+			if arg.Name != "" {
+				provided[arg.Name] = true
+				f := parent.LookupField(arg.Name)
+				if f == nil {
+					c.errorf(arg.Pos(), "parent type %s has no field %s", parent, arg.Name)
+				} else if argType != nil && !types.AssignableTo(argType, f.Type()) {
+					c.errorf(arg.Pos(), "cannot assign %s to field %s of type %s",
+						argType, arg.Name, f.Type())
+				}
+			}
+		}
+		// Check that all required parent fields are provided
+		for _, f := range parent.AllFields() {
+			if provided[f.Name()] {
+				continue
+			}
+			if f.HasDefault() {
+				continue
+			}
+			if _, isOpt := f.Type().(*types.Optional); isOpt {
+				continue
+			}
+			c.errorf(e.Pos(), "missing required field '%s' in super() call for parent %s", f.Name(), parent)
+		}
+	}
+	return types.TypVoid
 }
 
 // checkInstanceConstructorCall handles constructor calls on generic instances: Box[int](value: 42).
@@ -421,9 +578,18 @@ func (c *Checker) checkInstanceConstructorCall(e *ast.CallExpr, inst *types.Inst
 	}
 
 	subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+
+	// If the type has an explicit new() constructor, route through parameter checking
+	if origin.HasNew() {
+		c.checkNewConstructorCall(e, origin, subst)
+		return inst
+	}
+
+	provided := make(map[string]bool)
 	for _, arg := range e.Args {
 		argType := c.checkExpr(arg.Value)
 		if arg.Name != "" {
+			provided[arg.Name] = true
 			f := origin.LookupField(arg.Name)
 			if f == nil {
 				c.errorf(arg.Pos(), "type %s has no field %s", inst, arg.Name)
@@ -436,10 +602,30 @@ func (c *Checker) checkInstanceConstructorCall(e *ast.CallExpr, inst *types.Inst
 			}
 		}
 	}
+
+	// Check that all required fields are provided.
+	for _, f := range origin.AllFields() {
+		if provided[f.Name()] {
+			continue
+		}
+		if f.HasDefault() {
+			continue
+		}
+		fieldType := types.Substitute(f.Type(), subst)
+		if _, isOpt := fieldType.(*types.Optional); isOpt {
+			continue
+		}
+		c.errorf(e.Pos(), "missing required field '%s' in constructor for %s", f.Name(), inst)
+	}
 	return inst
 }
 
 func (c *Checker) checkCallExpr(e *ast.CallExpr) types.Type {
+	// Handle super() calls in constructor bodies
+	if ident, ok := e.Callee.(*ast.IdentExpr); ok && ident.Name == "super" {
+		return c.checkSuperCall(e)
+	}
+
 	calleeType := c.checkExpr(e.Callee)
 	if calleeType == nil {
 		return nil

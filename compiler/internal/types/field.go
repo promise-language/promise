@@ -8,6 +8,7 @@ type Field struct {
 	placement  Placement
 	isRaw      bool // `raw meta — type name is an LLVM type identifier
 	hasDef     bool // has a default value expression
+	isFinal    bool // `final — immutable after construction
 	doc        string
 	deprecated string
 }
@@ -30,6 +31,8 @@ func (f *Field) Type() Type             { return f.typ }
 func (f *Field) Placement() Placement   { return f.placement }
 func (f *Field) IsRaw() bool            { return f.isRaw }
 func (f *Field) HasDefault() bool       { return f.hasDef }
+func (f *Field) IsFinal() bool          { return f.isFinal }
+func (f *Field) SetFinal(v bool)        { f.isFinal = v }
 func (f *Field) Doc() string            { return f.doc }
 func (f *Field) SetDoc(s string)        { f.doc = s }
 func (f *Field) Deprecated() string     { return f.deprecated }
@@ -45,6 +48,7 @@ type Method struct {
 	native     bool // `native — implementation provided by runtime
 	isGetter   bool // getter — accessed without (), returns value type
 	isSetter   bool // setter — called on assignment to property
+	isFactory  bool // `factory — static constructor, no receiver
 	doc        string
 	deprecated string
 }
@@ -69,8 +73,10 @@ func (m *Method) IsAbstract() bool       { return m.abstract }
 func (m *Method) IsNative() bool         { return m.native }
 func (m *Method) IsGetter() bool         { return m.isGetter }
 func (m *Method) IsSetter() bool         { return m.isSetter }
+func (m *Method) IsFactory() bool        { return m.isFactory }
 func (m *Method) SetGetter(v bool)       { m.isGetter = v }
 func (m *Method) SetSetter(v bool)       { m.isSetter = v }
+func (m *Method) SetFactory(v bool)      { m.isFactory = v }
 func (m *Method) Doc() string            { return m.doc }
 func (m *Method) SetDoc(s string)        { m.doc = s }
 func (m *Method) Deprecated() string     { return m.deprecated }

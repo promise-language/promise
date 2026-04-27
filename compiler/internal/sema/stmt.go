@@ -106,6 +106,10 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 		if valType != nil && !types.AssignableTo(valType, declType) {
 			c.errorf(s.Pos(), "cannot assign %s to variable of type %s", valType, declType)
 		}
+		// Track factory-created locals for `final field write restriction
+		if c.inFactoryBody && s.Name != "_" && isConstructorCallExpr(s.Value) {
+			c.factoryLocals[s.Name] = true
+		}
 	}
 
 	if s.Name != "_" {
@@ -117,6 +121,11 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 	valType := c.checkExpr(s.Value)
 	if valType == nil {
 		return
+	}
+
+	// Track factory-created locals for `final field write restriction
+	if c.inFactoryBody && s.Name != "_" && isConstructorCallExpr(s.Value) {
+		c.factoryLocals[s.Name] = true
 	}
 
 	if s.Name != "_" {
@@ -255,8 +264,20 @@ func (c *Checker) checkSetterAvailable(me *ast.MemberExpr) {
 	if named == nil {
 		return
 	}
-	// If the member is a field, assignment is always OK
-	if named.LookupField(me.Field) != nil {
+	// If the member is a field, check `final restriction
+	if f := named.LookupField(me.Field); f != nil {
+		if f.IsFinal() {
+			if c.inNewBody {
+				// OK — new() body can assign to this's final fields
+			} else if c.inFactoryBody {
+				// Only allow on locally-created instances
+				if ident, ok := me.Target.(*ast.IdentExpr); !ok || !c.factoryLocals[ident.Name] {
+					c.errorf(me.Pos(), "cannot assign to `final field '%s' (only allowed on locally-created instances in factory)", me.Field)
+				}
+			} else {
+				c.errorf(me.Pos(), "cannot assign to `final field '%s'", me.Field)
+			}
+		}
 		return
 	}
 	// If the member is a getter, check for a corresponding setter
@@ -533,4 +554,35 @@ func (c *Checker) checkIncDecStmt(s *ast.IncDecStmt) {
 		op = "--"
 	}
 	c.checkUnaryOperator(s.Pos(), targetType, op)
+}
+
+// isConstructorCallExpr returns true if the expression is a constructor call
+// (Type(...), Self(...)), possibly wrapped in error propagation (!)  or unwrap (!!).
+func isConstructorCallExpr(expr ast.Expr) bool {
+	// Unwrap error propagation: Foo(...)! or Foo(...)!!
+	switch e := expr.(type) {
+	case *ast.ErrorPropagateExpr:
+		return isConstructorCallExpr(e.Expr)
+	case *ast.ErrorUnwrapExpr:
+		return isConstructorCallExpr(e.Expr)
+	}
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	switch callee := call.Callee.(type) {
+	case *ast.IdentExpr:
+		// Constructor calls use type names (capitalized) or Self
+		if len(callee.Name) > 0 && callee.Name[0] >= 'A' && callee.Name[0] <= 'Z' {
+			return true
+		}
+	case *ast.IndexExpr:
+		// Generic constructor: Type[T](...)
+		if ident, ok := callee.Target.(*ast.IdentExpr); ok {
+			if len(ident.Name) > 0 && ident.Name[0] >= 'A' && ident.Name[0] <= 'Z' {
+				return true
+			}
+		}
+	}
+	return false
 }

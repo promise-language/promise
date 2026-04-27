@@ -932,6 +932,622 @@ func TestConstructorFieldTypeCorrect(t *testing.T) {
 	`)
 }
 
+func TestConstructorRequiredFieldMissing(t *testing.T) {
+	errs := checkErrs(t, `
+		type User { string name; int age; }
+		test() {
+			User u = User(name: "Alice");
+		}
+	`)
+	expectError(t, errs, "missing required field 'age'")
+}
+
+func TestConstructorOptionalFieldOmittable(t *testing.T) {
+	checkOK(t, `
+		type Profile { string name; string? bio; }
+		test() {
+			Profile p = Profile(name: "Alice");
+		}
+	`)
+}
+
+func TestConstructorDefaultFieldOmittable(t *testing.T) {
+	checkOK(t, `
+		type Config { int port = 8080; string host; }
+		test() {
+			Config c = Config(host: "localhost");
+		}
+	`)
+}
+
+func TestConstructorAllRequiredFieldsMissing(t *testing.T) {
+	errs := checkErrs(t, `
+		type Point { int x; int y; }
+		test() {
+			Point p = Point();
+		}
+	`)
+	expectError(t, errs, "missing required field 'x'")
+	expectError(t, errs, "missing required field 'y'")
+}
+
+func TestConstructorInheritedRequiredFieldMissing(t *testing.T) {
+	errs := checkErrs(t, `
+		type Animal { string name; int age; }
+		type Dog is Animal { string breed; }
+		test() {
+			Dog d = Dog(breed: "Lab");
+		}
+	`)
+	expectError(t, errs, "missing required field 'name'")
+	expectError(t, errs, "missing required field 'age'")
+}
+
+func TestConstructorGenericRequiredField(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box[T] { T value; }
+		test() {
+			Box[int] b = Box[int]();
+		}
+	`)
+	expectError(t, errs, "missing required field 'value'")
+}
+
+func TestConstructorGenericOptionalField(t *testing.T) {
+	checkOK(t, `
+		type MaybeBox[T] { T? value; }
+		test() {
+			MaybeBox[int] b = MaybeBox[int]();
+		}
+	`)
+}
+
+func TestConstructorDefaultTypeMismatch(t *testing.T) {
+	errs := checkErrs(t, `
+		type Bad { int x = "hello"; }
+		test() {}
+	`)
+	expectError(t, errs, "cannot use string as default for field x of type int")
+}
+
+func TestConstructorDefaultTypeCorrect(t *testing.T) {
+	checkOK(t, `
+		type Config { int port = 8080; string host = "localhost"; }
+		test() {
+			Config c = Config();
+		}
+	`)
+}
+
+// --- Final Field Tests ---
+
+func TestFinalFieldConstructionOK(t *testing.T) {
+	checkOK(t, `
+		type Token { string raw `+"`final;"+` int line `+"`final;"+` }
+		test() {
+			Token t = Token(raw: "if", line: 1);
+		}
+	`)
+}
+
+func TestFinalFieldAssignmentRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		type Token { string raw `+"`final;"+` int line `+"`final;"+` }
+		test() {
+			Token t = Token(raw: "if", line: 1);
+			t.raw = "else";
+		}
+	`)
+	expectError(t, errs, "cannot assign to "+"`"+`final field 'raw'`)
+}
+
+func TestFinalFieldReadOK(t *testing.T) {
+	checkOK(t, `
+		type Token { string raw `+"`final;"+` }
+		test() {
+			Token t = Token(raw: "if");
+			string s = t.raw;
+		}
+	`)
+}
+
+func TestFinalFieldWithDefault(t *testing.T) {
+	checkOK(t, `
+		type Config { int version `+"`final"+` = 1; }
+		test() {
+			Config c = Config();
+		}
+	`)
+}
+
+// --- Explicit new() Constructor Tests ---
+
+func TestNewConstructorBasic(t *testing.T) {
+	checkOK(t, `
+		type Percentage {
+			int value;
+			new(~this, int value) {
+				if value < 0 { this.value = 0; }
+				else if value > 100 { this.value = 100; }
+				else { this.value = value; }
+			}
+		}
+		test() {
+			Percentage p = Percentage(value: 50);
+		}
+	`)
+}
+
+func TestNewConstructorReplacesImplicit(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo {
+			int x;
+			new(~this, int y) {
+				this.x = y;
+			}
+		}
+		test() {
+			Foo f = Foo(x: 1);
+		}
+	`)
+	// Should fail because 'x' is not a param of new(), 'y' is
+	expectError(t, errs, "argument name 'x' does not match parameter 'y'")
+}
+
+func TestNewConstructorWrongArgCount(t *testing.T) {
+	errs := checkErrs(t, `
+		type Bar {
+			int x;
+			new(~this, int a, int b) {
+				this.x = a + b;
+			}
+		}
+		test() {
+			Bar b = Bar(a: 1);
+		}
+	`)
+	expectError(t, errs, "expects 2 arguments, got 1")
+}
+
+func TestNewConstructorFinalFieldAssignment(t *testing.T) {
+	checkOK(t, `
+		type Token {
+			string raw `+"`final;"+`
+			new(~this, string raw) {
+				this.raw = raw;
+			}
+		}
+		test() {
+			Token t = Token(raw: "if");
+		}
+	`)
+}
+
+func TestNewConstructorMustNotReturnValue(t *testing.T) {
+	errs := checkErrs(t, `
+		type Bad {
+			int x;
+			new(~this, int x) int {
+				this.x = x;
+				return 0;
+			}
+		}
+		test() {}
+	`)
+	expectError(t, errs, "must not declare a return type")
+}
+
+func TestFailableNewConstructorSema(t *testing.T) {
+	checkOK(t, `
+		type Port {
+			int value;
+			new(~this, int value) void! {
+				if value < 1 {
+					raise "invalid port";
+				}
+				this.value = value;
+			}
+		}
+		test()! {
+			Port p = Port(value: 80)!;
+		}
+	`)
+}
+
+// --- Factory Constructor Tests ---
+
+func TestFactoryBasic(t *testing.T) {
+	checkOK(t, `
+		type Color {
+			int r;
+			int g;
+			int b;
+			red() Self `+"`"+`factory {
+				return Color(r: 255, g: 0, b: 0);
+			}
+		}
+		test() {
+			Color c = Color.red();
+		}
+	`)
+}
+
+func TestFactoryFinalFieldModification(t *testing.T) {
+	checkOK(t, `
+		type Token {
+			string raw `+"`"+`final;
+			int kind `+"`"+`final;
+			parse(string input) Self `+"`"+`factory {
+				Token t = Token(raw: input, kind: 0);
+				t.kind = 42;
+				return t;
+			}
+		}
+		test() {
+			Token tok = Token.parse("hello");
+		}
+	`)
+}
+
+func TestFactoryMustHaveReturnType(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo {
+			int x;
+			make() `+"`"+`factory {
+				return Foo(x: 1);
+			}
+		}
+		test() {}
+	`)
+	expectError(t, errs, "must have a return type")
+}
+
+func TestFactoryMustNotBeAbstract(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo {
+			int x;
+			make() Self `+"`"+`abstract `+"`"+`factory;
+		}
+		test() {}
+	`)
+	expectError(t, errs, "must not be abstract")
+}
+
+func TestFactoryNoReceiver(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo {
+			int x;
+			make(~this) Self `+"`"+`factory {
+				return Foo(x: 1);
+			}
+		}
+		test() {}
+	`)
+	expectError(t, errs, "must not declare a receiver")
+}
+
+// --- Inheritance / super() Tests ---
+
+func TestSuperCallParentHasNew(t *testing.T) {
+	checkOK(t, `
+		type Animal {
+			string name;
+			new(~this, string name) {
+				this.name = name;
+			}
+		}
+		type Dog is Animal {
+			string breed;
+			new(~this, string name, string breed) {
+				super(name);
+				this.breed = breed;
+			}
+		}
+		test() {
+			Dog d = Dog(name: "Rex", breed: "Lab");
+		}
+	`)
+}
+
+func TestSuperCallParentImplicit(t *testing.T) {
+	checkOK(t, `
+		type Animal {
+			string name;
+			int age;
+		}
+		type Dog is Animal {
+			string breed;
+			new(~this, string name, string breed) {
+				super(name: name, age: 0);
+				this.breed = breed;
+			}
+		}
+		test() {
+			Dog d = Dog(name: "Rex", breed: "Lab");
+		}
+	`)
+}
+
+func TestSuperCallOutsideNew(t *testing.T) {
+	errs := checkErrs(t, `
+		type Animal {
+			string name;
+		}
+		type Dog is Animal {
+			string breed;
+			bark() {
+				super(name: "x");
+			}
+		}
+		test() {}
+	`)
+	expectError(t, errs, "super() can only be called inside a new()")
+}
+
+func TestSuperCallNoParent(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo {
+			int x;
+			new(~this, int x) {
+				super(x);
+				this.x = x;
+			}
+		}
+		test() {}
+	`)
+	expectError(t, errs, "has no parent")
+}
+
+func TestChildMustDefineNewWhenParentHasNew(t *testing.T) {
+	errs := checkErrs(t, `
+		type Animal {
+			string name;
+			new(~this, string name) {
+				this.name = name;
+			}
+		}
+		type Dog is Animal {
+			string breed;
+		}
+		test() {}
+	`)
+	expectError(t, errs, "must define new()")
+}
+
+// --- Interaction Tests ---
+
+func TestCopyTypeWithNewAndFinal(t *testing.T) {
+	checkOK(t, `
+		type Point `+"`"+`copy {
+			int x `+"`"+`final;
+			int y `+"`"+`final;
+			new(~this, int x, int y) {
+				this.x = x;
+				this.y = y;
+			}
+		}
+		test() {
+			Point p = Point(x: 1, y: 2);
+		}
+	`)
+}
+
+func TestNewWithDropSymmetry(t *testing.T) {
+	checkOK(t, `
+		type Resource {
+			int id;
+			new(~this, int id) {
+				this.id = id;
+			}
+			drop(~this) {}
+		}
+		test() {
+			Resource r = Resource(id: 42);
+		}
+	`)
+}
+
+func TestFinalFieldCustomGetterOK(t *testing.T) {
+	checkOK(t, `
+		type Token {
+			string raw `+"`"+`final;
+			get text string {
+				return this.raw;
+			}
+		}
+		test() {
+			Token t = Token(raw: "hello");
+			string s = t.text;
+		}
+	`)
+}
+
+func TestFinalFieldCustomSetterError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Token {
+			string raw `+"`"+`final;
+			set raw(string v) {
+				this.raw = v;
+			}
+		}
+		test() {}
+	`)
+	expectError(t, errs, "cannot define setter for")
+}
+
+// --- Self Type Tests ---
+
+func TestSelfReturnType(t *testing.T) {
+	checkOK(t, `
+		type Point {
+			int x;
+			int y;
+			offset(int dx, int dy) Self {
+				return Point(x: this.x + dx, y: this.y + dy);
+			}
+		}
+		test() {
+			Point p = Point(x: 1, y: 2);
+			Point q = p.offset(3, 4);
+		}
+	`)
+}
+
+func TestSelfConstructorCall(t *testing.T) {
+	checkOK(t, `
+		type Point {
+			int x;
+			int y;
+			origin() Self {
+				return Self(x: 0, y: 0);
+			}
+		}
+		test() {
+			Point p = Point(x: 1, y: 2);
+			Point q = p.origin();
+		}
+	`)
+}
+
+func TestSelfOutsideType(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			Self x;
+		}
+	`)
+	expectError(t, errs, "Self can only be used inside a type body")
+}
+
+func TestSelfParameterType(t *testing.T) {
+	checkOK(t, `
+		type Foo {
+			int x;
+			eq(Self other) bool {
+				return this.x == other.x;
+			}
+		}
+		test() {
+			Foo a = Foo(x: 1);
+			Foo b = Foo(x: 2);
+			bool r = a.eq(b);
+		}
+	`)
+}
+
+// --- Fix #1: Failable parent new propagation ---
+
+func TestChildNewMustBeFailableWhenParentIs(t *testing.T) {
+	errs := checkErrs(t, `
+		type Animal {
+			string name;
+			new(~this, string name) void! {
+				if name == "" { raise "empty"; }
+				this.name = name;
+			}
+		}
+		type Dog is Animal {
+			string breed;
+			new(~this, string name, string breed) {
+				super(name);
+				this.breed = breed;
+			}
+		}
+		test() {}
+	`)
+	expectError(t, errs, "must be failable because parent")
+}
+
+func TestChildNewFailableMatchesParent(t *testing.T) {
+	checkOK(t, `
+		type Animal {
+			string name;
+			new(~this, string name) void! {
+				if name == "" { raise "empty"; }
+				this.name = name;
+			}
+		}
+		type Dog is Animal {
+			string breed;
+			new(~this, string name, string breed) void! {
+				super(name);
+				this.breed = breed;
+			}
+		}
+		test()! {
+			Dog d = Dog(name: "Rex", breed: "Lab")!;
+		}
+	`)
+}
+
+// --- Fix #2: Factory final field restriction ---
+
+func TestFactoryFinalFieldOnLocalOK(t *testing.T) {
+	checkOK(t, `
+		type Token {
+			string raw `+"`final;"+`
+			int kind `+"`final;"+`
+			parse(string input) Self `+"`factory"+` {
+				Token t = Token(raw: input, kind: 0);
+				t.kind = 42;
+				return t;
+			}
+		}
+		test() {
+			Token tok = Token.parse("hello");
+		}
+	`)
+}
+
+func TestFactoryFinalFieldOnParamRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo {
+			int x `+"`final;"+`
+			modify(Foo other) Self `+"`factory"+` {
+				other.x = 99;
+				return Foo(x: 1);
+			}
+		}
+		test() {}
+	`)
+	expectError(t, errs, "only allowed on locally-created instances")
+}
+
+func TestFactoryFinalFieldOnInferredLocalOK(t *testing.T) {
+	checkOK(t, `
+		type Point {
+			int x `+"`final;"+`
+			int y `+"`final;"+`
+			origin() Self `+"`factory"+` {
+				p := Point(x: 0, y: 0);
+				return p;
+			}
+		}
+		test() {
+			Point p = Point.origin();
+		}
+	`)
+}
+
+// --- Fix #3: Type ordering ---
+
+func TestChildBeforeParentNewCheck(t *testing.T) {
+	// Child declared before parent — the parent-new check should still work
+	// because validateConstructors runs after all types are defined
+	errs := checkErrs(t, `
+		type Dog is Animal {
+			string breed;
+		}
+		type Animal {
+			string name;
+			new(~this, string name) {
+				this.name = name;
+			}
+		}
+		test() {}
+	`)
+	expectError(t, errs, "must define new()")
+}
+
 // --- Is-Pattern Tests ---
 
 func TestIsPresent(t *testing.T) {

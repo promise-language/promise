@@ -35,6 +35,10 @@ type Info struct {
 
 	// Tests records functions annotated with `test.
 	Tests []*types.Func
+
+	// FieldDefaults maps fields with default values to their AST default expressions.
+	// Used by codegen to evaluate defaults for omitted constructor arguments.
+	FieldDefaults map[*types.Field]ast.Expr
 }
 
 // recordType stores the resolved type for an expression.

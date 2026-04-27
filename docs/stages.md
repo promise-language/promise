@@ -28,7 +28,8 @@ Implementation stages for the Promise compiler pipeline.
 | 8k | `compiler/internal/codegen/`, `sema/`, `types/`, `runtime/` | Inheritance codegen, RTTI, is/as expressions | Done |
 | 8L | `compiler/internal/codegen/`, `sema/`, `ast/` | Virtual dispatch (vtable indirect calls) | Done |
 | 8m | `compiler/internal/ast/`, `sema/`, `codegen/` | `use` bindings: scoped resource lifetime with automatic `close()` | Done |
-| 8n | `compiler/internal/sema/`, `codegen/`, `ownership/` | `drop()` methods: ownership-driven cleanup at scope exit | Planned |
+| 8n | `compiler/internal/sema/`, `codegen/`, `types/` | Constructors: `new`, `` `final ``, factory, `Self`, `super` | Done |
+| 8o | `compiler/internal/sema/`, `codegen/`, `ownership/` | `drop()` methods: ownership-driven cleanup at scope exit | Done |
 | 9 | `compiler/internal/module/` | Module resolution, dependency graph | Planned |
 | 10 | `cmd/promise/` | CLI entry point (build, run, test, fmt, etc.) | Planned |
 | 11 | `pkg/` | Package manager: fetch, resolve, lock | Planned |
@@ -210,7 +211,7 @@ Type-system-driven LLVM IR generation for primitive types, arithmetic, control f
 
 ### Deferred sub-stages
 
-- Ownership-aware memory management (drop) → Stage 8n
+- Ownership-aware memory management (drop) → Stage 8o
 - Concurrency (go, task, channel, `<-`) → TBD
 
 ## Stage 8b — Strings (Done)
@@ -439,7 +440,26 @@ Scoped resource management via `use` variable declaration modifier. When the enc
 
 **Ownership:** `pinned map[string]bool` field on `Checker`. `use`-bound variables are marked as pinned — `tryMove` rejects moves of pinned variables. 1 ownership test.
 
-## Stage 8n — `drop()` Methods: Ownership-Driven Cleanup (Planned)
+## Stage 8n — Constructors: `new`, `final`, Factory, `Self`, `super` (Done)
+
+Explicit constructors, immutable-after-construction fields, factory constructors, `Self` type alias, and constructor inheritance with `super()` calls.
+
+**Files:** `sema/check.go`, `sema/decl.go`, `sema/expr.go`, `sema/stmt.go`, `sema/meta.go`, `sema/resolve.go`, `sema/info.go`, `types/field.go`, `types/named.go`, `codegen/compiler.go`, `codegen/expr.go`
+
+- **Required field enforcement**: Sema rejects constructor calls that omit required fields. A field is required if it is not `T?` and has no `= default`. All required fields must be provided as named arguments.
+- **Default expression evaluation**: Fields with `= expr` defaults have their default expression evaluated at the call site when omitted. Defaults recorded in `Info.FieldDefaults` during sema, evaluated in `genConstructorCallMono` during codegen.
+- **`` `final `` fields**: `isFinal` flag on `types.Field`. Can be assigned in `new()` body or on locally-created instances in `` `factory `` methods. No setter generated. Custom setter on `` `final `` field is a compile error.
+- **`Self` type alias**: Resolves to `c.curType` in both type-ref context (`resolveNamedType`) and expression context (`checkIdentExpr`). Usable in return types, constructor calls (`Self(...)`), and parameter types within type bodies.
+- **Explicit `new` constructor**: `new(~this, params)` replaces the implicit constructor. Implicit `~this` receiver, implicit `Self` return. Sema validates: mutable receiver, no explicit return type, not abstract. `HasNew` flag on `types.Named`. Codegen zero-inits all fields, then calls `Type.new(instancePtr, args...)`.
+- **Failable `new`**: `new(~this, params) void!` — codegen wraps result in `{ i1, T, i8* }` result struct with branch/merge/phi for error vs ok paths at the constructor call site.
+- **Factory constructors**: `` `factory `` annotation implies `` `variant `` placement. No `this` receiver (set to nil in `resolveMethodSignature`). Must have return type (typically `Self`). Called as `Type.factoryName()`. `` `final `` field writes restricted to locally-created instances via `factoryLocals` tracking.
+- **`super()` calls**: Parsed as `CallExpr(IdentExpr("super"), args)` — no grammar changes. Intercepted before normal callee resolution in both sema and codegen. When parent has `new()`, calls `ParentType.new(this, args...)`. When parent has implicit constructor, sets parent fields directly via child's layout. Failable parent `new()` propagates errors.
+- **Constructor inheritance validation**: Runs as a post-define pass (`validateConstructors`) after all types are defined, ensuring correct validation regardless of declaration order. Child must define `new()` when parent has `new()`. Child `new()` must be failable when parent `new()` is failable.
+- **`lookupOwnMethod` helper**: Searches only a type's directly declared methods, not inherited — prevents `LookupMethod("new")` from finding a parent's `new()` and incorrectly setting `HasNew`.
+- **Scope**: Required fields, default expressions, `` `final `` fields, `Self` type alias, explicit `new()`, failable `new()`, factory constructors, `super()` with explicit/implicit parent, constructor inheritance validation.
+- **Deferred**: Definite-assignment analysis for `` `final `` fields in `new()` body, `super()` position tracking (no `this` before `super`, exactly-once enforcement, no `super` in loops).
+
+## Stage 8o — `drop()` Methods: Ownership-Driven Cleanup (Done)
 
 Compiler-inserted `drop()` calls when a value's owner goes out of scope and the value has not been moved.
 
@@ -505,9 +525,9 @@ Consolidated list of items deferred from completed stages. Items marked ~~strike
 
 | Item | Origin | Priority |
 |------|--------|----------|
-| ~~`llvmTypeSize` struct alignment — sums field sizes without padding, under-allocates for struct-typed slice elements~~ | 8g | ~~Fixed 8n~~ |
-| ~~Evaluation order in compound index assignment — RHS evaluated before LHS target/key~~ | 8i | ~~Fixed 8n~~ |
-| Reassignment of droppable variable leaks old value — `x = newVal` overwrites without calling `drop()` on old | 8n | Medium |
+| ~~`llvmTypeSize` struct alignment — sums field sizes without padding, under-allocates for struct-typed slice elements~~ | 8g | ~~Fixed 8o~~ |
+| ~~Evaluation order in compound index assignment — RHS evaluated before LHS target/key~~ | 8i | ~~Fixed 8o~~ |
+| Reassignment of droppable variable leaks old value — `x = newVal` overwrites without calling `drop()` on old | 8o | Medium |
 
 ### Codegen Gaps
 
@@ -526,7 +546,7 @@ Consolidated list of items deferred from completed stages. Items marked ~~strike
 | Multi-arg generics in expression context (grammar limitation) | 8f | Low |
 | Extern ABI for generic types | 8f | Low |
 | Non-instance field placements (`value`/`variant`/`type`) | 8c | Low |
-| Default field values | 8c | Low |
+| ~~Default field values~~ | 8c | ~~Done 8n~~ |
 | User type `toString()` for interpolation | 8h | Low |
 | Devirtualization optimization (direct call when concrete type known) | 8L | Low |
 
@@ -567,5 +587,5 @@ Consolidated list of items deferred from completed stages. Items marked ~~strike
 - ~~Vtable / virtual dispatch~~ → 8L
 - ~~`is` / `as` expressions~~ → 8k
 - ~~Slice growth `.push()`~~ → 8j
-- ~~`llvmTypeSize` struct alignment~~ → 8n
-- ~~Compound index assignment eval order~~ → 8n
+- ~~`llvmTypeSize` struct alignment~~ → 8o
+- ~~Compound index assignment eval order~~ → 8o

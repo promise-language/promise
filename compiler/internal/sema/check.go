@@ -7,14 +7,18 @@ import (
 
 // Checker performs semantic analysis on a parsed AST file.
 type Checker struct {
-	file      *ast.File
-	info      *Info
-	errors    []error
-	stdScope  *types.Scope     // std library scope (child of Universe, parent of fileScope)
-	fileScope *types.Scope     // file-level scope (child of stdScope)
-	scope     *types.Scope     // current scope during traversal
-	curFunc   *types.Signature // current function being checked (for return/raise)
-	inLoop    int              // nesting depth of loop constructs
+	file          *ast.File
+	info          *Info
+	errors        []error
+	stdScope      *types.Scope     // std library scope (child of Universe, parent of fileScope)
+	fileScope     *types.Scope     // file-level scope (child of stdScope)
+	scope         *types.Scope     // current scope during traversal
+	curFunc       *types.Signature // current function being checked (for return/raise)
+	curType       *types.Named     // current type being defined/checked (for Self resolution)
+	inNewBody     bool             // true when checking a new() constructor body
+	inFactoryBody bool             // true when checking a `factory method body
+	factoryLocals map[string]bool  // variables initialized from constructor calls in factory body
+	inLoop        int              // nesting depth of loop constructs
 }
 
 // Check performs semantic analysis on the given AST file.
@@ -23,9 +27,10 @@ func Check(file *ast.File) (*Info, []error) {
 	c := &Checker{
 		file: file,
 		info: &Info{
-			Types:   make(map[ast.Expr]types.Type),
-			Objects: make(map[*ast.IdentExpr]types.Object),
-			Scopes:  make(map[ast.Node]*types.Scope),
+			Types:         make(map[ast.Expr]types.Type),
+			Objects:       make(map[*ast.IdentExpr]types.Object),
+			Scopes:        make(map[ast.Node]*types.Scope),
+			FieldDefaults: make(map[*types.Field]ast.Expr),
 		},
 	}
 
@@ -39,11 +44,12 @@ func Check(file *ast.File) (*Info, []error) {
 	c.info.Scopes[file] = c.fileScope
 	c.info.StdScope = c.stdScope
 
-	c.declare(file)            // Pass 1: collect all declarations
-	c.define(file)             // Pass 2: resolve types, populate type structures
-	c.validateBuiltins()       // Validate: .pr files declare all required operators/methods/fields
-	c.check(file)              // Pass 3: type-check function/method bodies
-	c.checkMissingReturn(file) // Pass 4: verify non-void functions return
+	c.declare(file)              // Pass 1: collect all declarations
+	c.define(file)               // Pass 2: resolve types, populate type structures
+	c.validateConstructors(file) // Validate: constructor inheritance (after all types defined)
+	c.validateBuiltins()         // Validate: .pr files declare all required operators/methods/fields
+	c.check(file)                // Pass 3: type-check function/method bodies
+	c.checkMissingReturn(file)   // Pass 4: verify non-void functions return
 
 	return c.info, c.errors
 }
@@ -167,6 +173,9 @@ func (c *Checker) checkTypeDecl(d *ast.TypeDecl) {
 	if !ok {
 		return
 	}
+	savedType := c.curType
+	c.curType = named
+	defer func() { c.curType = savedType }()
 
 	// For generic types, open type param scope so method bodies can reference T, K, V, etc.
 	if len(named.TypeParams()) > 0 {
@@ -177,6 +186,24 @@ func (c *Checker) checkTypeDecl(d *ast.TypeDecl) {
 		defer c.closeScope()
 	}
 
+	// Type-check field default expressions and record them.
+	for _, fd := range d.Fields {
+		if fd.Default == nil {
+			continue
+		}
+		f := named.LookupField(fd.Name)
+		if f == nil {
+			continue
+		}
+		defType := c.checkExpr(fd.Default)
+		if defType != nil && f.Type() != nil {
+			if !types.AssignableTo(defType, f.Type()) {
+				c.errorf(fd.Default.Pos(), "cannot use %s as default for field %s of type %s", defType, fd.Name, f.Type())
+			}
+		}
+		c.info.FieldDefaults[f] = fd.Default
+	}
+
 	for _, md := range d.Methods {
 		if md.Body == nil {
 			continue
@@ -185,7 +212,22 @@ func (c *Checker) checkTypeDecl(d *ast.TypeDecl) {
 		if m == nil || m.Sig() == nil {
 			continue
 		}
-		c.checkMethodBody(d.Name, md, m)
+		if md.Name == "new" {
+			savedInNew := c.inNewBody
+			c.inNewBody = true
+			c.checkMethodBody(d.Name, md, m)
+			c.inNewBody = savedInNew
+		} else if m.IsFactory() {
+			savedInFactory := c.inFactoryBody
+			savedFactoryLocals := c.factoryLocals
+			c.inFactoryBody = true
+			c.factoryLocals = make(map[string]bool)
+			c.checkMethodBody(d.Name, md, m)
+			c.inFactoryBody = savedInFactory
+			c.factoryLocals = savedFactoryLocals
+		} else {
+			c.checkMethodBody(d.Name, md, m)
+		}
 	}
 }
 

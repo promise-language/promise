@@ -103,6 +103,19 @@ func (c *Checker) resolveType(ref ast.TypeRef) types.Type {
 
 // resolveNamedType resolves a named type reference, handling generic instantiation.
 func (c *Checker) resolveNamedType(r *ast.NamedTypeRef) types.Type {
+	// Self resolves to the enclosing type
+	if r.Name == "Self" {
+		if c.curType == nil {
+			c.errorf(r.Pos(), "Self can only be used inside a type body")
+			return nil
+		}
+		if len(r.TypeArgs) > 0 {
+			c.errorf(r.Pos(), "Self does not take type arguments")
+			return nil
+		}
+		return c.curType
+	}
+
 	obj := c.lookup(r.Name)
 	if obj == nil {
 		c.errorf(r.Pos(), "undefined type: %s", r.Name)

@@ -1216,13 +1216,157 @@ func TestUserTypeZeroArgConstructor(t *testing.T) {
 	ir := generateIR(t, `
 		type Point { int x; int y; }
 		main() {
-			p := Point();
+			p := Point(x: 0, y: 0);
 		}
 	`)
-	// Should allocate and zero-initialize both fields
+	// Should allocate and store both fields
 	assertContains(t, ir, "call i8* @malloc(i64")
-	// Both fields should get zero-initialized (store i64 0)
 	assertContains(t, ir, "store i64 0")
+}
+
+func TestConstructorDefaultExprEvaluation(t *testing.T) {
+	ir := generateIR(t, `
+		type Config { int port = 8080; string host; }
+		main() {
+			c := Config(host: "localhost");
+		}
+	`)
+	// The default expression (8080) should be evaluated and stored
+	assertContains(t, ir, "store i64 8080")
+}
+
+func TestConstructorAllDefaultsOmitted(t *testing.T) {
+	ir := generateIR(t, `
+		type Defaults { int x = 42; int y = 99; }
+		main() {
+			d := Defaults();
+		}
+	`)
+	assertContains(t, ir, "store i64 42")
+	assertContains(t, ir, "store i64 99")
+}
+
+func TestNewConstructorCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		type Clamped {
+			int value;
+			new(~this, int v) {
+				if v < 0 { this.value = 0; }
+				else { this.value = v; }
+			}
+		}
+		main() {
+			c := Clamped(v: 50);
+		}
+	`)
+	// Should declare the new() method as a void function
+	assertContains(t, ir, "define void @Clamped.new(i8* %this")
+	// Constructor should call new()
+	assertContains(t, ir, "call void @Clamped.new(")
+}
+
+func TestNewConstructorFinalFieldCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		type Token {
+			string raw `+"`"+`final;
+			new(~this, string raw) {
+				this.raw = raw;
+			}
+		}
+		main() {
+			t := Token(raw: "hello");
+		}
+	`)
+	assertContains(t, ir, "define void @Token.new(i8* %this")
+	assertContains(t, ir, "call void @Token.new(")
+}
+
+func TestFailableNewConstructorCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		type Port {
+			int value;
+			new(~this, int value) void! {
+				if value < 1 {
+					raise "invalid port";
+				}
+				this.value = value;
+			}
+		}
+		main()! {
+			Port p = Port(value: 80)!;
+		}
+	`)
+	// Failable new returns a result type { i1, i8* }
+	assertContains(t, ir, "define { i1, i8* } @Port.new(i8* %this")
+	// Constructor call should call new and check the error
+	assertContains(t, ir, "call { i1, i8* } @Port.new(")
+}
+
+func TestFactoryConstructorCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		type Color {
+			int r;
+			int g;
+			int b;
+			red() Self `+"`"+`factory {
+				return Color(r: 255, g: 0, b: 0);
+			}
+		}
+		main() {
+			Color c = Color.red();
+		}
+	`)
+	// Factory method should be defined without a receiver parameter
+	assertContains(t, ir, "define { i8*, i8* } @Color.red()")
+	// main should call Color.red
+	assertContains(t, ir, "call { i8*, i8* } @Color.red()")
+}
+
+func TestSuperCallCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal {
+			int age;
+			new(~this, int age) {
+				this.age = age;
+			}
+		}
+		type Dog is Animal {
+			int tricks;
+			new(~this, int age, int tricks) {
+				super(age);
+				this.tricks = tricks;
+			}
+		}
+		main() {
+			Dog d = Dog(age: 3, tricks: 5);
+		}
+	`)
+	// Dog.new should call Animal.new
+	assertContains(t, ir, "call void @Animal.new(")
+	// Dog constructor should call Dog.new
+	assertContains(t, ir, "call void @Dog.new(")
+}
+
+func TestSuperCallImplicitParentCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal {
+			int age;
+		}
+		type Dog is Animal {
+			int tricks;
+			new(~this, int age, int tricks) {
+				super(age: age);
+				this.tricks = tricks;
+			}
+		}
+		main() {
+			Dog d = Dog(age: 3, tricks: 5);
+		}
+	`)
+	// Dog.new should be defined and set parent field directly (no Animal.new call)
+	assertContains(t, ir, "define void @Dog.new(")
+	// Dog constructor should call Dog.new
+	assertContains(t, ir, "call void @Dog.new(")
 }
 
 func TestUserTypeHeaderFieldTypes(t *testing.T) {
@@ -1987,10 +2131,10 @@ func TestGenericConstructorZeroInit(t *testing.T) {
 	ir := generateIR(t, `
 		type Box[T] { T value; }
 		main() {
-			b := Box[int]();
+			b := Box[int](value: 0);
 		}
 	`)
-	// Zero-init with i64 0 for the int field
+	// Generic type instance for Box[int]
 	assertContains(t, ir, "Box__int_i")
 }
 
@@ -3292,14 +3436,11 @@ func TestConstructorZeroInitInheritedField(t *testing.T) {
 		type Animal { string name; int age; }
 		type Dog is Animal { string breed; }
 		main() {
-			Dog d = Dog(breed: "Lab");
+			Dog d = Dog(name: "Rex", age: 0, breed: "Lab");
 		}
 	`)
-	// Constructor should zero-init name (i8*) and age (i64) from inherited fields
+	// Constructor should store inherited fields
 	assertContains(t, ir, "getelementptr %promise_Dog_i")
-	// Should have zeroinitializer or null stores for the unprovided fields
-	assertContains(t, ir, "store i8* null")
-	assertContains(t, ir, "store i64 0")
 }
 
 func TestDeepInheritanceMethodDispatch(t *testing.T) {

@@ -150,6 +150,9 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 	if !ok {
 		return
 	}
+	savedType := c.curType
+	c.curType = named
+	defer func() { c.curType = savedType }()
 
 	isNative := c.hasAnnotation(d.Annotations, "native")
 
@@ -238,6 +241,13 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 		c.validateDropMethod(named, dropMethod, d)
 		named.SetHasDrop(true)
 	}
+
+	// Validate new() constructor if present (own methods only, not inherited)
+	if newMethod := lookupOwnMethod(named, "new"); newMethod != nil {
+		c.validateNewMethod(named, newMethod, d)
+		named.SetHasNew(true)
+	}
+
 }
 
 func (c *Checker) defineField(named *types.Named, fd *ast.FieldDecl) {
@@ -250,6 +260,9 @@ func (c *Checker) defineField(named *types.Named, fd *ast.FieldDecl) {
 	hasDef := fd.Default != nil
 
 	f := types.NewField(tpos(fd.Pos()), fd.Name, typ, placement, isRaw, hasDef)
+	if c.hasAnnotation(fd.Annotations, "final") {
+		f.SetFinal(true)
+	}
 	c.validateMetas(fd.Annotations, TargetField)
 	f.SetDoc(extractDoc(fd.Annotations))
 	f.SetDeprecated(extractDeprecated(fd.Annotations))
@@ -278,9 +291,26 @@ func (c *Checker) defineMethod(named *types.Named, md *ast.MethodDecl, typeName 
 		c.errorf(md.Pos(), "method %s.%s must have a body (or be marked `abstract or `native)", typeName, md.Name)
 	}
 
+	isFactory := c.hasAnnotation(md.Annotations, "factory")
+	// `factory implies `variant placement
+	if isFactory {
+		placement = types.PlaceVariant
+	}
+
 	m := types.NewMethod(tpos(md.Pos()), md.Name, sig, placement, abstract, native)
 	m.SetGetter(md.IsGetter)
 	m.SetSetter(md.IsSetter)
+	m.SetFactory(isFactory)
+	// Block defining a setter on a `final field
+	if md.IsSetter {
+		if f := named.LookupField(md.Name); f != nil && f.IsFinal() {
+			c.errorf(md.Pos(), "cannot define setter for `final field '%s'", md.Name)
+		}
+	}
+	// Validate factory method
+	if isFactory {
+		c.validateFactoryMethod(named, m, md)
+	}
 	c.validateMetas(md.Annotations, TargetMethod)
 	m.SetDoc(extractDoc(md.Annotations))
 	m.SetDeprecated(extractDeprecated(md.Annotations))
@@ -303,7 +333,11 @@ func (c *Checker) nativeMethodExists(named *types.Named, md *ast.MethodDecl) boo
 func (c *Checker) resolveMethodSignature(named *types.Named, md *ast.MethodDecl) *types.Signature {
 	// Resolve receiver
 	var recv *types.Param
-	if md.Receiver != nil {
+	isFactory := c.hasAnnotation(md.Annotations, "factory")
+	if isFactory {
+		// Factory methods have no receiver
+		recv = nil
+	} else if md.Receiver != nil {
 		ref := resolveRefMod(md.Receiver.RefMod)
 		recv = types.NewParam("this", named, ref)
 	} else {
@@ -487,6 +521,16 @@ func (c *Checker) resolveTypeParamConstraints(astParams []*ast.TypeParam, tparam
 			tparams[i].SetConstraints(resolved)
 		}
 	}
+}
+
+// lookupOwnMethod searches only the type's directly declared methods (not inherited).
+func lookupOwnMethod(named *types.Named, name string) *types.Method {
+	for _, m := range named.Methods() {
+		if m.Name() == name && !m.IsGetter() && !m.IsSetter() {
+			return m
+		}
+	}
+	return nil
 }
 
 // resolvePlacement extracts placement from meta annotations.

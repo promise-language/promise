@@ -504,6 +504,11 @@ func (c *Compiler) rangeStructType() *irtypes.StructType {
 // --- Call expressions ---
 
 func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
+	// Handle super() calls in constructor bodies
+	if ident, ok := e.Callee.(*ast.IdentExpr); ok && ident.Name == "super" {
+		return c.genSuperCall(e)
+	}
+
 	// Method call or enum variant constructor: callee is MemberExpr
 	if member, ok := e.Callee.(*ast.MemberExpr); ok {
 		// Handle std.X() — treat as a regular function call to X
@@ -667,6 +672,100 @@ func (c *Compiler) genGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr) value
 	return c.block.NewCall(fn, argVals...)
 }
 
+// --- super() calls ---
+
+// genSuperCall generates a super() call inside a new() constructor body.
+// Calls the parent's new() (if parent has one) or sets parent fields directly.
+func (c *Compiler) genSuperCall(e *ast.CallExpr) value.Value {
+	named := c.currentNamed
+	if named == nil || len(named.Parents()) == 0 {
+		return nil // sema already validated
+	}
+	parent := named.Parents()[0]
+
+	// Load the this pointer
+	thisAlloca := c.locals["this"]
+	thisPtr := c.block.NewLoad(irtypes.I8Ptr, thisAlloca)
+
+	if parent.HasNew() {
+		// Parent has explicit new() — call ParentType.new(this, args...)
+		parentName := parent.Obj().Name()
+		mangledName := mangleMethodName(parentName, "new", false)
+		fn, ok := c.funcs[mangledName]
+		if !ok {
+			panic(fmt.Sprintf("codegen: undeclared parent constructor %s", mangledName))
+		}
+
+		args := []value.Value{thisPtr}
+		for _, arg := range e.Args {
+			args = append(args, c.genExpr(arg.Value))
+			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+				c.clearDropFlag(ident.Name)
+			}
+		}
+		result := c.block.NewCall(fn, args...)
+
+		// If parent new is failable, propagate the error
+		newMethod := parent.LookupMethod("new")
+		if newMethod != nil && newMethod.Sig().CanError() {
+			tag := c.block.NewExtractValue(result, 0)
+			errBlock := c.newBlock("super.err")
+			okBlock := c.newBlock("super.ok")
+			c.block.NewCondBr(tag, errBlock, okBlock)
+			// Error path: propagate
+			c.block = errBlock
+			resultType := fn.Sig.RetType.(*irtypes.StructType)
+			errVal := c.block.NewExtractValue(result, resultErrIdx(resultType))
+			outerResultType := c.fn.Sig.RetType.(*irtypes.StructType)
+			errResult := c.wrapError(errVal, outerResultType)
+			c.block.NewRet(errResult)
+			// Continue on ok path
+			c.block = okBlock
+		}
+		return nil
+	}
+
+	// Parent has implicit constructor — set parent fields directly on `this`
+	// Use the child's own layout since parent fields are part of the child's instance struct
+	childLayout := c.lookupTypeLayout(named)
+	if childLayout == nil {
+		return nil
+	}
+	instanceStructType := childLayout.Instance.LLVMType
+	instancePtrType := childLayout.InstancePtrType
+
+	// Build map of provided field values
+	provided := make(map[string]value.Value)
+	for _, arg := range e.Args {
+		if arg.Name != "" {
+			provided[arg.Name] = c.genExpr(arg.Value)
+			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+				c.clearDropFlag(ident.Name)
+			}
+		}
+	}
+
+	// Set each parent field on the instance
+	instancePtr := c.block.NewBitCast(thisPtr, instancePtrType)
+	allFields := parent.AllFields()
+	for _, f := range allFields {
+		val, ok := provided[f.Name()]
+		if !ok {
+			// Use default if available, else zero
+			if defExpr, hasDef := c.info.FieldDefaults[f]; hasDef {
+				val = c.genExpr(defExpr)
+			} else {
+				val = c.zeroValue(c.resolveType(f.Type()))
+			}
+		}
+		fieldIdx := childLayout.InstanceFieldIndex[f.Name()]
+		fieldPtr := c.block.NewGetElementPtr(instanceStructType, instancePtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+		c.block.NewStore(val, fieldPtr)
+	}
+	return nil
+}
+
 // --- Constructor calls ---
 
 // genConstructorCallMono generates a heap-allocated instance of a user type.
@@ -706,36 +805,106 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 		c.block.NewStore(constant.NewNull(variantPtrType), variantFieldPtr)
 	}
 
-	// Build set of provided field names
-	provided := make(map[string]bool)
-	for _, arg := range e.Args {
-		if arg.Name == "" {
-			panic(fmt.Sprintf("codegen: positional constructor args not supported for %s", typ))
+	// If the type has an explicit new() constructor, call it instead of field matching
+	if named != nil && named.HasNew() {
+		// Zero-init all fields first
+		for _, f := range named.AllFields() {
+			fieldIdx := layout.InstanceFieldIndex[f.Name()]
+			fieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+			c.block.NewStore(c.zeroValue(layout.Instance.Fields[fieldIdx].LLVMType), fieldPtr)
 		}
-		provided[arg.Name] = true
-		fieldIdx, ok := layout.InstanceFieldIndex[arg.Name]
-		if !ok {
-			panic(fmt.Sprintf("codegen: unknown field %s on type %s", arg.Name, typ))
-		}
-		val := c.genExpr(arg.Value)
-		fieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
-		c.block.NewStore(val, fieldPtr)
-		// Clear drop flag: field value is moved into the constructor
-		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
-			c.clearDropFlag(ident.Name)
-		}
-	}
 
-	// Zero-initialize any fields not provided — use layout field types (not llvmType(f.Type()))
-	for _, f := range named.AllFields() {
-		if provided[f.Name()] {
-			continue
+		// Call new() with instance ptr as receiver + user args
+		mangledName := mangleMethodName(c.resolveTypeName(typ), "new", false)
+		fn, ok := c.funcs[mangledName]
+		if !ok {
+			panic(fmt.Sprintf("codegen: undeclared new() for type %s (mangled: %s)", typ, mangledName))
 		}
-		fieldIdx := layout.InstanceFieldIndex[f.Name()]
-		fieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
-		c.block.NewStore(c.zeroValue(layout.Instance.Fields[fieldIdx].LLVMType), fieldPtr)
+		args := []value.Value{typedPtr}
+		for _, arg := range e.Args {
+			args = append(args, c.genExpr(arg.Value))
+			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+				c.clearDropFlag(ident.Name)
+			}
+		}
+		newResult := c.block.NewCall(fn, args...)
+
+		// If failable new, check error and wrap result
+		newMethod := named.LookupMethod("new")
+		if newMethod != nil && newMethod.Sig().CanError() {
+			// new() returned { i1, i8* } — check tag
+			newResultType := newResult.Type().(*irtypes.StructType)
+			tag := c.block.NewExtractValue(newResult, 0)
+
+			errBlock := c.newBlock("new.err")
+			okBlock := c.newBlock("new.ok")
+			mergeBlock := c.newBlock("new.merge")
+			c.block.NewCondBr(tag, errBlock, okBlock)
+
+			// Error path: propagate error wrapped in constructor result type
+			constructorResultType := computeResultType(userValueType())
+			c.block = errBlock
+			errVal := c.block.NewExtractValue(newResult, resultErrIdx(newResultType))
+			errResult := c.wrapError(errVal, constructorResultType)
+			c.block.NewBr(mergeBlock)
+
+			// Ok path: build value struct and wrap
+			c.block = okBlock
+			var vtablePtr2 value.Value
+			if vtGlobal, ok := c.vtableGlobals[named]; ok && vtGlobal != nil {
+				vtablePtr2 = constant.NewBitCast(vtGlobal, irtypes.I8Ptr)
+			} else {
+				vtablePtr2 = constant.NewNull(irtypes.I8Ptr)
+			}
+			var valStruct value.Value = constant.NewUndef(userValueType())
+			valStruct = c.block.NewInsertValue(valStruct, vtablePtr2, 0)
+			valStruct = c.block.NewInsertValue(valStruct, rawPtr, 1)
+			okResult := c.wrapOk(valStruct, constructorResultType)
+			c.block.NewBr(mergeBlock)
+
+			// Merge: phi between error and ok results
+			c.block = mergeBlock
+			phi := c.block.NewPhi(ir.NewIncoming(errResult, errBlock), ir.NewIncoming(okResult, okBlock))
+			return phi
+		}
+	} else {
+		// Implicit constructor: match arguments to field names
+		provided := make(map[string]bool)
+		for _, arg := range e.Args {
+			if arg.Name == "" {
+				panic(fmt.Sprintf("codegen: positional constructor args not supported for %s", typ))
+			}
+			provided[arg.Name] = true
+			fieldIdx, ok := layout.InstanceFieldIndex[arg.Name]
+			if !ok {
+				panic(fmt.Sprintf("codegen: unknown field %s on type %s", arg.Name, typ))
+			}
+			val := c.genExpr(arg.Value)
+			fieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+			c.block.NewStore(val, fieldPtr)
+			// Clear drop flag: field value is moved into the constructor
+			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+				c.clearDropFlag(ident.Name)
+			}
+		}
+
+		// Initialize omitted fields: evaluate default expression if present, otherwise zero-init.
+		for _, f := range named.AllFields() {
+			if provided[f.Name()] {
+				continue
+			}
+			fieldIdx := layout.InstanceFieldIndex[f.Name()]
+			fieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+			if defExpr, ok := c.info.FieldDefaults[f]; ok {
+				val := c.genExpr(defExpr)
+				c.block.NewStore(val, fieldPtr)
+			} else {
+				c.block.NewStore(c.zeroValue(layout.Instance.Fields[fieldIdx].LLVMType), fieldPtr)
+			}
+		}
 	}
 
 	// Build value struct: { vtable_ptr, instance_ptr }

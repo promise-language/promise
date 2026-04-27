@@ -54,6 +54,8 @@ var builtinMetas = map[string][]MetaTarget{
 	"serializable": {TargetType, TargetEnum},
 	"public":       {TargetType, TargetField, TargetMethod, TargetFunc, TargetEnum},
 	"unsafe":       {TargetFunc, TargetMethod},
+	"final":        {TargetField},
+	"factory":      {TargetMethod},
 }
 
 // validateMetas checks that all meta annotations on a declaration are valid:
@@ -181,6 +183,96 @@ func (c *Checker) validateDropMethod(named *types.Named, m *types.Method, d *ast
 	}
 	if named.IsCopy() {
 		c.errorf(pos, "copy type %s cannot have a drop() method", d.Name)
+	}
+}
+
+// validateNewMethod checks that a new() constructor has a valid signature:
+// new(params) — implicit ~this receiver, no explicit return type.
+// The receiver and return type are implicit; user should not write them.
+func (c *Checker) validateNewMethod(named *types.Named, m *types.Method, d *ast.TypeDecl) {
+	sig := m.Sig()
+	if sig == nil {
+		return
+	}
+	pos := d.Pos()
+	// new() must have a mutable receiver (implicit ~this)
+	if sig.Recv() == nil || sig.Recv().Ref() != types.RefMut {
+		c.errorf(pos, "new() method on %s must take ~this (mutable borrow receiver)", d.Name)
+	}
+	// new() must not declare an explicit return type (return is implicit Self)
+	if sig.Result() != nil && sig.Result() != types.TypVoid {
+		c.errorf(pos, "new() method on %s must not declare a return type (implicitly returns Self)", d.Name)
+	}
+	if m.IsAbstract() {
+		c.errorf(pos, "new() method on %s must not be abstract", d.Name)
+	}
+}
+
+// validateFactoryMethod checks that a `factory method has a valid signature:
+// no receiver (must not declare this), return type must be Self, must not be abstract/native.
+func (c *Checker) validateFactoryMethod(named *types.Named, m *types.Method, md *ast.MethodDecl) {
+	sig := m.Sig()
+	if sig == nil {
+		return
+	}
+	pos := md.Pos()
+	// Factory must not have an explicit receiver
+	if md.Receiver != nil {
+		c.errorf(pos, "factory method %s on %s must not declare a receiver (factories have no this)", md.Name, named)
+	}
+	// Factory must not be abstract or native
+	if m.IsAbstract() {
+		c.errorf(pos, "factory method %s on %s must not be abstract", md.Name, named)
+	}
+	if m.IsNative() {
+		c.errorf(pos, "factory method %s on %s must not be native", md.Name, named)
+	}
+	// Return type must be specified (Self or child type) — validated at type level
+	if sig.Result() == nil || sig.Result() == types.TypVoid {
+		c.errorf(pos, "factory method %s on %s must have a return type (typically Self)", md.Name, named)
+	}
+}
+
+// validateConstructors runs after all types are defined (pass 2 complete) to check
+// constructor inheritance constraints. This must be a separate pass because parent
+// types may not have their HasNew() set yet during defineType if declared after children.
+func (c *Checker) validateConstructors(file *ast.File) {
+	for _, decl := range file.Decls {
+		td, ok := decl.(*ast.TypeDecl)
+		if !ok {
+			continue
+		}
+		obj := c.fileScope.Lookup(td.Name)
+		if obj == nil {
+			// Try stdScope for std types
+			obj = c.stdScope.Lookup(td.Name)
+		}
+		if obj == nil {
+			continue
+		}
+		tn, ok := obj.(*types.TypeName)
+		if !ok {
+			continue
+		}
+		named, ok := tn.Type().(*types.Named)
+		if !ok {
+			continue
+		}
+		for _, p := range named.Parents() {
+			if p.HasNew() && !named.HasNew() {
+				c.errorf(td.Pos(), "type %s must define new() because parent %s defines new()", td.Name, p)
+				break
+			}
+			if p.HasNew() && named.HasNew() {
+				parentNew := lookupOwnMethod(p, "new")
+				childNew := lookupOwnMethod(named, "new")
+				if parentNew != nil && parentNew.Sig().CanError() &&
+					(childNew == nil || !childNew.Sig().CanError()) {
+					c.errorf(td.Pos(), "new() on %s must be failable because parent %s has failable new()", td.Name, p)
+				}
+				break
+			}
+		}
 	}
 }
 

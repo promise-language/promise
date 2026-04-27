@@ -45,6 +45,9 @@ type Compiler struct {
 	// Return type of the current function/method (Promise-level, for coercion)
 	currentRetType types.Type
 
+	// Current type being compiled (set during method body generation)
+	currentNamed *types.Named
+
 	// String literal counter for unique global names
 	strCounter int
 
@@ -858,6 +861,11 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 	c.blockCounter = 0
 	c.canError = m.Sig().CanError()
 	c.currentRetType = m.Sig().Result()
+	savedNamed := c.currentNamed
+	if len(ownerNamed) > 0 {
+		c.currentNamed = ownerNamed[0]
+	}
+	defer func() { c.currentNamed = savedNamed }()
 
 	entry := fn.NewBlock("entry")
 	c.block = entry

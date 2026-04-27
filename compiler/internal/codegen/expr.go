@@ -776,6 +776,11 @@ func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 		return c.genFieldAccess(e, targetType, field)
 	}
 
+	// Getter property: emit a method call with no args beyond receiver
+	if g := named.LookupGetter(e.Field); g != nil {
+		return c.genGetterCall(e, targetType, named, g)
+	}
+
 	panic(fmt.Sprintf("codegen: member %s on type %s is not a field (method references not yet supported)", e.Field, named))
 }
 
@@ -906,6 +911,34 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 	}
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params())
 	args = append(args, argVals...)
+
+	return c.block.NewCall(fn, args...)
+}
+
+// genGetterCall emits a direct call to a getter method (zero args beyond receiver).
+func (c *Compiler) genGetterCall(e *ast.MemberExpr, targetType types.Type, named *types.Named, getter *types.Method) value.Value {
+	var mangledName string
+	ownerName := c.resolveMethodOwner(named, e.Field)
+	if ownerName != named.Obj().Name() {
+		mangledName = ownerName + "." + e.Field
+	} else {
+		mangledName = c.resolveTypeName(targetType) + "." + e.Field
+	}
+
+	fn, ok := c.funcs[mangledName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undeclared getter %s", mangledName))
+	}
+
+	var args []value.Value
+	target := c.genExpr(e.Target)
+	if _, isThis := e.Target.(*ast.ThisExpr); isThis {
+		args = append(args, target)
+	} else if isContainerType(targetType) {
+		args = append(args, target)
+	} else {
+		args = append(args, c.extractInstancePtr(target))
+	}
 
 	return c.block.NewCall(fn, args...)
 }
@@ -2173,8 +2206,9 @@ func (c *Compiler) genOptionalChainExpr(e *ast.OptionalChainExpr) value.Value {
 	)
 }
 
-// genFieldOnValue accesses a field on a value of a known type.
-// For user types (i8* pointers), it does bitcast + GEP. For other types, panics.
+// genFieldOnValue accesses a field or getter on a value of a known type.
+// For fields on user types (i8* pointers), it does bitcast + GEP.
+// For getters, it emits a direct call to the getter method.
 func (c *Compiler) genFieldOnValue(val value.Value, typ types.Type, fieldName string) value.Value {
 	named := extractNamed(typ)
 	if named == nil {
@@ -2182,25 +2216,35 @@ func (c *Compiler) genFieldOnValue(val value.Value, typ types.Type, fieldName st
 	}
 
 	field := named.LookupField(fieldName)
-	if field == nil {
-		panic(fmt.Sprintf("codegen: no field %s on type %s", fieldName, named))
+	if field != nil {
+		layout := c.lookupTypeLayout(typ)
+		if layout == nil {
+			panic(fmt.Sprintf("codegen: no layout for type %s", typ))
+		}
+
+		fieldIdx, ok := layout.InstanceFieldIndex[field.Name()]
+		if !ok {
+			panic(fmt.Sprintf("codegen: field %s not in instance layout for %s", field.Name(), typ))
+		}
+
+		typedPtr := c.block.NewBitCast(val, layout.InstancePtrType)
+		fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+
+		return c.block.NewLoad(layout.Instance.Fields[fieldIdx].LLVMType, fieldPtr)
 	}
 
-	layout := c.lookupTypeLayout(typ)
-	if layout == nil {
-		panic(fmt.Sprintf("codegen: no layout for type %s", typ))
+	// Getter property: emit a direct call with the value as receiver
+	if g := named.LookupGetter(fieldName); g != nil {
+		mangledName := c.resolveTypeName(typ) + "." + fieldName
+		fn, ok := c.funcs[mangledName]
+		if !ok {
+			panic(fmt.Sprintf("codegen: undeclared getter %s", mangledName))
+		}
+		return c.block.NewCall(fn, val)
 	}
 
-	fieldIdx, ok := layout.InstanceFieldIndex[field.Name()]
-	if !ok {
-		panic(fmt.Sprintf("codegen: field %s not in instance layout for %s", field.Name(), typ))
-	}
-
-	typedPtr := c.block.NewBitCast(val, layout.InstancePtrType)
-	fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
-
-	return c.block.NewLoad(layout.Instance.Fields[fieldIdx].LLVMType, fieldPtr)
+	panic(fmt.Sprintf("codegen: no field or getter %s on type %s", fieldName, named))
 }
 
 // genIndirectCall calls a function through a function pointer (i8*).

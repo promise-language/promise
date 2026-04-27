@@ -187,9 +187,32 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 }
 
 // genMemberAssign handles assignment to a field on a user type instance.
+// If the member is a setter property, emits a setter call instead.
 // Uses lookupTypeLayout for layout-driven field types that work for both
 // regular and monomorphic types.
 func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val value.Value) {
+	// Check for setter property
+	targetType := c.info.Types[target.Target]
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+	named := extractNamed(targetType)
+	if named != nil {
+		if setter := named.LookupSetter(target.Field); setter != nil {
+			if op != ast.OpAssign {
+				// Compound assignment (+=, -=, etc.): read via getter, apply op, write via setter
+				getter := named.LookupGetter(target.Field)
+				if getter == nil {
+					panic(fmt.Sprintf("codegen: compound assignment to setter %s.%s but no getter found", named, target.Field))
+				}
+				current := c.genGetterCall(target, targetType, named, getter)
+				val = c.genCompoundOp(op, current, val)
+			}
+			c.genSetterCall(target, targetType, named, setter, val)
+			return
+		}
+	}
+
 	fieldPtr := c.genFieldPtr(target)
 
 	if op == ast.OpAssign {
@@ -198,18 +221,41 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 	}
 
 	// Compound assignment: resolve field LLVM type for load
-	targetType := c.info.Types[target.Target]
-	if c.typeSubst != nil {
-		targetType = types.Substitute(targetType, c.typeSubst)
-	}
 	layout := c.lookupTypeLayout(targetType)
-	named := extractNamed(targetType)
 	field := named.LookupField(target.Field)
 	fieldIdx := layout.InstanceFieldIndex[field.Name()]
 	fieldLLVMType := layout.Instance.Fields[fieldIdx].LLVMType
 	current := c.block.NewLoad(fieldLLVMType, fieldPtr)
 	result := c.genCompoundOp(op, current, val)
 	c.block.NewStore(result, fieldPtr)
+}
+
+// genSetterCall emits a direct call to a setter method.
+func (c *Compiler) genSetterCall(target *ast.MemberExpr, targetType types.Type, named *types.Named, setter *types.Method, val value.Value) {
+	var mangledName string
+	ownerName := c.resolveMethodOwner(named, target.Field)
+	if ownerName != named.Obj().Name() {
+		mangledName = ownerName + "." + target.Field
+	} else {
+		mangledName = c.resolveTypeName(targetType) + "." + target.Field
+	}
+
+	fn, ok := c.funcs[mangledName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undeclared setter %s", mangledName))
+	}
+
+	var args []value.Value
+	recv := c.genExpr(target.Target)
+	if _, isThis := target.Target.(*ast.ThisExpr); isThis {
+		args = append(args, recv)
+	} else if isContainerType(targetType) {
+		args = append(args, recv)
+	} else {
+		args = append(args, c.extractInstancePtr(recv))
+	}
+	args = append(args, val)
+	c.block.NewCall(fn, args...)
 }
 
 // genCompoundOp applies a compound assignment operator through the type system.

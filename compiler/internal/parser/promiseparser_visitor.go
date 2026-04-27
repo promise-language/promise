@@ -49,6 +49,15 @@ type PromiseParserVisitor interface {
 	// Visit a parse tree produced by PromiseParser#methodDecl.
 	VisitMethodDecl(ctx *MethodDeclContext) interface{}
 
+	// Visit a parse tree produced by PromiseParser#getterDecl.
+	VisitGetterDecl(ctx *GetterDeclContext) interface{}
+
+	// Visit a parse tree produced by PromiseParser#setterDecl.
+	VisitSetterDecl(ctx *SetterDeclContext) interface{}
+
+	// Visit a parse tree produced by PromiseParser#memberBody.
+	VisitMemberBody(ctx *MemberBodyContext) interface{}
+
 	// Visit a parse tree produced by PromiseParser#methodName.
 	VisitMethodName(ctx *MethodNameContext) interface{}
 

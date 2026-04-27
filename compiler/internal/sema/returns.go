@@ -58,7 +58,7 @@ func (c *Checker) checkMissingReturn(file *ast.File) {
 				if md.Body == nil {
 					continue
 				}
-				m := named.LookupMethod(md.Name)
+				m := named.LookupAnyMethod(md.Name)
 				if m == nil || m.Sig() == nil {
 					continue
 				}

@@ -63,6 +63,18 @@ func (v *BasePromiseParserVisitor) VisitMethodDecl(ctx *MethodDeclContext) inter
 	return v.VisitChildren(ctx)
 }
 
+func (v *BasePromiseParserVisitor) VisitGetterDecl(ctx *GetterDeclContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BasePromiseParserVisitor) VisitSetterDecl(ctx *SetterDeclContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BasePromiseParserVisitor) VisitMemberBody(ctx *MemberBodyContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
 func (v *BasePromiseParserVisitor) VisitMethodName(ctx *MethodNameContext) interface{} {
 	return v.VisitChildren(ctx)
 }

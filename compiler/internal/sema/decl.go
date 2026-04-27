@@ -273,6 +273,8 @@ func (c *Checker) defineMethod(named *types.Named, md *ast.MethodDecl, typeName 
 	}
 
 	m := types.NewMethod(tpos(md.Pos()), md.Name, sig, placement, abstract, native)
+	m.SetGetter(md.IsGetter)
+	m.SetSetter(md.IsSetter)
 	c.validateMetas(md.Annotations, TargetMethod)
 	m.SetDoc(extractDoc(md.Annotations))
 	m.SetDeprecated(extractDeprecated(md.Annotations))

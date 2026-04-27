@@ -181,7 +181,7 @@ func (c *Checker) checkTypeDecl(d *ast.TypeDecl) {
 		if md.Body == nil {
 			continue
 		}
-		m := named.LookupMethod(md.Name)
+		m := named.LookupAnyMethod(md.Name)
 		if m == nil || m.Sig() == nil {
 			continue
 		}

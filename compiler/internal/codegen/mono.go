@@ -321,7 +321,7 @@ func (c *Compiler) declareMonoMethods(file *ast.File, instances []*types.Instanc
 			if md.Body == nil {
 				continue
 			}
-			m := named.LookupMethod(md.Name)
+			m := c.lookupAnyMethod(named, md.Name, md.IsGetter, md.IsSetter)
 			if m == nil || m.Sig() == nil {
 				continue
 			}
@@ -374,7 +374,7 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 			if md.Body == nil {
 				continue
 			}
-			m := named.LookupMethod(md.Name)
+			m := c.lookupAnyMethod(named, md.Name, md.IsGetter, md.IsSetter)
 			if m == nil || m.Sig() == nil {
 				continue
 			}

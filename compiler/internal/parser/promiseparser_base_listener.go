@@ -104,6 +104,24 @@ func (s *BasePromiseParserListener) EnterMethodDecl(ctx *MethodDeclContext) {}
 // ExitMethodDecl is called when production methodDecl is exited.
 func (s *BasePromiseParserListener) ExitMethodDecl(ctx *MethodDeclContext) {}
 
+// EnterGetterDecl is called when production getterDecl is entered.
+func (s *BasePromiseParserListener) EnterGetterDecl(ctx *GetterDeclContext) {}
+
+// ExitGetterDecl is called when production getterDecl is exited.
+func (s *BasePromiseParserListener) ExitGetterDecl(ctx *GetterDeclContext) {}
+
+// EnterSetterDecl is called when production setterDecl is entered.
+func (s *BasePromiseParserListener) EnterSetterDecl(ctx *SetterDeclContext) {}
+
+// ExitSetterDecl is called when production setterDecl is exited.
+func (s *BasePromiseParserListener) ExitSetterDecl(ctx *SetterDeclContext) {}
+
+// EnterMemberBody is called when production memberBody is entered.
+func (s *BasePromiseParserListener) EnterMemberBody(ctx *MemberBodyContext) {}
+
+// ExitMemberBody is called when production memberBody is exited.
+func (s *BasePromiseParserListener) ExitMemberBody(ctx *MemberBodyContext) {}
+
 // EnterMethodName is called when production methodName is entered.
 func (s *BasePromiseParserListener) EnterMethodName(ctx *MethodNameContext) {}
 

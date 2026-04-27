@@ -735,7 +735,7 @@ func (c *Compiler) declareTypeMethods(file *ast.File) {
 			if md.Body == nil {
 				continue // abstract or native
 			}
-			m := named.LookupMethod(md.Name)
+			m := c.lookupAnyMethod(named, md.Name, md.IsGetter, md.IsSetter)
 			if m == nil || m.Sig() == nil {
 				continue
 			}
@@ -784,7 +784,7 @@ func (c *Compiler) defineTypeMethods(file *ast.File) {
 			if md.Body == nil {
 				continue
 			}
-			m := named.LookupMethod(md.Name)
+			m := c.lookupAnyMethod(named, md.Name, md.IsGetter, md.IsSetter)
 			if m == nil || m.Sig() == nil {
 				continue
 			}
@@ -798,6 +798,11 @@ func (c *Compiler) defineTypeMethods(file *ast.File) {
 			c.defineMethodFunc(md, m, fn)
 		}
 	}
+}
+
+// lookupAnyMethod finds a method, getter, or setter by name.
+func (c *Compiler) lookupAnyMethod(named *types.Named, name string, _, _ bool) *types.Method {
+	return named.LookupAnyMethod(name)
 }
 
 // defineMethodFunc generates the body of a single method.

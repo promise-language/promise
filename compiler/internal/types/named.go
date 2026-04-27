@@ -105,17 +105,62 @@ func (n *Named) LookupField(name string) *Field {
 	return nil
 }
 
-// LookupMethod searches for a method by name in this type and its parents.
-// Returns nil if not found. Searches own methods first, then parents depth-first.
-// Child methods override parent methods with the same name.
+// LookupMethod searches for a regular method by name in this type and its parents.
+// Skips getters and setters. Returns nil if not found.
 func (n *Named) LookupMethod(name string) *Method {
+	for _, m := range n.methods {
+		if m.name == name && !m.isGetter && !m.isSetter {
+			return m
+		}
+	}
+	for _, p := range n.parents {
+		if m := p.LookupMethod(name); m != nil {
+			return m
+		}
+	}
+	return nil
+}
+
+// LookupAnyMethod searches for any method (regular, getter, or setter) by name.
+// Used by passes that need to find methods regardless of kind (e.g., codegen, returns).
+func (n *Named) LookupAnyMethod(name string) *Method {
 	for _, m := range n.methods {
 		if m.name == name {
 			return m
 		}
 	}
 	for _, p := range n.parents {
-		if m := p.LookupMethod(name); m != nil {
+		if m := p.LookupAnyMethod(name); m != nil {
+			return m
+		}
+	}
+	return nil
+}
+
+// LookupGetter searches for a getter by name in this type and its parents.
+func (n *Named) LookupGetter(name string) *Method {
+	for _, m := range n.methods {
+		if m.isGetter && m.name == name {
+			return m
+		}
+	}
+	for _, p := range n.parents {
+		if m := p.LookupGetter(name); m != nil {
+			return m
+		}
+	}
+	return nil
+}
+
+// LookupSetter searches for a setter by name in this type and its parents.
+func (n *Named) LookupSetter(name string) *Method {
+	for _, m := range n.methods {
+		if m.isSetter && m.name == name {
+			return m
+		}
+	}
+	for _, p := range n.parents {
+		if m := p.LookupSetter(name); m != nil {
 			return m
 		}
 	}

@@ -49,6 +49,15 @@ type PromiseParserListener interface {
 	// EnterMethodDecl is called when entering the methodDecl production.
 	EnterMethodDecl(c *MethodDeclContext)
 
+	// EnterGetterDecl is called when entering the getterDecl production.
+	EnterGetterDecl(c *GetterDeclContext)
+
+	// EnterSetterDecl is called when entering the setterDecl production.
+	EnterSetterDecl(c *SetterDeclContext)
+
+	// EnterMemberBody is called when entering the memberBody production.
+	EnterMemberBody(c *MemberBodyContext)
+
 	// EnterMethodName is called when entering the methodName production.
 	EnterMethodName(c *MethodNameContext)
 
@@ -459,6 +468,15 @@ type PromiseParserListener interface {
 
 	// ExitMethodDecl is called when exiting the methodDecl production.
 	ExitMethodDecl(c *MethodDeclContext)
+
+	// ExitGetterDecl is called when exiting the getterDecl production.
+	ExitGetterDecl(c *GetterDeclContext)
+
+	// ExitSetterDecl is called when exiting the setterDecl production.
+	ExitSetterDecl(c *SetterDeclContext)
+
+	// ExitMemberBody is called when exiting the memberBody production.
+	ExitMemberBody(c *MemberBodyContext)
 
 	// ExitMethodName is called when exiting the methodName production.
 	ExitMethodName(c *MethodNameContext)

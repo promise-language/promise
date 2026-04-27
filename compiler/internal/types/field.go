@@ -43,6 +43,8 @@ type Method struct {
 	placement  Placement
 	abstract   bool // `abstract — no body, must be overridden
 	native     bool // `native — implementation provided by runtime
+	isGetter   bool // getter — accessed without (), returns value type
+	isSetter   bool // setter — called on assignment to property
 	doc        string
 	deprecated string
 }
@@ -65,6 +67,10 @@ func (m *Method) Sig() *Signature        { return m.sig }
 func (m *Method) Placement() Placement   { return m.placement }
 func (m *Method) IsAbstract() bool       { return m.abstract }
 func (m *Method) IsNative() bool         { return m.native }
+func (m *Method) IsGetter() bool         { return m.isGetter }
+func (m *Method) IsSetter() bool         { return m.isSetter }
+func (m *Method) SetGetter(v bool)       { m.isGetter = v }
+func (m *Method) SetSetter(v bool)       { m.isSetter = v }
 func (m *Method) Doc() string            { return m.doc }
 func (m *Method) SetDoc(s string)        { m.doc = s }
 func (m *Method) Deprecated() string     { return m.deprecated }

@@ -7,7 +7,5 @@ type map[K, V] `native {
     keys() K[] `native;
     values() V[] `native;
 
-    is_empty() bool {
-        return this.len == 0;
-    }
+    get is_empty bool => this.len == 0;
 }

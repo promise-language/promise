@@ -514,12 +514,18 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 
 	switch t := target.(type) {
 	case *types.Named:
-		// Check fields first, then methods
+		// Check fields first, then getters, then methods
 		if f := t.LookupField(e.Field); f != nil {
 			if f.Deprecated() != "" {
 				c.warnf(e.Pos(), "use of deprecated field '%s'", e.Field)
 			}
 			return f.Type()
+		}
+		if g := t.LookupGetter(e.Field); g != nil {
+			if g.Deprecated() != "" {
+				c.warnf(e.Pos(), "use of deprecated getter '%s'", e.Field)
+			}
+			return g.Sig().Result()
 		}
 		if m := t.LookupMethod(e.Field); m != nil {
 			if m.Deprecated() != "" {
@@ -560,6 +566,9 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 		if f := types.TypSlice.LookupField(e.Field); f != nil {
 			return types.Substitute(f.Type(), subst)
 		}
+		if g := types.TypSlice.LookupGetter(e.Field); g != nil {
+			return types.Substitute(g.Sig().Result(), subst)
+		}
 		if m := types.TypSlice.LookupMethod(e.Field); m != nil {
 			if e.Field == "push" || e.Field == "pop" || e.Field == "remove" {
 				c.errorf(e.Pos(), "cannot %s on fixed-size array", e.Field)
@@ -586,6 +595,12 @@ func (c *Checker) resolveInstanceMember(pos ast.Pos, inst *types.Instance, name 
 				c.warnf(pos, "use of deprecated field '%s'", name)
 			}
 			return types.Substitute(f.Type(), subst)
+		}
+		if g := origin.LookupGetter(name); g != nil {
+			if g.Deprecated() != "" {
+				c.warnf(pos, "use of deprecated getter '%s'", name)
+			}
+			return types.Substitute(g.Sig().Result(), subst)
 		}
 		if m := origin.LookupMethod(name); m != nil {
 			if m.Deprecated() != "" {
@@ -771,6 +786,9 @@ func (c *Checker) checkOptionalChainExpr(e *ast.OptionalChainExpr) types.Type {
 	case *types.Named:
 		if f := t.LookupField(e.Field); f != nil {
 			return types.NewOptional(f.Type())
+		}
+		if g := t.LookupGetter(e.Field); g != nil {
+			return types.NewOptional(g.Sig().Result())
 		}
 		if m := t.LookupMethod(e.Field); m != nil {
 			return types.NewOptional(m.Sig())

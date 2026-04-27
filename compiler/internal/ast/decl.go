@@ -40,6 +40,7 @@ type FieldDecl struct {
 }
 
 // MethodDecl represents a method inside a type declaration.
+// Getters and setters are also represented as MethodDecl with IsGetter/IsSetter flags.
 type MethodDecl struct {
 	nodeBase
 	Name        string // identifier or operator symbol like "+"
@@ -49,6 +50,8 @@ type MethodDecl struct {
 	ReturnType  *ReturnTypeSpec // nil if no return type
 	Annotations []*MetaAnnotation
 	Body        *Block // nil for abstract methods
+	IsGetter    bool   // true for getter declarations (get name Type { ... })
+	IsSetter    bool   // true for setter declarations (set name(Type param) { ... })
 }
 
 // EnumDecl represents an enum declaration.

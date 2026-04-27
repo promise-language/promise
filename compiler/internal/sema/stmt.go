@@ -151,6 +151,11 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 		return
 	}
 
+	// Validate setter exists when assigning to a getter property
+	if me, ok := s.Target.(*ast.MemberExpr); ok {
+		c.checkSetterAvailable(me)
+	}
+
 	switch s.Op {
 	case ast.OpAssign:
 		if !types.AssignableTo(valType, targetType) {
@@ -182,6 +187,37 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 			}
 		}
 		c.checkOperator(s.Pos(), opTarget, op, valType)
+	}
+}
+
+// checkSetterAvailable validates that assignment to a getter property
+// has a corresponding setter. Fields are always assignable.
+func (c *Checker) checkSetterAvailable(me *ast.MemberExpr) {
+	targetType := c.info.Types[me.Target]
+	if targetType == nil {
+		return
+	}
+	var named *types.Named
+	switch t := targetType.(type) {
+	case *types.Named:
+		named = t
+	case *types.Instance:
+		if n, ok := t.Origin().(*types.Named); ok {
+			named = n
+		}
+	}
+	if named == nil {
+		return
+	}
+	// If the member is a field, assignment is always OK
+	if named.LookupField(me.Field) != nil {
+		return
+	}
+	// If the member is a getter, check for a corresponding setter
+	if g := named.LookupGetter(me.Field); g != nil {
+		if named.LookupSetter(me.Field) == nil {
+			c.errorf(me.Pos(), "property '%s' has no setter", me.Field)
+		}
 	}
 }
 

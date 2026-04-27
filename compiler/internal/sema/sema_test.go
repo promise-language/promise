@@ -59,7 +59,7 @@ func init() {
 	b.WriteString("\tindex_of(string sub) int? `native;\n")
 	b.WriteString("\ttrim() string `native;\n")
 	b.WriteString("\tsplit(string sep) string[] `native;\n")
-	b.WriteString("\tis_empty() bool { return this.len == 0; }\n}\n")
+	b.WriteString("\tget is_empty bool => this.len == 0;\n}\n")
 
 	// Containers
 	b.WriteString("type slice[T] `native {\n\tint len;\n")
@@ -67,14 +67,14 @@ func init() {
 	b.WriteString("\tpop() T? `native;\n")
 	b.WriteString("\tcontains(T elem) bool `native;\n")
 	b.WriteString("\tremove(int index) `native;\n")
-	b.WriteString("\tis_empty() bool { return this.len == 0; }\n}\n")
+	b.WriteString("\tget is_empty bool => this.len == 0;\n}\n")
 
 	b.WriteString("type map[K, V] `native {\n\tint len;\n")
 	b.WriteString("\tcontains(K key) bool `native;\n")
 	b.WriteString("\tremove(K key) bool `native;\n")
 	b.WriteString("\tkeys() K[] `native;\n")
 	b.WriteString("\tvalues() V[] `native;\n")
-	b.WriteString("\tis_empty() bool { return this.len == 0; }\n}\n")
+	b.WriteString("\tget is_empty bool => this.len == 0;\n}\n")
 
 	// Iter/Stream
 	b.WriteString("type iter[T] `native {\n\tnext() T? `abstract;\n}\n")
@@ -2864,17 +2864,17 @@ func TestStdScopeDoesNotLeakToUser(t *testing.T) {
 // --- Stage 8k: Native type declaration tests ---
 
 func TestNativeTypeStringMethod(t *testing.T) {
-	// Non-native method on a native type (string) with a Promise body
+	// Getter on a native type (string) with a Promise body
 	_, errs := checkSourceWithStd(t,
 		`type string `+"`"+`native {
 			int len;
-			is_empty() bool {
+			get is_empty bool {
 				return this.len == 0;
 			}
 		}`,
 		`main() {
 			s := "hello";
-			b := s.is_empty();
+			b := s.is_empty;
 		}`,
 	)
 	expectNoErrors(t, errs)
@@ -2902,11 +2902,11 @@ func TestNativeTypeNotInUniverse(t *testing.T) {
 }
 
 func TestNativeTypeMissingReturnDetected(t *testing.T) {
-	// Missing return in a non-native method on native type should be caught
+	// Missing return in a getter on native type should be caught
 	_, errs := checkSourceWithStd(t,
 		`type string `+"`"+`native {
 			int len;
-			is_empty() bool {}
+			get is_empty bool {}
 		}`,
 		`main() {}`,
 	)

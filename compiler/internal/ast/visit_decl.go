@@ -78,6 +78,12 @@ func (b *Builder) visitTypeMember(ctx parser.ITypeMemberContext, td *TypeDecl) {
 	if m := tc.MethodDecl(); m != nil {
 		td.Methods = append(td.Methods, m.Accept(b).(*MethodDecl))
 	}
+	if g := tc.GetterDecl(); g != nil {
+		td.Methods = append(td.Methods, g.Accept(b).(*MethodDecl))
+	}
+	if s := tc.SetterDecl(); s != nil {
+		td.Methods = append(td.Methods, s.Accept(b).(*MethodDecl))
+	}
 }
 
 func (b *Builder) VisitFieldDecl(ctx *parser.FieldDeclContext) interface{} {
@@ -110,10 +116,76 @@ func (b *Builder) VisitMethodDecl(ctx *parser.MethodDeclContext) interface{} {
 	for _, ma := range ctx.AllMetaAnnotation() {
 		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))
 	}
-	if blk := ctx.Block(); blk != nil {
-		node.Body = b.visitBlock(blk)
+	if mb := ctx.MemberBody(); mb != nil {
+		node.Body = b.visitMemberBody(mb, true)
 	}
 	return node
+}
+
+func (b *Builder) VisitGetterDecl(ctx *parser.GetterDeclContext) interface{} {
+	keyword := ctx.IDENT(0).GetText()
+	if keyword != "get" {
+		panic("expected 'get' keyword in getter declaration, got '" + keyword + "'")
+	}
+	node := &MethodDecl{
+		nodeBase: b.baseFromContext(ctx),
+		Name:     ctx.IDENT(1).GetText(),
+		IsGetter: true,
+	}
+	node.ReturnType = &ReturnTypeSpec{
+		nodeBase: b.baseFromContext(ctx),
+		Type:     b.visitTypeRef(ctx.TypeRef()),
+	}
+	for _, ma := range ctx.AllMetaAnnotation() {
+		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))
+	}
+	if mb := ctx.MemberBody(); mb != nil {
+		node.Body = b.visitMemberBody(mb, true)
+	}
+	return node
+}
+
+func (b *Builder) VisitSetterDecl(ctx *parser.SetterDeclContext) interface{} {
+	keyword := ctx.IDENT(0).GetText()
+	if keyword != "set" {
+		panic("expected 'set' keyword in setter declaration, got '" + keyword + "'")
+	}
+	node := &MethodDecl{
+		nodeBase: b.baseFromContext(ctx),
+		Name:     ctx.IDENT(1).GetText(),
+		IsSetter: true,
+		Params: []*Param{{
+			nodeBase: b.baseFromContext(ctx),
+			Type:     b.visitTypeRef(ctx.TypeRef()),
+			Name:     ctx.IDENT(2).GetText(),
+		}},
+	}
+	for _, ma := range ctx.AllMetaAnnotation() {
+		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))
+	}
+	if mb := ctx.MemberBody(); mb != nil {
+		node.Body = b.visitMemberBody(mb, false)
+	}
+	return node
+}
+
+// visitMemberBody handles both block body and expression body (=> expr;).
+// For expression body: if isReturn is true, wraps in ReturnStmt; otherwise wraps in ExprStmt.
+func (b *Builder) visitMemberBody(ctx parser.IMemberBodyContext, isReturn bool) *Block {
+	mbc := ctx.(*parser.MemberBodyContext)
+	if blk := mbc.Block(); blk != nil {
+		return b.visitBlock(blk)
+	}
+	// Expression body: => expr;
+	expr := b.visitExpr(mbc.Expression())
+	base := b.baseFromContext(mbc)
+	var stmt Stmt
+	if isReturn {
+		stmt = &ReturnStmt{nodeBase: base, Value: expr}
+	} else {
+		stmt = &ExprStmt{nodeBase: base, Expr: expr}
+	}
+	return &Block{nodeBase: base, Stmts: []Stmt{stmt}}
 }
 
 func (b *Builder) VisitMethodName(ctx *parser.MethodNameContext) interface{} {

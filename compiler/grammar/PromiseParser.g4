@@ -72,6 +72,8 @@ typeConstraint
 typeMember
     : fieldDecl
     | methodDecl
+    | getterDecl
+    | setterDecl
     ;
 
 fieldDecl
@@ -79,7 +81,25 @@ fieldDecl
     ;
 
 methodDecl
-    : methodName typeParams? LPAREN params RPAREN returnType? metaAnnotation* (block | SEMI)
+    : methodName typeParams? LPAREN params RPAREN returnType? metaAnnotation* (memberBody | SEMI)
+    ;
+
+// Getter: `get <name> <type> <annotations>? (<body> | ;)`
+// `get` is contextual — lexed as IDENT, validated in AST builder.
+getterDecl
+    : IDENT IDENT typeRef metaAnnotation* (memberBody | SEMI)
+    ;
+
+// Setter: `set <name>(<type> <param>) <annotations>? (<body> | ;)`
+// `set` is contextual — lexed as IDENT, validated in AST builder.
+setterDecl
+    : IDENT IDENT LPAREN typeRef IDENT RPAREN metaAnnotation* (memberBody | SEMI)
+    ;
+
+// Shared body for methods, getters, setters: block or expression body.
+memberBody
+    : block
+    | FAT_ARROW expression SEMI
     ;
 
 // Method name: identifier or operator symbol (for operator overloading)

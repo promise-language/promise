@@ -3463,6 +3463,76 @@ func TestDirectDispatchPreserved(t *testing.T) {
 	assertContains(t, ir, "call i8* @Dog.speak")
 }
 
+func TestVirtualGetterDispatch(t *testing.T) {
+	ir := generateIR(t, `
+		type Shape {
+			get area int `+"`"+`abstract;
+		}
+		type Circle is Shape {
+			int radius;
+			get area int => this.radius * this.radius;
+		}
+		main() {
+			Shape s = Circle(radius: 5);
+			int a = s.area;
+		}
+	`)
+	// Getter through abstract parent should use vtable dispatch (indirect call)
+	assertNotContains(t, ir, "call i64 @Shape.area")
+	assertContains(t, ir, "@promise_vtable_Shape")
+	assertContains(t, ir, "@promise_vtable_Circle")
+}
+
+func TestVirtualGetterOverrideDispatch(t *testing.T) {
+	ir := generateIR(t, `
+		type Base {
+			int _x;
+			get x int { return this._x; }
+		}
+		type Child is Base {
+			get x int { return this._x * 2; }
+		}
+		main() {
+			Base b = Child(_x: 5);
+			int v = b.x;
+		}
+	`)
+	// Concrete getter override through parent-typed variable should use vtable dispatch
+	assertNotContains(t, ir, "call i64 @Base.x(")
+	assertContains(t, ir, "@promise_vtable_Base")
+	assertContains(t, ir, "@promise_vtable_Child")
+}
+
+func TestDirectGetterPreserved(t *testing.T) {
+	ir := generateIR(t, `
+		type Point {
+			int _x;
+			get x int => this._x;
+		}
+		main() {
+			Point p = Point(_x: 42);
+			int v = p.x;
+		}
+	`)
+	// Point has no children → direct dispatch for getter
+	assertContains(t, ir, "call i64 @Point.x")
+}
+
+func TestDirectGetterNoVtable(t *testing.T) {
+	ir := generateIR(t, `
+		type Counter {
+			int _count;
+			get count int { return this._count; }
+		}
+		main() {
+			Counter c = Counter(_count: 10);
+			int n = c.count;
+		}
+	`)
+	// Counter has no children → direct getter call (not indirect through vtable)
+	assertContains(t, ir, "call i64 @Counter.count")
+}
+
 func TestMultipleAbstractParentsVtable(t *testing.T) {
 	ir := generateIR(t, `
 		type Speakable {
@@ -4080,4 +4150,192 @@ func TestUnaryNotCodegen(t *testing.T) {
 	`)
 	// ! on bool generates xor with 1
 	assertContains(t, ir, "xor i1")
+}
+
+// --- Stage 8m: use bindings ---
+
+func TestUseVarDeclBasic(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			close() { }
+		}
+		main() {
+			use r := Resource(id: 1);
+			int x = r.id;
+		}
+	`)
+	// use binding should generate a close() call at end of scope
+	assertContains(t, ir, "call void @Resource.close")
+}
+
+func TestUseVarDeclMultiple(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			close() { }
+		}
+		main() {
+			use a := Resource(id: 1);
+			use b := Resource(id: 2);
+			int x = a.id + b.id;
+		}
+	`)
+	// Both resources should have close() calls
+	assertContains(t, ir, "call void @Resource.close")
+	// Count that there are at least 2 close calls
+	count := strings.Count(ir, "call void @Resource.close")
+	if count < 2 {
+		t.Errorf("expected at least 2 close calls, got %d\nIR:\n%s", count, ir)
+	}
+}
+
+func TestUseVarDeclWithReturn(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			close() { }
+		}
+		make_resource() int {
+			use r := Resource(id: 42);
+			return r.id;
+		}
+		main() {
+			int v = make_resource();
+		}
+	`)
+	// close() should appear before the return instruction in make_resource
+	assertContains(t, ir, "call void @Resource.close")
+	assertContains(t, ir, "define i64 @make_resource")
+}
+
+func TestUseVarDeclInNestedBlock(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			close() { }
+		}
+		main() {
+			use outer := Resource(id: 1);
+			if true {
+				use inner := Resource(id: 2);
+				int x = inner.id;
+			}
+			int y = outer.id;
+		}
+	`)
+	// Both outer and inner resources should generate close() calls
+	count := strings.Count(ir, "call void @Resource.close")
+	if count < 2 {
+		t.Errorf("expected at least 2 close calls (inner + outer), got %d\nIR:\n%s", count, ir)
+	}
+}
+
+// --- Getter/Setter same name regression ---
+
+func TestGetterSetterSameNameCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		type Box {
+			int _val;
+			get val int { return this._val; }
+			set val(int v) { this._val = v; }
+		}
+		main() {
+			Box b = Box(_val: 0);
+			b.val = 42;
+			int v = b.val;
+		}
+	`)
+	// Both getter and setter should produce distinct functions
+	assertContains(t, ir, "define i64 @Box.val(")
+	assertContains(t, ir, "define void @Box.val$set(")
+}
+
+func TestGetterSetterSameNameVtable(t *testing.T) {
+	ir := generateIR(t, `
+		type Base {
+			get val int `+"`"+`abstract;
+			set val(int v) `+"`"+`abstract;
+		}
+		type Impl is Base {
+			int _v;
+			get val int { return this._v; }
+			set val(int v) { this._v = v; }
+		}
+		main() {
+			Base b = Impl(_v: 0);
+			b.val = 42;
+			int v = b.val;
+		}
+	`)
+	// Vtable should contain both getter and setter slots
+	assertContains(t, ir, "@promise_vtable_Base")
+	assertContains(t, ir, "@promise_vtable_Impl")
+	// Both getter and setter functions should exist
+	assertContains(t, ir, "define i64 @Impl.val(")
+	assertContains(t, ir, "define void @Impl.val$set(")
+	// Virtual dispatch should NOT use direct call to Base.val (abstract)
+	assertNotContains(t, ir, "call i64 @Base.val(")
+}
+
+func TestCompoundAssignmentGetterSetterCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		type Counter {
+			int _count;
+			get count int { return this._count; }
+			set count(int v) { this._count = v; }
+		}
+		main() {
+			Counter c = Counter(_count: 0);
+			c.count += 5;
+		}
+	`)
+	// Should call both getter and setter
+	assertContains(t, ir, "call i64 @Counter.count(")
+	assertContains(t, ir, "call void @Counter.count$set(")
+}
+
+func TestViewVtableGetterSetter(t *testing.T) {
+	ir := generateIR(t, `
+		type Readable {
+			get val int `+"`"+`abstract;
+		}
+		type Writable {
+			get val int `+"`"+`abstract;
+			set val(int v) `+"`"+`abstract;
+		}
+		type Store is Readable, Writable {
+			int _v;
+			get val int { return this._v; }
+			set val(int v) { this._v = v; }
+		}
+		main() {
+			Writable w = Store(_v: 0);
+			w.val = 42;
+			int v = w.val;
+		}
+	`)
+	// View vtable for Store-as-Writable should exist
+	assertContains(t, ir, "promise_vtable_Store_as_Writable")
+	// Both functions should be emitted
+	assertContains(t, ir, "define i64 @Store.val(")
+	assertContains(t, ir, "define void @Store.val$set(")
+}
+
+func TestGenericGetterSetterSameName(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] {
+			T _val;
+			get val T { return this._val; }
+			set val(T v) { this._val = v; }
+		}
+		main() {
+			b := Box[int](_val: 0);
+			b.val = 42;
+			int v = b.val;
+		}
+	`)
+	// Monomorphized getter and setter should have distinct names
+	assertContains(t, ir, "define i64 @Box__int.val(")
+	assertContains(t, ir, "define void @Box__int.val$set(")
 }

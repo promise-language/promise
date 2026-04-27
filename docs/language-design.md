@@ -1954,11 +1954,225 @@ rawPointer() `unsafe {
 
 ---
 
-## 16. Concurrency
+## 16. Resource Management
+
+Promise provides deterministic, ownership-driven resource cleanup without garbage collector finalizers. Two mechanisms work together: **`use` bindings** for scoped resource lifetime, and **`drop()` methods** for general cleanup when an owner goes out of scope.
+
+### 16.1 I/O Interfaces
+
+The standard library defines a set of structural interfaces for I/O, following the Go model of small, composable abstractions:
+
+```promise
+type Reader `structural {
+  read(~this, u8[] ~buf) int! `abstract `instance;
+}
+
+type Writer `structural {
+  write(~this, u8[] &buf) int! `abstract `instance;
+}
+
+type Closer `structural {
+  close(~this)! `abstract `instance;
+}
+
+type Seeker `structural {
+  seek(~this, int offset, int whence) int! `abstract `instance;
+}
+```
+
+Compound interfaces compose these via inheritance:
+
+```promise
+type ReadCloser `structural is Reader, Closer {}
+type WriteCloser `structural is Writer, Closer {}
+type ReadWriter `structural is Reader, Writer {}
+type ReadWriteCloser `structural is Reader, Writer, Closer {}
+```
+
+Because these are `` `structural ``, any type with matching method signatures satisfies them automatically — no explicit `is` declaration needed. A `File` type satisfies `ReadWriteCloser` by having `read`, `write`, and `close` methods with the right signatures:
+
+```promise
+type File is ReadWriteCloser {
+  int fd;
+
+  open(string path, string mode) File! `type `native;
+
+  read(~this, u8[] ~buf) int! `instance `native;
+  write(~this, u8[] &buf) int! `instance `native;
+  close(~this)! `instance `native;
+  seek(~this, int offset, int whence) int! `instance `native;
+}
+```
+
+User-defined types participate naturally:
+
+```promise
+type BufferedWriter is Writer {
+  Writer inner;
+  u8[] buf;
+
+  write(~this, u8[] &data) int! `instance {
+    this.buf.push(data);
+    if this.buf.len >= 4096 {
+      return this.flush()?;
+    }
+    return data.len;
+  }
+
+  flush(~this) int! `instance {
+    n := this.inner.write(&this.buf)?;
+    this.buf = [];
+    return n;
+  }
+}
+```
+
+### 16.2 `use` Bindings
+
+A `use` binding ties a resource's lifetime to the enclosing scope. When the scope exits — whether by normal fall-through, `return`, `raise`, `break`, or `continue` — the compiler automatically calls `close()` on the bound variable.
+
+```promise
+main()! {
+  use f := File.open("data.txt", "r")?;
+  string data = f.readAll()?;
+  // f.close() called automatically here
+}
+```
+
+`use` works in any block scope:
+
+```promise
+process(string path)! {
+  use f := File.open(path, "r")?;
+
+  if needsBackup(path) {
+    use backup := File.open(path + ".bak", "w")?;
+    copyTo(f, backup)?;
+    // backup.close() called here
+  }
+
+  // f.close() called here
+}
+```
+
+**Rules:**
+
+- The variable's type must have a `close()` method (checked via structural or nominal satisfaction of `Closer`)
+- Multiple `use` bindings in the same scope are closed in **reverse declaration order** (LIFO), matching the intuition that resources opened later depend on resources opened earlier
+- A `use` variable cannot be moved out of its scope — the compiler must guarantee `close()` is callable
+- `use` is a variable declaration modifier, not a statement — it binds a name and a value
+
+**Close error handling:** If the enclosing function is failable (`!` return type), close errors propagate — but only if no other error is already in flight. If the scope is exiting due to a `raise` or error propagation, the close error is suppressed to preserve the original error. If the scope exits normally and `close()` fails, the close error becomes the function's error.
+
+```promise
+// In a failable function:
+writeData(string path, u8[] &data)! {
+  use f := File.open(path, "w")?;
+  f.write(&data)?;
+  // If f.close() fails here, the error propagates (no prior error)
+}
+
+// If write fails:
+writeData(string path, u8[] &data)! {
+  use f := File.open(path, "w")?;
+  f.write(&data)?;  // raises an error
+  // f.close() still called, but its error is suppressed — write's error propagates
+}
+```
+
+In a non-failable function, close errors are silently suppressed (there is nowhere to propagate them).
+
+### 16.3 The `drop()` Method
+
+Any type can define a `drop()` method for general-purpose cleanup. The compiler inserts `drop()` calls when a value's owner goes out of scope and the value has not been moved.
+
+```promise
+type TempFile {
+  string path;
+  File file;
+
+  drop(~this) `instance {
+    this.file.close();
+    fs.remove(this.path);
+  }
+}
+```
+
+**Drop rules:**
+
+1. When a variable goes out of scope and its type has a `drop()` method, the compiler inserts a `drop()` call
+2. If the value was **moved** (ownership transferred), no drop occurs — the new owner is responsible
+3. Fields are dropped recursively **after** the parent's `drop()` runs, in reverse declaration order
+4. `` `copy `` types cannot define `drop()` — copy semantics are incompatible with unique cleanup (a value that is bitwise-copied would have its `drop()` called multiple times)
+5. Drop order within a scope follows reverse declaration order (LIFO), consistent with `use` bindings
+6. `drop()` methods must not fail — the signature is `drop(~this)` with no `!` return
+
+**Conditional drops:** When ownership depends on control flow, the compiler inserts **drop flags** — boolean variables that track whether a value still needs dropping:
+
+```promise
+transfer(bool condition) {
+  Resource r = Resource.new();
+  if condition {
+    consume(r);  // r is moved — no drop needed
+  }
+  // Compiler: if !moved_r { r.drop(); }
+}
+```
+
+### 16.4 Interaction Between `use` and `drop()`
+
+`use` and `drop()` are complementary:
+
+- `use` calls `close()` at scope exit — for explicit, scoped resource management
+- `drop()` calls cleanup code at scope exit — for automatic, ownership-driven cleanup
+- A type can have both: `use` calls `close()` explicitly, and `drop()` handles cleanup for non-`use` variables
+
+If a variable is declared with `use`, the compiler calls `close()` at scope exit. If that same type also has a `drop()` method, `drop()` is **not** called — `use` takes precedence. The expectation is that `close()` performs all necessary cleanup (or that `drop()` delegates to `close()` internally).
+
+For variables **not** declared with `use`, normal `drop()` semantics apply — the compiler calls `drop()` when the owner goes out of scope.
+
+```promise
+type Connection {
+  int socket_fd;
+
+  close(~this)! `instance {
+    syscall.close(this.socket_fd)?;
+  }
+
+  drop(~this) `instance {
+    // Best-effort close — errors suppressed in drop
+    syscall.close(this.socket_fd);
+  }
+}
+
+main()! {
+  // Explicit scoped lifetime — close() called, errors can propagate
+  use conn := Connection.connect("localhost:5432")?;
+  conn.query("SELECT 1")?;
+  // conn.close() called here — error propagates if function is !
+
+  // Without use — drop() called at scope exit, errors suppressed
+  conn2 := Connection.connect("localhost:5432")?;
+  conn2.query("SELECT 1")?;
+  // conn2.drop() called here — best-effort cleanup
+}
+```
+
+### 16.5 Summary
+
+| Mechanism | Trigger | Method Called | Error Handling | Use Case |
+|-----------|---------|-------------|----------------|----------|
+| `use` binding | Scope exit | `close()` | Propagates in `!` functions (unless another error is in flight) | Explicit resource scoping |
+| `drop()` method | Owner out of scope (not moved) | `drop()` | Suppressed (drop must not fail) | Automatic cleanup |
+| Neither | Owner out of scope | Nothing | N/A | `` `copy `` types, primitives |
+
+---
+
+## 17. Concurrency
 
 Promise uses goroutine-style lightweight coroutines. The runtime multiplexes goroutines onto OS threads and transparently handles I/O scheduling — all blocking I/O calls automatically suspend the current goroutine and resume it when the operation completes. There is **no function coloring**: functions that perform I/O have normal signatures and look identical to pure functions.
 
-### 16.1 Transparent I/O
+### 17.1 Transparent I/O
 
 Functions are never declared as "async". The runtime is the async engine — any function that performs I/O automatically yields the goroutine during the blocking operation:
 
@@ -1974,7 +2188,7 @@ fetchUser(Int id) User! {
 user := fetchUser(42)?;
 ```
 
-### 16.2 Explicit Concurrency with `go`
+### 17.2 Explicit Concurrency with `go`
 
 `go` is an **expression** that launches a goroutine and returns a `task[T]`, where `T` is the result type of the block or call. The `<-` operator receives the result, suspending the current goroutine until it is ready.
 
@@ -2002,7 +2216,7 @@ comments := <-t3;
 
 `task[T]` is a first-class type returned by `go` expressions. It can be stored in variables, fields, and collections, passed as arguments, and returned from functions. The `<-` operator receives the result from a task, suspending the current goroutine until the task completes. Concurrency is always a **caller-side decision** — the callee does not know or care whether it runs in a goroutine.
 
-### 16.3 Channels
+### 17.3 Channels
 
 Channels are the primary synchronization primitive for streaming data between goroutines:
 
@@ -2027,7 +2241,7 @@ The `<-` operator also works on channels: `value := <-ch;` receives the next val
 
 Because `channel[T]` implements `stream[T]`, channels gain all stream combinators — `map`, `filter`, `fold`, etc. — for free. See Section 12.6 for details and caveats about destructive iteration.
 
-### 16.4 Ownership Across Goroutines
+### 17.4 Ownership Across Goroutines
 
 Ownership rules apply across goroutines — data is either **moved** into the goroutine or shared via `Arc[T]` (atomic reference counting):
 
@@ -2050,7 +2264,7 @@ main() {
 
 ---
 
-## 17. Complete Example
+## 18. Complete Example
 
 ```promise
 use io "github.com/promise-lang/std/io/1"
@@ -2107,7 +2321,7 @@ main() {
 
 ---
 
-## 18. Grammar Sketch (ANTLR4)
+## 19. Grammar Sketch (ANTLR4)
 
 Key productions (simplified):
 
@@ -2181,8 +2395,10 @@ typeRefList: typeRef (',' typeRef)*;
 
 // Core expression and statement productions (simplified)
 block: '{' statement* '}';
-statement: expression ';' | varDecl | assignment | returnStmt | raiseStmt
+statement: expression ';' | varDecl | useDecl | assignment | returnStmt | raiseStmt
          | ifStmt | forStmt | whileStmt | yieldStmt | yieldDelegateStmt;
+
+useDecl: 'use' IDENT ':=' expression ';';     // scoped resource — close() at scope exit
 
 expression: primary | expression binOp expression | unaryOp expression
           | expression '.' IDENT | expression '(' args ')'
@@ -2245,7 +2461,7 @@ lifetime: '\'' IDENT;
 
 ---
 
-## 19. Compiler Implementation Plan (Go)
+## 20. Compiler Implementation Plan (Go)
 
 Single binary `promise` with the following internal packages:
 
@@ -2264,7 +2480,7 @@ Single binary `promise` with the following internal packages:
 
 ---
 
-## 20. Package Manager (integrated into `promise` binary)
+## 21. Package Manager (integrated into `promise` binary)
 
 ### Dependency Resolution
 
@@ -2276,7 +2492,7 @@ Single binary `promise` with the following internal packages:
 
 ---
 
-## 21. Open Design Questions
+## 22. Open Design Questions
 
 1. **REPL** — Should the toolchain include an interpreter/REPL for rapid prototyping?
 2. **Stream backpressure** — When a generator yields into a channel-backed consumer, should there be built-in backpressure beyond channel's existing capacity mechanism?

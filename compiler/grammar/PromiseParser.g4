@@ -237,7 +237,8 @@ block
     ;
 
 statement
-    : varDecl
+    : useVarDecl
+    | varDecl
     | returnStmt
     | raiseStmt
     | yieldStmt
@@ -252,6 +253,10 @@ statement
     | incDecStmt
     | assignmentStmt
     | expressionStmt
+    ;
+
+useVarDecl
+    : USE IDENT WALRUS expression SEMI
     ;
 
 varDecl

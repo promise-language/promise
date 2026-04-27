@@ -13,6 +13,9 @@ func (b *Builder) VisitBlock(ctx *parser.BlockContext) interface{} {
 }
 
 func (b *Builder) VisitStatement(ctx *parser.StatementContext) interface{} {
+	if c := ctx.UseVarDecl(); c != nil {
+		return c.Accept(b)
+	}
 	if c := ctx.VarDecl(); c != nil {
 		return c.Accept(b)
 	}
@@ -78,6 +81,14 @@ func (b *Builder) VisitTypedVarDecl(ctx *parser.TypedVarDeclContext) interface{}
 		node.RefMod = b.visitRefMod(rm)
 	}
 	return node
+}
+
+func (b *Builder) VisitUseVarDecl(ctx *parser.UseVarDeclContext) interface{} {
+	return &UseVarDecl{
+		nodeBase: b.baseFromContext(ctx),
+		Name:     ctx.IDENT().GetText(),
+		Value:    b.visitExpr(ctx.Expression()),
+	}
 }
 
 func (b *Builder) VisitInferredVarDecl(ctx *parser.InferredVarDeclContext) interface{} {

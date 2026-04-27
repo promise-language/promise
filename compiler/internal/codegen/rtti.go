@@ -95,7 +95,7 @@ func (c *Compiler) emitVtableGlobal(named *types.Named) *ir.Global {
 	var entries []constant.Constant
 	for _, m := range methods {
 		ownerName := c.resolveMethodOwner(named, m.Name())
-		mangledName := ownerName + "." + m.Name()
+		mangledName := mangleMethodName(ownerName, m.Name(), m.IsSetter())
 		if fn, ok := c.funcs[mangledName]; ok {
 			entries = append(entries, constant.NewBitCast(fn, irtypes.I8Ptr))
 		} else {
@@ -162,7 +162,7 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named) *ir.Global {
 	var entries []constant.Constant
 	for _, m := range methods {
 		ownerName := c.resolveMethodOwner(concrete, m.Name())
-		mangledName := ownerName + "." + m.Name()
+		mangledName := mangleMethodName(ownerName, m.Name(), m.IsSetter())
 		if fn, ok := c.funcs[mangledName]; ok {
 			entries = append(entries, constant.NewBitCast(fn, irtypes.I8Ptr))
 		} else {

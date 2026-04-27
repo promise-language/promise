@@ -155,6 +155,11 @@ func (c *Checker) tryMove(expr ast.Expr) {
 	if _, tracked := c.state[ident.Name]; !tracked {
 		return
 	}
+	// Cannot move use-bound variables (they need close() at scope exit)
+	if c.pinned[ident.Name] {
+		c.errorf(ident.Pos(), "cannot move use-bound variable '%s'", ident.Name)
+		return
+	}
 	// Cannot move while borrowed
 	if c.borrows != nil && c.borrows.HasAnyBorrow(ident.Name) {
 		c.errorf(ident.Pos(), "cannot move '%s' while it is borrowed", ident.Name)

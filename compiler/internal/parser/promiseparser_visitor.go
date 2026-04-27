@@ -151,6 +151,9 @@ type PromiseParserVisitor interface {
 	// Visit a parse tree produced by PromiseParser#statement.
 	VisitStatement(ctx *StatementContext) interface{}
 
+	// Visit a parse tree produced by PromiseParser#useVarDecl.
+	VisitUseVarDecl(ctx *UseVarDeclContext) interface{}
+
 	// Visit a parse tree produced by PromiseParser#typedVarDecl.
 	VisitTypedVarDecl(ctx *TypedVarDeclContext) interface{}
 

@@ -179,7 +179,7 @@ func (n *Named) IsAbstract() bool {
 	// Check inherited abstract methods not overridden by a concrete method here
 	for _, p := range n.parents {
 		for _, am := range p.allAbstractMethods() {
-			own := n.lookupOwnMethod(am.name)
+			own := n.lookupOwnMethodBySlotKey(methodSlotKey(am))
 			if own == nil || own.abstract {
 				return true
 			}
@@ -188,27 +188,40 @@ func (n *Named) IsAbstract() bool {
 	return false
 }
 
-// lookupOwnMethod searches only this type's directly declared methods.
-func (n *Named) lookupOwnMethod(name string) *Method {
+// lookupOwnMethodBySlotKey searches this type's directly declared methods
+// using the vtable slot key, which distinguishes getter/setter/regular methods
+// with the same name.
+func (n *Named) lookupOwnMethodBySlotKey(key string) *Method {
 	for _, m := range n.methods {
-		if m.name == name {
+		if methodSlotKey(m) == key {
 			return m
 		}
 	}
 	return nil
 }
 
+// methodSlotKey returns a deduplication key for vtable slot assignment.
+// Getter and setter with the same name occupy distinct slots.
+func methodSlotKey(m *Method) string {
+	if m.isSetter {
+		return m.name + "$set"
+	}
+	return m.name
+}
+
 // AllVirtualMethods returns an ordered, deduplicated list of all non-native methods
 // across the inheritance hierarchy. Parent methods come first (depth-first, left-to-right),
-// then own methods. Each method name appears exactly once at its first-introduced position.
+// then own methods. Each method slot key appears exactly once at its first-introduced position.
+// A getter and setter with the same name occupy separate slots.
 // Used for vtable slot assignment.
 func (n *Named) AllVirtualMethods() []*Method {
 	seen := make(map[string]bool)
 	var result []*Method
 	for _, p := range n.parents {
 		for _, m := range p.AllVirtualMethods() {
-			if !seen[m.Name()] {
-				seen[m.Name()] = true
+			key := methodSlotKey(m)
+			if !seen[key] {
+				seen[key] = true
 				result = append(result, m)
 			}
 		}
@@ -217,18 +230,24 @@ func (n *Named) AllVirtualMethods() []*Method {
 		if m.IsNative() {
 			continue
 		}
-		if !seen[m.Name()] {
-			seen[m.Name()] = true
+		key := methodSlotKey(m)
+		if !seen[key] {
+			seen[key] = true
 			result = append(result, m)
 		}
 	}
 	return result
 }
 
-// VirtualMethodIndex returns the vtable slot index for a method name, or -1 if not found.
-func (n *Named) VirtualMethodIndex(name string) int {
+// VirtualMethodIndex returns the vtable slot index for a method by name and kind, or -1.
+// For setters, pass isSetter=true to find the setter slot (not the getter slot).
+func (n *Named) VirtualMethodIndex(name string, isSetter bool) int {
+	key := name
+	if isSetter {
+		key = name + "$set"
+	}
 	for i, m := range n.AllVirtualMethods() {
-		if m.Name() == name {
+		if methodSlotKey(m) == key {
 			return i
 		}
 	}
@@ -246,8 +265,8 @@ func (n *Named) allAbstractMethods() []*Method {
 	}
 	for _, p := range n.parents {
 		for _, pm := range p.allAbstractMethods() {
-			// Only include if not overridden by a concrete method in n
-			own := n.lookupOwnMethod(pm.name)
+			// Only include if not overridden by a concrete method of the same kind in n
+			own := n.lookupOwnMethodBySlotKey(methodSlotKey(pm))
 			if own == nil {
 				result = append(result, pm)
 			}

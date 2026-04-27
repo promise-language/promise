@@ -308,6 +308,12 @@ func (s *BasePromiseParserListener) EnterStatement(ctx *StatementContext) {}
 // ExitStatement is called when production statement is exited.
 func (s *BasePromiseParserListener) ExitStatement(ctx *StatementContext) {}
 
+// EnterUseVarDecl is called when production useVarDecl is entered.
+func (s *BasePromiseParserListener) EnterUseVarDecl(ctx *UseVarDeclContext) {}
+
+// ExitUseVarDecl is called when production useVarDecl is exited.
+func (s *BasePromiseParserListener) ExitUseVarDecl(ctx *UseVarDeclContext) {}
+
 // EnterTypedVarDecl is called when production typedVarDecl is entered.
 func (s *BasePromiseParserListener) EnterTypedVarDecl(ctx *TypedVarDeclContext) {}
 

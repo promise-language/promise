@@ -151,6 +151,9 @@ type PromiseParserListener interface {
 	// EnterStatement is called when entering the statement production.
 	EnterStatement(c *StatementContext)
 
+	// EnterUseVarDecl is called when entering the useVarDecl production.
+	EnterUseVarDecl(c *UseVarDeclContext)
+
 	// EnterTypedVarDecl is called when entering the typedVarDecl production.
 	EnterTypedVarDecl(c *TypedVarDeclContext)
 
@@ -573,6 +576,9 @@ type PromiseParserListener interface {
 
 	// ExitStatement is called when exiting the statement production.
 	ExitStatement(c *StatementContext)
+
+	// ExitUseVarDecl is called when exiting the useVarDecl production.
+	ExitUseVarDecl(c *UseVarDeclContext)
 
 	// ExitTypedVarDecl is called when exiting the typedVarDecl production.
 	ExitTypedVarDecl(c *TypedVarDeclContext)

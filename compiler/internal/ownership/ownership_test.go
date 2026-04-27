@@ -1523,3 +1523,35 @@ func TestForInIndexBinding(t *testing.T) {
 		t.Errorf("expected 'i' to be Owned")
 	}
 }
+
+// --- Stage 8m: use Bindings ---
+
+func TestUseVarCannotBeMoved(t *testing.T) {
+	errs := ownerErrs(t, `
+		type Resource {
+			close() {}
+		}
+		consume(Resource r) {}
+		test() {
+			use r := Resource();
+			consume(r);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move use-bound variable 'r'")
+}
+
+// --- Getter/Setter same name ---
+
+func TestOwnershipGetterSetterSameName(t *testing.T) {
+	// Ownership checker must resolve getter and setter bodies independently.
+	ownerOK(t, `
+		type Box {
+			Box _inner;
+			get inner Box { return this._inner; }
+			set inner(Box v) { this._inner = v; }
+		}
+		test(Box b, Box v) {
+			b.inner = v;
+		}
+	`)
+}

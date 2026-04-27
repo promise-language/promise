@@ -37,6 +37,16 @@ type DestructureVarDecl struct {
 
 func (*DestructureVarDecl) stmtTag() {}
 
+// UseVarDecl represents a use binding declaration: use name := expr;
+// The compiler automatically calls close() on the variable when the scope exits.
+type UseVarDecl struct {
+	nodeBase
+	Name  string
+	Value Expr
+}
+
+func (*UseVarDecl) stmtTag() {}
+
 // AssignStmt represents an assignment statement: expr op= expr;
 type AssignStmt struct {
 	nodeBase

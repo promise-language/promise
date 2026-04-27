@@ -26,6 +26,9 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 	case *ast.DestructureVarDecl:
 		c.checkDestructureVarDecl(s)
 
+	case *ast.UseVarDecl:
+		c.checkUseVarDecl(s)
+
 	case *ast.AssignStmt:
 		c.checkAssignStmt(s)
 
@@ -143,6 +146,36 @@ func (c *Checker) checkDestructureVarDecl(s *ast.DestructureVarDecl) {
 		if name != "_" {
 			c.insert(types.NewVar(tpos(s.Pos()), name, tup.Elems()[i]))
 		}
+	}
+}
+
+func (c *Checker) checkUseVarDecl(s *ast.UseVarDecl) {
+	valType := c.checkExpr(s.Value)
+	if valType == nil {
+		return
+	}
+
+	// Verify the type has a close() method (structural Closer satisfaction)
+	var named *types.Named
+	switch t := valType.(type) {
+	case *types.Named:
+		named = t
+	case *types.Instance:
+		if n, ok := t.Origin().(*types.Named); ok {
+			named = n
+		}
+	}
+	if named == nil {
+		c.errorf(s.Pos(), "use binding requires a type with close() method, got %s", valType)
+		return
+	}
+	if named.LookupMethod("close") == nil {
+		c.errorf(s.Pos(), "type %s has no close() method (required for use binding)", valType)
+		return
+	}
+
+	if s.Name != "_" {
+		c.insert(types.NewVar(tpos(s.Pos()), s.Name, valType))
 	}
 }
 

@@ -115,6 +115,8 @@ func (p *printer) printStmt(s Stmt) {
 		p.line("InferredVar %s := ...", n.Name)
 	case *DestructureVarDecl:
 		p.line("Destructure (%s) := ...", strings.Join(n.Names, ", "))
+	case *UseVarDecl:
+		p.line("UseVar %s := ...", n.Name)
 	case *AssignStmt:
 		p.line("Assign %s ...", n.Op)
 	case *ReturnStmt:

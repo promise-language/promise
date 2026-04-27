@@ -25,6 +25,10 @@ Implementation stages for the Promise compiler pipeline.
 | 8h | `compiler/internal/codegen/` | Optional patterns, string interpolation, expression completeness | Done |
 | 8i | `compiler/internal/codegen/` | Char literals, container `.len`, string iteration, map compound assignment | Done |
 | 8j | `compiler/internal/types/`, `sema/`, `codegen/`, `runtime/` | Unify compound types with Named types + collection/string methods | Done |
+| 8k | `compiler/internal/codegen/`, `sema/`, `types/`, `runtime/` | Inheritance codegen, RTTI, is/as expressions | Done |
+| 8L | `compiler/internal/codegen/`, `sema/`, `ast/` | Virtual dispatch (vtable indirect calls) | Done |
+| 8m | `compiler/internal/ast/`, `sema/`, `codegen/` | `use` bindings: scoped resource lifetime with automatic `close()` | Done |
+| 8n | `compiler/internal/sema/`, `codegen/`, `ownership/` | `drop()` methods: ownership-driven cleanup at scope exit | Planned |
 | 9 | `compiler/internal/module/` | Module resolution, dependency graph | Planned |
 | 10 | `cmd/promise/` | CLI entry point (build, run, test, fmt, etc.) | Planned |
 | 11 | `pkg/` | Package manager: fetch, resolve, lock | Planned |
@@ -400,6 +404,61 @@ Promoted `slice[T]` and `map[K,V]` from structural placeholder types (`*types.Sl
 - ~35 `case *types.Slice:` / `case *types.Map:` switch cases migrated to `AsSlice`/`AsMap` helpers
 - `.len` removed as special case — now a real field lookup
 - Array delegates field/method lookup to TypSlice (rejects mutating methods like `push`/`remove`)
+
+## Stage 8L — Virtual Dispatch (Done)
+
+Vtable generation and indirect method calls for inheritance and interface types.
+
+- **Vtable layout**: Each Named type with virtual methods gets a vtable global containing function pointers ordered by `AllVirtualMethods()`. Child types extend parent vtable layout — parent slots at prefix positions, child slots appended. Getter and setter with the same name occupy distinct vtable slots via `methodSlotKey()` — setters keyed as `name$set`, getters/methods keyed by bare name.
+- **View-specific vtables**: When a value crosses an interface/parent boundary (assignment, function argument, return), the compiler generates a view vtable with slots ordered by the target type's method layout. The value struct's vtable pointer is swapped at the coercion point.
+- **Indirect calls**: Method calls on interface-typed or parent-typed variables use vtable-indexed indirect calls (`call` through GEP'd function pointer) instead of direct `call @TypeName.methodName`. Includes virtual dispatch for getters via `genVirtualGetterCall` and setters via `genVirtualSetterCall`.
+- **Setter mangling**: Setter IR functions use `TypeName.methodName$set` to avoid collision with same-name getters in the `c.funcs` map. `mangleMethodName()` helper used consistently across compiler passes (forward decl, body def, monomorphization, vtable emission, call sites).
+- **Abstract satisfaction**: `IsAbstract()` and `allAbstractMethods()` use `methodSlotKey` for matching — a concrete setter does not satisfy an abstract getter (and vice versa). Both must be independently implemented.
+- **Constructor vtable assignment**: Constructors store the type's vtable pointer into the value struct's slot 0 (currently stores RTTI in `_variant`).
+- **Kind-aware method lookup**: All 4 call sites that resolve AST `MethodDecl` to `types.Method` (sema check, sema returns, ownership, codegen) dispatch through getter/setter/method-aware lookup instead of name-only `LookupAnyMethod`.
+- **Tests**: 301 codegen tests (including virtual getter dispatch, getter override dispatch, direct getter preservation, same-name getter+setter vtable, view vtable getter+setter, generic getter+setter, compound assignment getter+setter).
+- **Deferred**: Devirtualization optimization (when concrete type is known at compile time, use direct call).
+
+## Stage 8m — `use` Bindings: Scoped Resource Lifetime (Done)
+
+Scoped resource management via `use` variable declaration modifier. When the enclosing scope exits, the compiler automatically calls `close()` on the bound variable.
+
+**Grammar:** `useVarDecl: USE IDENT WALRUS expression SEMI;` added as first `statement` alternative.
+
+**AST:** `UseVarDecl` node with `Name string`, `Value Expr` fields. Visitor, printer, and statement dispatch added.
+
+**Sema:** `checkUseVarDecl` type-checks the value expression, extracts `Named` type (handles `Named` and `Instance`), verifies `close()` method exists via `LookupMethod("close")` (structural satisfaction — no `is Closer` required), and inserts the variable into scope. 5 sema tests.
+
+**Codegen:** `useBinding` struct tracks alloca, close function (direct dispatch), named type (virtual dispatch), and value type. `genUseVarDecl` allocates the variable and resolves direct/virtual dispatch for `close()`. `emitUseCloseCalls(fromIdx)` emits close calls in LIFO order at all scope exit points:
+- **Fall-through:** `genBlock` emits close calls after generating all statements
+- **Return/Raise:** `genReturnStmt` and `genRaiseStmt` emit `emitUseCloseCalls(0)` before exit
+- **Break/Continue:** `genBreakStmt` and `genContinueStmt` emit `emitUseCloseCalls(loopUseDepth)` for loop-scoped bindings
+- All 8 loop functions save/restore `loopUseDepth`
+- Phase 1: close errors are silently suppressed (failable close error propagation deferred to follow-up)
+4 codegen tests.
+
+**Ownership:** `pinned map[string]bool` field on `Checker`. `use`-bound variables are marked as pinned — `tryMove` rejects moves of pinned variables. 1 ownership test.
+
+## Stage 8n — `drop()` Methods: Ownership-Driven Cleanup (Planned)
+
+Compiler-inserted `drop()` calls when a value's owner goes out of scope and the value has not been moved.
+
+**Sema:**
+- Validate `drop()` signature: must be `drop(~this)` with no return type and no `!`
+- Reject `drop()` on `` `copy `` types (compile error)
+- Track which Named types have `drop()` methods in `Info`
+
+**Codegen:**
+- At scope exit, for each local variable (reverse declaration order): if type has `drop()` and value was not moved and not declared with `use`, emit `drop()` call
+- **Drop flags**: for variables with ownership that depends on control flow (moved in one branch, not another), emit a boolean `alloca` (drop flag) initialized to `true`. Set to `false` when moved. At scope exit, condBr on flag before calling `drop()`.
+- **Field dropping**: after parent `drop()` returns, recursively emit `drop()` calls for each field whose type has `drop()`, in reverse declaration order
+- **`use` suppression**: variables declared with `use` are excluded from `drop()` insertion — `close()` already handles their cleanup
+
+**Ownership:**
+- Integrate with existing move tracking: when a variable is moved, record that it should not be dropped
+- Extend control flow merge to track drop eligibility across branches
+
+**Runtime:** No runtime changes — `drop()` is a regular method call.
 
 ## Stage 9 — Module System (Planned)
 

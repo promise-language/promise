@@ -199,6 +199,10 @@ func (v *BasePromiseParserVisitor) VisitStatement(ctx *StatementContext) interfa
 	return v.VisitChildren(ctx)
 }
 
+func (v *BasePromiseParserVisitor) VisitUseVarDecl(ctx *UseVarDeclContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
 func (v *BasePromiseParserVisitor) VisitTypedVarDecl(ctx *TypedVarDeclContext) interface{} {
 	return v.VisitChildren(ctx)
 }

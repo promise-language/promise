@@ -38,6 +38,7 @@ type Compiler struct {
 	// Loop control targets for break/continue
 	breakTarget    *ir.Block
 	continueTarget *ir.Block
+	loopUseDepth   int // useBindings depth at loop entry (for break/continue close insertion)
 
 	// Error handling: true if current function is failable (returns result struct)
 	canError bool
@@ -66,6 +67,17 @@ type Compiler struct {
 	hasChildren   map[*types.Named]bool        // true if any type declares `is ThisType`
 	vtableGlobals map[*types.Named]*ir.Global  // type → @promise_vtable_TypeName
 	viewVtables   map[viewVtableKey]*ir.Global // (concrete, view) → view-specific vtable
+
+	// use binding state: stack of active use bindings for automatic close() at scope exit
+	useBindings []useBinding
+}
+
+// useBinding tracks a use-bound variable for automatic close() insertion.
+type useBinding struct {
+	alloca    *ir.InstAlloca
+	closeFunc *ir.Func     // direct dispatch function (nil if virtual dispatch needed)
+	named     *types.Named // for virtual dispatch
+	valType   types.Type   // original type (for resolving close method)
 }
 
 // viewVtableKey identifies a view-specific vtable for a (concrete, view) pair.
@@ -740,7 +752,7 @@ func (c *Compiler) declareTypeMethods(file *ast.File) {
 				continue
 			}
 
-			mangledName := td.Name + "." + md.Name
+			mangledName := mangleMethodName(td.Name, md.Name, md.IsSetter)
 
 			var params []*ir.Param
 			if m.Sig().Recv() != nil {
@@ -789,7 +801,7 @@ func (c *Compiler) defineTypeMethods(file *ast.File) {
 				continue
 			}
 
-			mangledName := td.Name + "." + md.Name
+			mangledName := mangleMethodName(td.Name, md.Name, md.IsSetter)
 			fn, ok := c.funcs[mangledName]
 			if !ok {
 				continue
@@ -800,9 +812,25 @@ func (c *Compiler) defineTypeMethods(file *ast.File) {
 	}
 }
 
-// lookupAnyMethod finds a method, getter, or setter by name.
-func (c *Compiler) lookupAnyMethod(named *types.Named, name string, _, _ bool) *types.Method {
-	return named.LookupAnyMethod(name)
+// mangleMethodName returns the mangled IR function name for a method, appending
+// a "$set" suffix for setters to avoid collisions with same-name getters.
+func mangleMethodName(typeName, methodName string, isSetter bool) string {
+	if isSetter {
+		return typeName + "." + methodName + "$set"
+	}
+	return typeName + "." + methodName
+}
+
+// lookupAnyMethod finds a method, getter, or setter by name, dispatching to
+// the appropriate typed lookup based on the AST declaration's getter/setter flags.
+func (c *Compiler) lookupAnyMethod(named *types.Named, name string, isGetter, isSetter bool) *types.Method {
+	if isGetter {
+		return named.LookupGetter(name)
+	}
+	if isSetter {
+		return named.LookupSetter(name)
+	}
+	return named.LookupMethod(name)
 }
 
 // defineMethodFunc generates the body of a single method.

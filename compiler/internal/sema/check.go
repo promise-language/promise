@@ -181,12 +181,25 @@ func (c *Checker) checkTypeDecl(d *ast.TypeDecl) {
 		if md.Body == nil {
 			continue
 		}
-		m := named.LookupAnyMethod(md.Name)
+		m := lookupMethodByKind(named, md)
 		if m == nil || m.Sig() == nil {
 			continue
 		}
 		c.checkMethodBody(d.Name, md, m)
 	}
+}
+
+// lookupMethodByKind dispatches to the appropriate typed lookup based on the
+// AST method declaration's getter/setter flags, avoiding the same-name collision
+// that LookupAnyMethod causes when both a getter and setter share a field name.
+func lookupMethodByKind(named *types.Named, md *ast.MethodDecl) *types.Method {
+	if md.IsGetter {
+		return named.LookupGetter(md.Name)
+	}
+	if md.IsSetter {
+		return named.LookupSetter(md.Name)
+	}
+	return named.LookupMethod(md.Name)
 }
 
 func (c *Checker) checkMethodBody(typeName string, md *ast.MethodDecl, m *types.Method) {

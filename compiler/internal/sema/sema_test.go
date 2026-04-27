@@ -3383,3 +3383,167 @@ func TestStringHasSliceAndIndexOperators(t *testing.T) {
 		t.Error("string missing [:] operator")
 	}
 }
+
+// --- Stage 8m: use Bindings ---
+
+func TestUseVarDeclOK(t *testing.T) {
+	checkOK(t, `
+		type Resource {
+			close() {}
+		}
+		main() {
+			use r := Resource();
+		}
+	`)
+}
+
+func TestUseVarDeclNoCloseMethod(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo {
+			int x;
+		}
+		main() {
+			use f := Foo(x: 1);
+		}
+	`)
+	expectError(t, errs, "has no close() method")
+}
+
+func TestUseVarDeclPrimitiveError(t *testing.T) {
+	errs := checkErrs(t, `
+		main() {
+			use x := 42;
+		}
+	`)
+	expectError(t, errs, "has no close() method")
+}
+
+func TestUseVarDeclTypeUsable(t *testing.T) {
+	// Variable declared with use should be accessible in its scope
+	checkOK(t, `
+		type Resource {
+			int value;
+			close() {}
+			get_value() int { return this.value; }
+		}
+		main() {
+			use r := Resource(value: 10);
+			int v = r.get_value();
+		}
+	`)
+}
+
+func TestUseVarDeclStructuralClose(t *testing.T) {
+	// Any type with close() method works, even without explicit Closer interface
+	checkOK(t, `
+		type MyHandle {
+			close() {}
+		}
+		main() {
+			use h := MyHandle();
+		}
+	`)
+}
+
+// --- Getter/Setter same name regression ---
+
+func TestGetterSetterSameName(t *testing.T) {
+	// Type with both getter and setter for the same field name.
+	// Previously caused LookupAnyMethod collision: the setter body was
+	// validated against the getter's signature (or vice versa).
+	checkOK(t, `
+		type Counter {
+			int _count;
+			get count int { return this._count; }
+			set count(int v) { this._count = v; }
+		}
+		main() {
+			Counter c = Counter(_count: 0);
+			c.count = 5;
+			int v = c.count;
+		}
+	`)
+}
+
+func TestGetterSetterSameNameReturnCheck(t *testing.T) {
+	// Setter has no return type — the return checker should not flag it
+	// as "missing return statement" (which happened when LookupAnyMethod
+	// returned the getter instead of the setter).
+	checkOK(t, `
+		type Wrapper {
+			int _val;
+			get val int => this._val;
+			set val(int v) { this._val = v; }
+		}
+		main() {
+			Wrapper w = Wrapper(_val: 0);
+			w.val = 42;
+		}
+	`)
+}
+
+func TestAbstractGetterNotSatisfiedBySetter(t *testing.T) {
+	// A concrete setter should NOT satisfy an abstract getter with the same name.
+	errs := checkErrs(t, `
+		type Base {
+			get val int `+"`"+`abstract;
+		}
+		type Child is Base {
+			set val(int v) { }
+		}
+		main() {
+			Child c = Child();
+		}
+	`)
+	expectError(t, errs, "abstract")
+}
+
+func TestAbstractSetterNotSatisfiedByGetter(t *testing.T) {
+	// Inverse: a concrete getter should NOT satisfy an abstract setter.
+	errs := checkErrs(t, `
+		type Base {
+			set val(int v) `+"`"+`abstract;
+		}
+		type Child is Base {
+			get val int { return 0; }
+		}
+		main() {
+			Child c = Child();
+		}
+	`)
+	expectError(t, errs, "abstract")
+}
+
+func TestAbstractGetterAndSetterBothImplemented(t *testing.T) {
+	// Both abstract getter and setter implemented — child is not abstract.
+	checkOK(t, `
+		type Base {
+			get val int `+"`"+`abstract;
+			set val(int v) `+"`"+`abstract;
+		}
+		type Child is Base {
+			int _v;
+			get val int { return this._v; }
+			set val(int v) { this._v = v; }
+		}
+		main() {
+			Child c = Child(_v: 0);
+		}
+	`)
+}
+
+func TestCompoundAssignmentGetterSetter(t *testing.T) {
+	// Compound assignment reads via getter, writes via setter.
+	checkOK(t, `
+		type Counter {
+			int _count;
+			get count int { return this._count; }
+			set count(int v) { this._count = v; }
+		}
+		main() {
+			Counter c = Counter(_count: 0);
+			c.count += 5;
+			c.count -= 1;
+		}
+	`)
+}

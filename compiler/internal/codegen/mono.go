@@ -326,7 +326,7 @@ func (c *Compiler) declareMonoMethods(file *ast.File, instances []*types.Instanc
 				continue
 			}
 
-			mangledName := name + "." + md.Name
+			mangledName := mangleMethodName(name, md.Name, md.IsSetter)
 
 			var params []*ir.Param
 			if m.Sig().Recv() != nil {
@@ -379,7 +379,7 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 				continue
 			}
 
-			mangledName := name + "." + md.Name
+			mangledName := mangleMethodName(name, md.Name, md.IsSetter)
 			fn, ok := c.funcs[mangledName]
 			if !ok {
 				continue

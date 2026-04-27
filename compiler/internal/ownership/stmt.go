@@ -37,6 +37,14 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 	case *ast.DestructureVarDecl:
 		c.checkDestructureVarDecl(s)
 
+	case *ast.UseVarDecl:
+		c.checkExpr(s.Value)
+		c.tryMove(s.Value)
+		if s.Name != "_" {
+			c.state[s.Name] = Owned
+			c.pinned[s.Name] = true
+		}
+
 	case *ast.AssignStmt:
 		c.checkAssignStmt(s)
 

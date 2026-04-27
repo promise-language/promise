@@ -16,6 +16,7 @@ type Checker struct {
 	params   map[string]bool  // parameter names for current function
 	curSig   *types.Signature // current function signature (for return checks)
 	inUnsafe int
+	pinned   map[string]bool // use-bound variables that cannot be moved
 }
 
 // Check performs ownership analysis on the given file using sema results.
@@ -61,11 +62,13 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	savedBorrows := c.borrows
 	savedParams := c.params
 	savedSig := c.curSig
+	savedPinned := c.pinned
 
 	c.state = make(StateMap)
 	c.borrows = NewBorrowSet()
 	c.params = make(map[string]bool)
 	c.curSig = sig
+	c.pinned = make(map[string]bool)
 
 	for _, p := range sig.Params() {
 		if p.Name() != "" && p.Name() != "_" {
@@ -79,6 +82,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	c.state = savedState
 	c.borrows = savedBorrows
 	c.params = savedParams
+	c.pinned = savedPinned
 	c.curSig = savedSig
 }
 
@@ -100,7 +104,14 @@ func (c *Checker) checkTypeDecl(d *ast.TypeDecl) {
 		if md.Body == nil {
 			continue
 		}
-		m := named.LookupAnyMethod(md.Name)
+		var m *types.Method
+		if md.IsGetter {
+			m = named.LookupGetter(md.Name)
+		} else if md.IsSetter {
+			m = named.LookupSetter(md.Name)
+		} else {
+			m = named.LookupMethod(md.Name)
+		}
 		if m == nil || m.Sig() == nil {
 			continue
 		}
@@ -113,11 +124,13 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	savedBorrows := c.borrows
 	savedParams := c.params
 	savedSig := c.curSig
+	savedPinned := c.pinned
 
 	c.state = make(StateMap)
 	c.borrows = NewBorrowSet()
 	c.params = make(map[string]bool)
 	c.curSig = m.Sig()
+	c.pinned = make(map[string]bool)
 
 	if m.Sig().Recv() != nil {
 		c.state["this"] = Owned
@@ -136,6 +149,7 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	c.borrows = savedBorrows
 	c.params = savedParams
 	c.curSig = savedSig
+	c.pinned = savedPinned
 }
 
 // lookupFileScope finds an object in the file-level scope.

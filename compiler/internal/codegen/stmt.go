@@ -18,12 +18,18 @@ func (c *Compiler) genBlock(block *ast.Block) {
 	if block == nil {
 		return
 	}
+	savedUseLen := len(c.useBindings)
 	for _, stmt := range block.Stmts {
 		if c.block == nil || c.block.Term != nil {
 			break // block already terminated (return, break, etc.)
 		}
 		c.genStmt(stmt)
 	}
+	// Emit close() calls for use bindings added in this block (fall-through exit)
+	if c.block != nil && c.block.Term == nil && len(c.useBindings) > savedUseLen {
+		c.emitUseCloseCalls(savedUseLen)
+	}
+	c.useBindings = c.useBindings[:savedUseLen]
 }
 
 // genStmt generates LLVM IR for a single statement.
@@ -59,6 +65,8 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 		c.genRaiseStmt(s)
 	case *ast.DestructureVarDecl:
 		c.genDestructureVarDecl(s)
+	case *ast.UseVarDecl:
+		c.genUseVarDecl(s)
 	case *ast.IncDecStmt:
 		c.genIncDecStmt(s)
 	case *ast.Block:
@@ -153,6 +161,77 @@ func (c *Compiler) genDestructureVarDecl(s *ast.DestructureVarDecl) {
 	}
 }
 
+// --- use binding ---
+
+func (c *Compiler) genUseVarDecl(s *ast.UseVarDecl) {
+	typ := c.info.Types[s.Value]
+	if c.typeSubst != nil {
+		typ = types.Substitute(typ, c.typeSubst)
+	}
+	lt := c.resolveType(typ)
+	alloca := c.block.NewAlloca(lt)
+	alloca.SetName(s.Name)
+	val := c.genExpr(s.Value)
+	c.block.NewStore(val, alloca)
+	c.locals[s.Name] = alloca
+
+	// Track for scope-exit close() insertion
+	named := extractNamed(typ)
+	binding := useBinding{
+		alloca:  alloca,
+		named:   named,
+		valType: typ,
+	}
+	// Resolve close function for direct dispatch
+	if named != nil && (!c.needsVtable(named) || named.LookupMethod("close").IsNative()) {
+		ownerName := c.resolveMethodOwner(named, "close")
+		mangledName := mangleMethodName(ownerName, "close", false)
+		if fn, ok := c.funcs[mangledName]; ok {
+			binding.closeFunc = fn
+		}
+	}
+	c.useBindings = append(c.useBindings, binding)
+}
+
+// emitUseCloseCalls emits close() calls for all use bindings from fromIdx onwards,
+// in reverse order (LIFO). For Phase 1, close errors are silently suppressed.
+func (c *Compiler) emitUseCloseCalls(fromIdx int) {
+	for i := len(c.useBindings) - 1; i >= fromIdx; i-- {
+		b := c.useBindings[i]
+		val := c.block.NewLoad(b.alloca.ElemType, b.alloca)
+
+		if b.closeFunc != nil {
+			// Direct dispatch — extract instance pointer and call
+			instance := c.extractInstancePtr(val)
+			c.block.NewCall(b.closeFunc, instance)
+		} else if b.named != nil {
+			// Virtual dispatch through vtable
+			var vtableRaw, instance value.Value
+			vtableRaw = c.extractVtablePtr(val)
+			instance = c.extractInstancePtr(val)
+
+			slotIndex := b.named.VirtualMethodIndex("close", false) // close() is a regular method
+			if slotIndex < 0 {
+				panic(fmt.Sprintf("codegen: close method not in vtable for %s", b.named))
+			}
+			vtablePtr := c.block.NewBitCast(vtableRaw, irtypes.NewPointer(irtypes.I8Ptr))
+			fnSlotPtr := c.block.NewGetElementPtr(irtypes.I8Ptr, vtablePtr,
+				constant.NewInt(irtypes.I32, int64(slotIndex)))
+			fnRaw := c.block.NewLoad(irtypes.I8Ptr, fnSlotPtr)
+
+			// close() signature: (i8*) → void (or result struct if failable)
+			closeMethod := b.named.LookupMethod("close")
+			retType := irtypes.Type(irtypes.Void)
+			if closeMethod.Sig().CanError() {
+				retType = computeResultType(retType)
+			}
+			funcType := irtypes.NewFunc(retType, irtypes.I8Ptr)
+			fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))
+			c.block.NewCall(fnTyped, instance)
+		}
+	}
+}
+
 // --- Assignment ---
 
 func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
@@ -232,14 +311,21 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 	c.block.NewStore(result, fieldPtr)
 }
 
-// genSetterCall emits a direct call to a setter method.
+// genSetterCall emits a call to a setter method.
+// Uses virtual dispatch through the vtable when the static type needs it.
 func (c *Compiler) genSetterCall(target *ast.MemberExpr, targetType types.Type, named *types.Named, setter *types.Method, val value.Value) {
+	// Virtual dispatch for setter when static type needs vtable
+	if c.needsVtable(named) && !setter.IsNative() {
+		c.genVirtualSetterCall(target, named, setter, val)
+		return
+	}
+
 	var mangledName string
 	ownerName := c.resolveMethodOwner(named, target.Field)
 	if ownerName != named.Obj().Name() {
-		mangledName = ownerName + "." + target.Field
+		mangledName = mangleMethodName(ownerName, target.Field, true)
 	} else {
-		mangledName = c.resolveTypeName(targetType) + "." + target.Field
+		mangledName = mangleMethodName(c.resolveTypeName(targetType), target.Field, true)
 	}
 
 	fn, ok := c.funcs[mangledName]
@@ -258,6 +344,46 @@ func (c *Compiler) genSetterCall(target *ast.MemberExpr, targetType types.Type, 
 	}
 	args = append(args, val)
 	c.block.NewCall(fn, args...)
+}
+
+// genVirtualSetterCall emits an indirect setter call through the vtable.
+func (c *Compiler) genVirtualSetterCall(target *ast.MemberExpr, named *types.Named, setter *types.Method, val value.Value) {
+	receiverVal := c.genExpr(target.Target)
+
+	var vtableRaw, instance value.Value
+	if _, isThis := target.Target.(*ast.ThisExpr); isThis {
+		instance = receiverVal
+		variantPtr := c.loadVariantPtr(receiverVal)
+		typeinfoStruct := irtypes.NewStruct(irtypes.I8Ptr)
+		typeinfoPtr := c.block.NewBitCast(variantPtr, irtypes.NewPointer(typeinfoStruct))
+		vtableFieldPtr := c.block.NewGetElementPtr(typeinfoStruct, typeinfoPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		vtableRaw = c.block.NewLoad(irtypes.I8Ptr, vtableFieldPtr)
+	} else {
+		vtableRaw = c.extractVtablePtr(receiverVal)
+		instance = c.extractInstancePtr(receiverVal)
+	}
+
+	slotIndex := named.VirtualMethodIndex(target.Field, true) // setter slot
+	if slotIndex < 0 {
+		panic(fmt.Sprintf("codegen: setter %s not in vtable for %s", target.Field, named))
+	}
+	vtablePtr := c.block.NewBitCast(vtableRaw, irtypes.NewPointer(irtypes.I8Ptr))
+	fnSlotPtr := c.block.NewGetElementPtr(irtypes.I8Ptr, vtablePtr,
+		constant.NewInt(irtypes.I32, int64(slotIndex)))
+	fnRaw := c.block.NewLoad(irtypes.I8Ptr, fnSlotPtr)
+
+	// Setter signature: (i8* receiver, ValueType val) → void
+	valType := c.resolveType(setter.Sig().Params()[0].Type())
+	paramTypes := []irtypes.Type{irtypes.I8Ptr, valType}
+	retType := irtypes.Type(irtypes.Void)
+	if setter.Sig().CanError() {
+		retType = computeResultType(retType)
+	}
+	funcType := irtypes.NewFunc(retType, paramTypes...)
+	fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))
+
+	c.block.NewCall(fnTyped, instance, val)
 }
 
 // genCompoundOp applies a compound assignment operator through the type system.
@@ -403,6 +529,11 @@ func (c *Compiler) namedFromLLVMType(typ irtypes.Type) *types.Named {
 // --- Return ---
 
 func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
+	// Emit close() for all active use bindings before returning
+	if len(c.useBindings) > 0 {
+		c.emitUseCloseCalls(0)
+	}
+
 	if c.canError {
 		resultType := c.currentResultType()
 		if s.Value == nil {
@@ -434,6 +565,11 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 // --- Raise ---
 
 func (c *Compiler) genRaiseStmt(s *ast.RaiseStmt) {
+	// Emit close() for all active use bindings before raising
+	if len(c.useBindings) > 0 {
+		c.emitUseCloseCalls(0)
+	}
+
 	errVal := c.genExpr(s.Value)
 	resultType := c.currentResultType()
 	c.block.NewRet(c.wrapError(errVal, resultType))
@@ -549,8 +685,10 @@ func (c *Compiler) genWhileStmt(s *ast.WhileStmt) {
 	// Body
 	savedBreak := c.breakTarget
 	savedContinue := c.continueTarget
+	savedLoopUseDepth := c.loopUseDepth
 	c.breakTarget = exitBlock
 	c.continueTarget = headerBlock
+	c.loopUseDepth = len(c.useBindings)
 
 	c.block = bodyBlock
 	c.genBlock(s.Body)
@@ -560,6 +698,7 @@ func (c *Compiler) genWhileStmt(s *ast.WhileStmt) {
 
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
+	c.loopUseDepth = savedLoopUseDepth
 	c.block = exitBlock
 }
 
@@ -581,8 +720,10 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	// Body: unwrap value, bind to local
 	savedBreak := c.breakTarget
 	savedContinue := c.continueTarget
+	savedLoopUseDepth := c.loopUseDepth
 	c.breakTarget = exitBlock
 	c.continueTarget = headerBlock
+	c.loopUseDepth = len(c.useBindings)
 
 	c.block = bodyBlock
 	innerVal := c.block.NewExtractValue(optVal, 1)
@@ -607,6 +748,7 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
+	c.loopUseDepth = savedLoopUseDepth
 	c.block = exitBlock
 }
 
@@ -686,8 +828,10 @@ func (c *Compiler) genForInRange(s *ast.ForInStmt) {
 
 	savedBreak := c.breakTarget
 	savedContinue := c.continueTarget
+	savedLoopUseDepth := c.loopUseDepth
 	c.breakTarget = exitBlock
 	c.continueTarget = updateBlock
+	c.loopUseDepth = len(c.useBindings)
 
 	c.block = bodyBlock
 	c.genBlock(s.Body)
@@ -711,6 +855,7 @@ func (c *Compiler) genForInRange(s *ast.ForInStmt) {
 
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
+	c.loopUseDepth = savedLoopUseDepth
 	c.block = exitBlock
 }
 
@@ -743,8 +888,10 @@ func (c *Compiler) genClassicForStmt(s *ast.ClassicForStmt) {
 	// Body
 	savedBreak := c.breakTarget
 	savedContinue := c.continueTarget
+	savedLoopUseDepth := c.loopUseDepth
 	c.breakTarget = exitBlock
 	c.continueTarget = updateBlock
+	c.loopUseDepth = len(c.useBindings)
 
 	c.block = bodyBlock
 	c.genBlock(s.Body)
@@ -781,6 +928,7 @@ func (c *Compiler) genClassicForStmt(s *ast.ClassicForStmt) {
 
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
+	c.loopUseDepth = savedLoopUseDepth
 	c.block = exitBlock
 }
 
@@ -794,8 +942,10 @@ func (c *Compiler) genInfiniteLoop(s *ast.InfiniteLoop) {
 
 	savedBreak := c.breakTarget
 	savedContinue := c.continueTarget
+	savedLoopUseDepth := c.loopUseDepth
 	c.breakTarget = exitBlock
 	c.continueTarget = bodyBlock
+	c.loopUseDepth = len(c.useBindings)
 
 	c.block = bodyBlock
 	c.genBlock(s.Body)
@@ -805,6 +955,7 @@ func (c *Compiler) genInfiniteLoop(s *ast.InfiniteLoop) {
 
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
+	c.loopUseDepth = savedLoopUseDepth
 	c.block = exitBlock
 }
 
@@ -812,12 +963,20 @@ func (c *Compiler) genInfiniteLoop(s *ast.InfiniteLoop) {
 
 func (c *Compiler) genBreakStmt() {
 	if c.breakTarget != nil {
+		// Close use bindings added within the loop body
+		if len(c.useBindings) > c.loopUseDepth {
+			c.emitUseCloseCalls(c.loopUseDepth)
+		}
 		c.block.NewBr(c.breakTarget)
 	}
 }
 
 func (c *Compiler) genContinueStmt() {
 	if c.continueTarget != nil {
+		// Close use bindings added within the loop body
+		if len(c.useBindings) > c.loopUseDepth {
+			c.emitUseCloseCalls(c.loopUseDepth)
+		}
 		c.block.NewBr(c.continueTarget)
 	}
 }
@@ -1034,8 +1193,10 @@ func (c *Compiler) genForInSlice(s *ast.ForInStmt, slicePtr value.Value, elemTyp
 	// Body: load element, store to binding
 	savedBreak := c.breakTarget
 	savedContinue := c.continueTarget
+	savedLoopUseDepth := c.loopUseDepth
 	c.breakTarget = exitBlock
 	c.continueTarget = updateBlock
+	c.loopUseDepth = len(c.useBindings)
 
 	c.block = bodyBlock
 	dataBase := c.block.NewGetElementPtr(irtypes.I8, slicePtr,
@@ -1068,6 +1229,7 @@ func (c *Compiler) genForInSlice(s *ast.ForInStmt, slicePtr value.Value, elemTyp
 
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
+	c.loopUseDepth = savedLoopUseDepth
 	c.block = exitBlock
 }
 
@@ -1120,8 +1282,10 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapPtr value.Value, keyType, va
 	// Body: build tuple from key/val outputs, store to binding
 	savedBreak := c.breakTarget
 	savedContinue := c.continueTarget
+	savedLoopUseDepth := c.loopUseDepth
 	c.breakTarget = exitBlock
 	c.continueTarget = updateBlock
+	c.loopUseDepth = len(c.useBindings)
 
 	c.block = bodyBlock
 	key := c.block.NewLoad(keyLLVM, keyOutAlloca)
@@ -1148,6 +1312,7 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapPtr value.Value, keyType, va
 
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
+	c.loopUseDepth = savedLoopUseDepth
 	c.block = exitBlock
 }
 
@@ -1181,8 +1346,10 @@ func (c *Compiler) genForInString(s *ast.ForInStmt, strPtr value.Value) {
 	// Body: bind char to loop variable
 	savedBreak := c.breakTarget
 	savedContinue := c.continueTarget
+	savedLoopUseDepth := c.loopUseDepth
 	c.breakTarget = exitBlock
 	c.continueTarget = headerBlock
+	c.loopUseDepth = len(c.useBindings)
 
 	c.block = bodyBlock
 	alloca := c.block.NewAlloca(irtypes.I32)
@@ -1206,5 +1373,6 @@ func (c *Compiler) genForInString(s *ast.ForInStmt, strPtr value.Value) {
 
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue
+	c.loopUseDepth = savedLoopUseDepth
 	c.block = exitBlock
 }

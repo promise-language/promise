@@ -881,9 +881,9 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 	var mangledName string
 	ownerName := c.resolveMethodOwner(named, member.Field)
 	if ownerName != named.Obj().Name() {
-		mangledName = ownerName + "." + member.Field
+		mangledName = mangleMethodName(ownerName, member.Field, false)
 	} else {
-		mangledName = c.resolveTypeName(targetType) + "." + member.Field
+		mangledName = mangleMethodName(c.resolveTypeName(targetType), member.Field, false)
 	}
 
 	fn, ok := c.funcs[mangledName]
@@ -917,14 +917,20 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 	return c.block.NewCall(fn, args...)
 }
 
-// genGetterCall emits a direct call to a getter method (zero args beyond receiver).
+// genGetterCall emits a call to a getter method (zero args beyond receiver).
+// Uses virtual dispatch through the vtable when the static type needs it.
 func (c *Compiler) genGetterCall(e *ast.MemberExpr, targetType types.Type, named *types.Named, getter *types.Method) value.Value {
+	// Virtual dispatch for getter when static type needs vtable
+	if c.needsVtable(named) && !getter.IsNative() {
+		return c.genVirtualGetterCall(e, named, getter)
+	}
+
 	var mangledName string
 	ownerName := c.resolveMethodOwner(named, e.Field)
 	if ownerName != named.Obj().Name() {
-		mangledName = ownerName + "." + e.Field
+		mangledName = mangleMethodName(ownerName, e.Field, false)
 	} else {
-		mangledName = c.resolveTypeName(targetType) + "." + e.Field
+		mangledName = mangleMethodName(c.resolveTypeName(targetType), e.Field, false)
 	}
 
 	fn, ok := c.funcs[mangledName]
@@ -943,6 +949,47 @@ func (c *Compiler) genGetterCall(e *ast.MemberExpr, targetType types.Type, named
 	}
 
 	return c.block.NewCall(fn, args...)
+}
+
+// genVirtualGetterCall emits an indirect getter call through the vtable.
+func (c *Compiler) genVirtualGetterCall(e *ast.MemberExpr, named *types.Named, getter *types.Method) value.Value {
+	receiverVal := c.genExpr(e.Target)
+
+	var vtableRaw, instance value.Value
+	if _, isThis := e.Target.(*ast.ThisExpr); isThis {
+		instance = receiverVal
+		variantPtr := c.loadVariantPtr(receiverVal)
+		typeinfoStruct := irtypes.NewStruct(irtypes.I8Ptr)
+		typeinfoPtr := c.block.NewBitCast(variantPtr, irtypes.NewPointer(typeinfoStruct))
+		vtableFieldPtr := c.block.NewGetElementPtr(typeinfoStruct, typeinfoPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		vtableRaw = c.block.NewLoad(irtypes.I8Ptr, vtableFieldPtr)
+	} else {
+		vtableRaw = c.extractVtablePtr(receiverVal)
+		instance = c.extractInstancePtr(receiverVal)
+	}
+
+	slotIndex := named.VirtualMethodIndex(e.Field, false) // getter, not setter
+	if slotIndex < 0 {
+		panic(fmt.Sprintf("codegen: getter %s not in vtable for %s", e.Field, named))
+	}
+	vtablePtr := c.block.NewBitCast(vtableRaw, irtypes.NewPointer(irtypes.I8Ptr))
+	fnSlotPtr := c.block.NewGetElementPtr(irtypes.I8Ptr, vtablePtr,
+		constant.NewInt(irtypes.I32, int64(slotIndex)))
+	fnRaw := c.block.NewLoad(irtypes.I8Ptr, fnSlotPtr)
+
+	retType := irtypes.Type(irtypes.Void)
+	if getter.Sig().Result() != nil {
+		retType = c.resolveType(getter.Sig().Result())
+	}
+	if getter.Sig().CanError() {
+		retType = computeResultType(retType)
+	}
+	paramTypes := []irtypes.Type{irtypes.I8Ptr}
+	funcType := irtypes.NewFunc(retType, paramTypes...)
+	fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))
+
+	return c.block.NewCall(fnTyped, instance)
 }
 
 // genVirtualMethodCall emits an indirect call through the vtable.
@@ -972,7 +1019,7 @@ func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 	}
 
 	// 3. Index into vtable — use the STATIC type's slot layout
-	slotIndex := named.VirtualMethodIndex(member.Field)
+	slotIndex := named.VirtualMethodIndex(member.Field, false) // regular method, not setter
 	if slotIndex < 0 {
 		panic(fmt.Sprintf("codegen: method %s not in vtable for %s", member.Field, named))
 	}
@@ -2242,7 +2289,7 @@ func (c *Compiler) genFieldOnValue(val value.Value, typ types.Type, fieldName st
 
 	// Getter property: emit a direct call with the value as receiver
 	if g := named.LookupGetter(fieldName); g != nil {
-		mangledName := c.resolveTypeName(typ) + "." + fieldName
+		mangledName := mangleMethodName(c.resolveTypeName(typ), fieldName, false)
 		fn, ok := c.funcs[mangledName]
 		if !ok {
 			panic(fmt.Sprintf("codegen: undeclared getter %s", mangledName))

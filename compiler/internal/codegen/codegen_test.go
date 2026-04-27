@@ -18,7 +18,7 @@ var stdAll string
 func init() {
 	var b strings.Builder
 
-	// Numeric types: arithmetic + comparison + unary negate
+	// Numeric types: arithmetic + comparison + unary negate + inc/dec
 	for _, name := range []string{"int", "i8", "i16", "i32", "i64", "uint", "u8", "u16", "u32", "u64", "f32", "f64"} {
 		fmt.Fprintf(&b, "type %s `native {\n", name)
 		for _, op := range []string{"+", "-", "*", "/", "%"} {
@@ -27,7 +27,15 @@ func init() {
 		for _, op := range []string{"==", "!=", "<", ">", "<=", ">="} {
 			fmt.Fprintf(&b, "\t%s(%s other) bool `native;\n", op, name)
 		}
-		fmt.Fprintf(&b, "\t-() %s `native;\n}\n", name)
+		fmt.Fprintf(&b, "\t-() %s `native;\n", name)
+		fmt.Fprintf(&b, "\t++() %s `native;\n", name)
+		fmt.Fprintf(&b, "\t--() %s `native;\n", name)
+		// Range operators for integer types only (not floats)
+		if name != "f32" && name != "f64" {
+			fmt.Fprintf(&b, "\t..(%s end) range `native;\n", name)
+			fmt.Fprintf(&b, "\t..=(%s end) range `native;\n", name)
+		}
+		b.WriteString("}\n")
 	}
 
 	// Bool
@@ -43,6 +51,8 @@ func init() {
 	for _, op := range []string{"==", "!=", "<", ">", "<=", ">="} {
 		fmt.Fprintf(&b, "\t%s(char other) bool `native;\n", op)
 	}
+	b.WriteString("\t..(char end) range `native;\n")
+	b.WriteString("\t..=(char end) range `native;\n")
 	b.WriteString("}\n")
 
 	// String (operators + methods)
@@ -57,10 +67,16 @@ func init() {
 	b.WriteString("\tindex_of(string sub) int? `native;\n")
 	b.WriteString("\ttrim() string `native;\n")
 	b.WriteString("\tsplit(string sep) string[] `native;\n")
+	b.WriteString("\t[](int index) char `native;\n")
+	b.WriteString("\t[:](int? start, int? end) string `native;\n")
 	b.WriteString("\tget is_empty bool => this.len == 0;\n}\n")
 
 	// Containers
 	b.WriteString("type slice[T] `native {\n\tint len;\n")
+	b.WriteString("\t[](int index) T `native;\n")
+	b.WriteString("\t[]=(int index, T value) `native;\n")
+	b.WriteString("\t[:](int? start, int? end) T[] `native;\n")
+	b.WriteString("\t[:]=(int? start, int? end, T[] value) `native;\n")
 	b.WriteString("\tpush(T elem) `native;\n")
 	b.WriteString("\tpop() T? `native;\n")
 	b.WriteString("\tcontains(T elem) bool `native;\n")
@@ -68,6 +84,8 @@ func init() {
 	b.WriteString("\tget is_empty bool => this.len == 0;\n}\n")
 
 	b.WriteString("type map[K, V] `native {\n\tint len;\n")
+	b.WriteString("\t[](K key) V? `native;\n")
+	b.WriteString("\t[]=(K key, V value) `native;\n")
 	b.WriteString("\tcontains(K key) bool `native;\n")
 	b.WriteString("\tremove(K key) bool `native;\n")
 	b.WriteString("\tkeys() K[] `native;\n")
@@ -3968,4 +3986,98 @@ func TestStdFuncUnshadowed(t *testing.T) {
 	)
 	// Call should go to the __std_helper function
 	assertContains(t, ir, "call i64 @__std_helper")
+}
+
+// --- Operator Method Dispatch Tests ---
+
+func TestIncDecVariable(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			x := 0;
+			x++;
+			x--;
+		}
+	`)
+	// ++ adds 1, -- subtracts 1
+	assertContains(t, ir, "add i64")
+	assertContains(t, ir, "sub i64")
+}
+
+func TestIncDecMember(t *testing.T) {
+	ir := generateIR(t, `
+		type Counter { int value; }
+		main() {
+			Counter c = Counter(value: 0);
+			c.value++;
+		}
+	`)
+	// Should load field, add 1, store back
+	assertContains(t, ir, "add i64")
+	assertContains(t, ir, "getelementptr")
+}
+
+func TestIncDecIndexedElement(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[] items = [1, 2, 3];
+			items[0]++;
+		}
+	`)
+	// Should have bounds check
+	assertContains(t, ir, "incdec.index.ok")
+	assertContains(t, ir, "incdec.index.oob")
+	// Should load, increment, store back
+	assertContains(t, ir, "add i64")
+}
+
+func TestClassicForWithIncDec(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			for i := 0; i < 5; i++ {
+				int x = i;
+			}
+		}
+	`)
+	// Should have for loop structure
+	assertContains(t, ir, "for.header")
+	assertContains(t, ir, "for.body")
+	assertContains(t, ir, "for.update")
+	// Update should use add i64
+	assertContains(t, ir, "add i64")
+}
+
+func TestRangeExclusiveCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			for i in 0..5 {
+				int x = i;
+			}
+		}
+	`)
+	// Range loop compares counter < end
+	assertContains(t, ir, "icmp slt")
+	assertContains(t, ir, "forin.header")
+}
+
+func TestRangeInclusiveCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			for i in 0..=5 {
+				int x = i;
+			}
+		}
+	`)
+	// Inclusive range checks counter <= end
+	assertContains(t, ir, "forin.header")
+	assertContains(t, ir, "forin.body")
+}
+
+func TestUnaryNotCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			bool b = !true;
+		}
+	`)
+	// ! on bool generates xor with 1
+	assertContains(t, ir, "xor i1")
 }

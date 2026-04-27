@@ -125,6 +125,15 @@ type ForInStmt struct {
 
 func (*ForInStmt) stmtTag() {}
 
+// IncDecStmt represents an increment or decrement statement: x++; or x--;
+type IncDecStmt struct {
+	nodeBase
+	Target Expr
+	IsInc  bool // true for ++, false for --
+}
+
+func (*IncDecStmt) stmtTag() {}
+
 // ClassicForStmt represents a classic for loop: for init; cond; update { }
 type ClassicForStmt struct {
 	nodeBase
@@ -133,8 +142,10 @@ type ClassicForStmt struct {
 	InitValue    Expr
 	Cond         Expr
 	UpdateTarget Expr     // nil for expression-only update
-	UpdateOp     AssignOp // only meaningful if UpdateTarget != nil
-	UpdateValue  Expr
+	UpdateOp     AssignOp // only meaningful if UpdateTarget != nil and !UpdateIncDec
+	UpdateValue  Expr     // nil when UpdateIncDec is true
+	UpdateIncDec bool     // true when update is ++ or --
+	UpdateIsInc  bool     // true for ++, false for --
 	Body         *Block
 }
 

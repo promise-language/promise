@@ -6,4 +6,6 @@ type char `native {
     >(char other) bool `native;
     <=(char other) bool `native;
     >=(char other) bool `native;
+    ..(char end) range `native;
+    ..=(char end) range `native;
 }

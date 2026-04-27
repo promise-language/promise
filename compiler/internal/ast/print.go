@@ -182,6 +182,15 @@ func (p *printer) printStmt(s Stmt) {
 		p.indent++
 		p.printBlock(n.Body)
 		p.indent--
+	case *IncDecStmt:
+		op := "++"
+		if !n.IsInc {
+			op = "--"
+		}
+		p.line("IncDec %s", op)
+		p.indent++
+		p.printExpr(n.Target)
+		p.indent--
 	default:
 		p.line("Stmt<%T>", s)
 	}
@@ -228,6 +237,17 @@ func (p *printer) printExpr(e Expr) {
 		p.indent++
 		p.printExpr(n.Target)
 		p.printExpr(n.Index)
+		p.indent--
+	case *SliceExpr:
+		p.line("Slice")
+		p.indent++
+		p.printExpr(n.Target)
+		if n.Low != nil {
+			p.printExpr(n.Low)
+		}
+		if n.High != nil {
+			p.printExpr(n.High)
+		}
 		p.indent--
 	case *IdentExpr:
 		p.line("Ident %s", n.Name)

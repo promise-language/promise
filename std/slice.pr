@@ -2,6 +2,11 @@
 type slice[T] `native {
     int len;
 
+    [](int index) T `native;
+    []=(int index, T value) `native;
+    [:](int? start, int? end) T[] `native;
+    [:]=(int? start, int? end, T[] value) `native;
+
     push(T elem) `native;
     pop() T? `native;
     contains(T elem) bool `native;

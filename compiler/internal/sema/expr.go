@@ -71,6 +71,9 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 	case *ast.IndexExpr:
 		typ = c.checkIndexExpr(e)
 
+	case *ast.SliceExpr:
+		typ = c.checkSliceExpr(e)
+
 	case *ast.OptionalChainExpr:
 		typ = c.checkOptionalChainExpr(e)
 
@@ -243,14 +246,10 @@ func (c *Checker) checkBinaryExpr(e *ast.BinaryExpr) types.Type {
 		}
 		return inner
 
-	case ast.BinExclusiveRange, ast.BinInclusiveRange:
-		if !types.Identical(left, types.TypInt) {
-			c.errorf(e.Left.Pos(), "range operator requires int, got %s", left)
-		}
-		if !types.Identical(right, types.TypInt) {
-			c.errorf(e.Right.Pos(), "range operator requires int, got %s", right)
-		}
-		return types.TypRange
+	case ast.BinExclusiveRange:
+		return c.checkOperator(e.Pos(), left, "..", right)
+	case ast.BinInclusiveRange:
+		return c.checkOperator(e.Pos(), left, "..=", right)
 
 	default:
 		// Arithmetic and comparison: lookup operator method on left type
@@ -315,10 +314,7 @@ func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr) types.Type {
 
 	switch e.Op {
 	case ast.UnaryNot:
-		if !types.Identical(operand, types.TypBool) {
-			c.errorf(e.Pos(), "operator ! requires bool, got %s", operand)
-		}
-		return types.TypBool
+		return c.checkUnaryOperator(e.Pos(), operand, "!")
 
 	case ast.UnaryNeg:
 		return c.checkUnaryOperator(e.Pos(), operand, "-")
@@ -669,31 +665,109 @@ func (c *Checker) checkIndexExpr(e *ast.IndexExpr) types.Type {
 
 	index := c.checkExpr(e.Index)
 
+	// Method dispatch: look up [] on Named/Instance types
+	var named *types.Named
+	var subst map[*types.TypeParam]types.Type
+
 	switch t := target.(type) {
-	case *types.Array:
+	case *types.Named:
+		named = t
+	case *types.Instance:
+		if origin, ok := t.Origin().(*types.Named); ok {
+			named = origin
+			subst = types.BuildSubstMap(origin.TypeParams(), t.TypeArgs())
+		}
+	}
+
+	if named != nil {
+		if m := named.LookupMethod("[]"); m != nil {
+			sig := m.Sig()
+			if subst != nil {
+				sig = types.Substitute(sig, subst).(*types.Signature)
+			}
+			if len(sig.Params()) >= 1 {
+				paramType := sig.Params()[0].Type()
+				if index != nil && !types.AssignableTo(index, paramType) {
+					c.errorf(e.Index.Pos(), "index type mismatch: expected %s, got %s", paramType, index)
+				}
+			}
+			if sig.Result() != nil {
+				return sig.Result()
+			}
+			return types.TypVoid
+		}
+	}
+
+	// Fallback: Array (structural, not Named)
+	if arr, ok := target.(*types.Array); ok {
 		if index != nil && !types.Identical(index, types.TypInt) {
 			c.errorf(e.Index.Pos(), "array index must be int, got %s", index)
 		}
-		return t.Elem()
+		return arr.Elem()
+	}
 
-	default:
-		// Slice indexing: int[] → elem type
-		if elem, ok := types.AsSlice(target); ok {
-			if index != nil && !types.Identical(index, types.TypInt) {
-				c.errorf(e.Index.Pos(), "slice index must be int, got %s", index)
-			}
-			return elem
-		}
-		// Map indexing: Map[K,V] → V?
-		if key, val, ok := types.AsMap(target); ok {
-			if index != nil && !types.AssignableTo(index, key) {
-				c.errorf(e.Index.Pos(), "map key type mismatch: expected %s, got %s", key, index)
-			}
-			return types.NewOptional(val)
-		}
-		c.errorf(e.Pos(), "cannot index type %s", target)
+	c.errorf(e.Pos(), "cannot index type %s", target)
+	return nil
+}
+
+func (c *Checker) checkSliceExpr(e *ast.SliceExpr) types.Type {
+	target := c.checkExpr(e.Target)
+	if target == nil {
 		return nil
 	}
+
+	// Method dispatch: look up [:] on Named/Instance types
+	var named *types.Named
+	var subst map[*types.TypeParam]types.Type
+
+	switch t := target.(type) {
+	case *types.Named:
+		named = t
+	case *types.Instance:
+		if origin, ok := t.Origin().(*types.Named); ok {
+			named = origin
+			subst = types.BuildSubstMap(origin.TypeParams(), t.TypeArgs())
+		}
+	}
+
+	if named != nil {
+		if m := named.LookupMethod("[:]"); m != nil {
+			sig := m.Sig()
+			if subst != nil {
+				sig = types.Substitute(sig, subst).(*types.Signature)
+			}
+			params := sig.Params()
+
+			// Validate low bound against first param type
+			if e.Low != nil {
+				low := c.checkExpr(e.Low)
+				if low != nil && len(params) >= 1 {
+					paramType := params[0].Type()
+					if !types.AssignableTo(low, paramType) {
+						c.errorf(e.Low.Pos(), "slice bound type mismatch: expected %s, got %s", paramType, low)
+					}
+				}
+			}
+			// Validate high bound against second param type
+			if e.High != nil {
+				high := c.checkExpr(e.High)
+				if high != nil && len(params) >= 2 {
+					paramType := params[1].Type()
+					if !types.AssignableTo(high, paramType) {
+						c.errorf(e.High.Pos(), "slice bound type mismatch: expected %s, got %s", paramType, high)
+					}
+				}
+			}
+
+			if sig.Result() != nil {
+				return sig.Result()
+			}
+			return types.TypVoid
+		}
+	}
+
+	c.errorf(e.Pos(), "type %s does not support slicing", target)
+	return nil
 }
 
 // instantiateFromIndex handles Type[Arg] in expression context as generic instantiation.

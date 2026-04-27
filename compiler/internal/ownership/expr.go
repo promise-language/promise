@@ -34,6 +34,15 @@ func (c *Checker) checkExpr(expr ast.Expr) {
 		c.checkExpr(e.Target)
 		c.checkExpr(e.Index)
 
+	case *ast.SliceExpr:
+		c.checkExpr(e.Target)
+		if e.Low != nil {
+			c.checkExpr(e.Low)
+		}
+		if e.High != nil {
+			c.checkExpr(e.High)
+		}
+
 	case *ast.MemberExpr:
 		c.checkExpr(e.Target)
 

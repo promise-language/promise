@@ -59,6 +59,8 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 		c.genRaiseStmt(s)
 	case *ast.DestructureVarDecl:
 		c.genDestructureVarDecl(s)
+	case *ast.IncDecStmt:
+		c.genIncDecStmt(s)
 	case *ast.Block:
 		c.genBlock(s)
 	default:
@@ -293,6 +295,85 @@ func (c *Compiler) genCompoundOp(op ast.AssignOp, current, val value.Value) valu
 	}
 
 	panic(fmt.Sprintf("codegen: non-native compound op %s.%s not yet implemented", named, binOp))
+}
+
+// --- Increment / Decrement ---
+
+// genIncDecStmt generates code for x++ or x-- statements.
+func (c *Compiler) genIncDecStmt(s *ast.IncDecStmt) {
+	c.genIncDecTarget(s.Target, s.IsInc)
+}
+
+// genIncDecTarget applies ++ or -- to the given expression target.
+func (c *Compiler) genIncDecTarget(target ast.Expr, isInc bool) {
+	op := "++"
+	if !isInc {
+		op = "--"
+	}
+	targetType := c.info.Types[target]
+	named := extractNamed(targetType)
+	if named == nil {
+		panic(fmt.Sprintf("codegen: cannot resolve Named type for inc/dec on %s", targetType))
+	}
+
+	switch t := target.(type) {
+	case *ast.IdentExpr:
+		alloca, ok := c.locals[t.Name]
+		if !ok {
+			panic(fmt.Sprintf("codegen: undefined variable %q in inc/dec", t.Name))
+		}
+		current := c.block.NewLoad(alloca.ElemType, alloca)
+		result := c.emitNativeOp(named, op, current, nil)
+		c.block.NewStore(result, alloca)
+	case *ast.MemberExpr:
+		// Load field, apply op, store back
+		fieldPtr := c.genFieldPtr(t)
+		fieldType := c.info.Types[target]
+		llvmType := c.resolveType(fieldType)
+		current := c.block.NewLoad(llvmType, fieldPtr)
+		result := c.emitNativeOp(named, op, current, nil)
+		c.block.NewStore(result, fieldPtr)
+	case *ast.IndexExpr:
+		// Load indexed element, apply op, store back (slice only)
+		indexTargetType := c.info.Types[t.Target]
+		if c.typeSubst != nil {
+			indexTargetType = types.Substitute(indexTargetType, c.typeSubst)
+		}
+		elem, ok := types.AsSlice(indexTargetType)
+		if !ok {
+			panic(fmt.Sprintf("codegen: inc/dec on index of non-slice type %s", indexTargetType))
+		}
+		slicePtr := c.genExpr(t.Target)
+		idx := c.genExpr(t.Index)
+		elemLLVM := c.resolveType(elem)
+
+		// Bounds check
+		headerType := sliceHeaderType()
+		headerPtr := c.block.NewBitCast(slicePtr, irtypes.NewPointer(headerType))
+		lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		length := c.block.NewLoad(irtypes.I64, lenPtr)
+		inBounds := c.block.NewICmp(enum.IPredULT, idx, length)
+		okBlock := c.newBlock("incdec.index.ok")
+		panicBlock := c.newBlock("incdec.index.oob")
+		c.block.NewCondBr(inBounds, okBlock, panicBlock)
+
+		c.block = panicBlock
+		oobMsg := c.makeGlobalString("index out of bounds")
+		c.block.NewCall(c.funcs["promise_panic"], oobMsg)
+		c.block.NewUnreachable()
+
+		c.block = okBlock
+		dataBase := c.block.NewGetElementPtr(irtypes.I8, slicePtr,
+			constant.NewInt(irtypes.I64, int64(sliceHeaderSize)))
+		dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
+		elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, idx)
+		current := c.block.NewLoad(elemLLVM, elemPtr)
+		result := c.emitNativeOp(named, op, current, nil)
+		c.block.NewStore(result, elemPtr)
+	default:
+		panic(fmt.Sprintf("codegen: unsupported inc/dec target %T", target))
+	}
 }
 
 // namedFromLLVMType reverse-maps an LLVM type to the most common Promise Named type.
@@ -673,7 +754,10 @@ func (c *Compiler) genClassicForStmt(s *ast.ClassicForStmt) {
 
 	// Update
 	c.block = updateBlock
-	if s.UpdateTarget != nil {
+	if s.UpdateIncDec {
+		// Inc/dec update: target++ or target--
+		c.genIncDecTarget(s.UpdateTarget, s.UpdateIsInc)
+	} else if s.UpdateTarget != nil {
 		// Compound update: target op= value
 		updateVal := c.genExpr(s.UpdateValue)
 		ident, ok := s.UpdateTarget.(*ast.IdentExpr)

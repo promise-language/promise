@@ -2,6 +2,9 @@
 type map[K, V] `native {
     int len;
 
+    [](K key) V? `native;
+    []=(K key, V value) `native;
+
     contains(K key) bool `native;
     remove(K key) bool `native;
     keys() K[] `native;

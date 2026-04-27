@@ -10,6 +10,9 @@ type string `native {
     <=(string other) bool `native;
     >=(string other) bool `native;
 
+    [](int index) char `native;
+    [:](int? start, int? end) string `native;
+
     contains(string sub) bool `native;
     starts_with(string prefix) bool `native;
     ends_with(string suffix) bool `native;

@@ -12,6 +12,10 @@ type int `native {
     <=(int other) bool `native;
     >=(int other) bool `native;
     -() int `native;
+    ++() int `native;
+    --() int `native;
+    ..(int end) range `native;
+    ..=(int end) range `native;
 }
 
 type i8 `native {
@@ -27,6 +31,10 @@ type i8 `native {
     <=(i8 other) bool `native;
     >=(i8 other) bool `native;
     -() i8 `native;
+    ++() i8 `native;
+    --() i8 `native;
+    ..(i8 end) range `native;
+    ..=(i8 end) range `native;
 }
 
 type i16 `native {
@@ -42,6 +50,10 @@ type i16 `native {
     <=(i16 other) bool `native;
     >=(i16 other) bool `native;
     -() i16 `native;
+    ++() i16 `native;
+    --() i16 `native;
+    ..(i16 end) range `native;
+    ..=(i16 end) range `native;
 }
 
 type i32 `native {
@@ -57,6 +69,10 @@ type i32 `native {
     <=(i32 other) bool `native;
     >=(i32 other) bool `native;
     -() i32 `native;
+    ++() i32 `native;
+    --() i32 `native;
+    ..(i32 end) range `native;
+    ..=(i32 end) range `native;
 }
 
 type i64 `native {
@@ -72,4 +88,8 @@ type i64 `native {
     <=(i64 other) bool `native;
     >=(i64 other) bool `native;
     -() i64 `native;
+    ++() i64 `native;
+    --() i64 `native;
+    ..(i64 end) range `native;
+    ..=(i64 end) range `native;
 }

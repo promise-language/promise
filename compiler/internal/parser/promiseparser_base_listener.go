@@ -518,6 +518,12 @@ func (s *BasePromiseParserListener) EnterAdditiveExpr(ctx *AdditiveExprContext) 
 // ExitAdditiveExpr is called when production additiveExpr is exited.
 func (s *BasePromiseParserListener) ExitAdditiveExpr(ctx *AdditiveExprContext) {}
 
+// EnterSliceExpr is called when production sliceExpr is entered.
+func (s *BasePromiseParserListener) EnterSliceExpr(ctx *SliceExprContext) {}
+
+// ExitSliceExpr is called when production sliceExpr is exited.
+func (s *BasePromiseParserListener) ExitSliceExpr(ctx *SliceExprContext) {}
+
 // EnterElvisExpr is called when production elvisExpr is entered.
 func (s *BasePromiseParserListener) EnterElvisExpr(ctx *ElvisExprContext) {}
 

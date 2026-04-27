@@ -256,6 +256,9 @@ type PromiseParserListener interface {
 	// EnterAdditiveExpr is called when entering the additiveExpr production.
 	EnterAdditiveExpr(c *AdditiveExprContext)
 
+	// EnterSliceExpr is called when entering the sliceExpr production.
+	EnterSliceExpr(c *SliceExprContext)
+
 	// EnterElvisExpr is called when entering the elvisExpr production.
 	EnterElvisExpr(c *ElvisExprContext)
 
@@ -675,6 +678,9 @@ type PromiseParserListener interface {
 
 	// ExitAdditiveExpr is called when exiting the additiveExpr production.
 	ExitAdditiveExpr(c *AdditiveExprContext)
+
+	// ExitSliceExpr is called when exiting the sliceExpr production.
+	ExitSliceExpr(c *SliceExprContext)
 
 	// ExitElvisExpr is called when exiting the elvisExpr production.
 	ExitElvisExpr(c *ElvisExprContext)

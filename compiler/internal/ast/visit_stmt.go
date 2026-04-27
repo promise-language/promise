@@ -111,15 +111,10 @@ func (b *Builder) VisitAssignmentStmt(ctx *parser.AssignmentStmtContext) interfa
 }
 
 func (b *Builder) VisitIncDecStmt(ctx *parser.IncDecStmtContext) interface{} {
-	op := OpAddAssign
-	if ctx.MINUSMINUS() != nil {
-		op = OpSubAssign
-	}
-	return &AssignStmt{
+	return &IncDecStmt{
 		nodeBase: b.baseFromContext(ctx),
 		Target:   b.visitExpr(ctx.Expression()),
-		Op:       op,
-		Value:    &IntLit{nodeBase: b.baseFromContext(ctx), Raw: "1"},
+		IsInc:    ctx.PLUSPLUS() != nil,
 	}
 }
 
@@ -236,12 +231,8 @@ func (b *Builder) VisitClassicForStmt(ctx *parser.ClassicForStmtContext) interfa
 		node.UpdateValue = b.visitExpr(exprs[1])
 	case *parser.ForUpdateIncDecContext:
 		node.UpdateTarget = b.visitExpr(fu.Expression())
-		if fu.MINUSMINUS() != nil {
-			node.UpdateOp = OpSubAssign
-		} else {
-			node.UpdateOp = OpAddAssign
-		}
-		node.UpdateValue = &IntLit{nodeBase: b.baseFromContext(ctx), Raw: "1"}
+		node.UpdateIncDec = true
+		node.UpdateIsInc = fu.PLUSPLUS() != nil
 	case *parser.ForUpdateExprContext:
 		node.UpdateValue = b.visitExpr(fu.Expression())
 	}

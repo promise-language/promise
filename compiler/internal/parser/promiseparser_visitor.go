@@ -256,6 +256,9 @@ type PromiseParserVisitor interface {
 	// Visit a parse tree produced by PromiseParser#additiveExpr.
 	VisitAdditiveExpr(ctx *AdditiveExprContext) interface{}
 
+	// Visit a parse tree produced by PromiseParser#sliceExpr.
+	VisitSliceExpr(ctx *SliceExprContext) interface{}
+
 	// Visit a parse tree produced by PromiseParser#elvisExpr.
 	VisitElvisExpr(ctx *ElvisExprContext) interface{}
 

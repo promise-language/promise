@@ -20,7 +20,7 @@ var stdAll string
 func init() {
 	var b strings.Builder
 
-	// Numeric types: arithmetic + comparison + unary negate
+	// Numeric types: arithmetic + comparison + unary negate + inc/dec
 	for _, name := range []string{"int", "i8", "i16", "i32", "i64", "uint", "u8", "u16", "u32", "u64", "f32", "f64"} {
 		fmt.Fprintf(&b, "type %s `native {\n", name)
 		for _, op := range []string{"+", "-", "*", "/", "%"} {
@@ -29,7 +29,14 @@ func init() {
 		for _, op := range []string{"==", "!=", "<", ">", "<=", ">="} {
 			fmt.Fprintf(&b, "\t%s(%s other) bool `native;\n", op, name)
 		}
-		fmt.Fprintf(&b, "\t-() %s `native;\n}\n", name)
+		fmt.Fprintf(&b, "\t-() %s `native;\n", name)
+		fmt.Fprintf(&b, "\t++() %s `native;\n", name)
+		fmt.Fprintf(&b, "\t--() %s `native;\n", name)
+		if name != "f32" && name != "f64" {
+			fmt.Fprintf(&b, "\t..(%s end) range `native;\n", name)
+			fmt.Fprintf(&b, "\t..=(%s end) range `native;\n", name)
+		}
+		b.WriteString("}\n")
 	}
 
 	// Bool
@@ -45,6 +52,8 @@ func init() {
 	for _, op := range []string{"==", "!=", "<", ">", "<=", ">="} {
 		fmt.Fprintf(&b, "\t%s(char other) bool `native;\n", op)
 	}
+	b.WriteString("\t..(char end) range `native;\n")
+	b.WriteString("\t..=(char end) range `native;\n")
 	b.WriteString("}\n")
 
 	// String (operators + methods)
@@ -59,10 +68,16 @@ func init() {
 	b.WriteString("\tindex_of(string sub) int? `native;\n")
 	b.WriteString("\ttrim() string `native;\n")
 	b.WriteString("\tsplit(string sep) string[] `native;\n")
+	b.WriteString("\t[](int index) char `native;\n")
+	b.WriteString("\t[:](int? start, int? end) string `native;\n")
 	b.WriteString("\tget is_empty bool => this.len == 0;\n}\n")
 
 	// Containers
 	b.WriteString("type slice[T] `native {\n\tint len;\n")
+	b.WriteString("\t[](int index) T `native;\n")
+	b.WriteString("\t[]=(int index, T value) `native;\n")
+	b.WriteString("\t[:](int? start, int? end) T[] `native;\n")
+	b.WriteString("\t[:]=(int? start, int? end, T[] value) `native;\n")
 	b.WriteString("\tpush(T elem) `native;\n")
 	b.WriteString("\tpop() T? `native;\n")
 	b.WriteString("\tcontains(T elem) bool `native;\n")
@@ -70,6 +85,8 @@ func init() {
 	b.WriteString("\tget is_empty bool => this.len == 0;\n}\n")
 
 	b.WriteString("type map[K, V] `native {\n\tint len;\n")
+	b.WriteString("\t[](K key) V? `native;\n")
+	b.WriteString("\t[]=(K key, V value) `native;\n")
 	b.WriteString("\tcontains(K key) bool `native;\n")
 	b.WriteString("\tremove(K key) bool `native;\n")
 	b.WriteString("\tkeys() K[] `native;\n")

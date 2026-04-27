@@ -108,6 +108,12 @@ methodName
     | PLUS | MINUS | STAR | SLASH | PERCENT
     | EQ | NEQ | LT | GT | LTE | GTE
     | AND | OR | BANG
+    | PLUSPLUS | MINUSMINUS
+    | DOTDOT | DOTDOTEQ
+    | LBRACKET COLON RBRACKET ASSIGN
+    | LBRACKET COLON RBRACKET
+    | LBRACKET RBRACKET ASSIGN
+    | LBRACKET RBRACKET
     ;
 
 // ============================================================
@@ -367,6 +373,7 @@ expression
     | expression QUESTION_DOT IDENT                            # optionalChainExpr
     | expression LPAREN args RPAREN                            # callExpr
     | expression LBRACKET expression RBRACKET                  # indexExpr
+    | expression LBRACKET expression? COLON expression? RBRACKET  # sliceExpr
     | expression QUESTION bindingName? block                   # errorHandlerExpr
     | expression QUESTION                                      # errorPropagateExpr
     | expression BANG                                          # errorUnwrapExpr

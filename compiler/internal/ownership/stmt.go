@@ -80,6 +80,9 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 		c.checkExpr(s.Value)
 		c.tryMove(s.Value)
 
+	case *ast.IncDecStmt:
+		c.checkExpr(s.Target)
+
 	case *ast.BreakStmt, *ast.ContinueStmt:
 		// no ownership effect
 	}
@@ -198,6 +201,14 @@ func (c *Checker) checkAssignTarget(target ast.Expr) {
 	case *ast.IndexExpr:
 		c.checkExpr(e.Target)
 		c.checkExpr(e.Index)
+	case *ast.SliceExpr:
+		c.checkExpr(e.Target)
+		if e.Low != nil {
+			c.checkExpr(e.Low)
+		}
+		if e.High != nil {
+			c.checkExpr(e.High)
+		}
 	}
 }
 
@@ -306,7 +317,11 @@ func (c *Checker) checkClassicForStmt(s *ast.ClassicForStmt) {
 		c.checkExpr(s.Cond)
 	}
 	c.checkBlock(s.Body)
-	if s.UpdateValue != nil {
+	if s.UpdateIncDec {
+		if s.UpdateTarget != nil {
+			c.checkExpr(s.UpdateTarget)
+		}
+	} else if s.UpdateValue != nil {
 		c.checkExpr(s.UpdateValue)
 	}
 	c.state = merge(savedState, c.state)

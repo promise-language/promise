@@ -339,6 +339,10 @@ func (v *BasePromiseParserVisitor) VisitAdditiveExpr(ctx *AdditiveExprContext) i
 	return v.VisitChildren(ctx)
 }
 
+func (v *BasePromiseParserVisitor) VisitSliceExpr(ctx *SliceExprContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
 func (v *BasePromiseParserVisitor) VisitElvisExpr(ctx *ElvisExprContext) interface{} {
 	return v.VisitChildren(ctx)
 }

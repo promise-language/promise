@@ -66,6 +66,8 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		return c.genMapLit(e)
 	case *ast.IndexExpr:
 		return c.genIndexExpr(e)
+	case *ast.SliceExpr:
+		return c.genSliceExpr(e)
 	case *ast.LambdaExpr:
 		return c.genLambdaExpr(e)
 	case *ast.OptionalChainExpr:
@@ -1910,6 +1912,10 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 }
 
 // --- Index Expression ---
+
+func (c *Compiler) genSliceExpr(e *ast.SliceExpr) value.Value {
+	panic("codegen: slice expressions ([start:end]) not yet implemented")
+}
 
 func (c *Compiler) genIndexExpr(e *ast.IndexExpr) value.Value {
 	targetType := c.info.Types[e.Target]

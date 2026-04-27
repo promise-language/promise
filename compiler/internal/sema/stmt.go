@@ -76,6 +76,9 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 	case *ast.YieldDelegateStmt:
 		c.checkExpr(s.Value)
 
+	case *ast.IncDecStmt:
+		c.checkIncDecStmt(s)
+
 	default:
 		c.errorf(stmt.Pos(), "unsupported statement type")
 	}
@@ -156,6 +159,16 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 		c.checkSetterAvailable(me)
 	}
 
+	// Validate []= exists when assigning to an index target
+	if idx, ok := s.Target.(*ast.IndexExpr); ok {
+		c.checkIndexAssignAvailable(idx)
+	}
+
+	// Validate [:]= exists when assigning to a slice target
+	if sl, ok := s.Target.(*ast.SliceExpr); ok {
+		c.checkSliceAssignAvailable(sl)
+	}
+
 	switch s.Op {
 	case ast.OpAssign:
 		if !types.AssignableTo(valType, targetType) {
@@ -218,6 +231,55 @@ func (c *Checker) checkSetterAvailable(me *ast.MemberExpr) {
 		if named.LookupSetter(me.Field) == nil {
 			c.errorf(me.Pos(), "property '%s' has no setter", me.Field)
 		}
+	}
+}
+
+// checkIndexAssignAvailable validates that the target type has a []= method
+// when assigning to an index expression. For example, string has [] but not []=,
+// so `str[0] = 'a'` should be rejected.
+func (c *Checker) checkIndexAssignAvailable(idx *ast.IndexExpr) {
+	targetType := c.info.Types[idx.Target]
+	if targetType == nil {
+		return
+	}
+	var named *types.Named
+	switch t := targetType.(type) {
+	case *types.Named:
+		named = t
+	case *types.Instance:
+		if n, ok := t.Origin().(*types.Named); ok {
+			named = n
+		}
+	}
+	if named == nil {
+		return
+	}
+	if named.LookupMethod("[]=") == nil {
+		c.errorf(idx.Pos(), "type %s does not support index assignment", targetType)
+	}
+}
+
+// checkSliceAssignAvailable validates that the target type has a [:]= method
+// when assigning to a slice expression.
+func (c *Checker) checkSliceAssignAvailable(sl *ast.SliceExpr) {
+	targetType := c.info.Types[sl.Target]
+	if targetType == nil {
+		return
+	}
+	var named *types.Named
+	switch t := targetType.(type) {
+	case *types.Named:
+		named = t
+	case *types.Instance:
+		if n, ok := t.Origin().(*types.Named); ok {
+			named = n
+		}
+	}
+	if named == nil {
+		return
+	}
+	if named.LookupMethod("[:]=") == nil {
+		c.errorf(sl.Pos(), "type %s does not support slice assignment", targetType)
 	}
 }
 
@@ -407,7 +469,16 @@ func (c *Checker) checkClassicForStmt(s *ast.ClassicForStmt) {
 	}
 
 	// Update
-	if s.UpdateTarget != nil {
+	if s.UpdateIncDec {
+		targetType := c.checkExpr(s.UpdateTarget)
+		if targetType != nil {
+			op := "++"
+			if !s.UpdateIsInc {
+				op = "--"
+			}
+			c.checkUnaryOperator(s.Pos(), targetType, op)
+		}
+	} else if s.UpdateTarget != nil {
 		c.checkExpr(s.UpdateTarget)
 		c.checkExpr(s.UpdateValue)
 	} else if s.UpdateValue != nil {
@@ -417,4 +488,16 @@ func (c *Checker) checkClassicForStmt(s *ast.ClassicForStmt) {
 	c.checkBlock(s.Body)
 	c.closeScope()
 	c.inLoop--
+}
+
+func (c *Checker) checkIncDecStmt(s *ast.IncDecStmt) {
+	targetType := c.checkExpr(s.Target)
+	if targetType == nil {
+		return
+	}
+	op := "++"
+	if !s.IsInc {
+		op = "--"
+	}
+	c.checkUnaryOperator(s.Pos(), targetType, op)
 }

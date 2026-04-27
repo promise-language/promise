@@ -45,6 +45,14 @@ func signedIntOps() map[string]nativeEmitter {
 		">":  func(b *ir.Block, l, r value.Value) value.Value { return b.NewICmp(enum.IPredSGT, l, r) },
 		"<=": func(b *ir.Block, l, r value.Value) value.Value { return b.NewICmp(enum.IPredSLE, l, r) },
 		">=": func(b *ir.Block, l, r value.Value) value.Value { return b.NewICmp(enum.IPredSGE, l, r) },
+		"++": func(b *ir.Block, l, _ value.Value) value.Value {
+			one := constant.NewInt(l.Type().(*irtypes.IntType), 1)
+			return b.NewAdd(l, one)
+		},
+		"--": func(b *ir.Block, l, _ value.Value) value.Value {
+			one := constant.NewInt(l.Type().(*irtypes.IntType), 1)
+			return b.NewSub(l, one)
+		},
 	}
 }
 
@@ -67,6 +75,14 @@ func unsignedIntOps() map[string]nativeEmitter {
 		">":  func(b *ir.Block, l, r value.Value) value.Value { return b.NewICmp(enum.IPredUGT, l, r) },
 		"<=": func(b *ir.Block, l, r value.Value) value.Value { return b.NewICmp(enum.IPredULE, l, r) },
 		">=": func(b *ir.Block, l, r value.Value) value.Value { return b.NewICmp(enum.IPredUGE, l, r) },
+		"++": func(b *ir.Block, l, _ value.Value) value.Value {
+			one := constant.NewInt(l.Type().(*irtypes.IntType), 1)
+			return b.NewAdd(l, one)
+		},
+		"--": func(b *ir.Block, l, _ value.Value) value.Value {
+			one := constant.NewInt(l.Type().(*irtypes.IntType), 1)
+			return b.NewSub(l, one)
+		},
 	}
 }
 
@@ -86,6 +102,14 @@ func floatOps() map[string]nativeEmitter {
 		">":  func(b *ir.Block, l, r value.Value) value.Value { return b.NewFCmp(enum.FPredOGT, l, r) },
 		"<=": func(b *ir.Block, l, r value.Value) value.Value { return b.NewFCmp(enum.FPredOLE, l, r) },
 		">=": func(b *ir.Block, l, r value.Value) value.Value { return b.NewFCmp(enum.FPredOGE, l, r) },
+		"++": func(b *ir.Block, l, _ value.Value) value.Value {
+			one := constant.NewFloat(l.Type().(*irtypes.FloatType), 1.0)
+			return b.NewFAdd(l, one)
+		},
+		"--": func(b *ir.Block, l, _ value.Value) value.Value {
+			one := constant.NewFloat(l.Type().(*irtypes.FloatType), 1.0)
+			return b.NewFSub(l, one)
+		},
 	}
 }
 

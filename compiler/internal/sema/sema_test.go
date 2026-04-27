@@ -20,7 +20,7 @@ var stdAll string
 func init() {
 	var b strings.Builder
 
-	// Numeric types: arithmetic + comparison + unary negate
+	// Numeric types: arithmetic + comparison + unary negate + inc/dec
 	for _, name := range []string{"int", "i8", "i16", "i32", "i64", "uint", "u8", "u16", "u32", "u64", "f32", "f64"} {
 		fmt.Fprintf(&b, "type %s `native {\n", name)
 		for _, op := range []string{"+", "-", "*", "/", "%"} {
@@ -29,7 +29,15 @@ func init() {
 		for _, op := range []string{"==", "!=", "<", ">", "<=", ">="} {
 			fmt.Fprintf(&b, "\t%s(%s other) bool `native;\n", op, name)
 		}
-		fmt.Fprintf(&b, "\t-() %s `native;\n}\n", name)
+		fmt.Fprintf(&b, "\t-() %s `native;\n", name)
+		fmt.Fprintf(&b, "\t++() %s `native;\n", name)
+		fmt.Fprintf(&b, "\t--() %s `native;\n", name)
+		// Range operators for integer types only (not floats)
+		if name != "f32" && name != "f64" {
+			fmt.Fprintf(&b, "\t..(%s end) range `native;\n", name)
+			fmt.Fprintf(&b, "\t..=(%s end) range `native;\n", name)
+		}
+		b.WriteString("}\n")
 	}
 
 	// Bool
@@ -45,6 +53,8 @@ func init() {
 	for _, op := range []string{"==", "!=", "<", ">", "<=", ">="} {
 		fmt.Fprintf(&b, "\t%s(char other) bool `native;\n", op)
 	}
+	b.WriteString("\t..(char end) range `native;\n")
+	b.WriteString("\t..=(char end) range `native;\n")
 	b.WriteString("}\n")
 
 	// String (operators + methods)
@@ -59,10 +69,16 @@ func init() {
 	b.WriteString("\tindex_of(string sub) int? `native;\n")
 	b.WriteString("\ttrim() string `native;\n")
 	b.WriteString("\tsplit(string sep) string[] `native;\n")
+	b.WriteString("\t[](int index) char `native;\n")
+	b.WriteString("\t[:](int? start, int? end) string `native;\n")
 	b.WriteString("\tget is_empty bool => this.len == 0;\n}\n")
 
 	// Containers
 	b.WriteString("type slice[T] `native {\n\tint len;\n")
+	b.WriteString("\t[](int index) T `native;\n")
+	b.WriteString("\t[]=(int index, T value) `native;\n")
+	b.WriteString("\t[:](int? start, int? end) T[] `native;\n")
+	b.WriteString("\t[:]=(int? start, int? end, T[] value) `native;\n")
 	b.WriteString("\tpush(T elem) `native;\n")
 	b.WriteString("\tpop() T? `native;\n")
 	b.WriteString("\tcontains(T elem) bool `native;\n")
@@ -70,6 +86,8 @@ func init() {
 	b.WriteString("\tget is_empty bool => this.len == 0;\n}\n")
 
 	b.WriteString("type map[K, V] `native {\n\tint len;\n")
+	b.WriteString("\t[](K key) V? `native;\n")
+	b.WriteString("\t[]=(K key, V value) `native;\n")
 	b.WriteString("\tcontains(K key) bool `native;\n")
 	b.WriteString("\tremove(K key) bool `native;\n")
 	b.WriteString("\tkeys() K[] `native;\n")
@@ -432,7 +450,7 @@ func TestUnaryNot(t *testing.T) {
 
 func TestUnaryNotTypeMismatch(t *testing.T) {
 	errs := checkErrs(t, `test() { x := !42; }`)
-	expectError(t, errs, "requires bool")
+	expectError(t, errs, "operator ! not defined on type int")
 }
 
 // --- Function Call Tests ---
@@ -553,7 +571,7 @@ func TestIncrementDecrement(t *testing.T) {
 
 func TestIncrementTypeMismatch(t *testing.T) {
 	errs := checkErrs(t, `test() { string s = "hi"; s++; }`)
-	expectError(t, errs, "cannot use int as string")
+	expectError(t, errs, "operator ++ not defined on type string")
 }
 
 func TestAssignmentTypeMismatch(t *testing.T) {
@@ -1001,7 +1019,7 @@ func TestRangeInclusive(t *testing.T) {
 
 func TestRangeNonInt(t *testing.T) {
 	errs := checkErrs(t, `test() { r := "a".."z"; }`)
-	expectError(t, errs, "range operator requires int")
+	expectError(t, errs, "operator .. not defined on type string")
 }
 
 func TestRangeForIn(t *testing.T) {
@@ -3083,4 +3101,285 @@ func TestCharComparisons(t *testing.T) {
 			bool ge = 'a' >= 'b';
 		}
 	`)
+}
+
+// --- Operator Method Dispatch Tests ---
+
+func TestIncDecStmt(t *testing.T) {
+	checkOK(t, `
+		main() {
+			x := 0;
+			x++;
+			x--;
+		}
+	`)
+}
+
+func TestIncDecOnFloat(t *testing.T) {
+	checkOK(t, `
+		main() {
+			f64 x = 1.0;
+			x++;
+			x--;
+		}
+	`)
+}
+
+func TestIncDecOnNonNumeric(t *testing.T) {
+	errs := checkErrs(t, `
+		main() {
+			string s = "hello";
+			s++;
+		}
+	`)
+	expectError(t, errs, "operator ++ not defined on type string")
+}
+
+func TestIncDecOnMember(t *testing.T) {
+	checkOK(t, `
+		type Counter { int value; }
+		main() {
+			Counter c = Counter(value: 0);
+			c.value++;
+		}
+	`)
+}
+
+func TestIncDecOnIndex(t *testing.T) {
+	checkOK(t, `
+		main() {
+			int[] items = [1, 2, 3];
+			items[0]++;
+		}
+	`)
+}
+
+func TestClassicForIncDec(t *testing.T) {
+	checkOK(t, `
+		main() {
+			for i := 0; i < 10; i++ {
+				int x = i;
+			}
+		}
+	`)
+}
+
+func TestClassicForDecrement(t *testing.T) {
+	checkOK(t, `
+		main() {
+			for i := 10; i > 0; i-- {
+				int x = i;
+			}
+		}
+	`)
+}
+
+func TestNumericTypesHaveIncDec(t *testing.T) {
+	checkOK(t, `main() {}`)
+
+	numericTypes := map[string]*types.Named{
+		"int": types.TypInt, "i8": types.TypI8, "i16": types.TypI16,
+		"i32": types.TypI32, "i64": types.TypI64, "uint": types.TypUint,
+		"u8": types.TypU8, "u16": types.TypU16, "u32": types.TypU32,
+		"u64": types.TypU64, "f32": types.TypF32, "f64": types.TypF64,
+	}
+
+	for name, nt := range numericTypes {
+		if nt.LookupMethod("++") == nil {
+			t.Errorf("%s missing ++ operator", name)
+		}
+		if nt.LookupMethod("--") == nil {
+			t.Errorf("%s missing -- operator", name)
+		}
+	}
+}
+
+func TestRangeOnChar(t *testing.T) {
+	checkOK(t, `
+		main() {
+			r := 'a'..'z';
+		}
+	`)
+}
+
+func TestRangeInclusiveOnChar(t *testing.T) {
+	checkOK(t, `
+		main() {
+			r := 'a'..='z';
+		}
+	`)
+}
+
+func TestCharHasRangeOperators(t *testing.T) {
+	checkOK(t, `main() {}`)
+	if types.TypChar.LookupMethod("..") == nil {
+		t.Error("char missing .. operator")
+	}
+	if types.TypChar.LookupMethod("..=") == nil {
+		t.Error("char missing ..= operator")
+	}
+}
+
+func TestUnaryNotOnBool(t *testing.T) {
+	checkOK(t, `
+		main() {
+			bool b = !true;
+			bool c = !false;
+		}
+	`)
+}
+
+func TestUnaryNotOnNonBool(t *testing.T) {
+	errs := checkErrs(t, `main() { x := !42; }`)
+	expectError(t, errs, "operator ! not defined on type int")
+}
+
+func TestStringIndexAccess(t *testing.T) {
+	checkOK(t, `
+		main() {
+			string s = "hello";
+			char c = s[0];
+		}
+	`)
+}
+
+func TestStringIndexAssignFails(t *testing.T) {
+	errs := checkErrs(t, `
+		main() {
+			string s = "hello";
+			s[0] = 'a';
+		}
+	`)
+	expectError(t, errs, "does not support index assignment")
+}
+
+func TestSliceIndexAccess(t *testing.T) {
+	checkOK(t, `
+		main() {
+			int[] items = [1, 2, 3];
+			int x = items[0];
+		}
+	`)
+}
+
+func TestSliceIndexAssign(t *testing.T) {
+	checkOK(t, `
+		main() {
+			int[] items = [1, 2, 3];
+			items[0] = 42;
+		}
+	`)
+}
+
+func TestSliceIndexTypeMismatch(t *testing.T) {
+	errs := checkErrs(t, `
+		main() {
+			int[] items = [1, 2, 3];
+			int x = items["bad"];
+		}
+	`)
+	expectError(t, errs, "index type mismatch")
+}
+
+func TestMapIndexAccess(t *testing.T) {
+	checkOK(t, `
+		main() {
+			m := {"a": 1};
+			v := m["a"];
+		}
+	`)
+}
+
+func TestMapIndexAssign(t *testing.T) {
+	checkOK(t, `
+		main() {
+			m := {"a": 1};
+			m["b"] = 2;
+		}
+	`)
+}
+
+func TestSliceExprOnSlice(t *testing.T) {
+	checkOK(t, `
+		main() {
+			int[] items = [1, 2, 3, 4, 5];
+			int[] sub = items[1:3];
+		}
+	`)
+}
+
+func TestSliceExprLowOnly(t *testing.T) {
+	checkOK(t, `
+		main() {
+			int[] items = [1, 2, 3];
+			int[] sub = items[1:];
+		}
+	`)
+}
+
+func TestSliceExprHighOnly(t *testing.T) {
+	checkOK(t, `
+		main() {
+			int[] items = [1, 2, 3];
+			int[] sub = items[:2];
+		}
+	`)
+}
+
+func TestSliceExprBothEmpty(t *testing.T) {
+	checkOK(t, `
+		main() {
+			int[] items = [1, 2, 3];
+			int[] sub = items[:];
+		}
+	`)
+}
+
+func TestSliceExprOnString(t *testing.T) {
+	checkOK(t, `
+		main() {
+			string s = "hello world";
+			string sub = s[0:5];
+		}
+	`)
+}
+
+func TestSliceExprOnNonSliceable(t *testing.T) {
+	errs := checkErrs(t, `
+		main() {
+			int x = 42;
+			y := x[0:1];
+		}
+	`)
+	expectError(t, errs, "does not support slicing")
+}
+
+func TestSliceExprBoundTypeMismatch(t *testing.T) {
+	errs := checkErrs(t, `
+		main() {
+			int[] items = [1, 2, 3];
+			int[] sub = items["a":1];
+		}
+	`)
+	expectError(t, errs, "slice bound type mismatch")
+}
+
+func TestStringSliceAssignFails(t *testing.T) {
+	errs := checkErrs(t, `
+		main() {
+			string s = "hello";
+			s[0:2] = "ab";
+		}
+	`)
+	expectError(t, errs, "does not support slice assignment")
+}
+
+func TestStringHasSliceAndIndexOperators(t *testing.T) {
+	checkOK(t, `main() {}`)
+	if types.TypString.LookupMethod("[]") == nil {
+		t.Error("string missing [] operator")
+	}
+	if types.TypString.LookupMethod("[:]") == nil {
+		t.Error("string missing [:] operator")
+	}
 }

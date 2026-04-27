@@ -44,6 +44,16 @@ type IndexExpr struct {
 
 func (*IndexExpr) exprTag() {}
 
+// SliceExpr represents a slice expression: target[start:end].
+type SliceExpr struct {
+	nodeBase
+	Target Expr
+	Low    Expr // nil for [:high] and [:]
+	High   Expr // nil for [low:] and [:]
+}
+
+func (*SliceExpr) exprTag() {}
+
 // MemberExpr represents a member access: target.field.
 type MemberExpr struct {
 	nodeBase

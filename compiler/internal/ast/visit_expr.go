@@ -186,6 +186,24 @@ func (b *Builder) VisitIndexExpr(ctx *parser.IndexExprContext) interface{} {
 	}
 }
 
+func (b *Builder) VisitSliceExpr(ctx *parser.SliceExprContext) interface{} {
+	exprs := ctx.AllExpression()
+	node := &SliceExpr{
+		nodeBase: b.baseFromContext(ctx),
+		Target:   b.visitExpr(exprs[0]),
+	}
+	colonPos := ctx.COLON().GetSymbol().GetTokenIndex()
+	for _, e := range exprs[1:] {
+		ec := e.(antlr.ParserRuleContext)
+		if ec.GetStart().GetTokenIndex() < colonPos {
+			node.Low = b.visitExpr(e)
+		} else {
+			node.High = b.visitExpr(e)
+		}
+	}
+	return node
+}
+
 func (b *Builder) VisitErrorHandlerExpr(ctx *parser.ErrorHandlerExprContext) interface{} {
 	node := &ErrorHandlerExpr{
 		nodeBase: b.baseFromContext(ctx),
@@ -604,5 +622,11 @@ func offsetExprPositions(expr Expr, lineOffset, colOffset int) {
 		adjustPos(&e.end)
 		offsetExprPositions(e.Target, lineOffset, colOffset)
 		offsetExprPositions(e.Index, lineOffset, colOffset)
+	case *SliceExpr:
+		adjustPos(&e.pos)
+		adjustPos(&e.end)
+		offsetExprPositions(e.Target, lineOffset, colOffset)
+		offsetExprPositions(e.Low, lineOffset, colOffset)
+		offsetExprPositions(e.High, lineOffset, colOffset)
 	}
 }

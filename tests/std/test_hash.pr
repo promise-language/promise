@@ -93,3 +93,74 @@ test_expected_fnv1a_values() `test {
     int max_int = 9223372036854775807;
     assert(max_int.hash == -8289549613075766851, "fnv1a(max)");
 }
+
+test_float_hash_deterministic() `test {
+    f64 x = 3.14;
+    assert(x.hash == x.hash, "f64 deterministic");
+    f64 y = 3.14;
+    assert(x.hash == y.hash, "equal f64 same hash");
+}
+
+test_float_hash_different_values() `test {
+    f64 a = 1.0;
+    f64 b = 2.0;
+    assert(a.hash != b.hash, "1.0 vs 2.0");
+    f64 c = 0.0;
+    assert(a.hash != c.hash, "1.0 vs 0.0");
+}
+
+test_float_hash_as_map_key() `test {
+    map[f64, string] m = {:};
+    m[1.5] = "one point five";
+    m[2.5] = "two point five";
+    if v1 := m[1.5] { assert(v1 == "one point five", "m[1.5]"); } else { assert(false, "m[1.5] missing"); }
+    if v2 := m[2.5] { assert(v2 == "two point five", "m[2.5]"); } else { assert(false, "m[2.5] missing"); }
+}
+
+test_string_hash_deterministic() `test {
+    string a = "hello";
+    string b = "hello";
+    assert(a.hash == b.hash, "equal strings same hash");
+    assert(a.hash == a.hash, "string deterministic");
+}
+
+test_string_hash_different_values() `test {
+    string a = "hello";
+    string b = "world";
+    string c = "hello!";
+    assert(a.hash != b.hash, "hello vs world");
+    assert(a.hash != c.hash, "hello vs hello!");
+}
+
+test_string_hash_empty() `test {
+    string empty = "";
+    // Empty string should have the FNV offset basis as hash (no bytes mixed in)
+    assert(empty.hash != 0, "empty string hash non-zero");
+    assert(empty.hash == empty.hash, "empty string deterministic");
+}
+
+test_expected_string_hash_values() `test {
+    // Pin exact FNV-1a 64-bit output for known strings to catch algorithmic drift
+    string empty = "";
+    assert(empty.hash == -3750763034362895579, "fnv1a(\"\")");
+    string hi = "hi";
+    assert(hi.hash == 628919584683901914, "fnv1a(\"hi\")");
+    string hello = "hello";
+    assert(hello.hash == -6615550055289275125, "fnv1a(\"hello\")");
+    string world = "world";
+    assert(world.hash == 5717881983045765875, "fnv1a(\"world\")");
+    string a = "a";
+    assert(a.hash == -5808556873153909620, "fnv1a(\"a\")");
+    string abc = "abc";
+    assert(abc.hash == -1792535898324117685, "fnv1a(\"abc\")");
+}
+
+test_string_hash_as_map_key() `test {
+    map[string, int] m = {:};
+    m["foo"] = 1;
+    m["bar"] = 2;
+    m["baz"] = 3;
+    if v1 := m["foo"] { assert(v1 == 1, "m[foo]"); } else { assert(false, "foo missing"); }
+    if v2 := m["bar"] { assert(v2 == 2, "m[bar]"); } else { assert(false, "bar missing"); }
+    if v3 := m["baz"] { assert(v3 == 3, "m[baz]"); } else { assert(false, "baz missing"); }
+}

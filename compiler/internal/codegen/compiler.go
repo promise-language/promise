@@ -440,13 +440,8 @@ func (c *Compiler) declareIntrinsics() {
 		ir.NewParam("variant_ptr", irtypes.I8Ptr),
 		ir.NewParam("expected_id", irtypes.I32))
 
-	// Native hash functions for Hashable interface
-	c.funcs["promise_hash_int"] = c.module.NewFunc("promise_hash_int",
-		irtypes.I64,
-		ir.NewParam("val", irtypes.I64))
-	c.funcs["promise_hash_string_value"] = c.module.NewFunc("promise_hash_string_value",
-		irtypes.I64,
-		ir.NewParam("ptr", irtypes.I8Ptr))
+	// String hash function (codegen-emitted LLVM IR, replaces C runtime)
+	c.defineStringHashFunc()
 
 	// String equality comparison (used by Vector.contains for string elements)
 	c.funcs["promise_eq_string"] = c.module.NewFunc("promise_eq_string",
@@ -454,6 +449,80 @@ func (c *Compiler) declareIntrinsics() {
 		ir.NewParam("a", irtypes.I8Ptr),
 		ir.NewParam("b", irtypes.I8Ptr),
 		ir.NewParam("key_size", irtypes.I64))
+}
+
+// defineStringHashFunc emits an LLVM IR function that computes FNV-1a hash
+// over the raw bytes of a string. Replaces the C runtime promise_hash_string_value.
+// String instance layout: { i8* _variant, i64 len, [0 x i8] data }
+func (c *Compiler) defineStringHashFunc() {
+	ptrParam := ir.NewParam("ptr", irtypes.I8Ptr)
+	fn := c.module.NewFunc("__promise_hash_string", irtypes.I64, ptrParam)
+
+	strInstanceType := irtypes.NewStruct(
+		irtypes.I8Ptr,                   // _variant
+		irtypes.I64,                     // len
+		irtypes.NewArray(0, irtypes.I8), // data (flexible array)
+	)
+
+	fnvOffset := constant.NewInt(irtypes.I64, -3750763034362895579) // 0xcbf29ce484222325
+	fnvPrime := constant.NewInt(irtypes.I64, 1099511628211)         // 0x00000100000001b3
+	zero64 := constant.NewInt(irtypes.I64, 0)
+	one64 := constant.NewInt(irtypes.I64, 1)
+
+	// Entry: null check
+	entry := fn.NewBlock("entry")
+	isNull := entry.NewICmp(enum.IPredEQ, ptrParam, constant.NewNull(irtypes.I8Ptr))
+	nullBlk := fn.NewBlock("null")
+	initBlk := fn.NewBlock("init")
+	entry.NewCondBr(isNull, nullBlk, initBlk)
+
+	// Null → return 0
+	nullBlk.NewRet(zero64)
+
+	// Init: load len and data pointer, set up loop variables
+	typedPtr := initBlk.NewBitCast(ptrParam, irtypes.NewPointer(strInstanceType))
+	lenPtr := initBlk.NewGetElementPtr(strInstanceType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	strLen := initBlk.NewLoad(irtypes.I64, lenPtr)
+	dataPtr := initBlk.NewGetElementPtr(strInstanceType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
+		constant.NewInt(irtypes.I32, 0))
+
+	// Alloca-based loop variables (consistent with rest of codegen)
+	iAlloca := initBlk.NewAlloca(irtypes.I64)
+	initBlk.NewStore(zero64, iAlloca)
+	hAlloca := initBlk.NewAlloca(irtypes.I64)
+	initBlk.NewStore(fnvOffset, hAlloca)
+
+	headerBlk := fn.NewBlock("loop.header")
+	bodyBlk := fn.NewBlock("loop.body")
+	exitBlk := fn.NewBlock("exit")
+
+	initBlk.NewBr(headerBlk)
+
+	// Loop header: check i < len
+	iVal := headerBlk.NewLoad(irtypes.I64, iAlloca)
+	cond := headerBlk.NewICmp(enum.IPredSLT, iVal, strLen)
+	headerBlk.NewCondBr(cond, bodyBlk, exitBlk)
+
+	// Loop body: hash = (hash ^ byte) * prime; i++
+	iCur := bodyBlk.NewLoad(irtypes.I64, iAlloca)
+	bytePtr := bodyBlk.NewGetElementPtr(irtypes.I8, dataPtr, iCur)
+	byteVal := bodyBlk.NewLoad(irtypes.I8, bytePtr)
+	byteExt := bodyBlk.NewZExt(byteVal, irtypes.I64)
+	hCur := bodyBlk.NewLoad(irtypes.I64, hAlloca)
+	xored := bodyBlk.NewXor(hCur, byteExt)
+	mulled := bodyBlk.NewMul(xored, fnvPrime)
+	bodyBlk.NewStore(mulled, hAlloca)
+	nextI := bodyBlk.NewAdd(iCur, one64)
+	bodyBlk.NewStore(nextI, iAlloca)
+	bodyBlk.NewBr(headerBlk)
+
+	// Exit: return hash
+	result := exitBlk.NewLoad(irtypes.I64, hAlloca)
+	exitBlk.NewRet(result)
+
+	c.funcs["__promise_hash_string"] = fn
 }
 
 // declareFuncs creates LLVM function declarations for all FuncDecl nodes with bodies (pass 1).

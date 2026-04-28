@@ -1137,8 +1137,8 @@ func (c *Compiler) genVectorLen(e *ast.MemberExpr) value.Value {
 // genMapLen returns the length of a map via the runtime.
 // genNativeHashGetter emits native hash computation for primitive types.
 // Returns (value, true) if the type has a native hash getter, (nil, false) otherwise.
-// Integer, bool, and char hashes use the Promise-implemented _fnv1a_hash function.
-// Float and string hashes still use C runtime functions (need bitcast/byte access).
+// All primitive hashes use the Promise-implemented _fnv1a_hash function.
+// String hash uses a codegen-emitted LLVM IR function (__promise_hash_string).
 func (c *Compiler) genNativeHashGetter(e *ast.MemberExpr, named *types.Named) (value.Value, bool) {
 	target := c.genExpr(e.Target)
 	hashFn := c.stdFuncs["_fnv1a_hash"]
@@ -1171,16 +1171,17 @@ func (c *Compiler) genNativeHashGetter(e *ast.MemberExpr, named *types.Named) (v
 		ext := c.block.NewZExt(target, irtypes.I64)
 		return c.block.NewCall(hashFn, ext), true
 	case types.TypF64:
-		// Float hash still uses C runtime (needs bitcast unavailable in Promise)
+		// Bitcast double to i64 bits, then hash via Promise _fnv1a_hash
 		bits := c.block.NewBitCast(target, irtypes.I64)
-		return c.block.NewCall(c.funcs["promise_hash_int"], bits), true
+		return c.block.NewCall(hashFn, bits), true
 	case types.TypF32:
+		// Bitcast float to i32 bits, zero-extend to i64, then hash
 		bits := c.block.NewBitCast(target, irtypes.I32)
 		ext := c.block.NewZExt(bits, irtypes.I64)
-		return c.block.NewCall(c.funcs["promise_hash_int"], ext), true
+		return c.block.NewCall(hashFn, ext), true
 	case types.TypString:
-		// String hash still uses C runtime (needs byte-level access)
-		return c.block.NewCall(c.funcs["promise_hash_string_value"], target), true
+		// String hash uses codegen-emitted LLVM IR function
+		return c.block.NewCall(c.funcs["__promise_hash_string"], target), true
 	default:
 		return nil, false
 	}

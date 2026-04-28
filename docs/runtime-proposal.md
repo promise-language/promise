@@ -9,7 +9,7 @@ The runtime today is ~450 lines of C providing:
 - **Memory**: `malloc`/`free`/`realloc` for strings, vectors, closures
 - **String ops**: new, concat, eq, contains, starts_with, ends_with, index_of, trim, split, UTF-8 decode
 - **Vector ops**: with_capacity, push, pop, contains, remove
-- **Hash**: FNV-1a for int/bool/char (Promise `std/hash.pr`), float/string (C)
+- **Hash**: FNV-1a for int/bool/char/float (Promise `std/hash.pr` + codegen bitcast), string (codegen-emitted LLVM IR); only `eq_string` remains in C
 - **RTTI**: type_is check for inheritance
 - **Test runner**: fork/waitpid for crash isolation
 
@@ -149,7 +149,7 @@ Move string ops, vector ops, hash, and formatting from C into Promise.
 ~~**Blocker**: Promise currently lacks **bitwise operators** (`&`, `|`, `^`, `<<`, `>>`).~~ Resolved — bitwise operators, numeric literal type inference, and primitive casting (`as!`) are implemented.
 
 **What can move to Promise today**:
-- ~~Hash (FNV-1a) — moved to `std/hash.pr` for int/bool/char types~~
+- ~~Hash (FNV-1a) — all types migrated: int/bool/char/float use `std/hash.pr`, string uses codegen-emitted LLVM IR~~
 - `string.contains`, `starts_with`, `ends_with`, `index_of`, `trim`
 - `vector.contains`, `vector.remove`
 - Map — already done (HashMap is pure Promise)
@@ -165,7 +165,7 @@ Move string ops, vector ops, hash, and formatting from C into Promise.
 
 **Migration order**:
 1. ~~Add bitwise operators to the language (`&`, `|`, `^`, `<<`, `>>`, `~`)~~ — Done
-2. ~~Move hash to Promise (FNV-1a is ~10 lines)~~ — Done (int/bool/char; float/string remain in C)
+2. ~~Move hash to Promise (FNV-1a is ~10 lines)~~ — Done (all types: int/bool/char/float via Promise, string via codegen LLVM IR)
 3. Move string methods (contains, starts_with, etc.) to Promise
 4. Move vector.contains/remove to Promise
 5. Move int/float/bool→string to Promise

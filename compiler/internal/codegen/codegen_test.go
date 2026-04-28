@@ -5615,7 +5615,7 @@ func TestHashGetterChar(t *testing.T) {
 
 func TestHashGetterString(t *testing.T) {
 	ir := generateIR(t, `main() { s := "hi"; h := s.hash; }`)
-	assertContains(t, ir, "call i64 @promise_hash_string_value(i8*")
+	assertContains(t, ir, "call i64 @__promise_hash_string(i8*")
 }
 
 func TestHashGetterFloat(t *testing.T) {
@@ -5624,7 +5624,7 @@ func TestHashGetterFloat(t *testing.T) {
 		main() {}
 	`)
 	assertContains(t, ir, "bitcast double")
-	assertContains(t, ir, "call i64 @promise_hash_int(i64")
+	assertContains(t, ir, "call i64 @__std__fnv1a_hash(i64")
 }
 
 func TestHashGetterSmallInt(t *testing.T) {

@@ -510,7 +510,7 @@ Command-line interface. Core commands implemented; formatter planned.
 - Bare pipe detection: `echo '<code>' | promise` auto-enters exec mode
 - Inline error formatting: source line + `^` caret marker, no temp filenames
 - Embedded `std/` and `runtime/` in the binary via `go:embed` for self-contained install
-- **Standard library test suite** (`tests/std/`): 11 test files, 97 tests covering int, uint, float, bool, char, string, hash, Vector, map, math, and range
+- **Standard library test suite** (`tests/std/`): 11 test files, 104 tests covering int, uint, float, bool, char, string, hash, Vector, map, math, and range
 - `promise fmt` — code formatter (planned)
 
 ## Stage 11 — Package Manager (Planned)
@@ -580,8 +580,8 @@ Consolidated list of items deferred from completed stages. Items marked ~~strike
 | Bitwise operators (`&`, `\|`, `^`, `<<`, `>>`, `~`) on int/uint types | Done |
 | Numeric literal type inference (hex/binary/octal literals adopt context type) | Done |
 | Primitive casting (`as!` for int↔uint, int↔char, etc.) | Done |
-| FNV-1a hash in Promise (`std/hash.pr`) for int/bool/char types | Done |
-| FNV-1a hash for float/string (needs bitcast and byte-level access) | Pending |
+| FNV-1a hash in Promise (`std/hash.pr`) for int/bool/char/float types | Done |
+| FNV-1a hash for string (codegen-emitted LLVM IR, no C dependency) | Done |
 | Move string methods to Promise (contains, starts_with, etc.) | Pending |
 | Move vector.contains/remove to Promise | Pending |
 | Move int/float/bool→string to Promise | Pending |

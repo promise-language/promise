@@ -1,0 +1,126 @@
+// Test string interpolation for all primitive types
+//
+test_int_positive() `test {
+  int x = 42;
+  assert("{x}" == "42", "int 42");
+}
+
+test_int_negative() `test {
+  int x = -7;
+  assert("{x}" == "-7", "int -7");
+}
+
+test_int_zero() `test {
+  int x = 0;
+  assert("{x}" == "0", "int 0");
+}
+
+test_int_large() `test {
+  int x = 1000000;
+  assert("{x}" == "1000000", "int 1000000");
+}
+
+test_f64() `test {
+  f64 x = 3.14;
+  assert("{x}" == "3.14", "f64 3.14");
+}
+
+test_f64_integer() `test {
+  f64 x = 42.0;
+  assert("{x}" == "42", "f64 42.0 -> 42");
+}
+
+test_f64_zero() `test {
+  f64 x = 0.0;
+  assert("{x}" == "0", "f64 0.0 -> 0");
+}
+
+test_bool_true() `test {
+  bool b = true;
+  assert("{b}" == "true", "bool true");
+}
+
+test_bool_false() `test {
+  bool b = false;
+  assert("{b}" == "false", "bool false");
+}
+
+test_char_ascii() `test {
+  char c = 'A';
+  assert("{c}" == "A", "char A");
+}
+
+test_char_digit() `test {
+  char c = '0';
+  assert("{c}" == "0", "char 0");
+}
+
+test_int_min() `test {
+  // INT64_MIN: -9223372036854775808 (edge case for signed negation)
+  int x = -9223372036854775807 - 1;
+  assert("{x}" == "-9223372036854775808", "INT64_MIN");
+}
+
+test_int_max() `test {
+  int x = 9223372036854775807;
+  assert("{x}" == "9223372036854775807", "INT64_MAX");
+}
+
+test_f64_negative() `test {
+  f64 x = -3.14;
+  assert("{x}" == "-3.14", "f64 -3.14");
+}
+
+test_char_special() `test {
+  char c = '\n';
+  string s = "{c}";
+  assert(s.len == 1, "newline char is 1 byte");
+}
+
+test_uint_positive() `test {
+  uint x = 42;
+  assert("{x}" == "42", "uint 42");
+}
+
+test_uint_zero() `test {
+  uint x = 0;
+  assert("{x}" == "0", "uint 0");
+}
+
+test_uint_large() `test {
+  // 2^63 = 9223372036854775808 — would be negative if treated as signed
+  uint x = 9223372036854775808;
+  assert("{x}" == "9223372036854775808", "uint 2^63");
+}
+
+test_uint_max() `test {
+  // UINT64_MAX: 18446744073709551615
+  uint x = 18446744073709551615;
+  assert("{x}" == "18446744073709551615", "UINT64_MAX");
+}
+
+test_f64_small() `test {
+  f64 x = 0.001;
+  assert("{x}" == "0.001", "f64 0.001");
+}
+
+test_f64_scientific() `test {
+  f64 x = 1.5e10;
+  assert("{x}" == "1.5e+10", "f64 scientific");
+}
+
+test_f64_very_small() `test {
+  f64 x = 1.23e-15;
+  assert("{x}" == "1.23e-15", "f64 very small");
+}
+
+test_expr_interpolation() `test {
+  assert("{1 + 2}" == "3", "expr 1+2");
+  assert("{10 * 5}" == "50", "expr 10*5");
+}
+
+test_mixed_interpolation() `test {
+  int x = 42;
+  string name = "world";
+  assert("hello {name}, x={x}" == "hello world, x=42", "mixed interpolation");
+}

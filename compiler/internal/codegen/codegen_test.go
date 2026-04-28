@@ -3219,7 +3219,7 @@ func TestStringInterpolationI32(t *testing.T) {
 	assertContains(t, ir, "call i8* @promise_int_to_string")
 }
 
-// convertToString: u32 interpolation (zext to i64)
+// convertToString: u32 interpolation (zext to i64, calls uint_to_string)
 func TestStringInterpolationU32(t *testing.T) {
 	ir := generateIR(t, `
 		show(u32 x) {
@@ -3228,7 +3228,7 @@ func TestStringInterpolationU32(t *testing.T) {
 		main() { }
 	`)
 	assertContains(t, ir, "zext i32")
-	assertContains(t, ir, "call i8* @promise_int_to_string")
+	assertContains(t, ir, "call i8* @promise_uint_to_string")
 }
 
 // unsignedIntOps: basic unsigned arithmetic
@@ -3397,6 +3397,125 @@ func TestCharInterpolation(t *testing.T) {
 		main() { char c = 'X'; string s = "char: {c}"; }
 	`)
 	assertContains(t, ir, "call i8* @promise_char_to_string(i32")
+}
+
+// convertToString: i16 interpolation (sext to i64)
+func TestStringInterpolationI16(t *testing.T) {
+	ir := generateIR(t, `
+		show(i16 x) {
+			string msg = "val: {x}";
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "sext i16")
+	assertContains(t, ir, "call i8* @promise_int_to_string")
+}
+
+// convertToString: i8 interpolation (sext to i64)
+func TestStringInterpolationI8(t *testing.T) {
+	ir := generateIR(t, `
+		show(i8 x) {
+			string msg = "val: {x}";
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "sext i8")
+	assertContains(t, ir, "call i8* @promise_int_to_string")
+}
+
+// convertToString: uint interpolation (direct i64, no extension)
+func TestStringInterpolationUint(t *testing.T) {
+	ir := generateIR(t, `
+		show(uint x) {
+			string msg = "val: {x}";
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "call i8* @promise_uint_to_string")
+}
+
+// convertToString: u16 interpolation (zext to i64)
+func TestStringInterpolationU16(t *testing.T) {
+	ir := generateIR(t, `
+		show(u16 x) {
+			string msg = "val: {x}";
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "zext i16")
+	assertContains(t, ir, "call i8* @promise_uint_to_string")
+}
+
+// convertToString: u8 interpolation (zext to i64)
+func TestStringInterpolationU8(t *testing.T) {
+	ir := generateIR(t, `
+		show(u8 x) {
+			string msg = "val: {x}";
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "zext i8")
+	assertContains(t, ir, "call i8* @promise_uint_to_string")
+}
+
+// --- Value-to-string function body tests ---
+
+func TestBoolToStringFuncBody(t *testing.T) {
+	ir := generateIR(t, `
+		main() { bool b = true; string s = "{b}"; }
+	`)
+	assertContains(t, ir, "define i8* @promise_bool_to_string(i8")
+	assertContains(t, ir, `c"true"`)
+	assertContains(t, ir, `c"false"`)
+	assertContains(t, ir, "true:")
+	assertContains(t, ir, "false:")
+}
+
+func TestIntToStringFuncBody(t *testing.T) {
+	ir := generateIR(t, `
+		main() { int x = 42; string s = "{x}"; }
+	`)
+	assertContains(t, ir, "define i8* @promise_int_to_string(i64")
+	assertContains(t, ir, "digit_loop:")
+	assertContains(t, ir, "check_neg:")
+	assertContains(t, ir, "check_sign:")
+	assertContains(t, ir, "done:")
+	assertContains(t, ir, "urem i64")
+	assertContains(t, ir, "udiv i64")
+}
+
+func TestUintToStringFuncBody(t *testing.T) {
+	ir := generateIR(t, `
+		show(uint x) { string s = "{x}"; }
+		main() { }
+	`)
+	assertContains(t, ir, "define i8* @promise_uint_to_string(i64")
+	assertContains(t, ir, "call i8* @promise_uint_to_string")
+	assertContains(t, ir, "digit_loop:")
+	assertContains(t, ir, "done:")
+	assertContains(t, ir, "urem i64")
+	assertContains(t, ir, "udiv i64")
+}
+
+func TestF64ToStringFuncBody(t *testing.T) {
+	ir := generateIR(t, `
+		main() { f64 x = 3.14; string s = "{x}"; }
+	`)
+	assertContains(t, ir, "define i8* @promise_f64_to_string(double")
+	assertContains(t, ir, "@snprintf(")
+	assertContains(t, ir, `c"%g\00"`)
+}
+
+func TestCharToStringFuncBody(t *testing.T) {
+	ir := generateIR(t, `
+		main() { char c = 'X'; string s = "{c}"; }
+	`)
+	assertContains(t, ir, "define i8* @promise_char_to_string(i32")
+	assertContains(t, ir, "one_byte:")
+	assertContains(t, ir, "two_byte:")
+	assertContains(t, ir, "three_byte:")
+	assertContains(t, ir, "four_byte:")
+	assertContains(t, ir, "lshr i32")
 }
 
 func TestSliceLen(t *testing.T) {

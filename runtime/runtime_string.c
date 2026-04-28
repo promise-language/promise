@@ -30,52 +30,9 @@ void promise_print_string(promise_string_v *s) {
     putchar('\n');
 }
 
-// --- Value-to-string conversion for string interpolation ---
-
-promise_string_i* promise_int_to_string(int64_t x) {
-    char buf[32];
-    int len = snprintf(buf, sizeof(buf), "%lld", (long long)x);
-    return promise_string_new(buf, len);
-}
-
-promise_string_i* promise_f64_to_string(double x) {
-    char buf[64];
-    int len = snprintf(buf, sizeof(buf), "%g", x);
-    return promise_string_new(buf, len);
-}
-
-promise_string_i* promise_bool_to_string(int8_t x) {
-    if (x) {
-        return promise_string_new("true", 4);
-    }
-    return promise_string_new("false", 5);
-}
-
-// --- Char-to-string conversion (UTF-8 encode a Unicode codepoint) ---
-
-promise_string_i* promise_char_to_string(int32_t cp) {
-    char buf[4];
-    int len = 0;
-    if (cp < 0x80) {
-        buf[0] = (char)cp; len = 1;
-    } else if (cp < 0x800) {
-        buf[0] = 0xC0 | (cp >> 6);
-        buf[1] = 0x80 | (cp & 0x3F);
-        len = 2;
-    } else if (cp < 0x10000) {
-        buf[0] = 0xE0 | (cp >> 12);
-        buf[1] = 0x80 | ((cp >> 6) & 0x3F);
-        buf[2] = 0x80 | (cp & 0x3F);
-        len = 3;
-    } else {
-        buf[0] = 0xF0 | (cp >> 18);
-        buf[1] = 0x80 | ((cp >> 12) & 0x3F);
-        buf[2] = 0x80 | ((cp >> 6) & 0x3F);
-        buf[3] = 0x80 | (cp & 0x3F);
-        len = 4;
-    }
-    return promise_string_new(buf, len);
-}
+// promise_int_to_string, promise_f64_to_string, promise_bool_to_string,
+// promise_char_to_string are now codegen-emitted LLVM IR
+// (see compiler/internal/codegen/compiler.go: defineIntToStringFunc, etc.)
 
 // promise_string_trim returns a new string with leading/trailing whitespace removed.
 promise_string_i* promise_string_trim(promise_string_i* s) {

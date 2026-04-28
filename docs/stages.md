@@ -349,9 +349,9 @@ Codegen for if-unwrap, while-unwrap, optional chaining, string interpolation, an
   - **AST**: `StringInterp` gains `Expr` field (parsed expression from `{expr}` syntax).
   - **AST builder**: `parseInterpolationExpr` re-lexes/re-parses expression text via fresh ANTLR lexer/parser. `offsetExprPositions` recursively adjusts AST node positions to match original source locations.
   - **Sema**: StringLit case extended to type-check interpolation expressions.
-  - **Runtime**: `promise_int_to_string`, `promise_f64_to_string`, `promise_bool_to_string` conversion functions in `runtime_string.c` using `snprintf`.
+  - **Runtime**: ~~`promise_int_to_string`, `promise_f64_to_string`, `promise_bool_to_string` conversion functions in `runtime_string.c` using `snprintf`~~ — now codegen-emitted LLVM IR (`defineIntToStringFunc`, `defineUintToStringFunc`, `defineF64ToStringFunc`, `defineBoolToStringFunc`, `defineCharToStringFunc` in compiler.go).
   - **Codegen**: `genStringLit` split into `genStaticString` (compile-time, no interpolation) and `genInterpolatedString` (runtime). `convertToString` handles all primitive types with sext/zext/fpext as needed. Parts concatenated via `promise_string_concat`.
-  - **Intrinsics**: 3 new conversion functions declared in `declareIntrinsics`.
+  - **Intrinsics**: 5 conversion functions defined as codegen LLVM IR in `declareIntrinsics` (plus `promise_uint_to_string` for unsigned types).
 - **Unsafe blocks**: `genUnsafeExpr` trivially generates block contents. Ownership analysis handles the "unsafe" semantics, not codegen.
 - **Scope**: If-unwrap (with/without else), while-unwrap (with break/continue), optional chaining on user type fields, string interpolation with identifiers/literals/expressions/multiple parts, unsafe blocks.
 - **Deferred**: `is`/`as` expressions (need RTTI), generators (`yield`), concurrency (`go`, `task`, `channel`), container methods (`.push`, `.pop`, `.contains`), user type `toString()` for interpolation. Container `.len` completed in Stage 8i.
@@ -510,7 +510,7 @@ Command-line interface. Core commands implemented; formatter planned.
 - Bare pipe detection: `echo '<code>' | promise` auto-enters exec mode
 - Inline error formatting: source line + `^` caret marker, no temp filenames
 - Embedded `std/` and `runtime/` in the binary via `go:embed` for self-contained install
-- **Standard library test suite** (`tests/std/`): 11 test files, 104 tests covering int, uint, float, bool, char, string, hash, Vector, map, math, and range
+- **Standard library test suite** (`tests/std/`): 12 test files, 140 tests covering int, uint, float, bool, char, string, hash, Vector, map, math, range, and interpolation
 - `promise fmt` — code formatter (planned)
 
 ## Stage 11 — Package Manager (Planned)
@@ -584,7 +584,7 @@ Consolidated list of items deferred from completed stages. Items marked ~~strike
 | FNV-1a hash for string (codegen-emitted LLVM IR, no C dependency) | Done |
 | Move string methods to Promise (contains, starts_with, ends_with, index_of) | Done |
 | Move vector.contains/remove to codegen-emitted LLVM IR | Done |
-| Move int/float/bool→string to Promise | Pending |
+| Move int/float/bool/char→string to codegen-emitted LLVM IR (float via snprintf) | Done |
 
 ### Future Stages
 

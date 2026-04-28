@@ -256,10 +256,10 @@ func (c *Compiler) convertToString(val value.Value, typ types.Type) value.Value 
 		ext := c.block.NewSExt(val, irtypes.I64)
 		return c.block.NewCall(c.funcs["promise_int_to_string"], ext)
 	case types.TypUint, types.TypU64:
-		return c.block.NewCall(c.funcs["promise_int_to_string"], val)
+		return c.block.NewCall(c.funcs["promise_uint_to_string"], val)
 	case types.TypU32, types.TypU16, types.TypU8:
 		ext := c.block.NewZExt(val, irtypes.I64)
-		return c.block.NewCall(c.funcs["promise_int_to_string"], ext)
+		return c.block.NewCall(c.funcs["promise_uint_to_string"], ext)
 	case types.TypF64:
 		return c.block.NewCall(c.funcs["promise_f64_to_string"], val)
 	case types.TypF32:

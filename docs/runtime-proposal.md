@@ -5,7 +5,7 @@ Proposal for Promise's runtime, syscall layer, concurrency model, and multi-plat
 ## Current State
 
 The runtime today is ~450 lines of C providing:
-- **IO**: `printf`/`fprintf`/`fwrite` for print, `snprintf` for int/float/bool/char→string
+- **IO**: `printf`/`fprintf`/`fwrite` for print, ~~`snprintf` for int/float/bool/char→string~~ (codegen-emitted LLVM IR; float still uses libc `snprintf`)
 - **Memory**: `malloc`/`free`/`realloc` for strings, vectors, closures
 - **String ops**: new, concat, ~~eq~~ (codegen LLVM IR), ~~contains, starts_with, ends_with, index_of~~ (pure Promise), trim, split, UTF-8 decode
 - **Vector ops**: with_capacity, push, pop, ~~contains, remove~~ (codegen-emitted LLVM IR)
@@ -169,8 +169,8 @@ Move string ops, vector ops, hash, and formatting from C into Promise.
 2. ~~Move hash to Promise (FNV-1a is ~10 lines)~~ — Done (all types: int/bool/char/float via Promise, string via codegen LLVM IR)
 3. ~~Move string methods (contains, starts_with, ends_with, index_of) to Promise~~ — Done (string byte indexing `s[i]` + pure Promise implementations; `string_eq` moved to codegen LLVM IR)
 4. ~~Move vector.contains/remove to Promise~~ — Done (codegen-emitted LLVM IR; can't be pure Promise due to generic `T` needing `Equal` constraint)
-5. Move int/float/bool→string to Promise
-6. Move UTF-8 encode/decode to Promise
+5. ~~Move int/float/bool/char→string to Promise~~ — Done (codegen-emitted LLVM IR; float uses libc `snprintf`; also includes char→string UTF-8 encode from step 6; added `promise_uint_to_string` fixing u64 sign bug)
+6. ~~Move UTF-8 encode (char→string) to Promise~~ — Done (included in step 5 as `defineCharToStringFunc`)
 7. Replace C string.new/concat with codegen-emitted LLVM IR (calls allocator + memcpy intrinsic)
 
 After this migration, C runtime code drops to near zero.
@@ -274,7 +274,7 @@ Everything built on top of Layer 0-3: map (already done), iterators, streams, cr
 | Phase | Work | Targets | Status |
 |-------|------|---------|--------|
 | **Phase 1** | ~~Bitwise operators (`&`, `\|`, `^`, `<<`, `>>`, `~`)~~ | ~~All~~ | Done |
-| **Phase 2** | Move hash, string methods, vector methods to Promise/codegen (hash done, string methods done, vector contains/remove done) | All | In Progress |
+| **Phase 2** | Move hash, string methods, vector methods, value→string to Promise/codegen (all done; remaining C: string new/concat, trim, split, UTF-8 decode, print) | All | In Progress |
 | **Phase 3** | PAL abstraction — define interface, implement macOS + Linux | macOS, Linux | Planned |
 | **Phase 3b** | PAL Windows implementation | Windows | Planned |
 | **Phase 3c** | PAL WASM implementation (WASI imports + JS FFI) | WASM | Planned |

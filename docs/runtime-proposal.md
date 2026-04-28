@@ -7,13 +7,13 @@ Proposal for Promise's runtime, syscall layer, concurrency model, and multi-plat
 The runtime today is ~450 lines of C providing:
 - **IO**: `printf`/`fprintf`/`fwrite` for print, ~~`snprintf` for int/float/bool/char→string~~ (codegen-emitted LLVM IR; float still uses libc `snprintf`)
 - **Memory**: `malloc`/`free`/`realloc` for strings, vectors, closures
-- **String ops**: ~~new, concat~~ (codegen LLVM IR, uses `@llvm.memcpy` intrinsic), ~~eq~~ (codegen LLVM IR), ~~contains, starts_with, ends_with, index_of~~ (pure Promise), trim, split, UTF-8 decode
-- **Vector ops**: with_capacity, push, pop, ~~contains, remove~~ (codegen-emitted LLVM IR)
+- **String ops**: ~~new, concat~~ (codegen LLVM IR, uses `@llvm.memcpy` intrinsic), ~~eq~~ (codegen LLVM IR), ~~contains, starts_with, ends_with, index_of~~ (pure Promise), ~~trim, split, UTF-8 decode~~ (codegen-emitted LLVM IR; split uses libc `memcmp`)
+- **Vector ops**: ~~with_capacity, push, pop~~ (codegen-emitted LLVM IR), ~~contains, remove~~ (codegen-emitted LLVM IR)
 - **Hash**: FNV-1a for int/bool/char/float (Promise `std/hash.pr` + codegen bitcast), string (codegen-emitted LLVM IR); `eq_string` and `string_eq` also codegen-emitted — `runtime_hash.c` fully eliminated
 - **RTTI**: type_is check for inheritance
 - **Test runner**: fork/waitpid for crash isolation
 
-The libc surface used: `malloc`, `free`, `realloc`, `memcpy`, `memcmp`, `memmove`, `printf`, `fprintf`, `fwrite`, `snprintf`, `putchar`, `exit`, `fork`, `waitpid`, `fflush`.
+The libc surface used: `malloc`, `free`, `realloc`, `memcmp` (for string split), `printf`, `fprintf`, `fwrite`, `snprintf`, `putchar`, `exit`, `fork`, `waitpid`, `fflush`. LLVM intrinsics replace libc `memcpy`/`memmove`.
 
 Codegen uses `llir/llvm` (pure Go, text IR only). Clang serves as both C compiler (for runtime .c) and linker (.ll + .o → binary).
 
@@ -161,6 +161,7 @@ Move string ops, vector ops, hash, and formatting from C into Promise.
 - `string.new` (malloc + memcpy — close to allocator) — Done
 - `string.concat` (same) — Done
 - `vector.push` (realloc path) — Done (also with_capacity, pop)
+- `string.trim`, `string.split`, `string.next_char` — Done (trim/next_char are pure codegen; split uses libc `memcmp`)
 - `print` functions (until IO layer is built)
 - RTTI `type_is` (accesses raw memory layout)
 
@@ -175,15 +176,17 @@ Move string ops, vector ops, hash, and formatting from C into Promise.
 
 8. ~~Replace C vector with_capacity/push/pop with codegen-emitted LLVM IR~~ — Done (codegen-emitted LLVM IR using `@llvm.memcpy` intrinsic for push/pop; `@llvm.memmove` intrinsic for remove; `runtime_vector.c` eliminated entirely)
 
-After this migration, C runtime code drops to: `print` (IO), `trim`, `split`, `next_char` (string ops), `type_is` (RTTI), test runner.
+9. ~~Replace C string trim/split/next_char with codegen-emitted LLVM IR~~ — Done (trim uses byte loops, split uses libc `memcmp` for SIMD-accelerated substring matching, next_char is UTF-8 decoder; `runtime_string.c` reduced to `promise_print_string` only)
 
-**Performance TODO — restore SIMD memcmp**: The migration from C to codegen LLVM IR replaced libc `memcmp` (which uses SIMD — NEON on ARM, SSE/AVX on x86) with byte-by-byte comparison loops. This affects:
+After this migration, C runtime code drops to: `print` (IO), `type_is` (RTTI), test runner.
+
+**Performance TODO — restore SIMD memcmp in equality functions**: libc `memcmp` is now declared as extern (used by `defineStringSplitFunc`), but three codegen functions still use byte-by-byte comparison loops instead:
 - `defineStringDirectEqFunc` (compiler.go) — `promise_string_eq`, used by `==`/`!=` on strings
 - `defineStringEqFunc` (compiler.go) — `__promise_eq_string`, used by `vector.contains` for string[] elements
 - `defineVectorContainsFunc` (compiler.go) — memcmp path for non-string vector element comparison
 - Pure Promise string methods (`contains`, `starts_with`, `ends_with`, `index_of` in `std/string.pr`) — char-by-char comparison via `this[i] != sub[j]`
 
-**Fix**: Declare libc `memcmp` as extern (like `memmove`), replace the 3 codegen byte-loops with `memcmp(a, b, n) == 0`. For the Promise string methods, add a `memcmp`-like builtin or a native `string.eq_region(string other, int this_offset, int other_offset, int len) bool` method backed by memcmp. Short strings (< 8-16 bytes) won't benefit much, but long string equality and large vector scans will.
+**Fix**: Replace the 3 codegen byte-loops with `memcmp(a, b, n) == 0` (extern already declared). For the Promise string methods, add a `memcmp`-like builtin or a native `string.eq_region(string other, int this_offset, int other_offset, int len) bool` method backed by memcmp. Short strings (< 8-16 bytes) won't benefit much, but long string equality and large vector scans will.
 
 ~~**TODO — switch to LLVM intrinsics for memory operations**~~: Done. All memory operations now use LLVM intrinsics:
 - `@llvm.memcpy.p0i8.p0i8.i64` — used by `defineStringNewFunc`, `defineStringConcatFunc`, `defineVectorPushFunc`, `defineVectorPopFunc`
@@ -276,7 +279,7 @@ Everything built on top of Layer 0-3: map (already done), iterators, streams, cr
 | Phase | Work | Targets | Status |
 |-------|------|---------|--------|
 | **Phase 1** | ~~Bitwise operators (`&`, `\|`, `^`, `<<`, `>>`, `~`)~~ | ~~All~~ | Done |
-| **Phase 2** | Move hash, string methods, vector methods, value→string, string new/concat, vector ops to Promise/codegen (all done; remaining C: trim, split, UTF-8 decode, print, RTTI, test runner; `runtime_vector.c` eliminated) | All | In Progress |
+| **Phase 2** | Move hash, string methods, vector methods, value→string, string new/concat, vector ops, string trim/split/next_char to Promise/codegen (all done; remaining C: print, RTTI, test runner; `runtime_vector.c` and most of `runtime_string.c` eliminated) | All | In Progress |
 | **Phase 3** | PAL abstraction — define interface, implement macOS + Linux | macOS, Linux | Planned |
 | **Phase 3b** | PAL Windows implementation | Windows | Planned |
 | **Phase 3c** | PAL WASM implementation (WASI imports + JS FFI) | WASM | Planned |

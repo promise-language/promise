@@ -6078,6 +6078,7 @@ func TestStringTrim(t *testing.T) {
 			string trimmed = s.trim();
 		}
 	`)
+	assertContains(t, ir, "define i8* @promise_string_trim(")
 	assertContains(t, ir, "call i8* @promise_string_trim(")
 }
 
@@ -6088,7 +6089,59 @@ func TestStringSplit(t *testing.T) {
 			string[] parts = s.split(",");
 		}
 	`)
+	assertContains(t, ir, "define i8* @promise_string_split(")
 	assertContains(t, ir, "call i8* @promise_string_split(")
+}
+
+func TestStringTrimFuncBody(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			s := " hi ".trim();
+		}
+	`)
+	assertContains(t, ir, "define i8* @promise_string_trim(i8* %s)")
+	assertContains(t, ir, "trim_left_hdr:")
+	assertContains(t, ir, "trim_right_hdr:")
+	assertContains(t, ir, "build_result:")
+	assertContains(t, ir, "icmp eq i8") // whitespace checks
+	assertContains(t, ir, "call i8* @promise_string_new(")
+}
+
+func TestStringSplitFuncBody(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			s := "a,b".split(",");
+		}
+	`)
+	assertContains(t, ir, "define i8* @promise_string_split(i8* %s, i8* %sep)")
+	assertContains(t, ir, "call i32 @memcmp(")
+	assertContains(t, ir, "call i8* @malloc(")
+	assertContains(t, ir, "oom:")
+	assertContains(t, ir, "call void @promise_panic(")
+	assertContains(t, ir, "call i8* @promise_string_new(")
+	assertContains(t, ir, "count_hdr:")
+	assertContains(t, ir, "split_hdr:")
+	assertContains(t, ir, "split_tail:")
+}
+
+func TestStringNextCharFuncBody(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			for ch in "abc" {}
+		}
+	`)
+	assertContains(t, ir, "define i32 @promise_string_next_char(i8* %s, i64* %pos)")
+	assertContains(t, ir, "ret_eof:")
+	assertContains(t, ir, "ret i32 -1")
+	assertContains(t, ir, "set_1byte:")
+	assertContains(t, ir, "cont_hdr:")
+	assertContains(t, ir, "cont_body:")
+	assertContains(t, ir, "cont_done:")
+}
+
+func TestMemcmpDeclared(t *testing.T) {
+	ir := generateIR(t, `main() { x := 1; }`)
+	assertContains(t, ir, "declare i32 @memcmp(i8* %s1, i8* %s2, i64 %n)")
 }
 
 // --- Return optional wrapping in monomorphized context ---

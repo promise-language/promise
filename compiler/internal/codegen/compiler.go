@@ -357,6 +357,13 @@ func (c *Compiler) declareIntrinsics() {
 		ir.NewParam("ptr", irtypes.I8Ptr),
 		ir.NewParam("size", irtypes.I64))
 
+	// Memcmp for string split (SIMD-accelerated; no @llvm.memcmp intrinsic exists)
+	c.funcs["memcmp"] = c.module.NewFunc("memcmp",
+		irtypes.I32,
+		ir.NewParam("s1", irtypes.I8Ptr),
+		ir.NewParam("s2", irtypes.I8Ptr),
+		ir.NewParam("n", irtypes.I64))
+
 	// Vector methods (codegen-emitted LLVM IR, replaces C runtime)
 	c.defineVectorWithCapacityFunc()
 	c.defineVectorPushFunc()
@@ -364,14 +371,9 @@ func (c *Compiler) declareIntrinsics() {
 	c.defineVectorContainsFunc()
 	c.defineVectorRemoveFunc()
 
-	c.funcs["promise_string_trim"] = c.module.NewFunc("promise_string_trim",
-		irtypes.I8Ptr,
-		ir.NewParam("s", irtypes.I8Ptr))
-
-	c.funcs["promise_string_split"] = c.module.NewFunc("promise_string_split",
-		irtypes.I8Ptr,
-		ir.NewParam("s", irtypes.I8Ptr),
-		ir.NewParam("sep", irtypes.I8Ptr))
+	// String trim/split (codegen-emitted LLVM IR, replaces C runtime)
+	c.defineStringTrimFunc()
+	c.defineStringSplitFunc()
 
 	// snprintf extern (needed by defineF64ToStringFunc)
 	snprintfFn := c.module.NewFunc("snprintf", irtypes.I32,
@@ -388,10 +390,8 @@ func (c *Compiler) declareIntrinsics() {
 	c.defineF64ToStringFunc()
 	c.defineCharToStringFunc()
 
-	c.funcs["promise_string_next_char"] = c.module.NewFunc("promise_string_next_char",
-		irtypes.I32,
-		ir.NewParam("s", irtypes.I8Ptr),
-		ir.NewParam("pos", irtypes.NewPointer(irtypes.I64)))
+	// String next_char UTF-8 decoder (codegen-emitted LLVM IR, replaces C runtime)
+	c.defineStringNextCharFunc()
 
 	// RTTI intrinsic for runtime type checking
 	c.funcs["promise_type_is"] = c.module.NewFunc("promise_type_is",
@@ -643,7 +643,468 @@ func (c *Compiler) defineStringDirectEqFunc() {
 	c.funcs["promise_string_eq"] = fn
 }
 
+// defineStringTrimFunc emits an LLVM IR function that returns a new string
+// with leading and trailing whitespace removed.
+// Whitespace: space (32), tab (9), newline (10), carriage return (13).
+// String instance layout: { i8* _variant, i64 len, [0 x i8] data }
+func (c *Compiler) defineStringTrimFunc() {
+	sParam := ir.NewParam("s", irtypes.I8Ptr)
+	fn := c.module.NewFunc("promise_string_trim", irtypes.I8Ptr, sParam)
+
+	strInstanceType := irtypes.NewStruct(
+		irtypes.I8Ptr,                   // _variant
+		irtypes.I64,                     // len
+		irtypes.NewArray(0, irtypes.I8), // data (flexible array)
+	)
+
+	zero64 := constant.NewInt(irtypes.I64, 0)
+	one64 := constant.NewInt(irtypes.I64, 1)
+
+	// entry: load len, get data pointer, alloca start/end
+	entry := fn.NewBlock("entry")
+	typedS := entry.NewBitCast(sParam, irtypes.NewPointer(strInstanceType))
+	lenPtr := entry.NewGetElementPtr(strInstanceType, typedS,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	sLen := entry.NewLoad(irtypes.I64, lenPtr)
+	dataPtr := entry.NewGetElementPtr(strInstanceType, typedS,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
+		constant.NewInt(irtypes.I32, 0))
+
+	startA := entry.NewAlloca(irtypes.I64)
+	entry.NewStore(zero64, startA)
+	endA := entry.NewAlloca(irtypes.I64)
+	entry.NewStore(sLen, endA)
+
+	trimLeftHdr := fn.NewBlock("trim_left_hdr")
+	trimLeftChk := fn.NewBlock("trim_left_chk")
+	trimLeftAdv := fn.NewBlock("trim_left_adv")
+	trimRightHdr := fn.NewBlock("trim_right_hdr")
+	trimRightChk := fn.NewBlock("trim_right_chk")
+	trimRightAdv := fn.NewBlock("trim_right_adv")
+	buildResult := fn.NewBlock("build_result")
+
+	entry.NewBr(trimLeftHdr)
+
+	// trim_left_hdr: start < end?
+	start := trimLeftHdr.NewLoad(irtypes.I64, startA)
+	end := trimLeftHdr.NewLoad(irtypes.I64, endA)
+	leftCond := trimLeftHdr.NewICmp(enum.IPredSLT, start, end)
+	trimLeftHdr.NewCondBr(leftCond, trimLeftChk, trimRightHdr)
+
+	// trim_left_chk: is data[start] whitespace?
+	startVal := trimLeftChk.NewLoad(irtypes.I64, startA)
+	bytePtr := trimLeftChk.NewGetElementPtr(irtypes.I8, dataPtr, startVal)
+	b := trimLeftChk.NewLoad(irtypes.I8, bytePtr)
+	isSp := trimLeftChk.NewICmp(enum.IPredEQ, b, constant.NewInt(irtypes.I8, 32))
+	isTab := trimLeftChk.NewICmp(enum.IPredEQ, b, constant.NewInt(irtypes.I8, 9))
+	isNL := trimLeftChk.NewICmp(enum.IPredEQ, b, constant.NewInt(irtypes.I8, 10))
+	isCR := trimLeftChk.NewICmp(enum.IPredEQ, b, constant.NewInt(irtypes.I8, 13))
+	ws1 := trimLeftChk.NewOr(isSp, isTab)
+	ws2 := trimLeftChk.NewOr(ws1, isNL)
+	isWs := trimLeftChk.NewOr(ws2, isCR)
+	trimLeftChk.NewCondBr(isWs, trimLeftAdv, trimRightHdr)
+
+	// trim_left_adv: start++
+	startCur := trimLeftAdv.NewLoad(irtypes.I64, startA)
+	nextStart := trimLeftAdv.NewAdd(startCur, one64)
+	trimLeftAdv.NewStore(nextStart, startA)
+	trimLeftAdv.NewBr(trimLeftHdr)
+
+	// trim_right_hdr: end > start?
+	endVal := trimRightHdr.NewLoad(irtypes.I64, endA)
+	startVal2 := trimRightHdr.NewLoad(irtypes.I64, startA)
+	rightCond := trimRightHdr.NewICmp(enum.IPredSGT, endVal, startVal2)
+	trimRightHdr.NewCondBr(rightCond, trimRightChk, buildResult)
+
+	// trim_right_chk: is data[end-1] whitespace?
+	endVal2 := trimRightChk.NewLoad(irtypes.I64, endA)
+	idxR := trimRightChk.NewSub(endVal2, one64)
+	bytePtrR := trimRightChk.NewGetElementPtr(irtypes.I8, dataPtr, idxR)
+	bR := trimRightChk.NewLoad(irtypes.I8, bytePtrR)
+	isSpR := trimRightChk.NewICmp(enum.IPredEQ, bR, constant.NewInt(irtypes.I8, 32))
+	isTabR := trimRightChk.NewICmp(enum.IPredEQ, bR, constant.NewInt(irtypes.I8, 9))
+	isNLR := trimRightChk.NewICmp(enum.IPredEQ, bR, constant.NewInt(irtypes.I8, 10))
+	isCRR := trimRightChk.NewICmp(enum.IPredEQ, bR, constant.NewInt(irtypes.I8, 13))
+	wsR1 := trimRightChk.NewOr(isSpR, isTabR)
+	wsR2 := trimRightChk.NewOr(wsR1, isNLR)
+	isWsR := trimRightChk.NewOr(wsR2, isCRR)
+	trimRightChk.NewCondBr(isWsR, trimRightAdv, buildResult)
+
+	// trim_right_adv: end--
+	endCur := trimRightAdv.NewLoad(irtypes.I64, endA)
+	prevEnd := trimRightAdv.NewSub(endCur, one64)
+	trimRightAdv.NewStore(prevEnd, endA)
+	trimRightAdv.NewBr(trimRightHdr)
+
+	// build_result: create new string from data[start..end]
+	finalStart := buildResult.NewLoad(irtypes.I64, startA)
+	finalEnd := buildResult.NewLoad(irtypes.I64, endA)
+	newLen := buildResult.NewSub(finalEnd, finalStart)
+	newDataPtr := buildResult.NewGetElementPtr(irtypes.I8, dataPtr, finalStart)
+	result := buildResult.NewCall(c.funcs["promise_string_new"], newDataPtr, newLen)
+	buildResult.NewRet(result)
+
+	c.funcs["promise_string_trim"] = fn
+}
+
+// defineStringSplitFunc emits an LLVM IR function that splits a string by a
+// separator and returns a vector (slice) of string pointers.
+// Phase 1: count separator occurrences using memcmp.
+// Phase 2: allocate vector {i64 len, i64 cap, data...} and fill with substrings.
+// Empty separator returns a single-element slice containing the whole string.
+// String instance layout: { i8* _variant, i64 len, [0 x i8] data }
+func (c *Compiler) defineStringSplitFunc() {
+	sParam := ir.NewParam("s", irtypes.I8Ptr)
+	sepParam := ir.NewParam("sep", irtypes.I8Ptr)
+	fn := c.module.NewFunc("promise_string_split", irtypes.I8Ptr, sParam, sepParam)
+
+	strInstanceType := irtypes.NewStruct(
+		irtypes.I8Ptr,                   // _variant
+		irtypes.I64,                     // len
+		irtypes.NewArray(0, irtypes.I8), // data (flexible array)
+	)
+
+	zero64 := constant.NewInt(irtypes.I64, 0)
+	one64 := constant.NewInt(irtypes.I64, 1)
+	ptrSize := constant.NewInt(irtypes.I64, 8) // sizeof(pointer)
+	headerSize := constant.NewInt(irtypes.I64, 16)
+	vectorHeaderType := irtypes.NewStruct(irtypes.I64, irtypes.I64) // {len, cap}
+
+	// OOM panic message
+	oomMsg := constant.NewCharArrayFromString("out of memory\x00")
+	oomGlobal := c.module.NewGlobalDef(
+		fmt.Sprintf(".str.oom.%d", c.strCounter), oomMsg)
+	c.strCounter++
+	oomGlobal.Immutable = true
+
+	// entry: load string fields, set up allocas
+	entry := fn.NewBlock("entry")
+
+	typedS := entry.NewBitCast(sParam, irtypes.NewPointer(strInstanceType))
+	sLenPtr := entry.NewGetElementPtr(strInstanceType, typedS,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	sLen := entry.NewLoad(irtypes.I64, sLenPtr)
+	sDataPtr := entry.NewGetElementPtr(strInstanceType, typedS,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
+		constant.NewInt(irtypes.I32, 0))
+
+	typedSep := entry.NewBitCast(sepParam, irtypes.NewPointer(strInstanceType))
+	sepLenPtr := entry.NewGetElementPtr(strInstanceType, typedSep,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	sepLen := entry.NewLoad(irtypes.I64, sepLenPtr)
+	sepDataPtr := entry.NewGetElementPtr(strInstanceType, typedSep,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
+		constant.NewInt(irtypes.I32, 0))
+
+	// All allocas in entry block
+	countA := entry.NewAlloca(irtypes.I64)
+	entry.NewStore(one64, countA) // count starts at 1
+	iA := entry.NewAlloca(irtypes.I64)
+	entry.NewStore(zero64, iA)
+	posA := entry.NewAlloca(irtypes.I64)
+	entry.NewStore(zero64, posA)
+	idxA := entry.NewAlloca(irtypes.I64)
+	entry.NewStore(zero64, idxA)
+
+	sepEmpty := entry.NewICmp(enum.IPredEQ, sepLen, zero64)
+
+	// Create all blocks
+	countHdr := fn.NewBlock("count_hdr")
+	countBody := fn.NewBlock("count_body")
+	countMatch := fn.NewBlock("count_match")
+	countNext := fn.NewBlock("count_next")
+	allocBlk := fn.NewBlock("alloc")
+	oomBlk := fn.NewBlock("oom")
+	initHdr := fn.NewBlock("init_hdr")
+	emptySep := fn.NewBlock("empty_sep")
+	splitInit := fn.NewBlock("split_init")
+	splitHdr := fn.NewBlock("split_hdr")
+	splitBody := fn.NewBlock("split_body")
+	splitMatch := fn.NewBlock("split_match")
+	splitNext := fn.NewBlock("split_next")
+	splitTail := fn.NewBlock("split_tail")
+	doneBlk := fn.NewBlock("done")
+
+	entry.NewCondBr(sepEmpty, allocBlk, countHdr)
+
+	// ===== Phase 1: Count separators =====
+
+	// count_hdr: i <= sLen - sepLen?
+	iVal := countHdr.NewLoad(irtypes.I64, iA)
+	limit := countHdr.NewSub(sLen, sepLen)
+	countCond := countHdr.NewICmp(enum.IPredSLE, iVal, limit)
+	countHdr.NewCondBr(countCond, countBody, allocBlk)
+
+	// count_body: memcmp
+	iVal2 := countBody.NewLoad(irtypes.I64, iA)
+	curPtr := countBody.NewGetElementPtr(irtypes.I8, sDataPtr, iVal2)
+	cmpResult := countBody.NewCall(c.funcs["memcmp"], curPtr, sepDataPtr, sepLen)
+	isMatch := countBody.NewICmp(enum.IPredEQ, cmpResult, constant.NewInt(irtypes.I32, 0))
+	countBody.NewCondBr(isMatch, countMatch, countNext)
+
+	// count_match: count++, i += sepLen - 1
+	cnt := countMatch.NewLoad(irtypes.I64, countA)
+	cnt1 := countMatch.NewAdd(cnt, one64)
+	countMatch.NewStore(cnt1, countA)
+	iCur := countMatch.NewLoad(irtypes.I64, iA)
+	skipI := countMatch.NewAdd(iCur, sepLen)
+	skipIM1 := countMatch.NewSub(skipI, one64)
+	countMatch.NewStore(skipIM1, iA)
+	countMatch.NewBr(countNext)
+
+	// count_next: i++
+	iVal3 := countNext.NewLoad(irtypes.I64, iA)
+	iNext := countNext.NewAdd(iVal3, one64)
+	countNext.NewStore(iNext, iA)
+	countNext.NewBr(countHdr)
+
+	// ===== Phase 2: Allocate slice =====
+
+	// alloc: malloc(16 + count * 8)
+	count := allocBlk.NewLoad(irtypes.I64, countA)
+	dataSize := allocBlk.NewMul(count, ptrSize)
+	totalSize := allocBlk.NewAdd(headerSize, dataSize)
+	rawSlice := allocBlk.NewCall(c.funcs["malloc"], totalSize)
+	isNull := allocBlk.NewICmp(enum.IPredEQ, rawSlice, constant.NewNull(irtypes.I8Ptr))
+	allocBlk.NewCondBr(isNull, oomBlk, initHdr)
+
+	// oom: panic
+	msgPtr := oomBlk.NewGetElementPtr(oomGlobal.ContentType, oomGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	oomBlk.NewCall(c.funcs["promise_panic"], msgPtr)
+	oomBlk.NewUnreachable()
+
+	// init_hdr: store len and cap
+	hdrPtr := initHdr.NewBitCast(rawSlice, irtypes.NewPointer(vectorHeaderType))
+	lenField := initHdr.NewGetElementPtr(vectorHeaderType, hdrPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	initHdr.NewStore(count, lenField)
+	capField := initHdr.NewGetElementPtr(vectorHeaderType, hdrPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	initHdr.NewStore(count, capField)
+	sepEmpty2 := initHdr.NewICmp(enum.IPredEQ, sepLen, zero64)
+	initHdr.NewCondBr(sepEmpty2, emptySep, splitInit)
+
+	// ===== Phase 2a: Empty separator → single-element result =====
+
+	elemBase := emptySep.NewGetElementPtr(irtypes.I8, rawSlice, headerSize)
+	elemTyped := emptySep.NewBitCast(elemBase, irtypes.NewPointer(irtypes.I8Ptr))
+	wholeStr := emptySep.NewCall(c.funcs["promise_string_new"], sDataPtr, sLen)
+	emptySep.NewStore(wholeStr, elemTyped)
+	emptySep.NewBr(doneBlk)
+
+	// ===== Phase 2b: Split loop =====
+
+	// split_init: reset loop vars
+	splitInit.NewStore(zero64, iA)
+	splitInit.NewStore(zero64, posA)
+	splitInit.NewStore(zero64, idxA)
+	splitInit.NewBr(splitHdr)
+
+	// split_hdr: i <= sLen - sepLen?
+	siVal := splitHdr.NewLoad(irtypes.I64, iA)
+	sLimit := splitHdr.NewSub(sLen, sepLen)
+	sCond := splitHdr.NewICmp(enum.IPredSLE, siVal, sLimit)
+	splitHdr.NewCondBr(sCond, splitBody, splitTail)
+
+	// split_body: memcmp
+	siVal2 := splitBody.NewLoad(irtypes.I64, iA)
+	sCurPtr := splitBody.NewGetElementPtr(irtypes.I8, sDataPtr, siVal2)
+	sCmpResult := splitBody.NewCall(c.funcs["memcmp"], sCurPtr, sepDataPtr, sepLen)
+	sIsMatch := splitBody.NewICmp(enum.IPredEQ, sCmpResult, constant.NewInt(irtypes.I32, 0))
+	splitBody.NewCondBr(sIsMatch, splitMatch, splitNext)
+
+	// split_match: create substring, store in result
+	pos := splitMatch.NewLoad(irtypes.I64, posA)
+	idx := splitMatch.NewLoad(irtypes.I64, idxA)
+	matchI := splitMatch.NewLoad(irtypes.I64, iA)
+	subLen := splitMatch.NewSub(matchI, pos)
+	subPtr := splitMatch.NewGetElementPtr(irtypes.I8, sDataPtr, pos)
+	newStr := splitMatch.NewCall(c.funcs["promise_string_new"], subPtr, subLen)
+	// Store at rawSlice + 16 + idx * 8
+	elemOff := splitMatch.NewMul(idx, ptrSize)
+	elemOff2 := splitMatch.NewAdd(headerSize, elemOff)
+	elemPtr := splitMatch.NewGetElementPtr(irtypes.I8, rawSlice, elemOff2)
+	elemPtrTyped := splitMatch.NewBitCast(elemPtr, irtypes.NewPointer(irtypes.I8Ptr))
+	splitMatch.NewStore(newStr, elemPtrTyped)
+	// Update pos = i + sepLen, idx++
+	newPos := splitMatch.NewAdd(matchI, sepLen)
+	splitMatch.NewStore(newPos, posA)
+	nextIdx := splitMatch.NewAdd(idx, one64)
+	splitMatch.NewStore(nextIdx, idxA)
+	// i += sepLen - 1 (split_next adds 1 more)
+	skipSI := splitMatch.NewAdd(matchI, sepLen)
+	skipSIM1 := splitMatch.NewSub(skipSI, one64)
+	splitMatch.NewStore(skipSIM1, iA)
+	splitMatch.NewBr(splitNext)
+
+	// split_next: i++
+	siVal3 := splitNext.NewLoad(irtypes.I64, iA)
+	siNext := splitNext.NewAdd(siVal3, one64)
+	splitNext.NewStore(siNext, iA)
+	splitNext.NewBr(splitHdr)
+
+	// split_tail: store final substring from pos to sLen
+	tailPos := splitTail.NewLoad(irtypes.I64, posA)
+	tailIdx := splitTail.NewLoad(irtypes.I64, idxA)
+	tailLen := splitTail.NewSub(sLen, tailPos)
+	tailPtr := splitTail.NewGetElementPtr(irtypes.I8, sDataPtr, tailPos)
+	tailStr := splitTail.NewCall(c.funcs["promise_string_new"], tailPtr, tailLen)
+	tailElemOff := splitTail.NewMul(tailIdx, ptrSize)
+	tailElemOff2 := splitTail.NewAdd(headerSize, tailElemOff)
+	tailElemPtr := splitTail.NewGetElementPtr(irtypes.I8, rawSlice, tailElemOff2)
+	tailElemPtrTyped := splitTail.NewBitCast(tailElemPtr, irtypes.NewPointer(irtypes.I8Ptr))
+	splitTail.NewStore(tailStr, tailElemPtrTyped)
+	splitTail.NewBr(doneBlk)
+
+	// done: return slice
+	doneBlk.NewRet(rawSlice)
+
+	c.funcs["promise_string_split"] = fn
+}
+
+// defineStringNextCharFunc emits an LLVM IR function that decodes one UTF-8
+// codepoint from a string at position *pos, advances *pos past the consumed
+// bytes, and returns the codepoint as i32. Returns -1 when *pos >= len (EOF).
+// String instance layout: { i8* _variant, i64 len, [0 x i8] data }
+func (c *Compiler) defineStringNextCharFunc() {
+	sParam := ir.NewParam("s", irtypes.I8Ptr)
+	posParam := ir.NewParam("pos", irtypes.NewPointer(irtypes.I64))
+	fn := c.module.NewFunc("promise_string_next_char", irtypes.I32, sParam, posParam)
+
+	strInstanceType := irtypes.NewStruct(
+		irtypes.I8Ptr,                   // _variant
+		irtypes.I64,                     // len
+		irtypes.NewArray(0, irtypes.I8), // data (flexible array)
+	)
+
+	one32 := constant.NewInt(irtypes.I32, 1)
+
+	// entry: load len, data pointer, *pos, allocas for cp/n/loopI
+	entry := fn.NewBlock("entry")
+
+	typedS := entry.NewBitCast(sParam, irtypes.NewPointer(strInstanceType))
+	sLenPtr := entry.NewGetElementPtr(strInstanceType, typedS,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	sLen := entry.NewLoad(irtypes.I64, sLenPtr)
+	sDataPtr := entry.NewGetElementPtr(strInstanceType, typedS,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
+		constant.NewInt(irtypes.I32, 0))
+
+	posVal := entry.NewLoad(irtypes.I64, posParam)
+
+	// Allocas in entry block
+	cpA := entry.NewAlloca(irtypes.I32)
+	nA := entry.NewAlloca(irtypes.I32)
+	loopIA := entry.NewAlloca(irtypes.I32)
+
+	atEnd := entry.NewICmp(enum.IPredSGE, posVal, sLen)
+
+	retEof := fn.NewBlock("ret_eof")
+	decode := fn.NewBlock("decode")
+	set1 := fn.NewBlock("set_1byte")
+	chk2 := fn.NewBlock("chk_2byte")
+	set2 := fn.NewBlock("set_2byte")
+	chk3 := fn.NewBlock("chk_3byte")
+	set3 := fn.NewBlock("set_3byte")
+	set4 := fn.NewBlock("set_4byte")
+	contLoop := fn.NewBlock("cont_loop")
+	contHdr := fn.NewBlock("cont_hdr")
+	contBound := fn.NewBlock("cont_bound")
+	contBody := fn.NewBlock("cont_body")
+	contDone := fn.NewBlock("cont_done")
+
+	entry.NewCondBr(atEnd, retEof, decode)
+
+	// ret_eof: return -1
+	retEof.NewRet(constant.NewInt(irtypes.I32, -1))
+
+	// decode: load first byte, classify
+	bytePtr := decode.NewGetElementPtr(irtypes.I8, sDataPtr, posVal)
+	b0 := decode.NewLoad(irtypes.I8, bytePtr)
+	b0ext := decode.NewZExt(b0, irtypes.I32)
+	isAscii := decode.NewICmp(enum.IPredULT, b0ext, constant.NewInt(irtypes.I32, 0x80))
+	decode.NewCondBr(isAscii, set1, chk2)
+
+	// set_1byte: cp = b0, n = 1
+	set1.NewStore(b0ext, cpA)
+	set1.NewStore(one32, nA)
+	set1.NewBr(contLoop)
+
+	// chk_2byte: b0 < 0xE0?
+	is2byte := chk2.NewICmp(enum.IPredULT, b0ext, constant.NewInt(irtypes.I32, 0xE0))
+	chk2.NewCondBr(is2byte, set2, chk3)
+
+	// set_2byte: cp = b0 & 0x1F, n = 2
+	masked2 := set2.NewAnd(b0ext, constant.NewInt(irtypes.I32, 0x1F))
+	set2.NewStore(masked2, cpA)
+	set2.NewStore(constant.NewInt(irtypes.I32, 2), nA)
+	set2.NewBr(contLoop)
+
+	// chk_3byte: b0 < 0xF0?
+	is3byte := chk3.NewICmp(enum.IPredULT, b0ext, constant.NewInt(irtypes.I32, 0xF0))
+	chk3.NewCondBr(is3byte, set3, set4)
+
+	// set_3byte: cp = b0 & 0x0F, n = 3
+	masked3 := set3.NewAnd(b0ext, constant.NewInt(irtypes.I32, 0x0F))
+	set3.NewStore(masked3, cpA)
+	set3.NewStore(constant.NewInt(irtypes.I32, 3), nA)
+	set3.NewBr(contLoop)
+
+	// set_4byte: cp = b0 & 0x07, n = 4
+	masked4 := set4.NewAnd(b0ext, constant.NewInt(irtypes.I32, 0x07))
+	set4.NewStore(masked4, cpA)
+	set4.NewStore(constant.NewInt(irtypes.I32, 4), nA)
+	set4.NewBr(contLoop)
+
+	// cont_loop: initialize loop index i = 1
+	contLoop.NewStore(one32, loopIA)
+	contLoop.NewBr(contHdr)
+
+	// cont_hdr: i < n?
+	iVal := contHdr.NewLoad(irtypes.I32, loopIA)
+	nVal := contHdr.NewLoad(irtypes.I32, nA)
+	cond1 := contHdr.NewICmp(enum.IPredSLT, iVal, nVal)
+	contHdr.NewCondBr(cond1, contBound, contDone)
+
+	// cont_bound: *pos + i < sLen?
+	iVal2 := contBound.NewLoad(irtypes.I32, loopIA)
+	iExt := contBound.NewSExt(iVal2, irtypes.I64)
+	absPos := contBound.NewAdd(posVal, iExt)
+	cond2 := contBound.NewICmp(enum.IPredSLT, absPos, sLen)
+	contBound.NewCondBr(cond2, contBody, contDone)
+
+	// cont_body: cp = (cp << 6) | (data[absPos] & 0x3F); i++
+	absPosBody := contBody.NewLoad(irtypes.I32, loopIA)
+	absPosExt := contBody.NewSExt(absPosBody, irtypes.I64)
+	absPosCalc := contBody.NewAdd(posVal, absPosExt)
+	contBytePtr := contBody.NewGetElementPtr(irtypes.I8, sDataPtr, absPosCalc)
+	contByte := contBody.NewLoad(irtypes.I8, contBytePtr)
+	contByteExt := contBody.NewZExt(contByte, irtypes.I32)
+	masked := contBody.NewAnd(contByteExt, constant.NewInt(irtypes.I32, 0x3F))
+	cp := contBody.NewLoad(irtypes.I32, cpA)
+	shifted := contBody.NewShl(cp, constant.NewInt(irtypes.I32, 6))
+	newCp := contBody.NewOr(shifted, masked)
+	contBody.NewStore(newCp, cpA)
+	iCur := contBody.NewLoad(irtypes.I32, loopIA)
+	iNext := contBody.NewAdd(iCur, one32)
+	contBody.NewStore(iNext, loopIA)
+	contBody.NewBr(contHdr)
+
+	// cont_done: *pos += n, return cp
+	nFinal := contDone.NewLoad(irtypes.I32, nA)
+	nExt := contDone.NewSExt(nFinal, irtypes.I64)
+	newPos := contDone.NewAdd(posVal, nExt)
+	contDone.NewStore(newPos, posParam)
+	cpFinal := contDone.NewLoad(irtypes.I32, cpA)
+	contDone.NewRet(cpFinal)
+
+	c.funcs["promise_string_next_char"] = fn
+}
+
 // defineStringHashFunc emits an LLVM IR function that computes FNV-1a hash
+// over the raw bytes of a string. Replaces the C runtime promise_hash_string_value.
+// String instance layout: { i8* _variant, i64 len, [0 x i8] data }
 // over the raw bytes of a string. Replaces the C runtime promise_hash_string_value.
 // String instance layout: { i8* _variant, i64 len, [0 x i8] data }
 func (c *Compiler) defineStringHashFunc() {

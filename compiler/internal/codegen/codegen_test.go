@@ -5847,6 +5847,7 @@ func TestVectorPush(t *testing.T) {
 			nums.push(3);
 		}
 	`)
+	assertContains(t, ir, "define i8* @promise_vector_push(")
 	assertContains(t, ir, "call i8* @promise_vector_push(")
 }
 
@@ -5857,6 +5858,7 @@ func TestVectorPop(t *testing.T) {
 			int? v = nums.pop();
 		}
 	`)
+	assertContains(t, ir, "define i32 @promise_vector_pop(")
 	assertContains(t, ir, "call i32 @promise_vector_pop(")
 	assertContains(t, ir, "pop.some")
 	assertContains(t, ir, "pop.none")
@@ -5930,7 +5932,64 @@ func TestVectorRemoveFuncBody(t *testing.T) {
 	assertContains(t, ir, "dec_len:")
 	// Verify panic calls and memmove
 	assertContains(t, ir, "call void @promise_panic(")
-	assertContains(t, ir, "call i8* @memmove(")
+	assertContains(t, ir, "call void @llvm.memmove.p0i8.p0i8.i64(")
+}
+
+func TestVectorWithCapacityFuncBody(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[] nums = [1, 2];
+			nums.push(3);
+		}
+	`)
+	// with_capacity is always defined (codegen intrinsic)
+	assertContains(t, ir, "define i8* @promise_vector_with_capacity(")
+	assertContains(t, ir, "call i8* @malloc(")
+	assertContains(t, ir, "init:")
+	assertContains(t, ir, "store i64 0")
+}
+
+func TestVectorPushFuncBody(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[] nums = [1];
+			nums.push(2);
+		}
+	`)
+	// Verify key blocks in the defined push function
+	assertContains(t, ir, "define i8* @promise_vector_push(")
+	assertContains(t, ir, "grow:")
+	assertContains(t, ir, "call i8* @realloc(")
+	assertContains(t, ir, "oom:")
+	assertContains(t, ir, "update_cap:")
+	assertContains(t, ir, "copy:")
+	assertContains(t, ir, "call void @llvm.memcpy.p0i8.p0i8.i64(")
+}
+
+func TestVectorPopFuncBody(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[] nums = [1, 2];
+			int? v = nums.pop();
+		}
+	`)
+	// Verify key blocks in the defined pop function
+	assertContains(t, ir, "define i32 @promise_vector_pop(")
+	assertContains(t, ir, "empty:")
+	assertContains(t, ir, "do_pop:")
+	assertContains(t, ir, "ret i32 0")
+	assertContains(t, ir, "ret i32 1")
+	assertContains(t, ir, "call void @llvm.memcpy.p0i8.p0i8.i64(")
+}
+
+func TestLLVMMemmoveDeclared(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[] nums = [1, 2, 3];
+			nums.remove(0);
+		}
+	`)
+	assertContains(t, ir, "declare void @llvm.memmove.p0i8.p0i8.i64(")
 }
 
 func TestVectorContainsIntNull(t *testing.T) {

@@ -158,9 +158,9 @@ Move string ops, vector ops, hash, and formatting from C into Promise.
 - UTF-8 encode/decode (needs shifts and masks)
 
 **What should stay as builtins** (emitted as LLVM IR by codegen, not C):
-- `string.new` (malloc + memcpy — close to allocator)
-- `string.concat` (same)
-- `vector.push` (realloc path)
+- `string.new` (malloc + memcpy — close to allocator) — Done
+- `string.concat` (same) — Done
+- `vector.push` (realloc path) — Done (also with_capacity, pop)
 - `print` functions (until IO layer is built)
 - RTTI `type_is` (accesses raw memory layout)
 
@@ -173,7 +173,9 @@ Move string ops, vector ops, hash, and formatting from C into Promise.
 6. ~~Move UTF-8 encode (char→string) to Promise~~ — Done (included in step 5 as `defineCharToStringFunc`)
 7. ~~Replace C string.new/concat with codegen-emitted LLVM IR (calls allocator + memcpy intrinsic)~~ — Done (codegen-emitted LLVM IR using `@llvm.memcpy` intrinsic; C `trim`/`split` call codegen `promise_string_new` via linker)
 
-After this migration, C runtime code drops to: `print` (IO), `trim`, `split`, `next_char` (string ops), `vector_with_capacity`, `push`, `pop` (vector ops), `type_is` (RTTI), test runner.
+8. ~~Replace C vector with_capacity/push/pop with codegen-emitted LLVM IR~~ — Done (codegen-emitted LLVM IR using `@llvm.memcpy` intrinsic for push/pop; `@llvm.memmove` intrinsic for remove; `runtime_vector.c` eliminated entirely)
+
+After this migration, C runtime code drops to: `print` (IO), `trim`, `split`, `next_char` (string ops), `type_is` (RTTI), test runner.
 
 **Performance TODO — restore SIMD memcmp**: The migration from C to codegen LLVM IR replaced libc `memcmp` (which uses SIMD — NEON on ARM, SSE/AVX on x86) with byte-by-byte comparison loops. This affects:
 - `defineStringDirectEqFunc` (compiler.go) — `promise_string_eq`, used by `==`/`!=` on strings
@@ -183,10 +185,10 @@ After this migration, C runtime code drops to: `print` (IO), `trim`, `split`, `n
 
 **Fix**: Declare libc `memcmp` as extern (like `memmove`), replace the 3 codegen byte-loops with `memcmp(a, b, n) == 0`. For the Promise string methods, add a `memcmp`-like builtin or a native `string.eq_region(string other, int this_offset, int other_offset, int len) bool` method backed by memcmp. Short strings (< 8-16 bytes) won't benefit much, but long string equality and large vector scans will.
 
-**TODO — switch to LLVM intrinsics for memory operations**: Replace libc `memmove`/`memcpy` externs with LLVM intrinsics (`@llvm.memmove.p0i8.p0i8.i64`, `@llvm.memcpy.p0i8.p0i8.i64`). These take an extra `i1 isvolatile` param (always `false`). LLVM lowers them to the best instruction sequence for the target — inlined word copies for small sizes, SIMD for large sizes — often better than libc because LLVM knows alignment and size at compile time. Applies to:
-- `defineVectorRemoveFunc` (compiler.go) — currently uses libc `memmove`
-- `promise_vector_push` / `promise_vector_pop` (runtime_vector.c) — once migrated to codegen, use `@llvm.memcpy`
-- `promise_string_new` / `promise_string_concat` (runtime_string.c) — once migrated to codegen, use `@llvm.memcpy`
+~~**TODO — switch to LLVM intrinsics for memory operations**~~: Done. All memory operations now use LLVM intrinsics:
+- `@llvm.memcpy.p0i8.p0i8.i64` — used by `defineStringNewFunc`, `defineStringConcatFunc`, `defineVectorPushFunc`, `defineVectorPopFunc`
+- `@llvm.memmove.p0i8.p0i8.i64` — used by `defineVectorRemoveFunc`
+- No libc `memcpy`/`memmove` externs remain. LLVM lowers intrinsics to optimal instruction sequences per target.
 - Note: there is **no** `@llvm.memcmp` intrinsic — comparison must stay as libc `memcmp` or a byte loop.
 
 **WASM pointer size**: WASM uses 32-bit pointers. Codegen needs a `ptrSize` constant instead of hardcoded 8. Struct layouts (vtable_ptr, instance_ptr) shrink to 4 bytes on WASM. The target data layout tells LLVM, but explicit pointer arithmetic in codegen (e.g., vector header offsets) must use `ptrSize`.
@@ -274,7 +276,7 @@ Everything built on top of Layer 0-3: map (already done), iterators, streams, cr
 | Phase | Work | Targets | Status |
 |-------|------|---------|--------|
 | **Phase 1** | ~~Bitwise operators (`&`, `\|`, `^`, `<<`, `>>`, `~`)~~ | ~~All~~ | Done |
-| **Phase 2** | Move hash, string methods, vector methods, value→string, string new/concat to Promise/codegen (all done; remaining C: trim, split, UTF-8 decode, print, vector push/pop/with_capacity, RTTI, test runner) | All | In Progress |
+| **Phase 2** | Move hash, string methods, vector methods, value→string, string new/concat, vector ops to Promise/codegen (all done; remaining C: trim, split, UTF-8 decode, print, RTTI, test runner; `runtime_vector.c` eliminated) | All | In Progress |
 | **Phase 3** | PAL abstraction — define interface, implement macOS + Linux | macOS, Linux | Planned |
 | **Phase 3b** | PAL Windows implementation | Windows | Planned |
 | **Phase 3c** | PAL WASM implementation (WASI imports + JS FFI) | WASM | Planned |

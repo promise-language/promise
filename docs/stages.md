@@ -351,7 +351,7 @@ Codegen for if-unwrap, while-unwrap, optional chaining, string interpolation, an
   - **Sema**: StringLit case extended to type-check interpolation expressions.
   - **Runtime**: ~~`promise_int_to_string`, `promise_f64_to_string`, `promise_bool_to_string` conversion functions in `runtime_string.c` using `snprintf`~~ — now codegen-emitted LLVM IR (`defineIntToStringFunc`, `defineUintToStringFunc`, `defineF64ToStringFunc`, `defineBoolToStringFunc`, `defineCharToStringFunc` in compiler.go).
   - **Codegen**: `genStringLit` split into `genStaticString` (compile-time, no interpolation) and `genInterpolatedString` (runtime). `convertToString` handles all primitive types with sext/zext/fpext as needed. Parts concatenated via `promise_string_concat`. Both `promise_string_new` and `promise_string_concat` are codegen-emitted LLVM IR using `@llvm.memcpy` intrinsic.
-  - **Intrinsics**: 7 functions defined as codegen LLVM IR in `declareIntrinsics`: `promise_string_new`, `promise_string_concat`, and 5 conversion functions (`bool`, `int`, `uint`, `f64`, `char` to string).
+  - **Intrinsics**: 10 functions defined as codegen LLVM IR in `declareIntrinsics`: `promise_string_new`, `promise_string_concat`, 5 conversion functions (`bool`, `int`, `uint`, `f64`, `char` to string), and `promise_vector_with_capacity`, `promise_vector_push`, `promise_vector_pop`.
 - **Unsafe blocks**: `genUnsafeExpr` trivially generates block contents. Ownership analysis handles the "unsafe" semantics, not codegen.
 - **Scope**: If-unwrap (with/without else), while-unwrap (with break/continue), optional chaining on user type fields, string interpolation with identifiers/literals/expressions/multiple parts, unsafe blocks.
 - **Deferred**: `is`/`as` expressions (need RTTI), generators (`yield`), concurrency (`go`, `task`, `channel`), container methods (`.push`, `.pop`, `.contains`), user type `toString()` for interpolation. Container `.len` completed in Stage 8i.
@@ -586,6 +586,7 @@ Consolidated list of items deferred from completed stages. Items marked ~~strike
 | Move vector.contains/remove to codegen-emitted LLVM IR | Done |
 | Move int/float/bool/char→string to codegen-emitted LLVM IR (float via snprintf) | Done |
 | Move string.new/concat to codegen-emitted LLVM IR (uses `@llvm.memcpy` intrinsic) | Done |
+| Move vector with_capacity/push/pop to codegen-emitted LLVM IR; switch memmove to `@llvm.memmove` intrinsic; eliminate `runtime_vector.c` | Done |
 
 ### Future Stages
 

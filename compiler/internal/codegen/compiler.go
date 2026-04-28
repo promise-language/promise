@@ -330,8 +330,14 @@ func (c *Compiler) declareIntrinsics() {
 	c.funcs["free"] = c.module.NewFunc("free",
 		irtypes.Void, ir.NewParam("ptr", irtypes.I8Ptr))
 
-	// LLVM memcpy intrinsic (used by string new/concat instead of libc memcpy)
+	// LLVM memcpy/memmove intrinsics (used instead of libc memcpy/memmove)
 	c.funcs["llvm.memcpy"] = c.module.NewFunc("llvm.memcpy.p0i8.p0i8.i64",
+		irtypes.Void,
+		ir.NewParam("dest", irtypes.I8Ptr),
+		ir.NewParam("src", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64),
+		ir.NewParam("isvolatile", irtypes.I1))
+	c.funcs["llvm.memmove"] = c.module.NewFunc("llvm.memmove.p0i8.p0i8.i64",
 		irtypes.Void,
 		ir.NewParam("dest", irtypes.I8Ptr),
 		ir.NewParam("src", irtypes.I8Ptr),
@@ -345,36 +351,16 @@ func (c *Compiler) declareIntrinsics() {
 	// String direct equality (codegen-emitted LLVM IR, replaces C runtime)
 	c.defineStringDirectEqFunc()
 
-	// Vector methods
-	c.funcs["promise_vector_with_capacity"] = c.module.NewFunc("promise_vector_with_capacity",
-		irtypes.I8Ptr,
-		ir.NewParam("capacity", irtypes.I64),
-		ir.NewParam("elem_size", irtypes.I64))
-
-	c.funcs["promise_vector_push"] = c.module.NewFunc("promise_vector_push",
-		irtypes.I8Ptr,
-		ir.NewParam("slice", irtypes.I8Ptr),
-		ir.NewParam("elem", irtypes.I8Ptr),
-		ir.NewParam("elem_size", irtypes.I64))
-
-	c.funcs["promise_vector_pop"] = c.module.NewFunc("promise_vector_pop",
-		irtypes.I32,
-		ir.NewParam("slice", irtypes.I8Ptr),
-		ir.NewParam("out_elem", irtypes.I8Ptr),
-		ir.NewParam("elem_size", irtypes.I64))
-
-	// Realloc for vector growth, memmove for vector remove
+	// Realloc for vector growth
 	c.funcs["realloc"] = c.module.NewFunc("realloc",
 		irtypes.I8Ptr,
 		ir.NewParam("ptr", irtypes.I8Ptr),
 		ir.NewParam("size", irtypes.I64))
-	c.funcs["memmove"] = c.module.NewFunc("memmove",
-		irtypes.I8Ptr,
-		ir.NewParam("dst", irtypes.I8Ptr),
-		ir.NewParam("src", irtypes.I8Ptr),
-		ir.NewParam("n", irtypes.I64))
 
-	// Vector contains/remove (codegen-emitted LLVM IR, replaces C runtime)
+	// Vector methods (codegen-emitted LLVM IR, replaces C runtime)
+	c.defineVectorWithCapacityFunc()
+	c.defineVectorPushFunc()
+	c.defineVectorPopFunc()
 	c.defineVectorContainsFunc()
 	c.defineVectorRemoveFunc()
 
@@ -839,6 +825,186 @@ func (c *Compiler) defineStringEqFunc() {
 	c.funcs["__promise_eq_string"] = fn
 }
 
+// defineVectorWithCapacityFunc emits an LLVM IR function that allocates a vector
+// with len=0 and the given capacity. Replaces the C runtime promise_vector_with_capacity.
+// Vector layout: {i64 len, i64 cap, [data...]} with 16-byte header.
+func (c *Compiler) defineVectorWithCapacityFunc() {
+	capParam := ir.NewParam("capacity", irtypes.I64)
+	elemSizeParam := ir.NewParam("elem_size", irtypes.I64)
+	fn := c.module.NewFunc("promise_vector_with_capacity", irtypes.I8Ptr,
+		capParam, elemSizeParam)
+
+	headerType := vectorHeaderType() // {i64, i64}
+	zero64 := constant.NewInt(irtypes.I64, 0)
+	headerSizeConst := constant.NewInt(irtypes.I64, int64(vectorHeaderSize))
+
+	// Entry: clamp negative capacity to 0, compute alloc size
+	entry := fn.NewBlock("entry")
+	isNeg := entry.NewICmp(enum.IPredSLT, capParam, zero64)
+	clampedCap := entry.NewSelect(isNeg, zero64, capParam)
+	dataSize := entry.NewMul(clampedCap, elemSizeParam)
+	allocSize := entry.NewAdd(headerSizeConst, dataSize)
+	raw := entry.NewCall(c.funcs["malloc"], allocSize)
+	isNull := entry.NewICmp(enum.IPredEQ, raw, constant.NewNull(irtypes.I8Ptr))
+
+	oom := fn.NewBlock("oom")
+	init := fn.NewBlock("init")
+	entry.NewCondBr(isNull, oom, init)
+
+	// OOM: panic
+	panicMsg := constant.NewCharArrayFromString("out of memory\x00")
+	globalName := fmt.Sprintf(".str.vecwithcap.%d", c.strCounter)
+	c.strCounter++
+	panicGlobal := c.module.NewGlobalDef(globalName, panicMsg)
+	panicGlobal.Immutable = true
+	msgPtr := oom.NewGetElementPtr(panicGlobal.ContentType, panicGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	oom.NewCall(c.funcs["promise_panic"], msgPtr)
+	oom.NewUnreachable()
+
+	// Init: store len=0, cap
+	hdrPtr := init.NewBitCast(raw, irtypes.NewPointer(headerType))
+	lenPtr := init.NewGetElementPtr(headerType, hdrPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	init.NewStore(zero64, lenPtr)
+	capPtr := init.NewGetElementPtr(headerType, hdrPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	init.NewStore(clampedCap, capPtr)
+	init.NewRet(raw)
+
+	c.funcs["promise_vector_with_capacity"] = fn
+}
+
+// defineVectorPushFunc emits an LLVM IR function that appends an element to a vector.
+// Returns the (possibly reallocated) vector pointer.
+// Replaces the C runtime promise_vector_push.
+// Vector layout: {i64 len, i64 cap, [data...]} with 16-byte header.
+func (c *Compiler) defineVectorPushFunc() {
+	sliceParam := ir.NewParam("slice", irtypes.I8Ptr)
+	elemParam := ir.NewParam("elem", irtypes.I8Ptr)
+	elemSizeParam := ir.NewParam("elem_size", irtypes.I64)
+	fn := c.module.NewFunc("promise_vector_push", irtypes.I8Ptr,
+		sliceParam, elemParam, elemSizeParam)
+
+	headerType := vectorHeaderType() // {i64, i64}
+	zero64 := constant.NewInt(irtypes.I64, 0)
+	one64 := constant.NewInt(irtypes.I64, 1)
+	four64 := constant.NewInt(irtypes.I64, 4)
+	headerSizeConst := constant.NewInt(irtypes.I64, int64(vectorHeaderSize))
+
+	// Entry: load len and cap, check if growth needed
+	entry := fn.NewBlock("entry")
+	hdrPtr := entry.NewBitCast(sliceParam, irtypes.NewPointer(headerType))
+	lenPtr := entry.NewGetElementPtr(headerType, hdrPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	vecLen := entry.NewLoad(irtypes.I64, lenPtr)
+	capPtr := entry.NewGetElementPtr(headerType, hdrPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	vecCap := entry.NewLoad(irtypes.I64, capPtr)
+	needGrow := entry.NewICmp(enum.IPredSGE, vecLen, vecCap)
+
+	grow := fn.NewBlock("grow")
+	copyBlk := fn.NewBlock("copy")
+	entry.NewCondBr(needGrow, grow, copyBlk)
+
+	// Grow: realloc with cap*2 (or 4 if cap==0)
+	isZeroCap := grow.NewICmp(enum.IPredEQ, vecCap, zero64)
+	doubledCap := grow.NewMul(vecCap, constant.NewInt(irtypes.I64, 2))
+	newCap := grow.NewSelect(isZeroCap, four64, doubledCap)
+	newDataSize := grow.NewMul(newCap, elemSizeParam)
+	newAllocSize := grow.NewAdd(headerSizeConst, newDataSize)
+	newPtr := grow.NewCall(c.funcs["realloc"], sliceParam, newAllocSize)
+	isNull := grow.NewICmp(enum.IPredEQ, newPtr, constant.NewNull(irtypes.I8Ptr))
+
+	oom := fn.NewBlock("oom")
+	updateCap := fn.NewBlock("update_cap")
+	grow.NewCondBr(isNull, oom, updateCap)
+
+	// OOM: panic
+	panicMsg := constant.NewCharArrayFromString("out of memory\x00")
+	globalName := fmt.Sprintf(".str.vecpush.%d", c.strCounter)
+	c.strCounter++
+	panicGlobal := c.module.NewGlobalDef(globalName, panicMsg)
+	panicGlobal.Immutable = true
+	msgPtr := oom.NewGetElementPtr(panicGlobal.ContentType, panicGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	oom.NewCall(c.funcs["promise_panic"], msgPtr)
+	oom.NewUnreachable()
+
+	// Update cap: store new capacity in reallocated header
+	newHdrPtr := updateCap.NewBitCast(newPtr, irtypes.NewPointer(headerType))
+	newCapPtr := updateCap.NewGetElementPtr(headerType, newHdrPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	updateCap.NewStore(newCap, newCapPtr)
+	updateCap.NewBr(copyBlk)
+
+	// Copy: phi to merge original/reallocated pointers
+	vecPtr := copyBlk.NewPhi(
+		&ir.Incoming{X: sliceParam, Pred: entry},
+		&ir.Incoming{X: newPtr, Pred: updateCap})
+	curHdrPtr := copyBlk.NewPhi(
+		&ir.Incoming{X: hdrPtr, Pred: entry},
+		&ir.Incoming{X: newHdrPtr, Pred: updateCap})
+
+	// Compute destination: data area + len * elem_size
+	offset := copyBlk.NewMul(vecLen, elemSizeParam)
+	dataOffset := copyBlk.NewAdd(headerSizeConst, offset)
+	dest := copyBlk.NewGetElementPtr(irtypes.I8, vecPtr, dataOffset)
+	copyBlk.NewCall(c.funcs["llvm.memcpy"], dest, elemParam, elemSizeParam, constant.False)
+
+	// Increment length
+	newLen := copyBlk.NewAdd(vecLen, one64)
+	curLenPtr := copyBlk.NewGetElementPtr(headerType, curHdrPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	copyBlk.NewStore(newLen, curLenPtr)
+	copyBlk.NewRet(vecPtr)
+
+	c.funcs["promise_vector_push"] = fn
+}
+
+// defineVectorPopFunc emits an LLVM IR function that removes and returns the last
+// element from a vector. Returns 1 if successful, 0 if empty.
+// Replaces the C runtime promise_vector_pop.
+// Vector layout: {i64 len, i64 cap, [data...]} with 16-byte header.
+func (c *Compiler) defineVectorPopFunc() {
+	sliceParam := ir.NewParam("slice", irtypes.I8Ptr)
+	outElemParam := ir.NewParam("out_elem", irtypes.I8Ptr)
+	elemSizeParam := ir.NewParam("elem_size", irtypes.I64)
+	fn := c.module.NewFunc("promise_vector_pop", irtypes.I32,
+		sliceParam, outElemParam, elemSizeParam)
+
+	headerType := vectorHeaderType() // {i64, i64}
+	zero64 := constant.NewInt(irtypes.I64, 0)
+	one64 := constant.NewInt(irtypes.I64, 1)
+	headerSizeConst := constant.NewInt(irtypes.I64, int64(vectorHeaderSize))
+
+	// Entry: load len, check if empty
+	entry := fn.NewBlock("entry")
+	hdrPtr := entry.NewBitCast(sliceParam, irtypes.NewPointer(headerType))
+	lenPtr := entry.NewGetElementPtr(headerType, hdrPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	vecLen := entry.NewLoad(irtypes.I64, lenPtr)
+	isEmpty := entry.NewICmp(enum.IPredEQ, vecLen, zero64)
+
+	emptyBlk := fn.NewBlock("empty")
+	doPopBlk := fn.NewBlock("do_pop")
+	entry.NewCondBr(isEmpty, emptyBlk, doPopBlk)
+
+	// Empty: return 0
+	emptyBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+
+	// Do pop: decrement len, copy last element out
+	newLen := doPopBlk.NewSub(vecLen, one64)
+	doPopBlk.NewStore(newLen, lenPtr)
+	offset := doPopBlk.NewMul(newLen, elemSizeParam)
+	dataOffset := doPopBlk.NewAdd(headerSizeConst, offset)
+	src := doPopBlk.NewGetElementPtr(irtypes.I8, sliceParam, dataOffset)
+	doPopBlk.NewCall(c.funcs["llvm.memcpy"], outElemParam, src, elemSizeParam, constant.False)
+	doPopBlk.NewRet(constant.NewInt(irtypes.I32, 1))
+
+	c.funcs["promise_vector_pop"] = fn
+}
+
 // defineVectorContainsFunc emits an LLVM IR function that searches a vector for
 // an element. Replaces the C runtime promise_vector_contains.
 // For string elements, uses the eq_fn comparator (__promise_eq_string).
@@ -995,7 +1161,7 @@ func (c *Compiler) defineVectorRemoveFunc() {
 	src := doShift.NewGetElementPtr(irtypes.I8, dataBase, srcOffset)
 	remaining := doShift.NewSub(vecLen, idxPlus1)
 	moveSize := doShift.NewMul(remaining, elemSizeParam)
-	doShift.NewCall(c.funcs["memmove"], dst, src, moveSize)
+	doShift.NewCall(c.funcs["llvm.memmove"], dst, src, moveSize, constant.False)
 	doShift.NewBr(decLen)
 
 	// dec_len: decrement length

@@ -1,0 +1,23 @@
+square(int x) int {
+  return x * x;
+}
+
+main() {
+  // Fan-out: spawn multiple tasks
+  t1 := go square(2);
+  t2 := go square(3);
+  t3 := go square(4);
+  t4 := go square(5);
+
+  // Fan-in: collect all results
+  r1 := <-t1;
+  r2 := <-t2;
+  r3 := <-t3;
+  r4 := <-t4;
+
+  print_int(r1);
+  print_int(r2);
+  print_int(r3);
+  print_int(r4);
+  print_int(r1 + r2 + r3 + r4);
+}

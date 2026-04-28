@@ -1,0 +1,9 @@
+compute() int {
+  return 42;
+}
+
+main() {
+  t := go compute();
+  result := <-t;
+  print_int(result);
+}

@@ -97,6 +97,21 @@ type Compiler struct {
 	palFree    *ir.Func // @pal_free(i8* ptr) → void
 	palRealloc *ir.Func // @pal_realloc(i8* ptr, i64 size) → i8*
 
+	// PAL threading primitives (Phase 5)
+	palThreadCreate *ir.Func // @pal_thread_create(i8* fn, i8* arg) → i8*
+	palThreadJoin   *ir.Func // @pal_thread_join(i8* handle) → void
+	palMutexInit    *ir.Func // @pal_mutex_init() → i8*
+	palMutexLock    *ir.Func // @pal_mutex_lock(i8* mutex) → void
+	palMutexUnlock  *ir.Func // @pal_mutex_unlock(i8* mutex) → void
+	palMutexDestroy *ir.Func // @pal_mutex_destroy(i8* mutex) → void
+	palCondInit     *ir.Func // @pal_cond_init() → i8*
+	palCondWait     *ir.Func // @pal_cond_wait(i8* cond, i8* mutex) → void
+	palCondSignal   *ir.Func // @pal_cond_signal(i8* cond) → void
+	palCondDestroy  *ir.Func // @pal_cond_destroy(i8* cond) → void
+
+	// Go expression counter for unique trampoline function names
+	goCounter int
+
 	// Global constants for print/panic functions
 	newlineGlobal     *ir.Global // "\n" (1 byte)
 	panicPrefixGlobal *ir.Global // "panic: " (7 bytes)
@@ -244,17 +259,14 @@ func Compile(file *ast.File, info *sema.Info) *CompileResult {
 }
 
 // GenerateTestMain replaces the user's main() with a test runner that calls
-// each `test function via promise_test_run for fork-based isolation.
+// each test function via a codegen-emitted thread-based runner.
 func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 	c := r.compiler
 
-	// Declare test runner functions.
-	// promise_test_run remains a C extern (fork/waitpid in runtime_test.c).
-	// promise_test_print_result and promise_test_summary are codegen-defined via PAL.
-	testRunFn := c.module.NewFunc("promise_test_run",
-		irtypes.I32,
-		ir.NewParam("fn", irtypes.I8Ptr),
-	)
+	// Codegen-emitted test runner — replaces the C extern (fork/waitpid).
+	// Runs each test in a thread via PAL. If the test panics, pal_exit
+	// terminates the whole process (no fork isolation). Same as Go's testing.
+	testRunFn := c.defineTestRunFunc()
 	testPrintFn := c.module.NewFunc("promise_test_print_result",
 		irtypes.Void,
 		ir.NewParam("name", irtypes.I8Ptr),
@@ -358,6 +370,18 @@ func (c *Compiler) declareIntrinsics() {
 	c.palAlloc = p.EmitAlloc(c.module)
 	c.palFree = p.EmitFree(c.module)
 	c.palRealloc = p.EmitRealloc(c.module)
+
+	// PAL: emit threading primitives (Phase 5 — needed by go/receive codegen)
+	c.palThreadCreate = p.EmitThreadCreate(c.module)
+	c.palThreadJoin = p.EmitThreadJoin(c.module)
+	c.palMutexInit = p.EmitMutexInit(c.module)
+	c.palMutexLock = p.EmitMutexLock(c.module)
+	c.palMutexUnlock = p.EmitMutexUnlock(c.module)
+	c.palMutexDestroy = p.EmitMutexDestroy(c.module)
+	c.palCondInit = p.EmitCondInit(c.module)
+	c.palCondWait = p.EmitCondWait(c.module)
+	c.palCondSignal = p.EmitCondSignal(c.module)
+	c.palCondDestroy = p.EmitCondDestroy(c.module)
 
 	// LLVM memcpy/memmove intrinsics (used instead of libc memcpy/memmove)
 	c.funcs["llvm.memcpy"] = c.module.NewFunc("llvm.memcpy.p0i8.p0i8.i64",

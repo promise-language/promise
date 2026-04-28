@@ -45,8 +45,9 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 
 | Area | Description | Status | Design Doc |
 |------|-------------|--------|------------|
-| Runtime migration | Move C runtime to codegen LLVM IR / pure Promise | Done (Phases 1-2) | [runtime-proposal.md](runtime-proposal.md) |
-| Platform abstraction | PAL for macOS/Linux/Windows/WASM | Planned (Phase 3+) | [runtime-proposal.md](runtime-proposal.md) |
+| Runtime migration | Move C runtime to codegen LLVM IR / pure Promise | Done (Phases 1-4) | [runtime-proposal.md](runtime-proposal.md) |
+| Platform abstraction | PAL for macOS/Linux/Windows/WASM | Done (Phase 3) | [runtime-proposal.md](runtime-proposal.md) |
+| 1:1 Threading | `go`/`<-` with OS threads via PAL | Done (Phase 5a) | [runtime-proposal.md](runtime-proposal.md) |
 | Operator dispatch | `[]`, `[:]`, `++`, `--`, `..`, `!` as method-dispatched operators | Planned | [subscript-slice-operators.md](subscript-slice-operators.md) |
 | C binding | Generated headers for extern type safety | Planned | [c-binding-architecture.md](c-binding-architecture.md) |
 
@@ -228,7 +229,7 @@ Type-system-driven LLVM IR generation for primitive types, arithmetic, control f
 ### Deferred sub-stages
 
 - Ownership-aware memory management (drop) → Stage 8o
-- Concurrency (go, task, channel, `<-`) → TBD
+- Concurrency: `go`/`<-task` → Done (Phase 5); channels → TBD
 
 ## Stage 8b — Strings (Done)
 
@@ -370,7 +371,7 @@ Codegen for if-unwrap, while-unwrap, optional chaining, string interpolation, an
   - **Intrinsics**: 14 functions defined as codegen LLVM IR in `declareIntrinsics`: `promise_string_new`, `promise_string_concat`, 5 conversion functions (`bool`, `int`, `uint`, `f64`, `char` to string), `promise_vector_with_capacity`, `promise_vector_push`, `promise_vector_pop`, `promise_string_trim`, `promise_string_split`, `promise_string_next_char`, `promise_type_is`.
 - **Unsafe blocks**: `genUnsafeExpr` trivially generates block contents. Ownership analysis handles the "unsafe" semantics, not codegen.
 - **Scope**: If-unwrap (with/without else), while-unwrap (with break/continue), optional chaining on user type fields, string interpolation with identifiers/literals/expressions/multiple parts, unsafe blocks.
-- **Deferred**: `is`/`as` expressions (need RTTI), generators (`yield`), concurrency (`go`, `task`, `channel`), container methods (`.push`, `.pop`, `.contains`), user type `toString()` for interpolation. Container `.len` completed in Stage 8i.
+- **Deferred**: `is`/`as` expressions (need RTTI), generators (`yield`), channels (`channel[T]`), container methods (`.push`, `.pop`, `.contains`), user type `toString()` for interpolation. Container `.len` completed in Stage 8i. `go`/`<-task` concurrency completed in Phase 5.
 
 ## Stage 8i — Char Literals, Container `.len`, String Iteration & Map Compound Assignment (Done)
 
@@ -542,7 +543,7 @@ Dependency fetching and resolution.
 
 ## What's Next
 
-The compiler pipeline (Stages 1-8o) is complete for the current feature set. The runtime C-to-codegen migration (Phase 2) is also complete — only IO/process C functions remain. The next work falls into three areas:
+The compiler pipeline (Stages 1-8o) is complete for the current feature set. The runtime is fully codegen-emitted LLVM IR — no C files remain. Phase 5a added 1:1 threading (`go`/`<-` with OS threads). Channels, M:N scheduling, and IO reactor remain (Phases 5b-6). The next work falls into three areas:
 
 ### Near-term: Language Features
 
@@ -563,8 +564,10 @@ The compiler pipeline (Stages 1-8o) is complete for the current feature set. The
 
 | Work | Design Doc | Priority |
 |------|-----------|----------|
-| PAL abstraction (macOS + Linux) — Phase 3 | [runtime-proposal.md](runtime-proposal.md) | Medium |
-| Concurrency (`go`, `task`, `channel`, `<-`) — Phase 5 | [runtime-proposal.md](runtime-proposal.md) | Low |
+| Channels (`channel[T]`, buffered send/receive) — Phase 5b | [runtime-proposal.md](runtime-proposal.md) | Medium |
+| M:N scheduler (GMP model, work stealing) — Phase 5c | [runtime-proposal.md](runtime-proposal.md) | Medium |
+| Cooperative WASM scheduler — Phase 5d | [runtime-proposal.md](runtime-proposal.md) | Low |
+| IO reactor (kqueue/epoll/IOCP) — Phase 6 | [runtime-proposal.md](runtime-proposal.md) | Low |
 | Replace clang with `llc` + `lld` — Phase 7 | [runtime-proposal.md](runtime-proposal.md) | Low |
 
 ---
@@ -618,6 +621,6 @@ Known gaps and improvements deferred from completed stages.
 
 | Item |
 |------|
-| Concurrency (`go`, `task`, `channel`, `<-`) |
+| Channels (`channel[T]`, buffered send/receive) |
 | Generators (`yield`, `yield*`) |
 | String slicing, Unicode normalization |

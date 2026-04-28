@@ -24,8 +24,7 @@ import (
 //go:embed resources/std/*.pr
 var embeddedStd embed.FS
 
-//go:embed resources/runtime/*
-var embeddedRuntime embed.FS
+// Runtime is fully codegen-emitted LLVM IR — no embedded C files needed.
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `Usage: promise <command> [options] [file.pr]
@@ -182,7 +181,7 @@ func runBuild(args []string) {
 	file, info := compileFrontend(filename)
 	result := codegen.Compile(file, info)
 
-	compileAndLink(result, outputFile, false)
+	compileAndLink(result, outputFile)
 	fmt.Printf("Compiled %s → %s\n", filename, outputFile)
 }
 
@@ -271,7 +270,7 @@ func runTestFile(filename string) {
 	// Generate test main (replaces user main)
 	result.GenerateTestMain(info.Tests)
 
-	// Link to temp binary (include runtime_test.c for fork isolation)
+	// Link to temp binary (test runner is now codegen-emitted, no C files needed)
 	tmpOutput, err := os.CreateTemp("", "promise-test-*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
@@ -280,7 +279,7 @@ func runTestFile(filename string) {
 	tmpOutput.Close()
 	defer os.Remove(tmpOutput.Name())
 
-	compileAndLink(result, tmpOutput.Name(), true)
+	compileAndLink(result, tmpOutput.Name())
 
 	// Execute test binary
 	cmd := exec.Command(tmpOutput.Name())
@@ -434,9 +433,8 @@ func atoi(s string) int {
 	return n
 }
 
-// compileAndLink writes the IR to a temp file, compiles any C runtime files,
-// and links everything into the output binary.
-func compileAndLink(result *codegen.CompileResult, outputFile string, testMode bool) {
+// compileAndLink writes the IR to a temp file and links it into the output binary.
+func compileAndLink(result *codegen.CompileResult, outputFile string) {
 	llFile, err := os.CreateTemp("", "promise-*.ll")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
@@ -450,44 +448,15 @@ func compileAndLink(result *codegen.CompileResult, outputFile string, testMode b
 	}
 	llFile.Close()
 
-	runtimeDir := findRuntimeDir()
-	if runtimeDir == "" {
-		fmt.Fprintln(os.Stderr, "error: cannot find runtime/ directory")
-		os.Exit(1)
-	}
-
-	runtimeCFiles, err := findRuntimeCFiles(runtimeDir, testMode)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error reading runtime directory: %v\n", err)
-		os.Exit(1)
-	}
-
 	target := codegen.HostTargetTriple()
 
-	// Compile C runtime files if any exist (test mode: runtime_test.c for fork isolation).
-	// In non-test mode, all runtime functions are codegen-emitted LLVM IR — no C needed.
-	var runtimeObjs []string
-	for _, cFile := range runtimeCFiles {
-		objFile, err := os.CreateTemp("", "promise-runtime-*.o")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
-			os.Exit(1)
-		}
-		objFile.Close()
-		defer os.Remove(objFile.Name())
-
-		clangCmd := exec.Command("clang", "-target", target, "-c", cFile, "-o", objFile.Name())
-		clangCmd.Stderr = os.Stderr
-		if err := clangCmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "error compiling %s: %v\n", filepath.Base(cFile), err)
-			os.Exit(1)
-		}
-		runtimeObjs = append(runtimeObjs, objFile.Name())
+	// All runtime functions are codegen-emitted LLVM IR — no C files needed.
+	linkArgs := []string{"-target", target, llFile.Name(), "-o", outputFile}
+	// Linux requires explicit -lpthread for PAL threading primitives.
+	// macOS includes pthreads in libSystem (already linked).
+	if strings.Contains(target, "linux") {
+		linkArgs = append(linkArgs, "-lpthread")
 	}
-
-	linkArgs := []string{"-target", target, llFile.Name()}
-	linkArgs = append(linkArgs, runtimeObjs...)
-	linkArgs = append(linkArgs, "-o", outputFile)
 	linkCmd := exec.Command("clang", linkArgs...)
 	linkCmd.Stderr = os.Stderr
 	if err := linkCmd.Run(); err != nil {
@@ -640,63 +609,6 @@ func mergeStdDecls(userFile *ast.File, stdFiles []*ast.File) *ast.File {
 	return userFile
 }
 
-// findRuntimeDir searches for the runtime/ directory in standard locations.
-func findRuntimeDir() string {
-	candidates := []string{
-		"runtime",
-		"../runtime",
-		"../../runtime",
-	}
-
-	// Check relative to executable
-	if execPath, err := os.Executable(); err == nil {
-		dir := filepath.Dir(execPath)
-		candidates = append(candidates,
-			filepath.Join(dir, "runtime"),
-			filepath.Join(dir, "..", "runtime"),
-			filepath.Join(dir, "..", "..", "runtime"),
-		)
-	}
-
-	// Check installed location
-	if homeDir, err := os.UserHomeDir(); err == nil {
-		candidates = append(candidates,
-			filepath.Join(homeDir, ".promise", "lib", "runtime"),
-		)
-	}
-
-	for _, c := range candidates {
-		info, err := os.Stat(c)
-		if err == nil && info.IsDir() {
-			abs, err := filepath.Abs(c)
-			if err == nil {
-				return abs
-			}
-			return c
-		}
-	}
-	return ""
-}
-
-// findRuntimeCFiles returns .c files in the runtime directory.
-// If testMode is true, includes runtime_test.c; otherwise excludes it.
-func findRuntimeCFiles(dir string, testMode bool) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-	var files []string
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".c") {
-			if !testMode && e.Name() == "runtime_test.c" {
-				continue
-			}
-			files = append(files, filepath.Join(dir, e.Name()))
-		}
-	}
-	return files, nil
-}
-
 type errorListener struct {
 	antlr.DefaultErrorListener
 	filename string
@@ -810,7 +722,7 @@ func runExec(args []string) {
 	tmpOutput.Close()
 	defer os.Remove(tmpOutput.Name())
 
-	compileAndLink(result, tmpOutput.Name(), false)
+	compileAndLink(result, tmpOutput.Name())
 
 	// Execute
 	cmd := exec.Command(tmpOutput.Name())
@@ -962,10 +874,9 @@ func runInstall() {
 	binDir := filepath.Join(promiseDir, "bin")
 	libDir := filepath.Join(promiseDir, "lib")
 	stdDest := filepath.Join(libDir, "std")
-	runtimeDest := filepath.Join(libDir, "runtime")
 
 	// Create directory structure
-	for _, dir := range []string{binDir, stdDest, runtimeDest} {
+	for _, dir := range []string{binDir, stdDest} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			fmt.Fprintf(os.Stderr, "error creating %s: %v\n", dir, err)
 			os.Exit(1)
@@ -982,9 +893,6 @@ func runInstall() {
 
 	// Extract embedded std files
 	extractEmbedded(embeddedStd, "resources/std", stdDest)
-
-	// Extract embedded runtime files
-	extractEmbedded(embeddedRuntime, "resources/runtime", runtimeDest)
 
 	fmt.Printf("Installed Promise to %s\n\n", promiseDir)
 	fmt.Printf("Add to your shell profile:\n\n")

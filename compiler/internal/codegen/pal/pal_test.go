@@ -412,3 +412,376 @@ func TestForTargetReturnsWasmPAL(t *testing.T) {
 		}
 	}
 }
+
+// --- Threading tests ---
+
+// newModuleWithAlloc creates a module with pal_alloc/pal_free already emitted,
+// required by threading PAL functions that allocate handles internally.
+func newModuleWithAlloc(pal PAL) *ir.Module {
+	module := ir.NewModule()
+	pal.EmitAlloc(module)
+	pal.EmitFree(module)
+	return module
+}
+
+func TestEmitThreadCreate(t *testing.T) {
+	pals := []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	}
+	for _, tc := range pals {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newModuleWithAlloc(tc.pal)
+			fn := tc.pal.EmitThreadCreate(module)
+			out := module.String()
+
+			if !strings.Contains(out, "define i8* @pal_thread_create(i8* %fn, i8* %arg)") {
+				t.Error("missing @pal_thread_create definition")
+			}
+			if fn.Name() != "pal_thread_create" {
+				t.Errorf("expected function name pal_thread_create, got %s", fn.Name())
+			}
+			if !strings.Contains(out, "nounwind") {
+				t.Error("missing nounwind attribute")
+			}
+		})
+	}
+}
+
+func TestPosixThreadCreateDeclaresLibc(t *testing.T) {
+	module := newModuleWithAlloc(&PosixPAL{})
+	(&PosixPAL{}).EmitThreadCreate(module)
+	out := module.String()
+
+	if !strings.Contains(out, "@pthread_create(") {
+		t.Error("missing @pthread_create declaration")
+	}
+	if !strings.Contains(out, "call i32 @pthread_create(") {
+		t.Error("missing call to @pthread_create")
+	}
+	if !strings.Contains(out, "call i8* @pal_alloc(i64 8)") {
+		t.Error("missing handle allocation (8 bytes for pthread_t)")
+	}
+}
+
+func TestStubThreadCreateCallsSynchronously(t *testing.T) {
+	pals := []struct {
+		name string
+		pal  PAL
+	}{
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	}
+	for _, tc := range pals {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newModuleWithAlloc(tc.pal)
+			tc.pal.EmitThreadCreate(module)
+			out := module.String()
+
+			// Stubs bitcast fn i8* to function pointer and call synchronously
+			if !strings.Contains(out, "bitcast i8* %fn to i8* (i8*)*") {
+				t.Error("missing bitcast of fn to function pointer")
+			}
+			// Return null handle (no real thread)
+			if !strings.Contains(out, "ret i8* null") {
+				t.Error("missing null return (no real thread handle)")
+			}
+			// Should NOT declare pthread_create
+			if strings.Contains(out, "pthread_create") {
+				t.Error("stub should not declare pthread_create")
+			}
+		})
+	}
+}
+
+func TestEmitThreadJoin(t *testing.T) {
+	pals := []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	}
+	for _, tc := range pals {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newModuleWithAlloc(tc.pal)
+			fn := tc.pal.EmitThreadJoin(module)
+			out := module.String()
+
+			if !strings.Contains(out, "define void @pal_thread_join(i8* %handle)") {
+				t.Error("missing @pal_thread_join definition")
+			}
+			if fn.Name() != "pal_thread_join" {
+				t.Errorf("expected function name pal_thread_join, got %s", fn.Name())
+			}
+		})
+	}
+}
+
+func TestPosixThreadJoinDeclaresLibc(t *testing.T) {
+	module := newModuleWithAlloc(&PosixPAL{})
+	(&PosixPAL{}).EmitThreadJoin(module)
+	out := module.String()
+
+	if !strings.Contains(out, "@pthread_join(") {
+		t.Error("missing @pthread_join declaration")
+	}
+	if !strings.Contains(out, "call i32 @pthread_join(") {
+		t.Error("missing call to @pthread_join")
+	}
+	if !strings.Contains(out, "call void @pal_free(") {
+		t.Error("missing call to @pal_free for handle cleanup")
+	}
+}
+
+func TestEmitMutexInit(t *testing.T) {
+	pals := []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	}
+	for _, tc := range pals {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newModuleWithAlloc(tc.pal)
+			fn := tc.pal.EmitMutexInit(module)
+			out := module.String()
+
+			if !strings.Contains(out, "define i8* @pal_mutex_init()") {
+				t.Error("missing @pal_mutex_init definition")
+			}
+			if !strings.Contains(out, "call i8* @pal_alloc(") {
+				t.Error("missing allocation in pal_mutex_init")
+			}
+			if fn.Name() != "pal_mutex_init" {
+				t.Errorf("expected function name pal_mutex_init, got %s", fn.Name())
+			}
+		})
+	}
+}
+
+func TestPosixMutexInitDeclaresLibc(t *testing.T) {
+	module := newModuleWithAlloc(&PosixPAL{})
+	(&PosixPAL{}).EmitMutexInit(module)
+	out := module.String()
+
+	if !strings.Contains(out, "@pthread_mutex_init(") {
+		t.Error("missing @pthread_mutex_init declaration")
+	}
+	if !strings.Contains(out, "call i32 @pthread_mutex_init(") {
+		t.Error("missing call to @pthread_mutex_init")
+	}
+	if !strings.Contains(out, "call i8* @pal_alloc(i64 64)") {
+		t.Error("missing 64-byte allocation for pthread_mutex_t")
+	}
+}
+
+func TestPosixMutexLockUnlockDestroyDeclaresLibc(t *testing.T) {
+	module := newModuleWithAlloc(&PosixPAL{})
+	(&PosixPAL{}).EmitMutexLock(module)
+	(&PosixPAL{}).EmitMutexUnlock(module)
+	(&PosixPAL{}).EmitMutexDestroy(module)
+	out := module.String()
+
+	if !strings.Contains(out, "@pthread_mutex_lock(") {
+		t.Error("missing @pthread_mutex_lock declaration")
+	}
+	if !strings.Contains(out, "call i32 @pthread_mutex_lock(") {
+		t.Error("missing call to @pthread_mutex_lock")
+	}
+	if !strings.Contains(out, "@pthread_mutex_unlock(") {
+		t.Error("missing @pthread_mutex_unlock declaration")
+	}
+	if !strings.Contains(out, "call i32 @pthread_mutex_unlock(") {
+		t.Error("missing call to @pthread_mutex_unlock")
+	}
+	if !strings.Contains(out, "@pthread_mutex_destroy(") {
+		t.Error("missing @pthread_mutex_destroy declaration")
+	}
+	if !strings.Contains(out, "call i32 @pthread_mutex_destroy(") {
+		t.Error("missing call to @pthread_mutex_destroy")
+	}
+	if !strings.Contains(out, "call void @pal_free(") {
+		t.Error("missing call to @pal_free in pal_mutex_destroy")
+	}
+}
+
+func TestEmitMutexLockUnlock(t *testing.T) {
+	pals := []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	}
+	for _, tc := range pals {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newModuleWithAlloc(tc.pal)
+			lockFn := tc.pal.EmitMutexLock(module)
+			unlockFn := tc.pal.EmitMutexUnlock(module)
+			out := module.String()
+
+			if !strings.Contains(out, "define void @pal_mutex_lock(i8* %mutex)") {
+				t.Error("missing @pal_mutex_lock definition")
+			}
+			if !strings.Contains(out, "define void @pal_mutex_unlock(i8* %mutex)") {
+				t.Error("missing @pal_mutex_unlock definition")
+			}
+			if lockFn.Name() != "pal_mutex_lock" {
+				t.Errorf("expected pal_mutex_lock, got %s", lockFn.Name())
+			}
+			if unlockFn.Name() != "pal_mutex_unlock" {
+				t.Errorf("expected pal_mutex_unlock, got %s", unlockFn.Name())
+			}
+		})
+	}
+}
+
+func TestEmitMutexDestroy(t *testing.T) {
+	pals := []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	}
+	for _, tc := range pals {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newModuleWithAlloc(tc.pal)
+			fn := tc.pal.EmitMutexDestroy(module)
+			out := module.String()
+
+			if !strings.Contains(out, "define void @pal_mutex_destroy(i8* %mutex)") {
+				t.Error("missing @pal_mutex_destroy definition")
+			}
+			if !strings.Contains(out, "call void @pal_free(") {
+				t.Error("missing call to @pal_free in pal_mutex_destroy")
+			}
+			if fn.Name() != "pal_mutex_destroy" {
+				t.Errorf("expected pal_mutex_destroy, got %s", fn.Name())
+			}
+		})
+	}
+}
+
+func TestEmitCondInit(t *testing.T) {
+	pals := []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	}
+	for _, tc := range pals {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newModuleWithAlloc(tc.pal)
+			fn := tc.pal.EmitCondInit(module)
+			out := module.String()
+
+			if !strings.Contains(out, "define i8* @pal_cond_init()") {
+				t.Error("missing @pal_cond_init definition")
+			}
+			if !strings.Contains(out, "call i8* @pal_alloc(") {
+				t.Error("missing allocation in pal_cond_init")
+			}
+			if fn.Name() != "pal_cond_init" {
+				t.Errorf("expected pal_cond_init, got %s", fn.Name())
+			}
+		})
+	}
+}
+
+func TestEmitCondWaitSignal(t *testing.T) {
+	pals := []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	}
+	for _, tc := range pals {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newModuleWithAlloc(tc.pal)
+			waitFn := tc.pal.EmitCondWait(module)
+			signalFn := tc.pal.EmitCondSignal(module)
+			out := module.String()
+
+			if !strings.Contains(out, "define void @pal_cond_wait(i8* %cond, i8* %mutex)") {
+				t.Error("missing @pal_cond_wait definition")
+			}
+			if !strings.Contains(out, "define void @pal_cond_signal(i8* %cond)") {
+				t.Error("missing @pal_cond_signal definition")
+			}
+			if waitFn.Name() != "pal_cond_wait" {
+				t.Errorf("expected pal_cond_wait, got %s", waitFn.Name())
+			}
+			if signalFn.Name() != "pal_cond_signal" {
+				t.Errorf("expected pal_cond_signal, got %s", signalFn.Name())
+			}
+		})
+	}
+}
+
+func TestEmitCondDestroy(t *testing.T) {
+	pals := []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	}
+	for _, tc := range pals {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newModuleWithAlloc(tc.pal)
+			fn := tc.pal.EmitCondDestroy(module)
+			out := module.String()
+
+			if !strings.Contains(out, "define void @pal_cond_destroy(i8* %cond)") {
+				t.Error("missing @pal_cond_destroy definition")
+			}
+			if !strings.Contains(out, "call void @pal_free(") {
+				t.Error("missing call to @pal_free in pal_cond_destroy")
+			}
+			if fn.Name() != "pal_cond_destroy" {
+				t.Errorf("expected pal_cond_destroy, got %s", fn.Name())
+			}
+		})
+	}
+}
+
+func TestPosixCondDeclaresLibc(t *testing.T) {
+	module := newModuleWithAlloc(&PosixPAL{})
+	(&PosixPAL{}).EmitCondInit(module)
+	(&PosixPAL{}).EmitCondWait(module)
+	(&PosixPAL{}).EmitCondSignal(module)
+	(&PosixPAL{}).EmitCondDestroy(module)
+	out := module.String()
+
+	if !strings.Contains(out, "@pthread_cond_init(") {
+		t.Error("missing @pthread_cond_init declaration")
+	}
+	if !strings.Contains(out, "@pthread_cond_wait(") {
+		t.Error("missing @pthread_cond_wait declaration")
+	}
+	if !strings.Contains(out, "@pthread_cond_signal(") {
+		t.Error("missing @pthread_cond_signal declaration")
+	}
+	if !strings.Contains(out, "@pthread_cond_destroy(") {
+		t.Error("missing @pthread_cond_destroy declaration")
+	}
+	if !strings.Contains(out, "call i8* @pal_alloc(i64 64)") {
+		t.Error("missing 64-byte allocation for pthread_cond_t")
+	}
+}

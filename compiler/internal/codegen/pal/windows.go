@@ -86,3 +86,19 @@ func (p *WindowsPAL) EmitExit(module *ir.Module) *ir.Func {
 func (p *WindowsPAL) EmitAlloc(module *ir.Module) *ir.Func   { return emitLibcAlloc(module) }
 func (p *WindowsPAL) EmitFree(module *ir.Module) *ir.Func    { return emitLibcFree(module) }
 func (p *WindowsPAL) EmitRealloc(module *ir.Module) *ir.Func { return emitLibcRealloc(module) }
+
+// Windows threading stubs — run synchronously. Replace with CreateThread/CRITICAL_SECTION later.
+func (p *WindowsPAL) EmitThreadCreate(module *ir.Module) *ir.Func {
+	return emitStubThreadCreate(module)
+}
+func (p *WindowsPAL) EmitThreadJoin(module *ir.Module) *ir.Func  { return emitStubThreadJoin(module) }
+func (p *WindowsPAL) EmitMutexInit(module *ir.Module) *ir.Func   { return emitStubMutexInit(module) }
+func (p *WindowsPAL) EmitMutexLock(module *ir.Module) *ir.Func   { return emitStubMutexLock(module) }
+func (p *WindowsPAL) EmitMutexUnlock(module *ir.Module) *ir.Func { return emitStubMutexUnlock(module) }
+func (p *WindowsPAL) EmitMutexDestroy(module *ir.Module) *ir.Func {
+	return emitStubMutexDestroy(module)
+}
+func (p *WindowsPAL) EmitCondInit(module *ir.Module) *ir.Func    { return emitStubCondInit(module) }
+func (p *WindowsPAL) EmitCondWait(module *ir.Module) *ir.Func    { return emitStubCondWait(module) }
+func (p *WindowsPAL) EmitCondSignal(module *ir.Module) *ir.Func  { return emitStubCondSignal(module) }
+func (p *WindowsPAL) EmitCondDestroy(module *ir.Module) *ir.Func { return emitStubCondDestroy(module) }

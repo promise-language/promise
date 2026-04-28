@@ -1,0 +1,9 @@
+doWork() {
+  // Fire-and-forget work (void function)
+}
+
+main() {
+  t := go doWork();
+  <-t;
+  println("done");
+}

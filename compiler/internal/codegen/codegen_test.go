@@ -4742,6 +4742,13 @@ func TestGenerateTestMainNoExistingMain(t *testing.T) {
 	ir := result.Module.String()
 	assertContains(t, ir, "define i32 @main")
 	assertContains(t, ir, "call i32 @promise_test_run")
+	// promise_test_run is now codegen-defined (not a C extern)
+	assertContains(t, ir, "define i32 @promise_test_run(i8* %fn)")
+	// Thread-based: spawns a thread via PAL, joins it
+	assertContains(t, ir, "call i8* @pal_thread_create")
+	assertContains(t, ir, "call void @pal_thread_join")
+	// Trampoline bridges i8*(i8*) pthread ABI to void() test function
+	assertContains(t, ir, "define i8* @.test_trampoline(i8* %fn_ptr)")
 }
 
 func TestGenerateTestMainReplacesExistingMain(t *testing.T) {
@@ -6467,4 +6474,91 @@ func TestOrderedDefaultsViaViewVtable(t *testing.T) {
 	assertContains(t, ir, `@"Val.>="`) // synthesized from >= default
 	assertContains(t, ir, `@"Val.!="`) // inherited from MyEq parent default
 	assertContains(t, ir, "promise_vtable_Val_as_MyOrd")
+}
+
+// --- Go / Receive (concurrency) tests ---
+
+func TestGoExprBasicFunction(t *testing.T) {
+	ir := generateIR(t, `
+		compute() int { return 42; }
+		main() {
+			t := go compute();
+			result := <-t;
+		}
+	`)
+	// Task struct allocation
+	assertContains(t, ir, "@pal_alloc")
+	// Trampoline generated
+	assertContains(t, ir, ".go_trampoline.")
+	// Thread create called
+	assertContains(t, ir, "call i8* @pal_thread_create")
+	// Mutex/cond initialized
+	assertContains(t, ir, "call i8* @pal_mutex_init")
+	assertContains(t, ir, "call i8* @pal_cond_init")
+	// Receive: mutex lock/unlock, cond wait, thread join
+	assertContains(t, ir, "call void @pal_mutex_lock")
+	assertContains(t, ir, "call void @pal_mutex_unlock")
+	assertContains(t, ir, "call void @pal_cond_wait")
+	assertContains(t, ir, "call void @pal_thread_join")
+	// Cleanup
+	assertContains(t, ir, "call void @pal_mutex_destroy")
+	assertContains(t, ir, "call void @pal_cond_destroy")
+	assertContains(t, ir, "call void @pal_free")
+}
+
+func TestGoExprWithArgs(t *testing.T) {
+	ir := generateIR(t, `
+		double(int x) int { return x * 2; }
+		main() {
+			t := go double(21);
+			result := <-t;
+		}
+	`)
+	// Trampoline generated
+	assertContains(t, ir, ".go_trampoline.")
+	// Thread create called
+	assertContains(t, ir, "call i8* @pal_thread_create")
+	// The trampoline should call the target function
+	assertContains(t, ir, "call i64 @double")
+}
+
+func TestGoExprVoidFunction(t *testing.T) {
+	ir := generateIR(t, `
+		doWork() { }
+		main() {
+			t := go doWork();
+			<-t;
+		}
+	`)
+	assertContains(t, ir, ".go_trampoline.")
+	assertContains(t, ir, "call i8* @pal_thread_create")
+	// Trampoline calls void function
+	assertContains(t, ir, "call void @doWork")
+}
+
+func TestGoExprBlock(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			t := go { };
+			<-t;
+		}
+	`)
+	// Block body wrapped in a function
+	assertContains(t, ir, ".go_body.")
+	assertContains(t, ir, ".go_trampoline.")
+	assertContains(t, ir, "call i8* @pal_thread_create")
+}
+
+func TestReceiveExprWaitLoop(t *testing.T) {
+	ir := generateIR(t, `
+		compute() int { return 1; }
+		main() {
+			t := go compute();
+			result := <-t;
+		}
+	`)
+	// Verify the wait loop structure: check → wait → check
+	assertContains(t, ir, "recv.check")
+	assertContains(t, ir, "recv.wait")
+	assertContains(t, ir, "recv.ready")
 }

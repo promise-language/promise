@@ -79,6 +79,8 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		return c.genIsExpr(e)
 	case *ast.CastExpr:
 		return c.genCastExpr(e)
+	case *ast.GoExpr:
+		return c.genGoExpr(e)
 	default:
 		panic(fmt.Sprintf("codegen: unhandled expression type %T", expr))
 	}
@@ -488,6 +490,11 @@ func (c *Compiler) genStringOp(op string, left, right value.Value) value.Value {
 // --- Unary expressions ---
 
 func (c *Compiler) genUnaryExpr(e *ast.UnaryExpr) value.Value {
+	// Intercept receive operator (<-task) before normal unary dispatch
+	if e.Op == ast.UnaryReceive {
+		return c.genReceiveExpr(e)
+	}
+
 	operand := c.genExpr(e.Operand)
 	operandType := c.info.Types[e.Operand]
 	named := extractNamed(operandType)
@@ -3104,4 +3111,400 @@ func (c *Compiler) emitNumericCast(val value.Value, src, dst *types.Named) value
 	default:
 		panic(fmt.Sprintf("codegen: unsupported numeric cast %s → %s", src, dst))
 	}
+}
+
+// --- Go expression (concurrency) ---
+
+// taskStructType builds the LLVM struct type for a task[T]:
+//
+//	Void:    { i1 done, i8* mutex, i8* cond, i8* thread_handle }
+//	Non-void: { T result, i1 done, i8* mutex, i8* cond, i8* thread_handle }
+func (c *Compiler) taskStructType(resultType irtypes.Type) *irtypes.StructType {
+	if _, isVoid := resultType.(*irtypes.VoidType); isVoid {
+		return irtypes.NewStruct(irtypes.I1, irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I8Ptr)
+	}
+	return irtypes.NewStruct(resultType, irtypes.I1, irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I8Ptr)
+}
+
+// taskFieldIndices returns the GEP indices for task struct fields, accounting
+// for whether the result type is void (no result field).
+func taskFieldIndices(isVoid bool) (done, mutex, cond, threadHandle int) {
+	if isVoid {
+		return 0, 1, 2, 3
+	}
+	return 1, 2, 3, 4
+}
+
+// genGoExpr generates code for a `go expr` expression.
+// It spawns the expression on a new OS thread and returns a task handle (i8*).
+func (c *Compiler) genGoExpr(e *ast.GoExpr) value.Value {
+	if e.Expr != nil {
+		callExpr, ok := e.Expr.(*ast.CallExpr)
+		if !ok {
+			panic(fmt.Sprintf("codegen: go expression with non-call expr %T not supported", e.Expr))
+		}
+		return c.genGoCallExpr(callExpr)
+	}
+	// go { block } form
+	return c.genGoBlock(e.Block)
+}
+
+// genGoCallExpr handles `go func(args...)` — the common case.
+func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
+	// 1. Resolve result type T from sema
+	callResultType := c.info.Types[callExpr]
+	isVoid := (callResultType == nil || callResultType == types.TypVoid)
+	var resultLLVM irtypes.Type = irtypes.Void
+	if !isVoid {
+		resultLLVM = c.resolveType(callResultType)
+	}
+
+	taskType := c.taskStructType(resultLLVM)
+	doneIdx, mutexIdx, condIdx, handleIdx := taskFieldIndices(isVoid)
+
+	// 2. Evaluate arguments in caller scope
+	var argVals []value.Value
+	var argLLVMTypes []irtypes.Type
+	for _, arg := range callExpr.Args {
+		v := c.genExpr(arg.Value)
+		argVals = append(argVals, v)
+		argLLVMTypes = append(argLLVMTypes, v.Type())
+		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		}
+	}
+
+	// 3. Resolve the target function
+	targetFn := c.resolveGoTarget(callExpr)
+
+	// 4. Allocate task struct on heap
+	taskSize := int64(llvmTypeSize(taskType))
+	taskRaw := c.block.NewCall(c.palAlloc, constant.NewInt(irtypes.I64, taskSize))
+	taskPtr := c.block.NewBitCast(taskRaw, irtypes.NewPointer(taskType))
+
+	// Init done = false
+	donePtr := c.block.NewGetElementPtr(taskType, taskPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(doneIdx)))
+	c.block.NewStore(constant.NewInt(irtypes.I1, 0), donePtr)
+
+	// Init mutex
+	mtx := c.block.NewCall(c.palMutexInit)
+	mtxPtr := c.block.NewGetElementPtr(taskType, taskPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexIdx)))
+	c.block.NewStore(mtx, mtxPtr)
+
+	// Init cond
+	cnd := c.block.NewCall(c.palCondInit)
+	cndPtr := c.block.NewGetElementPtr(taskType, taskPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(condIdx)))
+	c.block.NewStore(cnd, cndPtr)
+
+	// 5. Build arg-pack struct: { i8* task_raw, arg0, arg1, ... }
+	packFieldTypes := []irtypes.Type{irtypes.I8Ptr} // task pointer
+	packFieldTypes = append(packFieldTypes, argLLVMTypes...)
+	packType := irtypes.NewStruct(packFieldTypes...)
+
+	packSize := int64(llvmTypeSize(packType))
+	packRaw := c.block.NewCall(c.palAlloc, constant.NewInt(irtypes.I64, packSize))
+	packPtr := c.block.NewBitCast(packRaw, irtypes.NewPointer(packType))
+
+	// Store task pointer into pack[0]
+	packTaskPtr := c.block.NewGetElementPtr(packType, packPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	c.block.NewStore(taskRaw, packTaskPtr)
+
+	// Store each argument into pack[1..N]
+	for i, v := range argVals {
+		fieldPtr := c.block.NewGetElementPtr(packType, packPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i+1)))
+		c.block.NewStore(v, fieldPtr)
+	}
+
+	// 6. Generate trampoline function: i8*(i8*) — matches pthread start_routine
+	trampoline := c.genGoTrampoline(targetFn, taskType, packType, resultLLVM, isVoid)
+
+	// 7. Spawn thread
+	trampolinePtr := c.block.NewBitCast(trampoline, irtypes.I8Ptr)
+	threadHandle := c.block.NewCall(c.palThreadCreate, trampolinePtr, packRaw)
+
+	// Store thread handle in task struct
+	thPtr := c.block.NewGetElementPtr(taskType, taskPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(handleIdx)))
+	c.block.NewStore(threadHandle, thPtr)
+
+	// 8. Return task as i8*
+	return taskRaw
+}
+
+// resolveGoTarget resolves the IR function for a call expression used in `go func()`.
+func (c *Compiler) resolveGoTarget(callExpr *ast.CallExpr) *ir.Func {
+	if ident, ok := callExpr.Callee.(*ast.IdentExpr); ok {
+		if fn, ok := c.funcs[ident.Name]; ok {
+			return fn
+		}
+		if fn, ok := c.stdFuncs[ident.Name]; ok {
+			return fn
+		}
+	}
+	// Method call or complex callee — wrap in a thunk
+	// For now, only support direct function calls
+	panic(fmt.Sprintf("codegen: go expression callee %T not yet supported", callExpr.Callee))
+}
+
+// genGoTrampoline generates a trampoline function for a go expression.
+// The trampoline has signature `i8*(i8*)` matching the pthread start_routine ABI.
+// It unpacks arguments from the arg-pack struct, calls the target, stores the
+// result in the task struct, and signals completion.
+func (c *Compiler) genGoTrampoline(
+	targetFn *ir.Func,
+	taskType *irtypes.StructType,
+	packType *irtypes.StructType,
+	resultLLVM irtypes.Type,
+	isVoid bool,
+) *ir.Func {
+	name := fmt.Sprintf(".go_trampoline.%d", c.goCounter)
+	c.goCounter++
+
+	trampoline := c.module.NewFunc(name, irtypes.I8Ptr,
+		ir.NewParam("pack_raw", irtypes.I8Ptr))
+	entry := trampoline.NewBlock("entry")
+
+	// Bitcast pack_raw to typed pointer
+	packPtr := entry.NewBitCast(trampoline.Params[0], irtypes.NewPointer(packType))
+
+	// Load task pointer from pack[0]
+	taskRawPtr := entry.NewGetElementPtr(packType, packPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	taskRaw := entry.NewLoad(irtypes.I8Ptr, taskRawPtr)
+	taskPtr := entry.NewBitCast(taskRaw, irtypes.NewPointer(taskType))
+
+	// Load arguments from pack[1..N]
+	var args []value.Value
+	for i := 1; i < len(packType.Fields); i++ {
+		argPtr := entry.NewGetElementPtr(packType, packPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
+		arg := entry.NewLoad(packType.Fields[i], argPtr)
+		args = append(args, arg)
+	}
+
+	// Free the arg-pack (no longer needed)
+	entry.NewCall(c.palFree, trampoline.Params[0])
+
+	// Call the target function
+	result := entry.NewCall(targetFn, args...)
+
+	doneIdx, mutexIdx, condIdx, _ := taskFieldIndices(isVoid)
+
+	// Store result in task struct (if non-void)
+	if !isVoid {
+		resultPtr := entry.NewGetElementPtr(taskType, taskPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		entry.NewStore(result, resultPtr)
+	}
+
+	// Lock mutex
+	mtxPtr := entry.NewGetElementPtr(taskType, taskPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexIdx)))
+	mtx := entry.NewLoad(irtypes.I8Ptr, mtxPtr)
+	entry.NewCall(c.palMutexLock, mtx)
+
+	// Set done = true
+	donePtr := entry.NewGetElementPtr(taskType, taskPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(doneIdx)))
+	entry.NewStore(constant.NewInt(irtypes.I1, 1), donePtr)
+
+	// Signal cond
+	cndPtr := entry.NewGetElementPtr(taskType, taskPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(condIdx)))
+	cnd := entry.NewLoad(irtypes.I8Ptr, cndPtr)
+	entry.NewCall(c.palCondSignal, cnd)
+
+	// Unlock mutex
+	entry.NewCall(c.palMutexUnlock, mtx)
+
+	// Return null (pthread expects i8* return)
+	entry.NewRet(constant.NewNull(irtypes.I8Ptr))
+	return trampoline
+}
+
+// genGoBlock handles `go { block }` — wraps the block in a void function and spawns it.
+func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
+	thunkName := fmt.Sprintf(".go_body.%d", c.goCounter)
+	c.goCounter++
+	thunkFn := c.module.NewFunc(thunkName, irtypes.Void)
+
+	// Save and switch context
+	savedFn := c.fn
+	savedBlock := c.block
+	savedLocals := c.locals
+	savedCanError := c.canError
+	savedRetType := c.currentRetType
+	savedBlockCounter := c.blockCounter
+	savedScopeBindings := c.scopeBindings
+	savedDropFlags := c.dropFlags
+	savedLoopScopeDepth := c.loopScopeDepth
+
+	c.fn = thunkFn
+	c.locals = make(map[string]*ir.InstAlloca)
+	c.blockCounter = 0
+	c.canError = false
+	c.currentRetType = types.TypVoid
+	c.scopeBindings = nil
+	c.dropFlags = make(map[string]*ir.InstAlloca)
+	c.loopScopeDepth = 0
+
+	entry := thunkFn.NewBlock("entry")
+	c.block = entry
+
+	c.genBlock(block)
+	if c.block != nil && c.block.Term == nil {
+		c.block.NewRet(nil)
+	}
+
+	// Restore context
+	c.fn = savedFn
+	c.block = savedBlock
+	c.locals = savedLocals
+	c.canError = savedCanError
+	c.currentRetType = savedRetType
+	c.blockCounter = savedBlockCounter
+	c.scopeBindings = savedScopeBindings
+	c.dropFlags = savedDropFlags
+	c.loopScopeDepth = savedLoopScopeDepth
+
+	// Spawn the void thunk
+	taskType := c.taskStructType(irtypes.Void)
+	doneIdx, mutexIdx, condIdx, handleIdx := taskFieldIndices(true)
+
+	taskSize := int64(llvmTypeSize(taskType))
+	taskRaw := c.block.NewCall(c.palAlloc, constant.NewInt(irtypes.I64, taskSize))
+	taskPtr := c.block.NewBitCast(taskRaw, irtypes.NewPointer(taskType))
+
+	donePtr := c.block.NewGetElementPtr(taskType, taskPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(doneIdx)))
+	c.block.NewStore(constant.NewInt(irtypes.I1, 0), donePtr)
+
+	mtx := c.block.NewCall(c.palMutexInit)
+	mtxPtr := c.block.NewGetElementPtr(taskType, taskPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexIdx)))
+	c.block.NewStore(mtx, mtxPtr)
+
+	cnd := c.block.NewCall(c.palCondInit)
+	cndPtr := c.block.NewGetElementPtr(taskType, taskPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(condIdx)))
+	c.block.NewStore(cnd, cndPtr)
+
+	packType := irtypes.NewStruct(irtypes.I8Ptr)
+	packSize := int64(llvmTypeSize(packType))
+	packRaw := c.block.NewCall(c.palAlloc, constant.NewInt(irtypes.I64, packSize))
+	packPtr := c.block.NewBitCast(packRaw, irtypes.NewPointer(packType))
+	packTaskField := c.block.NewGetElementPtr(packType, packPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	c.block.NewStore(taskRaw, packTaskField)
+
+	trampoline := c.genGoTrampoline(thunkFn, taskType, packType, irtypes.Void, true)
+	trampolinePtr := c.block.NewBitCast(trampoline, irtypes.I8Ptr)
+	threadHandle := c.block.NewCall(c.palThreadCreate, trampolinePtr, packRaw)
+
+	thPtr := c.block.NewGetElementPtr(taskType, taskPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(handleIdx)))
+	c.block.NewStore(threadHandle, thPtr)
+
+	return taskRaw
+}
+
+// --- Receive expression (<-task) ---
+
+// genReceiveExpr generates code for `<-task` — waits for the task to complete
+// and returns the result value.
+func (c *Compiler) genReceiveExpr(e *ast.UnaryExpr) value.Value {
+	// Generate the task pointer (i8*)
+	taskRaw := c.genExpr(e.Operand)
+
+	// Resolve result type T from sema: operand is task[T], result is T
+	operandType := c.info.Types[e.Operand]
+	if c.typeSubst != nil {
+		operandType = types.Substitute(operandType, c.typeSubst)
+	}
+
+	inst, ok := operandType.(*types.Instance)
+	if !ok {
+		panic(fmt.Sprintf("codegen: receive operand type %T is not Instance", operandType))
+	}
+
+	var innerType types.Type
+	if len(inst.TypeArgs()) > 0 {
+		innerType = inst.TypeArgs()[0]
+	}
+	isVoid := (innerType == nil || innerType == types.TypVoid)
+
+	var resultLLVM irtypes.Type = irtypes.Void
+	if !isVoid {
+		resultLLVM = c.resolveType(innerType)
+	}
+
+	taskType := c.taskStructType(resultLLVM)
+	doneIdx, mutexIdx, condIdx, handleIdx := taskFieldIndices(isVoid)
+
+	// Bitcast task i8* to typed pointer
+	taskPtr := c.block.NewBitCast(taskRaw, irtypes.NewPointer(taskType))
+
+	// Load mutex and cond pointers
+	mtxFieldPtr := c.block.NewGetElementPtr(taskType, taskPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexIdx)))
+	mtx := c.block.NewLoad(irtypes.I8Ptr, mtxFieldPtr)
+
+	cndFieldPtr := c.block.NewGetElementPtr(taskType, taskPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(condIdx)))
+	cnd := c.block.NewLoad(irtypes.I8Ptr, cndFieldPtr)
+
+	// Lock mutex
+	c.block.NewCall(c.palMutexLock, mtx)
+
+	// Spin-wait loop: check done flag, if not done → cond_wait → check again
+	checkBlock := c.newBlock("recv.check")
+	waitBlock := c.newBlock("recv.wait")
+	readyBlock := c.newBlock("recv.ready")
+
+	c.block.NewBr(checkBlock)
+
+	// check: load done, branch
+	c.block = checkBlock
+	donePtr := c.block.NewGetElementPtr(taskType, taskPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(doneIdx)))
+	doneVal := c.block.NewLoad(irtypes.I1, donePtr)
+	c.block.NewCondBr(doneVal, readyBlock, waitBlock)
+
+	// wait: cond_wait, loop back to check
+	c.block = waitBlock
+	c.block.NewCall(c.palCondWait, cnd, mtx)
+	c.block.NewBr(checkBlock)
+
+	// ready: load result, unlock, join, cleanup
+	c.block = readyBlock
+	var resultVal value.Value
+	if !isVoid {
+		resultFieldPtr := c.block.NewGetElementPtr(taskType, taskPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		resultVal = c.block.NewLoad(resultLLVM, resultFieldPtr)
+	}
+
+	// Unlock mutex
+	c.block.NewCall(c.palMutexUnlock, mtx)
+
+	// Join thread
+	thFieldPtr := c.block.NewGetElementPtr(taskType, taskPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(handleIdx)))
+	threadHandle := c.block.NewLoad(irtypes.I8Ptr, thFieldPtr)
+	c.block.NewCall(c.palThreadJoin, threadHandle)
+
+	// Cleanup: destroy mutex, destroy cond, free task
+	c.block.NewCall(c.palMutexDestroy, mtx)
+	c.block.NewCall(c.palCondDestroy, cnd)
+	c.block.NewCall(c.palFree, taskRaw)
+
+	if isVoid {
+		return nil
+	}
+	return resultVal
 }

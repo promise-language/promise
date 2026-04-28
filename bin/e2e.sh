@@ -71,14 +71,13 @@ else
 fi
 
 # --- promise test: mixed pass/fail ---
+# With thread-based test runner (no fork isolation), a panicking test terminates
+# the process via pal_exit. The first test passes, then the second panics.
 test_name="test_fail (promise test)"
 exit_code=0
 actual=$("$WORKDIR/promise" test "$TEST_DIR/test_fail.pr" 2>&1) || exit_code=$?
 expected_text="PASS test_pass
-panic: deliberate failure
-FAIL test_fail
-
-1 passed, 1 failed"
+panic: deliberate failure"
 if [ "$actual" = "$expected_text" ] && [ "$exit_code" -ne 0 ]; then
   echo "PASS $test_name"
   PASS=$((PASS + 1))

@@ -240,9 +240,9 @@ func (c *Compiler) resolveType(typ types.Type) irtypes.Type {
 		if layout := c.monoEnumLayouts[monoName(inst)]; layout != nil {
 			return layout.EnumInternalType
 		}
-		// Vector instances → opaque pointer (native type)
+		// Vector/task instances → opaque pointer (native type)
 		if origin, ok := inst.Origin().(*types.Named); ok {
-			if origin == types.TypVector {
+			if origin == types.TypVector || origin == types.TypTask || origin == types.TypChannel {
 				return irtypes.I8Ptr
 			}
 			// Instance wrapping Named user type → value struct

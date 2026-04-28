@@ -53,14 +53,16 @@ After completing Phases 1-3, the C runtime is reduced to a single function:
 | **3c** | PAL WASM (WASI imports + JS FFI) | **Done** |
 | **4** | Centralize allocator behind PAL | **Done** |
 | **4b** | WASM linear memory allocator (bump/free-list on `memory.grow`) | Planned |
-| **5** | M:N concurrency scheduler (C initially) | Planned |
-| **5b** | Cooperative scheduler for WASM (Asyncify or stack-switching) | Planned |
+| **5a** | 1:1 threading MVP (`go`/`<-` with OS threads via PAL) | **Done** |
+| **5b** | Channels (`channel[T]`, buffered send/receive) | Planned |
+| **5c** | M:N scheduler (GMP model: goroutines, processors, work stealing) | Planned |
+| **5d** | Cooperative scheduler for WASM (Asyncify or stack-switching) | Planned |
 | **6** | IO reactor: kqueue + epoll + IOCP | Planned |
 | **6b** | JS event loop integration for WASM IO | Planned |
 | **7** | Replace clang with `llc` + `lld`, enable cross-compilation | Planned |
 | **8** | Rewrite scheduler in Promise | Planned |
 
-Phases 1-3 are done. Phase 3 introduced the platform split (PAL). Phases 5-6 are the big architectural investment. Phases 7-8 are polish.
+Phases 1-5a are done. Phase 3 introduced the platform split (PAL). Phase 5a added 1:1 threading (each `go` spawns an OS thread). Phases 5b-6 add channels, M:N scheduling, and IO. Phases 7-8 are polish.
 
 ---
 
@@ -394,17 +396,23 @@ pal_realloc(ptr, old_size, new_size) → ptr
 - Windows: VirtualAlloc/VirtualFree (or HeapAlloc initially)
 - WASM: bump allocator on linear memory using `memory.grow`
 
-**Phase 5 — Threading** (unavailable on WASM):
+**Phase 5 — Threading** (Done — 1:1 model, WASM stubs run synchronously):
 ```
 pal_thread_create(fn, arg) → handle
 pal_thread_join(handle)
-pal_futex_wait(addr, expected)
-pal_futex_wake(addr, count)
+pal_mutex_init() → handle
+pal_mutex_lock(handle)
+pal_mutex_unlock(handle)
+pal_mutex_destroy(handle)
+pal_cond_init() → handle
+pal_cond_wait(cond, mutex)
+pal_cond_signal(cond)
+pal_cond_destroy(cond)
 ```
-- macOS: pthread_create + os_unfair_lock
-- Linux: clone + futex
-- Windows: CreateThread + WaitOnAddress
-- WASM: no-op / single-threaded mode
+- macOS/Linux: pthread_create/join + pthread_mutex + pthread_cond
+- Windows/WASM: synchronous stubs (call fn directly, no-op mutex/cond)
+
+`go expr` spawns an OS thread; `<-task` joins on it. Task struct layout: `{ T result, i1 done, i8* mutex, i8* cond, i8* thread_handle }`. Test runner (`promise_test_run`) migrated from fork/C to thread-based codegen — no C runtime files remain.
 
 **Phase 6 — IO Reactor** (for non-blocking IO):
 ```

@@ -275,6 +275,52 @@ func (c *Compiler) definePanicMsgBody(fn *ir.Func) {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoReturn)
 }
 
+// defineTestRunFunc defines a codegen-emitted promise_test_run(i8* %fn) → i32.
+// Replaces the C extern (fork/waitpid) with thread-based execution via PAL.
+// The test function runs on a separate thread. If it completes normally, returns 0.
+// If it panics, pal_exit terminates the process (no fork isolation — same as Go's testing).
+func (c *Compiler) defineTestRunFunc() *ir.Func {
+	fn := c.module.NewFunc("promise_test_run", irtypes.I32,
+		ir.NewParam("fn", irtypes.I8Ptr))
+	entry := fn.NewBlock("entry")
+
+	// The test function is void(). We need a trampoline with i8*(i8*) signature
+	// that calls the void function and returns null.
+	// Generate a single shared trampoline: .test_trampoline(i8* %fn_ptr) → i8*
+	// It bitcasts fn_ptr to void()* and calls it.
+	trampoline := c.defineTestTrampoline()
+	trampolinePtr := entry.NewBitCast(trampoline, irtypes.I8Ptr)
+
+	// Spawn thread: pass the test function pointer as the arg
+	handle := entry.NewCall(c.palThreadCreate, trampolinePtr, fn.Params[0])
+
+	// Join thread (waits for completion)
+	entry.NewCall(c.palThreadJoin, handle)
+
+	// If we get here, the test passed (panics terminate the process)
+	entry.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
+}
+
+// defineTestTrampoline generates a shared trampoline for test runner threads.
+// Signature: i8*(i8* %fn_ptr) — casts fn_ptr to void()* and calls it.
+func (c *Compiler) defineTestTrampoline() *ir.Func {
+	trampoline := c.module.NewFunc(".test_trampoline", irtypes.I8Ptr,
+		ir.NewParam("fn_ptr", irtypes.I8Ptr))
+	entry := trampoline.NewBlock("entry")
+
+	// Bitcast i8* → void()*
+	voidFnPtrType := irtypes.NewPointer(irtypes.NewFunc(irtypes.Void))
+	typedFn := entry.NewBitCast(trampoline.Params[0], voidFnPtrType)
+
+	// Call the test function
+	entry.NewCall(typedFn)
+
+	// Return null (pthread expects i8* return)
+	entry.NewRet(constant.NewNull(irtypes.I8Ptr))
+	return trampoline
+}
+
 // defineTestPrintResultBody adds a function body to promise_test_print_result(i8* %name, i32 %failed).
 // Writes "PASS <name>\n" or "FAIL <name>\n" to stdout via pal_write.
 func (c *Compiler) defineTestPrintResultBody(fn *ir.Func) {

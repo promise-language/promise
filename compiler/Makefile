@@ -18,13 +18,13 @@ $(ANTLR_JAR):
 
 generate: $(ANTLR_JAR)
 	@mkdir -p $(PARSER_PKG)
-	cd $(GRAMMAR_DIR) && java -jar ../$(ANTLR_JAR) \
+	@cd $(GRAMMAR_DIR) && java -jar ../$(ANTLR_JAR) \
 		-Dlanguage=Go \
 		-package parser \
 		-visitor \
 		-o ../$(PARSER_PKG) \
 		PromiseLexer.g4
-	cd $(GRAMMAR_DIR) && java -jar ../$(ANTLR_JAR) \
+	@cd $(GRAMMAR_DIR) && java -jar ../$(ANTLR_JAR) \
 		-Dlanguage=Go \
 		-package parser \
 		-visitor \
@@ -33,10 +33,9 @@ generate: $(ANTLR_JAR)
 		PromiseParser.g4
 
 resources:
-	@rm -rf $(RESOURCES)/std $(RESOURCES)/runtime
-	@mkdir -p $(RESOURCES)/std $(RESOURCES)/runtime
+	@rm -rf $(RESOURCES)/std
+	@mkdir -p $(RESOURCES)/std
 	@cp ../std/*.pr $(RESOURCES)/std/
-	@cp ../runtime/*.c $(RESOURCES)/runtime/
 
 build: generate resources
 	go build -o $(BINARY) ./cmd/promise

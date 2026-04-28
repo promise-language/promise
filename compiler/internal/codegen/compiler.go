@@ -11,6 +11,7 @@ import (
 	"github.com/llir/llvm/ir/value"
 
 	"djabi.dev/go/promise_lang/internal/ast"
+	"djabi.dev/go/promise_lang/internal/codegen/pal"
 	"djabi.dev/go/promise_lang/internal/sema"
 	"djabi.dev/go/promise_lang/internal/types"
 )
@@ -88,6 +89,14 @@ type Compiler struct {
 
 	// Drop flag tracking: maps variable name to its drop flag alloca (i1)
 	dropFlags map[string]*ir.InstAlloca
+
+	// PAL (Platform Abstraction Layer) function references
+	palWrite *ir.Func // @pal_write(i32 fd, i8* buf, i64 len) → i64
+	palExit  *ir.Func // @pal_exit(i32 code) → void [noreturn]
+
+	// Global constants for print/panic functions
+	newlineGlobal     *ir.Global // "\n" (1 byte)
+	panicPrefixGlobal *ir.Global // "panic: " (7 bytes)
 }
 
 // scopeBindingKind distinguishes close() bindings (use) from drop() bindings.
@@ -194,6 +203,10 @@ func Compile(file *ast.File, info *sema.Info) *CompileResult {
 	// declareExterns must run after computeUserTypeLayouts so that user type
 	// layouts are available when resolving extern parameter/return types.
 	c.declareExterns(externList, c.layouts)
+
+	// Add PAL-based function bodies to print/panic declarations.
+	// Must run after declareIntrinsics (to-string funcs) and declareExterns (print funcs).
+	c.definePALBodies()
 
 	// Declare method stubs before vtable/typeinfo emission (vtable needs function pointers)
 	c.declareTypeMethods(file)
@@ -321,8 +334,10 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 
 // declareIntrinsics declares compiler-intrinsic runtime functions (not user-declared externs).
 func (c *Compiler) declareIntrinsics() {
-	c.funcs["promise_panic"] = c.module.NewFunc("promise_panic",
+	panicFn := c.module.NewFunc("promise_panic",
 		irtypes.Void, ir.NewParam("msg", irtypes.I8Ptr))
+	panicFn.FuncAttrs = append(panicFn.FuncAttrs, enum.FuncAttrNoReturn, enum.FuncAttrNoUnwind)
+	c.funcs["promise_panic"] = panicFn
 
 	// malloc/free for heap allocation
 	mallocSize := ir.NewParam("size", irtypes.I64)
@@ -420,6 +435,18 @@ func (c *Compiler) declareIntrinsics() {
 
 	// String equality comparison (codegen-emitted LLVM IR, replaces C runtime)
 	c.defineStringEqFunc()
+
+	// PAL: emit platform-specific write/exit primitives
+	p := pal.ForTarget(c.module.TargetTriple)
+	c.palWrite = p.EmitWrite(c.module)
+	c.palExit = p.EmitExit(c.module)
+
+	// strlen (libc) — needed by definePanicBody to get C string length
+	strlenFn := c.module.NewFunc("strlen", irtypes.I64,
+		ir.NewParam("s", irtypes.I8Ptr))
+	strlenFn.FuncAttrs = append(strlenFn.FuncAttrs,
+		enum.FuncAttrNoUnwind, enum.FuncAttrReadOnly, enum.FuncAttrWillReturn)
+	c.funcs["strlen"] = strlenFn
 }
 
 // defineStringNewFunc emits an LLVM IR function that allocates and initializes

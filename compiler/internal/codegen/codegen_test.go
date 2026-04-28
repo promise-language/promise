@@ -643,8 +643,8 @@ func TestPrintInt(t *testing.T) {
 	`)
 	// Struct type definition
 	assertContains(t, ir, "%promise_int_v = type")
-	// Extern declaration: all params passed as i8* (pointer) for C ABI
-	assertContains(t, ir, "declare void @promise_print_int(i8*")
+	// PAL-defined print function: extern turned into define with body
+	assertContains(t, ir, "define void @promise_print_int(i8*")
 	// Struct packing via insertvalue
 	assertContains(t, ir, "insertvalue %promise_int_v")
 }
@@ -655,7 +655,7 @@ func TestPrintBool(t *testing.T) {
 		main() { print(true); }
 	`)
 	assertContains(t, ir, "%promise_bool_v = type")
-	assertContains(t, ir, "declare void @promise_print_bool(i8*")
+	assertContains(t, ir, "define void @promise_print_bool(i8*")
 	// Bool coercion: i1 → i8
 	assertContains(t, ir, "zext i1 true to i8")
 	assertContains(t, ir, "insertvalue %promise_bool_v")
@@ -667,8 +667,105 @@ func TestPrintF64(t *testing.T) {
 		main() { print(3.14); }
 	`)
 	assertContains(t, ir, "%promise_f64_v = type")
-	assertContains(t, ir, "declare void @promise_print_f64(i8*")
+	assertContains(t, ir, "define void @promise_print_f64(i8*")
 	assertContains(t, ir, "insertvalue %promise_f64_v")
+}
+
+// --- PAL function body tests ---
+// These verify that definePALBodies() generates correct IR for print/panic functions.
+
+func TestPrintIntBody(t *testing.T) {
+	ir := generateIR(t, `
+		print(int x) `+"`"+`extern("promise_print_int");
+		main() { print(42); }
+	`)
+	// Function body: extracts raw from value struct, converts to string, writes via PAL
+	assertContains(t, ir, "define void @promise_print_int(i8*")
+	assertContains(t, ir, "bitcast i8* %x to %promise_int_v*")
+	assertContains(t, ir, "call i8* @promise_int_to_string(i64")
+	assertContains(t, ir, "call i64 @pal_write(i32 1,") // stdout
+	assertContains(t, ir, "call void @free(i8*")        // free temp string
+}
+
+func TestPrintF64Body(t *testing.T) {
+	ir := generateIR(t, `
+		print(f64 x) `+"`"+`extern("promise_print_f64");
+		main() { print(3.14); }
+	`)
+	assertContains(t, ir, "define void @promise_print_f64(i8*")
+	assertContains(t, ir, "bitcast i8* %x to %promise_f64_v*")
+	assertContains(t, ir, "call i8* @promise_f64_to_string(double")
+	assertContains(t, ir, "call i64 @pal_write(i32 1,")
+	assertContains(t, ir, "call void @free(i8*")
+}
+
+func TestPrintBoolBody(t *testing.T) {
+	ir := generateIR(t, `
+		print(bool x) `+"`"+`extern("promise_print_bool");
+		main() { print(true); }
+	`)
+	assertContains(t, ir, "define void @promise_print_bool(i8*")
+	assertContains(t, ir, "bitcast i8* %x to %promise_bool_v*")
+	assertContains(t, ir, "call i8* @promise_bool_to_string(i8")
+	assertContains(t, ir, "call i64 @pal_write(i32 1,")
+	assertContains(t, ir, "call void @free(i8*")
+}
+
+func TestPrintStringBody(t *testing.T) {
+	ir := generateIR(t, `
+		print_string(string s) `+"`"+`extern("promise_print_string");
+		main() { print_string("hello"); }
+	`)
+	// Function body: extracts data/len from string value struct, writes via PAL
+	assertContains(t, ir, "define void @promise_print_string(i8*")
+	assertContains(t, ir, "bitcast i8* %s to %promise_string_v*")
+	assertContains(t, ir, "call i64 @pal_write(i32 1,") // stdout
+}
+
+func TestPanicBody(t *testing.T) {
+	ir := generateIR(t, `
+		main() {}
+	`)
+	// promise_panic is always declared as intrinsic; definePALBodies adds body
+	assertContains(t, ir, "define void @promise_panic(i8*")
+	assertContains(t, ir, "call i64 @strlen(i8*")
+	assertContains(t, ir, "call i64 @pal_write(i32 2,") // stderr
+	assertContains(t, ir, "call void @pal_exit(i32 1)")
+	assertContains(t, ir, "unreachable")
+}
+
+func TestPanicMsgBody(t *testing.T) {
+	ir := generateIR(t, `
+		panic_msg(string msg) `+"`"+`extern("promise_panic_msg");
+		main() { panic_msg("boom"); }
+	`)
+	assertContains(t, ir, "define void @promise_panic_msg(i8*")
+	assertContains(t, ir, "bitcast i8* %msg to %promise_string_v*")
+	assertContains(t, ir, "call i64 @pal_write(i32 2,") // stderr
+	assertContains(t, ir, "call void @pal_exit(i32 1)")
+	assertContains(t, ir, "unreachable")
+}
+
+func TestPALWriteExitDefined(t *testing.T) {
+	ir := generateIR(t, `
+		main() {}
+	`)
+	// PAL primitives are always emitted
+	assertContains(t, ir, "define i64 @pal_write(i32 %fd, i8* %buf, i64 %len)")
+	assertContains(t, ir, "call i64 @write(i32 %fd, i8* %buf, i64 %len)")
+	assertContains(t, ir, "define void @pal_exit(i32 %code)")
+	assertContains(t, ir, "call void @exit(i32 %code)")
+}
+
+func TestPrintNewlineEmission(t *testing.T) {
+	ir := generateIR(t, `
+		print(int x) `+"`"+`extern("promise_print_int");
+		main() { print(1); }
+	`)
+	// Newline global constant and two pal_write calls (data + newline)
+	assertContains(t, ir, `@.str.newline = constant [1 x i8] c"\0A"`)
+	// The print_int body should have exactly two pal_write calls
+	assertContains(t, ir, `@.str.panic_prefix = constant [7 x i8] c"panic: "`)
 }
 
 // --- Control flow tests ---

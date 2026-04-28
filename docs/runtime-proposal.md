@@ -85,7 +85,261 @@ Also done: LLVM intrinsics for all `memcpy`/`memmove`, libc `memcmp` for equalit
 
 ## Phase 3 — Platform Abstraction Layer (Next)
 
-The remaining C runtime functions all depend on IO or process control. Phase 3 replaces them with a platform abstraction layer (PAL) that provides per-target implementations.
+The remaining C runtime functions all depend on IO or process control. Phase 3 replaces them with a Platform Abstraction Layer (PAL) — codegen-emitted LLVM IR with per-target implementations, eliminating all C runtime files.
+
+### What Remains in C (to be replaced)
+
+| C function | File | Libc calls | What it does |
+|------------|------|------------|--------------|
+| `promise_print_int` | `runtime.c` | `printf` | Print int64 + newline to stdout |
+| `promise_print_f64` | `runtime.c` | `printf` | Print f64 + newline to stdout |
+| `promise_print_bool` | `runtime.c` | `printf` | Print "true"/"false" + newline to stdout |
+| `promise_panic` | `runtime.c` | `fprintf`, `exit` | Print "panic: msg" to stderr, exit(1) |
+| `promise_panic_msg` | `runtime.c` | `fprintf`, `exit` | Print "panic: msg" (Promise string) to stderr, exit(1) |
+| `promise_print_string` | `runtime_string.c` | `fwrite`, `putchar` | Print string bytes + newline to stdout |
+| `promise_test_run` | `runtime_test.c` | `fork`, `waitpid`, `fflush`, `_exit` | Fork-isolated test execution |
+| `promise_test_print_result` | `runtime_test.c` | `printf` | Print "PASS name" / "FAIL name" |
+| `promise_test_summary` | `runtime_test.c` | `printf` | Print "N passed, M failed" |
+
+These are called from:
+- **std/io.pr**: `_print_int`, `_print_f64`, `_print_bool`, `_print_string` as `extern` bindings
+- **std/assert.pr**: `_panic_msg` as `extern` binding
+- **codegen/compiler.go**: `promise_panic` declared as intrinsic (line 324), used for bounds checks, cast failures, OOM
+- **codegen/compiler.go**: `GenerateTestMain()` declares test runner functions (lines 231-244)
+
+### How It Works Today
+
+The build pipeline (`cmd/promise/main.go`) compiles C runtime files via clang, then links them with the generated LLVM IR:
+
+```
+promise source → codegen → .ll file
+runtime/*.c → clang -c → .o files
+clang links .ll + .o files → binary
+```
+
+The C functions use `printf` format strings internally, but Promise's codegen already knows the exact types (the value-to-string conversions are already codegen-emitted LLVM IR). The C print functions just unpack the value struct and call `printf`. This is what we replace.
+
+### What PAL Does
+
+PAL replaces libc calls with platform-native equivalents. Instead of `printf("%lld\n", x)` (which internally does formatting + `write(1, ...)`), the codegen formats the value to a buffer (already done by `defineIntToStringFunc` etc.) and calls `pal_write(fd, buf, len)` directly.
+
+The key insight: **all remaining C functions reduce to just two primitives** — `write(fd, buf, len)` and `exit(code)`. The `fork`/`waitpid` in the test runner adds a third (`pal_spawn`), but it's only needed for test mode.
+
+### PAL Interface (Go side)
+
+```go
+// compiler/internal/codegen/pal/pal.go
+
+// PAL defines platform-specific function emitters.
+// Each method emits an LLVM IR function definition into the module.
+type PAL interface {
+    // EmitWrite emits pal_write(fd i32, buf i8*, len i64) → i64
+    EmitWrite(module *ir.Module) *ir.Func
+
+    // EmitExit emits pal_exit(code i32) → void
+    EmitExit(module *ir.Module) *ir.Func
+
+    // EmitSpawn emits pal_spawn(fn i8*) → i32 (0=pass, 1=fail)
+    EmitSpawn(module *ir.Module) *ir.Func
+}
+
+// ForTarget returns the PAL implementation for the given target triple.
+func ForTarget(triple string) PAL {
+    switch {
+    case strings.Contains(triple, "darwin"):
+        return &DarwinPAL{}
+    case strings.Contains(triple, "linux"):
+        return &LinuxPAL{}
+    case strings.Contains(triple, "wasm"):
+        return &WasmPAL{}
+    default:
+        return &LinuxPAL{} // fallback
+    }
+}
+```
+
+Each PAL backend emits a **defined** LLVM IR function (not a `declare` — a full `define` with basic blocks), so no C object files are needed. The function bodies contain platform-specific calls or inline syscalls.
+
+### Per-Platform LLVM IR
+
+**`pal_write(fd, buf, len)` — macOS (libSystem.dylib)**:
+
+```llvm
+declare i64 @write(i32, i8*, i64)   ; libSystem.dylib export
+
+define i64 @pal_write(i32 %fd, i8* %buf, i64 %len) {
+entry:
+    %ret = call i64 @write(i32 %fd, i8* %buf, i64 %len)
+    ret i64 %ret
+}
+```
+
+macOS uses libSystem.dylib function calls. Apple does not guarantee raw syscall ABI stability (Go does the same — uses libSystem). The linker resolves `@write` from libSystem at link time.
+
+**`pal_write(fd, buf, len)` — Linux (raw syscall)**:
+
+```llvm
+define i64 @pal_write(i32 %fd, i8* %buf, i64 %len) {
+entry:
+    %fd64 = sext i32 %fd to i64
+    %bufint = ptrtoint i8* %buf to i64
+    ; syscall(nr=1, fd, buf, len) — write
+    %ret = call i64 asm sideeffect "syscall",
+        "={rax},{rax},{rdi},{rsi},{rdx}"
+        (i64 1, i64 %fd64, i64 %bufint, i64 %len)
+    ret i64 %ret
+}
+```
+
+Linux uses raw syscall instructions. Syscall numbers are stable ABI. `nr=1` is `write` on x86_64. ARM64 uses `svc #0` instead of `syscall`, with `nr=64` for write.
+
+**`pal_exit(code)` — macOS (libSystem.dylib)**:
+
+```llvm
+declare void @exit(i32)   ; libSystem.dylib export
+
+define void @pal_exit(i32 %code) {
+entry:
+    call void @exit(i32 %code)
+    unreachable
+}
+```
+
+**`pal_exit(code)` — Linux (raw syscall)**:
+
+```llvm
+define void @pal_exit(i32 %code) {
+entry:
+    %code64 = sext i32 %code to i64
+    ; syscall(nr=231, code) — exit_group
+    call void asm sideeffect "syscall",
+        "{rax},{rdi}"(i64 231, i64 %code64)
+    unreachable
+}
+```
+
+**`pal_spawn(fn)` — macOS/Linux (fork + waitpid)**:
+
+Initially keep as a C function or use libSystem/libc calls. Raw `fork` syscall is possible on Linux but the waitpid + status macro logic is nontrivial in pure IR. Can be migrated later or kept as the single remaining C function until Phase 5 (concurrency) provides thread-based isolation.
+
+### Migration: C Functions → PAL + Codegen
+
+Each C print function becomes a codegen-emitted LLVM IR function that formats the value, then calls `pal_write`:
+
+| C function | Replacement strategy |
+|------------|---------------------|
+| `promise_print_int` | Codegen: call existing `promise_int_to_string`, extract buf/len, call `pal_write(1, buf, len)`, write `\n` |
+| `promise_print_f64` | Codegen: call existing `promise_f64_to_string`, extract buf/len, call `pal_write(1, buf, len)`, write `\n` |
+| `promise_print_bool` | Codegen: call existing `promise_bool_to_string`, extract buf/len, call `pal_write(1, buf, len)`, write `\n` |
+| `promise_print_string` | Codegen: extract `data`/`len` from string instance, call `pal_write(1, data, len)`, write `\n` |
+| `promise_panic` | Codegen: write "panic: " + msg to fd 2 (stderr), call `pal_exit(1)` |
+| `promise_panic_msg` | Codegen: write "panic: " + string data to fd 2, call `pal_exit(1)` |
+| `promise_test_run` | Keep as C initially (fork/waitpid); replace in Phase 5 with thread-based isolation |
+| `promise_test_print_result` | Codegen: format "PASS name\n" / "FAIL name\n", call `pal_write(1, ...)` |
+| `promise_test_summary` | Codegen: format "N passed, M failed\n", call `pal_write(1, ...)` |
+
+The `_to_string` codegen functions (already implemented in `compiler.go`) produce a string `i8*` with `{len, data}`. The print functions just need to extract these fields and pass them to `pal_write`. The value struct unpacking that currently happens in C (`x->raw`) moves into the codegen-emitted function — the codegen already knows the struct layout.
+
+### Newline Handling
+
+Current C functions append `\n` via `printf` format strings. In PAL, two options:
+
+1. **Two writes**: `pal_write(fd, data, len)` then `pal_write(fd, "\n", 1)` — simple, two syscalls
+2. **Buffer copy**: copy string + `\n` into a stack buffer, single `pal_write` — one syscall, small alloca
+
+Option 2 is better for performance. The codegen allocates a stack buffer (`alloca [N x i8]` or dynamically sized via alloca), copies the string data + newline byte, calls `pal_write` once. For short strings (most `println` calls), this is a single `alloca` + `memcpy` + `store \n` + `pal_write`.
+
+### File Descriptors
+
+POSIX and Windows both use integer-like handles for IO. PAL uses `i32` file descriptors:
+
+| Constant | POSIX | Windows | WASM |
+|----------|-------|---------|------|
+| `fd 0` (stdin) | 0 | `GetStdHandle(STD_INPUT_HANDLE)` | 0 (WASI) |
+| `fd 1` (stdout) | 1 | `GetStdHandle(STD_OUTPUT_HANDLE)` | 1 (WASI) |
+| `fd 2` (stderr) | 2 | `GetStdHandle(STD_ERROR_HANDLE)` | 2 (WASI) |
+
+On Windows, `pal_write` maps fd 0/1/2 to the corresponding HANDLE, then calls `WriteFile`. On WASM/WASI, fd 1/2 map to WASI's `fd_write` with the same integers. On WASM/browser, a JS-provided import handles the mapping.
+
+### Step-by-Step Implementation Plan
+
+**Step 1: PAL infrastructure + `pal_write` + `pal_exit` (macOS + Linux)**
+
+Create `compiler/internal/codegen/pal/` package:
+- `pal.go` — `PAL` interface with `EmitWrite`, `EmitExit`
+- `pal_darwin.go` — `DarwinPAL` using libSystem `@write`, `@exit`
+- `pal_linux.go` — `LinuxPAL` using raw syscall instructions
+
+Update `compiler.go`:
+- Add `pal PAL` field to `Compiler`
+- `Compile()` calls `pal.ForTarget(triple)` to select backend
+- `declareIntrinsics()` calls `c.pal.EmitWrite(module)`, `c.pal.EmitExit(module)`
+
+**Step 2: Migrate print functions to codegen LLVM IR**
+
+Add to `compiler.go` (or new `io.go`):
+- `definePrintStringFunc()` — extract `data`/`len` from string instance, alloca buffer, append `\n`, call `pal_write(1, ...)`
+- `definePrintIntFunc()` — call `promise_int_to_string`, then print
+- `definePrintF64Func()` — call `promise_f64_to_string`, then print
+- `definePrintBoolFunc()` — call `promise_bool_to_string`, then print
+
+These replace the `extern` declarations. The std/io.pr `extern` bindings still work — same function names, same signatures — but the functions are now codegen-defined instead of C-provided.
+
+**Step 3: Migrate panic to codegen LLVM IR**
+
+- `definePanicFunc()` — write "panic: " prefix + msg to fd 2 (stderr), call `pal_exit(1)`
+- `definePanicMsgFunc()` — extract string data, write to stderr, call `pal_exit(1)`
+
+**Step 4: Migrate test runner print functions**
+
+- `defineTestPrintResultFunc()` — format + `pal_write`
+- `defineTestSummaryFunc()` — format + `pal_write`
+
+**Step 5: Remove C runtime files**
+
+After steps 1-4, the only C function left is `promise_test_run` (fork/waitpid isolation). Options:
+- Keep `runtime_test.c` with only `promise_test_run` (3 lines of C)
+- Delete all other `.c` files, `promise_bindings.h`
+- Update build pipeline to skip clang compilation when no C files remain (test mode excepted)
+
+**Step 6: Migrate test runner (optional, can defer to Phase 5)**
+
+Replace `fork`/`waitpid` with:
+- macOS: `posix_spawn` via libSystem (simpler than raw fork)
+- Linux: raw `clone` + `wait4` syscalls
+- Or defer entirely — thread-based isolation in Phase 5 replaces fork
+
+### Build Pipeline Changes
+
+**Before PAL** (current):
+```
+.pr → codegen → .ll
+runtime/*.c → clang -c → .o files
+clang links .ll + .o → binary
+```
+
+**After PAL** (Phase 3 complete):
+```
+.pr → codegen (with PAL) → .ll     (all runtime functions are in the .ll)
+clang links .ll → binary            (no .o files, clang just links)
+```
+
+The generated `.ll` file contains everything: user code, intrinsic functions, PAL functions. Clang is only needed as a linker (resolves libSystem on macOS). On Linux with raw syscalls, this is the path to replacing clang with `llc` + `lld` (Phase 7).
+
+### Directory Structure
+
+```
+compiler/internal/codegen/
+├── pal/
+│   ├── pal.go          # PAL interface + ForTarget() selector
+│   ├── darwin.go       # DarwinPAL: libSystem.dylib (write, exit)
+│   └── linux.go        # LinuxPAL: raw syscall (write, exit_group)
+├── io.go               # definePrintStringFunc, definePrintIntFunc, etc.
+├── compiler.go         # PAL field, wiring into declareIntrinsics
+└── ...existing files...
+```
+
+Windows and WASM PAL backends added in Phases 3b/3c. The `pal.go` interface grows as needed (Threading, IO Reactor functions added in Phases 5-6).
 
 ### Target Platforms
 
@@ -111,48 +365,32 @@ The remaining C runtime functions all depend on IO or process control. Phase 3 r
 ├──────────────────────────────────────────────┤
 │  Layer 1: Memory + Intrinsics (LLVM IR)      │  allocator, memcpy, memset
 ├──────────────────────────────────────────────┤
-│  Layer 0: Platform Abstraction Layer (PAL)   │  write, read, open, mmap, exit, kevent...
+│  Layer 0: Platform Abstraction Layer (PAL)   │  write, exit, spawn, (later: mmap, kevent...)
 └──────────────────────────────────────────────┘
 ```
 
-### Layer 0: PAL Functions
+### Platform Notes
 
-~25 primitive operations with per-target implementations. The codegen emits calls to PAL functions; each platform provides the LLVM IR.
+- **macOS**: Apple discourages raw syscalls and doesn't guarantee ABI stability. Use libSystem.dylib (Go does the same). `@write`, `@exit`, `@fork`, `@waitpid` are all resolved via libSystem.
+- **Linux**: raw syscalls are stable and preferred. `syscall` instruction on x86_64, `svc #0` on ARM64. Syscall numbers differ between architectures.
+- **Windows**: fundamentally different API surface (Win32). `WriteFile` instead of `write`, `ExitProcess` instead of `exit`. File descriptors → HANDLE mapping needed.
+- **WASM**: 32-bit pointers, no threads, no filesystem without WASI. Codegen needs a `ptrSize` constant instead of hardcoded 8. No fork/process isolation — test runner runs functions directly.
 
-```
-compiler/internal/codegen/pal/
-├── pal.go          # PAL function table (abstract interface)
-├── pal_darwin.go   # macOS: libSystem.dylib calls
-├── pal_linux.go    # Linux: raw syscall instructions
-├── pal_windows.go  # Windows: kernel32.dll imports
-└── pal_wasm.go     # WASM: host imports (__wasi_* or JS FFI)
-```
+### Layer 0: Future PAL Functions
 
-**IO**:
-```
-pal_write(fd, buf, len) → bytes_written
-pal_read(fd, buf, len) → bytes_read
-pal_open(path, flags, mode) → fd
-pal_close(fd) → err
-pal_stat(path, buf) → err
-```
-- macOS: `call @write` (libSystem)
-- Linux: `syscall` instruction (nr=1 for write)
-- Windows: `call @WriteFile` (kernel32), fd→HANDLE mapping
-- WASM/WASI: `call @fd_write` (WASI import)
-- WASM/browser: `call @__promise_write` (JS-provided import)
+Phase 3 starts with just `pal_write`, `pal_exit`, and `pal_spawn`. The full PAL grows as later phases need more primitives:
 
-**Memory**:
+**Phase 4 — Memory** (currently uses libc `malloc`/`free`/`realloc`):
 ```
 pal_alloc(size) → ptr
 pal_free(ptr, size)
 pal_realloc(ptr, old_size, new_size) → ptr
 ```
-- macOS/Linux: mmap/munmap (or malloc initially)
+- macOS/Linux: mmap/munmap (or keep malloc initially)
 - Windows: VirtualAlloc/VirtualFree (or HeapAlloc initially)
 - WASM: bump allocator on linear memory using `memory.grow`
 
-**Threading** (unavailable on WASM):
+**Phase 5 — Threading** (unavailable on WASM):
 ```
 pal_thread_create(fn, arg) → handle
 pal_thread_join(handle)
@@ -164,7 +402,7 @@ pal_futex_wake(addr, count)
 - Windows: CreateThread + WaitOnAddress
 - WASM: no-op / single-threaded mode
 
-**IO Reactor** (for non-blocking IO):
+**Phase 6 — IO Reactor** (for non-blocking IO):
 ```
 pal_reactor_create() → handle
 pal_reactor_add(reactor, fd, events)
@@ -175,20 +413,13 @@ pal_reactor_wait(reactor, events_out, timeout) → count
 - Windows: CreateIoCompletionPort + GetQueuedCompletionStatus
 - WASM: not applicable — use JS event loop integration
 
-**Process** (for test runner):
+**IO** (added when file/network IO is exposed to Promise):
 ```
-pal_exit(code)
-pal_spawn(fn) → status
+pal_read(fd, buf, len) → bytes_read
+pal_open(path, flags, mode) → fd
+pal_close(fd) → err
+pal_stat(path, buf) → err
 ```
-- macOS/Linux: fork + waitpid
-- Windows: CreateProcess (or thread-based isolation)
-- WASM: call function directly (no isolation, catch panics)
-
-**Platform notes**:
-- macOS: Apple discourages raw syscalls and doesn't guarantee ABI stability. Use libSystem.dylib (Go does the same).
-- Linux: raw syscalls are stable and preferred.
-- Windows: fundamentally different API surface (Win32), requires fd→HANDLE mapping layer.
-- WASM: 32-bit pointers, no threads, no filesystem without WASI. Codegen needs a `ptrSize` constant instead of hardcoded 8.
 
 ### Layer 1: Memory + Intrinsics
 

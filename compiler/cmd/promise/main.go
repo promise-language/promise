@@ -434,7 +434,7 @@ func atoi(s string) int {
 	return n
 }
 
-// compileAndLink writes the IR to a temp file, compiles the C runtime,
+// compileAndLink writes the IR to a temp file, compiles any C runtime files,
 // and links everything into the output binary.
 func compileAndLink(result *codegen.CompileResult, outputFile string, testMode bool) {
 	llFile, err := os.CreateTemp("", "promise-*.ll")
@@ -450,19 +450,6 @@ func compileAndLink(result *codegen.CompileResult, outputFile string, testMode b
 	}
 	llFile.Close()
 
-	headerFile, err := os.CreateTemp("", "promise_bindings-*.h")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating header file: %v\n", err)
-		os.Exit(1)
-	}
-	defer os.Remove(headerFile.Name())
-
-	if err := codegen.GenerateHeader(headerFile, result.Layouts, result.EnumLayouts, result.Externs); err != nil {
-		fmt.Fprintf(os.Stderr, "error generating header: %v\n", err)
-		os.Exit(1)
-	}
-	headerFile.Close()
-
 	runtimeDir := findRuntimeDir()
 	if runtimeDir == "" {
 		fmt.Fprintln(os.Stderr, "error: cannot find runtime/ directory")
@@ -476,23 +463,41 @@ func compileAndLink(result *codegen.CompileResult, outputFile string, testMode b
 	}
 
 	target := codegen.HostTargetTriple()
-	var runtimeObjs []string
-	for _, cFile := range runtimeCFiles {
-		objFile, err := os.CreateTemp("", "promise-runtime-*.o")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
-			os.Exit(1)
-		}
-		objFile.Close()
-		defer os.Remove(objFile.Name())
 
-		clangCmd := exec.Command("clang", "-target", target, "-c", cFile, "-include", headerFile.Name(), "-o", objFile.Name())
-		clangCmd.Stderr = os.Stderr
-		if err := clangCmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "error compiling %s: %v\n", filepath.Base(cFile), err)
+	// Only generate header and compile C files if any exist (test mode with runtime_test.c).
+	// In non-test mode, all runtime functions are codegen-emitted LLVM IR — no C needed.
+	var runtimeObjs []string
+	if len(runtimeCFiles) > 0 {
+		headerFile, err := os.CreateTemp("", "promise_bindings-*.h")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error creating header file: %v\n", err)
 			os.Exit(1)
 		}
-		runtimeObjs = append(runtimeObjs, objFile.Name())
+		defer os.Remove(headerFile.Name())
+
+		if err := codegen.GenerateHeader(headerFile, result.Layouts, result.EnumLayouts, result.Externs); err != nil {
+			fmt.Fprintf(os.Stderr, "error generating header: %v\n", err)
+			os.Exit(1)
+		}
+		headerFile.Close()
+
+		for _, cFile := range runtimeCFiles {
+			objFile, err := os.CreateTemp("", "promise-runtime-*.o")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
+				os.Exit(1)
+			}
+			objFile.Close()
+			defer os.Remove(objFile.Name())
+
+			clangCmd := exec.Command("clang", "-target", target, "-c", cFile, "-include", headerFile.Name(), "-o", objFile.Name())
+			clangCmd.Stderr = os.Stderr
+			if err := clangCmd.Run(); err != nil {
+				fmt.Fprintf(os.Stderr, "error compiling %s: %v\n", filepath.Base(cFile), err)
+				os.Exit(1)
+			}
+			runtimeObjs = append(runtimeObjs, objFile.Name())
+		}
 	}
 
 	linkArgs := []string{"-target", target, llFile.Name()}

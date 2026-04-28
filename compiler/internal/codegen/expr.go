@@ -1137,41 +1137,49 @@ func (c *Compiler) genVectorLen(e *ast.MemberExpr) value.Value {
 // genMapLen returns the length of a map via the runtime.
 // genNativeHashGetter emits native hash computation for primitive types.
 // Returns (value, true) if the type has a native hash getter, (nil, false) otherwise.
+// Integer, bool, and char hashes use the Promise-implemented _fnv1a_hash function.
+// Float and string hashes still use C runtime functions (need bitcast/byte access).
 func (c *Compiler) genNativeHashGetter(e *ast.MemberExpr, named *types.Named) (value.Value, bool) {
 	target := c.genExpr(e.Target)
+	hashFn := c.stdFuncs["_fnv1a_hash"]
 	switch named {
 	case types.TypInt, types.TypI64, types.TypUint, types.TypU64:
-		// Already i64 — call promise_hash_int directly
-		return c.block.NewCall(c.funcs["promise_hash_int"], target), true
-	case types.TypI32, types.TypU32:
-		// Sign/zero-extend i32 to i64
+		// Already i64 — call _fnv1a_hash directly
+		return c.block.NewCall(hashFn, target), true
+	case types.TypI32:
 		ext := c.block.NewSExt(target, irtypes.I64)
-		return c.block.NewCall(c.funcs["promise_hash_int"], ext), true
-	case types.TypI16, types.TypU16:
+		return c.block.NewCall(hashFn, ext), true
+	case types.TypU32:
+		ext := c.block.NewZExt(target, irtypes.I64)
+		return c.block.NewCall(hashFn, ext), true
+	case types.TypI16:
 		ext := c.block.NewSExt(target, irtypes.I64)
-		return c.block.NewCall(c.funcs["promise_hash_int"], ext), true
-	case types.TypI8, types.TypU8:
+		return c.block.NewCall(hashFn, ext), true
+	case types.TypU16:
+		ext := c.block.NewZExt(target, irtypes.I64)
+		return c.block.NewCall(hashFn, ext), true
+	case types.TypI8:
 		ext := c.block.NewSExt(target, irtypes.I64)
-		return c.block.NewCall(c.funcs["promise_hash_int"], ext), true
+		return c.block.NewCall(hashFn, ext), true
+	case types.TypU8:
+		ext := c.block.NewZExt(target, irtypes.I64)
+		return c.block.NewCall(hashFn, ext), true
 	case types.TypBool:
-		// bool (i1) → zero-extend to i64
 		ext := c.block.NewZExt(target, irtypes.I64)
-		return c.block.NewCall(c.funcs["promise_hash_int"], ext), true
+		return c.block.NewCall(hashFn, ext), true
 	case types.TypChar:
-		// char (i32 codepoint) → zero-extend to i64
 		ext := c.block.NewZExt(target, irtypes.I64)
-		return c.block.NewCall(c.funcs["promise_hash_int"], ext), true
+		return c.block.NewCall(hashFn, ext), true
 	case types.TypF64:
-		// bitcast double to i64
+		// Float hash still uses C runtime (needs bitcast unavailable in Promise)
 		bits := c.block.NewBitCast(target, irtypes.I64)
 		return c.block.NewCall(c.funcs["promise_hash_int"], bits), true
 	case types.TypF32:
-		// bitcast float to i32, then zero-extend to i64
 		bits := c.block.NewBitCast(target, irtypes.I32)
 		ext := c.block.NewZExt(bits, irtypes.I64)
 		return c.block.NewCall(c.funcs["promise_hash_int"], ext), true
 	case types.TypString:
-		// string is i8* (pointer to header) — call promise_hash_string_value
+		// String hash still uses C runtime (needs byte-level access)
 		return c.block.NewCall(c.funcs["promise_hash_string_value"], target), true
 	default:
 		return nil, false

@@ -272,6 +272,21 @@ type map[K: Hashable + Equal, V] {
 	b.WriteString("type Hashable `structural {\n\tget hash int `abstract;\n}\n")
 	b.WriteString("type Ordered is Equal `structural {\n\t<(Self other) bool `abstract;\n\t>(Self other) bool => other < this;\n\t<=(Self other) bool => !(other < this);\n\t>=(Self other) bool => !(this < other);\n}\n")
 
+	// Hash implementation (FNV-1a) — used by genNativeHashGetter for int/bool/char types
+	b.WriteString("_fnv1a_hash(int raw_bits) int {\n")
+	b.WriteString("\tuint h = 0xcbf29ce484222325;\n")
+	b.WriteString("\tuint prime = 0x00000100000001b3;\n")
+	b.WriteString("\tuint v = raw_bits as! uint;\n")
+	b.WriteString("\th = (h ^ (v & 255)) * prime;\n")
+	b.WriteString("\th = (h ^ ((v >> 8) & 255)) * prime;\n")
+	b.WriteString("\th = (h ^ ((v >> 16) & 255)) * prime;\n")
+	b.WriteString("\th = (h ^ ((v >> 24) & 255)) * prime;\n")
+	b.WriteString("\th = (h ^ ((v >> 32) & 255)) * prime;\n")
+	b.WriteString("\th = (h ^ ((v >> 40) & 255)) * prime;\n")
+	b.WriteString("\th = (h ^ ((v >> 48) & 255)) * prime;\n")
+	b.WriteString("\th = (h ^ ((v >> 56) & 255)) * prime;\n")
+	b.WriteString("\treturn h as! int;\n}\n")
+
 	stdAll = b.String()
 }
 

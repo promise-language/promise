@@ -9,7 +9,7 @@ The runtime today is ~450 lines of C providing:
 - **Memory**: `malloc`/`free`/`realloc` for strings, vectors, closures
 - **String ops**: new, concat, eq, contains, starts_with, ends_with, index_of, trim, split, UTF-8 decode
 - **Vector ops**: with_capacity, push, pop, contains, remove
-- **Hash**: FNV-1a for int and string (C)
+- **Hash**: FNV-1a for int/bool/char (Promise `std/hash.pr`), float/string (C)
 - **RTTI**: type_is check for inheritance
 - **Test runner**: fork/waitpid for crash isolation
 
@@ -146,15 +146,13 @@ pal_spawn(fn) → status
 
 Move string ops, vector ops, hash, and formatting from C into Promise.
 
-**Blocker**: Promise currently lacks **bitwise operators** (`&`, `|`, `^`, `<<`, `>>`). These are needed for hash, compression, crypto, UTF-8, etc. Adding them is straightforward — new entries in the `native` operator table.
+~~**Blocker**: Promise currently lacks **bitwise operators** (`&`, `|`, `^`, `<<`, `>>`).~~ Resolved — bitwise operators, numeric literal type inference, and primitive casting (`as!`) are implemented.
 
-**What can move to Promise today** (no new language features needed):
+**What can move to Promise today**:
+- ~~Hash (FNV-1a) — moved to `std/hash.pr` for int/bool/char types~~
 - `string.contains`, `starts_with`, `ends_with`, `index_of`, `trim`
 - `vector.contains`, `vector.remove`
 - Map — already done (HashMap is pure Promise)
-
-**What needs bitwise ops first**:
-- Hash (FNV-1a uses XOR and multiply)
 - Int/float → string conversion (hex formatting needs shifts)
 - UTF-8 encode/decode (needs shifts and masks)
 
@@ -166,8 +164,8 @@ Move string ops, vector ops, hash, and formatting from C into Promise.
 - RTTI `type_is` (accesses raw memory layout)
 
 **Migration order**:
-1. Add bitwise operators to the language (`&`, `|`, `^`, `<<`, `>>`, `~`)
-2. Move hash to Promise (FNV-1a is ~10 lines)
+1. ~~Add bitwise operators to the language (`&`, `|`, `^`, `<<`, `>>`, `~`)~~ — Done
+2. ~~Move hash to Promise (FNV-1a is ~10 lines)~~ — Done (int/bool/char; float/string remain in C)
 3. Move string methods (contains, starts_with, etc.) to Promise
 4. Move vector.contains/remove to Promise
 5. Move int/float/bool→string to Promise
@@ -258,21 +256,21 @@ Everything built on top of Layer 0-3: map (already done), iterators, streams, cr
 
 ## Phased Roadmap
 
-| Phase | Work | Targets |
-|-------|------|---------|
-| **Phase 1** | Bitwise operators (`&`, `\|`, `^`, `<<`, `>>`, `~`) | All |
-| **Phase 2** | Move hash, string methods, vector methods to Promise | All |
-| **Phase 3** | PAL abstraction — define interface, implement macOS + Linux | macOS, Linux |
-| **Phase 3b** | PAL Windows implementation | Windows |
-| **Phase 3c** | PAL WASM implementation (WASI imports + JS FFI) | WASM |
-| **Phase 4** | Replace memcpy/memset with LLVM intrinsics, centralize allocator | All |
-| **Phase 4b** | WASM linear memory allocator (bump/free-list on memory.grow) | WASM |
-| **Phase 5** | M:N concurrency scheduler (C initially) | macOS, Linux, Windows |
-| **Phase 5b** | Cooperative scheduler for WASM (Asyncify or stack-switching) | WASM |
-| **Phase 6** | IO reactor: kqueue + epoll + IOCP | macOS, Linux, Windows |
-| **Phase 6b** | JS event loop integration for WASM IO | WASM |
-| **Phase 7** | Replace clang with `llc` + `lld`, enable cross-compilation | All |
-| **Phase 8** | Rewrite scheduler in Promise | All |
+| Phase | Work | Targets | Status |
+|-------|------|---------|--------|
+| **Phase 1** | ~~Bitwise operators (`&`, `\|`, `^`, `<<`, `>>`, `~`)~~ | ~~All~~ | Done |
+| **Phase 2** | Move hash, string methods, vector methods to Promise (hash done for int/bool/char) | All | In Progress |
+| **Phase 3** | PAL abstraction — define interface, implement macOS + Linux | macOS, Linux | Planned |
+| **Phase 3b** | PAL Windows implementation | Windows | Planned |
+| **Phase 3c** | PAL WASM implementation (WASI imports + JS FFI) | WASM | Planned |
+| **Phase 4** | Replace memcpy/memset with LLVM intrinsics, centralize allocator | All | Planned |
+| **Phase 4b** | WASM linear memory allocator (bump/free-list on memory.grow) | WASM | Planned |
+| **Phase 5** | M:N concurrency scheduler (C initially) | macOS, Linux, Windows | Planned |
+| **Phase 5b** | Cooperative scheduler for WASM (Asyncify or stack-switching) | WASM | Planned |
+| **Phase 6** | IO reactor: kqueue + epoll + IOCP | macOS, Linux, Windows | Planned |
+| **Phase 6b** | JS event loop integration for WASM IO | WASM | Planned |
+| **Phase 7** | Replace clang with `llc` + `lld`, enable cross-compilation | All | Planned |
+| **Phase 8** | Rewrite scheduler in Promise | All | Planned |
 
 Phases 1-2 are immediate and platform-independent. Phase 3 is where the platform split begins. Phase 5-6 is the big architectural investment. Phase 7-8 is polish.
 

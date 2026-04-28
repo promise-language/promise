@@ -271,6 +271,21 @@ type map[K: Hashable + Equal, V] {
 	b.WriteString("type Hashable `structural {\n\tget hash int `abstract;\n}\n")
 	b.WriteString("type Ordered is Equal `structural {\n\t<(Self other) bool `abstract;\n\t>(Self other) bool => other < this;\n\t<=(Self other) bool => !(other < this);\n\t>=(Self other) bool => !(this < other);\n}\n")
 
+	// Hash implementation (FNV-1a) — used by genNativeHashGetter for int/bool/char types
+	b.WriteString("_fnv1a_hash(int raw_bits) int {\n")
+	b.WriteString("\tuint h = 0xcbf29ce484222325;\n")
+	b.WriteString("\tuint prime = 0x00000100000001b3;\n")
+	b.WriteString("\tuint v = raw_bits as! uint;\n")
+	b.WriteString("\th = (h ^ (v & 255)) * prime;\n")
+	b.WriteString("\th = (h ^ ((v >> 8) & 255)) * prime;\n")
+	b.WriteString("\th = (h ^ ((v >> 16) & 255)) * prime;\n")
+	b.WriteString("\th = (h ^ ((v >> 24) & 255)) * prime;\n")
+	b.WriteString("\th = (h ^ ((v >> 32) & 255)) * prime;\n")
+	b.WriteString("\th = (h ^ ((v >> 40) & 255)) * prime;\n")
+	b.WriteString("\th = (h ^ ((v >> 48) & 255)) * prime;\n")
+	b.WriteString("\th = (h ^ ((v >> 56) & 255)) * prime;\n")
+	b.WriteString("\treturn h as! int;\n}\n")
+
 	stdAll = b.String()
 }
 
@@ -5584,18 +5599,18 @@ func TestCompoundAssignI8(t *testing.T) {
 
 func TestHashGetterInt(t *testing.T) {
 	ir := generateIR(t, `main() { x := 42; h := x.hash; }`)
-	assertContains(t, ir, "call i64 @promise_hash_int(i64")
+	assertContains(t, ir, "call i64 @__std__fnv1a_hash(i64")
 }
 
 func TestHashGetterBool(t *testing.T) {
 	ir := generateIR(t, `main() { b := true; h := b.hash; }`)
 	assertContains(t, ir, "zext i1")
-	assertContains(t, ir, "call i64 @promise_hash_int(i64")
+	assertContains(t, ir, "call i64 @__std__fnv1a_hash(i64")
 }
 
 func TestHashGetterChar(t *testing.T) {
 	ir := generateIR(t, `main() { c := 'a'; h := c.hash; }`)
-	assertContains(t, ir, "call i64 @promise_hash_int(i64")
+	assertContains(t, ir, "call i64 @__std__fnv1a_hash(i64")
 }
 
 func TestHashGetterString(t *testing.T) {
@@ -5618,7 +5633,17 @@ func TestHashGetterSmallInt(t *testing.T) {
 		main() {}
 	`)
 	assertContains(t, ir, "sext i8")
-	assertContains(t, ir, "call i64 @promise_hash_int(i64")
+	assertContains(t, ir, "call i64 @__std__fnv1a_hash(i64")
+}
+
+func TestHashGetterSmallUint(t *testing.T) {
+	ir := generateIR(t, `
+		test(u8 x) int { return x.hash; }
+		main() {}
+	`)
+	// Unsigned types use zero-extend, not sign-extend
+	assertContains(t, ir, "zext i8")
+	assertContains(t, ir, "call i64 @__std__fnv1a_hash(i64")
 }
 
 // --- Vector method tests ---

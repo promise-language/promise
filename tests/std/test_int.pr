@@ -1,6 +1,5 @@
 // Test int arithmetic, comparisons, and unary operators
 //
-// TODO: test hash property
 // TODO: test range operators (.., ..=) on int values
 test_addition() `test {
   assert(1 + 2 == 3, "1 + 2 == 3");

@@ -279,17 +279,33 @@ func (n *Named) VirtualMethodIndex(name string, isSetter bool) int {
 // and its parents (used internally by IsAbstract).
 func (n *Named) allAbstractMethods() []*Method {
 	var result []*Method
+	for _, am := range n.allAbstractMethodsWithDeclarer() {
+		result = append(result, am.method)
+	}
+	return result
+}
+
+// abstractMethodInfo pairs an abstract method with the interface that declared it.
+// The declarer is the Self type that should be used for signature comparison.
+type abstractMethodInfo struct {
+	method   *Method
+	declarer *Named
+}
+
+// allAbstractMethodsWithDeclarer returns all abstract methods from this type
+// and its parents, paired with their declaring interface.
+func (n *Named) allAbstractMethodsWithDeclarer() []abstractMethodInfo {
+	var result []abstractMethodInfo
 	for _, m := range n.methods {
 		if m.abstract {
-			result = append(result, m)
+			result = append(result, abstractMethodInfo{method: m, declarer: n})
 		}
 	}
 	for _, p := range n.parents {
-		for _, pm := range p.allAbstractMethods() {
-			// Only include if not overridden by a concrete method of the same kind in n
-			own := n.lookupOwnMethodBySlotKey(methodSlotKey(pm))
+		for _, am := range p.allAbstractMethodsWithDeclarer() {
+			own := n.lookupOwnMethodBySlotKey(methodSlotKey(am.method))
 			if own == nil {
-				result = append(result, pm)
+				result = append(result, am)
 			}
 		}
 	}

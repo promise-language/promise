@@ -194,6 +194,137 @@ func ContainsTypeParam(typ Type) bool {
 	return false
 }
 
+// SubstituteSelf replaces occurrences of iface with concrete in a type.
+// Used for default method synthesis: sema records types using the structural
+// interface type (e.g., Equal), but codegen needs the concrete type (e.g., Point).
+func SubstituteSelf(typ Type, iface, concrete *Named) Type {
+	if typ == nil || iface == nil || concrete == nil {
+		return typ
+	}
+	return doSelfSubst(typ, iface, concrete)
+}
+
+func doSelfSubst(typ Type, iface, concrete *Named) Type {
+	switch t := typ.(type) {
+	case *Named:
+		if t == iface {
+			return concrete
+		}
+		return t
+
+	case *Enum:
+		return t
+
+	case *Instance:
+		changed := false
+		newArgs := make([]Type, len(t.typeArgs))
+		for i, a := range t.typeArgs {
+			newArgs[i] = doSelfSubst(a, iface, concrete)
+			if newArgs[i] != a {
+				changed = true
+			}
+		}
+		if !changed {
+			return t
+		}
+		return NewInstance(t.origin, newArgs)
+
+	case *Signature:
+		return selfSubstSignature(t, iface, concrete)
+
+	case *Optional:
+		inner := doSelfSubst(t.elem, iface, concrete)
+		if inner == t.elem {
+			return t
+		}
+		return NewOptional(inner)
+
+	case *SharedRef:
+		inner := doSelfSubst(t.elem, iface, concrete)
+		if inner == t.elem {
+			return t
+		}
+		return NewSharedRef(inner)
+
+	case *MutRef:
+		inner := doSelfSubst(t.elem, iface, concrete)
+		if inner == t.elem {
+			return t
+		}
+		return NewMutRef(inner)
+
+	case *Pointer:
+		inner := doSelfSubst(t.elem, iface, concrete)
+		if inner == t.elem {
+			return t
+		}
+		return NewPointer(inner)
+
+	case *Tuple:
+		changed := false
+		elems := make([]Type, len(t.elems))
+		for i, e := range t.elems {
+			elems[i] = doSelfSubst(e, iface, concrete)
+			if elems[i] != e {
+				changed = true
+			}
+		}
+		if !changed {
+			return t
+		}
+		return NewTuple(elems)
+
+	case *Array:
+		elem := doSelfSubst(t.elem, iface, concrete)
+		if elem == t.elem {
+			return t
+		}
+		return NewArray(elem, t.size)
+
+	default:
+		return typ
+	}
+}
+
+func selfSubstSignature(sig *Signature, iface, concrete *Named) *Signature {
+	changed := false
+
+	var newRecv *Param
+	if sig.recv != nil {
+		rt := doSelfSubst(sig.recv.typ, iface, concrete)
+		if rt != sig.recv.typ {
+			newRecv = NewParam(sig.recv.name, rt, sig.recv.ref)
+			changed = true
+		} else {
+			newRecv = sig.recv
+		}
+	}
+
+	newParams := make([]*Param, len(sig.params))
+	for i, p := range sig.params {
+		pt := doSelfSubst(p.typ, iface, concrete)
+		if pt != p.typ {
+			newParams[i] = NewParam(p.name, pt, p.ref)
+			changed = true
+		} else {
+			newParams[i] = p
+		}
+	}
+
+	var newResult Type
+	if sig.result != nil {
+		newResult = doSelfSubst(sig.result, iface, concrete)
+		if newResult != sig.result {
+			changed = true
+		}
+	}
+
+	if !changed {
+		return sig
+	}
+	return NewSignature(newRecv, newParams, newResult, sig.canError)
+}
+
 func typeSliceEq(a, b []Type) bool {
 	if len(a) != len(b) {
 		return false

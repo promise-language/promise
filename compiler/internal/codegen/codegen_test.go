@@ -260,9 +260,9 @@ type map[K: Hashable + Equal, V] {
 	b.WriteString("type range `native {\n\tint start `value;\n\tint end `value;\n\tbool inclusive `value;\n}\n")
 
 	// Constraint interfaces
-	b.WriteString("type Equal `structural {\n\t==(Self other) bool `abstract;\n\t!=(Self other) bool `abstract;\n}\n")
+	b.WriteString("type Equal `structural {\n\t==(Self other) bool `abstract;\n\t!=(Self other) bool => !(this == other);\n}\n")
 	b.WriteString("type Hashable `structural {\n\tget hash int `abstract;\n}\n")
-	b.WriteString("type Ordered is Equal `structural {\n\t<(Self other) bool `abstract;\n\t>(Self other) bool `abstract;\n\t<=(Self other) bool `abstract;\n\t>=(Self other) bool `abstract;\n}\n")
+	b.WriteString("type Ordered is Equal `structural {\n\t<(Self other) bool `abstract;\n\t>(Self other) bool => other < this;\n\t<=(Self other) bool => !(other < this);\n\t>=(Self other) bool => !(this < other);\n}\n")
 
 	stdAll = b.String()
 }
@@ -5736,4 +5736,84 @@ func TestNestedGenericMonomorphization(t *testing.T) {
 	// Both Wrapper[int] and Box[int] should be monomorphized
 	assertContains(t, ir, "Wrapper__int")
 	assertContains(t, ir, "Box__int")
+}
+
+// --- Non-native operator dispatch ---
+
+func TestNonNativeOperatorDispatch(t *testing.T) {
+	ir := generateIR(t, `
+		type Pt {
+			int x;
+			==(Pt other) bool { return this.x == other.x; }
+		}
+		main() {
+			Pt a = Pt(x: 1);
+			Pt b = Pt(x: 2);
+			bool r = a == b;
+		}
+	`)
+	assertContains(t, ir, `call i1 @"Pt.=="(`)
+}
+
+func TestDefaultMethodViaViewVtable(t *testing.T) {
+	ir := generateIRWithStd(t,
+		"type MyEq `structural {\n\t==(Self other) bool `abstract;\n\t!=(Self other) bool => !(this == other);\n}\n",
+		`type Pt {
+			int x;
+			==(Pt other) bool { return this.x == other.x; }
+		}
+		main() {
+			MyEq e = Pt(x: 1);
+			MyEq f = Pt(x: 2);
+			bool r = e != f;
+		}
+	`)
+	assertContains(t, ir, `@"Pt.!="`)                  // synthesized default
+	assertContains(t, ir, "promise_vtable_Pt_as_MyEq") // view vtable
+}
+
+func TestDefaultMethodOverride(t *testing.T) {
+	// Concrete type overrides the default — the override should be used, not the synthesized default
+	ir := generateIRWithStd(t,
+		"type MyEq `structural {\n\t==(Self other) bool `abstract;\n\t!=(Self other) bool => !(this == other);\n}\n",
+		`type Pt {
+			int x;
+			==(Pt other) bool { return this.x == other.x; }
+			!=(Pt other) bool { return this.x != other.x; }
+		}
+		main() {
+			MyEq e = Pt(x: 1);
+			MyEq f = Pt(x: 2);
+			bool r = e != f;
+		}
+	`)
+	assertContains(t, ir, "promise_vtable_Pt_as_MyEq") // view vtable still created
+	// The vtable should use the concrete Pt.!= override, not a synthesized default.
+	// Check that the concrete method exists.
+	assertContains(t, ir, `@"Pt.!="`)
+}
+
+func TestOrderedDefaultsViaViewVtable(t *testing.T) {
+	stdOrd := "type MyEq `structural {\n\t==(Self other) bool `abstract;\n\t!=(Self other) bool => !(this == other);\n}\n" +
+		"type MyOrd is MyEq `structural {\n\t<(Self other) bool `abstract;\n\t>(Self other) bool => other < this;\n\t<=(Self other) bool => !(other < this);\n\t>=(Self other) bool => !(this < other);\n}\n"
+	ir := generateIRWithStd(t, stdOrd, `
+		type Val {
+			int n;
+			==(Val o) bool { return this.n == o.n; }
+			<(Val o) bool { return this.n < o.n; }
+		}
+		main() {
+			MyOrd a = Val(n: 1);
+			MyOrd b = Val(n: 2);
+			bool r1 = a > b;
+			bool r2 = a <= b;
+			bool r3 = a >= b;
+			bool r4 = a != b;
+		}
+	`)
+	assertContains(t, ir, `@"Val.>"`)  // synthesized from > default
+	assertContains(t, ir, `@"Val.<="`) // synthesized from <= default
+	assertContains(t, ir, `@"Val.>="`) // synthesized from >= default
+	assertContains(t, ir, `@"Val.!="`) // inherited from MyEq parent default
+	assertContains(t, ir, "promise_vtable_Val_as_MyOrd")
 }

@@ -362,6 +362,9 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 	if c.typeSubst != nil {
 		leftType = types.Substitute(leftType, c.typeSubst)
 	}
+	if c.selfSubst != nil {
+		leftType = types.SubstituteSelf(leftType, c.selfSubst.iface, c.selfSubst.concrete)
+	}
 	named := extractNamed(leftType)
 	if named == nil {
 		panic(fmt.Sprintf("codegen: cannot resolve Named type from %s for operator %s", leftType, e.Op))
@@ -381,8 +384,90 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 		return c.emitNativeOp(named, op, left, right)
 	}
 
-	// Non-native method call (future stages)
-	panic(fmt.Sprintf("codegen: non-native operator %s.%s not yet implemented", named, op))
+	// Non-native operator: dispatch as a method call.
+	// Virtual dispatch when the type has a vtable (abstract/structural type or type with children).
+	if c.needsVtable(named) {
+		return c.genVirtualBinaryOp(e, named, method, left, right)
+	}
+
+	// Direct dispatch: call the concrete type's operator method.
+	ownerName := c.resolveMethodOwner(named, op)
+	mangledName := mangleMethodName(ownerName, op, false)
+	fn, ok := c.funcs[mangledName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undeclared operator method %s", mangledName))
+	}
+
+	var args []value.Value
+	if method.Sig().Recv() != nil {
+		if _, isThis := e.Left.(*ast.ThisExpr); isThis {
+			args = append(args, left)
+		} else {
+			args = append(args, c.extractInstancePtr(left))
+		}
+	}
+	args = append(args, right)
+	return c.block.NewCall(fn, args...)
+}
+
+// genVirtualBinaryOp dispatches a non-native binary operator through the vtable.
+// Used when the static type is abstract or has children requiring virtual dispatch.
+// Mirrors genVirtualMethodCall but uses pre-evaluated left/right operands.
+func (c *Compiler) genVirtualBinaryOp(e *ast.BinaryExpr, named *types.Named,
+	method *types.Method, left, right value.Value) value.Value {
+
+	op := e.Op.String()
+
+	// Extract vtable and instance from left operand
+	var vtableRaw, instance value.Value
+	if _, isThis := e.Left.(*ast.ThisExpr); isThis {
+		instance = left
+		variantPtr := c.loadVariantPtr(left)
+		typeinfoStruct := irtypes.NewStruct(irtypes.I8Ptr)
+		typeinfoPtr := c.block.NewBitCast(variantPtr, irtypes.NewPointer(typeinfoStruct))
+		vtableFieldPtr := c.block.NewGetElementPtr(typeinfoStruct, typeinfoPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		vtableRaw = c.block.NewLoad(irtypes.I8Ptr, vtableFieldPtr)
+	} else {
+		vtableRaw = c.extractVtablePtr(left)
+		instance = c.extractInstancePtr(left)
+	}
+
+	// Index into vtable
+	slotIndex := named.VirtualMethodIndex(op, false)
+	if slotIndex < 0 {
+		panic(fmt.Sprintf("codegen: operator %s not in vtable for %s", op, named))
+	}
+	vtablePtr := c.block.NewBitCast(vtableRaw, irtypes.NewPointer(irtypes.I8Ptr))
+	fnSlotPtr := c.block.NewGetElementPtr(irtypes.I8Ptr, vtablePtr,
+		constant.NewInt(irtypes.I32, int64(slotIndex)))
+	fnRaw := c.block.NewLoad(irtypes.I8Ptr, fnSlotPtr)
+
+	// Build the function type and bitcast
+	retType := irtypes.Type(irtypes.Void)
+	if method.Sig().Result() != nil {
+		retType = c.resolveType(method.Sig().Result())
+	}
+	if method.Sig().CanError() {
+		retType = computeResultType(retType)
+	}
+	var paramTypes []irtypes.Type
+	if method.Sig().Recv() != nil {
+		paramTypes = append(paramTypes, irtypes.I8Ptr)
+	}
+	for _, p := range method.Sig().Params() {
+		paramTypes = append(paramTypes, c.resolveType(p.Type()))
+	}
+	funcType := irtypes.NewFunc(retType, paramTypes...)
+	fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))
+
+	// Call with instance ptr + right operand
+	var args []value.Value
+	if method.Sig().Recv() != nil {
+		args = append(args, instance)
+	}
+	args = append(args, right)
+	return c.block.NewCall(fnTyped, args...)
 }
 
 // genStringOp dispatches a string binary operator to the appropriate runtime intrinsic.
@@ -960,6 +1045,9 @@ func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 	if c.typeSubst != nil {
 		targetType = types.Substitute(targetType, c.typeSubst)
 	}
+	if c.selfSubst != nil {
+		targetType = types.SubstituteSelf(targetType, c.selfSubst.iface, c.selfSubst.concrete)
+	}
 
 	// Container .len property (string, vector)
 	// Check both Instance wrappers (user code: Vector[int]) and bare Named (method body: this is TypVector)
@@ -1139,6 +1227,10 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 	// Apply typeSubst for mono context
 	if c.typeSubst != nil {
 		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+	// Apply selfSubst for default method synthesis
+	if c.selfSubst != nil {
+		targetType = types.SubstituteSelf(targetType, c.selfSubst.iface, c.selfSubst.concrete)
 	}
 
 	// Container native method dispatch (Vector, Map, string)
@@ -1504,6 +1596,9 @@ func (c *Compiler) genFieldPtr(target *ast.MemberExpr) value.Value {
 	targetType := c.info.Types[target.Target]
 	if c.typeSubst != nil {
 		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+	if c.selfSubst != nil {
+		targetType = types.SubstituteSelf(targetType, c.selfSubst.iface, c.selfSubst.concrete)
 	}
 	named := extractNamed(targetType)
 	if named == nil {

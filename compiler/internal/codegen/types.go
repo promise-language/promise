@@ -200,6 +200,10 @@ func (c *Compiler) resolveType(typ types.Type) irtypes.Type {
 	if c.typeSubst != nil {
 		typ = types.Substitute(typ, c.typeSubst)
 	}
+	// Apply self-type substitution (inside default method synthesis)
+	if c.selfSubst != nil {
+		typ = types.SubstituteSelf(typ, c.selfSubst.iface, c.selfSubst.concrete)
+	}
 
 	// Handle Tuple types (elements may contain TypeParams needing substitution)
 	if tup, ok := typ.(*types.Tuple); ok {

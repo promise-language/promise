@@ -227,8 +227,8 @@ func Implements(x Type, iface *Named) bool {
 		return false
 	}
 
-	// Collect all abstract methods from the interface
-	abstractMethods := iface.allAbstractMethods()
+	// Collect all abstract methods with their declaring interface (for correct Self substitution)
+	abstractMethods := iface.allAbstractMethodsWithDeclarer()
 
 	// x must provide concrete implementations for all abstract methods
 	// with matching signatures (excluding receiver type).
@@ -237,18 +237,18 @@ func Implements(x Type, iface *Named) bool {
 		for _, am := range abstractMethods {
 			// Use appropriate lookup based on method kind (getter vs setter vs regular)
 			var m *Method
-			if am.IsGetter() {
-				m = xt.LookupGetter(am.name)
-			} else if am.IsSetter() {
-				m = xt.LookupSetter(am.name)
+			if am.method.IsGetter() {
+				m = xt.LookupGetter(am.method.name)
+			} else if am.method.IsSetter() {
+				m = xt.LookupSetter(am.method.name)
 			} else {
-				m = xt.LookupMethod(am.name)
+				m = xt.LookupMethod(am.method.name)
 			}
 			if m == nil || m.abstract {
 				return false
 			}
-			// Verify signatures match, substituting Self (iface) with concrete type (xt)
-			if !identicalSignaturesWithSelf(m.sig, am.sig, iface, xt) {
+			// Verify signatures match, substituting Self (the declaring interface) with concrete type (xt)
+			if !identicalSignaturesWithSelf(m.sig, am.method.sig, am.declarer, xt) {
 				return false
 			}
 		}

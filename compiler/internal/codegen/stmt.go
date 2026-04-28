@@ -742,6 +742,9 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	if retType != nil && c.typeSubst != nil {
 		retType = types.Substitute(retType, c.typeSubst)
 	}
+	if retType != nil && c.selfSubst != nil {
+		retType = types.SubstituteSelf(retType, c.selfSubst.iface, c.selfSubst.concrete)
+	}
 
 	if c.canError {
 		resultType := c.currentResultType()
@@ -758,6 +761,9 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 				exprType := c.info.Types[s.Value]
 				if c.typeSubst != nil {
 					exprType = types.Substitute(exprType, c.typeSubst)
+				}
+				if c.selfSubst != nil {
+					exprType = types.SubstituteSelf(exprType, c.selfSubst.iface, c.selfSubst.concrete)
 				}
 				val = c.coerceToView(val, exprType, retType)
 			}
@@ -778,6 +784,9 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 			exprType := c.info.Types[s.Value]
 			if c.typeSubst != nil {
 				exprType = types.Substitute(exprType, c.typeSubst)
+			}
+			if c.selfSubst != nil {
+				exprType = types.SubstituteSelf(exprType, c.selfSubst.iface, c.selfSubst.concrete)
 			}
 			val = c.coerceToView(val, exprType, retType)
 		}

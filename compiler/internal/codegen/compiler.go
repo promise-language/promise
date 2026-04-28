@@ -35,6 +35,14 @@ type Compiler struct {
 	typeSubst       map[*types.TypeParam]types.Type // nil outside mono codegen
 	monoCtx         *monoContext                    // nil outside mono method codegen
 
+	// Self-substitution for default method synthesis on structural interfaces.
+	// When non-nil, replaces occurrences of selfSubst.iface with selfSubst.concrete
+	// in sema type lookups during codegen.
+	selfSubst *selfSubstInfo
+
+	// AST file reference for looking up default method bodies during synthesis.
+	file *ast.File
+
 	// Loop control targets for break/continue
 	breakTarget    *ir.Block
 	continueTarget *ir.Block
@@ -109,6 +117,13 @@ type viewVtableKey struct {
 	view     *types.Named
 }
 
+// selfSubstInfo tracks a Self-type substitution for generating default method
+// bodies from structural interfaces specialized to a concrete type.
+type selfSubstInfo struct {
+	iface    *types.Named // the structural interface (e.g., Equal)
+	concrete *types.Named // the concrete implementing type (e.g., Point)
+}
+
 // hostTargetTriple returns the LLVM target triple for the host platform.
 // Uses stable minimum deployment targets to avoid version mismatch warnings
 // between IR modules and clang-compiled object files.
@@ -150,6 +165,7 @@ func Compile(file *ast.File, info *sema.Info) *CompileResult {
 		viewVtables:     make(map[viewVtableKey]*ir.Global),
 		dropFlags:       make(map[string]*ir.InstAlloca),
 		thunks:          make(map[string]*ir.Func),
+		file:            file,
 	}
 
 	// Collect extern declarations and compute type layouts
@@ -1062,6 +1078,127 @@ func (c *Compiler) resolveMethodOwner(named *types.Named, methodName string) str
 		}
 	}
 	return named.Obj().Name() // fallback
+}
+
+// compilerState captures the mutable compiler fields that defineMethodFunc overwrites.
+// Used to save/restore state when synthesizing default methods during another function's codegen.
+type compilerState struct {
+	fn             *ir.Func
+	block          *ir.Block
+	locals         map[string]*ir.InstAlloca
+	dropFlags      map[string]*ir.InstAlloca
+	blockCounter   int
+	canError       bool
+	currentRetType types.Type
+	currentNamed   *types.Named
+	scopeBindings  []scopeBinding
+	loopScopeDepth int
+	selfSubst      *selfSubstInfo
+	targetType     types.Type
+}
+
+func (c *Compiler) saveState() compilerState {
+	return compilerState{
+		fn:             c.fn,
+		block:          c.block,
+		locals:         c.locals,
+		dropFlags:      c.dropFlags,
+		blockCounter:   c.blockCounter,
+		canError:       c.canError,
+		currentRetType: c.currentRetType,
+		currentNamed:   c.currentNamed,
+		scopeBindings:  c.scopeBindings,
+		loopScopeDepth: c.loopScopeDepth,
+		selfSubst:      c.selfSubst,
+		targetType:     c.targetType,
+	}
+}
+
+func (c *Compiler) restoreState(s compilerState) {
+	c.fn = s.fn
+	c.block = s.block
+	c.locals = s.locals
+	c.dropFlags = s.dropFlags
+	c.blockCounter = s.blockCounter
+	c.canError = s.canError
+	c.currentRetType = s.currentRetType
+	c.currentNamed = s.currentNamed
+	c.scopeBindings = s.scopeBindings
+	c.loopScopeDepth = s.loopScopeDepth
+	c.selfSubst = s.selfSubst
+	c.targetType = s.targetType
+}
+
+// synthesizeDefaultMethods generates LLVM functions for default methods from
+// a structural interface that a concrete type does not override.
+// Called lazily when a view vtable is needed for (concrete, iface).
+func (c *Compiler) synthesizeDefaultMethods(concrete, iface *types.Named) {
+	// Find the interface's AST TypeDecl to get method bodies
+	ifaceTD := c.findTypeDecl(c.file, iface.Obj().Name())
+	if ifaceTD == nil {
+		return
+	}
+
+	concreteName := concrete.Obj().Name()
+
+	for _, md := range ifaceTD.Methods {
+		if md.Body == nil {
+			continue // abstract method — skip
+		}
+
+		// Check if concrete already has this method (override)
+		ifaceMethod := c.lookupAnyMethod(iface, md.Name, md.IsGetter, md.IsSetter)
+		if ifaceMethod == nil || ifaceMethod.IsAbstract() {
+			continue
+		}
+		concreteMethod := c.lookupAnyMethod(concrete, md.Name, md.IsGetter, md.IsSetter)
+		if concreteMethod != nil && !concreteMethod.IsAbstract() {
+			continue // concrete type overrides the default
+		}
+
+		mangledName := mangleMethodName(concreteName, md.Name, md.IsSetter)
+		if _, exists := c.funcs[mangledName]; exists {
+			continue // already synthesized
+		}
+
+		sig := ifaceMethod.Sig()
+
+		// Save all compiler state — we're in the middle of codegen for another function
+		saved := c.saveState()
+		c.selfSubst = &selfSubstInfo{iface: iface, concrete: concrete}
+
+		var params []*ir.Param
+		if sig.Recv() != nil {
+			params = append(params, ir.NewParam("this", irtypes.I8Ptr))
+		}
+		for _, p := range sig.Params() {
+			params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
+		}
+
+		retType := irtypes.Type(irtypes.Void)
+		if sig.Result() != nil {
+			retType = c.resolveType(sig.Result())
+		}
+		if sig.CanError() {
+			retType = computeResultType(retType)
+		}
+
+		fn := c.module.NewFunc(mangledName, retType, params...)
+		c.funcs[mangledName] = fn // register BEFORE body generation (prevents recursion)
+
+		// Generate the body with selfSubst active
+		c.defineMethodFunc(md, ifaceMethod, fn, concrete)
+
+		// Restore compiler state
+		c.restoreState(saved)
+	}
+
+	// Recurse into parent interfaces (e.g., Ordered inherits != default from Equal)
+	for _, parent := range iface.Parents() {
+		if parent.IsStructural() {
+			c.synthesizeDefaultMethods(concrete, parent)
+		}
+	}
 }
 
 // computeVtableInfo scans all type declarations and marks types that have children.

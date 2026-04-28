@@ -158,6 +158,12 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named) *ir.Global {
 	if vt, ok := c.viewVtables[key]; ok {
 		return vt
 	}
+
+	// Synthesize default methods for this (concrete, view) pair
+	if view.IsStructural() {
+		c.synthesizeDefaultMethods(concrete, view)
+	}
+
 	methods := view.AllVirtualMethods()
 	var entries []constant.Constant
 	for _, m := range methods {

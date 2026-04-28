@@ -261,9 +261,9 @@ type map[K: Hashable + Equal, V] {
 	b.WriteString("type range `native {\n\tint start `value;\n\tint end `value;\n\tbool inclusive `value;\n}\n")
 
 	// Constraint interfaces
-	b.WriteString("type Equal `structural {\n\t==(Self other) bool `abstract;\n\t!=(Self other) bool `abstract;\n}\n")
+	b.WriteString("type Equal `structural {\n\t==(Self other) bool `abstract;\n\t!=(Self other) bool => !(this == other);\n}\n")
 	b.WriteString("type Hashable `structural {\n\tget hash int `abstract;\n}\n")
-	b.WriteString("type Ordered is Equal `structural {\n\t<(Self other) bool `abstract;\n\t>(Self other) bool `abstract;\n\t<=(Self other) bool `abstract;\n\t>=(Self other) bool `abstract;\n}\n")
+	b.WriteString("type Ordered is Equal `structural {\n\t<(Self other) bool `abstract;\n\t>(Self other) bool => other < this;\n\t<=(Self other) bool => !(other < this);\n\t>=(Self other) bool => !(this < other);\n}\n")
 
 	stdAll = b.String()
 }

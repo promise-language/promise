@@ -1,5 +1,5 @@
 // std/equal.pr — Structural equality interface
 type Equal `structural {
     ==(Self other) bool `abstract;
-    !=(Self other) bool `abstract;
+    !=(Self other) bool => !(this == other);
 }

@@ -13,7 +13,7 @@ cp ../runtime/*.c ../runtime/*.h cmd/promise/resources/runtime/
 
 # Build (skip ANTLR generate if parser already exists)
 echo "Building compiler..."
-if ! go build -o promise ./cmd/promise; then
+if ! go build -buildvcs=false -o promise ./cmd/promise; then
   echo "ERROR: build failed"
   exit 1
 fi

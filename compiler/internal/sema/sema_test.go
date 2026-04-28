@@ -1866,9 +1866,18 @@ func TestMapLiteralValueMismatch(t *testing.T) {
 	expectError(t, errs, "map value type mismatch")
 }
 
-// Note: empty map literal {} is ambiguous with empty block in the grammar.
-// The sema layer handles the case via checkMapLit, but it requires
-// at least one entry to parse as a map literal.
+func TestEmptyMapLiteral(t *testing.T) {
+	checkOK(t, `
+		test() {
+			map[string, int] m = {:};
+		}
+	`)
+}
+
+func TestEmptyMapLiteralUntyped(t *testing.T) {
+	errs := checkErrs(t, `test() { x := {:}; }`)
+	expectError(t, errs, "empty map")
+}
 
 func TestMapIndex(t *testing.T) {
 	checkOK(t, `

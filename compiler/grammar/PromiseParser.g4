@@ -432,7 +432,7 @@ primary
     | LPAREN expression RPAREN                                 # parenExpr
     | LPAREN expression COMMA expression (COMMA expression)* RPAREN  # tupleLiteral
     | LBRACKET (expression (COMMA expression)* COMMA?)? RBRACKET     # arrayLiteral
-    | LBRACE mapEntry (COMMA mapEntry)* COMMA? RBRACE          # mapLiteral
+    | LBRACE (COLON | mapEntry (COMMA mapEntry)* COMMA?) RBRACE  # mapLiteral
     | lambdaExpr                                               # lambda
     | ifExpr                                                   # ifExpression
     | matchExpr                                                # matchExpression

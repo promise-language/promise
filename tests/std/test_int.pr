@@ -1,6 +1,7 @@
 // Test int arithmetic, comparisons, and unary operators
 //
 // TODO: test hash property
+// TODO: test range operators (.., ..=) on int values
 // TODO: test bitwise operators (&, |, ^, <<, >>) when implemented
 // TODO: create separate test_uint.pr for unsigned integer types (uint, u8, u16, u32, u64)
 test_addition() `test {

@@ -1,7 +1,7 @@
 // Test map[K, V] operations: insert, lookup, contains, remove, keys, values
 //
 // TODO: test clear() method
-// TODO: test empty map literal — blocked on parser ({} parsed as empty block)
+// TODO: test for-in iteration over map entries
 test_literal_and_lookup() `test {
   map[string, int] m = {"a": 1, "b": 2, "c": 3};
   assert(m.len == 3, "literal len 3");
@@ -12,9 +12,16 @@ test_literal_and_lookup() `test {
   }
 }
 
+test_empty_literal() `test {
+  map[string, int] m = {:};
+  assert(m.is_empty, "empty literal is_empty");
+  assert(m.len == 0, "empty literal len 0");
+  m["a"] = 1;
+  assert(m.len == 1, "after insert len 1");
+}
+
 test_insert() `test {
-  map[string, int] m = {"_": 0};
-  m.remove("_");
+  map[string, int] m = {:};
   m["x"] = 10;
   m["y"] = 20;
   assert(m.len == 2, "after insert len 2");
@@ -61,8 +68,7 @@ test_keys_values() `test {
 }
 
 test_is_empty() `test {
-  map[string, int] m = {"_": 0};
-  m.remove("_");
+  map[string, int] m = {:};
   assert(m.is_empty, "empty map is_empty");
   m["a"] = 1;
   assert(!m.is_empty, "non-empty not is_empty");
@@ -78,8 +84,7 @@ test_missing_key_returns_none() `test {
 }
 
 test_int_keys() `test {
-  map[int, string] m = {0: "_"};
-  m.remove(0);
+  map[int, string] m = {:};
   m[1] = "one";
   m[2] = "two";
   assert(m.len == 2, "int key map len 2");

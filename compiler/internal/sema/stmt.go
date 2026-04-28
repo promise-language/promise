@@ -102,16 +102,22 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 	}
 
 	if s.Value != nil {
-		// Special case: empty array literal [] with a typed declaration like T[] x = []
+		// Special case: empty collection literals with typed declarations.
 		// Infer the element type from the declared type instead of erroring.
-		emptyArrayHandled := false
+		emptyLitHandled := false
 		if arrLit, ok := s.Value.(*ast.ArrayLit); ok && len(arrLit.Elements) == 0 {
 			if _, ok := types.AsVector(declType); ok {
 				c.recordType(s.Value, declType)
-				emptyArrayHandled = true
+				emptyLitHandled = true
 			}
 		}
-		if !emptyArrayHandled {
+		if mapLit, ok := s.Value.(*ast.MapLit); ok && len(mapLit.Entries) == 0 {
+			if _, _, ok := types.AsMap(declType); ok {
+				c.recordType(s.Value, declType)
+				emptyLitHandled = true
+			}
+		}
+		if !emptyLitHandled {
 			valType := c.checkExpr(s.Value)
 			if valType != nil && !types.AssignableTo(valType, declType) {
 				c.errorf(s.Pos(), "cannot assign %s to variable of type %s", valType, declType)

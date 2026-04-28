@@ -2,6 +2,7 @@
 //
 // TODO: test modulo (%)
 // TODO: test increment/decrement (++/--)
+// TODO: test hash property
 // TODO: test f32 type (separate typed params needed since literals infer as f64)
 test_arithmetic() `test {
   assert(1.0 + 2.0 == 3.0, "1.0 + 2.0 == 3.0");

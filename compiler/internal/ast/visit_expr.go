@@ -105,6 +105,39 @@ func (b *Builder) VisitMultiplicativeExpr(ctx *parser.MultiplicativeExprContext)
 	}
 }
 
+func (b *Builder) VisitShiftExpr(ctx *parser.ShiftExprContext) interface{} {
+	exprs := ctx.AllExpression()
+	op := BinLeftShift
+	if ctx.RSHIFT() != nil {
+		op = BinRightShift
+	}
+	return &BinaryExpr{
+		nodeBase: b.baseFromContext(ctx),
+		Left:     b.visitExpr(exprs[0]),
+		Op:       op,
+		Right:    b.visitExpr(exprs[1]),
+	}
+}
+
+func (b *Builder) VisitBitwiseExpr(ctx *parser.BitwiseExprContext) interface{} {
+	exprs := ctx.AllExpression()
+	var op BinaryOp
+	switch {
+	case ctx.AMP() != nil:
+		op = BinBitwiseAnd
+	case ctx.CARET() != nil:
+		op = BinBitwiseXor
+	case ctx.PIPE() != nil:
+		op = BinBitwiseOr
+	}
+	return &BinaryExpr{
+		nodeBase: b.baseFromContext(ctx),
+		Left:     b.visitExpr(exprs[0]),
+		Op:       op,
+		Right:    b.visitExpr(exprs[1]),
+	}
+}
+
 func (b *Builder) VisitExclusiveRangeExpr(ctx *parser.ExclusiveRangeExprContext) interface{} {
 	exprs := ctx.AllExpression()
 	return &BinaryExpr{
@@ -139,6 +172,14 @@ func (b *Builder) VisitUnaryNotExpr(ctx *parser.UnaryNotExprContext) interface{}
 	return &UnaryExpr{
 		nodeBase: b.baseFromContext(ctx),
 		Op:       UnaryNot,
+		Operand:  b.visitExpr(ctx.Expression()),
+	}
+}
+
+func (b *Builder) VisitBitwiseNotExpr(ctx *parser.BitwiseNotExprContext) interface{} {
+	return &UnaryExpr{
+		nodeBase: b.baseFromContext(ctx),
+		Op:       UnaryBitwiseNot,
 		Operand:  b.visitExpr(ctx.Expression()),
 	}
 }

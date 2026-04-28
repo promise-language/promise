@@ -48,6 +48,10 @@ QUESTION_COLON : '?:';
 ARROW       : '->';
 FAT_ARROW   : '=>';
 
+// Shift
+LSHIFT      : '<<';
+RSHIFT      : '>>';
+
 // Comparison
 EQ          : '==';
 NEQ         : '!=';
@@ -102,6 +106,7 @@ PERCENT     : '%';
 BANG        : '!';
 AMP         : '&';
 TILDE       : '~';
+CARET       : '^';
 QUESTION    : '?';
 UNDERSCORE  : '_';
 

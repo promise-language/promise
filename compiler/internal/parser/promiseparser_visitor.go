@@ -235,6 +235,36 @@ type PromiseParserVisitor interface {
 	// Visit a parse tree produced by PromiseParser#whileExprStmt.
 	VisitWhileExprStmt(ctx *WhileExprStmtContext) interface{}
 
+	// Visit a parse tree produced by PromiseParser#castExpr.
+	VisitCastExpr(ctx *CastExprContext) interface{}
+
+	// Visit a parse tree produced by PromiseParser#unaryNegExpr.
+	VisitUnaryNegExpr(ctx *UnaryNegExprContext) interface{}
+
+	// Visit a parse tree produced by PromiseParser#additiveExpr.
+	VisitAdditiveExpr(ctx *AdditiveExprContext) interface{}
+
+	// Visit a parse tree produced by PromiseParser#bitwiseNotExpr.
+	VisitBitwiseNotExpr(ctx *BitwiseNotExprContext) interface{}
+
+	// Visit a parse tree produced by PromiseParser#primaryExpr.
+	VisitPrimaryExpr(ctx *PrimaryExprContext) interface{}
+
+	// Visit a parse tree produced by PromiseParser#exclusiveRangeExpr.
+	VisitExclusiveRangeExpr(ctx *ExclusiveRangeExprContext) interface{}
+
+	// Visit a parse tree produced by PromiseParser#memberAccessExpr.
+	VisitMemberAccessExpr(ctx *MemberAccessExprContext) interface{}
+
+	// Visit a parse tree produced by PromiseParser#errorPropagateExpr.
+	VisitErrorPropagateExpr(ctx *ErrorPropagateExprContext) interface{}
+
+	// Visit a parse tree produced by PromiseParser#callExpr.
+	VisitCallExpr(ctx *CallExprContext) interface{}
+
+	// Visit a parse tree produced by PromiseParser#isExpr.
+	VisitIsExpr(ctx *IsExprContext) interface{}
+
 	// Visit a parse tree produced by PromiseParser#receiveExpr.
 	VisitReceiveExpr(ctx *ReceiveExprContext) interface{}
 
@@ -247,17 +277,8 @@ type PromiseParserVisitor interface {
 	// Visit a parse tree produced by PromiseParser#logicalAndExpr.
 	VisitLogicalAndExpr(ctx *LogicalAndExprContext) interface{}
 
-	// Visit a parse tree produced by PromiseParser#castExpr.
-	VisitCastExpr(ctx *CastExprContext) interface{}
-
 	// Visit a parse tree produced by PromiseParser#comparisonExpr.
 	VisitComparisonExpr(ctx *ComparisonExprContext) interface{}
-
-	// Visit a parse tree produced by PromiseParser#unaryNegExpr.
-	VisitUnaryNegExpr(ctx *UnaryNegExprContext) interface{}
-
-	// Visit a parse tree produced by PromiseParser#additiveExpr.
-	VisitAdditiveExpr(ctx *AdditiveExprContext) interface{}
 
 	// Visit a parse tree produced by PromiseParser#sliceExpr.
 	VisitSliceExpr(ctx *SliceExprContext) interface{}
@@ -265,41 +286,29 @@ type PromiseParserVisitor interface {
 	// Visit a parse tree produced by PromiseParser#elvisExpr.
 	VisitElvisExpr(ctx *ElvisExprContext) interface{}
 
+	// Visit a parse tree produced by PromiseParser#shiftExpr.
+	VisitShiftExpr(ctx *ShiftExprContext) interface{}
+
+	// Visit a parse tree produced by PromiseParser#bitwiseExpr.
+	VisitBitwiseExpr(ctx *BitwiseExprContext) interface{}
+
 	// Visit a parse tree produced by PromiseParser#logicalOrExpr.
 	VisitLogicalOrExpr(ctx *LogicalOrExprContext) interface{}
 
 	// Visit a parse tree produced by PromiseParser#indexExpr.
 	VisitIndexExpr(ctx *IndexExprContext) interface{}
 
-	// Visit a parse tree produced by PromiseParser#primaryExpr.
-	VisitPrimaryExpr(ctx *PrimaryExprContext) interface{}
-
-	// Visit a parse tree produced by PromiseParser#exclusiveRangeExpr.
-	VisitExclusiveRangeExpr(ctx *ExclusiveRangeExprContext) interface{}
-
 	// Visit a parse tree produced by PromiseParser#optionalChainExpr.
 	VisitOptionalChainExpr(ctx *OptionalChainExprContext) interface{}
 
-	// Visit a parse tree produced by PromiseParser#memberAccessExpr.
-	VisitMemberAccessExpr(ctx *MemberAccessExprContext) interface{}
-
 	// Visit a parse tree produced by PromiseParser#errorUnwrapExpr.
 	VisitErrorUnwrapExpr(ctx *ErrorUnwrapExprContext) interface{}
-
-	// Visit a parse tree produced by PromiseParser#errorPropagateExpr.
-	VisitErrorPropagateExpr(ctx *ErrorPropagateExprContext) interface{}
-
-	// Visit a parse tree produced by PromiseParser#callExpr.
-	VisitCallExpr(ctx *CallExprContext) interface{}
 
 	// Visit a parse tree produced by PromiseParser#unaryNotExpr.
 	VisitUnaryNotExpr(ctx *UnaryNotExprContext) interface{}
 
 	// Visit a parse tree produced by PromiseParser#multiplicativeExpr.
 	VisitMultiplicativeExpr(ctx *MultiplicativeExprContext) interface{}
-
-	// Visit a parse tree produced by PromiseParser#isExpr.
-	VisitIsExpr(ctx *IsExprContext) interface{}
 
 	// Visit a parse tree produced by PromiseParser#equalityExpr.
 	VisitEqualityExpr(ctx *EqualityExprContext) interface{}

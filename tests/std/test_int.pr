@@ -2,8 +2,6 @@
 //
 // TODO: test hash property
 // TODO: test range operators (.., ..=) on int values
-// TODO: test bitwise operators (&, |, ^, <<, >>) when implemented
-// TODO: create separate test_uint.pr for unsigned integer types (uint, u8, u16, u32, u64)
 test_addition() `test {
   assert(1 + 2 == 3, "1 + 2 == 3");
   assert(0 + 0 == 0, "0 + 0 == 0");
@@ -84,4 +82,53 @@ test_compound_assignment() `test {
   assert(x == 6, "/= 4");
   x %= 4;
   assert(x == 2, "%= 4");
+}
+
+test_bitwise_and() `test {
+  assert(12 & 10 == 8, "12 & 10 == 8");
+  assert(0xFF & 0x0F == 0x0F, "0xFF & 0x0F == 0x0F");
+  assert(0 & 100 == 0, "0 & x == 0");
+  assert(7 & 7 == 7, "x & x == x");
+}
+
+test_bitwise_or() `test {
+  assert(5 | 3 == 7, "5 | 3 == 7");
+  assert(0 | 42 == 42, "0 | x == x");
+  assert(0xF0 | 0x0F == 0xFF, "0xF0 | 0x0F == 0xFF");
+}
+
+test_bitwise_xor() `test {
+  assert(12 ^ 10 == 6, "12 ^ 10 == 6");
+  assert(0xFF ^ 0xFF == 0, "x ^ x == 0");
+  assert(0 ^ 42 == 42, "0 ^ x == x");
+}
+
+test_left_shift() `test {
+  assert(1 << 0 == 1, "1 << 0 == 1");
+  assert(1 << 4 == 16, "1 << 4 == 16");
+  assert(3 << 2 == 12, "3 << 2 == 12");
+  assert(1 << 10 == 1024, "1 << 10 == 1024");
+}
+
+test_right_shift() `test {
+  assert(16 >> 2 == 4, "16 >> 2 == 4");
+  assert(1024 >> 10 == 1, "1024 >> 10 == 1");
+  assert(255 >> 4 == 15, "255 >> 4 == 15");
+  // Arithmetic right shift preserves sign for signed ints
+  assert((0 - 8) >> 1 == 0 - 4, "-8 >> 1 == -4");
+}
+
+test_bitwise_not() `test {
+  assert(~0 == 0 - 1, "~0 == -1");
+  assert(~(0 - 1) == 0, "~(-1) == 0");
+  assert(~~42 == 42, "~~x == x");
+}
+
+test_bitwise_precedence() `test {
+  // Shift binds tighter than additive
+  assert(1 + 1 << 2 == 1 + 4, "1 + (1 << 2) == 5");
+  // Bitwise binds tighter than comparison
+  assert(3 & 1 == 1, "(3 & 1) == 1");
+  // Bitwise ops are same precedence, left-to-right
+  assert((5 | 3) & 6 == 6, "(5|3) & 6 == 6");
 }

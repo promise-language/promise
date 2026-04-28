@@ -31,6 +31,13 @@ func init() {
 		fmt.Fprintf(&b, "\t-() %s `native;\n", name)
 		fmt.Fprintf(&b, "\t++() %s `native;\n", name)
 		fmt.Fprintf(&b, "\t--() %s `native;\n", name)
+		// Bitwise operators for integer types only (not floats)
+		if name != "f32" && name != "f64" {
+			for _, op := range []string{"&", "|", "^", "<<", ">>"} {
+				fmt.Fprintf(&b, "\t%s(%s other) %s `native;\n", op, name, name)
+			}
+			fmt.Fprintf(&b, "\t~() %s `native;\n", name)
+		}
 		// Range operators for integer types only (not floats)
 		if name != "f32" && name != "f64" {
 			fmt.Fprintf(&b, "\t..(%s end) range `native;\n", name)
@@ -445,6 +452,38 @@ func TestUnaryNegInt(t *testing.T) {
 func TestUnaryNot(t *testing.T) {
 	ir := generateIR(t, `main() { x := !true; }`)
 	assertContains(t, ir, "xor i1")
+}
+
+// --- Bitwise operators ---
+
+func TestBitwiseAnd(t *testing.T) {
+	ir := generateIR(t, `main() { x := 12 & 10; }`)
+	assertContains(t, ir, "and i64")
+}
+
+func TestBitwiseOr(t *testing.T) {
+	ir := generateIR(t, `main() { x := 5 | 3; }`)
+	assertContains(t, ir, "or i64")
+}
+
+func TestBitwiseXor(t *testing.T) {
+	ir := generateIR(t, `main() { x := 12 ^ 10; }`)
+	assertContains(t, ir, "xor i64")
+}
+
+func TestLeftShift(t *testing.T) {
+	ir := generateIR(t, `main() { x := 1 << 4; }`)
+	assertContains(t, ir, "shl i64")
+}
+
+func TestRightShiftSigned(t *testing.T) {
+	ir := generateIR(t, `main() { x := 16 >> 2; }`)
+	assertContains(t, ir, "ashr i64")
+}
+
+func TestBitwiseNot(t *testing.T) {
+	ir := generateIR(t, `main() { x := ~0; }`)
+	assertContains(t, ir, "xor i64")
 }
 
 // --- Short-circuit boolean ops ---

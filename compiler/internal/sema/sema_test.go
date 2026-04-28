@@ -32,6 +32,13 @@ func init() {
 		fmt.Fprintf(&b, "\t-() %s `native;\n", name)
 		fmt.Fprintf(&b, "\t++() %s `native;\n", name)
 		fmt.Fprintf(&b, "\t--() %s `native;\n", name)
+		// Bitwise operators for integer types only (not floats)
+		if name != "f32" && name != "f64" {
+			for _, op := range []string{"&", "|", "^", "<<", ">>"} {
+				fmt.Fprintf(&b, "\t%s(%s other) %s `native;\n", op, name, name)
+			}
+			fmt.Fprintf(&b, "\t~() %s `native;\n", name)
+		}
 		// Range operators for integer types only (not floats)
 		if name != "f32" && name != "f64" {
 			fmt.Fprintf(&b, "\t..(%s end) range `native;\n", name)
@@ -3945,6 +3952,63 @@ func TestAllNumericTypesHaveOperators(t *testing.T) {
 	}
 }
 
+func TestIntegerTypesHaveBitwiseOperators(t *testing.T) {
+	checkOK(t, `main() {}`)
+
+	bitwiseOps := []string{"&", "|", "^", "<<", ">>"}
+
+	intTypes := map[string]*types.Named{
+		"int": types.TypInt, "i8": types.TypI8, "i16": types.TypI16,
+		"i32": types.TypI32, "i64": types.TypI64, "uint": types.TypUint,
+		"u8": types.TypU8, "u16": types.TypU16, "u32": types.TypU32,
+		"u64": types.TypU64,
+	}
+
+	for name, nt := range intTypes {
+		t.Run(name, func(t *testing.T) {
+			for _, op := range bitwiseOps {
+				if nt.LookupMethod(op) == nil {
+					t.Errorf("%s missing bitwise operator %s", name, op)
+				}
+			}
+			// Check unary bitwise NOT (~)
+			hasNot := false
+			for _, m := range nt.Methods() {
+				if m.Name() == "~" && len(m.Sig().Params()) == 0 {
+					hasNot = true
+					break
+				}
+			}
+			if !hasNot {
+				t.Errorf("%s missing unary operator ~", name)
+			}
+		})
+	}
+}
+
+func TestBitwiseOperatorsTypeCheck(t *testing.T) {
+	checkOK(t, `
+		test() {
+			int a = 12 & 10;
+			int b = 5 | 3;
+			int c = 12 ^ 10;
+			int d = 1 << 4;
+			int e = 16 >> 2;
+			int f = ~0;
+		}
+	`)
+}
+
+func TestBitwiseOnNonIntegerFails(t *testing.T) {
+	errs := checkErrs(t, `test() { x := "hello" & "world"; }`)
+	expectError(t, errs, "operator & not defined")
+}
+
+func TestBitwiseNotOnNonIntegerFails(t *testing.T) {
+	errs := checkErrs(t, `test() { x := ~true; }`)
+	expectError(t, errs, "operator ~ not defined")
+}
+
 func TestBoolHasAllOperators(t *testing.T) {
 	checkOK(t, `main() {}`)
 	for _, op := range []string{"&&", "||", "==", "!="} {
@@ -4529,10 +4593,10 @@ func TestDropMethodAbstract(t *testing.T) {
 
 // isCopyField with SharedRef — should be copy
 func TestCopyTypeWithRefField(t *testing.T) {
-	// &T is copy since it's just a pointer
+	// int& is copy since it's just a pointer (postfix & for shared ref)
 	checkOK(t, `
 		type Wrapper `+"`"+`copy {
-			&int val;
+			int& val;
 		}
 		main() {}
 	`)
@@ -4542,7 +4606,7 @@ func TestCopyTypeWithRefField(t *testing.T) {
 func TestCopyTypeWithMutRefField(t *testing.T) {
 	checkOK(t, `
 		type MutWrapper `+"`"+`copy {
-			~int val;
+			int~ val;
 		}
 		main() {}
 	`)

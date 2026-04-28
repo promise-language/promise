@@ -108,6 +108,7 @@ methodName
     | PLUS | MINUS | STAR | SLASH | PERCENT
     | EQ | NEQ | LT | GT | LTE | GTE
     | AND | OR | BANG
+    | AMP | PIPE | CARET | LSHIFT | RSHIFT | TILDE
     | PLUSPLUS | MINUSMINUS
     | DOTDOT | DOTDOTEQ
     | LBRACKET COLON RBRACKET ASSIGN
@@ -356,17 +357,19 @@ whileStmt
 // ============================================================
 // ANTLR4 precedence climbing: first alternative = highest precedence.
 //
-// Precedence table (1 = highest, 10 = lowest):
+// Precedence table (1 = highest, 14 = lowest):
 //   1 (highest): . ?. () [] ? ! (? handler)
-//   2: Unary - ! <-
+//   2: Unary - ! ~ <-
 //   3: * / %
-//   4: + -
-//   5: .. ..=
-//   6: < > <= >= is as
-//   7: == !=
-//   8: &&
-//   9: ||
-//  10 (low): ?:
+//   4: << >>
+//   5: + -
+//   6: & ^ |
+//   7: .. ..=
+//   8: < > <= >= is as
+//   9: == !=
+//  10: &&
+//  11: ||
+//  12 (low): ?:
 //  Assignment is NOT an expression — handled as assignmentStmt.
 
 expression
@@ -386,33 +389,40 @@ expression
     // Precedence 2: Unary prefix
     | MINUS expression                                         # unaryNegExpr
     | BANG expression                                          # unaryNotExpr
+    | TILDE expression                                         # bitwiseNotExpr
     | LT MINUS expression                                      # receiveExpr
 
     // Precedence 3: Multiplicative
     | expression (STAR | SLASH | PERCENT) expression           # multiplicativeExpr
 
-    // Precedence 4: Additive
+    // Precedence 4: Shift
+    | expression (LSHIFT | RSHIFT) expression                  # shiftExpr
+
+    // Precedence 5: Additive
     | expression (PLUS | MINUS) expression                     # additiveExpr
 
-    // Precedence 5: Range
+    // Precedence 6: Bitwise
+    | expression (AMP | CARET | PIPE) expression               # bitwiseExpr
+
+    // Precedence 7: Range
     | expression DOTDOT expression                             # exclusiveRangeExpr
     | expression DOTDOTEQ expression                           # inclusiveRangeExpr
 
-    // Precedence 6: Comparison + type check/cast
+    // Precedence 8: Comparison + type check/cast
     | expression (LT | GT | LTE | GTE) expression             # comparisonExpr
     | expression IS pattern                                    # isExpr
     | expression AS BANG? typeRef                               # castExpr
 
-    // Precedence 7: Equality
+    // Precedence 9: Equality
     | expression (EQ | NEQ) expression                         # equalityExpr
 
-    // Precedence 8: Logical AND
+    // Precedence 10: Logical AND
     | expression AND expression                                # logicalAndExpr
 
-    // Precedence 9: Logical OR
+    // Precedence 11: Logical OR
     | expression OR expression                                 # logicalOrExpr
 
-    // Precedence 10 (lowest): Elvis
+    // Precedence 12 (lowest): Elvis
     | expression QUESTION_COLON expression                     # elvisExpr
 
     // Primary atoms (not left-recursive — always highest precedence)

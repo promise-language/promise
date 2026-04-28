@@ -23,6 +23,7 @@ type Checker struct {
 	lambdaCaptures map[string]*CapturedVar // current lambda's captured vars (by name)
 	lambdaScope    *types.Scope            // scope at lambda definition site (capture boundary)
 	lambdaMove     bool                    // true if current lambda uses `move` keyword
+	typeHint       types.Type              // expected type for numeric literal adaptation (propagated through arithmetic)
 }
 
 // Check performs semantic analysis on the given AST file.

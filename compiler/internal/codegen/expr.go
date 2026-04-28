@@ -2976,9 +2976,18 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 	if targetNamed == nil {
 		panic(fmt.Sprintf("codegen: undefined type %s in cast", targetRef.Name))
 	}
-	targetID := c.assignTypeID(targetNamed)
 
 	subject := c.genExpr(e.Expr)
+
+	// Primitive numeric casts — compile-time conversions, no RTTI needed
+	srcType := c.info.Types[e.Expr]
+	srcNamed := extractNamed(srcType)
+	if srcNamed != nil && isPrimitiveNumeric(srcNamed) && isPrimitiveNumeric(targetNamed) {
+		return c.emitNumericCast(subject, srcNamed, targetNamed)
+	}
+
+	targetID := c.assignTypeID(targetNamed)
+
 	// Extract instance pointer — `this` is already i8*, others are value structs
 	var instance value.Value
 	if _, isThis := e.Expr.(*ast.ThisExpr); isThis {
@@ -3030,4 +3039,50 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 		&ir.Incoming{X: noneResult, Pred: noneEnd},
 	)
 	return phi
+}
+
+// emitNumericCast emits LLVM IR for a primitive numeric type conversion.
+// Handles int↔int (trunc/sext/zext), float↔float (fptrunc/fpext),
+// int→float (sitofp/uitofp), and float→int (fptosi/fptoui).
+func (c *Compiler) emitNumericCast(val value.Value, src, dst *types.Named) value.Value {
+	srcLLVM := llvmNamedType(src)
+	dstLLVM := llvmNamedType(dst)
+
+	srcInt, srcIsInt := srcLLVM.(*irtypes.IntType)
+	dstInt, dstIsInt := dstLLVM.(*irtypes.IntType)
+	_, srcIsFloat := srcLLVM.(*irtypes.FloatType)
+	dstFloat, dstIsFloat := dstLLVM.(*irtypes.FloatType)
+
+	switch {
+	case srcIsInt && dstIsInt:
+		if srcInt.BitSize == dstInt.BitSize {
+			return val // same width: no-op (e.g., int ↔ uint)
+		} else if srcInt.BitSize > dstInt.BitSize {
+			return c.block.NewTrunc(val, dstInt)
+		} else if isSignedType(src) {
+			return c.block.NewSExt(val, dstInt)
+		} else {
+			return c.block.NewZExt(val, dstInt)
+		}
+	case srcIsFloat && dstIsFloat:
+		srcFloat := srcLLVM.(*irtypes.FloatType)
+		if srcFloat == dstFloat {
+			return val
+		} else if srcFloat == irtypes.Float {
+			return c.block.NewFPExt(val, dstFloat)
+		}
+		return c.block.NewFPTrunc(val, dstFloat)
+	case srcIsInt && dstIsFloat:
+		if isSignedType(src) {
+			return c.block.NewSIToFP(val, dstFloat)
+		}
+		return c.block.NewUIToFP(val, dstFloat)
+	case srcIsFloat && dstIsInt:
+		if isSignedType(dst) {
+			return c.block.NewFPToSI(val, dstInt)
+		}
+		return c.block.NewFPToUI(val, dstInt)
+	default:
+		panic(fmt.Sprintf("codegen: unsupported numeric cast %s → %s", src, dst))
+	}
 }

@@ -20,6 +20,11 @@ const (
 	BinElvis                          // ?:
 	BinExclusiveRange                 // ..
 	BinInclusiveRange                 // ..=
+	BinBitwiseAnd                     // &
+	BinBitwiseOr                      // |
+	BinBitwiseXor                     // ^
+	BinLeftShift                      // <<
+	BinRightShift                     // >>
 )
 
 func (op BinaryOp) String() string {
@@ -56,6 +61,16 @@ func (op BinaryOp) String() string {
 		return ".."
 	case BinInclusiveRange:
 		return "..="
+	case BinBitwiseAnd:
+		return "&"
+	case BinBitwiseOr:
+		return "|"
+	case BinBitwiseXor:
+		return "^"
+	case BinLeftShift:
+		return "<<"
+	case BinRightShift:
+		return ">>"
 	default:
 		return "?"
 	}
@@ -65,9 +80,10 @@ func (op BinaryOp) String() string {
 type UnaryOp int
 
 const (
-	UnaryNeg     UnaryOp = iota // -
-	UnaryNot                    // !
-	UnaryReceive                // <-
+	UnaryNeg        UnaryOp = iota // -
+	UnaryNot                       // !
+	UnaryReceive                   // <-
+	UnaryBitwiseNot                // ~
 )
 
 func (op UnaryOp) String() string {
@@ -78,6 +94,8 @@ func (op UnaryOp) String() string {
 		return "!"
 	case UnaryReceive:
 		return "<-"
+	case UnaryBitwiseNot:
+		return "~"
 	default:
 		return "?"
 	}

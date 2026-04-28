@@ -118,7 +118,7 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 			}
 		}
 		if !emptyLitHandled {
-			valType := c.checkExpr(s.Value)
+			valType := c.checkExprWithHint(s.Value, declType)
 			if valType != nil && !types.AssignableTo(valType, declType) {
 				c.errorf(s.Pos(), "cannot assign %s to variable of type %s", valType, declType)
 			}
@@ -207,7 +207,7 @@ func (c *Checker) checkUseVarDecl(s *ast.UseVarDecl) {
 
 func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 	targetType := c.checkExpr(s.Target)
-	valType := c.checkExpr(s.Value)
+	valType := c.checkExprWithHint(s.Value, targetType)
 
 	if targetType == nil || valType == nil {
 		return
@@ -368,12 +368,13 @@ func (c *Checker) checkReturnStmt(s *ast.ReturnStmt) {
 		return
 	}
 
-	valType := c.checkExpr(s.Value)
+	expected := c.curFunc.Result()
+
+	valType := c.checkExprWithHint(s.Value, expected)
 	if valType == nil {
 		return
 	}
 
-	expected := c.curFunc.Result()
 	if expected == nil {
 		c.errorf(s.Pos(), "function does not return a value")
 		return

@@ -7,6 +7,37 @@ import (
 	"djabi.dev/go/promise_lang/internal/types"
 )
 
+// isIntegerType reports whether t is any integer type (signed or unsigned).
+func isIntegerType(t types.Type) bool {
+	switch t {
+	case types.TypInt, types.TypI8, types.TypI16, types.TypI32, types.TypI64,
+		types.TypUint, types.TypU8, types.TypU16, types.TypU32, types.TypU64:
+		return true
+	}
+	return false
+}
+
+// isFloatType reports whether t is any float type.
+func isFloatType(t types.Type) bool {
+	return t == types.TypF32 || t == types.TypF64
+}
+
+// isNumericType reports whether t is any numeric type.
+func isNumericType(t types.Type) bool {
+	return isIntegerType(t) || isFloatType(t)
+}
+
+// checkExprWithHint type-checks an expression with an optional expected type.
+// The hint propagates through arithmetic expressions so that nested literals
+// (e.g. 1 + 2 in `uint a = 1 + 2`) adapt to the expected type.
+func (c *Checker) checkExprWithHint(expr ast.Expr, hint types.Type) types.Type {
+	old := c.typeHint
+	c.typeHint = hint
+	typ := c.checkExpr(expr)
+	c.typeHint = old
+	return typ
+}
+
 // checkExpr type-checks an expression and returns its resolved type.
 // The result is also recorded in c.info.Types.
 func (c *Checker) checkExpr(expr ast.Expr) types.Type {
@@ -14,14 +45,28 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 		return nil
 	}
 
+	// Save and clear the type hint so it doesn't leak into unrelated
+	// sub-expressions. Only numeric literals and transparent wrappers
+	// (binary, unary, paren) use the saved hint.
+	hint := c.typeHint
+	c.typeHint = nil
+
 	var typ types.Type
 
 	switch e := expr.(type) {
 	case *ast.IntLit:
-		typ = types.TypInt
+		if hint != nil && isIntegerType(hint) {
+			typ = hint
+		} else {
+			typ = types.TypInt
+		}
 
 	case *ast.FloatLit:
-		typ = types.TypF64
+		if hint != nil && isFloatType(hint) {
+			typ = hint
+		} else {
+			typ = types.TypF64
+		}
 
 	case *ast.BoolLit:
 		typ = types.TypBool
@@ -47,6 +92,7 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 		typ = c.checkThisExpr(e)
 
 	case *ast.ParenExpr:
+		c.typeHint = hint // propagate through parentheses
 		typ = c.checkExpr(e.Expr)
 
 	case *ast.TupleLit:
@@ -59,9 +105,11 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 		typ = c.checkMapLit(e)
 
 	case *ast.BinaryExpr:
+		c.typeHint = hint // propagate through binary expressions
 		typ = c.checkBinaryExpr(e)
 
 	case *ast.UnaryExpr:
+		c.typeHint = hint // propagate through unary expressions
 		typ = c.checkUnaryExpr(e)
 
 	case *ast.CallExpr:
@@ -277,11 +325,33 @@ func (c *Checker) checkMapLit(e *ast.MapLit) types.Type {
 }
 
 func (c *Checker) checkBinaryExpr(e *ast.BinaryExpr) types.Type {
+	hint := c.typeHint // save hint propagated from caller
 	left := c.checkExpr(e.Left)
+	c.typeHint = hint // restore for right operand
 	right := c.checkExpr(e.Right)
 
 	if left == nil || right == nil {
 		return nil
+	}
+
+	// Adapt numeric operands when one side resolved to a non-default type
+	// and the other defaulted to int/f64. Re-check the defaulted side with
+	// a hint so that nested literals (e.g., `uint_var == 1 + 4`) adapt.
+	if isIntegerType(left) && left != types.TypInt && right == types.TypInt {
+		c.typeHint = left
+		right = c.checkExpr(e.Right)
+	}
+	if isIntegerType(right) && right != types.TypInt && left == types.TypInt {
+		c.typeHint = right
+		left = c.checkExpr(e.Left)
+	}
+	if isFloatType(left) && left != types.TypF64 && right == types.TypF64 {
+		c.typeHint = left
+		right = c.checkExpr(e.Right)
+	}
+	if isFloatType(right) && right != types.TypF64 && left == types.TypF64 {
+		c.typeHint = right
+		left = c.checkExpr(e.Left)
 	}
 
 	switch e.Op {
@@ -417,6 +487,9 @@ func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr) types.Type {
 	case ast.UnaryNeg:
 		return c.checkUnaryOperator(e.Pos(), operand, "-")
 
+	case ast.UnaryBitwiseNot:
+		return c.checkUnaryOperator(e.Pos(), operand, "~")
+
 	case ast.UnaryReceive:
 		// <-expr: operand should be task[T] or channel[T], result is T
 		if inst, ok := operand.(*types.Instance); ok {
@@ -495,17 +568,23 @@ func (c *Checker) checkConstructorCall(e *ast.CallExpr, named *types.Named) type
 	// Check arguments against fields (implicit constructor)
 	provided := make(map[string]bool)
 	for _, arg := range e.Args {
-		argType := c.checkExpr(arg.Value)
 		if arg.Name != "" {
 			provided[arg.Name] = true
 			// Named argument — check field exists and type matches
 			f := named.LookupField(arg.Name)
+			var hint types.Type
+			if f != nil {
+				hint = f.Type()
+			}
+			argType := c.checkExprWithHint(arg.Value, hint)
 			if f == nil {
 				c.errorf(arg.Pos(), "type %s has no field %s", named, arg.Name)
 			} else if argType != nil && !types.AssignableTo(argType, f.Type()) {
 				c.errorf(arg.Pos(), "cannot assign %s to field %s of type %s",
 					argType, arg.Name, f.Type())
 			}
+		} else {
+			c.checkExpr(arg.Value)
 		}
 	}
 
@@ -544,14 +623,15 @@ func (c *Checker) checkNewConstructorCall(e *ast.CallExpr, named *types.Named, s
 
 	// Check each argument type
 	for i, arg := range e.Args {
-		argType := c.checkExpr(arg.Value)
 		if i >= len(params) {
+			c.checkExpr(arg.Value)
 			continue
 		}
 		paramType := params[i].Type()
 		if subst != nil {
 			paramType = types.Substitute(paramType, subst)
 		}
+		argType := c.checkExprWithHint(arg.Value, paramType)
 		if arg.Name != "" && arg.Name != params[i].Name() {
 			c.errorf(arg.Pos(), "argument name '%s' does not match parameter '%s'",
 				arg.Name, params[i].Name())
@@ -751,11 +831,11 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) types.Type {
 		n = len(sig.Params())
 	}
 	for i := 0; i < n; i++ {
-		argType := c.checkExpr(e.Args[i].Value)
+		paramType := sig.Params()[i].Type()
+		argType := c.checkExprWithHint(e.Args[i].Value, paramType)
 		if argType == nil {
 			continue
 		}
-		paramType := sig.Params()[i].Type()
 		if !types.AssignableTo(argType, paramType) {
 			c.errorf(e.Args[i].Pos(), "argument type %s not assignable to parameter type %s",
 				argType, paramType)
@@ -1243,6 +1323,12 @@ func (c *Checker) checkCastExpr(e *ast.CastExpr) types.Type {
 	target := c.resolveType(e.Type)
 	if target == nil {
 		return nil
+	}
+
+	// Numeric casts always succeed — return target type directly (not optional)
+	srcType := c.info.Types[e.Expr]
+	if isNumericType(srcType) && isNumericType(target) {
+		return target
 	}
 
 	if e.Force {

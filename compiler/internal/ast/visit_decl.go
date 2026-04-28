@@ -247,6 +247,24 @@ func (b *Builder) VisitMethodName(ctx *parser.MethodNameContext) interface{} {
 	if ctx.DOTDOTEQ() != nil {
 		return "..="
 	}
+	if ctx.AMP() != nil {
+		return "&"
+	}
+	if ctx.PIPE() != nil {
+		return "|"
+	}
+	if ctx.CARET() != nil {
+		return "^"
+	}
+	if ctx.LSHIFT() != nil {
+		return "<<"
+	}
+	if ctx.RSHIFT() != nil {
+		return ">>"
+	}
+	if ctx.TILDE() != nil {
+		return "~"
+	}
 	// Bracket operators: check COLON before plain brackets
 	if ctx.LBRACKET() != nil && ctx.RBRACKET() != nil {
 		if ctx.COLON() != nil {

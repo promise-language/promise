@@ -235,6 +235,36 @@ type PromiseParserListener interface {
 	// EnterWhileExprStmt is called when entering the whileExprStmt production.
 	EnterWhileExprStmt(c *WhileExprStmtContext)
 
+	// EnterCastExpr is called when entering the castExpr production.
+	EnterCastExpr(c *CastExprContext)
+
+	// EnterUnaryNegExpr is called when entering the unaryNegExpr production.
+	EnterUnaryNegExpr(c *UnaryNegExprContext)
+
+	// EnterAdditiveExpr is called when entering the additiveExpr production.
+	EnterAdditiveExpr(c *AdditiveExprContext)
+
+	// EnterBitwiseNotExpr is called when entering the bitwiseNotExpr production.
+	EnterBitwiseNotExpr(c *BitwiseNotExprContext)
+
+	// EnterPrimaryExpr is called when entering the primaryExpr production.
+	EnterPrimaryExpr(c *PrimaryExprContext)
+
+	// EnterExclusiveRangeExpr is called when entering the exclusiveRangeExpr production.
+	EnterExclusiveRangeExpr(c *ExclusiveRangeExprContext)
+
+	// EnterMemberAccessExpr is called when entering the memberAccessExpr production.
+	EnterMemberAccessExpr(c *MemberAccessExprContext)
+
+	// EnterErrorPropagateExpr is called when entering the errorPropagateExpr production.
+	EnterErrorPropagateExpr(c *ErrorPropagateExprContext)
+
+	// EnterCallExpr is called when entering the callExpr production.
+	EnterCallExpr(c *CallExprContext)
+
+	// EnterIsExpr is called when entering the isExpr production.
+	EnterIsExpr(c *IsExprContext)
+
 	// EnterReceiveExpr is called when entering the receiveExpr production.
 	EnterReceiveExpr(c *ReceiveExprContext)
 
@@ -247,17 +277,8 @@ type PromiseParserListener interface {
 	// EnterLogicalAndExpr is called when entering the logicalAndExpr production.
 	EnterLogicalAndExpr(c *LogicalAndExprContext)
 
-	// EnterCastExpr is called when entering the castExpr production.
-	EnterCastExpr(c *CastExprContext)
-
 	// EnterComparisonExpr is called when entering the comparisonExpr production.
 	EnterComparisonExpr(c *ComparisonExprContext)
-
-	// EnterUnaryNegExpr is called when entering the unaryNegExpr production.
-	EnterUnaryNegExpr(c *UnaryNegExprContext)
-
-	// EnterAdditiveExpr is called when entering the additiveExpr production.
-	EnterAdditiveExpr(c *AdditiveExprContext)
 
 	// EnterSliceExpr is called when entering the sliceExpr production.
 	EnterSliceExpr(c *SliceExprContext)
@@ -265,41 +286,29 @@ type PromiseParserListener interface {
 	// EnterElvisExpr is called when entering the elvisExpr production.
 	EnterElvisExpr(c *ElvisExprContext)
 
+	// EnterShiftExpr is called when entering the shiftExpr production.
+	EnterShiftExpr(c *ShiftExprContext)
+
+	// EnterBitwiseExpr is called when entering the bitwiseExpr production.
+	EnterBitwiseExpr(c *BitwiseExprContext)
+
 	// EnterLogicalOrExpr is called when entering the logicalOrExpr production.
 	EnterLogicalOrExpr(c *LogicalOrExprContext)
 
 	// EnterIndexExpr is called when entering the indexExpr production.
 	EnterIndexExpr(c *IndexExprContext)
 
-	// EnterPrimaryExpr is called when entering the primaryExpr production.
-	EnterPrimaryExpr(c *PrimaryExprContext)
-
-	// EnterExclusiveRangeExpr is called when entering the exclusiveRangeExpr production.
-	EnterExclusiveRangeExpr(c *ExclusiveRangeExprContext)
-
 	// EnterOptionalChainExpr is called when entering the optionalChainExpr production.
 	EnterOptionalChainExpr(c *OptionalChainExprContext)
 
-	// EnterMemberAccessExpr is called when entering the memberAccessExpr production.
-	EnterMemberAccessExpr(c *MemberAccessExprContext)
-
 	// EnterErrorUnwrapExpr is called when entering the errorUnwrapExpr production.
 	EnterErrorUnwrapExpr(c *ErrorUnwrapExprContext)
-
-	// EnterErrorPropagateExpr is called when entering the errorPropagateExpr production.
-	EnterErrorPropagateExpr(c *ErrorPropagateExprContext)
-
-	// EnterCallExpr is called when entering the callExpr production.
-	EnterCallExpr(c *CallExprContext)
 
 	// EnterUnaryNotExpr is called when entering the unaryNotExpr production.
 	EnterUnaryNotExpr(c *UnaryNotExprContext)
 
 	// EnterMultiplicativeExpr is called when entering the multiplicativeExpr production.
 	EnterMultiplicativeExpr(c *MultiplicativeExprContext)
-
-	// EnterIsExpr is called when entering the isExpr production.
-	EnterIsExpr(c *IsExprContext)
 
 	// EnterEqualityExpr is called when entering the equalityExpr production.
 	EnterEqualityExpr(c *EqualityExprContext)
@@ -661,6 +670,36 @@ type PromiseParserListener interface {
 	// ExitWhileExprStmt is called when exiting the whileExprStmt production.
 	ExitWhileExprStmt(c *WhileExprStmtContext)
 
+	// ExitCastExpr is called when exiting the castExpr production.
+	ExitCastExpr(c *CastExprContext)
+
+	// ExitUnaryNegExpr is called when exiting the unaryNegExpr production.
+	ExitUnaryNegExpr(c *UnaryNegExprContext)
+
+	// ExitAdditiveExpr is called when exiting the additiveExpr production.
+	ExitAdditiveExpr(c *AdditiveExprContext)
+
+	// ExitBitwiseNotExpr is called when exiting the bitwiseNotExpr production.
+	ExitBitwiseNotExpr(c *BitwiseNotExprContext)
+
+	// ExitPrimaryExpr is called when exiting the primaryExpr production.
+	ExitPrimaryExpr(c *PrimaryExprContext)
+
+	// ExitExclusiveRangeExpr is called when exiting the exclusiveRangeExpr production.
+	ExitExclusiveRangeExpr(c *ExclusiveRangeExprContext)
+
+	// ExitMemberAccessExpr is called when exiting the memberAccessExpr production.
+	ExitMemberAccessExpr(c *MemberAccessExprContext)
+
+	// ExitErrorPropagateExpr is called when exiting the errorPropagateExpr production.
+	ExitErrorPropagateExpr(c *ErrorPropagateExprContext)
+
+	// ExitCallExpr is called when exiting the callExpr production.
+	ExitCallExpr(c *CallExprContext)
+
+	// ExitIsExpr is called when exiting the isExpr production.
+	ExitIsExpr(c *IsExprContext)
+
 	// ExitReceiveExpr is called when exiting the receiveExpr production.
 	ExitReceiveExpr(c *ReceiveExprContext)
 
@@ -673,17 +712,8 @@ type PromiseParserListener interface {
 	// ExitLogicalAndExpr is called when exiting the logicalAndExpr production.
 	ExitLogicalAndExpr(c *LogicalAndExprContext)
 
-	// ExitCastExpr is called when exiting the castExpr production.
-	ExitCastExpr(c *CastExprContext)
-
 	// ExitComparisonExpr is called when exiting the comparisonExpr production.
 	ExitComparisonExpr(c *ComparisonExprContext)
-
-	// ExitUnaryNegExpr is called when exiting the unaryNegExpr production.
-	ExitUnaryNegExpr(c *UnaryNegExprContext)
-
-	// ExitAdditiveExpr is called when exiting the additiveExpr production.
-	ExitAdditiveExpr(c *AdditiveExprContext)
 
 	// ExitSliceExpr is called when exiting the sliceExpr production.
 	ExitSliceExpr(c *SliceExprContext)
@@ -691,41 +721,29 @@ type PromiseParserListener interface {
 	// ExitElvisExpr is called when exiting the elvisExpr production.
 	ExitElvisExpr(c *ElvisExprContext)
 
+	// ExitShiftExpr is called when exiting the shiftExpr production.
+	ExitShiftExpr(c *ShiftExprContext)
+
+	// ExitBitwiseExpr is called when exiting the bitwiseExpr production.
+	ExitBitwiseExpr(c *BitwiseExprContext)
+
 	// ExitLogicalOrExpr is called when exiting the logicalOrExpr production.
 	ExitLogicalOrExpr(c *LogicalOrExprContext)
 
 	// ExitIndexExpr is called when exiting the indexExpr production.
 	ExitIndexExpr(c *IndexExprContext)
 
-	// ExitPrimaryExpr is called when exiting the primaryExpr production.
-	ExitPrimaryExpr(c *PrimaryExprContext)
-
-	// ExitExclusiveRangeExpr is called when exiting the exclusiveRangeExpr production.
-	ExitExclusiveRangeExpr(c *ExclusiveRangeExprContext)
-
 	// ExitOptionalChainExpr is called when exiting the optionalChainExpr production.
 	ExitOptionalChainExpr(c *OptionalChainExprContext)
 
-	// ExitMemberAccessExpr is called when exiting the memberAccessExpr production.
-	ExitMemberAccessExpr(c *MemberAccessExprContext)
-
 	// ExitErrorUnwrapExpr is called when exiting the errorUnwrapExpr production.
 	ExitErrorUnwrapExpr(c *ErrorUnwrapExprContext)
-
-	// ExitErrorPropagateExpr is called when exiting the errorPropagateExpr production.
-	ExitErrorPropagateExpr(c *ErrorPropagateExprContext)
-
-	// ExitCallExpr is called when exiting the callExpr production.
-	ExitCallExpr(c *CallExprContext)
 
 	// ExitUnaryNotExpr is called when exiting the unaryNotExpr production.
 	ExitUnaryNotExpr(c *UnaryNotExprContext)
 
 	// ExitMultiplicativeExpr is called when exiting the multiplicativeExpr production.
 	ExitMultiplicativeExpr(c *MultiplicativeExprContext)
-
-	// ExitIsExpr is called when exiting the isExpr production.
-	ExitIsExpr(c *IsExprContext)
 
 	// ExitEqualityExpr is called when exiting the equalityExpr production.
 	ExitEqualityExpr(c *EqualityExprContext)

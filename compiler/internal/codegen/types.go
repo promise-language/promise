@@ -18,6 +18,17 @@ const (
 	CatChar                     // char (i32 codepoint, signed comparisons)
 )
 
+// isPrimitiveNumeric reports whether a Named type is a primitive numeric type.
+func isPrimitiveNumeric(n *types.Named) bool {
+	cat := classify(n)
+	return cat == CatSignedInt || cat == CatUnsignedInt || cat == CatFloat
+}
+
+// isSignedType reports whether a Named type is a signed integer type.
+func isSignedType(n *types.Named) bool {
+	return classify(n) == CatSignedInt
+}
+
 // classify returns the backend category for a Named type.
 // This is the single point in codegen that compares against universe type singletons.
 func classify(n *types.Named) TypeCategory {

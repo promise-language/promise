@@ -32,6 +32,13 @@ func init() {
 		fmt.Fprintf(&b, "\t-() %s `native;\n", name)
 		fmt.Fprintf(&b, "\t++() %s `native;\n", name)
 		fmt.Fprintf(&b, "\t--() %s `native;\n", name)
+		// Bitwise operators for integer types only (not floats)
+		if name != "f32" && name != "f64" {
+			for _, op := range []string{"&", "|", "^", "<<", ">>"} {
+				fmt.Fprintf(&b, "\t%s(%s other) %s `native;\n", op, name, name)
+			}
+			fmt.Fprintf(&b, "\t~() %s `native;\n", name)
+		}
 		if name != "f32" && name != "f64" {
 			fmt.Fprintf(&b, "\t..(%s end) range `native;\n", name)
 			fmt.Fprintf(&b, "\t..=(%s end) range `native;\n", name)

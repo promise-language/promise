@@ -311,6 +311,46 @@ func (v *BasePromiseParserVisitor) VisitWhileExprStmt(ctx *WhileExprStmtContext)
 	return v.VisitChildren(ctx)
 }
 
+func (v *BasePromiseParserVisitor) VisitCastExpr(ctx *CastExprContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BasePromiseParserVisitor) VisitUnaryNegExpr(ctx *UnaryNegExprContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BasePromiseParserVisitor) VisitAdditiveExpr(ctx *AdditiveExprContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BasePromiseParserVisitor) VisitBitwiseNotExpr(ctx *BitwiseNotExprContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BasePromiseParserVisitor) VisitPrimaryExpr(ctx *PrimaryExprContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BasePromiseParserVisitor) VisitExclusiveRangeExpr(ctx *ExclusiveRangeExprContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BasePromiseParserVisitor) VisitMemberAccessExpr(ctx *MemberAccessExprContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BasePromiseParserVisitor) VisitErrorPropagateExpr(ctx *ErrorPropagateExprContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BasePromiseParserVisitor) VisitCallExpr(ctx *CallExprContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BasePromiseParserVisitor) VisitIsExpr(ctx *IsExprContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
 func (v *BasePromiseParserVisitor) VisitReceiveExpr(ctx *ReceiveExprContext) interface{} {
 	return v.VisitChildren(ctx)
 }
@@ -327,19 +367,7 @@ func (v *BasePromiseParserVisitor) VisitLogicalAndExpr(ctx *LogicalAndExprContex
 	return v.VisitChildren(ctx)
 }
 
-func (v *BasePromiseParserVisitor) VisitCastExpr(ctx *CastExprContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
 func (v *BasePromiseParserVisitor) VisitComparisonExpr(ctx *ComparisonExprContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BasePromiseParserVisitor) VisitUnaryNegExpr(ctx *UnaryNegExprContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BasePromiseParserVisitor) VisitAdditiveExpr(ctx *AdditiveExprContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
@@ -351,6 +379,14 @@ func (v *BasePromiseParserVisitor) VisitElvisExpr(ctx *ElvisExprContext) interfa
 	return v.VisitChildren(ctx)
 }
 
+func (v *BasePromiseParserVisitor) VisitShiftExpr(ctx *ShiftExprContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BasePromiseParserVisitor) VisitBitwiseExpr(ctx *BitwiseExprContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
 func (v *BasePromiseParserVisitor) VisitLogicalOrExpr(ctx *LogicalOrExprContext) interface{} {
 	return v.VisitChildren(ctx)
 }
@@ -359,31 +395,11 @@ func (v *BasePromiseParserVisitor) VisitIndexExpr(ctx *IndexExprContext) interfa
 	return v.VisitChildren(ctx)
 }
 
-func (v *BasePromiseParserVisitor) VisitPrimaryExpr(ctx *PrimaryExprContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BasePromiseParserVisitor) VisitExclusiveRangeExpr(ctx *ExclusiveRangeExprContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
 func (v *BasePromiseParserVisitor) VisitOptionalChainExpr(ctx *OptionalChainExprContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
-func (v *BasePromiseParserVisitor) VisitMemberAccessExpr(ctx *MemberAccessExprContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
 func (v *BasePromiseParserVisitor) VisitErrorUnwrapExpr(ctx *ErrorUnwrapExprContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BasePromiseParserVisitor) VisitErrorPropagateExpr(ctx *ErrorPropagateExprContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BasePromiseParserVisitor) VisitCallExpr(ctx *CallExprContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
@@ -392,10 +408,6 @@ func (v *BasePromiseParserVisitor) VisitUnaryNotExpr(ctx *UnaryNotExprContext) i
 }
 
 func (v *BasePromiseParserVisitor) VisitMultiplicativeExpr(ctx *MultiplicativeExprContext) interface{} {
-	return v.VisitChildren(ctx)
-}
-
-func (v *BasePromiseParserVisitor) VisitIsExpr(ctx *IsExprContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 

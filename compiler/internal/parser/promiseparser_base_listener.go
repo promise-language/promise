@@ -476,6 +476,66 @@ func (s *BasePromiseParserListener) EnterWhileExprStmt(ctx *WhileExprStmtContext
 // ExitWhileExprStmt is called when production whileExprStmt is exited.
 func (s *BasePromiseParserListener) ExitWhileExprStmt(ctx *WhileExprStmtContext) {}
 
+// EnterCastExpr is called when production castExpr is entered.
+func (s *BasePromiseParserListener) EnterCastExpr(ctx *CastExprContext) {}
+
+// ExitCastExpr is called when production castExpr is exited.
+func (s *BasePromiseParserListener) ExitCastExpr(ctx *CastExprContext) {}
+
+// EnterUnaryNegExpr is called when production unaryNegExpr is entered.
+func (s *BasePromiseParserListener) EnterUnaryNegExpr(ctx *UnaryNegExprContext) {}
+
+// ExitUnaryNegExpr is called when production unaryNegExpr is exited.
+func (s *BasePromiseParserListener) ExitUnaryNegExpr(ctx *UnaryNegExprContext) {}
+
+// EnterAdditiveExpr is called when production additiveExpr is entered.
+func (s *BasePromiseParserListener) EnterAdditiveExpr(ctx *AdditiveExprContext) {}
+
+// ExitAdditiveExpr is called when production additiveExpr is exited.
+func (s *BasePromiseParserListener) ExitAdditiveExpr(ctx *AdditiveExprContext) {}
+
+// EnterBitwiseNotExpr is called when production bitwiseNotExpr is entered.
+func (s *BasePromiseParserListener) EnterBitwiseNotExpr(ctx *BitwiseNotExprContext) {}
+
+// ExitBitwiseNotExpr is called when production bitwiseNotExpr is exited.
+func (s *BasePromiseParserListener) ExitBitwiseNotExpr(ctx *BitwiseNotExprContext) {}
+
+// EnterPrimaryExpr is called when production primaryExpr is entered.
+func (s *BasePromiseParserListener) EnterPrimaryExpr(ctx *PrimaryExprContext) {}
+
+// ExitPrimaryExpr is called when production primaryExpr is exited.
+func (s *BasePromiseParserListener) ExitPrimaryExpr(ctx *PrimaryExprContext) {}
+
+// EnterExclusiveRangeExpr is called when production exclusiveRangeExpr is entered.
+func (s *BasePromiseParserListener) EnterExclusiveRangeExpr(ctx *ExclusiveRangeExprContext) {}
+
+// ExitExclusiveRangeExpr is called when production exclusiveRangeExpr is exited.
+func (s *BasePromiseParserListener) ExitExclusiveRangeExpr(ctx *ExclusiveRangeExprContext) {}
+
+// EnterMemberAccessExpr is called when production memberAccessExpr is entered.
+func (s *BasePromiseParserListener) EnterMemberAccessExpr(ctx *MemberAccessExprContext) {}
+
+// ExitMemberAccessExpr is called when production memberAccessExpr is exited.
+func (s *BasePromiseParserListener) ExitMemberAccessExpr(ctx *MemberAccessExprContext) {}
+
+// EnterErrorPropagateExpr is called when production errorPropagateExpr is entered.
+func (s *BasePromiseParserListener) EnterErrorPropagateExpr(ctx *ErrorPropagateExprContext) {}
+
+// ExitErrorPropagateExpr is called when production errorPropagateExpr is exited.
+func (s *BasePromiseParserListener) ExitErrorPropagateExpr(ctx *ErrorPropagateExprContext) {}
+
+// EnterCallExpr is called when production callExpr is entered.
+func (s *BasePromiseParserListener) EnterCallExpr(ctx *CallExprContext) {}
+
+// ExitCallExpr is called when production callExpr is exited.
+func (s *BasePromiseParserListener) ExitCallExpr(ctx *CallExprContext) {}
+
+// EnterIsExpr is called when production isExpr is entered.
+func (s *BasePromiseParserListener) EnterIsExpr(ctx *IsExprContext) {}
+
+// ExitIsExpr is called when production isExpr is exited.
+func (s *BasePromiseParserListener) ExitIsExpr(ctx *IsExprContext) {}
+
 // EnterReceiveExpr is called when production receiveExpr is entered.
 func (s *BasePromiseParserListener) EnterReceiveExpr(ctx *ReceiveExprContext) {}
 
@@ -500,29 +560,11 @@ func (s *BasePromiseParserListener) EnterLogicalAndExpr(ctx *LogicalAndExprConte
 // ExitLogicalAndExpr is called when production logicalAndExpr is exited.
 func (s *BasePromiseParserListener) ExitLogicalAndExpr(ctx *LogicalAndExprContext) {}
 
-// EnterCastExpr is called when production castExpr is entered.
-func (s *BasePromiseParserListener) EnterCastExpr(ctx *CastExprContext) {}
-
-// ExitCastExpr is called when production castExpr is exited.
-func (s *BasePromiseParserListener) ExitCastExpr(ctx *CastExprContext) {}
-
 // EnterComparisonExpr is called when production comparisonExpr is entered.
 func (s *BasePromiseParserListener) EnterComparisonExpr(ctx *ComparisonExprContext) {}
 
 // ExitComparisonExpr is called when production comparisonExpr is exited.
 func (s *BasePromiseParserListener) ExitComparisonExpr(ctx *ComparisonExprContext) {}
-
-// EnterUnaryNegExpr is called when production unaryNegExpr is entered.
-func (s *BasePromiseParserListener) EnterUnaryNegExpr(ctx *UnaryNegExprContext) {}
-
-// ExitUnaryNegExpr is called when production unaryNegExpr is exited.
-func (s *BasePromiseParserListener) ExitUnaryNegExpr(ctx *UnaryNegExprContext) {}
-
-// EnterAdditiveExpr is called when production additiveExpr is entered.
-func (s *BasePromiseParserListener) EnterAdditiveExpr(ctx *AdditiveExprContext) {}
-
-// ExitAdditiveExpr is called when production additiveExpr is exited.
-func (s *BasePromiseParserListener) ExitAdditiveExpr(ctx *AdditiveExprContext) {}
 
 // EnterSliceExpr is called when production sliceExpr is entered.
 func (s *BasePromiseParserListener) EnterSliceExpr(ctx *SliceExprContext) {}
@@ -536,6 +578,18 @@ func (s *BasePromiseParserListener) EnterElvisExpr(ctx *ElvisExprContext) {}
 // ExitElvisExpr is called when production elvisExpr is exited.
 func (s *BasePromiseParserListener) ExitElvisExpr(ctx *ElvisExprContext) {}
 
+// EnterShiftExpr is called when production shiftExpr is entered.
+func (s *BasePromiseParserListener) EnterShiftExpr(ctx *ShiftExprContext) {}
+
+// ExitShiftExpr is called when production shiftExpr is exited.
+func (s *BasePromiseParserListener) ExitShiftExpr(ctx *ShiftExprContext) {}
+
+// EnterBitwiseExpr is called when production bitwiseExpr is entered.
+func (s *BasePromiseParserListener) EnterBitwiseExpr(ctx *BitwiseExprContext) {}
+
+// ExitBitwiseExpr is called when production bitwiseExpr is exited.
+func (s *BasePromiseParserListener) ExitBitwiseExpr(ctx *BitwiseExprContext) {}
+
 // EnterLogicalOrExpr is called when production logicalOrExpr is entered.
 func (s *BasePromiseParserListener) EnterLogicalOrExpr(ctx *LogicalOrExprContext) {}
 
@@ -548,47 +602,17 @@ func (s *BasePromiseParserListener) EnterIndexExpr(ctx *IndexExprContext) {}
 // ExitIndexExpr is called when production indexExpr is exited.
 func (s *BasePromiseParserListener) ExitIndexExpr(ctx *IndexExprContext) {}
 
-// EnterPrimaryExpr is called when production primaryExpr is entered.
-func (s *BasePromiseParserListener) EnterPrimaryExpr(ctx *PrimaryExprContext) {}
-
-// ExitPrimaryExpr is called when production primaryExpr is exited.
-func (s *BasePromiseParserListener) ExitPrimaryExpr(ctx *PrimaryExprContext) {}
-
-// EnterExclusiveRangeExpr is called when production exclusiveRangeExpr is entered.
-func (s *BasePromiseParserListener) EnterExclusiveRangeExpr(ctx *ExclusiveRangeExprContext) {}
-
-// ExitExclusiveRangeExpr is called when production exclusiveRangeExpr is exited.
-func (s *BasePromiseParserListener) ExitExclusiveRangeExpr(ctx *ExclusiveRangeExprContext) {}
-
 // EnterOptionalChainExpr is called when production optionalChainExpr is entered.
 func (s *BasePromiseParserListener) EnterOptionalChainExpr(ctx *OptionalChainExprContext) {}
 
 // ExitOptionalChainExpr is called when production optionalChainExpr is exited.
 func (s *BasePromiseParserListener) ExitOptionalChainExpr(ctx *OptionalChainExprContext) {}
 
-// EnterMemberAccessExpr is called when production memberAccessExpr is entered.
-func (s *BasePromiseParserListener) EnterMemberAccessExpr(ctx *MemberAccessExprContext) {}
-
-// ExitMemberAccessExpr is called when production memberAccessExpr is exited.
-func (s *BasePromiseParserListener) ExitMemberAccessExpr(ctx *MemberAccessExprContext) {}
-
 // EnterErrorUnwrapExpr is called when production errorUnwrapExpr is entered.
 func (s *BasePromiseParserListener) EnterErrorUnwrapExpr(ctx *ErrorUnwrapExprContext) {}
 
 // ExitErrorUnwrapExpr is called when production errorUnwrapExpr is exited.
 func (s *BasePromiseParserListener) ExitErrorUnwrapExpr(ctx *ErrorUnwrapExprContext) {}
-
-// EnterErrorPropagateExpr is called when production errorPropagateExpr is entered.
-func (s *BasePromiseParserListener) EnterErrorPropagateExpr(ctx *ErrorPropagateExprContext) {}
-
-// ExitErrorPropagateExpr is called when production errorPropagateExpr is exited.
-func (s *BasePromiseParserListener) ExitErrorPropagateExpr(ctx *ErrorPropagateExprContext) {}
-
-// EnterCallExpr is called when production callExpr is entered.
-func (s *BasePromiseParserListener) EnterCallExpr(ctx *CallExprContext) {}
-
-// ExitCallExpr is called when production callExpr is exited.
-func (s *BasePromiseParserListener) ExitCallExpr(ctx *CallExprContext) {}
 
 // EnterUnaryNotExpr is called when production unaryNotExpr is entered.
 func (s *BasePromiseParserListener) EnterUnaryNotExpr(ctx *UnaryNotExprContext) {}
@@ -601,12 +625,6 @@ func (s *BasePromiseParserListener) EnterMultiplicativeExpr(ctx *MultiplicativeE
 
 // ExitMultiplicativeExpr is called when production multiplicativeExpr is exited.
 func (s *BasePromiseParserListener) ExitMultiplicativeExpr(ctx *MultiplicativeExprContext) {}
-
-// EnterIsExpr is called when production isExpr is entered.
-func (s *BasePromiseParserListener) EnterIsExpr(ctx *IsExprContext) {}
-
-// ExitIsExpr is called when production isExpr is exited.
-func (s *BasePromiseParserListener) ExitIsExpr(ctx *IsExprContext) {}
 
 // EnterEqualityExpr is called when production equalityExpr is entered.
 func (s *BasePromiseParserListener) EnterEqualityExpr(ctx *EqualityExprContext) {}

@@ -53,6 +53,15 @@ func signedIntOps() map[string]nativeEmitter {
 			one := constant.NewInt(l.Type().(*irtypes.IntType), 1)
 			return b.NewSub(l, one)
 		},
+		"&":  func(b *ir.Block, l, r value.Value) value.Value { return b.NewAnd(l, r) },
+		"|":  func(b *ir.Block, l, r value.Value) value.Value { return b.NewOr(l, r) },
+		"^":  func(b *ir.Block, l, r value.Value) value.Value { return b.NewXor(l, r) },
+		"<<": func(b *ir.Block, l, r value.Value) value.Value { return b.NewShl(l, r) },
+		">>": func(b *ir.Block, l, r value.Value) value.Value { return b.NewAShr(l, r) },
+		"~": func(b *ir.Block, l, _ value.Value) value.Value {
+			allOnes := constant.NewInt(l.Type().(*irtypes.IntType), -1)
+			return b.NewXor(l, allOnes)
+		},
 	}
 }
 
@@ -82,6 +91,15 @@ func unsignedIntOps() map[string]nativeEmitter {
 		"--": func(b *ir.Block, l, _ value.Value) value.Value {
 			one := constant.NewInt(l.Type().(*irtypes.IntType), 1)
 			return b.NewSub(l, one)
+		},
+		"&":  func(b *ir.Block, l, r value.Value) value.Value { return b.NewAnd(l, r) },
+		"|":  func(b *ir.Block, l, r value.Value) value.Value { return b.NewOr(l, r) },
+		"^":  func(b *ir.Block, l, r value.Value) value.Value { return b.NewXor(l, r) },
+		"<<": func(b *ir.Block, l, r value.Value) value.Value { return b.NewShl(l, r) },
+		">>": func(b *ir.Block, l, r value.Value) value.Value { return b.NewLShr(l, r) },
+		"~": func(b *ir.Block, l, _ value.Value) value.Value {
+			allOnes := constant.NewInt(l.Type().(*irtypes.IntType), -1)
+			return b.NewXor(l, allOnes)
 		},
 	}
 }

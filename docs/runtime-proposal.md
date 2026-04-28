@@ -151,7 +151,7 @@ Move string ops, vector ops, hash, and formatting from C into Promise.
 **What can move to Promise today**:
 - ~~Hash (FNV-1a) — all types migrated: int/bool/char/float use `std/hash.pr`, string uses codegen-emitted LLVM IR~~
 - ~~`string.contains`, `starts_with`, `ends_with`, `index_of`~~ — migrated to pure Promise (uses byte indexing `s[i]`)
-- `string.trim`
+- ~~`string.trim`~~ — migrated to codegen-emitted LLVM IR
 - ~~`vector.contains`, `vector.remove`~~ — migrated to codegen-emitted LLVM IR
 - Map — already done (HashMap is pure Promise)
 - Int/float → string conversion (hex formatting needs shifts)
@@ -180,13 +180,12 @@ Move string ops, vector ops, hash, and formatting from C into Promise.
 
 After this migration, C runtime code drops to: `print` (IO), `type_is` (RTTI), test runner.
 
-**Performance TODO — restore SIMD memcmp in equality functions**: libc `memcmp` is now declared as extern (used by `defineStringSplitFunc`), but three codegen functions still use byte-by-byte comparison loops instead:
-- `defineStringDirectEqFunc` (compiler.go) — `promise_string_eq`, used by `==`/`!=` on strings
-- `defineStringEqFunc` (compiler.go) — `__promise_eq_string`, used by `vector.contains` for string[] elements
-- `defineVectorContainsFunc` (compiler.go) — memcmp path for non-string vector element comparison
-- Pure Promise string methods (`contains`, `starts_with`, `ends_with`, `index_of` in `std/string.pr`) — char-by-char comparison via `this[i] != sub[j]`
+~~**Performance TODO — restore SIMD memcmp in equality functions**~~: Done. All three codegen byte-by-byte comparison loops replaced with libc `memcmp` (SIMD-accelerated — NEON on ARM, SSE/AVX on x86):
+- `defineStringDirectEqFunc` — `promise_string_eq`, used by `==`/`!=` on strings
+- `defineStringEqFunc` — `__promise_eq_string`, used by `vector.contains` for string[] elements
+- `defineVectorContainsFunc` — memcmp path for non-string vector element comparison
 
-**Fix**: Replace the 3 codegen byte-loops with `memcmp(a, b, n) == 0` (extern already declared). For the Promise string methods, add a `memcmp`-like builtin or a native `string.eq_region(string other, int this_offset, int other_offset, int len) bool` method backed by memcmp. Short strings (< 8-16 bytes) won't benefit much, but long string equality and large vector scans will.
+**Remaining opportunity**: Pure Promise string methods (`contains`, `starts_with`, `ends_with`, `index_of` in `std/string.pr`) still use char-by-char comparison via `this[i] != sub[j]`. Could add a `memcmp`-like builtin or `string.eq_region` backed by memcmp for further acceleration on long strings.
 
 ~~**TODO — switch to LLVM intrinsics for memory operations**~~: Done. All memory operations now use LLVM intrinsics:
 - `@llvm.memcpy.p0i8.p0i8.i64` — used by `defineStringNewFunc`, `defineStringConcatFunc`, `defineVectorPushFunc`, `defineVectorPopFunc`

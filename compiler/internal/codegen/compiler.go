@@ -348,21 +348,28 @@ func (c *Compiler) declareIntrinsics() {
 	c.defineStringNewFunc()
 	c.defineStringConcatFunc()
 
-	// String direct equality (codegen-emitted LLVM IR, replaces C runtime)
-	c.defineStringDirectEqFunc()
-
 	// Realloc for vector growth
 	c.funcs["realloc"] = c.module.NewFunc("realloc",
 		irtypes.I8Ptr,
 		ir.NewParam("ptr", irtypes.I8Ptr),
 		ir.NewParam("size", irtypes.I64))
 
-	// Memcmp for string split (SIMD-accelerated; no @llvm.memcmp intrinsic exists)
-	c.funcs["memcmp"] = c.module.NewFunc("memcmp",
-		irtypes.I32,
-		ir.NewParam("s1", irtypes.I8Ptr),
-		ir.NewParam("s2", irtypes.I8Ptr),
-		ir.NewParam("n", irtypes.I64))
+	// Memcmp (SIMD-accelerated; no @llvm.memcmp intrinsic exists)
+	// Used by string equality, vector contains, and string split
+	memcmpS1 := ir.NewParam("s1", irtypes.I8Ptr)
+	memcmpS1.Attrs = append(memcmpS1.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
+	memcmpS2 := ir.NewParam("s2", irtypes.I8Ptr)
+	memcmpS2.Attrs = append(memcmpS2.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
+	memcmpN := ir.NewParam("n", irtypes.I64)
+	memcmpN.Attrs = append(memcmpN.Attrs, enum.ParamAttrNoUndef)
+	memcmpFn := c.module.NewFunc("memcmp", irtypes.I32, memcmpS1, memcmpS2, memcmpN)
+	memcmpFn.FuncAttrs = append(memcmpFn.FuncAttrs,
+		enum.FuncAttrMustProgress, enum.FuncAttrNoUnwind,
+		enum.FuncAttrReadOnly, enum.FuncAttrWillReturn, enum.FuncAttrArgMemOnly)
+	c.funcs["memcmp"] = memcmpFn
+
+	// String direct equality (codegen-emitted LLVM IR, replaces C runtime)
+	c.defineStringDirectEqFunc()
 
 	// Vector methods (codegen-emitted LLVM IR, replaces C runtime)
 	c.defineVectorWithCapacityFunc()
@@ -568,8 +575,6 @@ func (c *Compiler) defineStringDirectEqFunc() {
 		irtypes.NewArray(0, irtypes.I8), // data (flexible array)
 	)
 
-	zero64 := constant.NewInt(irtypes.I64, 0)
-	one64 := constant.NewInt(irtypes.I64, 1)
 	trueVal := constant.NewInt(irtypes.I1, 1)
 	falseVal := constant.NewInt(irtypes.I1, 0)
 
@@ -600,7 +605,7 @@ func (c *Compiler) defineStringDirectEqFunc() {
 
 	lenNeqBlk.NewRet(falseVal)
 
-	// Get data pointers and set up byte comparison loop
+	// Compare data using memcmp (SIMD-accelerated)
 	dataPtrA := cmpDataBlk.NewGetElementPtr(strInstanceType, typedA,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
 		constant.NewInt(irtypes.I32, 0))
@@ -608,36 +613,14 @@ func (c *Compiler) defineStringDirectEqFunc() {
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
 		constant.NewInt(irtypes.I32, 0))
 
-	iAlloca := cmpDataBlk.NewAlloca(irtypes.I64)
-	cmpDataBlk.NewStore(zero64, iAlloca)
-
-	headerBlk := fn.NewBlock("loop.header")
-	bodyBlk := fn.NewBlock("loop.body")
 	equalBlk := fn.NewBlock("equal")
 	neqBlk := fn.NewBlock("not_equal")
 
-	cmpDataBlk.NewBr(headerBlk)
+	cmpResult := cmpDataBlk.NewCall(c.funcs["memcmp"], dataPtrA, dataPtrB, lenA)
+	isEqual := cmpDataBlk.NewICmp(enum.IPredEQ, cmpResult, constant.NewInt(irtypes.I32, 0))
+	cmpDataBlk.NewCondBr(isEqual, equalBlk, neqBlk)
 
-	// Loop header: check i < len
-	iVal := headerBlk.NewLoad(irtypes.I64, iAlloca)
-	cond := headerBlk.NewICmp(enum.IPredSLT, iVal, lenA)
-	headerBlk.NewCondBr(cond, bodyBlk, equalBlk)
-
-	// Loop body: compare byte at position i
-	iCur := bodyBlk.NewLoad(irtypes.I64, iAlloca)
-	bytePtrA := bodyBlk.NewGetElementPtr(irtypes.I8, dataPtrA, iCur)
-	byteA := bodyBlk.NewLoad(irtypes.I8, bytePtrA)
-	bytePtrB := bodyBlk.NewGetElementPtr(irtypes.I8, dataPtrB, iCur)
-	byteB := bodyBlk.NewLoad(irtypes.I8, bytePtrB)
-	byteEq := bodyBlk.NewICmp(enum.IPredEQ, byteA, byteB)
-	nextI := bodyBlk.NewAdd(iCur, one64)
-	bodyBlk.NewStore(nextI, iAlloca)
-	bodyBlk.NewCondBr(byteEq, headerBlk, neqBlk)
-
-	// Bytes differ → not equal
 	neqBlk.NewRet(falseVal)
-
-	// All bytes match → equal
 	equalBlk.NewRet(trueVal)
 
 	c.funcs["promise_string_eq"] = fn
@@ -1197,8 +1180,6 @@ func (c *Compiler) defineStringEqFunc() {
 
 	zero32 := constant.NewInt(irtypes.I32, 0)
 	one32 := constant.NewInt(irtypes.I32, 1)
-	zero64 := constant.NewInt(irtypes.I64, 0)
-	one64 := constant.NewInt(irtypes.I64, 1)
 
 	// Entry: dereference indirect pointers to get actual string pointers
 	entry := fn.NewBlock("entry")
@@ -1243,7 +1224,7 @@ func (c *Compiler) defineStringEqFunc() {
 
 	lenNeqBlk.NewRet(zero32)
 
-	// Get data pointers and set up byte comparison loop
+	// Get data pointers and compare via memcmp
 	dataPtrA := cmpDataBlk.NewGetElementPtr(strInstanceType, typedA,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
 		constant.NewInt(irtypes.I32, 0))
@@ -1251,31 +1232,12 @@ func (c *Compiler) defineStringEqFunc() {
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
 		constant.NewInt(irtypes.I32, 0))
 
-	iAlloca := cmpDataBlk.NewAlloca(irtypes.I64)
-	cmpDataBlk.NewStore(zero64, iAlloca)
-
-	headerBlk := fn.NewBlock("loop.header")
-	bodyBlk := fn.NewBlock("loop.body")
 	equalBlk := fn.NewBlock("equal")
 	neqBlk := fn.NewBlock("not_equal")
 
-	cmpDataBlk.NewBr(headerBlk)
-
-	// Loop header: check i < len
-	iVal := headerBlk.NewLoad(irtypes.I64, iAlloca)
-	cond := headerBlk.NewICmp(enum.IPredSLT, iVal, lenA)
-	headerBlk.NewCondBr(cond, bodyBlk, equalBlk)
-
-	// Loop body: compare byte at position i
-	iCur := bodyBlk.NewLoad(irtypes.I64, iAlloca)
-	bytePtrA := bodyBlk.NewGetElementPtr(irtypes.I8, dataPtrA, iCur)
-	byteA := bodyBlk.NewLoad(irtypes.I8, bytePtrA)
-	bytePtrB := bodyBlk.NewGetElementPtr(irtypes.I8, dataPtrB, iCur)
-	byteB := bodyBlk.NewLoad(irtypes.I8, bytePtrB)
-	byteEq := bodyBlk.NewICmp(enum.IPredEQ, byteA, byteB)
-	nextI := bodyBlk.NewAdd(iCur, one64)
-	bodyBlk.NewStore(nextI, iAlloca)
-	bodyBlk.NewCondBr(byteEq, headerBlk, neqBlk)
+	cmpResult := cmpDataBlk.NewCall(c.funcs["memcmp"], dataPtrA, dataPtrB, lenA)
+	isEqual := cmpDataBlk.NewICmp(enum.IPredEQ, cmpResult, constant.NewInt(irtypes.I32, 0))
+	cmpDataBlk.NewCondBr(isEqual, equalBlk, neqBlk)
 
 	// Bytes differ → return 0
 	neqBlk.NewRet(zero32)
@@ -1500,8 +1462,6 @@ func (c *Compiler) defineVectorContainsFunc() {
 	loopBody := fn.NewBlock("loop.body")
 	callEq := fn.NewBlock("call_eq")
 	cmpBytes := fn.NewBlock("cmp_bytes")
-	byteHeader := fn.NewBlock("byte.header")
-	byteBody := fn.NewBlock("byte.body")
 	loopNext := fn.NewBlock("loop.next")
 	found := fn.NewBlock("found")
 	notFound := fn.NewBlock("not_found")
@@ -1528,26 +1488,10 @@ func (c *Compiler) defineVectorContainsFunc() {
 	eqNonZero := callEq.NewICmp(enum.IPredNE, eqResult, constant.NewInt(irtypes.I32, 0))
 	callEq.NewCondBr(eqNonZero, found, loopNext)
 
-	// cmp_bytes: byte-by-byte comparison (replaces memcmp)
-	jAlloca := cmpBytes.NewAlloca(irtypes.I64)
-	cmpBytes.NewStore(zero64, jAlloca)
-	cmpBytes.NewBr(byteHeader)
-
-	// byte.header: check j < elem_size
-	jVal := byteHeader.NewLoad(irtypes.I64, jAlloca)
-	byteCond := byteHeader.NewICmp(enum.IPredSLT, jVal, elemSizeParam)
-	byteHeader.NewCondBr(byteCond, byteBody, found)
-
-	// byte.body: compare single byte
-	jCur := byteBody.NewLoad(irtypes.I64, jAlloca)
-	curBytePtr := byteBody.NewGetElementPtr(irtypes.I8, curPtr, jCur)
-	curByte := byteBody.NewLoad(irtypes.I8, curBytePtr)
-	elemBytePtr := byteBody.NewGetElementPtr(irtypes.I8, elemParam, jCur)
-	elemByte := byteBody.NewLoad(irtypes.I8, elemBytePtr)
-	byteEq := byteBody.NewICmp(enum.IPredEQ, curByte, elemByte)
-	nextJ := byteBody.NewAdd(jCur, one64)
-	byteBody.NewStore(nextJ, jAlloca)
-	byteBody.NewCondBr(byteEq, byteHeader, loopNext)
+	// cmp_bytes: compare via memcmp
+	cmpResult := cmpBytes.NewCall(c.funcs["memcmp"], curPtr, elemParam, elemSizeParam)
+	isEqual := cmpBytes.NewICmp(enum.IPredEQ, cmpResult, constant.NewInt(irtypes.I32, 0))
+	cmpBytes.NewCondBr(isEqual, found, loopNext)
 
 	// loop.next: increment i, loop back
 	iNext := loopNext.NewLoad(irtypes.I64, iAlloca)

@@ -588,6 +588,7 @@ Consolidated list of items deferred from completed stages. Items marked ~~strike
 | Move string.new/concat to codegen-emitted LLVM IR (uses `@llvm.memcpy` intrinsic) | Done |
 | Move vector with_capacity/push/pop to codegen-emitted LLVM IR; switch memmove to `@llvm.memmove` intrinsic; eliminate `runtime_vector.c` | Done |
 | Move string trim/split/next_char to codegen-emitted LLVM IR; add libc `memcmp` extern for split; reduce `runtime_string.c` to print-only | Done |
+| Replace byte-by-byte comparison loops with libc `memcmp` in `promise_string_eq`, `__promise_eq_string`, `promise_vector_contains` | Done |
 
 ### Future Stages
 

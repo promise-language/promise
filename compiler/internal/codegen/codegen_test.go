@@ -1128,9 +1128,8 @@ func TestStringEqFuncBody(t *testing.T) {
 	assertContains(t, ir, "icmp eq i8* %a, %b")
 	// Length comparison
 	assertContains(t, ir, "check_len:")
-	// Byte-by-byte comparison loop
-	assertContains(t, ir, "loop.header:")
-	assertContains(t, ir, "loop.body:")
+	// memcmp-based data comparison (replaces byte-by-byte loop)
+	assertContains(t, ir, "call i32 @memcmp(")
 	// Terminal blocks
 	assertContains(t, ir, "equal:")
 	assertContains(t, ir, "not_equal:")
@@ -5911,8 +5910,10 @@ func TestVectorContainsFuncBody(t *testing.T) {
 	assertContains(t, ir, "loop.body:")
 	assertContains(t, ir, "cmp_bytes:")
 	assertContains(t, ir, "call_eq:")
-	assertContains(t, ir, "byte.header:")
-	assertContains(t, ir, "byte.body:")
+	// memcmp replaces byte-by-byte loop
+	assertContains(t, ir, "call i32 @memcmp(")
+	assertNotContains(t, ir, "byte.header:")
+	assertNotContains(t, ir, "byte.body:")
 	assertContains(t, ir, "found:")
 	assertContains(t, ir, "not_found:")
 	assertContains(t, ir, "loop.next:")
@@ -6141,7 +6142,8 @@ func TestStringNextCharFuncBody(t *testing.T) {
 
 func TestMemcmpDeclared(t *testing.T) {
 	ir := generateIR(t, `main() { x := 1; }`)
-	assertContains(t, ir, "declare i32 @memcmp(i8* %s1, i8* %s2, i64 %n)")
+	assertContains(t, ir, "declare i32 @memcmp(i8* nocapture noundef %s1, i8* nocapture noundef %s2, i64 noundef %n)")
+	assertContains(t, ir, "mustprogress nounwind readonly willreturn argmemonly")
 }
 
 // --- Return optional wrapping in monomorphized context ---

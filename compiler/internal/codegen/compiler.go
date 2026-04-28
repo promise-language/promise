@@ -148,6 +148,11 @@ func HostTargetTriple() string {
 			return "aarch64-unknown-linux-gnu"
 		}
 		return "x86_64-unknown-linux-gnu"
+	case "windows":
+		if runtime.GOARCH == "arm64" {
+			return "aarch64-pc-windows-msvc"
+		}
+		return "x86_64-pc-windows-msvc"
 	default:
 		return "x86_64-unknown-linux-gnu"
 	}

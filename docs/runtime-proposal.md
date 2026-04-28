@@ -49,8 +49,8 @@ After completing Phases 1-3, the C runtime is reduced to a single function:
 | **1** | Bitwise operators (`&`, `\|`, `^`, `<<`, `>>`, `~`) | Done |
 | **2** | Migrate all computation from C to codegen LLVM IR / pure Promise | Done |
 | **3** | PAL abstraction — define interface, implement macOS + Linux | Done |
-| **3b** | PAL Windows | **Next** |
-| **3c** | PAL WASM (WASI imports + JS FFI) | **Next** |
+| **3b** | PAL Windows | **Done** |
+| **3c** | PAL WASM (WASI imports + JS FFI) | **Done** |
 | **4** | Centralize allocator behind PAL | Planned |
 | **4b** | WASM linear memory allocator (bump/free-list on `memory.grow`) | Planned |
 | **5** | M:N concurrency scheduler (C initially) | Planned |

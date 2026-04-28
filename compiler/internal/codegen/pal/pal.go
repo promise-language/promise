@@ -3,7 +3,11 @@
 // PAL so the compiler can target different platforms by swapping implementations.
 package pal
 
-import "github.com/llir/llvm/ir"
+import (
+	"strings"
+
+	"github.com/llir/llvm/ir"
+)
 
 // PAL emits platform-specific LLVM IR functions into the module.
 type PAL interface {
@@ -14,7 +18,13 @@ type PAL interface {
 }
 
 // ForTarget returns a PAL implementation for the given LLVM target triple.
-// Currently macOS and Linux both use PosixPAL (libc write/exit).
 func ForTarget(triple string) PAL {
-	return &PosixPAL{}
+	switch {
+	case strings.Contains(triple, "windows"):
+		return &WindowsPAL{}
+	case strings.Contains(triple, "wasm"):
+		return &WasmPAL{}
+	default:
+		return &PosixPAL{}
+	}
 }

@@ -1,7 +1,6 @@
 // Test string operations: concat, equality, methods
 //
 // TODO: test comparisons (<, >, <=, >=) — blocked on codegen (string operator "<" not yet implemented)
-// TODO: test indexing s[i] — blocked on codegen (cannot index type string)
 // TODO: test slicing s[start:end] — blocked on codegen
 // TODO: test hash property
 test_concat() `test {
@@ -15,6 +14,8 @@ test_equality() `test {
   assert(!("hello" == "world"), "different strings not equal");
   assert("hello" != "world", "!= different");
   assert(!("abc" != "abc"), "!= same");
+  assert("" == "", "empty strings equal");
+  assert("" != "a", "empty != non-empty");
 }
 
 test_len() `test {
@@ -33,18 +34,24 @@ test_contains() `test {
   assert("hello world".contains("hello"), "contains hello");
   assert(!"hello".contains("xyz"), "not contains xyz");
   assert("abc".contains(""), "contains empty");
+  assert("abc".contains("abc"), "contains full string");
+  assert(!"hi".contains("longer"), "sub longer than string");
 }
 
 test_starts_with() `test {
   assert("hello world".starts_with("hello"), "starts_with hello");
   assert(!"hello world".starts_with("world"), "not starts_with world");
   assert("abc".starts_with(""), "starts_with empty");
+  assert("abc".starts_with("abc"), "starts_with full string");
+  assert(!"hi".starts_with("hello"), "prefix longer than string");
 }
 
 test_ends_with() `test {
   assert("hello world".ends_with("world"), "ends_with world");
   assert(!"hello world".ends_with("hello"), "not ends_with hello");
   assert("abc".ends_with(""), "ends_with empty");
+  assert("abc".ends_with("abc"), "ends_with full string");
+  assert(!"hi".ends_with("hello"), "suffix longer than string");
 }
 
 test_index_of() `test {
@@ -54,11 +61,31 @@ test_index_of() `test {
     assert(false, "should find world");
   }
 
-  bool found = false;
-  if _ := "hello".index_of("xyz") {
-    found = true;
+  assert("hello".index_of("xyz") is absent, "index_of xyz not found");
+
+  // Empty sub returns 0
+  if idx2 := "hello".index_of("") {
+    assert(idx2 == 0, "index_of empty == 0");
+  } else {
+    assert(false, "should find empty");
   }
-  assert(!found, "index_of xyz not found");
+
+  // Sub at position 0
+  if idx3 := "hello".index_of("hel") {
+    assert(idx3 == 0, "index_of at start == 0");
+  } else {
+    assert(false, "should find hel at start");
+  }
+
+  // Sub equals full string
+  if idx4 := "abc".index_of("abc") {
+    assert(idx4 == 0, "index_of full string == 0");
+  } else {
+    assert(false, "should find full string");
+  }
+
+  // Sub longer than string
+  assert("hi".index_of("longer") is absent, "index_of sub longer than string");
 }
 
 test_trim() `test {
@@ -73,6 +100,25 @@ test_split() `test {
   assert(parts[0] == "a", "split[0] == a");
   assert(parts[1] == "b", "split[1] == b");
   assert(parts[2] == "c", "split[2] == c");
+}
+
+test_indexing() `test {
+  assert("hello"[0] == 'h', "s[0] == h");
+  assert("hello"[1] == 'e', "s[1] == e");
+  assert("hello"[4] == 'o', "s[4] == o");
+  assert("abc"[2] == 'c', "abc[2] == c");
+
+  string s = "world";
+  assert(s[0] == 'w', "var s[0] == w");
+  assert(s[4] == 'd', "var s[4] == d");
+
+  // Variable index
+  int i = 2;
+  assert("abcde"[i] == 'c', "variable index");
+
+  // Last byte of string
+  string t = "xyz";
+  assert(t[t.len - 1] == 'z', "last byte");
 }
 
 test_interpolation() `test {

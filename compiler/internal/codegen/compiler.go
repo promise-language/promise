@@ -344,10 +344,8 @@ func (c *Compiler) declareIntrinsics() {
 		ir.NewParam("a", irtypes.I8Ptr),
 		ir.NewParam("b", irtypes.I8Ptr))
 
-	c.funcs["promise_string_eq"] = c.module.NewFunc("promise_string_eq",
-		irtypes.I1,
-		ir.NewParam("a", irtypes.I8Ptr),
-		ir.NewParam("b", irtypes.I8Ptr))
+	// String direct equality (codegen-emitted LLVM IR, replaces C runtime)
+	c.defineStringDirectEqFunc()
 
 	// Vector methods
 	c.funcs["promise_vector_with_capacity"] = c.module.NewFunc("promise_vector_with_capacity",
@@ -379,27 +377,6 @@ func (c *Compiler) declareIntrinsics() {
 		ir.NewParam("slice", irtypes.I8Ptr),
 		ir.NewParam("index", irtypes.I64),
 		ir.NewParam("elem_size", irtypes.I64))
-
-	// String methods
-	c.funcs["promise_string_contains"] = c.module.NewFunc("promise_string_contains",
-		irtypes.I8,
-		ir.NewParam("s", irtypes.I8Ptr),
-		ir.NewParam("sub", irtypes.I8Ptr))
-
-	c.funcs["promise_string_starts_with"] = c.module.NewFunc("promise_string_starts_with",
-		irtypes.I8,
-		ir.NewParam("s", irtypes.I8Ptr),
-		ir.NewParam("prefix", irtypes.I8Ptr))
-
-	c.funcs["promise_string_ends_with"] = c.module.NewFunc("promise_string_ends_with",
-		irtypes.I8,
-		ir.NewParam("s", irtypes.I8Ptr),
-		ir.NewParam("suffix", irtypes.I8Ptr))
-
-	c.funcs["promise_string_index_of"] = c.module.NewFunc("promise_string_index_of",
-		irtypes.I64,
-		ir.NewParam("s", irtypes.I8Ptr),
-		ir.NewParam("sub", irtypes.I8Ptr))
 
 	c.funcs["promise_string_trim"] = c.module.NewFunc("promise_string_trim",
 		irtypes.I8Ptr,
@@ -445,6 +422,97 @@ func (c *Compiler) declareIntrinsics() {
 
 	// String equality comparison (codegen-emitted LLVM IR, replaces C runtime)
 	c.defineStringEqFunc()
+}
+
+// defineStringDirectEqFunc emits an LLVM IR function that compares two strings
+// for equality. Used by the == and != operators. Takes direct i8* string pointers
+// (not indirect like defineStringEqFunc which is used by Vector.contains).
+// Returns i1 (true if equal). Replaces the C runtime promise_string_eq.
+// String instance layout: { i8* _variant, i64 len, [0 x i8] data }
+func (c *Compiler) defineStringDirectEqFunc() {
+	aParam := ir.NewParam("a", irtypes.I8Ptr)
+	bParam := ir.NewParam("b", irtypes.I8Ptr)
+	fn := c.module.NewFunc("promise_string_eq", irtypes.I1, aParam, bParam)
+
+	strInstanceType := irtypes.NewStruct(
+		irtypes.I8Ptr,                   // _variant
+		irtypes.I64,                     // len
+		irtypes.NewArray(0, irtypes.I8), // data (flexible array)
+	)
+
+	zero64 := constant.NewInt(irtypes.I64, 0)
+	one64 := constant.NewInt(irtypes.I64, 1)
+	trueVal := constant.NewInt(irtypes.I1, 1)
+	falseVal := constant.NewInt(irtypes.I1, 0)
+
+	// Fast path: same pointer → equal
+	entry := fn.NewBlock("entry")
+	samePtr := entry.NewICmp(enum.IPredEQ, aParam, bParam)
+	samePtrBlk := fn.NewBlock("same_ptr")
+	checkLenBlk := fn.NewBlock("check_len")
+	entry.NewCondBr(samePtr, samePtrBlk, checkLenBlk)
+
+	samePtrBlk.NewRet(trueVal)
+
+	// Compare lengths
+	typedA := checkLenBlk.NewBitCast(aParam, irtypes.NewPointer(strInstanceType))
+	lenPtrA := checkLenBlk.NewGetElementPtr(strInstanceType, typedA,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	lenA := checkLenBlk.NewLoad(irtypes.I64, lenPtrA)
+
+	typedB := checkLenBlk.NewBitCast(bParam, irtypes.NewPointer(strInstanceType))
+	lenPtrB := checkLenBlk.NewGetElementPtr(strInstanceType, typedB,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	lenB := checkLenBlk.NewLoad(irtypes.I64, lenPtrB)
+
+	lenEq := checkLenBlk.NewICmp(enum.IPredEQ, lenA, lenB)
+	lenNeqBlk := fn.NewBlock("len_neq")
+	cmpDataBlk := fn.NewBlock("cmp_data")
+	checkLenBlk.NewCondBr(lenEq, cmpDataBlk, lenNeqBlk)
+
+	lenNeqBlk.NewRet(falseVal)
+
+	// Get data pointers and set up byte comparison loop
+	dataPtrA := cmpDataBlk.NewGetElementPtr(strInstanceType, typedA,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
+		constant.NewInt(irtypes.I32, 0))
+	dataPtrB := cmpDataBlk.NewGetElementPtr(strInstanceType, typedB,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
+		constant.NewInt(irtypes.I32, 0))
+
+	iAlloca := cmpDataBlk.NewAlloca(irtypes.I64)
+	cmpDataBlk.NewStore(zero64, iAlloca)
+
+	headerBlk := fn.NewBlock("loop.header")
+	bodyBlk := fn.NewBlock("loop.body")
+	equalBlk := fn.NewBlock("equal")
+	neqBlk := fn.NewBlock("not_equal")
+
+	cmpDataBlk.NewBr(headerBlk)
+
+	// Loop header: check i < len
+	iVal := headerBlk.NewLoad(irtypes.I64, iAlloca)
+	cond := headerBlk.NewICmp(enum.IPredSLT, iVal, lenA)
+	headerBlk.NewCondBr(cond, bodyBlk, equalBlk)
+
+	// Loop body: compare byte at position i
+	iCur := bodyBlk.NewLoad(irtypes.I64, iAlloca)
+	bytePtrA := bodyBlk.NewGetElementPtr(irtypes.I8, dataPtrA, iCur)
+	byteA := bodyBlk.NewLoad(irtypes.I8, bytePtrA)
+	bytePtrB := bodyBlk.NewGetElementPtr(irtypes.I8, dataPtrB, iCur)
+	byteB := bodyBlk.NewLoad(irtypes.I8, bytePtrB)
+	byteEq := bodyBlk.NewICmp(enum.IPredEQ, byteA, byteB)
+	nextI := bodyBlk.NewAdd(iCur, one64)
+	bodyBlk.NewStore(nextI, iAlloca)
+	bodyBlk.NewCondBr(byteEq, headerBlk, neqBlk)
+
+	// Bytes differ → not equal
+	neqBlk.NewRet(falseVal)
+
+	// All bytes match → equal
+	equalBlk.NewRet(trueVal)
+
+	c.funcs["promise_string_eq"] = fn
 }
 
 // defineStringHashFunc emits an LLVM IR function that computes FNV-1a hash

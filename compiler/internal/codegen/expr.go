@@ -1488,7 +1488,7 @@ func (c *Compiler) genContainerMethodCall(e *ast.CallExpr, member *ast.MemberExp
 		}
 	}
 
-	// String methods: contains, starts_with, ends_with, index_of, trim, split
+	// String native methods: trim, split (contains/starts_with/ends_with/index_of are now pure Promise)
 	if named == types.TypString {
 		if result, ok := c.genStringMethodCall(e, member, methodName); ok {
 			return result, true
@@ -1646,46 +1646,6 @@ func (c *Compiler) genStringMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 	strPtr := c.genExpr(member.Target)
 
 	switch method {
-	case "contains":
-		argVal := c.genExpr(e.Args[0].Value)
-		result := c.block.NewCall(c.funcs["promise_string_contains"], strPtr, argVal)
-		return c.block.NewTrunc(result, irtypes.I1), true
-
-	case "starts_with":
-		argVal := c.genExpr(e.Args[0].Value)
-		result := c.block.NewCall(c.funcs["promise_string_starts_with"], strPtr, argVal)
-		return c.block.NewTrunc(result, irtypes.I1), true
-
-	case "ends_with":
-		argVal := c.genExpr(e.Args[0].Value)
-		result := c.block.NewCall(c.funcs["promise_string_ends_with"], strPtr, argVal)
-		return c.block.NewTrunc(result, irtypes.I1), true
-
-	case "index_of":
-		argVal := c.genExpr(e.Args[0].Value)
-		rawIdx := c.block.NewCall(c.funcs["promise_string_index_of"], strPtr, argVal)
-		// Wrap in Optional: -1 → none, otherwise some(idx)
-		isNeg := c.block.NewICmp(enum.IPredSLT, rawIdx, constant.NewInt(irtypes.I64, 0))
-		optType := irtypes.NewStruct(irtypes.I1, irtypes.I64)
-		someBlock := c.newBlock("indexof.some")
-		noneBlock := c.newBlock("indexof.none")
-		mergeBlock := c.newBlock("indexof.merge")
-		c.block.NewCondBr(isNeg, noneBlock, someBlock)
-
-		c.block = someBlock
-		someOpt := c.wrapOptional(rawIdx, optType)
-		c.block.NewBr(mergeBlock)
-		someEnd := c.block
-
-		c.block = noneBlock
-		noneOpt := constant.NewZeroInitializer(optType)
-		c.block.NewBr(mergeBlock)
-		noneEnd := c.block
-
-		c.block = mergeBlock
-		phi := c.block.NewPhi(ir.NewIncoming(someOpt, someEnd), ir.NewIncoming(noneOpt, noneEnd))
-		return phi, true
-
 	case "trim":
 		result := c.block.NewCall(c.funcs["promise_string_trim"], strPtr)
 		return result, true
@@ -2354,6 +2314,10 @@ func (c *Compiler) genIndexExpr(e *ast.IndexExpr) value.Value {
 		targetType = types.Substitute(targetType, c.typeSubst)
 	}
 
+	// String byte indexing: s[i] returns byte as char (i32)
+	if extractNamed(targetType) == types.TypString {
+		return c.genStringIndex(e)
+	}
 	if elem, ok := types.AsVector(targetType); ok {
 		return c.genVectorIndex(e, elem)
 	}
@@ -2361,6 +2325,48 @@ func (c *Compiler) genIndexExpr(e *ast.IndexExpr) value.Value {
 		return c.genMapIndex(e, key, val)
 	}
 	panic(fmt.Sprintf("codegen: cannot index type %s", targetType))
+}
+
+// genStringIndex implements string byte indexing: s[i] returns the byte at position i
+// as a char (i32), zero-extended from i8. This is byte indexing (like Go's string[i]),
+// not character indexing. UTF-8 decoding is handled separately by for-in loops.
+// String instance layout: { i8* _variant, i64 len, [0 x i8] data }
+func (c *Compiler) genStringIndex(e *ast.IndexExpr) value.Value {
+	strPtr := c.genExpr(e.Target)
+	idx := c.genExpr(e.Index)
+
+	strInstanceType := irtypes.NewStruct(
+		irtypes.I8Ptr,                   // _variant
+		irtypes.I64,                     // len
+		irtypes.NewArray(0, irtypes.I8), // data (flexible array)
+	)
+	typedPtr := c.block.NewBitCast(strPtr, irtypes.NewPointer(strInstanceType))
+
+	// Load len for bounds check
+	lenPtr := c.block.NewGetElementPtr(strInstanceType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	length := c.block.NewLoad(irtypes.I64, lenPtr)
+
+	// Bounds check (unsigned comparison handles negative indices too)
+	inBounds := c.block.NewICmp(enum.IPredULT, idx, length)
+	okBlock := c.newBlock("stridx.ok")
+	panicBlock := c.newBlock("stridx.oob")
+	c.block.NewCondBr(inBounds, okBlock, panicBlock)
+
+	// Out of bounds: panic
+	c.block = panicBlock
+	oobMsg := c.makeGlobalString("string index out of bounds")
+	c.block.NewCall(c.funcs["promise_panic"], oobMsg)
+	c.block.NewUnreachable()
+
+	// In bounds: load byte, zero-extend to i32 (char)
+	c.block = okBlock
+	dataPtr := c.block.NewGetElementPtr(strInstanceType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
+		constant.NewInt(irtypes.I32, 0))
+	bytePtr := c.block.NewGetElementPtr(irtypes.I8, dataPtr, idx)
+	byteVal := c.block.NewLoad(irtypes.I8, bytePtr)
+	return c.block.NewZExt(byteVal, irtypes.I32)
 }
 
 func (c *Compiler) genVectorIndex(e *ast.IndexExpr, elemType types.Type) value.Value {

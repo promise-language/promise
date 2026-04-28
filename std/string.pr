@@ -13,10 +13,60 @@ type string `native {
     [](int index) char `native;
     [:](int? start, int? end) string `native;
 
-    contains(string sub) bool `native;
-    starts_with(string prefix) bool `native;
-    ends_with(string suffix) bool `native;
-    index_of(string sub) int? `native;
+    contains(string sub) bool {
+        if sub.len == 0 { return true; }
+        if sub.len > this.len { return false; }
+        int limit = this.len - sub.len;
+        int i = 0;
+        while i <= limit {
+            int j = 0;
+            while j < sub.len {
+                if this[i + j] != sub[j] { break; }
+                j = j + 1;
+            }
+            if j == sub.len { return true; }
+            i = i + 1;
+        }
+        return false;
+    }
+
+    starts_with(string prefix) bool {
+        if prefix.len > this.len { return false; }
+        int i = 0;
+        while i < prefix.len {
+            if this[i] != prefix[i] { return false; }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    ends_with(string suffix) bool {
+        if suffix.len > this.len { return false; }
+        int offset = this.len - suffix.len;
+        int i = 0;
+        while i < suffix.len {
+            if this[offset + i] != suffix[i] { return false; }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    index_of(string sub) int? {
+        if sub.len == 0 { return 0; }
+        if sub.len > this.len { return none; }
+        int limit = this.len - sub.len;
+        int i = 0;
+        while i <= limit {
+            int j = 0;
+            while j < sub.len {
+                if this[i + j] != sub[j] { break; }
+                j = j + 1;
+            }
+            if j == sub.len { return i; }
+            i = i + 1;
+        }
+        return none;
+    }
     trim() string `native;
     split(string sep) string[] `native;
 

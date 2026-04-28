@@ -25,11 +25,6 @@ promise_string_i* promise_string_concat(promise_string_i* a, promise_string_i* b
     return s;
 }
 
-_Bool promise_string_eq(promise_string_i* a, promise_string_i* b) {
-    if (a->len != b->len) return 0;
-    return memcmp(a->data, b->data, a->len) == 0;
-}
-
 void promise_print_string(promise_string_v *s) {
     fwrite(s->_instance->data, 1, s->_instance->len, stdout);
     putchar('\n');
@@ -80,41 +75,6 @@ promise_string_i* promise_char_to_string(int32_t cp) {
         len = 4;
     }
     return promise_string_new(buf, len);
-}
-
-// --- String methods ---
-
-// promise_string_contains checks if sub is a substring of s.
-int8_t promise_string_contains(promise_string_i* s, promise_string_i* sub) {
-    if (sub->len == 0) return 1;
-    if (sub->len > s->len) return 0;
-    for (int64_t i = 0; i <= s->len - sub->len; i++) {
-        if (memcmp(s->data + i, sub->data, sub->len) == 0) return 1;
-    }
-    return 0;
-}
-
-// promise_string_starts_with checks if s starts with prefix.
-int8_t promise_string_starts_with(promise_string_i* s, promise_string_i* prefix) {
-    if (prefix->len > s->len) return 0;
-    return memcmp(s->data, prefix->data, prefix->len) == 0 ? 1 : 0;
-}
-
-// promise_string_ends_with checks if s ends with suffix.
-int8_t promise_string_ends_with(promise_string_i* s, promise_string_i* suffix) {
-    if (suffix->len > s->len) return 0;
-    return memcmp(s->data + s->len - suffix->len, suffix->data, suffix->len) == 0 ? 1 : 0;
-}
-
-// promise_string_index_of finds the first occurrence of sub in s.
-// Returns the byte index or -1 if not found.
-int64_t promise_string_index_of(promise_string_i* s, promise_string_i* sub) {
-    if (sub->len == 0) return 0;
-    if (sub->len > s->len) return -1;
-    for (int64_t i = 0; i <= s->len - sub->len; i++) {
-        if (memcmp(s->data + i, sub->data, sub->len) == 0) return i;
-    }
-    return -1;
 }
 
 // promise_string_trim returns a new string with leading/trailing whitespace removed.

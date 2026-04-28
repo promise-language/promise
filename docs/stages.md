@@ -403,7 +403,7 @@ Promoted `slice[T]` and `map[K,V]` from structural placeholder types (`*types.Sl
 **Runtime:**
 - New `runtime_slice.c`: push (with realloc growth), pop, contains, remove
 - Updated `runtime_map.c`: tombstone support (0=empty, 1=used, 2=tombstone), remove, contains, keys, values
-- Updated `runtime_string.c`: contains, starts_with, ends_with, index_of, trim, split
+- Updated `runtime_string.c`: ~~contains, starts_with, ends_with, index_of~~ (migrated to pure Promise), trim, split
 
 **Sema/Codegen Migration:**
 - ~35 `case *types.Slice:` / `case *types.Map:` switch cases migrated to `AsSlice`/`AsMap` helpers
@@ -582,7 +582,7 @@ Consolidated list of items deferred from completed stages. Items marked ~~strike
 | Primitive casting (`as!` for int↔uint, int↔char, etc.) | Done |
 | FNV-1a hash in Promise (`std/hash.pr`) for int/bool/char/float types | Done |
 | FNV-1a hash for string (codegen-emitted LLVM IR, no C dependency) | Done |
-| Move string methods to Promise (contains, starts_with, etc.) | Pending |
+| Move string methods to Promise (contains, starts_with, ends_with, index_of) | Done |
 | Move vector.contains/remove to Promise | Pending |
 | Move int/float/bool→string to Promise | Pending |
 

@@ -7,9 +7,9 @@ Proposal for Promise's runtime, syscall layer, concurrency model, and multi-plat
 The runtime today is ~450 lines of C providing:
 - **IO**: `printf`/`fprintf`/`fwrite` for print, `snprintf` for int/float/bool/char→string
 - **Memory**: `malloc`/`free`/`realloc` for strings, vectors, closures
-- **String ops**: new, concat, eq, contains, starts_with, ends_with, index_of, trim, split, UTF-8 decode
+- **String ops**: new, concat, ~~eq~~ (codegen LLVM IR), ~~contains, starts_with, ends_with, index_of~~ (pure Promise), trim, split, UTF-8 decode
 - **Vector ops**: with_capacity, push, pop, contains, remove
-- **Hash**: FNV-1a for int/bool/char/float (Promise `std/hash.pr` + codegen bitcast), string (codegen-emitted LLVM IR); `eq_string` also codegen-emitted — `runtime_hash.c` fully eliminated
+- **Hash**: FNV-1a for int/bool/char/float (Promise `std/hash.pr` + codegen bitcast), string (codegen-emitted LLVM IR); `eq_string` and `string_eq` also codegen-emitted — `runtime_hash.c` fully eliminated
 - **RTTI**: type_is check for inheritance
 - **Test runner**: fork/waitpid for crash isolation
 
@@ -150,7 +150,8 @@ Move string ops, vector ops, hash, and formatting from C into Promise.
 
 **What can move to Promise today**:
 - ~~Hash (FNV-1a) — all types migrated: int/bool/char/float use `std/hash.pr`, string uses codegen-emitted LLVM IR~~
-- `string.contains`, `starts_with`, `ends_with`, `index_of`, `trim`
+- ~~`string.contains`, `starts_with`, `ends_with`, `index_of`~~ — migrated to pure Promise (uses byte indexing `s[i]`)
+- `string.trim`
 - `vector.contains`, `vector.remove`
 - Map — already done (HashMap is pure Promise)
 - Int/float → string conversion (hex formatting needs shifts)
@@ -166,7 +167,7 @@ Move string ops, vector ops, hash, and formatting from C into Promise.
 **Migration order**:
 1. ~~Add bitwise operators to the language (`&`, `|`, `^`, `<<`, `>>`, `~`)~~ — Done
 2. ~~Move hash to Promise (FNV-1a is ~10 lines)~~ — Done (all types: int/bool/char/float via Promise, string via codegen LLVM IR)
-3. Move string methods (contains, starts_with, etc.) to Promise
+3. ~~Move string methods (contains, starts_with, ends_with, index_of) to Promise~~ — Done (string byte indexing `s[i]` + pure Promise implementations; `string_eq` moved to codegen LLVM IR)
 4. Move vector.contains/remove to Promise
 5. Move int/float/bool→string to Promise
 6. Move UTF-8 encode/decode to Promise

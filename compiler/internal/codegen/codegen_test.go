@@ -72,10 +72,45 @@ func init() {
 	for _, op := range []string{"==", "!=", "<", ">", "<=", ">="} {
 		fmt.Fprintf(&b, "\t%s(string other) bool `native;\n", op)
 	}
-	b.WriteString("\tcontains(string sub) bool `native;\n")
-	b.WriteString("\tstarts_with(string prefix) bool `native;\n")
-	b.WriteString("\tends_with(string suffix) bool `native;\n")
-	b.WriteString("\tindex_of(string sub) int? `native;\n")
+	b.WriteString("\tcontains(string sub) bool {\n")
+	b.WriteString("\t\tif sub.len == 0 { return true; }\n")
+	b.WriteString("\t\tif sub.len > this.len { return false; }\n")
+	b.WriteString("\t\tint limit = this.len - sub.len;\n")
+	b.WriteString("\t\tint i = 0;\n")
+	b.WriteString("\t\twhile i <= limit {\n")
+	b.WriteString("\t\t\tint j = 0;\n")
+	b.WriteString("\t\t\twhile j < sub.len { if this[i + j] != sub[j] { break; } j = j + 1; }\n")
+	b.WriteString("\t\t\tif j == sub.len { return true; }\n")
+	b.WriteString("\t\t\ti = i + 1;\n")
+	b.WriteString("\t\t}\n")
+	b.WriteString("\t\treturn false;\n")
+	b.WriteString("\t}\n")
+	b.WriteString("\tstarts_with(string prefix) bool {\n")
+	b.WriteString("\t\tif prefix.len > this.len { return false; }\n")
+	b.WriteString("\t\tint i = 0;\n")
+	b.WriteString("\t\twhile i < prefix.len { if this[i] != prefix[i] { return false; } i = i + 1; }\n")
+	b.WriteString("\t\treturn true;\n")
+	b.WriteString("\t}\n")
+	b.WriteString("\tends_with(string suffix) bool {\n")
+	b.WriteString("\t\tif suffix.len > this.len { return false; }\n")
+	b.WriteString("\t\tint offset = this.len - suffix.len;\n")
+	b.WriteString("\t\tint i = 0;\n")
+	b.WriteString("\t\twhile i < suffix.len { if this[offset + i] != suffix[i] { return false; } i = i + 1; }\n")
+	b.WriteString("\t\treturn true;\n")
+	b.WriteString("\t}\n")
+	b.WriteString("\tindex_of(string sub) int? {\n")
+	b.WriteString("\t\tif sub.len == 0 { return 0; }\n")
+	b.WriteString("\t\tif sub.len > this.len { return none; }\n")
+	b.WriteString("\t\tint limit = this.len - sub.len;\n")
+	b.WriteString("\t\tint i = 0;\n")
+	b.WriteString("\t\twhile i <= limit {\n")
+	b.WriteString("\t\t\tint j = 0;\n")
+	b.WriteString("\t\t\twhile j < sub.len { if this[i + j] != sub[j] { break; } j = j + 1; }\n")
+	b.WriteString("\t\t\tif j == sub.len { return i; }\n")
+	b.WriteString("\t\t\ti = i + 1;\n")
+	b.WriteString("\t\t}\n")
+	b.WriteString("\t\treturn none;\n")
+	b.WriteString("\t}\n")
 	b.WriteString("\ttrim() string `native;\n")
 	b.WriteString("\tsplit(string sep) string[] `native;\n")
 	b.WriteString("\t[](int index) char `native;\n")
@@ -1087,6 +1122,20 @@ func TestStringEquality(t *testing.T) {
 	assertContains(t, ir, "call i1 @promise_string_eq(")
 }
 
+func TestStringEqFuncBody(t *testing.T) {
+	ir := generateIR(t, `main() { b := "a" == "b"; }`)
+	// Same-pointer fast path
+	assertContains(t, ir, "icmp eq i8* %a, %b")
+	// Length comparison
+	assertContains(t, ir, "check_len:")
+	// Byte-by-byte comparison loop
+	assertContains(t, ir, "loop.header:")
+	assertContains(t, ir, "loop.body:")
+	// Terminal blocks
+	assertContains(t, ir, "equal:")
+	assertContains(t, ir, "not_equal:")
+}
+
 func TestStringNotEqual(t *testing.T) {
 	ir := generateIR(t, `main() { b := "a" != "b"; }`)
 	assertContains(t, ir, "call i1 @promise_string_eq(")
@@ -1173,7 +1222,7 @@ func TestStringIntrinsicsDeclared(t *testing.T) {
 	// String intrinsics should always be declared
 	assertContains(t, ir, "declare i8* @promise_string_new(i8* %data, i64 %len)")
 	assertContains(t, ir, "declare i8* @promise_string_concat(i8* %a, i8* %b)")
-	assertContains(t, ir, "declare i1 @promise_string_eq(i8* %a, i8* %b)")
+	assertContains(t, ir, "define i1 @promise_string_eq(i8* %a, i8* %b)")
 }
 
 // === User Type Tests ===
@@ -5707,6 +5756,20 @@ func TestVectorRemove(t *testing.T) {
 // TODO: Vector capacity constructor T[](capacity: n) not yet wired through sema.
 // genVectorCapacityConstructor exists in codegen but sema doesn't recognize the syntax yet.
 
+// --- String byte indexing ---
+
+func TestStringByteIndex(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			s := "hello";
+			char c = s[0];
+		}
+	`)
+	assertContains(t, ir, "stridx.ok")
+	assertContains(t, ir, "stridx.oob")
+	assertContains(t, ir, "zext i8")
+}
+
 // --- String method tests ---
 
 func TestStringContains(t *testing.T) {
@@ -5716,7 +5779,9 @@ func TestStringContains(t *testing.T) {
 			bool has = s.contains("world");
 		}
 	`)
-	assertContains(t, ir, "call i8 @promise_string_contains(")
+	// Now a Promise method, compiled as a regular function
+	assertContains(t, ir, "define i1 @string.contains(")
+	assertContains(t, ir, "call i1 @string.contains(")
 }
 
 func TestStringStartsWith(t *testing.T) {
@@ -5726,7 +5791,8 @@ func TestStringStartsWith(t *testing.T) {
 			bool yes = s.starts_with("hel");
 		}
 	`)
-	assertContains(t, ir, "call i8 @promise_string_starts_with(")
+	assertContains(t, ir, "define i1 @string.starts_with(")
+	assertContains(t, ir, "call i1 @string.starts_with(")
 }
 
 func TestStringEndsWith(t *testing.T) {
@@ -5736,7 +5802,8 @@ func TestStringEndsWith(t *testing.T) {
 			bool yes = s.ends_with("llo");
 		}
 	`)
-	assertContains(t, ir, "call i8 @promise_string_ends_with(")
+	assertContains(t, ir, "define i1 @string.ends_with(")
+	assertContains(t, ir, "call i1 @string.ends_with(")
 }
 
 func TestStringIndexOf(t *testing.T) {
@@ -5746,9 +5813,8 @@ func TestStringIndexOf(t *testing.T) {
 			int? idx = s.index_of("ll");
 		}
 	`)
-	assertContains(t, ir, "call i64 @promise_string_index_of(")
-	assertContains(t, ir, "indexof.some")
-	assertContains(t, ir, "indexof.none")
+	assertContains(t, ir, "define { i1, i64 } @string.index_of(")
+	assertContains(t, ir, "call { i1, i64 } @string.index_of(")
 }
 
 func TestStringTrim(t *testing.T) {

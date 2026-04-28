@@ -4,19 +4,23 @@ Proposal for Promise's runtime, syscall layer, concurrency model, and multi-plat
 
 ## Current State
 
-After completing the C-to-codegen migration (Phases 1-2), the remaining C runtime is minimal:
+After completing Phases 1-3, the C runtime is reduced to a single function:
 
-**Remaining C runtime** (`runtime/runtime.c`, ~15 lines):
-- `promise_print_int`, `promise_print_f64`, `promise_print_bool` — IO via `printf`
-- `promise_panic`, `promise_panic_msg` — error termination via `fprintf` + `exit`
+**Remaining C runtime** (`runtime/runtime_test.c`, ~25 lines):
+- `promise_test_run` — fork-based crash isolation via `fork`/`waitpid` (test mode only)
 
-**Remaining C runtime** (`runtime/runtime_string.c`, ~10 lines):
-- `promise_print_string` — IO via `fwrite`
+**Deleted C files**: `runtime.c`, `runtime_string.c`, `runtime_hash.c`, `runtime_vector.c`.
 
-**Remaining C runtime** (`runtime/runtime_test.c`, ~60 lines):
-- Test runner — crash isolation via `fork`/`waitpid`
+**PAL (Platform Abstraction Layer)** — codegen-emitted LLVM IR (`codegen/pal/`):
+- `pal_write(fd, buf, len)` — wraps libc `@write` (PosixPAL)
+- `pal_exit(code)` — wraps libc `@exit` (PosixPAL)
 
-**Everything else is codegen-emitted LLVM IR** (14 intrinsic functions defined in `compiler.go`):
+**Codegen-emitted print/panic functions** (`codegen/io.go`):
+- `promise_print_string`, `promise_print_int`, `promise_print_f64`, `promise_print_bool` — via PAL `pal_write`
+- `promise_panic`, `promise_panic_msg` — via PAL `pal_write` + `pal_exit`
+- `promise_test_print_result`, `promise_test_summary` — via PAL `pal_write` (test mode)
+
+**Codegen-emitted intrinsic functions** (`codegen/compiler.go`):
 - String: `new`, `concat`, `eq`, `trim`, `split`, `next_char`, `eq_string` (map key equality)
 - Vector: `with_capacity`, `push`, `pop`, `contains`, `remove`
 - RTTI: `type_is`
@@ -28,13 +32,13 @@ After completing the C-to-codegen migration (Phases 1-2), the remaining C runtim
 - String methods: `contains`, `starts_with`, `ends_with`, `index_of` (`std/string.pr`)
 - Map: full HashMap implementation (`std/map.pr`)
 
-**Libc surface**: `malloc`, `free`, `realloc`, `memcmp`, `printf`, `fprintf`, `fwrite`, `snprintf`, `putchar`, `exit`, `fork`, `waitpid`, `fflush`.
+**Libc surface**: `malloc`, `free`, `realloc`, `memcmp`, `snprintf`, `strlen`, `write`, `exit`, `fork`, `waitpid`, `fflush`, `_exit`.
 
 **LLVM intrinsics** (replace libc `memcpy`/`memmove`): `@llvm.memcpy`, `@llvm.memmove`. Note: no `@llvm.memcmp` intrinsic exists.
 
 **LLVM optimizer attributes** on all externs: `noalias`, `nocapture`, `noundef`, `nounwind`, `willreturn`, `readonly`, `argmemonly` (as applicable).
 
-**Eliminated C files**: `runtime_hash.c`, `runtime_vector.c`, most of `runtime_string.c`, most of `runtime.c`.
+**Build pipeline**: In non-test mode, no C compilation — the `.ll` file contains everything and clang just links it. In test mode, `runtime_test.c` is compiled and linked for fork isolation.
 
 ---
 
@@ -44,7 +48,7 @@ After completing the C-to-codegen migration (Phases 1-2), the remaining C runtim
 |-------|------|--------|
 | **1** | Bitwise operators (`&`, `\|`, `^`, `<<`, `>>`, `~`) | Done |
 | **2** | Migrate all computation from C to codegen LLVM IR / pure Promise | Done |
-| **3** | PAL abstraction — define interface, implement macOS + Linux | **Next** |
+| **3** | PAL abstraction — define interface, implement macOS + Linux | Done |
 | **3b** | PAL Windows | Planned |
 | **3c** | PAL WASM (WASI imports + JS FFI) | Planned |
 | **4** | Centralize allocator behind PAL | Planned |
@@ -56,7 +60,7 @@ After completing the C-to-codegen migration (Phases 1-2), the remaining C runtim
 | **7** | Replace clang with `llc` + `lld`, enable cross-compilation | Planned |
 | **8** | Rewrite scheduler in Promise | Planned |
 
-Phases 1-2 are done and platform-independent. Phase 3 is where the platform split begins. Phases 5-6 are the big architectural investment. Phases 7-8 are polish.
+Phases 1-3 are done. Phase 3 introduced the platform split (PAL). Phases 5-6 are the big architectural investment. Phases 7-8 are polish.
 
 ---
 
@@ -83,7 +87,7 @@ Also done: LLVM intrinsics for all `memcpy`/`memmove`, libc `memcmp` for equalit
 
 ---
 
-## Phase 3 — Platform Abstraction Layer (Next)
+## Phase 3 — Platform Abstraction Layer (Done)
 
 The remaining C runtime functions all depend on IO or process control. Phase 3 replaces them with a Platform Abstraction Layer (PAL) — codegen-emitted LLVM IR with per-target implementations, eliminating all C runtime files.
 

@@ -274,3 +274,95 @@ func (c *Compiler) definePanicMsgBody(fn *ir.Func) {
 
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoReturn)
 }
+
+// defineTestPrintResultBody adds a function body to promise_test_print_result(i8* %name, i32 %failed).
+// Writes "PASS <name>\n" or "FAIL <name>\n" to stdout via pal_write.
+func (c *Compiler) defineTestPrintResultBody(fn *ir.Func) {
+	// Global constants for prefix strings
+	passData := constant.NewCharArrayFromString("PASS ")
+	passGlobal := c.module.NewGlobalDef(".str.pass_prefix", passData)
+	passGlobal.Immutable = true
+
+	failData := constant.NewCharArrayFromString("FAIL ")
+	failGlobal := c.module.NewGlobalDef(".str.fail_prefix", failData)
+	failGlobal.Immutable = true
+
+	stdout := constant.NewInt(irtypes.I32, 1)
+	name := fn.Params[0]   // i8* (C string, null-terminated)
+	failed := fn.Params[1] // i32
+
+	// Branch on failed != 0
+	entry := fn.NewBlock("entry")
+	thenBlock := fn.NewBlock("fail")
+	elseBlock := fn.NewBlock("pass")
+	mergeBlock := fn.NewBlock("merge")
+
+	isFailed := entry.NewICmp(enum.IPredNE, failed, constant.NewInt(irtypes.I32, 0))
+	entry.NewCondBr(isFailed, thenBlock, elseBlock)
+
+	// "FAIL " branch
+	failPtr := thenBlock.NewGetElementPtr(failGlobal.ContentType, failGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	thenBlock.NewCall(c.palWrite, stdout, failPtr, constant.NewInt(irtypes.I64, 5))
+	thenBlock.NewBr(mergeBlock)
+
+	// "PASS " branch
+	passPtr := elseBlock.NewGetElementPtr(passGlobal.ContentType, passGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	elseBlock.NewCall(c.palWrite, stdout, passPtr, constant.NewInt(irtypes.I64, 5))
+	elseBlock.NewBr(mergeBlock)
+
+	// Write name + newline
+	nameLen := mergeBlock.NewCall(c.funcs["strlen"], name)
+	mergeBlock.NewCall(c.palWrite, stdout, name, nameLen)
+	c.emitWriteNewline(mergeBlock, stdout)
+	mergeBlock.NewRet(nil)
+}
+
+// defineTestSummaryBody adds a function body to promise_test_summary(i32 %passed, i32 %failed).
+// Writes "\n<passed> passed, <failed> failed\n" to stdout via pal_write.
+func (c *Compiler) defineTestSummaryBody(fn *ir.Func) {
+	// Global constants
+	passedSuffixData := constant.NewCharArrayFromString(" passed, ")
+	passedSuffixGlobal := c.module.NewGlobalDef(".str.passed_suffix", passedSuffixData)
+	passedSuffixGlobal.Immutable = true
+
+	failedSuffixData := constant.NewCharArrayFromString(" failed\n")
+	failedSuffixGlobal := c.module.NewGlobalDef(".str.failed_suffix", failedSuffixData)
+	failedSuffixGlobal.Immutable = true
+
+	stdout := constant.NewInt(irtypes.I32, 1)
+	passed := fn.Params[0] // i32
+	failed := fn.Params[1] // i32
+
+	entry := fn.NewBlock("entry")
+
+	// Write leading newline
+	c.emitWriteNewline(entry, stdout)
+
+	// Convert passed count to string: sext i32 → i64, call promise_int_to_string
+	passedI64 := entry.NewSExt(passed, irtypes.I64)
+	passedStr := entry.NewCall(c.funcs["promise_int_to_string"], passedI64)
+	passedDataPtr, passedDataLen := c.extractStringDataLenFromInstance(entry, passedStr)
+	entry.NewCall(c.palWrite, stdout, passedDataPtr, passedDataLen)
+	entry.NewCall(c.funcs["free"], passedStr)
+
+	// Write " passed, "
+	pSuffixPtr := entry.NewGetElementPtr(passedSuffixGlobal.ContentType, passedSuffixGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	entry.NewCall(c.palWrite, stdout, pSuffixPtr, constant.NewInt(irtypes.I64, 9))
+
+	// Convert failed count to string
+	failedI64 := entry.NewSExt(failed, irtypes.I64)
+	failedStr := entry.NewCall(c.funcs["promise_int_to_string"], failedI64)
+	failedDataPtr, failedDataLen := c.extractStringDataLenFromInstance(entry, failedStr)
+	entry.NewCall(c.palWrite, stdout, failedDataPtr, failedDataLen)
+	entry.NewCall(c.funcs["free"], failedStr)
+
+	// Write " failed\n"
+	fSuffixPtr := entry.NewGetElementPtr(failedSuffixGlobal.ContentType, failedSuffixGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	entry.NewCall(c.palWrite, stdout, fSuffixPtr, constant.NewInt(irtypes.I64, 8))
+
+	entry.NewRet(nil)
+}

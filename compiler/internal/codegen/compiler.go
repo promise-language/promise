@@ -240,7 +240,9 @@ func Compile(file *ast.File, info *sema.Info) *CompileResult {
 func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 	c := r.compiler
 
-	// Declare test runner C functions
+	// Declare test runner functions.
+	// promise_test_run remains a C extern (fork/waitpid in runtime_test.c).
+	// promise_test_print_result and promise_test_summary are codegen-defined via PAL.
 	testRunFn := c.module.NewFunc("promise_test_run",
 		irtypes.I32,
 		ir.NewParam("fn", irtypes.I8Ptr),
@@ -255,6 +257,10 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 		ir.NewParam("passed", irtypes.I32),
 		ir.NewParam("failed", irtypes.I32),
 	)
+
+	// Add codegen bodies (replaces C printf implementations)
+	c.defineTestPrintResultBody(testPrintFn)
+	c.defineTestSummaryBody(testSummaryFn)
 
 	// Remove existing main if present, then create test main
 	// The existing main is already compiled. We replace it with a new one.

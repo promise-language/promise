@@ -1,10 +1,13 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <stdio.h>
-#include <string.h>
 
 // Run a test function in a forked child process.
 // Returns 0 on success, 1 on failure (panic/crash/non-zero exit).
+//
+// This is the only remaining C runtime function. fork/waitpid cannot be
+// expressed in pure LLVM IR without platform-specific inline assembly.
+// Deferred to Phase 5 (thread-based test isolation).
 int promise_test_run(void (*fn)()) {
     fflush(stdout);
     fflush(stderr);
@@ -21,18 +24,4 @@ int promise_test_run(void (*fn)()) {
         return 0; // pass
     }
     return 1; // fail
-}
-
-// Print test result: name and PASS/FAIL
-void promise_test_print_result(const char* name, int failed) {
-    if (failed) {
-        printf("FAIL %s\n", name);
-    } else {
-        printf("PASS %s\n", name);
-    }
-}
-
-// Print test summary line
-void promise_test_summary(int passed, int failed) {
-    printf("\n%d passed, %d failed\n", passed, failed);
 }

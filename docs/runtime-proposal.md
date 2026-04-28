@@ -10,7 +10,7 @@ The runtime today is ~450 lines of C providing:
 - **String ops**: ~~new, concat~~ (codegen LLVM IR, uses `@llvm.memcpy` intrinsic), ~~eq~~ (codegen LLVM IR), ~~contains, starts_with, ends_with, index_of~~ (pure Promise), ~~trim, split, UTF-8 decode~~ (codegen-emitted LLVM IR; split uses libc `memcmp`)
 - **Vector ops**: ~~with_capacity, push, pop~~ (codegen-emitted LLVM IR), ~~contains, remove~~ (codegen-emitted LLVM IR)
 - **Hash**: FNV-1a for int/bool/char/float (Promise `std/hash.pr` + codegen bitcast), string (codegen-emitted LLVM IR); `eq_string` and `string_eq` also codegen-emitted — `runtime_hash.c` fully eliminated
-- **RTTI**: type_is check for inheritance
+- **RTTI**: ~~type_is check for inheritance~~ (codegen-emitted LLVM IR)
 - **Test runner**: fork/waitpid for crash isolation
 
 The libc surface used: `malloc`, `free`, `realloc`, `memcmp` (for string split), `printf`, `fprintf`, `fwrite`, `snprintf`, `putchar`, `exit`, `fork`, `waitpid`, `fflush`. LLVM intrinsics replace libc `memcpy`/`memmove`.
@@ -163,7 +163,7 @@ Move string ops, vector ops, hash, and formatting from C into Promise.
 - `vector.push` (realloc path) — Done (also with_capacity, pop)
 - `string.trim`, `string.split`, `string.next_char` — Done (trim/next_char are pure codegen; split uses libc `memcmp`)
 - `print` functions (until IO layer is built)
-- RTTI `type_is` (accesses raw memory layout)
+- RTTI `type_is` (accesses raw memory layout) — Done
 
 **Migration order**:
 1. ~~Add bitwise operators to the language (`&`, `|`, `^`, `<<`, `>>`, `~`)~~ — Done
@@ -178,7 +178,9 @@ Move string ops, vector ops, hash, and formatting from C into Promise.
 
 9. ~~Replace C string trim/split/next_char with codegen-emitted LLVM IR~~ — Done (trim uses byte loops, split uses libc `memcmp` for SIMD-accelerated substring matching, next_char is UTF-8 decoder; `runtime_string.c` reduced to `promise_print_string` only)
 
-After this migration, C runtime code drops to: `print` (IO), `type_is` (RTTI), test runner.
+10. ~~Replace C `promise_type_is` with codegen-emitted LLVM IR~~ — Done (phi-node loop over parent IDs; `runtime.c` reduced to print/panic functions only)
+
+After this migration, C runtime code drops to: `print` (IO), `panic` (error termination), test runner. All computation-only functions are now codegen-emitted LLVM IR. LLVM optimizer attributes added to `malloc`/`free`/`realloc`/`memcmp` externs (`noalias`, `nocapture`, `noundef`, `nounwind`, `willreturn`, `readonly`, `argmemonly`).
 
 ~~**Performance TODO — restore SIMD memcmp in equality functions**~~: Done. All three codegen byte-by-byte comparison loops replaced with libc `memcmp` (SIMD-accelerated — NEON on ARM, SSE/AVX on x86):
 - `defineStringDirectEqFunc` — `promise_string_eq`, used by `==`/`!=` on strings

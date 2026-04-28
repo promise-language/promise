@@ -325,10 +325,18 @@ func (c *Compiler) declareIntrinsics() {
 		irtypes.Void, ir.NewParam("msg", irtypes.I8Ptr))
 
 	// malloc/free for heap allocation
-	c.funcs["malloc"] = c.module.NewFunc("malloc",
-		irtypes.I8Ptr, ir.NewParam("size", irtypes.I64))
-	c.funcs["free"] = c.module.NewFunc("free",
-		irtypes.Void, ir.NewParam("ptr", irtypes.I8Ptr))
+	mallocSize := ir.NewParam("size", irtypes.I64)
+	mallocSize.Attrs = append(mallocSize.Attrs, enum.ParamAttrNoUndef)
+	mallocFn := c.module.NewFunc("malloc", irtypes.I8Ptr, mallocSize)
+	mallocFn.ReturnAttrs = append(mallocFn.ReturnAttrs, enum.ReturnAttrNoAlias)
+	mallocFn.FuncAttrs = append(mallocFn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
+	c.funcs["malloc"] = mallocFn
+
+	freePtr := ir.NewParam("ptr", irtypes.I8Ptr)
+	freePtr.Attrs = append(freePtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
+	freeFn := c.module.NewFunc("free", irtypes.Void, freePtr)
+	freeFn.FuncAttrs = append(freeFn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
+	c.funcs["free"] = freeFn
 
 	// LLVM memcpy/memmove intrinsics (used instead of libc memcpy/memmove)
 	c.funcs["llvm.memcpy"] = c.module.NewFunc("llvm.memcpy.p0i8.p0i8.i64",
@@ -349,10 +357,14 @@ func (c *Compiler) declareIntrinsics() {
 	c.defineStringConcatFunc()
 
 	// Realloc for vector growth
-	c.funcs["realloc"] = c.module.NewFunc("realloc",
-		irtypes.I8Ptr,
-		ir.NewParam("ptr", irtypes.I8Ptr),
-		ir.NewParam("size", irtypes.I64))
+	reallocPtr := ir.NewParam("ptr", irtypes.I8Ptr)
+	reallocPtr.Attrs = append(reallocPtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
+	reallocSz := ir.NewParam("size", irtypes.I64)
+	reallocSz.Attrs = append(reallocSz.Attrs, enum.ParamAttrNoUndef)
+	reallocFn := c.module.NewFunc("realloc", irtypes.I8Ptr, reallocPtr, reallocSz)
+	reallocFn.ReturnAttrs = append(reallocFn.ReturnAttrs, enum.ReturnAttrNoAlias)
+	reallocFn.FuncAttrs = append(reallocFn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
+	c.funcs["realloc"] = reallocFn
 
 	// Memcmp (SIMD-accelerated; no @llvm.memcmp intrinsic exists)
 	// Used by string equality, vector contains, and string split
@@ -400,11 +412,8 @@ func (c *Compiler) declareIntrinsics() {
 	// String next_char UTF-8 decoder (codegen-emitted LLVM IR, replaces C runtime)
 	c.defineStringNextCharFunc()
 
-	// RTTI intrinsic for runtime type checking
-	c.funcs["promise_type_is"] = c.module.NewFunc("promise_type_is",
-		irtypes.I32,
-		ir.NewParam("variant_ptr", irtypes.I8Ptr),
-		ir.NewParam("expected_id", irtypes.I32))
+	// RTTI type check (codegen-emitted LLVM IR, replaces C runtime)
+	c.defineTypeIsFunc()
 
 	// String hash function (codegen-emitted LLVM IR, replaces C runtime)
 	c.defineStringHashFunc()

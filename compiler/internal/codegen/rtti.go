@@ -5,6 +5,7 @@ import (
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
+	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 	"github.com/llir/llvm/ir/value"
 
@@ -148,6 +149,75 @@ func (c *Compiler) emitTypeInfoGlobals(file *ast.File) {
 		}
 		c.typeInfoGlobals[named] = c.emitTypeInfo(named)
 	}
+}
+
+// defineTypeIsFunc emits an LLVM IR function that checks if a type identified
+// by its variant pointer is or inherits from the expected type ID.
+// Replaces the C runtime promise_type_is.
+// Typeinfo layout: { i8* vtable_ptr, i32 type_id, i32 num_parents, [0 x i32] parent_ids }
+func (c *Compiler) defineTypeIsFunc() {
+	variantParam := ir.NewParam("variant_ptr", irtypes.I8Ptr)
+	expectedParam := ir.NewParam("expected_id", irtypes.I32)
+	fn := c.module.NewFunc("promise_type_is", irtypes.I32, variantParam, expectedParam)
+
+	// Typeinfo struct type with flexible array member for parent_ids
+	typeinfoType := irtypes.NewStruct(
+		irtypes.I8Ptr,                    // field 0: vtable_ptr
+		irtypes.I32,                      // field 1: type_id
+		irtypes.I32,                      // field 2: num_parents
+		irtypes.NewArray(0, irtypes.I32), // field 3: parent_ids (flexible)
+	)
+
+	zero32 := constant.NewInt(irtypes.I32, 0)
+	one32 := constant.NewInt(irtypes.I32, 1)
+
+	// --- Basic blocks ---
+	entry := fn.NewBlock("entry")
+	checkID := fn.NewBlock("check_id")
+	loopInit := fn.NewBlock("loop_init")
+	loopHeader := fn.NewBlock("loop_header")
+	loopBody := fn.NewBlock("loop_body")
+	retTrueBlk := fn.NewBlock("ret_true")
+	retFalseBlk := fn.NewBlock("ret_false")
+
+	// entry: null check
+	isNull := entry.NewICmp(enum.IPredEQ, variantParam, constant.NewNull(irtypes.I8Ptr))
+	entry.NewCondBr(isNull, retFalseBlk, checkID)
+
+	// check_id: load type_id, compare with expected_id
+	typedPtr := checkID.NewBitCast(variantParam, irtypes.NewPointer(typeinfoType))
+	tidPtr := checkID.NewGetElementPtr(typeinfoType, typedPtr, zero32, one32)
+	typeID := checkID.NewLoad(irtypes.I32, tidPtr)
+	match := checkID.NewICmp(enum.IPredEQ, typeID, expectedParam)
+	checkID.NewCondBr(match, retTrueBlk, loopInit)
+
+	// loop_init: load num_parents, check if > 0
+	npPtr := loopInit.NewGetElementPtr(typeinfoType, typedPtr, zero32, constant.NewInt(irtypes.I32, 2))
+	numParents := loopInit.NewLoad(irtypes.I32, npPtr)
+	hasParents := loopInit.NewICmp(enum.IPredSGT, numParents, zero32)
+	loopInit.NewCondBr(hasParents, loopHeader, retFalseBlk)
+
+	// loop_header: phi node for index, bounds check
+	iPhi := loopHeader.NewPhi(&ir.Incoming{X: zero32, Pred: loopInit})
+	inBounds := loopHeader.NewICmp(enum.IPredSLT, iPhi, numParents)
+	loopHeader.NewCondBr(inBounds, loopBody, retFalseBlk)
+
+	// loop_body: load parent_ids[i], compare, increment
+	pidPtr := loopBody.NewGetElementPtr(typeinfoType, typedPtr,
+		zero32, constant.NewInt(irtypes.I32, 3), iPhi)
+	parentID := loopBody.NewLoad(irtypes.I32, pidPtr)
+	parentMatch := loopBody.NewICmp(enum.IPredEQ, parentID, expectedParam)
+	iNext := loopBody.NewAdd(iPhi, one32)
+	loopBody.NewCondBr(parentMatch, retTrueBlk, loopHeader)
+
+	// Add second incoming to phi (from loop_body)
+	iPhi.Incs = append(iPhi.Incs, &ir.Incoming{X: iNext, Pred: loopBody})
+
+	// ret_true / ret_false
+	retTrueBlk.NewRet(constant.NewInt(irtypes.I32, 1))
+	retFalseBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+
+	c.funcs["promise_type_is"] = fn
 }
 
 // getOrEmitViewVtable emits a vtable ordered by the view type's AllVirtualMethods(),

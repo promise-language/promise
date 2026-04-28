@@ -1453,7 +1453,7 @@ func TestUserTypeMethodWithParams(t *testing.T) {
 
 func TestMallocDeclared(t *testing.T) {
 	ir := generateIR(t, `main() { x := 42; }`)
-	assertContains(t, ir, "declare i8* @malloc(i64 %size)")
+	assertContains(t, ir, "declare noalias i8* @malloc(i64 noundef %size) nounwind willreturn")
 }
 
 func TestUserTypeExternUnpacking(t *testing.T) {
@@ -3863,9 +3863,29 @@ func TestIsNamedType(t *testing.T) {
 			bool b = a is Dog;
 		}
 	`)
-	// Should call promise_type_is and convert to i1
+	// Should call promise_type_is (now codegen-emitted, not extern) and convert to i1
+	assertContains(t, ir, "define i32 @promise_type_is")
 	assertContains(t, ir, "call i32 @promise_type_is")
 	assertContains(t, ir, "icmp ne i32")
+}
+
+func TestTypeIsFuncBody(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal { string name; }
+		type Dog is Animal { }
+		main() {
+			Animal a = Dog(name: "Rex");
+			bool b = a is Dog;
+		}
+	`)
+	// Verify key blocks in the defined type_is function
+	assertContains(t, ir, "define i32 @promise_type_is")
+	assertContains(t, ir, "check_id:")
+	assertContains(t, ir, "loop_init:")
+	assertContains(t, ir, "loop_header:")
+	assertContains(t, ir, "loop_body:")
+	assertContains(t, ir, "ret_true:")
+	assertContains(t, ir, "ret_false:")
 }
 
 func TestIsNamedTypeInheritance(t *testing.T) {
@@ -6144,6 +6164,17 @@ func TestMemcmpDeclared(t *testing.T) {
 	ir := generateIR(t, `main() { x := 1; }`)
 	assertContains(t, ir, "declare i32 @memcmp(i8* nocapture noundef %s1, i8* nocapture noundef %s2, i64 noundef %n)")
 	assertContains(t, ir, "mustprogress nounwind readonly willreturn argmemonly")
+}
+
+func TestAllocatorAttributes(t *testing.T) {
+	ir := generateIR(t, `
+		type Foo { int x; }
+		main() { f := Foo(x: 1); }
+	`)
+	// malloc should have noalias return and nounwind
+	assertContains(t, ir, "declare noalias i8* @malloc(i64 noundef %size) nounwind willreturn")
+	assertContains(t, ir, "declare void @free(i8* nocapture noundef %ptr) nounwind willreturn")
+	assertContains(t, ir, "declare noalias i8* @realloc(i8* nocapture noundef %ptr, i64 noundef %size) nounwind willreturn")
 }
 
 // --- Return optional wrapping in monomorphized context ---

@@ -234,6 +234,140 @@ func TestWasmPALEmitExit(t *testing.T) {
 	}
 }
 
+// --- Allocator tests (shared libc wrappers, tested across all PALs) ---
+
+func TestEmitAlloc(t *testing.T) {
+	pals := []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	}
+	for _, tc := range pals {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitAlloc(module)
+			out := module.String()
+
+			if !strings.Contains(out, "@malloc(i64") {
+				t.Error("missing @malloc declaration")
+			}
+			if !strings.Contains(out, "noalias") {
+				t.Error("missing noalias attribute")
+			}
+			if !strings.Contains(out, "noundef") {
+				t.Error("missing noundef attribute on malloc size param")
+			}
+			if !strings.Contains(out, "define noalias i8* @pal_alloc(i64 %size)") {
+				t.Error("missing @pal_alloc definition with noalias return")
+			}
+			if !strings.Contains(out, "call i8* @malloc(i64 %size)") {
+				t.Error("missing call to @malloc in pal_alloc body")
+			}
+			if !strings.Contains(out, "nounwind") {
+				t.Error("missing nounwind attribute")
+			}
+			if !strings.Contains(out, "willreturn") {
+				t.Error("missing willreturn attribute")
+			}
+			if fn.Name() != "pal_alloc" {
+				t.Errorf("expected function name pal_alloc, got %s", fn.Name())
+			}
+		})
+	}
+}
+
+func TestEmitFree(t *testing.T) {
+	pals := []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	}
+	for _, tc := range pals {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitFree(module)
+			out := module.String()
+
+			if !strings.Contains(out, "@free(i8*") {
+				t.Error("missing @free declaration")
+			}
+			if !strings.Contains(out, "nocapture") {
+				t.Error("missing nocapture attribute on @free param")
+			}
+			if !strings.Contains(out, "noundef") {
+				t.Error("missing noundef attribute on @free param")
+			}
+			if !strings.Contains(out, "define void @pal_free(i8* %ptr)") {
+				t.Error("missing @pal_free definition")
+			}
+			if !strings.Contains(out, "call void @free(i8* %ptr)") {
+				t.Error("missing call to @free in pal_free body")
+			}
+			if !strings.Contains(out, "nounwind") {
+				t.Error("missing nounwind attribute on pal_free")
+			}
+			if !strings.Contains(out, "willreturn") {
+				t.Error("missing willreturn attribute on pal_free")
+			}
+			if fn.Name() != "pal_free" {
+				t.Errorf("expected function name pal_free, got %s", fn.Name())
+			}
+		})
+	}
+}
+
+func TestEmitRealloc(t *testing.T) {
+	pals := []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	}
+	for _, tc := range pals {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitRealloc(module)
+			out := module.String()
+
+			if !strings.Contains(out, "@realloc(i8*") {
+				t.Error("missing @realloc declaration")
+			}
+			if !strings.Contains(out, "noalias") {
+				t.Error("missing noalias attribute")
+			}
+			if !strings.Contains(out, "nocapture") {
+				t.Error("missing nocapture attribute on realloc ptr param")
+			}
+			if !strings.Contains(out, "noundef") {
+				t.Error("missing noundef attribute on realloc params")
+			}
+			if !strings.Contains(out, "define noalias i8* @pal_realloc(i8* %ptr, i64 %size)") {
+				t.Error("missing @pal_realloc definition with noalias return")
+			}
+			if !strings.Contains(out, "call i8* @realloc(i8* %ptr, i64 %size)") {
+				t.Error("missing call to @realloc in pal_realloc body")
+			}
+			if !strings.Contains(out, "nounwind") {
+				t.Error("missing nounwind attribute on pal_realloc")
+			}
+			if !strings.Contains(out, "willreturn") {
+				t.Error("missing willreturn attribute on pal_realloc")
+			}
+			if fn.Name() != "pal_realloc" {
+				t.Errorf("expected function name pal_realloc, got %s", fn.Name())
+			}
+		})
+	}
+}
+
 // --- ForTarget dispatch tests ---
 
 func TestForTargetReturnsPosixPAL(t *testing.T) {

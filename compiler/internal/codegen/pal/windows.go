@@ -81,3 +81,8 @@ func (p *WindowsPAL) EmitExit(module *ir.Module) *ir.Func {
 
 	return fn
 }
+
+// Windows UCRT provides libc-compatible malloc/free/realloc.
+func (p *WindowsPAL) EmitAlloc(module *ir.Module) *ir.Func   { return emitLibcAlloc(module) }
+func (p *WindowsPAL) EmitFree(module *ir.Module) *ir.Func    { return emitLibcFree(module) }
+func (p *WindowsPAL) EmitRealloc(module *ir.Module) *ir.Func { return emitLibcRealloc(module) }

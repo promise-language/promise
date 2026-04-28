@@ -684,7 +684,7 @@ func TestPrintIntBody(t *testing.T) {
 	assertContains(t, ir, "bitcast i8* %x to %promise_int_v*")
 	assertContains(t, ir, "call i8* @promise_int_to_string(i64")
 	assertContains(t, ir, "call i64 @pal_write(i32 1,") // stdout
-	assertContains(t, ir, "call void @free(i8*")        // free temp string
+	assertContains(t, ir, "call void @pal_free(i8*")    // free temp string
 }
 
 func TestPrintF64Body(t *testing.T) {
@@ -696,7 +696,7 @@ func TestPrintF64Body(t *testing.T) {
 	assertContains(t, ir, "bitcast i8* %x to %promise_f64_v*")
 	assertContains(t, ir, "call i8* @promise_f64_to_string(double")
 	assertContains(t, ir, "call i64 @pal_write(i32 1,")
-	assertContains(t, ir, "call void @free(i8*")
+	assertContains(t, ir, "call void @pal_free(i8*")
 }
 
 func TestPrintBoolBody(t *testing.T) {
@@ -708,7 +708,7 @@ func TestPrintBoolBody(t *testing.T) {
 	assertContains(t, ir, "bitcast i8* %x to %promise_bool_v*")
 	assertContains(t, ir, "call i8* @promise_bool_to_string(i8")
 	assertContains(t, ir, "call i64 @pal_write(i32 1,")
-	assertContains(t, ir, "call void @free(i8*")
+	assertContains(t, ir, "call void @pal_free(i8*")
 }
 
 func TestPrintStringBody(t *testing.T) {
@@ -1324,7 +1324,7 @@ func TestStringIntrinsicsDeclared(t *testing.T) {
 func TestStringNewFuncBody(t *testing.T) {
 	ir := generateIR(t, `main() { s := "hello"; }`)
 	assertContains(t, ir, "define i8* @promise_string_new(i8* %data, i64 %len)")
-	assertContains(t, ir, "call i8* @malloc(")
+	assertContains(t, ir, "call i8* @pal_alloc(")
 	assertContains(t, ir, "oom:")
 	assertContains(t, ir, "call void @promise_panic(")
 	assertContains(t, ir, "unreachable")
@@ -1335,7 +1335,7 @@ func TestStringNewFuncBody(t *testing.T) {
 func TestStringConcatFuncBody(t *testing.T) {
 	ir := generateIR(t, `main() { s := "a" + "b"; }`)
 	assertContains(t, ir, "define i8* @promise_string_concat(i8* %a, i8* %b)")
-	assertContains(t, ir, "call i8* @malloc(")
+	assertContains(t, ir, "call i8* @pal_alloc(")
 	assertContains(t, ir, "oom:")
 	assertContains(t, ir, "call void @llvm.memcpy.p0i8.p0i8.i64(")
 }
@@ -1364,7 +1364,7 @@ func TestUserTypeConstructor(t *testing.T) {
 		main() { d := Dog(age: 3); }
 	`)
 	// Should allocate via malloc
-	assertContains(t, ir, "call i8* @malloc(i64")
+	assertContains(t, ir, "call i8* @pal_alloc(i64")
 	// Should bitcast to typed pointer
 	assertContains(t, ir, "bitcast i8*")
 	// Should store field value
@@ -1548,9 +1548,10 @@ func TestUserTypeMethodWithParams(t *testing.T) {
 	assertContains(t, ir, "call i64 @Adder.add(i8*")
 }
 
-func TestMallocDeclared(t *testing.T) {
+func TestPalAllocDefined(t *testing.T) {
 	ir := generateIR(t, `main() { x := 42; }`)
 	assertContains(t, ir, "declare noalias i8* @malloc(i64 noundef %size) nounwind willreturn")
+	assertContains(t, ir, "@pal_alloc(i64 %size)")
 }
 
 func TestUserTypeExternUnpacking(t *testing.T) {
@@ -1581,7 +1582,7 @@ func TestUserTypeNestedField(t *testing.T) {
 	assertContains(t, ir, "%promise_Inner_i = type { %promise_Inner_m*, i64 }")
 	assertContains(t, ir, "%promise_Outer_i = type { %promise_Outer_m*, { i8*, i8* } }")
 	// Both should be allocated via malloc
-	assertContains(t, ir, "call i8* @malloc(i64")
+	assertContains(t, ir, "call i8* @pal_alloc(i64")
 }
 
 func TestUserTypeNestedFieldAccess(t *testing.T) {
@@ -1607,7 +1608,7 @@ func TestUserTypeZeroArgConstructor(t *testing.T) {
 		}
 	`)
 	// Should allocate and store both fields
-	assertContains(t, ir, "call i8* @malloc(i64")
+	assertContains(t, ir, "call i8* @pal_alloc(i64")
 	assertContains(t, ir, "store i64 0")
 }
 
@@ -2725,7 +2726,7 @@ func TestOptionalVariable(t *testing.T) {
 func TestArrayLiteral(t *testing.T) {
 	ir := generateIR(t, `main() { x := [1, 2, 3]; }`)
 	// Should call malloc for heap allocation
-	assertContains(t, ir, "call i8* @malloc(i64")
+	assertContains(t, ir, "call i8* @pal_alloc(i64")
 	// Should store len and cap
 	assertContains(t, ir, "store i64 3")
 	// Should store elements
@@ -2798,7 +2799,7 @@ func TestArrayStringElements(t *testing.T) {
 	ir := generateIR(t, `main() { x := ["hello", "world"]; }`)
 	// String elements stored as i8*
 	assertContains(t, ir, "call i8* @promise_string_new(")
-	assertContains(t, ir, "call i8* @malloc(i64")
+	assertContains(t, ir, "call i8* @pal_alloc(i64")
 }
 
 func TestArrayVariable(t *testing.T) {
@@ -2944,7 +2945,7 @@ func TestLambdaCaptureInt(t *testing.T) {
 		}
 	`)
 	// Env struct should be allocated via malloc
-	assertContains(t, ir, "call i8* @malloc(i64")
+	assertContains(t, ir, "call i8* @pal_alloc(i64")
 	// Lambda function should have env param
 	assertContains(t, ir, "define i64 @.lambda.0(i8* %env, i64 %y)")
 	// Should load captured var from env struct inside lambda
@@ -2960,7 +2961,7 @@ func TestLambdaCaptureMultiple(t *testing.T) {
 		}
 	`)
 	// Env should be allocated
-	assertContains(t, ir, "call i8* @malloc(i64")
+	assertContains(t, ir, "call i8* @pal_alloc(i64")
 	// Lambda should have env param
 	assertContains(t, ir, "define i64 @.lambda.0(i8* %env")
 }
@@ -3003,7 +3004,7 @@ func TestLambdaNestedCapture(t *testing.T) {
 	assertContains(t, ir, "define i64 @.lambda.0(i8* %env")
 	assertContains(t, ir, "define i64 @.lambda.1(i8* %env")
 	// Two malloc calls — one for outer lambda env, one for inner
-	assertContains(t, ir, "call i8* @malloc(i64")
+	assertContains(t, ir, "call i8* @pal_alloc(i64")
 }
 
 func TestLambdaEnvFree(t *testing.T) {
@@ -3014,7 +3015,7 @@ func TestLambdaEnvFree(t *testing.T) {
 		}
 	`)
 	// Env should be freed at scope exit
-	assertContains(t, ir, "call void @free(i8*")
+	assertContains(t, ir, "call void @pal_free(i8*")
 }
 
 func TestLambdaEnvFreeNullCheck(t *testing.T) {
@@ -3806,7 +3807,7 @@ func TestInheritedFieldConstructor(t *testing.T) {
 		}
 	`)
 	// Constructor should store values for both inherited and own fields
-	assertContains(t, ir, "call i8* @malloc(")
+	assertContains(t, ir, "call i8* @pal_alloc(")
 	assertContains(t, ir, "getelementptr %promise_Dog_i")
 }
 
@@ -4832,9 +4833,9 @@ func TestTestSummaryBody(t *testing.T) {
 	assertContains(t, ir, "sext i32 %failed to i64")
 	// Calls int_to_string and frees temp strings
 	assertContains(t, ir, "call i8* @promise_int_to_string(i64")
-	assertContains(t, ir, "call void @free(i8*")
+	assertContains(t, ir, "call void @pal_free(i8*")
 	// Two free() calls — one per converted count (verify both temp strings freed)
-	if strings.Count(ir, "call void @free(i8*") < 2 {
+	if strings.Count(ir, "call void @pal_free(i8*") < 2 {
 		t.Error("expected at least 2 free() calls in promise_test_summary (one per int_to_string result)")
 	}
 	// Writes to stdout
@@ -6141,7 +6142,7 @@ func TestVectorWithCapacityFuncBody(t *testing.T) {
 	`)
 	// with_capacity is always defined (codegen intrinsic)
 	assertContains(t, ir, "define i8* @promise_vector_with_capacity(")
-	assertContains(t, ir, "call i8* @malloc(")
+	assertContains(t, ir, "call i8* @pal_alloc(")
 	assertContains(t, ir, "init:")
 	assertContains(t, ir, "store i64 0")
 }
@@ -6156,7 +6157,7 @@ func TestVectorPushFuncBody(t *testing.T) {
 	// Verify key blocks in the defined push function
 	assertContains(t, ir, "define i8* @promise_vector_push(")
 	assertContains(t, ir, "grow:")
-	assertContains(t, ir, "call i8* @realloc(")
+	assertContains(t, ir, "call i8* @pal_realloc(")
 	assertContains(t, ir, "oom:")
 	assertContains(t, ir, "update_cap:")
 	assertContains(t, ir, "copy:")
@@ -6312,7 +6313,7 @@ func TestStringSplitFuncBody(t *testing.T) {
 	`)
 	assertContains(t, ir, "define i8* @promise_string_split(i8* %s, i8* %sep)")
 	assertContains(t, ir, "call i32 @memcmp(")
-	assertContains(t, ir, "call i8* @malloc(")
+	assertContains(t, ir, "call i8* @pal_alloc(")
 	assertContains(t, ir, "oom:")
 	assertContains(t, ir, "call void @promise_panic(")
 	assertContains(t, ir, "call i8* @promise_string_new(")
@@ -6347,10 +6348,14 @@ func TestAllocatorAttributes(t *testing.T) {
 		type Foo { int x; }
 		main() { f := Foo(x: 1); }
 	`)
-	// malloc should have noalias return and nounwind
+	// Underlying libc declarations still present (emitted by PAL)
 	assertContains(t, ir, "declare noalias i8* @malloc(i64 noundef %size) nounwind willreturn")
 	assertContains(t, ir, "declare void @free(i8* nocapture noundef %ptr) nounwind willreturn")
 	assertContains(t, ir, "declare noalias i8* @realloc(i8* nocapture noundef %ptr, i64 noundef %size) nounwind willreturn")
+	// PAL wrappers defined
+	assertContains(t, ir, "@pal_alloc(i64 %size)")
+	assertContains(t, ir, "@pal_free(i8* %ptr)")
+	assertContains(t, ir, "@pal_realloc(i8* %ptr, i64 %size)")
 }
 
 // --- Return optional wrapping in monomorphized context ---

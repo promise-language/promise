@@ -91,8 +91,11 @@ type Compiler struct {
 	dropFlags map[string]*ir.InstAlloca
 
 	// PAL (Platform Abstraction Layer) function references
-	palWrite *ir.Func // @pal_write(i32 fd, i8* buf, i64 len) → i64
-	palExit  *ir.Func // @pal_exit(i32 code) → void [noreturn]
+	palWrite   *ir.Func // @pal_write(i32 fd, i8* buf, i64 len) → i64
+	palExit    *ir.Func // @pal_exit(i32 code) → void [noreturn]
+	palAlloc   *ir.Func // @pal_alloc(i64 size) → i8*
+	palFree    *ir.Func // @pal_free(i8* ptr) → void
+	palRealloc *ir.Func // @pal_realloc(i8* ptr, i64 size) → i8*
 
 	// Global constants for print/panic functions
 	newlineGlobal     *ir.Global // "\n" (1 byte)
@@ -350,19 +353,11 @@ func (c *Compiler) declareIntrinsics() {
 	panicFn.FuncAttrs = append(panicFn.FuncAttrs, enum.FuncAttrNoReturn, enum.FuncAttrNoUnwind)
 	c.funcs["promise_panic"] = panicFn
 
-	// malloc/free for heap allocation
-	mallocSize := ir.NewParam("size", irtypes.I64)
-	mallocSize.Attrs = append(mallocSize.Attrs, enum.ParamAttrNoUndef)
-	mallocFn := c.module.NewFunc("malloc", irtypes.I8Ptr, mallocSize)
-	mallocFn.ReturnAttrs = append(mallocFn.ReturnAttrs, enum.ReturnAttrNoAlias)
-	mallocFn.FuncAttrs = append(mallocFn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
-	c.funcs["malloc"] = mallocFn
-
-	freePtr := ir.NewParam("ptr", irtypes.I8Ptr)
-	freePtr.Attrs = append(freePtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
-	freeFn := c.module.NewFunc("free", irtypes.Void, freePtr)
-	freeFn.FuncAttrs = append(freeFn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
-	c.funcs["free"] = freeFn
+	// PAL: emit platform-specific allocator primitives (needed by string/vector funcs below)
+	p := pal.ForTarget(c.module.TargetTriple)
+	c.palAlloc = p.EmitAlloc(c.module)
+	c.palFree = p.EmitFree(c.module)
+	c.palRealloc = p.EmitRealloc(c.module)
 
 	// LLVM memcpy/memmove intrinsics (used instead of libc memcpy/memmove)
 	c.funcs["llvm.memcpy"] = c.module.NewFunc("llvm.memcpy.p0i8.p0i8.i64",
@@ -381,16 +376,6 @@ func (c *Compiler) declareIntrinsics() {
 	// String new/concat (codegen-emitted LLVM IR, replaces C runtime)
 	c.defineStringNewFunc()
 	c.defineStringConcatFunc()
-
-	// Realloc for vector growth
-	reallocPtr := ir.NewParam("ptr", irtypes.I8Ptr)
-	reallocPtr.Attrs = append(reallocPtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
-	reallocSz := ir.NewParam("size", irtypes.I64)
-	reallocSz.Attrs = append(reallocSz.Attrs, enum.ParamAttrNoUndef)
-	reallocFn := c.module.NewFunc("realloc", irtypes.I8Ptr, reallocPtr, reallocSz)
-	reallocFn.ReturnAttrs = append(reallocFn.ReturnAttrs, enum.ReturnAttrNoAlias)
-	reallocFn.FuncAttrs = append(reallocFn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
-	c.funcs["realloc"] = reallocFn
 
 	// Memcmp (SIMD-accelerated; no @llvm.memcmp intrinsic exists)
 	// Used by string equality, vector contains, and string split
@@ -447,8 +432,7 @@ func (c *Compiler) declareIntrinsics() {
 	// String equality comparison (codegen-emitted LLVM IR, replaces C runtime)
 	c.defineStringEqFunc()
 
-	// PAL: emit platform-specific write/exit primitives
-	p := pal.ForTarget(c.module.TargetTriple)
+	// PAL: emit platform-specific IO/exit primitives
 	c.palWrite = p.EmitWrite(c.module)
 	c.palExit = p.EmitExit(c.module)
 
@@ -487,7 +471,7 @@ func (c *Compiler) defineStringNewFunc() {
 	// entry: allocate and null-check
 	entry := fn.NewBlock("entry")
 	allocSize := entry.NewAdd(headerSize, lenParam)
-	rawPtr := entry.NewCall(c.funcs["malloc"], allocSize)
+	rawPtr := entry.NewCall(c.palAlloc, allocSize)
 	isNull := entry.NewICmp(enum.IPredEQ, rawPtr, constant.NewNull(irtypes.I8Ptr))
 
 	oomBlk := fn.NewBlock("oom")
@@ -560,7 +544,7 @@ func (c *Compiler) defineStringConcatFunc() {
 
 	total := entry.NewAdd(lenA, lenB)
 	allocSize := entry.NewAdd(headerSize, total)
-	rawPtr := entry.NewCall(c.funcs["malloc"], allocSize)
+	rawPtr := entry.NewCall(c.palAlloc, allocSize)
 	isNull := entry.NewICmp(enum.IPredEQ, rawPtr, constant.NewNull(irtypes.I8Ptr))
 
 	oomBlk := fn.NewBlock("oom")
@@ -894,7 +878,7 @@ func (c *Compiler) defineStringSplitFunc() {
 	count := allocBlk.NewLoad(irtypes.I64, countA)
 	dataSize := allocBlk.NewMul(count, ptrSize)
 	totalSize := allocBlk.NewAdd(headerSize, dataSize)
-	rawSlice := allocBlk.NewCall(c.funcs["malloc"], totalSize)
+	rawSlice := allocBlk.NewCall(c.palAlloc, totalSize)
 	isNull := allocBlk.NewICmp(enum.IPredEQ, rawSlice, constant.NewNull(irtypes.I8Ptr))
 	allocBlk.NewCondBr(isNull, oomBlk, initHdr)
 
@@ -1314,7 +1298,7 @@ func (c *Compiler) defineVectorWithCapacityFunc() {
 	clampedCap := entry.NewSelect(isNeg, zero64, capParam)
 	dataSize := entry.NewMul(clampedCap, elemSizeParam)
 	allocSize := entry.NewAdd(headerSizeConst, dataSize)
-	raw := entry.NewCall(c.funcs["malloc"], allocSize)
+	raw := entry.NewCall(c.palAlloc, allocSize)
 	isNull := entry.NewICmp(enum.IPredEQ, raw, constant.NewNull(irtypes.I8Ptr))
 
 	oom := fn.NewBlock("oom")
@@ -1383,7 +1367,7 @@ func (c *Compiler) defineVectorPushFunc() {
 	newCap := grow.NewSelect(isZeroCap, four64, doubledCap)
 	newDataSize := grow.NewMul(newCap, elemSizeParam)
 	newAllocSize := grow.NewAdd(headerSizeConst, newDataSize)
-	newPtr := grow.NewCall(c.funcs["realloc"], sliceParam, newAllocSize)
+	newPtr := grow.NewCall(c.palRealloc, sliceParam, newAllocSize)
 	isNull := grow.NewICmp(enum.IPredEQ, newPtr, constant.NewNull(irtypes.I8Ptr))
 
 	oom := fn.NewBlock("oom")

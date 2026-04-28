@@ -80,3 +80,8 @@ func (p *WasmPAL) EmitExit(module *ir.Module) *ir.Func {
 
 	return fn
 }
+
+// WASI libc provides malloc/free/realloc. Phase 4b replaces with memory.grow bump allocator.
+func (p *WasmPAL) EmitAlloc(module *ir.Module) *ir.Func   { return emitLibcAlloc(module) }
+func (p *WasmPAL) EmitFree(module *ir.Module) *ir.Func    { return emitLibcFree(module) }
+func (p *WasmPAL) EmitRealloc(module *ir.Module) *ir.Func { return emitLibcRealloc(module) }

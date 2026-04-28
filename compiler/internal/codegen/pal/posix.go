@@ -49,3 +49,7 @@ func (p *PosixPAL) EmitExit(module *ir.Module) *ir.Func {
 
 	return fn
 }
+
+func (p *PosixPAL) EmitAlloc(module *ir.Module) *ir.Func   { return emitLibcAlloc(module) }
+func (p *PosixPAL) EmitFree(module *ir.Module) *ir.Func    { return emitLibcFree(module) }
+func (p *PosixPAL) EmitRealloc(module *ir.Module) *ir.Func { return emitLibcRealloc(module) }

@@ -158,7 +158,7 @@ func (c *Compiler) definePrintIntBody(fn *ir.Func) {
 	entry.NewCall(c.palWrite, stdout, dataPtr, dataLen)
 	c.emitWriteNewline(entry, stdout)
 	// Free the temporary string instance allocated by promise_int_to_string
-	entry.NewCall(c.funcs["free"], strInst)
+	entry.NewCall(c.palFree, strInst)
 	entry.NewRet(nil)
 }
 
@@ -188,7 +188,7 @@ func (c *Compiler) definePrintF64Body(fn *ir.Func) {
 	entry.NewCall(c.palWrite, stdout, dataPtr, dataLen)
 	c.emitWriteNewline(entry, stdout)
 	// Free the temporary string instance allocated by promise_f64_to_string
-	entry.NewCall(c.funcs["free"], strInst)
+	entry.NewCall(c.palFree, strInst)
 	entry.NewRet(nil)
 }
 
@@ -218,7 +218,7 @@ func (c *Compiler) definePrintBoolBody(fn *ir.Func) {
 	entry.NewCall(c.palWrite, stdout, dataPtr, dataLen)
 	c.emitWriteNewline(entry, stdout)
 	// Free the temporary string instance allocated by promise_bool_to_string
-	entry.NewCall(c.funcs["free"], strInst)
+	entry.NewCall(c.palFree, strInst)
 	entry.NewRet(nil)
 }
 
@@ -345,7 +345,7 @@ func (c *Compiler) defineTestSummaryBody(fn *ir.Func) {
 	passedStr := entry.NewCall(c.funcs["promise_int_to_string"], passedI64)
 	passedDataPtr, passedDataLen := c.extractStringDataLenFromInstance(entry, passedStr)
 	entry.NewCall(c.palWrite, stdout, passedDataPtr, passedDataLen)
-	entry.NewCall(c.funcs["free"], passedStr)
+	entry.NewCall(c.palFree, passedStr)
 
 	// Write " passed, "
 	pSuffixPtr := entry.NewGetElementPtr(passedSuffixGlobal.ContentType, passedSuffixGlobal,
@@ -357,7 +357,7 @@ func (c *Compiler) defineTestSummaryBody(fn *ir.Func) {
 	failedStr := entry.NewCall(c.funcs["promise_int_to_string"], failedI64)
 	failedDataPtr, failedDataLen := c.extractStringDataLenFromInstance(entry, failedStr)
 	entry.NewCall(c.palWrite, stdout, failedDataPtr, failedDataLen)
-	entry.NewCall(c.funcs["free"], failedStr)
+	entry.NewCall(c.palFree, failedStr)
 
 	// Write " failed\n"
 	fSuffixPtr := entry.NewGetElementPtr(failedSuffixGlobal.ContentType, failedSuffixGlobal,

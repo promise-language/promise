@@ -366,7 +366,7 @@ func (c *Compiler) emitEnvFree(b scopeBinding) {
 	c.block.NewCondBr(isNull, skipBlock, callBlock)
 
 	c.block = callBlock
-	c.block.NewCall(c.funcs["free"], envPtr)
+	c.block.NewCall(c.palFree, envPtr)
 	c.block.NewBr(skipBlock)
 
 	c.block = skipBlock

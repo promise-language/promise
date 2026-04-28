@@ -900,7 +900,7 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 	size := c.block.NewPtrToInt(sizePtr, irtypes.I64)
 
 	// Allocate
-	rawPtr := c.block.NewCall(c.funcs["malloc"], size)
+	rawPtr := c.block.NewCall(c.palAlloc, size)
 	typedPtr := c.block.NewBitCast(rawPtr, instancePtrType)
 
 	// Store type info pointer in _variant slot (field 0) for RTTI
@@ -2273,7 +2273,7 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 	totalSize := int64(vectorHeaderSize) + n*elemSize
 
 	// malloc
-	rawPtr := c.block.NewCall(c.funcs["malloc"],
+	rawPtr := c.block.NewCall(c.palAlloc,
 		constant.NewInt(irtypes.I64, totalSize))
 
 	// Store len and cap via header GEP
@@ -2469,7 +2469,7 @@ func (c *Compiler) genMapConstructor(inst *types.Instance) value.Value {
 	size := c.block.NewPtrToInt(sizePtr, irtypes.I64)
 
 	// Allocate
-	rawPtr := c.block.NewCall(c.funcs["malloc"], size)
+	rawPtr := c.block.NewCall(c.palAlloc, size)
 	typedPtr := c.block.NewBitCast(rawPtr, instancePtrType)
 
 	// Store type info pointer in _variant slot (field 0)
@@ -2604,7 +2604,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 
 		// Allocate env struct on heap
 		envSize := int64(llvmTypeSize(envStructType))
-		rawPtr := c.block.NewCall(c.funcs["malloc"], constant.NewInt(irtypes.I64, envSize))
+		rawPtr := c.block.NewCall(c.palAlloc, constant.NewInt(irtypes.I64, envSize))
 		typedEnvPtr := c.block.NewBitCast(rawPtr, irtypes.NewPointer(envStructType))
 
 		// Store captured values into env struct

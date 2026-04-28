@@ -1219,10 +1219,34 @@ func TestStringEscapeBrace(t *testing.T) {
 
 func TestStringIntrinsicsDeclared(t *testing.T) {
 	ir := generateIR(t, `main() { x := 42; }`)
-	// String intrinsics should always be declared
-	assertContains(t, ir, "declare i8* @promise_string_new(i8* %data, i64 %len)")
-	assertContains(t, ir, "declare i8* @promise_string_concat(i8* %a, i8* %b)")
+	// String intrinsics should always be defined (codegen-emitted LLVM IR)
+	assertContains(t, ir, "define i8* @promise_string_new(i8* %data, i64 %len)")
+	assertContains(t, ir, "define i8* @promise_string_concat(i8* %a, i8* %b)")
 	assertContains(t, ir, "define i1 @promise_string_eq(i8* %a, i8* %b)")
+}
+
+func TestStringNewFuncBody(t *testing.T) {
+	ir := generateIR(t, `main() { s := "hello"; }`)
+	assertContains(t, ir, "define i8* @promise_string_new(i8* %data, i64 %len)")
+	assertContains(t, ir, "call i8* @malloc(")
+	assertContains(t, ir, "oom:")
+	assertContains(t, ir, "call void @promise_panic(")
+	assertContains(t, ir, "unreachable")
+	assertContains(t, ir, "call void @llvm.memcpy.p0i8.p0i8.i64(")
+	assertContains(t, ir, "store i8* null")
+}
+
+func TestStringConcatFuncBody(t *testing.T) {
+	ir := generateIR(t, `main() { s := "a" + "b"; }`)
+	assertContains(t, ir, "define i8* @promise_string_concat(i8* %a, i8* %b)")
+	assertContains(t, ir, "call i8* @malloc(")
+	assertContains(t, ir, "oom:")
+	assertContains(t, ir, "call void @llvm.memcpy.p0i8.p0i8.i64(")
+}
+
+func TestLLVMMemcpyDeclared(t *testing.T) {
+	ir := generateIR(t, `main() { x := 42; }`)
+	assertContains(t, ir, "declare void @llvm.memcpy.p0i8.p0i8.i64(")
 }
 
 // === User Type Tests ===

@@ -330,19 +330,17 @@ func (c *Compiler) declareIntrinsics() {
 	c.funcs["free"] = c.module.NewFunc("free",
 		irtypes.Void, ir.NewParam("ptr", irtypes.I8Ptr))
 
-	// String intrinsics — declared with i8* params/returns for internal use.
-	// The C implementations (runtime_string.c) use typed promise_string_i* pointers.
-	// This is ABI-compatible since all pointers are the same size; the type mismatch
-	// is invisible at the linker level and avoids threading struct types through llvmNamedType.
-	c.funcs["promise_string_new"] = c.module.NewFunc("promise_string_new",
-		irtypes.I8Ptr,
-		ir.NewParam("data", irtypes.I8Ptr),
-		ir.NewParam("len", irtypes.I64))
+	// LLVM memcpy intrinsic (used by string new/concat instead of libc memcpy)
+	c.funcs["llvm.memcpy"] = c.module.NewFunc("llvm.memcpy.p0i8.p0i8.i64",
+		irtypes.Void,
+		ir.NewParam("dest", irtypes.I8Ptr),
+		ir.NewParam("src", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64),
+		ir.NewParam("isvolatile", irtypes.I1))
 
-	c.funcs["promise_string_concat"] = c.module.NewFunc("promise_string_concat",
-		irtypes.I8Ptr,
-		ir.NewParam("a", irtypes.I8Ptr),
-		ir.NewParam("b", irtypes.I8Ptr))
+	// String new/concat (codegen-emitted LLVM IR, replaces C runtime)
+	c.defineStringNewFunc()
+	c.defineStringConcatFunc()
 
 	// String direct equality (codegen-emitted LLVM IR, replaces C runtime)
 	c.defineStringDirectEqFunc()
@@ -420,6 +418,152 @@ func (c *Compiler) declareIntrinsics() {
 
 	// String equality comparison (codegen-emitted LLVM IR, replaces C runtime)
 	c.defineStringEqFunc()
+}
+
+// defineStringNewFunc emits an LLVM IR function that allocates and initializes
+// a string instance. Replaces the C runtime promise_string_new.
+// Allocates header (16 bytes) + data, copies data via @llvm.memcpy intrinsic.
+// String instance layout: { i8* _variant, i64 len, [0 x i8] data }
+func (c *Compiler) defineStringNewFunc() {
+	dataParam := ir.NewParam("data", irtypes.I8Ptr)
+	lenParam := ir.NewParam("len", irtypes.I64)
+	fn := c.module.NewFunc("promise_string_new", irtypes.I8Ptr, dataParam, lenParam)
+
+	strInstanceType := irtypes.NewStruct(
+		irtypes.I8Ptr,                   // _variant
+		irtypes.I64,                     // len
+		irtypes.NewArray(0, irtypes.I8), // data (flexible array)
+	)
+
+	headerSize := constant.NewInt(irtypes.I64, 16)
+
+	// OOM panic message
+	oomMsg := constant.NewCharArrayFromString("out of memory\x00")
+	oomGlobal := c.module.NewGlobalDef(
+		fmt.Sprintf(".str.oom.%d", c.strCounter), oomMsg)
+	c.strCounter++
+	oomGlobal.Immutable = true
+
+	// entry: allocate and null-check
+	entry := fn.NewBlock("entry")
+	allocSize := entry.NewAdd(headerSize, lenParam)
+	rawPtr := entry.NewCall(c.funcs["malloc"], allocSize)
+	isNull := entry.NewICmp(enum.IPredEQ, rawPtr, constant.NewNull(irtypes.I8Ptr))
+
+	oomBlk := fn.NewBlock("oom")
+	initBlk := fn.NewBlock("init")
+	entry.NewCondBr(isNull, oomBlk, initBlk)
+
+	// oom: panic
+	msgPtr := oomBlk.NewGetElementPtr(oomGlobal.ContentType, oomGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	oomBlk.NewCall(c.funcs["promise_panic"], msgPtr)
+	oomBlk.NewUnreachable()
+
+	// init: store fields and copy data
+	typedPtr := initBlk.NewBitCast(rawPtr, irtypes.NewPointer(strInstanceType))
+
+	variantPtr := initBlk.NewGetElementPtr(strInstanceType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	initBlk.NewStore(constant.NewNull(irtypes.I8Ptr), variantPtr)
+
+	lenPtr := initBlk.NewGetElementPtr(strInstanceType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	initBlk.NewStore(lenParam, lenPtr)
+
+	dataDst := initBlk.NewGetElementPtr(strInstanceType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
+		constant.NewInt(irtypes.I32, 0))
+	initBlk.NewCall(c.funcs["llvm.memcpy"], dataDst, dataParam, lenParam, constant.False)
+
+	initBlk.NewRet(rawPtr)
+
+	c.funcs["promise_string_new"] = fn
+}
+
+// defineStringConcatFunc emits an LLVM IR function that concatenates two strings.
+// Replaces the C runtime promise_string_concat.
+// Loads lengths from both inputs, allocates header + total, copies both data regions.
+// String instance layout: { i8* _variant, i64 len, [0 x i8] data }
+func (c *Compiler) defineStringConcatFunc() {
+	aParam := ir.NewParam("a", irtypes.I8Ptr)
+	bParam := ir.NewParam("b", irtypes.I8Ptr)
+	fn := c.module.NewFunc("promise_string_concat", irtypes.I8Ptr, aParam, bParam)
+
+	strInstanceType := irtypes.NewStruct(
+		irtypes.I8Ptr,                   // _variant
+		irtypes.I64,                     // len
+		irtypes.NewArray(0, irtypes.I8), // data (flexible array)
+	)
+
+	headerSize := constant.NewInt(irtypes.I64, 16)
+
+	// OOM panic message
+	oomMsg := constant.NewCharArrayFromString("out of memory\x00")
+	oomGlobal := c.module.NewGlobalDef(
+		fmt.Sprintf(".str.oom.%d", c.strCounter), oomMsg)
+	c.strCounter++
+	oomGlobal.Immutable = true
+
+	// entry: load lengths, compute total, allocate, null-check
+	entry := fn.NewBlock("entry")
+
+	typedA := entry.NewBitCast(aParam, irtypes.NewPointer(strInstanceType))
+	lenPtrA := entry.NewGetElementPtr(strInstanceType, typedA,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	lenA := entry.NewLoad(irtypes.I64, lenPtrA)
+
+	typedB := entry.NewBitCast(bParam, irtypes.NewPointer(strInstanceType))
+	lenPtrB := entry.NewGetElementPtr(strInstanceType, typedB,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	lenB := entry.NewLoad(irtypes.I64, lenPtrB)
+
+	total := entry.NewAdd(lenA, lenB)
+	allocSize := entry.NewAdd(headerSize, total)
+	rawPtr := entry.NewCall(c.funcs["malloc"], allocSize)
+	isNull := entry.NewICmp(enum.IPredEQ, rawPtr, constant.NewNull(irtypes.I8Ptr))
+
+	oomBlk := fn.NewBlock("oom")
+	initBlk := fn.NewBlock("init")
+	entry.NewCondBr(isNull, oomBlk, initBlk)
+
+	// oom: panic
+	msgPtr := oomBlk.NewGetElementPtr(oomGlobal.ContentType, oomGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	oomBlk.NewCall(c.funcs["promise_panic"], msgPtr)
+	oomBlk.NewUnreachable()
+
+	// init: store header fields and copy both data regions
+	typedNew := initBlk.NewBitCast(rawPtr, irtypes.NewPointer(strInstanceType))
+
+	variantPtr := initBlk.NewGetElementPtr(strInstanceType, typedNew,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	initBlk.NewStore(constant.NewNull(irtypes.I8Ptr), variantPtr)
+
+	lenPtr := initBlk.NewGetElementPtr(strInstanceType, typedNew,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	initBlk.NewStore(total, lenPtr)
+
+	dataDst := initBlk.NewGetElementPtr(strInstanceType, typedNew,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
+		constant.NewInt(irtypes.I32, 0))
+
+	// Copy a's data
+	dataA := initBlk.NewGetElementPtr(strInstanceType, typedA,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
+		constant.NewInt(irtypes.I32, 0))
+	initBlk.NewCall(c.funcs["llvm.memcpy"], dataDst, dataA, lenA, constant.False)
+
+	// Copy b's data after a's
+	dstOffset := initBlk.NewGetElementPtr(irtypes.I8, dataDst, lenA)
+	dataB := initBlk.NewGetElementPtr(strInstanceType, typedB,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
+		constant.NewInt(irtypes.I32, 0))
+	initBlk.NewCall(c.funcs["llvm.memcpy"], dstOffset, dataB, lenB, constant.False)
+
+	initBlk.NewRet(rawPtr)
+
+	c.funcs["promise_string_concat"] = fn
 }
 
 // defineStringDirectEqFunc emits an LLVM IR function that compares two strings

@@ -7,7 +7,7 @@ Proposal for Promise's runtime, syscall layer, concurrency model, and multi-plat
 The runtime today is ~450 lines of C providing:
 - **IO**: `printf`/`fprintf`/`fwrite` for print, ~~`snprintf` for int/float/bool/char→string~~ (codegen-emitted LLVM IR; float still uses libc `snprintf`)
 - **Memory**: `malloc`/`free`/`realloc` for strings, vectors, closures
-- **String ops**: new, concat, ~~eq~~ (codegen LLVM IR), ~~contains, starts_with, ends_with, index_of~~ (pure Promise), trim, split, UTF-8 decode
+- **String ops**: ~~new, concat~~ (codegen LLVM IR, uses `@llvm.memcpy` intrinsic), ~~eq~~ (codegen LLVM IR), ~~contains, starts_with, ends_with, index_of~~ (pure Promise), trim, split, UTF-8 decode
 - **Vector ops**: with_capacity, push, pop, ~~contains, remove~~ (codegen-emitted LLVM IR)
 - **Hash**: FNV-1a for int/bool/char/float (Promise `std/hash.pr` + codegen bitcast), string (codegen-emitted LLVM IR); `eq_string` and `string_eq` also codegen-emitted — `runtime_hash.c` fully eliminated
 - **RTTI**: type_is check for inheritance
@@ -171,9 +171,9 @@ Move string ops, vector ops, hash, and formatting from C into Promise.
 4. ~~Move vector.contains/remove to Promise~~ — Done (codegen-emitted LLVM IR; can't be pure Promise due to generic `T` needing `Equal` constraint)
 5. ~~Move int/float/bool/char→string to Promise~~ — Done (codegen-emitted LLVM IR; float uses libc `snprintf`; also includes char→string UTF-8 encode from step 6; added `promise_uint_to_string` fixing u64 sign bug)
 6. ~~Move UTF-8 encode (char→string) to Promise~~ — Done (included in step 5 as `defineCharToStringFunc`)
-7. Replace C string.new/concat with codegen-emitted LLVM IR (calls allocator + memcpy intrinsic)
+7. ~~Replace C string.new/concat with codegen-emitted LLVM IR (calls allocator + memcpy intrinsic)~~ — Done (codegen-emitted LLVM IR using `@llvm.memcpy` intrinsic; C `trim`/`split` call codegen `promise_string_new` via linker)
 
-After this migration, C runtime code drops to near zero.
+After this migration, C runtime code drops to: `print` (IO), `trim`, `split`, `next_char` (string ops), `vector_with_capacity`, `push`, `pop` (vector ops), `type_is` (RTTI), test runner.
 
 **Performance TODO — restore SIMD memcmp**: The migration from C to codegen LLVM IR replaced libc `memcmp` (which uses SIMD — NEON on ARM, SSE/AVX on x86) with byte-by-byte comparison loops. This affects:
 - `defineStringDirectEqFunc` (compiler.go) — `promise_string_eq`, used by `==`/`!=` on strings
@@ -274,7 +274,7 @@ Everything built on top of Layer 0-3: map (already done), iterators, streams, cr
 | Phase | Work | Targets | Status |
 |-------|------|---------|--------|
 | **Phase 1** | ~~Bitwise operators (`&`, `\|`, `^`, `<<`, `>>`, `~`)~~ | ~~All~~ | Done |
-| **Phase 2** | Move hash, string methods, vector methods, value→string to Promise/codegen (all done; remaining C: string new/concat, trim, split, UTF-8 decode, print) | All | In Progress |
+| **Phase 2** | Move hash, string methods, vector methods, value→string, string new/concat to Promise/codegen (all done; remaining C: trim, split, UTF-8 decode, print, vector push/pop/with_capacity, RTTI, test runner) | All | In Progress |
 | **Phase 3** | PAL abstraction — define interface, implement macOS + Linux | macOS, Linux | Planned |
 | **Phase 3b** | PAL Windows implementation | Windows | Planned |
 | **Phase 3c** | PAL WASM implementation (WASI imports + JS FFI) | WASM | Planned |

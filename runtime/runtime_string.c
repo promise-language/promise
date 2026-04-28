@@ -5,34 +5,16 @@
 
 extern void promise_panic(const char* msg);
 
-promise_string_i* promise_string_new(const char* data, int64_t len) {
-    promise_string_i* s = (promise_string_i*)malloc(sizeof(promise_string_i) + len);
-    if (!s) promise_panic("out of memory");
-    s->_variant = NULL;
-    s->len = len;
-    memcpy(s->data, data, len);
-    return s;
-}
-
-promise_string_i* promise_string_concat(promise_string_i* a, promise_string_i* b) {
-    int64_t total = a->len + b->len;
-    promise_string_i* s = (promise_string_i*)malloc(sizeof(promise_string_i) + total);
-    if (!s) promise_panic("out of memory");
-    s->_variant = NULL;
-    s->len = total;
-    memcpy(s->data, a->data, a->len);
-    memcpy(s->data + a->len, b->data, b->len);
-    return s;
-}
+// promise_string_new, promise_string_concat, promise_int_to_string,
+// promise_f64_to_string, promise_bool_to_string, promise_char_to_string
+// are now codegen-emitted LLVM IR
+// (see compiler/internal/codegen/compiler.go: defineStringNewFunc, etc.)
+extern promise_string_i* promise_string_new(const char* data, int64_t len);
 
 void promise_print_string(promise_string_v *s) {
     fwrite(s->_instance->data, 1, s->_instance->len, stdout);
     putchar('\n');
 }
-
-// promise_int_to_string, promise_f64_to_string, promise_bool_to_string,
-// promise_char_to_string are now codegen-emitted LLVM IR
-// (see compiler/internal/codegen/compiler.go: defineIntToStringFunc, etc.)
 
 // promise_string_trim returns a new string with leading/trailing whitespace removed.
 promise_string_i* promise_string_trim(promise_string_i* s) {

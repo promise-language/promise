@@ -36,7 +36,7 @@ resources:
 	@rm -rf $(RESOURCES)/std $(RESOURCES)/runtime
 	@mkdir -p $(RESOURCES)/std $(RESOURCES)/runtime
 	@cp ../std/*.pr $(RESOURCES)/std/
-	@cp ../runtime/*.c ../runtime/*.h $(RESOURCES)/runtime/
+	@cp ../runtime/*.c $(RESOURCES)/runtime/
 
 build: generate resources
 	go build -o $(BINARY) ./cmd/promise

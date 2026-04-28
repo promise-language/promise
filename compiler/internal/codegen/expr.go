@@ -1564,7 +1564,7 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		// Use string equality for string elements
 		var eqFn value.Value
 		if extractNamed(elemType) == types.TypString {
-			eqFn = c.block.NewBitCast(c.funcs["promise_eq_string"], irtypes.I8Ptr)
+			eqFn = c.block.NewBitCast(c.funcs["__promise_eq_string"], irtypes.I8Ptr)
 		} else {
 			eqFn = constant.NewNull(irtypes.I8Ptr)
 		}

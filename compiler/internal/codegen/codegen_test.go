@@ -5689,7 +5689,7 @@ func TestVectorContainsString(t *testing.T) {
 	`)
 	assertContains(t, ir, "call i8 @promise_vector_contains(")
 	// String contains uses custom equality comparator
-	assertContains(t, ir, "@promise_eq_string")
+	assertContains(t, ir, "@__promise_eq_string")
 }
 
 func TestVectorRemove(t *testing.T) {

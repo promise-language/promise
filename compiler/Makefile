@@ -33,6 +33,7 @@ generate: $(ANTLR_JAR)
 		PromiseParser.g4
 
 resources:
+	@rm -rf $(RESOURCES)/std $(RESOURCES)/runtime
 	@mkdir -p $(RESOURCES)/std $(RESOURCES)/runtime
 	@cp ../std/*.pr $(RESOURCES)/std/
 	@cp ../runtime/*.c ../runtime/*.h $(RESOURCES)/runtime/

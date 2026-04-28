@@ -9,7 +9,7 @@ The runtime today is ~450 lines of C providing:
 - **Memory**: `malloc`/`free`/`realloc` for strings, vectors, closures
 - **String ops**: new, concat, eq, contains, starts_with, ends_with, index_of, trim, split, UTF-8 decode
 - **Vector ops**: with_capacity, push, pop, contains, remove
-- **Hash**: FNV-1a for int/bool/char/float (Promise `std/hash.pr` + codegen bitcast), string (codegen-emitted LLVM IR); only `eq_string` remains in C
+- **Hash**: FNV-1a for int/bool/char/float (Promise `std/hash.pr` + codegen bitcast), string (codegen-emitted LLVM IR); `eq_string` also codegen-emitted — `runtime_hash.c` fully eliminated
 - **RTTI**: type_is check for inheritance
 - **Test runner**: fork/waitpid for crash isolation
 

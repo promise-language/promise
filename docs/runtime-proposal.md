@@ -8,7 +8,7 @@ The runtime today is ~450 lines of C providing:
 - **IO**: `printf`/`fprintf`/`fwrite` for print, `snprintf` for int/float/bool/char→string
 - **Memory**: `malloc`/`free`/`realloc` for strings, vectors, closures
 - **String ops**: new, concat, ~~eq~~ (codegen LLVM IR), ~~contains, starts_with, ends_with, index_of~~ (pure Promise), trim, split, UTF-8 decode
-- **Vector ops**: with_capacity, push, pop, contains, remove
+- **Vector ops**: with_capacity, push, pop, ~~contains, remove~~ (codegen-emitted LLVM IR)
 - **Hash**: FNV-1a for int/bool/char/float (Promise `std/hash.pr` + codegen bitcast), string (codegen-emitted LLVM IR); `eq_string` and `string_eq` also codegen-emitted — `runtime_hash.c` fully eliminated
 - **RTTI**: type_is check for inheritance
 - **Test runner**: fork/waitpid for crash isolation
@@ -152,7 +152,7 @@ Move string ops, vector ops, hash, and formatting from C into Promise.
 - ~~Hash (FNV-1a) — all types migrated: int/bool/char/float use `std/hash.pr`, string uses codegen-emitted LLVM IR~~
 - ~~`string.contains`, `starts_with`, `ends_with`, `index_of`~~ — migrated to pure Promise (uses byte indexing `s[i]`)
 - `string.trim`
-- `vector.contains`, `vector.remove`
+- ~~`vector.contains`, `vector.remove`~~ — migrated to codegen-emitted LLVM IR
 - Map — already done (HashMap is pure Promise)
 - Int/float → string conversion (hex formatting needs shifts)
 - UTF-8 encode/decode (needs shifts and masks)
@@ -168,12 +168,26 @@ Move string ops, vector ops, hash, and formatting from C into Promise.
 1. ~~Add bitwise operators to the language (`&`, `|`, `^`, `<<`, `>>`, `~`)~~ — Done
 2. ~~Move hash to Promise (FNV-1a is ~10 lines)~~ — Done (all types: int/bool/char/float via Promise, string via codegen LLVM IR)
 3. ~~Move string methods (contains, starts_with, ends_with, index_of) to Promise~~ — Done (string byte indexing `s[i]` + pure Promise implementations; `string_eq` moved to codegen LLVM IR)
-4. Move vector.contains/remove to Promise
+4. ~~Move vector.contains/remove to Promise~~ — Done (codegen-emitted LLVM IR; can't be pure Promise due to generic `T` needing `Equal` constraint)
 5. Move int/float/bool→string to Promise
 6. Move UTF-8 encode/decode to Promise
 7. Replace C string.new/concat with codegen-emitted LLVM IR (calls allocator + memcpy intrinsic)
 
 After this migration, C runtime code drops to near zero.
+
+**Performance TODO — restore SIMD memcmp**: The migration from C to codegen LLVM IR replaced libc `memcmp` (which uses SIMD — NEON on ARM, SSE/AVX on x86) with byte-by-byte comparison loops. This affects:
+- `defineStringDirectEqFunc` (compiler.go) — `promise_string_eq`, used by `==`/`!=` on strings
+- `defineStringEqFunc` (compiler.go) — `__promise_eq_string`, used by `vector.contains` for string[] elements
+- `defineVectorContainsFunc` (compiler.go) — memcmp path for non-string vector element comparison
+- Pure Promise string methods (`contains`, `starts_with`, `ends_with`, `index_of` in `std/string.pr`) — char-by-char comparison via `this[i] != sub[j]`
+
+**Fix**: Declare libc `memcmp` as extern (like `memmove`), replace the 3 codegen byte-loops with `memcmp(a, b, n) == 0`. For the Promise string methods, add a `memcmp`-like builtin or a native `string.eq_region(string other, int this_offset, int other_offset, int len) bool` method backed by memcmp. Short strings (< 8-16 bytes) won't benefit much, but long string equality and large vector scans will.
+
+**TODO — switch to LLVM intrinsics for memory operations**: Replace libc `memmove`/`memcpy` externs with LLVM intrinsics (`@llvm.memmove.p0i8.p0i8.i64`, `@llvm.memcpy.p0i8.p0i8.i64`). These take an extra `i1 isvolatile` param (always `false`). LLVM lowers them to the best instruction sequence for the target — inlined word copies for small sizes, SIMD for large sizes — often better than libc because LLVM knows alignment and size at compile time. Applies to:
+- `defineVectorRemoveFunc` (compiler.go) — currently uses libc `memmove`
+- `promise_vector_push` / `promise_vector_pop` (runtime_vector.c) — once migrated to codegen, use `@llvm.memcpy`
+- `promise_string_new` / `promise_string_concat` (runtime_string.c) — once migrated to codegen, use `@llvm.memcpy`
+- Note: there is **no** `@llvm.memcmp` intrinsic — comparison must stay as libc `memcmp` or a byte loop.
 
 **WASM pointer size**: WASM uses 32-bit pointers. Codegen needs a `ptrSize` constant instead of hardcoded 8. Struct layouts (vtable_ptr, instance_ptr) shrink to 4 bytes on WASM. The target data layout tells LLVM, but explicit pointer arithmetic in codegen (e.g., vector header offsets) must use `ptrSize`.
 
@@ -260,7 +274,7 @@ Everything built on top of Layer 0-3: map (already done), iterators, streams, cr
 | Phase | Work | Targets | Status |
 |-------|------|---------|--------|
 | **Phase 1** | ~~Bitwise operators (`&`, `\|`, `^`, `<<`, `>>`, `~`)~~ | ~~All~~ | Done |
-| **Phase 2** | Move hash, string methods, vector methods to Promise (hash done for int/bool/char) | All | In Progress |
+| **Phase 2** | Move hash, string methods, vector methods to Promise/codegen (hash done, string methods done, vector contains/remove done) | All | In Progress |
 | **Phase 3** | PAL abstraction — define interface, implement macOS + Linux | macOS, Linux | Planned |
 | **Phase 3b** | PAL Windows implementation | Windows | Planned |
 | **Phase 3c** | PAL WASM implementation (WASI imports + JS FFI) | WASM | Planned |

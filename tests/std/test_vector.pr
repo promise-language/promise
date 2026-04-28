@@ -45,10 +45,34 @@ test_contains() `test {
   assert(!nums.contains(99), "not contains 99");
 }
 
+test_contains_empty() `test {
+  int[] empty = [];
+  assert(!empty.contains(1), "empty contains returns false");
+}
+
+test_contains_single() `test {
+  int[] nums = [42];
+  assert(nums.contains(42), "single element found");
+  assert(!nums.contains(99), "single element not found");
+}
+
+test_contains_first_last() `test {
+  int[] nums = [10, 20, 30, 40, 50];
+  assert(nums.contains(10), "contains first element");
+  assert(nums.contains(50), "contains last element");
+}
+
+test_contains_duplicates() `test {
+  int[] nums = [5, 5, 5];
+  assert(nums.contains(5), "contains duplicate element");
+}
+
 test_contains_strings() `test {
   string[] words = ["hello", "world"];
   assert(words.contains("hello"), "contains hello");
   assert(!words.contains("nope"), "not contains nope");
+  assert(!words.contains(""), "not contains empty string");
+  assert(!words.contains("hello world"), "not contains longer string");
 }
 
 test_remove() `test {
@@ -58,6 +82,57 @@ test_remove() `test {
   assert(nums[0] == 10, "[0] == 10");
   assert(nums[1] == 30, "[1] == 30 (shifted)");
   assert(nums[2] == 40, "[2] == 40");
+}
+
+test_remove_first() `test {
+  int[] nums = [10, 20, 30];
+  nums.remove(0);
+  assert(nums.len == 2, "after remove first len 2");
+  assert(nums[0] == 20, "[0] == 20 (shifted from [1])");
+  assert(nums[1] == 30, "[1] == 30 (shifted from [2])");
+}
+
+test_remove_last() `test {
+  int[] nums = [10, 20, 30];
+  nums.remove(2);
+  assert(nums.len == 2, "after remove last len 2");
+  assert(nums[0] == 10, "[0] == 10");
+  assert(nums[1] == 20, "[1] == 20");
+}
+
+test_remove_single_element() `test {
+  int[] nums = [99];
+  nums.remove(0);
+  assert(nums.len == 0, "remove single leaves empty");
+  assert(nums.is_empty, "is_empty after single remove");
+}
+
+test_remove_sequential() `test {
+  int[] nums = [1, 2, 3, 4, 5];
+  nums.remove(2);
+  assert(nums.len == 4, "after first remove len 4");
+  assert(nums[2] == 4, "[2] == 4 after removing 3");
+  nums.remove(0);
+  assert(nums.len == 3, "after second remove len 3");
+  assert(nums[0] == 2, "[0] == 2 after removing 1");
+}
+
+test_contains_after_remove() `test {
+  int[] nums = [1, 2, 3];
+  nums.remove(1);
+  assert(nums.contains(1), "contains 1 after remove");
+  assert(nums.contains(3), "contains 3 after remove");
+  assert(!nums.contains(2), "2 removed, not contained");
+}
+
+test_remove_all_elements() `test {
+  int[] nums = [10, 20, 30];
+  nums.remove(0);
+  nums.remove(0);
+  nums.remove(0);
+  assert(nums.len == 0, "all removed len 0");
+  assert(nums.is_empty, "all removed is_empty");
+  assert(!nums.contains(10), "10 not in empty vec");
 }
 
 test_is_empty() `test {

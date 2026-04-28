@@ -60,33 +60,5 @@ int32_t promise_vector_pop(void* vec, void* out_elem, int64_t elem_size) {
     return 1;
 }
 
-// promise_vector_contains checks if an element exists in the vector.
-// eq_fn: int32_t (*)(const void* a, const void* b, int64_t size) or NULL for memcmp.
-int8_t promise_vector_contains(void* vec, const void* elem, int64_t elem_size, void* eq_fn) {
-    vector_header_t* h = hdr(vec);
-    typedef int32_t (*eq_func_t)(const void*, const void*, int64_t);
-
-    for (int64_t i = 0; i < h->len; i++) {
-        const void* cur = data(vec) + i * elem_size;
-        if (eq_fn) {
-            if (((eq_func_t)eq_fn)(cur, elem, elem_size)) return 1;
-        } else {
-            if (memcmp(cur, elem, elem_size) == 0) return 1;
-        }
-    }
-    return 0;
-}
-
-// promise_vector_remove removes an element at the given index by shifting.
-void promise_vector_remove(void* vec, int64_t index, int64_t elem_size) {
-    vector_header_t* h = hdr(vec);
-    if (index < 0 || index >= h->len) {
-        promise_panic("vector remove: index out of bounds");
-    }
-    uint8_t* d = data(vec);
-    if (index < h->len - 1) {
-        memmove(d + index * elem_size, d + (index + 1) * elem_size,
-                (h->len - index - 1) * elem_size);
-    }
-    h->len--;
-}
+// promise_vector_contains and promise_vector_remove are now codegen-emitted LLVM IR
+// (see compiler/internal/codegen/compiler.go: defineVectorContainsFunc, defineVectorRemoveFunc)

@@ -5726,6 +5726,7 @@ func TestVectorContainsInt(t *testing.T) {
 			bool has = nums.contains(2);
 		}
 	`)
+	assertContains(t, ir, "define i8 @promise_vector_contains(")
 	assertContains(t, ir, "call i8 @promise_vector_contains(")
 }
 
@@ -5736,6 +5737,7 @@ func TestVectorContainsString(t *testing.T) {
 			bool has = words.contains("a");
 		}
 	`)
+	assertContains(t, ir, "define i8 @promise_vector_contains(")
 	assertContains(t, ir, "call i8 @promise_vector_contains(")
 	// String contains uses custom equality comparator
 	assertContains(t, ir, "@__promise_eq_string")
@@ -5748,7 +5750,57 @@ func TestVectorRemove(t *testing.T) {
 			nums.remove(0);
 		}
 	`)
+	assertContains(t, ir, "define void @promise_vector_remove(")
 	assertContains(t, ir, "call void @promise_vector_remove(")
+}
+
+func TestVectorContainsFuncBody(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[] nums = [1];
+			bool has = nums.contains(1);
+		}
+	`)
+	// Verify key blocks in the defined contains function
+	assertContains(t, ir, "loop.header:")
+	assertContains(t, ir, "loop.body:")
+	assertContains(t, ir, "cmp_bytes:")
+	assertContains(t, ir, "call_eq:")
+	assertContains(t, ir, "byte.header:")
+	assertContains(t, ir, "byte.body:")
+	assertContains(t, ir, "found:")
+	assertContains(t, ir, "not_found:")
+	assertContains(t, ir, "loop.next:")
+}
+
+func TestVectorRemoveFuncBody(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[] nums = [1, 2, 3];
+			nums.remove(1);
+		}
+	`)
+	// Verify key blocks in the defined remove function
+	assertContains(t, ir, "panic:")
+	assertContains(t, ir, "check_shift:")
+	assertContains(t, ir, "do_shift:")
+	assertContains(t, ir, "dec_len:")
+	// Verify panic calls and memmove
+	assertContains(t, ir, "call void @promise_panic(")
+	assertContains(t, ir, "call i8* @memmove(")
+}
+
+func TestVectorContainsIntNull(t *testing.T) {
+	// Int contains passes null eq_fn → byte comparison path
+	ir := generateIR(t, `
+		main() {
+			int[] nums = [1, 2, 3];
+			bool has = nums.contains(2);
+		}
+	`)
+	assertContains(t, ir, "call i8 @promise_vector_contains(")
+	// Null eq_fn for int (non-string) type
+	assertContains(t, ir, "null)")
 }
 
 // --- Vector capacity constructor ---

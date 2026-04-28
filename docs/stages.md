@@ -583,7 +583,7 @@ Consolidated list of items deferred from completed stages. Items marked ~~strike
 | FNV-1a hash in Promise (`std/hash.pr`) for int/bool/char/float types | Done |
 | FNV-1a hash for string (codegen-emitted LLVM IR, no C dependency) | Done |
 | Move string methods to Promise (contains, starts_with, ends_with, index_of) | Done |
-| Move vector.contains/remove to Promise | Pending |
+| Move vector.contains/remove to codegen-emitted LLVM IR | Done |
 | Move int/float/bool→string to Promise | Pending |
 
 ### Future Stages

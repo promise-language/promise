@@ -365,18 +365,20 @@ func (c *Compiler) declareIntrinsics() {
 		ir.NewParam("out_elem", irtypes.I8Ptr),
 		ir.NewParam("elem_size", irtypes.I64))
 
-	c.funcs["promise_vector_contains"] = c.module.NewFunc("promise_vector_contains",
-		irtypes.I8,
-		ir.NewParam("slice", irtypes.I8Ptr),
-		ir.NewParam("elem", irtypes.I8Ptr),
-		ir.NewParam("elem_size", irtypes.I64),
-		ir.NewParam("eq_fn", irtypes.I8Ptr))
+	// Realloc for vector growth, memmove for vector remove
+	c.funcs["realloc"] = c.module.NewFunc("realloc",
+		irtypes.I8Ptr,
+		ir.NewParam("ptr", irtypes.I8Ptr),
+		ir.NewParam("size", irtypes.I64))
+	c.funcs["memmove"] = c.module.NewFunc("memmove",
+		irtypes.I8Ptr,
+		ir.NewParam("dst", irtypes.I8Ptr),
+		ir.NewParam("src", irtypes.I8Ptr),
+		ir.NewParam("n", irtypes.I64))
 
-	c.funcs["promise_vector_remove"] = c.module.NewFunc("promise_vector_remove",
-		irtypes.Void,
-		ir.NewParam("slice", irtypes.I8Ptr),
-		ir.NewParam("index", irtypes.I64),
-		ir.NewParam("elem_size", irtypes.I64))
+	// Vector contains/remove (codegen-emitted LLVM IR, replaces C runtime)
+	c.defineVectorContainsFunc()
+	c.defineVectorRemoveFunc()
 
 	c.funcs["promise_string_trim"] = c.module.NewFunc("promise_string_trim",
 		irtypes.I8Ptr,
@@ -386,12 +388,6 @@ func (c *Compiler) declareIntrinsics() {
 		irtypes.I8Ptr,
 		ir.NewParam("s", irtypes.I8Ptr),
 		ir.NewParam("sep", irtypes.I8Ptr))
-
-	// Realloc for vector growth
-	c.funcs["realloc"] = c.module.NewFunc("realloc",
-		irtypes.I8Ptr,
-		ir.NewParam("ptr", irtypes.I8Ptr),
-		ir.NewParam("size", irtypes.I64))
 
 	// Value-to-string conversion for string interpolation
 	c.funcs["promise_int_to_string"] = c.module.NewFunc("promise_int_to_string",
@@ -695,6 +691,173 @@ func (c *Compiler) defineStringEqFunc() {
 	equalBlk.NewRet(one32)
 
 	c.funcs["__promise_eq_string"] = fn
+}
+
+// defineVectorContainsFunc emits an LLVM IR function that searches a vector for
+// an element. Replaces the C runtime promise_vector_contains.
+// For string elements, uses the eq_fn comparator (__promise_eq_string).
+// For other types, does byte-by-byte comparison (equivalent to memcmp).
+// Vector layout: {i64 len, i64 cap, [data...]} with 16-byte header.
+func (c *Compiler) defineVectorContainsFunc() {
+	sliceParam := ir.NewParam("slice", irtypes.I8Ptr)
+	elemParam := ir.NewParam("elem", irtypes.I8Ptr)
+	elemSizeParam := ir.NewParam("elem_size", irtypes.I64)
+	eqFnParam := ir.NewParam("eq_fn", irtypes.I8Ptr)
+	fn := c.module.NewFunc("promise_vector_contains", irtypes.I8,
+		sliceParam, elemParam, elemSizeParam, eqFnParam)
+
+	headerType := vectorHeaderType() // {i64, i64}
+
+	zero64 := constant.NewInt(irtypes.I64, 0)
+	one64 := constant.NewInt(irtypes.I64, 1)
+	foundVal := constant.NewInt(irtypes.I8, 1)
+	notFoundVal := constant.NewInt(irtypes.I8, 0)
+	headerSizeConst := constant.NewInt(irtypes.I64, int64(vectorHeaderSize))
+
+	// Entry: load len from header, init loop counter
+	entry := fn.NewBlock("entry")
+	hdrPtr := entry.NewBitCast(sliceParam, irtypes.NewPointer(headerType))
+	lenPtr := entry.NewGetElementPtr(headerType, hdrPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	vecLen := entry.NewLoad(irtypes.I64, lenPtr)
+	iAlloca := entry.NewAlloca(irtypes.I64)
+	entry.NewStore(zero64, iAlloca)
+
+	loopHeader := fn.NewBlock("loop.header")
+	loopBody := fn.NewBlock("loop.body")
+	callEq := fn.NewBlock("call_eq")
+	cmpBytes := fn.NewBlock("cmp_bytes")
+	byteHeader := fn.NewBlock("byte.header")
+	byteBody := fn.NewBlock("byte.body")
+	loopNext := fn.NewBlock("loop.next")
+	found := fn.NewBlock("found")
+	notFound := fn.NewBlock("not_found")
+
+	entry.NewBr(loopHeader)
+
+	// loop.header: check i < len
+	iVal := loopHeader.NewLoad(irtypes.I64, iAlloca)
+	cond := loopHeader.NewICmp(enum.IPredSLT, iVal, vecLen)
+	loopHeader.NewCondBr(cond, loopBody, notFound)
+
+	// loop.body: compute element address, check eq_fn
+	iCur := loopBody.NewLoad(irtypes.I64, iAlloca)
+	offset := loopBody.NewMul(iCur, elemSizeParam)
+	dataOffset := loopBody.NewAdd(offset, headerSizeConst)
+	curPtr := loopBody.NewGetElementPtr(irtypes.I8, sliceParam, dataOffset)
+	isNull := loopBody.NewICmp(enum.IPredEQ, eqFnParam, constant.NewNull(irtypes.I8Ptr))
+	loopBody.NewCondBr(isNull, cmpBytes, callEq)
+
+	// call_eq: cast eq_fn to function pointer and call
+	eqFnType := irtypes.NewFunc(irtypes.I32, irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I64)
+	eqFnCast := callEq.NewBitCast(eqFnParam, irtypes.NewPointer(eqFnType))
+	eqResult := callEq.NewCall(eqFnCast, curPtr, elemParam, elemSizeParam)
+	eqNonZero := callEq.NewICmp(enum.IPredNE, eqResult, constant.NewInt(irtypes.I32, 0))
+	callEq.NewCondBr(eqNonZero, found, loopNext)
+
+	// cmp_bytes: byte-by-byte comparison (replaces memcmp)
+	jAlloca := cmpBytes.NewAlloca(irtypes.I64)
+	cmpBytes.NewStore(zero64, jAlloca)
+	cmpBytes.NewBr(byteHeader)
+
+	// byte.header: check j < elem_size
+	jVal := byteHeader.NewLoad(irtypes.I64, jAlloca)
+	byteCond := byteHeader.NewICmp(enum.IPredSLT, jVal, elemSizeParam)
+	byteHeader.NewCondBr(byteCond, byteBody, found)
+
+	// byte.body: compare single byte
+	jCur := byteBody.NewLoad(irtypes.I64, jAlloca)
+	curBytePtr := byteBody.NewGetElementPtr(irtypes.I8, curPtr, jCur)
+	curByte := byteBody.NewLoad(irtypes.I8, curBytePtr)
+	elemBytePtr := byteBody.NewGetElementPtr(irtypes.I8, elemParam, jCur)
+	elemByte := byteBody.NewLoad(irtypes.I8, elemBytePtr)
+	byteEq := byteBody.NewICmp(enum.IPredEQ, curByte, elemByte)
+	nextJ := byteBody.NewAdd(jCur, one64)
+	byteBody.NewStore(nextJ, jAlloca)
+	byteBody.NewCondBr(byteEq, byteHeader, loopNext)
+
+	// loop.next: increment i, loop back
+	iNext := loopNext.NewLoad(irtypes.I64, iAlloca)
+	iInc := loopNext.NewAdd(iNext, one64)
+	loopNext.NewStore(iInc, iAlloca)
+	loopNext.NewBr(loopHeader)
+
+	// found / not_found
+	found.NewRet(foundVal)
+	notFound.NewRet(notFoundVal)
+
+	c.funcs["promise_vector_contains"] = fn
+}
+
+// defineVectorRemoveFunc emits an LLVM IR function that removes an element
+// from a vector at a given index by shifting subsequent elements left.
+// Replaces the C runtime promise_vector_remove.
+// Uses memmove for the shift and decrements the length field.
+func (c *Compiler) defineVectorRemoveFunc() {
+	sliceParam := ir.NewParam("slice", irtypes.I8Ptr)
+	indexParam := ir.NewParam("index", irtypes.I64)
+	elemSizeParam := ir.NewParam("elem_size", irtypes.I64)
+	fn := c.module.NewFunc("promise_vector_remove", irtypes.Void,
+		sliceParam, indexParam, elemSizeParam)
+
+	headerType := vectorHeaderType() // {i64, i64}
+
+	zero64 := constant.NewInt(irtypes.I64, 0)
+	one64 := constant.NewInt(irtypes.I64, 1)
+	headerSizeConst := constant.NewInt(irtypes.I64, int64(vectorHeaderSize))
+
+	// Entry: load len, bounds check
+	entry := fn.NewBlock("entry")
+	hdrPtr := entry.NewBitCast(sliceParam, irtypes.NewPointer(headerType))
+	lenPtr := entry.NewGetElementPtr(headerType, hdrPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	vecLen := entry.NewLoad(irtypes.I64, lenPtr)
+
+	isNeg := entry.NewICmp(enum.IPredSLT, indexParam, zero64)
+	isOver := entry.NewICmp(enum.IPredSGE, indexParam, vecLen)
+	oob := entry.NewOr(isNeg, isOver)
+
+	panicBlk := fn.NewBlock("panic")
+	checkShift := fn.NewBlock("check_shift")
+	entry.NewCondBr(oob, panicBlk, checkShift)
+
+	// panic: call promise_panic with out-of-bounds message
+	panicMsg := constant.NewCharArrayFromString("vector remove: index out of bounds\x00")
+	globalName := fmt.Sprintf(".str.vecremove.%d", c.strCounter)
+	c.strCounter++
+	panicGlobal := c.module.NewGlobalDef(globalName, panicMsg)
+	panicGlobal.Immutable = true
+	msgPtr := panicBlk.NewGetElementPtr(panicGlobal.ContentType, panicGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	panicBlk.NewCall(c.funcs["promise_panic"], msgPtr)
+	panicBlk.NewUnreachable()
+
+	// check_shift: compute data base, check if shift needed
+	dataBase := checkShift.NewGetElementPtr(irtypes.I8, sliceParam, headerSizeConst)
+	lenMinus1 := checkShift.NewSub(vecLen, one64)
+	needsShift := checkShift.NewICmp(enum.IPredSLT, indexParam, lenMinus1)
+
+	doShift := fn.NewBlock("do_shift")
+	decLen := fn.NewBlock("dec_len")
+	checkShift.NewCondBr(needsShift, doShift, decLen)
+
+	// do_shift: memmove elements left
+	dstOffset := doShift.NewMul(indexParam, elemSizeParam)
+	dst := doShift.NewGetElementPtr(irtypes.I8, dataBase, dstOffset)
+	idxPlus1 := doShift.NewAdd(indexParam, one64)
+	srcOffset := doShift.NewMul(idxPlus1, elemSizeParam)
+	src := doShift.NewGetElementPtr(irtypes.I8, dataBase, srcOffset)
+	remaining := doShift.NewSub(vecLen, idxPlus1)
+	moveSize := doShift.NewMul(remaining, elemSizeParam)
+	doShift.NewCall(c.funcs["memmove"], dst, src, moveSize)
+	doShift.NewBr(decLen)
+
+	// dec_len: decrement length
+	newLen := decLen.NewSub(vecLen, one64)
+	decLen.NewStore(newLen, lenPtr)
+	decLen.NewRet(nil)
+
+	c.funcs["promise_vector_remove"] = fn
 }
 
 // declareFuncs creates LLVM function declarations for all FuncDecl nodes with bodies (pass 1).

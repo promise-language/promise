@@ -1,8 +1,10 @@
 # Compiler Stages
 
-Implementation stages for the Promise compiler pipeline.
+Implementation stages for the Promise compiler pipeline. For language design, see [language-design.md](language-design.md).
 
 ## Overview
+
+### Compiler Pipeline (Stages 1-8)
 
 | Stage | Package | Description | Status |
 |-------|---------|-------------|--------|
@@ -30,9 +32,23 @@ Implementation stages for the Promise compiler pipeline.
 | 8m | `compiler/internal/ast/`, `sema/`, `codegen/` | `use` bindings: scoped resource lifetime with automatic `close()` | Done |
 | 8n | `compiler/internal/sema/`, `codegen/`, `types/` | Constructors: `new`, `` `final ``, factory, `Self`, `super` | Done |
 | 8o | `compiler/internal/sema/`, `codegen/`, `ownership/` | `drop()` methods: ownership-driven cleanup at scope exit | Done |
+
+### Infrastructure (Stages 9-11)
+
+| Stage | Package | Description | Status |
+|-------|---------|-------------|--------|
 | 9 | `compiler/internal/module/` | Module resolution, dependency graph | Planned |
-| 10 | `cmd/promise/` | CLI entry point (build, run, test, fmt, etc.) | Planned |
+| 10 | `cmd/promise/` | CLI entry point (build, run, test, fmt, etc.) | Partial |
 | 11 | `pkg/` | Package manager: fetch, resolve, lock | Planned |
+
+### Cross-cutting Work
+
+| Area | Description | Status | Design Doc |
+|------|-------------|--------|------------|
+| Runtime migration | Move C runtime to codegen LLVM IR / pure Promise | Done (Phases 1-2) | [runtime-proposal.md](runtime-proposal.md) |
+| Platform abstraction | PAL for macOS/Linux/Windows/WASM | Planned (Phase 3+) | [runtime-proposal.md](runtime-proposal.md) |
+| Operator dispatch | `[]`, `[:]`, `++`, `--`, `..`, `!` as method-dispatched operators | Planned | [subscript-slice-operators.md](subscript-slice-operators.md) |
+| C binding | Generated headers for extern type safety | Planned | [c-binding-architecture.md](c-binding-architecture.md) |
 
 ---
 
@@ -524,23 +540,49 @@ Dependency fetching and resolution.
 
 ---
 
-## Deferred Work Tracker
+## What's Next
 
-Consolidated list of items deferred from completed stages. Items marked ~~strikethrough~~ were completed in later stages.
+The compiler pipeline (Stages 1-8o) is complete for the current feature set. The runtime C-to-codegen migration (Phase 2) is also complete — only IO/process C functions remain. The next work falls into three areas:
+
+### Near-term: Language Features
+
+| Work | Design Doc | Priority |
+|------|-----------|----------|
+| Operator method dispatch (`[]`, `[:]`, `++`, `--`, `..`, `!`) | [subscript-slice-operators.md](subscript-slice-operators.md) | High |
+| C binding architecture (generated headers) | [c-binding-architecture.md](c-binding-architecture.md) | Medium |
+
+### Near-term: Compiler Infrastructure
+
+| Work | Priority |
+|------|----------|
+| Module system (URL-based imports, dependency graph) — Stage 9 | High |
+| CLI: `promise fmt` code formatter — Stage 10 | Medium |
+| Package manager (fetch, resolve, lock) — Stage 11 | Medium |
+
+### Long-term: Runtime & Platform
+
+| Work | Design Doc | Priority |
+|------|-----------|----------|
+| PAL abstraction (macOS + Linux) — Phase 3 | [runtime-proposal.md](runtime-proposal.md) | Medium |
+| Concurrency (`go`, `task`, `channel`, `<-`) — Phase 5 | [runtime-proposal.md](runtime-proposal.md) | Low |
+| Replace clang with `llc` + `lld` — Phase 7 | [runtime-proposal.md](runtime-proposal.md) | Low |
+
+---
+
+## Deferred Work
+
+Known gaps and improvements deferred from completed stages.
 
 ### Correctness Bugs
 
 | Item | Origin | Priority |
 |------|--------|----------|
-| ~~`llvmTypeSize` struct alignment — sums field sizes without padding, under-allocates for struct-typed slice elements~~ | 8g | ~~Fixed 8o~~ |
-| ~~Evaluation order in compound index assignment — RHS evaluated before LHS target/key~~ | 8i | ~~Fixed 8o~~ |
 | Reassignment of droppable variable leaks old value — `x = newVal` overwrites without calling `drop()` on old | 8o | Medium |
 
 ### Codegen Gaps
 
 | Item | Origin | Priority |
 |------|--------|----------|
-| ~~Capturing lambdas/closures~~ | 8g | ~~Done~~ |
 | Fixed-size arrays as stack-allocated `[N x T]` | 8g | Medium |
 | Destructure is-patterns (`x is Dog(name)`) | 8k | Medium |
 | Generic type RTTI | 8k | Medium |
@@ -553,7 +595,6 @@ Consolidated list of items deferred from completed stages. Items marked ~~strike
 | Multi-arg generics in expression context (grammar limitation) | 8f | Low |
 | Extern ABI for generic types | 8f | Low |
 | Non-instance field placements (`value`/`variant`/`type`) | 8c | Low |
-| ~~Default field values~~ | 8c | ~~Done 8n~~ |
 | User type `toString()` for interpolation | 8h | Low |
 | Devirtualization optimization (direct call when concrete type known) | 8L | Low |
 
@@ -573,44 +614,10 @@ Consolidated list of items deferred from completed stages. Items marked ~~strike
 |------|--------|
 | `inline`, `packed`, `align`, `extern`, `serializable`, `public`, `unsafe` processing | 7 |
 
-### Runtime Migration (see `docs/runtime-proposal.md`)
+### Unscheduled Features
 
-| Item | Status |
-|------|--------|
-| Bitwise operators (`&`, `\|`, `^`, `<<`, `>>`, `~`) on int/uint types | Done |
-| Numeric literal type inference (hex/binary/octal literals adopt context type) | Done |
-| Primitive casting (`as!` for int↔uint, int↔char, etc.) | Done |
-| FNV-1a hash in Promise (`std/hash.pr`) for int/bool/char/float types | Done |
-| FNV-1a hash for string (codegen-emitted LLVM IR, no C dependency) | Done |
-| Move string methods to Promise (contains, starts_with, ends_with, index_of) | Done |
-| Move vector.contains/remove to codegen-emitted LLVM IR | Done |
-| Move int/float/bool/char→string to codegen-emitted LLVM IR (float via snprintf) | Done |
-| Move string.new/concat to codegen-emitted LLVM IR (uses `@llvm.memcpy` intrinsic) | Done |
-| Move vector with_capacity/push/pop to codegen-emitted LLVM IR; switch memmove to `@llvm.memmove` intrinsic; eliminate `runtime_vector.c` | Done |
-| Move string trim/split/next_char to codegen-emitted LLVM IR; add libc `memcmp` extern for split; reduce `runtime_string.c` to print-only | Done |
-| Replace byte-by-byte comparison loops with libc `memcmp` in `promise_string_eq`, `__promise_eq_string`, `promise_vector_contains` | Done |
-| Migrate `promise_type_is` (RTTI) to codegen LLVM IR; add LLVM optimizer attributes to `malloc`/`free`/`realloc` externs | Done |
-
-### Future Stages
-
-| Item | Target |
-|------|--------|
-| Module system (URL-based imports, dependency graph) | Stage 9 |
-| CLI: `promise fmt` code formatter | Stage 10 |
-| Package manager (fetch, resolve, lock) | Stage 11 |
-| Concurrency (`go`, `task`, `channel`, `<-`) | TBD |
-| Generators (`yield`, `yield*`) | TBD |
-| String slicing, Unicode normalization | TBD |
-
-### Completed (resolved in later stages)
-
-- ~~String interpolation~~ → 8h
-- ~~If-unwrap / while-unwrap~~ → 8h
-- ~~Optional chaining, unsafe blocks~~ → 8h
-- ~~Container `.len`~~ → 8i
-- ~~Container methods `.push`, `.pop`, `.contains`~~ → 8j
-- ~~Vtable / virtual dispatch~~ → 8L
-- ~~`is` / `as` expressions~~ → 8k
-- ~~Slice growth `.push()`~~ → 8j
-- ~~`llvmTypeSize` struct alignment~~ → 8o
-- ~~Compound index assignment eval order~~ → 8o
+| Item |
+|------|
+| Concurrency (`go`, `task`, `channel`, `<-`) |
+| Generators (`yield`, `yield*`) |
+| String slicing, Unicode normalization |

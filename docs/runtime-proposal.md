@@ -4,22 +4,90 @@ Proposal for Promise's runtime, syscall layer, concurrency model, and multi-plat
 
 ## Current State
 
-The runtime today is ~450 lines of C providing:
-- **IO**: `printf`/`fprintf`/`fwrite` for print, ~~`snprintf` for int/float/bool/char→string~~ (codegen-emitted LLVM IR; float still uses libc `snprintf`)
-- **Memory**: `malloc`/`free`/`realloc` for strings, vectors, closures
-- **String ops**: ~~new, concat~~ (codegen LLVM IR, uses `@llvm.memcpy` intrinsic), ~~eq~~ (codegen LLVM IR), ~~contains, starts_with, ends_with, index_of~~ (pure Promise), ~~trim, split, UTF-8 decode~~ (codegen-emitted LLVM IR; split uses libc `memcmp`)
-- **Vector ops**: ~~with_capacity, push, pop~~ (codegen-emitted LLVM IR), ~~contains, remove~~ (codegen-emitted LLVM IR)
-- **Hash**: FNV-1a for int/bool/char/float (Promise `std/hash.pr` + codegen bitcast), string (codegen-emitted LLVM IR); `eq_string` and `string_eq` also codegen-emitted — `runtime_hash.c` fully eliminated
-- **RTTI**: ~~type_is check for inheritance~~ (codegen-emitted LLVM IR)
-- **Test runner**: fork/waitpid for crash isolation
+After completing the C-to-codegen migration (Phases 1-2), the remaining C runtime is minimal:
 
-The libc surface used: `malloc`, `free`, `realloc`, `memcmp` (for string split), `printf`, `fprintf`, `fwrite`, `snprintf`, `putchar`, `exit`, `fork`, `waitpid`, `fflush`. LLVM intrinsics replace libc `memcpy`/`memmove`.
+**Remaining C runtime** (`runtime/runtime.c`, ~15 lines):
+- `promise_print_int`, `promise_print_f64`, `promise_print_bool` — IO via `printf`
+- `promise_panic`, `promise_panic_msg` — error termination via `fprintf` + `exit`
 
-Codegen uses `llir/llvm` (pure Go, text IR only). Clang serves as both C compiler (for runtime .c) and linker (.ll + .o → binary).
+**Remaining C runtime** (`runtime/runtime_string.c`, ~10 lines):
+- `promise_print_string` — IO via `fwrite`
+
+**Remaining C runtime** (`runtime/runtime_test.c`, ~60 lines):
+- Test runner — crash isolation via `fork`/`waitpid`
+
+**Everything else is codegen-emitted LLVM IR** (14 intrinsic functions defined in `compiler.go`):
+- String: `new`, `concat`, `eq`, `trim`, `split`, `next_char`, `eq_string` (map key equality)
+- Vector: `with_capacity`, `push`, `pop`, `contains`, `remove`
+- RTTI: `type_is`
+- Conversion: `int_to_string`, `uint_to_string`, `f64_to_string`, `bool_to_string`, `char_to_string`
+- Hash: `hash_string` (FNV-1a for string map keys)
+
+**Pure Promise** (`std/*.pr`):
+- Hash: FNV-1a for int/bool/char/float (`std/hash.pr`)
+- String methods: `contains`, `starts_with`, `ends_with`, `index_of` (`std/string.pr`)
+- Map: full HashMap implementation (`std/map.pr`)
+
+**Libc surface**: `malloc`, `free`, `realloc`, `memcmp`, `printf`, `fprintf`, `fwrite`, `snprintf`, `putchar`, `exit`, `fork`, `waitpid`, `fflush`.
+
+**LLVM intrinsics** (replace libc `memcpy`/`memmove`): `@llvm.memcpy`, `@llvm.memmove`. Note: no `@llvm.memcmp` intrinsic exists.
+
+**LLVM optimizer attributes** on all externs: `noalias`, `nocapture`, `noundef`, `nounwind`, `willreturn`, `readonly`, `argmemonly` (as applicable).
+
+**Eliminated C files**: `runtime_hash.c`, `runtime_vector.c`, most of `runtime_string.c`, most of `runtime.c`.
 
 ---
 
-## Target Platforms
+## Phased Roadmap
+
+| Phase | Work | Status |
+|-------|------|--------|
+| **1** | Bitwise operators (`&`, `\|`, `^`, `<<`, `>>`, `~`) | Done |
+| **2** | Migrate all computation from C to codegen LLVM IR / pure Promise | Done |
+| **3** | PAL abstraction — define interface, implement macOS + Linux | **Next** |
+| **3b** | PAL Windows | Planned |
+| **3c** | PAL WASM (WASI imports + JS FFI) | Planned |
+| **4** | Centralize allocator behind PAL | Planned |
+| **4b** | WASM linear memory allocator (bump/free-list on `memory.grow`) | Planned |
+| **5** | M:N concurrency scheduler (C initially) | Planned |
+| **5b** | Cooperative scheduler for WASM (Asyncify or stack-switching) | Planned |
+| **6** | IO reactor: kqueue + epoll + IOCP | Planned |
+| **6b** | JS event loop integration for WASM IO | Planned |
+| **7** | Replace clang with `llc` + `lld`, enable cross-compilation | Planned |
+| **8** | Rewrite scheduler in Promise | Planned |
+
+Phases 1-2 are done and platform-independent. Phase 3 is where the platform split begins. Phases 5-6 are the big architectural investment. Phases 7-8 are polish.
+
+---
+
+## Phase 2 — C-to-Codegen Migration (Done)
+
+Completed in 10 steps. All computation-only C functions replaced with codegen-emitted LLVM IR or pure Promise. Only IO/process functions remain in C.
+
+| Step | What moved | Where it went |
+|------|-----------|---------------|
+| 1 | Bitwise operators | Codegen native emitter table |
+| 2 | Hash (FNV-1a) | `std/hash.pr` (int/bool/char/float), codegen LLVM IR (string) |
+| 3 | String methods (contains, starts_with, ends_with, index_of) | `std/string.pr` (pure Promise) |
+| 4 | Vector contains/remove | Codegen LLVM IR |
+| 5 | int/float/bool/char/uint to string | Codegen LLVM IR (float uses libc `snprintf`) |
+| 6 | UTF-8 char encode | Included in step 5 (`defineCharToStringFunc`) |
+| 7 | String new/concat | Codegen LLVM IR (uses `@llvm.memcpy`) |
+| 8 | Vector with_capacity/push/pop | Codegen LLVM IR (uses `@llvm.memcpy`, `@llvm.memmove`) |
+| 9 | String trim/split/next_char | Codegen LLVM IR (split uses libc `memcmp`) |
+| 10 | RTTI type_is | Codegen LLVM IR (phi-node loop over parent IDs) |
+
+Also done: LLVM intrinsics for all `memcpy`/`memmove`, libc `memcmp` for equality functions (SIMD-accelerated), optimizer attributes on all externs.
+
+**Remaining opportunity**: Pure Promise string methods in `std/string.pr` still use char-by-char comparison. Could add a `memcmp`-backed `string.eq_region` builtin for acceleration on long strings.
+
+---
+
+## Phase 3 — Platform Abstraction Layer (Next)
+
+The remaining C runtime functions all depend on IO or process control. Phase 3 replaces them with a platform abstraction layer (PAL) that provides per-target implementations.
+
+### Target Platforms
 
 | Feature | macOS | Linux | Windows | WASM (browser) |
 |---------|-------|-------|---------|----------------|
@@ -31,9 +99,7 @@ Codegen uses `llir/llvm` (pure Go, text IR only). Clang serves as both C compile
 | Linking | Mach-O | ELF | PE/COFF | WASM binary |
 | Address size | 64-bit | 64-bit | 64-bit | **32-bit** |
 
----
-
-## Architecture: 5 Layers
+### Architecture: 5 Layers
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -49,9 +115,9 @@ Codegen uses `llir/llvm` (pure Go, text IR only). Clang serves as both C compile
 └──────────────────────────────────────────────┘
 ```
 
-### Layer 0: Platform Abstraction Layer (PAL)
+### Layer 0: PAL Functions
 
-A small set of ~25 primitive operations with per-target implementations. The codegen emits calls to PAL functions; each platform provides the LLVM IR for that target.
+~25 primitive operations with per-target implementations. The codegen emits calls to PAL functions; each platform provides the LLVM IR.
 
 ```
 compiler/internal/codegen/pal/
@@ -62,7 +128,7 @@ compiler/internal/codegen/pal/
 └── pal_wasm.go     # WASM: host imports (__wasi_* or JS FFI)
 ```
 
-**IO** (all platforms, different implementations):
+**IO**:
 ```
 pal_write(fd, buf, len) → bytes_written
 pal_read(fd, buf, len) → bytes_read
@@ -122,82 +188,17 @@ pal_spawn(fn) → status
 - macOS: Apple discourages raw syscalls and doesn't guarantee ABI stability. Use libSystem.dylib (Go does the same).
 - Linux: raw syscalls are stable and preferred.
 - Windows: fundamentally different API surface (Win32), requires fd→HANDLE mapping layer.
-- WASM: 32-bit pointers, no threads, no filesystem without WASI.
-
----
+- WASM: 32-bit pointers, no threads, no filesystem without WASI. Codegen needs a `ptrSize` constant instead of hardcoded 8.
 
 ### Layer 1: Memory + Intrinsics
 
-**Immediate wins** (no new code needed):
-- `memcpy` → `@llvm.memcpy.p0i8.p0i8.i64` (LLVM intrinsic)
-- `memset` → `@llvm.memset.p0i8.i64`
-- `memmove` → `@llvm.memmove.p0i8.p0i8.i64`
+LLVM intrinsics (already done): `@llvm.memcpy`, `@llvm.memmove`, `@llvm.memset`.
 
-**Memory allocator phasing**:
-1. **Now**: Keep `malloc`/`free` but route through `pal_alloc`/`pal_free` wrappers
-2. **Later**: mmap-based arena allocator (macOS/Linux), VirtualAlloc-based (Windows), bump allocator on linear memory (WASM)
-3. **Much later**: Per-goroutine allocation pools once concurrency lands
-
-**WASM-specific**: Linear memory has a single contiguous address space grown via `memory.grow`. A free-list or bump allocator manages this space.
-
----
-
-### Layer 2: Core Types in Promise
-
-Move string ops, vector ops, hash, and formatting from C into Promise.
-
-~~**Blocker**: Promise currently lacks **bitwise operators** (`&`, `|`, `^`, `<<`, `>>`).~~ Resolved — bitwise operators, numeric literal type inference, and primitive casting (`as!`) are implemented.
-
-**What can move to Promise today**:
-- ~~Hash (FNV-1a) — all types migrated: int/bool/char/float use `std/hash.pr`, string uses codegen-emitted LLVM IR~~
-- ~~`string.contains`, `starts_with`, `ends_with`, `index_of`~~ — migrated to pure Promise (uses byte indexing `s[i]`)
-- ~~`string.trim`~~ — migrated to codegen-emitted LLVM IR
-- ~~`vector.contains`, `vector.remove`~~ — migrated to codegen-emitted LLVM IR
-- Map — already done (HashMap is pure Promise)
-- Int/float → string conversion (hex formatting needs shifts)
-- UTF-8 encode/decode (needs shifts and masks)
-
-**What should stay as builtins** (emitted as LLVM IR by codegen, not C):
-- `string.new` (malloc + memcpy — close to allocator) — Done
-- `string.concat` (same) — Done
-- `vector.push` (realloc path) — Done (also with_capacity, pop)
-- `string.trim`, `string.split`, `string.next_char` — Done (trim/next_char are pure codegen; split uses libc `memcmp`)
-- `print` functions (until IO layer is built)
-- RTTI `type_is` (accesses raw memory layout) — Done
-
-**Migration order**:
-1. ~~Add bitwise operators to the language (`&`, `|`, `^`, `<<`, `>>`, `~`)~~ — Done
-2. ~~Move hash to Promise (FNV-1a is ~10 lines)~~ — Done (all types: int/bool/char/float via Promise, string via codegen LLVM IR)
-3. ~~Move string methods (contains, starts_with, ends_with, index_of) to Promise~~ — Done (string byte indexing `s[i]` + pure Promise implementations; `string_eq` moved to codegen LLVM IR)
-4. ~~Move vector.contains/remove to Promise~~ — Done (codegen-emitted LLVM IR; can't be pure Promise due to generic `T` needing `Equal` constraint)
-5. ~~Move int/float/bool/char→string to Promise~~ — Done (codegen-emitted LLVM IR; float uses libc `snprintf`; also includes char→string UTF-8 encode from step 6; added `promise_uint_to_string` fixing u64 sign bug)
-6. ~~Move UTF-8 encode (char→string) to Promise~~ — Done (included in step 5 as `defineCharToStringFunc`)
-7. ~~Replace C string.new/concat with codegen-emitted LLVM IR (calls allocator + memcpy intrinsic)~~ — Done (codegen-emitted LLVM IR using `@llvm.memcpy` intrinsic; C `trim`/`split` call codegen `promise_string_new` via linker)
-
-8. ~~Replace C vector with_capacity/push/pop with codegen-emitted LLVM IR~~ — Done (codegen-emitted LLVM IR using `@llvm.memcpy` intrinsic for push/pop; `@llvm.memmove` intrinsic for remove; `runtime_vector.c` eliminated entirely)
-
-9. ~~Replace C string trim/split/next_char with codegen-emitted LLVM IR~~ — Done (trim uses byte loops, split uses libc `memcmp` for SIMD-accelerated substring matching, next_char is UTF-8 decoder; `runtime_string.c` reduced to `promise_print_string` only)
-
-10. ~~Replace C `promise_type_is` with codegen-emitted LLVM IR~~ — Done (phi-node loop over parent IDs; `runtime.c` reduced to print/panic functions only)
-
-After this migration, C runtime code drops to: `print` (IO), `panic` (error termination), test runner. All computation-only functions are now codegen-emitted LLVM IR. LLVM optimizer attributes added to `malloc`/`free`/`realloc`/`memcmp` externs (`noalias`, `nocapture`, `noundef`, `nounwind`, `willreturn`, `readonly`, `argmemonly`).
-
-~~**Performance TODO — restore SIMD memcmp in equality functions**~~: Done. All three codegen byte-by-byte comparison loops replaced with libc `memcmp` (SIMD-accelerated — NEON on ARM, SSE/AVX on x86):
-- `defineStringDirectEqFunc` — `promise_string_eq`, used by `==`/`!=` on strings
-- `defineStringEqFunc` — `__promise_eq_string`, used by `vector.contains` for string[] elements
-- `defineVectorContainsFunc` — memcmp path for non-string vector element comparison
-
-**Remaining opportunity**: Pure Promise string methods (`contains`, `starts_with`, `ends_with`, `index_of` in `std/string.pr`) still use char-by-char comparison via `this[i] != sub[j]`. Could add a `memcmp`-like builtin or `string.eq_region` backed by memcmp for further acceleration on long strings.
-
-~~**TODO — switch to LLVM intrinsics for memory operations**~~: Done. All memory operations now use LLVM intrinsics:
-- `@llvm.memcpy.p0i8.p0i8.i64` — used by `defineStringNewFunc`, `defineStringConcatFunc`, `defineVectorPushFunc`, `defineVectorPopFunc`
-- `@llvm.memmove.p0i8.p0i8.i64` — used by `defineVectorRemoveFunc`
-- No libc `memcpy`/`memmove` externs remain. LLVM lowers intrinsics to optimal instruction sequences per target.
-- Note: there is **no** `@llvm.memcmp` intrinsic — comparison must stay as libc `memcmp` or a byte loop.
-
-**WASM pointer size**: WASM uses 32-bit pointers. Codegen needs a `ptrSize` constant instead of hardcoded 8. Struct layouts (vtable_ptr, instance_ptr) shrink to 4 bytes on WASM. The target data layout tells LLVM, but explicit pointer arithmetic in codegen (e.g., vector header offsets) must use `ptrSize`.
-
----
+Memory allocator phasing:
+1. **Now**: Keep `malloc`/`free` with LLVM optimizer attributes
+2. **Phase 4**: Route through `pal_alloc`/`pal_free` wrappers
+3. **Later**: mmap-based arena allocator (macOS/Linux), VirtualAlloc-based (Windows), bump allocator (WASM)
+4. **Much later**: Per-goroutine allocation pools once concurrency lands
 
 ### Layer 3: Concurrency — Platform-Adaptive
 
@@ -245,13 +246,11 @@ Go's GMP model. The IO reactor is the only platform-specific piece — abstracte
 
 This gives **no function coloring** — every function looks synchronous.
 
-**Implementation language**: Start with C for the scheduler (Option C), migrate to Promise once the language has unsafe pointers, inline assembly, and atomic ops. This is what Go did — early runtimes were mostly C.
-
----
+**Implementation language**: Start with C for the scheduler, migrate to Promise once the language has unsafe pointers, inline assembly, and atomic ops.
 
 ### Layer 4: Standard Library (Pure Promise)
 
-Everything built on top of Layer 0-3: map (already done), iterators, streams, crypto, compression, networking, etc. All platform-independent.
+Everything built on top of Layers 0-3: map (already done), iterators, streams, crypto, compression, networking, etc. All platform-independent.
 
 ---
 
@@ -271,46 +270,14 @@ Everything built on top of Layer 0-3: map (already done), iterators, streams, cr
 2. Compiler emits `.ll` text → `llc` produces `.o` → `lld` links to final binary
 3. Cross-compilation becomes trivial: `promise build --target wasm32 app.pr`
 
-**Alternative**: Keep text IR generation (`llir/llvm`), shell out to `llc` + `lld` instead of `clang`. Ship as companion binaries. `promise install` downloads the right LLVM tools per platform.
-
----
-
-## Phased Roadmap
-
-| Phase | Work | Targets | Status |
-|-------|------|---------|--------|
-| **Phase 1** | ~~Bitwise operators (`&`, `\|`, `^`, `<<`, `>>`, `~`)~~ | ~~All~~ | Done |
-| **Phase 2** | Move hash, string methods, vector methods, value→string, string new/concat, vector ops, string trim/split/next_char to Promise/codegen (all done; remaining C: print, RTTI, test runner; `runtime_vector.c` and most of `runtime_string.c` eliminated) | All | In Progress |
-| **Phase 3** | PAL abstraction — define interface, implement macOS + Linux | macOS, Linux | Planned |
-| **Phase 3b** | PAL Windows implementation | Windows | Planned |
-| **Phase 3c** | PAL WASM implementation (WASI imports + JS FFI) | WASM | Planned |
-| **Phase 4** | Replace memcpy/memset with LLVM intrinsics, centralize allocator | All | Planned |
-| **Phase 4b** | WASM linear memory allocator (bump/free-list on memory.grow) | WASM | Planned |
-| **Phase 5** | M:N concurrency scheduler (C initially) | macOS, Linux, Windows | Planned |
-| **Phase 5b** | Cooperative scheduler for WASM (Asyncify or stack-switching) | WASM | Planned |
-| **Phase 6** | IO reactor: kqueue + epoll + IOCP | macOS, Linux, Windows | Planned |
-| **Phase 6b** | JS event loop integration for WASM IO | WASM | Planned |
-| **Phase 7** | Replace clang with `llc` + `lld`, enable cross-compilation | All | Planned |
-| **Phase 8** | Rewrite scheduler in Promise | All | Planned |
-
-Phases 1-2 are immediate and platform-independent. Phase 3 is where the platform split begins. Phase 5-6 is the big architectural investment. Phase 7-8 is polish.
-
 ---
 
 ## Key Design Decisions
 
 1. **Layer 0 is a PAL, not raw syscalls.** Windows and WASM make raw syscalls impractical as the universal approach. The PAL is a thin abstraction (~25 functions) with per-target codegen.
-
 2. **Two concurrency modes.** WASM can't do threads, so the scheduler supports both M:N (native) and cooperative (WASM). Language semantics stay the same.
-
 3. **WASM is 32-bit pointers.** Codegen needs `ptrSize` abstraction instead of assuming 64-bit.
-
 4. **Test runner can't use fork on Windows/WASM.** Alternatives: threads on Windows, no isolation on WASM.
-
 5. **Cross-compilation comes naturally.** PAL per-target + `llc`/`lld` enables `promise build --target wasm32 app.pr`.
-
 6. **macOS keeps using libSystem.** Apple doesn't guarantee raw syscall ABI stability. Go does the same.
-
 7. **LLVM integration.** Keep text IR (`llir/llvm`) for now; switch to LLVM C API when removing clang becomes a priority.
-
-8. **int→string without libc.** Implement in Promise once bitwise ops exist.

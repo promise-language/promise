@@ -1,0 +1,13 @@
+main() {
+  int a = 100;
+  int b = 200;
+  ch := channel[int](capacity: 1);
+  go {
+    ch.send(a + b);
+    ch.close();
+  };
+  result := <-ch;
+  if v := result {
+    print_int(v);
+  }
+}

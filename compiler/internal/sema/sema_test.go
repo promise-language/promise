@@ -4784,3 +4784,92 @@ func TestTypeParamMemberAccessNoConstraint(t *testing.T) {
 	`)
 	expectError(t, errs, "no method")
 }
+
+// --- Channel Semantics ---
+
+// channelStd provides channel type declarations for sema tests
+const channelStd = `
+type channel[T] ` + "`" + `native {
+	new(int? capacity) ` + "`" + `native;
+	send(T value) ` + "`" + `native;
+	close() ` + "`" + `native;
+}
+`
+
+func TestChannelReceiveReturnsOptional(t *testing.T) {
+	// <-channel[int] returns int?, not int
+	checkOKWithStd(t, channelStd, `
+		test() {
+			ch := channel[int](capacity: 1);
+			ch.send(1);
+			result := <-ch;
+			int? x = result;
+		}
+	`)
+}
+
+func TestChannelReceiveNotBareType(t *testing.T) {
+	// Assigning channel receive directly to int should fail — it's int?
+	errs := checkErrsWithStd(t, channelStd, `
+		test() {
+			ch := channel[int](capacity: 1);
+			ch.send(1);
+			result := <-ch;
+			int x = result;
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+func TestChannelForInBindsElementType(t *testing.T) {
+	// for v in channel[int] binds v as int (not int?)
+	checkOKWithStd(t, channelStd, `
+		test() {
+			ch := channel[int](capacity: 1);
+			ch.send(1);
+			ch.close();
+			for v in ch {
+				int x = v;
+			}
+		}
+	`)
+}
+
+func TestChannelConstructorUnbuffered(t *testing.T) {
+	// channel[int]() — 0 args is valid (optional capacity param)
+	checkOKWithStd(t, channelStd, `
+		test() {
+			ch := channel[int]();
+		}
+	`)
+}
+
+func TestChannelConstructorBuffered(t *testing.T) {
+	// channel[int](capacity: 5) — 1 named arg
+	checkOKWithStd(t, channelStd, `
+		test() {
+			ch := channel[int](capacity: 5);
+		}
+	`)
+}
+
+func TestChannelConstructorTooManyArgs(t *testing.T) {
+	errs := checkErrsWithStd(t, channelStd, `
+		test() {
+			ch := channel[int](capacity: 5, capacity: 10);
+		}
+	`)
+	expectError(t, errs, "expects")
+}
+
+func TestTaskReceiveReturnsBareType(t *testing.T) {
+	// <-task[int] returns int (not int?) — contrast with channel
+	checkOK(t, `
+		compute() int { return 42; }
+		test() {
+			t := go compute();
+			result := <-t;
+			int x = result;
+		}
+	`)
+}

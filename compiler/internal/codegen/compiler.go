@@ -98,16 +98,17 @@ type Compiler struct {
 	palRealloc *ir.Func // @pal_realloc(i8* ptr, i64 size) → i8*
 
 	// PAL threading primitives (Phase 5)
-	palThreadCreate *ir.Func // @pal_thread_create(i8* fn, i8* arg) → i8*
-	palThreadJoin   *ir.Func // @pal_thread_join(i8* handle) → void
-	palMutexInit    *ir.Func // @pal_mutex_init() → i8*
-	palMutexLock    *ir.Func // @pal_mutex_lock(i8* mutex) → void
-	palMutexUnlock  *ir.Func // @pal_mutex_unlock(i8* mutex) → void
-	palMutexDestroy *ir.Func // @pal_mutex_destroy(i8* mutex) → void
-	palCondInit     *ir.Func // @pal_cond_init() → i8*
-	palCondWait     *ir.Func // @pal_cond_wait(i8* cond, i8* mutex) → void
-	palCondSignal   *ir.Func // @pal_cond_signal(i8* cond) → void
-	palCondDestroy  *ir.Func // @pal_cond_destroy(i8* cond) → void
+	palThreadCreate  *ir.Func // @pal_thread_create(i8* fn, i8* arg) → i8*
+	palThreadJoin    *ir.Func // @pal_thread_join(i8* handle) → void
+	palMutexInit     *ir.Func // @pal_mutex_init() → i8*
+	palMutexLock     *ir.Func // @pal_mutex_lock(i8* mutex) → void
+	palMutexUnlock   *ir.Func // @pal_mutex_unlock(i8* mutex) → void
+	palMutexDestroy  *ir.Func // @pal_mutex_destroy(i8* mutex) → void
+	palCondInit      *ir.Func // @pal_cond_init() → i8*
+	palCondWait      *ir.Func // @pal_cond_wait(i8* cond, i8* mutex) → void
+	palCondSignal    *ir.Func // @pal_cond_signal(i8* cond) → void
+	palCondBroadcast *ir.Func // @pal_cond_broadcast(i8* cond) → void
+	palCondDestroy   *ir.Func // @pal_cond_destroy(i8* cond) → void
 
 	// Go expression counter for unique trampoline function names
 	goCounter int
@@ -381,6 +382,7 @@ func (c *Compiler) declareIntrinsics() {
 	c.palCondInit = p.EmitCondInit(c.module)
 	c.palCondWait = p.EmitCondWait(c.module)
 	c.palCondSignal = p.EmitCondSignal(c.module)
+	c.palCondBroadcast = p.EmitCondBroadcast(c.module)
 	c.palCondDestroy = p.EmitCondDestroy(c.module)
 
 	// LLVM memcpy/memmove intrinsics (used instead of libc memcpy/memmove)
@@ -455,6 +457,9 @@ func (c *Compiler) declareIntrinsics() {
 
 	// String equality comparison (codegen-emitted LLVM IR, replaces C runtime)
 	c.defineStringEqFunc()
+
+	// Channel constructor (codegen-emitted LLVM IR)
+	c.defineChannelNewFunc()
 
 	// PAL: emit platform-specific IO/exit primitives
 	c.palWrite = p.EmitWrite(c.module)
@@ -2784,4 +2789,127 @@ func (c *Compiler) emitNativeOp(named *types.Named, op string, left, right value
 		panic(fmt.Sprintf("codegen: no native emitter for %s.%s", named, op))
 	}
 	return emitter(c.block, left, right)
+}
+
+// --- Channel infrastructure ---
+
+// Channel struct field indices.
+const (
+	chanFieldBuffer     = 0  // i8*  ring buffer
+	chanFieldElemSize   = 1  // i64  element size
+	chanFieldCapacity   = 2  // i64  ring buffer capacity (always >= 1)
+	chanFieldCount      = 3  // i64  current element count
+	chanFieldHead       = 4  // i64  read index
+	chanFieldTail       = 5  // i64  write index
+	chanFieldClosed     = 6  // i8   0=open, 1=closed
+	chanFieldUnbuffered = 7  // i8   1 if user requested capacity=0
+	chanFieldMutex      = 8  // i8*  PAL mutex handle
+	chanFieldNotEmpty   = 9  // i8*  cond var: signaled when items added or closed
+	chanFieldNotFull    = 10 // i8*  cond var: signaled when items removed
+)
+
+// channelStructType returns the LLVM struct type for a channel.
+// Layout: { i8*, i64, i64, i64, i64, i64, i8, i8, i8*, i8*, i8* }
+func channelStructType() *irtypes.StructType {
+	return irtypes.NewStruct(
+		irtypes.I8Ptr, // buffer
+		irtypes.I64,   // elem_size
+		irtypes.I64,   // capacity
+		irtypes.I64,   // count
+		irtypes.I64,   // head
+		irtypes.I64,   // tail
+		irtypes.I8,    // closed
+		irtypes.I8,    // unbuffered
+		irtypes.I8Ptr, // mutex
+		irtypes.I8Ptr, // not_empty cond
+		irtypes.I8Ptr, // not_full cond
+	)
+}
+
+// defineChannelNewFunc emits @promise_channel_new(i64 %capacity, i64 %elem_size) → i8*
+// Allocates and initializes a channel struct with ring buffer, mutex, and 2 cond vars.
+func (c *Compiler) defineChannelNewFunc() {
+	capParam := ir.NewParam("capacity", irtypes.I64)
+	elemSzParam := ir.NewParam("elem_size", irtypes.I64)
+	fn := c.module.NewFunc("promise_channel_new", irtypes.I8Ptr, capParam, elemSzParam)
+
+	chanType := channelStructType()
+
+	entry := fn.NewBlock("entry")
+
+	// Allocate channel struct
+	structSize := constant.NewInt(irtypes.I64, int64(llvmTypeSize(chanType)))
+	rawPtr := entry.NewCall(c.palAlloc, structSize)
+	chPtr := entry.NewBitCast(rawPtr, irtypes.NewPointer(chanType))
+
+	// actual_cap = max(capacity, 1) — even unbuffered channels need 1-slot buffer
+	isZero := entry.NewICmp(enum.IPredEQ, capParam, constant.NewInt(irtypes.I64, 0))
+	actualCap := entry.NewSelect(isZero, constant.NewInt(irtypes.I64, 1), capParam)
+
+	// Allocate ring buffer: actual_cap * elem_size
+	bufSize := entry.NewMul(actualCap, elemSzParam)
+	bufPtr := entry.NewCall(c.palAlloc, bufSize)
+
+	// Store buffer
+	bufField := entry.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldBuffer)))
+	entry.NewStore(bufPtr, bufField)
+
+	// Store elem_size
+	esField := entry.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldElemSize)))
+	entry.NewStore(elemSzParam, esField)
+
+	// Store capacity = actual_cap
+	capField := entry.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldCapacity)))
+	entry.NewStore(actualCap, capField)
+
+	// Store count = 0
+	countField := entry.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldCount)))
+	entry.NewStore(constant.NewInt(irtypes.I64, 0), countField)
+
+	// Store head = 0
+	headField := entry.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldHead)))
+	entry.NewStore(constant.NewInt(irtypes.I64, 0), headField)
+
+	// Store tail = 0
+	tailField := entry.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldTail)))
+	entry.NewStore(constant.NewInt(irtypes.I64, 0), tailField)
+
+	// Store closed = 0
+	closedField := entry.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldClosed)))
+	entry.NewStore(constant.NewInt(irtypes.I8, 0), closedField)
+
+	// Store unbuffered = (capacity == 0) ? 1 : 0
+	unbufVal := entry.NewSelect(isZero, constant.NewInt(irtypes.I8, 1), constant.NewInt(irtypes.I8, 0))
+	unbufField := entry.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldUnbuffered)))
+	entry.NewStore(unbufVal, unbufField)
+
+	// Init mutex
+	mtx := entry.NewCall(c.palMutexInit)
+	mtxField := entry.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldMutex)))
+	entry.NewStore(mtx, mtxField)
+
+	// Init not_empty cond var
+	notEmpty := entry.NewCall(c.palCondInit)
+	neField := entry.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldNotEmpty)))
+	entry.NewStore(notEmpty, neField)
+
+	// Init not_full cond var
+	notFull := entry.NewCall(c.palCondInit)
+	nfField := entry.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldNotFull)))
+	entry.NewStore(notFull, nfField)
+
+	entry.NewRet(rawPtr)
+
+	c.funcs["promise_channel_new"] = fn
 }

@@ -46,6 +46,8 @@ type PAL interface {
 	EmitCondSignal(module *ir.Module) *ir.Func
 	// EmitCondDestroy defines @pal_cond_destroy(i8* %cond) → void
 	EmitCondDestroy(module *ir.Module) *ir.Func
+	// EmitCondBroadcast defines @pal_cond_broadcast(i8* %cond) → void
+	EmitCondBroadcast(module *ir.Module) *ir.Func
 }
 
 // ForTarget returns a PAL implementation for the given LLVM target triple.
@@ -239,6 +241,16 @@ func emitStubCondWait(module *ir.Module) *ir.Func {
 // emitStubCondSignal is a no-op.
 func emitStubCondSignal(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_cond_signal", irtypes.Void,
+		ir.NewParam("cond", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock("entry")
+	entry.NewRet(nil)
+	return fn
+}
+
+// emitStubCondBroadcast is a no-op.
+func emitStubCondBroadcast(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_cond_broadcast", irtypes.Void,
 		ir.NewParam("cond", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock("entry")

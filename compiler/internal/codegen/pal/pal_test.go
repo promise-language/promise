@@ -761,6 +761,70 @@ func TestEmitCondDestroy(t *testing.T) {
 	}
 }
 
+func TestEmitCondBroadcast(t *testing.T) {
+	pals := []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	}
+	for _, tc := range pals {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newModuleWithAlloc(tc.pal)
+			fn := tc.pal.EmitCondBroadcast(module)
+			out := module.String()
+
+			if !strings.Contains(out, "define void @pal_cond_broadcast(i8* %cond)") {
+				t.Error("missing @pal_cond_broadcast definition")
+			}
+			if fn.Name() != "pal_cond_broadcast" {
+				t.Errorf("expected pal_cond_broadcast, got %s", fn.Name())
+			}
+		})
+	}
+}
+
+func TestPosixCondBroadcastDeclaresLibc(t *testing.T) {
+	module := newModuleWithAlloc(&PosixPAL{})
+	(&PosixPAL{}).EmitCondBroadcast(module)
+	out := module.String()
+
+	if !strings.Contains(out, "@pthread_cond_broadcast(") {
+		t.Error("missing @pthread_cond_broadcast declaration")
+	}
+	if !strings.Contains(out, "call i32 @pthread_cond_broadcast(") {
+		t.Error("missing call to @pthread_cond_broadcast")
+	}
+}
+
+func TestStubCondBroadcastIsNoOp(t *testing.T) {
+	pals := []struct {
+		name string
+		pal  PAL
+	}{
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	}
+	for _, tc := range pals {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newModuleWithAlloc(tc.pal)
+			tc.pal.EmitCondBroadcast(module)
+			out := module.String()
+
+			// Stubs should NOT declare pthread_cond_broadcast
+			if strings.Contains(out, "pthread_cond_broadcast") {
+				t.Error("stub should not declare pthread_cond_broadcast")
+			}
+			// Should just return void (no-op)
+			if !strings.Contains(out, "ret void") {
+				t.Error("stub should return void (no-op)")
+			}
+		})
+	}
+}
+
 func TestPosixCondDeclaresLibc(t *testing.T) {
 	module := newModuleWithAlloc(&PosixPAL{})
 	(&PosixPAL{}).EmitCondInit(module)

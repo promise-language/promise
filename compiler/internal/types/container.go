@@ -78,6 +78,21 @@ func AsVector(t Type) (elem Type, ok bool) {
 	return nil, false
 }
 
+// IsChannel reports whether t is a channel instance (Instance{TypChannel, _}).
+func IsChannel(t Type) bool {
+	inst, ok := t.(*Instance)
+	return ok && inst.origin == TypChannel
+}
+
+// AsChannel extracts the element type from a channel instance.
+// Returns (elem, true) for channel instances, (nil, false) otherwise.
+func AsChannel(t Type) (elem Type, ok bool) {
+	if inst, ok := t.(*Instance); ok && inst.origin == TypChannel {
+		return inst.typeArgs[0], true
+	}
+	return nil, false
+}
+
 // IsMap reports whether t is a Map instance (Instance{TypMap, _}).
 func IsMap(t Type) bool {
 	inst, ok := t.(*Instance)

@@ -48,6 +48,7 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 | Runtime migration | Move C runtime to codegen LLVM IR / pure Promise | Done (Phases 1-4) | [runtime-proposal.md](runtime-proposal.md) |
 | Platform abstraction | PAL for macOS/Linux/Windows/WASM | Done (Phase 3) | [runtime-proposal.md](runtime-proposal.md) |
 | 1:1 Threading | `go`/`<-` with OS threads via PAL | Done (Phase 5a) | [runtime-proposal.md](runtime-proposal.md) |
+| Channels | `channel[T]` with buffered/unbuffered send/receive/for-in | Done (Phase 5b) | [runtime-proposal.md](runtime-proposal.md) |
 | Operator dispatch | `[]`, `[:]`, `++`, `--`, `..`, `!` as method-dispatched operators | Planned | [subscript-slice-operators.md](subscript-slice-operators.md) |
 | C binding | Generated headers for extern type safety | Planned | [c-binding-architecture.md](c-binding-architecture.md) |
 
@@ -117,7 +118,7 @@ Four-pass analysis: declare → define → check → verify.
 - **Go expressions** resolve to `task[T]` with inner type inference
 - **Receive operator** (`<-`) extracts `T` from `task[T]` or `channel[T]`
 - **Map indexing** returns `V?` (optional) for `map[K, V]`
-- **For-in** supports `slice`, array, `map`, `range`, and `string` iteration
+- **For-in** supports `slice`, array, `map`, `range`, `string`, and `channel[T]` iteration
 - **Match exhaustiveness** checking for enum types (variant coverage) and non-enum types (wildcard required)
 - **Missing return** detection across if/else chains, match expressions, and infinite loops
 - Error reporting with source positions
@@ -229,7 +230,7 @@ Type-system-driven LLVM IR generation for primitive types, arithmetic, control f
 ### Deferred sub-stages
 
 - Ownership-aware memory management (drop) → Stage 8o
-- Concurrency: `go`/`<-task` → Done (Phase 5); channels → TBD
+- Concurrency: `go`/`<-task` → Done (Phase 5a); `channel[T]` → Done (Phase 5b)
 
 ## Stage 8b — Strings (Done)
 
@@ -371,7 +372,7 @@ Codegen for if-unwrap, while-unwrap, optional chaining, string interpolation, an
   - **Intrinsics**: 14 functions defined as codegen LLVM IR in `declareIntrinsics`: `promise_string_new`, `promise_string_concat`, 5 conversion functions (`bool`, `int`, `uint`, `f64`, `char` to string), `promise_vector_with_capacity`, `promise_vector_push`, `promise_vector_pop`, `promise_string_trim`, `promise_string_split`, `promise_string_next_char`, `promise_type_is`.
 - **Unsafe blocks**: `genUnsafeExpr` trivially generates block contents. Ownership analysis handles the "unsafe" semantics, not codegen.
 - **Scope**: If-unwrap (with/without else), while-unwrap (with break/continue), optional chaining on user type fields, string interpolation with identifiers/literals/expressions/multiple parts, unsafe blocks.
-- **Deferred**: `is`/`as` expressions (need RTTI), generators (`yield`), channels (`channel[T]`), container methods (`.push`, `.pop`, `.contains`), user type `toString()` for interpolation. Container `.len` completed in Stage 8i. `go`/`<-task` concurrency completed in Phase 5.
+- **Deferred**: `is`/`as` expressions (need RTTI), generators (`yield`), container methods (`.push`, `.pop`, `.contains`), user type `toString()` for interpolation. Container `.len` completed in Stage 8i. `go`/`<-task` concurrency completed in Phase 5a. `channel[T]` completed in Phase 5b.
 
 ## Stage 8i — Char Literals, Container `.len`, String Iteration & Map Compound Assignment (Done)
 
@@ -543,7 +544,7 @@ Dependency fetching and resolution.
 
 ## What's Next
 
-The compiler pipeline (Stages 1-8o) is complete for the current feature set. The runtime is fully codegen-emitted LLVM IR — no C files remain. Phase 5a added 1:1 threading (`go`/`<-` with OS threads). Channels, M:N scheduling, and IO reactor remain (Phases 5b-6). The next work falls into three areas:
+The compiler pipeline (Stages 1-8o) is complete for the current feature set. The runtime is fully codegen-emitted LLVM IR — no C files remain. Phase 5a added 1:1 threading (`go`/`<-` with OS threads). Phase 5b added typed channels (`channel[T]` with buffered/unbuffered send/receive/for-in). M:N scheduling and IO reactor remain (Phases 5c-6). The next work falls into three areas:
 
 ### Near-term: Language Features
 
@@ -564,7 +565,7 @@ The compiler pipeline (Stages 1-8o) is complete for the current feature set. The
 
 | Work | Design Doc | Priority |
 |------|-----------|----------|
-| Channels (`channel[T]`, buffered send/receive) — Phase 5b | [runtime-proposal.md](runtime-proposal.md) | Medium |
+| Channels (`channel[T]`, buffered send/receive) — Phase 5b | [runtime-proposal.md](runtime-proposal.md) | Done |
 | M:N scheduler (GMP model, work stealing) — Phase 5c | [runtime-proposal.md](runtime-proposal.md) | Medium |
 | Cooperative WASM scheduler — Phase 5d | [runtime-proposal.md](runtime-proposal.md) | Low |
 | IO reactor (kqueue/epoll/IOCP) — Phase 6 | [runtime-proposal.md](runtime-proposal.md) | Low |
@@ -617,10 +618,16 @@ Known gaps and improvements deferred from completed stages.
 |------|--------|
 | `inline`, `packed`, `align`, `extern`, `serializable`, `public`, `unsafe` processing | 7 |
 
+### Parameter Handling
+
+| Item | Origin | Priority |
+|------|--------|----------|
+| Default values for constructor parameters (`new(int capacity = 10)`) | 5b | Medium |
+| Unified parameter handling for constructors and methods: optional, default values, mixed named/positional | 5b | Medium |
+
 ### Unscheduled Features
 
 | Item |
 |------|
-| Channels (`channel[T]`, buffered send/receive) |
 | Generators (`yield`, `yield*`) |
 | String slicing, Unicode normalization |

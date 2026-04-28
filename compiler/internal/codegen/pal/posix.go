@@ -244,6 +244,21 @@ func (p *PosixPAL) EmitCondSignal(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// EmitCondBroadcast declares pthread_cond_broadcast and defines @pal_cond_broadcast.
+func (p *PosixPAL) EmitCondBroadcast(module *ir.Module) *ir.Func {
+	pthreadCondBroadcast := module.NewFunc("pthread_cond_broadcast", irtypes.I32,
+		ir.NewParam("cond", irtypes.I8Ptr))
+	pthreadCondBroadcast.FuncAttrs = append(pthreadCondBroadcast.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_cond_broadcast", irtypes.Void,
+		ir.NewParam("cond", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock("entry")
+	entry.NewCall(pthreadCondBroadcast, fn.Params[0])
+	entry.NewRet(nil)
+	return fn
+}
+
 // EmitCondDestroy declares pthread_cond_destroy and defines @pal_cond_destroy.
 func (p *PosixPAL) EmitCondDestroy(module *ir.Module) *ir.Func {
 	palFree := lookupFunc(module, "pal_free")

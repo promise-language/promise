@@ -52,6 +52,42 @@ for prfile in "$TEST_DIR"/*.pr; do
   fi
 done
 
+# --- concurrency tests ---
+CONC_DIR="$ROOT_DIR/tests/concurrency"
+if [ -d "$CONC_DIR" ]; then
+  for prfile in "$CONC_DIR"/*.pr; do
+    [ -f "$prfile" ] || continue
+    name=$(basename "$prfile" .pr)
+    expected="$CONC_DIR/${name}.expected"
+
+    if [ ! -f "$expected" ]; then
+      echo "SKIP $name (no .expected file)"
+      continue
+    fi
+
+    compile_out=$("$WORKDIR/promise" build "$prfile" -o "$WORKDIR/$name" 2>&1)
+    if [ $? -ne 0 ]; then
+      echo "FAIL $name (compilation failed)"
+      echo "$compile_out" | grep -v "^Compiled " | head -5
+      FAIL=$((FAIL + 1))
+      continue
+    fi
+
+    actual=$("$WORKDIR/$name" 2>&1) || true
+    expected_text=$(cat "$expected")
+
+    if [ "$actual" = "$expected_text" ]; then
+      echo "PASS $name"
+      PASS=$((PASS + 1))
+    else
+      echo "FAIL $name"
+      echo "  expected: $(head -3 "$expected")"
+      echo "  actual:   $(echo "$actual" | head -3)"
+      FAIL=$((FAIL + 1))
+    fi
+  done
+fi
+
 # --- promise test: all-pass ---
 test_name="test_assert (promise test)"
 actual=$("$WORKDIR/promise" test "$TEST_DIR/test_assert.pr" 2>&1) || true

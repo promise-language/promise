@@ -1,0 +1,11 @@
+main() {
+  ch := channel[int]();
+  go {
+    ch.send(99);
+    ch.close();
+  };
+  result := <-ch;
+  if v := result {
+    print_int(v);
+  }
+}

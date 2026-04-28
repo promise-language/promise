@@ -16,3 +16,4 @@ compiler/grammar/.antlr/PromiseLexer.tokens
 compiler/grammar/.antlr/PromiseParser.interp
 compiler/grammar/.antlr/PromiseParser.java
 compiler/grammar/.antlr/PromiseParser.tokens
+bin/promise

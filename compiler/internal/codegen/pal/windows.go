@@ -98,7 +98,10 @@ func (p *WindowsPAL) EmitMutexUnlock(module *ir.Module) *ir.Func { return emitSt
 func (p *WindowsPAL) EmitMutexDestroy(module *ir.Module) *ir.Func {
 	return emitStubMutexDestroy(module)
 }
-func (p *WindowsPAL) EmitCondInit(module *ir.Module) *ir.Func    { return emitStubCondInit(module) }
-func (p *WindowsPAL) EmitCondWait(module *ir.Module) *ir.Func    { return emitStubCondWait(module) }
-func (p *WindowsPAL) EmitCondSignal(module *ir.Module) *ir.Func  { return emitStubCondSignal(module) }
+func (p *WindowsPAL) EmitCondInit(module *ir.Module) *ir.Func   { return emitStubCondInit(module) }
+func (p *WindowsPAL) EmitCondWait(module *ir.Module) *ir.Func   { return emitStubCondWait(module) }
+func (p *WindowsPAL) EmitCondSignal(module *ir.Module) *ir.Func { return emitStubCondSignal(module) }
+func (p *WindowsPAL) EmitCondBroadcast(module *ir.Module) *ir.Func {
+	return emitStubCondBroadcast(module)
+}
 func (p *WindowsPAL) EmitCondDestroy(module *ir.Module) *ir.Func { return emitStubCondDestroy(module) }

@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -650,6 +651,10 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 			if origin == types.TypVector {
 				return c.genVectorCapacityConstructor(e, inst)
 			}
+			// Channel constructor: channel[T](capacity: n) or channel[T]()
+			if origin == types.TypChannel {
+				return c.genChannelConstructor(e, inst)
+			}
 			return c.genConstructorCallMono(e, calleeType)
 		}
 	}
@@ -1131,6 +1136,245 @@ func (c *Compiler) genVectorCapacityConstructor(e *ast.CallExpr, inst *types.Ins
 		constant.NewInt(irtypes.I64, elemSize))
 }
 
+// genChannelConstructor generates code for channel[T](capacity: n) or channel[T]().
+// Calls @promise_channel_new(capacity, elem_size) → i8*.
+func (c *Compiler) genChannelConstructor(e *ast.CallExpr, inst *types.Instance) value.Value {
+	elemType := inst.TypeArgs()[0]
+	elemLLVM := c.resolveType(elemType)
+	elemSize := int64(llvmTypeSize(elemLLVM))
+
+	// capacity defaults to 0 (unbuffered) when no argument provided
+	var capacity value.Value
+	if len(e.Args) > 0 {
+		capArg := c.genExpr(e.Args[0].Value)
+		// Argument is int? — unwrap the optional to get the int value.
+		// If it's a bare int literal, sema may pass it as int? via AssignableTo.
+		argType := c.info.Types[e.Args[0].Value]
+		if _, isOpt := argType.(*types.Optional); isOpt {
+			// Extract value from { i1, i64 } optional — field 1
+			capacity = c.block.NewExtractValue(capArg, 1)
+		} else {
+			capacity = capArg
+		}
+	} else {
+		capacity = constant.NewInt(irtypes.I64, 0)
+	}
+
+	return c.block.NewCall(c.funcs["promise_channel_new"],
+		capacity,
+		constant.NewInt(irtypes.I64, elemSize))
+}
+
+// genChannelMethodCall dispatches native method calls on channel[T].
+func (c *Compiler) genChannelMethodCall(e *ast.CallExpr, member *ast.MemberExpr, elemType types.Type, method string) value.Value {
+	chRaw := c.genExpr(member.Target)
+	chanType := channelStructType()
+	chPtr := c.block.NewBitCast(chRaw, irtypes.NewPointer(chanType))
+	elemLLVM := c.resolveType(elemType)
+	elemSize := int64(llvmTypeSize(elemLLVM))
+
+	switch method {
+	case "send":
+		return c.genChannelSend(e, chRaw, chPtr, chanType, elemLLVM, elemSize)
+	case "close":
+		return c.genChannelClose(chRaw, chPtr, chanType)
+	default:
+		panic(fmt.Sprintf("codegen: unknown channel method %q", method))
+	}
+}
+
+// genChannelSend generates code for ch.send(value).
+// lock → wait-if-full → memcpy to buffer → signal → rendezvous wait if unbuffered → unlock
+func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr value.Value, chanType *irtypes.StructType, elemLLVM irtypes.Type, elemSize int64) value.Value {
+	// Load mutex
+	mtxFieldPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldMutex)))
+	mtx := c.block.NewLoad(irtypes.I8Ptr, mtxFieldPtr)
+
+	// Load cond vars
+	neFieldPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldNotEmpty)))
+	notEmpty := c.block.NewLoad(irtypes.I8Ptr, neFieldPtr)
+
+	nfFieldPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldNotFull)))
+	notFull := c.block.NewLoad(irtypes.I8Ptr, nfFieldPtr)
+
+	// Lock mutex
+	c.block.NewCall(c.palMutexLock, mtx)
+
+	// Check closed before sending — panic if channel is closed
+	closedPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldClosed)))
+	closedVal := c.block.NewLoad(irtypes.I8, closedPtr)
+	isClosed := c.block.NewICmp(enum.IPredEQ, closedVal, constant.NewInt(irtypes.I8, 1))
+
+	sendClosedPanicBlock := c.newBlock("send.closed.panic")
+	sendOkBlock := c.newBlock("send.ok")
+	c.block.NewCondBr(isClosed, sendClosedPanicBlock, sendOkBlock)
+
+	c.block = sendClosedPanicBlock
+	c.block.NewCall(c.palMutexUnlock, mtx)
+	panicMsg := c.makeGlobalString("send on closed channel")
+	c.block.NewCall(c.funcs["promise_panic"], panicMsg)
+	c.block.NewUnreachable()
+
+	c.block = sendOkBlock
+
+	// Wait while full: while count == capacity
+	waitFullBlock := c.newBlock("send.waitfull")
+	waitFullBodyBlock := c.newBlock("send.waitfull.body")
+	waitFullClosedBlock := c.newBlock("send.waitfull.closed")
+	writeBlock := c.newBlock("send.write")
+
+	c.block.NewBr(waitFullBlock)
+
+	// waitfull: check count == capacity
+	c.block = waitFullBlock
+	countPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldCount)))
+	count := c.block.NewLoad(irtypes.I64, countPtr)
+	capPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldCapacity)))
+	cap_ := c.block.NewLoad(irtypes.I64, capPtr)
+	isFull := c.block.NewICmp(enum.IPredEQ, count, cap_)
+	c.block.NewCondBr(isFull, waitFullBodyBlock, writeBlock)
+
+	// waitfull.body: cond_wait, then re-check closed flag
+	c.block = waitFullBodyBlock
+	c.block.NewCall(c.palCondWait, notFull, mtx)
+	closedAfterWait := c.block.NewLoad(irtypes.I8, closedPtr)
+	isClosedAfterWait := c.block.NewICmp(enum.IPredEQ, closedAfterWait, constant.NewInt(irtypes.I8, 1))
+	c.block.NewCondBr(isClosedAfterWait, waitFullClosedBlock, waitFullBlock)
+
+	// waitfull.closed: channel was closed while we were waiting — panic
+	c.block = waitFullClosedBlock
+	c.block.NewCall(c.palMutexUnlock, mtx)
+	panicMsg2 := c.makeGlobalString("send on closed channel")
+	c.block.NewCall(c.funcs["promise_panic"], panicMsg2)
+	c.block.NewUnreachable()
+
+	// write: memcpy value into buffer[tail * elem_size]
+	c.block = writeBlock
+
+	// Alloca value and store
+	argVal := c.genExpr(e.Args[0].Value)
+	argAlloca := c.block.NewAlloca(elemLLVM)
+	c.block.NewStore(argVal, argAlloca)
+	argAsI8 := c.block.NewBitCast(argAlloca, irtypes.I8Ptr)
+
+	// Calculate dest = buffer + tail * elem_size
+	bufPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldBuffer)))
+	buf := c.block.NewLoad(irtypes.I8Ptr, bufPtr)
+	tailPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldTail)))
+	tail := c.block.NewLoad(irtypes.I64, tailPtr)
+	offset := c.block.NewMul(tail, constant.NewInt(irtypes.I64, elemSize))
+	dest := c.block.NewGetElementPtr(irtypes.I8, buf, offset)
+
+	// memcpy(dest, &value, elem_size)
+	c.block.NewCall(c.funcs["llvm.memcpy"], dest, argAsI8,
+		constant.NewInt(irtypes.I64, elemSize), constant.False)
+
+	// tail = (tail + 1) % capacity
+	capReload := c.block.NewLoad(irtypes.I64, capPtr)
+	tailPlusOne := c.block.NewAdd(tail, constant.NewInt(irtypes.I64, 1))
+	newTail := c.block.NewURem(tailPlusOne, capReload)
+	c.block.NewStore(newTail, tailPtr)
+
+	// count++
+	countReload := c.block.NewLoad(irtypes.I64, countPtr)
+	newCount := c.block.NewAdd(countReload, constant.NewInt(irtypes.I64, 1))
+	c.block.NewStore(newCount, countPtr)
+
+	// Signal not_empty (wake a receiver)
+	c.block.NewCall(c.palCondSignal, notEmpty)
+
+	// If unbuffered: wait until receiver picks up the value
+	unbufPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldUnbuffered)))
+	unbufVal := c.block.NewLoad(irtypes.I8, unbufPtr)
+	isUnbuf := c.block.NewICmp(enum.IPredEQ, unbufVal, constant.NewInt(irtypes.I8, 1))
+
+	rendezvousBlock := c.newBlock("send.rendezvous")
+	doneBlock := c.newBlock("send.done")
+	c.block.NewCondBr(isUnbuf, rendezvousBlock, doneBlock)
+
+	// rendezvous: wait while count > 0 && !closed
+	c.block = rendezvousBlock
+	rendezvousCheckBlock := c.newBlock("send.rv.check")
+	rendezvousWaitBlock := c.newBlock("send.rv.wait")
+	c.block.NewBr(rendezvousCheckBlock)
+
+	c.block = rendezvousCheckBlock
+	rvCount := c.block.NewLoad(irtypes.I64, countPtr)
+	rvHasItems := c.block.NewICmp(enum.IPredUGT, rvCount, constant.NewInt(irtypes.I64, 0))
+	rvClosedVal := c.block.NewLoad(irtypes.I8, closedPtr)
+	isOpen := c.block.NewICmp(enum.IPredEQ, rvClosedVal, constant.NewInt(irtypes.I8, 0))
+	shouldWait := c.block.NewAnd(rvHasItems, isOpen)
+	c.block.NewCondBr(shouldWait, rendezvousWaitBlock, doneBlock)
+
+	c.block = rendezvousWaitBlock
+	c.block.NewCall(c.palCondWait, notFull, mtx)
+	c.block.NewBr(rendezvousCheckBlock)
+
+	// done: unlock
+	c.block = doneBlock
+	c.block.NewCall(c.palMutexUnlock, mtx)
+
+	return nil
+}
+
+// genChannelClose generates code for ch.close().
+// lock → set closed=1 → broadcast both conds → unlock
+func (c *Compiler) genChannelClose(chRaw value.Value, chPtr value.Value, chanType *irtypes.StructType) value.Value {
+	// Load mutex
+	mtxFieldPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldMutex)))
+	mtx := c.block.NewLoad(irtypes.I8Ptr, mtxFieldPtr)
+
+	// Lock
+	c.block.NewCall(c.palMutexLock, mtx)
+
+	// Check if already closed — panic on double-close
+	closedPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldClosed)))
+	closedVal := c.block.NewLoad(irtypes.I8, closedPtr)
+	alreadyClosed := c.block.NewICmp(enum.IPredEQ, closedVal, constant.NewInt(irtypes.I8, 1))
+
+	doubleClosePanic := c.newBlock("close.panic")
+	closeOk := c.newBlock("close.ok")
+	c.block.NewCondBr(alreadyClosed, doubleClosePanic, closeOk)
+
+	c.block = doubleClosePanic
+	c.block.NewCall(c.palMutexUnlock, mtx)
+	panicMsg := c.makeGlobalString("close of closed channel")
+	c.block.NewCall(c.funcs["promise_panic"], panicMsg)
+	c.block.NewUnreachable()
+
+	c.block = closeOk
+
+	// Set closed = 1
+	c.block.NewStore(constant.NewInt(irtypes.I8, 1), closedPtr)
+
+	// Broadcast both cond vars to wake all waiters
+	neFieldPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldNotEmpty)))
+	notEmpty := c.block.NewLoad(irtypes.I8Ptr, neFieldPtr)
+	c.block.NewCall(c.palCondBroadcast, notEmpty)
+
+	nfFieldPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldNotFull)))
+	notFull := c.block.NewLoad(irtypes.I8Ptr, nfFieldPtr)
+	c.block.NewCall(c.palCondBroadcast, notFull)
+
+	// Unlock
+	c.block.NewCall(c.palMutexUnlock, mtx)
+
+	return nil
+}
+
 // genVectorLen loads the length from a vector/array header.
 func (c *Compiler) genVectorLen(e *ast.MemberExpr) value.Value {
 	slicePtr := c.genExpr(e.Target)
@@ -1477,7 +1721,7 @@ func (c *Compiler) genContainerMethodCall(e *ast.CallExpr, member *ast.MemberExp
 	// Check if the method is native — only native methods are handled here.
 	// Non-native methods fall through to the regular user method path.
 	named := extractNamed(targetType)
-	if named == types.TypVector || named == types.TypString {
+	if named == types.TypVector || named == types.TypString || named == types.TypChannel {
 		m := named.LookupMethod(methodName)
 		if m == nil || !m.IsNative() {
 			return nil, false // fall through to regular method dispatch
@@ -1492,6 +1736,16 @@ func (c *Compiler) genContainerMethodCall(e *ast.CallExpr, member *ast.MemberExp
 	if named == types.TypVector {
 		if elem := c.resolveTypeParam(types.TypVector.TypeParams()[0]); elem != nil {
 			return c.genVectorMethodCall(e, member, elem, methodName), true
+		}
+	}
+
+	// Channel methods: send, close
+	if elem, ok := types.AsChannel(targetType); ok {
+		return c.genChannelMethodCall(e, member, elem, methodName), true
+	}
+	if named == types.TypChannel {
+		if elem := c.resolveTypeParam(types.TypChannel.TypeParams()[0]); elem != nil {
+			return c.genChannelMethodCall(e, member, elem, methodName), true
 		}
 	}
 
@@ -3327,11 +3581,244 @@ func (c *Compiler) genGoTrampoline(
 	return trampoline
 }
 
+// collectBlockIdents walks an AST block and collects all IdentExpr names referenced.
+// Returns a sorted, deduplicated list of names that exist in outerLocals.
+func collectBlockIdents(block *ast.Block, outerLocals map[string]*ir.InstAlloca) []string {
+	seen := make(map[string]bool)
+	var walkExpr func(e ast.Expr)
+	var walkStmt func(s ast.Stmt)
+
+	walkExpr = func(e ast.Expr) {
+		if e == nil {
+			return
+		}
+		switch e := e.(type) {
+		case *ast.IdentExpr:
+			if _, ok := outerLocals[e.Name]; ok {
+				seen[e.Name] = true
+			}
+		case *ast.BinaryExpr:
+			walkExpr(e.Left)
+			walkExpr(e.Right)
+		case *ast.UnaryExpr:
+			walkExpr(e.Operand)
+		case *ast.CallExpr:
+			walkExpr(e.Callee)
+			for _, arg := range e.Args {
+				walkExpr(arg.Value)
+			}
+		case *ast.IndexExpr:
+			walkExpr(e.Target)
+			walkExpr(e.Index)
+		case *ast.SliceExpr:
+			walkExpr(e.Target)
+			walkExpr(e.Low)
+			walkExpr(e.High)
+		case *ast.MemberExpr:
+			walkExpr(e.Target)
+		case *ast.OptionalChainExpr:
+			walkExpr(e.Target)
+		case *ast.IsExpr:
+			walkExpr(e.Expr)
+		case *ast.CastExpr:
+			walkExpr(e.Expr)
+		case *ast.ErrorPropagateExpr:
+			walkExpr(e.Expr)
+		case *ast.ErrorUnwrapExpr:
+			walkExpr(e.Expr)
+		case *ast.ErrorHandlerExpr:
+			walkExpr(e.Expr)
+			if e.Body != nil {
+				for _, s := range e.Body.Stmts {
+					walkStmt(s)
+				}
+			}
+		case *ast.IfExpr:
+			walkExpr(e.Cond)
+			if e.Then != nil {
+				for _, s := range e.Then.Stmts {
+					walkStmt(s)
+				}
+			}
+			if e.Else != nil {
+				for _, s := range e.Else.Stmts {
+					walkStmt(s)
+				}
+			}
+		case *ast.MatchExpr:
+			walkExpr(e.Subject)
+			for _, arm := range e.Arms {
+				walkExpr(arm.Body)
+				if arm.Guard != nil {
+					walkExpr(arm.Guard)
+				}
+				if arm.Block != nil {
+					for _, s := range arm.Block.Stmts {
+						walkStmt(s)
+					}
+				}
+			}
+		case *ast.StringLit:
+			for _, part := range e.Parts {
+				if interp, ok := part.(ast.StringInterp); ok {
+					walkExpr(interp.Expr)
+				}
+			}
+		case *ast.TupleLit:
+			for _, elem := range e.Elements {
+				walkExpr(elem)
+			}
+		case *ast.ArrayLit:
+			for _, elem := range e.Elements {
+				walkExpr(elem)
+			}
+		case *ast.MapLit:
+			for _, entry := range e.Entries {
+				walkExpr(entry.Key)
+				walkExpr(entry.Value)
+			}
+		case *ast.GoExpr:
+			if e.Expr != nil {
+				walkExpr(e.Expr)
+			}
+			if e.Block != nil {
+				for _, s := range e.Block.Stmts {
+					walkStmt(s)
+				}
+			}
+		case *ast.LambdaExpr:
+			// Lambda captures are handled separately; skip inner references
+		case *ast.ParenExpr:
+			walkExpr(e.Expr)
+		case *ast.UnsafeExpr:
+			if e.Body != nil {
+				for _, s := range e.Body.Stmts {
+					walkStmt(s)
+				}
+			}
+		}
+	}
+
+	walkStmt = func(s ast.Stmt) {
+		if s == nil {
+			return
+		}
+		switch s := s.(type) {
+		case *ast.ExprStmt:
+			walkExpr(s.Expr)
+		case *ast.InferredVarDecl:
+			walkExpr(s.Value)
+		case *ast.TypedVarDecl:
+			walkExpr(s.Value)
+		case *ast.AssignStmt:
+			walkExpr(s.Target)
+			walkExpr(s.Value)
+		case *ast.ReturnStmt:
+			walkExpr(s.Value)
+		case *ast.RaiseStmt:
+			walkExpr(s.Value)
+		case *ast.YieldStmt:
+			walkExpr(s.Value)
+		case *ast.IfStmt:
+			walkExpr(s.Cond)
+			walkExpr(s.Init)
+			if s.Body != nil {
+				for _, st := range s.Body.Stmts {
+					walkStmt(st)
+				}
+			}
+			if s.Else != nil {
+				walkStmt(s.Else)
+			}
+		case *ast.ForInStmt:
+			walkExpr(s.Iterable)
+			if s.Body != nil {
+				for _, st := range s.Body.Stmts {
+					walkStmt(st)
+				}
+			}
+		case *ast.ClassicForStmt:
+			walkExpr(s.InitValue)
+			walkExpr(s.Cond)
+			walkExpr(s.UpdateTarget)
+			walkExpr(s.UpdateValue)
+			if s.Body != nil {
+				for _, st := range s.Body.Stmts {
+					walkStmt(st)
+				}
+			}
+		case *ast.WhileStmt:
+			walkExpr(s.Cond)
+			if s.Body != nil {
+				for _, st := range s.Body.Stmts {
+					walkStmt(st)
+				}
+			}
+		case *ast.WhileUnwrapStmt:
+			walkExpr(s.Value)
+			if s.Body != nil {
+				for _, st := range s.Body.Stmts {
+					walkStmt(st)
+				}
+			}
+		case *ast.DestructureVarDecl:
+			walkExpr(s.Value)
+		case *ast.UseVarDecl:
+			walkExpr(s.Value)
+		case *ast.YieldDelegateStmt:
+			walkExpr(s.Value)
+		case *ast.InfiniteLoop:
+			if s.Body != nil {
+				for _, st := range s.Body.Stmts {
+					walkStmt(st)
+				}
+			}
+		case *ast.IncDecStmt:
+			walkExpr(s.Target)
+		case *ast.Block:
+			for _, st := range s.Stmts {
+				walkStmt(st)
+			}
+		}
+	}
+
+	for _, s := range block.Stmts {
+		walkStmt(s)
+	}
+
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // genGoBlock handles `go { block }` — wraps the block in a void function and spawns it.
+// Captures outer local variables referenced in the block and passes them through the arg pack.
 func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
+	// Collect outer variables referenced in the block
+	captureNames := collectBlockIdents(block, c.locals)
+
+	// Load captured values and collect their types BEFORE switching context
+	var captureVals []value.Value
+	var captureLLVMTypes []irtypes.Type
+	for _, name := range captureNames {
+		alloca := c.locals[name]
+		elemType := alloca.ElemType
+		val := c.block.NewLoad(elemType, alloca)
+		captureVals = append(captureVals, val)
+		captureLLVMTypes = append(captureLLVMTypes, elemType)
+	}
+
+	// Create thunk function with captured values as parameters
 	thunkName := fmt.Sprintf(".go_body.%d", c.goCounter)
 	c.goCounter++
-	thunkFn := c.module.NewFunc(thunkName, irtypes.Void)
+	var thunkParams []*ir.Param
+	for i, name := range captureNames {
+		thunkParams = append(thunkParams, ir.NewParam(name+".cap", captureLLVMTypes[i]))
+	}
+	thunkFn := c.module.NewFunc(thunkName, irtypes.Void, thunkParams...)
 
 	// Save and switch context
 	savedFn := c.fn
@@ -3355,6 +3842,14 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 
 	entry := thunkFn.NewBlock("entry")
 	c.block = entry
+
+	// Store captured parameters into local allocas so genBlock can find them
+	for i, name := range captureNames {
+		alloca := entry.NewAlloca(captureLLVMTypes[i])
+		alloca.SetName(name + ".addr")
+		entry.NewStore(thunkFn.Params[i], alloca)
+		c.locals[name] = alloca
+	}
 
 	c.genBlock(block)
 	if c.block != nil && c.block.Term == nil {
@@ -3394,13 +3889,26 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(condIdx)))
 	c.block.NewStore(cnd, cndPtr)
 
-	packType := irtypes.NewStruct(irtypes.I8Ptr)
+	// Build arg-pack struct: { i8* task_raw, capture0, capture1, ... }
+	packFieldTypes := []irtypes.Type{irtypes.I8Ptr}
+	packFieldTypes = append(packFieldTypes, captureLLVMTypes...)
+	packType := irtypes.NewStruct(packFieldTypes...)
+
 	packSize := int64(llvmTypeSize(packType))
 	packRaw := c.block.NewCall(c.palAlloc, constant.NewInt(irtypes.I64, packSize))
 	packPtr := c.block.NewBitCast(packRaw, irtypes.NewPointer(packType))
+
+	// Store task pointer into pack[0]
 	packTaskField := c.block.NewGetElementPtr(packType, packPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	c.block.NewStore(taskRaw, packTaskField)
+
+	// Store captured values into pack[1..N]
+	for i, val := range captureVals {
+		fieldPtr := c.block.NewGetElementPtr(packType, packPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i+1)))
+		c.block.NewStore(val, fieldPtr)
+	}
 
 	trampoline := c.genGoTrampoline(thunkFn, taskType, packType, irtypes.Void, true)
 	trampolinePtr := c.block.NewBitCast(trampoline, irtypes.I8Ptr)
@@ -3413,15 +3921,10 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	return taskRaw
 }
 
-// --- Receive expression (<-task) ---
+// --- Receive expression (<-task / <-channel) ---
 
-// genReceiveExpr generates code for `<-task` — waits for the task to complete
-// and returns the result value.
+// genReceiveExpr generates code for `<-expr` — dispatches to task or channel receive.
 func (c *Compiler) genReceiveExpr(e *ast.UnaryExpr) value.Value {
-	// Generate the task pointer (i8*)
-	taskRaw := c.genExpr(e.Operand)
-
-	// Resolve result type T from sema: operand is task[T], result is T
 	operandType := c.info.Types[e.Operand]
 	if c.typeSubst != nil {
 		operandType = types.Substitute(operandType, c.typeSubst)
@@ -3431,6 +3934,17 @@ func (c *Compiler) genReceiveExpr(e *ast.UnaryExpr) value.Value {
 	if !ok {
 		panic(fmt.Sprintf("codegen: receive operand type %T is not Instance", operandType))
 	}
+
+	origin := inst.Origin()
+	if origin == types.TypChannel {
+		return c.genReceiveChannel(e, inst)
+	}
+	return c.genReceiveTask(e, inst)
+}
+
+// genReceiveTask generates code for `<-task` — waits for task to complete, returns T.
+func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.Value {
+	taskRaw := c.genExpr(e.Operand)
 
 	var innerType types.Type
 	if len(inst.TypeArgs()) > 0 {
@@ -3507,4 +4021,125 @@ func (c *Compiler) genReceiveExpr(e *ast.UnaryExpr) value.Value {
 		return nil
 	}
 	return resultVal
+}
+
+// genReceiveChannel generates code for `<-channel[T]` — returns T? (optional).
+// lock → wait while empty && !closed → if closed+empty: return none → read value → return Some(value)
+func (c *Compiler) genReceiveChannel(e *ast.UnaryExpr, inst *types.Instance) value.Value {
+	chRaw := c.genExpr(e.Operand)
+
+	elemType := inst.TypeArgs()[0]
+	elemLLVM := c.resolveType(elemType)
+	elemSize := int64(llvmTypeSize(elemLLVM))
+	optType := irtypes.NewStruct(irtypes.I1, elemLLVM) // { i1, T }
+
+	chanType := channelStructType()
+	chPtr := c.block.NewBitCast(chRaw, irtypes.NewPointer(chanType))
+
+	// Load mutex and not_empty cond
+	mtxFieldPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldMutex)))
+	mtx := c.block.NewLoad(irtypes.I8Ptr, mtxFieldPtr)
+
+	neFieldPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldNotEmpty)))
+	notEmpty := c.block.NewLoad(irtypes.I8Ptr, neFieldPtr)
+
+	nfFieldPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldNotFull)))
+	notFull := c.block.NewLoad(irtypes.I8Ptr, nfFieldPtr)
+
+	// Lock
+	c.block.NewCall(c.palMutexLock, mtx)
+
+	// Wait while count == 0 && !closed
+	waitBlock := c.newBlock("chrecv.wait")
+	waitBodyBlock := c.newBlock("chrecv.wait.body")
+	checkBlock := c.newBlock("chrecv.check")
+	noneBlock := c.newBlock("chrecv.none")
+	readBlock := c.newBlock("chrecv.read")
+	doneBlock := c.newBlock("chrecv.done")
+
+	c.block.NewBr(waitBlock)
+
+	// wait: check count == 0 && !closed
+	c.block = waitBlock
+	countPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldCount)))
+	count := c.block.NewLoad(irtypes.I64, countPtr)
+	isEmpty := c.block.NewICmp(enum.IPredEQ, count, constant.NewInt(irtypes.I64, 0))
+	closedPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldClosed)))
+	closedVal := c.block.NewLoad(irtypes.I8, closedPtr)
+	isOpen := c.block.NewICmp(enum.IPredEQ, closedVal, constant.NewInt(irtypes.I8, 0))
+	shouldWait := c.block.NewAnd(isEmpty, isOpen)
+	c.block.NewCondBr(shouldWait, waitBodyBlock, checkBlock)
+
+	// wait.body: cond_wait, loop
+	c.block = waitBodyBlock
+	c.block.NewCall(c.palCondWait, notEmpty, mtx)
+	c.block.NewBr(waitBlock)
+
+	// check: if count == 0 && closed → none, else → read
+	c.block = checkBlock
+	countAgain := c.block.NewLoad(irtypes.I64, countPtr)
+	stillEmpty := c.block.NewICmp(enum.IPredEQ, countAgain, constant.NewInt(irtypes.I64, 0))
+	c.block.NewCondBr(stillEmpty, noneBlock, readBlock)
+
+	// none: return { false, zeroinit }
+	c.block = noneBlock
+	c.block.NewCall(c.palMutexUnlock, mtx)
+	noneVal := constant.NewZeroInitializer(optType)
+	c.block.NewBr(doneBlock)
+
+	// read: memcpy from buffer[head], advance head, count--, signal not_full
+	c.block = readBlock
+	bufPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldBuffer)))
+	buf := c.block.NewLoad(irtypes.I8Ptr, bufPtr)
+	headPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldHead)))
+	head := c.block.NewLoad(irtypes.I64, headPtr)
+	offset := c.block.NewMul(head, constant.NewInt(irtypes.I64, elemSize))
+	src := c.block.NewGetElementPtr(irtypes.I8, buf, offset)
+
+	// Read value via alloca + memcpy
+	resultAlloca := c.block.NewAlloca(elemLLVM)
+	resultAsI8 := c.block.NewBitCast(resultAlloca, irtypes.I8Ptr)
+	c.block.NewCall(c.funcs["llvm.memcpy"], resultAsI8, src,
+		constant.NewInt(irtypes.I64, elemSize), constant.False)
+	resultVal := c.block.NewLoad(elemLLVM, resultAlloca)
+
+	// head = (head + 1) % capacity
+	capPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldCapacity)))
+	cap_ := c.block.NewLoad(irtypes.I64, capPtr)
+	headPlusOne := c.block.NewAdd(head, constant.NewInt(irtypes.I64, 1))
+	newHead := c.block.NewURem(headPlusOne, cap_)
+	c.block.NewStore(newHead, headPtr)
+
+	// count--
+	countRead := c.block.NewLoad(irtypes.I64, countPtr)
+	newCount := c.block.NewSub(countRead, constant.NewInt(irtypes.I64, 1))
+	c.block.NewStore(newCount, countPtr)
+
+	// Signal not_full (wake a blocked sender)
+	c.block.NewCall(c.palCondSignal, notFull)
+
+	// Unlock
+	c.block.NewCall(c.palMutexUnlock, mtx)
+
+	// Build Some: { true, value }
+	someVal := c.block.NewInsertValue(constant.NewZeroInitializer(optType), constant.True, 0)
+	someVal2 := c.block.NewInsertValue(someVal, resultVal, 1)
+	c.block.NewBr(doneBlock)
+
+	// done: phi to select none or some
+	c.block = doneBlock
+	phi := c.block.NewPhi(
+		&ir.Incoming{X: noneVal, Pred: noneBlock},
+		&ir.Incoming{X: someVal2, Pred: readBlock},
+	)
+
+	return phi
 }

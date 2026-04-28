@@ -491,12 +491,18 @@ func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr) types.Type {
 		return c.checkUnaryOperator(e.Pos(), operand, "~")
 
 	case ast.UnaryReceive:
-		// <-expr: operand should be task[T] or channel[T], result is T
+		// <-expr: operand should be task[T] or channel[T]
+		// task[T] returns T, channel[T] returns T? (none when closed+empty)
 		if inst, ok := operand.(*types.Instance); ok {
 			origin := inst.Origin()
-			if origin == types.TypTask || origin == types.TypChannel {
+			if origin == types.TypTask {
 				if len(inst.TypeArgs()) > 0 {
 					return inst.TypeArgs()[0]
+				}
+			}
+			if origin == types.TypChannel {
+				if len(inst.TypeArgs()) > 0 {
+					return types.NewOptional(inst.TypeArgs()[0])
 				}
 			}
 		}
@@ -615,10 +621,23 @@ func (c *Checker) checkNewConstructorCall(e *ast.CallExpr, named *types.Named, s
 	sig := newMethod.Sig()
 	params := sig.Params()
 
-	// Check argument count
-	if len(e.Args) != len(params) {
-		c.errorf(e.Pos(), "constructor for %s expects %d arguments, got %d",
-			named, len(params), len(e.Args))
+	// Count required params (non-optional types can't be omitted)
+	requiredCount := 0
+	for _, p := range params {
+		if _, isOpt := p.Type().(*types.Optional); !isOpt {
+			requiredCount++
+		}
+	}
+
+	// Check argument count: must provide at least required, at most all
+	if len(e.Args) < requiredCount || len(e.Args) > len(params) {
+		if requiredCount == len(params) {
+			c.errorf(e.Pos(), "constructor for %s expects %d arguments, got %d",
+				named, len(params), len(e.Args))
+		} else {
+			c.errorf(e.Pos(), "constructor for %s expects %d-%d arguments, got %d",
+				named, requiredCount, len(params), len(e.Args))
+		}
 	}
 
 	// Check each argument type

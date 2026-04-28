@@ -1,0 +1,8 @@
+main() {
+  ch := channel[int](capacity: 5);
+  ch.send(42);
+  result := <-ch;
+  if v := result {
+    print_int(v);
+  }
+}

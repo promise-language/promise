@@ -87,13 +87,14 @@ func (p *WasmPAL) EmitFree(module *ir.Module) *ir.Func    { return emitLibcFree(
 func (p *WasmPAL) EmitRealloc(module *ir.Module) *ir.Func { return emitLibcRealloc(module) }
 
 // WASM threading stubs — run synchronously. WASM has no threads (Phase 5b deferred).
-func (p *WasmPAL) EmitThreadCreate(module *ir.Module) *ir.Func { return emitStubThreadCreate(module) }
-func (p *WasmPAL) EmitThreadJoin(module *ir.Module) *ir.Func   { return emitStubThreadJoin(module) }
-func (p *WasmPAL) EmitMutexInit(module *ir.Module) *ir.Func    { return emitStubMutexInit(module) }
-func (p *WasmPAL) EmitMutexLock(module *ir.Module) *ir.Func    { return emitStubMutexLock(module) }
-func (p *WasmPAL) EmitMutexUnlock(module *ir.Module) *ir.Func  { return emitStubMutexUnlock(module) }
-func (p *WasmPAL) EmitMutexDestroy(module *ir.Module) *ir.Func { return emitStubMutexDestroy(module) }
-func (p *WasmPAL) EmitCondInit(module *ir.Module) *ir.Func     { return emitStubCondInit(module) }
-func (p *WasmPAL) EmitCondWait(module *ir.Module) *ir.Func     { return emitStubCondWait(module) }
-func (p *WasmPAL) EmitCondSignal(module *ir.Module) *ir.Func   { return emitStubCondSignal(module) }
-func (p *WasmPAL) EmitCondDestroy(module *ir.Module) *ir.Func  { return emitStubCondDestroy(module) }
+func (p *WasmPAL) EmitThreadCreate(module *ir.Module) *ir.Func  { return emitStubThreadCreate(module) }
+func (p *WasmPAL) EmitThreadJoin(module *ir.Module) *ir.Func    { return emitStubThreadJoin(module) }
+func (p *WasmPAL) EmitMutexInit(module *ir.Module) *ir.Func     { return emitStubMutexInit(module) }
+func (p *WasmPAL) EmitMutexLock(module *ir.Module) *ir.Func     { return emitStubMutexLock(module) }
+func (p *WasmPAL) EmitMutexUnlock(module *ir.Module) *ir.Func   { return emitStubMutexUnlock(module) }
+func (p *WasmPAL) EmitMutexDestroy(module *ir.Module) *ir.Func  { return emitStubMutexDestroy(module) }
+func (p *WasmPAL) EmitCondInit(module *ir.Module) *ir.Func      { return emitStubCondInit(module) }
+func (p *WasmPAL) EmitCondWait(module *ir.Module) *ir.Func      { return emitStubCondWait(module) }
+func (p *WasmPAL) EmitCondSignal(module *ir.Module) *ir.Func    { return emitStubCondSignal(module) }
+func (p *WasmPAL) EmitCondBroadcast(module *ir.Module) *ir.Func { return emitStubCondBroadcast(module) }
+func (p *WasmPAL) EmitCondDestroy(module *ir.Module) *ir.Func   { return emitStubCondDestroy(module) }

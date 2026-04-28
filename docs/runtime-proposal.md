@@ -54,7 +54,7 @@ After completing Phases 1-3, the C runtime is reduced to a single function:
 | **4** | Centralize allocator behind PAL | **Done** |
 | **4b** | WASM linear memory allocator (bump/free-list on `memory.grow`) | Planned |
 | **5a** | 1:1 threading MVP (`go`/`<-` with OS threads via PAL) | **Done** |
-| **5b** | Channels (`channel[T]`, buffered send/receive) | Planned |
+| **5b** | Channels (`channel[T]`, buffered send/receive) | **Done** |
 | **5c** | M:N scheduler (GMP model: goroutines, processors, work stealing) | Planned |
 | **5d** | Cooperative scheduler for WASM (Asyncify or stack-switching) | Planned |
 | **6** | IO reactor: kqueue + epoll + IOCP | Planned |
@@ -62,7 +62,7 @@ After completing Phases 1-3, the C runtime is reduced to a single function:
 | **7** | Replace clang with `llc` + `lld`, enable cross-compilation | Planned |
 | **8** | Rewrite scheduler in Promise | Planned |
 
-Phases 1-5a are done. Phase 3 introduced the platform split (PAL). Phase 5a added 1:1 threading (each `go` spawns an OS thread). Phases 5b-6 add channels, M:N scheduling, and IO. Phases 7-8 are polish.
+Phases 1-5b are done. Phase 3 introduced the platform split (PAL). Phase 5a added 1:1 threading (each `go` spawns an OS thread). Phase 5b added typed channels (`channel[T]` with buffered/unbuffered send/receive/for-in and `go { }` block variable capture). Phases 5c-6 add M:N scheduling and IO. Phases 7-8 are polish.
 
 ---
 
@@ -396,7 +396,7 @@ pal_realloc(ptr, old_size, new_size) → ptr
 - Windows: VirtualAlloc/VirtualFree (or HeapAlloc initially)
 - WASM: bump allocator on linear memory using `memory.grow`
 
-**Phase 5 — Threading** (Done — 1:1 model, WASM stubs run synchronously):
+**Phase 5a — Threading** (Done — 1:1 model, WASM stubs run synchronously):
 ```
 pal_thread_create(fn, arg) → handle
 pal_thread_join(handle)
@@ -407,12 +407,30 @@ pal_mutex_destroy(handle)
 pal_cond_init() → handle
 pal_cond_wait(cond, mutex)
 pal_cond_signal(cond)
+pal_cond_broadcast(cond)
 pal_cond_destroy(cond)
 ```
 - macOS/Linux: pthread_create/join + pthread_mutex + pthread_cond
 - Windows/WASM: synchronous stubs (call fn directly, no-op mutex/cond)
 
 `go expr` spawns an OS thread; `<-task` joins on it. Task struct layout: `{ T result, i1 done, i8* mutex, i8* cond, i8* thread_handle }`. Test runner (`promise_test_run`) migrated from fork/C to thread-based codegen — no C runtime files remain.
+
+**Phase 5b — Channels** (Done):
+
+`channel[T]` is a native type with buffered/unbuffered send/receive. Heap-allocated struct with mutex + 2 cond vars protecting a ring buffer:
+```
+{ i8* buffer, i64 elem_size, i64 capacity, i64 count, i64 head, i64 tail,
+  i8 closed, i8 unbuffered, i8* mutex, i8* not_empty, i8* not_full }
+```
+
+Operations:
+- `channel[T](capacity: N)` — constructor. N=0 (default) creates unbuffered (rendezvous) channel.
+- `ch.send(value)` — lock, wait-if-full, memcpy to ring buffer, signal, rendezvous wait if unbuffered, unlock. Panics on send-to-closed.
+- `<-ch` — lock, wait-while-empty, if closed+empty return `none`, else read and return `Some(value)`, unlock. Returns `T?`.
+- `ch.close()` — lock, set closed, broadcast both conds, unlock. Panics on double-close.
+- `for v in ch { }` — loop receiving until closed+empty.
+
+`go { block }` blocks capture outer local variables by value — the codegen walks the block AST to identify referenced outer locals, packs them into the thread arg struct, and unpacks them as parameters in the thunk function.
 
 **Phase 6 — IO Reactor** (for non-blocking IO):
 ```

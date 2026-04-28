@@ -1,0 +1,5 @@
+main() {
+  ch := channel[int](capacity: 1);
+  ch.close();
+  ch.close();
+}

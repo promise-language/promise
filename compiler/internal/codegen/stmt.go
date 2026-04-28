@@ -998,6 +998,9 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 	} else if key, val, ok := types.AsMap(iterableType); ok {
 		mapPtr := c.genExpr(s.Iterable)
 		c.genForInMap(s, mapPtr, key, val)
+	} else if elem, ok := types.AsChannel(iterableType); ok {
+		chPtr := c.genExpr(s.Iterable)
+		c.genForInChannel(s, chPtr, elem)
 	} else {
 		// String iteration
 		named := extractNamed(iterableType)
@@ -1515,6 +1518,134 @@ func (c *Compiler) genForInVector(s *ast.ForInStmt, slicePtr value.Value, elemTy
 	}
 
 	c.block.NewBr(headerBlock)
+
+	c.breakTarget = savedBreak
+	c.continueTarget = savedContinue
+	c.loopScopeDepth = savedLoopUseDepth
+	c.block = exitBlock
+}
+
+// --- For-in over channels ---
+
+// genForInChannel loops receiving from a channel until it returns none (closed+empty).
+// for v in ch { ... }  ≡  loop { val := <-ch; if val is none: break; v := unwrap(val); ... }
+func (c *Compiler) genForInChannel(s *ast.ForInStmt, chRaw value.Value, elemType types.Type) {
+	elemLLVM := c.resolveType(elemType)
+	elemSize := int64(llvmTypeSize(elemLLVM))
+
+	chanType := channelStructType()
+	chPtr := c.block.NewBitCast(chRaw, irtypes.NewPointer(chanType))
+
+	// Element binding alloca
+	elemAlloca := c.block.NewAlloca(elemLLVM)
+	elemAlloca.SetName(s.Binding)
+	c.locals[s.Binding] = elemAlloca
+
+	headerBlock := c.newBlock("forin_ch.header")
+	recvWaitBlock := c.newBlock("forin_ch.recv.wait")
+	recvWaitBodyBlock := c.newBlock("forin_ch.recv.wait.body")
+	recvCheckBlock := c.newBlock("forin_ch.recv.check")
+	recvNoneBlock := c.newBlock("forin_ch.recv.none")
+	recvReadBlock := c.newBlock("forin_ch.recv.read")
+	bodyBlock := c.newBlock("forin_ch.body")
+	exitBlock := c.newBlock("forin_ch.exit")
+
+	c.block.NewBr(headerBlock)
+
+	// header: lock mutex, then enter receive wait loop
+	c.block = headerBlock
+	mtxFieldPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldMutex)))
+	mtx := c.block.NewLoad(irtypes.I8Ptr, mtxFieldPtr)
+	neFieldPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldNotEmpty)))
+	notEmpty := c.block.NewLoad(irtypes.I8Ptr, neFieldPtr)
+	nfFieldPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldNotFull)))
+	notFull := c.block.NewLoad(irtypes.I8Ptr, nfFieldPtr)
+
+	c.block.NewCall(c.palMutexLock, mtx)
+	c.block.NewBr(recvWaitBlock)
+
+	// recv.wait: while count==0 && !closed → wait
+	c.block = recvWaitBlock
+	countPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldCount)))
+	count := c.block.NewLoad(irtypes.I64, countPtr)
+	isEmpty := c.block.NewICmp(enum.IPredEQ, count, constant.NewInt(irtypes.I64, 0))
+	closedPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldClosed)))
+	closedVal := c.block.NewLoad(irtypes.I8, closedPtr)
+	isOpen := c.block.NewICmp(enum.IPredEQ, closedVal, constant.NewInt(irtypes.I8, 0))
+	shouldWait := c.block.NewAnd(isEmpty, isOpen)
+	c.block.NewCondBr(shouldWait, recvWaitBodyBlock, recvCheckBlock)
+
+	// recv.wait.body
+	c.block = recvWaitBodyBlock
+	c.block.NewCall(c.palCondWait, notEmpty, mtx)
+	c.block.NewBr(recvWaitBlock)
+
+	// recv.check: if empty → exit (channel closed), else → read
+	c.block = recvCheckBlock
+	countAgain := c.block.NewLoad(irtypes.I64, countPtr)
+	stillEmpty := c.block.NewICmp(enum.IPredEQ, countAgain, constant.NewInt(irtypes.I64, 0))
+	c.block.NewCondBr(stillEmpty, recvNoneBlock, recvReadBlock)
+
+	// recv.none: unlock and exit loop
+	c.block = recvNoneBlock
+	c.block.NewCall(c.palMutexUnlock, mtx)
+	c.block.NewBr(exitBlock)
+
+	// recv.read: read value from buffer, advance head, count--, signal, unlock, enter body
+	c.block = recvReadBlock
+	bufPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldBuffer)))
+	buf := c.block.NewLoad(irtypes.I8Ptr, bufPtr)
+	headPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldHead)))
+	head := c.block.NewLoad(irtypes.I64, headPtr)
+	offset := c.block.NewMul(head, constant.NewInt(irtypes.I64, elemSize))
+	src := c.block.NewGetElementPtr(irtypes.I8, buf, offset)
+
+	resultAsI8 := c.block.NewBitCast(elemAlloca, irtypes.I8Ptr)
+	c.block.NewCall(c.funcs["llvm.memcpy"], resultAsI8, src,
+		constant.NewInt(irtypes.I64, elemSize), constant.False)
+
+	// head = (head + 1) % capacity
+	capPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldCapacity)))
+	cap_ := c.block.NewLoad(irtypes.I64, capPtr)
+	headPlusOne := c.block.NewAdd(head, constant.NewInt(irtypes.I64, 1))
+	newHead := c.block.NewURem(headPlusOne, cap_)
+	c.block.NewStore(newHead, headPtr)
+
+	// count--
+	countRead := c.block.NewLoad(irtypes.I64, countPtr)
+	newCount := c.block.NewSub(countRead, constant.NewInt(irtypes.I64, 1))
+	c.block.NewStore(newCount, countPtr)
+
+	// Signal not_full
+	c.block.NewCall(c.palCondSignal, notFull)
+
+	// Unlock
+	c.block.NewCall(c.palMutexUnlock, mtx)
+
+	// Fall into body
+	c.block.NewBr(bodyBlock)
+
+	// body: execute loop body
+	savedBreak := c.breakTarget
+	savedContinue := c.continueTarget
+	savedLoopUseDepth := c.loopScopeDepth
+	c.breakTarget = exitBlock
+	c.continueTarget = headerBlock
+	c.loopScopeDepth = len(c.scopeBindings)
+
+	c.block = bodyBlock
+	c.genBlock(s.Body)
+	if c.block.Term == nil {
+		c.block.NewBr(headerBlock)
+	}
 
 	c.breakTarget = savedBreak
 	c.continueTarget = savedContinue

@@ -141,6 +141,9 @@ func isContainerType(typ types.Type) bool {
 	if _, ok := types.AsVector(typ); ok || named == types.TypVector {
 		return true
 	}
+	if _, ok := types.AsChannel(typ); ok || named == types.TypChannel {
+		return true
+	}
 	if named == types.TypString {
 		return true
 	}

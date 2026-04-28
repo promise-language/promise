@@ -1,0 +1,12 @@
+main() {
+  ch := channel[int](capacity: 3);
+  go {
+    ch.send(10);
+    ch.send(20);
+    ch.send(30);
+    ch.close();
+  };
+  for v in ch {
+    print_int(v);
+  }
+}

@@ -298,6 +298,13 @@ type map[K: Hashable + Equal, V] {
 	b.WriteString("type iter[T] `native {\n\tnext() T? `abstract;\n}\n")
 	b.WriteString("type stream[T] `native {\n\titer() iter[T] `abstract;\n}\n")
 
+	// Channel
+	b.WriteString("type channel[T] `native {\n")
+	b.WriteString("\tnew(int? capacity) `native;\n")
+	b.WriteString("\tsend(T value) `native;\n")
+	b.WriteString("\tclose() `native;\n")
+	b.WriteString("}\n")
+
 	// Range
 	b.WriteString("type range `native {\n\tint start `value;\n\tint end `value;\n\tbool inclusive `value;\n}\n")
 
@@ -6561,4 +6568,164 @@ func TestReceiveExprWaitLoop(t *testing.T) {
 	assertContains(t, ir, "recv.check")
 	assertContains(t, ir, "recv.wait")
 	assertContains(t, ir, "recv.ready")
+}
+
+// --- Channel tests ---
+
+func TestChannelConstructor(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 5);
+		}
+	`)
+	// Should call promise_channel_new
+	assertContains(t, ir, "call i8* @promise_channel_new(")
+	// Should init mutex and 2 cond vars inside promise_channel_new
+	assertContains(t, ir, "call i8* @pal_mutex_init()")
+	assertContains(t, ir, "call i8* @pal_cond_init()")
+}
+
+func TestChannelConstructorUnbuffered(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int]();
+		}
+	`)
+	// Unbuffered: capacity=0
+	assertContains(t, ir, "call i8* @promise_channel_new(i64 0,")
+}
+
+func TestChannelSend(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 5);
+			ch.send(42);
+		}
+	`)
+	// Should lock/unlock mutex and use memcpy for send
+	assertContains(t, ir, "call void @pal_mutex_lock(")
+	assertContains(t, ir, "call void @llvm.memcpy.p0i8.p0i8.i64(")
+	assertContains(t, ir, "call void @pal_cond_signal(")
+	assertContains(t, ir, "call void @pal_mutex_unlock(")
+}
+
+func TestChannelClose(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 5);
+			ch.close();
+		}
+	`)
+	// Close should broadcast both cond vars
+	assertContains(t, ir, "call void @pal_cond_broadcast(")
+}
+
+func TestChannelReceive(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 5);
+			ch.send(42);
+			val := <-ch;
+		}
+	`)
+	// Should have channel receive blocks
+	assertContains(t, ir, "chrecv.wait")
+	assertContains(t, ir, "chrecv.check")
+	assertContains(t, ir, "chrecv.none")
+	assertContains(t, ir, "chrecv.read")
+	assertContains(t, ir, "chrecv.done")
+	// Returns optional { i1, i64 }
+	assertContains(t, ir, "insertvalue { i1, i64 }")
+}
+
+func TestChannelForIn(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 5);
+			ch.send(42);
+			ch.close();
+			for v in ch {
+				int x = v + 1;
+			}
+		}
+	`)
+	// Should have channel for-in block labels
+	assertContains(t, ir, "forin_ch.header")
+	assertContains(t, ir, "forin_ch.recv.wait")
+	assertContains(t, ir, "forin_ch.recv.check")
+	assertContains(t, ir, "forin_ch.recv.none")
+	assertContains(t, ir, "forin_ch.recv.read")
+	assertContains(t, ir, "forin_ch.body")
+	assertContains(t, ir, "forin_ch.exit")
+}
+
+func TestChannelSendClosedPanic(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 5);
+			ch.send(42);
+		}
+	`)
+	// Send should check closed flag and panic if set
+	assertContains(t, ir, "send.closed.panic")
+	assertContains(t, ir, "send on closed channel")
+	// After wait-full wakeup, should re-check closed
+	assertContains(t, ir, "send.waitfull.closed")
+}
+
+func TestChannelDoubleClosePanic(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 5);
+			ch.close();
+		}
+	`)
+	// Close should check already-closed flag
+	assertContains(t, ir, "close.panic")
+	assertContains(t, ir, "close of closed channel")
+}
+
+func TestGoBlockCapturesOuterVars(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 1);
+			int x = 10;
+			go {
+				ch.send(x);
+			};
+		}
+	`)
+	// Thunk should have parameters for captured variables
+	assertContains(t, ir, "define void @.go_body.")
+	// Captured values should be packed and loaded in trampoline
+	assertContains(t, ir, ".go_trampoline.")
+}
+
+func TestGoBlockCapturesMultipleVars(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 1);
+			int a = 10;
+			int b = 20;
+			go {
+				ch.send(a + b);
+			};
+		}
+	`)
+	// Thunk function should accept captured parameters
+	assertContains(t, ir, "define void @.go_body.")
+	// The pack struct should have fields beyond just the task pointer
+	assertContains(t, ir, ".go_trampoline.")
+}
+
+func TestGoBlockNoCapturesStillWorks(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			go { };
+		}
+	`)
+	// Even without captures, the go block should generate correctly
+	assertContains(t, ir, "define void @.go_body.")
+	assertContains(t, ir, ".go_trampoline.")
+	assertContains(t, ir, "call i8* @pal_thread_create")
 }

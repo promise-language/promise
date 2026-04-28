@@ -199,6 +199,10 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 				c.defineMethod(named, md, d.Name)
 			}
 		}
+		// Mark HasNew for native types with a new() constructor
+		if newMethod := lookupOwnMethod(named, "new"); newMethod != nil {
+			named.SetHasNew(true)
+		}
 		c.validateMetas(d.Annotations, TargetType)
 		return
 	}

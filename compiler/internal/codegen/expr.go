@@ -1812,7 +1812,11 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *typ
 	}
 
 	if defaultTarget == nil {
-		defaultTarget = mergeBlock
+		// Exhaustive match — default case is unreachable.
+		// We must NOT route to mergeBlock because the phi has no incoming for this edge.
+		unreachableBlock := c.newBlock("match.unreachable")
+		unreachableBlock.NewUnreachable()
+		defaultTarget = unreachableBlock
 	}
 
 	switchBlock.NewSwitch(tag, defaultTarget, cases...)

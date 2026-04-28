@@ -1,0 +1,46 @@
+// Test bool logical operators and equality
+//
+// TODO: test hash property
+test_and() `test {
+  assert(true && true, "true && true");
+  assert(!(true && false), "!(true && false)");
+  assert(!(false && true), "!(false && true)");
+  assert(!(false && false), "!(false && false)");
+}
+
+test_or() `test {
+  assert(true || true, "true || true");
+  assert(true || false, "true || false");
+  assert(false || true, "false || true");
+  assert(!(false || false), "!(false || false)");
+}
+
+test_not() `test {
+  assert(!false, "!false");
+  assert(!!true, "!!true");
+  assert(!(!true), "!(!true)");
+}
+
+test_equality() `test {
+  assert(true == true, "true == true");
+  assert(false == false, "false == false");
+  assert(!(true == false), "!(true == false)");
+  assert(true != false, "true != false");
+  assert(!(true != true), "!(true != true)");
+}
+
+test_short_circuit() `test {
+  // && should short-circuit: if left is false, right is not evaluated
+  bool reached = false;
+  if false && true {
+    reached = true;
+  }
+  assert(!reached, "false && _ short-circuits");
+
+  // || should short-circuit: if left is true, right is not evaluated
+  bool hit = false;
+  if true || false {
+    hit = true;
+  }
+  assert(hit, "true || _ short-circuits to true");
+}

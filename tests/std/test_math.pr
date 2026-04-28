@@ -1,0 +1,28 @@
+// Test math utility functions: min, max, abs, clamp
+test_min() `test {
+  assert(min(3, 7) == 3, "min(3,7) == 3");
+  assert(min(7, 3) == 3, "min(7,3) == 3");
+  assert(min(5, 5) == 5, "min(5,5) == 5");
+  assert(min(0 - 1, 1) == 0 - 1, "min(-1,1) == -1");
+}
+
+test_max() `test {
+  assert(max(3, 7) == 7, "max(3,7) == 7");
+  assert(max(7, 3) == 7, "max(7,3) == 7");
+  assert(max(5, 5) == 5, "max(5,5) == 5");
+  assert(max(0 - 1, 1) == 1, "max(-1,1) == 1");
+}
+
+test_abs() `test {
+  assert(abs(5) == 5, "abs(5) == 5");
+  assert(abs(0 - 5) == 5, "abs(-5) == 5");
+  assert(abs(0) == 0, "abs(0) == 0");
+}
+
+test_clamp() `test {
+  assert(clamp(5, 0, 10) == 5, "clamp in range");
+  assert(clamp(0 - 5, 0, 10) == 0, "clamp below");
+  assert(clamp(15, 0, 10) == 10, "clamp above");
+  assert(clamp(0, 0, 10) == 0, "clamp at lo");
+  assert(clamp(10, 0, 10) == 10, "clamp at hi");
+}

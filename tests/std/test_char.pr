@@ -1,0 +1,26 @@
+// Test char equality and comparisons
+//
+// TODO: test char range operators (.., ..=) and for-in over char ranges
+// TODO: test hash property
+test_equality() `test {
+  assert('a' == 'a', "'a' == 'a'");
+  assert(!('a' == 'b'), "!('a' == 'b')");
+  assert('a' != 'b', "'a' != 'b'");
+  assert(!('x' != 'x'), "!('x' != 'x')");
+}
+
+test_comparisons() `test {
+  assert('a' < 'b', "'a' < 'b'");
+  assert('z' > 'a', "'z' > 'a'");
+  assert('a' <= 'a', "'a' <= 'a'");
+  assert('a' <= 'b', "'a' <= 'b'");
+  assert('z' >= 'z', "'z' >= 'z'");
+  assert('z' >= 'a', "'z' >= 'a'");
+}
+
+test_escape_chars() `test {
+  assert('\n' != '\t', "newline != tab");
+  assert('\\' == '\\', "backslash == backslash");
+  assert('\'' == '\'', "quote == quote");
+  assert('\0' != 'a', "null != a");
+}

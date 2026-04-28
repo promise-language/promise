@@ -105,6 +105,19 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# --- promise test: directory scanning (std tests) ---
+test_name="std_tests (promise test dir)"
+exit_code=0
+actual=$("$WORKDIR/promise" test "$ROOT_DIR/tests/std/" 2>&1) || exit_code=$?
+if [ "$exit_code" -eq 0 ] && echo "$actual" | grep -q "passed, 0 failed"; then
+  echo "PASS $test_name"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL $test_name"
+  echo "  actual:   $(echo "$actual" | tail -3)"
+  FAIL=$((FAIL + 1))
+fi
+
 echo ""
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

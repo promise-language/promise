@@ -1,0 +1,42 @@
+// Test range creation and for-in iteration
+//
+// TODO: test range field access (start, end, inclusive)
+test_exclusive_range() `test {
+  int sum = 0;
+  for i in 0..5 {
+    sum += i;
+  }
+  assert(sum == 10, "0..5 sum == 10 (0+1+2+3+4)");
+}
+
+test_inclusive_range() `test {
+  int sum = 0;
+  for i in 0..=5 {
+    sum += i;
+  }
+  assert(sum == 15, "0..=5 sum == 15 (0+1+2+3+4+5)");
+}
+
+test_range_single() `test {
+  int count = 0;
+  for _ in 0..1 {
+    count++;
+  }
+  assert(count == 1, "0..1 iterates once");
+}
+
+test_range_empty() `test {
+  int count = 0;
+  for _ in 5..5 {
+    count++;
+  }
+  assert(count == 0, "5..5 iterates zero times");
+}
+
+test_range_in_expressions() `test {
+  int sum = 0;
+  for i in 1..4 {
+    sum += i * i;
+  }
+  assert(sum == 14, "sum of squares 1+4+9 == 14");
+}

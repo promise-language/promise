@@ -1,0 +1,84 @@
+// Test string operations: concat, equality, methods
+//
+// TODO: test comparisons (<, >, <=, >=) — blocked on codegen (string operator "<" not yet implemented)
+// TODO: test indexing s[i] — blocked on codegen (cannot index type string)
+// TODO: test slicing s[start:end] — blocked on codegen
+// TODO: test hash property
+test_concat() `test {
+  assert("hello" + " " + "world" == "hello world", "string concat");
+  assert("" + "a" == "a", "empty + a");
+  assert("a" + "" == "a", "a + empty");
+}
+
+test_equality() `test {
+  assert("hello" == "hello", "equal strings");
+  assert(!("hello" == "world"), "different strings not equal");
+  assert("hello" != "world", "!= different");
+  assert(!("abc" != "abc"), "!= same");
+}
+
+test_len() `test {
+  assert("hello".len == 5, "hello len 5");
+  assert("".len == 0, "empty len 0");
+  assert("ab".len == 2, "ab len 2");
+}
+
+test_is_empty() `test {
+  assert("".is_empty, "empty is_empty");
+  assert(!"hello".is_empty, "hello not is_empty");
+}
+
+test_contains() `test {
+  assert("hello world".contains("world"), "contains world");
+  assert("hello world".contains("hello"), "contains hello");
+  assert(!"hello".contains("xyz"), "not contains xyz");
+  assert("abc".contains(""), "contains empty");
+}
+
+test_starts_with() `test {
+  assert("hello world".starts_with("hello"), "starts_with hello");
+  assert(!"hello world".starts_with("world"), "not starts_with world");
+  assert("abc".starts_with(""), "starts_with empty");
+}
+
+test_ends_with() `test {
+  assert("hello world".ends_with("world"), "ends_with world");
+  assert(!"hello world".ends_with("hello"), "not ends_with hello");
+  assert("abc".ends_with(""), "ends_with empty");
+}
+
+test_index_of() `test {
+  if idx := "hello world".index_of("world") {
+    assert(idx == 6, "index_of world == 6");
+  } else {
+    assert(false, "should find world");
+  }
+
+  bool found = false;
+  if _ := "hello".index_of("xyz") {
+    found = true;
+  }
+  assert(!found, "index_of xyz not found");
+}
+
+test_trim() `test {
+  assert("  hello  ".trim() == "hello", "trim spaces");
+  assert("hello".trim() == "hello", "trim no-op");
+  assert("   ".trim() == "", "trim all spaces");
+}
+
+test_split() `test {
+  string[] parts = "a,b,c".split(",");
+  assert(parts.len == 3, "split len 3");
+  assert(parts[0] == "a", "split[0] == a");
+  assert(parts[1] == "b", "split[1] == b");
+  assert(parts[2] == "c", "split[2] == c");
+}
+
+test_interpolation() `test {
+  int x = 42;
+  assert("{x}" == "42", "int interpolation");
+  string name = "world";
+  assert("hello {name}" == "hello world", "string interpolation");
+  assert("{1 + 2}" == "3", "expr interpolation");
+}

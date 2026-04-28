@@ -1,0 +1,44 @@
+// Test f64 arithmetic, comparisons, and unary operators
+//
+// TODO: test modulo (%)
+// TODO: test increment/decrement (++/--)
+// TODO: test f32 type (separate typed params needed since literals infer as f64)
+test_arithmetic() `test {
+  assert(1.0 + 2.0 == 3.0, "1.0 + 2.0 == 3.0");
+  assert(5.0 - 3.0 == 2.0, "5.0 - 3.0 == 2.0");
+  assert(2.5 * 4.0 == 10.0, "2.5 * 4.0 == 10.0");
+  assert(10.0 / 4.0 == 2.5, "10.0 / 4.0 == 2.5");
+}
+
+test_comparisons() `test {
+  assert(1.0 < 2.0, "1.0 < 2.0");
+  assert(2.0 > 1.0, "2.0 > 1.0");
+  assert(1.0 <= 1.0, "1.0 <= 1.0");
+  assert(1.0 <= 2.0, "1.0 <= 2.0");
+  assert(2.0 >= 2.0, "2.0 >= 2.0");
+  assert(3.0 >= 1.0, "3.0 >= 1.0");
+}
+
+test_equality() `test {
+  assert(3.14 == 3.14, "3.14 == 3.14");
+  assert(1.0 != 2.0, "1.0 != 2.0");
+  assert(!(1.0 == 2.0), "!(1.0 == 2.0)");
+}
+
+test_unary_negation() `test {
+  f64 x = 3.5;
+  assert(-x == 0.0 - 3.5, "-x == -3.5");
+  assert(-(-x) == 3.5, "-(-x) == 3.5");
+}
+
+test_compound_assignment() `test {
+  f64 x = 10.0;
+  x += 2.5;
+  assert(x == 12.5, "+= 2.5");
+  x -= 1.5;
+  assert(x == 11.0, "-= 1.5");
+  x *= 2.0;
+  assert(x == 22.0, "*= 2.0");
+  x /= 4.0;
+  assert(x == 5.5, "/= 4.0");
+}

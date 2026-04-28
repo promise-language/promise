@@ -7,6 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/antlr4-go/antlr/v4"
@@ -38,6 +41,11 @@ Commands:
 
 Options (build):
   -o <output>   Output file name (default: input file without extension)
+
+Test discovery:
+  promise test file.pr          Run tests in a single file
+  promise test dir/             Scan directory for test files
+  promise test dir/...          Scan directory recursively for test files
 
 Inline execution:
   promise exec 'println("hello")'
@@ -212,15 +220,43 @@ func runRun(args []string) {
 	}
 }
 
-// runTest discovers and runs `test annotated functions in a .pr file.
+// runTest discovers and runs `test annotated functions.
+// Accepts a single file, a directory (non-recursive), or dir/... (recursive).
 func runTest(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: promise test <file.pr>")
+		fmt.Fprintln(os.Stderr, "usage: promise test <file.pr | dir | dir/...>")
 		os.Exit(1)
 	}
 
-	filename := args[0]
+	target := args[0]
 
+	// Check for recursive "..." pattern
+	recursive := false
+	if strings.HasSuffix(target, "/...") || target == "..." {
+		recursive = true
+		if target == "..." {
+			target = "."
+		} else {
+			target = strings.TrimSuffix(target, "/...")
+		}
+	}
+
+	// Check if target is a directory
+	info, err := os.Stat(target)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if info.IsDir() {
+		runTestDir(target, recursive)
+	} else {
+		runTestFile(target)
+	}
+}
+
+// runTestFile runs test functions from a single .pr file.
+func runTestFile(filename string) {
 	// Frontend compilation (parse + merge std + sema + ownership)
 	file, info := compileFrontend(filename)
 
@@ -257,6 +293,145 @@ func runTest(args []string) {
 		fmt.Fprintf(os.Stderr, "error running tests: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// runTestDir discovers .pr files in a directory and runs tests from each.
+func runTestDir(dir string, recursive bool) {
+	files := discoverTestFiles(dir, recursive)
+	if len(files) == 0 {
+		fmt.Println("no test files found")
+		return
+	}
+
+	selfExe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot determine executable path: %v\n", err)
+		os.Exit(1)
+	}
+
+	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed$`)
+
+	totalPassed := 0
+	totalFailed := 0
+	totalFiles := 0
+	failedFiles := 0
+
+	for _, f := range files {
+		// Run "promise test <file>" as subprocess
+		cmd := exec.Command(selfExe, "test", f)
+		output, err := cmd.CombinedOutput()
+		outStr := strings.TrimSpace(string(output))
+
+		// Skip files with no tests
+		if outStr == "no tests found" {
+			continue
+		}
+
+		totalFiles++
+
+		// Print file header and output
+		relPath, relErr := filepath.Rel(dir, f)
+		if relErr != nil {
+			relPath = f
+		}
+		fmt.Printf("--- %s ---\n", relPath)
+
+		if err != nil {
+			// Compilation or runtime error
+			fmt.Println(outStr)
+			failedFiles++
+
+			// Try to parse summary from output
+			if m := summaryRe.FindStringSubmatch(lastLine(outStr)); m != nil {
+				passed := atoi(m[1])
+				failed := atoi(m[2])
+				totalPassed += passed
+				totalFailed += failed
+			} else {
+				// Count entire file as one failure
+				totalFailed++
+			}
+			continue
+		}
+
+		// Parse summary before printing
+		if m := summaryRe.FindStringSubmatch(lastLine(outStr)); m != nil {
+			totalPassed += atoi(m[1])
+			totalFailed += atoi(m[2])
+		}
+
+		// Print test output (strip the summary line — we'll print our own)
+		lines := strings.Split(outStr, "\n")
+		for _, line := range lines {
+			if summaryRe.MatchString(line) {
+				continue
+			}
+			fmt.Println(line)
+		}
+		fmt.Println()
+	}
+
+	if totalFiles == 0 {
+		fmt.Println("no test files found")
+		return
+	}
+
+	// Print grand summary
+	fmt.Printf("%d passed, %d failed (%d files)\n", totalPassed, totalFailed, totalFiles)
+	if totalFailed > 0 || failedFiles > 0 {
+		os.Exit(1)
+	}
+}
+
+// discoverTestFiles finds .pr files in a directory.
+func discoverTestFiles(dir string, recursive bool) []string {
+	var files []string
+
+	if recursive {
+		if err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if !d.IsDir() && strings.HasSuffix(d.Name(), ".pr") {
+				files = append(files, path)
+			}
+			return nil
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "error walking directory: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error reading directory: %v\n", err)
+			os.Exit(1)
+		}
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".pr") {
+				files = append(files, filepath.Join(dir, e.Name()))
+			}
+		}
+	}
+
+	sort.Strings(files)
+	return files
+}
+
+// lastLine returns the last non-empty line of a string.
+func lastLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if lines[i] != "" {
+			return lines[i]
+		}
+	}
+	return ""
+}
+
+// atoi converts a string to int, returning 0 on failure.
+func atoi(s string) int {
+	n, _ := strconv.Atoi(s)
+	return n
 }
 
 // compileAndLink writes the IR to a temp file, compiles the C runtime,

@@ -502,12 +502,15 @@ Command-line interface. Core commands implemented; formatter planned.
 - `promise run <file.pr>` — compile and execute
 - `promise check <file.pr>` — type-check only
 - `promise test <file.pr>` — discover and run `test` meta-annotated functions
+- `promise test <dir>` — scan directory for `.pr` files and run tests from each
+- `promise test <dir>/...` — recursive directory scan (Go-style `...` wildcard)
 - `promise ast <file.pr>` — print the AST
 - `promise exec <code>` — execute inline code (auto-wraps in `main()` if needed)
 - `promise install` — install compiler + std + runtime to `~/.promise/`
 - Bare pipe detection: `echo '<code>' | promise` auto-enters exec mode
 - Inline error formatting: source line + `^` caret marker, no temp filenames
 - Embedded `std/` and `runtime/` in the binary via `go:embed` for self-contained install
+- **Standard library test suite** (`tests/std/`): 9 test files, 62 tests covering int, float, bool, char, string, Vector, map, math, and range
 - `promise fmt` — code formatter (planned)
 
 ## Stage 11 — Package Manager (Planned)

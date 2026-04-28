@@ -1,0 +1,89 @@
+// Test map[K, V] operations: insert, lookup, contains, remove, keys, values
+//
+// TODO: test clear() method
+// TODO: test empty map literal — blocked on parser ({} parsed as empty block)
+test_literal_and_lookup() `test {
+  map[string, int] m = {"a": 1, "b": 2, "c": 3};
+  assert(m.len == 3, "literal len 3");
+  if val := m["a"] {
+    assert(val == 1, "m[a] == 1");
+  } else {
+    assert(false, "should find a");
+  }
+}
+
+test_insert() `test {
+  map[string, int] m = {"_": 0};
+  m.remove("_");
+  m["x"] = 10;
+  m["y"] = 20;
+  assert(m.len == 2, "after insert len 2");
+  if val := m["x"] {
+    assert(val == 10, "m[x] == 10");
+  }
+}
+
+test_update() `test {
+  map[string, int] m = {"x": 10};
+  m["x"] = 99;
+  assert(m.len == 1, "update preserves len");
+  if val := m["x"] {
+    assert(val == 99, "m[x] updated to 99");
+  }
+}
+
+test_contains() `test {
+  map[string, int] m = {"a": 1, "b": 2};
+  assert(m.contains("a"), "contains a");
+  assert(!m.contains("z"), "not contains z");
+}
+
+test_remove() `test {
+  map[string, int] m = {"a": 1, "b": 2, "c": 3};
+  bool removed = m.remove("b");
+  assert(removed, "remove b returns true");
+  assert(m.len == 2, "after remove len 2");
+  assert(!m.contains("b"), "b removed");
+
+  bool not_found = m.remove("z");
+  assert(!not_found, "remove z returns false");
+}
+
+test_keys_values() `test {
+  map[string, int] m = {"x": 10};
+  string[] keys = m.keys();
+  assert(keys.len == 1, "keys len 1");
+  assert(keys[0] == "x", "key is x");
+
+  int[] vals = m.values();
+  assert(vals.len == 1, "values len 1");
+  assert(vals[0] == 10, "value is 10");
+}
+
+test_is_empty() `test {
+  map[string, int] m = {"_": 0};
+  m.remove("_");
+  assert(m.is_empty, "empty map is_empty");
+  m["a"] = 1;
+  assert(!m.is_empty, "non-empty not is_empty");
+}
+
+test_missing_key_returns_none() `test {
+  map[string, int] m = {"a": 1};
+  bool found = false;
+  if _ := m["missing"] {
+    found = true;
+  }
+  assert(!found, "missing key returns none");
+}
+
+test_int_keys() `test {
+  map[int, string] m = {0: "_"};
+  m.remove(0);
+  m[1] = "one";
+  m[2] = "two";
+  assert(m.len == 2, "int key map len 2");
+  if val := m[1] {
+    assert(val == "one", "m[1] == one");
+  }
+}

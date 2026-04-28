@@ -1,0 +1,80 @@
+// Test Vector (slice) operations: push, pop, contains, remove, indexing
+//
+// TODO: test slicing nums[start:end]
+// TODO: test slice assignment nums[start:end] = other
+// TODO: test Vector.new(capacity) constructor
+test_literal_and_len() `test {
+  int[] nums = [1, 2, 3];
+  assert(nums.len == 3, "literal len 3");
+  assert(nums[0] == 1, "[0] == 1");
+  assert(nums[1] == 2, "[1] == 2");
+  assert(nums[2] == 3, "[2] == 3");
+}
+
+test_push() `test {
+  int[] nums = [1, 2];
+  nums.push(3);
+  nums.push(4);
+  assert(nums.len == 4, "after push len 4");
+  assert(nums[2] == 3, "[2] == 3");
+  assert(nums[3] == 4, "[3] == 4");
+}
+
+test_pop() `test {
+  int[] nums = [10, 20, 30];
+  if val := nums.pop() {
+    assert(val == 30, "pop returns 30");
+  } else {
+    assert(false, "pop should return value");
+  }
+  assert(nums.len == 2, "after pop len 2");
+}
+
+test_pop_empty() `test {
+  int[] empty = [];
+  bool got_none = true;
+  if _ := empty.pop() {
+    got_none = false;
+  }
+  assert(got_none, "pop on empty returns none");
+}
+
+test_contains() `test {
+  int[] nums = [1, 2, 3, 4, 5];
+  assert(nums.contains(3), "contains 3");
+  assert(!nums.contains(99), "not contains 99");
+}
+
+test_contains_strings() `test {
+  string[] words = ["hello", "world"];
+  assert(words.contains("hello"), "contains hello");
+  assert(!words.contains("nope"), "not contains nope");
+}
+
+test_remove() `test {
+  int[] nums = [10, 20, 30, 40];
+  nums.remove(1);
+  assert(nums.len == 3, "after remove len 3");
+  assert(nums[0] == 10, "[0] == 10");
+  assert(nums[1] == 30, "[1] == 30 (shifted)");
+  assert(nums[2] == 40, "[2] == 40");
+}
+
+test_is_empty() `test {
+  int[] empty = [];
+  assert(empty.is_empty, "empty is_empty");
+  int[] nums = [1];
+  assert(!nums.is_empty, "non-empty not is_empty");
+}
+
+test_index_assign() `test {
+  int[] nums = [1, 2, 3];
+  nums[1] = 20;
+  assert(nums[1] == 20, "index assign");
+}
+
+test_compound_index_assign() `test {
+  int[] nums = [10, 20, 30];
+  nums[0] += 5;
+  assert(nums[0] == 15, "compound index assign");
+}

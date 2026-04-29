@@ -1,6 +1,8 @@
 package pal
 
 import (
+	"strings"
+
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
@@ -8,7 +10,9 @@ import (
 )
 
 // PosixPAL implements PAL for POSIX systems (macOS, Linux) using libc write/exit.
-type PosixPAL struct{}
+type PosixPAL struct {
+	target string // LLVM target triple (needed for platform-specific constants)
+}
 
 // EmitWrite declares libc @write and defines @pal_write as a thin wrapper.
 // Signature: @pal_write(i32 %fd, i8* %buf, i64 %len) → i64
@@ -274,5 +278,32 @@ func (p *PosixPAL) EmitCondDestroy(module *ir.Module) *ir.Func {
 	entry.NewCall(pthreadCondDestroy, fn.Params[0])
 	entry.NewCall(palFree, fn.Params[0])
 	entry.NewRet(nil)
+	return fn
+}
+
+// EmitNumCPUs declares libc @sysconf and defines @pal_num_cpus() → i32.
+// Uses _SC_NPROCESSORS_ONLN which differs between macOS (58) and Linux (84).
+func (p *PosixPAL) EmitNumCPUs(module *ir.Module) *ir.Func {
+	// declare i64 @sysconf(i32) nounwind
+	sysconfFn := module.NewFunc("sysconf", irtypes.I64,
+		ir.NewParam("name", irtypes.I32))
+	sysconfFn.FuncAttrs = append(sysconfFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	// _SC_NPROCESSORS_ONLN: macOS=58, Linux=84
+	scNprocessorsOnln := int64(84) // Linux default
+	if strings.Contains(p.target, "darwin") || strings.Contains(p.target, "apple") {
+		scNprocessorsOnln = 58
+	}
+
+	// define i32 @pal_num_cpus() nounwind
+	fn := module.NewFunc("pal_num_cpus", irtypes.I32)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock("entry")
+	n := entry.NewCall(sysconfFn, constant.NewInt(irtypes.I32, scNprocessorsOnln))
+	// Clamp to at least 1
+	isLess := entry.NewICmp(enum.IPredSLT, n, constant.NewInt(irtypes.I64, 1))
+	clamped := entry.NewSelect(isLess, constant.NewInt(irtypes.I64, 1), n)
+	result := entry.NewTrunc(clamped, irtypes.I32)
+	entry.NewRet(result)
 	return fn
 }

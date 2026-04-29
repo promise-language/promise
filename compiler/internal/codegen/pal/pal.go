@@ -48,6 +48,10 @@ type PAL interface {
 	EmitCondDestroy(module *ir.Module) *ir.Func
 	// EmitCondBroadcast defines @pal_cond_broadcast(i8* %cond) → void
 	EmitCondBroadcast(module *ir.Module) *ir.Func
+
+	// Scheduler primitives (Phase 5c)
+	// EmitNumCPUs defines @pal_num_cpus() → i32
+	EmitNumCPUs(module *ir.Module) *ir.Func
 }
 
 // ForTarget returns a PAL implementation for the given LLVM target triple.
@@ -58,7 +62,7 @@ func ForTarget(triple string) PAL {
 	case strings.Contains(triple, "wasm"):
 		return &WasmPAL{}
 	default:
-		return &PosixPAL{}
+		return &PosixPAL{target: triple}
 	}
 }
 
@@ -255,6 +259,15 @@ func emitStubCondBroadcast(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock("entry")
 	entry.NewRet(nil)
+	return fn
+}
+
+// emitStubNumCPUs returns 1 (single-threaded platforms: WASM, Windows stub).
+func emitStubNumCPUs(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_num_cpus", irtypes.I32)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock("entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, 1))
 	return fn
 }
 

@@ -49,6 +49,7 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 | Platform abstraction | PAL for macOS/Linux/Windows/WASM | Done (Phase 3) | [runtime-proposal.md](runtime-proposal.md) |
 | 1:1 Threading | `go`/`<-` with OS threads via PAL | Done (Phase 5a) | [runtime-proposal.md](runtime-proposal.md) |
 | Channels | `channel[T]` with buffered/unbuffered send/receive/for-in | Done (Phase 5b) | [runtime-proposal.md](runtime-proposal.md) |
+| M:N Scheduler | LLVM coroutines, GMP model, work stealing | Done (Phase 5c) | [runtime-proposal.md](runtime-proposal.md) |
 | Operator dispatch | `[]`, `[:]`, `++`, `--`, `..`, `!` as method-dispatched operators | Planned | [subscript-slice-operators.md](subscript-slice-operators.md) |
 | C binding | Generated headers for extern type safety | Planned | [c-binding-architecture.md](c-binding-architecture.md) |
 
@@ -230,7 +231,7 @@ Type-system-driven LLVM IR generation for primitive types, arithmetic, control f
 ### Deferred sub-stages
 
 - Ownership-aware memory management (drop) → Stage 8o
-- Concurrency: `go`/`<-task` → Done (Phase 5a); `channel[T]` → Done (Phase 5b)
+- Concurrency: `go`/`<-task` → Done (Phase 5a); `channel[T]` → Done (Phase 5b); M:N scheduler → Done (Phase 5c)
 
 ## Stage 8b — Strings (Done)
 
@@ -544,7 +545,7 @@ Dependency fetching and resolution.
 
 ## What's Next
 
-The compiler pipeline (Stages 1-8o) is complete for the current feature set. The runtime is fully codegen-emitted LLVM IR — no C files remain. Phase 5a added 1:1 threading (`go`/`<-` with OS threads). Phase 5b added typed channels (`channel[T]` with buffered/unbuffered send/receive/for-in). M:N scheduling and IO reactor remain (Phases 5c-6). The next work falls into three areas:
+The compiler pipeline (Stages 1-8o) is complete for the current feature set. The runtime is fully codegen-emitted LLVM IR — no C files remain. Phase 5a added 1:1 threading (`go`/`<-` with OS threads). Phase 5b added typed channels (`channel[T]`). Phase 5c replaced 1:1 threading with an M:N scheduler using LLVM coroutine intrinsics — goroutines are cheap coroutine handles multiplexed on OS threads via per-CPU processors and work stealing. IO reactor and WASM scheduling remain (Phases 5d-6). The next work falls into three areas:
 
 ### Near-term: Language Features
 
@@ -566,7 +567,7 @@ The compiler pipeline (Stages 1-8o) is complete for the current feature set. The
 | Work | Design Doc | Priority |
 |------|-----------|----------|
 | Channels (`channel[T]`, buffered send/receive) — Phase 5b | [runtime-proposal.md](runtime-proposal.md) | Done |
-| M:N scheduler (GMP model, work stealing) — Phase 5c | [runtime-proposal.md](runtime-proposal.md) | Medium |
+| M:N scheduler (LLVM coroutines, GMP model, work stealing) — Phase 5c | [runtime-proposal.md](runtime-proposal.md) | Done |
 | Cooperative WASM scheduler — Phase 5d | [runtime-proposal.md](runtime-proposal.md) | Low |
 | IO reactor (kqueue/epoll/IOCP) — Phase 6 | [runtime-proposal.md](runtime-proposal.md) | Low |
 | Replace clang with `llc` + `lld` — Phase 7 | [runtime-proposal.md](runtime-proposal.md) | Low |
@@ -582,6 +583,7 @@ Known gaps and improvements deferred from completed stages.
 | Item | Origin | Priority |
 |------|--------|----------|
 | Reassignment of droppable variable leaks old value — `x = newVal` overwrites without calling `drop()` on old | 8o | Medium |
+| Enqueue-before-suspend race — goroutine adds itself to waiter list then calls `coro.suspend`; another thread can `coro.resume` it before the suspend completes, causing UB (SIGSEGV/SIGBUS). Affects coroutine-mode channel parks and `<-task` done_waiters. Fix: deferred parking (goroutine stores park info in G, scheduler completes park after `coro.resume` returns). | 5c | High |
 
 ### Codegen Gaps
 

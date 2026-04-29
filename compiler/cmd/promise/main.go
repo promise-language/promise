@@ -442,6 +442,12 @@ func compileAndLink(result *codegen.CompileResult, outputFile string) {
 	}
 	defer os.Remove(llFile.Name())
 
+	// Dump generated LLVM IR to a file for debugging/inspection.
+	// Usage: PROMISE_DUMP_IR=/tmp/out.ll promise build foo.pr
+	if envDump := os.Getenv("PROMISE_DUMP_IR"); envDump != "" {
+		_ = os.WriteFile(envDump, []byte(result.Module.String()), 0644)
+	}
+
 	if _, err := fmt.Fprint(llFile, result.Module.String()); err != nil {
 		fmt.Fprintf(os.Stderr, "error writing IR: %v\n", err)
 		os.Exit(1)
@@ -451,18 +457,38 @@ func compileAndLink(result *codegen.CompileResult, outputFile string) {
 	target := codegen.HostTargetTriple()
 
 	// All runtime functions are codegen-emitted LLVM IR — no C files needed.
-	linkArgs := []string{"-target", target, llFile.Name(), "-o", outputFile}
+	// -O1 ensures LLVM coroutine passes (CoroSplit, CoroElide) run for M:N scheduler goroutines.
+	linkArgs := []string{"-O1", "-target", target, llFile.Name(), "-o", outputFile}
 	// Linux requires explicit -lpthread for PAL threading primitives.
 	// macOS includes pthreads in libSystem (already linked).
 	if strings.Contains(target, "linux") {
 		linkArgs = append(linkArgs, "-lpthread")
 	}
-	linkCmd := exec.Command("clang", linkArgs...)
+	linkCmd := exec.Command(findClang(), linkArgs...)
 	linkCmd.Stderr = os.Stderr
 	if err := linkCmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error linking: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// findClang returns the path to a clang binary.
+// Prefers Homebrew LLVM (needed for coroutine intrinsics) over Apple clang.
+func findClang() string {
+	// Check PROMISE_CLANG env override first
+	if p := os.Getenv("PROMISE_CLANG"); p != "" {
+		return p
+	}
+	// Homebrew LLVM (macOS)
+	for _, p := range []string{
+		"/opt/homebrew/opt/llvm/bin/clang",
+		"/usr/local/opt/llvm/bin/clang",
+	} {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return "clang"
 }
 
 // --- Frontend pipeline ---

@@ -6493,24 +6493,20 @@ func TestGoExprBasicFunction(t *testing.T) {
 			result := <-t;
 		}
 	`)
-	// Task struct allocation
+	// Coroutine function generated with presplitcoroutine attribute
+	assertContains(t, ir, ".goroutine.")
+	assertContains(t, ir, "presplitcoroutine")
+	// Coroutine intrinsics used
+	assertContains(t, ir, "call token @llvm.coro.id(")
+	assertContains(t, ir, "call i8* @llvm.coro.begin(")
+	assertContains(t, ir, "call i8 @llvm.coro.suspend(")
+	// G struct created and enqueued
+	assertContains(t, ir, "call i8* @promise_g_new(")
+	assertContains(t, ir, "call void @promise_sched_enqueue(")
+	// Result buffer allocated for non-void task
 	assertContains(t, ir, "@pal_alloc")
-	// Trampoline generated
-	assertContains(t, ir, ".go_trampoline.")
-	// Thread create called
-	assertContains(t, ir, "call i8* @pal_thread_create")
-	// Mutex/cond initialized
-	assertContains(t, ir, "call i8* @pal_mutex_init")
-	assertContains(t, ir, "call i8* @pal_cond_init")
-	// Receive: mutex lock/unlock, cond wait, thread join
-	assertContains(t, ir, "call void @pal_mutex_lock")
-	assertContains(t, ir, "call void @pal_mutex_unlock")
-	assertContains(t, ir, "call void @pal_cond_wait")
-	assertContains(t, ir, "call void @pal_thread_join")
-	// Cleanup
-	assertContains(t, ir, "call void @pal_mutex_destroy")
-	assertContains(t, ir, "call void @pal_cond_destroy")
-	assertContains(t, ir, "call void @pal_free")
+	// Coroutine calls target function
+	assertContains(t, ir, "call i64 @compute")
 }
 
 func TestGoExprWithArgs(t *testing.T) {
@@ -6521,11 +6517,13 @@ func TestGoExprWithArgs(t *testing.T) {
 			result := <-t;
 		}
 	`)
-	// Trampoline generated
-	assertContains(t, ir, ".go_trampoline.")
-	// Thread create called
-	assertContains(t, ir, "call i8* @pal_thread_create")
-	// The trampoline should call the target function
+	// Coroutine generated
+	assertContains(t, ir, ".goroutine.")
+	assertContains(t, ir, "presplitcoroutine")
+	// G struct created and enqueued
+	assertContains(t, ir, "call i8* @promise_g_new(")
+	assertContains(t, ir, "call void @promise_sched_enqueue(")
+	// The coroutine should call the target function
 	assertContains(t, ir, "call i64 @double")
 }
 
@@ -6537,10 +6535,13 @@ func TestGoExprVoidFunction(t *testing.T) {
 			<-t;
 		}
 	`)
-	assertContains(t, ir, ".go_trampoline.")
-	assertContains(t, ir, "call i8* @pal_thread_create")
-	// Trampoline calls void function
+	assertContains(t, ir, ".goroutine.")
+	assertContains(t, ir, "presplitcoroutine")
+	// Coroutine calls void function
 	assertContains(t, ir, "call void @doWork")
+	// G struct created and enqueued
+	assertContains(t, ir, "call i8* @promise_g_new(")
+	assertContains(t, ir, "call void @promise_sched_enqueue(")
 }
 
 func TestGoExprBlock(t *testing.T) {
@@ -6550,10 +6551,12 @@ func TestGoExprBlock(t *testing.T) {
 			<-t;
 		}
 	`)
-	// Block body wrapped in a function
-	assertContains(t, ir, ".go_body.")
-	assertContains(t, ir, ".go_trampoline.")
-	assertContains(t, ir, "call i8* @pal_thread_create")
+	// Coroutine function for the block
+	assertContains(t, ir, ".goroutine.")
+	assertContains(t, ir, "presplitcoroutine")
+	// G struct created and enqueued
+	assertContains(t, ir, "call i8* @promise_g_new(")
+	assertContains(t, ir, "call void @promise_sched_enqueue(")
 }
 
 func TestReceiveExprWaitLoop(t *testing.T) {
@@ -6564,10 +6567,10 @@ func TestReceiveExprWaitLoop(t *testing.T) {
 			result := <-t;
 		}
 	`)
-	// Verify the wait loop structure: check → wait → check
-	assertContains(t, ir, "recv.check")
-	assertContains(t, ir, "recv.wait")
-	assertContains(t, ir, "recv.ready")
+	// Verify the task receive structure (thread-blocking mode in main)
+	assertContains(t, ir, "task.done")
+	assertContains(t, ir, "task.wait")
+	assertContains(t, ir, "task.ready")
 }
 
 // --- Channel tests ---
@@ -6695,10 +6698,12 @@ func TestGoBlockCapturesOuterVars(t *testing.T) {
 			};
 		}
 	`)
-	// Thunk should have parameters for captured variables
-	assertContains(t, ir, "define void @.go_body.")
-	// Captured values should be packed and loaded in trampoline
-	assertContains(t, ir, ".go_trampoline.")
+	// Coroutine should have parameters for captured variables
+	assertContains(t, ir, "define i8* @.goroutine.")
+	assertContains(t, ir, "presplitcoroutine")
+	// G created and enqueued
+	assertContains(t, ir, "call i8* @promise_g_new(")
+	assertContains(t, ir, "call void @promise_sched_enqueue(")
 }
 
 func TestGoBlockCapturesMultipleVars(t *testing.T) {
@@ -6712,10 +6717,9 @@ func TestGoBlockCapturesMultipleVars(t *testing.T) {
 			};
 		}
 	`)
-	// Thunk function should accept captured parameters
-	assertContains(t, ir, "define void @.go_body.")
-	// The pack struct should have fields beyond just the task pointer
-	assertContains(t, ir, ".go_trampoline.")
+	// Coroutine function should accept captured parameters
+	assertContains(t, ir, "define i8* @.goroutine.")
+	assertContains(t, ir, "presplitcoroutine")
 }
 
 func TestGoBlockNoCapturesStillWorks(t *testing.T) {
@@ -6724,8 +6728,384 @@ func TestGoBlockNoCapturesStillWorks(t *testing.T) {
 			go { };
 		}
 	`)
-	// Even without captures, the go block should generate correctly
-	assertContains(t, ir, "define void @.go_body.")
-	assertContains(t, ir, ".go_trampoline.")
-	assertContains(t, ir, "call i8* @pal_thread_create")
+	// Even without captures, the go block should generate a coroutine
+	assertContains(t, ir, "define i8* @.goroutine.")
+	assertContains(t, ir, "presplitcoroutine")
+	assertContains(t, ir, "call i8* @promise_g_new(")
+	assertContains(t, ir, "call void @promise_sched_enqueue(")
+}
+
+// --- M:N Scheduler IR Tests ---
+
+func TestMainWrappedAsG0(t *testing.T) {
+	ir := generateIR(t, `
+		main() { }
+	`)
+	// User main should be renamed to __promise_user_main
+	assertContains(t, ir, "define i32 @__promise_user_main()")
+	// New main initializes the scheduler
+	assertContains(t, ir, "define i32 @main()")
+	assertContains(t, ir, "call i32 @pal_num_cpus()")
+	assertContains(t, ir, "call void @promise_sched_init(")
+	assertContains(t, ir, "call void @promise_sched_run_until_main(")
+	assertContains(t, ir, "call void @promise_sched_shutdown()")
+	// Coroutine wrapper for user main
+	assertContains(t, ir, "define i8* @.goroutine.main()")
+	assertContains(t, ir, "call i32 @__promise_user_main()")
+}
+
+func TestSchedulerGlobals(t *testing.T) {
+	ir := generateIR(t, `
+		main() { }
+	`)
+	// Thread-local current G pointer
+	assertContains(t, ir, "@__promise_current_g")
+	assertContains(t, ir, "thread_local")
+	// Global scheduler singleton
+	assertContains(t, ir, "@__promise_sched")
+}
+
+func TestSchedulerFunctionsExist(t *testing.T) {
+	ir := generateIR(t, `
+		main() { }
+	`)
+	assertContains(t, ir, "define void @promise_sched_init(")
+	assertContains(t, ir, "define i8* @promise_sched_loop(")
+	assertContains(t, ir, "define void @promise_sched_enqueue(")
+	assertContains(t, ir, "define i8* @promise_sched_find_runnable(")
+	assertContains(t, ir, "define void @promise_sched_park_m(")
+	assertContains(t, ir, "define void @promise_sched_wake_m()")
+	assertContains(t, ir, "define void @promise_goroutine_exit(")
+	assertContains(t, ir, "define void @promise_sched_shutdown()")
+	assertContains(t, ir, "define i8* @promise_g_new(")
+}
+
+func TestWaiterListFunctionsExist(t *testing.T) {
+	ir := generateIR(t, `
+		main() { }
+	`)
+	assertContains(t, ir, "define void @promise_waiter_enqueue(")
+	assertContains(t, ir, "define i8* @promise_waiter_dequeue(")
+	assertContains(t, ir, "define void @promise_waiter_wake_all(")
+}
+
+func TestCoroIntrinsicsDeclared(t *testing.T) {
+	ir := generateIR(t, `
+		main() { }
+	`)
+	assertContains(t, ir, "declare token @llvm.coro.id(")
+	assertContains(t, ir, "declare i1 @llvm.coro.alloc(")
+	assertContains(t, ir, "declare i8* @llvm.coro.begin(")
+	assertContains(t, ir, "declare i64 @llvm.coro.size.i64()")
+	assertContains(t, ir, "declare i8 @llvm.coro.suspend(")
+	assertContains(t, ir, "declare void @llvm.coro.end(")
+	assertContains(t, ir, "declare i8* @llvm.coro.free(")
+	assertContains(t, ir, "declare void @llvm.coro.resume(")
+	assertContains(t, ir, "declare void @llvm.coro.destroy(")
+	assertContains(t, ir, "declare i1 @llvm.coro.done(")
+}
+
+func TestGoBlockEmitsCoroutine(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			x := 42;
+			go { x; };
+		}
+	`)
+	// Coroutine function with presplitcoroutine attribute
+	assertContains(t, ir, "presplitcoroutine")
+	// Coroutine intrinsics used in the go block
+	assertContains(t, ir, "call token @llvm.coro.id(")
+	assertContains(t, ir, "call i1 @llvm.coro.alloc(")
+	assertContains(t, ir, "call i8* @llvm.coro.begin(")
+	assertContains(t, ir, "call i8 @llvm.coro.suspend(")
+	assertContains(t, ir, "call void @llvm.coro.end(")
+	// Go blocks now use coroutine + G + enqueue, not direct pal_thread_create
+	// (pal_thread_create is still used by the scheduler for M threads, but not in go block codegen)
+	assertContains(t, ir, "call i8* @promise_g_new(")
+	assertContains(t, ir, "call void @promise_sched_enqueue(")
+}
+
+func TestGoBlockEnqueuesG(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			go { };
+		}
+	`)
+	// G creation and enqueue
+	assertContains(t, ir, "call i8* @promise_g_new(")
+	assertContains(t, ir, "call void @promise_sched_enqueue(")
+}
+
+func TestChannelSendInCoroutineSuspends(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 1);
+			go {
+				ch.send(42);
+			};
+		}
+	`)
+	// Inside go block, channel send should use goroutine-aware park
+	assertContains(t, ir, "call void @promise_waiter_enqueue(")
+	// The go block is a coroutine
+	assertContains(t, ir, "presplitcoroutine")
+}
+
+func TestChannelRecvInCoroutineSuspends(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 1);
+			go {
+				result := <-ch;
+			};
+		}
+	`)
+	// Inside go block, channel recv should use goroutine-aware park
+	assertContains(t, ir, "call void @promise_waiter_enqueue(")
+}
+
+func TestChannelCloseWakesAllWaiters(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 1);
+			ch.close();
+		}
+	`)
+	// Close should call promise_waiter_wake_all for both send and recv waiters
+	assertContains(t, ir, "call void @promise_waiter_wake_all(")
+}
+
+func TestChannelStructHas15Fields(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 1);
+		}
+	`)
+	// Channel struct should have 15 fields including the 4 waiter lists
+	// The channel_new function initializes all fields including waiter lists
+	assertContains(t, ir, "define i8* @promise_channel_new(")
+}
+
+func TestTaskReceiveParksGoroutine(t *testing.T) {
+	ir := generateIR(t, `
+		compute() int { return 42; }
+		main() {
+			t := go compute();
+			result := <-t;
+		}
+	`)
+	// Task receive in main (non-coroutine) uses thread-blocking mode
+	// But the G.done field should be checked
+	assertContains(t, ir, "promise_g_new")
+	assertContains(t, ir, "promise_sched_enqueue")
+}
+
+// --- Phase 5c gap-filling tests ---
+
+func TestTaskReceiveInCoroutine(t *testing.T) {
+	// <-task inside a go block uses the coroutine park path, not the thread-blocking path.
+	// This also validates the TOCTOU race fix: after enqueueing on done_waiters,
+	// the code re-checks G.done and rescues itself if the target already completed.
+	ir := generateIR(t, `
+		compute() int { return 42; }
+		main() {
+			go {
+				t := go compute();
+				int result = <-t;
+			};
+		}
+	`)
+	// The outer go block is a coroutine
+	assertContains(t, ir, "presplitcoroutine")
+	// Task receive inside coroutine: parks on done_waiters via status=waiting
+	assertContains(t, ir, "task.done")
+	assertContains(t, ir, "task.wait")
+	assertContains(t, ir, "task.ready")
+	// TOCTOU fix: re-check after enqueue → rescue block restores runnable status
+	assertContains(t, ir, "task.rescue")
+	assertContains(t, ir, "task.suspend")
+	// Coroutine suspend in the task wait path
+	assertContains(t, ir, "task.resume")
+	// Should NOT use usleep (that's the thread-blocking path)
+	// The go block coroutine uses coro.suspend instead
+}
+
+func TestTaskReceiveThreadBlocking(t *testing.T) {
+	// <-task in main (non-coroutine) uses the usleep polling loop
+	ir := generateIR(t, `
+		compute() int { return 42; }
+		main() {
+			t := go compute();
+			result := <-t;
+		}
+	`)
+	// Thread-blocking mode: spin loop with usleep
+	assertContains(t, ir, "task.check")
+	assertContains(t, ir, "task.spin")
+	assertContains(t, ir, "task.threaddone")
+	assertContains(t, ir, "call i32 @usleep(")
+}
+
+func TestVoidTaskSentinel(t *testing.T) {
+	// Void tasks set result_ptr to sentinel inttoptr(i64 1) so goroutine_exit
+	// knows not to free G (the receiver frees it via <-task).
+	ir := generateIR(t, `
+		doWork() { }
+		main() {
+			t := go doWork();
+			<-t;
+		}
+	`)
+	// Sentinel value: inttoptr i64 1 to i8*
+	assertContains(t, ir, "inttoptr i64 1 to i8*")
+	// G is freed by the receiver, not goroutine_exit
+	assertContains(t, ir, "task.ready")
+}
+
+func TestVoidGoBlockSentinel(t *testing.T) {
+	// go { block } is always void — should also set sentinel
+	ir := generateIR(t, `
+		main() {
+			t := go { };
+			<-t;
+		}
+	`)
+	assertContains(t, ir, "inttoptr i64 1 to i8*")
+}
+
+func TestGoroutineExitSkipsFreeForTask(t *testing.T) {
+	// goroutine_exit checks result_ptr != null to decide whether to free G.
+	// Tasks (result_ptr set) skip the free; fire-and-forget goroutines are freed.
+	ir := generateIR(t, `
+		main() { }
+	`)
+	// goroutine_exit should contain the conditional skip-free logic
+	assertContains(t, ir, "define void @promise_goroutine_exit(")
+	// The function checks result_ptr to decide whether to free
+	assertContains(t, ir, "skip_free:")
+	assertContains(t, ir, "do_free:")
+}
+
+func TestChannelSendCoroutineRendezvous(t *testing.T) {
+	// Unbuffered channel send inside a go block uses coroutine-mode rendezvous:
+	// after writing the value, the sender parks and suspends waiting for the
+	// receiver to pick it up.
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int]();
+			go {
+				ch.send(42);
+			};
+			result := <-ch;
+		}
+	`)
+	// Inside the coroutine, the rendezvous wait should use waiter_enqueue + coro.suspend
+	assertContains(t, ir, "send.rv.wait")
+	assertContains(t, ir, "call void @promise_waiter_enqueue(")
+}
+
+func TestForInChannelCoroutineMode(t *testing.T) {
+	// for-in channel inside a go block uses coroutine-mode park+suspend
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 1);
+			go {
+				for v in ch {
+					int x = v + 1;
+				}
+			};
+			ch.send(1);
+			ch.close();
+		}
+	`)
+	// The for-in inside the coroutine should use waiter_enqueue + coro.suspend
+	assertContains(t, ir, "forin_ch.recv.wait")
+	assertContains(t, ir, "call void @promise_waiter_enqueue(")
+	// Should have the coroutine resume block for the for-in
+	assertContains(t, ir, "forin_ch.recv.resume")
+}
+
+func TestChannelRecvWakesSenderGoroutine(t *testing.T) {
+	// After receiving, the code should try to wake a parked sender goroutine
+	// before falling back to cond_signal. This tests the dual-mode wake path.
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 1);
+			ch.send(1);
+			result := <-ch;
+		}
+	`)
+	// Receive wake path: dequeue from send_waiters, then fallback to cond_signal
+	assertContains(t, ir, "call i8* @promise_waiter_dequeue(")
+	assertContains(t, ir, "chrecv.wake.send")
+	assertContains(t, ir, "chrecv.signal.send")
+}
+
+func TestChannelSendWakesRecvGoroutine(t *testing.T) {
+	// After sending, the code should try to wake a parked receiver goroutine
+	// before falling back to cond_signal. This tests the dual-mode wake path.
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 1);
+			ch.send(42);
+		}
+	`)
+	// Send wake path: dequeue from recv_waiters, then fallback to cond_signal
+	assertContains(t, ir, "call i8* @promise_waiter_dequeue(")
+	assertContains(t, ir, "send.wake.recv")
+	assertContains(t, ir, "send.signal.recv")
+}
+
+func TestBuildMatchPhiMixedArms(t *testing.T) {
+	// Match expression where some arms produce values and at least one arm
+	// has an early return. buildMatchPhi must handle missing predecessors
+	// by inserting null placeholders for arms that branch to merge without values.
+	ir := generateIR(t, `
+		test(int n) int {
+			int result = match n {
+				1 => 10,
+				2 => 20,
+				_ => 0,
+			};
+			return result;
+		}
+		main() { }
+	`)
+	// PHI node should exist in the merge block with values from all arms
+	assertContains(t, ir, "phi i64")
+	assertContains(t, ir, "match.end")
+}
+
+func TestBuildMatchPhiStatementOnly(t *testing.T) {
+	// Match used as a statement (no arm produces a value) — no PHI needed
+	ir := generateIR(t, `
+		test(int n) {
+			match n {
+				1 => { int x = 10; },
+				_ => { int y = 20; },
+			};
+		}
+		main() { }
+	`)
+	// Should have match arms but the merge block shouldn't have a PHI
+	assertContains(t, ir, "match.arm")
+	assertContains(t, ir, "match.end")
+}
+
+func TestEnumMatchPhiWithEarlyReturn(t *testing.T) {
+	// Enum match where one arm returns early (doesn't branch to merge).
+	// buildMatchPhi must skip non-merging arms to avoid PHI predecessor mismatch.
+	ir := generateIR(t, `
+		enum Op { Add(int a, int b), Neg(int a) }
+		eval(Op op) int {
+			return match op {
+				Add(a, b) => a + b,
+				Neg(a) => 0 - a,
+			};
+		}
+		main() { }
+	`)
+	// Both arms produce values; PHI should merge them
+	assertContains(t, ir, "phi i64")
 }

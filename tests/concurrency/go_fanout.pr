@@ -1,0 +1,22 @@
+// Fan-out: many goroutines all send to a shared channel.
+// Tests scheduler with more goroutines than OS threads.
+
+main() {
+  ch := channel[int](capacity: 20);
+  int n = 20;
+
+  for idx in 0..n {
+    go {
+      ch.send(1);
+    };
+  }
+
+  int sum = 0;
+  for j in 0..n {
+    result := <-ch;
+    if v := result {
+      sum = sum + v;
+    }
+  }
+  print_int(sum);
+}

@@ -1223,7 +1223,6 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 
 	// Wait while full: while count == capacity
 	waitFullBlock := c.newBlock("send.waitfull")
-	waitFullBodyBlock := c.newBlock("send.waitfull.body")
 	waitFullClosedBlock := c.newBlock("send.waitfull.closed")
 	writeBlock := c.newBlock("send.write")
 
@@ -1238,14 +1237,41 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldCapacity)))
 	cap_ := c.block.NewLoad(irtypes.I64, capPtr)
 	isFull := c.block.NewICmp(enum.IPredEQ, count, cap_)
+
+	waitFullBodyBlock := c.newBlock("send.waitfull.body")
 	c.block.NewCondBr(isFull, waitFullBodyBlock, writeBlock)
 
-	// waitfull.body: cond_wait, then re-check closed flag
-	c.block = waitFullBodyBlock
-	c.block.NewCall(c.palCondWait, notFull, mtx)
-	closedAfterWait := c.block.NewLoad(irtypes.I8, closedPtr)
-	isClosedAfterWait := c.block.NewICmp(enum.IPredEQ, closedAfterWait, constant.NewInt(irtypes.I8, 1))
-	c.block.NewCondBr(isClosedAfterWait, waitFullClosedBlock, waitFullBlock)
+	if c.inCoroutine {
+		// Goroutine mode: park on send_waiters + coro.suspend
+		c.block = waitFullBodyBlock
+		currentG := c.block.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
+		sendHeadPtr := c.block.NewGetElementPtr(chanType, chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersHead)))
+		sendTailPtr := c.block.NewGetElementPtr(chanType, chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersTail)))
+		c.block.NewCall(c.funcs["promise_waiter_enqueue"], sendHeadPtr, sendTailPtr, currentG)
+		c.block.NewCall(c.palMutexUnlock, mtx)
+
+		suspResult := c.block.NewCall(c.coroSuspend, constant.None, constant.False)
+		resumeBlk := c.newBlock("send.wait.resume")
+		c.block.NewSwitch(suspResult, c.coroCleanupBlk,
+			ir.NewCase(constant.NewInt(irtypes.I8, 0), resumeBlk),
+			ir.NewCase(constant.NewInt(irtypes.I8, 1), c.coroCleanupBlk))
+
+		// On resume: re-lock and check closed, then retry
+		c.block = resumeBlk
+		c.block.NewCall(c.palMutexLock, mtx)
+		closedAfterWait := c.block.NewLoad(irtypes.I8, closedPtr)
+		isClosedAfterWait := c.block.NewICmp(enum.IPredEQ, closedAfterWait, constant.NewInt(irtypes.I8, 1))
+		c.block.NewCondBr(isClosedAfterWait, waitFullClosedBlock, waitFullBlock)
+	} else {
+		// Thread-blocking mode: cond_wait, then re-check closed flag
+		c.block = waitFullBodyBlock
+		c.block.NewCall(c.palCondWait, notFull, mtx)
+		closedAfterWait := c.block.NewLoad(irtypes.I8, closedPtr)
+		isClosedAfterWait := c.block.NewICmp(enum.IPredEQ, closedAfterWait, constant.NewInt(irtypes.I8, 1))
+		c.block.NewCondBr(isClosedAfterWait, waitFullClosedBlock, waitFullBlock)
+	}
 
 	// waitfull.closed: channel was closed while we were waiting — panic
 	c.block = waitFullClosedBlock
@@ -1288,8 +1314,36 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 	newCount := c.block.NewAdd(countReload, constant.NewInt(irtypes.I64, 1))
 	c.block.NewStore(newCount, countPtr)
 
-	// Signal not_empty (wake a receiver)
+	// Wake a waiting receiver: try goroutine waiter first, then cond_signal
+	recvHeadPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersHead)))
+	recvTailPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersTail)))
+	recvWaiter := c.block.NewCall(c.funcs["promise_waiter_dequeue"], recvHeadPtr, recvTailPtr)
+	hasRecvWaiter := c.block.NewICmp(enum.IPredNE, recvWaiter, constant.NewNull(irtypes.I8Ptr))
+
+	wakeRecvBlk := c.newBlock("send.wake.recv")
+	signalRecvBlk := c.newBlock("send.signal.recv")
+	afterSignalBlk := c.newBlock("send.after.signal")
+	c.block.NewCondBr(hasRecvWaiter, wakeRecvBlk, signalRecvBlk)
+
+	// Wake parked receiver goroutine
+	c.block = wakeRecvBlk
+	gTy := goroutineStructType()
+	gPtrTy := irtypes.NewPointer(gTy)
+	waiterTyped := c.block.NewBitCast(recvWaiter, gPtrTy)
+	waiterStatusPtr := c.block.NewGetElementPtr(gTy, waiterTyped,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldStatus)))
+	c.block.NewStore(constant.NewInt(irtypes.I8, gStatusRunnable), waiterStatusPtr)
+	c.block.NewCall(c.funcs["promise_sched_enqueue"], recvWaiter)
+	c.block.NewBr(afterSignalBlk)
+
+	// Fallback: signal cond var for thread-blocked receivers
+	c.block = signalRecvBlk
 	c.block.NewCall(c.palCondSignal, notEmpty)
+	c.block.NewBr(afterSignalBlk)
+
+	c.block = afterSignalBlk
 
 	// If unbuffered: wait until receiver picks up the value
 	unbufPtr := c.block.NewGetElementPtr(chanType, chPtr,
@@ -1304,7 +1358,6 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 	// rendezvous: wait while count > 0 && !closed
 	c.block = rendezvousBlock
 	rendezvousCheckBlock := c.newBlock("send.rv.check")
-	rendezvousWaitBlock := c.newBlock("send.rv.wait")
 	c.block.NewBr(rendezvousCheckBlock)
 
 	c.block = rendezvousCheckBlock
@@ -1313,11 +1366,36 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 	rvClosedVal := c.block.NewLoad(irtypes.I8, closedPtr)
 	isOpen := c.block.NewICmp(enum.IPredEQ, rvClosedVal, constant.NewInt(irtypes.I8, 0))
 	shouldWait := c.block.NewAnd(rvHasItems, isOpen)
+
+	rendezvousWaitBlock := c.newBlock("send.rv.wait")
 	c.block.NewCondBr(shouldWait, rendezvousWaitBlock, doneBlock)
 
-	c.block = rendezvousWaitBlock
-	c.block.NewCall(c.palCondWait, notFull, mtx)
-	c.block.NewBr(rendezvousCheckBlock)
+	if c.inCoroutine {
+		// Goroutine mode rendezvous: park + suspend
+		c.block = rendezvousWaitBlock
+		rvCurrentG := c.block.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
+		rvSendHead := c.block.NewGetElementPtr(chanType, chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersHead)))
+		rvSendTail := c.block.NewGetElementPtr(chanType, chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersTail)))
+		c.block.NewCall(c.funcs["promise_waiter_enqueue"], rvSendHead, rvSendTail, rvCurrentG)
+		c.block.NewCall(c.palMutexUnlock, mtx)
+
+		rvSuspResult := c.block.NewCall(c.coroSuspend, constant.None, constant.False)
+		rvResumeBlk := c.newBlock("send.rv.resume")
+		c.block.NewSwitch(rvSuspResult, c.coroCleanupBlk,
+			ir.NewCase(constant.NewInt(irtypes.I8, 0), rvResumeBlk),
+			ir.NewCase(constant.NewInt(irtypes.I8, 1), c.coroCleanupBlk))
+
+		c.block = rvResumeBlk
+		c.block.NewCall(c.palMutexLock, mtx)
+		c.block.NewBr(rendezvousCheckBlock)
+	} else {
+		// Thread-blocking mode rendezvous: cond_wait
+		c.block = rendezvousWaitBlock
+		c.block.NewCall(c.palCondWait, notFull, mtx)
+		c.block.NewBr(rendezvousCheckBlock)
+	}
 
 	// done: unlock
 	c.block = doneBlock
@@ -1358,7 +1436,20 @@ func (c *Compiler) genChannelClose(chRaw value.Value, chPtr value.Value, chanTyp
 	// Set closed = 1
 	c.block.NewStore(constant.NewInt(irtypes.I8, 1), closedPtr)
 
-	// Broadcast both cond vars to wake all waiters
+	// Wake all goroutine waiters (send + recv)
+	sendHeadPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersHead)))
+	sendTailPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersTail)))
+	c.block.NewCall(c.funcs["promise_waiter_wake_all"], sendHeadPtr, sendTailPtr)
+
+	recvHeadPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersHead)))
+	recvTailPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersTail)))
+	c.block.NewCall(c.funcs["promise_waiter_wake_all"], recvHeadPtr, recvTailPtr)
+
+	// Broadcast both cond vars to wake thread-blocked waiters
 	neFieldPtr := c.block.NewGetElementPtr(chanType, chPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldNotEmpty)))
 	notEmpty := c.block.NewLoad(irtypes.I8Ptr, neFieldPtr)
@@ -2026,7 +2117,7 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *typ
 
 	var defaultTarget *ir.Block
 	var cases []*ir.Case
-	var incomings []*ir.Incoming
+	var arms []matchArmInfo
 
 	for i, arm := range e.Arms {
 		armBlock := c.newBlock(fmt.Sprintf("match.arm%d", i))
@@ -2067,9 +2158,7 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *typ
 			c.block.NewBr(mergeBlock)
 		}
 
-		if armVal != nil {
-			incomings = append(incomings, &ir.Incoming{X: armVal, Pred: armEnd})
-		}
+		arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil})
 	}
 
 	if defaultTarget == nil {
@@ -2083,6 +2172,49 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *typ
 	switchBlock.NewSwitch(tag, defaultTarget, cases...)
 
 	c.block = mergeBlock
+	return buildMatchPhi(mergeBlock, arms)
+}
+
+// matchArmInfo tracks a match arm's result value and final block for PHI construction.
+type matchArmInfo struct {
+	val  value.Value
+	end  *ir.Block
+	hasV bool
+}
+
+// buildMatchPhi constructs a PHI node at mergeBlock from collected match arm info.
+// Arms that branch to mergeBlock but produce no value get a null placeholder.
+// Returns nil if no arm produces a value (match used as statement).
+func buildMatchPhi(mergeBlock *ir.Block, arms []matchArmInfo) value.Value {
+	hasAnyValue := false
+	for _, a := range arms {
+		if a.hasV {
+			hasAnyValue = true
+			break
+		}
+	}
+	if !hasAnyValue {
+		return nil
+	}
+
+	var incomings []*ir.Incoming
+	for _, a := range arms {
+		// Skip arms that don't branch to mergeBlock (e.g. early return/break)
+		branchesToMerge := false
+		if a.end.Term != nil {
+			if br, ok := a.end.Term.(*ir.TermBr); ok && br.Target == mergeBlock {
+				branchesToMerge = true
+			}
+		}
+		if !branchesToMerge {
+			continue
+		}
+		v := a.val
+		if v == nil {
+			v = constant.NewNull(irtypes.I8Ptr)
+		}
+		incomings = append(incomings, &ir.Incoming{X: v, Pred: a.end})
+	}
 	if len(incomings) > 0 {
 		return mergeBlock.NewPhi(incomings...)
 	}
@@ -2092,9 +2224,10 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *typ
 // genValueMatch generates a match expression on a non-enum value using comparison chains.
 func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectType types.Type) value.Value {
 	mergeBlock := c.newBlock("match.end")
-	var incomings []*ir.Incoming
 
 	named := extractNamed(subjectType)
+
+	var arms []matchArmInfo
 
 	for i, arm := range e.Arms {
 		switch p := arm.Pattern.(type) {
@@ -2131,9 +2264,7 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 			if c.block.Term == nil {
 				c.block.NewBr(mergeBlock)
 			}
-			if armVal != nil {
-				incomings = append(incomings, &ir.Incoming{X: armVal, Pred: armEnd})
-			}
+			arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil})
 
 			c.block = nextBlock
 
@@ -2161,16 +2292,11 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 			if c.block.Term == nil {
 				c.block.NewBr(mergeBlock)
 			}
-			if armVal != nil {
-				incomings = append(incomings, &ir.Incoming{X: armVal, Pred: armEnd})
-			}
+			arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil})
 
 			// After a wildcard/name pattern, no more arms need checking
 			c.block = mergeBlock
-			if len(incomings) > 0 {
-				return mergeBlock.NewPhi(incomings...)
-			}
-			return nil
+			return buildMatchPhi(mergeBlock, arms)
 		}
 	}
 
@@ -2180,10 +2306,7 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 	}
 
 	c.block = mergeBlock
-	if len(incomings) > 0 {
-		return mergeBlock.NewPhi(incomings...)
-	}
-	return nil
+	return buildMatchPhi(mergeBlock, arms)
 }
 
 // bindMatchPattern binds pattern variables from a match arm into the current scope.
@@ -3369,28 +3492,8 @@ func (c *Compiler) emitNumericCast(val value.Value, src, dst *types.Named) value
 
 // --- Go expression (concurrency) ---
 
-// taskStructType builds the LLVM struct type for a task[T]:
-//
-//	Void:    { i1 done, i8* mutex, i8* cond, i8* thread_handle }
-//	Non-void: { T result, i1 done, i8* mutex, i8* cond, i8* thread_handle }
-func (c *Compiler) taskStructType(resultType irtypes.Type) *irtypes.StructType {
-	if _, isVoid := resultType.(*irtypes.VoidType); isVoid {
-		return irtypes.NewStruct(irtypes.I1, irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I8Ptr)
-	}
-	return irtypes.NewStruct(resultType, irtypes.I1, irtypes.I8Ptr, irtypes.I8Ptr, irtypes.I8Ptr)
-}
-
-// taskFieldIndices returns the GEP indices for task struct fields, accounting
-// for whether the result type is void (no result field).
-func taskFieldIndices(isVoid bool) (done, mutex, cond, threadHandle int) {
-	if isVoid {
-		return 0, 1, 2, 3
-	}
-	return 1, 2, 3, 4
-}
-
 // genGoExpr generates code for a `go expr` expression.
-// It spawns the expression on a new OS thread and returns a task handle (i8*).
+// It creates an LLVM coroutine, wraps it in a G, and enqueues it on the M:N scheduler.
 func (c *Compiler) genGoExpr(e *ast.GoExpr) value.Value {
 	if e.Expr != nil {
 		callExpr, ok := e.Expr.(*ast.CallExpr)
@@ -3413,9 +3516,6 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 		resultLLVM = c.resolveType(callResultType)
 	}
 
-	taskType := c.taskStructType(resultLLVM)
-	doneIdx, mutexIdx, condIdx, handleIdx := taskFieldIndices(isVoid)
-
 	// 2. Evaluate arguments in caller scope
 	var argVals []value.Value
 	var argLLVMTypes []irtypes.Type
@@ -3431,63 +3531,127 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 	// 3. Resolve the target function
 	targetFn := c.resolveGoTarget(callExpr)
 
-	// 4. Allocate task struct on heap
-	taskSize := int64(llvmTypeSize(taskType))
-	taskRaw := c.block.NewCall(c.palAlloc, constant.NewInt(irtypes.I64, taskSize))
-	taskPtr := c.block.NewBitCast(taskRaw, irtypes.NewPointer(taskType))
+	// 4. Create coroutine wrapper function
+	coroName := fmt.Sprintf(".goroutine.%d", c.goCounter)
+	c.goCounter++
 
-	// Init done = false
-	donePtr := c.block.NewGetElementPtr(taskType, taskPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(doneIdx)))
-	c.block.NewStore(constant.NewInt(irtypes.I1, 0), donePtr)
+	var coroParams []*ir.Param
+	for i := range argVals {
+		coroParams = append(coroParams, ir.NewParam(fmt.Sprintf("arg.%d", i), argLLVMTypes[i]))
+	}
+	coroFn := c.module.NewFunc(coroName, irtypes.I8Ptr, coroParams...)
+	coroFn.FuncAttrs = append(coroFn.FuncAttrs, rawFuncAttr("presplitcoroutine"))
 
-	// Init mutex
-	mtx := c.block.NewCall(c.palMutexInit)
-	mtxPtr := c.block.NewGetElementPtr(taskType, taskPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexIdx)))
-	c.block.NewStore(mtx, mtxPtr)
+	// 5. Build coroutine body
+	entry := coroFn.NewBlock("entry")
 
-	// Init cond
-	cnd := c.block.NewCall(c.palCondInit)
-	cndPtr := c.block.NewGetElementPtr(taskType, taskPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(condIdx)))
-	c.block.NewStore(cnd, cndPtr)
+	// Coroutine preamble
+	coroId := entry.NewCall(c.coroId,
+		constant.NewInt(irtypes.I32, 0),
+		constant.NewNull(irtypes.I8Ptr),
+		constant.NewNull(irtypes.I8Ptr),
+		constant.NewNull(irtypes.I8Ptr))
 
-	// 5. Build arg-pack struct: { i8* task_raw, arg0, arg1, ... }
-	packFieldTypes := []irtypes.Type{irtypes.I8Ptr} // task pointer
-	packFieldTypes = append(packFieldTypes, argLLVMTypes...)
-	packType := irtypes.NewStruct(packFieldTypes...)
+	need := entry.NewCall(c.coroAlloc, coroId)
+	allocBlk := coroFn.NewBlock("coro.alloc")
+	startBlk := coroFn.NewBlock("coro.start")
+	entry.NewCondBr(need, allocBlk, startBlk)
 
-	packSize := int64(llvmTypeSize(packType))
-	packRaw := c.block.NewCall(c.palAlloc, constant.NewInt(irtypes.I64, packSize))
-	packPtr := c.block.NewBitCast(packRaw, irtypes.NewPointer(packType))
+	coroSize := allocBlk.NewCall(c.coroSize)
+	mem := allocBlk.NewCall(c.palAlloc, coroSize)
+	allocBlk.NewBr(startBlk)
 
-	// Store task pointer into pack[0]
-	packTaskPtr := c.block.NewGetElementPtr(packType, packPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	c.block.NewStore(taskRaw, packTaskPtr)
+	phiMem := startBlk.NewPhi(
+		ir.NewIncoming(constant.NewNull(irtypes.I8Ptr), entry),
+		ir.NewIncoming(mem, allocBlk))
+	hdl := startBlk.NewCall(c.coroBegin, coroId, phiMem)
 
-	// Store each argument into pack[1..N]
-	for i, v := range argVals {
-		fieldPtr := c.block.NewGetElementPtr(packType, packPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i+1)))
-		c.block.NewStore(v, fieldPtr)
+	// Initial suspend
+	initResult := startBlk.NewCall(c.coroSuspend, constant.None, constant.False)
+
+	suspendBlk := coroFn.NewBlock("coro.suspend")
+	bodyBlk := coroFn.NewBlock("body")
+	cleanupBlk := coroFn.NewBlock("cleanup")
+
+	startBlk.NewSwitch(initResult, suspendBlk,
+		ir.NewCase(constant.NewInt(irtypes.I8, 0), bodyBlk),
+		ir.NewCase(constant.NewInt(irtypes.I8, 1), cleanupBlk))
+
+	// Suspend: ramp returns handle
+	suspendBlk.NewRet(hdl)
+
+	// Body: call target function with args (preserved in coro frame)
+	var callArgs []value.Value
+	for i := range coroParams {
+		callArgs = append(callArgs, coroFn.Params[i])
 	}
 
-	// 6. Generate trampoline function: i8*(i8*) — matches pthread start_routine
-	trampoline := c.genGoTrampoline(targetFn, taskType, packType, resultLLVM, isVoid)
+	if !isVoid {
+		result := bodyBlk.NewCall(targetFn, callArgs...)
+		// Store result via G.result_ptr (set by caller before enqueue)
+		gTy := goroutineStructType()
+		currentG := bodyBlk.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
+		gPtr := bodyBlk.NewBitCast(currentG, irtypes.NewPointer(gTy))
+		rpField := bodyBlk.NewGetElementPtr(gTy, gPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldResultPtr)))
+		rpVal := bodyBlk.NewLoad(irtypes.I8Ptr, rpField)
+		typedRP := bodyBlk.NewBitCast(rpVal, irtypes.NewPointer(resultLLVM))
+		bodyBlk.NewStore(result, typedRP)
+	} else {
+		bodyBlk.NewCall(targetFn, callArgs...)
+	}
 
-	// 7. Spawn thread
-	trampolinePtr := c.block.NewBitCast(trampoline, irtypes.I8Ptr)
-	threadHandle := c.block.NewCall(c.palThreadCreate, trampolinePtr, packRaw)
+	// Final suspend: yield back to scheduler so it can see coro.done()=true
+	// before destroying the coroutine frame.
+	finalSuspBlk := coroFn.NewBlock("final.suspend")
+	bodyBlk.NewBr(finalSuspBlk)
 
-	// Store thread handle in task struct
-	thPtr := c.block.NewGetElementPtr(taskType, taskPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(handleIdx)))
-	c.block.NewStore(threadHandle, thPtr)
+	// Cleanup: free coroutine memory (only reached via destroy path)
+	coroMem := cleanupBlk.NewCall(c.coroFree, coroId, hdl)
+	needFree := cleanupBlk.NewICmp(enum.IPredNE, coroMem, constant.NewNull(irtypes.I8Ptr))
+	freeBlk := coroFn.NewBlock("coro.free")
+	doneBlk := coroFn.NewBlock("coro.done")
+	cleanupBlk.NewCondBr(needFree, freeBlk, doneBlk)
 
-	// 8. Return task as i8*
-	return taskRaw
+	freeBlk.NewCall(c.palFree, coroMem)
+	freeBlk.NewBr(doneBlk)
+
+	// Done: single coro.end (both final-suspend exit and cleanup converge here)
+	doneBlk.NewCall(c.coroEnd, hdl, constant.False, constant.None)
+	doneBlk.NewRet(hdl)
+
+	// Final suspend switch: default/i8 0 → doneBlk (skip free, just coro.end+ret)
+	// i8 1 (destroy) → cleanup (free frame then coro.end+ret)
+	finalResult := finalSuspBlk.NewCall(c.coroSuspend, constant.None, constant.True)
+	finalSuspBlk.NewSwitch(finalResult, doneBlk,
+		ir.NewCase(constant.NewInt(irtypes.I8, 0), doneBlk),
+		ir.NewCase(constant.NewInt(irtypes.I8, 1), cleanupBlk))
+
+	// 6. Caller: call ramp, create G, set up result storage, enqueue
+	handle := c.block.NewCall(coroFn, argVals...)
+	gRaw := c.block.NewCall(c.funcs["promise_g_new"], handle)
+
+	{
+		gTy := goroutineStructType()
+		gPtr := c.block.NewBitCast(gRaw, irtypes.NewPointer(gTy))
+		rpField := c.block.NewGetElementPtr(gTy, gPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldResultPtr)))
+		if !isVoid {
+			// Allocate result buffer and store in G.result_ptr
+			resultSize := constant.NewInt(irtypes.I64, int64(llvmTypeSize(resultLLVM)))
+			resultBuf := c.block.NewCall(c.palAlloc, resultSize)
+			c.block.NewStore(resultBuf, rpField)
+		} else {
+			// Void task: set result_ptr to sentinel (0x1) so goroutine_exit
+			// knows this is a task and won't free G (caller frees via <-task)
+			sentinel := c.block.NewIntToPtr(constant.NewInt(irtypes.I64, 1), irtypes.I8Ptr)
+			c.block.NewStore(sentinel, rpField)
+		}
+	}
+
+	c.block.NewCall(c.funcs["promise_sched_enqueue"], gRaw)
+
+	return gRaw
 }
 
 // resolveGoTarget resolves the IR function for a call expression used in `go func()`.
@@ -3503,82 +3667,6 @@ func (c *Compiler) resolveGoTarget(callExpr *ast.CallExpr) *ir.Func {
 	// Method call or complex callee — wrap in a thunk
 	// For now, only support direct function calls
 	panic(fmt.Sprintf("codegen: go expression callee %T not yet supported", callExpr.Callee))
-}
-
-// genGoTrampoline generates a trampoline function for a go expression.
-// The trampoline has signature `i8*(i8*)` matching the pthread start_routine ABI.
-// It unpacks arguments from the arg-pack struct, calls the target, stores the
-// result in the task struct, and signals completion.
-func (c *Compiler) genGoTrampoline(
-	targetFn *ir.Func,
-	taskType *irtypes.StructType,
-	packType *irtypes.StructType,
-	resultLLVM irtypes.Type,
-	isVoid bool,
-) *ir.Func {
-	name := fmt.Sprintf(".go_trampoline.%d", c.goCounter)
-	c.goCounter++
-
-	trampoline := c.module.NewFunc(name, irtypes.I8Ptr,
-		ir.NewParam("pack_raw", irtypes.I8Ptr))
-	entry := trampoline.NewBlock("entry")
-
-	// Bitcast pack_raw to typed pointer
-	packPtr := entry.NewBitCast(trampoline.Params[0], irtypes.NewPointer(packType))
-
-	// Load task pointer from pack[0]
-	taskRawPtr := entry.NewGetElementPtr(packType, packPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	taskRaw := entry.NewLoad(irtypes.I8Ptr, taskRawPtr)
-	taskPtr := entry.NewBitCast(taskRaw, irtypes.NewPointer(taskType))
-
-	// Load arguments from pack[1..N]
-	var args []value.Value
-	for i := 1; i < len(packType.Fields); i++ {
-		argPtr := entry.NewGetElementPtr(packType, packPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
-		arg := entry.NewLoad(packType.Fields[i], argPtr)
-		args = append(args, arg)
-	}
-
-	// Free the arg-pack (no longer needed)
-	entry.NewCall(c.palFree, trampoline.Params[0])
-
-	// Call the target function
-	result := entry.NewCall(targetFn, args...)
-
-	doneIdx, mutexIdx, condIdx, _ := taskFieldIndices(isVoid)
-
-	// Store result in task struct (if non-void)
-	if !isVoid {
-		resultPtr := entry.NewGetElementPtr(taskType, taskPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-		entry.NewStore(result, resultPtr)
-	}
-
-	// Lock mutex
-	mtxPtr := entry.NewGetElementPtr(taskType, taskPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexIdx)))
-	mtx := entry.NewLoad(irtypes.I8Ptr, mtxPtr)
-	entry.NewCall(c.palMutexLock, mtx)
-
-	// Set done = true
-	donePtr := entry.NewGetElementPtr(taskType, taskPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(doneIdx)))
-	entry.NewStore(constant.NewInt(irtypes.I1, 1), donePtr)
-
-	// Signal cond
-	cndPtr := entry.NewGetElementPtr(taskType, taskPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(condIdx)))
-	cnd := entry.NewLoad(irtypes.I8Ptr, cndPtr)
-	entry.NewCall(c.palCondSignal, cnd)
-
-	// Unlock mutex
-	entry.NewCall(c.palMutexUnlock, mtx)
-
-	// Return null (pthread expects i8* return)
-	entry.NewRet(constant.NewNull(irtypes.I8Ptr))
-	return trampoline
 }
 
 // collectBlockIdents walks an AST block and collects all IdentExpr names referenced.
@@ -3811,14 +3899,15 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 		captureLLVMTypes = append(captureLLVMTypes, elemType)
 	}
 
-	// Create thunk function with captured values as parameters
-	thunkName := fmt.Sprintf(".go_body.%d", c.goCounter)
+	// Create coroutine function with captured values as parameters
+	coroName := fmt.Sprintf(".goroutine.%d", c.goCounter)
 	c.goCounter++
-	var thunkParams []*ir.Param
+	var coroParams []*ir.Param
 	for i, name := range captureNames {
-		thunkParams = append(thunkParams, ir.NewParam(name+".cap", captureLLVMTypes[i]))
+		coroParams = append(coroParams, ir.NewParam(name+".cap", captureLLVMTypes[i]))
 	}
-	thunkFn := c.module.NewFunc(thunkName, irtypes.Void, thunkParams...)
+	coroFn := c.module.NewFunc(coroName, irtypes.I8Ptr, coroParams...)
+	coroFn.FuncAttrs = append(coroFn.FuncAttrs, rawFuncAttr("presplitcoroutine"))
 
 	// Save and switch context
 	savedFn := c.fn
@@ -3830,8 +3919,10 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	savedScopeBindings := c.scopeBindings
 	savedDropFlags := c.dropFlags
 	savedLoopScopeDepth := c.loopScopeDepth
+	savedInCoroutine := c.inCoroutine
+	savedCoroCleanup := c.coroCleanupBlk
 
-	c.fn = thunkFn
+	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
 	c.blockCounter = 0
 	c.canError = false
@@ -3839,22 +3930,88 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	c.scopeBindings = nil
 	c.dropFlags = make(map[string]*ir.InstAlloca)
 	c.loopScopeDepth = 0
+	c.inCoroutine = true
 
-	entry := thunkFn.NewBlock("entry")
+	// --- Coroutine preamble ---
+	entry := coroFn.NewBlock("entry")
 	c.block = entry
 
-	// Store captured parameters into local allocas so genBlock can find them
+	coroId := entry.NewCall(c.coroId,
+		constant.NewInt(irtypes.I32, 0),
+		constant.NewNull(irtypes.I8Ptr),
+		constant.NewNull(irtypes.I8Ptr),
+		constant.NewNull(irtypes.I8Ptr))
+
+	need := entry.NewCall(c.coroAlloc, coroId)
+	allocBlk := coroFn.NewBlock("coro.alloc")
+	startBlk := coroFn.NewBlock("coro.start")
+	entry.NewCondBr(need, allocBlk, startBlk)
+
+	coroSize := allocBlk.NewCall(c.coroSize)
+	mem := allocBlk.NewCall(c.palAlloc, coroSize)
+	allocBlk.NewBr(startBlk)
+
+	phiMem := startBlk.NewPhi(
+		ir.NewIncoming(constant.NewNull(irtypes.I8Ptr), entry),
+		ir.NewIncoming(mem, allocBlk))
+	hdl := startBlk.NewCall(c.coroBegin, coroId, phiMem)
+
+	// Store captured params into allocas (after coro.begin → part of frame)
 	for i, name := range captureNames {
-		alloca := entry.NewAlloca(captureLLVMTypes[i])
+		alloca := startBlk.NewAlloca(captureLLVMTypes[i])
 		alloca.SetName(name + ".addr")
-		entry.NewStore(thunkFn.Params[i], alloca)
+		startBlk.NewStore(coroFn.Params[i], alloca)
 		c.locals[name] = alloca
 	}
 
+	// Initial suspend — wait to be scheduled
+	initResult := startBlk.NewCall(c.coroSuspend, constant.None, constant.False)
+
+	suspendBlk := coroFn.NewBlock("coro.suspend")
+	bodyBlk := coroFn.NewBlock("body")
+	cleanupBlk := coroFn.NewBlock("cleanup")
+
+	startBlk.NewSwitch(initResult, suspendBlk,
+		ir.NewCase(constant.NewInt(irtypes.I8, 0), bodyBlk),
+		ir.NewCase(constant.NewInt(irtypes.I8, 1), cleanupBlk))
+
+	// Suspend: ramp returns coroutine handle
+	suspendBlk.NewRet(hdl)
+
+	// Set cleanup block for mid-body suspends (channel ops, <-task)
+	c.coroCleanupBlk = cleanupBlk
+
+	// --- Body: compile user block ---
+	c.block = bodyBlk
 	c.genBlock(block)
+
+	// Final suspend: yield back to scheduler so it can see coro.done()=true
+	// before destroying the coroutine frame.
+	finalSuspBlk := coroFn.NewBlock("final.suspend")
 	if c.block != nil && c.block.Term == nil {
-		c.block.NewRet(nil)
+		c.block.NewBr(finalSuspBlk)
 	}
+
+	// --- Cleanup: free coroutine memory (only reached via destroy path) ---
+	coroMem := cleanupBlk.NewCall(c.coroFree, coroId, hdl)
+	needFree := cleanupBlk.NewICmp(enum.IPredNE, coroMem, constant.NewNull(irtypes.I8Ptr))
+	freeBlk := coroFn.NewBlock("coro.free")
+	doneBlk := coroFn.NewBlock("coro.done")
+	cleanupBlk.NewCondBr(needFree, freeBlk, doneBlk)
+
+	freeBlk.NewCall(c.palFree, coroMem)
+	freeBlk.NewBr(doneBlk)
+
+	// Done: single coro.end (both final-suspend exit and cleanup converge here)
+	doneBlk.NewCall(c.coroEnd, hdl, constant.False, constant.None)
+	doneBlk.NewRet(hdl)
+
+	// Final suspend switch: default/i8 0 → doneBlk (skip free, just coro.end+ret)
+	// i8 1 (destroy) → cleanup (free frame then coro.end+ret)
+	finalResult := finalSuspBlk.NewCall(c.coroSuspend, constant.None, constant.True)
+	finalSuspBlk.NewSwitch(finalResult, doneBlk,
+		ir.NewCase(constant.NewInt(irtypes.I8, 0), doneBlk),
+		ir.NewCase(constant.NewInt(irtypes.I8, 1), cleanupBlk))
 
 	// Restore context
 	c.fn = savedFn
@@ -3866,59 +4023,25 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	c.scopeBindings = savedScopeBindings
 	c.dropFlags = savedDropFlags
 	c.loopScopeDepth = savedLoopScopeDepth
+	c.inCoroutine = savedInCoroutine
+	c.coroCleanupBlk = savedCoroCleanup
 
-	// Spawn the void thunk
-	taskType := c.taskStructType(irtypes.Void)
-	doneIdx, mutexIdx, condIdx, handleIdx := taskFieldIndices(true)
+	// Caller: call coroutine ramp → get handle, create G, enqueue
+	handle := c.block.NewCall(coroFn, captureVals...)
+	gRaw := c.block.NewCall(c.funcs["promise_g_new"], handle)
 
-	taskSize := int64(llvmTypeSize(taskType))
-	taskRaw := c.block.NewCall(c.palAlloc, constant.NewInt(irtypes.I64, taskSize))
-	taskPtr := c.block.NewBitCast(taskRaw, irtypes.NewPointer(taskType))
+	// Set result_ptr to sentinel (0x1) so goroutine_exit knows this is a task
+	// and won't free G (caller frees via <-task)
+	gTy := goroutineStructType()
+	gPtr := c.block.NewBitCast(gRaw, irtypes.NewPointer(gTy))
+	rpField := c.block.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldResultPtr)))
+	sentinel := c.block.NewIntToPtr(constant.NewInt(irtypes.I64, 1), irtypes.I8Ptr)
+	c.block.NewStore(sentinel, rpField)
 
-	donePtr := c.block.NewGetElementPtr(taskType, taskPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(doneIdx)))
-	c.block.NewStore(constant.NewInt(irtypes.I1, 0), donePtr)
+	c.block.NewCall(c.funcs["promise_sched_enqueue"], gRaw)
 
-	mtx := c.block.NewCall(c.palMutexInit)
-	mtxPtr := c.block.NewGetElementPtr(taskType, taskPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexIdx)))
-	c.block.NewStore(mtx, mtxPtr)
-
-	cnd := c.block.NewCall(c.palCondInit)
-	cndPtr := c.block.NewGetElementPtr(taskType, taskPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(condIdx)))
-	c.block.NewStore(cnd, cndPtr)
-
-	// Build arg-pack struct: { i8* task_raw, capture0, capture1, ... }
-	packFieldTypes := []irtypes.Type{irtypes.I8Ptr}
-	packFieldTypes = append(packFieldTypes, captureLLVMTypes...)
-	packType := irtypes.NewStruct(packFieldTypes...)
-
-	packSize := int64(llvmTypeSize(packType))
-	packRaw := c.block.NewCall(c.palAlloc, constant.NewInt(irtypes.I64, packSize))
-	packPtr := c.block.NewBitCast(packRaw, irtypes.NewPointer(packType))
-
-	// Store task pointer into pack[0]
-	packTaskField := c.block.NewGetElementPtr(packType, packPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	c.block.NewStore(taskRaw, packTaskField)
-
-	// Store captured values into pack[1..N]
-	for i, val := range captureVals {
-		fieldPtr := c.block.NewGetElementPtr(packType, packPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i+1)))
-		c.block.NewStore(val, fieldPtr)
-	}
-
-	trampoline := c.genGoTrampoline(thunkFn, taskType, packType, irtypes.Void, true)
-	trampolinePtr := c.block.NewBitCast(trampoline, irtypes.I8Ptr)
-	threadHandle := c.block.NewCall(c.palThreadCreate, trampolinePtr, packRaw)
-
-	thPtr := c.block.NewGetElementPtr(taskType, taskPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(handleIdx)))
-	c.block.NewStore(threadHandle, thPtr)
-
-	return taskRaw
+	return gRaw
 }
 
 // --- Receive expression (<-task / <-channel) ---
@@ -3942,9 +4065,10 @@ func (c *Compiler) genReceiveExpr(e *ast.UnaryExpr) value.Value {
 	return c.genReceiveTask(e, inst)
 }
 
-// genReceiveTask generates code for `<-task` — waits for task to complete, returns T.
+// genReceiveTask generates code for `<-task` — waits for goroutine G to complete, returns T.
+// The task handle is now a G pointer (i8*). Checks G.done and loads from G.result_ptr.
 func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.Value {
-	taskRaw := c.genExpr(e.Operand)
+	gRaw := c.genExpr(e.Operand)
 
 	var innerType types.Type
 	if len(inst.TypeArgs()) > 0 {
@@ -3957,65 +4081,110 @@ func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.
 		resultLLVM = c.resolveType(innerType)
 	}
 
-	taskType := c.taskStructType(resultLLVM)
-	doneIdx, mutexIdx, condIdx, handleIdx := taskFieldIndices(isVoid)
+	gTy := goroutineStructType()
+	gPtr := c.block.NewBitCast(gRaw, irtypes.NewPointer(gTy))
 
-	// Bitcast task i8* to typed pointer
-	taskPtr := c.block.NewBitCast(taskRaw, irtypes.NewPointer(taskType))
+	// Check if G is already done
+	doneField := c.block.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldDone)))
+	doneVal := c.block.NewLoad(irtypes.I8, doneField)
+	isDone := c.block.NewICmp(enum.IPredNE, doneVal, constant.NewInt(irtypes.I8, 0))
 
-	// Load mutex and cond pointers
-	mtxFieldPtr := c.block.NewGetElementPtr(taskType, taskPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mutexIdx)))
-	mtx := c.block.NewLoad(irtypes.I8Ptr, mtxFieldPtr)
+	alreadyDone := c.newBlock("task.done")
+	waitBlk := c.newBlock("task.wait")
+	readyBlk := c.newBlock("task.ready")
 
-	cndFieldPtr := c.block.NewGetElementPtr(taskType, taskPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(condIdx)))
-	cnd := c.block.NewLoad(irtypes.I8Ptr, cndFieldPtr)
+	c.block.NewCondBr(isDone, alreadyDone, waitBlk)
 
-	// Lock mutex
-	c.block.NewCall(c.palMutexLock, mtx)
+	alreadyDone.NewBr(readyBlk)
 
-	// Spin-wait loop: check done flag, if not done → cond_wait → check again
-	checkBlock := c.newBlock("recv.check")
-	waitBlock := c.newBlock("recv.wait")
-	readyBlock := c.newBlock("recv.ready")
+	// Wait for G to complete
+	c.block = waitBlk
+	if c.inCoroutine {
+		// Goroutine-mode: park current G on target G's done_waiters, then suspend.
+		// Must re-check G.done after enqueue to avoid TOCTOU race: the target
+		// could complete between our initial done check and the enqueue, leaving
+		// us parked with nobody to wake us.
+		currentG := c.block.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
+		currentGPtr := c.block.NewBitCast(currentG, irtypes.NewPointer(gTy))
 
-	c.block.NewBr(checkBlock)
+		// Set current G.status = waiting
+		curStatusField := c.block.NewGetElementPtr(gTy, currentGPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldStatus)))
+		c.block.NewStore(constant.NewInt(irtypes.I8, gStatusWaiting), curStatusField)
 
-	// check: load done, branch
-	c.block = checkBlock
-	donePtr := c.block.NewGetElementPtr(taskType, taskPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(doneIdx)))
-	doneVal := c.block.NewLoad(irtypes.I1, donePtr)
-	c.block.NewCondBr(doneVal, readyBlock, waitBlock)
+		// Prepend current G to target G's done_waiters list
+		dwField := c.block.NewGetElementPtr(gTy, gPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldDoneWaiters)))
+		oldHead := c.block.NewLoad(irtypes.I8Ptr, dwField)
 
-	// wait: cond_wait, loop back to check
-	c.block = waitBlock
-	c.block.NewCall(c.palCondWait, cnd, mtx)
-	c.block.NewBr(checkBlock)
+		curWaitNextField := c.block.NewGetElementPtr(gTy, currentGPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldWaitNext)))
+		c.block.NewStore(oldHead, curWaitNextField)
+		c.block.NewStore(currentG, dwField)
 
-	// ready: load result, unlock, join, cleanup
-	c.block = readyBlock
-	var resultVal value.Value
-	if !isVoid {
-		resultFieldPtr := c.block.NewGetElementPtr(taskType, taskPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-		resultVal = c.block.NewLoad(resultLLVM, resultFieldPtr)
+		// Re-check G.done after enqueue to close the TOCTOU window.
+		// If the target completed while we were enqueueing, self-rescue:
+		// set status back to runnable and jump straight to readyBlk.
+		recheckDone := c.block.NewLoad(irtypes.I8, doneField)
+		recheckIsDone := c.block.NewICmp(enum.IPredNE, recheckDone, constant.NewInt(irtypes.I8, 0))
+		suspendBlk := c.newBlock("task.suspend")
+		rescueBlk := c.newBlock("task.rescue")
+		c.block.NewCondBr(recheckIsDone, rescueBlk, suspendBlk)
+
+		// rescue: target already done — restore runnable status and proceed
+		c.block = rescueBlk
+		c.block.NewStore(constant.NewInt(irtypes.I8, gStatusRunnable), curStatusField)
+		c.block.NewBr(readyBlk)
+
+		// suspend: target still running — yield to scheduler
+		c.block = suspendBlk
+		suspResult := c.block.NewCall(c.coroSuspend, constant.None, constant.False)
+		resumeBlk := c.newBlock("task.resume")
+		c.block.NewSwitch(suspResult, c.coroCleanupBlk,
+			ir.NewCase(constant.NewInt(irtypes.I8, 0), resumeBlk),
+			ir.NewCase(constant.NewInt(irtypes.I8, 1), c.coroCleanupBlk))
+		resumeBlk.NewBr(readyBlk)
+	} else {
+		// Thread-blocking mode: poll G.done in a loop.
+		// goroutine_exit sets G.done = 1 atomically; we just spin until we see it.
+		// A brief usleep(100) avoids burning CPU in a tight loop.
+		checkBlk := c.newBlock("task.check")
+		spinBlk := c.newBlock("task.spin")
+		doneBlk := c.newBlock("task.threaddone")
+
+		c.block.NewBr(checkBlk)
+
+		// check: reload done flag
+		c.block = checkBlk
+		doneVal2 := c.block.NewLoad(irtypes.I8, doneField)
+		isDone2 := c.block.NewICmp(enum.IPredNE, doneVal2, constant.NewInt(irtypes.I8, 0))
+		c.block.NewCondBr(isDone2, doneBlk, spinBlk)
+
+		// spin: brief sleep then recheck
+		c.block = spinBlk
+		c.block.NewCall(c.palUsleep, constant.NewInt(irtypes.I32, 100))
+		c.block.NewBr(checkBlk)
+
+		c.block = doneBlk
+		c.block.NewBr(readyBlk)
 	}
 
-	// Unlock mutex
-	c.block.NewCall(c.palMutexUnlock, mtx)
+	// ready: load result, free G
+	c.block = readyBlk
+	var resultVal value.Value
+	if !isVoid {
+		rpField := c.block.NewGetElementPtr(gTy, gPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldResultPtr)))
+		rpVal := c.block.NewLoad(irtypes.I8Ptr, rpField)
+		typedRP := c.block.NewBitCast(rpVal, irtypes.NewPointer(resultLLVM))
+		resultVal = c.block.NewLoad(resultLLVM, typedRP)
+		// Free result buffer
+		c.block.NewCall(c.palFree, rpVal)
+	}
 
-	// Join thread
-	thFieldPtr := c.block.NewGetElementPtr(taskType, taskPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(handleIdx)))
-	threadHandle := c.block.NewLoad(irtypes.I8Ptr, thFieldPtr)
-	c.block.NewCall(c.palThreadJoin, threadHandle)
-
-	// Cleanup: destroy mutex, destroy cond, free task
-	c.block.NewCall(c.palMutexDestroy, mtx)
-	c.block.NewCall(c.palCondDestroy, cnd)
-	c.block.NewCall(c.palFree, taskRaw)
+	// Free G struct
+	c.block.NewCall(c.palFree, gRaw)
 
 	if isVoid {
 		return nil
@@ -4036,7 +4205,7 @@ func (c *Compiler) genReceiveChannel(e *ast.UnaryExpr, inst *types.Instance) val
 	chanType := channelStructType()
 	chPtr := c.block.NewBitCast(chRaw, irtypes.NewPointer(chanType))
 
-	// Load mutex and not_empty cond
+	// Load mutex and cond vars
 	mtxFieldPtr := c.block.NewGetElementPtr(chanType, chPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldMutex)))
 	mtx := c.block.NewLoad(irtypes.I8Ptr, mtxFieldPtr)
@@ -4054,7 +4223,6 @@ func (c *Compiler) genReceiveChannel(e *ast.UnaryExpr, inst *types.Instance) val
 
 	// Wait while count == 0 && !closed
 	waitBlock := c.newBlock("chrecv.wait")
-	waitBodyBlock := c.newBlock("chrecv.wait.body")
 	checkBlock := c.newBlock("chrecv.check")
 	noneBlock := c.newBlock("chrecv.none")
 	readBlock := c.newBlock("chrecv.read")
@@ -4073,12 +4241,37 @@ func (c *Compiler) genReceiveChannel(e *ast.UnaryExpr, inst *types.Instance) val
 	closedVal := c.block.NewLoad(irtypes.I8, closedPtr)
 	isOpen := c.block.NewICmp(enum.IPredEQ, closedVal, constant.NewInt(irtypes.I8, 0))
 	shouldWait := c.block.NewAnd(isEmpty, isOpen)
+
+	waitBodyBlock := c.newBlock("chrecv.wait.body")
 	c.block.NewCondBr(shouldWait, waitBodyBlock, checkBlock)
 
-	// wait.body: cond_wait, loop
-	c.block = waitBodyBlock
-	c.block.NewCall(c.palCondWait, notEmpty, mtx)
-	c.block.NewBr(waitBlock)
+	if c.inCoroutine {
+		// Goroutine mode: park on recv_waiters + coro.suspend
+		c.block = waitBodyBlock
+		currentG := c.block.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
+		recvHeadPtr := c.block.NewGetElementPtr(chanType, chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersHead)))
+		recvTailPtr := c.block.NewGetElementPtr(chanType, chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersTail)))
+		c.block.NewCall(c.funcs["promise_waiter_enqueue"], recvHeadPtr, recvTailPtr, currentG)
+		c.block.NewCall(c.palMutexUnlock, mtx)
+
+		suspResult := c.block.NewCall(c.coroSuspend, constant.None, constant.False)
+		resumeBlk := c.newBlock("chrecv.wait.resume")
+		c.block.NewSwitch(suspResult, c.coroCleanupBlk,
+			ir.NewCase(constant.NewInt(irtypes.I8, 0), resumeBlk),
+			ir.NewCase(constant.NewInt(irtypes.I8, 1), c.coroCleanupBlk))
+
+		// On resume: re-lock and retry
+		c.block = resumeBlk
+		c.block.NewCall(c.palMutexLock, mtx)
+		c.block.NewBr(waitBlock)
+	} else {
+		// Thread-blocking mode: cond_wait, loop
+		c.block = waitBodyBlock
+		c.block.NewCall(c.palCondWait, notEmpty, mtx)
+		c.block.NewBr(waitBlock)
+	}
 
 	// check: if count == 0 && closed → none, else → read
 	c.block = checkBlock
@@ -4092,7 +4285,7 @@ func (c *Compiler) genReceiveChannel(e *ast.UnaryExpr, inst *types.Instance) val
 	noneVal := constant.NewZeroInitializer(optType)
 	c.block.NewBr(doneBlock)
 
-	// read: memcpy from buffer[head], advance head, count--, signal not_full
+	// read: memcpy from buffer[head], advance head, count--, wake sender
 	c.block = readBlock
 	bufPtr := c.block.NewGetElementPtr(chanType, chPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldBuffer)))
@@ -4123,8 +4316,36 @@ func (c *Compiler) genReceiveChannel(e *ast.UnaryExpr, inst *types.Instance) val
 	newCount := c.block.NewSub(countRead, constant.NewInt(irtypes.I64, 1))
 	c.block.NewStore(newCount, countPtr)
 
-	// Signal not_full (wake a blocked sender)
+	// Wake a waiting sender: try goroutine waiter first, then cond_signal
+	sendHeadPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersHead)))
+	sendTailPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersTail)))
+	sendWaiter := c.block.NewCall(c.funcs["promise_waiter_dequeue"], sendHeadPtr, sendTailPtr)
+	hasSendWaiter := c.block.NewICmp(enum.IPredNE, sendWaiter, constant.NewNull(irtypes.I8Ptr))
+
+	wakeSendBlk := c.newBlock("chrecv.wake.send")
+	signalSendBlk := c.newBlock("chrecv.signal.send")
+	afterSignalBlk := c.newBlock("chrecv.after.signal")
+	c.block.NewCondBr(hasSendWaiter, wakeSendBlk, signalSendBlk)
+
+	// Wake parked sender goroutine
+	c.block = wakeSendBlk
+	gTy := goroutineStructType()
+	gPtrTy := irtypes.NewPointer(gTy)
+	senderTyped := c.block.NewBitCast(sendWaiter, gPtrTy)
+	senderStatusPtr := c.block.NewGetElementPtr(gTy, senderTyped,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldStatus)))
+	c.block.NewStore(constant.NewInt(irtypes.I8, gStatusRunnable), senderStatusPtr)
+	c.block.NewCall(c.funcs["promise_sched_enqueue"], sendWaiter)
+	c.block.NewBr(afterSignalBlk)
+
+	// Fallback: signal cond var for thread-blocked senders
+	c.block = signalSendBlk
 	c.block.NewCall(c.palCondSignal, notFull)
+	c.block.NewBr(afterSignalBlk)
+
+	c.block = afterSignalBlk
 
 	// Unlock
 	c.block.NewCall(c.palMutexUnlock, mtx)
@@ -4138,7 +4359,7 @@ func (c *Compiler) genReceiveChannel(e *ast.UnaryExpr, inst *types.Instance) val
 	c.block = doneBlock
 	phi := c.block.NewPhi(
 		&ir.Incoming{X: noneVal, Pred: noneBlock},
-		&ir.Incoming{X: someVal2, Pred: readBlock},
+		&ir.Incoming{X: someVal2, Pred: afterSignalBlk},
 	)
 
 	return phi

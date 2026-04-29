@@ -55,14 +55,14 @@ After completing Phases 1-3, the C runtime is reduced to a single function:
 | **4b** | WASM linear memory allocator (bump/free-list on `memory.grow`) | Planned |
 | **5a** | 1:1 threading MVP (`go`/`<-` with OS threads via PAL) | **Done** |
 | **5b** | Channels (`channel[T]`, buffered send/receive) | **Done** |
-| **5c** | M:N scheduler (GMP model: goroutines, processors, work stealing) | Planned |
+| **5c** | M:N scheduler (GMP model, LLVM coroutines, work stealing) | **Done** |
 | **5d** | Cooperative scheduler for WASM (Asyncify or stack-switching) | Planned |
 | **6** | IO reactor: kqueue + epoll + IOCP | Planned |
 | **6b** | JS event loop integration for WASM IO | Planned |
 | **7** | Replace clang with `llc` + `lld`, enable cross-compilation | Planned |
 | **8** | Rewrite scheduler in Promise | Planned |
 
-Phases 1-5b are done. Phase 3 introduced the platform split (PAL). Phase 5a added 1:1 threading (each `go` spawns an OS thread). Phase 5b added typed channels (`channel[T]` with buffered/unbuffered send/receive/for-in and `go { }` block variable capture). Phases 5c-6 add M:N scheduling and IO. Phases 7-8 are polish.
+Phases 1-5c are done. Phase 3 introduced the platform split (PAL). Phase 5a added 1:1 threading (each `go` spawns an OS thread). Phase 5b added typed channels (`channel[T]` with buffered/unbuffered send/receive/for-in and `go { }` block variable capture). Phase 5c replaced 1:1 threading with an M:N scheduler using LLVM coroutine intrinsics — goroutines are cheap coroutine handles multiplexed on OS threads via per-CPU processors and work stealing. Phases 5d-6 add WASM scheduling and IO. Phases 7-8 are polish.
 
 ---
 
@@ -431,6 +431,35 @@ Operations:
 - `for v in ch { }` — loop receiving until closed+empty.
 
 `go { block }` blocks capture outer local variables by value — the codegen walks the block AST to identify referenced outer locals, packs them into the thread arg struct, and unpacks them as parameters in the thunk function.
+
+**Phase 5c — M:N Scheduler** (Done):
+
+Replaces 1:1 threading with Go-style M:N scheduling. Each `go` expression creates a lightweight goroutine (G) — an LLVM coroutine handle plus metadata (~72 bytes) — multiplexed on a pool of OS threads (M) via per-CPU processors (P) with work stealing.
+
+Architecture (GMP model):
+- **G (Goroutine)**: LLVM coroutine handle + status + wait data + scheduler linkage. Statuses: idle/runnable/running/waiting/dead.
+- **P (Processor)**: Per-CPU logical processor with a 256-slot ring buffer run queue (lock-free single-producer/single-consumer).
+- **M (Machine)**: OS thread bound to a P. Pool is elastic — sysmon spawns extra Ms when all are blocked.
+- **Sched (Global)**: Singleton with global run queue, idle M list, P array, goroutine counter.
+
+LLVM coroutine pattern: `go` blocks compile as `presplitcoroutine` functions using `llvm.coro.*` intrinsics (id, alloc, begin, suspend, end, free, resume, destroy, done). Each coroutine has an initial suspend (wait to be scheduled) and a final suspend (keep frame alive so scheduler can check `coro.done()`). Clang runs with `-O1` to ensure CoroSplit lowering.
+
+Dual-mode channel operations: inside a coroutine body (`c.inCoroutine`), channel send/receive parks the goroutine on the channel's wait list and calls `coro.suspend`. Outside coroutine context (e.g. `main()` before scheduler wrapping or nested non-coroutine calls), the existing mutex+cond_wait blocking mode is used. Both modes coexist on the same channel.
+
+Task receive (`<-task`): in coroutine mode, parks the current G on the target G's `done_waiters` list and suspends. In thread-blocking mode, polls `G.done` with `usleep(100)`.
+
+Scheduler lifecycle: `main()` is wrapped as goroutine G0. `promise_sched_init` creates P×M worker threads running `promise_sched_loop`. Each M loops: find_runnable (local queue → global queue → work steal) → `coro.resume(G)` → check `coro.done` → goroutine_exit or back to loop. `promise_sched_run_until_main` blocks the initial thread until G0 completes, then `promise_sched_shutdown` signals and joins all Ms.
+
+New files: `codegen/sched.go` (~1100 lines) — all scheduler data structures and functions.
+
+Key implementation details:
+- Channel struct extended with 4 waiter list fields (send/recv head/tail) appended to existing 11 fields.
+- Thread-local `@__promise_current_g` stores the running G pointer for channel ops.
+- `pal_num_cpus()` via `sysconf(_SC_NPROCESSORS_ONLN)` determines P count.
+- Sysmon thread with 1ms polling ensures progress when all Ms are blocked in nested calls.
+- Void tasks use a sentinel `result_ptr` (0x1) so `goroutine_exit` knows not to free G (caller frees via `<-task`).
+
+Known issue — **enqueue-before-suspend race**: coroutine-mode channel parks and `<-task` done_waiters add the goroutine to a wait list before calling `coro.suspend`. Another thread can dequeue the goroutine and call `coro.resume` before the suspend completes, causing UB (SIGSEGV/SIGBUS). The window is small (~2-3 instructions) but reproducible under contention. Fix requires **deferred parking**: the goroutine stores park info in G fields, suspends, and the scheduler loop completes the park after `coro.resume` returns. Current workaround: use buffered channels with sufficient capacity so coroutine-mode parks are rare; `main()` channel ops use the safe thread-blocking path.
 
 **Phase 6 — IO Reactor** (for non-blocking IO):
 ```

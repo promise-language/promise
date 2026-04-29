@@ -16,6 +16,14 @@ import (
 	"djabi.dev/go/promise_lang/internal/types"
 )
 
+// rawFuncAttr is a function attribute emitted as a bare keyword (no quotes).
+// This is needed for attributes like "presplitcoroutine" which LLVM only
+// recognizes as enum-style keywords, not as quoted string attributes.
+type rawFuncAttr string
+
+func (a rawFuncAttr) IsFuncAttribute() {}
+func (a rawFuncAttr) String() string   { return string(a) }
+
 // Compiler generates LLVM IR from a type-checked Promise AST.
 type Compiler struct {
 	module      *ir.Module
@@ -109,6 +117,28 @@ type Compiler struct {
 	palCondSignal    *ir.Func // @pal_cond_signal(i8* cond) → void
 	palCondBroadcast *ir.Func // @pal_cond_broadcast(i8* cond) → void
 	palCondDestroy   *ir.Func // @pal_cond_destroy(i8* cond) → void
+	palUsleep        *ir.Func // @usleep(i32 usec) → i32
+
+	// LLVM coroutine intrinsics (Phase 5c — M:N scheduler)
+	coroId      *ir.Func // @llvm.coro.id(i32, i8*, i8*, i8*) → token
+	coroAlloc   *ir.Func // @llvm.coro.alloc(token) → i1
+	coroBegin   *ir.Func // @llvm.coro.begin(token, i8*) → i8*
+	coroSize    *ir.Func // @llvm.coro.size.i64() → i64
+	coroSuspend *ir.Func // @llvm.coro.suspend(token, i1) → i8
+	coroEnd     *ir.Func // @llvm.coro.end(i8*, i1, token) → void
+	coroFree    *ir.Func // @llvm.coro.free(token, i8*) → i8*
+	coroResume  *ir.Func // @llvm.coro.resume(i8*) → void
+	coroDestroy *ir.Func // @llvm.coro.destroy(i8*) → void
+	coroDone    *ir.Func // @llvm.coro.done(i8*) → i1
+
+	// PAL scheduler primitives (Phase 5c)
+	palNumCPUs *ir.Func // @pal_num_cpus() → i32
+
+	// Scheduler globals (Phase 5c — M:N scheduler)
+	currentGGlobal *ir.Global // @__promise_current_g (TLS, i8*)
+	schedGlobal    *ir.Global // @__promise_sched (global Sched struct)
+	inCoroutine    bool       // true when compiling inside a go block coroutine body
+	coroCleanupBlk *ir.Block  // coroutine cleanup block for mid-body coro.suspend
 
 	// Go expression counter for unique trampoline function names
 	goCounter int
@@ -250,6 +280,9 @@ func Compile(file *ast.File, info *sema.Info) *CompileResult {
 	c.defineFuncs(file)
 	c.defineMonoFuncs(file, monoFuncInstances)
 
+	// Wrap user main() as G0 in the M:N scheduler
+	c.wrapMainWithScheduler()
+
 	return &CompileResult{
 		Module:      c.module,
 		Layouts:     c.layouts,
@@ -385,6 +418,13 @@ func (c *Compiler) declareIntrinsics() {
 	c.palCondBroadcast = p.EmitCondBroadcast(c.module)
 	c.palCondDestroy = p.EmitCondDestroy(c.module)
 
+	// usleep — POSIX function for brief polling delays in thread-blocking mode
+	c.palUsleep = c.module.NewFunc("usleep", irtypes.I32, ir.NewParam("usec", irtypes.I32))
+	c.palUsleep.FuncAttrs = append(c.palUsleep.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	// PAL: scheduler primitives (Phase 5c)
+	c.palNumCPUs = p.EmitNumCPUs(c.module)
+
 	// LLVM memcpy/memmove intrinsics (used instead of libc memcpy/memmove)
 	c.funcs["llvm.memcpy"] = c.module.NewFunc("llvm.memcpy.p0i8.p0i8.i64",
 		irtypes.Void,
@@ -460,6 +500,25 @@ func (c *Compiler) declareIntrinsics() {
 
 	// Channel constructor (codegen-emitted LLVM IR)
 	c.defineChannelNewFunc()
+
+	// LLVM coroutine intrinsics (Phase 5c — M:N scheduler)
+	c.declareCoroIntrinsics()
+
+	// Scheduler globals and functions (Phase 5c)
+	c.defineSchedulerGlobals()
+	c.defineGNewFunc()
+	c.defineSchedWakeMFunc()
+	c.defineSchedFindRunnableFunc()
+	c.defineSchedEnqueueFunc()
+	c.defineGoroutineExitFunc()
+	c.defineSchedParkMFunc()
+	c.defineSchedLoopFunc()
+	c.defineSchedInitFunc()
+	c.defineSchedRunUntilMainFunc()
+	c.defineSchedShutdownFunc()
+	c.defineWaiterEnqueueFunc()
+	c.defineWaiterDequeueFunc()
+	c.defineWaiterWakeAllFunc()
 
 	// PAL: emit platform-specific IO/exit primitives
 	c.palWrite = p.EmitWrite(c.module)
@@ -2806,10 +2865,16 @@ const (
 	chanFieldMutex      = 8  // i8*  PAL mutex handle
 	chanFieldNotEmpty   = 9  // i8*  cond var: signaled when items added or closed
 	chanFieldNotFull    = 10 // i8*  cond var: signaled when items removed
+
+	// Goroutine waiter lists (Phase 5c: M:N scheduler)
+	chanFieldSendWaitersHead = 11 // i8*  head of parked sender Gs
+	chanFieldSendWaitersTail = 12 // i8*  tail of parked sender Gs
+	chanFieldRecvWaitersHead = 13 // i8*  head of parked receiver Gs
+	chanFieldRecvWaitersTail = 14 // i8*  tail of parked receiver Gs
 )
 
 // channelStructType returns the LLVM struct type for a channel.
-// Layout: { i8*, i64, i64, i64, i64, i64, i8, i8, i8*, i8*, i8* }
+// Layout: { i8*, i64, i64, i64, i64, i64, i8, i8, i8*, i8*, i8*, i8*, i8*, i8*, i8* } — 15 fields
 func channelStructType() *irtypes.StructType {
 	return irtypes.NewStruct(
 		irtypes.I8Ptr, // buffer
@@ -2823,6 +2888,10 @@ func channelStructType() *irtypes.StructType {
 		irtypes.I8Ptr, // mutex
 		irtypes.I8Ptr, // not_empty cond
 		irtypes.I8Ptr, // not_full cond
+		irtypes.I8Ptr, // send_waiters_head
+		irtypes.I8Ptr, // send_waiters_tail
+		irtypes.I8Ptr, // recv_waiters_head
+		irtypes.I8Ptr, // recv_waiters_tail
 	)
 }
 
@@ -2909,7 +2978,68 @@ func (c *Compiler) defineChannelNewFunc() {
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldNotFull)))
 	entry.NewStore(notFull, nfField)
 
+	// Init goroutine waiter lists to null
+	nullPtr := constant.NewNull(irtypes.I8Ptr)
+	for _, idx := range []int{chanFieldSendWaitersHead, chanFieldSendWaitersTail,
+		chanFieldRecvWaitersHead, chanFieldRecvWaitersTail} {
+		field := entry.NewGetElementPtr(chanType, chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(idx)))
+		entry.NewStore(nullPtr, field)
+	}
+
 	entry.NewRet(rawPtr)
 
 	c.funcs["promise_channel_new"] = fn
+}
+
+// --- LLVM Coroutine Intrinsics (Phase 5c) ---
+
+// declareCoroIntrinsics declares all LLVM coroutine intrinsics needed for the M:N scheduler.
+func (c *Compiler) declareCoroIntrinsics() {
+	// @llvm.coro.id(i32 align, i8* promise, i8* coroaddr, i8* fnaddrs) → token
+	c.coroId = c.module.NewFunc("llvm.coro.id", irtypes.Token,
+		ir.NewParam("align", irtypes.I32),
+		ir.NewParam("promise", irtypes.I8Ptr),
+		ir.NewParam("coroaddr", irtypes.I8Ptr),
+		ir.NewParam("fnaddrs", irtypes.I8Ptr))
+
+	// @llvm.coro.alloc(token %id) → i1
+	c.coroAlloc = c.module.NewFunc("llvm.coro.alloc", irtypes.I1,
+		ir.NewParam("id", irtypes.Token))
+
+	// @llvm.coro.begin(token %id, i8* %mem) → i8*
+	c.coroBegin = c.module.NewFunc("llvm.coro.begin", irtypes.I8Ptr,
+		ir.NewParam("id", irtypes.Token),
+		ir.NewParam("mem", irtypes.I8Ptr))
+
+	// @llvm.coro.size.i64() → i64
+	c.coroSize = c.module.NewFunc("llvm.coro.size.i64", irtypes.I64)
+
+	// @llvm.coro.suspend(token %save, i1 %final) → i8
+	c.coroSuspend = c.module.NewFunc("llvm.coro.suspend", irtypes.I8,
+		ir.NewParam("save", irtypes.Token),
+		ir.NewParam("final", irtypes.I1))
+
+	// @llvm.coro.end(i8* %handle, i1 %unwind, token %bundle) → void
+	c.coroEnd = c.module.NewFunc("llvm.coro.end", irtypes.Void,
+		ir.NewParam("handle", irtypes.I8Ptr),
+		ir.NewParam("unwind", irtypes.I1),
+		ir.NewParam("bundle", irtypes.Token))
+
+	// @llvm.coro.free(token %id, i8* %handle) → i8*
+	c.coroFree = c.module.NewFunc("llvm.coro.free", irtypes.I8Ptr,
+		ir.NewParam("id", irtypes.Token),
+		ir.NewParam("handle", irtypes.I8Ptr))
+
+	// @llvm.coro.resume(i8* %handle) → void
+	c.coroResume = c.module.NewFunc("llvm.coro.resume", irtypes.Void,
+		ir.NewParam("handle", irtypes.I8Ptr))
+
+	// @llvm.coro.destroy(i8* %handle) → void
+	c.coroDestroy = c.module.NewFunc("llvm.coro.destroy", irtypes.Void,
+		ir.NewParam("handle", irtypes.I8Ptr))
+
+	// @llvm.coro.done(i8* %handle) → i1
+	c.coroDone = c.module.NewFunc("llvm.coro.done", irtypes.I1,
+		ir.NewParam("handle", irtypes.I8Ptr))
 }

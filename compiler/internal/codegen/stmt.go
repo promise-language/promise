@@ -1543,7 +1543,6 @@ func (c *Compiler) genForInChannel(s *ast.ForInStmt, chRaw value.Value, elemType
 
 	headerBlock := c.newBlock("forin_ch.header")
 	recvWaitBlock := c.newBlock("forin_ch.recv.wait")
-	recvWaitBodyBlock := c.newBlock("forin_ch.recv.wait.body")
 	recvCheckBlock := c.newBlock("forin_ch.recv.check")
 	recvNoneBlock := c.newBlock("forin_ch.recv.none")
 	recvReadBlock := c.newBlock("forin_ch.recv.read")
@@ -1578,12 +1577,36 @@ func (c *Compiler) genForInChannel(s *ast.ForInStmt, chRaw value.Value, elemType
 	closedVal := c.block.NewLoad(irtypes.I8, closedPtr)
 	isOpen := c.block.NewICmp(enum.IPredEQ, closedVal, constant.NewInt(irtypes.I8, 0))
 	shouldWait := c.block.NewAnd(isEmpty, isOpen)
+
+	recvWaitBodyBlock := c.newBlock("forin_ch.recv.wait.body")
 	c.block.NewCondBr(shouldWait, recvWaitBodyBlock, recvCheckBlock)
 
-	// recv.wait.body
-	c.block = recvWaitBodyBlock
-	c.block.NewCall(c.palCondWait, notEmpty, mtx)
-	c.block.NewBr(recvWaitBlock)
+	if c.inCoroutine {
+		// Goroutine mode: park on recv_waiters + coro.suspend
+		c.block = recvWaitBodyBlock
+		currentG := c.block.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
+		recvHeadPtr := c.block.NewGetElementPtr(chanType, chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersHead)))
+		recvTailPtr := c.block.NewGetElementPtr(chanType, chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersTail)))
+		c.block.NewCall(c.funcs["promise_waiter_enqueue"], recvHeadPtr, recvTailPtr, currentG)
+		c.block.NewCall(c.palMutexUnlock, mtx)
+
+		suspResult := c.block.NewCall(c.coroSuspend, constant.None, constant.False)
+		resumeBlk := c.newBlock("forin_ch.recv.resume")
+		c.block.NewSwitch(suspResult, c.coroCleanupBlk,
+			ir.NewCase(constant.NewInt(irtypes.I8, 0), resumeBlk),
+			ir.NewCase(constant.NewInt(irtypes.I8, 1), c.coroCleanupBlk))
+
+		c.block = resumeBlk
+		c.block.NewCall(c.palMutexLock, mtx)
+		c.block.NewBr(recvWaitBlock)
+	} else {
+		// Thread-blocking mode: cond_wait, loop
+		c.block = recvWaitBodyBlock
+		c.block.NewCall(c.palCondWait, notEmpty, mtx)
+		c.block.NewBr(recvWaitBlock)
+	}
 
 	// recv.check: if empty → exit (channel closed), else → read
 	c.block = recvCheckBlock
@@ -1596,7 +1619,7 @@ func (c *Compiler) genForInChannel(s *ast.ForInStmt, chRaw value.Value, elemType
 	c.block.NewCall(c.palMutexUnlock, mtx)
 	c.block.NewBr(exitBlock)
 
-	// recv.read: read value from buffer, advance head, count--, signal, unlock, enter body
+	// recv.read: read value from buffer, advance head, count--, wake sender, unlock, enter body
 	c.block = recvReadBlock
 	bufPtr := c.block.NewGetElementPtr(chanType, chPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldBuffer)))
@@ -1624,8 +1647,36 @@ func (c *Compiler) genForInChannel(s *ast.ForInStmt, chRaw value.Value, elemType
 	newCount := c.block.NewSub(countRead, constant.NewInt(irtypes.I64, 1))
 	c.block.NewStore(newCount, countPtr)
 
-	// Signal not_full
+	// Wake a waiting sender: try goroutine waiter first, then cond_signal
+	sendHeadPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersHead)))
+	sendTailPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersTail)))
+	sendWaiter := c.block.NewCall(c.funcs["promise_waiter_dequeue"], sendHeadPtr, sendTailPtr)
+	hasSendWaiter := c.block.NewICmp(enum.IPredNE, sendWaiter, constant.NewNull(irtypes.I8Ptr))
+
+	wakeSendBlk := c.newBlock("forin_ch.wake.send")
+	signalSendBlk := c.newBlock("forin_ch.signal.send")
+	afterSignalBlk := c.newBlock("forin_ch.after.signal")
+	c.block.NewCondBr(hasSendWaiter, wakeSendBlk, signalSendBlk)
+
+	// Wake parked sender goroutine
+	c.block = wakeSendBlk
+	gTy := goroutineStructType()
+	gPtrTy := irtypes.NewPointer(gTy)
+	senderTyped := c.block.NewBitCast(sendWaiter, gPtrTy)
+	senderStatusPtr := c.block.NewGetElementPtr(gTy, senderTyped,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldStatus)))
+	c.block.NewStore(constant.NewInt(irtypes.I8, gStatusRunnable), senderStatusPtr)
+	c.block.NewCall(c.funcs["promise_sched_enqueue"], sendWaiter)
+	c.block.NewBr(afterSignalBlk)
+
+	// Fallback: signal cond var for thread-blocked senders
+	c.block = signalSendBlk
 	c.block.NewCall(c.palCondSignal, notFull)
+	c.block.NewBr(afterSignalBlk)
+
+	c.block = afterSignalBlk
 
 	// Unlock
 	c.block.NewCall(c.palMutexUnlock, mtx)

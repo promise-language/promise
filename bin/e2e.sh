@@ -29,8 +29,9 @@ for prfile in "$TEST_DIR"/*.pr; do
   fi
 
   # Compile (suppress "Compiled..." message, show errors on failure)
-  compile_out=$("$WORKDIR/promise" build "$prfile" -o "$WORKDIR/$name" 2>&1)
-  if [ $? -ne 0 ]; then
+  compile_exit=0
+  compile_out=$("$WORKDIR/promise" build "$prfile" -o "$WORKDIR/$name" 2>&1) || compile_exit=$?
+  if [ "$compile_exit" -ne 0 ]; then
     echo "FAIL $name (compilation failed)"
     echo "$compile_out" | grep -v "^Compiled " | head -5
     FAIL=$((FAIL + 1))
@@ -65,8 +66,9 @@ if [ -d "$CONC_DIR" ]; then
       continue
     fi
 
-    compile_out=$("$WORKDIR/promise" build "$prfile" -o "$WORKDIR/$name" 2>&1)
-    if [ $? -ne 0 ]; then
+    compile_exit=0
+    compile_out=$("$WORKDIR/promise" build "$prfile" -o "$WORKDIR/$name" 2>&1) || compile_exit=$?
+    if [ "$compile_exit" -ne 0 ]; then
       echo "FAIL $name (compilation failed)"
       echo "$compile_out" | grep -v "^Compiled " | head -5
       FAIL=$((FAIL + 1))

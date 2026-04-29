@@ -98,3 +98,4 @@ func (p *WasmPAL) EmitCondWait(module *ir.Module) *ir.Func      { return emitStu
 func (p *WasmPAL) EmitCondSignal(module *ir.Module) *ir.Func    { return emitStubCondSignal(module) }
 func (p *WasmPAL) EmitCondBroadcast(module *ir.Module) *ir.Func { return emitStubCondBroadcast(module) }
 func (p *WasmPAL) EmitCondDestroy(module *ir.Module) *ir.Func   { return emitStubCondDestroy(module) }
+func (p *WasmPAL) EmitNumCPUs(module *ir.Module) *ir.Func       { return emitStubNumCPUs(module) }

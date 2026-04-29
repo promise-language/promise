@@ -105,3 +105,4 @@ func (p *WindowsPAL) EmitCondBroadcast(module *ir.Module) *ir.Func {
 	return emitStubCondBroadcast(module)
 }
 func (p *WindowsPAL) EmitCondDestroy(module *ir.Module) *ir.Func { return emitStubCondDestroy(module) }
+func (p *WindowsPAL) EmitNumCPUs(module *ir.Module) *ir.Func     { return emitStubNumCPUs(module) }

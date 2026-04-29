@@ -849,3 +849,77 @@ func TestPosixCondDeclaresLibc(t *testing.T) {
 		t.Error("missing 64-byte allocation for pthread_cond_t")
 	}
 }
+
+// --- NumCPUs tests (Phase 5c) ---
+
+func TestEmitNumCPUs(t *testing.T) {
+	tests := []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{target: "arm64-apple-macosx11.0.0"}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			module := ir.NewModule()
+			emitLibcAlloc(module) // needed by stub mutex init
+			fn := tt.pal.EmitNumCPUs(module)
+			if fn.Name() != "pal_num_cpus" {
+				t.Errorf("expected pal_num_cpus, got %s", fn.Name())
+			}
+			out := module.String()
+			if !strings.Contains(out, "define i32 @pal_num_cpus()") {
+				t.Error("missing @pal_num_cpus definition")
+			}
+		})
+	}
+}
+
+func TestPosixNumCPUsDeclaresLibc(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{target: "arm64-apple-macosx11.0.0"}
+	p.EmitNumCPUs(module)
+
+	out := module.String()
+	if !strings.Contains(out, "@sysconf(") {
+		t.Error("missing @sysconf declaration")
+	}
+	// macOS uses _SC_NPROCESSORS_ONLN = 58
+	if !strings.Contains(out, "call i64 @sysconf(i32 58)") {
+		t.Error("missing sysconf call with macOS _SC_NPROCESSORS_ONLN (58)")
+	}
+}
+
+func TestPosixNumCPUsLinuxConstant(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{target: "x86_64-unknown-linux-gnu"}
+	p.EmitNumCPUs(module)
+
+	out := module.String()
+	// Linux uses _SC_NPROCESSORS_ONLN = 84
+	if !strings.Contains(out, "call i64 @sysconf(i32 84)") {
+		t.Error("missing sysconf call with Linux _SC_NPROCESSORS_ONLN (84)")
+	}
+}
+
+func TestStubNumCPUsReturnsOne(t *testing.T) {
+	tests := []struct {
+		name string
+		pal  PAL
+	}{
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			module := ir.NewModule()
+			tt.pal.EmitNumCPUs(module)
+			out := module.String()
+			if !strings.Contains(out, "ret i32 1") {
+				t.Error("stub pal_num_cpus should return 1")
+			}
+		})
+	}
+}

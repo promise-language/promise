@@ -7,9 +7,8 @@ cd "$ROOT_DIR/compiler"
 
 # Copy resources for go:embed
 echo "Preparing resources..."
-mkdir -p cmd/promise/resources/std cmd/promise/resources/runtime
+mkdir -p cmd/promise/resources/std
 cp ../std/*.pr cmd/promise/resources/std/
-cp ../runtime/*.c ../runtime/*.h cmd/promise/resources/runtime/
 
 # Build (skip ANTLR generate if parser already exists)
 echo "Building compiler..."

@@ -108,7 +108,7 @@ Tests live alongside the code they test. Any function annotated with `` `test ``
 // user.pr
 type User {
   string name;
-  Int age;
+  int age;
 }
 
 testUserCreation() `test {
@@ -157,13 +157,13 @@ use col "github.com/acme/collections/2/1"
 
 main() {
   io.println("hello")
-  col.List[Int] list = col.List[Int]()
+  col.Vector[int] list = col.Vector[int]()
 }
 ```
 
 The identifier before the URL is **mandatory** and is the only way to reference that module's exports in the file.
 
-**Design rationale:** Each source file is self-contained — you can read a `.pr` file and understand every reference without consulting other files. The full URL next to the alias makes it immediately clear what `io.println` or `col.List` refers to. This optimizes for reading and understanding code locally, which is the most common operation.
+**Design rationale:** Each source file is self-contained — you can read a `.pr` file and understand every reference without consulting other files. The full URL next to the alias makes it immediately clear what `io.println` or `col.Vector` refers to. This optimizes for reading and understanding code locally, which is the most common operation.
 
 ### 4.4 Visibility
 
@@ -177,7 +177,7 @@ For now, everything is public. In a future revision, declarations will be **priv
 
 ### 5.1 Primitive Types — Defined as Regular Types
 
-Promise does **not** have a separate namespace for primitive types. Instead, primitives are defined as regular `type` declarations that contain a `` `raw `` field mapping directly to an LLVM type. This means `Int`, `Float64`, `Bool`, etc. are all types in the standard library, not compiler magic.
+Promise does **not** have a separate namespace for primitive types. Instead, primitives are defined as regular `type` declarations annotated with `` `native ``, where the compiler backend provides the underlying representation and operator implementations. This means `int`, `f64`, `bool`, etc. are all types in the standard library, not compiler magic.
 
 #### Raw Fields
 
@@ -188,99 +188,70 @@ A field annotated with `` `raw `` uses an LLVM type identifier directly as its t
 #### Standard Library Primitive Definitions
 
 ```promise
-type Int {
-  i64 `raw `value;
-
-  +(Int other) Int `native;
-  -(Int other) Int `native;
-  *(Int other) Int `native;
-  /(Int other) Int `native;
-  %(Int other) Int `native;
-  ==(Int other) Bool `native;
-  !=(Int other) Bool `native;
-  <(Int other) Bool `native;
-  >(Int other) Bool `native;
-  <=(Int other) Bool `native;
-  >=(Int other) Bool `native;
-  -() Int `native;                // unary negation
-  toString() string `native;
+type int `native {
+  +(int other) int `native;
+  -(int other) int `native;
+  *(int other) int `native;
+  /(int other) int `native;
+  %(int other) int `native;
+  ==(int other) bool `native;
+  !=(int other) bool `native;
+  <(int other) bool `native;
+  >(int other) bool `native;
+  <=(int other) bool `native;
+  >=(int other) bool `native;
+  -() int `native;                // unary negation
 }
 
-type Int8 {
-  i8 `raw `value;
-}
+type i8 `native { /* same pattern */ }
+type i16 `native { /* same pattern */ }
+type i32 `native { /* same pattern */ }
+type i64 `native { /* same pattern */ }
 
-type Int16 {
-  i16 `raw `value;
-}
+type uint `native { /* same pattern */ }
+type u8 `native { /* same pattern */ }
+type u16 `native { /* same pattern */ }
+type u32 `native { /* same pattern */ }
+type u64 `native { /* same pattern */ }
 
-type Int32 {
-  i32 `raw `value;
-}
+type f32 `native { /* same pattern */ }
+type f64 `native { /* same pattern */ }
 
-type Int64 {
-  i64 `raw `value;
-}
-
-type UInt {
-  i64 `raw `value;
-}
-
-type UInt8 {
-  i8 `raw `value;
-}
-
-type UInt16 {
-  i16 `raw `value;
-}
-
-type UInt32 {
-  i32 `raw `value;
-}
-
-type UInt64 {
-  i64 `raw `value;
-}
-
-type Float32 {
-  float `raw `value;
-}
-
-type Float64 {
-  double `raw `value;
-}
-
-type Bool {
-  i1 `raw `value;
+type bool `native {
+  &&(bool other) bool `native;
+  ||(bool other) bool `native;
+  ==(bool other) bool `native;
+  !=(bool other) bool `native;
+  !() bool `native;
 }
 ```
 
-The `` `raw `` meta marks a field as mapping directly to its LLVM IR type. The `` `value `` meta places the field in the Value struct (see Section 5.2). These are independent — `i64 `raw;` is valid and places the raw field in the Instance struct (the default). This unifies the type system — there is no distinction between "primitive" and "user-defined" types.
+Types annotated with `` `native `` have their underlying representation provided by the compiler backend — there are no user-visible fields. The `` `native `` annotation on methods means the runtime/compiler backend provides the implementation directly. This unifies the type system — there is no distinction between "primitive" and "user-defined" types.
 
 #### Operator Overloading
 
 Operators are ordinary methods whose name is the operator symbol. The compiler does **not** generate any built-in operator code — all operators for all types (including primitives) are defined as methods in the standard library.
 
-Methods marked `` `native `` have no Promise body; the runtime/compiler backend provides the implementation directly (e.g. mapping `Int.+` to an LLVM `add` instruction).
+Methods marked `` `native `` have no Promise body; the runtime/compiler backend provides the implementation directly (e.g. mapping `int.+` to an LLVM `add` instruction).
 
 Any user-defined type can define operators the same way:
 
 ```promise
 type Vec2 {
-  Float64 x `value;
-  Float64 y `value;
+  f64 x `value;
+  f64 y `value;
 
   +(Vec2 other) Vec2 {
     return Vec2(x: this.x + other.x, y: this.y + other.y);
   }
 
-  ==(Vec2 other) Bool {
+  ==(Vec2 other) bool {
     return this.x == other.x && this.y == other.y;
   }
 }
 ```
 
-Supported operator method names: `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `>`, `<=`, `>=`. Unary operators use the same symbol with no parameters (e.g. `-() Int` for negation). Both unary and binary forms can coexist on the same type — the compiler disambiguates by argument count.
+Supported operator method names: `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `>`, `<=`, `>=`. Unary operators use the same symbol with no parameters (e.g. `-() int` for negation). Both unary and binary forms can coexist on the same type — the compiler disambiguates by argument count.
 
 #### Operator Precedence
 
@@ -357,7 +328,7 @@ A **view** is the perspective through which a value is accessed via a particular
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │  T#t  (1 per source declaration, compile-time generated)         │
-│  - name: "List"                                                  │
+│  - name: "Vector"                                                │
 │  - generic_params: [E]                                           │
 │  - fields: [...]                                                 │
 │  - meta: [...]                                                   │
@@ -365,8 +336,8 @@ A **view** is the perspective through which a value is accessed via a particular
 │  - `type fields live here                                        │
 │                                                                  │
 │  ┌────────────────────────────────────────────────────────────┐  │
-│  │ T#m[Int]  (1 per monomorphization, compile-time gen)       │  │
-│  │ - resolved_params: {E: Int}                                │  │
+│  │ T#m[int]  (1 per monomorphization, compile-time gen)       │  │
+│  │ - resolved_params: {E: int}                                │  │
 │  │ - type_ptr: → T#t ◀───────────────────────────────────── │  │
 │  │ - `variant fields live here                                │  │
 │  └────────────────────────────────────────────────────────────┘  │
@@ -374,7 +345,7 @@ A **view** is the perspective through which a value is accessed via a particular
 
 ┌──────────────────────────────────────────────────────────────┐
 │ T#i (1 per live object, heap-allocated)                       │
-│ - variant_ptr: → T#m[Int]                                     │
+│ - variant_ptr: → T#m[int]                                     │
 │ - default (unannotated) instance fields live here             │
 └──────────────────────────────────────────────────────────────┘
         ▲
@@ -407,7 +378,7 @@ The vtable pointer in the value struct is the **sole mechanism** for field acces
 ```promise
 type Animal {
   string name;
-  Int age;
+  int age;
   speak() string `abstract;
 }
 ```
@@ -418,8 +389,8 @@ The compiler generates:
 Animal_vtable = {
   [0] get_name:  fn(Animal#v) -> string
   [1] set_name:  fn(Animal#v, string)
-  [2] get_age:   fn(Animal#v) -> Int
-  [3] set_age:   fn(Animal#v, Int)
+  [2] get_age:   fn(Animal#v) -> int
+  [3] set_age:   fn(Animal#v, int)
   [4] speak:     fn(Animal#v) -> string
 }
 ```
@@ -470,8 +441,8 @@ Dog_vtable = {
   // Animal slots (same positions — prefix-compatible)
   [0] get_name:  fn(Dog#v) -> string      → Dog's name field getter
   [1] set_name:  fn(Dog#v, string)        → Dog's name field setter
-  [2] get_age:   fn(Dog#v) -> Int         → Dog's age field getter
-  [3] set_age:   fn(Dog#v, Int)           → Dog's age field setter
+  [2] get_age:   fn(Dog#v) -> int         → Dog's age field getter
+  [3] set_age:   fn(Dog#v, int)           → Dog's age field setter
   [4] speak:     fn(Dog#v) -> string      → Dog.speak
 
   // Dog-specific slots (appended)
@@ -493,16 +464,16 @@ type Named {
 }
 
 type Audible {
-  volume() Int `abstract;
+  volume() int `abstract;
   speak() string `abstract;
 }
 
 type Dog is Named, Audible {
   string breed;
-  Int loudness;
+  int loudness;
 
   speak() string { return "Woof!"; }
-  volume() Int { return this.loudness; }
+  volume() int { return this.loudness; }
 }
 ```
 
@@ -541,9 +512,9 @@ Because fields are accessed through vtable getter/setter slots, an interface (a 
 
 ```promise
 type Positioned {
-  Float64 x;
-  Float64 y;
-  distanceTo(Positioned &other) Float64 {
+  f64 x;
+  f64 y;
+  distanceTo(Positioned &other) f64 {
     dx := this.x - other.x;
     dy := this.y - other.y;
     return math.sqrt(dx * dx + dy * dy);
@@ -552,8 +523,8 @@ type Positioned {
 
 type Player is Positioned {
   // Stores x, y as real fields — vtable getters read from instance memory
-  Float64 x;
-  Float64 y;
+  f64 x;
+  f64 y;
   string name;
 }
 
@@ -561,8 +532,8 @@ type CameraTarget is Positioned {
   // No stored x, y — computed from tracked entity
   Entity tracked;
 
-  x() Float64 { return this.tracked.position().x; }
-  y() Float64 { return this.tracked.position().y; }
+  x() f64 { return this.tracked.position().x; }
+  y() f64 { return this.tracked.position().y; }
 }
 ```
 
@@ -586,11 +557,11 @@ When defining a field in a type, the field goes into the **Instance struct** by 
 type Player {
   // Instance fields (default — no annotation needed)
   string name;
-  Int health;
+  int health;
 
   // Value field — lives in T#v, copied with the value struct
-  Float64 x `value;
-  Float64 y `value;
+  f64 x `value;
+  f64 y `value;
 
   // Variant field — shared across all instances of this monomorphization
   string spritePath `variant;
@@ -607,38 +578,31 @@ type Player {
 
 #### Primitives in the Four-Struct Model
 
-Since primitives are regular types, `Int` works like:
+Since primitives are regular types, `int` works like any other type in the four-struct model:
 
-```promise
-type Int {
-  i64 `raw `value;    // The actual i64 value lives in Int#v
-}
-```
+- `int#v` = `{ vtable*, int#i*, i64 }` — vtable pointer, instance pointer, and the raw i64 value
+- `int#i` = `{ int#m* }` — pointer to variant (no pointer back to value)
+- `int#m` = `{ int#t* }` — pointer to type (compile-time generated)
+- `int#t` = `{ metadata }` — name, reflection info (compile-time generated)
 
-Resulting LLVM structs:
-- `Int#v` = `{ vtable*, Int#i*, i64 }` — vtable pointer, instance pointer, and the raw i64 value
-- `Int#i` = `{ Int#m* }` — pointer to variant (no pointer back to value)
-- `Int#m` = `{ Int#t* }` — pointer to type (compile-time generated)
-- `Int#t` = `{ metadata }` — name, reflection info (compile-time generated)
-
-The Int vtable contains getter/setter for the raw value field plus all operator methods (`+`, `-`, `==`, etc.). For performance, the compiler will optimize away unnecessary indirection for primitives (e.g., `Int` on the stack is just an `i64` in practice, with the vtable/instance/variant/type pointers elided when not needed).
+The `int` vtable contains getter/setter for the raw value plus all operator methods (`+`, `-`, `==`, etc.). For performance, the compiler optimizes away unnecessary indirection for primitives (e.g., `int` on the stack is just an `i64` in practice, with the vtable/instance/variant/type pointers elided when not needed).
 
 ### 5.3 Variable Declarations
 
 Variable declarations use **type-first** syntax (Dart/C++ style):
 
 ```promise
-Int x = 42;
+int x = 42;
 string name = "Alice";
-Float64 pi = 3.14159;
-List[Int] numbers = [1, 2, 3];
-map[string, Int] scores = {"alice": 100, "bob": 85};
+f64 pi = 3.14159;
+int[] numbers = [1, 2, 3];
+map[string, int] scores = {"alice": 100, "bob": 85};
 ```
 
 Type inference with `:=`:
 
 ```promise
-x := 42;                // inferred as Int
+x := 42;                // inferred as int
 name := "Alice";        // inferred as string
 ```
 
@@ -648,16 +612,16 @@ A type declares its parent types with `is`. There is no distinction between inhe
 
 ```promise
 type Shape {
-  Float64 x;
-  Float64 y;
+  f64 x;
+  f64 y;
 
-  area() Float64 `abstract;
+  area() f64 `abstract;
 }
 
 type Circle is Shape {
-  Float64 radius;
+  f64 radius;
 
-  area() Float64 { return 3.14159 * this.radius * this.radius; }
+  area() f64 { return 3.14159 * this.radius * this.radius; }
 }
 
 type Drawable {
@@ -665,9 +629,9 @@ type Drawable {
 }
 
 type Circle is Shape, Drawable {
-  Float64 radius;
+  f64 radius;
 
-  area() Float64 { ... }
+  area() f64 { ... }
 
   draw(Canvas &canvas) {
     canvas.drawEllipse(this.x, this.y, this.radius);
@@ -683,7 +647,7 @@ When a type inherits from a parent, the child's vtable **extends** the parent's 
 - **Multiple inheritance**: the compiler generates a **per-view vtable** for each parent. When a Circle is passed where `Shape` is expected, the value carries a Shape-view vtable. When passed where `Drawable` is expected, it carries a Drawable-view vtable. Each call site sees the slot layout it expects.
 - **Field inheritance**: parent fields become getter/setter slots in the vtable. A child can inherit them as stored fields, override them with computed getters/setters, or provide them from a completely different source — the parent's call sites are unaffected.
 - **Default method implementations**: a parent type can provide method bodies. These become concrete function pointers in the child's vtable. The child can override them by providing its own implementation, which replaces the function pointer in the vtable slot. `` `abstract `` and a method body are **mutually exclusive**: `` `abstract `` means no body and the child must override; a body means a default implementation that the child may optionally override.
-- **Field placement inheritance**: when a child inherits from a parent, field placement annotations (`` `value ``, `` `variant ``, `` `type ``) are inherited as declared. If the parent declares `Float64 x `value`, the child's value struct also contains `x`.
+- **Field placement inheritance**: when a child inherits from a parent, field placement annotations (`` `value ``, `` `variant ``, `` `type ``) are inherited as declared. If the parent declares `f64 x `value`, the child's value struct also contains `x`.
 
 #### Structural Interface Satisfaction
 
@@ -697,8 +661,8 @@ type Printable `structural {
 }
 
 type Point {
-  Int x;
-  Int y;
+  int x;
+  int y;
 
   // No `is Printable` — but satisfies Printable structurally
   toString() string { return "(" + this.x.toString() + ", " + this.y.toString() + ")"; }
@@ -735,23 +699,23 @@ The standard library provides these interfaces for use as generic constraints:
 
 ```promise
 type Eq {
-  ==(Self &other) Bool `abstract;
-  !=(Self &other) Bool { return !(this == other); }
+  ==(Self &other) bool `abstract;
+  !=(Self &other) bool { return !(this == other); }
 }
 
 type Ord is Eq {
-  <(Self &other) Bool `abstract;
-  >(Self &other) Bool { return other < this; }
-  <=(Self &other) Bool { return !(this > other); }
-  >=(Self &other) Bool { return !(this < other); }
+  <(Self &other) bool `abstract;
+  >(Self &other) bool { return other < this; }
+  <=(Self &other) bool { return !(this > other); }
+  >=(Self &other) bool { return !(this < other); }
 }
 
 type Hashable {
-  hash() Int `abstract;
+  hash() int `abstract;
 }
 ```
 
-All primitive types (`Int`, `Float64`, `string`, `Bool`, etc.) implement `Eq` and `Ord`. `string` and `Int` also implement `Hashable`. User-defined types can implement these interfaces to participate in generic algorithms like `sort`, `Map` key lookup, and stream combinators like `distinct()`, `min()`, and `max()`.
+All primitive types (`int`, `f64`, `string`, `bool`, etc.) implement `Eq` and `Ord`. `string` and `int` also implement `Hashable`. User-defined types can implement these interfaces to participate in generic algorithms like `sort`, `map` key lookup, and stream combinators like `distinct()`, `min()`, and `max()`.
 
 ### 5.6 Enums (Algebraic Data Types)
 
@@ -770,7 +734,7 @@ enum Color {
   Red,
   Green,
   Blue,
-  Custom(UInt8 r, UInt8 g, UInt8 b),
+  Custom(u8 r, u8 g, u8 b),
 }
 ```
 
@@ -785,9 +749,9 @@ For simple types with no validation needs, the compiler generates a constructor 
 ```promise
 type User {
   string name;           // required — no default, not optional
-  Int age;               // required
+  int age;               // required
   string? bio;           // optional — T? defaults to none
-  Int score = 0;         // optional — has default
+  int score = 0;         // optional — has default
 }
 
 User(name: "Alice", age: 30)              // OK: bio=none, score=0
@@ -805,17 +769,17 @@ A field is **required** if it is not `T?` and does not have `= default`. All req
 |---------|-------------------|
 | Inside `type Foo { ... }` | `Foo` |
 | Inside `type Box[T] { ... }` | `Box[T]` |
-| After monomorphization for `Box[Int]` | `Box[Int]` |
+| After monomorphization for `Box[int]` | `Box[int]` |
 | Inside `type Dog is Animal { ... }` | `Dog` (not `Animal`) |
 
 `Self` is capitalized because it is a type name, contrasting with `this` which is a value. `Self` is usable in return types, constructor calls, parameter types, and field types within type bodies:
 
 ```promise
 type Point {
-  Float64 x `final;
-  Float64 y `final;
+  f64 x `final;
+  f64 y `final;
 
-  offset(Float64 dx, Float64 dy) Self {
+  offset(f64 dx, f64 dy) Self {
     return Self(x: this.x + dx, y: this.y + dy);
   }
 }
@@ -828,8 +792,8 @@ A field annotated `` `final `` can be assigned during construction but is frozen
 ```promise
 type Token {
   string raw `final;
-  Int line `final;
-  Int col `final;
+  int line `final;
+  int col `final;
 }
 
 main() {
@@ -846,7 +810,7 @@ Write access rules:
 
 Additional rules:
 - Child types cannot shadow a `` `final `` field with a mutable one
-- `` `final `` fields can have defaults: `Int version \`final = 1;`
+- `` `final `` fields can have defaults: `int version \`final = 1;`
 - `` `final `` + `T?` is valid: `string? tag \`final;` (defaults to `none`, frozen after)
 - Defining a custom setter on a `` `final `` field name is a compile error
 - Defining a custom getter on a `` `final `` field name is allowed (overrides the generated getter)
@@ -859,9 +823,9 @@ When a type needs validation or computed initialization, define a `new` method. 
 
 ```promise
 type Percentage {
-  Int value `final;
+  int value `final;
 
-  new(Int value) {
+  new(int value) {
     if value < 0 { this.value = 0; }
     else if value > 100 { this.value = 100; }
     else { this.value = value; }
@@ -889,11 +853,11 @@ Parameters can differ from field names, enabling computed construction:
 
 ```promise
 type Point {
-  Float64 x `final;
-  Float64 y `final;
+  f64 x `final;
+  f64 y `final;
 
   // Polar constructor — param names differ from field names
-  new(Float64 radius, Float64 angle) {
+  new(f64 radius, f64 angle) {
     this.x = radius * cos(angle);
     this.y = radius * sin(angle);
   }
@@ -908,9 +872,9 @@ Append `!` to make `new` failable. The caller must handle the error using standa
 
 ```promise
 type Port {
-  Int value `final;
+  int value `final;
 
-  new(Int value)! {
+  new(int value)! {
     if value < 1 || value > 65535 {
       raise InvalidArgError(msg: "invalid port number");
     }
@@ -925,7 +889,7 @@ Port(value: -1)!       // calls new(value:), raises InvalidArgError
 A failable constructor integrates with standard error handling — auto-propagation in `!` functions, explicit `?` handling, or `!` to assert-and-panic (see Section 7):
 
 ```promise
-serve(Int portNum) Server! {
+serve(int portNum) Server! {
   Port p = Port(value: portNum);   // auto-propagates InvalidArgError on failure
   return Server(port: p);
 }
@@ -945,9 +909,9 @@ A factory is a method annotated `` `factory ``. It provides named alternative co
 
 ```promise
 type Color {
-  Int r `final;
-  Int g `final;
-  Int b `final;
+  int r `final;
+  int g `final;
+  int b `final;
 
   red() Self `factory {
     return Self(r: 255, g: 0, b: 0);
@@ -979,7 +943,7 @@ type Shape `abstract {
     this.color = color;
   }
 
-  circle(string color, Float64 r) Self `factory {
+  circle(string color, f64 r) Self `factory {
     return Circle(color: color, radius: r);
   }
 }
@@ -996,9 +960,9 @@ When a parent type defines `new`, the child **must** also define `new` and call 
 ```promise
 type Animal {
   string name `final;
-  Int age;
+  int age;
 
-  new(string name, Int age) {
+  new(string name, int age) {
     this.name = name;
     this.age = age;
   }
@@ -1007,7 +971,7 @@ type Animal {
 type Dog is Animal {
   string breed `final;
 
-  new(string name, Int age, string breed) {
+  new(string name, int age, string breed) {
     super(name, age);       // calls Animal.new
     this.breed = breed;
   }
@@ -1167,8 +1131,8 @@ longest['a](string &'a a, string &'a b) string &'a {
 ```promise
 // Bitwise copy — compiler verifies all fields are also `copy
 type Point `copy {
-  Float64 x `value;
-  Float64 y `value;
+  f64 x `value;
+  f64 y `value;
 }
 
 // Auto-generated deep clone — compiler generates clone() Self method
@@ -1317,7 +1281,7 @@ type FileNotFoundError is Error {
 `raise` is used to return an error from a `!`-function. It is **not** an exception — it is sugar for returning the error half of the result struct.
 
 ```promise
-divide(Float64 a, Float64 b) Float64! {
+divide(f64 a, f64 b) f64! {
   if b == 0.0 {
     raise MathError("division by zero");
   }
@@ -1344,18 +1308,18 @@ Meta annotations appear in post-definition position:
 - **Types**: `type Foo `meta { ... }`
 - **Fields**: `string name `meta;`
 - **Methods**: `greet() string `meta { ... }`
-- **Functions**: `add(Int a, Int b) Int `meta { ... }`
-- **Parameters**: `foo(Int x `doc("description"), Int y `deprecated) { ... }`
+- **Functions**: `add(int a, int b) int `meta { ... }`
+- **Parameters**: `foo(int x `doc("description"), int y `deprecated) { ... }`
 
 ### 8.2 Examples
 
 ```promise
 type OldThing `serializable `version(2) `deprecated(since: "1.3", message: "Use newMethod instead") {
   string name `json(name: "user_name") `required;
-  Int age `json(name: "user_age");
+  int age `json(name: "user_age");
 }
 
-fastAdd(Int a, Int b) Int `inline {
+fastAdd(int a, int b) int `inline {
   return a + b;
 }
 
@@ -1399,7 +1363,7 @@ User-defined metas are available through the type system at compile time for met
 
 ```promise
 type HttpClient `doc("HTTP client with connection pooling and automatic retry.") {
-  Int maxRetries `doc("Maximum number of retry attempts before failing.");
+  int maxRetries `doc("Maximum number of retry attempts before failing.");
   Duration timeout `doc("Per-request timeout.");
 
   get(~this, string url `doc("The URL to fetch.")) Response!
@@ -1408,8 +1372,8 @@ type HttpClient `doc("HTTP client with connection pooling and automatic retry.")
   }
 }
 
-divide(Float64 a `doc("dividend"), Float64 b `doc("divisor"))
-    Float64! `doc("Divide a by b. Raises MathError on division by zero.") {
+divide(f64 a `doc("dividend"), f64 b `doc("divisor"))
+    f64! `doc("Divide a by b. Raises MathError on division by zero.") {
   if b == 0.0 {
     raise MathError("division by zero");
   }
@@ -1445,10 +1409,10 @@ By default, `this` is the **value struct**, copied when the method is called. Va
 
 ```promise
 type Point {
-  Float64 x `value;
-  Float64 y `value;
+  f64 x `value;
+  f64 y `value;
 
-  distanceTo(this, Point other) Float64 {
+  distanceTo(this, Point other) f64 {
     dx := this.x - other.x;
     dy := this.y - other.y;
     return math.sqrt(dx * dx + dy * dy);
@@ -1462,13 +1426,13 @@ Instance methods receive a **pointer to the instance struct**. They can access i
 
 ```promise
 type Counter {
-  Int value;
+  int value;
 
   increment(~this) `instance {
     this.value += 1;
   }
 
-  current(&this) Int `instance {
+  current(&this) int `instance {
     return this.value;
   }
 }
@@ -1494,7 +1458,7 @@ Type methods are effectively **namespaced functions**. No `this` is passed at ca
 
 ```promise
 type Counter {
-  Int value;
+  int value;
 
   create() Counter `type {
     return Counter(value: 0);
@@ -1519,8 +1483,8 @@ sendEmail(
     string subject,               // required
     string body = "",             // has default — skippable
     string? cc,                   // optional — skippable, receives none
-    Int priority = 3              // has default — skippable
-) Bool! {
+    int priority = 3              // has default — skippable
+) bool! {
   // cc is Option[string] — test with: if cc { ... } (see Section 14.1)
   ...
 }
@@ -1531,7 +1495,7 @@ There is no ordering constraint on required, defaulted, and optional parameters 
 Parameters can carry meta annotations (see Section 8), placed after the parameter name and before any default value:
 
 ```promise
-connect(string host `doc("hostname"), Int port `doc("port number") = 8080) Connection! { ... }
+connect(string host `doc("hostname"), int port `doc("port number") = 8080) Connection! { ... }
 ```
 
 **`T?` vs `Option[T]`:** Only the `T?` sugar triggers skippability. If a parameter is declared with `Option[T]` explicitly, it is a required parameter of optional type — the caller must provide it.
@@ -1589,11 +1553,11 @@ Default value expressions are evaluated **at the call site** each time the argum
 
 ```promise
 // VALID defaults:
-connect(string host, Int port = 8080) Connection! { ... }
+connect(string host, int port = 8080) Connection! { ... }
 createId(string prefix, string id = Uuid.generate()) Thing { ... }
 
 // INVALID — referencing sibling parameter:
-range(Int start, Int end = start + 10) { ... }  // compile error
+range(int start, int end = start + 10) { ... }  // compile error
 ```
 
 #### Constructor Defaults
@@ -1603,7 +1567,7 @@ Constructor parameters mirror field declarations. Fields with `= expression` def
 ```promise
 type Config {
   string host;           // required — must be provided
-  Int port = 8080;       // optional — default evaluated at call site
+  int port = 8080;       // optional — default evaluated at call site
   string? logFile;       // optional — defaults to none
 }
 
@@ -1618,7 +1582,7 @@ When a type defines an explicit `new` constructor, the implicit constructor is r
 ### 9.4 Lambdas / Closures
 
 ```promise
-add := |Int a, Int b| -> Int { return a + b; };
+add := |int a, int b| -> int { return a + b; };
 doubled := list.map(|x| x * 2);
 ```
 
@@ -1665,18 +1629,18 @@ Named arguments are **not available** when calling through a function-type varia
 Function types use arrow syntax instead of a keyword:
 
 ```promise
-(Int, Int) -> Int                  // function taking two Ints, returning Int
-(string&) -> Bool                  // function taking a borrowed string, returning Bool
+(int, int) -> int                  // function taking two ints, returning int
+(string&) -> bool                  // function taking a borrowed string, returning bool
 () -> ()                           // function taking nothing, returning nothing
 ```
 
 Function types **erase parameter names and default values**. Only the types and borrow modifiers are part of the function type signature. This means named arguments and default-value skipping are only available when calling a function by its declared name — not when calling through a function-type variable:
 
 ```promise
-add(Int a, Int b) Int { return a + b; }
+add(int a, int b) int { return a + b; }
 
 add(a: 1, b: 2);          // VALID: calling by name, names available
-(Int, Int) -> Int fn = add;
+(int, int) -> int fn = add;
 fn(1, 2);                  // VALID: positional through function-type variable
 fn(a: 1, b: 2);            // ERROR: function type has no parameter names
 ```
@@ -1819,7 +1783,7 @@ if animal is Dog && animal.age > 5 {
   // animal is Dog here — narrowed before the && guard
 }
 
-Bool isDog = animal is Dog;   // no narrowing — just a bool test
+bool isDog = animal is Dog;   // no narrowing — just a bool test
 ```
 
 #### `as` — type casting
@@ -1889,7 +1853,7 @@ for {
 }
 
 // Classic for
-for Int i = 0; i < 10; i += 1 {
+for int i = 0; i < 10; i += 1 {
   // ...
 }
 ```
@@ -1936,30 +1900,30 @@ type stream[T] {
 
   // Intermediate combinators — lazy, return a new stream
   map[R]((T) -> R transform) stream[R] { ... }
-  filter((T) -> Bool predicate) stream[T] { ... }
+  filter((T) -> bool predicate) stream[T] { ... }
   flatMap[R]((T) -> stream[R] transform) stream[R] { ... }
-  take(Int count) stream[T] { ... }
-  skip(Int count) stream[T] { ... }
-  takeWhile((T) -> Bool predicate) stream[T] { ... }
-  skipWhile((T) -> Bool predicate) stream[T] { ... }
+  take(int count) stream[T] { ... }
+  skip(int count) stream[T] { ... }
+  takeWhile((T) -> bool predicate) stream[T] { ... }
+  skipWhile((T) -> bool predicate) stream[T] { ... }
   zip[U](stream[U] other) stream[(T, U)] { ... }
   chain(stream[T] other) stream[T] { ... }
-  enumerate() stream[(Int, T)] { ... }
+  enumerate() stream[(int, T)] { ... }
   scan[R](R initial, (R, T) -> R accumulate) stream[R] { ... }
-  chunk(Int size) stream[T[]] { ... }
+  chunk(int size) stream[T[]] { ... }
   distinct() stream[T] { ... }
 
   // Terminal operations — eager, consume the stream
   fold[R](R initial, (R, T) -> R accumulate) R { ... }
   reduce((T, T) -> T combine) T? { ... }
   collect() T[] { ... }
-  count() Int { ... }
-  any((T) -> Bool predicate) Bool { ... }
-  every((T) -> Bool predicate) Bool { ... }
-  contains(T value) Bool { ... }
+  count() int { ... }
+  any((T) -> bool predicate) bool { ... }
+  every((T) -> bool predicate) bool { ... }
+  contains(T value) bool { ... }
   first() T? { ... }
   last() T? { ... }
-  find((T) -> Bool predicate) T? { ... }
+  find((T) -> bool predicate) T? { ... }
   min() T? { ... }
   max() T? { ... }
   forEach((T) action) { ... }
@@ -2054,12 +2018,12 @@ total := (1..=100).fold(0, (acc, n) -> acc + n);
 A function whose return type is `stream[T]` and whose body contains `yield` is a **generator function**. The compiler transforms its body into a state machine that implements `iter[T]`. No special modifier keyword is needed — the return type plus the presence of `yield` is sufficient.
 
 ```promise
-fibonacci() stream[Int] {
-  Int a = 0;
-  Int b = 1;
+fibonacci() stream[int] {
+  int a = 0;
+  int b = 1;
   for {
     yield a;
-    Int temp = a;
+    int temp = a;
     a = b;
     b = temp + b;
   }
@@ -2075,7 +2039,7 @@ for n in fibonacci() {
 **`yield*` delegates to another stream**, yielding all of its elements inline:
 
 ```promise
-oneThenTwo() stream[Int] {
+oneThenTwo() stream[int] {
   yield* 1..=3;     // yields 1, 2, 3
   yield* 7..=9;     // yields 7, 8, 9
 }
@@ -2098,12 +2062,12 @@ fetchPages(string url) stream[Page] {
 
 ```promise
 // ERROR — yield inside a closure
-example() stream[Int] {
+example() stream[int] {
   items.forEach(|item| { yield item; });  // compile error
 }
 
 // OK — yield in a for loop
-example() stream[Int] {
+example() stream[int] {
   for item in items { yield item; }
 }
 ```
@@ -2156,27 +2120,27 @@ Built-in collection types with generic support:
 
 ```promise
 // Array (fixed-size, stack-allocated)
-Int[3] arr = [1, 2, 3];
+int[3] arr = [1, 2, 3];
 
 // Slice (dynamic, heap-allocated)
-Int[] list = [1, 2, 3, 4, 5];
+int[] list = [1, 2, 3, 4, 5];
 list.push(6);
 
 // Map
-map[string, Int] scores = {
+map[string, int] scores = {
   "alice": 100,
   "bob": 85,
 };
 
 // Tuple
-(Int, string) pair = (42, "answer");
+(int, string) pair = (42, "answer");
 (num, label) := pair;      // destructuring
 ```
 
 All collection types implement `stream[T]` (see Section 12.5), providing lazy combinators like `map`, `filter`, `fold`, and more:
 
 ```promise
-Int[] numbers = [1, 2, 3, 4, 5];
+int[] numbers = [1, 2, 3, 4, 5];
 squares := numbers.map((n) -> n * n).collect();   // [1, 4, 9, 16, 25]
 sum := numbers.fold(0, (acc, n) -> acc + n);       // 15
 ```
@@ -2188,7 +2152,7 @@ sum := numbers.fold(0, (acc, n) -> acc + n);       // 15
 Promise does not have null. Optional values use `Option[T]`, with sugar `T?`:
 
 ```promise
-find(Int id) User? {            // shorthand for Option[User]
+find(int id) User? {            // shorthand for Option[User]
   // ...
   return none;                   // Option.None
 }
@@ -2224,17 +2188,17 @@ if !cc {
 
 Inside the `if cc` block, `cc` is narrowed to `T`. Inside the `if !cc` block, `cc` is known to be `none` — any use of `cc` as type `T` is a **compile-time error**.
 
-This works for any `T?` where `T` is not `Bool`. For `Bool?`, the compiler emits an error because the intent is ambiguous — use `is present` instead (see below).
+This works for any `T?` where `T` is not `bool`. For `bool?`, the compiler emits an error because the intent is ambiguous — use `is present` instead (see below).
 
 #### `is present` / `is absent`
 
-For explicit presence testing that works with **any** `T?` — including `Bool?` — use the `is present` and `is absent` patterns. These are contextual keywords: `present` and `absent` are only special after `is` in pattern position; in all other contexts they are normal identifiers.
+For explicit presence testing that works with **any** `T?` — including `bool?` — use the `is present` and `is absent` patterns. These are contextual keywords: `present` and `absent` are only special after `is` in pattern position; in all other contexts they are normal identifiers.
 
 ```promise
-Bool? verbose = getFlag();
+bool? verbose = getFlag();
 
 if verbose is present {
-  // verbose is Bool here — narrowed from Bool?
+  // verbose is bool here — narrowed from bool?
   if verbose { enableLogging(); }
 } else {
   io.println(verbose);           // ERROR: verbose is known to be none here
@@ -2303,7 +2267,7 @@ Promise allows unsafe blocks for low-level operations:
 ```promise
 rawPointer() `unsafe {
   ptr := unsafe {
-    Int* raw = alloc[Int]();
+    int* raw = alloc[int]();
     *raw = 42;
     raw
   };
@@ -2537,7 +2501,7 @@ Functions are never declared as "async". The runtime is the async engine — any
 ```promise
 // This function does I/O but has a normal signature.
 // The runtime suspends the goroutine during httpGet, not the OS thread.
-fetchUser(Int id) User! {
+fetchUser(int id) User! {
   data := httpGet("/users/{id}")?;
   return User.fromJson(data)?;
 }
@@ -2629,15 +2593,15 @@ use io "github.com/promise-lang/std/io/1"
 use json "github.com/promise-lang/std/json/1"
 
 type Todo `serializable {
-  Int id `json(name: "id");
+  int id `json(name: "id");
   string title `json(name: "title");
-  Bool done = false;                     // field default — constructor can skip
+  bool done = false;                     // field default — constructor can skip
 
   toggle(~this) `instance {
     this.done = !this.done;
   }
 
-  new(Int id, string title) Todo `type {
+  new(int id, string title) Todo `type {
     return Todo(id: id, title: title);   // done defaults to false
   }
 }
@@ -2645,8 +2609,8 @@ type Todo `serializable {
 type TodoList {
   Todo[] items;
 
-  add(~this, string title, Int priority = 0) `instance {
-    Int id = this.items.len() + 1;
+  add(~this, string title, int priority = 0) `instance {
+    int id = this.items.len() + 1;
     this.items.push(Todo.new(id, title));
   }
 

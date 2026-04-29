@@ -284,11 +284,13 @@ func runTest(args []string) {
 
 // runTestFile runs test functions from a single .pr file.
 func runTestFile(filename string, timeout time.Duration) {
+	start := time.Now()
+
 	// Frontend compilation (parse + merge std + sema + ownership)
 	file, info := compileFrontend(filename)
 
 	if info.HasExpectOutput {
-		runE2ETest(file, info, filename, timeout)
+		runE2ETest(file, info, filename, timeout, start)
 		return
 	}
 
@@ -318,23 +320,39 @@ func runTestFile(filename string, timeout time.Duration) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, tmpOutput.Name())
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			fmt.Fprintf(os.Stderr, "\nTIMEOUT: tests exceeded %s timeout\n", timeout)
-			os.Exit(1)
+	output, runErr := cmd.CombinedOutput()
+	elapsed := time.Since(start)
+
+	if ctx.Err() == context.DeadlineExceeded {
+		printTestOutput(string(output))
+		fmt.Fprintf(os.Stderr, "TIMEOUT: tests exceeded %s timeout\n", timeout)
+		os.Exit(1)
+	}
+
+	// Print output, replacing summary line with timed version
+	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed`)
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if line == "" {
+			continue
 		}
-		if exitErr, ok := err.(*exec.ExitError); ok {
+		if m := summaryRe.FindStringSubmatch(line); m != nil {
+			fmt.Printf("%s passed, %s failed (%.3fs)\n", m[1], m[2], elapsed.Seconds())
+		} else {
+			fmt.Println(line)
+		}
+	}
+
+	if runErr != nil {
+		if exitErr, ok := runErr.(*exec.ExitError); ok {
 			os.Exit(exitErr.ExitCode())
 		}
-		fmt.Fprintf(os.Stderr, "error running tests: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error running tests: %v\n", runErr)
 		os.Exit(1)
 	}
 }
 
 // runE2ETest compiles and runs a .pr file with `test(expected="..."), comparing output.
-func runE2ETest(file *ast.File, info *sema.Info, filename string, timeout time.Duration) {
+func runE2ETest(file *ast.File, info *sema.Info, filename string, timeout time.Duration, start time.Time) {
 	name := strings.TrimSuffix(filepath.Base(filename), ".pr")
 
 	// Codegen with normal main (no GenerateTestMain)
@@ -355,10 +373,11 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string, timeout time.D
 	defer cancel()
 	cmd := exec.CommandContext(ctx, tmpOutput.Name())
 	output, err := cmd.CombinedOutput()
+	elapsed := time.Since(start)
 
 	if ctx.Err() == context.DeadlineExceeded {
 		fmt.Printf("FAIL %s (timeout after %s)\n", name, timeout)
-		fmt.Printf("\n0 passed, 1 failed\n")
+		fmt.Printf("0 passed, 1 failed\n")
 		os.Exit(1)
 	}
 
@@ -367,16 +386,16 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string, timeout time.D
 	expected := strings.TrimRight(info.ExpectOutput, "\n")
 
 	if actual == expected {
-		fmt.Printf("PASS %s\n", name)
-		fmt.Printf("\n1 passed, 0 failed\n")
+		fmt.Printf("PASS %s\t(%.3fs)\n", name, elapsed.Seconds())
+		fmt.Printf("1 passed, 0 failed (%.3fs)\n", elapsed.Seconds())
 	} else {
-		fmt.Printf("FAIL %s\n", name)
+		fmt.Printf("FAIL %s\t(%.3fs)\n", name, elapsed.Seconds())
 		fmt.Printf("  expected: %s\n", firstLines(expected, 3))
 		fmt.Printf("  actual:   %s\n", firstLines(actual, 3))
 		if err != nil {
 			fmt.Printf("  exit:     %v\n", err)
 		}
-		fmt.Printf("\n0 passed, 1 failed\n")
+		fmt.Printf("0 passed, 1 failed (%.3fs)\n", elapsed.Seconds())
 		os.Exit(1)
 	}
 }
@@ -393,6 +412,8 @@ func firstLines(s string, n int) string {
 
 // runTestDir discovers .pr files in a directory and runs tests from each.
 func runTestDir(dir string, recursive bool, timeout time.Duration) {
+	totalStart := time.Now()
+
 	files := discoverTestFiles(dir, recursive)
 	if len(files) == 0 {
 		fmt.Println("no test files found")
@@ -405,7 +426,7 @@ func runTestDir(dir string, recursive bool, timeout time.Duration) {
 		os.Exit(1)
 	}
 
-	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed$`)
+	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed`)
 
 	totalPassed := 0
 	totalFailed := 0
@@ -436,7 +457,7 @@ func runTestDir(dir string, recursive bool, timeout time.Duration) {
 		fmt.Printf("--- %s ---\n", relPath)
 
 		if timedOut {
-			fmt.Printf("TIMEOUT: exceeded %s timeout\n\n", timeout)
+			fmt.Printf("TIMEOUT: exceeded %s timeout\n", timeout)
 			failedFiles++
 			totalFailed++
 			continue
@@ -444,7 +465,7 @@ func runTestDir(dir string, recursive bool, timeout time.Duration) {
 
 		if err != nil {
 			// Compilation or runtime error
-			fmt.Println(outStr)
+			printTestOutput(outStr)
 			failedFiles++
 
 			// Try to parse summary from output
@@ -466,15 +487,13 @@ func runTestDir(dir string, recursive bool, timeout time.Duration) {
 			totalFailed += atoi(m[2])
 		}
 
-		// Print test output (strip the summary line — we'll print our own)
-		lines := strings.Split(outStr, "\n")
-		for _, line := range lines {
-			if summaryRe.MatchString(line) {
+		// Print test output (strip the summary line and empty lines)
+		for _, line := range strings.Split(outStr, "\n") {
+			if line == "" || summaryRe.MatchString(line) {
 				continue
 			}
 			fmt.Println(line)
 		}
-		fmt.Println()
 	}
 
 	if totalFiles == 0 {
@@ -483,7 +502,8 @@ func runTestDir(dir string, recursive bool, timeout time.Duration) {
 	}
 
 	// Print grand summary
-	fmt.Printf("%d passed, %d failed (%d files)\n", totalPassed, totalFailed, totalFiles)
+	totalElapsed := time.Since(totalStart)
+	fmt.Printf("%d passed, %d failed (%d files, %.3fs)\n", totalPassed, totalFailed, totalFiles, totalElapsed.Seconds())
 	if totalFailed > 0 || failedFiles > 0 {
 		os.Exit(1)
 	}
@@ -521,6 +541,15 @@ func discoverTestFiles(dir string, recursive bool) []string {
 
 	sort.Strings(files)
 	return files
+}
+
+// printTestOutput prints a test output string, skipping empty lines.
+func printTestOutput(s string) {
+	for _, line := range strings.Split(s, "\n") {
+		if line != "" {
+			fmt.Println(line)
+		}
+	}
 }
 
 // lastLine returns the last non-empty line of a string.

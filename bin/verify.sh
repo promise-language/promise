@@ -17,7 +17,7 @@ go vet $(go list ./... | grep -v /internal/parser)
 echo "Building..."
 go build -o promise ./cmd/promise 2>&1
 
-echo "Running all tests..."
+echo "Running go tests..."
 go test ./... || exit 1
 
 echo "Running promise tests..."

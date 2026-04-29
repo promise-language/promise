@@ -1,177 +1,21 @@
 #!/usr/bin/env bash
-# E2E test runner: compiles and runs .pr files, checks output against .expected files
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-TEST_DIR="$ROOT_DIR/tests/e2e"
-WORKDIR=$(mktemp -d)
-TIMEOUT="${PROMISE_E2E_TIMEOUT:-60}"
-trap 'rm -rf "$WORKDIR"' EXIT
+trap 'if [ $? -ne 0 ]; then echo "----------------------------------------------------"; echo "❌ Verify FAILED: tests did not pass"; echo "----------------------------------------------------"; fi' EXIT
 
-# Build the compiler
-echo "Building compiler..."
-cd "$ROOT_DIR/compiler"
-if ! go build -o "$WORKDIR/promise" ./cmd/promise; then
-  echo "ERROR: compiler build failed"
-  exit 1
-fi
+cd "$(dirname "$0")/../compiler"
 
-PASS=0
-FAIL=0
+echo "Generating parser & resources..."
+make generate resources
 
-for prfile in "$TEST_DIR"/*.pr; do
-  [ -f "$prfile" ] || continue
-  name=$(basename "$prfile" .pr)
-  expected="$TEST_DIR/${name}.expected"
+echo "Building..."
+go build -o promise ./cmd/promise 2>&1
 
-  if [ ! -f "$expected" ]; then
-    echo "SKIP $name (no .expected file)"
-    continue
-  fi
+echo "Running go tests..."
+go test ./... || exit 1
 
-  # Compile (suppress "Compiled..." message, show errors on failure)
-  compile_exit=0
-  compile_out=$("$WORKDIR/promise" build "$prfile" -o "$WORKDIR/$name" 2>&1) || compile_exit=$?
-  if [ "$compile_exit" -ne 0 ]; then
-    echo "FAIL $name (compilation failed)"
-    echo "$compile_out" | grep -v "^Compiled " | head -5
-    FAIL=$((FAIL + 1))
-    continue
-  fi
-
-  # Run and capture output with timeout
-  run_exit=0
-  actual=$(timeout "$TIMEOUT" "$WORKDIR/$name" 2>&1) || run_exit=$?
-  if [ "$run_exit" -eq 124 ]; then
-    echo "FAIL $name (timeout after ${TIMEOUT}s)"
-    FAIL=$((FAIL + 1))
-    continue
-  fi
-  # Strip timeout diagnostic messages (e.g. "the monitored command dumped core")
-  actual=$(echo "$actual" | sed '/^timeout: /d')
-  expected_text=$(cat "$expected")
-
-  if [ "$actual" = "$expected_text" ]; then
-    echo "PASS $name"
-    PASS=$((PASS + 1))
-  else
-    echo "FAIL $name"
-    echo "  expected: $(head -3 "$expected")"
-    echo "  actual:   $(echo "$actual" | head -3)"
-    FAIL=$((FAIL + 1))
-  fi
-done
-
-# --- concurrency tests ---
-CONC_DIR="$ROOT_DIR/tests/concurrency"
-if [ -d "$CONC_DIR" ]; then
-  for prfile in "$CONC_DIR"/*.pr; do
-    [ -f "$prfile" ] || continue
-    name=$(basename "$prfile" .pr)
-    expected="$CONC_DIR/${name}.expected"
-
-    if [ ! -f "$expected" ]; then
-      echo "SKIP $name (no .expected file)"
-      continue
-    fi
-
-    compile_exit=0
-    compile_out=$("$WORKDIR/promise" build "$prfile" -o "$WORKDIR/$name" 2>&1) || compile_exit=$?
-    if [ "$compile_exit" -ne 0 ]; then
-      echo "FAIL $name (compilation failed)"
-      echo "$compile_out" | grep -v "^Compiled " | head -5
-      FAIL=$((FAIL + 1))
-      continue
-    fi
-
-    run_exit=0
-    actual=$(timeout "$TIMEOUT" "$WORKDIR/$name" 2>&1) || run_exit=$?
-    if [ "$run_exit" -eq 124 ]; then
-      echo "FAIL $name (timeout after ${TIMEOUT}s)"
-      FAIL=$((FAIL + 1))
-      continue
-    fi
-    # Strip timeout diagnostic messages (e.g. "the monitored command dumped core")
-    actual=$(echo "$actual" | sed '/^timeout: /d')
-    expected_text=$(cat "$expected")
-
-    if [ "$actual" = "$expected_text" ]; then
-      echo "PASS $name"
-      PASS=$((PASS + 1))
-    else
-      echo "FAIL $name"
-      echo "  expected: $(head -3 "$expected")"
-      echo "  actual:   $(echo "$actual" | head -3)"
-      FAIL=$((FAIL + 1))
-    fi
-  done
-fi
-
-# --- promise test: all-pass ---
-test_name="test_assert (promise test)"
-actual=$(timeout "$TIMEOUT" "$WORKDIR/promise" test -timeout "$TIMEOUT" "$TEST_DIR/test_assert.pr" 2>&1) || true
-expected_text="PASS test_addition
-PASS test_math
-PASS test_strings
-
-3 passed, 0 failed"
-if [ "$actual" = "$expected_text" ]; then
-  echo "PASS $test_name"
-  PASS=$((PASS + 1))
-else
-  echo "FAIL $test_name"
-  echo "  expected: $(echo "$expected_text" | head -3)"
-  echo "  actual:   $(echo "$actual" | head -3)"
-  FAIL=$((FAIL + 1))
-fi
-
-# --- promise test: mixed pass/fail ---
-# With thread-based test runner (no fork isolation), a panicking test terminates
-# the process via pal_exit. The first test passes, then the second panics.
-test_name="test_fail (promise test)"
-exit_code=0
-actual=$(timeout "$TIMEOUT" "$WORKDIR/promise" test -timeout "$TIMEOUT" "$TEST_DIR/test_fail.pr" 2>&1) || exit_code=$?
-expected_text="PASS test_pass
-panic: deliberate failure"
-if [ "$actual" = "$expected_text" ] && [ "$exit_code" -ne 0 ]; then
-  echo "PASS $test_name"
-  PASS=$((PASS + 1))
-else
-  echo "FAIL $test_name"
-  echo "  expected: $(echo "$expected_text" | head -3)"
-  echo "  actual:   $(echo "$actual" | head -3)"
-  if [ "$exit_code" -eq 0 ]; then
-    echo "  (expected non-zero exit code, got 0)"
-  fi
-  FAIL=$((FAIL + 1))
-fi
-
-# --- promise test: no tests found ---
-test_name="no_tests_found (promise test)"
-actual=$(timeout "$TIMEOUT" "$WORKDIR/promise" test -timeout "$TIMEOUT" "$TEST_DIR/std_basics.pr" 2>&1) || true
-if echo "$actual" | grep -q "no tests found"; then
-  echo "PASS $test_name"
-  PASS=$((PASS + 1))
-else
-  echo "FAIL $test_name"
-  echo "  expected output containing 'no tests found'"
-  echo "  actual:   $(echo "$actual" | head -3)"
-  FAIL=$((FAIL + 1))
-fi
-
-# --- promise test: directory scanning (std tests) ---
-test_name="std_tests (promise test dir)"
-exit_code=0
-actual=$(timeout "$TIMEOUT" "$WORKDIR/promise" test -timeout "$TIMEOUT" "$ROOT_DIR/tests/std/" 2>&1) || exit_code=$?
-if [ "$exit_code" -eq 0 ] && echo "$actual" | grep -q "passed, 0 failed"; then
-  echo "PASS $test_name"
-  PASS=$((PASS + 1))
-else
-  echo "FAIL $test_name"
-  echo "  actual:   $(echo "$actual" | tail -3)"
-  FAIL=$((FAIL + 1))
-fi
+echo "Running promise tests..."
+./promise test -timeout 60 ../tests/... || exit 1
 
 echo ""
-echo "$PASS passed, $FAIL failed"
-[ "$FAIL" -eq 0 ]
+echo "✅ OK to Commit"

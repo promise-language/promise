@@ -1,6 +1,8 @@
 package codegen
 
 import (
+	"strings"
+
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
@@ -486,6 +488,45 @@ func (c *Compiler) defineSchedStatGetterBody(fn *ir.Func, field int) {
 	entry.NewRet(nil)
 }
 
+// defineNanotimeFunc defines @promise_nanotime() → i64.
+// Returns monotonic nanoseconds via clock_gettime(CLOCK_MONOTONIC).
+func (c *Compiler) defineNanotimeFunc() *ir.Func {
+	timespecType := irtypes.NewStruct(irtypes.I64, irtypes.I64)
+
+	clockGettime := c.module.NewFunc("clock_gettime", irtypes.I32,
+		ir.NewParam("clk_id", irtypes.I32),
+		ir.NewParam("tp", irtypes.NewPointer(timespecType)))
+	clockGettime.FuncAttrs = append(clockGettime.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	// CLOCK_MONOTONIC: macOS=6, Linux=1
+	clockMonotonic := int64(1)
+	triple := c.module.TargetTriple
+	if strings.Contains(triple, "darwin") || strings.Contains(triple, "apple") {
+		clockMonotonic = 6
+	}
+
+	fn := c.module.NewFunc("promise_nanotime", irtypes.I64)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock("entry")
+
+	ts := entry.NewAlloca(timespecType)
+	entry.NewCall(clockGettime, constant.NewInt(irtypes.I32, clockMonotonic), ts)
+
+	secPtr := entry.NewGetElementPtr(timespecType, ts,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	nsecPtr := entry.NewGetElementPtr(timespecType, ts,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	sec := entry.NewLoad(irtypes.I64, secPtr)
+	nsec := entry.NewLoad(irtypes.I64, nsecPtr)
+
+	billion := constant.NewInt(irtypes.I64, 1_000_000_000)
+	secNanos := entry.NewMul(sec, billion)
+	totalNanos := entry.NewAdd(secNanos, nsec)
+	entry.NewRet(totalNanos)
+
+	return fn
+}
+
 // defineTestRunFunc defines a codegen-emitted promise_test_run(i8* %fn) → i32.
 // Replaces the C extern (fork/waitpid) with thread-based execution via PAL.
 // The test function runs on a separate thread. If it completes normally, returns 0.
@@ -532,10 +573,11 @@ func (c *Compiler) defineTestTrampoline() *ir.Func {
 	return trampoline
 }
 
-// defineTestPrintResultBody adds a function body to promise_test_print_result(i8* %name, i32 %failed).
-// Writes "PASS <name>\n" or "FAIL <name>\n" to stdout via pal_write.
+// defineTestPrintResultBody adds a function body to promise_test_print_result.
+// Params: (i8* %name, i32 %failed, i64 %elapsed_ns)
+// Writes "PASS <name> (X.XXXs)\n" or "FAIL <name> (X.XXXs)\n" to stdout.
 func (c *Compiler) defineTestPrintResultBody(fn *ir.Func) {
-	// Global constants for prefix strings
+	// Global constants for prefix/suffix strings
 	passData := constant.NewCharArrayFromString("PASS ")
 	passGlobal := c.module.NewGlobalDef(".str.pass_prefix", passData)
 	passGlobal.Immutable = true
@@ -544,9 +586,22 @@ func (c *Compiler) defineTestPrintResultBody(fn *ir.Func) {
 	failGlobal := c.module.NewGlobalDef(".str.fail_prefix", failData)
 	failGlobal.Immutable = true
 
+	timePrefixData := constant.NewCharArrayFromString("\t(")
+	timePrefixGlobal := c.module.NewGlobalDef(".str.time_prefix", timePrefixData)
+	timePrefixGlobal.Immutable = true
+
+	dotData := constant.NewCharArrayFromString(".")
+	dotGlobal := c.module.NewGlobalDef(".str.dot", dotData)
+	dotGlobal.Immutable = true
+
+	timeSuffixData := constant.NewCharArrayFromString("s)\n")
+	timeSuffixGlobal := c.module.NewGlobalDef(".str.time_suffix", timeSuffixData)
+	timeSuffixGlobal.Immutable = true
+
 	stdout := constant.NewInt(irtypes.I32, 1)
-	name := fn.Params[0]   // i8* (C string, null-terminated)
-	failed := fn.Params[1] // i32
+	name := fn.Params[0]      // i8*
+	failed := fn.Params[1]    // i32
+	elapsedNs := fn.Params[2] // i64
 
 	// Branch on failed != 0
 	entry := fn.NewBlock("entry")
@@ -569,15 +624,55 @@ func (c *Compiler) defineTestPrintResultBody(fn *ir.Func) {
 	elseBlock.NewCall(c.palWrite, stdout, passPtr, constant.NewInt(irtypes.I64, 5))
 	elseBlock.NewBr(mergeBlock)
 
-	// Write name + newline
+	// Write name
 	nameLen := mergeBlock.NewCall(c.funcs["strlen"], name)
 	mergeBlock.NewCall(c.palWrite, stdout, name, nameLen)
-	c.emitWriteNewline(mergeBlock, stdout)
+
+	// Write " ("
+	tpPtr := mergeBlock.NewGetElementPtr(timePrefixGlobal.ContentType, timePrefixGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	mergeBlock.NewCall(c.palWrite, stdout, tpPtr, constant.NewInt(irtypes.I64, 2))
+
+	// Compute seconds and fractional milliseconds from elapsed_ns
+	// elapsed_ms = elapsed_ns / 1_000_000
+	elapsedMs := mergeBlock.NewSDiv(elapsedNs, constant.NewInt(irtypes.I64, 1_000_000))
+	// seconds = elapsed_ms / 1000
+	seconds := mergeBlock.NewSDiv(elapsedMs, constant.NewInt(irtypes.I64, 1000))
+	// frac_ms = elapsed_ms % 1000
+	fracMs := mergeBlock.NewSRem(elapsedMs, constant.NewInt(irtypes.I64, 1000))
+
+	// Write seconds as string
+	secStr := mergeBlock.NewCall(c.funcs["promise_int_to_string"], seconds)
+	secDataPtr, secDataLen := c.extractStringDataLenFromInstance(mergeBlock, secStr)
+	mergeBlock.NewCall(c.palWrite, stdout, secDataPtr, secDataLen)
+	mergeBlock.NewCall(c.palFree, secStr)
+
+	// Write "."
+	dotPtr := mergeBlock.NewGetElementPtr(dotGlobal.ContentType, dotGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	mergeBlock.NewCall(c.palWrite, stdout, dotPtr, constant.NewInt(irtypes.I64, 1))
+
+	// Zero-pad fractional ms: add 1000 then skip first char ("1005" → "005")
+	paddedFrac := mergeBlock.NewAdd(fracMs, constant.NewInt(irtypes.I64, 1000))
+	fracStr := mergeBlock.NewCall(c.funcs["promise_int_to_string"], paddedFrac)
+	fracDataPtr, fracDataLen := c.extractStringDataLenFromInstance(mergeBlock, fracStr)
+	// Skip first character: ptr+1, len-1
+	fracDataPtrOffset := mergeBlock.NewGetElementPtr(irtypes.I8, fracDataPtr,
+		constant.NewInt(irtypes.I64, 1))
+	fracDataLenMinus1 := mergeBlock.NewSub(fracDataLen, constant.NewInt(irtypes.I64, 1))
+	mergeBlock.NewCall(c.palWrite, stdout, fracDataPtrOffset, fracDataLenMinus1)
+	mergeBlock.NewCall(c.palFree, fracStr)
+
+	// Write "s)\n"
+	tsPtr := mergeBlock.NewGetElementPtr(timeSuffixGlobal.ContentType, timeSuffixGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	mergeBlock.NewCall(c.palWrite, stdout, tsPtr, constant.NewInt(irtypes.I64, 3))
+
 	mergeBlock.NewRet(nil)
 }
 
 // defineTestSummaryBody adds a function body to promise_test_summary(i32 %passed, i32 %failed).
-// Writes "\n<passed> passed, <failed> failed\n" to stdout via pal_write.
+// Writes "<passed> passed, <failed> failed\n" to stdout via pal_write.
 func (c *Compiler) defineTestSummaryBody(fn *ir.Func) {
 	// Global constants
 	passedSuffixData := constant.NewCharArrayFromString(" passed, ")
@@ -593,9 +688,6 @@ func (c *Compiler) defineTestSummaryBody(fn *ir.Func) {
 	failed := fn.Params[1] // i32
 
 	entry := fn.NewBlock("entry")
-
-	// Write leading newline
-	c.emitWriteNewline(entry, stdout)
 
 	// Convert passed count to string: sext i32 → i64, call promise_int_to_string
 	passedI64 := entry.NewSExt(passed, irtypes.I64)

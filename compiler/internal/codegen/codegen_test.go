@@ -4802,7 +4802,7 @@ func TestTestPrintResultBody(t *testing.T) {
 	ir := result.Module.String()
 
 	// Function is defined (not just declared)
-	assertContains(t, ir, "define void @promise_test_print_result(i8* %name, i32 %failed)")
+	assertContains(t, ir, "define void @promise_test_print_result(i8* %name, i32 %failed, i64 %elapsed_ns)")
 	// Branching on failed flag with conditional branch to fail/pass blocks
 	assertContains(t, ir, "icmp ne i32 %failed, 0")
 	assertContains(t, ir, "br i1")    // conditional branch
@@ -4815,8 +4815,9 @@ func TestTestPrintResultBody(t *testing.T) {
 	assertContains(t, ir, "i64 5)")
 	// Gets name length via strlen and writes name
 	assertContains(t, ir, "call i64 @strlen(i8* %name)")
-	// Newline write: 1 byte
-	assertContains(t, ir, "i64 1)")
+	// Time formatting: "\t(" prefix, "s)\n" suffix
+	assertContains(t, ir, `@.str.time_prefix = constant [2 x i8] c"\09("`)
+	assertContains(t, ir, `@.str.time_suffix = constant [3 x i8] c"s)\0A"`)
 }
 
 func TestTestSummaryBody(t *testing.T) {

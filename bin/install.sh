@@ -7,10 +7,11 @@ cd "$ROOT_DIR/compiler"
 
 # Copy resources for go:embed
 echo "Preparing resources..."
+rm -fr cmd/promise/resources/std
 mkdir -p cmd/promise/resources/std
-cp ../std/*.pr cmd/promise/resources/std/
+cp -r ../std/*.pr cmd/promise/resources/std/
 
-# Build (skip ANTLR generate if parser already exists)
+# Build (skip ANTLR generate, parser already exists)
 echo "Building compiler..."
 if ! go build -buildvcs=false -o promise ./cmd/promise; then
   echo "ERROR: build failed"

@@ -326,10 +326,12 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 	// Runs each test in a thread via PAL. If the test panics, pal_exit
 	// terminates the whole process (no fork isolation). Same as Go's testing.
 	testRunFn := c.defineTestRunFunc()
+	nanotimeFn := c.defineNanotimeFunc()
 	testPrintFn := c.module.NewFunc("promise_test_print_result",
 		irtypes.Void,
 		ir.NewParam("name", irtypes.I8Ptr),
 		ir.NewParam("failed", irtypes.I32),
+		ir.NewParam("elapsed_ns", irtypes.I64),
 	)
 	testSummaryFn := c.module.NewFunc("promise_test_summary",
 		irtypes.Void,
@@ -378,8 +380,15 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 		// Bitcast test function to i8* for promise_test_run
 		fnPtr := entry.NewBitCast(testFn, irtypes.I8Ptr)
 
+		// Time the test: t0 = nanotime()
+		t0 := entry.NewCall(nanotimeFn)
+
 		// Call promise_test_run(fn) -> i32 (0=pass, 1=fail)
 		result := entry.NewCall(testRunFn, fnPtr)
+
+		// t1 = nanotime(); elapsed = t1 - t0
+		t1 := entry.NewCall(nanotimeFn)
+		elapsed := entry.NewSub(t1, t0)
 
 		// Get name pointer
 		namePtr := entry.NewGetElementPtr(
@@ -389,8 +398,8 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 			constant.NewInt(irtypes.I64, 0),
 		)
 
-		// Print result
-		entry.NewCall(testPrintFn, namePtr, result)
+		// Print result with timing
+		entry.NewCall(testPrintFn, namePtr, result, elapsed)
 
 		// Update counters
 		currentPassed := entry.NewLoad(irtypes.I32, passedAlloca)

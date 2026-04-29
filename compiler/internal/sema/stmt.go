@@ -101,6 +101,17 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 		declType = types.NewMutRef(declType)
 	}
 
+	// Uninitialized declaration: `T? x;` defaults to none
+	if s.Value == nil {
+		if _, ok := declType.(*types.Optional); !ok {
+			c.errorf(s.Pos(), "uninitialized variable %s requires optional type, got %s", s.Name, declType)
+		}
+		if s.Name != "_" {
+			c.insert(types.NewVar(tpos(s.Pos()), s.Name, declType))
+		}
+		return
+	}
+
 	if s.Value != nil {
 		// Special case: empty collection literals with typed declarations.
 		// Infer the element type from the declared type instead of erroring.
@@ -409,14 +420,45 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 		c.checkBlock(s.Body)
 		c.closeScope()
 	} else {
-		// Regular if
-		cond := c.checkExpr(s.Cond)
-		narrow := c.detectOptionalNarrowing(s.Cond, cond)
+		// Pre-detect compound/negated narrowing patterns before full type-check.
+		// These patterns (!cc, a && b) would produce spurious type errors if
+		// type-checked normally, so we intercept them first.
+		narrow := c.preDetectIfNarrowing(s.Cond)
+		var cond types.Type
+		if narrow == nil {
+			// Normal: type-check condition, then detect simple narrowing
+			cond = c.checkExpr(s.Cond)
+			narrow = c.detectOptionalNarrowing(s.Cond, cond)
+		}
 		if narrow != nil {
-			// Optional narrowing: record and shadow variable in then-block
+			// Optional narrowing: record and shadow variables in the appropriate branch
 			c.info.OptionalNarrowings[s] = narrow
+			if narrow.Negated {
+				// Negated (!cc): then-block has NO narrowing, else-block has narrowing
+				c.openScope(s.Body, "if-then")
+				c.checkBlock(s.Body)
+				c.closeScope()
+				if s.Else != nil {
+					// Insert narrowed vars into else scope
+					switch elseNode := s.Else.(type) {
+					case *ast.Block:
+						c.openScope(elseNode, "if-narrow-else")
+						for _, v := range narrow.Vars {
+							c.insert(types.NewVar(tpos(s.Pos()), v.VarName, v.InnerType))
+						}
+						c.checkBlock(elseNode)
+						c.closeScope()
+					default:
+						c.checkStmt(s.Else)
+					}
+				}
+				return // else already handled
+			}
+			// Non-negated: then-block has narrowing
 			c.openScope(s.Body, "if-narrow")
-			c.insert(types.NewVar(tpos(s.Pos()), narrow.VarName, narrow.InnerType))
+			for _, v := range narrow.Vars {
+				c.insert(types.NewVar(tpos(s.Pos()), v.VarName, v.InnerType))
+			}
 			c.checkBlock(s.Body)
 			c.closeScope()
 		} else {
@@ -445,11 +487,8 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 }
 
 // detectOptionalNarrowing checks if an if-condition implies optional narrowing.
-// Returns narrowing info if the condition is:
-//   - A simple identifier of type T? (where T is not bool)
-//   - An `x is present` expression where x is an identifier of type T?
-//
-// Returns nil if no narrowing applies.
+// Handles simple cases (single ident, `is present`) after the condition has been type-checked.
+// Compound (!cc, a && b) patterns are handled by preDetectIfNarrowing instead.
 func (c *Checker) detectOptionalNarrowing(cond ast.Expr, condType types.Type) *OptionalNarrowing {
 	// Case 1: `if cc { ... }` where cc is T? (truthiness narrowing)
 	if ident, ok := cond.(*ast.IdentExpr); ok {
@@ -460,7 +499,7 @@ func (c *Checker) detectOptionalNarrowing(cond ast.Expr, condType types.Type) *O
 				c.errorf(cond.Pos(), "bool? in if condition is ambiguous; use 'is present' instead")
 				return nil
 			}
-			return &OptionalNarrowing{VarName: ident.Name, InnerType: inner}
+			return &OptionalNarrowing{Vars: []NarrowedVar{{VarName: ident.Name, InnerType: inner}}}
 		}
 	}
 
@@ -470,8 +509,83 @@ func (c *Checker) detectOptionalNarrowing(cond ast.Expr, condType types.Type) *O
 			if ident, ok := isExpr.Expr.(*ast.IdentExpr); ok {
 				exprType := c.info.Types[isExpr.Expr]
 				if opt, ok := exprType.(*types.Optional); ok {
-					return &OptionalNarrowing{VarName: ident.Name, InnerType: opt.Elem()}
+					return &OptionalNarrowing{Vars: []NarrowedVar{{VarName: ident.Name, InnerType: opt.Elem()}}}
 				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// preDetectIfNarrowing detects compound (!cc, a && b) optional narrowing patterns
+// BEFORE the condition is fully type-checked. Uses scope lookups to resolve types
+// and manually records type info for the sub-expressions.
+// Returns nil if no compound/negated pattern is found.
+func (c *Checker) preDetectIfNarrowing(cond ast.Expr) *OptionalNarrowing {
+	// Case: !cc (negated narrowing)
+	if unary, ok := cond.(*ast.UnaryExpr); ok && unary.Op == ast.UnaryNot {
+		vars := c.detectNarrowableExpr(unary.Operand)
+		if vars != nil {
+			c.recordType(cond, types.TypBool)
+			return &OptionalNarrowing{Vars: vars, Negated: true}
+		}
+		return nil
+	}
+
+	// Case: a && b (compound narrowing)
+	if bin, ok := cond.(*ast.BinaryExpr); ok && bin.Op == ast.BinAnd {
+		leftVars := c.detectNarrowableExpr(bin.Left)
+		rightVars := c.detectNarrowableExpr(bin.Right)
+		if leftVars != nil && rightVars != nil {
+			c.recordType(cond, types.TypBool)
+			return &OptionalNarrowing{Vars: append(leftVars, rightVars...)}
+		}
+		return nil
+	}
+
+	return nil
+}
+
+// detectNarrowableExpr checks if an expression is a narrowable optional pattern
+// using scope lookups (no checkExpr). Records types for matched expressions.
+// Returns the narrowed variables or nil if not narrowable.
+func (c *Checker) detectNarrowableExpr(expr ast.Expr) []NarrowedVar {
+	// Simple identifier of type T?
+	if ident, ok := expr.(*ast.IdentExpr); ok {
+		obj := c.lookup(ident.Name)
+		if obj == nil {
+			return nil
+		}
+		opt, ok := obj.Type().(*types.Optional)
+		if !ok {
+			return nil
+		}
+		inner := opt.Elem()
+		if types.Identical(inner, types.TypBool) {
+			return nil // bool? can't use truthiness
+		}
+		c.recordType(expr, opt)
+		c.recordObject(ident, obj)
+		return []NarrowedVar{{VarName: ident.Name, InnerType: inner}}
+	}
+
+	// `x is present`
+	if isExpr, ok := expr.(*ast.IsExpr); ok {
+		if pat, ok := isExpr.Pattern.(*ast.IdentIsPattern); ok && pat.Name == "present" {
+			if ident, ok := isExpr.Expr.(*ast.IdentExpr); ok {
+				obj := c.lookup(ident.Name)
+				if obj == nil {
+					return nil
+				}
+				opt, ok := obj.Type().(*types.Optional)
+				if !ok {
+					return nil
+				}
+				c.recordType(isExpr.Expr, opt)
+				c.recordObject(ident, obj)
+				c.recordType(expr, types.TypBool)
+				return []NarrowedVar{{VarName: ident.Name, InnerType: opt.Elem()}}
 			}
 		}
 	}

@@ -80,6 +80,20 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 // --- Variable declarations ---
 
 func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
+	// Uninitialized optional: `T? x;` — zero-init (none)
+	if s.Value == nil {
+		declType := c.resolveTypeRefToType(s.Type)
+		if declType == nil {
+			return
+		}
+		lt := c.resolveType(declType)
+		alloca := c.block.NewAlloca(lt)
+		alloca.SetName(c.uniqueLocalName(s.Name))
+		c.block.NewStore(constant.NewZeroInitializer(lt), alloca)
+		c.locals[s.Name] = alloca
+		return
+	}
+
 	// Resolve the declared type (from sema's type annotation)
 	declType := c.lookupLocalType(s)
 	exprType := c.info.Types[s.Value]
@@ -427,6 +441,16 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				targetType = types.Substitute(targetType, c.typeSubst)
 			}
 			val = c.coerceToView(val, exprType, targetType)
+
+			// Wrap value in Optional if target is Optional but expr is not
+			if _, isOpt := targetType.(*types.Optional); isOpt {
+				if exprType == types.TypNone {
+					// none: already handled by genExpr (zeroinit)
+				} else if _, exprOpt := exprType.(*types.Optional); !exprOpt {
+					val = c.wrapOptional(val, alloca.ElemType.(*irtypes.StructType))
+				}
+			}
+
 			c.block.NewStore(val, alloca)
 			// Clear drop flag on RHS if it's being moved
 			if ident, ok := s.Value.(*ast.IdentExpr); ok {
@@ -854,15 +878,22 @@ func (c *Compiler) genIfStmt(s *ast.IfStmt) {
 	c.block = mergeBlock
 }
 
-// genIfNarrowStmt handles if-statements that narrow an optional variable.
-// Loads the optional, branches on the presence flag, and shadows the variable
-// with the unwrapped value in the then-block.
+// genIfNarrowStmt handles if-statements that narrow optional variables.
+// Supports single narrowing, compound narrowing (&&), and negated narrowing (!cc).
 func (c *Compiler) genIfNarrowStmt(s *ast.IfStmt, narrow *sema.OptionalNarrowing) {
-	// Load the optional value from the variable's alloca
-	alloca := c.locals[narrow.VarName]
-	optVal := c.block.NewLoad(alloca.ElemType, alloca)
+	if narrow.Negated {
+		c.genNegatedNarrowStmt(s, narrow)
+		return
+	}
+	if len(narrow.Vars) > 1 {
+		c.genCompoundNarrowStmt(s, narrow)
+		return
+	}
 
-	// Extract presence flag (field 0 of { i1, T })
+	// Single variable narrowing
+	v := narrow.Vars[0]
+	alloca := c.locals[v.VarName]
+	optVal := c.block.NewLoad(alloca.ElemType, alloca)
 	flag := c.block.NewExtractValue(optVal, 0)
 
 	thenBlock := c.newBlock("narrow.then")
@@ -881,18 +912,136 @@ func (c *Compiler) genIfNarrowStmt(s *ast.IfStmt, narrow *sema.OptionalNarrowing
 	innerVal := c.block.NewExtractValue(optVal, 1)
 	innerAlloca := c.block.NewAlloca(innerVal.Type())
 	c.block.NewStore(innerVal, innerAlloca)
-	prev := c.locals[narrow.VarName]
-	c.locals[narrow.VarName] = innerAlloca
+	prev := c.locals[v.VarName]
+	c.locals[v.VarName] = innerAlloca
+
+	c.genBlock(s.Body)
+	if c.block.Term == nil {
+		c.block.NewBr(mergeBlock)
+	}
+	c.locals[v.VarName] = prev
+
+	if s.Else != nil {
+		c.block = elseBlock
+		c.genStmt(s.Else)
+		if c.block.Term == nil {
+			c.block.NewBr(mergeBlock)
+		}
+	}
+
+	c.block = mergeBlock
+}
+
+// genNegatedNarrowStmt handles `if !cc { A } else { B }` — narrowing in else branch.
+func (c *Compiler) genNegatedNarrowStmt(s *ast.IfStmt, narrow *sema.OptionalNarrowing) {
+	v := narrow.Vars[0]
+	alloca := c.locals[v.VarName]
+	optVal := c.block.NewLoad(alloca.ElemType, alloca)
+	flag := c.block.NewExtractValue(optVal, 0)
+
+	thenBlock := c.newBlock("narrow.then")
+	mergeBlock := c.newBlock("narrow.end")
+
+	var elseBlock *ir.Block
+	if s.Else != nil {
+		elseBlock = c.newBlock("narrow.else")
+	}
+
+	// flag=true (present) → else (narrowed), flag=false (absent) → then (not narrowed)
+	if s.Else != nil {
+		c.block.NewCondBr(flag, elseBlock, thenBlock)
+	} else {
+		c.block.NewCondBr(flag, mergeBlock, thenBlock)
+	}
+
+	// Then: cc is none — no narrowing
+	c.block = thenBlock
+	c.genBlock(s.Body)
+	if c.block.Term == nil {
+		c.block.NewBr(mergeBlock)
+	}
+
+	// Else: cc is present — shadow with unwrapped value
+	if s.Else != nil {
+		c.block = elseBlock
+		innerVal := c.block.NewExtractValue(optVal, 1)
+		innerAlloca := c.block.NewAlloca(innerVal.Type())
+		c.block.NewStore(innerVal, innerAlloca)
+		prev := c.locals[v.VarName]
+		c.locals[v.VarName] = innerAlloca
+
+		c.genStmt(s.Else)
+		if c.block.Term == nil {
+			c.block.NewBr(mergeBlock)
+		}
+		c.locals[v.VarName] = prev
+	}
+
+	c.block = mergeBlock
+}
+
+// genCompoundNarrowStmt handles `if a && b { ... }` — both narrowed in then-block.
+// Generates nested flag checks with short-circuit evaluation.
+func (c *Compiler) genCompoundNarrowStmt(s *ast.IfStmt, narrow *sema.OptionalNarrowing) {
+	mergeBlock := c.newBlock("narrow.end")
+	var elseBlock *ir.Block
+	if s.Else != nil {
+		elseBlock = c.newBlock("narrow.else")
+	}
+
+	// Load all optional values and chain flag checks
+	type optInfo struct {
+		optVal value.Value
+		v      sema.NarrowedVar
+	}
+	opts := make([]optInfo, len(narrow.Vars))
+	for i, v := range narrow.Vars {
+		alloca := c.locals[v.VarName]
+		optVal := c.block.NewLoad(alloca.ElemType, alloca)
+		flag := c.block.NewExtractValue(optVal, 0)
+		opts[i] = optInfo{optVal: optVal, v: v}
+
+		if i < len(narrow.Vars)-1 {
+			// Not the last: chain to next check
+			nextCheck := c.newBlock(fmt.Sprintf("narrow.check.%d", i+1))
+			failTarget := elseBlock
+			if failTarget == nil {
+				failTarget = mergeBlock
+			}
+			c.block.NewCondBr(flag, nextCheck, failTarget)
+			c.block = nextCheck
+		} else {
+			// Last: branch to then or else/merge
+			thenBlock := c.newBlock("narrow.then")
+			failTarget := elseBlock
+			if failTarget == nil {
+				failTarget = mergeBlock
+			}
+			c.block.NewCondBr(flag, thenBlock, failTarget)
+			c.block = thenBlock
+		}
+	}
+
+	// Then: shadow all variables with unwrapped values
+	prevLocals := make(map[string]*ir.InstAlloca, len(opts))
+	for _, info := range opts {
+		innerVal := c.block.NewExtractValue(info.optVal, 1)
+		innerAlloca := c.block.NewAlloca(innerVal.Type())
+		c.block.NewStore(innerVal, innerAlloca)
+		prevLocals[info.v.VarName] = c.locals[info.v.VarName]
+		c.locals[info.v.VarName] = innerAlloca
+	}
 
 	c.genBlock(s.Body)
 	if c.block.Term == nil {
 		c.block.NewBr(mergeBlock)
 	}
 
-	// Restore original binding
-	c.locals[narrow.VarName] = prev
+	// Restore all
+	for name, prev := range prevLocals {
+		c.locals[name] = prev
+	}
 
-	// Else (optional)
 	if s.Else != nil {
 		c.block = elseBlock
 		c.genStmt(s.Else)

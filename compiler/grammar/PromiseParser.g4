@@ -261,7 +261,7 @@ useVarDecl
     ;
 
 varDecl
-    : typeRef refMod? bindingName ASSIGN expression SEMI       # typedVarDecl
+    : typeRef refMod? bindingName (ASSIGN expression)? SEMI    # typedVarDecl
     | bindingName WALRUS expression SEMI                       # inferredVarDecl
     | LPAREN bindingName COMMA bindingName RPAREN WALRUS expression SEMI   # destructureVarDecl
     ;

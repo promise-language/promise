@@ -7288,3 +7288,58 @@ func TestOptionalNarrowingWithElseCodegen(t *testing.T) {
 	assertContains(t, ir, "narrow.else")
 	assertContains(t, ir, "narrow.end")
 }
+
+func TestUninitOptionalVarCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int? x;
+			string s = "{x}";
+		}
+	`)
+	assertContains(t, ir, "zeroinitializer")
+	assertContains(t, ir, "interp.none")
+}
+
+func TestNegatedNarrowingCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string? cc = "hello";
+			if !cc {
+				string s = "none";
+			} else {
+				string s = cc;
+			}
+		}
+	`)
+	assertContains(t, ir, "narrow.then")
+	assertContains(t, ir, "narrow.else")
+}
+
+func TestCompoundNarrowingCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int? a = 1;
+			string? b = "hi";
+			if a && b {
+				int x = a;
+				string y = b;
+			}
+		}
+	`)
+	assertContains(t, ir, "narrow.check")
+	assertContains(t, ir, "narrow.then")
+}
+
+func TestOptionalChainUserType(t *testing.T) {
+	ir := generateIR(t, `
+		type Cfg {
+			int port;
+		}
+		main() {
+			Cfg? c = Cfg(port: 8080);
+			int? p = c?.port;
+		}
+	`)
+	assertContains(t, ir, "optchain.some")
+	assertContains(t, ir, "optchain.none")
+}

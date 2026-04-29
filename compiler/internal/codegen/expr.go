@@ -3248,7 +3248,9 @@ func (c *Compiler) genFieldOnValue(val value.Value, typ types.Type, fieldName st
 			panic(fmt.Sprintf("codegen: field %s not in instance layout for %s", field.Name(), typ))
 		}
 
-		typedPtr := c.block.NewBitCast(val, layout.InstancePtrType)
+		// val is a value struct {vtable_ptr, instance_ptr} — extract the instance pointer
+		instance := c.extractInstancePtr(val)
+		typedPtr := c.block.NewBitCast(instance, layout.InstancePtrType)
 		fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
 
@@ -3262,6 +3264,7 @@ func (c *Compiler) genFieldOnValue(val value.Value, typ types.Type, fieldName st
 		if !ok {
 			panic(fmt.Sprintf("codegen: undeclared getter %s", mangledName))
 		}
+		// val is a value struct — pass it directly (getters expect the value struct as receiver)
 		return c.block.NewCall(fn, val)
 	}
 

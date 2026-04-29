@@ -234,17 +234,130 @@ shadowing_after_narrowing() `test {
     assert(s == "42", "x still usable as int? after narrowing block");
 }
 
-// TODO: Unassigned optional locals (`int? x;` without `= expr`) — grammar requires
-// `= expression` for varDecl. Add grammar rule for `typeRef? IDENT SEMI` defaulting to none.
+// --- Uninitialized optional vars ---
 
-// TODO: Compound narrowing with `&&` (`if a && b { }` where both are T?) — `&&` currently
-// requires bool operands. Would need sema to recognize optional && optional as dual narrowing.
+uninit_optional_int() `test {
+    int? x;
+    assert("{x}" == "none", "uninitialized int? is none");
+}
 
-// TODO: Optional chaining (?.) on user-defined types has a pre-existing codegen bug.
-// Once fixed, add tests for: item?.name, noCfg?.host, etc.
+uninit_optional_string() `test {
+    string? s;
+    assert("{s}" == "none", "uninitialized string? is none");
+}
 
-// TODO: Negative narrowing — in the else of `if cc { }` or inside `if x is absent { }`,
-// usage of the optional as type T should be a compile-time error (language-design.md §14.1).
+uninit_optional_then_assign() `test {
+    int? x;
+    x = 42;
+    if x {
+        int n = x;
+        assert(n == 42, "assigned after init narrows correctly");
+    }
+}
 
-// TODO: `if !cc` form — the design doc shows `if !cc { ... }` as checking for none,
-// with cc known to be none inside the block. Not yet implemented.
+// --- Negated narrowing (!cc) ---
+
+negated_narrowing_none() `test {
+    string? cc = none;
+    if !cc {
+        assert(true, "!cc enters then when cc is none");
+    } else {
+        assert(false, "should not enter else");
+    }
+}
+
+negated_narrowing_present() `test {
+    string? cc = "hello";
+    if !cc {
+        assert(false, "should not enter then when cc is present");
+    } else {
+        string s = cc;
+        assert(s == "hello", "!cc narrows in else branch");
+    }
+}
+
+negated_narrowing_no_else() `test {
+    int? x = none;
+    bool entered = false;
+    if !x {
+        entered = true;
+    }
+    assert(entered, "!x enters then when x is none");
+}
+
+// --- Compound narrowing (&&) ---
+
+compound_narrowing_both_present() `test {
+    int? a = 10;
+    string? b = "world";
+    if a && b {
+        int x = a;
+        string y = b;
+        assert(x == 10, "compound narrows a");
+        assert(y == "world", "compound narrows b");
+    } else {
+        assert(false, "should enter then when both present");
+    }
+}
+
+compound_narrowing_first_absent() `test {
+    int? a = none;
+    string? b = "hello";
+    if a && b {
+        assert(false, "should not enter then when a is none");
+    }
+}
+
+compound_narrowing_second_absent() `test {
+    int? a = 42;
+    string? b = none;
+    if a && b {
+        assert(false, "should not enter then when b is none");
+    }
+}
+
+compound_narrowing_both_absent() `test {
+    int? a = none;
+    string? b = none;
+    if a && b {
+        assert(false, "should not enter then when both none");
+    }
+}
+
+compound_narrowing_with_else() `test {
+    int? a = none;
+    string? b = "hi";
+    bool entered_else = false;
+    if a && b {
+        assert(false, "should not enter then");
+    } else {
+        entered_else = true;
+    }
+    assert(entered_else, "else entered when compound fails");
+}
+
+// --- Optional chaining on user-defined types ---
+
+optional_chain_present() `test {
+    Point p = Point(x: 7, y: 8);
+    Point? mp = p;
+    int? px = mp?.x;
+    int? py = mp?.y;
+    if px is present {
+        assert(px == 7, "optional chain extracts field x");
+    } else {
+        assert(false, "px should be present");
+    }
+    if py is present {
+        assert(py == 8, "optional chain extracts field y");
+    } else {
+        assert(false, "py should be present");
+    }
+}
+
+optional_chain_none() `test {
+    Point? mp = none;
+    int? px = mp?.x;
+    assert("{px}" == "none", "optional chain on none gives none");
+}
+

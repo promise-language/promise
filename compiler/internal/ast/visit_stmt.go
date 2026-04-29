@@ -75,7 +75,9 @@ func (b *Builder) VisitTypedVarDecl(ctx *parser.TypedVarDeclContext) interface{}
 		nodeBase: b.baseFromContext(ctx),
 		Type:     b.visitTypeRef(ctx.TypeRef()),
 		Name:     b.bindingText(ctx.BindingName()),
-		Value:    b.visitExpr(ctx.Expression()),
+	}
+	if ctx.Expression() != nil {
+		node.Value = b.visitExpr(ctx.Expression())
 	}
 	if rm := ctx.RefMod(); rm != nil {
 		node.RefMod = b.visitRefMod(rm)

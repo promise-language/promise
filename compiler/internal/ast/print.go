@@ -110,7 +110,11 @@ func (p *printer) printStmt(s Stmt) {
 	case *Block:
 		p.printBlock(n)
 	case *TypedVarDecl:
-		p.line("TypedVar %s %s = ...", p.typeRefStr(n.Type), n.Name)
+		if n.Value == nil {
+			p.line("TypedVar %s %s", p.typeRefStr(n.Type), n.Name)
+		} else {
+			p.line("TypedVar %s %s = ...", p.typeRefStr(n.Type), n.Name)
+		}
 	case *InferredVarDecl:
 		p.line("InferredVar %s := ...", n.Name)
 	case *DestructureVarDecl:

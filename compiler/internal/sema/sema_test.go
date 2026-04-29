@@ -496,11 +496,11 @@ func TestForwardReference(t *testing.T) {
 func TestResolveBasicTypes(t *testing.T) {
 	info := checkOK(t, `
 		foo() {
-			int a := 1;
-			f64 b := 1.0;
-			bool c := true;
-			string d := "hello";
-			char e := 'x';
+			int a = 1;
+			f64 b = 1.0;
+			bool c = true;
+			string d = "hello";
+			char e = 'x';
 		}
 	`)
 	_ = info
@@ -705,7 +705,7 @@ func TestFieldAccess(t *testing.T) {
 	checkOK(t, `
 		type Dog { string name; int age; }
 		test() {
-			Dog d := Dog(name: "Rex", age: 3);
+			Dog d = Dog(name: "Rex", age: 3);
 			x := d.name;
 		}
 	`)
@@ -718,7 +718,7 @@ func TestMethodAccess(t *testing.T) {
 			bark() string { return "woof"; }
 		}
 		test() {
-			Dog d := Dog(name: "Rex");
+			Dog d = Dog(name: "Rex");
 			x := d.bark();
 		}
 	`)
@@ -729,7 +729,7 @@ func TestInheritedFieldAccess(t *testing.T) {
 		type Animal { string name; }
 		type Dog is Animal { int age; }
 		test() {
-			Dog d := Dog(name: "Rex", age: 3);
+			Dog d = Dog(name: "Rex", age: 3);
 			x := d.name;
 		}
 	`)
@@ -739,7 +739,7 @@ func TestUndefinedField(t *testing.T) {
 	errs := checkErrs(t, `
 		type Dog { string name; }
 		test() {
-			Dog d := Dog(name: "Rex");
+			Dog d = Dog(name: "Rex");
 			x := d.weight;
 		}
 	`)
@@ -979,7 +979,7 @@ func TestSafeCast(t *testing.T) {
 		type Animal { string name; }
 		type Dog is Animal { }
 		test() {
-			Animal a := Dog(name: "Rex");
+			Animal a = Dog(name: "Rex");
 			Dog? d = a as Dog;
 		}
 	`)
@@ -990,7 +990,7 @@ func TestForceCast(t *testing.T) {
 		type Animal { string name; }
 		type Dog is Animal { }
 		test() {
-			Animal a := Dog(name: "Rex");
+			Animal a = Dog(name: "Rex");
 			Dog d = a as! Dog;
 		}
 	`)
@@ -1892,7 +1892,7 @@ func TestIsTypeName(t *testing.T) {
 		type Animal { string name; }
 		type Dog is Animal { }
 		test() {
-			Animal a := Dog(name: "Rex");
+			Animal a = Dog(name: "Rex");
 			bool b = a is Dog;
 		}
 	`)
@@ -2748,7 +2748,7 @@ func TestMatchPatternBindingTypeBinding(t *testing.T) {
 		type Animal { string name; }
 		type Dog is Animal { int age; }
 		test() {
-			Animal a := Dog(name: "Rex", age: 3);
+			Animal a = Dog(name: "Rex", age: 3);
 			x := match a {
 				Dog d => d.age,
 				_ => 0,
@@ -3364,7 +3364,7 @@ func TestGenericFuncCall(t *testing.T) {
 	info := checkOK(t, `
 		identity[T](T x) T { return x; }
 		main() {
-			int r := identity[int](42);
+			int r = identity[int](42);
 		}
 	`)
 	if len(info.FuncInstances) != 1 {
@@ -3385,11 +3385,11 @@ func TestGenericFuncCall(t *testing.T) {
 func TestGenericFuncBodyTypeCheck(t *testing.T) {
 	checkOK(t, `
 		identity[T](T x) T {
-			T y := x;
+			T y = x;
 			return y;
 		}
 		main() {
-			int r := identity[int](42);
+			int r = identity[int](42);
 		}
 	`)
 }
@@ -3398,7 +3398,7 @@ func TestGenericFuncCallWrongType(t *testing.T) {
 	errs := checkErrs(t, `
 		identity[T](T x) T { return x; }
 		main() {
-			int r := identity[int]("hello");
+			int r = identity[int]("hello");
 		}
 	`)
 	expectError(t, errs, "cannot assign string to parameter")
@@ -3408,8 +3408,8 @@ func TestGenericFuncMultipleInstances(t *testing.T) {
 	info := checkOK(t, `
 		identity[T](T x) T { return x; }
 		main() {
-			int a := identity[int](42);
-			string b := identity[string]("hi");
+			int a = identity[int](42);
+			string b = identity[string]("hi");
 		}
 	`)
 	if len(info.FuncInstances) != 2 {
@@ -3421,7 +3421,7 @@ func TestGenericFuncStringResult(t *testing.T) {
 	info := checkOK(t, `
 		identity[T](T x) T { return x; }
 		main() {
-			string s := identity[string]("hello");
+			string s = identity[string]("hello");
 		}
 	`)
 	if len(info.FuncInstances) != 1 {
@@ -5210,4 +5210,94 @@ func TestOptionalNarrowingNonIdent(t *testing.T) {
 		}
 	`)
 	expectError(t, errs, "if condition must be bool")
+}
+
+// --- Uninitialized optional var decls ---
+
+func TestUninitOptionalVar(t *testing.T) {
+	checkOK(t, `
+		test() {
+			int? x;
+			string? s;
+		}
+	`)
+}
+
+func TestUninitNonOptionalError(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			int x;
+		}
+	`)
+	expectError(t, errs, "uninitialized variable x requires optional type")
+}
+
+// --- Negated narrowing (!cc) ---
+
+func TestNegatedNarrowing(t *testing.T) {
+	checkOK(t, `
+		test() {
+			string? cc = "hello";
+			if !cc {
+				// cc is none here — no narrowing
+			} else {
+				string s = cc;
+			}
+		}
+	`)
+}
+
+func TestNegatedNarrowingNoElse(t *testing.T) {
+	checkOK(t, `
+		test() {
+			int? x = 42;
+			if !x {
+				// x is none
+			}
+		}
+	`)
+}
+
+// --- Compound narrowing (&&) ---
+
+func TestCompoundNarrowing(t *testing.T) {
+	checkOK(t, `
+		test() {
+			int? a = 1;
+			string? b = "hi";
+			if a && b {
+				int x = a;
+				string y = b;
+			}
+		}
+	`)
+}
+
+func TestCompoundNarrowingWithIsPresent(t *testing.T) {
+	checkOK(t, `
+		test() {
+			bool? a = true;
+			int? b = 42;
+			if a is present && b {
+				bool x = a;
+				int y = b;
+			}
+		}
+	`)
+}
+
+func TestCompoundNarrowingElseBranchNotNarrowed(t *testing.T) {
+	// In the else branch, vars stay as T? — not narrowed
+	checkOK(t, `
+		test() {
+			int? a = 1;
+			string? b = "hi";
+			if a && b {
+				int x = a;
+			} else {
+				string sa = "{a}";
+				string sb = "{b}";
+			}
+		}
+	`)
 }

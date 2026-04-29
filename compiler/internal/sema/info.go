@@ -63,10 +63,16 @@ type Info struct {
 	OptionalNarrowings map[*ast.IfStmt]*OptionalNarrowing
 }
 
-// OptionalNarrowing records that an if-statement narrows an optional variable.
-type OptionalNarrowing struct {
+// NarrowedVar records a single variable narrowing (T? → T).
+type NarrowedVar struct {
 	VarName   string     // the variable being narrowed
 	InnerType types.Type // the unwrapped type (T from T?)
+}
+
+// OptionalNarrowing records that an if-statement narrows one or more optional variables.
+type OptionalNarrowing struct {
+	Vars    []NarrowedVar // one or more narrowed variables
+	Negated bool          // if true, narrowing applies to else branch (!cc form)
 }
 
 // recordType stores the resolved type for an expression.

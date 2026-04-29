@@ -2341,7 +2341,7 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 			c.block = armBlock
 			if np, ok := p.(*ast.NameMatchPattern); ok && np.Name != "_" {
 				lt := subject.Type()
-				alloca := c.block.NewAlloca(lt)
+				alloca := c.createEntryAlloca(lt)
 				alloca.SetName(c.uniqueLocalName(np.Name))
 				c.block.NewStore(subject, alloca)
 				c.locals[np.Name] = alloca
@@ -2386,7 +2386,7 @@ func (c *Compiler) bindMatchPattern(pat ast.MatchPattern, subject value.Value, e
 	case *ast.NameMatchPattern:
 		if p.Name != "_" {
 			lt := subject.Type()
-			alloca := c.block.NewAlloca(lt)
+			alloca := c.createEntryAlloca(lt)
 			c.block.NewStore(subject, alloca)
 			c.locals[p.Name] = alloca
 		}
@@ -2415,7 +2415,7 @@ func (c *Compiler) bindEnumDestructure(bindings []string, variantName string, su
 	// EnumInternalType is guaranteed to be a struct here because we returned early
 	// above when variant has no fields (which is the only case where it would be i32).
 	internalType := layout.EnumInternalType.(*irtypes.StructType)
-	alloca := c.block.NewAlloca(internalType)
+	alloca := c.createEntryAlloca(internalType)
 	c.block.NewStore(subject, alloca)
 
 	dataPtr := c.block.NewGetElementPtr(internalType, alloca,
@@ -2435,7 +2435,7 @@ func (c *Compiler) bindEnumDestructure(bindings []string, variantName string, su
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
 		val := c.block.NewLoad(fieldType, fieldPtr)
 
-		bindAlloca := c.block.NewAlloca(fieldType)
+		bindAlloca := c.createEntryAlloca(fieldType)
 		c.block.NewStore(val, bindAlloca)
 		c.locals[binding] = bindAlloca
 	}
@@ -3074,6 +3074,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	// Save current state
 	savedFn := c.fn
 	savedBlock := c.block
+	savedEntryBlock := c.entryBlock
 	savedLocals := c.locals
 	savedCanError := c.canError
 	savedRetType := c.currentRetType
@@ -3095,6 +3096,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 
 	entry := fn.NewBlock("entry")
 	c.block = entry
+	c.entryBlock = entry
 
 	// Load captured variables from env struct into local allocas
 	if len(captures) > 0 && envStructType != nil {
@@ -3155,6 +3157,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	// Restore state
 	c.fn = savedFn
 	c.block = savedBlock
+	c.entryBlock = savedEntryBlock
 	c.locals = savedLocals
 	c.canError = savedCanError
 	c.currentRetType = savedRetType
@@ -3981,6 +3984,7 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	// Save and switch context
 	savedFn := c.fn
 	savedBlock := c.block
+	savedEntryBlock := c.entryBlock
 	savedLocals := c.locals
 	savedCanError := c.canError
 	savedRetType := c.currentRetType
@@ -4061,6 +4065,7 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 
 	// --- Body: compile user block ---
 	c.block = bodyBlk
+	c.entryBlock = startBlk // allocas go in startBlk (after coro.begin) to be part of coroutine frame
 	c.genBlock(block)
 
 	// Final suspend: yield back to scheduler so it can see coro.done()=true
@@ -4093,6 +4098,7 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	// Restore context
 	c.fn = savedFn
 	c.block = savedBlock
+	c.entryBlock = savedEntryBlock
 	c.locals = savedLocals
 	c.canError = savedCanError
 	c.currentRetType = savedRetType

@@ -32,6 +32,7 @@ type Compiler struct {
 	info           *sema.Info
 	fn             *ir.Func                         // current function being generated
 	block          *ir.Block                        // current basic block
+	entryBlock     *ir.Block                        // entry block of current function (for allocas)
 	locals         map[string]*ir.InstAlloca        // local variable allocas
 	localNameCount map[string]int                   // per-function alloca name counter for dedup
 	funcs          map[string]*ir.Func              // declared Promise functions by name
@@ -2170,6 +2171,7 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 
 	entry := fn.NewBlock("entry")
 	c.block = entry
+	c.entryBlock = entry
 
 	// Allocate parameters and store incoming values
 	obj := c.lookupFunc(fd.Name)
@@ -2284,6 +2286,14 @@ func (c *Compiler) wrapError(errVal value.Value, resultType *irtypes.StructType)
 func (c *Compiler) newBlock(name string) *ir.Block {
 	c.blockCounter++
 	return c.fn.NewBlock(fmt.Sprintf("%s.%d", name, c.blockCounter))
+}
+
+// createEntryAlloca creates an alloca in the function's entry block.
+// This ensures the alloca dominates all uses, which is required by LLVM's
+// verifier across all versions. The entry block dominates every block in
+// the function, so allocas placed here are always valid.
+func (c *Compiler) createEntryAlloca(elemType irtypes.Type) *ir.InstAlloca {
+	return c.entryBlock.NewAlloca(elemType)
 }
 
 // computeUserTypeLayouts computes layouts for all user-declared types in the file.
@@ -2464,6 +2474,7 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 
 	entry := fn.NewBlock("entry")
 	c.block = entry
+	c.entryBlock = entry
 
 	paramIdx := 0
 
@@ -2699,6 +2710,7 @@ func (c *Compiler) resolveMethodOwner(named *types.Named, methodName string) str
 type compilerState struct {
 	fn             *ir.Func
 	block          *ir.Block
+	entryBlock     *ir.Block
 	locals         map[string]*ir.InstAlloca
 	dropFlags      map[string]*ir.InstAlloca
 	blockCounter   int
@@ -2715,6 +2727,7 @@ func (c *Compiler) saveState() compilerState {
 	return compilerState{
 		fn:             c.fn,
 		block:          c.block,
+		entryBlock:     c.entryBlock,
 		locals:         c.locals,
 		dropFlags:      c.dropFlags,
 		blockCounter:   c.blockCounter,
@@ -2731,6 +2744,7 @@ func (c *Compiler) saveState() compilerState {
 func (c *Compiler) restoreState(s compilerState) {
 	c.fn = s.fn
 	c.block = s.block
+	c.entryBlock = s.entryBlock
 	c.locals = s.locals
 	c.dropFlags = s.dropFlags
 	c.blockCounter = s.blockCounter

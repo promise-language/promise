@@ -1,7 +1,7 @@
 // Multi-consumer: 1 producer sends 25 values, 5 consumers read and forward.
 // Tests concurrent reads from a shared channel.
 
-main() {
+main() `test(expected: "25") {
   ch := channel[int](capacity: 25);
   result := channel[int](capacity: 25);
 

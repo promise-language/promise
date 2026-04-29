@@ -2,7 +2,7 @@
 // 3 goroutines iterate over channel; close wakes them all.
 // Uses for-loop pattern to satisfy ownership checker for shared channel captures.
 
-main() {
+main() `test(expected: "4") {
   ch := channel[int](capacity: 1);
   done := channel[int](capacity: 4);
 

@@ -287,6 +287,11 @@ func runTestFile(filename string, timeout time.Duration) {
 	// Frontend compilation (parse + merge std + sema + ownership)
 	file, info := compileFrontend(filename)
 
+	if info.HasExpectOutput {
+		runE2ETest(file, info, filename, timeout)
+		return
+	}
+
 	if len(info.Tests) == 0 {
 		fmt.Println("no tests found")
 		return
@@ -326,6 +331,64 @@ func runTestFile(filename string, timeout time.Duration) {
 		fmt.Fprintf(os.Stderr, "error running tests: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// runE2ETest compiles and runs a .pr file with `test(expected="..."), comparing output.
+func runE2ETest(file *ast.File, info *sema.Info, filename string, timeout time.Duration) {
+	name := strings.TrimSuffix(filepath.Base(filename), ".pr")
+
+	// Codegen with normal main (no GenerateTestMain)
+	result := codegen.Compile(file, info)
+
+	tmpOutput, err := os.CreateTemp("", "promise-e2e-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
+		os.Exit(1)
+	}
+	tmpOutput.Close()
+	defer os.Remove(tmpOutput.Name())
+
+	compileAndLink(result, tmpOutput.Name())
+
+	// Execute with timeout, capturing combined stdout+stderr
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, tmpOutput.Name())
+	output, err := cmd.CombinedOutput()
+
+	if ctx.Err() == context.DeadlineExceeded {
+		fmt.Printf("FAIL %s (timeout after %s)\n", name, timeout)
+		fmt.Printf("\n0 passed, 1 failed\n")
+		os.Exit(1)
+	}
+
+	// Compare output — non-zero exit code is NOT a failure (handles panic tests)
+	actual := strings.TrimRight(string(output), "\n")
+	expected := strings.TrimRight(info.ExpectOutput, "\n")
+
+	if actual == expected {
+		fmt.Printf("PASS %s\n", name)
+		fmt.Printf("\n1 passed, 0 failed\n")
+	} else {
+		fmt.Printf("FAIL %s\n", name)
+		fmt.Printf("  expected: %s\n", firstLines(expected, 3))
+		fmt.Printf("  actual:   %s\n", firstLines(actual, 3))
+		if err != nil {
+			fmt.Printf("  exit:     %v\n", err)
+		}
+		fmt.Printf("\n0 passed, 1 failed\n")
+		os.Exit(1)
+	}
+}
+
+// firstLines returns the first n lines of s, joined by " | ".
+func firstLines(s string, n int) string {
+	lines := strings.SplitN(s, "\n", n+1)
+	if len(lines) > n {
+		lines = lines[:n]
+		lines = append(lines, "...")
+	}
+	return strings.Join(lines, " | ")
 }
 
 // runTestDir discovers .pr files in a directory and runs tests from each.

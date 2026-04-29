@@ -1,4 +1,4 @@
-main() {
+main() `test(expected: "300") {
   int a = 100;
   int b = 200;
   ch := channel[int](capacity: 1);

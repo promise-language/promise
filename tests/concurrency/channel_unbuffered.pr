@@ -1,4 +1,4 @@
-main() {
+main() `test(expected: "99") {
   ch := channel[int]();
   go {
     ch.send(99);

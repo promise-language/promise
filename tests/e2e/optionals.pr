@@ -5,7 +5,26 @@ type Config {
     string host;
 }
 
-main() {
+main() `test(expected: """Alice
+none
+42
+hi
+true
+3.14
+hello
+noVal is none
+100
+true
+missing is absent
+Bob
+localhost
+8080
+99
+first
+b is none
+8080
+localhost
+noCfg is none""") {
     // --- Implicit T to T? conversion ---
     string name = "Alice";
     string? maybeName = name;

@@ -24,7 +24,17 @@ type Cat is Animal {
   }
 }
 
-main() {
+main() `test(expected: """3
+4
+7
+Rex
+woof
+Whiskers
+meow
+Buddy
+woof
+Luna
+meow""") {
   // Constructor + field access
   p := Point(x: 3, y: 4);
   print_int(p.x);

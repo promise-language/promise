@@ -4,7 +4,7 @@
 // Stage 3: double
 // Result: sum of (i+10)*2 for i=0..4 = 120
 
-main() {
+main() `test(expected: "120") {
   ch1 := channel[int](capacity: 5);
   ch2 := channel[int](capacity: 5);
   ch3 := channel[int](capacity: 5);

@@ -1,7 +1,7 @@
 // Multi-producer: 5 producer goroutines, each sends 4 values.
 // Tests concurrent writes to a shared channel.
 
-main() {
+main() `test(expected: "20") {
   ch := channel[int](capacity: 20);
   for p in 0..5 {
     go {

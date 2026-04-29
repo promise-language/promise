@@ -486,23 +486,35 @@ func (c *Checker) defineFunc(d *ast.FuncDecl) {
 	fn.SetDoc(extractDoc(d.Annotations))
 	fn.SetDeprecated(extractDeprecated(d.Annotations))
 	if c.hasAnnotation(d.Annotations, "test") {
-		// Validate test function constraints: must be zero-arity, non-failable, non-generic
-		if sig != nil {
-			if len(sig.Params()) > 0 {
-				c.errorf(d.Pos(), "test function '%s' must have no parameters", d.Name)
+		if expected, ok := extractTestExpected(d.Annotations); ok {
+			// `test(expected="...") — e2e output test on main()
+			if d.Name != "main" {
+				c.errorf(d.Pos(), "`test(expected=...) can only be applied to main()")
 			}
-			if sig.Result() != nil && !types.Identical(sig.Result(), types.TypVoid) {
-				c.errorf(d.Pos(), "test function '%s' must not have a return type", d.Name)
+			if c.info.HasExpectOutput {
+				c.errorf(d.Pos(), "duplicate `test(expected=...) annotation")
 			}
-			if sig.CanError() {
-				c.errorf(d.Pos(), "test function '%s' must not be failable", d.Name)
+			c.info.ExpectOutput = expected
+			c.info.HasExpectOutput = true
+		} else {
+			// `test — unit test function
+			if sig != nil {
+				if len(sig.Params()) > 0 {
+					c.errorf(d.Pos(), "test function '%s' must have no parameters", d.Name)
+				}
+				if sig.Result() != nil && !types.Identical(sig.Result(), types.TypVoid) {
+					c.errorf(d.Pos(), "test function '%s' must not have a return type", d.Name)
+				}
+				if sig.CanError() {
+					c.errorf(d.Pos(), "test function '%s' must not be failable", d.Name)
+				}
+				if len(sig.TypeParams()) > 0 {
+					c.errorf(d.Pos(), "test function '%s' must not be generic", d.Name)
+				}
 			}
-			if len(sig.TypeParams()) > 0 {
-				c.errorf(d.Pos(), "test function '%s' must not be generic", d.Name)
-			}
+			fn.SetTest(true)
+			c.info.Tests = append(c.info.Tests, fn)
 		}
-		fn.SetTest(true)
-		c.info.Tests = append(c.info.Tests, fn)
 	}
 }
 

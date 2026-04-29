@@ -1,4 +1,4 @@
-main() {
+main() `test(expected: "panic: send on closed channel") {
   ch := channel[int](capacity: 1);
   ch.close();
   ch.send(42);

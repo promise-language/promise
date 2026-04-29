@@ -1,7 +1,7 @@
 // Many void goroutines: 50 go blocks, each sends 1 to channel.
 // Tests high-volume void goroutine creation.
 
-main() {
+main() `test(expected: "50") {
   ch := channel[int](capacity: 50);
   for idx in 0..50 {
     go { ch.send(1); };

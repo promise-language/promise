@@ -1,4 +1,15 @@
-main() {
+main() `test(expected: """true
+false
+true
+true
+false
+6
+false
+hi
+3
+a
+b
+c""") {
   string s = "hello world";
 
   // contains

@@ -15,13 +15,13 @@ echo "Vetting..."
 go vet $(go list ./... | grep -v /internal/parser)
 
 echo "Building..."
-go build ./cmd/promise 2>&1
+go build -o promise ./cmd/promise 2>&1
 
 echo "Running all tests..."
 go test ./... || exit 1
 
-echo "Running e2e tests..."
-bash ../bin/e2e.sh || exit 1
+echo "Running promise tests..."
+./promise test -timeout 60 ../tests/... || exit 1
 
 echo ""
 echo "✅ OK to Commit"

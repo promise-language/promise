@@ -1,7 +1,7 @@
 // Pipeline: 3-stage goroutine chain connected by channels.
 // Each stage adds 10 to the value.
 
-main() {
+main() `test(expected: "30") {
   ch1 := channel[int](capacity: 1);
   ch2 := channel[int](capacity: 1);
   ch3 := channel[int](capacity: 1);

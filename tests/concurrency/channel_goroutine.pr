@@ -1,4 +1,6 @@
-main() {
+main() `test(expected: """10
+20
+30""") {
   ch := channel[int](capacity: 3);
   go {
     ch.send(10);

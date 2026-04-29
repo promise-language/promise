@@ -2,7 +2,7 @@ doWork() {
   // Fire-and-forget work (void function)
 }
 
-main() {
+main() `test(expected: "done") {
   t := go doWork();
   <-t;
   println("done");

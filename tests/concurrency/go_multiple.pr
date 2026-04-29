@@ -2,7 +2,11 @@ square(int x) int {
   return x * x;
 }
 
-main() {
+main() `test(expected: """4
+9
+16
+25
+54""") {
   // Fan-out: spawn multiple tasks
   t1 := go square(2);
   t2 := go square(3);

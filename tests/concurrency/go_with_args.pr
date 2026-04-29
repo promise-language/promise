@@ -6,7 +6,8 @@ add(int a, int b) int {
   return a + b;
 }
 
-main() {
+main() `test(expected: """42
+42""") {
   t1 := go double(21);
   t2 := go add(10, 32);
   r1 := <-t1;

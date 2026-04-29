@@ -1,4 +1,4 @@
-main() {
+main() `test(expected: "42") {
   ch := channel[int](capacity: 5);
   ch.send(42);
   result := <-ch;

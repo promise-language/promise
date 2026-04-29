@@ -4,7 +4,12 @@ min(int a, int b) int { return 999; }
 // User-defined println shadows std println
 println(string s) { std.print_int(0); }
 
-main() {
+main() `test(expected: """999
+3
+0
+via std
+2.72
+true""") {
   print_int(min(3, 7));
   print_int(std.min(3, 7));
 

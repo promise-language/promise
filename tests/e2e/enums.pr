@@ -13,7 +13,11 @@ color_name(Color c) string {
   };
 }
 
-main() {
+main() `test(expected: """red
+green
+blue
+circle
+rect""") {
   // Fieldless enum + match
   println(color_name(Color.Red));
   println(color_name(Color.Green));

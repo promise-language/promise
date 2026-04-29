@@ -2,7 +2,7 @@
 // send to results. Tests concurrent channel consumers.
 // sum of i*2 for i=0..9 = 90
 
-main() {
+main() `test(expected: "90") {
   jobs := channel[int](capacity: 10);
   results := channel[int](capacity: 10);
 

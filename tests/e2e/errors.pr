@@ -12,7 +12,8 @@ compute() int! {
   return x + y;
 }
 
-main() {
+main() `test(expected: """6
+10""") {
   // Successful bang unwrap
   print_int(safe_div(42, 7)!);
 

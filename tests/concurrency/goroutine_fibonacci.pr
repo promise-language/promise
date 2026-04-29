@@ -1,7 +1,7 @@
 // Fibonacci: goroutine generates Fibonacci numbers via channel.
 // Tests sequential goroutine-channel communication.
 
-main() {
+main() `test(expected: "34") {
   ch := channel[int](capacity: 10);
   go {
     int a = 0;

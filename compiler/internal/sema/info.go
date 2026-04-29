@@ -42,6 +42,10 @@ type Info struct {
 	// Tests records functions annotated with `test.
 	Tests []*types.Func
 
+	// ExpectOutput is the expected stdout from `test(expected="...") on main.
+	ExpectOutput    string
+	HasExpectOutput bool
+
 	// FieldDefaults maps fields with default values to their AST default expressions.
 	// Used by codegen to evaluate defaults for omitted constructor arguments.
 	FieldDefaults map[*types.Field]ast.Expr

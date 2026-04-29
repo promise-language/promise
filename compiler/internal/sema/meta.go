@@ -1,6 +1,8 @@
 package sema
 
 import (
+	"strings"
+
 	"djabi.dev/go/promise_lang/internal/ast"
 	"djabi.dev/go/promise_lang/internal/types"
 )
@@ -135,6 +137,80 @@ func stringLitValue(expr ast.Expr) string {
 		}
 	}
 	return s
+}
+
+// evalStringLit extracts a string value from a StringLit expression, resolving escape sequences.
+// For triple-quoted and raw strings, extracts content from the Raw field (Parts is empty).
+func evalStringLit(expr ast.Expr) string {
+	sl, ok := expr.(*ast.StringLit)
+	if !ok {
+		return ""
+	}
+	switch sl.Kind {
+	case ast.StringTriple:
+		if len(sl.Raw) >= 6 {
+			return sl.Raw[3 : len(sl.Raw)-3]
+		}
+		return ""
+	case ast.StringRaw:
+		if len(sl.Raw) >= 3 {
+			return sl.Raw[2 : len(sl.Raw)-1]
+		}
+		return ""
+	}
+	var buf strings.Builder
+	for _, p := range sl.Parts {
+		switch p := p.(type) {
+		case ast.StringText:
+			buf.WriteString(p.Text)
+		case ast.StringEscape:
+			buf.WriteString(resolveEscape(p.Sequence))
+		}
+	}
+	return buf.String()
+}
+
+// resolveEscape converts an escape sequence token to its string value.
+func resolveEscape(seq string) string {
+	if len(seq) > 1 && seq[0] == '\\' {
+		seq = seq[1:]
+	}
+	switch seq {
+	case "n":
+		return "\n"
+	case "t":
+		return "\t"
+	case "r":
+		return "\r"
+	case "b":
+		return "\b"
+	case "\\":
+		return "\\"
+	case "\"":
+		return "\""
+	case "0":
+		return "\x00"
+	case "{":
+		return "{"
+	default:
+		return "\\" + seq
+	}
+}
+
+// extractTestExpected extracts the expected output from a `test(expected="...") annotation.
+// Returns the evaluated string and true if the annotation has an expected parameter.
+func extractTestExpected(annotations []*ast.MetaAnnotation) (string, bool) {
+	for _, ann := range annotations {
+		if ann.Name != "test" {
+			continue
+		}
+		for _, p := range ann.Params {
+			if p.Name == "expected" {
+				return evalStringLit(p.Value), true
+			}
+		}
+	}
+	return "", false
 }
 
 // checkDeprecatedObj emits a warning if the resolved object refers to a deprecated entity.

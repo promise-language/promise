@@ -3,7 +3,7 @@
 
 add_one(int x) int { return x + 1; }
 
-main() {
+main() `test(expected: "210") {
   int sum = 0;
   for idx in 0..20 {
     t := go add_one(idx);

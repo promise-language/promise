@@ -1,4 +1,8 @@
-main() {
+main() `test(expected: """false
+true
+false
+true
+false""") {
   // --- String is_empty (getter) ---
   s := "hello";
   print_bool(s.is_empty);       // false

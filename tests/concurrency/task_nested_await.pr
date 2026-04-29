@@ -3,7 +3,7 @@
 
 compute() int { return 7; }
 
-main() {
+main() `test(expected: "42") {
   ch := channel[int](capacity: 1);
   go {
     t := go compute();

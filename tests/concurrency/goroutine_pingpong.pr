@@ -1,7 +1,7 @@
 // Ping-pong: two goroutines alternate sending values via two channels.
 // Tests bidirectional channel communication.
 
-main() {
+main() `test(expected: "4") {
   ping := channel[int](capacity: 1);
   pong := channel[int](capacity: 1);
   int n = 5;

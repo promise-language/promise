@@ -32,11 +32,11 @@ func Check(file *ast.File) (*Info, []error) {
 	c := &Checker{
 		file: file,
 		info: &Info{
-			Types:          make(map[ast.Expr]types.Type),
-			Objects:        make(map[*ast.IdentExpr]types.Object),
-			Scopes:         make(map[ast.Node]*types.Scope),
-			FieldDefaults:  make(map[*types.Field]ast.Expr),
-			ParamDefaults:  make(map[*types.Param]ast.Expr),
+			Types:              make(map[ast.Expr]types.Type),
+			Objects:            make(map[*ast.IdentExpr]types.Object),
+			Scopes:             make(map[ast.Node]*types.Scope),
+			FieldDefaults:      make(map[*types.Field]ast.Expr),
+			ParamDefaults:      make(map[*types.Param]ast.Expr),
 			LambdaCaptures:     make(map[*ast.LambdaExpr][]*CapturedVar),
 			OptionalNarrowings: make(map[*ast.IfStmt]*OptionalNarrowing),
 		},

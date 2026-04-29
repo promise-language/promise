@@ -1,4 +1,16 @@
-main() {
+main() `test(expected: """42
+-7
+3.14
+true
+false
+hello world
+30
+foobar
+x < y
+10
+45
+5
+7""") {
   // Integers
   print_int(42);
   print_int(-7);

@@ -2,7 +2,7 @@
 // to a shared buffered channel. Main collects results.
 // Tests that nested goroutine scheduling works correctly.
 
-main() {
+main() `test(expected: "62") {
   ch := channel[int](capacity: 2);
 
   // Outer goroutine spawns two inner goroutines

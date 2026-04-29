@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/antlr4-go/antlr/v4"
 
@@ -41,6 +43,12 @@ Commands:
 Options (build):
   -o <output>   Output file name (default: input file without extension)
 
+Options (test):
+  -timeout <duration>   Per-test timeout (default: 60s)
+
+Options (exec):
+  -timeout <duration>   Execution timeout (default: 60s)
+
 Test discovery:
   promise test file.pr          Run tests in a single file
   promise test dir/             Scan directory for test files
@@ -48,6 +56,7 @@ Test discovery:
 
 Inline execution:
   promise exec 'println("hello")'
+  promise exec -timeout 30s 'println("hello")'
   echo 'println("hello")' | promise exec
   echo 'println("hello")' | promise
 `)
@@ -222,12 +231,28 @@ func runRun(args []string) {
 // runTest discovers and runs `test annotated functions.
 // Accepts a single file, a directory (non-recursive), or dir/... (recursive).
 func runTest(args []string) {
-	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: promise test <file.pr | dir | dir/...>")
+	timeout := 60 * time.Second
+	var remaining []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-timeout" && i+1 < len(args) {
+			d, err := parseTimeoutArg(args[i+1])
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			timeout = d
+			i++
+		} else {
+			remaining = append(remaining, args[i])
+		}
+	}
+
+	if len(remaining) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: promise test [-timeout duration] <file.pr | dir | dir/...>")
 		os.Exit(1)
 	}
 
-	target := args[0]
+	target := remaining[0]
 
 	// Check for recursive "..." pattern
 	recursive := false
@@ -248,14 +273,14 @@ func runTest(args []string) {
 	}
 
 	if info.IsDir() {
-		runTestDir(target, recursive)
+		runTestDir(target, recursive, timeout)
 	} else {
-		runTestFile(target)
+		runTestFile(target, timeout)
 	}
 }
 
 // runTestFile runs test functions from a single .pr file.
-func runTestFile(filename string) {
+func runTestFile(filename string, timeout time.Duration) {
 	// Frontend compilation (parse + merge std + sema + ownership)
 	file, info := compileFrontend(filename)
 
@@ -281,11 +306,17 @@ func runTestFile(filename string) {
 
 	compileAndLink(result, tmpOutput.Name())
 
-	// Execute test binary
-	cmd := exec.Command(tmpOutput.Name())
+	// Execute test binary with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, tmpOutput.Name())
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			fmt.Fprintf(os.Stderr, "\nTIMEOUT: tests exceeded %s timeout\n", timeout)
+			os.Exit(1)
+		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			os.Exit(exitErr.ExitCode())
 		}
@@ -295,7 +326,7 @@ func runTestFile(filename string) {
 }
 
 // runTestDir discovers .pr files in a directory and runs tests from each.
-func runTestDir(dir string, recursive bool) {
+func runTestDir(dir string, recursive bool, timeout time.Duration) {
 	files := discoverTestFiles(dir, recursive)
 	if len(files) == 0 {
 		fmt.Println("no test files found")
@@ -316,13 +347,16 @@ func runTestDir(dir string, recursive bool) {
 	failedFiles := 0
 
 	for _, f := range files {
-		// Run "promise test <file>" as subprocess
-		cmd := exec.Command(selfExe, "test", f)
+		// Run "promise test <file>" as subprocess with timeout
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		cmd := exec.CommandContext(ctx, selfExe, "test", "-timeout", fmt.Sprintf("%gs", timeout.Seconds()), f)
 		output, err := cmd.CombinedOutput()
+		timedOut := ctx.Err() == context.DeadlineExceeded
+		cancel()
 		outStr := strings.TrimSpace(string(output))
 
 		// Skip files with no tests
-		if outStr == "no tests found" {
+		if !timedOut && outStr == "no tests found" {
 			continue
 		}
 
@@ -334,6 +368,13 @@ func runTestDir(dir string, recursive bool) {
 			relPath = f
 		}
 		fmt.Printf("--- %s ---\n", relPath)
+
+		if timedOut {
+			fmt.Printf("TIMEOUT: exceeded %s timeout\n\n", timeout)
+			failedFiles++
+			totalFailed++
+			continue
+		}
 
 		if err != nil {
 			// Compilation or runtime error
@@ -431,6 +472,19 @@ func lastLine(s string) string {
 func atoi(s string) int {
 	n, _ := strconv.Atoi(s)
 	return n
+}
+
+// parseTimeoutArg parses a timeout string as a Go duration ("60s", "2m") or plain seconds ("60").
+func parseTimeoutArg(s string) (time.Duration, error) {
+	d, err := time.ParseDuration(s)
+	if err == nil {
+		return d, nil
+	}
+	secs, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid timeout: %s (use duration like '60s' or seconds like '60')", s)
+	}
+	return time.Duration(secs) * time.Second, nil
 }
 
 // compileAndLink writes the IR to a temp file and links it into the output binary.
@@ -676,10 +730,26 @@ func (l *errorListener) SyntaxError(
 
 // runExec executes inline Promise code from CLI arguments or stdin.
 func runExec(args []string) {
+	timeout := 60 * time.Second
+	var remaining []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-timeout" && i+1 < len(args) {
+			d, err := parseTimeoutArg(args[i+1])
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			timeout = d
+			i++
+		} else {
+			remaining = append(remaining, args[i])
+		}
+	}
+
 	var source string
 
-	if len(args) > 0 {
-		source = strings.Join(args, " ")
+	if len(remaining) > 0 {
+		source = strings.Join(remaining, " ")
 	} else {
 		// Read from stdin
 		info, err := os.Stdin.Stat()
@@ -750,11 +820,17 @@ func runExec(args []string) {
 
 	compileAndLink(result, tmpOutput.Name())
 
-	// Execute
-	cmd := exec.Command(tmpOutput.Name())
+	// Execute with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, tmpOutput.Name())
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			fmt.Fprintf(os.Stderr, "\nTIMEOUT: execution exceeded %s timeout\n", timeout)
+			os.Exit(1)
+		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			os.Exit(exitErr.ExitCode())
 		}

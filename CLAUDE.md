@@ -31,6 +31,12 @@ go tool cover -func=/tmp/cov.out
 
 # End-to-end tests (from repo root)
 bin/e2e.sh
+PROMISE_E2E_TIMEOUT=120 bin/e2e.sh  # custom timeout (default: 60s)
+
+# Promise test with timeout
+promise test file.pr                       # default 60s timeout
+promise test -timeout 30s file.pr          # custom timeout (Go duration or seconds)
+promise exec -timeout 10s 'println("hi")'  # exec with timeout
 ```
 
 ## Compiler Pipeline

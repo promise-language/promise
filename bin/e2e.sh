@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TEST_DIR="$ROOT_DIR/tests/e2e"
 WORKDIR=$(mktemp -d)
+TIMEOUT="${PROMISE_E2E_TIMEOUT:-60}"
 trap 'rm -rf "$WORKDIR"' EXIT
 
 # Build the compiler
@@ -38,8 +39,16 @@ for prfile in "$TEST_DIR"/*.pr; do
     continue
   fi
 
-  # Run and capture output
-  actual=$("$WORKDIR/$name" 2>&1) || true
+  # Run and capture output with timeout
+  run_exit=0
+  actual=$(timeout "$TIMEOUT" "$WORKDIR/$name" 2>&1) || run_exit=$?
+  if [ "$run_exit" -eq 124 ]; then
+    echo "FAIL $name (timeout after ${TIMEOUT}s)"
+    FAIL=$((FAIL + 1))
+    continue
+  fi
+  # Strip timeout diagnostic messages (e.g. "the monitored command dumped core")
+  actual=$(echo "$actual" | sed '/^timeout: /d')
   expected_text=$(cat "$expected")
 
   if [ "$actual" = "$expected_text" ]; then
@@ -75,7 +84,15 @@ if [ -d "$CONC_DIR" ]; then
       continue
     fi
 
-    actual=$("$WORKDIR/$name" 2>&1) || true
+    run_exit=0
+    actual=$(timeout "$TIMEOUT" "$WORKDIR/$name" 2>&1) || run_exit=$?
+    if [ "$run_exit" -eq 124 ]; then
+      echo "FAIL $name (timeout after ${TIMEOUT}s)"
+      FAIL=$((FAIL + 1))
+      continue
+    fi
+    # Strip timeout diagnostic messages (e.g. "the monitored command dumped core")
+    actual=$(echo "$actual" | sed '/^timeout: /d')
     expected_text=$(cat "$expected")
 
     if [ "$actual" = "$expected_text" ]; then
@@ -92,7 +109,7 @@ fi
 
 # --- promise test: all-pass ---
 test_name="test_assert (promise test)"
-actual=$("$WORKDIR/promise" test "$TEST_DIR/test_assert.pr" 2>&1) || true
+actual=$(timeout "$TIMEOUT" "$WORKDIR/promise" test -timeout "$TIMEOUT" "$TEST_DIR/test_assert.pr" 2>&1) || true
 expected_text="PASS test_addition
 PASS test_math
 PASS test_strings
@@ -113,7 +130,7 @@ fi
 # the process via pal_exit. The first test passes, then the second panics.
 test_name="test_fail (promise test)"
 exit_code=0
-actual=$("$WORKDIR/promise" test "$TEST_DIR/test_fail.pr" 2>&1) || exit_code=$?
+actual=$(timeout "$TIMEOUT" "$WORKDIR/promise" test -timeout "$TIMEOUT" "$TEST_DIR/test_fail.pr" 2>&1) || exit_code=$?
 expected_text="PASS test_pass
 panic: deliberate failure"
 if [ "$actual" = "$expected_text" ] && [ "$exit_code" -ne 0 ]; then
@@ -131,7 +148,7 @@ fi
 
 # --- promise test: no tests found ---
 test_name="no_tests_found (promise test)"
-actual=$("$WORKDIR/promise" test "$TEST_DIR/std_basics.pr" 2>&1) || true
+actual=$(timeout "$TIMEOUT" "$WORKDIR/promise" test -timeout "$TIMEOUT" "$TEST_DIR/std_basics.pr" 2>&1) || true
 if echo "$actual" | grep -q "no tests found"; then
   echo "PASS $test_name"
   PASS=$((PASS + 1))
@@ -145,7 +162,7 @@ fi
 # --- promise test: directory scanning (std tests) ---
 test_name="std_tests (promise test dir)"
 exit_code=0
-actual=$("$WORKDIR/promise" test "$ROOT_DIR/tests/std/" 2>&1) || exit_code=$?
+actual=$(timeout "$TIMEOUT" "$WORKDIR/promise" test -timeout "$TIMEOUT" "$ROOT_DIR/tests/std/" 2>&1) || exit_code=$?
 if [ "$exit_code" -eq 0 ] && echo "$actual" | grep -q "passed, 0 failed"; then
   echo "PASS $test_name"
   PASS=$((PASS + 1))

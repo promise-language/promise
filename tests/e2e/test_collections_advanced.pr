@@ -1,0 +1,218 @@
+// Advanced collection tests: vectors, maps, nested operations, edge cases.
+
+// --- vector: push many ---
+
+test_vector_push_many() `test {
+    int[] v = [];
+    for i in 0..100 {
+        v.push(i);
+    }
+    assert(v.len == 100, "100 elements after push");
+    assert(v[0] == 0, "first element");
+    assert(v[99] == 99, "last element");
+}
+
+// --- vector: pop until empty ---
+
+test_vector_pop_all() `test {
+    int[] v = [1, 2, 3, 4, 5];
+    int sum = 0;
+    while v.len > 0 {
+        if val := v.pop() {
+            sum += val;
+        }
+    }
+    assert(sum == 15, "popped sum = 15");
+    assert(v.len == 0, "vector empty after popping all");
+}
+
+// --- vector: contains after modifications ---
+
+test_vector_contains_dynamic() `test {
+    int[] v = [10, 20, 30];
+    assert(v.contains(20), "contains 20");
+    v.remove(1);
+    assert(!v.contains(20), "20 removed");
+    assert(v.contains(10), "still has 10");
+    assert(v.contains(30), "still has 30");
+}
+
+// --- vector: remove from front ---
+
+test_vector_remove_front() `test {
+    string[] v = ["a", "b", "c", "d"];
+    v.remove(0);
+    assert(v.len == 3, "3 after remove front");
+    assert(v[0] == "b", "b is new front");
+}
+
+// --- vector: remove from back ---
+
+test_vector_remove_back() `test {
+    string[] v = ["a", "b", "c", "d"];
+    v.remove(3);
+    assert(v.len == 3, "3 after remove back");
+    assert(v[2] == "c", "c is last");
+}
+
+// --- vector: index assignment ---
+
+test_vector_index_assign() `test {
+    int[] v = [1, 2, 3];
+    v[0] = 10;
+    v[1] = 20;
+    v[2] = 30;
+    assert(v[0] == 10, "index 0 updated");
+    assert(v[1] == 20, "index 1 updated");
+    assert(v[2] == 30, "index 2 updated");
+}
+
+// --- vector of strings ---
+
+test_vector_strings() `test {
+    string[] words = [];
+    words.push("hello");
+    words.push("world");
+    words.push("foo");
+    assert(words.len == 3, "3 words");
+    assert(words.contains("world"), "contains world");
+    assert(!words.contains("bar"), "no bar");
+}
+
+// --- vector: for-in iteration ---
+
+test_vector_iteration() `test {
+    int[] nums = [10, 20, 30, 40, 50];
+    int sum = 0;
+    for n in nums {
+        sum += n;
+    }
+    assert(sum == 150, "sum = 150");
+}
+
+// --- vector: for-in with index ---
+
+test_vector_index_iteration() `test {
+    string[] items = ["a", "b", "c"];
+    string result = "";
+    for i, item in items {
+        result = result + "{i}:{item} ";
+    }
+    assert(result == "0:a 1:b 2:c ", "indexed iteration");
+}
+
+// --- map: basic operations ---
+
+test_map_basic() `test {
+    map[string, int] m = {"one": 1, "two": 2, "three": 3};
+    assert(m.len == 3, "map has 3 entries");
+    assert(m.contains("one"), "contains one");
+    assert(m.contains("two"), "contains two");
+    assert(!m.contains("four"), "no four");
+}
+
+// --- map: insert and update ---
+
+test_map_insert_update() `test {
+    map[string, int] m = {:};
+    m["a"] = 1;
+    m["b"] = 2;
+    assert(m.len == 2, "2 entries");
+    m["a"] = 10;
+    assert(m.len == 2, "still 2 entries after update");
+    if v := m["a"] { assert(v == 10, "updated value"); }
+}
+
+// --- map: remove ---
+
+test_map_remove_all() `test {
+    map[string, int] m = {"x": 1, "y": 2, "z": 3};
+    bool r1 = m.remove("x");
+    bool r2 = m.remove("y");
+    bool r3 = m.remove("z");
+    assert(m.len == 0, "empty after removing all");
+}
+
+// --- map: keys and values ---
+
+test_map_keys_values() `test {
+    map[string, int] m = {"a": 10};
+    string[] keys = m.keys();
+    int[] vals = m.values();
+    assert(keys.len == 1, "1 key");
+    assert(vals.len == 1, "1 value");
+    assert(keys[0] == "a", "key is a");
+    assert(vals[0] == 10, "value is 10");
+}
+
+// --- map: int keys ---
+
+test_map_int_keys() `test {
+    map[int, string] m = {1: "one", 2: "two", 3: "three"};
+    assert(m.len == 3, "3 entries");
+    if v := m[1] { assert(v == "one", "key 1 = one"); }
+    if v := m[2] { assert(v == "two", "key 2 = two"); }
+    assert(m.contains(3), "contains 3");
+}
+
+// --- map: large insertions ---
+
+test_map_large() `test {
+    map[int, int] m = {:};
+    for i in 0..50 {
+        m[i] = i * i;
+    }
+    assert(m.len == 50, "50 entries");
+    if v := m[0] { assert(v == 0, "0*0 = 0"); }
+    if v := m[7] { assert(v == 49, "7*7 = 49"); }
+    if v := m[49] { assert(v == 2401, "49*49 = 2401"); }
+}
+
+// --- map: iteration with for-in ---
+
+test_map_values_sum() `test {
+    map[string, int] m = {"a": 1, "b": 2, "c": 3};
+    int sum = 0;
+    int[] vals = m.values();
+    for v in vals {
+        sum += v;
+    }
+    assert(sum == 6, "sum of values = 6");
+}
+
+// --- empty collection edge cases ---
+
+test_empty_vector() `test {
+    int[] v = [];
+    assert(v.len == 0, "empty vector len = 0");
+    assert(v.is_empty, "empty vector is_empty");
+    assert(!v.contains(1), "empty does not contain 1");
+}
+
+test_empty_map() `test {
+    map[string, int] m = {:};
+    assert(m.len == 0, "empty map len = 0");
+    assert(m.is_empty, "empty map is_empty");
+    assert(!m.contains("x"), "empty does not contain x");
+}
+
+// --- vector: compound index assignment ---
+
+test_compound_index_assign() `test {
+    int[] v = [10, 20, 30];
+    v[0] += 5;
+    v[1] -= 5;
+    v[2] *= 2;
+    assert(v[0] == 15, "10 + 5 = 15");
+    assert(v[1] == 15, "20 - 5 = 15");
+    assert(v[2] == 60, "30 * 2 = 60");
+}
+
+// --- mixed types in map values ---
+
+test_map_bool_values() `test {
+    map[string, bool] flags = {"debug": true, "verbose": false, "trace": true};
+    assert(flags.contains("debug"), "has debug");
+    assert(flags.contains("verbose"), "has verbose");
+    assert(flags.len == 3, "3 flags");
+}

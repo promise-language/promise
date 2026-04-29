@@ -1,0 +1,16 @@
+// Stress test: fan-out of 200 task goroutines via go-call, all awaited.
+// Tests done_waiters linked list under heavy concurrent completion.
+
+compute(int x) int { return x * 2; }
+
+main() `test(expected: "39800") {
+  int n = 200;
+  int sum = 0;
+  for idx in 0..n {
+    t := go compute(idx);
+    int r = <-t;
+    sum = sum + r;
+  }
+  // Sum of 2*0 + 2*1 + ... + 2*199 = 2 * (199*200/2) = 39800
+  print_int(sum);
+}

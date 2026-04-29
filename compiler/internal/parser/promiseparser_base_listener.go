@@ -476,6 +476,24 @@ func (s *BasePromiseParserListener) EnterWhileExprStmt(ctx *WhileExprStmtContext
 // ExitWhileExprStmt is called when production whileExprStmt is exited.
 func (s *BasePromiseParserListener) ExitWhileExprStmt(ctx *WhileExprStmtContext) {}
 
+// EnterSelectStmt is called when production selectStmt is entered.
+func (s *BasePromiseParserListener) EnterSelectStmt(ctx *SelectStmtContext) {}
+
+// ExitSelectStmt is called when production selectStmt is exited.
+func (s *BasePromiseParserListener) ExitSelectStmt(ctx *SelectStmtContext) {}
+
+// EnterSelectCase is called when production selectCase is entered.
+func (s *BasePromiseParserListener) EnterSelectCase(ctx *SelectCaseContext) {}
+
+// ExitSelectCase is called when production selectCase is exited.
+func (s *BasePromiseParserListener) ExitSelectCase(ctx *SelectCaseContext) {}
+
+// EnterSelectDefault is called when production selectDefault is entered.
+func (s *BasePromiseParserListener) EnterSelectDefault(ctx *SelectDefaultContext) {}
+
+// ExitSelectDefault is called when production selectDefault is exited.
+func (s *BasePromiseParserListener) ExitSelectDefault(ctx *SelectDefaultContext) {}
+
 // EnterCastExpr is called when production castExpr is entered.
 func (s *BasePromiseParserListener) EnterCastExpr(ctx *CastExprContext) {}
 

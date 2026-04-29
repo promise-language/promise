@@ -1,0 +1,17 @@
+// Panic after channel operations: channel state should be consistent.
+
+main() `test(expected: """panic: boom after send
+42""") {
+    ch := channel[int](capacity: 2);
+
+    go {
+        ch.send(42);
+        assert(false, "boom after send");
+    };
+
+    // The value sent before the panic should still be receivable
+    r := <-ch;
+    if v := r {
+        print_int(v);
+    }
+}

@@ -1,0 +1,17 @@
+// Goroutine panic recovery: a panicking goroutine should not crash the process.
+// The main goroutine should continue running after a child goroutine panics.
+
+main() `test(expected: "panic: goroutine boom\nsurvived") {
+  ch := channel[int](capacity: 1);
+
+  go {
+    ch.send(1);
+    assert(false, "goroutine boom");
+  };
+
+  // Wait for the goroutine to send before it panics
+  r := <-ch;
+
+  // Main should still be running
+  println("survived");
+}

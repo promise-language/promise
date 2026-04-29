@@ -1,0 +1,162 @@
+// Function tests: recursion, multiple return values, various parameter types.
+
+// --- recursive fibonacci ---
+
+fib(int n) int {
+    if n <= 1 { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+
+test_fibonacci() `test {
+    assert(fib(0) == 0, "fib(0) = 0");
+    assert(fib(1) == 1, "fib(1) = 1");
+    assert(fib(2) == 1, "fib(2) = 1");
+    assert(fib(5) == 5, "fib(5) = 5");
+    assert(fib(10) == 55, "fib(10) = 55");
+}
+
+// --- recursive factorial ---
+
+fact(int n) int {
+    if n <= 1 { return 1; }
+    return n * fact(n - 1);
+}
+
+test_factorial() `test {
+    assert(fact(0) == 1, "fact(0) = 1");
+    assert(fact(1) == 1, "fact(1) = 1");
+    assert(fact(5) == 120, "fact(5) = 120");
+    assert(fact(10) == 3628800, "fact(10) = 3628800");
+}
+
+// --- function with default parameter ---
+
+greet(string name, string greeting = "Hello") string {
+    return greeting + " " + name;
+}
+
+test_default_params() `test {
+    assert(greet("Alice") == "Hello Alice", "default greeting");
+    assert(greet("Bob", greeting: "Hi") == "Hi Bob", "custom greeting");
+}
+
+// --- function returning bool ---
+
+is_palindrome(string s) bool {
+    int left = 0;
+    int right = s.len - 1;
+    while left < right {
+        if s[left] != s[right] { return false; }
+        left++;
+        right--;
+    }
+    return true;
+}
+
+test_palindrome() `test {
+    assert(is_palindrome("racecar"), "racecar is palindrome");
+    assert(is_palindrome("aba"), "aba is palindrome");
+    assert(is_palindrome("a"), "single char palindrome");
+    assert(is_palindrome(""), "empty is palindrome");
+    assert(!is_palindrome("hello"), "hello is not palindrome");
+    assert(!is_palindrome("ab"), "ab is not palindrome");
+}
+
+// --- function with array parameter ---
+
+sum_array(int[] nums) int {
+    int total = 0;
+    for n in nums {
+        total += n;
+    }
+    return total;
+}
+
+test_sum_array() `test {
+    int[] empty = [];
+    assert(sum_array(empty) == 0, "empty sum = 0");
+    assert(sum_array([42]) == 42, "single element");
+    assert(sum_array([1, 2, 3, 4, 5]) == 15, "1-5 sum = 15");
+}
+
+// --- function with multiple parameters ---
+
+clamp_val(int value, int lo, int hi) int {
+    if value < lo { return lo; }
+    if value > hi { return hi; }
+    return value;
+}
+
+test_clamp_val() `test {
+    assert(clamp_val(5, 0, 10) == 5, "within range");
+    assert(clamp_val(-5, 0, 10) == 0, "below range");
+    assert(clamp_val(15, 0, 10) == 10, "above range");
+    assert(clamp_val(0, 0, 10) == 0, "at lower bound");
+    assert(clamp_val(10, 0, 10) == 10, "at upper bound");
+}
+
+// --- function composition ---
+
+double_it(int n) int { return n * 2; }
+square_it(int n) int { return n * n; }
+add_one(int n) int { return n + 1; }
+
+test_composition() `test {
+    int x = 3;
+    assert(double_it(square_it(x)) == 18, "double(square(3)) = 18");
+    assert(square_it(double_it(x)) == 36, "square(double(3)) = 36");
+    assert(add_one(double_it(square_it(x))) == 19, "add_one(double(square(3))) = 19");
+}
+
+// --- early return ---
+
+find_first_negative(int[] nums) int {
+    for n in nums {
+        if n < 0 { return n; }
+    }
+    return 0;
+}
+
+test_early_return() `test {
+    assert(find_first_negative([1, -2, 3]) == -2, "first negative = -2");
+    assert(find_first_negative([1, 2, 3]) == 0, "no negative = 0");
+    assert(find_first_negative([-5]) == -5, "single negative");
+    int[] empty = [];
+    assert(find_first_negative(empty) == 0, "empty array");
+}
+
+// --- max of three using if/else ---
+
+max_of_three(int a, int b, int c) int {
+    int m = a;
+    if b > m { m = b; }
+    if c > m { m = c; }
+    return m;
+}
+
+test_max_of_three() `test {
+    assert(max_of_three(1, 2, 3) == 3, "max(1,2,3) = 3");
+    assert(max_of_three(3, 2, 1) == 3, "max(3,2,1) = 3");
+    assert(max_of_three(2, 3, 1) == 3, "max(2,3,1) = 3");
+    assert(max_of_three(5, 5, 5) == 5, "max(5,5,5) = 5");
+}
+
+// --- mutual recursion ---
+
+is_even_rec(int n) bool {
+    if n == 0 { return true; }
+    return is_odd_rec(n - 1);
+}
+
+is_odd_rec(int n) bool {
+    if n == 0 { return false; }
+    return is_even_rec(n - 1);
+}
+
+test_mutual_recursion() `test {
+    assert(is_even_rec(0), "0 is even");
+    assert(!is_even_rec(1), "1 is not even");
+    assert(is_even_rec(4), "4 is even");
+    assert(is_odd_rec(3), "3 is odd");
+    assert(!is_odd_rec(6), "6 is not odd");
+}

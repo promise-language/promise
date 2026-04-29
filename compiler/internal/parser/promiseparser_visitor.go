@@ -235,6 +235,15 @@ type PromiseParserVisitor interface {
 	// Visit a parse tree produced by PromiseParser#whileExprStmt.
 	VisitWhileExprStmt(ctx *WhileExprStmtContext) interface{}
 
+	// Visit a parse tree produced by PromiseParser#selectStmt.
+	VisitSelectStmt(ctx *SelectStmtContext) interface{}
+
+	// Visit a parse tree produced by PromiseParser#selectCase.
+	VisitSelectCase(ctx *SelectCaseContext) interface{}
+
+	// Visit a parse tree produced by PromiseParser#selectDefault.
+	VisitSelectDefault(ctx *SelectDefaultContext) interface{}
+
 	// Visit a parse tree produced by PromiseParser#castExpr.
 	VisitCastExpr(ctx *CastExprContext) interface{}
 

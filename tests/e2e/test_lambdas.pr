@@ -1,0 +1,123 @@
+// Lambda and closure tests: captures, higher-order functions, lambda as args.
+
+// --- basic lambda creation and call ---
+
+test_lambda_basic() `test {
+    f := |int x| -> x * 2;
+    assert(f(5) == 10, "lambda doubles 5 to 10");
+    assert(f(0) == 0, "lambda doubles 0 to 0");
+    assert(f(-3) == -6, "lambda doubles -3 to -6");
+}
+
+// --- lambda with block body ---
+
+test_lambda_block() `test {
+    f := |int x, int y| -> int {
+        int sum = x + y;
+        return sum * sum;
+    };
+    assert(f(2, 3) == 25, "(2+3)^2 = 25");
+    assert(f(0, 0) == 0, "(0+0)^2 = 0");
+}
+
+// --- lambda capturing one variable ---
+
+test_lambda_capture_one() `test {
+    int factor = 10;
+    f := |int x| -> x * factor;
+    assert(f(5) == 50, "capture factor: 5 * 10 = 50");
+    assert(f(3) == 30, "capture factor: 3 * 10 = 30");
+}
+
+// --- lambda capturing multiple variables ---
+
+test_lambda_capture_multi() `test {
+    int a = 3;
+    int b = 7;
+    f := |int x| -> a * x + b;
+    assert(f(2) == 13, "3*2+7 = 13");
+    assert(f(0) == 7, "3*0+7 = 7");
+    assert(f(10) == 37, "3*10+7 = 37");
+}
+
+// --- lambda returning bool ---
+
+test_lambda_predicate() `test {
+    is_even := |int n| -> n % 2 == 0;
+    assert(is_even(4) == true, "4 is even");
+    assert(is_even(7) == false, "7 is not even");
+    assert(is_even(0) == true, "0 is even");
+}
+
+// --- lambda returning string ---
+
+test_lambda_string() `test {
+    greet := |string name| -> "hello " + name;
+    assert(greet("world") == "hello world", "greeting works");
+    assert(greet("") == "hello ", "greet empty string");
+}
+
+// --- pass lambda to function ---
+
+apply_int(int x, (int) -> int fn) int {
+    return fn(x);
+}
+
+test_lambda_as_arg() `test {
+    int result = apply_int(5, |int x| -> x * x);
+    assert(result == 25, "5^2 = 25 via higher-order function");
+}
+
+// --- multiple lambda calls ---
+
+test_lambda_multi_call() `test {
+    counter := 0;
+    inc := |int n| -> n + 1;
+    counter = inc(counter);
+    counter = inc(counter);
+    counter = inc(counter);
+    assert(counter == 3, "inc called 3 times: 0→1→2→3");
+}
+
+// --- lambda with captured string ---
+
+test_lambda_capture_int_and_compute() `test {
+    int offset = 100;
+    calc := |int n| -> n + offset;
+    assert(calc(1) == 101, "1 + 100 = 101");
+    assert(calc(42) == 142, "42 + 100 = 142");
+}
+
+// --- lambda stored and reused ---
+
+test_lambda_stored() `test {
+    (int) -> int doubled = |int x| -> x * 2;
+    int a = doubled(10);
+    int b = doubled(20);
+    int c = doubled(a + b);
+    assert(a == 20, "doubled 10 = 20");
+    assert(b == 40, "doubled 20 = 40");
+    assert(c == 120, "doubled 60 = 120");
+}
+
+// --- lambda composition ---
+
+test_lambda_composition() `test {
+    add1 := |int x| -> x + 1;
+    mul2 := |int x| -> x * 2;
+
+    // manually compose: mul2(add1(x))
+    int result = mul2(add1(5));
+    assert(result == 12, "mul2(add1(5)) = (5+1)*2 = 12");
+}
+
+// --- lambda in loop ---
+
+test_lambda_in_loop() `test {
+    transform := |int x| -> x * x;
+    int sum = 0;
+    for i in 1..=5 {
+        sum += transform(i);
+    }
+    assert(sum == 55, "1+4+9+16+25 = 55");
+}

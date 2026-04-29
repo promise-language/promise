@@ -1,0 +1,20 @@
+// GOMAXPROCS query: passing 0 returns current without changing.
+
+main() `test(expected: "ok") {
+    // Query current setting (0 means don't change, just return)
+    int current = set_max_procs(0);
+    assert(current > 0, "current maxprocs > 0");
+
+    // Set to 2 and verify old value returned
+    int old = set_max_procs(2);
+    assert(old == current, "old matches previous current");
+
+    // Query again
+    int now = set_max_procs(0);
+    assert(now == 2, "now set to 2");
+
+    // Restore
+    set_max_procs(old);
+
+    println("ok");
+}

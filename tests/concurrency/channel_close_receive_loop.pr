@@ -1,0 +1,20 @@
+// Closing a channel while receivers are waiting: all should get none.
+
+main() `test(expected: "3") {
+    ch := channel[int](capacity: 5);
+    ch.send(10);
+    ch.send(20);
+    ch.send(30);
+    ch.close();
+
+    int count = 0;
+    // Receive until none
+    for i in 0..10 {
+        r := <-ch;
+        if v := r {
+            count++;
+        }
+    }
+    // Should get exactly 3 values, then nones
+    print_int(count);
+}

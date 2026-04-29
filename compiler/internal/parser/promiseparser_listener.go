@@ -235,6 +235,15 @@ type PromiseParserListener interface {
 	// EnterWhileExprStmt is called when entering the whileExprStmt production.
 	EnterWhileExprStmt(c *WhileExprStmtContext)
 
+	// EnterSelectStmt is called when entering the selectStmt production.
+	EnterSelectStmt(c *SelectStmtContext)
+
+	// EnterSelectCase is called when entering the selectCase production.
+	EnterSelectCase(c *SelectCaseContext)
+
+	// EnterSelectDefault is called when entering the selectDefault production.
+	EnterSelectDefault(c *SelectDefaultContext)
+
 	// EnterCastExpr is called when entering the castExpr production.
 	EnterCastExpr(c *CastExprContext)
 
@@ -669,6 +678,15 @@ type PromiseParserListener interface {
 
 	// ExitWhileExprStmt is called when exiting the whileExprStmt production.
 	ExitWhileExprStmt(c *WhileExprStmtContext)
+
+	// ExitSelectStmt is called when exiting the selectStmt production.
+	ExitSelectStmt(c *SelectStmtContext)
+
+	// ExitSelectCase is called when exiting the selectCase production.
+	ExitSelectCase(c *SelectCaseContext)
+
+	// ExitSelectDefault is called when exiting the selectDefault production.
+	ExitSelectDefault(c *SelectDefaultContext)
 
 	// ExitCastExpr is called when exiting the castExpr production.
 	ExitCastExpr(c *CastExprContext)

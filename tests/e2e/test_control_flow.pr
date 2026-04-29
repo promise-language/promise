@@ -1,0 +1,234 @@
+// Comprehensive control flow tests: break, continue, nested loops,
+// classic for, while, infinite loops, if/else chains.
+
+// --- break in while ---
+
+test_break_while() `test {
+    int i = 0;
+    while true {
+        if i == 5 { break; }
+        i++;
+    }
+    assert(i == 5, "break exits while at 5");
+}
+
+// --- break in for-in ---
+
+test_break_for_in() `test {
+    int sum = 0;
+    for n in 0..100 {
+        if n == 10 { break; }
+        sum += n;
+    }
+    assert(sum == 45, "break exits for-in at 10, sum 0..9 = 45");
+}
+
+// --- continue in for-in ---
+
+test_continue_for_in() `test {
+    int sum = 0;
+    for n in 0..10 {
+        if n % 2 == 0 { continue; }
+        sum += n;
+    }
+    assert(sum == 25, "continue skips evens, sum of odds 1+3+5+7+9 = 25");
+}
+
+// --- continue in while ---
+
+test_continue_while() `test {
+    int i = 0;
+    int sum = 0;
+    while i < 10 {
+        i++;
+        if i % 3 == 0 { continue; }
+        sum += i;
+    }
+    // sum = 1+2+4+5+7+8+10 = 37
+    assert(sum == 37, "continue skips multiples of 3");
+}
+
+// --- nested break (inner only) ---
+
+test_nested_break_inner() `test {
+    int count = 0;
+    for i in 0..5 {
+        for j in 0..10 {
+            if j == 3 { break; }
+            count++;
+        }
+    }
+    assert(count == 15, "inner break at j=3, 5 outer * 3 inner = 15");
+}
+
+// --- nested continue ---
+
+test_nested_continue() `test {
+    int count = 0;
+    for i in 0..5 {
+        for j in 0..5 {
+            if j == 2 { continue; }
+            count++;
+        }
+    }
+    assert(count == 20, "skip j=2 in each outer, 5*4 = 20");
+}
+
+// --- classic for loop ---
+
+test_classic_for() `test {
+    int sum = 0;
+    for i := 0; i < 10; i++ {
+        sum += i;
+    }
+    assert(sum == 45, "classic for 0..9 sum = 45");
+}
+
+// --- classic for with compound step ---
+
+test_classic_for_step() `test {
+    int count = 0;
+    for i := 0; i < 20; i += 3 {
+        count++;
+    }
+    // i = 0, 3, 6, 9, 12, 15, 18 => 7 iterations
+    assert(count == 7, "classic for step 3: 7 iterations");
+}
+
+// --- while with condition ---
+
+test_while_countdown() `test {
+    int n = 10;
+    while n > 0 {
+        n--;
+    }
+    assert(n == 0, "while counts down to 0");
+}
+
+// --- if-else chain ---
+
+test_if_else_chain() `test {
+    int x = 42;
+    string result = "";
+    if x < 0 {
+        result = "negative";
+    } else if x == 0 {
+        result = "zero";
+    } else if x < 10 {
+        result = "small";
+    } else if x < 100 {
+        result = "medium";
+    } else {
+        result = "large";
+    }
+    assert(result == "medium", "42 is medium");
+}
+
+// --- deeply nested if ---
+
+test_deep_nested_if() `test {
+    int a = 1;
+    int b = 2;
+    int c = 3;
+    string result = "";
+    if a > 0 {
+        if b > 0 {
+            if c > 0 {
+                result = "all positive";
+            } else {
+                result = "c not positive";
+            }
+        }
+    }
+    assert(result == "all positive", "all conditions true");
+}
+
+// --- for-in with index ---
+
+test_for_in_index() `test {
+    string[] items = ["a", "b", "c", "d"];
+    int last_idx = -1;
+    string last_val = "";
+    for i, item in items {
+        last_idx = i;
+        last_val = item;
+    }
+    assert(last_idx == 3, "last index is 3");
+    assert(last_val == "d", "last value is d");
+}
+
+// --- break after accumulation ---
+
+test_break_accumulate() `test {
+    int[] nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    int sum = 0;
+    for n in nums {
+        sum += n;
+        if sum > 15 { break; }
+    }
+    // 1+2+3+4+5+6 = 21 > 15, so break after adding 6
+    assert(sum == 21, "sum accumulates to 21 before break");
+}
+
+// --- while with multiple conditions ---
+
+test_while_multi_cond() `test {
+    int x = 0;
+    int y = 100;
+    while x < 50 && y > 50 {
+        x += 5;
+        y -= 5;
+    }
+    assert(x == 50, "x reaches 50");
+    assert(y == 50, "y reaches 50");
+}
+
+// --- classic for empty body ---
+
+test_classic_for_empty_iterations() `test {
+    int count = 0;
+    for i := 10; i < 5; i++ {
+        count++;
+    }
+    assert(count == 0, "no iterations when start >= end");
+}
+
+// --- break in classic for ---
+
+test_break_classic_for() `test {
+    int last = -1;
+    for i := 0; i < 100; i++ {
+        if i * i > 50 {
+            last = i;
+            break;
+        }
+    }
+    assert(last == 8, "8*8=64 > 50, break at i=8");
+}
+
+// --- inclusive range ---
+
+test_inclusive_range() `test {
+    int sum = 0;
+    for n in 1..=5 {
+        sum += n;
+    }
+    assert(sum == 15, "inclusive 1..=5: 1+2+3+4+5 = 15");
+}
+
+// --- nested for with break and continue ---
+
+test_nested_break_continue() `test {
+    int total = 0;
+    for i in 0..5 {
+        if i == 3 { continue; }
+        for j in 0..5 {
+            if j == 4 { break; }
+            total++;
+        }
+    }
+    // outer: 0,1,2,4 (skip 3) = 4 iterations
+    // inner: 0,1,2,3 (break at 4) = 4 iterations each
+    // total = 4 * 4 = 16
+    assert(total == 16, "nested break+continue: 16");
+}

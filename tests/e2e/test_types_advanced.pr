@@ -1,0 +1,218 @@
+// Advanced type system tests: multi-level inheritance, method override,
+// field access, constructors, type methods.
+
+// --- basic type with methods ---
+
+type Counter {
+    int value;
+
+    increment(~this) {
+        this.value++;
+    }
+
+    decrement(~this) {
+        this.value--;
+    }
+
+    get(&this) int {
+        return this.value;
+    }
+}
+
+test_counter() `test {
+    c := Counter(value: 0);
+    c.increment();
+    c.increment();
+    c.increment();
+    assert(c.get() == 3, "counter incremented to 3");
+    c.decrement();
+    assert(c.get() == 2, "counter decremented to 2");
+}
+
+// --- type with computed result ---
+
+type Rect {
+    int width;
+    int height;
+
+    area(&this) int {
+        return this.width * this.height;
+    }
+
+    perimeter(&this) int {
+        return 2 * (this.width + this.height);
+    }
+
+    is_square(&this) bool {
+        return this.width == this.height;
+    }
+}
+
+test_rect() `test {
+    r := Rect(width: 3, height: 4);
+    assert(r.area() == 12, "3x4 area = 12");
+    assert(r.perimeter() == 14, "3x4 perimeter = 14");
+    assert(r.is_square() == false, "3x4 is not square");
+
+    s := Rect(width: 5, height: 5);
+    assert(s.is_square() == true, "5x5 is square");
+}
+
+// --- inheritance: override abstract ---
+
+type Greeter {
+    string name;
+    greet(&this) string `abstract;
+}
+
+type FormalGreeter is Greeter {
+    greet(&this) string {
+        return "Good day, " + this.name;
+    }
+}
+
+type CasualGreeter is Greeter {
+    greet(&this) string {
+        return "Hey " + this.name + "!";
+    }
+}
+
+test_greeter_hierarchy() `test {
+    Greeter g1 = FormalGreeter(name: "Alice");
+    Greeter g2 = CasualGreeter(name: "Bob");
+    assert(g1.greet() == "Good day, Alice", "formal greeting");
+    assert(g2.greet() == "Hey Bob!", "casual greeting");
+}
+
+// --- type with string field ---
+
+type Person {
+    string first;
+    string last;
+
+    full_name(&this) string {
+        return this.first + " " + this.last;
+    }
+}
+
+test_person() `test {
+    p := Person(first: "John", last: "Doe");
+    assert(p.full_name() == "John Doe", "full name concatenation");
+    assert(p.first == "John", "first name access");
+    assert(p.last == "Doe", "last name access");
+}
+
+// --- type with multiple methods ---
+
+type Vec2 {
+    f64 x;
+    f64 y;
+
+    length_sq(&this) f64 {
+        return this.x * this.x + this.y * this.y;
+    }
+
+    dot(&this, f64 ox, f64 oy) f64 {
+        return this.x * ox + this.y * oy;
+    }
+}
+
+test_vec2() `test {
+    v := Vec2(x: 3.0, y: 4.0);
+    f64 lsq = v.length_sq();
+    // 3^2 + 4^2 = 25
+    assert(lsq > 24.9 && lsq < 25.1, "length_sq = 25");
+    f64 d = v.dot(1.0, 0.0);
+    assert(d > 2.9 && d < 3.1, "dot with (1,0) = 3");
+}
+
+// --- mutable methods ---
+
+type Stack {
+    int[] items;
+
+    push(~this, int val) {
+        this.items.push(val);
+    }
+
+    pop(~this) int? {
+        return this.items.pop();
+    }
+
+    size(&this) int {
+        return this.items.len;
+    }
+
+    is_empty(&this) bool {
+        return this.items.len == 0;
+    }
+}
+
+test_stack() `test {
+    int[] empty = [];
+    s := Stack(items: empty);
+    assert(s.is_empty(), "new stack is empty");
+    s.push(10);
+    s.push(20);
+    s.push(30);
+    assert(s.size() == 3, "stack has 3 items");
+    assert(!s.is_empty(), "stack not empty");
+
+    if v := s.pop() {
+        assert(v == 30, "pop returns 30 (LIFO)");
+    }
+    if v := s.pop() {
+        assert(v == 20, "pop returns 20");
+    }
+    assert(s.size() == 1, "stack has 1 item left");
+}
+
+// --- field mutation ---
+
+type MutablePoint {
+    int x;
+    int y;
+
+    move_by(~this, int dx, int dy) {
+        this.x += dx;
+        this.y += dy;
+    }
+
+    reset(~this) {
+        this.x = 0;
+        this.y = 0;
+    }
+}
+
+test_mutable_point() `test {
+    p := MutablePoint(x: 0, y: 0);
+    p.move_by(3, 4);
+    assert(p.x == 3, "moved x to 3");
+    assert(p.y == 4, "moved y to 4");
+    p.move_by(-1, 2);
+    assert(p.x == 2, "moved x to 2");
+    assert(p.y == 6, "moved y to 6");
+    p.reset();
+    assert(p.x == 0, "reset x to 0");
+    assert(p.y == 0, "reset y to 0");
+}
+
+// --- method returning self-type fields ---
+
+type Range2D {
+    int x_min;
+    int x_max;
+    int y_min;
+    int y_max;
+
+    width(&this) int { return this.x_max - this.x_min; }
+    height(&this) int { return this.y_max - this.y_min; }
+    area(&this) int { return this.width() * this.height(); }
+}
+
+test_range2d() `test {
+    r := Range2D(x_min: 1, x_max: 5, y_min: 2, y_max: 7);
+    assert(r.width() == 4, "width = 4");
+    assert(r.height() == 5, "height = 5");
+    assert(r.area() == 20, "area = 20");
+}

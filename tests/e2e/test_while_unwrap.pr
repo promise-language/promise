@@ -1,0 +1,55 @@
+// While-unwrap tests: loop while optional has value.
+
+// --- basic while-unwrap with pop ---
+
+test_while_pop() `test {
+    int[] items = [1, 2, 3, 4, 5];
+    int sum = 0;
+    while v := items.pop() {
+        sum += v;
+    }
+    // pops: 5, 4, 3, 2, 1
+    assert(sum == 15, "while-pop sum = 15");
+    assert(items.len == 0, "all items popped");
+}
+
+// --- while-unwrap terminates on none ---
+
+test_while_unwrap_none() `test {
+    int[] empty = [];
+    int count = 0;
+    while v := empty.pop() {
+        count++;
+    }
+    assert(count == 0, "no iterations on empty");
+}
+
+// --- while-unwrap processes partial data ---
+
+test_while_unwrap_partial() `test {
+    int[] nums = [10, 20, 30];
+    int first = 0;
+    // Pop once manually, then loop
+    if v := nums.pop() {
+        first = v;
+    }
+    assert(first == 30, "first pop = 30");
+
+    int sum = 0;
+    while v := nums.pop() {
+        sum += v;
+    }
+    assert(sum == 30, "remaining: 20 + 10 = 30");
+}
+
+// --- while-unwrap with string vector ---
+
+test_while_unwrap_strings() `test {
+    string[] words = ["hello", "world"];
+    string result = "";
+    while w := words.pop() {
+        if result.len > 0 { result = result + " "; }
+        result = result + w;
+    }
+    assert(result == "world hello", "reverse order via pop");
+}

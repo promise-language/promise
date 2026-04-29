@@ -1,0 +1,16 @@
+// Select receiving from a goroutine-produced channel.
+
+main() `test(expected: "42") {
+    ch := channel[int](capacity: 1);
+    dummy := channel[int](capacity: 1);
+
+    go { ch.send(42); };
+
+    // Select: ch will have data, dummy won't
+    select {
+        v := <-ch:
+            if val := v { print_int(val); }
+        v := <-dummy:
+            println("unexpected");
+    }
+}

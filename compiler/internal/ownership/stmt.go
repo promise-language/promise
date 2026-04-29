@@ -91,6 +91,9 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 	case *ast.IncDecStmt:
 		c.checkExpr(s.Target)
 
+	case *ast.SelectStmt:
+		c.checkSelectStmt(s)
+
 	case *ast.BreakStmt, *ast.ContinueStmt:
 		// no ownership effect
 	}
@@ -334,6 +337,69 @@ func (c *Checker) checkClassicForStmt(s *ast.ClassicForStmt) {
 	}
 	c.state = merge(savedState, c.state)
 	c.borrows = MergeBorrowSets(savedBorrows, c.borrows)
+}
+
+func (c *Checker) checkSelectStmt(s *ast.SelectStmt) {
+	// Each case channel expression is checked; at most one case executes.
+	savedState := c.state.clone()
+	savedBorrows := c.borrows.Clone()
+
+	var states []StateMap
+	var borrowSets []*BorrowSet
+
+	for _, sc := range s.Cases {
+		c.state = savedState.clone()
+		c.borrows = savedBorrows.Clone()
+		c.checkExpr(sc.Channel)
+		if sc.IsSend && sc.SendValue != nil {
+			c.checkExpr(sc.SendValue)
+			c.tryMove(sc.SendValue)
+		}
+		if !sc.IsSend && sc.Binding != "_" {
+			c.state[sc.Binding] = Owned
+		}
+		for _, stmt := range sc.Body {
+			c.checkStmt(stmt)
+			if c.borrows != nil {
+				c.borrows.ExpireCallScoped()
+			}
+		}
+		states = append(states, c.state)
+		borrowSets = append(borrowSets, c.borrows)
+	}
+
+	if s.Default != nil {
+		c.state = savedState.clone()
+		c.borrows = savedBorrows.Clone()
+		for _, stmt := range s.Default {
+			c.checkStmt(stmt)
+			if c.borrows != nil {
+				c.borrows.ExpireCallScoped()
+			}
+		}
+		states = append(states, c.state)
+		borrowSets = append(borrowSets, c.borrows)
+	}
+
+	// Merge all branches
+	if len(states) > 0 {
+		merged := states[0]
+		mergedBorrows := borrowSets[0]
+		for i := 1; i < len(states); i++ {
+			merged = merge(merged, states[i])
+			mergedBorrows = MergeBorrowSets(mergedBorrows, borrowSets[i])
+		}
+		// Also merge with pre-select state (select might not execute any case if no default)
+		if s.Default == nil {
+			merged = merge(savedState, merged)
+			mergedBorrows = MergeBorrowSets(savedBorrows, mergedBorrows)
+		}
+		c.state = merged
+		c.borrows = mergedBorrows
+	} else {
+		c.state = savedState
+		c.borrows = savedBorrows
+	}
 }
 
 func (c *Checker) checkInfiniteLoop(s *ast.InfiniteLoop) {

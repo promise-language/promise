@@ -1,0 +1,193 @@
+// Advanced enum tests: multi-variant matching, data enums with methods,
+// enum in collections, nested enum usage.
+
+enum Season { Spring, Summer, Autumn, Winter }
+
+enum Result {
+    Ok(int value),
+    Err(string message),
+}
+
+enum Token {
+    Number(int val),
+    Plus,
+    Minus,
+    Star,
+}
+
+// --- all variants of fieldless enum ---
+
+season_name(Season s) string {
+    return match s {
+        Season.Spring => "spring",
+        Season.Summer => "summer",
+        Season.Autumn => "autumn",
+        Season.Winter => "winter",
+    };
+}
+
+test_all_seasons() `test {
+    assert(season_name(Season.Spring) == "spring", "spring");
+    assert(season_name(Season.Summer) == "summer", "summer");
+    assert(season_name(Season.Autumn) == "autumn", "autumn");
+    assert(season_name(Season.Winter) == "winter", "winter");
+}
+
+// --- data enum: Ok and Err ---
+
+test_result_ok() `test {
+    Result r = Result.Ok(42);
+    int val = match r {
+        Result.Ok(v) => v,
+        Result.Err(msg) => -1,
+    };
+    assert(val == 42, "Ok(42) extracts 42");
+}
+
+test_result_err() `test {
+    Result r = Result.Err("oops");
+    int val = match r {
+        Result.Ok(v) => v,
+        Result.Err(msg) => -1,
+    };
+    assert(val == -1, "Err gives -1");
+}
+
+// --- enum in loop ---
+
+test_enum_loop() `test {
+    Season[] seasons = [Season.Spring, Season.Summer, Season.Autumn, Season.Winter];
+    int count = 0;
+    for s in seasons {
+        string name = season_name(s);
+        if name.len > 0 { count++; }
+    }
+    assert(count == 4, "all 4 seasons processed");
+}
+
+// --- multi-field data variant ---
+
+enum Event {
+    Click(int x, int y),
+    Key(string ch),
+    Resize(int w, int h),
+    Quit,
+}
+
+test_event_click() `test {
+    Event e = Event.Click(100, 200);
+    string desc = match e {
+        Event.Click(x, y) => "click at {x},{y}",
+        Event.Key(k) => "key",
+        Event.Resize(w, h) => "resize",
+        Event.Quit => "quit",
+    };
+    assert(desc == "click at 100,200", "click event with coords");
+}
+
+test_event_key() `test {
+    Event e = Event.Key("a");
+    string desc = match e {
+        Event.Click(x, y) => "click",
+        Event.Key(k) => "key:" + k,
+        Event.Resize(w, h) => "resize",
+        Event.Quit => "quit",
+    };
+    assert(desc == "key:a", "key event");
+}
+
+test_event_quit() `test {
+    Event e = Event.Quit;
+    string desc = match e {
+        Event.Click(x, y) => "click",
+        Event.Key(k) => "key",
+        Event.Resize(w, h) => "resize",
+        Event.Quit => "quit",
+    };
+    assert(desc == "quit", "quit event");
+}
+
+// --- token: mixed fieldless and data variants ---
+
+token_str(Token t) string {
+    return match t {
+        Token.Number(v) => "{v}",
+        Token.Plus => "+",
+        Token.Minus => "-",
+        Token.Star => "*",
+    };
+}
+
+test_token_sequence() `test {
+    Token[] tokens = [
+        Token.Number(3),
+        Token.Plus,
+        Token.Number(4),
+        Token.Star,
+        Token.Number(2),
+    ];
+    string result = "";
+    for t in tokens {
+        if result.len > 0 { result = result + " "; }
+        result = result + token_str(t);
+    }
+    assert(result == "3 + 4 * 2", "tokenized expression");
+}
+
+// --- enum in function return ---
+
+make_result(bool ok) Result {
+    if ok {
+        return Result.Ok(100);
+    }
+    return Result.Err("failed");
+}
+
+test_enum_from_function() `test {
+    Result r1 = make_result(true);
+    int v1 = match r1 {
+        Result.Ok(v) => v,
+        Result.Err(m) => -1,
+    };
+    assert(v1 == 100, "make_result(true) => Ok(100)");
+
+    Result r2 = make_result(false);
+    int v2 = match r2 {
+        Result.Ok(v) => v,
+        Result.Err(m) => -1,
+    };
+    assert(v2 == -1, "make_result(false) => Err");
+}
+
+// --- wildcard in data enum match ---
+
+test_wildcard_data_enum() `test {
+    Event e = Event.Resize(800, 600);
+    bool is_resize = match e {
+        Event.Resize(w, h) => true,
+        _ => false,
+    };
+    assert(is_resize, "wildcard catches non-resize");
+}
+
+// --- chain of matches ---
+
+test_chain_matches() `test {
+    Result[] items = [Result.Ok(1), Result.Err("x"), Result.Ok(2), Result.Ok(3)];
+    int sum = 0;
+    int errs = 0;
+    for item in items {
+        int v = match item {
+            Result.Ok(val) => val,
+            Result.Err(msg) => 0,
+        };
+        sum += v;
+        bool is_err = match item {
+            Result.Err(msg) => true,
+            _ => false,
+        };
+        if is_err { errs++; }
+    }
+    assert(sum == 6, "sum of Ok values = 6");
+    assert(errs == 1, "1 error in list");
+}

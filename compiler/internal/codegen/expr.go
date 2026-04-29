@@ -4263,8 +4263,30 @@ func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.
 		c.block.NewBr(readyBlk)
 	}
 
-	// ready: load result, free G
+	// ready: check if goroutine panicked, then load result, free G
 	c.block = readyBlk
+
+	// Check G.panicked — if the goroutine panicked, re-panic in current goroutine
+	panickedField := c.block.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicked)))
+	panickedVal := c.block.NewLoad(irtypes.I8, panickedField)
+	isPanicked := c.block.NewICmp(enum.IPredNE, panickedVal, constant.NewInt(irtypes.I8, 0))
+
+	rePanicBlk := c.newBlock("task.repanic")
+	loadResultBlk := c.newBlock("task.load_result")
+	c.block.NewCondBr(isPanicked, rePanicBlk, loadResultBlk)
+
+	// rePanicBlk: goroutine panicked — load panic_msg, free G, re-panic
+	c.block = rePanicBlk
+	panicMsgField := c.block.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicMsg)))
+	panicMsg := c.block.NewLoad(irtypes.I8Ptr, panicMsgField)
+	c.block.NewCall(c.palFree, gRaw)
+	c.block.NewCall(c.funcs["promise_panic"], panicMsg)
+	c.block.NewUnreachable()
+
+	// loadResultBlk: normal path — load result, free G
+	c.block = loadResultBlk
 	var resultVal value.Value
 	if !isVoid {
 		rpField := c.block.NewGetElementPtr(gTy, gPtr,

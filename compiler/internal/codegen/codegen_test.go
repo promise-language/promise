@@ -6741,17 +6741,15 @@ func TestMainWrappedAsG0(t *testing.T) {
 	ir := generateIR(t, `
 		main() { }
 	`)
-	// User main should be renamed to __promise_user_main
-	assertContains(t, ir, "define i32 @__promise_user_main()")
-	// New main initializes the scheduler
+	// Main is the OS entry point that initializes the scheduler
 	assertContains(t, ir, "define i32 @main()")
 	assertContains(t, ir, "call i32 @pal_num_cpus()")
 	assertContains(t, ir, "call void @promise_sched_init(")
 	assertContains(t, ir, "call void @promise_sched_run_until_main(")
 	assertContains(t, ir, "call void @promise_sched_shutdown()")
-	// Coroutine wrapper for user main
+	// Main body is compiled inline inside the coroutine (no __promise_user_main call)
 	assertContains(t, ir, "define i8* @.goroutine.main()")
-	assertContains(t, ir, "call i32 @__promise_user_main()")
+	assertNotContains(t, ir, "__promise_user_main")
 }
 
 func TestSchedulerGlobals(t *testing.T) {
@@ -6931,8 +6929,8 @@ func TestTaskReceiveInCoroutine(t *testing.T) {
 	// The go block coroutine uses coro.suspend instead
 }
 
-func TestTaskReceiveThreadBlocking(t *testing.T) {
-	// <-task in main (non-coroutine) uses the usleep polling loop
+func TestTaskReceiveCoroutineMode(t *testing.T) {
+	// <-task in main uses coroutine parking (main is compiled as goroutine)
 	ir := generateIR(t, `
 		compute() int { return 42; }
 		main() {
@@ -6940,11 +6938,10 @@ func TestTaskReceiveThreadBlocking(t *testing.T) {
 			result := <-t;
 		}
 	`)
-	// Thread-blocking mode: spin loop with usleep
-	assertContains(t, ir, "task.check")
-	assertContains(t, ir, "task.spin")
-	assertContains(t, ir, "task.threaddone")
-	assertContains(t, ir, "call i32 @usleep(")
+	// Coroutine mode: park on done_waiters with done_lock, coro.suspend
+	assertContains(t, ir, "task.park")
+	assertContains(t, ir, "task.resume")
+	assertContains(t, ir, "task.done_under_lock")
 }
 
 func TestVoidTaskSentinel(t *testing.T) {

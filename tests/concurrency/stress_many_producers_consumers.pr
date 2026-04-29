@@ -1,0 +1,36 @@
+// Stress test: many producers and many consumers on a small buffered channel.
+// 100 producers send 10 values each to a capacity-5 channel; 100 consumers
+// receive 10 values each. Forces frequent blocking on both send and receive.
+
+main() `test(expected: "1000") {
+  ch := channel[int](capacity: 5);
+
+  // Launch 100 producers
+  for p in 0..100 {
+    go {
+      for idx in 0..10 {
+        ch.send(1);
+      }
+    };
+  }
+
+  // Launch 100 consumers that report their sub-totals
+  result := channel[int](capacity: 100);
+  for c in 0..100 {
+    go {
+      int local = 0;
+      for idx in 0..10 {
+        r := <-ch;
+        if v := r { local = local + v; }
+      }
+      result.send(local);
+    };
+  }
+
+  int total = 0;
+  for j in 0..100 {
+    r := <-result;
+    if v := r { total = total + v; }
+  }
+  print_int(total);
+}

@@ -1,0 +1,36 @@
+// Parallel computation: multiple goroutines compute independently.
+
+main() `test(expected: "done") {
+    ch := channel[int](capacity: 4);
+
+    // 4 goroutines, each computes a sum
+    go {
+        int sum = 0;
+        for i in 0..100 { sum += 1; }
+        ch.send(sum);
+    };
+    go {
+        int sum = 0;
+        for i in 0..100 { sum += 2; }
+        ch.send(sum);
+    };
+    go {
+        int sum = 0;
+        for i in 0..100 { sum += 3; }
+        ch.send(sum);
+    };
+    go {
+        int sum = 0;
+        for i in 0..100 { sum += 4; }
+        ch.send(sum);
+    };
+
+    int total = 0;
+    for j in 0..4 {
+        r := <-ch;
+        if v := r { total += v; }
+    }
+    // 100+200+300+400 = 1000
+    assert(total == 1000, "parallel sum = 1000");
+    println("done");
+}

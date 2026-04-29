@@ -1,0 +1,25 @@
+// GOMAXPROCS: set_max_procs returns previous value and clamps to valid range.
+
+main() `test(expected: "ok") {
+  // Query current value (n=0 returns current without changing)
+  initial := set_max_procs(0);
+  assert(initial > 0, "initial should be > 0");
+
+  // Set to 1, should return the old value
+  old := set_max_procs(1);
+  assert(old == initial, "old should equal initial");
+
+  // Query again, should be 1
+  cur := set_max_procs(0);
+  assert(cur == 1, "should be 1");
+
+  // Restore original
+  prev := set_max_procs(initial);
+  assert(prev == 1, "prev should be 1");
+
+  // Verify restored
+  restored := set_max_procs(0);
+  assert(restored == initial, "should be restored");
+
+  println("ok");
+}

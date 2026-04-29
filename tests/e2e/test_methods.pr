@@ -1,0 +1,176 @@
+// Method tests: value/shared/mutable receivers, method chaining patterns.
+
+type Accumulator {
+    int total;
+
+    add(~this, int n) {
+        this.total += n;
+    }
+
+    get_total(&this) int {
+        return this.total;
+    }
+
+    reset(~this) {
+        this.total = 0;
+    }
+
+    is_zero(&this) bool {
+        return this.total == 0;
+    }
+}
+
+test_accumulator() `test {
+    acc := Accumulator(total: 0);
+    assert(acc.is_zero(), "starts at zero");
+    acc.add(10);
+    acc.add(20);
+    acc.add(30);
+    assert(acc.get_total() == 60, "total = 60");
+    acc.reset();
+    assert(acc.is_zero(), "reset to zero");
+}
+
+// --- type with string methods ---
+
+type Greeting {
+    string template;
+
+    format(&this, string name) string {
+        return this.template + ", " + name + "!";
+    }
+
+    word_count(&this) int {
+        string[] words = this.template.split(" ");
+        return words.len;
+    }
+}
+
+test_greeting() `test {
+    g := Greeting(template: "Good morning");
+    assert(g.format("Alice") == "Good morning, Alice!", "format greeting");
+    assert(g.word_count() == 2, "2 words in template");
+}
+
+// --- type with bool logic ---
+
+type Permissions {
+    bool read;
+    bool write;
+    bool exec;
+
+    can_read(&this) bool { return this.read; }
+    can_write(&this) bool { return this.write; }
+    can_exec(&this) bool { return this.exec; }
+    is_readonly(&this) bool { return this.read && !this.write; }
+    has_any(&this) bool { return this.read || this.write || this.exec; }
+}
+
+test_permissions() `test {
+    p := Permissions(read: true, write: false, exec: false);
+    assert(p.can_read(), "can read");
+    assert(!p.can_write(), "cannot write");
+    assert(p.is_readonly(), "is readonly");
+    assert(p.has_any(), "has some permission");
+
+    none_perms := Permissions(read: false, write: false, exec: false);
+    assert(!none_perms.has_any(), "no permissions");
+}
+
+// --- multiple types interacting ---
+
+type Player {
+    string name;
+    int score;
+
+    add_score(~this, int points) {
+        this.score += points;
+    }
+
+    is_winning(&this, int threshold) bool {
+        return this.score >= threshold;
+    }
+}
+
+test_player_game() `test {
+    p := Player(name: "Alice", score: 0);
+    assert(!p.is_winning(100), "not winning at start");
+    p.add_score(50);
+    p.add_score(30);
+    p.add_score(25);
+    assert(p.score == 105, "score = 105");
+    assert(p.is_winning(100), "winning at 105");
+    assert(!p.is_winning(200), "not winning at 200 threshold");
+}
+
+// --- method calling another method ---
+
+type Calculator {
+    int result;
+
+    add(~this, int n) {
+        this.result += n;
+    }
+
+    sub(~this, int n) {
+        this.result -= n;
+    }
+
+    mul(~this, int n) {
+        this.result *= n;
+    }
+
+    abs(~this) {
+        if this.result < 0 {
+            this.result = -this.result;
+        }
+    }
+
+    value(&this) int {
+        return this.result;
+    }
+}
+
+test_calculator() `test {
+    c := Calculator(result: 0);
+    c.add(10);
+    c.add(5);
+    c.sub(3);
+    assert(c.value() == 12, "10+5-3 = 12");
+    c.mul(2);
+    assert(c.value() == 24, "12*2 = 24");
+    c.sub(30);
+    assert(c.value() == -6, "24-30 = -6");
+    c.abs();
+    assert(c.value() == 6, "abs(-6) = 6");
+}
+
+// --- method with multiple parameters ---
+
+type Matrix2x2 {
+    int a; int b;
+    int c; int d;
+
+    det(&this) int {
+        return this.a * this.d - this.b * this.c;
+    }
+
+    trace(&this) int {
+        return this.a + this.d;
+    }
+
+    is_identity(&this) bool {
+        return this.a == 1 && this.b == 0 && this.c == 0 && this.d == 1;
+    }
+}
+
+test_matrix() `test {
+    m := Matrix2x2(a: 1, b: 2, c: 3, d: 4);
+    assert(m.det() == -2, "det = 1*4 - 2*3 = -2");
+    assert(m.trace() == 5, "trace = 1+4 = 5");
+    assert(!m.is_identity(), "not identity");
+
+    id := Matrix2x2(a: 1, b: 0, c: 0, d: 1);
+    assert(id.det() == 1, "identity det = 1");
+    assert(id.is_identity(), "is identity");
+}

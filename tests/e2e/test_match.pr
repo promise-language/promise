@@ -1,0 +1,194 @@
+// Comprehensive match expression tests: literals, enums, wildcards,
+// name bindings, guards, nested matching.
+
+enum Direction { North, South, East, West }
+
+enum Expr {
+    Num(int value),
+    Add(int left, int right),
+    Neg(int inner),
+}
+
+// --- match on int literal ---
+
+test_match_int_literal() `test {
+    int x = 3;
+    string s = match x {
+        1 => "one",
+        2 => "two",
+        3 => "three",
+        _ => "other",
+    };
+    assert(s == "three", "match int literal 3");
+}
+
+// --- match wildcard ---
+
+test_match_wildcard() `test {
+    int x = 999;
+    string s = match x {
+        0 => "zero",
+        _ => "nonzero",
+    };
+    assert(s == "nonzero", "wildcard catches 999");
+}
+
+// --- match name binding ---
+
+test_match_name_binding() `test {
+    int x = 42;
+    int r = match x {
+        val => val * 2,
+    };
+    assert(r == 84, "name binding captures value");
+}
+
+// --- match fieldless enum ---
+
+test_match_direction() `test {
+    Direction d = Direction.North;
+    string s = match d {
+        Direction.North => "north",
+        Direction.South => "south",
+        Direction.East => "east",
+        Direction.West => "west",
+    };
+    assert(s == "north", "match Direction.North");
+}
+
+// --- match all enum directions ---
+
+dir_name(Direction d) string {
+    return match d {
+        Direction.North => "N",
+        Direction.South => "S",
+        Direction.East => "E",
+        Direction.West => "W",
+    };
+}
+
+test_match_all_directions() `test {
+    assert(dir_name(Direction.North) == "N", "North -> N");
+    assert(dir_name(Direction.South) == "S", "South -> S");
+    assert(dir_name(Direction.East) == "E", "East -> E");
+    assert(dir_name(Direction.West) == "W", "West -> W");
+}
+
+// --- match data enum destructure ---
+
+test_match_data_enum() `test {
+    Expr e = Expr.Num(42);
+    int val = match e {
+        Expr.Num(v) => v,
+        Expr.Add(l, r) => l + r,
+        Expr.Neg(n) => -n,
+    };
+    assert(val == 42, "destructure Num(42)");
+}
+
+test_match_data_enum_add() `test {
+    Expr e = Expr.Add(10, 20);
+    int val = match e {
+        Expr.Num(v) => v,
+        Expr.Add(l, r) => l + r,
+        Expr.Neg(n) => -n,
+    };
+    assert(val == 30, "destructure Add(10, 20) => 30");
+}
+
+test_match_data_enum_neg() `test {
+    Expr e = Expr.Neg(7);
+    int val = match e {
+        Expr.Num(v) => v,
+        Expr.Add(l, r) => l + r,
+        Expr.Neg(n) => -n,
+    };
+    assert(val == -7, "destructure Neg(7) => -7");
+}
+
+// --- match with wildcard on non-enum ---
+
+test_match_int_wildcard() `test {
+    int n = 42;
+    string s = match n {
+        0 => "zero",
+        1 => "one",
+        _ => "other",
+    };
+    assert(s == "other", "42 matches wildcard");
+}
+
+// --- match string literal ---
+
+test_match_string() `test {
+    string cmd = "quit";
+    int code = match cmd {
+        "help" => 0,
+        "quit" => 1,
+        "run" => 2,
+        _ => -1,
+    };
+    assert(code == 1, "match quit => 1");
+}
+
+// --- match returning complex expression ---
+
+test_match_complex_result() `test {
+    int x = 5;
+    int result = match x {
+        1 => 100 + 1,
+        5 => 200 + 50,
+        _ => 0,
+    };
+    assert(result == 250, "match 5 => 200+50 = 250");
+}
+
+// --- match in function ---
+
+classify(int n) string {
+    return match n {
+        0 => "zero",
+        1 => "one",
+        _ => "many",
+    };
+}
+
+test_match_in_function() `test {
+    assert(classify(0) == "zero", "classify 0");
+    assert(classify(1) == "one", "classify 1");
+    assert(classify(42) == "many", "classify 42");
+    assert(classify(-1) == "many", "classify -1");
+}
+
+// --- match used in assignment ---
+
+test_match_in_assignment() `test {
+    for i in 0..4 {
+        string s = match i {
+            0 => "a",
+            1 => "b",
+            2 => "c",
+            _ => "d",
+        };
+        if i == 0 { assert(s == "a", "i=0 => a"); }
+        if i == 1 { assert(s == "b", "i=1 => b"); }
+        if i == 2 { assert(s == "c", "i=2 => c"); }
+        if i == 3 { assert(s == "d", "i=3 => d"); }
+    }
+}
+
+// --- nested match ---
+
+test_nested_match() `test {
+    int x = 2;
+    int y = 3;
+    string r = match x {
+        1 => "x is one",
+        2 => match y {
+            3 => "x=2,y=3",
+            _ => "x=2,y=other",
+        },
+        _ => "other",
+    };
+    assert(r == "x=2,y=3", "nested match resolves correctly");
+}

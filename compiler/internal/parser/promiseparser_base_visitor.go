@@ -311,6 +311,18 @@ func (v *BasePromiseParserVisitor) VisitWhileExprStmt(ctx *WhileExprStmtContext)
 	return v.VisitChildren(ctx)
 }
 
+func (v *BasePromiseParserVisitor) VisitSelectStmt(ctx *SelectStmtContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BasePromiseParserVisitor) VisitSelectCase(ctx *SelectCaseContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BasePromiseParserVisitor) VisitSelectDefault(ctx *SelectDefaultContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
 func (v *BasePromiseParserVisitor) VisitCastExpr(ctx *CastExprContext) interface{} {
 	return v.VisitChildren(ctx)
 }

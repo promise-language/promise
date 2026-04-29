@@ -231,7 +231,7 @@ Type-system-driven LLVM IR generation for primitive types, arithmetic, control f
 ### Deferred sub-stages
 
 - Ownership-aware memory management (drop) → Stage 8o
-- Concurrency: `go`/`<-task` → Done (Phase 5a); `channel[T]` → Done (Phase 5b); M:N scheduler → Done (Phase 5c)
+- Concurrency: `go`/`<-task` → Done (Phase 5a); `channel[T]` → Done (Phase 5b); M:N scheduler with select, preemption, panic recovery, GOMAXPROCS, sched stats → Done (Phase 5c)
 
 ## Stage 8b — Strings (Done)
 
@@ -529,7 +529,7 @@ Command-line interface. Core commands implemented; formatter planned.
 - Bare pipe detection: `echo '<code>' | promise` auto-enters exec mode
 - Inline error formatting: source line + `^` caret marker, no temp filenames
 - Embedded `std/` and `runtime/` in the binary via `go:embed` for self-contained install
-- **Standard library test suite** (`tests/std/`): 12 test files, 140 tests covering int, uint, float, bool, char, string, hash, Vector, map, math, range, and interpolation
+- **Test suite**: 568 tests across 117 files — `tests/e2e/` (language features), `tests/std/` (standard library), `tests/concurrency/` (scheduler, channels, select, panic recovery, stress tests)
 - `promise fmt` — code formatter (planned)
 
 ## Stage 11 — Package Manager (Planned)
@@ -545,7 +545,7 @@ Dependency fetching and resolution.
 
 ## What's Next
 
-The compiler pipeline (Stages 1-8o) is complete for the current feature set. The runtime is fully codegen-emitted LLVM IR — no C files remain. Phase 5a added 1:1 threading (`go`/`<-` with OS threads). Phase 5b added typed channels (`channel[T]`). Phase 5c replaced 1:1 threading with an M:N scheduler using LLVM coroutine intrinsics — goroutines are cheap coroutine handles multiplexed on OS threads via per-CPU processors and work stealing. IO reactor and WASM scheduling remain (Phases 5d-6). The next work falls into three areas:
+The compiler pipeline (Stages 1-8o) is complete for the current feature set. The runtime is fully codegen-emitted LLVM IR — no C files remain. Phase 5a added 1:1 threading (`go`/`<-` with OS threads). Phase 5b added typed channels (`channel[T]`). Phase 5c replaced 1:1 threading with an M:N scheduler using LLVM coroutine intrinsics — goroutines are cheap coroutine handles multiplexed on OS threads via per-CPU processors and work stealing. Scheduler enhancements completed: P-local run queues with work stealing, cooperative preemption (yield checks at function entry and loop back-edges), `select` statement (multi-channel blocking with default), goroutine-scoped panic recovery (setjmp/longjmp per-G, panics don't kill the process), `set_max_procs`/`get_max_procs` runtime API, and scheduler profiling counters (gs_created, gs_completed, context_switches, steals). IO reactor and WASM scheduling remain (Phases 5d-6). The next work falls into three areas:
 
 ### Near-term: Language Features
 
@@ -567,7 +567,7 @@ The compiler pipeline (Stages 1-8o) is complete for the current feature set. The
 | Work | Design Doc | Priority |
 |------|-----------|----------|
 | Channels (`channel[T]`, buffered send/receive) — Phase 5b | [runtime-proposal.md](runtime-proposal.md) | Done |
-| M:N scheduler (LLVM coroutines, GMP model, work stealing) — Phase 5c | [runtime-proposal.md](runtime-proposal.md) | Done |
+| M:N scheduler (LLVM coroutines, GMP model, work stealing, select, preemption, panic recovery, GOMAXPROCS, sched stats) — Phase 5c | [runtime-proposal.md](runtime-proposal.md) | Done |
 | Cooperative WASM scheduler — Phase 5d | [runtime-proposal.md](runtime-proposal.md) | Low |
 | IO reactor (kqueue/epoll/IOCP) — Phase 6 | [runtime-proposal.md](runtime-proposal.md) | Low |
 | Replace clang with `llc` + `lld` — Phase 7 | [runtime-proposal.md](runtime-proposal.md) | Low |
@@ -583,7 +583,7 @@ Known gaps and improvements deferred from completed stages.
 | Item | Origin | Priority |
 |------|--------|----------|
 | Reassignment of droppable variable leaks old value — `x = newVal` overwrites without calling `drop()` on old | 8o | Medium |
-| Enqueue-before-suspend race — goroutine adds itself to waiter list then calls `coro.suspend`; another thread can `coro.resume` it before the suspend completes, causing UB (SIGSEGV/SIGBUS). Affects coroutine-mode channel parks and `<-task` done_waiters. Fix: deferred parking (goroutine stores park info in G, scheduler completes park after `coro.resume` returns). | 5c | High |
+| ~~Enqueue-before-suspend race~~ — **Fixed.** Goroutine stores the channel/done mutex in `G.park_mutex` before `coro.suspend`; the scheduler loop releases it in `coroSuspendedBlk` after `coro.resume` returns. Since the waker must acquire the same mutex to dequeue, it blocks until the suspend completes. Verified with stress tests in `tests/concurrency/stress_*.pr`. | 5c | ~~High~~ Resolved |
 
 ### Codegen Gaps
 
@@ -603,6 +603,8 @@ Known gaps and improvements deferred from completed stages.
 | Non-instance field placements (`value`/`variant`/`type`) | 8c | Low |
 | User type `toString()` for interpolation | 8h | Low |
 | Devirtualization optimization (direct call when concrete type known) | 8L | Low |
+| `map[bool, T]` — bool key hashing/lookup is broken (assert fails on retrieval) | 8i | Medium |
+| Variable name collisions in repeated `if v := opt { }` blocks within same function (LLVM IR `%v` redefined) | 8n | Medium |
 
 ### Ownership & Type System
 

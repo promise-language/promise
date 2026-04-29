@@ -139,11 +139,16 @@ type Compiler struct {
 	palNumCPUs *ir.Func // @pal_num_cpus() → i32
 
 	// Scheduler globals (Phase 5c — M:N scheduler)
-	currentGGlobal *ir.Global // @__promise_current_g (TLS, i8*)
-	schedGlobal    *ir.Global // @__promise_sched (global Sched struct)
-	inCoroutine    bool       // true when compiling inside a go block coroutine body
-	coroCleanupBlk *ir.Block  // coroutine cleanup block (destroy path: coro.free + free)
-	coroSuspendBlk *ir.Block  // coroutine suspend block (suspend path: coro.end + ret)
+	currentGGlobal    *ir.Global // @__promise_current_g (TLS, i8*)
+	currentPGlobal    *ir.Global // @__promise_current_p (TLS, i8*) — current P for local queue ops
+	schedGlobal       *ir.Global // @__promise_sched (global Sched struct)
+	panicJmpBufGlobal *ir.Global // @__promise_panic_jmpbuf (TLS, i8*) — setjmp buf for panic recovery
+	inCoroutine       bool       // true when compiling inside a go block coroutine body
+	coroCleanupBlk    *ir.Block  // coroutine cleanup block (destroy path: coro.free + free)
+	coroSuspendBlk    *ir.Block  // coroutine suspend block (suspend path: coro.end + ret)
+
+	// Main function AST — saved so wrapMainWithScheduler can compile it inline
+	mainDecl *ast.FuncDecl
 
 	// Go expression counter for unique trampoline function names
 	goCounter int
@@ -524,21 +529,41 @@ func (c *Compiler) declareIntrinsics() {
 	// LLVM coroutine intrinsics (Phase 5c — M:N scheduler)
 	c.declareCoroIntrinsics()
 
+	// setjmp/longjmp (libc) — used for goroutine-level panic recovery.
+	// Declared before scheduler functions since defineSchedLoopFunc uses them.
+	// On POSIX, _setjmp/_longjmp don't save/restore signal masks (faster).
+	setjmpFn := c.module.NewFunc("_setjmp", irtypes.I32,
+		ir.NewParam("env", irtypes.I8Ptr))
+	setjmpFn.FuncAttrs = append(setjmpFn.FuncAttrs, enum.FuncAttrNoUnwind)
+	c.funcs["setjmp"] = setjmpFn
+
+	longjmpFn := c.module.NewFunc("_longjmp", irtypes.Void,
+		ir.NewParam("env", irtypes.I8Ptr),
+		ir.NewParam("val", irtypes.I32))
+	longjmpFn.FuncAttrs = append(longjmpFn.FuncAttrs, enum.FuncAttrNoReturn, enum.FuncAttrNoUnwind)
+	c.funcs["longjmp"] = longjmpFn
+
 	// Scheduler globals and functions (Phase 5c)
 	c.defineSchedulerGlobals()
 	c.defineGNewFunc()
+	c.defineI64MaxFunc()
+	c.defineLocalEnqueueFunc()
+	c.defineLocalDequeueFunc()
+	c.defineStealWorkFunc()
 	c.defineSchedWakeMFunc()
 	c.defineSchedFindRunnableFunc()
 	c.defineSchedEnqueueFunc()
 	c.defineGoroutineExitFunc()
 	c.defineSchedParkMFunc()
 	c.defineSchedLoopFunc()
+	c.defineSysmonFunc()
 	c.defineSchedInitFunc()
 	c.defineSchedRunUntilMainFunc()
 	c.defineSchedShutdownFunc()
 	c.defineWaiterEnqueueFunc()
 	c.defineWaiterDequeueFunc()
 	c.defineWaiterWakeAllFunc()
+	c.defineWaiterRemoveFunc()
 
 	// PAL: emit platform-specific IO/exit primitives
 	c.palWrite = p.EmitWrite(c.module)
@@ -550,6 +575,7 @@ func (c *Compiler) declareIntrinsics() {
 	strlenFn.FuncAttrs = append(strlenFn.FuncAttrs,
 		enum.FuncAttrNoUnwind, enum.FuncAttrReadOnly, enum.FuncAttrWillReturn)
 	c.funcs["strlen"] = strlenFn
+
 }
 
 // defineStringNewFunc emits an LLVM IR function that allocates and initializes
@@ -2146,6 +2172,12 @@ func (c *Compiler) defineFuncs(file *ast.File) {
 		}
 		if len(fd.TypeParams) > 0 {
 			continue // generic — handled by monomorphization
+		}
+		// Skip user main — its body is compiled inline inside .goroutine.main
+		// by wrapMainWithScheduler (with inCoroutine=true for proper channel ops).
+		if fd.Name == "main" && !fd.IsStd {
+			c.mainDecl = fd
+			continue
 		}
 		// Std functions use stdFuncs map; user functions use funcs map
 		var fn *ir.Func

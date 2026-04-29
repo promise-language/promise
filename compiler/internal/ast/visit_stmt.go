@@ -46,6 +46,9 @@ func (b *Builder) VisitStatement(ctx *parser.StatementContext) interface{} {
 	if c := ctx.WhileStmt(); c != nil {
 		return c.Accept(b)
 	}
+	if c := ctx.SelectStmt(); c != nil {
+		return c.Accept(b)
+	}
 	if c := ctx.MatchExpr(); c != nil {
 		return &ExprStmt{
 			nodeBase: b.baseFromContext(ctx),
@@ -275,4 +278,50 @@ func (b *Builder) VisitWhileUnwrapStmt(ctx *parser.WhileUnwrapStmtContext) inter
 		Value:    b.visitExpr(ctx.Expression()),
 		Body:     b.visitBlock(ctx.Block()),
 	}
+}
+
+func (b *Builder) VisitSelectStmt(ctx *parser.SelectStmtContext) interface{} {
+	node := &SelectStmt{nodeBase: b.baseFromContext(ctx)}
+	for _, sc := range ctx.AllSelectCase() {
+		node.Cases = append(node.Cases, sc.Accept(b).(*SelectCase))
+	}
+	if sd := ctx.SelectDefault(); sd != nil {
+		node.Default = sd.Accept(b).([]Stmt)
+	}
+	return node
+}
+
+func (b *Builder) VisitSelectCase(ctx *parser.SelectCaseContext) interface{} {
+	node := &SelectCase{nodeBase: b.baseFromContext(ctx)}
+	if ctx.BindingName() != nil {
+		// Receive case: binding := <-ch
+		node.IsSend = false
+		node.Binding = b.bindingText(ctx.BindingName())
+		// The receive expression is the last expression (after <- )
+		exprs := ctx.AllExpression()
+		node.Channel = b.visitExpr(exprs[0])
+	} else {
+		// Send case: ch.send(v)
+		node.IsSend = true
+		exprs := ctx.AllExpression()
+		node.Channel = b.visitExpr(exprs[0])
+		node.SendValue = b.visitExpr(exprs[1])
+	}
+	// Parse body statements
+	for _, s := range ctx.AllStatement() {
+		if stmt := b.visitStmt(s); stmt != nil {
+			node.Body = append(node.Body, stmt)
+		}
+	}
+	return node
+}
+
+func (b *Builder) VisitSelectDefault(ctx *parser.SelectDefaultContext) interface{} {
+	var stmts []Stmt
+	for _, s := range ctx.AllStatement() {
+		if stmt := b.visitStmt(s); stmt != nil {
+			stmts = append(stmts, stmt)
+		}
+	}
+	return stmts
 }

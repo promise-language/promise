@@ -1,0 +1,16 @@
+// Select with default when no channels ready: should not block.
+
+main() `test(expected: "default taken") {
+    ch1 := channel[int](capacity: 1);
+    ch2 := channel[int](capacity: 1);
+
+    // No data in either channel
+    select {
+        v := <-ch1:
+            println("from ch1");
+        v := <-ch2:
+            println("from ch2");
+        default:
+            println("default taken");
+    }
+}

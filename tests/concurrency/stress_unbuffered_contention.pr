@@ -1,0 +1,38 @@
+// Stress test: high-contention small-buffer channel with producers and consumers.
+// 10 producers each send 5 values to a capacity-2 channel; 5 consumers each
+// receive 10 values. Forces frequent blocking on both sides.
+// Tests the enqueue-before-suspend race fix under heavy contention.
+
+main() `test(expected: "50") {
+  ch := channel[int](capacity: 2);
+
+  // Launch 10 producers, each sends 5 values
+  for p in 0..10 {
+    go {
+      for idx in 0..5 {
+        ch.send(1);
+      }
+    };
+  }
+
+  // Launch 5 consumers that sum into result channel
+  result := channel[int](capacity: 5);
+  for c in 0..5 {
+    go {
+      int local_sum = 0;
+      for idx in 0..10 {
+        r := <-ch;
+        if v := r { local_sum = local_sum + v; }
+      }
+      result.send(local_sum);
+    };
+  }
+
+  // Collect all consumer results
+  int total = 0;
+  for j in 0..5 {
+    r := <-result;
+    if v := r { total = total + v; }
+  }
+  print_int(total);
+}

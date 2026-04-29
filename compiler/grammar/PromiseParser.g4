@@ -249,6 +249,7 @@ statement
     | ifStmt
     | forStmt
     | whileStmt
+    | selectStmt                                               // block-terminated, no ;
     | matchExpr                                                // block-terminated, no ;
     | unsafeBlock                                              // block-terminated, no ;
     | incDecStmt
@@ -350,6 +351,23 @@ forUpdate
 whileStmt
     : WHILE bindingName WALRUS expression block                # whileUnwrapStmt
     | WHILE expression block                                   # whileExprStmt
+    ;
+
+// ============================================================
+// Select Statement
+// ============================================================
+
+selectStmt
+    : SELECT LBRACE selectCase* selectDefault? RBRACE
+    ;
+
+selectCase
+    : expression DOT IDENT LPAREN expression RPAREN COLON statement*   // ch.send(v):
+    | bindingName WALRUS LT MINUS expression COLON statement*          // val := <-ch:
+    ;
+
+selectDefault
+    : IDENT COLON statement*  // 'default' is a contextual keyword — validated in AST builder
     ;
 
 // ============================================================

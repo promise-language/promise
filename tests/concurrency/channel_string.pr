@@ -1,0 +1,15 @@
+// Channel with string type.
+
+main() `test(expected: """hello
+world
+foo""") {
+    ch := channel[string](capacity: 3);
+    ch.send("hello");
+    ch.send("world");
+    ch.send("foo");
+
+    for i in 0..3 {
+        r := <-ch;
+        if v := r { println(v); }
+    }
+}

@@ -70,6 +70,8 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 		c.genUseVarDecl(s)
 	case *ast.IncDecStmt:
 		c.genIncDecStmt(s)
+	case *ast.SelectStmt:
+		c.genSelectStmt(s)
 	case *ast.Block:
 		c.genBlock(s)
 	default:
@@ -1292,6 +1294,7 @@ func (c *Compiler) genForInRange(s *ast.ForInStmt) {
 		c.block.NewStore(nextIdx, idxAlloca)
 	}
 
+	c.emitYieldCheck()
 	c.block.NewBr(headerBlock)
 
 	c.breakTarget = savedBreak
@@ -1365,6 +1368,7 @@ func (c *Compiler) genClassicForStmt(s *ast.ClassicForStmt) {
 		// Expression-only update
 		c.genExpr(s.UpdateValue)
 	}
+	c.emitYieldCheck()
 	c.block.NewBr(headerBlock)
 
 	c.breakTarget = savedBreak
@@ -1390,7 +1394,8 @@ func (c *Compiler) genInfiniteLoop(s *ast.InfiniteLoop) {
 
 	c.block = bodyBlock
 	c.genBlock(s.Body)
-	if c.block.Term == nil {
+	if c.block != nil && c.block.Term == nil {
+		c.emitYieldCheck()
 		c.block.NewBr(bodyBlock)
 	}
 
@@ -1398,6 +1403,53 @@ func (c *Compiler) genInfiniteLoop(s *ast.InfiniteLoop) {
 	c.continueTarget = savedContinue
 	c.loopScopeDepth = savedLoopUseDepth
 	c.block = exitBlock
+}
+
+// --- Cooperative preemption yield check ---
+
+// emitYieldCheck emits an inline cooperative yield check at loop back-edges.
+// Only active when c.inCoroutine is true (inside goroutine/main coroutine).
+// Checks G.preempt flag set by sysmon; if set, clears it, re-enqueues self,
+// and calls coro.suspend to yield to the scheduler.
+func (c *Compiler) emitYieldCheck() {
+	if !c.inCoroutine {
+		return
+	}
+	if c.block == nil || c.block.Term != nil {
+		return
+	}
+
+	gTy := goroutineStructType()
+
+	// Load current G
+	curG := c.block.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
+	gPtr := c.block.NewBitCast(curG, irtypes.NewPointer(gTy))
+
+	// Load G.preempt
+	preemptField := c.block.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPreempt)))
+	preemptVal := c.block.NewLoad(irtypes.I8, preemptField)
+	shouldYield := c.block.NewICmp(enum.IPredNE, preemptVal, constant.NewInt(irtypes.I8, 0))
+
+	yieldBlk := c.newBlock("yield")
+	continueBlk := c.newBlock("yield.cont")
+	c.block.NewCondBr(shouldYield, yieldBlk, continueBlk)
+
+	// yield: clear preempt, set status=runnable, enqueue self, coro.suspend
+	c.block = yieldBlk
+	c.block.NewStore(constant.NewInt(irtypes.I8, 0), preemptField)
+
+	// Re-enqueue self so we get scheduled again
+	c.block.NewCall(c.funcs["promise_sched_enqueue"], curG)
+
+	// Suspend — scheduler will resume us later
+	suspResult := c.block.NewCall(c.coroSuspend, constant.None, constant.False)
+	c.block.NewSwitch(suspResult, c.coroSuspendBlk,
+		ir.NewCase(constant.NewInt(irtypes.I8, 0), continueBlk),
+		ir.NewCase(constant.NewInt(irtypes.I8, 1), c.coroCleanupBlk))
+
+	// yield.cont: continue with the loop
+	c.block = continueBlk
 }
 
 // --- Break / Continue ---
@@ -1769,6 +1821,7 @@ func (c *Compiler) genForInVector(s *ast.ForInStmt, slicePtr value.Value, elemTy
 		c.block.NewStore(nextIdx, idxAlloca)
 	}
 
+	c.emitYieldCheck()
 	c.block.NewBr(headerBlock)
 
 	c.breakTarget = savedBreak
@@ -1952,6 +2005,7 @@ func (c *Compiler) genForInChannel(s *ast.ForInStmt, chRaw value.Value, elemType
 	c.block = bodyBlock
 	c.genBlock(s.Body)
 	if c.block.Term == nil {
+		c.emitYieldCheck()
 		c.block.NewBr(headerBlock)
 	}
 
@@ -2079,6 +2133,7 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapVal value.Value, keyType, va
 		nextIdx := c.block.NewAdd(curIdx, constant.NewInt(irtypes.I64, 1))
 		c.block.NewStore(nextIdx, idxAlloca)
 	}
+	c.emitYieldCheck()
 	c.block.NewBr(headerBlock)
 
 	c.breakTarget = savedBreak
@@ -2139,6 +2194,7 @@ func (c *Compiler) genForInString(s *ast.ForInStmt, strPtr value.Value) {
 	}
 
 	if c.block.Term == nil {
+		c.emitYieldCheck()
 		c.block.NewBr(headerBlock)
 	}
 
@@ -2146,4 +2202,588 @@ func (c *Compiler) genForInString(s *ast.ForInStmt, strPtr value.Value) {
 	c.continueTarget = savedContinue
 	c.loopScopeDepth = savedLoopUseDepth
 	c.block = exitBlock
+}
+
+// genSelectStmt generates LLVM IR for a select statement.
+// Implements Go-style lock-all-channels protocol:
+// 1. Evaluate all channel expressions
+// 2. Lock all channels sorted by address (deadlock prevention)
+// 3. Check which cases can proceed (non-blocking)
+// 4. If one can: execute it, unlock all
+// 5. If none + default: unlock all, execute default
+// 6. If none + no default: park on waiter lists, suspend, dispatch on wake
+func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
+	nCases := len(s.Cases)
+	chanType := channelStructType()
+
+	// Step 1: Evaluate channel expressions and gather info
+	type selectCaseInfo struct {
+		chRaw         value.Value
+		chPtr         value.Value
+		isSend        bool
+		sendValueExpr ast.Expr
+		binding       string
+		elemLLVM      irtypes.Type
+		elemSize      int64
+	}
+
+	caseInfos := make([]selectCaseInfo, nCases)
+	for i, sc := range s.Cases {
+		chRaw := c.genExpr(sc.Channel)
+		chPtr := c.block.NewBitCast(chRaw, irtypes.NewPointer(chanType))
+
+		semaType := c.info.Types[sc.Channel]
+		inst := semaType.(*types.Instance)
+		elemType := inst.TypeArgs()[0]
+		elemLLVM := c.resolveType(elemType)
+		elemSize := int64(llvmTypeSize(elemLLVM))
+
+		caseInfos[i] = selectCaseInfo{
+			chRaw:         chRaw,
+			chPtr:         chPtr,
+			isSend:        sc.IsSend,
+			sendValueExpr: sc.SendValue,
+			binding:       sc.Binding,
+			elemLLVM:      elemLLVM,
+			elemSize:      elemSize,
+		}
+	}
+
+	// Step 2: Sort channel pointers by address and lock all.
+	i8PtrTy := irtypes.I8Ptr
+	arrType := irtypes.NewArray(uint64(nCases), i8PtrTy)
+	chArr := c.block.NewAlloca(arrType)
+
+	for i, ci := range caseInfos {
+		ptr := c.block.NewGetElementPtr(arrType, chArr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
+		c.block.NewStore(ci.chRaw, ptr)
+	}
+
+	// Inline bubble sort by pointer address (for deadlock prevention)
+	if nCases > 1 {
+		for pass := 0; pass < nCases-1; pass++ {
+			for j := 0; j < nCases-1-pass; j++ {
+				ptrA := c.block.NewGetElementPtr(arrType, chArr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(j)))
+				ptrB := c.block.NewGetElementPtr(arrType, chArr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(j+1)))
+				valA := c.block.NewLoad(i8PtrTy, ptrA)
+				valB := c.block.NewLoad(i8PtrTy, ptrB)
+				intA := c.block.NewPtrToInt(valA, irtypes.I64)
+				intB := c.block.NewPtrToInt(valB, irtypes.I64)
+				needSwap := c.block.NewICmp(enum.IPredUGT, intA, intB)
+
+				swapBlk := c.newBlock(fmt.Sprintf("select.sort.swap.%d.%d", pass, j))
+				contBlk := c.newBlock(fmt.Sprintf("select.sort.cont.%d.%d", pass, j))
+				c.block.NewCondBr(needSwap, swapBlk, contBlk)
+
+				c.block = swapBlk
+				c.block.NewStore(valB, ptrA)
+				c.block.NewStore(valA, ptrB)
+				c.block.NewBr(contBlk)
+
+				c.block = contBlk
+			}
+		}
+	}
+
+	// Lock all channels in sorted order (skip duplicates)
+	for i := 0; i < nCases; i++ {
+		ptr := c.block.NewGetElementPtr(arrType, chArr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
+		chRawSorted := c.block.NewLoad(i8PtrTy, ptr)
+		chPtrSorted := c.block.NewBitCast(chRawSorted, irtypes.NewPointer(chanType))
+		mtxPtr := c.block.NewGetElementPtr(chanType, chPtrSorted,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldMutex)))
+		mtx := c.block.NewLoad(i8PtrTy, mtxPtr)
+
+		if i > 0 {
+			// Skip if same channel as previous (avoid double-lock)
+			prevPtr := c.block.NewGetElementPtr(arrType, chArr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i-1)))
+			prevRaw := c.block.NewLoad(i8PtrTy, prevPtr)
+			isSame := c.block.NewICmp(enum.IPredEQ, chRawSorted, prevRaw)
+			lockBlk := c.newBlock(fmt.Sprintf("select.lock.%d", i))
+			skipBlk := c.newBlock(fmt.Sprintf("select.lock.skip.%d", i))
+			c.block.NewCondBr(isSame, skipBlk, lockBlk)
+			c.block = lockBlk
+			c.block.NewCall(c.palMutexLock, mtx)
+			c.block.NewBr(skipBlk)
+			c.block = skipBlk
+		} else {
+			c.block.NewCall(c.palMutexLock, mtx)
+		}
+	}
+
+	// Step 3: Try each case to see if it can proceed
+	mergeBlk := c.newBlock("select.merge")
+	caseExecBlks := make([]*ir.Block, nCases)
+	for i := range nCases {
+		caseExecBlks[i] = c.newBlock(fmt.Sprintf("select.case%d.exec", i))
+	}
+
+	// After trying all: default or park or merge
+	var afterTryBlk *ir.Block
+	var defaultBlk *ir.Block
+	if s.Default != nil {
+		defaultBlk = c.newBlock("select.default")
+		afterTryBlk = defaultBlk
+	} else if c.inCoroutine {
+		afterTryBlk = c.newBlock("select.park")
+	} else {
+		afterTryBlk = mergeBlk
+	}
+
+	// Generate try-check chain
+	firstTryBlk := c.newBlock("select.try0")
+	c.block.NewBr(firstTryBlk)
+	c.block = firstTryBlk
+
+	for i, ci := range caseInfos {
+		var nextCheck *ir.Block
+		if i+1 < nCases {
+			nextCheck = c.newBlock(fmt.Sprintf("select.try%d", i+1))
+		} else {
+			nextCheck = afterTryBlk
+		}
+
+		if ci.isSend {
+			countPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldCount)))
+			count := c.block.NewLoad(irtypes.I64, countPtr)
+			capPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldCapacity)))
+			cap_ := c.block.NewLoad(irtypes.I64, capPtr)
+			notFull := c.block.NewICmp(enum.IPredULT, count, cap_)
+			closedPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldClosed)))
+			closedVal := c.block.NewLoad(irtypes.I8, closedPtr)
+			isOpen := c.block.NewICmp(enum.IPredEQ, closedVal, constant.NewInt(irtypes.I8, 0))
+			canSend := c.block.NewAnd(notFull, isOpen)
+			c.block.NewCondBr(canSend, caseExecBlks[i], nextCheck)
+		} else {
+			countPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldCount)))
+			count := c.block.NewLoad(irtypes.I64, countPtr)
+			hasItems := c.block.NewICmp(enum.IPredUGT, count, constant.NewInt(irtypes.I64, 0))
+			closedPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldClosed)))
+			closedVal := c.block.NewLoad(irtypes.I8, closedPtr)
+			isClosed := c.block.NewICmp(enum.IPredEQ, closedVal, constant.NewInt(irtypes.I8, 1))
+			canRecv := c.block.NewOr(hasItems, isClosed)
+			c.block.NewCondBr(canRecv, caseExecBlks[i], nextCheck)
+		}
+
+		if i+1 < nCases {
+			c.block = nextCheck
+		}
+	}
+
+	// Helper: generate unlock-all code
+	unlockAll := func() {
+		for j := nCases - 1; j >= 0; j-- {
+			ptr := c.block.NewGetElementPtr(arrType, chArr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(j)))
+			chRawSorted := c.block.NewLoad(i8PtrTy, ptr)
+
+			if j < nCases-1 {
+				// Skip if same as next (since we're going in reverse)
+				nextPtr := c.block.NewGetElementPtr(arrType, chArr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(j+1)))
+				nextRaw := c.block.NewLoad(i8PtrTy, nextPtr)
+				isSame := c.block.NewICmp(enum.IPredEQ, chRawSorted, nextRaw)
+				unlockBlk := c.newBlock(fmt.Sprintf("select.unlock.%d", j))
+				skipBlk := c.newBlock(fmt.Sprintf("select.unlock.skip.%d", j))
+				c.block.NewCondBr(isSame, skipBlk, unlockBlk)
+				c.block = unlockBlk
+				chPtrSorted := c.block.NewBitCast(chRawSorted, irtypes.NewPointer(chanType))
+				mtxPtr := c.block.NewGetElementPtr(chanType, chPtrSorted,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldMutex)))
+				mtx := c.block.NewLoad(i8PtrTy, mtxPtr)
+				c.block.NewCall(c.palMutexUnlock, mtx)
+				c.block.NewBr(skipBlk)
+				c.block = skipBlk
+			} else {
+				chPtrSorted := c.block.NewBitCast(chRawSorted, irtypes.NewPointer(chanType))
+				mtxPtr := c.block.NewGetElementPtr(chanType, chPtrSorted,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldMutex)))
+				mtx := c.block.NewLoad(i8PtrTy, mtxPtr)
+				c.block.NewCall(c.palMutexUnlock, mtx)
+			}
+		}
+	}
+
+	// Helper: generate send execution code for a case
+	execSend := func(ci selectCaseInfo, prefix string) {
+		argVal := c.genExpr(ci.sendValueExpr)
+		argAlloca := c.block.NewAlloca(ci.elemLLVM)
+		c.block.NewStore(argVal, argAlloca)
+		argAsI8 := c.block.NewBitCast(argAlloca, i8PtrTy)
+
+		bufPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldBuffer)))
+		buf := c.block.NewLoad(i8PtrTy, bufPtr)
+		tailPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldTail)))
+		tail := c.block.NewLoad(irtypes.I64, tailPtr)
+		offset := c.block.NewMul(tail, constant.NewInt(irtypes.I64, ci.elemSize))
+		dest := c.block.NewGetElementPtr(irtypes.I8, buf, offset)
+		c.block.NewCall(c.funcs["llvm.memcpy"], dest, argAsI8,
+			constant.NewInt(irtypes.I64, ci.elemSize), constant.False)
+
+		capPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldCapacity)))
+		cap_ := c.block.NewLoad(irtypes.I64, capPtr)
+		tailPlusOne := c.block.NewAdd(tail, constant.NewInt(irtypes.I64, 1))
+		newTail := c.block.NewURem(tailPlusOne, cap_)
+		c.block.NewStore(newTail, tailPtr)
+
+		countPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldCount)))
+		countVal := c.block.NewLoad(irtypes.I64, countPtr)
+		newCount := c.block.NewAdd(countVal, constant.NewInt(irtypes.I64, 1))
+		c.block.NewStore(newCount, countPtr)
+
+		// Wake a waiting receiver
+		recvHeadPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersHead)))
+		recvTailPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersTail)))
+		recvWaiter := c.block.NewCall(c.funcs["promise_waiter_dequeue"], recvHeadPtr, recvTailPtr)
+		hasRecvWaiter := c.block.NewICmp(enum.IPredNE, recvWaiter, constant.NewNull(i8PtrTy))
+		wakeBlk := c.newBlock(prefix + ".wake")
+		signalBlk := c.newBlock(prefix + ".signal")
+		afterBlk := c.newBlock(prefix + ".after")
+		c.block.NewCondBr(hasRecvWaiter, wakeBlk, signalBlk)
+
+		c.block = wakeBlk
+		gTy := goroutineStructType()
+		wTyped := c.block.NewBitCast(recvWaiter, irtypes.NewPointer(gTy))
+		wStatusPtr := c.block.NewGetElementPtr(gTy, wTyped,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldStatus)))
+		c.block.NewStore(constant.NewInt(irtypes.I8, gStatusRunnable), wStatusPtr)
+		c.block.NewCall(c.funcs["promise_sched_enqueue"], recvWaiter)
+		c.block.NewBr(afterBlk)
+
+		c.block = signalBlk
+		nePtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldNotEmpty)))
+		ne := c.block.NewLoad(i8PtrTy, nePtr)
+		c.block.NewCall(c.palCondSignal, ne)
+		c.block.NewBr(afterBlk)
+
+		c.block = afterBlk
+	}
+
+	// Helper: generate recv execution code for a case
+	execRecv := func(ci selectCaseInfo, prefix string) {
+		optType := irtypes.NewStruct(irtypes.I1, ci.elemLLVM)
+		countPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldCount)))
+		count := c.block.NewLoad(irtypes.I64, countPtr)
+		isEmpty := c.block.NewICmp(enum.IPredEQ, count, constant.NewInt(irtypes.I64, 0))
+
+		noneBlk := c.newBlock(prefix + ".none")
+		readBlk := c.newBlock(prefix + ".read")
+		doneBlk := c.newBlock(prefix + ".done")
+		c.block.NewCondBr(isEmpty, noneBlk, readBlk)
+
+		c.block = noneBlk
+		noneVal := constant.NewZeroInitializer(optType)
+		c.block.NewBr(doneBlk)
+
+		c.block = readBlk
+		bufPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldBuffer)))
+		buf := c.block.NewLoad(i8PtrTy, bufPtr)
+		headPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldHead)))
+		head := c.block.NewLoad(irtypes.I64, headPtr)
+		offset := c.block.NewMul(head, constant.NewInt(irtypes.I64, ci.elemSize))
+		src := c.block.NewGetElementPtr(irtypes.I8, buf, offset)
+		rAlloca := c.block.NewAlloca(ci.elemLLVM)
+		rAsI8 := c.block.NewBitCast(rAlloca, i8PtrTy)
+		c.block.NewCall(c.funcs["llvm.memcpy"], rAsI8, src,
+			constant.NewInt(irtypes.I64, ci.elemSize), constant.False)
+		rVal := c.block.NewLoad(ci.elemLLVM, rAlloca)
+
+		capPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldCapacity)))
+		cap_ := c.block.NewLoad(irtypes.I64, capPtr)
+		headPlusOne := c.block.NewAdd(head, constant.NewInt(irtypes.I64, 1))
+		newHead := c.block.NewURem(headPlusOne, cap_)
+		c.block.NewStore(newHead, headPtr)
+
+		countRead := c.block.NewLoad(irtypes.I64, countPtr)
+		newCount := c.block.NewSub(countRead, constant.NewInt(irtypes.I64, 1))
+		c.block.NewStore(newCount, countPtr)
+
+		// Wake a waiting sender
+		sendHeadPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersHead)))
+		sendTailPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersTail)))
+		sendWaiter := c.block.NewCall(c.funcs["promise_waiter_dequeue"], sendHeadPtr, sendTailPtr)
+		hasSendWaiter := c.block.NewICmp(enum.IPredNE, sendWaiter, constant.NewNull(i8PtrTy))
+		wakeBlk := c.newBlock(prefix + ".wsend")
+		signalBlk := c.newBlock(prefix + ".ssend")
+		afterBlk := c.newBlock(prefix + ".afterwk")
+		c.block.NewCondBr(hasSendWaiter, wakeBlk, signalBlk)
+
+		c.block = wakeBlk
+		gTy := goroutineStructType()
+		wTyped := c.block.NewBitCast(sendWaiter, irtypes.NewPointer(gTy))
+		wStatusPtr := c.block.NewGetElementPtr(gTy, wTyped,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldStatus)))
+		c.block.NewStore(constant.NewInt(irtypes.I8, gStatusRunnable), wStatusPtr)
+		c.block.NewCall(c.funcs["promise_sched_enqueue"], sendWaiter)
+		c.block.NewBr(afterBlk)
+
+		c.block = signalBlk
+		nfPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldNotFull)))
+		nf := c.block.NewLoad(i8PtrTy, nfPtr)
+		c.block.NewCall(c.palCondSignal, nf)
+		c.block.NewBr(afterBlk)
+
+		c.block = afterBlk
+		someVal := c.block.NewInsertValue(constant.NewZeroInitializer(optType), constant.True, 0)
+		someVal2 := c.block.NewInsertValue(someVal, rVal, 1)
+		c.block.NewBr(doneBlk)
+
+		c.block = doneBlk
+		recvPhi := c.block.NewPhi(
+			&ir.Incoming{X: noneVal, Pred: noneBlk},
+			&ir.Incoming{X: someVal2, Pred: afterBlk},
+		)
+
+		if ci.binding != "_" {
+			alloca := c.block.NewAlloca(optType)
+			alloca.SetName(c.uniqueLocalName(ci.binding))
+			c.block.NewStore(recvPhi, alloca)
+			c.locals[ci.binding] = alloca
+		}
+	}
+
+	// Step 4: Generate case execution blocks (non-blocking path)
+	for i, ci := range caseInfos {
+		c.block = caseExecBlks[i]
+		savedScopeLen := len(c.scopeBindings)
+
+		prefix := fmt.Sprintf("select.c%d", i)
+		if ci.isSend {
+			execSend(ci, prefix)
+		} else {
+			execRecv(ci, prefix)
+		}
+
+		unlockAll()
+
+		for _, stmt := range s.Cases[i].Body {
+			if c.block.Term != nil {
+				break
+			}
+			c.genStmt(stmt)
+		}
+		if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > savedScopeLen {
+			c.emitScopeCleanup(savedScopeLen)
+		}
+		c.scopeBindings = c.scopeBindings[:savedScopeLen]
+		if c.block != nil && c.block.Term == nil {
+			c.block.NewBr(mergeBlk)
+		}
+	}
+
+	// Step 5: Default block
+	if defaultBlk != nil {
+		c.block = defaultBlk
+		savedScopeLen := len(c.scopeBindings)
+		unlockAll()
+		for _, stmt := range s.Default {
+			if c.block.Term != nil {
+				break
+			}
+			c.genStmt(stmt)
+		}
+		if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > savedScopeLen {
+			c.emitScopeCleanup(savedScopeLen)
+		}
+		c.scopeBindings = c.scopeBindings[:savedScopeLen]
+		if c.block != nil && c.block.Term == nil {
+			c.block.NewBr(mergeBlk)
+		}
+	}
+
+	// Step 6: Blocking park (no default, coroutine mode)
+	if s.Default == nil && c.inCoroutine {
+		// afterTryBlk is the park block
+		c.block = afterTryBlk
+
+		currentG := c.block.NewLoad(i8PtrTy, c.currentGGlobal)
+		gTy := goroutineStructType()
+		gPtrTy := irtypes.NewPointer(gTy)
+		gTyped := c.block.NewBitCast(currentG, gPtrTy)
+
+		// Set G.select_case = -1
+		selCasePtr := c.block.NewGetElementPtr(gTy, gTyped,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldSelectCase)))
+		c.block.NewStore(constant.NewInt(irtypes.I32, 0xFFFFFFFF), selCasePtr)
+
+		// Enqueue on all waiter lists
+		for _, ci := range caseInfos {
+			var headPtr, tailPtr value.Value
+			if ci.isSend {
+				headPtr = c.block.NewGetElementPtr(chanType, ci.chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersHead)))
+				tailPtr = c.block.NewGetElementPtr(chanType, ci.chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersTail)))
+			} else {
+				headPtr = c.block.NewGetElementPtr(chanType, ci.chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersHead)))
+				tailPtr = c.block.NewGetElementPtr(chanType, ci.chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersTail)))
+			}
+			c.block.NewCall(c.funcs["promise_waiter_enqueue"], headPtr, tailPtr, currentG)
+		}
+
+		// Unlock all channels and suspend
+		pmField := c.block.NewGetElementPtr(gTy, gTyped,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldParkMutex)))
+		c.block.NewStore(constant.NewNull(i8PtrTy), pmField)
+		unlockAll()
+
+		suspResult := c.block.NewCall(c.coroSuspend, constant.None, constant.False)
+		resumeBlk := c.newBlock("select.resume")
+		c.block.NewSwitch(suspResult, c.coroSuspendBlk,
+			ir.NewCase(constant.NewInt(irtypes.I8, 0), resumeBlk),
+			ir.NewCase(constant.NewInt(irtypes.I8, 1), c.coroCleanupBlk))
+
+		// On resume: re-lock all, remove from all waiter lists, find ready case
+		c.block = resumeBlk
+
+		// Re-lock all channels in sorted order
+		for i := 0; i < nCases; i++ {
+			ptr := c.block.NewGetElementPtr(arrType, chArr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
+			chRawSorted := c.block.NewLoad(i8PtrTy, ptr)
+
+			if i > 0 {
+				prevPtr := c.block.NewGetElementPtr(arrType, chArr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i-1)))
+				prevRaw := c.block.NewLoad(i8PtrTy, prevPtr)
+				isSame := c.block.NewICmp(enum.IPredEQ, chRawSorted, prevRaw)
+				lockBlk := c.newBlock(fmt.Sprintf("select.relock.%d", i))
+				skipBlk := c.newBlock(fmt.Sprintf("select.relock.skip.%d", i))
+				c.block.NewCondBr(isSame, skipBlk, lockBlk)
+				c.block = lockBlk
+				chPtrSorted := c.block.NewBitCast(chRawSorted, irtypes.NewPointer(chanType))
+				mtxPtr := c.block.NewGetElementPtr(chanType, chPtrSorted,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldMutex)))
+				mtx := c.block.NewLoad(i8PtrTy, mtxPtr)
+				c.block.NewCall(c.palMutexLock, mtx)
+				c.block.NewBr(skipBlk)
+				c.block = skipBlk
+			} else {
+				chPtrSorted := c.block.NewBitCast(chRawSorted, irtypes.NewPointer(chanType))
+				mtxPtr := c.block.NewGetElementPtr(chanType, chPtrSorted,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldMutex)))
+				mtx := c.block.NewLoad(i8PtrTy, mtxPtr)
+				c.block.NewCall(c.palMutexLock, mtx)
+			}
+		}
+
+		// Remove from all waiter lists
+		for _, ci := range caseInfos {
+			var headPtr, tailPtr value.Value
+			if ci.isSend {
+				headPtr = c.block.NewGetElementPtr(chanType, ci.chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersHead)))
+				tailPtr = c.block.NewGetElementPtr(chanType, ci.chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersTail)))
+			} else {
+				headPtr = c.block.NewGetElementPtr(chanType, ci.chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersHead)))
+				tailPtr = c.block.NewGetElementPtr(chanType, ci.chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersTail)))
+			}
+			c.block.NewCall(c.funcs["promise_waiter_remove"], headPtr, tailPtr, currentG)
+		}
+
+		// Try each case again — one should be ready
+		// Pre-create all try blocks upfront to avoid subtle block-management issues
+		wakeTryBlks := make([]*ir.Block, nCases)
+		for i := range nCases {
+			wakeTryBlks[i] = c.newBlock(fmt.Sprintf("select.wk.try%d", i))
+		}
+		c.block.NewBr(wakeTryBlks[0])
+
+		for i, ci := range caseInfos {
+			c.block = wakeTryBlks[i]
+
+			var nextTryBlk *ir.Block
+			if i+1 < nCases {
+				nextTryBlk = wakeTryBlks[i+1]
+			} else {
+				nextTryBlk = mergeBlk // fallback — shouldn't happen
+			}
+
+			wakeExecBlk := c.newBlock(fmt.Sprintf("select.wk.c%d.exec", i))
+
+			if ci.isSend {
+				countPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldCount)))
+				count := c.block.NewLoad(irtypes.I64, countPtr)
+				capPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldCapacity)))
+				cap_ := c.block.NewLoad(irtypes.I64, capPtr)
+				notFull := c.block.NewICmp(enum.IPredULT, count, cap_)
+				closedPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldClosed)))
+				closedVal := c.block.NewLoad(irtypes.I8, closedPtr)
+				isOpen := c.block.NewICmp(enum.IPredEQ, closedVal, constant.NewInt(irtypes.I8, 0))
+				canSend := c.block.NewAnd(notFull, isOpen)
+				c.block.NewCondBr(canSend, wakeExecBlk, nextTryBlk)
+			} else {
+				countPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldCount)))
+				count := c.block.NewLoad(irtypes.I64, countPtr)
+				hasItems := c.block.NewICmp(enum.IPredUGT, count, constant.NewInt(irtypes.I64, 0))
+				closedPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldClosed)))
+				closedVal := c.block.NewLoad(irtypes.I8, closedPtr)
+				isClosed := c.block.NewICmp(enum.IPredEQ, closedVal, constant.NewInt(irtypes.I8, 1))
+				canRecv := c.block.NewOr(hasItems, isClosed)
+				c.block.NewCondBr(canRecv, wakeExecBlk, nextTryBlk)
+			}
+
+			c.block = wakeExecBlk
+			savedScopeLen := len(c.scopeBindings)
+
+			prefix := fmt.Sprintf("select.wk.c%d", i)
+			if ci.isSend {
+				execSend(ci, prefix)
+			} else {
+				execRecv(ci, prefix)
+			}
+
+			unlockAll()
+
+			for _, stmt := range s.Cases[i].Body {
+				if c.block.Term != nil {
+					break
+				}
+				c.genStmt(stmt)
+			}
+			if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > savedScopeLen {
+				c.emitScopeCleanup(savedScopeLen)
+			}
+			c.scopeBindings = c.scopeBindings[:savedScopeLen]
+			if c.block != nil && c.block.Term == nil {
+				c.block.NewBr(mergeBlk)
+			}
+		}
+	}
+
+	c.block = mergeBlk
 }

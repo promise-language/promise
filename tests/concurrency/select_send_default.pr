@@ -1,0 +1,19 @@
+// Select with send case and default: non-blocking send.
+
+main() `test(expected: "sent") {
+    ch := channel[int](capacity: 1);
+
+    // Channel has capacity, send should succeed
+    select {
+        ch.send(42):
+            println("sent");
+        default:
+            println("would block");
+    }
+
+    // Verify the value was sent
+    r := <-ch;
+    if v := r {
+        assert(v == 42, "received 42");
+    }
+}

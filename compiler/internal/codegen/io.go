@@ -57,6 +57,27 @@ func (c *Compiler) definePALBodies() {
 	if fn, ok := irFuncByName["promise_panic_msg"]; ok {
 		c.definePanicMsgBody(fn)
 	}
+
+	// Runtime functions
+	if fn, ok := irFuncByName["promise_set_maxprocs"]; ok {
+		c.defineSetMaxProcsBody(fn)
+	}
+
+	// Scheduler stat getters
+	statGetters := []struct {
+		name  string
+		field int
+	}{
+		{"promise_sched_gs_created", schedFieldGsCreated},
+		{"promise_sched_gs_completed", schedFieldGsCompleted},
+		{"promise_sched_ctx_switches", schedFieldContextSwitches},
+		{"promise_sched_steals", schedFieldSteals},
+	}
+	for _, sg := range statGetters {
+		if fn, ok := irFuncByName[sg.name]; ok {
+			c.defineSchedStatGetterBody(fn, sg.field)
+		}
+	}
 }
 
 // extractStringDataLen extracts the data pointer (i8*) and length (i64) from a
@@ -223,10 +244,13 @@ func (c *Compiler) definePrintBoolBody(fn *ir.Func) {
 }
 
 // definePanicBody adds a function body to promise_panic(i8* %msg).
-// msg is a null-terminated C string. Writes "panic: <msg>\n" to stderr and exits.
+// msg is a null-terminated C string. Writes "panic: <msg>\n" to stderr.
+// For non-main goroutines: sets G.panicked=1, G.panic_msg=msg, longjmp to scheduler.
+// For main goroutine or no goroutine context: exits process with code 1.
 func (c *Compiler) definePanicBody(fn *ir.Func) {
 	entry := fn.NewBlock("entry")
 	stderr := constant.NewInt(irtypes.I32, 2)
+	gTy := goroutineStructType()
 
 	// Write "panic: " prefix
 	prefixPtr := entry.NewGetElementPtr(c.panicPrefixGlobal.ContentType, c.panicPrefixGlobal,
@@ -242,17 +266,53 @@ func (c *Compiler) definePanicBody(fn *ir.Func) {
 	// Write newline
 	c.emitWriteNewline(entry, stderr)
 
-	// Exit with code 1
-	entry.NewCall(c.palExit, constant.NewInt(irtypes.I32, 1))
-	entry.NewUnreachable()
+	// Check if we're in a non-main goroutine that can recover
+	currentG := entry.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
+	hasG := entry.NewICmp(enum.IPredNE, currentG, constant.NewNull(irtypes.I8Ptr))
+
+	checkIdBlk := fn.NewBlock("check_id")
+	exitBlk := fn.NewBlock("do_exit")
+
+	entry.NewCondBr(hasG, checkIdBlk, exitBlk)
+
+	// checkId: if G.id != 0 (not main goroutine), use longjmp recovery
+	gPtr := checkIdBlk.NewBitCast(currentG, irtypes.NewPointer(gTy))
+	idField := checkIdBlk.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldID)))
+	gID := checkIdBlk.NewLoad(irtypes.I64, idField)
+	isMain := checkIdBlk.NewICmp(enum.IPredEQ, gID, constant.NewInt(irtypes.I64, 0))
+
+	recoverBlk := fn.NewBlock("do_recover")
+	checkIdBlk.NewCondBr(isMain, exitBlk, recoverBlk)
+
+	// do_recover: set G.panicked=1, G.panic_msg=msg, longjmp back to scheduler
+	panickedField := recoverBlk.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicked)))
+	recoverBlk.NewStore(constant.NewInt(irtypes.I8, 1), panickedField)
+
+	panicMsgField := recoverBlk.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicMsg)))
+	recoverBlk.NewStore(fn.Params[0], panicMsgField)
+
+	// Load jmp_buf from TLS and longjmp
+	jmpBuf := recoverBlk.NewLoad(irtypes.I8Ptr, c.panicJmpBufGlobal)
+	recoverBlk.NewCall(c.funcs["longjmp"], jmpBuf, constant.NewInt(irtypes.I32, 1))
+	recoverBlk.NewUnreachable()
+
+	// do_exit: main goroutine or no goroutine context — exit process
+	exitBlk.NewCall(c.palExit, constant.NewInt(irtypes.I32, 1))
+	exitBlk.NewUnreachable()
 	// noreturn already set on promise_panic in declareIntrinsics
 }
 
 // definePanicMsgBody adds a function body to promise_panic_msg(i8* %s).
-// s points to a promise_string_v. Writes "panic: <msg>\n" to stderr and exits.
+// s points to a promise_string_v. Writes "panic: <msg>\n" to stderr.
+// For non-main goroutines: sets G.panicked=1, longjmp to scheduler.
+// For main goroutine or no goroutine context: exits process with code 1.
 func (c *Compiler) definePanicMsgBody(fn *ir.Func) {
 	entry := fn.NewBlock("entry")
 	stderr := constant.NewInt(irtypes.I32, 2)
+	gTy := goroutineStructType()
 
 	// Write "panic: " prefix
 	prefixPtr := entry.NewGetElementPtr(c.panicPrefixGlobal.ContentType, c.panicPrefixGlobal,
@@ -268,11 +328,162 @@ func (c *Compiler) definePanicMsgBody(fn *ir.Func) {
 	// Write newline
 	c.emitWriteNewline(entry, stderr)
 
-	// Exit with code 1
-	entry.NewCall(c.palExit, constant.NewInt(irtypes.I32, 1))
-	entry.NewUnreachable()
+	// Check if we're in a non-main goroutine that can recover
+	currentG := entry.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
+	hasG := entry.NewICmp(enum.IPredNE, currentG, constant.NewNull(irtypes.I8Ptr))
+
+	checkIdBlk := fn.NewBlock("check_id")
+	exitBlk := fn.NewBlock("do_exit")
+
+	entry.NewCondBr(hasG, checkIdBlk, exitBlk)
+
+	// checkId: if G.id != 0 (not main goroutine), use longjmp recovery
+	gPtr := checkIdBlk.NewBitCast(currentG, irtypes.NewPointer(gTy))
+	idField := checkIdBlk.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldID)))
+	gID := checkIdBlk.NewLoad(irtypes.I64, idField)
+	isMain := checkIdBlk.NewICmp(enum.IPredEQ, gID, constant.NewInt(irtypes.I64, 0))
+
+	recoverBlk := fn.NewBlock("do_recover")
+	checkIdBlk.NewCondBr(isMain, exitBlk, recoverBlk)
+
+	// do_recover: set G.panicked=1, G.panic_msg=cstr, longjmp back to scheduler
+	panickedField := recoverBlk.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicked)))
+	recoverBlk.NewStore(constant.NewInt(irtypes.I8, 1), panickedField)
+
+	// Create a null-terminated C string copy from Promise string data for G.panic_msg.
+	allocSize := recoverBlk.NewAdd(dataLen, constant.NewInt(irtypes.I64, 1))
+	cstr := recoverBlk.NewCall(c.palAlloc, allocSize)
+	recoverBlk.NewCall(c.funcs["llvm.memcpy"], cstr, dataPtr, dataLen, constant.False)
+	nullPos := recoverBlk.NewGetElementPtr(irtypes.I8, cstr, dataLen)
+	recoverBlk.NewStore(constant.NewInt(irtypes.I8, 0), nullPos)
+
+	panicMsgField := recoverBlk.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicMsg)))
+	recoverBlk.NewStore(cstr, panicMsgField)
+
+	// Load jmp_buf from TLS and longjmp
+	jmpBuf := recoverBlk.NewLoad(irtypes.I8Ptr, c.panicJmpBufGlobal)
+	recoverBlk.NewCall(c.funcs["longjmp"], jmpBuf, constant.NewInt(irtypes.I32, 1))
+	recoverBlk.NewUnreachable()
+
+	// do_exit: main goroutine or no goroutine context — exit process
+	exitBlk.NewCall(c.palExit, constant.NewInt(irtypes.I32, 1))
+	exitBlk.NewUnreachable()
 
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoReturn)
+}
+
+// defineSetMaxProcsBody adds a function body to promise_set_maxprocs(i8* %sret, i8* %n).
+// Implements GOMAXPROCS: sets the number of active Ps (processors).
+// If n <= 0, returns current value without changing. Otherwise clamps to [1, max_p].
+// Returns the previous num_p value as a Promise int.
+func (c *Compiler) defineSetMaxProcsBody(fn *ir.Func) {
+	// fn signature: void @promise_set_maxprocs(i8* %sret, i8* %n)
+	sretParam := fn.Params[0]
+	nParam := fn.Params[1]
+
+	schedTy := schedStructType()
+	intLayout := c.layouts[types.TypInt]
+	valType := intLayout.Value.LLVMType
+
+	entry := fn.NewBlock("entry")
+
+	// Alloca must be in entry block for LLVM's mem2reg pass
+	wakeIAlloca := entry.NewAlloca(irtypes.I32)
+
+	// Extract raw i64 from n param (int value struct field 2)
+	valPtr := entry.NewBitCast(nParam, irtypes.NewPointer(valType))
+	rawPtr := entry.NewGetElementPtr(valType, valPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+	rawN := entry.NewLoad(irtypes.I64, rawPtr)
+	nI32 := entry.NewTrunc(rawN, irtypes.I32)
+
+	// Load current num_p (this is the old value we'll return)
+	numPField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldNumP)))
+	oldNumP := entry.NewLoad(irtypes.I32, numPField)
+
+	// If n <= 0, just return old value (query-only mode, like Go's GOMAXPROCS(0))
+	isQuery := entry.NewICmp(enum.IPredSLE, nI32, constant.NewInt(irtypes.I32, 0))
+	setBlk := fn.NewBlock("set")
+	doneBlk := fn.NewBlock("done")
+	entry.NewCondBr(isQuery, doneBlk, setBlk)
+
+	// set: clamp n to [1, max_p], store new num_p
+	maxPField := setBlk.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldMaxP)))
+	maxP := setBlk.NewLoad(irtypes.I32, maxPField)
+
+	// clamped = max(1, min(n, max_p))
+	nGtMax := setBlk.NewICmp(enum.IPredSGT, nI32, maxP)
+	clamped1 := setBlk.NewSelect(nGtMax, maxP, nI32)
+	clamped1Lt1 := setBlk.NewICmp(enum.IPredSLT, clamped1, constant.NewInt(irtypes.I32, 1))
+	clamped := setBlk.NewSelect(clamped1Lt1, constant.NewInt(irtypes.I32, 1), clamped1)
+
+	setBlk.NewStore(clamped, numPField)
+
+	// If increasing, wake idle Ms so they can pick up work
+	isIncrease := setBlk.NewICmp(enum.IPredSGT, clamped, oldNumP)
+	wakeBlk := fn.NewBlock("wake")
+	setBlk.NewCondBr(isIncrease, wakeBlk, doneBlk)
+
+	// wake: call wake_m for each additional P
+	diff := wakeBlk.NewSub(clamped, oldNumP)
+	wakeBlk.NewStore(constant.NewInt(irtypes.I32, 0), wakeIAlloca)
+	wakeHeader := fn.NewBlock("wake_header")
+	wakeBody := fn.NewBlock("wake_body")
+	wakeBlk.NewBr(wakeHeader)
+
+	iVal := wakeHeader.NewLoad(irtypes.I32, wakeIAlloca)
+	wakeDone := wakeHeader.NewICmp(enum.IPredSGE, iVal, diff)
+	wakeHeader.NewCondBr(wakeDone, doneBlk, wakeBody)
+
+	wakeBody.NewCall(c.funcs["promise_sched_wake_m"])
+	nextI := wakeBody.NewAdd(iVal, constant.NewInt(irtypes.I32, 1))
+	wakeBody.NewStore(nextI, wakeIAlloca)
+	wakeBody.NewBr(wakeHeader)
+
+	// done: write old num_p as int value struct to sret
+	oldNumP64 := doneBlk.NewSExt(oldNumP, irtypes.I64)
+	instancePtrType := intLayout.Value.Fields[1].LLVMType.(*irtypes.PointerType)
+	var agg value.Value = constant.NewUndef(valType)
+	agg = doneBlk.NewInsertValue(agg, constant.NewNull(irtypes.I8Ptr), 0)
+	agg = doneBlk.NewInsertValue(agg, constant.NewNull(instancePtrType), 1)
+	agg = doneBlk.NewInsertValue(agg, oldNumP64, 2)
+
+	sretTyped := doneBlk.NewBitCast(sretParam, irtypes.NewPointer(valType))
+	doneBlk.NewStore(agg, sretTyped)
+	doneBlk.NewRet(nil)
+}
+
+// defineSchedStatGetterBody adds a function body to a sched stat getter.
+// Signature: void @promise_sched_X(i8* %sret) — reads an i64 counter from the
+// sched struct and returns it as a Promise int value via sret.
+func (c *Compiler) defineSchedStatGetterBody(fn *ir.Func, field int) {
+	sretParam := fn.Params[0]
+	schedTy := schedStructType()
+	intLayout := c.layouts[types.TypInt]
+	valType := intLayout.Value.LLVMType
+
+	entry := fn.NewBlock("entry")
+
+	// Load the i64 counter from sched struct
+	counterField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(field)))
+	counterVal := entry.NewLoad(irtypes.I64, counterField)
+
+	// Pack as int value struct and store via sret
+	instancePtrType := intLayout.Value.Fields[1].LLVMType.(*irtypes.PointerType)
+	var agg value.Value = constant.NewUndef(valType)
+	agg = entry.NewInsertValue(agg, constant.NewNull(irtypes.I8Ptr), 0)
+	agg = entry.NewInsertValue(agg, constant.NewNull(instancePtrType), 1)
+	agg = entry.NewInsertValue(agg, counterVal, 2)
+
+	sretTyped := entry.NewBitCast(sretParam, irtypes.NewPointer(valType))
+	entry.NewStore(agg, sretTyped)
+	entry.NewRet(nil)
 }
 
 // defineTestRunFunc defines a codegen-emitted promise_test_run(i8* %fn) → i32.

@@ -1,0 +1,30 @@
+// Scheduler stats: verify counters track goroutine creation and completion.
+
+main() `test(expected: "ok") {
+  // Snapshot before spawning
+  created_before := goroutines_created();
+  completed_before := goroutines_completed();
+
+  ch := channel[int](capacity: 5);
+  for i in 0..5 {
+    go { ch.send(1); };
+  }
+
+  // Wait for all goroutines to finish
+  for j in 0..5 {
+    <-ch;
+  }
+
+  // Check counters increased
+  created_after := goroutines_created();
+  completed_after := goroutines_completed();
+
+  new_created := created_after - created_before;
+  new_completed := completed_after - completed_before;
+
+  assert(new_created >= 5, "should have created at least 5 goroutines");
+  assert(new_completed >= 5, "should have completed at least 5 goroutines");
+  assert(context_switches() > 0, "should have context switches");
+
+  println("ok");
+}

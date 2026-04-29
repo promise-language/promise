@@ -187,3 +187,22 @@ type WhileUnwrapStmt struct {
 }
 
 func (*WhileUnwrapStmt) stmtTag() {}
+
+// SelectStmt represents a select statement that waits on multiple channel ops.
+type SelectStmt struct {
+	nodeBase
+	Cases   []*SelectCase
+	Default []Stmt // nil if no default case
+}
+
+func (*SelectStmt) stmtTag() {}
+
+// SelectCase represents a single case in a select statement.
+type SelectCase struct {
+	nodeBase
+	IsSend    bool   // true for ch.send(v), false for val := <-ch
+	Channel   Expr   // channel expression
+	SendValue Expr   // value expression (send only)
+	Binding   string // binding name (receive only)
+	Body      []Stmt // statements in this case
+}

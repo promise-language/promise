@@ -1,0 +1,100 @@
+// Tuple tests: creation, destructuring, as return values.
+
+// --- basic tuple creation ---
+
+test_tuple_basic() `test {
+    (int, string) pair = (42, "hello");
+    (a, b) := pair;
+    assert(a == 42, "first element is 42");
+    assert(b == "hello", "second element is hello");
+}
+
+// --- tuple of same types ---
+
+test_tuple_same_type() `test {
+    (int, int) coords = (10, 20);
+    (x, y) := coords;
+    assert(x == 10, "x = 10");
+    assert(y == 20, "y = 20");
+}
+
+// --- tuple returned from function ---
+
+swap(int a, int b) (int, int) {
+    return (b, a);
+}
+
+test_tuple_return() `test {
+    (x, y) := swap(1, 2);
+    assert(x == 2, "swapped first = 2");
+    assert(y == 1, "swapped second = 1");
+}
+
+// --- tuple with bool ---
+
+test_tuple_with_bool() `test {
+    (bool, int) result = (true, 42);
+    (ok, val) := result;
+    assert(ok == true, "bool element");
+    assert(val == 42, "int element");
+}
+
+// --- tuple in assignment ---
+
+min_max(int a, int b) (int, int) {
+    if a < b {
+        return (a, b);
+    }
+    return (b, a);
+}
+
+test_min_max() `test {
+    (lo, hi) := min_max(10, 3);
+    assert(lo == 3, "min is 3");
+    assert(hi == 10, "max is 10");
+
+    (lo2, hi2) := min_max(5, 5);
+    assert(lo2 == 5, "equal: min = 5");
+    assert(hi2 == 5, "equal: max = 5");
+}
+
+// --- tuple of strings ---
+
+test_tuple_strings() `test {
+    (string, string) pair = ("hello", "world");
+    (a, b) := pair;
+    assert(a == "hello", "first string");
+    assert(b == "world", "second string");
+    string combined = a + " " + b;
+    assert(combined == "hello world", "combined strings");
+}
+
+// --- tuple in loop ---
+
+test_tuple_in_loop() `test {
+    int sum_x = 0;
+    int sum_y = 0;
+    for i in 0..5 {
+        (x, y) := (i, i * 2);
+        sum_x += x;
+        sum_y += y;
+    }
+    assert(sum_x == 10, "sum of x: 0+1+2+3+4 = 10");
+    assert(sum_y == 20, "sum of y: 0+2+4+6+8 = 20");
+}
+
+// --- divmod function ---
+
+divmod(int a, int b) (int, int) {
+    return (a / b, a % b);
+}
+
+test_divmod() `test {
+    (q, r) := divmod(17, 5);
+    assert(q == 3, "17 / 5 = 3");
+    assert(r == 2, "17 % 5 = 2");
+
+    (q2, r2) := divmod(10, 3);
+    assert(q2 == 3, "10 / 3 = 3");
+    assert(r2 == 1, "10 % 3 = 1");
+}

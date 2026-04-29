@@ -1,0 +1,22 @@
+// Tasks returning different types via helper functions.
+
+get_int() int { return 42; }
+get_str() string { return "hello"; }
+get_bool() bool { return true; }
+
+main() `test(expected: """42
+hello
+true""") {
+    t_int := go get_int();
+    t_str := go get_str();
+    t_bool := go get_bool();
+
+    int ri = <-t_int;
+    print_int(ri);
+
+    string rs = <-t_str;
+    println(rs);
+
+    bool rb = <-t_bool;
+    print_bool(rb);
+}

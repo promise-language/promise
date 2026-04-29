@@ -1,0 +1,130 @@
+// Advanced vector tests: edge cases, iteration patterns, bulk operations.
+
+test_single_element() `test {
+    int[] v = [42];
+    assert(v.len == 1, "len = 1");
+    assert(v[0] == 42, "first = 42");
+    assert(v.contains(42), "contains 42");
+}
+
+test_pop_single() `test {
+    int[] v = [99];
+    if val := v.pop() {
+        assert(val == 99, "popped 99");
+    } else {
+        assert(false, "should pop value");
+    }
+    assert(v.len == 0, "empty after pop");
+}
+
+test_push_pop_push() `test {
+    int[] v = [];
+    v.push(1);
+    v.push(2);
+    v.pop();
+    v.push(3);
+    assert(v.len == 2, "len = 2");
+    assert(v[0] == 1, "first = 1");
+    assert(v[1] == 3, "second = 3");
+}
+
+test_remove_middle() `test {
+    int[] v = [10, 20, 30, 40, 50];
+    v.remove(2);
+    assert(v.len == 4, "len = 4");
+    assert(v[0] == 10, "idx 0 = 10");
+    assert(v[1] == 20, "idx 1 = 20");
+    assert(v[2] == 40, "idx 2 = 40");
+    assert(v[3] == 50, "idx 3 = 50");
+}
+
+test_contains_after_clear() `test {
+    int[] v = [1, 2, 3];
+    v.pop();
+    v.pop();
+    v.pop();
+    assert(!v.contains(1), "empty no 1");
+    assert(!v.contains(2), "empty no 2");
+    assert(!v.contains(3), "empty no 3");
+}
+
+test_sequential_push() `test {
+    int[] v = [];
+    for i in 0..20 {
+        v.push(i * i);
+    }
+    assert(v.len == 20, "20 elements");
+    assert(v[0] == 0, "0^2 = 0");
+    assert(v[1] == 1, "1^2 = 1");
+    assert(v[10] == 100, "10^2 = 100");
+    assert(v[19] == 361, "19^2 = 361");
+}
+
+test_index_assign_all() `test {
+    int[] v = [0, 0, 0, 0, 0];
+    for i in 0..5 {
+        v[i] = (i + 1) * 10;
+    }
+    assert(v[0] == 10, "idx 0 = 10");
+    assert(v[4] == 50, "idx 4 = 50");
+}
+
+test_string_vector_ops() `test {
+    string[] names = [];
+    names.push("alice");
+    names.push("bob");
+    names.push("charlie");
+    assert(names.contains("bob"), "contains bob");
+    names.remove(1);
+    assert(!names.contains("bob"), "bob removed");
+    assert(names.len == 2, "2 remaining");
+}
+
+test_bool_vector() `test {
+    bool[] flags = [true, false, true, true, false];
+    int trues = 0;
+    for f in flags {
+        if f { trues++; }
+    }
+    assert(trues == 3, "3 true values");
+}
+
+test_vector_iterate_sum() `test {
+    int[] nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    int sum = 0;
+    for n in nums {
+        sum += n;
+    }
+    assert(sum == 55, "1..10 sum = 55");
+}
+
+test_vector_iterate_index() `test {
+    string[] items = ["a", "b", "c"];
+    int last_idx = -1;
+    for i, item in items {
+        last_idx = i;
+    }
+    assert(last_idx == 2, "last index = 2");
+}
+
+test_empty_pop_returns_none() `test {
+    int[] v = [];
+    bool got_none = true;
+    if val := v.pop() {
+        got_none = false;
+    }
+    assert(got_none, "pop on empty returns none");
+}
+
+test_grow_and_shrink() `test {
+    int[] v = [];
+    for i in 0..50 {
+        v.push(i);
+    }
+    assert(v.len == 50, "grew to 50");
+    for i in 0..30 {
+        v.pop();
+    }
+    assert(v.len == 20, "shrank to 20");
+    assert(v[19] == 19, "last element preserved");
+}

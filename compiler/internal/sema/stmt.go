@@ -82,6 +82,9 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 	case *ast.IncDecStmt:
 		c.checkIncDecStmt(s)
 
+	case *ast.SelectStmt:
+		c.checkSelectStmt(s)
+
 	default:
 		c.errorf(stmt.Pos(), "unsupported statement type")
 	}
@@ -740,6 +743,62 @@ func (c *Checker) checkIncDecStmt(s *ast.IncDecStmt) {
 		op = "--"
 	}
 	c.checkUnaryOperator(s.Pos(), targetType, op)
+}
+
+func (c *Checker) checkSelectStmt(s *ast.SelectStmt) {
+	for _, sc := range s.Cases {
+		chanType := c.checkExpr(sc.Channel)
+		if chanType == nil {
+			continue
+		}
+
+		// Verify it's a channel type
+		inst, ok := chanType.(*types.Instance)
+		if !ok || inst.Origin() != types.TypChannel {
+			c.errorf(sc.Channel.Pos(), "select case requires channel type, got %s", chanType)
+			continue
+		}
+
+		var elemType types.Type
+		if len(inst.TypeArgs()) > 0 {
+			elemType = inst.TypeArgs()[0]
+		}
+
+		if sc.IsSend {
+			// Send case: verify method name is "send" (already parsed)
+			// Check value type matches channel element type
+			if sc.SendValue != nil && elemType != nil {
+				valType := c.checkExprWithHint(sc.SendValue, elemType)
+				if valType != nil && !types.AssignableTo(valType, elemType) {
+					c.errorf(sc.SendValue.Pos(), "cannot send %s on channel[%s]", valType, elemType)
+				}
+			}
+		} else {
+			// Receive case: introduce binding as T? in case body scope
+			// (same as regular receive: returns optional)
+		}
+
+		// Type-check body statements in a new scope
+		c.openScope(s, "select-case")
+		if !sc.IsSend && sc.Binding != "_" && elemType != nil {
+			// Receive binding is T? (optional, like normal receive)
+			optType := types.NewOptional(elemType)
+			c.insert(types.NewVar(tpos(sc.Pos()), sc.Binding, optType))
+		}
+		for _, stmt := range sc.Body {
+			c.checkStmt(stmt)
+		}
+		c.closeScope()
+	}
+
+	// Check default case body
+	if s.Default != nil {
+		c.openScope(s, "select-default")
+		for _, stmt := range s.Default {
+			c.checkStmt(stmt)
+		}
+		c.closeScope()
+	}
 }
 
 // isConstructorCallExpr returns true if the expression is a constructor call

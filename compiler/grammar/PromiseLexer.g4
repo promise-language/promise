@@ -22,6 +22,7 @@ BREAK       : 'break';
 CONTINUE    : 'continue';
 UNSAFE      : 'unsafe';
 MOVE        : 'move';
+SELECT      : 'select';
 
 // Literal keywords
 NONE        : 'none';

@@ -1,0 +1,16 @@
+// Select with multiple ready channels: one is picked (first ready wins).
+
+main() `test(expected: "10") {
+  ch1 := channel[int](capacity: 1);
+  ch2 := channel[int](capacity: 1);
+
+  ch1.send(10);
+  ch2.send(20);
+
+  select {
+    v := <-ch1:
+      if val := v { print_int(val); }
+    v := <-ch2:
+      if val := v { print_int(val); }
+  }
+}

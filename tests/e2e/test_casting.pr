@@ -1,0 +1,145 @@
+// Type casting and type check tests: is expression, polymorphism.
+
+type Shape {
+    string name;
+    area(&this) f64 `abstract;
+}
+
+type Circle is Shape {
+    f64 radius;
+    area(&this) f64 {
+        return 3.14159 * this.radius * this.radius;
+    }
+}
+
+type Square is Shape {
+    f64 side;
+    area(&this) f64 {
+        return this.side * this.side;
+    }
+}
+
+type Triangle is Shape {
+    f64 base;
+    f64 height;
+    area(&this) f64 {
+        return this.base * this.height / 2.0;
+    }
+}
+
+// --- is expression: positive check ---
+
+test_is_positive() `test {
+    Shape s = Circle(name: "circle", radius: 5.0);
+    assert(s is Circle, "Circle is Circle");
+}
+
+// --- is expression: negative check ---
+
+test_is_negative() `test {
+    Shape s = Circle(name: "circle", radius: 5.0);
+    assert(!(s is Square), "Circle is not Square");
+}
+
+// --- is expression in if ---
+
+test_is_in_if() `test {
+    Shape s = Square(name: "sq", side: 4.0);
+    string result = "unknown";
+    if s is Circle {
+        result = "circle";
+    } else if s is Square {
+        result = "square";
+    } else if s is Triangle {
+        result = "triangle";
+    }
+    assert(result == "square", "identified as square");
+}
+
+// --- polymorphic method dispatch ---
+
+test_polymorphic_dispatch() `test {
+    Shape c = Circle(name: "c", radius: 1.0);
+    Shape s = Square(name: "s", side: 2.0);
+    f64 ca = c.area();
+    f64 sa = s.area();
+    assert(ca > 3.0 && ca < 3.2, "circle area ~ 3.14");
+    assert(sa > 3.9 && sa < 4.1, "square area = 4.0");
+}
+
+// --- is on same type ---
+
+test_is_same_type() `test {
+    Shape s1 = Circle(name: "a", radius: 1.0);
+    Shape s2 = Circle(name: "b", radius: 2.0);
+    assert(s1 is Circle, "s1 is Circle");
+    assert(s2 is Circle, "s2 is Circle");
+}
+
+// --- parent field access via polymorphic ref ---
+
+test_parent_field_access() `test {
+    Shape s = Triangle(name: "tri", base: 6.0, height: 8.0);
+    assert(s.name == "tri", "parent field accessible");
+}
+
+// --- multiple levels of type check ---
+
+type Vehicle {
+    string make;
+    describe(&this) string `abstract;
+}
+
+type Car is Vehicle {
+    int doors;
+    describe(&this) string {
+        return "car";
+    }
+}
+
+type Truck is Vehicle {
+    int payload;
+    describe(&this) string {
+        return "truck";
+    }
+}
+
+test_vehicle_hierarchy() `test {
+    Vehicle v1 = Car(make: "Toyota", doors: 4);
+    Vehicle v2 = Truck(make: "Ford", payload: 5000);
+    assert(v1 is Car, "v1 is Car");
+    assert(!(v1 is Truck), "v1 is not Truck");
+    assert(v2 is Truck, "v2 is Truck");
+    assert(!(v2 is Car), "v2 is not Car");
+    assert(v1.describe() == "car", "v1 describes as car");
+    assert(v2.describe() == "truck", "v2 describes as truck");
+}
+
+// --- type check in loop with individual items ---
+
+test_type_check_loop() `test {
+    Shape s1 = Circle(name: "c", radius: 1.0);
+    Shape s2 = Square(name: "s", side: 1.0);
+    Shape s3 = Triangle(name: "t", base: 1.0, height: 1.0);
+
+    int circles = 0;
+    int squares = 0;
+    int triangles = 0;
+
+    // Check each shape
+    if s1 is Circle { circles++; }
+    if s1 is Square { squares++; }
+    if s1 is Triangle { triangles++; }
+
+    if s2 is Circle { circles++; }
+    if s2 is Square { squares++; }
+    if s2 is Triangle { triangles++; }
+
+    if s3 is Circle { circles++; }
+    if s3 is Square { squares++; }
+    if s3 is Triangle { triangles++; }
+
+    assert(circles == 1, "1 circle");
+    assert(squares == 1, "1 square");
+    assert(triangles == 1, "1 triangle");
+}

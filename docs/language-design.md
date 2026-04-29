@@ -1345,6 +1345,7 @@ Meta annotations appear in post-definition position:
 - **Fields**: `string name `meta;`
 - **Methods**: `greet() string `meta { ... }`
 - **Functions**: `add(Int a, Int b) Int `meta { ... }`
+- **Parameters**: `foo(Int x `doc("description"), Int y `deprecated) { ... }`
 
 ### 8.2 Examples
 
@@ -1388,7 +1389,7 @@ testAddition() `test {
 | `` `required ``| fields         | Field must be present during deserialization; validation error otherwise |
 | `` `final `` | fields          | Immutable after construction; can only be set in `new` or `` `factory `` body (see Section 5.7) |
 | `` `factory ``| methods        | Factory constructor with `` `variant `` placement; no `this`, returns `Self` or child (see Section 5.7) |
-| `` `doc ``   | any             | AST-attached documentation (see Section 8.4)      |
+| `` `doc ``   | any, parameters | AST-attached documentation (see Section 8.4)      |
 
 User-defined metas are available through the type system at compile time for meta-programming and code generation.
 
@@ -1401,12 +1402,14 @@ type HttpClient `doc("HTTP client with connection pooling and automatic retry.")
   Int maxRetries `doc("Maximum number of retry attempts before failing.");
   Duration timeout `doc("Per-request timeout.");
 
-  get(~this, string url) Response! `doc("Perform a GET request. Returns the response or an error.") `instance {
+  get(~this, string url `doc("The URL to fetch.")) Response!
+      `doc("Perform a GET request. Returns the response or an error.") `instance {
     ...
   }
 }
 
-divide(Float64 a, Float64 b) Float64! `doc("Divide a by b. Raises MathError on division by zero.") {
+divide(Float64 a `doc("dividend"), Float64 b `doc("divisor"))
+    Float64! `doc("Divide a by b. Raises MathError on division by zero.") {
   if b == 0.0 {
     raise MathError("division by zero");
   }
@@ -1415,6 +1418,8 @@ divide(Float64 a, Float64 b) Float64! `doc("Divide a by b. Raises MathError on d
 ```
 
 The parameter is a plain string. Tooling can extract structured sections (parameters, return values, errors) from the text by convention, but the language itself treats it as an opaque string. This keeps the meta simple while giving AI agents a reliable, parseable documentation source that is always in sync with the code structure.
+
+Parameter-level `` `doc `` annotations are placed after the parameter name (and before any default value), providing per-parameter documentation that is structurally bound to each parameter rather than embedded in a free-text block.
 
 ---
 
@@ -1522,6 +1527,12 @@ sendEmail(
 ```
 
 There is no ordering constraint on required, defaulted, and optional parameters in the definition — any order is valid. The `this`/`&this`/`~this` receiver is unaffected: it is never named, never defaulted, and always implicit.
+
+Parameters can carry meta annotations (see Section 8), placed after the parameter name and before any default value:
+
+```promise
+connect(string host `doc("hostname"), Int port `doc("port number") = 8080) Connection! { ... }
+```
 
 **`T?` vs `Option[T]`:** Only the `T?` sugar triggers skippability. If a parameter is declared with `Option[T]` explicitly, it is a required parameter of optional type — the caller must provide it.
 

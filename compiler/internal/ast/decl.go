@@ -111,10 +111,11 @@ type ReturnTypeSpec struct {
 // Param represents a function/method parameter.
 type Param struct {
 	nodeBase
-	Type    TypeRef
-	RefMod  RefModifier
-	Name    string // "_" for discard
-	Default Expr   // nil if no default
+	Type        TypeRef
+	RefMod      RefModifier
+	Name        string // "_" for discard
+	Annotations []*MetaAnnotation
+	Default     Expr // nil if no default
 }
 
 // ReceiverParam represents a method receiver (this).

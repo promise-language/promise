@@ -166,9 +166,12 @@ func runLegacy(args []string) {
 
 // runBuild compiles a .pr file to an executable.
 func runBuild(args []string) {
-	var outputFile string
-	var filename string
+	filename, outputFile := buildToFile(args)
+	fmt.Printf("Compiled %s → %s\n", filename, outputFile)
+}
 
+// buildToFile compiles a .pr file to an executable, returning the source and output paths.
+func buildToFile(args []string) (filename, outputFile string) {
 	for i := 0; i < len(args); i++ {
 		if args[i] == "-o" && i+1 < len(args) {
 			outputFile = args[i+1]
@@ -191,7 +194,7 @@ func runBuild(args []string) {
 	result := codegen.Compile(file, info)
 
 	compileAndLink(result, outputFile)
-	fmt.Printf("Compiled %s → %s\n", filename, outputFile)
+	return filename, outputFile
 }
 
 // runRun compiles and immediately runs a .pr file.
@@ -213,7 +216,7 @@ func runRun(args []string) {
 	// Reuse build logic
 	buildArgs := []string{"-o", tmpOutput.Name()}
 	buildArgs = append(buildArgs, args...)
-	runBuild(buildArgs)
+	buildToFile(buildArgs)
 
 	// Execute
 	cmd := exec.Command(tmpOutput.Name())
@@ -711,11 +714,7 @@ func (l *errorListener) SyntaxError(
 			displayLine--
 		}
 		fmt.Fprintf(os.Stderr, "%d:%d: %s\n", displayLine, column, msg)
-		srcIdx := line - 1
-		if srcIdx >= 0 && srcIdx < len(lines) {
-			fmt.Fprintf(os.Stderr, "    %s\n", lines[srcIdx])
-			fmt.Fprintf(os.Stderr, "    %s^\n", strings.Repeat(" ", column))
-		}
+		printErrorContext(lines, line-1, column)
 	} else {
 		fmt.Fprintf(os.Stderr, "%s:%d:%d: %s\n", l.filename, line, column, msg)
 		lines := readFileLines(l.filename)
@@ -910,14 +909,20 @@ func printInlineErrors(source string, errs []error, wrapped bool) {
 	}
 }
 
-// printErrorContext prints a source line and caret marker to stderr.
-// srcIdx is the 0-based line index, column is 0-based.
+// printErrorContext prints source context around an error to stderr.
+// It shows the previous line (when available) for context, then the
+// error line with a caret marker. srcIdx is 0-based, column is 0-based.
 func printErrorContext(lines []string, srcIdx, column int) {
-	if srcIdx >= 0 && srcIdx < len(lines) {
-		fmt.Fprintf(os.Stderr, "    %s\n", lines[srcIdx])
-		if column >= 0 {
-			fmt.Fprintf(os.Stderr, "    %s^\n", strings.Repeat(" ", column))
-		}
+	if srcIdx < 0 || srcIdx >= len(lines) {
+		return
+	}
+	// Show the previous line for context when the error line is not the first.
+	if srcIdx > 0 {
+		fmt.Fprintf(os.Stderr, "    %s\n", lines[srcIdx-1])
+	}
+	fmt.Fprintf(os.Stderr, "  > %s\n", lines[srcIdx])
+	if column >= 0 {
+		fmt.Fprintf(os.Stderr, "    %s^\n", strings.Repeat(" ", column))
 	}
 }
 

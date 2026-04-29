@@ -163,7 +163,7 @@ receiverParam
     ;
 
 param
-    : typeRef refMod? bindingName (ASSIGN expression)?
+    : typeRef refMod? bindingName metaAnnotation* (ASSIGN expression)?
     ;
 
 refMod

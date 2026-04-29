@@ -5058,3 +5058,52 @@ func TestNamedArgsConstructorTypeMismatchReordered(t *testing.T) {
 	expectError(t, errs, "cannot assign string to field 'age'")
 	expectError(t, errs, "cannot assign int to field 'name'")
 }
+
+// --- Param Annotation Tests ---
+
+func TestParamAnnotationFunctionAccepted(t *testing.T) {
+	checkOK(t, `
+		greet(string name `+"`"+`doc("who to greet"), int times `+"`"+`doc("repeat count") = 1) {}
+		test() { greet("hi"); }
+	`)
+}
+
+func TestParamAnnotationMethodAccepted(t *testing.T) {
+	checkOK(t, `
+		type Calc {
+			int value;
+			add(&this, int a `+"`"+`doc("operand")) int { return this.value + a; }
+		}
+		test() {
+			Calc c = Calc(value: 1);
+			int r = c.add(a: 2);
+		}
+	`)
+}
+
+func TestParamAnnotationNewConstructorAccepted(t *testing.T) {
+	checkOK(t, `
+		type Point {
+			int x; int y;
+			new(~this, int x `+"`"+`doc("x coord"), int y `+"`"+`doc("y coord")) {
+				this.x = x;
+				this.y = y;
+			}
+		}
+		test() { Point p = Point(x: 1, y: 2); }
+	`)
+}
+
+func TestParamAnnotationWithDefaultValue(t *testing.T) {
+	checkOK(t, `
+		connect(string host `+"`"+`doc("hostname"), int port `+"`"+`doc("port") = 8080) {}
+		test() { connect("localhost"); }
+	`)
+}
+
+func TestParamAnnotationNamedArgsStillWork(t *testing.T) {
+	checkOK(t, `
+		add(int a `+"`"+`doc("first"), int b `+"`"+`doc("second")) int { return a + b; }
+		test() { int r = add(b: 2, a: 1); }
+	`)
+}

@@ -418,6 +418,9 @@ func (b *Builder) VisitParam(ctx *parser.ParamContext) interface{} {
 	if rm := ctx.RefMod(); rm != nil {
 		node.RefMod = b.visitRefMod(rm)
 	}
+	for _, ma := range ctx.AllMetaAnnotation() {
+		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))
+	}
 	if expr := ctx.Expression(); expr != nil {
 		node.Default = b.visitExpr(expr)
 	}

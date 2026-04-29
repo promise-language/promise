@@ -370,3 +370,32 @@ test_method_chain_named() `test {
     int result = p.add_point(dx: 10, dy: 20).sum();
     assert(result == 33, "chained method sum");
 }
+
+// === Param annotation tests ===
+
+// Function with annotated params — annotations are ignored at runtime.
+annotated_add(int a `doc("first operand"), int b `doc("second operand")) int {
+    return a + b;
+}
+
+annotated_default(int x `doc("value"), int y `doc("multiplier") = 10) int {
+    return x * y;
+}
+
+test_param_annotation_function() `test {
+    assert(annotated_add(3, 7) == 10, "positional");
+    assert(annotated_add(a: 3, b: 7) == 10, "named");
+    assert(annotated_add(b: 7, a: 3) == 10, "reordered");
+}
+
+test_param_annotation_with_default() `test {
+    assert(annotated_default(5) == 50, "default y");
+    assert(annotated_default(5, y: 3) == 15, "named y");
+    assert(annotated_default(x: 5) == 50, "named x, default y");
+}
+
+test_param_annotation_method() `test {
+    // Point.scale has no annotations, but verify annotated methods work
+    Point p = Point(x: 2, y: 3);
+    assert(p.scale(factor: 4, offset: 1) == 21, "annotated method");
+}

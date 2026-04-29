@@ -341,10 +341,18 @@ func (p *printer) typeParamsStr(tps []*TypeParam) string {
 	return "[" + strings.Join(parts, ", ") + "]"
 }
 
+func (p *printer) paramStr(param *Param) string {
+	s := fmt.Sprintf("%s %s", p.typeRefStr(param.Type), param.Name)
+	for _, a := range param.Annotations {
+		s += " `" + a.Name
+	}
+	return s
+}
+
 func (p *printer) paramsStr(params []*Param) string {
 	var parts []string
 	for _, param := range params {
-		parts = append(parts, fmt.Sprintf("%s %s", p.typeRefStr(param.Type), param.Name))
+		parts = append(parts, p.paramStr(param))
 	}
 	return "(" + strings.Join(parts, ", ") + ")"
 }
@@ -362,7 +370,7 @@ func (p *printer) methodParamsStr(recv *ReceiverParam, params []*Param) string {
 		parts = append(parts, mod+"this")
 	}
 	for _, param := range params {
-		parts = append(parts, fmt.Sprintf("%s %s", p.typeRefStr(param.Type), param.Name))
+		parts = append(parts, p.paramStr(param))
 	}
 	return "(" + strings.Join(parts, ", ") + ")"
 }

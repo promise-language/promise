@@ -1494,6 +1494,62 @@ func TestBuildDeclDetails(t *testing.T) {
 			},
 		},
 		{
+			name: "param_annotation_doc",
+			src:  "f(int x `doc(\"must be positive\")) {}",
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				assertLen(t, fn.Params, 1)
+				assertLen(t, fn.Params[0].Annotations, 1)
+				assertEqual(t, fn.Params[0].Annotations[0].Name, "doc")
+				assertLen(t, fn.Params[0].Annotations[0].Params, 1)
+				assertEqual(t, fn.Params[0].Annotations[0].Params[0].Name, "")
+			},
+		},
+		{
+			name: "param_annotation_no_args",
+			src:  "f(int x `deprecated) {}",
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				assertLen(t, fn.Params[0].Annotations, 1)
+				assertEqual(t, fn.Params[0].Annotations[0].Name, "deprecated")
+				assertLen(t, fn.Params[0].Annotations[0].Params, 0)
+			},
+		},
+		{
+			name: "param_annotation_multiple_params",
+			src:  "f(int a `doc(\"first\"), int b `doc(\"second\")) {}",
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				assertLen(t, fn.Params, 2)
+				assertLen(t, fn.Params[0].Annotations, 1)
+				assertEqual(t, fn.Params[0].Annotations[0].Name, "doc")
+				assertLen(t, fn.Params[1].Annotations, 1)
+				assertEqual(t, fn.Params[1].Annotations[0].Name, "doc")
+			},
+		},
+		{
+			name: "param_annotation_with_default",
+			src:  "f(int x `doc(\"the value\") = 42) {}",
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				p := fn.Params[0]
+				assertLen(t, p.Annotations, 1)
+				assertEqual(t, p.Annotations[0].Name, "doc")
+				assertNotNil(t, p.Default)
+			},
+		},
+		{
+			name: "param_annotation_method",
+			src:  "type T { foo(&this, int x `doc(\"param\")) {} }",
+			check: func(t *testing.T, file *File) {
+				td := file.Decls[0].(*TypeDecl)
+				m := td.Methods[0]
+				assertLen(t, m.Params, 1)
+				assertLen(t, m.Params[0].Annotations, 1)
+				assertEqual(t, m.Params[0].Annotations[0].Name, "doc")
+			},
+		},
+		{
 			name: "multi_inherit",
 			src:  `type Hybrid is Flyable, Swimmable { }`,
 			check: func(t *testing.T, file *File) {

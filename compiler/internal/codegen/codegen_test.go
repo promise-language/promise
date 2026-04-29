@@ -7140,3 +7140,64 @@ func TestGoroutineExitUsesDoneLock(t *testing.T) {
 	assertContains(t, ir, "waiter_loop")
 	assertContains(t, ir, "waiters_done")
 }
+
+// --- Named Arguments Tests ---
+
+func TestNamedArgsConstructorCodegen(t *testing.T) {
+	// Named args in reverse order should produce correct field stores
+	ir := generateIR(t, `
+		type Point { int x; int y; }
+		main() {
+			p := Point(y: 20, x: 10);
+		}
+	`)
+	// Both fields should be stored
+	assertContains(t, ir, "store")
+}
+
+func TestNamedArgsConstructorPositionalCodegen(t *testing.T) {
+	// All positional args should work for constructors
+	ir := generateIR(t, `
+		type Point { int x; int y; }
+		main() {
+			p := Point(10, 20);
+		}
+	`)
+	assertContains(t, ir, "store")
+}
+
+func TestNamedArgsFunctionCallCodegen(t *testing.T) {
+	// Named args reordered should generate correct call
+	ir := generateIR(t, `
+		add(int a, int b) int { return a + b; }
+		main() {
+			r := add(b: 2, a: 1);
+		}
+	`)
+	assertContains(t, ir, "call")
+	assertContains(t, ir, "@add")
+}
+
+func TestNamedArgsMethodCallCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		type Calc {
+			int value;
+			compute(int a, int b) int { return a + b; }
+		}
+		main() {
+			c := Calc(value: 0);
+			r := c.compute(b: 2, a: 1);
+		}
+	`)
+	assertContains(t, ir, "Calc.compute")
+}
+
+func TestNamedArgsMixedPositionalNamedCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		calc(int a, int b, int c) int { return a + b + c; }
+		main() {
+			r := calc(1, c: 3, b: 2);
+		}
+	`)
+	assertContains(t, ir, "@calc")
+}

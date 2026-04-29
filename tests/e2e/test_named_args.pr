@@ -1,0 +1,372 @@
+// --- Types ---
+
+type Point {
+    int x;
+    int y;
+
+    sum(&this) int {
+        return this.x + this.y;
+    }
+
+    scale(&this, int factor, int offset) int {
+        return (this.x + this.y) * factor + offset;
+    }
+
+    add_point(&this, int dx, int dy) Point {
+        return Point(x: this.x + dx, y: this.y + dy);
+    }
+}
+
+type Config {
+    string host;
+    int port;
+    string? label;
+}
+
+type Defaults {
+    int port = 8080;
+    string host = "localhost";
+}
+
+type Multi {
+    int a;
+    int b = 10;
+    int? c;
+    int d = 40;
+}
+
+type Validated {
+    int value;
+    new(~this, int raw, int scale) {
+        this.value = raw * scale;
+    }
+}
+
+type Animal {
+    string name;
+    int age;
+}
+
+type Dog is Animal {
+    string breed;
+}
+
+type Cat is Animal {
+    int lives = 9;
+}
+
+enum Color { Red, Green, Blue }
+
+enum Shape {
+    Circle(f64 radius),
+    Rect(f64 w, f64 h),
+}
+
+// --- Functions ---
+
+add(int a, int b, int c) int {
+    return a + b + c;
+}
+
+compute(int x, int y = 10, int z = 100) int {
+    return x + y + z;
+}
+
+identity(int val) int {
+    return val;
+}
+
+pair_sum(int first, int second) int {
+    return first + second;
+}
+
+// === Function tests ===
+
+test_func_all_positional() `test {
+    assert(add(1, 2, 3) == 6, "add(1,2,3)");
+    assert(add(0, 0, 0) == 0, "add(0,0,0)");
+    assert(add(100, 200, 300) == 600, "add(100,200,300)");
+}
+
+test_func_all_named() `test {
+    assert(add(a: 1, b: 2, c: 3) == 6, "in-order named");
+    assert(add(c: 3, b: 2, a: 1) == 6, "reverse named");
+    assert(add(b: 20, a: 10, c: 30) == 60, "mixed order named");
+}
+
+test_func_positional_then_named() `test {
+    assert(add(1, b: 2, c: 3) == 6, "1 pos + 2 named");
+    assert(add(1, 2, c: 3) == 6, "2 pos + 1 named");
+    assert(add(100, c: 300, b: 200) == 600, "pos + reordered named");
+}
+
+test_func_defaults_omit() `test {
+    assert(compute(1) == 111, "omit y and z");
+    assert(compute(1, 2) == 103, "omit z only");
+    assert(compute(1, 2, 3) == 6, "all provided positional");
+}
+
+test_func_defaults_named() `test {
+    assert(compute(x: 1) == 111, "x named, y/z default");
+    assert(compute(x: 1, z: 50) == 61, "override z, keep y default");
+    assert(compute(z: 1000, x: 1, y: 2) == 1003, "all named reordered");
+    assert(compute(x: 5, y: 5) == 110, "override y, keep z default");
+}
+
+test_func_defaults_mixed() `test {
+    assert(compute(1, z: 50) == 61, "pos x + named z");
+    assert(compute(1, 20, z: 300) == 321, "pos x,y + named z");
+    assert(compute(1, y: 20) == 121, "pos x + named y, z default");
+}
+
+test_func_single_arg() `test {
+    assert(identity(42) == 42, "positional");
+    assert(identity(val: 42) == 42, "named");
+}
+
+test_func_two_args() `test {
+    assert(pair_sum(3, 7) == 10, "positional");
+    assert(pair_sum(first: 3, second: 7) == 10, "named in-order");
+    assert(pair_sum(second: 7, first: 3) == 10, "named reversed");
+    assert(pair_sum(3, second: 7) == 10, "mixed");
+}
+
+// === Constructor tests ===
+
+test_constructor_all_positional() `test {
+    Point p = Point(3, 4);
+    assert(p.x == 3, "x");
+    assert(p.y == 4, "y");
+}
+
+test_constructor_all_named() `test {
+    Point p = Point(x: 3, y: 4);
+    assert(p.x == 3, "in-order x");
+    assert(p.y == 4, "in-order y");
+}
+
+test_constructor_named_reordered() `test {
+    Point p = Point(y: 40, x: 30);
+    assert(p.x == 30, "reordered x");
+    assert(p.y == 40, "reordered y");
+}
+
+test_constructor_mixed() `test {
+    Point p = Point(50, y: 60);
+    assert(p.x == 50, "positional x");
+    assert(p.y == 60, "named y");
+}
+
+test_constructor_optional_skip() `test {
+    Config c = Config(host: "localhost", port: 8080);
+    assert(c.host == "localhost", "host");
+    assert(c.port == 8080, "port");
+}
+
+test_constructor_optional_provide() `test {
+    Config c = Config(host: "remote", port: 443, label: "prod");
+    assert(c.host == "remote", "host");
+    assert(c.port == 443, "port");
+}
+
+test_constructor_optional_positional_skip() `test {
+    Config c = Config("direct", 9090);
+    assert(c.host == "direct", "host");
+    assert(c.port == 9090, "port");
+}
+
+test_constructor_defaults_empty() `test {
+    Defaults d = Defaults();
+    assert(d.port == 8080, "default port");
+    assert(d.host == "localhost", "default host");
+}
+
+test_constructor_defaults_override_one() `test {
+    Defaults d = Defaults(port: 3000);
+    assert(d.port == 3000, "overridden port");
+    assert(d.host == "localhost", "default host kept");
+}
+
+test_constructor_defaults_override_both() `test {
+    Defaults d = Defaults(host: "example.com", port: 443);
+    assert(d.port == 443, "overridden port");
+    assert(d.host == "example.com", "overridden host");
+}
+
+test_constructor_multi_field() `test {
+    // All provided, reordered
+    Multi m1 = Multi(d: 4, c: 3, b: 2, a: 1);
+    assert(m1.a == 1, "m1.a");
+    assert(m1.b == 2, "m1.b");
+    assert(m1.d == 4, "m1.d");
+
+    // Only required field, rest use defaults/none
+    Multi m2 = Multi(a: 99);
+    assert(m2.a == 99, "m2.a");
+    assert(m2.b == 10, "m2.b default");
+    assert(m2.d == 40, "m2.d default");
+
+    // Positional + named
+    Multi m3 = Multi(5, d: 100);
+    assert(m3.a == 5, "m3.a positional");
+    assert(m3.b == 10, "m3.b default");
+    assert(m3.d == 100, "m3.d named");
+}
+
+// === new() constructor tests ===
+
+test_new_constructor_positional() `test {
+    Validated v = Validated(7, 6);
+    assert(v.value == 42, "7*6=42");
+}
+
+test_new_constructor_named() `test {
+    Validated v = Validated(raw: 10, scale: 3);
+    assert(v.value == 30, "10*3=30");
+}
+
+test_new_constructor_named_reordered() `test {
+    Validated v = Validated(scale: 5, raw: 8);
+    assert(v.value == 40, "8*5=40");
+}
+
+test_new_constructor_mixed() `test {
+    Validated v = Validated(5, scale: 9);
+    assert(v.value == 45, "5*9=45");
+}
+
+// === Method tests ===
+
+test_method_no_extra_params() `test {
+    Point p = Point(x: 3, y: 7);
+    assert(p.sum() == 10, "sum");
+}
+
+test_method_named_reordered() `test {
+    Point p = Point(x: 3, y: 7);
+    // (3+7)*2 + 5 = 25
+    assert(p.scale(offset: 5, factor: 2) == 25, "reordered");
+}
+
+test_method_positional() `test {
+    Point p = Point(x: 3, y: 7);
+    // (3+7)*3 + 1 = 31
+    assert(p.scale(3, 1) == 31, "positional");
+}
+
+test_method_mixed() `test {
+    Point p = Point(x: 3, y: 7);
+    // (3+7)*4 + 10 = 50
+    assert(p.scale(4, offset: 10) == 50, "mixed");
+}
+
+test_method_returns_type_named() `test {
+    Point p = Point(x: 1, y: 2);
+    Point p2 = p.add_point(dy: 20, dx: 10);
+    assert(p2.x == 11, "p2.x");
+    assert(p2.y == 22, "p2.y");
+}
+
+// === Inheritance tests ===
+
+test_inheritance_all_named() `test {
+    Dog d = Dog(breed: "Lab", name: "Rex", age: 5);
+    assert(d.name == "Rex", "name");
+    assert(d.age == 5, "age");
+    assert(d.breed == "Lab", "breed");
+}
+
+test_inheritance_all_positional() `test {
+    Dog d = Dog("Buddy", 3, "Golden");
+    assert(d.name == "Buddy", "name");
+    assert(d.age == 3, "age");
+    assert(d.breed == "Golden", "breed");
+}
+
+test_inheritance_mixed() `test {
+    Dog d = Dog("Max", 7, breed: "Husky");
+    assert(d.name == "Max", "name");
+    assert(d.age == 7, "age");
+    assert(d.breed == "Husky", "breed");
+}
+
+test_inheritance_named_parent_fields_only() `test {
+    Dog d = Dog(name: "Luna", age: 2, breed: "Poodle");
+    assert(d.name == "Luna", "name");
+    assert(d.age == 2, "age");
+    assert(d.breed == "Poodle", "breed");
+}
+
+test_inheritance_with_default() `test {
+    Cat c = Cat(name: "Whiskers", age: 4);
+    assert(c.name == "Whiskers", "name");
+    assert(c.age == 4, "age");
+    assert(c.lives == 9, "default lives");
+}
+
+test_inheritance_default_override() `test {
+    Cat c = Cat(name: "Felix", age: 10, lives: 7);
+    assert(c.name == "Felix", "name");
+    assert(c.age == 10, "age");
+    assert(c.lives == 7, "overridden lives");
+}
+
+// === Enum variant tests ===
+
+test_enum_variant_positional() `test {
+    Shape s = Shape.Rect(10.0, 20.0);
+    f64 w = match s { Shape.Rect(w, h) => w, Shape.Circle(r) => 0.0, };
+    f64 h = match s { Shape.Rect(w, h) => h, Shape.Circle(r) => 0.0, };
+    assert(w == 10.0, "w");
+    assert(h == 20.0, "h");
+}
+
+test_enum_variant_named_reordered() `test {
+    Shape s = Shape.Rect(h: 30.0, w: 15.0);
+    f64 w = match s { Shape.Rect(w, h) => w, Shape.Circle(r) => 0.0, };
+    f64 h = match s { Shape.Rect(w, h) => h, Shape.Circle(r) => 0.0, };
+    assert(w == 15.0, "w reordered");
+    assert(h == 30.0, "h reordered");
+}
+
+test_enum_variant_single_named() `test {
+    Shape s = Shape.Circle(radius: 3.14);
+    f64 r = match s { Shape.Circle(r) => r, Shape.Rect(w, h) => 0.0, };
+    assert(r == 3.14, "radius");
+}
+
+test_enum_variant_single_positional() `test {
+    Shape s = Shape.Circle(2.72);
+    f64 r = match s { Shape.Circle(r) => r, Shape.Rect(w, h) => 0.0, };
+    assert(r == 2.72, "radius positional");
+}
+
+test_enum_variant_mixed() `test {
+    Shape s = Shape.Rect(5.0, h: 25.0);
+    f64 w = match s { Shape.Rect(w, h) => w, Shape.Circle(r) => 0.0, };
+    f64 h = match s { Shape.Rect(w, h) => h, Shape.Circle(r) => 0.0, };
+    assert(w == 5.0, "w mixed");
+    assert(h == 25.0, "h mixed");
+}
+
+// === Nested/chained call tests ===
+
+test_nested_named_args() `test {
+    // Named args in nested function calls
+    int result = add(a: identity(val: 10), b: identity(val: 20), c: identity(val: 30));
+    assert(result == 60, "nested named");
+}
+
+test_named_in_constructor_value() `test {
+    // Use named arg function result as constructor arg
+    Point p = Point(x: add(a: 1, b: 2, c: 3), y: add(c: 10, b: 20, a: 30));
+    assert(p.x == 6, "constructor x from func");
+    assert(p.y == 60, "constructor y from func");
+}
+
+test_method_chain_named() `test {
+    Point p = Point(x: 1, y: 2);
+    // Call method with named args, then access field
+    int result = p.add_point(dx: 10, dy: 20).sum();
+    assert(result == 33, "chained method sum");
+}

@@ -994,7 +994,36 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 			return phi
 		}
 	} else {
-		// Implicit constructor: match arguments to field names
+		// Implicit constructor: match arguments to field names.
+		// Build field-type lookup for optional wrapping.
+		fieldTypeMap := make(map[string]types.Type)
+		for _, f := range named.AllFields() {
+			ft := f.Type()
+			if c.typeSubst != nil {
+				ft = types.Substitute(ft, c.typeSubst)
+			}
+			fieldTypeMap[f.Name()] = ft
+		}
+
+		// maybeWrapOptional wraps val in an optional struct when the field type
+		// is T? but the expression produces a non-optional, non-none value.
+		maybeWrapOptional := func(val value.Value, expr ast.Expr, fieldName string, fieldIdx int) value.Value {
+			if _, isOpt := fieldTypeMap[fieldName].(*types.Optional); !isOpt {
+				return val
+			}
+			exprType := c.info.Types[expr]
+			if c.typeSubst != nil {
+				exprType = types.Substitute(exprType, c.typeSubst)
+			}
+			if exprType == types.TypNone {
+				return val
+			}
+			if _, exprOpt := exprType.(*types.Optional); exprOpt {
+				return val
+			}
+			return c.wrapOptional(val, layout.Instance.Fields[fieldIdx].LLVMType.(*irtypes.StructType))
+		}
+
 		provided := make(map[string]bool)
 		for _, arg := range e.Args {
 			if arg.Name == "" {
@@ -1006,6 +1035,7 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				panic(fmt.Sprintf("codegen: unknown field %s on type %s", arg.Name, typ))
 			}
 			val := c.genExpr(arg.Value)
+			val = maybeWrapOptional(val, arg.Value, arg.Name, fieldIdx)
 			fieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
 			c.block.NewStore(val, fieldPtr)
@@ -1025,6 +1055,7 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
 			if defExpr, ok := c.info.FieldDefaults[f]; ok {
 				val := c.genExpr(defExpr)
+				val = maybeWrapOptional(val, defExpr, f.Name(), fieldIdx)
 				c.block.NewStore(val, fieldPtr)
 			} else {
 				c.block.NewStore(c.zeroValue(layout.Instance.Fields[fieldIdx].LLVMType), fieldPtr)

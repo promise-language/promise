@@ -36,6 +36,7 @@ func Check(file *ast.File) (*Info, []error) {
 			Objects:        make(map[*ast.IdentExpr]types.Object),
 			Scopes:         make(map[ast.Node]*types.Scope),
 			FieldDefaults:  make(map[*types.Field]ast.Expr),
+			ParamDefaults:  make(map[*types.Param]ast.Expr),
 			LambdaCaptures: make(map[*ast.LambdaExpr][]*CapturedVar),
 		},
 	}

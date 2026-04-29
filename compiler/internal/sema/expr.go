@@ -571,43 +571,7 @@ func (c *Checker) checkConstructorCall(e *ast.CallExpr, named *types.Named) type
 		return c.checkNewConstructorCall(e, named, nil)
 	}
 
-	// Check arguments against fields (implicit constructor)
-	provided := make(map[string]bool)
-	for _, arg := range e.Args {
-		if arg.Name != "" {
-			provided[arg.Name] = true
-			// Named argument — check field exists and type matches
-			f := named.LookupField(arg.Name)
-			var hint types.Type
-			if f != nil {
-				hint = f.Type()
-			}
-			argType := c.checkExprWithHint(arg.Value, hint)
-			if f == nil {
-				c.errorf(arg.Pos(), "type %s has no field %s", named, arg.Name)
-			} else if argType != nil && !types.AssignableTo(argType, f.Type()) {
-				c.errorf(arg.Pos(), "cannot assign %s to field %s of type %s",
-					argType, arg.Name, f.Type())
-			}
-		} else {
-			c.checkExpr(arg.Value)
-		}
-	}
-
-	// Check that all required fields are provided.
-	// A field is required if it has no default value and is not optional (T?).
-	for _, f := range named.AllFields() {
-		if provided[f.Name()] {
-			continue
-		}
-		if f.HasDefault() {
-			continue
-		}
-		if _, isOpt := f.Type().(*types.Optional); isOpt {
-			continue
-		}
-		c.errorf(e.Pos(), "missing required field '%s' in constructor for %s", f.Name(), named)
-	}
+	c.resolveImplicitConstructorArgs(e, named, nil)
 	return named
 }
 
@@ -618,53 +582,10 @@ func (c *Checker) checkNewConstructorCall(e *ast.CallExpr, named *types.Named, s
 	if newMethod == nil {
 		return named
 	}
-	sig := newMethod.Sig()
-	params := sig.Params()
 
-	// Count required params (non-optional types can't be omitted)
-	requiredCount := 0
-	for _, p := range params {
-		if _, isOpt := p.Type().(*types.Optional); !isOpt {
-			requiredCount++
-		}
-	}
+	callDesc := "constructor for " + named.String()
+	c.resolveCallArgs(e, newMethod.Sig().Params(), callDesc, subst)
 
-	// Check argument count: must provide at least required, at most all
-	if len(e.Args) < requiredCount || len(e.Args) > len(params) {
-		if requiredCount == len(params) {
-			c.errorf(e.Pos(), "constructor for %s expects %d arguments, got %d",
-				named, len(params), len(e.Args))
-		} else {
-			c.errorf(e.Pos(), "constructor for %s expects %d-%d arguments, got %d",
-				named, requiredCount, len(params), len(e.Args))
-		}
-	}
-
-	// Check each argument type
-	for i, arg := range e.Args {
-		if i >= len(params) {
-			c.checkExpr(arg.Value)
-			continue
-		}
-		paramType := params[i].Type()
-		if subst != nil {
-			paramType = types.Substitute(paramType, subst)
-		}
-		argType := c.checkExprWithHint(arg.Value, paramType)
-		if arg.Name != "" && arg.Name != params[i].Name() {
-			c.errorf(arg.Pos(), "argument name '%s' does not match parameter '%s'",
-				arg.Name, params[i].Name())
-		}
-		if argType != nil && paramType != nil && !types.AssignableTo(argType, paramType) {
-			c.errorf(arg.Pos(), "cannot assign %s to parameter %s of type %s",
-				argType, params[i].Name(), paramType)
-		}
-	}
-
-	// If failable, return type includes error potential
-	if sig.CanError() {
-		return named // failable handled by caller (Point 5)
-	}
 	return named
 }
 
@@ -699,54 +620,11 @@ func (c *Checker) checkSuperCall(e *ast.CallExpr) types.Type {
 		if newMethod == nil || newMethod.Sig() == nil {
 			return types.TypVoid
 		}
-		params := newMethod.Sig().Params()
-		if len(e.Args) != len(params) {
-			c.errorf(e.Pos(), "super() expects %d arguments (parent %s new), got %d",
-				len(params), parent, len(e.Args))
-		}
-		for i, arg := range e.Args {
-			argType := c.checkExpr(arg.Value)
-			if i >= len(params) {
-				continue
-			}
-			if arg.Name != "" && arg.Name != params[i].Name() {
-				c.errorf(arg.Pos(), "argument name '%s' does not match parameter '%s'",
-					arg.Name, params[i].Name())
-			}
-			if argType != nil && params[i].Type() != nil && !types.AssignableTo(argType, params[i].Type()) {
-				c.errorf(arg.Pos(), "cannot assign %s to parameter %s of type %s",
-					argType, params[i].Name(), params[i].Type())
-			}
-		}
+		callDesc := "super() (parent " + parent.String() + " new)"
+		c.resolveCallArgs(e, newMethod.Sig().Params(), callDesc, nil)
 	} else {
 		// Parent has implicit constructor — validate named args against parent's fields
-		provided := make(map[string]bool)
-		for _, arg := range e.Args {
-			argType := c.checkExpr(arg.Value)
-			if arg.Name != "" {
-				provided[arg.Name] = true
-				f := parent.LookupField(arg.Name)
-				if f == nil {
-					c.errorf(arg.Pos(), "parent type %s has no field %s", parent, arg.Name)
-				} else if argType != nil && !types.AssignableTo(argType, f.Type()) {
-					c.errorf(arg.Pos(), "cannot assign %s to field %s of type %s",
-						argType, arg.Name, f.Type())
-				}
-			}
-		}
-		// Check that all required parent fields are provided
-		for _, f := range parent.AllFields() {
-			if provided[f.Name()] {
-				continue
-			}
-			if f.HasDefault() {
-				continue
-			}
-			if _, isOpt := f.Type().(*types.Optional); isOpt {
-				continue
-			}
-			c.errorf(e.Pos(), "missing required field '%s' in super() call for parent %s", f.Name(), parent)
-		}
+		c.resolveImplicitConstructorArgs(e, parent, nil)
 	}
 	return types.TypVoid
 }
@@ -765,6 +643,24 @@ func (c *Checker) checkInstanceConstructorCall(e *ast.CallExpr, inst *types.Inst
 		return inst
 	}
 
+	// Built-in types with special constructors managed by codegen.
+	if origin == types.TypChannel {
+		// channel[T]() or channel[T](capacity: n) — at most 1 arg
+		if len(e.Args) > 1 {
+			c.errorf(e.Pos(), "channel constructor expects at most 1 argument, got %d", len(e.Args))
+		}
+		for _, arg := range e.Args {
+			c.checkExpr(arg.Value)
+		}
+		return inst
+	}
+	if origin == types.TypVector {
+		for _, arg := range e.Args {
+			c.checkExpr(arg.Value)
+		}
+		return inst
+	}
+
 	subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
 
 	// If the type has an explicit new() constructor, route through parameter checking
@@ -773,38 +669,7 @@ func (c *Checker) checkInstanceConstructorCall(e *ast.CallExpr, inst *types.Inst
 		return inst
 	}
 
-	provided := make(map[string]bool)
-	for _, arg := range e.Args {
-		argType := c.checkExpr(arg.Value)
-		if arg.Name != "" {
-			provided[arg.Name] = true
-			f := origin.LookupField(arg.Name)
-			if f == nil {
-				c.errorf(arg.Pos(), "type %s has no field %s", inst, arg.Name)
-			} else if argType != nil {
-				fieldType := types.Substitute(f.Type(), subst)
-				if !types.AssignableTo(argType, fieldType) {
-					c.errorf(arg.Pos(), "cannot assign %s to field %s of type %s",
-						argType, arg.Name, fieldType)
-				}
-			}
-		}
-	}
-
-	// Check that all required fields are provided.
-	for _, f := range origin.AllFields() {
-		if provided[f.Name()] {
-			continue
-		}
-		if f.HasDefault() {
-			continue
-		}
-		fieldType := types.Substitute(f.Type(), subst)
-		if _, isOpt := fieldType.(*types.Optional); isOpt {
-			continue
-		}
-		c.errorf(e.Pos(), "missing required field '%s' in constructor for %s", f.Name(), inst)
-	}
+	c.resolveImplicitConstructorArgs(e, origin, subst)
 	return inst
 }
 
@@ -837,33 +702,15 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) types.Type {
 		return nil
 	}
 
-	// Check argument count
-	if len(e.Args) != len(sig.Params()) {
-		c.errorf(e.Pos(), "function expects %d arguments, got %d",
-			len(sig.Params()), len(e.Args))
-		// Continue checking what we can
+	// Build call description for error messages.
+	callDesc := "function"
+	if ident, ok := e.Callee.(*ast.IdentExpr); ok {
+		callDesc = "function '" + ident.Name + "'"
+	} else if mem, ok := e.Callee.(*ast.MemberExpr); ok {
+		callDesc = "method '" + mem.Field + "'"
 	}
 
-	// Check argument types
-	n := len(e.Args)
-	if n > len(sig.Params()) {
-		n = len(sig.Params())
-	}
-	for i := 0; i < n; i++ {
-		paramType := sig.Params()[i].Type()
-		argType := c.checkExprWithHint(e.Args[i].Value, paramType)
-		if argType == nil {
-			continue
-		}
-		if !types.AssignableTo(argType, paramType) {
-			c.errorf(e.Args[i].Pos(), "argument type %s not assignable to parameter type %s",
-				argType, paramType)
-		}
-	}
-	// Check remaining args even if too many
-	for i := n; i < len(e.Args); i++ {
-		c.checkExpr(e.Args[i].Value)
-	}
+	c.resolveCallArgs(e, sig.Params(), callDesc, nil)
 
 	if sig.Result() != nil {
 		return sig.Result()

@@ -379,6 +379,10 @@ func (c *Checker) resolveMethodSignature(named *types.Named, md *ast.MethodDecl)
 			return nil
 		}
 		params[i] = types.NewParam(p.Name, pt, resolveRefMod(p.RefMod))
+		if p.Default != nil {
+			params[i].SetHasDefault(true)
+			c.info.ParamDefaults[params[i]] = p.Default
+		}
 	}
 
 	// Resolve return type
@@ -511,6 +515,10 @@ func (c *Checker) resolveFuncSignature(d *ast.FuncDecl) *types.Signature {
 			return nil
 		}
 		params[i] = types.NewParam(p.Name, pt, resolveRefMod(p.RefMod))
+		if p.Default != nil {
+			params[i].SetHasDefault(true)
+			c.info.ParamDefaults[params[i]] = p.Default
+		}
 	}
 
 	// Resolve return type

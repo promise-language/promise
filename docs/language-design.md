@@ -1529,40 +1529,35 @@ There is no ordering constraint on required, defaulted, and optional parameters 
 
 At any call site, an argument can be passed by name using `name: expression`, where `name` matches a parameter name from the definition.
 
-The argument list is structured as up to three segments: an optional named prefix, one contiguous positional block, and an optional named suffix. All positional arguments must appear together — they cannot be split by named arguments.
+**Positional arguments must precede all named arguments.** Once a named argument appears, all subsequent arguments must also be named. Named arguments can appear in any order.
 
 ```promise
 // All positional
 sendEmail("bob@ex.com", "Hi");
 
-// Positional then named
+// Positional then named (skip optional params)
 sendEmail("bob@ex.com", "Hi", priority: 1);
 
-// All named
+// All named (any order)
 sendEmail(to: "bob@ex.com", subject: "Hi", cc: "a@ex.com");
+sendEmail(cc: "a@ex.com", subject: "Hi", to: "bob@ex.com");
 
-// Named, then positional, then named
-sendEmail(cc: "a@ex.com", "bob@ex.com", "Hi", priority: 1);
+// ERROR — named before positional:
+sendEmail(cc: "a@ex.com", "bob@ex.com", "Hi");
 
-// Named then positional
-sendEmail(priority: 1, "bob@ex.com", "Hi");
-
-// ERROR — positional split by named (two positional blocks):
+// ERROR — interleaving:
 sendEmail("bob@ex.com", cc: "a@ex.com", "Hi");
-
-// ERROR — interleaving (named, positional, named, positional):
-sendEmail(cc: "a@ex.com", "bob@ex.com", priority: 1, "Hi");
 ```
 
-Valid patterns: `[named...] [positional...] [named...]` — each segment optional, but positional must be one contiguous block.
+Valid pattern: `[positional...] [named...]` — positional arguments fill parameters left-to-right in declaration order, named arguments fill parameters by name.
 
 #### Argument Matching
 
 The compiler resolves arguments in this order:
 
-1. **Validate structure**: scan the argument list and verify positional arguments form one contiguous block. If positional arguments are split by named arguments, emit a compile error.
-2. **Match named arguments first**: resolve all named arguments by name lookup. Mark each matched parameter as filled. Error on unknown names or duplicate names.
-3. **Match positional arguments**: fill remaining unclaimed parameters left-to-right in declaration order (skipping the receiver and any parameters already claimed by name). Error if a positional argument targets a parameter already filled by a named argument.
+1. **Validate structure**: scan the argument list and verify all positional arguments come before any named argument. If a positional argument appears after a named argument, emit a compile error.
+2. **Match positional arguments**: fill parameters left-to-right in declaration order. The first positional argument fills the first parameter, the second fills the second, and so on.
+3. **Match named arguments**: resolve each named argument by parameter name. Mark each matched parameter as filled. Error on unknown names, duplicate names, or naming a parameter already filled by a positional argument.
 4. **Fill defaults and optionals**: for each unfilled parameter — if it has a default value, insert the default expression; if its type is `T?`, insert `none`; otherwise emit a "missing required argument" error.
 
 #### Skipping Parameters

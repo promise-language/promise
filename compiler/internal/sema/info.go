@@ -46,6 +46,10 @@ type Info struct {
 	// Used by codegen to evaluate defaults for omitted constructor arguments.
 	FieldDefaults map[*types.Field]ast.Expr
 
+	// ParamDefaults maps function/method parameters with default values to their AST default expressions.
+	// Used by codegen to evaluate defaults for omitted named arguments.
+	ParamDefaults map[*types.Param]ast.Expr
+
 	// LambdaCaptures maps each lambda to its captured variables (in capture order).
 	// Empty slice means no captures; nil key means lambda was not analyzed.
 	LambdaCaptures map[*ast.LambdaExpr][]*CapturedVar

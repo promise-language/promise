@@ -4,9 +4,10 @@ import "strings"
 
 // Param represents a function parameter.
 type Param struct {
-	name string
-	typ  Type
-	ref  RefMod
+	name   string
+	typ    Type
+	ref    RefMod
+	hasDef bool // true if parameter has a default value
 }
 
 // NewParam creates a new parameter.
@@ -14,9 +15,13 @@ func NewParam(name string, typ Type, ref RefMod) *Param {
 	return &Param{name: name, typ: typ, ref: ref}
 }
 
-func (p *Param) Name() string { return p.name }
-func (p *Param) Type() Type   { return p.typ }
-func (p *Param) Ref() RefMod  { return p.ref }
+func (p *Param) Name() string     { return p.name }
+func (p *Param) Type() Type       { return p.typ }
+func (p *Param) Ref() RefMod      { return p.ref }
+func (p *Param) HasDefault() bool { return p.hasDef }
+
+// SetHasDefault marks this parameter as having a default value.
+func (p *Param) SetHasDefault(v bool) { p.hasDef = v }
 
 // Signature represents a function type: (params) -> result.
 type Signature struct {

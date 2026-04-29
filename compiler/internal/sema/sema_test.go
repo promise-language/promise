@@ -688,7 +688,7 @@ func TestFunctionCallArityMismatch(t *testing.T) {
 		add(int a, int b) int { return a + b; }
 		test() { x := add(1); }
 	`)
-	expectError(t, errs, "expects 2 arguments, got 1")
+	expectError(t, errs, "missing required argument 'b'")
 }
 
 func TestFunctionCallTypeMismatch(t *testing.T) {
@@ -696,7 +696,7 @@ func TestFunctionCallTypeMismatch(t *testing.T) {
 		add(int a, int b) int { return a + b; }
 		test() { x := add(1, "two"); }
 	`)
-	expectError(t, errs, "not assignable to parameter")
+	expectError(t, errs, "cannot assign string to parameter 'b'")
 }
 
 // --- Member Access Tests ---
@@ -1238,8 +1238,8 @@ func TestConstructorFieldTypeMismatch(t *testing.T) {
 			Dog d = Dog(name: 42, age: "old");
 		}
 	`)
-	expectError(t, errs, "cannot assign int to field name of type string")
-	expectError(t, errs, "cannot assign string to field age of type int")
+	expectError(t, errs, "cannot assign int to field 'name' of type string")
+	expectError(t, errs, "cannot assign string to field 'age' of type int")
 }
 
 func TestConstructorFieldTypeCorrect(t *testing.T) {
@@ -1410,7 +1410,7 @@ func TestNewConstructorReplacesImplicit(t *testing.T) {
 		}
 	`)
 	// Should fail because 'x' is not a param of new(), 'y' is
-	expectError(t, errs, "argument name 'x' does not match parameter 'y'")
+	expectError(t, errs, "unknown parameter 'x'")
 }
 
 func TestNewConstructorWrongArgCount(t *testing.T) {
@@ -1425,7 +1425,7 @@ func TestNewConstructorWrongArgCount(t *testing.T) {
 			Bar b = Bar(a: 1);
 		}
 	`)
-	expectError(t, errs, "expects 2 arguments, got 1")
+	expectError(t, errs, "missing required argument 'b'")
 }
 
 func TestNewConstructorFinalFieldAssignment(t *testing.T) {
@@ -2476,7 +2476,7 @@ func TestGenericMethodParamMismatch(t *testing.T) {
 			s.push("wrong");
 		}
 	`)
-	expectError(t, errs, "not assignable")
+	expectError(t, errs, "cannot assign string to parameter")
 }
 
 func TestGenericConstructorValidation(t *testing.T) {
@@ -2520,7 +2520,7 @@ func TestGenericEnumVariantConstructorType(t *testing.T) {
 			Option[int] x = Option[int].Some("wrong");
 		}
 	`)
-	expectError(t, errs, "not assignable")
+	expectError(t, errs, "cannot assign string to parameter")
 }
 
 func TestConstraintValidationFails(t *testing.T) {
@@ -3401,7 +3401,7 @@ func TestGenericFuncCallWrongType(t *testing.T) {
 			int r := identity[int]("hello");
 		}
 	`)
-	expectError(t, errs, "not assignable")
+	expectError(t, errs, "cannot assign string to parameter")
 }
 
 func TestGenericFuncMultipleInstances(t *testing.T) {
@@ -4872,4 +4872,189 @@ func TestTaskReceiveReturnsBareType(t *testing.T) {
 			int x = result;
 		}
 	`)
+}
+
+// --- Named Arguments Tests ---
+
+func TestNamedArgsFunctionBasic(t *testing.T) {
+	checkOK(t, `
+		greet(string name, int age) string { return name; }
+		test() {
+			string s = greet(name: "Alice", age: 30);
+		}
+	`)
+}
+
+func TestNamedArgsFunctionReorder(t *testing.T) {
+	// Named args can appear in any order
+	checkOK(t, `
+		greet(string name, int age) string { return name; }
+		test() {
+			string s = greet(age: 30, name: "Alice");
+		}
+	`)
+}
+
+func TestNamedArgsPositionalThenNamed(t *testing.T) {
+	checkOK(t, `
+		add(int a, int b, int c) int { return a + b + c; }
+		test() {
+			int r = add(1, 2, c: 3);
+		}
+	`)
+}
+
+func TestNamedArgsErrorPositionalAfterNamed(t *testing.T) {
+	errs := checkErrs(t, `
+		add(int a, int b) int { return a + b; }
+		test() { int r = add(a: 1, 2); }
+	`)
+	expectError(t, errs, "positional argument after named argument")
+}
+
+func TestNamedArgsErrorUnknownParam(t *testing.T) {
+	errs := checkErrs(t, `
+		add(int a, int b) int { return a + b; }
+		test() { int r = add(a: 1, c: 2); }
+	`)
+	expectError(t, errs, "unknown parameter 'c'")
+}
+
+func TestNamedArgsErrorDuplicateParam(t *testing.T) {
+	errs := checkErrs(t, `
+		add(int a, int b) int { return a + b; }
+		test() { int r = add(a: 1, a: 2); }
+	`)
+	expectError(t, errs, "parameter 'a' already provided")
+}
+
+func TestNamedArgsErrorPositionalFillsThenNamedDuplicates(t *testing.T) {
+	errs := checkErrs(t, `
+		add(int a, int b) int { return a + b; }
+		test() { int r = add(1, a: 2); }
+	`)
+	expectError(t, errs, "parameter 'a' already provided")
+}
+
+func TestNamedArgsConstructorReorder(t *testing.T) {
+	// Implicit constructor with named args in different order
+	checkOK(t, `
+		type Dog { string name; int age; }
+		test() {
+			Dog d = Dog(age: 3, name: "Rex");
+		}
+	`)
+}
+
+func TestNamedArgsConstructorPositionalThenNamed(t *testing.T) {
+	// First positional fills first field, then named
+	checkOK(t, `
+		type Dog { string name; int age; }
+		test() {
+			Dog d = Dog("Rex", age: 3);
+		}
+	`)
+}
+
+func TestNamedArgsConstructorAllPositional(t *testing.T) {
+	// All positional: fills fields in declaration order
+	checkOK(t, `
+		type Dog { string name; int age; }
+		test() {
+			Dog d = Dog("Rex", 3);
+		}
+	`)
+}
+
+func TestNamedArgsConstructorSkipOptional(t *testing.T) {
+	// Skip optional field using named args
+	checkOK(t, `
+		type Config { string host; int port; string? label; }
+		test() {
+			Config c = Config(host: "localhost", port: 8080);
+		}
+	`)
+}
+
+func TestNamedArgsConstructorErrorPositionalAfterNamed(t *testing.T) {
+	errs := checkErrs(t, `
+		type Dog { string name; int age; }
+		test() { Dog d = Dog(name: "Rex", 3); }
+	`)
+	expectError(t, errs, "positional argument after named argument")
+}
+
+func TestNamedArgsNewConstructorReorder(t *testing.T) {
+	checkOK(t, `
+		type Point {
+			int x;
+			int y;
+			new(~this, int x, int y) {
+				this.x = x;
+				this.y = y;
+			}
+		}
+		test() {
+			Point p = Point(y: 2, x: 1);
+		}
+	`)
+}
+
+func TestNamedArgsNewConstructorPositionalThenNamed(t *testing.T) {
+	checkOK(t, `
+		type Point {
+			int x;
+			int y;
+			new(~this, int x, int y) {
+				this.x = x;
+				this.y = y;
+			}
+		}
+		test() {
+			Point p = Point(1, y: 2);
+		}
+	`)
+}
+
+func TestNamedArgsMethodCall(t *testing.T) {
+	checkOK(t, `
+		type Calc {
+			int value;
+			add(int a, int b) int { return a + b; }
+		}
+		test() {
+			Calc c = Calc(value: 0);
+			int r = c.add(b: 2, a: 1);
+		}
+	`)
+}
+
+func TestNamedArgsTooManyArgs(t *testing.T) {
+	errs := checkErrs(t, `
+		add(int a, int b) int { return a + b; }
+		test() { int r = add(1, 2, 3); }
+	`)
+	expectError(t, errs, "expects 2 arguments, got 3")
+}
+
+func TestNamedArgsTypeMismatchReordered(t *testing.T) {
+	errs := checkErrs(t, `
+		greet(string name, int age) string { return name; }
+		test() {
+			string s = greet(age: "old", name: 42);
+		}
+	`)
+	expectError(t, errs, "cannot assign string to parameter 'age'")
+	expectError(t, errs, "cannot assign int to parameter 'name'")
+}
+
+func TestNamedArgsConstructorTypeMismatchReordered(t *testing.T) {
+	errs := checkErrs(t, `
+		type Dog { string name; int age; }
+		test() {
+			Dog d = Dog(age: "old", name: 42);
+		}
+	`)
+	expectError(t, errs, "cannot assign string to field 'age'")
+	expectError(t, errs, "cannot assign int to field 'name'")
 }

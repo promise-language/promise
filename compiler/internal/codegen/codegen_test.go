@@ -6904,9 +6904,9 @@ func TestTaskReceiveParksGoroutine(t *testing.T) {
 // --- Phase 5c gap-filling tests ---
 
 func TestTaskReceiveInCoroutine(t *testing.T) {
-	// <-task inside a go block uses the coroutine park path, not the thread-blocking path.
-	// This also validates the TOCTOU race fix: after enqueueing on done_waiters,
-	// the code re-checks G.done and rescues itself if the target already completed.
+	// <-task inside a go block uses the coroutine park path with done_lock,
+	// not the thread-blocking path. The done_lock protects the done flag and
+	// done_waiters list, and park_mutex holds the lock across coro.suspend.
 	ir := generateIR(t, `
 		compute() int { return 42; }
 		main() {
@@ -6918,13 +6918,13 @@ func TestTaskReceiveInCoroutine(t *testing.T) {
 	`)
 	// The outer go block is a coroutine
 	assertContains(t, ir, "presplitcoroutine")
-	// Task receive inside coroutine: parks on done_waiters via status=waiting
+	// Task receive inside coroutine: parks on done_waiters via done_lock
 	assertContains(t, ir, "task.done")
 	assertContains(t, ir, "task.wait")
 	assertContains(t, ir, "task.ready")
-	// TOCTOU fix: re-check after enqueue → rescue block restores runnable status
-	assertContains(t, ir, "task.rescue")
-	assertContains(t, ir, "task.suspend")
+	// done_lock path: check under lock, park if not done
+	assertContains(t, ir, "task.done_under_lock")
+	assertContains(t, ir, "task.park")
 	// Coroutine suspend in the task wait path
 	assertContains(t, ir, "task.resume")
 	// Should NOT use usleep (that's the thread-blocking path)
@@ -7108,4 +7108,35 @@ func TestEnumMatchPhiWithEarlyReturn(t *testing.T) {
 	`)
 	// Both arms produce values; PHI should merge them
 	assertContains(t, ir, "phi i64")
+}
+
+func TestSchedulerReleasesParkMutex(t *testing.T) {
+	// The scheduler loop checks G.park_mutex after coro.resume returns
+	// and releases it if non-null. This closes the enqueue-before-suspend race.
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 1);
+			go { ch.send(42); };
+		}
+	`)
+	// Scheduler loop must contain the park_mutex release blocks
+	assertContains(t, ir, "release_park_mutex")
+	assertContains(t, ir, "after_release")
+}
+
+func TestGoroutineExitUsesDoneLock(t *testing.T) {
+	// goroutine_exit acquires sched.done_lock before setting done=1 and
+	// walking done_waiters, ensuring proper synchronization with task receivers.
+	ir := generateIR(t, `
+		compute() int { return 42; }
+		main() {
+			t := go compute();
+			result := <-t;
+		}
+	`)
+	// promise_goroutine_exit must lock done_lock (from sched global)
+	assertContains(t, ir, "promise_goroutine_exit")
+	// The function should contain mutex lock/unlock calls
+	assertContains(t, ir, "waiter_loop")
+	assertContains(t, ir, "waiters_done")
 }

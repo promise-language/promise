@@ -1,0 +1,31 @@
+// Worker pool: 3 workers read from jobs channel, double each value,
+// send to results. Tests concurrent channel consumers.
+// sum of i*2 for i=0..9 = 90
+
+main() {
+  jobs := channel[int](capacity: 10);
+  results := channel[int](capacity: 10);
+
+  // Send 10 jobs first (buffered, won't block)
+  for idx in 0..10 {
+    jobs.send(idx);
+  }
+  jobs.close();
+
+  // Spawn 3 workers
+  for w in 0..3 {
+    go {
+      for j in jobs {
+        results.send(j * 2);
+      }
+    };
+  }
+
+  // Collect 10 results
+  int sum = 0;
+  for j in 0..10 {
+    r := <-results;
+    if v := r { sum = sum + v; }
+  }
+  print_int(sum);
+}

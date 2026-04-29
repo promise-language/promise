@@ -20,6 +20,7 @@ const (
 	gFieldResultPtr   = 6 // i8*  for task[T]: heap-allocated result storage
 	gFieldDone        = 7 // i8   for task[T]: completion flag (0=running, 1=done)
 	gFieldDoneWaiters = 8 // i8*  for task[T]: head of Gs waiting on <-task
+	gFieldParkMutex   = 9 // i8*  mutex to release after coro.suspend completes
 )
 
 // G status values.
@@ -32,7 +33,7 @@ const (
 )
 
 // goroutineStructType returns the LLVM struct type for a goroutine (G).
-// Layout: { i8*, i8, i8*, i8*, i8*, i64, i8*, i8, i8* } — 9 fields, 72 bytes.
+// Layout: { i8*, i8, i8*, i8*, i8*, i64, i8*, i8, i8*, i8* } — 10 fields.
 func goroutineStructType() *irtypes.StructType {
 	return irtypes.NewStruct(
 		irtypes.I8Ptr, // coro_handle
@@ -44,6 +45,7 @@ func goroutineStructType() *irtypes.StructType {
 		irtypes.I8Ptr, // result_ptr
 		irtypes.I8,    // done
 		irtypes.I8Ptr, // done_waiters
+		irtypes.I8Ptr, // park_mutex
 	)
 }
 
@@ -115,6 +117,7 @@ const (
 	schedFieldMainDone         = 10 // i8   1 when main goroutine completed
 	schedFieldMainDoneMutex    = 11 // i8*  mutex for main done signaling
 	schedFieldMainDoneCond     = 12 // i8*  cond var for main done signaling
+	schedFieldDoneLock         = 13 // i8*  mutex protecting task G.done + G.done_waiters
 )
 
 // schedStructType returns the LLVM struct type for the global scheduler.
@@ -133,6 +136,7 @@ func schedStructType() *irtypes.StructType {
 		irtypes.I8,    // main_done
 		irtypes.I8Ptr, // main_done_mutex
 		irtypes.I8Ptr, // main_done_cond
+		irtypes.I8Ptr, // done_lock
 	)
 }
 
@@ -223,6 +227,11 @@ func (c *Compiler) defineGNewFunc() {
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldDoneWaiters)))
 	entry.NewStore(constant.NewNull(irtypes.I8Ptr), dwField)
 
+	// Store park_mutex = null
+	pmField := entry.NewGetElementPtr(gType, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldParkMutex)))
+	entry.NewStore(constant.NewNull(irtypes.I8Ptr), pmField)
+
 	entry.NewRet(rawPtr)
 
 	c.funcs["promise_g_new"] = fn
@@ -265,6 +274,12 @@ func (c *Compiler) defineSchedInitFunc() {
 	mdCondField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldMainDoneCond)))
 	entry.NewStore(mdCond, mdCondField)
+
+	// Init done_lock (protects task G.done + G.done_waiters)
+	doneLock := entry.NewCall(c.palMutexInit)
+	doneLockField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldDoneLock)))
+	entry.NewStore(doneLock, doneLockField)
 
 	// Store num_p
 	numPField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
@@ -487,10 +502,26 @@ func (c *Compiler) defineSchedLoopFunc() {
 	coroDoneBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentGGlobal)
 	coroDoneBlk.NewBr(loop)
 
-	// coroSuspended: G suspended itself (channel op), already in a wait queue
-	// Clear current G
-	coroSuspendedBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentGGlobal)
-	coroSuspendedBlk.NewBr(loop)
+	// coroSuspended: G suspended itself. If G.park_mutex is non-null, release it
+	// now that coro.suspend has completed — this closes the enqueue-before-suspend
+	// race by ensuring no waker can dequeue+resume G before suspend finishes.
+	pmField := coroSuspendedBlk.NewGetElementPtr(gTy, gPtr2,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldParkMutex)))
+	parkMtx := coroSuspendedBlk.NewLoad(irtypes.I8Ptr, pmField)
+	hasParkMtx := coroSuspendedBlk.NewICmp(enum.IPredNE, parkMtx, constant.NewNull(irtypes.I8Ptr))
+
+	releaseMtxBlk := fn.NewBlock("release_park_mutex")
+	afterReleaseBlk := fn.NewBlock("after_release")
+	coroSuspendedBlk.NewCondBr(hasParkMtx, releaseMtxBlk, afterReleaseBlk)
+
+	// release_park_mutex: unlock the mutex and clear the field
+	releaseMtxBlk.NewCall(c.palMutexUnlock, parkMtx)
+	releaseMtxBlk.NewStore(constant.NewNull(irtypes.I8Ptr), pmField)
+	releaseMtxBlk.NewBr(afterReleaseBlk)
+
+	// after_release: clear current G and loop back
+	afterReleaseBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentGGlobal)
+	afterReleaseBlk.NewBr(loop)
 
 	// exit: return null
 	exitBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
@@ -786,6 +817,28 @@ func (c *Compiler) defineGoroutineExitFunc() {
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldStatus)))
 	entry.NewStore(constant.NewInt(irtypes.I8, gStatusDead), statusField)
 
+	// Pre-load fields we need after unlocking done_lock.
+	// For task[T] goroutines, the receiver may free the G struct as soon as
+	// done_lock is released, so we must read all G fields beforehand.
+	earlyHandleField := entry.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldCoroHandle)))
+	earlyCoroHandle := entry.NewLoad(irtypes.I8Ptr, earlyHandleField)
+	earlyIdField := entry.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldID)))
+	earlyGID := entry.NewLoad(irtypes.I64, earlyIdField)
+	earlyRpField := entry.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldResultPtr)))
+	earlyRpVal := entry.NewLoad(irtypes.I8Ptr, earlyRpField)
+
+	// Lock sched.done_lock to protect done + done_waiters atomically.
+	// This pairs with genReceiveTask's done_lock acquisition so that
+	// no waiter can enqueue-then-suspend between our done=1 and waiter walk.
+	schedTyExit := schedStructType()
+	doneLockFieldExit := entry.NewGetElementPtr(schedTyExit, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldDoneLock)))
+	doneLockExit := entry.NewLoad(irtypes.I8Ptr, doneLockFieldExit)
+	entry.NewCall(c.palMutexLock, doneLockExit)
+
 	// G.done = 1
 	doneField := entry.NewGetElementPtr(gTy, gPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldDone)))
@@ -826,17 +879,16 @@ func (c *Compiler) defineGoroutineExitFunc() {
 	waiterBody.NewStore(nextWaiter, waiterAlloca)
 	waiterBody.NewBr(waiterLoop)
 
-	// waitersDone: destroy coroutine
-	handleField := waitersDone.NewGetElementPtr(gTy, gPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldCoroHandle)))
-	coroHandle := waitersDone.NewLoad(irtypes.I8Ptr, handleField)
-	waitersDone.NewCall(c.coroDestroy, coroHandle)
+	// Unlock sched.done_lock — done + waiters fully processed.
+	// After this point, a woken task[T] receiver may free the G struct,
+	// so we must NOT access G fields below — use early-loaded values instead.
+	waitersDone.NewCall(c.palMutexUnlock, doneLockExit)
+
+	// Destroy coroutine (using early-loaded handle)
+	waitersDone.NewCall(c.coroDestroy, earlyCoroHandle)
 
 	// Signal main_done if this is G0 (id == 0)
-	idField := waitersDone.NewGetElementPtr(gTy, gPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldID)))
-	gID := waitersDone.NewLoad(irtypes.I64, idField)
-	isG0 := waitersDone.NewICmp(enum.IPredEQ, gID, constant.NewInt(irtypes.I64, 0))
+	isG0 := waitersDone.NewICmp(enum.IPredEQ, earlyGID, constant.NewInt(irtypes.I64, 0))
 
 	signalMain := fn.NewBlock("signal_main")
 	freeG := fn.NewBlock("free_g")
@@ -862,11 +914,8 @@ func (c *Compiler) defineGoroutineExitFunc() {
 	signalMain.NewBr(freeG)
 
 	// freeG: free the G struct (don't free if task[T] — caller needs result_ptr)
-	// Check if result_ptr is non-null (task[T]) — if so, don't free yet
-	rpField := freeG.NewGetElementPtr(gTy, gPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldResultPtr)))
-	rpVal := freeG.NewLoad(irtypes.I8Ptr, rpField)
-	isTask := freeG.NewICmp(enum.IPredNE, rpVal, constant.NewNull(irtypes.I8Ptr))
+	// Use early-loaded result_ptr (G struct may be freed by task receiver after unlock)
+	isTask := freeG.NewICmp(enum.IPredNE, earlyRpVal, constant.NewNull(irtypes.I8Ptr))
 
 	skipFree := fn.NewBlock("skip_free")
 	doFree := fn.NewBlock("do_free")
@@ -981,6 +1030,13 @@ func (c *Compiler) defineSchedShutdownFunc() {
 
 	// done: cleanup scheduler resources
 	doneBlk.NewCall(c.palFree, psRaw)
+
+	// Destroy done_lock
+	doneLockField := doneBlk.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldDoneLock)))
+	doneLockVal := doneBlk.NewLoad(irtypes.I8Ptr, doneLockField)
+	doneBlk.NewCall(c.palMutexDestroy, doneLockVal)
+
 	doneBlk.NewRet(nil)
 
 	c.funcs["promise_sched_shutdown"] = fn

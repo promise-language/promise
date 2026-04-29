@@ -1,0 +1,10 @@
+// Basic task: spawn a function as goroutine, await result.
+// Tests task[T] creation and value retrieval.
+
+compute() int { return 42; }
+
+main() {
+  t := go compute();
+  result := <-t;
+  print_int(result);
+}

@@ -1,0 +1,23 @@
+// Fibonacci: goroutine generates Fibonacci numbers via channel.
+// Tests sequential goroutine-channel communication.
+
+main() {
+  ch := channel[int](capacity: 10);
+  go {
+    int a = 0;
+    int b = 1;
+    for idx in 0..10 {
+      ch.send(a);
+      int t = a + b;
+      a = b;
+      b = t;
+    }
+    ch.close();
+  };
+
+  int last = 0;
+  for v in ch {
+    last = v;
+  }
+  print_int(last);
+}

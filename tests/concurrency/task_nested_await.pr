@@ -1,0 +1,15 @@
+// Nested task await: a go block internally spawns and awaits another task.
+// This exercises the done_lock + park_mutex fix (previously caused SIGSEGV).
+
+compute() int { return 7; }
+
+main() {
+  ch := channel[int](capacity: 1);
+  go {
+    t := go compute();
+    int result = <-t;
+    ch.send(result * 6);
+  };
+  r := <-ch;
+  if v := r { print_int(v); }
+}

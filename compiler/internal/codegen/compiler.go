@@ -2,7 +2,9 @@ package codegen
 
 import (
 	"fmt"
+	"os/exec"
 	"runtime"
+	"strings"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -138,7 +140,8 @@ type Compiler struct {
 	currentGGlobal *ir.Global // @__promise_current_g (TLS, i8*)
 	schedGlobal    *ir.Global // @__promise_sched (global Sched struct)
 	inCoroutine    bool       // true when compiling inside a go block coroutine body
-	coroCleanupBlk *ir.Block  // coroutine cleanup block for mid-body coro.suspend
+	coroCleanupBlk *ir.Block  // coroutine cleanup block (destroy path: coro.free + free)
+	coroSuspendBlk *ir.Block  // coroutine suspend block (suspend path: coro.end + ret)
 
 	// Go expression counter for unique trampoline function names
 	goCounter int
@@ -183,13 +186,28 @@ type selfSubstInfo struct {
 }
 
 // hostTargetTriple returns the LLVM target triple for the host platform.
-// Uses stable minimum deployment targets to avoid version mismatch warnings
-// between IR modules and clang-compiled object files.
+// On macOS, dynamically detects the OS version via sw_vers to ensure the
+// triple matches what clang expects (avoids module triple override warnings
+// and potential ABI mismatches in coroutine lowering).
 func HostTargetTriple() string {
 	switch runtime.GOOS {
 	case "darwin":
+		arch := "x86_64"
 		if runtime.GOARCH == "arm64" {
-			return "arm64-apple-macosx11.0.0"
+			arch = "arm64"
+		}
+		// Dynamically detect macOS version for correct triple
+		if out, err := exec.Command("sw_vers", "-productVersion").Output(); err == nil {
+			ver := strings.TrimSpace(string(out))
+			// Use major.0.0 form (e.g. "26.3" → "26.0.0")
+			parts := strings.Split(ver, ".")
+			if len(parts) >= 1 {
+				return arch + "-apple-macosx" + parts[0] + ".0.0"
+			}
+		}
+		// Fallback if sw_vers fails
+		if runtime.GOARCH == "arm64" {
+			return "arm64-apple-macosx14.0.0"
 		}
 		return "x86_64-apple-macosx10.15.0"
 	case "linux":

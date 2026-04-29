@@ -1,0 +1,29 @@
+// Diamond pattern: 1 producer sends work, 1 worker doubles it, 1 collector sums.
+// Tests producer-worker-collector pattern with channels.
+
+main() {
+  work := channel[int](capacity: 2);
+  results := channel[int](capacity: 2);
+
+  // Producer: send two values
+  go {
+    work.send(10);
+    work.send(20);
+    work.close();
+  };
+
+  // Worker: read all work, double each, send to results
+  go {
+    for v in work {
+      results.send(v * 2);
+    }
+    results.close();
+  };
+
+  // Collector: sum all results
+  int sum = 0;
+  for v in results {
+    sum = sum + v;
+  }
+  print_int(sum);
+}

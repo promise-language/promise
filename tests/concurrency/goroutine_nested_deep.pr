@@ -1,0 +1,15 @@
+// Nested goroutines: 3 levels deep.
+// Tests that deeply nested goroutine spawning works correctly.
+
+main() {
+  ch := channel[int](capacity: 1);
+  go {
+    go {
+      go {
+        ch.send(42);
+      };
+    };
+  };
+  r := <-ch;
+  if v := r { print_int(v); }
+}

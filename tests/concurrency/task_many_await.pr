@@ -1,0 +1,14 @@
+// Sequential task spawn and await: spawn 20 tasks one at a time, await each.
+// Tests repeated task creation and synchronization.
+
+add_one(int x) int { return x + 1; }
+
+main() {
+  int sum = 0;
+  for idx in 0..20 {
+    t := go add_one(idx);
+    int r = <-t;
+    sum = sum + r;
+  }
+  print_int(sum);
+}

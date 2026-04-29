@@ -1,0 +1,15 @@
+// Stress test: 100 goroutines each send 1 to a shared channel.
+// Tests scheduler with many concurrent goroutines.
+
+main() {
+  ch := channel[int](capacity: 100);
+  for idx in 0..100 {
+    go { ch.send(1); };
+  }
+  int sum = 0;
+  for j in 0..100 {
+    r := <-ch;
+    if v := r { sum = sum + v; }
+  }
+  print_int(sum);
+}

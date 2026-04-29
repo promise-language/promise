@@ -1590,11 +1590,16 @@ func (c *Compiler) genForInChannel(s *ast.ForInStmt, chRaw value.Value, elemType
 		recvTailPtr := c.block.NewGetElementPtr(chanType, chPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersTail)))
 		c.block.NewCall(c.funcs["promise_waiter_enqueue"], recvHeadPtr, recvTailPtr, currentG)
-		c.block.NewCall(c.palMutexUnlock, mtx)
+		// Store mutex in G.park_mutex — scheduler releases after coro.suspend completes
+		gTyForIn := goroutineStructType()
+		forInGPtr := c.block.NewBitCast(currentG, irtypes.NewPointer(gTyForIn))
+		forInPmField := c.block.NewGetElementPtr(gTyForIn, forInGPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldParkMutex)))
+		c.block.NewStore(mtx, forInPmField)
 
 		suspResult := c.block.NewCall(c.coroSuspend, constant.None, constant.False)
 		resumeBlk := c.newBlock("forin_ch.recv.resume")
-		c.block.NewSwitch(suspResult, c.coroCleanupBlk,
+		c.block.NewSwitch(suspResult, c.coroSuspendBlk,
 			ir.NewCase(constant.NewInt(irtypes.I8, 0), resumeBlk),
 			ir.NewCase(constant.NewInt(irtypes.I8, 1), c.coroCleanupBlk))
 

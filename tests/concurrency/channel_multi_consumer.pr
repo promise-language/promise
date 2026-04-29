@@ -1,0 +1,32 @@
+// Multi-consumer: 1 producer sends 25 values, 5 consumers read and forward.
+// Tests concurrent reads from a shared channel.
+
+main() {
+  ch := channel[int](capacity: 25);
+  result := channel[int](capacity: 25);
+
+  // Producer: send 25 values
+  go {
+    for idx in 0..25 {
+      ch.send(1);
+    }
+    ch.close();
+  };
+
+  // 5 consumers: each reads from ch and forwards to result
+  for c in 0..5 {
+    go {
+      for v in ch {
+        result.send(v);
+      }
+    };
+  }
+
+  // Collect all 25 results
+  int sum = 0;
+  for j in 0..25 {
+    r := <-result;
+    if v := r { sum = sum + v; }
+  }
+  print_int(sum);
+}

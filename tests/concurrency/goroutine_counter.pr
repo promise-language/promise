@@ -1,0 +1,15 @@
+// Counter: 50 goroutines each send 1 to a channel, main counts them.
+// Tests medium goroutine fan-out.
+
+main() {
+  ch := channel[int](capacity: 50);
+  for idx in 0..50 {
+    go { ch.send(1); };
+  }
+  int count = 0;
+  for j in 0..50 {
+    r := <-ch;
+    if v := r { count = count + 1; }
+  }
+  print_int(count);
+}

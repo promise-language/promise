@@ -1,0 +1,19 @@
+// Multi-producer: 5 producer goroutines, each sends 4 values.
+// Tests concurrent writes to a shared channel.
+
+main() {
+  ch := channel[int](capacity: 20);
+  for p in 0..5 {
+    go {
+      for idx in 0..4 {
+        ch.send(1);
+      }
+    };
+  }
+  int sum = 0;
+  for j in 0..20 {
+    r := <-ch;
+    if v := r { sum = sum + v; }
+  }
+  print_int(sum);
+}

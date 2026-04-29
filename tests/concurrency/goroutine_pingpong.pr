@@ -1,0 +1,25 @@
+// Ping-pong: two goroutines alternate sending values via two channels.
+// Tests bidirectional channel communication.
+
+main() {
+  ping := channel[int](capacity: 1);
+  pong := channel[int](capacity: 1);
+  int n = 5;
+
+  go {
+    for idx in 0..n {
+      ping.send(idx);
+      r := <-pong;
+    }
+  };
+
+  int last = 0;
+  for j in 0..n {
+    r := <-ping;
+    if v := r {
+      last = v;
+      pong.send(v);
+    }
+  }
+  print_int(last);
+}

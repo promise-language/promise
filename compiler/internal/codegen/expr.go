@@ -1250,11 +1250,16 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 		sendTailPtr := c.block.NewGetElementPtr(chanType, chPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersTail)))
 		c.block.NewCall(c.funcs["promise_waiter_enqueue"], sendHeadPtr, sendTailPtr, currentG)
-		c.block.NewCall(c.palMutexUnlock, mtx)
+		// Store mutex in G.park_mutex — scheduler releases after coro.suspend completes
+		gTySend := goroutineStructType()
+		sendGPtr := c.block.NewBitCast(currentG, irtypes.NewPointer(gTySend))
+		sendPmField := c.block.NewGetElementPtr(gTySend, sendGPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldParkMutex)))
+		c.block.NewStore(mtx, sendPmField)
 
 		suspResult := c.block.NewCall(c.coroSuspend, constant.None, constant.False)
 		resumeBlk := c.newBlock("send.wait.resume")
-		c.block.NewSwitch(suspResult, c.coroCleanupBlk,
+		c.block.NewSwitch(suspResult, c.coroSuspendBlk,
 			ir.NewCase(constant.NewInt(irtypes.I8, 0), resumeBlk),
 			ir.NewCase(constant.NewInt(irtypes.I8, 1), c.coroCleanupBlk))
 
@@ -1379,11 +1384,16 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 		rvSendTail := c.block.NewGetElementPtr(chanType, chPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersTail)))
 		c.block.NewCall(c.funcs["promise_waiter_enqueue"], rvSendHead, rvSendTail, rvCurrentG)
-		c.block.NewCall(c.palMutexUnlock, mtx)
+		// Store mutex in G.park_mutex — scheduler releases after coro.suspend completes
+		gTyRv := goroutineStructType()
+		rvGPtr := c.block.NewBitCast(rvCurrentG, irtypes.NewPointer(gTyRv))
+		rvPmField := c.block.NewGetElementPtr(gTyRv, rvGPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldParkMutex)))
+		c.block.NewStore(mtx, rvPmField)
 
 		rvSuspResult := c.block.NewCall(c.coroSuspend, constant.None, constant.False)
 		rvResumeBlk := c.newBlock("send.rv.resume")
-		c.block.NewSwitch(rvSuspResult, c.coroCleanupBlk,
+		c.block.NewSwitch(rvSuspResult, c.coroSuspendBlk,
 			ir.NewCase(constant.NewInt(irtypes.I8, 0), rvResumeBlk),
 			ir.NewCase(constant.NewInt(irtypes.I8, 1), c.coroCleanupBlk))
 
@@ -3921,6 +3931,7 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	savedLoopScopeDepth := c.loopScopeDepth
 	savedInCoroutine := c.inCoroutine
 	savedCoroCleanup := c.coroCleanupBlk
+	savedCoroSuspend := c.coroSuspendBlk
 
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
@@ -3970,6 +3981,9 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	suspendBlk := coroFn.NewBlock("coro.suspend")
 	bodyBlk := coroFn.NewBlock("body")
 	cleanupBlk := coroFn.NewBlock("cleanup")
+	// Create doneBlk early so intermediate coro.suspend switches can reference it.
+	// Instructions are added after the body is compiled.
+	doneBlk := coroFn.NewBlock("coro.done")
 
 	startBlk.NewSwitch(initResult, suspendBlk,
 		ir.NewCase(constant.NewInt(irtypes.I8, 0), bodyBlk),
@@ -3978,8 +3992,12 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	// Suspend: ramp returns coroutine handle
 	suspendBlk.NewRet(hdl)
 
-	// Set cleanup block for mid-body suspends (channel ops, <-task)
+	// Set cleanup and suspend blocks for mid-body coro.suspend switches.
+	// Cleanup = destroy path (coro.free + free). Suspend = default case (coro.end + ret).
+	// Per LLVM coroutine ABI, intermediate coro.suspend default cases must go to the
+	// suspend block, NOT the cleanup block — otherwise the frame is freed on park.
 	c.coroCleanupBlk = cleanupBlk
+	c.coroSuspendBlk = doneBlk
 
 	// --- Body: compile user block ---
 	c.block = bodyBlk
@@ -3996,7 +4014,6 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	coroMem := cleanupBlk.NewCall(c.coroFree, coroId, hdl)
 	needFree := cleanupBlk.NewICmp(enum.IPredNE, coroMem, constant.NewNull(irtypes.I8Ptr))
 	freeBlk := coroFn.NewBlock("coro.free")
-	doneBlk := coroFn.NewBlock("coro.done")
 	cleanupBlk.NewCondBr(needFree, freeBlk, doneBlk)
 
 	freeBlk.NewCall(c.palFree, coroMem)
@@ -4025,6 +4042,7 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	c.loopScopeDepth = savedLoopScopeDepth
 	c.inCoroutine = savedInCoroutine
 	c.coroCleanupBlk = savedCoroCleanup
+	c.coroSuspendBlk = savedCoroSuspend
 
 	// Caller: call coroutine ramp → get handle, create G, enqueue
 	handle := c.block.NewCall(coroFn, captureVals...)
@@ -4101,14 +4119,34 @@ func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.
 	// Wait for G to complete
 	c.block = waitBlk
 	if c.inCoroutine {
-		// Goroutine-mode: park current G on target G's done_waiters, then suspend.
-		// Must re-check G.done after enqueue to avoid TOCTOU race: the target
-		// could complete between our initial done check and the enqueue, leaving
-		// us parked with nobody to wake us.
+		// Goroutine-mode: use sched.done_lock to protect done + done_waiters
+		// atomically. Hold the lock across coro.suspend via G.park_mutex so
+		// the scheduler releases it after suspend completes — this prevents
+		// the enqueue-before-suspend race.
 		currentG := c.block.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
 		currentGPtr := c.block.NewBitCast(currentG, irtypes.NewPointer(gTy))
 
-		// Set current G.status = waiting
+		// Load and lock sched.done_lock
+		schedTy := schedStructType()
+		doneLockField := c.block.NewGetElementPtr(schedTy, c.schedGlobal,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldDoneLock)))
+		doneLock := c.block.NewLoad(irtypes.I8Ptr, doneLockField)
+		c.block.NewCall(c.palMutexLock, doneLock)
+
+		// Re-check G.done under lock
+		recheckDone := c.block.NewLoad(irtypes.I8, doneField)
+		recheckIsDone := c.block.NewICmp(enum.IPredNE, recheckDone, constant.NewInt(irtypes.I8, 0))
+		doneUnderLockBlk := c.newBlock("task.done_under_lock")
+		parkBlk := c.newBlock("task.park")
+		c.block.NewCondBr(recheckIsDone, doneUnderLockBlk, parkBlk)
+
+		// task.done_under_lock: target already done — unlock and proceed
+		c.block = doneUnderLockBlk
+		c.block.NewCall(c.palMutexUnlock, doneLock)
+		c.block.NewBr(readyBlk)
+
+		// task.park: set status = waiting, prepend to done_waiters, park_mutex = done_lock, suspend
+		c.block = parkBlk
 		curStatusField := c.block.NewGetElementPtr(gTy, currentGPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldStatus)))
 		c.block.NewStore(constant.NewInt(irtypes.I8, gStatusWaiting), curStatusField)
@@ -4117,31 +4155,20 @@ func (c *Compiler) genReceiveTask(e *ast.UnaryExpr, inst *types.Instance) value.
 		dwField := c.block.NewGetElementPtr(gTy, gPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldDoneWaiters)))
 		oldHead := c.block.NewLoad(irtypes.I8Ptr, dwField)
-
 		curWaitNextField := c.block.NewGetElementPtr(gTy, currentGPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldWaitNext)))
 		c.block.NewStore(oldHead, curWaitNextField)
 		c.block.NewStore(currentG, dwField)
 
-		// Re-check G.done after enqueue to close the TOCTOU window.
-		// If the target completed while we were enqueueing, self-rescue:
-		// set status back to runnable and jump straight to readyBlk.
-		recheckDone := c.block.NewLoad(irtypes.I8, doneField)
-		recheckIsDone := c.block.NewICmp(enum.IPredNE, recheckDone, constant.NewInt(irtypes.I8, 0))
-		suspendBlk := c.newBlock("task.suspend")
-		rescueBlk := c.newBlock("task.rescue")
-		c.block.NewCondBr(recheckIsDone, rescueBlk, suspendBlk)
+		// Store done_lock as park_mutex — scheduler will release after suspend
+		pmField := c.block.NewGetElementPtr(gTy, currentGPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldParkMutex)))
+		c.block.NewStore(doneLock, pmField)
 
-		// rescue: target already done — restore runnable status and proceed
-		c.block = rescueBlk
-		c.block.NewStore(constant.NewInt(irtypes.I8, gStatusRunnable), curStatusField)
-		c.block.NewBr(readyBlk)
-
-		// suspend: target still running — yield to scheduler
-		c.block = suspendBlk
+		// Suspend (lock held — scheduler releases it)
 		suspResult := c.block.NewCall(c.coroSuspend, constant.None, constant.False)
 		resumeBlk := c.newBlock("task.resume")
-		c.block.NewSwitch(suspResult, c.coroCleanupBlk,
+		c.block.NewSwitch(suspResult, c.coroSuspendBlk,
 			ir.NewCase(constant.NewInt(irtypes.I8, 0), resumeBlk),
 			ir.NewCase(constant.NewInt(irtypes.I8, 1), c.coroCleanupBlk))
 		resumeBlk.NewBr(readyBlk)
@@ -4254,11 +4281,16 @@ func (c *Compiler) genReceiveChannel(e *ast.UnaryExpr, inst *types.Instance) val
 		recvTailPtr := c.block.NewGetElementPtr(chanType, chPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersTail)))
 		c.block.NewCall(c.funcs["promise_waiter_enqueue"], recvHeadPtr, recvTailPtr, currentG)
-		c.block.NewCall(c.palMutexUnlock, mtx)
+		// Store mutex in G.park_mutex — scheduler releases after coro.suspend completes
+		gTyRecv := goroutineStructType()
+		recvGPtr := c.block.NewBitCast(currentG, irtypes.NewPointer(gTyRecv))
+		recvPmField := c.block.NewGetElementPtr(gTyRecv, recvGPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldParkMutex)))
+		c.block.NewStore(mtx, recvPmField)
 
 		suspResult := c.block.NewCall(c.coroSuspend, constant.None, constant.False)
 		resumeBlk := c.newBlock("chrecv.wait.resume")
-		c.block.NewSwitch(suspResult, c.coroCleanupBlk,
+		c.block.NewSwitch(suspResult, c.coroSuspendBlk,
 			ir.NewCase(constant.NewInt(irtypes.I8, 0), resumeBlk),
 			ir.NewCase(constant.NewInt(irtypes.I8, 1), c.coroCleanupBlk))
 

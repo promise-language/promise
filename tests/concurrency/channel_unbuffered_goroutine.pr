@@ -1,0 +1,9 @@
+// Unbuffered channel: goroutine sends, main receives.
+// Tests rendezvous synchronization between goroutines.
+
+main() {
+  ch := channel[int]();
+  go { ch.send(42); };
+  r := <-ch;
+  if v := r { print_int(v); }
+}

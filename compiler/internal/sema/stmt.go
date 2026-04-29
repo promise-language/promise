@@ -411,18 +411,72 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 	} else {
 		// Regular if
 		cond := c.checkExpr(s.Cond)
-		if cond != nil && !types.Identical(cond, types.TypBool) {
-			c.errorf(s.Cond.Pos(), "if condition must be bool, got %s", cond)
+		narrow := c.detectOptionalNarrowing(s.Cond, cond)
+		if narrow != nil {
+			// Optional narrowing: record and shadow variable in then-block
+			c.info.OptionalNarrowings[s] = narrow
+			c.openScope(s.Body, "if-narrow")
+			c.insert(types.NewVar(tpos(s.Pos()), narrow.VarName, narrow.InnerType))
+			c.checkBlock(s.Body)
+			c.closeScope()
+		} else {
+			if cond != nil && !types.Identical(cond, types.TypBool) {
+				// Suppress for bool? identifiers (ambiguity error already reported above)
+				isBoolOptIdent := false
+				if _, isIdent := s.Cond.(*ast.IdentExpr); isIdent {
+					if opt, isOpt := cond.(*types.Optional); isOpt {
+						isBoolOptIdent = types.Identical(opt.Elem(), types.TypBool)
+					}
+				}
+				if !isBoolOptIdent {
+					c.errorf(s.Cond.Pos(), "if condition must be bool, got %s", cond)
+				}
+			}
+			c.openScope(s.Body, "if-then")
+			c.checkBlock(s.Body)
+			c.closeScope()
 		}
-		c.openScope(s.Body, "if-then")
-		c.checkBlock(s.Body)
-		c.closeScope()
 	}
 
 	// Check else branch
 	if s.Else != nil {
 		c.checkStmt(s.Else)
 	}
+}
+
+// detectOptionalNarrowing checks if an if-condition implies optional narrowing.
+// Returns narrowing info if the condition is:
+//   - A simple identifier of type T? (where T is not bool)
+//   - An `x is present` expression where x is an identifier of type T?
+//
+// Returns nil if no narrowing applies.
+func (c *Checker) detectOptionalNarrowing(cond ast.Expr, condType types.Type) *OptionalNarrowing {
+	// Case 1: `if cc { ... }` where cc is T? (truthiness narrowing)
+	if ident, ok := cond.(*ast.IdentExpr); ok {
+		if opt, ok := condType.(*types.Optional); ok {
+			inner := opt.Elem()
+			// bool? is ambiguous for truthiness — require `is present` instead
+			if types.Identical(inner, types.TypBool) {
+				c.errorf(cond.Pos(), "bool? in if condition is ambiguous; use 'is present' instead")
+				return nil
+			}
+			return &OptionalNarrowing{VarName: ident.Name, InnerType: inner}
+		}
+	}
+
+	// Case 2: `if cc is present { ... }` — works for any T? including bool?
+	if isExpr, ok := cond.(*ast.IsExpr); ok {
+		if pat, ok := isExpr.Pattern.(*ast.IdentIsPattern); ok && pat.Name == "present" {
+			if ident, ok := isExpr.Expr.(*ast.IdentExpr); ok {
+				exprType := c.info.Types[isExpr.Expr]
+				if opt, ok := exprType.(*types.Optional); ok {
+					return &OptionalNarrowing{VarName: ident.Name, InnerType: opt.Elem()}
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 func (c *Checker) checkWhileStmt(s *ast.WhileStmt) {

@@ -240,6 +240,30 @@ func (c *Compiler) makeRuntimeString(s string) value.Value {
 
 // convertToString converts a value to a string (i8*) for interpolation.
 func (c *Compiler) convertToString(val value.Value, typ types.Type) value.Value {
+	// Handle optional types: print inner value if present, "none" if absent.
+	if opt, ok := typ.(*types.Optional); ok {
+		flag := c.block.NewExtractValue(val, 0)
+		someBlock := c.newBlock("interp.some")
+		noneBlock := c.newBlock("interp.none")
+		mergeBlock := c.newBlock("interp.merge")
+		c.block.NewCondBr(flag, someBlock, noneBlock)
+
+		c.block = someBlock
+		innerVal := c.block.NewExtractValue(val, 1)
+		someStr := c.convertToString(innerVal, opt.Elem())
+		someEnd := c.block
+		c.block.NewBr(mergeBlock)
+
+		c.block = noneBlock
+		noneStr := c.makeRuntimeString("none")
+		noneEnd := c.block
+		c.block.NewBr(mergeBlock)
+
+		c.block = mergeBlock
+		phi := c.block.NewPhi(ir.NewIncoming(someStr, someEnd), ir.NewIncoming(noneStr, noneEnd))
+		return phi
+	}
+
 	named := extractNamed(typ)
 	if named == nil {
 		panic(fmt.Sprintf("codegen: cannot convert %s to string for interpolation", typ))
@@ -2318,7 +2342,7 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 			if np, ok := p.(*ast.NameMatchPattern); ok && np.Name != "_" {
 				lt := subject.Type()
 				alloca := c.block.NewAlloca(lt)
-				alloca.SetName(np.Name)
+				alloca.SetName(c.uniqueLocalName(np.Name))
 				c.block.NewStore(subject, alloca)
 				c.locals[np.Name] = alloca
 			}
@@ -2548,7 +2572,7 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 	if e.Binding != "" && e.Binding != "_" {
 		errVal := c.block.NewExtractValue(result, resultErrIdx(resultType))
 		alloca := c.block.NewAlloca(irtypes.I8Ptr)
-		alloca.SetName(e.Binding)
+		alloca.SetName(c.uniqueLocalName(e.Binding))
 		c.block.NewStore(errVal, alloca)
 		c.locals[e.Binding] = alloca
 	}
@@ -3061,6 +3085,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	// Generate lambda body with fresh scope state
 	c.fn = fn
 	c.locals = make(map[string]*ir.InstAlloca)
+	c.localNameCount = make(map[string]int)
 	c.blockCounter = 0
 	c.canError = false
 	c.currentRetType = sig.Result()
@@ -3080,7 +3105,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
 			val := entry.NewLoad(captureType, fieldPtr)
 			alloca := entry.NewAlloca(captureType)
-			alloca.SetName(cv.Obj.Name() + ".cap")
+			alloca.SetName(c.uniqueLocalName(cv.Obj.Name() + ".cap"))
 			entry.NewStore(val, alloca)
 			c.locals[cv.Obj.Name()] = alloca
 			// Register drop for move-captured droppable types
@@ -3096,7 +3121,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 			continue
 		}
 		alloca := entry.NewAlloca(c.resolveType(p.Type()))
-		alloca.SetName(p.Name() + ".addr")
+		alloca.SetName(c.uniqueLocalName(p.Name() + ".addr"))
 		entry.NewStore(fn.Params[i+1], alloca) // +1 for env param
 		c.locals[p.Name()] = alloca
 	}
@@ -3966,6 +3991,7 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
+	c.localNameCount = make(map[string]int)
 	c.blockCounter = 0
 	c.canError = false
 	c.currentRetType = types.TypVoid
@@ -4001,7 +4027,7 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	// Store captured params into allocas (after coro.begin → part of frame)
 	for i, name := range captureNames {
 		alloca := startBlk.NewAlloca(captureLLVMTypes[i])
-		alloca.SetName(name + ".addr")
+		alloca.SetName(c.uniqueLocalName(name + ".addr"))
 		startBlk.NewStore(coroFn.Params[i], alloca)
 		c.locals[name] = alloca
 	}

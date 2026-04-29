@@ -1,0 +1,250 @@
+// Test functions for optional values.
+
+// --- Truthiness narrowing ---
+
+truthiness_string_present() `test {
+    string? cc = "hello";
+    if cc {
+        string s = cc;
+        assert(s == "hello", "truthiness narrows string? to string");
+    } else {
+        assert(false, "should enter then branch");
+    }
+}
+
+truthiness_string_none() `test {
+    string? cc = none;
+    if cc {
+        assert(false, "should not enter then branch");
+    }
+}
+
+truthiness_int_present() `test {
+    int? x = 42;
+    if x {
+        int n = x;
+        assert(n == 42, "truthiness narrows int? to int");
+    } else {
+        assert(false, "should enter then branch");
+    }
+}
+
+truthiness_int_none() `test {
+    int? x = none;
+    if x {
+        assert(false, "should not enter then branch");
+    }
+}
+
+// --- is present narrowing ---
+
+is_present_string() `test {
+    string? s = "world";
+    if s is present {
+        string v = s;
+        assert(v == "world", "is present narrows string?");
+    } else {
+        assert(false, "should enter then branch");
+    }
+}
+
+is_present_bool() `test {
+    bool? verbose = true;
+    if verbose is present {
+        bool b = verbose;
+        assert(b == true, "is present narrows bool?");
+    } else {
+        assert(false, "should enter then branch");
+    }
+}
+
+is_present_none() `test {
+    int? x = none;
+    if x is present {
+        assert(false, "should not enter then branch");
+    }
+}
+
+// --- is absent ---
+
+is_absent_none() `test {
+    int? x = none;
+    if x is absent {
+        assert(true, "is absent detects none");
+    } else {
+        assert(false, "should enter then branch");
+    }
+}
+
+is_absent_value() `test {
+    int? x = 42;
+    if x is absent {
+        assert(false, "should not enter then branch");
+    }
+}
+
+// --- if-unwrap ---
+
+if_unwrap_present() `test {
+    string? name = "Alice";
+    if n := name {
+        assert(n == "Alice", "if-unwrap binds value");
+    } else {
+        assert(false, "should enter then branch");
+    }
+}
+
+if_unwrap_absent() `test {
+    string? name = none;
+    if n := name {
+        assert(false, "should not enter then branch");
+    }
+}
+
+// --- Elvis operator ---
+
+elvis_none_default() `test {
+    string? x = none;
+    string result = x ?: "default";
+    assert(result == "default", "elvis gives default for none");
+}
+
+elvis_value_kept() `test {
+    string? x = "actual";
+    string result = x ?: "default";
+    assert(result == "actual", "elvis keeps present value");
+}
+
+// --- String interpolation with optionals ---
+
+interp_present_int() `test {
+    int? x = 42;
+    string s = "{x}";
+    assert(s == "42", "interpolate present int?");
+}
+
+interp_none_int() `test {
+    int? x = none;
+    string s = "{x}";
+    assert(s == "none", "interpolate none int?");
+}
+
+interp_present_string() `test {
+    string? name = "Bob";
+    string s = "hello {name}";
+    assert(s == "hello Bob", "interpolate present string?");
+}
+
+interp_none_string() `test {
+    string? name = none;
+    string s = "hello {name}";
+    assert(s == "hello none", "interpolate none string?");
+}
+
+interp_present_bool() `test {
+    bool? b = true;
+    string s = "{b}";
+    assert(s == "true", "interpolate present bool?");
+}
+
+interp_none_bool() `test {
+    bool? b = none;
+    string s = "{b}";
+    assert(s == "none", "interpolate none bool?");
+}
+
+// --- Optional user-defined types ---
+
+type Point {
+    int x;
+    int y;
+}
+
+narrowing_type_present() `test {
+    Point p = Point(x: 3, y: 4);
+    Point? mp = p;
+    if mp {
+        assert(mp.x == 3, "narrowed type field x");
+        assert(mp.y == 4, "narrowed type field y");
+    } else {
+        assert(false, "should enter then branch");
+    }
+}
+
+narrowing_type_none() `test {
+    Point? mp = none;
+    if mp {
+        assert(false, "should not enter then branch");
+    }
+}
+
+is_present_type() `test {
+    Point p = Point(x: 5, y: 6);
+    Point? mp = p;
+    if mp is present {
+        Point inner = mp;
+        assert(inner.x == 5, "is present narrows type");
+    } else {
+        assert(false, "should enter then branch");
+    }
+}
+
+// --- Narrowing with else ---
+
+narrowing_with_else() `test {
+    string? cc = none;
+    bool entered_else = false;
+    if cc {
+        assert(false, "should not enter then branch");
+    } else {
+        entered_else = true;
+    }
+    assert(entered_else, "else branch executes for none");
+}
+
+// --- Multiple narrowings in sequence ---
+
+multiple_narrowings() `test {
+    string? a = "first";
+    string? b = none;
+    bool a_ok = false;
+    bool b_absent = false;
+    if a {
+        a_ok = true;
+    }
+    if b {
+        assert(false, "b should not be present");
+    } else {
+        b_absent = true;
+    }
+    assert(a_ok, "a was present");
+    assert(b_absent, "b was absent");
+}
+
+// --- Shadowing: same var name in inner scope after narrowing ---
+
+shadowing_after_narrowing() `test {
+    int? x = 42;
+    if x {
+        int n = x;
+        assert(n == 42, "narrowed x inside if");
+    }
+    // x is still int? here
+    string s = "{x}";
+    assert(s == "42", "x still usable as int? after narrowing block");
+}
+
+// TODO: Unassigned optional locals (`int? x;` without `= expr`) — grammar requires
+// `= expression` for varDecl. Add grammar rule for `typeRef? IDENT SEMI` defaulting to none.
+
+// TODO: Compound narrowing with `&&` (`if a && b { }` where both are T?) — `&&` currently
+// requires bool operands. Would need sema to recognize optional && optional as dual narrowing.
+
+// TODO: Optional chaining (?.) on user-defined types has a pre-existing codegen bug.
+// Once fixed, add tests for: item?.name, noCfg?.host, etc.
+
+// TODO: Negative narrowing — in the else of `if cc { }` or inside `if x is absent { }`,
+// usage of the optional as type T should be a compile-time error (language-design.md §14.1).
+
+// TODO: `if !cc` form — the design doc shows `if !cc { ... }` as checking for none,
+// with cc known to be none inside the block. Not yet implemented.

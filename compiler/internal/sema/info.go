@@ -53,6 +53,16 @@ type Info struct {
 	// LambdaCaptures maps each lambda to its captured variables (in capture order).
 	// Empty slice means no captures; nil key means lambda was not analyzed.
 	LambdaCaptures map[*ast.LambdaExpr][]*CapturedVar
+
+	// OptionalNarrowings maps if-statement nodes to their narrowing info.
+	// Used by codegen to unwrap optional variables in narrowed scopes.
+	OptionalNarrowings map[*ast.IfStmt]*OptionalNarrowing
+}
+
+// OptionalNarrowing records that an if-statement narrows an optional variable.
+type OptionalNarrowing struct {
+	VarName   string     // the variable being narrowed
+	InnerType types.Type // the unwrapped type (T from T?)
 }
 
 // recordType stores the resolved type for an expression.

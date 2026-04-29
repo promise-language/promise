@@ -602,6 +602,11 @@ Known gaps and improvements deferred from completed stages.
 | Extern ABI for generic types | 8f | Low |
 | Non-instance field placements (`value`/`variant`/`type`) | 8c | Low |
 | User type `toString()` for interpolation | 8h | Low |
+| Optional chaining (`?.`) on user-defined types — bitcast bug (value struct vs instance ptr) | 8h | Medium |
+| Negative narrowing: usage of optional as `T` in else/absent blocks should error | 14.1 | Low |
+| `if !cc` form for optional none-check (`if !cc { }`) | 14.1 | Low |
+| Compound narrowing with `&&` (`if a && b { }` where both are `T?`) | 14.1 | Low |
+| Unassigned optional locals (`int? x;` defaulting to none) — grammar requires `= expression` for varDecl | 14.1 | Low |
 | Devirtualization optimization (direct call when concrete type known) | 8L | Low |
 
 ### Ownership & Type System

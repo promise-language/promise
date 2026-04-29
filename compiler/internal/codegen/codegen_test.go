@@ -7201,3 +7201,90 @@ func TestNamedArgsMixedPositionalNamedCodegen(t *testing.T) {
 	`)
 	assertContains(t, ir, "@calc")
 }
+
+// --- Optional interpolation tests ---
+
+func TestStringInterpolationOptionalPresent(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int? x = 42;
+			string s = "{x}";
+		}
+	`)
+	// Should branch on presence flag
+	assertContains(t, ir, "interp.some")
+	assertContains(t, ir, "interp.none")
+	assertContains(t, ir, "interp.merge")
+	// Should call int_to_string in the some branch
+	assertContains(t, ir, "promise_int_to_string")
+}
+
+func TestStringInterpolationOptionalNone(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int? x = none;
+			string s = "{x}";
+		}
+	`)
+	assertContains(t, ir, "interp.some")
+	assertContains(t, ir, "interp.none")
+}
+
+func TestStringInterpolationOptionalString(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string? name = "Alice";
+			string s = "hello {name}";
+		}
+	`)
+	assertContains(t, ir, "interp.some")
+	assertContains(t, ir, "interp.none")
+}
+
+// --- Optional narrowing codegen tests ---
+
+func TestOptionalTruthinessNarrowingCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string? cc = "hello";
+			if cc {
+				string s = cc;
+			}
+		}
+	`)
+	// Should have narrow blocks (not regular if blocks)
+	assertContains(t, ir, "narrow.then")
+	assertContains(t, ir, "narrow.end")
+	// In the then block, should extractvalue the inner string from the optional
+	assertContains(t, ir, "extractvalue { i1, i8* }")
+}
+
+func TestIsPresentNarrowingCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int? x = 42;
+			if x is present {
+				int n = x;
+			}
+		}
+	`)
+	assertContains(t, ir, "narrow.then")
+	// Should extract the inner i64 from { i1, i64 }
+	assertContains(t, ir, "extractvalue { i1, i64 }")
+}
+
+func TestOptionalNarrowingWithElseCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int? x = 42;
+			if x {
+				int n = x;
+			} else {
+				int n = 0;
+			}
+		}
+	`)
+	assertContains(t, ir, "narrow.then")
+	assertContains(t, ir, "narrow.else")
+	assertContains(t, ir, "narrow.end")
+}

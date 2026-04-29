@@ -10,6 +10,7 @@ import (
 	"github.com/llir/llvm/ir/value"
 
 	"djabi.dev/go/promise_lang/internal/ast"
+	"djabi.dev/go/promise_lang/internal/sema"
 	"djabi.dev/go/promise_lang/internal/types"
 )
 
@@ -91,7 +92,7 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 		lt = c.resolveType(exprType)
 	}
 	alloca := c.block.NewAlloca(lt)
-	alloca.SetName(s.Name)
+	alloca.SetName(c.uniqueLocalName(s.Name))
 
 	// Set targetType for contextual type resolution (NoneLit needs Optional(T))
 	if declType != nil {
@@ -139,7 +140,7 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	}
 	lt := c.resolveType(typ)
 	alloca := c.block.NewAlloca(lt)
-	alloca.SetName(s.Name)
+	alloca.SetName(c.uniqueLocalName(s.Name))
 	val := c.genExpr(s.Value)
 	c.block.NewStore(val, alloca)
 	c.locals[s.Name] = alloca
@@ -164,7 +165,7 @@ func (c *Compiler) genDestructureVarDecl(s *ast.DestructureVarDecl) {
 		}
 		elemType := c.resolveType(tup.Elems()[i])
 		alloca := c.block.NewAlloca(elemType)
-		alloca.SetName(name)
+		alloca.SetName(c.uniqueLocalName(name))
 		c.block.NewStore(c.block.NewExtractValue(tupleVal, uint64(i)), alloca)
 		c.locals[name] = alloca
 	}
@@ -179,7 +180,7 @@ func (c *Compiler) genUseVarDecl(s *ast.UseVarDecl) {
 	}
 	lt := c.resolveType(typ)
 	alloca := c.block.NewAlloca(lt)
-	alloca.SetName(s.Name)
+	alloca.SetName(c.uniqueLocalName(s.Name))
 	val := c.genExpr(s.Value)
 	c.block.NewStore(val, alloca)
 	c.locals[s.Name] = alloca
@@ -216,7 +217,7 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 
 	// Allocate drop flag: i1, initialized to true (should drop)
 	dropFlag := c.block.NewAlloca(irtypes.I1)
-	dropFlag.SetName(varName + ".dropflag")
+	dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
 	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
 	c.dropFlags[varName] = dropFlag
 
@@ -379,7 +380,7 @@ func (c *Compiler) maybeRegisterEnvFree(varName string, alloca *ir.InstAlloca, t
 		return
 	}
 	dropFlag := c.block.NewAlloca(irtypes.I1)
-	dropFlag.SetName(varName + ".dropflag")
+	dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
 	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
 	c.dropFlags[varName] = dropFlag
 
@@ -815,6 +816,12 @@ func (c *Compiler) genIfStmt(s *ast.IfStmt) {
 		return
 	}
 
+	// Check for optional narrowing
+	if narrow := c.info.OptionalNarrowings[s]; narrow != nil {
+		c.genIfNarrowStmt(s, narrow)
+		return
+	}
+
 	cond := c.genExpr(s.Cond)
 
 	thenBlock := c.newBlock("if.then")
@@ -836,6 +843,56 @@ func (c *Compiler) genIfStmt(s *ast.IfStmt) {
 	}
 
 	// Else branch
+	if s.Else != nil {
+		c.block = elseBlock
+		c.genStmt(s.Else)
+		if c.block.Term == nil {
+			c.block.NewBr(mergeBlock)
+		}
+	}
+
+	c.block = mergeBlock
+}
+
+// genIfNarrowStmt handles if-statements that narrow an optional variable.
+// Loads the optional, branches on the presence flag, and shadows the variable
+// with the unwrapped value in the then-block.
+func (c *Compiler) genIfNarrowStmt(s *ast.IfStmt, narrow *sema.OptionalNarrowing) {
+	// Load the optional value from the variable's alloca
+	alloca := c.locals[narrow.VarName]
+	optVal := c.block.NewLoad(alloca.ElemType, alloca)
+
+	// Extract presence flag (field 0 of { i1, T })
+	flag := c.block.NewExtractValue(optVal, 0)
+
+	thenBlock := c.newBlock("narrow.then")
+	mergeBlock := c.newBlock("narrow.end")
+
+	var elseBlock *ir.Block
+	if s.Else != nil {
+		elseBlock = c.newBlock("narrow.else")
+		c.block.NewCondBr(flag, thenBlock, elseBlock)
+	} else {
+		c.block.NewCondBr(flag, thenBlock, mergeBlock)
+	}
+
+	// Then: shadow the variable with the unwrapped inner value
+	c.block = thenBlock
+	innerVal := c.block.NewExtractValue(optVal, 1)
+	innerAlloca := c.block.NewAlloca(innerVal.Type())
+	c.block.NewStore(innerVal, innerAlloca)
+	prev := c.locals[narrow.VarName]
+	c.locals[narrow.VarName] = innerAlloca
+
+	c.genBlock(s.Body)
+	if c.block.Term == nil {
+		c.block.NewBr(mergeBlock)
+	}
+
+	// Restore original binding
+	c.locals[narrow.VarName] = prev
+
+	// Else (optional)
 	if s.Else != nil {
 		c.block = elseBlock
 		c.genStmt(s.Else)
@@ -871,7 +928,7 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 	innerVal := c.block.NewExtractValue(optVal, 1)
 	innerType := innerVal.Type()
 	alloca := c.block.NewAlloca(innerType)
-	alloca.SetName(s.Binding)
+	alloca.SetName(c.uniqueLocalName(s.Binding))
 	c.block.NewStore(innerVal, alloca)
 	prev, hadPrev := c.locals[s.Binding]
 	c.locals[s.Binding] = alloca
@@ -961,7 +1018,7 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	innerVal := c.block.NewExtractValue(optVal, 1)
 	innerType := innerVal.Type()
 	alloca := c.block.NewAlloca(innerType)
-	alloca.SetName(s.Binding)
+	alloca.SetName(c.uniqueLocalName(s.Binding))
 	c.block.NewStore(innerVal, alloca)
 	prev, hadPrev := c.locals[s.Binding]
 	c.locals[s.Binding] = alloca
@@ -1035,13 +1092,13 @@ func (c *Compiler) genForInRange(s *ast.ForInStmt) {
 	inclusive := c.block.NewLoad(irtypes.I1, inclPtr)
 
 	counterAlloca := c.block.NewAlloca(irtypes.I64)
-	counterAlloca.SetName(s.Binding)
+	counterAlloca.SetName(c.uniqueLocalName(s.Binding))
 	c.block.NewStore(start, counterAlloca)
 	c.locals[s.Binding] = counterAlloca
 
 	if s.Index != "" {
 		indexAlloca := c.block.NewAlloca(irtypes.I64)
-		indexAlloca.SetName(s.Index)
+		indexAlloca.SetName(c.uniqueLocalName(s.Index))
 		c.block.NewStore(constant.NewInt(irtypes.I64, 0), indexAlloca)
 		c.locals[s.Index] = indexAlloca
 	}
@@ -1102,7 +1159,7 @@ func (c *Compiler) genClassicForStmt(s *ast.ClassicForStmt) {
 		typ := c.info.Types[s.InitValue]
 		lt := c.resolveType(typ)
 		alloca := c.block.NewAlloca(lt)
-		alloca.SetName(s.InitName)
+		alloca.SetName(c.uniqueLocalName(s.InitName))
 		val := c.genExpr(s.InitValue)
 		c.block.NewStore(val, alloca)
 		c.locals[s.InitName] = alloca
@@ -1403,7 +1460,8 @@ func (c *Compiler) genMapCompoundAssign(inst *types.Instance, mapVal, keyVal val
 
 func (c *Compiler) lookupLocalType(s *ast.TypedVarDecl) types.Type {
 	// Only need special handling for Optional declarations
-	if _, ok := s.Type.(*ast.OptionalTypeRef); !ok {
+	optRef, ok := s.Type.(*ast.OptionalTypeRef)
+	if !ok {
 		return nil // use expression type
 	}
 
@@ -1412,8 +1470,13 @@ func (c *Compiler) lookupLocalType(s *ast.TypedVarDecl) types.Type {
 		exprType = types.Substitute(exprType, c.typeSubst)
 	}
 
-	// If value is NoneLit, look up the declared type from sema scopes
+	// If value is NoneLit, resolve the inner type from the AST OptionalTypeRef
 	if exprType == types.TypNone || exprType == nil {
+		innerType := c.resolveTypeRefToType(optRef.Inner)
+		if innerType != nil {
+			return types.NewOptional(innerType)
+		}
+		// Fallback: search sema scopes
 		return c.lookupVarType(s.Name)
 	}
 
@@ -1422,6 +1485,34 @@ func (c *Compiler) lookupLocalType(s *ast.TypedVarDecl) types.Type {
 		return exprType // already Optional
 	}
 	return types.NewOptional(exprType)
+}
+
+// resolveTypeRefToType resolves an AST TypeRef to a types.Type.
+// Handles named types (primitives and user types) by looking up in Universe and sema scopes.
+func (c *Compiler) resolveTypeRefToType(ref ast.TypeRef) types.Type {
+	switch r := ref.(type) {
+	case *ast.NamedTypeRef:
+		// Check Universe scope first (primitives)
+		if obj, _ := types.Universe.LookupParent(r.Name); obj != nil {
+			if tn, ok := obj.(*types.TypeName); ok {
+				return tn.Type()
+			}
+		}
+		// Check sema scopes (user-defined types)
+		for _, scope := range c.info.Scopes {
+			if obj := scope.Lookup(r.Name); obj != nil {
+				if tn, ok := obj.(*types.TypeName); ok {
+					return tn.Type()
+				}
+			}
+		}
+	case *ast.OptionalTypeRef:
+		inner := c.resolveTypeRefToType(r.Inner)
+		if inner != nil {
+			return types.NewOptional(inner)
+		}
+	}
+	return nil
 }
 
 // lookupVarType finds a variable's declared type by walking sema scopes.
@@ -1438,6 +1529,18 @@ func (c *Compiler) lookupVarType(name string) types.Type {
 		}
 	}
 	return nil
+}
+
+// uniqueLocalName returns a unique LLVM name for a local variable alloca.
+// On first use of a name within a function, returns it unchanged.
+// On subsequent uses (shadowing in inner scopes), appends a numeric suffix.
+func (c *Compiler) uniqueLocalName(name string) string {
+	n := c.localNameCount[name]
+	c.localNameCount[name] = n + 1
+	if n == 0 {
+		return name
+	}
+	return fmt.Sprintf("%s.%d", name, n)
 }
 
 // --- For-in over vectors ---
@@ -1458,13 +1561,13 @@ func (c *Compiler) genForInVector(s *ast.ForInStmt, slicePtr value.Value, elemTy
 
 	// Element binding alloca
 	elemAlloca := c.block.NewAlloca(elemLLVM)
-	elemAlloca.SetName(s.Binding)
+	elemAlloca.SetName(c.uniqueLocalName(s.Binding))
 	c.locals[s.Binding] = elemAlloca
 
 	// Index variable if present
 	if s.Index != "" {
 		indexAlloca := c.block.NewAlloca(irtypes.I64)
-		indexAlloca.SetName(s.Index)
+		indexAlloca.SetName(c.uniqueLocalName(s.Index))
 		c.block.NewStore(constant.NewInt(irtypes.I64, 0), indexAlloca)
 		c.locals[s.Index] = indexAlloca
 	}
@@ -1538,7 +1641,7 @@ func (c *Compiler) genForInChannel(s *ast.ForInStmt, chRaw value.Value, elemType
 
 	// Element binding alloca
 	elemAlloca := c.block.NewAlloca(elemLLVM)
-	elemAlloca.SetName(s.Binding)
+	elemAlloca.SetName(c.uniqueLocalName(s.Binding))
 	c.locals[s.Binding] = elemAlloca
 
 	headerBlock := c.newBlock("forin_ch.header")
@@ -1757,13 +1860,13 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapVal value.Value, keyType, va
 
 	// Binding alloca for the (K, V) tuple
 	bindingAlloca := c.block.NewAlloca(tupleType)
-	bindingAlloca.SetName(s.Binding)
+	bindingAlloca.SetName(c.uniqueLocalName(s.Binding))
 	c.locals[s.Binding] = bindingAlloca
 
 	// Index variable if present
 	if s.Index != "" {
 		indexAlloca := c.block.NewAlloca(irtypes.I64)
-		indexAlloca.SetName(s.Index)
+		indexAlloca.SetName(c.uniqueLocalName(s.Index))
 		c.block.NewStore(constant.NewInt(irtypes.I64, 0), indexAlloca)
 		c.locals[s.Index] = indexAlloca
 	}
@@ -1845,7 +1948,7 @@ func (c *Compiler) genForInString(s *ast.ForInStmt, strPtr value.Value) {
 	// Index variable if present
 	if s.Index != "" {
 		indexAlloca := c.block.NewAlloca(irtypes.I64)
-		indexAlloca.SetName(s.Index)
+		indexAlloca.SetName(c.uniqueLocalName(s.Index))
 		c.block.NewStore(constant.NewInt(irtypes.I64, 0), indexAlloca)
 		c.locals[s.Index] = indexAlloca
 	}
@@ -1872,7 +1975,7 @@ func (c *Compiler) genForInString(s *ast.ForInStmt, strPtr value.Value) {
 
 	c.block = bodyBlock
 	alloca := c.block.NewAlloca(irtypes.I32)
-	alloca.SetName(s.Binding)
+	alloca.SetName(c.uniqueLocalName(s.Binding))
 	c.block.NewStore(cp, alloca)
 	c.locals[s.Binding] = alloca
 

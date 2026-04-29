@@ -5107,3 +5107,107 @@ func TestParamAnnotationNamedArgsStillWork(t *testing.T) {
 		test() { int r = add(b: 2, a: 1); }
 	`)
 }
+
+// --- Optional narrowing tests ---
+
+func TestOptionalTruthinessNarrowing(t *testing.T) {
+	// if cc { ... } where cc is string? should narrow cc to string
+	info := checkOK(t, `
+		test() {
+			string? cc = "hello";
+			if cc {
+				string s = cc;
+			}
+		}
+	`)
+	if len(info.OptionalNarrowings) != 1 {
+		t.Errorf("expected 1 narrowing, got %d", len(info.OptionalNarrowings))
+	}
+}
+
+func TestOptionalTruthinessNarrowingInt(t *testing.T) {
+	// if x { ... } where x is int? should narrow x to int
+	checkOK(t, `
+		test() {
+			int? x = 42;
+			if x {
+				int n = x;
+			}
+		}
+	`)
+}
+
+func TestOptionalTruthinessNarrowingBoolError(t *testing.T) {
+	// if x { ... } where x is bool? should error (ambiguous) — exactly one error, no double-report
+	errs := checkErrs(t, `
+		test() {
+			bool? x = true;
+			if x {}
+		}
+	`)
+	expectError(t, errs, "bool? in if condition is ambiguous")
+	if len(errs) != 1 {
+		t.Errorf("expected exactly 1 error for bool? ambiguity, got %d: %v", len(errs), errs)
+	}
+}
+
+func TestIsPresentNarrowing(t *testing.T) {
+	// if x is present { ... } should narrow x to T
+	checkOK(t, `
+		test() {
+			string? cc = "hello";
+			if cc is present {
+				string s = cc;
+			}
+		}
+	`)
+}
+
+func TestIsPresentNarrowingBoolOptional(t *testing.T) {
+	// is present works for bool? (unlike truthiness)
+	checkOK(t, `
+		test() {
+			bool? verbose = true;
+			if verbose is present {
+				bool b = verbose;
+			}
+		}
+	`)
+}
+
+func TestIsAbsentNoNarrowing(t *testing.T) {
+	// is absent returns bool, no narrowing needed
+	checkOK(t, `
+		test() {
+			int? x = 42;
+			if x is absent {
+				int y = 0;
+			}
+		}
+	`)
+}
+
+func TestOptionalNarrowingWithElse(t *testing.T) {
+	// After the if block, cc should still be string? (no narrowing in else)
+	checkOK(t, `
+		test() {
+			string? cc = "hello";
+			if cc {
+				string s = cc;
+			} else {
+				int y = 0;
+			}
+		}
+	`)
+}
+
+func TestOptionalNarrowingNonIdent(t *testing.T) {
+	// Complex expressions don't trigger narrowing, should error as non-bool
+	errs := checkErrs(t, `
+		getOpt() int? { return 42; }
+		test() {
+			if getOpt() {}
+		}
+	`)
+	expectError(t, errs, "if condition must be bool")
+}

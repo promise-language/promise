@@ -166,10 +166,8 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 }
 
 func (c *Checker) checkIdentExpr(e *ast.IdentExpr) types.Type {
-	// Check for contextual keywords
-	if e.Name == "present" || e.Name == "absent" {
-		return types.TypBool
-	}
+	// "present" and "absent" are contextual keywords — only special after `is`.
+	// As standalone identifiers they are normal variables (looked up below).
 
 	// Self resolves to the enclosing type
 	if e.Name == "Self" {

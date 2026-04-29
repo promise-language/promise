@@ -1,0 +1,114 @@
+// E2E tests for optional values: narrowing, interpolation, elvis.
+
+type Config {
+    int port;
+    string host;
+}
+
+main() {
+    // --- Implicit T to T? conversion ---
+    string name = "Alice";
+    string? maybeName = name;
+    println("{maybeName}");
+
+    // --- Optional with none ---
+    int? absent = none;
+    println("{absent}");
+
+    // --- String interpolation with optional types ---
+    int? x = 42;
+    println("{x}");
+
+    string? greeting = "hi";
+    println("{greeting}");
+
+    bool? flag = true;
+    println("{flag}");
+
+    f64? pi = 3.14;
+    println("{pi}");
+
+    // --- Truthiness narrowing: if cc { ... } ---
+    string? cc = "hello";
+    if cc {
+        // cc is narrowed to string here
+        println(cc);
+    }
+
+    string? noVal = none;
+    if noVal {
+        println("should not print");
+    } else {
+        println("noVal is none");
+    }
+
+    // --- is present narrowing ---
+    int? num = 100;
+    if num is present {
+        // num is narrowed to int here
+        int n = num;
+        print_int(n);
+    }
+
+    // --- is present with bool? (truthiness is ambiguous, is present works) ---
+    bool? verbose = true;
+    if verbose is present {
+        bool b = verbose;
+        print_bool(b);
+    }
+
+    // --- is absent ---
+    int? missing = none;
+    if missing is absent {
+        println("missing is absent");
+    }
+
+    // --- if-unwrap binding ---
+    string? user = "Bob";
+    if u := user {
+        println(u);
+    }
+
+    // --- Elvis operator ---
+    string? maybeHost = none;
+    string host = maybeHost ?: "localhost";
+    println(host);
+
+    string? maybePort = "8080";
+    string port = maybePort ?: "3000";
+    println(port);
+
+    // --- Narrowing with int ---
+    int? score = 99;
+    if score {
+        int s = score;
+        print_int(s);
+    }
+
+    // --- Multiple narrowings ---
+    string? a = "first";
+    string? b = none;
+    if a {
+        println(a);
+    }
+    if b {
+        println("should not print");
+    } else {
+        println("b is none");
+    }
+
+    // --- Narrowing user-defined types ---
+    Config cfg = Config(port: 8080, host: "localhost");
+    Config? maybeCfg = cfg;
+    if maybeCfg {
+        println("{maybeCfg.port}");
+        println(maybeCfg.host);
+    }
+
+    Config? noCfg = none;
+    if noCfg {
+        println("should not print");
+    } else {
+        println("noCfg is none");
+    }
+}

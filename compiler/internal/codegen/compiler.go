@@ -32,7 +32,8 @@ type Compiler struct {
 	info        *sema.Info
 	fn          *ir.Func                         // current function being generated
 	block       *ir.Block                        // current basic block
-	locals      map[string]*ir.InstAlloca        // local variable allocas
+	locals         map[string]*ir.InstAlloca // local variable allocas
+	localNameCount map[string]int           // per-function alloca name counter for dedup
 	funcs       map[string]*ir.Func              // declared Promise functions by name
 	stdFuncs    map[string]*ir.Func              // std library functions by name (for std.X)
 	stdExterns  map[string]*ExternFunc           // std library externs by name (for std.X)
@@ -2163,6 +2164,7 @@ func (c *Compiler) defineFuncs(file *ast.File) {
 func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 	c.fn = fn
 	c.locals = make(map[string]*ir.InstAlloca)
+	c.localNameCount = make(map[string]int)
 	c.dropFlags = make(map[string]*ir.InstAlloca)
 	c.blockCounter = 0
 
@@ -2186,7 +2188,7 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 			continue
 		}
 		alloca := entry.NewAlloca(c.resolveType(p.Type()))
-		alloca.SetName(p.Name() + ".addr")
+		alloca.SetName(c.uniqueLocalName(p.Name() + ".addr"))
 		entry.NewStore(fn.Params[i], alloca)
 		c.locals[p.Name()] = alloca
 	}
@@ -2449,6 +2451,7 @@ func (c *Compiler) lookupAnyMethod(named *types.Named, name string, isGetter, is
 func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.Func, ownerNamed ...*types.Named) {
 	c.fn = fn
 	c.locals = make(map[string]*ir.InstAlloca)
+	c.localNameCount = make(map[string]int)
 	c.dropFlags = make(map[string]*ir.InstAlloca)
 	c.blockCounter = 0
 	c.canError = m.Sig().CanError()
@@ -2467,7 +2470,7 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 	// Allocate receiver as "this"
 	if m.Sig().Recv() != nil {
 		alloca := entry.NewAlloca(irtypes.I8Ptr)
-		alloca.SetName("this.addr")
+		alloca.SetName(c.uniqueLocalName("this.addr"))
 		entry.NewStore(fn.Params[paramIdx], alloca)
 		c.locals["this"] = alloca
 		paramIdx++
@@ -2481,7 +2484,7 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 		}
 		lt := c.resolveType(p.Type())
 		alloca := entry.NewAlloca(lt)
-		alloca.SetName(p.Name() + ".addr")
+		alloca.SetName(c.uniqueLocalName(p.Name() + ".addr"))
 		entry.NewStore(fn.Params[paramIdx], alloca)
 		c.locals[p.Name()] = alloca
 		paramIdx++

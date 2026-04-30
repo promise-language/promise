@@ -52,7 +52,7 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 | M:N Scheduler | LLVM coroutines, GMP model, work stealing | Done (Phase 5c) | [runtime-proposal.md](runtime-proposal.md) |
 | Operator dispatch | `[]`, `[]=`, `[:]`, `[:]=` as method-dispatched operators | Done | [subscript-slice-operators.md](subscript-slice-operators.md) |
 | Naming conventions | PascalCase canonical names for all non-scalar types; lowercase sugar | Planned | [standard-runtime.md](standard-runtime.md#naming-conventions) |
-| C binding | Generated headers for extern type safety | Planned | [c-binding-architecture.md](c-binding-architecture.md) |
+| C binding | Extern ABI coercion (`extern.go`), C header generation (`headergen.go`) | Done (dormant — header gen implemented but not exposed via CLI; original use case obsolete after C runtime migration) | [c-binding-architecture.md](c-binding-architecture.md) |
 
 ---
 

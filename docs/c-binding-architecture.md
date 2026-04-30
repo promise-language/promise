@@ -1,8 +1,10 @@
 # C Binding Architecture — Generated Header Approach
 
-## Problem
+> **Status: Implemented but dormant.** The extern ABI coercion (`extern.go`) and header generation (`headergen.go`) were built and are tested. However, the original motivation — type-safe binding to a C runtime — is obsolete: all runtime functions were migrated to codegen-emitted LLVM IR (see [runtime-proposal.md](runtime-proposal.md), Phases 1-4). The `extern` keyword and ABI coercion remain actively used for PAL function declarations in `std/*.pr`. Header generation could be revived for future C FFI if needed.
 
-The current C binding is fragile and won't scale:
+## Problem (historical)
+
+The C binding described below was fragile and wouldn't scale:
 
 1. **Hardcoded mappings.** `builtins.go` manually declares `promise_print_int`, `promise_print_f64`, etc. `declareExternFunc` pattern-matches "1 arg, void return, print-like" to select a runtime function. Every new extern requires touching three places: `declareRuntime()`, `declareExternFunc()`, and `runtime.c`.
 

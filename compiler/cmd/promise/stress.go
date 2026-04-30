@@ -315,6 +315,15 @@ func runStress(files []string, count int, duration time.Duration, perRunTimeout 
 			cancel()
 			wallClock := time.Since(runStart).Seconds()
 
+			// If SIGINT arrived during this run, the child was killed by the
+			// signal — don't record that as a real failure.
+			select {
+			case <-stopCh:
+				fmt.Fprintf(os.Stderr, "\n\nInterrupted.\n")
+				goto report
+			default:
+			}
+
 			fs.runs++
 
 			if t.isE2E {

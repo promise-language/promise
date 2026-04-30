@@ -178,13 +178,13 @@ fail_io() void! {
     raise IoError(message: "disk full", code: 28);
 }
 
-get_io_error_code() int {
+get_io_error_code() int! {
     fail_io() ? e is IoError { return e.code; };
     return 0;
 }
 
 test_typed_handler_catches() `test {
-    int code = get_io_error_code();
+    int code = get_io_error_code()!;
     assert(code == 28, "typed handler catches IoError and accesses code");
 }
 
@@ -198,16 +198,16 @@ fail_parse() void! {
     raise ParseError(message: "syntax error", line: 42);
 }
 
-try_typed_propagation() bool {
+try_typed_propagation() bool! {
     // IoError handler won't match ParseError, should propagate
     fail_parse() ? e is IoError { return false; };
     return false;
 }
 
 test_typed_handler_propagates_nonmatch() `test {
-    // try_typed_propagation is non-failable, nomatch panics
+    // try_typed_propagation is failable, nomatch propagates
     // Can't easily test panic in e2e, but we can test matching path
-    int code = get_io_error_code();
+    int code = get_io_error_code()!;
     assert(code == 28, "typed handler match path works");
 }
 

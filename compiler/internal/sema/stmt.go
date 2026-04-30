@@ -40,6 +40,7 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 
 	case *ast.ExprStmt:
 		c.checkExpr(s.Expr)
+		c.checkExprStmtFailable(s)
 
 	case *ast.IfStmt:
 		c.checkIfStmt(s)
@@ -170,6 +171,26 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 func (c *Checker) checkDestructureVarDecl(s *ast.DestructureVarDecl) {
 	valType := c.checkExpr(s.Value)
 	if valType == nil {
+		return
+	}
+
+	// Failable result capture: (val, err) := failableCall()
+	if c.info.FailableExprs[s.Value] {
+		if len(s.Names) != 2 {
+			c.errorf(s.Pos(), "failable result destructuring requires exactly 2 bindings (value, error), got %d", len(s.Names))
+			return
+		}
+		c.info.FailableDestructures[s] = true
+		// First binding: success type (T from T!)
+		if s.Names[0] != "_" {
+			c.checkNoShadow(s.Names[0], s.Pos())
+			c.insert(types.NewVar(tpos(s.Pos()), s.Names[0], valType))
+		}
+		// Second binding: error? (optional error)
+		if s.Names[1] != "_" {
+			c.checkNoShadow(s.Names[1], s.Pos())
+			c.insert(types.NewVar(tpos(s.Pos()), s.Names[1], types.NewOptional(types.TypError)))
+		}
 		return
 	}
 
@@ -421,6 +442,22 @@ func (c *Checker) checkRaiseStmt(s *ast.RaiseStmt) {
 	}
 	if named == nil || !named.InheritsFrom(types.TypError) {
 		c.errorf(s.Pos(), "raise requires an error type, got %s", valType)
+	}
+}
+
+// checkExprStmtFailable validates failable calls used as expression statements.
+// In failable functions, naked failable calls are auto-propagated.
+// In non-failable functions, naked failable calls are a compile error.
+func (c *Checker) checkExprStmtFailable(s *ast.ExprStmt) {
+	if !c.info.FailableExprs[s.Expr] {
+		return
+	}
+	// The expression is a failable call used as a statement (no ?, !, or handler).
+	if c.curFunc != nil && c.curFunc.CanError() {
+		// Auto-propagate: codegen will emit tag-check + early return.
+		c.info.AutoPropagateExprs[s.Expr] = true
+	} else {
+		c.errorf(s.Expr.Pos(), "failable call must be handled with '?', '!', or an error handler")
 	}
 }
 

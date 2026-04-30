@@ -66,7 +66,11 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 func (c *Compiler) genStmt(stmt ast.Stmt) {
 	switch s := stmt.(type) {
 	case *ast.ExprStmt:
-		c.genExpr(s.Expr)
+		if c.info.AutoPropagateExprs[s.Expr] {
+			c.genAutoPropagate(s.Expr)
+		} else {
+			c.genExpr(s.Expr)
+		}
 	case *ast.ReturnStmt:
 		c.genReturnStmt(s)
 	case *ast.TypedVarDecl:
@@ -106,6 +110,32 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 	default:
 		panic(fmt.Sprintf("codegen: unhandled statement type %T", stmt))
 	}
+}
+
+// genAutoPropagate generates implicit error propagation for a failable call
+// used as a statement in a failable function. Same semantics as explicit `?`:
+// check the error tag, propagate on error, discard ok value on success.
+func (c *Compiler) genAutoPropagate(expr ast.Expr) {
+	result := c.genExpr(expr)
+	calleeResultType := result.Type().(*irtypes.StructType)
+
+	tag := c.block.NewExtractValue(result, 0)
+
+	propagateBlock := c.newBlock("auto.propagate")
+	okBlock := c.newBlock("auto.ok")
+	c.block.NewCondBr(tag, propagateBlock, okBlock)
+
+	// Error path: cleanup scope bindings, extract error, wrap in caller's result type, early return
+	c.block = propagateBlock
+	if len(c.scopeBindings) > 0 {
+		c.emitScopeCleanup(0)
+	}
+	errVal := c.block.NewExtractValue(result, resultErrIdx(calleeResultType))
+	callerResultType := c.currentResultType()
+	c.block.NewRet(c.wrapError(errVal, callerResultType))
+
+	// Ok path: continue (value discarded since this is a statement)
+	c.block = okBlock
 }
 
 // --- Variable declarations ---
@@ -195,6 +225,10 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 
 // genDestructureVarDecl handles tuple destructuring: (a, b) := expr
 func (c *Compiler) genDestructureVarDecl(s *ast.DestructureVarDecl) {
+	if c.info.FailableDestructures[s] {
+		c.genFailableDestructure(s)
+		return
+	}
 	tupleVal := c.genExpr(s.Value)
 	tupleType := c.info.Types[s.Value]
 	if c.typeSubst != nil {
@@ -213,6 +247,89 @@ func (c *Compiler) genDestructureVarDecl(s *ast.DestructureVarDecl) {
 		alloca.SetName(c.uniqueLocalName(name))
 		c.block.NewStore(c.block.NewExtractValue(tupleVal, uint64(i)), alloca)
 		c.locals[name] = alloca
+	}
+}
+
+// genFailableDestructure handles (val, err) := failableCall()
+// Extracts the value and converts the error into an error? optional.
+func (c *Compiler) genFailableDestructure(s *ast.DestructureVarDecl) {
+	result := c.genExpr(s.Value)
+	resultType := result.Type().(*irtypes.StructType)
+	tag := c.block.NewExtractValue(result, 0) // i1: false=ok, true=error
+
+	errOptType := irtypes.NewStruct(irtypes.I1, userValueType()) // error? = {i1, {i8*, i8*}}
+
+	errBlock := c.newBlock("destruct.err")
+	okBlock := c.newBlock("destruct.ok")
+	mergeBlock := c.newBlock("destruct.merge")
+	c.block.NewCondBr(tag, errBlock, okBlock)
+
+	// --- Error path ---
+	c.block = errBlock
+	errPtr := c.block.NewExtractValue(result, resultErrIdx(resultType))
+	// Reconstruct error value struct {vtable_ptr, instance_ptr}
+	variantPtr := c.loadVariantPtr(errPtr)
+	typeinfoStruct := irtypes.NewStruct(irtypes.I8Ptr)
+	typeinfoPtr := c.block.NewBitCast(variantPtr, irtypes.NewPointer(typeinfoStruct))
+	vtableFieldPtr := c.block.NewGetElementPtr(typeinfoStruct, typeinfoPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	vtablePtr := c.block.NewLoad(irtypes.I8Ptr, vtableFieldPtr)
+	var errValStruct value.Value = constant.NewZeroInitializer(userValueType())
+	errValStruct = c.block.NewInsertValue(errValStruct, vtablePtr, 0)
+	errValStruct = c.block.NewInsertValue(errValStruct, errPtr, 1)
+	// Wrap as present optional: {true, errValStruct}
+	var errOpt value.Value = constant.NewZeroInitializer(errOptType)
+	errOpt = c.block.NewInsertValue(errOpt, constant.True, 0)
+	errOpt = c.block.NewInsertValue(errOpt, errValStruct, 1)
+	// Value on error path: zero-initialized
+	valType := c.info.Types[s.Value]
+	if c.typeSubst != nil {
+		valType = types.Substitute(valType, c.typeSubst)
+	}
+	llValType := c.resolveType(valType)
+	var errPathVal value.Value
+	if !isVoidResult(resultType) {
+		errPathVal = constant.NewZeroInitializer(llValType)
+	}
+	errEnd := c.block
+	c.block.NewBr(mergeBlock)
+
+	// --- Ok path ---
+	c.block = okBlock
+	var okPathVal value.Value
+	if !isVoidResult(resultType) {
+		okPathVal = c.block.NewExtractValue(result, 1)
+	}
+	// Absent optional: {false, zeroinitializer}
+	okOpt := constant.NewZeroInitializer(errOptType)
+	okEnd := c.block
+	c.block.NewBr(mergeBlock)
+
+	// --- Merge ---
+	c.block = mergeBlock
+
+	// Store value binding
+	if s.Names[0] != "_" && !isVoidResult(resultType) {
+		mergedVal := mergeBlock.NewPhi(
+			&ir.Incoming{X: errPathVal, Pred: errEnd},
+			&ir.Incoming{X: okPathVal, Pred: okEnd},
+		)
+		alloca := c.block.NewAlloca(llValType)
+		alloca.SetName(c.uniqueLocalName(s.Names[0]))
+		c.block.NewStore(mergedVal, alloca)
+		c.locals[s.Names[0]] = alloca
+	}
+
+	// Store error binding
+	if s.Names[1] != "_" {
+		mergedErr := mergeBlock.NewPhi(
+			&ir.Incoming{X: errOpt, Pred: errEnd},
+			&ir.Incoming{X: okOpt, Pred: okEnd},
+		)
+		alloca := c.block.NewAlloca(errOptType)
+		alloca.SetName(c.uniqueLocalName(s.Names[1]))
+		c.block.NewStore(mergedErr, alloca)
+		c.locals[s.Names[1]] = alloca
 	}
 }
 

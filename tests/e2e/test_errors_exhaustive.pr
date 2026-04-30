@@ -63,35 +63,35 @@ fail_timeout() void! {
     raise TimeoutError(message: "query timeout", status: 504, query: "SELECT 1", seconds: 30);
 }
 
-catch_as_app_error() int {
+catch_as_app_error() int! {
     fail_timeout() ? e is AppError { return e.status; };
     return 0;
 }
 
 test_catch_deep_as_parent() `test {
-    int status = catch_as_app_error();
+    int status = catch_as_app_error()!;
     assert(status == 504, "catch TimeoutError as AppError gets status");
 }
 
 // Raise leaf type, catch as mid-level DbError
-catch_as_db_error() string {
+catch_as_db_error() string! {
     fail_timeout() ? e is DbError { return e.query; };
     return "";
 }
 
 test_catch_deep_as_mid_parent() `test {
-    string q = catch_as_db_error();
+    string q = catch_as_db_error()!;
     assert(q == "SELECT 1", "catch TimeoutError as DbError gets query");
 }
 
 // Raise leaf type, catch as exact type
-catch_as_timeout() int {
+catch_as_timeout() int! {
     fail_timeout() ? e is TimeoutError { return e.seconds; };
     return 0;
 }
 
 test_catch_exact_type() `test {
-    int secs = catch_as_timeout();
+    int secs = catch_as_timeout()!;
     assert(secs == 30, "catch TimeoutError as itself gets seconds");
 }
 
@@ -225,23 +225,23 @@ fail_validation() void! {
 }
 
 // Sequential calls with different typed handlers
-process_auth() string {
+process_auth() string! {
     fail_auth() ? e is AuthError { return "auth:" + e.user; };
     return "ok";
 }
 
 test_sequential_typed_handler_auth() `test {
-    string r = process_auth();
+    string r = process_auth()!;
     assert(r == "auth:admin", "typed handler catches AuthError");
 }
 
-process_validation() string {
+process_validation() string! {
     fail_validation() ? e is ValidationError { return "field:" + e.field; };
     return "ok";
 }
 
 test_sequential_typed_handler_validation() `test {
-    string r = process_validation();
+    string r = process_validation()!;
     assert(r == "field:email", "typed handler catches ValidationError");
 }
 
@@ -259,38 +259,41 @@ fail_http() void! {
     raise HttpError(message: "server error", status: 503, url: "/api/data", retryable: true);
 }
 
-get_http_status() int {
+get_http_status() int! {
     fail_http() ? e is HttpError { return e.status; };
     return 0;
 }
 
-get_http_url() string {
+get_http_url() string! {
     fail_http() ? e is HttpError { return e.url; };
     return "";
 }
 
-get_http_retryable() bool {
+get_http_retryable() bool! {
     fail_http() ? e is HttpError { return e.retryable; };
     return false;
 }
 
 test_multi_field_error_status() `test {
-    assert(get_http_status() == 503, "HttpError status is 503");
+    assert(get_http_status()! == 503, "HttpError status is 503");
 }
 
 test_multi_field_error_url() `test {
-    assert(get_http_url() == "/api/data", "HttpError url is /api/data");
+    assert(get_http_url()! == "/api/data", "HttpError url is /api/data");
 }
 
 test_multi_field_error_retryable() `test {
-    assert(get_http_retryable(), "HttpError retryable is true");
+    assert(get_http_retryable()!, "HttpError retryable is true");
+}
+
+get_http_message() string! {
+    fail_http() ? e is HttpError { return e.message; };
+    return "";
 }
 
 test_multi_field_error_message() `test {
-    fail_http() ? e is HttpError {
-        assert(e.message == "server error", "HttpError message from base");
-        return;
-    };
+    string msg = get_http_message()!;
+    assert(msg == "server error", "HttpError message from base");
 }
 
 // ============================================================
@@ -381,24 +384,24 @@ fail_specific() void! {
 }
 
 // Handler for parent type catches child
-catch_as_base() int {
+catch_as_base() int! {
     fail_specific() ? e is BaseAppError { return e.severity; };
     return 0;
 }
 
 test_parent_handler_catches_child() `test {
-    int sev = catch_as_base();
+    int sev = catch_as_base()!;
     assert(sev == 3, "parent typed handler catches child error");
 }
 
 // Handler for exact child type
-catch_as_specific() string {
+catch_as_specific() string! {
     fail_specific() ? e is SpecificError { return e.detail; };
     return "";
 }
 
 test_exact_child_handler() `test {
-    string d = catch_as_specific();
+    string d = catch_as_specific()!;
     assert(d == "details here", "exact typed handler gets child fields");
 }
 
@@ -412,9 +415,13 @@ test_discard_binding_untyped() `test {
     assert(caught, "discard binding untyped handler works");
 }
 
+discard_binding_typed_helper() bool! {
+    fail_specific() ? _ is BaseAppError { return true; };
+    return false;
+}
+
 test_discard_binding_typed() `test {
-    bool caught = false;
-    fail_specific() ? _ is BaseAppError { caught = true; };
+    bool caught = discard_binding_typed_helper()!;
     assert(caught, "discard binding typed handler works");
 }
 

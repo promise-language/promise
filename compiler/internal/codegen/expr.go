@@ -2565,6 +2565,9 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 	c.block = handlerBlock
 	errVal := c.block.NewExtractValue(result, resultErrIdx(resultType))
 
+	var noMatchVal value.Value
+	var noMatchEnd *ir.Block
+
 	// For typed handlers, perform RTTI check before entering the handler body
 	if e.TypeName != "" {
 		targetNamed := c.lookupNamedType(e.TypeName)
@@ -2582,15 +2585,36 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 		noMatchBlock := c.newBlock("error.typed.nomatch")
 		c.block.NewCondBr(typeMatch, matchBlock, noMatchBlock)
 
-		// No-match path: propagate or panic
+		// No-match path: else body, panic (!), or propagate
 		c.block = noMatchBlock
-		if c.canError {
+		if e.ElseBody != nil {
+			// else clause: bind error and run else body
+			if e.ElseBinding != "" && e.ElseBinding != "_" {
+				elseValStruct := c.reconstructErrorValue(errVal)
+				alloca := c.block.NewAlloca(userValueType())
+				alloca.SetName(c.uniqueLocalName(e.ElseBinding))
+				c.block.NewStore(elseValStruct, alloca)
+				c.locals[e.ElseBinding] = alloca
+			}
+			noMatchVal = c.genBlockValue(e.ElseBody)
+			elseDiverged := c.block.Term != nil
+			if !elseDiverged {
+				noMatchEnd = c.block
+				c.block.NewBr(mergeBlock)
+			}
+		} else if e.PanicOnNomatch {
+			// Explicit ! suffix: panic on non-matching error
+			c.block.NewCall(c.funcs["promise_panic"], errVal)
+			c.block.NewUnreachable()
+		} else if c.canError {
 			if len(c.scopeBindings) > 0 {
 				c.emitScopeCleanup(0)
 			}
 			callerResultType := c.currentResultType()
 			c.block.NewRet(c.wrapError(errVal, callerResultType))
 		} else {
+			// Should not be reached — sema rejects typed handlers in
+			// non-failable functions without else or !
 			panicMsg := c.makeGlobalString("unhandled error type")
 			c.block.NewCall(c.funcs["promise_panic"], panicMsg)
 			c.block.NewUnreachable()
@@ -2602,19 +2626,7 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 
 	// Bind the error variable as a value struct {vtable_ptr, instance_ptr}
 	if e.Binding != "" && e.Binding != "_" {
-		// Reconstruct value struct from instance pointer
-		variantPtr := c.loadVariantPtr(errVal)
-		// typeinfo field 0 is vtable_ptr
-		typeinfoStruct := irtypes.NewStruct(irtypes.I8Ptr)
-		typeinfoPtr := c.block.NewBitCast(variantPtr, irtypes.NewPointer(typeinfoStruct))
-		vtableFieldPtr := c.block.NewGetElementPtr(typeinfoStruct, typeinfoPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-		vtablePtr := c.block.NewLoad(irtypes.I8Ptr, vtableFieldPtr)
-
-		var valStruct value.Value = constant.NewZeroInitializer(userValueType())
-		valStruct = c.block.NewInsertValue(valStruct, vtablePtr, 0)
-		valStruct = c.block.NewInsertValue(valStruct, errVal, 1)
-
+		valStruct := c.reconstructErrorValue(errVal)
 		alloca := c.block.NewAlloca(userValueType())
 		alloca.SetName(c.uniqueLocalName(e.Binding))
 		c.block.NewStore(valStruct, alloca)
@@ -2638,12 +2650,30 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 	// Merge with phi if both paths produce values
 	c.block = mergeBlock
 	if okVal != nil && handlerVal != nil {
-		return mergeBlock.NewPhi(
-			&ir.Incoming{X: okVal, Pred: okEnd},
-			&ir.Incoming{X: handlerVal, Pred: handlerEnd},
-		)
+		incomings := []*ir.Incoming{
+			{X: okVal, Pred: okEnd},
+			{X: handlerVal, Pred: handlerEnd},
+		}
+		if noMatchEnd != nil {
+			incomings = append(incomings, &ir.Incoming{X: noMatchVal, Pred: noMatchEnd})
+		}
+		return mergeBlock.NewPhi(incomings...)
 	}
 	return okVal
+}
+
+// reconstructErrorValue builds a value struct {vtable_ptr, instance_ptr} from a raw i8* error pointer.
+func (c *Compiler) reconstructErrorValue(errPtr value.Value) value.Value {
+	variantPtr := c.loadVariantPtr(errPtr)
+	typeinfoStruct := irtypes.NewStruct(irtypes.I8Ptr)
+	typeinfoPtr := c.block.NewBitCast(variantPtr, irtypes.NewPointer(typeinfoStruct))
+	vtableFieldPtr := c.block.NewGetElementPtr(typeinfoStruct, typeinfoPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	vtablePtr := c.block.NewLoad(irtypes.I8Ptr, vtableFieldPtr)
+	var valStruct value.Value = constant.NewZeroInitializer(userValueType())
+	valStruct = c.block.NewInsertValue(valStruct, vtablePtr, 0)
+	valStruct = c.block.NewInsertValue(valStruct, errPtr, 1)
+	return valStruct
 }
 
 // --- Tuple ---

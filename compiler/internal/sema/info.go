@@ -66,6 +66,16 @@ type Info struct {
 	// (failable function/method calls, failable constructor calls). Used by
 	// error operators (?, !, ? handler) to validate their inner expression.
 	FailableExprs map[ast.Expr]bool
+
+	// AutoPropagateExprs records ExprStmt expressions (failable calls used as
+	// statements in failable functions) that need implicit error propagation.
+	// Codegen emits the same tag-check + early-return as explicit `?`.
+	AutoPropagateExprs map[ast.Expr]bool
+
+	// FailableDestructures records destructure declarations whose RHS is a
+	// failable call. Codegen extracts (value, error?) from the result struct
+	// instead of a tuple.
+	FailableDestructures map[*ast.DestructureVarDecl]bool
 }
 
 // NarrowedVar records a single variable narrowing (T? → T).

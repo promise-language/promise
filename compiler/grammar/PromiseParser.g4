@@ -400,7 +400,7 @@ expression
     | expression LPAREN args RPAREN                            # callExpr
     | expression LBRACKET expression RBRACKET                  # indexExpr
     | expression LBRACKET expression? COLON expression? RBRACKET  # sliceExpr
-    | expression QUESTION bindingName? (IS IDENT)? block       # errorHandlerExpr
+    | expression QUESTION bindingName? (IS IDENT)? block (ELSE bindingName? block | BANG)?  # errorHandlerExpr
     | expression QUESTION                                      # errorPropagateExpr
     | expression BANG                                          # errorUnwrapExpr
 

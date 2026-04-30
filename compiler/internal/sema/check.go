@@ -40,6 +40,8 @@ func Check(file *ast.File) (*Info, []error) {
 			LambdaCaptures:     make(map[*ast.LambdaExpr][]*CapturedVar),
 			OptionalNarrowings: make(map[*ast.IfStmt]*OptionalNarrowing),
 			FailableExprs:      make(map[ast.Expr]bool),
+			AutoPropagateExprs:   make(map[ast.Expr]bool),
+			FailableDestructures: make(map[*ast.DestructureVarDecl]bool),
 		},
 	}
 

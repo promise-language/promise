@@ -249,13 +249,23 @@ func (b *Builder) VisitErrorHandlerExpr(ctx *parser.ErrorHandlerExprContext) int
 	node := &ErrorHandlerExpr{
 		nodeBase: b.baseFromContext(ctx),
 		Expr:     b.visitExpr(ctx.Expression()),
-		Body:     b.visitBlock(ctx.Block()),
+		Body:     b.visitBlock(ctx.Block(0)),
 	}
-	if bn := ctx.BindingName(); bn != nil {
-		node.Binding = b.bindingText(bn)
+	bindings := ctx.AllBindingName()
+	if len(bindings) > 0 {
+		node.Binding = b.bindingText(bindings[0])
 	}
 	if ctx.IS() != nil {
 		node.TypeName = ctx.IDENT().GetText()
+	}
+	if ctx.ELSE() != nil {
+		node.ElseBody = b.visitBlock(ctx.Block(1))
+		if len(bindings) > 1 {
+			node.ElseBinding = b.bindingText(bindings[1])
+		}
+	}
+	if ctx.BANG() != nil {
+		node.PanicOnNomatch = true
 	}
 	return node
 }

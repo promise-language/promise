@@ -2420,9 +2420,10 @@ func TestTypedErrorHandler(t *testing.T) {
 			int code;
 		}
 		fail() void! { raise IoError(message: "disk full", code: 28); }
-		main() {
+		process() void! {
 			fail() ? e is IoError { };
 		}
+		main() { }
 	`)
 	// Should have RTTI type check
 	assertContains(t, ir, "call i32 @promise_type_is(")
@@ -2447,21 +2448,20 @@ func TestTypedErrorHandlerInFailable(t *testing.T) {
 	assertContains(t, ir, "ret { i1, i8* }")
 }
 
-func TestTypedErrorHandlerPanicOnNomatch(t *testing.T) {
+func TestTypedErrorHandlerNomatchPropagates(t *testing.T) {
 	ir := generateIR(t, `
 		type IoError is error {
 			int code;
 		}
 		fail() void! { raise IoError(message: "disk full", code: 28); }
-		main() {
+		process() void! {
 			fail() ? e is IoError { };
 		}
+		main() { }
 	`)
-	// Nomatch path in non-failable main should panic
+	// Nomatch path in failable function should propagate error
 	assertContains(t, ir, "error.typed.nomatch")
-	assertContains(t, ir, `c"unhandled error type`)
-	assertContains(t, ir, "call void @promise_panic(")
-	assertContains(t, ir, "unreachable")
+	assertContains(t, ir, "ret { i1, i8* }")
 }
 
 func TestTypedErrorHandlerDiscardBinding(t *testing.T) {
@@ -2470,12 +2470,58 @@ func TestTypedErrorHandlerDiscardBinding(t *testing.T) {
 			int code;
 		}
 		fail() void! { raise IoError(message: "disk full", code: 28); }
-		main() {
+		process() void! {
 			fail() ? _ is IoError { };
 		}
+		main() { }
 	`)
 	assertContains(t, ir, "call i32 @promise_type_is(")
 	assertContains(t, ir, "error.typed.match")
+}
+
+func TestTypedErrorHandlerElse(t *testing.T) {
+	ir := generateIR(t, `
+		type IoError is error { int code; }
+		fail() void! { raise IoError(message: "disk full", code: 28); }
+		process() {
+			fail() ? e is IoError { } else { };
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "error.typed.match")
+	assertContains(t, ir, "error.typed.nomatch")
+	// No panic in nomatch — else handles it
+	assertNotContains(t, ir, "unhandled error type")
+}
+
+func TestTypedErrorHandlerElseWithBinding(t *testing.T) {
+	ir := generateIR(t, `
+		type IoError is error { int code; }
+		fail() void! { raise IoError(message: "disk full", code: 28); }
+		get_msg() string {
+			fail() ? e is IoError { return "io"; } else e { return e.message; };
+			return "";
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "error.typed.match")
+	assertContains(t, ir, "error.typed.nomatch")
+}
+
+func TestTypedErrorHandlerBang(t *testing.T) {
+	ir := generateIR(t, `
+		type IoError is error { int code; }
+		fail() void! { raise IoError(message: "disk full", code: 28); }
+		process() {
+			fail() ? e is IoError { }!;
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "error.typed.match")
+	assertContains(t, ir, "error.typed.nomatch")
+	// Nomatch panics via promise_panic
+	assertContains(t, ir, "call void @promise_panic(")
+	assertContains(t, ir, "unreachable")
 }
 
 func TestUntypedErrorHandlerUnchanged(t *testing.T) {
@@ -2497,7 +2543,7 @@ func TestErrorHandlerBindingFieldAccess(t *testing.T) {
 			int code;
 		}
 		fail() void! { raise IoError(message: "disk full", code: 28); }
-		process() int {
+		process() int! {
 			fail() ? e is IoError { return e.code; };
 			return 0;
 		}
@@ -2583,7 +2629,7 @@ func TestErrorInheritanceChainTypedHandler(t *testing.T) {
 		type AppError is error { int code; }
 		type DbError is AppError { string query; }
 		fail() void! { raise DbError(message: "fail", code: 500, query: "SELECT"); }
-		handler() int {
+		handler() int! {
 			fail() ? e is AppError { return e.code; };
 			return 0;
 		}
@@ -2591,6 +2637,36 @@ func TestErrorInheritanceChainTypedHandler(t *testing.T) {
 	`)
 	assertContains(t, ir, "error.typed.match")
 	assertContains(t, ir, "promise_type_is")
+}
+
+func TestAutoPropagate(t *testing.T) {
+	ir := generateIR(t, `
+		fail() void! { raise error(message: "oops"); }
+		process() void! {
+			fail();
+		}
+		main() { }
+	`)
+	// Should have auto-propagation blocks
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+	// Should extract tag and conditionally branch
+	assertContains(t, ir, "extractvalue { i1, i8* }")
+	// Should return error result on error path
+	assertContains(t, ir, "ret { i1, i8* }")
+}
+
+func TestAutoPropagate_NonVoid(t *testing.T) {
+	ir := generateIR(t, `
+		parse() int! { return 42; }
+		process() int! {
+			parse();
+			return 0;
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
 }
 
 func TestRaiseExtractsInstancePtr(t *testing.T) {
@@ -2912,6 +2988,33 @@ func TestTupleDestructureSkip(t *testing.T) {
 	assertContains(t, ir, "extractvalue { i64, i64 }")
 	// b should be allocated
 	assertContains(t, ir, "%b = alloca i64")
+}
+
+func TestFailableDestructure(t *testing.T) {
+	ir := generateIR(t, `
+		parse() int! { return 42; }
+		main() {
+			(val, err) := parse();
+		}
+	`)
+	// Should have branch on tag for error/ok paths
+	assertContains(t, ir, "destruct.err")
+	assertContains(t, ir, "destruct.ok")
+	assertContains(t, ir, "destruct.merge")
+	// Should alloca both bindings
+	assertContains(t, ir, "%val")
+	assertContains(t, ir, "%err")
+}
+
+func TestFailableDestructureDiscardError(t *testing.T) {
+	ir := generateIR(t, `
+		parse() int! { return 42; }
+		main() {
+			(val, _) := parse();
+		}
+	`)
+	assertContains(t, ir, "destruct.merge")
+	assertContains(t, ir, "%val")
 }
 
 func TestTupleMixedTypes(t *testing.T) {

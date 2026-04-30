@@ -1220,10 +1220,13 @@ The `? e { ... }` form handles errors inline. The error binding and type filter 
 |------|---------|
 | `expr ? e { ... }` | Handle any error, bind to `e` |
 | `expr ? { ... }` | Handle any error, discard error value |
-| `expr ? e is IoError { ... }` | Handle only `IoError` (or subtypes), bind to `e` |
+| `expr ? e is IoError { ... }` | Handle only `IoError` (or subtypes), bind to `e` — propagates non-match in `!` function |
 | `expr ? _ is IoError { ... }` | Handle only `IoError`, discard binding |
+| `expr ? e is IoError { ... } else { ... }` | Handle `IoError`, else catches all other errors |
+| `expr ? e is IoError { ... } else e { ... }` | Same with error binding in else clause |
+| `expr ? e is IoError { ... }!` | Handle `IoError`, panic on non-matching error |
 
-**Typed handlers** (`? e is T`) perform an RTTI check on the error. If the error does not match, it is either **propagated** (in a failable function) or **panics** (in a non-failable function).
+**Typed handlers** (`? e is T`) perform an RTTI check on the error. In a **failable function**, non-matching errors are **propagated**. In a **non-failable function**, typed handlers must be exhaustive — add an `else { }` clause, a `!` suffix (panic on nomatch), or make the function failable.
 
 The handler block must either produce a **recovery value** of the expected type, or **diverge** (`return`, `break`, `panic`). If it produces a value, that value is used in place of the failed call:
 
@@ -1242,6 +1245,24 @@ process() string! {
   string content = readFile("data.txt") ? e is IoError {
     return "fallback for IO error (code: {e.code})";
   };
+  return content;
+}
+
+// Typed handler with else — catches IoError specifically, handles all others
+handle_all() string {
+  string content = readFile("data.txt") ? e is IoError {
+    "io fallback";
+  } else e {
+    return "unexpected: {e.message}";
+  };
+  return content;
+}
+
+// Typed handler with ! — panics on non-matching (explicit opt-in)
+handle_or_die() string {
+  string content = readFile("data.txt") ? e is IoError {
+    "io fallback";
+  }!;
   return content;
 }
 ```
@@ -1267,7 +1288,9 @@ if err is present {
 | `foo()?` | Explicit propagate (same as naked) | `!` function only |
 | `foo() ? e { ... }` | Handle any error, bind to `e` | Any function |
 | `foo() ? { ... }` | Handle any error, discard value | Any function |
-| `foo() ? e is T { ... }` | Handle only type `T`, propagate others | `!` function or non-match panics |
+| `foo() ? e is T { ... }` | Handle only type `T`, propagate others | `!` function only |
+| `foo() ? e is T { ... } else { ... }` | Handle `T`, else catches rest | Any function |
+| `foo() ? e is T { ... }!` | Handle `T`, panic on non-match | Any function |
 | `foo()!` | Panic on error | Any function |
 | `(val, err) := foo()` | Capture raw result | Any function |
 

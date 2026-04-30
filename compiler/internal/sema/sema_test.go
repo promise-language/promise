@@ -1169,7 +1169,7 @@ func TestTypedHandlerInsideUntypedHandler(t *testing.T) {
 		type IoError is error { int code; }
 		a() void! { raise error(message: "a"); }
 		b() void! { raise IoError(message: "b", code: 1); }
-		foo() {
+		foo() void! {
 			a() ? e1 {
 				b() ? e2 is IoError { };
 			};
@@ -1192,10 +1192,71 @@ func TestTypedHandlerWithDiscardBinding(t *testing.T) {
 	checkOK(t, `
 		type IoError is error { int code; }
 		foo() void! { raise IoError(message: "fail", code: 1); }
+		bar() void! {
+			foo() ? _ is IoError { };
+		}
+	`)
+}
+
+func TestTypedHandlerInNonFailableRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		type IoError is error { int code; }
+		foo() void! { raise IoError(message: "fail", code: 1); }
 		bar() {
 			foo() ? _ is IoError { };
 		}
 	`)
+	expectError(t, errs, "typed error handler in non-failable function")
+}
+
+func TestTypedHandlerElseInNonFailable(t *testing.T) {
+	checkOK(t, `
+		type IoError is error { int code; }
+		foo() void! { raise IoError(message: "fail", code: 1); }
+		bar() {
+			foo() ? e is IoError { } else { };
+		}
+	`)
+}
+
+func TestTypedHandlerElseWithBinding(t *testing.T) {
+	checkOK(t, `
+		type IoError is error { int code; }
+		foo() void! { raise IoError(message: "fail", code: 1); }
+		bar() {
+			foo() ? e is IoError { } else e { };
+		}
+	`)
+}
+
+func TestTypedHandlerBangInNonFailable(t *testing.T) {
+	checkOK(t, `
+		type IoError is error { int code; }
+		foo() void! { raise IoError(message: "fail", code: 1); }
+		bar() {
+			foo() ? e is IoError { }!;
+		}
+	`)
+}
+
+func TestElseOnUntypedHandlerRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		foo() void! { raise error(message: "fail"); }
+		bar() {
+			foo() ? e { } else { };
+		}
+	`)
+	expectError(t, errs, "only valid on typed error handlers")
+}
+
+func TestBangOnUntypedHandlerRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		foo() void! { raise error(message: "fail"); }
+		bar() {
+			foo() ? e { }!;
+		}
+	`)
+	expectError(t, errs, "only valid on typed error handlers")
 }
 
 func TestHandlerNoBinding(t *testing.T) {
@@ -1203,6 +1264,73 @@ func TestHandlerNoBinding(t *testing.T) {
 		foo() void! { raise error(message: "oops"); }
 		bar() {
 			foo() ? { };
+		}
+	`)
+}
+
+func TestUnhandledFailableCallInNonFailable(t *testing.T) {
+	errs := checkErrs(t, `
+		foo() void! { raise error(message: "oops"); }
+		bar() {
+			foo();
+		}
+	`)
+	expectError(t, errs, "failable call must be handled")
+}
+
+func TestAutoPropagateFailable(t *testing.T) {
+	checkOK(t, `
+		foo() void! { raise error(message: "oops"); }
+		bar() void! {
+			foo();
+		}
+	`)
+}
+
+func TestAutoPropagateFailable_NonVoid(t *testing.T) {
+	checkOK(t, `
+		parse() int! { return 42; }
+		process() int! {
+			parse();
+			return 0;
+		}
+	`)
+}
+
+func TestFailableDestructure(t *testing.T) {
+	checkOK(t, `
+		parse() int! { return 42; }
+		foo() {
+			(val, err) := parse();
+		}
+	`)
+}
+
+func TestFailableDestructureInNonFailable(t *testing.T) {
+	// Destructuring a failable result is allowed in non-failable functions
+	// (unlike naked failable calls, destructuring explicitly captures the error)
+	checkOK(t, `
+		parse() int! { return 42; }
+		foo() {
+			(val, err) := parse();
+		}
+	`)
+}
+
+func TestFailableDestructureDiscardValue(t *testing.T) {
+	checkOK(t, `
+		parse() int! { return 42; }
+		foo() {
+			(_, err) := parse();
+		}
+	`)
+}
+
+func TestFailableDestructureDiscardError(t *testing.T) {
+	checkOK(t, `
+		parse() int! { return 42; }
+		foo() {
+			(val, _) := parse();
 		}
 	`)
 }

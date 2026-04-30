@@ -1252,9 +1252,20 @@ func (c *Checker) checkErrorHandlerExpr(e *ast.ErrorHandlerExpr) types.Type {
 		c.errorf(e.Pos(), "error handler requires a failable expression")
 	}
 
+	// Validate else/! only on typed handlers
+	if e.TypeName == "" && (e.ElseBody != nil || e.PanicOnNomatch) {
+		c.errorf(e.Pos(), "else clause and '!' are only valid on typed error handlers (? e is T { })")
+	}
+
 	// Determine binding type: specific error subtype or generic error
 	var bindingType types.Type = types.TypError
 	if e.TypeName != "" {
+		// Typed handlers in non-failable functions need else or ! to be exhaustive.
+		// Without them, non-matching errors have nowhere to go.
+		isExhaustive := e.ElseBody != nil || e.PanicOnNomatch
+		if !isExhaustive && (c.curFunc == nil || !c.curFunc.CanError()) {
+			c.errorf(e.Pos(), "typed error handler in non-failable function; add 'else { }', '!' suffix, or make function failable")
+		}
 		obj := c.lookup(e.TypeName)
 		if obj == nil {
 			c.errorf(e.Pos(), "undefined type: %s", e.TypeName)
@@ -1281,6 +1292,17 @@ func (c *Checker) checkErrorHandlerExpr(e *ast.ErrorHandlerExpr) types.Type {
 	}
 	c.checkBlock(e.Body)
 	c.closeScope()
+
+	// Type-check else clause
+	if e.ElseBody != nil {
+		c.openScope(e.ElseBody, "error-else")
+		if e.ElseBinding != "" && e.ElseBinding != "_" {
+			c.checkNoShadow(e.ElseBinding, e.Pos())
+			c.insert(types.NewVar(tpos(e.Pos()), e.ElseBinding, types.TypError))
+		}
+		c.checkBlock(e.ElseBody)
+		c.closeScope()
+	}
 
 	return inner
 }

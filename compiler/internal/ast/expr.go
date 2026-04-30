@@ -109,12 +109,17 @@ func (*ErrorUnwrapExpr) exprTag() {}
 
 // ErrorHandlerExpr represents an error handler: expr ? binding { body }
 // With optional type filter: expr ? binding is TypeName { body }
+// With optional else clause: expr ? binding is TypeName { body } else binding { body }
+// With optional panic suffix: expr ? binding is TypeName { body }!
 type ErrorHandlerExpr struct {
 	nodeBase
-	Expr     Expr
-	Binding  string // "" if no binding, "_" for discard
-	TypeName string // "" if untyped handler; type name for typed handler (e.g. "IoError")
-	Body     *Block
+	Expr           Expr
+	Binding        string // "" if no binding, "_" for discard
+	TypeName       string // "" if untyped handler; type name for typed handler (e.g. "IoError")
+	Body           *Block
+	ElseBinding    string // "" if no else binding; set when `else binding { }` present
+	ElseBody       *Block // non-nil when else clause present
+	PanicOnNomatch bool   // true when `!` suffix on typed handler
 }
 
 func (*ErrorHandlerExpr) exprTag() {}

@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -221,10 +222,16 @@ func HostTargetTriple() string {
 		}
 		return "x86_64-apple-macosx10.15.0"
 	case "linux":
-		if runtime.GOARCH == "arm64" {
-			return "aarch64-unknown-linux-gnu"
+		// Default to musl for fully static binaries.
+		// PROMISE_USE_CLANG=1 switches to gnu for dynamic glibc linking.
+		libc := "musl"
+		if os.Getenv("PROMISE_USE_CLANG") == "1" {
+			libc = "gnu"
 		}
-		return "x86_64-unknown-linux-gnu"
+		if runtime.GOARCH == "arm64" {
+			return "aarch64-unknown-linux-" + libc
+		}
+		return "x86_64-unknown-linux-" + libc
 	case "windows":
 		if runtime.GOARCH == "arm64" {
 			return "aarch64-pc-windows-msvc"

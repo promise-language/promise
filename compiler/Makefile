@@ -5,8 +5,13 @@ GRAMMAR_DIR   := grammar
 PARSER_PKG    := internal/parser
 BINARY        := promise
 RESOURCES     := cmd/promise/resources
+UNAME         := $(shell uname -s)
 
-.PHONY: all generate build test clean download-antlr fmt install resources
+# musl CRT paths (Linux only)
+MUSL_CRT_SRC  := /usr/lib/x86_64-linux-musl
+MUSL_CRT_DST  := $(RESOURCES)/crt/x86_64-linux-musl
+
+.PHONY: all generate build test clean download-antlr fmt install resources musl-crt
 
 all: generate build
 
@@ -37,10 +42,25 @@ resources:
 	@mkdir -p $(RESOURCES)/std
 	@cp ../std/*.pr $(RESOURCES)/std/
 
+musl-crt:
+	@mkdir -p $(MUSL_CRT_DST)
+	@cp $(MUSL_CRT_SRC)/crt1.o $(MUSL_CRT_DST)/
+	@cp $(MUSL_CRT_SRC)/crti.o $(MUSL_CRT_DST)/
+	@cp $(MUSL_CRT_SRC)/crtn.o $(MUSL_CRT_DST)/
+	@cp $(MUSL_CRT_SRC)/libc.a $(MUSL_CRT_DST)/
+
+ifeq ($(UNAME),Linux)
+build: generate resources musl-crt
+else
 build: generate resources
+endif
 	go build -o $(BINARY) ./cmd/promise
 
+ifeq ($(UNAME),Linux)
+test: generate resources musl-crt
+else
 test: generate resources
+endif
 	go test ./...
 
 clean:

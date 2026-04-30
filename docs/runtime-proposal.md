@@ -61,14 +61,14 @@ After completing Phases 1-3, the C runtime is reduced to a single function:
 | **6b** | JS event loop integration for WASM IO | Planned |
 | **7a** | WASM: `llc` + `wasm-ld` (no CRT) | Planned |
 | **7b** | Linux: `opt` + `llc` + `ld.lld` (system glibc CRT) | **Done** |
-| **7b'** | Linux: bundled musl CRT (fully static binaries) | Planned |
+| **7b'** | Linux: bundled musl CRT (fully static binaries) | **Done** |
 | **7c** | macOS: `llc` + system `ld` (SDK sysroot) | Planned |
 | **7d** | Windows: `llc` + `lld-link` (MSVC paths) | Planned |
 | **7e** | `--target` flag + cross-compilation | Planned |
 | **7f** | Bundle `llc` + `lld` + musl CRT into release tarball | Planned |
 | **8** | Rewrite scheduler in Promise | Planned |
 
-Phases 1-5c and 7b are done. Phase 3 introduced the platform split (PAL). Phase 5a added 1:1 threading (each `go` spawns an OS thread). Phase 5b added typed channels (`channel[T]` with buffered/unbuffered send/receive/for-in and `go { }` block variable capture). Phase 5c replaced 1:1 threading with an M:N scheduler using LLVM coroutine intrinsics — goroutines are cheap coroutine handles multiplexed on OS threads via per-CPU processors and work stealing. Phase 7b replaced clang with `opt` + `llc` + `ld.lld` on Linux — the default pipeline uses standalone LLVM tools with system glibc CRT discovery; clang remains as fallback via `PROMISE_USE_CLANG=1`. Phases 5d-6 add WASM scheduling and IO. Remaining Phase 7 (a, b', c-f) adds other platforms, bundled musl CRT, and cross-compilation. Phase 8 is polish.
+Phases 1-5c, 7b, and 7b' are done. Phase 3 introduced the platform split (PAL). Phase 5a added 1:1 threading (each `go` spawns an OS thread). Phase 5b added typed channels (`channel[T]` with buffered/unbuffered send/receive/for-in and `go { }` block variable capture). Phase 5c replaced 1:1 threading with an M:N scheduler using LLVM coroutine intrinsics — goroutines are cheap coroutine handles multiplexed on OS threads via per-CPU processors and work stealing. Phase 7b replaced clang with `opt` + `llc` + `ld.lld` on Linux with system glibc CRT. Phase 7b' bundled musl libc CRT objects via `go:embed`, making fully static binaries the default on Linux — target triple is now `x86_64-unknown-linux-musl`; clang remains as fallback via `PROMISE_USE_CLANG=1`. Phases 5d-6 add WASM scheduling and IO. Remaining Phase 7 (a, c-f) adds other platforms and cross-compilation. Phase 8 is polish.
 
 ---
 
@@ -588,16 +588,16 @@ Three steps:
 **Linux** (building from source):
 ```bash
 # Debian/Ubuntu
-sudo apt install llvm-20 lld-20 build-essential
+sudo apt install llvm-20 lld-20 musl-dev
 
 # Fedora
-sudo dnf install llvm lld gcc
+sudo dnf install llvm lld musl-devel
 
 # Arch
-sudo pacman -S llvm lld gcc
+sudo pacman -S llvm lld musl
 ```
 
-Provides: `opt-20`, `llc-20`, `ld.lld-20` (LLVM tools) and system CRT objects (`Scrt1.o`, `crti.o`, etc. from glibc).
+Provides: `opt-20`, `llc-20`, `ld.lld-20` (LLVM tools) and musl CRT objects (`crt1.o`, `crti.o`, `crtn.o`, `libc.a`). The `musl-dev` package is required — musl CRT objects are embedded in the Go binary via `go:embed` during `make build`. The `build-essential` package is no longer required for building Promise programs (glibc CRT is only used with `PROMISE_USE_CLANG=1`).
 
 **macOS** (clang fallback, Phase 7c pending):
 ```bash
@@ -644,27 +644,37 @@ Library search paths (`-L`) are derived from the CRT locations plus standard pat
 
 ### Linux Linker Invocation
 
-The exact `ld.lld` command (matches clang's output):
+**Default: musl static** (Phase 7b') — target triple `x86_64-unknown-linux-musl`:
+```bash
+ld.lld \
+  -m elf_x86_64 -static \
+  --build-id --eh-frame-hdr --gc-sections \
+  -o output \
+  ~/.promise/cache/crt/x86_64-linux-musl/crt1.o \
+  ~/.promise/cache/crt/x86_64-linux-musl/crti.o \
+  promise.o \
+  ~/.promise/cache/crt/x86_64-linux-musl/libc.a \
+  ~/.promise/cache/crt/x86_64-linux-musl/crtn.o
+```
+
+No `-lpthread`, `-lgcc`, `-lgcc_s` needed — musl's `libc.a` includes everything. Produces fully static binaries that run on any Linux kernel ≥2.6 regardless of distro.
+
+**Fallback: glibc dynamic** (`PROMISE_USE_CLANG=1`, or internal glibc path) — target triple `x86_64-unknown-linux-gnu`:
 ```bash
 ld.lld \
   -z relro --hash-style=gnu --build-id --eh-frame-hdr \
   -m elf_x86_64 -pie \
   -dynamic-linker /lib64/ld-linux-x86-64.so.2 \
   -o output \
-  /lib/x86_64-linux-gnu/Scrt1.o \
-  /lib/x86_64-linux-gnu/crti.o \
-  /usr/lib/gcc/x86_64-linux-gnu/13/crtbeginS.o \
+  Scrt1.o crti.o crtbeginS.o \
   -L/lib/x86_64-linux-gnu -L/usr/lib/gcc/x86_64-linux-gnu/13 \
   promise.o \
-  -lpthread \
+  -lpthread -lgcc --as-needed -lgcc_s --no-as-needed -lc \
   -lgcc --as-needed -lgcc_s --no-as-needed \
-  -lc \
-  -lgcc --as-needed -lgcc_s --no-as-needed \
-  /usr/lib/gcc/x86_64-linux-gnu/13/crtendS.o \
-  /lib/x86_64-linux-gnu/crtn.o
+  crtendS.o crtn.o
 ```
 
-Supports both x86_64 and aarch64 (different emulation mode and dynamic linker path).
+Both paths support x86_64 and aarch64 (different emulation mode and dynamic linker path).
 
 ### Remaining Per-Platform Work
 
@@ -751,7 +761,7 @@ The PAL (Phase 3) already emits platform-specific IR based on the target triple.
 - **macOS**: requires macOS SDK (`-lSystem`). Cross-compiling *to* macOS from Linux/Windows needs the SDK files (legally gray area).
 - **Windows**: requires MSVC CRT libs. Cross-compiling *to* Windows needs the Windows SDK.
 
-### Implementation (7b Done, rest planned)
+### Implementation (7b + 7b' Done, rest planned)
 
 **`cmd/promise/main.go` — implemented functions**:
 
@@ -759,24 +769,40 @@ The PAL (Phase 3) already emits platform-specific IR based on the target triple.
 |----------|---------|
 | `compileAndLink()` | Dispatcher: writes `.ll`, calls LLVM or clang pipeline based on target |
 | `useClangPipeline(target)` | Returns true for non-Linux or `PROMISE_USE_CLANG=1` |
-| `compileAndLinkLLVM()` | `opt -O1` → `llc -filetype=obj` → `ld.lld` with CRT |
+| `compileAndLinkLLVM()` | `opt -O1` → `llc -filetype=obj` → `ld.lld` (musl static or glibc dynamic) |
 | `compileAndLinkClang()` | Old clang driver path (fallback for non-Linux) |
 | `findLLVMTool(name)` | Discovers `opt`/`llc`/`ld.lld` — sibling → env → versioned PATH → unversioned PATH |
 | `llvmToolVersion(path)` | Parses `LLVM version X` or `LLD X` from `--version` output |
 | `checkLLVMToolVersion(path)` | Enforces LLVM 20+ minimum |
+| `findMuslCRT(target)` | Locates musl CRT — sibling → installed → cache → extract from embedded |
+| `muslCRTValid(dir)` | Validates cached CRT against embedded sizes (detects stale cache) |
+| `buildMuslLinkArgs(target, obj, out, crtDir)` | Builds `ld.lld -static` argument list with musl CRT |
 | `findCRT(target)` | Discovers system glibc CRT objects via `cc -print-file-name` + fallback probing |
 | `tryCRTFallback(info, missing, target)` | Probes `/lib/{arch}-linux-gnu/`, `/usr/lib/gcc/...` for missing CRT |
-| `buildLinuxLinkArgs(target, obj, out)` | Builds full `ld.lld` argument list matching clang's link order |
+| `buildLinuxLinkArgs(target, obj, out)` | Builds `ld.lld -pie` argument list for dynamic glibc linking |
 | `dynamicLinker(target)` | Returns `/lib64/ld-linux-x86-64.so.2` or aarch64 equivalent |
 | `emulationMode(target)` | Returns `elf_x86_64` or `aarch64linux` |
+
+**Build-tagged embed files**:
+
+| File | Build constraint | Purpose |
+|------|-----------------|---------|
+| `crt_linux_amd64.go` | `linux && amd64` | `go:embed resources/crt/x86_64-linux-musl/*` — embeds musl CRT |
+| `crt_other.go` | `!(linux && amd64)` | Empty `embed.FS` stub — no musl CRT on other platforms |
+
+**Musl CRT discovery order** (`findMuslCRT`):
+1. Sibling of binary: `{exe_dir}/crt/x86_64-linux-musl/`
+2. Installed: `~/.promise/lib/crt/x86_64-linux-musl/`
+3. Cache: `~/.promise/cache/crt/x86_64-linux-musl/` (validated by size against embedded)
+4. Extract embedded CRT to cache (first build only, ~2.5 MB)
 
 **Phased rollout**:
 
 | Step | Work | Status |
 |------|------|--------|
 | 7b | Linux: `opt` + `llc` + `ld.lld` + system glibc CRT | **Done** |
+| 7b' | Linux: bundled musl CRT (fully static binaries) | **Done** |
 | 7a | WASM target via `llc` + `wasm-ld` | Planned (low — no CRT) |
-| 7b' | Linux: bundled musl CRT (fully static binaries) | Planned (medium — musl build) |
 | 7c | macOS target via `llc` + system `ld` (or `ld64.lld`) | Planned (medium — SDK sysroot) |
 | 7d | Windows target via `llc` + `lld-link` | Planned (high — MSVC paths) |
 | 7e | `--target` flag + cross-compilation | Planned (low — plumbing) |
@@ -925,11 +951,11 @@ The bundled-binaries approach (Phase 7) is the pragmatic first step. The long-te
 
 ### Dependency summary by platform
 
-**Current state** (Phase 7b done):
+**Current state** (Phase 7b + 7b' done):
 
 | Platform | Build pipeline | External deps (source build) |
 |----------|---------------|------|
-| **Linux** | `opt` + `llc` + `ld.lld` + system CRT | LLVM 20+ (`opt`, `llc`, `lld`), `build-essential` (glibc CRT) |
+| **Linux** | `opt` + `llc` + `ld.lld` + bundled musl CRT → **fully static** | LLVM 20+ (`opt`, `llc`, `lld`), `musl-dev` (embedded at compile time) |
 | **macOS** | clang (fallback) | clang 20+ (Homebrew or Xcode CLT) |
 | **Windows** | clang (fallback) | clang 20+ |
 | **WASM** | clang (fallback) | clang 20+ |

@@ -89,7 +89,7 @@ Stress mode compiles once and re-runs binaries. Stable files are gradually suppr
 .pr source → ANTLR4 (grammar/) → AST (ast/) → Sema 4-pass (sema/) → Ownership (ownership/) → LLVM IR (codegen/) → opt+llc+lld → binary
 ```
 
-On Linux: `opt -O1` (coroutine lowering) → `llc -filetype=obj` → `ld.lld` (link with system CRT). On other platforms (or `PROMISE_USE_CLANG=1`): `clang -O1`. Requires LLVM 20+.
+On Linux: `opt -O1` (coroutine lowering) → `llc -filetype=obj` → `ld.lld -static` (link with bundled musl CRT → fully static binaries). On other platforms (or `PROMISE_USE_CLANG=1`): `clang -O1` (dynamic glibc). Requires LLVM 20+. musl CRT objects are embedded in the Go binary via `go:embed` (build requires `musl-dev`).
 
 Entry point: `cmd/promise/main.go` → `compileFrontend()` orchestrates parse → std merge → sema → ownership.
 

@@ -376,6 +376,8 @@ func TestForTargetReturnsPosixPAL(t *testing.T) {
 		"x86_64-apple-macosx10.15.0",
 		"aarch64-unknown-linux-gnu",
 		"x86_64-unknown-linux-gnu",
+		"aarch64-unknown-linux-musl",
+		"x86_64-unknown-linux-musl",
 	}
 	for _, triple := range triples {
 		p := ForTarget(triple)

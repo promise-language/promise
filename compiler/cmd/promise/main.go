@@ -677,7 +677,7 @@ func useClangPipeline(target string) bool {
 	if os.Getenv("PROMISE_USE_CLANG") == "1" {
 		return true
 	}
-	// Only Linux uses the LLVM pipeline (Phase 7b). Other platforms use clang.
+	// Only Linux uses the LLVM pipeline. Other platforms use clang.
 	return !strings.Contains(target, "linux")
 }
 
@@ -743,7 +743,7 @@ func checkClangVersion(clangPath string) {
 	}
 }
 
-// --- LLVM tool pipeline (Phase 7b) ---
+// --- LLVM tool pipeline ---
 
 // findLLVMTool locates an LLVM tool (opt, llc, ld.lld) by searching:
 // 1. Sibling directory of the promise binary
@@ -1024,7 +1024,7 @@ func emulationMode(target string) string {
 	return "elf_x86_64"
 }
 
-// buildLinuxLinkArgs builds the ld.lld argument list for Linux ELF linking.
+// buildLinuxLinkArgs builds the ld.lld argument list for dynamic glibc ELF linking.
 func buildLinuxLinkArgs(target, objFile, outputFile string) []string {
 	crt, err := findCRT(target)
 	if err != nil {
@@ -1067,6 +1067,143 @@ func buildLinuxLinkArgs(target, objFile, outputFile string) []string {
 	args = append(args, crt.crtendS, crt.crtn)
 
 	return args
+}
+
+// --- Musl CRT (Phase 7b') ---
+
+// muslCRTFiles lists the musl CRT objects needed for static linking.
+var muslCRTFiles = []string{"crt1.o", "crti.o", "crtn.o", "libc.a"}
+
+// muslArchDir returns the CRT subdirectory name for the given target triple.
+func muslArchDir(target string) string {
+	if strings.HasPrefix(target, "aarch64") {
+		return "aarch64-linux-musl"
+	}
+	return "x86_64-linux-musl"
+}
+
+// muslCRTComplete checks if all required musl CRT files exist in dir.
+func muslCRTComplete(dir string) bool {
+	for _, name := range muslCRTFiles {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// muslCRTValid checks if cached musl CRT files match the embedded versions (by size).
+// Uses fs.DirEntry.Info() to compare sizes without reading file contents into memory.
+func muslCRTValid(dir string) bool {
+	if !hasEmbeddedMuslCRT {
+		return muslCRTComplete(dir)
+	}
+	arch := filepath.Base(dir)
+	prefix := "resources/crt/" + arch
+
+	// Build a size map from the embedded FS
+	entries, err := embeddedMuslCRT.ReadDir(prefix)
+	if err != nil {
+		return false
+	}
+	embeddedSizes := make(map[string]int64, len(entries))
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil {
+			return false
+		}
+		embeddedSizes[e.Name()] = info.Size()
+	}
+
+	for _, name := range muslCRTFiles {
+		cached, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			return false
+		}
+		embSize, ok := embeddedSizes[name]
+		if !ok {
+			return false
+		}
+		if cached.Size() != embSize {
+			return false
+		}
+	}
+	return true
+}
+
+// findMuslCRT locates musl CRT objects for static linking.
+// Discovery order:
+// 1. Sibling of promise binary: {exe_dir}/crt/{arch}/
+// 2. Installed location: ~/.promise/lib/crt/{arch}/
+// 3. Cache dir: ~/.promise/cache/crt/{arch}/
+// 4. Extract embedded CRT to cache (first build only)
+func findMuslCRT(target string) (string, error) {
+	arch := muslArchDir(target)
+
+	// 1. Sibling of promise binary
+	if execPath, err := os.Executable(); err == nil {
+		dir := filepath.Join(filepath.Dir(execPath), "crt", arch)
+		if muslCRTComplete(dir) {
+			return dir, nil
+		}
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine home directory: %v", err)
+	}
+
+	// 2. Installed location (~/.promise/lib/crt/{arch}/)
+	installDir := filepath.Join(homeDir, ".promise", "lib", "crt", arch)
+	if muslCRTComplete(installDir) {
+		return installDir, nil
+	}
+
+	// 3. Cache dir (~/.promise/cache/crt/{arch}/)
+	cacheDir := filepath.Join(homeDir, ".promise", "cache", "crt", arch)
+
+	if muslCRTValid(cacheDir) {
+		return cacheDir, nil
+	}
+
+	// 4. Extract embedded CRT to cache
+	if !hasEmbeddedMuslCRT {
+		return "", fmt.Errorf("musl CRT not available for %s\n  this binary was not built with embedded musl CRT\n  set PROMISE_USE_CLANG=1 to use clang with system glibc instead", arch)
+	}
+
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return "", fmt.Errorf("cannot create CRT cache dir %s: %v", cacheDir, err)
+	}
+
+	prefix := "resources/crt/" + arch
+	for _, name := range muslCRTFiles {
+		data, err := embeddedMuslCRT.ReadFile(prefix + "/" + name)
+		if err != nil {
+			return "", fmt.Errorf("cannot read embedded %s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(cacheDir, name), data, 0644); err != nil {
+			return "", fmt.Errorf("cannot write %s to cache: %v", name, err)
+		}
+	}
+
+	return cacheDir, nil
+}
+
+// buildMuslLinkArgs builds the ld.lld argument list for static musl linking.
+func buildMuslLinkArgs(target, objFile, outputFile, crtDir string) []string {
+	return []string{
+		"-m", emulationMode(target),
+		"-static",
+		"--build-id",
+		"--eh-frame-hdr",
+		"--gc-sections",
+		"-o", outputFile,
+		filepath.Join(crtDir, "crt1.o"),
+		filepath.Join(crtDir, "crti.o"),
+		objFile,
+		filepath.Join(crtDir, "libc.a"),
+		filepath.Join(crtDir, "crtn.o"),
+	}
 }
 
 // compileAndLinkLLVM runs the opt + llc + ld.lld pipeline for Linux targets.
@@ -1130,7 +1267,17 @@ func compileAndLinkLLVM(llFile, target, outputFile string) {
 	}
 
 	// Step 3: ld.lld (link with CRT objects)
-	linkArgs := buildLinuxLinkArgs(target, objFile.Name(), outputFile)
+	var linkArgs []string
+	if strings.Contains(target, "linux-musl") {
+		crtDir, err := findMuslCRT(target)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		linkArgs = buildMuslLinkArgs(target, objFile.Name(), outputFile, crtDir)
+	} else {
+		linkArgs = buildLinuxLinkArgs(target, objFile.Name(), outputFile)
+	}
 	linkCmd := exec.Command(lldPath, linkArgs...)
 	linkCmd.Stderr = os.Stderr
 	if err := linkCmd.Run(); err != nil {
@@ -1607,6 +1754,17 @@ func runInstall() {
 
 	// Extract embedded std files
 	extractEmbedded(embeddedStd, "resources/std", stdDest)
+
+	// Extract embedded musl CRT (if available)
+	if hasEmbeddedMuslCRT {
+		arch := "x86_64-linux-musl"
+		crtDest := filepath.Join(libDir, "crt", arch)
+		if err := os.MkdirAll(crtDest, 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "error creating %s: %v\n", crtDest, err)
+			os.Exit(1)
+		}
+		extractEmbedded(embeddedMuslCRT, "resources/crt/"+arch, crtDest)
+	}
 
 	fmt.Printf("Installed Promise to %s\n\n", promiseDir)
 	fmt.Printf("Add to your shell profile:\n\n")

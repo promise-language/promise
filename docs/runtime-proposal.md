@@ -581,14 +581,14 @@ Three steps:
 - `findCRT(target)` — discovers system glibc CRT objects via `cc -print-file-name` with fallback path probing
 - `buildLinuxLinkArgs()` — builds the full `ld.lld` argument list matching clang's link order
 
-**LLVM version**: requires LLVM 20+. The generated IR uses `llvm.coro.end → i1` (LLVM 20 signature). All three tools (`opt`, `llc`, `ld.lld`) are version-checked.
+**LLVM version**: requires LLVM 22+. The generated IR uses `llvm.coro.end → void` (LLVM 22+ signature). All tools (`opt`, `llc`, linker) are version-checked.
 
 ### Prerequisites
 
 **Linux** (building from source):
 ```bash
 # Debian/Ubuntu
-sudo apt install llvm-20 lld-20 musl-dev
+sudo apt install llvm-22 lld-22 musl-dev
 
 # Fedora
 sudo dnf install llvm lld musl-devel
@@ -597,12 +597,12 @@ sudo dnf install llvm lld musl-devel
 sudo pacman -S llvm lld musl
 ```
 
-Provides: `opt-20`, `llc-20`, `ld.lld-20` (LLVM tools) and musl CRT objects (`crt1.o`, `crti.o`, `crtn.o`, `libc.a`). The `musl-dev` package is required — musl CRT objects are embedded in the Go binary via `go:embed` during `make build`. The `build-essential` package is no longer required for building Promise programs (glibc CRT is only used with `PROMISE_USE_CLANG=1`).
+Provides: `opt-22`, `llc-22`, `ld.lld-22` (LLVM tools) and musl CRT objects (`crt1.o`, `crti.o`, `crtn.o`, `libc.a`). The `musl-dev` package is required — musl CRT objects are embedded in the Go binary via `go:embed` during `make build`. The `build-essential` package is no longer required for building Promise programs (glibc CRT is only used with `PROMISE_USE_CLANG=1`).
 
-**macOS** (clang fallback, Phase 7c pending):
+**macOS** (Phase 7c — opt + llc + system ld):
 ```bash
-brew install llvm    # provides clang 20+
-# or: Xcode CommandLineTools (xcode-select --install)
+brew install llvm    # provides opt + llc (LLVM 22+)
+xcode-select --install  # provides macOS SDK + system ld
 ```
 
 **Windows** (clang fallback, Phase 7d pending):
@@ -627,8 +627,9 @@ choco install llvm   # or winget install llvm
 `findLLVMTool(name)` searches in this order:
 1. **Sibling of binary**: `{promise_dir}/opt`, `{promise_dir}/llc`, `{promise_dir}/ld.lld`
 2. **Environment override**: `$PROMISE_OPT`, `$PROMISE_LLC`, `$PROMISE_LLD`
-3. **Versioned PATH**: `opt-25`, `opt-24`, ..., `opt-20` (newest to oldest, LLVM 20+ only)
-4. **Unversioned PATH**: `opt`, `llc`, `ld.lld`
+3. **Homebrew LLVM** (macOS): `/opt/homebrew/opt/llvm/bin`, `/usr/local/opt/llvm/bin`
+4. **Versioned PATH**: `opt-25`, `opt-24`, ..., `opt-22` (newest to oldest, LLVM 22+ only)
+5. **Unversioned PATH**: `opt`, `llc`, `ld.lld`
 
 Sibling-first means a bundled Promise installation always uses its own tools regardless of system PATH.
 
@@ -682,7 +683,7 @@ Both paths support x86_64 and aarch64 (different emulation mode and dynamic link
 
 | Target | Current (clang) | New (llc + lld) |
 |--------|---------|---------------|
-| macOS | `clang -O1 -target {triple} in.ll -o out` | `llc` + `ld64.lld` (or Xcode's `ld`) |
+| macOS | ~~`clang -O1 -target {triple} in.ll -o out`~~ | `llc` + `ld64.lld` (or system `ld`) — **Done** |
 | Linux | `clang -O1 -target {triple} in.ll -o out -lpthread` | `llc` + `ld.lld` |
 | Windows | `clang -O1 -target {triple} in.ll -o out` | `llc` + `lld-link` |
 | WASM | `clang -O1 --target=wasm32 in.ll -o out` | `llc` + `wasm-ld` |
@@ -773,7 +774,7 @@ The PAL (Phase 3) already emits platform-specific IR based on the target triple.
 | `compileAndLinkClang()` | Old clang driver path (fallback for non-Linux) |
 | `findLLVMTool(name)` | Discovers `opt`/`llc`/`ld.lld` — sibling → env → versioned PATH → unversioned PATH |
 | `llvmToolVersion(path)` | Parses `LLVM version X` or `LLD X` from `--version` output |
-| `checkLLVMToolVersion(path)` | Enforces LLVM 20+ minimum |
+| `checkLLVMToolVersion(path)` | Enforces LLVM 22+ minimum |
 | `findMuslCRT(target)` | Locates musl CRT — sibling → installed → cache → extract from embedded |
 | `muslCRTValid(dir)` | Validates cached CRT against embedded sizes (detects stale cache) |
 | `buildMuslLinkArgs(target, obj, out, crtDir)` | Builds `ld.lld -static` argument list with musl CRT |
@@ -782,6 +783,12 @@ The PAL (Phase 3) already emits platform-specific IR based on the target triple.
 | `buildLinuxLinkArgs(target, obj, out)` | Builds `ld.lld -pie` argument list for dynamic glibc linking |
 | `dynamicLinker(target)` | Returns `/lib64/ld-linux-x86-64.so.2` or aarch64 equivalent |
 | `emulationMode(target)` | Returns `elf_x86_64` or `aarch64linux` |
+| `findMacOSSDK()` | Discovers macOS SDK sysroot via `xcrun --show-sdk-path` |
+| `parseDarwinTriple(target)` | Extracts arch + version from macOS target triple |
+| `findDarwinLinker()` | Locates `ld64.lld` or system `ld` for Mach-O linking |
+| `buildDarwinLinkArgs(target, obj, out)` | Builds linker args with `-lSystem -syslibroot -platform_version` |
+| `linkDarwin(obj, target, out)` | Runs macOS Mach-O linker (ld64.lld or system ld) |
+| `linkLinux(obj, target, out)` | Runs Linux ELF linker (ld.lld with glibc or musl) |
 
 **Build-tagged embed files**:
 
@@ -803,21 +810,21 @@ The PAL (Phase 3) already emits platform-specific IR based on the target triple.
 | 7b | Linux: `opt` + `llc` + `ld.lld` + system glibc CRT | **Done** |
 | 7b' | Linux: bundled musl CRT (fully static binaries) | **Done** |
 | 7a | WASM target via `llc` + `wasm-ld` | Planned (low — no CRT) |
-| 7c | macOS target via `llc` + system `ld` (or `ld64.lld`) | Planned (medium — SDK sysroot) |
+| 7c | macOS target via `llc` + system `ld` (or `ld64.lld`) | **Done** |
 | 7d | Windows target via `llc` + `lld-link` | Planned (high — MSVC paths) |
 | 7e | `--target` flag + cross-compilation | Planned (low — plumbing) |
 | 7f | Bundle `llc` + `lld` + musl CRT into release tarball | Planned (medium — CI) |
 | 7g | Remove clang fallback (optional) | Planned (low — cleanup) |
 
-**Fallback strategy**: `PROMISE_USE_CLANG=1` forces the clang pipeline on any platform. This lets users on platforms without native lld support (macOS, Windows) continue working.
+**Fallback strategy**: `PROMISE_USE_CLANG=1` forces the clang pipeline on any platform. This lets users on platforms without native linker support (Windows) continue working.
 
 ### Coroutine Pass Verification (Done)
 
-Verified with LLVM 20 on Linux:
+Verified with LLVM 22 on Linux and macOS:
 
 1. **`llc -O1` does NOT run CoroSplit** — `llc` only runs backend passes (instruction selection, register allocation). CoroSplit is a CGSCC pass in the middle-end optimization pipeline.
 2. **`opt -O1 | llc` works** — `opt -O1` runs the full `default<O1>` pipeline including CoroSplit/CoroElide, producing lowered coroutine IR that `llc` can compile without optimization.
-3. **LLVM 20 requires `llvm.coro.end → i1`** — LLVM 17-19 temporarily changed this to `void`, LLVM 20 reverted to `i1`. The generated IR targets LLVM 20+ exclusively.
+3. **LLVM 22+ requires `llvm.coro.end → void`** — LLVM 20-21 used `i1` return type, LLVM 22+ changed to `void`. The generated IR targets LLVM 22+ exclusively.
 
 Validated: `promise test -stress 20 tests/concurrency/...` — 71 tests, 100% pass rate, 0 flaky across 20 iterations with the `opt` + `llc` + `ld.lld` pipeline.
 
@@ -860,8 +867,9 @@ promise-v0.1.0-darwin-arm64.tar.gz
 **Tool discovery order** (implemented in `findLLVMTool()`):
 1. **Sibling directory**: look next to the `promise` binary — `{promise_dir}/opt`, `{promise_dir}/llc`, `{promise_dir}/ld.lld`
 2. **Env override**: `PROMISE_OPT`, `PROMISE_LLC`, `PROMISE_LLD` (for development/testing)
-3. **Versioned PATH**: `opt-25` down to `opt-20`, `llc-25` down to `llc-20`, etc.
-4. **Unversioned PATH**: `opt`, `llc`, `ld.lld`
+3. **Homebrew LLVM** (macOS): `/opt/homebrew/opt/llvm/bin`, `/usr/local/opt/llvm/bin`
+4. **Versioned PATH**: `opt-25` down to `opt-22`, `llc-25` down to `llc-22`, etc.
+5. **Unversioned PATH**: `opt`, `llc`, `ld.lld`
 
 Looking next to the binary first means an installed Promise always finds its own tools, regardless of system PATH changes or Homebrew upgrades.
 
@@ -951,14 +959,14 @@ The bundled-binaries approach (Phase 7) is the pragmatic first step. The long-te
 
 ### Dependency summary by platform
 
-**Current state** (Phase 7b + 7b' done):
+**Current state** (Phase 7b + 7b' + 7c done):
 
 | Platform | Build pipeline | External deps (source build) |
 |----------|---------------|------|
-| **Linux** | `opt` + `llc` + `ld.lld` + bundled musl CRT → **fully static** | LLVM 20+ (`opt`, `llc`, `lld`), `musl-dev` (embedded at compile time) |
-| **macOS** | clang (fallback) | clang 20+ (Homebrew or Xcode CLT) |
-| **Windows** | clang (fallback) | clang 20+ |
-| **WASM** | clang (fallback) | clang 20+ |
+| **Linux** | `opt` + `llc` + `ld.lld` + bundled musl CRT → **fully static** | LLVM 22+ (`opt`, `llc`, `lld`), `musl-dev` (embedded at compile time) |
+| **macOS** | `opt` + `llc` + system `ld` (or `ld64.lld`) | LLVM 22+ (`opt`, `llc`), Xcode CommandLineTools (SDK + `ld`) |
+| **Windows** | clang (fallback) | clang 22+ |
+| **WASM** | clang (fallback) | clang 22+ |
 
 **After full Phase 7** (bundled tools + musl):
 

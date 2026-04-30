@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -641,7 +642,7 @@ func parseTimeoutArg(s string) (time.Duration, error) {
 }
 
 // compileAndLink writes the IR to a temp file and links it into the output binary.
-// On Linux, uses opt + llc + ld.lld pipeline (Phase 7b).
+// On Linux and macOS, uses opt + llc + linker pipeline (Phase 7b/7c).
 // On other platforms (or with PROMISE_USE_CLANG=1), uses clang as driver.
 func compileAndLink(result *codegen.CompileResult, outputFile string) {
 	llFile, err := os.CreateTemp("", "promise-*.ll")
@@ -672,19 +673,19 @@ func compileAndLink(result *codegen.CompileResult, outputFile string) {
 	}
 }
 
-// useClangPipeline returns true if the clang pipeline should be used instead of opt+llc+lld.
+// useClangPipeline returns true if the clang pipeline should be used instead of opt+llc+linker.
 func useClangPipeline(target string) bool {
 	if os.Getenv("PROMISE_USE_CLANG") == "1" {
 		return true
 	}
-	// Only Linux uses the LLVM pipeline. Other platforms use clang.
-	return !strings.Contains(target, "linux")
+	// Linux and macOS use the LLVM pipeline. Other platforms use clang.
+	return !strings.Contains(target, "linux") && !strings.Contains(target, "macosx")
 }
 
 // minLLVMMajor is the minimum LLVM/clang major version required.
-// LLVM 20+ is required: llvm.coro.end returns i1 (not void as in 17-19).
-// Applies to both the opt/llc/lld pipeline and the clang fallback.
-const minLLVMMajor = 20
+// LLVM 22+ is required: llvm.coro.end returns void (changed from i1 in LLVM 20-21).
+// Applies to both the opt/llc/linker pipeline and the clang fallback.
+const minLLVMMajor = 22
 
 // maxLLVMSearch is the highest LLVM version to probe when searching PATH for
 // versioned tool names (e.g. opt-25, opt-24, ..., opt-20).
@@ -745,16 +746,18 @@ func checkClangVersion(clangPath string) {
 
 // --- LLVM tool pipeline ---
 
-// findLLVMTool locates an LLVM tool (opt, llc, ld.lld) by searching:
+// findLLVMTool locates an LLVM tool (opt, llc, ld.lld, ld64.lld) by searching:
 // 1. Sibling directory of the promise binary
-// 2. Environment variable override (PROMISE_OPT, PROMISE_LLC, PROMISE_LLD)
-// 3. Versioned names on PATH (e.g., opt-20, llc-20, ld.lld-20) from newest to minLLVMMajor
-// 4. Unversioned names on PATH (e.g., opt, llc, ld.lld)
+// 2. Environment variable override (PROMISE_OPT, PROMISE_LLC, PROMISE_LLD, PROMISE_LD64LLD)
+// 3. Homebrew LLVM (macOS)
+// 4. Versioned names on PATH (e.g., opt-20, llc-20, ld.lld-20) from newest to minLLVMMajor
+// 5. Unversioned names on PATH (e.g., opt, llc, ld.lld)
 func findLLVMTool(name string) (string, error) {
 	envMap := map[string]string{
-		"opt":    "PROMISE_OPT",
-		"llc":    "PROMISE_LLC",
-		"ld.lld": "PROMISE_LLD",
+		"opt":      "PROMISE_OPT",
+		"llc":      "PROMISE_LLC",
+		"ld.lld":   "PROMISE_LLD",
+		"ld64.lld": "PROMISE_LD64LLD",
 	}
 
 	// 1. Sibling of promise binary
@@ -772,7 +775,20 @@ func findLLVMTool(name string) (string, error) {
 		}
 	}
 
-	// 3. Versioned names on PATH (try newest to oldest)
+	// 3. Homebrew LLVM (macOS only)
+	if runtime.GOOS == "darwin" {
+		for _, prefix := range []string{
+			"/opt/homebrew/opt/llvm/bin",
+			"/usr/local/opt/llvm/bin",
+		} {
+			p := filepath.Join(prefix, name)
+			if _, err := os.Stat(p); err == nil {
+				return p, nil
+			}
+		}
+	}
+
+	// 4. Versioned names on PATH (try newest to oldest)
 	for v := maxLLVMSearch; v >= minLLVMMajor; v-- {
 		versioned := fmt.Sprintf("%s-%d", name, v)
 		if path, err := exec.LookPath(versioned); err == nil {
@@ -780,13 +796,13 @@ func findLLVMTool(name string) (string, error) {
 		}
 	}
 
-	// 4. Unversioned on PATH
+	// 5. Unversioned on PATH
 	if path, err := exec.LookPath(name); err == nil {
 		return path, nil
 	}
 
 	envName := envMap[name]
-	return "", fmt.Errorf("%s not found\n  searched: sibling of promise binary, $%s, PATH (%s-{%d..%d}, %s)\n  install LLVM %d+ or set PROMISE_USE_CLANG=1 to use clang",
+	return "", fmt.Errorf("%s not found\n  searched: sibling of promise binary, $%s, Homebrew LLVM, PATH (%s-{%d..%d}, %s)\n  install LLVM %d+ or set PROMISE_USE_CLANG=1 to use clang",
 		name, envName, name, maxLLVMSearch, minLLVMMajor, name, minLLVMMajor)
 }
 
@@ -1008,6 +1024,112 @@ func tryCRTFallback(info *crtInfo, missing []string, target string) {
 	}
 }
 
+// --- macOS (Phase 7c) ---
+
+// macOSSDKInfo holds discovered macOS SDK information for linking.
+type macOSSDKInfo struct {
+	sysroot    string // SDK path from xcrun --show-sdk-path
+	sdkVersion string // SDK version from xcrun --show-sdk-version (e.g. "15.2")
+}
+
+// findMacOSSDK discovers the macOS SDK sysroot via xcrun.
+func findMacOSSDK() (*macOSSDKInfo, error) {
+	sysroot, err := exec.Command("xcrun", "--show-sdk-path").Output()
+	if err != nil {
+		return nil, fmt.Errorf("macOS SDK not found: xcrun --show-sdk-path failed\n  install Xcode CommandLineTools: xcode-select --install")
+	}
+	sysrootPath := strings.TrimSpace(string(sysroot))
+	if sysrootPath == "" {
+		return nil, fmt.Errorf("macOS SDK not found: xcrun returned empty path\n  install Xcode CommandLineTools: xcode-select --install")
+	}
+	if _, err := os.Stat(sysrootPath); err != nil {
+		return nil, fmt.Errorf("macOS SDK path does not exist: %s\n  install Xcode CommandLineTools: xcode-select --install", sysrootPath)
+	}
+
+	info := &macOSSDKInfo{sysroot: sysrootPath}
+	if sdkVer, err := exec.Command("xcrun", "--show-sdk-version").Output(); err == nil {
+		info.sdkVersion = strings.TrimSpace(string(sdkVer))
+	}
+	return info, nil
+}
+
+// darwinTripleInfo holds parsed components of a macOS target triple.
+type darwinTripleInfo struct {
+	arch       string // "arm64" or "x86_64"
+	minVersion string // deployment target version, e.g. "14.0.0"
+}
+
+// parseDarwinTriple extracts architecture and version from a macOS target triple.
+// Example: "arm64-apple-macosx14.0.0" → arch="arm64", minVersion="14.0.0"
+func parseDarwinTriple(target string) darwinTripleInfo {
+	info := darwinTripleInfo{arch: "arm64", minVersion: "14.0.0"}
+	if strings.HasPrefix(target, "x86_64") {
+		info.arch = "x86_64"
+	}
+	if idx := strings.Index(target, "macosx"); idx >= 0 {
+		if ver := target[idx+len("macosx"):]; ver != "" {
+			info.minVersion = ver
+		}
+	}
+	return info
+}
+
+// findDarwinLinker returns the path to a Mach-O linker for macOS.
+// Tries ld64.lld first (for bundled release), then falls back to system ld.
+// Returns (path, isLLD, error).
+func findDarwinLinker() (string, bool, error) {
+	// 1. Try ld64.lld via standard LLVM tool discovery
+	if path, err := findLLVMTool("ld64.lld"); err == nil {
+		return path, true, nil
+	}
+
+	// 2. Environment override for system ld
+	if p := os.Getenv("PROMISE_LD"); p != "" {
+		return p, false, nil
+	}
+
+	// 3. System ld (always available on macOS with CommandLineTools)
+	if path, err := exec.LookPath("ld"); err == nil {
+		return path, false, nil
+	}
+
+	return "", false, fmt.Errorf("no Mach-O linker found\n  install Xcode CommandLineTools: xcode-select --install\n  or set PROMISE_USE_CLANG=1 to use clang")
+}
+
+// isDarwinTarget returns true if the target triple is macOS/Darwin.
+func isDarwinTarget(target string) bool {
+	return strings.Contains(target, "macosx")
+}
+
+// buildDarwinLinkArgs builds the linker argument list for macOS Mach-O linking.
+// Works with both ld64.lld and Apple's system ld.
+func buildDarwinLinkArgs(target, objFile, outputFile string) []string {
+	sdk, err := findMacOSSDK()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	tri := parseDarwinTriple(target)
+
+	// Use SDK version for -platform_version if available, otherwise deployment target.
+	sdkVersion := tri.minVersion
+	if sdk.sdkVersion != "" {
+		sdkVersion = sdk.sdkVersion
+	}
+
+	return []string{
+		"-arch", tri.arch,
+		"-platform_version", "macos", tri.minVersion, sdkVersion,
+		"-syslibroot", sdk.sysroot,
+		"-o", outputFile,
+		objFile,
+		"-lSystem",
+	}
+}
+
+// --- Linux linking ---
+
 // dynamicLinker returns the ELF dynamic linker path for the given target.
 func dynamicLinker(target string) string {
 	if strings.HasPrefix(target, "aarch64") {
@@ -1206,7 +1328,8 @@ func buildMuslLinkArgs(target, objFile, outputFile, crtDir string) []string {
 	}
 }
 
-// compileAndLinkLLVM runs the opt + llc + ld.lld pipeline for Linux targets.
+// compileAndLinkLLVM runs the opt + llc + linker pipeline.
+// Linux: opt → llc → ld.lld. macOS: opt → llc → ld64.lld (or system ld).
 func compileAndLinkLLVM(llFile, target, outputFile string) {
 	optPath, err := findLLVMTool("opt")
 	if err != nil {
@@ -1218,15 +1341,9 @@ func compileAndLinkLLVM(llFile, target, outputFile string) {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	lldPath, err := findLLVMTool("ld.lld")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
 
 	checkLLVMToolVersion(optPath)
 	checkLLVMToolVersion(llcPath)
-	checkLLVMToolVersion(lldPath)
 
 	// Step 1: opt -O1 (optimization + coroutine passes CoroSplit/CoroElide)
 	bcFile, err := os.CreateTemp("", "promise-*.bc")
@@ -1266,7 +1383,47 @@ func compileAndLinkLLVM(llFile, target, outputFile string) {
 		os.Exit(1)
 	}
 
-	// Step 3: ld.lld (link with CRT objects)
+	// Step 3: Link (platform-specific)
+	if isDarwinTarget(target) {
+		linkDarwin(objFile.Name(), target, outputFile)
+	} else {
+		linkLinux(objFile.Name(), target, outputFile)
+	}
+}
+
+// linkDarwin runs ld64.lld or system ld for macOS Mach-O linking.
+func linkDarwin(objFile, target, outputFile string) {
+	linkerPath, isLLD, err := findDarwinLinker()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if isLLD {
+		checkLLVMToolVersion(linkerPath)
+	}
+
+	linkArgs := buildDarwinLinkArgs(target, objFile, outputFile)
+	linkCmd := exec.Command(linkerPath, linkArgs...)
+	linkCmd.Stderr = os.Stderr
+	if err := linkCmd.Run(); err != nil {
+		linkerName := "ld"
+		if isLLD {
+			linkerName = "ld64.lld"
+		}
+		fmt.Fprintf(os.Stderr, "error linking (%s): %v\n", linkerName, err)
+		os.Exit(1)
+	}
+}
+
+// linkLinux runs ld.lld for Linux ELF linking (glibc or musl).
+func linkLinux(objFile, target, outputFile string) {
+	lldPath, err := findLLVMTool("ld.lld")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	checkLLVMToolVersion(lldPath)
+
 	var linkArgs []string
 	if strings.Contains(target, "linux-musl") {
 		crtDir, err := findMuslCRT(target)
@@ -1274,9 +1431,9 @@ func compileAndLinkLLVM(llFile, target, outputFile string) {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		linkArgs = buildMuslLinkArgs(target, objFile.Name(), outputFile, crtDir)
+		linkArgs = buildMuslLinkArgs(target, objFile, outputFile, crtDir)
 	} else {
-		linkArgs = buildLinuxLinkArgs(target, objFile.Name(), outputFile)
+		linkArgs = buildLinuxLinkArgs(target, objFile, outputFile)
 	}
 	linkCmd := exec.Command(lldPath, linkArgs...)
 	linkCmd.Stderr = os.Stderr

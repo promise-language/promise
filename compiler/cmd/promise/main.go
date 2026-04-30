@@ -730,7 +730,6 @@ func clangVersion(clangPath string) int {
 }
 
 // checkClangVersion verifies the clang binary meets the minimum version requirement.
-// Uses minLLVMMajor (20+) since the generated IR requires LLVM 20 intrinsic signatures.
 func checkClangVersion(clangPath string) {
 	v := clangVersion(clangPath)
 	if v == 0 {
@@ -750,7 +749,7 @@ func checkClangVersion(clangPath string) {
 // 1. Sibling directory of the promise binary
 // 2. Environment variable override (PROMISE_OPT, PROMISE_LLC, PROMISE_LLD, PROMISE_LD64LLD)
 // 3. Homebrew LLVM (macOS)
-// 4. Versioned names on PATH (e.g., opt-20, llc-20, ld.lld-20) from newest to minLLVMMajor
+// 4. Versioned names on PATH (e.g., opt-22, llc-22, ld.lld-22) from newest to minLLVMMajor
 // 5. Unversioned names on PATH (e.g., opt, llc, ld.lld)
 func findLLVMTool(name string) (string, error) {
 	envMap := map[string]string{
@@ -808,8 +807,8 @@ func findLLVMTool(name string) (string, error) {
 
 // llvmToolVersion returns the major version of an LLVM tool, or 0 if it cannot be determined.
 // Handles different version formats:
-//   - opt/llc: "LLVM version 20.1.2"
-//   - ld.lld:  "LLD 20.1.2" (no "LLVM version" prefix)
+//   - opt/llc: "LLVM version 22.1.2"
+//   - ld.lld:  "LLD 22.1.2" (no "LLVM version" prefix)
 func llvmToolVersion(toolPath string) int {
 	out, err := exec.Command(toolPath, "--version").Output()
 	if err != nil {

@@ -38,7 +38,7 @@ After completing Phases 1-3, the C runtime is reduced to a single function:
 
 **LLVM optimizer attributes** on all externs: `noalias`, `nocapture`, `noundef`, `nounwind`, `willreturn`, `readonly`, `argmemonly` (as applicable).
 
-**Build pipeline**: No C compilation — the `.ll` file contains everything. On Linux, `opt -O1` + `llc` + `ld.lld` compile and link (Phase 7b). On other platforms (or `PROMISE_USE_CLANG=1`), clang acts as driver.
+**Build pipeline**: No C compilation — the `.ll` file contains everything. On Linux, `opt -O1` + `llc` + `ld.lld` compile and link with bundled musl CRT (Phase 7b/7b'). On macOS, `opt -O1` + `llc` + system `ld` (or `ld64.lld`) with `-lSystem -syslibroot` (Phase 7c). On other platforms (or `PROMISE_USE_CLANG=1`), clang acts as driver. Requires LLVM 22+.
 
 ---
 
@@ -62,7 +62,7 @@ After completing Phases 1-3, the C runtime is reduced to a single function:
 | **7a** | WASM: `llc` + `wasm-ld` (no CRT) | Planned |
 | **7b** | Linux: `opt` + `llc` + `ld.lld` (system glibc CRT) | **Done** |
 | **7b'** | Linux: bundled musl CRT (fully static binaries) | **Done** |
-| **7c** | macOS: `llc` + system `ld` (SDK sysroot) | Planned |
+| **7c** | macOS: `llc` + system `ld` (SDK sysroot) | **Done** |
 | **7d** | Windows: `llc` + `lld-link` (MSVC paths) | Planned |
 | **7e** | `--target` flag + cross-compilation | Planned |
 | **7f** | Bundle `llc` + `lld` + musl CRT into release tarball | Planned |

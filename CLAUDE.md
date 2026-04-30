@@ -113,7 +113,7 @@ Entry point: `cmd/promise/main.go` → `compileFrontend()` orchestrates parse �
 
 **Monomorphization**: Generic types/functions are specialized at codegen time. `mono.go` handles collecting instances, creating specialized layouts, and defining specialized methods.
 
-**M:N Scheduler** (`codegen/sched.go`): GMP model — G (goroutine/LLVM coroutine), P (processor with 256-slot ring buffer run queue), M (OS thread). Key concurrency invariants:
+**M:N Scheduler** (`codegen/sched.go`): GMP model — G (goroutine/LLVM coroutine), P (processor with 256-slot ring buffer run queue), M (OS thread via `pal_thread_create` with explicit 2MB stack — musl defaults to 128KB). Key concurrency invariants:
 - **Park mutex protocol**: Goroutines store the channel/done mutex in `G.park_mutex` before `coro.suspend`. The scheduler unlocks it after `coro.resume` returns. This prevents enqueue-before-suspend races — the waker must acquire the same mutex, blocking until suspend completes.
 - **park_mutex = null means yield**: The scheduler re-enqueues the goroutine (cooperative preemption). park_mutex != null means park — the goroutine is on a waiter list and will be woken by another goroutine.
 - **Select blocking uses yield-and-retry**: Because select involves multiple channel mutexes but park_mutex can only hold one, blocking select yields (park_mutex=null) and retries the lock→try→unlock cycle until a case is ready. This avoids multi-mutex enqueue-before-suspend and double-wake races.

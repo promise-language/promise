@@ -63,8 +63,25 @@ func (p *PosixPAL) EmitRealloc(module *ir.Module) *ir.Func { return emitLibcReal
 
 // EmitThreadCreate declares pthread_create and defines @pal_thread_create.
 // Allocates 8 bytes for pthread_t, spawns a thread, returns handle.
+// Sets explicit 2MB stack size (musl defaults to 128KB which is too small).
 func (p *PosixPAL) EmitThreadCreate(module *ir.Module) *ir.Func {
 	palAlloc := lookupFunc(module, "pal_alloc")
+
+	// declare i32 @pthread_attr_init(i8*) nounwind
+	pthreadAttrInit := module.NewFunc("pthread_attr_init", irtypes.I32,
+		ir.NewParam("attr", irtypes.I8Ptr))
+	pthreadAttrInit.FuncAttrs = append(pthreadAttrInit.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	// declare i32 @pthread_attr_setstacksize(i8*, i64) nounwind
+	pthreadAttrSetStackSize := module.NewFunc("pthread_attr_setstacksize", irtypes.I32,
+		ir.NewParam("attr", irtypes.I8Ptr),
+		ir.NewParam("stacksize", irtypes.I64))
+	pthreadAttrSetStackSize.FuncAttrs = append(pthreadAttrSetStackSize.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	// declare i32 @pthread_attr_destroy(i8*) nounwind
+	pthreadAttrDestroy := module.NewFunc("pthread_attr_destroy", irtypes.I32,
+		ir.NewParam("attr", irtypes.I8Ptr))
+	pthreadAttrDestroy.FuncAttrs = append(pthreadAttrDestroy.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// declare i32 @pthread_create(i8*, i8*, i8*(i8*)*, i8*) nounwind
 	pthreadCreate := module.NewFunc("pthread_create", irtypes.I32,
@@ -84,11 +101,21 @@ func (p *PosixPAL) EmitThreadCreate(module *ir.Module) *ir.Func {
 	// Allocate 8 bytes for pthread_t handle
 	handle := entry.NewCall(palAlloc, constant.NewInt(irtypes.I64, 8))
 
+	// Stack-allocate pthread_attr_t (64 bytes covers all platforms) and set
+	// explicit 2MB stack size (musl defaults to 128KB, causing stack overflows)
+	attrBuf := entry.NewAlloca(irtypes.NewArray(64, irtypes.I8))
+	attr := entry.NewBitCast(attrBuf, irtypes.I8Ptr)
+	entry.NewCall(pthreadAttrInit, attr)
+	entry.NewCall(pthreadAttrSetStackSize, attr, constant.NewInt(irtypes.I64, 2*1024*1024))
+
 	// Bitcast i8* fn to thread routine function pointer
 	fnPtr := entry.NewBitCast(fn.Params[0], threadFnPtrType())
 
-	// pthread_create(handle, null, fnPtr, arg)
-	entry.NewCall(pthreadCreate, handle, constant.NewNull(irtypes.I8Ptr), fnPtr, fn.Params[1])
+	// pthread_create(handle, attr, fnPtr, arg)
+	entry.NewCall(pthreadCreate, handle, attr, fnPtr, fn.Params[1])
+
+	// Destroy attr (stack-allocated, no free needed)
+	entry.NewCall(pthreadAttrDestroy, attr)
 
 	entry.NewRet(handle)
 	return fn

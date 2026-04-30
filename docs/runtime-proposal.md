@@ -416,7 +416,7 @@ pal_cond_signal(cond)
 pal_cond_broadcast(cond)
 pal_cond_destroy(cond)
 ```
-- macOS/Linux: pthread_create/join + pthread_mutex + pthread_cond
+- macOS/Linux: pthread_create/join + pthread_mutex + pthread_cond (explicit 2MB thread stack via pthread_attr_setstacksize — musl defaults to 128KB)
 - Windows/WASM: synchronous stubs (call fn directly, no-op mutex/cond)
 
 `go expr` spawns an OS thread; `<-task` joins on it. Task struct layout: `{ T result, i1 done, i8* mutex, i8* cond, i8* thread_handle }`. Test runner (`promise_test_run`) migrated from fork/C to thread-based codegen — no C runtime files remain.

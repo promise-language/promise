@@ -468,6 +468,22 @@ func TestPosixThreadCreateDeclaresLibc(t *testing.T) {
 	if !strings.Contains(out, "call i8* @pal_alloc(i64 8)") {
 		t.Error("missing handle allocation (8 bytes for pthread_t)")
 	}
+	// Verify explicit thread stack size setup (musl needs this)
+	if !strings.Contains(out, "alloca [64 x i8]") {
+		t.Error("missing stack-allocated pthread_attr_t (64 bytes)")
+	}
+	if !strings.Contains(out, "call i32 @pthread_attr_init(") {
+		t.Error("missing call to @pthread_attr_init")
+	}
+	if !strings.Contains(out, "call i32 @pthread_attr_setstacksize(") {
+		t.Error("missing call to @pthread_attr_setstacksize")
+	}
+	if !strings.Contains(out, "i64 u0x200000") {
+		t.Error("missing 2MB stack size constant (0x200000)")
+	}
+	if !strings.Contains(out, "call i32 @pthread_attr_destroy(") {
+		t.Error("missing call to @pthread_attr_destroy")
+	}
 }
 
 func TestStubThreadCreateCallsSynchronously(t *testing.T) {

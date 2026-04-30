@@ -11,7 +11,10 @@ UNAME         := $(shell uname -s)
 MUSL_CRT_SRC  := /usr/lib/x86_64-linux-musl
 MUSL_CRT_DST  := $(RESOURCES)/crt/x86_64-linux-musl
 
-.PHONY: all generate build test clean download-antlr fmt install resources musl-crt
+# LLVM tool bundling (release builds only)
+LLVM_DST      := $(RESOURCES)/llvm/linux-amd64
+
+.PHONY: all generate build test clean download-antlr fmt install resources musl-crt llvm-bundle release
 
 all: generate build
 
@@ -67,6 +70,29 @@ clean:
 	rm -f $(BINARY)
 	rm -rf $(PARSER_PKG)/*.go $(PARSER_PKG)/*.interp $(PARSER_PKG)/*.tokens
 	rm -rf $(RESOURCES)
+
+llvm-bundle:
+	@LLVM_VER=$$(for v in $$(seq 25 -1 22); do \
+		if command -v opt-$$v >/dev/null 2>&1; then echo $$v; break; fi; done); \
+	if [ -z "$$LLVM_VER" ]; then echo "ERROR: no LLVM 22+ found"; exit 1; fi; \
+	LLVM_DIR=/usr/lib/llvm-$$LLVM_VER; \
+	LLVM_LIB=$$(readlink -f $$LLVM_DIR/lib/libLLVM.so); \
+	echo "Bundling LLVM $$LLVM_VER tools ($$LLVM_DIR)..."; \
+	mkdir -p $(LLVM_DST); \
+	gzip -9 -c $$LLVM_DIR/bin/opt > $(LLVM_DST)/opt.gz; \
+	gzip -9 -c $$LLVM_DIR/bin/llc > $(LLVM_DST)/llc.gz; \
+	gzip -9 -c $$LLVM_DIR/bin/lld > $(LLVM_DST)/lld.gz; \
+	gzip -9 -c $$LLVM_LIB > $(LLVM_DST)/libLLVM.so.gz; \
+	echo "  opt.gz: $$(du -h $(LLVM_DST)/opt.gz | cut -f1)"; \
+	echo "  llc.gz: $$(du -h $(LLVM_DST)/llc.gz | cut -f1)"; \
+	echo "  lld.gz: $$(du -h $(LLVM_DST)/lld.gz | cut -f1)"; \
+	echo "  libLLVM.so.gz: $$(du -h $(LLVM_DST)/libLLVM.so.gz | cut -f1)"
+
+ifeq ($(UNAME),Linux)
+release: generate resources musl-crt llvm-bundle
+	go build -tags embed_llvm -o $(BINARY) ./cmd/promise
+	@echo "Release binary: $$(du -h $(BINARY) | cut -f1) (self-contained)"
+endif
 
 install: build
 	./promise install

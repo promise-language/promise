@@ -65,10 +65,10 @@ After completing Phases 1-3, the C runtime is reduced to a single function:
 | **7c** | macOS: `llc` + system `ld` (SDK sysroot) | **Done** |
 | **7d** | Windows: `llc` + `lld-link` (MSVC paths) | Planned |
 | **7e** | `--target` flag + cross-compilation | Planned |
-| **7f** | Bundle `llc` + `lld` + musl CRT into release tarball | Planned |
+| **7f** | Self-contained binary: embed gzip-compressed LLVM tools via `go:embed` | **Done** |
 | **8** | Rewrite scheduler in Promise | Planned |
 
-Phases 1-5c, 7b, and 7b' are done. Phase 3 introduced the platform split (PAL). Phase 5a added 1:1 threading (each `go` spawns an OS thread). Phase 5b added typed channels (`channel[T]` with buffered/unbuffered send/receive/for-in and `go { }` block variable capture). Phase 5c replaced 1:1 threading with an M:N scheduler using LLVM coroutine intrinsics — goroutines are cheap coroutine handles multiplexed on OS threads via per-CPU processors and work stealing. Phase 7b replaced clang with `opt` + `llc` + `ld.lld` on Linux with system glibc CRT. Phase 7b' bundled musl libc CRT objects via `go:embed`, making fully static binaries the default on Linux — target triple is now `x86_64-unknown-linux-musl`; clang remains as fallback via `PROMISE_USE_CLANG=1`. Phases 5d-6 add WASM scheduling and IO. Remaining Phase 7 (a, c-f) adds other platforms and cross-compilation. Phase 8 is polish.
+Phases 1-5c, 7b, 7b', 7c, and 7f are done. Phase 3 introduced the platform split (PAL). Phase 5a added 1:1 threading (each `go` spawns an OS thread). Phase 5b added typed channels (`channel[T]` with buffered/unbuffered send/receive/for-in and `go { }` block variable capture). Phase 5c replaced 1:1 threading with an M:N scheduler using LLVM coroutine intrinsics — goroutines are cheap coroutine handles multiplexed on OS threads via per-CPU processors and work stealing. Phase 7b replaced clang with `opt` + `llc` + `ld.lld` on Linux with system glibc CRT. Phase 7b' bundled musl libc CRT objects via `go:embed`, making fully static binaries the default on Linux — target triple is now `x86_64-unknown-linux-musl`; clang remains as fallback via `PROMISE_USE_CLANG=1`. Phase 7c added macOS opt+llc+system ld pipeline. Phase 7f embeds gzip-compressed LLVM tools (opt, llc, lld, libLLVM.so) in the Go binary for release builds (`go build -tags embed_llvm`), making the promise binary fully self-contained on Linux (~61MB). Phases 5d-6 add WASM scheduling and IO. Remaining Phase 7 (a, d-e) adds other platforms and cross-compilation. Phase 8 is polish.
 
 ---
 
@@ -835,46 +835,28 @@ Validated: `promise test -stress 20 tests/concurrency/...` — 71 tests, 100% pa
 
 **Goal**: once `promise` is installed, it has zero external dependencies. No system LLVM, no Homebrew, no Xcode CLT (except macOS `-lSystem`). A fresh machine with the Promise tarball can compile and link.
 
-**Phase 7 distribution**: Bundle `llc` + `lld` + musl CRT as prebuilt binaries.
+**Phase 7f (Done)**: LLVM tools are gzip-compressed and embedded in the Go binary via `go:embed` for release builds. The release binary is fully self-contained (~61MB on Linux x86_64).
 
-```
-promise-v0.1.0-darwin-arm64.tar.gz
-├── bin/
-│   ├── promise              # ~15MB  — Go compiler binary
-│   ├── llc                  # ~40MB  — LLVM static compiler (multi-target)
-│   ├── lld                  # ~30MB  — LLVM linker (all modes in one binary)
-│   ├── ld.lld -> lld        # symlink — ELF linker mode (Linux)
-│   ├── ld64.lld -> lld      # symlink — Mach-O linker mode (macOS)
-│   ├── lld-link -> lld      # symlink — PE/COFF linker mode (Windows)
-│   └── wasm-ld -> lld       # symlink — WASM linker mode
-└── lib/
-    └── promise/
-        ├── std/             # .pr standard library (also go:embed'd in binary)
-        └── crt/             # bundled CRT objects for self-contained linking
-            ├── x86_64-linux-musl/
-            │   ├── crt1.o
-            │   ├── crti.o
-            │   ├── crtn.o
-            │   └── libc.a   # musl static libc (~600KB)
-            ├── aarch64-linux-musl/
-            │   ├── crt1.o
-            │   ├── crti.o
-            │   ├── crtn.o
-            │   └── libc.a
-            └── wasm32-wasi/
-                └── libc.a   # wasi-libc (optional, for WASI targets)
-```
+**Build modes**:
+- `make build` — dev build (~16MB), uses system LLVM tools
+- `make release` — release build (~61MB), embeds opt + llc + lld + libLLVM.so (gzip-compressed)
+- `bin/build.sh --release` — same as `make release`
 
-`lld` is a single binary that acts as all four linker variants — the symlinks select the mode. Total bundle size: ~90MB compressed.
+**Embedded LLVM tools** (Linux x86_64, gated by `-tags embed_llvm`):
+- `opt.gz` (76K), `llc.gz` (60K), `lld.gz` (2.1M), `libLLVM.so.gz` (44M)
+- Extracted lazily on first use to `~/.promise/cache/llvm/linux-amd64/`
+- Symlinks created: `ld.lld → lld`, `ld64.lld → lld`, `lld-link → lld`, `wasm-ld → lld`
+- `LD_LIBRARY_PATH` set at exec time so tools find `libLLVM.so` in the cache dir
 
 **Tool discovery order** (implemented in `findLLVMTool()`):
-1. **Sibling directory**: look next to the `promise` binary — `{promise_dir}/opt`, `{promise_dir}/llc`, `{promise_dir}/ld.lld`
+1. **Sibling directory**: `{promise_dir}/opt`, `{promise_dir}/llvm/opt` (install layout)
 2. **Env override**: `PROMISE_OPT`, `PROMISE_LLC`, `PROMISE_LLD` (for development/testing)
-3. **Homebrew LLVM** (macOS): `/opt/homebrew/opt/llvm/bin`, `/usr/local/opt/llvm/bin`
-4. **Versioned PATH**: `opt-25` down to `opt-22`, `llc-25` down to `llc-22`, etc.
-5. **Unversioned PATH**: `opt`, `llc`, `ld.lld`
+3. **Embedded cache**: `~/.promise/cache/llvm/linux-amd64/` (extracted from embedded on first access)
+4. **Homebrew LLVM** (macOS): `/opt/homebrew/opt/llvm/bin`, `/usr/local/opt/llvm/bin`
+5. **Versioned PATH**: `opt-25` down to `opt-22`, `llc-25` down to `llc-22`, etc.
+6. **Unversioned PATH**: `opt`, `llc`, `ld.lld`
 
-Looking next to the binary first means an installed Promise always finds its own tools, regardless of system PATH changes or Homebrew upgrades.
+Looking next to the binary first means an installed Promise always finds its own tools, regardless of system PATH changes or Homebrew upgrades. The embedded cache fallback means a release binary works on a fresh machine with zero LLVM installation.
 
 ### Bundled musl libc
 

@@ -18,9 +18,10 @@ All commands run from `compiler/`:
 
 ```bash
 make                  # download ANTLR4 JAR, generate parser, embed resources, build binary
+make release          # release build: embed LLVM tools (~61MB self-contained binary, Linux only)
 make test             # run all Go tests (go test ./...)
 make generate         # regenerate ANTLR4 parser from grammar
-make resources        # copy std/ and runtime/ into embedded resources
+make resources        # copy std/ into embedded resources
 make clean            # remove generated code and binary
 
 # Run tests for a single package
@@ -89,7 +90,7 @@ Stress mode compiles once and re-runs binaries. Stable files are gradually suppr
 .pr source → ANTLR4 (grammar/) → AST (ast/) → Sema 4-pass (sema/) → Ownership (ownership/) → LLVM IR (codegen/) → opt+llc+lld → binary
 ```
 
-On Linux: `opt -O1` (coroutine lowering) → `llc -filetype=obj` → `ld.lld -static` (link with bundled musl CRT → fully static binaries). On macOS: `opt -O1` → `llc -filetype=obj` → system `ld` (or `ld64.lld`) with `-lSystem -syslibroot`. On other platforms (or `PROMISE_USE_CLANG=1`): `clang -O1`. Requires LLVM 22+.
+On Linux: `opt -O1` (coroutine lowering) → `llc -filetype=obj` → `ld.lld -static` (link with bundled musl CRT → fully static binaries). On macOS: `opt -O1` → `llc -filetype=obj` → system `ld` (or `ld64.lld`) with `-lSystem -syslibroot`. On other platforms (or `PROMISE_USE_CLANG=1`): `clang -O1`. Requires LLVM 22+. Release builds (`make release`) embed gzip-compressed LLVM tools in the binary (~61MB), extracted lazily to `~/.promise/cache/llvm/`.
 
 Entry point: `cmd/promise/main.go` → `compileFrontend()` orchestrates parse → std merge → sema → ownership.
 
@@ -122,7 +123,7 @@ Entry point: `cmd/promise/main.go` → `compileFrontend()` orchestrates parse �
 - **Waiter lists**: Intrusive linked list via `G.wait_next`. Protected by channel mutex. `promise_waiter_enqueue/dequeue/remove/wake_all` helpers in sched.go.
 - **Sysmon**: Background thread sets `G.preempt=1` every 10ms; yield checks at loop back-edges call `coro.suspend`.
 
-**Standard library**: `.pr` files in `std/` are embedded via `go:embed` and merged into user AST before sema. Runtime support is C code in `runtime/` linked by clang.
+**Standard library**: `.pr` files in `std/` are embedded via `go:embed` and merged into user AST before sema. Runtime is codegen-emitted LLVM IR (no C runtime).
 
 ## Test Patterns
 

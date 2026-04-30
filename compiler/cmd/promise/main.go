@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"embed"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/antlr4-go/antlr/v4"
@@ -743,14 +746,136 @@ func checkClangVersion(clangPath string) {
 	}
 }
 
+// --- Embedded LLVM tool extraction ---
+
+// llvmExtractOnce ensures embedded LLVM tools are extracted at most once per process.
+var llvmExtractOnce sync.Once
+
+// llvmCacheDir is set by ensureEmbeddedLLVM after successful extraction.
+var llvmCacheDir string
+
+// embeddedLLVMFiles are the compressed files we expect in the embed FS.
+// The base names (without .gz) become executables in the cache dir.
+var embeddedLLVMFiles = []string{"opt.gz", "llc.gz", "lld.gz", "libLLVM.so.gz"}
+
+// embeddedLLVMSymlinks maps symlink name → target for lld mode selection.
+var embeddedLLVMSymlinks = map[string]string{
+	"ld.lld":   "lld",
+	"ld64.lld": "lld",
+	"lld-link": "lld",
+	"wasm-ld":  "lld",
+}
+
+// llvmCacheDirPath returns the path where embedded LLVM tools are extracted.
+func llvmCacheDirPath() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(homeDir, ".promise", "cache", "llvm", "linux-amd64"), nil
+}
+
+// llvmCacheComplete checks if all expected LLVM tools exist in the cache dir.
+func llvmCacheComplete(dir string) bool {
+	for _, gz := range embeddedLLVMFiles {
+		name := strings.TrimSuffix(gz, ".gz")
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			return false
+		}
+	}
+	// Also check symlinks
+	for link := range embeddedLLVMSymlinks {
+		if _, err := os.Lstat(filepath.Join(dir, link)); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// ensureEmbeddedLLVM extracts compressed LLVM tools from the embedded FS to the cache dir.
+// Called at most once per process via llvmExtractOnce.
+func ensureEmbeddedLLVM() {
+	if !hasEmbeddedLLVM {
+		return
+	}
+
+	dir, err := llvmCacheDirPath()
+	if err != nil {
+		return
+	}
+
+	// Check if cache is already complete
+	if llvmCacheComplete(dir) {
+		llvmCacheDir = dir
+		return
+	}
+
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot create LLVM cache dir %s: %v\n", dir, err)
+		os.Exit(1)
+	}
+
+	fmt.Fprintf(os.Stderr, "Extracting embedded LLVM tools to %s...\n", dir)
+	extractCompressedLLVM(dir)
+	llvmCacheDir = dir
+}
+
+// extractCompressedLLVM decompresses embedded LLVM tools to the given directory.
+// Used by both ensureEmbeddedLLVM (cache) and runInstall (install dir).
+func extractCompressedLLVM(destDir string) {
+	prefix := "resources/llvm/linux-amd64"
+	for _, gz := range embeddedLLVMFiles {
+		data, err := embeddedLLVM.ReadFile(prefix + "/" + gz)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: cannot read embedded %s: %v\n", gz, err)
+			os.Exit(1)
+		}
+
+		gr, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: cannot decompress %s: %v\n", gz, err)
+			os.Exit(1)
+		}
+
+		name := strings.TrimSuffix(gz, ".gz")
+		outPath := filepath.Join(destDir, name)
+		out, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+		if err != nil {
+			gr.Close()
+			fmt.Fprintf(os.Stderr, "error: cannot write %s: %v\n", outPath, err)
+			os.Exit(1)
+		}
+
+		if _, err := io.Copy(out, gr); err != nil {
+			out.Close()
+			gr.Close()
+			fmt.Fprintf(os.Stderr, "error: cannot decompress %s: %v\n", gz, err)
+			os.Exit(1)
+		}
+		out.Close()
+		gr.Close()
+	}
+
+	// Create symlinks for lld modes
+	for link, target := range embeddedLLVMSymlinks {
+		linkPath := filepath.Join(destDir, link)
+		os.Remove(linkPath)
+		if err := os.Symlink(target, linkPath); err != nil {
+			fmt.Fprintf(os.Stderr, "error: cannot create symlink %s → %s: %v\n", link, target, err)
+			os.Exit(1)
+		}
+	}
+}
+
 // --- LLVM tool pipeline ---
 
 // findLLVMTool locates an LLVM tool (opt, llc, ld.lld, ld64.lld) by searching:
 // 1. Sibling directory of the promise binary
 // 2. Environment variable override (PROMISE_OPT, PROMISE_LLC, PROMISE_LLD, PROMISE_LD64LLD)
-// 3. Homebrew LLVM (macOS)
-// 4. Versioned names on PATH (e.g., opt-22, llc-22, ld.lld-22) from newest to minLLVMMajor
-// 5. Unversioned names on PATH (e.g., opt, llc, ld.lld)
+// 3. Embedded LLVM cache (~/.promise/cache/llvm/linux-amd64/)
+// 4. Homebrew LLVM (macOS)
+// 5. Versioned names on PATH (e.g., opt-22, llc-22, ld.lld-22) from newest to minLLVMMajor
+// 6. Unversioned names on PATH (e.g., opt, llc, ld.lld)
 func findLLVMTool(name string) (string, error) {
 	envMap := map[string]string{
 		"opt":      "PROMISE_OPT",
@@ -759,11 +884,16 @@ func findLLVMTool(name string) (string, error) {
 		"ld64.lld": "PROMISE_LD64LLD",
 	}
 
-	// 1. Sibling of promise binary
+	// 1. Sibling of promise binary (also check llvm/ subdirectory for install layout)
 	if execPath, err := os.Executable(); err == nil {
-		sibling := filepath.Join(filepath.Dir(execPath), name)
+		dir := filepath.Dir(execPath)
+		sibling := filepath.Join(dir, name)
 		if _, err := os.Stat(sibling); err == nil {
 			return sibling, nil
+		}
+		subdir := filepath.Join(dir, "llvm", name)
+		if _, err := os.Stat(subdir); err == nil {
+			return subdir, nil
 		}
 	}
 
@@ -774,7 +904,18 @@ func findLLVMTool(name string) (string, error) {
 		}
 	}
 
-	// 3. Homebrew LLVM (macOS only)
+	// 3. Embedded LLVM cache (Linux only — extract on first access)
+	if hasEmbeddedLLVM {
+		llvmExtractOnce.Do(ensureEmbeddedLLVM)
+		if llvmCacheDir != "" {
+			p := filepath.Join(llvmCacheDir, name)
+			if _, err := os.Stat(p); err == nil {
+				return p, nil
+			}
+		}
+	}
+
+	// 4. Homebrew LLVM (macOS only)
 	if runtime.GOOS == "darwin" {
 		for _, prefix := range []string{
 			"/opt/homebrew/opt/llvm/bin",
@@ -787,7 +928,7 @@ func findLLVMTool(name string) (string, error) {
 		}
 	}
 
-	// 4. Versioned names on PATH (try newest to oldest)
+	// 5. Versioned names on PATH (try newest to oldest)
 	for v := maxLLVMSearch; v >= minLLVMMajor; v-- {
 		versioned := fmt.Sprintf("%s-%d", name, v)
 		if path, err := exec.LookPath(versioned); err == nil {
@@ -795,14 +936,46 @@ func findLLVMTool(name string) (string, error) {
 		}
 	}
 
-	// 5. Unversioned on PATH
+	// 6. Unversioned on PATH
 	if path, err := exec.LookPath(name); err == nil {
 		return path, nil
 	}
 
 	envName := envMap[name]
-	return "", fmt.Errorf("%s not found\n  searched: sibling of promise binary, $%s, Homebrew LLVM, PATH (%s-{%d..%d}, %s)\n  install LLVM %d+ or set PROMISE_USE_CLANG=1 to use clang",
+	return "", fmt.Errorf("%s not found\n  searched: sibling of promise binary, $%s, embedded cache, Homebrew LLVM, PATH (%s-{%d..%d}, %s)\n  install LLVM %d+ or set PROMISE_USE_CLANG=1 to use clang",
 		name, envName, name, maxLLVMSearch, minLLVMMajor, name, minLLVMMajor)
+}
+
+// runLLVMCmd creates an exec.Cmd for an LLVM tool, setting LD_LIBRARY_PATH
+// so dynamically-linked tools can find libLLVM.so when running from the cache dir.
+func runLLVMCmd(toolPath string, args ...string) *exec.Cmd {
+	cmd := exec.Command(toolPath, args...)
+	// If the tool is in the embedded cache, ensure LD_LIBRARY_PATH includes that dir
+	// so it can find libLLVM.so alongside it.
+	toolDir := filepath.Dir(toolPath)
+	if llvmCacheDir != "" && toolDir == llvmCacheDir {
+		env := os.Environ()
+		ldPath := os.Getenv("LD_LIBRARY_PATH")
+		if ldPath != "" {
+			ldPath = toolDir + ":" + ldPath
+		} else {
+			ldPath = toolDir
+		}
+		// Replace or append LD_LIBRARY_PATH
+		found := false
+		for i, e := range env {
+			if strings.HasPrefix(e, "LD_LIBRARY_PATH=") {
+				env[i] = "LD_LIBRARY_PATH=" + ldPath
+				found = true
+				break
+			}
+		}
+		if !found {
+			env = append(env, "LD_LIBRARY_PATH="+ldPath)
+		}
+		cmd.Env = env
+	}
+	return cmd
 }
 
 // llvmToolVersion returns the major version of an LLVM tool, or 0 if it cannot be determined.
@@ -810,7 +983,8 @@ func findLLVMTool(name string) (string, error) {
 //   - opt/llc: "LLVM version 22.1.2"
 //   - ld.lld:  "LLD 22.1.2" (no "LLVM version" prefix)
 func llvmToolVersion(toolPath string) int {
-	out, err := exec.Command(toolPath, "--version").Output()
+	cmd := runLLVMCmd(toolPath, "--version")
+	out, err := cmd.Output()
 	if err != nil {
 		return 0
 	}
@@ -1353,7 +1527,7 @@ func compileAndLinkLLVM(llFile, target, outputFile string) {
 	bcFile.Close()
 	defer os.Remove(bcFile.Name())
 
-	optCmd := exec.Command(optPath, "-O1", llFile, "-o", bcFile.Name())
+	optCmd := runLLVMCmd(optPath, "-O1", llFile, "-o", bcFile.Name())
 	optCmd.Stderr = os.Stderr
 	if err := optCmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error running opt: %v\n", err)
@@ -1369,7 +1543,7 @@ func compileAndLinkLLVM(llFile, target, outputFile string) {
 	objFile.Close()
 	defer os.Remove(objFile.Name())
 
-	llcCmd := exec.Command(llcPath,
+	llcCmd := runLLVMCmd(llcPath,
 		"-mtriple="+target,
 		"-filetype=obj",
 		"-relocation-model=pic",
@@ -1402,7 +1576,12 @@ func linkDarwin(objFile, target, outputFile string) {
 	}
 
 	linkArgs := buildDarwinLinkArgs(target, objFile, outputFile)
-	linkCmd := exec.Command(linkerPath, linkArgs...)
+	var linkCmd *exec.Cmd
+	if isLLD {
+		linkCmd = runLLVMCmd(linkerPath, linkArgs...)
+	} else {
+		linkCmd = exec.Command(linkerPath, linkArgs...)
+	}
 	linkCmd.Stderr = os.Stderr
 	if err := linkCmd.Run(); err != nil {
 		linkerName := "ld"
@@ -1434,7 +1613,7 @@ func linkLinux(objFile, target, outputFile string) {
 	} else {
 		linkArgs = buildLinuxLinkArgs(target, objFile, outputFile)
 	}
-	linkCmd := exec.Command(lldPath, linkArgs...)
+	linkCmd := runLLVMCmd(lldPath, linkArgs...)
 	linkCmd.Stderr = os.Stderr
 	if err := linkCmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error linking (ld.lld): %v\n", err)
@@ -1922,7 +2101,22 @@ func runInstall() {
 		extractEmbedded(embeddedMuslCRT, "resources/crt/"+arch, crtDest)
 	}
 
-	fmt.Printf("Installed Promise to %s\n\n", promiseDir)
+	// Extract embedded LLVM tools (if available)
+	if hasEmbeddedLLVM {
+		llvmDest := filepath.Join(binDir, "llvm")
+		if err := os.MkdirAll(llvmDest, 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "error creating %s: %v\n", llvmDest, err)
+			os.Exit(1)
+		}
+		extractCompressedLLVM(llvmDest)
+	}
+
+	fmt.Printf("Installed Promise to %s\n", promiseDir)
+	fmt.Printf("  binary: %s\n", filepath.Join(binDir, "promise"))
+	fmt.Printf("  std:    %s\n", stdDest)
+	if hasEmbeddedLLVM {
+		fmt.Printf("  llvm:   %s\n", filepath.Join(binDir, "llvm"))
+	}
 	fmt.Printf("Add to your shell profile:\n\n")
 	fmt.Printf("  export PATH=\"%s:$PATH\"\n", binDir)
 }

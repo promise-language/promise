@@ -23,7 +23,18 @@ if [ "$(uname -s)" = "Linux" ]; then
   fi
 fi
 
-# Build (skip ANTLR generate if parser already exists)
+# Release build: bundle LLVM tools into the binary
+if [ "${1:-}" = "--release" ] && [ "$(uname -s)" = "Linux" ]; then
+  make llvm-bundle
+  if ! go build -tags embed_llvm -o promise ./cmd/promise; then
+    echo "ERROR: release build failed"
+    exit 1
+  fi
+  echo "Built: compiler/promise (release, $(du -h promise | cut -f1))"
+  exit 0
+fi
+
+# Dev build (skip ANTLR generate if parser already exists)
 if ! go build -o promise ./cmd/promise; then
   echo "ERROR: build failed"
   exit 1

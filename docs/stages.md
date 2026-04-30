@@ -53,6 +53,7 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 | Operator dispatch | `[]`, `[]=`, `[:]`, `[:]=` as method-dispatched operators | Done | [subscript-slice-operators.md](subscript-slice-operators.md) |
 | Naming conventions | PascalCase canonical names for all non-scalar types; lowercase sugar | Planned | [standard-runtime.md](standard-runtime.md#naming-conventions) |
 | C binding | Extern ABI coercion (`extern.go`), C header generation (`headergen.go`) | Done (dormant — header gen implemented but not exposed via CLI; original use case obsolete after C runtime migration) | [c-binding-architecture.md](c-binding-architecture.md) |
+| Self-contained binary | Embed gzip-compressed LLVM tools (opt, llc, lld, libLLVM.so) via `go:embed` for release builds | Done (Phase 7f, Linux x86_64) | [runtime-proposal.md](runtime-proposal.md) |
 
 ---
 

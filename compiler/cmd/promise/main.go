@@ -671,7 +671,9 @@ func compileAndLink(result *codegen.CompileResult, outputFile string) {
 	if strings.Contains(target, "linux") {
 		linkArgs = append(linkArgs, "-lpthread")
 	}
-	linkCmd := exec.Command(findClang(), linkArgs...)
+	clang := findClang()
+	checkClangVersion(clang)
+	linkCmd := exec.Command(clang, linkArgs...)
 	linkCmd.Stderr = os.Stderr
 	if err := linkCmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error linking: %v\n", err)
@@ -679,8 +681,12 @@ func compileAndLink(result *codegen.CompileResult, outputFile string) {
 	}
 }
 
+// minClangMajor is the minimum clang/LLVM major version required.
+// LLVM 15+ is needed for coroutine intrinsics with the current IR shape.
+const minClangMajor = 15
+
 // findClang returns the path to a clang binary.
-// Prefers Homebrew LLVM (needed for coroutine intrinsics) over Apple clang.
+// Prefers Homebrew LLVM over Apple clang.
 func findClang() string {
 	// Check PROMISE_CLANG env override first
 	if p := os.Getenv("PROMISE_CLANG"); p != "" {
@@ -696,6 +702,39 @@ func findClang() string {
 		}
 	}
 	return "clang"
+}
+
+// clangVersion returns the major version of the given clang binary, or 0 if it cannot be determined.
+// Parses both "clang version X.Y.Z" (upstream) and "Apple clang version X.Y.Z" (Xcode).
+func clangVersion(clangPath string) int {
+	out, err := exec.Command(clangPath, "--version").Output()
+	if err != nil {
+		return 0
+	}
+	re := regexp.MustCompile(`(?:Apple )?clang version (\d+)`)
+	m := re.FindSubmatch(out)
+	if m == nil {
+		return 0
+	}
+	v, err := strconv.Atoi(string(m[1]))
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+// checkClangVersion verifies the clang binary meets the minimum version requirement.
+func checkClangVersion(clangPath string) {
+	v := clangVersion(clangPath)
+	if v == 0 {
+		return // can't determine version, let clang errors speak for themselves
+	}
+	if v < minClangMajor {
+		fmt.Fprintf(os.Stderr, "error: clang version %d is too old (minimum required: %d)\n", v, minClangMajor)
+		fmt.Fprintf(os.Stderr, "  clang path: %s\n", clangPath)
+		fmt.Fprintf(os.Stderr, "  install a newer clang or set PROMISE_CLANG to override\n")
+		os.Exit(1)
+	}
 }
 
 // --- Frontend pipeline ---

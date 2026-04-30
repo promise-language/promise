@@ -132,7 +132,7 @@ type Compiler struct {
 	coroBegin   *ir.Func // @llvm.coro.begin(token, i8*) → i8*
 	coroSize    *ir.Func // @llvm.coro.size.i64() → i64
 	coroSuspend *ir.Func // @llvm.coro.suspend(token, i1) → i8
-	coroEnd     *ir.Func // @llvm.coro.end(i8*, i1, token) → i1
+	coroEnd     *ir.Func // @llvm.coro.end(i8*, i1, token) → void
 	coroFree    *ir.Func // @llvm.coro.free(token, i8*) → i8*
 	coroResume  *ir.Func // @llvm.coro.resume(i8*) → void
 	coroDestroy *ir.Func // @llvm.coro.destroy(i8*) → void
@@ -3183,8 +3183,9 @@ func (c *Compiler) declareCoroIntrinsics() {
 		ir.NewParam("save", irtypes.Token),
 		ir.NewParam("final", irtypes.I1))
 
-	// @llvm.coro.end(i8* %handle, i1 %unwind, token %bundle) → i1
-	c.coroEnd = c.module.NewFunc("llvm.coro.end", irtypes.I1,
+	// @llvm.coro.end(i8* %handle, i1 %unwind, token %bundle) → void
+	// Return type changed from i1 to void in LLVM 20+; void works on LLVM 16+ too.
+	c.coroEnd = c.module.NewFunc("llvm.coro.end", irtypes.Void,
 		ir.NewParam("handle", irtypes.I8Ptr),
 		ir.NewParam("unwind", irtypes.I1),
 		ir.NewParam("bundle", irtypes.Token))

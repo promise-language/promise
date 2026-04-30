@@ -50,7 +50,7 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 | 1:1 Threading | `go`/`<-` with OS threads via PAL | Done (Phase 5a) | [runtime-proposal.md](runtime-proposal.md) |
 | Channels | `channel[T]` with buffered/unbuffered send/receive/for-in | Done (Phase 5b) | [runtime-proposal.md](runtime-proposal.md) |
 | M:N Scheduler | LLVM coroutines, GMP model, work stealing | Done (Phase 5c) | [runtime-proposal.md](runtime-proposal.md) |
-| Operator dispatch | `[]`, `[:]`, `++`, `--`, `..`, `!` as method-dispatched operators | Planned | [subscript-slice-operators.md](subscript-slice-operators.md) |
+| Operator dispatch | `[]`, `[]=`, `[:]`, `[:]=` as method-dispatched operators | Done | [subscript-slice-operators.md](subscript-slice-operators.md) |
 | C binding | Generated headers for extern type safety | Planned | [c-binding-architecture.md](c-binding-architecture.md) |
 
 ---
@@ -551,8 +551,8 @@ The compiler pipeline (Stages 1-8o) is complete for the current feature set. The
 
 | Work | Design Doc | Priority |
 |------|-----------|----------|
-| Operator method dispatch (`[]`, `[:]`, `++`, `--`, `..`, `!`) | [subscript-slice-operators.md](subscript-slice-operators.md) | High |
-| C binding architecture (generated headers) | [c-binding-architecture.md](c-binding-architecture.md) | Medium |
+| ~~Operator method dispatch (`[]`, `[]=`, `[:]`, `[:]=`)~~ | [subscript-slice-operators.md](subscript-slice-operators.md) | ~~High~~ Done |
+| ~~C binding architecture (generated headers)~~ | [c-binding-architecture.md](c-binding-architecture.md) | ~~Medium~~ Done |
 
 ### Near-term: Compiler Infrastructure
 
@@ -604,7 +604,7 @@ Known gaps and improvements deferred from completed stages.
 | User type `toString()` for interpolation | 8h | Low |
 | Devirtualization optimization (direct call when concrete type known) | 8L | Low |
 | ~~`map[bool, T]` — bool key hashing/lookup is broken~~ — **Fixed.** Bool hash now uses hardcoded constants via `select i1` instead of `fnv1a_hash`. Map literal key types are validated against `Hashable + Equal` constraints via `validateConstraints`. | 8i | ~~Medium~~ Resolved |
-| Variable name collisions in repeated `if v := opt { }` blocks within same function (LLVM IR `%v` redefined) | 8n | Medium |
+| ~~Variable name collisions in repeated `if v := opt { }` blocks~~ — **Fixed.** `uniqueLocalName()` with per-function `localNameCount` appends `.N` suffix to duplicate alloca names in inner scopes. | 8n | ~~Medium~~ Resolved |
 
 ### Ownership & Type System
 
@@ -626,8 +626,8 @@ Known gaps and improvements deferred from completed stages.
 
 | Item | Origin | Priority |
 |------|--------|----------|
-| Default values for constructor parameters (`new(int capacity = 10)`) | 5b | Medium |
-| Unified parameter handling for constructors and methods: optional, default values, mixed named/positional | 5b | Medium |
+| ~~Default values for constructor parameters~~ — **Done.** Implemented in Stage 8n. Defaults recorded in `Info.FieldDefaults` during sema, evaluated in `genConstructorCallMono` during codegen. | 5b | ~~Medium~~ Resolved |
+| ~~Unified parameter handling for constructors and methods~~ — **Done.** Implemented in Stage 8n. Named args, defaults, optional params, and `Self` all work for constructors. | 5b | ~~Medium~~ Resolved |
 
 ### Unscheduled Features
 

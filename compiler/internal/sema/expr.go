@@ -907,19 +907,31 @@ func (c *Checker) checkIndexExpr(e *ast.IndexExpr) types.Type {
 	}
 
 	// Generic instantiation: Type[Arg] or func[Arg] in expression context.
-	// When target is a generic Named/Enum, treat [index] as type argument.
-	switch t := target.(type) {
-	case *types.Named:
-		if len(t.TypeParams()) > 0 {
-			return c.instantiateFromIndex(e, t, t.TypeParams())
+	// Only treat [index] as type argument when the target is a type name
+	// reference (e.g., Vector[int]), NOT a value of a generic type
+	// (e.g., this[i] inside Vector[T]'s method body).
+	isTypeRef := false
+	if ident, ok := e.Target.(*ast.IdentExpr); ok {
+		if obj, found := c.info.Objects[ident]; found {
+			_, isTypeRef = obj.(*types.TypeName)
 		}
-	case *types.Enum:
-		if len(t.TypeParams()) > 0 {
-			return c.instantiateFromIndex(e, t, t.TypeParams())
+	}
+	if isTypeRef {
+		switch t := target.(type) {
+		case *types.Named:
+			if len(t.TypeParams()) > 0 {
+				return c.instantiateFromIndex(e, t, t.TypeParams())
+			}
+		case *types.Enum:
+			if len(t.TypeParams()) > 0 {
+				return c.instantiateFromIndex(e, t, t.TypeParams())
+			}
 		}
-	case *types.Signature:
-		if len(t.TypeParams()) > 0 {
-			return c.instantiateGenericFunc(e, t)
+	}
+	// Generic function instantiation: func[Arg]
+	if sig, ok := target.(*types.Signature); ok {
+		if len(sig.TypeParams()) > 0 {
+			return c.instantiateGenericFunc(e, sig)
 		}
 	}
 

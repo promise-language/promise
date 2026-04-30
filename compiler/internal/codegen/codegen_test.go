@@ -123,8 +123,33 @@ func init() {
 	b.WriteString("\tnew(int capacity) `native;\n")
 	b.WriteString("\t[](int index) T `native;\n")
 	b.WriteString("\t[]=(int index, T value) `native;\n")
-	b.WriteString("\t[:](int? start, int? end) T[] `native;\n")
-	b.WriteString("\t[:]=(int? start, int? end, T[] value) `native;\n")
+	b.WriteString("\t[:](int? start, int? end) T[] {\n")
+	b.WriteString("\t\tint s = 0;\n")
+	b.WriteString("\t\tif val := start { s = val; }\n")
+	b.WriteString("\t\tint e = this.len;\n")
+	b.WriteString("\t\tif val := end { e = val; }\n")
+	b.WriteString("\t\tT[] result = [];\n")
+	b.WriteString("\t\tint i = s;\n")
+	b.WriteString("\t\twhile i < e {\n")
+	b.WriteString("\t\t\tresult.push(this[i]);\n")
+	b.WriteString("\t\t\ti = i + 1;\n")
+	b.WriteString("\t\t}\n")
+	b.WriteString("\t\treturn result;\n")
+	b.WriteString("\t}\n")
+	b.WriteString("\t[:]=(int? start, int? end, T[] value) {\n")
+	b.WriteString("\t\tint s = 0;\n")
+	b.WriteString("\t\tif val := start { s = val; }\n")
+	b.WriteString("\t\tint e = this.len;\n")
+	b.WriteString("\t\tif val := end { e = val; }\n")
+	b.WriteString("\t\tint vi = 0;\n")
+	b.WriteString("\t\tint i = s;\n")
+	b.WriteString("\t\twhile i < e {\n")
+	b.WriteString("\t\t\tif vi >= value.len { break; }\n")
+	b.WriteString("\t\t\tthis[i] = value[vi];\n")
+	b.WriteString("\t\t\tvi = vi + 1;\n")
+	b.WriteString("\t\t\ti = i + 1;\n")
+	b.WriteString("\t\t}\n")
+	b.WriteString("\t}\n")
 	b.WriteString("\tpush(T elem) `native;\n")
 	b.WriteString("\tpop() T? `native;\n")
 	b.WriteString("\tcontains(T elem) bool `native;\n")
@@ -7579,4 +7604,166 @@ func TestOptionalChainUserType(t *testing.T) {
 	`)
 	assertContains(t, ir, "optchain.some")
 	assertContains(t, ir, "optchain.none")
+}
+
+// --- Index/Slice Operator Method Dispatch Tests ---
+
+func TestIndexMethodDispatchMap(t *testing.T) {
+	// Map [] goes through genMethodIndex, not genMapIndex
+	ir := generateIR(t, `
+		main() {
+			m := {"a": 1};
+			int? v = m["a"];
+		}
+	`)
+	assertContains(t, ir, `call { i1, i64 } @"map__string__int.[]"(`)
+}
+
+func TestIndexAssignMethodDispatchMap(t *testing.T) {
+	// Map []= goes through genMethodIndexAssign
+	ir := generateIR(t, `
+		main() {
+			m := {"a": 1};
+			m["b"] = 2;
+		}
+	`)
+	assertContains(t, ir, `call void @"map__string__int.[]="(`)
+}
+
+func TestIndexNativeDispatchVector(t *testing.T) {
+	// Vector [] still uses native path (genVectorIndex)
+	ir := generateIR(t, `
+		main() {
+			v := [1, 2, 3];
+			int x = v[0];
+		}
+	`)
+	assertContains(t, ir, "index.ok")
+	assertContains(t, ir, "index.oob")
+}
+
+func TestIndexNativeDispatchString(t *testing.T) {
+	// String [] still uses native path (genStringIndex)
+	ir := generateIR(t, `
+		main() {
+			s := "hello";
+			char c = s[0];
+		}
+	`)
+	assertContains(t, ir, "stridx.ok")
+	assertContains(t, ir, "stridx.oob")
+}
+
+func TestSliceExprString(t *testing.T) {
+	// String [:] uses native genStringSlice
+	ir := generateIR(t, `
+		main() {
+			s := "hello";
+			string sub = s[1:3];
+		}
+	`)
+	assertContains(t, ir, "call i8* @promise_string_new(")
+}
+
+func TestSliceExprStringLowOnly(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			s := "hello";
+			string sub = s[1:];
+		}
+	`)
+	assertContains(t, ir, "call i8* @promise_string_new(")
+}
+
+func TestSliceExprStringHighOnly(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			s := "hello";
+			string sub = s[:3];
+		}
+	`)
+	assertContains(t, ir, "call i8* @promise_string_new(")
+}
+
+func TestSliceExprVector(t *testing.T) {
+	// Vector [:] calls the Promise-implemented method
+	ir := generateIR(t, `
+		main() {
+			v := [1, 2, 3, 4, 5];
+			int[] sub = v[1:3];
+		}
+	`)
+	assertContains(t, ir, `call i8* @"Vector__int.[:]"(`)
+}
+
+func TestSliceAssignVector(t *testing.T) {
+	// Vector [:]= calls the Promise-implemented method
+	ir := generateIR(t, `
+		main() {
+			v := [1, 2, 3, 4, 5];
+			v[1:3] = [10, 20];
+		}
+	`)
+	assertContains(t, ir, `call void @"Vector__int.[:]=`)
+}
+
+func TestUserDefinedIndexOperator(t *testing.T) {
+	// User-defined type with [] operator method
+	ir := generateIR(t, `
+		type Grid {
+			int[] data;
+			int width;
+
+			[](int index) int? {
+				if index < 0 { return none; }
+				if index >= this.data.len { return none; }
+				return this.data[index];
+			}
+		}
+		main() {
+			Grid g = Grid(data: [1, 2, 3], width: 3);
+			int? v = g[1];
+		}
+	`)
+	assertContains(t, ir, `call { i1, i64 } @"Grid.[]"(`)
+}
+
+func TestUserDefinedIndexAssignOperator(t *testing.T) {
+	// User-defined type with [] and []= operator methods
+	ir := generateIR(t, `
+		type Grid {
+			int[] data;
+			int width;
+
+			[](int index) int {
+				return this.data[index];
+			}
+			[]=(int index, int value) {
+				this.data[index] = value;
+			}
+		}
+		main() {
+			Grid g = Grid(data: [1, 2, 3], width: 3);
+			g[1] = 42;
+		}
+	`)
+	assertContains(t, ir, `call void @"Grid.[]="(`)
+}
+
+func TestUserDefinedSliceOperator(t *testing.T) {
+	// User-defined type with [:] operator method
+	ir := generateIR(t, `
+		type MyList {
+			int[] data;
+
+			[:](int? start, int? end) int[] {
+				return this.data[start:end];
+			}
+		}
+		main() {
+			MyList l = MyList(data: [1, 2, 3, 4, 5]);
+			int[] sub = l[1:3];
+		}
+	`)
+	assertContains(t, ir, `call i8* @"MyList.[:]"(`)
 }

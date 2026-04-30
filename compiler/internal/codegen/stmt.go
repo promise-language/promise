@@ -489,6 +489,14 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			}
 		}
 
+	case *ast.SliceExpr:
+		c.genSliceAssign(target, val)
+		if s.Op == ast.OpAssign {
+			if ident, ok := s.Value.(*ast.IdentExpr); ok {
+				c.clearDropFlag(ident.Name)
+			}
+		}
+
 	default:
 		panic(fmt.Sprintf("codegen: unsupported assignment target %T", s.Target))
 	}
@@ -690,43 +698,94 @@ func (c *Compiler) genIncDecTarget(target ast.Expr, isInc bool) {
 		result := c.emitNativeOp(named, op, current, nil)
 		c.block.NewStore(result, fieldPtr)
 	case *ast.IndexExpr:
-		// Load indexed element, apply op, store back (vector only)
 		indexTargetType := c.info.Types[t.Target]
 		if c.typeSubst != nil {
 			indexTargetType = types.Substitute(indexTargetType, c.typeSubst)
 		}
-		elem, ok := types.AsVector(indexTargetType)
-		if !ok {
-			panic(fmt.Sprintf("codegen: inc/dec on index of non-vector type %s", indexTargetType))
+		indexNamed := extractNamed(indexTargetType)
+		if indexNamed == nil {
+			panic(fmt.Sprintf("codegen: inc/dec on index of unresolved type %s", indexTargetType))
 		}
-		slicePtr := c.genExpr(t.Target)
-		idx := c.genExpr(t.Index)
-		elemLLVM := c.resolveType(elem)
+		indexMethod := indexNamed.LookupMethod("[]")
+		assignMethod := indexNamed.LookupMethod("[]=")
 
-		// Bounds check
-		headerType := vectorHeaderType()
-		headerPtr := c.block.NewBitCast(slicePtr, irtypes.NewPointer(headerType))
-		lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-		length := c.block.NewLoad(irtypes.I64, lenPtr)
-		inBounds := c.block.NewICmp(enum.IPredULT, idx, length)
-		okBlock := c.newBlock("incdec.index.ok")
-		panicBlock := c.newBlock("incdec.index.oob")
-		c.block.NewCondBr(inBounds, okBlock, panicBlock)
+		if indexMethod != nil && indexMethod.IsNative() && assignMethod != nil && assignMethod.IsNative() {
+			// Native path: direct memory access (vectors)
+			elem, ok := types.AsVector(indexTargetType)
+			if !ok && indexNamed == types.TypVector && c.typeSubst != nil {
+				tp := indexNamed.TypeParams()[0]
+				elem, ok = c.typeSubst[tp], c.typeSubst[tp] != nil
+			}
+			if !ok {
+				panic(fmt.Sprintf("codegen: inc/dec on index of non-vector native type %s", indexTargetType))
+			}
+			slicePtr := c.genExpr(t.Target)
+			idx := c.genExpr(t.Index)
+			elemLLVM := c.resolveType(elem)
 
-		c.block = panicBlock
-		oobMsg := c.makeGlobalString("index out of bounds")
-		c.block.NewCall(c.funcs["promise_panic"], oobMsg)
-		c.block.NewUnreachable()
+			headerType := vectorHeaderType()
+			headerPtr := c.block.NewBitCast(slicePtr, irtypes.NewPointer(headerType))
+			lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+			length := c.block.NewLoad(irtypes.I64, lenPtr)
+			inBounds := c.block.NewICmp(enum.IPredULT, idx, length)
+			okBlock := c.newBlock("incdec.index.ok")
+			panicBlock := c.newBlock("incdec.index.oob")
+			c.block.NewCondBr(inBounds, okBlock, panicBlock)
 
-		c.block = okBlock
-		dataBase := c.block.NewGetElementPtr(irtypes.I8, slicePtr,
-			constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
-		dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
-		elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, idx)
-		current := c.block.NewLoad(elemLLVM, elemPtr)
-		result := c.emitNativeOp(named, op, current, nil)
-		c.block.NewStore(result, elemPtr)
+			c.block = panicBlock
+			oobMsg := c.makeGlobalString("index out of bounds")
+			c.block.NewCall(c.funcs["promise_panic"], oobMsg)
+			c.block.NewUnreachable()
+
+			c.block = okBlock
+			dataBase := c.block.NewGetElementPtr(irtypes.I8, slicePtr,
+				constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
+			dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
+			elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, idx)
+			current := c.block.NewLoad(elemLLVM, elemPtr)
+			result := c.emitNativeOp(named, op, current, nil)
+			c.block.NewStore(result, elemPtr)
+		} else if indexMethod != nil && assignMethod != nil {
+			// Non-native: read via [], apply op, write via []=
+			typeName := c.resolveTypeName(indexTargetType)
+			getFnName := mangleMethodName(typeName, "[]", false)
+			getFn, ok := c.funcs[getFnName]
+			if !ok {
+				panic(fmt.Sprintf("codegen: undeclared [] method %s", getFnName))
+			}
+			setFnName := mangleMethodName(typeName, "[]=", false)
+			setFn, ok := c.funcs[setFnName]
+			if !ok {
+				panic(fmt.Sprintf("codegen: undeclared []= method %s", setFnName))
+			}
+			targetVal := c.genExpr(t.Target)
+			keyVal := c.genExpr(t.Index)
+			var instancePtr value.Value
+			if isContainerType(indexTargetType) {
+				instancePtr = targetVal
+			} else {
+				instancePtr = c.extractInstancePtr(targetVal)
+			}
+			// Read, inc/dec, write
+			optVal := c.block.NewCall(getFn, instancePtr, keyVal)
+			hasVal := c.block.NewExtractValue(optVal, 0)
+			okBlock := c.newBlock("incdec.method.ok")
+			panicBlock := c.newBlock("incdec.method.panic")
+			c.block.NewCondBr(hasVal, okBlock, panicBlock)
+
+			c.block = panicBlock
+			panicMsg := c.makeGlobalString("inc/dec on missing key")
+			c.block.NewCall(c.funcs["promise_panic"], panicMsg)
+			c.block.NewUnreachable()
+
+			c.block = okBlock
+			current := c.block.NewExtractValue(optVal, 1)
+			result := c.emitNativeOp(named, op, current, nil)
+			c.block.NewCall(setFn, instancePtr, keyVal, result)
+		} else {
+			panic(fmt.Sprintf("codegen: inc/dec on index of type %s without []/[]= methods", indexTargetType))
+		}
 	default:
 		panic(fmt.Sprintf("codegen: unsupported inc/dec target %T", target))
 	}
@@ -1489,13 +1548,57 @@ func (c *Compiler) genIndexAssign(target *ast.IndexExpr, op ast.AssignOp, val va
 		targetType = types.Substitute(targetType, c.typeSubst)
 	}
 
+	named := extractNamed(targetType)
+	if named != nil {
+		if m := named.LookupMethod("[]="); m != nil {
+			if m.IsNative() {
+				c.genNativeIndexAssign(target, targetType, op, val)
+				return
+			}
+			c.genMethodIndexAssign(target, targetType, val)
+			return
+		}
+	}
+	panic(fmt.Sprintf("codegen: cannot assign to index of type %s", targetType))
+}
+
+// genNativeIndexAssign dispatches native []= implementations for built-in types.
+func (c *Compiler) genNativeIndexAssign(target *ast.IndexExpr, targetType types.Type, op ast.AssignOp, val value.Value) {
 	if elem, ok := types.AsVector(targetType); ok {
 		c.genVectorIndexAssign(target, elem, op, val)
-	} else if key, valT, ok := types.AsMap(targetType); ok {
-		c.genMapIndexAssign(target, key, valT, val)
-	} else {
-		panic(fmt.Sprintf("codegen: cannot assign to index of type %s", targetType))
+		return
 	}
+	// Inside monomorphized method body: targetType is Named(Vector) not Instance(Vector[T]).
+	named := extractNamed(targetType)
+	if named == types.TypVector && c.typeSubst != nil {
+		tp := named.TypeParams()[0]
+		if elem, ok := c.typeSubst[tp]; ok {
+			c.genVectorIndexAssign(target, elem, op, val)
+			return
+		}
+	}
+	panic(fmt.Sprintf("codegen: no native []= implementation for type %s", targetType))
+}
+
+// genMethodIndexAssign calls the monomorphized []= method on a user type.
+func (c *Compiler) genMethodIndexAssign(target *ast.IndexExpr, targetType types.Type, val value.Value) {
+	mangledName := mangleMethodName(c.resolveTypeName(targetType), "[]=", false)
+	fn, ok := c.funcs[mangledName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undeclared []= method %s", mangledName))
+	}
+
+	targetVal := c.genExpr(target.Target)
+	keyVal := c.genExpr(target.Index)
+
+	var instancePtr value.Value
+	if isContainerType(targetType) {
+		instancePtr = targetVal
+	} else {
+		instancePtr = c.extractInstancePtr(targetVal)
+	}
+
+	c.block.NewCall(fn, instancePtr, keyVal, val)
 }
 
 // genVectorIndexAssign handles vec[i] = val with bounds check.
@@ -1538,31 +1641,6 @@ func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Ty
 	c.block.NewStore(result, elemPtr)
 }
 
-// genMapIndexAssign handles m[k] = val via the monomorphized []= method.
-func (c *Compiler) genMapIndexAssign(target *ast.IndexExpr, keyType, valType types.Type, val value.Value) {
-	targetType := c.info.Types[target.Target]
-	if c.typeSubst != nil {
-		targetType = types.Substitute(targetType, c.typeSubst)
-	}
-	inst, ok := targetType.(*types.Instance)
-	if !ok {
-		panic(fmt.Sprintf("codegen: map index-assign target is %T, want Instance", targetType))
-	}
-
-	name := monoName(inst)
-	setFnName := mangleMethodName(name, "[]=", false)
-	setFn, ok := c.funcs[setFnName]
-	if !ok {
-		panic(fmt.Sprintf("codegen: undeclared map []= method %s", setFnName))
-	}
-
-	mapVal := c.genExpr(target.Target)
-	keyVal := c.genExpr(target.Index)
-	instancePtr := c.extractInstancePtr(mapVal)
-
-	c.block.NewCall(setFn, instancePtr, keyVal, val)
-}
-
 // genCompoundIndexAssign handles compound index assignments (arr[i] += val, m[k] += val)
 // with correct evaluation order: target → key → RHS.
 func (c *Compiler) genCompoundIndexAssign(target *ast.IndexExpr, op ast.AssignOp, valueExpr ast.Expr) {
@@ -1571,20 +1649,79 @@ func (c *Compiler) genCompoundIndexAssign(target *ast.IndexExpr, op ast.AssignOp
 		targetType = types.Substitute(targetType, c.typeSubst)
 	}
 
-	if elem, ok := types.AsVector(targetType); ok {
-		slicePtr := c.genExpr(target.Target)
-		idx := c.genExpr(target.Index)
-		val := c.genExpr(valueExpr)
-		c.genVectorCompoundAssign(slicePtr, idx, elem, op, val)
-	} else if _, valT, ok := types.AsMap(targetType); ok {
-		mapVal := c.genExpr(target.Target)
-		keyVal := c.genExpr(target.Index)
-		val := c.genExpr(valueExpr)
-		inst := targetType.(*types.Instance)
-		c.genMapCompoundAssign(inst, mapVal, keyVal, valT, op, val)
-	} else {
-		panic(fmt.Sprintf("codegen: cannot compound-assign to index of type %s", targetType))
+	named := extractNamed(targetType)
+	if named != nil {
+		if m := named.LookupMethod("[]="); m != nil {
+			if m.IsNative() {
+				// Native compound assign (vectors)
+				elem, ok := types.AsVector(targetType)
+				if !ok && named == types.TypVector && c.typeSubst != nil {
+					tp := named.TypeParams()[0]
+					elem, ok = c.typeSubst[tp], c.typeSubst[tp] != nil
+				}
+				if ok {
+					slicePtr := c.genExpr(target.Target)
+					idx := c.genExpr(target.Index)
+					val := c.genExpr(valueExpr)
+					c.genVectorCompoundAssign(slicePtr, idx, elem, op, val)
+					return
+				}
+			} else {
+				// Non-native: read via [], apply op, write via []=
+				c.genMethodCompoundAssign(target, targetType, op, valueExpr)
+				return
+			}
+		}
 	}
+	panic(fmt.Sprintf("codegen: cannot compound-assign to index of type %s", targetType))
+}
+
+// genMethodCompoundAssign handles compound assignment (e.g. m[k] += v) on non-native types
+// by calling [] to read, applying the operator, then calling []= to write.
+func (c *Compiler) genMethodCompoundAssign(target *ast.IndexExpr, targetType types.Type, op ast.AssignOp, valueExpr ast.Expr) {
+	typeName := c.resolveTypeName(targetType)
+
+	getFnName := mangleMethodName(typeName, "[]", false)
+	getFn, ok := c.funcs[getFnName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undeclared [] method %s", getFnName))
+	}
+	setFnName := mangleMethodName(typeName, "[]=", false)
+	setFn, ok := c.funcs[setFnName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undeclared []= method %s", setFnName))
+	}
+
+	targetVal := c.genExpr(target.Target)
+	keyVal := c.genExpr(target.Index)
+	val := c.genExpr(valueExpr)
+
+	var instancePtr value.Value
+	if isContainerType(targetType) {
+		instancePtr = targetVal
+	} else {
+		instancePtr = c.extractInstancePtr(targetVal)
+	}
+
+	// Call [] to get current value (returns V? for maps)
+	optVal := c.block.NewCall(getFn, instancePtr, keyVal)
+
+	// Check has_value flag (field 0 of optional struct)
+	hasVal := c.block.NewExtractValue(optVal, 0)
+	okBlock := c.newBlock("mapcomp.ok")
+	panicBlock := c.newBlock("mapcomp.panic")
+	c.block.NewCondBr(hasVal, okBlock, panicBlock)
+
+	c.block = panicBlock
+	panicMsg := c.makeGlobalString("compound assignment on missing key")
+	c.block.NewCall(c.funcs["promise_panic"], panicMsg)
+	c.block.NewUnreachable()
+
+	c.block = okBlock
+	current := c.block.NewExtractValue(optVal, 1)
+	result := c.genCompoundOp(op, current, val)
+
+	c.block.NewCall(setFn, instancePtr, keyVal, result)
 }
 
 // genVectorCompoundAssign handles vec[i] += val with bounds check and pre-evaluated operands.
@@ -1618,47 +1755,45 @@ func (c *Compiler) genVectorCompoundAssign(slicePtr, idx value.Value, elemType t
 	c.block.NewStore(result, elemPtr)
 }
 
-// genMapCompoundAssign handles m["key"] += val by calling [] to get, applying op, then []=.
-func (c *Compiler) genMapCompoundAssign(inst *types.Instance, mapVal, keyVal value.Value, valType types.Type, op ast.AssignOp, val value.Value) {
-	valLLVM := c.resolveType(valType)
-	name := monoName(inst)
+// --- Slice assignment ---
 
-	getFnName := mangleMethodName(name, "[]", false)
-	getFn, ok := c.funcs[getFnName]
-	if !ok {
-		panic(fmt.Sprintf("codegen: undeclared map [] method %s", getFnName))
-	}
-	setFnName := mangleMethodName(name, "[]=", false)
-	setFn, ok := c.funcs[setFnName]
-	if !ok {
-		panic(fmt.Sprintf("codegen: undeclared map []= method %s", setFnName))
+// genSliceAssign handles assignment to a slice target: v[a:b] = val.
+func (c *Compiler) genSliceAssign(target *ast.SliceExpr, val value.Value) {
+	targetType := c.info.Types[target.Target]
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
 	}
 
-	instancePtr := c.extractInstancePtr(mapVal)
+	named := extractNamed(targetType)
+	if named == nil {
+		panic(fmt.Sprintf("codegen: cannot slice-assign to type %s", targetType))
+	}
+	m := named.LookupMethod("[:]=")
+	if m == nil {
+		panic(fmt.Sprintf("codegen: no [:]=  method on type %s", named))
+	}
 
-	// Call [] to get V? (optional)
-	optVal := c.block.NewCall(getFn, instancePtr, keyVal)
+	targetVal := c.genExpr(target.Target)
 
-	// Check has_value flag (field 0 of optional struct)
-	hasVal := c.block.NewExtractValue(optVal, 0)
-	okBlock := c.newBlock("mapcomp.ok")
-	panicBlock := c.newBlock("mapcomp.panic")
-	c.block.NewCondBr(hasVal, okBlock, panicBlock)
+	// Generate optional int arguments for low and high bounds
+	optIntType := irtypes.NewStruct(irtypes.I1, irtypes.I64)
+	low := c.genSliceBound(target.Low, optIntType)
+	high := c.genSliceBound(target.High, optIntType)
 
-	// Panic: compound assignment requires existing key
-	c.block = panicBlock
-	panicMsg := c.makeGlobalString("compound assignment on missing map key")
-	c.block.NewCall(c.funcs["promise_panic"], panicMsg)
-	c.block.NewUnreachable()
+	mangledName := mangleMethodName(c.resolveTypeName(targetType), "[:]=", false)
+	fn, ok := c.funcs[mangledName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undeclared [:]=  method %s", mangledName))
+	}
 
-	// OK: extract value, apply op, call []=
-	c.block = okBlock
-	optType := irtypes.NewStruct(irtypes.I1, valLLVM)
-	_ = optType
-	current := c.block.NewExtractValue(optVal, 1)
-	result := c.genCompoundOp(op, current, val)
+	var instancePtr value.Value
+	if isContainerType(targetType) {
+		instancePtr = targetVal
+	} else {
+		instancePtr = c.extractInstancePtr(targetVal)
+	}
 
-	c.block.NewCall(setFn, instancePtr, keyVal, result)
+	c.block.NewCall(fn, instancePtr, low, high, val)
 }
 
 // --- lookupLocalType resolves the declared type for a TypedVarDecl ---

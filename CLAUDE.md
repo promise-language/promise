@@ -106,6 +106,11 @@ Methods must be declared inside the type body. Numeric literals infer as `int`/`
 - `compiler/internal/sema/decl.go` — type/method/func definition passes
 - `compiler/internal/types/named.go` — Named type with fields, methods, generics, flags
 
+## Implementation Philosophy
+
+- **Prefer Promise over IR**: When adding new standard library functionality (e.g., container methods, operators), implement in the Promise language (`std/*.pr`) rather than generating custom LLVM IR in codegen. Only use `native` methods when direct memory access or runtime calls are unavoidable (e.g., `Vector.push`, `Vector.[]`, string byte access). Non-native methods written in Promise are type-checked by sema, monomorphized automatically, and far easier to maintain.
+- **Test at every level**: Significant changes need both Go unit tests (`codegen_test.go`, `sema_test.go`) AND Promise-level e2e tests (`tests/` directory, run via `promise test`). Go tests verify IR shape; Promise tests verify runtime correctness.
+
 ## Conventions
 
 - Compiler errors are accumulated (not fatal on first error) and printed together
@@ -114,3 +119,4 @@ Methods must be declared inside the type body. Numeric literals infer as `int`/`
 - `mangleMethodName(owner, name, failable)` produces LLVM function names like `TypeName.method`
 - Move sites must call `clearDropFlag(name)` — there are 8 call variant sites in expr.go plus assignment sites in stmt.go
 - All tests must pass after changes. Significant changes need accompanying tests.
+- When updating `std/*.pr`, also update the `stdAll` mini standard library in test files (`codegen_test.go`, `sema_test.go`, `ownership_test.go`) to match, then run `make resources` to embed changes.

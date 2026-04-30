@@ -6,8 +6,34 @@ type Vector[T] `native {
 
     [](int index) T `native;
     []=(int index, T value) `native;
-    [:](int? start, int? end) T[] `native;
-    [:]=(int? start, int? end, T[] value) `native;
+    [:](int? start, int? end) T[] {
+        int s = 0;
+        if val := start { s = val; }
+        int e = this.len;
+        if val := end { e = val; }
+        T[] result = [];
+        int i = s;
+        while i < e {
+            result.push(this[i]);
+            i = i + 1;
+        }
+        return result;
+    }
+
+    [:]=(int? start, int? end, T[] value) {
+        int s = 0;
+        if val := start { s = val; }
+        int e = this.len;
+        if val := end { e = val; }
+        int vi = 0;
+        int i = s;
+        while i < e {
+            if vi >= value.len { break; }
+            this[i] = value[vi];
+            vi = vi + 1;
+            i = i + 1;
+        }
+    }
 
     push(T elem) `native;
     pop() T? `native;

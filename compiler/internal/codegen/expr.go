@@ -2760,7 +2760,65 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 // --- Index Expression ---
 
 func (c *Compiler) genSliceExpr(e *ast.SliceExpr) value.Value {
-	panic("codegen: slice expressions ([start:end]) not yet implemented")
+	targetType := c.info.Types[e.Target]
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+
+	named := extractNamed(targetType)
+	if named == nil {
+		panic(fmt.Sprintf("codegen: cannot slice type %s", targetType))
+	}
+	m := named.LookupMethod("[:]")
+	if m == nil {
+		panic(fmt.Sprintf("codegen: no [:] method on type %s", named))
+	}
+
+	target := c.genExpr(e.Target)
+
+	// Generate optional int arguments for low and high bounds
+	optIntType := irtypes.NewStruct(irtypes.I1, irtypes.I64)
+	low := c.genSliceBound(e.Low, optIntType)
+	high := c.genSliceBound(e.High, optIntType)
+
+	if m.IsNative() {
+		return c.genNativeSlice(named, targetType, target, low, high)
+	}
+
+	// Non-native: call monomorphized [:] method
+	mangledName := mangleMethodName(c.resolveTypeName(targetType), "[:]", false)
+	fn, ok := c.funcs[mangledName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undeclared [:] method %s", mangledName))
+	}
+
+	var instancePtr value.Value
+	if isContainerType(targetType) {
+		instancePtr = target
+	} else {
+		instancePtr = c.extractInstancePtr(target)
+	}
+
+	return c.block.NewCall(fn, instancePtr, low, high)
+}
+
+// genSliceBound generates an optional int value for a slice bound expression.
+// If expr is nil, returns none ({i1 false, i64 0}). Otherwise wraps the value.
+// If the expression already produces an optional (int?), passes it through directly.
+func (c *Compiler) genSliceBound(expr ast.Expr, optType *irtypes.StructType) value.Value {
+	if expr == nil {
+		return constant.NewZeroInitializer(optType)
+	}
+	val := c.genExpr(expr)
+	// If the expression type is already optional, pass through directly.
+	exprType := c.info.Types[expr]
+	if c.typeSubst != nil {
+		exprType = types.Substitute(exprType, c.typeSubst)
+	}
+	if _, isOpt := exprType.(*types.Optional); isOpt {
+		return val
+	}
+	return c.wrapOptional(val, optType)
 }
 
 func (c *Compiler) genIndexExpr(e *ast.IndexExpr) value.Value {
@@ -2769,17 +2827,106 @@ func (c *Compiler) genIndexExpr(e *ast.IndexExpr) value.Value {
 		targetType = types.Substitute(targetType, c.typeSubst)
 	}
 
-	// String byte indexing: s[i] returns byte as char (i32)
-	if extractNamed(targetType) == types.TypString {
+	named := extractNamed(targetType)
+	if named != nil {
+		if m := named.LookupMethod("[]"); m != nil {
+			if m.IsNative() {
+				return c.genNativeIndex(e, named, targetType)
+			}
+			return c.genMethodIndex(e, targetType)
+		}
+	}
+
+	panic(fmt.Sprintf("codegen: cannot index type %s", targetType))
+}
+
+// genNativeIndex dispatches native [] implementations for built-in types.
+func (c *Compiler) genNativeIndex(e *ast.IndexExpr, named *types.Named, targetType types.Type) value.Value {
+	if named == types.TypString {
 		return c.genStringIndex(e)
 	}
 	if elem, ok := types.AsVector(targetType); ok {
 		return c.genVectorIndex(e, elem)
 	}
-	if key, val, ok := types.AsMap(targetType); ok {
-		return c.genMapIndex(e, key, val)
+	// Inside monomorphized method body: targetType is Named(Vector) not Instance(Vector[T]).
+	// Get element type from typeSubst.
+	if named == types.TypVector && c.typeSubst != nil {
+		tp := named.TypeParams()[0]
+		if elem, ok := c.typeSubst[tp]; ok {
+			return c.genVectorIndex(e, elem)
+		}
 	}
-	panic(fmt.Sprintf("codegen: cannot index type %s", targetType))
+	panic(fmt.Sprintf("codegen: no native [] implementation for type %s", named))
+}
+
+// genNativeSlice dispatches native [:] implementations for built-in types.
+func (c *Compiler) genNativeSlice(named *types.Named, targetType types.Type, target, low, high value.Value) value.Value {
+	if named == types.TypString {
+		return c.genStringSlice(target, low, high)
+	}
+	panic(fmt.Sprintf("codegen: no native [:] implementation for type %s", named))
+}
+
+// genStringSlice implements string[start:end] by extracting a substring.
+// Bounds are optional ints ({i1, i64}). Defaults: start=0, end=len.
+func (c *Compiler) genStringSlice(strPtr, low, high value.Value) value.Value {
+	strInstanceType := irtypes.NewStruct(
+		irtypes.I8Ptr,                   // _variant
+		irtypes.I64,                     // len
+		irtypes.NewArray(0, irtypes.I8), // data (flexible array)
+	)
+	typedPtr := c.block.NewBitCast(strPtr, irtypes.NewPointer(strInstanceType))
+
+	// Load string length
+	lenPtr := c.block.NewGetElementPtr(strInstanceType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	length := c.block.NewLoad(irtypes.I64, lenPtr)
+
+	// Resolve start: if present use value, else 0
+	lowPresent := c.block.NewExtractValue(low, 0)
+	lowVal := c.block.NewExtractValue(low, 1)
+	start := c.block.NewSelect(lowPresent, lowVal, constant.NewInt(irtypes.I64, 0))
+
+	// Resolve end: if present use value, else len
+	highPresent := c.block.NewExtractValue(high, 0)
+	highVal := c.block.NewExtractValue(high, 1)
+	end := c.block.NewSelect(highPresent, highVal, length)
+
+	// Compute slice length
+	sliceLen := c.block.NewSub(end, start)
+
+	// Get data pointer offset by start
+	dataPtr := c.block.NewGetElementPtr(strInstanceType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
+		constant.NewInt(irtypes.I32, 0))
+	sliceDataPtr := c.block.NewGetElementPtr(irtypes.I8, dataPtr, start)
+
+	// Create new string via promise_string_new
+	return c.block.NewCall(c.funcs["promise_string_new"], sliceDataPtr, sliceLen)
+}
+
+// genMethodIndex calls the monomorphized [] method on a user type.
+func (c *Compiler) genMethodIndex(e *ast.IndexExpr, targetType types.Type) value.Value {
+	// Resolve mangled method name
+	mangledName := mangleMethodName(c.resolveTypeName(targetType), "[]", false)
+	fn, ok := c.funcs[mangledName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undeclared [] method %s", mangledName))
+	}
+
+	target := c.genExpr(e.Target)
+	keyVal := c.genExpr(e.Index)
+
+	// Extract instance pointer: container types (Vector, Map) are already i8*,
+	// regular user types are value structs needing extraction.
+	var instancePtr value.Value
+	if isContainerType(targetType) {
+		instancePtr = target
+	} else {
+		instancePtr = c.extractInstancePtr(target)
+	}
+
+	return c.block.NewCall(fn, instancePtr, keyVal)
 }
 
 // genStringIndex implements string byte indexing: s[i] returns the byte at position i
@@ -2977,35 +3124,6 @@ func (c *Compiler) genMapConstructor(inst *types.Instance) value.Value {
 	valStruct = c.block.NewInsertValue(valStruct, vtablePtr, 0)
 	valStruct = c.block.NewInsertValue(valStruct, c.block.NewBitCast(typedPtr, irtypes.I8Ptr), 1)
 	return valStruct
-}
-
-// genMapIndex calls the monomorphized [] method on a map instance.
-// The [] method returns V? (optional) directly.
-func (c *Compiler) genMapIndex(e *ast.IndexExpr, keyType, valType types.Type) value.Value {
-	targetType := c.info.Types[e.Target]
-	if c.typeSubst != nil {
-		targetType = types.Substitute(targetType, c.typeSubst)
-	}
-	inst, ok := targetType.(*types.Instance)
-	if !ok {
-		panic(fmt.Sprintf("codegen: map index target is %T, want Instance", targetType))
-	}
-
-	name := monoName(inst)
-	getFnName := mangleMethodName(name, "[]", false)
-	getFn, ok := c.funcs[getFnName]
-	if !ok {
-		panic(fmt.Sprintf("codegen: undeclared map [] method %s", getFnName))
-	}
-
-	mapVal := c.genExpr(e.Target)
-	keyVal := c.genExpr(e.Index)
-
-	// Extract instance pointer from value struct
-	instancePtr := c.extractInstancePtr(mapVal)
-
-	// Call the monomorphized [] method — returns V? directly
-	return c.block.NewCall(getFn, instancePtr, keyVal)
 }
 
 // --- Lambda ---

@@ -1,7 +1,9 @@
 // Goroutine panic recovery: a panicking goroutine should not crash the process.
 // The main goroutine should continue running after a child goroutine panics.
+// Recovered goroutine panics are silent (no stderr output) — the panic message
+// is stored in G.panic_msg for task re-propagation only.
 
-main() `test(expected: "panic: goroutine boom\nsurvived") {
+main() `test(expected: "survived") {
   ch := channel[int](capacity: 1);
 
   go {

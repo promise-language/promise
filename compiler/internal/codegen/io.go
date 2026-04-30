@@ -246,27 +246,15 @@ func (c *Compiler) definePrintBoolBody(fn *ir.Func) {
 }
 
 // definePanicBody adds a function body to promise_panic(i8* %msg).
-// msg is a null-terminated C string. Writes "panic: <msg>\n" to stderr.
-// For non-main goroutines: sets G.panicked=1, G.panic_msg=msg, longjmp to scheduler.
-// For main goroutine or no goroutine context: exits process with code 1.
+// msg is a null-terminated C string.
+// For non-main goroutines: silently sets G.panicked=1, G.panic_msg=msg, longjmp to scheduler.
+// For main goroutine or no goroutine context: writes "panic: <msg>\n" to stderr, exits with code 1.
+// Recovered goroutines don't write to stderr — this avoids non-deterministic output
+// ordering between goroutine panic messages and main's stdout.
 func (c *Compiler) definePanicBody(fn *ir.Func) {
 	entry := fn.NewBlock("entry")
 	stderr := constant.NewInt(irtypes.I32, 2)
 	gTy := goroutineStructType()
-
-	// Write "panic: " prefix
-	prefixPtr := entry.NewGetElementPtr(c.panicPrefixGlobal.ContentType, c.panicPrefixGlobal,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	entry.NewCall(c.palWrite, stderr, prefixPtr, constant.NewInt(irtypes.I64, 7))
-
-	// Get message length via strlen
-	msgLen := entry.NewCall(c.funcs["strlen"], fn.Params[0])
-
-	// Write message
-	entry.NewCall(c.palWrite, stderr, fn.Params[0], msgLen)
-
-	// Write newline
-	c.emitWriteNewline(entry, stderr)
 
 	// Check if we're in a non-main goroutine that can recover
 	currentG := entry.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
@@ -288,6 +276,7 @@ func (c *Compiler) definePanicBody(fn *ir.Func) {
 	checkIdBlk.NewCondBr(isMain, exitBlk, recoverBlk)
 
 	// do_recover: set G.panicked=1, G.panic_msg=msg, longjmp back to scheduler
+	// No stderr output — recovered goroutines are silent.
 	panickedField := recoverBlk.NewGetElementPtr(gTy, gPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicked)))
 	recoverBlk.NewStore(constant.NewInt(irtypes.I8, 1), panickedField)
@@ -301,34 +290,29 @@ func (c *Compiler) definePanicBody(fn *ir.Func) {
 	recoverBlk.NewCall(c.funcs["longjmp"], jmpBuf, constant.NewInt(irtypes.I32, 1))
 	recoverBlk.NewUnreachable()
 
-	// do_exit: main goroutine or no goroutine context — exit process
+	// do_exit: main goroutine or no goroutine context — write panic message and exit
+	prefixPtr := exitBlk.NewGetElementPtr(c.panicPrefixGlobal.ContentType, c.panicPrefixGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	exitBlk.NewCall(c.palWrite, stderr, prefixPtr, constant.NewInt(irtypes.I64, 7))
+	msgLen := exitBlk.NewCall(c.funcs["strlen"], fn.Params[0])
+	exitBlk.NewCall(c.palWrite, stderr, fn.Params[0], msgLen)
+	c.emitWriteNewline(exitBlk, stderr)
 	exitBlk.NewCall(c.palExit, constant.NewInt(irtypes.I32, 1))
 	exitBlk.NewUnreachable()
 	// noreturn already set on promise_panic in declareIntrinsics
 }
 
 // definePanicMsgBody adds a function body to promise_panic_msg(i8* %s).
-// s points to a promise_string_v. Writes "panic: <msg>\n" to stderr.
-// For non-main goroutines: sets G.panicked=1, longjmp to scheduler.
-// For main goroutine or no goroutine context: exits process with code 1.
+// s points to a promise_string_v.
+// For non-main goroutines: silently sets G.panicked=1, G.panic_msg=cstr, longjmp to scheduler.
+// For main goroutine or no goroutine context: writes "panic: <msg>\n" to stderr, exits with code 1.
 func (c *Compiler) definePanicMsgBody(fn *ir.Func) {
 	entry := fn.NewBlock("entry")
 	stderr := constant.NewInt(irtypes.I32, 2)
 	gTy := goroutineStructType()
 
-	// Write "panic: " prefix
-	prefixPtr := entry.NewGetElementPtr(c.panicPrefixGlobal.ContentType, c.panicPrefixGlobal,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	entry.NewCall(c.palWrite, stderr, prefixPtr, constant.NewInt(irtypes.I64, 7))
-
-	// Extract data/len from string value struct
+	// Extract data/len from string value struct (needed by both paths)
 	dataPtr, dataLen := c.extractStringDataLen(entry, fn.Params[0])
-
-	// Write message
-	entry.NewCall(c.palWrite, stderr, dataPtr, dataLen)
-
-	// Write newline
-	c.emitWriteNewline(entry, stderr)
 
 	// Check if we're in a non-main goroutine that can recover
 	currentG := entry.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
@@ -350,6 +334,7 @@ func (c *Compiler) definePanicMsgBody(fn *ir.Func) {
 	checkIdBlk.NewCondBr(isMain, exitBlk, recoverBlk)
 
 	// do_recover: set G.panicked=1, G.panic_msg=cstr, longjmp back to scheduler
+	// No stderr output — recovered goroutines are silent.
 	panickedField := recoverBlk.NewGetElementPtr(gTy, gPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicked)))
 	recoverBlk.NewStore(constant.NewInt(irtypes.I8, 1), panickedField)
@@ -370,7 +355,12 @@ func (c *Compiler) definePanicMsgBody(fn *ir.Func) {
 	recoverBlk.NewCall(c.funcs["longjmp"], jmpBuf, constant.NewInt(irtypes.I32, 1))
 	recoverBlk.NewUnreachable()
 
-	// do_exit: main goroutine or no goroutine context — exit process
+	// do_exit: main goroutine or no goroutine context — write panic message and exit
+	prefixPtr := exitBlk.NewGetElementPtr(c.panicPrefixGlobal.ContentType, c.panicPrefixGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	exitBlk.NewCall(c.palWrite, stderr, prefixPtr, constant.NewInt(irtypes.I64, 7))
+	exitBlk.NewCall(c.palWrite, stderr, dataPtr, dataLen)
+	c.emitWriteNewline(exitBlk, stderr)
 	exitBlk.NewCall(c.palExit, constant.NewInt(irtypes.I32, 1))
 	exitBlk.NewUnreachable()
 

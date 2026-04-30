@@ -1,6 +1,8 @@
 // Task panic propagation: when a task panics, receiving its result re-panics.
+// The goroutine's panic is silent (recovered), but the re-panic in main prints
+// the original message and exits.
 
-main() `test(expected: "panic: task failure\npanic: task failure") {
+main() `test(expected: "panic: task failure") {
   t := go {
     assert(false, "task failure");
   };

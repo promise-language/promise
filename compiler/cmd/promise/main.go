@@ -641,6 +641,8 @@ func parseTimeoutArg(s string) (time.Duration, error) {
 }
 
 // compileAndLink writes the IR to a temp file and links it into the output binary.
+// On Linux, uses opt + llc + ld.lld pipeline (Phase 7b).
+// On other platforms (or with PROMISE_USE_CLANG=1), uses clang as driver.
 func compileAndLink(result *codegen.CompileResult, outputFile string) {
 	llFile, err := os.CreateTemp("", "promise-*.ll")
 	if err != nil {
@@ -663,27 +665,30 @@ func compileAndLink(result *codegen.CompileResult, outputFile string) {
 
 	target := codegen.HostTargetTriple()
 
-	// All runtime functions are codegen-emitted LLVM IR — no C files needed.
-	// -O1 ensures LLVM coroutine passes (CoroSplit, CoroElide) run for M:N scheduler goroutines.
-	linkArgs := []string{"-O1", "-target", target, llFile.Name(), "-o", outputFile}
-	// Linux requires explicit -lpthread for PAL threading primitives.
-	// macOS includes pthreads in libSystem (already linked).
-	if strings.Contains(target, "linux") {
-		linkArgs = append(linkArgs, "-lpthread")
-	}
-	clang := findClang()
-	checkClangVersion(clang)
-	linkCmd := exec.Command(clang, linkArgs...)
-	linkCmd.Stderr = os.Stderr
-	if err := linkCmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "error linking: %v\n", err)
-		os.Exit(1)
+	if useClangPipeline(target) {
+		compileAndLinkClang(llFile.Name(), target, outputFile)
+	} else {
+		compileAndLinkLLVM(llFile.Name(), target, outputFile)
 	}
 }
 
-// minClangMajor is the minimum clang/LLVM major version required.
-// LLVM 15+ is needed for coroutine intrinsics with the current IR shape.
-const minClangMajor = 15
+// useClangPipeline returns true if the clang pipeline should be used instead of opt+llc+lld.
+func useClangPipeline(target string) bool {
+	if os.Getenv("PROMISE_USE_CLANG") == "1" {
+		return true
+	}
+	// Only Linux uses the LLVM pipeline (Phase 7b). Other platforms use clang.
+	return !strings.Contains(target, "linux")
+}
+
+// minLLVMMajor is the minimum LLVM/clang major version required.
+// LLVM 20+ is required: llvm.coro.end returns i1 (not void as in 17-19).
+// Applies to both the opt/llc/lld pipeline and the clang fallback.
+const minLLVMMajor = 20
+
+// maxLLVMSearch is the highest LLVM version to probe when searching PATH for
+// versioned tool names (e.g. opt-25, opt-24, ..., opt-20).
+const maxLLVMSearch = 25
 
 // findClang returns the path to a clang binary.
 // Prefers Homebrew LLVM over Apple clang.
@@ -705,13 +710,13 @@ func findClang() string {
 }
 
 // clangVersion returns the major version of the given clang binary, or 0 if it cannot be determined.
-// Parses both "clang version X.Y.Z" (upstream) and "Apple clang version X.Y.Z" (Xcode).
+// Handles: "clang version X" (upstream), "Apple clang version X" (Xcode), "Ubuntu clang version X" (apt).
 func clangVersion(clangPath string) int {
 	out, err := exec.Command(clangPath, "--version").Output()
 	if err != nil {
 		return 0
 	}
-	re := regexp.MustCompile(`(?:Apple )?clang version (\d+)`)
+	re := regexp.MustCompile(`clang version (\d+)`)
 	m := re.FindSubmatch(out)
 	if m == nil {
 		return 0
@@ -724,15 +729,428 @@ func clangVersion(clangPath string) int {
 }
 
 // checkClangVersion verifies the clang binary meets the minimum version requirement.
+// Uses minLLVMMajor (20+) since the generated IR requires LLVM 20 intrinsic signatures.
 func checkClangVersion(clangPath string) {
 	v := clangVersion(clangPath)
 	if v == 0 {
 		return // can't determine version, let clang errors speak for themselves
 	}
-	if v < minClangMajor {
-		fmt.Fprintf(os.Stderr, "error: clang version %d is too old (minimum required: %d)\n", v, minClangMajor)
+	if v < minLLVMMajor {
+		fmt.Fprintf(os.Stderr, "error: clang version %d is too old (minimum required: %d)\n", v, minLLVMMajor)
 		fmt.Fprintf(os.Stderr, "  clang path: %s\n", clangPath)
-		fmt.Fprintf(os.Stderr, "  install a newer clang or set PROMISE_CLANG to override\n")
+		fmt.Fprintf(os.Stderr, "  install clang %d+ or set PROMISE_CLANG to override\n", minLLVMMajor)
+		os.Exit(1)
+	}
+}
+
+// --- LLVM tool pipeline (Phase 7b) ---
+
+// findLLVMTool locates an LLVM tool (opt, llc, ld.lld) by searching:
+// 1. Sibling directory of the promise binary
+// 2. Environment variable override (PROMISE_OPT, PROMISE_LLC, PROMISE_LLD)
+// 3. Versioned names on PATH (e.g., opt-20, llc-20, ld.lld-20) from newest to minLLVMMajor
+// 4. Unversioned names on PATH (e.g., opt, llc, ld.lld)
+func findLLVMTool(name string) (string, error) {
+	envMap := map[string]string{
+		"opt":    "PROMISE_OPT",
+		"llc":    "PROMISE_LLC",
+		"ld.lld": "PROMISE_LLD",
+	}
+
+	// 1. Sibling of promise binary
+	if execPath, err := os.Executable(); err == nil {
+		sibling := filepath.Join(filepath.Dir(execPath), name)
+		if _, err := os.Stat(sibling); err == nil {
+			return sibling, nil
+		}
+	}
+
+	// 2. Env override
+	if envName, ok := envMap[name]; ok {
+		if p := os.Getenv(envName); p != "" {
+			return p, nil
+		}
+	}
+
+	// 3. Versioned names on PATH (try newest to oldest)
+	for v := maxLLVMSearch; v >= minLLVMMajor; v-- {
+		versioned := fmt.Sprintf("%s-%d", name, v)
+		if path, err := exec.LookPath(versioned); err == nil {
+			return path, nil
+		}
+	}
+
+	// 4. Unversioned on PATH
+	if path, err := exec.LookPath(name); err == nil {
+		return path, nil
+	}
+
+	envName := envMap[name]
+	return "", fmt.Errorf("%s not found\n  searched: sibling of promise binary, $%s, PATH (%s-{%d..%d}, %s)\n  install LLVM %d+ or set PROMISE_USE_CLANG=1 to use clang",
+		name, envName, name, maxLLVMSearch, minLLVMMajor, name, minLLVMMajor)
+}
+
+// llvmToolVersion returns the major version of an LLVM tool, or 0 if it cannot be determined.
+// Handles different version formats:
+//   - opt/llc: "LLVM version 20.1.2"
+//   - ld.lld:  "LLD 20.1.2" (no "LLVM version" prefix)
+func llvmToolVersion(toolPath string) int {
+	out, err := exec.Command(toolPath, "--version").Output()
+	if err != nil {
+		return 0
+	}
+	// Try "LLVM version X" first (opt, llc)
+	re := regexp.MustCompile(`LLVM version (\d+)`)
+	if m := re.FindSubmatch(out); m != nil {
+		v, _ := strconv.Atoi(string(m[1]))
+		return v
+	}
+	// Try "LLD X.Y.Z" (ld.lld)
+	re2 := regexp.MustCompile(`LLD (\d+)`)
+	if m := re2.FindSubmatch(out); m != nil {
+		v, _ := strconv.Atoi(string(m[1]))
+		return v
+	}
+	return 0
+}
+
+// checkLLVMToolVersion verifies an LLVM tool meets the minimum version requirement.
+func checkLLVMToolVersion(toolPath string) {
+	v := llvmToolVersion(toolPath)
+	if v == 0 {
+		return
+	}
+	if v < minLLVMMajor {
+		fmt.Fprintf(os.Stderr, "error: LLVM version %d is too old (minimum required: %d)\n", v, minLLVMMajor)
+		fmt.Fprintf(os.Stderr, "  tool path: %s\n", toolPath)
+		fmt.Fprintf(os.Stderr, "  install LLVM %d+ or set PROMISE_USE_CLANG=1 to use clang\n", minLLVMMajor)
+		os.Exit(1)
+	}
+}
+
+// crtInfo holds discovered CRT object paths for Linux linking.
+type crtInfo struct {
+	scrt1     string   // Scrt1.o — PIE startup entry point
+	crti      string   // crti.o — .init/.fini section prologue
+	crtn      string   // crtn.o — .init/.fini section epilogue
+	crtbeginS string   // crtbeginS.o — GCC PIC constructor registration
+	crtendS   string   // crtendS.o — GCC PIC destructor cleanup
+	libDirs   []string // -L library search paths
+}
+
+// findCRT discovers system CRT objects on Linux.
+// Primary: cc -print-file-name=X. Fallback: probe common paths.
+func findCRT(target string) (*crtInfo, error) {
+	info := &crtInfo{}
+
+	type crtFile struct {
+		name string
+		dest *string
+	}
+	files := []crtFile{
+		{"Scrt1.o", &info.scrt1},
+		{"crti.o", &info.crti},
+		{"crtn.o", &info.crtn},
+		{"crtbeginS.o", &info.crtbeginS},
+		{"crtendS.o", &info.crtendS},
+	}
+
+	// Find a system C compiler for -print-file-name
+	ccPath := ""
+	for _, name := range []string{"cc", "gcc"} {
+		if p, err := exec.LookPath(name); err == nil {
+			ccPath = p
+			break
+		}
+	}
+
+	var missing []string
+	if ccPath != "" {
+		for _, f := range files {
+			out, err := exec.Command(ccPath, "-print-file-name="+f.name).Output()
+			if err != nil {
+				missing = append(missing, f.name)
+				continue
+			}
+			path := strings.TrimSpace(string(out))
+			// cc returns just the filename if it can't find the file
+			if path == f.name || path == "" {
+				missing = append(missing, f.name)
+				continue
+			}
+			absPath, err := filepath.Abs(path)
+			if err != nil {
+				absPath = path
+			}
+			if _, err := os.Stat(absPath); err != nil {
+				missing = append(missing, f.name)
+				continue
+			}
+			*f.dest = absPath
+		}
+	} else {
+		for _, f := range files {
+			missing = append(missing, f.name)
+		}
+	}
+
+	// Fallback: probe common paths for any missing files
+	if len(missing) > 0 {
+		tryCRTFallback(info, missing, target)
+	}
+
+	// Check all found
+	var stillMissing []string
+	for _, f := range files {
+		if *f.dest == "" {
+			stillMissing = append(stillMissing, f.name)
+		}
+	}
+	if len(stillMissing) > 0 {
+		return nil, fmt.Errorf("CRT objects not found: %s\n  install build-essential (Debian/Ubuntu) or gcc (Fedora/Arch)\n  or set PROMISE_USE_CLANG=1 to use clang",
+			strings.Join(stillMissing, ", "))
+	}
+
+	// Derive library search paths from CRT locations
+	seen := map[string]bool{}
+	addDir := func(path string) {
+		dir := filepath.Dir(path)
+		if !seen[dir] {
+			seen[dir] = true
+			info.libDirs = append(info.libDirs, dir)
+		}
+	}
+	addDir(info.crti)
+	addDir(info.crtbeginS)
+
+	// Add standard library paths
+	arch := "x86_64"
+	if strings.HasPrefix(target, "aarch64") {
+		arch = "aarch64"
+	}
+	for _, dir := range []string{
+		"/lib/" + arch + "-linux-gnu",
+		"/usr/lib/" + arch + "-linux-gnu",
+		"/lib64",
+		"/usr/lib64",
+	} {
+		if _, err := os.Stat(dir); err == nil && !seen[dir] {
+			seen[dir] = true
+			info.libDirs = append(info.libDirs, dir)
+		}
+	}
+
+	return info, nil
+}
+
+// tryCRTFallback probes common Linux paths for missing CRT objects.
+func tryCRTFallback(info *crtInfo, missing []string, target string) {
+	arch := "x86_64"
+	if strings.HasPrefix(target, "aarch64") {
+		arch = "aarch64"
+	}
+
+	// glibc CRT dirs
+	glibcDirs := []string{
+		"/lib/" + arch + "-linux-gnu",
+		"/usr/lib/" + arch + "-linux-gnu",
+		"/lib64",
+		"/usr/lib64",
+		"/usr/lib",
+	}
+
+	// GCC CRT dirs (versioned)
+	var gccDirs []string
+	for _, base := range []string{
+		"/usr/lib/gcc/" + arch + "-linux-gnu",
+	} {
+		entries, err := os.ReadDir(base)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				gccDirs = append(gccDirs, filepath.Join(base, e.Name()))
+			}
+		}
+	}
+
+	for _, name := range missing {
+		var dest *string
+		var searchDirs []string
+		switch name {
+		case "Scrt1.o":
+			dest = &info.scrt1
+			searchDirs = glibcDirs
+		case "crti.o":
+			dest = &info.crti
+			searchDirs = glibcDirs
+		case "crtn.o":
+			dest = &info.crtn
+			searchDirs = glibcDirs
+		case "crtbeginS.o":
+			dest = &info.crtbeginS
+			searchDirs = gccDirs
+		case "crtendS.o":
+			dest = &info.crtendS
+			searchDirs = gccDirs
+		}
+		if dest == nil {
+			continue
+		}
+		for _, dir := range searchDirs {
+			path := filepath.Join(dir, name)
+			if _, err := os.Stat(path); err == nil {
+				*dest = path
+				break
+			}
+		}
+	}
+}
+
+// dynamicLinker returns the ELF dynamic linker path for the given target.
+func dynamicLinker(target string) string {
+	if strings.HasPrefix(target, "aarch64") {
+		return "/lib/ld-linux-aarch64.so.1"
+	}
+	return "/lib64/ld-linux-x86-64.so.2"
+}
+
+// emulationMode returns the ld.lld -m flag for the given target.
+func emulationMode(target string) string {
+	if strings.HasPrefix(target, "aarch64") {
+		return "aarch64linux"
+	}
+	return "elf_x86_64"
+}
+
+// buildLinuxLinkArgs builds the ld.lld argument list for Linux ELF linking.
+func buildLinuxLinkArgs(target, objFile, outputFile string) []string {
+	crt, err := findCRT(target)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	args := []string{
+		"-z", "relro",
+		"--hash-style=gnu",
+		"--build-id",
+		"--eh-frame-hdr",
+		"-m", emulationMode(target),
+		"-pie",
+		"-dynamic-linker", dynamicLinker(target),
+		"-o", outputFile,
+		// CRT startup (order matters)
+		crt.scrt1,
+		crt.crti,
+		crt.crtbeginS,
+	}
+
+	// Library search paths
+	for _, dir := range crt.libDirs {
+		args = append(args, "-L"+dir)
+	}
+
+	// Object file
+	args = append(args, objFile)
+
+	// Libraries (matches clang's link order)
+	args = append(args,
+		"-lpthread",
+		"-lgcc", "--as-needed", "-lgcc_s", "--no-as-needed",
+		"-lc",
+		"-lgcc", "--as-needed", "-lgcc_s", "--no-as-needed",
+	)
+
+	// CRT finalization (order matters)
+	args = append(args, crt.crtendS, crt.crtn)
+
+	return args
+}
+
+// compileAndLinkLLVM runs the opt + llc + ld.lld pipeline for Linux targets.
+func compileAndLinkLLVM(llFile, target, outputFile string) {
+	optPath, err := findLLVMTool("opt")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	llcPath, err := findLLVMTool("llc")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	lldPath, err := findLLVMTool("ld.lld")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	checkLLVMToolVersion(optPath)
+	checkLLVMToolVersion(llcPath)
+	checkLLVMToolVersion(lldPath)
+
+	// Step 1: opt -O1 (optimization + coroutine passes CoroSplit/CoroElide)
+	bcFile, err := os.CreateTemp("", "promise-*.bc")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
+		os.Exit(1)
+	}
+	bcFile.Close()
+	defer os.Remove(bcFile.Name())
+
+	optCmd := exec.Command(optPath, "-O1", llFile, "-o", bcFile.Name())
+	optCmd.Stderr = os.Stderr
+	if err := optCmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "error running opt: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Step 2: llc (bitcode → object file)
+	objFile, err := os.CreateTemp("", "promise-*.o")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
+		os.Exit(1)
+	}
+	objFile.Close()
+	defer os.Remove(objFile.Name())
+
+	llcCmd := exec.Command(llcPath,
+		"-mtriple="+target,
+		"-filetype=obj",
+		"-relocation-model=pic",
+		bcFile.Name(),
+		"-o", objFile.Name(),
+	)
+	llcCmd.Stderr = os.Stderr
+	if err := llcCmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "error running llc: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Step 3: ld.lld (link with CRT objects)
+	linkArgs := buildLinuxLinkArgs(target, objFile.Name(), outputFile)
+	linkCmd := exec.Command(lldPath, linkArgs...)
+	linkCmd.Stderr = os.Stderr
+	if err := linkCmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "error linking (ld.lld): %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// compileAndLinkClang runs the clang pipeline (non-Linux or fallback).
+func compileAndLinkClang(llFile, target, outputFile string) {
+	linkArgs := []string{"-O1", "-target", target, llFile, "-o", outputFile}
+	if strings.Contains(target, "linux") {
+		linkArgs = append(linkArgs, "-lpthread")
+	}
+	clang := findClang()
+	checkClangVersion(clang)
+	linkCmd := exec.Command(clang, linkArgs...)
+	linkCmd.Stderr = os.Stderr
+	if err := linkCmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "error linking (clang): %v\n", err)
 		os.Exit(1)
 	}
 }

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Promise is a statically-typed programming language with Dart-inspired syntax and Rust-inspired ownership semantics. The compiler is a single Go binary (`promise`) that uses ANTLR4 for parsing and targets LLVM IR (linked via clang to native binaries).
+Promise is a statically-typed programming language with Dart-inspired syntax and Rust-inspired ownership semantics. The compiler is a single Go binary (`promise`) that uses ANTLR4 for parsing and targets LLVM IR (compiled via `opt` + `llc` + `ld.lld` on Linux, clang on other platforms).
 
 **Primary goal**: Promise is designed for AI-agent efficiency — making it easy for LLMs to generate correct, self-contained programs in one shot or use them as tools. Every design decision should optimize for:
 - **Self-contained readability**: Looking at a single source file should be enough to understand with certainty what it does. Avoid hidden effects, implicit behaviors, and action-at-a-distance.
@@ -86,8 +86,10 @@ Stress mode compiles once and re-runs binaries. Stable files are gradually suppr
 ## Compiler Pipeline
 
 ```
-.pr source → ANTLR4 (grammar/) → AST (ast/) → Sema 4-pass (sema/) → Ownership (ownership/) → LLVM IR (codegen/) → clang → binary
+.pr source → ANTLR4 (grammar/) → AST (ast/) → Sema 4-pass (sema/) → Ownership (ownership/) → LLVM IR (codegen/) → opt+llc+lld → binary
 ```
+
+On Linux: `opt -O1` (coroutine lowering) → `llc -filetype=obj` → `ld.lld` (link with system CRT). On other platforms (or `PROMISE_USE_CLANG=1`): `clang -O1`. Requires LLVM 20+.
 
 Entry point: `cmd/promise/main.go` → `compileFrontend()` orchestrates parse → std merge → sema → ownership.
 

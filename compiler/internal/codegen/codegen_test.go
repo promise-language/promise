@@ -7388,7 +7388,7 @@ func TestCoroIntrinsicsDeclared(t *testing.T) {
 	assertContains(t, ir, "declare i8* @llvm.coro.begin(")
 	assertContains(t, ir, "declare i64 @llvm.coro.size.i64()")
 	assertContains(t, ir, "declare i8 @llvm.coro.suspend(")
-	assertContains(t, ir, "declare void @llvm.coro.end(")
+	assertContains(t, ir, "declare i1 @llvm.coro.end(")
 	assertContains(t, ir, "declare i8* @llvm.coro.free(")
 	assertContains(t, ir, "declare void @llvm.coro.resume(")
 	assertContains(t, ir, "declare void @llvm.coro.destroy(")
@@ -7409,7 +7409,7 @@ func TestGoBlockEmitsCoroutine(t *testing.T) {
 	assertContains(t, ir, "call i1 @llvm.coro.alloc(")
 	assertContains(t, ir, "call i8* @llvm.coro.begin(")
 	assertContains(t, ir, "call i8 @llvm.coro.suspend(")
-	assertContains(t, ir, "call void @llvm.coro.end(")
+	assertContains(t, ir, "call i1 @llvm.coro.end(")
 	// Go blocks now use coroutine + G + enqueue, not direct pal_thread_create
 	// (pal_thread_create is still used by the scheduler for M threads, but not in go block codegen)
 	assertContains(t, ir, "call i8* @promise_g_new(")

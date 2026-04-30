@@ -38,7 +38,7 @@ After completing Phases 1-3, the C runtime is reduced to a single function:
 
 **LLVM optimizer attributes** on all externs: `noalias`, `nocapture`, `noundef`, `nounwind`, `willreturn`, `readonly`, `argmemonly` (as applicable).
 
-**Build pipeline**: In non-test mode, no C compilation — the `.ll` file contains everything and clang just links it. In test mode, `runtime_test.c` is compiled and linked for fork isolation.
+**Build pipeline**: No C compilation — the `.ll` file contains everything. On Linux, `opt -O1` + `llc` + `ld.lld` compile and link (Phase 7b). On other platforms (or `PROMISE_USE_CLANG=1`), clang acts as driver.
 
 ---
 
@@ -60,14 +60,15 @@ After completing Phases 1-3, the C runtime is reduced to a single function:
 | **6** | IO reactor: kqueue + epoll + IOCP | Planned |
 | **6b** | JS event loop integration for WASM IO | Planned |
 | **7a** | WASM: `llc` + `wasm-ld` (no CRT) | Planned |
-| **7b** | Linux: `llc` + `ld.lld` + bundled musl CRT (static binaries) | Planned |
+| **7b** | Linux: `opt` + `llc` + `ld.lld` (system glibc CRT) | **Done** |
+| **7b'** | Linux: bundled musl CRT (fully static binaries) | Planned |
 | **7c** | macOS: `llc` + system `ld` (SDK sysroot) | Planned |
 | **7d** | Windows: `llc` + `lld-link` (MSVC paths) | Planned |
 | **7e** | `--target` flag + cross-compilation | Planned |
 | **7f** | Bundle `llc` + `lld` + musl CRT into release tarball | Planned |
 | **8** | Rewrite scheduler in Promise | Planned |
 
-Phases 1-5c are done. Phase 3 introduced the platform split (PAL). Phase 5a added 1:1 threading (each `go` spawns an OS thread). Phase 5b added typed channels (`channel[T]` with buffered/unbuffered send/receive/for-in and `go { }` block variable capture). Phase 5c replaced 1:1 threading with an M:N scheduler using LLVM coroutine intrinsics — goroutines are cheap coroutine handles multiplexed on OS threads via per-CPU processors and work stealing. Phases 5d-6 add WASM scheduling and IO. Phase 7 (a-e) replaces clang with `llc` + `lld` per-platform and adds cross-compilation. Phase 8 is polish.
+Phases 1-5c and 7b are done. Phase 3 introduced the platform split (PAL). Phase 5a added 1:1 threading (each `go` spawns an OS thread). Phase 5b added typed channels (`channel[T]` with buffered/unbuffered send/receive/for-in and `go { }` block variable capture). Phase 5c replaced 1:1 threading with an M:N scheduler using LLVM coroutine intrinsics — goroutines are cheap coroutine handles multiplexed on OS threads via per-CPU processors and work stealing. Phase 7b replaced clang with `opt` + `llc` + `ld.lld` on Linux — the default pipeline uses standalone LLVM tools with system glibc CRT discovery; clang remains as fallback via `PROMISE_USE_CLANG=1`. Phases 5d-6 add WASM scheduling and IO. Remaining Phase 7 (a, b', c-f) adds other platforms, bundled musl CRT, and cross-compilation. Phase 8 is polish.
 
 ---
 
@@ -549,39 +550,123 @@ Everything built on top of Layers 0-3: map (already done), iterators, streams, c
 
 ---
 
-## Phase 7 — Replace Clang with `llc` + `lld` (Planned)
+## Phase 7 — Replace Clang with `opt` + `llc` + `lld`
 
 ### Why
 
 Clang is currently used as a convenience driver — it compiles LLVM IR, runs optimization passes, and links in one command. But it pulls in a full C compiler toolchain that Promise doesn't need, can't cross-compile without a cross-toolchain, and hides platform linking details that become problems when targeting multiple platforms from one host.
 
-`llc` (LLVM static compiler) and `lld` (LLVM linker) are standalone tools that handle exactly what Promise needs: IR-to-object codegen and linking. Both support all targets in a single binary, enabling cross-compilation without additional toolchains.
+`opt` (LLVM optimizer), `llc` (LLVM static compiler), and `lld` (LLVM linker) are standalone tools that handle exactly what Promise needs: optimization, IR-to-object codegen, and linking. `llc` and `lld` support all targets in a single binary, enabling cross-compilation without additional toolchains.
 
-### Current Pipeline
+### Phase 7b — Linux Pipeline (Done)
 
+On Linux, `compileAndLink()` dispatches to the LLVM pipeline by default. Non-Linux platforms and `PROMISE_USE_CLANG=1` use the clang fallback.
+
+**Pipeline**:
 ```
-promise.ll → clang -O1 -target {triple} → binary
-```
-
-`clang` internally does: parse IR → run optimization/coroutine passes → codegen to machine code → invoke system linker with CRT objects and system libraries. The `-O1` flag is critical — it triggers LLVM's CoroSplit and CoroElide passes required by the M:N scheduler's coroutine-based goroutines.
-
-**Current code** (`cmd/promise/main.go`):
-- `compileAndLink()` — writes `.ll` to temp file, calls `clang -O1 -target {triple} input.ll -o output` (+ `-lpthread` on Linux)
-- `findClang()` — searches `PROMISE_CLANG` env, Homebrew LLVM paths, then system PATH
-- `checkClangVersion()` — requires LLVM 15+ (coroutine intrinsic compatibility)
-
-### New Pipeline
-
-```
-promise.ll → opt -O1 → optimized.ll → llc -filetype=obj → promise.o → lld → binary
+promise.ll → opt -O1 → promise.bc → llc -filetype=obj → promise.o → ld.lld + CRT → binary
 ```
 
 Three steps:
-1. **`opt -O1`** — run optimization passes including CoroSplit/CoroElide (coroutine lowering)
-2. **`llc -filetype=obj -mtriple={triple}`** — compile optimized IR to platform object file
-3. **`lld` (variant)** — link object file with platform CRT objects and system libraries
+1. **`opt -O1`** — run optimization passes including CoroSplit/CoroElide (coroutine lowering). `opt` is needed because `llc` alone doesn't run module-level optimization passes.
+2. **`llc -mtriple={triple} -filetype=obj -relocation-model=pic`** — compile optimized bitcode to a PIE-compatible ELF object file.
+3. **`ld.lld`** — link with system glibc CRT objects (`Scrt1.o`, `crti.o`, `crtbeginS.o`, `crtendS.o`, `crtn.o`) and libraries (`-lc`, `-lpthread`, `-lgcc`, `-lgcc_s`).
 
-The `opt` step is needed because `llc` alone doesn't run the full optimization pipeline — specifically the coroutine passes that `-O1` triggers in clang. Alternative: `llc -O1` may include sufficient passes (needs verification per LLVM version).
+**Code** (`cmd/promise/main.go`):
+- `compileAndLink()` — writes `.ll` to temp file, dispatches to LLVM or clang pipeline based on target
+- `useClangPipeline(target)` — returns true for non-Linux targets or when `PROMISE_USE_CLANG=1`
+- `compileAndLinkLLVM()` — the `opt` → `llc` → `ld.lld` pipeline with temp file cleanup
+- `compileAndLinkClang()` — the old clang driver path (fallback)
+- `findLLVMTool(name)` — discovers `opt`/`llc`/`ld.lld` (sibling of binary → env override → versioned PATH → unversioned PATH)
+- `findCRT(target)` — discovers system glibc CRT objects via `cc -print-file-name` with fallback path probing
+- `buildLinuxLinkArgs()` — builds the full `ld.lld` argument list matching clang's link order
+
+**LLVM version**: requires LLVM 20+. The generated IR uses `llvm.coro.end → i1` (LLVM 20 signature). All three tools (`opt`, `llc`, `ld.lld`) are version-checked.
+
+### Prerequisites
+
+**Linux** (building from source):
+```bash
+# Debian/Ubuntu
+sudo apt install llvm-20 lld-20 build-essential
+
+# Fedora
+sudo dnf install llvm lld gcc
+
+# Arch
+sudo pacman -S llvm lld gcc
+```
+
+Provides: `opt-20`, `llc-20`, `ld.lld-20` (LLVM tools) and system CRT objects (`Scrt1.o`, `crti.o`, etc. from glibc).
+
+**macOS** (clang fallback, Phase 7c pending):
+```bash
+brew install llvm    # provides clang 20+
+# or: Xcode CommandLineTools (xcode-select --install)
+```
+
+**Windows** (clang fallback, Phase 7d pending):
+```bash
+choco install llvm   # or winget install llvm
+# + Visual Studio Build Tools for CRT libs
+```
+
+### Environment Variables
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `PROMISE_USE_CLANG` | Set to `1` to force the clang pipeline instead of opt+llc+lld | (unset — use LLVM pipeline on Linux) |
+| `PROMISE_OPT` | Override path to `opt` binary | Auto-discover |
+| `PROMISE_LLC` | Override path to `llc` binary | Auto-discover |
+| `PROMISE_LLD` | Override path to `ld.lld` binary | Auto-discover |
+| `PROMISE_CLANG` | Override path to `clang` binary (fallback pipeline) | Auto-discover |
+| `PROMISE_DUMP_IR` | Write generated LLVM IR to this path (debugging) | (unset — disabled) |
+
+### LLVM Tool Discovery Order
+
+`findLLVMTool(name)` searches in this order:
+1. **Sibling of binary**: `{promise_dir}/opt`, `{promise_dir}/llc`, `{promise_dir}/ld.lld`
+2. **Environment override**: `$PROMISE_OPT`, `$PROMISE_LLC`, `$PROMISE_LLD`
+3. **Versioned PATH**: `opt-25`, `opt-24`, ..., `opt-20` (newest to oldest, LLVM 20+ only)
+4. **Unversioned PATH**: `opt`, `llc`, `ld.lld`
+
+Sibling-first means a bundled Promise installation always uses its own tools regardless of system PATH.
+
+### CRT Object Discovery
+
+`findCRT(target)` discovers glibc CRT objects needed by `ld.lld`:
+1. **Primary**: `cc -print-file-name=Scrt1.o` (works on all distros)
+2. **Fallback**: probe common paths (`/lib/x86_64-linux-gnu/`, `/usr/lib64/`, GCC versioned dirs)
+
+Discovers: `Scrt1.o` (PIE entry), `crti.o`/`crtn.o` (init/fini sections), `crtbeginS.o`/`crtendS.o` (GCC PIC init).
+
+Library search paths (`-L`) are derived from the CRT locations plus standard paths.
+
+### Linux Linker Invocation
+
+The exact `ld.lld` command (matches clang's output):
+```bash
+ld.lld \
+  -z relro --hash-style=gnu --build-id --eh-frame-hdr \
+  -m elf_x86_64 -pie \
+  -dynamic-linker /lib64/ld-linux-x86-64.so.2 \
+  -o output \
+  /lib/x86_64-linux-gnu/Scrt1.o \
+  /lib/x86_64-linux-gnu/crti.o \
+  /usr/lib/gcc/x86_64-linux-gnu/13/crtbeginS.o \
+  -L/lib/x86_64-linux-gnu -L/usr/lib/gcc/x86_64-linux-gnu/13 \
+  promise.o \
+  -lpthread \
+  -lgcc --as-needed -lgcc_s --no-as-needed \
+  -lc \
+  -lgcc --as-needed -lgcc_s --no-as-needed \
+  /usr/lib/gcc/x86_64-linux-gnu/13/crtendS.o \
+  /lib/x86_64-linux-gnu/crtn.o
+```
+
+Supports both x86_64 and aarch64 (different emulation mode and dynamic linker path).
+
+### Remaining Per-Platform Work
 
 ### Per-Platform Linker Commands
 
@@ -666,45 +751,49 @@ The PAL (Phase 3) already emits platform-specific IR based on the target triple.
 - **macOS**: requires macOS SDK (`-lSystem`). Cross-compiling *to* macOS from Linux/Windows needs the SDK files (legally gray area).
 - **Windows**: requires MSVC CRT libs. Cross-compiling *to* Windows needs the Windows SDK.
 
-### Implementation Plan
+### Implementation (7b Done, rest planned)
 
-**`cmd/promise/main.go` changes**:
+**`cmd/promise/main.go` — implemented functions**:
 
-| Current | New |
-|---------|-----|
-| `compileAndLink()` calls `clang` | Split into `compileToObject()` (calls `opt` + `llc`) and `linkBinary()` (calls `lld` variant) |
-| `findClang()` | `findLLVMTool(name)` — generic finder for `opt`, `llc`, `lld` with env overrides (`PROMISE_OPT`, `PROMISE_LLC`, `PROMISE_LLD`) |
-| `checkClangVersion()` | `checkLLVMVersion(tool)` — parse `llc --version` for LLVM 15+ |
-| `HostTargetTriple()` | Unchanged — already returns correct triples |
-
-New functions:
-- `findCRTObjects(triple)` — resolve path to bundled musl CRT (`{promise_dir}/../lib/promise/crt/{arch}-linux-musl/`), or SDK path on macOS via `xcrun`
-- `linkerArgsForTarget(triple, objFile, output)` — build platform-specific lld argument list (musl static link on Linux, `-lSystem` on macOS, etc.)
-- `--target` flag on `promise build` — override `HostTargetTriple()` for cross-compilation
+| Function | Purpose |
+|----------|---------|
+| `compileAndLink()` | Dispatcher: writes `.ll`, calls LLVM or clang pipeline based on target |
+| `useClangPipeline(target)` | Returns true for non-Linux or `PROMISE_USE_CLANG=1` |
+| `compileAndLinkLLVM()` | `opt -O1` → `llc -filetype=obj` → `ld.lld` with CRT |
+| `compileAndLinkClang()` | Old clang driver path (fallback for non-Linux) |
+| `findLLVMTool(name)` | Discovers `opt`/`llc`/`ld.lld` — sibling → env → versioned PATH → unversioned PATH |
+| `llvmToolVersion(path)` | Parses `LLVM version X` or `LLD X` from `--version` output |
+| `checkLLVMToolVersion(path)` | Enforces LLVM 20+ minimum |
+| `findCRT(target)` | Discovers system glibc CRT objects via `cc -print-file-name` + fallback probing |
+| `tryCRTFallback(info, missing, target)` | Probes `/lib/{arch}-linux-gnu/`, `/usr/lib/gcc/...` for missing CRT |
+| `buildLinuxLinkArgs(target, obj, out)` | Builds full `ld.lld` argument list matching clang's link order |
+| `dynamicLinker(target)` | Returns `/lib64/ld-linux-x86-64.so.2` or aarch64 equivalent |
+| `emulationMode(target)` | Returns `elf_x86_64` or `aarch64linux` |
 
 **Phased rollout**:
 
-| Step | Work | Complexity |
-|------|------|------------|
-| 7a | WASM target via `llc` + `wasm-ld` | Low — no CRT, no system libs |
-| 7b | Linux target via `llc` + `ld.lld` + bundled musl CRT | Medium — musl build, static linking |
-| 7c | macOS target via `llc` + system `ld` (or `ld64.lld`) | Medium — SDK sysroot resolution |
-| 7d | Windows target via `llc` + `lld-link` | High — MSVC path discovery |
-| 7e | `--target` flag + cross-compilation | Low — plumbing, PAL already handles it |
-| 7f | Bundle `llc` + `lld` + musl CRT into release tarball | Medium — CI build pipeline, musl cross-compile |
-| 7g | Remove clang fallback (optional) | Low — cleanup |
+| Step | Work | Status |
+|------|------|--------|
+| 7b | Linux: `opt` + `llc` + `ld.lld` + system glibc CRT | **Done** |
+| 7a | WASM target via `llc` + `wasm-ld` | Planned (low — no CRT) |
+| 7b' | Linux: bundled musl CRT (fully static binaries) | Planned (medium — musl build) |
+| 7c | macOS target via `llc` + system `ld` (or `ld64.lld`) | Planned (medium — SDK sysroot) |
+| 7d | Windows target via `llc` + `lld-link` | Planned (high — MSVC paths) |
+| 7e | `--target` flag + cross-compilation | Planned (low — plumbing) |
+| 7f | Bundle `llc` + `lld` + musl CRT into release tarball | Planned (medium — CI) |
+| 7g | Remove clang fallback (optional) | Planned (low — cleanup) |
 
-**Fallback strategy**: Keep `clang` as a fallback backend selectable via `PROMISE_USE_CLANG=1` or `--backend=clang`. This lets users on platforms with complex CRT resolution (Windows) continue working while native lld support is developed.
+**Fallback strategy**: `PROMISE_USE_CLANG=1` forces the clang pipeline on any platform. This lets users on platforms without native lld support (macOS, Windows) continue working.
 
-### Coroutine Pass Verification
+### Coroutine Pass Verification (Done)
 
-The M:N scheduler depends on LLVM coroutine passes. Verification needed:
+Verified with LLVM 20 on Linux:
 
-1. Does `llc -O1` run CoroSplit? (It should — CoroSplit is a module pass in the standard O1 pipeline)
-2. Does `opt -O1 | llc -O0` work? (Separate optimization from codegen)
-3. Are there LLVM version differences in which passes `-O1` includes?
+1. **`llc -O1` does NOT run CoroSplit** — `llc` only runs backend passes (instruction selection, register allocation). CoroSplit is a CGSCC pass in the middle-end optimization pipeline.
+2. **`opt -O1 | llc` works** — `opt -O1` runs the full `default<O1>` pipeline including CoroSplit/CoroElide, producing lowered coroutine IR that `llc` can compile without optimization.
+3. **LLVM 20 requires `llvm.coro.end → i1`** — LLVM 17-19 temporarily changed this to `void`, LLVM 20 reverted to `i1`. The generated IR targets LLVM 20+ exclusively.
 
-Test: compile a goroutine-heavy program with the new pipeline, run `promise test -stress 100 tests/concurrency/...`, compare results to clang pipeline.
+Validated: `promise test -stress 20 tests/concurrency/...` — 71 tests, 100% pass rate, 0 flaky across 20 iterations with the `opt` + `llc` + `ld.lld` pipeline.
 
 ### Distribution
 
@@ -742,10 +831,11 @@ promise-v0.1.0-darwin-arm64.tar.gz
 
 `lld` is a single binary that acts as all four linker variants — the symlinks select the mode. Total bundle size: ~90MB compressed.
 
-**Tool discovery order** (in `findLLVMTool()`):
-1. **Sibling directory**: look next to the `promise` binary — `{promise_dir}/llc`, `{promise_dir}/lld`
-2. **Env override**: `PROMISE_LLC`, `PROMISE_LLD` (for development/testing)
-3. **System PATH**: fallback to `llc`/`lld` on PATH (dev machines with LLVM installed)
+**Tool discovery order** (implemented in `findLLVMTool()`):
+1. **Sibling directory**: look next to the `promise` binary — `{promise_dir}/opt`, `{promise_dir}/llc`, `{promise_dir}/ld.lld`
+2. **Env override**: `PROMISE_OPT`, `PROMISE_LLC`, `PROMISE_LLD` (for development/testing)
+3. **Versioned PATH**: `opt-25` down to `opt-20`, `llc-25` down to `llc-20`, etc.
+4. **Unversioned PATH**: `opt`, `llc`, `ld.lld`
 
 Looking next to the binary first means an installed Promise always finds its own tools, regardless of system PATH changes or Homebrew upgrades.
 
@@ -835,12 +925,23 @@ The bundled-binaries approach (Phase 7) is the pragmatic first step. The long-te
 
 ### Dependency summary by platform
 
-| Platform | After Phase 7 install | External deps |
+**Current state** (Phase 7b done):
+
+| Platform | Build pipeline | External deps (source build) |
+|----------|---------------|------|
+| **Linux** | `opt` + `llc` + `ld.lld` + system CRT | LLVM 20+ (`opt`, `llc`, `lld`), `build-essential` (glibc CRT) |
+| **macOS** | clang (fallback) | clang 20+ (Homebrew or Xcode CLT) |
+| **Windows** | clang (fallback) | clang 20+ |
+| **WASM** | clang (fallback) | clang 20+ |
+
+**After full Phase 7** (bundled tools + musl):
+
+| Platform | Release install includes | External deps |
 |----------|----------------------|---------------|
-| **Linux** | `promise` + `llc` + `lld` + musl CRT | **None** — fully static binaries |
-| **macOS** | `promise` + `llc` + `lld` | Xcode CommandLineTools (for `-lSystem`) |
-| **Windows** | `promise` + `llc` + `lld` | VS Build Tools (for CRT libs) |
-| **WASM** | `promise` + `llc` + `wasm-ld` | **None** — no CRT needed |
+| **Linux** | `promise` + `opt` + `llc` + `lld` + musl CRT | **None** — fully static binaries |
+| **macOS** | `promise` + `opt` + `llc` + `lld` | Xcode CommandLineTools (for `-lSystem`) |
+| **Windows** | `promise` + `opt` + `llc` + `lld` | VS Build Tools (for CRT libs) |
+| **WASM** | `promise` + `opt` + `llc` + `wasm-ld` | **None** — no CRT needed |
 
 ---
 

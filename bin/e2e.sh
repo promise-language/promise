@@ -6,7 +6,11 @@ trap 'if [ $? -ne 0 ]; then echo "----------------------------------------------
 cd "$(dirname "$0")/../compiler"
 
 echo "Generating parser & resources..."
-make generate resources
+if [ "$(uname -s)" = "Linux" ]; then
+  make generate resources musl-crt
+else
+  make generate resources
+fi
 
 echo "Building..."
 go build -o promise ./cmd/promise 2>&1

@@ -587,8 +587,11 @@ Three steps:
 
 **Linux** (building from source):
 ```bash
-# Debian/Ubuntu
-sudo apt install llvm-22 lld-22 musl-dev
+# Automated (installs LLVM 22+, musl-dev, adds apt.llvm.org if needed):
+sudo bin/install-prereqs.sh
+
+# Or manually — Debian/Ubuntu (use highest available LLVM >= 22):
+sudo apt install llvm-23 lld-23 musl-dev   # from apt.llvm.org
 
 # Fedora
 sudo dnf install llvm lld musl-devel
@@ -597,7 +600,7 @@ sudo dnf install llvm lld musl-devel
 sudo pacman -S llvm lld musl
 ```
 
-Provides: `opt-22`, `llc-22`, `ld.lld-22` (LLVM tools) and musl CRT objects (`crt1.o`, `crti.o`, `crtn.o`, `libc.a`). The `musl-dev` package is required — musl CRT objects are embedded in the Go binary via `go:embed` during `make build`. The `build-essential` package is no longer required for building Promise programs (glibc CRT is only used with `PROMISE_USE_CLANG=1`).
+Provides: `opt`, `llc`, `ld.lld` (LLVM 22+ tools) and musl CRT objects (`crt1.o`, `crti.o`, `crtn.o`, `libc.a`). The `musl-dev` package is required — musl CRT objects are embedded in the Go binary via `go:embed` during `make build`. The `build-essential` package is no longer required for building Promise programs (glibc CRT is only used with `PROMISE_USE_CLANG=1`). The LLVM apt repository ([apt.llvm.org](https://apt.llvm.org)) is needed on Ubuntu/Debian since stock repos may not have LLVM 22+.
 
 **macOS** (Phase 7c — opt + llc + system ld):
 ```bash

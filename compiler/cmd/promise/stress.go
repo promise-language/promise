@@ -28,11 +28,13 @@ type stressTarget struct {
 }
 
 type testStats struct {
-	name    string
-	file    string
-	passes  int
-	fails   int
-	timings []float64 // seconds per run (recorded for both pass and fail)
+	name     string
+	file     string
+	passes   int
+	fails    int
+	timeouts int       // subset of fails caused by timeout
+	timings  []float64 // seconds per run (recorded for pass and non-timeout fail; excludes timeouts)
+	lastErr  string    // last failure reason (for debugging)
 }
 
 func (s *testStats) total() int { return s.passes + s.fails }
@@ -105,7 +107,7 @@ func (s *testStats) maxTime() float64 {
 // isHighVariance returns true if timing variance is suspiciously high.
 // Ignores sub-millisecond tests where measurement noise dominates.
 func (s *testStats) isHighVariance() bool {
-	return s.total() >= 5 && s.mean() > 0.001 && s.cov() > 0.5
+	return s.total() >= 5 && s.mean() > 0.005 && s.cov() > 1.0
 }
 
 type fileStats struct {
@@ -320,17 +322,29 @@ func runStress(files []string, count int, duration time.Duration, perRunTimeout 
 				name := t.tests[0]
 				st := fs.stats[name]
 				actual := strings.TrimRight(string(output), "\n")
-				st.timings = append(st.timings, wallClock)
-				if timedOut || actual != t.expected {
+				if timedOut {
+					// Timeout counts as failure; don't add timeout duration to timings
+					// as it would inflate CoV (the timeout ceiling is not real variance).
 					st.fails++
+					st.timeouts++
+					st.lastErr = "timeout"
+				} else if actual != t.expected {
+					st.timings = append(st.timings, wallClock)
+					st.fails++
+					st.lastErr = failReason(t.expected, actual)
 				} else {
+					st.timings = append(st.timings, wallClock)
 					st.passes++
 				}
 			} else {
 				// Unit tests: parse per-test results
 				if timedOut {
+					// Timeout counts as failure for all tests; don't add timing data.
 					for _, name := range fs.testOrder {
-						fs.stats[name].fails++
+						st := fs.stats[name]
+						st.fails++
+						st.timeouts++
+						st.lastErr = "timeout"
 					}
 				} else {
 					seen := make(map[string]bool, len(fs.testOrder))
@@ -351,6 +365,7 @@ func runStress(files []string, count int, duration time.Duration, perRunTimeout 
 							st.passes++
 						} else {
 							st.fails++
+							st.lastErr = "test failed"
 						}
 						if v, e := strconv.ParseFloat(timing, 64); e == nil {
 							st.timings = append(st.timings, v)
@@ -358,9 +373,12 @@ func runStress(files []string, count int, duration time.Duration, perRunTimeout 
 					}
 					// If binary crashed before printing all results, mark unseen as failed
 					if err != nil {
+						crashMsg := extractCrashReason(string(output))
 						for _, name := range fs.testOrder {
 							if !seen[name] {
-								fs.stats[name].fails++
+								st := fs.stats[name]
+								st.fails++
+								st.lastErr = crashMsg
 							}
 						}
 					}
@@ -519,6 +537,9 @@ func printTestGroup(tests []*testStats, showCoV bool) {
 			if showCoV {
 				line += fmt.Sprintf("  (CoV: %.2f)", st.cov())
 			}
+			if st.fails > 0 {
+				line += "  " + st.failSummary()
+			}
 			fmt.Println(line)
 		}
 	}
@@ -552,6 +573,9 @@ func printTestGroupDetailed(tests []*testStats) {
 			if st.isHighVariance() {
 				fmt.Printf("  CoV: %.2f", st.cov())
 			}
+			if st.fails > 0 {
+				fmt.Printf("\n      %s", st.failSummary())
+			}
 			fmt.Println()
 		}
 	}
@@ -569,6 +593,66 @@ func fmtDuration(secs float64) string {
 		return fmt.Sprintf("%.1fms", secs*1e3)
 	}
 	return fmt.Sprintf("%.3fs", secs)
+}
+
+// failReason returns a short description of an e2e output mismatch.
+func failReason(expected, actual string) string {
+	if actual == "" {
+		return "no output"
+	}
+	// Show first differing line
+	expLines := strings.Split(expected, "\n")
+	actLines := strings.Split(actual, "\n")
+	for i := 0; i < len(expLines) && i < len(actLines); i++ {
+		if expLines[i] != actLines[i] {
+			got := actLines[i]
+			if len(got) > 80 {
+				got = got[:77] + "..."
+			}
+			return fmt.Sprintf("line %d: got %q", i+1, got)
+		}
+	}
+	if len(actLines) != len(expLines) {
+		return fmt.Sprintf("expected %d lines, got %d", len(expLines), len(actLines))
+	}
+	return "output mismatch"
+}
+
+// extractCrashReason returns a short reason from crash/panic output.
+func extractCrashReason(output string) string {
+	// Look for panic message
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "panic:") || strings.HasPrefix(line, "fatal error:") {
+			if len(line) > 100 {
+				line = line[:97] + "..."
+			}
+			return line
+		}
+	}
+	return "crash"
+}
+
+// failSummary returns a short string summarizing why a test is flaky.
+func (s *testStats) failSummary() string {
+	if s.fails == 0 {
+		return ""
+	}
+	parts := []string{}
+	if s.timeouts > 0 {
+		parts = append(parts, fmt.Sprintf("%d timeout", s.timeouts))
+	}
+	nonTimeout := s.fails - s.timeouts
+	if nonTimeout > 0 {
+		parts = append(parts, fmt.Sprintf("%d fail", nonTimeout))
+	}
+	summary := strings.Join(parts, ", ")
+	if s.lastErr != "" && s.lastErr != "timeout" && s.lastErr != "test failed" {
+		summary += "  last: " + s.lastErr
+	} else if s.lastErr != "" {
+		summary += "  (" + s.lastErr + ")"
+	}
+	return summary
 }
 
 // commonDir returns the deepest common directory of the given file paths.

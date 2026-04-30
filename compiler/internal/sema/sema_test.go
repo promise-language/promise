@@ -919,7 +919,7 @@ func TestEnumUndefinedVariant(t *testing.T) {
 // --- Scope Tests ---
 
 func TestScopeShadowing(t *testing.T) {
-	checkOK(t, `
+	errs := checkErrs(t, `
 		test() {
 			int x = 1;
 			if true {
@@ -927,6 +927,295 @@ func TestScopeShadowing(t *testing.T) {
 			}
 		}
 	`)
+	expectError(t, errs, "shadows")
+}
+
+func TestScopeShadowingSiblingScopes(t *testing.T) {
+	// Sequential reuse in sibling scopes is OK (not nested)
+	checkOK(t, `
+		test() {
+			if true { int v = 1; }
+			if true { int v = 2; }
+		}
+	`)
+}
+
+func TestScopeShadowingLambdaParam(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			int x = 1;
+			f := |int x| -> x + 1;
+		}
+	`)
+	expectError(t, errs, "shadows")
+}
+
+func TestScopeShadowingForIn(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			int i = 0;
+			for x, i in [1, 2, 3] {}
+		}
+	`)
+	expectError(t, errs, "shadows")
+}
+
+func TestScopeShadowingNestedIf(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			int a = 1;
+			if true {
+				if true {
+					int a = 3;
+				}
+			}
+		}
+	`)
+	expectError(t, errs, "shadows")
+}
+
+func TestScopeShadowingWhileLoop(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			int x = 0;
+			while true {
+				int x = 1;
+				break;
+			}
+		}
+	`)
+	expectError(t, errs, "shadows")
+}
+
+func TestScopeShadowingClassicFor(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			int i = 99;
+			for int i = 0; i < 10; i++ {}
+		}
+	`)
+	expectError(t, errs, "shadows")
+}
+
+func TestScopeShadowingClassicForInferred(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			int j = 99;
+			for j := 0; j < 10; j++ {}
+		}
+	`)
+	expectError(t, errs, "shadows")
+}
+
+func TestScopeShadowingIfUnwrap(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			int v = 10;
+			int? opt = 42;
+			if v := opt {}
+		}
+	`)
+	expectError(t, errs, "shadows")
+}
+
+func TestScopeShadowingForInBinding(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			int x = 0;
+			for x in [1, 2, 3] {}
+		}
+	`)
+	expectError(t, errs, "shadows")
+}
+
+func TestScopeShadowingForInIndex(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			string idx = "a";
+			for x, idx in [1, 2, 3] {}
+		}
+	`)
+	expectError(t, errs, "shadows")
+}
+
+func TestScopeShadowingTypedVarDecl(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			int n = 1;
+			if true {
+				string n = "shadow";
+			}
+		}
+	`)
+	expectError(t, errs, "shadows")
+}
+
+func TestScopeShadowingInferredVarDecl(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			x := 1;
+			if true {
+				x := "shadow";
+			}
+		}
+	`)
+	expectError(t, errs, "shadows")
+}
+
+func TestScopeShadowingUseVarDecl(t *testing.T) {
+	errs := checkErrs(t, `
+		type Res { close() {} }
+		test() {
+			int r = 1;
+			if true {
+				use r := Res();
+			}
+		}
+	`)
+	expectError(t, errs, "shadows")
+}
+
+func TestScopeShadowingDestructure(t *testing.T) {
+	errs := checkErrs(t, `
+		pair() (int, int) { return (1, 2); }
+		test() {
+			int a = 0;
+			if true {
+				(a, b) := pair();
+			}
+		}
+	`)
+	expectError(t, errs, "shadows")
+}
+
+func TestScopeShadowingUnderscoreOK(t *testing.T) {
+	// _ should never trigger shadowing
+	checkOK(t, `
+		test() {
+			int _ = 1;
+			if true {
+				int _ = 2;
+			}
+		}
+	`)
+}
+
+func TestScopeShadowingSiblingForLoops(t *testing.T) {
+	// Same variable in sibling for-in scopes is OK
+	checkOK(t, `
+		test() {
+			for x in [1, 2] {}
+			for x in [3, 4] {}
+		}
+	`)
+}
+
+func TestScopeShadowingSiblingBlocks(t *testing.T) {
+	checkOK(t, `
+		test() {
+			if true { x := 1; }
+			if true { x := 2; }
+			while true { x := 3; break; }
+		}
+	`)
+}
+
+func TestScopeShadowingLambdaExprBody(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			int y = 1;
+			g := |int y| -> y * 2;
+		}
+	`)
+	expectError(t, errs, "shadows")
+}
+
+func TestScopeShadowingMultipleLevels(t *testing.T) {
+	// Three levels deep: innermost shadows outermost
+	errs := checkErrs(t, `
+		test() {
+			int z = 0;
+			if true {
+				if true {
+					if true {
+						int z = 99;
+					}
+				}
+			}
+		}
+	`)
+	expectError(t, errs, "shadows")
+}
+
+func TestScopeShadowingErrorHandler(t *testing.T) {
+	errs := checkErrs(t, `
+		fail() int! { return 1; }
+		test() int! {
+			int e = 0;
+			v := fail() ? e { return 0; };
+			return v;
+		}
+	`)
+	expectError(t, errs, "shadows")
+}
+
+func TestScopeShadowingMatchBindingAllowed(t *testing.T) {
+	// Match arm bindings should NOT trigger shadow errors
+	checkOK(t, `
+		test() {
+			int x = 10;
+			int? opt = 42;
+			y := match opt {
+				x => x,
+				_ => 0,
+			};
+		}
+	`)
+}
+
+func TestScopeShadowingNarrowingAllowed(t *testing.T) {
+	// Narrowing bindings should NOT trigger shadow errors
+	checkOK(t, `
+		test() {
+			int? cc = 42;
+			if cc {
+				int x = cc + 1;
+			}
+		}
+	`)
+}
+
+func TestScopeShadowingDifferentTypesInSiblings(t *testing.T) {
+	// Different types in sibling scopes is fine
+	checkOK(t, `
+		test() {
+			if true { string v = "a"; }
+			if true { int v = 1; }
+			if true { bool v = true; }
+		}
+	`)
+}
+
+func TestScopeShadowingForInSiblingWithOuter(t *testing.T) {
+	// for-in binding doesn't shadow outer if outer is in parent scope
+	errs := checkErrs(t, `
+		test() {
+			int item = 0;
+			for item in [1, 2, 3] {}
+		}
+	`)
+	expectError(t, errs, "shadows")
+}
+
+func TestScopeShadowingNestedLambda(t *testing.T) {
+	// Lambda param shadows outer variable
+	errs := checkErrs(t, `
+		test() {
+			int a = 5;
+			f := |int a| -> a + 1;
+		}
+	`)
+	expectError(t, errs, "shadows")
 }
 
 func TestUndefinedVariable(t *testing.T) {
@@ -1921,6 +2210,73 @@ func TestMapLiteralKeyMismatch(t *testing.T) {
 func TestMapLiteralValueMismatch(t *testing.T) {
 	errs := checkErrs(t, `test() { m := {"a": 1, "b": "two"}; }`)
 	expectError(t, errs, "map value type mismatch")
+}
+
+func TestMapLiteralNonHashableKey(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo { int x; }
+		test() { m := {Foo(x: 1): "a"}; }
+	`)
+	expectError(t, errs, "does not satisfy constraint Hashable")
+}
+
+func TestMapLiteralValidKeyTypes(t *testing.T) {
+	checkOK(t, `test() { m := {"a": 1, "b": 2}; }`)
+	checkOK(t, `test() { m := {1: "a", 2: "b"}; }`)
+	checkOK(t, `test() { m := {true: 1, false: 2}; }`)
+}
+
+func TestMapLiteralNonEqualKey(t *testing.T) {
+	// Type without == method fails Equal constraint
+	errs := checkErrs(t, `
+		type Bar { int x; get hash int => 0; }
+		test() { m := {Bar(x: 1): "a"}; }
+	`)
+	expectError(t, errs, "does not satisfy constraint Equal")
+}
+
+func TestMapLiteralMissingBothConstraints(t *testing.T) {
+	// Type without hash or == fails both constraints
+	errs := checkErrs(t, `
+		type Plain { int x; }
+		test() { m := {Plain(x: 1): 42}; }
+	`)
+	expectError(t, errs, "does not satisfy constraint")
+}
+
+func TestMapLiteralCharKey(t *testing.T) {
+	checkOK(t, `test() { m := {'a': 1, 'b': 2}; }`)
+}
+
+func TestMapLiteralI32Key(t *testing.T) {
+	checkOK(t, `
+		test(i32 k) {
+			m := {k: "val"};
+		}
+		main() {}
+	`)
+}
+
+func TestMapLiteralUserHashableEqualKey(t *testing.T) {
+	checkOK(t, `
+		type MyKey {
+			int id;
+			get hash int => this.id;
+			==(MyKey other) bool => this.id == other.id;
+			!=(MyKey other) bool => !(this == other);
+		}
+		test() {
+			m := {MyKey(id: 1): "one", MyKey(id: 2): "two"};
+		}
+	`)
+}
+
+func TestMapLiteralValueTypeNotConstrained(t *testing.T) {
+	// Value type has no constraints — any type should work
+	checkOK(t, `
+		type Payload { int data; }
+		test() { m := {1: Payload(data: 42)}; }
+	`)
 }
 
 func TestEmptyMapLiteral(t *testing.T) {

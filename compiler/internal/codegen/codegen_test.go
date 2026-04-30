@@ -5943,6 +5943,206 @@ func TestDropErrorPropagateCleansUp(t *testing.T) {
 	assertContains(t, ir, "define { i1, i64, i8* } @work")
 }
 
+// Reassignment of droppable variable emits drop on old value
+func TestDropOnReassignment(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) {}
+		}
+		test() {
+			r := Resource(id: 1);
+			r = Resource(id: 2);
+		}
+		main() {}
+	`)
+	// Should have drop.call and drop.skip blocks for the reassignment drop
+	assertContains(t, ir, "drop.call")
+	assertContains(t, ir, "drop.skip")
+	// Should reset drop flag after reassignment
+	assertContains(t, ir, "store i1 true")
+}
+
+// Move-then-reassign: drop flag was cleared by move, so reassignment skips drop
+func TestDropOnReassignmentAfterMove(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) {}
+		}
+		consume(Resource r) {}
+		test() {
+			r := Resource(id: 1);
+			consume(r);
+			r = Resource(id: 2);
+		}
+		main() {}
+	`)
+	// The drop-before-reassign still emits condBr (checks flag), but flag is cleared
+	assertContains(t, ir, "drop.call")
+	assertContains(t, ir, "drop.skip")
+}
+
+// Multiple reassignments: each reassignment should drop the old value
+func TestDropOnMultipleReassignments(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) {}
+		}
+		test() {
+			r := Resource(id: 1);
+			r = Resource(id: 2);
+			r = Resource(id: 3);
+		}
+		main() {}
+	`)
+	// At least two drop.call blocks (one per reassignment)
+	assertContains(t, ir, "drop.call")
+	assertContains(t, ir, "drop.skip")
+	assertContains(t, ir, "store i1 true")
+}
+
+// Self-assignment should be a no-op (no drop emitted, no store)
+func TestDropOnSelfAssignmentSkipped(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) {}
+		}
+		test() {
+			r := Resource(id: 1);
+			r = r;
+		}
+		main() {}
+	`)
+	// The self-assignment is skipped entirely via return.
+	// Scope exit should still emit ONE drop for r, so drop.call should exist.
+	assertContains(t, ir, "drop.call")
+}
+
+// Compound assignment should NOT trigger drop-before-store
+func TestDropCompoundAssignNoExtraDrop(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int x = 10;
+			x += 5;
+		}
+	`)
+	// No drop blocks for primitive int
+	assertNotContains(t, ir, "drop.call")
+}
+
+// Non-droppable type reassignment should not emit drop
+func TestDropOnReassignmentNonDroppable(t *testing.T) {
+	ir := generateIR(t, `
+		type Simple { int x; }
+		test() {
+			s := Simple(x: 1);
+			s = Simple(x: 2);
+		}
+		main() {}
+	`)
+	// No drop.call for non-droppable types
+	assertNotContains(t, ir, "drop.call")
+}
+
+// Reassignment inside if block: drop still emitted
+func TestDropOnReassignmentInIfBlock(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) {}
+		}
+		test() {
+			r := Resource(id: 1);
+			if true {
+				r = Resource(id: 2);
+			}
+		}
+		main() {}
+	`)
+	assertContains(t, ir, "drop.call")
+	assertContains(t, ir, "drop.skip")
+}
+
+// Reassignment inside loop: drop per iteration
+func TestDropOnReassignmentInLoop(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) {}
+		}
+		test() {
+			r := Resource(id: 0);
+			for int i = 0; i < 3; i++ {
+				r = Resource(id: i);
+			}
+		}
+		main() {}
+	`)
+	assertContains(t, ir, "drop.call")
+	assertContains(t, ir, "drop.skip")
+	assertContains(t, ir, "store i1 true")
+}
+
+// Reassignment with virtual drop dispatch (type has children)
+func TestDropOnReassignmentVirtualDispatch(t *testing.T) {
+	ir := generateIR(t, `
+		type Base {
+			int id;
+			drop(~this) {}
+		}
+		type Child is Base {
+			drop(~this) {}
+		}
+		test() {
+			r := Base(id: 1);
+			r = Base(id: 2);
+		}
+		main() {}
+	`)
+	assertContains(t, ir, "drop.call")
+	assertContains(t, ir, "drop.skip")
+}
+
+// Drop flag reset is i1 true (not i64 or other)
+func TestDropOnReassignmentFlagResetIsI1True(t *testing.T) {
+	ir := generateIR(t, `
+		type R {
+			int v;
+			drop(~this) {}
+		}
+		test() {
+			r := R(v: 1);
+			r = R(v: 2);
+		}
+		main() {}
+	`)
+	// After emitDropCall, the flag is reset to i1 true
+	assertContains(t, ir, "store i1 true")
+}
+
+// Reassignment when RHS is a moved variable clears RHS drop flag
+func TestDropOnReassignmentRHSMoveClears(t *testing.T) {
+	ir := generateIR(t, `
+		type R {
+			int v;
+			drop(~this) {}
+		}
+		test() {
+			a := R(v: 1);
+			b := R(v: 2);
+			a = b;
+		}
+		main() {}
+	`)
+	// Drop old a, store b into a, clear b's drop flag
+	assertContains(t, ir, "drop.call")
+	assertContains(t, ir, "store i1 true")
+	assertContains(t, ir, "store i1 false")
+}
+
 // Compound assignment on different typed variables exercises namedFromLLVMType branches
 func TestCompoundAssignF64(t *testing.T) {
 	ir := generateIR(t, `
@@ -6007,8 +6207,47 @@ func TestHashGetterInt(t *testing.T) {
 
 func TestHashGetterBool(t *testing.T) {
 	ir := generateIR(t, `main() { b := true; h := b.hash; }`)
-	assertContains(t, ir, "zext i1")
-	assertContains(t, ir, "call i64 @__std__fnv1a_hash(i64")
+	// Bool hash uses hardcoded constants via select, not fnv1a
+	assertContains(t, ir, "select i1")
+	assertNotContains(t, ir, "call i64 @__std__fnv1a_hash")
+}
+
+func TestHashGetterBoolFalse(t *testing.T) {
+	ir := generateIR(t, `main() { b := false; h := b.hash; }`)
+	assertContains(t, ir, "select i1")
+}
+
+func TestHashGetterBoolInFunction(t *testing.T) {
+	ir := generateIR(t, `
+		hash_it(bool b) int { return b.hash; }
+		main() {}
+	`)
+	assertContains(t, ir, "select i1")
+	assertNotContains(t, ir, "call i64 @__std__fnv1a_hash")
+}
+
+func TestHashGetterBoolNoZext(t *testing.T) {
+	// Bool hash should not zext to i64 anymore
+	ir := generateIR(t, `main() { h := true.hash; }`)
+	assertContains(t, ir, "select i1")
+}
+
+func TestHashGetterBoolTrueAndFalseDifferentConstants(t *testing.T) {
+	// Both constants should appear in the select instruction
+	ir := generateIR(t, `main() { h := true.hash; }`)
+	assertContains(t, ir, "5871781006564002453") // 0x517cc1b727220a95
+	assertContains(t, ir, "7809847782465536322") // 0x6c62272e07bb0142
+}
+
+func TestHashGetterIntStillUsesFnv1a(t *testing.T) {
+	// Verify other types still use fnv1a (regression check)
+	ir := generateIR(t, `main() { h := 42.hash; }`)
+	assertContains(t, ir, "call i64 @__std__fnv1a_hash")
+}
+
+func TestHashGetterCharStillUsesFnv1a(t *testing.T) {
+	ir := generateIR(t, `main() { h := 'x'.hash; }`)
+	assertContains(t, ir, "call i64 @__std__fnv1a_hash")
 }
 
 func TestHashGetterChar(t *testing.T) {

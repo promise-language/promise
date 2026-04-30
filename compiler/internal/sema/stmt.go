@@ -110,6 +110,7 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 			c.errorf(s.Pos(), "uninitialized variable %s requires optional type, got %s", s.Name, declType)
 		}
 		if s.Name != "_" {
+			c.checkNoShadow(s.Name, s.Pos())
 			c.insert(types.NewVar(tpos(s.Pos()), s.Name, declType))
 		}
 		return
@@ -144,6 +145,7 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 	}
 
 	if s.Name != "_" {
+		c.checkNoShadow(s.Name, s.Pos())
 		c.insert(types.NewVar(tpos(s.Pos()), s.Name, declType))
 	}
 }
@@ -160,6 +162,7 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 	}
 
 	if s.Name != "_" {
+		c.checkNoShadow(s.Name, s.Pos())
 		c.insert(types.NewVar(tpos(s.Pos()), s.Name, valType))
 	}
 }
@@ -184,6 +187,7 @@ func (c *Checker) checkDestructureVarDecl(s *ast.DestructureVarDecl) {
 
 	for i, name := range s.Names {
 		if name != "_" {
+			c.checkNoShadow(name, s.Pos())
 			c.insert(types.NewVar(tpos(s.Pos()), name, tup.Elems()[i]))
 		}
 	}
@@ -215,6 +219,7 @@ func (c *Checker) checkUseVarDecl(s *ast.UseVarDecl) {
 	}
 
 	if s.Name != "_" {
+		c.checkNoShadow(s.Name, s.Pos())
 		c.insert(types.NewVar(tpos(s.Pos()), s.Name, valType))
 	}
 }
@@ -412,6 +417,7 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 		c.openScope(s.Body, "if-unwrap")
 		initType := c.checkExpr(s.Init)
 		if initType != nil {
+			c.checkNoShadow(s.Binding, s.Pos())
 			opt, ok := initType.(*types.Optional)
 			if !ok {
 				c.errorf(s.Init.Pos(), "if-unwrap requires optional type, got %s", initType)
@@ -616,6 +622,7 @@ func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	c.openScope(s.Body, "while-unwrap")
 
 	if valType != nil {
+		c.checkNoShadow(s.Binding, s.Pos())
 		opt, ok := valType.(*types.Optional)
 		if !ok {
 			c.errorf(s.Value.Pos(), "while-unwrap requires optional type, got %s", valType)
@@ -669,9 +676,11 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 		}
 
 		if s.Binding != "_" {
+			c.checkNoShadow(s.Binding, s.Pos())
 			c.insert(types.NewVar(tpos(s.Pos()), s.Binding, elemType))
 		}
 		if s.Index != "" && s.Index != "_" {
+			c.checkNoShadow(s.Index, s.Pos())
 			c.insert(types.NewVar(tpos(s.Pos()), s.Index, types.TypInt))
 		}
 	}
@@ -686,6 +695,7 @@ func (c *Checker) checkClassicForStmt(s *ast.ClassicForStmt) {
 	c.openScope(s.Body, "for")
 
 	// Init variable
+	c.checkNoShadow(s.InitName, s.Pos())
 	if s.InitType != nil {
 		initType := c.resolveType(s.InitType)
 		if initType != nil {
@@ -782,6 +792,7 @@ func (c *Checker) checkSelectStmt(s *ast.SelectStmt) {
 		c.openScope(s, "select-case")
 		if !sc.IsSend && sc.Binding != "_" && elemType != nil {
 			// Receive binding is T? (optional, like normal receive)
+			c.checkNoShadow(sc.Binding, sc.Pos())
 			optType := types.NewOptional(elemType)
 			c.insert(types.NewVar(tpos(sc.Pos()), sc.Binding, optType))
 		}

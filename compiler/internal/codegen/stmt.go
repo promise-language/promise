@@ -256,6 +256,7 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 	}
 
 	c.scopeBindings = append(c.scopeBindings, binding)
+	c.dropBindings[varName] = binding
 }
 
 // clearDropFlag sets a variable's drop flag to false (indicating the value has been moved).
@@ -429,11 +430,16 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			panic(fmt.Sprintf("codegen: undefined variable %q in assignment", target.Name))
 		}
 		if s.Op == ast.OpAssign {
-			// TODO(drop): When reassigning a droppable variable, the old value
-			// should be dropped before storing the new one. Currently the old
-			// value is silently overwritten, which leaks it. The ownership
-			// checker allows this (resurrects the variable), so this is a
-			// resource leak, not a soundness bug. Fix in a future stage.
+			// Drop old value before reassignment (if target is droppable)
+			if binding, ok := c.dropBindings[target.Name]; ok {
+				// Skip self-assignment (would drop then store dangling pointer)
+				if ident, ok := s.Value.(*ast.IdentExpr); ok && ident.Name == target.Name {
+					return
+				}
+				c.emitDropCall(binding)
+				// Reset drop flag: new value is now owned
+				c.block.NewStore(constant.NewInt(irtypes.I1, 1), binding.dropFlag)
+			}
 
 			// Coerce value struct vtable when crossing type boundaries
 			exprType := c.info.Types[s.Value]

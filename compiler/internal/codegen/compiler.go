@@ -102,6 +102,9 @@ type Compiler struct {
 	// Drop flag tracking: maps variable name to its drop flag alloca (i1)
 	dropFlags map[string]*ir.InstAlloca
 
+	// Drop binding tracking: maps variable name to its scope binding (for reassignment drop)
+	dropBindings map[string]scopeBinding
+
 	// PAL (Platform Abstraction Layer) function references
 	palWrite   *ir.Func // @pal_write(i32 fd, i8* buf, i64 len) → i64
 	palExit    *ir.Func // @pal_exit(i32 code) → void [noreturn]
@@ -252,6 +255,7 @@ func Compile(file *ast.File, info *sema.Info) *CompileResult {
 		vtableGlobals:   make(map[*types.Named]*ir.Global),
 		viewVtables:     make(map[viewVtableKey]*ir.Global),
 		dropFlags:       make(map[string]*ir.InstAlloca),
+		dropBindings:    make(map[string]scopeBinding),
 		thunks:          make(map[string]*ir.Func),
 		file:            file,
 	}
@@ -2208,6 +2212,7 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 	c.locals = make(map[string]*ir.InstAlloca)
 	c.localNameCount = make(map[string]int)
 	c.dropFlags = make(map[string]*ir.InstAlloca)
+	c.dropBindings = make(map[string]scopeBinding)
 	c.blockCounter = 0
 
 	entry := fn.NewBlock("entry")
@@ -2504,6 +2509,7 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 	c.locals = make(map[string]*ir.InstAlloca)
 	c.localNameCount = make(map[string]int)
 	c.dropFlags = make(map[string]*ir.InstAlloca)
+	c.dropBindings = make(map[string]scopeBinding)
 	c.blockCounter = 0
 	c.canError = m.Sig().CanError()
 	c.currentRetType = m.Sig().Result()
@@ -2754,6 +2760,7 @@ type compilerState struct {
 	entryBlock     *ir.Block
 	locals         map[string]*ir.InstAlloca
 	dropFlags      map[string]*ir.InstAlloca
+	dropBindings   map[string]scopeBinding
 	blockCounter   int
 	canError       bool
 	currentRetType types.Type
@@ -2771,6 +2778,7 @@ func (c *Compiler) saveState() compilerState {
 		entryBlock:     c.entryBlock,
 		locals:         c.locals,
 		dropFlags:      c.dropFlags,
+		dropBindings:   c.dropBindings,
 		blockCounter:   c.blockCounter,
 		canError:       c.canError,
 		currentRetType: c.currentRetType,
@@ -2788,6 +2796,7 @@ func (c *Compiler) restoreState(s compilerState) {
 	c.entryBlock = s.entryBlock
 	c.locals = s.locals
 	c.dropFlags = s.dropFlags
+	c.dropBindings = s.dropBindings
 	c.blockCounter = s.blockCounter
 	c.canError = s.canError
 	c.currentRetType = s.currentRetType

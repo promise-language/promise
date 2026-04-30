@@ -85,6 +85,21 @@ func (c *Checker) lookup(name string) types.Object {
 	return obj
 }
 
+// checkNoShadow reports an error if name shadows a variable in any parent scope.
+func (c *Checker) checkNoShadow(name string, pos ast.Pos) {
+	if name == "_" {
+		return
+	}
+	for s := c.scope.Parent(); s != nil; s = s.Parent() {
+		if obj := s.Lookup(name); obj != nil {
+			if _, isVar := obj.(*types.Var); isVar {
+				c.errorf(pos, "'%s' shadows declaration at %s", name, obj.Pos())
+				return
+			}
+		}
+	}
+}
+
 // insert adds an object to the current scope.
 // Returns true on success, false and reports error on duplicate.
 func (c *Checker) insert(obj types.Object) bool {
@@ -159,6 +174,7 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	// Bind parameters into scope
 	for _, p := range sig.Params() {
 		if p.Name() != "" && p.Name() != "_" {
+			c.checkNoShadow(p.Name(), d.Pos())
 			c.insert(types.NewVar(tpos(d.Pos()), p.Name(), p.Type()))
 		}
 	}
@@ -266,6 +282,7 @@ func (c *Checker) checkMethodBody(typeName string, md *ast.MethodDecl, m *types.
 	// Bind parameters
 	for _, p := range m.Sig().Params() {
 		if p.Name() != "" && p.Name() != "_" {
+			c.checkNoShadow(p.Name(), md.Pos())
 			c.insert(types.NewVar(tpos(md.Pos()), p.Name(), p.Type()))
 		}
 	}

@@ -582,7 +582,7 @@ Known gaps and improvements deferred from completed stages.
 
 | Item | Origin | Priority |
 |------|--------|----------|
-| Reassignment of droppable variable leaks old value — `x = newVal` overwrites without calling `drop()` on old | 8o | Medium |
+| ~~Reassignment of droppable variable leaks old value~~ — **Fixed.** `genAssignStmt` now calls `emitDropCall` on the old value before storing the new one. Drop flag is checked (moved values skipped) and reset after reassignment. Self-assignment short-circuits. | 8o | ~~Medium~~ Resolved |
 | ~~Enqueue-before-suspend race~~ — **Fixed.** Goroutine stores the channel/done mutex in `G.park_mutex` before `coro.suspend`; the scheduler loop releases it in `coroSuspendedBlk` after `coro.resume` returns. Since the waker must acquire the same mutex to dequeue, it blocks until the suspend completes. Verified with stress tests in `tests/concurrency/stress_*.pr`. | 5c | ~~High~~ Resolved |
 
 ### Codegen Gaps
@@ -603,7 +603,7 @@ Known gaps and improvements deferred from completed stages.
 | Non-instance field placements (`value`/`variant`/`type`) | 8c | Low |
 | User type `toString()` for interpolation | 8h | Low |
 | Devirtualization optimization (direct call when concrete type known) | 8L | Low |
-| `map[bool, T]` — bool key hashing/lookup is broken (assert fails on retrieval) | 8i | Medium |
+| ~~`map[bool, T]` — bool key hashing/lookup is broken~~ — **Fixed.** Bool hash now uses hardcoded constants via `select i1` instead of `fnv1a_hash`. Map literal key types are validated against `Hashable + Equal` constraints via `validateConstraints`. | 8i | ~~Medium~~ Resolved |
 | Variable name collisions in repeated `if v := opt { }` blocks within same function (LLVM IR `%v` redefined) | 8n | Medium |
 
 ### Ownership & Type System

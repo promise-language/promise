@@ -317,6 +317,8 @@ func (c *Checker) checkMapLit(e *ast.MapLit) types.Type {
 	if keyType == nil || valType == nil {
 		return nil
 	}
+	c.validateConstraints(e.Pos(), types.TypMap, []types.Type{keyType, valType})
+
 	inst := types.NewMap(keyType, valType)
 	c.recordInstance(inst)
 	return inst
@@ -1224,6 +1226,7 @@ func (c *Checker) checkErrorHandlerExpr(e *ast.ErrorHandlerExpr) types.Type {
 	c.openScope(e.Body, "error-handler")
 	// Bind error variable if present
 	if e.Binding != "" && e.Binding != "_" {
+		c.checkNoShadow(e.Binding, e.Pos())
 		c.insert(types.NewVar(tpos(e.Pos()), e.Binding, types.TypError))
 	}
 	c.checkBlock(e.Body)
@@ -1556,6 +1559,7 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) types.Type {
 		c.openScope(e.Body, "lambda")
 		for _, p := range params {
 			if p.Name() != "" && p.Name() != "_" {
+				c.checkNoShadow(p.Name(), e.Pos())
 				c.insert(types.NewVar(tpos(e.Pos()), p.Name(), p.Type()))
 			}
 		}
@@ -1566,6 +1570,7 @@ func (c *Checker) checkLambdaExpr(e *ast.LambdaExpr) types.Type {
 		c.openScope(e, "lambda")
 		for _, p := range params {
 			if p.Name() != "" && p.Name() != "_" {
+				c.checkNoShadow(p.Name(), e.Pos())
 				c.insert(types.NewVar(tpos(e.Pos()), p.Name(), p.Type()))
 			}
 		}

@@ -1572,8 +1572,10 @@ func (c *Compiler) genNativeHashGetter(e *ast.MemberExpr, named *types.Named) (v
 		ext := c.block.NewZExt(target, irtypes.I64)
 		return c.block.NewCall(hashFn, ext), true
 	case types.TypBool:
-		ext := c.block.NewZExt(target, irtypes.I64)
-		return c.block.NewCall(hashFn, ext), true
+		// Hardcoded hash constants for bool (avoids hashing through fnv1a)
+		trueHash := constant.NewInt(irtypes.I64, 0x517cc1b727220a95)
+		falseHash := constant.NewInt(irtypes.I64, 0x6c62272e07bb0142)
+		return c.block.NewSelect(target, trueHash, falseHash), true
 	case types.TypChar:
 		ext := c.block.NewZExt(target, irtypes.I64)
 		return c.block.NewCall(hashFn, ext), true
@@ -3092,6 +3094,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.currentRetType = sig.Result()
 	c.scopeBindings = nil
 	c.dropFlags = make(map[string]*ir.InstAlloca)
+	c.dropBindings = make(map[string]scopeBinding)
 	c.loopScopeDepth = 0
 
 	entry := fn.NewBlock("entry")
@@ -4004,6 +4007,7 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	c.currentRetType = types.TypVoid
 	c.scopeBindings = nil
 	c.dropFlags = make(map[string]*ir.InstAlloca)
+	c.dropBindings = make(map[string]scopeBinding)
 	c.loopScopeDepth = 0
 	c.inCoroutine = true
 

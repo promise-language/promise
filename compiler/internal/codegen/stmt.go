@@ -33,6 +33,35 @@ func (c *Compiler) genBlock(block *ast.Block) {
 	c.scopeBindings = c.scopeBindings[:savedScopeLen]
 }
 
+// genBlockValue generates a block like genBlock, but returns the value of the
+// last expression statement (if any). Avoids the double-generation that would
+// occur if genBlock + separate genExpr on the last statement were used.
+func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
+	if block == nil {
+		return nil
+	}
+	savedScopeLen := len(c.scopeBindings)
+	var result value.Value
+	n := len(block.Stmts)
+	for i, stmt := range block.Stmts {
+		if c.block == nil || c.block.Term != nil {
+			break
+		}
+		if i == n-1 {
+			if es, ok := stmt.(*ast.ExprStmt); ok {
+				result = c.genExpr(es.Expr)
+				break
+			}
+		}
+		c.genStmt(stmt)
+	}
+	if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > savedScopeLen {
+		c.emitScopeCleanup(savedScopeLen)
+	}
+	c.scopeBindings = c.scopeBindings[:savedScopeLen]
+	return result
+}
+
 // genStmt generates LLVM IR for a single statement.
 func (c *Compiler) genStmt(stmt ast.Stmt) {
 	switch s := stmt.(type) {
@@ -895,6 +924,11 @@ func (c *Compiler) genRaiseStmt(s *ast.RaiseStmt) {
 	}
 
 	errVal := c.genExpr(s.Value)
+	// Error types are user types with value struct {vtable_ptr, instance_ptr}.
+	// Extract the instance pointer (i8*) for storage in the result struct's error slot.
+	if st, ok := errVal.Type().(*irtypes.StructType); ok && len(st.Fields) == 2 {
+		errVal = c.block.NewExtractValue(errVal, 1)
+	}
 	resultType := c.currentResultType()
 	c.block.NewRet(c.wrapError(errVal, resultType))
 }

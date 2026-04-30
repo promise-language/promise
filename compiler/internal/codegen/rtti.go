@@ -285,6 +285,14 @@ func (c *Compiler) coerceToView(val value.Value, fromType, toType types.Type) va
 		return val
 	}
 
+	// Guard: verify the LLVM value is actually a {i8*, i8*} struct before modifying it.
+	// During monomorphization, type substitution can produce non-user-value LLVM types
+	// even when the sema type passes isUserValueType.
+	if st, ok := val.Type().(*irtypes.StructType); !ok || len(st.Fields) != 2 ||
+		!st.Fields[0].Equal(irtypes.I8Ptr) || !st.Fields[1].Equal(irtypes.I8Ptr) {
+		return val
+	}
+
 	// First parent chain → vtable is prefix-compatible, no swap needed
 	if isInFirstParentChain(fromNamed, toNamed) {
 		return val

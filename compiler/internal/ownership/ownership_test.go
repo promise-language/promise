@@ -346,6 +346,9 @@ type map[K: Hashable + Equal, V] {
 	b.WriteString("\th = (h ^ ((v >> 56) & 255)) * prime;\n")
 	b.WriteString("\treturn h as! int;\n}\n")
 
+	// Error base type
+	b.WriteString("type error {\n\tstring message;\n}\n")
+
 	stdAll = b.String()
 }
 

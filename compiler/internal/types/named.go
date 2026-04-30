@@ -51,6 +51,21 @@ func (n *Named) AddParent(parent *Named) {
 	n.parents = append(n.parents, parent)
 }
 
+// InheritsFrom returns true if this type is the target type or transitively
+// inherits from it. Used for error type validation (e.g., raise must produce
+// a type that inherits from error).
+func (n *Named) InheritsFrom(target *Named) bool {
+	if n == target {
+		return true
+	}
+	for _, p := range n.parents {
+		if p.InheritsFrom(target) {
+			return true
+		}
+	}
+	return false
+}
+
 // AddField adds a field to this type.
 func (n *Named) AddField(f *Field) {
 	n.fields = append(n.fields, f)

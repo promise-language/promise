@@ -70,18 +70,14 @@ func (c *Checker) declareType(d *ast.TypeDecl) {
 		return
 	}
 
-	// Non-native std type redeclaring a universe generic (e.g., map[K,V] with
-	// Promise-implemented methods): reuse the universe Named singleton so that
-	// TypMap identity checks continue to work. The define pass will add fields,
+	// Non-native std type redeclaring a universe type (e.g., map[K,V], error):
+	// reuse the universe Named singleton so that identity checks (TypMap,
+	// TypError, etc.) continue to work. The define pass will add fields,
 	// methods, and type-param constraints from the source declaration.
 	if d.IsStd {
 		if obj := types.Universe.Lookup(d.Name); obj != nil {
-			if tn, ok := obj.(*types.TypeName); ok {
-				if named, ok := tn.Type().(*types.Named); ok && len(named.TypeParams()) > 0 {
-					c.scope.Insert(obj)
-					return
-				}
-			}
+			c.scope.Insert(obj)
+			return
 		}
 	}
 

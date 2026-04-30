@@ -1214,12 +1214,16 @@ main() {
 
 #### Error handler syntax
 
-The `? e { ... }` form handles errors inline. The error binding is optional:
+The `? e { ... }` form handles errors inline. The error binding and type filter are optional:
 
 | Form | Meaning |
 |------|---------|
-| `expr ? e { ... }` | Handle error, bind error value to `e` |
-| `expr ? { ... }` | Handle error, discard error value |
+| `expr ? e { ... }` | Handle any error, bind to `e` |
+| `expr ? { ... }` | Handle any error, discard error value |
+| `expr ? e is IoError { ... }` | Handle only `IoError` (or subtypes), bind to `e` |
+| `expr ? _ is IoError { ... }` | Handle only `IoError`, discard binding |
+
+**Typed handlers** (`? e is T`) perform an RTTI check on the error. If the error does not match, it is either **propagated** (in a failable function) or **panics** (in a non-failable function).
 
 The handler block must either produce a **recovery value** of the expected type, or **diverge** (`return`, `break`, `panic`). If it produces a value, that value is used in place of the failed call:
 
@@ -1229,9 +1233,17 @@ string content = readFile("data.txt") ? { "" };    // use empty string on failur
 
 // Diverge
 string content = readFile("data.txt") ? e {
-  io.println("Error: {e.message()}");
+  io.println("Error: {e.message}");
   return;
 };
+
+// Typed handler — only catches IoError, propagates other errors
+process() string! {
+  string content = readFile("data.txt") ? e is IoError {
+    return "fallback for IO error (code: {e.code})";
+  };
+  return content;
+}
 ```
 
 #### Capturing the raw result
@@ -1253,8 +1265,9 @@ if err is present {
 |-----------|----------|---------|
 | `foo()` | Auto-propagate error | `!` function only |
 | `foo()?` | Explicit propagate (same as naked) | `!` function only |
-| `foo() ? e { ... }` | Handle error, bind to `e` | Any function |
-| `foo() ? { ... }` | Handle error, discard error value | Any function |
+| `foo() ? e { ... }` | Handle any error, bind to `e` | Any function |
+| `foo() ? { ... }` | Handle any error, discard value | Any function |
+| `foo() ? e is T { ... }` | Handle only type `T`, propagate others | `!` function or non-match panics |
 | `foo()!` | Panic on error | Any function |
 | `(val, err) := foo()` | Capture raw result | Any function |
 
@@ -1262,31 +1275,69 @@ if err is present {
 
 ### 7.3 Error Types
 
+The base `error` type is defined in the standard library with a `message` field:
+
 ```promise
-type Error {
-  message() string `abstract;
+type error {
+  string message;
+}
+```
+
+Custom error types inherit from `error` and add domain-specific fields:
+
+```promise
+type IoError is error {
+  int code;
 }
 
-type FileNotFoundError is Error {
+type FileNotFoundError is error {
   string path;
-
-  message() string {
-    return "file not found: {this.path}";
-  }
 }
+```
+
+Error types can be generic:
+
+```promise
+type DataError[T] is error {
+  T data;
+}
+```
+
+**Restrictions:**
+- Error types **cannot** have `drop()` methods. Error values are passed as raw pointers through the result struct and are not tracked for cleanup. Allowing `drop()` would silently leak resources.
+- The `raise` statement validates at compile time that the raised value inherits from `error`.
+- Error operators (`?`, `!`, `? handler`) validate at compile time that the inner expression is a failable call.
+
+Error inheritance chains work with typed handlers — a handler for a parent type catches all child types:
+
+```promise
+type AppError is error { int code; }
+type DbError is AppError { string query; }
+
+// Handler for AppError catches DbError too
+fail() ? e is AppError { return e.code; };
 ```
 
 ### 7.4 `raise` Statement
 
-`raise` is used to return an error from a `!`-function. It is **not** an exception — it is sugar for returning the error half of the result struct.
+`raise` is used to return an error from a `!`-function. It is **not** an exception — it is sugar for returning the error half of the result struct. The raised value must be an `error` or an error subtype.
 
 ```promise
 divide(f64 a, f64 b) f64! {
   if b == 0.0 {
-    raise MathError("division by zero");
+    raise error(message: "division by zero");
   }
   return a / b;
 }
+```
+
+Error construction supports both positional and named arguments:
+
+```promise
+raise error("division by zero");                        // positional
+raise IoError(message: "disk full", code: 28);          // named
+raise IoError("disk full", 28);                         // positional
+raise IoError("disk full", code: 28);                   // mixed
 ```
 
 ---

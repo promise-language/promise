@@ -353,6 +353,9 @@ type map[K: Hashable + Equal, V] {
 	b.WriteString("\th = (h ^ ((v >> 56) & 255)) * prime;\n")
 	b.WriteString("\treturn h as! int;\n}\n")
 
+	// Error base type
+	b.WriteString("type error {\n\tstring message;\n}\n")
+
 	stdAll = b.String()
 }
 
@@ -1707,7 +1710,7 @@ func TestFailableNewConstructorCodegen(t *testing.T) {
 			int value;
 			new(~this, int value) void! {
 				if value < 1 {
-					raise "invalid port";
+					raise error(message: "invalid port");
 				}
 				this.value = value;
 			}
@@ -2216,14 +2219,16 @@ func TestReturnInFailable(t *testing.T) {
 
 func TestRaiseStmt(t *testing.T) {
 	ir := generateIR(t, `
-		parse(string s) int! { raise "parse error"; }
+		parse(string s) int! { raise error(message: "parse error"); }
 		main() { }
 	`)
 	// Should wrap error in Error result: tag=true
 	assertContains(t, ir, "i1 true")
 	assertContains(t, ir, "ret { i1, i64, i8* }")
-	// Should create the error string
+	// Should create the error message string
 	assertContains(t, ir, `c"parse error"`)
+	// Should extract instance pointer from value struct
+	assertContains(t, ir, "extractvalue { i8*, i8* }")
 }
 
 func TestErrorPropagate(t *testing.T) {
@@ -2292,7 +2297,7 @@ func TestVoidFailable(t *testing.T) {
 
 func TestVoidRaise(t *testing.T) {
 	ir := generateIR(t, `
-		validate(string s) void! { raise "invalid"; }
+		validate(string s) void! { raise error(message: "invalid"); }
 		main() { }
 	`)
 	assertContains(t, ir, "i1 true")
@@ -2328,7 +2333,7 @@ func TestFailableAutoTerminator(t *testing.T) {
 
 func TestVoidFailablePropagate(t *testing.T) {
 	ir := generateIR(t, `
-		validate(string s) void! { raise "invalid"; }
+		validate(string s) void! { raise error(message: "invalid"); }
 		process() void! {
 			validate("x")?;
 		}
@@ -2343,7 +2348,7 @@ func TestVoidFailablePropagate(t *testing.T) {
 
 func TestVoidFailableUnwrap(t *testing.T) {
 	ir := generateIR(t, `
-		validate(string s) void! { raise "invalid"; }
+		validate(string s) void! { raise error(message: "invalid"); }
 		main() {
 			validate("x")!;
 		}
@@ -2355,7 +2360,7 @@ func TestVoidFailableUnwrap(t *testing.T) {
 
 func TestVoidFailableHandler(t *testing.T) {
 	ir := generateIR(t, `
-		validate(string s) void! { raise "invalid"; }
+		validate(string s) void! { raise error(message: "invalid"); }
 		main() {
 			validate("x") ? e { };
 		}
@@ -2395,7 +2400,7 @@ func TestFailableConditionalRaiseReturn(t *testing.T) {
 	ir := generateIR(t, `
 		parse(string s) int! {
 			if s == "" {
-				raise "empty";
+				raise error(message: "empty");
 			}
 			return 42;
 		}
@@ -2405,6 +2410,225 @@ func TestFailableConditionalRaiseReturn(t *testing.T) {
 	assertContains(t, ir, "i1 true")
 	assertContains(t, ir, "i1 false")
 	assertContains(t, ir, "ret { i1, i64, i8* }")
+}
+
+// --- Typed Error Handler Tests ---
+
+func TestTypedErrorHandler(t *testing.T) {
+	ir := generateIR(t, `
+		type IoError is error {
+			int code;
+		}
+		fail() void! { raise IoError(message: "disk full", code: 28); }
+		main() {
+			fail() ? e is IoError { };
+		}
+	`)
+	// Should have RTTI type check
+	assertContains(t, ir, "call i32 @promise_type_is(")
+	// Should have typed match/nomatch blocks
+	assertContains(t, ir, "error.typed.match")
+	assertContains(t, ir, "error.typed.nomatch")
+}
+
+func TestTypedErrorHandlerInFailable(t *testing.T) {
+	ir := generateIR(t, `
+		type IoError is error {
+			int code;
+		}
+		fail() void! { raise IoError(message: "disk full", code: 28); }
+		process() void! {
+			fail() ? e is IoError { };
+		}
+		main() { }
+	`)
+	// Nomatch path in failable function should propagate error (ret)
+	assertContains(t, ir, "error.typed.nomatch")
+	assertContains(t, ir, "ret { i1, i8* }")
+}
+
+func TestTypedErrorHandlerPanicOnNomatch(t *testing.T) {
+	ir := generateIR(t, `
+		type IoError is error {
+			int code;
+		}
+		fail() void! { raise IoError(message: "disk full", code: 28); }
+		main() {
+			fail() ? e is IoError { };
+		}
+	`)
+	// Nomatch path in non-failable main should panic
+	assertContains(t, ir, "error.typed.nomatch")
+	assertContains(t, ir, `c"unhandled error type`)
+	assertContains(t, ir, "call void @promise_panic(")
+	assertContains(t, ir, "unreachable")
+}
+
+func TestTypedErrorHandlerDiscardBinding(t *testing.T) {
+	ir := generateIR(t, `
+		type IoError is error {
+			int code;
+		}
+		fail() void! { raise IoError(message: "disk full", code: 28); }
+		main() {
+			fail() ? _ is IoError { };
+		}
+	`)
+	assertContains(t, ir, "call i32 @promise_type_is(")
+	assertContains(t, ir, "error.typed.match")
+}
+
+func TestUntypedErrorHandlerUnchanged(t *testing.T) {
+	ir := generateIR(t, `
+		fail() void! { raise error(message: "oops"); }
+		main() {
+			fail() ? e { };
+		}
+	`)
+	// Untyped handler should NOT have typed match/nomatch blocks
+	assertContains(t, ir, "error.handler")
+	assertNotContains(t, ir, "error.typed.match")
+	assertNotContains(t, ir, "error.typed.nomatch")
+}
+
+func TestErrorHandlerBindingFieldAccess(t *testing.T) {
+	ir := generateIR(t, `
+		type IoError is error {
+			int code;
+		}
+		fail() void! { raise IoError(message: "disk full", code: 28); }
+		process() int {
+			fail() ? e is IoError { return e.code; };
+			return 0;
+		}
+		main() { }
+	`)
+	// Should reconstruct value struct and access field
+	assertContains(t, ir, "error.typed.match")
+	assertContains(t, ir, "insertvalue { i8*, i8* }")
+}
+
+func TestErrorPositionalConstruction(t *testing.T) {
+	ir := generateIR(t, `
+		foo() void! { raise error("oops"); }
+		main() { foo() ? e { }; }
+	`)
+	assertContains(t, ir, "error.handler")
+}
+
+func TestErrorSubtypePositionalConstruction(t *testing.T) {
+	ir := generateIR(t, `
+		type IoError is error { int code; }
+		foo() void! { raise IoError("disk full", 28); }
+		main() { foo() ? e { }; }
+	`)
+	assertContains(t, ir, "error.handler")
+}
+
+func TestGenericErrorTypeRaise(t *testing.T) {
+	ir := generateIR(t, `
+		type DataError[T] is error { T data; }
+		foo() void! { raise DataError[int](message: "bad", data: 42); }
+		main() { foo() ? e { }; }
+	`)
+	// Should monomorphize DataError[int]
+	assertContains(t, ir, "DataError__int")
+	assertContains(t, ir, "error.handler")
+}
+
+func TestFailableCallInsideHandler(t *testing.T) {
+	ir := generateIR(t, `
+		parse(string s) int! { return 0; }
+		foo() int! {
+			int v = parse("x") ? e { return parse("0")?; };
+			return v;
+		}
+		main() { foo() ? e { }; }
+	`)
+	assertContains(t, ir, "error.handler")
+	// The handler body should contain another error propagation
+	assertContains(t, ir, "error.propagate")
+}
+
+func TestBangUnwrapInsideHandler(t *testing.T) {
+	ir := generateIR(t, `
+		parse(string s) int! { return 0; }
+		foo() {
+			parse("x") ? e { int v = parse("0")!; };
+		}
+		main() { }
+	`)
+	// Should have both handler and panic-on-unwrap blocks
+	assertContains(t, ir, "error.handler")
+	assertContains(t, ir, "error.panic")
+}
+
+func TestNestedErrorHandlers(t *testing.T) {
+	ir := generateIR(t, `
+		a() int! { return 1; }
+		b() int! { return 2; }
+		foo() {
+			a() ? e1 {
+				b() ? e2 { };
+			};
+		}
+		main() { }
+	`)
+	// Should have multiple handler blocks
+	assertContains(t, ir, "error.handler")
+}
+
+func TestErrorInheritanceChainTypedHandler(t *testing.T) {
+	ir := generateIR(t, `
+		type AppError is error { int code; }
+		type DbError is AppError { string query; }
+		fail() void! { raise DbError(message: "fail", code: 500, query: "SELECT"); }
+		handler() int {
+			fail() ? e is AppError { return e.code; };
+			return 0;
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "error.typed.match")
+	assertContains(t, ir, "promise_type_is")
+}
+
+func TestRaiseExtractsInstancePtr(t *testing.T) {
+	ir := generateIR(t, `
+		type IoError is error { int code; }
+		foo() void! { raise IoError(message: "err", code: 1); }
+		main() { foo() ? e { }; }
+	`)
+	// Raise on user types should extract instance pointer (i8*) from value struct
+	assertContains(t, ir, "extractvalue { i8*, i8* }")
+}
+
+func TestHandlerNoBinding(t *testing.T) {
+	ir := generateIR(t, `
+		foo() void! { raise error(message: "oops"); }
+		bar() {
+			foo() ? { };
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "error.handler")
+	// Handler without binding should not load variant pointer for reconstruction
+	assertNotContains(t, ir, "error.typed.match")
+}
+
+func TestTypedHandlerNoMatchPropagation(t *testing.T) {
+	ir := generateIR(t, `
+		type IoError is error { int code; }
+		type ParseError is error { int line; }
+		fail() void! { raise ParseError(message: "parse", line: 1); }
+		handler() void! {
+			fail() ? e is IoError { };
+		}
+		main() { handler() ? e { }; }
+	`)
+	// Nomatch should propagate (re-wrap error and return)
+	assertContains(t, ir, "error.typed.nomatch")
+	assertContains(t, ir, "promise_type_is")
 }
 
 // --- Generic type tests ---
@@ -5675,7 +5899,7 @@ func TestDropWithRaise(t *testing.T) {
 		}
 		fail() void! {
 			r := Resource(id: 1);
-			raise "oops";
+			raise error(message: "oops");
 		}
 		main() { }
 	`)

@@ -254,6 +254,9 @@ func (b *Builder) VisitErrorHandlerExpr(ctx *parser.ErrorHandlerExprContext) int
 	if bn := ctx.BindingName(); bn != nil {
 		node.Binding = b.bindingText(bn)
 	}
+	if ctx.IS() != nil {
+		node.TypeName = ctx.IDENT().GetText()
+	}
 	return node
 }
 

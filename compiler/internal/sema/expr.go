@@ -586,6 +586,10 @@ func (c *Checker) checkNewConstructorCall(e *ast.CallExpr, named *types.Named, s
 	callDesc := "constructor for " + named.String()
 	c.resolveCallArgs(e, newMethod.Sig().Params(), callDesc, subst)
 
+	if newMethod.Sig().CanError() {
+		c.info.FailableExprs[e] = true
+	}
+
 	return named
 }
 
@@ -711,6 +715,10 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) types.Type {
 	}
 
 	c.resolveCallArgs(e, sig.Params(), callDesc, nil)
+
+	if sig.CanError() {
+		c.info.FailableExprs[e] = true
+	}
 
 	if sig.Result() != nil {
 		return sig.Result()
@@ -1222,24 +1230,54 @@ func (c *Checker) checkErrorPropagateExpr(e *ast.ErrorPropagateExpr) types.Type 
 	if c.curFunc == nil || !c.curFunc.CanError() {
 		c.errorf(e.Pos(), "error propagation (?) used outside of failable function")
 	}
+	if !c.info.FailableExprs[e.Expr] {
+		c.errorf(e.Pos(), "error propagation (?) requires a failable expression")
+	}
 	// The inner expression's type is the success type (error is propagated)
 	return inner
 }
 
 func (c *Checker) checkErrorUnwrapExpr(e *ast.ErrorUnwrapExpr) types.Type {
 	inner := c.checkExpr(e.Expr)
+	if !c.info.FailableExprs[e.Expr] {
+		c.errorf(e.Pos(), "error unwrap (!) requires a failable expression")
+	}
 	// Unwrap panics on error, returns success type
 	return inner
 }
 
 func (c *Checker) checkErrorHandlerExpr(e *ast.ErrorHandlerExpr) types.Type {
 	inner := c.checkExpr(e.Expr)
+	if !c.info.FailableExprs[e.Expr] {
+		c.errorf(e.Pos(), "error handler requires a failable expression")
+	}
+
+	// Determine binding type: specific error subtype or generic error
+	var bindingType types.Type = types.TypError
+	if e.TypeName != "" {
+		obj := c.lookup(e.TypeName)
+		if obj == nil {
+			c.errorf(e.Pos(), "undefined type: %s", e.TypeName)
+		} else if tn, ok := obj.(*types.TypeName); ok && tn.Type() != nil {
+			if named, ok := tn.Type().(*types.Named); ok {
+				if !named.InheritsFrom(types.TypError) {
+					c.errorf(e.Pos(), "%s does not inherit from error", e.TypeName)
+				} else {
+					bindingType = named
+				}
+			} else {
+				c.errorf(e.Pos(), "%s is not a type", e.TypeName)
+			}
+		} else {
+			c.errorf(e.Pos(), "%s is not a type", e.TypeName)
+		}
+	}
 
 	c.openScope(e.Body, "error-handler")
 	// Bind error variable if present
 	if e.Binding != "" && e.Binding != "_" {
 		c.checkNoShadow(e.Binding, e.Pos())
-		c.insert(types.NewVar(tpos(e.Pos()), e.Binding, types.TypError))
+		c.insert(types.NewVar(tpos(e.Pos()), e.Binding, bindingType))
 	}
 	c.checkBlock(e.Body)
 	c.closeScope()

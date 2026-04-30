@@ -61,6 +61,11 @@ type Info struct {
 	// OptionalNarrowings maps if-statement nodes to their narrowing info.
 	// Used by codegen to unwrap optional variables in narrowed scopes.
 	OptionalNarrowings map[*ast.IfStmt]*OptionalNarrowing
+
+	// FailableExprs records expressions whose evaluation can produce an error
+	// (failable function/method calls, failable constructor calls). Used by
+	// error operators (?, !, ? handler) to validate their inner expression.
+	FailableExprs map[ast.Expr]bool
 }
 
 // NarrowedVar records a single variable narrowing (T? → T).

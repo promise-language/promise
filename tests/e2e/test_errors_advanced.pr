@@ -6,7 +6,7 @@ parse_int(string s) int! {
     if s == "42" { return 42; }
     if s == "0" { return 0; }
     if s == "-1" { return -1; }
-    raise "invalid number: " + s;
+    raise error(message: "invalid number: " + s);
 }
 
 test_propagate_success() `test {
@@ -17,7 +17,7 @@ test_propagate_success() `test {
 // --- propagation chain: 3 levels deep ---
 
 level3() int! {
-    raise "deep error";
+    raise error(message: "deep error");
 }
 
 level2() int! {
@@ -88,8 +88,8 @@ test_bang_unwrap_success() `test {
 // --- conditional error handling ---
 
 safe_get(int[] arr, int idx) int! {
-    if idx < 0 { raise "negative index"; }
-    if idx >= arr.len { raise "index out of bounds"; }
+    if idx < 0 { raise error(message: "negative index"); }
+    if idx >= arr.len { raise error(message: "index out of bounds"); }
     return arr[idx];
 }
 
@@ -154,4 +154,86 @@ try_parse_and_sum_bad() bool {
 
 test_propagation_in_loop_fail() `test {
     assert(try_parse_and_sum_bad(), "bad input causes propagation");
+}
+
+// --- untyped handler with field access ---
+
+get_error_message() string {
+    int v = parse_int("bad") ? e { return e.message; };
+    return "no error";
+}
+
+test_untyped_handler_field_access() `test {
+    string msg = get_error_message();
+    assert(msg == "invalid number: bad", "untyped handler can access e.message");
+}
+
+// --- typed error handler ---
+
+type IoError is error {
+    int code;
+}
+
+fail_io() void! {
+    raise IoError(message: "disk full", code: 28);
+}
+
+get_io_error_code() int {
+    fail_io() ? e is IoError { return e.code; };
+    return 0;
+}
+
+test_typed_handler_catches() `test {
+    int code = get_io_error_code();
+    assert(code == 28, "typed handler catches IoError and accesses code");
+}
+
+// --- typed handler propagates non-matching ---
+
+type ParseError is error {
+    int line;
+}
+
+fail_parse() void! {
+    raise ParseError(message: "syntax error", line: 42);
+}
+
+try_typed_propagation() bool {
+    // IoError handler won't match ParseError, should propagate
+    fail_parse() ? e is IoError { return false; };
+    return false;
+}
+
+test_typed_handler_propagates_nonmatch() `test {
+    // try_typed_propagation is non-failable, nomatch panics
+    // Can't easily test panic in e2e, but we can test matching path
+    int code = get_io_error_code();
+    assert(code == 28, "typed handler match path works");
+}
+
+// --- typed handler in failable function propagates ---
+
+try_io_in_failable() void! {
+    fail_parse() ? e is IoError { return; };
+}
+
+try_propagation_wrapper() bool {
+    try_io_in_failable() ? e { return true; };
+    return false;
+}
+
+test_typed_handler_propagates_in_failable() `test {
+    assert(try_propagation_wrapper(), "typed handler propagates non-matching error in failable fn");
+}
+
+// --- untyped handler catches all error subtypes ---
+
+get_io_message() string {
+    fail_io() ? e { return e.message; };
+    return "no error";
+}
+
+test_untyped_handler_catches_subtype() `test {
+    string msg = get_io_message();
+    assert(msg == "disk full", "untyped handler catches IoError via error base");
 }

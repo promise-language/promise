@@ -408,7 +408,20 @@ func (c *Checker) checkRaiseStmt(s *ast.RaiseStmt) {
 	if c.curFunc == nil || !c.curFunc.CanError() {
 		c.errorf(s.Pos(), "raise outside of failable function")
 	}
-	c.checkExpr(s.Value)
+	valType := c.checkExpr(s.Value)
+	if valType == nil {
+		return
+	}
+	// Raised value must be an error type (error itself or a subtype).
+	named, _ := valType.(*types.Named)
+	if named == nil {
+		if inst, ok := valType.(*types.Instance); ok {
+			named, _ = inst.Origin().(*types.Named)
+		}
+	}
+	if named == nil || !named.InheritsFrom(types.TypError) {
+		c.errorf(s.Pos(), "raise requires an error type, got %s", valType)
+	}
 }
 
 func (c *Checker) checkIfStmt(s *ast.IfStmt) {

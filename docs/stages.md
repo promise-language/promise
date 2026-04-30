@@ -287,21 +287,26 @@ Enum type codegen: tagged unions, fieldless enums, variant constructors, pattern
 
 ## Stage 8e — Error Handling (Done)
 
-Error handling codegen: failable function declarations, raise statements, error propagation (`?`), forced unwrap (`!`), error handler expressions.
+Error handling codegen: failable function declarations, raise statements, error propagation (`?`), forced unwrap (`!`), error handler expressions, typed error handlers.
 
-**Files:** Updates to `codegen/compiler.go`, `codegen/expr.go`, `codegen/stmt.go`, `codegen/types.go`; 17 error handling tests
+**Files:** Updates to `codegen/compiler.go`, `codegen/expr.go`, `codegen/stmt.go`, `codegen/types.go`, `sema/expr.go`, `sema/stmt.go`, `sema/info.go`, `sema/meta.go`, `sema/decl.go`, `types/named.go`, `grammar/PromiseParser.g4`, `ast/expr.go`, `ast/visit_expr.go`, `std/error.pr`; 17 error handling tests + 46 sema tests + 12 codegen tests + 40 e2e tests
 
+- **Error base type**: `type error { string message; }` defined in `std/error.pr`. Universe type reuse merges std fields into `TypError`. All error types inherit from `error` via `is error`.
 - **Result struct**: Non-void `T!` → `{ i1, T, i8* }` (tag, ok value, error pointer). Void `void!` → `{ i1, i8* }` (tag, error pointer). Tag: `i1 false` = Ok, `i1 true` = Error.
-- **Error values are `i8*`**: Same representation as strings. `raise "message"` stores the string's `i8*`.
+- **Error values are `i8*`**: Error instance pointers stored in result struct. `raise` on user types extracts the instance pointer from the value struct `{vtable, instance}`.
 - **Failable declarations**: Functions/methods with `CanError()` return the result struct. `declareFuncs`/`declareTypeMethods` wrap return type with `computeResultType`.
 - **Return wrapping**: `genReturnStmt` wraps the value in an Ok result (`{ false, val, null }`) when inside a failable function.
-- **Raise statement**: `genRaiseStmt` wraps the error in an Error result (`{ true, zero, errVal }`) and returns.
+- **Raise statement**: `genRaiseStmt` wraps the error in an Error result (`{ true, zero, errVal }`) and returns. Validates raised value inherits from `error` at compile time.
 - **Error propagation** (`?`): `genErrorPropagateExpr` checks the tag via `condBr`. Error path extracts the `i8*` error, re-wraps in caller's result type, early-returns. Ok path extracts the value.
 - **Forced unwrap** (`!`): `genErrorUnwrapExpr` panics on error via `promise_panic(i8*)` + `unreachable`. Ok path extracts the value.
-- **Error handler** (`? binding { body }`): `genErrorHandlerExpr` branches to handler block (binds error, generates body) or ok block, merges with phi node.
+- **Untyped error handler** (`? e { body }`): `genErrorHandlerExpr` branches to handler block, reconstructs error value struct `{vtable_ptr, instance_ptr}` for the binding, generates body, merges with phi node.
+- **Typed error handler** (`? e is IoError { body }`): RTTI check via `promise_type_is` on the error instance's `_variant` pointer. Match path: reconstruct typed value struct, generate body. No-match path: propagate error (in failable functions) or panic (in non-failable functions).
+- **Failable validation**: `FailableExprs` map in sema `Info` records call expressions with failable signatures. Error operators (`?`, `!`, `? handler`) validate at compile time that their inner expression is failable.
+- **Error type restrictions**: Error types cannot have `drop()` methods (error values are not tracked for cleanup; allowing drop would silently leak resources). Generic error types (`type DataError[T] is error { T data; }`) are supported.
 - **Auto-terminator**: Failable functions without explicit terminator return an Ok-wrapped zero value.
-- **Scope**: Failable functions/methods, raise, `?` propagation, `!` unwrap, `? binding { body }` handlers, void failables.
-- **Deferred**: Failable extern functions (C ABI for errors). If-unwrap/while-unwrap completed in Stage 8h.
+- **`genBlockValue` helper**: Generates a block and returns the last expression's value without double-generating. Used by `genErrorHandlerExpr` and `genIfExpr`.
+- **Scope**: Failable functions/methods, raise, `?` propagation, `!` unwrap, `? binding { body }` handlers, `? e is T { body }` typed handlers, void failables, generic error types.
+- **Deferred**: Failable extern functions (C ABI for errors). If-unwrap/while-unwrap completed in Stage 8h. Full type expressions in `is` patterns (generics, arrays, module-qualified — see Stage 8k deferred). **Typed error handler nomatch semantics**: currently panics in non-failable functions — must become a compile error. Errors should never cause a silent panic without explicit `!`. In non-failable functions, typed handlers (`? e is T`) that don't cover all error types should be rejected at compile time; users must use an untyped handler or make the function failable.
 
 ## Stage 8f — Generic Monomorphization (Done)
 
@@ -400,7 +405,7 @@ Codegen for inherited field layouts, static method dispatch through inheritance 
 - **RTTI infrastructure**: Each non-generic Named type gets a unique i32 type ID. Type info globals (`@promise_typeinfo_TypeName`) store `{ i32 type_id, i32 num_parents, [N x i32] parent_ids }` with transitive parent IDs. Constructors store the type info pointer in the `_variant` slot (index 0) instead of null. Runtime function `promise_type_is(variant_ptr, expected_id)` checks type ID and parent IDs.
 - **is expressions**: `x is present` → `extractvalue` i1 flag from optional. `x is absent` → extract + xor negate. `c is Variant` → extract enum tag, `icmp eq`. `a is Dog` → load `_variant` pointer, call `promise_type_is`, convert i32→i1.
 - **as expressions**: `a as Dog` (safe) → RTTI check, branch to `cast.some` (wrap in Optional) or `cast.none` (zeroinitializer), phi merge. `a as! Dog` (force) → RTTI check, branch to `cast.ok` or `cast.panic` (calls `promise_panic`).
-- **Deferred**: Virtual dispatch (vtable), destructure is-patterns (`x is Dog(name)`), generic type RTTI.
+- **Deferred**: Virtual dispatch (vtable — completed in Stage 8L), destructure is-patterns (`x is Dog(name)`), generic type RTTI, full type expressions in `is` patterns and typed error handlers. Both `if x is TYPE` and `? e is TYPE` currently only accept bare `IDENT`. Need to support `typeRef` (generics like `DataError[int]`, arrays like `int[]`, optionals like `Foo?`, module-qualified like `std.Error`). The `typeRef` grammar rule already supports these forms — requires updating `pattern` rule, `ErrorHandlerExpr` grammar, AST, sema type resolution, and codegen RTTI for monomorphized type IDs.
 
 ## Stage 8j — Unify Compound Types with Named Types + Collection Methods (Done)
 

@@ -260,6 +260,9 @@ func (c *Checker) validateDropMethod(named *types.Named, m *types.Method, d *ast
 	if named.IsCopy() {
 		c.errorf(pos, "copy type %s cannot have a drop() method", d.Name)
 	}
+	if named.InheritsFrom(types.TypError) {
+		c.errorf(pos, "error type %s cannot have a drop() method (error values are not dropped when caught or propagated)", d.Name)
+	}
 }
 
 // validateNewMethod checks that a new() constructor has a valid signature:

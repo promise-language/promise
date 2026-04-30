@@ -376,7 +376,7 @@ selectDefault
 // ANTLR4 precedence climbing: first alternative = highest precedence.
 //
 // Precedence table (1 = highest, 14 = lowest):
-//   1 (highest): . ?. () [] ? ! (? handler)
+//   1 (highest): . ?. () [] ? ! (? handler) (? is T handler)
 //   2: Unary - ! ~ <-
 //   3: * / %
 //   4: << >>
@@ -400,7 +400,7 @@ expression
     | expression LPAREN args RPAREN                            # callExpr
     | expression LBRACKET expression RBRACKET                  # indexExpr
     | expression LBRACKET expression? COLON expression? RBRACKET  # sliceExpr
-    | expression QUESTION bindingName? block                   # errorHandlerExpr
+    | expression QUESTION bindingName? (IS IDENT)? block       # errorHandlerExpr
     | expression QUESTION                                      # errorPropagateExpr
     | expression BANG                                          # errorUnwrapExpr
 

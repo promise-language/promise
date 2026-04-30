@@ -39,6 +39,7 @@ func Check(file *ast.File) (*Info, []error) {
 			ParamDefaults:      make(map[*types.Param]ast.Expr),
 			LambdaCaptures:     make(map[*ast.LambdaExpr][]*CapturedVar),
 			OptionalNarrowings: make(map[*ast.IfStmt]*OptionalNarrowing),
+			FailableExprs:      make(map[ast.Expr]bool),
 		},
 	}
 

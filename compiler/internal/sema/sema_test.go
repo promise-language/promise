@@ -347,6 +347,9 @@ type map[K: Hashable + Equal, V] {
 	b.WriteString("\th = (h ^ ((v >> 56) & 255)) * prime;\n")
 	b.WriteString("\treturn h as! int;\n}\n")
 
+	// Error base type
+	b.WriteString("type error {\n\tstring message;\n}\n")
+
 	stdAll = b.String()
 }
 
@@ -848,11 +851,11 @@ func TestBareReturnInNonVoid(t *testing.T) {
 // --- Error Handling Tests ---
 
 func TestRaiseInFailable(t *testing.T) {
-	checkOK(t, `foo() int! { raise "oops"; }`)
+	checkOK(t, `foo() int! { raise error(message: "oops"); }`)
 }
 
 func TestRaiseInNonFailable(t *testing.T) {
-	errs := checkErrs(t, `foo() { raise "oops"; }`)
+	errs := checkErrs(t, `foo() { raise error(message: "oops"); }`)
 	expectError(t, errs, "raise outside of failable")
 }
 
@@ -875,6 +878,434 @@ func TestErrorUnwrap(t *testing.T) {
 	checkOK(t, `
 		parse(string s) int! { return 0; }
 		foo() { x := parse("42")!; }
+	`)
+}
+
+func TestRaiseNonErrorType(t *testing.T) {
+	errs := checkErrs(t, `foo() int! { raise 42; }`)
+	expectError(t, errs, "raise requires an error type")
+}
+
+func TestRaiseErrorSubtype(t *testing.T) {
+	checkOK(t, `
+		type IoError is error {
+			int code;
+		}
+		foo() void! { raise IoError(message: "fail", code: 1); }
+	`)
+}
+
+func TestTypedErrorHandler(t *testing.T) {
+	checkOK(t, `
+		type IoError is error {
+			int code;
+		}
+		foo() void! { raise IoError(message: "fail", code: 1); }
+		bar() int! {
+			foo() ? e is IoError { return e.code; };
+			return 0;
+		}
+	`)
+}
+
+func TestTypedErrorHandlerUndefinedType(t *testing.T) {
+	errs := checkErrs(t, `
+		foo() void! { raise error(message: "oops"); }
+		bar() {
+			foo() ? e is Nope { };
+		}
+	`)
+	expectError(t, errs, "undefined type: Nope")
+}
+
+func TestTypedErrorHandlerNonErrorType(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo { int x; }
+		foo() void! { raise error(message: "oops"); }
+		bar() {
+			foo() ? e is Foo { };
+		}
+	`)
+	expectError(t, errs, "does not inherit from error")
+}
+
+func TestErrorPropagateOnNonFailable(t *testing.T) {
+	errs := checkErrs(t, `
+		foo() int { return 42; }
+		bar() int! { return foo()?; }
+	`)
+	expectError(t, errs, "requires a failable expression")
+}
+
+func TestErrorUnwrapOnNonFailable(t *testing.T) {
+	errs := checkErrs(t, `
+		foo() int { return 42; }
+		bar() { int x = foo()!; }
+	`)
+	expectError(t, errs, "requires a failable expression")
+}
+
+func TestErrorHandlerOnNonFailable(t *testing.T) {
+	errs := checkErrs(t, `
+		foo() int { return 42; }
+		bar() { foo() ? e { }; }
+	`)
+	expectError(t, errs, "requires a failable expression")
+}
+
+// --- Generic Error Types ---
+
+func TestGenericErrorType(t *testing.T) {
+	checkOK(t, `
+		type DataError[T] is error {
+			T data;
+		}
+		foo() void! {
+			raise DataError[int](message: "bad data", data: 42);
+		}
+	`)
+}
+
+func TestGenericErrorTypeStringParam(t *testing.T) {
+	checkOK(t, `
+		type DataError[T] is error {
+			T data;
+		}
+		foo() void! {
+			raise DataError[string](message: "bad", data: "details");
+		}
+	`)
+}
+
+func TestGenericErrorTypeInHandler(t *testing.T) {
+	checkOK(t, `
+		type DataError[T] is error {
+			T data;
+		}
+		foo() void! {
+			raise DataError[int](message: "bad", data: 42);
+		}
+		bar() {
+			foo() ? e { };
+		}
+	`)
+}
+
+func TestGenericErrorTypeFieldAccess(t *testing.T) {
+	// NOTE: Typed handler with generic type (? e is DataError[int]) is not yet
+	// supported in the grammar. Untyped handler with message access works.
+	checkOK(t, `
+		type DataError[T] is error {
+			T data;
+		}
+		foo() void! {
+			raise DataError[int](message: "bad", data: 42);
+		}
+		bar() string {
+			foo() ? e { return e.message; };
+			return "";
+		}
+	`)
+}
+
+func TestRaiseGenericErrorNonErrorBase(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box[T] { T value; }
+		foo() void! { raise Box[int](value: 1); }
+	`)
+	expectError(t, errs, "raise requires an error type")
+}
+
+// --- Error Construction Variants ---
+
+func TestErrorPositionalConstruction(t *testing.T) {
+	checkOK(t, `
+		foo() void! {
+			raise error("oops");
+		}
+	`)
+}
+
+func TestErrorSubtypePositionalConstruction(t *testing.T) {
+	checkOK(t, `
+		type IoError is error {
+			int code;
+		}
+		foo() void! {
+			raise IoError("disk full", 28);
+		}
+	`)
+}
+
+func TestErrorSubtypeMixedConstruction(t *testing.T) {
+	checkOK(t, `
+		type IoError is error {
+			int code;
+		}
+		foo() void! {
+			raise IoError("disk full", code: 28);
+		}
+	`)
+}
+
+func TestErrorConstructionTooManyArgs(t *testing.T) {
+	errs := checkErrs(t, `
+		foo() void! { raise error("a", "b"); }
+	`)
+	expectError(t, errs, "expects at most")
+}
+
+func TestErrorConstructionWrongType(t *testing.T) {
+	errs := checkErrs(t, `
+		foo() void! { raise error(42); }
+	`)
+	expectError(t, errs, "cannot assign int")
+}
+
+func TestErrorSubtypeConstructionWrongFieldType(t *testing.T) {
+	errs := checkErrs(t, `
+		type IoError is error { int code; }
+		foo() void! { raise IoError(message: "err", code: "notint"); }
+	`)
+	expectError(t, errs, "cannot assign string")
+}
+
+// --- Drop Semantics on Error Types ---
+
+func TestErrorTypeCannotHaveDrop(t *testing.T) {
+	errs := checkErrs(t, `
+		type FileError is error {
+			int fd;
+			drop(~this) {}
+		}
+		main() {}
+	`)
+	expectError(t, errs, "error type FileError cannot have a drop")
+}
+
+func TestErrorSubtypeCannotHaveDrop(t *testing.T) {
+	errs := checkErrs(t, `
+		type AppError is error { int code; }
+		type DbError is AppError {
+			string conn;
+			drop(~this) {}
+		}
+		main() {}
+	`)
+	expectError(t, errs, "error type DbError cannot have a drop")
+}
+
+// --- Failable Calls Inside Error Handlers ---
+
+func TestFailableCallInsideUntypedHandler(t *testing.T) {
+	checkOK(t, `
+		parse(string s) int! { return 0; }
+		other() int! { return 1; }
+		foo() int! {
+			int v = parse("x") ? e { return other()?; };
+			return v;
+		}
+	`)
+}
+
+func TestFailableCallInsideTypedHandler(t *testing.T) {
+	checkOK(t, `
+		type IoError is error { int code; }
+		fail_io() void! { raise IoError(message: "fail", code: 1); }
+		retry() int! { return 0; }
+		foo() int! {
+			fail_io() ? e is IoError { return retry()?; };
+			return 0;
+		}
+	`)
+}
+
+func TestBangUnwrapInsideHandler(t *testing.T) {
+	checkOK(t, `
+		parse(string s) int! { return 0; }
+		foo() {
+			parse("x") ? e { int v = parse("0")!; };
+		}
+	`)
+}
+
+func TestFailableCallInsideHandlerOfNonFailable(t *testing.T) {
+	// In a non-failable function, handler body can still use ! (bang unwrap)
+	checkOK(t, `
+		parse(string s) int! { return 0; }
+		foo() {
+			parse("x") ? e { int v = parse("fallback")!; };
+		}
+	`)
+}
+
+func TestFailableCallPropagateInsideHandlerOfNonFailable(t *testing.T) {
+	// Cannot use ? (propagate) in non-failable function, even inside handler
+	errs := checkErrs(t, `
+		parse(string s) int! { return 0; }
+		foo() {
+			parse("x") ? e { int v = parse("retry")?; };
+		}
+	`)
+	expectError(t, errs, "outside of failable")
+}
+
+// --- Nested Error Handlers ---
+
+func TestNestedErrorHandlers(t *testing.T) {
+	checkOK(t, `
+		a() int! { return 1; }
+		b() int! { return 2; }
+		foo() {
+			int v = a() ? e1 {
+				b() ? e2 { };
+			};
+		}
+	`)
+}
+
+func TestTypedHandlerInsideUntypedHandler(t *testing.T) {
+	checkOK(t, `
+		type IoError is error { int code; }
+		a() void! { raise error(message: "a"); }
+		b() void! { raise IoError(message: "b", code: 1); }
+		foo() {
+			a() ? e1 {
+				b() ? e2 is IoError { };
+			};
+		}
+	`)
+}
+
+// --- Error Handler Edge Cases ---
+
+func TestHandlerWithDiscardBinding(t *testing.T) {
+	checkOK(t, `
+		foo() void! { raise error(message: "oops"); }
+		bar() {
+			foo() ? _ { };
+		}
+	`)
+}
+
+func TestTypedHandlerWithDiscardBinding(t *testing.T) {
+	checkOK(t, `
+		type IoError is error { int code; }
+		foo() void! { raise IoError(message: "fail", code: 1); }
+		bar() {
+			foo() ? _ is IoError { };
+		}
+	`)
+}
+
+func TestHandlerNoBinding(t *testing.T) {
+	checkOK(t, `
+		foo() void! { raise error(message: "oops"); }
+		bar() {
+			foo() ? { };
+		}
+	`)
+}
+
+func TestMultipleFieldErrorType(t *testing.T) {
+	checkOK(t, `
+		type DetailedError is error {
+			int code;
+			string detail;
+			bool retryable;
+		}
+		foo() void! {
+			raise DetailedError(message: "failed", code: 503, detail: "service unavailable", retryable: true);
+		}
+		bar() bool! {
+			foo() ? e is DetailedError { return e.retryable; };
+			return false;
+		}
+	`)
+}
+
+func TestErrorInheritanceChain(t *testing.T) {
+	checkOK(t, `
+		type AppError is error {
+			int code;
+		}
+		type DbError is AppError {
+			string query;
+		}
+		foo() void! {
+			raise DbError(message: "query failed", code: 500, query: "SELECT 1");
+		}
+		bar() int! {
+			foo() ? e is AppError { return e.code; };
+			return 0;
+		}
+	`)
+}
+
+func TestTypedHandlerWithInheritanceChainDeep(t *testing.T) {
+	checkOK(t, `
+		type AppError is error { int code; }
+		type DbError is AppError { string query; }
+		type TimeoutError is DbError { int seconds; }
+		foo() void! {
+			raise TimeoutError(message: "timeout", code: 504, query: "SELECT 1", seconds: 30);
+		}
+		bar() int! {
+			foo() ? e is AppError { return e.code; };
+			return 0;
+		}
+	`)
+}
+
+func TestRaiseStringLiteral(t *testing.T) {
+	errs := checkErrs(t, `foo() void! { raise "oops"; }`)
+	expectError(t, errs, "raise requires an error type")
+}
+
+func TestRaiseBoolLiteral(t *testing.T) {
+	errs := checkErrs(t, `foo() void! { raise true; }`)
+	expectError(t, errs, "raise requires an error type")
+}
+
+func TestRaiseVariable(t *testing.T) {
+	checkOK(t, `
+		foo() void! {
+			error e = error(message: "saved");
+			raise e;
+		}
+	`)
+}
+
+func TestFuncReturningErrorType(t *testing.T) {
+	// A non-failable function can return error as a normal value
+	checkOK(t, `
+		make_error() error {
+			return error(message: "made");
+		}
+		foo() void! {
+			raise make_error();
+		}
+	`)
+}
+
+func TestErrorHandlerAccessMessageField(t *testing.T) {
+	checkOK(t, `
+		foo() void! { raise error(message: "test msg"); }
+		bar() string {
+			foo() ? e { return e.message; };
+			return "";
+		}
+	`)
+}
+
+func TestErrorSubtypeAccessBaseMessageField(t *testing.T) {
+	checkOK(t, `
+		type IoError is error { int code; }
+		foo() void! { raise IoError(message: "io fail", code: 1); }
+		bar() string! {
+			foo() ? e is IoError { return e.message; };
+			return "";
+		}
 	`)
 }
 
@@ -1776,7 +2207,7 @@ func TestFailableNewConstructorSema(t *testing.T) {
 			int value;
 			new(~this, int value) void! {
 				if value < 1 {
-					raise "invalid port";
+					raise error(message: "invalid port");
 				}
 				this.value = value;
 			}
@@ -2074,7 +2505,7 @@ func TestChildNewMustBeFailableWhenParentIs(t *testing.T) {
 		type Animal {
 			string name;
 			new(~this, string name) void! {
-				if name == "" { raise "empty"; }
+				if name == "" { raise error(message: "empty"); }
 				this.name = name;
 			}
 		}
@@ -2095,7 +2526,7 @@ func TestChildNewFailableMatchesParent(t *testing.T) {
 		type Animal {
 			string name;
 			new(~this, string name) void! {
-				if name == "" { raise "empty"; }
+				if name == "" { raise error(message: "empty"); }
 				this.name = name;
 			}
 		}
@@ -3212,7 +3643,7 @@ func TestUnreachableAfterReturn(t *testing.T) {
 func TestUnreachableAfterRaise(t *testing.T) {
 	errs := checkErrs(t, `
 		test() int! {
-			raise "oops";
+			raise error(message: "oops");
 			int x = 42;
 		}
 	`)
@@ -4992,7 +5423,7 @@ func TestDropMethodFailable(t *testing.T) {
 	errs := checkErrs(t, `
 		type File {
 			int fd;
-			drop(~this) void! { raise "err"; }
+			drop(~this) void! { raise error(message: "err"); }
 		}
 		main() {}
 	`)

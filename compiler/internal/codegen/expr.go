@@ -2456,13 +2456,7 @@ func (c *Compiler) genIfExpr(e *ast.IfExpr) value.Value {
 
 	// Then branch
 	c.block = thenBlock
-	c.genBlock(e.Then)
-	var thenVal value.Value
-	if len(e.Then.Stmts) > 0 {
-		if es, ok := e.Then.Stmts[len(e.Then.Stmts)-1].(*ast.ExprStmt); ok {
-			thenVal = c.genExpr(es.Expr)
-		}
-	}
+	thenVal := c.genBlockValue(e.Then)
 	thenEnd := c.block
 	if c.block.Term == nil {
 		c.block.NewBr(mergeBlock)
@@ -2470,13 +2464,7 @@ func (c *Compiler) genIfExpr(e *ast.IfExpr) value.Value {
 
 	// Else branch
 	c.block = elseBlock
-	c.genBlock(e.Else)
-	var elseVal value.Value
-	if len(e.Else.Stmts) > 0 {
-		if es, ok := e.Else.Stmts[len(e.Else.Stmts)-1].(*ast.ExprStmt); ok {
-			elseVal = c.genExpr(es.Expr)
-		}
-	}
+	elseVal := c.genBlockValue(e.Else)
 	elseEnd := c.block
 	if c.block.Term == nil {
 		c.block.NewBr(mergeBlock)
@@ -2558,6 +2546,10 @@ func (c *Compiler) genErrorUnwrapExpr(e *ast.ErrorUnwrapExpr) value.Value {
 // Evaluates the inner failable call, runs the handler on error (with optional
 // error binding), or extracts the Ok value on success. Merges with phi if
 // both branches produce values.
+//
+// For typed handlers (`? e is IoError { ... }`), an RTTI check is performed on
+// the error instance. If the check fails, the error is propagated (in failable
+// functions) or causes a panic (in non-failable functions).
 func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 	result := c.genExpr(e.Expr)
 	resultType := result.Type().(*irtypes.StructType)
@@ -2569,22 +2561,66 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 	mergeBlock := c.newBlock("error.merge")
 	c.block.NewCondBr(tag, handlerBlock, okBlock)
 
-	// Handler block: bind error variable, generate body
+	// Handler block
 	c.block = handlerBlock
+	errVal := c.block.NewExtractValue(result, resultErrIdx(resultType))
+
+	// For typed handlers, perform RTTI check before entering the handler body
+	if e.TypeName != "" {
+		targetNamed := c.lookupNamedType(e.TypeName)
+		if targetNamed == nil {
+			panic(fmt.Sprintf("codegen: undefined type %s in error handler", e.TypeName))
+		}
+		targetID := c.assignTypeID(targetNamed)
+
+		variantPtr := c.loadVariantPtr(errVal)
+		rttiResult := c.block.NewCall(c.funcs["promise_type_is"],
+			variantPtr, constant.NewInt(irtypes.I32, int64(targetID)))
+		typeMatch := c.block.NewICmp(enum.IPredNE, rttiResult, constant.NewInt(irtypes.I32, 0))
+
+		matchBlock := c.newBlock("error.typed.match")
+		noMatchBlock := c.newBlock("error.typed.nomatch")
+		c.block.NewCondBr(typeMatch, matchBlock, noMatchBlock)
+
+		// No-match path: propagate or panic
+		c.block = noMatchBlock
+		if c.canError {
+			if len(c.scopeBindings) > 0 {
+				c.emitScopeCleanup(0)
+			}
+			callerResultType := c.currentResultType()
+			c.block.NewRet(c.wrapError(errVal, callerResultType))
+		} else {
+			panicMsg := c.makeGlobalString("unhandled error type")
+			c.block.NewCall(c.funcs["promise_panic"], panicMsg)
+			c.block.NewUnreachable()
+		}
+
+		// Match path: continue to bind and run handler body
+		c.block = matchBlock
+	}
+
+	// Bind the error variable as a value struct {vtable_ptr, instance_ptr}
 	if e.Binding != "" && e.Binding != "_" {
-		errVal := c.block.NewExtractValue(result, resultErrIdx(resultType))
-		alloca := c.block.NewAlloca(irtypes.I8Ptr)
+		// Reconstruct value struct from instance pointer
+		variantPtr := c.loadVariantPtr(errVal)
+		// typeinfo field 0 is vtable_ptr
+		typeinfoStruct := irtypes.NewStruct(irtypes.I8Ptr)
+		typeinfoPtr := c.block.NewBitCast(variantPtr, irtypes.NewPointer(typeinfoStruct))
+		vtableFieldPtr := c.block.NewGetElementPtr(typeinfoStruct, typeinfoPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		vtablePtr := c.block.NewLoad(irtypes.I8Ptr, vtableFieldPtr)
+
+		var valStruct value.Value = constant.NewZeroInitializer(userValueType())
+		valStruct = c.block.NewInsertValue(valStruct, vtablePtr, 0)
+		valStruct = c.block.NewInsertValue(valStruct, errVal, 1)
+
+		alloca := c.block.NewAlloca(userValueType())
 		alloca.SetName(c.uniqueLocalName(e.Binding))
-		c.block.NewStore(errVal, alloca)
+		c.block.NewStore(valStruct, alloca)
 		c.locals[e.Binding] = alloca
 	}
-	c.genBlock(e.Body)
-	var handlerVal value.Value
-	if len(e.Body.Stmts) > 0 {
-		if es, ok := e.Body.Stmts[len(e.Body.Stmts)-1].(*ast.ExprStmt); ok {
-			handlerVal = c.genExpr(es.Expr)
-		}
-	}
+	handlerVal := c.genBlockValue(e.Body)
 	handlerEnd := c.block
 	if c.block.Term == nil {
 		c.block.NewBr(mergeBlock)

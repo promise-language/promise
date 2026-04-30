@@ -238,7 +238,7 @@ func runRun(args []string) {
 func runTest(args []string) {
 	timeout := 60 * time.Second
 	var stressMode bool
-	var stressCount int          // 0 = unlimited
+	var stressCount int              // 0 = unlimited
 	var stressDuration time.Duration // 0 = unlimited
 	var remaining []string
 	for i := 0; i < len(args); i++ {

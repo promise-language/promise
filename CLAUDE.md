@@ -45,6 +45,21 @@ promise test -timeout 30s file.pr          # custom timeout (Go duration or seco
 promise exec -timeout 10s 'println("hi")'  # exec with timeout
 ```
 
+**Test output format** — designed for AI-agent tail-friendliness:
+```
+PASS (0.000s) test_name        # individual results: PASS/FAIL (time) name
+FAIL (0.001s) test_broken
+20 passed, 1 failed (0.423s)   # summary line (single file)
+FAILED:                         # only appears when failures exist
+  test_broken
+
+568 passed, 2 failed (117 files, 30.810s)  # directory summary
+FAILED:
+  std/test_vector.pr: test_push
+  e2e/basics.pr (timeout)
+```
+An agent can read the last ~20 lines of output to identify all failures without re-running or grepping.
+
 ## Compiler Pipeline
 
 ```

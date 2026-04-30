@@ -366,6 +366,13 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 	entry.NewStore(constant.NewInt(irtypes.I32, 0), passedAlloca)
 	entry.NewStore(constant.NewInt(irtypes.I32, 0), failedAlloca)
 
+	// Allocate array for failed test name pointers and a counter
+	totalTests := len(tests)
+	failedNamesArrayType := irtypes.NewArray(uint64(totalTests), irtypes.I8Ptr)
+	failedNamesAlloca := entry.NewAlloca(failedNamesArrayType)
+	failedCountAlloca := entry.NewAlloca(irtypes.I32)
+	entry.NewStore(constant.NewInt(irtypes.I32, 0), failedCountAlloca)
+
 	for _, test := range tests {
 		// Look up the IR function — tests are always user code
 		testFn := c.funcs[test.Name()]
@@ -417,6 +424,26 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 		newFailed := entry.NewSelect(isPass, currentFailed, failIncr)
 		entry.NewStore(newPassed, passedAlloca)
 		entry.NewStore(newFailed, failedAlloca)
+
+		// If failed, store name pointer in failedNames array
+		failStoreBlock := mainFn.NewBlock(fmt.Sprintf("store_fail_%s", nameStr))
+		skipStoreBlock := mainFn.NewBlock(fmt.Sprintf("skip_fail_%s", nameStr))
+		isFail := entry.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 0))
+		entry.NewCondBr(isFail, failStoreBlock, skipStoreBlock)
+
+		// Store the name pointer at failedNames[failedCount], then increment
+		failIdx := failStoreBlock.NewLoad(irtypes.I32, failedCountAlloca)
+		failSlot := failStoreBlock.NewGetElementPtr(failedNamesArrayType, failedNamesAlloca,
+			constant.NewInt(irtypes.I32, 0), failIdx)
+		failStoreBlock.NewStore(namePtr, failSlot)
+		failStoreBlock.NewStore(
+			failStoreBlock.NewAdd(failIdx, constant.NewInt(irtypes.I32, 1)),
+			failedCountAlloca,
+		)
+		failStoreBlock.NewBr(skipStoreBlock)
+
+		// Continue from skipStoreBlock for the next test
+		entry = skipStoreBlock
 	}
 
 	// Print summary
@@ -424,10 +451,61 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 	finalFailed := entry.NewLoad(irtypes.I32, failedAlloca)
 	entry.NewCall(testSummaryFn, finalPassed, finalFailed)
 
-	// Return 0 if all passed, 1 if any failed
+	// Print FAILED: list if any failures
+	failedHeaderData := constant.NewCharArrayFromString("FAILED:\n")
+	failedHeaderGlobal := c.module.NewGlobalDef(".str.failed_header", failedHeaderData)
+	failedHeaderGlobal.Immutable = true
+	failedIndentData := constant.NewCharArrayFromString("  ")
+	failedIndentGlobal := c.module.NewGlobalDef(".str.failed_indent", failedIndentData)
+	failedIndentGlobal.Immutable = true
+	stdout := constant.NewInt(irtypes.I32, 1)
+
 	hasFailures := entry.NewICmp(enum.IPredSGT, finalFailed, constant.NewInt(irtypes.I32, 0))
-	retVal := entry.NewSelect(hasFailures, constant.NewInt(irtypes.I32, 1), constant.NewInt(irtypes.I32, 0))
-	entry.NewRet(retVal)
+	printFailBlock := mainFn.NewBlock("print_failures")
+	doneBlock := mainFn.NewBlock("done")
+	entry.NewCondBr(hasFailures, printFailBlock, doneBlock)
+
+	// Print "FAILED:\n" header
+	headerPtr := printFailBlock.NewGetElementPtr(failedHeaderGlobal.ContentType, failedHeaderGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	printFailBlock.NewCall(c.palWrite, stdout, headerPtr, constant.NewInt(irtypes.I64, 8))
+
+	// Loop through failed names
+	loopBlock := mainFn.NewBlock("fail_loop")
+	loopEndBlock := mainFn.NewBlock("fail_loop_end")
+	printFailBlock.NewBr(loopBlock)
+
+	// Loop index phi
+	idxPhi := loopBlock.NewPhi(ir.NewIncoming(constant.NewInt(irtypes.I32, 0), printFailBlock))
+
+	// Load name pointer from array
+	nameSlot := loopBlock.NewGetElementPtr(failedNamesArrayType, failedNamesAlloca,
+		constant.NewInt(irtypes.I32, 0), idxPhi)
+	failedNamePtr := loopBlock.NewLoad(irtypes.I8Ptr, nameSlot)
+
+	// Print "  " + name + "\n"
+	indentPtr := loopBlock.NewGetElementPtr(failedIndentGlobal.ContentType, failedIndentGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	loopBlock.NewCall(c.palWrite, stdout, indentPtr, constant.NewInt(irtypes.I64, 2))
+	failedNameLen := loopBlock.NewCall(c.funcs["strlen"], failedNamePtr)
+	loopBlock.NewCall(c.palWrite, stdout, failedNamePtr, failedNameLen)
+	nlPtr := loopBlock.NewGetElementPtr(c.newlineGlobal.ContentType, c.newlineGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	loopBlock.NewCall(c.palWrite, stdout, nlPtr, constant.NewInt(irtypes.I64, 1))
+
+	// Increment and check
+	nextIdx := loopBlock.NewAdd(idxPhi, constant.NewInt(irtypes.I32, 1))
+	totalFailedCount := loopBlock.NewLoad(irtypes.I32, failedCountAlloca)
+	loopDone := loopBlock.NewICmp(enum.IPredSGE, nextIdx, totalFailedCount)
+	idxPhi.Incs = append(idxPhi.Incs, ir.NewIncoming(nextIdx, loopBlock))
+	loopBlock.NewCondBr(loopDone, loopEndBlock, loopBlock)
+
+	loopEndBlock.NewBr(doneBlock)
+
+	// Return 0 if all passed, 1 if any failed
+	retHasFailures := doneBlock.NewICmp(enum.IPredSGT, finalFailed, constant.NewInt(irtypes.I32, 0))
+	retVal := doneBlock.NewSelect(retHasFailures, constant.NewInt(irtypes.I32, 1), constant.NewInt(irtypes.I32, 0))
+	doneBlock.NewRet(retVal)
 }
 
 // declareIntrinsics declares compiler-intrinsic runtime functions (not user-declared externs).

@@ -4832,17 +4832,17 @@ func TestTestPrintResultBody(t *testing.T) {
 	assertContains(t, ir, "icmp ne i32 %failed, 0")
 	assertContains(t, ir, "br i1")    // conditional branch
 	assertContains(t, ir, "br label") // unconditional branches to merge
-	// PASS/FAIL prefix globals
-	assertContains(t, ir, `@.str.pass_prefix = constant [5 x i8] c"PASS "`)
-	assertContains(t, ir, `@.str.fail_prefix = constant [5 x i8] c"FAIL "`)
-	// Prefix write: 5 bytes for "PASS " or "FAIL "
+	// PASS/FAIL prefix globals (now include opening paren)
+	assertContains(t, ir, `@.str.pass_prefix = constant [6 x i8] c"PASS ("`)
+	assertContains(t, ir, `@.str.fail_prefix = constant [6 x i8] c"FAIL ("`)
+	// Prefix write: 6 bytes for "PASS (" or "FAIL ("
 	assertContains(t, ir, "call i64 @pal_write(i32 1,")
-	assertContains(t, ir, "i64 5)")
+	assertContains(t, ir, "i64 6)")
 	// Gets name length via strlen and writes name
 	assertContains(t, ir, "call i64 @strlen(i8* %name)")
-	// Time formatting: "\t(" prefix, "s)\n" suffix
-	assertContains(t, ir, `@.str.time_prefix = constant [2 x i8] c"\09("`)
-	assertContains(t, ir, `@.str.time_suffix = constant [3 x i8] c"s)\0A"`)
+	// Time formatting: "s) " suffix, "\n" newline
+	assertContains(t, ir, `@.str.time_suffix = constant [3 x i8] c"s) "`)
+	assertContains(t, ir, `@.str.newline = constant [1 x i8] c"\0A"`)
 }
 
 func TestTestSummaryBody(t *testing.T) {

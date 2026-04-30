@@ -376,8 +376,9 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string, timeout time.D
 	elapsed := time.Since(start)
 
 	if ctx.Err() == context.DeadlineExceeded {
-		fmt.Printf("FAIL %s (timeout after %s)\n", name, timeout)
+		fmt.Printf("FAIL (timeout) %s\n", name)
 		fmt.Printf("0 passed, 1 failed\n")
+		fmt.Printf("\nFAILED:\n  %s\n", name)
 		os.Exit(1)
 	}
 
@@ -386,16 +387,17 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string, timeout time.D
 	expected := strings.TrimRight(info.ExpectOutput, "\n")
 
 	if actual == expected {
-		fmt.Printf("PASS %s\t(%.3fs)\n", name, elapsed.Seconds())
+		fmt.Printf("PASS (%.3fs) %s\n", elapsed.Seconds(), name)
 		fmt.Printf("1 passed, 0 failed (%.3fs)\n", elapsed.Seconds())
 	} else {
-		fmt.Printf("FAIL %s\t(%.3fs)\n", name, elapsed.Seconds())
+		fmt.Printf("FAIL (%.3fs) %s\n", elapsed.Seconds(), name)
 		fmt.Printf("  expected: %s\n", firstLines(expected, 3))
 		fmt.Printf("  actual:   %s\n", firstLines(actual, 3))
 		if err != nil {
 			fmt.Printf("  exit:     %v\n", err)
 		}
 		fmt.Printf("0 passed, 1 failed (%.3fs)\n", elapsed.Seconds())
+		fmt.Printf("\nFAILED:\n  %s\n", name)
 		os.Exit(1)
 	}
 }
@@ -427,11 +429,13 @@ func runTestDir(dir string, recursive bool, timeout time.Duration) {
 	}
 
 	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed`)
+	failLineRe := regexp.MustCompile(`^FAIL \(\d+\.\d+s\) (.+)$`)
 
 	totalPassed := 0
 	totalFailed := 0
 	totalFiles := 0
 	failedFiles := 0
+	var failures []string
 
 	for _, f := range files {
 		// Run "promise test <file>" as subprocess with timeout
@@ -460,6 +464,7 @@ func runTestDir(dir string, recursive bool, timeout time.Duration) {
 			fmt.Printf("TIMEOUT: exceeded %s timeout\n", timeout)
 			failedFiles++
 			totalFailed++
+			failures = append(failures, relPath+" (timeout)")
 			continue
 		}
 
@@ -477,6 +482,18 @@ func runTestDir(dir string, recursive bool, timeout time.Duration) {
 			} else {
 				// Count entire file as one failure
 				totalFailed++
+			}
+
+			// Extract individual FAIL lines from output
+			foundFailLines := false
+			for _, line := range strings.Split(outStr, "\n") {
+				if m := failLineRe.FindStringSubmatch(line); m != nil {
+					failures = append(failures, relPath+": "+m[1])
+					foundFailLines = true
+				}
+			}
+			if !foundFailLines {
+				failures = append(failures, relPath+" (compilation error)")
 			}
 			continue
 		}
@@ -504,6 +521,15 @@ func runTestDir(dir string, recursive bool, timeout time.Duration) {
 	// Print grand summary
 	totalElapsed := time.Since(totalStart)
 	fmt.Printf("%d passed, %d failed (%d files, %.3fs)\n", totalPassed, totalFailed, totalFiles, totalElapsed.Seconds())
+
+	// Print failure list if any
+	if len(failures) > 0 {
+		fmt.Printf("\nFAILED:\n")
+		for _, f := range failures {
+			fmt.Printf("  %s\n", f)
+		}
+	}
+
 	if totalFailed > 0 || failedFiles > 0 {
 		os.Exit(1)
 	}

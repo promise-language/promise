@@ -575,26 +575,22 @@ func (c *Compiler) defineTestTrampoline() *ir.Func {
 
 // defineTestPrintResultBody adds a function body to promise_test_print_result.
 // Params: (i8* %name, i32 %failed, i64 %elapsed_ns)
-// Writes "PASS <name> (X.XXXs)\n" or "FAIL <name> (X.XXXs)\n" to stdout.
+// Writes "PASS (X.XXXs) <name>\n" or "FAIL (X.XXXs) <name>\n" to stdout.
 func (c *Compiler) defineTestPrintResultBody(fn *ir.Func) {
 	// Global constants for prefix/suffix strings
-	passData := constant.NewCharArrayFromString("PASS ")
+	passData := constant.NewCharArrayFromString("PASS (")
 	passGlobal := c.module.NewGlobalDef(".str.pass_prefix", passData)
 	passGlobal.Immutable = true
 
-	failData := constant.NewCharArrayFromString("FAIL ")
+	failData := constant.NewCharArrayFromString("FAIL (")
 	failGlobal := c.module.NewGlobalDef(".str.fail_prefix", failData)
 	failGlobal.Immutable = true
-
-	timePrefixData := constant.NewCharArrayFromString("\t(")
-	timePrefixGlobal := c.module.NewGlobalDef(".str.time_prefix", timePrefixData)
-	timePrefixGlobal.Immutable = true
 
 	dotData := constant.NewCharArrayFromString(".")
 	dotGlobal := c.module.NewGlobalDef(".str.dot", dotData)
 	dotGlobal.Immutable = true
 
-	timeSuffixData := constant.NewCharArrayFromString("s)\n")
+	timeSuffixData := constant.NewCharArrayFromString("s) ")
 	timeSuffixGlobal := c.module.NewGlobalDef(".str.time_suffix", timeSuffixData)
 	timeSuffixGlobal.Immutable = true
 
@@ -612,26 +608,17 @@ func (c *Compiler) defineTestPrintResultBody(fn *ir.Func) {
 	isFailed := entry.NewICmp(enum.IPredNE, failed, constant.NewInt(irtypes.I32, 0))
 	entry.NewCondBr(isFailed, thenBlock, elseBlock)
 
-	// "FAIL " branch
+	// "FAIL (" branch
 	failPtr := thenBlock.NewGetElementPtr(failGlobal.ContentType, failGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	thenBlock.NewCall(c.palWrite, stdout, failPtr, constant.NewInt(irtypes.I64, 5))
+	thenBlock.NewCall(c.palWrite, stdout, failPtr, constant.NewInt(irtypes.I64, 6))
 	thenBlock.NewBr(mergeBlock)
 
-	// "PASS " branch
+	// "PASS (" branch
 	passPtr := elseBlock.NewGetElementPtr(passGlobal.ContentType, passGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	elseBlock.NewCall(c.palWrite, stdout, passPtr, constant.NewInt(irtypes.I64, 5))
+	elseBlock.NewCall(c.palWrite, stdout, passPtr, constant.NewInt(irtypes.I64, 6))
 	elseBlock.NewBr(mergeBlock)
-
-	// Write name
-	nameLen := mergeBlock.NewCall(c.funcs["strlen"], name)
-	mergeBlock.NewCall(c.palWrite, stdout, name, nameLen)
-
-	// Write " ("
-	tpPtr := mergeBlock.NewGetElementPtr(timePrefixGlobal.ContentType, timePrefixGlobal,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	mergeBlock.NewCall(c.palWrite, stdout, tpPtr, constant.NewInt(irtypes.I64, 2))
 
 	// Compute seconds and fractional milliseconds from elapsed_ns
 	// elapsed_ms = elapsed_ns / 1_000_000
@@ -663,10 +650,19 @@ func (c *Compiler) defineTestPrintResultBody(fn *ir.Func) {
 	mergeBlock.NewCall(c.palWrite, stdout, fracDataPtrOffset, fracDataLenMinus1)
 	mergeBlock.NewCall(c.palFree, fracStr)
 
-	// Write "s)\n"
+	// Write "s) "
 	tsPtr := mergeBlock.NewGetElementPtr(timeSuffixGlobal.ContentType, timeSuffixGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	mergeBlock.NewCall(c.palWrite, stdout, tsPtr, constant.NewInt(irtypes.I64, 3))
+
+	// Write name
+	nameLen := mergeBlock.NewCall(c.funcs["strlen"], name)
+	mergeBlock.NewCall(c.palWrite, stdout, name, nameLen)
+
+	// Write "\n"
+	nlPtr := mergeBlock.NewGetElementPtr(c.newlineGlobal.ContentType, c.newlineGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	mergeBlock.NewCall(c.palWrite, stdout, nlPtr, constant.NewInt(irtypes.I64, 1))
 
 	mergeBlock.NewRet(nil)
 }

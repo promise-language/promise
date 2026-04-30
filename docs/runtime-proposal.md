@@ -59,10 +59,15 @@ After completing Phases 1-3, the C runtime is reduced to a single function:
 | **5d** | Cooperative scheduler for WASM (Asyncify or stack-switching) | Planned |
 | **6** | IO reactor: kqueue + epoll + IOCP | Planned |
 | **6b** | JS event loop integration for WASM IO | Planned |
-| **7** | Replace clang with `llc` + `lld`, enable cross-compilation | Planned |
+| **7a** | WASM: `llc` + `wasm-ld` (no CRT) | Planned |
+| **7b** | Linux: `llc` + `ld.lld` + bundled musl CRT (static binaries) | Planned |
+| **7c** | macOS: `llc` + system `ld` (SDK sysroot) | Planned |
+| **7d** | Windows: `llc` + `lld-link` (MSVC paths) | Planned |
+| **7e** | `--target` flag + cross-compilation | Planned |
+| **7f** | Bundle `llc` + `lld` + musl CRT into release tarball | Planned |
 | **8** | Rewrite scheduler in Promise | Planned |
 
-Phases 1-5c are done. Phase 3 introduced the platform split (PAL). Phase 5a added 1:1 threading (each `go` spawns an OS thread). Phase 5b added typed channels (`channel[T]` with buffered/unbuffered send/receive/for-in and `go { }` block variable capture). Phase 5c replaced 1:1 threading with an M:N scheduler using LLVM coroutine intrinsics — goroutines are cheap coroutine handles multiplexed on OS threads via per-CPU processors and work stealing. Phases 5d-6 add WASM scheduling and IO. Phases 7-8 are polish.
+Phases 1-5c are done. Phase 3 introduced the platform split (PAL). Phase 5a added 1:1 threading (each `go` spawns an OS thread). Phase 5b added typed channels (`channel[T]` with buffered/unbuffered send/receive/for-in and `go { }` block variable capture). Phase 5c replaced 1:1 threading with an M:N scheduler using LLVM coroutine intrinsics — goroutines are cheap coroutine handles multiplexed on OS threads via per-CPU processors and work stealing. Phases 5d-6 add WASM scheduling and IO. Phase 7 (a-e) replaces clang with `llc` + `lld` per-platform and adds cross-compilation. Phase 8 is polish.
 
 ---
 
@@ -544,21 +549,298 @@ Everything built on top of Layers 0-3: map (already done), iterators, streams, c
 
 ---
 
-## Toolchain: Removing Clang
+## Phase 7 — Replace Clang with `llc` + `lld` (Planned)
 
-| Target | Current | Without Clang |
+### Why
+
+Clang is currently used as a convenience driver — it compiles LLVM IR, runs optimization passes, and links in one command. But it pulls in a full C compiler toolchain that Promise doesn't need, can't cross-compile without a cross-toolchain, and hides platform linking details that become problems when targeting multiple platforms from one host.
+
+`llc` (LLVM static compiler) and `lld` (LLVM linker) are standalone tools that handle exactly what Promise needs: IR-to-object codegen and linking. Both support all targets in a single binary, enabling cross-compilation without additional toolchains.
+
+### Current Pipeline
+
+```
+promise.ll → clang -O1 -target {triple} → binary
+```
+
+`clang` internally does: parse IR → run optimization/coroutine passes → codegen to machine code → invoke system linker with CRT objects and system libraries. The `-O1` flag is critical — it triggers LLVM's CoroSplit and CoroElide passes required by the M:N scheduler's coroutine-based goroutines.
+
+**Current code** (`cmd/promise/main.go`):
+- `compileAndLink()` — writes `.ll` to temp file, calls `clang -O1 -target {triple} input.ll -o output` (+ `-lpthread` on Linux)
+- `findClang()` — searches `PROMISE_CLANG` env, Homebrew LLVM paths, then system PATH
+- `checkClangVersion()` — requires LLVM 15+ (coroutine intrinsic compatibility)
+
+### New Pipeline
+
+```
+promise.ll → opt -O1 → optimized.ll → llc -filetype=obj → promise.o → lld → binary
+```
+
+Three steps:
+1. **`opt -O1`** — run optimization passes including CoroSplit/CoroElide (coroutine lowering)
+2. **`llc -filetype=obj -mtriple={triple}`** — compile optimized IR to platform object file
+3. **`lld` (variant)** — link object file with platform CRT objects and system libraries
+
+The `opt` step is needed because `llc` alone doesn't run the full optimization pipeline — specifically the coroutine passes that `-O1` triggers in clang. Alternative: `llc -O1` may include sufficient passes (needs verification per LLVM version).
+
+### Per-Platform Linker Commands
+
+| Target | Current (clang) | New (llc + lld) |
 |--------|---------|---------------|
-| macOS | clang (Xcode) | `llc` + `ld64.lld` (or Xcode's ld) |
-| Linux | clang | `llc` + `ld.lld` |
-| Windows | clang (MSVC/MinGW) | `llc` + `lld-link` |
-| WASM | clang --target=wasm32 | `llc` + `wasm-ld` |
+| macOS | `clang -O1 -target {triple} in.ll -o out` | `llc` + `ld64.lld` (or Xcode's `ld`) |
+| Linux | `clang -O1 -target {triple} in.ll -o out -lpthread` | `llc` + `ld.lld` |
+| Windows | `clang -O1 -target {triple} in.ll -o out` | `llc` + `lld-link` |
+| WASM | `clang -O1 --target=wasm32 in.ll -o out` | `llc` + `wasm-ld` |
 
-`lld` (LLVM's linker) supports all four output formats: Mach-O, ELF, PE/COFF, and WASM.
+`lld` supports all four output formats (Mach-O, ELF, PE/COFF, WASM) via different driver modes.
 
-**Path**:
-1. Ship `llc` + `lld` alongside the `promise` binary (or statically link via LLVM C API)
-2. Compiler emits `.ll` text → `llc` produces `.o` → `lld` links to final binary
-3. Cross-compilation becomes trivial: `promise build --target wasm32 app.pr`
+**WASM** (simplest — no CRT):
+```bash
+llc -O1 -mtriple=wasm32-unknown-wasi -filetype=obj promise.ll -o promise.o
+wasm-ld promise.o -o output.wasm --no-entry --export-all
+```
+
+**Linux** (ELF — bundled musl CRT, fully static):
+```bash
+llc -O1 -mtriple=x86_64-unknown-linux-musl -filetype=obj promise.ll -o promise.o
+ld.lld \
+  {promise_lib}/crt/x86_64-linux-musl/crt1.o \
+  {promise_lib}/crt/x86_64-linux-musl/crti.o \
+  promise.o \
+  {promise_lib}/crt/x86_64-linux-musl/crtn.o \
+  {promise_lib}/crt/x86_64-linux-musl/libc.a \
+  -static \
+  -o output
+```
+
+CRT objects (`crt1.o`, `crti.o`, `crtn.o`) are the C runtime startup files — they set up `_start`, call `main()`, and handle process init/fini. Promise bundles musl libc's CRT objects rather than depending on the host's glibc. This produces fully static binaries that run on any Linux kernel ≥2.6 regardless of distro. No `-lpthread` needed — musl includes pthreads in `libc.a`. See the Distribution section for details on musl.
+
+**macOS** (Mach-O — needs SDK sysroot):
+```bash
+llc -O1 -mtriple=arm64-apple-macosx14.0.0 -filetype=obj promise.ll -o promise.o
+ld64.lld promise.o -o output \
+  -lSystem \
+  -syslibroot $(xcrun --show-sdk-path) \
+  -arch arm64 \
+  -platform_version macos 14.0.0 14.0.0
+```
+
+macOS requires the SDK sysroot for `-lSystem` resolution. `xcrun --show-sdk-path` returns it (e.g., `/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk`). The existing `HostTargetTriple()` already calls `sw_vers` for version detection — similar pattern.
+
+Alternative: use Xcode's system `ld` instead of `ld64.lld` — avoids Mach-O compatibility edge cases. Command: `ld -o output promise.o -lSystem -syslibroot $(xcrun --show-sdk-path) -arch arm64`.
+
+**Windows** (PE/COFF — MSVC CRT):
+```bash
+llc -O1 -mtriple=x86_64-pc-windows-msvc -filetype=obj promise.ll -o promise.obj
+lld-link promise.obj /out:output.exe \
+  /defaultlib:libcmt \
+  /defaultlib:oldnames \
+  kernel32.lib \
+  /libpath:"C:\Program Files\...\MSVC\lib\x64" \
+  /libpath:"C:\Program Files\...\Windows Kits\10\Lib\...\ucrt\x64" \
+  /libpath:"C:\Program Files\...\Windows Kits\10\Lib\...\um\x64"
+```
+
+Windows is the most complex — MSVC library paths are deeply nested and version-dependent. Discovery: parse `vswhere` output or read `VS*COMNTOOLS` environment variables. Consider keeping clang as fallback on Windows.
+
+### Cross-Compilation
+
+With `llc` + `lld`, cross-compilation requires no cross-toolchain:
+
+```bash
+# Build on macOS, target Linux x86_64
+promise build --target x86_64-unknown-linux-gnu app.pr
+
+# Build on Linux, target WASM
+promise build --target wasm32 app.pr
+```
+
+The PAL (Phase 3) already emits platform-specific IR based on the target triple. The codegen selects the right PAL backend via `pal.ForTarget(triple)`. Cross-compilation just means:
+1. PAL emits IR for the target (already works)
+2. `llc` compiles to target object format (multi-target by design)
+3. `lld` links for target (multi-format by design)
+
+**Cross-target difficulty**:
+- **WASM**: easiest — no CRT, no system libs. Works from any host.
+- **Linux**: easy — bundled musl CRT means no host Linux toolchain needed. `promise build --target x86_64-linux-musl app.pr` works from macOS.
+- **macOS**: requires macOS SDK (`-lSystem`). Cross-compiling *to* macOS from Linux/Windows needs the SDK files (legally gray area).
+- **Windows**: requires MSVC CRT libs. Cross-compiling *to* Windows needs the Windows SDK.
+
+### Implementation Plan
+
+**`cmd/promise/main.go` changes**:
+
+| Current | New |
+|---------|-----|
+| `compileAndLink()` calls `clang` | Split into `compileToObject()` (calls `opt` + `llc`) and `linkBinary()` (calls `lld` variant) |
+| `findClang()` | `findLLVMTool(name)` — generic finder for `opt`, `llc`, `lld` with env overrides (`PROMISE_OPT`, `PROMISE_LLC`, `PROMISE_LLD`) |
+| `checkClangVersion()` | `checkLLVMVersion(tool)` — parse `llc --version` for LLVM 15+ |
+| `HostTargetTriple()` | Unchanged — already returns correct triples |
+
+New functions:
+- `findCRTObjects(triple)` — resolve path to bundled musl CRT (`{promise_dir}/../lib/promise/crt/{arch}-linux-musl/`), or SDK path on macOS via `xcrun`
+- `linkerArgsForTarget(triple, objFile, output)` — build platform-specific lld argument list (musl static link on Linux, `-lSystem` on macOS, etc.)
+- `--target` flag on `promise build` — override `HostTargetTriple()` for cross-compilation
+
+**Phased rollout**:
+
+| Step | Work | Complexity |
+|------|------|------------|
+| 7a | WASM target via `llc` + `wasm-ld` | Low — no CRT, no system libs |
+| 7b | Linux target via `llc` + `ld.lld` + bundled musl CRT | Medium — musl build, static linking |
+| 7c | macOS target via `llc` + system `ld` (or `ld64.lld`) | Medium — SDK sysroot resolution |
+| 7d | Windows target via `llc` + `lld-link` | High — MSVC path discovery |
+| 7e | `--target` flag + cross-compilation | Low — plumbing, PAL already handles it |
+| 7f | Bundle `llc` + `lld` + musl CRT into release tarball | Medium — CI build pipeline, musl cross-compile |
+| 7g | Remove clang fallback (optional) | Low — cleanup |
+
+**Fallback strategy**: Keep `clang` as a fallback backend selectable via `PROMISE_USE_CLANG=1` or `--backend=clang`. This lets users on platforms with complex CRT resolution (Windows) continue working while native lld support is developed.
+
+### Coroutine Pass Verification
+
+The M:N scheduler depends on LLVM coroutine passes. Verification needed:
+
+1. Does `llc -O1` run CoroSplit? (It should — CoroSplit is a module pass in the standard O1 pipeline)
+2. Does `opt -O1 | llc -O0` work? (Separate optimization from codegen)
+3. Are there LLVM version differences in which passes `-O1` includes?
+
+Test: compile a goroutine-heavy program with the new pipeline, run `promise test -stress 100 tests/concurrency/...`, compare results to clang pipeline.
+
+### Distribution
+
+**Goal**: once `promise` is installed, it has zero external dependencies. No system LLVM, no Homebrew, no Xcode CLT (except macOS `-lSystem`). A fresh machine with the Promise tarball can compile and link.
+
+**Phase 7 distribution**: Bundle `llc` + `lld` + musl CRT as prebuilt binaries.
+
+```
+promise-v0.1.0-darwin-arm64.tar.gz
+├── bin/
+│   ├── promise              # ~15MB  — Go compiler binary
+│   ├── llc                  # ~40MB  — LLVM static compiler (multi-target)
+│   ├── lld                  # ~30MB  — LLVM linker (all modes in one binary)
+│   ├── ld.lld -> lld        # symlink — ELF linker mode (Linux)
+│   ├── ld64.lld -> lld      # symlink — Mach-O linker mode (macOS)
+│   ├── lld-link -> lld      # symlink — PE/COFF linker mode (Windows)
+│   └── wasm-ld -> lld       # symlink — WASM linker mode
+└── lib/
+    └── promise/
+        ├── std/             # .pr standard library (also go:embed'd in binary)
+        └── crt/             # bundled CRT objects for self-contained linking
+            ├── x86_64-linux-musl/
+            │   ├── crt1.o
+            │   ├── crti.o
+            │   ├── crtn.o
+            │   └── libc.a   # musl static libc (~600KB)
+            ├── aarch64-linux-musl/
+            │   ├── crt1.o
+            │   ├── crti.o
+            │   ├── crtn.o
+            │   └── libc.a
+            └── wasm32-wasi/
+                └── libc.a   # wasi-libc (optional, for WASI targets)
+```
+
+`lld` is a single binary that acts as all four linker variants — the symlinks select the mode. Total bundle size: ~90MB compressed.
+
+**Tool discovery order** (in `findLLVMTool()`):
+1. **Sibling directory**: look next to the `promise` binary — `{promise_dir}/llc`, `{promise_dir}/lld`
+2. **Env override**: `PROMISE_LLC`, `PROMISE_LLD` (for development/testing)
+3. **System PATH**: fallback to `llc`/`lld` on PATH (dev machines with LLVM installed)
+
+Looking next to the binary first means an installed Promise always finds its own tools, regardless of system PATH changes or Homebrew upgrades.
+
+### Bundled musl libc
+
+Linux linking requires CRT startup objects (`crt1.o`, `crti.o`, `crtn.o`) and libc. Rather than depending on the host's glibc (version-specific, path varies by distro), Promise bundles [musl libc](https://musl.libc.org/) — a lightweight, static-linkable, MIT-licensed libc.
+
+**Why musl**:
+- **Static linking** — produces fully static binaries with no `.so` dependencies. A Promise binary runs on any Linux kernel ≥2.6, regardless of distro or installed glibc version.
+- **Small** — musl's `libc.a` is ~600KB per architecture. CRT objects are ~2KB each.
+- **MIT license** — no copyleft concerns (glibc is LGPL, which complicates static linking).
+- **Cross-compilation friendly** — bundling musl CRT for x86_64 + aarch64 means Promise can cross-compile to Linux from macOS or Windows without any Linux toolchain installed.
+- **Reproducible** — same musl version always produces the same binary. No variance from host libc version.
+
+**Trade-off**: musl has minor behavioral differences from glibc (locale handling, DNS resolution, `dlopen` limitations). These don't affect Promise — the language doesn't expose locale, DNS, or dynamic loading. The PAL's libc surface (`malloc`, `free`, `realloc`, `memcmp`, `snprintf`, `strlen`, `write`, `exit`, `pthread_*`) is fully supported by musl.
+
+**Linux linker command with bundled musl**:
+```bash
+llc -O1 -mtriple=x86_64-unknown-linux-musl -filetype=obj promise.ll -o promise.o
+ld.lld \
+  {promise_lib}/crt/x86_64-linux-musl/crt1.o \
+  {promise_lib}/crt/x86_64-linux-musl/crti.o \
+  promise.o \
+  {promise_lib}/crt/x86_64-linux-musl/crtn.o \
+  {promise_lib}/crt/x86_64-linux-musl/libc.a \
+  -static \
+  -o output
+```
+
+Note the target triple changes to `x86_64-unknown-linux-musl` (not `linux-gnu`). The `-static` flag produces a fully static ELF binary. No `-lpthread` needed — musl includes pthreads in `libc.a`.
+
+**Building the musl CRT objects** (release engineering):
+```bash
+# Cross-compile musl for each target architecture
+curl -O https://musl.libc.org/releases/musl-1.2.5.tar.gz
+tar xf musl-1.2.5.tar.gz && cd musl-1.2.5
+
+# x86_64
+CROSS_COMPILE=x86_64-linux-musl- ./configure --prefix=/out/x86_64 --target=x86_64
+make install  # produces crt1.o, crti.o, crtn.o, libc.a
+
+# aarch64
+CROSS_COMPILE=aarch64-linux-musl- ./configure --prefix=/out/aarch64 --target=aarch64
+make install
+```
+
+These objects are built once per musl release and checked into the Promise release artifacts (not the source repo — too large). A CI job rebuilds them when the musl version is bumped.
+
+### macOS — SDK sysroot requirement
+
+macOS is the one platform where a full zero-dependency bundle isn't possible. Apple requires linking against `-lSystem` from the macOS SDK, which is part of Xcode or CommandLineTools. This is unavoidable — even Zig and Go require it on macOS.
+
+Mitigation: the Promise installer can check for CommandLineTools and prompt `xcode-select --install` if missing. This is a one-time setup that most Mac developer machines already have.
+
+**macOS linker command**:
+```bash
+llc -O1 -mtriple=arm64-apple-macosx14.0.0 -filetype=obj promise.ll -o promise.o
+ld64.lld promise.o -o output \
+  -lSystem \
+  -syslibroot $(xcrun --show-sdk-path) \
+  -arch arm64 \
+  -platform_version macos 14.0.0 14.0.0
+```
+
+### Windows — MSVC dependency
+
+Windows requires MSVC CRT libraries (`libcmt.lib`, `kernel32.lib`) from the Visual Studio Build Tools or Windows SDK. Path discovery is complex (`vswhere`, registry, env vars).
+
+Options:
+- **Require VS Build Tools** — same as Zig/Rust on Windows. Most Windows dev machines have it.
+- **Bundle MinGW CRT** — alternative to MSVC, but adds compatibility concerns.
+- **Keep clang fallback** — `PROMISE_USE_CLANG=1` for Windows until native lld support is solid.
+
+Initial plan: require VS Build Tools, with clang fallback. Revisit if bundling a Windows CRT becomes feasible.
+
+### Future — static LLVM (single binary)
+
+The bundled-binaries approach (Phase 7) is the pragmatic first step. The long-term ideal is statically linking LLVM into the `promise` binary via the LLVM C API + CGo:
+
+- **Single binary** (~200MB) — no `llc`/`lld` to ship separately
+- **Faster** — no text IR serialization, no temp files, no process spawning. Build IR in memory → run passes → emit object → link, all in-process.
+- **Simpler distribution** — one file to download, one file to run
+
+**Why not now**: CGo complicates Go cross-compilation of the Promise compiler itself. Building LLVM static libraries for every host platform requires significant CI infrastructure. The bundled-binaries approach gives the same user experience (zero deps after install) without this build complexity.
+
+**Migration path**: the internal interface (`compileToObject` / `linkBinary`) is the same whether calling `llc`/`lld` as subprocesses or calling LLVM C API functions. The swap is internal — no user-facing changes.
+
+### Dependency summary by platform
+
+| Platform | After Phase 7 install | External deps |
+|----------|----------------------|---------------|
+| **Linux** | `promise` + `llc` + `lld` + musl CRT | **None** — fully static binaries |
+| **macOS** | `promise` + `llc` + `lld` | Xcode CommandLineTools (for `-lSystem`) |
+| **Windows** | `promise` + `llc` + `lld` | VS Build Tools (for CRT libs) |
+| **WASM** | `promise` + `llc` + `wasm-ld` | **None** — no CRT needed |
 
 ---
 

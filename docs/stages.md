@@ -531,14 +531,32 @@ Command-line interface. Core commands implemented; formatter planned.
 - `promise test <file.pr>` — discover and run `test` meta-annotated functions
 - `promise test <dir>` — scan directory for `.pr` files and run tests from each
 - `promise test <dir>/...` — recursive directory scan (Go-style `...` wildcard)
+- `promise test -timeout <duration>` — per-test timeout (default: 60s, accepts Go durations or plain seconds)
 - `promise ast <file.pr>` — print the AST
 - `promise exec <code>` — execute inline code (auto-wraps in `main()` if needed)
 - `promise install` — install compiler + std + runtime to `~/.promise/`
 - Bare pipe detection: `echo '<code>' | promise` auto-enters exec mode
 - Inline error formatting: source line + `^` caret marker, no temp filenames
 - Embedded `std/` and `runtime/` in the binary via `go:embed` for self-contained install
-- **Test suite**: 568 tests across 117 files — `tests/e2e/` (language features), `tests/std/` (standard library), `tests/concurrency/` (scheduler, channels, select, panic recovery, stress tests)
+- **Test suite**: 613 tests across 118 files — `tests/e2e/` (language features), `tests/std/` (standard library), `tests/concurrency/` (scheduler, channels, select, panic recovery, stress tests)
 - `promise fmt` — code formatter (planned)
+
+### Stress test mode (`-stress`)
+
+Flaky test detection via repeated execution with adaptive scheduling.
+
+**Files:** `cmd/promise/stress.go` (~560 LOC), `cmd/promise/main.go` (flag parsing)
+
+- `promise test -stress <target>` — run until Ctrl+C
+- `promise test -stress N <target>` — run N iterations
+- `promise test -stress <duration> <target>` — run for a time limit (e.g. `30s`, `2m`)
+- **Compile-once, run-many**: all `.pr` files are compiled to temp binaries once, then re-executed repeatedly. Compilation errors are deterministic and exit immediately.
+- **Per-test stats**: pass/fail count, timing mean/stddev/CoV (coefficient of variation), min/max. Timing parsed from test binary output (`PASS (0.003s) test_name`) for unit tests, wall-clock for e2e tests.
+- **Flaky detection**: tests with any failure flagged as flaky. Tests with CoV > 0.5 and mean > 1ms flagged as high-variance (timing instability often precedes flakiness).
+- **Adaptive file-level scheduling**: stable files gradually suppressed — run every 2nd iteration after 20 runs, every 4th after 50, every 8th after 100. Files with failures or high variance always run every iteration.
+- **Live TTY display**: clears and redraws summary each iteration showing flaky/high-variance/stable counts. Non-TTY (piped) mode prints progress every 2 seconds.
+- **SIGINT handling**: Ctrl+C stops the loop and prints the final report.
+- **Exit code**: 0 if all tests 100% pass rate, 1 if any flaky tests found.
 
 ## Stage 11 — Package Manager (Planned)
 
@@ -553,7 +571,7 @@ Dependency fetching and resolution.
 
 ## What's Next
 
-The compiler pipeline (Stages 1-8o) is complete for the current feature set. The runtime is fully codegen-emitted LLVM IR — no C files remain. Phase 5a added 1:1 threading (`go`/`<-` with OS threads). Phase 5b added typed channels (`channel[T]`). Phase 5c replaced 1:1 threading with an M:N scheduler using LLVM coroutine intrinsics — goroutines are cheap coroutine handles multiplexed on OS threads via per-CPU processors and work stealing. Scheduler enhancements completed: P-local run queues with work stealing, cooperative preemption (yield checks at function entry and loop back-edges), `select` statement (multi-channel blocking with default), goroutine-scoped panic recovery (setjmp/longjmp per-G, panics don't kill the process), `set_max_procs`/`get_max_procs` runtime API, and scheduler profiling counters (gs_created, gs_completed, context_switches, steals). IO reactor and WASM scheduling remain (Phases 5d-6). The next work falls into three areas:
+The compiler pipeline (Stages 1-8o) is complete for the current feature set. The runtime is fully codegen-emitted LLVM IR — no C files remain. Phase 5a added 1:1 threading (`go`/`<-` with OS threads). Phase 5b added typed channels (`channel[T]`). Phase 5c replaced 1:1 threading with an M:N scheduler using LLVM coroutine intrinsics — goroutines are cheap coroutine handles multiplexed on OS threads via per-CPU processors and work stealing. Scheduler enhancements completed: P-local run queues with work stealing, cooperative preemption (yield checks at function entry and loop back-edges), `select` statement (multi-channel blocking with default), goroutine-scoped panic recovery (setjmp/longjmp per-G, panics don't kill the process), `set_max_procs`/`get_max_procs` runtime API, and scheduler profiling counters (gs_created, gs_completed, context_switches, steals). CLI stress testing (`promise test -stress`) detects flaky tests via repeated execution with adaptive scheduling, timing variance analysis, and live reporting. IO reactor and WASM scheduling remain (Phases 5d-6). The next work falls into three areas:
 
 ### Near-term: Language Features
 

@@ -47,20 +47,25 @@ Source (.pr)
 The `promise` binary serves as both compiler and package manager:
 
 ```
-promise build file.pr        # Compile to executable
-promise run file.pr          # Build and run
-promise test file.pr         # Run @test functions
-promise check file.pr        # Type-check only
-promise ast file.pr          # Print the AST
-promise exec '<code>'        # Execute inline code
-echo '<code>' | promise      # Execute from stdin
-promise install              # Install to ~/.promise/
-promise init                 # Create new promise.mod (planned)
-promise add <url>            # Add dependency (planned)
-promise remove <url>         # Remove dependency (planned)
-promise update               # Update dependencies (planned)
-promise fmt                  # Format source code (planned)
-promise lock                 # Regenerate lockfile (planned)
+promise build file.pr             # Compile to executable
+promise run file.pr               # Build and run
+promise test file.pr              # Run @test functions
+promise test dir/...              # Recursive directory scan
+promise test -timeout 30s ...     # Per-test timeout (default: 60s)
+promise test -stress ...          # Stress test until Ctrl+C
+promise test -stress 100 ...      # Stress test for 100 iterations
+promise test -stress 30s ...      # Stress test for 30 seconds
+promise check file.pr             # Type-check only
+promise ast file.pr               # Print the AST
+promise exec '<code>'             # Execute inline code
+echo '<code>' | promise           # Execute from stdin
+promise install                   # Install to ~/.promise/
+promise init                      # Create new promise.mod (planned)
+promise add <url>                 # Add dependency (planned)
+promise remove <url>              # Remove dependency (planned)
+promise update                    # Update dependencies (planned)
+promise fmt                       # Format source code (planned)
+promise lock                      # Regenerate lockfile (planned)
 ```
 
 ---
@@ -120,6 +125,32 @@ testUserCreation() `test {
 2. **Separate test files** — create a `<name>_test.pr` file next to the source file (e.g., `user_test.pr` alongside `user.pr`). Test files follow the same convention — all `` `test ``-annotated functions are collected by `promise test`.
 
 The `promise test` command discovers and runs all `` `test ``-annotated functions across the project. Any declaration annotated with `` `test `` — functions, types, or anything else — is excluded from production builds. Entire `_test.pr` files are also excluded from production builds.
+
+**E2E tests** use the `` `test(expected: "output") `` annotation on `main()` to verify program output:
+
+```promise
+main() `test(expected: "42") {
+  print_int(42);
+}
+```
+
+**Directory scanning** runs all `.pr` files in a directory, with Go-style `...` for recursion:
+
+```sh
+promise test tests/               # non-recursive
+promise test tests/...            # recursive (all subdirectories)
+promise test -timeout 30s tests/  # custom per-test timeout
+```
+
+**Stress testing** detects flaky tests via repeated execution:
+
+```sh
+promise test -stress tests/concurrency/...       # run until Ctrl+C
+promise test -stress 100 tests/concurrency/...   # 100 iterations
+promise test -stress 30s tests/concurrency/...   # 30-second time limit
+```
+
+Stress mode compiles all target files once, then repeatedly runs the binaries. It tracks per-test pass rates and timing variance (coefficient of variation). Tests that always pass are gradually suppressed to focus on unreliable ones. The final report categorizes tests as flaky (any failures), high-variance (timing CoV > 0.5), or stable.
 
 ---
 

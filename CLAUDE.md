@@ -43,6 +43,12 @@ PROMISE_E2E_TIMEOUT=120 bin/e2e.sh  # custom timeout (default: 60s)
 promise test file.pr                       # default 60s timeout
 promise test -timeout 30s file.pr          # custom timeout (Go duration or seconds)
 promise exec -timeout 10s 'println("hi")'  # exec with timeout
+
+# Stress testing (flaky test detection)
+promise test -stress tests/...                       # run until Ctrl+C
+promise test -stress 100 tests/concurrency/...       # run 100 iterations
+promise test -stress 30s tests/concurrency/...       # run for 30 seconds
+promise test -timeout 10s -stress 50 tests/...       # per-run timeout + stress
 ```
 
 **Test output format** — designed for AI-agent tail-friendliness:
@@ -59,6 +65,23 @@ FAILED:
   e2e/basics.pr (timeout)
 ```
 An agent can read the last ~20 lines of output to identify all failures without re-running or grepping.
+
+**Stress test output** — reports flaky tests, timing variance, and adaptive scheduling:
+```
+=== Stress Test Report ===
+50 iterations over 45.2s
+
+FLAKY (2 tests):
+  concurrency/stress_unbuffered.pr
+    test_channel_send              47/50 (94.0%)  avg: 23.1ms  σ: 15.2ms  min: 2.1ms  max: 89.3ms
+
+HIGH VARIANCE (1 test):
+  concurrency/test_channel_basic.pr
+    test_buffered_recv             50/50 (100%)  avg: 5.2ms  σ: 8.4ms  CoV: 1.62
+
+STABLE: 45 tests across 12 files
+```
+Stress mode compiles once and re-runs binaries. Stable files are gradually suppressed (run every 2nd/4th/8th iteration). Exit code 1 if any test has failures.
 
 ## Compiler Pipeline
 

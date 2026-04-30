@@ -74,9 +74,24 @@ promise build file.pr           # compile to executable
 promise build -o out file.pr    # compile with custom output name
 promise run file.pr             # compile and run
 promise test file.pr            # discover and run @test functions
+promise test tests/...          # recursive directory scan
 promise check file.pr           # type-check only
 promise ast file.pr             # print the AST
 ```
+
+### Testing options
+
+```sh
+promise test -timeout 30s file.pr                    # per-test timeout (default: 60s)
+promise test -stress tests/...                       # stress test until Ctrl+C
+promise test -stress 100 tests/concurrency/...       # 100 iterations
+promise test -stress 30s tests/concurrency/...       # run for 30 seconds
+promise test -timeout 10s -stress 50 tests/...       # combine per-run timeout with stress
+```
+
+Stress mode compiles all files once, then repeatedly runs the test binaries. It tracks
+per-test pass rates and timing variance to detect flaky tests. Stable tests are gradually
+suppressed to focus resources on unreliable ones.
 
 ### Inline execution
 

@@ -45,6 +45,8 @@ Options (build):
 
 Options (test):
   -timeout <duration>   Per-test timeout (default: 60s)
+  -stress [N|duration]  Stress test mode: run repeatedly to find flaky tests
+                        N = iteration count, duration = time limit, bare = until Ctrl+C
 
 Options (exec):
   -timeout <duration>   Execution timeout (default: 60s)
@@ -235,6 +237,9 @@ func runRun(args []string) {
 // Accepts a single file, a directory (non-recursive), or dir/... (recursive).
 func runTest(args []string) {
 	timeout := 60 * time.Second
+	var stressMode bool
+	var stressCount int          // 0 = unlimited
+	var stressDuration time.Duration // 0 = unlimited
 	var remaining []string
 	for i := 0; i < len(args); i++ {
 		if args[i] == "-timeout" && i+1 < len(args) {
@@ -245,13 +250,27 @@ func runTest(args []string) {
 			}
 			timeout = d
 			i++
+		} else if args[i] == "-stress" {
+			stressMode = true
+			// Check if next arg is a count or duration (not a file/dir path)
+			if i+1 < len(args) {
+				next := args[i+1]
+				if d, err := time.ParseDuration(next); err == nil {
+					stressDuration = d
+					i++
+				} else if n, err := strconv.Atoi(next); err == nil && n > 0 {
+					stressCount = n
+					i++
+				}
+				// otherwise: bare -stress (unlimited), next arg is a target
+			}
 		} else {
 			remaining = append(remaining, args[i])
 		}
 	}
 
 	if len(remaining) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: promise test [-timeout duration] <file.pr | dir | dir/...>")
+		fmt.Fprintln(os.Stderr, "usage: promise test [-timeout duration] [-stress [N|duration]] <file.pr | dir | dir/...>")
 		os.Exit(1)
 	}
 
@@ -273,6 +292,19 @@ func runTest(args []string) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Discover files
+	var files []string
+	if info.IsDir() {
+		files = discoverTestFiles(target, recursive)
+	} else {
+		files = []string{target}
+	}
+
+	if stressMode {
+		runStress(files, stressCount, stressDuration, timeout)
+		return
 	}
 
 	if info.IsDir() {

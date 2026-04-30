@@ -1,0 +1,601 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"math"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"djabi.dev/go/promise_lang/internal/codegen"
+)
+
+// --- Stress test types ---
+
+type stressTarget struct {
+	relPath  string   // display path
+	binary   string   // compiled temp binary path
+	isE2E    bool     // true for `test(expected:...) on main
+	expected string   // expected output for e2e tests
+	tests    []string // test function names
+}
+
+type testStats struct {
+	name    string
+	file    string
+	passes  int
+	fails   int
+	timings []float64 // seconds per run (recorded for both pass and fail)
+}
+
+func (s *testStats) total() int { return s.passes + s.fails }
+
+func (s *testStats) passRate() float64 {
+	if s.total() == 0 {
+		return 1.0
+	}
+	return float64(s.passes) / float64(s.total())
+}
+
+func (s *testStats) mean() float64 {
+	if len(s.timings) == 0 {
+		return 0
+	}
+	sum := 0.0
+	for _, t := range s.timings {
+		sum += t
+	}
+	return sum / float64(len(s.timings))
+}
+
+func (s *testStats) stddev() float64 {
+	if len(s.timings) < 2 {
+		return 0
+	}
+	m := s.mean()
+	sumSq := 0.0
+	for _, t := range s.timings {
+		d := t - m
+		sumSq += d * d
+	}
+	return math.Sqrt(sumSq / float64(len(s.timings)))
+}
+
+func (s *testStats) cov() float64 {
+	m := s.mean()
+	if m == 0 {
+		return 0
+	}
+	return s.stddev() / m
+}
+
+func (s *testStats) minTime() float64 {
+	if len(s.timings) == 0 {
+		return 0
+	}
+	v := s.timings[0]
+	for _, t := range s.timings[1:] {
+		if t < v {
+			v = t
+		}
+	}
+	return v
+}
+
+func (s *testStats) maxTime() float64 {
+	if len(s.timings) == 0 {
+		return 0
+	}
+	v := s.timings[0]
+	for _, t := range s.timings[1:] {
+		if t > v {
+			v = t
+		}
+	}
+	return v
+}
+
+// isHighVariance returns true if timing variance is suspiciously high.
+// Ignores sub-millisecond tests where measurement noise dominates.
+func (s *testStats) isHighVariance() bool {
+	return s.total() >= 5 && s.mean() > 0.001 && s.cov() > 0.5
+}
+
+type fileStats struct {
+	path      string
+	stats     map[string]*testStats
+	testOrder []string // stable iteration order for stats map
+	interval  int      // run every N iterations
+	skipCount int      // counts down to 0
+	runs      int      // total runs
+}
+
+func (f *fileStats) hasFailures() bool {
+	for _, name := range f.testOrder {
+		if f.stats[name].fails > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fileStats) hasHighVariance() bool {
+	for _, name := range f.testOrder {
+		if f.stats[name].isHighVariance() {
+			return true
+		}
+	}
+	return false
+}
+
+// recalcInterval updates the adaptive run interval for this file.
+func (f *fileStats) recalcInterval() {
+	if f.hasFailures() || f.hasHighVariance() {
+		f.interval = 1
+		return
+	}
+	switch {
+	case f.runs < 20:
+		f.interval = 1
+	case f.runs < 50:
+		f.interval = 2
+	case f.runs < 100:
+		f.interval = 4
+	default:
+		f.interval = 8
+	}
+}
+
+// --- Compile phase ---
+
+func compileTargets(files []string, baseDir string) (targets []stressTarget, cleanup func()) {
+	var tempFiles []string
+
+	for _, f := range files {
+		relPath := f
+		if baseDir != "" {
+			if r, err := filepath.Rel(baseDir, f); err == nil {
+				relPath = r
+			}
+		}
+
+		file, info := compileFrontend(f)
+
+		// Create temp binary
+		tmp, err := os.CreateTemp("", "promise-stress-*")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
+			os.Exit(1)
+		}
+		tmp.Close()
+
+		if info.HasExpectOutput {
+			// E2E test — compile with normal main
+			result := codegen.Compile(file, info)
+			compileAndLink(result, tmp.Name())
+			tempFiles = append(tempFiles, tmp.Name())
+			targets = append(targets, stressTarget{
+				relPath:  relPath,
+				binary:   tmp.Name(),
+				isE2E:    true,
+				expected: strings.TrimRight(info.ExpectOutput, "\n"),
+				tests:    []string{strings.TrimSuffix(filepath.Base(f), ".pr")},
+			})
+		} else if len(info.Tests) > 0 {
+			// Unit tests — compile with generated test main
+			result := codegen.Compile(file, info)
+			result.GenerateTestMain(info.Tests)
+			compileAndLink(result, tmp.Name())
+			tempFiles = append(tempFiles, tmp.Name())
+
+			var testNames []string
+			for _, t := range info.Tests {
+				testNames = append(testNames, t.Name())
+			}
+			targets = append(targets, stressTarget{
+				relPath: relPath,
+				binary:  tmp.Name(),
+				tests:   testNames,
+			})
+		} else {
+			// No tests in file — remove the temp
+			os.Remove(tmp.Name())
+		}
+	}
+
+	cleanup = func() {
+		for _, f := range tempFiles {
+			os.Remove(f)
+		}
+	}
+	return
+}
+
+// --- Run loop ---
+
+func runStress(files []string, count int, duration time.Duration, perRunTimeout time.Duration) {
+	if len(files) == 0 {
+		fmt.Println("no test files found")
+		return
+	}
+
+	// SIGINT handler — set up before compile so Ctrl+C during compile works
+	stopCh := make(chan os.Signal, 1)
+	signal.Notify(stopCh, os.Interrupt)
+	defer signal.Stop(stopCh)
+
+	// Determine base directory for relative display paths
+	baseDir := commonDir(files)
+
+	// Compile all targets (exits on compile error)
+	fmt.Fprintf(os.Stderr, "Compiling %d file(s)...\n", len(files))
+	targets, cleanup := compileTargets(files, baseDir)
+	defer cleanup()
+
+	if len(targets) == 0 {
+		fmt.Println("no tests found")
+		return
+	}
+
+	totalTests := 0
+	for _, t := range targets {
+		totalTests += len(t.tests)
+	}
+	fmt.Fprintf(os.Stderr, "Compiled %d file(s), %d test(s). Starting stress loop.\n\n", len(targets), totalTests)
+
+	// Initialize file stats with stable iteration order
+	allFiles := make([]*fileStats, len(targets))
+	for i, t := range targets {
+		stats := make(map[string]*testStats, len(t.tests))
+		for _, name := range t.tests {
+			stats[name] = &testStats{name: name, file: t.relPath}
+		}
+		allFiles[i] = &fileStats{
+			path:      t.relPath,
+			stats:     stats,
+			testOrder: t.tests, // preserves declaration order
+			interval:  1,
+		}
+	}
+
+	// TTY detection
+	isTTY := false
+	if fi, err := os.Stdout.Stat(); err == nil {
+		isTTY = fi.Mode()&os.ModeCharDevice != 0
+	}
+
+	resultRe := regexp.MustCompile(`^(PASS|FAIL) \((\d+\.\d+)s\) (.+)$`)
+	start := time.Now()
+	iteration := 0
+	lastProgress := time.Time{}
+
+	for {
+		// Check stopping conditions
+		select {
+		case <-stopCh:
+			fmt.Fprintf(os.Stderr, "\n\nInterrupted.\n")
+			goto report
+		default:
+		}
+
+		if count > 0 && iteration >= count {
+			break
+		}
+		if duration > 0 && time.Since(start) >= duration {
+			break
+		}
+
+		iteration++
+
+		// Run each target (with adaptive skipping)
+		for i, t := range targets {
+			fs := allFiles[i]
+
+			// Adaptive skip
+			if fs.skipCount > 0 {
+				fs.skipCount--
+				continue
+			}
+
+			// Run binary
+			runStart := time.Now()
+			ctx, cancel := context.WithTimeout(context.Background(), perRunTimeout)
+			cmd := exec.CommandContext(ctx, t.binary)
+			output, err := cmd.CombinedOutput()
+			timedOut := ctx.Err() == context.DeadlineExceeded
+			cancel()
+			wallClock := time.Since(runStart).Seconds()
+
+			fs.runs++
+
+			if t.isE2E {
+				// E2E: single test, compare output
+				name := t.tests[0]
+				st := fs.stats[name]
+				actual := strings.TrimRight(string(output), "\n")
+				st.timings = append(st.timings, wallClock)
+				if timedOut || actual != t.expected {
+					st.fails++
+				} else {
+					st.passes++
+				}
+			} else {
+				// Unit tests: parse per-test results
+				if timedOut {
+					for _, name := range fs.testOrder {
+						fs.stats[name].fails++
+					}
+				} else {
+					seen := make(map[string]bool, len(fs.testOrder))
+					for _, line := range strings.Split(string(output), "\n") {
+						m := resultRe.FindStringSubmatch(line)
+						if m == nil {
+							continue
+						}
+						status, timing, name := m[1], m[2], m[3]
+						st := fs.stats[name]
+						if st == nil {
+							st = &testStats{name: name, file: t.relPath}
+							fs.stats[name] = st
+							fs.testOrder = append(fs.testOrder, name)
+						}
+						seen[name] = true
+						if status == "PASS" {
+							st.passes++
+						} else {
+							st.fails++
+						}
+						if v, e := strconv.ParseFloat(timing, 64); e == nil {
+							st.timings = append(st.timings, v)
+						}
+					}
+					// If binary crashed before printing all results, mark unseen as failed
+					if err != nil {
+						for _, name := range fs.testOrder {
+							if !seen[name] {
+								fs.stats[name].fails++
+							}
+						}
+					}
+				}
+			}
+
+			// Recalculate adaptive interval
+			fs.recalcInterval()
+			fs.skipCount = fs.interval - 1
+		}
+
+		// Display: TTY redraws every iteration; non-TTY prints every 2 seconds
+		if isTTY {
+			printStressLive(iteration, time.Since(start), allFiles, totalTests)
+		} else if iteration == 1 || time.Since(lastProgress) >= 2*time.Second {
+			printStressProgress(iteration, time.Since(start), allFiles, totalTests)
+			lastProgress = time.Now()
+		}
+	}
+
+report:
+	if !isTTY {
+		fmt.Println()
+	}
+	printStressReport(iteration, time.Since(start), allFiles, totalTests)
+
+	// Exit code: 1 if any flaky tests
+	for _, fs := range allFiles {
+		if fs.hasFailures() {
+			os.Exit(1)
+		}
+	}
+}
+
+// --- Display ---
+
+// collectTestsByCategory partitions all tests into flaky, high-variance, and stable.
+// Returns sorted slices (flaky by worst pass rate, high-var by highest CoV).
+func collectTestsByCategory(files []*fileStats) (flaky, highVar, stable []*testStats) {
+	for _, fs := range files {
+		for _, name := range fs.testOrder {
+			st := fs.stats[name]
+			if st.fails > 0 {
+				flaky = append(flaky, st)
+			} else if st.isHighVariance() {
+				highVar = append(highVar, st)
+			} else {
+				stable = append(stable, st)
+			}
+		}
+	}
+	sort.Slice(flaky, func(i, j int) bool {
+		return flaky[i].passRate() < flaky[j].passRate()
+	})
+	sort.Slice(highVar, func(i, j int) bool {
+		return highVar[i].cov() > highVar[j].cov()
+	})
+	return
+}
+
+func printStressLive(iteration int, elapsed time.Duration, files []*fileStats, totalTests int) {
+	fmt.Print("\033[H\033[2J") // clear screen
+
+	fmt.Printf("Stress: %d iterations, %.1fs elapsed\n\n", iteration, elapsed.Seconds())
+
+	flaky, highVar, _ := collectTestsByCategory(files)
+
+	suppressedFiles := 0
+	for _, fs := range files {
+		if fs.interval > 1 {
+			suppressedFiles++
+		}
+	}
+
+	if len(flaky) > 0 {
+		fmt.Printf("Flaky (%d):\n", len(flaky))
+		printTestGroup(flaky, false)
+		fmt.Println()
+	}
+
+	if len(highVar) > 0 {
+		fmt.Printf("High variance (%d):\n", len(highVar))
+		printTestGroup(highVar, true)
+		fmt.Println()
+	}
+
+	stableCount := totalTests - len(flaky) - len(highVar)
+	fmt.Printf("Stable: %d/%d tests", stableCount, totalTests)
+	if suppressedFiles > 0 {
+		fmt.Printf(" (%d files suppressed)", suppressedFiles)
+	}
+	fmt.Println()
+}
+
+func printStressProgress(iteration int, elapsed time.Duration, files []*fileStats, totalTests int) {
+	flaky, highVar, _ := collectTestsByCategory(files)
+	stableCount := totalTests - len(flaky) - len(highVar)
+	fmt.Printf("Stress: iteration %d (%.1fs) — %d flaky, %d high-variance, %d/%d stable\n",
+		iteration, elapsed.Seconds(), len(flaky), len(highVar), stableCount, totalTests)
+}
+
+func printStressReport(iterations int, elapsed time.Duration, files []*fileStats, totalTests int) {
+	fmt.Printf("=== Stress Test Report ===\n")
+	fmt.Printf("%d iterations over %.1fs\n\n", iterations, elapsed.Seconds())
+
+	flaky, highVar, stable := collectTestsByCategory(files)
+
+	if len(flaky) > 0 {
+		fmt.Printf("FLAKY (%d tests):\n", len(flaky))
+		printTestGroupDetailed(flaky)
+		fmt.Println()
+	}
+
+	if len(highVar) > 0 {
+		fmt.Printf("HIGH VARIANCE (%d tests):\n", len(highVar))
+		printTestGroupDetailed(highVar)
+		fmt.Println()
+	}
+
+	if len(flaky) == 0 && len(highVar) == 0 {
+		fmt.Printf("ALL STABLE: %d tests, all 100%% pass rate with low variance\n", totalTests)
+	} else {
+		stableFiles := map[string]bool{}
+		for _, st := range stable {
+			stableFiles[st.file] = true
+		}
+		fmt.Printf("STABLE: %d tests across %d files\n", len(stable), len(stableFiles))
+	}
+}
+
+// printTestGroup prints tests grouped by file, with compact stats.
+// If showCoV is true, appends the coefficient of variation.
+func printTestGroup(tests []*testStats, showCoV bool) {
+	// Group by file while preserving order of first appearance
+	type fileGroup struct {
+		file  string
+		tests []*testStats
+	}
+	var groups []fileGroup
+	idx := map[string]int{}
+	for _, st := range tests {
+		if i, ok := idx[st.file]; ok {
+			groups[i].tests = append(groups[i].tests, st)
+		} else {
+			idx[st.file] = len(groups)
+			groups = append(groups, fileGroup{file: st.file, tests: []*testStats{st}})
+		}
+	}
+
+	for _, g := range groups {
+		fmt.Printf("  %s\n", g.file)
+		for _, st := range g.tests {
+			line := fmt.Sprintf("    %-30s pass: %d/%d (%.1f%%)  avg: %s  σ: %s",
+				st.name, st.passes, st.total(), st.passRate()*100,
+				fmtDuration(st.mean()), fmtDuration(st.stddev()))
+			if showCoV {
+				line += fmt.Sprintf("  (CoV: %.2f)", st.cov())
+			}
+			fmt.Println(line)
+		}
+	}
+}
+
+// printTestGroupDetailed prints tests grouped by file, with full stats including min/max.
+func printTestGroupDetailed(tests []*testStats) {
+	type fileGroup struct {
+		file  string
+		tests []*testStats
+	}
+	var groups []fileGroup
+	idx := map[string]int{}
+	for _, st := range tests {
+		if i, ok := idx[st.file]; ok {
+			groups[i].tests = append(groups[i].tests, st)
+		} else {
+			idx[st.file] = len(groups)
+			groups = append(groups, fileGroup{file: st.file, tests: []*testStats{st}})
+		}
+	}
+
+	for _, g := range groups {
+		fmt.Printf("  %s\n", g.file)
+		for _, st := range g.tests {
+			fmt.Printf("    %-30s %d/%d (%.1f%%)  avg: %s  σ: %s  min: %s  max: %s",
+				st.name,
+				st.passes, st.total(), st.passRate()*100,
+				fmtDuration(st.mean()), fmtDuration(st.stddev()),
+				fmtDuration(st.minTime()), fmtDuration(st.maxTime()))
+			if st.isHighVariance() {
+				fmt.Printf("  CoV: %.2f", st.cov())
+			}
+			fmt.Println()
+		}
+	}
+}
+
+// fmtDuration formats seconds as a human-readable duration string.
+func fmtDuration(secs float64) string {
+	if secs == 0 {
+		return "0ms"
+	}
+	if secs < 0.001 {
+		return fmt.Sprintf("%.0fμs", secs*1e6)
+	}
+	if secs < 1.0 {
+		return fmt.Sprintf("%.1fms", secs*1e3)
+	}
+	return fmt.Sprintf("%.3fs", secs)
+}
+
+// commonDir returns the deepest common directory of the given file paths.
+// Returns "" if there's only one file.
+func commonDir(files []string) string {
+	if len(files) <= 1 {
+		return ""
+	}
+	// Use filepath.Abs so we compare canonical paths
+	abs := make([]string, len(files))
+	for i, f := range files {
+		a, err := filepath.Abs(f)
+		if err != nil {
+			return ""
+		}
+		abs[i] = a
+	}
+	common := filepath.Dir(abs[0])
+	for _, f := range abs[1:] {
+		for common != "/" && common != "." {
+			// Check with trailing separator to avoid /tmp/test matching /tmp/test2/
+			prefix := common + string(filepath.Separator)
+			if strings.HasPrefix(f, prefix) {
+				break
+			}
+			common = filepath.Dir(common)
+		}
+	}
+	return common
+}

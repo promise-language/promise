@@ -13,7 +13,7 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 | 3 | `compiler/internal/types/` | Type system: Named, Enum, Signature, Scope, Universe | Done |
 | 4 | `compiler/internal/sema/` | Semantic analysis: type checking, name resolution, returns, exhaustiveness | Done |
 | 5a | `compiler/internal/sema/` | Generic type substitution, constraint validation, instance tracking | Done |
-| 5b | `compiler/internal/sema/` | Match bindings, unreachable code, multi-constraint, iter/stream, use decls | Done |
+| 5b | `compiler/internal/sema/` | Match bindings, unreachable code, multi-constraint, Iterator/Stream, use decls | Done |
 | 6a | `compiler/internal/ownership/` | Move semantics, use-after-move, copy exemption, borrow conflicts, unsafe pointer | Done |
 | 6b | `compiler/internal/ownership/` | Borrow tracking, implicit coercion, return safety | Done |
 | 7 | `compiler/internal/sema/` | Meta annotation processing and validation | Done |
@@ -51,6 +51,7 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 | Channels | `channel[T]` with buffered/unbuffered send/receive/for-in | Done (Phase 5b) | [runtime-proposal.md](runtime-proposal.md) |
 | M:N Scheduler | LLVM coroutines, GMP model, work stealing | Done (Phase 5c) | [runtime-proposal.md](runtime-proposal.md) |
 | Operator dispatch | `[]`, `[]=`, `[:]`, `[:]=` as method-dispatched operators | Done | [subscript-slice-operators.md](subscript-slice-operators.md) |
+| Naming conventions | PascalCase canonical names for all non-scalar types; lowercase sugar | Planned | [standard-runtime.md](standard-runtime.md#naming-conventions) |
 | C binding | Generated headers for extern type safety | Planned | [c-binding-architecture.md](c-binding-architecture.md) |
 
 ---
@@ -597,6 +598,92 @@ The compiler pipeline (Stages 1-8o) is complete for the current feature set. The
 | Cooperative WASM scheduler — Phase 5d | [runtime-proposal.md](runtime-proposal.md) | Low |
 | IO reactor (kqueue/epoll/IOCP) — Phase 6 | [runtime-proposal.md](runtime-proposal.md) | Low |
 | Replace clang with `llc` + `lld` — Phase 7 | [runtime-proposal.md](runtime-proposal.md) | Low |
+
+---
+
+## Naming Convention Migration
+
+Bring the compiler and stdlib in line with the naming conventions defined in [standard-runtime.md](standard-runtime.md#naming-conventions). All non-scalar types use PascalCase canonical names; lowercase forms are syntactic sugar resolved by the compiler.
+
+### Step 1 — Rename `iter` → `Iterator`, `stream` → `Stream` in universe
+
+**Files:** `compiler/internal/types/universe.go`
+
+- Change `defGeneric("iter", "T")` → `defGeneric("Iterator", "T")`
+- Change `defGeneric("stream", "T")` → `defGeneric("Stream", "T")`
+- Update all Go references to `TypIter` / `TypStream` names (the Go variable names can stay, but `Named.Name` must be PascalCase)
+
+### Step 2 — Rename `map` → `Map`, `channel` → `Channel`, `task` → `Task`, `range` → `Range` in universe
+
+**Files:** `compiler/internal/types/universe.go`
+
+- Change `defGeneric("map", "K", "V")` → `defGeneric("Map", "K", "V")`
+- Change `defGeneric("channel", "T")` → `defGeneric("Channel", "T")`
+- Change `defGeneric("task", "T")` → `defGeneric("Task", "T")`
+- Change `defNamed("range")` → `defNamed("Range")`
+- These types already have lowercase sugar forms in the parser — this step makes PascalCase the canonical name
+
+### Step 3 — Add sugar resolution in sema
+
+**Files:** `compiler/internal/sema/check.go` or `compiler/internal/sema/resolve.go`
+
+- When the parser sees `map[K,V]`, `channel[T]`, `task[T]`, or `range`, resolve to canonical `Map[K,V]`, `Channel[T]`, `Task[T]`, `Range`
+- `T[]` already resolves to `Vector[T]` — verify this still works after the rename
+- `iter[T]` and `stream[T]` sugar forms: decide whether to keep as sugar or drop entirely (these were never user-facing sugar like `map[K,V]`)
+
+### Step 4 — Update `std/*.pr` files
+
+**Files:** `std/iter.pr`, `std/map.pr`, `std/channel.pr`, `std/task.pr`, `std/range.pr`
+
+- `std/iter.pr`: rename `type iter[T]` → `type Iterator[T]`, `type stream[T]` → `type Stream[T]`
+- `std/map.pr`: `type map[K: Hashable + Equal, V]` → `type Map[K: Hashable + Equal, V]` (the file already has both — verify sugar still works)
+- `std/channel.pr`: update type references if any use the old canonical name
+- `std/task.pr`: update type references if any use the old canonical name
+- `std/range.pr`: rename `type range` → `type Range`
+- Update any cross-references (e.g., methods returning `Iterator[T]` or `Stream[T]`)
+
+### Step 5 — Update codegen name matching
+
+**Files:** `compiler/internal/codegen/compiler.go`, `compiler/internal/codegen/expr.go`, `compiler/internal/codegen/stmt.go`, `compiler/internal/codegen/mono.go`
+
+- Codegen uses string comparisons against type names (e.g., `named.Name == "map"`, `named.Name == "channel"`). Update all to PascalCase.
+- Search for: `"map"`, `"channel"`, `"task"`, `"range"`, `"iter"`, `"stream"` in codegen string comparisons
+- Also check `isContainerType()` and `mangleMethodName()` helpers
+
+### Step 6 — Update sema name matching
+
+**Files:** `compiler/internal/sema/check.go`, `compiler/internal/sema/decl.go`, `compiler/internal/sema/info.go`
+
+- Same as Step 5 but in sema: update string comparisons against old lowercase names
+
+### Step 7 — Update ownership name matching
+
+**Files:** `compiler/internal/ownership/checker.go`
+
+- Any type-name string comparisons in ownership analysis must be updated
+
+### Step 8 — Update test helpers
+
+**Files:** `compiler/internal/codegen/codegen_test.go`, `compiler/internal/sema/sema_test.go`, `compiler/internal/ownership/ownership_test.go`
+
+- Update `stdAll` in each test file's `init()` to use PascalCase type names
+- Update any test source strings that reference old names
+- Run `make resources` to embed updated `std/*.pr`
+
+### Step 9 — Update e2e tests
+
+**Files:** `tests/**/*.pr`
+
+- Search all `.pr` files for old lowercase canonical names used as types
+- Note: sugar forms (`map[K,V]`, `channel[T]`, `task[T]`, `T[]`) remain valid — only direct references to canonical names need updating
+- `iterator[T]` / `stream[T]` references must become `Iterator[T]` / `Stream[T]`
+
+### Step 10 — Validation
+
+- `make clean && make`
+- `go test ./...` (all Go unit tests)
+- `promise test ../tests/...` (all e2e tests)
+- `bin/e2e.sh` (end-to-end test harness)
 
 ---
 

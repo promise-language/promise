@@ -21,7 +21,7 @@ echo "Running go tests..."
 go test ./... || exit 1
 
 echo "Running promise tests..."
-./promise test -timeout 120 ../tests/... || exit 1
+./promise test -timeout 15 ../tests/... || exit 1
 
 echo ""
 echo "✅ OK to Commit"

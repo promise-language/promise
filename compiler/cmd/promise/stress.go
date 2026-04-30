@@ -371,7 +371,9 @@ func runStress(files []string, count int, duration time.Duration, perRunTimeout 
 							st.timings = append(st.timings, v)
 						}
 					}
-					// If binary crashed before printing all results, mark unseen as failed
+					// If binary crashed, find the first unseen test (in declaration
+					// order) — that's the one that was running when the crash happened.
+					// Only count that test as failed; tests that never ran are skipped.
 					if err != nil {
 						crashMsg := extractCrashReason(string(output))
 						for _, name := range fs.testOrder {
@@ -379,6 +381,7 @@ func runStress(files []string, count int, duration time.Duration, perRunTimeout 
 								st := fs.stats[name]
 								st.fails++
 								st.lastErr = crashMsg
+								break
 							}
 						}
 					}

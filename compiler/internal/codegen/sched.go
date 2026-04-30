@@ -631,24 +631,40 @@ func (c *Compiler) defineSchedLoopFunc() {
 	coroDoneBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentPGlobal)
 	coroDoneBlk.NewBr(loop)
 
-	// coroSuspended: G suspended itself. If G.park_mutex is non-null, release it
-	// now that coro.suspend has completed — this closes the enqueue-before-suspend
-	// race by ensuring no waker can dequeue+resume G before suspend finishes.
+	// coroSuspended: G suspended itself. Two cases:
+	// 1. park_mutex != null → channel/task wait: release mutex (G is on a waiter list)
+	// 2. park_mutex == null → cooperative yield: re-enqueue G (it's now fully suspended)
 	pmField := coroSuspendedBlk.NewGetElementPtr(gTy, gPtr2,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldParkMutex)))
 	parkMtx := coroSuspendedBlk.NewLoad(irtypes.I8Ptr, pmField)
 	hasParkMtx := coroSuspendedBlk.NewICmp(enum.IPredNE, parkMtx, constant.NewNull(irtypes.I8Ptr))
 
 	releaseMtxBlk := fn.NewBlock("release_park_mutex")
+	yieldReenqueueBlk := fn.NewBlock("yield_reenqueue")
 	afterReleaseBlk := fn.NewBlock("after_release")
-	coroSuspendedBlk.NewCondBr(hasParkMtx, releaseMtxBlk, afterReleaseBlk)
+	coroSuspendedBlk.NewCondBr(hasParkMtx, releaseMtxBlk, yieldReenqueueBlk)
 
 	// release_park_mutex: unlock the mutex and clear the field
 	releaseMtxBlk.NewCall(c.palMutexUnlock, parkMtx)
 	releaseMtxBlk.NewStore(constant.NewNull(irtypes.I8Ptr), pmField)
 	releaseMtxBlk.NewBr(afterReleaseBlk)
 
-	// after_release: clear P.current_g, current G and P TLS, loop back
+	// yield_reenqueue: cooperative yield — G has no park_mutex, so it just
+	// wanted to give up the CPU. Re-enqueue it now that coro.suspend has
+	// completed and G is safely in a suspended state.
+	// Clear P.current_g BEFORE enqueue so sysmon doesn't set preempt on
+	// a goroutine that's about to be scheduled by another M.
+	pRawY := yieldReenqueueBlk.NewLoad(irtypes.I8Ptr, c.currentPGlobal)
+	pPtrY := yieldReenqueueBlk.NewBitCast(pRawY, irtypes.NewPointer(pTy))
+	pCurGFieldY := yieldReenqueueBlk.NewGetElementPtr(pTy, pPtrY,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldCurrentG)))
+	yieldReenqueueBlk.NewStore(constant.NewNull(irtypes.I8Ptr), pCurGFieldY)
+	yieldReenqueueBlk.NewCall(c.funcs["promise_sched_enqueue"], gRaw2)
+	yieldReenqueueBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentGGlobal)
+	yieldReenqueueBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentPGlobal)
+	yieldReenqueueBlk.NewBr(loop)
+
+	// after_release: channel/task wait — clear P.current_g, current G and P TLS, loop back
 	pRaw3 := afterReleaseBlk.NewLoad(irtypes.I8Ptr, c.currentPGlobal)
 	pPtr3 := afterReleaseBlk.NewBitCast(pRaw3, irtypes.NewPointer(pTy))
 	pCurGField3 := afterReleaseBlk.NewGetElementPtr(pTy, pPtr3,
@@ -875,7 +891,7 @@ func (c *Compiler) defineLocalDequeueFunc() {
 // defineStealWorkFunc emits @promise_steal_work(i8* %thief_p, i8* %victim_p) → i8*
 // Steals up to half of victim P's local queue into thief P's queue.
 // Returns one stolen G (the first one), or null if nothing was stolen.
-// Locks victim P's lock during the steal.
+// Locks BOTH P's during the steal (address-ordered to prevent ABBA deadlock).
 func (c *Compiler) defineStealWorkFunc() {
 	thiefParam := ir.NewParam("thief_p", irtypes.I8Ptr)
 	victimParam := ir.NewParam("victim_p", irtypes.I8Ptr)
@@ -901,12 +917,34 @@ func (c *Compiler) defineStealWorkFunc() {
 	firstGAlloca := entry.NewAlloca(irtypes.I8Ptr)
 	entry.NewStore(constant.NewNull(irtypes.I8Ptr), firstGAlloca)
 
-	// Lock victim's mutex
+	// Get both locks
+	thiefLockField := entry.NewGetElementPtr(pTy, thiefPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldLock)))
+	thiefLock := entry.NewLoad(irtypes.I8Ptr, thiefLockField)
 	victimLockField := entry.NewGetElementPtr(pTy, victimPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldLock)))
 	victimLock := entry.NewLoad(irtypes.I8Ptr, victimLockField)
-	entry.NewCall(c.palMutexLock, victimLock)
-	entry.NewBr(checkEmpty)
+
+	// Lock both Ps in address order to prevent ABBA deadlock when two Ms
+	// steal from each other concurrently (M1: steal P2→P1, M2: steal P1→P2).
+	thiefInt := entry.NewPtrToInt(thiefParam, irtypes.I64)
+	victimInt := entry.NewPtrToInt(victimParam, irtypes.I64)
+	thiefFirst := entry.NewICmp(enum.IPredULT, thiefInt, victimInt)
+
+	lockThiefFirst := fn.NewBlock("lock_thief_first")
+	lockVictimFirst := fn.NewBlock("lock_victim_first")
+	lockDone := fn.NewBlock("lock_done")
+	entry.NewCondBr(thiefFirst, lockThiefFirst, lockVictimFirst)
+
+	lockThiefFirst.NewCall(c.palMutexLock, thiefLock)
+	lockThiefFirst.NewCall(c.palMutexLock, victimLock)
+	lockThiefFirst.NewBr(lockDone)
+
+	lockVictimFirst.NewCall(c.palMutexLock, victimLock)
+	lockVictimFirst.NewCall(c.palMutexLock, thiefLock)
+	lockVictimFirst.NewBr(lockDone)
+
+	lockDone.NewBr(checkEmpty)
 
 	// Check if victim has work
 	vHeadField := checkEmpty.NewGetElementPtr(pTy, victimPtr,
@@ -919,8 +957,9 @@ func (c *Compiler) defineStealWorkFunc() {
 	vEmpty := checkEmpty.NewICmp(enum.IPredSLE, vDiff, constant.NewInt(irtypes.I64, 0))
 	checkEmpty.NewCondBr(vEmpty, emptyBlk, stealLoop)
 
-	// empty: unlock and return null
+	// empty: unlock both and return null
 	emptyBlk.NewCall(c.palMutexUnlock, victimLock)
+	emptyBlk.NewCall(c.palMutexUnlock, thiefLock)
 	emptyBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
 
 	// stealLoop: steal up to half = (vTail - vHead) / 2, minimum 1
@@ -979,8 +1018,9 @@ func (c *Compiler) defineStealWorkFunc() {
 	nextIterBlk.NewStore(nextI, iAlloca)
 	nextIterBlk.NewBr(stealBody)
 
-	// stealDone: unlock victim, increment steals counter, return first stolen G
+	// stealDone: unlock both, increment steals counter, return first stolen G
 	stealDone.NewCall(c.palMutexUnlock, victimLock)
+	stealDone.NewCall(c.palMutexUnlock, thiefLock)
 
 	// Increment steals counter (atomic — called from multiple Ms)
 	schedTySteal := schedStructType()
@@ -1255,9 +1295,15 @@ func (c *Compiler) defineSchedFindRunnableFunc() {
 // Parks an M (OS thread) until woken by promise_sched_wake_m or shutdown.
 //
 // Protocol: park_mutex is locked BEFORE adding to idle list, then cond_wait
-// is called while still holding it. This prevents the lost-signal race where
-// wake_m/shutdown could signal between idle-list push and cond_wait.
+// is called in a loop while still holding it. This prevents the lost-signal
+// race where wake_m/shutdown could signal between idle-list push and cond_wait.
 // M.p is saved/restored since it's reused as the idle stack next pointer.
+//
+// Spurious wakeup safety: POSIX allows cond_wait to return spuriously.
+// We use M.spinning as a "woken" flag — wake_m sets it to 1 after popping M
+// from the idle stack. park_m loops until spinning==1 or shutdown. This
+// prevents M from returning prematurely and re-pushing onto the idle stack
+// (which would corrupt the intrusive linked list and potentially lose Ms).
 func (c *Compiler) defineSchedParkMFunc() {
 	mParam := ir.NewParam("m_raw", irtypes.I8Ptr)
 	fn := c.module.NewFunc("promise_sched_park_m", irtypes.Void, mParam)
@@ -1267,6 +1313,9 @@ func (c *Compiler) defineSchedParkMFunc() {
 	schedTy := schedStructType()
 
 	entry := fn.NewBlock("entry")
+	waitLoop := fn.NewBlock("wait_loop")
+	doWait := fn.NewBlock("do_wait")
+	doneBlk := fn.NewBlock("done")
 
 	mPtr := entry.NewBitCast(mParam, irtypes.NewPointer(mTy))
 
@@ -1280,6 +1329,11 @@ func (c *Compiler) defineSchedParkMFunc() {
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldParkMutex)))
 	parkMtx := entry.NewLoad(irtypes.I8Ptr, parkMtxField)
 	entry.NewCall(c.palMutexLock, parkMtx)
+
+	// M.spinning = 0 (clear woken flag — wake_m sets it to 1 when deliberately waking)
+	spinField := entry.NewGetElementPtr(mTy, mPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldSpinning)))
+	entry.NewStore(constant.NewInt(irtypes.I8, 0), spinField)
 
 	// Push M onto idle stack: M.p = old idle head, idle_head = M
 	imLockField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
@@ -1295,18 +1349,36 @@ func (c *Compiler) defineSchedParkMFunc() {
 
 	entry.NewCall(c.palMutexUnlock, imLock)
 
-	// cond_wait (park_mutex already held — released atomically by cond_wait)
+	// Pre-load park_cond (defined in entry, dominates all blocks)
 	parkCondField := entry.NewGetElementPtr(mTy, mPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldParkCond)))
 	parkCond := entry.NewLoad(irtypes.I8Ptr, parkCondField)
-	entry.NewCall(c.palCondWait, parkCond, parkMtx)
 
-	entry.NewCall(c.palMutexUnlock, parkMtx)
+	entry.NewBr(waitLoop)
 
-	// Restore M.p to original P pointer
-	entry.NewStore(savedP, mPField)
+	// wait_loop: check if deliberately woken (spinning==1) or shutdown.
+	// POSIX cond_wait may return spuriously; we must loop to prevent
+	// returning early and corrupting the idle stack on re-park.
+	spinVal := waitLoop.NewLoad(irtypes.I8, spinField)
+	isWoken := waitLoop.NewICmp(enum.IPredNE, spinVal, constant.NewInt(irtypes.I8, 0))
 
-	entry.NewRet(nil)
+	shutdownField := waitLoop.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldShutdown)))
+	shutdownVal := waitLoop.NewLoad(irtypes.I8, shutdownField)
+	isShutdown := waitLoop.NewICmp(enum.IPredNE, shutdownVal, constant.NewInt(irtypes.I8, 0))
+
+	shouldExit := waitLoop.NewOr(isWoken, isShutdown)
+	waitLoop.NewCondBr(shouldExit, doneBlk, doWait)
+
+	// doWait: cond_wait (park_mutex held — released atomically by cond_wait)
+	doWait.NewCall(c.palCondWait, parkCond, parkMtx)
+	doWait.NewBr(waitLoop)
+
+	// done: unlock park_mutex, restore M.p
+	doneBlk.NewCall(c.palMutexUnlock, parkMtx)
+	doneBlk.NewStore(savedP, mPField)
+
+	doneBlk.NewRet(nil)
 
 	c.funcs["promise_sched_park_m"] = fn
 }
@@ -1352,11 +1424,18 @@ func (c *Compiler) defineSchedWakeMFunc() {
 	wakeBlk.NewStore(nextIdle, idleHeadField)
 	wakeBlk.NewCall(c.palMutexUnlock, imLock)
 
-	// Signal M's park_cond while holding park_mutex (prevents lost-signal race)
+	// Signal M's park_cond while holding park_mutex (prevents lost-signal race).
+	// Set M.spinning = 1 BEFORE signaling — park_m loops on this flag to
+	// distinguish real wakeups from spurious cond_wait returns.
 	parkMtxField := wakeBlk.NewGetElementPtr(mTy, mPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldParkMutex)))
 	parkMtx := wakeBlk.NewLoad(irtypes.I8Ptr, parkMtxField)
 	wakeBlk.NewCall(c.palMutexLock, parkMtx)
+
+	// Set woken flag (synchronized by park_mutex)
+	spinField := wakeBlk.NewGetElementPtr(mTy, mPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldSpinning)))
+	wakeBlk.NewStore(constant.NewInt(irtypes.I8, 1), spinField)
 
 	parkCondField := wakeBlk.NewGetElementPtr(mTy, mPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldParkCond)))

@@ -610,11 +610,17 @@ Known gaps and improvements deferred from completed stages.
 |------|--------|----------|
 | ~~Reassignment of droppable variable leaks old value~~ — **Fixed.** `genAssignStmt` now calls `emitDropCall` on the old value before storing the new one. Drop flag is checked (moved values skipped) and reset after reassignment. Self-assignment short-circuits. | 8o | ~~Medium~~ Resolved |
 | ~~Enqueue-before-suspend race~~ — **Fixed.** Goroutine stores the channel/done mutex in `G.park_mutex` before `coro.suspend`; the scheduler loop releases it in `coroSuspendedBlk` after `coro.resume` returns. Since the waker must acquire the same mutex to dequeue, it blocks until the suspend completes. Verified with stress tests in `tests/concurrency/stress_*.pr`. | 5c | ~~High~~ Resolved |
+| ~~Park_m spurious wakeup causing deadlocks~~ — **Fixed.** POSIX `cond_wait` can return spuriously. `park_m` now loops checking `M.spinning` flag (set to 1 by `wake_m` before signaling) and shutdown flag. On spurious wakeup, `M.spinning == 0` → re-wait. Previously, spurious wakeup corrupted the idle M stack (M.p used as both next-pointer and real P association). | 5c | ~~Critical~~ Resolved |
+| ~~Select blocking deadlock~~ — **Fixed.** `genSelectStmt` set `park_mutex = null` for blocking select, causing the scheduler to treat it as a yield and immediately re-enqueue. After resume, if no case was ready, code fell through to `mergeBlk` skipping the select. Replaced waiter-list parking with yield-and-retry loop (lockStartBlk). Waiter lists had fundamental enqueue-before-suspend and double-wake races with multiple channel mutexes. | 5c | ~~High~~ Resolved |
+| ~~Steal_work data race on thief P queue~~ — **Fixed.** `steal_work` wrote stolen goroutines to the thief's P queue without holding the thief's lock. On ARM64, stores could be reordered, causing queue corruption visible to concurrent stealers. Now locks both thief and victim P's in address order (ptrtoint comparison) to prevent ABBA deadlock. | 5c | ~~High~~ Resolved |
+| ~~PHI nodes not grouped in failable destructuring~~ — **Fixed.** `genFailableDestructure` interleaved PHI nodes with alloca/store in the merge block. LLVM requires all PHIs at block top. Reordered to emit both PHIs first, then stores. Affected `(val, err) := failable()` patterns. | 8e | ~~Medium~~ Resolved |
 
 ### Codegen Gaps
 
 | Item | Origin | Priority |
 |------|--------|----------|
+| Blocking select uses polling (yield-and-retry) instead of waiter-list parking. Correct but spins when no case is ready. Proper fix requires multi-mutex unlock in scheduler or atomic wake-once protocol for select waiters. | 5c | Medium |
+| Fire-and-forget goroutine G struct leak: all `go { }` blocks set `result_ptr` to sentinel `0x1`, preventing goroutine_exit from freeing the G. Only `task[T]` should use the sentinel. | 5c | Low |
 | Fixed-size arrays as stack-allocated `[N x T]` | 8g | Medium |
 | Destructure is-patterns (`x is Dog(name)`) | 8k | Medium |
 | Generic type RTTI | 8k | Medium |

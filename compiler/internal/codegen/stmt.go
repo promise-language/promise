@@ -308,24 +308,30 @@ func (c *Compiler) genFailableDestructure(s *ast.DestructureVarDecl) {
 	// --- Merge ---
 	c.block = mergeBlock
 
-	// Store value binding
+	// Emit all PHI nodes first (LLVM requires PHIs grouped at block top)
+	var mergedVal value.Value
 	if s.Names[0] != "_" && !isVoidResult(resultType) {
-		mergedVal := mergeBlock.NewPhi(
+		mergedVal = mergeBlock.NewPhi(
 			&ir.Incoming{X: errPathVal, Pred: errEnd},
 			&ir.Incoming{X: okPathVal, Pred: okEnd},
 		)
+	}
+	var mergedErr value.Value
+	if s.Names[1] != "_" {
+		mergedErr = mergeBlock.NewPhi(
+			&ir.Incoming{X: errOpt, Pred: errEnd},
+			&ir.Incoming{X: okOpt, Pred: okEnd},
+		)
+	}
+
+	// Now emit stores (after all PHIs)
+	if mergedVal != nil {
 		alloca := c.block.NewAlloca(llValType)
 		alloca.SetName(c.uniqueLocalName(s.Names[0]))
 		c.block.NewStore(mergedVal, alloca)
 		c.locals[s.Names[0]] = alloca
 	}
-
-	// Store error binding
-	if s.Names[1] != "_" {
-		mergedErr := mergeBlock.NewPhi(
-			&ir.Incoming{X: errOpt, Pred: errEnd},
-			&ir.Incoming{X: okOpt, Pred: okEnd},
-		)
+	if mergedErr != nil {
 		alloca := c.block.NewAlloca(errOptType)
 		alloca.SetName(c.uniqueLocalName(s.Names[1]))
 		c.block.NewStore(mergedErr, alloca)
@@ -1651,14 +1657,17 @@ func (c *Compiler) emitYieldCheck() {
 	continueBlk := c.newBlock("yield.cont")
 	c.block.NewCondBr(shouldYield, yieldBlk, continueBlk)
 
-	// yield: clear preempt, set status=runnable, enqueue self, coro.suspend
+	// yield: clear preempt, coro.suspend (scheduler re-enqueues after suspend)
+	//
+	// IMPORTANT: We must NOT enqueue self before coro.suspend. If we did,
+	// another M could pick up G from the run queue and call coro.resume
+	// before our coro.suspend completes — that's UB in LLVM's coroutine model.
+	// Instead, we just suspend. The scheduler detects a yield (park_mutex==null)
+	// and re-enqueues the goroutine after coro.suspend has fully completed.
 	c.block = yieldBlk
 	c.block.NewStore(constant.NewInt(irtypes.I8, 0), preemptField)
 
-	// Re-enqueue self so we get scheduled again
-	c.block.NewCall(c.funcs["promise_sched_enqueue"], curG)
-
-	// Suspend — scheduler will resume us later
+	// Suspend — scheduler detects yield (null park_mutex) and re-enqueues us
 	suspResult := c.block.NewCall(c.coroSuspend, constant.None, constant.False)
 	c.block.NewSwitch(suspResult, c.coroSuspendBlk,
 		ir.NewCase(constant.NewInt(irtypes.I8, 0), continueBlk),
@@ -2580,7 +2589,13 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 		}
 	}
 
-	// Lock all channels in sorted order (skip duplicates)
+	// Lock all channels in sorted order (skip duplicates).
+	// lockStartBlk is the entry point for the retry loop when blocking select
+	// yields and needs to re-lock + re-check all cases.
+	lockStartBlk := c.newBlock("select.lock.start")
+	c.block.NewBr(lockStartBlk)
+	c.block = lockStartBlk
+
 	for i := 0; i < nCases; i++ {
 		ptr := c.block.NewGetElementPtr(arrType, chArr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
@@ -2907,43 +2922,25 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 		}
 	}
 
-	// Step 6: Blocking park (no default, coroutine mode)
+	// Step 6: Blocking select (no default, coroutine mode) — yield-and-retry.
+	// Instead of parking on waiter lists (which has fundamental multi-mutex races:
+	// enqueue-before-suspend UB and double-wake from multiple channels), we use
+	// a simple polling approach: unlock all channels, yield (cooperative suspend),
+	// and on resume branch back to lockStartBlk to re-lock and re-try all cases.
+	// The goroutine cycles through the scheduler until a case becomes ready.
 	if s.Default == nil && c.inCoroutine {
-		// afterTryBlk is the park block
 		c.block = afterTryBlk
 
+		// Unlock all channels before yielding
+		unlockAll()
+
+		// Set park_mutex = null → yield (scheduler re-enqueues after suspend)
 		currentG := c.block.NewLoad(i8PtrTy, c.currentGGlobal)
 		gTy := goroutineStructType()
-		gPtrTy := irtypes.NewPointer(gTy)
-		gTyped := c.block.NewBitCast(currentG, gPtrTy)
-
-		// Set G.select_case = -1
-		selCasePtr := c.block.NewGetElementPtr(gTy, gTyped,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldSelectCase)))
-		c.block.NewStore(constant.NewInt(irtypes.I32, 0xFFFFFFFF), selCasePtr)
-
-		// Enqueue on all waiter lists
-		for _, ci := range caseInfos {
-			var headPtr, tailPtr value.Value
-			if ci.isSend {
-				headPtr = c.block.NewGetElementPtr(chanType, ci.chPtr,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersHead)))
-				tailPtr = c.block.NewGetElementPtr(chanType, ci.chPtr,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersTail)))
-			} else {
-				headPtr = c.block.NewGetElementPtr(chanType, ci.chPtr,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersHead)))
-				tailPtr = c.block.NewGetElementPtr(chanType, ci.chPtr,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersTail)))
-			}
-			c.block.NewCall(c.funcs["promise_waiter_enqueue"], headPtr, tailPtr, currentG)
-		}
-
-		// Unlock all channels and suspend
+		gTyped := c.block.NewBitCast(currentG, irtypes.NewPointer(gTy))
 		pmField := c.block.NewGetElementPtr(gTy, gTyped,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldParkMutex)))
 		c.block.NewStore(constant.NewNull(i8PtrTy), pmField)
-		unlockAll()
 
 		suspResult := c.block.NewCall(c.coroSuspend, constant.None, constant.False)
 		resumeBlk := c.newBlock("select.resume")
@@ -2951,130 +2948,9 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 			ir.NewCase(constant.NewInt(irtypes.I8, 0), resumeBlk),
 			ir.NewCase(constant.NewInt(irtypes.I8, 1), c.coroCleanupBlk))
 
-		// On resume: re-lock all, remove from all waiter lists, find ready case
+		// On resume: go back to lock-start to re-lock all channels and re-try
 		c.block = resumeBlk
-
-		// Re-lock all channels in sorted order
-		for i := 0; i < nCases; i++ {
-			ptr := c.block.NewGetElementPtr(arrType, chArr,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
-			chRawSorted := c.block.NewLoad(i8PtrTy, ptr)
-
-			if i > 0 {
-				prevPtr := c.block.NewGetElementPtr(arrType, chArr,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i-1)))
-				prevRaw := c.block.NewLoad(i8PtrTy, prevPtr)
-				isSame := c.block.NewICmp(enum.IPredEQ, chRawSorted, prevRaw)
-				lockBlk := c.newBlock(fmt.Sprintf("select.relock.%d", i))
-				skipBlk := c.newBlock(fmt.Sprintf("select.relock.skip.%d", i))
-				c.block.NewCondBr(isSame, skipBlk, lockBlk)
-				c.block = lockBlk
-				chPtrSorted := c.block.NewBitCast(chRawSorted, irtypes.NewPointer(chanType))
-				mtxPtr := c.block.NewGetElementPtr(chanType, chPtrSorted,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldMutex)))
-				mtx := c.block.NewLoad(i8PtrTy, mtxPtr)
-				c.block.NewCall(c.palMutexLock, mtx)
-				c.block.NewBr(skipBlk)
-				c.block = skipBlk
-			} else {
-				chPtrSorted := c.block.NewBitCast(chRawSorted, irtypes.NewPointer(chanType))
-				mtxPtr := c.block.NewGetElementPtr(chanType, chPtrSorted,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldMutex)))
-				mtx := c.block.NewLoad(i8PtrTy, mtxPtr)
-				c.block.NewCall(c.palMutexLock, mtx)
-			}
-		}
-
-		// Remove from all waiter lists
-		for _, ci := range caseInfos {
-			var headPtr, tailPtr value.Value
-			if ci.isSend {
-				headPtr = c.block.NewGetElementPtr(chanType, ci.chPtr,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersHead)))
-				tailPtr = c.block.NewGetElementPtr(chanType, ci.chPtr,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersTail)))
-			} else {
-				headPtr = c.block.NewGetElementPtr(chanType, ci.chPtr,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersHead)))
-				tailPtr = c.block.NewGetElementPtr(chanType, ci.chPtr,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersTail)))
-			}
-			c.block.NewCall(c.funcs["promise_waiter_remove"], headPtr, tailPtr, currentG)
-		}
-
-		// Try each case again — one should be ready
-		// Pre-create all try blocks upfront to avoid subtle block-management issues
-		wakeTryBlks := make([]*ir.Block, nCases)
-		for i := range nCases {
-			wakeTryBlks[i] = c.newBlock(fmt.Sprintf("select.wk.try%d", i))
-		}
-		c.block.NewBr(wakeTryBlks[0])
-
-		for i, ci := range caseInfos {
-			c.block = wakeTryBlks[i]
-
-			var nextTryBlk *ir.Block
-			if i+1 < nCases {
-				nextTryBlk = wakeTryBlks[i+1]
-			} else {
-				nextTryBlk = mergeBlk // fallback — shouldn't happen
-			}
-
-			wakeExecBlk := c.newBlock(fmt.Sprintf("select.wk.c%d.exec", i))
-
-			if ci.isSend {
-				countPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldCount)))
-				count := c.block.NewLoad(irtypes.I64, countPtr)
-				capPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldCapacity)))
-				cap_ := c.block.NewLoad(irtypes.I64, capPtr)
-				notFull := c.block.NewICmp(enum.IPredULT, count, cap_)
-				closedPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldClosed)))
-				closedVal := c.block.NewLoad(irtypes.I8, closedPtr)
-				isOpen := c.block.NewICmp(enum.IPredEQ, closedVal, constant.NewInt(irtypes.I8, 0))
-				canSend := c.block.NewAnd(notFull, isOpen)
-				c.block.NewCondBr(canSend, wakeExecBlk, nextTryBlk)
-			} else {
-				countPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldCount)))
-				count := c.block.NewLoad(irtypes.I64, countPtr)
-				hasItems := c.block.NewICmp(enum.IPredUGT, count, constant.NewInt(irtypes.I64, 0))
-				closedPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldClosed)))
-				closedVal := c.block.NewLoad(irtypes.I8, closedPtr)
-				isClosed := c.block.NewICmp(enum.IPredEQ, closedVal, constant.NewInt(irtypes.I8, 1))
-				canRecv := c.block.NewOr(hasItems, isClosed)
-				c.block.NewCondBr(canRecv, wakeExecBlk, nextTryBlk)
-			}
-
-			c.block = wakeExecBlk
-			savedScopeLen := len(c.scopeBindings)
-
-			prefix := fmt.Sprintf("select.wk.c%d", i)
-			if ci.isSend {
-				execSend(ci, prefix)
-			} else {
-				execRecv(ci, prefix)
-			}
-
-			unlockAll()
-
-			for _, stmt := range s.Cases[i].Body {
-				if c.block.Term != nil {
-					break
-				}
-				c.genStmt(stmt)
-			}
-			if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > savedScopeLen {
-				c.emitScopeCleanup(savedScopeLen)
-			}
-			c.scopeBindings = c.scopeBindings[:savedScopeLen]
-			if c.block != nil && c.block.Term == nil {
-				c.block.NewBr(mergeBlk)
-			}
-		}
+		c.block.NewBr(lockStartBlk)
 	}
 
 	c.block = mergeBlk

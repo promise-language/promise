@@ -111,6 +111,15 @@ Entry point: `cmd/promise/main.go` → `compileFrontend()` orchestrates parse �
 
 **Monomorphization**: Generic types/functions are specialized at codegen time. `mono.go` handles collecting instances, creating specialized layouts, and defining specialized methods.
 
+**M:N Scheduler** (`codegen/sched.go`): GMP model — G (goroutine/LLVM coroutine), P (processor with 256-slot ring buffer run queue), M (OS thread). Key concurrency invariants:
+- **Park mutex protocol**: Goroutines store the channel/done mutex in `G.park_mutex` before `coro.suspend`. The scheduler unlocks it after `coro.resume` returns. This prevents enqueue-before-suspend races — the waker must acquire the same mutex, blocking until suspend completes.
+- **park_mutex = null means yield**: The scheduler re-enqueues the goroutine (cooperative preemption). park_mutex != null means park — the goroutine is on a waiter list and will be woken by another goroutine.
+- **Select blocking uses yield-and-retry**: Because select involves multiple channel mutexes but park_mutex can only hold one, blocking select yields (park_mutex=null) and retries the lock→try→unlock cycle until a case is ready. This avoids multi-mutex enqueue-before-suspend and double-wake races.
+- **Park_m spurious wakeup protection**: `park_m` loops on `cond_wait` checking `M.spinning` flag (set by `wake_m` before signaling). Prevents spurious wakeups from corrupting the idle M stack.
+- **Work stealing lock order**: `steal_work` locks both thief and victim P's in address order (ptrtoint comparison) to prevent ABBA deadlock between concurrent stealers.
+- **Waiter lists**: Intrusive linked list via `G.wait_next`. Protected by channel mutex. `promise_waiter_enqueue/dequeue/remove/wake_all` helpers in sched.go.
+- **Sysmon**: Background thread sets `G.preempt=1` every 10ms; yield checks at loop back-edges call `coro.suspend`.
+
 **Standard library**: `.pr` files in `std/` are embedded via `go:embed` and merged into user AST before sema. Runtime support is C code in `runtime/` linked by clang.
 
 ## Test Patterns
@@ -143,8 +152,9 @@ Methods must be declared inside the type body. Numeric literals infer as `int`/`
 - `docs/stages.md` — implementation roadmap with deferred bug tracker
 - `docs/language-design.md` — full language design proposal
 - `compiler/internal/codegen/compiler.go` — codegen entry, type layouts, scope cleanup
-- `compiler/internal/codegen/stmt.go` — statement codegen, drop/close emission
-- `compiler/internal/codegen/expr.go` — expression codegen, all call variants
+- `compiler/internal/codegen/sched.go` — M:N scheduler: GMP structs, sched_loop, park/wake, steal, shutdown
+- `compiler/internal/codegen/stmt.go` — statement codegen, drop/close emission, select
+- `compiler/internal/codegen/expr.go` — expression codegen, channel send/recv, go blocks
 - `compiler/internal/sema/check.go` — sema orchestration
 - `compiler/internal/sema/info.go` — sema output (type map, objects, lambda captures)
 - `compiler/internal/sema/decl.go` — type/method/func definition passes

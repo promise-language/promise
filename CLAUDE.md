@@ -6,6 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Promise is a statically-typed programming language with Dart-inspired syntax and Rust-inspired ownership semantics. The compiler is a single Go binary (`promise`) that uses ANTLR4 for parsing and targets LLVM IR (linked via clang to native binaries).
 
+**Primary goal**: Promise is designed for AI-agent efficiency — making it easy for LLMs to generate correct, self-contained programs in one shot or use them as tools. Every design decision should optimize for:
+- **Self-contained readability**: Looking at a single source file should be enough to understand with certainty what it does. Avoid hidden effects, implicit behaviors, and action-at-a-distance.
+- **Explicit over implicit**: Prefer explicit types, explicit error handling (`?`/`!`), explicit ownership (`~`/`&`), explicit mutability. No surprising defaults.
+- **Minimal context needed**: An AI agent should be able to generate a correct Promise program without needing to understand a large framework or ecosystem. The standard library should be small, orthogonal, and predictable.
+- **One obvious way**: Avoid multiple equivalent ways to do the same thing. Reduce ambiguity in both syntax and semantics so code generation is deterministic.
+
 ## Build & Test Commands
 
 All commands run from `compiler/`:
@@ -110,6 +116,8 @@ Methods must be declared inside the type body. Numeric literals infer as `int`/`
 
 - **Prefer Promise over IR**: When adding new standard library functionality (e.g., container methods, operators), implement in the Promise language (`std/*.pr`) rather than generating custom LLVM IR in codegen. Only use `native` methods when direct memory access or runtime calls are unavoidable (e.g., `Vector.push`, `Vector.[]`, string byte access). Non-native methods written in Promise are type-checked by sema, monomorphized automatically, and far easier to maintain.
 - **Test at every level**: Significant changes need both Go unit tests (`codegen_test.go`, `sema_test.go`) AND Promise-level e2e tests (`tests/` directory, run via `promise test`). Go tests verify IR shape; Promise tests verify runtime correctness.
+- **No hidden effects**: When designing language features, avoid implicit side effects, hidden control flow, or magic behaviors. Every effect should be visible at the call site. If a function can fail, it must be marked failable (`!`). If a value is consumed, it must be moved (`~`). If a variable is mutable, it must be declared so.
+- **Self-contained by default**: Design features so that programs are understandable in isolation. Avoid global state, implicit initialization, and ambient context. A reader (human or AI) should be able to read a `.pr` file top-to-bottom and know exactly what it does without consulting external docs or hidden configuration.
 
 ## Conventions
 

@@ -822,6 +822,13 @@ func (c *Compiler) resolveModuleName(ident *ast.IdentExpr) string {
 			if prefix, ok := c.moduleCanonical[mod.Path()]; ok {
 				return prefix
 			}
+			// Catalog modules have empty Path(); use catalog name as IR prefix.
+			// Catalog names are simple identifiers that pass through SanitizeIRPrefix
+			// unchanged, so catalogName == IRPrefix. This handles aliased imports
+			// like `use json as j;` where mod.Name() = "j" but IR prefix = "json".
+			if catName := mod.CatalogName(); catName != "" {
+				return catName
+			}
 			return mod.Name()
 		}
 	}

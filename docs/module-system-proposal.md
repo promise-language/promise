@@ -97,7 +97,6 @@ description = "JSON parsing and serialization"
 url = "https://github.com/promise-lang/http"
 commit = "e4f5a6b"
 description = "HTTP client and server"
-requires = ["json", "crypto"]
 
 [modules.crypto]
 url = "git@github.com:promise-lang/crypto.git"
@@ -109,8 +108,8 @@ Key properties:
 - **Flat namespace.** Module names are simple identifiers (`json`, `http`, `crypto`). No URLs, no paths, no version numbers in names.
 - **Fetch-ready URLs.** The `url` field stores the full git-fetchable URL including protocol and authentication info (e.g., `https://github.com/...`, `git@github.com:...`, `ssh://git@git.corp.com/...`). This is the URL passed directly to `git clone` — not the normalized canonical form used for identity/deduplication (which strips schemes and suffixes). The catalog entry is the source of truth for *how* to fetch each module.
 - **Pinned commits.** Each module points to an exact commit hash. No ranges, no "latest", no resolution.
-- **Declared dependencies.** Each module lists which other catalog modules it requires. These are validated by the catalog CI — circular dependencies are rejected.
-- **Self-contained.** Catalog modules may only depend on other catalog modules — never on remote or local modules. The catalog is a closed world: every dependency in the graph is tested, versioned, and shipped together. This is enforced by the catalog CI pipeline (see Section 8.1).
+- **Implicit dependencies.** Catalog modules declare dependencies via `use` declarations in their source code, not in catalog.toml. The compiler resolves them transitively at build time. The catalog CI validates that all inter-module dependencies form a DAG (no cycles).
+- **Self-contained.** Catalog modules may only depend on other catalog modules — never on remote or local modules. The catalog is a closed world: every dependency in the graph is tested, versioned, and shipped together. This is enforced at build time (catalog modules with `[require]` entries are rejected) and by the catalog CI pipeline (see Section 8.1).
 
 ### 3.3 What's NOT in the Catalog
 

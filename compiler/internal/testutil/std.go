@@ -2,19 +2,24 @@
 package testutil
 
 import (
-	"os"
-	"path/filepath"
+	"embed"
 	"sort"
 	"strings"
 )
 
-// LoadStdFiles reads all std/*.pr files and concatenates them into a single source string.
-// The path is relative to the calling test package (3 levels up from internal/<pkg>/).
+// Embed std/*.pr files copied by `make resources` into testdata/std/.
+// This ensures Go's build cache tracks std file changes — when std files
+// are modified and `make resources` re-copies them, tests are rebuilt.
+//
+//go:embed testdata/std/*.pr
+var stdFS embed.FS
+
+// LoadStdFiles reads all embedded std/*.pr files and concatenates them
+// into a single source string suitable for parsing by ANTLR.
 func LoadStdFiles() string {
-	stdDir := filepath.Join("..", "..", "..", "std")
-	entries, err := os.ReadDir(stdDir)
+	entries, err := stdFS.ReadDir("testdata/std")
 	if err != nil {
-		panic("cannot read std directory: " + err.Error())
+		panic("cannot read embedded std directory: " + err.Error())
 	}
 	var names []string
 	for _, e := range entries {
@@ -25,9 +30,9 @@ func LoadStdFiles() string {
 	sort.Strings(names)
 	var b strings.Builder
 	for _, name := range names {
-		data, err := os.ReadFile(filepath.Join(stdDir, name))
+		data, err := stdFS.ReadFile("testdata/std/" + name)
 		if err != nil {
-			panic("cannot read std file " + name + ": " + err.Error())
+			panic("cannot read embedded std file " + name + ": " + err.Error())
 		}
 		b.Write(data)
 		b.WriteByte('\n')

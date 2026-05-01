@@ -2548,12 +2548,7 @@ func (ml *moduleLoader) loadRemote(remoteURL, alias string) (*sema.ModuleInfo, e
 					return nil, fmt.Errorf("replace %s → %s: %w", remoteURL, localPath, err)
 				}
 				// Override identity: replaced remote modules use the remote URL identity.
-				// Read back the identity that load() stored, then replace with URL identity.
-				oldID := mi.GlobalIdentity
-				mi.GlobalIdentity = module.GlobalIdentityForRemote(normalized)
-				mi.IRPrefix = module.SanitizeIRPrefix(mi.GlobalIdentity)
-				delete(ml.globalIdentities, oldID)
-				ml.globalIdentities[mi.GlobalIdentity] = mi.AbsDir
+				ml.overrideIdentity(mi, module.GlobalIdentityForRemote(normalized))
 
 				ml.remoteResolved[normalized] = mi.AbsDir
 				if err := ml.mergeTransitivePins(mi.AbsDir, remoteURL); err != nil {
@@ -2587,12 +2582,7 @@ func (ml *moduleLoader) loadRemote(remoteURL, alias string) (*sema.ModuleInfo, e
 
 	// Override identity: remote modules use normalized URL as global identity,
 	// not the local path that load() derived from the checkout directory.
-	// Read back the identity that load() stored, then replace with URL identity.
-	oldID := mi.GlobalIdentity
-	mi.GlobalIdentity = module.GlobalIdentityForRemote(normalized)
-	mi.IRPrefix = module.SanitizeIRPrefix(mi.GlobalIdentity)
-	delete(ml.globalIdentities, oldID)
-	ml.globalIdentities[mi.GlobalIdentity] = mi.AbsDir
+	ml.overrideIdentity(mi, module.GlobalIdentityForRemote(normalized))
 
 	if err := ml.mergeTransitivePins(absDir, remoteURL); err != nil {
 		return nil, err
@@ -2603,7 +2593,6 @@ func (ml *moduleLoader) loadRemote(remoteURL, alias string) (*sema.ModuleInfo, e
 
 // loadCatalog resolves a catalog import by looking up the name in the embedded
 // catalog manifest, fetching the module via git, and loading it like a remote module.
-// Returns nil for "std" (handled specially by sema via stdScope).
 func (ml *moduleLoader) loadCatalog(catalogName string) (*sema.ModuleInfo, error) {
 	if catalogName == "std" {
 		return nil, nil // handled by sema directly
@@ -2623,11 +2612,7 @@ func (ml *moduleLoader) loadCatalog(catalogName string) (*sema.ModuleInfo, error
 				return nil, fmt.Errorf("replace %s → %s: %w", catalogName, localPath, err)
 			}
 			// Override identity: use catalog identity, not local path identity
-			oldID := mi.GlobalIdentity
-			mi.GlobalIdentity = module.GlobalIdentityForCatalog(catalogName)
-			mi.IRPrefix = module.SanitizeIRPrefix(mi.GlobalIdentity)
-			delete(ml.globalIdentities, oldID)
-			ml.globalIdentities[mi.GlobalIdentity] = mi.AbsDir
+			ml.overrideIdentity(mi, module.GlobalIdentityForCatalog(catalogName))
 			return mi, nil
 		}
 	}
@@ -2647,6 +2632,13 @@ func (ml *moduleLoader) loadCatalog(catalogName string) (*sema.ModuleInfo, error
 		return nil, fmt.Errorf("cannot fetch catalog module '%s': %w", catalogName, err)
 	}
 
+	// Catalog modules must not have remote dependencies — they can only
+	// depend on other catalog modules (resolved via their own use declarations).
+	cfg, cfgErr := module.ParseConfig(filepath.Join(absDir, "promise.toml"))
+	if cfgErr == nil && len(cfg.Require) > 0 {
+		return nil, fmt.Errorf("catalog module '%s' has [require] entries in promise.toml — catalog modules can only depend on other catalog modules", catalogName)
+	}
+
 	// Delegate to load() for parsing, sema, cycle detection, caching
 	mi, err := ml.load(absDir)
 	if err != nil {
@@ -2654,13 +2646,19 @@ func (ml *moduleLoader) loadCatalog(catalogName string) (*sema.ModuleInfo, error
 	}
 
 	// Override identity: catalog modules use their name as global identity
-	oldID := mi.GlobalIdentity
-	mi.GlobalIdentity = module.GlobalIdentityForCatalog(catalogName)
-	mi.IRPrefix = module.SanitizeIRPrefix(mi.GlobalIdentity)
-	delete(ml.globalIdentities, oldID)
-	ml.globalIdentities[mi.GlobalIdentity] = mi.AbsDir
+	ml.overrideIdentity(mi, module.GlobalIdentityForCatalog(catalogName))
 
 	return mi, nil
+}
+
+// overrideIdentity replaces a module's identity (GlobalIdentity + IRPrefix) and
+// updates the globalIdentities dedup map atomically.
+func (ml *moduleLoader) overrideIdentity(mi *sema.ModuleInfo, globalID string) {
+	oldID := mi.GlobalIdentity
+	mi.GlobalIdentity = globalID
+	mi.IRPrefix = module.SanitizeIRPrefix(globalID)
+	delete(ml.globalIdentities, oldID)
+	ml.globalIdentities[mi.GlobalIdentity] = mi.AbsDir
 }
 
 // mergeTransitivePins reads a module's promise.toml and merges its [require] entries

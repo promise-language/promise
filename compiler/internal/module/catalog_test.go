@@ -1,6 +1,7 @@
 package module
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -94,32 +95,6 @@ commit = "7c8d9e0"
 	}
 }
 
-func TestParseCatalogWithRequires(t *testing.T) {
-	data := []byte(`
-[catalog]
-epoch = "2026.3"
-
-[modules.http]
-url = "https://github.com/promise-lang/http"
-commit = "e4f5a6b"
-requires = ["json", "crypto"]
-`)
-	cat, err := ParseCatalog(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	entry := cat.Modules["http"]
-	if entry == nil {
-		t.Fatal("expected http entry")
-	}
-	if len(entry.Requires) != 2 {
-		t.Fatalf("expected 2 requires, got %d", len(entry.Requires))
-	}
-	if entry.Requires[0] != "json" || entry.Requires[1] != "crypto" {
-		t.Errorf("expected [json, crypto], got %v", entry.Requires)
-	}
-}
-
 func TestParseCatalogMissingURL(t *testing.T) {
 	data := []byte(`
 [catalog]
@@ -132,7 +107,7 @@ commit = "a1b2c3d"
 	if err == nil {
 		t.Fatal("expected error for missing url")
 	}
-	if !contains(err.Error(), "missing 'url'") {
+	if !strings.Contains(err.Error(), "missing 'url'") {
 		t.Errorf("expected 'missing url' error, got: %v", err)
 	}
 }
@@ -149,7 +124,7 @@ url = "https://github.com/promise-lang/json"
 	if err == nil {
 		t.Fatal("expected error for missing commit")
 	}
-	if !contains(err.Error(), "missing 'commit'") {
+	if !strings.Contains(err.Error(), "missing 'commit'") {
 		t.Errorf("expected 'missing commit' error, got: %v", err)
 	}
 }
@@ -243,68 +218,41 @@ commit = "a1b2c3d"
 	if err == nil {
 		t.Fatal("expected error for empty module name")
 	}
-	if !contains(err.Error(), "empty module name") {
+	if !strings.Contains(err.Error(), "empty module name") {
 		t.Errorf("expected 'empty module name' error, got: %v", err)
 	}
 }
 
-func TestParseCatalogEmptyRequires(t *testing.T) {
+func TestParseCatalogInvalidSectionHeader(t *testing.T) {
+	data := []byte(`
+[catalog]
+epoch = "2026.3"
+
+[modules.json
+url = "https://github.com/promise-lang/json"
+`)
+	_, err := ParseCatalog(data)
+	if err == nil {
+		t.Fatal("expected error for invalid section header")
+	}
+	if !strings.Contains(err.Error(), "invalid section header") {
+		t.Errorf("expected 'invalid section header' error, got: %v", err)
+	}
+}
+
+func TestParseCatalogInvalidKeyValueLine(t *testing.T) {
 	data := []byte(`
 [catalog]
 epoch = "2026.3"
 
 [modules.json]
-url = "https://github.com/promise-lang/json"
-commit = "a1b2c3d"
-requires = []
+this is not valid toml
 `)
-	cat, err := ParseCatalog(data)
-	if err != nil {
-		t.Fatal(err)
+	_, err := ParseCatalog(data)
+	if err == nil {
+		t.Fatal("expected error for invalid key=value line")
 	}
-	entry := cat.Lookup("json")
-	if entry == nil {
-		t.Fatal("expected json entry")
+	if !strings.Contains(err.Error(), "expected key = value") {
+		t.Errorf("expected 'expected key = value' error, got: %v", err)
 	}
-	if len(entry.Requires) != 0 {
-		t.Errorf("expected 0 requires, got %d", len(entry.Requires))
-	}
-}
-
-func TestParseTOMLArray(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected []string
-	}{
-		{`["json", "crypto"]`, []string{"json", "crypto"}},
-		{`["single"]`, []string{"single"}},
-		{`[]`, nil},
-		{`["a","b","c"]`, []string{"a", "b", "c"}},
-		{`[ "spaced" , "out" ]`, []string{"spaced", "out"}},
-	}
-	for _, tt := range tests {
-		result := parseTOMLArray(tt.input)
-		if len(result) != len(tt.expected) {
-			t.Errorf("parseTOMLArray(%q): expected %v, got %v", tt.input, tt.expected, result)
-			continue
-		}
-		for i := range result {
-			if result[i] != tt.expected[i] {
-				t.Errorf("parseTOMLArray(%q)[%d]: expected %q, got %q", tt.input, i, tt.expected[i], result[i])
-			}
-		}
-	}
-}
-
-func contains(s, sub string) bool {
-	return len(s) >= len(sub) && containsSubstring(s, sub)
-}
-
-func containsSubstring(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }

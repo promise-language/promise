@@ -5861,6 +5861,127 @@ func TestModuleIRPrefixUsedForIR(t *testing.T) {
 	assertNotContains(t, ir, "__mod_myalias_")
 }
 
+// --- Catalog Module Tests ---
+
+// generateIRWithCatalogModule sets up a module with catalog identity (bare name as
+// IRPrefix, keyed by catalog name in sema scopes) and compiles user source against it.
+func generateIRWithCatalogModule(t *testing.T, catalogName, modSrc, userSrc string) string {
+	t.Helper()
+	modInfo, modScope := parseModuleSource(t, catalogName, modSrc)
+	// Override identity to match catalog convention: bare name
+	modInfo.GlobalIdentity = catalogName
+	modInfo.IRPrefix = catalogName
+	modInfo.Path = catalogName
+
+	stdInput := antlr.NewInputStream(stdAll)
+	stdLexer := parser.NewPromiseLexer(stdInput)
+	stdLexer.RemoveErrorListeners()
+	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
+	stdP := parser.NewPromiseParser(stdStream)
+	stdP.RemoveErrorListeners()
+	stdTree := stdP.CompilationUnit()
+	stdFile, errs := ast.Build("std.pr", stdTree)
+	if len(errs) > 0 {
+		t.Fatalf("std AST build errors: %v", errs)
+	}
+	for _, d := range stdFile.Decls {
+		switch dd := d.(type) {
+		case *ast.FuncDecl:
+			dd.IsStd = true
+		case *ast.TypeDecl:
+			dd.IsStd = true
+		case *ast.EnumDecl:
+			dd.IsStd = true
+		}
+	}
+
+	userInput := antlr.NewInputStream(userSrc)
+	userLexer := parser.NewPromiseLexer(userInput)
+	userLexer.RemoveErrorListeners()
+	userStream := antlr.NewCommonTokenStream(userLexer, antlr.TokenDefaultChannel)
+	userP := parser.NewPromiseParser(userStream)
+	userP.RemoveErrorListeners()
+	userTree := userP.CompilationUnit()
+	userFile, errs := ast.Build("test.pr", userTree)
+	if len(errs) > 0 {
+		t.Fatalf("user AST build errors: %v", errs)
+	}
+
+	mergedDecls := make([]ast.Decl, 0, len(stdFile.Decls)+len(userFile.Decls))
+	mergedDecls = append(mergedDecls, stdFile.Decls...)
+	mergedDecls = append(mergedDecls, userFile.Decls...)
+	userFile.Decls = mergedDecls
+
+	// Catalog modules are keyed by their catalog name (not "./name")
+	moduleScopes := map[string]*types.Scope{catalogName: modScope}
+	info, semaErrs := sema.CheckWithModules(userFile, moduleScopes)
+	if len(semaErrs) > 0 {
+		t.Fatalf("sema errors: %v", semaErrs)
+	}
+	info.ModuleInfos = map[string]*sema.ModuleInfo{catalogName: modInfo}
+
+	result := Compile(userFile, info, "")
+	return result.Module.String()
+}
+
+func TestCatalogModuleCallQualified(t *testing.T) {
+	ir := generateIRWithCatalogModule(t, "json",
+		"parse() int `public { return 1; }",
+		`
+		use json;
+		main() {
+			int x = json.parse();
+		}
+		`,
+	)
+	assertContains(t, ir, "define i64 @__mod_json_parse")
+	assertContains(t, ir, "call i64 @__mod_json_parse")
+}
+
+func TestCatalogModuleAliasedCall(t *testing.T) {
+	// Regression test: aliased catalog imports must use the catalog name
+	// as IR prefix, not the alias.
+	ir := generateIRWithCatalogModule(t, "json",
+		"parse() int `public { return 1; }",
+		`
+		use json as j;
+		main() {
+			int x = j.parse();
+		}
+		`,
+	)
+	assertContains(t, ir, "define i64 @__mod_json_parse")
+	assertContains(t, ir, "call i64 @__mod_json_parse")
+	assertNotContains(t, ir, "__mod_j_")
+}
+
+func TestCatalogModuleTypeQualified(t *testing.T) {
+	ir := generateIRWithCatalogModule(t, "json",
+		"type Value `public { int x; }",
+		`
+		use json;
+		main() {
+			v := json.Value(x: 42);
+		}
+		`,
+	)
+	assertContains(t, ir, "promise_typeinfo___mod_json_Value")
+}
+
+func TestCatalogModuleGlobImport(t *testing.T) {
+	ir := generateIRWithCatalogModule(t, "json",
+		"parse() int `public { return 1; }",
+		`
+		use json as _;
+		main() {
+			int x = parse();
+		}
+		`,
+	)
+	assertContains(t, ir, "define i64 @__mod_json_parse")
+	assertContains(t, ir, "call i64 @__mod_json_parse")
+}
+
 // --- Operator Method Dispatch Tests ---
 
 func TestIncDecVariable(t *testing.T) {

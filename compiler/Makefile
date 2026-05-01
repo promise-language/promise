@@ -40,11 +40,16 @@ generate: $(ANTLR_JAR)
 		-o ../$(PARSER_PKG) \
 		PromiseParser.g4
 
+TESTDATA_STD  := internal/testutil/testdata/std
+
 resources:
 	@rm -rf $(RESOURCES)/std
 	@mkdir -p $(RESOURCES)/std
 	@cp ../std/*.pr $(RESOURCES)/std/
 	@cp ../catalog.toml $(RESOURCES)/catalog.toml
+	@rm -rf $(TESTDATA_STD)
+	@mkdir -p $(TESTDATA_STD)
+	@cp ../std/*.pr $(TESTDATA_STD)/
 
 musl-crt:
 	@mkdir -p $(MUSL_CRT_DST)
@@ -71,6 +76,7 @@ clean:
 	rm -f $(BINARY)
 	rm -rf $(PARSER_PKG)/*.go $(PARSER_PKG)/*.interp $(PARSER_PKG)/*.tokens
 	rm -rf $(RESOURCES)
+	rm -rf $(TESTDATA_STD)
 
 wasm-alloc:
 	clang --target=wasm32-unknown-wasi -O2 -nostdlib -c \

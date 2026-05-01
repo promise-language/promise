@@ -9,11 +9,10 @@ import (
 
 // CatalogEntry describes a single module in the catalog.
 type CatalogEntry struct {
-	Name        string   // module name (the TOML key, e.g., "json")
-	URL         string   // fetch-ready git URL (e.g., "https://github.com/promise-lang/json")
-	Commit      string   // pinned commit hash
-	Description string   // human-readable description
-	Requires    []string // catalog-module dependencies (e.g., ["json", "crypto"])
+	Name        string // module name (the TOML key, e.g., "json")
+	URL         string // fetch-ready git URL (e.g., "https://github.com/promise-lang/json")
+	Commit      string // pinned commit hash
+	Description string // human-readable description
 }
 
 // Catalog is the parsed representation of the embedded catalog.toml.
@@ -41,7 +40,6 @@ func (c *Catalog) Lookup(name string) *CatalogEntry {
 //	url = "https://github.com/promise-lang/json"
 //	commit = "a1b2c3d"
 //	description = "JSON parsing and serialization"
-//	requires = ["crypto"]
 func ParseCatalog(data []byte) (*Catalog, error) {
 	cat := &Catalog{
 		Modules: make(map[string]*CatalogEntry),
@@ -105,8 +103,6 @@ func ParseCatalog(data []byte) (*Catalog, error) {
 				currentEntry.Commit = val
 			case "description":
 				currentEntry.Description = val
-			case "requires":
-				currentEntry.Requires = parseTOMLArray(val)
 			}
 		}
 	}
@@ -126,34 +122,4 @@ func ParseCatalog(data []byte) (*Catalog, error) {
 	}
 
 	return cat, nil
-}
-
-// parseTOMLArray parses a simple TOML array like ["json", "crypto"].
-// Only supports flat arrays of strings.
-func parseTOMLArray(s string) []string {
-	s = strings.TrimSpace(s)
-	if !strings.HasPrefix(s, "[") || !strings.HasSuffix(s, "]") {
-		// Not an array — treat as single value
-		s = stripQuotes(s)
-		if s == "" {
-			return nil
-		}
-		return []string{s}
-	}
-	// Strip brackets
-	s = s[1 : len(s)-1]
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return nil
-	}
-	parts := strings.Split(s, ",")
-	var result []string
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		p = stripQuotes(p)
-		if p != "" {
-			result = append(result, p)
-		}
-	}
-	return result
 }

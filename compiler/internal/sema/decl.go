@@ -421,6 +421,22 @@ func (c *Checker) defineMethod(named *types.Named, md *ast.MethodDecl, typeName 
 		c.errorf(md.Pos(), "method %s.%s must have a body (or be marked `abstract or `native)", typeName, md.Name)
 	}
 
+	// Validate: generic methods cannot be abstract, native, getter, or setter
+	if len(sig.TypeParams()) > 0 {
+		if abstract {
+			c.errorf(md.Pos(), "generic method %s.%s cannot be abstract", typeName, md.Name)
+		}
+		if native {
+			c.errorf(md.Pos(), "generic method %s.%s cannot be native", typeName, md.Name)
+		}
+		if md.IsGetter {
+			c.errorf(md.Pos(), "generic method %s.%s cannot be a getter", typeName, md.Name)
+		}
+		if md.IsSetter {
+			c.errorf(md.Pos(), "generic method %s.%s cannot be a setter", typeName, md.Name)
+		}
+	}
+
 	isFactory := c.hasAnnotation(md.Annotations, "factory")
 	isGlobal := c.hasAnnotation(md.Annotations, "global")
 	isMono := c.hasAnnotation(md.Annotations, "mono")
@@ -490,6 +506,20 @@ func (c *Checker) nativeMethodExists(named *types.Named, md *ast.MethodDecl) boo
 }
 
 func (c *Checker) resolveMethodSignature(named *types.Named, md *ast.MethodDecl) *types.Signature {
+	// Open type-params scope if generic method and create TypeParam objects
+	var methodTParams []*types.TypeParam
+	if len(md.TypeParams) > 0 {
+		c.openScope(md, "methodtypeparams:"+md.Name)
+		methodTParams = make([]*types.TypeParam, len(md.TypeParams))
+		for i, tp := range md.TypeParams {
+			tn := types.NewTypeName(tpos(tp.Pos()), tp.Name, nil)
+			methodTParams[i] = types.NewTypeParam(tn, nil, i)
+			c.insert(tn)
+		}
+		c.resolveTypeParamConstraints(md.TypeParams, methodTParams)
+		defer c.closeScope()
+	}
+
 	// Resolve receiver
 	var recv *types.Param
 	isFactory := c.hasAnnotation(md.Annotations, "factory")
@@ -551,7 +581,11 @@ func (c *Checker) resolveMethodSignature(named *types.Named, md *ast.MethodDecl)
 		}
 	}
 
-	return types.NewSignature(recv, params, result, canError)
+	sig := types.NewSignature(recv, params, result, canError)
+	if len(methodTParams) > 0 {
+		sig.SetTypeParams(methodTParams)
+	}
+	return sig
 }
 
 func (c *Checker) defineEnum(d *ast.EnumDecl) {

@@ -928,6 +928,58 @@ type Hashable {
 
 All primitive types (`int`, `f64`, `string`, `bool`, etc.) implement `Eq` and `Ord`. `string` and `int` also implement `Hashable`. User-defined types can implement these interfaces to participate in generic algorithms like `sort`, `map` key lookup, and stream combinators like `distinct()`, `min()`, and `max()`.
 
+#### Method-Level Generics
+
+Methods can have their own type parameters, independent of the enclosing type's generic parameters. This enables transformation methods like `map[R]` where the return type differs from the owner's type parameter.
+
+```promise
+type Box[T] {
+  T value;
+
+  // Method-level type param R, independent of type-level T
+  transform[R]((T) -> R fn) R {
+    return fn(this.value);
+  }
+
+  // Multiple method-level type params
+  zip[A, B]((T) -> A fa, (T) -> B fb) Pair[A, B] {
+    return Pair[A, B](first: fa(this.value), second: fb(this.value));
+  }
+}
+
+main() {
+  b := Box[int](value: 42);
+  string s = b.transform[string](|int x| -> "value: {x}");
+  int doubled = b.transform[int](|int x| -> x * 2);
+}
+```
+
+**Call syntax:** `obj.method[TypeArgs](args)` — type arguments are provided in square brackets between the method name and the argument list. Type arguments are always explicit (no inference).
+
+**Rules:**
+
+- Method-level type parameters are declared after the method name: `method[R, S](params) ReturnType { ... }`
+- Both the method's own type params and the owner's type params are in scope within the method body
+- Method-level generics are monomorphized independently — `Box[int].transform[string]` and `Box[int].transform[f64]` produce separate specialized functions
+- **Cannot be virtual or abstract** — generic methods use direct dispatch only (same restriction as C++ virtual templates). A generic method is excluded from the vtable
+- Generic methods can be inherited — a child type inherits the parent's generic methods and can call them with any type arguments
+- Generic methods work on both generic and non-generic owner types
+
+**Interaction with type-level generics:** When a generic method is called on a generic type, substitution composes both levels. Calling `container.map_to[string](fn)` on a `Container[int]` resolves `T=int` (from the type) and `R=string` (from the method call):
+
+```promise
+type Container[T] {
+  T item;
+
+  map_to[R]((T) -> R fn) R {
+    return fn(this.item);
+  }
+}
+
+c := Container[int](item: 7);
+string result = c.map_to[string](|int x| -> "got {x}");
+```
+
 ### 5.6 Enums (Algebraic Data Types)
 
 ```promise

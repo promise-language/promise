@@ -288,6 +288,9 @@ func (n *Named) AllVirtualMethods() []*Method {
 		if m.IsNative() {
 			continue
 		}
+		if len(m.Sig().TypeParams()) > 0 {
+			continue // generic methods cannot be virtual — direct dispatch only
+		}
 		key := methodSlotKey(m)
 		if !seen[key] {
 			seen[key] = true

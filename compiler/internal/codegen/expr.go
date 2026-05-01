@@ -725,8 +725,11 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 		}
 	}
 
-	// Generic function call: callee is IndexExpr (identity[int](42))
+	// Generic function/method call: callee is IndexExpr (identity[int](42) or obj.method[int](42))
 	if idx, ok := e.Callee.(*ast.IndexExpr); ok {
+		if member, ok := idx.Target.(*ast.MemberExpr); ok {
+			return c.genGenericMethodCall(e, idx, member)
+		}
 		return c.genGenericFuncCall(e, idx)
 	}
 
@@ -913,6 +916,82 @@ func (c *Compiler) genGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr) value
 	}
 
 	return c.block.NewCall(fn, argVals...)
+}
+
+// genGenericMethodCall generates a call to a monomorphized generic method.
+// Example: box.transform[string](fn) → Box.transform__string(this, fn)
+// Example: box.transform[string](fn) where box is Box[int] → Box__int.transform__string(this, fn)
+func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, idx *ast.IndexExpr, member *ast.MemberExpr) value.Value {
+	targetType := c.info.Types[member.Target]
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+
+	named := extractNamed(targetType)
+	if named == nil {
+		panic(fmt.Sprintf("codegen: cannot resolve type for generic method call on %T", targetType))
+	}
+
+	method := named.LookupMethod(member.Field)
+	if method == nil {
+		panic(fmt.Sprintf("codegen: no method %s on type %s", member.Field, named))
+	}
+
+	// Build mono method name: DefiningType.method__typearg1__typearg2
+	// Use the method's defining type (which may be a parent), not the target type.
+	defOwnerName := c.resolveMethodOwner(named, member.Field)
+	if defOwnerName != named.Obj().Name() {
+		// Inherited — resolve mono parent name if the parent is generic
+		defOwnerName = c.resolveMonoParentName(named, targetType, defOwnerName)
+	} else {
+		defOwnerName = c.resolveTypeName(targetType)
+	}
+	mangledName := mangleMethodName(defOwnerName, member.Field, false)
+	allTypeArgExprs := append([]ast.Expr{idx.Index}, idx.ExtraIndices...)
+	for _, argExpr := range allTypeArgExprs {
+		typeArgType := c.info.Types[argExpr]
+		if c.typeSubst != nil && typeArgType != nil {
+			typeArgType = types.Substitute(typeArgType, c.typeSubst)
+		}
+		mangledName += "__" + typeArgSuffix(typeArgType)
+	}
+
+	fn, ok := c.funcs[mangledName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undefined monomorphic method %q", mangledName))
+	}
+
+	// Generate receiver
+	var args []value.Value
+	if method.Sig().Recv() != nil {
+		target := c.genExpr(member.Target)
+		if _, isThis := member.Target.(*ast.ThisExpr); isThis {
+			args = append(args, target)
+		} else if isContainerType(targetType) {
+			args = append(args, target)
+		} else if isPrimitiveScalar(named) {
+			args = append(args, target)
+		} else if named.IsValueType() {
+			args = append(args, c.valueTypeReceiverPtr(target, targetType))
+		} else {
+			args = append(args, c.extractInstancePtr(target))
+		}
+	}
+
+	// Generate arguments
+	var argVals []value.Value
+	var argTypes []types.Type
+	for _, arg := range e.Args {
+		argVals = append(argVals, c.genExpr(arg.Value))
+		argTypes = append(argTypes, c.info.Types[arg.Value])
+		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		}
+	}
+	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params())
+	args = append(args, argVals...)
+
+	return c.block.NewCall(fn, args...)
 }
 
 // --- super() calls ---

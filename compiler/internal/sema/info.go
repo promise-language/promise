@@ -12,6 +12,15 @@ type FuncInstance struct {
 	Sig      *types.Signature // substituted signature (no TypeParams)
 }
 
+// MethodInstance records a concrete instantiation of a generic method.
+type MethodInstance struct {
+	Owner     *types.Named     // origin type owning the method
+	OwnerInst *types.Instance  // non-nil when owner is a generic instance (e.g., Box[int])
+	Method    *types.Method    // the generic method
+	TypeArgs  []types.Type     // method-level concrete type arguments
+	Sig       *types.Signature // fully substituted signature (no TypeParams)
+}
+
 // CapturedVar records a variable captured by a lambda/closure.
 type CapturedVar struct {
 	Obj    types.Object // the captured variable (always *types.Var)
@@ -70,6 +79,9 @@ type Info struct {
 
 	// FuncInstances records all concrete generic function instantiations for later monomorphization.
 	FuncInstances []*FuncInstance
+
+	// MethodInstances records all concrete generic method instantiations for later monomorphization.
+	MethodInstances []*MethodInstance
 
 	// Tests records functions annotated with `test.
 	Tests []*types.Func

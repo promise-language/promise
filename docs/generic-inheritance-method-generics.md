@@ -45,27 +45,25 @@ Change `Named.parents` from `[]*Named` to `[]ParentRef`. Every consumer of paren
 
 ---
 
-## Feature 2: Method-Level Generics
+## Feature 2: Method-Level Generics (Done)
 
 **Goal**: `map[R]((T) -> R transform) Stream[R]` — methods with their own type parameters.
 
-### Current State
+### Implementation Steps (all completed)
 
-- Grammar already supports `typeParams?` on `methodDecl`
-- AST has `MethodDecl.TypeParams`, `Signature` has `typeParams`
-- But sema never processes method type params, and codegen has no method-level monomorphization
+| Step | Phase | Change | Status |
+|------|-------|--------|--------|
+| B1 | sema/decl | `resolveMethodSignature`: process `md.TypeParams`, create TypeParam objects, set on signature | Done |
+| B2 | sema/info | Add `MethodInstance{Owner, Method, TypeArgs, Sig}` tracking | Done |
+| B3 | sema/expr | Generic method instantiation: `stream.map[string]` → member access returns generic Signature, index expr instantiates, record `MethodInstance` | Done |
+| B4 | sema/check | Put method type params in scope during body checking | Done |
+| B5 | codegen/mono | Method-level monomorphization: names like `Box__int.convert__string`, combined substitution | Done |
+| B6 | codegen/expr | `genGenericMethodCall`: detect IndexExpr+MemberExpr, dispatch to mono name | Done |
+| B7 | codegen/compiler | Wire up in compilation pipeline (main + module paths) | Done |
+| B8 | codegen | Skip generic methods in non-mono passes (declareTypeMethods, defineTypeMethods, mono methods) | Done |
+| B9 | tests | 7 sema tests, 2 codegen IR tests, 8 e2e tests | Done |
 
-### Implementation Steps
-
-| Step | Phase | Change |
-|------|-------|--------|
-| B1 | sema/decl | `resolveMethodSignature`: process `md.TypeParams`, create TypeParam objects, set on signature |
-| B2 | sema/info | Add `MethodInstance{Owner, Method, TypeArgs, Sig}` tracking |
-| B3 | sema/expr | Generic method instantiation: `stream.map[string]` → member access returns generic Signature, index expr instantiates, record `MethodInstance` |
-| B4 | sema/check | Put method type params in scope during body checking |
-| B5 | codegen/mono | Method-level monomorphization: names like `Stream__int.map__string`, combined substitution |
-| B6 | codegen/expr | `genMethodCall`: detect generic method instance, dispatch to mono name |
-| B7 | tests | Sema, codegen, e2e tests |
+**Key fix**: `substSignature` in `types/subst.go` updated to preserve method-level TypeParams when only type-level params are being substituted. Without this, `resolveInstanceMember` would strip method TypeParams.
 
 **Restriction**: Generic methods cannot be virtual/abstract (same as C++ virtual templates). Direct dispatch only.
 
@@ -73,7 +71,7 @@ Change `Named.parents` from `[]*Named` to `[]ParentRef`. Every consumer of paren
 
 ## Implementation Order
 
-Phase A first (generic inheritance), then Phase B (method generics), then Phase C (integration: `Stream[T].map[R]` on `Range[int]`).
+Phase A first (generic inheritance — done), then Phase B (method generics — done), then Phase C (integration: `Stream[T].map[R]` on `Range[int]`).
 
 ### Core Challenge
 
@@ -81,3 +79,11 @@ Phase A first (generic inheritance), then Phase B (method generics), then Phase 
 1. Range's `T=int`
 2. Stream's `T=Range's T=int`
 3. Method's `R=string`
+
+---
+
+## Known Bugs (Pre-existing)
+
+| Bug | Scope | Status |
+|-----|-------|--------|
+| Failable `? e { ... }` handler phi node type mismatch on method calls — the phi node in the merge block has a type mismatch between the success path (value type) and the handler path (recovery value). Discovered during method generics work but affects all methods, not just generic ones. | codegen | Open |

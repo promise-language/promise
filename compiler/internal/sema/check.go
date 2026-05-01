@@ -393,6 +393,15 @@ func (c *Checker) checkMethodBody(typeName string, md *ast.MethodDecl, m *types.
 		c.errorf(md.Pos(), "generator methods cannot be failable")
 	}
 
+	// For generic methods, open type param scope so body can reference method-level type params
+	if len(m.Sig().TypeParams()) > 0 {
+		c.openScope(md, "methodtypeparams:"+typeName+"."+md.Name)
+		for _, tp := range m.Sig().TypeParams() {
+			c.insert(tp.Obj())
+		}
+		defer c.closeScope()
+	}
+
 	c.openScope(md.Body, "method:"+typeName+"."+md.Name)
 
 	// Bind receiver as "this"

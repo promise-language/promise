@@ -368,6 +368,7 @@ func Compile(file *ast.File, info *sema.Info, target string) *CompileResult {
 	monoInstances := collectMonoInstances(info)
 	c.computeMonoLayouts(monoInstances)
 	monoFuncInstances := collectMonoFuncInstances(info)
+	monoMethodInstances := collectMonoMethodInstances(info)
 
 	c.declareIntrinsics()
 	c.declareMathIntrinsics()
@@ -394,6 +395,7 @@ func Compile(file *ast.File, info *sema.Info, target string) *CompileResult {
 	c.declareFuncs(file)
 	c.defineF64ToStringBridge() // bridge promise_f64_to_string → Promise _f64_to_str
 	c.declareMonoFuncs(file, monoFuncInstances)
+	c.declareMonoMethodInstances(file, monoMethodInstances)
 
 	// Compile imported modules into the same IR module (inline strategy)
 	c.compileModules()
@@ -402,6 +404,7 @@ func Compile(file *ast.File, info *sema.Info, target string) *CompileResult {
 	c.defineMonoMethods(file, monoInstances)
 	c.defineFuncs(file)
 	c.defineMonoFuncs(file, monoFuncInstances)
+	c.defineMonoMethodInstances(file, monoMethodInstances)
 
 	// Wrap user main() as G0 in the M:N scheduler
 	c.wrapMainWithScheduler()
@@ -2861,6 +2864,7 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo) {
 	monoInstances := collectMonoInstances(modInfo.SemaInfo)
 	c.computeMonoLayouts(monoInstances)
 	monoFuncInstances := collectMonoFuncInstances(modInfo.SemaInfo)
+	monoMethodInstances := collectMonoMethodInstances(modInfo.SemaInfo)
 
 	// 4. Declare module externs
 	modExterns := collectExterns(modFile, modInfo.SemaInfo)
@@ -2878,6 +2882,7 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo) {
 	// 7. Declare and define module functions
 	c.declareModuleFuncs(modFile, irName)
 	c.declareMonoFuncs(modFile, monoFuncInstances)
+	c.declareMonoMethodInstances(modFile, monoMethodInstances)
 
 	// 8. Define module method bodies
 	c.defineModuleTypeMethods(modFile, irName)
@@ -2886,6 +2891,7 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo) {
 	// 9. Define module function bodies
 	c.defineModuleFuncs(modFile, irName)
 	c.defineMonoFuncs(modFile, monoFuncInstances)
+	c.defineMonoMethodInstances(modFile, monoMethodInstances)
 
 	// Restore main context
 	c.info = savedInfo
@@ -3063,6 +3069,9 @@ func (c *Compiler) declareModuleTypeMethods(file *ast.File, moduleName string) {
 			if md.Body == nil {
 				continue
 			}
+			if len(md.TypeParams) > 0 {
+				continue // generic method — handled by mono method instances
+			}
 			m := c.lookupAnyMethod(named, md.Name, md.IsGetter, md.IsSetter)
 			if m == nil || m.Sig() == nil {
 				continue
@@ -3120,6 +3129,9 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 		for _, md := range td.Methods {
 			if md.Body == nil {
 				continue
+			}
+			if len(md.TypeParams) > 0 {
+				continue // generic method — handled by mono method instances
 			}
 			m := c.lookupAnyMethod(named, md.Name, md.IsGetter, md.IsSetter)
 			if m == nil || m.Sig() == nil {
@@ -3254,6 +3266,9 @@ func (c *Compiler) declareTypeMethods(file *ast.File) {
 			if md.Body == nil {
 				continue // abstract or native
 			}
+			if len(md.TypeParams) > 0 {
+				continue // generic method — handled by mono method instances
+			}
 			m := c.lookupAnyMethod(named, md.Name, md.IsGetter, md.IsSetter)
 			if m == nil || m.Sig() == nil {
 				continue
@@ -3306,6 +3321,9 @@ func (c *Compiler) defineTypeMethods(file *ast.File) {
 		for _, md := range td.Methods {
 			if md.Body == nil {
 				continue
+			}
+			if len(md.TypeParams) > 0 {
+				continue // generic method — handled by mono method instances
 			}
 			m := c.lookupAnyMethod(named, md.Name, md.IsGetter, md.IsSetter)
 			if m == nil || m.Sig() == nil {

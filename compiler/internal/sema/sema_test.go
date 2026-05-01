@@ -8688,3 +8688,146 @@ func TestGenericInheritanceConcreteOverride(t *testing.T) {
 		}
 	`)
 }
+
+// --- Method-level generics tests ---
+
+func TestMethodGenericBasic(t *testing.T) {
+	expectNoErrors(t, checkErrs(t, `
+		type Echo {
+			echo[T](T val) T { return val; }
+		}
+		main() {
+			e := Echo();
+			int x = e.echo[int](42);
+			string s = e.echo[string]("hi");
+		}
+	`))
+}
+
+func TestMethodGenericOnGenericType(t *testing.T) {
+	expectNoErrors(t, checkErrs(t, `
+		type Box[T] {
+			T item;
+			convert[R](R val) R { return val; }
+		}
+		main() {
+			b := Box[int](item: 1);
+			string s = b.convert[string]("hello");
+		}
+	`))
+}
+
+func TestMethodGenericMultipleTypeParams(t *testing.T) {
+	expectNoErrors(t, checkErrs(t, `
+		type Mapper {
+			pair[A, B](A a, B b) A { return a; }
+		}
+		main() {
+			m := Mapper();
+			int x = m.pair[int, string](42, "hi");
+		}
+	`))
+}
+
+func TestMethodGenericCannotBeAbstract(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo {
+			bar[T]() T `+"`"+`abstract;
+		}
+		main() {}
+	`)
+	expectError(t, errs, "generic method Foo.bar cannot be abstract")
+}
+
+func TestMethodGenericCannotBeNative(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo {
+			bar[T]() T `+"`"+`native;
+		}
+		main() {}
+	`)
+	expectError(t, errs, "generic method Foo.bar cannot be native")
+}
+
+func TestMethodGenericWrongTypeArgCount(t *testing.T) {
+	errs := checkErrs(t, `
+		type Echo {
+			echo[T](T val) T { return val; }
+		}
+		main() {
+			e := Echo();
+			e.echo[int, string](42);
+		}
+	`)
+	expectError(t, errs, "expects 1 type arguments, got 2")
+}
+
+func TestMethodGenericInherited(t *testing.T) {
+	expectNoErrors(t, checkErrs(t, `
+		type Parent {
+			echo[T](T val) T { return val; }
+		}
+		type Child is Parent {
+			int extra;
+		}
+		main() {
+			c := Child(extra: 1);
+			int x = c.echo[int](42);
+		}
+	`))
+}
+
+func TestMethodGenericFailable(t *testing.T) {
+	expectNoErrors(t, checkErrs(t, `
+		type MyErr is error { string message; }
+		type Parser {
+			try_parse[T](T val) T! { return val; }
+		}
+		main() {
+			p := Parser();
+			int x = p.try_parse[int](42)!;
+		}
+	`))
+}
+
+func TestMethodGenericTracksMethodInstance(t *testing.T) {
+	info, errs := checkSource(t, `
+		type Echo {
+			echo[T](T val) T { return val; }
+		}
+		main() {
+			e := Echo();
+			e.echo[int](42);
+			e.echo[string]("hi");
+		}
+	`)
+	expectNoErrors(t, errs)
+	if len(info.MethodInstances) != 2 {
+		t.Fatalf("expected 2 MethodInstances, got %d", len(info.MethodInstances))
+	}
+}
+
+func TestMethodGenericVoidReturn(t *testing.T) {
+	expectNoErrors(t, checkErrs(t, `
+		type Logger {
+			log[T](T val) {}
+		}
+		main() {
+			l := Logger();
+			l.log[int](42);
+		}
+	`))
+}
+
+func TestMethodGenericOnGenericChildType(t *testing.T) {
+	expectNoErrors(t, checkErrs(t, `
+		type Base[T] { T val; }
+		type Child[T] is Base[T] {
+			convert[R](R other) R { return other; }
+		}
+		main() {
+			c := Child[int](val: 1);
+			string s = c.convert[string]("hi");
+		}
+	`))
+}

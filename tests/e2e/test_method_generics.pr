@@ -1,0 +1,251 @@
+// Tests for method-level generics: methods with their own type parameters.
+
+// --- Basic generic method on non-generic type ---
+
+type Converter {
+    int base;
+
+    convert[R](R default_val) R {
+        return default_val;
+    }
+}
+
+test_basic_generic_method() `test {
+    c := Converter(base: 10);
+    result := c.convert[string]("hello");
+    assert(result == "hello", "basic generic method");
+}
+
+// --- Generic method with lambda arg ---
+
+type Box {
+    int value;
+
+    transform[R]((int) -> R fn) R {
+        return fn(this.value);
+    }
+}
+
+test_transform() `test {
+    b := Box(value: 42);
+    result := b.transform[string](|int x| -> string { return "got it"; });
+    assert(result == "got it", "transform method");
+}
+
+// --- Generic method on generic type ---
+
+type Container[T] {
+    T item;
+
+    map_to[R]((T) -> R fn) R {
+        return fn(this.item);
+    }
+}
+
+test_generic_method_on_generic_type() `test {
+    c := Container[int](item: 7);
+    result := c.map_to[string](|int x| -> string { return "mapped"; });
+    assert(result == "mapped", "generic method on generic type");
+}
+
+// --- Multiple type params on method ---
+
+type Mapper {
+    map_pair[A, B](A a, B b) string {
+        return "mapped";
+    }
+}
+
+test_multiple_type_params() `test {
+    m := Mapper();
+    result := m.map_pair[int, string](42, "hello");
+    assert(result == "mapped", "multiple type params");
+}
+
+// --- Generic method with same-type param and return ---
+
+type Echo {
+    echo[T](T val) T {
+        return val;
+    }
+}
+
+test_echo() `test {
+    e := Echo();
+    assert(e.echo[int](42) == 42, "echo int");
+    assert(e.echo[string]("hi") == "hi", "echo string");
+}
+
+// --- Multiple instantiations of same generic method ---
+
+test_multiple_instantiations() `test {
+    e := Echo();
+    int_result := e.echo[int](10);
+    str_result := e.echo[string]("test");
+    assert(int_result == 10, "multi inst int");
+    assert(str_result == "test", "multi inst string");
+}
+
+// --- Generic method accessing this fields ---
+
+type Wrapper[T] {
+    T data;
+
+    with_default[R](R default_val) R {
+        return default_val;
+    }
+
+    transform_data[R]((T) -> R fn) R {
+        return fn(this.data);
+    }
+}
+
+test_generic_method_with_this() `test {
+    w := Wrapper[int](data: 99);
+    result := w.with_default[string]("fallback");
+    assert(result == "fallback", "generic method with this");
+}
+
+test_generic_method_transform_data() `test {
+    w := Wrapper[int](data: 5);
+    result := w.transform_data[int](|int x| -> x * 10);
+    assert(result == 50, "transform data");
+}
+
+// --- Inherited generic method ---
+
+type Parent {
+    echo[T](T val) T {
+        return val;
+    }
+}
+
+type Child is Parent {
+    int extra;
+}
+
+test_inherited_generic_method() `test {
+    c := Child(extra: 1);
+    assert(c.echo[int](42) == 42, "inherited generic method int");
+    assert(c.echo[string]("hi") == "hi", "inherited generic method string");
+}
+
+// --- Mixed generic + non-generic methods (vtable correctness) ---
+
+type Animal {
+    speak() string `abstract;
+}
+
+type Dog is Animal {
+    speak() string { return "woof"; }
+
+    echo[T](T val) T {
+        return val;
+    }
+}
+
+accept_animal(Animal a) string {
+    return a.speak();
+}
+
+test_vtable_with_generic_method() `test {
+    d := Dog();
+    // Virtual dispatch should work (speak is in vtable)
+    assert(accept_animal(d) == "woof", "vtable dispatch with generic method present");
+    // Generic method should also work (direct dispatch)
+    d2 := Dog();
+    assert(d2.echo[int](7) == 7, "generic method alongside vtable");
+}
+
+// --- Failable generic method ---
+
+type ParseErr is error {
+    string message;
+}
+
+type Parser {
+    try_parse[T](T val) T! {
+        return val;
+    }
+}
+
+test_failable_generic_method() `test {
+    p := Parser();
+    int result = p.try_parse[int](42)!;
+    assert(result == 42, "failable generic method");
+}
+
+// --- Generic method using both owner T and method R ---
+
+type Pair[T] {
+    T first;
+
+    combine[R](R second) string {
+        return "combined";
+    }
+
+    swap[R](R other) R {
+        return other;
+    }
+}
+
+test_owner_and_method_params() `test {
+    p := Pair[int](first: 1);
+    assert(p.combine[string]("x") == "combined", "both T and R");
+    assert(p.swap[string]("hello") == "hello", "swap with R");
+}
+
+// --- Generic method calling non-generic method on this ---
+
+type Counter {
+    int count;
+
+    get_count() int {
+        return this.count;
+    }
+
+    count_as[R]((int) -> R fn) R {
+        return fn(this.get_count());
+    }
+}
+
+test_generic_method_calls_regular() `test {
+    c := Counter(count: 5);
+    result := c.count_as[int](|int x| -> x * 2);
+    assert(result == 10, "generic calls regular method");
+}
+
+// --- Void generic method ---
+
+type Logger {
+    int logged;
+
+    log[T](T val) {
+        // void — just exercises the codegen path
+    }
+}
+
+test_void_generic_method() `test {
+    l := Logger(logged: 0);
+    l.log[int](42);
+    l.log[string]("hi");
+    assert(true, "void generic method executed");
+}
+
+// --- Generic method on generic type with inherited parent ---
+
+type GBase[T] {
+    T val;
+}
+
+type GChild[T] is GBase[T] {
+    convert[R](R other) R {
+        return other;
+    }
+}
+
+test_generic_method_on_generic_child() `test {
+    g := GChild[int](val: 10);
+    assert(g.convert[string]("yes") == "yes", "generic method on generic child");
+    assert(g.val == 10, "inherited field still works");
+}

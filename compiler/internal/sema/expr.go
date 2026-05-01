@@ -1550,9 +1550,11 @@ func (c *Checker) instantiateGenericFunc(e *ast.IndexExpr, sig *types.Signature)
 	subst := types.BuildSubstMap(tparams, typeArgs)
 	monoSig := types.Substitute(sig, subst).(*types.Signature)
 
-	// Look up the original function object for FuncInstance recording
-	if ident, ok := e.Target.(*ast.IdentExpr); ok {
-		obj := c.lookup(ident.Name)
+	// Record instance for monomorphization
+	switch t := e.Target.(type) {
+	case *ast.IdentExpr:
+		// Generic function instantiation: func[Arg]
+		obj := c.lookup(t.Name)
 		if fn, ok := obj.(*types.Func); ok {
 			c.info.FuncInstances = append(c.info.FuncInstances, &FuncInstance{
 				Func:     fn,
@@ -1560,9 +1562,66 @@ func (c *Checker) instantiateGenericFunc(e *ast.IndexExpr, sig *types.Signature)
 				Sig:      monoSig,
 			})
 		}
+	case *ast.MemberExpr:
+		// Generic method instantiation: obj.method[Arg]
+		targetType := c.info.Types[t.Target]
+		if ref, ok := targetType.(*types.MutRef); ok {
+			targetType = ref.Elem()
+		}
+		if ref, ok := targetType.(*types.SharedRef); ok {
+			targetType = ref.Elem()
+		}
+		var owner *types.Named
+		var ownerInst *types.Instance
+		switch tt := targetType.(type) {
+		case *types.Named:
+			owner = tt
+		case *types.Instance:
+			if n, ok := tt.Origin().(*types.Named); ok {
+				owner = n
+				ownerInst = tt
+			}
+		}
+		if owner != nil {
+			if method := owner.LookupMethod(t.Field); method != nil {
+				// Find the type that actually declares the method (may be a parent).
+				// This is needed for codegen to find the AST MethodDecl.
+				defOwner := findMethodDefiner(owner, t.Field)
+				// If the method is inherited, the OwnerInst must reflect the
+				// defining type, not the caller's type.
+				defInst := ownerInst
+				if defOwner != owner {
+					defInst = nil // inherited from a different type
+				}
+				c.info.MethodInstances = append(c.info.MethodInstances, &MethodInstance{
+					Owner:     defOwner,
+					OwnerInst: defInst,
+					Method:    method,
+					TypeArgs:  typeArgs,
+					Sig:       monoSig,
+				})
+			}
+		}
 	}
 
 	return monoSig
+}
+
+// findMethodDefiner walks the parent chain to find the Named type that actually
+// declares the method (has it in its own Methods(), not inherited). Returns the
+// original type if not found in any parent (fallback).
+func findMethodDefiner(named *types.Named, methodName string) *types.Named {
+	for _, m := range named.Methods() {
+		if m.Name() == methodName {
+			return named
+		}
+	}
+	for _, pr := range named.Parents() {
+		if pr.Named.LookupMethod(methodName) != nil {
+			return findMethodDefiner(pr.Named, methodName)
+		}
+	}
+	return named // fallback
 }
 
 // resolveTypeRef resolves an expression as a type reference.

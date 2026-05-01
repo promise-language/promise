@@ -20,3 +20,4 @@ bin/promise
 
 # Build cache
 .promise-build/
+**/.DS_Store

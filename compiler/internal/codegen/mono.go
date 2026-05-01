@@ -527,6 +527,9 @@ func (c *Compiler) declareMonoMethods(file *ast.File, instances []*types.Instanc
 			if md.Body == nil {
 				continue
 			}
+			if len(md.TypeParams) > 0 {
+				continue // generic method — handled by mono method instances
+			}
 			m := c.lookupAnyMethod(named, md.Name, md.IsGetter, md.IsSetter)
 			if m == nil || m.Sig() == nil {
 				continue
@@ -591,6 +594,9 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 		for _, md := range td.Methods {
 			if md.Body == nil {
 				continue
+			}
+			if len(md.TypeParams) > 0 {
+				continue // generic method — handled by mono method instances
 			}
 			m := c.lookupAnyMethod(named, md.Name, md.IsGetter, md.IsSetter)
 			if m == nil || m.Sig() == nil {
@@ -702,4 +708,153 @@ func (c *Compiler) findFuncDecl(file *ast.File, name string) *ast.FuncDecl {
 		}
 	}
 	return nil
+}
+
+// monoMethodInstanceName generates a unique mangled name for a generic method instantiation.
+// Example: Box.transform[string] → "Box.transform__string"
+// Example: Box[int].transform[string] → "Box__int.transform__string"
+func monoMethodInstanceName(mi *sema.MethodInstance) string {
+	ownerName := mi.Owner.Obj().Name()
+	if mi.OwnerInst != nil {
+		ownerName = monoName(mi.OwnerInst)
+	}
+	base := mangleMethodName(ownerName, mi.Method.Name(), false)
+	for _, arg := range mi.TypeArgs {
+		base += "__" + typeArgSuffix(arg)
+	}
+	return base
+}
+
+// collectMonoMethodInstances deduplicates generic method instantiations.
+func collectMonoMethodInstances(info *sema.Info) []*sema.MethodInstance {
+	seen := map[string]bool{}
+	var result []*sema.MethodInstance
+	for _, mi := range info.MethodInstances {
+		key := monoMethodInstanceName(mi)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		result = append(result, mi)
+	}
+	return result
+}
+
+// buildMethodInstanceSubst builds the combined substitution map for a generic method instance.
+// This merges owner type params (if generic type) + method type params.
+func buildMethodInstanceSubst(mi *sema.MethodInstance) map[*types.TypeParam]types.Type {
+	subst := map[*types.TypeParam]types.Type{}
+	// Owner type-level substitution (if on a generic type instance)
+	if mi.OwnerInst != nil {
+		for k, v := range types.BuildSubstMap(mi.Owner.TypeParams(), mi.OwnerInst.TypeArgs()) {
+			subst[k] = v
+		}
+		mergeParentSubst(mi.Owner, subst)
+	}
+	// Method-level substitution
+	for k, v := range types.BuildSubstMap(mi.Method.Sig().TypeParams(), mi.TypeArgs) {
+		subst[k] = v
+	}
+	return subst
+}
+
+// declareMonoMethodInstances declares LLVM functions for monomorphic generic method instances.
+func (c *Compiler) declareMonoMethodInstances(file *ast.File, methodInsts []*sema.MethodInstance) {
+	for _, mi := range methodInsts {
+		name := monoMethodInstanceName(mi)
+		if _, exists := c.funcs[name]; exists {
+			continue
+		}
+
+		td := c.findTypeDecl(file, mi.Owner.Obj().Name())
+		if td == nil {
+			continue
+		}
+
+		// Find the method decl
+		var md *ast.MethodDecl
+		for _, m := range td.Methods {
+			if m.Name == mi.Method.Name() && !m.IsGetter && !m.IsSetter {
+				md = m
+				break
+			}
+		}
+		if md == nil || md.Body == nil {
+			continue
+		}
+
+		subst := buildMethodInstanceSubst(mi)
+
+		var params []*ir.Param
+		if mi.Method.Sig().Recv() != nil {
+			params = append(params, ir.NewParam("this", irtypes.I8Ptr))
+		}
+
+		c.typeSubst = subst
+		for _, p := range mi.Method.Sig().Params() {
+			params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
+		}
+		retType := irtypes.Type(irtypes.Void)
+		if mi.Method.Sig().Result() != nil {
+			retType = c.resolveType(mi.Method.Sig().Result())
+		}
+		c.typeSubst = nil
+
+		if mi.Method.Sig().CanError() {
+			retType = computeResultType(retType)
+		}
+
+		fn := c.module.NewFunc(name, retType, params...)
+		c.funcs[name] = fn
+		if c.compilingModule != "" {
+			c.moduleOwnedFuncs[name] = c.compilingModule
+		}
+	}
+}
+
+// defineMonoMethodInstances generates method bodies for monomorphic generic method instances.
+func (c *Compiler) defineMonoMethodInstances(file *ast.File, methodInsts []*sema.MethodInstance) {
+	for _, mi := range methodInsts {
+		name := monoMethodInstanceName(mi)
+
+		td := c.findTypeDecl(file, mi.Owner.Obj().Name())
+		if td == nil {
+			continue
+		}
+
+		var md *ast.MethodDecl
+		for _, m := range td.Methods {
+			if m.Name == mi.Method.Name() && !m.IsGetter && !m.IsSetter {
+				md = m
+				break
+			}
+		}
+		if md == nil || md.Body == nil {
+			continue
+		}
+
+		fn, ok := c.funcs[name]
+		if !ok || len(fn.Blocks) > 0 {
+			continue
+		}
+
+		subst := buildMethodInstanceSubst(mi)
+		m := c.lookupAnyMethod(mi.Owner, md.Name, false, false)
+		if m == nil {
+			continue
+		}
+
+		c.typeSubst = subst
+		if mi.OwnerInst != nil {
+			c.monoCtx = &monoContext{
+				inst:   mi.OwnerInst,
+				origin: mi.Owner,
+				name:   monoName(mi.OwnerInst),
+			}
+		}
+		func() {
+			defer func() { c.typeSubst = nil; c.monoCtx = nil }()
+			c.defineMethodFunc(md, m, fn, mi.Owner)
+		}()
+	}
 }

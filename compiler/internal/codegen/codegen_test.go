@@ -9334,3 +9334,34 @@ func TestGenericInheritanceForwardedTypeParams(t *testing.T) {
 	assertContains(t, ir, "Derived__int")
 	assertContains(t, ir, "Base__int")
 }
+
+func TestMethodGenericIR(t *testing.T) {
+	ir := generateIR(t, `
+		type Echo {
+			echo[T](T val) T { return val; }
+		}
+		main() {
+			e := Echo();
+			int x = e.echo[int](42);
+			string s = e.echo[string]("hi");
+		}
+	`)
+	// Monomorphized method names should appear
+	assertContains(t, ir, "Echo.echo__int")
+	assertContains(t, ir, "Echo.echo__string")
+}
+
+func TestMethodGenericOnGenericTypeIR(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] {
+			T item;
+			convert[R](R val) R { return val; }
+		}
+		main() {
+			b := Box[int](item: 1);
+			string s = b.convert[string]("hello");
+		}
+	`)
+	// Should have mono type name + mono method name
+	assertContains(t, ir, "Box__int.convert__string")
+}

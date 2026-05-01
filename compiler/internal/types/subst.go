@@ -140,7 +140,23 @@ func substSignature(sig *Signature, subst map[*TypeParam]Type) *Signature {
 	if !changed {
 		return sig
 	}
-	return NewSignature(newRecv, newParams, newResult, sig.canError)
+	newSig := NewSignature(newRecv, newParams, newResult, sig.canError)
+	// Preserve method-level type params that are NOT being substituted.
+	// When substituting type-level params on a generic method's signature,
+	// the method's own TypeParams must carry through.
+	if len(sig.typeParams) > 0 {
+		anySubstituted := false
+		for _, tp := range sig.typeParams {
+			if _, ok := subst[tp]; ok {
+				anySubstituted = true
+				break
+			}
+		}
+		if !anySubstituted {
+			newSig.SetTypeParams(sig.typeParams)
+		}
+	}
+	return newSig
 }
 
 func substList(list []Type, subst map[*TypeParam]Type) []Type {

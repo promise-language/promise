@@ -9184,3 +9184,68 @@ func TestVariadicMultipleArgsArrayLit(t *testing.T) {
 	// Should see Vector_int creation with elements pushed
 	assertContains(t, ir, "call i64 @sum(i8*")
 }
+
+// --- Numeric Suffix Tests ---
+
+func TestNumericSuffixU8IR(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			u8 x = 42u8;
+		}
+	`)
+	assertContains(t, ir, "store i8 42")
+}
+
+func TestNumericSuffixU16IR(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			u16 x = 1000u16;
+		}
+	`)
+	assertContains(t, ir, "store i16 1000")
+}
+
+func TestNumericSuffixI32IR(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			i32 x = 0xFFi32;
+		}
+	`)
+	assertContains(t, ir, "store i32 255")
+}
+
+func TestNumericSuffixF32IR(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			f32 x = 1.5f32;
+		}
+	`)
+	assertContains(t, ir, "store float")
+}
+
+func TestNumericSuffixI64IR(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			i64 x = 999i64;
+		}
+	`)
+	assertContains(t, ir, "store i64 999")
+}
+
+func TestNumericSuffixU64IR(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			u64 x = 42u64;
+		}
+	`)
+	assertContains(t, ir, "store i64 42")
+}
+
+func TestNumericSuffixF64IR(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			f64 x = 3.14f64;
+		}
+	`)
+	assertContains(t, ir, "store double")
+}

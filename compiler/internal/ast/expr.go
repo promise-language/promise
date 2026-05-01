@@ -194,7 +194,8 @@ type LambdaParam struct {
 // IntLit represents an integer literal.
 type IntLit struct {
 	nodeBase
-	Raw string // original text, e.g. "0xFF", "42", "1_000"
+	Raw    string // numeric text without suffix, e.g. "0xFF", "42", "1_000"
+	Suffix string // "" for unsuffixed, "u8", "i32", etc.
 }
 
 func (*IntLit) exprTag() {}
@@ -202,10 +203,27 @@ func (*IntLit) exprTag() {}
 // FloatLit represents a floating-point literal.
 type FloatLit struct {
 	nodeBase
-	Raw string
+	Raw    string // numeric text without suffix
+	Suffix string // "" for unsuffixed, "f32", "f64"
 }
 
 func (*FloatLit) exprTag() {}
+
+// splitNumericSuffix splits a numeric literal token text into the numeric
+// part and an optional type suffix (e.g., "42u8" → "42", "u8").
+func splitNumericSuffix(text string) (raw, suffix string) {
+	// Known suffixes ordered longest-first for correct matching.
+	suffixes := []string{
+		"i16", "i32", "i64", "u16", "u32", "u64", "f32", "f64",
+		"i8", "u8",
+	}
+	for _, s := range suffixes {
+		if len(text) > len(s) && text[len(text)-len(s):] == s {
+			return text[:len(text)-len(s)], s
+		}
+	}
+	return text, ""
+}
 
 // BoolLit represents a boolean literal (true/false).
 type BoolLit struct {

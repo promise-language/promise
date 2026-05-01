@@ -314,16 +314,20 @@ func (b *Builder) VisitPrimaryExpr(ctx *parser.PrimaryExprContext) interface{} {
 }
 
 func (b *Builder) VisitIntLiteral(ctx *parser.IntLiteralContext) interface{} {
+	raw, suffix := splitNumericSuffix(ctx.INT_LITERAL().GetText())
 	return &IntLit{
 		nodeBase: b.baseFromContext(ctx),
-		Raw:      ctx.INT_LITERAL().GetText(),
+		Raw:      raw,
+		Suffix:   suffix,
 	}
 }
 
 func (b *Builder) VisitFloatLiteral(ctx *parser.FloatLiteralContext) interface{} {
+	raw, suffix := splitNumericSuffix(ctx.FLOAT_LITERAL().GetText())
 	return &FloatLit{
 		nodeBase: b.baseFromContext(ctx),
-		Raw:      ctx.FLOAT_LITERAL().GetText(),
+		Raw:      raw,
+		Suffix:   suffix,
 	}
 }
 

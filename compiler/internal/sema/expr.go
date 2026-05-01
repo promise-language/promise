@@ -1,11 +1,104 @@
 package sema
 
 import (
+	"fmt"
+	"math"
 	"sort"
+	"strconv"
+	"strings"
 
 	"djabi.dev/go/promise_lang/internal/ast"
 	"djabi.dev/go/promise_lang/internal/types"
 )
+
+// suffixToType maps a numeric literal suffix to its corresponding type.
+func suffixToType(suffix string) types.Type {
+	switch suffix {
+	case "i8":
+		return types.TypI8
+	case "i16":
+		return types.TypI16
+	case "i32":
+		return types.TypI32
+	case "i64":
+		return types.TypI64
+	case "u8":
+		return types.TypU8
+	case "u16":
+		return types.TypU16
+	case "u32":
+		return types.TypU32
+	case "u64":
+		return types.TypU64
+	case "f32":
+		return types.TypF32
+	case "f64":
+		return types.TypF64
+	}
+	return nil
+}
+
+// isSignedIntSuffix reports whether suffix is a signed integer suffix.
+func isSignedIntSuffix(suffix string) bool {
+	return suffix == "i8" || suffix == "i16" || suffix == "i32" || suffix == "i64"
+}
+
+// validateIntRange checks that a raw integer literal value fits in the target
+// type. When negated is true, the value is checked as -(raw) against the
+// signed minimum. Returns an error message or "" if valid.
+func validateIntRange(raw string, typ types.Type, negated bool) string {
+	cleanRaw := strings.ReplaceAll(raw, "_", "")
+	val, err := strconv.ParseUint(cleanRaw, 0, 64)
+	if err != nil {
+		// Try signed parse for edge cases
+		sval, serr := strconv.ParseInt(cleanRaw, 0, 64)
+		if serr != nil {
+			return fmt.Sprintf("invalid integer literal: %s", raw)
+		}
+		val = uint64(sval)
+	}
+
+	var maxPos uint64
+	var minNeg uint64 // absolute value of minimum (e.g. 128 for i8)
+	switch typ {
+	case types.TypI8:
+		maxPos, minNeg = math.MaxInt8, 128
+	case types.TypI16:
+		maxPos, minNeg = math.MaxInt16, 32768
+	case types.TypI32:
+		maxPos, minNeg = math.MaxInt32, 2147483648
+	case types.TypI64:
+		maxPos, minNeg = math.MaxInt64, 9223372036854775808
+	case types.TypU8:
+		maxPos = math.MaxUint8
+	case types.TypU16:
+		maxPos = math.MaxUint16
+	case types.TypU32:
+		maxPos = math.MaxUint32
+	case types.TypU64:
+		maxPos = math.MaxUint64
+	default:
+		return ""
+	}
+
+	switch {
+	case typ == types.TypU8 || typ == types.TypU16 || typ == types.TypU32 || typ == types.TypU64:
+		if val > maxPos {
+			return fmt.Sprintf("value %s overflows %s (max %d)", raw, typ, maxPos)
+		}
+	default: // signed
+		if negated {
+			if val > minNeg {
+				return fmt.Sprintf("value -%s overflows %s (min -%d)", raw, typ, minNeg)
+			}
+		} else {
+			if val > maxPos {
+				return fmt.Sprintf("value %s overflows %s (max %d)", raw, typ, maxPos)
+			}
+		}
+	}
+	return ""
+}
 
 // isIntegerType reports whether t is any integer type (signed or unsigned).
 func isIntegerType(t types.Type) bool {
@@ -55,14 +148,30 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 
 	switch e := expr.(type) {
 	case *ast.IntLit:
-		if hint != nil && isIntegerType(hint) {
+		if e.Suffix != "" {
+			typ = suffixToType(e.Suffix)
+			if typ == nil {
+				c.errorf(e.Pos(), "unknown numeric suffix '%s'", e.Suffix)
+				typ = types.TypInt
+			} else {
+				if msg := validateIntRange(e.Raw, typ, c.inUnaryNeg); msg != "" {
+					c.errorf(e.Pos(), "%s", msg)
+				}
+			}
+		} else if hint != nil && isIntegerType(hint) {
 			typ = hint
 		} else {
 			typ = types.TypInt
 		}
 
 	case *ast.FloatLit:
-		if hint != nil && isFloatType(hint) {
+		if e.Suffix != "" {
+			typ = suffixToType(e.Suffix)
+			if typ == nil {
+				c.errorf(e.Pos(), "unknown numeric suffix '%s'", e.Suffix)
+				typ = types.TypF64
+			}
+		} else if hint != nil && isFloatType(hint) {
 			typ = hint
 		} else {
 			typ = types.TypF64
@@ -501,7 +610,17 @@ func (c *Checker) checkOperator(pos ast.Pos, left types.Type, op string, right t
 }
 
 func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr) types.Type {
+	// Set inUnaryNeg so that suffixed integer literals (e.g. 128i8 in -128i8)
+	// validate against the signed minimum instead of the signed maximum.
+	// Save/restore to handle nested unary expressions correctly.
+	savedNeg := c.inUnaryNeg
+	if e.Op == ast.UnaryNeg {
+		c.inUnaryNeg = true
+	} else {
+		c.inUnaryNeg = false
+	}
 	operand := c.checkExpr(e.Operand)
+	c.inUnaryNeg = savedNeg
 	if operand == nil {
 		return nil
 	}

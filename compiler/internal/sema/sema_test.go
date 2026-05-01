@@ -7949,3 +7949,268 @@ func TestVariadicMethodWithReceiver(t *testing.T) {
 		}
 	`)
 }
+
+// --- Numeric Suffix Tests ---
+
+func TestNumericSuffixBasic(t *testing.T) {
+	checkOK(t, `
+		main() {
+			u8 a = 42u8;
+			u16 b = 1000u16;
+			u32 c = 100000u32;
+			u64 d = 999u64;
+			i8 e = 42i8;
+			i16 f = 1000i16;
+			i32 g = 100000i32;
+			i64 h = 999i64;
+		}
+	`)
+}
+
+func TestNumericSuffixInference(t *testing.T) {
+	// Suffix determines the type for := inference.
+	checkOK(t, `
+		main() {
+			a := 42u8;
+			b := 1000u16;
+			c := 100i32;
+			d := 999u64;
+		}
+	`)
+}
+
+func TestNumericSuffixOverridesHint(t *testing.T) {
+	// Suffix type takes priority over variable type — mismatch is an error.
+	errs := checkErrs(t, `
+		main() {
+			u16 x = 10u8;
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+func TestNumericSuffixRangeOverflowU8(t *testing.T) {
+	errs := checkErrs(t, `
+		main() { x := 256u8; }
+	`)
+	expectError(t, errs, "overflows u8")
+}
+
+func TestNumericSuffixRangeOverflowI8(t *testing.T) {
+	errs := checkErrs(t, `
+		main() { x := 128i8; }
+	`)
+	expectError(t, errs, "overflows i8")
+}
+
+func TestNumericSuffixRangeEdgeValid(t *testing.T) {
+	checkOK(t, `
+		main() {
+			a := 255u8;
+			b := 127i8;
+			c := 0u8;
+			d := 0i8;
+			e := 65535u16;
+			f := 32767i16;
+		}
+	`)
+}
+
+func TestNumericSuffixNegMin(t *testing.T) {
+	// -128i8 is valid: unary neg of 128i8 should pass.
+	checkOK(t, `
+		main() {
+			i8 a = -128i8;
+			i16 b = -32768i16;
+			i32 c = -2147483648i32;
+		}
+	`)
+}
+
+func TestNumericSuffixNegOverflow(t *testing.T) {
+	// -129i8 overflows.
+	errs := checkErrs(t, `
+		main() { i8 x = -129i8; }
+	`)
+	expectError(t, errs, "overflows i8")
+}
+
+func TestNumericSuffixHex(t *testing.T) {
+	checkOK(t, `
+		main() {
+			a := 0xFFu8;
+			b := 0xFFFFu16;
+			c := 0x7Fi8;
+		}
+	`)
+}
+
+func TestNumericSuffixHexOverflow(t *testing.T) {
+	errs := checkErrs(t, `
+		main() { x := 0x100u8; }
+	`)
+	expectError(t, errs, "overflows u8")
+}
+
+func TestNumericSuffixBinary(t *testing.T) {
+	checkOK(t, `
+		main() {
+			a := 0b11111111u8;
+			b := 0b1010i8;
+		}
+	`)
+}
+
+func TestNumericSuffixFloat(t *testing.T) {
+	checkOK(t, `
+		main() {
+			f32 a = 1.5f32;
+			f64 b = 3.14f64;
+			c := 2.5f32;
+		}
+	`)
+}
+
+func TestNumericSuffixFloatMismatch(t *testing.T) {
+	errs := checkErrs(t, `
+		main() {
+			f64 x = 1.5f32;
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+func TestNumericSuffixArithmetic(t *testing.T) {
+	// Arithmetic with suffixed literals should work.
+	checkOK(t, `
+		main() {
+			u8 a = 10u8;
+			u8 b = 20u8;
+			u8 c = a + b;
+		}
+	`)
+}
+
+func TestNumericSuffixPassToFunction(t *testing.T) {
+	checkOK(t, `
+		add(u8 a, u8 b) u8 { return a + b; }
+		main() {
+			add(10u8, 20u8);
+		}
+	`)
+}
+
+func TestNumericSuffixNestedUnaryNotNeg(t *testing.T) {
+	// ~128i8 inside negation: the bitwise-not operand is NOT directly negated,
+	// so 128i8 should still overflow i8.
+	errs := checkErrs(t, `
+		main() { i8 x = -(~128i8); }
+	`)
+	expectError(t, errs, "overflows i8")
+}
+
+func TestNumericSuffixUnsignedNeg(t *testing.T) {
+	// Negating an unsigned suffixed literal — the negation check is only
+	// for signed suffixes, so 1u8 should be allowed (unary neg on u8 type).
+	checkOK(t, `
+		main() {
+			i8 x = -1i8;
+		}
+	`)
+}
+
+func TestNumericSuffixOctalWithSuffix(t *testing.T) {
+	checkOK(t, `
+		main() {
+			x := 0o77u8;
+			y := 0o177i16;
+		}
+	`)
+}
+
+func TestNumericSuffixRangeOverflowU16(t *testing.T) {
+	errs := checkErrs(t, `
+		main() { x := 65536u16; }
+	`)
+	expectError(t, errs, "overflows u16")
+}
+
+func TestNumericSuffixRangeOverflowU32(t *testing.T) {
+	errs := checkErrs(t, `
+		main() { x := 4294967296u32; }
+	`)
+	expectError(t, errs, "overflows u32")
+}
+
+func TestNumericSuffixRangeOverflowI16(t *testing.T) {
+	errs := checkErrs(t, `
+		main() { x := 32768i16; }
+	`)
+	expectError(t, errs, "overflows i16")
+}
+
+func TestNumericSuffixRangeOverflowI32(t *testing.T) {
+	errs := checkErrs(t, `
+		main() { x := 2147483648i32; }
+	`)
+	expectError(t, errs, "overflows i32")
+}
+
+func TestNumericSuffixNegOverflowI16(t *testing.T) {
+	errs := checkErrs(t, `
+		main() { i16 x = -32769i16; }
+	`)
+	expectError(t, errs, "overflows i16")
+}
+
+func TestNumericSuffixNegOverflowI32(t *testing.T) {
+	errs := checkErrs(t, `
+		main() { i32 x = -2147483649i32; }
+	`)
+	expectError(t, errs, "overflows i32")
+}
+
+func TestNumericSuffixNegMinI64(t *testing.T) {
+	checkOK(t, `
+		main() {
+			i64 x = -9223372036854775808i64;
+		}
+	`)
+}
+
+func TestNumericSuffixEdgeValuesAllTypes(t *testing.T) {
+	checkOK(t, `
+		main() {
+			a := 4294967295u32;
+			b := 2147483647i32;
+			c := 32767i16;
+			d := 127i8;
+		}
+	`)
+}
+
+func TestNumericSuffixUnderscoreSeparated(t *testing.T) {
+	checkOK(t, `
+		main() {
+			x := 1_000u32;
+			y := 1_000_000i32;
+			z := 0xFF_FFu16;
+		}
+	`)
+}
+
+func TestNumericSuffixReturnValue(t *testing.T) {
+	checkOK(t, `
+		getVal() u8 { return 42u8; }
+		main() { getVal(); }
+	`)
+}
+
+func TestNumericSuffixFloatMismatchReverse(t *testing.T) {
+	errs := checkErrs(t, `
+		main() {
+			f32 x = 3.14f64;
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}

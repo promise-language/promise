@@ -67,7 +67,7 @@ ANTLR4 lexer and parser grammars covering the full language surface.
 **Files:** `PromiseLexer.g4` (166 lines), `PromiseParser.g4` (492 lines)
 
 - 25 keywords, all operators including `:=`, `..`, `..=`, `?.`, `?:`, `=>`, `<-`
-- Numeric literals with hex/octal/binary/underscore support
+- Numeric literals with hex/octal/binary/underscore support and typed suffixes (`u8`, `i32`, `f64`, etc.)
 - String interpolation (`{expr}`), raw strings, triple-quoted multiline strings
 - Type declarations with inheritance (`is`), enums/ADTs, generics
 - Pattern matching, error handling (`?`, `!`, error handlers)

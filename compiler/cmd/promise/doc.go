@@ -878,9 +878,9 @@ func typeString(t types.Type) string {
 func exprToString(expr ast.Expr) string {
 	switch e := expr.(type) {
 	case *ast.IntLit:
-		return e.Raw
+		return e.Raw + e.Suffix
 	case *ast.FloatLit:
-		return e.Raw
+		return e.Raw + e.Suffix
 	case *ast.BoolLit:
 		if e.Value {
 			return "true"

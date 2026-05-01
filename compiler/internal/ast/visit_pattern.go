@@ -51,16 +51,18 @@ func (b *Builder) VisitNamePattern(ctx *parser.NamePatternContext) interface{} {
 }
 
 func (b *Builder) VisitIntLiteralPattern(ctx *parser.IntLiteralPatternContext) interface{} {
+	raw, suffix := splitNumericSuffix(ctx.INT_LITERAL().GetText())
 	return &LiteralMatchPattern{
 		nodeBase: b.baseFromContext(ctx),
-		Value:    &IntLit{nodeBase: b.baseFromContext(ctx), Raw: ctx.INT_LITERAL().GetText()},
+		Value:    &IntLit{nodeBase: b.baseFromContext(ctx), Raw: raw, Suffix: suffix},
 	}
 }
 
 func (b *Builder) VisitFloatLiteralPattern(ctx *parser.FloatLiteralPatternContext) interface{} {
+	raw, suffix := splitNumericSuffix(ctx.FLOAT_LITERAL().GetText())
 	return &LiteralMatchPattern{
 		nodeBase: b.baseFromContext(ctx),
-		Value:    &FloatLit{nodeBase: b.baseFromContext(ctx), Raw: ctx.FLOAT_LITERAL().GetText()},
+		Value:    &FloatLit{nodeBase: b.baseFromContext(ctx), Raw: raw, Suffix: suffix},
 	}
 }
 

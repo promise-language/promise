@@ -24,6 +24,7 @@ type Checker struct {
 	lambdaScope       *types.Scope            // scope at lambda definition site (capture boundary)
 	lambdaMove        bool                    // true if current lambda uses `move` keyword
 	typeHint          types.Type              // expected type for numeric literal adaptation (propagated through arithmetic)
+	inUnaryNeg        bool                    // true when checking operand of unary negation (for signed suffix range check)
 	inGenerator       bool                    // true when checking a generator function body
 	generatorElemType types.Type              // T from stream[T] or Iterator[T] return type
 	yieldFound        bool                    // true if at least one yield seen in current generator func

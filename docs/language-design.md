@@ -726,6 +726,36 @@ x := 42;                // inferred as int
 name := "Alice";        // inferred as string
 ```
 
+#### Typed Numeric Literal Suffixes
+
+Numeric literals can carry a type suffix to specify their exact type without casting. This avoids the need for `as!` casts when working with fixed-width numeric types.
+
+**Integer suffixes:** `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64`
+**Float suffixes:** `f32`, `f64`
+
+```promise
+x := 255u8;             // x is u8
+y := 1000u16;           // y is u16
+z := 3.14f32;           // z is f32
+big := 1_000_000u32;    // underscores work with suffixes
+hex := 0xFFu8;          // hex/octal/binary bases work with suffixes
+```
+
+The suffix determines the type — it overrides any type hint context. A mismatch between the declared type and the suffix is a compile error:
+
+```promise
+u8 a = 42u8;            // OK: suffix matches declared type
+u16 b = 10u8;           // ERROR: cannot assign u8 to u16
+```
+
+Range validation is performed at compile time. Signed negative minimums like `-128i8` are handled correctly — the compiler recognizes that the unary negation and the literal form a single value:
+
+```promise
+i8 min = -128i8;        // OK: -128 is within i8 range
+i8 bad = 128i8;         // ERROR: 128 overflows i8 (max 127)
+u8 big = 256u8;         // ERROR: 256 overflows u8 (max 255)
+```
+
 ### 5.4 Inheritance
 
 A type declares its parent types with `is`. There is no distinction between inheritance and interface implementation — both use the same keyword. An interface is simply a type whose methods are all `` `abstract `` — it uses the same `is` keyword and the same vtable machinery.
@@ -3018,6 +3048,12 @@ ifUnwrap: 'if' IDENT ':=' expression block ('else' block)?;
 whileUnwrap: 'while' IDENT ':=' expression block;
 
 lifetime: '\'' IDENT;
+
+// Numeric literals with optional type suffixes (lexer fragments)
+fragment INT_SUFFIX: [iu] ('8' | '16' | '32' | '64');
+fragment FLOAT_SUFFIX: 'f32' | 'f64';
+INT_LITERAL: ('0' [xXoObB]? ...)  INT_SUFFIX?;
+FLOAT_LITERAL: ... FLOAT_SUFFIX?;
 ```
 
 ---

@@ -261,9 +261,17 @@ func (p *printer) printExpr(e Expr) {
 	case *IdentExpr:
 		p.line("Ident %s", n.Name)
 	case *IntLit:
-		p.line("Int %s", n.Raw)
+		if n.Suffix != "" {
+			p.line("Int %s%s", n.Raw, n.Suffix)
+		} else {
+			p.line("Int %s", n.Raw)
+		}
 	case *FloatLit:
-		p.line("Float %s", n.Raw)
+		if n.Suffix != "" {
+			p.line("Float %s%s", n.Raw, n.Suffix)
+		} else {
+			p.line("Float %s", n.Raw)
+		}
 	case *BoolLit:
 		p.line("Bool %v", n.Value)
 	case *NoneLit:

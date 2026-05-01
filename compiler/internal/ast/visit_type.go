@@ -94,9 +94,10 @@ func (b *Builder) VisitSliceType(ctx *parser.SliceTypeContext) interface{} {
 }
 
 func (b *Builder) VisitArrayType(ctx *parser.ArrayTypeContext) interface{} {
+	raw, _ := splitNumericSuffix(b.termText(ctx.INT_LITERAL()))
 	return &ArrayTypeRef{
 		nodeBase: b.baseFromContext(ctx),
 		Element:  b.visitTypeRef(ctx.TypeRef()),
-		Size:     b.termText(ctx.INT_LITERAL()),
+		Size:     raw,
 	}
 }

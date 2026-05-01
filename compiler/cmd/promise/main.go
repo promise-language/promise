@@ -1849,9 +1849,12 @@ func compileFrontend(filename string) (*ast.File, *sema.Info) {
 	}
 
 	// Load local modules from use declarations
-	moduleScopes := loadModuleScopes(filename, file, stdFiles)
+	moduleScopes, modInfos := loadModuleScopes(filename, file, stdFiles)
 
 	info, errs := sema.CheckWithModules(file, moduleScopes)
+	if modInfos != nil {
+		info.ModuleInfos = modInfos
+	}
 	if len(errs) > 0 {
 		printFileErrors(filename, errs)
 		os.Exit(1)
@@ -1867,10 +1870,10 @@ func compileFrontend(filename string) (*ast.File, *sema.Info) {
 }
 
 // loadModuleScopes scans use declarations for local module paths, loads each
-// module (parse + sema), and returns a map of path → exported scope.
-func loadModuleScopes(filename string, file *ast.File, stdFiles []*ast.File) map[string]*types.Scope {
+// module (parse + sema), and returns scopes for sema + ModuleInfos for codegen.
+func loadModuleScopes(filename string, file *ast.File, stdFiles []*ast.File) (map[string]*types.Scope, map[string]*sema.ModuleInfo) {
 	if len(file.Uses) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// Find project root (directory containing promise.toml).
@@ -1884,28 +1887,30 @@ func loadModuleScopes(filename string, file *ast.File, stdFiles []*ast.File) map
 	}
 
 	scopes := make(map[string]*types.Scope)
+	modInfos := make(map[string]*sema.ModuleInfo)
 	for _, u := range file.Uses {
 		if u.Path == "" || !module.IsLocalPath(u.Path) {
 			continue // catalog or remote — skip for now
 		}
 
-		scope, err := loadLocalModule(u.Path, projectRoot, stdFiles)
+		modInfo, err := loadLocalModule(u.Path, projectRoot, stdFiles)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s: error loading module '%s': %v\n", filename, u.Path, err)
 			os.Exit(1)
 		}
-		scopes[u.Path] = scope
+		scopes[u.Path] = sema.ExportedScope(modInfo.SemaInfo, modInfo.File)
+		modInfos[u.Path] = modInfo
 	}
 
 	if len(scopes) == 0 {
-		return nil
+		return nil, nil
 	}
-	return scopes
+	return scopes, modInfos
 }
 
 // loadLocalModule parses all .pr files in the module directory, runs sema,
-// and returns a scope containing only the module's `public symbols.
-func loadLocalModule(modPath, projectRoot string, stdFiles []*ast.File) (*types.Scope, error) {
+// and returns a ModuleInfo containing the AST, sema output, and exported scope.
+func loadLocalModule(modPath, projectRoot string, stdFiles []*ast.File) (*sema.ModuleInfo, error) {
 	// Resolve module directory (paths are relative to project root)
 	modDir := filepath.Join(projectRoot, modPath)
 	absDir, err := filepath.Abs(modDir)
@@ -1957,8 +1962,15 @@ func loadLocalModule(modPath, projectRoot string, stdFiles []*ast.File) (*types.
 		return nil, fmt.Errorf("errors in module '%s': %v", modPath, errs[0])
 	}
 
-	// Extract only `public symbols into a module scope
-	return sema.ExportedScope(semaInfo, merged), nil
+	// Extract the module alias from the path (last component)
+	alias := filepath.Base(modPath)
+
+	return &sema.ModuleInfo{
+		Name:     alias,
+		Path:     modPath,
+		File:     merged,
+		SemaInfo: semaInfo,
+	}, nil
 }
 
 // mergeModuleFiles combines multiple parsed .pr files from a module directory

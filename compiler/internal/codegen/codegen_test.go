@@ -9,6 +9,7 @@ import (
 	"djabi.dev/go/promise_lang/internal/ast"
 	"djabi.dev/go/promise_lang/internal/parser"
 	"djabi.dev/go/promise_lang/internal/sema"
+	"djabi.dev/go/promise_lang/internal/types"
 	antlr "github.com/antlr4-go/antlr/v4"
 	irtypes "github.com/llir/llvm/ir/types"
 )
@@ -5489,6 +5490,219 @@ func TestStdFuncUnshadowed(t *testing.T) {
 	)
 	// Call should go to the __std_helper function
 	assertContains(t, ir, "call i64 @__std_helper")
+}
+
+// --- Cross-Module Codegen Tests ---
+
+// parseModuleSource parses a module source string with std, runs sema, and returns
+// the ModuleInfo and exported scope.
+func parseModuleSource(t *testing.T, moduleName, src string) (*sema.ModuleInfo, *types.Scope) {
+	t.Helper()
+	// Parse std
+	stdInput := antlr.NewInputStream(stdAll)
+	stdLexer := parser.NewPromiseLexer(stdInput)
+	stdLexer.RemoveErrorListeners()
+	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
+	stdP := parser.NewPromiseParser(stdStream)
+	stdP.RemoveErrorListeners()
+	stdTree := stdP.CompilationUnit()
+	stdFile, errs := ast.Build("std.pr", stdTree)
+	if len(errs) > 0 {
+		t.Fatalf("std AST build errors: %v", errs)
+	}
+	for _, d := range stdFile.Decls {
+		switch dd := d.(type) {
+		case *ast.FuncDecl:
+			dd.IsStd = true
+		case *ast.TypeDecl:
+			dd.IsStd = true
+		case *ast.EnumDecl:
+			dd.IsStd = true
+		}
+	}
+
+	// Parse module source
+	modInput := antlr.NewInputStream(src)
+	modLexer := parser.NewPromiseLexer(modInput)
+	modLexer.RemoveErrorListeners()
+	modStream := antlr.NewCommonTokenStream(modLexer, antlr.TokenDefaultChannel)
+	modP := parser.NewPromiseParser(modStream)
+	modP.RemoveErrorListeners()
+	modTree := modP.CompilationUnit()
+	modFile, errs := ast.Build("module.pr", modTree)
+	if len(errs) > 0 {
+		t.Fatalf("module AST build errors: %v", errs)
+	}
+
+	// Merge std + module
+	merged := make([]ast.Decl, 0, len(stdFile.Decls)+len(modFile.Decls))
+	merged = append(merged, stdFile.Decls...)
+	merged = append(merged, modFile.Decls...)
+	modFile.Decls = merged
+
+	modInfo, semaErrs := sema.Check(modFile)
+	if len(semaErrs) > 0 {
+		t.Fatalf("module sema errors: %v", semaErrs)
+	}
+
+	scope := sema.ExportedScope(modInfo, modFile)
+	return &sema.ModuleInfo{
+		Name:     moduleName,
+		Path:     "./" + moduleName,
+		File:     modFile,
+		SemaInfo: modInfo,
+	}, scope
+}
+
+// generateIRWithModule parses a module and user source, runs sema+codegen with
+// the module available via `use <moduleName>`.
+func generateIRWithModule(t *testing.T, moduleName, modSrc, userSrc string) string {
+	t.Helper()
+
+	modInfo, modScope := parseModuleSource(t, moduleName, modSrc)
+
+	// Parse std + user
+	stdInput := antlr.NewInputStream(stdAll)
+	stdLexer := parser.NewPromiseLexer(stdInput)
+	stdLexer.RemoveErrorListeners()
+	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
+	stdP := parser.NewPromiseParser(stdStream)
+	stdP.RemoveErrorListeners()
+	stdTree := stdP.CompilationUnit()
+	stdFile, errs := ast.Build("std.pr", stdTree)
+	if len(errs) > 0 {
+		t.Fatalf("std AST build errors: %v", errs)
+	}
+	for _, d := range stdFile.Decls {
+		switch dd := d.(type) {
+		case *ast.FuncDecl:
+			dd.IsStd = true
+		case *ast.TypeDecl:
+			dd.IsStd = true
+		case *ast.EnumDecl:
+			dd.IsStd = true
+		}
+	}
+
+	userInput := antlr.NewInputStream(userSrc)
+	userLexer := parser.NewPromiseLexer(userInput)
+	userLexer.RemoveErrorListeners()
+	userStream := antlr.NewCommonTokenStream(userLexer, antlr.TokenDefaultChannel)
+	userP := parser.NewPromiseParser(userStream)
+	userP.RemoveErrorListeners()
+	userTree := userP.CompilationUnit()
+	userFile, errs := ast.Build("test.pr", userTree)
+	if len(errs) > 0 {
+		t.Fatalf("user AST build errors: %v", errs)
+	}
+
+	// Merge std + user
+	mergedDecls := make([]ast.Decl, 0, len(stdFile.Decls)+len(userFile.Decls))
+	mergedDecls = append(mergedDecls, stdFile.Decls...)
+	mergedDecls = append(mergedDecls, userFile.Decls...)
+	userFile.Decls = mergedDecls
+
+	// Sema with module scope
+	modKey := "./" + moduleName
+	moduleScopes := map[string]*types.Scope{modKey: modScope}
+	info, semaErrs := sema.CheckWithModules(userFile, moduleScopes)
+	if len(semaErrs) > 0 {
+		t.Fatalf("sema errors: %v", semaErrs)
+	}
+
+	// Attach module info for codegen
+	info.ModuleInfos = map[string]*sema.ModuleInfo{modKey: modInfo}
+
+	result := Compile(userFile, info, "")
+	return result.Module.String()
+}
+
+func TestModuleCallQualified(t *testing.T) {
+	ir := generateIRWithModule(t, "mylib",
+		"compute() int `public { return 42; }",
+		`
+		use mylib "./mylib";
+		main() {
+			x := mylib.compute();
+		}
+		`,
+	)
+	// Module function should have module-mangled name
+	assertContains(t, ir, "define i64 @__mod_mylib_compute")
+	// Call should use the mangled name
+	assertContains(t, ir, "call i64 @__mod_mylib_compute")
+}
+
+func TestModuleCallDoesNotCollideWithUser(t *testing.T) {
+	ir := generateIRWithModule(t, "mylib",
+		"compute() int `public { return 42; }",
+		`
+		use mylib "./mylib";
+		compute() int { return 99; }
+		main() {
+			x := compute();
+			y := mylib.compute();
+		}
+		`,
+	)
+	// Both functions exist with different names
+	assertContains(t, ir, "define i64 @compute")
+	assertContains(t, ir, "define i64 @__mod_mylib_compute")
+	// User call goes to @compute, module call to @__mod_mylib_compute
+	assertContains(t, ir, "call i64 @compute()")
+	assertContains(t, ir, "call i64 @__mod_mylib_compute()")
+}
+
+func TestModuleTypeConstructor(t *testing.T) {
+	ir := generateIRWithModule(t, "geo",
+		`type Point `+"`public"+` { int x; int y; }`,
+		`
+		use geo "./geo";
+		main() {
+			geo.Point p = geo.Point(x: 1, y: 2);
+		}
+		`,
+	)
+	// Module type should have layout and constructor
+	assertContains(t, ir, "Point")
+	// Constructor stores field values
+	assertContains(t, ir, "store i64 1")
+	assertContains(t, ir, "store i64 2")
+}
+
+func TestModuleMethodCall(t *testing.T) {
+	ir := generateIRWithModule(t, "counter",
+		`type Counter `+"`public"+` {
+			int value;
+			get_value(this) int `+"`public"+` { return this.value; }
+		}`,
+		`
+		use counter "./counter";
+		main() {
+			counter.Counter c = counter.Counter(value: 42);
+			int v = c.get_value();
+		}
+		`,
+	)
+	// Module method should be defined with module-prefixed name
+	assertContains(t, ir, "define i64 @__mod_counter_Counter.get_value")
+	// Call should use the module-prefixed method
+	assertContains(t, ir, "call i64 @__mod_counter_Counter.get_value")
+}
+
+func TestModuleGlobImportCall(t *testing.T) {
+	ir := generateIRWithModule(t, "helpers",
+		"greet() int `public { return 1; }",
+		`
+		use _ "./helpers";
+		main() {
+			int x = greet();
+		}
+		`,
+	)
+	// Glob-imported function should resolve to module-prefixed IR name
+	assertContains(t, ir, "define i64 @__mod_helpers_greet")
+	assertContains(t, ir, "call i64 @__mod_helpers_greet")
 }
 
 // --- Operator Method Dispatch Tests ---

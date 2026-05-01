@@ -10,6 +10,7 @@ import (
 
 	"djabi.dev/go/promise_lang/internal/ast"
 	"djabi.dev/go/promise_lang/internal/parser"
+	"djabi.dev/go/promise_lang/internal/sema"
 )
 
 // testdataDir resolves the testdata directory relative to the project root.
@@ -783,15 +784,16 @@ helper() int { return 1; }
 
 	// Load the module (with std so sema validation passes)
 	stdFiles := testStdFiles(t)
-	scope, err := loadLocalModule("./libs/mymod", projectDir, stdFiles)
+	modInfo, err := loadLocalModule("./libs/mymod", projectDir, stdFiles)
 	if err != nil {
 		t.Fatalf("loadLocalModule failed: %v", err)
 	}
-	if scope == nil {
-		t.Fatal("expected non-nil scope")
+	if modInfo == nil {
+		t.Fatal("expected non-nil ModuleInfo")
 	}
 
-	// Verify only public symbols are in the scope
+	// Verify only public symbols are in the exported scope
+	scope := sema.ExportedScope(modInfo.SemaInfo, modInfo.File)
 	if scope.Lookup("User") == nil {
 		t.Error("expected 'User' in exported scope")
 	}
@@ -842,11 +844,12 @@ type Bar `+"`public"+` { int y; }
 	}
 
 	stdFiles := testStdFiles(t)
-	scope, err := loadLocalModule("./mylib", projectDir, stdFiles)
+	modInfo, err := loadLocalModule("./mylib", projectDir, stdFiles)
 	if err != nil {
 		t.Fatalf("loadLocalModule failed: %v", err)
 	}
 
+	scope := sema.ExportedScope(modInfo.SemaInfo, modInfo.File)
 	if scope.Lookup("Foo") == nil {
 		t.Error("expected 'Foo' from a.pr in exported scope")
 	}
@@ -976,10 +979,11 @@ sum(int[] nums) int `+"`public"+` {
 	}
 
 	stdFiles := testStdFiles(t)
-	scope, err := loadLocalModule("./mymod", projectDir, stdFiles)
+	modInfo, err := loadLocalModule("./mymod", projectDir, stdFiles)
 	if err != nil {
 		t.Fatalf("loadLocalModule failed: %v", err)
 	}
+	scope := sema.ExportedScope(modInfo.SemaInfo, modInfo.File)
 	if scope.Lookup("greet") == nil {
 		t.Error("expected 'greet' in exported scope")
 	}

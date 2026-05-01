@@ -57,6 +57,11 @@ type Compiler struct {
 	// AST file reference for looking up default method bodies during synthesis.
 	file *ast.File
 
+	// Module codegen state
+	moduleFuncs map[string]*ir.Func    // "modname.funcname" → IR func (cross-module calls)
+	moduleExterns map[string]*ExternFunc // "modname.funcname" → extern (cross-module externs)
+	compilingModule string              // non-empty when compiling a module's declarations
+
 	// Loop control targets for break/continue
 	breakTarget    *ir.Block
 	continueTarget *ir.Block
@@ -332,6 +337,8 @@ func Compile(file *ast.File, info *sema.Info, target string) *CompileResult {
 		dropBindings:    make(map[string]scopeBinding),
 		thunks:          make(map[string]*ir.Func),
 		file:            file,
+		moduleFuncs:     make(map[string]*ir.Func),
+		moduleExterns:   make(map[string]*ExternFunc),
 	}
 
 	// Collect extern declarations and compute type layouts
@@ -379,6 +386,10 @@ func Compile(file *ast.File, info *sema.Info, target string) *CompileResult {
 	c.declareFuncs(file)
 	c.defineF64ToStringBridge() // bridge promise_f64_to_string → Promise _f64_to_str
 	c.declareMonoFuncs(file, monoFuncInstances)
+
+	// Compile imported modules into the same IR module (inline strategy)
+	c.compileModules()
+
 	c.defineTypeMethods(file)
 	c.defineMonoMethods(file, monoInstances)
 	c.defineFuncs(file)
@@ -2528,6 +2539,347 @@ func (c *Compiler) newBlock(name string) *ir.Block {
 // the function, so allocas placed here are always valid.
 func (c *Compiler) createEntryAlloca(elemType irtypes.Type) *ir.InstAlloca {
 	return c.entryBlock.NewAlloca(elemType)
+}
+
+// mangleModuleFuncName produces a module-qualified LLVM function name.
+func mangleModuleFuncName(moduleName, funcName string) string {
+	return "__mod_" + moduleName + "_" + funcName
+}
+
+// mangleModuleMethodName produces a module-qualified LLVM method name.
+func mangleModuleMethodName(moduleName, typeName, methodName string, isSetter bool) string {
+	base := mangleMethodName(typeName, methodName, isSetter)
+	return "__mod_" + moduleName + "_" + base
+}
+
+// mangleModuleTypeName produces a module-qualified LLVM struct name prefix.
+func mangleModuleTypeName(moduleName, typeName string) string {
+	return moduleName + "." + typeName
+}
+
+// compileModules inlines all imported module declarations into the current IR module.
+// For each module, it temporarily swaps c.info and c.file to the module's context,
+// runs the same layout/declare/define pipeline, then restores.
+func (c *Compiler) compileModules() {
+	if c.info.ModuleInfos == nil {
+		return
+	}
+
+	for _, modInfo := range c.info.ModuleInfos {
+		c.compileModule(modInfo)
+	}
+}
+
+// compileModule compiles a single module's declarations into the current IR module.
+func (c *Compiler) compileModule(modInfo *sema.ModuleInfo) {
+	// Save main context
+	savedInfo := c.info
+	savedFile := c.file
+	savedModule := c.compilingModule
+
+	// Switch to module context
+	c.info = modInfo.SemaInfo
+	c.file = modInfo.File
+	c.compilingModule = modInfo.Name
+
+	modFile := modInfo.File
+
+	// 1. Compute enum layouts for module types
+	c.computeEnumLayouts(modFile)
+
+	// 2. Compute user type layouts for module types
+	c.computeUserTypeLayouts(modFile)
+
+	// 3. Compute mono layouts for module generic instantiations
+	monoInstances := collectMonoInstances(modInfo.SemaInfo)
+	c.computeMonoLayouts(monoInstances)
+	monoFuncInstances := collectMonoFuncInstances(modInfo.SemaInfo)
+
+	// 4. Declare module externs
+	modExterns := collectExterns(modFile, modInfo.SemaInfo)
+	c.declareModuleExterns(modInfo.Name, modExterns)
+
+	// 5. Declare method stubs for module types
+	c.declareModuleTypeMethods(modFile, modInfo.Name)
+	c.declareMonoMethods(modFile, monoInstances)
+
+	// 6. Compute vtable info and emit for module types
+	c.computeVtableInfo(modFile)
+	c.emitVtableGlobals(modFile)
+	c.emitTypeInfoGlobals(modFile)
+
+	// 7. Declare and define module functions
+	c.declareModuleFuncs(modFile, modInfo.Name)
+	c.declareMonoFuncs(modFile, monoFuncInstances)
+
+	// 8. Define module method bodies
+	c.defineModuleTypeMethods(modFile, modInfo.Name)
+	c.defineMonoMethods(modFile, monoInstances)
+
+	// 9. Define module function bodies
+	c.defineModuleFuncs(modFile, modInfo.Name)
+	c.defineMonoFuncs(modFile, monoFuncInstances)
+
+	// Restore main context
+	c.info = savedInfo
+	c.file = savedFile
+	c.compilingModule = savedModule
+}
+
+// declareModuleExterns declares extern functions from a module, deduplicating
+// against already-declared C functions. Registers in moduleExterns for qualified access.
+func (c *Compiler) declareModuleExterns(moduleName string, externs []*ExternFunc) {
+	// Use the standard extern declaration pipeline (handles dedup, sret, etc.)
+	modLayouts := make(map[*types.Named]*TypeDeclLayout)
+	for k, v := range c.layouts {
+		modLayouts[k] = v
+	}
+	c.declareExterns(externs, modLayouts)
+
+	// Register module externs for qualified access
+	for _, ext := range externs {
+		key := moduleName + "." + ext.PromiseName
+		c.moduleExterns[key] = ext
+		// Also register in main externs if no collision
+		if _, exists := c.externs[ext.PromiseName]; !exists {
+			c.externs[ext.PromiseName] = ext
+		}
+	}
+}
+
+// declareModuleFuncs declares module functions with module-prefixed IR names.
+func (c *Compiler) declareModuleFuncs(file *ast.File, moduleName string) {
+	for _, decl := range file.Decls {
+		fd, ok := decl.(*ast.FuncDecl)
+		if !ok || fd.Body == nil || len(fd.TypeParams) > 0 {
+			continue
+		}
+		if fd.IsStd {
+			continue // std functions already compiled by main pipeline
+		}
+
+		obj := c.lookupFunc(fd.Name)
+		if obj == nil {
+			continue
+		}
+		sig, ok := obj.Type().(*types.Signature)
+		if !ok {
+			continue
+		}
+
+		retType := irtypes.Type(irtypes.Void)
+		if c.info.GeneratorFuncs[fd] != nil {
+			retType = generatorValueType()
+		} else if sig.Result() != nil {
+			retType = c.resolveType(sig.Result())
+		}
+		if sig.CanError() && c.info.GeneratorFuncs[fd] == nil {
+			retType = computeResultType(retType)
+		}
+
+		var params []*ir.Param
+		for _, p := range sig.Params() {
+			params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
+		}
+
+		irName := mangleModuleFuncName(moduleName, fd.Name)
+		fn := c.module.NewFunc(irName, retType, params...)
+
+		// Register in moduleFuncs for qualified access (mod.func())
+		key := moduleName + "." + fd.Name
+		c.moduleFuncs[key] = fn
+
+		// Also register in main funcs if no collision (for glob imports)
+		if _, shadowed := c.funcs[fd.Name]; !shadowed {
+			c.funcs[fd.Name] = fn
+		}
+	}
+}
+
+// defineModuleFuncs generates bodies for module functions.
+func (c *Compiler) defineModuleFuncs(file *ast.File, moduleName string) {
+	for _, decl := range file.Decls {
+		fd, ok := decl.(*ast.FuncDecl)
+		if !ok || fd.Body == nil || len(fd.TypeParams) > 0 || fd.IsStd {
+			continue
+		}
+
+		irName := mangleModuleFuncName(moduleName, fd.Name)
+		fn, ok := c.funcs[irName]
+		if !ok {
+			// Try moduleFuncs
+			key := moduleName + "." + fd.Name
+			fn, ok = c.moduleFuncs[key]
+			if !ok {
+				continue
+			}
+		}
+
+		obj := c.lookupFunc(fd.Name)
+		if obj == nil {
+			continue
+		}
+		sig, ok := obj.Type().(*types.Signature)
+		if !ok {
+			continue
+		}
+
+		c.fn = fn
+		c.block = fn.NewBlock("entry")
+		c.entryBlock = c.block
+		c.locals = make(map[string]*ir.InstAlloca)
+		c.localNameCount = make(map[string]int)
+		c.dropFlags = make(map[string]*ir.InstAlloca)
+		c.dropBindings = make(map[string]scopeBinding)
+		c.scopeBindings = nil
+		c.canError = sig.CanError()
+		c.currentRetType = sig.Result()
+		c.blockCounter = 0
+
+		// Bind parameters to local allocas
+		for i, p := range fn.Params {
+			alloca := c.entryBlock.NewAlloca(p.Typ)
+			c.entryBlock.NewStore(p, alloca)
+			c.locals[sig.Params()[i].Name()] = alloca
+		}
+
+		c.genBlock(fd.Body)
+
+		// Add implicit return if block not terminated
+		if c.block != nil && c.block.Term == nil {
+			if sig.CanError() {
+				c.block.NewRet(c.zeroValue(fn.Sig.RetType))
+			} else if fn.Sig.RetType == irtypes.Void {
+				c.block.NewRet(nil)
+			} else {
+				c.block.NewRet(c.zeroValue(fn.Sig.RetType))
+			}
+		}
+	}
+}
+
+// declareModuleTypeMethods declares method stubs for module types with module-prefixed names.
+func (c *Compiler) declareModuleTypeMethods(file *ast.File, moduleName string) {
+	for _, decl := range file.Decls {
+		td, ok := decl.(*ast.TypeDecl)
+		if !ok {
+			continue
+		}
+		if td.IsStd {
+			continue
+		}
+		named := c.lookupNamedType(td.Name)
+		if named == nil || len(named.TypeParams()) > 0 {
+			continue
+		}
+
+		for _, md := range td.Methods {
+			if md.Body == nil {
+				continue
+			}
+			m := c.lookupAnyMethod(named, md.Name, md.IsGetter, md.IsSetter)
+			if m == nil || m.Sig() == nil {
+				continue
+			}
+
+			mangledName := mangleModuleMethodName(moduleName, td.Name, md.Name, md.IsSetter)
+
+			var params []*ir.Param
+			if m.Sig().Recv() != nil {
+				params = append(params, ir.NewParam("this", irtypes.I8Ptr))
+			}
+			for _, p := range m.Sig().Params() {
+				params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
+			}
+
+			retType := irtypes.Type(irtypes.Void)
+			if m.Sig().Result() != nil {
+				retType = c.resolveType(m.Sig().Result())
+			}
+			if m.Sig().CanError() {
+				retType = computeResultType(retType)
+			}
+
+			fn := c.module.NewFunc(mangledName, retType, params...)
+			c.funcs[mangledName] = fn
+
+			// Also register the non-prefixed method name for dispatch within the module
+			plainName := mangleMethodName(td.Name, md.Name, md.IsSetter)
+			if _, exists := c.funcs[plainName]; !exists {
+				c.funcs[plainName] = fn
+			}
+		}
+	}
+}
+
+// defineModuleTypeMethods generates method bodies for module types.
+func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
+	for _, decl := range file.Decls {
+		td, ok := decl.(*ast.TypeDecl)
+		if !ok || td.IsStd {
+			continue
+		}
+		named := c.lookupNamedType(td.Name)
+		if named == nil || len(named.TypeParams()) > 0 {
+			continue
+		}
+
+		for _, md := range td.Methods {
+			if md.Body == nil {
+				continue
+			}
+			m := c.lookupAnyMethod(named, md.Name, md.IsGetter, md.IsSetter)
+			if m == nil || m.Sig() == nil {
+				continue
+			}
+
+			mangledName := mangleModuleMethodName(moduleName, td.Name, md.Name, md.IsSetter)
+			fn, ok := c.funcs[mangledName]
+			if !ok {
+				continue
+			}
+
+			c.currentNamed = named
+			c.fn = fn
+			c.block = fn.NewBlock("entry")
+			c.entryBlock = c.block
+			c.locals = make(map[string]*ir.InstAlloca)
+			c.localNameCount = make(map[string]int)
+			c.dropFlags = make(map[string]*ir.InstAlloca)
+			c.dropBindings = make(map[string]scopeBinding)
+			c.scopeBindings = nil
+			c.canError = m.Sig().CanError()
+			c.currentRetType = m.Sig().Result()
+			c.blockCounter = 0
+
+			// Bind 'this' and parameters
+			paramIdx := 0
+			if m.Sig().Recv() != nil {
+				alloca := c.entryBlock.NewAlloca(irtypes.I8Ptr)
+				c.entryBlock.NewStore(fn.Params[0], alloca)
+				c.locals["this"] = alloca
+				paramIdx = 1
+			}
+			for i, p := range m.Sig().Params() {
+				alloca := c.entryBlock.NewAlloca(fn.Params[paramIdx+i].Typ)
+				c.entryBlock.NewStore(fn.Params[paramIdx+i], alloca)
+				c.locals[p.Name()] = alloca
+			}
+
+			c.genBlock(md.Body)
+
+			if c.block != nil && c.block.Term == nil {
+				if m.Sig().CanError() {
+					c.block.NewRet(c.zeroValue(fn.Sig.RetType))
+				} else if fn.Sig.RetType == irtypes.Void {
+					c.block.NewRet(nil)
+				} else {
+					c.block.NewRet(c.zeroValue(fn.Sig.RetType))
+				}
+			}
+			c.currentNamed = nil
+		}
+	}
 }
 
 // computeUserTypeLayouts computes layouts for all user-declared types in the file.

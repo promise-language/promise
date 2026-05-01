@@ -645,6 +645,33 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 		if ident, ok := member.Target.(*ast.IdentExpr); ok && ident.Name == "std" {
 			return c.genStdCall(e, member.Field)
 		}
+		// Handle mod.func() — qualified call to imported module function
+		// Only dispatch as a module call if the callee resolves to a function
+		// (not a type — type constructors use the constructor path below).
+		if ident, ok := member.Target.(*ast.IdentExpr); ok {
+			if modName := c.resolveModuleName(ident); modName != "" {
+				calleeType := c.info.Types[e.Callee]
+				if _, isNamed := calleeType.(*types.Named); !isNamed {
+					if _, isInst := calleeType.(*types.Instance); !isInst {
+						if _, isEnum := calleeType.(*types.Enum); !isEnum {
+							return c.genModuleCall(e, modName, member.Field)
+						}
+					}
+				}
+			}
+		}
+		// Module-qualified constructor: mod.Type(args) — the callee MemberExpr
+		// resolves to a Named/Instance type, so redirect to constructor path.
+		memberCalleeType := c.info.Types[e.Callee]
+		if memberCalleeType != nil {
+			if _, isNamed := memberCalleeType.(*types.Named); isNamed {
+				return c.genConstructorCallMono(e, memberCalleeType)
+			}
+			if _, isInst := memberCalleeType.(*types.Instance); isInst {
+				return c.genConstructorCallMono(e, memberCalleeType)
+			}
+		}
+
 		targetType := c.info.Types[member.Target]
 		// Apply typeSubst for mono context
 		if c.typeSubst != nil {
@@ -772,6 +799,73 @@ func (c *Compiler) genStdCall(e *ast.CallExpr, funcName string) value.Value {
 				if sig, ok := callee.Type().(*types.Signature); ok {
 					argVals = c.coerceCallArgs(argVals, argTypes, sig.Params())
 				}
+			}
+		}
+	}
+
+	return c.block.NewCall(fn, argVals...)
+}
+
+// resolveModuleName checks if an IdentExpr refers to a module and returns
+// the module's binding name. Returns "" if the ident is not a module.
+func (c *Compiler) resolveModuleName(ident *ast.IdentExpr) string {
+	if obj, ok := c.info.Objects[ident]; ok {
+		if mod, ok := obj.(*types.Module); ok {
+			return mod.Name()
+		}
+	}
+	return ""
+}
+
+// genModuleCall handles mod.func() calls — resolves func in the module's IR functions.
+func (c *Compiler) genModuleCall(e *ast.CallExpr, moduleName, funcName string) value.Value {
+	var argVals []value.Value
+	var argTypes []types.Type
+	for _, arg := range e.Args {
+		argVals = append(argVals, c.genExpr(arg.Value))
+		argTypes = append(argTypes, c.info.Types[arg.Value])
+		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		}
+	}
+
+	// Try module extern first
+	key := moduleName + "." + funcName
+	if ext, ok := c.moduleExterns[key]; ok {
+		return c.genExternCall(ext, argVals, argTypes)
+	}
+
+	// Try module function
+	fn, ok := c.moduleFuncs[key]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undefined module function %s.%s", moduleName, funcName))
+	}
+
+	// Coerce arguments
+	if c.info.ModuleInfos != nil {
+		for _, modInfo := range c.info.ModuleInfos {
+			if modInfo.Name == moduleName {
+				if modInfo.SemaInfo.StdScope != nil {
+					if obj := modInfo.SemaInfo.StdScope.Lookup(funcName); obj != nil {
+						if callee, ok := obj.(*types.Func); ok {
+							if sig, ok := callee.Type().(*types.Signature); ok {
+								argVals = c.coerceCallArgs(argVals, argTypes, sig.Params())
+							}
+						}
+					}
+				}
+				// Check file scope
+				fileScope := modInfo.SemaInfo.Scopes[modInfo.File]
+				if fileScope != nil {
+					if obj := fileScope.Lookup(funcName); obj != nil {
+						if callee, ok := obj.(*types.Func); ok {
+							if sig, ok := callee.Type().(*types.Signature); ok {
+								argVals = c.coerceCallArgs(argVals, argTypes, sig.Params())
+							}
+						}
+					}
+				}
+				break
 			}
 		}
 	}

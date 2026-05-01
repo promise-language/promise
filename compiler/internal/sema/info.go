@@ -18,6 +18,15 @@ type CapturedVar struct {
 	ByMove bool         // true if move-captured, false if copy-captured
 }
 
+// ModuleInfo bundles everything codegen needs about an imported module:
+// the module's merged AST file and its sema output.
+type ModuleInfo struct {
+	Name     string   // module alias (binding name used in consumer code)
+	Path     string   // source path (empty for catalog modules)
+	File     *ast.File // the module's merged AST (with std decls merged in)
+	SemaInfo *Info     // the module's sema output
+}
+
 // Info holds the results of semantic analysis.
 // All maps use AST nodes as keys — the AST itself is not modified.
 type Info struct {
@@ -89,6 +98,11 @@ type Info struct {
 	// element type T. A function is a generator if its return type is
 	// stream[T] and its body contains at least one yield statement.
 	GeneratorFuncs map[ast.Node]types.Type
+
+	// ModuleInfos maps module keys (catalog name or source path) to the
+	// full module compilation result. Used by codegen to inline module
+	// declarations into the main IR module.
+	ModuleInfos map[string]*ModuleInfo
 }
 
 // NarrowedVar records a single variable narrowing (T? → T).

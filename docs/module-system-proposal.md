@@ -46,7 +46,7 @@ Every decision in this proposal is evaluated against Promise's core principles:
 | Principle | How the catalog model serves it |
 |-----------|-------------------------------|
 | **Self-contained readability** | `use io` is unambiguous — there's exactly one `io` module at your epoch. No version in the import means no version to get wrong. |
-| **Explicit over implicit** | The epoch is explicit in `promise.mod`. Everything else follows deterministically from it. No implicit resolution, no heuristics. |
+| **Explicit over implicit** | The epoch is explicit in `promise.toml`. Everything else follows deterministically from it. No implicit resolution, no heuristics. |
 | **Minimal context needed** | An AI agent only needs to know the epoch to generate correct imports. The catalog is finite, documented, and stable within an epoch. |
 | **One obvious way** | There is exactly one version of each module. No version ranges, no "compatible" vs "latest" vs "pinned." No lockfiles to maintain. |
 | **No hidden effects** | Build output is fully determined by source code + epoch. No resolver surprises, no phantom dependency updates. |
@@ -106,10 +106,11 @@ Key properties:
 - **Flat namespace.** Module names are simple identifiers (`json`, `http`, `crypto`). No URLs, no paths, no version numbers in names.
 - **Pinned commits.** Each module points to an exact commit hash. No ranges, no "latest", no resolution.
 - **Declared dependencies.** Each module lists which other catalog modules it requires. These are validated by the catalog CI — circular dependencies are rejected.
+- **Self-contained.** Catalog modules may only depend on other catalog modules — never on remote or local modules. The catalog is a closed world: every dependency in the graph is tested, versioned, and shipped together. This is enforced by the catalog CI pipeline (see Section 8.1).
 
 ### 3.3 What's NOT in the Catalog
 
-The catalog is curated, not exhaustive. Not every Promise module needs to be in it. Modules outside the catalog are called **external modules** and are imported via URL-based `use` declarations with per-module commit pinning (see Section 9).
+The catalog is curated, not exhaustive. Not every Promise module needs to be in it. Modules outside the catalog are **sourced modules** — either local (path-based) or remote (URL-based) — imported via `use alias "location"` declarations (see Section 9).
 
 The catalog aims to cover the "90% use case" — the modules that most programs need. Think of it as a comprehensive standard library rather than a package registry.
 
@@ -169,9 +170,11 @@ This is radically simpler than semver, where a breaking change in one package ca
 
 ## 5. Import Syntax
 
-### 5.1 `use` Declarations
+### 5.1 `use` Declarations (Module Imports)
 
-The `use` keyword imports a module by its catalog name:
+The `use` keyword at file scope imports a module by its catalog name:
+
+**Note on keyword reuse:** Promise also uses `use` inside function bodies for scoped resource bindings (`use x = File.open("path")`). There is no ambiguity — module imports (`useDecl`) appear at file scope before declarations, while resource bindings (`useBinding`) appear inside statement blocks. The grammar separates them structurally.
 
 ```promise
 use io
@@ -179,7 +182,7 @@ use json
 use http
 ```
 
-That's it. No URLs, no version numbers, no string literals. The module name is a bare identifier that maps to a catalog entry. The epoch (declared in `promise.mod`) determines which version of each module you get.
+That's it. No URLs, no version numbers, no string literals. The module name is a bare identifier that maps to a catalog entry. The epoch (declared in `promise.toml`) determines which version of each module you get.
 
 **Qualified access** — all references to imported names use the module name as a prefix:
 
@@ -212,41 +215,61 @@ There is no `from json use parse` or `use json { parse }`. Every reference is qu
 1. **Self-contained readability.** When you see `json.parse(...)` anywhere in the file, you know exactly where `parse` comes from without scanning import lists.
 2. **One obvious way.** There's no choice between qualified and unqualified imports. No style debates, no inconsistency across codebases.
 
-### 5.4 External Module Imports (URL-based)
+### 5.4 Sourced Module Imports (Local and Remote)
 
-For modules **not in the catalog** — private libraries, experimental packages, pre-catalog prototypes — use URL-based imports with an explicit alias:
+For modules **not in the catalog** — project-local modules, private libraries, experimental packages, pre-catalog prototypes — use a sourced import with an explicit alias and a location string:
 
 ```promise
+// Local modules (relative path)
+use models "./libs/models"
+use auth "../shared/auth"
+
+// Remote modules (URL — git repository)
 use parser "github.com/someone/promise-parser"
 use internal "git.corp.com/team/internal-utils"
 
 main() {
+    user := models.User(name: "Alice")
     parser.parse("input")
     internal.do_thing()
 }
 ```
 
-URL-based imports use the same `use alias "url"` syntax from the original language design. The alias is mandatory and is the only way to reference the module's exports. The URL points to a git repository containing a `promise.mod` at its root.
+Both local and remote sourced imports use the same syntax: `use alias "location"`. The alias is mandatory and is the only way to reference the module's exports. The compiler disambiguates local vs remote based on a simple prefix rule:
 
-**Version pinning for external modules:** External modules are not epoch-managed, so they need explicit version pinning. This is declared in `promise.mod` (see Section 6.2).
+**A location string is local if it starts with a path prefix. Everything else is remote.** The detection rule:
 
-### 5.5 Local Module Imports
+| Prefix | Kind | Example |
+|--------|------|---------|
+| `./`, `../` | Local (relative) | `"./libs/models"`, `"../shared/auth"` |
+| `/` | Local (absolute, Unix) | `"/opt/shared/auth"` |
+| `C:\`, `d:/`, etc. | Local (absolute, Windows) | `"C:\projects\shared\auth"` |
+| Everything else | Remote (git URL) | `"github.com/someone/parser"`, `"https://git.corp.com/team/utils"` |
 
-For project-local modules (sub-directories with their own `promise.mod`), use a relative path:
+More precisely: a location string is local if it starts with `./`, `../`, `/`, or a drive letter followed by `:` (matching `[A-Za-z]:`). Everything else is remote. This is unambiguous — `github.com/...` doesn't match any local prefix. A bare name like `"models"` would be classified as remote, fail to resolve as a git URL, and produce a clear error:
 
-```promise
-use "./models"
-use "./utils" as u
-
-main() {
-    user := models.User(name: "Alice")
-    u.format(user)
-}
+```
+error: invalid module path "models" — not a valid git URL
+  hint: did you mean `use models;` (catalog) or `use models "./models";` (local)?
 ```
 
-Relative imports always start with `./` or `../` to distinguish them from catalog modules. The path points to the directory containing the target `promise.mod`. The default alias is the `module` name declared in that module's `promise.mod` — use `as` to override it. If the module name conflicts with another import in the same file, an explicit alias is required.
+**Relative paths (`./`, `../`) are the norm.** Absolute paths (`/...`, `C:\...`) work but are non-portable across machines — they should be treated as development-only conveniences (like `[replace]`) and not committed to source control. The compiler emits a warning for absolute local imports:
 
-### 5.6 Standard Library — Just Part of the Catalog
+```
+warning: absolute local import path "/opt/shared/auth" is non-portable
+  hint: use a relative path or import as a remote module for reproducible builds
+```
+
+**Local modules** point to a directory containing its own `promise.toml`. The path is always relative to the project's module root (the directory containing the project's `promise.toml`), not the importing source file. This means every source file in the project uses the same path to reference the same local module, regardless of which subdirectory the source file lives in. Subdirectories without a `promise.toml` are organizational — their `.pr` files belong to the parent module.
+
+**Remote modules** point to a git repository containing a `promise.toml` at its root. They must be pinned to a specific git commit hash in the project's `promise.toml` `[require]` section (see Section 6.2). The compiler clones (or fetches from cache) the repository at the pinned commit. If a source file references a remote URL that has no `[require]` entry, the compiler errors:
+
+```
+error: remote module "github.com/someone/parser" has no pin in promise.toml
+  hint: run `promise pin "github.com/someone/parser"` to add one
+```
+
+### 5.5 Standard Library — Just Part of the Catalog
 
 From the user's perspective, `use io` and `use json` look and work identically — both are catalog modules resolved by the epoch. The only difference is operational: **core modules** ship embedded in the compiler binary and work offline immediately after `promise sync`, while **community modules** are fetched on first use.
 
@@ -274,92 +297,107 @@ time        — clocks, durations, formatting
 
 The boundary between core and community is a packaging decision, not a language one. Modules can move between tiers across epochs.
 
-### 5.7 Two Tiers of Import
+### 5.6 Import Summary
 
-The import syntax has two forms, reflecting two tiers of the ecosystem:
+The import syntax has two grammar forms, covering three semantic tiers:
 
 | Form | Tier | Example | Resolution |
 |------|------|---------|------------|
 | `use name` | Catalog | `use json` | Looked up in catalog at project's epoch |
-| `use alias "url"` | External | `use parser "github.com/someone/parser"` | Fetched from URL, pinned in `promise.mod` |
+| `use alias "location"` | Local | `use models "./libs/models"` | Directory relative to `promise.toml` |
+| `use alias "location"` | Remote | `use parser "github.com/someone/parser"` | Git repo, pinned by commit hash in `promise.toml` |
 
-**Why catalog modules don't use URLs:**
+Local and remote imports share the same grammar rule — the compiler disambiguates based on the location string prefix (starts with `./`, `../`, `/`, or a drive letter like `C:` → local; everything else → remote).
+
+**Why catalog modules don't use location strings:**
 
 1. **URLs encode hosting, not identity.** If `github.com/promise-lang/json` moves to another host, catalog imports (`use json`) are unaffected.
 2. **Version in the URL is redundant.** The epoch determines the version. A URL with a version creates two sources of truth.
 3. **`use json` is clearer than `use json "github.com/promise-lang/json/1"`.** The URL adds no information the catalog doesn't already provide.
 4. **AI agents can enumerate catalog names.** A flat namespace (`json`, `http`, `crypto`) is predictable and discoverable. URLs are not.
 
-**Why external modules DO use URLs:**
+**Why sourced modules DO use location strings:**
 
-1. **The compiler can't guess where they live.** Without a catalog entry, the URL is the only source of truth.
-2. **Explicit alias forces readability.** `use parser "github.com/someone/promise-parser"` makes it immediately clear this is an external dependency — the string literal is a visual signal.
-3. **Self-contained.** Each source file declares exactly where its external dependencies come from. No external configuration needed to understand the import.
+1. **The compiler can't guess where they live.** Without a catalog entry, the location string is the only source of truth.
+2. **Explicit alias forces readability.** `use parser "github.com/someone/promise-parser"` makes it immediately clear this is a sourced dependency — the string literal is a visual signal.
+3. **Self-contained.** Each source file declares exactly where its sourced dependencies come from. No external configuration needed to understand the import.
 
-**Alias rules:** All import aliases (whether from catalog, external, or local imports) must be unique within a file. If a catalog module name collides with a needed alias, use `as` on one of them to resolve the conflict.
+**Alias rules:** All import aliases (whether from catalog or sourced imports) must be unique within a file. If a catalog module name collides with a needed alias, use `as` on one of them to resolve the conflict.
 
-**Grammar change:** The current grammar rule `useDecl: USE IDENT stringLiteral SEMI` supports only the `use alias "url"` form. This must be extended to also support bare `use IDENT SEMI` for catalog imports:
+**Grammar:** The grammar has two import forms — bare identifier for catalog, identifier with string literal for sourced:
 
 ```antlr
 useDecl
-    : USE IDENT stringLiteral SEMI        // external: use parser "url";
-    | USE IDENT (AS IDENT)? SEMI          // catalog:  use json; / use json as j;
-    | USE stringLiteral (AS IDENT)? SEMI  // local:    use "./models"; / use "./models" as m;
-    ;
+    : USE IDENT (AS IDENT)? SEMI          // catalog:  use json; / use json as j;
+    | USE IDENT stringLiteral SEMI         // sourced:  use parser "github.com/...";
+    ;                                      //           use models "./libs/models";
 ```
+
+The existing grammar rule `USE IDENT stringLiteral SEMI` already covers sourced imports. The only addition is the bare `USE IDENT (AS IDENT)? SEMI` form for catalog imports. The two alternatives disambiguate cleanly on the third token: `stringLiteral` → sourced, `AS`/`SEMI` → catalog.
 
 ---
 
 ## 6. Module Structure
 
-### 6.1 `promise.mod` File
+### 6.1 `promise.toml` File
 
-Every module (including your project) has a `promise.mod` file at its root:
+Every module (including your project) has a `promise.toml` file at its root. The file uses standard [TOML](https://toml.io) format, so editors and IDEs provide syntax highlighting, validation, and completion out of the box.
 
+```toml
+[module]
+name = "myapp"
+epoch = "2026.3"
 ```
-epoch 2026.3
-module myapp
-```
 
-Two lines. That's a complete project manifest. The `epoch` line pins the catalog version. The `module` line names the module (used when other modules import it).
+That's a complete project manifest. The `epoch` key pins the catalog version. The `name` key names the module (used as the default alias when other modules import it).
 
 For a module that will be submitted to the catalog:
 
-```
-epoch 2026.3
-module json
+```toml
+[module]
+name = "json"
+epoch = "2026.3"
 ```
 
 The module name must be a valid Promise identifier. It must be unique within the catalog.
 
-### 6.2 External Module Pinning
+**Forward compatibility:** The compiler ignores unknown keys and sections in `promise.toml`. This allows the format to evolve across epochs without breaking older compilers reading newer manifests. New keys are always optional with sensible defaults.
 
-Catalog modules need no version declaration — the epoch handles it. But external modules (URL-based imports) must be pinned in `promise.mod`:
+**Catalog self-containment enforcement:** The catalog self-containment rule (catalog modules may not depend on sourced modules — see Section 3.2 and 8.1) is enforced by the **catalog CI pipeline**, not by the compiler. A module's `promise.toml` does not declare whether it is a catalog module — that status is determined by its presence in `catalog.toml`. The compiler treats all modules identically; the catalog CI adds the extra validation layer (rejecting `[require]` sections, sourced `use` imports, etc.).
 
+### 6.2 Remote Module Pinning
+
+Catalog modules need no version declaration — the epoch handles it. Local modules use whatever is on disk. But remote modules must be pinned to a git commit hash in `promise.toml`:
+
+```toml
+[module]
+name = "myapp"
+epoch = "2026.3"
+
+[require]
+"github.com/someone/promise-parser" = "a1b2c3d4e5f6"
+"git.corp.com/team/internal-utils" = "def5678abc1234"
 ```
-epoch 2026.3
-module myapp
 
-require "github.com/someone/promise-parser" abc1234
-require "git.corp.com/team/internal-utils" def5678
-```
+Each entry in `[require]` maps a remote URL to a git commit hash. This is the **only** version information in the entire project — and it only applies to remote modules.
 
-Each `require` line specifies a URL and a commit hash. This is the **only** version information in the entire project — and it only applies to non-catalog modules.
+**What lives at the remote URL:** Always a git repository containing a `promise.toml` at its root. The compiler clones the repo (or fetches into its cache) at the pinned commit. No other formats (zip, tar, registry) are supported — git is universal and commit hashes map directly to git objects.
 
-**Why commit hashes, not semver?** Consistency with the catalog model. The catalog pins exact commits internally; external modules follow the same principle. A commit hash is unambiguous and immutable. Semver tags can be moved or deleted.
+**Why commit hashes, not semver?** Consistency with the catalog model. The catalog pins exact commits internally; remote modules follow the same principle. A commit hash is unambiguous and immutable. Semver tags can be moved or deleted. Remote module authors can use whatever versioning scheme they like (tags, semver, etc.) — Promise resolves everything to a commit hash at pin time.
 
-**`promise pin` command** updates the commit hash for an external module:
+**`promise pin` command** resolves human-friendly references to commit hashes:
 
 ```bash
-promise pin "github.com/someone/promise-parser"           # pin to latest commit
-promise pin "github.com/someone/promise-parser" abc1234   # pin to specific commit
+promise pin "github.com/someone/promise-parser"              # pin to latest commit on default branch
+promise pin "github.com/someone/promise-parser" v2.1.0        # resolve tag → commit hash, pin that
+promise pin "github.com/someone/promise-parser" a1b2c3d       # pin to exact commit
 ```
 
 ### 6.3 No Lockfile (for Catalog Modules)
 
 There is no `promise.lock` for catalog modules. The epoch **is** the lock. Two developers on the same epoch will always get identical catalog module source code, because the catalog pins exact commits per epoch.
 
-External modules are pinned by commit hash directly in `promise.mod` — this serves the same purpose as a lockfile but lives in the manifest, not a separate generated file.
+Remote modules are pinned by commit hash directly in `promise.toml` — this serves the same purpose as a lockfile but lives in the manifest, not a separate generated file.
 
 This eliminates an entire class of problems:
 - No lockfile merge conflicts
@@ -373,7 +411,7 @@ Unchanged from the existing design. Flat layout, no required `src/`:
 
 ```
 myapp/
-  promise.mod           # epoch 2026.3 / module myapp
+  promise.toml          # [module] name = "myapp", epoch = "2026.3"
   main.pr               # entry point
   helpers.pr            # source file
   models/
@@ -382,15 +420,15 @@ myapp/
     test_main.pr        # test files
 ```
 
-Sub-directories with their own `promise.mod` are separate modules, excluded from the parent:
+Sub-directories with their own `promise.toml` are separate modules, excluded from the parent:
 
 ```
 myapp/
-  promise.mod           # module myapp
+  promise.toml          # module myapp
   main.pr
   libs/
     auth/
-      promise.mod       # module auth (separate, imported via use "./libs/auth")
+      promise.toml      # module auth (separate, imported via use auth "./libs/auth")
       auth.pr
 ```
 
@@ -424,6 +462,19 @@ next_id() int {             // private function — not visible outside this mod
 **Why private by default (changed from original design):** Explicit exports make a module's API surface immediately obvious. An AI agent reading a module only needs to look at `` `public `` declarations to understand the API. This also means adding a new internal helper never accidentally becomes part of the public API.
 
 This fulfills the original design's plan: "In a future revision, declarations will be **private by default**, and `` `public `` will be required to export them." The module system is that future revision.
+
+**Test files can access private declarations.** Test files (matching `test_*.pr` or `*_test.pr` conventions) within a module are part of that module's compilation unit. They can access all declarations — public and private — because they're inside the module boundary. Only code in OTHER modules is restricted to `` `public `` declarations. This is the same approach Go uses (`_test.go` files are in the same package).
+
+**Import alias collisions.** All import aliases must be unique within a file. If a catalog module name collides with a sourced import alias, the compiler reports an error:
+
+```
+error: duplicate import alias 'json'
+  use json;                              // catalog
+  use json "./libs/json";               // local — conflicts with catalog alias
+  hint: use `as` to rename one: `use json as std_json;` or `use local_json "./libs/json";`
+```
+
+Both catalog and sourced imports can be aliased: `use json as j` for catalog, or simply choose a different alias for the sourced import.
 
 ---
 
@@ -462,20 +513,29 @@ The current `promise install` creates `~/.promise/bin/` and `~/.promise/lib/std/
     2026.3/
       ...
   cache/
-    modules/
+    catalog/                # catalog module source + compiled objects (keyed by name/commit)
       json/
-        a1b2c3d/            # cached module source at specific commit
+        a1b2c3d/            # source checkout
+        a1b2c3d.o           # compiled object (shared across projects on same epoch)
+        a1b2c3d.interface   # public API description
       http/
         e4f5a6b/
+        e4f5a6b.o
+        e4f5a6b.interface
+    modules/                # remote module source + compiled objects (keyed by URL/commit)
+      github.com/someone/promise-parser/
+        a1b2c3d/            # source checkout
+        a1b2c3d.o
+        a1b2c3d.interface
 ```
 
-Multiple epochs can coexist. The compiler binary in `~/.promise/epochs/<epoch>/bin/promise` is used when building a project pinned to that epoch. The shim at `~/.promise/bin/promise` reads the project's `promise.mod` and dispatches to the correct epoch's compiler.
+Multiple epochs can coexist. The compiler binary in `~/.promise/epochs/<epoch>/bin/promise` is used when building a project pinned to that epoch. The shim at `~/.promise/bin/promise` reads the project's `promise.toml` and dispatches to the correct epoch's compiler.
 
 ### 7.3 Project Epoch Resolution
 
 When you run `promise build` or `promise run`, the compiler:
 
-1. Walks up from the current directory to find `promise.mod`
+1. Walks up from the current directory to find `promise.toml`
 2. Reads the `epoch` line
 3. If the current compiler binary matches that epoch, proceeds directly
 4. If not, delegates to `~/.promise/epochs/<epoch>/bin/promise`
@@ -494,7 +554,7 @@ promise sync
 # Create a new project
 mkdir myapp && cd myapp
 promise init
-# Creates promise.mod with the current stable epoch
+# Creates promise.toml with the current stable epoch
 
 # Write code and build — catalog modules are fetched on first use
 cat > main.pr << 'EOF'
@@ -507,6 +567,8 @@ EOF
 promise run main.pr
 ```
 
+**Single-file mode (no `promise.toml` required):** For quick scripts and one-off programs, `promise run file.pr` and `promise exec '<code>'` work without a `promise.toml`. If the compiler walks up the directory tree and finds no `promise.toml`, it treats the file as an anonymous single-file module using the compiler's default epoch (the `active` epoch from `~/.promise/active`). Only catalog imports are available in this mode — sourced imports require a `promise.toml` (for `[require]` pins and path resolution root). This preserves the "write one file and run it" experience that is critical for AI agent workflows.
+
 ---
 
 ## 8. Catalog Governance & Submission
@@ -516,7 +578,7 @@ promise run main.pr
 To be accepted into the catalog, a module must meet:
 
 1. **Tests.** The module must have a test suite that passes. Coverage expectations scale with module scope — a small utility needs basic tests, a crypto library needs comprehensive tests.
-2. **No external modules.** A catalog module may only depend on other catalog modules. This ensures the entire dependency graph is within the tested, mono-versioned set. If a catalog module needs functionality from outside the catalog, that functionality must be submitted to the catalog first.
+2. **Catalog-only dependencies (self-containment).** A catalog module may only depend on other catalog modules — no remote modules, no local modules, no `[require]` section in its `promise.toml`. This ensures the catalog is a **closed, fully self-contained world**: every dependency in the graph is tested, versioned, and shipped as a unit. If a catalog module needs functionality from outside the catalog, that functionality must be submitted to the catalog first. This is enforced by the catalog CI pipeline, which rejects any module with sourced imports or a `[require]` section (see Section 6.1).
 3. **API documentation.** Every `` `public `` declaration must have a doc comment. These are used to generate the catalog's API reference, which AI agents use for code generation.
 4. **Naming.** The module name must be descriptive, not conflict with existing modules, and follow naming conventions (lowercase, underscores for multi-word).
 5. **Scope.** The module should do one thing well. "Kitchen sink" modules that bundle unrelated functionality are split into separate modules.
@@ -556,46 +618,48 @@ This is deliberately more restrictive than npm/crates.io. The tradeoff is clear:
 
 ---
 
-## 9. External Modules (Non-Catalog)
+## 9. Remote Modules (Non-Catalog)
 
-### 9.1 The Two-Tier Ecosystem
+### 9.1 The Module Ecosystem
 
-The Promise ecosystem has two tiers:
+The Promise ecosystem has three tiers, covered by two grammar forms:
 
 | Tier | Import syntax | Versioning | Compatibility guarantee | Use case |
 |------|--------------|------------|------------------------|----------|
 | **Catalog** | `use json` | Mono-versioned (epoch) | All modules tested together | Standard library, common community modules |
-| **External** | `use parser "url"` | Per-module (commit pin) | Author's responsibility | Private libs, experimental code, niche tools, pre-catalog prototypes |
+| **Local** | `use models "./libs/models"` | Whatever is on disk | Developer's responsibility | Project sub-modules, monorepo packages |
+| **Remote** | `use parser "github.com/..."` | Git commit pin | Author's responsibility | Private libs, experimental code, niche tools, pre-catalog prototypes |
 
-Both tiers are first-class. External modules are not second-class citizens — they have full access to the type system, generics, ownership, and everything else. The difference is purely in how they're versioned and what guarantees they carry.
+All tiers are first-class. Sourced modules (local and remote) have full access to the type system, generics, ownership, and everything else. The difference is purely in how they're versioned and what guarantees they carry.
 
-### 9.2 Developing an External Module
+### 9.2 Developing a Remote Module
 
-An external module is a git repository with a `promise.mod` at the root:
+A remote module is a git repository with a `promise.toml` at the root:
 
 ```
 promise-parser/
-  promise.mod           # epoch 2026.3 / module parser
+  promise.toml          # [module] name = "parser", epoch = "2026.3"
   parser.pr
   lexer.pr
   tests/
     test_parser.pr
 ```
 
-Its `promise.mod`:
+Its `promise.toml`:
 
-```
-epoch 2026.3
-module parser
+```toml
+[module]
+name = "parser"
+epoch = "2026.3"
 ```
 
-The `epoch` line declares which catalog epoch this module is built against. This means:
+The `epoch` key declares which catalog epoch this module is built against. This means:
 - It can `use` any catalog module from that epoch
 - Its users should ideally be on the same epoch (or a compatible one)
 
-**Publishing:** Push to any git host. That's it. There's no registry to publish to (unless aiming for catalog inclusion). Anyone can use it by adding `use parser "github.com/you/promise-parser"` and pinning in their `promise.mod`.
+**Publishing:** Push to any git host. That's it. There's no registry to publish to (unless aiming for catalog inclusion). Anyone can use it by adding `use parser "github.com/you/promise-parser"` and pinning in their `promise.toml`.
 
-### 9.3 Using External Modules
+### 9.3 Using Remote Modules
 
 ```promise
 // main.pr
@@ -608,40 +672,63 @@ main() {
 }
 ```
 
-```
-// promise.mod
-epoch 2026.3
-module myapp
+```toml
+# promise.toml
+[module]
+name = "myapp"
+epoch = "2026.3"
 
-require "github.com/someone/promise-parser" a1b2c3d
-require "git.corp.com/team/internal-utils" e4f5a6b
+[require]
+"github.com/someone/promise-parser" = "a1b2c3d"
+"git.corp.com/team/internal-utils" = "e4f5a6b"
 ```
 
 The compiler:
 1. Sees `use parser "github.com/someone/promise-parser"` in source
-2. Looks up the URL in `promise.mod` to find the pinned commit `a1b2c3d`
-3. Fetches (or uses cached) source at that commit
-4. Compiles the external module and links it
+2. Looks up the URL in `promise.toml` `[require]` to find the pinned commit `a1b2c3d`
+3. Clones (or uses cached) the git repo at that commit
+4. Reads the remote module's `promise.toml` to confirm the module name
+5. Compiles the remote module and links it
 
-### 9.4 External Module Dependency Rules
+### 9.4 Remote Module Dependency Rules
 
-External modules can depend on:
-- **Catalog modules** — via `use json` (resolved at the external module's declared epoch)
-- **Other external modules** — via `use other "url"` with their own `require` pins
-- **Local modules** — via `use "./subdir"`
+Remote modules can depend on:
+- **Catalog modules** — via `use json` (resolved at the remote module's declared epoch)
+- **Other remote modules** — via `use other "url"` with their own `[require]` pins
+- **Local modules** — via `use lib "./subdir"`
 
-**Epoch compatibility:** When an external module declares `epoch 2026.3` and your project uses `epoch 2026.3`, catalog dependencies align perfectly. If the epochs differ, the compiler emits a warning:
+**Epoch compatibility:** When a remote module declares `epoch = "2026.3"` and your project uses `epoch = "2026.3"`, catalog dependencies align perfectly. If the epochs differ, the compiler emits a warning:
 
 ```
-warning: external module 'parser' targets epoch 2026.2, project targets 2026.3
+warning: remote module 'parser' targets epoch 2026.2, project targets 2026.3
   catalog APIs may differ — consider asking the author to update
 ```
 
 The build still proceeds — epoch mismatches are warnings, not errors, because catalog modules aim for backward compatibility between adjacent epochs. But the warning makes the risk explicit.
 
-### 9.5 External Module Resolution
+### 9.5 Transitive Dependencies
 
-When multiple external modules are involved, each module's `require` pins are **its own**. There is no transitive resolution:
+Each module declares only its **direct** dependencies — catalog via `use name`, sourced via `use alias "location"` with `[require]` pins for remote ones. The compiler resolves transitive dependencies automatically by walking the dependency graph.
+
+**Graph construction:**
+
+1. Parse the top-level project's `promise.toml` and source files
+2. For each sourced dependency, fetch its source (local path or git repo at pinned commit)
+3. Parse that dependency's `promise.toml` and source files to discover ITS dependencies
+4. Recurse until the full graph is resolved
+5. Catalog dependencies are leaves — they only depend on other catalog modules (self-containment rule)
+
+**The top-level project does NOT need to declare transitive dependencies.** If your project uses `parser`, and `parser` depends on `tokenizer`, you don't need `tokenizer` in your `[require]`. The `parser` module's own `promise.toml` handles that:
+
+```
+myapp/promise.toml         → [require] parser = "a1b2c3d"
+parser/promise.toml        → [require] tokenizer = "fff111"
+tokenizer/promise.toml     → (no further remote deps)
+```
+
+The compiler walks this graph and fetches `tokenizer` at `fff111` automatically. Your project never mentions `tokenizer`.
+
+**Conflict detection:** If two paths in the graph reach the same remote URL at **different** commits, the build fails:
 
 ```
 myapp depends on:
@@ -654,50 +741,88 @@ myapp depends on:
       tokenizer "github.com/someone/tokenizer" @ aaa222
 ```
 
-If `parser` and `analyzer` both depend on `tokenizer` at the same commit, they share one copy. If they pin **different commits** (as above: `fff111` vs `aaa222`), the compiler rejects the build:
-
 ```
-error: conflicting versions of external module "github.com/someone/tokenizer"
+error: conflicting versions of remote module "github.com/someone/tokenizer"
   parser pins:   fff111
   analyzer pins: aaa222  (via github.com/other/analyzer @ b2c3d4e)
   → resolve by coordinating with module authors or pinning both to the same commit
+  → or use [replace] in your promise.toml to force a specific commit
 ```
 
-**No diamond dependency resolution.** This is deliberate. The catalog tier handles version unification; the external tier requires explicit coordination. This pushes widely-used external modules toward catalog inclusion, where compatibility is guaranteed. If you can't change the pins in upstream libraries, a `replace` directive can override a transitive dependency to force a specific commit (see Section 9.7).
+If they pin the **same** commit, they share one copy — compiled once, linked once.
+
+**No diamond resolution.** This is deliberate. The catalog tier handles version unification; the sourced tier requires explicit coordination. This pushes widely-used modules toward catalog inclusion, where compatibility is guaranteed.
+
+**Resolving conflicts with top-level `[require]`:** If two transitive dependencies pin different commits of the same URL, the top-level project can resolve the conflict by adding its own `[require]` entry for that URL. **The top-level project's `[require]` always wins over transitive pins:**
+
+```toml
+# myapp/promise.toml — force tokenizer to a specific commit
+[require]
+"github.com/someone/parser" = "a1b2c3d"
+"github.com/other/analyzer" = "b2c3d4e"
+"github.com/someone/tokenizer" = "fff111"  # overrides both transitive pins
+```
+
+This is the only mechanism for overriding transitive commits. `[replace]` is strictly for redirecting to local paths during development (see Section 9.7) — it never changes commit hashes.
+
+**Local module transitivity:** Local modules can have their own dependencies (catalog, remote, or other local). A local module's `[require]` introduces those remote modules into the graph — the same conflict rules apply. A local module's local paths are relative to ITS own `promise.toml`, not the parent project's. A remote module's local imports (e.g., `use util "./internal/util"` within a remote repo) are resolved within its own repository and are invisible to the consuming project.
+
+**Circular dependency detection:** Circular dependencies between any modules — catalog, local, or remote — are a compile error. The compiler detects cycles during the topological sort of the dependency graph and reports the full cycle path:
+
+```
+error: circular dependency detected
+  myapp → auth ("./libs/auth") → permissions ("./perms") → myapp
+```
+
+**Dependency graph summary by tier:**
+
+| Dependency type | Declared where | Transitive? | Conflict rule |
+|----------------|---------------|-------------|---------------|
+| Catalog → Catalog | Implicit (epoch) | No conflicts possible (mono-versioned) | N/A |
+| Project → Catalog | `use name` | Catalog deps are self-contained | N/A |
+| Project → Remote | `use alias "url"` + `[require]` | Resolved automatically from remote's `promise.toml` | Same URL, different commit → error (top-level `[require]` overrides) |
+| Project → Local | `use alias "./path"` | Resolved automatically from local's `promise.toml` | Same rules as remote |
+| Remote → Catalog | `use name` | Self-contained within catalog | Epoch mismatch → warning |
+| Remote → Remote | `use alias "url"` + `[require]` | Walked recursively | Same URL, different commit → error |
 
 ### 9.6 Path to Catalog Inclusion
 
-The external module mechanism is the on-ramp to the catalog:
+The remote module mechanism is the on-ramp to the catalog:
 
-1. **Prototype** as an external module in your own repo
+1. **Prototype** as a remote module in your own repo
 2. **Stabilize** the API, add comprehensive tests
 3. **Submit** to the catalog (PR to the catalog repo)
 4. **Migrate** users: `use parser "github.com/someone/parser"` → `use parser`
 
-When a module joins the catalog, users update one line of code per file (drop the URL) and remove the `require` line from `promise.mod`. The module name stays the same, so all qualified references (`parser.parse(...)`) are unchanged.
+When a module joins the catalog, users update one line of code per file (drop the URL string) and remove the `[require]` entry from `promise.toml`. The module name stays the same, so all qualified references (`parser.parse(...)`) are unchanged.
 
 ### 9.7 Local Development Overrides
 
-When developing an external module alongside a project that uses it, you don't want to push + pin on every change. Use a `replace` directive in `promise.mod`:
+When developing a remote module alongside a project that uses it, you don't want to push + pin on every change. Use a `[replace]` section in `promise.toml`:
 
+```toml
+[module]
+name = "myapp"
+epoch = "2026.3"
+
+[require]
+"github.com/someone/promise-parser" = "a1b2c3d"
+
+[replace]
+"github.com/someone/promise-parser" = "../promise-parser"
 ```
-epoch 2026.3
-module myapp
 
-require "github.com/someone/promise-parser" a1b2c3d
+The `[replace]` section redirects a module to a local directory during development. **`[replace]` values are always local paths** — it is purely a path-redirection mechanism, never used for changing commit hashes (use `[require]` for commit overrides — see Section 9.5). It is **not** committed to source control (or if committed, the CI should reject it). This is the same pattern as Go's `replace` directive — a development convenience that doesn't affect the published module.
 
-replace "github.com/someone/promise-parser" => "../promise-parser"
-```
+`[replace]` also works for **catalog modules**, enabling local development against a patched version:
 
-The `replace` directive redirects the URL to a local directory during development. It is **not** committed to source control (or if committed, the CI should reject it). This is the same pattern as Go's `replace` directive — a development convenience that doesn't affect the published module.
+```toml
+[module]
+name = "myapp"
+epoch = "2026.3"
 
-`replace` also works for **catalog modules**, enabling local development against a patched version:
-
-```
-epoch 2026.3
-module myapp
-
-replace json => "../my-json-fork"
+[replace]
+json = "../my-json-fork"
 ```
 
 When a `replace` targets a catalog module, the compiler emits a prominent warning:
@@ -707,71 +832,189 @@ warning: catalog module 'json' replaced with local path "../my-json-fork"
   catalog compatibility guarantees do not apply to replaced modules
 ```
 
-This is the escape hatch for Section 14.4 (bleeding-edge fixes). It also supports `replace` for transitive external dependencies to resolve diamond conflicts (Section 9.5).
+This is the escape hatch for Section 14.4 (bleeding-edge fixes).
 
 ---
 
 ## 10. Compiler Integration
 
-### 10.1 Compilation Pipeline Changes
+### 10.1 Compilation Pipeline
 
 Currently, the compiler processes a single file (or directory of files) as one compilation unit, with `std/*.pr` merged in. The module system adds a layer before this:
 
 ```
-promise.mod           # read epoch, identify module
+promise.toml          # read epoch, identify module
     |
     v
 source scan           # find all .pr files in module, collect `use` declarations
     |
     v
-module resolution     # map `use` names to catalog entries or local paths
-    |
-    v
-dependency fetch      # download/cache any catalog modules not yet local
+dependency graph      # walk transitive deps, fetch remote modules, detect conflicts
     |
     v
 topological sort      # order modules so dependencies compile before dependents
     |
     v
-per-module compile    # existing pipeline (parse -> sema -> ownership -> codegen)
+incremental check     # hash sources + dep interfaces, skip unchanged modules
     |
     v
-link                  # combine all module .ll files via clang
+per-module compile    # existing pipeline (parse → sema → ownership → codegen)
+    |                    only for modules whose hash changed
+    v
+link                  # combine all module object files → binary
 ```
 
 ### 10.2 Module Compilation Model
 
-Each module compiles to its own LLVM IR file. The linker (clang) combines them:
+Each module is a **separate compilation unit** that produces:
+
+1. **Object file** (`.o`) — compiled LLVM IR → machine code via `opt` + `llc`
+2. **Module interface** — the public API surface needed by dependent modules during sema:
+   - Public type definitions (fields, methods, signatures, inheritance)
+   - Public function signatures
+   - Generic type/function **templates** (full AST — needed for monomorphization in dependents)
+   - RTTI type IDs
+
+The linker (`ld.lld` on Linux, system `ld` on macOS) combines all object files:
 
 ```bash
-# Conceptual compilation steps (handled internally by `promise build`)
-promise compile-module ~/.promise/cache/modules/json/a1b2c3d/ -o /tmp/json.ll
-promise compile-module ~/.promise/cache/modules/http/e4f5a6b/ -o /tmp/http.ll
-promise compile-module ./                                     -o /tmp/myapp.ll
-clang /tmp/myapp.ll /tmp/json.ll /tmp/http.ll -o myapp
+# Conceptual steps (handled internally by `promise build`)
+# 1. Compile each module to object file
+promise compile-module ~/.promise/cache/modules/json/a1b2c3d/ -o .promise-build/json.o
+promise compile-module ./libs/models/                          -o .promise-build/models.o
+promise compile-module ./                                      -o .promise-build/myapp.o
+# 2. Link
+ld.lld .promise-build/myapp.o .promise-build/json.o .promise-build/models.o -o myapp
 ```
+
+Modules without dependencies on each other can compile **in parallel** (they're at the same level in the topological sort).
 
 ### 10.3 Separate Compilation Considerations
 
 Currently, all `.pr` files in a compilation unit share a single namespace. With modules, each module has its own namespace. This means:
 
 - **Name mangling** must include the module name. A top-level function `parse` in module `json` becomes `json.parse` in LLVM IR, following the existing `Owner.method` mangling convention. Types become `json.JsonObject`, etc.
-- **Generic monomorphization** crosses module boundaries. If your code uses `Vector[MyType]` from the standard library, the monomorphized version is emitted in YOUR module's IR, not the standard library's. This is already how it works (codegen generates specialized instances at use sites).
+- **Generic monomorphization** crosses module boundaries. If your code uses `Vector[MyType]` from the standard library, the monomorphized version is emitted in YOUR module's IR, not the standard library's. This is already how it works (codegen generates specialized instances at use sites). Monomorphized symbols use `linkonce_odr` linkage so the linker deduplicates identical instantiations across modules.
 - **RTTI** type IDs must be globally unique across modules. The existing string-based type IDs (`"Dog"`, `"Cat"`) need module prefixing (`"myapp.Dog"`, `"zoo.Cat"`).
 
-### 10.4 Incremental Compilation (Future)
+### 10.4 Incremental Compilation
 
-Because modules are separate compilation units, the compiler can cache compiled IR:
+Fast modify-build-test loops are critical for AI agent efficiency. The module system enables fine-grained incremental compilation: **only recompile what changed, skip everything else.**
+
+#### Cache Key
+
+Each module's build is keyed by a content hash:
 
 ```
-~/.promise/cache/compiled/
-  json/a1b2c3d/json.ll          # compiled IR, reused across all projects on this epoch
-  http/e4f5a6b/http.ll
+cache_key = hash(
+    sorted(hash(source_file) for each .pr file in module),
+    sorted(interface_hash(dep) for each direct dependency),
+    epoch,
+    compiler_version
+)
 ```
 
-Catalog modules at a given epoch are immutable, so their compiled output can be cached indefinitely. Only your project code needs recompilation on changes.
+If the cache key matches a previous build → skip compilation entirely, reuse cached `.o` file.
 
-**Limitation:** Generic monomorphization crosses module boundaries — `Vector[MyType]` from the standard library is specialized in the user's module, not the library's. This means cached library IR contains only non-generic code. Monomorphized instances for user types are always emitted in the user's compilation unit, which is rebuilt on every change anyway. This matches the current architecture.
+#### What Triggers Recompilation
+
+| What changed | What recompiles | Why |
+|---|---|---|
+| A `.pr` file in user's module | User's module only | Source hash changed |
+| A local module's **internal** code (private functions, method bodies) | That local module only | Its source hash changed, but its interface hash didn't → dependents skip |
+| A local module's **public API** (new public type, changed signature) | That module + all dependents | Interface hash changed → dependents' cache keys changed |
+| A remote module | Nothing | Immutable at pinned commit — cached forever |
+| A catalog module | Nothing | Immutable at epoch — cached forever |
+| Epoch change | Everything | Compiler + all catalog modules change |
+
+#### Interface Hashing
+
+The key optimization is distinguishing between **internal changes** (no dependent recompilation) and **API changes** (dependents must recompile). The module interface hash covers:
+
+- Public type definitions: names, fields, parent types, method signatures
+- Public function signatures: names, parameter types, return types, failable markers
+- Public generic templates: full AST (because dependents monomorphize them — a body change produces different code in the dependent)
+- Exported constants, enum variants
+
+If a module's source changes but its interface hash stays the same, **no dependent recompiles.** Only the module itself is rebuilt.
+
+#### Cache Layout
+
+```
+.promise-build/                          # project-local build cache (gitignored)
+  myapp.o                                # user's module object file
+  myapp.interface                        # public API description
+  models.o                               # local module object file
+  models.interface
+
+~/.promise/cache/                        # global cache (shared across projects)
+  catalog/                               # catalog modules (keyed by name/commit)
+    json/
+      a1b2c3d.o                          # compiled object
+      a1b2c3d.interface                  # public API description
+    http/
+      e4f5a6b.o
+      e4f5a6b.interface
+  modules/                               # remote modules (keyed by URL/commit)
+    github.com/someone/promise-parser/
+      a1b2c3d/                           # source checkout
+        ...
+      a1b2c3d.o                          # compiled object
+      a1b2c3d.interface
+```
+
+- **Catalog and remote module caches are global** (`~/.promise/cache/`). Since they're immutable at a given commit, the compiled output is valid for any project using the same epoch/commit. Multiple projects on the same epoch share cached catalog builds.
+- **Project module cache is local** (`.promise-build/`). It's specific to this project and gitignored.
+
+#### The AI Modify-Build-Test Loop
+
+The typical AI workflow: modify 1-3 files → build → test → check output → repeat. With incremental compilation:
+
+```
+Step 1: AI edits main.pr
+Step 2: `promise build`
+  a. Read promise.toml, build dependency graph              ~1ms
+  b. Check dep module hashes → all cached                   ~1ms
+  c. Detect changed source in user module                   ~1ms
+  d. Recompile user module only (parse→sema→codegen)     ~50-200ms
+  e. opt + llc on user module only                        ~50-100ms
+  f. Relink all object files                              ~30-50ms
+  ─────────────────────────────────────────────────
+  Total                                                  ~130-350ms
+
+Step 3: `promise test`
+  (binary already built, just execute)
+```
+
+Compare to a full rebuild (first build or epoch change):
+
+```
+Full build:
+  Compile all catalog deps (parallel)                     ~1-5s
+  Compile user module                                     ~50-200ms
+  Link                                                    ~30-50ms
+  ─────────────────────────────────────────────────
+  Total                                                   ~2-6s
+```
+
+**Key design decisions for fast rebuilds:**
+
+1. **Module = compilation unit.** Changing one file doesn't recompile the whole project — only the module containing that file. For most AI-generated programs (single module), this means one compilation unit.
+2. **Dependency compilation is amortized.** Catalog and remote modules compile once and cache forever (per epoch/commit). The cost is paid on first build, not on every iteration.
+3. **Interface-aware caching.** A local module's internal refactoring doesn't cascade to dependents. Only public API changes propagate.
+4. **Parallel module compilation.** Independent modules compile concurrently. The topological sort identifies parallelizable groups.
+5. **Object file linking, not IR linking.** Each module produces a `.o` file. Relinking `.o` files is faster than re-running `opt`+`llc` on combined IR.
+
+#### Generic Monomorphization and Caching
+
+Generic templates (e.g., `Vector[T]`, `Map[K, V]`) cross module boundaries — they're monomorphized in the **dependent's** compilation unit, not the library's. This means:
+
+- Cached library `.o` files contain only non-generic code and library-internal monomorphizations
+- When user code uses `Vector[MyType]`, the monomorphized `Vector[MyType]` code is emitted in the user's `.o` file
+- The user module's cache key includes the interface hash of dependencies, which includes generic template ASTs
+- If a generic template body changes (rare for catalog/remote), dependents using that generic will recompile
+
+This matches the current architecture (codegen generates specialized instances at use sites) and is the same approach used by Rust and C++ with templates.
 
 ---
 
@@ -817,24 +1060,24 @@ Documentation is generated from `` `public `` declarations and doc comments in s
 
 | Aspect | Original Design | This Proposal |
 |--------|----------------|---------------|
-| Module identity | URL with version in path | Catalog name OR URL (two tiers) |
-| `promise.mod` | `module github.com/acme/app/1` | `epoch 2026.3` / `module myapp` / optional `require` pins |
-| Import syntax | `use io "github.com/std/io/1"` | `use io` (catalog) or `use alias "url"` (external) |
-| Dependency declaration | Inferred from `use` URLs | Catalog: implicit from epoch. External: `require` in `promise.mod` |
-| Version resolution | Diamond deps, per-module versions | Catalog: none (mono-versioned). External: no diamonds allowed |
-| Lockfile | `promise.lock` | None — epoch + commit pins in `promise.mod` |
+| Module identity | URL with version in path | Catalog name OR location string (two grammar forms, three tiers) |
+| Manifest | `promise.mod` (custom format) | `promise.toml` (standard TOML) |
+| Import syntax | `use io "github.com/std/io/1"` | `use io` (catalog) or `use alias "location"` (sourced) |
+| Dependency declaration | Inferred from `use` URLs | Catalog: implicit from epoch. Remote: `[require]` in `promise.toml`. Local: on disk |
+| Version resolution | Diamond deps, per-module versions | Catalog: none (mono-versioned). Remote: no diamonds allowed |
+| Lockfile | `promise.lock` | None — epoch + commit pins in `promise.toml` |
 | Package manager | `promise add/remove/update` | `promise sync` + `promise pin` |
-| External deps | Fetched from URLs | Fetched from URLs, pinned by commit hash |
+| Remote deps | Fetched from URLs | Fetched from git repos, pinned by commit hash |
 | Visibility | Public by default | Private by default, `` `public `` to export |
 
 ### 12.2 What Stays the Same
 
-- Module boundary semantics (`promise.mod` marks a module root)
+- Module boundary semantics (`promise.toml` marks a module root)
 - Flat directory layout (no required `src/`)
 - Testing conventions (`` `test `` annotation, `_test.pr` files)
-- No sub-modules — every `promise.mod` is independent
+- No sub-modules — every `promise.toml` is independent
 - Catalog dependencies inferred from `use` in source (no dependency list for catalog modules)
-- URL-based syntax retained for external (non-catalog) modules
+- Location-string syntax retained for sourced (non-catalog) modules
 
 ---
 
@@ -860,7 +1103,7 @@ The closest analog is **NixOS** — a mono-versioned global package set with CI 
 ### 14.1 "What if the catalog is too small?"
 
 **Risk:** Users need modules that aren't in the catalog.
-**Mitigation:** External modules (URL-based imports) provide a full-featured escape hatch with their own dependency management. The catalog doesn't need to be exhaustive — it needs to cover common needs. External modules can graduate to the catalog as they mature.
+**Mitigation:** Sourced modules (local and remote imports) provide a full-featured escape hatch with their own dependency management. The catalog doesn't need to be exhaustive — it needs to cover common needs. Remote modules can graduate to the catalog as they mature.
 
 ### 14.2 "What if catalog modules conflict?"
 
@@ -875,7 +1118,7 @@ The closest analog is **NixOS** — a mono-versioned global package set with CI 
 ### 14.4 "What if I need a bleeding-edge fix?"
 
 **Risk:** A catalog module has a bug fix in its repo that hasn't made it into an epoch yet.
-**Mitigation:** Temporarily import it as an external module pinned to the fixed commit. When the next epoch includes the fix, switch back to catalog import. The `replace` directive in `promise.mod` can also redirect a catalog module to a local checkout during development.
+**Mitigation:** Temporarily import it as a remote module pinned to the fixed commit. When the next epoch includes the fix, switch back to catalog import. The `[replace]` section in `promise.toml` can also redirect a catalog module to a local checkout during development.
 
 ### 14.5 "Won't coordinated breaking changes slow everything down?"
 
@@ -885,7 +1128,7 @@ The closest analog is **NixOS** — a mono-versioned global package set with CI 
 ### 14.6 "What about private/proprietary modules?"
 
 **Risk:** Companies want private module registries.
-**Mitigation:** Private modules are external modules hosted on private git servers. `use auth "git.corp.com/team/auth-lib"` works with any git host that the developer has access to. No private catalog is needed — the URL-based import mechanism handles this cleanly. For fully offline environments, local path imports (`use "./libs/auth"`) work without any network access.
+**Mitigation:** Private modules are remote modules hosted on private git servers. `use auth "git.corp.com/team/auth-lib"` works with any git host that the developer has access to. No private catalog is needed — the sourced import mechanism handles this cleanly. For fully offline environments, local imports (`use auth "./libs/auth"`) work without any network access.
 
 ---
 
@@ -893,21 +1136,22 @@ The closest analog is **NixOS** — a mono-versioned global package set with CI 
 
 ### Phase 1: Module Boundaries & Local Imports
 
-- Parse `promise.mod` (epoch + module name)
-- Implement `use <name>` and `use alias "url"` syntax in the parser/AST
+- Parse `promise.toml` (TOML format: `[module]` with `name` and `epoch`)
+- Extend grammar: add bare `USE IDENT (AS IDENT)? SEMI` for catalog imports alongside existing `USE IDENT stringLiteral SEMI` for sourced imports
 - Resolve `use` names against standard library modules (already embedded)
 - Qualified name resolution in sema (`io.println` → look up `println` in `io` module's scope)
 - `` `public `` meta annotation for visibility enforcement at module boundaries
-- Local module imports (`use "./subdir"`)
+- Local module imports (`use models "./libs/models"` — path relative to `promise.toml`)
 - Compile multi-module projects (project + local modules as separate compilation units, linked together)
+- **Incremental compilation from day one:** content-hash-based caching per module, interface hashing to skip dependent recompilation when only internals change (see Section 10.4)
 
-### Phase 2: External Modules
+### Phase 2: Remote Modules
 
-- Parse `require` and `replace` directives in `promise.mod`
+- Parse `[require]` and `[replace]` sections in `promise.toml`
 - Git-based module fetching (clone at pinned commit)
 - Module caching in `~/.promise/cache/`
-- `promise pin` command for updating commit hashes
-- Diamond dependency detection and rejection for external modules
+- `promise pin` command for resolving tags/branches to commit hashes
+- Diamond dependency detection and rejection for remote modules
 - Epoch mismatch warnings
 
 ### Phase 3: Catalog Infrastructure
@@ -930,8 +1174,8 @@ The closest analog is **NixOS** — a mono-versioned global package set with CI 
 - `promise catalog diff` between epochs
 - `promise catalog export` for AI agent context
 - `promise doc` documentation generation
-- Incremental compilation with module-level caching
-- `replace` directive for local development overrides
+- `[replace]` section for local development overrides
+- Parallel module compilation (independent modules in the topological sort compile concurrently)
 
 ---
 
@@ -943,7 +1187,7 @@ The closest analog is **NixOS** — a mono-versioned global package set with CI 
 
 3. **Module granularity.** Should `crypto` be one module or split into `crypto/hash`, `crypto/aes`, `crypto/tls`? The flat catalog namespace suggests coarser granularity with submodule-like organization within a single module.
 
-4. **Cross-epoch compatibility.** If project A (epoch 2026.2) uses an external module built for epoch 2026.3, should this work? Or should external modules target the same epoch as the project?
+4. **Cross-epoch compatibility.** If project A (epoch 2026.2) uses a remote module built for epoch 2026.3, should this work? Or should remote modules target the same epoch as the project?
 
 5. **Catalog size constraint.** Is there a formal limit on catalog size (e.g., "the full API summary must fit in 200K tokens")? This would be a unique and powerful constraint for AI-first design.
 
@@ -953,6 +1197,6 @@ The closest analog is **NixOS** — a mono-versioned global package set with CI 
 
 8. **Catalog override scope.** Section 9.7 allows `replace` for catalog modules with a warning. Should there be additional guardrails — e.g., only allow catalog replacements in development mode, reject them in `promise build --release`?
 
-9. **External module transitivity.** If external module A depends on external module B, should your project need to declare B in its own `require` list, or should A's pins be trusted transitively? Requiring explicit declaration is safer but verbose; trusting transitively is convenient but less visible.
+9. ~~**Remote module transitivity.**~~ **Resolved:** Transitive dependencies are resolved automatically by walking each module's `promise.toml`. The top-level project only declares direct deps. Conflicts (same URL, different commits) are rejected. See Section 9.5.
 
-10. **External module epoch range.** Should an external module declare a range of compatible epochs (e.g., `epoch 2026.2..2026.4`) or just a single one? A range would reduce "epoch mismatch" warnings but add complexity.
+10. **Remote module epoch range.** Should a remote module declare a range of compatible epochs (e.g., `epoch = "2026.2..2026.4"`) or just a single one? A range would reduce "epoch mismatch" warnings but add complexity.

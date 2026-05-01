@@ -423,13 +423,17 @@ func runTestFile(filename string, timeout time.Duration, targetTriple string) {
 	}
 
 	// Print output, replacing summary line with timed version
-	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed`)
+	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?`)
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 		if line == "" {
 			continue
 		}
 		if m := summaryRe.FindStringSubmatch(line); m != nil {
-			fmt.Printf("%s passed, %s failed (%.3fs)\n", m[1], m[2], elapsed.Seconds())
+			if m[3] != "" {
+				fmt.Printf("%s passed, %s failed, %s skipped (%.3fs)\n", m[1], m[2], m[3], elapsed.Seconds())
+			} else {
+				fmt.Printf("%s passed, %s failed (%.3fs)\n", m[1], m[2], elapsed.Seconds())
+			}
 		} else {
 			fmt.Println(line)
 		}
@@ -542,11 +546,12 @@ func runTestDir(dir string, recursive bool, timeout time.Duration, targetTriple 
 		os.Exit(1)
 	}
 
-	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed`)
+	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?`)
 	failLineRe := regexp.MustCompile(`^FAIL \(\d+\.\d+s\)(?: (.+))?$`)
 
 	totalPassed := 0
 	totalFailed := 0
+	totalSkipped := 0
 	totalFiles := 0
 	failedFiles := 0
 	var failures []string
@@ -594,10 +599,11 @@ func runTestDir(dir string, recursive bool, timeout time.Duration, targetTriple 
 
 			// Try to parse summary from output
 			if m := summaryRe.FindStringSubmatch(lastLine(outStr)); m != nil {
-				passed := atoi(m[1])
-				failed := atoi(m[2])
-				totalPassed += passed
-				totalFailed += failed
+				totalPassed += atoi(m[1])
+				totalFailed += atoi(m[2])
+				if m[3] != "" {
+					totalSkipped += atoi(m[3])
+				}
 			} else {
 				// Count entire file as one failure
 				totalFailed++
@@ -625,6 +631,9 @@ func runTestDir(dir string, recursive bool, timeout time.Duration, targetTriple 
 		if m := summaryRe.FindStringSubmatch(lastLine(outStr)); m != nil {
 			totalPassed += atoi(m[1])
 			totalFailed += atoi(m[2])
+			if m[3] != "" {
+				totalSkipped += atoi(m[3])
+			}
 		}
 
 		// Print test output (strip the summary line and empty lines)
@@ -643,7 +652,11 @@ func runTestDir(dir string, recursive bool, timeout time.Duration, targetTriple 
 
 	// Print grand summary
 	totalElapsed := time.Since(totalStart)
-	fmt.Printf("%d passed, %d failed (%d files, %.3fs)\n", totalPassed, totalFailed, totalFiles, totalElapsed.Seconds())
+	if totalSkipped > 0 {
+		fmt.Printf("%d passed, %d failed, %d skipped (%d files, %.3fs)\n", totalPassed, totalFailed, totalSkipped, totalFiles, totalElapsed.Seconds())
+	} else {
+		fmt.Printf("%d passed, %d failed (%d files, %.3fs)\n", totalPassed, totalFailed, totalFiles, totalElapsed.Seconds())
+	}
 
 	// Print failure list if any
 	if len(failures) > 0 {

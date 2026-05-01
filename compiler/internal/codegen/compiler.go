@@ -431,6 +431,7 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 		irtypes.Void,
 		ir.NewParam("passed", irtypes.I32),
 		ir.NewParam("failed", irtypes.I32),
+		ir.NewParam("skipped", irtypes.I32),
 	)
 
 	// Add codegen bodies (replaces C printf implementations)
@@ -455,6 +456,19 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 	failedAlloca := entry.NewAlloca(irtypes.I32)
 	entry.NewStore(constant.NewInt(irtypes.I32, 0), passedAlloca)
 	entry.NewStore(constant.NewInt(irtypes.I32, 0), failedAlloca)
+
+	// Count tests excluded for this target
+	skippedCount := 0
+	for _, test := range tests {
+		if excludes, ok := c.info.TestExcludes[test.Name()]; ok {
+			for _, ex := range excludes {
+				if strings.Contains(c.target, ex) {
+					skippedCount++
+					break
+				}
+			}
+		}
+	}
 
 	// Allocate array for failed test name pointers and a counter
 	totalTests := len(tests)
@@ -553,7 +567,7 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 	// Print summary
 	finalPassed := entry.NewLoad(irtypes.I32, passedAlloca)
 	finalFailed := entry.NewLoad(irtypes.I32, failedAlloca)
-	entry.NewCall(testSummaryFn, finalPassed, finalFailed)
+	entry.NewCall(testSummaryFn, finalPassed, finalFailed, constant.NewInt(irtypes.I32, int64(skippedCount)))
 
 	// Print FAILED: list if any failures
 	failedHeaderData := constant.NewCharArrayFromString("FAILED:\n")

@@ -57,10 +57,12 @@ promise test -timeout 10s -stress 50 tests/...       # per-run timeout + stress
 PASS (0.000s) test_name        # individual results: PASS/FAIL (time) name
 FAIL (0.001s) test_broken
 20 passed, 1 failed (0.423s)   # summary line (single file)
+20 passed, 1 failed, 2 skipped (0.423s)  # with target-excluded tests
 FAILED:                         # only appears when failures exist
   test_broken
 
 568 passed, 2 failed (117 files, 30.810s)  # directory summary
+568 passed, 2 failed, 3 skipped (117 files, 30.810s)  # with skipped tests
 FAILED:
   std/test_vector.pr: test_push
   e2e/basics.pr (timeout)

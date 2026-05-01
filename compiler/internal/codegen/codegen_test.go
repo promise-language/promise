@@ -5415,25 +5415,28 @@ func TestTestSummaryBody(t *testing.T) {
 	ir := result.Module.String()
 
 	// Function is defined (not just declared)
-	assertContains(t, ir, "define void @promise_test_summary(i32 %passed, i32 %failed)")
+	assertContains(t, ir, "define void @promise_test_summary(i32 %passed, i32 %failed, i32 %skipped)")
 	// String suffix globals
 	assertContains(t, ir, `@.str.passed_suffix = constant [9 x i8] c" passed, "`)
-	assertContains(t, ir, `@.str.failed_suffix = constant [8 x i8] c" failed\0A"`)
+	assertContains(t, ir, `@.str.failed_suffix = constant [7 x i8] c" failed"`)
+	assertContains(t, ir, `@.str.skipped_suffix = constant [8 x i8] c" skipped"`)
 	// Converts i32 → i64 for int_to_string
 	assertContains(t, ir, "sext i32 %passed to i64")
 	assertContains(t, ir, "sext i32 %failed to i64")
 	// Calls int_to_string and frees temp strings
 	assertContains(t, ir, "call i8* @promise_int_to_string(i64")
 	assertContains(t, ir, "call void @pal_free(i8*")
-	// Two free() calls — one per converted count (verify both temp strings freed)
+	// At least 2 free() calls for passed+failed (skipped is conditional)
 	if strings.Count(ir, "call void @pal_free(i8*") < 2 {
 		t.Error("expected at least 2 free() calls in promise_test_summary (one per int_to_string result)")
 	}
 	// Writes to stdout
 	assertContains(t, ir, "call i64 @pal_write(i32 1,")
-	// Suffix write lengths: 9 for " passed, ", 8 for " failed\n"
+	// Suffix write lengths: 9 for " passed, ", 7 for " failed"
 	assertContains(t, ir, "i64 9)")
-	assertContains(t, ir, "i64 8)")
+	assertContains(t, ir, "i64 7)")
+	// Conditional skipped output: icmp sgt for skipped > 0
+	assertContains(t, ir, "icmp sgt i32 %skipped, 0")
 	// String instance extraction (bitcast for extractStringDataLenFromInstance)
 	assertContains(t, ir, "bitcast i8* %")
 	assertContains(t, ir, "to %promise_string_i*")

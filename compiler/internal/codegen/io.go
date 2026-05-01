@@ -691,21 +691,30 @@ func (c *Compiler) defineTestPrintResultBody(fn *ir.Func) {
 	mergeBlock.NewRet(nil)
 }
 
-// defineTestSummaryBody adds a function body to promise_test_summary(i32 %passed, i32 %failed).
-// Writes "<passed> passed, <failed> failed\n" to stdout via pal_write.
+// defineTestSummaryBody adds a function body to promise_test_summary(i32 %passed, i32 %failed, i32 %skipped).
+// Writes "<passed> passed, <failed> failed[, <skipped> skipped]\n" to stdout via pal_write.
 func (c *Compiler) defineTestSummaryBody(fn *ir.Func) {
 	// Global constants
 	passedSuffixData := constant.NewCharArrayFromString(" passed, ")
 	passedSuffixGlobal := c.module.NewGlobalDef(".str.passed_suffix", passedSuffixData)
 	passedSuffixGlobal.Immutable = true
 
-	failedSuffixData := constant.NewCharArrayFromString(" failed\n")
+	failedSuffixData := constant.NewCharArrayFromString(" failed")
 	failedSuffixGlobal := c.module.NewGlobalDef(".str.failed_suffix", failedSuffixData)
 	failedSuffixGlobal.Immutable = true
 
+	skippedPrefixData := constant.NewCharArrayFromString(", ")
+	skippedPrefixGlobal := c.module.NewGlobalDef(".str.skipped_prefix", skippedPrefixData)
+	skippedPrefixGlobal.Immutable = true
+
+	skippedSuffixData := constant.NewCharArrayFromString(" skipped")
+	skippedSuffixGlobal := c.module.NewGlobalDef(".str.skipped_suffix", skippedSuffixData)
+	skippedSuffixGlobal.Immutable = true
+
 	stdout := constant.NewInt(irtypes.I32, 1)
-	passed := fn.Params[0] // i32
-	failed := fn.Params[1] // i32
+	passed := fn.Params[0]  // i32
+	failed := fn.Params[1]  // i32
+	skipped := fn.Params[2] // i32
 
 	entry := fn.NewBlock("entry")
 
@@ -728,10 +737,39 @@ func (c *Compiler) defineTestSummaryBody(fn *ir.Func) {
 	entry.NewCall(c.palWrite, stdout, failedDataPtr, failedDataLen)
 	entry.NewCall(c.palFree, failedStr)
 
-	// Write " failed\n"
+	// Write " failed"
 	fSuffixPtr := entry.NewGetElementPtr(failedSuffixGlobal.ContentType, failedSuffixGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	entry.NewCall(c.palWrite, stdout, fSuffixPtr, constant.NewInt(irtypes.I64, 8))
+	entry.NewCall(c.palWrite, stdout, fSuffixPtr, constant.NewInt(irtypes.I64, 7))
 
-	entry.NewRet(nil)
+	// Conditionally write ", <skipped> skipped" if skipped > 0
+	hasSkipped := entry.NewICmp(enum.IPredSGT, skipped, constant.NewInt(irtypes.I32, 0))
+	printSkipBlock := fn.NewBlock("print_skipped")
+	afterSkipBlock := fn.NewBlock("after_skipped")
+	entry.NewCondBr(hasSkipped, printSkipBlock, afterSkipBlock)
+
+	// Write ", "
+	sPrefixPtr := printSkipBlock.NewGetElementPtr(skippedPrefixGlobal.ContentType, skippedPrefixGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	printSkipBlock.NewCall(c.palWrite, stdout, sPrefixPtr, constant.NewInt(irtypes.I64, 2))
+
+	// Convert skipped count to string
+	skippedI64 := printSkipBlock.NewSExt(skipped, irtypes.I64)
+	skippedStr := printSkipBlock.NewCall(c.funcs["promise_int_to_string"], skippedI64)
+	skippedDataPtr, skippedDataLen := c.extractStringDataLenFromInstance(printSkipBlock, skippedStr)
+	printSkipBlock.NewCall(c.palWrite, stdout, skippedDataPtr, skippedDataLen)
+	printSkipBlock.NewCall(c.palFree, skippedStr)
+
+	// Write " skipped"
+	sSuffixPtr := printSkipBlock.NewGetElementPtr(skippedSuffixGlobal.ContentType, skippedSuffixGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	printSkipBlock.NewCall(c.palWrite, stdout, sSuffixPtr, constant.NewInt(irtypes.I64, 8))
+	printSkipBlock.NewBr(afterSkipBlock)
+
+	// Write "\n"
+	nlPtr := afterSkipBlock.NewGetElementPtr(c.newlineGlobal.ContentType, c.newlineGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	afterSkipBlock.NewCall(c.palWrite, stdout, nlPtr, constant.NewInt(irtypes.I64, 1))
+
+	afterSkipBlock.NewRet(nil)
 }

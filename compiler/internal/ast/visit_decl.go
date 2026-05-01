@@ -321,6 +321,9 @@ func (b *Builder) VisitEnumVariant(ctx *parser.EnumVariantContext) interface{} {
 	for _, ef := range ctx.AllEnumField() {
 		node.Fields = append(node.Fields, ef.Accept(b).(*EnumField))
 	}
+	for _, ma := range ctx.AllMetaAnnotation() {
+		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))
+	}
 	return node
 }
 

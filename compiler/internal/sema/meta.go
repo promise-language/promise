@@ -16,6 +16,8 @@ const (
 	TargetMethod
 	TargetFunc
 	TargetEnum
+	TargetParam
+	TargetVariant
 )
 
 func targetLabel(t MetaTarget) string {
@@ -30,6 +32,10 @@ func targetLabel(t MetaTarget) string {
 		return "function"
 	case TargetEnum:
 		return "enum"
+	case TargetParam:
+		return "parameter"
+	case TargetVariant:
+		return "variant"
 	default:
 		return "declaration"
 	}
@@ -46,8 +52,8 @@ var builtinMetas = map[string][]MetaTarget{
 	"native":       {TargetMethod, TargetType},
 	"copy":         {TargetType, TargetEnum},
 	"structural":   {TargetType},
-	"doc":          {TargetType, TargetField, TargetMethod, TargetFunc, TargetEnum},
-	"deprecated":   {TargetType, TargetField, TargetMethod, TargetFunc, TargetEnum},
+	"doc":          {TargetType, TargetField, TargetMethod, TargetFunc, TargetEnum, TargetParam, TargetVariant},
+	"deprecated":   {TargetType, TargetField, TargetMethod, TargetFunc, TargetEnum, TargetParam, TargetVariant},
 	"test":         {TargetFunc},
 	"inline":       {TargetFunc, TargetMethod},
 	"packed":       {TargetType},
@@ -98,7 +104,7 @@ func extractDoc(annotations []*ast.MetaAnnotation) string {
 			continue
 		}
 		if len(ann.Params) > 0 {
-			return stringLitValue(ann.Params[0].Value)
+			return evalStringLit(ann.Params[0].Value)
 		}
 		return ""
 	}

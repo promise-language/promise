@@ -127,7 +127,7 @@ enumDecl
     ;
 
 enumVariant
-    : IDENT (LPAREN enumField (COMMA enumField)* RPAREN)?
+    : IDENT (LPAREN enumField (COMMA enumField)* RPAREN)? metaAnnotation*
     ;
 
 enumField

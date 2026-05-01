@@ -75,8 +75,9 @@ func (*EnumDecl) declTag() {}
 // EnumVariant represents a variant inside an enum declaration.
 type EnumVariant struct {
 	nodeBase
-	Name   string
-	Fields []*EnumField // nil for fieldless variants
+	Name        string
+	Fields      []*EnumField      // nil for fieldless variants
+	Annotations []*MetaAnnotation // `doc, `deprecated on variants
 }
 
 // EnumField represents a field inside an enum variant.

@@ -56,7 +56,7 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 | Self-contained binary | Embed gzip-compressed LLVM tools (opt, llc, lld, libLLVM.so) via `go:embed` for release builds | Done (Phase 7f, Linux x86_64) | [runtime-proposal.md](runtime-proposal.md) |
 | Yield generators | `stream[T]` functions with `yield`, LLVM presplit coroutines, `for-in` consumption | Done | — |
 | Structural interfaces | Relaxed matching (extra optional/default params, non-failable→failable, T→T?), adapter thunks, abstract factory methods with implicit Self, generic factory patterns (`T.parse(data)`) | Done | [language-design.md](language-design.md#structural-interface-satisfaction) |
-| Documentation system | `promise doc` command: extract `doc()` meta tags, emit markdown to stdout, `-signatures` compact mode, `-std` for stdlib reference | Planned | [documentation-proposal.md](documentation-proposal.md) |
+| Documentation system | `promise doc` command: extract `doc()` meta tags, emit markdown to stdout, `-signatures` compact mode, `-std` for stdlib reference | Phase 1 done (single-file doc, `-public`/`-all`/`-signatures`/`-o` flags, param/variant doc propagation, `DeclareAndDefine` early-exit sema) | [documentation-proposal.md](documentation-proposal.md) |
 
 ---
 
@@ -590,14 +590,16 @@ Command-line interface. Core commands implemented; formatter planned.
 - Inline error formatting: source line + `^` caret marker, no temp filenames
 - Embedded `std/` and `runtime/` in the binary via `go:embed` for self-contained install
 - **Test suite**: 684 tests across 123 files — `tests/e2e/` (language features), `tests/std/` (standard library), `tests/concurrency/` (scheduler, channels, select, panic recovery, stress tests)
-- `promise doc <file.pr|dir|dir/...>` — generate documentation from `doc()` meta tags (planned, see [documentation-proposal.md](documentation-proposal.md))
-  - `-public` / `-all` — filter by visibility (default: `-public` for directories, `-all` for single files)
+- `promise doc <file.pr>` — generate documentation from `doc()` meta tags (**Phase 1 done**: `cmd/promise/doc.go`)
+  - `-public` (default) / `-all` — filter by visibility
   - `-signatures` — compact signature-only output (minimal tokens for AI agents)
-  - `-std` — document the embedded standard library
   - `-o PATH` — write to file instead of stdout
-  - `-expand Type.method` — inline referenced types for complete context
-  - `-query "has:drop"` — structured type system queries
-  - `-lint` — warn on undocumented public symbols
+  - Runs `sema.DeclareAndDefine()` (passes 1+2 only — fast, tolerates incomplete bodies)
+  - Shows: types (with inheritance, fields, methods, getters, operators, drop), enums (flat/payload variants with doc), functions (with generic constraints)
+  - Param `doc()` and enum variant `doc()` propagated through sema
+  - Bug fix: `extractDoc()` now uses `evalStringLit()` for triple-quoted doc strings
+  - Phase 2 (planned): directory/recursive docs, `-std`, `-expand`, index generation
+  - Phase 3 (planned): `-query "has:drop"`, `-lint`, IDE integration
 - `promise fmt` — code formatter (planned)
 
 ### Stress test mode (`-stress`)

@@ -42,6 +42,7 @@ Commands:
   run       Compile and run a Promise source file
   test      Discover and run test functions
   check     Run semantic analysis (type checking)
+  doc       Generate documentation from doc() annotations
   ast       Print the AST
   exec      Execute inline Promise code
   init      Initialize a new Promise project (creates promise.toml)
@@ -49,6 +50,12 @@ Commands:
 
 Options (build):
   -o <output>   Output file name (default: input file without extension)
+
+Options (doc):
+  -public         Show only public symbols (default)
+  -all            Show all symbols including private
+  -signatures     Compact mode: signatures only, no doc text
+  -o <output>     Write output to file instead of stdout
 
 Options (test):
   -timeout <duration>   Per-test timeout (default: 60s)
@@ -115,6 +122,8 @@ func main() {
 		ast.Print(os.Stdout, file)
 	case "exec":
 		runExec(os.Args[2:])
+	case "doc":
+		runDoc(os.Args[2:])
 	case "init":
 		runInit()
 	case "install":

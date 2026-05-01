@@ -4275,6 +4275,61 @@ func TestDocOnMethod(t *testing.T) {
 	}
 }
 
+func TestDocOnParam(t *testing.T) {
+	info := checkOK(t, `
+		type T {
+			foo(string url `+"`doc(\"The URL to fetch.\")"+`) {}
+		}
+	`)
+	scope := info.Scopes[findFile(t, info)]
+	named := scope.Lookup("T").(*types.TypeName).Type().(*types.Named)
+	m := named.LookupMethod("foo")
+	if m.Sig().Params()[0].Doc() != "The URL to fetch." {
+		t.Errorf("expected param doc 'The URL to fetch.', got %q", m.Sig().Params()[0].Doc())
+	}
+}
+
+func TestDocOnFuncParam(t *testing.T) {
+	info := checkOK(t, `
+		bar(int x `+"`doc(\"The count.\")"+`) {}
+	`)
+	scope := info.Scopes[findFile(t, info)]
+	fn := scope.Lookup("bar").(*types.Func)
+	sig := fn.Type().(*types.Signature)
+	if sig.Params()[0].Doc() != "The count." {
+		t.Errorf("expected param doc 'The count.', got %q", sig.Params()[0].Doc())
+	}
+}
+
+func TestDocOnEnumVariant(t *testing.T) {
+	info := checkOK(t, `
+		enum Result {
+			Ok(int value) `+"`doc(\"Success.\")"+`,
+			Err(string msg) `+"`doc(\"Failure.\")"+`,
+		}
+	`)
+	scope := info.Scopes[findFile(t, info)]
+	enum := scope.Lookup("Result").(*types.TypeName).Type().(*types.Enum)
+	if enum.Variants()[0].Doc() != "Success." {
+		t.Errorf("expected variant doc 'Success.', got %q", enum.Variants()[0].Doc())
+	}
+	if enum.Variants()[1].Doc() != "Failure." {
+		t.Errorf("expected variant doc 'Failure.', got %q", enum.Variants()[1].Doc())
+	}
+}
+
+func TestDocTripleQuoted(t *testing.T) {
+	info := checkOK(t, `
+		bar() `+"`doc(\"\"\"Line one.\nLine two.\"\"\")"+` {}
+	`)
+	scope := info.Scopes[findFile(t, info)]
+	fn := scope.Lookup("bar").(*types.Func)
+	expected := "Line one.\nLine two."
+	if fn.Doc() != expected {
+		t.Errorf("expected doc %q, got %q", expected, fn.Doc())
+	}
+}
+
 // === Copy enum with variant fields ===
 
 func TestCopyEnumWithNonCopyVariantField(t *testing.T) {

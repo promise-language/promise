@@ -78,6 +78,51 @@ func CheckWithModules(file *ast.File, moduleScopes map[string]*types.Scope) (*In
 	return c.info, c.errors
 }
 
+// DeclareAndDefine runs only the first two sema passes: Declare and Define.
+// It resolves type names, fields, methods, and signatures, but does NOT
+// type-check function/method bodies or verify return paths.
+// Used by `promise doc` which only needs type structure, not body correctness.
+func DeclareAndDefine(file *ast.File) (*Info, []error) {
+	return DeclareAndDefineWithModules(file, nil)
+}
+
+// DeclareAndDefineWithModules runs Declare + Define with pre-loaded module scopes.
+func DeclareAndDefineWithModules(file *ast.File, moduleScopes map[string]*types.Scope) (*Info, []error) {
+	c := &Checker{
+		moduleScopes: moduleScopes,
+		file:         file,
+		info: &Info{
+			Types:                make(map[ast.Expr]types.Type),
+			Objects:              make(map[*ast.IdentExpr]types.Object),
+			Scopes:               make(map[ast.Node]*types.Scope),
+			FieldDefaults:        make(map[*types.Field]ast.Expr),
+			ParamDefaults:        make(map[*types.Param]ast.Expr),
+			LambdaCaptures:       make(map[*ast.LambdaExpr][]*CapturedVar),
+			OptionalNarrowings:   make(map[*ast.IfStmt]*OptionalNarrowing),
+			FailableExprs:        make(map[ast.Expr]bool),
+			AutoPropagateExprs:   make(map[ast.Expr]bool),
+			FailableDestructures: make(map[*ast.DestructureVarDecl]bool),
+			GeneratorFuncs:       make(map[ast.Node]types.Type),
+		},
+	}
+
+	c.stdScope = types.NewScope(
+		types.Universe, tpos(file.Pos()), tpos(file.End()), "std",
+	)
+	c.fileScope = types.NewScope(
+		c.stdScope, tpos(file.Pos()), tpos(file.End()), "file",
+	)
+	c.scope = c.fileScope
+	c.info.Scopes[file] = c.fileScope
+	c.info.StdScope = c.stdScope
+
+	c.declare(file)              // Pass 1: collect all declarations
+	c.define(file)               // Pass 2: resolve types, populate type structures
+	c.validateConstructors(file) // Validate: constructor inheritance
+
+	return c.info, c.errors
+}
+
 // tpos converts an ast.Pos to a types.Pos.
 func tpos(p ast.Pos) types.Pos {
 	return types.Pos{File: p.File, Line: p.Line, Column: p.Column}

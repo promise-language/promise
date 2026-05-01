@@ -283,9 +283,9 @@ When documenting a directory, each file becomes a top-level section. Files are s
 | `-signatures` | off | Signatures only, no doc text (compact mode) |
 | `-no-index` | off | Skip index section for directories |
 
-## Compiler Changes
+## Compiler Changes (all done in Phase 1)
 
-### 1. Parameter Documentation
+### 1. Parameter Documentation — Done
 
 The grammar already allows `doc()` on parameters in the AST. The semantic layer needs to propagate this.
 
@@ -308,17 +308,13 @@ func (p *Param) SetDoc(s string)   { p.doc = s }
 
 This is a small change — `ast.Param` already supports annotations and `extractDoc()` already exists.
 
-### 2. Default Value Expressions
+### 2. Default Value Expressions — Done (Option A)
 
-The doc tool needs to display default values in signatures (e.g., `int maxRetries = 3`). Currently `types.Param` only stores `hasDef bool`, not the expression text.
+The doc tool reads defaults from `sema.Info.ParamDefaults` and `sema.Info.FieldDefaults`, formatting the `ast.Expr` via an `exprToString()` helper that covers literals, identifiers, and unary expressions.
 
-**Option A (recommended):** The doc tool reads defaults from `sema.Info.ParamDefaults` (which maps `*types.Field` to `ast.Expr`) and from `sema.Info.FieldDefaults`. It formats the expression using `ast.Expr` source text. No changes to `types.Param` needed — the doc tool has access to the full `Info` struct.
+### 3. Enum Variant Documentation — Done
 
-**Option B:** Add `defaultText string` to `types.Param` and populate it during sema with the source text of the default expression. This makes the doc tool simpler but couples type metadata to source representation.
-
-### 3. Enum Variant Documentation
-
-Currently `enumVariant` in the grammar does not support meta annotations:
+Previously `enumVariant` in the grammar did not support meta annotations:
 
 ```
 enumVariant : IDENT (LPAREN enumField (COMMA enumField)* RPAREN)? ;
@@ -345,9 +341,9 @@ func (v *Variant) SetDoc(s string) { v.doc = s }
 
 **Propagate in sema** (`sema/decl.go`): during `defineEnum`, extract `doc()` from variant annotations.
 
-### 4. The `doc` Subcommand
+### 4. The `doc` Subcommand — Done
 
-New file: `cmd/promise/doc.go`
+Implemented in `cmd/promise/doc.go`. Also added `sema.DeclareAndDefine()` / `sema.DeclareAndDefineWithModules()` in `sema/check.go` — runs passes 1+2 only (Declare + Define + validateConstructors), skipping Check/Verify/Ownership.
 
 Entry point: parses the source file(s), runs sema Declare + Define passes (no Check/Verify/Ownership), then walks the resulting `Info` and scope to emit markdown.
 
@@ -512,18 +508,24 @@ This helps maintain documentation quality. Output is one-line-per-issue, grep-fr
 
 ## Implementation Plan
 
-### Phase 1: Core `promise doc` (MVP)
+### Phase 1: Core `promise doc` (MVP) — Done
 
-1. Add `doc` field to `types.Param` + accessors, propagate from AST in sema
-2. Add `doc` field to `types.Variant` + accessors, add `metaAnnotation*` to `enumVariant` grammar rule
-3. Implement `cmd/promise/doc.go`:
-   - Parse source, run sema Declare + Define (reuse `compileFrontend` with early exit)
-   - Walk scope: emit types (with inheritance, fields, methods, getters, operators, new/drop), enums (with payload variants), functions
-   - Handle `-public` / `-all` filtering
-   - Handle `-o` file output
-   - Handle `-signatures` compact mode
-4. Add `doc` subcommand to `cmd/promise/main.go` command dispatch
-5. Document `std/*.pr` with `doc()` — prioritize string, vector, map, error
+1. ~~Add `doc` field to `types.Param` + accessors, propagate from AST in sema~~ — Done (`types/signature.go`, `sema/decl.go`)
+2. ~~Add `doc` field to `types.Variant` + accessors, add `metaAnnotation*` to `enumVariant` grammar rule~~ — Done (`types/enum.go`, `grammar/PromiseParser.g4`, `ast/decl.go`, `ast/visit_decl.go`)
+3. ~~Implement `cmd/promise/doc.go`~~ — Done (single-file documentation with full output format)
+   - ~~Parse source, run sema Declare + Define (reuse `compileFrontend` with early exit)~~ — `sema.DeclareAndDefineWithModules()` in `sema/check.go`
+   - ~~Walk scope: emit types (with inheritance, fields, methods, getters, operators, new/drop), enums (with payload variants), functions~~ — walks `ast.File.Decls` in source order
+   - ~~Handle `-public` / `-all` filtering~~ — `-public` default, `-all` shows everything
+   - ~~Handle `-o` file output~~ — Done
+   - ~~Handle `-signatures` compact mode~~ — Done
+4. ~~Add `doc` subcommand to `cmd/promise/main.go` command dispatch~~ — Done
+5. Document `std/*.pr` with `doc()` — prioritize string, vector, map, error — **Not yet started**
+
+Additional Phase 1 work done:
+- Added `TargetParam` and `TargetVariant` meta targets in `sema/meta.go`
+- Fixed `extractDoc()` to use `evalStringLit()` instead of `stringLitValue()` — triple-quoted `doc()` strings were silently ignored
+- Inherited `drop` methods shown on child types (agents need this for ownership reasoning)
+- Structural interface methods shown regardless of `public` filter (they define the contract)
 
 ### Phase 2: Multi-File and Std
 

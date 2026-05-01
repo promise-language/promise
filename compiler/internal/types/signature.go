@@ -7,7 +7,8 @@ type Param struct {
 	name   string
 	typ    Type
 	ref    RefMod
-	hasDef bool // true if parameter has a default value
+	hasDef bool   // true if parameter has a default value
+	doc    string // `doc meta annotation
 }
 
 // NewParam creates a new parameter.
@@ -19,9 +20,13 @@ func (p *Param) Name() string     { return p.name }
 func (p *Param) Type() Type       { return p.typ }
 func (p *Param) Ref() RefMod      { return p.ref }
 func (p *Param) HasDefault() bool { return p.hasDef }
+func (p *Param) Doc() string      { return p.doc }
 
 // SetHasDefault marks this parameter as having a default value.
 func (p *Param) SetHasDefault(v bool) { p.hasDef = v }
+
+// SetDoc sets the documentation string from a `doc annotation.
+func (p *Param) SetDoc(s string) { p.doc = s }
 
 // Signature represents a function type: (params) -> result.
 type Signature struct {

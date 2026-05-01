@@ -463,6 +463,8 @@ func (c *Checker) resolveMethodSignature(named *types.Named, md *ast.MethodDecl)
 			params[i].SetHasDefault(true)
 			c.info.ParamDefaults[params[i]] = p.Default
 		}
+		params[i].SetDoc(extractDoc(p.Annotations))
+		c.validateMetas(p.Annotations, TargetParam)
 	}
 
 	// Resolve return type
@@ -523,7 +525,10 @@ func (c *Checker) defineEnum(d *ast.EnumDecl) {
 			}
 			fields[i] = types.NewVarField(f.Name, ft)
 		}
-		enum.AddVariant(types.NewVariant(v.Name, fields))
+		variant := types.NewVariant(v.Name, fields)
+		variant.SetDoc(extractDoc(v.Annotations))
+		c.validateMetas(v.Annotations, TargetVariant)
+		enum.AddVariant(variant)
 	}
 
 	// Process meta annotations
@@ -632,6 +637,8 @@ func (c *Checker) resolveFuncSignature(d *ast.FuncDecl) *types.Signature {
 			params[i].SetHasDefault(true)
 			c.info.ParamDefaults[params[i]] = p.Default
 		}
+		params[i].SetDoc(extractDoc(p.Annotations))
+		c.validateMetas(p.Annotations, TargetParam)
 	}
 
 	// Resolve return type

@@ -20,6 +20,7 @@ func (vf *VarField) Type() Type   { return vf.typ }
 type Variant struct {
 	name   string
 	fields []*VarField
+	doc    string // `doc meta annotation
 }
 
 // NewVariant creates a new enum variant.
@@ -30,6 +31,10 @@ func NewVariant(name string, fields []*VarField) *Variant {
 func (v *Variant) Name() string        { return v.name }
 func (v *Variant) Fields() []*VarField { return v.fields }
 func (v *Variant) NumFields() int      { return len(v.fields) }
+func (v *Variant) Doc() string         { return v.doc }
+
+// SetDoc sets the documentation string from a `doc annotation.
+func (v *Variant) SetDoc(s string) { v.doc = s }
 
 // Enum represents an enum/ADT type.
 type Enum struct {

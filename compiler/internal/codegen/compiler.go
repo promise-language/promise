@@ -3216,8 +3216,8 @@ func (c *Compiler) computeUserTypeLayouts(file *ast.File) {
 			return
 		}
 		// Ensure parent layouts are computed first
-		for _, p := range named.Parents() {
-			pName := p.Obj().Name()
+		for _, pr := range named.Parents() {
+			pName := pr.Named.Obj().Name()
 			if _, ok := pending[pName]; ok {
 				compute(pName)
 			}
@@ -3602,12 +3602,60 @@ func (c *Compiler) resolveMethodOwner(named *types.Named, methodName string) str
 		}
 	}
 	// Walk parents
-	for _, p := range named.Parents() {
-		if p.LookupMethod(methodName) != nil {
-			return c.resolveMethodOwner(p, methodName)
+	for _, pr := range named.Parents() {
+		if pr.Named.LookupMethod(methodName) != nil {
+			return c.resolveMethodOwner(pr.Named, methodName)
 		}
 	}
 	return named.Obj().Name() // fallback
+}
+
+// resolveMonoParentName resolves the monomorphized name of a parent type that owns
+// a method inherited by `named`. If the parent is generic and the child is accessed
+// through a concrete type (Instance or Named with generic parents), the parent's
+// mono name (e.g., Container__int) is returned instead of the raw name (Container).
+// resolveMonoParentName resolves the monomorphized name for an inherited method's
+// owner type. E.g., for Wrapper[int].get() inherited from Container[T], returns
+// "Container__int". Builds a full substitution map from the child's concrete
+// type args through the entire parent chain to resolve all type params.
+func (c *Compiler) resolveMonoParentName(named *types.Named, targetType types.Type, ownerName string) string {
+	// Build a full substitution map from targetType through the parent chain.
+	subst := make(map[*types.TypeParam]types.Type)
+	if inst, ok := targetType.(*types.Instance); ok {
+		origin, _ := inst.Origin().(*types.Named)
+		if origin != nil {
+			for k, v := range types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs()) {
+				subst[k] = v
+			}
+		}
+	}
+	// Merge parent type param mappings transitively.
+	mergeParentSubst(named, subst)
+
+	// Now find the parent ref that matches ownerName by walking the chain.
+	return findMonoParentName(named, ownerName, subst)
+}
+
+// findMonoParentName walks the parent chain to find ownerName and build
+// the monomorphized Instance name from the already-computed substitution map.
+func findMonoParentName(named *types.Named, ownerName string, subst map[*types.TypeParam]types.Type) string {
+	for _, pr := range named.Parents() {
+		if pr.Named.Obj().Name() == ownerName && len(pr.TypeArgs) > 0 {
+			resolvedArgs := make([]types.Type, len(pr.TypeArgs))
+			for i, ta := range pr.TypeArgs {
+				resolvedArgs[i] = types.Substitute(ta, subst)
+			}
+			parentInst := types.NewInstance(pr.Named, resolvedArgs)
+			return monoName(parentInst)
+		}
+		if pr.Named.Obj().Name() != ownerName {
+			result := findMonoParentName(pr.Named, ownerName, subst)
+			if result != ownerName {
+				return result
+			}
+		}
+	}
+	return ownerName
 }
 
 // compilerState captures the mutable compiler fields that defineMethodFunc overwrites.
@@ -3730,9 +3778,9 @@ func (c *Compiler) synthesizeDefaultMethods(concrete, iface *types.Named) {
 	}
 
 	// Recurse into parent interfaces (e.g., Ordered inherits != default from Equal)
-	for _, parent := range iface.Parents() {
-		if parent.IsStructural() {
-			c.synthesizeDefaultMethods(concrete, parent)
+	for _, pr := range iface.Parents() {
+		if pr.Named.IsStructural() {
+			c.synthesizeDefaultMethods(concrete, pr.Named)
 		}
 	}
 }
@@ -3754,9 +3802,9 @@ func (c *Compiler) computeVtableInfo(file *ast.File) {
 		}
 		var markParents func(n *types.Named)
 		markParents = func(n *types.Named) {
-			for _, p := range n.Parents() {
-				c.hasChildren[p] = true
-				markParents(p)
+			for _, pr := range n.Parents() {
+				c.hasChildren[pr.Named] = true
+				markParents(pr.Named)
 			}
 		}
 		markParents(named)

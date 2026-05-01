@@ -9265,3 +9265,36 @@ func TestGlobalMethodIR(t *testing.T) {
 	// Should only have the 'v' param, not 'this'
 	assertNotContains(t, ir, "Counter.create(i8*")
 }
+
+func TestGenericInheritanceNonGenericChild(t *testing.T) {
+	ir := generateIR(t, `
+		type Holder[T] { T value; }
+		type IntHolder is Holder[int] {}
+		main() {
+			h := IntHolder(value: 42);
+			int x = h.value;
+		}
+	`)
+	// IntHolder uses Holder's layout — field should be i64 (int)
+	assertContains(t, ir, "IntHolder")
+	assertContains(t, ir, "load i64")
+}
+
+func TestGenericInheritanceForwardedTypeParams(t *testing.T) {
+	ir := generateIR(t, `
+		type Base[T] {
+			T data;
+			get() T { return this.data; }
+		}
+		type Derived[T] is Base[T] {
+			get() T { return this.data; }
+		}
+		main() {
+			d := Derived[int](data: 99);
+			int x = d.get();
+		}
+	`)
+	// Monomorphized names should appear
+	assertContains(t, ir, "Derived__int")
+	assertContains(t, ir, "Base__int")
+}

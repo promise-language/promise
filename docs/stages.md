@@ -345,6 +345,15 @@ Generic function sema support and type-specialized code generation for all gener
 - **Scope**: Generic user type instantiation (layout, constructor, field access/assignment, methods), generic enum instantiation (tagged union, variant values/constructors, pattern matching, destructure bindings), generic functions (single type parameter, void/non-void/failable), multiple instantiations of same generic.
 - **Deferred**: Type argument inference (explicit type args only), extern ABI for generic types, C header generation for monomorphic types, container types (Array, Slice, Map, Tuple — Stage 8g).
 
+**Part C — Generic Inheritance** (`types/`, `sema/`, `codegen/`)
+- **ParentRef with type args** (`types/named.go`): `ParentRef{Named, TypeArgs}` struct replaces bare `*Named` parent pointers. `AddParent` accepts optional type args. All parent-walking methods (`AllFields`, `AllMethods`, `LookupMethod`, etc.) updated.
+- **Assignability** (`types/equal.go`): `isNamedChildOfInstance` and `isInstanceChild` handle generic parent matching — direct type arg comparison and transitive resolution through generic intermediaries via intermediate Instance construction.
+- **Sema: define + check** (`sema/decl.go`, `sema/expr.go`): `defineType` resolves `Instance` parents, extracts origin + type args, records instances for monomorphization. `buildParentSubstMap` rewritten as recursive `mergeParentSubstSema` — walks parent chain composing substitutions at each level. Constructor calls use composed substitution for inherited field type validation.
+- **Codegen: layout + mono** (`codegen/layout.go`, `codegen/mono.go`): `buildParentFieldSubst` → recursive `mergeParentFieldSubst` for correct LLVM field types. `collectMonoInstances` discovers parent instances transitively. `mergeParentSubst` recursive for transitive chains.
+- **Codegen: dispatch + RTTI** (`codegen/compiler.go`, `codegen/expr.go`, `codegen/rtti.go`): `resolveMonoParentName` builds full subst map for method name mangling through generic parents. `genVirtualMethodCall`/`genVirtualGetterCall` apply `vtableSubst` from Instance type args for correct LLVM return/param types. `emitVtableGlobal` falls back to mono parent names for inherited method lookup.
+- **Scope**: Non-generic child of generic parent (`IntHolder is Holder[int]`), generic child forwarding params (`Wrapper[T] is Container[T]`), partial type arg application (`StringPair[V] is Pair[string, V]`), abstract generic parents, transitive 3-level chains, assignability (child→parent instance, instance→instance, transitive through generic intermediaries), method override, own+inherited fields/methods.
+- **Tests**: 17 e2e tests (`test_generic_inheritance.pr`), 13 sema tests, 2 codegen IR tests.
+
 ## Stage 8g — Container Codegen (Done)
 
 Codegen for container types (tuples, optionals, slices, maps) and capturing lambdas.
@@ -833,6 +842,7 @@ Known gaps and improvements deferred from completed stages.
 | Failable generators (`stream[T]!` with error propagation through yield) | Generators | Low |
 | Stored generator values (first-class generator variables outside for-in) | Generators | Low |
 | Generator closures (capturing lambdas as generators) | Generators | Low |
+| Mono type vtable/RTTI: generic instances (e.g. `ConstProducer[int]`) lack vtable and typeinfo globals — virtual dispatch crashes when a mono instance is passed as a parent type (e.g. `ConstProducer[int]` as `Producer[int]`). Non-generic children of generic parents work (vtable emitted by `emitVtableGlobals`). Fix: emit vtable/typeinfo for mono instances in `computeMonoLayouts` or a dedicated `emitMonoVtables` pass. | 8f | Medium |
 | Devirtualization optimization (direct call when concrete type known) | 8L | Low |
 | Factory `Self` return type on generic native types resolves to raw `Vector` instead of monomorphized `Vector[T]` — workaround: use `T[]` return type | Runtime | Low |
 | `as!` cast between u8/char crashes (extractInstancePtr on scalar) — numeric cast path doesn't cover char | Codegen | Low |

@@ -157,6 +157,30 @@ func AssignableTo(x, y Type) bool {
 				return true
 			}
 		}
+		// Named child assignable to Instance parent via generic inheritance.
+		// e.g., Doubler is assignable to Transformer[int] when Doubler is Transformer[int].
+		if yi, ok := y.(*Instance); ok {
+			if isNamedChildOfInstance(xn, yi) {
+				return true
+			}
+		}
+	}
+
+	// Rule 4b: Instance child assignable to Instance parent via generic inheritance.
+	// e.g., Range[int] is assignable to Stream[int] when Range is Stream[T].
+	if xi, ok := x.(*Instance); ok {
+		if yi, ok := y.(*Instance); ok {
+			if isInstanceChild(xi, yi) {
+				return true
+			}
+		}
+		// Instance child assignable to non-generic Named parent
+		if yn, ok := y.(*Named); ok {
+			xo, _ := xi.Origin().(*Named)
+			if xo != nil && isChild(xo, yn) {
+				return true
+			}
+		}
 	}
 
 	// Rule 5: TypeParam assignable to any of its constraints
@@ -207,11 +231,113 @@ func AssignableTo(x, y Type) bool {
 // isChild reports whether child inherits from parent (directly or transitively).
 func isChild(child, parent *Named) bool {
 	for _, p := range child.parents {
-		if p == parent {
+		if p.Named == parent {
 			return true
 		}
-		if isChild(p, parent) {
+		if isChild(p.Named, parent) {
 			return true
+		}
+	}
+	return false
+}
+
+// isNamedChildOfInstance reports whether a Named child is assignable to an
+// Instance parent. E.g., Doubler (Named) is Transformer[int] (Instance)
+// when Doubler has ParentRef{Named: Transformer, TypeArgs: [int]}.
+// Handles transitive chains: Leaf is Middle[int] is Base[T] → Leaf assignable to Base[int].
+func isNamedChildOfInstance(child *Named, parent *Instance) bool {
+	parentOrigin, _ := parent.Origin().(*Named)
+	if parentOrigin == nil {
+		return false
+	}
+	for _, p := range child.parents {
+		if p.Named == parentOrigin && len(p.TypeArgs) > 0 {
+			// Direct match: check that the concrete parent type args match
+			parentTypeArgs := parent.TypeArgs()
+			if len(p.TypeArgs) != len(parentTypeArgs) {
+				continue
+			}
+			match := true
+			for i, ta := range p.TypeArgs {
+				if !Identical(ta, parentTypeArgs[i]) {
+					match = false
+					break
+				}
+			}
+			if match {
+				return true
+			}
+		}
+		if p.Named == parentOrigin {
+			continue // already checked above with type args
+		}
+		// Transitive: build intermediate instance if parent has type args
+		if len(p.TypeArgs) > 0 {
+			intermediate := NewInstance(p.Named, p.TypeArgs)
+			if isInstanceChild(intermediate, parent) {
+				return true
+			}
+		} else {
+			// Non-generic intermediary — recurse
+			if isNamedChildOfInstance(p.Named, parent) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isInstanceChild reports whether child Instance inherits from parent Instance
+// via generic inheritance. e.g., Range[int] inherits from Stream[int] when
+// Range[T] is Stream[T] — we check that the child's origin has a ParentRef
+// whose Named matches the parent's origin, and the substituted type args match.
+func isInstanceChild(child, parent *Instance) bool {
+	childOrigin, _ := child.Origin().(*Named)
+	parentOrigin, _ := parent.Origin().(*Named)
+	if childOrigin == nil || parentOrigin == nil {
+		return false
+	}
+	for _, p := range childOrigin.parents {
+		// Direct match: parent ref origin matches target origin
+		if p.Named == parentOrigin {
+			// Substitute child's type args into parent's type args
+			subst := BuildSubstMap(childOrigin.TypeParams(), child.TypeArgs())
+			if subst == nil && len(childOrigin.TypeParams()) > 0 {
+				continue
+			}
+			match := true
+			parentTypeArgs := parent.TypeArgs()
+			if len(p.TypeArgs) != len(parentTypeArgs) {
+				continue
+			}
+			for i, ta := range p.TypeArgs {
+				resolved := Substitute(ta, subst)
+				if !Identical(resolved, parentTypeArgs[i]) {
+					match = false
+					break
+				}
+			}
+			if match {
+				return true
+			}
+		}
+		// Transitive: check if the parent ref's origin is itself an instance child
+		if len(p.TypeArgs) > 0 {
+			// Build intermediate instance with substituted type args
+			subst := BuildSubstMap(childOrigin.TypeParams(), child.TypeArgs())
+			substArgs := make([]Type, len(p.TypeArgs))
+			for i, ta := range p.TypeArgs {
+				substArgs[i] = Substitute(ta, subst)
+			}
+			intermediate := NewInstance(p.Named, substArgs)
+			if isInstanceChild(intermediate, parent) {
+				return true
+			}
+		} else {
+			// Non-generic parent in chain — check if it inherits from parentOrigin
+			if isChild(p.Named, parentOrigin) {
+				return true
+			}
 		}
 	}
 	return false

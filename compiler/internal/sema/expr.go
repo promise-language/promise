@@ -711,12 +711,15 @@ func (c *Checker) checkConstructorCall(e *ast.CallExpr, named *types.Named) type
 		return named
 	}
 
+	// Build substitution map for inherited fields from generic parents
+	subst := c.buildParentSubstMap(named)
+
 	// If the type has an explicit new() constructor, route through parameter checking
 	if named.HasNew() {
-		return c.checkNewConstructorCall(e, named, nil)
+		return c.checkNewConstructorCall(e, named, subst)
 	}
 
-	c.resolveImplicitConstructorArgs(e, named, nil)
+	c.resolveImplicitConstructorArgs(e, named, subst)
 	return named
 }
 
@@ -753,15 +756,15 @@ func (c *Checker) checkSuperCall(e *ast.CallExpr) types.Type {
 		c.errorf(e.Pos(), "super() used outside of a type")
 		return types.TypVoid
 	}
-	parents := c.curType.Parents()
-	if len(parents) == 0 {
+	parentRefs := c.curType.Parents()
+	if len(parentRefs) == 0 {
 		c.errorf(e.Pos(), "super() called but type %s has no parent", c.curType)
 		for _, arg := range e.Args {
 			c.checkExpr(arg.Value)
 		}
 		return types.TypVoid
 	}
-	parent := parents[0] // first parent is the concrete parent
+	parent := parentRefs[0].Named // first parent is the concrete parent
 
 	if parent.HasNew() {
 		// Parent has explicit new() — validate args against parent's new() params
@@ -821,6 +824,13 @@ func (c *Checker) checkInstanceConstructorCall(e *ast.CallExpr, inst *types.Inst
 	}
 
 	subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+	if subst == nil {
+		subst = make(map[*types.TypeParam]types.Type)
+	}
+
+	// Merge parent type param substitutions for inherited fields from generic parents.
+	// Recurse transitively: GLeaf[int] is GMid[T] is GBase[T] needs all params resolved.
+	c.mergeParentSubstSema(origin, subst)
 
 	// If the type has an explicit new() constructor, route through parameter checking
 	if origin.HasNew() {
@@ -958,24 +968,26 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 
 	switch t := target.(type) {
 	case *types.Named:
+		// Build substitution for inherited members from generic parents
+		parentSubst := c.buildParentSubstMap(t)
 		// Check fields first, then getters, then methods
 		if f := t.LookupField(e.Field); f != nil {
 			if f.Deprecated() != "" {
 				c.warnf(e.Pos(), "use of deprecated field '%s'", e.Field)
 			}
-			return f.Type()
+			return types.Substitute(f.Type(), parentSubst)
 		}
 		if g := t.LookupGetter(e.Field); g != nil {
 			if g.Deprecated() != "" {
 				c.warnf(e.Pos(), "use of deprecated getter '%s'", e.Field)
 			}
-			return g.Sig().Result()
+			return types.Substitute(g.Sig().Result(), parentSubst)
 		}
 		if m := t.LookupMethod(e.Field); m != nil {
 			if m.Deprecated() != "" {
 				c.warnf(e.Pos(), "use of deprecated method '%s'", e.Field)
 			}
-			return m.Sig()
+			return types.Substitute(m.Sig(), parentSubst)
 		}
 		c.errorf(e.Pos(), "type %s has no field or method %s", t, e.Field)
 		return nil
@@ -1086,17 +1098,26 @@ func (c *Checker) resolveInstanceMember(pos ast.Pos, inst *types.Instance, name 
 			if f.Deprecated() != "" {
 				c.warnf(pos, "use of deprecated field '%s'", name)
 			}
+			if !hasOwnField(origin, name) {
+				subst = c.composeParentSubst(origin, inst.TypeArgs(), name, memberField)
+			}
 			return types.Substitute(f.Type(), subst)
 		}
 		if g := origin.LookupGetter(name); g != nil {
 			if g.Deprecated() != "" {
 				c.warnf(pos, "use of deprecated getter '%s'", name)
 			}
+			if !hasOwnGetter(origin, name) {
+				subst = c.composeParentSubst(origin, inst.TypeArgs(), name, memberGetter)
+			}
 			return types.Substitute(g.Sig().Result(), subst)
 		}
 		if m := origin.LookupMethod(name); m != nil {
 			if m.Deprecated() != "" {
 				c.warnf(pos, "use of deprecated method '%s'", name)
+			}
+			if !hasOwnMethod(origin, name) {
+				subst = c.composeParentSubst(origin, inst.TypeArgs(), name, memberMethod)
 			}
 			return types.Substitute(m.Sig(), subst)
 		}
@@ -1111,6 +1132,140 @@ func (c *Checker) resolveInstanceMember(pos ast.Pos, inst *types.Instance, name 
 	default:
 		c.errorf(pos, "cannot access member on type %s", inst)
 		return nil
+	}
+}
+
+type memberKind int
+
+const (
+	memberField memberKind = iota
+	memberGetter
+	memberMethod
+)
+
+// hasOwnField checks if a Named type has the field directly declared (not inherited).
+func hasOwnField(n *types.Named, name string) bool {
+	for _, f := range n.Fields() {
+		if f.Name() == name {
+			return true
+		}
+	}
+	return false
+}
+
+// hasOwnGetter checks if a Named type has the getter directly declared (not inherited).
+func hasOwnGetter(n *types.Named, name string) bool {
+	for _, m := range n.Methods() {
+		if m.IsGetter() && m.Name() == name {
+			return true
+		}
+	}
+	return false
+}
+
+// hasOwnMethod checks if a Named type has the method directly declared (not inherited).
+func hasOwnMethod(n *types.Named, name string) bool {
+	for _, m := range n.Methods() {
+		if m.Name() == name && !m.IsGetter() && !m.IsSetter() {
+			return true
+		}
+	}
+	return false
+}
+
+// composeParentSubst builds a composed substitution map for accessing a member
+// inherited from a generic parent. Walks the parent chain to find the declaring
+// type, composing type parameter substitutions through each ParentRef.
+//
+// Example: Range[T] is Stream[T], Stream has method next() T?
+// For Range[int].next(), builds {Stream.T → int} by composing:
+//
+//	Range.T → int (from inst type args) + Stream.T → Range.T (from ParentRef)
+func (c *Checker) composeParentSubst(origin *types.Named, childTypeArgs []types.Type, name string, kind memberKind) map[*types.TypeParam]types.Type {
+	childSubst := types.BuildSubstMap(origin.TypeParams(), childTypeArgs)
+	return composeParentSubstWalk(origin, childSubst, name, kind)
+}
+
+func composeParentSubstWalk(n *types.Named, currentSubst map[*types.TypeParam]types.Type, name string, kind memberKind) map[*types.TypeParam]types.Type {
+	for _, pr := range n.Parents() {
+		parent := pr.Named
+		var found bool
+		switch kind {
+		case memberField:
+			found = parent.LookupField(name) != nil
+		case memberGetter:
+			found = parent.LookupGetter(name) != nil
+		case memberMethod:
+			found = parent.LookupMethod(name) != nil
+		}
+		if !found {
+			continue
+		}
+
+		if len(pr.TypeArgs) == 0 || len(parent.TypeParams()) == 0 {
+			return currentSubst
+		}
+
+		// Compose: substitute child's type args into parent's type args,
+		// then build a map from parent's type params to the resolved args
+		resolvedParentArgs := make([]types.Type, len(pr.TypeArgs))
+		for i, ta := range pr.TypeArgs {
+			resolvedParentArgs[i] = types.Substitute(ta, currentSubst)
+		}
+		parentSubst := types.BuildSubstMap(parent.TypeParams(), resolvedParentArgs)
+
+		// If the member is directly on this parent, return the parent's substitution
+		switch kind {
+		case memberField:
+			if hasOwnField(parent, name) {
+				return parentSubst
+			}
+		case memberGetter:
+			if hasOwnGetter(parent, name) {
+				return parentSubst
+			}
+		case memberMethod:
+			if hasOwnMethod(parent, name) {
+				return parentSubst
+			}
+		}
+
+		// Member is further up the chain — recurse
+		return composeParentSubstWalk(parent, parentSubst, name, kind)
+	}
+	return currentSubst
+}
+
+// buildParentSubstMap builds a substitution map from generic parent type params
+// to their concrete type args for a Named type. Recursively walks the entire parent
+// chain so transitive inheritance (Leaf is Middle[int] is Base[T]) resolves all params.
+func (c *Checker) buildParentSubstMap(named *types.Named) map[*types.TypeParam]types.Type {
+	subst := make(map[*types.TypeParam]types.Type)
+	c.mergeParentSubstSema(named, subst)
+	if len(subst) == 0 {
+		return nil
+	}
+	return subst
+}
+
+// mergeParentSubstSema recursively adds parent type param mappings to subst.
+func (c *Checker) mergeParentSubstSema(named *types.Named, subst map[*types.TypeParam]types.Type) {
+	for _, pr := range named.Parents() {
+		if len(pr.TypeArgs) == 0 {
+			// Non-generic parent — still recurse for its parents.
+			c.mergeParentSubstSema(pr.Named, subst)
+			continue
+		}
+		resolvedArgs := make([]types.Type, len(pr.TypeArgs))
+		for i, ta := range pr.TypeArgs {
+			resolvedArgs[i] = types.Substitute(ta, subst)
+		}
+		parentMap := types.BuildSubstMap(pr.Named.TypeParams(), resolvedArgs)
+		for k, v := range parentMap {
+			subst[k] = v
+		}
+		// Recurse into parent's parents for transitive chains.
+		c.mergeParentSubstSema(pr.Named, subst)
 	}
 }
 

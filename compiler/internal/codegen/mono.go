@@ -60,6 +60,30 @@ func monoFuncName(fi *sema.FuncInstance) string {
 	return name
 }
 
+// mergeParentSubst augments a type param substitution map with mappings for
+// inherited generic parent type params. E.g., if Derived[T] is Base[T] and
+// subst = {Derived.T → int}, this adds {Base.T → int} so that inherited
+// fields/methods using Base.T are correctly resolved.
+func mergeParentSubst(origin *types.Named, subst map[*types.TypeParam]types.Type) {
+	for _, pr := range origin.Parents() {
+		if len(pr.TypeArgs) == 0 {
+			// Non-generic parent — still recurse for its parents.
+			mergeParentSubst(pr.Named, subst)
+			continue
+		}
+		resolvedArgs := make([]types.Type, len(pr.TypeArgs))
+		for i, ta := range pr.TypeArgs {
+			resolvedArgs[i] = types.Substitute(ta, subst)
+		}
+		parentMap := types.BuildSubstMap(pr.Named.TypeParams(), resolvedArgs)
+		for k, v := range parentMap {
+			subst[k] = v
+		}
+		// Recurse into parent's parents for transitive chains.
+		mergeParentSubst(pr.Named, subst)
+	}
+}
+
 // collectMonoInstances deduplicates generic type instances by mangled name.
 // Also transitively discovers instances referenced by field types of already-collected
 // instances (e.g., map[string, int] has a Slot[K, V][] field which after substitution
@@ -76,7 +100,7 @@ func collectMonoInstances(info *sema.Info) []*types.Instance {
 		result = append(result, inst)
 	}
 
-	// Transitively expand: walk substituted field types and collect nested Instances.
+	// Transitively expand: walk substituted field types and parent instances.
 	for i := 0; i < len(result); i++ {
 		inst := result[i]
 		switch origin := inst.Origin().(type) {
@@ -85,6 +109,19 @@ func collectMonoInstances(info *sema.Info) []*types.Instance {
 			for _, f := range origin.AllFields() {
 				ft := types.Substitute(f.Type(), subst)
 				discoverInstances(ft, &result, seen)
+			}
+			// Discover parent instances: Range[int] is Stream[T] → need Stream[int]
+			for _, pr := range origin.Parents() {
+				if len(pr.TypeArgs) > 0 {
+					resolvedArgs := make([]types.Type, len(pr.TypeArgs))
+					for j, ta := range pr.TypeArgs {
+						resolvedArgs[j] = types.Substitute(ta, subst)
+					}
+					parentInst := types.NewInstance(pr.Named, resolvedArgs)
+					if !types.ContainsTypeParam(parentInst) {
+						discoverInstances(parentInst, &result, seen)
+					}
+				}
 			}
 		case *types.Enum:
 			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
@@ -445,6 +482,7 @@ func (c *Compiler) computeMonoLayouts(instances []*types.Instance) {
 				continue // already computed (e.g., same instance from main file)
 			}
 			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+			mergeParentSubst(origin, subst)
 			if origin.IsValueType() {
 				c.monoLayouts[name] = computeMonoValueTypeLayout(c.module, origin, name, subst, c.layouts)
 			} else {
@@ -472,6 +510,7 @@ func (c *Compiler) declareMonoMethods(file *ast.File, instances []*types.Instanc
 		}
 		name := monoName(inst)
 		subst := types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
+		mergeParentSubst(named, subst)
 
 		// Find the TypeDecl AST node for this type
 		td := c.findTypeDecl(file, named.Obj().Name())
@@ -537,6 +576,7 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 		}
 		name := monoName(inst)
 		subst := types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
+		mergeParentSubst(named, subst)
 
 		td := c.findTypeDecl(file, named.Obj().Name())
 		if td == nil {

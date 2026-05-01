@@ -853,6 +853,39 @@ Abstract factory methods declared without a return type get an **implicit `Self`
 
 When a value crosses a type boundary through structural satisfaction (or through a second+ parent), the compiler emits a **view-specific vtable** ordered by the target interface's slot layout. The value struct's vtable pointer is swapped to this view vtable at the coercion point (variable declaration, assignment, function argument, or return statement). For methods with relaxed signature differences, the vtable slot points to an adapter thunk rather than the method directly.
 
+#### Generic Inheritance
+
+A child type can inherit from a **generic parent** by supplying type arguments in the `is` clause. This works for all inheritance patterns: non-generic children, generic children forwarding type params, and partial application of multi-param parents.
+
+```promise
+// Non-generic child of generic parent — fixes all type params
+type Holder[T] { T value; }
+type IntHolder is Holder[int] {}
+
+// Generic child forwarding type params
+type Container[T] { T item; get() T { return this.item; } }
+type Wrapper[T] is Container[T] { string label; }
+
+// Partial type argument application
+type Pair[A, B] { A first; B second; }
+type StringPair[V] is Pair[string, V] {}
+
+// Abstract generic parent
+type Producer[T] { produce() T `abstract; }
+type ConstProducer[T] is Producer[T] {
+    T value;
+    produce() T { return this.value; }
+}
+```
+
+**Rules:**
+
+- Type arguments in the `is` clause can be concrete types (`int`, `string`) or the child's own type parameters (`T`, `V`).
+- **Transitive chains** work: `type Leaf is Middle[int]` where `type Middle[T] is Base[T]` — `Leaf` inherits all fields and methods from both `Middle` and `Base`, with `T` resolved to `int` throughout.
+- **Assignability** follows: a `Wrapper[int]` is assignable to `Container[int]`, and a `Leaf` is assignable to `Base[int]`. This works transitively through generic intermediaries.
+- **Method dispatch**: inherited methods have their type parameters substituted. Calling `get()` on a `Wrapper[int]` returns `int`, not `T`.
+- All parent type arguments must be valid types (no raw type parameters from an unrelated scope).
+
 ### 5.5 Generics
 
 Generics use **square brackets** `[]`. Constraints are expressed inline in the type parameter list.

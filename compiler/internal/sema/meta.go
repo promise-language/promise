@@ -377,17 +377,18 @@ func (c *Checker) validateConstructors(file *ast.File) {
 		if !ok {
 			continue
 		}
-		for _, p := range named.Parents() {
-			if p.HasNew() && !named.HasNew() {
-				c.errorf(td.Pos(), "type %s must define new() because parent %s defines new()", td.Name, p)
+		for _, pr := range named.Parents() {
+			pn := pr.Named
+			if pn.HasNew() && !named.HasNew() {
+				c.errorf(td.Pos(), "type %s must define new() because parent %s defines new()", td.Name, pn)
 				break
 			}
-			if p.HasNew() && named.HasNew() {
-				parentNew := lookupOwnMethod(p, "new")
+			if pn.HasNew() && named.HasNew() {
+				parentNew := lookupOwnMethod(pn, "new")
 				childNew := lookupOwnMethod(named, "new")
 				if parentNew != nil && parentNew.Sig().CanError() &&
 					(childNew == nil || !childNew.Sig().CanError()) {
-					c.errorf(td.Pos(), "new() on %s must be failable because parent %s has failable new()", td.Name, p)
+					c.errorf(td.Pos(), "new() on %s must be failable because parent %s has failable new()", td.Name, pn)
 				}
 				break
 			}

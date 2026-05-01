@@ -1,11 +1,19 @@
 package types
 
+// ParentRef represents a parent type reference in the inheritance chain.
+// For non-generic parents, TypeArgs is nil. For generic parents like
+// `type Foo[T] is Bar[T]`, TypeArgs holds the type arguments applied to the parent.
+type ParentRef struct {
+	Named    *Named
+	TypeArgs []Type // nil for non-generic parents
+}
+
 // Named represents a named type: user-defined types and built-in primitives alike.
 // int, bool, string are Named types just like Dog and Shape.
 type Named struct {
 	obj         *TypeName
 	typeParams  []*TypeParam
-	parents     []*Named // inheritance via `is`
+	parents     []*ParentRef // inheritance via `is`
 	fields      []*Field
 	methods     []*Method
 	isCopy      bool   // `copy meta — bitwise copy on assignment
@@ -27,7 +35,7 @@ func NewNamed(obj *TypeName, typeParams []*TypeParam) *Named {
 
 func (n *Named) Obj() *TypeName           { return n.obj }
 func (n *Named) TypeParams() []*TypeParam { return n.typeParams }
-func (n *Named) Parents() []*Named        { return n.parents }
+func (n *Named) Parents() []*ParentRef    { return n.parents }
 func (n *Named) Fields() []*Field         { return n.fields }
 func (n *Named) Methods() []*Method       { return n.methods }
 func (n *Named) Underlying() Type         { return n }
@@ -53,8 +61,13 @@ func (n *Named) String() string {
 }
 
 // AddParent adds a parent type (inheritance via `is`).
-func (n *Named) AddParent(parent *Named) {
-	n.parents = append(n.parents, parent)
+// For non-generic parents, pass nil typeArgs.
+func (n *Named) AddParent(parent *Named, typeArgs ...[]Type) {
+	var ta []Type
+	if len(typeArgs) > 0 {
+		ta = typeArgs[0]
+	}
+	n.parents = append(n.parents, &ParentRef{Named: parent, TypeArgs: ta})
 }
 
 // InheritsFrom returns true if this type is the target type or transitively
@@ -65,7 +78,7 @@ func (n *Named) InheritsFrom(target *Named) bool {
 		return true
 	}
 	for _, p := range n.parents {
-		if p.InheritsFrom(target) {
+		if p.Named.InheritsFrom(target) {
 			return true
 		}
 	}
@@ -114,8 +127,9 @@ func (n *Named) AllFields() []*Field {
 	// Only the first parent with fields (or with parents that have fields) is followed.
 	// Multiple concrete parents are rejected by sema.
 	for _, p := range n.parents {
-		if p.NumFields() > 0 || len(p.parents) > 0 {
-			result = append(result, p.AllFields()...)
+		pn := p.Named
+		if pn.NumFields() > 0 || len(pn.parents) > 0 {
+			result = append(result, pn.AllFields()...)
 			break
 		}
 	}
@@ -142,7 +156,7 @@ func (n *Named) LookupField(name string) *Field {
 		}
 	}
 	for _, p := range n.parents {
-		if f := p.LookupField(name); f != nil {
+		if f := p.Named.LookupField(name); f != nil {
 			return f
 		}
 	}
@@ -158,7 +172,7 @@ func (n *Named) LookupMethod(name string) *Method {
 		}
 	}
 	for _, p := range n.parents {
-		if m := p.LookupMethod(name); m != nil {
+		if m := p.Named.LookupMethod(name); m != nil {
 			return m
 		}
 	}
@@ -174,7 +188,7 @@ func (n *Named) LookupAnyMethod(name string) *Method {
 		}
 	}
 	for _, p := range n.parents {
-		if m := p.LookupAnyMethod(name); m != nil {
+		if m := p.Named.LookupAnyMethod(name); m != nil {
 			return m
 		}
 	}
@@ -189,7 +203,7 @@ func (n *Named) LookupGetter(name string) *Method {
 		}
 	}
 	for _, p := range n.parents {
-		if m := p.LookupGetter(name); m != nil {
+		if m := p.Named.LookupGetter(name); m != nil {
 			return m
 		}
 	}
@@ -204,7 +218,7 @@ func (n *Named) LookupSetter(name string) *Method {
 		}
 	}
 	for _, p := range n.parents {
-		if m := p.LookupSetter(name); m != nil {
+		if m := p.Named.LookupSetter(name); m != nil {
 			return m
 		}
 	}
@@ -222,7 +236,7 @@ func (n *Named) IsAbstract() bool {
 	}
 	// Check inherited abstract methods not overridden by a concrete method here
 	for _, p := range n.parents {
-		for _, am := range p.allAbstractMethods() {
+		for _, am := range p.Named.allAbstractMethods() {
 			own := n.lookupOwnMethodBySlotKey(methodSlotKey(am))
 			if own == nil || own.abstract {
 				return true
@@ -262,7 +276,7 @@ func (n *Named) AllVirtualMethods() []*Method {
 	seen := make(map[string]bool)
 	var result []*Method
 	for _, p := range n.parents {
-		for _, m := range p.AllVirtualMethods() {
+		for _, m := range p.Named.AllVirtualMethods() {
 			key := methodSlotKey(m)
 			if !seen[key] {
 				seen[key] = true
@@ -325,7 +339,7 @@ func (n *Named) allAbstractMethodsWithDeclarer() []abstractMethodInfo {
 		}
 	}
 	for _, p := range n.parents {
-		for _, am := range p.allAbstractMethodsWithDeclarer() {
+		for _, am := range p.Named.allAbstractMethodsWithDeclarer() {
 			own := n.lookupOwnMethodBySlotKey(methodSlotKey(am.method))
 			if own == nil {
 				result = append(result, am)

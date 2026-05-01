@@ -29,9 +29,9 @@ func (c *Compiler) assignTypeID(named *types.Named) int32 {
 // Returns a deduplicated slice.
 func (c *Compiler) collectAllParentIDs(named *types.Named) []int32 {
 	var ids []int32
-	for _, p := range named.Parents() {
-		ids = append(ids, c.assignTypeID(p))
-		ids = append(ids, c.collectAllParentIDs(p)...)
+	for _, pr := range named.Parents() {
+		ids = append(ids, c.assignTypeID(pr.Named))
+		ids = append(ids, c.collectAllParentIDs(pr.Named)...)
 	}
 	// Deduplicate
 	seen := make(map[int32]bool)
@@ -97,6 +97,11 @@ func (c *Compiler) emitVtableGlobal(named *types.Named) *ir.Global {
 	for _, m := range methods {
 		ownerName := c.resolveMethodOwner(named, m.Name())
 		mangledName := mangleMethodName(ownerName, m.Name(), m.IsSetter())
+		if _, ok := c.funcs[mangledName]; !ok && ownerName != named.Obj().Name() {
+			// Inherited method from a generic parent — resolve to mono name.
+			monoOwner := c.resolveMonoParentName(named, named, ownerName)
+			mangledName = mangleMethodName(monoOwner, m.Name(), m.IsSetter())
+		}
 		if fn, ok := c.funcs[mangledName]; ok {
 			entries = append(entries, constant.NewBitCast(fn, irtypes.I8Ptr))
 		} else {
@@ -451,7 +456,7 @@ func isInFirstParentChain(concrete, target *types.Named) bool {
 		if len(c.Parents()) == 0 {
 			return false
 		}
-		c = c.Parents()[0]
+		c = c.Parents()[0].Named
 	}
 	return false
 }

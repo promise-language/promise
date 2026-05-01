@@ -291,19 +291,37 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 		if pt == nil {
 			continue
 		}
-		pn, ok := pt.(*types.Named)
-		if !ok {
+		switch p := pt.(type) {
+		case *types.Named:
+			named.AddParent(p)
+		case *types.Instance:
+			origin, ok := p.Origin().(*types.Named)
+			if !ok {
+				c.errorf(inh.Pos(), "parent type must be a named type, got %s", pt)
+				continue
+			}
+			named.AddParent(origin, p.TypeArgs())
+			// Record the instance for monomorphization if type args are concrete
+			allConcrete := true
+			for _, ta := range p.TypeArgs() {
+				if types.ContainsTypeParam(ta) {
+					allConcrete = false
+					break
+				}
+			}
+			if allConcrete {
+				c.recordInstance(p)
+			}
+		default:
 			c.errorf(inh.Pos(), "parent type must be a named type, got %s", pt)
-			continue
 		}
-		named.AddParent(pn)
 	}
 
 	// Validate: at most one parent may have fields (concrete parent).
 	// Use AllFields() to catch transitively-inherited fields (e.g., B is A where A has fields).
 	concreteCount := 0
-	for _, pn := range named.Parents() {
-		if len(pn.AllFields()) > 0 {
+	for _, pr := range named.Parents() {
+		if len(pr.Named.AllFields()) > 0 {
 			concreteCount++
 		}
 	}

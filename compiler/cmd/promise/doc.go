@@ -742,7 +742,7 @@ func formatParents(named *types.Named) string {
 	parents := named.Parents()
 	names := make([]string, len(parents))
 	for i, p := range parents {
-		names[i] = p.Obj().Name()
+		names[i] = p.Named.Obj().Name()
 	}
 	return strings.Join(names, ", ")
 }
@@ -802,8 +802,8 @@ func collectMethods(named *types.Named, opts docOpts) []*types.Method {
 
 	// Add inherited drop if not overridden (agents need to know about drop for ownership)
 	if !seen["drop"] {
-		for _, p := range named.Parents() {
-			if dm := p.LookupMethod("drop"); dm != nil {
+		for _, pr := range named.Parents() {
+			if dm := pr.Named.LookupMethod("drop"); dm != nil {
 				result = append(result, dm)
 				break
 			}

@@ -8386,3 +8386,228 @@ func TestMonoMethodSelfAllowed(t *testing.T) {
 		"p := Pair.origin();\n"+
 		"}\n")
 }
+
+// --- Generic Inheritance Tests ---
+
+func TestGenericInheritanceBasic(t *testing.T) {
+	checkOK(t, `
+		type Stream[T] {
+			next() T? `+"`abstract;\n"+`
+		}
+		type IntStream is Stream[int] {
+			int pos;
+			next() int? { return this.pos; }
+		}
+		test() {
+			s := IntStream(pos: 42);
+			int? v = s.next();
+		}
+	`)
+}
+
+func TestGenericInheritanceForwardParams(t *testing.T) {
+	checkOK(t, `
+		type Producer[T] {
+			produce() T `+"`abstract;\n"+`
+		}
+		type ConstProducer[T] is Producer[T] {
+			T value;
+			produce() T { return this.value; }
+		}
+		test() {
+			p := ConstProducer[int](value: 42);
+			int x = p.produce();
+		}
+	`)
+}
+
+func TestGenericInheritanceMethodSubstitution(t *testing.T) {
+	errs := checkErrs(t, `
+		type Stream[T] {
+			next() T? `+"`abstract;\n"+`
+		}
+		type IntStream is Stream[int] {
+			next() int? { return 1; }
+		}
+		test() {
+			s := IntStream();
+			string? v = s.next();
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+func TestGenericInheritancePartialApplication(t *testing.T) {
+	checkOK(t, `
+		type Container[K, V] {
+			get(K key) V? `+"`abstract;\n"+`
+		}
+		type StringMap[V] is Container[string, V] {
+			get(string key) V? { return none; }
+		}
+		test() {
+			s := StringMap[int]();
+			int? v = s.get("hello");
+		}
+	`)
+}
+
+func TestGenericInheritanceNonGenericChild(t *testing.T) {
+	checkOK(t, `
+		type Holder[T] {
+			T value;
+		}
+		type IntHolder is Holder[int] {
+		}
+		test() {
+			h := IntHolder(value: 42);
+			int x = h.value;
+		}
+	`)
+}
+
+func TestGenericInheritanceAssignability(t *testing.T) {
+	checkOK(t, `
+		type Stream[T] {
+			next() T? `+"`abstract;\n"+`
+		}
+		type MyStream[T] is Stream[T] {
+			next() T? { return none; }
+		}
+		acceptStream(Stream[int] s) {
+			int? v = s.next();
+		}
+		test() {
+			ms := MyStream[int]();
+			acceptStream(ms);
+		}
+	`)
+}
+
+func TestGenericInheritanceTransitive(t *testing.T) {
+	// 3-level chain: Leaf is Middle[int] is Base[T]
+	checkOK(t, `
+		type Base[T] {
+			T data;
+			get_data() T { return this.data; }
+		}
+		type Middle[T] is Base[T] {
+			string tag;
+		}
+		type Leaf is Middle[int] {}
+		test() {
+			leaf := Leaf(data: 42, tag: "x");
+			int v = leaf.data;
+			int r = leaf.get_data();
+		}
+	`)
+}
+
+func TestGenericInheritanceTransitiveAssignability(t *testing.T) {
+	// Leaf (Named) assignable to Base[int] (Instance) through generic Middle[int]
+	checkOK(t, `
+		type Base[T] {
+			T data;
+			get_data() T `+"`abstract;\n"+`
+		}
+		type Middle[T] is Base[T] {
+			get_data() T { return this.data; }
+		}
+		type Leaf is Middle[int] {}
+		acceptBase(Base[int] b) {
+			int v = b.get_data();
+		}
+		test() {
+			leaf := Leaf(data: 42);
+			acceptBase(leaf);
+		}
+	`)
+}
+
+func TestGenericInheritanceTransitiveGenericChain(t *testing.T) {
+	// GLeaf[T] is GMid[T] is GBase[T] — all generic
+	checkOK(t, `
+		type GBase[T] {
+			T val;
+			fetch() T { return this.val; }
+		}
+		type GMid[T] is GBase[T] {}
+		type GLeaf[T] is GMid[T] {}
+		test() {
+			g := GLeaf[int](val: 77);
+			int v = g.val;
+			int r = g.fetch();
+		}
+	`)
+}
+
+func TestGenericInheritanceInstanceToInstance(t *testing.T) {
+	// Wrapper[int] assignable to Container[int]
+	checkOK(t, `
+		type Container[T] {
+			T item;
+			get() T { return this.item; }
+		}
+		type Wrapper[T] is Container[T] {
+			string label;
+		}
+		acceptContainer(Container[int] c) {
+			int v = c.get();
+		}
+		test() {
+			w := Wrapper[int](item: 42, label: "w");
+			acceptContainer(w);
+		}
+	`)
+}
+
+func TestGenericInheritanceWrongTypeArg(t *testing.T) {
+	// Wrapper[string] should NOT be assignable to Container[int]
+	errs := checkErrs(t, `
+		type Container[T] {
+			T item;
+		}
+		type Wrapper[T] is Container[T] {}
+		acceptContainer(Container[int] c) {}
+		test() {
+			w := Wrapper[string](item: "x");
+			acceptContainer(w);
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+func TestGenericInheritancePartialAppMethod(t *testing.T) {
+	// Partial application with inherited methods
+	checkOK(t, `
+		type KVPair[K, V] {
+			K key;
+			V val;
+			get_key() K { return this.key; }
+			get_val() V { return this.val; }
+		}
+		type IntKV[V] is KVPair[int, V] {}
+		test() {
+			kv := IntKV[string](key: 1, val: "one");
+			int k = kv.get_key();
+			string v = kv.get_val();
+		}
+	`)
+}
+
+func TestGenericInheritanceConcreteOverride(t *testing.T) {
+	checkOK(t, `
+		type Greeter[T] {
+			T name;
+			greet() string { return "hello"; }
+		}
+		type FancyGreeter[T] is Greeter[T] {
+			greet() string { return "greetings"; }
+		}
+		test() {
+			g := FancyGreeter[int](name: 42);
+			string s = g.greet();
+			int n = g.name;
+		}
+	`)
+}

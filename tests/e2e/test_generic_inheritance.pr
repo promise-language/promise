@@ -1,0 +1,266 @@
+// Tests for generic inheritance: type Foo[T] is Bar[T].
+
+// --- Non-generic child of generic parent ---
+
+type Holder[T] {
+    T value;
+}
+
+type IntHolder is Holder[int] {
+}
+
+test_non_generic_child() `test {
+    h := IntHolder(value: 42);
+    assert(h.value == 42, "non-generic child field access");
+}
+
+// --- Generic child forwarding type params ---
+
+type Container[T] {
+    T item;
+
+    get() T {
+        return this.item;
+    }
+}
+
+type Wrapper[T] is Container[T] {
+    string label;
+}
+
+test_forwarded_params() `test {
+    w := Wrapper[int](item: 99, label: "test");
+    assert(w.item == 99, "forwarded param field");
+    assert(w.get() == 99, "inherited method");
+    assert(w.label == "test", "own field");
+}
+
+// --- Abstract parent with generic type param ---
+
+type Producer[T] {
+    produce() T `abstract;
+}
+
+type ConstProducer[T] is Producer[T] {
+    T value;
+
+    produce() T {
+        return this.value;
+    }
+}
+
+test_abstract_generic_parent() `test {
+    p := ConstProducer[int](value: 7);
+    assert(p.produce() == 7, "abstract generic parent");
+}
+
+test_abstract_generic_string() `test {
+    p := ConstProducer[string](value: "hello");
+    assert(p.produce() == "hello", "abstract generic parent string");
+}
+
+// --- Partial type arg application ---
+
+type Pair[A, B] {
+    A first;
+    B second;
+}
+
+type StringPair[V] is Pair[string, V] {
+}
+
+test_partial_application() `test {
+    sp := StringPair[int](first: "age", second: 30);
+    assert(sp.first == "age", "partial app first");
+    assert(sp.second == 30, "partial app second");
+}
+
+// --- Transitive generic inheritance (3-level chain) ---
+
+type Base[T] {
+    T data;
+
+    get_data() T {
+        return this.data;
+    }
+}
+
+type Middle[T] is Base[T] {
+    string tag;
+}
+
+type Leaf is Middle[int] {
+}
+
+test_transitive_field() `test {
+    leaf := Leaf(data: 100, tag: "leaf");
+    assert(leaf.data == 100, "transitive field access");
+    assert(leaf.tag == "leaf", "middle field access");
+}
+
+test_transitive_method() `test {
+    leaf := Leaf(data: 55, tag: "x");
+    assert(leaf.get_data() == 55, "transitive inherited method");
+}
+
+// --- Generic child of generic parent of generic grandparent ---
+
+type GBase[T] {
+    T val;
+    fetch() T { return this.val; }
+}
+
+type GMid[T] is GBase[T] {}
+
+type GLeaf[T] is GMid[T] {}
+
+test_transitive_generic() `test {
+    g := GLeaf[int](val: 77);
+    assert(g.val == 77, "transitive generic field");
+    assert(g.fetch() == 77, "transitive generic method");
+}
+
+// --- Assignability through generic intermediary ---
+
+accept_base(Base[int] b) int {
+    return b.get_data();
+}
+
+test_transitive_assignability() `test {
+    leaf := Leaf(data: 33, tag: "t");
+    result := accept_base(leaf);
+    assert(result == 33, "transitive assignability");
+}
+
+// --- Multiple instantiations of same generic chain ---
+
+test_multiple_instantiations() `test {
+    gi := GLeaf[int](val: 10);
+    gs := GLeaf[string](val: "hi");
+    assert(gi.fetch() == 10, "multi inst int");
+    assert(gs.fetch() == "hi", "multi inst string");
+}
+
+// --- Instance to Instance assignability ---
+
+accept_container(Container[int] c) int {
+    return c.get();
+}
+
+test_instance_to_instance_assignability() `test {
+    w := Wrapper[int](item: 42, label: "w");
+    result := accept_container(w);
+    assert(result == 42, "instance to instance assignability");
+}
+
+// --- Partial application with inherited method ---
+
+type KVPair[K, V] {
+    K key;
+    V val;
+
+    get_key() K { return this.key; }
+    get_val() V { return this.val; }
+}
+
+type IntKV[V] is KVPair[int, V] {}
+
+test_partial_app_method() `test {
+    kv := IntKV[string](key: 1, val: "one");
+    assert(kv.get_key() == 1, "partial app inherited method key");
+    assert(kv.get_val() == "one", "partial app inherited method val");
+}
+
+// --- Child overriding concrete parent method ---
+
+type Greeter[T] {
+    T name;
+
+    greet() string {
+        return "hello";
+    }
+}
+
+type FancyGreeter[T] is Greeter[T] {
+    greet() string {
+        return "greetings";
+    }
+}
+
+test_concrete_override() `test {
+    g := FancyGreeter[int](name: 42);
+    assert(g.greet() == "greetings", "concrete override");
+    assert(g.name == 42, "override preserves fields");
+}
+
+// --- Generic child with own methods + inherited ---
+
+type Animal[T] {
+    T id;
+    get_id() T { return this.id; }
+}
+
+type Dog[T] is Animal[T] {
+    string breed;
+    bark() string { return "woof"; }
+}
+
+test_own_and_inherited_methods() `test {
+    d := Dog[int](id: 7, breed: "lab");
+    assert(d.get_id() == 7, "inherited method");
+    assert(d.bark() == "woof", "own method");
+    assert(d.breed == "lab", "own field");
+}
+
+// --- Non-generic child with own fields + inherited generic fields ---
+
+type Tagged[T] {
+    T payload;
+}
+
+type NamedItem is Tagged[int] {
+    string name;
+}
+
+test_own_and_inherited_fields() `test {
+    item := NamedItem(payload: 99, name: "item");
+    assert(item.payload == 99, "inherited generic field");
+    assert(item.name == "item", "own field");
+}
+
+// --- Assignability: child instance to parent instance ---
+
+type Transformer[T] {
+    transform(T input) T `abstract;
+}
+
+type Doubler is Transformer[int] {
+    transform(int input) int {
+        return input * 2;
+    }
+}
+
+accept_transformer(Transformer[int] t) int {
+    return t.transform(5);
+}
+
+test_assignability() `test {
+    d := Doubler();
+    result := accept_transformer(d);
+    assert(result == 10, "assignability child to parent");
+}
+
+// --- Assignability: non-generic child to generic parent instance ---
+
+accept_producer(Producer[int] p) int {
+    return p.produce();
+}
+
+type IntProducer is Producer[int] {
+    produce() int { return 42; }
+}
+
+test_non_generic_child_to_generic_parent() `test {
+    ip := IntProducer();
+    assert(accept_producer(ip) == 42, "non-generic child to generic parent");
+}

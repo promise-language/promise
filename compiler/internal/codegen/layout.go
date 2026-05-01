@@ -308,12 +308,16 @@ func computeUserTypeLayout(module *ir.Module, named *types.Named, allLayouts map
 	}
 	fieldIndex := map[string]int{}
 
+	// Build substitution for inherited fields from generic parents
+	parentSubst := buildParentFieldSubst(named)
+
 	for _, f := range named.AllFields() {
 		if f.Placement() != types.PlaceInstance {
 			panic("codegen: non-instance field placement not yet supported for " + name + "." + f.Name())
 		}
-		llvmFT := instanceFieldLLVMType(f.Type(), allLayouts)
-		cType := userFieldCType(f.Type(), allLayouts)
+		fType := types.Substitute(f.Type(), parentSubst)
+		llvmFT := instanceFieldLLVMType(fType, allLayouts)
+		cType := userFieldCType(fType, allLayouts)
 		instanceLLVMFields = append(instanceLLVMFields, llvmFT)
 		idx := len(fieldLayouts) // GEP index
 		fieldLayouts = append(fieldLayouts, FieldLayout{
@@ -370,6 +374,39 @@ func computeUserTypeLayout(module *ir.Module, named *types.Named, allLayouts map
 			},
 			LLVMType: valueStruct,
 		},
+	}
+}
+
+// buildParentFieldSubst builds a substitution map for inherited fields from
+// generic parents. Recursively walks the entire parent chain so that transitive
+// inheritance (e.g., Leaf is Middle[int] is Base[T]) resolves all type params.
+func buildParentFieldSubst(named *types.Named) map[*types.TypeParam]types.Type {
+	subst := make(map[*types.TypeParam]types.Type)
+	mergeParentFieldSubst(named, subst)
+	if len(subst) == 0 {
+		return nil
+	}
+	return subst
+}
+
+// mergeParentFieldSubst recursively adds parent type param mappings to subst.
+func mergeParentFieldSubst(named *types.Named, subst map[*types.TypeParam]types.Type) {
+	for _, pr := range named.Parents() {
+		if len(pr.TypeArgs) == 0 {
+			// Non-generic parent — still recurse for its parents.
+			mergeParentFieldSubst(pr.Named, subst)
+			continue
+		}
+		resolvedArgs := make([]types.Type, len(pr.TypeArgs))
+		for i, ta := range pr.TypeArgs {
+			resolvedArgs[i] = types.Substitute(ta, subst)
+		}
+		parentMap := types.BuildSubstMap(pr.Named.TypeParams(), resolvedArgs)
+		for k, v := range parentMap {
+			subst[k] = v
+		}
+		// Recurse into parent's parents for transitive chains.
+		mergeParentFieldSubst(pr.Named, subst)
 	}
 }
 

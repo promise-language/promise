@@ -920,7 +920,7 @@ func (c *Compiler) genSuperCall(e *ast.CallExpr) value.Value {
 	if named == nil || len(named.Parents()) == 0 {
 		return nil // sema already validated
 	}
-	parent := named.Parents()[0]
+	parent := named.Parents()[0].Named
 
 	// Load the this pointer
 	thisAlloca := c.locals["this"]
@@ -1927,7 +1927,7 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 	// Virtual dispatch: if the static type needs vtable and the method is not native,
 	// emit an indirect call through the vtable so the correct override is called.
 	if c.needsVtable(named) && !method.IsNative() {
-		return c.genVirtualMethodCall(e, member, named, method)
+		return c.genVirtualMethodCall(e, member, named, method, targetType)
 	}
 
 	// Direct dispatch: resolve method to a compile-time-known function.
@@ -1937,7 +1937,10 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 	var mangledName string
 	ownerName := c.resolveMethodOwner(named, member.Field)
 	if ownerName != named.Obj().Name() {
-		mangledName = mangleMethodName(ownerName, member.Field, false)
+		// Method inherited from parent. Check if the parent is generic —
+		// if so, resolve to the monomorphized parent name.
+		monoOwner := c.resolveMonoParentName(named, targetType, ownerName)
+		mangledName = mangleMethodName(monoOwner, member.Field, false)
 	} else {
 		mangledName = mangleMethodName(c.resolveTypeName(targetType), member.Field, false)
 	}
@@ -1988,13 +1991,15 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 func (c *Compiler) genGetterCall(e *ast.MemberExpr, targetType types.Type, named *types.Named, getter *types.Method) value.Value {
 	// Virtual dispatch for getter when static type needs vtable
 	if c.needsVtable(named) && !getter.IsNative() {
-		return c.genVirtualGetterCall(e, named, getter)
+		return c.genVirtualGetterCall(e, named, getter, targetType)
 	}
 
 	var mangledName string
 	ownerName := c.resolveMethodOwner(named, e.Field)
 	if ownerName != named.Obj().Name() {
-		mangledName = mangleMethodName(ownerName, e.Field, false)
+		// Getter inherited from parent. Resolve to mono name if parent is generic.
+		monoOwner := c.resolveMonoParentName(named, targetType, ownerName)
+		mangledName = mangleMethodName(monoOwner, e.Field, false)
 	} else {
 		mangledName = mangleMethodName(c.resolveTypeName(targetType), e.Field, false)
 	}
@@ -2022,7 +2027,7 @@ func (c *Compiler) genGetterCall(e *ast.MemberExpr, targetType types.Type, named
 }
 
 // genVirtualGetterCall emits an indirect getter call through the vtable.
-func (c *Compiler) genVirtualGetterCall(e *ast.MemberExpr, named *types.Named, getter *types.Method) value.Value {
+func (c *Compiler) genVirtualGetterCall(e *ast.MemberExpr, named *types.Named, getter *types.Method, targetType types.Type) value.Value {
 	receiverVal := c.genExpr(e.Target)
 
 	var vtableRaw, instance value.Value
@@ -2048,9 +2053,24 @@ func (c *Compiler) genVirtualGetterCall(e *ast.MemberExpr, named *types.Named, g
 		constant.NewInt(irtypes.I32, int64(slotIndex)))
 	fnRaw := c.block.NewLoad(irtypes.I8Ptr, fnSlotPtr)
 
+	// Substitute type params for generic instances (e.g. Transformer[int])
+	var vtableSubst map[*types.TypeParam]types.Type
+	if inst, ok := targetType.(*types.Instance); ok {
+		origin, _ := inst.Origin().(*types.Named)
+		if origin != nil && len(origin.TypeParams()) > 0 {
+			vtableSubst = types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+		}
+	}
+	resolveVtableType := func(t types.Type) irtypes.Type {
+		if vtableSubst != nil {
+			t = types.Substitute(t, vtableSubst)
+		}
+		return c.resolveType(t)
+	}
+
 	retType := irtypes.Type(irtypes.Void)
 	if getter.Sig().Result() != nil {
-		retType = c.resolveType(getter.Sig().Result())
+		retType = resolveVtableType(getter.Sig().Result())
 	}
 	if getter.Sig().CanError() {
 		retType = computeResultType(retType)
@@ -2066,7 +2086,7 @@ func (c *Compiler) genVirtualGetterCall(e *ast.MemberExpr, named *types.Named, g
 // Reads vtable pointer from the value struct (field 0), indexes into it
 // to get the function pointer, casts it, and calls.
 func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
-	named *types.Named, method *types.Method) value.Value {
+	named *types.Named, method *types.Method, targetType types.Type) value.Value {
 
 	// 1. Evaluate receiver
 	receiverVal := c.genExpr(member.Target)
@@ -2098,10 +2118,26 @@ func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 		constant.NewInt(irtypes.I32, int64(slotIndex)))
 	fnRaw := c.block.NewLoad(irtypes.I8Ptr, fnSlotPtr)
 
-	// 4. Build the correct function type and bitcast
+	// 4. Build the correct function type and bitcast.
+	// If the static type is a generic instance (e.g. Transformer[int]),
+	// substitute type params so T→int in method signatures.
+	var vtableSubst map[*types.TypeParam]types.Type
+	if inst, ok := targetType.(*types.Instance); ok {
+		origin, _ := inst.Origin().(*types.Named)
+		if origin != nil && len(origin.TypeParams()) > 0 {
+			vtableSubst = types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+		}
+	}
+	resolveVtableType := func(t types.Type) irtypes.Type {
+		if vtableSubst != nil {
+			t = types.Substitute(t, vtableSubst)
+		}
+		return c.resolveType(t)
+	}
+
 	retType := irtypes.Type(irtypes.Void)
 	if method.Sig().Result() != nil {
-		retType = c.resolveType(method.Sig().Result())
+		retType = resolveVtableType(method.Sig().Result())
 	}
 	if method.Sig().CanError() {
 		retType = computeResultType(retType)
@@ -2111,7 +2147,7 @@ func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 		paramTypes = append(paramTypes, irtypes.I8Ptr)
 	}
 	for _, p := range method.Sig().Params() {
-		paramTypes = append(paramTypes, c.resolveType(p.Type()))
+		paramTypes = append(paramTypes, resolveVtableType(p.Type()))
 	}
 	funcType := irtypes.NewFunc(retType, paramTypes...)
 	fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))

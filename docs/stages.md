@@ -754,6 +754,7 @@ Known gaps and improvements deferred from completed stages.
 |------|--------|----------|
 | Blocking select uses polling (yield-and-retry) instead of waiter-list parking. Correct but spins when no case is ready. Proper fix requires multi-mutex unlock in scheduler or atomic wake-once protocol for select waiters. | 5c | Medium |
 | Fire-and-forget goroutine G struct leak: all `go { }` blocks set `result_ptr` to sentinel `0x1`, preventing goroutine_exit from freeing the G. Only `task[T]` should use the sentinel. | 5c | Low |
+| Stack overflow detection: deep recursion segfaults with no message. Add guard page (`mprotect` bottom page of M stack) + `SIGSEGV` handler on `sigaltstack` to print "stack overflow" and terminate cleanly. Consider `probe-stack` for large frames. | 5c | Medium |
 | Fixed-size arrays as stack-allocated `[N x T]` | 8g | Medium |
 | Destructure is-patterns (`x is Dog(name)`) | 8k | Medium |
 | Generic type RTTI | 8k | Medium |

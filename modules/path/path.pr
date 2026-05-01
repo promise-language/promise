@@ -1,0 +1,74 @@
+// path module — file path manipulation (POSIX-style paths).
+// All functions are pure string operations; no filesystem access.
+
+join(string base, string child) string `public `doc("Joins two path segments with a `/` separator. Handles trailing slashes on base.") {
+    if base.len == 0 { return child; }
+    if child.len == 0 { return base; }
+    if base[base.len - 1] == '/' {
+        return base + child;
+    }
+    return base + "/" + child;
+}
+
+basename(string p) string `public `doc("Returns the last component of a path. Strips trailing slashes.") {
+    if p.len == 0 { return ""; }
+    // Strip trailing slash
+    int end = p.len;
+    if end > 1 && p[end - 1] == '/' {
+        end = end - 1;
+    }
+    // Find last slash
+    int i = end - 1;
+    while i >= 0 {
+        if p[i] == '/' { return p[i + 1:end]; }
+        i = i - 1;
+    }
+    return p[0:end];
+}
+
+dirname(string p) string `public `doc("Returns the directory part of a path (everything before the last component). Returns `.` for bare filenames.") {
+    if p.len == 0 { return "."; }
+    // Strip trailing slash
+    int end = p.len;
+    if end > 1 && p[end - 1] == '/' {
+        end = end - 1;
+    }
+    // Find last slash
+    int i = end - 1;
+    while i >= 0 {
+        if p[i] == '/' {
+            if i == 0 { return "/"; }
+            return p[0:i];
+        }
+        i = i - 1;
+    }
+    return ".";
+}
+
+extension(string p) string `public `doc("Returns the file extension including the leading dot. Returns empty string if no extension.") {
+    string base = basename(p);
+    int i = base.len - 1;
+    while i > 0 {
+        if base[i] == '.' { return base[i:base.len]; }
+        i = i - 1;
+    }
+    return "";
+}
+
+stem(string p) string `public `doc("Returns the filename without its extension. For `archive.tar.gz` returns `archive.tar`.") {
+    string base = basename(p);
+    int i = base.len - 1;
+    while i > 0 {
+        if base[i] == '.' { return base[0:i]; }
+        i = i - 1;
+    }
+    return base;
+}
+
+is_absolute(string p) bool `public `doc("Returns true if the path starts with `/`.") {
+    return p.len > 0 && p[0] == '/';
+}
+
+is_relative(string p) bool `public `doc("Returns true if the path does not start with `/`.") {
+    return !is_absolute(p);
+}

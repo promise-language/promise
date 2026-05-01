@@ -219,12 +219,13 @@ func TestDocFuncWithParamDoc(t *testing.T) {
 // === Filtering ===
 
 func TestDocPublicFiltering(t *testing.T) {
+	// Members of a public type are public by default; _ prefix = private.
 	out := docFromSource(t, `
 		type Public `+"`public"+` {
-			int visible `+"`public"+`;
-			int hidden;
-			show() `+"`public"+` {}
-			hide() {}
+			int visible;
+			int _hidden;
+			show() {}
+			_hide() {}
 		}
 		type Private { int x; }
 		internal_func() {}
@@ -234,10 +235,10 @@ func TestDocPublicFiltering(t *testing.T) {
 	assertContainsDoc(t, out, "### Public")
 	assertNotContainsDoc(t, out, "### Private")
 	assertContainsDoc(t, out, "int visible")
-	assertNotContainsDoc(t, out, "int hidden")
+	assertNotContainsDoc(t, out, "int _hidden")
 	// Instance methods include `this` receiver
 	assertContainsDoc(t, out, "show(this)")
-	assertNotContainsDoc(t, out, "hide(")
+	assertNotContainsDoc(t, out, "_hide(")
 	assertContainsDoc(t, out, "### public_func")
 	assertNotContainsDoc(t, out, "### internal_func")
 }
@@ -620,4 +621,210 @@ func TestDocMultipleParamDocs(t *testing.T) {
 	assertContainsDoc(t, out, "Parameters:")
 	assertContainsDoc(t, out, "`host` — The hostname.")
 	assertContainsDoc(t, out, "`port` — The port number.")
+}
+
+// === Generic types and functions (formatTypeParams coverage) ===
+
+func TestDocGenericType(t *testing.T) {
+	out := docFromSource(t, `
+		type Box[T] `+"`public"+` {
+			T value `+"`public"+`;
+		}
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "### Box")
+	assertContainsDoc(t, out, "type Box[T]")
+	assertContainsDoc(t, out, "T value")
+}
+
+func TestDocGenericTypeWithConstraint(t *testing.T) {
+	out := docFromSource(t, `
+		type Printable `+"`public `structural"+` {
+			to_string() string `+"`abstract"+`;
+		}
+		type Wrapper[T: Printable] `+"`public"+` {
+			T item `+"`public"+`;
+		}
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "type Wrapper[T: Printable]")
+}
+
+func TestDocGenericFunc(t *testing.T) {
+	out := docFromSource(t, `
+		identity[T](T x) T `+"`public `doc(\"Returns x unchanged.\")"+` {
+			return x;
+		}
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "### identity")
+	assertContainsDoc(t, out, "identity[T](T x) T")
+	assertContainsDoc(t, out, "Returns x unchanged.")
+}
+
+func TestDocGenericEnum(t *testing.T) {
+	out := docFromSource(t, `
+		enum Maybe[T] `+"`public"+` {
+			Some(T value),
+			None,
+		}
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "### Maybe[T]")
+	assertContainsDoc(t, out, "Some(T value)")
+}
+
+func TestDocGenericEnumCompact(t *testing.T) {
+	out := docFromSource(t, `
+		enum Pair[A, B] `+"`public"+` {
+			Both(A first, B second),
+			Empty,
+		}
+	`, docOpts{publicOnly: true, sigOnly: true})
+
+	assertContainsDoc(t, out, "enum Pair[A, B]")
+}
+
+// === Factory method (emitMethodSection factory branch) ===
+
+func TestDocFactoryMethod(t *testing.T) {
+	out := docFromSource(t, `
+		type Builder `+"`public"+` {
+			int value `+"`public"+`;
+			create() Builder `+"`public `factory `doc(\"Creates a new Builder.\")"+` {
+				return Builder(value: 0);
+			}
+		}
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "#### Builder.create")
+	assertContainsDoc(t, out, "`factory")
+	assertContainsDoc(t, out, "Creates a new Builder.")
+}
+
+// === Enum with private method (collectEnumMethods filtering) ===
+
+func TestDocEnumMethodFiltering(t *testing.T) {
+	out := docFromSource(t, `
+		enum Status `+"`public"+` {
+			Active, Inactive,
+			label() string `+"`doc(\"Human-readable label.\")"+` {
+				return "status";
+			}
+			_internal() int {
+				return 0;
+			}
+		}
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "label(")
+	assertNotContainsDoc(t, out, "_internal")
+}
+
+// === exprToString: none literal and unary minus ===
+
+func TestDocFieldDefaultNone(t *testing.T) {
+	out := docFromSource(t, `
+		type Node `+"`public"+` {
+			int? value `+"`public"+` = none;
+		}
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "int? value = none")
+}
+
+func TestDocFieldDefaultNegative(t *testing.T) {
+	out := docFromSource(t, `
+		type Offset `+"`public"+` {
+			int x `+"`public"+` = -1;
+		}
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "int x = -1")
+}
+
+// === Func with ref param (formatFuncSig ref modifier branch) ===
+
+func TestDocFuncRefParam(t *testing.T) {
+	out := docFromSource(t, `
+		inspect(int &val) int `+"`public"+` {
+			return val;
+		}
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "inspect(int& val) int")
+}
+
+// === Subscript operators shown in summary, not operators line ===
+
+func TestDocSubscriptOps(t *testing.T) {
+	out := docFromSource(t, `
+		type Grid `+"`public"+` {
+			int _size;
+			[](int idx) int `+"`public"+` {
+				return idx;
+			}
+			+(Grid &a, Grid &b) Grid `+"`public"+` {
+				return a;
+			}
+		}
+	`, docOpts{publicOnly: true})
+
+	// [] should be in the summary block (inside type { ... })
+	assertContainsDoc(t, out, "[](")
+	// + should be in the operators line
+	assertContainsDoc(t, out, "Operators:")
+	assertContainsDoc(t, out, "+")
+}
+
+// === Failable function ===
+
+func TestDocFuncFailable(t *testing.T) {
+	out := docFromSource(t, `
+		parse(string s) int! `+"`public `doc(\"Parses a string to int.\")"+` {
+			return 0;
+		}
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "parse(string s) int!")
+	assertContainsDoc(t, out, "Parses a string to int.")
+}
+
+// === Void return (typeString nil branch) ===
+
+func TestDocVoidFunc(t *testing.T) {
+	out := docFromSource(t, `
+		noop() `+"`public"+` {}
+	`, docOpts{publicOnly: true})
+
+	// Void functions should not have a return type shown
+	assertContainsDoc(t, out, "noop()")
+	// The signature should end at ")" (no trailing type)
+}
+
+// === Function with default param (formatFuncSig default branch) ===
+
+func TestDocFuncParamDefault(t *testing.T) {
+	out := docFromSource(t, `
+		greet(string name = "world") `+"`public"+` {}
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, `greet(string name = "world")`)
+}
+
+// === Setter method ===
+
+func TestDocSetterMethod(t *testing.T) {
+	out := docFromSource(t, `
+		type Counter `+"`public"+` {
+			int _count;
+			get count int `+"`public"+` => this._count;
+			set count(int v) `+"`public"+` {
+				this._count = v;
+			}
+		}
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "get count int")
+	assertContainsDoc(t, out, "set count(")
 }

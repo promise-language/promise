@@ -2,9 +2,7 @@
 // These complement string's built-in methods with operations that work
 // on collections of strings or produce strings from non-string inputs.
 
-/// Joins an array of strings with a separator between each element.
-///   strings.join(["a", "b", "c"], ", ") == "a, b, c"
-join(string[] parts, string sep) string `public {
+join(string[] parts, string sep) string `public `doc("Joins an array of strings with a separator between each element.") {
     if parts.len == 0 { return ""; }
     string result = parts[0];
     int i = 1;
@@ -15,15 +13,11 @@ join(string[] parts, string sep) string `public {
     return result;
 }
 
-/// Returns a string of n spaces.
-///   strings.spaces(4) == "    "
-spaces(int n) string `public {
+spaces(int n) string `public `doc("Returns a string of `n` spaces.") {
     return " ".repeat(n);
 }
 
-/// Reverses a string.
-///   strings.reverse("hello") == "olleh"
-reverse(string s) string `public {
+reverse(string s) string `public `doc("Reverses a string byte-by-byte.") {
     if s.len <= 1 { return s; }
     string result = "";
     int i = s.len - 1;
@@ -34,10 +28,7 @@ reverse(string s) string `public {
     return result;
 }
 
-/// Checks if a string contains only whitespace characters (space, tab, newline, carriage return).
-///   strings.is_blank("  \n") == true
-///   strings.is_blank("hi")   == false
-is_blank(string s) bool `public {
+is_blank(string s) bool `public `doc("Returns true if the string is empty or contains only whitespace (space, tab, newline, carriage return).") {
     if s.len == 0 { return true; }
     int i = 0;
     while i < s.len {
@@ -50,9 +41,7 @@ is_blank(string s) bool `public {
     return true;
 }
 
-/// Repeats a string n times with a separator between each repetition.
-///   strings.repeat_join("ab", 3, "-") == "ab-ab-ab"
-repeat_join(string s, int n, string sep) string `public {
+repeat_join(string s, int n, string sep) string `public `doc("Repeats a string `n` times with a separator between each repetition.") {
     if n <= 0 { return ""; }
     string result = s;
     int i = 1;

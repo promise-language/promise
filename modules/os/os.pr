@@ -1,0 +1,4 @@
+// os module — operating system interface.
+// Planned: args, env, exit, getenv, setenv, getcwd, hostname.
+// Requires native runtime support (syscalls).
+// Currently a placeholder — functions will be added as native OS support lands.

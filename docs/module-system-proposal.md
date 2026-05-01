@@ -456,34 +456,34 @@ myapp/
 
 ### 6.5 Visibility
 
-Declarations are **module-private by default**. Annotate with `` `public `` to export:
+Top-level declarations are **module-private by default**. Annotate with `` `public `` to export. Members of a public type are **public by default** — use `_` prefix to mark internal members:
 
 ```promise
 type User `public {
-    string name `public;
-    int internal_id;        // private — not visible outside this module
+    string name;            // public (member of public type)
+    int _internal_id;       // private — underscore prefix
 
-    greet() string `public {
+    greet() string {        // public (member of public type)
         return "Hi, I'm {name}"
     }
 
-    validate() bool {       // private method
-        return internal_id > 0
+    _validate() bool {      // private — underscore prefix
+        return _internal_id > 0
     }
 }
 
 create_user(string name) User `public {
-    return User(name: name, internal_id: next_id())
+    return User(name: name, _internal_id: _next_id())
 }
 
-next_id() int {             // private function — not visible outside this module
+_next_id() int {            // private function — not exported
     // ...
 }
 ```
 
-**Why private by default (changed from original design):** Explicit exports make a module's API surface immediately obvious. An AI agent reading a module only needs to look at `` `public `` declarations to understand the API. This also means adding a new internal helper never accidentally becomes part of the public API.
-
-This fulfills the original design's plan: "In a future revision, declarations will be **private by default**, and `` `public `` will be required to export them." The module system is that future revision.
+**Two-level visibility model:**
+- **Module level**: top-level declarations (types, enums, functions) need `` `public `` to be exported. This makes a module's API surface immediately obvious.
+- **Member level**: members of a public type are public by default. The `_` prefix convention marks members as private. This avoids the verbosity of annotating every method/field while keeping the convention lightweight and visible.
 
 **Test files can access private declarations.** Test files (matching `test_*.pr` or `*_test.pr` conventions) within a module are part of that module's compilation unit. They can access all declarations — public and private — because they're inside the module boundary. Only code in OTHER modules is restricted to `` `public `` declarations. This is the same approach Go uses (`_test.go` files are in the same package).
 
@@ -1226,9 +1226,9 @@ promise init
 use io
 
 type Row `public {
-    string[] fields `public;
+    string[] fields;
 
-    get(int index) string `public {
+    get(int index) string {
         return fields[index]
     }
 }

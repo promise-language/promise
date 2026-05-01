@@ -1,0 +1,4 @@
+// time module — time and duration operations.
+// Planned: now, sleep, Duration, Instant, format, parse.
+// Requires native runtime support (clock syscalls).
+// Currently a placeholder — functions will be added as native time support lands.

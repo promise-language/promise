@@ -1,0 +1,58 @@
+// math module — pure math utilities that complement the built-in math functions.
+// Built-in std provides: min, max, abs, clamp, sqrt, sin, cos, tan, pow, exp,
+// log, log2, log10, floor, ceil, round, trunc, fabs, is_nan, is_inf, is_finite,
+// PI, E, TAU, MAX_INT, MIN_INT.
+// This module adds higher-level helpers.
+
+lerp(f64 a, f64 b, f64 t) f64 `public `doc("Linear interpolation between `a` and `b` by factor `t` (0.0 to 1.0). Returns `a + (b - a) * t`.") {
+    return a + (b - a) * t;
+}
+
+map_range(f64 value, f64 in_lo, f64 in_hi, f64 out_lo, f64 out_hi) f64 `public `doc("Maps a value from range [in_lo, in_hi] to [out_lo, out_hi]. Requires in_lo != in_hi.") {
+    return out_lo + (value - in_lo) * (out_hi - out_lo) / (in_hi - in_lo);
+}
+
+deg_to_rad(f64 deg) f64 `public `doc("Converts degrees to radians.") {
+    return deg * PI() / 180.0;
+}
+
+rad_to_deg(f64 rad) f64 `public `doc("Converts radians to degrees.") {
+    return rad * 180.0 / PI();
+}
+
+sign(int x) int `public `doc("Returns the sign of an integer: -1, 0, or 1.") {
+    if x < 0 { return -1; }
+    if x > 0 { return 1; }
+    return 0;
+}
+
+sign_f64(f64 x) f64 `public `doc("Returns the sign of a float: -1.0, 0.0, or 1.0.") {
+    if x < 0.0 { return -1.0; }
+    if x > 0.0 { return 1.0; }
+    return 0.0;
+}
+
+is_even(int n) bool `public `doc("Returns true if n is even.") {
+    return n % 2 == 0;
+}
+
+is_odd(int n) bool `public `doc("Returns true if n is odd.") {
+    return n % 2 != 0;
+}
+
+gcd(int a, int b) int `public `doc("Greatest common divisor (Euclidean algorithm).") {
+    int x = abs(a);
+    int y = abs(b);
+    while y != 0 {
+        int t = y;
+        y = x % y;
+        x = t;
+    }
+    return x;
+}
+
+lcm(int a, int b) int `public `doc("Least common multiple. Returns 0 if either argument is 0.") {
+    if a == 0 || b == 0 { return 0; }
+    int d = gcd(a, b);
+    return abs(a) / d * abs(b);
+}

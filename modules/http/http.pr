@@ -1,0 +1,4 @@
+// http module — HTTP client and server.
+// Planned: get, post, Request, Response, Server, Handler.
+// Requires native socket support and the io module.
+// Currently a placeholder — functions will be added as networking lands.

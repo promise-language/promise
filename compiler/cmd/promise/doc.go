@@ -5,9 +5,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"djabi.dev/go/promise_lang/internal/ast"
+	"djabi.dev/go/promise_lang/internal/module"
 	"djabi.dev/go/promise_lang/internal/sema"
 	"djabi.dev/go/promise_lang/internal/types"
 )
@@ -47,12 +49,9 @@ func runDoc(args []string) {
 	}
 
 	if len(remaining) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: promise doc [options] <file.pr>")
+		fmt.Fprintln(os.Stderr, "usage: promise doc [options] <file.pr | module-name>")
 		os.Exit(1)
 	}
-
-	filename := remaining[0]
-	file, info := docFrontend(filename)
 
 	var w io.Writer = os.Stdout
 	if outputFile != "" {
@@ -65,7 +64,18 @@ func runDoc(args []string) {
 		w = f
 	}
 
-	emitDoc(w, file, info, opts, filename)
+	target := remaining[0]
+
+	// If target looks like a .pr file, use the existing single-file path.
+	// Otherwise, treat it as a module name (catalog or local directory).
+	if strings.HasSuffix(target, ".pr") {
+		file, info := docFrontend(target)
+		emitDoc(w, file, info, opts, target)
+		return
+	}
+
+	// Module documentation: look up in catalog or as a local directory
+	runDocModule(w, target, opts)
 }
 
 // docFrontend runs parse + merge std + DeclareAndDefine (no Check/Verify/Ownership).
@@ -88,14 +98,86 @@ func docFrontend(filename string) (*ast.File, *sema.Info) {
 	return file, info
 }
 
-// emitDoc generates markdown documentation for a single file.
-func emitDoc(w io.Writer, file *ast.File, info *sema.Info, opts docOpts, filename string) {
+// runDocModule generates documentation for a catalog module or local module directory.
+func runDocModule(w io.Writer, name string, opts docOpts) {
+	// Try catalog first
+	var modDir string
+
+	if len(embeddedCatalog) > 0 {
+		cat, err := module.ParseCatalog(embeddedCatalog)
+		if err == nil {
+			if entry := cat.Lookup(name); entry != nil {
+				if entry.IsEmbedded() {
+					dir, err := extractEmbeddedModule(name)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "error: cannot extract module '%s': %v\n", name, err)
+						os.Exit(1)
+					}
+					modDir = dir
+				} else {
+					dir, err := module.ResolveRemoteModule(entry.URL, entry.Commit)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "error: cannot fetch module '%s': %v\n", name, err)
+						os.Exit(1)
+					}
+					modDir = dir
+				}
+			}
+		}
+	}
+
+	// If not found in catalog, try as a local directory
+	if modDir == "" {
+		if info, err := os.Stat(name); err == nil && info.IsDir() {
+			modDir = name
+		} else {
+			fmt.Fprintf(os.Stderr, "error: '%s' is not a known catalog module or directory\n", name)
+			os.Exit(1)
+		}
+	}
+
+	// Find all .pr source files (excluding test files)
+	entries, err := os.ReadDir(modDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot read module directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	var sourceFiles []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if strings.HasSuffix(e.Name(), ".pr") && !strings.HasSuffix(e.Name(), "_test.pr") {
+			sourceFiles = append(sourceFiles, filepath.Join(modDir, e.Name()))
+		}
+	}
+
+	if len(sourceFiles) == 0 {
+		fmt.Fprintf(w, "# %s\n\nNo public declarations.\n", name)
+		return
+	}
+
+	sort.Strings(sourceFiles)
+
+	// Module heading
+	fmt.Fprintf(w, "# %s\n", name)
+
+	// Generate docs for each source file
+	for _, sf := range sourceFiles {
+		file, info := docFrontend(sf)
+		emitModuleFileDoc(w, file, info, opts)
+	}
+}
+
+// emitModuleFileDoc generates documentation for a single file within a module.
+// Unlike emitDoc, it omits the file heading and merges into the module-level output.
+func emitModuleFileDoc(w io.Writer, file *ast.File, info *sema.Info, opts docOpts) {
 	fileScope := info.Scopes[file]
 	if fileScope == nil {
 		return
 	}
 
-	// Collect non-std declarations grouped by category, in source order
 	var typeDecls []*ast.TypeDecl
 	var enumDecls []*ast.EnumDecl
 	var funcDecls []*ast.FuncDecl
@@ -132,7 +214,6 @@ func emitDoc(w io.Writer, file *ast.File, info *sema.Info, opts docOpts, filenam
 			if fn == nil {
 				continue
 			}
-			// Skip test functions and main
 			if fn.IsTest() || d.Name == "main" {
 				continue
 			}
@@ -142,10 +223,6 @@ func emitDoc(w io.Writer, file *ast.File, info *sema.Info, opts docOpts, filenam
 			funcDecls = append(funcDecls, d)
 		}
 	}
-
-	// File heading
-	base := filepath.Base(filename)
-	fmt.Fprintf(w, "# %s\n", base)
 
 	if len(typeDecls) > 0 {
 		if !opts.sigOnly {
@@ -191,6 +268,15 @@ func emitDoc(w io.Writer, file *ast.File, info *sema.Info, opts docOpts, filenam
 			emitFunc(w, d, fn, info, opts)
 		}
 	}
+}
+
+// emitDoc generates markdown documentation for a single file.
+func emitDoc(w io.Writer, file *ast.File, info *sema.Info, opts docOpts, filename string) {
+	// File heading
+	base := filepath.Base(filename)
+	fmt.Fprintf(w, "# %s\n", base)
+
+	emitModuleFileDoc(w, file, info, opts)
 }
 
 // --- Type documentation ---
@@ -273,7 +359,7 @@ func emitTypeSummary(w io.Writer, d *ast.TypeDecl, named *types.Named, info *sem
 	// Fields
 	hasFields := false
 	for _, f := range named.Fields() {
-		if opts.publicOnly && !f.IsExported() {
+		if opts.publicOnly && !isMemberPublic(f.Name(), f.IsExported()) {
 			continue
 		}
 		fieldLine := "        " + typeString(f.Type()) + " " + f.Name()
@@ -306,7 +392,7 @@ func emitTypeSummary(w io.Writer, d *ast.TypeDecl, named *types.Named, info *sem
 func emitOperators(w io.Writer, named *types.Named, opts docOpts) {
 	var ops []string
 	for _, m := range named.Methods() {
-		if opts.publicOnly && !m.IsExported() {
+		if opts.publicOnly && !isMemberPublic(m.Name(), m.IsExported()) {
 			continue
 		}
 		name := m.Name()
@@ -666,6 +752,19 @@ func hasParamDocs(sig *types.Signature) bool {
 
 // --- Collection helpers ---
 
+// isMemberPublic returns true if a member (method or field) should be shown
+// in public-only mode. Members of a public type are public by default —
+// only names starting with '_' are considered private. Explicit `public
+// annotation also makes a member visible.
+func isMemberPublic(name string, exported bool) bool {
+	if exported {
+		return true
+	}
+	// Members of a public type are public unless underscore-prefixed.
+	// Operators are always public (they can't start with _).
+	return !strings.HasPrefix(name, "_")
+}
+
 func collectMethods(named *types.Named, opts docOpts) []*types.Method {
 	// For structural interfaces, show all methods (they define the interface contract)
 	if named.IsStructural() {
@@ -676,7 +775,7 @@ func collectMethods(named *types.Named, opts docOpts) []*types.Method {
 	seen := make(map[string]bool)
 	var result []*types.Method
 	for _, m := range named.Methods() {
-		if opts.publicOnly && !m.IsExported() {
+		if opts.publicOnly && !isMemberPublic(m.Name(), m.IsExported()) {
 			continue
 		}
 		seen[m.Name()] = true
@@ -699,7 +798,7 @@ func collectMethods(named *types.Named, opts docOpts) []*types.Method {
 func collectEnumMethods(enum *types.Enum, opts docOpts) []*types.Method {
 	var result []*types.Method
 	for _, m := range enum.Methods() {
-		if opts.publicOnly && !m.IsExported() {
+		if opts.publicOnly && !isMemberPublic(m.Name(), m.IsExported()) {
 			continue
 		}
 		result = append(result, m)

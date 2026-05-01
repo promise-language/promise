@@ -51,11 +51,12 @@ Commands:
   run       Compile and run a Promise source file
   test      Discover and run test functions
   check     Run semantic analysis (type checking)
-  doc       Generate documentation from doc() annotations
+  doc       Generate documentation (file.pr or module name)
   ast       Print the AST
   exec      Execute inline Promise code
   init      Initialize a new Promise project (creates promise.toml)
   pin       Pin a remote module to a specific commit
+  catalog   Catalog operations (list)
   clean     Remove build cache (--global also clears module cache)
   install   Install Promise to PROMISE_HOME (default: ~/.promise/)
 
@@ -143,6 +144,8 @@ func main() {
 		runPin(os.Args[2:])
 	case "install":
 		runInstall()
+	case "catalog":
+		runCatalog(os.Args[2:])
 	default:
 		// Try treating as a filename for backwards compatibility
 		if strings.HasSuffix(cmd, ".pr") {
@@ -3241,6 +3244,60 @@ func printFileErrors(filename string, errs []error) {
 }
 
 // --- Install ---
+
+// runCatalog implements the `promise catalog` subcommand.
+func runCatalog(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: promise catalog <subcommand>")
+		fmt.Fprintln(os.Stderr, "  list    List all available catalog modules")
+		os.Exit(1)
+	}
+
+	switch args[0] {
+	case "list":
+		runCatalogList()
+	default:
+		fmt.Fprintf(os.Stderr, "unknown catalog subcommand: %s\n", args[0])
+		os.Exit(1)
+	}
+}
+
+// runCatalogList prints all available catalog modules.
+func runCatalogList() {
+	if len(embeddedCatalog) == 0 {
+		fmt.Fprintln(os.Stderr, "error: no catalog available")
+		os.Exit(1)
+	}
+
+	cat, err := module.ParseCatalog(embeddedCatalog)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: invalid catalog: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Promise catalog (epoch %s)\n\n", cat.Epoch)
+
+	// Sort module names for stable output
+	names := make([]string, 0, len(cat.Modules))
+	for name := range cat.Modules {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		entry := cat.Modules[name]
+		source := "embedded"
+		if !entry.IsEmbedded() {
+			source = entry.URL
+		}
+		fmt.Printf("  %-12s %s\n", name, source)
+		if entry.Description != "" {
+			fmt.Printf("  %-12s %s\n", "", entry.Description)
+		}
+	}
+
+	fmt.Printf("\n%d modules\n", len(names))
+}
 
 // runInstall installs the Promise compiler to PROMISE_HOME (default: ~/.promise/).
 // runInit creates a promise.toml in the current directory.

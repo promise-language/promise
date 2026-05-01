@@ -1,0 +1,4 @@
+// io module — file and stream I/O operations.
+// Planned: open, read, write, close, read_all, read_lines, write_all.
+// Requires native runtime support (file descriptors, syscalls).
+// Currently a placeholder — functions will be added as native I/O lands.

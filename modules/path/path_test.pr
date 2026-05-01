@@ -1,0 +1,48 @@
+// Test the embedded catalog path module.
+use path;
+
+join_test() `test {
+    assert(path.join("/home", "user") == "/home/user", "join basic");
+    assert(path.join("/home/", "user") == "/home/user", "join trailing slash");
+    assert(path.join("", "file") == "file", "join empty base");
+    assert(path.join("/home", "") == "/home", "join empty child");
+}
+
+basename_test() `test {
+    assert(path.basename("/home/user/file.txt") == "file.txt", "basename file");
+    assert(path.basename("/home/user/") == "user", "basename trailing slash");
+    assert(path.basename("file.txt") == "file.txt", "basename no dir");
+    assert(path.basename("/") == "", "basename root");
+    assert(path.basename("") == "", "basename empty");
+}
+
+dirname_test() `test {
+    assert(path.dirname("/home/user/file.txt") == "/home/user", "dirname basic");
+    assert(path.dirname("file.txt") == ".", "dirname no dir");
+    assert(path.dirname("/file.txt") == "/", "dirname root file");
+    assert(path.dirname("") == ".", "dirname empty");
+}
+
+extension_test() `test {
+    assert(path.extension("file.txt") == ".txt", "ext basic");
+    assert(path.extension("archive.tar.gz") == ".gz", "ext double");
+    assert(path.extension("Makefile") == "", "ext none");
+    assert(path.extension(".hidden") == "", "ext dot file");
+}
+
+stem_test() `test {
+    assert(path.stem("file.txt") == "file", "stem basic");
+    assert(path.stem("archive.tar.gz") == "archive.tar", "stem double");
+    assert(path.stem("Makefile") == "Makefile", "stem no ext");
+}
+
+is_absolute_test() `test {
+    assert(path.is_absolute("/home"), "abs /home");
+    assert(!path.is_absolute("home"), "rel home");
+    assert(!path.is_absolute(""), "empty not abs");
+}
+
+is_relative_test() `test {
+    assert(path.is_relative("home/user"), "rel basic");
+    assert(!path.is_relative("/home"), "abs not rel");
+}

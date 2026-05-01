@@ -203,9 +203,55 @@ The identifier before the URL is **mandatory** and is the only way to reference 
 
 ### 4.4 Visibility
 
-All declarations are **public** by default. Use `` `public `` meta annotation to explicitly mark something as public (reserved for future use when private-by-default is introduced).
+Promise uses a two-level visibility model: **module-level** and **member-level**.
 
-For now, everything is public. In a future revision, declarations will be **private by default**, and `` `public `` will be required to export them.
+#### Module-Level Visibility
+
+Top-level declarations (types, enums, functions) are **private by default**. To export a declaration from a module, annotate it with `` `public ``:
+
+```promise
+type User `public {          // exported — visible to `use` consumers
+  string name;
+  int age;
+}
+
+type Cache {                  // private — only visible within this module
+  map[string, string] data;
+}
+
+greet(string name) string `public {   // exported function
+  return "Hello, {name}!";
+}
+
+helper() int {               // private — not exported
+  return 42;
+}
+```
+
+The `ExportedScope` of a module contains only `` `public ``-annotated declarations. Consumers using `use mymod;` can only access `mymod.User`, `mymod.greet`, etc. — not `Cache` or `helper`.
+
+#### Member-Level Visibility
+
+Members (fields, methods) of a `` `public `` type are **public by default**. The underscore prefix (`_`) convention marks a member as private:
+
+```promise
+type Connection `public {
+  string host;              // public — visible to consumers
+  int port;                 // public
+  int _retry_count;         // private — hidden from doc, conventionally internal
+
+  connect(~this)! {}        // public method
+  _reset_backoff(~this) {}  // private method
+}
+```
+
+**Rules:**
+- Members without `_` prefix → **public** (shown in `promise doc`, accessible to consumers)
+- Members with `_` prefix → **private** (hidden from `promise doc -public`, conventionally internal)
+- Explicit `` `public `` on a member is allowed but redundant for members of a public type
+- Operators (`+`, `==`, `[]`, etc.) are always public
+
+This model balances explicitness at module boundaries (types/functions need `` `public ``) with practicality inside types (annotating every method would be verbose and add no information). The `_` prefix is a lightweight, visible signal — a reader can immediately tell whether a member is part of the public API just by looking at its name.
 
 ---
 
@@ -1529,7 +1575,7 @@ testAddition() `test {
 | `` `instance ``| methods       | Method receives pointer to Instance struct as `this` |
 | `` `variant ``| fields, methods| Place field in Variant struct; method receives variant as `this` |
 | `` `type ``   | fields, methods| Place field in Type struct; method is a namespaced function (no `this`) |
-| `` `public `` | any decl       | Mark as exported (future: when private-by-default)|
+| `` `public `` | types, enums, functions | Export from module (see Section 4.4) |
 | `` `inline `` | functions      | Hint to inline the function                      |
 | `` `deprecated`` | any         | Mark as deprecated with optional message         |
 | `` `test ``   | functions      | Mark as a test function                          |

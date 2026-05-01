@@ -1,0 +1,103 @@
+// Tests for Parse interface, int.parse, bool.parse, and Vector.filled
+
+test_int_parse() `test {
+    Scanner r1 = Scanner(s: "42");
+    int v1 = int.parse(r1)!;
+    assert(v1 == 42, "parse 42");
+
+    Scanner r2 = Scanner(s: "-17");
+    int v2 = int.parse(r2)!;
+    assert(v2 == -17, "parse -17");
+
+    Scanner r3 = Scanner(s: "0");
+    int v3 = int.parse(r3)!;
+    assert(v3 == 0, "parse 0");
+}
+
+test_int_parse_stops_at_non_digit() `test {
+    Scanner r = Scanner(s: "123abc");
+    int v = int.parse(r)!;
+    assert(v == 123, "parse 123 from 123abc");
+    assert(r.rest() == "bc", "remaining bc");
+}
+
+test_bool_parse() `test {
+    Scanner r1 = Scanner(s: "true");
+    bool v1 = bool.parse(r1)!;
+    assert(v1, "parse true");
+
+    Scanner r2 = Scanner(s: "false");
+    bool v2 = bool.parse(r2)!;
+    assert(!v2, "parse false");
+}
+
+_try_parse_int(string s) string {
+    Scanner r = Scanner(s: s);
+    int v = int.parse(r) ? e { return e.message; };
+    return "ok";
+}
+
+test_int_parse_error() `test {
+    string result = _try_parse_int("abc");
+    assert(result == "expected digit", "error message");
+}
+
+test_int_parse_empty() `test {
+    string result = _try_parse_int("");
+    assert(result == "unexpected end of input", "empty input");
+}
+
+test_int_parse_minus_only() `test {
+    string result = _try_parse_int("-");
+    assert(result == "expected digit", "minus only");
+}
+
+_try_parse_bool(string s) string {
+    Scanner r = Scanner(s: s);
+    bool v = bool.parse(r) ? e { return e.message; };
+    return "ok";
+}
+
+test_bool_parse_error() `test {
+    string result = _try_parse_bool("xyz");
+    assert(result == "expected 'true' or 'false'", "bad input");
+}
+
+test_bool_parse_empty() `test {
+    string result = _try_parse_bool("");
+    assert(result == "unexpected end of input", "empty input");
+}
+
+test_bool_parse_partial() `test {
+    string result = _try_parse_bool("tru");
+    assert(result == "expected 'true'", "partial true");
+}
+
+test_scan_int() `test {
+    int v = scan[int]("99")!;
+    assert(v == 99, "scan int");
+}
+
+test_sequential_parse() `test {
+    Scanner r = Scanner(s: "12 34");
+    int a = int.parse(r)!;
+    assert(a == 12, "first int");
+    // int.parse already consumed the space (first non-digit)
+    int b = int.parse(r)!;
+    assert(b == 34, "second int");
+}
+
+test_vector_filled() `test {
+    int[] v = Vector[int].filled(7, 5);
+    assert(v.len == 5, "len 5");
+    int i = 0;
+    while i < v.len {
+        assert(v[i] == 7, "element == 7");
+        i = i + 1;
+    }
+}
+
+test_vector_filled_empty() `test {
+    int[] v = Vector[int].filled(0, 0);
+    assert(v.len == 0, "empty filled");
+}

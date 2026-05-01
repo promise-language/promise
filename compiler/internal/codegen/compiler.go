@@ -3072,7 +3072,11 @@ func (c *Compiler) declareModuleTypeMethods(file *ast.File, moduleName string) {
 
 			var params []*ir.Param
 			if m.Sig().Recv() != nil {
-				params = append(params, ir.NewParam("this", irtypes.I8Ptr))
+				receiverType := irtypes.Type(irtypes.I8Ptr)
+				if isPrimitiveScalar(named) {
+					receiverType = llvmNamedType(named)
+				}
+				params = append(params, ir.NewParam("this", receiverType))
 			}
 			for _, p := range m.Sig().Params() {
 				params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
@@ -3259,7 +3263,11 @@ func (c *Compiler) declareTypeMethods(file *ast.File) {
 
 			var params []*ir.Param
 			if m.Sig().Recv() != nil {
-				params = append(params, ir.NewParam("this", irtypes.I8Ptr))
+				receiverType := irtypes.Type(irtypes.I8Ptr)
+				if isPrimitiveScalar(named) {
+					receiverType = llvmNamedType(named)
+				}
+				params = append(params, ir.NewParam("this", receiverType))
 			}
 			for _, p := range m.Sig().Params() {
 				params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
@@ -3376,7 +3384,8 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 
 	// Allocate receiver as "this"
 	if m.Sig().Recv() != nil {
-		alloca := entry.NewAlloca(irtypes.I8Ptr)
+		receiverType := fn.Params[paramIdx].Typ
+		alloca := entry.NewAlloca(receiverType)
 		alloca.SetName(c.uniqueLocalName("this.addr"))
 		entry.NewStore(fn.Params[paramIdx], alloca)
 		c.locals["this"] = alloca

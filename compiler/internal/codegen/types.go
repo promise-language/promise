@@ -135,6 +135,28 @@ func isRefType(typ types.Type) bool {
 	return false
 }
 
+// isPrimitiveScalar reports whether a Named type is a scalar primitive
+// (int, i8-i64, uint, u8-u64, f32, f64, bool, char).
+// These use raw LLVM types (i64, i32, i1, double, etc.), NOT i8* pointers.
+func isPrimitiveScalar(n *types.Named) bool {
+	cat := classify(n)
+	return cat != CatUnknown
+}
+
+// isOpaqueContainerType returns true for Vector and Channel types,
+// which are opaque i8* pointers without value struct layouts.
+// Unlike isContainerType, this excludes string (which has a value struct layout).
+func isOpaqueContainerType(typ types.Type) bool {
+	named := extractNamed(typ)
+	if _, ok := types.AsVector(typ); ok || named == types.TypVector {
+		return true
+	}
+	if _, ok := types.AsChannel(typ); ok || named == types.TypChannel {
+		return true
+	}
+	return false
+}
+
 // isContainerType returns true for Vector and string types,
 // which are represented as i8* pointers (not value structs) in codegen.
 // Map is no longer a container type — it's a user-defined type with value struct layout.

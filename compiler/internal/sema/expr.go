@@ -775,6 +775,13 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 	if target == nil {
 		return nil
 	}
+	// Unwrap references — member access transparently delegates to inner type
+	if ref, ok := target.(*types.MutRef); ok {
+		target = ref.Elem()
+	}
+	if ref, ok := target.(*types.SharedRef); ok {
+		target = ref.Elem()
+	}
 
 	switch t := target.(type) {
 	case *types.Named:

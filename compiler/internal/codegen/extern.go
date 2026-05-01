@@ -32,7 +32,8 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 	for _, ext := range externs {
 		// Struct return: use sret pattern (return void, first param is pointer to result).
 		// This matches C ABI on ARM64 where large structs are returned via pointer.
-		hasSret := ext.ResultType != nil
+		// Container types (Vector, Channel, string) return i8* directly — no sret.
+		hasSret := ext.ResultType != nil && !isOpaqueContainerType(ext.ResultType)
 
 		// Deduplicate by C name — multiple Promise externs may map to the same C function
 		if fn, ok := cFuncs[ext.CName]; ok {
@@ -51,24 +52,32 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 		}
 
 		for i, pt := range ext.ParamTypes {
-			layout := c.lookupLayout(pt)
-			if layout == nil {
-				panic(fmt.Sprintf("codegen: cannot resolve layout for extern param %d of %s", i, ext.PromiseName))
-			}
-
 			paramName := ext.Sig.Params()[i].Name()
 
 			var paramType irtypes.Type
-			if isRefType(pt) {
-				paramType = irtypes.NewPointer(layout.Value.LLVMType)
-			} else {
-				// All extern value struct params: pass by pointer to match C ABI
+			if isOpaqueContainerType(pt) {
+				// Container types (Vector, Channel, string) are i8* pointers
 				paramType = irtypes.I8Ptr
+			} else {
+				layout := c.lookupLayout(pt)
+				if layout == nil {
+					panic(fmt.Sprintf("codegen: cannot resolve layout for extern param %d of %s", i, ext.PromiseName))
+				}
+				if isRefType(pt) {
+					paramType = irtypes.NewPointer(layout.Value.LLVMType)
+				} else {
+					// All extern value struct params: pass by pointer to match C ABI
+					paramType = irtypes.I8Ptr
+				}
 			}
 			params = append(params, ir.NewParam(paramName, paramType))
 		}
 
-		fn := c.module.NewFunc(ext.CName, irtypes.Void, params...)
+		retType := irtypes.Type(irtypes.Void)
+		if ext.ResultType != nil && isOpaqueContainerType(ext.ResultType) {
+			retType = irtypes.I8Ptr
+		}
+		fn := c.module.NewFunc(ext.CName, retType, params...)
 		ext.IRFunc = fn
 		ext.HasSret = hasSret
 		c.funcs[ext.PromiseName] = fn
@@ -102,6 +111,12 @@ func (c *Compiler) genExternCall(ext *ExternFunc, argVals []value.Value, argType
 			continue
 		}
 
+		// Container types (Vector, Channel, string) are already i8* — pass directly
+		if isOpaqueContainerType(ext.ParamTypes[i]) {
+			callArgs = append(callArgs, arg)
+			continue
+		}
+
 		named := extractNamed(argTypes[i])
 		layout := c.lookupLayout(argTypes[i])
 		if layout == nil {
@@ -113,6 +128,11 @@ func (c *Compiler) genExternCall(ext *ExternFunc, argVals []value.Value, argType
 		alloca := c.block.NewAlloca(layout.Value.LLVMType)
 		c.block.NewStore(packed, alloca)
 		callArgs = append(callArgs, c.block.NewBitCast(alloca, irtypes.I8Ptr))
+	}
+
+	// Container return types return i8* directly — no sret
+	if ext.ResultType != nil && isOpaqueContainerType(ext.ResultType) {
+		return c.block.NewCall(ext.IRFunc, callArgs...)
 	}
 
 	c.block.NewCall(ext.IRFunc, callArgs...)

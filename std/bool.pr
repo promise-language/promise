@@ -6,4 +6,42 @@ type bool `native `public {
     !=(bool other) bool `native;
     !() bool `native;
     get hash int `native;
+
+    parse(Reader ~r) bool! `factory `public {
+        if b1 := r.read_byte() {
+            int c1 = b1 as! int;
+            if c1 == 116 {
+                // 't' — expect "rue"
+                if b2 := r.read_byte() {
+                    if b3 := r.read_byte() {
+                        if b4 := r.read_byte() {
+                            if (b2 as! int) == 114 && (b3 as! int) == 117 && (b4 as! int) == 101 {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                raise error(message: "expected 'true'");
+            }
+            if c1 == 102 {
+                // 'f' — expect "alse"
+                if b2 := r.read_byte() {
+                    if b3 := r.read_byte() {
+                        if b4 := r.read_byte() {
+                            if b5 := r.read_byte() {
+                                if (b2 as! int) == 97 && (b3 as! int) == 108 && (b4 as! int) == 115 && (b5 as! int) == 101 {
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+                }
+                raise error(message: "expected 'false'");
+            }
+            raise error(message: "expected 'true' or 'false'");
+        }
+        raise error(message: "unexpected end of input");
+    }
+
+    to_string() string `public => "{this}";
 }

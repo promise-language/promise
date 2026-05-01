@@ -1,5 +1,7 @@
 // std/string.pr — String type with operators and methods
 type string `native `public {
+    from_bytes(u8[] bytes) string `native `factory;
+
     get len int `native;
 
     +(string other) string `native;
@@ -69,6 +71,8 @@ type string `native `public {
     }
     trim() string `native;
     split(string sep) string[] `native;
+    bytes() u8[] `native;
+    byte_at(int index) u8 `native;
 
     to_upper() string `native;
     to_lower() string `native;
@@ -132,4 +136,5 @@ type string `native `public {
 
     get hash int `native;
     get is_empty bool => this.len == 0;
+    to_string() string `public => this;
 }

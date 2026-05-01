@@ -9,4 +9,5 @@ type char `native `public {
     ..(char end) Range[char] `native;
     ..=(char end) Range[char] `native;
     get hash int `native;
+    to_string() string `public => "{this}";
 }

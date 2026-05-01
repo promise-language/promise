@@ -729,9 +729,9 @@ Dependency fetching and resolution.
 
 ## What's Next
 
-The compiler pipeline (Stages 1-8p) is complete. Runtime is fully codegen-emitted LLVM IR — no C files remain. All major cross-cutting features are done: M:N scheduler (Phase 5c), WASM target (Phases 4b/5d/7a), yield generators, structural interfaces, operator dispatch, naming conventions, pure value types, documentation system (Phase 1), module system (Phase 3 done + identity redesign), and stdlib expansion (math, sort, set, random catalog modules).
+The compiler pipeline (Stages 1-8p) is complete. Runtime is fully codegen-emitted LLVM IR — no C files remain. All major cross-cutting features are done: M:N scheduler (Phase 5c), WASM target (Phases 4b/5d/7a), yield generators, structural interfaces, operator dispatch, naming conventions, pure value types, documentation system (Phase 1), module system (Phase 3 done + identity redesign), stdlib expansion (math, sort, set, random catalog modules), and Format/Parse infrastructure (Writer, Reader, Builder, Scanner, `to_string()`, `int.parse`, `bool.parse`, `string.from_bytes`, `Vector.filled`).
 
-Test suite: 920 native pass, 761 WASM pass (3 skip).
+Test suite: 959 native pass, 761 WASM pass (3 skip).
 
 ### Near-term: Compiler Infrastructure
 
@@ -761,7 +761,7 @@ Test suite: 920 native pass, 761 WASM pass (3 skip).
 | Generic type RTTI | — | Low |
 | Value type structural interface coercion (stack boxing) | — | Low |
 | ~~Generic value types~~ | — | ~~Done~~ |
-| User type `toString()` for interpolation | — | Low |
+| User type `format(Writer ~w)` for interpolation (desugar `"${x}"` to `x.format(~builder)`) | — | Low |
 | Type argument inference | — | Low |
 
 ### WASM remaining work
@@ -824,12 +824,14 @@ Known gaps and improvements deferred from completed stages.
 | Non-instance field placements: mixed `value`+instance, `variant`, `type` | 8c | Low |
 | Value type structural interface coercion (stack boxing) | 8p | Low |
 | ~~Generic value types~~ — **Done.** `computeMonoValueTypeLayout` in `mono.go`. `Range[T]` is the first generic value type. | 8p | ~~Low~~ Resolved |
-| User type `toString()` for interpolation | 8h | Low |
+| User type `format(Writer ~w)` for interpolation (desugar `"${x}"` to `x.format(~builder)`) | 8h | Low |
 | `yield*` delegate (forward all values from sub-iterator) | Generators | Medium |
 | Failable generators (`stream[T]!` with error propagation through yield) | Generators | Low |
 | Stored generator values (first-class generator variables outside for-in) | Generators | Low |
 | Generator closures (capturing lambdas as generators) | Generators | Low |
 | Devirtualization optimization (direct call when concrete type known) | 8L | Low |
+| Factory `Self` return type on generic native types resolves to raw `Vector` instead of monomorphized `Vector[T]` — workaround: use `T[]` return type | Runtime | Low |
+| `as!` cast between u8/char crashes (extractInstancePtr on scalar) — numeric cast path doesn't cover char | Codegen | Low |
 | ~~String comparison operators (`<`, `>`, `<=`, `>=`)~~ — **Resolved**: lexicographic byte comparison via `memcmp` | 8b | ~~Medium~~ |
 | ~~Range value type variable binding~~ — resolved: Range is now `Range[T]` generic value type | 8g | ~~Medium~~ |
 | ~~Char range iteration~~ — resolved: `Range[char]` uses correct i32 element type | 8g | ~~Medium~~ |

@@ -1,4 +1,20 @@
-// std/format.pr — Value-to-string formatting functions
+// std/format.pr — Writer, Format interfaces and value-to-string formatting
+
+// Writer is the byte-oriented output structural interface.
+// Concrete types implement write() to accept raw bytes.
+type Writer `structural `public {
+    write(~this, u8[] buf) int! `abstract;
+    write_string(~this, string s) int! {
+        u8[] b = s.bytes();
+        return this.write(b);
+    }
+}
+
+// Format is the structural interface for types that can format themselves.
+type Format `structural `public {
+    format(Writer ~w) `abstract;
+}
+
 
 // _f64_to_str converts an f64 to its string representation,
 // matching C's %g format (6 significant digits, trailing zeros stripped).

@@ -264,7 +264,7 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 		}
 		for _, md := range d.Methods {
 			if !c.nativeMethodExists(named, md) {
-				c.defineMethod(named, md, d.Name)
+				c.defineMethod(named, md, d.Name, true)
 			}
 		}
 		// Mark HasNew for native types with a new() constructor
@@ -381,7 +381,7 @@ func (c *Checker) defineField(named *types.Named, fd *ast.FieldDecl) {
 	named.AddField(f)
 }
 
-func (c *Checker) defineMethod(named *types.Named, md *ast.MethodDecl, typeName string) {
+func (c *Checker) defineMethod(named *types.Named, md *ast.MethodDecl, typeName string, isNativeType ...bool) {
 	sig := c.resolveMethodSignature(named, md)
 	if sig == nil {
 		return
@@ -421,7 +421,8 @@ func (c *Checker) defineMethod(named *types.Named, md *ast.MethodDecl, typeName 
 	}
 	// Validate factory method
 	if isFactory {
-		c.validateFactoryMethod(named, m, md)
+		nativeType := len(isNativeType) > 0 && isNativeType[0]
+		c.validateFactoryMethod(named, m, md, nativeType)
 	}
 	if c.hasAnnotation(md.Annotations, "public") {
 		m.SetExported(true)

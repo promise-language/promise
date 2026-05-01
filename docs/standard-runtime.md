@@ -22,21 +22,23 @@ This document defines the complete standard library architecture for Promise. It
 
 ## 1. Current State
 
-The stdlib today (20 files, ~730 lines) provides:
+The stdlib today (27 files) provides:
 
 | Module | File | What it covers |
 |--------|------|---------------|
-| Primitives | `int.pr`, `uint.pr`, `float.pr`, `bool.pr`, `char.pr` | Arithmetic, comparison, bitwise, hash operators |
-| Strings | `string.pr` | Concatenation, comparison, `contains`, `starts_with`, `ends_with`, `index_of`, `trim`, `split`, `[]`, `[:]` |
-| Containers | `vector.pr`, `map.pr` | `Vector[T]` / `T[]` (push/pop/remove/contains/slice), `Map[K,V]` / `map[K,V]` (open-addressing, rehash) |
+| Primitives | `int.pr`, `uint.pr`, `float.pr`, `bool.pr`, `char.pr` | Arithmetic, comparison, bitwise, hash, `to_string()`, `int.parse()`, `bool.parse()` |
+| Strings | `string.pr` | Concatenation, comparison, `contains`, `starts_with`, `ends_with`, `index_of`, `trim`, `split`, `[]`, `[:]`, `bytes()`, `byte_at()`, `from_bytes()`, `to_string()`, `to_upper`, `to_lower`, `repeat`, `replace`, `count`, `chars` |
+| Containers | `vector.pr`, `map.pr`, `set.pr` | `Vector[T]` / `T[]` (push/pop/remove/contains/slice/`filled`), `Map[K,V]` / `map[K,V]` (open-addressing, rehash), `Set[T]` |
+| Format/Parse | `format.pr`, `builder.pr`, `parse.pr` | `Writer`/`Format` structural interfaces, `Builder` (string building), `Reader`/`Parse` structural interfaces, `Scanner` (string parsing), `scan[T]()` |
 | I/O | `io.pr` | `println`, `print_int`, `print_f64`, `print_bool` (4 functions total) |
-| Math | `math.pr` | `min`, `max`, `abs`, `clamp` (int only) |
+| Math | `math.pr`, `random.pr` | `min`, `max`, `abs`, `clamp`, `sqrt`, `sin`, `cos`, `tan`, `pow`, `exp`, `log`, `floor`, `ceil`, `round`, `Random` PRNG |
+| Sorting | `sort.pr` | `sort(T[])` for `Ordered` types |
 | Interfaces | `equal.pr`, `ordered.pr`, `hashable.pr` | `Equal`, `Ordered`, `Hashable` structural types |
 | Iterators | `iter.pr` | `Iterator[T]`, `Stream[T]` abstract type stubs (no combinators) |
 | Concurrency | `channel.pr`, `task.pr`, `runtime.pr` | `Channel[T]` / `channel[T]` send/close, `Task[T]` / `task[T]` handle, scheduler stats |
-| Other | `range.pr`, `hash.pr`, `assert.pr` | `Range` / `..`/`..=`, FNV-1a hash, `assert(bool, string)` |
+| Other | `range.pr`, `hash.pr`, `assert.pr`, `error.pr` | `Range` / `..`/`..=`, FNV-1a hash, `assert(bool, string)`, `error` base type |
 
-**What's missing**: file I/O, string conversions (int↔string, parse), math functions (sqrt, sin, floor), error types, sorting, time, OS access, process execution, path manipulation, string builder, set type, stream/iterator combinators.
+**What's missing**: file I/O, numeric conversions (u8↔char, int↔uint cross-width casts), time, OS access, process execution, path manipulation, stream/iterator combinators, `f64.parse`, `format(Writer ~w)` on primitives, string interpolation desugaring to Format.
 
 ### Naming Conventions
 
@@ -172,16 +174,17 @@ type Stream[T] `structural {
 | Int↔String | Not implemented | Needed for `format()`, `to_string()`, `parse()`, string interpolation |
 | Float↔String | `print_f64` uses internal C `snprintf`; no Promise-level access | Need `f64.format()` / `to_string()` and `f64.parse()` |
 
-**Proposed approach**: Add native `format(Writer ~w)` on numeric types (Phase 2a) satisfying `Format`. Add `to_string() string` as a Promise-level method that wraps `format()`. Add native `parse(Reader ~r) Self!` factory methods satisfying `Parse` — each reads from a Reader, consuming only what it needs (e.g., digits for int). Generic `scan[int]("42")!` replaces individual `parse_int`/`parse_f64` free functions. Native codegen uses `snprintf`/`strtol`/`strtod`.
+**Implemented approach**: All primitives have `to_string() string` via `"{this}"` (string interpolation, zero native codegen). `int.parse(Reader ~r) int!` and `bool.parse(Reader ~r) bool!` are pure Promise methods that read from a Reader byte-by-byte. `scan[int]("42")!` works via generic `scan[T: Parse]()`. No `snprintf`/`strtol`/`strtod` needed — everything is pure Promise except `string.from_bytes()` and `string.bytes()`/`byte_at()` which are native. `format(Writer ~w)` on primitives is deferred — `to_string()` works directly today.
 
-### 2.4 Format & Writer for String Interpolation
+### 2.4 Format & Writer for String Interpolation — DONE (interfaces defined, interpolation desugaring deferred)
 
-| Aspect | Current State | Required Change |
-|--------|--------------|-----------------|
-| String interpolation | Works for `string`, `int`, `f64`, `bool`, `char` via hardcoded codegen paths | User types need `format(Writer ~w)` support |
-| `Writer` interface | Not defined | Define structural type for text output |
-| `Format` interface | Not defined | Define structural type with `format(Writer ~w)` |
-| `to_string()` | Not available on user types | Synthesized: format into Builder, extract string |
+| Aspect | Current State | Remaining |
+|--------|--------------|-----------|
+| String interpolation | Works for `string`, `int`, `f64`, `bool`, `char` via hardcoded codegen paths | User types need `format(Writer ~w)` + interpolation desugaring |
+| `Writer` interface | **Defined** in `std/format.pr` | — |
+| `Format` interface | **Defined** in `std/format.pr` | — |
+| `to_string()` | **Available** on all primitives via `"{this}"` | User types need `format()` → `to_string()` synthesis |
+| `Builder` | **Implemented** in `std/builder.pr` (pure Promise) | — |
 
 **Proposed types** (in `std/format.pr`):
 
@@ -242,14 +245,15 @@ p := Point(x: 3, y: 4);
 println("point: ${p}");   // point: (3, 4)
 ```
 
-### 2.5 Parse & Reader — Structural Interface on Factory Methods
+### 2.5 Parse & Reader — Structural Interface on Factory Methods — DONE
 
-| Aspect | Current State | Required Change |
-|--------|--------------|-----------------|
-| Parsing | No generic parsing — would need individual `parse_int`, `parse_f64`, etc. | Define `Parse` structural interface with factory method |
-| Byte input | No reader abstraction | Define `Reader` structural interface (byte counterpart to Writer) |
-| Structural matching | Matches instance methods and factory methods; abstract factories with implicit Self return | ~~Extend to match factory methods on the type itself~~ **Done** |
-| Generic scanning | Not possible (factory infrastructure ready: `T.method()` works in generic context) | `scanner.next[T: Parse]() T!` becomes possible once `Reader` is defined |
+| Aspect | Status | Details |
+|--------|--------|---------|
+| Parsing | **Done** | `int.parse(Reader ~r) int!` and `bool.parse(Reader ~r) bool!` — pure Promise |
+| Byte input | **Done** | `Reader` structural interface in `std/parse.pr` with `read_byte` default method |
+| `Scanner` | **Done** | Wraps string, satisfies Reader, tracks position. In `std/parse.pr` |
+| `scan[T]()` | **Done** | Generic convenience: `scan[int]("42")!` — wraps string in Scanner, calls `T.parse` |
+| Remaining | `f64.parse`, `uint.parse` | Complex parsing not yet implemented |
 
 **The problem**: `Format` works as a structural interface because it's an instance method — you have a value and call `value.format(~writer)`. Parsing is the inverse: you need to **create** a value by reading from a source. There's no instance to call a method on. The operation lives on the type, not on an instance. Additionally, a parser may not consume all the input — it should read what it needs and leave the rest.
 
@@ -408,9 +412,9 @@ x := s.next[int]()!;
 |---------|--------|--------|
 | Error type system (2.1) | All failable stdlib APIs | **DONE** — inheritance-based errors, typed handlers, exhaustiveness |
 | Stream combinators (2.2) | Sorting, functional patterns | Medium — ~15 wrapper types + methods |
-| Numeric conversions (2.3) | String formatting, parsing, math display | Medium — native codegen for format/parse |
-| Format & Writer (2.4) | String interpolation, user type display, stream join | Small — structural types + interpolation codegen |
-| Parse (2.5) | Generic parsing, Scanner | Small — structural factory matching + native parse for primitives |
+| Numeric conversions (2.3) | String formatting, parsing, math display | **PARTIAL** — `to_string()` done on all primitives, `int.parse`/`bool.parse` done, `f64.parse`/`uint.parse` remaining |
+| Format & Writer (2.4) | String interpolation, user type display, stream join | **DONE** — Writer/Format interfaces defined, Builder implemented. Interpolation desugaring deferred |
+| Parse & Reader (2.5) | Generic parsing, Scanner | **DONE** — Reader/Parse interfaces, Scanner, `scan[T]()`, `int.parse`, `bool.parse` |
 
 ---
 
@@ -522,16 +526,19 @@ Complete the features from Section 2 before building stdlib modules.
 - Files: `std/int.pr`, `std/uint.pr`, `std/float.pr` (extend)
 - Codegen: native `format(Writer ~w)` methods, parse functions
 
-**0d. Format & Writer**
-- File: `std/format.pr` (new) — `Writer` and `Format` structural interfaces
-- Codegen: extend string interpolation to desugar `${x}` to `x.format(~builder)`
-- Primitives get built-in `format(Writer ~w)` implementations
+**0d. Format & Writer — DONE**
+- File: `std/format.pr` — `Writer` and `Format` structural interfaces with default `write_string` method
+- File: `std/builder.pr` — `Builder` type (pure Promise, wraps `Vector[u8]`, satisfies `Writer`)
+- Primitives have `to_string()` via string interpolation (`"{this}"`). `format(Writer ~w)` deferred.
+- String interpolation desugaring to Format deferred — existing codegen paths work.
 
-**0e. Parse & structural factory matching**
-- File: `std/parse.pr` (new) — `Parse` structural interface with factory method, `Reader` structural interface, `Scanner` type
-- Language feature: extend structural interface matching to factory methods
-- Language feature: default methods on structural interfaces (Reader provides `read_string`, `peek`)
-- Primitives get built-in `parse(Reader ~r) Self!` factory implementations
+**0e. Parse & Reader — DONE**
+- File: `std/parse.pr` — `Reader` structural interface (with `read_byte` default), `Parse` structural interface with factory method, `Scanner` type, `scan[T]()` convenience function
+- `int.parse(Reader ~r) int!` and `bool.parse(Reader ~r) bool!` implemented in pure Promise
+- `string.from_bytes(u8[]) string` native factory, `string.bytes() u8[]` and `string.byte_at(int) u8` native methods
+- `Vector[T].filled(T, int) T[]` factory for buffer pre-allocation
+- Codegen: primitive scalar method receivers (i64 for int, double for f64, etc. instead of i8*)
+- Sema: MutRef/SharedRef unwrapping in member access, native factory validation
 
 ---
 
@@ -651,85 +658,43 @@ is_error[T](T! value) bool;
 
 ### Phase 2: Conversion & Formatting
 
-#### 2a. Numeric Formatting & Parsing
+#### 2a. Numeric Formatting & Parsing — PARTIALLY DONE
 
-Native `format(Writer ~w)` on primitive types (satisfying `Format`), plus Promise-level `to_string()` wrappers:
+**Done:**
+- `to_string()` on all primitives (int, i8-i64, uint, u8-u64, f32, f64, bool, char, string) — uses `"{this}"` string interpolation, zero native codegen needed
+- `int.parse(Reader ~r) int!` — pure Promise, reads digits with optional leading `-`, stops at first non-digit
+- `bool.parse(Reader ~r) bool!` — pure Promise, reads "true"/"false" byte-by-byte
+- Tests: `tests/std/test_to_string.pr` (9 tests), `tests/std/test_parse.pr` (13 tests)
+
+**Remaining:**
+- `format(Writer ~w)` on primitives — needed for user types to compose formatting via Writer
+- `f64.parse(Reader ~r)` — complex (integer + dot + fraction + exponent)
+- `uint.parse(Reader ~r)` — straightforward extension of int.parse without sign
+- String interpolation desugaring to `format()` — big codegen change, current approach works
+
+**Design change from original plan**: `to_string()` uses string interpolation (`"{this}"`) directly instead of wrapping `format()` through a Builder. This is simpler, has zero native codegen, and works today. `format(Writer ~w)` will be added later for composable output to arbitrary Writers.
+
+- **Files**: `std/int.pr`, `std/uint.pr`, `std/float.pr`, `std/bool.pr`, `std/char.pr`, `std/string.pr`
+- **Test**: `tests/std/test_to_string.pr`, `tests/std/test_parse.pr`
+
+#### 2b. `std/builder.pr` — Builder — DONE
 
 ```promise
-type int `native {
-    // ... existing ...
-    format(Writer ~w) `native;               // writes decimal representation
-    parse(Reader ~r) Self! `factory `native;  // reads digits, stops at non-digit
-    to_string() string {                     // convenience wrapper
-        mut b := Builder();
-        this.format(~b);
-        return b.to_string();
-    }
-}
-
-type uint `native {
-    // ... existing ...
-    format(Writer ~w) `native;
-    parse(Reader ~r) Self! `factory `native;
-    to_string() string { mut b := Builder(); this.format(~b); return b.to_string(); }
-}
-
-type f64 `native {
-    // ... existing ...
-    format(Writer ~w) `native;               // writes shortest representation
-    parse(Reader ~r) Self! `factory `native;  // reads float literal, stops at end
-    to_string() string { mut b := Builder(); this.format(~b); return b.to_string(); }
-}
-
-type bool `native {
-    // ... existing ...
-    format(Writer ~w) `native;               // writes "true" or "false"
-    parse(Reader ~r) Self! `factory `native;  // reads "true"/"false"
-    to_string() string { mut b := Builder(); this.format(~b); return b.to_string(); }
-}
-
-type char `native {
-    // ... existing ...
-    format(Writer ~w) `native;
-    to_string() string { mut b := Builder(); this.format(~b); return b.to_string(); }
+type Builder `public {
+    u8[] buf;
+    new(~this, int capacity = 16) { this.buf = Vector[u8](capacity: capacity); }
+    write(~this, u8[] data) int { /* push loop */ }
+    write_string(~this, string s) int { /* bytes + push loop */ }
+    to_string() string => string.from_bytes(this.buf);
+    get len int => this.buf.len;
+    clear(~this) { this.buf = Vector[u8](); }
 }
 ```
 
-Each primitive satisfies both `Format` (instance method) and `Parse` (factory method). `format()` and `parse()` are native; `to_string()` is pure Promise wrapping `format()`. Each `parse()` reads from a Reader, consuming only what it needs — e.g., `int.parse` reads digits and stops at the first non-digit.
-
-- **File**: Extend `std/int.pr`, `std/uint.pr`, `std/float.pr`, `std/bool.pr`, `std/char.pr`
-- **Dependencies**: Error type (Phase 0a), Format & Writer (Phase 0d), Parse & Reader (Phase 0e), Builder (Phase 2b)
-- **Native codegen**: `snprintf` for formatting into writer, `strtol`/`strtod` for `parse()` factory (reading from Reader)
-- **Implementation**: `format()` and `parse()` are native; `to_string()` is Promise wrapping `format()`
-- **Test**: `tests/std/test_convert.pr`
-
-#### 2b. `std/builder.pr` — Builder
-
-```promise
-type Builder {
-    // Efficient string construction via buffer
-    // Satisfies Writer — used as the target for Format and string interpolation
-
-    new(~this);
-    new(~this, int capacity);
-
-    // Writer interface (satisfies Writer structural type)
-    write(~this, u8[] &buf) int!;
-
-    // Convenience methods (from Writer default + additional)
-    write_string(~this, string s) int!;
-    write_char(char c);
-
-    get len int;
-    to_string() string;
-    clear();
-}
-```
-
-- **File**: `std/builder.pr`
-- **Dependencies**: `vector.pr` (backed by `u8[]` internally), Writer (Phase 0d)
-- **Implementation**: Wraps a `Vector[u8]` with growth strategy. `write(u8[] &buf)` satisfies the `Writer` structural interface, making Builder the primary target for `Format`. `write_string` inherited as default from Writer. `to_string()` copies buffer to new string via native `_sb_to_string`.
-- **Test**: `tests/std/test_builder.pr`
+- **File**: `std/builder.pr` — 100% pure Promise, no native/extern methods
+- **Dependencies**: `vector.pr` (backed by `u8[]` internally), `string.from_bytes()` native factory
+- **Implementation**: Wraps a `Vector[u8]`. `write()` and `write_string()` push bytes individually. `to_string()` calls `string.from_bytes()` which reads Vector[u8] data+count and calls `promise_string_new`. `write_char` not yet implemented.
+- **Test**: `tests/std/test_builder.pr` (9 tests)
 
 #### 2c. `std/fmt.pr` — Runtime Template Formatting
 

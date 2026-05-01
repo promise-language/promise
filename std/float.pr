@@ -15,6 +15,7 @@ type f32 `native `public {
     ++() f32 `native;
     --() f32 `native;
     get hash int `native;
+    to_string() string `public => "{this}";
 }
 
 type f64 `native `public {
@@ -33,4 +34,5 @@ type f64 `native `public {
     ++() f64 `native;
     --() f64 `native;
     get hash int `native;
+    to_string() string `public => "{this}";
 }

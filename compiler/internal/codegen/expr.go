@@ -1952,11 +1952,14 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 		target := c.genExpr(member.Target)
 		// Container types (Vector, Map, string) are already i8* pointers — pass directly.
 		// `this` in a method body is also i8*.
+		// Primitive scalars (int, f64, bool, char, etc.) are raw values — pass directly.
 		// Value types: store to temp alloca, pass pointer (value semantics).
 		// Regular user types are value structs — extract the instance pointer.
 		if _, isThis := member.Target.(*ast.ThisExpr); isThis {
 			args = append(args, target)
 		} else if isContainerType(targetType) {
+			args = append(args, target)
+		} else if isPrimitiveScalar(named) {
 			args = append(args, target)
 		} else if named.IsValueType() {
 			args = append(args, c.valueTypeReceiverPtr(target, targetType))
@@ -2006,6 +2009,8 @@ func (c *Compiler) genGetterCall(e *ast.MemberExpr, targetType types.Type, named
 	if _, isThis := e.Target.(*ast.ThisExpr); isThis {
 		args = append(args, target)
 	} else if isContainerType(targetType) {
+		args = append(args, target)
+	} else if isPrimitiveScalar(named) {
 		args = append(args, target)
 	} else if named.IsValueType() {
 		args = append(args, c.valueTypeReceiverPtr(target, targetType))
@@ -2350,6 +2355,11 @@ func (c *Compiler) genFieldPtr(target *ast.MemberExpr) value.Value {
 }
 
 func (c *Compiler) genStringMethodCall(e *ast.CallExpr, member *ast.MemberExpr, method string) (value.Value, bool) {
+	// Factory methods (no receiver — target is a type name, not a value)
+	if method == "from_bytes" {
+		return c.genStringFromBytes(e), true
+	}
+
 	strPtr := c.genExpr(member.Target)
 
 	switch method {
@@ -2375,9 +2385,39 @@ func (c *Compiler) genStringMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		result := c.block.NewCall(c.funcs["promise_string_repeat"], strPtr, argVal)
 		return result, true
 
+	case "bytes":
+		return c.genStringBytes(strPtr), true
+
+	case "byte_at":
+		argVal := c.genExpr(e.Args[0].Value)
+		return c.genStringByteAt(strPtr, argVal), true
+
 	default:
 		return nil, false
 	}
+}
+
+// genStringFromBytes creates a string from a Vector[u8] (factory method).
+// Reads the vector's count and data pointer, calls promise_string_new.
+func (c *Compiler) genStringFromBytes(e *ast.CallExpr) value.Value {
+	vecPtr := c.genExpr(e.Args[0].Value)
+	// Clear drop flag for moved argument
+	if ident, ok := e.Args[0].Value.(*ast.IdentExpr); ok {
+		c.clearDropFlag(ident.Name)
+	}
+
+	// Vector layout: {i64 count, i64 capacity} header, then data at offset 16
+	headerType := vectorHeaderType() // {i64, i64}
+	hdrPtr := c.block.NewBitCast(vecPtr, irtypes.NewPointer(headerType))
+	countPtr := c.block.NewGetElementPtr(headerType, hdrPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	count := c.block.NewLoad(irtypes.I64, countPtr)
+
+	// Data starts at offset vectorHeaderSize (16)
+	dataPtr := c.block.NewGetElementPtr(irtypes.I8, vecPtr,
+		constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
+
+	return c.block.NewCall(c.funcs["promise_string_new"], dataPtr, count)
 }
 
 // genStringLen loads the length field from a string instance struct.
@@ -2394,6 +2434,65 @@ func (c *Compiler) genStringLen(e *ast.MemberExpr) value.Value {
 	lenPtr := c.block.NewGetElementPtr(strInstanceType, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 	return c.block.NewLoad(irtypes.I64, lenPtr)
+}
+
+// genStringBytes creates a Vector[u8] from the string's raw bytes.
+// Allocates a new vector, memcpys string data into it, sets count = string len.
+func (c *Compiler) genStringBytes(strPtr value.Value) value.Value {
+	strInstanceType := irtypes.NewStruct(
+		irtypes.I8Ptr,                   // _variant
+		irtypes.I64,                     // len
+		irtypes.NewArray(0, irtypes.I8), // data (flexible array)
+	)
+	typedPtr := c.block.NewBitCast(strPtr, irtypes.NewPointer(strInstanceType))
+
+	// Load string length
+	lenPtr := c.block.NewGetElementPtr(strInstanceType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	strLen := c.block.NewLoad(irtypes.I64, lenPtr)
+
+	// Get pointer to string data (field 2)
+	dataPtr := c.block.NewGetElementPtr(strInstanceType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
+		constant.NewInt(irtypes.I32, 0))
+
+	// Allocate vector with capacity = strLen, elem_size = 1
+	vec := c.block.NewCall(c.funcs["promise_vector_with_capacity"],
+		strLen, constant.NewInt(irtypes.I64, 1))
+
+	// Copy string data into vector data area (offset 16 = vectorHeaderSize)
+	headerSizeConst := constant.NewInt(irtypes.I64, int64(vectorHeaderSize))
+	vecDataPtr := c.block.NewGetElementPtr(irtypes.I8, vec, headerSizeConst)
+	c.block.NewCall(c.funcs["llvm.memcpy"], vecDataPtr, dataPtr, strLen, constant.False)
+
+	// Set vector count = strLen
+	headerType := vectorHeaderType() // {i64, i64}
+	hdrPtr := c.block.NewBitCast(vec, irtypes.NewPointer(headerType))
+	countPtr := c.block.NewGetElementPtr(headerType, hdrPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	c.block.NewStore(strLen, countPtr)
+
+	return vec
+}
+
+// genStringByteAt returns the raw byte at a given byte offset in the string.
+// Unlike string[], this does NOT do UTF-8 decoding — it returns u8 directly.
+func (c *Compiler) genStringByteAt(strPtr, index value.Value) value.Value {
+	strInstanceType := irtypes.NewStruct(
+		irtypes.I8Ptr,                   // _variant
+		irtypes.I64,                     // len
+		irtypes.NewArray(0, irtypes.I8), // data (flexible array)
+	)
+	typedPtr := c.block.NewBitCast(strPtr, irtypes.NewPointer(strInstanceType))
+
+	// Get pointer to string data
+	dataPtr := c.block.NewGetElementPtr(strInstanceType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
+		constant.NewInt(irtypes.I32, 0))
+
+	// GEP to data[index], load byte
+	bytePtr := c.block.NewGetElementPtr(irtypes.I8, dataPtr, index)
+	return c.block.NewLoad(irtypes.I8, bytePtr)
 }
 
 // --- Enum variant values ---

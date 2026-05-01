@@ -80,6 +80,7 @@ func (c *Compiler) definePALBodies() {
 			c.defineSchedStatGetterBody(fn, sg.field)
 		}
 	}
+
 }
 
 // extractStringDataLen extracts the data pointer (i8*) and length (i64) from a

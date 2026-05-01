@@ -63,18 +63,22 @@ The **catalog** is a curated, tested, mono-versioned set of modules that constit
 - **Community modules** that have been submitted, reviewed, and accepted
 - **The compiler itself** — the `promise` binary is versioned with the catalog
 
-The catalog is a single git repository. Each commit represents a state of the world where every module has a specific version. Tagged commits are **epochs** — stable release points.
+The catalog manifest (`catalog.toml`) lives in the **compiler repository** alongside the compiler source and standard library. It is embedded into the compiler binary via `go:embed`, just like `std/*.pr`. This means a compiler binary IS an epoch — it contains the compiler, the standard library, and the catalog manifest that pins every community module. Tagged compiler commits are **epochs** — stable release points.
 
 ```
-promise-catalog/
-  catalog.toml              # module registry: names → source repos + commits
+promise_lang/compiler/
+  resources/
+    catalog.toml            # module registry: names → source repos + commits
+  std/                      # standard library (embedded in binary)
+  internal/                 # compiler source
+  cmd/promise/              # CLI entry point
   tests/                    # cross-module integration tests
-    io_json_test.pr
-    http_crypto_test.pr
-    ...
+    integration/
+      io_json_test.pr
+      http_crypto_test.pr
 ```
 
-The standard library source lives in the compiler repository (as it does today via `std/`) and is embedded in the compiler binary. The catalog references it by pinning a compiler commit — when you sync to an epoch, the compiler binary includes the matching std. Community modules live in their own repositories and are referenced by commit hash in `catalog.toml`.
+The standard library source lives in `std/` and is embedded in the compiler binary. Community modules live in their own repositories and are referenced by URL + commit hash in `catalog.toml`. There is no separate catalog repository — the compiler repo is the single source of truth for what constitutes an epoch.
 
 ### 3.2 `catalog.toml`
 
@@ -83,27 +87,27 @@ The catalog manifest maps module names to their source locations and pinned comm
 ```toml
 [catalog]
 epoch = "2026.3"
-compiler = "b4e7f2a"         # compiler repo commit for this epoch
 
 [modules.json]
-repo = "github.com/promise-lang/json"
+url = "https://github.com/promise-lang/json"
 commit = "a1b2c3d"
 description = "JSON parsing and serialization"
 
 [modules.http]
-repo = "github.com/promise-lang/http"
+url = "https://github.com/promise-lang/http"
 commit = "e4f5a6b"
 description = "HTTP client and server"
 requires = ["json", "crypto"]
 
 [modules.crypto]
-repo = "github.com/promise-lang/crypto"
+url = "git@github.com:promise-lang/crypto.git"
 commit = "7c8d9e0"
 description = "Cryptographic primitives"
 ```
 
 Key properties:
 - **Flat namespace.** Module names are simple identifiers (`json`, `http`, `crypto`). No URLs, no paths, no version numbers in names.
+- **Fetch-ready URLs.** The `url` field stores the full git-fetchable URL including protocol and authentication info (e.g., `https://github.com/...`, `git@github.com:...`, `ssh://git@git.corp.com/...`). This is the URL passed directly to `git clone` — not the normalized canonical form used for identity/deduplication (which strips schemes and suffixes). The catalog entry is the source of truth for *how* to fetch each module.
 - **Pinned commits.** Each module points to an exact commit hash. No ranges, no "latest", no resolution.
 - **Declared dependencies.** Each module lists which other catalog modules it requires. These are validated by the catalog CI — circular dependencies are rejected.
 - **Self-contained.** Catalog modules may only depend on other catalog modules — never on remote or local modules. The catalog is a closed world: every dependency in the graph is tested, versioned, and shipped together. This is enforced by the catalog CI pipeline (see Section 8.1).
@@ -492,10 +496,11 @@ promise sync next            # sync to the upcoming epoch (for testing)
 
 What `promise sync` does:
 
-1. Downloads the catalog manifest for the target epoch
-2. Updates the `promise` compiler binary to the epoch's version
-3. Caches the standard library source for the epoch
-4. Does NOT download all catalog modules — they are fetched lazily on first `use`
+1. Downloads the `promise` compiler binary for the target epoch (~61MB self-contained binary)
+2. The binary embeds: compiler, standard library (`std/*.pr`), catalog manifest (`catalog.toml`), LLVM tools (compressed)
+3. Does NOT download all catalog modules — they are fetched lazily from their git URLs on first `use`
+
+Since the catalog manifest is embedded in the compiler binary, there is no separate catalog download step. One binary = one epoch.
 
 ### 7.2 Toolchain Directory
 
@@ -513,20 +518,17 @@ The current `promise install` creates `~/.promise/bin/` and `~/.promise/lib/std/
     2026.3/
       ...
   cache/
-    catalog/                # catalog module source + compiled objects (keyed by name/commit)
-      json/
-        a1b2c3d/            # source checkout
-        a1b2c3d.o           # compiled object (shared across projects on same epoch)
-        a1b2c3d.interface   # public API description
-      http/
-        e4f5a6b/
-        e4f5a6b.o
-        e4f5a6b.interface
-    modules/                # remote module source + compiled objects (keyed by URL/commit)
+    modules/                # all git-fetched modules (catalog + remote), keyed by normalized URL
+      github.com/promise-lang/json/
+        repo.git/           # bare clone
+        a1b2c3d4e5f6/       # source checkout (first 12 chars of commit)
       github.com/someone/promise-parser/
-        a1b2c3d/            # source checkout
-        a1b2c3d.o
-        a1b2c3d.interface
+        repo.git/
+        f1e2d3c4a5b6/
+    build/                  # content-addressed build cache (shared across all projects)
+      a3/                   # two-level directory (first 2 hex chars of cache key)
+        a3b4c5d8...o        # compiled object file
+        a3b4c5d8...interface # public API hash
 ```
 
 Multiple epochs can coexist. The compiler binary in `~/.promise/epochs/<epoch>/bin/promise` is used when building a project pinned to that epoch. The shim at `~/.promise/bin/promise` reads the project's `promise.toml` and dispatches to the correct epoch's compiler.
@@ -545,11 +547,11 @@ This means you can work on multiple projects targeting different epochs without 
 ### 7.4 First-Run Experience
 
 ```bash
-# Install Promise for the first time
+# Install Promise for the first time — downloads a single self-contained binary
 curl -sSf https://promise-lang.dev/install.sh | sh
 
-# This installs a bootstrap binary that immediately syncs:
-promise sync
+# The binary includes everything: compiler, std, catalog, LLVM tools
+# No `promise sync` needed on first install
 
 # Create a new project
 mkdir myapp && cd myapp
@@ -832,7 +834,7 @@ warning: catalog module 'json' replaced with local path "../my-json-fork"
   catalog compatibility guarantees do not apply to replaced modules
 ```
 
-This is the escape hatch for Section 14.4 (bleeding-edge fixes).
+This is the escape hatch for Section 15.4 (bleeding-edge fixes).
 
 ---
 
@@ -1017,37 +1019,456 @@ This matches the current architecture (codegen generates specialized instances a
 
 ```bash
 promise catalog list                    # list all modules in current epoch
-promise catalog info json               # show json module's API surface
-promise catalog search "parse"          # search module descriptions and exports
 promise catalog diff 2026.2 2026.3      # show what changed between epochs
+promise doc json                        # show json module's API surface (see 11.3)
+promise doc --search "parse"            # search module descriptions and exports
 ```
 
-### 11.2 AI Agent Integration
-
-The catalog is designed to be a **complete context** that an AI agent can consume:
-
-```bash
-# Generate a machine-readable API summary for all catalog modules
-promise catalog export --format json > catalog-api.json
-```
-
-This produces a structured document containing every module's public types, functions, and their signatures. An AI agent can load this as context and generate correct `use` declarations and API calls without guessing.
-
-The catalog is intentionally small enough that the full API summary fits in a single context window. This is a design constraint — if the catalog grows too large for an AI to reason about, it's too large.
-
-### 11.3 `promise doc`
+### 11.2 `promise doc`
 
 ```bash
 promise doc json                # view json module documentation
 promise doc json.parse          # view specific function docs
+promise doc --search "parse"    # search module descriptions and exports
 promise doc --serve             # local doc server
+promise doc --export json       # machine-readable API summary (for AI agents)
 ```
 
 Documentation is generated from `` `public `` declarations and doc comments in source. No separate doc format — the source is the documentation.
 
+### 11.3 AI Agent Integration
+
+The `--export` flag produces a structured document containing every module's public types, functions, and their signatures. An AI agent can load this as context and generate correct `use` declarations and API calls without guessing:
+
+```bash
+promise doc --export json > catalog-api.json
+```
+
+The catalog is intentionally small enough that the full API summary fits in a single context window. This is a design constraint — if the catalog grows too large for an AI to reason about, it's too large.
+
 ---
 
-## 12. Migration from the Original Design
+## 12. User Journeys
+
+This section documents end-to-end workflows for the three primary personas interacting with the Promise module ecosystem.
+
+### 12.1 End User: Download Promise, Build & Run Projects
+
+**Goal:** A developer (human or AI agent) downloads Promise for the first time, creates a project that uses catalog and remote modules, and iterates on it.
+
+#### First install
+
+```bash
+# Download and install Promise (self-contained ~61MB binary)
+curl -sSf https://promise-lang.dev/install.sh | sh
+
+# The install script places the binary at ~/.promise/bin/promise
+# and adds it to PATH. The binary embeds:
+#   - the compiler (Go binary)
+#   - LLVM tools (opt, llc, lld) compressed, extracted lazily
+#   - the standard library (std/*.pr)
+#   - the catalog manifest (catalog.toml) for this epoch
+
+# Verify installation
+promise version
+# promise 2026.3 (epoch 2026.3, linux-amd64)
+```
+
+No `promise sync` needed on first install — the binary IS the epoch. The catalog manifest is embedded, the std library is embedded, LLVM tools are embedded. One download, fully offline-capable for catalog modules (fetched lazily on first use).
+
+#### Single-file mode (no project setup)
+
+```bash
+# Run a one-liner — no promise.toml needed
+promise exec 'println("hello world")'
+
+# Run a single file — uses the compiler's default epoch
+echo 'use io; main() { io.println("hello") }' > hello.pr
+promise run hello.pr
+
+# Catalog modules work in single-file mode
+echo '
+use json
+
+main() {
+    obj := json.parse("{\"name\": \"Alice\"}")
+    println(obj)
+}
+' > parse.pr
+promise run parse.pr
+# First run: fetches json module source from catalog URL, compiles, caches
+# Subsequent runs: uses cached .o — near-instant
+```
+
+Single-file mode uses the compiler's built-in epoch. Only catalog imports are available (no `[require]` for remote modules, no path root for local modules).
+
+#### Project setup
+
+```bash
+mkdir myapp && cd myapp
+promise init
+# Creates promise.toml:
+#   [module]
+#   name = "myapp"
+#   epoch = "2026.3"
+```
+
+#### Writing code with catalog modules
+
+```promise
+// main.pr
+use json
+use http
+
+main()! {
+    resp := http.get("https://api.example.com/data")!
+    data := json.parse(resp.body)!
+    println(data["name"])
+}
+```
+
+```bash
+promise build
+# 1. Reads promise.toml → epoch 2026.3
+# 2. Scans source → needs json, http from catalog
+# 3. Looks up json, http in embedded catalog.toml → gets URLs + commits
+# 4. Fetches json repo at pinned commit (or uses cached checkout)
+# 5. Fetches http repo at pinned commit (http requires json, crypto — fetches those too)
+# 6. Compiles all modules (parallel where possible), caches .o files globally
+# 7. Links → produces ./myapp binary
+
+./myapp
+```
+
+#### Adding a remote module
+
+```bash
+# Find a community parser library (not in catalog)
+# Add it to source code:
+```
+
+```promise
+// main.pr
+use json
+use parser "github.com/someone/promise-parser"
+
+main() {
+    ast := parser.parse("1 + 2")
+    println(json.serialize(ast))
+}
+```
+
+```bash
+# Pin it — resolves latest commit on default branch
+promise pin "github.com/someone/promise-parser"
+# Added to promise.toml:
+#   [require]
+#   "github.com/someone/promise-parser" = "a1b2c3d4e5f67890..."
+
+promise build    # fetches, compiles, links
+promise test     # run tests
+```
+
+#### The modify-build-test loop
+
+```bash
+# Edit main.pr...
+promise build    # ~200ms — only recompiles myapp module, deps cached
+promise test     # runs immediately — binary already built
+
+# Edit a local module...
+promise build    # ~300ms — recompiles changed module + myapp if API changed
+                 # deps whose interface didn't change → dependents skip
+```
+
+#### Cleaning caches
+
+```bash
+promise clean              # remove global build cache (~/.promise/cache/build/)
+promise clean --global     # remove all global caches (build + module source)
+```
+
+### 12.2 Community Module Developer: Create & Publish a Module
+
+**Goal:** A developer creates a reusable Promise module, publishes it for others to use as a remote module, and eventually submits it to the catalog.
+
+#### Create the module
+
+```bash
+mkdir promise-csv && cd promise-csv
+promise init
+# Edit promise.toml:
+#   [module]
+#   name = "csv"
+#   epoch = "2026.3"
+```
+
+```promise
+// csv.pr
+use io
+
+type Row `public {
+    string[] fields `public;
+
+    get(int index) string `public {
+        return fields[index]
+    }
+}
+
+parse(string input) Row[] `public {
+    // ...parse CSV...
+}
+
+write(Row[] rows) string `public {
+    // ...serialize to CSV...
+}
+```
+
+```promise
+// tests/test_csv.pr
+use csv   // test files within the module access it by name
+
+test parse_simple() {
+    rows := csv.parse("a,b,c\n1,2,3")
+    assert(rows.length == 2)
+    assert(rows[1].get(0) == "1")
+}
+
+test roundtrip() {
+    input := "name,age\nAlice,30\nBob,25"
+    rows := csv.parse(input)
+    output := csv.write(rows)
+    assert(output == input)
+}
+```
+
+```bash
+# Test locally
+promise test tests/
+
+# The module can use catalog modules (json, io, etc.)
+# but cannot have [require] entries if it aims for catalog inclusion
+```
+
+#### Publish as a remote module
+
+```bash
+# Push to any git host
+git init && git add -A && git commit -m "Initial csv module"
+git remote add origin git@github.com:yourname/promise-csv.git
+git push -u origin main
+```
+
+Others can now use it:
+
+```promise
+// In someone else's project:
+use csv "github.com/yourname/promise-csv"
+
+main() {
+    rows := csv.parse("a,b\n1,2")
+    println(rows[0].fields)
+}
+```
+
+```bash
+# They pin it in their promise.toml:
+promise pin "github.com/yourname/promise-csv"
+```
+
+#### Iterate on the module
+
+```bash
+# Make changes, push, tag a release
+git tag v1.0.0
+git push --tags
+
+# Users update by re-pinning:
+promise pin "github.com/yourname/promise-csv" v1.0.0
+# Resolves tag → commit hash, updates promise.toml
+```
+
+#### Submit to the catalog
+
+When the module is stable, well-tested, and generally useful:
+
+1. **Ensure catalog compatibility:**
+   - No `[require]` section (catalog modules can only depend on other catalog modules)
+   - No sourced imports (`use alias "url"`) — only `use name` catalog imports
+   - All public declarations have doc comments
+   - Comprehensive test suite
+
+2. **Submit a PR to the catalog repo:**
+
+```bash
+# The PR adds an entry to catalog.toml:
+# [modules.csv]
+# url = "https://github.com/yourname/promise-csv"
+# commit = "a1b2c3d4e5f6..."
+# description = "CSV parsing and serialization"
+```
+
+3. **Catalog CI runs automatically:**
+   - Clones the module at the proposed commit
+   - Builds with the `next` epoch compiler
+   - Runs the module's test suite
+   - Runs all existing catalog tests (regression check)
+   - Validates no sourced imports, no `[require]`, doc comments present
+
+4. **After review and merge:**
+   - Module is available in the next epoch
+   - Users migrate: `use csv "github.com/yourname/promise-csv"` → `use csv`
+   - They remove the `[require]` entry from `promise.toml`
+   - All qualified references (`csv.parse(...)`) are unchanged
+
+### 12.3 Language Developer: Iterate on Promise or Publish an Epoch
+
+**Goal:** A Promise language developer works on the compiler, standard library, or catalog modules, tests changes, and cuts a new epoch release.
+
+#### Day-to-day development
+
+```bash
+cd promise_lang/compiler
+
+# The catalog manifest lives in the repo alongside the compiler and std lib:
+#   compiler/resources/catalog.toml
+# It is embedded into the compiler binary via go:embed, just like std/*.pr
+
+# Edit the compiler, std library, or catalog manifest
+vim internal/codegen/stmt.go     # compiler change
+vim std/vector.pr                # std library change
+vim resources/catalog.toml       # update a catalog module pin
+
+# Build the compiler
+make                             # regenerate parser, embed resources, build binary
+
+# Run compiler tests
+make test                        # go test ./...
+
+# Run Promise-level tests
+./promise test tests/            # e2e tests using the built compiler
+```
+
+#### Testing a catalog module update
+
+When a community module author submits an update (new commit) or a new module:
+
+```bash
+# 1. Update the catalog manifest
+vim resources/catalog.toml
+# Change: [modules.json]
+#         commit = "new_commit_hash"
+
+# 2. Rebuild compiler (embeds new catalog.toml)
+make
+
+# 3. Run the module's own tests
+./promise test --module json
+
+# 4. Run cross-module integration tests
+./promise test tests/integration/
+
+# 5. Run the full test suite to check for regressions
+bin/verify.sh
+```
+
+#### Cutting a new epoch
+
+An epoch release is a tagged commit of the compiler repo. The catalog manifest embedded in that binary IS the epoch — there is no separate catalog repository to coordinate with.
+
+```bash
+# 1. Ensure all catalog modules build and pass tests at their pinned commits
+./promise catalog verify        # builds every catalog module, runs all tests
+
+# 2. Update epoch identifier
+vim resources/catalog.toml
+# [catalog]
+# epoch = "2026.4"
+
+# 3. Update any std library or compiler changes
+# ...
+
+# 4. Build release binary
+make release                    # embeds LLVM tools → ~61MB self-contained binary
+
+# 5. Run full verification
+bin/verify.sh                   # compiler tests + promise tests + e2e
+
+# 6. Tag and release
+git tag epoch-2026.4
+git push --tags
+# CI builds release binaries for linux-amd64, darwin-amd64, darwin-arm64
+# Publishes to https://promise-lang.dev/download/
+```
+
+#### The epoch lifecycle
+
+```
+                    ┌─────────────────────────────────────┐
+                    │         Compiler Repository          │
+                    │                                      │
+                    │  compiler/                            │
+                    │    resources/                         │
+                    │      catalog.toml  ← THE catalog     │
+                    │    std/            ← std library      │
+                    │    internal/       ← compiler code    │
+                    │    cmd/promise/    ← CLI entry        │
+                    │                                      │
+                    └──────────────┬──────────────────────┘
+                                   │
+                          git tag epoch-2026.4
+                                   │
+                    ┌──────────────▼──────────────────────┐
+                    │        Release Binary                 │
+                    │                                      │
+                    │  Embeds:                              │
+                    │    catalog.toml (epoch 2026.4)        │
+                    │    std/*.pr                           │
+                    │    LLVM tools (gzip)                  │
+                    │    musl CRT (linux)                   │
+                    │                                      │
+                    │  One binary = one epoch               │
+                    │  No external catalog repo needed      │
+                    └──────────────────────────────────────┘
+```
+
+**Key insight:** The catalog file lives in the compiler repo, not in a separate repository. This means:
+- A compiler binary always knows its epoch and which modules belong to it
+- There is no drift between compiler version and catalog version
+- `promise sync` downloads a single binary — that binary IS the epoch
+- Language developers iterate on compiler + std + catalog in one commit
+
+#### Adding a breaking change across modules
+
+```bash
+# Example: renaming json.parse() → json.decode()
+
+# 1. Update the json module source in its own repo
+#    (coordinate with module author or fork)
+
+# 2. Update catalog.toml to pin the new commit
+vim resources/catalog.toml
+# [modules.json]
+# commit = "new_commit_with_decode"
+
+# 3. Update any other catalog modules that call json.parse()
+#    Pin their updated commits too
+
+# 4. Update std library if it references the old API
+
+# 5. Update integration tests
+
+# 6. Build, test everything together
+make && ./promise catalog verify
+
+# 7. All changes land in one commit/PR — atomic epoch transition
+```
+
+This is the mono-versioned model in action: breaking changes are coordinated across the entire catalog in a single commit, so users never see a half-migrated state.
+
+---
+
+## 13. Migration from the Original Design
 
 ### 12.1 What Changes
 
@@ -1074,7 +1495,7 @@ Documentation is generated from `` `public `` declarations and doc comments in s
 
 ---
 
-## 13. Comparison with Other Systems
+## 14. Comparison with Other Systems
 
 | Property | npm | Go | Cargo | Elm | Nix | **Promise** |
 |----------|-----|-----|-------|-----|-----|-------------|
@@ -1091,41 +1512,41 @@ The closest analog is **NixOS** — a mono-versioned global package set with CI 
 
 ---
 
-## 14. Risks & Mitigations
+## 15. Risks & Mitigations
 
-### 14.1 "What if the catalog is too small?"
+### 15.1 "What if the catalog is too small?"
 
 **Risk:** Users need modules that aren't in the catalog.
 **Mitigation:** Sourced modules (local and remote imports) provide a full-featured escape hatch with their own dependency management. The catalog doesn't need to be exhaustive — it needs to cover common needs. Remote modules can graduate to the catalog as they mature.
 
-### 14.2 "What if catalog modules conflict?"
+### 15.2 "What if catalog modules conflict?"
 
 **Risk:** Two catalog modules want incompatible APIs from a third module.
 **Mitigation:** This is exactly what the mono-versioned model prevents. Conflicts are resolved **before** the epoch is tagged, by the catalog maintainers. The CI enforces it — if tests don't pass, the epoch doesn't ship.
 
-### 14.3 "What if a module author disappears?"
+### 15.3 "What if a module author disappears?"
 
 **Risk:** A catalog module's author stops maintaining it.
 **Mitigation:** Because module source is pinned by commit hash, an orphaned module doesn't "break" — it just stops getting updates. The catalog team can adopt, fork, or eventually deprecate it.
 
-### 14.4 "What if I need a bleeding-edge fix?"
+### 15.4 "What if I need a bleeding-edge fix?"
 
 **Risk:** A catalog module has a bug fix in its repo that hasn't made it into an epoch yet.
 **Mitigation:** Temporarily import it as a remote module pinned to the fixed commit. When the next epoch includes the fix, switch back to catalog import. The `[replace]` section in `promise.toml` can also redirect a catalog module to a local checkout during development.
 
-### 14.5 "Won't coordinated breaking changes slow everything down?"
+### 15.5 "Won't coordinated breaking changes slow everything down?"
 
 **Risk:** A module can't make breaking changes because it requires updating all dependents.
 **Mitigation:** Yes — but this is a feature, not a bug. Breaking changes should be expensive. They force API designers to think carefully. And when they do happen, they happen atomically — no ecosystem-wide breakage cascade.
 
-### 14.6 "What about private/proprietary modules?"
+### 15.6 "What about private/proprietary modules?"
 
 **Risk:** Companies want private module registries.
 **Mitigation:** Private modules are remote modules hosted on private git servers. `use auth "git.corp.com/team/auth-lib"` works with any git host that the developer has access to. No private catalog is needed — the sourced import mechanism handles this cleanly. For fully offline environments, local imports (`use auth "./libs/auth"`) work without any network access.
 
 ---
 
-## 15. Implementation Plan
+## 16. Implementation Plan
 
 ### Phase 1: Module Boundaries & Local Imports
 
@@ -1152,7 +1573,8 @@ The closest analog is **NixOS** — a mono-versioned global package set with CI 
 - Create the catalog repository with `catalog.toml` format
 - Implement `promise sync` (download compiler + catalog manifest)
 - Implement lazy catalog module fetching (download on first `use`)
-- `promise catalog list/info/search` commands
+- `promise catalog list` command
+- `promise doc` for module API browsing and search
 - Epoch-based compiler dispatch (project epoch → matching compiler binary)
 
 ### Phase 4: Catalog CI & Governance
@@ -1165,14 +1587,13 @@ The closest analog is **NixOS** — a mono-versioned global package set with CI 
 ### Phase 5: Tooling & Polish
 
 - `promise catalog diff` between epochs
-- `promise catalog export` for AI agent context
-- `promise doc` documentation generation
+- `promise doc --export` for AI agent context
 - `[replace]` section for local development overrides
 - Parallel module compilation (independent modules in the topological sort compile concurrently)
 
 ---
 
-## 16. Open Questions
+## 17. Open Questions
 
 1. **Epoch cadence.** How often should epochs be released? Monthly? Quarterly? On-demand when enough changes accumulate?
 

@@ -1,0 +1,104 @@
+// Tests for `global and `mono method placement.
+
+// --- `global: namespace-scoped static method ---
+
+type Counter {
+    int value;
+
+    create(int v) Counter `global {
+        return Counter(value: v);
+    }
+
+    zero() Counter `global {
+        return Counter(value: 0);
+    }
+}
+
+test_global_basic() `test {
+    c := Counter.create(42);
+    assert(c.value == 42, "global create");
+}
+
+test_global_zero() `test {
+    c := Counter.zero();
+    assert(c.value == 0, "global zero");
+}
+
+// --- `global with multiple params ---
+
+type Point {
+    int x `value;
+    int y `value;
+
+    origin() Point `global {
+        return Point(x: 0, y: 0);
+    }
+
+    fromXY(int x, int y) Point `global {
+        return Point(x: x, y: y);
+    }
+
+    distance(Point a, Point b) int `global {
+        int dx = a.x - b.x;
+        int dy = a.y - b.y;
+        return dx * dx + dy * dy;
+    }
+}
+
+test_global_value_type() `test {
+    p := Point.origin();
+    assert(p.x == 0, "origin x");
+    assert(p.y == 0, "origin y");
+}
+
+test_global_from_xy() `test {
+    p := Point.fromXY(3, 4);
+    assert(p.x == 3, "fromXY x");
+    assert(p.y == 4, "fromXY y");
+}
+
+test_global_static_util() `test {
+    a := Point.fromXY(0, 0);
+    b := Point.fromXY(3, 4);
+    d := Point.distance(a, b);
+    assert(d == 25, "distance squared");
+}
+
+// --- `mono: per-monomorphization method on generic type ---
+
+type Wrapper[T] {
+    T value;
+
+    defaultInt() int `mono {
+        return 0;
+    }
+}
+
+test_mono_basic() `test {
+    n := Wrapper[int].defaultInt();
+    assert(n == 0, "mono defaultInt");
+}
+
+test_mono_different_instantiations() `test {
+    a := Wrapper[int].defaultInt();
+    b := Wrapper[string].defaultInt();
+    assert(a == 0, "mono int instantiation");
+    assert(b == 0, "mono string instantiation");
+}
+
+// --- `mono with Self on non-generic ---
+
+type Pair {
+    int a;
+    int b;
+
+    zeros() Self `mono {
+        return Pair(a: 0, b: 0);
+    }
+}
+
+test_mono_self() `test {
+    p := Pair.zeros();
+    assert(p.a == 0, "mono self a");
+    assert(p.b == 0, "mono self b");
+}

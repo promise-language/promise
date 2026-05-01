@@ -344,6 +344,12 @@ func (c *Checker) checkTypeDecl(d *ast.TypeDecl) {
 			c.checkMethodBody(d.Name, md, m)
 			c.inFactoryBody = savedInFactory
 			c.factoryLocals = savedFactoryLocals
+		} else if m.Placement() == types.PlaceType {
+			// `global methods: no Self, no this
+			savedCurType := c.curType
+			c.curType = nil
+			c.checkMethodBody(d.Name, md, m)
+			c.curType = savedCurType
 		} else {
 			c.checkMethodBody(d.Name, md, m)
 		}

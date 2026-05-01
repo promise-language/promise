@@ -9249,3 +9249,19 @@ func TestNumericSuffixF64IR(t *testing.T) {
 	`)
 	assertContains(t, ir, "store double")
 }
+
+func TestGlobalMethodIR(t *testing.T) {
+	ir := generateIR(t, "type Counter {\n"+
+		"int value;\n"+
+		"create(int v) Counter `global {\n"+
+		"return Counter(value: v);\n"+
+		"}\n"+
+		"}\n"+
+		"main() {\n"+
+		"c := Counter.create(42);\n"+
+		"}\n")
+	// Global method should be defined as Counter.create with no 'this' parameter
+	assertContains(t, ir, "Counter.create")
+	// Should only have the 'v' param, not 'this'
+	assertNotContains(t, ir, "Counter.create(i8*")
+}

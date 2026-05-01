@@ -45,8 +45,9 @@ func targetLabel(t MetaTarget) string {
 var builtinMetas = map[string][]MetaTarget{
 	"value":        {TargetField, TargetMethod},
 	"instance":     {TargetField, TargetMethod},
-	"variant":      {TargetField, TargetMethod},
-	"type":         {TargetField, TargetMethod},
+	"variant":      {TargetField},
+	"global":       {TargetMethod},
+	"mono":         {TargetMethod},
 	"raw":          {TargetField},
 	"abstract":     {TargetMethod},
 	"native":       {TargetMethod, TargetType},

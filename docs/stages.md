@@ -129,6 +129,7 @@ Four-pass analysis: declare → define → check → verify.
 - **Missing return** detection across if/else chains, match expressions, and infinite loops
 - Error reporting with source positions
 - **Agent-friendly diagnostics**: Property-called-as-method detection (`v.len()` → `'len' is a property on int[], not a method — remove ()`)
+- **Method placement**: `` `global `` (namespace-scoped, no `this`/`Self`, non-generic only), `` `mono `` (per-monomorphization, no `this`, `Self` available), `` `factory `` (constructor pattern, implies `` `mono `` placement)
 
 ---
 

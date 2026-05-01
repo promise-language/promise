@@ -8263,3 +8263,126 @@ func TestPropertyCalledAsMethodMap(t *testing.T) {
 	expectError(t, errs, "is a property")
 	expectError(t, errs, "not a method")
 }
+
+// --- `global and `mono placement tests ---
+
+func TestGlobalMethodBasic(t *testing.T) {
+	checkOK(t, "type Counter {\n"+
+		"int value;\n"+
+		"create(int v) Counter `global {\n"+
+		"return Counter(value: v);\n"+
+		"}\n"+
+		"}\n"+
+		"main() {\n"+
+		"c := Counter.create(42);\n"+
+		"}\n")
+}
+
+func TestGlobalMethodNoReceiver(t *testing.T) {
+	errs := checkErrs(t, "type Foo {\n"+
+		"int x;\n"+
+		"bad(&this) int `global {\n"+
+		"return this.x;\n"+
+		"}\n"+
+		"}\n"+
+		"main() {}\n")
+	expectError(t, errs, "must not declare a receiver")
+}
+
+func TestGlobalMethodNoSelfInBody(t *testing.T) {
+	errs := checkErrs(t, "type Foo {\n"+
+		"int x;\n"+
+		"make() Foo `global {\n"+
+		"Self s = Foo(x: 0);\n"+
+		"return s;\n"+
+		"}\n"+
+		"}\n"+
+		"main() {}\n")
+	expectError(t, errs, "Self can only be used inside a type body")
+}
+
+func TestGlobalMethodNoSelfInReturnType(t *testing.T) {
+	// Self in return type of `global resolves during define pass where curType is set.
+	// This is acceptable — Self just means the owning type. The key restriction is
+	// that the body cannot use Self (no type context).
+	// Actually, for consistency, let's allow Self in the signature since it resolves
+	// at define time. The body restriction is what matters.
+	checkOK(t, "type Foo {\n"+
+		"int x;\n"+
+		"make() Self `global {\n"+
+		"return Foo(x: 0);\n"+
+		"}\n"+
+		"}\n"+
+		"main() {\n"+
+		"f := Foo.make();\n"+
+		"}\n")
+}
+
+func TestGlobalMethodNoGetterSetter(t *testing.T) {
+	errs := checkErrs(t, "type Foo {\n"+
+		"int x;\n"+
+		"get count int `global { return 0; }\n"+
+		"}\n"+
+		"main() {}\n")
+	expectError(t, errs, "cannot be a getter or setter")
+}
+
+func TestGlobalMethodOnGenericTypeError(t *testing.T) {
+	errs := checkErrs(t, "type Box[T] {\n"+
+		"T value;\n"+
+		"hello() int `global {\n"+
+		"return 42;\n"+
+		"}\n"+
+		"}\n"+
+		"main() {}\n")
+	expectError(t, errs, "cannot be on a generic type")
+}
+
+func TestMonoMethodBasic(t *testing.T) {
+	checkOK(t, "type Box[T] {\n"+
+		"T value;\n"+
+		"defaultValue() int `mono {\n"+
+		"return 0;\n"+
+		"}\n"+
+		"}\n"+
+		"main() {\n"+
+		"n := Box[int].defaultValue();\n"+
+		"}\n")
+}
+
+func TestMonoMethodNoReceiver(t *testing.T) {
+	errs := checkErrs(t, "type Box[T] {\n"+
+		"T value;\n"+
+		"bad(&this) int `mono {\n"+
+		"return 0;\n"+
+		"}\n"+
+		"}\n"+
+		"main() {}\n")
+	expectError(t, errs, "must not declare a receiver")
+}
+
+func TestGlobalMonoMutuallyExclusive(t *testing.T) {
+	errs := checkErrs(t, "type Foo {\n"+
+		"int x;\n"+
+		"bad() int `global `mono {\n"+
+		"return 0;\n"+
+		"}\n"+
+		"}\n"+
+		"main() {}\n")
+	expectError(t, errs, "mutually exclusive")
+}
+
+func TestMonoMethodSelfAllowed(t *testing.T) {
+	// Self in `mono method signature resolves to the owning type.
+	// Body can reference Self since curType is set.
+	checkOK(t, "type Pair {\n"+
+		"int x;\n"+
+		"int y;\n"+
+		"origin() Self `mono {\n"+
+		"return Pair(x: 0, y: 0);\n"+
+		"}\n"+
+		"}\n"+
+		"main() {\n"+
+		"p := Pair.origin();\n"+
+		"}\n")
+}

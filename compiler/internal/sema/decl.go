@@ -404,9 +404,34 @@ func (c *Checker) defineMethod(named *types.Named, md *ast.MethodDecl, typeName 
 	}
 
 	isFactory := c.hasAnnotation(md.Annotations, "factory")
+	isGlobal := c.hasAnnotation(md.Annotations, "global")
+	isMono := c.hasAnnotation(md.Annotations, "mono")
 	// `factory implies `variant placement
 	if isFactory {
 		placement = types.PlaceVariant
+	}
+
+	// Validate `global and `mono methods
+	if isGlobal || isMono {
+		metaName := "global"
+		if isMono {
+			metaName = "mono"
+		}
+		if isFactory {
+			c.errorf(md.Pos(), "`%s and `factory are mutually exclusive on %s.%s", metaName, typeName, md.Name)
+		}
+		if md.Receiver != nil {
+			c.errorf(md.Pos(), "`%s method %s.%s must not declare a receiver", metaName, typeName, md.Name)
+		}
+		if md.IsGetter || md.IsSetter {
+			c.errorf(md.Pos(), "`%s method %s.%s cannot be a getter or setter", metaName, typeName, md.Name)
+		}
+		if isGlobal && len(named.TypeParams()) > 0 {
+			c.errorf(md.Pos(), "`global method %s.%s cannot be on a generic type — use `mono instead", typeName, md.Name)
+		}
+	}
+	if isGlobal && isMono {
+		c.errorf(md.Pos(), "`global and `mono are mutually exclusive on %s.%s", typeName, md.Name)
 	}
 
 	m := types.NewMethod(tpos(md.Pos()), md.Name, sig, placement, abstract, native)
@@ -450,8 +475,10 @@ func (c *Checker) resolveMethodSignature(named *types.Named, md *ast.MethodDecl)
 	// Resolve receiver
 	var recv *types.Param
 	isFactory := c.hasAnnotation(md.Annotations, "factory")
-	if isFactory {
-		// Factory methods have no receiver
+	isGlobal := c.hasAnnotation(md.Annotations, "global")
+	isMono := c.hasAnnotation(md.Annotations, "mono")
+	if isFactory || isGlobal || isMono {
+		// Factory, `global, and `mono methods have no receiver
 		recv = nil
 	} else if md.Receiver != nil {
 		ref := resolveRefMod(md.Receiver.RefMod)
@@ -722,8 +749,10 @@ func (c *Checker) resolvePlacement(annotations []*ast.MetaAnnotation) types.Plac
 			return types.PlaceValue
 		case "variant":
 			return types.PlaceVariant
-		case "type":
+		case "global":
 			return types.PlaceType
+		case "mono":
+			return types.PlaceVariant
 		case "instance":
 			return types.PlaceInstance
 		}

@@ -1706,38 +1706,47 @@ type Counter {
 }
 ```
 
-#### Variant Methods (`` `variant ``)
+#### Global Methods (`` `global ``)
 
-Variant methods receive the **variant struct**. One method copy exists per monomorphization. They can access `` `variant `` fields only.
-
-```promise
-type Collection[T] {
-  string typeName `variant;
-
-  describeType() string `variant {
-    return "Collection of {this.typeName}";
-  }
-}
-```
-
-#### Type Methods (`` `type ``)
-
-Type methods are effectively **namespaced functions**. No `this` is passed at call time — the type struct is static and known at compile time. They can access `` `type `` fields only. These replace the `static` keyword.
+Global methods are **namespaced functions** — no `this` is passed, no `Self` is available in the body. The type serves purely as a namespace. These replace the `static` keyword from other languages. Cannot be used on generic types (use `` `mono `` instead).
 
 ```promise
 type Counter {
   int value;
 
-  create() Counter `type {
+  create(int v) Counter `global {
+    return Counter(value: v);
+  }
+
+  zero() Counter `global {
     return Counter(value: 0);
   }
 }
 
 // Called as:
-Counter c = Counter.create();
+Counter c = Counter.create(42);
+Counter z = Counter.zero();
 ```
 
-**Note:** The name `new` is reserved for explicit constructors (see Section 5.7). Type methods that create instances should use descriptive names like `create`, `from`, or `empty`. Factory constructors (`` `factory ``) use `` `variant `` placement instead of `` `type `` — see Section 5.7.
+#### Mono Methods (`` `mono ``)
+
+Mono methods are **per-monomorphization namespaced functions**. Like `` `global ``, no `this` is passed, but the type's generic parameters are resolved and `Self` is available in the body. One copy exists per concrete type instantiation.
+
+```promise
+type Wrapper[T] {
+  T value;
+
+  defaultCount() int `mono {
+    return 0;
+  }
+}
+
+// Called as — each instantiation gets its own copy:
+n := Wrapper[int].defaultCount();
+m := Wrapper[string].defaultCount();
+```
+
+**Note:** The name `new` is reserved for explicit constructors (see Section 5.7). Global/mono methods that create instances should use descriptive names like `create`, `from`, or `empty`. Factory constructors (`` `factory ``) use `` `mono `` (variant) placement instead of `` `global `` — see Section 5.7.
 
 ### 9.3 Named Arguments, Defaults & Optional Parameters
 

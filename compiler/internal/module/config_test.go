@@ -233,3 +233,145 @@ whatever = "also ignored"
 		t.Errorf("Name = %q, want %q", cfg.Name, "myapp")
 	}
 }
+
+func TestSetRequireNewSection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	content := "[module]\nname = \"myapp\"\nepoch = \"2026.3\"\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SetRequire(path, "github.com/foo/bar", "abc123"); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := ParseConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Require["github.com/foo/bar"]; got != "abc123" {
+		t.Errorf("Require[foo/bar] = %q, want %q", got, "abc123")
+	}
+}
+
+func TestSetRequireExistingSection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	content := `[module]
+name = "myapp"
+epoch = "2026.3"
+
+[require]
+"github.com/foo/bar" = "old_hash"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SetRequire(path, "github.com/foo/bar", "new_hash"); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := ParseConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Require["github.com/foo/bar"]; got != "new_hash" {
+		t.Errorf("Require[foo/bar] = %q, want %q", got, "new_hash")
+	}
+}
+
+func TestSetRequireAppendToExisting(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	content := `[module]
+name = "myapp"
+epoch = "2026.3"
+
+[require]
+"github.com/foo/bar" = "hash1"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SetRequire(path, "github.com/baz/qux", "hash2"); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := ParseConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Require["github.com/foo/bar"]; got != "hash1" {
+		t.Errorf("Require[foo/bar] = %q, want %q", got, "hash1")
+	}
+	if got := cfg.Require["github.com/baz/qux"]; got != "hash2" {
+		t.Errorf("Require[baz/qux] = %q, want %q", got, "hash2")
+	}
+}
+
+func TestSetRequireNormalizedMatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	content := `[module]
+name = "myapp"
+epoch = "2026.3"
+
+[require]
+"https://github.com/foo/bar.git" = "old_hash"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Different URL form for same repo — should replace existing
+	if err := SetRequire(path, "github.com/foo/bar", "new_hash"); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := ParseConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The old key was replaced in-place, so the new key form is used
+	if got := cfg.Require["github.com/foo/bar"]; got != "new_hash" {
+		t.Errorf("Require[foo/bar] = %q, want %q", got, "new_hash")
+	}
+}
+
+func TestSetRequirePreservesComments(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "promise.toml")
+	content := `[module]
+name = "myapp"
+epoch = "2026.3"
+
+# My dependencies
+[require]
+"github.com/foo/bar" = "hash1"
+
+[replace]
+"github.com/foo/bar" = "../bar"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SetRequire(path, "github.com/baz/qux", "hash2"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify [replace] is preserved
+	cfg, err := ParseConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Replace["github.com/foo/bar"]; got != "../bar" {
+		t.Errorf("Replace[foo/bar] = %q, want %q", got, "../bar")
+	}
+	if got := cfg.Require["github.com/baz/qux"]; got != "hash2" {
+		t.Errorf("Require[baz/qux] = %q, want %q", got, "hash2")
+	}
+}

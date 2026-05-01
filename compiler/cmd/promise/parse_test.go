@@ -1636,3 +1636,81 @@ func TestInvalidSyntax(t *testing.T) {
 		})
 	}
 }
+
+func TestEpochMismatchWarning(t *testing.T) {
+	projectDir := t.TempDir()
+	modDir := filepath.Join(projectDir, "libs", "mymod")
+	if err := os.MkdirAll(modDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	os.WriteFile(filepath.Join(projectDir, "promise.toml"), []byte(`
+[module]
+name = "myapp"
+epoch = "2026.3"
+`), 0644)
+
+	os.WriteFile(filepath.Join(modDir, "promise.toml"), []byte(`
+[module]
+name = "mymod"
+epoch = "2025.1"
+`), 0644)
+
+	os.WriteFile(filepath.Join(modDir, "lib.pr"), []byte("greet() string `public { return \"hello\"; }\n"), 0644)
+
+	projectCfg, err := module.ParseConfig(filepath.Join(projectDir, "promise.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loader := testModuleLoaderWithConfig(projectDir, testStdFiles(t), projectCfg)
+	_, loadErr := loader.load(modDir)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+
+	if len(loader.warnings) == 0 {
+		t.Fatal("expected epoch mismatch warning, got none")
+	}
+	w := loader.warnings[0]
+	if !strings.Contains(w, "epoch") || !strings.Contains(w, "2025.1") || !strings.Contains(w, "2026.3") {
+		t.Errorf("unexpected warning: %q", w)
+	}
+}
+
+func TestEpochMatchNoWarning(t *testing.T) {
+	projectDir := t.TempDir()
+	modDir := filepath.Join(projectDir, "libs", "mymod")
+	if err := os.MkdirAll(modDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	os.WriteFile(filepath.Join(projectDir, "promise.toml"), []byte(`
+[module]
+name = "myapp"
+epoch = "2026.3"
+`), 0644)
+
+	os.WriteFile(filepath.Join(modDir, "promise.toml"), []byte(`
+[module]
+name = "mymod"
+epoch = "2026.3"
+`), 0644)
+
+	os.WriteFile(filepath.Join(modDir, "lib.pr"), []byte("greet() string `public { return \"hello\"; }\n"), 0644)
+
+	projectCfg, err := module.ParseConfig(filepath.Join(projectDir, "promise.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loader := testModuleLoaderWithConfig(projectDir, testStdFiles(t), projectCfg)
+	_, loadErr := loader.load(modDir)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+
+	if len(loader.warnings) != 0 {
+		t.Errorf("expected no warnings for matching epochs, got: %v", loader.warnings)
+	}
+}

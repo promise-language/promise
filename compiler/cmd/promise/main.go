@@ -46,6 +46,8 @@ Commands:
   ast       Print the AST
   exec      Execute inline Promise code
   init      Initialize a new Promise project (creates promise.toml)
+  pin       Pin a remote module to a specific commit
+  clean     Remove build cache (--global for remote module cache)
   install   Install Promise to ~/.promise/
 
 Options (build):
@@ -127,7 +129,9 @@ func main() {
 	case "init":
 		runInit()
 	case "clean":
-		runClean()
+		runClean(os.Args[2:])
+	case "pin":
+		runPin(os.Args[2:])
 	case "install":
 		runInstall()
 	default:
@@ -2289,6 +2293,8 @@ type moduleLoader struct {
 	// commitPins holds effective commit pins for remote modules.
 	// Starts with [require] from root project, extended by transitive deps.
 	commitPins map[string]string
+	// warnings collects warning messages emitted during loading.
+	warnings []string
 }
 
 // loadModuleScopes scans use declarations for local module paths, loads each
@@ -2359,6 +2365,11 @@ func loadModuleScopes(filename string, file *ast.File, stdFiles []*ast.File) (ma
 		scopes[u.Path] = exportedScope
 	}
 
+	// Emit warnings collected during loading
+	for _, w := range loader.warnings {
+		fmt.Fprintln(os.Stderr, w)
+	}
+
 	if len(scopes) == 0 {
 		return nil, nil, nil
 	}
@@ -2425,6 +2436,11 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 		return nil, fmt.Errorf("duplicate module name %q: declared by both %s and %s", modCfg.Name, existingDir, absDir)
 	}
 	ml.canonicalNames[modCfg.Name] = absDir
+
+	// Epoch mismatch warning
+	if ml.projectCfg != nil && modCfg.Epoch != "" && ml.projectCfg.Epoch != "" && modCfg.Epoch != ml.projectCfg.Epoch {
+		ml.warnings = append(ml.warnings, fmt.Sprintf("warning: module %q has epoch %s, but project uses epoch %s", modCfg.Name, modCfg.Epoch, ml.projectCfg.Epoch))
+	}
 
 	// Parse all .pr files in the module directory
 	entries, err := os.ReadDir(absDir)
@@ -3029,13 +3045,23 @@ func printFileErrors(filename string, errs []error) {
 // runInstall installs the Promise compiler to ~/.promise/.
 // runInit creates a promise.toml in the current directory.
 // runClean removes the .promise-build/ cache directory.
-func runClean() {
+func runClean(args []string) {
+	global := false
+	for _, a := range args {
+		if a == "--global" {
+			global = true
+		} else {
+			fmt.Fprintf(os.Stderr, "usage: promise clean [--global]\n")
+			os.Exit(1)
+		}
+	}
+
+	// Always clean local build cache
 	dir, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	// Walk up to find project root
 	if cfg, err := module.FindConfig(dir); err == nil && cfg != nil {
 		dir = cfg.Dir
 	}
@@ -3045,6 +3071,62 @@ func runClean() {
 		os.Exit(1)
 	}
 	fmt.Println("Cleaned build cache")
+
+	if global {
+		if err := module.CleanGlobalCache(); err != nil {
+			fmt.Fprintf(os.Stderr, "error cleaning global cache: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Cleaned global module cache")
+	}
+}
+
+// runPin resolves a remote module ref to a full commit SHA and writes it to promise.toml.
+func runPin(args []string) {
+	if len(args) < 1 || len(args) > 2 {
+		fmt.Fprintln(os.Stderr, "usage: promise pin <url> [ref]")
+		fmt.Fprintln(os.Stderr, "  ref: tag, branch, commit hash, or HEAD (default: HEAD)")
+		os.Exit(1)
+	}
+
+	url := args[0]
+	ref := "HEAD"
+	if len(args) == 2 {
+		ref = args[1]
+	}
+
+	// Find promise.toml
+	dir, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	cfg, err := module.FindConfig(dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if cfg == nil {
+		fmt.Fprintln(os.Stderr, "error: no promise.toml found (run 'promise init' first)")
+		os.Exit(1)
+	}
+
+	// Resolve ref to full commit hash
+	fmt.Fprintf(os.Stderr, "Resolving %s @ %s...\n", url, ref)
+	commitHash, err := module.PinResolve(url, ref)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Write to promise.toml
+	tomlPath := filepath.Join(cfg.Dir, "promise.toml")
+	if err := module.SetRequire(tomlPath, url, commitHash); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Pinned %s → %s\n", url, commitHash[:12])
 }
 
 func runInit() {

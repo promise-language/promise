@@ -166,6 +166,75 @@ func NormalizeURL(url string) string {
 	return s
 }
 
+// SetRequire updates or adds a [require] entry in the promise.toml file at path.
+// Preserves existing file content (comments, formatting) — only modifies the [require] section.
+func SetRequire(path, url, commitHash string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("cannot read %s: %w", path, err)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	entry := fmt.Sprintf("%q = %q", url, commitHash)
+
+	// Find [require] section and look for existing key
+	requireStart := -1 // line index of [require] header
+	requireEnd := -1   // line index of next section header (or EOF)
+	existingLine := -1 // line index of existing entry for this URL
+
+	normalizedURL := NormalizeURL(url)
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "[require]" {
+			requireStart = i
+			continue
+		}
+		if requireStart >= 0 && requireEnd < 0 {
+			// We're inside [require]
+			if strings.HasPrefix(trimmed, "[") {
+				requireEnd = i
+				continue
+			}
+			// Check if this line is for the same URL
+			if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+				if key, _, err := parseTOMLLine(trimmed); err == nil {
+					if NormalizeURL(key) == normalizedURL {
+						existingLine = i
+					}
+				}
+			}
+		}
+	}
+
+	if existingLine >= 0 {
+		// Replace existing entry
+		lines[existingLine] = entry
+	} else if requireStart >= 0 {
+		// Append to existing [require] section
+		insertAt := requireStart + 1
+		if requireEnd >= 0 {
+			insertAt = requireEnd
+		} else {
+			insertAt = len(lines)
+		}
+		// Find last non-empty line in [require] to insert after
+		for j := insertAt - 1; j > requireStart; j-- {
+			if strings.TrimSpace(lines[j]) != "" {
+				insertAt = j + 1
+				break
+			}
+		}
+		lines = append(lines[:insertAt], append([]string{entry}, lines[insertAt:]...)...)
+	} else {
+		// No [require] section — add one
+		// Find end of file, add section
+		result := strings.TrimRight(string(data), "\n") + "\n\n[require]\n" + entry + "\n"
+		return os.WriteFile(path, []byte(result), 0644)
+	}
+
+	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644)
+}
+
 // IsLocalPath returns true if the location string refers to a local module.
 func IsLocalPath(location string) bool {
 	if strings.HasPrefix(location, "./") || strings.HasPrefix(location, "../") {

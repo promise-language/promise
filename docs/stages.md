@@ -37,7 +37,7 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 
 | Stage | Package | Description | Status |
 |-------|---------|-------------|--------|
-| 9 | `compiler/internal/module/`, `sema/`, `codegen/`, `std/` | Module system: visibility, qualified access, local imports, cross-module codegen, separate/incremental compilation, transitive deps, circular detection, remote git fetching | Phase 3 In Progress |
+| 9 | `compiler/internal/module/`, `sema/`, `codegen/`, `std/` | Module system: visibility, qualified access, local imports, cross-module codegen, separate/incremental compilation, transitive deps, circular detection, remote git fetching | Phase 3 Done |
 | 10 | `cmd/promise/` | CLI entry point (build, run, test, fmt, etc.) | Done (except `fmt`) |
 | 11 | `pkg/` | Package manager: fetch, resolve, lock | Planned |
 
@@ -597,7 +597,7 @@ Generator functions: `stream[T]` return type with `yield` statements, compiled t
 
 **Deferred**: `yield*` (delegate to sub-iterator), failable generators (`stream[T]!`), stored generator values (first-class generator variables outside for-in), generator closures (capturing lambdas as generators).
 
-## Stage 9 — Module System (Phase 3 In Progress)
+## Stage 9 — Module System (Phase 3 Done)
 
 Module resolution and dependency management. See [module-system-proposal.md](module-system-proposal.md) for the full design.
 
@@ -629,11 +629,11 @@ Module resolution and dependency management. See [module-system-proposal.md](mod
 - **Module-prefixed IR globals**: `typeGlobalName()` returns `__mod_<canonical>_<Type>` for typeinfo, vtable, and RTTI globals when compiling a module. Prevents name collisions between module types and std library types (e.g., module `Range` vs std `Range`). `resolveModuleName()` maps consumer aliases to canonical names via `moduleCanonical` map.
 - **Tests**: 3 new loader tests (transitive, diamond, circular, 3-module circular, canonical name, duplicate canonical name), 4 new codegen tests (prefixed globals, SplitModuleIRs, canonical vs alias IR identity), 8 new cache unit tests (hashing, determinism, round-trip, stale cleanup), 1 new e2e test file (4-level deep transitive chain: test → renderer → geometry → utils). Total: 53 e2e module tests across 15 files, 775 total tests.
 
-**Phase 3 — Remote Module Fetching (Steps 1-4 done, Steps 5-7 planned):**
+**Phase 3 — Remote Module Fetching (done):**
 
 See [phase3-remote-modules.md](phase3-remote-modules.md) for the full design.
 
-**Files:** `internal/module/config.go` (NormalizeURL, IsLocalPath, IsCommitHashLike), `internal/module/git.go` (new — git operations), `cmd/promise/main.go` (loadRemote, transitive pin merging)
+**Files:** `internal/module/config.go` (NormalizeURL, SetRequire, IsLocalPath), `internal/module/git.go` (new — git operations), `cmd/promise/main.go` (loadRemote, runPin, runClean --global, epoch warnings)
 
 - **URL normalization**: `NormalizeURL()` strips schemes (`https://`, `http://`, `git://`, `ssh://`), trailing `.git`, trailing slashes, lowercases host (preserves path case). Idempotent.
 - **Global cache**: `~/.promise/cache/modules/<normalized-url>/repo.git/` (bare clone) + `<commit12>/` (checkout). `GlobalCacheDir()`, `URLToCachePath()`, `CleanGlobalCache()`.
@@ -641,9 +641,10 @@ See [phase3-remote-modules.md](phase3-remote-modules.md) for the full design.
 - **Pin resolution**: `PinResolve()` resolves tags/branches/HEAD/"" to full 40-char commit SHA via `git ls-remote`. `IsFullCommitHash()`/`IsCommitHashLike()` validators.
 - **`moduleLoader` integration**: `projectCfg` (root config), `remoteResolved` (URL→absDir dedup), `commitPins` (effective pins). `loadRemote()`: normalize → dedup → `[replace]` check → pin lookup → `ResolveRemoteModule()` → `load()`. Both `loadModuleScopes()` and `loadDeps()` dispatch non-local imports to `loadRemote()`.
 - **Transitive pin merging**: `mergeTransitivePins()` reads remote module's `promise.toml` [require] and merges into effective pins. Top-level project pins always win (override). Conflicting pins from different modules → error. Called from both `[replace]` and git-fetch paths.
-- **Tests**: 17 git tests (bare repo, checkout, two commits, pin resolve tag/HEAD/full hash/not found, short hash, stale lock, cache clean), 2 URL normalization tests (18 table-driven cases + idempotency), 7 integration tests (replace, scheme variant, no pin error, nil config, isTopLevelPin, pin conflict, top-level override).
-
-**Remaining Phase 3 steps:** `promise pin` CLI command (Step 5), epoch mismatch warnings (Step 6), `promise clean --global` (Step 7).
+- **`promise pin`**: CLI command resolves tag/branch/HEAD/commit to full SHA via `PinResolve()`, writes to `promise.toml` via `SetRequire()`. Creates `[require]` section if absent; updates existing entries in-place (normalized URL match).
+- **Epoch mismatch warnings**: `load()` compares module's epoch vs project epoch, collects warnings in `ml.warnings`. Printed to stderr after all modules loaded.
+- **`promise clean --global`**: `runClean(args)` accepts `--global` flag; removes both `.promise-build/` and `~/.promise/cache/modules/`.
+- **Tests**: 17 git tests, 2+5 config tests (URL normalization + SetRequire), 7+2 integration tests (remote module + epoch warnings).
 
 **Deferred to Phase 4+:**
 - Catalog infrastructure and versioning
@@ -711,7 +712,7 @@ Dependency fetching and resolution.
 
 ## What's Next
 
-The compiler pipeline (Stages 1-8p) is complete. Runtime is fully codegen-emitted LLVM IR — no C files remain. All major cross-cutting features are done: M:N scheduler (Phase 5c), WASM target (Phases 4b/5d/7a), yield generators, structural interfaces, operator dispatch, naming conventions, pure value types, documentation system (Phase 1), and module system (Phase 3 in progress: remote git fetching core done, CLI tooling remaining).
+The compiler pipeline (Stages 1-8p) is complete. Runtime is fully codegen-emitted LLVM IR — no C files remain. All major cross-cutting features are done: M:N scheduler (Phase 5c), WASM target (Phases 4b/5d/7a), yield generators, structural interfaces, operator dispatch, naming conventions, pure value types, documentation system (Phase 1), and module system (Phase 3 done: local+remote modules, git fetching, `promise pin`, epoch warnings, separate/incremental compilation).
 
 Test suite: 781 native pass, 761 WASM pass (3 skip).
 
@@ -719,8 +720,8 @@ Test suite: 781 native pass, 761 WASM pass (3 skip).
 
 | Work | Priority |
 |------|----------|
-| Module system Phase 3 remaining: `promise pin`, epoch warnings, `promise clean --global` — Stage 9 | Medium |
 | CLI: `promise fmt` code formatter — Stage 10 | Medium |
+| Module system Phase 4 (catalog infrastructure) — Stage 9 | Medium |
 | Package manager (fetch, resolve, lock) — Stage 11 | Medium |
 | Documentation system Phase 2 (directory/recursive docs, `-std`, index generation) | Medium |
 
@@ -840,9 +841,6 @@ Known gaps and improvements deferred from completed stages.
 
 | Item | Priority |
 |------|----------|
-| `promise pin` CLI command (Phase 3, Step 5) | Medium |
-| Epoch mismatch warnings (Phase 3, Step 6) | Low |
-| `promise clean --global` (Phase 3, Step 7) | Low |
 | Catalog infrastructure and versioning (Phase 4) | Low |
 
 ### Unscheduled Features

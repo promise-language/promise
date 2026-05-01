@@ -74,7 +74,7 @@ When loading a remote module, its `promise.toml` [require] entries merge into ef
 - Conflicting pins from different modules → error with conflict chain
 - Same pin → share the checkout
 
-### Step 5: `promise pin` CLI command
+### Step 5: `promise pin` CLI command [DONE]
 
 ```
 promise pin "github.com/someone/parser"          # pin to HEAD
@@ -82,15 +82,15 @@ promise pin "github.com/someone/parser" v2.1.0   # resolve tag
 promise pin "github.com/someone/parser" a1b2c3d  # exact commit
 ```
 
-Uses `git ls-remote` to resolve refs. Writes full 40-char SHA to `promise.toml`.
+Uses `PinResolve()` (via `git ls-remote`) to resolve refs. Writes full 40-char SHA to `promise.toml` `[require]` section via `SetRequire()`. Creates `[require]` section if missing; updates existing entries in-place (matched by normalized URL).
 
-### Step 6: Epoch mismatch warnings
+### Step 6: Epoch mismatch warnings [DONE]
 
-Compare remote module epoch vs project epoch, emit warning if different.
+When loading a module, compares its `epoch` field against the project's `epoch`. Emits a warning if they differ: `warning: module "foo" has epoch 2025.1, but project uses epoch 2026.3`. Warnings are collected in `moduleLoader.warnings` and printed to stderr after all modules are loaded.
 
-### Step 7: `promise clean --global`
+### Step 7: `promise clean --global` [DONE]
 
-Extend `runClean()` to optionally clean `~/.promise/cache/modules/`.
+`promise clean` removes `.promise-build/` (local build cache). `promise clean --global` additionally removes `~/.promise/cache/modules/` (global remote module cache) via `CleanGlobalCache()`.
 
 ## Files
 
@@ -103,10 +103,10 @@ Extend `runClean()` to optionally clean `~/.promise/cache/modules/`.
 ### Modified
 | File | Changes |
 |------|---------|
-| `module/config.go` | `NormalizeURL()` — strips `https://`, `http://`, `git://`, `ssh://`, `.git`, trailing slashes, lowercases host |
-| `module/config_test.go` | 16 table-driven URL normalization tests + idempotency test |
-| `cmd/promise/main.go` | `loadRemote()` method, `projectCfg`/`remoteResolved`/`commitPins` fields, absolute path support in `load()`, transitive pin merging |
-| `cmd/promise/parse_test.go` | `testModuleLoaderWithConfig()` helper, `TestLoadRemoteModuleReplace`, `TestLoadRemoteModuleReplaceSchemeVariant`, `TestLoadRemoteModuleNoPinError` |
+| `module/config.go` | `NormalizeURL()`, `SetRequire()` (TOML write), `IsLocalPath()`, `IsCommitHashLike()` |
+| `module/config_test.go` | URL normalization tests, `SetRequire` tests (new section, existing section, append, normalized match, preserve comments) |
+| `cmd/promise/main.go` | `loadRemote()`, `runPin()`, `runClean(--global)`, epoch warnings via `ml.warnings`, `projectCfg`/`remoteResolved`/`commitPins` fields |
+| `cmd/promise/parse_test.go` | Remote module tests (replace, scheme variant, no pin, nil config, pin conflict, top-level override), epoch mismatch/match tests |
 
 ### Unchanged
 Grammar, AST, sema, codegen, `module/cache.go` — all module-agnostic.

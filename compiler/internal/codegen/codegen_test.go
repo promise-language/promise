@@ -2265,6 +2265,27 @@ func TestReturnInFailable(t *testing.T) {
 	assertContains(t, ir, "ret { i1, i64, i8* }")
 }
 
+func TestFailableVoidBangShorthand(t *testing.T) {
+	ir := generateIR(t, `
+		fail()! { raise error(message: "oops"); }
+		main() { }
+	`)
+	// Should produce void result struct { i1, i8* }
+	assertContains(t, ir, "define { i1, i8* } @fail()")
+}
+
+func TestFailableMain(t *testing.T) {
+	ir := generateIR(t, `
+		main()! {
+			raise error(message: "boom");
+		}
+	`)
+	// Body compiled into helper function
+	assertContains(t, ir, "define { i1, i8* } @__promise_main_body()")
+	// Error path panics
+	assertContains(t, ir, "unhandled error in main")
+}
+
 func TestRaiseStmt(t *testing.T) {
 	ir := generateIR(t, `
 		parse(string s) int! { raise error(message: "parse error"); }

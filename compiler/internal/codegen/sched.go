@@ -1,6 +1,7 @@
 package codegen
 
 import (
+	"djabi.dev/go/promise_lang/internal/types"
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
@@ -1740,6 +1741,24 @@ func (c *Compiler) wrapMainWithScheduler() {
 		return // no main function (e.g., test-only compilation)
 	}
 
+	// If main is failable, compile its body into a separate helper function.
+	// raise inside a coroutine would try to return a result struct from an
+	// i8*-returning function, causing a type mismatch crash.
+	var mainBodyFn *ir.Func
+	mainIsFailable := false
+	if obj := c.lookupFunc("main"); obj != nil {
+		if sig, ok := obj.Type().(*types.Signature); ok && sig.CanError() {
+			mainIsFailable = true
+			var innerType irtypes.Type = irtypes.Void
+			if sig.Result() != nil {
+				innerType = c.resolveType(sig.Result())
+			}
+			resultType := computeResultType(innerType)
+			mainBodyFn = c.module.NewFunc("__promise_main_body", resultType)
+			c.defineFunc(c.mainDecl, mainBodyFn)
+		}
+	}
+
 	// mainFn was declared by declareFuncs with i32 return but no body defined.
 	// Use it directly as the OS entry point — add scheduler setup code.
 	entry := mainFn.NewBlock("entry")
@@ -1834,10 +1853,30 @@ func (c *Compiler) wrapMainWithScheduler() {
 	c.coroCleanupBlk = cleanupBlk
 	c.coroSuspendBlk = doneBlk
 
-	// --- Body: compile main's AST statements inline ---
+	// --- Body ---
 	c.block = bodyBlk
 	c.entryBlock = startBlk // allocas go in startBlk (part of coroutine frame)
-	c.genBlock(c.mainDecl.Body)
+	if mainIsFailable {
+		// Call the helper function and check the result
+		result := c.block.NewCall(mainBodyFn)
+		tag := c.block.NewExtractValue(result, 0) // i1: false=ok, true=error
+		errBlk := coroFn.NewBlock("main.error")
+		okBlk := coroFn.NewBlock("main.ok")
+		c.block.NewCondBr(tag, errBlk, okBlk)
+
+		// Error path: panic with message
+		panicStr := constant.NewCharArrayFromString("unhandled error in main\x00")
+		panicGlobal := c.module.NewGlobalDef(".str.main_error", panicStr)
+		panicGlobal.Immutable = true
+		msgPtr := errBlk.NewGetElementPtr(panicGlobal.ContentType, panicGlobal,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		errBlk.NewCall(c.funcs["promise_panic"], msgPtr)
+		errBlk.NewUnreachable()
+
+		c.block = okBlk
+	} else {
+		c.genBlock(c.mainDecl.Body)
+	}
 
 	// Final suspend: yield back to scheduler
 	finalSuspBlk := coroFn.NewBlock("final.suspend")

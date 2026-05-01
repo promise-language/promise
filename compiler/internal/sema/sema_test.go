@@ -1385,6 +1385,21 @@ func TestTypedHandlerWithInheritanceChainDeep(t *testing.T) {
 	`)
 }
 
+func TestBangShorthandForVoidFailable(t *testing.T) {
+	// foo()! is shorthand for foo() void!
+	checkOK(t, `
+		foo()! { raise error(message: "oops"); }
+	`)
+}
+
+func TestBangShorthandMethodFailable(t *testing.T) {
+	checkOK(t, `
+		type Foo {
+			bar(this)! { raise error(message: "oops"); }
+		}
+	`)
+}
+
 func TestRaiseStringLiteral(t *testing.T) {
 	errs := checkErrs(t, `foo() void! { raise "oops"; }`)
 	expectError(t, errs, "raise requires an error type")

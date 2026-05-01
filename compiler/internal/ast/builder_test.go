@@ -118,6 +118,16 @@ func TestBuildFuncDecl(t *testing.T) {
 			},
 		},
 		{
+			name: "bang_shorthand_void_failable",
+			src:  `fail()! { raise error("boom"); }`,
+			check: func(t *testing.T, file *File) {
+				fn := file.Decls[0].(*FuncDecl)
+				assertNotNil(t, fn.ReturnType)
+				assertTrue(t, fn.ReturnType.CanError)
+				assertNil(t, fn.ReturnType.Type)
+			},
+		},
+		{
 			name: "generics",
 			src:  `identity[T](T val) T { return val; }`,
 			check: func(t *testing.T, file *File) {

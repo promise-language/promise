@@ -337,11 +337,14 @@ func (b *Builder) VisitFuncDecl(ctx *parser.FuncDeclContext) interface{} {
 }
 
 func (b *Builder) VisitReturnType(ctx *parser.ReturnTypeContext) interface{} {
-	return &ReturnTypeSpec{
+	spec := &ReturnTypeSpec{
 		nodeBase: b.baseFromContext(ctx),
-		Type:     b.visitTypeRef(ctx.TypeRef()),
 		CanError: ctx.BANG() != nil,
 	}
+	if tr := ctx.TypeRef(); tr != nil {
+		spec.Type = b.visitTypeRef(tr)
+	}
+	return spec
 }
 
 func (b *Builder) visitTypeParams(ctx parser.ITypeParamsContext) []*TypeParam {

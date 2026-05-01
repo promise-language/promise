@@ -1206,6 +1206,14 @@ readFile(string &path) string! {
 
 The `!` suffix on the return type means: "this function returns `(string, Error)`".
 
+For void functions, `!` alone is shorthand for `void!`:
+
+```promise
+validate(string input)! {
+  if input.is_empty() { raise error("empty input"); }
+}
+```
+
 ### 7.2 Calling Failable Functions
 
 In a **failable function** (return type has `!`), a naked call to another failable function **auto-propagates** the error — if the callee fails, the caller immediately returns the error to its own caller. This is the most common case and requires no extra syntax:

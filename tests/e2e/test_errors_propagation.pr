@@ -280,3 +280,31 @@ test_result_capture_conditional() `test {
     assert(second_ok, "second parse failed as expected");
     assert(val1 == 42, "first value correct");
 }
+
+// ============================================================
+// Section 7: Bang shorthand (! as void!)
+// ============================================================
+
+bang_void()! {
+    raise error(message: "bang");
+}
+
+bang_ok()! {
+    // does not raise
+}
+
+test_bang_shorthand_raise() `test {
+    bool caught = false;
+    bang_void() ? e {
+        caught = true;
+    };
+    assert(caught, "bang shorthand function raised");
+}
+
+test_bang_shorthand_ok() `test {
+    bool caught = false;
+    bang_ok() ? e {
+        caught = true;
+    };
+    assert(!caught, "bang shorthand ok path");
+}

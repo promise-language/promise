@@ -325,7 +325,11 @@ func (p *printer) printReturnType(rt *ReturnTypeSpec) {
 	if rt.CanError {
 		err = "!"
 	}
-	p.line("Returns %s%s", p.typeRefStr(rt.Type), err)
+	typeName := "void"
+	if rt.Type != nil {
+		typeName = p.typeRefStr(rt.Type)
+	}
+	p.line("Returns %s%s", typeName, err)
 }
 
 func (p *printer) printAnnotations(anns []*MetaAnnotation) {

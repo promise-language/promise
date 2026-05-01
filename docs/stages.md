@@ -846,7 +846,46 @@ Known gaps and improvements deferred from completed stages.
 
 | Item | Priority |
 |------|----------|
-| Catalog infrastructure and versioning (Phase 4) | Low |
+| **Module identity redesign** — current `name` field causes collisions when two community modules use the same name (e.g. two "parser" modules can't coexist). Need a globally unique canonical identity scheme. See design notes below. | High |
+| Catalog infrastructure and versioning (Phase 4) | Medium |
+| Std as a regular cacheable module (remove AST-merge special case) | Low |
+
+**Module identity design — two-layer architecture:**
+
+The current scheme uses `promise.toml` `name` as the canonical IR identity (`__mod_<name>_<func>`). This is simple but not globally unique — two unrelated remote modules with `name = "parser"` collide.
+
+**Layer 1 — Global identity (canonical, stable, unique):**
+Every module has a globally unique identity derived from its source:
+- **Remote modules**: the normalized URL (e.g. `github.com/alice/parser`) — already computed by `NormalizeURL()`.
+- **Catalog modules**: the catalog-assigned name (e.g. `json`, `http`). Guaranteed unique within an epoch by the catalog registry. Short, descriptive, and ideal as-is.
+- **Local modules**: the full normalized URL of the root project + relative path (e.g. `github.com/myorg/myapp/libs/parser`), or just the relative path for non-published projects.
+- **Std**: `std` — singleton, always the same.
+
+**Layer 2 — Local identity (IR symbols, build-specific):**
+The build system maps global identities to local IR symbol prefixes. The mapping strategy is an implementation detail — the build system doesn't care *how* the mapping works, only that it is **stable** (same input → same output) and **collision-free** (no two distinct global identities map to the same local identity). Possible strategies:
+- **Verbatim**: use the full global identity in quoted LLVM identifiers (`@"github.com/alice/parser.parse"`). Best for debugging. Verbose but unambiguous.
+- **Hash-based**: deterministic hash of the global identity → short prefix (`__mod_a3b4c5_parse`). Compact but opaque.
+- **Dictionary-based**: compiler maintains a persisted mapping file (global identity → short index). `github.com/alice/parser` → `__mod43`. Compact and stable across builds if the dictionary is shared.
+- **Catalog shortcut**: for catalog modules, the catalog ID *is* the local identity (e.g. `__mod_json_parse`). Short, readable, globally unique by construction.
+- **Mixed**: use catalog IDs for catalog modules, hashes for remote git modules, relative paths for local modules. Each strategy is optimal for its source type.
+
+The build system should treat Layer 2 as a pluggable concern: any function `f(global_identity) → local_prefix` that satisfies stability and collision-freedom is valid. This separation means the local identity strategy can evolve (e.g. switch from hash to dictionary) without changing the module system, cache keys, or dependency resolution.
+
+**Global content-addressable build cache:**
+
+The current `.promise-build/` is project-local — every project rebuilds all its modules from scratch even when another project already compiled the same module at the same commit with the same compiler. Worse, project-less commands like `promise exec` have no cache at all — every invocation recompiles std and everything else from scratch. This is especially costly for the AI-agent use case (Promise's core design target): an agent using `promise exec` as a tool in a loop pays full `opt+llc` cost every time. A device-wide global build cache (e.g. `~/.promise/cache/build/`) would store `.o` files keyed by a content address derived from all inputs that affect the output:
+- Compiler binary hash (or version)
+- Build mode (debug/release), optimization level, target triple
+- Module source hash (impl hash — already computed)
+- Module interface hashes of all direct dependencies (already computed)
+- Local identity strategy + its output for this module (part of the `.o` content)
+
+The cache key is a SHA-256 of these inputs → `~/.promise/cache/build/<hash>.o`. Any build on the device that produces the same key reuses the cached `.o`. This is especially valuable for common dependencies — if 10 projects all use `github.com/alice/parser` at the same commit, it's compiled once. Because the local identity mapping is deterministic (same global identity → same local prefix regardless of which project), both debug and release `.o` files are globally cacheable.
+
+Challenges:
+- **Garbage collection**: unlike project-local `.promise-build/` (cleaned by `promise clean`), a global cache grows unboundedly. Options: LRU eviction by access time, max size limit, `promise clean --build-cache` manual purge, or reference counting (track which projects use which entries — complex).
+- **Cache key correctness**: must include everything that affects the `.o` output. Missing an input (e.g. a codegen flag) causes silent miscompilation. Over-including inputs (e.g. absolute paths) defeats sharing.
+- **Atomic writes**: concurrent builds must not corrupt cache entries. Write to temp file + atomic rename (already used for the remote module cache).
 
 ### Unscheduled Features
 

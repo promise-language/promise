@@ -2309,6 +2309,224 @@ func TestSelfParameterType(t *testing.T) {
 	`)
 }
 
+// --- Self on generic types ---
+
+func TestSelfReturnTypeGeneric(t *testing.T) {
+	checkOK(t, `
+		type Box[T] {
+			T value;
+			new(~this, T v) { this.value = v; }
+			wrap(T v) Self `+"`"+`factory {
+				return Self(v: v);
+			}
+		}
+		test() {
+			Box[int] b = Box[int].wrap(v: 42);
+		}
+	`)
+}
+
+func TestSelfReturnTypeGenericMethodReturn(t *testing.T) {
+	checkOK(t, `
+		type Box[T] {
+			T value;
+			new(~this, T v) { this.value = v; }
+			rewrap(T v) Self {
+				return Self(v: v);
+			}
+		}
+		test() {
+			Box[int] b = Box[int](v: 1);
+			Box[int] c = b.rewrap(v: 42);
+		}
+	`)
+}
+
+func TestSelfConstructorCallGeneric(t *testing.T) {
+	checkOK(t, `
+		type Pair[A, B] {
+			A first;
+			B second;
+			new(~this, A a, B b) { this.first = a; this.second = b; }
+			swap() Self {
+				return Self(a: this.first, b: this.second);
+			}
+		}
+		test() {
+			Pair[int, string] p = Pair[int, string](a: 1, b: "x");
+			Pair[int, string] q = p.swap();
+		}
+	`)
+}
+
+func TestSelfParameterTypeGeneric(t *testing.T) {
+	checkOK(t, `
+		type Box[T] {
+			T value;
+			new(~this, T v) { this.value = v; }
+			same_value(Self other) bool {
+				return true;
+			}
+		}
+		test() {
+			Box[int] a = Box[int](v: 1);
+			Box[int] b = Box[int](v: 2);
+			bool r = a.same_value(b);
+		}
+	`)
+}
+
+func TestSelfFieldTypeGeneric(t *testing.T) {
+	checkOK(t, `
+		type Node[T] {
+			T value;
+			Self? next;
+		}
+		test() {
+			Node[int]? n = none;
+		}
+	`)
+}
+
+func TestSelfGenericFactoryAssignability(t *testing.T) {
+	// The return type of a generic factory returning Self must be
+	// assignable to the instantiated type
+	checkOK(t, `
+		type Wrapper[T] {
+			T val;
+			new(~this, T v) { this.val = v; }
+			create(T v) Self `+"`"+`factory {
+				return Self(v: v);
+			}
+		}
+		test() {
+			// Type inference: the result type of create should be Wrapper[int]
+			w := Wrapper[int].create(v: 10);
+		}
+	`)
+}
+
+func TestSelfGenericRejectsTypeArgs(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box[T] {
+			T value;
+			bad() Self[int] {
+				return this;
+			}
+		}
+		test() {}
+	`)
+	expectError(t, errs, "Self does not take type arguments")
+}
+
+func TestSelfOutsideTypeExpr(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			x := Self;
+		}
+	`)
+	expectError(t, errs, "Self can only be used inside a type body")
+}
+
+func TestSelfGenericMultipleTypeParams(t *testing.T) {
+	checkOK(t, `
+		type Map2[K, V] {
+			K key;
+			V val;
+			new(~this, K k, V v) { this.key = k; this.val = v; }
+			make(K k, V v) Self `+"`"+`factory {
+				return Self(k: k, v: v);
+			}
+		}
+		test() {
+			Map2[string, int] m = Map2[string, int].make(k: "x", v: 1);
+		}
+	`)
+}
+
+func TestSelfGenericReturnTypeMismatch(t *testing.T) {
+	// Returning wrong instantiation should fail
+	errs := checkErrs(t, `
+		type Box[T] {
+			T value;
+			new(~this, T v) { this.value = v; }
+			bad() Self {
+				return Box[string](v: "oops");
+			}
+		}
+		test() {
+			Box[int] b = Box[int](v: 1);
+		}
+	`)
+	expectError(t, errs, "cannot return")
+}
+
+func TestSelfFailableFactoryGeneric(t *testing.T) {
+	checkOK(t, `
+		type Validated[T] {
+			T value;
+			new(~this, T v) { this.value = v; }
+			parse(T v) Self! `+"`"+`factory {
+				return Self(v: v);
+			}
+		}
+		test() {
+			Validated[int] v = Validated[int].parse(v: 42)!;
+		}
+	`)
+}
+
+func TestSelfOptionalFactoryGeneric(t *testing.T) {
+	checkOK(t, `
+		type MaybeBox[T] {
+			T value;
+			new(~this, T v) { this.value = v; }
+			try_wrap(T v, bool ok) Self? `+"`"+`factory {
+				if !ok { return none; }
+				return Self(v: v);
+			}
+		}
+		test() {
+			MaybeBox[int]? r = MaybeBox[int].try_wrap(v: 1, ok: true);
+		}
+	`)
+}
+
+func TestSelfLocalVarAnnotationGeneric(t *testing.T) {
+	checkOK(t, `
+		type Holder[T] {
+			T value;
+			new(~this, T v) { this.value = v; }
+			duplicate() Self {
+				Self copy = Holder[T](v: this.value);
+				return copy;
+			}
+		}
+		test() {
+			Holder[int] h = Holder[int](v: 1);
+			Holder[int] h2 = h.duplicate();
+		}
+	`)
+}
+
+func TestSelfFieldAccessAfterGenericFactory(t *testing.T) {
+	// After calling a Self-returning factory on a generic type,
+	// field access should see the instantiated element type
+	checkOK(t, `
+		type Box[T] {
+			T value;
+			new(~this, T v) { this.value = v; }
+			wrap(T v) Self `+"`"+`factory {
+				return Self(v: v);
+			}
+		}
+		test() {
+			b := Box[int].wrap(v: 42);
+			int x = b.value;
+		}
+	`)
+}
+
 // --- Fix #1: Failable parent new propagation ---
 
 func TestChildNewMustBeFailableWhenParentIs(t *testing.T) {

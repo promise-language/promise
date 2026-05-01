@@ -1035,7 +1035,7 @@ A field is **required** if it is not `T?` and does not have `= default`. All req
 | After monomorphization for `Box[int]` | `Box[int]` |
 | Inside `type Dog is Animal { ... }` | `Dog` (not `Animal`) |
 
-`Self` is capitalized because it is a type name, contrasting with `this` which is a value. `Self` is usable in return types, constructor calls, parameter types, and field types within type bodies:
+`Self` is capitalized because it is a type name, contrasting with `this` which is a value. `Self` is usable in return types, constructor calls, parameter types, field types, and local variable annotations within type bodies:
 
 ```promise
 type Point {
@@ -1046,6 +1046,32 @@ type Point {
     return Self(x: this.x + dx, y: this.y + dy);
   }
 }
+```
+
+On generic types, `Self` resolves to the self-instantiation — `Self` inside `Box[T]` is `Box[T]`, not the raw `Box`. This ensures correct type parameter substitution during monomorphization:
+
+```promise
+type Box[T] {
+  T value;
+  new(~this, T v) { this.value = v; }
+
+  // Factory returning Self — monomorphizes to Box[int] for Box[int].wrap(...)
+  wrap(T v) Self `factory {
+    return Self(v: v);
+  }
+
+  // Instance method returning Self
+  rewrap(T v) Self {
+    return Self(v: v);
+  }
+
+  // Self as parameter type
+  same_as(Self other) bool {
+    return true;
+  }
+}
+
+Box[int] b = Box[int].wrap(v: 42);   // b.value is int, not T
 ```
 
 #### `` `final `` Fields

@@ -577,7 +577,7 @@ func (c *Checker) resolveMethodSignature(named *types.Named, md *ast.MethodDecl)
 	abstract := c.hasAnnotation(md.Annotations, "abstract")
 	if isFactory && abstract {
 		if result == nil {
-			result = named
+			result = c.selfType()
 		}
 	}
 

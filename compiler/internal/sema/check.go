@@ -32,6 +32,23 @@ type Checker struct {
 	moduleScopes      map[string]*types.Scope // pre-loaded module scopes (catalog name or path → scope)
 }
 
+// selfType returns the current type as Self would resolve:
+// for generic types, an Instance with the type's own params as args (e.g., Vector[T]);
+// for non-generic types, the Named type directly.
+func (c *Checker) selfType() types.Type {
+	if c.curType == nil {
+		return nil
+	}
+	if tparams := c.curType.TypeParams(); len(tparams) > 0 {
+		args := make([]types.Type, len(tparams))
+		for i, tp := range tparams {
+			args[i] = tp
+		}
+		return types.NewInstance(c.curType, args)
+	}
+	return c.curType
+}
+
 // Check performs semantic analysis on the given AST file.
 // It returns type information and any semantic errors found.
 func Check(file *ast.File) (*Info, []error) {

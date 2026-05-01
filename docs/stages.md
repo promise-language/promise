@@ -846,7 +846,7 @@ Known gaps and improvements deferred from completed stages.
 | Generator closures (capturing lambdas as generators) | Generators | Low |
 | Mono type vtable/RTTI: generic instances (e.g. `ConstProducer[int]`) lack vtable and typeinfo globals — virtual dispatch crashes when a mono instance is passed as a parent type (e.g. `ConstProducer[int]` as `Producer[int]`). Non-generic children of generic parents work (vtable emitted by `emitVtableGlobals`). Fix: emit vtable/typeinfo for mono instances in `computeMonoLayouts` or a dedicated `emitMonoVtables` pass. | 8f | Medium |
 | Devirtualization optimization (direct call when concrete type known) | 8L | Low |
-| Factory `Self` return type on generic native types resolves to raw `Vector` instead of monomorphized `Vector[T]` — workaround: use `T[]` return type | Runtime | Low |
+| ~~Factory `Self` return type on generic types resolves to raw `Vector` instead of monomorphized `Vector[T]`~~ — **Resolved**: `selfType()` helper returns self-instantiation (`Instance{curType, [T1, T2, ...]}`) for generic types; used in `resolveNamedType`, `checkIdentExpr`, and implicit abstract factory return | Sema | ~~Low~~ |
 | `as!` cast between u8/char crashes (extractInstancePtr on scalar) — numeric cast path doesn't cover char | Codegen | Low |
 | ~~String comparison operators (`<`, `>`, `<=`, `>=`)~~ — **Resolved**: lexicographic byte comparison via `memcmp` | 8b | ~~Medium~~ |
 | ~~Range value type variable binding~~ — resolved: Range is now `Range[T]` generic value type | 8g | ~~Medium~~ |

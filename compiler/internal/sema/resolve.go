@@ -116,7 +116,7 @@ func (c *Checker) resolveNamedType(r *ast.NamedTypeRef) types.Type {
 			c.errorf(r.Pos(), "Self does not take type arguments")
 			return nil
 		}
-		return c.curType
+		return c.selfType()
 	}
 
 	obj := c.lookup(r.Name)

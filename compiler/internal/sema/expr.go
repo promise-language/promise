@@ -287,7 +287,7 @@ func (c *Checker) checkIdentExpr(e *ast.IdentExpr) types.Type {
 			c.errorf(e.Pos(), "Self can only be used inside a type body")
 			return nil
 		}
-		return c.curType
+		return c.selfType()
 	}
 
 	obj := c.lookup(e.Name)

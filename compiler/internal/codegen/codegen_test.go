@@ -1455,6 +1455,62 @@ func TestGenericFailableFactoryPassthrough(t *testing.T) {
 	assertContains(t, ir, "ret { i1, { i8*, i8* }, i8* } %")
 }
 
+func TestSelfGenericFactoryCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] {
+			T value;
+			new(~this, T v) { this.value = v; }
+			wrap(T v) Self `+"`"+`factory {
+				return Self(v: v);
+			}
+		}
+		main() {
+			Box[int] b = Box[int].wrap(v: 42);
+		}
+	`)
+	// Factory should be monomorphized for int
+	assertContains(t, ir, "@Box__int.wrap(")
+	// Should call the Box__int constructor
+	assertContains(t, ir, "@Box__int.new(")
+}
+
+func TestSelfGenericMethodReturnCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] {
+			T value;
+			new(~this, T v) { this.value = v; }
+			rewrap(T v) Self {
+				return Self(v: v);
+			}
+		}
+		main() {
+			Box[int] b = Box[int](v: 1);
+			Box[int] c = b.rewrap(v: 2);
+		}
+	`)
+	// Instance method should exist for int monomorphization
+	assertContains(t, ir, "@Box__int.rewrap(")
+}
+
+func TestSelfGenericMultiParamCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		type Pair[A, B] {
+			A first;
+			B second;
+			new(~this, A a, B b) { this.first = a; this.second = b; }
+			make(A a, B b) Self `+"`"+`factory {
+				return Self(a: a, b: b);
+			}
+		}
+		main() {
+			Pair[int, string] p = Pair[int, string].make(a: 1, b: "x");
+		}
+	`)
+	// Factory monomorphized for (int, string)
+	assertContains(t, ir, "@Pair__int__string.make(")
+	assertContains(t, ir, "@Pair__int__string.new(")
+}
+
 func TestSuperCallCodegen(t *testing.T) {
 	ir := generateIR(t, `
 		type Animal {

@@ -50,7 +50,7 @@ resources:
 	@rm -rf $(RESOURCES)/modules
 	@mkdir -p $(RESOURCES)/modules
 	@touch $(RESOURCES)/modules/.keep
-	@if [ -d ../modules ]; then for d in ../modules/*/; do [ -d "$$d" ] && cp -r "$$d" $(RESOURCES)/modules/; done; fi
+	@if [ -d ../modules ]; then for d in ../modules/*/; do [ -d "$$d" ] && cp -r "$${d%/}" $(RESOURCES)/modules/; done; fi
 	@rm -rf $(TESTDATA_STD)
 	@mkdir -p $(TESTDATA_STD)
 	@cp ../std/*.pr $(TESTDATA_STD)/

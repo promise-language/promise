@@ -14,9 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"djabi.dev/go/promise_lang/internal/ast"
 	"djabi.dev/go/promise_lang/internal/codegen"
-	"djabi.dev/go/promise_lang/internal/sema"
+	"djabi.dev/go/promise_lang/internal/module"
 )
 
 // --- Stress test types ---
@@ -177,54 +176,30 @@ func compileTargets(files []string, baseDir string, targetTriple string) (target
 			}
 		}
 
-		var file *ast.File
-		var info *sema.Info
+		// Module test dispatch.
 		if modDir := isModuleTestFile(f); modDir != "" {
 			if moduleTestSeen[modDir] {
 				continue
 			}
 			moduleTestSeen[modDir] = true
-			file, info = compileModuleTestFrontend(modDir)
-		} else {
-			file, info = compileFrontend(f)
-		}
-
-		// Create temp binary
-		ext := ""
-		if isWasmTarget(target) {
-			ext = ".wasm"
-		}
-		tmp, err := os.CreateTemp("", "promise-stress-*"+ext)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
-			os.Exit(1)
-		}
-		tmp.Close()
-
-		if info.HasExpectOutput {
-			// Skip excluded e2e tests
-			if isTestExcluded(target, info.ExcludeTargets) {
-				os.Remove(tmp.Name())
+			file, info := compileModuleTestFrontend(modDir)
+			if len(info.Tests) == 0 {
 				continue
 			}
-			// E2E test — compile with normal main
-			result := codegen.Compile(file, info, target)
-			compileAndLink(result, tmp.Name(), target, f)
-			tempFiles = append(tempFiles, tmp.Name())
-			targets = append(targets, stressTarget{
-				relPath:  relPath,
-				binary:   tmp.Name(),
-				isE2E:    true,
-				expected: strings.TrimRight(info.ExpectOutput, "\n"),
-				tests:    []string{strings.TrimSuffix(filepath.Base(f), ".pr")},
-			})
-		} else if len(info.Tests) > 0 {
-			// Unit tests — compile with generated test main
+			ext := ""
+			if isWasmTarget(target) {
+				ext = ".wasm"
+			}
+			tmp, err := os.CreateTemp("", "promise-stress-*"+ext)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
+				os.Exit(1)
+			}
+			tmp.Close()
 			result := codegen.Compile(file, info, target)
 			result.GenerateTestMain(info.Tests)
 			compileAndLink(result, tmp.Name(), target, f)
 			tempFiles = append(tempFiles, tmp.Name())
-
 			var testNames []string
 			for _, t := range info.Tests {
 				if excludes, ok := info.TestExcludes[t.Name()]; ok {
@@ -239,8 +214,129 @@ func compileTargets(files []string, baseDir string, targetTriple string) (target
 				binary:  tmp.Name(),
 				tests:   testNames,
 			})
+			continue
+		}
+
+		// Non-module test: check cache first.
+		cacheKey, cacheable := computeTestFileCacheKey(f, target)
+		var cacheDir string
+		if cacheable {
+			cacheDir, _ = module.BuildCacheDir()
+		}
+
+		if cacheDir != "" {
+			if cachedBin := module.LookupTestBinaryCache(cacheDir, cacheKey); cachedBin != "" {
+				meta := module.LoadTestBinaryMeta(cacheDir, cacheKey)
+				if meta != nil && meta.E2E {
+					if isTestExcluded(target, meta.ExcludeTargets) {
+						continue
+					}
+					targets = append(targets, stressTarget{
+						relPath:  relPath,
+						binary:   cachedBin,
+						isE2E:    true,
+						expected: strings.TrimRight(meta.ExpectedOutput, "\n"),
+						tests:    []string{strings.TrimSuffix(filepath.Base(f), ".pr")},
+					})
+				} else if meta != nil && len(meta.Tests) > 0 {
+					var testNames []string
+					for _, name := range meta.Tests {
+						if excludes, ok := meta.TestExcludes[name]; ok {
+							if isTestExcluded(target, excludes) {
+								continue
+							}
+						}
+						testNames = append(testNames, name)
+					}
+					targets = append(targets, stressTarget{
+						relPath: relPath,
+						binary:  cachedBin,
+						tests:   testNames,
+					})
+				}
+				continue
+			}
+		}
+
+		// Cache miss — compile.
+		file, info := compileFrontend(f)
+
+		ext := ""
+		if isWasmTarget(target) {
+			ext = ".wasm"
+		}
+		tmp, err := os.CreateTemp("", "promise-stress-*"+ext)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
+			os.Exit(1)
+		}
+		tmp.Close()
+
+		if info.HasExpectOutput {
+			if isTestExcluded(target, info.ExcludeTargets) {
+				os.Remove(tmp.Name())
+				continue
+			}
+			result := codegen.Compile(file, info, target)
+			compileAndLink(result, tmp.Name(), target, f)
+			tempFiles = append(tempFiles, tmp.Name())
+
+			// Save to cache.
+			if cacheDir != "" {
+				module.SaveTestBinaryCache(cacheDir, cacheKey, tmp.Name())
+				module.SaveTestBinaryMeta(cacheDir, cacheKey, &module.TestCacheMeta{
+					E2E:            true,
+					ExpectedOutput: info.ExpectOutput,
+					ExcludeTargets: info.ExcludeTargets,
+				})
+			}
+
+			targets = append(targets, stressTarget{
+				relPath:  relPath,
+				binary:   tmp.Name(),
+				isE2E:    true,
+				expected: strings.TrimRight(info.ExpectOutput, "\n"),
+				tests:    []string{strings.TrimSuffix(filepath.Base(f), ".pr")},
+			})
+		} else if len(info.Tests) > 0 {
+			result := codegen.Compile(file, info, target)
+			result.GenerateTestMain(info.Tests)
+			compileAndLink(result, tmp.Name(), target, f)
+			tempFiles = append(tempFiles, tmp.Name())
+
+			var testNames []string
+			testExcludes := map[string][]string{}
+			for _, t := range info.Tests {
+				testNames = append(testNames, t.Name())
+				if excludes, ok := info.TestExcludes[t.Name()]; ok {
+					testExcludes[t.Name()] = excludes
+				}
+			}
+
+			// Save to cache.
+			if cacheDir != "" {
+				module.SaveTestBinaryCache(cacheDir, cacheKey, tmp.Name())
+				module.SaveTestBinaryMeta(cacheDir, cacheKey, &module.TestCacheMeta{
+					Tests:        testNames,
+					TestExcludes: testExcludes,
+				})
+			}
+
+			var filteredNames []string
+			for _, name := range testNames {
+				if excludes, ok := testExcludes[name]; ok {
+					if isTestExcluded(target, excludes) {
+						continue
+					}
+				}
+				filteredNames = append(filteredNames, name)
+			}
+			targets = append(targets, stressTarget{
+				relPath: relPath,
+				binary:  tmp.Name(),
+				tests:   filteredNames,
+			})
 		} else {
-			// No tests in file — remove the temp
 			os.Remove(tmp.Name())
 		}
 	}

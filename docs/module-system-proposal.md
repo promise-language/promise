@@ -488,7 +488,7 @@ _next_id() int {            // private function — not exported
 
 **Test files are part of the module.** Files matching `*_test.pr` within a module directory (or its subdirectories, excluding nested modules) are compiled as part of the module's compilation unit during `promise test`. They can access all declarations — public and private — without needing `use <self>`. This is the same approach Go uses (`_test.go` files are in the same package).
 
-All `*_test.pr` files in a module compile together into a single test binary (not one binary per file). Test functions use the `` `test `` annotation. Compiled test binaries are cached in the build cache — re-running unchanged tests skips compilation entirely.
+All `*_test.pr` files in a module compile together into a single test binary (not one binary per file). Test functions use the `` `test `` annotation. Compiled test binaries are cached in the build cache — re-running unchanged tests skips compilation entirely. Non-module test files (standalone `.pr` files with `` `test `` or `` `test(expected=...) `` annotations) are also cached, keyed on source content + compiler + std library + target + local module dependencies.
 
 ```promise
 // math_test.pr — inside the math module directory
@@ -989,7 +989,7 @@ If a module's source changes but its interface hash stays the same, **no depende
         ...
 ```
 
-- **All caches are global** (`~/.promise/cache/`). Build cache keys are content-addressed (SHA-256 of impl hash + compiler hash + target + module paths), so the same module compiled with the same inputs produces the same cache key regardless of which project triggered the build.
+- **All caches are global** (`~/.promise/cache/`). Module build cache keys are content-addressed (SHA-256 of impl hash + compiler hash + target + module paths). Test binary cache keys use FNV-128a of source content + compiler hash + std hash + target + local module deps. Both ensure the same inputs produce the same cache key regardless of which project triggered the build.
 - **`PROMISE_HOME` env var** overrides the `~/.promise/` base directory for all Promise data (caches, LLVM tools, CRT, installs). Useful when `$HOME` is unavailable or for CI environments.
 
 #### The AI Modify-Build-Test Loop

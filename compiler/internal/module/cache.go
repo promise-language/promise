@@ -3,7 +3,9 @@ package module
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"sort"
@@ -368,4 +370,78 @@ func CleanAll(cacheDir string) error {
 		}
 	}
 	return nil
+}
+
+// HashFile computes an FNV-128a hash of a single file's content.
+func HashFile(filename string) (string, error) {
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return "", err
+	}
+	h := fnv.New128a()
+	h.Write(data)
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// HashDir computes a deterministic FNV-128a hash of all files matching suffix
+// in dir (flat, not recursive, sorted by name).
+func HashDir(dir, suffix string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", err
+	}
+	h := fnv.New128a()
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), suffix) {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(h, "file:%s\n", e.Name())
+		h.Write(data)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// TestCacheMeta holds metadata for a cached test binary.
+type TestCacheMeta struct {
+	E2E            bool                `json:"e2e"`
+	ExpectedOutput string              `json:"expected_output,omitempty"`
+	ExcludeTargets []string            `json:"exclude_targets,omitempty"`
+	Tests          []string            `json:"tests,omitempty"`
+	TestExcludes   map[string][]string `json:"test_excludes,omitempty"`
+}
+
+// TestBinaryMetaPath returns the metadata path for a cached test binary.
+func TestBinaryMetaPath(cacheDir, cacheKey string) string {
+	return TestBinaryCachePath(cacheDir, cacheKey) + ".meta"
+}
+
+// SaveTestBinaryMeta writes test binary metadata to the cache.
+func SaveTestBinaryMeta(cacheDir, cacheKey string, meta *TestCacheMeta) error {
+	subdir := filepath.Join(cacheDir, cacheKey[:2])
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		return err
+	}
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(TestBinaryMetaPath(cacheDir, cacheKey), data, 0644)
+}
+
+// LoadTestBinaryMeta reads cached test binary metadata.
+// Returns nil if not found or invalid.
+func LoadTestBinaryMeta(cacheDir, cacheKey string) *TestCacheMeta {
+	data, err := os.ReadFile(TestBinaryMetaPath(cacheDir, cacheKey))
+	if err != nil {
+		return nil
+	}
+	var meta TestCacheMeta
+	if json.Unmarshal(data, &meta) != nil {
+		return nil
+	}
+	return &meta
 }

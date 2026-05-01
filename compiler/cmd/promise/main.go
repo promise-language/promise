@@ -5,7 +5,9 @@ import (
 	"compress/gzip"
 	"context"
 	"embed"
+	"encoding/hex"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
 	"os/exec"
@@ -385,11 +387,37 @@ func runTestFile(filename string, timeout time.Duration, targetTriple string) {
 		return
 	}
 
-	// Non-module test file: standard compilation.
+	// Test binary cache for non-module files.
+	target := targetTriple
+	if target == "" {
+		target = codegen.HostTargetTriple()
+	}
+
+	cacheKey, cacheable := computeTestFileCacheKey(filename, target)
+	var cacheDir string
+	if cacheable {
+		cacheDir, _ = module.BuildCacheDir()
+	}
+
+	// Check cache.
+	if cacheDir != "" {
+		if cachedBin := module.LookupTestBinaryCache(cacheDir, cacheKey); cachedBin != "" {
+			meta := module.LoadTestBinaryMeta(cacheDir, cacheKey)
+			if meta != nil && meta.E2E {
+				executeE2EBinary(cachedBin, meta.ExpectedOutput, meta.ExcludeTargets,
+					filename, timeout, start, targetTriple)
+			} else {
+				runTestBinary(cachedBin, timeout, start, targetTriple)
+			}
+			return
+		}
+	}
+
+	// Cache miss — compile.
 	file, info := compileFrontend(filename)
 
 	if info.HasExpectOutput {
-		runE2ETest(file, info, filename, timeout, start, targetTriple)
+		runE2ETest(file, info, filename, timeout, start, targetTriple, cacheDir, cacheKey)
 		return
 	}
 
@@ -399,6 +427,24 @@ func runTestFile(filename string, timeout time.Duration, targetTriple string) {
 	}
 
 	binaryPath := compileTestBinary(file, info, targetTriple, filename)
+
+	// Save to cache.
+	if cacheDir != "" {
+		module.SaveTestBinaryCache(cacheDir, cacheKey, binaryPath)
+		var testNames []string
+		testExcludes := map[string][]string{}
+		for _, t := range info.Tests {
+			testNames = append(testNames, t.Name())
+			if excludes, ok := info.TestExcludes[t.Name()]; ok {
+				testExcludes[t.Name()] = excludes
+			}
+		}
+		module.SaveTestBinaryMeta(cacheDir, cacheKey, &module.TestCacheMeta{
+			Tests:        testNames,
+			TestExcludes: testExcludes,
+		})
+	}
+
 	defer os.Remove(binaryPath)
 	runTestBinary(binaryPath, timeout, start, targetTriple)
 }
@@ -529,10 +575,12 @@ func runTestBinary(binaryPath string, timeout time.Duration, start time.Time, ta
 }
 
 // runE2ETest compiles and runs a .pr file with `test(expected="..."), comparing output.
-func runE2ETest(file *ast.File, info *sema.Info, filename string, timeout time.Duration, start time.Time, targetTriple string) {
+// executeE2EBinary runs a compiled E2E binary and compares its output.
+func executeE2EBinary(binaryPath, expected string, excludeTargets []string,
+	filename string, timeout time.Duration, start time.Time, targetTriple string) {
+
 	name := strings.TrimSuffix(filepath.Base(filename), ".pr")
 
-	// Resolve target
 	target := targetTriple
 	if target == "" {
 		target = codegen.HostTargetTriple()
@@ -543,8 +591,67 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string, timeout time.D
 		targetSuffix = fmt.Sprintf(" [%s]", targetTriple)
 	}
 
-	// Check target exclusion
+	if isTestExcluded(target, excludeTargets) {
+		fmt.Printf("SKIP (excluded) %s%s\n", name, targetSuffix)
+		return
+	}
+
+	// Execute with timeout, capturing combined stdout+stderr
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	var cmd *exec.Cmd
+	if isWasmTarget(target) {
+		cmd = exec.CommandContext(ctx, "wasmtime", binaryPath)
+	} else {
+		cmd = exec.CommandContext(ctx, binaryPath)
+	}
+	output, err := cmd.CombinedOutput()
+	elapsed := time.Since(start)
+
+	if ctx.Err() == context.DeadlineExceeded {
+		fmt.Printf("FAIL (timeout) %s%s\n", name, targetSuffix)
+		fmt.Printf("0 passed, 1 failed\n")
+		fmt.Printf("\nFAILED:\n  %s\n", name)
+		os.Exit(1)
+	}
+
+	// Compare output — non-zero exit code is NOT a failure (handles panic tests)
+	actual := strings.TrimRight(string(output), "\n")
+	expectedTrimmed := strings.TrimRight(expected, "\n")
+
+	if actual == expectedTrimmed {
+		fmt.Printf("PASS (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
+		fmt.Printf("\n1 passed, 0 failed (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
+	} else {
+		fmt.Printf("FAIL (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
+		fmt.Printf("  expected: %s\n", firstLines(expectedTrimmed, 3))
+		fmt.Printf("  actual:   %s\n", firstLines(actual, 3))
+		if err != nil {
+			fmt.Printf("  exit:     %v\n", err)
+		}
+		fmt.Printf("\n0 passed, 1 failed (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
+		fmt.Printf("\nFAILED:\n  %s\n", name)
+		os.Exit(1)
+	}
+}
+
+// runE2ETest compiles an E2E test binary, saves it to the cache, and runs it.
+func runE2ETest(file *ast.File, info *sema.Info, filename string,
+	timeout time.Duration, start time.Time, targetTriple string,
+	cacheDir, cacheKey string) {
+
+	target := targetTriple
+	if target == "" {
+		target = codegen.HostTargetTriple()
+	}
+
+	// Check target exclusion before compiling
 	if isTestExcluded(target, info.ExcludeTargets) {
+		name := strings.TrimSuffix(filepath.Base(filename), ".pr")
+		targetSuffix := ""
+		if targetTriple != "" && targetTriple != codegen.HostTargetTriple() {
+			targetSuffix = fmt.Sprintf(" [%s]", targetTriple)
+		}
 		fmt.Printf("SKIP (excluded) %s%s\n", name, targetSuffix)
 		return
 	}
@@ -566,43 +673,18 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string, timeout time.D
 
 	compileAndLink(result, tmpOutput.Name(), target, filename)
 
-	// Execute with timeout, capturing combined stdout+stderr
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	var cmd *exec.Cmd
-	if isWasmTarget(target) {
-		cmd = exec.CommandContext(ctx, "wasmtime", tmpOutput.Name())
-	} else {
-		cmd = exec.CommandContext(ctx, tmpOutput.Name())
-	}
-	output, err := cmd.CombinedOutput()
-	elapsed := time.Since(start)
-
-	if ctx.Err() == context.DeadlineExceeded {
-		fmt.Printf("FAIL (timeout) %s%s\n", name, targetSuffix)
-		fmt.Printf("0 passed, 1 failed\n")
-		fmt.Printf("\nFAILED:\n  %s\n", name)
-		os.Exit(1)
+	// Save to cache
+	if cacheDir != "" {
+		module.SaveTestBinaryCache(cacheDir, cacheKey, tmpOutput.Name())
+		module.SaveTestBinaryMeta(cacheDir, cacheKey, &module.TestCacheMeta{
+			E2E:            true,
+			ExpectedOutput: info.ExpectOutput,
+			ExcludeTargets: info.ExcludeTargets,
+		})
 	}
 
-	// Compare output — non-zero exit code is NOT a failure (handles panic tests)
-	actual := strings.TrimRight(string(output), "\n")
-	expected := strings.TrimRight(info.ExpectOutput, "\n")
-
-	if actual == expected {
-		fmt.Printf("PASS (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
-		fmt.Printf("\n1 passed, 0 failed (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
-	} else {
-		fmt.Printf("FAIL (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
-		fmt.Printf("  expected: %s\n", firstLines(expected, 3))
-		fmt.Printf("  actual:   %s\n", firstLines(actual, 3))
-		if err != nil {
-			fmt.Printf("  exit:     %v\n", err)
-		}
-		fmt.Printf("\n0 passed, 1 failed (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
-		fmt.Printf("\nFAILED:\n  %s\n", name)
-		os.Exit(1)
-	}
+	executeE2EBinary(tmpOutput.Name(), info.ExpectOutput, info.ExcludeTargets,
+		filename, timeout, start, targetTriple)
 }
 
 // firstLines returns the first n lines of s, joined by " | ".
@@ -2380,6 +2462,80 @@ func compileFrontend(filename string) (*ast.File, *sema.Info) {
 	}
 
 	return file, info
+}
+
+// cachedStdHash returns a memoized hash of the std library directory.
+// Computed once per process since std doesn't change mid-run.
+var (
+	stdHashOnce sync.Once
+	stdHashVal  string
+)
+
+func cachedStdHash() string {
+	stdHashOnce.Do(func() {
+		dir := findStdDir()
+		if dir != "" {
+			if h, err := module.HashDir(dir, ".pr"); err == nil {
+				stdHashVal = h
+			}
+		}
+	})
+	return stdHashVal
+}
+
+// computeTestFileCacheKey computes a cache key for a non-module test file.
+// Returns the key and true if cacheable, or ("", false) if not.
+// The key covers: source content, compiler binary, std library, target triple,
+// and any local module dependencies (from sourced use declarations).
+func computeTestFileCacheKey(filename, target string) (string, bool) {
+	content, err := os.ReadFile(filename)
+	if err != nil {
+		return "", false
+	}
+
+	fh := fnv.New128a()
+	fh.Write(content)
+	fileHash := hex.EncodeToString(fh.Sum(nil))
+	compilerHash := module.CompilerHash()
+	sHash := cachedStdHash()
+	if sHash == "" {
+		return "", false
+	}
+
+	h := fnv.New128a()
+	fmt.Fprintf(h, "test-file:%s\n", fileHash)
+	fmt.Fprintf(h, "compiler:%s\n", compilerHash)
+	fmt.Fprintf(h, "std:%s\n", sHash)
+	fmt.Fprintf(h, "target:%s\n", target)
+
+	// Hash local module dependencies from sourced use declarations.
+	useRe := regexp.MustCompile(`use\s+[\w_]+\s+"([^"]+)"`)
+	matches := useRe.FindAllSubmatch(content, -1)
+	if len(matches) > 0 {
+		abs, _ := filepath.Abs(filename)
+		dir := filepath.Dir(abs)
+		var modHashes []string
+		for _, m := range matches {
+			path := string(m[1])
+			if strings.HasPrefix(path, "./") || strings.HasPrefix(path, "../") {
+				modPath := filepath.Join(dir, path)
+				modHash, err := module.HashModuleSources(modPath, false)
+				if err != nil {
+					return "", false
+				}
+				modHashes = append(modHashes, path+":"+modHash)
+			} else {
+				// Remote import — don't cache
+				return "", false
+			}
+		}
+		sort.Strings(modHashes)
+		for _, mh := range modHashes {
+			fmt.Fprintf(h, "mod:%s\n", mh)
+		}
+	}
+
+	return hex.EncodeToString(h.Sum(nil)), true
 }
 
 // isModuleTestFile checks whether filename is a *_test.pr file inside a module

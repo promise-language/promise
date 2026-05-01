@@ -600,6 +600,143 @@ func TestHashModuleSourcesSubdirs(t *testing.T) {
 	}
 }
 
+func TestHashFile(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "test.pr")
+	os.WriteFile(f, []byte("func hello() {}"), 0644)
+
+	h1, err := HashFile(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h1 == "" {
+		t.Fatal("expected non-empty hash")
+	}
+
+	// Same content → same hash
+	h2, err := HashFile(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h1 != h2 {
+		t.Error("same file should produce same hash")
+	}
+
+	// Different content → different hash
+	os.WriteFile(f, []byte("func goodbye() {}"), 0644)
+	h3, err := HashFile(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h1 == h3 {
+		t.Error("different content should produce different hash")
+	}
+
+	// Nonexistent file → error
+	_, err = HashFile(filepath.Join(dir, "nonexistent.pr"))
+	if err == nil {
+		t.Error("expected error for nonexistent file")
+	}
+}
+
+func TestHashDir(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.pr"), []byte("func a() {}"), 0644)
+	os.WriteFile(filepath.Join(dir, "b.pr"), []byte("func b() {}"), 0644)
+	os.WriteFile(filepath.Join(dir, "readme.md"), []byte("hello"), 0644)
+
+	h1, err := HashDir(dir, ".pr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h1 == "" {
+		t.Fatal("expected non-empty hash")
+	}
+
+	// Non-.pr files should not affect hash
+	os.WriteFile(filepath.Join(dir, "extra.md"), []byte("more"), 0644)
+	h2, err := HashDir(dir, ".pr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h1 != h2 {
+		t.Error("non-.pr files should not affect hash")
+	}
+
+	// Changing a .pr file should change hash
+	os.WriteFile(filepath.Join(dir, "a.pr"), []byte("func a_v2() {}"), 0644)
+	h3, err := HashDir(dir, ".pr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h1 == h3 {
+		t.Error("changed .pr file should change hash")
+	}
+
+	// Nonexistent dir → error
+	_, err = HashDir("/nonexistent/dir/12345", ".pr")
+	if err == nil {
+		t.Error("expected error for nonexistent directory")
+	}
+}
+
+func TestTestBinaryMetaRoundTrip(t *testing.T) {
+	cacheDir := t.TempDir()
+	cacheKey := "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+
+	// Initially no metadata
+	if got := LoadTestBinaryMeta(cacheDir, cacheKey); got != nil {
+		t.Errorf("expected nil meta, got %+v", got)
+	}
+
+	// Save unit test metadata
+	unitMeta := &TestCacheMeta{
+		Tests:        []string{"test_add", "test_sub"},
+		TestExcludes: map[string][]string{"test_sub": {"wasm32-wasi"}},
+	}
+	if err := SaveTestBinaryMeta(cacheDir, cacheKey, unitMeta); err != nil {
+		t.Fatal(err)
+	}
+
+	got := LoadTestBinaryMeta(cacheDir, cacheKey)
+	if got == nil {
+		t.Fatal("expected non-nil meta after save")
+	}
+	if got.E2E {
+		t.Error("expected E2E=false for unit test meta")
+	}
+	if len(got.Tests) != 2 || got.Tests[0] != "test_add" || got.Tests[1] != "test_sub" {
+		t.Errorf("unexpected tests: %v", got.Tests)
+	}
+	if excludes, ok := got.TestExcludes["test_sub"]; !ok || len(excludes) != 1 || excludes[0] != "wasm32-wasi" {
+		t.Errorf("unexpected test excludes: %v", got.TestExcludes)
+	}
+
+	// Save E2E metadata (overwrites)
+	e2eMeta := &TestCacheMeta{
+		E2E:            true,
+		ExpectedOutput: "hello\nworld",
+		ExcludeTargets: []string{"wasm32-wasi"},
+	}
+	if err := SaveTestBinaryMeta(cacheDir, cacheKey, e2eMeta); err != nil {
+		t.Fatal(err)
+	}
+
+	got = LoadTestBinaryMeta(cacheDir, cacheKey)
+	if got == nil {
+		t.Fatal("expected non-nil meta after E2E save")
+	}
+	if !got.E2E {
+		t.Error("expected E2E=true")
+	}
+	if got.ExpectedOutput != "hello\nworld" {
+		t.Errorf("expected output = %q, want %q", got.ExpectedOutput, "hello\nworld")
+	}
+	if len(got.ExcludeTargets) != 1 || got.ExcludeTargets[0] != "wasm32-wasi" {
+		t.Errorf("unexpected exclude targets: %v", got.ExcludeTargets)
+	}
+}
+
 func TestPromiseHome(t *testing.T) {
 	// Default should use home dir
 	home, err := PromiseHome()

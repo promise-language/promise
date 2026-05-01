@@ -925,6 +925,17 @@ Remaining work:
 - **Multi-file dedup**: `runTestFiles` and `compileTargets` (stress mode) track which modules have already been tested, avoiding duplicate results when multiple `_test.pr` files from the same module are discovered.
 - **File discovery**: `discoverTestFiles()` uses `isInModuleTree()` to correctly handle test files in subdirectories of module roots.
 
+**Non-module test binary caching (implemented):**
+
+All non-module test files (`tests/...`) — both unit tests (`` `test ``) and E2E tests (`` `test(expected=...) ``) — are also cached in the build cache. Cache key = FNV-128a hash of source file content + compiler hash + std library hash + target triple + local module dependency hashes. On cache hit, the compiled binary is reused directly, skipping parse/sema/codegen/linking entirely (~30x speedup).
+
+**Files:** `cmd/promise/main.go` (`cachedStdHash`, `computeTestFileCacheKey`, `executeE2EBinary`), `internal/module/cache.go` (`HashFile`, `HashDir`, `TestCacheMeta`, `SaveTestBinaryMeta`/`LoadTestBinaryMeta`), `cmd/promise/stress.go` (cache lookup in `compileTargets`)
+
+- **Cache key composition**: Source file content (FNV-128a) + `CompilerHash()` (covers compiler logic + embedded catalog modules) + `cachedStdHash()` (covers dev-mode std changes) + target triple + hashes of any local module dependencies from `use X "./path"` declarations.
+- **E2E metadata**: Cached E2E test binaries have a `.bin.meta` JSON sidecar storing expected output and exclude targets, so cache hits bypass compilation while preserving output comparison semantics.
+- **Stress mode**: `compileTargets()` also checks the test binary cache before compiling, using metadata for test names and exclude lists.
+- **Remote imports**: Files with non-local `use` imports (remote URLs) are not cached (too complex to hash; none exist in the test suite currently).
+
 **Remaining TODO — file naming**: The `test_*.pr` prefix convention in `tests/` should be renamed to `*_test.pr` for consistency (e.g., `test_arithmetic.pr` → `arithmetic_test.pr`).
 
 ### Unscheduled Features

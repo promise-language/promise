@@ -703,9 +703,36 @@ Printable p = Point(x: 1, y: 2);  // OK — Point has toString() with matching s
 p.toString();                       // dispatches to Point.toString via view-specific vtable
 ```
 
-Structural satisfaction requires an **exact signature match**: parameter types, return type, and error capability must all be identical. A method with the same name but different parameters does not satisfy the interface.
+Structural satisfaction uses **relaxed signature matching**: the concrete type's method must be compatible with the interface method, but can be more specific:
 
-When a value crosses a type boundary through structural satisfaction (or through a second+ parent), the compiler emits a **view-specific vtable** ordered by the target interface's slot layout. The value struct's vtable pointer is swapped to this view vtable at the coercion point (variable declaration, assignment, function argument, or return statement).
+- **Extra parameters**: the concrete method may have additional parameters beyond those declared in the interface, as long as all extras have default values or are optional types. The compiler generates an **adapter thunk** that supplies defaults/nones for the omitted parameters.
+- **Failable**: a non-failable concrete method satisfies a failable interface method (but not vice versa). The adapter wraps the result in a success failable struct.
+- **Optional return**: a concrete method returning `T` satisfies an interface requiring `T?`. The adapter wraps the result as `some`.
+
+Structural interfaces can also declare **abstract factory methods** — static constructors that enable generic factory patterns:
+
+```promise
+type Parseable `structural {
+    parse(string data) `abstract `factory;   // implicit Self return
+}
+
+type Json {
+    string raw;
+    parse(string data) Json `factory { return Json(raw: data); }
+    format() string { return "json:{this.raw}"; }
+}
+
+// Generic function constrained by factory interface
+load[T: Parseable](string data) T {
+    return T.parse(data);  // monomorphized: calls Json.parse(data) directly
+}
+
+Json j = load[Json]("...");
+```
+
+Abstract factory methods declared without a return type get an **implicit `Self` return**. Failable abstract factories (`tryParse(string data)! \`abstract \`factory;`) get implicit `Self!`. Factory methods must match factory-to-factory: an instance method does not satisfy a factory requirement and vice versa.
+
+When a value crosses a type boundary through structural satisfaction (or through a second+ parent), the compiler emits a **view-specific vtable** ordered by the target interface's slot layout. The value struct's vtable pointer is swapped to this view vtable at the coercion point (variable declaration, assignment, function argument, or return statement). For methods with relaxed signature differences, the vtable slot points to an adapter thunk rather than the method directly.
 
 ### 5.5 Generics
 
@@ -935,8 +962,9 @@ A factory is a method annotated `` `factory ``. It provides named alternative co
 - Can modify `` `final `` fields on locally-created instances
 - Can return child types (return type is `Self` or a type that `is Self`)
 - Can be failable (`!`)
+- Can be declared `` `abstract `` on `` `structural `` interfaces (see §5.4) to enable generic factory patterns
 
-`` `factory `` implies `` `variant `` placement — per-monomorphization, all generics resolved. This is necessary because a factory on `Box[T]` must know which `T` to create. A factory has **no `this` receiver**.
+`` `factory `` implies `` `variant `` placement — per-monomorphization, all generics resolved. This is necessary because a factory on `Box[T]` must know which `T` to create. A factory has **no `this` receiver**. Abstract factories on structural interfaces get an **implicit `Self` return type** when none is specified.
 
 ```promise
 type Color {

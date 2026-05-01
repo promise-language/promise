@@ -1017,20 +1017,26 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 			c.targetType = retType
 			val := c.genExpr(s.Value)
 			c.targetType = nil
-			// Wrap value in Optional if return type is Optional but expr is not
-			val = c.wrapReturnOptional(val, s.Value, retType)
-			// Coerce value struct vtable when returning through a parent type
-			if retType != nil {
-				exprType := c.info.Types[s.Value]
-				if c.typeSubst != nil {
-					exprType = types.Substitute(exprType, c.typeSubst)
+			// If the expression is itself a failable call, val is already a
+			// failable result struct matching our result type — return directly.
+			if c.info.FailableExprs[s.Value] && val != nil && val.Type().Equal(resultType) {
+				c.block.NewRet(val)
+			} else {
+				// Wrap value in Optional if return type is Optional but expr is not
+				val = c.wrapReturnOptional(val, s.Value, retType)
+				// Coerce value struct vtable when returning through a parent type
+				if retType != nil {
+					exprType := c.info.Types[s.Value]
+					if c.typeSubst != nil {
+						exprType = types.Substitute(exprType, c.typeSubst)
+					}
+					if c.selfSubst != nil {
+						exprType = types.SubstituteSelf(exprType, c.selfSubst.iface, c.selfSubst.concrete)
+					}
+					val = c.coerceToView(val, exprType, retType)
 				}
-				if c.selfSubst != nil {
-					exprType = types.SubstituteSelf(exprType, c.selfSubst.iface, c.selfSubst.concrete)
-				}
-				val = c.coerceToView(val, exprType, retType)
+				c.block.NewRet(c.wrapOk(val, resultType))
 			}
-			c.block.NewRet(c.wrapOk(val, resultType))
 		}
 		return
 	}

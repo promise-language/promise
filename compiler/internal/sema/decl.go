@@ -296,6 +296,11 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 		c.errorf(d.Pos(), "type %s has multiple concrete parents; at most one parent may have fields", d.Name)
 	}
 
+	// Set structural flag before defining methods (factory validation needs it)
+	if c.hasAnnotation(d.Annotations, "structural") {
+		named.SetStructural(true)
+	}
+
 	// Resolve fields
 	for _, fd := range d.Fields {
 		c.defineField(named, fd)
@@ -461,6 +466,14 @@ func (c *Checker) resolveMethodSignature(named *types.Named, md *ast.MethodDecl)
 			}
 		}
 		canError = md.ReturnType.CanError
+	}
+
+	// Abstract factory methods get implicit Self return type
+	abstract := c.hasAnnotation(md.Annotations, "abstract")
+	if isFactory && abstract {
+		if result == nil {
+			result = named
+		}
 	}
 
 	return types.NewSignature(recv, params, result, canError)

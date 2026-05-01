@@ -1793,6 +1793,53 @@ func TestFactoryConstructorCodegen(t *testing.T) {
 	assertContains(t, ir, "call { i8*, i8* } @Color.red()")
 }
 
+func TestGenericFactoryCallCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		type Parseable `+"`"+`structural {
+			parse(string data) `+"`"+`abstract `+"`"+`factory;
+		}
+		type My {
+			parse(string data) My `+"`"+`factory { return My(); }
+		}
+		load[T: Parseable](string data) T {
+			return T.parse(data);
+		}
+		main() {
+			My m = load[My]("hello");
+		}
+	`)
+	// Monomorphized load[My] should call My.parse directly
+	assertContains(t, ir, "call { i8*, i8* } @My.parse(")
+}
+
+func TestGenericFailableFactoryPassthrough(t *testing.T) {
+	ir := generateIR(t, `
+		type TryParseable `+"`"+`structural {
+			tryParse(string data)! `+"`"+`abstract `+"`"+`factory;
+		}
+		type Strict {
+			tryParse(string data) Strict! `+"`"+`factory {
+				if data == "bad" {
+					raise error("invalid");
+				}
+				return Strict();
+			}
+		}
+		tryLoad[T: TryParseable](string data) T! {
+			return T.tryParse(data);
+		}
+		main() {
+			Strict s = tryLoad[Strict]("ok")!;
+		}
+	`)
+	// Monomorphized tryLoad[Strict] should call Strict.tryParse directly
+	assertContains(t, ir, "call { i1, { i8*, i8* }, i8* } @Strict.tryParse(")
+	// Failable passthrough: tryLoad__Strict should return the result directly
+	// (single ret of the call result, no insertvalue wrapping)
+	assertContains(t, ir, "@tryLoad__Strict(")
+	assertContains(t, ir, "ret { i1, { i8*, i8* }, i8* } %")
+}
+
 func TestSuperCallCodegen(t *testing.T) {
 	ir := generateIR(t, `
 		type Animal {

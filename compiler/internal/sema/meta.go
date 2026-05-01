@@ -315,7 +315,8 @@ func (c *Checker) validateNewMethod(named *types.Named, m *types.Method, d *ast.
 }
 
 // validateFactoryMethod checks that a `factory method has a valid signature:
-// no receiver (must not declare this), return type must be Self, must not be abstract/native.
+// no receiver (must not declare this), return type must be Self (or implicit for abstract),
+// must not be native. Abstract is allowed only on structural interfaces.
 func (c *Checker) validateFactoryMethod(named *types.Named, m *types.Method, md *ast.MethodDecl) {
 	sig := m.Sig()
 	if sig == nil {
@@ -326,15 +327,15 @@ func (c *Checker) validateFactoryMethod(named *types.Named, m *types.Method, md 
 	if md.Receiver != nil {
 		c.errorf(pos, "factory method %s on %s must not declare a receiver (factories have no this)", md.Name, named)
 	}
-	// Factory must not be abstract or native
-	if m.IsAbstract() {
+	// Factory must not be abstract — unless it's on a structural interface
+	if m.IsAbstract() && !named.IsStructural() {
 		c.errorf(pos, "factory method %s on %s must not be abstract", md.Name, named)
 	}
 	if m.IsNative() {
 		c.errorf(pos, "factory method %s on %s must not be native", md.Name, named)
 	}
-	// Return type must be specified (Self or child type) — validated at type level
-	if sig.Result() == nil || sig.Result() == types.TypVoid {
+	// Return type must be specified (Self or child type) — unless abstract (implicit Self)
+	if !m.IsAbstract() && (sig.Result() == nil || sig.Result() == types.TypVoid) {
 		c.errorf(pos, "factory method %s on %s must have a return type (typically Self)", md.Name, named)
 	}
 }

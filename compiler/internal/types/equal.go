@@ -247,6 +247,10 @@ func Implements(x Type, iface *Named) bool {
 			if m == nil || m.abstract {
 				return false
 			}
+			// Factory methods must match: factory satisfies factory, instance satisfies instance
+			if am.method.IsFactory() != m.IsFactory() {
+				return false
+			}
 			// Verify signatures match, substituting Self (the declaring interface) with concrete type (xt)
 			if !identicalSignaturesWithSelf(m.sig, am.method.sig, am.declarer, xt) {
 				return false

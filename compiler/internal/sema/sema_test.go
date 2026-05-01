@@ -7233,3 +7233,200 @@ func TestModuleLoadFieldAccessOnImportedType(t *testing.T) {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 }
+
+// --- Abstract Factory in Structural Interface Tests ---
+
+func TestAbstractFactoryInStructuralInterface(t *testing.T) {
+	checkOK(t, `
+		type Parseable `+"`"+`structural {
+			parse(string data) `+"`"+`abstract `+"`"+`factory;
+		}
+		type My {
+			parse(string data) My `+"`"+`factory { return My(); }
+		}
+		test() {
+			Parseable p = My.parse("hello");
+		}
+	`)
+}
+
+func TestAbstractFactoryInNonStructuralFails(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo {
+			make() Self `+"`"+`abstract `+"`"+`factory;
+		}
+		test() {}
+	`)
+	expectError(t, errs, "must not be abstract")
+}
+
+func TestAbstractFactoryFailableReturn(t *testing.T) {
+	checkOK(t, `
+		type Parseable `+"`"+`structural {
+			tryParse(string data)! `+"`"+`abstract `+"`"+`factory;
+		}
+		type My {
+			tryParse(string data) My! `+"`"+`factory {
+				return My();
+			}
+		}
+		test() {
+			My m = My.tryParse("hello")!;
+		}
+	`)
+}
+
+func TestAbstractFactoryImplicitSelfReturn(t *testing.T) {
+	// Abstract factory with no return type gets implicit Self
+	checkOK(t, `
+		type Maker `+"`"+`structural {
+			make() `+"`"+`abstract `+"`"+`factory;
+		}
+		type Widget {
+			make() Widget `+"`"+`factory { return Widget(); }
+		}
+		test() {
+			Maker w = Widget.make();
+		}
+	`)
+}
+
+func TestFactoryInstanceMethodMismatch(t *testing.T) {
+	// Instance method should NOT satisfy factory requirement
+	errs := checkErrs(t, `
+		type Maker `+"`"+`structural {
+			make() `+"`"+`abstract `+"`"+`factory;
+		}
+		type Bad {
+			make() Bad { return Bad(); }
+		}
+		test() {
+			Maker m = Bad();
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+func TestFactoryForInstanceMethodMismatch(t *testing.T) {
+	// Factory method should NOT satisfy instance method requirement
+	errs := checkErrs(t, `
+		type Processor `+"`"+`structural {
+			process() int `+"`"+`abstract;
+		}
+		type Bad {
+			process() int `+"`"+`factory { return 0; }
+		}
+		test() {
+			Processor p = Bad();
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+func TestGenericFactoryConstraint(t *testing.T) {
+	checkOK(t, `
+		type Parseable `+"`"+`structural {
+			parse(string data) `+"`"+`abstract `+"`"+`factory;
+		}
+		type My {
+			parse(string data) My `+"`"+`factory { return My(); }
+		}
+		load[T: Parseable](string data) T {
+			return T.parse(data);
+		}
+		test() {
+			My m = load[My]("hello");
+		}
+	`)
+}
+
+func TestGenericFactoryFailableConstraint(t *testing.T) {
+	checkOK(t, `
+		type Parseable `+"`"+`structural {
+			tryParse(string data)! `+"`"+`abstract `+"`"+`factory;
+		}
+		type My {
+			tryParse(string data) My `+"`"+`factory { return My(); }
+		}
+		load[T: Parseable](string data) T! {
+			return T.tryParse(data);
+		}
+		test() {
+			My m = load[My]("hello")!;
+		}
+	`)
+}
+
+func TestStructuralMixedFactoryAndInstance(t *testing.T) {
+	// Interface with both factory and instance abstract methods
+	checkOK(t, `
+		type Codec `+"`"+`structural {
+			parse(string data) `+"`"+`abstract `+"`"+`factory;
+			format() string `+"`"+`abstract;
+		}
+		type Json {
+			string raw;
+			parse(string data) Json `+"`"+`factory { return Json(raw: data); }
+			format() string { return this.raw; }
+		}
+		roundTrip[T: Codec](string data) string {
+			T obj = T.parse(data);
+			return obj.format();
+		}
+		test() {
+			string s = roundTrip[Json]("hello");
+		}
+	`)
+}
+
+func TestAbstractFactoryExplicitSelfReturn(t *testing.T) {
+	// Explicit Self return type on abstract factory (not relying on implicit)
+	checkOK(t, `
+		type Maker `+"`"+`structural {
+			make() Self `+"`"+`abstract `+"`"+`factory;
+		}
+		type Foo {
+			make() Foo `+"`"+`factory { return Foo(); }
+		}
+		test() {
+			Maker f = Foo.make();
+		}
+	`)
+}
+
+func TestAbstractFactoryExplicitFailableSelfReturn(t *testing.T) {
+	// Abstract factory with explicit Self! return type should compile
+	checkOK(t, `
+		type TryParseable `+"`"+`structural {
+			tryParse(string data) Self! `+"`"+`abstract `+"`"+`factory;
+		}
+		type Strict {
+			tryParse(string data) Strict! `+"`"+`factory {
+				if data == "bad" {
+					raise error("invalid");
+				}
+				return Strict();
+			}
+		}
+		tryLoad[T: TryParseable](string data) T! {
+			return T.tryParse(data);
+		}
+		test() {
+			Strict s = tryLoad[Strict]("ok")!;
+		}
+	`)
+}
+
+func TestStructuralFactoryAssignmentViolation(t *testing.T) {
+	// Type missing the factory method should not satisfy structural interface
+	errs := checkErrs(t, `
+		type Parseable `+"`"+`structural {
+			parse(string data) `+"`"+`abstract `+"`"+`factory;
+		}
+		type Empty {}
+		test() {
+			Parseable p = Empty();
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}

@@ -248,8 +248,8 @@ println("point: ${p}");   // point: (3, 4)
 |--------|--------------|-----------------|
 | Parsing | No generic parsing — would need individual `parse_int`, `parse_f64`, etc. | Define `Parse` structural interface with factory method |
 | Byte input | No reader abstraction | Define `Reader` structural interface (byte counterpart to Writer) |
-| Structural matching | Only matches instance methods | Extend to match factory methods on the type itself |
-| Generic scanning | Not possible | `scanner.next[T: Parse]() T!` becomes possible |
+| Structural matching | Matches instance methods and factory methods; abstract factories with implicit Self return | ~~Extend to match factory methods on the type itself~~ **Done** |
+| Generic scanning | Not possible (factory infrastructure ready: `T.method()` works in generic context) | `scanner.next[T: Parse]() T!` becomes possible once `Reader` is defined |
 
 **The problem**: `Format` works as a structural interface because it's an instance method — you have a value and call `value.format(~writer)`. Parsing is the inverse: you need to **create** a value by reading from a source. There's no instance to call a method on. The operation lives on the type, not on an instance. Additionally, a parser may not consume all the input — it should read what it needs and leave the rest.
 

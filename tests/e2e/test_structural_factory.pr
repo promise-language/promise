@@ -1,0 +1,164 @@
+// E2E tests for abstract factory methods in structural interfaces.
+// Factory methods are static constructors (`factory) that can be declared
+// abstract in structural interfaces, enabling generic factory patterns.
+
+// --- Basic: abstract factory in structural interface ---
+
+type Parseable `structural {
+    parse(string data) `abstract `factory;
+}
+
+type My {
+    string value;
+    parse(string data) My `factory {
+        return My(value: data);
+    }
+}
+
+test_basic_factory() `test {
+    My m = My.parse("hello");
+    assert(m.value == "hello", "basic factory call");
+}
+
+// --- Generic factory pattern: load[T: Parseable] ---
+
+load[T: Parseable](string data) T {
+    return T.parse(data);
+}
+
+test_generic_factory() `test {
+    My m = load[My]("world");
+    assert(m.value == "world", "generic factory via constraint");
+}
+
+// --- Failable abstract factory ---
+
+type TryParseable `structural {
+    tryParse(string data)! `abstract `factory;
+}
+
+type Strict {
+    int n;
+    tryParse(string data) Strict! `factory {
+        if data == "bad" {
+            raise error("invalid");
+        }
+        return Strict(n: 42);
+    }
+}
+
+test_failable_factory_success() `test {
+    Strict s = Strict.tryParse("good")!;
+    assert(s.n == 42, "failable factory success");
+}
+
+test_failable_factory_error() `test {
+    bool caught = false;
+    Strict.tryParse("bad") ? e {
+        caught = true;
+    };
+    assert(caught, "failable factory raises on bad input");
+}
+
+// --- Generic failable factory ---
+
+tryLoad[T: TryParseable](string data) T! {
+    return T.tryParse(data);
+}
+
+test_generic_failable_factory() `test {
+    Strict s = tryLoad[Strict]("ok")!;
+    assert(s.n == 42, "generic failable factory");
+}
+
+test_generic_failable_factory_error() `test {
+    bool caught = false;
+    tryLoad[Strict]("bad") ? e {
+        caught = true;
+    };
+    assert(caught, "error propagates through generic failable factory");
+}
+
+// --- Factory with params ---
+
+type Configurable `structural {
+    create(int value) `abstract `factory;
+}
+
+type Widget {
+    int size;
+    create(int value) Widget `factory {
+        return Widget(size: value * 2);
+    }
+}
+
+makeWidget[T: Configurable](int v) T {
+    return T.create(v);
+}
+
+test_factory_with_params() `test {
+    Widget w = makeWidget[Widget](5);
+    assert(w.size == 10, "factory with params");
+}
+
+// --- Direct factory call still works ---
+
+test_direct_factory_call() `test {
+    My m = My.parse("direct");
+    assert(m.value == "direct", "direct factory call");
+}
+
+// --- Multiple types satisfying same factory interface ---
+
+type Other {
+    string data;
+    parse(string data) Other `factory {
+        return Other(data: "other:{data}");
+    }
+}
+
+test_multiple_types_same_interface() `test {
+    My m = load[My]("a");
+    Other o = load[Other]("b");
+    assert(m.value == "a", "first type through generic");
+    assert(o.data == "other:b", "second type through generic");
+}
+
+// --- Mixed factory + instance methods in one interface ---
+
+type Codec `structural {
+    parse(string data) `abstract `factory;
+    format() string `abstract;
+}
+
+type Json {
+    string raw;
+    parse(string data) Json `factory {
+        return Json(raw: data);
+    }
+    format() string { return "json:{this.raw}"; }
+}
+
+roundTrip[T: Codec](string data) string {
+    T obj = T.parse(data);
+    return obj.format();
+}
+
+test_mixed_factory_instance_generic() `test {
+    string result = roundTrip[Json]("hello");
+    assert(result == "json:hello", "mixed factory+instance through generic");
+}
+
+// --- Non-failable satisfies failable factory ---
+
+type SafeParser {
+    int n;
+    tryParse(string data) SafeParser `factory {
+        return SafeParser(n: 99);
+    }
+}
+
+test_nonfailable_satisfies_failable_factory() `test {
+    SafeParser s = tryLoad[SafeParser]("x")!;
+    assert(s.n == 99, "non-failable factory satisfies failable interface");
+}

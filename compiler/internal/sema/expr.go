@@ -848,6 +848,15 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 		for _, constraint := range t.Constraints() {
 			if cn, ok := constraint.(*types.Named); ok {
 				if m := cn.LookupMethod(e.Field); m != nil {
+					if m.IsFactory() {
+						// Factory: substitute Self→T in return type
+						sig := m.Sig()
+						result := sig.Result()
+						if rn, ok := result.(*types.Named); ok && rn == cn {
+							result = t // Self → TypeParam
+						}
+						return types.NewSignature(nil, sig.Params(), result, sig.CanError())
+					}
 					return m.Sig()
 				}
 				if g := cn.LookupGetter(e.Field); g != nil {

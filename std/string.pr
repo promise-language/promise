@@ -70,6 +70,66 @@ type string `native `public {
     trim() string `native;
     split(string sep) string[] `native;
 
+    to_upper() string `native;
+    to_lower() string `native;
+    repeat(int n) string `native;
+
+    replace(string old, string new_val) string {
+        if old.len == 0 { return this; }
+        string result = "";
+        int i = 0;
+        while i <= this.len - old.len {
+            int j = 0;
+            while j < old.len {
+                if this[i + j] != old[j] { break; }
+                j = j + 1;
+            }
+            if j == old.len {
+                result = result + new_val;
+                i = i + old.len;
+            } else {
+                result = result + this[i:i + 1];
+                i = i + 1;
+            }
+        }
+        // Append remaining characters
+        while i < this.len {
+            result = result + this[i:i + 1];
+            i = i + 1;
+        }
+        return result;
+    }
+
+    count(string sub) int {
+        if sub.len == 0 { return 0; }
+        if sub.len > this.len { return 0; }
+        int result = 0;
+        int limit = this.len - sub.len;
+        int i = 0;
+        while i <= limit {
+            int j = 0;
+            while j < sub.len {
+                if this[i + j] != sub[j] { break; }
+                j = j + 1;
+            }
+            if j == sub.len {
+                result = result + 1;
+                i = i + sub.len;
+            } else {
+                i = i + 1;
+            }
+        }
+        return result;
+    }
+
+    chars() char[] {
+        char[] result = Vector[char](this.len);
+        for c in this {
+            result.push(c);
+        }
+        return result;
+    }
+
     get hash int `native;
     get is_empty bool => this.len == 0;
 }

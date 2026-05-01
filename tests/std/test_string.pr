@@ -1,6 +1,4 @@
-// Test string operations: concat, equality, methods
-//
-// TODO: test comparisons (<, >, <=, >=) — blocked on codegen (string operator "<" not yet implemented)
+// Test string operations: concat, equality, comparison, methods
 test_concat() `test {
   assert("hello" + " " + "world" == "hello world", "string concat");
   assert("" + "a" == "a", "empty + a");
@@ -191,4 +189,106 @@ test_hash_variable() `test {
 test_hash_type() `test {
   int h = "test".hash;
   assert(h == h, "hash is int");
+}
+
+// --- Comparison operators ---
+
+test_less_than() `test {
+  assert("apple" < "banana", "apple < banana");
+  assert(!("banana" < "apple"), "not banana < apple");
+  assert(!("abc" < "abc"), "not abc < abc (equal)");
+  assert("a" < "ab", "prefix is less");
+  assert("" < "a", "empty < non-empty");
+  assert(!("a" < ""), "not a < empty");
+}
+
+test_greater_than() `test {
+  assert("banana" > "apple", "banana > apple");
+  assert(!("apple" > "banana"), "not apple > banana");
+  assert(!("abc" > "abc"), "not abc > abc (equal)");
+  assert("ab" > "a", "longer > prefix");
+  assert("a" > "", "non-empty > empty");
+}
+
+test_less_equal() `test {
+  assert("abc" <= "abc", "equal strings <=");
+  assert("abc" <= "abd", "abc <= abd");
+  assert("a" <= "ab", "prefix <=");
+  assert(!("abd" <= "abc"), "not abd <= abc");
+}
+
+test_greater_equal() `test {
+  assert("abc" >= "abc", "equal strings >=");
+  assert("abd" >= "abc", "abd >= abc");
+  assert("ab" >= "a", "longer >= prefix");
+  assert(!("abc" >= "abd"), "not abc >= abd");
+}
+
+test_comparison_case_sensitive() `test {
+  // ASCII: uppercase letters (65-90) come before lowercase (97-122)
+  assert("A" < "a", "A < a (ASCII ordering)");
+  assert("Z" < "a", "Z < a (ASCII ordering)");
+  assert("hello" > "Hello", "hello > Hello");
+}
+
+// --- to_upper / to_lower ---
+
+test_to_upper() `test {
+  assert("hello".to_upper() == "HELLO", "basic to_upper");
+  assert("Hello World".to_upper() == "HELLO WORLD", "mixed to_upper");
+  assert("ALREADY".to_upper() == "ALREADY", "already upper");
+  assert("".to_upper() == "", "empty to_upper");
+  assert("abc123".to_upper() == "ABC123", "digits unchanged");
+  assert("a-b_c".to_upper() == "A-B_C", "special chars unchanged");
+}
+
+test_to_lower() `test {
+  assert("HELLO".to_lower() == "hello", "basic to_lower");
+  assert("Hello World".to_lower() == "hello world", "mixed to_lower");
+  assert("already".to_lower() == "already", "already lower");
+  assert("".to_lower() == "", "empty to_lower");
+  assert("ABC123".to_lower() == "abc123", "digits unchanged");
+}
+
+// --- repeat ---
+
+test_repeat() `test {
+  assert("ab".repeat(3) == "ababab", "repeat 3");
+  assert("x".repeat(1) == "x", "repeat 1");
+  assert("hello".repeat(0) == "", "repeat 0 is empty");
+  assert("abc".repeat(-1) == "", "repeat negative is empty");
+  assert("".repeat(5) == "", "empty repeat is empty");
+}
+
+// --- replace ---
+
+test_replace() `test {
+  assert("hello world".replace("world", "there") == "hello there", "replace word");
+  assert("aabaa".replace("a", "x") == "xxbxx", "replace all occurrences");
+  assert("hello".replace("xyz", "abc") == "hello", "replace no match");
+  assert("aaa".replace("a", "bb") == "bbbbbb", "replace with longer");
+  assert("hello".replace("", "x") == "hello", "replace empty does nothing");
+}
+
+// --- count ---
+
+test_count() `test {
+  assert("hello world".count("l") == 3, "count l in hello world");
+  assert("aabaa".count("a") == 4, "count a");
+  assert("aaa".count("aa") == 1, "count non-overlapping");
+  assert("hello".count("xyz") == 0, "count no match");
+  assert("".count("a") == 0, "count in empty");
+  assert("hello".count("") == 0, "count empty sub");
+}
+
+// --- chars ---
+
+test_chars() `test {
+  char[] cs = "hello".chars();
+  assert(cs.len == 5, "chars len 5");
+  assert(cs[0] == 'h', "chars[0] == h");
+  assert(cs[4] == 'o', "chars[4] == o");
+
+  char[] empty = "".chars();
+  assert(empty.len == 0, "empty chars");
 }

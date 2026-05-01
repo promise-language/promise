@@ -714,8 +714,9 @@ func (c *Compiler) declareIntrinsics() {
 		c.funcs["memcmp"] = memcmpFn
 	}
 
-	// String direct equality (codegen-emitted LLVM IR, replaces C runtime)
+	// String direct equality and comparison (codegen-emitted LLVM IR)
 	c.defineStringDirectEqFunc()
+	c.defineStringCompareFunc()
 
 	// Vector methods (codegen-emitted LLVM IR, replaces C runtime)
 	c.defineVectorWithCapacityFunc()
@@ -724,9 +725,12 @@ func (c *Compiler) declareIntrinsics() {
 	c.defineVectorContainsFunc()
 	c.defineVectorRemoveFunc()
 
-	// String trim/split (codegen-emitted LLVM IR, replaces C runtime)
+	// String trim/split/case/repeat (codegen-emitted LLVM IR)
 	c.defineStringTrimFunc()
 	c.defineStringSplitFunc()
+	c.defineStringToUpperFunc()
+	c.defineStringToLowerFunc()
+	c.defineStringRepeatFunc()
 
 	// Value-to-string conversion (codegen-emitted LLVM IR, replaces C runtime)
 	c.defineBoolToStringFunc()
@@ -1025,6 +1029,229 @@ func (c *Compiler) defineStringDirectEqFunc() {
 	equalBlk.NewRet(trueVal)
 
 	c.funcs["promise_string_eq"] = fn
+}
+
+// defineStringCompareFunc emits an LLVM IR function for lexicographic string
+// comparison. Returns i32: negative if a<b, 0 if equal, positive if a>b.
+// Uses memcmp on min(len_a, len_b) bytes, then compares lengths.
+// String instance layout: { i8* _variant, i64 len, [0 x i8] data }
+func (c *Compiler) defineStringCompareFunc() {
+	aParam := ir.NewParam("a", irtypes.I8Ptr)
+	bParam := ir.NewParam("b", irtypes.I8Ptr)
+	fn := c.module.NewFunc("promise_string_compare", irtypes.I32, aParam, bParam)
+
+	strInstanceType := irtypes.NewStruct(
+		irtypes.I8Ptr,                   // _variant
+		irtypes.I64,                     // len
+		irtypes.NewArray(0, irtypes.I8), // data (flexible array)
+	)
+
+	ci32 := func(v int64) *constant.Int { return constant.NewInt(irtypes.I32, v) }
+	ci64 := func(v int64) *constant.Int { return constant.NewInt(irtypes.I64, v) }
+
+	// Fast path: same pointer → equal
+	entry := fn.NewBlock(".entry")
+	samePtr := entry.NewICmp(enum.IPredEQ, aParam, bParam)
+	samePtrBlk := fn.NewBlock("same_ptr")
+	loadBlk := fn.NewBlock("load")
+	entry.NewCondBr(samePtr, samePtrBlk, loadBlk)
+
+	samePtrBlk.NewRet(ci32(0))
+
+	// Load lengths and data pointers
+	typedA := loadBlk.NewBitCast(aParam, irtypes.NewPointer(strInstanceType))
+	lenPtrA := loadBlk.NewGetElementPtr(strInstanceType, typedA, ci32(0), ci32(1))
+	lenA := loadBlk.NewLoad(irtypes.I64, lenPtrA)
+	dataPtrA := loadBlk.NewGetElementPtr(strInstanceType, typedA, ci32(0), ci32(2), ci32(0))
+
+	typedB := loadBlk.NewBitCast(bParam, irtypes.NewPointer(strInstanceType))
+	lenPtrB := loadBlk.NewGetElementPtr(strInstanceType, typedB, ci32(0), ci32(1))
+	lenB := loadBlk.NewLoad(irtypes.I64, lenPtrB)
+	dataPtrB := loadBlk.NewGetElementPtr(strInstanceType, typedB, ci32(0), ci32(2), ci32(0))
+
+	// minLen = min(lenA, lenB)
+	aLess := loadBlk.NewICmp(enum.IPredULT, lenA, lenB)
+	minLen := loadBlk.NewSelect(aLess, lenA, lenB)
+
+	// If minLen == 0, skip memcmp (both empty or one is empty)
+	minIsZero := loadBlk.NewICmp(enum.IPredEQ, minLen, ci64(0))
+	cmpDataBlk := fn.NewBlock("cmp_data")
+	cmpLenBlk := fn.NewBlock("cmp_len")
+	loadBlk.NewCondBr(minIsZero, cmpLenBlk, cmpDataBlk)
+
+	// cmp_data: memcmp(data_a, data_b, minLen)
+	cmpResult := cmpDataBlk.NewCall(c.funcs["memcmp"], dataPtrA, dataPtrB, minLen)
+	cmpNonZero := cmpDataBlk.NewICmp(enum.IPredNE, cmpResult, ci32(0))
+	retCmpBlk := fn.NewBlock("ret_cmp")
+	cmpDataBlk.NewCondBr(cmpNonZero, retCmpBlk, cmpLenBlk)
+
+	// ret_cmp: data differs, return memcmp result
+	retCmpBlk.NewRet(cmpResult)
+
+	// cmp_len: data is equal prefix, compare lengths: shorter < longer
+	aLess2 := cmpLenBlk.NewICmp(enum.IPredULT, lenA, lenB)
+	aGreater := cmpLenBlk.NewICmp(enum.IPredUGT, lenA, lenB)
+	r := cmpLenBlk.NewSelect(aGreater, ci32(1), ci32(0))
+	r = cmpLenBlk.NewSelect(aLess2, ci32(-1), r)
+	cmpLenBlk.NewRet(r)
+
+	c.funcs["promise_string_compare"] = fn
+}
+
+// defineStringToUpperFunc emits an LLVM IR function that returns a new string
+// with ASCII lowercase letters (a-z) converted to uppercase (A-Z).
+// Non-ASCII bytes are left unchanged. O(n) with single allocation.
+// String instance layout: { i8* _variant, i64 len, [0 x i8] data }
+func (c *Compiler) defineStringToUpperFunc() {
+	c.defineStringCaseFunc("promise_string_to_upper", 'a', 'z', -32)
+}
+
+// defineStringToLowerFunc emits an LLVM IR function that returns a new string
+// with ASCII uppercase letters (A-Z) converted to lowercase (a-z).
+// Non-ASCII bytes are left unchanged. O(n) with single allocation.
+// String instance layout: { i8* _variant, i64 len, [0 x i8] data }
+func (c *Compiler) defineStringToLowerFunc() {
+	c.defineStringCaseFunc("promise_string_to_lower", 'A', 'Z', 32)
+}
+
+// defineStringCaseFunc emits an LLVM IR function for ASCII case conversion.
+// Bytes in [rangeStart, rangeEnd] are shifted by delta; others unchanged.
+func (c *Compiler) defineStringCaseFunc(name string, rangeStart, rangeEnd byte, delta int64) {
+	sParam := ir.NewParam("s", irtypes.I8Ptr)
+	fn := c.module.NewFunc(name, irtypes.I8Ptr, sParam)
+
+	strInstanceType := irtypes.NewStruct(
+		irtypes.I8Ptr,                   // _variant
+		irtypes.I64,                     // len
+		irtypes.NewArray(0, irtypes.I8), // data (flexible array)
+	)
+
+	ci32 := func(v int64) *constant.Int { return constant.NewInt(irtypes.I32, v) }
+	ci64 := func(v int64) *constant.Int { return constant.NewInt(irtypes.I64, v) }
+	ci8 := func(v int64) *constant.Int { return constant.NewInt(irtypes.I8, v) }
+
+	entry := fn.NewBlock(".entry")
+
+	// Load length and data pointer
+	typedS := entry.NewBitCast(sParam, irtypes.NewPointer(strInstanceType))
+	lenPtr := entry.NewGetElementPtr(strInstanceType, typedS, ci32(0), ci32(1))
+	sLen := entry.NewLoad(irtypes.I64, lenPtr)
+	sDataPtr := entry.NewGetElementPtr(strInstanceType, typedS, ci32(0), ci32(2), ci32(0))
+
+	// Create new string: promise_string_new(data, len) — copies bytes
+	newStr := entry.NewCall(c.funcs["promise_string_new"], sDataPtr, sLen)
+
+	// Get data pointer of new string for in-place modification
+	typedNew := entry.NewBitCast(newStr, irtypes.NewPointer(strInstanceType))
+	newDataPtr := entry.NewGetElementPtr(strInstanceType, typedNew, ci32(0), ci32(2), ci32(0))
+
+	// If empty, skip loop
+	isEmpty := entry.NewICmp(enum.IPredEQ, sLen, ci64(0))
+	loopHdr := fn.NewBlock("loop_hdr")
+	doneBlk := fn.NewBlock("done")
+	entry.NewCondBr(isEmpty, doneBlk, loopHdr)
+
+	// loop_hdr: i = phi(0 from entry, i+1 from loop_update)
+	iPhi := loopHdr.NewPhi(ir.NewIncoming(ci64(0), entry))
+	bytePtr := loopHdr.NewGetElementPtr(irtypes.I8, newDataPtr, iPhi)
+	b := loopHdr.NewLoad(irtypes.I8, bytePtr)
+
+	// Check if byte is in [rangeStart, rangeEnd]
+	geStart := loopHdr.NewICmp(enum.IPredUGE, b, ci8(int64(rangeStart)))
+	leEnd := loopHdr.NewICmp(enum.IPredULE, b, ci8(int64(rangeEnd)))
+	inRange := loopHdr.NewAnd(geStart, leEnd)
+
+	convertBlk := fn.NewBlock("convert")
+	updateBlk := fn.NewBlock("update")
+	loopHdr.NewCondBr(inRange, convertBlk, updateBlk)
+
+	// convert: shift the byte
+	shifted := convertBlk.NewAdd(b, ci8(delta))
+	convertBlk.NewStore(shifted, bytePtr)
+	convertBlk.NewBr(updateBlk)
+
+	// update: i++, check bound
+	iNext := updateBlk.NewAdd(iPhi, ci64(1))
+	iPhi.Incs = append(iPhi.Incs, ir.NewIncoming(iNext, updateBlk))
+	atEnd := updateBlk.NewICmp(enum.IPredEQ, iNext, sLen)
+	updateBlk.NewCondBr(atEnd, doneBlk, loopHdr)
+
+	// done: return new string
+	doneBlk.NewRet(newStr)
+
+	c.funcs[name] = fn
+}
+
+// defineStringRepeatFunc emits an LLVM IR function that returns a new string
+// consisting of the input string repeated n times. O(n*len) with single allocation.
+// String instance layout: { i8* _variant, i64 len, [0 x i8] data }
+func (c *Compiler) defineStringRepeatFunc() {
+	sParam := ir.NewParam("s", irtypes.I8Ptr)
+	nParam := ir.NewParam("n", irtypes.I64)
+	fn := c.module.NewFunc("promise_string_repeat", irtypes.I8Ptr, sParam, nParam)
+
+	strInstanceType := irtypes.NewStruct(
+		irtypes.I8Ptr,                   // _variant
+		irtypes.I64,                     // len
+		irtypes.NewArray(0, irtypes.I8), // data (flexible array)
+	)
+
+	ci32 := func(v int64) *constant.Int { return constant.NewInt(irtypes.I32, v) }
+	ci64 := func(v int64) *constant.Int { return constant.NewInt(irtypes.I64, v) }
+
+	entry := fn.NewBlock(".entry")
+
+	// Load source length and data pointer
+	typedS := entry.NewBitCast(sParam, irtypes.NewPointer(strInstanceType))
+	lenPtr := entry.NewGetElementPtr(strInstanceType, typedS, ci32(0), ci32(1))
+	sLen := entry.NewLoad(irtypes.I64, lenPtr)
+	sDataPtr := entry.NewGetElementPtr(strInstanceType, typedS, ci32(0), ci32(2), ci32(0))
+
+	// If n <= 0 or sLen == 0, return empty string (reuse promise_string_new with len=0)
+	nLeZero := entry.NewICmp(enum.IPredSLE, nParam, ci64(0))
+	sLenZero := entry.NewICmp(enum.IPredEQ, sLen, ci64(0))
+	skipLoop := entry.NewOr(nLeZero, sLenZero)
+	allocBlk := fn.NewBlock("alloc")
+	emptyBlk := fn.NewBlock("empty")
+	entry.NewCondBr(skipLoop, emptyBlk, allocBlk)
+
+	// empty: return empty string
+	emptyStr := emptyBlk.NewCall(c.funcs["promise_string_new"], constant.NewNull(irtypes.I8Ptr), ci64(0))
+	emptyBlk.NewRet(emptyStr)
+
+	// alloc: allocate result string: header + sLen*n bytes
+	totalLen := allocBlk.NewMul(sLen, nParam)
+	headerSize := constant.NewInt(irtypes.I64, int64(c.typeSize(irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64))))
+	allocSize := allocBlk.NewAdd(headerSize, totalLen)
+	rawPtr := allocBlk.NewCall(c.palAlloc, allocSize)
+
+	// Set up the header: variant = null, len = totalLen
+	typedResult := allocBlk.NewBitCast(rawPtr, irtypes.NewPointer(strInstanceType))
+	variantPtr := allocBlk.NewGetElementPtr(strInstanceType, typedResult, ci32(0), ci32(0))
+	allocBlk.NewStore(constant.NewNull(irtypes.I8Ptr), variantPtr)
+	resultLenPtr := allocBlk.NewGetElementPtr(strInstanceType, typedResult, ci32(0), ci32(1))
+	allocBlk.NewStore(totalLen, resultLenPtr)
+	resultDataPtr := allocBlk.NewGetElementPtr(strInstanceType, typedResult, ci32(0), ci32(2), ci32(0))
+
+	loopHdr := fn.NewBlock("loop_hdr")
+	doneBlk := fn.NewBlock("done")
+	allocBlk.NewBr(loopHdr)
+
+	// loop_hdr: i = phi(0, i+1), copy sLen bytes at offset i*sLen
+	iPhi := loopHdr.NewPhi(ir.NewIncoming(ci64(0), allocBlk))
+	offset := loopHdr.NewMul(iPhi, sLen)
+	destPtr := loopHdr.NewGetElementPtr(irtypes.I8, resultDataPtr, offset)
+	loopHdr.NewCall(c.funcs["llvm.memcpy"], destPtr, sDataPtr, sLen, constant.False)
+
+	iNext := loopHdr.NewAdd(iPhi, ci64(1))
+	iPhi.Incs = append(iPhi.Incs, ir.NewIncoming(iNext, loopHdr))
+	atEnd := loopHdr.NewICmp(enum.IPredEQ, iNext, nParam)
+	loopHdr.NewCondBr(atEnd, doneBlk, loopHdr)
+
+	// done: return result
+	doneBlk.NewRet(rawPtr)
+
+	c.funcs["promise_string_repeat"] = fn
 }
 
 // defineStringTrimFunc emits an LLVM IR function that returns a new string

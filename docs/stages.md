@@ -811,7 +811,7 @@ Known gaps and improvements deferred from completed stages.
 | Stored generator values (first-class generator variables outside for-in) | Generators | Low |
 | Generator closures (capturing lambdas as generators) | Generators | Low |
 | Devirtualization optimization (direct call when concrete type known) | 8L | Low |
-| String comparison operators (`<`, `>`, `<=`, `>=`) — codegen panics with "string operator '<' not yet implemented" | 8b | Medium |
+| ~~String comparison operators (`<`, `>`, `<=`, `>=`)~~ — **Resolved**: lexicographic byte comparison via `memcmp` | 8b | ~~Medium~~ |
 | Range value type variable binding — `r := 1..5` panics in codegen (store type mismatch: `{ i64, i64, i1 }` vs `{ i8*, i8* }*`) | 8g | Medium |
 | Char range iteration — `for c in 'a'..'z'` panics in codegen (i32 vs i64 mismatch in `genRange`) | 8g | Medium |
 | Uint range iteration — `for i in a..b` (uint bounds) yields `int`, not `uint`, causing type errors in loop body | 8g | Low |

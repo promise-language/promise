@@ -344,6 +344,10 @@ func resolveEscape(seq string) string {
 // --- Identifiers ---
 
 func (c *Compiler) genIdentExpr(e *ast.IdentExpr) value.Value {
+	// Local variable: load from alloca (checked first to shadow module-level names)
+	if alloca, ok := c.locals[e.Name]; ok {
+		return c.block.NewLoad(alloca.ElemType, alloca)
+	}
 	// Check for function reference — wrap in fat pointer if used as a value
 	if fn, ok := c.funcs[e.Name]; ok {
 		if _, isSig := c.info.Types[e].(*types.Signature); isSig {
@@ -358,12 +362,7 @@ func (c *Compiler) genIdentExpr(e *ast.IdentExpr) value.Value {
 		}
 		return fn
 	}
-	// Local variable: load from alloca
-	alloca, ok := c.locals[e.Name]
-	if !ok {
-		panic(fmt.Sprintf("codegen: undefined variable %q", e.Name))
-	}
-	return c.block.NewLoad(alloca.ElemType, alloca)
+	panic(fmt.Sprintf("codegen: undefined variable %q", e.Name))
 }
 
 // --- Binary expressions ---
@@ -509,6 +508,18 @@ func (c *Compiler) genStringOp(op string, left, right value.Value) value.Value {
 	case "!=":
 		eq := c.block.NewCall(c.funcs["promise_string_eq"], left, right)
 		return c.block.NewXor(eq, constant.NewInt(irtypes.I1, 1))
+	case "<":
+		cmp := c.block.NewCall(c.funcs["promise_string_compare"], left, right)
+		return c.block.NewICmp(enum.IPredSLT, cmp, constant.NewInt(irtypes.I32, 0))
+	case ">":
+		cmp := c.block.NewCall(c.funcs["promise_string_compare"], left, right)
+		return c.block.NewICmp(enum.IPredSGT, cmp, constant.NewInt(irtypes.I32, 0))
+	case "<=":
+		cmp := c.block.NewCall(c.funcs["promise_string_compare"], left, right)
+		return c.block.NewICmp(enum.IPredSLE, cmp, constant.NewInt(irtypes.I32, 0))
+	case ">=":
+		cmp := c.block.NewCall(c.funcs["promise_string_compare"], left, right)
+		return c.block.NewICmp(enum.IPredSGE, cmp, constant.NewInt(irtypes.I32, 0))
 	default:
 		panic(fmt.Sprintf("codegen: string operator %q not yet implemented", op))
 	}
@@ -2342,6 +2353,19 @@ func (c *Compiler) genStringMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 	case "split":
 		argVal := c.genExpr(e.Args[0].Value)
 		result := c.block.NewCall(c.funcs["promise_string_split"], strPtr, argVal)
+		return result, true
+
+	case "to_upper":
+		result := c.block.NewCall(c.funcs["promise_string_to_upper"], strPtr)
+		return result, true
+
+	case "to_lower":
+		result := c.block.NewCall(c.funcs["promise_string_to_lower"], strPtr)
+		return result, true
+
+	case "repeat":
+		argVal := c.genExpr(e.Args[0].Value)
+		result := c.block.NewCall(c.funcs["promise_string_repeat"], strPtr, argVal)
 		return result, true
 
 	default:

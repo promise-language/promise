@@ -2202,7 +2202,7 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 	switch method {
 	case "push":
 		argVal := c.genExpr(e.Args[0].Value)
-		argAlloca := c.block.NewAlloca(elemLLVM)
+		argAlloca := c.createEntryAlloca(elemLLVM)
 		// Zero-initialize before store to clear padding bytes for memcmp correctness
 		c.block.NewStore(constant.NewZeroInitializer(elemLLVM), argAlloca)
 		c.block.NewStore(argVal, argAlloca)
@@ -2214,7 +2214,7 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		return newSlice
 
 	case "pop":
-		outAlloca := c.block.NewAlloca(elemLLVM)
+		outAlloca := c.createEntryAlloca(elemLLVM)
 		outPtr := c.block.NewBitCast(outAlloca, irtypes.I8Ptr)
 		found := c.block.NewCall(c.funcs["promise_vector_pop"],
 			slicePtr, outPtr, constant.NewInt(irtypes.I64, elemSize))
@@ -2243,7 +2243,7 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 
 	case "contains":
 		argVal := c.genExpr(e.Args[0].Value)
-		argAlloca := c.block.NewAlloca(elemLLVM)
+		argAlloca := c.createEntryAlloca(elemLLVM)
 		// Zero-initialize before store to clear padding bytes for memcmp correctness
 		c.block.NewStore(constant.NewZeroInitializer(elemLLVM), argAlloca)
 		c.block.NewStore(argVal, argAlloca)
@@ -4117,7 +4117,7 @@ func (c *Compiler) valueTypeReceiverPtr(val value.Value, typ types.Type) value.V
 	if layout == nil {
 		panic(fmt.Sprintf("codegen: no layout for value type receiver %s", typ))
 	}
-	tmp := c.block.NewAlloca(layout.Value.LLVMType)
+	tmp := c.createEntryAlloca(layout.Value.LLVMType)
 	c.block.NewStore(val, tmp)
 	return c.block.NewBitCast(tmp, irtypes.I8Ptr)
 }

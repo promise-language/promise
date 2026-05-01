@@ -99,7 +99,7 @@ func (c *Compiler) genExternCall(ext *ExternFunc, argVals []value.Value, argType
 	var sretAlloca *ir.InstAlloca
 	if ext.HasSret {
 		layout := c.lookupLayout(ext.ResultType)
-		sretAlloca = c.block.NewAlloca(layout.Value.LLVMType)
+		sretAlloca = c.createEntryAlloca(layout.Value.LLVMType)
 		sretPtr := c.block.NewBitCast(sretAlloca, irtypes.I8Ptr)
 		callArgs = append(callArgs, sretPtr)
 	}
@@ -125,7 +125,7 @@ func (c *Compiler) genExternCall(ext *ExternFunc, argVals []value.Value, argType
 		packed := c.packToValueStruct(arg, named, layout)
 
 		// All extern value args: alloca, store, pass pointer (matching C ABI)
-		alloca := c.block.NewAlloca(layout.Value.LLVMType)
+		alloca := c.createEntryAlloca(layout.Value.LLVMType)
 		c.block.NewStore(packed, alloca)
 		callArgs = append(callArgs, c.block.NewBitCast(alloca, irtypes.I8Ptr))
 	}

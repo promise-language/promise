@@ -128,3 +128,73 @@ test_grow_and_shrink() `test {
     assert(v.len == 20, "shrank to 20");
     assert(v[19] == 19, "last element preserved");
 }
+
+// Regression: dynamic allocas in loop body caused stack overflow at ~131K iterations.
+test_push_1m_ints() `test {
+    int[] v = [];
+    i := 0;
+    while i < 1_000_000 {
+        v.push(i);
+        i = i + 1;
+    }
+    assert(v.len == 1_000_000, "len should be 1M");
+    assert(v[0] == 0, "first element");
+    assert(v[999_999] == 999_999, "last element");
+}
+
+test_push_10m_ints() `test {
+    int[] v = [];
+    i := 0;
+    while i < 10_000_000 {
+        v.push(i);
+        i = i + 1;
+    }
+    assert(v.len == 10_000_000, "len should be 10M");
+    assert(v[0] == 0, "first element");
+    assert(v[9_999_999] == 9_999_999, "last element");
+}
+
+// Regression: pop alloca was also a dynamic alloca in loop body.
+test_pop_200k() `test {
+    int[] v = [];
+    i := 0;
+    while i < 200_000 {
+        v.push(i);
+        i = i + 1;
+    }
+    int last = -1;
+    i = 0;
+    while i < 200_000 {
+        if val := v.pop() {
+            last = val;
+        }
+        i = i + 1;
+    }
+    assert(v.len == 0, "empty after pop all");
+    assert(last == 0, "last popped is first pushed");
+}
+
+// Regression: contains alloca was also a dynamic alloca in loop body.
+test_contains_200k() `test {
+    int[] v = [42, 99, 7];
+    int found = 0;
+    i := 0;
+    while i < 200_000 {
+        if v.contains(42) { found = found + 1; }
+        i = i + 1;
+    }
+    assert(found == 200_000, "found 42 every time");
+}
+
+// Regression: value type receiver alloca was a dynamic alloca in loop body.
+test_value_type_method_200k() `test {
+    int sum = 0;
+    i := 0;
+    while i < 200_000 {
+        d := Duration.from_nanos(i);
+        sum = sum + d.as_nanos;
+        i = i + 1;
+    }
+    // sum of 0..199999 = 199999 * 200000 / 2 = 19999900000
+    assert(sum == 19_999_900_000, "sum of nanos");
+}

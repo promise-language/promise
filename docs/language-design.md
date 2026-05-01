@@ -2402,11 +2402,11 @@ Built-in collection types with generic support:
 // Array (fixed-size, stack-allocated)
 int[3] arr = [1, 2, 3];
 
-// Slice (dynamic, heap-allocated)
+// Vector (dynamic, heap-allocated) — T[] is sugar for Vector[T]
 int[] list = [1, 2, 3, 4, 5];
 list.push(6);
 
-// Map
+// Map (hash map with open addressing)
 map[string, int] scores = {
   "alice": 100,
   "bob": 85,
@@ -2423,6 +2423,105 @@ All collection types implement `stream[T]` (see Section 12.5), providing lazy co
 int[] numbers = [1, 2, 3, 4, 5];
 squares := numbers.map((n) -> n * n).collect();   // [1, 4, 9, 16, 25]
 sum := numbers.fold(0, (acc, n) -> acc + n);       // 15
+```
+
+### 13.1 Vector (`T[]`)
+
+`T[]` is syntactic sugar for `Vector[T]`, a generic dynamic array backed by a contiguous heap-allocated buffer. Vectors use a doubling growth strategy (0 → 4 → 8 → 16 → ...) and handle millions of elements efficiently.
+
+```promise
+int[] v = [];              // empty vector
+int[] v = [1, 2, 3];      // initialized with elements
+```
+
+**Methods and properties:**
+
+| Signature | Description |
+|-----------|-------------|
+| `get len int` | Number of elements |
+| `get is_empty bool` | True when `len == 0` |
+| `push(T elem)` | Append element, growing if needed |
+| `pop() T?` | Remove and return last element, or `none` if empty |
+| `contains(T elem) bool` | Linear search for element equality |
+| `remove(int index)` | Remove element at index, shifting subsequent elements left |
+| `[](int index) T` | Index access (panics on out-of-bounds) |
+| `[]=(int index, T value)` | Index assignment (panics on out-of-bounds) |
+| `[:](int? start, int? end) T[]` | Slice — returns a new vector from `start` to `end` (exclusive) |
+| `[:]=(int? start, int? end, T[] value)` | Slice assignment — overwrites range with values from `value` |
+| `filled(T value, int count) T[]` | Factory: creates a vector of `count` copies of `value` |
+
+```promise
+int[] v = [];
+for i in 0..5 { v.push(i * i); }     // [0, 1, 4, 9, 16]
+v.remove(2);                           // [0, 1, 9, 16]
+
+if val := v.pop() {
+    println("{val}");                  // 16
+}
+
+assert(v.contains(9));                 // true
+v[0] = 42;                            // [42, 1, 9]
+
+sub := v[1:3];                         // [1, 9]
+```
+
+Vectors support `for-in` iteration:
+
+```promise
+int[] nums = [10, 20, 30];
+for n in nums { println("{n}"); }          // value iteration
+for i, n in nums { println("{i}: {n}"); }  // indexed iteration
+```
+
+### 13.2 Map (`map[K, V]`)
+
+`map[K, V]` is a generic hash map using open addressing with linear probing. Keys must satisfy the `Hashable + Equal` constraints.
+
+```promise
+map[string, int] scores = {"alice": 100, "bob": 85};
+scores["charlie"] = 92;
+```
+
+**Methods and properties:**
+
+| Signature | Description |
+|-----------|-------------|
+| `get len int` | Number of entries |
+| `get is_empty bool` | True when `len == 0` |
+| `[](K key) V?` | Lookup by key, returns `none` if not found |
+| `[]=(K key, V value)` | Insert or overwrite entry |
+| `contains(K key) bool` | True if key exists |
+| `remove(K key) bool` | Remove entry, returns true if found |
+| `get_or(K key, V default) V` | Lookup with fallback value |
+| `pop(K key) V?` | Remove and return value, or `none` |
+| `update(K key, V value) bool` | Update existing entry only, returns true if found |
+| `keys() K[]` | All keys as a vector |
+| `values() V[]` | All values as a vector |
+| `entries() (K, V)[]` | All entries as a vector of tuples |
+| `merge(Map[K, V] other)` | Copy all entries from `other` into this map |
+| `clear()` | Remove all entries |
+
+```promise
+map[string, int] m = {};
+m["x"] = 10;
+m["y"] = 20;
+
+if val := m["x"] {
+    println("{val}");            // 10
+}
+
+name := m.get_or("z", 0);       // 0
+m.remove("x");                   // true
+keys := m.keys();                // ["y"]
+```
+
+### 13.3 Tuple
+
+Tuples are fixed-size heterogeneous collections with positional access and destructuring:
+
+```promise
+(int, string) pair = (42, "answer");
+(num, label) := pair;              // destructuring
 ```
 
 ---

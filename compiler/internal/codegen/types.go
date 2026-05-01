@@ -77,7 +77,7 @@ func llvmType(typ types.Type) irtypes.Type {
 		if origin == types.TypIter || origin == types.TypStream {
 			return generatorValueType() // {i8* handle, i8* yield_slot}
 		}
-		return irtypes.I8Ptr // Slice[T], Map[K,V], and other generic instances
+		return irtypes.I8Ptr // generic instances (resolveType/instanceFieldLLVMType handle user types)
 	default:
 		return irtypes.I8Ptr // opaque pointer placeholder for future types
 	}
@@ -205,7 +205,7 @@ func userValueType() *irtypes.StructType {
 func instanceFieldLLVMType(typ types.Type, allLayouts map[*types.Named]*TypeDeclLayout) irtypes.Type {
 	if n := extractNamed(typ); n != nil && classify(n) == CatUnknown {
 		if n != types.TypString && n != types.TypVoid && n != types.TypNone &&
-			n != types.TypVector && n != types.TypMap {
+			n != types.TypVector {
 			// Value types have a wider value struct with embedded fields
 			if n.IsValueType() {
 				if layout, ok := allLayouts[n]; ok {

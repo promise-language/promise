@@ -1,0 +1,139 @@
+// Test Set[T] type: creation, add, remove, contains, set operations
+
+test_set_empty() `test {
+    Set[int] s = Set[int]();
+    assert(s.len == 0, "empty set len == 0");
+    assert(s.is_empty, "empty set is_empty");
+}
+
+test_set_add_contains() `test {
+    Set[int] s = Set[int]();
+    s.add(1);
+    s.add(2);
+    s.add(3);
+    assert(s.len == 3, "set len == 3");
+    assert(s.contains(1), "contains 1");
+    assert(s.contains(2), "contains 2");
+    assert(s.contains(3), "contains 3");
+    assert(!s.contains(4), "!contains 4");
+}
+
+test_set_add_duplicate() `test {
+    Set[int] s = Set[int]();
+    s.add(1);
+    s.add(1);
+    s.add(1);
+    assert(s.len == 1, "duplicates: len == 1");
+}
+
+test_set_remove() `test {
+    Set[int] s = Set[int]();
+    s.add(1);
+    s.add(2);
+    s.add(3);
+    bool removed = s.remove(2);
+    assert(removed, "remove returns true");
+    assert(s.len == 2, "len after remove == 2");
+    assert(!s.contains(2), "!contains removed");
+}
+
+test_set_remove_missing() `test {
+    Set[int] s = Set[int]();
+    s.add(1);
+    bool removed = s.remove(99);
+    assert(!removed, "remove missing returns false");
+    assert(s.len == 1, "len unchanged");
+}
+
+test_set_clear() `test {
+    Set[int] s = Set[int]();
+    s.add(1);
+    s.add(2);
+    s.clear();
+    assert(s.len == 0, "clear: len == 0");
+    assert(s.is_empty, "clear: is_empty");
+}
+
+test_set_to_vector() `test {
+    Set[int] s = Set[int]();
+    s.add(10);
+    s.add(20);
+    int[] v = s.to_vector();
+    assert(v.len == 2, "to_vector len == 2");
+}
+
+test_set_union() `test {
+    Set[int] a = Set[int]();
+    a.add(1);
+    a.add(2);
+    Set[int] b = Set[int]();
+    b.add(2);
+    b.add(3);
+    Set[int] u = a.union(b);
+    assert(u.len == 3, "union len == 3");
+    assert(u.contains(1), "union contains 1");
+    assert(u.contains(2), "union contains 2");
+    assert(u.contains(3), "union contains 3");
+}
+
+test_set_intersect() `test {
+    Set[int] a = Set[int]();
+    a.add(1);
+    a.add(2);
+    a.add(3);
+    Set[int] b = Set[int]();
+    b.add(2);
+    b.add(3);
+    b.add(4);
+    Set[int] i = a.intersect(b);
+    assert(i.len == 2, "intersect len == 2");
+    assert(i.contains(2), "intersect contains 2");
+    assert(i.contains(3), "intersect contains 3");
+    assert(!i.contains(1), "intersect !contains 1");
+}
+
+test_set_difference() `test {
+    Set[int] a = Set[int]();
+    a.add(1);
+    a.add(2);
+    a.add(3);
+    Set[int] b = Set[int]();
+    b.add(2);
+    b.add(3);
+    b.add(4);
+    Set[int] d = a.difference(b);
+    assert(d.len == 1, "difference len == 1");
+    assert(d.contains(1), "difference contains 1");
+    assert(!d.contains(2), "difference !contains 2");
+}
+
+test_set_is_subset() `test {
+    Set[int] a = Set[int]();
+    a.add(1);
+    a.add(2);
+    Set[int] b = Set[int]();
+    b.add(1);
+    b.add(2);
+    b.add(3);
+    assert(a.is_subset(b), "a is subset of b");
+}
+
+test_set_not_subset() `test {
+    Set[int] a = Set[int]();
+    a.add(1);
+    a.add(2);
+    a.add(3);
+    Set[int] b = Set[int]();
+    b.add(1);
+    b.add(2);
+    assert(!a.is_subset(b), "a is not subset of b");
+}
+
+test_set_string() `test {
+    Set[string] s = Set[string]();
+    s.add("hello");
+    s.add("world");
+    assert(s.len == 2, "string set len == 2");
+    assert(s.contains("hello"), "string set contains hello");
+    assert(!s.contains("foo"), "string set !contains foo");
+}

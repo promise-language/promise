@@ -57,6 +57,11 @@ type Info struct {
 	// Scopes maps scope-creating AST nodes (File, Block, etc.) to their scope.
 	Scopes map[ast.Node]*types.Scope
 
+	// ScopeOrder lists all scopes in insertion order (file scope first, then
+	// nested block/function scopes). Provides deterministic iteration — always
+	// use this instead of ranging over the Scopes map directly.
+	ScopeOrder []*types.Scope
+
 	// StdScope is the std library scope (parent of file scope). Nil if no std loaded.
 	StdScope *types.Scope
 

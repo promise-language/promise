@@ -2104,8 +2104,16 @@ func (c *Compiler) resolveTypeRefToType(ref ast.TypeRef) types.Type {
 				return tn.Type()
 			}
 		}
-		// Check sema scopes (user-defined types)
-		for _, scope := range c.info.Scopes {
+		// Check std scope (std-declared types)
+		if c.info.StdScope != nil {
+			if obj := c.info.StdScope.Lookup(r.Name); obj != nil {
+				if tn, ok := obj.(*types.TypeName); ok {
+					return tn.Type()
+				}
+			}
+		}
+		// Check file scope (user-defined types)
+		for _, scope := range c.info.ScopeOrder {
 			if obj := scope.Lookup(r.Name); obj != nil {
 				if tn, ok := obj.(*types.TypeName); ok {
 					return tn.Type()
@@ -2114,7 +2122,7 @@ func (c *Compiler) resolveTypeRefToType(ref ast.TypeRef) types.Type {
 		}
 	case *ast.QualifiedTypeRef:
 		// Module-qualified types: look up in sema scopes by unqualified name
-		for _, scope := range c.info.Scopes {
+		for _, scope := range c.info.ScopeOrder {
 			if obj := scope.Lookup(r.Name); obj != nil {
 				if tn, ok := obj.(*types.TypeName); ok {
 					return tn.Type()
@@ -2132,7 +2140,7 @@ func (c *Compiler) resolveTypeRefToType(ref ast.TypeRef) types.Type {
 
 // lookupVarType finds a variable's declared type by walking sema scopes.
 func (c *Compiler) lookupVarType(name string) types.Type {
-	for _, scope := range c.info.Scopes {
+	for _, scope := range c.info.ScopeOrder {
 		if obj := scope.Lookup(name); obj != nil {
 			if v, ok := obj.(*types.Var); ok {
 				typ := v.Type()

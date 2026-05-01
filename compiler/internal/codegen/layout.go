@@ -711,7 +711,7 @@ func computeEnumLayout(module *ir.Module, enum *types.Enum, ptrSize int) *TypeDe
 
 // lookupFuncSig finds a function's signature in sema info by name.
 func lookupFuncSig(name string, info *sema.Info) *types.Signature {
-	for _, scope := range info.Scopes {
+	for _, scope := range info.ScopeOrder {
 		if obj := scope.Lookup(name); obj != nil {
 			if fn, ok := obj.(*types.Func); ok {
 				if sig, ok := fn.Type().(*types.Signature); ok {

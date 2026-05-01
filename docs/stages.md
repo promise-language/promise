@@ -652,6 +652,22 @@ See [phase3-remote-modules.md](phase3-remote-modules.md) for the full design.
 
 **Planned phases:** Phase 4 (catalog infrastructure), Phase 5 (catalog CI), Phase 6 (tooling)
 
+### Stdlib Catalog Modules (Tier 1)
+
+Catalog modules shipped as embedded `.pr` files in `std/`. Registered in `internal/module/catalog.go` via the embedded `catalog.toml`. Available via `use math;`, `use sort;`, `use set;`, `use random;`.
+
+**`std/math.pr`** — Integer math (`min`, `max`, `abs`, `clamp`), constants (`PI`, `E`, `TAU`, `MAX_INT`, `MIN_INT`), f64 math via LLVM intrinsics (`sqrt`, `sin`, `cos`, `pow`, `exp`, `log`, `fabs`, `floor`, `ceil`, `round`), derived f64 functions (`tan`, `log2`, `log10`, `is_nan`, `is_inf`), integer power (`ipow`). LLVM intrinsics declared as `extern` functions mapped to codegen-emitted declarations (`promise_sqrt` → `@llvm.sqrt.f64`, etc). 7 intrinsic functions in `expr.go:genCallExpr`.
+
+**`std/sort.pr`** — Insertion sort for `Vector[int]` and `Vector[string]` (`sort_ints`, `sort_strings`). Comparison-based variants (`sort_ints_by`, `sort_strings_by`) taking `(int, int) bool` / `(string, string) bool` comparators. Pure Promise implementation (no native methods). `reverse_ints`, `reverse_strings`.
+
+**`std/set.pr`** — `Set[T]` wrapper around `Map[T, bool]`. Methods: `add`, `remove`, `contains`, `get len`, `to_vector`, `union`, `intersection`, `difference`. All pure Promise.
+
+**`std/random.pr`** — xorshift64 PRNG seeded from `nanotime()`. Functions: `random_int`, `random_range`, `random_f64`, `random_bool`, `shuffle_ints`. Uses `nanotime() int` extern for seeding.
+
+**Codegen support:** `genCallExpr` handles LLVM math intrinsics via name-based dispatch. `instanceFieldLLVMType` updated to not special-case `Map` (already `i8*`). `genCallExpr` applies `typeSubst` to constructor callee types for generic constructors inside generic methods.
+
+**Tests:** 46 math tests (`tests/std/test_math.pr`), sort/set/random tests in `tests/std/`. Total: 920 native pass.
+
 ## Stage 10 — CLI
 
 Command-line interface. Core commands implemented; formatter planned.
@@ -670,7 +686,7 @@ Command-line interface. Core commands implemented; formatter planned.
 - Inline error formatting: source line + `^` caret marker, no temp filenames
 - `promise clean` — remove build cache (`~/.promise/cache/build/`), `--global` also removes module cache
 - Embedded `std/` and `runtime/` in the binary via `go:embed` for self-contained install
-- **Test suite**: 775 tests across 149 files — `tests/e2e/` (language features), `tests/std/` (standard library), `tests/concurrency/` (scheduler, channels, select, panic recovery, stress tests), `tests/modules/` (module system e2e), `tests/value_types/` (pure value types)
+- **Test suite**: 920 tests across 158 files — `tests/e2e/` (language features), `tests/std/` (standard library), `tests/concurrency/` (scheduler, channels, select, panic recovery, stress tests), `tests/modules/` (module system e2e), `tests/value_types/` (pure value types)
 - `promise doc <file.pr>` — generate documentation from `doc()` meta tags (**Phase 1 done**: `cmd/promise/doc.go`)
   - `-public` (default) / `-all` — filter by visibility
   - `-signatures` — compact signature-only output (minimal tokens for AI agents)
@@ -713,9 +729,9 @@ Dependency fetching and resolution.
 
 ## What's Next
 
-The compiler pipeline (Stages 1-8p) is complete. Runtime is fully codegen-emitted LLVM IR — no C files remain. All major cross-cutting features are done: M:N scheduler (Phase 5c), WASM target (Phases 4b/5d/7a), yield generators, structural interfaces, operator dispatch, naming conventions, pure value types, documentation system (Phase 1), and module system (Phase 3 done + identity redesign: local+remote modules, git fetching, `promise pin`, epoch warnings, separate/incremental compilation, globally unique module identity with two-layer architecture).
+The compiler pipeline (Stages 1-8p) is complete. Runtime is fully codegen-emitted LLVM IR — no C files remain. All major cross-cutting features are done: M:N scheduler (Phase 5c), WASM target (Phases 4b/5d/7a), yield generators, structural interfaces, operator dispatch, naming conventions, pure value types, documentation system (Phase 1), module system (Phase 3 done + identity redesign), and stdlib expansion (math, sort, set, random catalog modules).
 
-Test suite: 781 native pass, 761 WASM pass (3 skip).
+Test suite: 920 native pass, 761 WASM pass (3 skip).
 
 ### Near-term: Compiler Infrastructure
 
@@ -744,13 +760,13 @@ Test suite: 781 native pass, 761 WASM pass (3 skip).
 | IO reactor (kqueue/epoll/IOCP) — Phase 6 | [runtime-proposal.md](runtime-proposal.md) | Low |
 | Generic type RTTI | — | Low |
 | Value type structural interface coercion (stack boxing) | — | Low |
-| Generic value types | — | Low |
+| ~~Generic value types~~ | — | ~~Done~~ |
 | User type `toString()` for interpolation | — | Low |
 | Type argument inference | — | Low |
 
 ### WASM remaining work
 
-Tests: 761 pass, 0 fail, 3 skip on `wasm32-wasi` (781 native pass)
+Tests: 761 pass, 0 fail, 3 skip on `wasm32-wasi` (920 native pass)
 
 | Item | Skipped tests | Effort | Notes |
 |------|--------------|--------|-------|
@@ -786,6 +802,7 @@ Known gaps and improvements deferred from completed stages.
 | ~~Select blocking deadlock~~ — **Fixed.** `genSelectStmt` set `park_mutex = null` for blocking select, causing the scheduler to treat it as a yield and immediately re-enqueue. After resume, if no case was ready, code fell through to `mergeBlk` skipping the select. Replaced waiter-list parking with yield-and-retry loop (lockStartBlk). Waiter lists had fundamental enqueue-before-suspend and double-wake races with multiple channel mutexes. | 5c | ~~High~~ Resolved |
 | ~~Steal_work data race on thief P queue~~ — **Fixed.** `steal_work` wrote stolen goroutines to the thief's P queue without holding the thief's lock. On ARM64, stores could be reordered, causing queue corruption visible to concurrent stealers. Now locks both thief and victim P's in address order (ptrtoint comparison) to prevent ABBA deadlock. | 5c | ~~High~~ Resolved |
 | ~~PHI nodes not grouped in failable destructuring~~ — **Fixed.** `genFailableDestructure` interleaved PHI nodes with alloca/store in the merge block. LLVM requires all PHIs at block top. Reordered to emit both PHIs first, then stores. Affected `(val, err) := failable()` patterns. | 8e | ~~Medium~~ Resolved |
+| ~~Non-deterministic scope iteration~~ — **Fixed.** Codegen iterated `info.Scopes` (Go map) for type/variable lookups, causing 50/50 test failures due to Go map randomization. Added `ScopeOrder []*types.Scope` to `Info` — insertion-ordered slice appended in `openScope()` and `Check()`. Replaced all 7 `range info.Scopes` sites in codegen with `range info.ScopeOrder`. Also added `StdScope` check in `resolveTypeRefToType` for std-declared types. | 9 | ~~Medium~~ Resolved |
 
 ### Codegen Gaps
 
@@ -806,7 +823,7 @@ Known gaps and improvements deferred from completed stages.
 | Extern ABI for generic types | 8f | Low |
 | Non-instance field placements: mixed `value`+instance, `variant`, `type` | 8c | Low |
 | Value type structural interface coercion (stack boxing) | 8p | Low |
-| Generic value types (`type Pair[T] { T first \`value; T second \`value; }`) | 8p | Low |
+| ~~Generic value types~~ — **Done.** `computeMonoValueTypeLayout` in `mono.go`. `Range[T]` is the first generic value type. | 8p | ~~Low~~ Resolved |
 | User type `toString()` for interpolation | 8h | Low |
 | `yield*` delegate (forward all values from sub-iterator) | Generators | Medium |
 | Failable generators (`stream[T]!` with error propagation through yield) | Generators | Low |

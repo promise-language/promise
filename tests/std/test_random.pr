@@ -1,0 +1,68 @@
+// Test Random type: deterministic PRNG, range, distribution
+
+test_random_deterministic() `test {
+    Random r1 = Random(seed: 42 as! uint);
+    Random r2 = Random(seed: 42 as! uint);
+    assert(r1.next_uint() == r2.next_uint(), "same seed same output 1");
+    assert(r1.next_uint() == r2.next_uint(), "same seed same output 2");
+    assert(r1.next_uint() == r2.next_uint(), "same seed same output 3");
+}
+
+test_random_different_seeds() `test {
+    Random r1 = Random(seed: 1 as! uint);
+    Random r2 = Random(seed: 2 as! uint);
+    // different seeds should produce different sequences
+    // (statistically guaranteed for xoshiro256**)
+    uint a = r1.next_uint();
+    uint b = r2.next_uint();
+    assert(a != b, "different seeds different output");
+}
+
+test_random_next_int() `test {
+    Random r = Random(seed: 123 as! uint);
+    int x = r.next_int();
+    int y = r.next_int();
+    // just verify it produces values without crashing
+    assert(x != y, "next_int produces varying values");
+}
+
+test_random_next_f64_range() `test {
+    Random r = Random(seed: 99 as! uint);
+    int i = 0;
+    while i < 100 {
+        f64 x = r.next_f64();
+        assert(x >= 0.0, "next_f64 >= 0.0");
+        assert(x < 1.0, "next_f64 < 1.0");
+        i++;
+    }
+}
+
+test_random_next_int_range() `test {
+    Random r = Random(seed: 77 as! uint);
+    int i = 0;
+    while i < 100 {
+        int x = r.next_int_range(10, 20);
+        assert(x >= 10, "int_range >= 10");
+        assert(x < 20, "int_range < 20");
+        i++;
+    }
+}
+
+test_random_next_bool() `test {
+    Random r = Random(seed: 55 as! uint);
+    int true_count = 0;
+    int i = 0;
+    while i < 100 {
+        if r.next_bool() { true_count++; }
+        i++;
+    }
+    // should have some trues and some falses (extremely unlikely to be all one)
+    assert(true_count > 0, "next_bool produces true");
+    assert(true_count < 100, "next_bool produces false");
+}
+
+test_random_int_range_single() `test {
+    Random r = Random(seed: 1 as! uint);
+    int x = r.next_int_range(5, 6);
+    assert(x == 5, "int_range [5,6) always 5");
+}

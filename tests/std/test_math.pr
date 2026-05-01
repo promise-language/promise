@@ -1,28 +1,133 @@
-// Test math utility functions: min, max, abs, clamp
+// Test math utility functions: min, max, abs, clamp, constants, f64 math
+
 test_min() `test {
-  assert(min(3, 7) == 3, "min(3,7) == 3");
-  assert(min(7, 3) == 3, "min(7,3) == 3");
-  assert(min(5, 5) == 5, "min(5,5) == 5");
-  assert(min(0 - 1, 1) == 0 - 1, "min(-1,1) == -1");
+    assert(min(3, 7) == 3, "min(3,7) == 3");
+    assert(min(7, 3) == 3, "min(7,3) == 3");
+    assert(min(5, 5) == 5, "min(5,5) == 5");
+    assert(min(0 - 1, 1) == 0 - 1, "min(-1,1) == -1");
 }
 
 test_max() `test {
-  assert(max(3, 7) == 7, "max(3,7) == 7");
-  assert(max(7, 3) == 7, "max(7,3) == 7");
-  assert(max(5, 5) == 5, "max(5,5) == 5");
-  assert(max(0 - 1, 1) == 1, "max(-1,1) == 1");
+    assert(max(3, 7) == 7, "max(3,7) == 7");
+    assert(max(7, 3) == 7, "max(7,3) == 7");
+    assert(max(5, 5) == 5, "max(5,5) == 5");
+    assert(max(0 - 1, 1) == 1, "max(-1,1) == 1");
 }
 
 test_abs() `test {
-  assert(abs(5) == 5, "abs(5) == 5");
-  assert(abs(0 - 5) == 5, "abs(-5) == 5");
-  assert(abs(0) == 0, "abs(0) == 0");
+    assert(abs(5) == 5, "abs(5) == 5");
+    assert(abs(0 - 5) == 5, "abs(-5) == 5");
+    assert(abs(0) == 0, "abs(0) == 0");
 }
 
 test_clamp() `test {
-  assert(clamp(5, 0, 10) == 5, "clamp in range");
-  assert(clamp(0 - 5, 0, 10) == 0, "clamp below");
-  assert(clamp(15, 0, 10) == 10, "clamp above");
-  assert(clamp(0, 0, 10) == 0, "clamp at lo");
-  assert(clamp(10, 0, 10) == 10, "clamp at hi");
+    assert(clamp(5, 0, 10) == 5, "clamp in range");
+    assert(clamp(0 - 5, 0, 10) == 0, "clamp below");
+    assert(clamp(15, 0, 10) == 10, "clamp above");
+    assert(clamp(0, 0, 10) == 0, "clamp at lo");
+    assert(clamp(10, 0, 10) == 10, "clamp at hi");
+}
+
+// --- Constants ---
+
+test_pi() `test {
+    f64 pi = PI();
+    assert(pi > 3.14 && pi < 3.15, "PI ~ 3.14159");
+}
+
+test_e() `test {
+    f64 e = E();
+    assert(e > 2.71 && e < 2.72, "E ~ 2.71828");
+}
+
+test_tau() `test {
+    f64 tau = TAU();
+    assert(tau > 6.28 && tau < 6.29, "TAU ~ 6.28318");
+}
+
+test_max_int() `test {
+    assert(MAX_INT() > 0, "MAX_INT positive");
+}
+
+test_min_int() `test {
+    assert(MIN_INT() < 0, "MIN_INT negative");
+}
+
+// --- f64 math ---
+
+test_sqrt() `test {
+    f64 r = sqrt(4.0);
+    assert(r > 1.99 && r < 2.01, "sqrt(4) ~ 2.0");
+    f64 r2 = sqrt(9.0);
+    assert(r2 > 2.99 && r2 < 3.01, "sqrt(9) ~ 3.0");
+}
+
+test_sin_cos() `test {
+    f64 s = sin(0.0);
+    assert(s > -0.01 && s < 0.01, "sin(0) ~ 0");
+    f64 c = cos(0.0);
+    assert(c > 0.99 && c < 1.01, "cos(0) ~ 1");
+}
+
+test_tan() `test {
+    f64 t = tan(0.0);
+    assert(t > -0.01 && t < 0.01, "tan(0) ~ 0");
+}
+
+test_pow() `test {
+    f64 r = pow(2.0, 10.0);
+    assert(r > 1023.0 && r < 1025.0, "pow(2,10) ~ 1024");
+}
+
+test_exp_log() `test {
+    f64 e = exp(1.0);
+    assert(e > 2.71 && e < 2.72, "exp(1) ~ E");
+    f64 l = log(E());
+    assert(l > 0.99 && l < 1.01, "log(E) ~ 1");
+}
+
+test_floor_ceil_round() `test {
+    assert(floor(3.7) > 2.99 && floor(3.7) < 3.01, "floor(3.7) ~ 3");
+    assert(ceil(3.2) > 3.99 && ceil(3.2) < 4.01, "ceil(3.2) ~ 4");
+    assert(round(3.5) > 3.99 && round(3.5) < 4.01, "round(3.5) ~ 4");
+    assert(round(3.4) > 2.99 && round(3.4) < 3.01, "round(3.4) ~ 3");
+}
+
+test_fabs() `test {
+    assert(fabs(-5.0) > 4.99 && fabs(-5.0) < 5.01, "fabs(-5) ~ 5");
+    assert(fabs(5.0) > 4.99 && fabs(5.0) < 5.01, "fabs(5) ~ 5");
+}
+
+test_abs_f64() `test {
+    assert(abs_f64(-3.14) > 3.13 && abs_f64(-3.14) < 3.15, "abs_f64(-3.14) ~ 3.14");
+}
+
+test_log2() `test {
+    f64 l = log2(8.0);
+    assert(l > 2.99 && l < 3.01, "log2(8) ~ 3");
+}
+
+test_log10() `test {
+    f64 l = log10(1000.0);
+    assert(l > 2.99 && l < 3.01, "log10(1000) ~ 3");
+}
+
+test_trunc() `test {
+    assert(trunc(3.7) > 2.99 && trunc(3.7) < 3.01, "trunc(3.7) ~ 3");
+    assert(trunc(-3.7) > -3.01 && trunc(-3.7) < -2.99, "trunc(-3.7) ~ -3");
+}
+
+test_is_nan() `test {
+    assert(!is_nan(1.0), "1.0 is not NaN");
+    assert(!is_nan(0.0), "0.0 is not NaN");
+}
+
+test_is_inf() `test {
+    assert(!is_inf(1.0), "1.0 is not inf");
+    assert(!is_inf(0.0), "0.0 is not inf");
+}
+
+test_is_finite() `test {
+    assert(is_finite(1.0), "1.0 is finite");
+    assert(is_finite(0.0), "0.0 is finite");
 }

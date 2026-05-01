@@ -66,6 +66,7 @@ func CheckWithModules(file *ast.File, moduleScopes map[string]*types.Scope) (*In
 	)
 	c.scope = c.fileScope
 	c.info.Scopes[file] = c.fileScope
+	c.info.ScopeOrder = append(c.info.ScopeOrder, c.fileScope)
 	c.info.StdScope = c.stdScope
 
 	c.declare(file)              // Pass 1: collect all declarations
@@ -114,6 +115,7 @@ func DeclareAndDefineWithModules(file *ast.File, moduleScopes map[string]*types.
 	)
 	c.scope = c.fileScope
 	c.info.Scopes[file] = c.fileScope
+	c.info.ScopeOrder = append(c.info.ScopeOrder, c.fileScope)
 	c.info.StdScope = c.stdScope
 
 	c.declare(file)              // Pass 1: collect all declarations
@@ -133,6 +135,7 @@ func (c *Checker) openScope(node ast.Node, comment string) {
 	s := types.NewScope(c.scope, tpos(node.Pos()), tpos(node.End()), comment)
 	c.scope = s
 	c.info.Scopes[node] = s
+	c.info.ScopeOrder = append(c.info.ScopeOrder, s)
 }
 
 // closeScope pops back to the parent scope.

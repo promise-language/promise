@@ -18,7 +18,7 @@ type CatalogEntry struct {
 
 // Catalog is the parsed representation of the embedded catalog.toml.
 type Catalog struct {
-	Epoch   string                    // catalog epoch (e.g., "2026.3")
+	Epoch   string                   // catalog epoch (e.g., "2026.3")
 	Modules map[string]*CatalogEntry // name → entry
 }
 
@@ -47,7 +47,7 @@ func ParseCatalog(data []byte) (*Catalog, error) {
 		Modules: make(map[string]*CatalogEntry),
 	}
 
-	var section string     // current section name (e.g., "catalog", "modules.json")
+	var section string // current section name (e.g., "catalog", "modules.json")
 	var currentEntry *CatalogEntry
 	var currentName string // module name extracted from "modules.NAME"
 

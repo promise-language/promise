@@ -1,21 +1,79 @@
-// std/math.pr — Pure Promise math utilities
+// std/math.pr — Math utilities
+
+// --- Integer-specific (backward compatible) ---
+
 min(int a, int b) int `public {
-  if a < b { return a; }
-  return b;
+    if a < b { return a; }
+    return b;
 }
 
 max(int a, int b) int `public {
-  if a > b { return a; }
-  return b;
+    if a > b { return a; }
+    return b;
 }
 
 abs(int x) int `public {
-  if x < 0 { return 0 - x; }
-  return x;
+    if x < 0 { return 0 - x; }
+    return x;
 }
 
 clamp(int x, int lo, int hi) int `public {
-  if x < lo { return lo; }
-  if x > hi { return hi; }
-  return x;
+    if x < lo { return lo; }
+    if x > hi { return hi; }
+    return x;
 }
+
+// --- Constants ---
+
+PI() f64 `public { return 3.14159265358979323846; }
+E() f64 `public { return 2.71828182845904523536; }
+TAU() f64 `public { return 6.28318530717958647692; }
+MAX_INT() int `public { return 9223372036854775807; }
+MIN_INT() int `public { return -9223372036854775807 - 1; }
+
+// --- f64 math via LLVM intrinsics ---
+
+_sqrt(f64 x) f64 `extern("promise_sqrt");
+_sin(f64 x) f64 `extern("promise_sin");
+_cos(f64 x) f64 `extern("promise_cos");
+_pow(f64 base, f64 exp) f64 `extern("promise_pow");
+_exp(f64 x) f64 `extern("promise_exp");
+_log(f64 x) f64 `extern("promise_log");
+_fabs(f64 x) f64 `extern("promise_fabs");
+_floor(f64 x) f64 `extern("promise_floor");
+_ceil(f64 x) f64 `extern("promise_ceil");
+_round(f64 x) f64 `extern("promise_round");
+
+sqrt(f64 x) f64 `public { return _sqrt(x); }
+sin(f64 x) f64 `public { return _sin(x); }
+cos(f64 x) f64 `public { return _cos(x); }
+pow(f64 base, f64 exp) f64 `public { return _pow(base, exp); }
+exp(f64 x) f64 `public { return _exp(x); }
+log(f64 x) f64 `public { return _log(x); }
+fabs(f64 x) f64 `public { return _fabs(x); }
+floor(f64 x) f64 `public { return _floor(x); }
+ceil(f64 x) f64 `public { return _ceil(x); }
+round(f64 x) f64 `public { return _round(x); }
+
+// --- Pure Promise math functions ---
+
+tan(f64 x) f64 `public { return sin(x) / cos(x); }
+log2(f64 x) f64 `public { return log(x) / log(2.0); }
+log10(f64 x) f64 `public { return log(x) / log(10.0); }
+
+trunc(f64 x) f64 `public {
+    if x >= 0.0 { return floor(x); }
+    return ceil(x);
+}
+
+is_nan(f64 x) bool `public { return x != x; }
+
+is_inf(f64 x) bool `public {
+    return x != 0.0 && x + x == x;
+}
+
+is_finite(f64 x) bool `public {
+    return !is_nan(x) && !is_inf(x);
+}
+
+abs_f64(f64 x) f64 `public { return fabs(x); }

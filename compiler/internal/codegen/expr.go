@@ -699,6 +699,9 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 
 	// Constructor call: callee resolves to a Named type or Instance
 	calleeType := c.info.Types[e.Callee]
+	if c.typeSubst != nil {
+		calleeType = types.Substitute(calleeType, c.typeSubst)
+	}
 	if inst, ok := calleeType.(*types.Instance); ok {
 		if origin, ok := inst.Origin().(*types.Named); ok {
 			// Vector capacity constructor: T[](capacity: n)

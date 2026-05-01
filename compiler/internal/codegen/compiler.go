@@ -370,6 +370,7 @@ func Compile(file *ast.File, info *sema.Info, target string) *CompileResult {
 	monoFuncInstances := collectMonoFuncInstances(info)
 
 	c.declareIntrinsics()
+	c.declareMathIntrinsics()
 	// declareExterns must run after computeUserTypeLayouts so that user type
 	// layouts are available when resolving extern parameter/return types.
 	c.declareExterns(externList, c.layouts)
@@ -377,6 +378,7 @@ func Compile(file *ast.File, info *sema.Info, target string) *CompileResult {
 	// Add PAL-based function bodies to print/panic declarations.
 	// Must run after declareIntrinsics (to-string funcs) and declareExterns (print funcs).
 	c.definePALBodies()
+	c.defineMathBodies()
 
 	// Declare method stubs before vtable/typeinfo emission (vtable needs function pointers)
 	c.declareTypeMethods(file)
@@ -2709,7 +2711,7 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 // lookupFunc finds a function object in sema info by name.
 func (c *Compiler) lookupFunc(name string) *types.Func {
 	// Walk all recorded scopes
-	for _, scope := range c.info.Scopes {
+	for _, scope := range c.info.ScopeOrder {
 		if obj := scope.Lookup(name); obj != nil {
 			if fn, ok := obj.(*types.Func); ok {
 				return fn
@@ -3466,7 +3468,7 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 
 // lookupNamedType finds a Named type in sema info by name.
 func (c *Compiler) lookupNamedType(name string) *types.Named {
-	for _, scope := range c.info.Scopes {
+	for _, scope := range c.info.ScopeOrder {
 		if obj := scope.Lookup(name); obj != nil {
 			if tn, ok := obj.(*types.TypeName); ok {
 				if named, ok := tn.Type().(*types.Named); ok {
@@ -3489,7 +3491,7 @@ func (c *Compiler) lookupNamedType(name string) *types.Named {
 
 // lookupEnumType finds an Enum type in sema info by name.
 func (c *Compiler) lookupEnumType(name string) *types.Enum {
-	for _, scope := range c.info.Scopes {
+	for _, scope := range c.info.ScopeOrder {
 		if obj := scope.Lookup(name); obj != nil {
 			if tn, ok := obj.(*types.TypeName); ok {
 				if enum, ok := tn.Type().(*types.Enum); ok {

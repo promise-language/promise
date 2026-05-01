@@ -33,6 +33,9 @@ func (c *Checker) checkExpr(expr ast.Expr) {
 	case *ast.IndexExpr:
 		c.checkExpr(e.Target)
 		c.checkExpr(e.Index)
+		for _, extra := range e.ExtraIndices {
+			c.checkExpr(extra)
+		}
 
 	case *ast.SliceExpr:
 		c.checkExpr(e.Target)

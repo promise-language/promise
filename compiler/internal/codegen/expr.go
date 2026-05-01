@@ -841,19 +841,21 @@ func (c *Compiler) genModuleCall(e *ast.CallExpr, moduleName, funcName string) v
 
 // genGenericFuncCall generates a call to a monomorphic generic function instance.
 func (c *Compiler) genGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr) value.Value {
-	// Resolve the type argument to build the mangled name
-	typeArgType := c.info.Types[idx.Index]
-	// Apply typeSubst so generic-in-generic calls resolve correctly
-	if c.typeSubst != nil && typeArgType != nil {
-		typeArgType = types.Substitute(typeArgType, c.typeSubst)
-	}
-
+	// Resolve all type arguments to build the mangled name
 	ident, ok := idx.Target.(*ast.IdentExpr)
 	if !ok {
 		panic(fmt.Sprintf("codegen: generic function target is not IdentExpr: %T", idx.Target))
 	}
 
-	mangledName := ident.Name + "__" + typeArgSuffix(typeArgType)
+	mangledName := ident.Name
+	allTypeArgExprs := append([]ast.Expr{idx.Index}, idx.ExtraIndices...)
+	for _, argExpr := range allTypeArgExprs {
+		typeArgType := c.info.Types[argExpr]
+		if c.typeSubst != nil && typeArgType != nil {
+			typeArgType = types.Substitute(typeArgType, c.typeSubst)
+		}
+		mangledName += "__" + typeArgSuffix(typeArgType)
+	}
 
 	fn, ok := c.funcs[mangledName]
 	if !ok {

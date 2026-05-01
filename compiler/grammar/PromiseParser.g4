@@ -401,7 +401,7 @@ expression
     : expression DOT IDENT                                     # memberAccessExpr
     | expression QUESTION_DOT IDENT                            # optionalChainExpr
     | expression LPAREN args RPAREN                            # callExpr
-    | expression LBRACKET expression RBRACKET                  # indexExpr
+    | expression LBRACKET expression (COMMA expression)* RBRACKET  # indexExpr
     | expression LBRACKET expression? COLON expression? RBRACKET  # sliceExpr
     | expression QUESTION bindingName? (IS IDENT)? block (ELSE bindingName? block | BANG)?  # errorHandlerExpr
     | expression QUESTION                                      # errorPropagateExpr

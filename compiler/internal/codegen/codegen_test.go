@@ -8797,3 +8797,30 @@ func TestGeneratorFactoryReturnsStruct(t *testing.T) {
 	// Should allocate yield slot
 	assertContains(t, ir, "@pal_alloc")
 }
+
+func TestMultiParamGenericType(t *testing.T) {
+	ir := generateIR(t, `
+		type Pair[A, B] {
+			A first;
+			B second;
+		}
+		main() {
+			p := Pair[int, string](first: 42, second: "hello");
+		}
+	`)
+	// Monomorphized struct name should contain both type args
+	assertContains(t, ir, "Pair__int__string")
+}
+
+func TestMultiParamGenericFunc(t *testing.T) {
+	ir := generateIR(t, `
+		make_pair[A, B](A a, B b) (A, B) {
+			return (a, b);
+		}
+		main() {
+			(x, y) := make_pair[int, string](42, "hi");
+		}
+	`)
+	// Monomorphized function name should contain both type args
+	assertContains(t, ir, "make_pair__int__string")
+}

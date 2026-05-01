@@ -220,11 +220,15 @@ func (b *Builder) VisitCallExpr(ctx *parser.CallExprContext) interface{} {
 
 func (b *Builder) VisitIndexExpr(ctx *parser.IndexExprContext) interface{} {
 	exprs := ctx.AllExpression()
-	return &IndexExpr{
+	node := &IndexExpr{
 		nodeBase: b.baseFromContext(ctx),
 		Target:   b.visitExpr(exprs[0]),
 		Index:    b.visitExpr(exprs[1]),
 	}
+	for i := 2; i < len(exprs); i++ {
+		node.ExtraIndices = append(node.ExtraIndices, b.visitExpr(exprs[i]))
+	}
+	return node
 }
 
 func (b *Builder) VisitSliceExpr(ctx *parser.SliceExprContext) interface{} {

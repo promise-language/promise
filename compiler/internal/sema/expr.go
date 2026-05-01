@@ -943,9 +943,18 @@ func (c *Checker) checkIndexExpr(e *ast.IndexExpr) types.Type {
 	// reference (e.g., Vector[int]), NOT a value of a generic type
 	// (e.g., this[i] inside Vector[T]'s method body).
 	isTypeRef := false
-	if ident, ok := e.Target.(*ast.IdentExpr); ok {
-		if obj, found := c.info.Objects[ident]; found {
+	switch t := e.Target.(type) {
+	case *ast.IdentExpr:
+		if obj, found := c.info.Objects[t]; found {
 			_, isTypeRef = obj.(*types.TypeName)
+		}
+	case *ast.MemberExpr:
+		// Module-qualified type: mathlib.Pair[int, string]
+		switch typ := target.(type) {
+		case *types.Named:
+			isTypeRef = len(typ.TypeParams()) > 0
+		case *types.Enum:
+			isTypeRef = len(typ.TypeParams()) > 0
 		}
 	}
 	if isTypeRef {
@@ -965,6 +974,12 @@ func (c *Checker) checkIndexExpr(e *ast.IndexExpr) types.Type {
 		if len(sig.TypeParams()) > 0 {
 			return c.instantiateGenericFunc(e, sig)
 		}
+	}
+
+	// Multi-index only valid for generic instantiation (handled above).
+	if len(e.ExtraIndices) > 0 {
+		c.errorf(e.Pos(), "multiple indices not supported for indexing")
+		return nil
 	}
 
 	index := c.checkExpr(e.Index)
@@ -1074,44 +1089,63 @@ func (c *Checker) checkSliceExpr(e *ast.SliceExpr) types.Type {
 	return nil
 }
 
-// instantiateFromIndex handles Type[Arg] in expression context as generic instantiation.
-// The index expression is reinterpreted as a type argument.
+// instantiateFromIndex handles Type[Arg] or Type[A, B] in expression context as generic instantiation.
+// The index expressions are reinterpreted as type arguments.
 func (c *Checker) instantiateFromIndex(e *ast.IndexExpr, origin types.Type, tparams []*types.TypeParam) types.Type {
-	// The index is a type name used as a type argument
+	// Collect all type arguments: Index + ExtraIndices
+	var typeArgs []types.Type
 	typeArg := c.resolveTypeRef(e.Index)
 	if typeArg == nil {
 		return nil
 	}
+	typeArgs = append(typeArgs, typeArg)
+	for _, extra := range e.ExtraIndices {
+		arg := c.resolveTypeRef(extra)
+		if arg == nil {
+			return nil
+		}
+		typeArgs = append(typeArgs, arg)
+	}
 
-	if len(tparams) != 1 {
-		c.errorf(e.Pos(), "type %s expects %d type arguments, got 1", origin, len(tparams))
+	if len(tparams) != len(typeArgs) {
+		c.errorf(e.Pos(), "type %s expects %d type arguments, got %d", origin, len(tparams), len(typeArgs))
 		return nil
 	}
 
-	c.validateConstraints(e.Pos(), origin, []types.Type{typeArg})
-	inst := types.NewInstance(origin, []types.Type{typeArg})
+	c.validateConstraints(e.Pos(), origin, typeArgs)
+	inst := types.NewInstance(origin, typeArgs)
 	c.recordInstance(inst)
 	return inst
 }
 
-// instantiateGenericFunc handles func[Arg] in expression context as generic function instantiation.
-// Returns the substituted signature (with TypeParams stripped).
+// instantiateGenericFunc handles func[Arg] or func[A, B] in expression context
+// as generic function instantiation. Returns the substituted signature.
 func (c *Checker) instantiateGenericFunc(e *ast.IndexExpr, sig *types.Signature) types.Type {
-	// Resolve the type argument from the index expression
+	// Collect all type arguments: Index + ExtraIndices
+	var typeArgs []types.Type
 	typeArg := c.resolveTypeRef(e.Index)
 	if typeArg == nil {
 		c.errorf(e.Index.Pos(), "cannot resolve type argument")
 		return nil
 	}
+	typeArgs = append(typeArgs, typeArg)
+	for _, extra := range e.ExtraIndices {
+		arg := c.resolveTypeRef(extra)
+		if arg == nil {
+			c.errorf(extra.Pos(), "cannot resolve type argument")
+			return nil
+		}
+		typeArgs = append(typeArgs, arg)
+	}
 
 	tparams := sig.TypeParams()
-	if len(tparams) != 1 {
-		c.errorf(e.Pos(), "function expects %d type arguments, got 1", len(tparams))
+	if len(tparams) != len(typeArgs) {
+		c.errorf(e.Pos(), "function expects %d type arguments, got %d", len(tparams), len(typeArgs))
 		return nil
 	}
 
 	// Build substitution map and substitute the signature
-	subst := types.BuildSubstMap(tparams, []types.Type{typeArg})
+	subst := types.BuildSubstMap(tparams, typeArgs)
 	monoSig := types.Substitute(sig, subst).(*types.Signature)
 
 	// Look up the original function object for FuncInstance recording
@@ -1120,7 +1154,7 @@ func (c *Checker) instantiateGenericFunc(e *ast.IndexExpr, sig *types.Signature)
 		if fn, ok := obj.(*types.Func); ok {
 			c.info.FuncInstances = append(c.info.FuncInstances, &FuncInstance{
 				Func:     fn,
-				TypeArgs: []types.Type{typeArg},
+				TypeArgs: typeArgs,
 				Sig:      monoSig,
 			})
 		}

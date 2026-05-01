@@ -656,6 +656,20 @@ func runTestDir(dir string, recursive bool, timeout time.Duration, targetTriple 
 	}
 }
 
+// dirHasTestFiles checks if a directory contains any test_*.pr files (non-recursive).
+func dirHasTestFiles(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasPrefix(e.Name(), "test_") && strings.HasSuffix(e.Name(), ".pr") {
+			return true
+		}
+	}
+	return false
+}
+
 // discoverTestFiles finds .pr files in a directory.
 func discoverTestFiles(dir string, recursive bool) []string {
 	var files []string
@@ -665,11 +679,13 @@ func discoverTestFiles(dir string, recursive bool) []string {
 			if err != nil {
 				return nil
 			}
-			// Skip module directories (contain promise.toml) — their .pr files
-			// are module source, not test files, and can't be compiled standalone.
+			// Skip module source directories (contain promise.toml but no test files).
+			// Test project roots also have promise.toml but contain test_*.pr files.
 			if d.IsDir() && path != dir {
 				if _, err := os.Stat(filepath.Join(path, "promise.toml")); err == nil {
-					return filepath.SkipDir
+					if !dirHasTestFiles(path) {
+						return filepath.SkipDir
+					}
 				}
 			}
 			if !d.IsDir() && strings.HasSuffix(d.Name(), ".pr") {

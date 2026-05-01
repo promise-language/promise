@@ -35,11 +35,13 @@ type Arg struct {
 	Value Expr
 }
 
-// IndexExpr represents an index expression: target[index].
+// IndexExpr represents an index expression: target[index] or
+// a multi-param generic instantiation: Type[A, B].
 type IndexExpr struct {
 	nodeBase
-	Target Expr
-	Index  Expr
+	Target       Expr
+	Index        Expr
+	ExtraIndices []Expr
 }
 
 func (*IndexExpr) exprTag() {}

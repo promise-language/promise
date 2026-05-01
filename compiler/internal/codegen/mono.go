@@ -356,10 +356,16 @@ func (c *Compiler) computeMonoLayouts(instances []*types.Instance) {
 			if len(origin.TypeParams()) == 0 {
 				continue
 			}
+			if _, exists := c.monoLayouts[name]; exists {
+				continue // already computed (e.g., same instance from main file)
+			}
 			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
 			c.monoLayouts[name] = computeMonoUserTypeLayout(c.module, origin, name, subst, c.layouts)
 		case *types.Enum:
 			if len(origin.TypeParams()) == 0 {
+				continue
+			}
+			if _, exists := c.monoEnumLayouts[name]; exists {
 				continue
 			}
 			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
@@ -394,6 +400,9 @@ func (c *Compiler) declareMonoMethods(file *ast.File, instances []*types.Instanc
 			}
 
 			mangledName := mangleMethodName(name, md.Name, md.IsSetter)
+			if _, exists := c.funcs[mangledName]; exists {
+				continue // already declared (e.g., same instance from main file)
+			}
 
 			var params []*ir.Param
 			if m.Sig().Recv() != nil {
@@ -470,6 +479,9 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 func (c *Compiler) declareMonoFuncs(file *ast.File, funcInsts []*sema.FuncInstance) {
 	for _, fi := range funcInsts {
 		name := monoFuncName(fi)
+		if _, exists := c.funcs[name]; exists {
+			continue // already declared (e.g., same instance from main file)
+		}
 		fd := c.findFuncDecl(file, fi.Func.Name())
 		if fd == nil || fd.Body == nil {
 			continue

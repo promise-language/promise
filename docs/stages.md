@@ -143,12 +143,11 @@ Type substitution engine and integration into the semantic checker.
 - **Constructor calls on Instance**: `Box[int](value: 42)` validates field types with substitution
 - **Operator dispatch on Instance**: binary/unary operators resolved through origin type with substitution
 - **Constraint validation**: type arguments checked against TypeParam constraints at instantiation
-- **Expression-context instantiation**: `Box[int]` in expression context (parsed as IndexExpr) reinterpreted as generic instantiation for single-type-arg generics
+- **Expression-context instantiation**: `Box[int]` and `Pair[int, string]` in expression context (parsed as IndexExpr with ExtraIndices) reinterpreted as generic instantiation; works for types, enums, and generic functions with any number of type parameters
 - **Instance tracking**: `Info.Instances` records all concrete instantiations for later monomorphization
 - **Exhaustiveness for generic enums**: `Option[int]` match checks work via Instance → Enum extraction
 - **Optional chaining on Instance**: `box?.value` resolves member through substitution
 - **For-in on iter/stream instances**: `iter[T]` iteration yields `T`
-- **Known limitation**: multi-arg generics (e.g., `Pair[int, string]`) only work in type annotation position (function params, variable types), not in expression context — grammar allows only single expression inside `[]`
 
 ---
 
@@ -342,7 +341,7 @@ Generic function sema support and type-specialized code generation for all gener
 - **Statement codegen** (`stmt.go`): `genMemberAssign` uses `lookupTypeLayout` and layout field types for both regular and monomorphic types.
 - **Layout-driven field types**: All field load/store/zero-init operations use `layout.Instance.Fields[idx].LLVMType` instead of `llvmType(field.Type())`, which correctly handles TypeParam substitution.
 - **Scope**: Generic user type instantiation (layout, constructor, field access/assignment, methods), generic enum instantiation (tagged union, variant values/constructors, pattern matching, destructure bindings), generic functions (single type parameter, void/non-void/failable), multiple instantiations of same generic.
-- **Deferred**: Type argument inference (explicit type args only), multi-arg generics in expression context (grammar limitation), extern ABI for generic types, C header generation for monomorphic types, container types (Array, Slice, Map, Tuple — Stage 8g).
+- **Deferred**: Type argument inference (explicit type args only), extern ABI for generic types, C header generation for monomorphic types, container types (Array, Slice, Map, Tuple — Stage 8g).
 
 ## Stage 8g — Container Codegen (Done)
 
@@ -562,13 +561,17 @@ Module resolution and dependency management. See [module-system-proposal.md](mod
 - **Local module loading**: `loadLocalModule()` in `cmd/promise/main.go` — scans use decls for local paths, parses+sema+exports. `ExportedScope()` extracts only `public` symbols. `mergeModuleFiles()` combines multiple `.pr` files in a module dir.
 - **Std as catalog module**: `use std;` / `use std as s;` for qualified access (`std.min()`, `std.int[]`). `use std as _;` is a no-op (std symbols already in scope via parent chain). Unqualified access still works without any `use` statement.
 - **Cross-module codegen (inline strategy)**: All module declarations compiled into one LLVM IR module via `compileModules()` with context save/restore (`c.info`/`c.file`/`c.compilingModule` swap). Name mangling: `__mod_<module>_<func>` for functions, `__mod_<module>_<Type>.<method>` for methods. `moduleFuncs`/`moduleExterns` maps for qualified call dispatch; plain names registered in `c.funcs` for glob imports. MemberExpr dispatch: std check → module check (function/constructor/enum switch) → enum layout → method call. Coercion uses callee's `*types.Signature` from sema directly.
-- **Tests**: 7 std-module sema tests, 26 general module sema tests, 4 ExportedScope tests, 10 module load integration tests, 5 `cmd/promise` integration tests, 6 codegen std tests, 13 cross-module codegen tests (qualified calls, constructors, methods, enums, glob imports, failable functions, externs, multi-module).
+- **Tests**: 7 std-module sema tests, 26 general module sema tests, 4 ExportedScope tests, 10 module load integration tests, 5 `cmd/promise` integration tests, 6 codegen std tests, 15 cross-module codegen tests (qualified calls, constructors, methods, enums, glob imports, failable functions, externs, multi-module, multi-param generics). 44 e2e tests across 12 files in `tests/modules/` (qualified calls, glob imports with struct types/enums/match, aliases, multi-file modules, generics including multi-param `Pair[int, string]`, failable functions, drop types, closures, visibility, two-module interop, module type as param/return).
 
 **Still TODO for Phase 1:**
-1. **E2e tests with real module directories** — test `promise build`/`promise test` on actual multi-module projects (current tests are Go unit tests with synthetic module sources, no real filesystem layout).
-2. **Update stages.md** — ~~mark cross-module codegen as complete~~ done (this update).
-3. **Separate compilation** — compile each module to its own `.o` file instead of inlining all declarations into one IR module. Enables parallel compilation, reduces recompilation scope, and exercises the linker. Critical for validating the module boundary design as the language grows.
-4. **Incremental compilation** — content-hash caching of compiled modules. Skip recompilation when source hasn't changed. Essential for the language's AI-agent use case (fast iteration cycles) and must be exercised early while the module system is still being shaped.
+1. **Separate compilation** — compile each module to its own `.o` file instead of inlining all declarations into one IR module. Enables parallel compilation, reduces recompilation scope, and exercises the linker. Critical for validating the module boundary design as the language grows.
+2. **Incremental compilation** — content-hash caching of compiled modules. Skip recompilation when source hasn't changed. Essential for the language's AI-agent use case (fast iteration cycles) and must be exercised early while the module system is still being shaped.
+
+**Deferred to Phase 2+:**
+- Module-imports-module (module A uses module B) — transitive dependency resolution
+- Circular import detection and error reporting
+- Remote module fetching (git-based)
+- Catalog infrastructure and versioning
 
 **Planned phases:** Phase 2 (remote modules, git fetching), Phase 3 (catalog infrastructure), Phase 4 (catalog CI), Phase 5 (tooling)
 
@@ -589,7 +592,7 @@ Command-line interface. Core commands implemented; formatter planned.
 - Bare pipe detection: `echo '<code>' | promise` auto-enters exec mode
 - Inline error formatting: source line + `^` caret marker, no temp filenames
 - Embedded `std/` and `runtime/` in the binary via `go:embed` for self-contained install
-- **Test suite**: 684 tests across 123 files — `tests/e2e/` (language features), `tests/std/` (standard library), `tests/concurrency/` (scheduler, channels, select, panic recovery, stress tests)
+- **Test suite**: 750 tests across 137 files — `tests/e2e/` (language features), `tests/std/` (standard library), `tests/concurrency/` (scheduler, channels, select, panic recovery, stress tests), `tests/modules/` (module system e2e)
 - `promise doc <file.pr>` — generate documentation from `doc()` meta tags (**Phase 1 done**: `cmd/promise/doc.go`)
   - `-public` (default) / `-all` — filter by visibility
   - `-signatures` — compact signature-only output (minimal tokens for AI agents)
@@ -794,7 +797,6 @@ Known gaps and improvements deferred from completed stages.
 | Extern ABI pack/unpack for enums | 8d | Low |
 | Failable extern functions (C ABI for errors) | 8e | Low |
 | Type argument inference (explicit type args only currently) | 8f | Low |
-| Multi-arg generics in expression context (grammar limitation) | 8f | Low |
 | Extern ABI for generic types | 8f | Low |
 | Non-instance field placements (`value`/`variant`/`type`) | 8c | Low |
 | User type `toString()` for interpolation | 8h | Low |
@@ -828,6 +830,15 @@ Known gaps and improvements deferred from completed stages.
 |------|--------|----------|
 | ~~Default values for constructor parameters~~ — **Done.** Implemented in Stage 8n. Defaults recorded in `Info.FieldDefaults` during sema, evaluated in `genConstructorCallMono` during codegen. | 5b | ~~Medium~~ Resolved |
 | ~~Unified parameter handling for constructors and methods~~ — **Done.** Implemented in Stage 8n. Named args, defaults, optional params, and `Self` all work for constructors. | 5b | ~~Medium~~ Resolved |
+
+### Module System (Phase 2+)
+
+| Item | Priority |
+|------|----------|
+| Module-imports-module (transitive dependency resolution) | High |
+| Circular import detection and error reporting | High |
+| Remote module fetching (git-based) | Medium |
+| Catalog infrastructure and versioning | Low |
 
 ### Unscheduled Features
 

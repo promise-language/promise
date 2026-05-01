@@ -243,6 +243,9 @@ func (p *printer) printExpr(e Expr) {
 		p.indent++
 		p.printExpr(n.Target)
 		p.printExpr(n.Index)
+		for _, extra := range n.ExtraIndices {
+			p.printExpr(extra)
+		}
 		p.indent--
 	case *SliceExpr:
 		p.line("Slice")

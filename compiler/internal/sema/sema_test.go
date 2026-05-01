@@ -7605,3 +7605,43 @@ func TestStdQualifiedConstructorCall(t *testing.T) {
 		}
 	`)
 }
+
+// --- Multi-param generics in expression context ---
+
+func TestMultiParamGenericInstantiation(t *testing.T) {
+	checkOK(t, `
+		type Pair[A, B] { A first; B second; }
+		main() {
+			p := Pair[int, string](first: 1, second: "hello");
+		}
+	`)
+}
+
+func TestMultiParamGenericWrongCount(t *testing.T) {
+	errs := checkErrs(t, `
+		type Pair[A, B] { A first; B second; }
+		main() {
+			p := Pair[int](first: 1, second: "hello");
+		}
+	`)
+	expectError(t, errs, "expects 2 type arguments, got 1")
+}
+
+func TestMultiParamGenericThreeParams(t *testing.T) {
+	checkOK(t, `
+		type Triple[A, B, C] { A x; B y; C z; }
+		main() {
+			t := Triple[int, string, bool](x: 1, y: "two", z: true);
+		}
+	`)
+}
+
+func TestMultiParamGenericExtraIndicesOnNonGeneric(t *testing.T) {
+	errs := checkErrs(t, `
+		main() {
+			int[] v = [1, 2, 3];
+			x := v[0, 1];
+		}
+	`)
+	expectError(t, errs, "multiple indices not supported")
+}

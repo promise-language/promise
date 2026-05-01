@@ -126,6 +126,8 @@ func main() {
 		runDoc(os.Args[2:])
 	case "init":
 		runInit()
+	case "clean":
+		runClean()
 	case "install":
 		runInstall()
 	default:
@@ -231,7 +233,7 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 	file, info := compileFrontend(filename)
 	result := codegen.Compile(file, info, target)
 
-	compileAndLink(result, outputFile, target)
+	compileAndLink(result, outputFile, target, filename)
 	return filename, outputFile, target
 }
 
@@ -400,7 +402,7 @@ func runTestFile(filename string, timeout time.Duration, targetTriple string) {
 	tmpOutput.Close()
 	defer os.Remove(tmpOutput.Name())
 
-	compileAndLink(result, tmpOutput.Name(), target)
+	compileAndLink(result, tmpOutput.Name(), target, filename)
 
 	// Execute test binary with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -473,7 +475,7 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string, timeout time.D
 	tmpOutput.Close()
 	defer os.Remove(tmpOutput.Name())
 
-	compileAndLink(result, tmpOutput.Name(), target)
+	compileAndLink(result, tmpOutput.Name(), target, filename)
 
 	// Execute with timeout, capturing combined stdout+stderr
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -755,7 +757,7 @@ func parseTimeoutArg(s string) (time.Duration, error) {
 // compileAndLink writes the IR to a temp file and links it into the output binary.
 // On Linux, macOS, and WASM, uses opt + llc + linker pipeline (Phase 7a/7b/7c).
 // On other platforms (or with PROMISE_USE_CLANG=1), uses clang as driver.
-func compileAndLink(result *codegen.CompileResult, outputFile, target string) {
+func compileAndLink(result *codegen.CompileResult, outputFile, target, sourceFile string) {
 	// Dump generated LLVM IR to a file for debugging/inspection.
 	// Usage: PROMISE_DUMP_IR=/tmp/out.ll promise build foo.pr
 	if envDump := os.Getenv("PROMISE_DUMP_IR"); envDump != "" {
@@ -764,7 +766,7 @@ func compileAndLink(result *codegen.CompileResult, outputFile, target string) {
 
 	// Separate compilation: split IR into main + per-module .ll files
 	if result.HasModules() && !useClangPipeline(target) {
-		compileAndLinkSeparate(result, outputFile, target)
+		compileAndLinkSeparate(result, outputFile, target, sourceFile)
 		return
 	}
 
@@ -790,7 +792,8 @@ func compileAndLink(result *codegen.CompileResult, outputFile, target string) {
 }
 
 // compileAndLinkSeparate compiles each module to its own .o file, then links them.
-func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target string) {
+// Uses content-hash caching: if a module's source hasn't changed, its cached .o is reused.
+func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, sourceFile string) {
 	mainIR, moduleIRs := result.SplitModuleIRs()
 
 	optPath, err := findLLVMTool("opt")
@@ -806,14 +809,50 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target st
 	checkLLVMToolVersion(optPath)
 	checkLLVMToolVersion(llcPath)
 
-	// Compile main IR → .o
+	// Find cache directory from project root
+	var cacheDir string
+	if sourceFile != "" {
+		projectRoot := filepath.Dir(sourceFile)
+		if abs, err := filepath.Abs(projectRoot); err == nil {
+			projectRoot = abs
+		}
+		if cfg, err := module.FindConfig(projectRoot); err == nil && cfg != nil {
+			projectRoot = cfg.Dir
+		}
+		if dir, err := module.CacheDir(projectRoot); err == nil {
+			cacheDir = dir
+		}
+	}
+
+	// Build context for cache keys: compiler hash + all module paths
+	compilerHash := module.CompilerHash()
+	modInfos := result.ModuleInfos()
+	var allModPaths []string
+	if modInfos != nil {
+		for path := range modInfos {
+			allModPaths = append(allModPaths, path)
+		}
+	}
+
+	// Precompute cache keys for each module
+	modCacheKeys := make(map[string]string) // module name → cache key
+	if cacheDir != "" && modInfos != nil {
+		for _, mi := range modInfos {
+			if mi.ImplHash != "" {
+				modCacheKeys[mi.Name] = module.BuildCacheKey(mi.ImplHash, compilerHash, target, allModPaths)
+			}
+		}
+	}
+
+	// Compile main IR → .o (always recompiled)
 	mainObj := compileLLToObj(mainIR, "promise-main", target, optPath, llcPath)
 	defer os.Remove(mainObj)
 
-	// Compile each module IR → .o (in parallel)
+	// Compile each module IR → .o (in parallel, with caching)
 	type moduleObj struct {
 		name    string
 		objFile string
+		cached  bool // if true, objFile points to cache — don't delete
 	}
 	var moduleObjs []moduleObj
 
@@ -821,17 +860,47 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target st
 	var mu sync.Mutex
 	for modName, modIR := range moduleIRs {
 		wg.Add(1)
-		go func(name, ir string) {
+		go func(name, irText string) {
 			defer wg.Done()
-			obj := compileLLToObj(ir, "promise-mod-"+name, target, optPath, llcPath)
+
+			// Try cache lookup
+			if cacheKey, ok := modCacheKeys[name]; ok && cacheDir != "" {
+				if cachedObj := module.LookupCachedObj(cacheDir, name, cacheKey); cachedObj != "" {
+					mu.Lock()
+					moduleObjs = append(moduleObjs, moduleObj{name: name, objFile: cachedObj, cached: true})
+					mu.Unlock()
+					return
+				}
+			}
+
+			// Cache miss — compile
+			obj := compileLLToObj(irText, "promise-mod-"+name, target, optPath, llcPath)
+
+			// Save to cache
+			if cacheKey, ok := modCacheKeys[name]; ok && cacheDir != "" {
+				interfaceHash := ""
+				for _, mi := range modInfos {
+					if mi.Name == name {
+						interfaceHash = mi.InterfaceHash
+						break
+					}
+				}
+				_ = module.SaveCachedObj(cacheDir, name, cacheKey, interfaceHash, obj)
+				module.CleanStaleCache(cacheDir, name, cacheKey)
+			}
+
 			mu.Lock()
 			moduleObjs = append(moduleObjs, moduleObj{name: name, objFile: obj})
 			mu.Unlock()
 		}(modName, modIR)
 	}
 	wg.Wait()
+
+	// Clean up non-cached temp .o files after linking
 	for _, mo := range moduleObjs {
-		defer os.Remove(mo.objFile)
+		if !mo.cached {
+			defer os.Remove(mo.objFile)
+		}
 	}
 
 	// Collect all .o files for linking
@@ -2181,7 +2250,9 @@ func loadModuleScopes(filename string, file *ast.File, stdFiles []*ast.File) (ma
 		if u.Alias != "_" {
 			modInfo.Name = u.Alias
 		}
-		scopes[u.Path] = sema.ExportedScope(modInfo.SemaInfo, modInfo.File)
+		exportedScope := sema.ExportedScope(modInfo.SemaInfo, modInfo.File)
+		modInfo.InterfaceHash = module.HashModuleInterface(exportedScope)
+		scopes[u.Path] = exportedScope
 		modInfos[u.Path] = modInfo
 	}
 
@@ -2248,11 +2319,19 @@ func loadLocalModule(modPath, projectRoot string, stdFiles []*ast.File) (*sema.M
 	// Extract the module alias from the path (last component)
 	alias := filepath.Base(modPath)
 
+	// Compute implementation hash from source files
+	implHash, err := module.HashModuleSources(absDir)
+	if err != nil {
+		return nil, fmt.Errorf("cannot hash module sources: %w", err)
+	}
+
 	return &sema.ModuleInfo{
 		Name:     alias,
 		Path:     modPath,
 		File:     merged,
 		SemaInfo: semaInfo,
+		AbsDir:   absDir,
+		ImplHash: implHash,
 	}, nil
 }
 
@@ -2487,7 +2566,7 @@ func runExec(args []string) {
 	tmpOutput.Close()
 	defer os.Remove(tmpOutput.Name())
 
-	compileAndLink(result, tmpOutput.Name(), target)
+	compileAndLink(result, tmpOutput.Name(), target, "")
 
 	// Execute with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -2646,6 +2725,25 @@ func printFileErrors(filename string, errs []error) {
 
 // runInstall installs the Promise compiler to ~/.promise/.
 // runInit creates a promise.toml in the current directory.
+// runClean removes the .promise-build/ cache directory.
+func runClean() {
+	dir, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	// Walk up to find project root
+	if cfg, err := module.FindConfig(dir); err == nil && cfg != nil {
+		dir = cfg.Dir
+	}
+	cacheDir := filepath.Join(dir, ".promise-build")
+	if err := os.RemoveAll(cacheDir); err != nil {
+		fmt.Fprintf(os.Stderr, "error removing %s: %v\n", cacheDir, err)
+		os.Exit(1)
+	}
+	fmt.Println("Cleaned build cache")
+}
+
 func runInit() {
 	const defaultEpoch = "2026.3"
 

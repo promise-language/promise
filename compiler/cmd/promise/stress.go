@@ -194,7 +194,7 @@ func compileTargets(files []string, baseDir string, targetTriple string) (target
 			}
 			// E2E test — compile with normal main
 			result := codegen.Compile(file, info, target)
-			compileAndLink(result, tmp.Name(), target)
+			compileAndLink(result, tmp.Name(), target, f)
 			tempFiles = append(tempFiles, tmp.Name())
 			targets = append(targets, stressTarget{
 				relPath:  relPath,
@@ -207,7 +207,7 @@ func compileTargets(files []string, baseDir string, targetTriple string) (target
 			// Unit tests — compile with generated test main
 			result := codegen.Compile(file, info, target)
 			result.GenerateTestMain(info.Tests)
-			compileAndLink(result, tmp.Name(), target)
+			compileAndLink(result, tmp.Name(), target, f)
 			tempFiles = append(tempFiles, tmp.Name())
 
 			var testNames []string

@@ -1,10 +1,17 @@
 package codegen
 
 import (
+	"djabi.dev/go/promise_lang/internal/sema"
+
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
 )
+
+// ModuleInfos returns the module info map from sema, keyed by module path.
+func (r *CompileResult) ModuleInfos() map[string]*sema.ModuleInfo {
+	return r.compiler.info.ModuleInfos
+}
 
 // HasModules returns true if the compile result contains separate module code.
 func (r *CompileResult) HasModules() bool {

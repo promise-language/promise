@@ -37,7 +37,7 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 
 | Stage | Package | Description | Status |
 |-------|---------|-------------|--------|
-| 9 | `compiler/internal/module/`, `sema/`, `codegen/`, `std/` | Module system: visibility, qualified access, local imports, cross-module codegen, separate/incremental compilation | Phase 1 In Progress |
+| 9 | `compiler/internal/module/`, `sema/`, `codegen/`, `std/` | Module system: visibility, qualified access, local imports, cross-module codegen, separate/incremental compilation | Phase 1 Done |
 | 10 | `cmd/promise/` | CLI entry point (build, run, test, fmt, etc.) | Partial |
 | 11 | `pkg/` | Package manager: fetch, resolve, lock | Planned |
 
@@ -596,13 +596,13 @@ Generator functions: `stream[T]` return type with `yield` statements, compiled t
 
 **Deferred**: `yield*` (delegate to sub-iterator), failable generators (`stream[T]!`), stored generator values (first-class generator variables outside for-in), generator closures (capturing lambdas as generators).
 
-## Stage 9 — Module System (Phase 1 In Progress)
+## Stage 9 — Module System (Phase 1 Done)
 
 Module resolution and dependency management. See [module-system-proposal.md](module-system-proposal.md) for the full design.
 
-**Phase 1 — Module Boundaries & Local Imports (in progress):**
+**Phase 1 — Module Boundaries & Local Imports (done):**
 
-**Files:** `grammar/PromiseParser.g4` (use decl alts), `internal/module/config.go`, `internal/sema/decl.go`, `internal/sema/expr.go`, `internal/sema/resolve.go`, `internal/sema/export.go`, `internal/codegen/compiler.go`, `internal/codegen/expr.go`, `internal/codegen/separate.go`, `internal/codegen/mono.go`, `ast/decl.go`, `ast/visit_decl.go`, `types/object.go`, `cmd/promise/main.go`, `std/*.pr` (22 files)
+**Files:** `grammar/PromiseParser.g4` (use decl alts), `internal/module/config.go`, `internal/module/cache.go`, `internal/sema/decl.go`, `internal/sema/expr.go`, `internal/sema/resolve.go`, `internal/sema/export.go`, `internal/sema/info.go`, `internal/codegen/compiler.go`, `internal/codegen/expr.go`, `internal/codegen/separate.go`, `internal/codegen/mono.go`, `ast/decl.go`, `ast/visit_decl.go`, `types/object.go`, `cmd/promise/main.go`, `std/*.pr` (22 files)
 
 - **Grammar**: `useDecl` has two labeled alternatives — `catalogImport` (`use json;` / `use json as j;` / `use json as _;`) and `sourcedImport` (`use parser "url";` / `use _ "url";`). `qualifiedType` alt in `typeRef` for `mod.Type` references.
 - **`promise.toml`**: TOML parser for `[module]`, `[require]`, `[replace]` sections. `promise init` creates the file.
@@ -613,10 +613,8 @@ Module resolution and dependency management. See [module-system-proposal.md](mod
 - **Std as catalog module**: `use std;` / `use std as s;` for qualified access (`std.min()`, `std.int[]`). `use std as _;` is a no-op (std symbols already in scope via parent chain). Unqualified access still works without any `use` statement.
 - **Cross-module codegen (inline strategy)**: All module declarations compiled into one LLVM IR module via `compileModules()` with context save/restore (`c.info`/`c.file`/`c.compilingModule` swap). Name mangling: `__mod_<module>_<func>` for functions, `__mod_<module>_<Type>.<method>` for methods. `moduleFuncs`/`moduleExterns` maps for qualified call dispatch; plain names registered in `c.funcs` for glob imports. MemberExpr dispatch: std check → module check (function/constructor/enum switch) → enum layout → method call. Coercion uses callee's `*types.Signature` from sema directly.
 - **Separate compilation**: Post-codegen IR split — single codegen pass produces unified `ir.Module`, then `SplitModuleIRs()` (in `codegen/separate.go`) toggles function blocks and global initializers to produce per-module `.ll` files. Module IRs contain only module-owned function bodies; all other functions become `declare`, all globals become `external`. Main IR keeps everything except module function bodies. Each `.ll` → `opt` → `llc` → `.o` (modules compiled in parallel via goroutines). `linkLinuxMulti()`/`linkDarwinMulti()` link all `.o` files together. `moduleOwnedFuncs map[string]string` tracks which IR functions belong to which module (populated during `declareModuleFuncs`, `declareModuleTypeMethods`, `declareMonoMethods`, `declareMonoFuncs`).
+- **Incremental compilation**: Dual content-hash caching in `.promise-build/` directory (in `module/cache.go`). **Implementation hash** (SHA-256 of sorted source file contents) determines when a module's `.o` needs recompilation. **Interface hash** (SHA-256 of public API signatures: function names+signatures, type fields+methods, enum variants) determines when dependents need recompilation. On cache hit, the expensive `opt`→`llc` pipeline is skipped entirely — the cached `.o` is linked directly. Stale cache entries are cleaned automatically when source changes. Main file always recompiles (most frequent change target). Cache key includes filename separators to prevent hash collisions from file splits.
 - **Tests**: 7 std-module sema tests, 26 general module sema tests, 4 ExportedScope tests, 10 module load integration tests, 5 `cmd/promise` integration tests, 6 codegen std tests, 15 cross-module codegen tests (qualified calls, constructors, methods, enums, glob imports, failable functions, externs, multi-module, multi-param generics). 44 e2e tests across 12 files in `tests/modules/` (qualified calls, glob imports with struct types/enums/match, aliases, multi-file modules, generics including multi-param `Pair[int, string]`, failable functions, drop types, closures, visibility, two-module interop, module type as param/return).
-
-**Still TODO for Phase 1:**
-1. **Incremental compilation** — content-hash caching of compiled modules. Skip recompilation when source hasn't changed. Essential for the language's AI-agent use case (fast iteration cycles) and must be exercised early while the module system is still being shaped.
 
 **Deferred to Phase 2+:**
 - Module-imports-module (module A uses module B) — transitive dependency resolution
@@ -642,6 +640,7 @@ Command-line interface. Core commands implemented; formatter planned.
 - `promise install` — install compiler + std + runtime to `~/.promise/`
 - Bare pipe detection: `echo '<code>' | promise` auto-enters exec mode
 - Inline error formatting: source line + `^` caret marker, no temp filenames
+- `promise clean` — remove `.promise-build/` cache directory
 - Embedded `std/` and `runtime/` in the binary via `go:embed` for self-contained install
 - **Test suite**: 755 tests across 137 files — `tests/e2e/` (language features), `tests/std/` (standard library), `tests/concurrency/` (scheduler, channels, select, panic recovery, stress tests), `tests/modules/` (module system e2e)
 - `promise doc <file.pr>` — generate documentation from `doc()` meta tags (**Phase 1 done**: `cmd/promise/doc.go`)
@@ -699,7 +698,7 @@ The compiler pipeline (Stages 1-8o) is complete for the current feature set. The
 
 | Work | Priority |
 |------|----------|
-| Module system Phase 1 (incremental compilation) — Stage 9 | High |
+| Module system Phase 2 (module-imports-module, remote modules) — Stage 9 | High |
 | CLI: `promise fmt` code formatter — Stage 10 | Medium |
 | Package manager (fetch, resolve, lock) — Stage 11 | Medium |
 

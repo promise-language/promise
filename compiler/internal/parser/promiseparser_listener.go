@@ -253,6 +253,9 @@ type PromiseParserListener interface {
 	// EnterSelectDefault is called when entering the selectDefault production.
 	EnterSelectDefault(c *SelectDefaultContext)
 
+	// EnterSliceTypeExpr is called when entering the sliceTypeExpr production.
+	EnterSliceTypeExpr(c *SliceTypeExprContext)
+
 	// EnterCastExpr is called when entering the castExpr production.
 	EnterCastExpr(c *CastExprContext)
 
@@ -705,6 +708,9 @@ type PromiseParserListener interface {
 
 	// ExitSelectDefault is called when exiting the selectDefault production.
 	ExitSelectDefault(c *SelectDefaultContext)
+
+	// ExitSliceTypeExpr is called when exiting the sliceTypeExpr production.
+	ExitSliceTypeExpr(c *SliceTypeExprContext)
 
 	// ExitCastExpr is called when exiting the castExpr production.
 	ExitCastExpr(c *CastExprContext)

@@ -512,6 +512,12 @@ func (s *BasePromiseParserListener) EnterSelectDefault(ctx *SelectDefaultContext
 // ExitSelectDefault is called when production selectDefault is exited.
 func (s *BasePromiseParserListener) ExitSelectDefault(ctx *SelectDefaultContext) {}
 
+// EnterSliceTypeExpr is called when production sliceTypeExpr is entered.
+func (s *BasePromiseParserListener) EnterSliceTypeExpr(ctx *SliceTypeExprContext) {}
+
+// ExitSliceTypeExpr is called when production sliceTypeExpr is exited.
+func (s *BasePromiseParserListener) ExitSliceTypeExpr(ctx *SliceTypeExprContext) {}
+
 // EnterCastExpr is called when production castExpr is entered.
 func (s *BasePromiseParserListener) EnterCastExpr(ctx *CastExprContext) {}
 

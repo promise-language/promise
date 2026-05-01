@@ -253,6 +253,9 @@ type PromiseParserVisitor interface {
 	// Visit a parse tree produced by PromiseParser#selectDefault.
 	VisitSelectDefault(ctx *SelectDefaultContext) interface{}
 
+	// Visit a parse tree produced by PromiseParser#sliceTypeExpr.
+	VisitSliceTypeExpr(ctx *SliceTypeExprContext) interface{}
+
 	// Visit a parse tree produced by PromiseParser#castExpr.
 	VisitCastExpr(ctx *CastExprContext) interface{}
 

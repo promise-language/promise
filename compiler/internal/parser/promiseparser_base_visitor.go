@@ -335,6 +335,10 @@ func (v *BasePromiseParserVisitor) VisitSelectDefault(ctx *SelectDefaultContext)
 	return v.VisitChildren(ctx)
 }
 
+func (v *BasePromiseParserVisitor) VisitSliceTypeExpr(ctx *SliceTypeExprContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
 func (v *BasePromiseParserVisitor) VisitCastExpr(ctx *CastExprContext) interface{} {
 	return v.VisitChildren(ctx)
 }

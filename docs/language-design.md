@@ -724,6 +724,7 @@ Type inference with `:=`:
 ```promise
 x := 42;                // inferred as int
 name := "Alice";        // inferred as string
+nums := int[]();        // inferred as int[] (Vector[int])
 ```
 
 #### Typed Numeric Literal Suffixes
@@ -2462,10 +2463,24 @@ sum := numbers.fold(0, (acc, n) -> acc + n);       // 15
 
 `T[]` is syntactic sugar for `Vector[T]`, a generic dynamic array backed by a contiguous heap-allocated buffer. Vectors use a doubling growth strategy (0 → 4 → 8 → 16 → ...) and handle millions of elements efficiently.
 
+The `T[]` syntax works in both **type annotation** and **expression** positions. In expression position, it is equivalent to `Vector[T]`, enabling constructor calls and factory method access:
+
 ```promise
+// Type annotation position
 int[] v = [];              // empty vector
 int[] v = [1, 2, 3];      // initialized with elements
+
+// Expression position — constructor calls
+v := int[]();              // equivalent to Vector[int]()
+v := int[](capacity: 1000);  // pre-allocate capacity
+v := int[][]();            // nested: Vector[Vector[int]]()
+
+// Expression position — factory methods
+v := int[].filled(value: 0, count: 100);
+v := string[].filled(value: "x", count: 3);
 ```
+
+Only type names are valid before `[]` — using a variable or literal (e.g. `x[]()`, `42[]()`) is a compile error.
 
 **Methods and properties:**
 

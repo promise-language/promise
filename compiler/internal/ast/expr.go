@@ -56,6 +56,15 @@ type SliceExpr struct {
 
 func (*SliceExpr) exprTag() {}
 
+// SliceTypeExpr represents a slice type in expression position: T[].
+// Semantically equivalent to Vector[T] as a constructor reference.
+type SliceTypeExpr struct {
+	nodeBase
+	Inner Expr
+}
+
+func (*SliceTypeExpr) exprTag() {}
+
 // MemberExpr represents a member access: target.field.
 type MemberExpr struct {
 	nodeBase

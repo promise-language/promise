@@ -5870,6 +5870,83 @@ func TestStringLenCompoundAssignReadOnly(t *testing.T) {
 	expectError(t, errs, "has no setter")
 }
 
+// --- Slice Type Expression (T[] in expression position) ---
+
+func TestSliceTypeExprBasic(t *testing.T) {
+	checkOK(t, `
+		test() {
+			v := int[]();
+			v.push(1);
+		}
+	`)
+}
+
+func TestSliceTypeExprWithCapacity(t *testing.T) {
+	checkOK(t, `
+		test() {
+			v := int[](capacity: 64);
+			v.push(1);
+		}
+	`)
+}
+
+func TestSliceTypeExprString(t *testing.T) {
+	checkOK(t, `
+		test() {
+			v := string[]();
+			v.push("hello");
+		}
+	`)
+}
+
+func TestSliceTypeExprNested(t *testing.T) {
+	checkOK(t, `
+		test() {
+			v := int[][]();
+			inner := int[]();
+			inner.push(1);
+			v.push(inner);
+		}
+	`)
+}
+
+func TestSliceTypeExprFilledFactory(t *testing.T) {
+	checkOK(t, `
+		test() {
+			v := int[].filled(value: 0, count: 10);
+		}
+	`)
+}
+
+func TestSliceTypeExprRejectsVariable(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			x := 42;
+			v := x[]();
+		}
+	`)
+	expectError(t, errs, "expected type name before []")
+}
+
+func TestSliceTypeExprRejectsLiteral(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			v := 42[]();
+		}
+	`)
+	expectError(t, errs, "expected type name before []")
+}
+
+func TestSliceTypeExprRejectsCallResult(t *testing.T) {
+	errs := checkErrs(t, `
+		foo() int { return 1; }
+		test() {
+			v := foo()[]();
+		}
+	`)
+	expectError(t, errs, "expected type name before []")
+}
+
 func TestTaskReceiveReturnsBareType(t *testing.T) {
 	// <-task[int] returns int (not int?) — contrast with channel
 	checkOK(t, `

@@ -258,6 +258,11 @@ func (p *printer) printExpr(e Expr) {
 			p.printExpr(n.High)
 		}
 		p.indent--
+	case *SliceTypeExpr:
+		p.line("SliceType[]")
+		p.indent++
+		p.printExpr(n.Inner)
+		p.indent--
 	case *IdentExpr:
 		p.line("Ident %s", n.Name)
 	case *IntLit:

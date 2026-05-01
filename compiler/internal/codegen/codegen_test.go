@@ -7547,6 +7547,42 @@ func TestVectorExplicitCapacity(t *testing.T) {
 	assertContains(t, ir, "call i8* @promise_vector_with_capacity(i64 64,")
 }
 
+// --- Slice Type Expression (T[] in expression position) ---
+
+func TestSliceTypeExprDefaultCapacity(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v := int[]();
+			v.push(1);
+		}
+	`)
+	// int[]() should generate the same IR as Vector[int]()
+	assertContains(t, ir, "call i8* @promise_vector_with_capacity(i64 16,")
+}
+
+func TestSliceTypeExprExplicitCapacity(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v := int[](capacity: 64);
+			v.push(1);
+		}
+	`)
+	assertContains(t, ir, "call i8* @promise_vector_with_capacity(i64 64,")
+}
+
+func TestSliceTypeExprNested(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v := int[][]();
+			inner := int[]();
+			inner.push(1);
+			v.push(inner);
+		}
+	`)
+	// Both outer and inner should use vector_with_capacity
+	assertContains(t, ir, "call i8* @promise_vector_with_capacity(i64 16,")
+}
+
 // --- String byte indexing ---
 
 func TestStringByteIndex(t *testing.T) {

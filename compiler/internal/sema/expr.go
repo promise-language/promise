@@ -233,6 +233,9 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 	case *ast.SliceExpr:
 		typ = c.checkSliceExpr(e)
 
+	case *ast.SliceTypeExpr:
+		typ = c.checkSliceTypeExpr(e)
+
 	case *ast.OptionalChainExpr:
 		typ = c.checkOptionalChainExpr(e)
 
@@ -1386,6 +1389,46 @@ func (c *Checker) checkIndexExpr(e *ast.IndexExpr) types.Type {
 
 	c.errorf(e.Pos(), "cannot index type %s", target)
 	return nil
+}
+
+// checkSliceTypeExpr handles T[] in expression position — desugars to Vector[T].
+func (c *Checker) checkSliceTypeExpr(e *ast.SliceTypeExpr) types.Type {
+	inner := c.checkExpr(e.Inner)
+	if inner == nil {
+		return nil
+	}
+
+	// Validate that the inner expression is a type reference, not a value.
+	isTypeRef := false
+	switch t := e.Inner.(type) {
+	case *ast.IdentExpr:
+		if obj, found := c.info.Objects[t]; found {
+			_, isTypeRef = obj.(*types.TypeName)
+		}
+	case *ast.MemberExpr:
+		// Module-qualified type: mod.Type[]
+		switch inner.(type) {
+		case *types.Named, *types.Enum, *types.Instance:
+			isTypeRef = true
+		}
+	case *ast.IndexExpr:
+		// Generic instantiation: Map[K, V][]
+		switch inner.(type) {
+		case *types.Named, *types.Enum, *types.Instance:
+			isTypeRef = true
+		}
+	case *ast.SliceTypeExpr:
+		// Chained: int[][] — inner already validated
+		isTypeRef = true
+	}
+	if !isTypeRef {
+		c.errorf(e.Pos(), "expected type name before [], got value expression")
+		return nil
+	}
+
+	inst := types.NewVector(inner)
+	c.recordInstance(inst)
+	return inst
 }
 
 func (c *Checker) checkSliceExpr(e *ast.SliceExpr) types.Type {

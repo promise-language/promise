@@ -249,6 +249,13 @@ func (b *Builder) VisitSliceExpr(ctx *parser.SliceExprContext) interface{} {
 	return node
 }
 
+func (b *Builder) VisitSliceTypeExpr(ctx *parser.SliceTypeExprContext) interface{} {
+	return &SliceTypeExpr{
+		nodeBase: b.baseFromContext(ctx),
+		Inner:    b.visitExpr(ctx.Expression()),
+	}
+}
+
 func (b *Builder) VisitErrorHandlerExpr(ctx *parser.ErrorHandlerExprContext) interface{} {
 	node := &ErrorHandlerExpr{
 		nodeBase: b.baseFromContext(ctx),
@@ -690,5 +697,9 @@ func offsetExprPositions(expr Expr, lineOffset, colOffset int) {
 		offsetExprPositions(e.Target, lineOffset, colOffset)
 		offsetExprPositions(e.Low, lineOffset, colOffset)
 		offsetExprPositions(e.High, lineOffset, colOffset)
+	case *SliceTypeExpr:
+		adjustPos(&e.pos)
+		adjustPos(&e.end)
+		offsetExprPositions(e.Inner, lineOffset, colOffset)
 	}
 }

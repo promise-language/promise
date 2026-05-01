@@ -69,6 +69,10 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		return c.genIndexExpr(e)
 	case *ast.SliceExpr:
 		return c.genSliceExpr(e)
+	case *ast.SliceTypeExpr:
+		// Type expression in expression position; only used as constructor callee.
+		// genCallExpr handles this via c.info.Types lookup, not genExpr.
+		return nil
 	case *ast.LambdaExpr:
 		return c.genLambdaExpr(e)
 	case *ast.OptionalChainExpr:
@@ -4524,6 +4528,8 @@ func collectBlockIdents(block *ast.Block, outerLocals map[string]*ir.InstAlloca)
 			walkExpr(e.Target)
 			walkExpr(e.Low)
 			walkExpr(e.High)
+		case *ast.SliceTypeExpr:
+			walkExpr(e.Inner)
 		case *ast.MemberExpr:
 			walkExpr(e.Target)
 		case *ast.OptionalChainExpr:

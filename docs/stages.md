@@ -453,6 +453,7 @@ Promoted `slice[T]` and `map[K,V]` from structural placeholder types (`*types.Sl
 - ~35 `case *types.Slice:` / `case *types.Map:` switch cases migrated to `AsSlice`/`AsMap` helpers
 - `.len` removed as special case — now a real field lookup
 - Array delegates field/method lookup to TypSlice (rejects mutating methods like `push`/`remove`)
+- **`T[]` in expression position**: Grammar extended with `expression LBRACKET RBRACKET` postfix rule (`sliceTypeExpr`). New `SliceTypeExpr` AST node desugared to `Vector[T]` in sema via `checkSliceTypeExpr` (mirrors `resolveType` for `SliceTypeRef`). Validates inner expression is a type reference (IdentExpr → TypeName, IndexExpr, MemberExpr, or chained SliceTypeExpr) — rejects variables and literals. Enables `int[]()`, `int[](capacity: N)`, `int[][]()`, `int[].filled(...)` as constructor/factory calls equivalent to `Vector[int]()` etc. Tests in `tests/e2e/test_slice_type_expr.pr`.
 
 ## Stage 8L — Virtual Dispatch (Done)
 

@@ -46,6 +46,9 @@ func (c *Checker) checkExpr(expr ast.Expr) {
 			c.checkExpr(e.High)
 		}
 
+	case *ast.SliceTypeExpr:
+		c.checkExpr(e.Inner)
+
 	case *ast.MemberExpr:
 		c.checkExpr(e.Target)
 

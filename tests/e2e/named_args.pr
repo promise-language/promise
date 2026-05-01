@@ -101,7 +101,7 @@ Husky
 20
 5
 15
-3.14""", exclude: "wasm32") {
+3.14""") {
     // === Functions ===
 
     // 1. all positional

@@ -9,7 +9,7 @@ main() `test(expected: """999
 0
 via std
 2.72
-true""", exclude: "wasm32") {
+true""") {
   print_int(min(3, 7));
   print_int(std.min(3, 7));
 

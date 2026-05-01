@@ -378,7 +378,7 @@ Codegen for if-unwrap, while-unwrap, optional chaining, string interpolation, an
   - **AST**: `StringInterp` gains `Expr` field (parsed expression from `{expr}` syntax).
   - **AST builder**: `parseInterpolationExpr` re-lexes/re-parses expression text via fresh ANTLR lexer/parser. `offsetExprPositions` recursively adjusts AST node positions to match original source locations.
   - **Sema**: StringLit case extended to type-check interpolation expressions.
-  - **Runtime**: ~~`promise_int_to_string`, `promise_f64_to_string`, `promise_bool_to_string` conversion functions in `runtime_string.c` using `snprintf`~~ — now codegen-emitted LLVM IR (`defineIntToStringFunc`, `defineUintToStringFunc`, `defineF64ToStringFunc`, `defineBoolToStringFunc`, `defineCharToStringFunc` in compiler.go).
+  - **Runtime**: ~~`promise_int_to_string`, `promise_f64_to_string`, `promise_bool_to_string` conversion functions in `runtime_string.c` using `snprintf`~~ — now codegen-emitted LLVM IR (`defineIntToStringFunc`, `defineUintToStringFunc`, `defineBoolToStringFunc`, `defineCharToStringFunc` in compiler.go). f64→string uses `_f64_to_str` in `std/format.pr` (pure Promise, no libc dep).
   - **Codegen**: `genStringLit` split into `genStaticString` (compile-time, no interpolation) and `genInterpolatedString` (runtime). `convertToString` handles all primitive types with sext/zext/fpext as needed. Parts concatenated via `promise_string_concat`. Both `promise_string_new` and `promise_string_concat` are codegen-emitted LLVM IR using `@llvm.memcpy` intrinsic.
   - **Intrinsics**: 14 functions defined as codegen LLVM IR in `declareIntrinsics`: `promise_string_new`, `promise_string_concat`, 5 conversion functions (`bool`, `int`, `uint`, `f64`, `char` to string), `promise_vector_with_capacity`, `promise_vector_push`, `promise_vector_pop`, `promise_string_trim`, `promise_string_split`, `promise_string_next_char`, `promise_type_is`.
 - **Unsafe blocks**: `genUnsafeExpr` trivially generates block contents. Ownership analysis handles the "unsafe" semantics, not codegen.
@@ -602,11 +602,12 @@ The compiler pipeline (Stages 1-8o) is complete for the current feature set. The
 
 ### WASM remaining work
 
-Tests: 618 pass, 0 fail, 16 skip on `wasm32-wasi` (634 native)
+Tests: 630 pass, 0 fail, 4 skip on `wasm32-wasi` (634 native)
 
 | Item | Skipped tests | Effort | Notes |
 |------|--------------|--------|-------|
-| f64→string (custom dtoa) | 12 (5 e2e files + 7 unit) | Medium | `snprintf` stub returns "?". Need custom double-to-string in LLVM IR or Promise. Grisu2/Ryu algorithm. |
+| ~~f64→string (custom dtoa)~~ | ~~12~~ → 0 | ~~Medium~~ Done | Custom `_f64_to_str` in `std/format.pr` (pure Promise, %g format, 6 sig digits). No snprintf dependency. |
+| f64→string full precision (Grisu2/Ryu) | 0 | Medium | Current implementation uses 6 significant digits (matches `%g`). For full round-trip precision (~17 digits), implement Grisu2 or Ryu algorithm. Needed for serialization/deserialization fidelity. |
 | Panic recovery (`setjmp`/`longjmp`) | 2 (panic_recovery_basic, panic_recovery_channel) | Medium | WASM has no `setjmp`/`longjmp`. Options: Emscripten-style JS exception handling, or WASM exception handling proposal (`try`/`catch`/`throw` instructions). |
 | Free-list allocator | 1 (goroutine_1000 OOM) | Medium | Current bump allocator never frees. Add free-list on top of bump for long-running programs. |
 | GOMAXPROCS >1 | 1 (gomaxprocs_query) | Low | Single-threaded WASM can't have multiple Ps. Could clamp silently instead of panicking. |

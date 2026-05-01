@@ -82,37 +82,6 @@ func (c *Compiler) defineWasmStrlen() *ir.Func {
 	return fn
 }
 
-// defineWasmSnprintf emits a stub snprintf for WASM.
-// Float-to-string is a known limitation without libc.
-// Writes "?" to the buffer and returns 1.
-func (c *Compiler) defineWasmSnprintf() *ir.Func {
-	buf := ir.NewParam("buf", irtypes.I8Ptr)
-	size := ir.NewParam("size", irtypes.I64)
-	fmtParam := ir.NewParam("fmt", irtypes.I8Ptr)
-	fn := c.module.NewFunc("snprintf", irtypes.I32, buf, size, fmtParam)
-	fn.Sig.Variadic = true
-	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-
-	entry := fn.NewBlock("entry")
-	writeBlk := fn.NewBlock("write")
-	nullBlk := fn.NewBlock("null_term")
-	doneBlk := fn.NewBlock("done")
-
-	hasSpace := entry.NewICmp(enum.IPredUGT, size, constant.NewInt(irtypes.I64, 0))
-	entry.NewCondBr(hasSpace, writeBlk, doneBlk)
-
-	writeBlk.NewStore(constant.NewInt(irtypes.I8, '?'), buf)
-	hasTwo := writeBlk.NewICmp(enum.IPredUGT, size, constant.NewInt(irtypes.I64, 1))
-	writeBlk.NewCondBr(hasTwo, nullBlk, doneBlk)
-
-	pos1 := nullBlk.NewGetElementPtr(irtypes.I8, buf, constant.NewInt(irtypes.I64, 1))
-	nullBlk.NewStore(constant.NewInt(irtypes.I8, 0), pos1)
-	nullBlk.NewBr(doneBlk)
-
-	doneBlk.NewRet(constant.NewInt(irtypes.I32, 1))
-	return fn
-}
-
 // defineWasmUsleep emits a no-op usleep for WASM.
 func (c *Compiler) defineWasmUsleep() *ir.Func {
 	usec := ir.NewParam("usec", irtypes.I32)

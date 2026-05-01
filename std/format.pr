@@ -1,0 +1,99 @@
+// std/format.pr — Value-to-string formatting functions
+
+// _f64_to_str converts an f64 to its string representation,
+// matching C's %g format (6 significant digits, trailing zeros stripped).
+_f64_to_str(f64 x) string {
+    // NaN: only value where x != x
+    if x != x { return "nan"; }
+
+    // Sign
+    string prefix = "";
+    if x < 0.0 {
+        prefix = "-";
+        x = -x;
+    }
+
+    // Inf (after sign handling)
+    if x > 1.7976931348623157e308 { return prefix + "inf"; }
+
+    // Zero
+    if x == 0.0 { return prefix + "0"; }
+
+    // Normalize to [1.0, 10.0) and track decimal exponent
+    int e10 = 0;
+    f64 norm = x;
+
+    // Scale down large values in chunks
+    while norm >= 1e15 { norm = norm / 1e15; e10 = e10 + 15; }
+    while norm >= 10.0 { norm = norm / 10.0; e10 = e10 + 1; }
+
+    // Scale up small values in chunks
+    while norm < 1e-14 { norm = norm * 1e15; e10 = e10 - 15; }
+    while norm < 1.0 { norm = norm * 10.0; e10 = e10 - 1; }
+
+    // Extract 6 significant digits with rounding
+    int scaled = (norm * 100000.0 + 0.5) as int;
+    if scaled >= 1000000 { scaled = scaled / 10; e10 = e10 + 1; }
+    if scaled < 100000 { scaled = 100000; }
+
+    // Convert digits to string, trim trailing zeros
+    string digits = "{scaled}";
+    int ndigits = digits.len;
+    while ndigits > 1 && digits[ndigits - 1] == '0' {
+        ndigits = ndigits - 1;
+    }
+
+    // Choose fixed vs scientific notation (%g rules)
+    if e10 >= -4 && e10 <= 5 {
+        return prefix + _f64_fixed(digits, ndigits, e10);
+    }
+    return prefix + _f64_sci(digits, ndigits, e10);
+}
+
+// _f64_fixed formats digits in fixed-point notation.
+// e10 is the decimal exponent (power of 10 of the first digit).
+_f64_fixed(string digits, int ndigits, int e10) string {
+    if e10 >= 0 {
+        // Integer part: digits[0..e10], fractional: digits[e10+1..ndigits-1]
+        string result = digits[0 : e10 + 1];
+        if ndigits > e10 + 1 {
+            result = result + "." + digits[e10 + 1 : ndigits];
+        }
+        return result;
+    }
+
+    // e10 < 0: "0." + leading zeros + significant digits
+    string result = "0.";
+    int zeros = -e10 - 1;
+    int i = 0;
+    while i < zeros { result = result + "0"; i = i + 1; }
+    return result + digits[0 : ndigits];
+}
+
+// _f64_sci formats digits in scientific notation (e.g., "1.23e+04").
+_f64_sci(string digits, int ndigits, int e10) string {
+    // Leading digit
+    string result = digits[0 : 1];
+
+    // Fractional digits (if any)
+    if ndigits > 1 {
+        result = result + "." + digits[1 : ndigits];
+    }
+
+    // Exponent sign
+    int abs_e = e10;
+    if e10 >= 0 {
+        result = result + "e+";
+    } else {
+        result = result + "e-";
+        abs_e = -e10;
+    }
+
+    // Exponent value (minimum 2 digits, per C standard)
+    if abs_e < 10 {
+        result = result + "0{abs_e}";
+    } else {
+        result = result + "{abs_e}";
+    }
+    return result;
+}

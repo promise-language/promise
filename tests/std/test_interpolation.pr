@@ -20,17 +20,17 @@ test_int_large() `test {
   assert("{x}" == "1000000", "int 1000000");
 }
 
-test_f64() `test(exclude: "wasm32") {
+test_f64() `test {
   f64 x = 3.14;
   assert("{x}" == "3.14", "f64 3.14");
 }
 
-test_f64_integer() `test(exclude: "wasm32") {
+test_f64_integer() `test {
   f64 x = 42.0;
   assert("{x}" == "42", "f64 42.0 -> 42");
 }
 
-test_f64_zero() `test(exclude: "wasm32") {
+test_f64_zero() `test {
   f64 x = 0.0;
   assert("{x}" == "0", "f64 0.0 -> 0");
 }
@@ -66,7 +66,7 @@ test_int_max() `test {
   assert("{x}" == "9223372036854775807", "INT64_MAX");
 }
 
-test_f64_negative() `test(exclude: "wasm32") {
+test_f64_negative() `test {
   f64 x = -3.14;
   assert("{x}" == "-3.14", "f64 -3.14");
 }
@@ -99,19 +99,231 @@ test_uint_max() `test {
   assert("{x}" == "18446744073709551615", "UINT64_MAX");
 }
 
-test_f64_small() `test(exclude: "wasm32") {
+test_f64_small() `test {
   f64 x = 0.001;
   assert("{x}" == "0.001", "f64 0.001");
 }
 
-test_f64_scientific() `test(exclude: "wasm32") {
+test_f64_scientific() `test {
   f64 x = 1.5e10;
   assert("{x}" == "1.5e+10", "f64 scientific");
 }
 
-test_f64_very_small() `test(exclude: "wasm32") {
+test_f64_very_small() `test {
   f64 x = 1.23e-15;
   assert("{x}" == "1.23e-15", "f64 very small");
+}
+
+// --- f64 edge cases: fixed/scientific boundary ---
+
+test_f64_boundary_fixed_max() `test {
+  // e10=5 is the last fixed exponent
+  f64 x = 999999.0;
+  assert("{x}" == "999999", "999999 stays fixed");
+}
+
+test_f64_boundary_sci_min() `test {
+  // e10=6 triggers scientific
+  f64 x = 1e6;
+  assert("{x}" == "1e+06", "1e6 -> scientific");
+}
+
+test_f64_boundary_neg_fixed() `test {
+  // e10=-4 is the last negative fixed exponent
+  f64 x = 0.0001;
+  assert("{x}" == "0.0001", "0.0001 stays fixed");
+}
+
+test_f64_boundary_neg_sci() `test {
+  // e10=-5 triggers scientific
+  f64 x = 0.00001;
+  assert("{x}" == "1e-05", "0.00001 -> scientific");
+}
+
+// --- f64 edge cases: rounding ---
+
+test_f64_round_up() `test {
+  // 1.23456789 rounds to 6 sig digits: 1.23457
+  f64 x = 1.23456789;
+  assert("{x}" == "1.23457", "rounds to 6 sig digits");
+}
+
+test_f64_round_sci() `test {
+  // 1234567.0 -> 1.23457e+06 (6 sig digits, rounds up)
+  f64 x = 1234567.0;
+  assert("{x}" == "1.23457e+06", "large int rounds in sci notation");
+}
+
+test_f64_round_overflow() `test {
+  // 9.999995 rounds up to 10, bumps exponent
+  f64 x = 9.999995;
+  assert("{x}" == "10", "round overflow bumps exponent");
+}
+
+// --- f64 edge cases: exact integers ---
+
+test_f64_hundred() `test {
+  f64 x = 100.0;
+  assert("{x}" == "100", "100.0 -> 100");
+}
+
+test_f64_one() `test {
+  f64 x = 1.0;
+  assert("{x}" == "1", "1.0 -> 1");
+}
+
+test_f64_half() `test {
+  f64 x = 0.5;
+  assert("{x}" == "0.5", "0.5");
+}
+
+test_f64_tenth() `test {
+  f64 x = 0.1;
+  assert("{x}" == "0.1", "0.1");
+}
+
+// --- f64 edge cases: extreme values ---
+
+test_f64_max() `test {
+  f64 x = 1.7976931348623157e308;
+  assert("{x}" == "1.79769e+308", "DBL_MAX");
+}
+
+test_f64_min_normal() `test {
+  f64 x = 2.2250738585072014e-308;
+  assert("{x}" == "2.22507e-308", "DBL_MIN normal");
+}
+
+test_f64_denormalized() `test {
+  f64 x = 5e-324;
+  assert("{x}" == "4.94066e-324", "denormalized");
+}
+
+test_f64_1e100() `test {
+  f64 x = 1e100;
+  assert("{x}" == "1e+100", "1e100");
+}
+
+test_f64_1e_neg100() `test {
+  f64 x = 1e-100;
+  assert("{x}" == "1e-100", "1e-100");
+}
+
+test_f64_1e20() `test {
+  f64 x = 1e20;
+  assert("{x}" == "1e+20", "1e20");
+}
+
+test_f64_1e_neg20() `test {
+  f64 x = 1e-20;
+  assert("{x}" == "1e-20", "1e-20");
+}
+
+// --- f64 edge cases: negative values ---
+
+test_f64_neg_integer() `test {
+  f64 x = -42.0;
+  assert("{x}" == "-42", "-42.0 -> -42");
+}
+
+test_f64_neg_small() `test {
+  f64 x = -0.001;
+  assert("{x}" == "-0.001", "-0.001");
+}
+
+test_f64_neg_sci() `test {
+  f64 x = -1.5e10;
+  assert("{x}" == "-1.5e+10", "-1.5e+10");
+}
+
+test_f64_neg_very_small() `test {
+  f64 x = -1e-20;
+  assert("{x}" == "-1e-20", "-1e-20");
+}
+
+// --- f64 edge cases: trailing zero stripping ---
+
+test_f64_trailing_zeros_1() `test {
+  f64 x = 1.00001;
+  assert("{x}" == "1.00001", "no trailing zeros, 6 sig digits");
+}
+
+test_f64_trailing_zeros_2() `test {
+  f64 x = 1.10000;
+  assert("{x}" == "1.1", "trailing zeros stripped");
+}
+
+test_f64_trailing_zeros_3() `test {
+  f64 x = 10.0;
+  assert("{x}" == "10", "10.0 -> 10");
+}
+
+test_f64_trailing_zeros_sci() `test {
+  f64 x = 1e15;
+  assert("{x}" == "1e+15", "1e15 no trailing zeros");
+}
+
+// --- f64 edge cases: values near 1.0 ---
+
+test_f64_just_above_1() `test {
+  f64 x = 1.00001;
+  assert("{x}" == "1.00001", "just above 1");
+}
+
+test_f64_just_below_1() `test {
+  f64 x = 0.999999;
+  assert("{x}" == "0.999999", "just below 1");
+}
+
+// --- f64 edge cases: powers of 10 ---
+
+test_f64_pow10_pos() `test {
+  assert("{1.0}" == "1", "1e0");
+  assert("{10.0}" == "10", "1e1");
+  assert("{100.0}" == "100", "1e2");
+  assert("{1000.0}" == "1000", "1e3");
+  assert("{10000.0}" == "10000", "1e4");
+  assert("{100000.0}" == "100000", "1e5");
+}
+
+test_f64_pow10_neg() `test {
+  f64 a = 0.1; assert("{a}" == "0.1", "1e-1");
+  f64 b = 0.01; assert("{b}" == "0.01", "1e-2");
+  f64 c = 0.001; assert("{c}" == "0.001", "1e-3");
+  f64 d = 0.0001; assert("{d}" == "0.0001", "1e-4");
+}
+
+test_f64_pow10_sci() `test {
+  f64 a = 1e6;  assert("{a}" == "1e+06", "1e6");
+  f64 b = 1e10; assert("{b}" == "1e+10", "1e10");
+  f64 c = 1e15; assert("{c}" == "1e+15", "1e15");
+  f64 d = 1e50; assert("{d}" == "1e+50", "1e50");
+  f64 e = 1e200; assert("{e}" == "1e+200", "1e200");
+}
+
+test_f64_pow10_neg_sci() `test {
+  f64 a = 1e-5;  assert("{a}" == "1e-05", "1e-5");
+  f64 b = 1e-10; assert("{b}" == "1e-10", "1e-10");
+  f64 c = 1e-15; assert("{c}" == "1e-15", "1e-15");
+  f64 d = 1e-50; assert("{d}" == "1e-50", "1e-50");
+  f64 e = 1e-200; assert("{e}" == "1e-200", "1e-200");
+}
+
+// --- f64 edge cases: f32 (fpext path) ---
+
+test_f32_interpolation() `test {
+  f32 x = 3.14;
+  assert("{x}" == "3.14", "f32 3.14");
+}
+
+test_f32_integer() `test {
+  f32 x = 42.0;
+  assert("{x}" == "42", "f32 42.0");
+}
+
+test_f32_negative() `test {
+  f32 x = -0.5;
+  assert("{x}" == "-0.5", "f32 -0.5");
 }
 
 test_expr_interpolation() `test {

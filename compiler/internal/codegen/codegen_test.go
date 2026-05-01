@@ -359,6 +359,51 @@ type Map[K: Hashable + Equal, V] {
 	// Error base type
 	b.WriteString("type error {\n\tstring message;\n}\n")
 
+	// f64-to-string formatting (matches std/format.pr)
+	b.WriteString(`
+_f64_to_str(f64 x) string {
+	if x != x { return "nan"; }
+	string prefix = "";
+	if x < 0.0 { prefix = "-"; x = -x; }
+	if x > 1.7976931348623157e308 { return prefix + "inf"; }
+	if x == 0.0 { return prefix + "0"; }
+	int e10 = 0;
+	f64 norm = x;
+	while norm >= 1e15 { norm = norm / 1e15; e10 = e10 + 15; }
+	while norm >= 10.0 { norm = norm / 10.0; e10 = e10 + 1; }
+	while norm < 1e-14 { norm = norm * 1e15; e10 = e10 - 15; }
+	while norm < 1.0 { norm = norm * 10.0; e10 = e10 - 1; }
+	int scaled = (norm * 100000.0 + 0.5) as int;
+	if scaled >= 1000000 { scaled = scaled / 10; e10 = e10 + 1; }
+	if scaled < 100000 { scaled = 100000; }
+	string digits = "{scaled}";
+	int ndigits = digits.len;
+	while ndigits > 1 && digits[ndigits - 1] == '0' { ndigits = ndigits - 1; }
+	if e10 >= -4 && e10 <= 5 { return prefix + _f64_fixed(digits, ndigits, e10); }
+	return prefix + _f64_sci(digits, ndigits, e10);
+}
+_f64_fixed(string digits, int ndigits, int e10) string {
+	if e10 >= 0 {
+		string result = digits[0 : e10 + 1];
+		if ndigits > e10 + 1 { result = result + "." + digits[e10 + 1 : ndigits]; }
+		return result;
+	}
+	string result = "0.";
+	int zeros = -e10 - 1;
+	int i = 0;
+	while i < zeros { result = result + "0"; i = i + 1; }
+	return result + digits[0 : ndigits];
+}
+_f64_sci(string digits, int ndigits, int e10) string {
+	string result = digits[0 : 1];
+	if ndigits > 1 { result = result + "." + digits[1 : ndigits]; }
+	int abs_e = e10;
+	if e10 >= 0 { result = result + "e+"; } else { result = result + "e-"; abs_e = -e10; }
+	if abs_e < 10 { result = result + "0{abs_e}"; } else { result = result + "{abs_e}"; }
+	return result;
+}
+`)
+
 	stdAll = b.String()
 }
 
@@ -3673,8 +3718,6 @@ func TestStringInterpolationStringVar(t *testing.T) {
 		}
 	`)
 	// No conversion call needed — string is passed directly to concat
-	assertNotContains(t, ir, "call i8* @promise_int_to_string")
-	assertNotContains(t, ir, "call i8* @promise_f64_to_string")
 	assertContains(t, ir, "call i8* @promise_string_concat")
 }
 
@@ -3984,9 +4027,9 @@ func TestF64ToStringFuncBody(t *testing.T) {
 	ir := generateIR(t, `
 		main() { f64 x = 3.14; string s = "{x}"; }
 	`)
+	// promise_f64_to_string is a bridge to the Promise-defined _f64_to_str
 	assertContains(t, ir, "define i8* @promise_f64_to_string(double")
-	assertContains(t, ir, "@snprintf(")
-	assertContains(t, ir, `c"%g\00"`)
+	assertContains(t, ir, "call i8* @__std__f64_to_str(double")
 }
 
 func TestCharToStringFuncBody(t *testing.T) {

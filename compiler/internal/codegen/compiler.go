@@ -357,6 +357,7 @@ func Compile(file *ast.File, info *sema.Info, target string) *CompileResult {
 	c.emitTypeInfoGlobals(file)
 
 	c.declareFuncs(file)
+	c.defineF64ToStringBridge() // bridge promise_f64_to_string → Promise _f64_to_str
 	c.declareMonoFuncs(file, monoFuncInstances)
 	c.defineTypeMethods(file)
 	c.defineMonoMethods(file, monoInstances)
@@ -676,23 +677,11 @@ func (c *Compiler) declareIntrinsics() {
 	c.defineStringTrimFunc()
 	c.defineStringSplitFunc()
 
-	// snprintf — needed by defineF64ToStringFunc (stub on WASM: float→string deferred)
-	if c.isWasm {
-		c.funcs["snprintf"] = c.defineWasmSnprintf()
-	} else {
-		snprintfFn := c.module.NewFunc("snprintf", irtypes.I32,
-			ir.NewParam("buf", irtypes.I8Ptr),
-			ir.NewParam("size", irtypes.I64),
-			ir.NewParam("fmt", irtypes.I8Ptr))
-		snprintfFn.Sig.Variadic = true
-		c.funcs["snprintf"] = snprintfFn
-	}
-
 	// Value-to-string conversion (codegen-emitted LLVM IR, replaces C runtime)
 	c.defineBoolToStringFunc()
 	c.defineIntToStringFunc()
 	c.defineUintToStringFunc()
-	c.defineF64ToStringFunc()
+	c.declareF64ToStringFunc() // stub — body bridged to Promise _f64_to_str after declareFuncs
 	c.defineCharToStringFunc()
 
 	// String next_char UTF-8 decoder (codegen-emitted LLVM IR, replaces C runtime)
@@ -2145,35 +2134,23 @@ func (c *Compiler) defineUintToStringFunc() {
 	c.funcs["promise_uint_to_string"] = fn
 }
 
-// defineF64ToStringFunc emits an LLVM IR function that converts a double to its
-// string representation using libc snprintf with "%g" format.
-// Replaces the C runtime promise_f64_to_string.
-func (c *Compiler) defineF64ToStringFunc() {
+// declareF64ToStringFunc declares promise_f64_to_string as a stub (no body).
+// The body is added later by defineF64ToStringBridge, which forwards to the
+// Promise-defined _f64_to_str function in std/format.pr.
+func (c *Compiler) declareF64ToStringFunc() {
 	xParam := ir.NewParam("x", irtypes.Double)
 	fn := c.module.NewFunc("promise_f64_to_string", irtypes.I8Ptr, xParam)
-
-	bufType := irtypes.NewArray(64, irtypes.I8)
-
-	// Global format string "%g\0"
-	fmtData := constant.NewCharArrayFromString("%g\x00")
-	fmtGlobal := c.module.NewGlobalDef(fmt.Sprintf(".str.fmt.g.%d", c.strCounter), fmtData)
-	c.strCounter++
-	fmtGlobal.Immutable = true
-
-	entry := fn.NewBlock("entry")
-	buf := entry.NewAlloca(bufType)
-	bufPtr := entry.NewGetElementPtr(bufType, buf,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	fmtPtr := entry.NewGetElementPtr(fmtGlobal.ContentType, fmtGlobal,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-
-	len32 := entry.NewCall(c.funcs["snprintf"],
-		bufPtr, constant.NewInt(irtypes.I64, 64), fmtPtr, xParam)
-	len64 := entry.NewSExt(len32, irtypes.I64)
-	result := entry.NewCall(c.funcs["promise_string_new"], bufPtr, len64)
-	entry.NewRet(result)
-
 	c.funcs["promise_f64_to_string"] = fn
+}
+
+// defineF64ToStringBridge adds a body to promise_f64_to_string that calls
+// the Promise-defined _f64_to_str function. Must be called after declareFuncs.
+func (c *Compiler) defineF64ToStringBridge() {
+	fn := c.funcs["promise_f64_to_string"]
+	entry := fn.NewBlock("entry")
+	stdFn := c.funcs["_f64_to_str"]
+	result := entry.NewCall(stdFn, fn.Params[0])
+	entry.NewRet(result)
 }
 
 // defineCharToStringFunc emits an LLVM IR function that converts a Unicode

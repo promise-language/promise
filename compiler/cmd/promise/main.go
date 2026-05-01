@@ -1939,6 +1939,7 @@ func (l *errorListener) SyntaxError(
 // runExec executes inline Promise code from CLI arguments or stdin.
 func runExec(args []string) {
 	timeout := 60 * time.Second
+	target := ""
 	var remaining []string
 	for i := 0; i < len(args); i++ {
 		if args[i] == "-timeout" && i+1 < len(args) {
@@ -1948,6 +1949,9 @@ func runExec(args []string) {
 				os.Exit(1)
 			}
 			timeout = d
+			i++
+		} else if (args[i] == "-target" || args[i] == "--target") && i+1 < len(args) {
+			target = args[i+1]
 			i++
 		} else {
 			remaining = append(remaining, args[i])
@@ -2015,11 +2019,17 @@ func runExec(args []string) {
 	}
 
 	// Code generation
-	target := codegen.HostTargetTriple()
+	if target == "" {
+		target = codegen.HostTargetTriple()
+	}
 	result := codegen.Compile(file, info, target)
 
 	// Compile and link to temp binary
-	tmpOutput, err := os.CreateTemp("", "promise-exec-*")
+	ext := ""
+	if isWasmTarget(target) {
+		ext = ".wasm"
+	}
+	tmpOutput, err := os.CreateTemp("", "promise-exec-*"+ext)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
 		os.Exit(1)
@@ -2032,7 +2042,12 @@ func runExec(args []string) {
 	// Execute with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, tmpOutput.Name())
+	var cmd *exec.Cmd
+	if isWasmTarget(target) {
+		cmd = exec.CommandContext(ctx, "wasmtime", tmpOutput.Name())
+	} else {
+		cmd = exec.CommandContext(ctx, tmpOutput.Name())
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {

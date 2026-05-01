@@ -44,6 +44,7 @@ resources:
 	@rm -rf $(RESOURCES)/std
 	@mkdir -p $(RESOURCES)/std
 	@cp ../std/*.pr $(RESOURCES)/std/
+	@cp ../catalog.toml $(RESOURCES)/catalog.toml
 
 musl-crt:
 	@mkdir -p $(MUSL_CRT_DST)

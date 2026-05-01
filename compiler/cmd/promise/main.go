@@ -32,6 +32,9 @@ import (
 //go:embed resources/std/*.pr
 var embeddedStd embed.FS
 
+//go:embed resources/catalog.toml
+var embeddedCatalog []byte
+
 // Runtime is fully codegen-emitted LLVM IR — no embedded C files needed.
 
 func usage() {
@@ -2274,6 +2277,8 @@ type moduleLoader struct {
 	commitPins map[string]string
 	// warnings collects warning messages emitted during loading.
 	warnings []string
+	// catalog is the parsed embedded catalog manifest (nil if unavailable).
+	catalog *module.Catalog
 }
 
 // loadModuleScopes scans use declarations for local module paths, loads each
@@ -2304,6 +2309,17 @@ func loadModuleScopes(filename string, file *ast.File, stdFiles []*ast.File) (ma
 		}
 	}
 
+	// Parse embedded catalog
+	var catalog *module.Catalog
+	if len(embeddedCatalog) > 0 {
+		cat, err := module.ParseCatalog(embeddedCatalog)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: invalid embedded catalog: %v\n", err)
+			os.Exit(1)
+		}
+		catalog = cat
+	}
+
 	loader := &moduleLoader{
 		projectRoot:      projectRoot,
 		stdFiles:         stdFiles,
@@ -2314,12 +2330,30 @@ func loadModuleScopes(filename string, file *ast.File, stdFiles []*ast.File) (ma
 		allModInfos:      make(map[string]*sema.ModuleInfo),
 		remoteResolved:   make(map[string]string),
 		commitPins:       commitPins,
+		catalog:          catalog,
 	}
 
 	scopes := make(map[string]*types.Scope)
 	for _, u := range file.Uses {
 		if u.Path == "" {
-			continue // catalog import — handled by sema
+			// Catalog import — look up in embedded catalog
+			if u.CatalogName == "std" {
+				continue // std handled by sema via stdScope
+			}
+			modInfo, err := loader.loadCatalog(u.CatalogName)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s: error loading catalog module '%s': %v\n", filename, u.CatalogName, err)
+				os.Exit(1)
+			}
+			if modInfo != nil {
+				if u.Alias != "_" {
+					modInfo.Name = u.Alias
+				}
+				exportedScope := sema.ExportedScope(modInfo.SemaInfo, modInfo.File)
+				modInfo.InterfaceHash = module.HashModuleInterface(exportedScope)
+				scopes[u.CatalogName] = exportedScope
+			}
+			continue
 		}
 
 		var modInfo *sema.ModuleInfo
@@ -2567,6 +2601,68 @@ func (ml *moduleLoader) loadRemote(remoteURL, alias string) (*sema.ModuleInfo, e
 	return mi, nil
 }
 
+// loadCatalog resolves a catalog import by looking up the name in the embedded
+// catalog manifest, fetching the module via git, and loading it like a remote module.
+// Returns nil for "std" (handled specially by sema via stdScope).
+func (ml *moduleLoader) loadCatalog(catalogName string) (*sema.ModuleInfo, error) {
+	if catalogName == "std" {
+		return nil, nil // handled by sema directly
+	}
+
+	// Check [replace] — catalog name as key
+	if ml.projectCfg != nil {
+		if localPath, ok := ml.projectCfg.Replace[catalogName]; ok {
+			if !filepath.IsAbs(localPath) {
+				localPath = filepath.Join(ml.projectRoot, localPath)
+			}
+			ml.warnings = append(ml.warnings, fmt.Sprintf(
+				"warning: catalog module '%s' replaced with local path %q\n  catalog compatibility guarantees do not apply to replaced modules",
+				catalogName, localPath))
+			mi, err := ml.load(localPath)
+			if err != nil {
+				return nil, fmt.Errorf("replace %s → %s: %w", catalogName, localPath, err)
+			}
+			// Override identity: use catalog identity, not local path identity
+			oldID := mi.GlobalIdentity
+			mi.GlobalIdentity = module.GlobalIdentityForCatalog(catalogName)
+			mi.IRPrefix = module.SanitizeIRPrefix(mi.GlobalIdentity)
+			delete(ml.globalIdentities, oldID)
+			ml.globalIdentities[mi.GlobalIdentity] = mi.AbsDir
+			return mi, nil
+		}
+	}
+
+	// Look up in catalog
+	if ml.catalog == nil {
+		return nil, fmt.Errorf("unknown catalog module '%s' (no catalog available)", catalogName)
+	}
+	entry := ml.catalog.Lookup(catalogName)
+	if entry == nil {
+		return nil, fmt.Errorf("unknown catalog module '%s' — not in catalog for epoch %s", catalogName, ml.catalog.Epoch)
+	}
+
+	// Fetch/checkout via git (same infrastructure as remote modules)
+	absDir, err := module.ResolveRemoteModule(entry.URL, entry.Commit)
+	if err != nil {
+		return nil, fmt.Errorf("cannot fetch catalog module '%s': %w", catalogName, err)
+	}
+
+	// Delegate to load() for parsing, sema, cycle detection, caching
+	mi, err := ml.load(absDir)
+	if err != nil {
+		return nil, fmt.Errorf("catalog module '%s': %w", catalogName, err)
+	}
+
+	// Override identity: catalog modules use their name as global identity
+	oldID := mi.GlobalIdentity
+	mi.GlobalIdentity = module.GlobalIdentityForCatalog(catalogName)
+	mi.IRPrefix = module.SanitizeIRPrefix(mi.GlobalIdentity)
+	delete(ml.globalIdentities, oldID)
+	ml.globalIdentities[mi.GlobalIdentity] = mi.AbsDir
+
+	return mi, nil
+}
+
 // mergeTransitivePins reads a module's promise.toml and merges its [require] entries
 // into the loader's effective commit pins. Top-level pins take priority; conflicting
 // transitive pins produce an error.
@@ -2612,7 +2708,20 @@ func (ml *moduleLoader) loadDeps(file *ast.File, parentPath string) (map[string]
 	scopes := make(map[string]*types.Scope)
 	for _, u := range file.Uses {
 		if u.Path == "" {
-			continue // catalog import
+			// Catalog import
+			if u.CatalogName == "std" {
+				continue // std handled by sema via stdScope
+			}
+			depInfo, err := ml.loadCatalog(u.CatalogName)
+			if err != nil {
+				return nil, fmt.Errorf("in module '%s': %w", parentPath, err)
+			}
+			if depInfo != nil {
+				exportedScope := sema.ExportedScope(depInfo.SemaInfo, depInfo.File)
+				depInfo.InterfaceHash = module.HashModuleInterface(exportedScope)
+				scopes[u.CatalogName] = exportedScope
+			}
+			continue
 		}
 
 		var depInfo *sema.ModuleInfo

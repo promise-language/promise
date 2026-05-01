@@ -67,6 +67,9 @@ func (c *Checker) resolveModuleScope(u *ast.UseDecl, mod *types.Module) {
 		return
 	}
 	if c.moduleScopes == nil {
+		if u.CatalogName != "" {
+			c.errorf(u.Pos(), "unknown catalog module '%s'", u.CatalogName)
+		}
 		return
 	}
 	// Try catalog name first, then path
@@ -76,6 +79,8 @@ func (c *Checker) resolveModuleScope(u *ast.UseDecl, mod *types.Module) {
 	}
 	if scope, ok := c.moduleScopes[key]; ok {
 		mod.SetScope(scope)
+	} else if u.CatalogName != "" {
+		c.errorf(u.Pos(), "unknown catalog module '%s'", u.CatalogName)
 	}
 }
 

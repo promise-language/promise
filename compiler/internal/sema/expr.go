@@ -273,6 +273,12 @@ func (c *Checker) checkTupleLit(e *ast.TupleLit) types.Type {
 
 func (c *Checker) checkArrayLit(e *ast.ArrayLit, hint types.Type) types.Type {
 	if len(e.Elements) == 0 {
+		// Empty array with a Vector hint (e.g. from variadic param) → use the hint type.
+		if hint != nil {
+			if _, ok := types.AsVector(hint); ok {
+				return hint
+			}
+		}
 		c.errorf(e.Pos(), "cannot infer type of empty array literal")
 		return nil
 	}

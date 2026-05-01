@@ -468,7 +468,14 @@ func (c *Checker) resolveMethodSignature(named *types.Named, md *ast.MethodDecl)
 		if pt == nil {
 			return nil
 		}
-		params[i] = types.NewParam(p.Name, pt, resolveRefMod(p.RefMod))
+		if p.IsVariadic {
+			vecType := types.NewVector(pt)
+			c.recordInstance(vecType)
+			params[i] = types.NewParam(p.Name, vecType, types.RefNone)
+			params[i].SetVariadic(true)
+		} else {
+			params[i] = types.NewParam(p.Name, pt, resolveRefMod(p.RefMod))
+		}
 		if p.Default != nil {
 			params[i].SetHasDefault(true)
 			c.info.ParamDefaults[params[i]] = p.Default
@@ -476,6 +483,7 @@ func (c *Checker) resolveMethodSignature(named *types.Named, md *ast.MethodDecl)
 		params[i].SetDoc(extractDoc(p.Annotations))
 		c.validateMetas(p.Annotations, TargetParam)
 	}
+	c.validateVariadicParams(md.Params, params, "method '"+md.Name+"'")
 
 	// Resolve return type
 	var result types.Type
@@ -642,7 +650,15 @@ func (c *Checker) resolveFuncSignature(d *ast.FuncDecl) *types.Signature {
 		if pt == nil {
 			return nil
 		}
-		params[i] = types.NewParam(p.Name, pt, resolveRefMod(p.RefMod))
+		if p.IsVariadic {
+			// Variadic param: declared as ...T, stored as T[] internally
+			vecType := types.NewVector(pt)
+			c.recordInstance(vecType)
+			params[i] = types.NewParam(p.Name, vecType, types.RefNone)
+			params[i].SetVariadic(true)
+		} else {
+			params[i] = types.NewParam(p.Name, pt, resolveRefMod(p.RefMod))
+		}
 		if p.Default != nil {
 			params[i].SetHasDefault(true)
 			c.info.ParamDefaults[params[i]] = p.Default
@@ -650,6 +666,7 @@ func (c *Checker) resolveFuncSignature(d *ast.FuncDecl) *types.Signature {
 		params[i].SetDoc(extractDoc(p.Annotations))
 		c.validateMetas(p.Annotations, TargetParam)
 	}
+	c.validateVariadicParams(d.Params, params, "function '"+d.Name+"'")
 
 	// Resolve return type
 	var result types.Type

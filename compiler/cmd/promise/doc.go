@@ -627,7 +627,16 @@ func formatMethodSig(m *types.Method, info *sema.Info) string {
 		if !first {
 			b.WriteString(", ")
 		}
-		b.WriteString(typeString(p.Type()))
+		if p.IsVariadic() {
+			b.WriteString("...")
+			if elem, ok := types.AsVector(p.Type()); ok {
+				b.WriteString(typeString(elem))
+			} else {
+				b.WriteString(typeString(p.Type()))
+			}
+		} else {
+			b.WriteString(typeString(p.Type()))
+		}
 		b.WriteByte(' ')
 		b.WriteString(p.Name())
 		if p.HasDefault() {
@@ -674,7 +683,16 @@ func formatFuncSig(name string, sig *types.Signature, info *sema.Info) string {
 		if i > 0 {
 			b.WriteString(", ")
 		}
-		b.WriteString(typeString(p.Type()))
+		if p.IsVariadic() {
+			b.WriteString("...")
+			if elem, ok := types.AsVector(p.Type()); ok {
+				b.WriteString(typeString(elem))
+			} else {
+				b.WriteString(typeString(p.Type()))
+			}
+		} else {
+			b.WriteString(typeString(p.Type()))
+		}
 		b.WriteByte(' ')
 		if p.Ref() != types.RefNone {
 			b.WriteString(p.Ref().String())

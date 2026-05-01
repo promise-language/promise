@@ -115,7 +115,11 @@ func (v *BasePromiseParserVisitor) VisitReceiverParam(ctx *ReceiverParamContext)
 	return v.VisitChildren(ctx)
 }
 
-func (v *BasePromiseParserVisitor) VisitParam(ctx *ParamContext) interface{} {
+func (v *BasePromiseParserVisitor) VisitVariadicParam(ctx *VariadicParamContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BasePromiseParserVisitor) VisitRegularParam(ctx *RegularParamContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 

@@ -9051,3 +9051,136 @@ func TestValueTypeOptional(t *testing.T) {
 	// Optional wraps the full value struct: { i1, %promise_Point_v }
 	assertContains(t, ir, "{ i1, %promise_Point_v }")
 }
+
+// --- Variadic Parameter Tests ---
+
+func TestVariadicFunctionIR(t *testing.T) {
+	// Variadic param becomes a T[] (i8*) parameter in IR.
+	ir := generateIR(t, `
+		sum(...int nums) int {
+			int total = 0;
+			for n in nums { total += n; }
+			return total;
+		}
+		main() {
+			sum(1, 2, 3);
+		}
+	`)
+	// The function should take i8* (Vector) as its parameter
+	assertContains(t, ir, "define i64 @sum(i8* %nums)")
+}
+
+func TestVariadicEmptyCall(t *testing.T) {
+	ir := generateIR(t, `
+		count(...int nums) int {
+			return nums.len;
+		}
+		main() {
+			count();
+		}
+	`)
+	// Should generate a call with an empty vector
+	assertContains(t, ir, "call i64 @count(i8*")
+}
+
+func TestVariadicWithFixedParams(t *testing.T) {
+	ir := generateIR(t, `
+		join(string sep, ...string items) string {
+			return sep;
+		}
+		main() {
+			join(",", "a", "b");
+		}
+	`)
+	// Function takes (i8* sep, i8* items) — both are i8* (string and Vector)
+	assertContains(t, ir, "define i8* @join(i8* %sep, i8* %items)")
+}
+
+func TestVariadicPassVectorDirectly(t *testing.T) {
+	ir := generateIR(t, `
+		sum(...int nums) int {
+			int total = 0;
+			for n in nums { total += n; }
+			return total;
+		}
+		main() {
+			int[] v = [1, 2, 3];
+			sum(v);
+		}
+	`)
+	// Should pass vector directly, not wrap in another vector
+	assertContains(t, ir, "call i64 @sum(i8*")
+}
+
+func TestVariadicMethodIR(t *testing.T) {
+	// Variadic method: receiver + variadic param in IR.
+	ir := generateIR(t, `
+		type Adder {
+			int base;
+
+			addAll(&this, ...int values) int {
+				return this.base;
+			}
+		}
+		main() {
+			a := Adder(base: 10);
+			a.addAll(1, 2, 3);
+		}
+	`)
+	// Method takes instance ptr + vector param
+	assertContains(t, ir, "define i64 @Adder.addAll(")
+	assertContains(t, ir, "i8* %values")
+}
+
+func TestVariadicFailableIR(t *testing.T) {
+	// Variadic + failable function in IR.
+	ir := generateIR(t, `
+		trySum(...int nums) int! {
+			if nums.len == 0 { raise error(message: "empty"); }
+			int total = 0;
+			for n in nums { total += n; }
+			return total;
+		}
+		main() {
+			x := trySum(1, 2, 3)!;
+		}
+	`)
+	// Failable returns {i1, i64, i8*} (error flag + result + error ptr)
+	assertContains(t, ir, "define { i1, i64, i8* } @trySum(i8* %nums)")
+}
+
+func TestVariadicNestedCallIR(t *testing.T) {
+	// Variadic passing its param to another variadic — should pass T[] directly.
+	ir := generateIR(t, `
+		sum(...int nums) int {
+			int total = 0;
+			for n in nums { total += n; }
+			return total;
+		}
+		doubleSum(...int nums) int {
+			return sum(nums) * 2;
+		}
+		main() {
+			doubleSum(1, 2, 3);
+		}
+	`)
+	assertContains(t, ir, "define i64 @doubleSum(i8* %nums)")
+	// Inner call passes nums directly (T[] → T[])
+	assertContains(t, ir, "call i64 @sum(i8*")
+}
+
+func TestVariadicMultipleArgsArrayLit(t *testing.T) {
+	// Multiple variadic args should be wrapped into array literal in IR.
+	ir := generateIR(t, `
+		sum(...int nums) int {
+			int total = 0;
+			for n in nums { total += n; }
+			return total;
+		}
+		main() {
+			sum(10, 20);
+		}
+	`)
+	// Should see Vector_int creation with elements pushed
+	assertContains(t, ir, "call i64 @sum(i8*")
+}

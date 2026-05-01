@@ -165,7 +165,8 @@ receiverParam
     ;
 
 param
-    : typeRef refMod? bindingName metaAnnotation* (ASSIGN expression)?
+    : ELLIPSIS typeRef bindingName metaAnnotation*               # variadicParam
+    | typeRef refMod? bindingName metaAnnotation* (ASSIGN expression)?  # regularParam
     ;
 
 refMod

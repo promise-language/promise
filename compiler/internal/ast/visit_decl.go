@@ -430,7 +430,7 @@ func (b *Builder) VisitReceiverParam(ctx *parser.ReceiverParamContext) interface
 	return node
 }
 
-func (b *Builder) VisitParam(ctx *parser.ParamContext) interface{} {
+func (b *Builder) VisitRegularParam(ctx *parser.RegularParamContext) interface{} {
 	node := &Param{
 		nodeBase: b.baseFromContext(ctx),
 		Type:     b.visitTypeRef(ctx.TypeRef()),
@@ -444,6 +444,19 @@ func (b *Builder) VisitParam(ctx *parser.ParamContext) interface{} {
 	}
 	if expr := ctx.Expression(); expr != nil {
 		node.Default = b.visitExpr(expr)
+	}
+	return node
+}
+
+func (b *Builder) VisitVariadicParam(ctx *parser.VariadicParamContext) interface{} {
+	node := &Param{
+		nodeBase:   b.baseFromContext(ctx),
+		Type:       b.visitTypeRef(ctx.TypeRef()),
+		Name:       b.bindingText(ctx.BindingName()),
+		IsVariadic: true,
+	}
+	for _, ma := range ctx.AllMetaAnnotation() {
+		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))
 	}
 	return node
 }

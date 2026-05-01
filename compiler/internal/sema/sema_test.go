@@ -7680,3 +7680,272 @@ func TestValueTypeNonCopyEnumField(t *testing.T) {
 	`)
 	expectError(t, errs, "value field Step.dir must be a copy type")
 }
+
+// --- Variadic Parameter Tests ---
+
+func TestVariadicBasic(t *testing.T) {
+	checkOK(t, `
+		sum(...int nums) int {
+			int total = 0;
+			for n in nums { total += n; }
+			return total;
+		}
+		main() {
+			sum();
+			sum(1);
+			sum(1, 2, 3);
+		}
+	`)
+}
+
+func TestVariadicWithRegularParams(t *testing.T) {
+	checkOK(t, `
+		join(string sep, ...string items) string {
+			return sep;
+		}
+		main() {
+			join(",");
+			join(",", "a");
+			join(",", "a", "b", "c");
+		}
+	`)
+}
+
+func TestVariadicPassVector(t *testing.T) {
+	checkOK(t, `
+		sum(...int nums) int {
+			int total = 0;
+			for n in nums { total += n; }
+			return total;
+		}
+		main() {
+			int[] v = [1, 2, 3];
+			sum(v);
+		}
+	`)
+}
+
+func TestVariadicMustBeLast(t *testing.T) {
+	errs := checkErrs(t, `
+		bad(...int nums, string tail) {}
+		main() {}
+	`)
+	expectError(t, errs, "variadic parameter must be the last parameter")
+}
+
+func TestVariadicOnlyOne(t *testing.T) {
+	errs := checkErrs(t, `
+		bad(...int a, ...int b) {}
+		main() {}
+	`)
+	expectError(t, errs, "variadic parameter must be the last parameter")
+}
+
+func TestVariadicTypeMismatch(t *testing.T) {
+	errs := checkErrs(t, `
+		sum(...int nums) {}
+		main() {
+			sum("hello");
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+func TestVariadicMethod(t *testing.T) {
+	checkOK(t, `
+		type Printer {
+			printAll(~this, ...string items) {
+			}
+		}
+		main() {
+			p := Printer();
+			p.printAll("a", "b");
+		}
+	`)
+}
+
+func TestVariadicNamedVectorArg(t *testing.T) {
+	// Passing a T[] by name to a variadic parameter.
+	checkOK(t, `
+		sum(...int nums) int {
+			int total = 0;
+			for n in nums { total += n; }
+			return total;
+		}
+		main() {
+			sum(nums: [1, 2, 3]);
+		}
+	`)
+}
+
+func TestVariadicWithDefaultsAndOptionals(t *testing.T) {
+	// Variadic after params with defaults and optionals.
+	checkOK(t, `
+		log(string level = "info", string? tag, ...string msgs) {
+		}
+		main() {
+			log();
+			log("warn");
+			log("warn", "a", "b");
+			log(level: "debug", tag: "sys", msgs: ["x", "y"]);
+		}
+	`)
+}
+
+func TestVariadicNonVariadicTooManyArgs(t *testing.T) {
+	// Non-variadic functions still reject too many args.
+	errs := checkErrs(t, `
+		add(int a, int b) int { return a + b; }
+		main() { add(1, 2, 3); }
+	`)
+	expectError(t, errs, "expects 2 arguments, got 3")
+}
+
+func TestVariadicMultipleTypeMismatch(t *testing.T) {
+	// Type mismatch in one of several variadic args.
+	errs := checkErrs(t, `
+		sum(...int nums) {}
+		main() { sum(1, "bad", 3); }
+	`)
+	expectError(t, errs, "type mismatch")
+}
+
+func TestVariadicBodyUsesVectorMethods(t *testing.T) {
+	// The variadic param should support T[] methods like .len and indexing.
+	checkOK(t, `
+		count(...string items) int {
+			return items.len;
+		}
+		first(...string items) string {
+			return items[0];
+		}
+		main() {
+			count("a", "b");
+			first("x");
+		}
+	`)
+}
+
+func TestVariadicFailable(t *testing.T) {
+	// Variadic function that can raise errors.
+	checkOK(t, `
+		trySum(...int nums) int! {
+			if nums.len == 0 { raise error(message: "empty"); }
+			int total = 0;
+			for n in nums { total += n; }
+			return total;
+		}
+		main() {
+			x := trySum(1, 2, 3)!;
+			y := trySum()!;
+		}
+	`)
+}
+
+func TestVariadicFailablePropagation(t *testing.T) {
+	// Variadic failable called with ? from another failable function.
+	checkOK(t, `
+		trySum(...int nums) int! {
+			if nums.len == 0 { raise error(message: "empty"); }
+			int total = 0;
+			for n in nums { total += n; }
+			return total;
+		}
+		outer() int! {
+			a := trySum(1, 2)?;
+			b := trySum()?;
+			return a + b;
+		}
+		main() { outer()!; }
+	`)
+}
+
+func TestVariadicNestedCalls(t *testing.T) {
+	// A variadic function passing its param to another variadic function.
+	checkOK(t, `
+		sum(...int nums) int {
+			int total = 0;
+			for n in nums { total += n; }
+			return total;
+		}
+		doubleSum(...int nums) int {
+			return sum(nums) * 2;
+		}
+		main() {
+			doubleSum(1, 2, 3);
+		}
+	`)
+}
+
+func TestVariadicComputedVectorPassThrough(t *testing.T) {
+	// Pass a computed T[] (function return) to variadic — should pass through.
+	checkOK(t, `
+		sum(...int nums) int {
+			int total = 0;
+			for n in nums { total += n; }
+			return total;
+		}
+		makeVec() int[] {
+			return [10, 20, 30];
+		}
+		main() {
+			sum(makeVec());
+		}
+	`)
+}
+
+func TestVariadicMixedPositionalAndNamed(t *testing.T) {
+	// Fixed params positional, variadic by name.
+	checkOK(t, `
+		log(string level, string tag, ...string msgs) {
+		}
+		main() {
+			log("warn", "sys", "a", "b");
+			log("info", tag: "app", msgs: ["x", "y"]);
+		}
+	`)
+}
+
+func TestVariadicWrongVectorType(t *testing.T) {
+	// Passing string[] to ...int should fail.
+	errs := checkErrs(t, `
+		sum(...int nums) int { return 0; }
+		main() {
+			string[] v = ["a", "b"];
+			sum(v);
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+func TestVariadicEmptyCallInference(t *testing.T) {
+	// Empty variadic with string type — verifies empty array hint works for all types.
+	checkOK(t, `
+		concat(...string parts) string {
+			return "";
+		}
+		main() {
+			concat();
+			concat("a");
+			concat("a", "b", "c");
+		}
+	`)
+}
+
+func TestVariadicMethodWithReceiver(t *testing.T) {
+	// Variadic method with mutable receiver.
+	checkOK(t, `
+		type Logger {
+			int count;
+
+			logAll(&this, ...string msgs) {
+				this.count += msgs.len;
+			}
+		}
+		main() {
+			l := Logger(count: 0);
+			l.logAll();
+			l.logAll("a", "b");
+		}
+	`)
+}

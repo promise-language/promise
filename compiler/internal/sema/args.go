@@ -23,6 +23,13 @@ func (c *Checker) resolveCallArgs(
 ) bool {
 	args := e.Args
 
+	// Detect variadic signature.
+	isVariadic := len(params) > 0 && params[len(params)-1].IsVariadic()
+	variadicIdx := -1
+	if isVariadic {
+		variadicIdx = len(params) - 1
+	}
+
 	// 1. Validate positional-first ordering: once a named arg appears,
 	//    all subsequent args must be named.
 	seenNamed := false
@@ -47,7 +54,14 @@ func (c *Checker) resolveCallArgs(
 	}
 
 	// 3. Check: too many args overall.
-	if len(args) > len(params) {
+	// For variadic functions, positional args beyond the non-variadic params
+	// are collected into the variadic parameter.
+	nonVariadicCount := len(params)
+	if isVariadic {
+		nonVariadicCount = len(params) - 1
+	}
+
+	if !isVariadic && len(args) > len(params) {
 		c.errorf(e.Pos(), "%s expects %d arguments, got %d",
 			callDesc, len(params), len(args))
 		for _, a := range args {
@@ -59,12 +73,22 @@ func (c *Checker) resolveCallArgs(
 	// 4. Build result: resolved[i] holds the arg for param[i], or nil if omitted.
 	resolved := make([]*ast.Arg, len(params))
 
-	// 4a. Fill positional args: first N params in declaration order.
-	for i := 0; i < positionalCount; i++ {
+	// 4a. Fill positional args for non-variadic params.
+	positionalForFixed := positionalCount
+	if isVariadic && positionalForFixed > nonVariadicCount {
+		positionalForFixed = nonVariadicCount
+	}
+	for i := 0; i < positionalForFixed && i < len(params); i++ {
 		resolved[i] = args[i]
 	}
 
-	// 4b. Fill named args by name lookup.
+	// 4b. Collect extra positional args for the variadic param.
+	var variadicArgs []*ast.Arg
+	if isVariadic && positionalCount > nonVariadicCount {
+		variadicArgs = args[nonVariadicCount:positionalCount]
+	}
+
+	// 4c. Fill named args by name lookup.
 	paramIndex := make(map[string]int, len(params))
 	for i, p := range params {
 		paramIndex[p.Name()] = i
@@ -86,6 +110,45 @@ func (c *Checker) resolveCallArgs(
 		resolved[idx] = arg
 	}
 
+	// 4d. For variadic param: if extra positional args exist, wrap them in an ArrayLit.
+	// Special case: if exactly one extra positional arg has type T[] (matching the
+	// variadic param type), pass it directly without wrapping.
+	if isVariadic && resolved[variadicIdx] == nil {
+		if len(variadicArgs) == 1 {
+			// Single arg: check if it's already a T[] — pass through directly.
+			// Type-check the arg first to determine its type.
+			paramType := params[variadicIdx].Type()
+			if subst != nil {
+				paramType = types.Substitute(paramType, subst)
+			}
+			argType := c.checkExprWithHint(variadicArgs[0].Value, paramType)
+			if argType != nil && types.AssignableTo(argType, paramType) {
+				// Direct T[] pass-through.
+				resolved[variadicIdx] = variadicArgs[0]
+				resolved[variadicIdx].Name = params[variadicIdx].Name()
+			} else {
+				// Single element of type T — wrap in array.
+				arrayLit := &ast.ArrayLit{Elements: []ast.Expr{variadicArgs[0].Value}}
+				resolved[variadicIdx] = &ast.Arg{
+					Name:  params[variadicIdx].Name(),
+					Value: arrayLit,
+				}
+			}
+		} else if len(variadicArgs) > 1 {
+			// Multiple args: wrap into an array literal.
+			elems := make([]ast.Expr, len(variadicArgs))
+			for i, a := range variadicArgs {
+				elems[i] = a.Value
+			}
+			arrayLit := &ast.ArrayLit{Elements: elems}
+			resolved[variadicIdx] = &ast.Arg{
+				Name:  params[variadicIdx].Name(),
+				Value: arrayLit,
+			}
+		}
+		// If still nil (no variadicArgs), will be filled with empty array in step 5.
+	}
+
 	// 5. Check for missing required params; insert defaults/nones for optional params.
 	requiredMissing := false
 	for i, param := range params {
@@ -95,6 +158,15 @@ func (c *Checker) resolveCallArgs(
 		paramType := param.Type()
 		if subst != nil {
 			paramType = types.Substitute(paramType, subst)
+		}
+
+		// Variadic param with no args → insert empty array literal.
+		if param.IsVariadic() {
+			resolved[i] = &ast.Arg{
+				Name:  param.Name(),
+				Value: &ast.ArrayLit{Elements: nil},
+			}
+			continue
 		}
 
 		if param.HasDefault() {
@@ -275,4 +347,32 @@ func (c *Checker) resolveImplicitConstructorArgs(
 	e.Args = reordered
 
 	return true
+}
+
+// validateVariadicParams checks that variadic parameters (...T) are used correctly:
+// - at most one variadic param
+// - must be the last parameter
+// - cannot have a default value
+// - cannot have a ref modifier (& or ~)
+func (c *Checker) validateVariadicParams(astParams []*ast.Param, params []*types.Param, callDesc string) {
+	variadicCount := 0
+	for i, p := range astParams {
+		if !p.IsVariadic {
+			continue
+		}
+		variadicCount++
+		if variadicCount > 1 {
+			c.errorf(p.Pos(), "at most one variadic parameter allowed in %s", callDesc)
+		}
+		if i != len(astParams)-1 {
+			c.errorf(p.Pos(), "variadic parameter must be the last parameter in %s", callDesc)
+		}
+		if p.Default != nil {
+			c.errorf(p.Pos(), "variadic parameter '%s' cannot have a default value", p.Name)
+		}
+		if p.RefMod != ast.RefNone {
+			c.errorf(p.Pos(), "variadic parameter '%s' cannot have a reference modifier", p.Name)
+		}
+		_ = params // params slice already has the correct types set
+	}
 }

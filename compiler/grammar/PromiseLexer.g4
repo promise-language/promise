@@ -37,7 +37,8 @@ THIS        : 'this';
 // Multi-character operators (must precede single-char counterparts)
 // ============================================================
 
-// Range
+// Range / variadic
+ELLIPSIS    : '...';
 DOTDOTEQ    : '..=';
 DOTDOT      : '..';
 

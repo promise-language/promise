@@ -123,6 +123,7 @@ type Param struct {
 	Name        string // "_" for discard
 	Annotations []*MetaAnnotation
 	Default     Expr // nil if no default
+	IsVariadic  bool // true for ...T params
 }
 
 // ReceiverParam represents a method receiver (this).

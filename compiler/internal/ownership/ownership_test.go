@@ -1889,3 +1889,71 @@ func TestCopyCaptureDoesNotMoveVariable(t *testing.T) {
 		}
 	`)
 }
+
+// === Variadic Parameters ===
+
+func TestVariadicBasicOwnership(t *testing.T) {
+	// Basic variadic with copy types — no ownership issues.
+	ownerOK(t, `
+		sum(...int nums) int {
+			int total = 0;
+			for n in nums { total += n; }
+			return total;
+		}
+		test() {
+			sum(1, 2, 3);
+		}
+	`)
+}
+
+func TestVariadicPassVectorOwnership(t *testing.T) {
+	// Passing a vector directly to variadic — vector is used after call.
+	ownerOK(t, `
+		sum(...int nums) int {
+			int total = 0;
+			for n in nums { total += n; }
+			return total;
+		}
+		test() {
+			int[] v = [1, 2, 3];
+			sum(v);
+		}
+	`)
+}
+
+func TestVariadicEmptyCallOwnership(t *testing.T) {
+	// Empty variadic call should not cause ownership issues.
+	ownerOK(t, `
+		process(...string items) {}
+		test() {
+			process();
+		}
+	`)
+}
+
+func TestVariadicWithFixedParamsOwnership(t *testing.T) {
+	// Mixed fixed + variadic, all copy types.
+	ownerOK(t, `
+		log(string level, ...string msgs) {}
+		test() {
+			log("info", "a", "b", "c");
+		}
+	`)
+}
+
+func TestVariadicNestedCallOwnership(t *testing.T) {
+	// Variadic function passing its param to another variadic.
+	ownerOK(t, `
+		sum(...int nums) int {
+			int total = 0;
+			for n in nums { total += n; }
+			return total;
+		}
+		doubleSum(...int nums) int {
+			return sum(nums) * 2;
+		}
+		test() {
+			doubleSum(1, 2, 3);
+		}
+	`)
+}

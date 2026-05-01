@@ -182,11 +182,17 @@ func (s *BasePromiseParserListener) EnterReceiverParam(ctx *ReceiverParamContext
 // ExitReceiverParam is called when production receiverParam is exited.
 func (s *BasePromiseParserListener) ExitReceiverParam(ctx *ReceiverParamContext) {}
 
-// EnterParam is called when production param is entered.
-func (s *BasePromiseParserListener) EnterParam(ctx *ParamContext) {}
+// EnterVariadicParam is called when production variadicParam is entered.
+func (s *BasePromiseParserListener) EnterVariadicParam(ctx *VariadicParamContext) {}
 
-// ExitParam is called when production param is exited.
-func (s *BasePromiseParserListener) ExitParam(ctx *ParamContext) {}
+// ExitVariadicParam is called when production variadicParam is exited.
+func (s *BasePromiseParserListener) ExitVariadicParam(ctx *VariadicParamContext) {}
+
+// EnterRegularParam is called when production regularParam is entered.
+func (s *BasePromiseParserListener) EnterRegularParam(ctx *RegularParamContext) {}
+
+// ExitRegularParam is called when production regularParam is exited.
+func (s *BasePromiseParserListener) ExitRegularParam(ctx *RegularParamContext) {}
 
 // EnterRefMod is called when production refMod is entered.
 func (s *BasePromiseParserListener) EnterRefMod(ctx *RefModContext) {}

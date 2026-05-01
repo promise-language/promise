@@ -88,8 +88,11 @@ type PromiseParserListener interface {
 	// EnterReceiverParam is called when entering the receiverParam production.
 	EnterReceiverParam(c *ReceiverParamContext)
 
-	// EnterParam is called when entering the param production.
-	EnterParam(c *ParamContext)
+	// EnterVariadicParam is called when entering the variadicParam production.
+	EnterVariadicParam(c *VariadicParamContext)
+
+	// EnterRegularParam is called when entering the regularParam production.
+	EnterRegularParam(c *RegularParamContext)
 
 	// EnterRefMod is called when entering the refMod production.
 	EnterRefMod(c *RefModContext)
@@ -538,8 +541,11 @@ type PromiseParserListener interface {
 	// ExitReceiverParam is called when exiting the receiverParam production.
 	ExitReceiverParam(c *ReceiverParamContext)
 
-	// ExitParam is called when exiting the param production.
-	ExitParam(c *ParamContext)
+	// ExitVariadicParam is called when exiting the variadicParam production.
+	ExitVariadicParam(c *VariadicParamContext)
+
+	// ExitRegularParam is called when exiting the regularParam production.
+	ExitRegularParam(c *RegularParamContext)
 
 	// ExitRefMod is called when exiting the refMod production.
 	ExitRefMod(c *RefModContext)

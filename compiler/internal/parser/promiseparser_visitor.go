@@ -88,8 +88,11 @@ type PromiseParserVisitor interface {
 	// Visit a parse tree produced by PromiseParser#receiverParam.
 	VisitReceiverParam(ctx *ReceiverParamContext) interface{}
 
-	// Visit a parse tree produced by PromiseParser#param.
-	VisitParam(ctx *ParamContext) interface{}
+	// Visit a parse tree produced by PromiseParser#variadicParam.
+	VisitVariadicParam(ctx *VariadicParamContext) interface{}
+
+	// Visit a parse tree produced by PromiseParser#regularParam.
+	VisitRegularParam(ctx *RegularParamContext) interface{}
 
 	// Visit a parse tree produced by PromiseParser#refMod.
 	VisitRefMod(ctx *RefModContext) interface{}

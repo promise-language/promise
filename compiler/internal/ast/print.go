@@ -353,7 +353,11 @@ func (p *printer) typeParamsStr(tps []*TypeParam) string {
 }
 
 func (p *printer) paramStr(param *Param) string {
-	s := fmt.Sprintf("%s %s", p.typeRefStr(param.Type), param.Name)
+	prefix := ""
+	if param.IsVariadic {
+		prefix = "..."
+	}
+	s := fmt.Sprintf("%s%s %s", prefix, p.typeRefStr(param.Type), param.Name)
 	for _, a := range param.Annotations {
 		s += " `" + a.Name
 	}

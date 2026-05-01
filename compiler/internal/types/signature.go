@@ -4,11 +4,12 @@ import "strings"
 
 // Param represents a function parameter.
 type Param struct {
-	name   string
-	typ    Type
-	ref    RefMod
-	hasDef bool   // true if parameter has a default value
-	doc    string // `doc meta annotation
+	name       string
+	typ        Type
+	ref        RefMod
+	hasDef     bool   // true if parameter has a default value
+	doc        string // `doc meta annotation
+	isVariadic bool   // true for ...T params (receives T[])
 }
 
 // NewParam creates a new parameter.
@@ -21,12 +22,16 @@ func (p *Param) Type() Type       { return p.typ }
 func (p *Param) Ref() RefMod      { return p.ref }
 func (p *Param) HasDefault() bool { return p.hasDef }
 func (p *Param) Doc() string      { return p.doc }
+func (p *Param) IsVariadic() bool { return p.isVariadic }
 
 // SetHasDefault marks this parameter as having a default value.
 func (p *Param) SetHasDefault(v bool) { p.hasDef = v }
 
 // SetDoc sets the documentation string from a `doc annotation.
 func (p *Param) SetDoc(s string) { p.doc = s }
+
+// SetVariadic marks this parameter as variadic (...T).
+func (p *Param) SetVariadic(v bool) { p.isVariadic = v }
 
 // Signature represents a function type: (params) -> result.
 type Signature struct {
@@ -54,6 +59,12 @@ func (s *Signature) CanError() bool           { return s.canError }
 func (s *Signature) TypeParams() []*TypeParam { return s.typeParams }
 func (s *Signature) Underlying() Type         { return s }
 
+// IsVariadic returns true if the last parameter is variadic (...T).
+func (s *Signature) IsVariadic() bool {
+	n := len(s.params)
+	return n > 0 && s.params[n-1].IsVariadic()
+}
+
 // SetTypeParams sets the type parameters for a generic function signature.
 func (s *Signature) SetTypeParams(tps []*TypeParam) { s.typeParams = tps }
 
@@ -64,8 +75,18 @@ func (s *Signature) String() string {
 		if i > 0 {
 			b.WriteString(", ")
 		}
-		if p.typ != nil {
-			b.WriteString(p.typ.String())
+		if p.isVariadic {
+			b.WriteString("...")
+			// Variadic stores T[] internally; display the element type T.
+			if elem, ok := AsVector(p.typ); ok {
+				b.WriteString(elem.String())
+			} else if p.typ != nil {
+				b.WriteString(p.typ.String())
+			}
+		} else {
+			if p.typ != nil {
+				b.WriteString(p.typ.String())
+			}
 		}
 		if p.ref != RefNone {
 			b.WriteString(p.ref.String())

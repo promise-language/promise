@@ -1,20 +1,20 @@
 // std/math.pr — Pure Promise math utilities
-min(int a, int b) int {
+min(int a, int b) int `public {
   if a < b { return a; }
   return b;
 }
 
-max(int a, int b) int {
+max(int a, int b) int `public {
   if a > b { return a; }
   return b;
 }
 
-abs(int x) int {
+abs(int x) int `public {
   if x < 0 { return 0 - x; }
   return x;
 }
 
-clamp(int x, int lo, int hi) int {
+clamp(int x, int lo, int hi) int `public {
   if x < lo { return lo; }
   if x > hi { return hi; }
   return x;

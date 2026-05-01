@@ -37,7 +37,7 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 
 | Stage | Package | Description | Status |
 |-------|---------|-------------|--------|
-| 9 | `compiler/internal/module/` | Module resolution, dependency graph | Planned |
+| 9 | `compiler/internal/module/`, `sema/`, `std/` | Module system: visibility, qualified access, local imports | Phase 1 In Progress |
 | 10 | `cmd/promise/` | CLI entry point (build, run, test, fmt, etc.) | Partial |
 | 11 | `pkg/` | Package manager: fetch, resolve, lock | Planned |
 
@@ -162,7 +162,7 @@ Completes remaining semantic analysis features before ownership checking.
 - **Unreachable code detection**: `checkBlock` tracks dead-code state — statements after `return`, `raise`, `break`, `continue` flagged as unreachable. Recognizes if/else where both branches exit, exhaustive match with all arms exiting, and infinite loops without break.
 - **Multi-constraint resolution**: `T: A + B` fully supported — `TypeParam.constraints []Type` stores all constraints, `resolveTypeParamConstraints` resolves the full constraint list, `validateConstraints` checks type args against ALL constraints, `AssignableTo` allows TypeParam assignment to any of its constraints.
 - **iter[T] and stream[T] abstract methods**: `iter[T].next() T?` and `stream[T].next() task[T?]` populated via `populateIterStream()` in builtins — enables iteration protocol interface checking.
-- **Use declaration placeholders**: `Module` object type added, `file.Uses` processed in Pass 1 (alias reserved in scope), bare module reference reports "module not loaded" error. Actual module loading deferred to Stage 9.
+- **Use declarations**: `Module` object type added, `file.Uses` processed in Pass 1 (alias reserved in scope). Module scope resolution, qualified access (`mod.func()`, `mod.Type`), visibility enforcement, and local module loading implemented in Stage 9 Phase 1.
 
 ---
 
@@ -213,7 +213,7 @@ Validates and processes built-in meta annotations, wiring them into the type sys
 - **`deprecated` meta**: Stores deprecation messages. Usage warnings emitted when deprecated types, functions, fields, or methods are referenced in expressions.
 - **`test` meta**: Tracks test functions in `Info.Tests` for future `promise test` runner.
 - **Warning system**: `warnf` added to checker for non-fatal diagnostic messages (prefixed with "warning:").
-- **Deferred metas**: `inline`, `packed`, `align`, `extern`, `serializable`, `public`, `unsafe` are validated for target correctness but processing deferred to later stages (codegen/module system).
+- **Deferred metas**: `inline`, `packed`, `align`, `extern`, `serializable`, `unsafe` are validated for target correctness but processing deferred to later stages (codegen/module system). `` `public `` is now processed in Stage 9 (module visibility).
 
 ## Stage 8a — LLVM Codegen: Primitives & Control Flow (Done)
 
@@ -546,15 +546,26 @@ Generator functions: `stream[T]` return type with `yield` statements, compiled t
 
 **Deferred**: `yield*` (delegate to sub-iterator), failable generators (`stream[T]!`), stored generator values (first-class generator variables outside for-in), generator closures (capturing lambdas as generators).
 
-## Stage 9 — Module System (Planned)
+## Stage 9 — Module System (Phase 1 In Progress)
 
-Module resolution and dependency management.
+Module resolution and dependency management. See [module-system-proposal.md](module-system-proposal.md) for the full design.
 
-- URL-based module identity with version in path
-- `use alias "url"` import processing
-- Dependency graph construction from source
-- Flat directory layout (no required `src/`)
-- Cycle detection
+**Phase 1 — Module Boundaries & Local Imports (in progress):**
+
+**Files:** `grammar/PromiseParser.g4` (use decl alts), `internal/module/config.go`, `internal/sema/decl.go`, `internal/sema/expr.go`, `internal/sema/resolve.go`, `internal/sema/export.go`, `ast/decl.go`, `ast/visit_decl.go`, `types/object.go`, `cmd/promise/main.go`, `std/*.pr` (22 files)
+
+- **Grammar**: `useDecl` has two labeled alternatives — `catalogImport` (`use json;` / `use json as j;` / `use json as _;`) and `sourcedImport` (`use parser "url";` / `use _ "url";`). `qualifiedType` alt in `typeRef` for `mod.Type` references.
+- **`promise.toml`**: TOML parser for `[module]`, `[require]`, `[replace]` sections. `promise init` creates the file.
+- **`public` visibility**: Explicit `` `public `` meta annotation on types, enums, functions, fields, and methods. `isObjectExported()` checks Func/Named/Enum exported flags. All 22 `std/*.pr` files annotated with explicit `public` on exported symbols.
+- **Module scope resolution**: `resolveModuleScope()` handles catalog modules (special case for `"std"` → uses built-in `stdScope`), local modules via `moduleScopes` map. `mergeGlobImport()` for `as _` with eager conflict detection, filtering by `public` visibility.
+- **Qualified access**: `resolveModuleMember()` for `mod.func()` calls with visibility enforcement. `resolveStdMember()` shortcut for `std.func()` (works with or without `use std;`). `resolveQualifiedType()` for `mod.Type` in type position (also works for `std.Type` without `use std;`).
+- **Local module loading**: `loadLocalModule()` in `cmd/promise/main.go` — scans use decls for local paths, parses+sema+exports. `ExportedScope()` extracts only `public` symbols. `mergeModuleFiles()` combines multiple `.pr` files in a module dir.
+- **Std as catalog module**: `use std;` / `use std as s;` for qualified access (`std.min()`, `std.int[]`). `use std as _;` is a no-op (std symbols already in scope via parent chain). Unqualified access still works without any `use` statement.
+- **Tests**: 7 std-module sema tests, 26 general module sema tests, 4 ExportedScope tests, 10 module load integration tests, 5 `cmd/promise` integration tests, 6 codegen std tests.
+
+**Still TODO for Phase 1:** codegen for cross-module function calls, multi-module linking.
+
+**Planned phases:** Phase 2 (remote modules, git fetching), Phase 3 (catalog infrastructure), Phase 4 (catalog CI), Phase 5 (tooling)
 
 ## Stage 10 — CLI
 
@@ -627,7 +638,7 @@ The compiler pipeline (Stages 1-8o) is complete for the current feature set. The
 
 | Work | Priority |
 |------|----------|
-| Module system (URL-based imports, dependency graph) — Stage 9 | High |
+| ~~Module system Phase 1 (visibility, qualified access, local modules)~~ — Stage 9 | ~~High~~ In Progress |
 | CLI: `promise fmt` code formatter — Stage 10 | Medium |
 | Package manager (fetch, resolve, lock) — Stage 11 | Medium |
 

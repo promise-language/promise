@@ -22,7 +22,7 @@ func init() {
 
 	// Numeric types: arithmetic + comparison + unary negate + inc/dec
 	for _, name := range []string{"int", "i8", "i16", "i32", "i64", "uint", "u8", "u16", "u32", "u64", "f32", "f64"} {
-		fmt.Fprintf(&b, "type %s `native {\n", name)
+		fmt.Fprintf(&b, "type %s `native `public {\n", name)
 		for _, op := range []string{"+", "-", "*", "/", "%"} {
 			fmt.Fprintf(&b, "\t%s(%s other) %s `native;\n", op, name, name)
 		}
@@ -49,7 +49,7 @@ func init() {
 	}
 
 	// Bool
-	b.WriteString("type bool `native {\n")
+	b.WriteString("type bool `native `public {\n")
 	b.WriteString("\t&&(bool other) bool `native;\n")
 	b.WriteString("\t||(bool other) bool `native;\n")
 	b.WriteString("\t==(bool other) bool `native;\n")
@@ -58,7 +58,7 @@ func init() {
 	b.WriteString("\tget hash int `native;\n}\n")
 
 	// Char
-	b.WriteString("type char `native {\n")
+	b.WriteString("type char `native `public {\n")
 	for _, op := range []string{"==", "!=", "<", ">", "<=", ">="} {
 		fmt.Fprintf(&b, "\t%s(char other) bool `native;\n", op)
 	}
@@ -68,7 +68,7 @@ func init() {
 	b.WriteString("}\n")
 
 	// String (operators + methods)
-	b.WriteString("type string `native {\n\tint len;\n")
+	b.WriteString("type string `native `public {\n\tint len;\n")
 	b.WriteString("\t+(string other) string `native;\n")
 	for _, op := range []string{"==", "!=", "<", ">", "<=", ">="} {
 		fmt.Fprintf(&b, "\t%s(string other) bool `native;\n", op)
@@ -120,7 +120,7 @@ func init() {
 	b.WriteString("\tget is_empty bool => this.len == 0;\n}\n")
 
 	// Containers
-	b.WriteString("type Vector[T] `native {\n\tint len;\n")
+	b.WriteString("type Vector[T] `native `public {\n\tint len;\n")
 	b.WriteString("\tnew(int capacity) `native;\n")
 	b.WriteString("\t[](int index) T `native;\n")
 	b.WriteString("\t[]=(int index, T value) `native;\n")
@@ -157,12 +157,9 @@ func init() {
 	b.WriteString("\tremove(int index) `native;\n")
 	b.WriteString("\tget is_empty bool => this.len == 0;\n}\n")
 
-	b.WriteString(`enum Slot[K, V] {
-	Empty,
-	Tombstone,
-	Used(K key, V value),
-}
-type Map[K: Hashable + Equal, V] {
+	b.WriteString("enum Slot[K, V] `public {\n\tEmpty,\n\tTombstone,\n\tUsed(K key, V value),\n}\n")
+	b.WriteString("type Map[K: Hashable + Equal, V] `public {\n")
+	b.WriteString(`
 	Slot[K, V][] _buckets;
 	int _count;
 	new(~this) {
@@ -321,16 +318,16 @@ type Map[K: Hashable + Equal, V] {
 `)
 
 	// Iterator/Stream
-	b.WriteString("type Iterator[T] `native {\n\tnext() T? `abstract;\n}\n")
-	b.WriteString("type Stream[T] `native {\n\titer() Iterator[T] `abstract;\n}\n")
+	b.WriteString("type Iterator[T] `native `public {\n\tnext() T? `abstract;\n}\n")
+	b.WriteString("type Stream[T] `native `public {\n\titer() Iterator[T] `abstract;\n}\n")
 
 	// Range
-	b.WriteString("type Range `native {\n\tint start `value;\n\tint end `value;\n\tbool inclusive `value;\n}\n")
+	b.WriteString("type Range `native `public {\n\tint start `value;\n\tint end `value;\n\tbool inclusive `value;\n}\n")
 
 	// Constraint interfaces
-	b.WriteString("type Equal `structural {\n\t==(Self other) bool `abstract;\n\t!=(Self other) bool => !(this == other);\n}\n")
-	b.WriteString("type Hashable `structural {\n\tget hash int `abstract;\n}\n")
-	b.WriteString("type Ordered is Equal `structural {\n\t<(Self other) bool `abstract;\n\t>(Self other) bool => other < this;\n\t<=(Self other) bool => !(other < this);\n\t>=(Self other) bool => !(this < other);\n}\n")
+	b.WriteString("type Equal `structural `public {\n\t==(Self other) bool `abstract;\n\t!=(Self other) bool => !(this == other);\n}\n")
+	b.WriteString("type Hashable `structural `public {\n\tget hash int `abstract;\n}\n")
+	b.WriteString("type Ordered is Equal `structural `public {\n\t<(Self other) bool `abstract;\n\t>(Self other) bool => other < this;\n\t<=(Self other) bool => !(other < this);\n\t>=(Self other) bool => !(this < other);\n}\n")
 
 	// Hash implementation (FNV-1a) — used by genNativeHashGetter for int/bool/char types
 	b.WriteString("_fnv1a_hash(int raw_bits) int {\n")
@@ -348,7 +345,15 @@ type Map[K: Hashable + Equal, V] {
 	b.WriteString("\treturn h as! int;\n}\n")
 
 	// Error base type
-	b.WriteString("type error {\n\tstring message;\n}\n")
+	b.WriteString("type error `public {\n\tstring message;\n}\n")
+
+	// IO functions (public)
+	b.WriteString("_print_string(string s) `extern(\"promise_print_string\");\n")
+	b.WriteString("println(string s) `public { _print_string(s); }\n")
+
+	// Math functions (public)
+	b.WriteString("min(int a, int b) int `public {\n\tif a < b { return a; }\n\treturn b;\n}\n")
+	b.WriteString("max(int a, int b) int `public {\n\tif a > b { return a; }\n\treturn b;\n}\n")
 
 	stdAll = b.String()
 }
@@ -7429,4 +7434,119 @@ func TestStructuralFactoryAssignmentViolation(t *testing.T) {
 		}
 	`)
 	expectError(t, errs, "cannot assign")
+}
+
+// --- use std; tests ---
+
+func TestUseStdQualifiedFuncCall(t *testing.T) {
+	checkOK(t, `
+		use std;
+		main() {
+			int x = std.min(1, 2);
+		}
+	`)
+}
+
+func TestUseStdQualifiedTypeRef(t *testing.T) {
+	checkOK(t, `
+		use std;
+		main() {
+			std.int[] v = [];
+		}
+	`)
+}
+
+func TestUseStdWithAlias(t *testing.T) {
+	checkOK(t, `
+		use std as s;
+		main() {
+			int x = s.max(3, 4);
+		}
+	`)
+}
+
+func TestUseStdPrivateMemberDenied(t *testing.T) {
+	errs := checkErrs(t, `
+		use std;
+		main() {
+			std._print_string("hi");
+		}
+	`)
+	expectError(t, errs, "private to module")
+}
+
+func TestUseStdGlobNoop(t *testing.T) {
+	// use std as _ is a no-op; std symbols are already in scope
+	checkOK(t, `
+		use std as _;
+		main() {
+			int x = min(1, 2);
+		}
+	`)
+}
+
+func TestUseStdUnqualifiedStillWorks(t *testing.T) {
+	// Even with use std;, unqualified access via parent scope chain still works
+	checkOK(t, `
+		use std;
+		main() {
+			int x = min(1, 2);
+		}
+	`)
+}
+
+func TestUseStdNoSuchMember(t *testing.T) {
+	errs := checkErrs(t, `
+		use std;
+		main() {
+			std.nonexistent();
+		}
+	`)
+	expectError(t, errs, "has no member")
+}
+
+func TestUseStdAliasQualifiedType(t *testing.T) {
+	checkOK(t, `
+		use std as s;
+		main() {
+			s.int[] v = [];
+		}
+	`)
+}
+
+func TestUseStdAliasPrivateDenied(t *testing.T) {
+	errs := checkErrs(t, `
+		use std as s;
+		main() {
+			s._print_string("hi");
+		}
+	`)
+	expectError(t, errs, "private to module")
+}
+
+func TestStdQualifiedFuncWithoutUse(t *testing.T) {
+	// std.min() works without "use std;" via checkMemberExpr shortcut
+	checkOK(t, `
+		main() {
+			int x = std.min(1, 2);
+		}
+	`)
+}
+
+func TestStdQualifiedTypeWithoutUse(t *testing.T) {
+	// std.int[] works without "use std;" via resolveQualifiedType shortcut
+	checkOK(t, `
+		main() {
+			std.int[] v = [];
+		}
+	`)
+}
+
+func TestStdQualifiedConstructorCall(t *testing.T) {
+	checkOK(t, `
+		use std;
+		main() {
+			std.Range r = std.Range(start: 0, end: 10, inclusive: false);
+		}
+	`)
 }

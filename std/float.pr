@@ -1,5 +1,5 @@
 // std/float.pr — Floating-point types with arithmetic, comparison, and unary operators
-type f32 `native {
+type f32 `native `public {
     +(f32 other) f32 `native;
     -(f32 other) f32 `native;
     *(f32 other) f32 `native;
@@ -17,7 +17,7 @@ type f32 `native {
     get hash int `native;
 }
 
-type f64 `native {
+type f64 `native `public {
     +(f64 other) f64 `native;
     -(f64 other) f64 `native;
     *(f64 other) f64 `native;

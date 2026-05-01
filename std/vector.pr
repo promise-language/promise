@@ -1,5 +1,5 @@
 // std/vector.pr — Vector[T] type methods
-type Vector[T] `native {
+type Vector[T] `native `public {
     int len;
 
     new(int capacity) `native;

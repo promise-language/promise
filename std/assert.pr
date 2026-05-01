@@ -1,7 +1,7 @@
 // std/assert.pr — Assertion utilities
 _panic_msg(string msg) `extern("promise_panic_msg");
 
-assert(bool cond, string msg) {
+assert(bool cond, string msg) `public {
   if !cond {
     _panic_msg(msg);
   }

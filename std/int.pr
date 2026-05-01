@@ -1,5 +1,5 @@
 // std/int.pr — Signed integer types with arithmetic, comparison, bitwise, and unary operators
-type int `native {
+type int `native `public {
     +(int other) int `native;
     -(int other) int `native;
     *(int other) int `native;
@@ -25,7 +25,7 @@ type int `native {
     get hash int `native;
 }
 
-type i8 `native {
+type i8 `native `public {
     +(i8 other) i8 `native;
     -(i8 other) i8 `native;
     *(i8 other) i8 `native;
@@ -51,7 +51,7 @@ type i8 `native {
     get hash int `native;
 }
 
-type i16 `native {
+type i16 `native `public {
     +(i16 other) i16 `native;
     -(i16 other) i16 `native;
     *(i16 other) i16 `native;
@@ -77,7 +77,7 @@ type i16 `native {
     get hash int `native;
 }
 
-type i32 `native {
+type i32 `native `public {
     +(i32 other) i32 `native;
     -(i32 other) i32 `native;
     *(i32 other) i32 `native;
@@ -103,7 +103,7 @@ type i32 `native {
     get hash int `native;
 }
 
-type i64 `native {
+type i64 `native `public {
     +(i64 other) i64 `native;
     -(i64 other) i64 `native;
     *(i64 other) i64 `native;

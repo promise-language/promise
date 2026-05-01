@@ -1,5 +1,5 @@
 // std/string.pr — String type with operators and methods
-type string `native {
+type string `native `public {
     int len;
 
     +(string other) string `native;

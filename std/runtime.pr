@@ -5,7 +5,7 @@ _set_max_procs(int n) int `extern("promise_set_maxprocs");
 // set_max_procs sets the maximum number of CPUs that can execute simultaneously.
 // It returns the previous setting. If n <= 0, it returns the current setting
 // without changing it.
-set_max_procs(int n) int {
+set_max_procs(int n) int `public {
   return _set_max_procs(n);
 }
 
@@ -16,13 +16,13 @@ _sched_ctx_switches() int `extern("promise_sched_ctx_switches");
 _sched_steals() int `extern("promise_sched_steals");
 
 // goroutines_created returns the total number of goroutines created.
-goroutines_created() int { return _sched_gs_created(); }
+goroutines_created() int `public { return _sched_gs_created(); }
 
 // goroutines_completed returns the total number of goroutines completed.
-goroutines_completed() int { return _sched_gs_completed(); }
+goroutines_completed() int `public { return _sched_gs_completed(); }
 
 // context_switches returns the total number of context switches.
-context_switches() int { return _sched_ctx_switches(); }
+context_switches() int `public { return _sched_ctx_switches(); }
 
 // work_steals returns the total number of work-stealing events.
-work_steals() int { return _sched_steals(); }
+work_steals() int `public { return _sched_steals(); }

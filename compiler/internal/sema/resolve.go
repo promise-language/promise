@@ -177,19 +177,24 @@ func (c *Checker) resolveNamedType(r *ast.NamedTypeRef) types.Type {
 // resolveQualifiedType resolves a module-qualified type reference like mod.Type or mod.Type[T].
 func (c *Checker) resolveQualifiedType(r *ast.QualifiedTypeRef) types.Type {
 	// Look up the module object
+	var scope *types.Scope
 	obj := c.lookup(r.Module)
-	if obj == nil {
+	if obj != nil {
+		mod, ok := obj.(*types.Module)
+		if !ok {
+			c.errorf(r.Pos(), "%s is not a module", r.Module)
+			return nil
+		}
+		scope = mod.Scope()
+		if scope == nil {
+			c.errorf(r.Pos(), "module '%s' has no loaded scope", r.Module)
+			return nil
+		}
+	} else if r.Module == "std" && c.stdScope != nil {
+		// Handle std.Type without "use std;" — consistent with checkMemberExpr shortcut
+		scope = c.stdScope
+	} else {
 		c.errorf(r.Pos(), "undefined module: %s", r.Module)
-		return nil
-	}
-	mod, ok := obj.(*types.Module)
-	if !ok {
-		c.errorf(r.Pos(), "%s is not a module", r.Module)
-		return nil
-	}
-	scope := mod.Scope()
-	if scope == nil {
-		c.errorf(r.Pos(), "module '%s' has no loaded scope", r.Module)
 		return nil
 	}
 

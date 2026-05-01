@@ -1769,7 +1769,7 @@ func (c *Checker) checkUnsafeExpr(e *ast.UnsafeExpr) types.Type {
 }
 
 // resolveStdMember handles std.X expressions by looking up X in the std scope.
-// TODO: test std.X used as a value expression (not a callee) when first-class functions are supported
+// Checks visibility: only `public symbols are accessible via std.X.
 func (c *Checker) resolveStdMember(e *ast.MemberExpr) types.Type {
 	if c.stdScope == nil {
 		c.errorf(e.Pos(), "std library is not available")
@@ -1778,6 +1778,10 @@ func (c *Checker) resolveStdMember(e *ast.MemberExpr) types.Type {
 	obj := c.stdScope.Lookup(e.Field)
 	if obj == nil {
 		c.errorf(e.Pos(), "std has no member '%s'", e.Field)
+		return nil
+	}
+	if !isObjectExported(obj) {
+		c.errorf(e.Pos(), "'%s' is private to module 'std'", e.Field)
 		return nil
 	}
 	return obj.Type()

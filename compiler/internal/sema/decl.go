@@ -59,6 +59,13 @@ func (c *Checker) declare(file *ast.File) {
 
 // resolveModuleScope looks up the module's scope from pre-loaded moduleScopes.
 func (c *Checker) resolveModuleScope(u *ast.UseDecl, mod *types.Module) {
+	// Special case: "std" catalog module uses the built-in stdScope.
+	// stdScope is a live reference populated during the declare pass,
+	// so by the time qualified lookups happen (define/check), it's full.
+	if mod.CatalogName() == "std" {
+		mod.SetScope(c.stdScope)
+		return
+	}
 	if c.moduleScopes == nil {
 		return
 	}
@@ -260,6 +267,9 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 			named.SetHasNew(true)
 		}
 		c.validateMetas(d.Annotations, TargetType)
+		if c.hasAnnotation(d.Annotations, "public") {
+			named.SetExported(true)
+		}
 		return
 	}
 

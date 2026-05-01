@@ -6,7 +6,7 @@ _print_bool(bool x) `extern("promise_print_bool");
 _print_string(string s) `extern("promise_print_string");
 
 // Public API
-print_int(int x) { _print_int(x); }
-print_f64(f64 x) { _print_f64(x); }
-print_bool(bool x) { _print_bool(x); }
-println(string s) { _print_string(s); }
+print_int(int x) `public { _print_int(x); }
+print_f64(f64 x) `public { _print_f64(x); }
+print_bool(bool x) `public { _print_bool(x); }
+println(string s) `public { _print_string(s); }

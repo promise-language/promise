@@ -1,5 +1,5 @@
 // std/char.pr — Character type with equality and comparison operators
-type char `native {
+type char `native `public {
     ==(char other) bool `native;
     !=(char other) bool `native;
     <(char other) bool `native;

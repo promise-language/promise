@@ -4947,6 +4947,118 @@ func TestStructuralSatisfactionWithoutMetaFails(t *testing.T) {
 	}
 }
 
+func TestStructuralAdapterExtraOptionalParam(t *testing.T) {
+	ir := generateIR(t, `
+		type Printable `+"`"+`structural {
+			print() string `+"`"+`abstract;
+		}
+		type Doc {
+			print(int? indent) string { return "doc"; }
+		}
+		main() {
+			Printable p = Doc();
+			string s = p.print();
+		}
+	`)
+	// Adapter thunk should be generated
+	assertContains(t, ir, "Doc.print$view_adapt")
+	assertContains(t, ir, "@promise_vtable_Doc_as_Printable")
+}
+
+func TestStructuralAdapterNonFailableToFailable(t *testing.T) {
+	ir := generateIR(t, `
+		type Processor `+"`"+`structural {
+			process(int x) int! `+"`"+`abstract;
+		}
+		type Simple {
+			process(int x) int { return x; }
+		}
+		main() {
+			Processor p = Simple();
+		}
+	`)
+	assertContains(t, ir, "Simple.process$view_adapt")
+}
+
+func TestStructuralAdapterNonOptionalToOptionalReturn(t *testing.T) {
+	ir := generateIR(t, `
+		type Finder `+"`"+`structural {
+			find() int? `+"`"+`abstract;
+		}
+		type Always {
+			find() int { return 42; }
+		}
+		main() {
+			Finder f = Always();
+		}
+	`)
+	assertContains(t, ir, "Always.find$view_adapt")
+}
+
+func TestOptionalParamWrapping(t *testing.T) {
+	ir := generateIR(t, `
+		foo(int? x) int {
+			if x is present { return x; }
+			return 0;
+		}
+		main() {
+			int r = foo(4);
+		}
+	`)
+	// The call to foo(4) should pass {i1, i64} not bare i64
+	assertContains(t, ir, "call i64 @foo({ i1, i64 }")
+	assertNotContains(t, ir, "call i64 @foo(i64 ")
+}
+
+func TestOptionalParamOmittedNoneZeroinit(t *testing.T) {
+	ir := generateIR(t, `
+		foo(int? x) int {
+			if x is present { return x; }
+			return 0;
+		}
+		main() {
+			int r = foo();
+		}
+	`)
+	// Omitted optional param should pass {i1, i64} zeroinitializer, not bare i1 false
+	assertContains(t, ir, "call i64 @foo({ i1, i64 }")
+	assertNotContains(t, ir, "call i64 @foo(i1 ")
+}
+
+func TestOptionalParamWrappingMethodCall(t *testing.T) {
+	ir := generateIR(t, `
+		type Calc {
+			add(int? bonus) int {
+				if bonus is present { return bonus; }
+				return 0;
+			}
+		}
+		main() {
+			Calc c = Calc();
+			int r = c.add(bonus: 10);
+		}
+	`)
+	// Method call should wrap 10 as {i1, i64}
+	assertContains(t, ir, "call i64 @Calc.add(i8*")
+	assertNotContains(t, ir, "call i64 @Calc.add(i8*, i64 ")
+}
+
+func TestOptionalParamWrappingConstructor(t *testing.T) {
+	ir := generateIR(t, `
+		type Widget {
+			int value;
+			new(~this, int? v) {
+				if v is present { this.value = v; }
+			}
+		}
+		main() {
+			Widget w = Widget(v: 5);
+		}
+	`)
+	// Constructor new() call should wrap 5 as {i1, i64}
+	assertContains(t, ir, "{ i1, i64 }")
+}
+
 func TestReturnCoercionSecondParent(t *testing.T) {
 	ir := generateIR(t, `
 		type Speakable {

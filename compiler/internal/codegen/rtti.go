@@ -240,7 +240,16 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named) *ir.Global {
 		ownerName := c.resolveMethodOwner(concrete, m.Name())
 		mangledName := mangleMethodName(ownerName, m.Name(), m.IsSetter())
 		if fn, ok := c.funcs[mangledName]; ok {
-			entries = append(entries, constant.NewBitCast(fn, irtypes.I8Ptr))
+			// Check if the concrete method signature differs from the interface method
+			// (extra optional/default params, non-failable→failable, T→T? return).
+			// If so, generate an adapter thunk with the interface's signature.
+			concreteMethod := c.lookupAnyMethod(concrete, m.Name(), m.IsGetter(), m.IsSetter())
+			if concreteMethod != nil && needsViewAdapter(concreteMethod.Sig(), m.Sig()) {
+				adapter := c.emitViewMethodAdapter(concrete, concreteMethod, m, fn)
+				entries = append(entries, constant.NewBitCast(adapter, irtypes.I8Ptr))
+			} else {
+				entries = append(entries, constant.NewBitCast(fn, irtypes.I8Ptr))
+			}
 		} else {
 			entries = append(entries, constant.NewNull(irtypes.I8Ptr))
 		}
@@ -252,6 +261,168 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named) *ir.Global {
 	global.Immutable = true
 	c.viewVtables[key] = global
 	return global
+}
+
+// needsViewAdapter reports whether the concrete method's signature differs from
+// the interface method's in ways that require an adapter thunk in the vtable:
+//   - concrete has more params than iface (extra optional/default params)
+//   - concrete is non-failable but iface is failable
+//   - concrete returns T but iface returns T?
+func needsViewAdapter(concrete, iface *types.Signature) bool {
+	if len(concrete.Params()) != len(iface.Params()) {
+		return true
+	}
+	if !concrete.CanError() && iface.CanError() {
+		return true
+	}
+	if concrete.Result() != nil && iface.Result() != nil {
+		if !types.Identical(concrete.Result(), iface.Result()) {
+			return true
+		}
+	}
+	return false
+}
+
+// emitViewMethodAdapter generates a thunk function with the interface method's LLVM
+// signature that forwards to the concrete method, supplying default values for extra
+// params and wrapping the return if needed (non-failable→failable, T→T?).
+func (c *Compiler) emitViewMethodAdapter(
+	concreteType *types.Named,
+	concreteMethod, ifaceMethod *types.Method,
+	concreteFn *ir.Func,
+) *ir.Func {
+	ifaceSig := ifaceMethod.Sig()
+	concreteSig := concreteMethod.Sig()
+
+	// Build adapter function type matching the interface method's signature
+	adapterName := fmt.Sprintf("%s.%s$view_adapt", concreteType.Obj().Name(), ifaceMethod.Name())
+
+	var params []*ir.Param
+	if ifaceSig.Recv() != nil {
+		params = append(params, ir.NewParam("this", irtypes.I8Ptr))
+	}
+	for i, p := range ifaceSig.Params() {
+		params = append(params, ir.NewParam(fmt.Sprintf("p%d", i), c.resolveType(p.Type())))
+	}
+
+	ifaceRetType := irtypes.Type(irtypes.Void)
+	if ifaceSig.Result() != nil {
+		ifaceRetType = c.resolveType(ifaceSig.Result())
+	}
+	if ifaceSig.CanError() {
+		ifaceRetType = computeResultType(ifaceRetType)
+	}
+
+	fn := c.module.NewFunc(adapterName, ifaceRetType, params...)
+
+	// Save compiler state
+	saved := c.saveState()
+	defer c.restoreState(saved)
+
+	c.fn = fn
+	c.locals = make(map[string]*ir.InstAlloca)
+	c.localNameCount = make(map[string]int)
+
+	entry := fn.NewBlock("entry")
+	c.block = entry
+	c.entryBlock = entry
+
+	// Build arguments for the concrete method call
+	var args []value.Value
+	paramIdx := 0
+
+	// Forward receiver
+	if concreteSig.Recv() != nil {
+		args = append(args, params[paramIdx])
+		paramIdx++
+	}
+
+	// Forward interface params
+	for i := 0; i < len(ifaceSig.Params()); i++ {
+		args = append(args, params[paramIdx])
+		paramIdx++
+	}
+
+	// Supply defaults for extra concrete params
+	for i := len(ifaceSig.Params()); i < len(concreteSig.Params()); i++ {
+		p := concreteSig.Params()[i]
+		pType := c.resolveType(p.Type())
+
+		if p.HasDefault() {
+			// Compile the default expression
+			if defExpr, ok := c.info.ParamDefaults[p]; ok {
+				args = append(args, c.genExpr(defExpr))
+				continue
+			}
+		}
+		// Optional type or fallback: pass zeroinitializer (none)
+		args = append(args, constant.NewZeroInitializer(pType))
+	}
+
+	// Call the concrete method
+	result := c.block.NewCall(concreteFn, args...)
+
+	// Handle return type adaptation
+	concreteCanError := concreteSig.CanError()
+	ifaceCanError := ifaceSig.CanError()
+	concreteResult := concreteSig.Result()
+	ifaceResult := ifaceSig.Result()
+
+	// Check if we need optional wrapping (T → T?)
+	needsOptWrap := false
+	if concreteResult != nil && ifaceResult != nil {
+		if _, isOpt := ifaceResult.(*types.Optional); isOpt {
+			if !types.Identical(concreteResult, ifaceResult) {
+				needsOptWrap = true
+			}
+		}
+	}
+
+	if !concreteCanError && ifaceCanError {
+		// Non-failable → failable: wrap result as success {i1 false, T, i8* null}
+		var innerVal value.Value
+		if concreteResult == nil {
+			// void → void!: just {i1 false, i8* null}
+			innerVal = nil
+		} else if needsOptWrap {
+			// T → T?!: wrap T as some(T) first, then as success
+			innerVal = c.wrapSome(result, c.resolveType(concreteResult))
+		} else {
+			innerVal = result
+		}
+		retVal := c.wrapSuccessResult(innerVal, ifaceRetType.(*irtypes.StructType))
+		c.block.NewRet(retVal)
+	} else if needsOptWrap {
+		// T → T?: wrap as some(T)
+		optVal := c.wrapSome(result, c.resolveType(concreteResult))
+		c.block.NewRet(optVal)
+	} else if concreteResult == nil {
+		c.block.NewRet(nil)
+	} else {
+		c.block.NewRet(result)
+	}
+
+	return fn
+}
+
+// wrapSome wraps a value T as some(T) = {i1 true, T}.
+func (c *Compiler) wrapSome(val value.Value, innerType irtypes.Type) value.Value {
+	optType := irtypes.NewStruct(irtypes.I1, innerType)
+	optVal := constant.NewZeroInitializer(optType)
+	tmp := c.block.NewInsertValue(optVal, constant.True, 0)
+	return c.block.NewInsertValue(tmp, val, 1)
+}
+
+// wrapSuccessResult wraps a value as a failable success: {i1 false, T, i8* null}.
+// For void results (innerVal == nil), produces {i1 false, i8* null}.
+func (c *Compiler) wrapSuccessResult(innerVal value.Value, resultType *irtypes.StructType) value.Value {
+	result := constant.NewZeroInitializer(resultType)
+	// i1 false is already zero-initialized
+	if innerVal != nil {
+		tmp := c.block.NewInsertValue(result, innerVal, 1)
+		return c.block.NewInsertValue(tmp, constant.NewNull(irtypes.I8Ptr), uint64(len(resultType.Fields)-1))
+	}
+	return c.block.NewInsertValue(result, constant.NewNull(irtypes.I8Ptr), uint64(len(resultType.Fields)-1))
 }
 
 // isInFirstParentChain returns true if target is reachable from concrete
@@ -304,8 +475,9 @@ func (c *Compiler) coerceToView(val value.Value, fromType, toType types.Type) va
 	return c.block.NewInsertValue(val, vtablePtr, 0)
 }
 
-// coerceCallArgs applies coerceToView to each argument whose type differs from the
-// parameter type. Returns a new slice (or the original if no coercion was needed).
+// coerceCallArgs applies optional wrapping (T→T?) and view coercion to each
+// argument whose type differs from the parameter type.
+// Returns a new slice (or the original if no coercion was needed).
 func (c *Compiler) coerceCallArgs(argVals []value.Value, argTypes []types.Type, params []*types.Param) []value.Value {
 	n := len(params)
 	if n > len(argVals) {
@@ -314,7 +486,34 @@ func (c *Compiler) coerceCallArgs(argVals []value.Value, argTypes []types.Type, 
 	coerced := false
 	result := argVals
 	for i := 0; i < n; i++ {
-		v := c.coerceToView(argVals[i], argTypes[i], params[i].Type())
+		v := argVals[i]
+
+		// Optional wrapping: param is T? but arg is not optional
+		paramType := params[i].Type()
+		if c.typeSubst != nil {
+			paramType = types.Substitute(paramType, c.typeSubst)
+		}
+		if _, isOpt := paramType.(*types.Optional); isOpt {
+			argType := argTypes[i]
+			if c.typeSubst != nil && argType != nil {
+				argType = types.Substitute(argType, c.typeSubst)
+			}
+			_, argIsOpt := argType.(*types.Optional)
+			if !argIsOpt {
+				lt := c.resolveType(paramType)
+				if xn, ok := argType.(*types.Named); ok && xn == types.TypNone {
+					// none → T?: produce zeroinitializer
+					v = c.zeroValue(lt)
+				} else if st, ok := lt.(*irtypes.StructType); ok {
+					// T → T?: wrap as some
+					v = c.wrapOptional(v, st)
+				}
+			}
+		}
+
+		// View coercion (structural interface vtable swap)
+		v = c.coerceToView(v, argTypes[i], params[i].Type())
+
 		if v != argVals[i] && !coerced {
 			// Lazily copy so we don't allocate when no coercion is needed
 			coerced = true

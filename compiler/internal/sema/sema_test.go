@@ -4595,6 +4595,166 @@ func TestStructuralSatisfactionSignatureMismatchFails(t *testing.T) {
 	expectError(t, errs, "cannot assign")
 }
 
+// --- Relaxed structural satisfaction ---
+
+func TestStructuralExtraOptionalParam(t *testing.T) {
+	checkOK(t, `
+		type Printable `+"`structural"+` {
+			print() string `+"`abstract;"+`
+		}
+		type Doc {
+			print(int? indent) string { return "doc"; }
+		}
+		main() {
+			Printable p = Doc();
+		}
+	`)
+}
+
+func TestStructuralExtraDefaultedParam(t *testing.T) {
+	checkOK(t, `
+		type Printable `+"`structural"+` {
+			print() string `+"`abstract;"+`
+		}
+		type Doc {
+			print(int indent = 2) string { return "doc"; }
+		}
+		main() {
+			Printable p = Doc();
+		}
+	`)
+}
+
+func TestStructuralExtraRequiredParamFails(t *testing.T) {
+	errs := checkErrs(t, `
+		type Printable `+"`structural"+` {
+			print() string `+"`abstract;"+`
+		}
+		type Doc {
+			print(int indent) string { return "doc"; }
+		}
+		main() {
+			Printable p = Doc();
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+func TestStructuralNonFailableSatisfiesFailable(t *testing.T) {
+	checkOK(t, `
+		type Processor `+"`structural"+` {
+			process(int x) int! `+"`abstract;"+`
+		}
+		type Simple {
+			process(int x) int { return x; }
+		}
+		main() {
+			Processor p = Simple();
+		}
+	`)
+}
+
+func TestStructuralFailableDoesNotSatisfyNonFailable(t *testing.T) {
+	errs := checkErrs(t, `
+		type Processor `+"`structural"+` {
+			process(int x) int `+"`abstract;"+`
+		}
+		type Risky {
+			process(int x) int! { return x; }
+		}
+		main() {
+			Processor p = Risky();
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+func TestStructuralNonOptionalReturnSatisfiesOptional(t *testing.T) {
+	checkOK(t, `
+		type Finder `+"`structural"+` {
+			find() int? `+"`abstract;"+`
+		}
+		type Always {
+			find() int { return 42; }
+		}
+		main() {
+			Finder f = Always();
+		}
+	`)
+}
+
+func TestStructuralOptionalReturnDoesNotSatisfyNonOptional(t *testing.T) {
+	errs := checkErrs(t, `
+		type Finder `+"`structural"+` {
+			find() int `+"`abstract;"+`
+		}
+		type Maybe {
+			find() int? { return 42; }
+		}
+		main() {
+			Finder f = Maybe();
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+func TestStructuralMultipleExtraOptionalParams(t *testing.T) {
+	checkOK(t, `
+		type Runnable `+"`structural"+` {
+			run() int `+"`abstract;"+`
+		}
+		type Worker {
+			run(int? priority, int? retries) int { return 1; }
+		}
+		main() {
+			Runnable r = Worker();
+		}
+	`)
+}
+
+func TestStructuralMultipleExtraDefaultedParams(t *testing.T) {
+	checkOK(t, `
+		type Runnable `+"`structural"+` {
+			run() int `+"`abstract;"+`
+		}
+		type Worker {
+			run(int priority = 5, int retries = 3) int { return 1; }
+		}
+		main() {
+			Runnable r = Worker();
+		}
+	`)
+}
+
+func TestStructuralMixedExtraParams(t *testing.T) {
+	checkOK(t, `
+		type Runnable `+"`structural"+` {
+			run() int `+"`abstract;"+`
+		}
+		type Worker {
+			run(int? priority, int retries = 3) int { return 1; }
+		}
+		main() {
+			Runnable r = Worker();
+		}
+	`)
+}
+
+func TestStructuralMultipleExtraOneRequiredFails(t *testing.T) {
+	errs := checkErrs(t, `
+		type Runnable `+"`structural"+` {
+			run() int `+"`abstract;"+`
+		}
+		type Worker {
+			run(int? priority, int retries) int { return 1; }
+		}
+		main() {
+			Runnable r = Worker();
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
 // --- Stage 9: Reserved std name tests ---
 
 func TestReservedStdNameFunc(t *testing.T) {

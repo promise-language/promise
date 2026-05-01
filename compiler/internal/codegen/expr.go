@@ -845,17 +845,21 @@ func (c *Compiler) genSuperCall(e *ast.CallExpr) value.Value {
 			panic(fmt.Sprintf("codegen: undeclared parent constructor %s", mangledName))
 		}
 
-		args := []value.Value{thisPtr}
+		var argVals []value.Value
+		var argTypes []types.Type
 		for _, arg := range e.Args {
-			args = append(args, c.genExpr(arg.Value))
+			argVals = append(argVals, c.genExpr(arg.Value))
+			argTypes = append(argTypes, c.info.Types[arg.Value])
 			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 				c.clearDropFlag(ident.Name)
 			}
 		}
-		result := c.block.NewCall(fn, args...)
-
-		// If parent new is failable, propagate the error
 		newMethod := parent.LookupMethod("new")
+		if newMethod != nil {
+			argVals = c.coerceCallArgs(argVals, argTypes, newMethod.Sig().Params())
+		}
+		args := append([]value.Value{thisPtr}, argVals...)
+		result := c.block.NewCall(fn, args...)
 		if newMethod != nil && newMethod.Sig().CanError() {
 			tag := c.block.NewExtractValue(result, 0)
 			errBlock := c.newBlock("super.err")
@@ -974,17 +978,26 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 		if !ok {
 			panic(fmt.Sprintf("codegen: undeclared new() for type %s (mangled: %s)", typ, mangledName))
 		}
-		args := []value.Value{typedPtr}
+		var argVals []value.Value
+		var argTypes []types.Type
 		for _, arg := range e.Args {
-			args = append(args, c.genExpr(arg.Value))
+			argVals = append(argVals, c.genExpr(arg.Value))
+			argTypes = append(argTypes, c.info.Types[arg.Value])
 			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 				c.clearDropFlag(ident.Name)
 			}
 		}
+		newMethod := named.LookupMethod("new")
+		if newMethod != nil {
+			argVals = c.coerceCallArgs(argVals, argTypes, newMethod.Sig().Params())
+		}
+		args := append([]value.Value{typedPtr}, argVals...)
 		newResult := c.block.NewCall(fn, args...)
 
 		// If failable new, check error and wrap result
-		newMethod := named.LookupMethod("new")
+		if newMethod == nil {
+			newMethod = named.LookupMethod("new")
+		}
 		if newMethod != nil && newMethod.Sig().CanError() {
 			// new() returned { i1, i8* } — check tag
 			newResultType := newResult.Type().(*irtypes.StructType)

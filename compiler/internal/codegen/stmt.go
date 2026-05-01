@@ -192,7 +192,11 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	// Coerce value struct vtable when crossing type boundaries (e.g. Dog → Animal)
 	coerceTarget := declType
 	if coerceTarget == nil {
-		// For non-Optional typed declarations, look up the declared type from sema scopes
+		// Resolve declared type from the AST TypeRef (handles non-optional typed decls)
+		coerceTarget = c.resolveTypeRefToType(s.Type)
+	}
+	if coerceTarget == nil {
+		// Final fallback: look up the declared type from sema scopes
 		coerceTarget = c.lookupVarType(s.Name)
 	}
 	if coerceTarget != nil {

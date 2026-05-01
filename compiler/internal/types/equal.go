@@ -258,15 +258,21 @@ func Implements(x Type, iface *Named) bool {
 	}
 }
 
-// identicalSignaturesWithSelf compares two signatures, treating occurrences of
-// the `self` type in the interface signature as equal to the `replacement` type
-// in the concrete signature. This enables structural interface satisfaction where
-// Self-typed parameters match the implementing type.
+// identicalSignaturesWithSelf compares two signatures for structural interface
+// satisfaction, treating occurrences of the `self` type in the interface signature
+// as equal to the `replacement` type in the concrete signature.
+//
+// Relaxed matching rules (concrete may be more specific than interface):
+//   - Extra params: concrete may have more params if all extras have defaults or are optional types
+//   - Failable: non-failable concrete satisfies failable interface (but not vice versa)
+//   - Optional return: concrete returning T satisfies interface returning T? (but not vice versa)
 func identicalSignaturesWithSelf(concrete, iface *Signature, self, replacement *Named) bool {
-	if len(concrete.params) != len(iface.params) {
+	// Concrete must have at least as many params as the interface requires
+	if len(concrete.params) < len(iface.params) {
 		return false
 	}
-	for i := range concrete.params {
+	// Required params (those declared in the interface) must match exactly
+	for i := range iface.params {
 		if concrete.params[i].ref != iface.params[i].ref {
 			return false
 		}
@@ -274,16 +280,36 @@ func identicalSignaturesWithSelf(concrete, iface *Signature, self, replacement *
 			return false
 		}
 	}
-	if concrete.canError != iface.canError {
+	// Extra concrete params must all be omittable (have default or be optional type)
+	for i := len(iface.params); i < len(concrete.params); i++ {
+		if concrete.params[i].HasDefault() {
+			continue
+		}
+		if _, isOpt := concrete.params[i].typ.(*Optional); isOpt {
+			continue
+		}
 		return false
 	}
+	// Failable: non-failable concrete can satisfy failable interface,
+	// but failable concrete cannot satisfy non-failable interface.
+	if concrete.canError && !iface.canError {
+		return false
+	}
+	// Return type
 	if concrete.result == nil && iface.result == nil {
 		return true
 	}
 	if concrete.result == nil || iface.result == nil {
 		return false
 	}
-	return identicalWithSelf(concrete.result, iface.result, self, replacement)
+	if identicalWithSelf(concrete.result, iface.result, self, replacement) {
+		return true
+	}
+	// Non-optional concrete return satisfies optional interface return: T matches T?
+	if ifaceOpt, ok := iface.result.(*Optional); ok {
+		return identicalWithSelf(concrete.result, ifaceOpt.Elem(), self, replacement)
+	}
+	return false
 }
 
 // identicalWithSelf is like Identical but treats the interface type (self) as

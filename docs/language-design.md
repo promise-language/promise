@@ -1748,6 +1748,8 @@ m := Wrapper[string].defaultCount();
 
 **Note:** The name `new` is reserved for explicit constructors (see Section 5.7). Global/mono methods that create instances should use descriptive names like `create`, `from`, or `empty`. Factory constructors (`` `factory ``) use `` `mono `` (variant) placement instead of `` `global `` — see Section 5.7.
 
+**Future: Data Placement** — `` `global `` and `` `mono `` can also apply to fields, enabling type-scoped or monomorphization-scoped shared data (e.g., `int instanceCount `global` or `string typeName `mono`). This is deferred pending mixed-placement codegen support.
+
 ### 9.3 Named Arguments, Defaults & Optional Parameters
 
 #### Definition Syntax

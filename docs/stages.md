@@ -570,7 +570,7 @@ Types where ALL fields have `` `value `` placement behave like primitives: data 
 
 **Generic value types**: Supported via monomorphization (`computeMonoValueTypeLayout` in `mono.go`). `Range[T]` is the first generic value type — `Range[int]`, `Range[char]`, `Range[uint]`, etc. are monomorphized with correct field types.
 
-**Deferred**: Structural interface coercion (stack boxing), mixed `value`+instance field placements, `variant`/`type` field placements.
+**Deferred**: Structural interface coercion (stack boxing), mixed `value`+instance field placements, `variant`/`type` field placements, `global`/`mono` data placement on fields.
 
 ## Yield Generators (Done)
 
@@ -823,7 +823,7 @@ Known gaps and improvements deferred from completed stages.
 | Failable extern functions (C ABI for errors) | 8e | Low |
 | Type argument inference (explicit type args only currently) | 8f | Low |
 | Extern ABI for generic types | 8f | Low |
-| Non-instance field placements: mixed `value`+instance, `variant`, `type` | 8c | Low |
+| Non-instance field placements: mixed `value`+instance, `variant`/`type` fields, `global`/`mono` data placement | 8c | Low |
 | Value type structural interface coercion (stack boxing) | 8p | Low |
 | ~~Generic value types~~ — **Done.** `computeMonoValueTypeLayout` in `mono.go`. `Range[T]` is the first generic value type. | 8p | ~~Low~~ Resolved |
 | User type `format(Writer ~w)` for interpolation (desugar `"${x}"` to `x.format(~builder)`) | 8h | Low |

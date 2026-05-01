@@ -9,6 +9,7 @@ import (
 	"github.com/antlr4-go/antlr/v4"
 
 	"djabi.dev/go/promise_lang/internal/ast"
+	"djabi.dev/go/promise_lang/internal/module"
 	"djabi.dev/go/promise_lang/internal/parser"
 	"djabi.dev/go/promise_lang/internal/sema"
 )
@@ -742,13 +743,26 @@ func testStdFiles(t *testing.T) []*ast.File {
 
 // testModuleLoader creates a moduleLoader for use in tests.
 func testModuleLoader(projectDir string, stdFiles []*ast.File) *moduleLoader {
+	return testModuleLoaderWithConfig(projectDir, stdFiles, nil)
+}
+
+func testModuleLoaderWithConfig(projectDir string, stdFiles []*ast.File, cfg *module.Config) *moduleLoader {
+	commitPins := make(map[string]string)
+	if cfg != nil {
+		for url, pin := range cfg.Require {
+			commitPins[module.NormalizeURL(url)] = pin
+		}
+	}
 	return &moduleLoader{
 		projectRoot:    projectDir,
 		stdFiles:       stdFiles,
+		projectCfg:     cfg,
 		loaded:         make(map[string]*sema.ModuleInfo),
 		canonicalNames: make(map[string]string),
 		visiting:       make(map[string]string),
 		allModInfos:    make(map[string]*sema.ModuleInfo),
+		remoteResolved: make(map[string]string),
+		commitPins:     commitPins,
 	}
 }
 
@@ -1267,6 +1281,327 @@ func TestLoadModuleDuplicateCanonicalName(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "shared_name") {
 		t.Errorf("expected error to mention 'shared_name', got: %v", err)
+	}
+}
+
+// TestLoadRemoteModuleReplace verifies that [replace] redirects a remote URL to a local path.
+func TestLoadRemoteModuleReplace(t *testing.T) {
+	projectDir := t.TempDir()
+
+	// Create the local replacement module
+	modDir := filepath.Join(projectDir, "local-parser")
+	os.MkdirAll(modDir, 0755)
+	os.WriteFile(filepath.Join(modDir, "promise.toml"), []byte(`
+[module]
+name = "parser"
+epoch = "2026.3"
+`), 0644)
+	os.WriteFile(filepath.Join(modDir, "parser.pr"), []byte(`
+parse(int x) int `+"`"+`public {
+    return x + 1;
+}
+`), 0644)
+
+	// Root project config with [replace]
+	cfg := &module.Config{
+		Name:    "myproject",
+		Epoch:   "2026.3",
+		Dir:     projectDir,
+		Require: map[string]string{},
+		Replace: map[string]string{
+			"github.com/someone/parser": "./local-parser",
+		},
+	}
+
+	stdFiles := testStdFiles(t)
+	loader := testModuleLoaderWithConfig(projectDir, stdFiles, cfg)
+
+	modInfo, err := loader.loadRemote("github.com/someone/parser", "parser")
+	if err != nil {
+		t.Fatalf("loadRemote with [replace] failed: %v", err)
+	}
+	if modInfo == nil {
+		t.Fatal("expected non-nil ModuleInfo")
+	}
+	if modInfo.CanonicalName != "parser" {
+		t.Errorf("expected canonical name 'parser', got %q", modInfo.CanonicalName)
+	}
+
+	// Verify it's cached in remoteResolved
+	normalized := module.NormalizeURL("github.com/someone/parser")
+	if _, ok := loader.remoteResolved[normalized]; !ok {
+		t.Error("expected URL to be cached in remoteResolved")
+	}
+
+	// Second call should return the same module (dedup)
+	modInfo2, err := loader.loadRemote("github.com/someone/parser", "parser")
+	if err != nil {
+		t.Fatalf("second loadRemote failed: %v", err)
+	}
+	if modInfo2.AbsDir != modInfo.AbsDir {
+		t.Error("expected same module on second load")
+	}
+}
+
+// TestLoadRemoteModuleReplaceSchemeVariant verifies that [replace] matches
+// URL variants (with/without scheme).
+func TestLoadRemoteModuleReplaceSchemeVariant(t *testing.T) {
+	projectDir := t.TempDir()
+
+	modDir := filepath.Join(projectDir, "local-parser")
+	os.MkdirAll(modDir, 0755)
+	os.WriteFile(filepath.Join(modDir, "promise.toml"), []byte(`
+[module]
+name = "parser"
+epoch = "2026.3"
+`), 0644)
+	os.WriteFile(filepath.Join(modDir, "parser.pr"), []byte(`
+parse(int x) int `+"`"+`public { return x; }
+`), 0644)
+
+	// Replace key uses bare URL, import uses https://
+	cfg := &module.Config{
+		Name:    "myproject",
+		Epoch:   "2026.3",
+		Dir:     projectDir,
+		Require: map[string]string{},
+		Replace: map[string]string{
+			"github.com/someone/parser": "./local-parser",
+		},
+	}
+
+	stdFiles := testStdFiles(t)
+	loader := testModuleLoaderWithConfig(projectDir, stdFiles, cfg)
+
+	// Import with https:// scheme — should still match the replace
+	modInfo, err := loader.loadRemote("https://github.com/someone/parser", "parser")
+	if err != nil {
+		t.Fatalf("loadRemote with scheme variant failed: %v", err)
+	}
+	if modInfo.CanonicalName != "parser" {
+		t.Errorf("expected canonical name 'parser', got %q", modInfo.CanonicalName)
+	}
+}
+
+// TestLoadRemoteModuleNoPinError verifies that a remote module without a pin produces a clear error.
+func TestLoadRemoteModuleNoPinError(t *testing.T) {
+	projectDir := t.TempDir()
+
+	cfg := &module.Config{
+		Name:    "myproject",
+		Epoch:   "2026.3",
+		Dir:     projectDir,
+		Require: map[string]string{}, // no pins
+		Replace: map[string]string{},
+	}
+
+	stdFiles := testStdFiles(t)
+	loader := testModuleLoaderWithConfig(projectDir, stdFiles, cfg)
+
+	_, err := loader.loadRemote("github.com/someone/parser", "parser")
+	if err == nil {
+		t.Fatal("expected error for missing pin")
+	}
+	if !strings.Contains(err.Error(), "no pin") {
+		t.Errorf("expected 'no pin' error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "promise.toml") {
+		t.Errorf("expected error to mention promise.toml, got: %v", err)
+	}
+}
+
+// TestLoadRemoteModuleNilConfig verifies loadRemote works when there's no promise.toml (single-file mode).
+func TestLoadRemoteModuleNilConfig(t *testing.T) {
+	projectDir := t.TempDir()
+	stdFiles := testStdFiles(t)
+	// nil config — no [require], no [replace]
+	loader := testModuleLoaderWithConfig(projectDir, stdFiles, nil)
+
+	_, err := loader.loadRemote("github.com/someone/parser", "parser")
+	if err == nil {
+		t.Fatal("expected error for remote module with nil config")
+	}
+	if !strings.Contains(err.Error(), "no pin") {
+		t.Errorf("expected 'no pin' error, got: %v", err)
+	}
+}
+
+// TestIsTopLevelPin verifies the helper correctly identifies top-level pins.
+func TestIsTopLevelPin(t *testing.T) {
+	cfg := &module.Config{
+		Name:  "myproject",
+		Epoch: "2026.3",
+		Require: map[string]string{
+			"github.com/someone/parser":          "abc123",
+			"https://github.com/someone/utils.git": "def456",
+		},
+		Replace: map[string]string{},
+	}
+
+	loader := testModuleLoaderWithConfig(t.TempDir(), nil, cfg)
+
+	// Exact match
+	if !loader.isTopLevelPin("github.com/someone/parser") {
+		t.Error("expected github.com/someone/parser to be a top-level pin")
+	}
+
+	// Normalized match (scheme + .git stripped)
+	if !loader.isTopLevelPin("github.com/someone/utils") {
+		t.Error("expected github.com/someone/utils to match normalized top-level pin")
+	}
+
+	// Not a top-level pin
+	if loader.isTopLevelPin("github.com/other/lib") {
+		t.Error("expected github.com/other/lib to NOT be a top-level pin")
+	}
+
+	// Nil config
+	loaderNil := testModuleLoaderWithConfig(t.TempDir(), nil, nil)
+	if loaderNil.isTopLevelPin("github.com/someone/parser") {
+		t.Error("expected false with nil config")
+	}
+}
+
+// TestLoadRemoteModulePinConflict verifies that conflicting transitive pins produce an error.
+func TestLoadRemoteModulePinConflict(t *testing.T) {
+	projectDir := t.TempDir()
+
+	// Create two local modules that will be used via [replace].
+	// Module A's promise.toml has [require] pinning "shared" to commit "aaa..."
+	modA := filepath.Join(projectDir, "mod_a")
+	os.MkdirAll(modA, 0755)
+	os.WriteFile(filepath.Join(modA, "promise.toml"), []byte(`
+[module]
+name = "mod_a"
+epoch = "2026.3"
+
+[require]
+"github.com/shared/lib" = "aaaaaaa"
+`), 0644)
+	os.WriteFile(filepath.Join(modA, "a.pr"), []byte(`
+a_func() int `+"`"+`public { return 1; }
+`), 0644)
+
+	// Module B's promise.toml pins "shared" to a DIFFERENT commit "bbb..."
+	modB := filepath.Join(projectDir, "mod_b")
+	os.MkdirAll(modB, 0755)
+	os.WriteFile(filepath.Join(modB, "promise.toml"), []byte(`
+[module]
+name = "mod_b"
+epoch = "2026.3"
+
+[require]
+"github.com/shared/lib" = "bbbbbbb"
+`), 0644)
+	os.WriteFile(filepath.Join(modB, "b.pr"), []byte(`
+b_func() int `+"`"+`public { return 2; }
+`), 0644)
+
+	// Root project uses both via [replace]
+	cfg := &module.Config{
+		Name:  "myproject",
+		Epoch: "2026.3",
+		Dir:   projectDir,
+		Require: map[string]string{},
+		Replace: map[string]string{
+			"github.com/someone/mod_a": "./mod_a",
+			"github.com/someone/mod_b": "./mod_b",
+		},
+	}
+
+	stdFiles := testStdFiles(t)
+	loader := testModuleLoaderWithConfig(projectDir, stdFiles, cfg)
+
+	// Load A — should succeed and register its pin for shared/lib
+	_, err := loader.loadRemote("github.com/someone/mod_a", "mod_a")
+	if err != nil {
+		t.Fatalf("loadRemote mod_a: %v", err)
+	}
+
+	// Verify the transitive pin was registered
+	sharedNorm := module.NormalizeURL("github.com/shared/lib")
+	if pin, ok := loader.commitPins[sharedNorm]; !ok || pin != "aaaaaaa" {
+		t.Errorf("expected commitPins[shared/lib] = 'aaaaaaa', got %q (ok=%v)", pin, ok)
+	}
+
+	// Load B — should fail because it pins shared/lib to a different commit
+	_, err = loader.loadRemote("github.com/someone/mod_b", "mod_b")
+	if err == nil {
+		t.Fatal("expected error for conflicting pins")
+	}
+	if !strings.Contains(err.Error(), "conflicting pins") {
+		t.Errorf("expected 'conflicting pins' error, got: %v", err)
+	}
+}
+
+// TestLoadRemoteModulePinConflictTopLevelOverride verifies that a top-level [require]
+// pin overrides a transitive conflict.
+func TestLoadRemoteModulePinConflictTopLevelOverride(t *testing.T) {
+	projectDir := t.TempDir()
+
+	// Module A pins shared/lib to "aaaaaaa"
+	modA := filepath.Join(projectDir, "mod_a")
+	os.MkdirAll(modA, 0755)
+	os.WriteFile(filepath.Join(modA, "promise.toml"), []byte(`
+[module]
+name = "mod_a"
+epoch = "2026.3"
+
+[require]
+"github.com/shared/lib" = "aaaaaaa"
+`), 0644)
+	os.WriteFile(filepath.Join(modA, "a.pr"), []byte(`
+a_func() int `+"`"+`public { return 1; }
+`), 0644)
+
+	// Module B pins shared/lib to a DIFFERENT commit "bbbbbbb"
+	modB := filepath.Join(projectDir, "mod_b")
+	os.MkdirAll(modB, 0755)
+	os.WriteFile(filepath.Join(modB, "promise.toml"), []byte(`
+[module]
+name = "mod_b"
+epoch = "2026.3"
+
+[require]
+"github.com/shared/lib" = "bbbbbbb"
+`), 0644)
+	os.WriteFile(filepath.Join(modB, "b.pr"), []byte(`
+b_func() int `+"`"+`public { return 2; }
+`), 0644)
+
+	// Root project explicitly pins shared/lib — this should override both
+	cfg := &module.Config{
+		Name:  "myproject",
+		Epoch: "2026.3",
+		Dir:   projectDir,
+		Require: map[string]string{
+			"github.com/shared/lib": "ccccccc",
+		},
+		Replace: map[string]string{
+			"github.com/someone/mod_a": "./mod_a",
+			"github.com/someone/mod_b": "./mod_b",
+		},
+	}
+
+	stdFiles := testStdFiles(t)
+	loader := testModuleLoaderWithConfig(projectDir, stdFiles, cfg)
+
+	// Load A — should succeed, its pin for shared/lib is overridden by top-level
+	_, err := loader.loadRemote("github.com/someone/mod_a", "mod_a")
+	if err != nil {
+		t.Fatalf("loadRemote mod_a: %v", err)
+	}
+
+	// Load B — should also succeed because top-level overrides both
+	_, err = loader.loadRemote("github.com/someone/mod_b", "mod_b")
+	if err != nil {
+		t.Fatalf("loadRemote mod_b should succeed with top-level override: %v", err)
+	}
+
+	// The effective pin should be the top-level one
+	sharedNorm := module.NormalizeURL("github.com/shared/lib")
+	if pin := loader.commitPins[sharedNorm]; pin != "ccccccc" {
+		t.Errorf("expected top-level pin 'ccccccc', got %q", pin)
 	}
 }
 

@@ -152,6 +152,63 @@ func TestIsLocalPath(t *testing.T) {
 	}
 }
 
+func TestNormalizeURL(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		// Already normalized
+		{"github.com/someone/parser", "github.com/someone/parser"},
+		// Strip https scheme
+		{"https://github.com/someone/parser", "github.com/someone/parser"},
+		// Strip http scheme
+		{"http://github.com/someone/parser", "github.com/someone/parser"},
+		// Strip git scheme
+		{"git://github.com/someone/parser", "github.com/someone/parser"},
+		// Strip trailing .git
+		{"github.com/someone/parser.git", "github.com/someone/parser"},
+		// Strip scheme + .git
+		{"https://github.com/someone/parser.git", "github.com/someone/parser"},
+		// Strip trailing slashes
+		{"github.com/someone/parser/", "github.com/someone/parser"},
+		{"github.com/someone/parser///", "github.com/someone/parser"},
+		// Lowercase host only (preserve path case)
+		{"GitHub.COM/Someone/Parser", "github.com/Someone/Parser"},
+		{"GITHUB.COM/user/MyLib", "github.com/user/MyLib"},
+		// Combined
+		{"HTTPS://GitHub.COM/User/Repo.git/", "github.com/User/Repo"},
+		// Host only (no path)
+		{"GITHUB.COM", "github.com"},
+		// Strip ssh scheme
+		{"ssh://git@github.com/someone/parser", "git@github.com/someone/parser"},
+		{"SSH://git@github.com/someone/parser.git", "git@github.com/someone/parser"},
+		// Corporate git servers
+		{"git.corp.com/team/utils", "git.corp.com/team/utils"},
+		{"https://git.corp.com/team/utils.git", "git.corp.com/team/utils"},
+	}
+	for _, tt := range tests {
+		got := NormalizeURL(tt.input)
+		if got != tt.want {
+			t.Errorf("NormalizeURL(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestNormalizeURLIdempotent(t *testing.T) {
+	urls := []string{
+		"github.com/someone/parser",
+		"https://GITHUB.COM/User/Repo.git/",
+		"git.corp.com/team/utils",
+	}
+	for _, url := range urls {
+		first := NormalizeURL(url)
+		second := NormalizeURL(first)
+		if first != second {
+			t.Errorf("NormalizeURL not idempotent: %q → %q → %q", url, first, second)
+		}
+	}
+}
+
 func TestParseConfigUnknownKeys(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "promise.toml")

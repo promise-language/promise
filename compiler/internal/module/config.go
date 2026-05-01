@@ -141,6 +141,31 @@ func IsCatalogImport(path string) bool {
 	return path == ""
 }
 
+// NormalizeURL canonicalizes a remote module URL for dedup and comparison.
+// Strips scheme (https://, http://, git://, ssh://), trailing .git, trailing slashes,
+// and lowercases the host portion. Path case is preserved.
+func NormalizeURL(url string) string {
+	s := url
+	// Strip scheme
+	for _, prefix := range []string{"https://", "http://", "git://", "ssh://"} {
+		if strings.HasPrefix(strings.ToLower(s), prefix) {
+			s = s[len(prefix):]
+			break
+		}
+	}
+	// Strip trailing slashes first, then .git, then slashes again
+	s = strings.TrimRight(s, "/")
+	s = strings.TrimSuffix(s, ".git")
+	s = strings.TrimRight(s, "/")
+	// Lowercase the host portion (everything before the first /)
+	if host, rest, ok := strings.Cut(s, "/"); ok {
+		s = strings.ToLower(host) + "/" + rest
+	} else {
+		s = strings.ToLower(s)
+	}
+	return s
+}
+
 // IsLocalPath returns true if the location string refers to a local module.
 func IsLocalPath(location string) bool {
 	if strings.HasPrefix(location, "./") || strings.HasPrefix(location, "../") {

@@ -2264,6 +2264,9 @@ func compileFrontend(filename string) (*ast.File, *sema.Info) {
 type moduleLoader struct {
 	projectRoot string
 	stdFiles    []*ast.File
+	// projectCfg is the root project's parsed promise.toml.
+	// Provides [require] pins and [replace] overrides for remote modules.
+	projectCfg *module.Config
 	// loaded caches fully loaded modules by absolute directory path.
 	// This prevents re-loading the same module when multiple consumers import it.
 	loaded map[string]*sema.ModuleInfo
@@ -2280,6 +2283,12 @@ type moduleLoader struct {
 	// depOrder records modules in topological order (dependencies before dependents).
 	// This is the post-order of the DFS walk — leaf modules come first.
 	depOrder []string
+	// remoteResolved caches resolved remote URLs → absolute directory path.
+	// Prevents re-fetching the same remote module.
+	remoteResolved map[string]string
+	// commitPins holds effective commit pins for remote modules.
+	// Starts with [require] from root project, extended by transitive deps.
+	commitPins map[string]string
 }
 
 // loadModuleScopes scans use declarations for local module paths, loads each
@@ -2296,26 +2305,45 @@ func loadModuleScopes(filename string, file *ast.File, stdFiles []*ast.File) (ma
 	if abs, err := filepath.Abs(projectRoot); err == nil {
 		projectRoot = abs
 	}
+	var projectCfg *module.Config
 	if cfg, err := module.FindConfig(projectRoot); err == nil && cfg != nil {
 		projectRoot = cfg.Dir
+		projectCfg = cfg
+	}
+
+	// Build initial commit pins from the root project's [require] section.
+	commitPins := make(map[string]string)
+	if projectCfg != nil {
+		for url, pin := range projectCfg.Require {
+			commitPins[module.NormalizeURL(url)] = pin
+		}
 	}
 
 	loader := &moduleLoader{
 		projectRoot:    projectRoot,
 		stdFiles:       stdFiles,
+		projectCfg:     projectCfg,
 		loaded:         make(map[string]*sema.ModuleInfo),
 		canonicalNames: make(map[string]string),
 		visiting:       make(map[string]string),
 		allModInfos:    make(map[string]*sema.ModuleInfo),
+		remoteResolved: make(map[string]string),
+		commitPins:     commitPins,
 	}
 
 	scopes := make(map[string]*types.Scope)
 	for _, u := range file.Uses {
-		if u.Path == "" || !module.IsLocalPath(u.Path) {
-			continue // catalog or remote — skip for now
+		if u.Path == "" {
+			continue // catalog import — handled by sema
 		}
 
-		modInfo, err := loader.load(u.Path)
+		var modInfo *sema.ModuleInfo
+		var err error
+		if module.IsLocalPath(u.Path) {
+			modInfo, err = loader.load(u.Path)
+		} else {
+			modInfo, err = loader.loadRemote(u.Path, u.Alias)
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s: error loading module '%s': %v\n", filename, u.Path, err)
 			os.Exit(1)
@@ -2340,9 +2368,15 @@ func loadModuleScopes(filename string, file *ast.File, stdFiles []*ast.File) (ma
 // load recursively loads a local module and all its dependencies.
 // Returns a cached result if the module was already loaded.
 // Detects circular dependencies via the visiting set.
+// modPath can be a relative path (joined with projectRoot) or an absolute path.
 func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 	// Resolve absolute directory for dedup and cycle detection
-	modDir := filepath.Join(ml.projectRoot, modPath)
+	var modDir string
+	if filepath.IsAbs(modPath) {
+		modDir = modPath
+	} else {
+		modDir = filepath.Join(ml.projectRoot, modPath)
+	}
 	absDir, err := filepath.Abs(modDir)
 	if err != nil {
 		return nil, fmt.Errorf("cannot resolve path: %w", err)
@@ -2452,7 +2486,103 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 	return mi, nil
 }
 
-// loadDeps scans a module's use declarations and recursively loads its local dependencies.
+// loadRemote resolves a remote module URL to a local directory and loads it.
+// Checks [replace] overrides first, then fetches via git using the commit pin.
+func (ml *moduleLoader) loadRemote(remoteURL, alias string) (*sema.ModuleInfo, error) {
+	normalized := module.NormalizeURL(remoteURL)
+
+	// Check dedup cache — already resolved this URL
+	if absDir, ok := ml.remoteResolved[normalized]; ok {
+		if mi, ok := ml.loaded[absDir]; ok {
+			return mi, nil
+		}
+	}
+
+	// Check [replace] in root project config — redirect to local path
+	if ml.projectCfg != nil {
+		for replaceURL, localPath := range ml.projectCfg.Replace {
+			if module.NormalizeURL(replaceURL) == normalized {
+				// Resolve relative to project root
+				if !filepath.IsAbs(localPath) {
+					localPath = filepath.Join(ml.projectRoot, localPath)
+				}
+				mi, err := ml.load(localPath)
+				if err != nil {
+					return nil, fmt.Errorf("replace %s → %s: %w", remoteURL, localPath, err)
+				}
+				ml.remoteResolved[normalized] = mi.AbsDir
+				if err := ml.mergeTransitivePins(mi.AbsDir, remoteURL); err != nil {
+					return nil, err
+				}
+				return mi, nil
+			}
+		}
+	}
+
+	// Look up commit pin
+	pin, ok := ml.commitPins[normalized]
+	if !ok {
+		return nil, fmt.Errorf("remote module %q has no pin in promise.toml [require] section\n  hint: add '%s = \"<commit>\"' to [require], or run 'promise pin \"%s\"'", remoteURL, remoteURL, remoteURL)
+	}
+
+	// Fetch/checkout via git
+	absDir, err := module.ResolveRemoteModule(remoteURL, pin)
+	if err != nil {
+		return nil, err
+	}
+
+	ml.remoteResolved[normalized] = absDir
+
+	// Delegate to load() which handles parsing, sema, cycle detection, etc.
+	// Use the resolved absolute path directly.
+	mi, err := ml.load(absDir)
+	if err != nil {
+		return nil, fmt.Errorf("remote module %s: %w", remoteURL, err)
+	}
+
+	if err := ml.mergeTransitivePins(absDir, remoteURL); err != nil {
+		return nil, err
+	}
+
+	return mi, nil
+}
+
+// mergeTransitivePins reads a module's promise.toml and merges its [require] entries
+// into the loader's effective commit pins. Top-level pins take priority; conflicting
+// transitive pins produce an error.
+func (ml *moduleLoader) mergeTransitivePins(absDir, sourceURL string) error {
+	tomlPath := filepath.Join(absDir, "promise.toml")
+	modCfg, cfgErr := module.ParseConfig(tomlPath)
+	if cfgErr != nil {
+		return nil // no config or parse error — nothing to merge
+	}
+	for depURL, depPin := range modCfg.Require {
+		depNorm := module.NormalizeURL(depURL)
+		if ml.isTopLevelPin(depNorm) {
+			continue
+		}
+		if existing, exists := ml.commitPins[depNorm]; exists && existing != depPin {
+			return fmt.Errorf("conflicting pins for %q: module %q pins %s but another module pins %s\n  hint: add an explicit pin in your project's [require] to resolve the conflict", depURL, sourceURL, depPin, existing)
+		}
+		ml.commitPins[depNorm] = depPin
+	}
+	return nil
+}
+
+// isTopLevelPin returns true if the normalized URL is pinned by the root project's [require].
+func (ml *moduleLoader) isTopLevelPin(normalizedURL string) bool {
+	if ml.projectCfg == nil {
+		return false
+	}
+	for topURL := range ml.projectCfg.Require {
+		if module.NormalizeURL(topURL) == normalizedURL {
+			return true
+		}
+	}
+	return false
+}
+
+// loadDeps scans a module's use declarations and recursively loads its dependencies.
 // Returns module scopes for sema.CheckWithModules.
 func (ml *moduleLoader) loadDeps(file *ast.File, parentPath string) (map[string]*types.Scope, error) {
 	if len(file.Uses) == 0 {
@@ -2461,11 +2591,17 @@ func (ml *moduleLoader) loadDeps(file *ast.File, parentPath string) (map[string]
 
 	scopes := make(map[string]*types.Scope)
 	for _, u := range file.Uses {
-		if u.Path == "" || !module.IsLocalPath(u.Path) {
-			continue // catalog or remote — skip for now
+		if u.Path == "" {
+			continue // catalog import
 		}
 
-		depInfo, err := ml.load(u.Path)
+		var depInfo *sema.ModuleInfo
+		var err error
+		if module.IsLocalPath(u.Path) {
+			depInfo, err = ml.load(u.Path)
+		} else {
+			depInfo, err = ml.loadRemote(u.Path, u.Alias)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("in module '%s': %w", parentPath, err)
 		}

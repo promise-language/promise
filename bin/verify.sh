@@ -31,8 +31,7 @@ go test ./... || exit 1
 if [ "$MODE" = "host" ] || [ "$MODE" = "all" ]; then
   echo ""
   echo "Running promise tests (host)..."
-  ./promise test -timeout 10 ../tests/... || exit 1
-  ./promise test -timeout 10 ../modules/... || exit 1
+  ./promise test -timeout 10 ../tests/... ../modules/... || exit 1
 fi
 
 if [ "$MODE" = "wasm" ] || [ "$MODE" = "all" ]; then
@@ -42,8 +41,7 @@ if [ "$MODE" = "wasm" ] || [ "$MODE" = "all" ]; then
   fi
   echo ""
   echo "Running promise tests (wasm32-wasi)..."
-  ./promise test -timeout 30 -target wasm32-wasi ../tests/... || exit 1
-  ./promise test -timeout 30 -target wasm32-wasi ../modules/... || exit 1
+  ./promise test -timeout 10 -target wasm32-wasi ../tests/... ../modules/... || exit 1
 fi
 
 echo ""

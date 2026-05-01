@@ -325,47 +325,48 @@ func runTest(args []string) {
 	}
 
 	if len(remaining) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: promise test [-timeout duration] [-stress [N|duration]] <file.pr | dir | dir/...>")
+		fmt.Fprintln(os.Stderr, "usage: promise test [-timeout duration] [-stress [N|duration]] <file.pr | dir | dir/...> ...")
 		os.Exit(1)
 	}
 
-	target := remaining[0]
+	// Expand all targets into a flat file list.
+	var allFiles []string
+	for _, arg := range remaining {
+		target := arg
+		recursive := false
+		if strings.HasSuffix(target, "/...") || target == "..." {
+			recursive = true
+			if target == "..." {
+				target = "."
+			} else {
+				target = strings.TrimSuffix(target, "/...")
+			}
+		}
 
-	// Check for recursive "..." pattern
-	recursive := false
-	if strings.HasSuffix(target, "/...") || target == "..." {
-		recursive = true
-		if target == "..." {
-			target = "."
+		info, err := os.Stat(target)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+
+		if info.IsDir() {
+			allFiles = append(allFiles, discoverTestFiles(target, recursive)...)
 		} else {
-			target = strings.TrimSuffix(target, "/...")
+			allFiles = append(allFiles, target)
 		}
 	}
 
-	// Check if target is a directory
-	info, err := os.Stat(target)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Discover files
-	var files []string
-	if info.IsDir() {
-		files = discoverTestFiles(target, recursive)
-	} else {
-		files = []string{target}
-	}
-
 	if stressMode {
-		runStress(files, stressCount, stressDuration, timeout, targetTriple)
+		runStress(allFiles, stressCount, stressDuration, timeout, targetTriple)
 		return
 	}
 
-	if info.IsDir() {
-		runTestDir(target, recursive, timeout, targetTriple)
+	// Single file: use simple runner (no directory summary).
+	// Multiple files: combined summary at the end.
+	if len(allFiles) == 1 {
+		runTestFile(allFiles[0], timeout, targetTriple)
 	} else {
-		runTestFile(target, timeout, targetTriple)
+		runTestFiles(allFiles, timeout, targetTriple)
 	}
 }
 
@@ -550,11 +551,11 @@ func firstLines(s string, n int) string {
 	return strings.Join(lines, " | ")
 }
 
-// runTestDir discovers .pr files in a directory and runs tests from each.
-func runTestDir(dir string, recursive bool, timeout time.Duration, targetTriple string) {
+// runTestFiles runs tests from a list of .pr files, printing per-file results
+// and a combined summary at the end.
+func runTestFiles(files []string, timeout time.Duration, targetTriple string) {
 	totalStart := time.Now()
 
-	files := discoverTestFiles(dir, recursive)
 	if len(files) == 0 {
 		fmt.Println("no test files found")
 		return
@@ -575,6 +576,9 @@ func runTestDir(dir string, recursive bool, timeout time.Duration, targetTriple 
 	totalFiles := 0
 	failedFiles := 0
 	var failures []string
+
+	// Find common base directory for relative path display.
+	baseDir := commonDir(files)
 
 	for _, f := range files {
 		// Run "promise test <file>" as subprocess with timeout
@@ -603,7 +607,7 @@ func runTestDir(dir string, recursive bool, timeout time.Duration, targetTriple 
 		totalFiles++
 
 		// Print file header and output
-		relPath, relErr := filepath.Rel(dir, f)
+		relPath, relErr := filepath.Rel(baseDir, f)
 		if relErr != nil {
 			relPath = f
 		}

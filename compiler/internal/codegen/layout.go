@@ -489,7 +489,7 @@ func externCName(fd *ast.FuncDecl) string {
 // computeEnumLayout creates a TypeDeclLayout for an enum type.
 // Enums are value types: data lives in the value struct (tag + union data),
 // not heap-allocated like user types. The instance struct is empty.
-func computeEnumLayout(module *ir.Module, enum *types.Enum) *TypeDeclLayout {
+func computeEnumLayout(module *ir.Module, enum *types.Enum, ptrSize int) *TypeDeclLayout {
 	name := enum.Obj().Name()
 
 	// Compute variant tags and per-variant data struct types
@@ -511,7 +511,7 @@ func computeEnumLayout(module *ir.Module, enum *types.Enum) *TypeDeclLayout {
 			// Compute data size: sum of field sizes (conservative 8-byte per field)
 			ds := 0
 			for _, ft := range fieldTypes {
-				ds += llvmTypeSize(ft)
+				ds += llvmTypeSizeWithPtr(ft, ptrSize)
 			}
 			if ds > maxDataSize {
 				maxDataSize = ds

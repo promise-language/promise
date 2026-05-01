@@ -596,9 +596,24 @@ The compiler pipeline (Stages 1-8o) is complete for the current feature set. The
 |------|-----------|----------|
 | Channels (`channel[T]`, buffered send/receive) — Phase 5b | [runtime-proposal.md](runtime-proposal.md) | Done |
 | M:N scheduler (LLVM coroutines, GMP model, work stealing, select, preemption, panic recovery, GOMAXPROCS, sched stats) — Phase 5c | [runtime-proposal.md](runtime-proposal.md) | Done |
-| Cooperative WASM scheduler — Phase 5d | [runtime-proposal.md](runtime-proposal.md) | Low |
+| WASM target (`--target wasm32-wasi`, bump allocator, coop scheduler) — Phases 4b/5d/7a | [runtime-proposal.md](runtime-proposal.md) | Done |
 | IO reactor (kqueue/epoll/IOCP) — Phase 6 | [runtime-proposal.md](runtime-proposal.md) | Low |
 | Replace clang with `llc` + `lld` — Phase 7 | [runtime-proposal.md](runtime-proposal.md) | Low |
+
+### WASM remaining work
+
+Tests: 618 pass, 0 fail, 16 skip on `wasm32-wasi` (634 native)
+
+| Item | Skipped tests | Effort | Notes |
+|------|--------------|--------|-------|
+| f64→string (custom dtoa) | 12 (5 e2e files + 7 unit) | Medium | `snprintf` stub returns "?". Need custom double-to-string in LLVM IR or Promise. Grisu2/Ryu algorithm. |
+| Panic recovery (`setjmp`/`longjmp`) | 2 (panic_recovery_basic, panic_recovery_channel) | Medium | WASM has no `setjmp`/`longjmp`. Options: Emscripten-style JS exception handling, or WASM exception handling proposal (`try`/`catch`/`throw` instructions). |
+| Free-list allocator | 1 (goroutine_1000 OOM) | Medium | Current bump allocator never frees. Add free-list on top of bump for long-running programs. |
+| GOMAXPROCS >1 | 1 (gomaxprocs_query) | Low | Single-threaded WASM can't have multiple Ps. Could clamp silently instead of panicking. |
+| `clock_time_get` (WASI timing) | 0 | Low | `nanotime()` returns 0. Import `clock_time_get` from WASI for real timing. |
+| File IO (`fd_read`, `fd_prestat_*`) | 0 | Low | No tests depend on it yet. Needed for WASI filesystem access. |
+| WASM threading (shared memory + atomics) | 0 | Future | `wasm32-unknown-unknown` or threads proposal for true multi-P. |
+| Browser/JS FFI | 0 | Future | `wasm32-unknown-unknown` target, JS host bindings. |
 
 ---
 

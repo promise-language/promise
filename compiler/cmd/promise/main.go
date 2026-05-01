@@ -172,35 +172,53 @@ func runLegacy(args []string) {
 
 // runBuild compiles a .pr file to an executable.
 func runBuild(args []string) {
-	filename, outputFile := buildToFile(args)
+	filename, outputFile, _ := buildToFile(args)
 	fmt.Printf("Compiled %s → %s\n", filename, outputFile)
 }
 
-// buildToFile compiles a .pr file to an executable, returning the source and output paths.
-func buildToFile(args []string) (filename, outputFile string) {
+// buildToFile compiles a .pr file to an executable, returning the source path,
+// output path, and target triple.
+func buildToFile(args []string) (filename, outputFile, target string) {
 	for i := 0; i < len(args); i++ {
-		if args[i] == "-o" && i+1 < len(args) {
-			outputFile = args[i+1]
-			i++
-		} else {
+		switch args[i] {
+		case "-o":
+			if i+1 < len(args) {
+				outputFile = args[i+1]
+				i++
+			}
+		case "-target", "--target":
+			if i+1 < len(args) {
+				target = args[i+1]
+				i++
+			}
+		default:
 			filename = args[i]
 		}
 	}
 
 	if filename == "" {
-		fmt.Fprintln(os.Stderr, "usage: promise build [-o output] <file.pr>")
+		fmt.Fprintln(os.Stderr, "usage: promise build [-o output] [--target triple] <file.pr>")
 		os.Exit(1)
 	}
 
+	if target == "" {
+		target = codegen.HostTargetTriple()
+	}
+
 	if outputFile == "" {
-		outputFile = strings.TrimSuffix(filepath.Base(filename), ".pr")
+		base := strings.TrimSuffix(filepath.Base(filename), ".pr")
+		if isWasmTarget(target) {
+			outputFile = base + ".wasm"
+		} else {
+			outputFile = base
+		}
 	}
 
 	file, info := compileFrontend(filename)
-	result := codegen.Compile(file, info)
+	result := codegen.Compile(file, info, target)
 
-	compileAndLink(result, outputFile)
-	return filename, outputFile
+	compileAndLink(result, outputFile, target)
+	return filename, outputFile, target
 }
 
 // runRun compiles and immediately runs a .pr file.
@@ -244,6 +262,7 @@ func runTest(args []string) {
 	var stressMode bool
 	var stressCount int              // 0 = unlimited
 	var stressDuration time.Duration // 0 = unlimited
+	var targetTriple string          // empty = host target
 	var remaining []string
 	for i := 0; i < len(args); i++ {
 		if args[i] == "-timeout" && i+1 < len(args) {
@@ -253,6 +272,9 @@ func runTest(args []string) {
 				os.Exit(1)
 			}
 			timeout = d
+			i++
+		} else if (args[i] == "-target" || args[i] == "--target") && i+1 < len(args) {
+			targetTriple = args[i+1]
 			i++
 		} else if args[i] == "-stress" {
 			stressMode = true
@@ -279,6 +301,11 @@ func runTest(args []string) {
 	}
 
 	target := remaining[0]
+
+	// Print target when cross-compiling
+	if targetTriple != "" && targetTriple != codegen.HostTargetTriple() {
+		fmt.Printf("target: %s\n", targetTriple)
+	}
 
 	// Check for recursive "..." pattern
 	recursive := false
@@ -307,26 +334,27 @@ func runTest(args []string) {
 	}
 
 	if stressMode {
-		runStress(files, stressCount, stressDuration, timeout)
+		runStress(files, stressCount, stressDuration, timeout, targetTriple)
 		return
 	}
 
 	if info.IsDir() {
-		runTestDir(target, recursive, timeout)
+		runTestDir(target, recursive, timeout, targetTriple)
 	} else {
-		runTestFile(target, timeout)
+		runTestFile(target, timeout, targetTriple)
 	}
 }
 
 // runTestFile runs test functions from a single .pr file.
-func runTestFile(filename string, timeout time.Duration) {
+// targetTriple overrides the compilation target (empty = host).
+func runTestFile(filename string, timeout time.Duration, targetTriple string) {
 	start := time.Now()
 
 	// Frontend compilation (parse + merge std + sema + ownership)
 	file, info := compileFrontend(filename)
 
 	if info.HasExpectOutput {
-		runE2ETest(file, info, filename, timeout, start)
+		runE2ETest(file, info, filename, timeout, start, targetTriple)
 		return
 	}
 
@@ -336,13 +364,21 @@ func runTestFile(filename string, timeout time.Duration) {
 	}
 
 	// Codegen
-	result := codegen.Compile(file, info)
+	target := targetTriple
+	if target == "" {
+		target = codegen.HostTargetTriple()
+	}
+	result := codegen.Compile(file, info, target)
 
 	// Generate test main (replaces user main)
 	result.GenerateTestMain(info.Tests)
 
 	// Link to temp binary (test runner is now codegen-emitted, no C files needed)
-	tmpOutput, err := os.CreateTemp("", "promise-test-*")
+	ext := ""
+	if isWasmTarget(target) {
+		ext = ".wasm"
+	}
+	tmpOutput, err := os.CreateTemp("", "promise-test-*"+ext)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
 		os.Exit(1)
@@ -350,12 +386,17 @@ func runTestFile(filename string, timeout time.Duration) {
 	tmpOutput.Close()
 	defer os.Remove(tmpOutput.Name())
 
-	compileAndLink(result, tmpOutput.Name())
+	compileAndLink(result, tmpOutput.Name(), target)
 
 	// Execute test binary with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, tmpOutput.Name())
+	var cmd *exec.Cmd
+	if isWasmTarget(target) {
+		cmd = exec.CommandContext(ctx, "wasmtime", tmpOutput.Name())
+	} else {
+		cmd = exec.CommandContext(ctx, tmpOutput.Name())
+	}
 	output, runErr := cmd.CombinedOutput()
 	elapsed := time.Since(start)
 
@@ -388,13 +429,29 @@ func runTestFile(filename string, timeout time.Duration) {
 }
 
 // runE2ETest compiles and runs a .pr file with `test(expected="..."), comparing output.
-func runE2ETest(file *ast.File, info *sema.Info, filename string, timeout time.Duration, start time.Time) {
+func runE2ETest(file *ast.File, info *sema.Info, filename string, timeout time.Duration, start time.Time, targetTriple string) {
 	name := strings.TrimSuffix(filepath.Base(filename), ".pr")
 
-	// Codegen with normal main (no GenerateTestMain)
-	result := codegen.Compile(file, info)
+	// Resolve target
+	target := targetTriple
+	if target == "" {
+		target = codegen.HostTargetTriple()
+	}
 
-	tmpOutput, err := os.CreateTemp("", "promise-e2e-*")
+	// Check target exclusion
+	if isTestExcluded(target, info.ExcludeTargets) {
+		fmt.Printf("SKIP (excluded) %s\n", name)
+		return
+	}
+
+	// Codegen with normal main (no GenerateTestMain)
+	result := codegen.Compile(file, info, target)
+
+	ext := ""
+	if isWasmTarget(target) {
+		ext = ".wasm"
+	}
+	tmpOutput, err := os.CreateTemp("", "promise-e2e-*"+ext)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
 		os.Exit(1)
@@ -402,12 +459,17 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string, timeout time.D
 	tmpOutput.Close()
 	defer os.Remove(tmpOutput.Name())
 
-	compileAndLink(result, tmpOutput.Name())
+	compileAndLink(result, tmpOutput.Name(), target)
 
 	// Execute with timeout, capturing combined stdout+stderr
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, tmpOutput.Name())
+	var cmd *exec.Cmd
+	if isWasmTarget(target) {
+		cmd = exec.CommandContext(ctx, "wasmtime", tmpOutput.Name())
+	} else {
+		cmd = exec.CommandContext(ctx, tmpOutput.Name())
+	}
 	output, err := cmd.CombinedOutput()
 	elapsed := time.Since(start)
 
@@ -449,7 +511,7 @@ func firstLines(s string, n int) string {
 }
 
 // runTestDir discovers .pr files in a directory and runs tests from each.
-func runTestDir(dir string, recursive bool, timeout time.Duration) {
+func runTestDir(dir string, recursive bool, timeout time.Duration, targetTriple string) {
 	totalStart := time.Now()
 
 	files := discoverTestFiles(dir, recursive)
@@ -476,14 +538,19 @@ func runTestDir(dir string, recursive bool, timeout time.Duration) {
 	for _, f := range files {
 		// Run "promise test <file>" as subprocess with timeout
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		cmd := exec.CommandContext(ctx, selfExe, "test", "-timeout", fmt.Sprintf("%gs", timeout.Seconds()), f)
+		testArgs := []string{"test", "-timeout", fmt.Sprintf("%gs", timeout.Seconds())}
+		if targetTriple != "" {
+			testArgs = append(testArgs, "--target", targetTriple)
+		}
+		testArgs = append(testArgs, f)
+		cmd := exec.CommandContext(ctx, selfExe, testArgs...)
 		output, err := cmd.CombinedOutput()
 		timedOut := ctx.Err() == context.DeadlineExceeded
 		cancel()
 		outStr := strings.TrimSpace(string(output))
 
-		// Skip files with no tests
-		if !timedOut && outStr == "no tests found" {
+		// Skip files with no tests or excluded for this target
+		if !timedOut && (outStr == "no tests found" || strings.HasPrefix(outStr, "SKIP")) {
 			continue
 		}
 
@@ -645,9 +712,9 @@ func parseTimeoutArg(s string) (time.Duration, error) {
 }
 
 // compileAndLink writes the IR to a temp file and links it into the output binary.
-// On Linux and macOS, uses opt + llc + linker pipeline (Phase 7b/7c).
+// On Linux, macOS, and WASM, uses opt + llc + linker pipeline (Phase 7a/7b/7c).
 // On other platforms (or with PROMISE_USE_CLANG=1), uses clang as driver.
-func compileAndLink(result *codegen.CompileResult, outputFile string) {
+func compileAndLink(result *codegen.CompileResult, outputFile, target string) {
 	llFile, err := os.CreateTemp("", "promise-*.ll")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
@@ -667,8 +734,6 @@ func compileAndLink(result *codegen.CompileResult, outputFile string) {
 	}
 	llFile.Close()
 
-	target := codegen.HostTargetTriple()
-
 	if useClangPipeline(target) {
 		compileAndLinkClang(llFile.Name(), target, outputFile)
 	} else {
@@ -681,8 +746,8 @@ func useClangPipeline(target string) bool {
 	if os.Getenv("PROMISE_USE_CLANG") == "1" {
 		return true
 	}
-	// Linux and macOS use the LLVM pipeline. Other platforms use clang.
-	return !strings.Contains(target, "linux") && !strings.Contains(target, "macosx")
+	// Linux, macOS, and WASM use the LLVM pipeline. Other platforms use clang.
+	return !strings.Contains(target, "linux") && !strings.Contains(target, "macosx") && !strings.Contains(target, "wasm")
 }
 
 // minLLVMMajor is the minimum LLVM/clang major version required.
@@ -882,6 +947,7 @@ func findLLVMTool(name string) (string, error) {
 		"llc":      "PROMISE_LLC",
 		"ld.lld":   "PROMISE_LLD",
 		"ld64.lld": "PROMISE_LD64LLD",
+		"wasm-ld":  "PROMISE_WASM_LD",
 	}
 
 	// 1. Sibling of promise binary (also check llvm/ subdirectory for install layout)
@@ -915,11 +981,13 @@ func findLLVMTool(name string) (string, error) {
 		}
 	}
 
-	// 4. Homebrew LLVM (macOS only)
+	// 4. Homebrew LLVM/LLD (macOS only)
 	if runtime.GOOS == "darwin" {
 		for _, prefix := range []string{
 			"/opt/homebrew/opt/llvm/bin",
 			"/usr/local/opt/llvm/bin",
+			"/opt/homebrew/opt/lld/bin",
+			"/usr/local/opt/lld/bin",
 		} {
 			p := filepath.Join(prefix, name)
 			if _, err := os.Stat(p); err == nil {
@@ -1274,6 +1342,21 @@ func isDarwinTarget(target string) bool {
 	return strings.Contains(target, "macosx")
 }
 
+// isWasmTarget returns true if the target triple is WebAssembly.
+func isWasmTarget(target string) bool {
+	return strings.Contains(target, "wasm")
+}
+
+// isTestExcluded checks if the current target matches any of the exclude substrings.
+func isTestExcluded(target string, excludes []string) bool {
+	for _, ex := range excludes {
+		if strings.Contains(target, ex) {
+			return true
+		}
+	}
+	return false
+}
+
 // buildDarwinLinkArgs builds the linker argument list for macOS Mach-O linking.
 // Works with both ld64.lld and Apple's system ld.
 func buildDarwinLinkArgs(target, objFile, outputFile string) []string {
@@ -1502,7 +1585,7 @@ func buildMuslLinkArgs(target, objFile, outputFile, crtDir string) []string {
 }
 
 // compileAndLinkLLVM runs the opt + llc + linker pipeline.
-// Linux: opt → llc → ld.lld. macOS: opt → llc → ld64.lld (or system ld).
+// Linux: opt → llc → ld.lld. macOS: opt → llc → ld64.lld (or system ld). WASM: opt → llc → wasm-ld.
 func compileAndLinkLLVM(llFile, target, outputFile string) {
 	optPath, err := findLLVMTool("opt")
 	if err != nil {
@@ -1543,13 +1626,18 @@ func compileAndLinkLLVM(llFile, target, outputFile string) {
 	objFile.Close()
 	defer os.Remove(objFile.Name())
 
-	llcCmd := runLLVMCmd(llcPath,
-		"-mtriple="+target,
+	llcArgs := []string{
+		"-mtriple=" + target,
 		"-filetype=obj",
-		"-relocation-model=pic",
-		bcFile.Name(),
-		"-o", objFile.Name(),
-	)
+	}
+	if isWasmTarget(target) {
+		llcArgs = append(llcArgs, "-mattr=+bulk-memory,+mutable-globals,+sign-ext")
+	} else {
+		llcArgs = append(llcArgs, "-relocation-model=pic")
+	}
+	llcArgs = append(llcArgs, bcFile.Name(), "-o", objFile.Name())
+
+	llcCmd := exec.Command(llcPath, llcArgs...)
 	llcCmd.Stderr = os.Stderr
 	if err := llcCmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error running llc: %v\n", err)
@@ -1559,6 +1647,8 @@ func compileAndLinkLLVM(llFile, target, outputFile string) {
 	// Step 3: Link (platform-specific)
 	if isDarwinTarget(target) {
 		linkDarwin(objFile.Name(), target, outputFile)
+	} else if isWasmTarget(target) {
+		linkWasm(objFile.Name(), outputFile)
 	} else {
 		linkLinux(objFile.Name(), target, outputFile)
 	}
@@ -1590,6 +1680,36 @@ func linkDarwin(objFile, target, outputFile string) {
 		}
 		fmt.Fprintf(os.Stderr, "error linking (%s): %v\n", linkerName, err)
 		os.Exit(1)
+	}
+}
+
+// linkWasm runs wasm-ld for WebAssembly linking.
+func linkWasm(objFile, outputFile string) {
+	lldPath, err := findLLVMTool("wasm-ld")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	checkLLVMToolVersion(lldPath)
+
+	linkArgs := buildWasmLinkArgs(objFile, outputFile)
+	linkCmd := exec.Command(lldPath, linkArgs...)
+	linkCmd.Stderr = os.Stderr
+	if err := linkCmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "error linking (wasm-ld): %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// buildWasmLinkArgs builds the wasm-ld argument list for WASI linking.
+// No CRT objects needed — WASM has no system startup code.
+func buildWasmLinkArgs(objFile, outputFile string) []string {
+	return []string{
+		"--no-entry",
+		"--export=_start",
+		"--allow-undefined", // WASI imports (fd_write, proc_exit) resolved at runtime
+		"-o", outputFile,
+		objFile,
 	}
 }
 
@@ -1895,7 +2015,8 @@ func runExec(args []string) {
 	}
 
 	// Code generation
-	result := codegen.Compile(file, info)
+	target := codegen.HostTargetTriple()
+	result := codegen.Compile(file, info, target)
 
 	// Compile and link to temp binary
 	tmpOutput, err := os.CreateTemp("", "promise-exec-*")
@@ -1906,7 +2027,7 @@ func runExec(args []string) {
 	tmpOutput.Close()
 	defer os.Remove(tmpOutput.Name())
 
-	compileAndLink(result, tmpOutput.Name())
+	compileAndLink(result, tmpOutput.Name(), target)
 
 	// Execute with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)

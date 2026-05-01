@@ -1,6 +1,6 @@
 // GOMAXPROCS query: passing 0 returns current without changing.
 
-main() `test(expected: "ok") {
+main() `test(expected: "ok", exclude: "wasm32") {
     // Query current setting (0 means don't change, just return)
     int current = set_max_procs(0);
     assert(current > 0, "current maxprocs > 0");

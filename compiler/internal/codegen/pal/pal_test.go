@@ -234,18 +234,18 @@ func TestWasmPALEmitExit(t *testing.T) {
 	}
 }
 
-// --- Allocator tests (shared libc wrappers, tested across all PALs) ---
+// --- Allocator tests (libc wrappers for Posix/Windows, custom for WASM) ---
 
 func TestEmitAlloc(t *testing.T) {
-	pals := []struct {
+	// Posix and Windows use libc malloc wrapper
+	libcPals := []struct {
 		name string
 		pal  PAL
 	}{
 		{"Posix", &PosixPAL{}},
 		{"Windows", &WindowsPAL{}},
-		{"Wasm", &WasmPAL{}},
 	}
-	for _, tc := range pals {
+	for _, tc := range libcPals {
 		t.Run(tc.name, func(t *testing.T) {
 			module := ir.NewModule()
 			fn := tc.pal.EmitAlloc(module)
@@ -277,18 +277,51 @@ func TestEmitAlloc(t *testing.T) {
 			}
 		})
 	}
+
+	// WASM uses custom bump allocator on memory.grow
+	t.Run("Wasm", func(t *testing.T) {
+		module := ir.NewModule()
+		p := &WasmPAL{}
+		fn := p.EmitAlloc(module)
+		out := module.String()
+
+		if fn.Name() != "pal_alloc" {
+			t.Errorf("expected function name pal_alloc, got %s", fn.Name())
+		}
+		if !strings.Contains(out, "noalias") {
+			t.Error("missing noalias attribute on pal_alloc")
+		}
+		if !strings.Contains(out, "nounwind") {
+			t.Error("missing nounwind attribute on pal_alloc")
+		}
+		if !strings.Contains(out, "@__promise_heap_ptr") {
+			t.Error("missing heap_ptr global")
+		}
+		if !strings.Contains(out, "@__promise_heap_end") {
+			t.Error("missing heap_end global")
+		}
+		if !strings.Contains(out, "@__heap_base") {
+			t.Error("missing __heap_base external global")
+		}
+		if !strings.Contains(out, "@llvm.wasm.memory.grow.i32") {
+			t.Error("missing memory.grow intrinsic")
+		}
+		if !strings.Contains(out, "@__promise_init_heap") {
+			t.Error("missing init_heap function")
+		}
+	})
 }
 
 func TestEmitFree(t *testing.T) {
-	pals := []struct {
+	// Posix and Windows use libc free wrapper
+	libcPals := []struct {
 		name string
 		pal  PAL
 	}{
 		{"Posix", &PosixPAL{}},
 		{"Windows", &WindowsPAL{}},
-		{"Wasm", &WasmPAL{}},
 	}
-	for _, tc := range pals {
+	for _, tc := range libcPals {
 		t.Run(tc.name, func(t *testing.T) {
 			module := ir.NewModule()
 			fn := tc.pal.EmitFree(module)
@@ -320,18 +353,40 @@ func TestEmitFree(t *testing.T) {
 			}
 		})
 	}
+
+	// WASM free is a no-op (bump allocator doesn't reclaim)
+	t.Run("Wasm", func(t *testing.T) {
+		module := ir.NewModule()
+		p := &WasmPAL{}
+		fn := p.EmitFree(module)
+		out := module.String()
+
+		if fn.Name() != "pal_free" {
+			t.Errorf("expected function name pal_free, got %s", fn.Name())
+		}
+		if !strings.Contains(out, "nounwind") {
+			t.Error("missing nounwind attribute on pal_free")
+		}
+		if !strings.Contains(out, "willreturn") {
+			t.Error("missing willreturn attribute on pal_free")
+		}
+		// No-op: should not contain call to @free
+		if strings.Contains(out, "@free") {
+			t.Error("WASM pal_free should not call @free")
+		}
+	})
 }
 
 func TestEmitRealloc(t *testing.T) {
-	pals := []struct {
+	// Posix and Windows use libc realloc wrapper
+	libcPals := []struct {
 		name string
 		pal  PAL
 	}{
 		{"Posix", &PosixPAL{}},
 		{"Windows", &WindowsPAL{}},
-		{"Wasm", &WasmPAL{}},
 	}
-	for _, tc := range pals {
+	for _, tc := range libcPals {
 		t.Run(tc.name, func(t *testing.T) {
 			module := ir.NewModule()
 			fn := tc.pal.EmitRealloc(module)
@@ -366,6 +421,32 @@ func TestEmitRealloc(t *testing.T) {
 			}
 		})
 	}
+
+	// WASM realloc: alloc new + memcpy (requires EmitAlloc first)
+	t.Run("Wasm", func(t *testing.T) {
+		module := ir.NewModule()
+		p := &WasmPAL{}
+		p.EmitAlloc(module) // EmitRealloc needs pal_alloc in module
+		fn := p.EmitRealloc(module)
+		out := module.String()
+
+		if fn.Name() != "pal_realloc" {
+			t.Errorf("expected function name pal_realloc, got %s", fn.Name())
+		}
+		if !strings.Contains(out, "noalias") {
+			t.Error("missing noalias attribute on pal_realloc")
+		}
+		if !strings.Contains(out, "nounwind") {
+			t.Error("missing nounwind attribute on pal_realloc")
+		}
+		if !strings.Contains(out, "@__promise_memcpy") {
+			t.Error("missing __promise_memcpy for byte-by-byte copy")
+		}
+		// Should not use libc realloc
+		if strings.Contains(out, "declare") && strings.Contains(out, "@realloc") {
+			t.Error("WASM pal_realloc should not use libc @realloc")
+		}
+	})
 }
 
 // --- ForTarget dispatch tests ---

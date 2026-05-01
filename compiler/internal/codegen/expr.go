@@ -933,7 +933,11 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 	nullPtr := constant.NewNull(instancePtrType)
 	sizePtr := c.block.NewGetElementPtr(instanceStructType, nullPtr,
 		constant.NewInt(irtypes.I32, 1))
-	size := c.block.NewPtrToInt(sizePtr, irtypes.I64)
+	sizeRaw := c.block.NewPtrToInt(sizePtr, c.ptrIntType())
+	var size value.Value = sizeRaw
+	if c.isWasm {
+		size = c.block.NewZExt(sizeRaw, irtypes.I64)
+	}
 
 	// Allocate
 	rawPtr := c.block.NewCall(c.palAlloc, size)
@@ -1184,7 +1188,7 @@ func (c *Compiler) genVectorCapacityConstructor(e *ast.CallExpr, inst *types.Ins
 	// Determine element size
 	elemType := inst.TypeArgs()[0]
 	elemLLVM := c.resolveType(elemType)
-	elemSize := int64(llvmTypeSize(elemLLVM))
+	elemSize := int64(c.typeSize(elemLLVM))
 
 	return c.block.NewCall(c.funcs["promise_vector_with_capacity"],
 		capacity,
@@ -1196,7 +1200,7 @@ func (c *Compiler) genVectorCapacityConstructor(e *ast.CallExpr, inst *types.Ins
 func (c *Compiler) genChannelConstructor(e *ast.CallExpr, inst *types.Instance) value.Value {
 	elemType := inst.TypeArgs()[0]
 	elemLLVM := c.resolveType(elemType)
-	elemSize := int64(llvmTypeSize(elemLLVM))
+	elemSize := int64(c.typeSize(elemLLVM))
 
 	// capacity defaults to 0 (unbuffered) when no argument provided
 	var capacity value.Value
@@ -1226,7 +1230,7 @@ func (c *Compiler) genChannelMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 	chanType := channelStructType()
 	chPtr := c.block.NewBitCast(chRaw, irtypes.NewPointer(chanType))
 	elemLLVM := c.resolveType(elemType)
-	elemSize := int64(llvmTypeSize(elemLLVM))
+	elemSize := int64(c.typeSize(elemLLVM))
 
 	switch method {
 	case "send":
@@ -1929,7 +1933,7 @@ func (c *Compiler) resolveTypeParam(tp *types.TypeParam) types.Type {
 func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, elemType types.Type, method string) value.Value {
 	slicePtr := c.genExpr(member.Target)
 	elemLLVM := c.resolveType(elemType)
-	elemSize := int64(llvmTypeSize(elemLLVM))
+	elemSize := int64(c.typeSize(elemLLVM))
 
 	switch method {
 	case "push":
@@ -2787,7 +2791,7 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 		panic(fmt.Sprintf("codegen: array literal type is %T, want Vector instance", typ))
 	}
 	elemLLVM := c.resolveType(elem)
-	elemSize := int64(llvmTypeSize(elemLLVM))
+	elemSize := int64(c.typeSize(elemLLVM))
 	n := int64(len(e.Elements))
 
 	// Total allocation: header (16 bytes) + n * elemSize
@@ -3134,7 +3138,11 @@ func (c *Compiler) genMapConstructor(inst *types.Instance) value.Value {
 	nullPtr := constant.NewNull(instancePtrType)
 	sizePtr := c.block.NewGetElementPtr(instanceStructType, nullPtr,
 		constant.NewInt(irtypes.I32, 1))
-	size := c.block.NewPtrToInt(sizePtr, irtypes.I64)
+	sizeRaw := c.block.NewPtrToInt(sizePtr, c.ptrIntType())
+	var size value.Value = sizeRaw
+	if c.isWasm {
+		size = c.block.NewZExt(sizeRaw, irtypes.I64)
+	}
 
 	// Allocate
 	rawPtr := c.block.NewCall(c.palAlloc, size)
@@ -3242,7 +3250,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 		envStructType = irtypes.NewStruct(envFieldTypes...)
 
 		// Allocate env struct on heap
-		envSize := int64(llvmTypeSize(envStructType))
+		envSize := int64(c.typeSize(envStructType))
 		rawPtr := c.block.NewCall(c.palAlloc, constant.NewInt(irtypes.I64, envSize))
 		typedEnvPtr := c.block.NewBitCast(rawPtr, irtypes.NewPointer(envStructType))
 
@@ -3816,8 +3824,12 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 	startBlk := coroFn.NewBlock("coro.start")
 	entry.NewCondBr(need, allocBlk, startBlk)
 
-	coroSize := allocBlk.NewCall(c.coroSize)
-	mem := allocBlk.NewCall(c.palAlloc, coroSize)
+	coroSizeVal := allocBlk.NewCall(c.coroSize)
+	var coroSizeArg value.Value = coroSizeVal
+	if c.isWasm {
+		coroSizeArg = allocBlk.NewZExt(coroSizeVal, irtypes.I64)
+	}
+	mem := allocBlk.NewCall(c.palAlloc, coroSizeArg)
 	allocBlk.NewBr(startBlk)
 
 	phiMem := startBlk.NewPhi(
@@ -3897,13 +3909,13 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldResultPtr)))
 		if !isVoid {
 			// Allocate result buffer and store in G.result_ptr
-			resultSize := constant.NewInt(irtypes.I64, int64(llvmTypeSize(resultLLVM)))
+			resultSize := constant.NewInt(irtypes.I64, int64(c.typeSize(resultLLVM)))
 			resultBuf := c.block.NewCall(c.palAlloc, resultSize)
 			c.block.NewStore(resultBuf, rpField)
 		} else {
 			// Void task: set result_ptr to sentinel (0x1) so goroutine_exit
 			// knows this is a task and won't free G (caller frees via <-task)
-			sentinel := c.block.NewIntToPtr(constant.NewInt(irtypes.I64, 1), irtypes.I8Ptr)
+			sentinel := c.block.NewIntToPtr(constant.NewInt(c.ptrIntType(), 1), irtypes.I8Ptr)
 			c.block.NewStore(sentinel, rpField)
 		}
 	}
@@ -4210,8 +4222,12 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	startBlk := coroFn.NewBlock("coro.start")
 	entry.NewCondBr(need, allocBlk, startBlk)
 
-	coroSize := allocBlk.NewCall(c.coroSize)
-	mem := allocBlk.NewCall(c.palAlloc, coroSize)
+	coroSizeVal := allocBlk.NewCall(c.coroSize)
+	var coroSizeArg value.Value = coroSizeVal
+	if c.isWasm {
+		coroSizeArg = allocBlk.NewZExt(coroSizeVal, irtypes.I64)
+	}
+	mem := allocBlk.NewCall(c.palAlloc, coroSizeArg)
 	allocBlk.NewBr(startBlk)
 
 	phiMem := startBlk.NewPhi(
@@ -4308,7 +4324,7 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	gPtr := c.block.NewBitCast(gRaw, irtypes.NewPointer(gTy))
 	rpField := c.block.NewGetElementPtr(gTy, gPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldResultPtr)))
-	sentinel := c.block.NewIntToPtr(constant.NewInt(irtypes.I64, 1), irtypes.I8Ptr)
+	sentinel := c.block.NewIntToPtr(constant.NewInt(c.ptrIntType(), 1), irtypes.I8Ptr)
 	c.block.NewStore(sentinel, rpField)
 
 	c.block.NewCall(c.funcs["promise_sched_enqueue"], gRaw)
@@ -4502,7 +4518,7 @@ func (c *Compiler) genReceiveChannel(e *ast.UnaryExpr, inst *types.Instance) val
 
 	elemType := inst.TypeArgs()[0]
 	elemLLVM := c.resolveType(elemType)
-	elemSize := int64(llvmTypeSize(elemLLVM))
+	elemSize := int64(c.typeSize(elemLLVM))
 	optType := irtypes.NewStruct(irtypes.I1, elemLLVM) // { i1, T }
 
 	chanType := channelStructType()

@@ -157,8 +157,12 @@ func (f *fileStats) recalcInterval() {
 
 // --- Compile phase ---
 
-func compileTargets(files []string, baseDir string) (targets []stressTarget, cleanup func()) {
+func compileTargets(files []string, baseDir string, targetTriple string) (targets []stressTarget, cleanup func()) {
 	var tempFiles []string
+	target := targetTriple
+	if target == "" {
+		target = codegen.HostTargetTriple()
+	}
 
 	for _, f := range files {
 		relPath := f
@@ -171,7 +175,11 @@ func compileTargets(files []string, baseDir string) (targets []stressTarget, cle
 		file, info := compileFrontend(f)
 
 		// Create temp binary
-		tmp, err := os.CreateTemp("", "promise-stress-*")
+		ext := ""
+		if isWasmTarget(target) {
+			ext = ".wasm"
+		}
+		tmp, err := os.CreateTemp("", "promise-stress-*"+ext)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
 			os.Exit(1)
@@ -179,9 +187,14 @@ func compileTargets(files []string, baseDir string) (targets []stressTarget, cle
 		tmp.Close()
 
 		if info.HasExpectOutput {
+			// Skip excluded e2e tests
+			if isTestExcluded(target, info.ExcludeTargets) {
+				os.Remove(tmp.Name())
+				continue
+			}
 			// E2E test — compile with normal main
-			result := codegen.Compile(file, info)
-			compileAndLink(result, tmp.Name())
+			result := codegen.Compile(file, info, target)
+			compileAndLink(result, tmp.Name(), target)
 			tempFiles = append(tempFiles, tmp.Name())
 			targets = append(targets, stressTarget{
 				relPath:  relPath,
@@ -192,13 +205,18 @@ func compileTargets(files []string, baseDir string) (targets []stressTarget, cle
 			})
 		} else if len(info.Tests) > 0 {
 			// Unit tests — compile with generated test main
-			result := codegen.Compile(file, info)
+			result := codegen.Compile(file, info, target)
 			result.GenerateTestMain(info.Tests)
-			compileAndLink(result, tmp.Name())
+			compileAndLink(result, tmp.Name(), target)
 			tempFiles = append(tempFiles, tmp.Name())
 
 			var testNames []string
 			for _, t := range info.Tests {
+				if excludes, ok := info.TestExcludes[t.Name()]; ok {
+					if isTestExcluded(target, excludes) {
+						continue
+					}
+				}
 				testNames = append(testNames, t.Name())
 			}
 			targets = append(targets, stressTarget{
@@ -222,7 +240,7 @@ func compileTargets(files []string, baseDir string) (targets []stressTarget, cle
 
 // --- Run loop ---
 
-func runStress(files []string, count int, duration time.Duration, perRunTimeout time.Duration) {
+func runStress(files []string, count int, duration time.Duration, perRunTimeout time.Duration, targetTriple string) {
 	if len(files) == 0 {
 		fmt.Println("no test files found")
 		return
@@ -238,7 +256,7 @@ func runStress(files []string, count int, duration time.Duration, perRunTimeout 
 
 	// Compile all targets (exits on compile error)
 	fmt.Fprintf(os.Stderr, "Compiling %d file(s)...\n", len(files))
-	targets, cleanup := compileTargets(files, baseDir)
+	targets, cleanup := compileTargets(files, baseDir, targetTriple)
 	defer cleanup()
 
 	if len(targets) == 0 {
@@ -309,7 +327,12 @@ func runStress(files []string, count int, duration time.Duration, perRunTimeout 
 			// Run binary
 			runStart := time.Now()
 			ctx, cancel := context.WithTimeout(context.Background(), perRunTimeout)
-			cmd := exec.CommandContext(ctx, t.binary)
+			var cmd *exec.Cmd
+			if isWasmTarget(targetTriple) {
+				cmd = exec.CommandContext(ctx, "wasmtime", t.binary)
+			} else {
+				cmd = exec.CommandContext(ctx, t.binary)
+			}
 			output, err := cmd.CombinedOutput()
 			timedOut := ctx.Err() == context.DeadlineExceeded
 			cancel()

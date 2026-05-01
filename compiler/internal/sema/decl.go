@@ -492,6 +492,7 @@ func (c *Checker) defineFunc(d *ast.FuncDecl) {
 			}
 			c.info.ExpectOutput = expected
 			c.info.HasExpectOutput = true
+			c.info.ExcludeTargets = extractTestExclude(d.Annotations)
 		} else {
 			// `test — unit test function
 			if sig != nil {
@@ -510,6 +511,12 @@ func (c *Checker) defineFunc(d *ast.FuncDecl) {
 			}
 			fn.SetTest(true)
 			c.info.Tests = append(c.info.Tests, fn)
+			if excludes := extractTestExclude(d.Annotations); len(excludes) > 0 {
+				if c.info.TestExcludes == nil {
+					c.info.TestExcludes = make(map[string][]string)
+				}
+				c.info.TestExcludes[d.Name] = excludes
+			}
 		}
 	}
 }

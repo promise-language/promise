@@ -2137,7 +2137,7 @@ func (c *Compiler) genForInVector(s *ast.ForInStmt, slicePtr value.Value, elemTy
 // for v in ch { ... }  ≡  loop { val := <-ch; if val is none: break; v := unwrap(val); ... }
 func (c *Compiler) genForInChannel(s *ast.ForInStmt, chRaw value.Value, elemType types.Type) {
 	elemLLVM := c.resolveType(elemType)
-	elemSize := int64(llvmTypeSize(elemLLVM))
+	elemSize := int64(c.typeSize(elemLLVM))
 
 	chanType := channelStructType()
 	chPtr := c.block.NewBitCast(chRaw, irtypes.NewPointer(chanType))
@@ -2537,7 +2537,7 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 		inst := semaType.(*types.Instance)
 		elemType := inst.TypeArgs()[0]
 		elemLLVM := c.resolveType(elemType)
-		elemSize := int64(llvmTypeSize(elemLLVM))
+		elemSize := int64(c.typeSize(elemLLVM))
 
 		caseInfos[i] = selectCaseInfo{
 			chRaw:         chRaw,
@@ -2571,8 +2571,8 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(j+1)))
 				valA := c.block.NewLoad(i8PtrTy, ptrA)
 				valB := c.block.NewLoad(i8PtrTy, ptrB)
-				intA := c.block.NewPtrToInt(valA, irtypes.I64)
-				intB := c.block.NewPtrToInt(valB, irtypes.I64)
+				intA := c.block.NewPtrToInt(valA, c.ptrIntType())
+				intB := c.block.NewPtrToInt(valB, c.ptrIntType())
 				needSwap := c.block.NewICmp(enum.IPredUGT, intA, intB)
 
 				swapBlk := c.newBlock(fmt.Sprintf("select.sort.swap.%d.%d", pass, j))

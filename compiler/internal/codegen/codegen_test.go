@@ -416,7 +416,7 @@ func parseWithStd(t *testing.T, src string) (*ast.File, *sema.Info) {
 func generateIR(t *testing.T, src string) string {
 	t.Helper()
 	file, info := parseWithStd(t, src)
-	result := Compile(file, info)
+	result := Compile(file, info, "")
 	return result.Module.String()
 }
 
@@ -424,7 +424,7 @@ func generateIR(t *testing.T, src string) string {
 func compileResult(t *testing.T, src string) *CompileResult {
 	t.Helper()
 	file, info := parseWithStd(t, src)
-	return Compile(file, info)
+	return Compile(file, info, "")
 }
 
 func assertContains(t *testing.T, ir, substr string) {
@@ -4985,7 +4985,7 @@ func generateIRWithStd(t *testing.T, stdSrc, userSrc string) string {
 	if len(errs) > 0 {
 		t.Fatalf("sema errors: %v", errs)
 	}
-	result := Compile(userFile, info)
+	result := Compile(userFile, info, "")
 	return result.Module.String()
 }
 
@@ -5035,7 +5035,7 @@ func compileResultWithStd(t *testing.T, stdSrc, userSrc string) *CompileResult {
 	if len(errs) > 0 {
 		t.Fatalf("sema errors: %v", errs)
 	}
-	return Compile(userFile, info)
+	return Compile(userFile, info, "")
 }
 
 func TestStdFuncMangledName(t *testing.T) {

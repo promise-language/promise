@@ -5,6 +5,7 @@ import (
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
+	"github.com/llir/llvm/ir/value"
 )
 
 // --- G (Goroutine) struct ---
@@ -162,20 +163,35 @@ func schedStructType() *irtypes.StructType {
 
 // --- Scheduler globals and initialization ---
 
+// emitAtomicAdd emits an atomic add on native targets, or a regular load+add+store on WASM
+// (single-threaded, no atomics needed). Returns the old value.
+func (c *Compiler) emitAtomicAdd(blk *ir.Block, ptr value.Value, val value.Value, typ *irtypes.IntType) value.Value {
+	if c.isWasm {
+		old := blk.NewLoad(typ, ptr)
+		blk.NewStore(blk.NewAdd(old, val), ptr)
+		return old
+	}
+	return blk.NewAtomicRMW(enum.AtomicOpAdd, ptr, val, enum.AtomicOrderingMonotonic)
+}
+
 // defineSchedulerGlobals defines the thread-local current-G pointer and the
 // global scheduler singleton, and wires them into the compiler.
 func (c *Compiler) defineSchedulerGlobals() {
-	// @__promise_current_g = thread_local global i8* null
+	// @__promise_current_g = [thread_local] global i8* null
 	currentG := c.module.NewGlobal("__promise_current_g", irtypes.I8Ptr)
 	currentG.Init = constant.NewNull(irtypes.I8Ptr)
-	currentG.TLSModel = enum.TLSModelGeneric
+	if !c.isWasm {
+		currentG.TLSModel = enum.TLSModelGeneric
+	}
 	c.currentGGlobal = currentG
 
-	// @__promise_current_p = thread_local global i8* null
+	// @__promise_current_p = [thread_local] global i8* null
 	// Used by local queue operations to find the current P without going through M.
 	currentP := c.module.NewGlobal("__promise_current_p", irtypes.I8Ptr)
 	currentP.Init = constant.NewNull(irtypes.I8Ptr)
-	currentP.TLSModel = enum.TLSModelGeneric
+	if !c.isWasm {
+		currentP.TLSModel = enum.TLSModelGeneric
+	}
 	c.currentPGlobal = currentP
 
 	// @__promise_sched = global %Sched zeroinitializer
@@ -184,12 +200,14 @@ func (c *Compiler) defineSchedulerGlobals() {
 	sched.Init = constant.NewZeroInitializer(schedTy)
 	c.schedGlobal = sched
 
-	// @__promise_panic_jmpbuf = thread_local global i8* null
+	// @__promise_panic_jmpbuf = [thread_local] global i8* null
 	// Each M thread stores a pointer to its stack-allocated jmp_buf here.
 	// promise_panic uses this to longjmp back to the scheduler on non-main goroutine panics.
 	panicJmpBuf := c.module.NewGlobal("__promise_panic_jmpbuf", irtypes.I8Ptr)
 	panicJmpBuf.Init = constant.NewNull(irtypes.I8Ptr)
-	panicJmpBuf.TLSModel = enum.TLSModelGeneric
+	if !c.isWasm {
+		panicJmpBuf.TLSModel = enum.TLSModelGeneric
+	}
 	c.panicJmpBufGlobal = panicJmpBuf
 }
 
@@ -204,7 +222,7 @@ func (c *Compiler) defineGNewFunc() {
 	entry := fn.NewBlock("entry")
 
 	// Allocate G struct
-	structSize := constant.NewInt(irtypes.I64, int64(llvmTypeSize(gType)))
+	structSize := constant.NewInt(irtypes.I64, int64(c.typeSize(gType)))
 	rawPtr := entry.NewCall(c.palAlloc, structSize)
 	gPtr := entry.NewBitCast(rawPtr, irtypes.NewPointer(gType))
 
@@ -238,7 +256,7 @@ func (c *Compiler) defineGNewFunc() {
 	schedTy := schedStructType()
 	counterField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGoroutineCounter)))
-	counter := entry.NewAtomicRMW(enum.AtomicOpAdd, counterField, constant.NewInt(irtypes.I64, 1), enum.AtomicOrderingMonotonic)
+	counter := c.emitAtomicAdd(entry, counterField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
 
 	// Store id
 	idField := entry.NewGetElementPtr(gType, gPtr,
@@ -284,7 +302,7 @@ func (c *Compiler) defineGNewFunc() {
 	schedTyLocal := schedStructType()
 	gsCreatedField := entry.NewGetElementPtr(schedTyLocal, c.schedGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsCreated)))
-	entry.NewAtomicRMW(enum.AtomicOpAdd, gsCreatedField, constant.NewInt(irtypes.I64, 1), enum.AtomicOrderingMonotonic)
+	c.emitAtomicAdd(entry, gsCreatedField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
 
 	entry.NewRet(rawPtr)
 
@@ -346,7 +364,7 @@ func (c *Compiler) defineSchedInitFunc() {
 
 	// Allocate P array: num_cpus * sizeof(P)
 	numP64 := entry.NewZExt(numCPUsParam, irtypes.I64)
-	pSize := constant.NewInt(irtypes.I64, int64(llvmTypeSize(pTy)))
+	pSize := constant.NewInt(irtypes.I64, int64(c.typeSize(pTy)))
 	totalPSize := entry.NewMul(numP64, pSize)
 	psRaw := entry.NewCall(c.palAlloc, totalPSize)
 
@@ -404,7 +422,7 @@ func (c *Compiler) defineSchedInitFunc() {
 	initBody.NewStore(pLock, pLockField)
 
 	// Allocate and init M for this P
-	mSize := constant.NewInt(irtypes.I64, int64(llvmTypeSize(mTy)))
+	mSize := constant.NewInt(irtypes.I64, int64(c.typeSize(mTy)))
 	mRaw := initBody.NewCall(c.palAlloc, mSize)
 	mPtr := initBody.NewBitCast(mRaw, irtypes.NewPointer(mTy))
 
@@ -442,52 +460,57 @@ func (c *Compiler) defineSchedInitFunc() {
 	initBody.NewStore(nextI, iAlloca)
 	initBody.NewBr(initHeader)
 
-	// --- Phase 2: Create worker threads (all Ps fully initialized) ---
-	threadHeader := fn.NewBlock("thread_loop_header")
-	threadBody := fn.NewBlock("thread_loop_body")
-	loopEnd := fn.NewBlock("thread_loop_end")
+	if c.isWasm {
+		// WASM: no threads, no sysmon — cooperative scheduler only
+		initEnd.NewRet(nil)
+	} else {
+		// --- Phase 2: Create worker threads (all Ps fully initialized) ---
+		threadHeader := fn.NewBlock("thread_loop_header")
+		threadBody := fn.NewBlock("thread_loop_body")
+		loopEnd := fn.NewBlock("thread_loop_end")
 
-	// Reset counter
-	initEnd.NewStore(constant.NewInt(irtypes.I32, 0), iAlloca)
-	initEnd.NewBr(threadHeader)
+		// Reset counter
+		initEnd.NewStore(constant.NewInt(irtypes.I32, 0), iAlloca)
+		initEnd.NewBr(threadHeader)
 
-	tVal := threadHeader.NewLoad(irtypes.I32, iAlloca)
-	tCond := threadHeader.NewICmp(enum.IPredSLT, tVal, numCPUsParam)
-	threadHeader.NewCondBr(tCond, threadBody, loopEnd)
+		tVal := threadHeader.NewLoad(irtypes.I32, iAlloca)
+		tCond := threadHeader.NewICmp(enum.IPredSLT, tVal, numCPUsParam)
+		threadHeader.NewCondBr(tCond, threadBody, loopEnd)
 
-	tVal2 := threadBody.NewLoad(irtypes.I32, iAlloca)
-	t64Val := threadBody.NewZExt(tVal2, irtypes.I64)
+		tVal2 := threadBody.NewLoad(irtypes.I32, iAlloca)
+		t64Val := threadBody.NewZExt(tVal2, irtypes.I64)
 
-	// Get P[i].m
-	psTyped2 := threadBody.NewBitCast(psRaw, irtypes.NewPointer(pTy))
-	tPPtr := threadBody.NewGetElementPtr(pTy, psTyped2, t64Val)
-	tMField := threadBody.NewGetElementPtr(pTy, tPPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldM)))
-	tMRaw := threadBody.NewLoad(irtypes.I8Ptr, tMField)
-	tMPtr := threadBody.NewBitCast(tMRaw, irtypes.NewPointer(mTy))
+		// Get P[i].m
+		psTyped2 := threadBody.NewBitCast(psRaw, irtypes.NewPointer(pTy))
+		tPPtr := threadBody.NewGetElementPtr(pTy, psTyped2, t64Val)
+		tMField := threadBody.NewGetElementPtr(pTy, tPPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldM)))
+		tMRaw := threadBody.NewLoad(irtypes.I8Ptr, tMField)
+		tMPtr := threadBody.NewBitCast(tMRaw, irtypes.NewPointer(mTy))
 
-	// Create thread: pal_thread_create(sched_loop_fn, mRaw)
-	schedLoopFn := c.funcs["promise_sched_loop"]
-	loopFnPtr := threadBody.NewBitCast(schedLoopFn, irtypes.I8Ptr)
-	handle := threadBody.NewCall(c.palThreadCreate, loopFnPtr, tMRaw)
+		// Create thread: pal_thread_create(sched_loop_fn, mRaw)
+		schedLoopFn := c.funcs["promise_sched_loop"]
+		loopFnPtr := threadBody.NewBitCast(schedLoopFn, irtypes.I8Ptr)
+		handle := threadBody.NewCall(c.palThreadCreate, loopFnPtr, tMRaw)
 
-	// M.thread_handle = handle
-	mThField := threadBody.NewGetElementPtr(mTy, tMPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldThreadHandle)))
-	threadBody.NewStore(handle, mThField)
+		// M.thread_handle = handle
+		mThField := threadBody.NewGetElementPtr(mTy, tMPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldThreadHandle)))
+		threadBody.NewStore(handle, mThField)
 
-	// i++
-	tNextI := threadBody.NewAdd(tVal2, constant.NewInt(irtypes.I32, 1))
-	threadBody.NewStore(tNextI, iAlloca)
-	threadBody.NewBr(threadHeader)
+		// i++
+		tNextI := threadBody.NewAdd(tVal2, constant.NewInt(irtypes.I32, 1))
+		threadBody.NewStore(tNextI, iAlloca)
+		threadBody.NewBr(threadHeader)
 
-	// Start sysmon thread (sets G.preempt on running Gs periodically)
-	sysmonFn := c.funcs["promise_sysmon"]
-	sysmonFnPtr := loopEnd.NewBitCast(sysmonFn, irtypes.I8Ptr)
-	loopEnd.NewCall(c.palThreadCreate, sysmonFnPtr, constant.NewNull(irtypes.I8Ptr))
+		// Start sysmon thread (sets G.preempt on running Gs periodically)
+		sysmonFn := c.funcs["promise_sysmon"]
+		sysmonFnPtr := loopEnd.NewBitCast(sysmonFn, irtypes.I8Ptr)
+		loopEnd.NewCall(c.palThreadCreate, sysmonFnPtr, constant.NewNull(irtypes.I8Ptr))
 
-	// Done
-	loopEnd.NewRet(nil)
+		// Done
+		loopEnd.NewRet(nil)
+	}
 
 	c.funcs["promise_sched_init"] = fn
 }
@@ -566,7 +589,7 @@ func (c *Compiler) defineSchedLoopFunc() {
 	// Increment context_switches counter (atomic — called from multiple Ms)
 	ctxSwitchField := runG.NewGetElementPtr(schedTy, c.schedGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldContextSwitches)))
-	runG.NewAtomicRMW(enum.AtomicOpAdd, ctxSwitchField, constant.NewInt(irtypes.I64, 1), enum.AtomicOrderingMonotonic)
+	c.emitAtomicAdd(runG, ctxSwitchField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
 
 	// Load coro handle
 	handleField := runG.NewGetElementPtr(gTy, gPtr,
@@ -927,8 +950,8 @@ func (c *Compiler) defineStealWorkFunc() {
 
 	// Lock both Ps in address order to prevent ABBA deadlock when two Ms
 	// steal from each other concurrently (M1: steal P2→P1, M2: steal P1→P2).
-	thiefInt := entry.NewPtrToInt(thiefParam, irtypes.I64)
-	victimInt := entry.NewPtrToInt(victimParam, irtypes.I64)
+	thiefInt := entry.NewPtrToInt(thiefParam, c.ptrIntType())
+	victimInt := entry.NewPtrToInt(victimParam, c.ptrIntType())
 	thiefFirst := entry.NewICmp(enum.IPredULT, thiefInt, victimInt)
 
 	lockThiefFirst := fn.NewBlock("lock_thief_first")
@@ -1026,7 +1049,7 @@ func (c *Compiler) defineStealWorkFunc() {
 	schedTySteal := schedStructType()
 	stealsField := stealDone.NewGetElementPtr(schedTySteal, c.schedGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldSteals)))
-	stealDone.NewAtomicRMW(enum.AtomicOpAdd, stealsField, constant.NewInt(irtypes.I64, 1), enum.AtomicOrderingMonotonic)
+	c.emitAtomicAdd(stealDone, stealsField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
 
 	firstG := stealDone.NewLoad(irtypes.I8Ptr, firstGAlloca)
 	stealDone.NewRet(firstG)
@@ -1471,7 +1494,7 @@ func (c *Compiler) defineGoroutineExitFunc() {
 	schedTyLocal := schedStructType()
 	gsCompletedField := entry.NewGetElementPtr(schedTyLocal, c.schedGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGsCompleted)))
-	entry.NewAtomicRMW(enum.AtomicOpAdd, gsCompletedField, constant.NewInt(irtypes.I64, 1), enum.AtomicOrderingMonotonic)
+	c.emitAtomicAdd(entry, gsCompletedField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
 
 	// Pre-load fields we need after unlocking done_lock.
 	// For task[T] goroutines, the receiver may free the G struct as soon as
@@ -1721,9 +1744,16 @@ func (c *Compiler) wrapMainWithScheduler() {
 	// Use it directly as the OS entry point — add scheduler setup code.
 	entry := mainFn.NewBlock("entry")
 
-	// Init scheduler: num_cpus = pal_num_cpus()
-	numCPUs := entry.NewCall(c.palNumCPUs)
-	entry.NewCall(c.funcs["promise_sched_init"], numCPUs)
+	if c.isWasm {
+		// WASM: create @_start entry point that calls __promise_init_heap then @main
+		c.emitWasmStart(mainFn)
+		// Init scheduler with 1 P (single-threaded cooperative)
+		entry.NewCall(c.funcs["promise_sched_init"], constant.NewInt(irtypes.I32, 1))
+	} else {
+		// Native: num_cpus = pal_num_cpus()
+		numCPUs := entry.NewCall(c.palNumCPUs)
+		entry.NewCall(c.funcs["promise_sched_init"], numCPUs)
+	}
 
 	// Create coroutine for user main — compile body inline with inCoroutine=true
 	// so that channel ops in main() use coroutine parking instead of thread-blocking.
@@ -1773,8 +1803,12 @@ func (c *Compiler) wrapMainWithScheduler() {
 	startBlk := coroFn.NewBlock("coro.start")
 	coroEntry.NewCondBr(need, allocBlk, startBlk)
 
-	coroSize := allocBlk.NewCall(c.coroSize)
-	mem := allocBlk.NewCall(c.palAlloc, coroSize)
+	coroSizeVal := allocBlk.NewCall(c.coroSize)
+	var coroSizeArg value.Value = coroSizeVal
+	if c.isWasm {
+		coroSizeArg = allocBlk.NewZExt(coroSizeVal, irtypes.I64)
+	}
+	mem := allocBlk.NewCall(c.palAlloc, coroSizeArg)
 	allocBlk.NewBr(startBlk)
 
 	phiMem := startBlk.NewPhi(
@@ -1846,12 +1880,18 @@ func (c *Compiler) wrapMainWithScheduler() {
 	c.coroCleanupBlk = savedCoroCleanup
 	c.coroSuspendBlk = savedCoroSuspend
 
-	// Back in @main: call the ramp, create G0, enqueue, wait, shutdown
+	// Back in @main: call the ramp, create G0, enqueue, run, shutdown
 	handle := entry.NewCall(coroFn)
 	g0 := entry.NewCall(c.funcs["promise_g_new"], handle)
 	entry.NewCall(c.funcs["promise_sched_enqueue"], g0)
-	entry.NewCall(c.funcs["promise_sched_run_until_main"], g0)
-	entry.NewCall(c.funcs["promise_sched_shutdown"])
+
+	if c.isWasm {
+		// WASM: cooperative run loop (single-threaded, no M threads)
+		entry.NewCall(c.funcs["promise_sched_coop_run"])
+	} else {
+		entry.NewCall(c.funcs["promise_sched_run_until_main"], g0)
+		entry.NewCall(c.funcs["promise_sched_shutdown"])
+	}
 	entry.NewRet(constant.NewInt(irtypes.I32, 0))
 }
 
@@ -1898,6 +1938,151 @@ func (c *Compiler) defineSchedRunUntilMainFunc() {
 	doneBlk.NewRet(nil)
 
 	c.funcs["promise_sched_run_until_main"] = fn
+}
+
+// --- Cooperative scheduler (WASM) ---
+
+// defineSchedCoopRunFunc emits @promise_sched_coop_run() → void
+// Single-threaded cooperative event loop for WASM. No threads, no stealing, no sysmon.
+// Runs goroutines until main completes. Deadlocks if no runnable G and main not done.
+func (c *Compiler) defineSchedCoopRunFunc() {
+	fn := c.module.NewFunc("promise_sched_coop_run", irtypes.Void)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	schedTy := schedStructType()
+	gTy := goroutineStructType()
+	pTy := processorStructType()
+
+	entry := fn.NewBlock("entry")
+	loop := fn.NewBlock("loop")
+	foundG := fn.NewBlock("found_g")
+	noG := fn.NewBlock("no_g")
+	afterResume := fn.NewBlock("after_resume")
+	coroDoneBlk := fn.NewBlock("coro_done")
+	coroSuspendedBlk := fn.NewBlock("coro_suspended")
+	releaseMtxBlk := fn.NewBlock("release_park_mutex")
+	yieldReenqueueBlk := fn.NewBlock("yield_reenqueue")
+	afterReleaseBlk := fn.NewBlock("after_release")
+	doneBlk := fn.NewBlock("done")
+	deadlockBlk := fn.NewBlock("deadlock")
+
+	// Get P0 from sched.allPs[0]
+	psField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldPs)))
+	psRaw := entry.NewLoad(irtypes.I8Ptr, psField)
+	// P0 is the first element — cast to P* then back to i8*
+	psTyped := entry.NewBitCast(psRaw, irtypes.NewPointer(pTy))
+	p0 := entry.NewBitCast(psTyped, irtypes.I8Ptr)
+	entry.NewBr(loop)
+
+	// loop: find runnable G via find_runnable (tries local queue, global queue, steal)
+	gRaw := loop.NewCall(c.funcs["promise_sched_find_runnable"], p0)
+	gNull := loop.NewICmp(enum.IPredEQ, gRaw, constant.NewNull(irtypes.I8Ptr))
+	loop.NewCondBr(gNull, noG, foundG)
+
+	// noG: check if main is done
+	mdField := noG.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldMainDone)))
+	mainDone := noG.NewLoad(irtypes.I8, mdField)
+	mainIsDone := noG.NewICmp(enum.IPredNE, mainDone, constant.NewInt(irtypes.I8, 0))
+	noG.NewCondBr(mainIsDone, doneBlk, deadlockBlk)
+
+	// foundG: set current_g/current_p, set G.status=running, resume coroutine
+	foundG.NewStore(gRaw, c.currentGGlobal)
+	foundG.NewStore(p0, c.currentPGlobal)
+
+	// G.status = running
+	gPtr := foundG.NewBitCast(gRaw, irtypes.NewPointer(gTy))
+	statusField := foundG.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldStatus)))
+	foundG.NewStore(constant.NewInt(irtypes.I8, gStatusRunning), statusField)
+
+	// P.current_g = gRaw
+	pPtr := foundG.NewBitCast(p0, irtypes.NewPointer(pTy))
+	curGField := foundG.NewGetElementPtr(pTy, pPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldCurrentG)))
+	foundG.NewStore(gRaw, curGField)
+
+	// Increment context_switches
+	ctxField := foundG.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldContextSwitches)))
+	ctxVal := foundG.NewLoad(irtypes.I64, ctxField)
+	foundG.NewStore(foundG.NewAdd(ctxVal, constant.NewInt(irtypes.I64, 1)), ctxField)
+
+	// Load coro handle and resume
+	handleField := foundG.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldCoroHandle)))
+	coroHandle := foundG.NewLoad(irtypes.I8Ptr, handleField)
+	foundG.NewCall(c.coroResume, coroHandle)
+	foundG.NewBr(afterResume)
+
+	// afterResume: reload G from current_g (safety), check coro.done
+	gRaw2 := afterResume.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
+	gPtr2 := afterResume.NewBitCast(gRaw2, irtypes.NewPointer(gTy))
+	handleField2 := afterResume.NewGetElementPtr(gTy, gPtr2,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldCoroHandle)))
+	coroHandle2 := afterResume.NewLoad(irtypes.I8Ptr, handleField2)
+
+	isDoneCoro := afterResume.NewCall(c.coroDone, coroHandle2)
+	afterResume.NewCondBr(isDoneCoro, coroDoneBlk, coroSuspendedBlk)
+
+	// coroDone: goroutine finished — clear P.current_g, call goroutine_exit, clear TLS
+	pRaw2 := coroDoneBlk.NewLoad(irtypes.I8Ptr, c.currentPGlobal)
+	pPtr2 := coroDoneBlk.NewBitCast(pRaw2, irtypes.NewPointer(pTy))
+	pCurGField2 := coroDoneBlk.NewGetElementPtr(pTy, pPtr2,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldCurrentG)))
+	coroDoneBlk.NewStore(constant.NewNull(irtypes.I8Ptr), pCurGField2)
+	coroDoneBlk.NewCall(c.funcs["promise_goroutine_exit"], gRaw2)
+	coroDoneBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentGGlobal)
+	coroDoneBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentPGlobal)
+	coroDoneBlk.NewBr(loop)
+
+	// coroSuspended: check park_mutex to distinguish park vs yield
+	pmField := coroSuspendedBlk.NewGetElementPtr(gTy, gPtr2,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldParkMutex)))
+	parkMtx := coroSuspendedBlk.NewLoad(irtypes.I8Ptr, pmField)
+	hasParkMtx := coroSuspendedBlk.NewICmp(enum.IPredNE, parkMtx, constant.NewNull(irtypes.I8Ptr))
+	coroSuspendedBlk.NewCondBr(hasParkMtx, releaseMtxBlk, yieldReenqueueBlk)
+
+	// release_park_mutex: goroutine parked (on waiter list) — unlock + clear field
+	releaseMtxBlk.NewCall(c.palMutexUnlock, parkMtx)
+	releaseMtxBlk.NewStore(constant.NewNull(irtypes.I8Ptr), pmField)
+	releaseMtxBlk.NewBr(afterReleaseBlk)
+
+	// yield_reenqueue: cooperative yield — re-enqueue G
+	pRawY := yieldReenqueueBlk.NewLoad(irtypes.I8Ptr, c.currentPGlobal)
+	pPtrY := yieldReenqueueBlk.NewBitCast(pRawY, irtypes.NewPointer(pTy))
+	pCurGFieldY := yieldReenqueueBlk.NewGetElementPtr(pTy, pPtrY,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldCurrentG)))
+	yieldReenqueueBlk.NewStore(constant.NewNull(irtypes.I8Ptr), pCurGFieldY)
+	yieldReenqueueBlk.NewCall(c.funcs["promise_sched_enqueue"], gRaw2)
+	yieldReenqueueBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentGGlobal)
+	yieldReenqueueBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentPGlobal)
+	yieldReenqueueBlk.NewBr(loop)
+
+	// after_release: parked path — clear P.current_g and TLS, loop back
+	pRaw3 := afterReleaseBlk.NewLoad(irtypes.I8Ptr, c.currentPGlobal)
+	pPtr3 := afterReleaseBlk.NewBitCast(pRaw3, irtypes.NewPointer(pTy))
+	pCurGField3 := afterReleaseBlk.NewGetElementPtr(pTy, pPtr3,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldCurrentG)))
+	afterReleaseBlk.NewStore(constant.NewNull(irtypes.I8Ptr), pCurGField3)
+	afterReleaseBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentGGlobal)
+	afterReleaseBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentPGlobal)
+	afterReleaseBlk.NewBr(loop)
+
+	// done: main completed
+	doneBlk.NewRet(nil)
+
+	// deadlock: all goroutines asleep, main not done
+	deadlockMsg := constant.NewCharArrayFromString("all goroutines are asleep - deadlock!\x00")
+	deadlockGlobal := c.module.NewGlobalDef(".str.deadlock", deadlockMsg)
+	deadlockGlobal.Immutable = true
+	deadlockPtr := deadlockBlk.NewGetElementPtr(deadlockGlobal.ContentType, deadlockGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	deadlockBlk.NewCall(c.funcs["promise_panic"], deadlockPtr)
+	deadlockBlk.NewUnreachable()
+
+	c.funcs["promise_sched_coop_run"] = fn
 }
 
 // --- Waiter list helpers (for channel goroutine parking) ---

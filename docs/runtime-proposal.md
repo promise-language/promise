@@ -38,7 +38,7 @@ After completing Phases 1-3, the C runtime is reduced to a single function:
 
 **LLVM optimizer attributes** on all externs: `noalias`, `nocapture`, `noundef`, `nounwind`, `willreturn`, `readonly`, `argmemonly` (as applicable).
 
-**Build pipeline**: No C compilation — the `.ll` file contains everything. On Linux, `opt -O1` + `llc` + `ld.lld` compile and link with bundled musl CRT (Phase 7b/7b'). On macOS, `opt -O1` + `llc` + system `ld` (or `ld64.lld`) with `-lSystem -syslibroot` (Phase 7c). On other platforms (or `PROMISE_USE_CLANG=1`), clang acts as driver. Requires LLVM 22+.
+**Build pipeline**: No C compilation — the `.ll` file contains everything. On Linux, `opt -O1` + `llc` + `ld.lld` compile and link with bundled musl CRT (Phase 7b/7b'). On macOS, `opt -O1` + `llc` + system `ld` (or `ld64.lld`) with `-lSystem -syslibroot` (Phase 7c). On WASM, `opt -O1` + `llc` + `wasm-ld` with custom bump allocator and cooperative scheduler — no libc dependency (Phases 4b/5d/7a). On other platforms (or `PROMISE_USE_CLANG=1`), clang acts as driver. Requires LLVM 22+.
 
 ---
 
@@ -52,14 +52,14 @@ After completing Phases 1-3, the C runtime is reduced to a single function:
 | **3b** | PAL Windows | **Done** |
 | **3c** | PAL WASM (WASI imports + JS FFI) | **Done** |
 | **4** | Centralize allocator behind PAL | **Done** |
-| **4b** | WASM linear memory allocator (bump/free-list on `memory.grow`) | Planned |
+| **4b** | WASM linear memory allocator (bump on `memory.grow`, no libc) | **Done** |
 | **5a** | 1:1 threading MVP (`go`/`<-` with OS threads via PAL) | **Done** |
 | **5b** | Channels (`channel[T]`, buffered send/receive) | **Done** |
 | **5c** | M:N scheduler (GMP model, LLVM coroutines, work stealing) | **Done** |
-| **5d** | Cooperative scheduler for WASM (Asyncify or stack-switching) | Planned |
+| **5d** | Cooperative scheduler for WASM (LLVM coroutines, single-threaded) | **Done** |
 | **6** | IO reactor: kqueue + epoll + IOCP | Planned |
 | **6b** | JS event loop integration for WASM IO | Planned |
-| **7a** | WASM: `llc` + `wasm-ld` (no CRT) | Planned |
+| **7a** | WASM: `opt` + `llc` + `wasm-ld` (no CRT) + `--target wasm32-wasi` | **Done** |
 | **7b** | Linux: `opt` + `llc` + `ld.lld` (system glibc CRT) | **Done** |
 | **7b'** | Linux: bundled musl CRT (fully static binaries) | **Done** |
 | **7c** | macOS: `llc` + system `ld` (SDK sysroot) | **Done** |
@@ -951,7 +951,7 @@ The bundled-binaries approach (Phase 7) is the pragmatic first step. The long-te
 | **Linux** | `opt` + `llc` + `ld.lld` + bundled musl CRT → **fully static** | LLVM 22+ (`opt`, `llc`, `lld`), `musl-dev` (embedded at compile time) |
 | **macOS** | `opt` + `llc` + system `ld` (or `ld64.lld`) | LLVM 22+ (`opt`, `llc`), Xcode CommandLineTools (SDK + `ld`) |
 | **Windows** | clang (fallback) | clang 22+ |
-| **WASM** | clang (fallback) | clang 22+ |
+| **WASM** | `opt` + `llc` + `wasm-ld` (no CRT, bump allocator, coop scheduler) | LLVM 22+ (`opt`, `llc`, `wasm-ld`) |
 
 **After full Phase 7** (bundled tools + musl):
 

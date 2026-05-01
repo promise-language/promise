@@ -29,7 +29,7 @@ none
 negated
 100
 both
-8080""") {
+8080""", exclude: "wasm32") {
     // --- Implicit T to T? conversion ---
     string name = "Alice";
     string? maybeName = name;

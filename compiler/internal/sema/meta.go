@@ -213,6 +213,33 @@ func extractTestExpected(annotations []*ast.MetaAnnotation) (string, bool) {
 	return "", false
 }
 
+// extractTestExclude extracts the exclude targets from a `test(exclude: "wasm32") annotation.
+// The value is split by comma into a list of target substrings.
+func extractTestExclude(annotations []*ast.MetaAnnotation) []string {
+	for _, ann := range annotations {
+		if ann.Name != "test" {
+			continue
+		}
+		for _, p := range ann.Params {
+			if p.Name == "exclude" {
+				raw := evalStringLit(p.Value)
+				if raw == "" {
+					return nil
+				}
+				var targets []string
+				for _, t := range strings.Split(raw, ",") {
+					t = strings.TrimSpace(t)
+					if t != "" {
+						targets = append(targets, t)
+					}
+				}
+				return targets
+			}
+		}
+	}
+	return nil
+}
+
 // checkDeprecatedObj emits a warning if the resolved object refers to a deprecated entity.
 func (c *Checker) checkDeprecatedObj(pos ast.Pos, obj types.Object) {
 	switch o := obj.(type) {

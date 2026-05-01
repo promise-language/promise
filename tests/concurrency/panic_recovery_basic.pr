@@ -3,7 +3,7 @@
 // Recovered goroutine panics are silent (no stderr output) — the panic message
 // is stored in G.panic_msg for task re-propagation only.
 
-main() `test(expected: "survived") {
+main() `test(expected: "survived", exclude: "wasm32") {
   ch := channel[int](capacity: 1);
 
   go {

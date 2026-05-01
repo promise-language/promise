@@ -2,7 +2,7 @@
 // The value sent before the goroutine panics must still be receivable.
 // Recovered goroutine panics are silent — no stderr output.
 
-main() `test(expected: "42") {
+main() `test(expected: "42", exclude: "wasm32") {
     ch := channel[int](capacity: 2);
 
     go {

@@ -318,6 +318,11 @@ func resultErrIdx(resultType *irtypes.StructType) uint64 {
 
 // llvmTypeAlign returns the natural alignment of an LLVM type in bytes on a 64-bit target.
 func llvmTypeAlign(typ irtypes.Type) int {
+	return llvmTypeAlignWithPtr(typ, 8)
+}
+
+// llvmTypeAlignWithPtr returns the natural alignment of an LLVM type with the given pointer size.
+func llvmTypeAlignWithPtr(typ irtypes.Type, ptrSize int) int {
 	switch t := typ.(type) {
 	case *irtypes.IntType:
 		sz := int((t.BitSize + 7) / 8)
@@ -331,17 +336,17 @@ func llvmTypeAlign(typ irtypes.Type) int {
 		}
 		return 8
 	case *irtypes.PointerType:
-		return 8
+		return ptrSize
 	case *irtypes.StructType:
 		maxAlign := 1
 		for _, f := range t.Fields {
-			if a := llvmTypeAlign(f); a > maxAlign {
+			if a := llvmTypeAlignWithPtr(f, ptrSize); a > maxAlign {
 				maxAlign = a
 			}
 		}
 		return maxAlign
 	case *irtypes.ArrayType:
-		return llvmTypeAlign(t.ElemType)
+		return llvmTypeAlignWithPtr(t.ElemType, ptrSize)
 	default:
 		return 8
 	}
@@ -350,6 +355,11 @@ func llvmTypeAlign(typ irtypes.Type) int {
 // llvmTypeSize returns the byte size of an LLVM type on a 64-bit target,
 // accounting for struct field alignment and padding.
 func llvmTypeSize(typ irtypes.Type) int {
+	return llvmTypeSizeWithPtr(typ, 8)
+}
+
+// llvmTypeSizeWithPtr returns the byte size of an LLVM type with the given pointer size.
+func llvmTypeSizeWithPtr(typ irtypes.Type, ptrSize int) int {
 	switch t := typ.(type) {
 	case *irtypes.IntType:
 		return int((t.BitSize + 7) / 8)
@@ -359,19 +369,19 @@ func llvmTypeSize(typ irtypes.Type) int {
 		}
 		return 8 // double
 	case *irtypes.PointerType:
-		return 8
+		return ptrSize
 	case *irtypes.StructType:
 		offset := 0
 		maxAlign := 1
 		for _, f := range t.Fields {
-			fieldAlign := llvmTypeAlign(f)
+			fieldAlign := llvmTypeAlignWithPtr(f, ptrSize)
 			if fieldAlign > maxAlign {
 				maxAlign = fieldAlign
 			}
 			if rem := offset % fieldAlign; rem != 0 {
 				offset += fieldAlign - rem
 			}
-			offset += llvmTypeSize(f)
+			offset += llvmTypeSizeWithPtr(f, ptrSize)
 		}
 		// Pad to struct alignment
 		if rem := offset % maxAlign; rem != 0 {
@@ -379,7 +389,7 @@ func llvmTypeSize(typ irtypes.Type) int {
 		}
 		return offset
 	case *irtypes.ArrayType:
-		return int(t.Len) * llvmTypeSize(t.ElemType)
+		return int(t.Len) * llvmTypeSizeWithPtr(t.ElemType, ptrSize)
 	default:
 		return 8
 	}

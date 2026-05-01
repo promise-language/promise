@@ -10,7 +10,7 @@ x < y
 10
 45
 5
-7""") {
+7""", exclude: "wasm32") {
   // Integers
   print_int(42);
   print_int(-7);

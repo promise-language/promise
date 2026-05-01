@@ -8,7 +8,7 @@ main() `test(expected: """42
 3.14
 true
 false
-hello from std""") {
+hello from std""", exclude: "wasm32") {
   print_int(42);
   print_int(min(3, 7));
   print_int(max(3, 7));

@@ -243,7 +243,7 @@ func computeMonoUserTypeLayout(module *ir.Module, named *types.Named, name strin
 }
 
 // computeMonoEnumLayout computes a TypeDeclLayout for a monomorphic enum instance.
-func computeMonoEnumLayout(module *ir.Module, enum *types.Enum, name string, subst map[*types.TypeParam]types.Type) *TypeDeclLayout {
+func computeMonoEnumLayout(module *ir.Module, enum *types.Enum, name string, subst map[*types.TypeParam]types.Type, ptrSize int) *TypeDeclLayout {
 	variantTag := map[string]int{}
 	variantDataTypes := map[string]*irtypes.StructType{}
 	maxDataSize := 0
@@ -262,7 +262,7 @@ func computeMonoEnumLayout(module *ir.Module, enum *types.Enum, name string, sub
 
 			ds := 0
 			for _, ft := range fieldTypes {
-				ds += llvmTypeSize(ft)
+				ds += llvmTypeSizeWithPtr(ft, ptrSize)
 			}
 			if ds > maxDataSize {
 				maxDataSize = ds
@@ -363,7 +363,7 @@ func (c *Compiler) computeMonoLayouts(instances []*types.Instance) {
 				continue
 			}
 			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
-			c.monoEnumLayouts[name] = computeMonoEnumLayout(c.module, origin, name, subst)
+			c.monoEnumLayouts[name] = computeMonoEnumLayout(c.module, origin, name, subst, c.ptrSize())
 		}
 	}
 }

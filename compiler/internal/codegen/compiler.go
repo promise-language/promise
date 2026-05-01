@@ -157,9 +157,47 @@ type Compiler struct {
 	// Go expression counter for unique trampoline function names
 	goCounter int
 
+	// Target triple and platform flags
+	target string // LLVM target triple
+	isWasm bool   // true if targeting wasm32
+
 	// Global constants for print/panic functions
 	newlineGlobal     *ir.Global // "\n" (1 byte)
 	panicPrefixGlobal *ir.Global // "panic: " (7 bytes)
+}
+
+// ptrIntType returns i32 for wasm32, i64 for 64-bit targets.
+func (c *Compiler) ptrIntType() *irtypes.IntType {
+	if c.isWasm {
+		return irtypes.I32
+	}
+	return irtypes.I64
+}
+
+// ptrSize returns the pointer byte size (4 for wasm32, 8 for 64-bit).
+func (c *Compiler) ptrSize() int {
+	if c.isWasm {
+		return 4
+	}
+	return 8
+}
+
+// ptrSizeConst returns a constant for the pointer size in the pointer-width int type.
+func (c *Compiler) ptrSizeConst() *constant.Int {
+	if c.isWasm {
+		return constant.NewInt(irtypes.I32, 4)
+	}
+	return constant.NewInt(irtypes.I64, 8)
+}
+
+// typeSize returns the byte size of an LLVM type on the current target.
+func (c *Compiler) typeSize(typ irtypes.Type) int {
+	return llvmTypeSizeWithPtr(typ, c.ptrSize())
+}
+
+// typeAlign returns the alignment of an LLVM type on the current target.
+func (c *Compiler) typeAlign(typ irtypes.Type) int {
+	return llvmTypeAlignWithPtr(typ, c.ptrSize())
 }
 
 // scopeBindingKind distinguishes close() bindings (use) from drop() bindings.
@@ -243,13 +281,22 @@ func HostTargetTriple() string {
 }
 
 // Compile generates an LLVM IR module from a type-checked Promise AST.
-func Compile(file *ast.File, info *sema.Info) *CompileResult {
+// If target is empty, defaults to the host platform triple.
+func Compile(file *ast.File, info *sema.Info, target string) *CompileResult {
 	module := ir.NewModule()
-	module.TargetTriple = HostTargetTriple()
+	if target == "" {
+		target = HostTargetTriple()
+	}
+	module.TargetTriple = target
+	if strings.Contains(target, "wasm32") {
+		module.DataLayout = "e-m:e-p:32:32-i64:64-n32:64-S128"
+	}
 
 	c := &Compiler{
 		module:          module,
 		info:            info,
+		target:          target,
+		isWasm:          strings.Contains(target, "wasm"),
 		funcs:           make(map[string]*ir.Func),
 		stdFuncs:        make(map[string]*ir.Func),
 		stdExterns:      make(map[string]*ExternFunc),
@@ -381,6 +428,20 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 	entry.NewStore(constant.NewInt(irtypes.I32, 0), failedCountAlloca)
 
 	for _, test := range tests {
+		// Skip tests excluded for this target
+		if excludes, ok := c.info.TestExcludes[test.Name()]; ok {
+			excluded := false
+			for _, ex := range excludes {
+				if strings.Contains(c.target, ex) {
+					excluded = true
+					break
+				}
+			}
+			if excluded {
+				continue
+			}
+		}
+
 		// Look up the IR function — tests are always user code
 		testFn := c.funcs[test.Name()]
 		if testFn == nil {
@@ -513,6 +574,20 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 	retHasFailures := doneBlock.NewICmp(enum.IPredSGT, finalFailed, constant.NewInt(irtypes.I32, 0))
 	retVal := doneBlock.NewSelect(retHasFailures, constant.NewInt(irtypes.I32, 1), constant.NewInt(irtypes.I32, 0))
 	doneBlock.NewRet(retVal)
+
+	// WASM: emit @_start if not already present (test-only files have no user main)
+	if c.isWasm {
+		hasStart := false
+		for _, f := range c.module.Funcs {
+			if f.Name() == "_start" {
+				hasStart = true
+				break
+			}
+		}
+		if !hasStart {
+			c.emitWasmStart(mainFn)
+		}
+	}
 }
 
 // declareIntrinsics declares compiler-intrinsic runtime functions (not user-declared externs).
@@ -542,8 +617,12 @@ func (c *Compiler) declareIntrinsics() {
 	c.palCondDestroy = p.EmitCondDestroy(c.module)
 
 	// usleep — POSIX function for brief polling delays in thread-blocking mode
-	c.palUsleep = c.module.NewFunc("usleep", irtypes.I32, ir.NewParam("usec", irtypes.I32))
-	c.palUsleep.FuncAttrs = append(c.palUsleep.FuncAttrs, enum.FuncAttrNoUnwind)
+	if c.isWasm {
+		c.palUsleep = c.defineWasmUsleep()
+	} else {
+		c.palUsleep = c.module.NewFunc("usleep", irtypes.I32, ir.NewParam("usec", irtypes.I32))
+		c.palUsleep.FuncAttrs = append(c.palUsleep.FuncAttrs, enum.FuncAttrNoUnwind)
+	}
 
 	// PAL: scheduler primitives (Phase 5c)
 	c.palNumCPUs = p.EmitNumCPUs(c.module)
@@ -566,19 +645,22 @@ func (c *Compiler) declareIntrinsics() {
 	c.defineStringNewFunc()
 	c.defineStringConcatFunc()
 
-	// Memcmp (SIMD-accelerated; no @llvm.memcmp intrinsic exists)
-	// Used by string equality, vector contains, and string split
-	memcmpS1 := ir.NewParam("s1", irtypes.I8Ptr)
-	memcmpS1.Attrs = append(memcmpS1.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
-	memcmpS2 := ir.NewParam("s2", irtypes.I8Ptr)
-	memcmpS2.Attrs = append(memcmpS2.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
-	memcmpN := ir.NewParam("n", irtypes.I64)
-	memcmpN.Attrs = append(memcmpN.Attrs, enum.ParamAttrNoUndef)
-	memcmpFn := c.module.NewFunc("memcmp", irtypes.I32, memcmpS1, memcmpS2, memcmpN)
-	memcmpFn.FuncAttrs = append(memcmpFn.FuncAttrs,
-		enum.FuncAttrMustProgress, enum.FuncAttrNoUnwind,
-		enum.FuncAttrReadOnly, enum.FuncAttrWillReturn, enum.FuncAttrArgMemOnly)
-	c.funcs["memcmp"] = memcmpFn
+	// Memcmp — used by string equality, vector contains, and string split
+	if c.isWasm {
+		c.funcs["memcmp"] = c.defineWasmMemcmp()
+	} else {
+		memcmpS1 := ir.NewParam("s1", irtypes.I8Ptr)
+		memcmpS1.Attrs = append(memcmpS1.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
+		memcmpS2 := ir.NewParam("s2", irtypes.I8Ptr)
+		memcmpS2.Attrs = append(memcmpS2.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
+		memcmpN := ir.NewParam("n", irtypes.I64)
+		memcmpN.Attrs = append(memcmpN.Attrs, enum.ParamAttrNoUndef)
+		memcmpFn := c.module.NewFunc("memcmp", irtypes.I32, memcmpS1, memcmpS2, memcmpN)
+		memcmpFn.FuncAttrs = append(memcmpFn.FuncAttrs,
+			enum.FuncAttrMustProgress, enum.FuncAttrNoUnwind,
+			enum.FuncAttrReadOnly, enum.FuncAttrWillReturn, enum.FuncAttrArgMemOnly)
+		c.funcs["memcmp"] = memcmpFn
+	}
 
 	// String direct equality (codegen-emitted LLVM IR, replaces C runtime)
 	c.defineStringDirectEqFunc()
@@ -594,13 +676,17 @@ func (c *Compiler) declareIntrinsics() {
 	c.defineStringTrimFunc()
 	c.defineStringSplitFunc()
 
-	// snprintf extern (needed by defineF64ToStringFunc)
-	snprintfFn := c.module.NewFunc("snprintf", irtypes.I32,
-		ir.NewParam("buf", irtypes.I8Ptr),
-		ir.NewParam("size", irtypes.I64),
-		ir.NewParam("fmt", irtypes.I8Ptr))
-	snprintfFn.Sig.Variadic = true
-	c.funcs["snprintf"] = snprintfFn
+	// snprintf — needed by defineF64ToStringFunc (stub on WASM: float→string deferred)
+	if c.isWasm {
+		c.funcs["snprintf"] = c.defineWasmSnprintf()
+	} else {
+		snprintfFn := c.module.NewFunc("snprintf", irtypes.I32,
+			ir.NewParam("buf", irtypes.I8Ptr),
+			ir.NewParam("size", irtypes.I64),
+			ir.NewParam("fmt", irtypes.I8Ptr))
+		snprintfFn.Sig.Variadic = true
+		c.funcs["snprintf"] = snprintfFn
+	}
 
 	// Value-to-string conversion (codegen-emitted LLVM IR, replaces C runtime)
 	c.defineBoolToStringFunc()
@@ -627,19 +713,24 @@ func (c *Compiler) declareIntrinsics() {
 	// LLVM coroutine intrinsics (Phase 5c — M:N scheduler)
 	c.declareCoroIntrinsics()
 
-	// setjmp/longjmp (libc) — used for goroutine-level panic recovery.
-	// Declared before scheduler functions since defineSchedLoopFunc uses them.
-	// On POSIX, _setjmp/_longjmp don't save/restore signal masks (faster).
-	setjmpFn := c.module.NewFunc("_setjmp", irtypes.I32,
-		ir.NewParam("env", irtypes.I8Ptr))
-	setjmpFn.FuncAttrs = append(setjmpFn.FuncAttrs, enum.FuncAttrNoUnwind)
-	c.funcs["setjmp"] = setjmpFn
+	// setjmp/longjmp — used for goroutine-level panic recovery.
+	// On WASM: stubs (panic always exits, no longjmp recovery).
+	// On POSIX: _setjmp/_longjmp don't save/restore signal masks (faster).
+	if c.isWasm {
+		c.funcs["setjmp"] = c.defineWasmSetjmp()
+		c.funcs["longjmp"] = c.defineWasmLongjmp()
+	} else {
+		setjmpFn := c.module.NewFunc("_setjmp", irtypes.I32,
+			ir.NewParam("env", irtypes.I8Ptr))
+		setjmpFn.FuncAttrs = append(setjmpFn.FuncAttrs, enum.FuncAttrNoUnwind)
+		c.funcs["setjmp"] = setjmpFn
 
-	longjmpFn := c.module.NewFunc("_longjmp", irtypes.Void,
-		ir.NewParam("env", irtypes.I8Ptr),
-		ir.NewParam("val", irtypes.I32))
-	longjmpFn.FuncAttrs = append(longjmpFn.FuncAttrs, enum.FuncAttrNoReturn, enum.FuncAttrNoUnwind)
-	c.funcs["longjmp"] = longjmpFn
+		longjmpFn := c.module.NewFunc("_longjmp", irtypes.Void,
+			ir.NewParam("env", irtypes.I8Ptr),
+			ir.NewParam("val", irtypes.I32))
+		longjmpFn.FuncAttrs = append(longjmpFn.FuncAttrs, enum.FuncAttrNoReturn, enum.FuncAttrNoUnwind)
+		c.funcs["longjmp"] = longjmpFn
+	}
 
 	// Scheduler globals and functions (Phase 5c)
 	c.defineSchedulerGlobals()
@@ -657,6 +748,9 @@ func (c *Compiler) declareIntrinsics() {
 	c.defineSysmonFunc()
 	c.defineSchedInitFunc()
 	c.defineSchedRunUntilMainFunc()
+	if c.isWasm {
+		c.defineSchedCoopRunFunc()
+	}
 	c.defineSchedShutdownFunc()
 	c.defineWaiterEnqueueFunc()
 	c.defineWaiterDequeueFunc()
@@ -667,12 +761,16 @@ func (c *Compiler) declareIntrinsics() {
 	c.palWrite = p.EmitWrite(c.module)
 	c.palExit = p.EmitExit(c.module)
 
-	// strlen (libc) — needed by definePanicBody to get C string length
-	strlenFn := c.module.NewFunc("strlen", irtypes.I64,
-		ir.NewParam("s", irtypes.I8Ptr))
-	strlenFn.FuncAttrs = append(strlenFn.FuncAttrs,
-		enum.FuncAttrNoUnwind, enum.FuncAttrReadOnly, enum.FuncAttrWillReturn)
-	c.funcs["strlen"] = strlenFn
+	// strlen — needed by definePanicBody to get C string length
+	if c.isWasm {
+		c.funcs["strlen"] = c.defineWasmStrlen()
+	} else {
+		strlenFn := c.module.NewFunc("strlen", irtypes.I64,
+			ir.NewParam("s", irtypes.I8Ptr))
+		strlenFn.FuncAttrs = append(strlenFn.FuncAttrs,
+			enum.FuncAttrNoUnwind, enum.FuncAttrReadOnly, enum.FuncAttrWillReturn)
+		c.funcs["strlen"] = strlenFn
+	}
 
 }
 
@@ -691,7 +789,7 @@ func (c *Compiler) defineStringNewFunc() {
 		irtypes.NewArray(0, irtypes.I8), // data (flexible array)
 	)
 
-	headerSize := constant.NewInt(irtypes.I64, 16)
+	headerSize := constant.NewInt(irtypes.I64, int64(c.typeSize(irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64))))
 
 	// OOM panic message
 	oomMsg := constant.NewCharArrayFromString("out of memory\x00")
@@ -752,7 +850,7 @@ func (c *Compiler) defineStringConcatFunc() {
 		irtypes.NewArray(0, irtypes.I8), // data (flexible array)
 	)
 
-	headerSize := constant.NewInt(irtypes.I64, 16)
+	headerSize := constant.NewInt(irtypes.I64, int64(c.typeSize(irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64))))
 
 	// OOM panic message
 	oomMsg := constant.NewCharArrayFromString("out of memory\x00")
@@ -1012,8 +1110,8 @@ func (c *Compiler) defineStringSplitFunc() {
 
 	zero64 := constant.NewInt(irtypes.I64, 0)
 	one64 := constant.NewInt(irtypes.I64, 1)
-	ptrSize := constant.NewInt(irtypes.I64, 8) // sizeof(pointer)
-	headerSize := constant.NewInt(irtypes.I64, 16)
+	ptrSize := constant.NewInt(irtypes.I64, int64(c.ptrSize()))
+	headerSize := constant.NewInt(irtypes.I64, int64(c.typeSize(irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64))))
 	vectorHeaderType := irtypes.NewStruct(irtypes.I64, irtypes.I64) // {len, cap}
 
 	// OOM panic message
@@ -2763,7 +2861,7 @@ func (c *Compiler) computeEnumLayouts(file *ast.File) {
 		if len(enum.TypeParams()) > 0 {
 			continue // generic — handled by monomorphization
 		}
-		c.enumLayouts[enum] = computeEnumLayout(c.module, enum)
+		c.enumLayouts[enum] = computeEnumLayout(c.module, enum, c.ptrSize())
 	}
 }
 
@@ -3077,7 +3175,7 @@ func (c *Compiler) defineChannelNewFunc() {
 	entry := fn.NewBlock("entry")
 
 	// Allocate channel struct
-	structSize := constant.NewInt(irtypes.I64, int64(llvmTypeSize(chanType)))
+	structSize := constant.NewInt(irtypes.I64, int64(c.typeSize(chanType)))
 	rawPtr := entry.NewCall(c.palAlloc, structSize)
 	chPtr := entry.NewBitCast(rawPtr, irtypes.NewPointer(chanType))
 
@@ -3182,8 +3280,12 @@ func (c *Compiler) declareCoroIntrinsics() {
 		ir.NewParam("id", irtypes.Token),
 		ir.NewParam("mem", irtypes.I8Ptr))
 
-	// @llvm.coro.size.i64() → i64
-	c.coroSize = c.module.NewFunc("llvm.coro.size.i64", irtypes.I64)
+	// @llvm.coro.size.{i32|i64}() → {i32|i64}
+	if c.isWasm {
+		c.coroSize = c.module.NewFunc("llvm.coro.size.i32", irtypes.I32)
+	} else {
+		c.coroSize = c.module.NewFunc("llvm.coro.size.i64", irtypes.I64)
+	}
 
 	// @llvm.coro.suspend(token %save, i1 %final) → i8
 	c.coroSuspend = c.module.NewFunc("llvm.coro.suspend", irtypes.I8,

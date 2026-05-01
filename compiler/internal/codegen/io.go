@@ -249,11 +249,24 @@ func (c *Compiler) definePrintBoolBody(fn *ir.Func) {
 // msg is a null-terminated C string.
 // For non-main goroutines: silently sets G.panicked=1, G.panic_msg=msg, longjmp to scheduler.
 // For main goroutine or no goroutine context: writes "panic: <msg>\n" to stderr, exits with code 1.
-// Recovered goroutines don't write to stderr — this avoids non-deterministic output
-// ordering between goroutine panic messages and main's stdout.
+// On WASM: always exits (no longjmp recovery — single-threaded, no goroutine isolation).
 func (c *Compiler) definePanicBody(fn *ir.Func) {
 	entry := fn.NewBlock("entry")
 	stderr := constant.NewInt(irtypes.I32, 2)
+
+	if c.isWasm {
+		// WASM: all panics write to stderr and exit
+		prefixPtr := entry.NewGetElementPtr(c.panicPrefixGlobal.ContentType, c.panicPrefixGlobal,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		entry.NewCall(c.palWrite, stderr, prefixPtr, constant.NewInt(irtypes.I64, 7))
+		msgLen := entry.NewCall(c.funcs["strlen"], fn.Params[0])
+		entry.NewCall(c.palWrite, stderr, fn.Params[0], msgLen)
+		c.emitWriteNewline(entry, stderr)
+		entry.NewCall(c.palExit, constant.NewInt(irtypes.I32, 1))
+		entry.NewUnreachable()
+		return
+	}
+
 	gTy := goroutineStructType()
 
 	// Check if we're in a non-main goroutine that can recover
@@ -306,13 +319,28 @@ func (c *Compiler) definePanicBody(fn *ir.Func) {
 // s points to a promise_string_v.
 // For non-main goroutines: silently sets G.panicked=1, G.panic_msg=cstr, longjmp to scheduler.
 // For main goroutine or no goroutine context: writes "panic: <msg>\n" to stderr, exits with code 1.
+// On WASM: always exits (no longjmp recovery).
 func (c *Compiler) definePanicMsgBody(fn *ir.Func) {
 	entry := fn.NewBlock("entry")
 	stderr := constant.NewInt(irtypes.I32, 2)
-	gTy := goroutineStructType()
 
 	// Extract data/len from string value struct (needed by both paths)
 	dataPtr, dataLen := c.extractStringDataLen(entry, fn.Params[0])
+
+	if c.isWasm {
+		// WASM: all panics write to stderr and exit
+		prefixPtr := entry.NewGetElementPtr(c.panicPrefixGlobal.ContentType, c.panicPrefixGlobal,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		entry.NewCall(c.palWrite, stderr, prefixPtr, constant.NewInt(irtypes.I64, 7))
+		entry.NewCall(c.palWrite, stderr, dataPtr, dataLen)
+		c.emitWriteNewline(entry, stderr)
+		entry.NewCall(c.palExit, constant.NewInt(irtypes.I32, 1))
+		entry.NewUnreachable()
+		fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoReturn)
+		return
+	}
+
+	gTy := goroutineStructType()
 
 	// Check if we're in a non-main goroutine that can recover
 	currentG := entry.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
@@ -481,6 +509,16 @@ func (c *Compiler) defineSchedStatGetterBody(fn *ir.Func, field int) {
 // defineNanotimeFunc defines @promise_nanotime() → i64.
 // Returns monotonic nanoseconds via clock_gettime(CLOCK_MONOTONIC).
 func (c *Compiler) defineNanotimeFunc() *ir.Func {
+	fn := c.module.NewFunc("promise_nanotime", irtypes.I64)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock("entry")
+
+	if c.isWasm {
+		// WASM: no clock_gettime, return 0 (timing not available)
+		entry.NewRet(constant.NewInt(irtypes.I64, 0))
+		return fn
+	}
+
 	timespecType := irtypes.NewStruct(irtypes.I64, irtypes.I64)
 
 	clockGettime := c.module.NewFunc("clock_gettime", irtypes.I32,
@@ -494,10 +532,6 @@ func (c *Compiler) defineNanotimeFunc() *ir.Func {
 	if strings.Contains(triple, "darwin") || strings.Contains(triple, "apple") {
 		clockMonotonic = 6
 	}
-
-	fn := c.module.NewFunc("promise_nanotime", irtypes.I64)
-	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
 
 	ts := entry.NewAlloca(timespecType)
 	entry.NewCall(clockGettime, constant.NewInt(irtypes.I32, clockMonotonic), ts)

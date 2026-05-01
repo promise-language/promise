@@ -20,17 +20,17 @@ test_int_large() `test {
   assert("{x}" == "1000000", "int 1000000");
 }
 
-test_f64() `test {
+test_f64() `test(exclude: "wasm32") {
   f64 x = 3.14;
   assert("{x}" == "3.14", "f64 3.14");
 }
 
-test_f64_integer() `test {
+test_f64_integer() `test(exclude: "wasm32") {
   f64 x = 42.0;
   assert("{x}" == "42", "f64 42.0 -> 42");
 }
 
-test_f64_zero() `test {
+test_f64_zero() `test(exclude: "wasm32") {
   f64 x = 0.0;
   assert("{x}" == "0", "f64 0.0 -> 0");
 }
@@ -66,7 +66,7 @@ test_int_max() `test {
   assert("{x}" == "9223372036854775807", "INT64_MAX");
 }
 
-test_f64_negative() `test {
+test_f64_negative() `test(exclude: "wasm32") {
   f64 x = -3.14;
   assert("{x}" == "-3.14", "f64 -3.14");
 }
@@ -99,17 +99,17 @@ test_uint_max() `test {
   assert("{x}" == "18446744073709551615", "UINT64_MAX");
 }
 
-test_f64_small() `test {
+test_f64_small() `test(exclude: "wasm32") {
   f64 x = 0.001;
   assert("{x}" == "0.001", "f64 0.001");
 }
 
-test_f64_scientific() `test {
+test_f64_scientific() `test(exclude: "wasm32") {
   f64 x = 1.5e10;
   assert("{x}" == "1.5e+10", "f64 scientific");
 }
 
-test_f64_very_small() `test {
+test_f64_very_small() `test(exclude: "wasm32") {
   f64 x = 1.23e-15;
   assert("{x}" == "1.23e-15", "f64 very small");
 }

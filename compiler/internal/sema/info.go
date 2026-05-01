@@ -46,6 +46,14 @@ type Info struct {
 	ExpectOutput    string
 	HasExpectOutput bool
 
+	// ExcludeTargets lists target substrings for which this test should be skipped.
+	// Parsed from `test(expected="...", exclude: "wasm32") annotation on main().
+	ExcludeTargets []string
+
+	// TestExcludes maps test function names to their exclude target substrings.
+	// Parsed from `test(exclude: "wasm32") annotations on individual test functions.
+	TestExcludes map[string][]string
+
 	// FieldDefaults maps fields with default values to their AST default expressions.
 	// Used by codegen to evaluate defaults for omitted constructor arguments.
 	FieldDefaults map[*types.Field]ast.Expr

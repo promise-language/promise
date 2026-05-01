@@ -60,7 +60,10 @@ promise ast file.pr               # Print the AST
 promise exec '<code>'             # Execute inline code
 echo '<code>' | promise           # Execute from stdin
 promise install                   # Install to ~/.promise/
-promise init                      # Create new promise.mod (planned)
+promise init                      # Create new promise.toml
+promise doc file.pr               # Generate documentation from doc() meta tags
+promise doc -signatures file.pr   # Compact signature-only output
+promise clean                     # Remove .promise-build/ cache
 promise add <url>                 # Add dependency (planned)
 promise remove <url>              # Remove dependency (planned)
 promise update                    # Update dependencies (planned)
@@ -168,7 +171,9 @@ github.com/std/io/1               → module "io", version 1
 
 Version segments are parsed left-to-right as `major`, `minor`, `patch`.
 
-### 4.2 promise.mod File
+### 4.2 Module File
+
+> **Current implementation**: The module file is `promise.toml` (TOML format) with `[module]`, `[require]`, and `[replace]` sections. The design below describes the target format; the current TOML format supports local module imports via sourced paths.
 
 The module file declares only the module's own identity:
 
@@ -2069,38 +2074,38 @@ string slices (`&str` equivalent) use `string&` for borrowed string data.
 
 ## 12. Streams, Ranges & Generators
 
-Promise provides a unified iteration and streaming abstraction through two core interfaces: `stream[T]` (a reusable factory that produces cursors) and `iter[T]` (a single-pass cursor that yields elements one at a time). Because Promise has no function coloring and uses goroutine-based transparent I/O, a single `stream[T]` type handles both synchronous and asynchronous data sources — a generator that performs I/O simply suspends its goroutine during the blocking operation, with no change to its type signature.
+Promise provides a unified iteration and streaming abstraction through two core interfaces: `Stream[T]` (a reusable factory that produces cursors) and `Iterator[T]` (a single-pass cursor that yields elements one at a time). Lowercase forms (`stream[T]`, `iter[T]`) are syntactic sugar. Because Promise has no function coloring and uses goroutine-based transparent I/O, a single `Stream[T]` type handles both synchronous and asynchronous data sources — a generator that performs I/O simply suspends its goroutine during the blocking operation, with no change to its type signature.
 
 ### 12.1 Core Interfaces
 
 ```promise
-type iter[T] {
+type Iterator[T] {
   next() T? `abstract;
 }
 ```
 
-`iter[T]` is the stateful cursor. Each call to `next()` returns the next element wrapped in `T?`, or `none` when the sequence is exhausted. This combines the traditional `hasNext()` + `next()` two-method pattern into a single call, leveraging Promise's optional type system.
+`Iterator[T]` is the stateful cursor. Each call to `next()` returns the next element wrapped in `T?`, or `none` when the sequence is exhausted. This combines the traditional `hasNext()` + `next()` two-method pattern into a single call, leveraging Promise's optional type system.
 
 ```promise
-type stream[T] {
-  iter() iter[T] `abstract;
+type Stream[T] {
+  iter() Iterator[T] `abstract;
 
-  // Intermediate combinators — lazy, return a new stream
-  map[R]((T) -> R transform) stream[R] { ... }
-  filter((T) -> bool predicate) stream[T] { ... }
-  flatMap[R]((T) -> stream[R] transform) stream[R] { ... }
-  take(int count) stream[T] { ... }
-  skip(int count) stream[T] { ... }
-  takeWhile((T) -> bool predicate) stream[T] { ... }
-  skipWhile((T) -> bool predicate) stream[T] { ... }
-  zip[U](stream[U] other) stream[(T, U)] { ... }
-  chain(stream[T] other) stream[T] { ... }
-  enumerate() stream[(int, T)] { ... }
-  scan[R](R initial, (R, T) -> R accumulate) stream[R] { ... }
-  chunk(int size) stream[T[]] { ... }
-  distinct() stream[T] { ... }
+  // Intermediate combinators — lazy, return a new stream (planned)
+  map[R]((T) -> R transform) Stream[R] { ... }
+  filter((T) -> bool predicate) Stream[T] { ... }
+  flatMap[R]((T) -> Stream[R] transform) Stream[R] { ... }
+  take(int count) Stream[T] { ... }
+  skip(int count) Stream[T] { ... }
+  takeWhile((T) -> bool predicate) Stream[T] { ... }
+  skipWhile((T) -> bool predicate) Stream[T] { ... }
+  zip[U](Stream[U] other) Stream[(T, U)] { ... }
+  chain(Stream[T] other) Stream[T] { ... }
+  enumerate() Stream[(int, T)] { ... }
+  scan[R](R initial, (R, T) -> R accumulate) Stream[R] { ... }
+  chunk(int size) Stream[T[]] { ... }
+  distinct() Stream[T] { ... }
 
-  // Terminal operations — eager, consume the stream
+  // Terminal operations — eager, consume the stream (planned)
   fold[R](R initial, (R, T) -> R accumulate) R { ... }
   reduce((T, T) -> T combine) T? { ... }
   collect() T[] { ... }
@@ -2118,24 +2123,26 @@ type stream[T] {
 }
 ```
 
+> **Status**: Only the core interfaces (`Iterator[T]` with `next()`, `Stream[T]` with `iter()`) are implemented. The combinator methods listed above are the design target but are not yet implemented in the standard library.
+
 **Key design properties:**
 
-- **`stream[T]` is a factory.** Each call to `iter()` produces a fresh, independent cursor. This means streams are reusable — you can iterate the same stream multiple times and get the same elements each time (for deterministic sources).
-- **`iter[T]` is a single-pass cursor.** Once `next()` returns `none`, the iterator is exhausted. There is no `reset()`.
+- **`Stream[T]` is a factory.** Each call to `iter()` produces a fresh, independent cursor. This means streams are reusable — you can iterate the same stream multiple times and get the same elements each time (for deterministic sources).
+- **`Iterator[T]` is a single-pass cursor.** Once `next()` returns `none`, the iterator is exhausted. There is no `reset()`.
 - **Intermediate operations are lazy.** Calling `stream.map(fn)` does not execute `fn` — it returns a new `stream[T]` that applies `fn` on demand when iterated. Multiple intermediate operations compose into a single pass over the data.
 - **Terminal operations are eager.** Calling `stream.collect()` or `stream.count()` consumes the stream and produces a result.
 - **Constraint-dependent combinators**: `distinct()` requires `T: Eq`. `min()` and `max()` require `T: Ord`. These constraints are enforced at the call site via generic bounds.
 
 ### 12.2 For-in Desugaring
 
-The `for item in expr` loop desugars into `stream[T]` and `iter[T]` operations:
+The `for item in expr` loop desugars into `Stream[T]` and `Iterator[T]` operations:
 
 ```promise
 for item in stream { body }
 
 // Desugars to:
 {
-  iter[T] _iter = stream.iter();
+  Iterator[T] _iter = stream.iter();
   while item := _iter.next() {
     body
   }
@@ -2164,18 +2171,18 @@ The `..` operator constructs a `range` value. `..` produces a half-open (exclusi
 5..=5       // single element: 5
 ```
 
-`range` is a type that implements `stream[int]`:
+`Range` is a type that implements `Stream[int]` (lowercase `range` is sugar):
 
 ```promise
-type range is stream[int] {
+type Range is Stream[int] {
   int start;
   int end;
   bool inclusive;
 
-  iter() iter[int] { ... }
+  iter() Iterator[int] { ... }
 
   // Derived ranges
-  step(int n) stream[int] { ... }
+  step(int n) Stream[int] { ... }
 
   // O(1) membership test — overrides the O(n) default from Stream
   contains(int value) bool {
@@ -2202,7 +2209,7 @@ total := (1..=100).fold(0, (acc, n) -> acc + n);
 
 ### 12.4 Generator Functions
 
-A function whose return type is `stream[T]` and whose body contains `yield` is a **generator function**. The compiler transforms its body into a state machine that implements `iter[T]`. No special modifier keyword is needed — the return type plus the presence of `yield` is sufficient.
+A function whose return type is `stream[T]` (or `Stream[T]`) and whose body contains `yield` is a **generator function**. The compiler transforms its body into a coroutine via LLVM `presplitcoroutine` intrinsics that implements `Iterator[T]`. No special modifier keyword is needed — the return type plus the presence of `yield` is sufficient.
 
 ```promise
 fibonacci() stream[int] {
@@ -2223,7 +2230,7 @@ for n in fibonacci() {
 }
 ```
 
-**`yield*` delegates to another stream**, yielding all of its elements inline:
+**`yield*` delegates to another stream** (planned — not yet implemented), yielding all of its elements inline:
 
 ```promise
 oneThenTwo() stream[int] {
@@ -2263,19 +2270,18 @@ The compiler transforms each `yield` point into a state in a state machine. Loca
 
 ### 12.5 Collections as Streams
 
-Built-in collection types implement `stream[T]`, giving them all stream combinators for free:
+Built-in collection types implement `Stream[T]`, supporting `for-in` iteration. Stream combinators (planned) will give them rich functional operations for free:
 
 | Collection      | Stream Implementation           |
 |----------------|---------------------------------|
-| `T[]` (slice)   | `stream[T]` — iterates elements in order |
-| `T[N]` (array)  | `stream[T]` — iterates elements in order |
-| `set[T]`        | `stream[T]` — iteration order is implementation-defined |
-| `map[K, V]`     | `stream[(K, V)]` — iterates key-value pairs |
-| `channel[T]`    | `stream[T]` — receives from channel until closed |
-| `range`         | `stream[int]` — see Section 12.3 |
-| `string`        | `stream[char]` — iterates Unicode scalar values |
+| `T[]` (Vector)  | `Stream[T]` — iterates elements in order |
+| `T[N]` (array)  | `Stream[T]` — iterates elements in order (planned) |
+| `map[K, V]`     | `Stream[(K, V)]` — iterates key-value pairs |
+| `channel[T]`    | `Stream[T]` — receives from channel until closed |
+| `range`         | `Stream[int]` — see Section 12.3 |
+| `string`        | `Stream[char]` — iterates Unicode scalar values |
 
-`map[K, V]` also provides `.keys() stream[K]` and `.values() stream[V]` for iterating only keys or values.
+`map[K, V]` also provides `.keys() Stream[K]` and `.values() Stream[V]` for iterating only keys or values.
 
 ### 12.6 Channels as Streams
 

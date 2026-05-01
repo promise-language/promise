@@ -4,12 +4,9 @@ Proposal for Promise's runtime, syscall layer, concurrency model, and multi-plat
 
 ## Current State
 
-After completing Phases 1-3, the C runtime is reduced to a single function:
+No C runtime files remain. All runtime functions are codegen-emitted LLVM IR or pure Promise (including `promise_test_run`, `promise_test_print_result`, `promise_test_summary`).
 
-**Remaining C runtime** (`runtime/runtime_test.c`, ~25 lines):
-- `promise_test_run` — fork-based crash isolation via `fork`/`waitpid` (test mode only)
-
-**Deleted C files**: `runtime.c`, `runtime_string.c`, `runtime_hash.c`, `runtime_vector.c`.
+**Deleted C files**: `runtime.c`, `runtime_string.c`, `runtime_hash.c`, `runtime_vector.c`, `runtime_test.c`.
 
 **PAL (Platform Abstraction Layer)** — codegen-emitted LLVM IR (`codegen/pal/`):
 - `pal_write(fd, buf, len)` — wraps libc `@write` (PosixPAL)
@@ -68,7 +65,7 @@ After completing Phases 1-3, the C runtime is reduced to a single function:
 | **7f** | Self-contained binary: embed gzip-compressed LLVM tools via `go:embed` | **Done** |
 | **8** | Rewrite scheduler in Promise | Planned |
 
-Phases 1-5c, 7b, 7b', 7c, and 7f are done. Phase 3 introduced the platform split (PAL). Phase 5a added 1:1 threading (each `go` spawns an OS thread). Phase 5b added typed channels (`channel[T]` with buffered/unbuffered send/receive/for-in and `go { }` block variable capture). Phase 5c replaced 1:1 threading with an M:N scheduler using LLVM coroutine intrinsics — goroutines are cheap coroutine handles multiplexed on OS threads via per-CPU processors and work stealing. Phase 7b replaced clang with `opt` + `llc` + `ld.lld` on Linux with system glibc CRT. Phase 7b' bundled musl libc CRT objects via `go:embed`, making fully static binaries the default on Linux — target triple is now `x86_64-unknown-linux-musl`; clang remains as fallback via `PROMISE_USE_CLANG=1`. Phase 7c added macOS opt+llc+system ld pipeline. Phase 7f embeds gzip-compressed LLVM tools (opt, llc, lld, libLLVM.so) in the Go binary for release builds (`go build -tags embed_llvm`), making the promise binary fully self-contained on Linux (~61MB). Phases 5d-6 add WASM scheduling and IO. Remaining Phase 7 (a, d-e) adds other platforms and cross-compilation. Phase 8 is polish.
+Phases 1-5d, 4b, 7a, 7b, 7b', 7c, and 7f are done. Phase 3 introduced the platform split (PAL). Phase 5a added 1:1 threading (each `go` spawns an OS thread). Phase 5b added typed channels (`channel[T]` with buffered/unbuffered send/receive/for-in and `go { }` block variable capture). Phase 5c replaced 1:1 threading with an M:N scheduler using LLVM coroutine intrinsics — goroutines are cheap coroutine handles multiplexed on OS threads via per-CPU processors and work stealing. Phase 4b added a WASM bump allocator (later replaced by a free-list allocator). Phase 5d added a cooperative scheduler for WASM (single-threaded, no atomics). Phase 7a added the WASM build pipeline (`opt` + `llc` + `wasm-ld`). Phase 7b replaced clang with `opt` + `llc` + `ld.lld` on Linux with system glibc CRT. Phase 7b' bundled musl libc CRT objects via `go:embed`, making fully static binaries the default on Linux — target triple is now `x86_64-unknown-linux-musl`; clang remains as fallback via `PROMISE_USE_CLANG=1`. Phase 7c added macOS opt+llc+system ld pipeline. Phase 7f embeds gzip-compressed LLVM tools (opt, llc, lld, libLLVM.so) in the Go binary for release builds (`go build -tags embed_llvm`), making the promise binary fully self-contained on Linux (~61MB). Phase 6 (IO reactor) and remaining Phase 7 (d-e) are planned. Phase 8 is polish.
 
 ---
 
@@ -812,7 +809,7 @@ The PAL (Phase 3) already emits platform-specific IR based on the target triple.
 |------|------|--------|
 | 7b | Linux: `opt` + `llc` + `ld.lld` + system glibc CRT | **Done** |
 | 7b' | Linux: bundled musl CRT (fully static binaries) | **Done** |
-| 7a | WASM target via `llc` + `wasm-ld` | Planned (low — no CRT) |
+| 7a | WASM target via `llc` + `wasm-ld` | **Done** |
 | 7c | macOS target via `llc` + system `ld` (or `ld64.lld`) | **Done** |
 | 7d | Windows target via `llc` + `lld-link` | Planned (high — MSVC paths) |
 | 7e | `--target` flag + cross-compilation | Planned (low — plumbing) |

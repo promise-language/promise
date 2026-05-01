@@ -38,7 +38,7 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 | Stage | Package | Description | Status |
 |-------|---------|-------------|--------|
 | 9 | `compiler/internal/module/`, `sema/`, `codegen/`, `std/` | Module system: visibility, qualified access, local imports, cross-module codegen, separate/incremental compilation | Phase 1 Done |
-| 10 | `cmd/promise/` | CLI entry point (build, run, test, fmt, etc.) | Partial |
+| 10 | `cmd/promise/` | CLI entry point (build, run, test, fmt, etc.) | Done (except `fmt`) |
 | 11 | `pkg/` | Package manager: fetch, resolve, lock | Planned |
 
 ### Cross-cutting Work
@@ -642,7 +642,7 @@ Command-line interface. Core commands implemented; formatter planned.
 - Inline error formatting: source line + `^` caret marker, no temp filenames
 - `promise clean` — remove `.promise-build/` cache directory
 - Embedded `std/` and `runtime/` in the binary via `go:embed` for self-contained install
-- **Test suite**: 755 tests across 137 files — `tests/e2e/` (language features), `tests/std/` (standard library), `tests/concurrency/` (scheduler, channels, select, panic recovery, stress tests), `tests/modules/` (module system e2e)
+- **Test suite**: 764 tests across 146 files — `tests/e2e/` (language features), `tests/std/` (standard library), `tests/concurrency/` (scheduler, channels, select, panic recovery, stress tests), `tests/modules/` (module system e2e), `tests/value_types/` (pure value types)
 - `promise doc <file.pr>` — generate documentation from `doc()` meta tags (**Phase 1 done**: `cmd/promise/doc.go`)
   - `-public` (default) / `-all` — filter by visibility
   - `-signatures` — compact signature-only output (minimal tokens for AI agents)
@@ -685,36 +685,43 @@ Dependency fetching and resolution.
 
 ## What's Next
 
-The compiler pipeline (Stages 1-8o) is complete for the current feature set. The runtime is fully codegen-emitted LLVM IR — no C files remain. Phase 5a added 1:1 threading (`go`/`<-` with OS threads). Phase 5b added typed channels (`channel[T]`). Phase 5c replaced 1:1 threading with an M:N scheduler using LLVM coroutine intrinsics — goroutines are cheap coroutine handles multiplexed on OS threads via per-CPU processors and work stealing. Scheduler enhancements completed: P-local run queues with work stealing, cooperative preemption (yield checks at function entry and loop back-edges), `select` statement (multi-channel blocking with default), goroutine-scoped panic recovery (setjmp/longjmp per-G, panics don't kill the process), `set_max_procs`/`get_max_procs` runtime API, and scheduler profiling counters (gs_created, gs_completed, context_switches, steals). Yield generators (`stream[T]` with `yield`) reuse the LLVM presplit coroutine infrastructure for synchronous, caller-driven iteration — functions, methods, infinite generators, recursion, and scope cleanup all work. CLI stress testing (`promise test -stress`) detects flaky tests via repeated execution with adaptive scheduling, timing variance analysis, and live reporting. IO reactor and WASM scheduling remain (Phases 5d-6). The next work falls into three areas:
+The compiler pipeline (Stages 1-8p) is complete. Runtime is fully codegen-emitted LLVM IR — no C files remain. All major cross-cutting features are done: M:N scheduler (Phase 5c), WASM target (Phases 4b/5d/7a), yield generators, structural interfaces, operator dispatch, naming conventions, pure value types, documentation system (Phase 1), and module system (Phase 1 with separate/incremental compilation).
 
-### Near-term: Language Features
-
-| Work | Design Doc | Priority |
-|------|-----------|----------|
-| ~~Operator method dispatch (`[]`, `[]=`, `[:]`, `[:]=`)~~ | [subscript-slice-operators.md](subscript-slice-operators.md) | ~~High~~ Done |
-| ~~C binding architecture (generated headers)~~ | [c-binding-architecture.md](c-binding-architecture.md) | ~~Medium~~ Done |
+Test suite: 764 native pass, 761 WASM pass (3 skip).
 
 ### Near-term: Compiler Infrastructure
 
 | Work | Priority |
 |------|----------|
-| Module system Phase 2 (module-imports-module, remote modules) — Stage 9 | High |
+| Module system Phase 2 (module-imports-module, transitive deps, circular import detection) — Stage 9 | High |
 | CLI: `promise fmt` code formatter — Stage 10 | Medium |
 | Package manager (fetch, resolve, lock) — Stage 11 | Medium |
+| Documentation system Phase 2 (directory/recursive docs, `-std`, index generation) | Medium |
+
+### Medium-term: Codegen Gaps
+
+| Work | Priority |
+|------|----------|
+| Blocking select optimization (waiter-list parking instead of yield-and-retry polling) | Medium |
+| Stack overflow detection (guard page + SIGSEGV handler) | Medium |
+| Fixed-size arrays as stack-allocated `[N x T]` | Medium |
+| Destructure is-patterns (`x is Dog(name)`) | Medium |
+| `yield*` delegate (forward all values from sub-iterator) | Medium |
 
 ### Long-term: Runtime & Platform
 
 | Work | Design Doc | Priority |
 |------|-----------|----------|
-| Channels (`channel[T]`, buffered send/receive) — Phase 5b | [runtime-proposal.md](runtime-proposal.md) | Done |
-| M:N scheduler (LLVM coroutines, GMP model, work stealing, select, preemption, panic recovery, GOMAXPROCS, sched stats) — Phase 5c | [runtime-proposal.md](runtime-proposal.md) | Done |
-| WASM target (`--target wasm32-wasi`, bump allocator, coop scheduler) — Phases 4b/5d/7a | [runtime-proposal.md](runtime-proposal.md) | Done |
 | IO reactor (kqueue/epoll/IOCP) — Phase 6 | [runtime-proposal.md](runtime-proposal.md) | Low |
-| Replace clang with `llc` + `lld` — Phase 7 | [runtime-proposal.md](runtime-proposal.md) | Low |
+| Generic type RTTI | — | Low |
+| Value type structural interface coercion (stack boxing) | — | Low |
+| Generic value types | — | Low |
+| User type `toString()` for interpolation | — | Low |
+| Type argument inference | — | Low |
 
 ### WASM remaining work
 
-Tests: 761 pass, 0 fail, 3 skip on `wasm32-wasi` (764 native)
+Tests: 761 pass, 0 fail, 3 skip on `wasm32-wasi` (764 native pass)
 
 | Item | Skipped tests | Effort | Notes |
 |------|--------------|--------|-------|
@@ -730,89 +737,9 @@ Tests: 761 pass, 0 fail, 3 skip on `wasm32-wasi` (764 native)
 
 ---
 
-## Naming Convention Migration
+## Naming Convention Migration (Done)
 
-Bring the compiler and stdlib in line with the naming conventions defined in [standard-runtime.md](standard-runtime.md#naming-conventions). All non-scalar types use PascalCase canonical names; lowercase forms are syntactic sugar resolved by the compiler.
-
-### Step 1 — Rename `iter` → `Iterator`, `stream` → `Stream` in universe
-
-**Files:** `compiler/internal/types/universe.go`
-
-- Change `defGeneric("iter", "T")` → `defGeneric("Iterator", "T")`
-- Change `defGeneric("stream", "T")` → `defGeneric("Stream", "T")`
-- Update all Go references to `TypIter` / `TypStream` names (the Go variable names can stay, but `Named.Name` must be PascalCase)
-
-### Step 2 — Rename `map` → `Map`, `channel` → `Channel`, `task` → `Task`, `range` → `Range` in universe
-
-**Files:** `compiler/internal/types/universe.go`
-
-- Change `defGeneric("map", "K", "V")` → `defGeneric("Map", "K", "V")`
-- Change `defGeneric("channel", "T")` → `defGeneric("Channel", "T")`
-- Change `defGeneric("task", "T")` → `defGeneric("Task", "T")`
-- Change `defNamed("range")` → `defNamed("Range")`
-- These types already have lowercase sugar forms in the parser — this step makes PascalCase the canonical name
-
-### Step 3 — Add sugar resolution in sema
-
-**Files:** `compiler/internal/sema/check.go` or `compiler/internal/sema/resolve.go`
-
-- When the parser sees `map[K,V]`, `channel[T]`, `task[T]`, or `range`, resolve to canonical `Map[K,V]`, `Channel[T]`, `Task[T]`, `Range`
-- `T[]` already resolves to `Vector[T]` — verify this still works after the rename
-- `iter[T]` and `stream[T]` sugar forms: decide whether to keep as sugar or drop entirely (these were never user-facing sugar like `map[K,V]`)
-
-### Step 4 — Update `std/*.pr` files
-
-**Files:** `std/iter.pr`, `std/map.pr`, `std/channel.pr`, `std/task.pr`, `std/range.pr`
-
-- `std/iter.pr`: rename `type iter[T]` → `type Iterator[T]`, `type stream[T]` → `type Stream[T]`
-- `std/map.pr`: `type map[K: Hashable + Equal, V]` → `type Map[K: Hashable + Equal, V]` (the file already has both — verify sugar still works)
-- `std/channel.pr`: update type references if any use the old canonical name
-- `std/task.pr`: update type references if any use the old canonical name
-- `std/range.pr`: rename `type range` → `type Range`
-- Update any cross-references (e.g., methods returning `Iterator[T]` or `Stream[T]`)
-
-### Step 5 — Update codegen name matching
-
-**Files:** `compiler/internal/codegen/compiler.go`, `compiler/internal/codegen/expr.go`, `compiler/internal/codegen/stmt.go`, `compiler/internal/codegen/mono.go`
-
-- Codegen uses string comparisons against type names (e.g., `named.Name == "map"`, `named.Name == "channel"`). Update all to PascalCase.
-- Search for: `"map"`, `"channel"`, `"task"`, `"range"`, `"iter"`, `"stream"` in codegen string comparisons
-- Also check `isContainerType()` and `mangleMethodName()` helpers
-
-### Step 6 — Update sema name matching
-
-**Files:** `compiler/internal/sema/check.go`, `compiler/internal/sema/decl.go`, `compiler/internal/sema/info.go`
-
-- Same as Step 5 but in sema: update string comparisons against old lowercase names
-
-### Step 7 — Update ownership name matching
-
-**Files:** `compiler/internal/ownership/checker.go`
-
-- Any type-name string comparisons in ownership analysis must be updated
-
-### Step 8 — Update test helpers
-
-**Files:** `compiler/internal/codegen/codegen_test.go`, `compiler/internal/sema/sema_test.go`, `compiler/internal/ownership/ownership_test.go`
-
-- Update `stdAll` in each test file's `init()` to use PascalCase type names
-- Update any test source strings that reference old names
-- Run `make resources` to embed updated `std/*.pr`
-
-### Step 9 — Update e2e tests
-
-**Files:** `tests/**/*.pr`
-
-- Search all `.pr` files for old lowercase canonical names used as types
-- Note: sugar forms (`map[K,V]`, `channel[T]`, `task[T]`, `T[]`) remain valid — only direct references to canonical names need updating
-- `iterator[T]` / `stream[T]` references must become `Iterator[T]` / `Stream[T]`
-
-### Step 10 — Validation
-
-- `make clean && make`
-- `go test ./...` (all Go unit tests)
-- `promise test ../tests/...` (all e2e tests)
-- `bin/e2e.sh` (end-to-end test harness)
+All non-scalar types now use PascalCase canonical names in the universe, stdlib, codegen, sema, ownership, and tests. Lowercase forms (`map[K,V]`, `channel[T]`, `task[T]`, `iter[T]`, `stream[T]`, `range`) are syntactic sugar resolved by the compiler. See [standard-runtime.md](standard-runtime.md#naming-conventions).
 
 ---
 

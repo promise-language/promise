@@ -756,18 +756,25 @@ func parseTimeoutArg(s string) (time.Duration, error) {
 // On Linux, macOS, and WASM, uses opt + llc + linker pipeline (Phase 7a/7b/7c).
 // On other platforms (or with PROMISE_USE_CLANG=1), uses clang as driver.
 func compileAndLink(result *codegen.CompileResult, outputFile, target string) {
+	// Dump generated LLVM IR to a file for debugging/inspection.
+	// Usage: PROMISE_DUMP_IR=/tmp/out.ll promise build foo.pr
+	if envDump := os.Getenv("PROMISE_DUMP_IR"); envDump != "" {
+		_ = os.WriteFile(envDump, []byte(result.Module.String()), 0644)
+	}
+
+	// Separate compilation: split IR into main + per-module .ll files
+	if result.HasModules() && !useClangPipeline(target) {
+		compileAndLinkSeparate(result, outputFile, target)
+		return
+	}
+
+	// Single-file compilation (no modules or clang fallback)
 	llFile, err := os.CreateTemp("", "promise-*.ll")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
 		os.Exit(1)
 	}
 	defer os.Remove(llFile.Name())
-
-	// Dump generated LLVM IR to a file for debugging/inspection.
-	// Usage: PROMISE_DUMP_IR=/tmp/out.ll promise build foo.pr
-	if envDump := os.Getenv("PROMISE_DUMP_IR"); envDump != "" {
-		_ = os.WriteFile(envDump, []byte(result.Module.String()), 0644)
-	}
 
 	if _, err := fmt.Fprint(llFile, result.Module.String()); err != nil {
 		fmt.Fprintf(os.Stderr, "error writing IR: %v\n", err)
@@ -780,6 +787,124 @@ func compileAndLink(result *codegen.CompileResult, outputFile, target string) {
 	} else {
 		compileAndLinkLLVM(llFile.Name(), target, outputFile)
 	}
+}
+
+// compileAndLinkSeparate compiles each module to its own .o file, then links them.
+func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target string) {
+	mainIR, moduleIRs := result.SplitModuleIRs()
+
+	optPath, err := findLLVMTool("opt")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	llcPath, err := findLLVMTool("llc")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	checkLLVMToolVersion(optPath)
+	checkLLVMToolVersion(llcPath)
+
+	// Compile main IR → .o
+	mainObj := compileLLToObj(mainIR, "promise-main", target, optPath, llcPath)
+	defer os.Remove(mainObj)
+
+	// Compile each module IR → .o (in parallel)
+	type moduleObj struct {
+		name    string
+		objFile string
+	}
+	var moduleObjs []moduleObj
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	for modName, modIR := range moduleIRs {
+		wg.Add(1)
+		go func(name, ir string) {
+			defer wg.Done()
+			obj := compileLLToObj(ir, "promise-mod-"+name, target, optPath, llcPath)
+			mu.Lock()
+			moduleObjs = append(moduleObjs, moduleObj{name: name, objFile: obj})
+			mu.Unlock()
+		}(modName, modIR)
+	}
+	wg.Wait()
+	for _, mo := range moduleObjs {
+		defer os.Remove(mo.objFile)
+	}
+
+	// Collect all .o files for linking
+	objFiles := []string{mainObj}
+	for _, mo := range moduleObjs {
+		objFiles = append(objFiles, mo.objFile)
+	}
+
+	// Link all .o files together
+	if isDarwinTarget(target) {
+		linkDarwinMulti(objFiles, target, outputFile)
+	} else if isWasmTarget(target) {
+		// WASM: not yet supported for separate compilation
+		linkWasm(objFiles[0], outputFile)
+	} else {
+		linkLinuxMulti(objFiles, target, outputFile)
+	}
+}
+
+// compileLLToObj compiles LLVM IR text to an object file via opt + llc.
+func compileLLToObj(irText, prefix, target, optPath, llcPath string) string {
+	llFile, err := os.CreateTemp("", prefix+"-*.ll")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
+		os.Exit(1)
+	}
+	if _, err := fmt.Fprint(llFile, irText); err != nil {
+		fmt.Fprintf(os.Stderr, "error writing IR: %v\n", err)
+		os.Exit(1)
+	}
+	llFile.Close()
+	defer os.Remove(llFile.Name())
+
+	// opt -O1
+	bcFile, err := os.CreateTemp("", prefix+"-*.bc")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
+		os.Exit(1)
+	}
+	bcFile.Close()
+	defer os.Remove(bcFile.Name())
+
+	optCmd := runLLVMCmd(optPath, "-O1", llFile.Name(), "-o", bcFile.Name())
+	optCmd.Stderr = os.Stderr
+	if err := optCmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "error running opt on %s: %v\n", prefix, err)
+		os.Exit(1)
+	}
+
+	// llc → .o
+	objFile, err := os.CreateTemp("", prefix+"-*.o")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
+		os.Exit(1)
+	}
+	objFile.Close()
+
+	llcArgs := []string{"-mtriple=" + target, "-filetype=obj"}
+	if isWasmTarget(target) {
+		llcArgs = append(llcArgs, "-mattr=+bulk-memory,+mutable-globals,+sign-ext")
+	} else {
+		llcArgs = append(llcArgs, "-relocation-model=pic")
+	}
+	llcArgs = append(llcArgs, bcFile.Name(), "-o", objFile.Name())
+
+	llcCmd := exec.Command(llcPath, llcArgs...)
+	llcCmd.Stderr = os.Stderr
+	if err := llcCmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "error running llc on %s: %v\n", prefix, err)
+		os.Exit(1)
+	}
+
+	return objFile.Name()
 }
 
 // useClangPipeline returns true if the clang pipeline should be used instead of opt+llc+linker.
@@ -1807,6 +1932,126 @@ func linkLinux(objFile, target, outputFile string) {
 	} else {
 		linkArgs = buildLinuxLinkArgs(target, objFile, outputFile)
 	}
+	linkCmd := runLLVMCmd(lldPath, linkArgs...)
+	linkCmd.Stderr = os.Stderr
+	if err := linkCmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "error linking (ld.lld): %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// linkDarwinMulti links multiple .o files on macOS.
+func linkDarwinMulti(objFiles []string, target, outputFile string) {
+	linkerPath, isLLD, err := findDarwinLinker()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if isLLD {
+		checkLLVMToolVersion(linkerPath)
+	}
+
+	sdk, err := findMacOSSDK()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	tri := parseDarwinTriple(target)
+	sdkVersion := tri.minVersion
+	if sdk.sdkVersion != "" {
+		sdkVersion = sdk.sdkVersion
+	}
+
+	linkArgs := []string{
+		"-arch", tri.arch,
+		"-platform_version", "macos", tri.minVersion, sdkVersion,
+		"-syslibroot", sdk.sysroot,
+		"-o", outputFile,
+	}
+	linkArgs = append(linkArgs, objFiles...)
+	linkArgs = append(linkArgs, "-lSystem")
+
+	var linkCmd *exec.Cmd
+	if isLLD {
+		linkCmd = runLLVMCmd(linkerPath, linkArgs...)
+	} else {
+		linkCmd = exec.Command(linkerPath, linkArgs...)
+	}
+	linkCmd.Stderr = os.Stderr
+	if err := linkCmd.Run(); err != nil {
+		linkerName := "ld"
+		if isLLD {
+			linkerName = "ld64.lld"
+		}
+		fmt.Fprintf(os.Stderr, "error linking (%s): %v\n", linkerName, err)
+		os.Exit(1)
+	}
+}
+
+// linkLinuxMulti links multiple .o files on Linux (glibc or musl).
+func linkLinuxMulti(objFiles []string, target, outputFile string) {
+	lldPath, err := findLLVMTool("ld.lld")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	checkLLVMToolVersion(lldPath)
+
+	var linkArgs []string
+	if strings.Contains(target, "linux-musl") {
+		crtDir, err := findMuslCRT(target)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		linkArgs = []string{
+			"-m", emulationMode(target),
+			"-static",
+			"--build-id",
+			"--eh-frame-hdr",
+			"--gc-sections",
+			"-o", outputFile,
+			filepath.Join(crtDir, "crt1.o"),
+			filepath.Join(crtDir, "crti.o"),
+		}
+		linkArgs = append(linkArgs, objFiles...)
+		linkArgs = append(linkArgs,
+			filepath.Join(crtDir, "libc.a"),
+			filepath.Join(crtDir, "crtn.o"),
+		)
+	} else {
+		crt, err := findCRT(target)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		linkArgs = []string{
+			"-z", "relro",
+			"--hash-style=gnu",
+			"--build-id",
+			"--eh-frame-hdr",
+			"-m", emulationMode(target),
+			"-pie",
+			"-dynamic-linker", dynamicLinker(target),
+			"-o", outputFile,
+			crt.scrt1,
+			crt.crti,
+			crt.crtbeginS,
+		}
+		for _, dir := range crt.libDirs {
+			linkArgs = append(linkArgs, "-L"+dir)
+		}
+		linkArgs = append(linkArgs, objFiles...)
+		linkArgs = append(linkArgs,
+			"-lpthread",
+			"-lgcc", "--as-needed", "-lgcc_s", "--no-as-needed",
+			"-lc",
+			"-lgcc", "--as-needed", "-lgcc_s", "--no-as-needed",
+		)
+		linkArgs = append(linkArgs, crt.crtendS, crt.crtn)
+	}
+
 	linkCmd := runLLVMCmd(lldPath, linkArgs...)
 	linkCmd.Stderr = os.Stderr
 	if err := linkCmd.Run(); err != nil {

@@ -58,9 +58,10 @@ type Compiler struct {
 	file *ast.File
 
 	// Module codegen state
-	moduleFuncs     map[string]*ir.Func    // "modname.funcname" → IR func (cross-module calls)
-	moduleExterns   map[string]*ExternFunc // "modname.funcname" → extern (cross-module externs)
-	compilingModule string                 // non-empty when compiling a module's declarations
+	moduleFuncs      map[string]*ir.Func    // "modname.funcname" → IR func (cross-module calls)
+	moduleExterns    map[string]*ExternFunc // "modname.funcname" → extern (cross-module externs)
+	compilingModule  string                 // non-empty when compiling a module's declarations
+	moduleOwnedFuncs map[string]string      // IR func name → module name (for separate compilation)
 
 	// Loop control targets for break/continue
 	breakTarget    *ir.Block
@@ -318,27 +319,28 @@ func Compile(file *ast.File, info *sema.Info, target string) *CompileResult {
 	}
 
 	c := &Compiler{
-		module:          module,
-		info:            info,
-		target:          target,
-		isWasm:          strings.Contains(target, "wasm"),
-		funcs:           make(map[string]*ir.Func),
-		stdFuncs:        make(map[string]*ir.Func),
-		stdExterns:      make(map[string]*ExternFunc),
-		monoLayouts:     make(map[string]*TypeDeclLayout),
-		monoEnumLayouts: make(map[string]*TypeDeclLayout),
-		typeIDs:         make(map[*types.Named]int32),
-		nextTypeID:      1, // 0 reserved for "no type info"
-		typeInfoGlobals: make(map[*types.Named]*ir.Global),
-		hasChildren:     make(map[*types.Named]bool),
-		vtableGlobals:   make(map[*types.Named]*ir.Global),
-		viewVtables:     make(map[viewVtableKey]*ir.Global),
-		dropFlags:       make(map[string]*ir.InstAlloca),
-		dropBindings:    make(map[string]scopeBinding),
-		thunks:          make(map[string]*ir.Func),
-		file:            file,
-		moduleFuncs:     make(map[string]*ir.Func),
-		moduleExterns:   make(map[string]*ExternFunc),
+		module:           module,
+		info:             info,
+		target:           target,
+		isWasm:           strings.Contains(target, "wasm"),
+		funcs:            make(map[string]*ir.Func),
+		stdFuncs:         make(map[string]*ir.Func),
+		stdExterns:       make(map[string]*ExternFunc),
+		monoLayouts:      make(map[string]*TypeDeclLayout),
+		monoEnumLayouts:  make(map[string]*TypeDeclLayout),
+		typeIDs:          make(map[*types.Named]int32),
+		nextTypeID:       1, // 0 reserved for "no type info"
+		typeInfoGlobals:  make(map[*types.Named]*ir.Global),
+		hasChildren:      make(map[*types.Named]bool),
+		vtableGlobals:    make(map[*types.Named]*ir.Global),
+		viewVtables:      make(map[viewVtableKey]*ir.Global),
+		dropFlags:        make(map[string]*ir.InstAlloca),
+		dropBindings:     make(map[string]scopeBinding),
+		thunks:           make(map[string]*ir.Func),
+		file:             file,
+		moduleFuncs:      make(map[string]*ir.Func),
+		moduleExterns:    make(map[string]*ExternFunc),
+		moduleOwnedFuncs: make(map[string]string),
 	}
 
 	// Collect extern declarations and compute type layouts
@@ -2703,6 +2705,9 @@ func (c *Compiler) declareModuleFuncs(file *ast.File, moduleName string) {
 		irName := mangleModuleFuncName(moduleName, fd.Name)
 		fn := c.module.NewFunc(irName, retType, params...)
 
+		// Track ownership for separate compilation
+		c.moduleOwnedFuncs[irName] = moduleName
+
 		// Register in moduleFuncs for qualified access (mod.func())
 		key := moduleName + "." + fd.Name
 		c.moduleFuncs[key] = fn
@@ -2815,6 +2820,9 @@ func (c *Compiler) declareModuleTypeMethods(file *ast.File, moduleName string) {
 
 			fn := c.module.NewFunc(mangledName, retType, params...)
 			c.funcs[mangledName] = fn
+
+			// Track ownership for separate compilation
+			c.moduleOwnedFuncs[mangledName] = moduleName
 
 			// Also register the non-prefixed method name for dispatch within the module
 			plainName := mangleMethodName(td.Name, md.Name, md.IsSetter)

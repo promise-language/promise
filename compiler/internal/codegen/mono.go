@@ -427,6 +427,9 @@ func (c *Compiler) declareMonoMethods(file *ast.File, instances []*types.Instanc
 
 			fn := c.module.NewFunc(mangledName, retType, params...)
 			c.funcs[mangledName] = fn
+			if c.compilingModule != "" {
+				c.moduleOwnedFuncs[mangledName] = c.compilingModule
+			}
 		}
 	}
 }
@@ -507,6 +510,9 @@ func (c *Compiler) declareMonoFuncs(file *ast.File, funcInsts []*sema.FuncInstan
 
 		fn := c.module.NewFunc(name, retType, params...)
 		c.funcs[name] = fn
+		if c.compilingModule != "" {
+			c.moduleOwnedFuncs[name] = c.compilingModule
+		}
 	}
 }
 

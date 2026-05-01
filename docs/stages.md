@@ -37,7 +37,7 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 
 | Stage | Package | Description | Status |
 |-------|---------|-------------|--------|
-| 9 | `compiler/internal/module/`, `sema/`, `std/` | Module system: visibility, qualified access, local imports | Phase 1 In Progress |
+| 9 | `compiler/internal/module/`, `sema/`, `codegen/`, `std/` | Module system: visibility, qualified access, local imports, cross-module codegen, separate/incremental compilation | Phase 1 In Progress |
 | 10 | `cmd/promise/` | CLI entry point (build, run, test, fmt, etc.) | Partial |
 | 11 | `pkg/` | Package manager: fetch, resolve, lock | Planned |
 
@@ -552,7 +552,7 @@ Module resolution and dependency management. See [module-system-proposal.md](mod
 
 **Phase 1 — Module Boundaries & Local Imports (in progress):**
 
-**Files:** `grammar/PromiseParser.g4` (use decl alts), `internal/module/config.go`, `internal/sema/decl.go`, `internal/sema/expr.go`, `internal/sema/resolve.go`, `internal/sema/export.go`, `ast/decl.go`, `ast/visit_decl.go`, `types/object.go`, `cmd/promise/main.go`, `std/*.pr` (22 files)
+**Files:** `grammar/PromiseParser.g4` (use decl alts), `internal/module/config.go`, `internal/sema/decl.go`, `internal/sema/expr.go`, `internal/sema/resolve.go`, `internal/sema/export.go`, `internal/codegen/compiler.go`, `internal/codegen/expr.go`, `ast/decl.go`, `ast/visit_decl.go`, `types/object.go`, `cmd/promise/main.go`, `std/*.pr` (22 files)
 
 - **Grammar**: `useDecl` has two labeled alternatives — `catalogImport` (`use json;` / `use json as j;` / `use json as _;`) and `sourcedImport` (`use parser "url";` / `use _ "url";`). `qualifiedType` alt in `typeRef` for `mod.Type` references.
 - **`promise.toml`**: TOML parser for `[module]`, `[require]`, `[replace]` sections. `promise init` creates the file.
@@ -561,9 +561,14 @@ Module resolution and dependency management. See [module-system-proposal.md](mod
 - **Qualified access**: `resolveModuleMember()` for `mod.func()` calls with visibility enforcement. `resolveStdMember()` shortcut for `std.func()` (works with or without `use std;`). `resolveQualifiedType()` for `mod.Type` in type position (also works for `std.Type` without `use std;`).
 - **Local module loading**: `loadLocalModule()` in `cmd/promise/main.go` — scans use decls for local paths, parses+sema+exports. `ExportedScope()` extracts only `public` symbols. `mergeModuleFiles()` combines multiple `.pr` files in a module dir.
 - **Std as catalog module**: `use std;` / `use std as s;` for qualified access (`std.min()`, `std.int[]`). `use std as _;` is a no-op (std symbols already in scope via parent chain). Unqualified access still works without any `use` statement.
-- **Tests**: 7 std-module sema tests, 26 general module sema tests, 4 ExportedScope tests, 10 module load integration tests, 5 `cmd/promise` integration tests, 6 codegen std tests.
+- **Cross-module codegen (inline strategy)**: All module declarations compiled into one LLVM IR module via `compileModules()` with context save/restore (`c.info`/`c.file`/`c.compilingModule` swap). Name mangling: `__mod_<module>_<func>` for functions, `__mod_<module>_<Type>.<method>` for methods. `moduleFuncs`/`moduleExterns` maps for qualified call dispatch; plain names registered in `c.funcs` for glob imports. MemberExpr dispatch: std check → module check (function/constructor/enum switch) → enum layout → method call. Coercion uses callee's `*types.Signature` from sema directly.
+- **Tests**: 7 std-module sema tests, 26 general module sema tests, 4 ExportedScope tests, 10 module load integration tests, 5 `cmd/promise` integration tests, 6 codegen std tests, 13 cross-module codegen tests (qualified calls, constructors, methods, enums, glob imports, failable functions, externs, multi-module).
 
-**Still TODO for Phase 1:** codegen for cross-module function calls, multi-module linking.
+**Still TODO for Phase 1:**
+1. **E2e tests with real module directories** — test `promise build`/`promise test` on actual multi-module projects (current tests are Go unit tests with synthetic module sources, no real filesystem layout).
+2. **Update stages.md** — ~~mark cross-module codegen as complete~~ done (this update).
+3. **Separate compilation** — compile each module to its own `.o` file instead of inlining all declarations into one IR module. Enables parallel compilation, reduces recompilation scope, and exercises the linker. Critical for validating the module boundary design as the language grows.
+4. **Incremental compilation** — content-hash caching of compiled modules. Skip recompilation when source hasn't changed. Essential for the language's AI-agent use case (fast iteration cycles) and must be exercised early while the module system is still being shaped.
 
 **Planned phases:** Phase 2 (remote modules, git fetching), Phase 3 (catalog infrastructure), Phase 4 (catalog CI), Phase 5 (tooling)
 
@@ -638,7 +643,7 @@ The compiler pipeline (Stages 1-8o) is complete for the current feature set. The
 
 | Work | Priority |
 |------|----------|
-| ~~Module system Phase 1 (visibility, qualified access, local modules)~~ — Stage 9 | ~~High~~ In Progress |
+| Module system Phase 1 (e2e tests, separate compilation, incremental compilation) — Stage 9 | High |
 | CLI: `promise fmt` code formatter — Stage 10 | Medium |
 | Package manager (fetch, resolve, lock) — Stage 11 | Medium |
 

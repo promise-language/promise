@@ -32,7 +32,7 @@ func (p *WasmPAL) EmitWrite(module *ir.Module) *ir.Func {
 		ir.NewParam("fd", irtypes.I32),
 		ir.NewParam("buf", irtypes.I8Ptr),
 		ir.NewParam("len", irtypes.I64))
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 
 	// Alloca ciovec {i8*, i32} on the stack
 	iov := entry.NewAlloca(ciovecType)
@@ -78,7 +78,7 @@ func (p *WasmPAL) EmitExit(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_exit", irtypes.Void,
 		ir.NewParam("code", irtypes.I32))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoReturn, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	entry.NewCall(procExit, fn.Params[0])
 	entry.NewUnreachable()
 
@@ -106,7 +106,7 @@ func (p *WasmPAL) EmitAlloc(module *ir.Module) *ir.Func {
 		ir.NewParam("size", irtypes.I64))
 	fn.ReturnAttrs = append(fn.ReturnAttrs, enum.ReturnAttrNoAlias)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 
 	// Truncate i64 to i32 (wasm32 address space)
 	size32 := entry.NewTrunc(fn.Params[0], irtypes.I32)
@@ -128,7 +128,7 @@ func (p *WasmPAL) EmitFree(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_free", irtypes.Void,
 		ir.NewParam("ptr", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	entry.NewCall(freeFn, fn.Params[0])
 	entry.NewRet(nil)
 
@@ -152,7 +152,7 @@ func (p *WasmPAL) EmitRealloc(module *ir.Module) *ir.Func {
 		ir.NewParam("size", irtypes.I64))
 	fn.ReturnAttrs = append(fn.ReturnAttrs, enum.ReturnAttrNoAlias)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 
 	size32 := entry.NewTrunc(fn.Params[1], irtypes.I32)
 	ret := entry.NewCall(reallocFn, fn.Params[0], size32)

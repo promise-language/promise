@@ -2534,24 +2534,27 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapVal value.Value, keyType, va
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	length := c.block.NewLoad(irtypes.I64, lenPtr)
 
-	// Build tuple type for the binding (K, V)
-	tupleType := irtypes.NewStruct(keyLLVM, valLLVM)
-
 	// Counter alloca
 	counterAlloca := c.block.NewAlloca(irtypes.I64)
 	c.block.NewStore(constant.NewInt(irtypes.I64, 0), counterAlloca)
 
-	// Binding alloca for the (K, V) tuple
-	bindingAlloca := c.block.NewAlloca(tupleType)
-	bindingAlloca.SetName(c.uniqueLocalName(s.Binding))
-	c.locals[s.Binding] = bindingAlloca
+	twoBindings := s.Index != "" // for k, v in map
 
-	// Index variable if present
-	if s.Index != "" {
-		indexAlloca := c.block.NewAlloca(irtypes.I64)
-		indexAlloca.SetName(c.uniqueLocalName(s.Index))
-		c.block.NewStore(constant.NewInt(irtypes.I64, 0), indexAlloca)
-		c.locals[s.Index] = indexAlloca
+	if twoBindings {
+		// Separate key and value allocas
+		keyAlloca := c.block.NewAlloca(keyLLVM)
+		keyAlloca.SetName(c.uniqueLocalName(s.Index))
+		c.locals[s.Index] = keyAlloca
+
+		valAlloca := c.block.NewAlloca(valLLVM)
+		valAlloca.SetName(c.uniqueLocalName(s.Binding))
+		c.locals[s.Binding] = valAlloca
+	} else {
+		// Single binding: (K, V) tuple
+		tupleType := irtypes.NewStruct(keyLLVM, valLLVM)
+		bindingAlloca := c.block.NewAlloca(tupleType)
+		bindingAlloca.SetName(c.uniqueLocalName(s.Binding))
+		c.locals[s.Binding] = bindingAlloca
 	}
 
 	headerBlock := c.newBlock("forin.header")
@@ -2592,27 +2595,29 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapVal value.Value, keyType, va
 	valElemPtr := c.block.NewGetElementPtr(valLLVM, valDataPtr, idx)
 	val := c.block.NewLoad(valLLVM, valElemPtr)
 
-	var tuple value.Value = constant.NewZeroInitializer(tupleType)
-	tuple = c.block.NewInsertValue(tuple, key, 0)
-	tuple = c.block.NewInsertValue(tuple, val, 1)
-	c.block.NewStore(tuple, bindingAlloca)
+	if twoBindings {
+		// Store key and value to separate allocas
+		c.block.NewStore(key, c.locals[s.Index])
+		c.block.NewStore(val, c.locals[s.Binding])
+	} else {
+		// Build and store (K, V) tuple
+		tupleType := irtypes.NewStruct(keyLLVM, valLLVM)
+		var tuple value.Value = constant.NewZeroInitializer(tupleType)
+		tuple = c.block.NewInsertValue(tuple, key, 0)
+		tuple = c.block.NewInsertValue(tuple, val, 1)
+		c.block.NewStore(tuple, c.locals[s.Binding])
+	}
 
 	c.genBlock(s.Body)
 	if c.block.Term == nil {
 		c.block.NewBr(updateBlock)
 	}
 
-	// Update: increment counter (and index if present)
+	// Update: increment counter
 	c.block = updateBlock
 	curCount := c.block.NewLoad(irtypes.I64, counterAlloca)
 	nextCount := c.block.NewAdd(curCount, constant.NewInt(irtypes.I64, 1))
 	c.block.NewStore(nextCount, counterAlloca)
-	if s.Index != "" {
-		idxAlloca := c.locals[s.Index]
-		curIdx := c.block.NewLoad(irtypes.I64, idxAlloca)
-		nextIdx := c.block.NewAdd(curIdx, constant.NewInt(irtypes.I64, 1))
-		c.block.NewStore(nextIdx, idxAlloca)
-	}
 	c.emitYieldCheck()
 	c.block.NewBr(headerBlock)
 

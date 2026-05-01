@@ -108,7 +108,7 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	yieldSlotParam := coroFn.Params[len(coroFn.Params)-1]
 
 	// 3. Build coroutine preamble with initial suspend
-	entry := coroFn.NewBlock("entry")
+	entry := coroFn.NewBlock(".entry")
 	c.block = entry
 
 	coroId := entry.NewCall(c.coroId,
@@ -244,7 +244,7 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 	c.dropBindings = make(map[string]scopeBinding)
 	c.blockCounter = 0
 
-	factoryEntry := fn.NewBlock("entry")
+	factoryEntry := fn.NewBlock(".entry")
 	c.block = factoryEntry
 	c.entryBlock = factoryEntry
 

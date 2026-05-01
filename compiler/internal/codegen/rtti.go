@@ -188,7 +188,7 @@ func (c *Compiler) defineTypeIsFunc() {
 	one32 := constant.NewInt(irtypes.I32, 1)
 
 	// --- Basic blocks ---
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	checkID := fn.NewBlock("check_id")
 	loopInit := fn.NewBlock("loop_init")
 	loopHeader := fn.NewBlock("loop_header")
@@ -339,7 +339,7 @@ func (c *Compiler) emitViewMethodAdapter(
 	c.locals = make(map[string]*ir.InstAlloca)
 	c.localNameCount = make(map[string]int)
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	c.block = entry
 	c.entryBlock = entry
 

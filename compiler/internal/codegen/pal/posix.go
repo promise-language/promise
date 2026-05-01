@@ -29,7 +29,7 @@ func (p *PosixPAL) EmitWrite(module *ir.Module) *ir.Func {
 		ir.NewParam("fd", irtypes.I32),
 		ir.NewParam("buf", irtypes.I8Ptr),
 		ir.NewParam("len", irtypes.I64))
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	ret := entry.NewCall(writeFn, fn.Params[0], fn.Params[1], fn.Params[2])
 	entry.NewRet(ret)
 
@@ -48,7 +48,7 @@ func (p *PosixPAL) EmitExit(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_exit", irtypes.Void,
 		ir.NewParam("code", irtypes.I32))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoReturn, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	entry.NewCall(exitFn, fn.Params[0])
 	entry.NewUnreachable()
 
@@ -96,7 +96,7 @@ func (p *PosixPAL) EmitThreadCreate(module *ir.Module) *ir.Func {
 		ir.NewParam("fn", irtypes.I8Ptr),
 		ir.NewParam("arg", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 
 	// Allocate 8 bytes for pthread_t handle
 	handle := entry.NewCall(palAlloc, constant.NewInt(irtypes.I64, 8))
@@ -137,7 +137,7 @@ func (p *PosixPAL) EmitThreadJoin(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_thread_join", irtypes.Void,
 		ir.NewParam("handle", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 
 	// Load pthread_t from handle buffer (stored as i8*)
 	handleAsPtr := entry.NewBitCast(fn.Params[0], irtypes.NewPointer(irtypes.I8Ptr))
@@ -167,7 +167,7 @@ func (p *PosixPAL) EmitMutexInit(module *ir.Module) *ir.Func {
 	// define i8* @pal_mutex_init() nounwind
 	fn := module.NewFunc("pal_mutex_init", irtypes.I8Ptr)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 
 	buf := entry.NewCall(palAlloc, constant.NewInt(irtypes.I64, 64))
 	entry.NewCall(pthreadMutexInit, buf, constant.NewNull(irtypes.I8Ptr))
@@ -184,7 +184,7 @@ func (p *PosixPAL) EmitMutexLock(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_mutex_lock", irtypes.Void,
 		ir.NewParam("mutex", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	entry.NewCall(pthreadMutexLock, fn.Params[0])
 	entry.NewRet(nil)
 	return fn
@@ -199,7 +199,7 @@ func (p *PosixPAL) EmitMutexUnlock(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_mutex_unlock", irtypes.Void,
 		ir.NewParam("mutex", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	entry.NewCall(pthreadMutexUnlock, fn.Params[0])
 	entry.NewRet(nil)
 	return fn
@@ -216,7 +216,7 @@ func (p *PosixPAL) EmitMutexDestroy(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_mutex_destroy", irtypes.Void,
 		ir.NewParam("mutex", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	entry.NewCall(pthreadMutexDestroy, fn.Params[0])
 	entry.NewCall(palFree, fn.Params[0])
 	entry.NewRet(nil)
@@ -235,7 +235,7 @@ func (p *PosixPAL) EmitCondInit(module *ir.Module) *ir.Func {
 
 	fn := module.NewFunc("pal_cond_init", irtypes.I8Ptr)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 
 	buf := entry.NewCall(palAlloc, constant.NewInt(irtypes.I64, 64))
 	entry.NewCall(pthreadCondInit, buf, constant.NewNull(irtypes.I8Ptr))
@@ -254,7 +254,7 @@ func (p *PosixPAL) EmitCondWait(module *ir.Module) *ir.Func {
 		ir.NewParam("cond", irtypes.I8Ptr),
 		ir.NewParam("mutex", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	entry.NewCall(pthreadCondWait, fn.Params[0], fn.Params[1])
 	entry.NewRet(nil)
 	return fn
@@ -269,7 +269,7 @@ func (p *PosixPAL) EmitCondSignal(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_cond_signal", irtypes.Void,
 		ir.NewParam("cond", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	entry.NewCall(pthreadCondSignal, fn.Params[0])
 	entry.NewRet(nil)
 	return fn
@@ -284,7 +284,7 @@ func (p *PosixPAL) EmitCondBroadcast(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_cond_broadcast", irtypes.Void,
 		ir.NewParam("cond", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	entry.NewCall(pthreadCondBroadcast, fn.Params[0])
 	entry.NewRet(nil)
 	return fn
@@ -301,7 +301,7 @@ func (p *PosixPAL) EmitCondDestroy(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_cond_destroy", irtypes.Void,
 		ir.NewParam("cond", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	entry.NewCall(pthreadCondDestroy, fn.Params[0])
 	entry.NewCall(palFree, fn.Params[0])
 	entry.NewRet(nil)
@@ -325,7 +325,7 @@ func (p *PosixPAL) EmitNumCPUs(module *ir.Module) *ir.Func {
 	// define i32 @pal_num_cpus() nounwind
 	fn := module.NewFunc("pal_num_cpus", irtypes.I32)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	n := entry.NewCall(sysconfFn, constant.NewInt(irtypes.I32, scNprocessorsOnln))
 	// Clamp to at least 1
 	isLess := entry.NewICmp(enum.IPredSLT, n, constant.NewInt(irtypes.I64, 1))

@@ -266,6 +266,76 @@ func init() {
 		}
 		return result;
 	}
+	get_or(K key, V default_val) V {
+		int cap = this._buckets.len;
+		int h = key.hash % cap;
+		if h < 0 { h = h + cap; }
+		for {
+			match this._buckets[h] {
+				Slot.Empty => { return default_val; },
+				Slot.Used(k, v) => {
+					if k == key { return v; }
+				},
+				Slot.Tombstone => {},
+			}
+			h = (h + 1) % cap;
+		}
+	}
+	pop(K key) V? {
+		int cap = this._buckets.len;
+		int h = key.hash % cap;
+		if h < 0 { h = h + cap; }
+		for {
+			match this._buckets[h] {
+				Slot.Empty => { return none; },
+				Slot.Used(k, v) => {
+					if k == key {
+						this._buckets[h] = Slot.Tombstone;
+						this._count = this._count - 1;
+						return v;
+					}
+				},
+				Slot.Tombstone => {},
+			}
+			h = (h + 1) % cap;
+		}
+	}
+	update(K key, V value) bool {
+		int cap = this._buckets.len;
+		int h = key.hash % cap;
+		if h < 0 { h = h + cap; }
+		for {
+			match this._buckets[h] {
+				Slot.Empty => { return false; },
+				Slot.Used(k, _) => {
+					if k == key {
+						this._buckets[h] = Slot.Used(key: key, value: value);
+						return true;
+					}
+				},
+				Slot.Tombstone => {},
+			}
+			h = (h + 1) % cap;
+		}
+	}
+	entries() (K, V)[] {
+		(K, V)[] result = [];
+		for slot in this._buckets {
+			match slot {
+				Slot.Used(k, v) => result.push((k, v)),
+				_ => {},
+			}
+		}
+		return result;
+	}
+	merge(Map[K, V] other) {
+		for slot in other._buckets {
+			match slot {
+				Slot.Used(k, v) => { this._set(k, v); },
+				_ => {},
+			}
+		}
+	}
 	clear() {
 		for i in 0..this._buckets.len {
 			this._buckets[i] = Slot.Empty;

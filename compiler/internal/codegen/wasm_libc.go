@@ -16,7 +16,7 @@ func (c *Compiler) defineWasmMemcmp() *ir.Func {
 	fn := c.module.NewFunc("memcmp", irtypes.I32, s1, s2, n)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	loopBlk := fn.NewBlock("loop")
 	neqBlk := fn.NewBlock("not_equal")
 	continueBlk := fn.NewBlock("continue")
@@ -61,7 +61,7 @@ func (c *Compiler) defineWasmStrlen() *ir.Func {
 	fn := c.module.NewFunc("strlen", irtypes.I64, s)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrReadOnly)
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	loopBlk := fn.NewBlock("loop")
 	doneBlk := fn.NewBlock("done")
 
@@ -87,7 +87,7 @@ func (c *Compiler) defineWasmUsleep() *ir.Func {
 	usec := ir.NewParam("usec", irtypes.I32)
 	fn := c.module.NewFunc("usleep", irtypes.I32, usec)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	entry.NewRet(constant.NewInt(irtypes.I32, 0))
 	return fn
 }
@@ -97,7 +97,7 @@ func (c *Compiler) defineWasmSetjmp() *ir.Func {
 	env := ir.NewParam("env", irtypes.I8Ptr)
 	fn := c.module.NewFunc("_setjmp", irtypes.I32, env)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	entry.NewRet(constant.NewInt(irtypes.I32, 0))
 	return fn
 }
@@ -109,7 +109,7 @@ func (c *Compiler) defineWasmLongjmp() *ir.Func {
 	val := ir.NewParam("val", irtypes.I32)
 	fn := c.module.NewFunc("_longjmp", irtypes.Void, env, val)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoReturn, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	entry.NewUnreachable()
 	return fn
 }
@@ -119,7 +119,7 @@ func (c *Compiler) defineWasmLongjmp() *ir.Func {
 func (c *Compiler) emitWasmStart(mainFn *ir.Func) {
 	startFn := c.module.NewFunc("_start", irtypes.Void)
 	startFn.FuncAttrs = append(startFn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := startFn.NewBlock("entry")
+	entry := startFn.NewBlock(".entry")
 
 	// Call @main (scheduler setup + coroutine run)
 	exitCode := entry.NewCall(mainFn)

@@ -143,7 +143,7 @@ func (c *Compiler) emitWriteNewline(block *ir.Block, fd value.Value) {
 // definePrintStringBody adds a function body to promise_print_string(i8* %s).
 // Extracts data/len from the string value struct and writes via pal_write.
 func (c *Compiler) definePrintStringBody(fn *ir.Func) {
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	stdout := constant.NewInt(irtypes.I32, 1)
 
 	dataPtr, dataLen := c.extractStringDataLen(entry, fn.Params[0])
@@ -158,7 +158,7 @@ func (c *Compiler) definePrintStringBody(fn *ir.Func) {
 // definePrintIntBody adds a function body to promise_print_int(i8* %x).
 // Extracts raw i64, converts to string via promise_int_to_string, writes via pal_write.
 func (c *Compiler) definePrintIntBody(fn *ir.Func) {
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	stdout := constant.NewInt(irtypes.I32, 1)
 
 	intLayout := c.layouts[types.TypInt]
@@ -188,7 +188,7 @@ func (c *Compiler) definePrintIntBody(fn *ir.Func) {
 // definePrintF64Body adds a function body to promise_print_f64(i8* %x).
 // Extracts raw double, converts to string via promise_f64_to_string, writes via pal_write.
 func (c *Compiler) definePrintF64Body(fn *ir.Func) {
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	stdout := constant.NewInt(irtypes.I32, 1)
 
 	f64Layout := c.layouts[types.TypF64]
@@ -218,7 +218,7 @@ func (c *Compiler) definePrintF64Body(fn *ir.Func) {
 // definePrintBoolBody adds a function body to promise_print_bool(i8* %x).
 // Extracts raw i8, converts to string via promise_bool_to_string, writes via pal_write.
 func (c *Compiler) definePrintBoolBody(fn *ir.Func) {
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	stdout := constant.NewInt(irtypes.I32, 1)
 
 	boolLayout := c.layouts[types.TypBool]
@@ -251,7 +251,7 @@ func (c *Compiler) definePrintBoolBody(fn *ir.Func) {
 // For main goroutine or no goroutine context: writes "panic: <msg>\n" to stderr, exits with code 1.
 // On WASM: always exits (no longjmp recovery — single-threaded, no goroutine isolation).
 func (c *Compiler) definePanicBody(fn *ir.Func) {
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	stderr := constant.NewInt(irtypes.I32, 2)
 
 	if c.isWasm {
@@ -321,7 +321,7 @@ func (c *Compiler) definePanicBody(fn *ir.Func) {
 // For main goroutine or no goroutine context: writes "panic: <msg>\n" to stderr, exits with code 1.
 // On WASM: always exits (no longjmp recovery).
 func (c *Compiler) definePanicMsgBody(fn *ir.Func) {
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	stderr := constant.NewInt(irtypes.I32, 2)
 
 	// Extract data/len from string value struct (needed by both paths)
@@ -408,7 +408,7 @@ func (c *Compiler) defineSetMaxProcsBody(fn *ir.Func) {
 	intLayout := c.layouts[types.TypInt]
 	valType := intLayout.Value.LLVMType
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 
 	// Alloca must be in entry block for LLVM's mem2reg pass
 	wakeIAlloca := entry.NewAlloca(irtypes.I32)
@@ -487,7 +487,7 @@ func (c *Compiler) defineSchedStatGetterBody(fn *ir.Func, field int) {
 	intLayout := c.layouts[types.TypInt]
 	valType := intLayout.Value.LLVMType
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 
 	// Load the i64 counter from sched struct
 	counterField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
@@ -511,7 +511,7 @@ func (c *Compiler) defineSchedStatGetterBody(fn *ir.Func, field int) {
 func (c *Compiler) defineNanotimeFunc() *ir.Func {
 	fn := c.module.NewFunc("promise_nanotime", irtypes.I64)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 
 	if c.isWasm {
 		// WASM: no clock_gettime, return 0 (timing not available)
@@ -558,7 +558,7 @@ func (c *Compiler) defineNanotimeFunc() *ir.Func {
 func (c *Compiler) defineTestRunFunc() *ir.Func {
 	fn := c.module.NewFunc("promise_test_run", irtypes.I32,
 		ir.NewParam("fn", irtypes.I8Ptr))
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 
 	// The test function is void(). We need a trampoline with i8*(i8*) signature
 	// that calls the void function and returns null.
@@ -583,7 +583,7 @@ func (c *Compiler) defineTestRunFunc() *ir.Func {
 func (c *Compiler) defineTestTrampoline() *ir.Func {
 	trampoline := c.module.NewFunc(".test_trampoline", irtypes.I8Ptr,
 		ir.NewParam("fn_ptr", irtypes.I8Ptr))
-	entry := trampoline.NewBlock("entry")
+	entry := trampoline.NewBlock(".entry")
 
 	// Bitcast i8* → void()*
 	voidFnPtrType := irtypes.NewPointer(irtypes.NewFunc(irtypes.Void))
@@ -624,7 +624,7 @@ func (c *Compiler) defineTestPrintResultBody(fn *ir.Func) {
 	elapsedNs := fn.Params[2] // i64
 
 	// Branch on failed != 0
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	thenBlock := fn.NewBlock("fail")
 	elseBlock := fn.NewBlock("pass")
 	mergeBlock := fn.NewBlock("merge")
@@ -716,7 +716,7 @@ func (c *Compiler) defineTestSummaryBody(fn *ir.Func) {
 	failed := fn.Params[1]  // i32
 	skipped := fn.Params[2] // i32
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 
 	// Convert passed count to string: sext i32 → i64, call promise_int_to_string
 	passedI64 := entry.NewSExt(passed, irtypes.I64)

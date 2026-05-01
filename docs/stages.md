@@ -124,7 +124,7 @@ Four-pass analysis: declare → define → check → verify.
 - **Go expressions** resolve to `task[T]` with inner type inference
 - **Receive operator** (`<-`) extracts `T` from `task[T]` or `channel[T]`
 - **Map indexing** returns `V?` (optional) for `map[K, V]`
-- **For-in** supports `slice`, array, `map`, `range`, `string`, and `channel[T]` iteration
+- **For-in** supports vector, array, `map` (single binding yields `(K,V)` tuple; `for k, v in m` yields separate key/value), `range`, `string`, and `channel[T]` iteration
 - **Match exhaustiveness** checking for enum types (variant coverage) and non-enum types (wildcard required)
 - **Missing return** detection across if/else chains, match expressions, and infinite loops
 - Error reporting with source positions
@@ -347,7 +347,7 @@ Generic function sema support and type-specialized code generation for all gener
 
 Codegen for container types (tuples, optionals, slices, maps) and capturing lambdas.
 
-**Files:** Updates to `codegen/compiler.go`, `codegen/types.go`, `codegen/expr.go`, `codegen/stmt.go`; new `runtime/runtime_map.c` (~205 LOC); 29 new tests (119 total codegen tests)
+**Files:** Updates to `codegen/compiler.go`, `codegen/types.go`, `codegen/expr.go`, `codegen/stmt.go`; ~~new `runtime/runtime_map.c` (~205 LOC)~~ (superseded by `std/map.pr`); 29 new tests (119 total codegen tests)
 
 - **Tuples**: Value type, LLVM struct `{ T0, T1, ... }`. Literals via `insertvalue`, destructuring (`(a, b) := expr`) via `extractvalue`. Mixed-type tuples supported.
 - **Optionals**: Value type, `{ i1, T }` struct. `none` = zeroinitializer, some = `{ true, val }`. `targetType` field on Compiler resolves contextual type for `NoneLit` (sema records `TypNone` but codegen needs `Optional(T)`). `lookupLocalType` detects `OptionalTypeRef` annotations and resolves declared types from sema scopes.
@@ -355,17 +355,16 @@ Codegen for container types (tuples, optionals, slices, maps) and capturing lamb
 - **Optional wrapping**: Assigning `T` to `T?` variable auto-wraps via `wrapOptional` (insertvalue `{ true, val }`).
 - **Slices / Array literals**: Heap-allocated `i8*` → `{ i64 len, i64 cap, [data...] }`. 16-byte header + inline elements. `genArrayLit` mallocs, stores header via GEP, stores elements via typed GEP past header. Both `*types.Slice` and `*types.Array` map to `i8Ptr`.
 - **Slice indexing**: Bounds-checked with `icmp ult` (unsigned, catches negative indices). Out-of-bounds calls `promise_panic` + `unreachable`. Read via `genSliceIndex`, write via `genSliceIndexAssign` (supports compound assignment like `arr[i] += 1`).
-- **Maps**: Type-erased C runtime hash table (`runtime/runtime_map.c`). Open-addressing with FNV-1a hash, 75% load rehash. Entry layout: `[used:1][key_bytes][val_bytes]` inline. Functions: `promise_map_new`, `promise_map_set`, `promise_map_get`, `promise_map_len`, `promise_map_iter_next`.
-- **String map keys**: Content-based hashing via `__promise_hash_string` / `__promise_eq_string` (codegen-emitted LLVM IR, dereference `i8*` to read string header). Byte-level hash/compare for primitive keys (NULL function pointers → default). `runtime_hash.c` fully eliminated.
-- **Map indexing**: `m["key"]` returns `Optional(V)` — calls `promise_map_get`, checks NULL, wraps in `{ i1, V }` via phi merge. Assignment via `promise_map_set`.
-- **For-in iteration**: `genForInStmt` dispatches on iterable type. Slices: counter loop with bounds check per element. Maps: `promise_map_iter_next` loop building `(K, V)` tuple per entry. Ranges: existing `genForInRange` extracted.
+- **Maps**: ~~Type-erased C runtime hash table (`runtime/runtime_map.c`)~~ — **Superseded.** Now a pure Promise self-hosted implementation in `std/map.pr`: generic `Map[K: Hashable + Equal, V]` using open-addressing with `Slot[K, V]` enum (Empty/Tombstone/Used), FNV-1a key hashing via `.hash` property, 75% load-factor rehash. Methods: `[]`, `[]=`, `contains`, `remove`, `keys`, `values`, `get_or`, `pop`, `update`, `entries`, `merge`, `clear`. Monomorphized at codegen time.
+- **Map indexing**: `m["key"]` returns `V?` (optional). Assignment via `m["key"] = val`. Both compile to monomorphized method calls on the Map instance.
+- **For-in iteration**: `genForInStmt` dispatches on iterable type. Vectors: counter loop with bounds check per element. Maps: `genForInMap` calls monomorphized `keys()`/`values()`, iterates both vectors in parallel — single binding yields `(K, V)` tuple, two bindings (`for k, v in m`) yield separate key and value. Ranges: `genForInRange`. Strings: `genForInString` (UTF-8 codepoints). Channels: `genForInChannel`.
 - **Lambdas (capturing)**: Anonymous LLVM functions (`.lambda.N`) with `i8* %env` as first parameter (uniform ABI). Fat pointer representation `{ i8*, i8* }` (fn ptr + env ptr) for all function values. Non-capturing lambdas use null env. Compiler state saved/restored (fn, block, locals, canError, scopeBindings, dropFlags). Handles both expression body (`|x| -> x + 1`) and block body (`|x| -> int { return x * 2; }`).
 - **Lambda captures**: Sema capture analysis (`checkLambdaCapture`) detects outer-scope variable references via scope chain traversal. `Copy` types auto-captured by copy; non-`Copy` types require explicit `move` keyword. Captures recorded in `info.LambdaCaptures` (deterministic order via sorted names). Nested lambda capture propagation: inner captures from grandparent scopes automatically propagate to intermediate lambdas.
 - **Lambda env struct**: Heap-allocated struct holding captured values (`malloc`). Captures loaded from enclosing scope allocas, stored into env fields. Inside lambda body, env is bitcast to typed pointer, fields extracted into local allocas. Move-captured droppable types registered for drop inside lambda body. Env struct freed at scope exit via `bindingFreeEnv` binding (drop-flag-guarded, null-checked `free()`).
 - **Lambda calls**: `genCallExpr` detects local variables with `*types.Signature` type before regular function lookup. Loads fat pointer `{ i8*, i8* }`, calls `genIndirectCall` which extracts fn/env, bitcasts to typed function pointer with env-first ABI, calls with env as first arg.
 - **Named function references**: When a named function is used as a first-class value (e.g., `f := add`), a thunk with env-first ABI is generated (`.thunk.add`) that forwards to the original function. Fat pointer uses `{ @.thunk.add, null }`.
 - **Lambda ownership**: Move captures mark the variable as `Moved` in the enclosing scope. Captured variables are `Owned` inside the lambda body. Copy captures leave the original variable usable.
-- **Intrinsics** (`compiler.go`): 7 new map runtime functions declared in `declareIntrinsics`. `lambdaCounter` and `targetType` fields added to Compiler.
+- **Intrinsics** (`compiler.go`): ~~7 new map runtime functions declared in `declareIntrinsics`~~ (superseded by self-hosted `std/map.pr`). `lambdaCounter` and `targetType` fields added to Compiler.
 - **Scope**: Tuple literals/destructure/return, optional none/some/wrapping/elvis, array literals, slice/array indexing (read/write/compound), for-in over slices/arrays/maps, map literals/indexing/assignment, capturing lambdas (expression/block body, indirect calls, copy/move captures, nested capture propagation, env allocation/cleanup, named function reference thunks).
 - **Deferred**: Slice growth (`.push()`), container methods (`.contains`), `llvmTypeSize` struct alignment (current implementation sums without padding — correct for primitive elements, under-allocates for struct-typed slice elements). String interpolation, if-unwrap/while-unwrap, optional chaining, and unsafe blocks completed in Stage 8h. Container `.len` completed in Stage 8i.
 - **Fixed-size arrays** (`T[N]`): Stack-allocated `[N x T]` LLVM array type. Hint-based literal inference: `int[3] x = [1,2,3]` types the literal as `*types.Array`, bare `[1,2,3]` remains Vector. `genFixedArrayLit` allocas `[N x T]` and stores elements via GEP. `genArrayIndex`/`genArrayIndexAssign` emit bounds check (`icmp ult idx, N`) and GEP into the array. `.len` returns compile-time constant. `genForInArray` iterates with constant-bound loop. `genArrayBasePtr` returns alloca for identifiers, `genFieldPtr` for struct field access (MemberExpr), temp alloca for computed expressions. Copy semantics: arrays of copy-type elements are copy. Element count mismatch (`int[3] x = [1,2]`) is a sema error. Mutating vector methods (push/pop/remove) rejected on fixed arrays.
@@ -397,9 +396,9 @@ Codegen for char literals, `.len` property on all containers (string, slice, arr
 **Files:** Updates to `codegen/expr.go`, `codegen/stmt.go`, `codegen/compiler.go`, `codegen/types.go`, `codegen/native.go`, `sema/expr.go`, `sema/stmt.go`, `runtime/runtime_string.c`, `types/container.go`; 25 new tests (19 codegen → 227 total, 6 sema → 214 total)
 
 - **Char literals**: `genCharLit` parses raw text including escape sequences (`\n`, `\t`, `\r`, `\b`, `\\`, `\'`, `\0`), returns i32 constant. `CatChar` classification added to `types.go` with signed i32 comparisons in `native.go`.
-- **Container `.len` property**: Uniform read-only getter across all container types — `arr.len`, `m.len`, `s.len`. Slice/array reads i64 from heap header (GEP index 0). Map calls `promise_map_len`. String reads i64 from instance struct (GEP index 1). Sema extended with `Slice`/`Array`/`Map` cases in `checkMemberExpr` and `TypString` special case in Named handler. Both `string.len` and `Vector.len` are declared as `get len int` (read-only getter, no setter).
+- **Container `.len` property**: Uniform read-only getter across all container types — `arr.len`, `m.len`, `s.len`. Vector reads i64 from heap header (GEP index 0). Map uses `get len` getter (pure Promise). String reads i64 from instance struct (GEP index 1). Both `string.len` and `Vector.len` are declared as `get len int` (read-only getter, no setter).
 - **For-in over strings**: `genForInString` iterates UTF-8 codepoints via `promise_string_next_char` runtime function. Byte position tracked in i64 alloca, -1 sentinel for end. Index variable (`for i, ch in s`) supported with separate counter.
-- **Map compound assignment**: `genMapCompoundAssign` gets current value via `promise_map_get`, NULL-checks with panic on missing key, applies operator, stores back via `promise_map_set`. Sema fix unwraps Optional for operator lookup on map value type.
+- **Map compound assignment**: `genMapCompoundAssign` reads current value via monomorphized `[]` method, unwraps optional with panic on missing key, applies operator, stores back via `[]=`. Sema fix unwraps Optional for operator lookup on map value type.
 - **Char interpolation**: `convertToString` extended with `TypChar` case calling `promise_char_to_string` (UTF-8 encode).
 - **Deferred**: Evaluation order bug in compound index assignment (RHS evaluated before LHS target/key — see comment in `genMapCompoundAssign`).
 
@@ -431,12 +430,12 @@ Promoted `slice[T]` and `map[K,V]` from structural placeholder types (`*types.Sl
 
 **Native Methods Registered in `builtins.go`:**
 - **slice[T]**: `get len` getter, `new(int capacity = 16)`, `push(T)`, `pop() → T?`, `contains(T) → bool`, `remove(int)`
-- **map[K,V]**: `get len` getter, `contains(K) → bool`, `remove(K) → bool`, `keys() → K[]`, `values() → V[]`
+- **map[K,V]**: ~~`get len` getter, `contains(K) → bool`, `remove(K) → bool`, `keys() → K[]`, `values() → V[]`~~ (superseded by self-hosted `std/map.pr` — all methods are pure Promise, only `[]`/`[]=` dispatch through codegen for subscript syntax)
 - **string**: `get len` getter, `contains(string) → bool`, `starts_with(string) → bool`, `ends_with(string) → bool`, `index_of(string) → int?`, `trim() → string`, `split(string) → string[]`
 
 **Runtime:**
 - New `runtime_slice.c`: push (with realloc growth), pop, contains, remove
-- Updated `runtime_map.c`: tombstone support (0=empty, 1=used, 2=tombstone), remove, contains, keys, values
+- ~~Updated `runtime_map.c`: tombstone support~~ (superseded by self-hosted `std/map.pr` with `Slot[K,V]` enum: Empty/Tombstone/Used)
 - Updated `runtime_string.c`: ~~contains, starts_with, ends_with, index_of~~ (migrated to pure Promise), trim, split
 
 **Sema/Codegen Migration:**
@@ -815,7 +814,7 @@ Known gaps and improvements deferred from completed stages.
 | Range value type variable binding — `r := 1..5` panics in codegen (store type mismatch: `{ i64, i64, i1 }` vs `{ i8*, i8* }*`) | 8g | Medium |
 | Char range iteration — `for c in 'a'..'z'` panics in codegen (i32 vs i64 mismatch in `genRange`) | 8g | Medium |
 | Uint range iteration — `for i in a..b` (uint bounds) yields `int`, not `uint`, causing type errors in loop body | 8g | Low |
-| Map for-in tuple handling — `for entry in map` panics in codegen (cannot convert tuple type `(K, V)` to string for interpolation; also affects tuple variable binding) | 8g | Medium |
+| ~~Map for-in tuple handling — `for entry in map` panics in codegen~~ — **Fixed.** Renamed `entry` basic block to `.entry` to avoid LLVM IR name collision. Added `for k, v in map` with proper key/value type bindings in sema+codegen. Added `get_or`, `pop`, `update`, `entries`, `merge` methods. | 8g | ~~Medium~~ Resolved |
 | ~~`map[bool, T]` — bool key hashing/lookup is broken~~ — **Fixed.** Bool hash now uses hardcoded constants via `select i1` instead of `fnv1a_hash`. Map literal key types are validated against `Hashable + Equal` constraints via `validateConstraints`. | 8i | ~~Medium~~ Resolved |
 | ~~Variable name collisions in repeated `if v := opt { }` blocks~~ — **Fixed.** `uniqueLocalName()` with per-function `localNameCount` appends `.N` suffix to duplicate alloca names in inner scopes. | 8n | ~~Medium~~ Resolved |
 

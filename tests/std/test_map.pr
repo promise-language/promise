@@ -1,6 +1,5 @@
-// Test map[K, V] operations: insert, lookup, contains, remove, keys, values
+// Test map[K, V] operations: insert, lookup, contains, remove, keys, values, iteration
 //
-// TODO: test for-in iteration over map entries — blocked on codegen (tuple type crash)
 test_literal_and_lookup() `test {
   map[string, int] m = {"a": 1, "b": 2, "c": 3};
   assert(m.len == 3, "literal len 3");
@@ -104,5 +103,223 @@ test_clear() `test {
   assert(m.len == 1, "after re-insert len 1");
   if val := m["x"] {
     assert(val == 99, "m[x] == 99 after clear+insert");
+  }
+}
+
+// --- for-in iteration ---
+
+test_for_in_kv() `test {
+  map[string, int] m = {"a": 1, "b": 2, "c": 3};
+  int sum = 0;
+  int count = 0;
+  string[] seen_keys = [];
+  for k, v in m {
+    sum += v;
+    count++;
+    seen_keys.push(k);
+  }
+  assert(sum == 6, "for k, v sum == 6");
+  assert(count == 3, "for k, v visits 3 entries");
+  assert(seen_keys.contains("a"), "visited key a");
+  assert(seen_keys.contains("b"), "visited key b");
+  assert(seen_keys.contains("c"), "visited key c");
+}
+
+test_for_in_single() `test {
+  map[string, int] m = {"x": 10, "y": 20};
+  int sum = 0;
+  for pair in m {
+    (k, v) := pair;
+    sum += v;
+  }
+  assert(sum == 30, "for pair sum == 30");
+}
+
+test_for_in_empty() `test {
+  map[string, int] m = {:};
+  int count = 0;
+  for k, v in m {
+    count++;
+  }
+  assert(count == 0, "empty map iterates zero times");
+}
+
+test_for_in_entry_name() `test {
+  map[string, int] m = {"a": 1, "b": 2};
+  int sum = 0;
+  for entry in m {
+    (_, v) := entry;
+    sum += v;
+  }
+  assert(sum == 3, "entry name doesn't collide");
+}
+
+// --- get_or ---
+
+test_get_or() `test {
+  map[string, int] m = {"a": 1, "b": 2};
+  assert(m.get_or("a", 99) == 1, "get_or existing returns value");
+  assert(m.get_or("z", 99) == 99, "get_or missing returns default");
+}
+
+// --- pop ---
+
+test_pop() `test {
+  map[string, int] m = {"a": 1, "b": 2};
+  if val := m.pop("a") {
+    assert(val == 1, "pop returns removed value");
+  } else {
+    assert(false, "pop should find key");
+  }
+  assert(m.len == 1, "pop reduces len");
+  assert(!m.contains("a"), "pop removes key");
+}
+
+test_pop_missing() `test {
+  map[string, int] m = {"a": 1};
+  bool found = false;
+  if _ := m.pop("z") {
+    found = true;
+  }
+  assert(!found, "pop missing returns none");
+  assert(m.len == 1, "pop missing preserves len");
+}
+
+// --- update ---
+
+test_update_existing() `test {
+  map[string, int] m = {"a": 1, "b": 2};
+  assert(m.update("a", 99), "update existing returns true");
+  assert(m.get_or("a", 0) == 99, "update changes value");
+  assert(m.len == 2, "update preserves len");
+}
+
+test_update_missing() `test {
+  map[string, int] m = {"a": 1};
+  assert(!m.update("z", 99), "update missing returns false");
+  assert(m.len == 1, "update missing preserves len");
+  assert(!m.contains("z"), "update missing doesn't insert");
+}
+
+// --- entries ---
+
+test_entries() `test {
+  map[string, int] m = {"x": 10};
+  (string, int)[] e = m.entries();
+  assert(e.len == 1, "entries len 1");
+  (k, v) := e[0];
+  assert(k == "x", "entry key is x");
+  assert(v == 10, "entry value is 10");
+}
+
+// --- merge ---
+
+test_merge() `test {
+  map[string, int] m1 = {"a": 1, "b": 2};
+  map[string, int] m2 = {"b": 99, "c": 3};
+  m1.merge(m2);
+  assert(m1.len == 3, "merge len 3");
+  assert(m1.get_or("a", 0) == 1, "merge preserves a");
+  assert(m1.get_or("b", 0) == 99, "merge overwrites b");
+  assert(m1.get_or("c", 0) == 3, "merge adds c");
+}
+
+// --- compound index assignment ---
+
+test_compound_index_assign() `test {
+  map[string, int] m = {"a": 10, "b": 20};
+  m["a"] += 5;
+  assert(m.get_or("a", 0) == 15, "+= on map element");
+  m["b"] -= 3;
+  assert(m.get_or("b", 0) == 17, "-= on map element");
+  m["a"] *= 2;
+  assert(m.get_or("a", 0) == 30, "*= on map element");
+}
+
+// --- tombstone probing ---
+
+test_lookup_past_tombstone() `test {
+  // Insert two keys that will occupy consecutive slots,
+  // remove the first, verify the second is still found.
+  map[int, int] m = {:};
+  // Fill enough to create collisions
+  for i in 0..20 {
+    m[i] = i;
+  }
+  // Remove some entries, creating tombstones
+  m.remove(3);
+  m.remove(7);
+  m.remove(11);
+  // Verify remaining entries are still accessible past tombstones
+  assert(m.get_or(4, -1) == 4, "lookup past tombstone 3");
+  assert(m.get_or(8, -1) == 8, "lookup past tombstone 7");
+  assert(m.get_or(12, -1) == 12, "lookup past tombstone 11");
+  assert(m.len == 17, "len after 3 removes");
+}
+
+test_pop_creates_tombstone() `test {
+  map[string, int] m = {:};
+  m["a"] = 1;
+  m["b"] = 2;
+  m["c"] = 3;
+  m.pop("b");
+  // Lookup should skip tombstone left by pop
+  assert(m.get_or("a", -1) == 1, "a still found after pop b");
+  assert(m.get_or("c", -1) == 3, "c still found after pop b");
+  assert(m.len == 2, "len after pop");
+}
+
+// --- entries with multiple entries ---
+
+test_entries_multiple() `test {
+  map[string, int] m = {"a": 1, "b": 2, "c": 3};
+  (string, int)[] e = m.entries();
+  assert(e.len == 3, "entries len 3");
+  // Collect into map to verify order-independently
+  int sum = 0;
+  for pair in e {
+    (_, v) := pair;
+    sum += v;
+  }
+  assert(sum == 6, "entries values sum to 6");
+}
+
+// --- merge into empty ---
+
+test_merge_into_empty() `test {
+  map[string, int] m1 = {:};
+  map[string, int] m2 = {"x": 10, "y": 20};
+  m1.merge(m2);
+  assert(m1.len == 2, "merge into empty len 2");
+  assert(m1.get_or("x", 0) == 10, "merged x");
+  assert(m1.get_or("y", 0) == 20, "merged y");
+}
+
+// --- for k, v with int keys ---
+
+test_for_in_kv_int_keys() `test {
+  map[int, string] m = {1: "one", 2: "two", 3: "three"};
+  int key_sum = 0;
+  string[] vals = [];
+  for k, v in m {
+    key_sum += k;
+    vals.push(v);
+  }
+  assert(key_sum == 6, "int key sum == 6");
+  assert(vals.len == 3, "3 values iterated");
+}
+
+// --- rehash ---
+
+test_rehash_stress() `test {
+  map[int, int] m = {:};
+  // Insert enough entries to trigger rehash (initial capacity 16, load factor 75%)
+  for i in 0..50 {
+    m[i] = i * 10;
+  }
+  assert(m.len == 50, "50 entries after rehash");
+  // Verify all entries survive rehash
+  for i in 0..50 {
+    assert(m.get_or(i, -1) == i * 10, "entry survived rehash");
   }
 }

@@ -92,7 +92,7 @@ func emitLibcAlloc(module *ir.Module) *ir.Func {
 		ir.NewParam("size", irtypes.I64))
 	fn.ReturnAttrs = append(fn.ReturnAttrs, enum.ReturnAttrNoAlias)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	ret := entry.NewCall(mallocFn, fn.Params[0])
 	entry.NewRet(ret)
 
@@ -111,7 +111,7 @@ func emitLibcFree(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_free", irtypes.Void,
 		ir.NewParam("ptr", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	entry.NewCall(freeFn, fn.Params[0])
 	entry.NewRet(nil)
 
@@ -135,7 +135,7 @@ func emitLibcRealloc(module *ir.Module) *ir.Func {
 		ir.NewParam("size", irtypes.I64))
 	fn.ReturnAttrs = append(fn.ReturnAttrs, enum.ReturnAttrNoAlias)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	ret := entry.NewCall(reallocFn, fn.Params[0], fn.Params[1])
 	entry.NewRet(ret)
 
@@ -157,7 +157,7 @@ func emitStubThreadCreate(module *ir.Module) *ir.Func {
 		ir.NewParam("fn", irtypes.I8Ptr),
 		ir.NewParam("arg", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 
 	// Bitcast i8* to function pointer and call synchronously
 	fnPtr := entry.NewBitCast(fn.Params[0], threadFnPtrType())
@@ -172,7 +172,7 @@ func emitStubThreadJoin(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_thread_join", irtypes.Void,
 		ir.NewParam("handle", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	entry.NewRet(nil)
 	return fn
 }
@@ -182,7 +182,7 @@ func emitStubMutexInit(module *ir.Module) *ir.Func {
 	palAlloc := lookupFunc(module, "pal_alloc")
 	fn := module.NewFunc("pal_mutex_init", irtypes.I8Ptr)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	handle := entry.NewCall(palAlloc, constant.NewInt(irtypes.I64, 1))
 	entry.NewRet(handle)
 	return fn
@@ -193,7 +193,7 @@ func emitStubMutexLock(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_mutex_lock", irtypes.Void,
 		ir.NewParam("mutex", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	entry.NewRet(nil)
 	return fn
 }
@@ -203,7 +203,7 @@ func emitStubMutexUnlock(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_mutex_unlock", irtypes.Void,
 		ir.NewParam("mutex", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	entry.NewRet(nil)
 	return fn
 }
@@ -214,7 +214,7 @@ func emitStubMutexDestroy(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_mutex_destroy", irtypes.Void,
 		ir.NewParam("mutex", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	entry.NewCall(palFree, fn.Params[0])
 	entry.NewRet(nil)
 	return fn
@@ -225,7 +225,7 @@ func emitStubCondInit(module *ir.Module) *ir.Func {
 	palAlloc := lookupFunc(module, "pal_alloc")
 	fn := module.NewFunc("pal_cond_init", irtypes.I8Ptr)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	handle := entry.NewCall(palAlloc, constant.NewInt(irtypes.I64, 1))
 	entry.NewRet(handle)
 	return fn
@@ -237,7 +237,7 @@ func emitStubCondWait(module *ir.Module) *ir.Func {
 		ir.NewParam("cond", irtypes.I8Ptr),
 		ir.NewParam("mutex", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	entry.NewRet(nil)
 	return fn
 }
@@ -247,7 +247,7 @@ func emitStubCondSignal(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_cond_signal", irtypes.Void,
 		ir.NewParam("cond", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	entry.NewRet(nil)
 	return fn
 }
@@ -257,7 +257,7 @@ func emitStubCondBroadcast(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_cond_broadcast", irtypes.Void,
 		ir.NewParam("cond", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	entry.NewRet(nil)
 	return fn
 }
@@ -266,7 +266,7 @@ func emitStubCondBroadcast(module *ir.Module) *ir.Func {
 func emitStubNumCPUs(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_num_cpus", irtypes.I32)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	entry.NewRet(constant.NewInt(irtypes.I32, 1))
 	return fn
 }
@@ -277,7 +277,7 @@ func emitStubCondDestroy(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_cond_destroy", irtypes.Void,
 		ir.NewParam("cond", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	entry.NewCall(palFree, fn.Params[0])
 	entry.NewRet(nil)
 	return fn

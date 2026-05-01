@@ -750,13 +750,20 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 	if iterType != nil {
 		// Determine element type from iterable
 		var elemType types.Type
+		var mapKeyType types.Type // non-nil when iterating a map with 2 bindings
 		if arr, ok := iterType.(*types.Array); ok {
 			elemType = arr.Elem()
 		} else if elem, ok := types.AsVector(iterType); ok {
 			elemType = elem
 		} else if key, val, ok := types.AsMap(iterType); ok {
-			// Iterating a map yields (key, value) tuples
-			elemType = types.NewTuple([]types.Type{key, val})
+			if s.Index != "" {
+				// for k, v in map: k = key type, v = value type
+				elemType = val
+				mapKeyType = key
+			} else {
+				// for entry in map: entry = (key, value) tuple
+				elemType = types.NewTuple([]types.Type{key, val})
+			}
 		} else if inst, ok := iterType.(*types.Instance); ok {
 			// Iterator[T] yields T, Stream[T] yields T, Channel[T] yields T
 			origin := inst.Origin()
@@ -787,7 +794,11 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 		}
 		if s.Index != "" && s.Index != "_" {
 			c.checkNoShadow(s.Index, s.Pos())
-			c.insert(types.NewVar(tpos(s.Pos()), s.Index, types.TypInt))
+			var indexType types.Type = types.TypInt
+			if mapKeyType != nil {
+				indexType = mapKeyType
+			}
+			c.insert(types.NewVar(tpos(s.Pos()), s.Index, indexType))
 		}
 	}
 

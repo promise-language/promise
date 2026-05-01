@@ -220,7 +220,7 @@ func (c *Compiler) defineGNewFunc() {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	gType := goroutineStructType()
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 
 	// Allocate G struct
 	structSize := constant.NewInt(irtypes.I64, int64(c.typeSize(gType)))
@@ -323,7 +323,7 @@ func (c *Compiler) defineSchedInitFunc() {
 	pTy := processorStructType()
 	mTy := machineStructType()
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 
 	// Init global queue lock
 	glLock := entry.NewCall(c.palMutexInit)
@@ -527,7 +527,7 @@ func (c *Compiler) defineSchedLoopFunc() {
 	mTy := machineStructType()
 	schedTy := schedStructType()
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	loop := fn.NewBlock("loop")
 	checkShutdown := fn.NewBlock("check_shutdown")
 	runG := fn.NewBlock("run_g")
@@ -720,7 +720,7 @@ func (c *Compiler) defineSysmonFunc() {
 	pTy := processorStructType()
 	schedTy := schedStructType()
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	loop := fn.NewBlock("loop")
 	scanHeader := fn.NewBlock("scan_header")
 	scanBody := fn.NewBlock("scan_body")
@@ -803,7 +803,7 @@ func (c *Compiler) defineLocalEnqueueFunc() {
 
 	pTy := processorStructType()
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	enqueueBlk := fn.NewBlock("enqueue")
 	fullBlk := fn.NewBlock("full")
 	retTrue := fn.NewBlock("ret_true")
@@ -863,7 +863,7 @@ func (c *Compiler) defineLocalDequeueFunc() {
 
 	pTy := processorStructType()
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	dequeueBlk := fn.NewBlock("dequeue")
 	emptyBlk := fn.NewBlock("empty")
 	retG := fn.NewBlock("ret_g")
@@ -924,7 +924,7 @@ func (c *Compiler) defineStealWorkFunc() {
 
 	pTy := processorStructType()
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	checkEmpty := fn.NewBlock("check_empty")
 	stealLoop := fn.NewBlock("steal_loop")
 	stealBody := fn.NewBlock("steal_body")
@@ -1065,7 +1065,7 @@ func (c *Compiler) defineI64MaxFunc() {
 	fn := c.module.NewFunc("promise_i64_max", irtypes.I64, aParam, bParam)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	isGT := entry.NewICmp(enum.IPredSGT, aParam, bParam)
 	retA := fn.NewBlock("ret_a")
 	retB := fn.NewBlock("ret_b")
@@ -1086,7 +1086,7 @@ func (c *Compiler) defineSchedEnqueueFunc() {
 	gTy := goroutineStructType()
 	schedTy := schedStructType()
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	tryLocal := fn.NewBlock("try_local")
 	globalEnqueue := fn.NewBlock("global_enqueue")
 	wakeAndRet := fn.NewBlock("wake_and_ret")
@@ -1177,7 +1177,7 @@ func (c *Compiler) defineSchedFindRunnableFunc() {
 	pTy := processorStructType()
 	schedTy := schedStructType()
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	tryGlobal := fn.NewBlock("try_global")
 	globalEmpty := fn.NewBlock("global_empty")
 	globalDequeue := fn.NewBlock("global_dequeue")
@@ -1336,7 +1336,7 @@ func (c *Compiler) defineSchedParkMFunc() {
 	mTy := machineStructType()
 	schedTy := schedStructType()
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	waitLoop := fn.NewBlock("wait_loop")
 	doWait := fn.NewBlock("do_wait")
 	doneBlk := fn.NewBlock("done")
@@ -1416,7 +1416,7 @@ func (c *Compiler) defineSchedWakeMFunc() {
 	mTy := machineStructType()
 	schedTy := schedStructType()
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 
 	// Lock idle M list
 	imLockField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
@@ -1482,7 +1482,7 @@ func (c *Compiler) defineGoroutineExitFunc() {
 
 	gTy := goroutineStructType()
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 
 	gPtr := entry.NewBitCast(gParam, irtypes.NewPointer(gTy))
 
@@ -1632,7 +1632,7 @@ func (c *Compiler) defineSchedShutdownFunc() {
 	pTy := processorStructType()
 	mTy := machineStructType()
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 
 	// Set shutdown flag
 	shutdownField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
@@ -1761,7 +1761,7 @@ func (c *Compiler) wrapMainWithScheduler() {
 
 	// mainFn was declared by declareFuncs with i32 return but no body defined.
 	// Use it directly as the OS entry point — add scheduler setup code.
-	entry := mainFn.NewBlock("entry")
+	entry := mainFn.NewBlock(".entry")
 
 	if c.isWasm {
 		// WASM: create @_start entry point that calls __promise_init_heap then @main
@@ -1808,7 +1808,7 @@ func (c *Compiler) wrapMainWithScheduler() {
 	c.inCoroutine = true
 
 	// --- Coroutine preamble ---
-	coroEntry := coroFn.NewBlock("entry")
+	coroEntry := coroFn.NewBlock(".entry")
 	c.block = coroEntry
 
 	coroId := coroEntry.NewCall(c.coroId,
@@ -1943,7 +1943,7 @@ func (c *Compiler) defineSchedRunUntilMainFunc() {
 
 	schedTy := schedStructType()
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	waitLoop := fn.NewBlock("wait_loop")
 	waitBlk := fn.NewBlock("wait")
 	doneBlk := fn.NewBlock("done")
@@ -1992,7 +1992,7 @@ func (c *Compiler) defineSchedCoopRunFunc() {
 	gTy := goroutineStructType()
 	pTy := processorStructType()
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	loop := fn.NewBlock("loop")
 	foundG := fn.NewBlock("found_g")
 	noG := fn.NewBlock("no_g")
@@ -2139,7 +2139,7 @@ func (c *Compiler) defineWaiterEnqueueFunc() {
 	gTy := goroutineStructType()
 	gPtrTy := irtypes.NewPointer(gTy)
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	setHeadBlk := fn.NewBlock("set_head")
 	linkTailBlk := fn.NewBlock("link_tail")
 
@@ -2187,7 +2187,7 @@ func (c *Compiler) defineWaiterDequeueFunc() {
 	gTy := goroutineStructType()
 	gPtrTy := irtypes.NewPointer(gTy)
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	dequeueBlk := fn.NewBlock("dequeue")
 	clearTailBlk := fn.NewBlock("clear_tail")
 	doneBlk := fn.NewBlock("done")
@@ -2236,7 +2236,7 @@ func (c *Compiler) defineWaiterWakeAllFunc() {
 	gTy := goroutineStructType()
 	gPtrTy := irtypes.NewPointer(gTy)
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	loopBlk := fn.NewBlock("loop")
 	wakeBlk := fn.NewBlock("wake")
 	doneBlk := fn.NewBlock("done")
@@ -2274,7 +2274,7 @@ func (c *Compiler) defineWaiterRemoveFunc() {
 	gTy := goroutineStructType()
 	gPtrTy := irtypes.NewPointer(gTy)
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	checkHeadBlk := fn.NewBlock("check_head")
 	removeHeadBlk := fn.NewBlock("remove_head")
 	searchBlk := fn.NewBlock("search")

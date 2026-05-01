@@ -451,7 +451,7 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 		c.funcs["main"] = mainFn
 	}
 
-	entry := mainFn.NewBlock("entry")
+	entry := mainFn.NewBlock(".entry")
 
 	// Allocate counters: passed and failed
 	passedAlloca := entry.NewAlloca(irtypes.I32)
@@ -839,7 +839,7 @@ func (c *Compiler) defineStringNewFunc() {
 	oomGlobal.Immutable = true
 
 	// entry: allocate and null-check
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	allocSize := entry.NewAdd(headerSize, lenParam)
 	rawPtr := entry.NewCall(c.palAlloc, allocSize)
 	isNull := entry.NewICmp(enum.IPredEQ, rawPtr, constant.NewNull(irtypes.I8Ptr))
@@ -900,7 +900,7 @@ func (c *Compiler) defineStringConcatFunc() {
 	oomGlobal.Immutable = true
 
 	// entry: load lengths, compute total, allocate, null-check
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 
 	typedA := entry.NewBitCast(aParam, irtypes.NewPointer(strInstanceType))
 	lenPtrA := entry.NewGetElementPtr(strInstanceType, typedA,
@@ -980,7 +980,7 @@ func (c *Compiler) defineStringDirectEqFunc() {
 	falseVal := constant.NewInt(irtypes.I1, 0)
 
 	// Fast path: same pointer → equal
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	samePtr := entry.NewICmp(enum.IPredEQ, aParam, bParam)
 	samePtrBlk := fn.NewBlock("same_ptr")
 	checkLenBlk := fn.NewBlock("check_len")
@@ -1045,7 +1045,7 @@ func (c *Compiler) defineStringTrimFunc() {
 	one64 := constant.NewInt(irtypes.I64, 1)
 
 	// entry: load len, get data pointer, alloca start/end
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	typedS := entry.NewBitCast(sParam, irtypes.NewPointer(strInstanceType))
 	lenPtr := entry.NewGetElementPtr(strInstanceType, typedS,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
@@ -1162,7 +1162,7 @@ func (c *Compiler) defineStringSplitFunc() {
 	oomGlobal.Immutable = true
 
 	// entry: load string fields, set up allocas
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 
 	typedS := entry.NewBitCast(sParam, irtypes.NewPointer(strInstanceType))
 	sLenPtr := entry.NewGetElementPtr(strInstanceType, typedS,
@@ -1365,7 +1365,7 @@ func (c *Compiler) defineStringNextCharFunc() {
 	one32 := constant.NewInt(irtypes.I32, 1)
 
 	// entry: load len, data pointer, *pos, allocas for cp/n/loopI
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 
 	typedS := entry.NewBitCast(sParam, irtypes.NewPointer(strInstanceType))
 	sLenPtr := entry.NewGetElementPtr(strInstanceType, typedS,
@@ -1507,7 +1507,7 @@ func (c *Compiler) defineStringHashFunc() {
 	one64 := constant.NewInt(irtypes.I64, 1)
 
 	// Entry: null check
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	isNull := entry.NewICmp(enum.IPredEQ, ptrParam, constant.NewNull(irtypes.I8Ptr))
 	nullBlk := fn.NewBlock("null")
 	initBlk := fn.NewBlock("init")
@@ -1583,7 +1583,7 @@ func (c *Compiler) defineStringEqFunc() {
 	one32 := constant.NewInt(irtypes.I32, 1)
 
 	// Entry: dereference indirect pointers to get actual string pointers
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	ptrPtrA := entry.NewBitCast(aParam, irtypes.NewPointer(irtypes.I8Ptr))
 	pa := entry.NewLoad(irtypes.I8Ptr, ptrPtrA)
 	ptrPtrB := entry.NewBitCast(bParam, irtypes.NewPointer(irtypes.I8Ptr))
@@ -1663,7 +1663,7 @@ func (c *Compiler) defineVectorWithCapacityFunc() {
 	headerSizeConst := constant.NewInt(irtypes.I64, int64(vectorHeaderSize))
 
 	// Entry: clamp negative capacity to 0, compute alloc size
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	isNeg := entry.NewICmp(enum.IPredSLT, capParam, zero64)
 	clampedCap := entry.NewSelect(isNeg, zero64, capParam)
 	dataSize := entry.NewMul(clampedCap, elemSizeParam)
@@ -1717,7 +1717,7 @@ func (c *Compiler) defineVectorPushFunc() {
 	headerSizeConst := constant.NewInt(irtypes.I64, int64(vectorHeaderSize))
 
 	// Entry: load len and cap, check if growth needed
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	hdrPtr := entry.NewBitCast(sliceParam, irtypes.NewPointer(headerType))
 	lenPtr := entry.NewGetElementPtr(headerType, hdrPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
@@ -1803,7 +1803,7 @@ func (c *Compiler) defineVectorPopFunc() {
 	headerSizeConst := constant.NewInt(irtypes.I64, int64(vectorHeaderSize))
 
 	// Entry: load len, check if empty
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	hdrPtr := entry.NewBitCast(sliceParam, irtypes.NewPointer(headerType))
 	lenPtr := entry.NewGetElementPtr(headerType, hdrPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
@@ -1851,7 +1851,7 @@ func (c *Compiler) defineVectorContainsFunc() {
 	headerSizeConst := constant.NewInt(irtypes.I64, int64(vectorHeaderSize))
 
 	// Entry: load len from header, init loop counter
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	hdrPtr := entry.NewBitCast(sliceParam, irtypes.NewPointer(headerType))
 	lenPtr := entry.NewGetElementPtr(headerType, hdrPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
@@ -1925,7 +1925,7 @@ func (c *Compiler) defineVectorRemoveFunc() {
 	headerSizeConst := constant.NewInt(irtypes.I64, int64(vectorHeaderSize))
 
 	// Entry: load len, bounds check
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	hdrPtr := entry.NewBitCast(sliceParam, irtypes.NewPointer(headerType))
 	lenPtr := entry.NewGetElementPtr(headerType, hdrPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
@@ -1996,7 +1996,7 @@ func (c *Compiler) defineBoolToStringFunc() {
 	c.strCounter++
 	falseGlobal.Immutable = true
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	trueBlk := fn.NewBlock("true")
 	falseBlk := fn.NewBlock("false")
 
@@ -2041,7 +2041,7 @@ func (c *Compiler) defineIntToStringFunc() {
 	zeroGlobal.Immutable = true
 
 	// entry: allocas and zero check
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	buf := entry.NewAlloca(bufType)
 	posAlloca := entry.NewAlloca(irtypes.I64)
 	entry.NewStore(constant.NewInt(irtypes.I64, 19), posAlloca)
@@ -2139,7 +2139,7 @@ func (c *Compiler) defineUintToStringFunc() {
 	zeroGlobal.Immutable = true
 
 	// entry: allocas and zero check
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	buf := entry.NewAlloca(bufType)
 	posAlloca := entry.NewAlloca(irtypes.I64)
 	entry.NewStore(constant.NewInt(irtypes.I64, 19), posAlloca)
@@ -2198,7 +2198,7 @@ func (c *Compiler) declareF64ToStringFunc() {
 // the Promise-defined _f64_to_str function. Must be called after declareFuncs.
 func (c *Compiler) defineF64ToStringBridge() {
 	fn := c.funcs["promise_f64_to_string"]
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	stdFn := c.funcs["_f64_to_str"]
 	result := entry.NewCall(stdFn, fn.Params[0])
 	entry.NewRet(result)
@@ -2215,7 +2215,7 @@ func (c *Compiler) defineCharToStringFunc() {
 	bufType := irtypes.NewArray(4, irtypes.I8)
 	zero32 := constant.NewInt(irtypes.I32, 0)
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	buf := entry.NewAlloca(bufType)
 
 	// Check: cp < 0x80?
@@ -2434,7 +2434,7 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 	c.dropBindings = make(map[string]scopeBinding)
 	c.blockCounter = 0
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	c.block = entry
 	c.entryBlock = entry
 
@@ -2789,7 +2789,7 @@ func (c *Compiler) defineModuleFuncs(file *ast.File, moduleName string) {
 		}
 
 		c.fn = fn
-		c.block = fn.NewBlock("entry")
+		c.block = fn.NewBlock(".entry")
 		c.entryBlock = c.block
 		c.locals = make(map[string]*ir.InstAlloca)
 		c.localNameCount = make(map[string]int)
@@ -2908,7 +2908,7 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 
 			c.currentNamed = named
 			c.fn = fn
-			c.block = fn.NewBlock("entry")
+			c.block = fn.NewBlock(".entry")
 			c.entryBlock = c.block
 			c.locals = make(map[string]*ir.InstAlloca)
 			c.localNameCount = make(map[string]int)
@@ -3146,7 +3146,7 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 	}
 	defer func() { c.currentNamed = savedNamed }()
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	c.block = entry
 	c.entryBlock = entry
 
@@ -3616,7 +3616,7 @@ func (c *Compiler) defineChannelNewFunc() {
 
 	chanType := channelStructType()
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 
 	// Allocate channel struct
 	structSize := constant.NewInt(irtypes.I64, int64(c.typeSize(chanType)))
@@ -3765,7 +3765,7 @@ func (c *Compiler) declareCoroIntrinsics() {
 		ir.NewParam("handle", irtypes.I8Ptr))
 	c.genResume.FuncAttrs = append(c.genResume.FuncAttrs, rawFuncAttr("noinline"))
 	{
-		b := c.genResume.NewBlock("entry")
+		b := c.genResume.NewBlock(".entry")
 		b.NewCall(c.coroResume, c.genResume.Params[0])
 		b.NewRet(nil)
 	}
@@ -3774,7 +3774,7 @@ func (c *Compiler) declareCoroIntrinsics() {
 		ir.NewParam("handle", irtypes.I8Ptr))
 	c.genDone.FuncAttrs = append(c.genDone.FuncAttrs, rawFuncAttr("noinline"))
 	{
-		b := c.genDone.NewBlock("entry")
+		b := c.genDone.NewBlock(".entry")
 		v := b.NewCall(c.coroDone, c.genDone.Params[0])
 		b.NewRet(v)
 	}
@@ -3783,7 +3783,7 @@ func (c *Compiler) declareCoroIntrinsics() {
 		ir.NewParam("handle", irtypes.I8Ptr))
 	c.genDestroy.FuncAttrs = append(c.genDestroy.FuncAttrs, rawFuncAttr("noinline"))
 	{
-		b := c.genDestroy.NewBlock("entry")
+		b := c.genDestroy.NewBlock(".entry")
 		b.NewCall(c.coroDestroy, c.genDestroy.Params[0])
 		b.NewRet(nil)
 	}

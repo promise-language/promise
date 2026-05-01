@@ -3634,7 +3634,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.dropBindings = make(map[string]scopeBinding)
 	c.loopScopeDepth = 0
 
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	c.block = entry
 	c.entryBlock = entry
 
@@ -3869,7 +3869,7 @@ func (c *Compiler) getOrCreateThunk(fn *ir.Func, name string) *ir.Func {
 
 	thunkName := ".thunk." + name
 	thunk := c.module.NewFunc(thunkName, fn.Sig.RetType, params...)
-	entry := thunk.NewBlock("entry")
+	entry := thunk.NewBlock(".entry")
 
 	// Forward call to original function, skipping the env param
 	callArgs := make([]value.Value, len(fn.Params))
@@ -4192,7 +4192,7 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 	coroFn.FuncAttrs = append(coroFn.FuncAttrs, rawFuncAttr("presplitcoroutine"))
 
 	// 5. Build coroutine body
-	entry := coroFn.NewBlock("entry")
+	entry := coroFn.NewBlock(".entry")
 
 	// Coroutine preamble
 	coroId := entry.NewCall(c.coroId,
@@ -4590,7 +4590,7 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	c.inCoroutine = true
 
 	// --- Coroutine preamble ---
-	entry := coroFn.NewBlock("entry")
+	entry := coroFn.NewBlock(".entry")
 	c.block = entry
 
 	coroId := entry.NewCall(c.coroId,

@@ -33,7 +33,7 @@ func (p *WindowsPAL) EmitWrite(module *ir.Module) *ir.Func {
 		ir.NewParam("fd", irtypes.I32),
 		ir.NewParam("buf", irtypes.I8Ptr),
 		ir.NewParam("len", irtypes.I64))
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 
 	// Map fd to Windows handle constant: sub i32 -10, %fd
 	// fd 0 → -10 (STD_INPUT_HANDLE)
@@ -75,7 +75,7 @@ func (p *WindowsPAL) EmitExit(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_exit", irtypes.Void,
 		ir.NewParam("code", irtypes.I32))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoReturn, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
+	entry := fn.NewBlock(".entry")
 	entry.NewCall(exitProcess, fn.Params[0])
 	entry.NewUnreachable()
 

@@ -11,7 +11,8 @@ compilationUnit
     ;
 
 useDecl
-    : USE IDENT stringLiteral SEMI
+    : USE IDENT (AS bindingName)? SEMI              # catalogImport
+    | USE bindingName stringLiteral SEMI             # sourcedImport
     ;
 
 declaration
@@ -210,7 +211,8 @@ metaParam
 // ============================================================
 
 typeRef
-    : IDENT typeArgs?                                          # namedType
+    : IDENT DOT IDENT typeArgs?                                # qualifiedType
+    | IDENT typeArgs?                                          # namedType
     | LPAREN typeRef (COMMA typeRef)+ RPAREN                   # tupleType
     | LPAREN typeRefList RPAREN ARROW typeRef                  # functionType
     | LPAREN typeRef RPAREN                                    # parenType

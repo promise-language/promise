@@ -10,8 +10,11 @@ type PromiseParserListener interface {
 	// EnterCompilationUnit is called when entering the compilationUnit production.
 	EnterCompilationUnit(c *CompilationUnitContext)
 
-	// EnterUseDecl is called when entering the useDecl production.
-	EnterUseDecl(c *UseDeclContext)
+	// EnterCatalogImport is called when entering the catalogImport production.
+	EnterCatalogImport(c *CatalogImportContext)
+
+	// EnterSourcedImport is called when entering the sourcedImport production.
+	EnterSourcedImport(c *SourcedImportContext)
 
 	// EnterDeclaration is called when entering the declaration production.
 	EnterDeclaration(c *DeclarationContext)
@@ -111,6 +114,9 @@ type PromiseParserListener interface {
 
 	// EnterNamedType is called when entering the namedType production.
 	EnterNamedType(c *NamedTypeContext)
+
+	// EnterQualifiedType is called when entering the qualifiedType production.
+	EnterQualifiedType(c *QualifiedTypeContext)
 
 	// EnterArrayType is called when entering the arrayType production.
 	EnterArrayType(c *ArrayTypeContext)
@@ -454,8 +460,11 @@ type PromiseParserListener interface {
 	// ExitCompilationUnit is called when exiting the compilationUnit production.
 	ExitCompilationUnit(c *CompilationUnitContext)
 
-	// ExitUseDecl is called when exiting the useDecl production.
-	ExitUseDecl(c *UseDeclContext)
+	// ExitCatalogImport is called when exiting the catalogImport production.
+	ExitCatalogImport(c *CatalogImportContext)
+
+	// ExitSourcedImport is called when exiting the sourcedImport production.
+	ExitSourcedImport(c *SourcedImportContext)
 
 	// ExitDeclaration is called when exiting the declaration production.
 	ExitDeclaration(c *DeclarationContext)
@@ -555,6 +564,9 @@ type PromiseParserListener interface {
 
 	// ExitNamedType is called when exiting the namedType production.
 	ExitNamedType(c *NamedTypeContext)
+
+	// ExitQualifiedType is called when exiting the qualifiedType production.
+	ExitQualifiedType(c *QualifiedTypeContext)
 
 	// ExitArrayType is called when exiting the arrayType production.
 	ExitArrayType(c *ArrayTypeContext)

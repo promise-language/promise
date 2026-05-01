@@ -26,11 +26,17 @@ func (s *BasePromiseParserListener) EnterCompilationUnit(ctx *CompilationUnitCon
 // ExitCompilationUnit is called when production compilationUnit is exited.
 func (s *BasePromiseParserListener) ExitCompilationUnit(ctx *CompilationUnitContext) {}
 
-// EnterUseDecl is called when production useDecl is entered.
-func (s *BasePromiseParserListener) EnterUseDecl(ctx *UseDeclContext) {}
+// EnterCatalogImport is called when production catalogImport is entered.
+func (s *BasePromiseParserListener) EnterCatalogImport(ctx *CatalogImportContext) {}
 
-// ExitUseDecl is called when production useDecl is exited.
-func (s *BasePromiseParserListener) ExitUseDecl(ctx *UseDeclContext) {}
+// ExitCatalogImport is called when production catalogImport is exited.
+func (s *BasePromiseParserListener) ExitCatalogImport(ctx *CatalogImportContext) {}
+
+// EnterSourcedImport is called when production sourcedImport is entered.
+func (s *BasePromiseParserListener) EnterSourcedImport(ctx *SourcedImportContext) {}
+
+// ExitSourcedImport is called when production sourcedImport is exited.
+func (s *BasePromiseParserListener) ExitSourcedImport(ctx *SourcedImportContext) {}
 
 // EnterDeclaration is called when production declaration is entered.
 func (s *BasePromiseParserListener) EnterDeclaration(ctx *DeclarationContext) {}
@@ -229,6 +235,12 @@ func (s *BasePromiseParserListener) EnterNamedType(ctx *NamedTypeContext) {}
 
 // ExitNamedType is called when production namedType is exited.
 func (s *BasePromiseParserListener) ExitNamedType(ctx *NamedTypeContext) {}
+
+// EnterQualifiedType is called when production qualifiedType is entered.
+func (s *BasePromiseParserListener) EnterQualifiedType(ctx *QualifiedTypeContext) {}
+
+// ExitQualifiedType is called when production qualifiedType is exited.
+func (s *BasePromiseParserListener) ExitQualifiedType(ctx *QualifiedTypeContext) {}
 
 // EnterArrayType is called when production arrayType is entered.
 func (s *BasePromiseParserListener) EnterArrayType(ctx *ArrayTypeContext) {}

@@ -8,10 +8,16 @@ type File struct {
 }
 
 // UseDecl represents a use (import) declaration.
+// Two forms:
+//   - Catalog:  use json; / use json as j; / use json as _;
+//   - Sourced:  use parser "github.com/..."; / use _ "github.com/...";
 type UseDecl struct {
 	nodeBase
-	Alias string // local name, e.g. "io"
-	Path  string // import path, e.g. "std/io"
+	Alias string // effective local name: "json", "j", "_" (glob import)
+	Path  string // "" for catalog, otherwise location string (URL or path)
+	// CatalogName is the catalog module name (first IDENT in catalog form).
+	// Empty for sourced imports.
+	CatalogName string
 }
 
 func (*UseDecl) declTag() {}

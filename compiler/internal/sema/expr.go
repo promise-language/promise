@@ -183,10 +183,16 @@ func (c *Checker) checkIdentExpr(e *ast.IdentExpr) types.Type {
 		c.errorf(e.Pos(), "undefined: %s", e.Name)
 		return nil
 	}
-	// Module aliases are placeholders — module loading is not yet implemented
-	if _, ok := obj.(*types.Module); ok {
-		c.errorf(e.Pos(), "module %s is not loaded (module loading not yet implemented)", e.Name)
-		return nil
+	// Module objects are valid as member-access targets (mod.func()),
+	// but not as standalone values. Return nil type — checkMemberExpr
+	// handles the dispatch when it sees a Module-typed target.
+	if mod, ok := obj.(*types.Module); ok {
+		if mod.Scope() == nil {
+			c.errorf(e.Pos(), "module '%s' has no loaded scope", e.Name)
+			return nil
+		}
+		c.recordObject(e, obj)
+		return nil // not a value; checkMemberExpr handles qualified access
 	}
 	c.recordObject(e, obj)
 
@@ -730,6 +736,15 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 	// Handle std.X — resolve against stdScope directly
 	if ident, ok := e.Target.(*ast.IdentExpr); ok && ident.Name == "std" {
 		return c.resolveStdMember(e)
+	}
+
+	// Handle module-qualified access: mod.symbol
+	if ident, ok := e.Target.(*ast.IdentExpr); ok {
+		if obj := c.lookup(ident.Name); obj != nil {
+			if mod, ok := obj.(*types.Module); ok {
+				return c.resolveModuleMember(e, mod)
+			}
+		}
 	}
 
 	target := c.checkExpr(e.Target)
@@ -1757,4 +1772,48 @@ func (c *Checker) resolveStdMember(e *ast.MemberExpr) types.Type {
 		return nil
 	}
 	return obj.Type()
+}
+
+// resolveModuleMember resolves a qualified access like mod.symbol against
+// the module's exported scope.
+func (c *Checker) resolveModuleMember(e *ast.MemberExpr, mod *types.Module) types.Type {
+	scope := mod.Scope()
+	if scope == nil {
+		c.errorf(e.Pos(), "module '%s' has no loaded scope", mod.Name())
+		return nil
+	}
+	obj := scope.Lookup(e.Field)
+	if obj == nil {
+		c.errorf(e.Pos(), "module '%s' has no exported member '%s'", mod.Name(), e.Field)
+		return nil
+	}
+
+	// Check visibility: only `public members are accessible from other modules
+	if !isObjectExported(obj) {
+		c.errorf(e.Pos(), "'%s' is private to module '%s'", e.Field, mod.Name())
+		return nil
+	}
+
+	// Record the resolved object for codegen
+	if ident, ok := e.Target.(*ast.IdentExpr); ok {
+		c.recordObject(ident, mod)
+	}
+
+	return obj.Type()
+}
+
+// isObjectExported returns true if the given object has the `public annotation.
+func isObjectExported(obj types.Object) bool {
+	switch o := obj.(type) {
+	case *types.Func:
+		return o.IsExported()
+	case *types.TypeName:
+		switch t := o.Type().(type) {
+		case *types.Named:
+			return t.IsExported()
+		case *types.Enum:
+			return t.IsExported()
+		}
+	}
+	return false
 }

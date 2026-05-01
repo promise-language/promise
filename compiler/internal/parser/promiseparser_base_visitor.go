@@ -11,7 +11,11 @@ func (v *BasePromiseParserVisitor) VisitCompilationUnit(ctx *CompilationUnitCont
 	return v.VisitChildren(ctx)
 }
 
-func (v *BasePromiseParserVisitor) VisitUseDecl(ctx *UseDeclContext) interface{} {
+func (v *BasePromiseParserVisitor) VisitCatalogImport(ctx *CatalogImportContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BasePromiseParserVisitor) VisitSourcedImport(ctx *SourcedImportContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 
@@ -144,6 +148,10 @@ func (v *BasePromiseParserVisitor) VisitMetaParam(ctx *MetaParamContext) interfa
 }
 
 func (v *BasePromiseParserVisitor) VisitNamedType(ctx *NamedTypeContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
+func (v *BasePromiseParserVisitor) VisitQualifiedType(ctx *QualifiedTypeContext) interface{} {
 	return v.VisitChildren(ctx)
 }
 

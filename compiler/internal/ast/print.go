@@ -397,6 +397,16 @@ func (p *printer) typeRefStr(t TypeRef) string {
 			return n.Name + "[" + strings.Join(args, ", ") + "]"
 		}
 		return n.Name
+	case *QualifiedTypeRef:
+		name := n.Module + "." + n.Name
+		if len(n.TypeArgs) > 0 {
+			var args []string
+			for _, a := range n.TypeArgs {
+				args = append(args, p.typeRefStr(a))
+			}
+			return name + "[" + strings.Join(args, ", ") + "]"
+		}
+		return name
 	case *TupleTypeRef:
 		var elems []string
 		for _, e := range n.Elements {

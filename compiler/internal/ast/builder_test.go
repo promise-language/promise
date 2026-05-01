@@ -259,10 +259,40 @@ func TestBuildEnumDecl(t *testing.T) {
 
 // TestBuildUseDecl verifies use declaration AST structure.
 func TestBuildUseDecl(t *testing.T) {
+	// Sourced import (existing form)
 	file := parseAndBuild(t, `use io "std/io";`)
 	assertLen(t, file.Uses, 1)
 	assertEqual(t, file.Uses[0].Alias, "io")
 	assertEqual(t, file.Uses[0].Path, "std/io")
+	assertEqual(t, file.Uses[0].CatalogName, "")
+
+	// Catalog import (bare name)
+	file = parseAndBuild(t, `use json;`)
+	assertLen(t, file.Uses, 1)
+	assertEqual(t, file.Uses[0].Alias, "json")
+	assertEqual(t, file.Uses[0].CatalogName, "json")
+	assertEqual(t, file.Uses[0].Path, "")
+
+	// Catalog import with alias
+	file = parseAndBuild(t, `use json as j;`)
+	assertLen(t, file.Uses, 1)
+	assertEqual(t, file.Uses[0].Alias, "j")
+	assertEqual(t, file.Uses[0].CatalogName, "json")
+	assertEqual(t, file.Uses[0].Path, "")
+
+	// Catalog import with glob (as _)
+	file = parseAndBuild(t, `use json as _;`)
+	assertLen(t, file.Uses, 1)
+	assertEqual(t, file.Uses[0].Alias, "_")
+	assertEqual(t, file.Uses[0].CatalogName, "json")
+	assertEqual(t, file.Uses[0].Path, "")
+
+	// Sourced import with glob (use _ "path")
+	file = parseAndBuild(t, `use _ "./libs/models";`)
+	assertLen(t, file.Uses, 1)
+	assertEqual(t, file.Uses[0].Alias, "_")
+	assertEqual(t, file.Uses[0].Path, "./libs/models")
+	assertEqual(t, file.Uses[0].CatalogName, "")
 }
 
 // TestBuildStatements verifies statement AST structure.

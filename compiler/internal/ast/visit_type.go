@@ -16,6 +16,22 @@ func (b *Builder) VisitNamedType(ctx *parser.NamedTypeContext) interface{} {
 	return node
 }
 
+func (b *Builder) VisitQualifiedType(ctx *parser.QualifiedTypeContext) interface{} {
+	idents := ctx.AllIDENT()
+	node := &QualifiedTypeRef{
+		nodeBase: b.baseFromContext(ctx),
+		Module:   idents[0].GetText(),
+		Name:     idents[1].GetText(),
+	}
+	if ta := ctx.TypeArgs(); ta != nil {
+		tac := ta.(*parser.TypeArgsContext)
+		for _, tr := range tac.AllTypeRef() {
+			node.TypeArgs = append(node.TypeArgs, b.visitTypeRef(tr))
+		}
+	}
+	return node
+}
+
 func (b *Builder) VisitTupleType(ctx *parser.TupleTypeContext) interface{} {
 	node := &TupleTypeRef{nodeBase: b.baseFromContext(ctx)}
 	for _, tr := range ctx.AllTypeRef() {

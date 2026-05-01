@@ -20,7 +20,23 @@ func (b *Builder) VisitCompilationUnit(ctx *parser.CompilationUnitContext) inter
 	return file
 }
 
-func (b *Builder) VisitUseDecl(ctx *parser.UseDeclContext) interface{} {
+func (b *Builder) VisitCatalogImport(ctx *parser.CatalogImportContext) interface{} {
+	name := b.termText(ctx.IDENT())
+	alias := name // default: alias == catalog name
+	if ctx.AS() != nil {
+		if bn := ctx.BindingName(); bn != nil {
+			alias = b.bindingText(bn)
+		}
+	}
+	return &UseDecl{
+		nodeBase:    b.baseFromContext(ctx),
+		Alias:       alias,
+		CatalogName: name,
+	}
+}
+
+func (b *Builder) VisitSourcedImport(ctx *parser.SourcedImportContext) interface{} {
+	alias := b.bindingText(ctx.BindingName())
 	path := ""
 	if sl := ctx.StringLiteral(); sl != nil {
 		lit := b.visitStringLiteral(sl)
@@ -28,11 +44,10 @@ func (b *Builder) VisitUseDecl(ctx *parser.UseDeclContext) interface{} {
 			path = lit.Raw
 		}
 	}
-	// Strip surrounding quotes from string literal
 	path = strings.Trim(path, "\"")
 	return &UseDecl{
 		nodeBase: b.baseFromContext(ctx),
-		Alias:    b.termText(ctx.IDENT()),
+		Alias:    alias,
 		Path:     path,
 	}
 }

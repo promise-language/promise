@@ -9,6 +9,16 @@ type NamedTypeRef struct {
 
 func (*NamedTypeRef) typeRefTag() {}
 
+// QualifiedTypeRef represents a module-qualified type: mod.Type, mod.Type[T].
+type QualifiedTypeRef struct {
+	nodeBase
+	Module   string
+	Name     string
+	TypeArgs []TypeRef
+}
+
+func (*QualifiedTypeRef) typeRefTag() {}
+
 // TupleTypeRef represents a tuple type: (Int, String).
 type TupleTypeRef struct {
 	nodeBase

@@ -12,6 +12,7 @@ type Named struct {
 	hasDrop    bool   // type has a validated drop(~this) method
 	hasNew     bool   // type has a validated new() constructor method
 	structural bool   // `structural meta — allows structural interface satisfaction
+	exported   bool   // `public meta — visible to other modules
 	doc        string // `doc meta — documentation string
 	deprecated string // `deprecated meta — empty means not deprecated
 }
@@ -37,6 +38,8 @@ func (n *Named) HasNew() bool             { return n.hasNew }
 func (n *Named) SetHasNew(v bool)         { n.hasNew = v }
 func (n *Named) IsStructural() bool       { return n.structural }
 func (n *Named) SetStructural(v bool)     { n.structural = v }
+func (n *Named) IsExported() bool         { return n.exported }
+func (n *Named) SetExported(v bool)       { n.exported = v }
 func (n *Named) Doc() string              { return n.doc }
 func (n *Named) SetDoc(s string)          { n.doc = s }
 func (n *Named) Deprecated() string       { return n.deprecated }
@@ -87,6 +90,7 @@ func (n *Named) ResetMembers() {
 	n.hasNew = false
 	n.isCopy = false
 	n.structural = false
+	n.exported = false
 	n.doc = ""
 	n.deprecated = ""
 }

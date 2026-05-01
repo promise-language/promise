@@ -2033,6 +2033,15 @@ func (c *Compiler) resolveTypeRefToType(ref ast.TypeRef) types.Type {
 				}
 			}
 		}
+	case *ast.QualifiedTypeRef:
+		// Module-qualified types: look up in sema scopes by unqualified name
+		for _, scope := range c.info.Scopes {
+			if obj := scope.Lookup(r.Name); obj != nil {
+				if tn, ok := obj.(*types.TypeName); ok {
+					return tn.Type()
+				}
+			}
+		}
 	case *ast.OptionalTypeRef:
 		inner := c.resolveTypeRefToType(r.Inner)
 		if inner != nil {

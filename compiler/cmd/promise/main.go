@@ -22,9 +22,11 @@ import (
 
 	"djabi.dev/go/promise_lang/internal/ast"
 	"djabi.dev/go/promise_lang/internal/codegen"
+	"djabi.dev/go/promise_lang/internal/module"
 	"djabi.dev/go/promise_lang/internal/ownership"
 	"djabi.dev/go/promise_lang/internal/parser"
 	"djabi.dev/go/promise_lang/internal/sema"
+	"djabi.dev/go/promise_lang/internal/types"
 )
 
 //go:embed resources/std/*.pr
@@ -42,6 +44,7 @@ Commands:
   check     Run semantic analysis (type checking)
   ast       Print the AST
   exec      Execute inline Promise code
+  init      Initialize a new Promise project (creates promise.toml)
   install   Install Promise to ~/.promise/
 
 Options (build):
@@ -112,6 +115,8 @@ func main() {
 		ast.Print(os.Stdout, file)
 	case "exec":
 		runExec(os.Args[2:])
+	case "init":
+		runInit()
 	case "install":
 		runInstall()
 	default:
@@ -1837,12 +1842,16 @@ func compileFrontend(filename string) (*ast.File, *sema.Info) {
 
 	// Merge standard library declarations
 	stdDir := findStdDir()
+	var stdFiles []*ast.File
 	if stdDir != "" {
-		stdFiles := parseStdFiles(stdDir)
+		stdFiles = parseStdFiles(stdDir)
 		file = mergeStdDecls(file, stdFiles)
 	}
 
-	info, errs := sema.Check(file)
+	// Load local modules from use declarations
+	moduleScopes := loadModuleScopes(filename, file, stdFiles)
+
+	info, errs := sema.CheckWithModules(file, moduleScopes)
 	if len(errs) > 0 {
 		printFileErrors(filename, errs)
 		os.Exit(1)
@@ -1855,6 +1864,115 @@ func compileFrontend(filename string) (*ast.File, *sema.Info) {
 	}
 
 	return file, info
+}
+
+// loadModuleScopes scans use declarations for local module paths, loads each
+// module (parse + sema), and returns a map of path → exported scope.
+func loadModuleScopes(filename string, file *ast.File, stdFiles []*ast.File) map[string]*types.Scope {
+	if len(file.Uses) == 0 {
+		return nil
+	}
+
+	// Find project root (directory containing promise.toml).
+	// Fall back to the source file's directory for single-file mode.
+	projectRoot := filepath.Dir(filename)
+	if abs, err := filepath.Abs(projectRoot); err == nil {
+		projectRoot = abs
+	}
+	if cfg, err := module.FindConfig(projectRoot); err == nil && cfg != nil {
+		projectRoot = cfg.Dir
+	}
+
+	scopes := make(map[string]*types.Scope)
+	for _, u := range file.Uses {
+		if u.Path == "" || !module.IsLocalPath(u.Path) {
+			continue // catalog or remote — skip for now
+		}
+
+		scope, err := loadLocalModule(u.Path, projectRoot, stdFiles)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s: error loading module '%s': %v\n", filename, u.Path, err)
+			os.Exit(1)
+		}
+		scopes[u.Path] = scope
+	}
+
+	if len(scopes) == 0 {
+		return nil
+	}
+	return scopes
+}
+
+// loadLocalModule parses all .pr files in the module directory, runs sema,
+// and returns a scope containing only the module's `public symbols.
+func loadLocalModule(modPath, projectRoot string, stdFiles []*ast.File) (*types.Scope, error) {
+	// Resolve module directory (paths are relative to project root)
+	modDir := filepath.Join(projectRoot, modPath)
+	absDir, err := filepath.Abs(modDir)
+	if err != nil {
+		return nil, fmt.Errorf("cannot resolve path: %w", err)
+	}
+
+	info, err := os.Stat(absDir)
+	if err != nil {
+		return nil, fmt.Errorf("module directory not found: %s", absDir)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("not a directory: %s", absDir)
+	}
+
+	// Check for promise.toml
+	tomlPath := filepath.Join(absDir, "promise.toml")
+	if _, err := os.Stat(tomlPath); err != nil {
+		return nil, fmt.Errorf("module directory '%s' has no promise.toml", absDir)
+	}
+
+	// Parse all .pr files in the module directory
+	entries, err := os.ReadDir(absDir)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read module directory: %w", err)
+	}
+
+	var modFileList []*ast.File
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".pr") {
+			f := parseSourceFile(filepath.Join(absDir, e.Name()))
+			modFileList = append(modFileList, f)
+		}
+	}
+
+	if len(modFileList) == 0 {
+		return nil, fmt.Errorf("module '%s' contains no .pr files", modPath)
+	}
+
+	// Merge module files into a single AST, then merge std decls
+	merged := mergeModuleFiles(modFileList)
+	if len(stdFiles) > 0 {
+		merged = mergeStdDecls(merged, stdFiles)
+	}
+
+	// Run sema on the module
+	semaInfo, errs := sema.Check(merged)
+	if len(errs) > 0 {
+		return nil, fmt.Errorf("errors in module '%s': %v", modPath, errs[0])
+	}
+
+	// Extract only `public symbols into a module scope
+	return sema.ExportedScope(semaInfo, merged), nil
+}
+
+// mergeModuleFiles combines multiple parsed .pr files from a module directory
+// into a single AST file. Use declarations and top-level declarations are merged.
+func mergeModuleFiles(files []*ast.File) *ast.File {
+	if len(files) == 1 {
+		return files[0]
+	}
+	merged := files[0]
+	for _, f := range files[1:] {
+		merged.Uses = append(merged.Uses, f.Uses...)
+		merged.Decls = append(merged.Decls, f.Decls...)
+	}
+	return merged
 }
 
 // findStdDir searches for the std/ directory containing standard library .pr files.
@@ -2232,6 +2350,31 @@ func printFileErrors(filename string, errs []error) {
 // --- Install ---
 
 // runInstall installs the Promise compiler to ~/.promise/.
+// runInit creates a promise.toml in the current directory.
+func runInit() {
+	const defaultEpoch = "2026.3"
+
+	if _, err := os.Stat("promise.toml"); err == nil {
+		fmt.Fprintln(os.Stderr, "promise.toml already exists")
+		os.Exit(1)
+	}
+
+	// Use directory name as default module name
+	dir, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	name := filepath.Base(dir)
+
+	content := fmt.Sprintf("[module]\nname = %q\nepoch = %q\n", name, defaultEpoch)
+	if err := os.WriteFile("promise.toml", []byte(content), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "error writing promise.toml: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Created promise.toml (module: %s, epoch: %s)\n", name, defaultEpoch)
+}
+
 func runInstall() {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {

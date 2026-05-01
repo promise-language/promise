@@ -3964,7 +3964,7 @@ func TestUseDeclModuleNotLoaded(t *testing.T) {
 			io.Print();
 		}
 	`)
-	expectError(t, errs, "not loaded")
+	expectError(t, errs, "no loaded scope")
 }
 
 func TestUseDeclMultiple(t *testing.T) {
@@ -3975,7 +3975,7 @@ func TestUseDeclMultiple(t *testing.T) {
 			io.Print();
 		}
 	`)
-	expectError(t, errs, "not loaded")
+	expectError(t, errs, "no loaded scope")
 	// fmt should also be reserved but not cause errors since it's unused
 }
 
@@ -6541,4 +6541,695 @@ func TestGeneratorMethodBasic(t *testing.T) {
 		}
 		main() {}
 	`)
+}
+
+// --- Module System Tests ---
+
+// checkWithModules parses user source with pre-loaded module scopes.
+func checkWithModules(t *testing.T, userSrc string, moduleScopes map[string]*types.Scope) (*Info, []error) {
+	t.Helper()
+	// Parse std
+	combinedStd := stdAll
+	stdInput := antlr.NewInputStream(combinedStd)
+	stdLexer := parser.NewPromiseLexer(stdInput)
+	stdLexer.RemoveErrorListeners()
+	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
+	stdP := parser.NewPromiseParser(stdStream)
+	stdP.RemoveErrorListeners()
+	stdTree := stdP.CompilationUnit()
+	stdFile, errs := ast.Build("std.pr", stdTree)
+	if len(errs) > 0 {
+		t.Fatalf("std AST build errors: %v", errs)
+	}
+	for _, d := range stdFile.Decls {
+		switch dd := d.(type) {
+		case *ast.FuncDecl:
+			dd.IsStd = true
+		case *ast.TypeDecl:
+			dd.IsStd = true
+		case *ast.EnumDecl:
+			dd.IsStd = true
+		}
+	}
+
+	// Parse user
+	userInput := antlr.NewInputStream(userSrc)
+	userLexer := parser.NewPromiseLexer(userInput)
+	userLexer.RemoveErrorListeners()
+	userStream := antlr.NewCommonTokenStream(userLexer, antlr.TokenDefaultChannel)
+	userP := parser.NewPromiseParser(userStream)
+	userP.RemoveErrorListeners()
+	userTree := userP.CompilationUnit()
+	userFile, errs := ast.Build("test.pr", userTree)
+	if len(errs) > 0 {
+		t.Fatalf("user AST build errors: %v", errs)
+	}
+
+	merged := make([]ast.Decl, 0, len(stdFile.Decls)+len(userFile.Decls))
+	merged = append(merged, stdFile.Decls...)
+	merged = append(merged, userFile.Decls...)
+	userFile.Decls = merged
+
+	return CheckWithModules(userFile, moduleScopes)
+}
+
+// makeModuleScope creates a module scope with exported function declarations.
+func makeModuleScope(t *testing.T, funcs map[string]*types.Signature) *types.Scope {
+	t.Helper()
+	scope := types.NewScope(nil, types.Pos{}, types.Pos{}, "module")
+	for name, sig := range funcs {
+		fn := types.NewFunc(types.Pos{}, name, sig)
+		fn.SetExported(true)
+		scope.Insert(fn)
+	}
+	return scope
+}
+
+// makeModuleScopeWithVisibility creates a module scope where each function
+// is marked exported or private based on the exported map.
+func makeModuleScopeWithVisibility(t *testing.T, funcs map[string]*types.Signature, exported map[string]bool) *types.Scope {
+	t.Helper()
+	scope := types.NewScope(nil, types.Pos{}, types.Pos{}, "module")
+	for name, sig := range funcs {
+		fn := types.NewFunc(types.Pos{}, name, sig)
+		if exported[name] {
+			fn.SetExported(true)
+		}
+		scope.Insert(fn)
+	}
+	return scope
+}
+
+func TestModuleQualifiedAccess(t *testing.T) {
+	// Create a module with a function: mymod.greet() int
+	sig := types.NewSignature(nil, nil, types.TypInt, false)
+	modScope := makeModuleScope(t, map[string]*types.Signature{
+		"greet": sig,
+	})
+	moduleScopes := map[string]*types.Scope{
+		"mymod": modScope,
+	}
+
+	info, errs := checkWithModules(t, `
+		use mymod;
+		main() {
+			int x = mymod.greet();
+		}
+	`, moduleScopes)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	_ = info
+}
+
+func TestModuleQualifiedAccessWithAlias(t *testing.T) {
+	sig := types.NewSignature(nil, nil, types.TypInt, false)
+	modScope := makeModuleScope(t, map[string]*types.Signature{
+		"greet": sig,
+	})
+	moduleScopes := map[string]*types.Scope{
+		"mymod": modScope,
+	}
+
+	_, errs := checkWithModules(t, `
+		use mymod as m;
+		main() {
+			int x = m.greet();
+		}
+	`, moduleScopes)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestModuleNoSuchMember(t *testing.T) {
+	sig := types.NewSignature(nil, nil, types.TypInt, false)
+	modScope := makeModuleScope(t, map[string]*types.Signature{
+		"greet": sig,
+	})
+	moduleScopes := map[string]*types.Scope{
+		"mymod": modScope,
+	}
+
+	_, errs := checkWithModules(t, `
+		use mymod;
+		main() {
+			mymod.nonexistent();
+		}
+	`, moduleScopes)
+	expectError(t, errs, "no exported member 'nonexistent'")
+}
+
+func TestModuleGlobImport(t *testing.T) {
+	sig := types.NewSignature(nil, nil, types.TypInt, false)
+	modScope := makeModuleScope(t, map[string]*types.Signature{
+		"greet": sig,
+	})
+	moduleScopes := map[string]*types.Scope{
+		"mymod": modScope,
+	}
+
+	_, errs := checkWithModules(t, `
+		use mymod as _;
+		main() {
+			int x = greet();
+		}
+	`, moduleScopes)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestModuleGlobConflict(t *testing.T) {
+	sig := types.NewSignature(nil, nil, types.TypInt, false)
+	mod1 := makeModuleScope(t, map[string]*types.Signature{
+		"helper": sig,
+	})
+	mod2 := makeModuleScope(t, map[string]*types.Signature{
+		"helper": sig,
+	})
+	moduleScopes := map[string]*types.Scope{
+		"mod1": mod1,
+		"mod2": mod2,
+	}
+
+	_, errs := checkWithModules(t, `
+		use mod1 as _;
+		use mod2 as _;
+		main() {}
+	`, moduleScopes)
+	expectError(t, errs, "conflicts with existing symbol 'helper'")
+}
+
+func TestModuleSourcedQualifiedAccess(t *testing.T) {
+	sig := types.NewSignature(nil, nil, types.TypInt, false)
+	modScope := makeModuleScope(t, map[string]*types.Signature{
+		"parse": sig,
+	})
+	moduleScopes := map[string]*types.Scope{
+		"./libs/parser": modScope,
+	}
+
+	_, errs := checkWithModules(t, `
+		use parser "./libs/parser";
+		main() {
+			int x = parser.parse();
+		}
+	`, moduleScopes)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestModuleSourcedGlobImport(t *testing.T) {
+	sig := types.NewSignature(nil, nil, types.TypInt, false)
+	modScope := makeModuleScope(t, map[string]*types.Signature{
+		"parse": sig,
+	})
+	moduleScopes := map[string]*types.Scope{
+		"./libs/parser": modScope,
+	}
+
+	_, errs := checkWithModules(t, `
+		use _ "./libs/parser";
+		main() {
+			int x = parse();
+		}
+	`, moduleScopes)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+// --- Module Visibility Tests ---
+
+func TestModulePrivateMemberAccess(t *testing.T) {
+	sig := types.NewSignature(nil, nil, types.TypInt, false)
+	modScope := makeModuleScopeWithVisibility(t,
+		map[string]*types.Signature{"greet": sig, "helper": sig},
+		map[string]bool{"greet": true}, // helper is private
+	)
+	moduleScopes := map[string]*types.Scope{"mymod": modScope}
+
+	// Public member works
+	_, errs := checkWithModules(t, `
+		use mymod;
+		main() { int x = mymod.greet(); }
+	`, moduleScopes)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestModulePrivateMemberDenied(t *testing.T) {
+	sig := types.NewSignature(nil, nil, types.TypInt, false)
+	modScope := makeModuleScopeWithVisibility(t,
+		map[string]*types.Signature{"greet": sig, "helper": sig},
+		map[string]bool{"greet": true}, // helper is private
+	)
+	moduleScopes := map[string]*types.Scope{"mymod": modScope}
+
+	_, errs := checkWithModules(t, `
+		use mymod;
+		main() { int x = mymod.helper(); }
+	`, moduleScopes)
+	expectError(t, errs, "'helper' is private to module 'mymod'")
+}
+
+func TestModuleGlobImportSkipsPrivate(t *testing.T) {
+	sig := types.NewSignature(nil, nil, types.TypInt, false)
+	modScope := makeModuleScopeWithVisibility(t,
+		map[string]*types.Signature{"greet": sig, "helper": sig},
+		map[string]bool{"greet": true}, // helper is private
+	)
+	moduleScopes := map[string]*types.Scope{"mymod": modScope}
+
+	// greet() is imported via glob, helper() is not
+	_, errs := checkWithModules(t, `
+		use mymod as _;
+		main() { int x = greet(); }
+	`, moduleScopes)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestModuleGlobImportPrivateNotVisible(t *testing.T) {
+	sig := types.NewSignature(nil, nil, types.TypInt, false)
+	modScope := makeModuleScopeWithVisibility(t,
+		map[string]*types.Signature{"greet": sig, "helper": sig},
+		map[string]bool{"greet": true}, // helper is private
+	)
+	moduleScopes := map[string]*types.Scope{"mymod": modScope}
+
+	_, errs := checkWithModules(t, `
+		use mymod as _;
+		main() { int x = helper(); }
+	`, moduleScopes)
+	expectError(t, errs, "undefined")
+}
+
+// --- Module Qualified Type Ref Tests ---
+
+// makeModuleScopeWithTypes creates a module scope with exported types and functions.
+func makeModuleScopeWithTypes(t *testing.T) *types.Scope {
+	t.Helper()
+	scope := types.NewScope(nil, types.Pos{}, types.Pos{}, "module")
+
+	// Add an exported type: User { string name; int age; }
+	tn := types.NewTypeName(types.Pos{}, "User", nil)
+	named := types.NewNamed(tn, nil)
+	named.SetExported(true)
+	named.AddField(types.NewField(types.Pos{}, "name", types.TypString, types.PlaceInstance, false, false))
+	named.AddField(types.NewField(types.Pos{}, "age", types.TypInt, types.PlaceInstance, false, false))
+	scope.Insert(tn)
+
+	// Add a private type: Internal { int id; }
+	tn2 := types.NewTypeName(types.Pos{}, "Internal", nil)
+	named2 := types.NewNamed(tn2, nil)
+	// not exported
+	named2.AddField(types.NewField(types.Pos{}, "id", types.TypInt, types.PlaceInstance, false, false))
+	scope.Insert(tn2)
+
+	// Add exported function: create_user() User
+	sig := types.NewSignature(nil, nil, named, false)
+	fn := types.NewFunc(types.Pos{}, "create_user", sig)
+	fn.SetExported(true)
+	scope.Insert(fn)
+
+	return scope
+}
+
+func TestModuleQualifiedTypeRef(t *testing.T) {
+	modScope := makeModuleScopeWithTypes(t)
+	moduleScopes := map[string]*types.Scope{"models": modScope}
+
+	_, errs := checkWithModules(t, `
+		use models;
+		main() {
+			models.User u = models.create_user();
+		}
+	`, moduleScopes)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestModuleQualifiedTypeRefPrivate(t *testing.T) {
+	modScope := makeModuleScopeWithTypes(t)
+	moduleScopes := map[string]*types.Scope{"models": modScope}
+
+	_, errs := checkWithModules(t, `
+		use models;
+		main() {
+			models.Internal x = models.create_user();
+		}
+	`, moduleScopes)
+	expectError(t, errs, "'Internal' is private to module 'models'")
+}
+
+func TestModuleQualifiedTypeRefUndefined(t *testing.T) {
+	modScope := makeModuleScopeWithTypes(t)
+	moduleScopes := map[string]*types.Scope{"models": modScope}
+
+	_, errs := checkWithModules(t, `
+		use models;
+		main() {
+			models.Nonexistent x = models.create_user();
+		}
+	`, moduleScopes)
+	expectError(t, errs, "no exported member 'Nonexistent'")
+}
+
+func TestModuleQualifiedTypeRefNotAType(t *testing.T) {
+	modScope := makeModuleScopeWithTypes(t)
+	moduleScopes := map[string]*types.Scope{"models": modScope}
+
+	_, errs := checkWithModules(t, `
+		use models;
+		main() {
+			models.create_user x = models.create_user();
+		}
+	`, moduleScopes)
+	expectError(t, errs, "is not a type")
+}
+
+func TestModuleQualifiedTypeRefAsParam(t *testing.T) {
+	modScope := makeModuleScopeWithTypes(t)
+	moduleScopes := map[string]*types.Scope{"models": modScope}
+
+	_, errs := checkWithModules(t, `
+		use models;
+		greet(models.User u) string { return "hi"; }
+		main() {
+			models.User u = models.create_user();
+			greet(u);
+		}
+	`, moduleScopes)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestModuleQualifiedTypeRefAsReturn(t *testing.T) {
+	modScope := makeModuleScopeWithTypes(t)
+	moduleScopes := map[string]*types.Scope{"models": modScope}
+
+	_, errs := checkWithModules(t, `
+		use models;
+		make_user() models.User { return models.create_user(); }
+		main() {
+			models.User u = make_user();
+		}
+	`, moduleScopes)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+// --- ExportedScope tests ---
+
+// checkModuleSource runs sema on module source code and returns its ExportedScope.
+func checkModuleSource(t *testing.T, src string) *types.Scope {
+	t.Helper()
+	// Parse std
+	stdInput := antlr.NewInputStream(stdAll)
+	stdLexer := parser.NewPromiseLexer(stdInput)
+	stdLexer.RemoveErrorListeners()
+	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
+	stdP := parser.NewPromiseParser(stdStream)
+	stdP.RemoveErrorListeners()
+	stdTree := stdP.CompilationUnit()
+	stdFile, errs := ast.Build("std.pr", stdTree)
+	if len(errs) > 0 {
+		t.Fatalf("std AST build errors: %v", errs)
+	}
+	for _, d := range stdFile.Decls {
+		switch dd := d.(type) {
+		case *ast.FuncDecl:
+			dd.IsStd = true
+		case *ast.TypeDecl:
+			dd.IsStd = true
+		case *ast.EnumDecl:
+			dd.IsStd = true
+		}
+	}
+
+	// Parse module source
+	modInput := antlr.NewInputStream(src)
+	modLexer := parser.NewPromiseLexer(modInput)
+	modLexer.RemoveErrorListeners()
+	modStream := antlr.NewCommonTokenStream(modLexer, antlr.TokenDefaultChannel)
+	modP := parser.NewPromiseParser(modStream)
+	modP.RemoveErrorListeners()
+	modTree := modP.CompilationUnit()
+	modFile, errs := ast.Build("module.pr", modTree)
+	if len(errs) > 0 {
+		t.Fatalf("module AST build errors: %v", errs)
+	}
+
+	// Merge std + module
+	merged := make([]ast.Decl, 0, len(stdFile.Decls)+len(modFile.Decls))
+	merged = append(merged, stdFile.Decls...)
+	merged = append(merged, modFile.Decls...)
+	modFile.Decls = merged
+
+	info, errs := Check(modFile)
+	if len(errs) > 0 {
+		t.Fatalf("module sema errors: %v", errs)
+	}
+
+	return ExportedScope(info, modFile)
+}
+
+func TestExportedScopeOnlyPublic(t *testing.T) {
+	scope := checkModuleSource(t, "greet() int `public { return 42; }\nhelper() int { return 1; }")
+
+	if scope.Lookup("greet") == nil {
+		t.Error("expected 'greet' in exported scope")
+	}
+	if scope.Lookup("helper") != nil {
+		t.Error("'helper' should not be in exported scope (not public)")
+	}
+}
+
+func TestExportedScopePublicType(t *testing.T) {
+	scope := checkModuleSource(t, "type User `public { string name; int age; }\ntype Internal { int id; }")
+
+	if scope.Lookup("User") == nil {
+		t.Error("expected 'User' in exported scope")
+	}
+	if scope.Lookup("Internal") != nil {
+		t.Error("'Internal' should not be in exported scope (not public)")
+	}
+}
+
+func TestExportedScopePublicEnum(t *testing.T) {
+	scope := checkModuleSource(t, "enum Color `public { Red; Green; Blue; }\nenum Secret { A; B; }")
+
+	if scope.Lookup("Color") == nil {
+		t.Error("expected 'Color' in exported scope")
+	}
+	if scope.Lookup("Secret") != nil {
+		t.Error("'Secret' should not be in exported scope (not public)")
+	}
+}
+
+func TestExportedScopeEmpty(t *testing.T) {
+	scope := checkModuleSource(t, "helper() int { return 1; }\ntype Internal { int id; }")
+
+	if scope.Len() != 0 {
+		t.Errorf("expected empty exported scope, got %d symbols", scope.Len())
+	}
+}
+
+// Test full module loading flow: sema a module source → ExportedScope → use in consumer
+func TestModuleLoadViaExportedScope(t *testing.T) {
+	// Step 1: "compile" the module
+	modScope := checkModuleSource(t, `
+		type Point `+"`public"+` { int x; int y; }
+		origin() Point `+"`public"+` { return Point(x: 0, y: 0); }
+		helper() int { return 42; }
+	`)
+
+	// Step 2: use the module's exported scope in a consumer
+	moduleScopes := map[string]*types.Scope{"geo": modScope}
+	_, errs := checkWithModules(t, `
+		use geo;
+		main() {
+			geo.Point p = geo.origin();
+			int x = p.x;
+		}
+	`, moduleScopes)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestModuleLoadPrivateNotVisible(t *testing.T) {
+	modScope := checkModuleSource(t, `
+		get_value() int `+"`public"+` { return 42; }
+		secret() int { return 99; }
+	`)
+
+	moduleScopes := map[string]*types.Scope{"lib": modScope}
+	_, errs := checkWithModules(t, `
+		use lib;
+		main() {
+			int x = lib.secret();
+		}
+	`, moduleScopes)
+	expectError(t, errs, "no exported member 'secret'")
+}
+
+func TestModuleLoadGlobImportFiltersPrivate(t *testing.T) {
+	modScope := checkModuleSource(t, `
+		greet() int `+"`public"+` { return 1; }
+		internal_fn() int { return 2; }
+	`)
+
+	moduleScopes := map[string]*types.Scope{"helpers": modScope}
+	_, errs := checkWithModules(t, `
+		use helpers as _;
+		main() {
+			int x = greet();
+		}
+	`, moduleScopes)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+
+	// internal_fn() should not be accessible
+	_, errs2 := checkWithModules(t, `
+		use helpers as _;
+		main() {
+			int x = internal_fn();
+		}
+	`, moduleScopes)
+	expectError(t, errs2, "undefined")
+}
+
+func TestModuleLoadSourcedLocalPath(t *testing.T) {
+	modScope := checkModuleSource(t, `
+		compute() int `+"`public"+` { return 42; }
+	`)
+
+	moduleScopes := map[string]*types.Scope{"./libs/math": modScope}
+	_, errs := checkWithModules(t, `
+		use math "./libs/math";
+		main() {
+			int x = math.compute();
+		}
+	`, moduleScopes)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestModuleLoadQualifiedTypeFromSource(t *testing.T) {
+	modScope := checkModuleSource(t, `
+		type Config `+"`public"+` { string key; string value; }
+		default_config() Config `+"`public"+` { return Config(key: "k", value: "v"); }
+	`)
+
+	moduleScopes := map[string]*types.Scope{"./config": modScope}
+	_, errs := checkWithModules(t, `
+		use cfg "./config";
+		main() {
+			cfg.Config c = cfg.default_config();
+			string k = c.key;
+		}
+	`, moduleScopes)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestModuleLoadMethodsOnExportedType(t *testing.T) {
+	modScope := checkModuleSource(t, `
+		type Counter `+"`public"+` {
+			int value;
+			increment(~this) `+"`public"+` { this.value = this.value + 1; }
+			get_value(this) int `+"`public"+` { return this.value; }
+		}
+	`)
+
+	moduleScopes := map[string]*types.Scope{"counter": modScope}
+	_, errs := checkWithModules(t, `
+		use counter;
+		main() {
+			counter.Counter c = counter.Counter(value: 0);
+			c.increment();
+			int v = c.get_value();
+		}
+	`, moduleScopes)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestModuleLoadMultipleModules(t *testing.T) {
+	modA := checkModuleSource(t, `
+		compute() int `+"`public"+` { return 42; }
+	`)
+	modB := checkModuleSource(t, `
+		greet() string `+"`public"+` { return "hi"; }
+	`)
+
+	moduleScopes := map[string]*types.Scope{
+		"math": modA,
+		"text": modB,
+	}
+	_, errs := checkWithModules(t, `
+		use math;
+		use text;
+		main() {
+			int x = math.compute();
+			string s = text.greet();
+		}
+	`, moduleScopes)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestModuleLoadConstructorCall(t *testing.T) {
+	modScope := checkModuleSource(t, `
+		type Point `+"`public"+` { int x; int y; }
+	`)
+
+	moduleScopes := map[string]*types.Scope{"geo": modScope}
+	_, errs := checkWithModules(t, `
+		use geo;
+		main() {
+			geo.Point p = geo.Point(x: 1, y: 2);
+			int sum = p.x + p.y;
+		}
+	`, moduleScopes)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+}
+
+func TestModuleLoadFieldAccessOnImportedType(t *testing.T) {
+	modScope := checkModuleSource(t, `
+		type User `+"`public"+` {
+			string name;
+			int age;
+		}
+		make_user() User `+"`public"+` { return User(name: "Alice", age: 30); }
+	`)
+
+	moduleScopes := map[string]*types.Scope{"users": modScope}
+	_, errs := checkWithModules(t, `
+		use users;
+		main() {
+			users.User u = users.make_user();
+			string n = u.name;
+			int a = u.age;
+		}
+	`, moduleScopes)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
 }

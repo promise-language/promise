@@ -10,8 +10,11 @@ type PromiseParserVisitor interface {
 	// Visit a parse tree produced by PromiseParser#compilationUnit.
 	VisitCompilationUnit(ctx *CompilationUnitContext) interface{}
 
-	// Visit a parse tree produced by PromiseParser#useDecl.
-	VisitUseDecl(ctx *UseDeclContext) interface{}
+	// Visit a parse tree produced by PromiseParser#catalogImport.
+	VisitCatalogImport(ctx *CatalogImportContext) interface{}
+
+	// Visit a parse tree produced by PromiseParser#sourcedImport.
+	VisitSourcedImport(ctx *SourcedImportContext) interface{}
 
 	// Visit a parse tree produced by PromiseParser#declaration.
 	VisitDeclaration(ctx *DeclarationContext) interface{}
@@ -111,6 +114,9 @@ type PromiseParserVisitor interface {
 
 	// Visit a parse tree produced by PromiseParser#namedType.
 	VisitNamedType(ctx *NamedTypeContext) interface{}
+
+	// Visit a parse tree produced by PromiseParser#qualifiedType.
+	VisitQualifiedType(ctx *QualifiedTypeContext) interface{}
 
 	// Visit a parse tree produced by PromiseParser#arrayType.
 	VisitArrayType(ctx *ArrayTypeContext) interface{}

@@ -38,6 +38,7 @@ type Enum struct {
 	variants   []*Variant
 	methods    []*Method
 	isCopy     bool   // `copy meta — bitwise copy on assignment
+	exported   bool   // `public meta — visible to other modules
 	doc        string // `doc meta — documentation string
 	deprecated string // `deprecated meta — empty means not deprecated
 }
@@ -56,6 +57,8 @@ func (e *Enum) Methods() []*Method       { return e.methods }
 func (e *Enum) Underlying() Type         { return e }
 func (e *Enum) IsCopy() bool             { return e.isCopy }
 func (e *Enum) SetCopy(v bool)           { e.isCopy = v }
+func (e *Enum) IsExported() bool         { return e.exported }
+func (e *Enum) SetExported(v bool)       { e.exported = v }
 func (e *Enum) Doc() string              { return e.doc }
 func (e *Enum) SetDoc(s string)          { e.doc = s }
 func (e *Enum) Deprecated() string       { return e.deprecated }

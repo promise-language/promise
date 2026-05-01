@@ -8,6 +8,7 @@ import (
 
 	"github.com/antlr4-go/antlr/v4"
 
+	"djabi.dev/go/promise_lang/internal/ast"
 	"djabi.dev/go/promise_lang/internal/parser"
 )
 
@@ -699,6 +700,267 @@ func TestExecWrapCode(t *testing.T) {
 				t.Errorf("wrapped code has parse errors: %s", wrapped)
 			}
 		})
+	}
+}
+
+// --- Module loading integration tests ---
+
+// testStdFiles parses the standard library for use in module loading tests.
+func testStdFiles(t *testing.T) []*ast.File {
+	t.Helper()
+	stdDir := findStdDir()
+	if stdDir == "" {
+		t.Skip("std directory not found")
+	}
+	return parseStdFiles(stdDir)
+}
+
+// TestLoadLocalModuleBasic creates a temp module directory and verifies
+// that loadLocalModule parses, sema-checks, and extracts the exported scope.
+func TestLoadLocalModuleBasic(t *testing.T) {
+	// Create project structure:
+	//   project/
+	//     promise.toml
+	//     libs/mymod/
+	//       promise.toml
+	//       lib.pr
+	projectDir := t.TempDir()
+	modDir := filepath.Join(projectDir, "libs", "mymod")
+	if err := os.MkdirAll(modDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write project promise.toml
+	if err := os.WriteFile(filepath.Join(projectDir, "promise.toml"), []byte(`
+[module]
+name = "testproj"
+epoch = "2026.3"
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write module promise.toml
+	if err := os.WriteFile(filepath.Join(modDir, "promise.toml"), []byte(`
+[module]
+name = "mymod"
+epoch = "2026.3"
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write module source
+	if err := os.WriteFile(filepath.Join(modDir, "lib.pr"), []byte(`
+type User `+"`public"+` { int id; }
+create_user() int `+"`public"+` { return 0; }
+helper() int { return 1; }
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Load the module (with std so sema validation passes)
+	stdFiles := testStdFiles(t)
+	scope, err := loadLocalModule("./libs/mymod", projectDir, stdFiles)
+	if err != nil {
+		t.Fatalf("loadLocalModule failed: %v", err)
+	}
+	if scope == nil {
+		t.Fatal("expected non-nil scope")
+	}
+
+	// Verify only public symbols are in the scope
+	if scope.Lookup("User") == nil {
+		t.Error("expected 'User' in exported scope")
+	}
+	if scope.Lookup("create_user") == nil {
+		t.Error("expected 'create_user' in exported scope")
+	}
+	if scope.Lookup("helper") != nil {
+		t.Error("'helper' should not be in exported scope (not public)")
+	}
+}
+
+// TestLoadLocalModuleMultipleFiles verifies that multiple .pr files in a module
+// directory are all parsed and merged.
+func TestLoadLocalModuleMultipleFiles(t *testing.T) {
+	projectDir := t.TempDir()
+	modDir := filepath.Join(projectDir, "mylib")
+	if err := os.MkdirAll(modDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(projectDir, "promise.toml"), []byte(`
+[module]
+name = "testproj"
+epoch = "2026.3"
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(modDir, "promise.toml"), []byte(`
+[module]
+name = "mylib"
+epoch = "2026.3"
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two files in the module, each exporting different things
+	if err := os.WriteFile(filepath.Join(modDir, "a.pr"), []byte(`
+type Foo `+"`public"+` { int x; }
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(modDir, "b.pr"), []byte(`
+type Bar `+"`public"+` { int y; }
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdFiles := testStdFiles(t)
+	scope, err := loadLocalModule("./mylib", projectDir, stdFiles)
+	if err != nil {
+		t.Fatalf("loadLocalModule failed: %v", err)
+	}
+
+	if scope.Lookup("Foo") == nil {
+		t.Error("expected 'Foo' from a.pr in exported scope")
+	}
+	if scope.Lookup("Bar") == nil {
+		t.Error("expected 'Bar' from b.pr in exported scope")
+	}
+}
+
+// TestLoadLocalModuleNoPromiseToml verifies error when module dir has no promise.toml.
+func TestLoadLocalModuleNoPromiseToml(t *testing.T) {
+	projectDir := t.TempDir()
+	modDir := filepath.Join(projectDir, "badmod")
+	if err := os.MkdirAll(modDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modDir, "lib.pr"), []byte("helper() int { return 0; }"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadLocalModule("./badmod", projectDir, nil)
+	if err == nil {
+		t.Fatal("expected error for missing promise.toml")
+	}
+	if !strings.Contains(err.Error(), "no promise.toml") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// TestLoadLocalModuleDirNotFound verifies error when module directory doesn't exist.
+func TestLoadLocalModuleDirNotFound(t *testing.T) {
+	projectDir := t.TempDir()
+	_, err := loadLocalModule("./nonexistent", projectDir, nil)
+	if err == nil {
+		t.Fatal("expected error for missing directory")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// TestLoadLocalModuleNoPrFiles verifies error when module has no .pr files.
+func TestLoadLocalModuleNoPrFiles(t *testing.T) {
+	projectDir := t.TempDir()
+	modDir := filepath.Join(projectDir, "empty")
+	if err := os.MkdirAll(modDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modDir, "promise.toml"), []byte(`
+[module]
+name = "empty"
+epoch = "2026.3"
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadLocalModule("./empty", projectDir, nil)
+	if err == nil {
+		t.Fatal("expected error for module with no .pr files")
+	}
+	if !strings.Contains(err.Error(), "no .pr files") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// TestLoadLocalModuleSemaErrors verifies that sema errors in a module are reported.
+func TestLoadLocalModuleSemaErrors(t *testing.T) {
+	projectDir := t.TempDir()
+	modDir := filepath.Join(projectDir, "badmod")
+	if err := os.MkdirAll(modDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modDir, "promise.toml"), []byte(`
+[module]
+name = "badmod"
+epoch = "2026.3"
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Module source with a type error: returning string where int expected
+	if err := os.WriteFile(filepath.Join(modDir, "lib.pr"), []byte(`
+compute() int `+"`public"+` { return "not an int"; }
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdFiles := testStdFiles(t)
+	_, err := loadLocalModule("./badmod", projectDir, stdFiles)
+	if err == nil {
+		t.Fatal("expected error for module with sema errors")
+	}
+	if !strings.Contains(err.Error(), "errors in module") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// TestLoadLocalModuleWithStdTypes verifies a module using std types (string, int[]) loads correctly.
+func TestLoadLocalModuleWithStdTypes(t *testing.T) {
+	projectDir := t.TempDir()
+	modDir := filepath.Join(projectDir, "mymod")
+	if err := os.MkdirAll(modDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "promise.toml"), []byte(`
+[module]
+name = "testproj"
+epoch = "2026.3"
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modDir, "promise.toml"), []byte(`
+[module]
+name = "mymod"
+epoch = "2026.3"
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Module uses std library types: string return, int[] parameter
+	if err := os.WriteFile(filepath.Join(modDir, "lib.pr"), []byte(`
+greet(string name) string `+"`public"+` { return "hello " + name; }
+sum(int[] nums) int `+"`public"+` {
+	int total = 0;
+	for n in nums { total = total + n; }
+	return total;
+}
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdFiles := testStdFiles(t)
+	scope, err := loadLocalModule("./mymod", projectDir, stdFiles)
+	if err != nil {
+		t.Fatalf("loadLocalModule failed: %v", err)
+	}
+	if scope.Lookup("greet") == nil {
+		t.Error("expected 'greet' in exported scope")
+	}
+	if scope.Lookup("sum") == nil {
+		t.Error("expected 'sum' in exported scope")
 	}
 }
 

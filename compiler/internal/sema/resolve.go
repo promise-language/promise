@@ -18,6 +18,9 @@ func (c *Checker) resolveType(ref ast.TypeRef) types.Type {
 	case *ast.NamedTypeRef:
 		return c.resolveNamedType(r)
 
+	case *ast.QualifiedTypeRef:
+		return c.resolveQualifiedType(r)
+
 	case *ast.TupleTypeRef:
 		elems := make([]types.Type, len(r.Elements))
 		for i, e := range r.Elements {
@@ -166,6 +169,84 @@ func (c *Checker) resolveNamedType(r *ast.NamedTypeRef) types.Type {
 	// Validate type argument constraints
 	c.validateConstraints(r.Pos(), typ, typeArgs)
 
+	inst := types.NewInstance(typ, typeArgs)
+	c.recordInstance(inst)
+	return inst
+}
+
+// resolveQualifiedType resolves a module-qualified type reference like mod.Type or mod.Type[T].
+func (c *Checker) resolveQualifiedType(r *ast.QualifiedTypeRef) types.Type {
+	// Look up the module object
+	obj := c.lookup(r.Module)
+	if obj == nil {
+		c.errorf(r.Pos(), "undefined module: %s", r.Module)
+		return nil
+	}
+	mod, ok := obj.(*types.Module)
+	if !ok {
+		c.errorf(r.Pos(), "%s is not a module", r.Module)
+		return nil
+	}
+	scope := mod.Scope()
+	if scope == nil {
+		c.errorf(r.Pos(), "module '%s' has no loaded scope", r.Module)
+		return nil
+	}
+
+	// Look up the type name in the module's scope
+	member := scope.Lookup(r.Name)
+	if member == nil {
+		c.errorf(r.Pos(), "module '%s' has no exported member '%s'", r.Module, r.Name)
+		return nil
+	}
+
+	// Check visibility
+	if !isObjectExported(member) {
+		c.errorf(r.Pos(), "'%s' is private to module '%s'", r.Name, r.Module)
+		return nil
+	}
+
+	tn, ok := member.(*types.TypeName)
+	if !ok {
+		c.errorf(r.Pos(), "%s.%s is not a type", r.Module, r.Name)
+		return nil
+	}
+
+	typ := tn.Type()
+
+	// No type arguments — return directly
+	if len(r.TypeArgs) == 0 {
+		return typ
+	}
+
+	// Generic instantiation
+	typeArgs := make([]types.Type, len(r.TypeArgs))
+	for i, ta := range r.TypeArgs {
+		typeArgs[i] = c.resolveType(ta)
+		if typeArgs[i] == nil {
+			return nil
+		}
+	}
+
+	switch t := typ.(type) {
+	case *types.Named:
+		if len(t.TypeParams()) != len(typeArgs) {
+			c.errorf(r.Pos(), "type %s.%s expects %d type arguments, got %d",
+				r.Module, r.Name, len(t.TypeParams()), len(typeArgs))
+			return nil
+		}
+	case *types.Enum:
+		if len(t.TypeParams()) != len(typeArgs) {
+			c.errorf(r.Pos(), "type %s.%s expects %d type arguments, got %d",
+				r.Module, r.Name, len(t.TypeParams()), len(typeArgs))
+			return nil
+		}
+	default:
+		c.errorf(r.Pos(), "type %s.%s is not generic", r.Module, r.Name)
+		return nil
+	}
+
+	c.validateConstraints(r.Pos(), typ, typeArgs)
 	inst := types.NewInstance(typ, typeArgs)
 	c.recordInstance(inst)
 	return inst

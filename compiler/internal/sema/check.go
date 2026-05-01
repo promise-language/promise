@@ -27,13 +27,22 @@ type Checker struct {
 	inGenerator       bool                    // true when checking a generator function body
 	generatorElemType types.Type              // T from stream[T] or Iterator[T] return type
 	yieldFound        bool                    // true if at least one yield seen in current generator func
+	modules           []*types.Module         // all modules from use declarations
+	moduleScopes      map[string]*types.Scope // pre-loaded module scopes (catalog name or path → scope)
 }
 
 // Check performs semantic analysis on the given AST file.
 // It returns type information and any semantic errors found.
 func Check(file *ast.File) (*Info, []error) {
+	return CheckWithModules(file, nil)
+}
+
+// CheckWithModules performs semantic analysis with pre-loaded module scopes.
+// moduleScopes maps module keys (catalog name or source path) to their exported scopes.
+func CheckWithModules(file *ast.File, moduleScopes map[string]*types.Scope) (*Info, []error) {
 	c := &Checker{
-		file: file,
+		moduleScopes: moduleScopes,
+		file:         file,
 		info: &Info{
 			Types:                make(map[ast.Expr]types.Type),
 			Objects:              make(map[*ast.IdentExpr]types.Object),

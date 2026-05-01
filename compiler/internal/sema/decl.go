@@ -8,10 +8,29 @@ import (
 // declare performs Pass 1: walk top-level declarations and insert names.
 // Std library declarations go into stdScope; user declarations go into fileScope.
 func (c *Checker) declare(file *ast.File) {
-	// Process use declarations first — reserve alias names
+	// Process use declarations — create module objects and resolve scopes
 	for _, u := range file.Uses {
-		mod := types.NewModule(tpos(u.Pos()), u.Alias, u.Path)
-		c.insert(mod)
+		alias := u.Alias
+		isGlob := alias == "_"
+
+		mod := types.NewModule(tpos(u.Pos()), alias, u.Path)
+		if u.CatalogName != "" {
+			mod.SetCatalogName(u.CatalogName)
+		}
+		mod.SetGlob(isGlob)
+
+		// Resolve module scope from pre-loaded scopes
+		c.resolveModuleScope(u, mod)
+
+		// Glob imports (as _) merge their exports into fileScope eagerly.
+		// Non-glob imports are inserted as named module objects.
+		if isGlob {
+			c.mergeGlobImport(u, mod)
+		} else {
+			c.insert(mod)
+		}
+
+		c.modules = append(c.modules, mod)
 	}
 
 	for _, decl := range file.Decls {
@@ -36,6 +55,47 @@ func (c *Checker) declare(file *ast.File) {
 
 	// Restore scope to fileScope
 	c.scope = c.fileScope
+}
+
+// resolveModuleScope looks up the module's scope from pre-loaded moduleScopes.
+func (c *Checker) resolveModuleScope(u *ast.UseDecl, mod *types.Module) {
+	if c.moduleScopes == nil {
+		return
+	}
+	// Try catalog name first, then path
+	key := u.CatalogName
+	if key == "" {
+		key = u.Path
+	}
+	if scope, ok := c.moduleScopes[key]; ok {
+		mod.SetScope(scope)
+	}
+}
+
+// mergeGlobImport dumps all exports from a module's scope into fileScope.
+// Eagerly checks for name conflicts with existing declarations.
+func (c *Checker) mergeGlobImport(u *ast.UseDecl, mod *types.Module) {
+	scope := mod.Scope()
+	if scope == nil {
+		return // module has no scope (not loaded)
+	}
+	modName := u.CatalogName
+	if modName == "" {
+		modName = u.Path
+	}
+	for _, name := range scope.Names() {
+		obj := scope.Lookup(name)
+		// Only import `public symbols from modules
+		if !isObjectExported(obj) {
+			continue
+		}
+		if existing := c.fileScope.Lookup(name); existing != nil {
+			c.errorf(u.Pos(), "importing module '%s' as _ conflicts with existing symbol '%s'", modName, name)
+			c.errorf(u.Pos(), "hint: use `use %s` or `use %s as <alias>` to avoid conflict", modName, modName)
+			continue
+		}
+		c.fileScope.Insert(obj)
+	}
 }
 
 // isDeclStd returns true if a declaration has the IsStd flag set.
@@ -255,6 +315,9 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 	if c.hasAnnotation(d.Annotations, "structural") {
 		named.SetStructural(true)
 	}
+	if c.hasAnnotation(d.Annotations, "public") {
+		named.SetExported(true)
+	}
 	named.SetDoc(extractDoc(d.Annotations))
 	named.SetDeprecated(extractDeprecated(d.Annotations))
 
@@ -284,6 +347,9 @@ func (c *Checker) defineField(named *types.Named, fd *ast.FieldDecl) {
 	f := types.NewField(tpos(fd.Pos()), fd.Name, typ, placement, isRaw, hasDef)
 	if c.hasAnnotation(fd.Annotations, "final") {
 		f.SetFinal(true)
+	}
+	if c.hasAnnotation(fd.Annotations, "public") {
+		f.SetExported(true)
 	}
 	c.validateMetas(fd.Annotations, TargetField)
 	f.SetDoc(extractDoc(fd.Annotations))
@@ -332,6 +398,9 @@ func (c *Checker) defineMethod(named *types.Named, md *ast.MethodDecl, typeName 
 	// Validate factory method
 	if isFactory {
 		c.validateFactoryMethod(named, m, md)
+	}
+	if c.hasAnnotation(md.Annotations, "public") {
+		m.SetExported(true)
 	}
 	c.validateMetas(md.Annotations, TargetMethod)
 	m.SetDoc(extractDoc(md.Annotations))
@@ -440,6 +509,9 @@ func (c *Checker) defineEnum(d *ast.EnumDecl) {
 		enum.SetCopy(true)
 		c.validateCopyEnum(enum, d)
 	}
+	if c.hasAnnotation(d.Annotations, "public") {
+		enum.SetExported(true)
+	}
 	enum.SetDoc(extractDoc(d.Annotations))
 	enum.SetDeprecated(extractDeprecated(d.Annotations))
 }
@@ -481,6 +553,9 @@ func (c *Checker) defineFunc(d *ast.FuncDecl) {
 	c.validateMetas(d.Annotations, TargetFunc)
 	fn.SetDoc(extractDoc(d.Annotations))
 	fn.SetDeprecated(extractDeprecated(d.Annotations))
+	if c.hasAnnotation(d.Annotations, "public") {
+		fn.SetExported(true)
+	}
 	if c.hasAnnotation(d.Annotations, "test") {
 		if expected, ok := extractTestExpected(d.Annotations); ok {
 			// `test(expected="...") — e2e output test on main()

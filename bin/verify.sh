@@ -3,7 +3,16 @@ set -euo pipefail
 
 trap 'if [ $? -ne 0 ]; then echo "----------------------------------------------------"; echo "❌ Verify FAILED: tests did not pass"; echo "----------------------------------------------------"; fi' EXIT
 
-MODE="${1:-host}"  # host (default), wasm, all
+MODE="host"
+CLEAN_CACHE=false
+
+for arg in "$@"; do
+  case "$arg" in
+    host|wasm|all) MODE="$arg" ;;
+    --clean) CLEAN_CACHE=true ;;
+    *) echo "Usage: verify.sh [host|wasm|all] [--clean]"; exit 1 ;;
+  esac
+done
 
 cd "$(dirname "$0")/../compiler"
 
@@ -23,8 +32,13 @@ go vet $(go list ./... | grep -v /internal/parser)
 echo "Building..."
 go build -o promise ./cmd/promise 2>&1
 
-echo "Clearing go tests cache"
-go clean -testcache || exit 1
+if [ "$CLEAN_CACHE" = true ]; then
+  echo "Clearing go test cache..."
+  go clean -testcache || exit 1
+  echo "Clearing promise test cache..."
+  ./promise clean
+fi
+
 echo "Running go tests..."
 go test ./... || exit 1
 

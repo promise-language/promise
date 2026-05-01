@@ -26,7 +26,7 @@ The stdlib today (27 files) provides:
 
 | Module | File | What it covers |
 |--------|------|---------------|
-| Primitives | `int.pr`, `uint.pr`, `float.pr`, `bool.pr`, `char.pr` | Arithmetic, comparison, bitwise, hash, `to_string()`, `int.parse()`, `bool.parse()` |
+| Primitives | `int.pr`, `uint.pr`, `float.pr`, `bool.pr`, `char.pr` | Arithmetic, comparison, bitwise, hash, `to_string()`, `format()`, `int.parse()`, `bool.parse()`, `uint.parse()`, `f64.parse()` |
 | Strings | `string.pr` | Concatenation, comparison, `contains`, `starts_with`, `ends_with`, `index_of`, `trim`, `split`, `[]`, `[:]`, `bytes()`, `byte_at()`, `from_bytes()`, `to_string()`, `to_upper`, `to_lower`, `repeat`, `replace`, `count`, `chars` |
 | Containers | `vector.pr`, `map.pr`, `set.pr` | `Vector[T]` / `T[]` (push/pop/remove/contains/slice/`filled`), `Map[K,V]` / `map[K,V]` (open-addressing, rehash), `Set[T]` |
 | Format/Parse | `format.pr`, `builder.pr`, `parse.pr` | `Writer`/`Format` structural interfaces, `Builder` (string building), `Reader`/`Parse` structural interfaces, `Scanner` (string parsing), `scan[T]()` |
@@ -38,7 +38,7 @@ The stdlib today (27 files) provides:
 | Concurrency | `channel.pr`, `task.pr`, `runtime.pr` | `Channel[T]` / `channel[T]` send/close, `Task[T]` / `task[T]` handle, scheduler stats |
 | Other | `range.pr`, `hash.pr`, `assert.pr`, `error.pr` | `Range` / `..`/`..=`, FNV-1a hash, `assert(bool, string)`, `error` base type |
 
-**What's missing**: file I/O, numeric conversions (u8↔char, int↔uint cross-width casts), time, OS access, process execution, path manipulation, stream/iterator combinators, `f64.parse`, `format(Writer ~w)` on primitives, string interpolation desugaring to Format.
+**What's missing**: file I/O, numeric conversions (u8↔char, int↔uint cross-width casts), time, OS access, process execution, path manipulation, stream/iterator combinators, string interpolation desugaring to Format.
 
 ### Naming Conventions
 
@@ -171,19 +171,20 @@ type Stream[T] `structural {
 |--------|--------------|-----------------|
 | `as!` (unsafe cast) | Works for numeric widening/narrowing (confirmed in `std/hash.pr`) | No change needed |
 | `as` (safe cast) | Works for inheritance downcasts; unclear for numeric | Define numeric `as` as safe widening only (e.g., `int as i64`) |
-| Int↔String | Not implemented | Needed for `format()`, `to_string()`, `parse()`, string interpolation |
-| Float↔String | `print_f64` uses internal C `snprintf`; no Promise-level access | Need `f64.format()` / `to_string()` and `f64.parse()` |
+| Int↔String | **Done** | `to_string()`, `format(Writer ~w)!`, `int.parse(Reader ~r) int!` — all pure Promise |
+| Float↔String | **Done** | `to_string()`, `format(Writer ~w)!`, `f64.parse(Reader ~r) f64!` — all pure Promise. f64→string via `_f64_to_str` in `std/format.pr` |
 
-**Implemented approach**: All primitives have `to_string() string` via `"{this}"` (string interpolation, zero native codegen). `int.parse(Reader ~r) int!` and `bool.parse(Reader ~r) bool!` are pure Promise methods that read from a Reader byte-by-byte. `scan[int]("42")!` works via generic `scan[T: Parse]()`. No `snprintf`/`strtol`/`strtod` needed — everything is pure Promise except `string.from_bytes()` and `string.bytes()`/`byte_at()` which are native. `format(Writer ~w)` on primitives is deferred — `to_string()` works directly today.
+**Implemented approach**: All primitives have `to_string() string` via `"{this}"` (string interpolation, zero native codegen) and `format(Writer ~w)!` via `w.write_string(this.to_string())`. `int.parse`, `bool.parse`, `uint.parse`, `f64.parse` are pure Promise factory methods that read from a Reader byte-by-byte. `scan[int]("42")!` works via generic `scan[T: Parse]()`. No `snprintf`/`strtol`/`strtod` needed — everything is pure Promise except `string.from_bytes()` and `string.bytes()`/`byte_at()` which are native.
 
 ### 2.4 Format & Writer for String Interpolation — DONE (interfaces defined, interpolation desugaring deferred)
 
 | Aspect | Current State | Remaining |
 |--------|--------------|-----------|
-| String interpolation | Works for `string`, `int`, `f64`, `bool`, `char` via hardcoded codegen paths | User types need `format(Writer ~w)` + interpolation desugaring |
+| String interpolation | Works for `string`, `int`, `f64`, `bool`, `char` via hardcoded codegen paths | User types need `format(Writer ~w)!` + interpolation desugaring |
 | `Writer` interface | **Defined** in `std/format.pr` | — |
-| `Format` interface | **Defined** in `std/format.pr` | — |
+| `Format` interface | **Defined** in `std/format.pr` — `format(Writer ~w)!` (failable) | — |
 | `to_string()` | **Available** on all primitives via `"{this}"` | User types need `format()` → `to_string()` synthesis |
+| `format()` | **Available** on all primitives — delegates to `w.write_string(to_string())` | Interpolation desugaring to `format()` deferred |
 | `Builder` | **Implemented** in `std/builder.pr` (pure Promise) | — |
 
 **Proposed types** (in `std/format.pr`):
@@ -200,7 +201,7 @@ type Writer `structural {
 }
 
 type Format `structural {
-    format(Writer ~w) `abstract;
+    format(Writer ~w)! `abstract;
 }
 ```
 
@@ -208,20 +209,20 @@ Writer is byte-oriented (like Go's `io.Writer`), making it usable for files, net
 
 **Language feature: default methods on structural interfaces**. A structural interface can have both `abstract` methods (required for satisfaction) and non-abstract methods (default implementations, available on any satisfying type). This is similar to Rust traits or Java default interface methods.
 
-**How it works**: `Format` types write their string representation into a `Writer` via `write_string()`. The caller controls the buffer, and multiple format calls compose without intermediate allocations.
+**How it works**: `Format` types write their string representation into a `Writer` via `write_string()`. The caller controls the buffer, and multiple format calls compose without intermediate allocations. `format()` is failable because underlying `Writer.write()` may fail (e.g., I/O error).
 
-`to_string()` is synthesized from `format()`: create a Builder (which satisfies `Writer`), call `format(~builder)`, return `builder.to_string()`. No need for types to implement `to_string()` separately.
+`to_string()` is synthesized from `format()`: create a Builder (which satisfies `Writer`), call `format(~builder)!`, return `builder.to_string()`. No need for types to implement `to_string()` separately. Builder's `write()` never fails, so the `!` is safe.
 
 **String interpolation** `"value: ${x}"` desugars to:
 ```promise
 // compiler-generated:
 mut _sb := Builder();
 _sb.write_string("value: ");
-x.format(~_sb);          // if x implements Format
+x.format(~_sb)!;          // if x implements Format
 _sb.to_string()
 ```
 
-For primitives (`int`, `f64`, `bool`, `char`), the compiler uses existing native paths or built-in `format(Writer ~w)` implementations.
+All primitive types (`int`, `i8`-`i64`, `uint`, `u8`-`u64`, `f32`, `f64`, `bool`, `char`, `string`) implement `format(Writer ~w)!`.
 
 **Stream `join`**: With `Format`, stream combinators can offer `join(string separator)` as a terminal on `Stream[T: Format]` — each element formats into the shared builder with separators between them.
 
@@ -231,7 +232,7 @@ type Point {
     int x;
     int y;
 
-    format(Writer ~w) {
+    format(Writer ~w)! {
         w.write_string("(");
         this.x.format(~w);
         w.write_string(", ");
@@ -249,11 +250,10 @@ println("point: ${p}");   // point: (3, 4)
 
 | Aspect | Status | Details |
 |--------|--------|---------|
-| Parsing | **Done** | `int.parse(Reader ~r) int!` and `bool.parse(Reader ~r) bool!` — pure Promise |
+| Parsing | **Done** | `int.parse`, `bool.parse`, `uint.parse`, `f64.parse` — all pure Promise |
 | Byte input | **Done** | `Reader` structural interface in `std/parse.pr` with `read_byte` default method |
 | `Scanner` | **Done** | Wraps string, satisfies Reader, tracks position. In `std/parse.pr` |
 | `scan[T]()` | **Done** | Generic convenience: `scan[int]("42")!` — wraps string in Scanner, calls `T.parse` |
-| Remaining | `f64.parse`, `uint.parse` | Complex parsing not yet implemented |
 
 **The problem**: `Format` works as a structural interface because it's an instance method — you have a value and call `value.format(~writer)`. Parsing is the inverse: you need to **create** a value by reading from a source. There's no instance to call a method on. The operation lives on the type, not on an instance. Additionally, a parser may not consume all the input — it should read what it needs and leave the rest.
 
@@ -397,7 +397,7 @@ x := s.next[int]()!;
 |---|---|---|
 | Structural interface | `Format` | `Parse` |
 | I/O interface | `Writer` (bytes) | `Reader` (bytes) |
-| Method | `format(Writer ~w)` | `parse(Reader ~r) Self!` |
+| Method | `format(Writer ~w)!` | `parse(Reader ~r) Self!` |
 | Method kind | Instance | Factory |
 | Direction | Value → Writer | Reader → Value |
 | Concrete wrapper | Builder (satisfies Writer) | Scanner (satisfies Reader) |
@@ -412,9 +412,9 @@ x := s.next[int]()!;
 |---------|--------|--------|
 | Error type system (2.1) | All failable stdlib APIs | **DONE** — inheritance-based errors, typed handlers, exhaustiveness |
 | Stream combinators (2.2) | Sorting, functional patterns | Medium — ~15 wrapper types + methods |
-| Numeric conversions (2.3) | String formatting, parsing, math display | **PARTIAL** — `to_string()` done on all primitives, `int.parse`/`bool.parse` done, `f64.parse`/`uint.parse` remaining |
-| Format & Writer (2.4) | String interpolation, user type display, stream join | **DONE** — Writer/Format interfaces defined, Builder implemented. Interpolation desugaring deferred |
-| Parse & Reader (2.5) | Generic parsing, Scanner | **DONE** — Reader/Parse interfaces, Scanner, `scan[T]()`, `int.parse`, `bool.parse` |
+| Numeric conversions (2.3) | String formatting, parsing, math display | **DONE** — `to_string()` + `format()` on all primitives, `int/bool/uint/f64.parse` done. Interpolation desugaring deferred |
+| Format & Writer (2.4) | String interpolation, user type display, stream join | **DONE** — Writer/Format interfaces defined, Builder implemented, `format(Writer ~w)!` on all primitives. Interpolation desugaring deferred |
+| Parse & Reader (2.5) | Generic parsing, Scanner | **DONE** — Reader/Parse interfaces, Scanner, `scan[T]()`, `int/bool/uint/f64.parse` |
 
 ---
 
@@ -524,17 +524,18 @@ Complete the features from Section 2 before building stdlib modules.
 
 **0c. Numeric conversions**
 - Files: `std/int.pr`, `std/uint.pr`, `std/float.pr` (extend)
-- Codegen: native `format(Writer ~w)` methods, parse functions
+- Cross-width casts, u8↔char conversions
 
 **0d. Format & Writer — DONE**
 - File: `std/format.pr` — `Writer` and `Format` structural interfaces with default `write_string` method
 - File: `std/builder.pr` — `Builder` type (pure Promise, wraps `Vector[u8]`, satisfies `Writer`)
-- Primitives have `to_string()` via string interpolation (`"{this}"`). `format(Writer ~w)` deferred.
+- Primitives have `to_string()` via string interpolation (`"{this}"`)
+- All primitives (`int`, `i8`-`i64`, `uint`, `u8`-`u64`, `f32`, `f64`, `bool`, `char`, `string`) implement `format(Writer ~w)!`
 - String interpolation desugaring to Format deferred — existing codegen paths work.
 
 **0e. Parse & Reader — DONE**
 - File: `std/parse.pr` — `Reader` structural interface (with `read_byte` default), `Parse` structural interface with factory method, `Scanner` type, `scan[T]()` convenience function
-- `int.parse(Reader ~r) int!` and `bool.parse(Reader ~r) bool!` implemented in pure Promise
+- `int.parse(Reader ~r) int!`, `bool.parse(Reader ~r) bool!`, `uint.parse(Reader ~r) uint!`, `f64.parse(Reader ~r) f64!` — all pure Promise
 - `string.from_bytes(u8[]) string` native factory, `string.bytes() u8[]` and `string.byte_at(int) u8` native methods
 - `Vector[T].filled(T, int) T[]` factory for buffer pre-allocation
 - Codegen: primitive scalar method receivers (i64 for int, double for f64, etc. instead of i8*)
@@ -658,24 +659,22 @@ is_error[T](T! value) bool;
 
 ### Phase 2: Conversion & Formatting
 
-#### 2a. Numeric Formatting & Parsing — PARTIALLY DONE
+#### 2a. Numeric Formatting & Parsing — DONE
 
-**Done:**
 - `to_string()` on all primitives (int, i8-i64, uint, u8-u64, f32, f64, bool, char, string) — uses `"{this}"` string interpolation, zero native codegen needed
+- `format(Writer ~w)!` on all primitives — delegates to `w.write_string(this.to_string())` (string uses `w.write_string(this)`)
 - `int.parse(Reader ~r) int!` — pure Promise, reads digits with optional leading `-`, stops at first non-digit
 - `bool.parse(Reader ~r) bool!` — pure Promise, reads "true"/"false" byte-by-byte
-- Tests: `tests/std/test_to_string.pr` (9 tests), `tests/std/test_parse.pr` (13 tests)
+- `uint.parse(Reader ~r) uint!` — pure Promise, reads digits, stops at first non-digit
+- `f64.parse(Reader ~r) f64!` — pure Promise, handles sign, integer/fractional parts, scientific notation (e/E)
+- Tests: `tests/std/test_to_string.pr` (21 tests), `tests/std/test_parse.pr` (38 tests), `tests/std/test_format.pr` (20 tests)
 
-**Remaining:**
-- `format(Writer ~w)` on primitives — needed for user types to compose formatting via Writer
-- `f64.parse(Reader ~r)` — complex (integer + dot + fraction + exponent)
-- `uint.parse(Reader ~r)` — straightforward extension of int.parse without sign
-- String interpolation desugaring to `format()` — big codegen change, current approach works
+**Remaining (separate from 2a):** String interpolation desugaring to `format()` — big codegen change, current approach works.
 
-**Design change from original plan**: `to_string()` uses string interpolation (`"{this}"`) directly instead of wrapping `format()` through a Builder. This is simpler, has zero native codegen, and works today. `format(Writer ~w)` will be added later for composable output to arbitrary Writers.
+**Design change from original plan**: `to_string()` uses string interpolation (`"{this}"`) directly instead of wrapping `format()` through a Builder. This is simpler, has zero native codegen, and works today. `format(Writer ~w)!` is separately implemented for composable output to arbitrary Writers.
 
 - **Files**: `std/int.pr`, `std/uint.pr`, `std/float.pr`, `std/bool.pr`, `std/char.pr`, `std/string.pr`
-- **Test**: `tests/std/test_to_string.pr`, `tests/std/test_parse.pr`
+- **Test**: `tests/std/test_to_string.pr`, `tests/std/test_parse.pr`, `tests/std/test_format.pr`
 
 #### 2b. `std/builder.pr` — Builder — DONE
 

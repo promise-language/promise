@@ -1,0 +1,147 @@
+// Tests for Format interface — format(Writer ~w) on primitive types
+
+test_int_format() `test {
+    Builder b = Builder();
+    42.format(b)!;
+    assert(b.to_string() == "42", "int 42");
+}
+
+test_negative_int_format() `test {
+    Builder b = Builder();
+    (-17).format(b)!;
+    assert(b.to_string() == "-17", "int -17");
+}
+
+test_zero_format() `test {
+    Builder b = Builder();
+    0.format(b)!;
+    assert(b.to_string() == "0", "int 0");
+}
+
+test_bool_true_format() `test {
+    Builder b = Builder();
+    true.format(b)!;
+    assert(b.to_string() == "true", "bool true");
+}
+
+test_bool_false_format() `test {
+    Builder b = Builder();
+    false.format(b)!;
+    assert(b.to_string() == "false", "bool false");
+}
+
+test_char_format() `test {
+    Builder b = Builder();
+    'A'.format(b)!;
+    assert(b.to_string() == "A", "char A");
+}
+
+test_string_format() `test {
+    Builder b = Builder();
+    "hello".format(b)!;
+    assert(b.to_string() == "hello", "string hello");
+}
+
+test_f64_format() `test {
+    Builder b = Builder();
+    3.14.format(b)!;
+    assert(b.to_string() == "3.14", "f64 3.14");
+}
+
+test_uint_format() `test {
+    Builder b = Builder();
+    uint x = 99 as! uint;
+    x.format(b)!;
+    assert(b.to_string() == "99", "uint 99");
+}
+
+test_i8_format() `test {
+    i8 v = 127 as! i8;
+    Builder b = Builder();
+    v.format(b)!;
+    assert(b.to_string() == "127", "i8 127");
+}
+
+test_i16_format() `test {
+    i16 v = -1000 as! i16;
+    Builder b = Builder();
+    v.format(b)!;
+    assert(b.to_string() == "-1000", "i16 -1000");
+}
+
+test_i32_format() `test {
+    i32 v = 42 as! i32;
+    Builder b = Builder();
+    v.format(b)!;
+    assert(b.to_string() == "42", "i32 42");
+}
+
+test_i64_format() `test {
+    i64 v = -99 as! i64;
+    Builder b = Builder();
+    v.format(b)!;
+    assert(b.to_string() == "-99", "i64 -99");
+}
+
+test_u8_format() `test {
+    u8 v = 255 as! u8;
+    Builder b = Builder();
+    v.format(b)!;
+    assert(b.to_string() == "255", "u8 255");
+}
+
+test_u16_format() `test {
+    u16 v = 1000 as! u16;
+    Builder b = Builder();
+    v.format(b)!;
+    assert(b.to_string() == "1000", "u16 1000");
+}
+
+test_u32_format() `test {
+    u32 v = 42 as! u32;
+    Builder b = Builder();
+    v.format(b)!;
+    assert(b.to_string() == "42", "u32 42");
+}
+
+test_u64_format() `test {
+    u64 v = 99 as! u64;
+    Builder b = Builder();
+    v.format(b)!;
+    assert(b.to_string() == "99", "u64 99");
+}
+
+test_f32_format() `test {
+    f32 v = 2.5 as! f32;
+    Builder b = Builder();
+    v.format(b)!;
+    assert(b.to_string() == "2.5", "f32 2.5");
+}
+
+test_format_matches_to_string() `test {
+    // Verify format() output matches to_string() for each type
+    Builder b = Builder();
+    42.format(b)!;
+    assert(b.to_string() == 42.to_string(), "int consistency");
+
+    Builder b2 = Builder();
+    true.format(b2)!;
+    assert(b2.to_string() == true.to_string(), "bool consistency");
+
+    Builder b3 = Builder();
+    'Z'.format(b3)!;
+    assert(b3.to_string() == 'Z'.to_string(), "char consistency");
+
+    Builder b4 = Builder();
+    "test".format(b4)!;
+    assert(b4.to_string() == "test".to_string(), "string consistency");
+}
+
+test_multiple_format() `test {
+    Builder b = Builder();
+    "x=".format(b)!;
+    42.format(b)!;
+    ", y=".format(b)!;
+    true.format(b)!;
+    assert(b.to_string() == "x=42, y=true", "composed");
+}

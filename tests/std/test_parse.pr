@@ -1,4 +1,4 @@
-// Tests for Parse interface, int.parse, bool.parse, and Vector.filled
+// Tests for Parse interface: int.parse, bool.parse, uint.parse, f64.parse, Vector.filled
 
 test_int_parse() `test {
     Scanner r1 = Scanner(s: "42");
@@ -85,6 +85,162 @@ test_sequential_parse() `test {
     // int.parse already consumed the space (first non-digit)
     int b = int.parse(r)!;
     assert(b == 34, "second int");
+}
+
+// --- uint.parse ---
+
+test_uint_parse() `test {
+    Scanner r = Scanner(s: "42");
+    uint v = uint.parse(r)!;
+    assert((v as! int) == 42, "parse 42");
+}
+
+test_uint_parse_large() `test {
+    Scanner r = Scanner(s: "1000000");
+    uint v = uint.parse(r)!;
+    assert((v as! int) == 1000000, "parse 1000000");
+}
+
+_try_parse_uint(string s) string {
+    Scanner r = Scanner(s: s);
+    uint v = uint.parse(r) ? e { return e.message; };
+    return "ok";
+}
+
+test_uint_parse_empty() `test {
+    string result = _try_parse_uint("");
+    assert(result == "unexpected end of input", "empty input");
+}
+
+test_uint_parse_non_digit() `test {
+    string result = _try_parse_uint("abc");
+    assert(result == "expected digit", "non-digit");
+}
+
+test_uint_parse_stops_at_non_digit() `test {
+    Scanner r = Scanner(s: "123abc");
+    uint v = uint.parse(r)!;
+    assert((v as! int) == 123, "parse 123 from 123abc");
+    assert(r.rest() == "bc", "remaining bc");
+}
+
+test_uint_parse_zero() `test {
+    uint v = scan[uint]("0")!;
+    assert((v as! int) == 0, "parse 0");
+}
+
+test_scan_uint() `test {
+    uint v = scan[uint]("255")!;
+    assert((v as! int) == 255, "scan uint");
+}
+
+test_scan_bool() `test {
+    bool v1 = scan[bool]("true")!;
+    assert(v1, "scan true");
+    bool v2 = scan[bool]("false")!;
+    assert(!v2, "scan false");
+}
+
+// --- f64.parse ---
+
+test_f64_parse_integer() `test {
+    f64 v = scan[f64]("42")!;
+    assert(v == 42.0, "parse 42");
+}
+
+test_f64_parse_decimal() `test {
+    f64 v = scan[f64]("3.14")!;
+    // Check with tolerance (floating point)
+    assert(v > 3.13 && v < 3.15, "parse 3.14");
+}
+
+test_f64_parse_negative() `test {
+    f64 v = scan[f64]("-2.5")!;
+    assert(v == -2.5, "parse -2.5");
+}
+
+test_f64_parse_zero() `test {
+    f64 v = scan[f64]("0")!;
+    assert(v == 0.0, "parse 0");
+}
+
+test_f64_parse_zero_point() `test {
+    f64 v = scan[f64]("0.0")!;
+    assert(v == 0.0, "parse 0.0");
+}
+
+test_f64_parse_scientific() `test {
+    f64 v = scan[f64]("1e3")!;
+    assert(v == 1000.0, "parse 1e3");
+}
+
+test_f64_parse_scientific_negative_exp() `test {
+    f64 v = scan[f64]("5e-2")!;
+    assert(v > 0.049 && v < 0.051, "parse 5e-2");
+}
+
+test_f64_parse_scientific_plus() `test {
+    f64 v = scan[f64]("2.5e+2")!;
+    assert(v == 250.0, "parse 2.5e+2");
+}
+
+test_f64_parse_capital_e() `test {
+    f64 v = scan[f64]("1E3")!;
+    assert(v == 1000.0, "parse 1E3");
+}
+
+test_f64_parse_negative_scientific() `test {
+    f64 v = scan[f64]("-1.5e2")!;
+    assert(v == -150.0, "parse -1.5e2");
+}
+
+test_f64_parse_stops_at_non_digit() `test {
+    Scanner r = Scanner(s: "3.14abc");
+    f64 v = f64.parse(r)!;
+    assert(v > 3.13 && v < 3.15, "parse 3.14 from 3.14abc");
+    assert(r.rest() == "bc", "remaining bc");
+}
+
+_try_parse_f64(string s) string {
+    Scanner r = Scanner(s: s);
+    f64 v = f64.parse(r) ? e { return e.message; };
+    return "ok";
+}
+
+test_f64_parse_empty() `test {
+    string result = _try_parse_f64("");
+    assert(result == "unexpected end of input", "empty input");
+}
+
+test_f64_parse_non_numeric() `test {
+    string result = _try_parse_f64("abc");
+    assert(result == "expected digit", "non-numeric");
+}
+
+test_f64_parse_minus_only() `test {
+    string result = _try_parse_f64("-");
+    assert(result == "expected digit", "minus only");
+}
+
+test_f64_parse_leading_dot() `test {
+    f64 v = scan[f64](".5")!;
+    assert(v == 0.5, "parse .5 as 0.5");
+}
+
+test_f64_parse_negative_integer() `test {
+    f64 v = scan[f64]("-42")!;
+    assert(v == -42.0, "parse -42");
+}
+
+test_f64_parse_trailing_dot() `test {
+    f64 v = scan[f64]("1.")!;
+    assert(v == 1.0, "parse 1.");
+}
+
+test_f64_parse_negative_zero() `test {
+    f64 v = scan[f64]("-0.0")!;
+    // -0.0 == 0.0 in IEEE 754
+    assert(v == 0.0, "parse -0.0");
 }
 
 test_vector_filled() `test {

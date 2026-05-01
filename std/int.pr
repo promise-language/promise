@@ -57,6 +57,7 @@ type int `native `public {
     }
 
     to_string() string `public => "{this}";
+    format(Writer ~w)! `public { w.write_string(this.to_string()); }
 }
 
 type i8 `native `public {
@@ -84,6 +85,7 @@ type i8 `native `public {
     ..=(i8 end) Range[i8] `native;
     get hash int `native;
     to_string() string `public => "{this}";
+    format(Writer ~w)! `public { w.write_string(this.to_string()); }
 }
 
 type i16 `native `public {
@@ -111,6 +113,7 @@ type i16 `native `public {
     ..=(i16 end) Range[i16] `native;
     get hash int `native;
     to_string() string `public => "{this}";
+    format(Writer ~w)! `public { w.write_string(this.to_string()); }
 }
 
 type i32 `native `public {
@@ -138,6 +141,7 @@ type i32 `native `public {
     ..=(i32 end) Range[i32] `native;
     get hash int `native;
     to_string() string `public => "{this}";
+    format(Writer ~w)! `public { w.write_string(this.to_string()); }
 }
 
 type i64 `native `public {
@@ -165,4 +169,5 @@ type i64 `native `public {
     ..=(i64 end) Range[i64] `native;
     get hash int `native;
     to_string() string `public => "{this}";
+    format(Writer ~w)! `public { w.write_string(this.to_string()); }
 }

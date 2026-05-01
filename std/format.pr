@@ -12,7 +12,7 @@ type Writer `structural `public {
 
 // Format is the structural interface for types that can format themselves.
 type Format `structural `public {
-    format(Writer ~w) `abstract;
+    format(Writer ~w)! `abstract;
 }
 
 

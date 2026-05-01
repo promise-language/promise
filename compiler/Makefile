@@ -47,9 +47,14 @@ resources:
 	@mkdir -p $(RESOURCES)/std
 	@cp ../std/*.pr $(RESOURCES)/std/
 	@cp ../catalog.toml $(RESOURCES)/catalog.toml
+	@rm -rf $(RESOURCES)/modules
+	@mkdir -p $(RESOURCES)/modules
+	@touch $(RESOURCES)/modules/.keep
+	@if [ -d ../modules ]; then for d in ../modules/*/; do [ -d "$$d" ] && cp -r "$$d" $(RESOURCES)/modules/; done; fi
 	@rm -rf $(TESTDATA_STD)
 	@mkdir -p $(TESTDATA_STD)
 	@cp ../std/*.pr $(TESTDATA_STD)/
+	@(cd .. && find std/ modules/ catalog.toml -type f | sort | xargs sha256sum) > $(RESOURCES)/.sources.sha256
 
 musl-crt:
 	@mkdir -p $(MUSL_CRT_DST)

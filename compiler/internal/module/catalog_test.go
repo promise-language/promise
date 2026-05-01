@@ -95,7 +95,7 @@ commit = "7c8d9e0"
 	}
 }
 
-func TestParseCatalogMissingURL(t *testing.T) {
+func TestParseCatalogCommitWithoutURL(t *testing.T) {
 	data := []byte(`
 [catalog]
 epoch = "2026.3"
@@ -105,14 +105,14 @@ commit = "a1b2c3d"
 `)
 	_, err := ParseCatalog(data)
 	if err == nil {
-		t.Fatal("expected error for missing url")
+		t.Fatal("expected error for commit without url")
 	}
 	if !strings.Contains(err.Error(), "missing 'url'") {
 		t.Errorf("expected 'missing url' error, got: %v", err)
 	}
 }
 
-func TestParseCatalogMissingCommit(t *testing.T) {
+func TestParseCatalogURLWithoutCommit(t *testing.T) {
 	data := []byte(`
 [catalog]
 epoch = "2026.3"
@@ -122,10 +122,79 @@ url = "https://github.com/promise-lang/json"
 `)
 	_, err := ParseCatalog(data)
 	if err == nil {
-		t.Fatal("expected error for missing commit")
+		t.Fatal("expected error for url without commit")
 	}
 	if !strings.Contains(err.Error(), "missing 'commit'") {
 		t.Errorf("expected 'missing commit' error, got: %v", err)
+	}
+}
+
+func TestParseCatalogEmbedded(t *testing.T) {
+	data := []byte(`
+[catalog]
+epoch = "2026.3"
+
+[modules.io]
+description = "Console and file I/O"
+
+[modules.math]
+description = "Numeric functions and constants"
+`)
+	cat, err := ParseCatalog(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cat.Modules) != 2 {
+		t.Fatalf("expected 2 modules, got %d", len(cat.Modules))
+	}
+	io := cat.Modules["io"]
+	if io == nil {
+		t.Fatal("expected io entry")
+	}
+	if !io.IsEmbedded() {
+		t.Error("expected io to be embedded")
+	}
+	if io.Description != "Console and file I/O" {
+		t.Errorf("expected description, got %s", io.Description)
+	}
+}
+
+func TestParseCatalogMixed(t *testing.T) {
+	data := []byte(`
+[catalog]
+epoch = "2026.3"
+
+[modules.io]
+description = "Console and file I/O"
+
+[modules.json]
+url = "https://github.com/promise-lang/json"
+commit = "a1b2c3d"
+description = "JSON parsing and serialization"
+`)
+	cat, err := ParseCatalog(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cat.Modules) != 2 {
+		t.Fatalf("expected 2 modules, got %d", len(cat.Modules))
+	}
+	if !cat.Modules["io"].IsEmbedded() {
+		t.Error("expected io to be embedded")
+	}
+	if cat.Modules["json"].IsEmbedded() {
+		t.Error("expected json to be external")
+	}
+}
+
+func TestCatalogEntryIsEmbedded(t *testing.T) {
+	embedded := &CatalogEntry{Name: "io", Description: "I/O"}
+	if !embedded.IsEmbedded() {
+		t.Error("expected embedded for entry without URL")
+	}
+	external := &CatalogEntry{Name: "json", URL: "https://example.com/json", Commit: "abc123"}
+	if external.IsEmbedded() {
+		t.Error("expected not embedded for entry with URL")
 	}
 }
 

@@ -35,6 +35,12 @@ var embeddedStd embed.FS
 //go:embed resources/catalog.toml
 var embeddedCatalog []byte
 
+//go:embed all:resources/modules
+var embeddedModules embed.FS
+
+//go:embed resources/.sources.sha256
+var embeddedSourcesChecksum []byte
+
 // Runtime is fully codegen-emitted LLVM IR — no embedded C files needed.
 
 func usage() {
@@ -695,41 +701,69 @@ func runTestDir(dir string, recursive bool, timeout time.Duration, targetTriple 
 	}
 }
 
-// dirHasTestFiles checks if a directory contains any test_*.pr files (non-recursive).
+// dirHasTestFiles checks if a directory contains any test .pr files (non-recursive).
+// Matches both test_*.pr (standalone test files) and *_test.pr (module companion tests).
 func dirHasTestFiles(dir string) bool {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return false
 	}
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasPrefix(e.Name(), "test_") && strings.HasSuffix(e.Name(), ".pr") {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".pr") {
+			continue
+		}
+		if strings.HasPrefix(e.Name(), "test_") || strings.HasSuffix(e.Name(), "_test.pr") {
 			return true
 		}
 	}
 	return false
 }
 
-// discoverTestFiles finds .pr files in a directory.
+// discoverTestFiles finds test .pr files in a directory.
+// In module directories (containing promise.toml), only *_test.pr files are returned.
+// In non-module directories, all .pr files are returned (they're standalone tests).
 func discoverTestFiles(dir string, recursive bool) []string {
 	var files []string
+
+	// isModuleDir caches whether a directory is a module source directory.
+	modDirCache := map[string]bool{}
+	isModuleDir := func(d string) bool {
+		if v, ok := modDirCache[d]; ok {
+			return v
+		}
+		_, err := os.Stat(filepath.Join(d, "promise.toml"))
+		v := err == nil
+		modDirCache[d] = v
+		return v
+	}
+
+	// isTestFile returns true if the file name matches test naming conventions.
+	isTestFile := func(name string) bool {
+		return strings.HasPrefix(name, "test_") || strings.HasSuffix(name, "_test.pr")
+	}
 
 	if recursive {
 		if err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				return nil
 			}
-			// Skip module source directories (contain promise.toml but no test files).
-			// Test project roots also have promise.toml but contain test_*.pr files.
+			// Skip module directories that have no test files at all.
 			if d.IsDir() && path != dir {
-				if _, err := os.Stat(filepath.Join(path, "promise.toml")); err == nil {
-					if !dirHasTestFiles(path) {
-						return filepath.SkipDir
-					}
+				if isModuleDir(path) && !dirHasTestFiles(path) {
+					return filepath.SkipDir
 				}
 			}
-			if !d.IsDir() && strings.HasSuffix(d.Name(), ".pr") {
-				files = append(files, path)
+			if d.IsDir() {
+				return nil
 			}
+			if !strings.HasSuffix(d.Name(), ".pr") {
+				return nil
+			}
+			// In module directories, only pick up test files (not implementation).
+			if isModuleDir(filepath.Dir(path)) && !isTestFile(d.Name()) {
+				return nil
+			}
+			files = append(files, path)
 			return nil
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "error walking directory: %v\n", err)
@@ -741,10 +775,16 @@ func discoverTestFiles(dir string, recursive bool) []string {
 			fmt.Fprintf(os.Stderr, "error reading directory: %v\n", err)
 			os.Exit(1)
 		}
+		moduleDir := isModuleDir(dir)
 		for _, e := range entries {
-			if !e.IsDir() && strings.HasSuffix(e.Name(), ".pr") {
-				files = append(files, filepath.Join(dir, e.Name()))
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".pr") {
+				continue
 			}
+			// In module directories, only pick up test files.
+			if moduleDir && !isTestFile(e.Name()) {
+				continue
+			}
+			files = append(files, filepath.Join(dir, e.Name()))
 		}
 	}
 
@@ -2461,7 +2501,8 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 		ml.warnings = append(ml.warnings, fmt.Sprintf("warning: module %q has epoch %s, but project uses epoch %s", modCfg.Name, modCfg.Epoch, ml.projectCfg.Epoch))
 	}
 
-	// Parse all .pr files in the module directory
+	// Parse all .pr files in the module directory (skip *_test.pr files —
+	// those are module tests, not part of the module's public implementation).
 	entries, err := os.ReadDir(absDir)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read module directory: %w", err)
@@ -2469,7 +2510,7 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 
 	var modFileList []*ast.File
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".pr") {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".pr") && !strings.HasSuffix(e.Name(), "_test.pr") {
 			f := parseSourceFile(filepath.Join(absDir, e.Name()))
 			modFileList = append(modFileList, f)
 		}
@@ -2592,7 +2633,8 @@ func (ml *moduleLoader) loadRemote(remoteURL, alias string) (*sema.ModuleInfo, e
 }
 
 // loadCatalog resolves a catalog import by looking up the name in the embedded
-// catalog manifest, fetching the module via git, and loading it like a remote module.
+// catalog manifest. Embedded modules (no URL) are extracted from go:embed;
+// external modules (with URL + commit) are fetched via git.
 func (ml *moduleLoader) loadCatalog(catalogName string) (*sema.ModuleInfo, error) {
 	if catalogName == "std" {
 		return nil, nil // handled by sema directly
@@ -2626,10 +2668,22 @@ func (ml *moduleLoader) loadCatalog(catalogName string) (*sema.ModuleInfo, error
 		return nil, fmt.Errorf("unknown catalog module '%s' — not in catalog for epoch %s", catalogName, ml.catalog.Epoch)
 	}
 
-	// Fetch/checkout via git (same infrastructure as remote modules)
-	absDir, err := module.ResolveRemoteModule(entry.URL, entry.Commit)
-	if err != nil {
-		return nil, fmt.Errorf("cannot fetch catalog module '%s': %w", catalogName, err)
+	var absDir string
+
+	if entry.IsEmbedded() {
+		// Embedded module: extract from go:embed to a temp directory
+		dir, err := extractEmbeddedModule(catalogName)
+		if err != nil {
+			return nil, fmt.Errorf("cannot load embedded catalog module '%s': %w", catalogName, err)
+		}
+		absDir = dir
+	} else {
+		// External module: fetch/checkout via git
+		dir, err := module.ResolveRemoteModule(entry.URL, entry.Commit)
+		if err != nil {
+			return nil, fmt.Errorf("cannot fetch catalog module '%s': %w", catalogName, err)
+		}
+		absDir = dir
 	}
 
 	// Catalog modules must not have remote dependencies — they can only
@@ -2649,6 +2703,37 @@ func (ml *moduleLoader) loadCatalog(catalogName string) (*sema.ModuleInfo, error
 	ml.overrideIdentity(mi, module.GlobalIdentityForCatalog(catalogName))
 
 	return mi, nil
+}
+
+// extractEmbeddedModule extracts an embedded catalog module from go:embed to
+// a temporary directory and returns the path. The OS cleans up temp directories
+// on reboot; for short-lived compiler invocations this is acceptable.
+func extractEmbeddedModule(name string) (string, error) {
+	prefix := "resources/modules/" + name
+	entries, err := embeddedModules.ReadDir(prefix)
+	if err != nil {
+		return "", fmt.Errorf("no embedded source for module '%s'", name)
+	}
+
+	tmpDir, err := os.MkdirTemp("", "promise-mod-"+name+"-")
+	if err != nil {
+		return "", err
+	}
+
+	for _, e := range entries {
+		if e.IsDir() {
+			continue // embedded catalog modules are flat (no subdirectories)
+		}
+		data, err := embeddedModules.ReadFile(prefix + "/" + e.Name())
+		if err != nil {
+			return "", fmt.Errorf("reading embedded %s/%s: %w", name, e.Name(), err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, e.Name()), data, 0644); err != nil {
+			return "", err
+		}
+	}
+
+	return tmpDir, nil
 }
 
 // overrideIdentity replaces a module's identity (GlobalIdentity + IRPrefix) and

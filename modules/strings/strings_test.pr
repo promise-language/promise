@@ -1,0 +1,57 @@
+// Test the embedded catalog strings module.
+use strings;
+
+join_basic() `test {
+    string[] parts = ["a", "b", "c"];
+    assert(strings.join(parts, ", ") == "a, b, c", "join basic");
+}
+
+join_empty() `test {
+    string[] empty = [];
+    assert(strings.join(empty, ",") == "", "join empty");
+}
+
+join_single() `test {
+    string[] one = ["hello"];
+    assert(strings.join(one, ",") == "hello", "join single");
+}
+
+reverse_basic() `test {
+    assert(strings.reverse("hello") == "olleh", "reverse basic");
+}
+
+reverse_empty() `test {
+    assert(strings.reverse("") == "", "reverse empty");
+}
+
+reverse_single() `test {
+    assert(strings.reverse("x") == "x", "reverse single");
+}
+
+is_blank_spaces() `test {
+    assert(strings.is_blank("   "), "blank spaces");
+}
+
+is_blank_empty() `test {
+    assert(strings.is_blank(""), "blank empty");
+}
+
+is_blank_tabs_newlines() `test {
+    assert(strings.is_blank("\t\n\r "), "blank tabs newlines");
+}
+
+is_blank_false() `test {
+    assert(!strings.is_blank("hi"), "not blank hi");
+    assert(!strings.is_blank(" x "), "not blank x");
+}
+
+spaces_test() `test {
+    assert(strings.spaces(0) == "", "spaces 0");
+    assert(strings.spaces(3) == "   ", "spaces 3");
+}
+
+repeat_join_test() `test {
+    assert(strings.repeat_join("ab", 3, "-") == "ab-ab-ab", "repeat_join 3");
+    assert(strings.repeat_join("x", 1, ",") == "x", "repeat_join 1");
+    assert(strings.repeat_join("x", 0, ",") == "", "repeat_join 0");
+}

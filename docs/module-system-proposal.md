@@ -66,37 +66,51 @@ The **catalog** is a curated, tested, mono-versioned set of modules that constit
 The catalog manifest (`catalog.toml`) lives in the **compiler repository** alongside the compiler source and standard library. It is embedded into the compiler binary via `go:embed`, just like `std/*.pr`. This means a compiler binary IS an epoch — it contains the compiler, the standard library, and the catalog manifest that pins every community module. Tagged compiler commits are **epochs** — stable release points.
 
 ```
-promise_lang/compiler/
-  resources/
-    catalog.toml            # module registry: names → source repos + commits
-  std/                      # standard library (embedded in binary)
-  internal/                 # compiler source
-  cmd/promise/              # CLI entry point
-  tests/                    # cross-module integration tests
+promise_lang/
+  compiler/
+    cmd/promise/              # CLI entry point
+    internal/                 # compiler source
+  std/                        # standard library (embedded in binary, merged into every compilation)
+  modules/                    # embedded catalog modules (each is a separate module requiring `use`)
+    io/
+      promise.toml
+      io.pr
+    math/
+      promise.toml
+      math.pr
+  catalog.toml                # module registry: names → source repos + commits (or embedded)
+  tests/                      # cross-module integration tests
     integration/
       io_json_test.pr
       http_crypto_test.pr
 ```
 
-The standard library source lives in `std/` and is embedded in the compiler binary. Community modules live in their own repositories and are referenced by URL + commit hash in `catalog.toml`. There is no separate catalog repository — the compiler repo is the single source of truth for what constitutes an epoch.
+The standard library source lives in `std/` and is embedded in the compiler binary — its types and functions are merged into every compilation unit (no `use` required). **Embedded catalog modules** live in `modules/<name>/` in the same repository — they are also embedded in the compiler binary but require explicit `use` to import. Community modules that have matured live in their own repositories and are referenced by URL + commit hash in `catalog.toml`. There is no separate catalog repository — the compiler repo is the single source of truth for what constitutes an epoch.
+
+During early language development, keeping catalog modules in-repo avoids the overhead of coordinating across many repositories. A module can start in `modules/<name>/`, be iterated atomically alongside the compiler and std, and later graduate to its own repository by adding a `url` + `commit` to its catalog entry and removing the `modules/<name>/` directory.
 
 ### 3.2 `catalog.toml`
 
-The catalog manifest maps module names to their source locations and pinned commits:
+The catalog manifest maps module names to their source locations:
 
 ```toml
 [catalog]
 epoch = "2026.3"
 
+# Embedded modules — source lives in modules/<name>/ in the compiler repo.
+# No url or commit needed; embedded in the compiler binary via go:embed.
+[modules.io]
+description = "Console and file I/O"
+
+[modules.math]
+description = "Numeric functions and constants"
+
+# External modules — source lives in a separate git repository.
+# Fetched on first use, cached locally.
 [modules.json]
 url = "https://github.com/promise-lang/json"
 commit = "a1b2c3d"
 description = "JSON parsing and serialization"
-
-[modules.http]
-url = "https://github.com/promise-lang/http"
-commit = "e4f5a6b"
-description = "HTTP client and server"
 
 [modules.crypto]
 url = "git@github.com:promise-lang/crypto.git"
@@ -106,8 +120,9 @@ description = "Cryptographic primitives"
 
 Key properties:
 - **Flat namespace.** Module names are simple identifiers (`json`, `http`, `crypto`). No URLs, no paths, no version numbers in names.
-- **Fetch-ready URLs.** The `url` field stores the full git-fetchable URL including protocol and authentication info (e.g., `https://github.com/...`, `git@github.com:...`, `ssh://git@git.corp.com/...`). This is the URL passed directly to `git clone` — not the normalized canonical form used for identity/deduplication (which strips schemes and suffixes). The catalog entry is the source of truth for *how* to fetch each module.
-- **Pinned commits.** Each module points to an exact commit hash. No ranges, no "latest", no resolution.
+- **Embedded or external.** A catalog entry **without** `url`/`commit` is an **embedded module** — its source lives in `modules/<name>/` in the compiler repo and is compiled into the binary. An entry **with** `url`/`commit` is an **external module** — fetched from git on first use. From the user's perspective, both are just `use name`. This allows modules to start embedded (fast iteration during early development) and graduate to external repos when stable.
+- **Fetch-ready URLs (external only).** The `url` field stores the full git-fetchable URL including protocol and authentication info (e.g., `https://github.com/...`, `git@github.com:...`, `ssh://git@git.corp.com/...`). This is the URL passed directly to `git clone` — not the normalized canonical form used for identity/deduplication (which strips schemes and suffixes). The catalog entry is the source of truth for *how* to fetch each module.
+- **Pinned commits (external only).** Each external module points to an exact commit hash. No ranges, no "latest", no resolution. Embedded modules are versioned implicitly by the compiler commit (they're in the same repo).
 - **Implicit dependencies.** Catalog modules declare dependencies via `use` declarations in their source code, not in catalog.toml. The compiler resolves them transitively at build time. The catalog CI validates that all inter-module dependencies form a DAG (no cycles).
 - **Self-contained.** Catalog modules may only depend on other catalog modules — never on remote or local modules. The catalog is a closed world: every dependency in the graph is tested, versioned, and shipped together. This is enforced at build time (catalog modules with `[require]` entries are rejected) and by the catalog CI pipeline (see Section 8.1).
 
@@ -274,9 +289,13 @@ error: remote module "github.com/someone/parser" has no pin in promise.toml
 
 ### 5.5 Standard Library — Just Part of the Catalog
 
-From the user's perspective, `use io` and `use json` look and work identically — both are catalog modules resolved by the epoch. The only difference is operational: **core modules** ship embedded in the compiler binary and work offline immediately after `promise sync`, while **community modules** are fetched on first use.
+From the user's perspective, `use io` and `use json` look and work identically — both are catalog modules resolved by the epoch. The difference is purely operational:
 
-Core modules (embedded in compiler):
+- **`std/`** — universe types (primitives, Vector, Map, etc.) merged into every compilation unit. No `use` required. Always embedded.
+- **Embedded catalog modules** (`modules/<name>/`) — ship in the compiler binary, work offline. Require explicit `use`. Source lives in the compiler repo.
+- **External catalog modules** — listed in catalog.toml with `url` + `commit`. Fetched from git on first use, cached locally. Same `use` syntax.
+
+Embedded catalog modules (in compiler binary):
 
 ```
 io          — console I/O, file I/O, formatting
@@ -288,7 +307,7 @@ sync        — synchronization primitives beyond channels
 os          — environment, process, signals
 ```
 
-Community catalog modules (fetched on demand):
+External catalog modules (fetched on demand):
 
 ```
 crypto      — cryptographic primitives
@@ -298,7 +317,7 @@ json        — JSON parsing/serialization
 time        — clocks, durations, formatting
 ```
 
-The boundary between core and community is a packaging decision, not a language one. Modules can move between tiers across epochs.
+The boundary between embedded and external is a packaging decision, not a language one. Modules can move between tiers across epochs — an embedded module graduates to external by moving its source to a separate repo and adding `url` + `commit` to its catalog entry.
 
 ### 5.6 Import Summary
 

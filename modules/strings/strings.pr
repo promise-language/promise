@@ -1,0 +1,64 @@
+// strings module — standalone string utility functions.
+// These complement string's built-in methods with operations that work
+// on collections of strings or produce strings from non-string inputs.
+
+/// Joins an array of strings with a separator between each element.
+///   strings.join(["a", "b", "c"], ", ") == "a, b, c"
+join(string[] parts, string sep) string `public {
+    if parts.len == 0 { return ""; }
+    string result = parts[0];
+    int i = 1;
+    while i < parts.len {
+        result = result + sep + parts[i];
+        i = i + 1;
+    }
+    return result;
+}
+
+/// Returns a string of n spaces.
+///   strings.spaces(4) == "    "
+spaces(int n) string `public {
+    return " ".repeat(n);
+}
+
+/// Reverses a string.
+///   strings.reverse("hello") == "olleh"
+reverse(string s) string `public {
+    if s.len <= 1 { return s; }
+    string result = "";
+    int i = s.len - 1;
+    while i >= 0 {
+        result = result + s[i:i + 1];
+        i = i - 1;
+    }
+    return result;
+}
+
+/// Checks if a string contains only whitespace characters (space, tab, newline, carriage return).
+///   strings.is_blank("  \n") == true
+///   strings.is_blank("hi")   == false
+is_blank(string s) bool `public {
+    if s.len == 0 { return true; }
+    int i = 0;
+    while i < s.len {
+        char c = s[i];
+        if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// Repeats a string n times with a separator between each repetition.
+///   strings.repeat_join("ab", 3, "-") == "ab-ab-ab"
+repeat_join(string s, int n, string sep) string `public {
+    if n <= 0 { return ""; }
+    string result = s;
+    int i = 1;
+    while i < n {
+        result = result + sep + s;
+        i = i + 1;
+    }
+    return result;
+}

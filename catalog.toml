@@ -1,2 +1,5 @@
 [catalog]
 epoch = "2026.3"
+
+[modules.strings]
+description = "String utility functions: join, reverse, is_blank, spaces, repeat_join"

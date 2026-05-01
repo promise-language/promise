@@ -869,6 +869,7 @@ Known gaps and improvements deferred from completed stages.
 | ~~Global content-addressable build cache~~ — **Done.** `~/.promise/cache/build/` wired into `compileAndLinkSeparate()`. Two-level dirs, atomic writes, `PROMISE_HOME` override. No local `.promise-build/` cache — global only. | ~~High~~ Resolved |
 | Catalog infrastructure and versioning (Phase 4) | Medium |
 | Std as a regular cacheable module (remove AST-merge special case) | Low |
+| Test file structure redesign (see below) | Medium |
 
 **Module identity — two-layer architecture (implemented):**
 
@@ -908,6 +909,27 @@ Wired into `compileAndLinkSeparate()` in `main.go`: lookup → cache hit skips `
 
 Remaining work:
 - **Garbage collection**: LRU eviction by access time, max size limit, or `promise clean --build-cache` manual purge
+
+**Test file structure redesign (TODO):**
+
+The current test infrastructure has two conflicting conventions that need unification:
+
+1. **File naming**: `promise test dir/...` discovers files by name (`test_*.pr` prefix for standalone tests, `*_test.pr` suffix for module companion tests). This is fragile — Promise identifies tests by `` `test `` annotations, not by filename.
+
+2. **Module test isolation**: `*_test.pr` files in module directories are excluded from module loading (to avoid circular `use` imports), but this means tests run as external consumers and can only test the public API.
+
+**Desired end state:** Tests are recognized solely by the `_test.pr` suffix. The `test_*.pr` prefix convention in `tests/` should be renamed to `*_test.pr` for consistency (e.g., `test_arithmetic.pr` → `arithmetic_test.pr`).
+
+**Open design question — test file module membership:**
+
+Option A: Test files are **external consumers** (current behavior). They `use` the module like any other code. Simple, but can only test public API.
+
+Option B: Test files are **part of the module** when running `promise test`. The test runner merges `_test.pr` files into the module's compilation unit, giving them access to private functions and fields. This is how Go handles `_test.go` files. Benefits:
+- Tests can exercise internal logic without making it `public`
+- No `use <self>` import needed — test functions see module scope directly
+- Module name resolution: for catalog modules, use the catalog name; for local modules, read `promise.toml`
+
+Option B is preferred but requires compiler work: `promise test` must detect when a test file lives in a module directory, load the module source, merge the test file into it, and compile as a single unit.
 
 ### Unscheduled Features
 

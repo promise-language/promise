@@ -8,11 +8,19 @@ import (
 )
 
 // CatalogEntry describes a single module in the catalog.
+// An entry with URL + Commit is an external module (fetched from git).
+// An entry without URL/Commit is an embedded module (source lives in modules/<name>/).
 type CatalogEntry struct {
 	Name        string // module name (the TOML key, e.g., "json")
-	URL         string // fetch-ready git URL (e.g., "https://github.com/promise-lang/json")
-	Commit      string // pinned commit hash
+	URL         string // fetch-ready git URL; empty for embedded modules
+	Commit      string // pinned commit hash; empty for embedded modules
 	Description string // human-readable description
+}
+
+// IsEmbedded returns true if this entry has no URL, meaning the module source
+// lives in the compiler repo (modules/<name>/) and is embedded in the binary.
+func (e *CatalogEntry) IsEmbedded() bool {
+	return e.URL == ""
 }
 
 // Catalog is the parsed representation of the embedded catalog.toml.
@@ -31,10 +39,16 @@ func (c *Catalog) Lookup(name string) *CatalogEntry {
 
 // ParseCatalog parses a catalog.toml from bytes (typically from go:embed).
 //
+// Entries without url/commit are embedded modules (source in modules/<name>/).
+// Entries with url + commit are external modules (fetched from git).
+//
 // Format:
 //
 //	[catalog]
 //	epoch = "2026.3"
+//
+//	[modules.io]
+//	description = "Console and file I/O"
 //
 //	[modules.json]
 //	url = "https://github.com/promise-lang/json"
@@ -111,13 +125,13 @@ func ParseCatalog(data []byte) (*Catalog, error) {
 		return nil, fmt.Errorf("reading catalog.toml: %w", err)
 	}
 
-	// Validate entries
+	// Validate entries: url and commit must be both present (external) or both absent (embedded).
 	for name, entry := range cat.Modules {
-		if entry.URL == "" {
-			return nil, fmt.Errorf("catalog.toml: module '%s' is missing 'url'", name)
+		if entry.URL != "" && entry.Commit == "" {
+			return nil, fmt.Errorf("catalog.toml: module '%s' has 'url' but is missing 'commit'", name)
 		}
-		if entry.Commit == "" {
-			return nil, fmt.Errorf("catalog.toml: module '%s' is missing 'commit'", name)
+		if entry.URL == "" && entry.Commit != "" {
+			return nil, fmt.Errorf("catalog.toml: module '%s' has 'commit' but is missing 'url'", name)
 		}
 	}
 

@@ -335,7 +335,7 @@ This pattern applies to strings (inline character data) and arrays/slices (inlin
 
 ```promise
 type string `intrinsic {
-    int len;    // PlaceInstance (default) → Instance struct
+    get len int `native;    // read-only; stored in Instance struct internally
     // char data[] is compiler-managed inline storage
 }
 ```

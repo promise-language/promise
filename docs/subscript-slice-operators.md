@@ -58,7 +58,7 @@ These follow the same convention as `+`, `-`, `==`, etc. — they are method nam
 
 ```promise
 type slice[T] `native {
-    int len;
+    get len int `native;
 
     // Single-element access
     [](int index) T `native;
@@ -74,7 +74,7 @@ type slice[T] `native {
 }
 
 type string `native {
-    int len;
+    get len int `native;
 
     [](int index) char `native;
     [:](int? start, int? end) string `native;
@@ -84,7 +84,7 @@ type string `native {
 }
 
 type map[K, V] `native {
-    int len;
+    get len int `native;
 
     [](K key) V? `native;
     []=(K key, V value) `native;
@@ -498,7 +498,7 @@ This matches the LLVM layout for `int?`: `{ i1, i64 }` (padded to struct alignme
 
 ```promise
 type slice[T] `native {
-    int len;
+    get len int `native;
 
     [](int index) T `native;
     []=(int index, T value) `native;
@@ -518,7 +518,7 @@ type slice[T] `native {
 
 ```promise
 type string `native {
-    int len;
+    get len int `native;
 
     [](int index) char `native;
     [:](int? start, int? end) string `native;   // s[0:5], s[3:], s[:5], s[:]
@@ -534,7 +534,7 @@ type string `native {
 
 ```promise
 type map[K, V] `native {
-    int len;
+    get len int `native;
 
     [](K key) V? `native;
     []=(K key, V value) `native;

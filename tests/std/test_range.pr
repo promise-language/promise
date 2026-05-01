@@ -1,6 +1,6 @@
 // Test range creation and for-in iteration
 //
-// TODO: test range field access (start, end, inclusive)
+// TODO: test range field access (start, end, inclusive) — blocked on codegen (Range value type mismatch in store)
 test_exclusive_range() `test {
   int sum = 0;
   for i in 0..5 {

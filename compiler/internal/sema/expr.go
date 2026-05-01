@@ -670,13 +670,23 @@ func (c *Checker) checkInstanceConstructorCall(e *ast.CallExpr, inst *types.Inst
 			c.errorf(e.Pos(), "channel constructor expects at most 1 argument, got %d", len(e.Args))
 		}
 		for _, arg := range e.Args {
-			c.checkExpr(arg.Value)
+			argType := c.checkExpr(arg.Value)
+			if argType != nil && !types.AssignableTo(argType, types.TypInt) {
+				c.errorf(arg.Pos(), "cannot assign %s to parameter 'capacity' of type int in constructor for channel", argType)
+			}
 		}
 		return inst
 	}
 	if origin == types.TypVector {
+		// Vector[T]() or Vector[T](capacity: n) — at most 1 arg
+		if len(e.Args) > 1 {
+			c.errorf(e.Pos(), "Vector constructor expects at most 1 argument, got %d", len(e.Args))
+		}
 		for _, arg := range e.Args {
-			c.checkExpr(arg.Value)
+			argType := c.checkExpr(arg.Value)
+			if argType != nil && !types.AssignableTo(argType, types.TypInt) {
+				c.errorf(arg.Pos(), "cannot assign %s to parameter 'capacity' of type int in constructor for Vector", argType)
+			}
 		}
 		return inst
 	}

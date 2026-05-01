@@ -1,9 +1,5 @@
 // Test f64 arithmetic, comparisons, and unary operators
 //
-// TODO: test modulo (%)
-// TODO: test increment/decrement (++/--)
-// TODO: test hash property
-// TODO: test f32 type (separate typed params needed since literals infer as f64)
 test_arithmetic() `test {
   assert(1.0 + 2.0 == 3.0, "1.0 + 2.0 == 3.0");
   assert(5.0 - 3.0 == 2.0, "5.0 - 3.0 == 2.0");
@@ -42,4 +38,50 @@ test_compound_assignment() `test {
   assert(x == 22.0, "*= 2.0");
   x /= 4.0;
   assert(x == 5.5, "/= 4.0");
+}
+
+test_modulo() `test {
+  assert(7.5 % 2.0 == 1.5, "7.5 % 2.0 == 1.5");
+  assert(10.0 % 3.0 == 1.0, "10.0 % 3.0 == 1.0");
+  assert(5.0 % 5.0 == 0.0, "5.0 % 5.0 == 0.0");
+}
+
+test_increment_decrement() `test {
+  f64 x = 1.5;
+  x++;
+  assert(x == 2.5, "f64 x++ == 2.5");
+  x--;
+  assert(x == 1.5, "f64 x-- == 1.5");
+}
+
+// --- Hash ---
+
+test_hash() `test {
+  f64 a = 3.14;
+  f64 b = 3.14;
+  assert(a.hash == b.hash, "same f64 same hash");
+  f64 c = 2.71;
+  assert(a.hash != c.hash, "different f64 different hash");
+  int h = a.hash;
+  assert(h == b.hash, "hash via variable");
+}
+
+// --- f32 ---
+
+f32_double(f32 x) f32 { return x * 2.0; }
+
+test_f32_basic() `test {
+  f32 a = 1.5;
+  assert(f32_double(a) == 3.0, "f32 double");
+  f32 b = 0.0;
+  assert(a > b, "f32 comparison");
+  assert(a != b, "f32 inequality");
+}
+
+test_f32_arithmetic() `test {
+  f32 a = 10.0;
+  f32 b = 3.0;
+  assert(a + b == 13.0, "f32 addition");
+  assert(a - b == 7.0, "f32 subtraction");
+  assert(a / b > 3.3, "f32 division");
 }

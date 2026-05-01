@@ -1,8 +1,8 @@
 // std/vector.pr — Vector[T] type methods
 type Vector[T] `native `public {
-    int len;
+    get len int `native;
 
-    new(int capacity) `native;
+    new(int capacity = 16) `native;
 
     [](int index) T `native;
     []=(int index, T value) `native;

@@ -68,7 +68,7 @@ func init() {
 	b.WriteString("}\n")
 
 	// String (operators + methods)
-	b.WriteString("type string `native `public {\n\tint len;\n")
+	b.WriteString("type string `native `public {\n\tget len int `native;\n")
 	b.WriteString("\t+(string other) string `native;\n")
 	for _, op := range []string{"==", "!=", "<", ">", "<=", ">="} {
 		fmt.Fprintf(&b, "\t%s(string other) bool `native;\n", op)
@@ -120,8 +120,8 @@ func init() {
 	b.WriteString("\tget is_empty bool => this.len == 0;\n}\n")
 
 	// Containers
-	b.WriteString("type Vector[T] `native `public {\n\tint len;\n")
-	b.WriteString("\tnew(int capacity) `native;\n")
+	b.WriteString("type Vector[T] `native `public {\n\tget len int `native;\n")
+	b.WriteString("\tnew(int capacity = 16) `native;\n")
 	b.WriteString("\t[](int index) T `native;\n")
 	b.WriteString("\t[]=(int index, T value) `native;\n")
 	b.WriteString("\t[:](int? start, int? end) T[] {\n")
@@ -7781,10 +7781,29 @@ func TestVectorContainsIntNull(t *testing.T) {
 	assertContains(t, ir, "null)")
 }
 
-// --- Vector capacity constructor ---
+// --- Vector default capacity constructor ---
 
-// TODO: Vector capacity constructor T[](capacity: n) not yet wired through sema.
-// genVectorCapacityConstructor exists in codegen but sema doesn't recognize the syntax yet.
+func TestVectorDefaultCapacity(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v := Vector[int]();
+			v.push(1);
+		}
+	`)
+	// Should call promise_vector_with_capacity with default capacity 16
+	assertContains(t, ir, "call i8* @promise_vector_with_capacity(i64 16,")
+}
+
+func TestVectorExplicitCapacity(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v := Vector[int](64);
+			v.push(1);
+		}
+	`)
+	// Should call promise_vector_with_capacity with explicit capacity 64
+	assertContains(t, ir, "call i8* @promise_vector_with_capacity(i64 64,")
+}
 
 // --- String byte indexing ---
 

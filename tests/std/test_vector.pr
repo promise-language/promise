@@ -1,8 +1,5 @@
 // Test Vector (slice) operations: push, pop, contains, remove, indexing
 //
-// TODO: test slicing nums[start:end]
-// TODO: test slice assignment nums[start:end] = other
-// TODO: test Vector.new(capacity) constructor
 test_literal_and_len() `test {
   int[] nums = [1, 2, 3];
   assert(nums.len == 3, "literal len 3");
@@ -152,4 +149,149 @@ test_compound_index_assign() `test {
   int[] nums = [10, 20, 30];
   nums[0] += 5;
   assert(nums[0] == 15, "compound index assign");
+}
+
+test_default_capacity_constructor() `test {
+  v := Vector[int]();
+  assert(v.len == 0, "empty after default constructor");
+  v.push(1);
+  v.push(2);
+  v.push(3);
+  assert(v.len == 3, "len 3 after pushes");
+  assert(v[0] == 1, "[0] == 1");
+  assert(v[1] == 2, "[1] == 2");
+  assert(v[2] == 3, "[2] == 3");
+}
+
+test_explicit_capacity_positional() `test {
+  v := Vector[int](4);
+  assert(v.len == 0, "empty after explicit capacity");
+  v.push(10);
+  v.push(20);
+  v.push(30);
+  v.push(40);
+  assert(v.len == 4, "len 4 after pushes");
+  assert(v[3] == 40, "[3] == 40");
+}
+
+test_explicit_capacity_named() `test {
+  v := Vector[string](capacity: 8);
+  assert(v.len == 0, "empty after named capacity");
+  v.push("hello");
+  v.push("world");
+  assert(v.len == 2, "len 2 after pushes");
+  assert(v[0] == "hello", "[0] == hello");
+  assert(v[1] == "world", "[1] == world");
+}
+
+test_grow_beyond_default_capacity() `test {
+  v := Vector[int]();
+  // Push 20 items — exceeds default capacity of 16
+  int i = 0;
+  while i < 20 {
+    v.push(i);
+    i = i + 1;
+  }
+  assert(v.len == 20, "len 20 after growing past capacity");
+  assert(v[0] == 0, "[0] == 0");
+  assert(v[19] == 19, "[19] == 19");
+}
+
+test_grow_beyond_explicit_capacity() `test {
+  v := Vector[int](2);
+  // Push 10 items — exceeds explicit capacity of 2
+  int i = 0;
+  while i < 10 {
+    v.push(i * 10);
+    i = i + 1;
+  }
+  assert(v.len == 10, "len 10 after growing");
+  assert(v[0] == 0, "[0] == 0");
+  assert(v[9] == 90, "[9] == 90");
+}
+
+// --- Slicing ---
+
+test_slice_range() `test {
+  int[] nums = [10, 20, 30, 40, 50];
+  int[] sub = nums[1:4];
+  assert(sub.len == 3, "slice [1:4] len 3");
+  assert(sub[0] == 20, "[0] == 20");
+  assert(sub[1] == 30, "[1] == 30");
+  assert(sub[2] == 40, "[2] == 40");
+}
+
+test_slice_from_start() `test {
+  int[] nums = [10, 20, 30, 40, 50];
+  int[] sub = nums[:3];
+  assert(sub.len == 3, "slice [:3] len 3");
+  assert(sub[0] == 10, "[0] == 10");
+  assert(sub[2] == 30, "[2] == 30");
+}
+
+test_slice_to_end() `test {
+  int[] nums = [10, 20, 30, 40, 50];
+  int[] sub = nums[2:];
+  assert(sub.len == 3, "slice [2:] len 3");
+  assert(sub[0] == 30, "[0] == 30");
+  assert(sub[2] == 50, "[2] == 50");
+}
+
+test_slice_full() `test {
+  int[] nums = [10, 20, 30];
+  int[] sub = nums[:];
+  assert(sub.len == 3, "slice [:] len 3");
+  assert(sub[0] == 10, "[0] == 10");
+  assert(sub[2] == 30, "[2] == 30");
+}
+
+test_slice_empty_range() `test {
+  int[] nums = [10, 20, 30];
+  int[] sub = nums[2:2];
+  assert(sub.len == 0, "slice [2:2] empty");
+}
+
+test_slice_single() `test {
+  int[] nums = [10, 20, 30];
+  int[] sub = nums[1:2];
+  assert(sub.len == 1, "slice [1:2] len 1");
+  assert(sub[0] == 20, "[0] == 20");
+}
+
+test_slice_is_copy() `test {
+  int[] nums = [10, 20, 30];
+  int[] sub = nums[0:2];
+  sub[0] = 99;
+  assert(nums[0] == 10, "original unchanged");
+  assert(sub[0] == 99, "copy modified");
+}
+
+// --- Slice assignment ---
+
+test_slice_assign() `test {
+  int[] nums = [10, 20, 30, 40, 50];
+  nums[1:4] = [200, 300, 400];
+  assert(nums[0] == 10, "[0] unchanged");
+  assert(nums[1] == 200, "[1] == 200");
+  assert(nums[2] == 300, "[2] == 300");
+  assert(nums[3] == 400, "[3] == 400");
+  assert(nums[4] == 50, "[4] unchanged");
+}
+
+test_slice_assign_from_start() `test {
+  int[] nums = [10, 20, 30];
+  nums[:2] = [100, 200];
+  assert(nums[0] == 100, "[0] == 100");
+  assert(nums[1] == 200, "[1] == 200");
+  assert(nums[2] == 30, "[2] unchanged");
+}
+
+test_slice_assign_partial() `test {
+  // Assigning fewer values than range — only overwrites what's provided
+  int[] nums = [10, 20, 30, 40, 50];
+  nums[1:4] = [200];
+  assert(nums[0] == 10, "[0] unchanged");
+  assert(nums[1] == 200, "[1] == 200");
+  assert(nums[2] == 30, "[2] unchanged (not enough values)");
+  assert(nums[3] == 40, "[3] unchanged");
 }

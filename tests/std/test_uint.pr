@@ -1,8 +1,6 @@
 // Test uint arithmetic, comparisons, bitwise, and unary operators
 //
-// TODO: test hash property
-// TODO: test range operators (.., ..=) on uint values
-// TODO: add tests for fixed-width unsigned types (u8, u16, u32, u64)
+// TODO: test range operators (.., ..=) on uint values — blocked: for-in yields int, not uint
 test_addition() `test {
   uint a = 1 + 2;
   assert(a == 3, "1 + 2 == 3");
@@ -162,4 +160,48 @@ test_bitwise_precedence() `test {
   assert(b == 1, "(3 & 1) == 1");
   // Bitwise ops are same precedence, left-to-right
   assert((5 | 3) & 6 == 6, "(5|3) & 6 == 6");
+}
+
+// --- Hash ---
+
+test_hash() `test {
+  uint a = 42;
+  uint b = 42;
+  assert(a.hash == b.hash, "same uint same hash");
+  uint c = 99;
+  assert(a.hash != c.hash, "different uint different hash");
+  int h = a.hash;
+  assert(h == b.hash, "hash via variable");
+}
+
+// --- Fixed-width unsigned types ---
+
+test_u8() `test {
+  u8 a = 255;
+  u8 b = 0;
+  assert(a > b, "u8 255 > 0");
+  u8 c = 100;
+  u8 d = 50;
+  assert(c + d == 150, "u8 100 + 50 == 150");
+}
+
+test_u16() `test {
+  u16 a = 1000;
+  u16 b = 500;
+  assert(a - b == 500, "u16 1000 - 500");
+  assert(a > b, "u16 1000 > 500");
+}
+
+test_u32() `test {
+  u32 a = 100000;
+  u32 b = 100000;
+  assert(a == b, "u32 equality");
+  assert(a * 2 == 200000, "u32 multiplication");
+}
+
+test_u64() `test {
+  u64 a = 999999;
+  u64 b = 1;
+  assert(a + b == 1000000, "u64 large addition");
+  assert(a > b, "u64 comparison");
 }

@@ -1,7 +1,6 @@
 // Test map[K, V] operations: insert, lookup, contains, remove, keys, values
 //
-// TODO: test clear() method
-// TODO: test for-in iteration over map entries
+// TODO: test for-in iteration over map entries — blocked on codegen (tuple type crash)
 test_literal_and_lookup() `test {
   map[string, int] m = {"a": 1, "b": 2, "c": 3};
   assert(m.len == 3, "literal len 3");
@@ -90,5 +89,20 @@ test_int_keys() `test {
   assert(m.len == 2, "int key map len 2");
   if val := m[1] {
     assert(val == "one", "m[1] == one");
+  }
+}
+
+test_clear() `test {
+  map[string, int] m = {"a": 1, "b": 2, "c": 3};
+  assert(m.len == 3, "before clear len 3");
+  m.clear();
+  assert(m.len == 0, "after clear len 0");
+  assert(m.is_empty, "after clear is_empty");
+  assert(!m.contains("a"), "a not contained after clear");
+  // Can insert after clear
+  m["x"] = 99;
+  assert(m.len == 1, "after re-insert len 1");
+  if val := m["x"] {
+    assert(val == 99, "m[x] == 99 after clear+insert");
   }
 }

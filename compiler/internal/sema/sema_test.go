@@ -68,7 +68,7 @@ func init() {
 	b.WriteString("}\n")
 
 	// String (operators + methods)
-	b.WriteString("type string `native `public {\n\tint len;\n")
+	b.WriteString("type string `native `public {\n\tget len int `native;\n")
 	b.WriteString("\t+(string other) string `native;\n")
 	for _, op := range []string{"==", "!=", "<", ">", "<=", ">="} {
 		fmt.Fprintf(&b, "\t%s(string other) bool `native;\n", op)
@@ -120,8 +120,8 @@ func init() {
 	b.WriteString("\tget is_empty bool => this.len == 0;\n}\n")
 
 	// Containers
-	b.WriteString("type Vector[T] `native `public {\n\tint len;\n")
-	b.WriteString("\tnew(int capacity) `native;\n")
+	b.WriteString("type Vector[T] `native `public {\n\tget len int `native;\n")
+	b.WriteString("\tnew(int capacity = 16) `native;\n")
 	b.WriteString("\t[](int index) T `native;\n")
 	b.WriteString("\t[]=(int index, T value) `native;\n")
 	b.WriteString("\t[:](int? start, int? end) T[] {\n")
@@ -5065,7 +5065,7 @@ func TestNativeTypeStringMethod(t *testing.T) {
 	// Getter on a native type (string) with a Promise body
 	_, errs := checkSourceWithStd(t,
 		`type string `+"`"+`native {
-			int len;
+			get len int `+"`"+`native;
 			get is_empty bool {
 				return this.len == 0;
 			}
@@ -5103,7 +5103,7 @@ func TestNativeTypeMissingReturnDetected(t *testing.T) {
 	// Missing return in a getter on native type should be caught
 	_, errs := checkSourceWithStd(t,
 		`type string `+"`"+`native {
-			int len;
+			get len int `+"`"+`native;
 			get is_empty bool {}
 		}`,
 		`main() {}`,
@@ -6096,6 +6096,109 @@ func TestChannelConstructorTooManyArgs(t *testing.T) {
 		}
 	`)
 	expectError(t, errs, "expects")
+}
+
+func TestChannelConstructorWrongType(t *testing.T) {
+	errs := checkErrsWithStd(t, channelStd, `
+		test() {
+			ch := channel[int]("hello");
+		}
+	`)
+	expectError(t, errs, "cannot assign string to parameter 'capacity'")
+}
+
+func TestVectorConstructorNoArgs(t *testing.T) {
+	checkOK(t, `
+		test() {
+			v := Vector[int]();
+			v.push(1);
+		}
+	`)
+}
+
+func TestVectorConstructorWithCapacity(t *testing.T) {
+	checkOK(t, `
+		test() {
+			v := Vector[int](32);
+			v.push(1);
+		}
+	`)
+}
+
+func TestVectorConstructorWrongType(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			v := Vector[int]("hello");
+		}
+	`)
+	expectError(t, errs, "cannot assign string to parameter 'capacity'")
+}
+
+func TestVectorConstructorTooManyArgs(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			v := Vector[int](16, 32);
+		}
+	`)
+	expectError(t, errs, "expects at most 1 argument")
+}
+
+func TestVectorLenReadOnly(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			v := Vector[int]();
+			v.len = 0;
+		}
+	`)
+	expectError(t, errs, "has no setter")
+}
+
+func TestStringLenReadOnly(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			s := "hello";
+			s.len = 0;
+		}
+	`)
+	expectError(t, errs, "has no setter")
+}
+
+func TestVectorConstructorNamedArg(t *testing.T) {
+	checkOK(t, `
+		test() {
+			v := Vector[int](capacity: 32);
+			v.push(1);
+		}
+	`)
+}
+
+func TestVectorConstructorBoolCapacity(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			v := Vector[int](true);
+		}
+	`)
+	expectError(t, errs, "cannot assign bool to parameter 'capacity'")
+}
+
+func TestVectorLenCompoundAssignReadOnly(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			v := Vector[int]();
+			v.len += 1;
+		}
+	`)
+	expectError(t, errs, "has no setter")
+}
+
+func TestStringLenCompoundAssignReadOnly(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			s := "hello";
+			s.len += 1;
+		}
+	`)
+	expectError(t, errs, "has no setter")
 }
 
 func TestTaskReceiveReturnsBareType(t *testing.T) {

@@ -1,6 +1,6 @@
 // std/string.pr — String type with operators and methods
 type string `native `public {
-    int len;
+    get len int `native;
 
     +(string other) string `native;
     ==(string other) bool `native;

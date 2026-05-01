@@ -385,8 +385,8 @@ Documenting `std/*.pr` with `doc()` is the **highest-impact item** in this propo
 
 ### Priority Order
 
-1. **`string.pr`** — `len`, operators (`+`, `==`, `<`), `contains`, `starts_with`, `ends_with`, `index_of`, `trim`, `split`, subscript `[]`, slice `[:]`, getters (`hash`, `is_empty`)
-2. **`vector.pr`** — `len`, `new(capacity)`, `push`, `pop`, `contains`, `remove`, subscript `[]`/`[]=`, slice `[:]`/`[:]=`, getter `is_empty`
+1. **`string.pr`** — `len` (getter), operators (`+`, `==`, `<`), `contains`, `starts_with`, `ends_with`, `index_of`, `trim`, `split`, subscript `[]`, slice `[:]`, getters (`hash`, `is_empty`)
+2. **`vector.pr`** — `len` (getter), `new(capacity = 16)`, `push`, `pop`, `contains`, `remove`, subscript `[]`/`[]=`, slice `[:]`/`[:]=`, getter `is_empty`
 3. **`map.pr`** — `new()`, subscript `[]`/`[]=`, `contains`, `remove`, `keys`, `values`, `clear`, getters (`len`, `is_empty`); also the internal `Slot[K,V]` enum
 4. **`error.pr`** — `string message` field, inheritance pattern for custom errors
 5. **`channel.pr`** — `new(capacity)`, `send`, `close`, receive via `<-` operator
@@ -400,9 +400,9 @@ Documenting `std/*.pr` with `doc()` is the **highest-impact item** in this propo
     ### Vector[T]
 
         type Vector[T] {
-            int len
+            get len int
 
-            new(int capacity)
+            new(int capacity = 16)
             push(T elem)
             pop() T?
             contains(T elem) bool
@@ -417,7 +417,7 @@ Documenting `std/*.pr` with `doc()` is the **highest-impact item** in this propo
 
     #### Vector.new
 
-        new(int capacity)
+        new(int capacity = 16)
 
     #### Vector.push
 

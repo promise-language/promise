@@ -1,8 +1,6 @@
 // Test string operations: concat, equality, methods
 //
 // TODO: test comparisons (<, >, <=, >=) — blocked on codegen (string operator "<" not yet implemented)
-// TODO: test slicing s[start:end] — blocked on codegen
-// TODO: test hash property
 test_concat() `test {
   assert("hello" + " " + "world" == "hello world", "string concat");
   assert("" + "a" == "a", "empty + a");
@@ -127,4 +125,70 @@ test_interpolation() `test {
   string name = "world";
   assert("hello {name}" == "hello world", "string interpolation");
   assert("{1 + 2}" == "3", "expr interpolation");
+}
+
+// --- Slicing ---
+
+test_slice_range() `test {
+  assert("hello world"[0:5] == "hello", "slice [0:5]");
+  assert("hello world"[6:11] == "world", "slice [6:11]");
+  assert("abcdef"[2:4] == "cd", "slice [2:4]");
+}
+
+test_slice_from_start() `test {
+  assert("hello"[:3] == "hel", "slice [:3]");
+  assert("hello"[:0] == "", "slice [:0] empty");
+  assert("hello"[:5] == "hello", "slice [:5] full");
+}
+
+test_slice_to_end() `test {
+  assert("hello"[3:] == "lo", "slice [3:]");
+  assert("hello"[0:] == "hello", "slice [0:] full");
+  assert("hello"[5:] == "", "slice [5:] empty");
+}
+
+test_slice_full() `test {
+  assert("hello"[:] == "hello", "slice [:] full copy");
+  assert(""[:] == "", "slice [:] empty string");
+}
+
+test_slice_empty() `test {
+  assert("hello"[2:2] == "", "slice [2:2] empty");
+  assert("hello"[0:0] == "", "slice [0:0] empty");
+}
+
+test_slice_single_char() `test {
+  assert("hello"[1:2] == "e", "slice [1:2] single char");
+}
+
+test_slice_variable() `test {
+  string s = "hello world";
+  int start = 6;
+  string sub = s[start:];
+  assert(sub == "world", "slice with variable start");
+}
+
+// --- Hash ---
+
+test_hash_consistent() `test {
+  assert("hello".hash == "hello".hash, "same string same hash");
+  assert("world".hash == "world".hash, "world hash consistent");
+  assert("".hash == "".hash, "empty hash consistent");
+}
+
+test_hash_different() `test {
+  assert("hello".hash != "world".hash, "different strings different hash");
+  assert("abc".hash != "xyz".hash, "abc != xyz hash");
+  assert("".hash != "hello".hash, "empty != hello hash");
+}
+
+test_hash_variable() `test {
+  string s = "hello";
+  int h = s.hash;
+  assert(h == "hello".hash, "variable hash matches literal hash");
+}
+
+test_hash_type() `test {
+  int h = "test".hash;
+  assert(h == h, "hash is int");
 }

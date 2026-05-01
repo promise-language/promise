@@ -1392,12 +1392,15 @@ func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 	panic(fmt.Sprintf("codegen: member %s on type %s is not a field (method references not yet supported)", e.Field, named))
 }
 
-// genVectorCapacityConstructor generates a Vector with pre-allocated capacity: T[](capacity: n).
+// genVectorCapacityConstructor generates a Vector with pre-allocated capacity: T[](capacity: n) or T[]().
 func (c *Compiler) genVectorCapacityConstructor(e *ast.CallExpr, inst *types.Instance) value.Value {
-	if len(e.Args) != 1 {
-		panic(fmt.Sprintf("codegen: Vector capacity constructor expects 1 argument, got %d", len(e.Args)))
+	// capacity defaults to 16 when no argument provided
+	var capacity value.Value
+	if len(e.Args) > 0 {
+		capacity = c.genExpr(e.Args[0].Value)
+	} else {
+		capacity = constant.NewInt(irtypes.I64, 16)
 	}
-	capacity := c.genExpr(e.Args[0].Value)
 
 	// Determine element size
 	elemType := inst.TypeArgs()[0]

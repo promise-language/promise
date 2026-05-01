@@ -1,7 +1,6 @@
 // Test char equality and comparisons
 //
-// TODO: test char range operators (.., ..=) and for-in over char ranges
-// TODO: test hash property
+// TODO: test char range operators (.., ..=) and for-in over char ranges — blocked on codegen (i32 vs i64 mismatch in genRange)
 test_equality() `test {
   assert('a' == 'a', "'a' == 'a'");
   assert(!('a' == 'b'), "!('a' == 'b')");
@@ -23,4 +22,14 @@ test_escape_chars() `test {
   assert('\\' == '\\', "backslash == backslash");
   assert('\'' == '\'', "quote == quote");
   assert('\0' != 'a', "null != a");
+}
+
+// --- Hash ---
+
+test_hash() `test {
+  assert('a'.hash == 'a'.hash, "char hash consistent");
+  assert('a'.hash != 'b'.hash, "different chars different hash");
+  assert('z'.hash != 'A'.hash, "z != A hash");
+  int h = 'x'.hash;
+  assert(h == 'x'.hash, "hash via variable");
 }

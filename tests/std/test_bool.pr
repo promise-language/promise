@@ -1,6 +1,5 @@
 // Test bool logical operators and equality
 //
-// TODO: test hash property
 test_and() `test {
   assert(true && true, "true && true");
   assert(!(true && false), "!(true && false)");
@@ -43,4 +42,14 @@ test_short_circuit() `test {
     hit = true;
   }
   assert(hit, "true || _ short-circuits to true");
+}
+
+// --- Hash ---
+
+test_hash() `test {
+  assert(true.hash == true.hash, "true hash consistent");
+  assert(false.hash == false.hash, "false hash consistent");
+  assert(true.hash != false.hash, "true != false hash");
+  int h = true.hash;
+  assert(h == true.hash, "hash via variable");
 }

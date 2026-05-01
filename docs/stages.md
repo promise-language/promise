@@ -397,7 +397,7 @@ Codegen for char literals, `.len` property on all containers (string, slice, arr
 **Files:** Updates to `codegen/expr.go`, `codegen/stmt.go`, `codegen/compiler.go`, `codegen/types.go`, `codegen/native.go`, `sema/expr.go`, `sema/stmt.go`, `runtime/runtime_string.c`, `types/container.go`; 25 new tests (19 codegen → 227 total, 6 sema → 214 total)
 
 - **Char literals**: `genCharLit` parses raw text including escape sequences (`\n`, `\t`, `\r`, `\b`, `\\`, `\'`, `\0`), returns i32 constant. `CatChar` classification added to `types.go` with signed i32 comparisons in `native.go`.
-- **Container `.len` property**: Uniform property access across all container types — `arr.len`, `m.len`, `s.len`. Slice/array reads i64 from heap header (GEP index 0). Map calls `promise_map_len`. String reads i64 from instance struct (GEP index 1). Sema extended with `Slice`/`Array`/`Map` cases in `checkMemberExpr` and `TypString` special case in Named handler.
+- **Container `.len` property**: Uniform read-only getter across all container types — `arr.len`, `m.len`, `s.len`. Slice/array reads i64 from heap header (GEP index 0). Map calls `promise_map_len`. String reads i64 from instance struct (GEP index 1). Sema extended with `Slice`/`Array`/`Map` cases in `checkMemberExpr` and `TypString` special case in Named handler. Both `string.len` and `Vector.len` are declared as `get len int` (read-only getter, no setter).
 - **For-in over strings**: `genForInString` iterates UTF-8 codepoints via `promise_string_next_char` runtime function. Byte position tracked in i64 alloca, -1 sentinel for end. Index variable (`for i, ch in s`) supported with separate counter.
 - **Map compound assignment**: `genMapCompoundAssign` gets current value via `promise_map_get`, NULL-checks with panic on missing key, applies operator, stores back via `promise_map_set`. Sema fix unwraps Optional for operator lookup on map value type.
 - **Char interpolation**: `convertToString` extended with `TypChar` case calling `promise_char_to_string` (UTF-8 encode).
@@ -430,9 +430,9 @@ Promoted `slice[T]` and `map[K,V]` from structural placeholder types (`*types.Sl
 - Deleted `case *Slice:` and `case *Map:` from `equal.go` and `subst.go`
 
 **Native Methods Registered in `builtins.go`:**
-- **slice[T]**: `len` field, `push(T)`, `pop() → T?`, `contains(T) → bool`, `remove(int)`
-- **map[K,V]**: `len` field, `contains(K) → bool`, `remove(K) → bool`, `keys() → K[]`, `values() → V[]`
-- **string**: `len` field, `contains(string) → bool`, `starts_with(string) → bool`, `ends_with(string) → bool`, `index_of(string) → int?`, `trim() → string`, `split(string) → string[]`
+- **slice[T]**: `get len` getter, `new(int capacity = 16)`, `push(T)`, `pop() → T?`, `contains(T) → bool`, `remove(int)`
+- **map[K,V]**: `get len` getter, `contains(K) → bool`, `remove(K) → bool`, `keys() → K[]`, `values() → V[]`
+- **string**: `get len` getter, `contains(string) → bool`, `starts_with(string) → bool`, `ends_with(string) → bool`, `index_of(string) → int?`, `trim() → string`, `split(string) → string[]`
 
 **Runtime:**
 - New `runtime_slice.c`: push (with realloc growth), pop, contains, remove
@@ -811,6 +811,11 @@ Known gaps and improvements deferred from completed stages.
 | Stored generator values (first-class generator variables outside for-in) | Generators | Low |
 | Generator closures (capturing lambdas as generators) | Generators | Low |
 | Devirtualization optimization (direct call when concrete type known) | 8L | Low |
+| String comparison operators (`<`, `>`, `<=`, `>=`) — codegen panics with "string operator '<' not yet implemented" | 8b | Medium |
+| Range value type variable binding — `r := 1..5` panics in codegen (store type mismatch: `{ i64, i64, i1 }` vs `{ i8*, i8* }*`) | 8g | Medium |
+| Char range iteration — `for c in 'a'..'z'` panics in codegen (i32 vs i64 mismatch in `genRange`) | 8g | Medium |
+| Uint range iteration — `for i in a..b` (uint bounds) yields `int`, not `uint`, causing type errors in loop body | 8g | Low |
+| Map for-in tuple handling — `for entry in map` panics in codegen (cannot convert tuple type `(K, V)` to string for interpolation; also affects tuple variable binding) | 8g | Medium |
 | ~~`map[bool, T]` — bool key hashing/lookup is broken~~ — **Fixed.** Bool hash now uses hardcoded constants via `select i1` instead of `fnv1a_hash`. Map literal key types are validated against `Hashable + Equal` constraints via `validateConstraints`. | 8i | ~~Medium~~ Resolved |
 | ~~Variable name collisions in repeated `if v := opt { }` blocks~~ — **Fixed.** `uniqueLocalName()` with per-function `localNameCount` appends `.N` suffix to duplicate alloca names in inner scopes. | 8n | ~~Medium~~ Resolved |
 
@@ -847,4 +852,5 @@ Known gaps and improvements deferred from completed stages.
 
 | Item |
 |------|
-| String slicing, Unicode normalization |
+| ~~String slicing~~ — **Done.** `string[:]` operator implemented in `std/string.pr` and codegen. Tested in `tests/std/test_string.pr` (7 slice tests). |
+| Unicode normalization |

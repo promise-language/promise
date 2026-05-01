@@ -912,26 +912,20 @@ Wired into `compileAndLinkSeparate()` in `main.go`: lookup → cache hit skips `
 Remaining work:
 - **Garbage collection**: LRU eviction by access time, max size limit, or `promise clean --build-cache` manual purge
 
-**Test file structure redesign (TODO):**
+**Module-internal test files (implemented — Option B):**
 
-The current test infrastructure has two conflicting conventions that need unification:
+`*_test.pr` files in module directories are compiled as **part of the module** during `promise test` (Go-style `_test.go` pattern). All module source files (including all `_test.pr` files) are merged into a single compilation unit, giving test functions access to private declarations without needing `use <self>`.
 
-1. **File naming**: `promise test dir/...` discovers files by name (`test_*.pr` prefix for standalone tests, `*_test.pr` suffix for module companion tests). This is fragile — Promise identifies tests by `` `test `` annotations, not by filename.
+**Files:** `cmd/promise/main.go` (`isModuleTestFile`, `compileModuleTestFrontend`, `runModuleTestFile`), `internal/module/cache.go` (`CollectModuleSources`, `HashModuleSources` with `includeTests` param, `SaveTestBinaryCache`/`LookupTestBinaryCache`), `cmd/promise/stress.go` (module test dispatch)
 
-2. **Module test isolation**: `*_test.pr` files in module directories are excluded from module loading (to avoid circular `use` imports), but this means tests run as external consumers and can only test the public API.
+- **Detection**: `isModuleTestFile()` walks up the directory tree to find the nearest `promise.toml`, identifying module test files. Non-module `_test.pr` files (e.g., in `tests/`) use existing `compileFrontend` unchanged.
+- **Compilation**: `compileModuleTestFrontend(modDir)` collects all `.pr` files (impl + tests) via `CollectModuleSources(modDir, true)`, which walks subdirectories recursively and excludes nested modules (subdirs with their own `promise.toml`). All files are merged into a single AST, then sema + ownership run on the combined unit.
+- **Self-import detection**: If a test file contains `use <moduleName>;`, a clear error is emitted.
+- **Test binary caching**: Compiled test binaries are cached in the build cache (`~/.promise/cache/build/`). Cache key = `BuildCacheKey(HashModuleSources(modDir, true), compiler, target, nil)`. Second runs skip compilation entirely.
+- **Multi-file dedup**: `runTestFiles` and `compileTargets` (stress mode) track which modules have already been tested, avoiding duplicate results when multiple `_test.pr` files from the same module are discovered.
+- **File discovery**: `discoverTestFiles()` uses `isInModuleTree()` to correctly handle test files in subdirectories of module roots.
 
-**Desired end state:** Tests are recognized solely by the `_test.pr` suffix. The `test_*.pr` prefix convention in `tests/` should be renamed to `*_test.pr` for consistency (e.g., `test_arithmetic.pr` → `arithmetic_test.pr`).
-
-**Open design question — test file module membership:**
-
-Option A: Test files are **external consumers** (current behavior). They `use` the module like any other code. Simple, but can only test public API.
-
-Option B: Test files are **part of the module** when running `promise test`. The test runner merges `_test.pr` files into the module's compilation unit, giving them access to private functions and fields. This is how Go handles `_test.go` files. Benefits:
-- Tests can exercise internal logic without making it `public`
-- No `use <self>` import needed — test functions see module scope directly
-- Module name resolution: for catalog modules, use the catalog name; for local modules, read `promise.toml`
-
-Option B is preferred but requires compiler work: `promise test` must detect when a test file lives in a module directory, load the module source, merge the test file into it, and compile as a single unit.
+**Remaining TODO — file naming**: The `test_*.pr` prefix convention in `tests/` should be renamed to `*_test.pr` for consistency (e.g., `test_arithmetic.pr` → `arithmetic_test.pr`).
 
 ### Unscheduled Features
 

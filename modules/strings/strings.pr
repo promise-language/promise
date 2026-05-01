@@ -18,14 +18,17 @@ spaces(int n) string `public `doc("Returns a string of `n` spaces.") {
 }
 
 reverse(string s) string `public `doc("Reverses a string byte-by-byte.") {
-    if s.len <= 1 { return s; }
-    string result = "";
-    int i = s.len - 1;
-    while i >= 0 {
-        result = result + s[i:i + 1];
-        i = i - 1;
+    if s.len <= 1 {
+        return s;
+    } else {
+        string result = "";
+        int i = s.len - 1;
+        while i >= 0 {
+            result = result + s[i:i + 1];
+            i = i - 1;
+        }
+        return result;
     }
-    return result;
 }
 
 is_blank(string s) bool `public `doc("Returns true if the string is empty or contains only whitespace (space, tab, newline, carriage return).") {
@@ -42,12 +45,18 @@ is_blank(string s) bool `public `doc("Returns true if the string is empty or con
 }
 
 repeat_join(string s, int n, string sep) string `public `doc("Repeats a string `n` times with a separator between each repetition.") {
-    if n <= 0 { return ""; }
-    string result = s;
-    int i = 1;
-    while i < n {
-        result = result + sep + s;
-        i = i + 1;
+    if n <= 0 {
+        return "";
+    } else {
+        string result = "";
+        int i = 0;
+        while i < n {
+            if i > 0 {
+                result = result + sep;
+            }
+            result = result + s;
+            i = i + 1;
+        }
+        return result;
     }
-    return result;
 }

@@ -14,7 +14,9 @@ import (
 	"strings"
 	"time"
 
+	"djabi.dev/go/promise_lang/internal/ast"
 	"djabi.dev/go/promise_lang/internal/codegen"
+	"djabi.dev/go/promise_lang/internal/sema"
 )
 
 // --- Stress test types ---
@@ -164,6 +166,9 @@ func compileTargets(files []string, baseDir string, targetTriple string) (target
 		target = codegen.HostTargetTriple()
 	}
 
+	// Dedup module test files by module directory.
+	moduleTestSeen := map[string]bool{}
+
 	for _, f := range files {
 		relPath := f
 		if baseDir != "" {
@@ -172,7 +177,17 @@ func compileTargets(files []string, baseDir string, targetTriple string) (target
 			}
 		}
 
-		file, info := compileFrontend(f)
+		var file *ast.File
+		var info *sema.Info
+		if modDir := isModuleTestFile(f); modDir != "" {
+			if moduleTestSeen[modDir] {
+				continue
+			}
+			moduleTestSeen[modDir] = true
+			file, info = compileModuleTestFrontend(modDir)
+		} else {
+			file, info = compileFrontend(f)
+		}
 
 		// Create temp binary
 		ext := ""

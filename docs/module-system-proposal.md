@@ -75,14 +75,15 @@ promise_lang/
     io/
       promise.toml
       io.pr
+      io_test.pr              # module-internal tests (compiled as part of io during `promise test`)
     math/
       promise.toml
       math.pr
+      math_test.pr
   catalog.toml                # module registry: names → source repos + commits (or embedded)
   tests/                      # cross-module integration tests
-    integration/
-      io_json_test.pr
-      http_crypto_test.pr
+    io_json_test.pr
+    http_crypto_test.pr
 ```
 
 The standard library source lives in `std/` and is embedded in the compiler binary — its types and functions are merged into every compilation unit (no `use` required). **Embedded catalog modules** live in `modules/<name>/` in the same repository — they are also embedded in the compiler binary but require explicit `use` to import. Community modules that have matured live in their own repositories and are referenced by URL + commit hash in `catalog.toml`. There is no separate catalog repository — the compiler repo is the single source of truth for what constitutes an epoch.
@@ -436,10 +437,10 @@ myapp/
   promise.toml          # [module] name = "myapp", epoch = "2026.3"
   main.pr               # entry point
   helpers.pr            # source file
+  helpers_test.pr       # test file (compiled as part of module during `promise test`)
   models/
     user.pr             # organizational subdirectory (part of myapp)
-  tests/
-    test_main.pr        # test files
+    user_test.pr        # test file in subdirectory (also part of module)
 ```
 
 Sub-directories with their own `promise.toml` are separate modules, excluded from the parent:
@@ -485,7 +486,19 @@ _next_id() int {            // private function — not exported
 - **Module level**: top-level declarations (types, enums, functions) need `` `public `` to be exported. This makes a module's API surface immediately obvious.
 - **Member level**: members of a public type are public by default. The `_` prefix convention marks members as private. This avoids the verbosity of annotating every method/field while keeping the convention lightweight and visible.
 
-**Test files can access private declarations.** Test files (matching `test_*.pr` or `*_test.pr` conventions) within a module are part of that module's compilation unit. They can access all declarations — public and private — because they're inside the module boundary. Only code in OTHER modules is restricted to `` `public `` declarations. This is the same approach Go uses (`_test.go` files are in the same package).
+**Test files are part of the module.** Files matching `*_test.pr` within a module directory (or its subdirectories, excluding nested modules) are compiled as part of the module's compilation unit during `promise test`. They can access all declarations — public and private — without needing `use <self>`. This is the same approach Go uses (`_test.go` files are in the same package).
+
+All `*_test.pr` files in a module compile together into a single test binary (not one binary per file). Test functions use the `` `test `` annotation. Compiled test binaries are cached in the build cache — re-running unchanged tests skips compilation entirely.
+
+```promise
+// math_test.pr — inside the math module directory
+lerp_test() `test {
+    // Direct access to module-private function — no `use math;` needed
+    assert(lerp(0.0, 10.0, 0.5) == 5.0);
+}
+```
+
+Self-importing (`use <own-module-name>;` inside a test file) is a compile error with a helpful message directing the user to remove the import.
 
 **Import alias collisions.** All import aliases must be unique within a file. If a catalog module name collides with a sourced import alias, the compiler reports an error:
 
@@ -1243,26 +1256,27 @@ write(Row[] rows) string `public {
 ```
 
 ```promise
-// tests/test_csv.pr
-use csv   // test files within the module access it by name
+// csv_test.pr — module-internal test file
+// No `use csv;` needed — test files are part of the module's compilation unit.
+// All private declarations (types, functions, fields) are accessible.
 
-test parse_simple() {
-    rows := csv.parse("a,b,c\n1,2,3")
-    assert(rows.length == 2)
-    assert(rows[1].get(0) == "1")
+parse_simple() `test {
+    rows := parse("a,b,c\n1,2,3");
+    assert(rows.length == 2);
+    assert(rows[1].get(0) == "1");
 }
 
-test roundtrip() {
-    input := "name,age\nAlice,30\nBob,25"
-    rows := csv.parse(input)
-    output := csv.write(rows)
-    assert(output == input)
+roundtrip() `test {
+    input := "name,age\nAlice,30\nBob,25";
+    rows := parse(input);
+    output := write(rows);
+    assert(output == input);
 }
 ```
 
 ```bash
-# Test locally
-promise test tests/
+# Test locally — all *_test.pr files in the module compile together
+promise test csv_test.pr
 
 # The module can use catalog modules (json, io, etc.)
 # but cannot have [require] entries if it aims for catalog inclusion

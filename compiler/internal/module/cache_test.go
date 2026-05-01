@@ -13,7 +13,7 @@ func TestHashModuleSources(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "a.pr"), []byte("func a() {}"), 0644)
 	os.WriteFile(filepath.Join(dir, "b.pr"), []byte("func b() {}"), 0644)
 
-	h1, err := HashModuleSources(dir)
+	h1, err := HashModuleSources(dir, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,7 +22,7 @@ func TestHashModuleSources(t *testing.T) {
 	}
 
 	// Same content should produce same hash
-	h2, err := HashModuleSources(dir)
+	h2, err := HashModuleSources(dir, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +32,7 @@ func TestHashModuleSources(t *testing.T) {
 
 	// Changing a file should change the hash
 	os.WriteFile(filepath.Join(dir, "b.pr"), []byte("func b_changed() {}"), 0644)
-	h3, err := HashModuleSources(dir)
+	h3, err := HashModuleSources(dir, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,14 +45,14 @@ func TestHashModuleSourcesIgnoresNonPr(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "a.pr"), []byte("func a() {}"), 0644)
 
-	h1, err := HashModuleSources(dir)
+	h1, err := HashModuleSources(dir, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Adding a non-.pr file should not change the hash
 	os.WriteFile(filepath.Join(dir, "readme.md"), []byte("hello"), 0644)
-	h2, err := HashModuleSources(dir)
+	h2, err := HashModuleSources(dir, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,8 +74,8 @@ func TestHashModuleSourcesDeterministic(t *testing.T) {
 	os.WriteFile(filepath.Join(dir2, "a.pr"), []byte("func a() {}"), 0644)
 	os.WriteFile(filepath.Join(dir2, "b.pr"), []byte("func b() {}"), 0644)
 
-	h1, _ := HashModuleSources(dir1)
-	h2, _ := HashModuleSources(dir2)
+	h1, _ := HashModuleSources(dir1, false)
+	h2, _ := HashModuleSources(dir2, false)
 	if h1 != h2 {
 		t.Error("same files in different creation order should produce same hash")
 	}
@@ -472,9 +472,131 @@ func TestReadBuildCacheInterfaceHashMissing(t *testing.T) {
 }
 
 func TestHashModuleSourcesBadDir(t *testing.T) {
-	_, err := HashModuleSources("/nonexistent/dir/12345")
+	_, err := HashModuleSources("/nonexistent/dir/12345", false)
 	if err == nil {
 		t.Fatal("expected error for nonexistent directory")
+	}
+}
+
+func TestHashModuleSourcesExcludesTestFiles(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "impl.pr"), []byte("func impl() {}"), 0644)
+	os.WriteFile(filepath.Join(dir, "impl_test.pr"), []byte("test_impl() `test {}"), 0644)
+
+	// Without tests: test file should not affect hash
+	h1, err := HashModuleSources(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// With tests: hash should differ
+	h2, err := HashModuleSources(dir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h1 == h2 {
+		t.Error("hash with tests should differ from hash without tests")
+	}
+
+	// Changing test file should not affect non-test hash
+	os.WriteFile(filepath.Join(dir, "impl_test.pr"), []byte("test_impl_v2() `test {}"), 0644)
+	h3, err := HashModuleSources(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h1 != h3 {
+		t.Error("changing test file should not affect non-test hash")
+	}
+
+	// But should affect test hash
+	h4, err := HashModuleSources(dir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h2 == h4 {
+		t.Error("changing test file should affect test hash")
+	}
+}
+
+func TestCollectModuleSourcesSubdirs(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "root.pr"), []byte("func root() {}"), 0644)
+	os.WriteFile(filepath.Join(dir, "root_test.pr"), []byte("test() `test {}"), 0644)
+
+	// Subdir without promise.toml — included
+	sub := filepath.Join(dir, "helpers")
+	os.MkdirAll(sub, 0755)
+	os.WriteFile(filepath.Join(sub, "helper.pr"), []byte("func helper() {}"), 0644)
+	os.WriteFile(filepath.Join(sub, "helper_test.pr"), []byte("helper_test() `test {}"), 0644)
+
+	// Nested module subdir with promise.toml — excluded
+	nested := filepath.Join(dir, "nested")
+	os.MkdirAll(nested, 0755)
+	os.WriteFile(filepath.Join(nested, "promise.toml"), []byte("name = \"nested\"\n"), 0644)
+	os.WriteFile(filepath.Join(nested, "nested.pr"), []byte("func nested() {}"), 0644)
+
+	// Without tests
+	files, err := CollectModuleSources(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Should include root.pr and helpers/helper.pr, exclude tests and nested
+	if len(files) != 2 {
+		t.Errorf("CollectModuleSources(false) = %d files, want 2: %v", len(files), files)
+	}
+
+	// With tests
+	files, err = CollectModuleSources(dir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Should include root.pr, root_test.pr, helpers/helper.pr, helpers/helper_test.pr
+	if len(files) != 4 {
+		t.Errorf("CollectModuleSources(true) = %d files, want 4: %v", len(files), files)
+	}
+
+	// Nested module files should never be included
+	for _, f := range files {
+		if filepath.Base(f) == "nested.pr" {
+			t.Errorf("nested module file should not be included: %s", f)
+		}
+	}
+}
+
+func TestHashModuleSourcesSubdirs(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "root.pr"), []byte("func root() {}"), 0644)
+
+	h1, err := HashModuleSources(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Adding a file in a subdirectory should change the hash
+	sub := filepath.Join(dir, "sub")
+	os.MkdirAll(sub, 0755)
+	os.WriteFile(filepath.Join(sub, "sub.pr"), []byte("func sub() {}"), 0644)
+
+	h2, err := HashModuleSources(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h1 == h2 {
+		t.Error("adding subdir file should change the hash")
+	}
+
+	// Adding a nested module should NOT change the hash
+	nested := filepath.Join(dir, "nested")
+	os.MkdirAll(nested, 0755)
+	os.WriteFile(filepath.Join(nested, "promise.toml"), []byte("name = \"nested\"\n"), 0644)
+	os.WriteFile(filepath.Join(nested, "nested.pr"), []byte("func nested() {}"), 0644)
+
+	h3, err := HashModuleSources(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h2 != h3 {
+		t.Error("nested module files should not affect parent hash")
 	}
 }
 

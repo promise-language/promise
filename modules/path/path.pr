@@ -2,12 +2,15 @@
 // All functions are pure string operations; no filesystem access.
 
 join(string base, string child) string `public `doc("Joins two path segments with a `/` separator. Handles trailing slashes on base.") {
-    if base.len == 0 { return child; }
-    if child.len == 0 { return base; }
-    if base[base.len - 1] == '/' {
+    if base.len == 0 {
+        return child;
+    } else if child.len == 0 {
+        return base;
+    } else if base[base.len - 1] == '/' {
         return base + child;
+    } else {
+        return base + "/" + child;
     }
-    return base + "/" + child;
 }
 
 basename(string p) string `public `doc("Returns the last component of a path. Strips trailing slashes.") {

@@ -12,32 +12,68 @@ import (
 	"djabi.dev/go/promise_lang/internal/types"
 )
 
-// HashModuleSources computes the implementation hash from the module's source files.
-// It reads all .pr files in the module directory, sorts them by name, and hashes
-// their concatenated contents.
-func HashModuleSources(modDir string) (string, error) {
-	entries, err := os.ReadDir(modDir)
-	if err != nil {
-		return "", fmt.Errorf("cannot read module directory: %w", err)
-	}
-
-	// Collect and sort .pr file names for deterministic ordering
-	var prFiles []string
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".pr") {
-			prFiles = append(prFiles, e.Name())
+// CollectModuleSources walks a module directory recursively and returns all .pr
+// source files. Subdirectories containing their own promise.toml (nested modules)
+// are excluded. When includeTests is false, *_test.pr files are skipped.
+// Returns sorted absolute paths for deterministic ordering.
+func CollectModuleSources(modDir string, includeTests bool) ([]string, error) {
+	var files []string
+	err := filepath.WalkDir(modDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			if path == modDir {
+				return err // propagate root dir errors
+			}
+			return nil
 		}
+		if d.IsDir() && path != modDir {
+			// Skip nested modules (subdirs with their own promise.toml)
+			if _, err := os.Stat(filepath.Join(path, "promise.toml")); err == nil {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(d.Name(), ".pr") {
+			return nil
+		}
+		if !includeTests && strings.HasSuffix(d.Name(), "_test.pr") {
+			return nil
+		}
+		files = append(files, path)
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("cannot walk module directory: %w", err)
 	}
-	sort.Strings(prFiles)
+	sort.Strings(files)
+	return files, nil
+}
+
+// HashModuleSources computes the implementation hash from the module's source files.
+// It walks the module directory recursively (excluding nested modules) and hashes
+// all .pr files. When includeTests is false, *_test.pr files are excluded from the
+// hash — used for non-test builds. When true, test files are included — used for
+// test build caching.
+func HashModuleSources(modDir string, includeTests bool) (string, error) {
+	files, err := CollectModuleSources(modDir, includeTests)
+	if err != nil {
+		return "", err
+	}
 
 	h := sha256.New()
-	for _, name := range prFiles {
-		content, err := os.ReadFile(filepath.Join(modDir, name))
+	for _, path := range files {
+		// Use relative path as separator for determinism across machines
+		rel, err := filepath.Rel(modDir, path)
 		if err != nil {
-			return "", fmt.Errorf("cannot read %s: %w", name, err)
+			rel = filepath.Base(path)
 		}
-		// Include filename as separator to avoid hash collisions from file splits
-		fmt.Fprintf(h, "file:%s\n", name)
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("cannot read %s: %w", rel, err)
+		}
+		fmt.Fprintf(h, "file:%s\n", rel)
 		h.Write(content)
 	}
 
@@ -197,6 +233,48 @@ func BuildCachePath(cacheDir, cacheKey string) string {
 func BuildCacheInterfacePath(cacheDir, cacheKey string) string {
 	subdir := cacheKey[:2]
 	return filepath.Join(cacheDir, subdir, cacheKey+".interface")
+}
+
+// TestBinaryCachePath returns the path for a cached test binary in the build cache.
+func TestBinaryCachePath(cacheDir, cacheKey string) string {
+	subdir := cacheKey[:2]
+	return filepath.Join(cacheDir, subdir, cacheKey+".bin")
+}
+
+// LookupTestBinaryCache checks if a cached test binary exists.
+// Returns the path if found, empty string if not cached.
+func LookupTestBinaryCache(cacheDir, cacheKey string) string {
+	path := TestBinaryCachePath(cacheDir, cacheKey)
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	return ""
+}
+
+// SaveTestBinaryCache stores a compiled test binary in the build cache.
+// Uses executable permissions (0755) and atomic write.
+func SaveTestBinaryCache(cacheDir, cacheKey, binaryFile string) error {
+	subdir := filepath.Join(cacheDir, cacheKey[:2])
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		return fmt.Errorf("cannot create cache subdir: %w", err)
+	}
+
+	data, err := os.ReadFile(binaryFile)
+	if err != nil {
+		return fmt.Errorf("cannot read binary file: %w", err)
+	}
+
+	binPath := TestBinaryCachePath(cacheDir, cacheKey)
+	tmpPath := binPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0755); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("cannot write cached binary: %w", err)
+	}
+	if err := os.Rename(tmpPath, binPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("cannot finalize cached binary: %w", err)
+	}
+	return nil
 }
 
 // LookupBuildCache checks if a cached .o file exists in the build cache.

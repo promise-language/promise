@@ -378,7 +378,14 @@ func runTest(args []string) {
 func runTestFile(filename string, timeout time.Duration, targetTriple string) {
 	start := time.Now()
 
-	// Frontend compilation (parse + merge std + sema + ownership)
+	// Module test dispatch: compile all module sources + tests together,
+	// with build cache support.
+	if modDir := isModuleTestFile(filename); modDir != "" {
+		runModuleTestFile(modDir, timeout, start, targetTriple)
+		return
+	}
+
+	// Non-module test file: standard compilation.
 	file, info := compileFrontend(filename)
 
 	if info.HasExpectOutput {
@@ -391,17 +398,65 @@ func runTestFile(filename string, timeout time.Duration, targetTriple string) {
 		return
 	}
 
-	// Codegen
+	binaryPath := compileTestBinary(file, info, targetTriple, filename)
+	defer os.Remove(binaryPath)
+	runTestBinary(binaryPath, timeout, start, targetTriple)
+}
+
+// runModuleTestFile compiles and runs a module's test suite. All module source
+// files (including all *_test.pr) are compiled together as a single unit.
+// Test binaries are cached in the build cache for fast re-runs.
+func runModuleTestFile(modDir string, timeout time.Duration, start time.Time, targetTriple string) {
+	target := targetTriple
+	if target == "" {
+		target = codegen.HostTargetTriple()
+	}
+
+	// Check build cache for a cached test binary.
+	implHash, err := module.HashModuleSources(modDir, true) // includes test files
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error hashing module sources: %v\n", err)
+		os.Exit(1)
+	}
+	compilerHash := module.CompilerHash()
+	cacheKey := module.BuildCacheKey(implHash, compilerHash, target, nil)
+	cacheDir, _ := module.BuildCacheDir()
+
+	if cacheDir != "" {
+		if cachedBin := module.LookupTestBinaryCache(cacheDir, cacheKey); cachedBin != "" {
+			runTestBinary(cachedBin, timeout, start, targetTriple)
+			return
+		}
+	}
+
+	// Cache miss — compile the module test suite.
+	file, info := compileModuleTestFrontend(modDir)
+
+	if len(info.Tests) == 0 {
+		fmt.Println("no tests found")
+		return
+	}
+
+	binaryPath := compileTestBinary(file, info, targetTriple, modDir)
+
+	// Save compiled binary to cache.
+	if cacheDir != "" {
+		module.SaveTestBinaryCache(cacheDir, cacheKey, binaryPath)
+	}
+
+	defer os.Remove(binaryPath)
+	runTestBinary(binaryPath, timeout, start, targetTriple)
+}
+
+// compileTestBinary runs codegen + link for a test file and returns the binary path.
+func compileTestBinary(file *ast.File, info *sema.Info, targetTriple, sourceFile string) string {
 	target := targetTriple
 	if target == "" {
 		target = codegen.HostTargetTriple()
 	}
 	result := codegen.Compile(file, info, target)
-
-	// Generate test main (replaces user main)
 	result.GenerateTestMain(info.Tests)
 
-	// Link to temp binary (test runner is now codegen-emitted, no C files needed)
 	ext := ""
 	if isWasmTarget(target) {
 		ext = ".wasm"
@@ -412,18 +467,24 @@ func runTestFile(filename string, timeout time.Duration, targetTriple string) {
 		os.Exit(1)
 	}
 	tmpOutput.Close()
-	defer os.Remove(tmpOutput.Name())
+	compileAndLink(result, tmpOutput.Name(), target, sourceFile)
+	return tmpOutput.Name()
+}
 
-	compileAndLink(result, tmpOutput.Name(), target, filename)
+// runTestBinary executes a compiled test binary and prints formatted results.
+func runTestBinary(binaryPath string, timeout time.Duration, start time.Time, targetTriple string) {
+	target := targetTriple
+	if target == "" {
+		target = codegen.HostTargetTriple()
+	}
 
-	// Execute test binary with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var cmd *exec.Cmd
 	if isWasmTarget(target) {
-		cmd = exec.CommandContext(ctx, "wasmtime", tmpOutput.Name())
+		cmd = exec.CommandContext(ctx, "wasmtime", binaryPath)
 	} else {
-		cmd = exec.CommandContext(ctx, tmpOutput.Name())
+		cmd = exec.CommandContext(ctx, binaryPath)
 	}
 	output, runErr := cmd.CombinedOutput()
 	elapsed := time.Since(start)
@@ -583,7 +644,17 @@ func runTestFiles(files []string, timeout time.Duration, targetTriple string) {
 	// Find common base directory for relative path display.
 	baseDir := commonDir(files)
 
+	// Dedup module test files: all *_test.pr files in the same module compile
+	// together into one binary, so we only need to run one per module.
+	moduleTestSeen := map[string]bool{}
+
 	for _, f := range files {
+		if modDir := isModuleTestFile(f); modDir != "" {
+			if moduleTestSeen[modDir] {
+				continue
+			}
+			moduleTestSeen[modDir] = true
+		}
 		// Run "promise test <file>" as subprocess with timeout
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		testArgs := []string{"test", "-timeout", fmt.Sprintf("%gs", timeout.Seconds())}
@@ -749,6 +820,24 @@ func discoverTestFiles(dir string, recursive bool) []string {
 		return strings.HasPrefix(name, "test_") || strings.HasSuffix(name, "_test.pr")
 	}
 
+	// isInModuleTree checks if a file is inside a module directory tree
+	// (any ancestor up to the walk root has promise.toml, but no closer
+	// promise.toml in between that would make it a nested module).
+	isInModuleTree := func(filePath string) bool {
+		d := filepath.Dir(filePath)
+		for d != dir {
+			if isModuleDir(d) {
+				return true
+			}
+			parent := filepath.Dir(d)
+			if parent == d {
+				break
+			}
+			d = parent
+		}
+		return isModuleDir(dir)
+	}
+
 	if recursive {
 		if err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
@@ -766,8 +855,9 @@ func discoverTestFiles(dir string, recursive bool) []string {
 			if !strings.HasSuffix(d.Name(), ".pr") {
 				return nil
 			}
-			// In module directories, only pick up test files (not implementation).
-			if isModuleDir(filepath.Dir(path)) && !isTestFile(d.Name()) {
+			// In module directory trees, only pick up test files (not implementation).
+			// This handles both direct module dirs and their subdirs.
+			if isInModuleTree(path) && !isTestFile(d.Name()) {
 				return nil
 			}
 			files = append(files, path)
@@ -2292,6 +2382,102 @@ func compileFrontend(filename string) (*ast.File, *sema.Info) {
 	return file, info
 }
 
+// isModuleTestFile checks whether filename is a *_test.pr file inside a module
+// directory tree (a directory with promise.toml as ancestor). Returns the module
+// root directory if found, empty string otherwise.
+func isModuleTestFile(filename string) string {
+	if !strings.HasSuffix(filepath.Base(filename), "_test.pr") {
+		return ""
+	}
+	abs, err := filepath.Abs(filename)
+	if err != nil {
+		return ""
+	}
+	dir := filepath.Dir(abs)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "promise.toml")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return ""
+}
+
+// compileModuleTestFrontend compiles a module's test suite by merging all module
+// source files (including *_test.pr files) into a single AST. This gives test
+// functions access to all module-private declarations without needing `use <self>`.
+// All test files in the module compile together (Go-style).
+func compileModuleTestFrontend(modDir string) (*ast.File, *sema.Info) {
+	// Read module config for name (used for self-import detection)
+	modCfg, err := module.ParseConfig(filepath.Join(modDir, "promise.toml"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error reading module config: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Collect ALL .pr files (including tests) — walks subdirs, excludes nested modules
+	allFiles, err := module.CollectModuleSources(modDir, true)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error collecting module sources: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(allFiles) == 0 {
+		fmt.Fprintf(os.Stderr, "error: module '%s' contains no .pr files\n", modCfg.Name)
+		os.Exit(1)
+	}
+
+	// Parse all files
+	var parsedFiles []*ast.File
+	for _, f := range allFiles {
+		parsedFiles = append(parsedFiles, parseSourceFile(f))
+	}
+
+	// Merge into single AST
+	merged := mergeModuleFiles(parsedFiles)
+
+	// Detect self-import: error if any file tries to `use <moduleName>`
+	for _, u := range merged.Uses {
+		if u.CatalogName == modCfg.Name && u.Path == "" {
+			fmt.Fprintf(os.Stderr, "error: module test files should not `use %s;` — test code is compiled as part of the module\n", modCfg.Name)
+			os.Exit(1)
+		}
+	}
+
+	// Merge standard library declarations
+	stdDir := findStdDir()
+	var stdFiles []*ast.File
+	if stdDir != "" {
+		stdFiles = parseStdFiles(stdDir)
+		merged = mergeStdDecls(merged, stdFiles)
+	}
+
+	// Load module dependencies (the module's own `use` declarations)
+	moduleScopes, modInfos, depOrder := loadModuleScopes(filepath.Join(modDir, "promise.toml"), merged, stdFiles)
+
+	info, errs := sema.CheckWithModules(merged, moduleScopes)
+	if modInfos != nil {
+		info.ModuleInfos = modInfos
+		info.ModuleOrder = depOrder
+	}
+	if len(errs) > 0 {
+		printFileErrors(modDir, errs)
+		os.Exit(1)
+	}
+
+	ownerErrs := ownership.Check(merged, info)
+	if len(ownerErrs) > 0 {
+		printFileErrors(modDir, ownerErrs)
+		os.Exit(1)
+	}
+
+	return merged, info
+}
+
 // moduleLoader manages recursive module loading with cycle detection and caching.
 // A single loader instance is shared across the entire dependency graph walk.
 type moduleLoader struct {
@@ -2508,19 +2694,17 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 		ml.warnings = append(ml.warnings, fmt.Sprintf("warning: module %q has epoch %s, but project uses epoch %s", modCfg.Name, modCfg.Epoch, ml.projectCfg.Epoch))
 	}
 
-	// Parse all .pr files in the module directory (skip *_test.pr files —
+	// Parse all .pr files in the module directory tree (skip *_test.pr files —
 	// those are module tests, not part of the module's public implementation).
-	entries, err := os.ReadDir(absDir)
+	// Walks subdirs recursively, excluding nested modules (subdirs with promise.toml).
+	srcFiles, err := module.CollectModuleSources(absDir, false)
 	if err != nil {
-		return nil, fmt.Errorf("cannot read module directory: %w", err)
+		return nil, err
 	}
 
 	var modFileList []*ast.File
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".pr") && !strings.HasSuffix(e.Name(), "_test.pr") {
-			f := parseSourceFile(filepath.Join(absDir, e.Name()))
-			modFileList = append(modFileList, f)
-		}
+	for _, f := range srcFiles {
+		modFileList = append(modFileList, parseSourceFile(f))
 	}
 
 	if len(modFileList) == 0 {
@@ -2546,7 +2730,7 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 	}
 
 	// Compute implementation hash from source files
-	implHash, err := module.HashModuleSources(absDir)
+	implHash, err := module.HashModuleSources(absDir, false)
 	if err != nil {
 		return nil, fmt.Errorf("cannot hash module sources: %w", err)
 	}

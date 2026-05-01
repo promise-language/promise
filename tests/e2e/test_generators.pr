@@ -1,0 +1,197 @@
+// Generator tests
+
+// Helper generators
+count_to(int n) stream[int] {
+    for i in 0..n {
+        yield i;
+    }
+}
+
+early_stop(int n) stream[int] {
+    for i in 0..100 {
+        if i >= n { return; }
+        yield i;
+    }
+}
+
+evens(int n) stream[int] {
+    for i in 0..n {
+        if i % 2 == 0 {
+            yield i;
+        }
+    }
+}
+
+fibonacci() stream[int] {
+    int a = 0;
+    int b = 1;
+    for {
+        yield a;
+        int temp = a + b;
+        a = b;
+        b = temp;
+    }
+}
+
+range_gen(int start, int end) stream[int] {
+    int i = start;
+    while i < end {
+        yield i;
+        i = i + 1;
+    }
+}
+
+empty() stream[int] {
+    if false {
+        yield 0;
+    }
+}
+
+doubles(int n) stream[int] {
+    for x in count_to(n) {
+        yield x * 2;
+    }
+}
+
+// --- Tests ---
+
+test_basic_generator() `test {
+    int sum = 0;
+    for x in count_to(5) {
+        sum += x;
+    }
+    assert(sum == 10, "count_to(5) should yield 0+1+2+3+4=10");
+}
+
+test_early_return() `test {
+    int sum = 0;
+    for x in early_stop(3) {
+        sum += x;
+    }
+    assert(sum == 3, "early_stop(3) should yield 0+1+2=3");
+}
+
+test_conditional_yield() `test {
+    int sum = 0;
+    int count = 0;
+    for x in evens(6) {
+        sum += x;
+        count++;
+    }
+    assert(count == 3, "evens(6) should yield 3 values: 0,2,4");
+    assert(sum == 6, "evens(6) sum should be 0+2+4=6");
+}
+
+test_fibonacci() `test {
+    int count = 0;
+    int last = 0;
+    for x in fibonacci() {
+        if x > 10 { break; }
+        last = x;
+        count++;
+    }
+    assert(last == 8, "last fib <= 10 is 8");
+    assert(count == 7, "fibs <= 10: 0,1,1,2,3,5,8 = 7 values");
+}
+
+test_params() `test {
+    int sum = 0;
+    for x in range_gen(5, 10) {
+        sum += x;
+    }
+    assert(sum == 35, "range_gen(5,10) should yield 5+6+7+8+9=35");
+}
+
+test_empty_generator() `test {
+    int count = 0;
+    for x in empty() {
+        count++;
+    }
+    assert(count == 0, "empty generator should yield nothing");
+}
+
+test_nested_generators() `test {
+    int sum = 0;
+    for x in doubles(4) {
+        sum += x;
+    }
+    assert(sum == 12, "doubles(4) should yield 0+2+4+6=12");
+}
+
+test_early_break() `test {
+    int count = 0;
+    for x in count_to(100) {
+        if x >= 3 { break; }
+        count++;
+    }
+    assert(count == 3, "early break should only process 3 values");
+}
+
+test_index() `test {
+    int idx_sum = 0;
+    for x, i in count_to(5) {
+        idx_sum += i;
+    }
+    assert(idx_sum == 10, "index sum 0+1+2+3+4=10");
+}
+
+// --- Generator methods ---
+
+type Counter {
+    int limit;
+
+    values() stream[int] {
+        for i in 0..this.limit {
+            yield i;
+        }
+    }
+}
+
+type Stepper {
+    int start;
+    int step;
+
+    take(int n) stream[int] {
+        int val = this.start;
+        for i in 0..n {
+            yield val;
+            val = val + this.step;
+        }
+    }
+}
+
+test_method_generator() `test {
+    c := Counter(limit: 5);
+    int sum = 0;
+    for x in c.values() {
+        sum += x;
+    }
+    assert(sum == 10, "Counter(5).values() should yield 0+1+2+3+4=10");
+}
+
+test_method_generator_with_params() `test {
+    s := Stepper(start: 10, step: 3);
+    int sum = 0;
+    for x in s.take(4) {
+        sum += x;
+    }
+    assert(sum == 58, "Stepper(10,3).take(4) should yield 10+13+16+19=58");
+}
+
+test_recursive_generator() `test {
+    int sum = 0;
+    for x in countdown(5) {
+        sum += x;
+    }
+    assert(sum == 15, "countdown(5) should yield 5+4+3+2+1=15");
+}
+
+countdown(int n) stream[int] {
+    if n <= 0 { return; }
+    yield n;
+    for x in countdown(n - 1) {
+        yield x;
+    }
+}
+
+main() {}

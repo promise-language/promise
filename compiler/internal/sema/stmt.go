@@ -75,10 +75,52 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 		}
 
 	case *ast.YieldStmt:
-		c.checkExpr(s.Value)
+		if !c.inGenerator {
+			c.errorf(s.Pos(), "yield outside of generator function")
+		} else if c.lambdaDepth > 0 {
+			c.errorf(s.Pos(), "yield inside lambda/closure is not allowed")
+		} else {
+			c.yieldFound = true
+			valType := c.checkExprWithHint(s.Value, c.generatorElemType)
+			if valType != nil && c.generatorElemType != nil {
+				if !types.AssignableTo(valType, c.generatorElemType) {
+					c.errorf(s.Value.Pos(), "cannot yield %s in generator returning stream[%s]",
+						valType, c.generatorElemType)
+				}
+			}
+		}
 
 	case *ast.YieldDelegateStmt:
-		c.checkExpr(s.Value)
+		if !c.inGenerator {
+			c.errorf(s.Pos(), "yield* outside of generator function")
+		} else if c.lambdaDepth > 0 {
+			c.errorf(s.Pos(), "yield* inside lambda/closure is not allowed")
+		} else {
+			c.yieldFound = true
+			valType := c.checkExpr(s.Value)
+			if valType != nil {
+				var delegateElem types.Type
+				if elem, ok := types.AsStream(valType); ok {
+					delegateElem = elem
+				} else if elem, ok := types.AsIterator(valType); ok {
+					delegateElem = elem
+				} else if elem, ok := types.AsVector(valType); ok {
+					delegateElem = elem
+				} else if types.Identical(valType, types.TypRange) {
+					delegateElem = types.TypInt
+				} else if types.Identical(valType, types.TypString) {
+					delegateElem = types.TypChar
+				} else {
+					c.errorf(s.Value.Pos(), "yield* requires an iterable type, got %s", valType)
+				}
+				if delegateElem != nil && c.generatorElemType != nil {
+					if !types.AssignableTo(delegateElem, c.generatorElemType) {
+						c.errorf(s.Value.Pos(), "yield* element type %s does not match generator element type %s",
+							delegateElem, c.generatorElemType)
+					}
+				}
+			}
+		}
 
 	case *ast.IncDecStmt:
 		c.checkIncDecStmt(s)
@@ -397,6 +439,16 @@ func (c *Checker) checkSliceAssignAvailable(sl *ast.SliceExpr) {
 func (c *Checker) checkReturnStmt(s *ast.ReturnStmt) {
 	if c.curFunc == nil {
 		c.errorf(s.Pos(), "return outside of function")
+		return
+	}
+
+	// In generator functions, bare return terminates the generator.
+	// return-with-value is an error (use yield instead).
+	if c.inGenerator {
+		if s.Value != nil {
+			c.errorf(s.Pos(), "cannot return a value from a generator function; use yield instead")
+			c.checkExpr(s.Value) // still type-check for error recovery
+		}
 		return
 	}
 

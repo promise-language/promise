@@ -105,6 +105,8 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 		c.genIncDecStmt(s)
 	case *ast.SelectStmt:
 		c.genSelectStmt(s)
+	case *ast.YieldStmt:
+		c.genYieldStmt(s)
 	case *ast.Block:
 		c.genBlock(s)
 	default:
@@ -431,6 +433,8 @@ func (c *Compiler) emitScopeCleanup(fromIdx int) {
 			c.emitDropCall(b)
 		case bindingFreeEnv:
 			c.emitEnvFree(b)
+		case bindingGenerator:
+			c.emitGeneratorCleanup(b)
 		}
 	}
 }
@@ -970,6 +974,17 @@ func (c *Compiler) namedFromLLVMType(typ irtypes.Type) *types.Named {
 // --- Return ---
 
 func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
+	// Generator return: bare return means "stop producing values"
+	if c.inGenerator {
+		if len(c.scopeBindings) > 0 {
+			c.emitScopeCleanup(0)
+		}
+		// Branch to the single final suspend block
+		c.block.NewBr(c.generatorFinalSuspend)
+		// c.block already has a terminator, so subsequent codegen is skipped
+		return
+	}
+
 	// Clear drop flag for returned variable (it's being moved out, not dropped)
 	if s.Value != nil {
 		if ident, ok := s.Value.(*ast.IdentExpr); ok {
@@ -1431,6 +1446,12 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 	} else if elem, ok := types.AsChannel(iterableType); ok {
 		chPtr := c.genExpr(s.Iterable)
 		c.genForInChannel(s, chPtr, elem)
+	} else if elem, ok := types.AsStream(iterableType); ok {
+		genVal := c.genExpr(s.Iterable)
+		c.genForInGenerator(s, genVal, elem)
+	} else if elem, ok := types.AsIterator(iterableType); ok {
+		genVal := c.genExpr(s.Iterable)
+		c.genForInGenerator(s, genVal, elem)
 	} else {
 		// String iteration
 		named := extractNamed(iterableType)

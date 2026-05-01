@@ -157,6 +157,22 @@ type Compiler struct {
 	// Go expression counter for unique trampoline function names
 	goCounter int
 
+	// Generator state
+	inGenerator           bool        // true when compiling inside a generator coroutine body
+	generatorYieldSlot    value.Value // yield_slot parameter (i8*) of current generator coro
+	generatorCoroId       value.Value // coro.id token for current generator
+	generatorCleanup      *ir.Block   // cleanup block for current generator
+	generatorSuspend      *ir.Block   // suspend block for current generator (ramp exit)
+	generatorFinalSuspend *ir.Block   // final suspend block (for early return)
+	generatorCounter      int         // counter for unique generator function names
+
+	// noinline wrappers around coro.resume/done/destroy — used by generator consumers
+	// to hide the pattern from LLVM's coro-elide pass (which incorrectly stack-allocates
+	// generator frames when it sees ramp+resume+done+destroy in the same function).
+	genResume  *ir.Func // @__promise_gen_resume(i8*) → void [noinline]
+	genDone    *ir.Func // @__promise_gen_done(i8*) → i1 [noinline]
+	genDestroy *ir.Func // @__promise_gen_destroy(i8*) → void [noinline]
+
 	// Target triple and platform flags
 	target string // LLVM target triple
 	isWasm bool   // true if targeting wasm32
@@ -204,9 +220,10 @@ func (c *Compiler) typeAlign(typ irtypes.Type) int {
 type scopeBindingKind int
 
 const (
-	bindingClose   scopeBindingKind = iota // use-bound: call close() at scope exit
-	bindingDrop                            // droppable: call drop() at scope exit
-	bindingFreeEnv                         // closure env: free env pointer at scope exit
+	bindingClose     scopeBindingKind = iota // use-bound: call close() at scope exit
+	bindingDrop                              // droppable: call drop() at scope exit
+	bindingFreeEnv                           // closure env: free env pointer at scope exit
+	bindingGenerator                         // generator: destroy coroutine + free yield slot at scope exit
 )
 
 // scopeBinding tracks a variable that needs cleanup at scope exit.
@@ -219,6 +236,9 @@ type scopeBinding struct {
 	valType   types.Type     // original Promise type
 	dropFlag  *ir.InstAlloca // i1: true=should drop (nil for close bindings)
 	varName   string         // variable name (for drop flag lookup)
+	// Generator cleanup
+	generatorHandle *ir.InstAlloca // coro handle alloca (for destroy)
+	generatorSlot   *ir.InstAlloca // yield slot alloca (for free)
 }
 
 // viewVtableKey identifies a view-specific vtable for a (concrete, view) pair.
@@ -2294,10 +2314,13 @@ func (c *Compiler) declareFuncs(file *ast.File) {
 		}
 
 		retType := irtypes.Type(irtypes.Void)
-		if sig.Result() != nil {
+		if c.info.GeneratorFuncs[fd] != nil {
+			// Generator functions return {i8*, i8*} (handle + yield slot)
+			retType = generatorValueType()
+		} else if sig.Result() != nil {
 			retType = c.resolveType(sig.Result())
 		}
-		if sig.CanError() {
+		if sig.CanError() && c.info.GeneratorFuncs[fd] == nil {
 			retType = computeResultType(retType)
 		}
 
@@ -2360,6 +2383,11 @@ func (c *Compiler) defineFuncs(file *ast.File) {
 			fn = c.funcs[fd.Name]
 		}
 		if fn == nil {
+			continue
+		}
+		// Generator functions get special compilation
+		if elemType := c.info.GeneratorFuncs[fd]; elemType != nil {
+			c.defineGeneratorFunc(fd, fn, elemType)
 			continue
 		}
 		c.defineFunc(fd, fn)
@@ -2637,6 +2665,11 @@ func (c *Compiler) defineTypeMethods(file *ast.File) {
 				continue
 			}
 
+			// Route generator methods to the generator codegen path
+			if elemType := c.info.GeneratorFuncs[md]; elemType != nil {
+				c.defineGeneratorMethod(md, m, fn, elemType, named)
+				continue
+			}
 			c.defineMethodFunc(md, m, fn, named)
 		}
 	}
@@ -3291,4 +3324,33 @@ func (c *Compiler) declareCoroIntrinsics() {
 	// @llvm.coro.done(i8* %handle) → i1
 	c.coroDone = c.module.NewFunc("llvm.coro.done", irtypes.I1,
 		ir.NewParam("handle", irtypes.I8Ptr))
+
+	// noinline wrappers for generator consumer code — prevents coro-elide from
+	// seeing the resume/done/destroy pattern and incorrectly stack-allocating frames.
+	c.genResume = c.module.NewFunc("__promise_gen_resume", irtypes.Void,
+		ir.NewParam("handle", irtypes.I8Ptr))
+	c.genResume.FuncAttrs = append(c.genResume.FuncAttrs, rawFuncAttr("noinline"))
+	{
+		b := c.genResume.NewBlock("entry")
+		b.NewCall(c.coroResume, c.genResume.Params[0])
+		b.NewRet(nil)
+	}
+
+	c.genDone = c.module.NewFunc("__promise_gen_done", irtypes.I1,
+		ir.NewParam("handle", irtypes.I8Ptr))
+	c.genDone.FuncAttrs = append(c.genDone.FuncAttrs, rawFuncAttr("noinline"))
+	{
+		b := c.genDone.NewBlock("entry")
+		v := b.NewCall(c.coroDone, c.genDone.Params[0])
+		b.NewRet(v)
+	}
+
+	c.genDestroy = c.module.NewFunc("__promise_gen_destroy", irtypes.Void,
+		ir.NewParam("handle", irtypes.I8Ptr))
+	c.genDestroy.FuncAttrs = append(c.genDestroy.FuncAttrs, rawFuncAttr("noinline"))
+	{
+		b := c.genDestroy.NewBlock("entry")
+		b.NewCall(c.coroDestroy, c.genDestroy.Params[0])
+		b.NewRet(nil)
+	}
 }

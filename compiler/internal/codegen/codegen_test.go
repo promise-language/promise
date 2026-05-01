@@ -8140,3 +8140,49 @@ func TestUserDefinedSliceOperator(t *testing.T) {
 	`)
 	assertContains(t, ir, `call i8* @"MyList.[:]"(`)
 }
+
+// --- Generator Tests ---
+
+func TestGeneratorProducesCoroutine(t *testing.T) {
+	ir := generateIR(t, `
+		count() stream[int] {
+			yield 1;
+			yield 2;
+		}
+		main() {}
+	`)
+	assertContains(t, ir, `.generator.`)
+	assertContains(t, ir, "presplitcoroutine")
+	assertContains(t, ir, "@llvm.coro.suspend")
+}
+
+func TestGeneratorForIn(t *testing.T) {
+	ir := generateIR(t, `
+		count() stream[int] {
+			yield 1;
+			yield 2;
+		}
+		main() {
+			int total = 0;
+			for x in count() {
+				total = total + x;
+			}
+		}
+	`)
+	assertContains(t, ir, "@llvm.coro.resume")
+	assertContains(t, ir, "@llvm.coro.done")
+	assertContains(t, ir, "@llvm.coro.destroy")
+}
+
+func TestGeneratorFactoryReturnsStruct(t *testing.T) {
+	ir := generateIR(t, `
+		nums() stream[int] {
+			yield 42;
+		}
+		main() {}
+	`)
+	// The factory function should return {i8*, i8*}
+	assertContains(t, ir, "insertvalue { i8*, i8* }")
+	// Should allocate yield slot
+	assertContains(t, ir, "@pal_alloc")
+}

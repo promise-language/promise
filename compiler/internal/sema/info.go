@@ -84,6 +84,11 @@ type Info struct {
 	// failable call. Codegen extracts (value, error?) from the result struct
 	// instead of a tuple.
 	FailableDestructures map[*ast.DestructureVarDecl]bool
+
+	// GeneratorFuncs maps generator function/method declarations to their
+	// element type T. A function is a generator if its return type is
+	// stream[T] and its body contains at least one yield statement.
+	GeneratorFuncs map[ast.Node]types.Type
 }
 
 // NarrowedVar records a single variable narrowing (T? → T).

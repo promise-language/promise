@@ -456,7 +456,11 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 			c.monoCtx = &monoContext{inst: inst, origin: named, name: name}
 			func() {
 				defer func() { c.typeSubst = nil; c.monoCtx = nil }()
-				c.defineMethodFunc(md, m, fn, named)
+				if elemType := c.info.GeneratorFuncs[md]; elemType != nil {
+					c.defineGeneratorMethod(md, m, fn, elemType, named)
+				} else {
+					c.defineMethodFunc(md, m, fn, named)
+				}
 			}()
 		}
 	}
@@ -514,7 +518,11 @@ func (c *Compiler) defineMonoFuncs(file *ast.File, funcInsts []*sema.FuncInstanc
 		c.typeSubst = subst
 		func() {
 			defer func() { c.typeSubst = nil }()
-			c.defineFunc(fd, fn)
+			if elemType := c.info.GeneratorFuncs[fd]; elemType != nil {
+				c.defineGeneratorFunc(fd, fn, elemType)
+			} else {
+				c.defineFunc(fd, fn)
+			}
 		}()
 	}
 }

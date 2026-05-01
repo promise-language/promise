@@ -7,23 +7,26 @@ import (
 
 // Checker performs semantic analysis on a parsed AST file.
 type Checker struct {
-	file           *ast.File
-	info           *Info
-	errors         []error
-	stdScope       *types.Scope            // std library scope (child of Universe, parent of fileScope)
-	fileScope      *types.Scope            // file-level scope (child of stdScope)
-	scope          *types.Scope            // current scope during traversal
-	curFunc        *types.Signature        // current function being checked (for return/raise)
-	curType        *types.Named            // current type being defined/checked (for Self resolution)
-	inNewBody      bool                    // true when checking a new() constructor body
-	inFactoryBody  bool                    // true when checking a `factory method body
-	factoryLocals  map[string]bool         // variables initialized from constructor calls in factory body
-	inLoop         int                     // nesting depth of loop constructs
-	lambdaDepth    int                     // nesting depth of lambdas (0 = not in lambda)
-	lambdaCaptures map[string]*CapturedVar // current lambda's captured vars (by name)
-	lambdaScope    *types.Scope            // scope at lambda definition site (capture boundary)
-	lambdaMove     bool                    // true if current lambda uses `move` keyword
-	typeHint       types.Type              // expected type for numeric literal adaptation (propagated through arithmetic)
+	file              *ast.File
+	info              *Info
+	errors            []error
+	stdScope          *types.Scope            // std library scope (child of Universe, parent of fileScope)
+	fileScope         *types.Scope            // file-level scope (child of stdScope)
+	scope             *types.Scope            // current scope during traversal
+	curFunc           *types.Signature        // current function being checked (for return/raise)
+	curType           *types.Named            // current type being defined/checked (for Self resolution)
+	inNewBody         bool                    // true when checking a new() constructor body
+	inFactoryBody     bool                    // true when checking a `factory method body
+	factoryLocals     map[string]bool         // variables initialized from constructor calls in factory body
+	inLoop            int                     // nesting depth of loop constructs
+	lambdaDepth       int                     // nesting depth of lambdas (0 = not in lambda)
+	lambdaCaptures    map[string]*CapturedVar // current lambda's captured vars (by name)
+	lambdaScope       *types.Scope            // scope at lambda definition site (capture boundary)
+	lambdaMove        bool                    // true if current lambda uses `move` keyword
+	typeHint          types.Type              // expected type for numeric literal adaptation (propagated through arithmetic)
+	inGenerator       bool                    // true when checking a generator function body
+	generatorElemType types.Type              // T from stream[T] or Iterator[T] return type
+	yieldFound        bool                    // true if at least one yield seen in current generator func
 }
 
 // Check performs semantic analysis on the given AST file.
@@ -42,6 +45,7 @@ func Check(file *ast.File) (*Info, []error) {
 			FailableExprs:        make(map[ast.Expr]bool),
 			AutoPropagateExprs:   make(map[ast.Expr]bool),
 			FailableDestructures: make(map[*ast.DestructureVarDecl]bool),
+			GeneratorFuncs:       make(map[ast.Node]types.Type),
 		},
 	}
 
@@ -172,6 +176,25 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 		defer c.closeScope()
 	}
 
+	// Detect generator: return type is stream[T]
+	savedInGenerator := c.inGenerator
+	savedGenElemType := c.generatorElemType
+	savedYieldFound := c.yieldFound
+	c.inGenerator = false
+	c.generatorElemType = nil
+	c.yieldFound = false
+
+	if sig.Result() != nil {
+		if elem, ok := types.AsStream(sig.Result()); ok {
+			c.inGenerator = true
+			c.generatorElemType = elem
+		}
+	}
+
+	if c.inGenerator && sig.CanError() {
+		c.errorf(d.Pos(), "generator functions cannot be failable")
+	}
+
 	c.openScope(d.Body, "func:"+d.Name)
 
 	// Bind parameters into scope
@@ -184,6 +207,17 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 
 	c.checkBlock(d.Body)
 	c.closeScope()
+
+	// Record generator function if yields were found
+	if c.inGenerator && c.yieldFound {
+		c.info.GeneratorFuncs[d] = c.generatorElemType
+	} else if c.inGenerator && !c.yieldFound {
+		c.errorf(d.Pos(), "function %s returns stream[%s] but contains no yield statements", d.Name, c.generatorElemType)
+	}
+
+	c.inGenerator = savedInGenerator
+	c.generatorElemType = savedGenElemType
+	c.yieldFound = savedYieldFound
 }
 
 // checkTypeDecl type-checks method bodies in a type declaration.
@@ -276,6 +310,25 @@ func (c *Checker) checkMethodBody(typeName string, md *ast.MethodDecl, m *types.
 	c.curFunc = m.Sig()
 	defer func() { c.curFunc = saved }()
 
+	// Detect generator: return type is stream[T]
+	savedInGenerator := c.inGenerator
+	savedGenElemType := c.generatorElemType
+	savedYieldFound := c.yieldFound
+	c.inGenerator = false
+	c.generatorElemType = nil
+	c.yieldFound = false
+
+	if m.Sig().Result() != nil {
+		if elem, ok := types.AsStream(m.Sig().Result()); ok {
+			c.inGenerator = true
+			c.generatorElemType = elem
+		}
+	}
+
+	if c.inGenerator && m.Sig().CanError() {
+		c.errorf(md.Pos(), "generator methods cannot be failable")
+	}
+
 	c.openScope(md.Body, "method:"+typeName+"."+md.Name)
 
 	// Bind receiver as "this"
@@ -292,6 +345,17 @@ func (c *Checker) checkMethodBody(typeName string, md *ast.MethodDecl, m *types.
 
 	c.checkBlock(md.Body)
 	c.closeScope()
+
+	// Record generator method if yields were found
+	if c.inGenerator && c.yieldFound {
+		c.info.GeneratorFuncs[md] = c.generatorElemType
+	} else if c.inGenerator && !c.yieldFound {
+		c.errorf(md.Pos(), "method %s returns stream[%s] but contains no yield statements", md.Name, c.generatorElemType)
+	}
+
+	c.inGenerator = savedInGenerator
+	c.generatorElemType = savedGenElemType
+	c.yieldFound = savedYieldFound
 }
 
 // checkEnumDecl type-checks method bodies in an enum declaration.

@@ -6241,3 +6241,129 @@ func TestCompoundNarrowingElseBranchNotNarrowed(t *testing.T) {
 		}
 	`)
 }
+
+// --- Generator Tests ---
+
+func TestGeneratorBasic(t *testing.T) {
+	checkOK(t, `
+		count() stream[int] {
+			yield 1;
+			yield 2;
+			yield 3;
+		}
+		main() {}
+	`)
+}
+
+func TestGeneratorYieldOutsideGenerator(t *testing.T) {
+	errs := checkErrs(t, `
+		foo() {
+			yield 1;
+		}
+		main() {}
+	`)
+	expectError(t, errs, "yield outside of generator function")
+}
+
+func TestGeneratorYieldTypeMismatch(t *testing.T) {
+	errs := checkErrs(t, `
+		count() stream[int] {
+			yield "hello";
+		}
+		main() {}
+	`)
+	expectError(t, errs, "cannot yield string in generator returning stream[int]")
+}
+
+func TestGeneratorYieldInsideLambda(t *testing.T) {
+	errs := checkErrs(t, `
+		gen() stream[int] {
+			f := || { yield 1; };
+		}
+		main() {}
+	`)
+	expectError(t, errs, "yield inside lambda/closure is not allowed")
+}
+
+func TestGeneratorFailableError(t *testing.T) {
+	errs := checkErrs(t, `
+		gen() stream[int]! {
+			yield 1;
+		}
+		main() {}
+	`)
+	expectError(t, errs, "generator functions cannot be failable")
+}
+
+func TestGeneratorMissingReturnOK(t *testing.T) {
+	// Generators don't need explicit return — they terminate by falling off the end
+	checkOK(t, `
+		gen() stream[int] {
+			yield 1;
+		}
+		main() {}
+	`)
+}
+
+func TestGeneratorBareReturn(t *testing.T) {
+	// bare return in generators is OK (early termination)
+	checkOK(t, `
+		gen(bool stop) stream[int] {
+			yield 1;
+			if stop { return; }
+			yield 2;
+		}
+		main() {}
+	`)
+}
+
+func TestGeneratorReturnValue(t *testing.T) {
+	errs := checkErrs(t, `
+		gen() stream[int] {
+			return 42;
+		}
+		main() {}
+	`)
+	expectError(t, errs, "use yield instead")
+}
+
+func TestGeneratorNoYield(t *testing.T) {
+	errs := checkErrs(t, `
+		gen() stream[int] {
+		}
+		main() {}
+	`)
+	expectError(t, errs, "contains no yield statements")
+}
+
+func TestGeneratorNoYieldBareReturn(t *testing.T) {
+	errs := checkErrs(t, `
+		gen() stream[int] {
+			return;
+		}
+		main() {}
+	`)
+	expectError(t, errs, "contains no yield statements")
+}
+
+func TestGeneratorMethodNoYield(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo {
+			gen() stream[int] {}
+		}
+		main() {}
+	`)
+	expectError(t, errs, "contains no yield statements")
+}
+
+func TestGeneratorMethodBasic(t *testing.T) {
+	checkOK(t, `
+		type Foo {
+			int n;
+			gen() stream[int] {
+				yield this.n;
+			}
+		}
+		main() {}
+	`)
+}

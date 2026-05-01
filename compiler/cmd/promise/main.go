@@ -485,10 +485,10 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string, timeout time.D
 	expected := strings.TrimRight(info.ExpectOutput, "\n")
 
 	if actual == expected {
-		fmt.Printf("PASS (%.3fs) %s\n", elapsed.Seconds(), name)
+		fmt.Printf("PASS (%.3fs)\n", elapsed.Seconds())
 		fmt.Printf("1 passed, 0 failed (%.3fs)\n", elapsed.Seconds())
 	} else {
-		fmt.Printf("FAIL (%.3fs) %s\n", elapsed.Seconds(), name)
+		fmt.Printf("FAIL (%.3fs)\n", elapsed.Seconds())
 		fmt.Printf("  expected: %s\n", firstLines(expected, 3))
 		fmt.Printf("  actual:   %s\n", firstLines(actual, 3))
 		if err != nil {
@@ -527,7 +527,7 @@ func runTestDir(dir string, recursive bool, timeout time.Duration, targetTriple 
 	}
 
 	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed`)
-	failLineRe := regexp.MustCompile(`^FAIL \(\d+\.\d+s\) (.+)$`)
+	failLineRe := regexp.MustCompile(`^FAIL \(\d+\.\d+s\)(?: (.+))?$`)
 
 	totalPassed := 0
 	totalFailed := 0
@@ -591,7 +591,11 @@ func runTestDir(dir string, recursive bool, timeout time.Duration, targetTriple 
 			foundFailLines := false
 			for _, line := range strings.Split(outStr, "\n") {
 				if m := failLineRe.FindStringSubmatch(line); m != nil {
-					failures = append(failures, relPath+": "+m[1])
+					if m[1] != "" {
+						failures = append(failures, relPath+": "+m[1])
+					} else {
+						failures = append(failures, relPath)
+					}
 					foundFailLines = true
 				}
 			}

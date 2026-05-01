@@ -7,23 +7,21 @@ set -euo pipefail
 # Prerequisites:
 #   Linux: LLVM 22+ (opt, llc, lld), musl-dev, Go 1.25+, Java 11+ (for ANTLR)
 #   macOS: Homebrew LLVM 22+ (opt, llc), Xcode CommandLineTools, Go 1.25+, Java 11+
+#
+# Optional (for --target wasm32-wasi):
+#   wasmtime: WASI runtime for running/testing WASM binaries
 
 MIN_LLVM=22
 MAX_LLVM=25
+INSTALL_WASM=0
+
+for arg in "$@"; do
+    case "$arg" in
+        --wasm) INSTALL_WASM=1 ;;
+    esac
+done
 
 OS=$(uname -s)
-
-# Linux package installation requires root
-if [ "$OS" = "Linux" ] && [ "$(id -u)" -ne 0 ]; then
-    echo "This script requires root privileges on Linux (for apt-get)."
-    echo ""
-    echo "  sudo bin/install-prereqs.sh"
-    echo ""
-    exit 1
-fi
-
-echo "=== Promise Compiler Prerequisites ==="
-echo ""
 
 # --- Helper functions ---
 
@@ -47,6 +45,24 @@ check_java() {
         echo "    Install Java 11+ (for ANTLR parser generation)"
         return 1
     fi
+}
+
+check_wasmtime() {
+    if has_cmd wasmtime; then
+        echo "  wasmtime: $(wasmtime --version 2>&1)"
+    else
+        echo "  wasmtime: NOT FOUND (optional, for --target wasm32-wasi)"
+        return 1
+    fi
+}
+
+install_wasmtime() {
+    if has_cmd wasmtime; then
+        return 0
+    fi
+    echo "Installing wasmtime (WASI runtime)..."
+    curl https://wasmtime.dev/install.sh -sSf | bash
+    echo "  NOTE: restart your shell or run 'source ~/.bashrc' to add wasmtime to PATH"
 }
 
 # Find the best available LLVM version (newest >= MIN_LLVM)
@@ -96,10 +112,15 @@ install_linux() {
     fi
     check_go || true
     check_java || true
+    check_wasmtime || true
     echo ""
 
     if [ "$llvm_ver" -ge "$MIN_LLVM" ] 2>/dev/null && [ -f /usr/lib/x86_64-linux-musl/libc.a ]; then
-        echo "All prerequisites already installed."
+        if [ "$INSTALL_WASM" = "1" ]; then
+            install_wasmtime
+        else
+            echo "All prerequisites already installed."
+        fi
         return 0
     fi
 
@@ -155,6 +176,11 @@ install_linux() {
     if [ -f /usr/lib/x86_64-linux-musl/libc.a ]; then
         echo "  musl: /usr/lib/x86_64-linux-musl/libc.a"
     fi
+    # Install wasmtime if --wasm flag
+    if [ "$INSTALL_WASM" = "1" ]; then
+        install_wasmtime
+    fi
+
     echo ""
     echo "Done. Run 'bin/build.sh' to build."
 }
@@ -193,6 +219,7 @@ install_macos() {
 
     check_go || true
     check_java || true
+    check_wasmtime || true
     echo ""
 
     # Install Homebrew LLVM if needed
@@ -213,11 +240,38 @@ install_macos() {
         return 1
     fi
 
+    # Install wasmtime if --wasm flag
+    if [ "$INSTALL_WASM" = "1" ]; then
+        install_wasmtime
+    fi
+
     echo ""
     echo "Done. Run 'bin/build.sh' to build."
 }
 
 # --- Main ---
+
+echo "=== Promise Compiler Prerequisites ==="
+echo ""
+
+# On Linux, non-root with --wasm: just install wasmtime (no apt-get needed)
+if [ "$OS" = "Linux" ] && [ "$(id -u)" -ne 0 ] && [ "$INSTALL_WASM" = "1" ]; then
+    install_wasmtime
+    exit 0
+fi
+
+# Linux package installation requires root
+if [ "$OS" = "Linux" ] && [ "$(id -u)" -ne 0 ]; then
+    echo "This script requires root privileges on Linux (for apt-get)."
+    echo ""
+    echo "  sudo bin/install-prereqs.sh"
+    echo ""
+    echo "To install only wasmtime (no root needed):"
+    echo ""
+    echo "  bin/install-prereqs.sh --wasm"
+    echo ""
+    exit 1
+fi
 
 case "$OS" in
     Linux)  install_linux ;;

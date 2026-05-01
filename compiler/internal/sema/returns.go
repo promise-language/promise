@@ -22,6 +22,10 @@ func (c *Checker) checkMissingReturn(file *ast.File) {
 			if d.Body == nil {
 				continue
 			}
+			// Generator functions don't need explicit return
+			if c.info.GeneratorFuncs[d] != nil {
+				continue
+			}
 			obj := c.lookup(d.Name)
 			if obj == nil {
 				continue
@@ -56,6 +60,10 @@ func (c *Checker) checkMissingReturn(file *ast.File) {
 			}
 			for _, md := range d.Methods {
 				if md.Body == nil {
+					continue
+				}
+				// Generator methods don't need explicit return
+				if c.info.GeneratorFuncs[md] != nil {
 					continue
 				}
 				m := lookupMethodByKind(named, md)

@@ -73,6 +73,10 @@ func llvmType(typ types.Type) irtypes.Type {
 	case *types.Array:
 		return irtypes.I8Ptr // treated as heap-allocated slice for now
 	case *types.Instance:
+		origin := t.Origin()
+		if origin == types.TypIter || origin == types.TypStream {
+			return generatorValueType() // {i8* handle, i8* yield_slot}
+		}
 		return irtypes.I8Ptr // Slice[T], Map[K,V], and other generic instances
 	default:
 		return irtypes.I8Ptr // opaque pointer placeholder for future types

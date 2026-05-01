@@ -107,3 +107,21 @@ func AsMap(t Type) (key, val Type, ok bool) {
 	}
 	return nil, nil, false
 }
+
+// AsIterator extracts the element type from an Iterator instance.
+// Returns (elem, true) for Iterator instances, (nil, false) otherwise.
+func AsIterator(t Type) (elem Type, ok bool) {
+	if inst, ok := t.(*Instance); ok && inst.origin == TypIter {
+		return inst.typeArgs[0], true
+	}
+	return nil, false
+}
+
+// AsStream extracts the element type from a Stream instance.
+// Returns (elem, true) for Stream instances, (nil, false) otherwise.
+func AsStream(t Type) (elem Type, ok bool) {
+	if inst, ok := t.(*Instance); ok && inst.origin == TypStream {
+		return inst.typeArgs[0], true
+	}
+	return nil, false
+}

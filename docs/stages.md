@@ -54,6 +54,7 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 | Naming conventions | PascalCase canonical names for all non-scalar types; lowercase sugar | Done | [standard-runtime.md](standard-runtime.md#naming-conventions) |
 | C binding | Extern ABI coercion (`extern.go`), C header generation (`headergen.go`) | Done (dormant — header gen implemented but not exposed via CLI; original use case obsolete after C runtime migration) | [c-binding-architecture.md](c-binding-architecture.md) |
 | Self-contained binary | Embed gzip-compressed LLVM tools (opt, llc, lld, libLLVM.so) via `go:embed` for release builds | Done (Phase 7f, Linux x86_64) | [runtime-proposal.md](runtime-proposal.md) |
+| Yield generators | `stream[T]` functions with `yield`, LLVM presplit coroutines, `for-in` consumption | Done | — |
 
 ---
 
@@ -513,6 +514,34 @@ Compiler-inserted `drop()` calls when a value's owner goes out of scope and the 
 
 **Runtime:** No runtime changes — `drop()` is a regular method call.
 
+## Yield Generators (Done)
+
+Generator functions: `stream[T]` return type with `yield` statements, compiled to LLVM presplit coroutines, consumed via `for-in`.
+
+**Files:** New `codegen/generator.go` (~350 LOC); updates to `codegen/compiler.go`, `codegen/stmt.go`, `codegen/mono.go`, `sema/check.go`, `sema/stmt.go`, `sema/info.go`, `types/container.go`; 12 e2e tests
+
+**Sema:**
+- `AsStream(Type)` / `AsIterator(Type)` type helpers in `types/container.go`
+- Generator detection: functions/methods returning `stream[T]` with `yield` recorded in `Info.GeneratorFuncs`
+- `yield` outside generator → error; `yield` in lambda → error; `yield` type mismatch → error
+- `stream[T]` function with no `yield` → error (catches bare `return` in stream functions)
+- Return path analysis skipped for generator functions (terminate by falling off the end)
+
+**Codegen:**
+- **Representation**: `{i8* coro_handle, i8* yield_slot_ptr}` — same shape as closure fat pointer. Yield slot is heap-allocated (stable pointer across suspend/resume).
+- **Coroutine structure**: LLVM presplit coroutine with initial suspend. Factory function allocates yield slot, calls coroutine ramp, returns `{handle, slot}`.
+- **Yield**: Store value to yield slot → `coro.suspend(none, false)` → switch (0=resume, 1=cleanup, default=suspend/done).
+- **Consumer (for-in)**: `resume → done? → load value → body → resume → done? → ...`. Loop exit: `coro.destroy(handle)`, `pal_free(yield_slot)`.
+- **Coro-elide prevention**: `__promise_gen_resume/done/destroy` noinline wrapper functions hide the resume/done/destroy pattern from LLVM's coro-elide pass, which otherwise incorrectly stack-allocates generator frames.
+- **Critical coro-split requirement**: Suspend block (default case of `coro.suspend` switch) must go to a block with `coro.end + ret`, not a bare `ret`. Without `coro.end`, coro-split generates `unreachable` in the resume function's suspend path → optimizer eliminates state saves → use-after-free.
+- **Scope cleanup**: `bindingGenerator` kind with handle+slot allocas. On scope exit/break/return: null-check handle → `coro.done?` → `coro.destroy` → `pal_free(slot)`.
+- **Monomorphization**: Generator routing in `defineMonoMethods` and `defineMonoFuncs` via `GeneratorFuncs` map lookup.
+- **Method generators**: `buildGeneratorCoroutine` shared by top-level functions and type methods. Methods pass receiver as extra coroutine parameter.
+
+**Scope**: Basic generators, infinite generators with break, early return, conditional yield, generator with parameters, empty generators, nested generators (generator calling generator), early break cleanup, index variable in for-in, generator methods on types, recursive generators.
+
+**Deferred**: `yield*` (delegate to sub-iterator), failable generators (`stream[T]!`), stored generator values (first-class generator variables outside for-in), generator closures (capturing lambdas as generators).
+
 ## Stage 9 — Module System (Planned)
 
 Module resolution and dependency management.
@@ -540,7 +569,7 @@ Command-line interface. Core commands implemented; formatter planned.
 - Bare pipe detection: `echo '<code>' | promise` auto-enters exec mode
 - Inline error formatting: source line + `^` caret marker, no temp filenames
 - Embedded `std/` and `runtime/` in the binary via `go:embed` for self-contained install
-- **Test suite**: 613 tests across 118 files — `tests/e2e/` (language features), `tests/std/` (standard library), `tests/concurrency/` (scheduler, channels, select, panic recovery, stress tests)
+- **Test suite**: 681 tests across 120 files — `tests/e2e/` (language features), `tests/std/` (standard library), `tests/concurrency/` (scheduler, channels, select, panic recovery, stress tests)
 - `promise fmt` — code formatter (planned)
 
 ### Stress test mode (`-stress`)
@@ -573,7 +602,7 @@ Dependency fetching and resolution.
 
 ## What's Next
 
-The compiler pipeline (Stages 1-8o) is complete for the current feature set. The runtime is fully codegen-emitted LLVM IR — no C files remain. Phase 5a added 1:1 threading (`go`/`<-` with OS threads). Phase 5b added typed channels (`channel[T]`). Phase 5c replaced 1:1 threading with an M:N scheduler using LLVM coroutine intrinsics — goroutines are cheap coroutine handles multiplexed on OS threads via per-CPU processors and work stealing. Scheduler enhancements completed: P-local run queues with work stealing, cooperative preemption (yield checks at function entry and loop back-edges), `select` statement (multi-channel blocking with default), goroutine-scoped panic recovery (setjmp/longjmp per-G, panics don't kill the process), `set_max_procs`/`get_max_procs` runtime API, and scheduler profiling counters (gs_created, gs_completed, context_switches, steals). CLI stress testing (`promise test -stress`) detects flaky tests via repeated execution with adaptive scheduling, timing variance analysis, and live reporting. IO reactor and WASM scheduling remain (Phases 5d-6). The next work falls into three areas:
+The compiler pipeline (Stages 1-8o) is complete for the current feature set. The runtime is fully codegen-emitted LLVM IR — no C files remain. Phase 5a added 1:1 threading (`go`/`<-` with OS threads). Phase 5b added typed channels (`channel[T]`). Phase 5c replaced 1:1 threading with an M:N scheduler using LLVM coroutine intrinsics — goroutines are cheap coroutine handles multiplexed on OS threads via per-CPU processors and work stealing. Scheduler enhancements completed: P-local run queues with work stealing, cooperative preemption (yield checks at function entry and loop back-edges), `select` statement (multi-channel blocking with default), goroutine-scoped panic recovery (setjmp/longjmp per-G, panics don't kill the process), `set_max_procs`/`get_max_procs` runtime API, and scheduler profiling counters (gs_created, gs_completed, context_switches, steals). Yield generators (`stream[T]` with `yield`) reuse the LLVM presplit coroutine infrastructure for synchronous, caller-driven iteration — functions, methods, infinite generators, recursion, and scope cleanup all work. CLI stress testing (`promise test -stress`) detects flaky tests via repeated execution with adaptive scheduling, timing variance analysis, and live reporting. IO reactor and WASM scheduling remain (Phases 5d-6). The next work falls into three areas:
 
 ### Near-term: Language Features
 
@@ -738,6 +767,10 @@ Known gaps and improvements deferred from completed stages.
 | Extern ABI for generic types | 8f | Low |
 | Non-instance field placements (`value`/`variant`/`type`) | 8c | Low |
 | User type `toString()` for interpolation | 8h | Low |
+| `yield*` delegate (forward all values from sub-iterator) | Generators | Medium |
+| Failable generators (`stream[T]!` with error propagation through yield) | Generators | Low |
+| Stored generator values (first-class generator variables outside for-in) | Generators | Low |
+| Generator closures (capturing lambdas as generators) | Generators | Low |
 | Devirtualization optimization (direct call when concrete type known) | 8L | Low |
 | ~~`map[bool, T]` — bool key hashing/lookup is broken~~ — **Fixed.** Bool hash now uses hardcoded constants via `select i1` instead of `fnv1a_hash`. Map literal key types are validated against `Hashable + Equal` constraints via `validateConstraints`. | 8i | ~~Medium~~ Resolved |
 | ~~Variable name collisions in repeated `if v := opt { }` blocks~~ — **Fixed.** `uniqueLocalName()` with per-function `localNameCount` appends `.N` suffix to duplicate alloca names in inner scopes. | 8n | ~~Medium~~ Resolved |
@@ -769,5 +802,4 @@ Known gaps and improvements deferred from completed stages.
 
 | Item |
 |------|
-| Generators (`yield`, `yield*`) |
 | String slicing, Unicode normalization |

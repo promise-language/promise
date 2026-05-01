@@ -318,11 +318,6 @@ func runTest(args []string) {
 
 	target := remaining[0]
 
-	// Print target when cross-compiling
-	if targetTriple != "" && targetTriple != codegen.HostTargetTriple() {
-		fmt.Printf("target: %s\n", targetTriple)
-	}
-
 	// Check for recursive "..." pattern
 	recursive := false
 	if strings.HasSuffix(target, "/...") || target == "..." {
@@ -422,18 +417,25 @@ func runTestFile(filename string, timeout time.Duration, targetTriple string) {
 		os.Exit(1)
 	}
 
-	// Print output, replacing summary line with timed version
+	// Print output: format raw "PASS <ns> <name>" lines and replace summary with timed version
+	targetSuffix := ""
+	if targetTriple != "" && targetTriple != codegen.HostTargetTriple() {
+		targetSuffix = fmt.Sprintf(" [%s]", targetTriple)
+	}
 	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?`)
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 		if line == "" {
 			continue
 		}
 		if m := summaryRe.FindStringSubmatch(line); m != nil {
+			fmt.Println() // empty line before summary
 			if m[3] != "" {
-				fmt.Printf("%s passed, %s failed, %s skipped (%.3fs)\n", m[1], m[2], m[3], elapsed.Seconds())
+				fmt.Printf("%s passed, %s failed, %s skipped (%.3fs)%s\n", m[1], m[2], m[3], elapsed.Seconds(), targetSuffix)
 			} else {
-				fmt.Printf("%s passed, %s failed (%.3fs)\n", m[1], m[2], elapsed.Seconds())
+				fmt.Printf("%s passed, %s failed (%.3fs)%s\n", m[1], m[2], elapsed.Seconds(), targetSuffix)
 			}
+		} else if targetSuffix != "" && (strings.HasPrefix(line, "PASS ") || strings.HasPrefix(line, "FAIL ")) {
+			fmt.Printf("%s%s\n", line, targetSuffix)
 		} else {
 			fmt.Println(line)
 		}
@@ -458,9 +460,14 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string, timeout time.D
 		target = codegen.HostTargetTriple()
 	}
 
+	targetSuffix := ""
+	if targetTriple != "" && targetTriple != codegen.HostTargetTriple() {
+		targetSuffix = fmt.Sprintf(" [%s]", targetTriple)
+	}
+
 	// Check target exclusion
 	if isTestExcluded(target, info.ExcludeTargets) {
-		fmt.Printf("SKIP (excluded) %s\n", name)
+		fmt.Printf("SKIP (excluded) %s%s\n", name, targetSuffix)
 		return
 	}
 
@@ -494,7 +501,7 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string, timeout time.D
 	elapsed := time.Since(start)
 
 	if ctx.Err() == context.DeadlineExceeded {
-		fmt.Printf("FAIL (timeout) %s\n", name)
+		fmt.Printf("FAIL (timeout) %s%s\n", name, targetSuffix)
 		fmt.Printf("0 passed, 1 failed\n")
 		fmt.Printf("\nFAILED:\n  %s\n", name)
 		os.Exit(1)
@@ -505,16 +512,16 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string, timeout time.D
 	expected := strings.TrimRight(info.ExpectOutput, "\n")
 
 	if actual == expected {
-		fmt.Printf("PASS (%.3fs)\n", elapsed.Seconds())
-		fmt.Printf("1 passed, 0 failed (%.3fs)\n", elapsed.Seconds())
+		fmt.Printf("PASS (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
+		fmt.Printf("\n1 passed, 0 failed (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
 	} else {
-		fmt.Printf("FAIL (%.3fs)\n", elapsed.Seconds())
+		fmt.Printf("FAIL (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
 		fmt.Printf("  expected: %s\n", firstLines(expected, 3))
 		fmt.Printf("  actual:   %s\n", firstLines(actual, 3))
 		if err != nil {
 			fmt.Printf("  exit:     %v\n", err)
 		}
-		fmt.Printf("0 passed, 1 failed (%.3fs)\n", elapsed.Seconds())
+		fmt.Printf("\n0 passed, 1 failed (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)
 		fmt.Printf("\nFAILED:\n  %s\n", name)
 		os.Exit(1)
 	}
@@ -571,7 +578,12 @@ func runTestDir(dir string, recursive bool, timeout time.Duration, targetTriple 
 		outStr := strings.TrimSpace(string(output))
 
 		// Skip files with no tests or excluded for this target
-		if !timedOut && (outStr == "no tests found" || strings.HasPrefix(outStr, "SKIP")) {
+		// Use lastLine because subprocess may prefix output with "target: ..." line
+		last := lastLine(outStr)
+		if !timedOut && (last == "no tests found" || strings.HasPrefix(last, "SKIP")) {
+			if strings.HasPrefix(last, "SKIP") {
+				totalSkipped++
+			}
 			continue
 		}
 
@@ -651,11 +663,16 @@ func runTestDir(dir string, recursive bool, timeout time.Duration, targetTriple 
 	}
 
 	// Print grand summary
+	fmt.Println() // empty line before summary
 	totalElapsed := time.Since(totalStart)
+	targetSuffix := ""
+	if targetTriple != "" && targetTriple != codegen.HostTargetTriple() {
+		targetSuffix = fmt.Sprintf(" [%s]", targetTriple)
+	}
 	if totalSkipped > 0 {
-		fmt.Printf("%d passed, %d failed, %d skipped (%d files, %.3fs)\n", totalPassed, totalFailed, totalSkipped, totalFiles, totalElapsed.Seconds())
+		fmt.Printf("%d passed, %d failed, %d skipped (%d files, %.3fs)%s\n", totalPassed, totalFailed, totalSkipped, totalFiles, totalElapsed.Seconds(), targetSuffix)
 	} else {
-		fmt.Printf("%d passed, %d failed (%d files, %.3fs)\n", totalPassed, totalFailed, totalFiles, totalElapsed.Seconds())
+		fmt.Printf("%d passed, %d failed (%d files, %.3fs)%s\n", totalPassed, totalFailed, totalFiles, totalElapsed.Seconds(), targetSuffix)
 	}
 
 	// Print failure list if any

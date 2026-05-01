@@ -1,0 +1,22 @@
+// Stress test: 2000 goroutines each creating a vector.
+// Tests that goroutine frames + vector allocations are recycled.
+
+main() `test(expected: "2000") {
+  ch := channel[int](capacity: 100);
+  for i in 0..2000 {
+    go {
+      int[] v = [];
+      v.push(1);
+      v.push(2);
+      v.push(3);
+      ch.send(v.len);
+    };
+  }
+  int sum = 0;
+  for j in 0..2000 {
+    r := <-ch;
+    if v := r { sum = sum + v; }
+  }
+  // Each goroutine sends 3 (vector length), so sum = 2000 * 3 = 6000
+  print_int(sum / 3);
+}

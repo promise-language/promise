@@ -569,7 +569,7 @@ Command-line interface. Core commands implemented; formatter planned.
 - Bare pipe detection: `echo '<code>' | promise` auto-enters exec mode
 - Inline error formatting: source line + `^` caret marker, no temp filenames
 - Embedded `std/` and `runtime/` in the binary via `go:embed` for self-contained install
-- **Test suite**: 681 tests across 120 files — `tests/e2e/` (language features), `tests/std/` (standard library), `tests/concurrency/` (scheduler, channels, select, panic recovery, stress tests)
+- **Test suite**: 684 tests across 123 files — `tests/e2e/` (language features), `tests/std/` (standard library), `tests/concurrency/` (scheduler, channels, select, panic recovery, stress tests)
 - `promise fmt` — code formatter (planned)
 
 ### Stress test mode (`-stress`)
@@ -631,14 +631,14 @@ The compiler pipeline (Stages 1-8o) is complete for the current feature set. The
 
 ### WASM remaining work
 
-Tests: 630 pass, 0 fail, 4 skip on `wasm32-wasi` (634 native)
+Tests: 681 pass, 0 fail, 3 skip on `wasm32-wasi` (684 native)
 
 | Item | Skipped tests | Effort | Notes |
 |------|--------------|--------|-------|
 | ~~f64→string (custom dtoa)~~ | ~~12~~ → 0 | ~~Medium~~ Done | Custom `_f64_to_str` in `std/format.pr` (pure Promise, %g format, 6 sig digits). No snprintf dependency. |
 | f64→string full precision (Grisu2/Ryu) | 0 | Medium | Current implementation uses 6 significant digits (matches `%g`). For full round-trip precision (~17 digits), implement Grisu2 or Ryu algorithm. Needed for serialization/deserialization fidelity. |
 | Panic recovery (`setjmp`/`longjmp`) | 2 (panic_recovery_basic, panic_recovery_channel) | Medium | WASM has no `setjmp`/`longjmp`. Options: Emscripten-style JS exception handling, or WASM exception handling proposal (`try`/`catch`/`throw` instructions). |
-| Free-list allocator | 1 (goroutine_1000 OOM) | Medium | Current bump allocator never frees. Add free-list on top of bump for long-running programs. |
+| ~~Free-list allocator~~ | ~~1~~ → 0 | ~~Medium~~ Done | Pre-compiled C free-list allocator (`wasm_alloc.c`) linked via wasm-ld. Size-class buckets (16B–64KB), sbrk via `memory.grow`. Replaces bump allocator. |
 | GOMAXPROCS >1 | 1 (gomaxprocs_query) | Low | Single-threaded WASM can't have multiple Ps. Could clamp silently instead of panicking. |
 | `clock_time_get` (WASI timing) | 0 | Low | `nanotime()` returns 0. Import `clock_time_get` from WASI for real timing. |
 | File IO (`fd_read`, `fd_prestat_*`) | 0 | Low | No tests depend on it yet. Needed for WASI filesystem access. |

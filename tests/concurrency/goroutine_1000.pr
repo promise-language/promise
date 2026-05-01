@@ -1,7 +1,7 @@
 // Stress test: 1000 goroutines each send 1 to a shared channel.
 // Tests scheduler scalability with high goroutine count.
 
-main() `test(expected: "1000", exclude: "wasm32") {
+main() `test(expected: "1000") {
   ch := channel[int](capacity: 1000);
   for idx in 0..1000 {
     go { ch.send(1); };

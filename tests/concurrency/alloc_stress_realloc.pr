@@ -1,0 +1,14 @@
+// Stress test: repeatedly grow and drop vectors (exercises realloc + free).
+// Each iteration grows a vector to 200 elements (multiple reallocs), then drops it.
+
+main() `test(expected: "100") {
+  int count = 0;
+  for i in 0..100 {
+    int[] v = [];
+    for j in 0..200 {
+      v.push(j);
+    }
+    count = count + 1;
+  }
+  print_int(count);
+}

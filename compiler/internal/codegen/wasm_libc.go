@@ -115,19 +115,11 @@ func (c *Compiler) defineWasmLongjmp() *ir.Func {
 }
 
 // emitWasmStart creates the @_start WASI entry point.
-// _start initializes the heap allocator, then calls @main (which has scheduler code).
+// _start calls @main (which has scheduler code). The allocator self-initializes.
 func (c *Compiler) emitWasmStart(mainFn *ir.Func) {
 	startFn := c.module.NewFunc("_start", irtypes.Void)
 	startFn.FuncAttrs = append(startFn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := startFn.NewBlock("entry")
-
-	// Initialize WASM bump allocator (loads __heap_base, sets heap_ptr/heap_end)
-	for _, f := range c.module.Funcs {
-		if f.Name() == "__promise_init_heap" {
-			entry.NewCall(f)
-			break
-		}
-	}
 
 	// Call @main (scheduler setup + coroutine run)
 	exitCode := entry.NewCall(mainFn)

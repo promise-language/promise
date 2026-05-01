@@ -278,7 +278,7 @@ func TestEmitAlloc(t *testing.T) {
 		})
 	}
 
-	// WASM uses custom bump allocator on memory.grow
+	// WASM uses linked C allocator (extern malloc)
 	t.Run("Wasm", func(t *testing.T) {
 		module := ir.NewModule()
 		p := &WasmPAL{}
@@ -294,20 +294,17 @@ func TestEmitAlloc(t *testing.T) {
 		if !strings.Contains(out, "nounwind") {
 			t.Error("missing nounwind attribute on pal_alloc")
 		}
-		if !strings.Contains(out, "@__promise_heap_ptr") {
-			t.Error("missing heap_ptr global")
+		// Should declare extern malloc (i32 for wasm32)
+		if !strings.Contains(out, "@malloc(i32") {
+			t.Error("missing @malloc(i32) declaration for wasm32")
 		}
-		if !strings.Contains(out, "@__promise_heap_end") {
-			t.Error("missing heap_end global")
+		// Should trunc i64 to i32 before calling malloc
+		if !strings.Contains(out, "trunc i64") {
+			t.Error("missing trunc i64 to i32 for wasm32 malloc")
 		}
-		if !strings.Contains(out, "@__heap_base") {
-			t.Error("missing __heap_base external global")
-		}
-		if !strings.Contains(out, "@llvm.wasm.memory.grow.i32") {
-			t.Error("missing memory.grow intrinsic")
-		}
-		if !strings.Contains(out, "@__promise_init_heap") {
-			t.Error("missing init_heap function")
+		// Should NOT have bump allocator globals
+		if strings.Contains(out, "@__promise_heap_ptr") {
+			t.Error("should not have bump allocator globals")
 		}
 	})
 }
@@ -354,7 +351,7 @@ func TestEmitFree(t *testing.T) {
 		})
 	}
 
-	// WASM free is a no-op (bump allocator doesn't reclaim)
+	// WASM free calls linked C allocator's @free
 	t.Run("Wasm", func(t *testing.T) {
 		module := ir.NewModule()
 		p := &WasmPAL{}
@@ -370,9 +367,9 @@ func TestEmitFree(t *testing.T) {
 		if !strings.Contains(out, "willreturn") {
 			t.Error("missing willreturn attribute on pal_free")
 		}
-		// No-op: should not contain call to @free
-		if strings.Contains(out, "@free") {
-			t.Error("WASM pal_free should not call @free")
+		// Should call @free (not a no-op)
+		if !strings.Contains(out, "@free(i8*") {
+			t.Error("WASM pal_free should call @free")
 		}
 	})
 }
@@ -422,11 +419,10 @@ func TestEmitRealloc(t *testing.T) {
 		})
 	}
 
-	// WASM realloc: alloc new + memcpy (requires EmitAlloc first)
+	// WASM realloc calls linked C allocator's @realloc
 	t.Run("Wasm", func(t *testing.T) {
 		module := ir.NewModule()
 		p := &WasmPAL{}
-		p.EmitAlloc(module) // EmitRealloc needs pal_alloc in module
 		fn := p.EmitRealloc(module)
 		out := module.String()
 
@@ -439,12 +435,17 @@ func TestEmitRealloc(t *testing.T) {
 		if !strings.Contains(out, "nounwind") {
 			t.Error("missing nounwind attribute on pal_realloc")
 		}
-		if !strings.Contains(out, "@__promise_memcpy") {
-			t.Error("missing __promise_memcpy for byte-by-byte copy")
+		// Should declare extern realloc (i32 size for wasm32)
+		if !strings.Contains(out, "@realloc(i8*") {
+			t.Error("missing @realloc declaration for wasm32")
 		}
-		// Should not use libc realloc
-		if strings.Contains(out, "declare") && strings.Contains(out, "@realloc") {
-			t.Error("WASM pal_realloc should not use libc @realloc")
+		// Should trunc size to i32
+		if !strings.Contains(out, "trunc i64") {
+			t.Error("missing trunc i64 to i32 for wasm32 realloc")
+		}
+		// Should NOT use __promise_memcpy
+		if strings.Contains(out, "@__promise_memcpy") {
+			t.Error("WASM pal_realloc should not use __promise_memcpy")
 		}
 	})
 }

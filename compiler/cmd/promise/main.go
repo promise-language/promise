@@ -1705,15 +1705,48 @@ func linkWasm(objFile, outputFile string) {
 	}
 }
 
+// ensureWasmAllocObj extracts the embedded WASM allocator object to cache.
+// Returns the path to the .o file.
+func ensureWasmAllocObj() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine home dir: %v", err)
+	}
+	cacheDir := filepath.Join(homeDir, ".promise", "cache", "crt", "wasm32")
+	objPath := filepath.Join(cacheDir, "wasm_alloc.o")
+
+	// Check if cached version matches embedded (by size)
+	if info, err := os.Stat(objPath); err == nil {
+		if info.Size() == int64(len(embeddedWasmAllocObj)) {
+			return objPath, nil
+		}
+	}
+
+	// Extract to cache
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return "", fmt.Errorf("cannot create WASM CRT cache: %v", err)
+	}
+	if err := os.WriteFile(objPath, embeddedWasmAllocObj, 0644); err != nil {
+		return "", fmt.Errorf("cannot write wasm_alloc.o to cache: %v", err)
+	}
+	return objPath, nil
+}
+
 // buildWasmLinkArgs builds the wasm-ld argument list for WASI linking.
-// No CRT objects needed — WASM has no system startup code.
+// Links user code with the embedded free-list allocator (wasm_alloc.o).
 func buildWasmLinkArgs(objFile, outputFile string) []string {
+	allocObj, err := ensureWasmAllocObj()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
 	return []string{
 		"--no-entry",
 		"--export=_start",
 		"--allow-undefined", // WASI imports (fd_write, proc_exit) resolved at runtime
 		"-o", outputFile,
 		objFile,
+		allocObj,
 	}
 }
 

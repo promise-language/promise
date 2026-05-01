@@ -14,7 +14,7 @@ MUSL_CRT_DST  := $(RESOURCES)/crt/x86_64-linux-musl
 # LLVM tool bundling (release builds only)
 LLVM_DST      := $(RESOURCES)/llvm/linux-amd64
 
-.PHONY: all generate build test clean download-antlr fmt install resources musl-crt llvm-bundle release
+.PHONY: all generate build test clean download-antlr fmt install resources musl-crt llvm-bundle release wasm-alloc
 
 all: generate build
 
@@ -70,6 +70,10 @@ clean:
 	rm -f $(BINARY)
 	rm -rf $(PARSER_PKG)/*.go $(PARSER_PKG)/*.interp $(PARSER_PKG)/*.tokens
 	rm -rf $(RESOURCES)
+
+wasm-alloc:
+	clang --target=wasm32-unknown-wasi -O2 -nostdlib -c \
+		cmd/promise/crt/wasm32/wasm_alloc.c -o cmd/promise/crt/wasm32/wasm_alloc.o
 
 llvm-bundle:
 	@LLVM_VER=$$(for v in $$(seq 25 -1 22); do \

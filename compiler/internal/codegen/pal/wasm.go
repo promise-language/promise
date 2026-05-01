@@ -85,223 +85,79 @@ func (p *WasmPAL) EmitExit(module *ir.Module) *ir.Func {
 	return fn
 }
 
-// --- Custom bump allocator (Phase 4b) ---
+// --- WASM allocator (linked from pre-compiled wasm_alloc.o) ---
 //
-// Uses WASM linear memory via memory.grow/memory.size.
-// Each allocation has an 8-byte header storing the block size (for realloc).
-// free() is a no-op (bump only). Memory grows but never shrinks.
-//
-// Globals:
-//   @__promise_heap_ptr  — current bump pointer (i32)
-//   @__promise_heap_end  — end of committed memory (i32)
-//   @__heap_base         — provided by wasm-ld, start of heap after stack/data
+// The allocator is a C free-list implementation compiled to WASM and linked
+// via wasm-ld. It provides malloc/free/realloc with size-class buckets.
+// See cmd/promise/crt/wasm32/wasm_alloc.c for the implementation.
 
-// emitWasmAllocGlobals declares the heap state globals and the __heap_base external.
-func emitWasmAllocGlobals(module *ir.Module) (heapPtr, heapEnd, heapBase *ir.Global) {
-	heapPtr = module.NewGlobal("__promise_heap_ptr", irtypes.I32)
-	heapPtr.Init = constant.NewInt(irtypes.I32, 0)
-
-	heapEnd = module.NewGlobal("__promise_heap_end", irtypes.I32)
-	heapEnd.Init = constant.NewInt(irtypes.I32, 0)
-
-	// __heap_base is provided by wasm-ld
-	heapBase = module.NewGlobal("__heap_base", irtypes.I32)
-	heapBase.Linkage = enum.LinkageExternal
-	heapBase.Immutable = true
-
-	return
-}
-
-// emitWasmInitHeap emits @__promise_init_heap which sets heap_ptr and heap_end
-// from __heap_base and current memory.size. Must be called once at _start.
-func emitWasmInitHeap(module *ir.Module, heapPtr, heapEnd, heapBase *ir.Global) *ir.Func {
-	memorySize := module.NewFunc("llvm.wasm.memory.size.i32", irtypes.I32,
-		ir.NewParam("mem", irtypes.I32))
-	memorySize.FuncAttrs = append(memorySize.FuncAttrs, enum.FuncAttrNoUnwind)
-
-	fn := module.NewFunc("__promise_init_heap", irtypes.Void)
-	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock("entry")
-
-	// Align __heap_base up to 8 bytes
-	base := entry.NewLoad(irtypes.I32, heapBase)
-	basePlus7 := entry.NewAdd(base, constant.NewInt(irtypes.I32, 7))
-	aligned := entry.NewAnd(basePlus7, constant.NewInt(irtypes.I32, -8)) // & ~7
-	entry.NewStore(aligned, heapPtr)
-
-	// heap_end = memory.size(0) * 65536
-	pages := entry.NewCall(memorySize, constant.NewInt(irtypes.I32, 0))
-	end := entry.NewMul(pages, constant.NewInt(irtypes.I32, 65536))
-	entry.NewStore(end, heapEnd)
-
-	entry.NewRet(nil)
-	return fn
-}
-
-// EmitAlloc defines @pal_alloc using a bump allocator on WASM linear memory.
+// EmitAlloc declares extern @malloc and defines @pal_alloc as a wrapper.
 // Signature: @pal_alloc(i64 %size) → i8*
 func (p *WasmPAL) EmitAlloc(module *ir.Module) *ir.Func {
-	heapPtr, heapEnd, heapBase := emitWasmAllocGlobals(module)
-	emitWasmInitHeap(module, heapPtr, heapEnd, heapBase)
+	// declare noalias i8* @malloc(i32 noundef) nounwind
+	mallocSize := ir.NewParam("size", irtypes.I32)
+	mallocSize.Attrs = append(mallocSize.Attrs, enum.ParamAttrNoUndef)
+	mallocFn := module.NewFunc("malloc", irtypes.I8Ptr, mallocSize)
+	mallocFn.ReturnAttrs = append(mallocFn.ReturnAttrs, enum.ReturnAttrNoAlias)
+	mallocFn.FuncAttrs = append(mallocFn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
 
-	memoryGrow := module.NewFunc("llvm.wasm.memory.grow.i32", irtypes.I32,
-		ir.NewParam("mem", irtypes.I32),
-		ir.NewParam("pages", irtypes.I32))
-	memoryGrow.FuncAttrs = append(memoryGrow.FuncAttrs, enum.FuncAttrNoUnwind)
-
+	// define noalias i8* @pal_alloc(i64 %size) nounwind
 	fn := module.NewFunc("pal_alloc", irtypes.I8Ptr,
 		ir.NewParam("size", irtypes.I64))
 	fn.ReturnAttrs = append(fn.ReturnAttrs, enum.ReturnAttrNoAlias)
-	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
 	entry := fn.NewBlock("entry")
-	growBlk := fn.NewBlock("grow")
-	oomBlk := fn.NewBlock("oom")
-	doneBlk := fn.NewBlock("done")
 
-	// Truncate i64 size to i32 (wasm32 address space)
+	// Truncate i64 to i32 (wasm32 address space)
 	size32 := entry.NewTrunc(fn.Params[0], irtypes.I32)
+	ret := entry.NewCall(mallocFn, size32)
+	entry.NewRet(ret)
 
-	// total = align_up(size32, 8) + 8 (header)
-	sizePlus7 := entry.NewAdd(size32, constant.NewInt(irtypes.I32, 7))
-	sizeAligned := entry.NewAnd(sizePlus7, constant.NewInt(irtypes.I32, -8))
-	total := entry.NewAdd(sizeAligned, constant.NewInt(irtypes.I32, 8)) // 8-byte header
-
-	// Load current heap state
-	curPtr := entry.NewLoad(irtypes.I32, heapPtr)
-	curEnd := entry.NewLoad(irtypes.I32, heapEnd)
-
-	// newPtr = curPtr + total
-	newPtr := entry.NewAdd(curPtr, total)
-
-	// if newPtr > curEnd: grow
-	needGrow := entry.NewICmp(enum.IPredUGT, newPtr, curEnd)
-	entry.NewCondBr(needGrow, growBlk, doneBlk)
-
-	// grow block: call memory.grow with enough pages
-	deficit := growBlk.NewSub(newPtr, curEnd)
-	deficitRounded := growBlk.NewAdd(deficit, constant.NewInt(irtypes.I32, 65535))
-	pagesNeeded := growBlk.NewUDiv(deficitRounded, constant.NewInt(irtypes.I32, 65536))
-	growResult := growBlk.NewCall(memoryGrow, constant.NewInt(irtypes.I32, 0), pagesNeeded)
-	// memory.grow returns -1 on failure
-	growFailed := growBlk.NewICmp(enum.IPredEQ, growResult, constant.NewInt(irtypes.I32, -1))
-	growOkBlk := fn.NewBlock("grow_ok")
-	growBlk.NewCondBr(growFailed, oomBlk, growOkBlk)
-
-	// OOM: trap (WASM runtime will report the error)
-	oomBlk.NewUnreachable()
-
-	// grow_ok: update heap_end after successful grow
-	newEnd := growOkBlk.NewAdd(curEnd, growOkBlk.NewMul(pagesNeeded, constant.NewInt(irtypes.I32, 65536)))
-	growOkBlk.NewStore(newEnd, heapEnd)
-	growOkBlk.NewBr(doneBlk)
-
-	// done block: store size in header, advance heap_ptr, return ptr+8
-	// Header at curPtr: store the allocation size (for realloc)
-	headerPtr := doneBlk.NewIntToPtr(curPtr, irtypes.NewPointer(irtypes.I32))
-	doneBlk.NewStore(sizeAligned, headerPtr)
-
-	// User pointer = curPtr + 8
-	userAddr := doneBlk.NewAdd(curPtr, constant.NewInt(irtypes.I32, 8))
-	userPtr := doneBlk.NewIntToPtr(userAddr, irtypes.I8Ptr)
-
-	// Advance heap_ptr
-	doneBlk.NewStore(newPtr, heapPtr)
-
-	doneBlk.NewRet(userPtr)
 	return fn
 }
 
-// EmitFree defines @pal_free as a no-op (bump allocator doesn't reclaim).
+// EmitFree declares extern @free and defines @pal_free as a wrapper.
 func (p *WasmPAL) EmitFree(module *ir.Module) *ir.Func {
+	// declare void @free(i8* nocapture noundef) nounwind
+	freePtr := ir.NewParam("ptr", irtypes.I8Ptr)
+	freePtr.Attrs = append(freePtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
+	freeFn := module.NewFunc("free", irtypes.Void, freePtr)
+	freeFn.FuncAttrs = append(freeFn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
+
+	// define void @pal_free(i8* %ptr) nounwind willreturn
 	fn := module.NewFunc("pal_free", irtypes.Void,
 		ir.NewParam("ptr", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
 	entry := fn.NewBlock("entry")
+	entry.NewCall(freeFn, fn.Params[0])
 	entry.NewRet(nil)
+
 	return fn
 }
 
-// EmitRealloc defines @pal_realloc: allocate new, copy, return new (old is leaked).
+// EmitRealloc declares extern @realloc and defines @pal_realloc as a wrapper.
 func (p *WasmPAL) EmitRealloc(module *ir.Module) *ir.Func {
-	palAlloc := lookupFunc(module, "pal_alloc")
-	memcpyFn := emitWasmMemcpy(module)
+	// declare noalias i8* @realloc(i8* nocapture noundef, i32 noundef) nounwind
+	reallocPtr := ir.NewParam("ptr", irtypes.I8Ptr)
+	reallocPtr.Attrs = append(reallocPtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
+	reallocSize := ir.NewParam("size", irtypes.I32)
+	reallocSize.Attrs = append(reallocSize.Attrs, enum.ParamAttrNoUndef)
+	reallocFn := module.NewFunc("realloc", irtypes.I8Ptr, reallocPtr, reallocSize)
+	reallocFn.ReturnAttrs = append(reallocFn.ReturnAttrs, enum.ReturnAttrNoAlias)
+	reallocFn.FuncAttrs = append(reallocFn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
 
+	// define noalias i8* @pal_realloc(i8* %ptr, i64 %size) nounwind
 	fn := module.NewFunc("pal_realloc", irtypes.I8Ptr,
 		ir.NewParam("ptr", irtypes.I8Ptr),
 		ir.NewParam("size", irtypes.I64))
 	fn.ReturnAttrs = append(fn.ReturnAttrs, enum.ReturnAttrNoAlias)
-	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
 	entry := fn.NewBlock("entry")
-	nullBlk := fn.NewBlock("null_ptr")
-	copyBlk := fn.NewBlock("copy")
 
-	// If ptr is null, just allocate
-	isNull := entry.NewICmp(enum.IPredEQ, fn.Params[0], constant.NewNull(irtypes.I8Ptr))
-	entry.NewCondBr(isNull, nullBlk, copyBlk)
+	size32 := entry.NewTrunc(fn.Params[1], irtypes.I32)
+	ret := entry.NewCall(reallocFn, fn.Params[0], size32)
+	entry.NewRet(ret)
 
-	// null case: return alloc(size)
-	newAlloc := nullBlk.NewCall(palAlloc, fn.Params[1])
-	nullBlk.NewRet(newAlloc)
-
-	// copy case: read old size from header (ptr - 8), alloc new, memcpy, return new
-	ptrInt := copyBlk.NewPtrToInt(fn.Params[0], irtypes.I32)
-	headerAddr := copyBlk.NewSub(ptrInt, constant.NewInt(irtypes.I32, 8))
-	headerP := copyBlk.NewIntToPtr(headerAddr, irtypes.NewPointer(irtypes.I32))
-	oldSize := copyBlk.NewLoad(irtypes.I32, headerP)
-
-	newSize32 := copyBlk.NewTrunc(fn.Params[1], irtypes.I32)
-	// copyLen = min(oldSize, newSize32)
-	useOld := copyBlk.NewICmp(enum.IPredULT, oldSize, newSize32)
-	copyLen := copyBlk.NewSelect(useOld, oldSize, newSize32)
-
-	newPtr := copyBlk.NewCall(palAlloc, fn.Params[1])
-	// Copy bytes
-	copyLen64 := copyBlk.NewZExt(copyLen, irtypes.I64)
-	copyBlk.NewCall(memcpyFn, newPtr, fn.Params[0], copyLen64)
-
-	copyBlk.NewRet(newPtr)
-	return fn
-}
-
-// emitWasmMemcpy emits a simple byte-by-byte memcpy for WASM (no libc).
-// Signature: @__promise_memcpy(i8* %dst, i8* %src, i64 %n) → void
-func emitWasmMemcpy(module *ir.Module) *ir.Func {
-	// Check if already defined
-	if f := lookupFunc(module, "__promise_memcpy"); f != nil {
-		return f
-	}
-
-	fn := module.NewFunc("__promise_memcpy", irtypes.Void,
-		ir.NewParam("dst", irtypes.I8Ptr),
-		ir.NewParam("src", irtypes.I8Ptr),
-		ir.NewParam("n", irtypes.I64))
-	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-
-	entry := fn.NewBlock("entry")
-	loopBlk := fn.NewBlock("loop")
-	doneBlk := fn.NewBlock("done")
-
-	// if n == 0, skip
-	isZero := entry.NewICmp(enum.IPredEQ, fn.Params[2], constant.NewInt(irtypes.I64, 0))
-	entry.NewCondBr(isZero, doneBlk, loopBlk)
-
-	// loop: i = phi(0, i+1); copy byte; if i+1 == n goto done
-	iPhi := loopBlk.NewPhi(
-		ir.NewIncoming(constant.NewInt(irtypes.I64, 0), entry))
-	srcElem := loopBlk.NewGetElementPtr(irtypes.I8, fn.Params[1], iPhi)
-	b := loopBlk.NewLoad(irtypes.I8, srcElem)
-	dstElem := loopBlk.NewGetElementPtr(irtypes.I8, fn.Params[0], iPhi)
-	loopBlk.NewStore(b, dstElem)
-
-	iNext := loopBlk.NewAdd(iPhi, constant.NewInt(irtypes.I64, 1))
-	iPhi.Incs = append(iPhi.Incs, ir.NewIncoming(iNext, loopBlk))
-
-	loopDone := loopBlk.NewICmp(enum.IPredEQ, iNext, fn.Params[2])
-	loopBlk.NewCondBr(loopDone, doneBlk, loopBlk)
-
-	doneBlk.NewRet(nil)
 	return fn
 }
 

@@ -638,22 +638,13 @@ count(string s, string sub) int;
 - **Implementation**: Pure Promise using existing `string.[]`, `string.[:]`, `string.+`
 - **Test**: `tests/std/test_string_util.pr`
 
-#### 1d. `std/result.pr` — Result Utilities
+#### 1d. `std/result.pr` — Result Utilities — DEFERRED
 
-```promise
-// Unwrap with default value
-unwrap_or[T](T! value, T default_val) T;
+Failable types (`T!`) in Promise are a function-level concept — they cannot be used as parameter or variable types. The planned `unwrap_or[T](T! value, T default_val)` and `is_error[T](T! value)` are not expressible. Promise's built-in error handling syntax already covers these use cases concisely:
+- `unwrap_or` → `failable_call() ? e { default_val }`
+- `is_error` → `bool err = false; failable_call() ? e { err = true; }`
 
-// Map the success value
-map_result[T, R](T! value, |T| R transform) R!;
-
-// Check if result is error
-is_error[T](T! value) bool;
-```
-
-- **File**: `std/result.pr`
-- **Dependencies**: Error type (Phase 0a)
-- **Test**: `tests/std/test_result.pr`
+No `std/result.pr` is needed.
 
 ---
 
@@ -695,29 +686,9 @@ type Builder `public {
 - **Implementation**: Wraps a `Vector[u8]`. `write()` and `write_string()` push bytes individually. `to_string()` calls `string.from_bytes()` which reads Vector[u8] data+count and calls `promise_string_new`. `write_char` not yet implemented.
 - **Test**: `tests/std/test_builder.pr` (9 tests)
 
-#### 2c. `std/fmt.pr` — Runtime Template Formatting
+#### 2c. `std/fmt.pr` — Runtime Template Formatting — DEFERRED
 
-```promise
-// Format with positional placeholders: fmt("{} is {} years old", name, age)
-// Each {} calls format(~writer) on the next argument
-// Escape literal braces with {{  }}
-//
-// NOTE: Requires variadic generics or overloads for multiple arities.
-// Initial implementation: fixed overloads for 1-6 Format arguments.
-
-fmt1[A: Format](string template, A a1) string;
-fmt2[A: Format, B: Format](string template, A a1, B a2) string;
-fmt3[A: Format, B: Format, C: Format](string template, A a1, B a2, C a3) string;
-// ... up to fmt6
-
-// Prefer string interpolation for compile-time templates.
-// fmt() is for cases where the template is a runtime value.
-```
-
-- **File**: `std/fmt.pr`
-- **Dependencies**: `builder.pr`, `Format` (Phase 0d)
-- **Implementation**: Pure Promise — scan template for `{}`, call `arg.format(~builder)` for each placeholder
-- **Test**: `tests/std/test_fmt.pr`
+Runtime template formatting (`fmt1`-`fmt6`) is deferred. String interpolation (`"{x} is {age} years old"`) covers the vast majority of formatting needs at compile time. Runtime template formatting, if needed, belongs in a catalog module (`modules/templates/`) rather than `std/`, since it is not a core primitive.
 
 ---
 
@@ -804,100 +775,26 @@ type Random {
 - **Implementation**: Pure Promise. xoshiro256** state is 4 `uint` fields. Seed expansion via splitmix64. Float conversion: mask top bits, OR into exponent, subtract 1.0.
 - **Test**: `tests/std/test_random.pr`
 
-#### 3c. `std/time.pr` — Duration & Instant
+#### 3c. `std/time.pr` — Duration & Instant — DONE
 
-```promise
-type Duration {
-    // Immutable time duration (nanosecond precision)
-
-    int nanos `value;
-
-    // Factory constructors
-    from_nanos(int ns) Self `factory;
-    from_micros(int us) Self `factory;
-    from_millis(int ms) Self `factory;
-    from_secs(int s) Self `factory;
-    from_mins(int m) Self `factory;
-    zero() Self `factory;
-
-    // Accessors
-    get as_nanos int;
-    get as_micros int;
-    get as_millis int;
-    get as_secs int;
-
-    // Arithmetic
-    +(Duration other) Duration;
-    -(Duration other) Duration;
-    *(int factor) Duration;
-
-    // Comparison
-    ==(Duration other) bool;
-    !=(Duration other) bool;
-    <(Duration other) bool;
-    >(Duration other) bool;
-    <=(Duration other) bool;
-    >=(Duration other) bool;
-
-    to_string() string;
-}
-
-type Instant {
-    // Monotonic timestamp for measuring elapsed time
-
-    int nanos;
-
-    // Factory constructors
-    now() Self! `factory;
-
-    // Measurement
-    elapsed() Duration!;
-    duration_since(Instant &earlier) Duration;
-
-    // Comparison
-    ==(Instant other) bool;
-    <(Instant other) bool;
-    >(Instant other) bool;
-}
-
-// Utility
-sleep(Duration d)!;
-```
-
+- `Duration` — pure value type (`int nanos `value`). Factory constructors: `from_nanos`, `from_micros`, `from_millis`, `from_secs`, `zero`. Getters: `as_nanos`, `as_micros`, `as_millis`, `as_secs`. Arithmetic: `+`, `-`, `*`. Full comparison operators. `to_string()` with adaptive units (ns/us/ms/s). `format(Writer ~w)!`.
+- `Instant` — pure value type. `now()` factory (calls `_nanotime` extern). `elapsed()`, `duration_since()`. Comparison operators.
+- `sleep(Duration d)` — free function, calls `_sleep_nanos` extern. WASM: no-op.
+- Native codegen: `promise_nanotime` (clock_gettime CLOCK_MONOTONIC), `promise_sleep_nanos` (nanosleep(2)). Bodies in `io.go:definePALBodies`. Test runner uses separate `.promise_nanotime_raw` to avoid ABI conflict.
 - **File**: `std/time.pr`
-- **Dependencies**: PAL `EmitNanotime` (3.3), PAL `EmitSleep` (3.3), numeric `to_string()` (Phase 2a)
-- **Native codegen**: `Instant.now()` calls PAL nanotime, `sleep()` calls PAL sleep
-- **Implementation**: `Duration` is pure Promise (arithmetic on nanos). `Instant` needs two native operations (now, sleep).
-- **Test**: `tests/std/test_time.pr`
+- **Test**: `tests/std/test_time.pr` (23 tests)
 
 ---
 
 ### Phase 4: System I/O
 
-#### 4a. `std/io.pr` — Extended I/O (Closer Interface, Utilities)
+#### 4a. `std/io.pr` — Extended I/O (Closer Interface, Utilities) — DONE
 
-```promise
-// Note: Writer is already defined in std/format.pr (Phase 0d)
-// Note: Reader is already defined in std/parse.pr (Phase 0e)
-
-type Closer `structural {
-    close(~this)! `abstract;
-}
-
-// Convenience functions using Writer (from std/format.pr)
-write_line(Writer ~w, string s)!;
-
-// Read utilities using Reader (from std/parse.pr)
-read_all(Reader ~r) u8[]!;
-read_string(Reader ~r) string!;
-```
-
-Extend existing `std/io.pr` with Closer and I/O utilities while keeping existing print functions. `Writer` is reused from `std/format.pr` and `Reader` from `std/parse.pr` — File, TcpStream, etc. all satisfy the same interfaces used for formatting and parsing.
-
-- **File**: `std/io.pr` (extend)
-- **Dependencies**: Error type (Phase 0a), Writer (Phase 0d), Reader (Phase 0e), `Vector[u8]`
-- **Implementation**: Closer is a pure structural type. Convenience functions are pure Promise.
-- **Test**: `tests/std/test_io.pr`
+- `Closer` — structural interface with `close(~this)!` abstract method. Any type with a matching `close` method satisfies it.
+- `write_line(Writer ~w, string s)!` — convenience function, writes string + newline.
+- `read_all`/`read_string` deferred to Phase 4b (File) when there are concrete Reader sources beyond Scanner.
+- **File**: `std/io.pr` (extended)
+- **Test**: `tests/std/test_io.pr` (4 tests)
 
 #### 4b. `std/file.pr` — File System Access
 
@@ -1264,10 +1161,10 @@ cd .. && bin/e2e.sh                    # all Promise tests pass (including new o
 | 1a | `std/set.pr` | Promise | No | 80 |
 | 1b | `std/sort.pr` | Promise | No | 120 |
 | 1c | `std/string_util.pr` | Promise | No | 80 |
-| 1d | `std/result.pr` | Promise | No | 30 |
+| 1d | `std/result.pr` | ~~Promise~~ | No | ~~30~~ DEFERRED |
 | 2a | `std/int.pr` etc. | Native + Promise | No | 60 |
 | 2b | `std/builder.pr` | Mostly Promise | No | 60 |
-| 2c | `std/fmt.pr` | Promise | No | 50 |
+| 2c | `std/fmt.pr` | ~~Promise~~ | No | ~~50~~ DEFERRED |
 | 3a | `std/math.pr` | Native + Promise | No | 100 |
 | 3b | `std/random.pr` | Promise | No | 80 |
 | 3c | `std/time.pr` | Promise + Native | 3 | 120 |

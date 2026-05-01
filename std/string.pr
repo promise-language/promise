@@ -134,6 +134,16 @@ type string `native `public {
         return result;
     }
 
+    pad_left(int width, char fill) string `doc("Pads the string on the left with `fill` to reach `width`. Returns unchanged if already wide enough.") {
+        if this.len >= width { return this; }
+        return fill.to_string().repeat(width - this.len) + this;
+    }
+
+    pad_right(int width, char fill) string `doc("Pads the string on the right with `fill` to reach `width`. Returns unchanged if already wide enough.") {
+        if this.len >= width { return this; }
+        return this + fill.to_string().repeat(width - this.len);
+    }
+
     get hash int `native;
     get is_empty bool => this.len == 0;
     to_string() string `public => this;

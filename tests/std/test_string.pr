@@ -292,3 +292,33 @@ test_chars() `test {
   char[] empty = "".chars();
   assert(empty.len == 0, "empty chars");
 }
+
+// --- pad_left / pad_right ---
+
+test_pad_left_basic() `test {
+  assert("hi".pad_left(5, ' ') == "   hi", "pad_left space");
+  assert("42".pad_left(5, '0') == "00042", "pad_left zero");
+}
+
+test_pad_left_no_op() `test {
+  assert("hello".pad_left(3, ' ') == "hello", "pad_left no-op longer");
+  assert("abc".pad_left(3, ' ') == "abc", "pad_left no-op equal");
+}
+
+test_pad_left_empty() `test {
+  assert("".pad_left(4, '*') == "****", "pad_left empty");
+}
+
+test_pad_right_basic() `test {
+  assert("hi".pad_right(5, ' ') == "hi   ", "pad_right space");
+  assert("42".pad_right(5, '0') == "42000", "pad_right zero");
+}
+
+test_pad_right_no_op() `test {
+  assert("hello".pad_right(3, ' ') == "hello", "pad_right no-op longer");
+  assert("abc".pad_right(3, ' ') == "abc", "pad_right no-op equal");
+}
+
+test_pad_right_empty() `test {
+  assert("".pad_right(4, '*') == "****", "pad_right empty");
+}

@@ -1,18 +1,28 @@
 // Test the strings module (compiled as part of the module).
 
 join_basic() `test {
-    string[] parts = ["a", "b", "c"];
-    assert(join(parts, ", ") == "a, b, c", "join basic");
+    assert(join(", ", "a", "b", "c") == "a, b, c", "join basic");
 }
 
 join_empty() `test {
-    string[] empty = [];
-    assert(join(empty, ",") == "", "join empty");
+    assert(join(",") == "", "join empty");
 }
 
 join_single() `test {
-    string[] one = ["hello"];
-    assert(join(one, ",") == "hello", "join single");
+    assert(join(",", "hello") == "hello", "join single");
+}
+
+join_vector_passthrough() `test {
+    string[] parts = ["x", "y", "z"];
+    assert(join("-", parts) == "x-y-z", "join vector passthrough");
+}
+
+join_empty_separator() `test {
+    assert(join("", "a", "b", "c") == "abc", "join empty separator");
+}
+
+join_two_args() `test {
+    assert(join("|", "x", "y") == "x|y", "join two args");
 }
 
 reverse_basic() `test {

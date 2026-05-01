@@ -2,7 +2,7 @@
 // These complement string's built-in methods with operations that work
 // on collections of strings or produce strings from non-string inputs.
 
-join(string[] parts, string sep) string `public `doc("Joins an array of strings with a separator between each element.") {
+join(string sep, ...string parts) string `public `doc("Joins strings with a separator between each element.") {
     if parts.len == 0 { return ""; }
     string result = parts[0];
     int i = 1;

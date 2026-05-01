@@ -1,0 +1,61 @@
+// Tests for std/io.pr — Closer interface, write_line
+
+// --- write_line ---
+
+test_write_line() `test {
+    Builder b = Builder();
+    write_line(b, "hello")!;
+    assert(b.to_string() == "hello\n", "write_line appends newline");
+}
+
+test_write_line_multiple() `test {
+    Builder b = Builder();
+    write_line(b, "first")!;
+    write_line(b, "second")!;
+    assert(b.to_string() == "first\nsecond\n", "multiple write_lines");
+}
+
+test_write_line_empty() `test {
+    Builder b = Builder();
+    write_line(b, "")!;
+    assert(b.to_string() == "\n", "write_line empty string");
+}
+
+// --- Closer structural interface ---
+
+type TestCloser {
+    bool closed;
+
+    close(~this)! {
+        this.closed = true;
+    }
+}
+
+_do_close(Closer ~c)! {
+    c.close();
+}
+
+test_closer_structural() `test {
+    TestCloser tc = TestCloser(closed: false);
+    _do_close(tc)!;
+    assert(tc.closed, "closer was called");
+}
+
+// --- Closer error propagation ---
+
+type FailCloser {
+    close(~this)! {
+        raise error(message: "close failed");
+    }
+}
+
+_try_close(Closer ~c) string {
+    c.close() ? e { return e.message; };
+    return "ok";
+}
+
+test_closer_error() `test {
+    FailCloser fc = FailCloser();
+    string result = _try_close(fc);
+    assert(result == "close failed", "closer error propagated");
+}

@@ -730,9 +730,9 @@ Dependency fetching and resolution.
 
 ## What's Next
 
-The compiler pipeline (Stages 1-8p) is complete. Runtime is fully codegen-emitted LLVM IR — no C files remain. All major cross-cutting features are done: M:N scheduler (Phase 5c), WASM target (Phases 4b/5d/7a), yield generators, structural interfaces, operator dispatch, naming conventions, pure value types, documentation system (Phase 1), module system (Phase 3 done + identity redesign), stdlib expansion (math, sort, set, random catalog modules), and Format/Parse infrastructure (Writer, Reader, Builder, Scanner, `to_string()`, `format(Writer ~w)!` on all primitives, `int/bool/uint/f64.parse`, `string.from_bytes`, `Vector.filled`).
+The compiler pipeline (Stages 1-8p) is complete. Runtime is fully codegen-emitted LLVM IR — no C files remain. All major cross-cutting features are done: M:N scheduler (Phase 5c), WASM target (Phases 4b/5d/7a), yield generators, structural interfaces, operator dispatch, naming conventions, pure value types, documentation system (Phase 1), module system (Phase 3 done + identity redesign), stdlib expansion (math, sort, set, random catalog modules), Format/Parse infrastructure (Writer, Reader, Builder, Scanner, `to_string()`, `format(Writer ~w)!` on all primitives, `int/bool/uint/f64.parse`, `string.from_bytes`, `Vector.filled`), time measurement (Duration, Instant, sleep), and extended I/O (Closer, write_line). String pad_left/pad_right methods. Strings module `join` uses variadic params.
 
-Test suite: 1043 native pass, 761 WASM pass (3 skip).
+Test suite: 1068+ native pass, 761 WASM pass (3 skip).
 
 ### Near-term: Compiler Infrastructure
 

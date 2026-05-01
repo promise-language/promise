@@ -10,3 +10,12 @@ print_int(int x) `public { _print_int(x); }
 print_f64(f64 x) `public { _print_f64(x); }
 print_bool(bool x) `public { _print_bool(x); }
 println(string s) `public { _print_string(s); }
+
+type Closer `structural `public `doc("Structural interface for resources that need cleanup. Implement `close(~this)!` to satisfy.") {
+    close(~this)! `abstract;
+}
+
+write_line(Writer ~w, string s)! `public `doc("Writes a string followed by a newline to a Writer.") {
+    w.write_string(s);
+    w.write_string("\n");
+}

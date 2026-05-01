@@ -81,6 +81,14 @@ func (c *Compiler) definePALBodies() {
 		}
 	}
 
+	// Time functions — declared by extern from std/time.pr
+	if fn, ok := irFuncByName["promise_nanotime"]; ok {
+		c.buildNanotimeExternBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_sleep_nanos"]; ok {
+		c.buildSleepNanosExternBody(fn)
+	}
+
 }
 
 // extractStringDataLen extracts the data pointer (i8*) and length (i64) from a
@@ -507,27 +515,24 @@ func (c *Compiler) defineSchedStatGetterBody(fn *ir.Func, field int) {
 	entry.NewRet(nil)
 }
 
-// defineNanotimeFunc defines @promise_nanotime() → i64.
-// Returns monotonic nanoseconds via clock_gettime(CLOCK_MONOTONIC).
+// defineNanotimeFunc defines .promise_nanotime_raw() → i64 for the test runner.
+// Returns raw i64 nanoseconds (not Promise int value struct).
+// Uses a dot-prefixed name to avoid collision with the extern promise_nanotime.
 func (c *Compiler) defineNanotimeFunc() *ir.Func {
-	fn := c.module.NewFunc("promise_nanotime", irtypes.I64)
+	fn := c.module.NewFunc(".promise_nanotime_raw", irtypes.I64)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 
 	if c.isWasm {
-		// WASM: no clock_gettime, return 0 (timing not available)
 		entry.NewRet(constant.NewInt(irtypes.I64, 0))
 		return fn
 	}
 
 	timespecType := irtypes.NewStruct(irtypes.I64, irtypes.I64)
-
-	clockGettime := c.module.NewFunc("clock_gettime", irtypes.I32,
+	clockGettime := c.getOrDeclareFunc("clock_gettime", irtypes.I32,
 		ir.NewParam("clk_id", irtypes.I32),
 		ir.NewParam("tp", irtypes.NewPointer(timespecType)))
-	clockGettime.FuncAttrs = append(clockGettime.FuncAttrs, enum.FuncAttrNoUnwind)
 
-	// CLOCK_MONOTONIC: macOS=6, Linux=1
 	clockMonotonic := int64(1)
 	triple := c.module.TargetTriple
 	if strings.Contains(triple, "darwin") || strings.Contains(triple, "apple") {
@@ -548,7 +553,113 @@ func (c *Compiler) defineNanotimeFunc() *ir.Func {
 	secNanos := entry.NewMul(sec, billion)
 	totalNanos := entry.NewAdd(secNanos, nsec)
 	entry.NewRet(totalNanos)
+	return fn
+}
 
+// buildNanotimeExternBody adds a body to extern promise_nanotime(i8* %sret).
+// Computes monotonic nanos via clock_gettime, packs into Promise int value struct.
+func (c *Compiler) buildNanotimeExternBody(fn *ir.Func) {
+	intLayout := c.layouts[types.TypInt]
+	valType := intLayout.Value.LLVMType
+	entry := fn.NewBlock(".entry")
+
+	if c.isWasm {
+		sretPtr := entry.NewBitCast(fn.Params[0], irtypes.NewPointer(valType))
+		var agg value.Value = constant.NewUndef(valType)
+		agg = entry.NewInsertValue(agg, constant.NewNull(irtypes.I8Ptr), 0)
+		instancePtrType := intLayout.Value.Fields[1].LLVMType.(*irtypes.PointerType)
+		agg = entry.NewInsertValue(agg, constant.NewNull(instancePtrType), 1)
+		agg = entry.NewInsertValue(agg, constant.NewInt(irtypes.I64, 0), 2)
+		entry.NewStore(agg, sretPtr)
+		entry.NewRet(nil)
+		return
+	}
+
+	timespecType := irtypes.NewStruct(irtypes.I64, irtypes.I64)
+	clockGettime := c.getOrDeclareFunc("clock_gettime", irtypes.I32,
+		ir.NewParam("clk_id", irtypes.I32),
+		ir.NewParam("tp", irtypes.NewPointer(timespecType)))
+
+	clockMonotonic := int64(1)
+	triple := c.module.TargetTriple
+	if strings.Contains(triple, "darwin") || strings.Contains(triple, "apple") {
+		clockMonotonic = 6
+	}
+
+	ts := entry.NewAlloca(timespecType)
+	entry.NewCall(clockGettime, constant.NewInt(irtypes.I32, clockMonotonic), ts)
+
+	secPtr := entry.NewGetElementPtr(timespecType, ts,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	nsecPtr := entry.NewGetElementPtr(timespecType, ts,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	sec := entry.NewLoad(irtypes.I64, secPtr)
+	nsec := entry.NewLoad(irtypes.I64, nsecPtr)
+
+	billion := constant.NewInt(irtypes.I64, 1_000_000_000)
+	secNanos := entry.NewMul(sec, billion)
+	totalNanos := entry.NewAdd(secNanos, nsec)
+
+	// Pack into int value struct {vtable, instance_ptr, raw_i64} and store to sret
+	sretPtr := entry.NewBitCast(fn.Params[0], irtypes.NewPointer(valType))
+	var agg value.Value = constant.NewUndef(valType)
+	agg = entry.NewInsertValue(agg, constant.NewNull(irtypes.I8Ptr), 0)
+	instancePtrType := intLayout.Value.Fields[1].LLVMType.(*irtypes.PointerType)
+	agg = entry.NewInsertValue(agg, constant.NewNull(instancePtrType), 1)
+	agg = entry.NewInsertValue(agg, totalNanos, 2)
+	entry.NewStore(agg, sretPtr)
+	entry.NewRet(nil)
+}
+
+// buildSleepNanosExternBody adds a body to extern promise_sleep_nanos(i8* %ns).
+// Extracts raw i64 from Promise int param, calls nanosleep(2). No-op on WASM.
+func (c *Compiler) buildSleepNanosExternBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+
+	if c.isWasm {
+		entry.NewRet(nil)
+		return
+	}
+
+	// Extract raw i64 from the int value struct parameter
+	intLayout := c.layouts[types.TypInt]
+	valType := intLayout.Value.LLVMType
+	valPtr := entry.NewBitCast(fn.Params[0], irtypes.NewPointer(valType))
+	rawPtr := entry.NewGetElementPtr(valType, valPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+	ns := entry.NewLoad(irtypes.I64, rawPtr)
+
+	timespecType := irtypes.NewStruct(irtypes.I64, irtypes.I64)
+	nanosleepFn := c.getOrDeclareFunc("nanosleep", irtypes.I32,
+		ir.NewParam("req", irtypes.NewPointer(timespecType)),
+		ir.NewParam("rem", irtypes.NewPointer(timespecType)))
+
+	// sec = ns / 1_000_000_000, nsec = ns % 1_000_000_000
+	billion := constant.NewInt(irtypes.I64, 1_000_000_000)
+	sec := entry.NewSDiv(ns, billion)
+	nsec := entry.NewSRem(ns, billion)
+
+	ts := entry.NewAlloca(timespecType)
+	secPtr := entry.NewGetElementPtr(timespecType, ts,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	nsecPtr := entry.NewGetElementPtr(timespecType, ts,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	entry.NewStore(sec, secPtr)
+	entry.NewStore(nsec, nsecPtr)
+
+	entry.NewCall(nanosleepFn, ts, constant.NewNull(irtypes.NewPointer(timespecType)))
+	entry.NewRet(nil)
+}
+
+// getOrDeclareFunc returns an existing function by name, or declares a new one.
+func (c *Compiler) getOrDeclareFunc(name string, retType irtypes.Type, params ...*ir.Param) *ir.Func {
+	for _, fn := range c.module.Funcs {
+		if fn.Name() == name {
+			return fn
+		}
+	}
+	fn := c.module.NewFunc(name, retType, params...)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	return fn
 }
 

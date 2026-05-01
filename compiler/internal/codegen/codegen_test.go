@@ -5550,10 +5550,11 @@ func parseModuleSource(t *testing.T, moduleName, src string) (*sema.ModuleInfo, 
 
 	scope := sema.ExportedScope(modInfo, modFile)
 	return &sema.ModuleInfo{
-		Name:     moduleName,
-		Path:     "./" + moduleName,
-		File:     modFile,
-		SemaInfo: modInfo,
+		Name:          moduleName,
+		CanonicalName: moduleName,
+		Path:          "./" + moduleName,
+		File:          modFile,
+		SemaInfo:      modInfo,
 	}, scope
 }
 
@@ -5926,6 +5927,190 @@ func TestMultipleModules(t *testing.T) {
 	assertContains(t, ir, "define i64 @__mod_beta_get_b")
 	assertContains(t, ir, "call i64 @__mod_alpha_get_a")
 	assertContains(t, ir, "call i64 @__mod_beta_get_b")
+}
+
+func TestModuleTypeGlobalsPrefixed(t *testing.T) {
+	ir := generateIRWithModule(t, "shapes",
+		`type Circle `+"`public"+` {
+			int radius;
+			area(this) int `+"`public"+` { return this.radius; }
+		}`,
+		`
+		use shapes "./shapes";
+		main() {
+			shapes.Circle c = shapes.Circle(radius: 5);
+			int a = c.area();
+		}
+		`,
+	)
+	// RTTI/typeinfo globals should be prefixed with __mod_shapes_
+	assertContains(t, ir, "@promise_typeinfo___mod_shapes_Circle")
+	// std library types (e.g., int) should NOT have module prefix
+	assertNotContains(t, ir, "__mod_shapes_int")
+}
+
+func TestModuleSplitModuleIRs(t *testing.T) {
+	mod1Info, mod1Scope := parseModuleSource(t, "alpha", "get_a() int `public { return 1; }")
+	mod2Info, mod2Scope := parseModuleSource(t, "beta", "get_b() int `public { return 2; }")
+
+	stdInput := antlr.NewInputStream(stdAll)
+	stdLexer := parser.NewPromiseLexer(stdInput)
+	stdLexer.RemoveErrorListeners()
+	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
+	stdP := parser.NewPromiseParser(stdStream)
+	stdP.RemoveErrorListeners()
+	stdTree := stdP.CompilationUnit()
+	stdFile, errs := ast.Build("std.pr", stdTree)
+	if len(errs) > 0 {
+		t.Fatalf("std AST build errors: %v", errs)
+	}
+	for _, d := range stdFile.Decls {
+		switch dd := d.(type) {
+		case *ast.FuncDecl:
+			dd.IsStd = true
+		case *ast.TypeDecl:
+			dd.IsStd = true
+		case *ast.EnumDecl:
+			dd.IsStd = true
+		}
+	}
+
+	userSrc := `
+		use alpha "./alpha";
+		use beta "./beta";
+		main() {
+			int a = alpha.get_a();
+			int b = beta.get_b();
+		}
+	`
+	userInput := antlr.NewInputStream(userSrc)
+	userLexer := parser.NewPromiseLexer(userInput)
+	userLexer.RemoveErrorListeners()
+	userStream := antlr.NewCommonTokenStream(userLexer, antlr.TokenDefaultChannel)
+	userP := parser.NewPromiseParser(userStream)
+	userP.RemoveErrorListeners()
+	userTree := userP.CompilationUnit()
+	userFile, buildErrs := ast.Build("test.pr", userTree)
+	if len(buildErrs) > 0 {
+		t.Fatalf("user AST build errors: %v", buildErrs)
+	}
+
+	mergedDecls := make([]ast.Decl, 0, len(stdFile.Decls)+len(userFile.Decls))
+	mergedDecls = append(mergedDecls, stdFile.Decls...)
+	mergedDecls = append(mergedDecls, userFile.Decls...)
+	userFile.Decls = mergedDecls
+
+	moduleScopes := map[string]*types.Scope{
+		"./alpha": mod1Scope,
+		"./beta":  mod2Scope,
+	}
+	info, semaErrs := sema.CheckWithModules(userFile, moduleScopes)
+	if len(semaErrs) > 0 {
+		t.Fatalf("sema errors: %v", semaErrs)
+	}
+	info.ModuleInfos = map[string]*sema.ModuleInfo{
+		"./alpha": mod1Info,
+		"./beta":  mod2Info,
+	}
+	info.ModuleOrder = []string{"./alpha", "./beta"}
+
+	result := Compile(userFile, info, "")
+	mainIR, moduleIRs := result.SplitModuleIRs()
+
+	// Should produce separate IRs for each module
+	if len(moduleIRs) != 2 {
+		t.Fatalf("expected 2 module IRs, got %d", len(moduleIRs))
+	}
+	alphaIR, ok := moduleIRs["alpha"]
+	if !ok {
+		t.Fatal("expected 'alpha' in moduleIRs")
+	}
+	betaIR, ok := moduleIRs["beta"]
+	if !ok {
+		t.Fatal("expected 'beta' in moduleIRs")
+	}
+
+	// alpha IR: has alpha's function body, beta's function is a declaration
+	assertContains(t, alphaIR, "define i64 @__mod_alpha_get_a")
+	assertNotContains(t, alphaIR, "define i64 @__mod_beta_get_b")
+
+	// beta IR: has beta's function body, alpha's function is a declaration
+	assertContains(t, betaIR, "define i64 @__mod_beta_get_b")
+	assertNotContains(t, betaIR, "define i64 @__mod_alpha_get_a")
+
+	// main IR: module function bodies are declarations, not definitions
+	assertNotContains(t, mainIR, "define i64 @__mod_alpha_get_a")
+	assertNotContains(t, mainIR, "define i64 @__mod_beta_get_b")
+	// main IR should still declare (not define) the module functions
+	assertContains(t, mainIR, "declare i64 @__mod_alpha_get_a")
+	assertContains(t, mainIR, "declare i64 @__mod_beta_get_b")
+}
+
+func TestModuleCanonicalNameUsedForIR(t *testing.T) {
+	// Verify that even when the user alias differs from the canonical name,
+	// the IR uses the canonical name (from CanonicalName field).
+	mod1Info, mod1Scope := parseModuleSource(t, "myalias", "helper() int `public { return 42; }")
+	// Override canonical name to differ from alias
+	mod1Info.CanonicalName = "real_name"
+
+	stdInput := antlr.NewInputStream(stdAll)
+	stdLexer := parser.NewPromiseLexer(stdInput)
+	stdLexer.RemoveErrorListeners()
+	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
+	stdP := parser.NewPromiseParser(stdStream)
+	stdP.RemoveErrorListeners()
+	stdTree := stdP.CompilationUnit()
+	stdFile, errs := ast.Build("std.pr", stdTree)
+	if len(errs) > 0 {
+		t.Fatalf("std AST build errors: %v", errs)
+	}
+	for _, d := range stdFile.Decls {
+		switch dd := d.(type) {
+		case *ast.FuncDecl:
+			dd.IsStd = true
+		case *ast.TypeDecl:
+			dd.IsStd = true
+		case *ast.EnumDecl:
+			dd.IsStd = true
+		}
+	}
+
+	userSrc := `
+		use myalias "./myalias";
+		main() {
+			int x = myalias.helper();
+		}
+	`
+	userInput := antlr.NewInputStream(userSrc)
+	userLexer := parser.NewPromiseLexer(userInput)
+	userLexer.RemoveErrorListeners()
+	userStream := antlr.NewCommonTokenStream(userLexer, antlr.TokenDefaultChannel)
+	userP := parser.NewPromiseParser(userStream)
+	userP.RemoveErrorListeners()
+	userTree := userP.CompilationUnit()
+	userFile, buildErrs := ast.Build("test.pr", userTree)
+	if len(buildErrs) > 0 {
+		t.Fatalf("user AST build errors: %v", buildErrs)
+	}
+
+	mergedDecls := make([]ast.Decl, 0, len(stdFile.Decls)+len(userFile.Decls))
+	mergedDecls = append(mergedDecls, stdFile.Decls...)
+	mergedDecls = append(mergedDecls, userFile.Decls...)
+	userFile.Decls = mergedDecls
+
+	moduleScopes := map[string]*types.Scope{"./myalias": mod1Scope}
+	info, semaErrs := sema.CheckWithModules(userFile, moduleScopes)
+	if len(semaErrs) > 0 {
+		t.Fatalf("sema errors: %v", semaErrs)
+	}
+	info.ModuleInfos = map[string]*sema.ModuleInfo{"./myalias": mod1Info}
+
+	result := Compile(userFile, info, "")
+	ir := result.Module.String()
+
+	// IR should use canonical name "real_name", not the alias "myalias"
+	assertContains(t, ir, "define i64 @__mod_real_name_helper")
+	assertNotContains(t, ir, "__mod_myalias_")
 }
 
 // --- Operator Method Dispatch Tests ---

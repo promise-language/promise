@@ -1,0 +1,18 @@
+// renderer: depends on geometry, which depends on utils (3-level chain).
+use geometry "./geometry";
+
+type Canvas `public {
+    int width;
+    int height;
+
+    // Compute manhattan distance from origin to a point on the canvas.
+    origin_distance(&this, int px, int py) int `public {
+        geometry.Point2D origin = geometry.Point2D(x: 0, y: 0);
+        return origin.distance_to(px, py);
+    }
+}
+
+// Create a canvas and compute the midpoint of its diagonal.
+canvas_center(int w, int h) geometry.Point2D `public {
+    return geometry.midpoint(0, 0, w, h);
+}

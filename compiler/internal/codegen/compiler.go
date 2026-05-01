@@ -58,10 +58,11 @@ type Compiler struct {
 	file *ast.File
 
 	// Module codegen state
-	moduleFuncs      map[string]*ir.Func    // "modname.funcname" → IR func (cross-module calls)
-	moduleExterns    map[string]*ExternFunc // "modname.funcname" → extern (cross-module externs)
-	compilingModule  string                 // non-empty when compiling a module's declarations
-	moduleOwnedFuncs map[string]string      // IR func name → module name (for separate compilation)
+	moduleFuncs      map[string]*ir.Func    // "canonical.funcname" → IR func (cross-module calls)
+	moduleExterns    map[string]*ExternFunc // "canonical.funcname" → extern (cross-module externs)
+	compilingModule  string                 // non-empty when compiling a module's declarations (canonical name)
+	moduleOwnedFuncs map[string]string      // IR func name → canonical module name (for separate compilation)
+	moduleCanonical  map[string]string      // module path → canonical name (for alias→canonical mapping)
 
 	// Loop control targets for break/continue
 	breakTarget    *ir.Block
@@ -343,6 +344,7 @@ func Compile(file *ast.File, info *sema.Info, target string) *CompileResult {
 		moduleFuncs:      make(map[string]*ir.Func),
 		moduleExterns:    make(map[string]*ExternFunc),
 		moduleOwnedFuncs: make(map[string]string),
+		moduleCanonical:  make(map[string]string),
 	}
 
 	// Collect extern declarations and compute type layouts
@@ -2573,13 +2575,35 @@ func mangleModuleMethodName(moduleName, typeName, methodName string, isSetter bo
 // compileModules inlines all imported module declarations into the current IR module.
 // For each module, it temporarily swaps c.info and c.file to the module's context,
 // runs the same layout/declare/define pipeline, then restores.
+// Modules are compiled in topological order (dependencies before dependents)
+// so that a module's types and functions are available when its dependents are compiled.
 func (c *Compiler) compileModules() {
 	if c.info.ModuleInfos == nil {
 		return
 	}
 
+	// Build path → canonical name mapping for alias resolution in genModuleCall.
 	for _, modInfo := range c.info.ModuleInfos {
-		c.compileModule(modInfo)
+		canonical := modInfo.CanonicalName
+		if canonical == "" {
+			canonical = modInfo.Name
+		}
+		if modInfo.Path != "" {
+			c.moduleCanonical[modInfo.Path] = canonical
+		}
+	}
+
+	// Use topological order if available, otherwise fall back to map iteration.
+	if len(c.info.ModuleOrder) > 0 {
+		for _, key := range c.info.ModuleOrder {
+			if modInfo, ok := c.info.ModuleInfos[key]; ok {
+				c.compileModule(modInfo)
+			}
+		}
+	} else {
+		for _, modInfo := range c.info.ModuleInfos {
+			c.compileModule(modInfo)
+		}
 	}
 }
 
@@ -2590,10 +2614,16 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo) {
 	savedFile := c.file
 	savedModule := c.compilingModule
 
-	// Switch to module context
+	// Switch to module context.
+	// Use CanonicalName (from promise.toml) for IR symbols — this is stable
+	// regardless of the consumer's alias, enabling cross-project .o reuse.
+	irName := modInfo.CanonicalName
+	if irName == "" {
+		irName = modInfo.Name // fallback for tests without promise.toml
+	}
 	c.info = modInfo.SemaInfo
 	c.file = modInfo.File
-	c.compilingModule = modInfo.Name
+	c.compilingModule = irName
 
 	// Create a filtered file containing only the module's own declarations,
 	// excluding merged std library declarations that are already compiled.
@@ -2612,10 +2642,10 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo) {
 
 	// 4. Declare module externs
 	modExterns := collectExterns(modFile, modInfo.SemaInfo)
-	c.declareModuleExterns(modInfo.Name, modExterns)
+	c.declareModuleExterns(irName, modExterns)
 
 	// 5. Declare method stubs for module types
-	c.declareModuleTypeMethods(modFile, modInfo.Name)
+	c.declareModuleTypeMethods(modFile, irName)
 	c.declareMonoMethods(modFile, monoInstances)
 
 	// 6. Compute vtable info and emit for module types
@@ -2624,15 +2654,15 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo) {
 	c.emitTypeInfoGlobals(modFile)
 
 	// 7. Declare and define module functions
-	c.declareModuleFuncs(modFile, modInfo.Name)
+	c.declareModuleFuncs(modFile, irName)
 	c.declareMonoFuncs(modFile, monoFuncInstances)
 
 	// 8. Define module method bodies
-	c.defineModuleTypeMethods(modFile, modInfo.Name)
+	c.defineModuleTypeMethods(modFile, irName)
 	c.defineMonoMethods(modFile, monoInstances)
 
 	// 9. Define module function bodies
-	c.defineModuleFuncs(modFile, modInfo.Name)
+	c.defineModuleFuncs(modFile, irName)
 	c.defineMonoFuncs(modFile, monoFuncInstances)
 
 	// Restore main context
@@ -3070,6 +3100,17 @@ func (c *Compiler) defineTypeMethods(file *ast.File) {
 
 // mangleMethodName returns the mangled IR function name for a method, appending
 // a "$set" suffix for setters to avoid collisions with same-name getters.
+// typeGlobalName returns the IR global name for a type's typeinfo/vtable/rtti globals.
+// When compiling a module, the name is prefixed with "__mod_<module>_" to avoid
+// collisions with std library types or types from other modules.
+func (c *Compiler) typeGlobalName(named *types.Named) string {
+	name := named.Obj().Name()
+	if c.compilingModule != "" {
+		return "__mod_" + c.compilingModule + "_" + name
+	}
+	return name
+}
+
 func mangleMethodName(typeName, methodName string, isSetter bool) string {
 	if isSetter {
 		return typeName + "." + methodName + "$set"

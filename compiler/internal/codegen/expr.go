@@ -799,10 +799,15 @@ func (c *Compiler) genStdCall(e *ast.CallExpr, funcName string) value.Value {
 }
 
 // resolveModuleName checks if an IdentExpr refers to a module and returns
-// the module's binding name. Returns "" if the ident is not a module.
+// the module's canonical name (from promise.toml) for IR symbol lookup.
+// Returns "" if the ident is not a module.
 func (c *Compiler) resolveModuleName(ident *ast.IdentExpr) string {
 	if obj, ok := c.info.Objects[ident]; ok {
 		if mod, ok := obj.(*types.Module); ok {
+			// Map the module's path to its canonical name for stable IR identity
+			if canonical, ok := c.moduleCanonical[mod.Path()]; ok {
+				return canonical
+			}
 			return mod.Name()
 		}
 	}

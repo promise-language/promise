@@ -37,7 +37,7 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 
 | Stage | Package | Description | Status |
 |-------|---------|-------------|--------|
-| 9 | `compiler/internal/module/`, `sema/`, `codegen/`, `std/` | Module system: visibility, qualified access, local imports, cross-module codegen, separate/incremental compilation | Phase 1 Done |
+| 9 | `compiler/internal/module/`, `sema/`, `codegen/`, `std/` | Module system: visibility, qualified access, local imports, cross-module codegen, separate/incremental compilation, transitive deps, circular detection | Phase 2 Done |
 | 10 | `cmd/promise/` | CLI entry point (build, run, test, fmt, etc.) | Done (except `fmt`) |
 | 11 | `pkg/` | Package manager: fetch, resolve, lock | Planned |
 
@@ -596,7 +596,7 @@ Generator functions: `stream[T]` return type with `yield` statements, compiled t
 
 **Deferred**: `yield*` (delegate to sub-iterator), failable generators (`stream[T]!`), stored generator values (first-class generator variables outside for-in), generator closures (capturing lambdas as generators).
 
-## Stage 9 — Module System (Phase 1 Done)
+## Stage 9 — Module System (Phase 2 Done)
 
 Module resolution and dependency management. See [module-system-proposal.md](module-system-proposal.md) for the full design.
 
@@ -616,13 +616,23 @@ Module resolution and dependency management. See [module-system-proposal.md](mod
 - **Incremental compilation**: Dual content-hash caching in `.promise-build/` directory (in `module/cache.go`). **Implementation hash** (SHA-256 of sorted source file contents) determines when a module's `.o` needs recompilation. **Interface hash** (SHA-256 of public API signatures: function names+signatures, type fields+methods, enum variants) determines when dependents need recompilation. On cache hit, the expensive `opt`→`llc` pipeline is skipped entirely — the cached `.o` is linked directly. Stale cache entries are cleaned automatically when source changes. Main file always recompiles (most frequent change target). Cache key includes filename separators to prevent hash collisions from file splits.
 - **Tests**: 7 std-module sema tests, 26 general module sema tests, 4 ExportedScope tests, 10 module load integration tests, 5 `cmd/promise` integration tests, 6 codegen std tests, 15 cross-module codegen tests (qualified calls, constructors, methods, enums, glob imports, failable functions, externs, multi-module, multi-param generics). 42 e2e tests across 12 files in `tests/modules/` (qualified calls, glob imports with struct types/enums/match, aliases, multi-file modules, generics including multi-param `Pair[int, string]`, failable functions, drop types, closures, visibility, two-module interop, module type as param/return).
 
-**Deferred to Phase 2+:**
-- Module-imports-module (module A uses module B) — transitive dependency resolution
-- Circular import detection and error reporting
+**Phase 2 — Transitive Dependencies & Canonical Identity (done):**
+
+**Files:** `cmd/promise/main.go` (moduleLoader refactor), `internal/sema/info.go` (CanonicalName, ModuleOrder), `internal/codegen/compiler.go` (typeGlobalName, moduleCanonical), `internal/codegen/rtti.go` (module-prefixed globals), `internal/codegen/expr.go` (resolveModuleName), `internal/module/cache.go` (BuildCacheKey)
+
+- **Recursive module loading**: `moduleLoader` struct with DFS walk — replaces flat `loadLocalModule()`. Modules are parsed, their `use` declarations scanned, and dependencies recursively loaded via `loadDeps()` before `sema.CheckWithModules()`. Results cached by absolute directory path to handle diamond dependencies (same module loaded once, shared across consumers).
+- **Cycle detection**: `visiting` set (maps absDir → import path) tracks in-progress modules. If a module is encountered while it's being loaded, a cycle error with the full path is reported (e.g., `"./a → ./b → ./c → ./a"`). `buildCyclePath()` formats the cycle from the visit stack.
+- **Topological ordering**: `depOrder` records modules in post-order DFS — leaf dependencies first. Stored in `Info.ModuleOrder` for codegen. `compileModules()` processes modules in this order so that a module's types and functions are available when its dependents are compiled.
+- **Canonical module identity**: Each module's `promise.toml` `name` field is the stable IR identity (`CanonicalName`), independent of the consumer's alias or import path. IR symbols use `__mod_<canonical>_<func>`, not the consumer's alias. This enables cross-project `.o` reuse — the same module compiled in different projects produces identical IR symbols.
+- **Duplicate canonical name detection**: `canonicalNames` map (canonical → absDir) in `moduleLoader` detects two different modules claiming the same identity. Error: `"duplicate module name "X": declared by both /path/a and /path/b"`.
+- **Module-prefixed IR globals**: `typeGlobalName()` returns `__mod_<canonical>_<Type>` for typeinfo, vtable, and RTTI globals when compiling a module. Prevents name collisions between module types and std library types (e.g., module `Range` vs std `Range`). `resolveModuleName()` maps consumer aliases to canonical names via `moduleCanonical` map.
+- **Tests**: 3 new loader tests (transitive, diamond, circular, 3-module circular, canonical name, duplicate canonical name), 4 new codegen tests (prefixed globals, SplitModuleIRs, canonical vs alias IR identity), 8 new cache unit tests (hashing, determinism, round-trip, stale cleanup), 1 new e2e test file (4-level deep transitive chain: test → renderer → geometry → utils). Total: 53 e2e module tests across 15 files, 775 total tests.
+
+**Deferred to Phase 3+:**
 - Remote module fetching (git-based)
 - Catalog infrastructure and versioning
 
-**Planned phases:** Phase 2 (remote modules, git fetching), Phase 3 (catalog infrastructure), Phase 4 (catalog CI), Phase 5 (tooling)
+**Planned phases:** Phase 3 (remote modules, git fetching), Phase 4 (catalog infrastructure), Phase 5 (catalog CI), Phase 6 (tooling)
 
 ## Stage 10 — CLI
 
@@ -642,7 +652,7 @@ Command-line interface. Core commands implemented; formatter planned.
 - Inline error formatting: source line + `^` caret marker, no temp filenames
 - `promise clean` — remove `.promise-build/` cache directory
 - Embedded `std/` and `runtime/` in the binary via `go:embed` for self-contained install
-- **Test suite**: 764 tests across 146 files — `tests/e2e/` (language features), `tests/std/` (standard library), `tests/concurrency/` (scheduler, channels, select, panic recovery, stress tests), `tests/modules/` (module system e2e), `tests/value_types/` (pure value types)
+- **Test suite**: 775 tests across 149 files — `tests/e2e/` (language features), `tests/std/` (standard library), `tests/concurrency/` (scheduler, channels, select, panic recovery, stress tests), `tests/modules/` (module system e2e), `tests/value_types/` (pure value types)
 - `promise doc <file.pr>` — generate documentation from `doc()` meta tags (**Phase 1 done**: `cmd/promise/doc.go`)
   - `-public` (default) / `-all` — filter by visibility
   - `-signatures` — compact signature-only output (minimal tokens for AI agents)
@@ -685,16 +695,16 @@ Dependency fetching and resolution.
 
 ## What's Next
 
-The compiler pipeline (Stages 1-8p) is complete. Runtime is fully codegen-emitted LLVM IR — no C files remain. All major cross-cutting features are done: M:N scheduler (Phase 5c), WASM target (Phases 4b/5d/7a), yield generators, structural interfaces, operator dispatch, naming conventions, pure value types, documentation system (Phase 1), and module system (Phase 1 with separate/incremental compilation).
+The compiler pipeline (Stages 1-8p) is complete. Runtime is fully codegen-emitted LLVM IR — no C files remain. All major cross-cutting features are done: M:N scheduler (Phase 5c), WASM target (Phases 4b/5d/7a), yield generators, structural interfaces, operator dispatch, naming conventions, pure value types, documentation system (Phase 1), and module system (Phase 2 with transitive deps, separate/incremental compilation).
 
-Test suite: 764 native pass, 761 WASM pass (3 skip).
+Test suite: 775 native pass, 761 WASM pass (3 skip).
 
 ### Near-term: Compiler Infrastructure
 
 | Work | Priority |
 |------|----------|
-| Module system Phase 2 (module-imports-module, transitive deps, circular import detection) — Stage 9 | High |
 | CLI: `promise fmt` code formatter — Stage 10 | Medium |
+| Module system Phase 3 (remote modules, git fetching) — Stage 9 | Medium |
 | Package manager (fetch, resolve, lock) — Stage 11 | Medium |
 | Documentation system Phase 2 (directory/recursive docs, `-std`, index generation) | Medium |
 
@@ -810,12 +820,10 @@ Known gaps and improvements deferred from completed stages.
 | ~~Default values for constructor parameters~~ — **Done.** Implemented in Stage 8n. Defaults recorded in `Info.FieldDefaults` during sema, evaluated in `genConstructorCallMono` during codegen. | 5b | ~~Medium~~ Resolved |
 | ~~Unified parameter handling for constructors and methods~~ — **Done.** Implemented in Stage 8n. Named args, defaults, optional params, and `Self` all work for constructors. | 5b | ~~Medium~~ Resolved |
 
-### Module System (Phase 2+)
+### Module System (Phase 3+)
 
 | Item | Priority |
 |------|----------|
-| Module-imports-module (transitive dependency resolution) | High |
-| Circular import detection and error reporting | High |
 | Remote module fetching (git-based) | Medium |
 | Catalog infrastructure and versioning | Low |
 

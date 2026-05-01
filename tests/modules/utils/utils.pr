@@ -1,0 +1,25 @@
+// utils: base module with no dependencies.
+
+clamp(int val, int lo, int hi) int `public {
+    if val < lo { return lo; }
+    if val > hi { return hi; }
+    return val;
+}
+
+abs(int x) int `public {
+    if x < 0 { return 0 - x; }
+    return x;
+}
+
+type Range `public {
+    int lo;
+    int hi;
+
+    contains(&this, int val) bool {
+        return val >= this.lo && val <= this.hi;
+    }
+
+    size(&this) int {
+        return this.hi - this.lo;
+    }
+}

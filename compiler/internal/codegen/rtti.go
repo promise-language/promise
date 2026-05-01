@@ -80,7 +80,7 @@ func (c *Compiler) emitTypeInfo(named *types.Named) *ir.Global {
 	}
 
 	init := constant.NewStruct(structType, fields...)
-	globalName := "promise_typeinfo_" + named.Obj().Name()
+	globalName := "promise_typeinfo_" + c.typeGlobalName(named)
 	global := c.module.NewGlobalDef(globalName, init)
 	global.Immutable = true
 	return global
@@ -106,7 +106,7 @@ func (c *Compiler) emitVtableGlobal(named *types.Named) *ir.Global {
 	}
 	arrayType := irtypes.NewArray(uint64(len(entries)), irtypes.I8Ptr)
 	init := constant.NewArray(arrayType, entries...)
-	global := c.module.NewGlobalDef("promise_vtable_"+named.Obj().Name(), init)
+	global := c.module.NewGlobalDef("promise_vtable_"+c.typeGlobalName(named), init)
 	global.Immutable = true
 	return global
 }
@@ -159,7 +159,7 @@ func (c *Compiler) emitTypeInfoGlobals(file *ast.File) {
 				variantFieldType := layout.Instance.Fields[0].LLVMType
 				rttiInit := constant.NewStruct(instanceStructType,
 					constant.NewBitCast(tiGlobal, variantFieldType))
-				rttiGlobal := c.module.NewGlobalDef("promise_rtti_"+named.Obj().Name(), rttiInit)
+				rttiGlobal := c.module.NewGlobalDef("promise_rtti_"+c.typeGlobalName(named), rttiInit)
 				rttiGlobal.Immutable = true
 				c.valueTypeRTTI[named] = rttiGlobal
 			}

@@ -847,12 +847,16 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 		}
 	}
 
-	// Precompute cache keys for each module
-	modCacheKeys := make(map[string]string) // module name → cache key
+	// Precompute cache keys for each module (keyed by canonical name for IR consistency)
+	modCacheKeys := make(map[string]string) // canonical name → cache key
 	if cacheDir != "" && modInfos != nil {
 		for _, mi := range modInfos {
 			if mi.ImplHash != "" {
-				modCacheKeys[mi.Name] = module.BuildCacheKey(mi.ImplHash, compilerHash, target, allModPaths)
+				cn := mi.CanonicalName
+				if cn == "" {
+					cn = mi.Name
+				}
+				modCacheKeys[cn] = module.BuildCacheKey(mi.ImplHash, compilerHash, target, allModPaths)
 			}
 		}
 	}
@@ -893,7 +897,11 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 			if cacheKey, ok := modCacheKeys[name]; ok && cacheDir != "" {
 				interfaceHash := ""
 				for _, mi := range modInfos {
-					if mi.Name == name {
+					cn := mi.CanonicalName
+					if cn == "" {
+						cn = mi.Name
+					}
+					if cn == name {
 						interfaceHash = mi.InterfaceHash
 						break
 					}
@@ -2213,11 +2221,12 @@ func compileFrontend(filename string) (*ast.File, *sema.Info) {
 	}
 
 	// Load local modules from use declarations
-	moduleScopes, modInfos := loadModuleScopes(filename, file, stdFiles)
+	moduleScopes, modInfos, depOrder := loadModuleScopes(filename, file, stdFiles)
 
 	info, errs := sema.CheckWithModules(file, moduleScopes)
 	if modInfos != nil {
 		info.ModuleInfos = modInfos
+		info.ModuleOrder = depOrder
 	}
 	if len(errs) > 0 {
 		printFileErrors(filename, errs)
@@ -2233,11 +2242,35 @@ func compileFrontend(filename string) (*ast.File, *sema.Info) {
 	return file, info
 }
 
+// moduleLoader manages recursive module loading with cycle detection and caching.
+// A single loader instance is shared across the entire dependency graph walk.
+type moduleLoader struct {
+	projectRoot string
+	stdFiles    []*ast.File
+	// loaded caches fully loaded modules by absolute directory path.
+	// This prevents re-loading the same module when multiple consumers import it.
+	loaded map[string]*sema.ModuleInfo
+	// canonicalNames maps canonical name (from promise.toml) → absolute directory path.
+	// Used to detect two different modules claiming the same identity.
+	canonicalNames map[string]string
+	// visiting tracks modules currently being loaded (for cycle detection).
+	// Maps absolute directory path → import path (for error messages).
+	visiting map[string]string
+	// visitStack records the import path order for cycle error messages.
+	visitStack []string
+	// allModInfos collects every module in the dependency graph for codegen.
+	allModInfos map[string]*sema.ModuleInfo
+	// depOrder records modules in topological order (dependencies before dependents).
+	// This is the post-order of the DFS walk — leaf modules come first.
+	depOrder []string
+}
+
 // loadModuleScopes scans use declarations for local module paths, loads each
 // module (parse + sema), and returns scopes for sema + ModuleInfos for codegen.
-func loadModuleScopes(filename string, file *ast.File, stdFiles []*ast.File) (map[string]*types.Scope, map[string]*sema.ModuleInfo) {
+// Modules are loaded recursively: if module A imports module B, B is loaded first.
+func loadModuleScopes(filename string, file *ast.File, stdFiles []*ast.File) (map[string]*types.Scope, map[string]*sema.ModuleInfo, []string) {
 	if len(file.Uses) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	// Find project root (directory containing promise.toml).
@@ -2250,14 +2283,22 @@ func loadModuleScopes(filename string, file *ast.File, stdFiles []*ast.File) (ma
 		projectRoot = cfg.Dir
 	}
 
+	loader := &moduleLoader{
+		projectRoot:    projectRoot,
+		stdFiles:       stdFiles,
+		loaded:         make(map[string]*sema.ModuleInfo),
+		canonicalNames: make(map[string]string),
+		visiting:       make(map[string]string),
+		allModInfos:    make(map[string]*sema.ModuleInfo),
+	}
+
 	scopes := make(map[string]*types.Scope)
-	modInfos := make(map[string]*sema.ModuleInfo)
 	for _, u := range file.Uses {
 		if u.Path == "" || !module.IsLocalPath(u.Path) {
 			continue // catalog or remote — skip for now
 		}
 
-		modInfo, err := loadLocalModule(u.Path, projectRoot, stdFiles)
+		modInfo, err := loader.load(u.Path)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s: error loading module '%s': %v\n", filename, u.Path, err)
 			os.Exit(1)
@@ -2271,25 +2312,45 @@ func loadModuleScopes(filename string, file *ast.File, stdFiles []*ast.File) (ma
 		exportedScope := sema.ExportedScope(modInfo.SemaInfo, modInfo.File)
 		modInfo.InterfaceHash = module.HashModuleInterface(exportedScope)
 		scopes[u.Path] = exportedScope
-		modInfos[u.Path] = modInfo
 	}
 
 	if len(scopes) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
-	return scopes, modInfos
+	return scopes, loader.allModInfos, loader.depOrder
 }
 
-// loadLocalModule parses all .pr files in the module directory, runs sema,
-// and returns a ModuleInfo containing the AST, sema output, and exported scope.
-func loadLocalModule(modPath, projectRoot string, stdFiles []*ast.File) (*sema.ModuleInfo, error) {
-	// Resolve module directory (paths are relative to project root)
-	modDir := filepath.Join(projectRoot, modPath)
+// load recursively loads a local module and all its dependencies.
+// Returns a cached result if the module was already loaded.
+// Detects circular dependencies via the visiting set.
+func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
+	// Resolve absolute directory for dedup and cycle detection
+	modDir := filepath.Join(ml.projectRoot, modPath)
 	absDir, err := filepath.Abs(modDir)
 	if err != nil {
 		return nil, fmt.Errorf("cannot resolve path: %w", err)
 	}
 
+	// Check cache — already fully loaded
+	if mi, ok := ml.loaded[absDir]; ok {
+		return mi, nil
+	}
+
+	// Check for circular dependency
+	if _, inProgress := ml.visiting[absDir]; inProgress {
+		cycle := buildCyclePath(ml.visitStack, modPath)
+		return nil, fmt.Errorf("circular dependency detected\n  %s", cycle)
+	}
+
+	// Mark as visiting (in progress)
+	ml.visiting[absDir] = modPath
+	ml.visitStack = append(ml.visitStack, modPath)
+	defer func() {
+		delete(ml.visiting, absDir)
+		ml.visitStack = ml.visitStack[:len(ml.visitStack)-1]
+	}()
+
+	// Validate directory
 	info, err := os.Stat(absDir)
 	if err != nil {
 		return nil, fmt.Errorf("module directory not found: %s", absDir)
@@ -2298,11 +2359,21 @@ func loadLocalModule(modPath, projectRoot string, stdFiles []*ast.File) (*sema.M
 		return nil, fmt.Errorf("not a directory: %s", absDir)
 	}
 
-	// Check for promise.toml
+	// Parse promise.toml to get the module's canonical name
 	tomlPath := filepath.Join(absDir, "promise.toml")
-	if _, err := os.Stat(tomlPath); err != nil {
-		return nil, fmt.Errorf("module directory '%s' has no promise.toml", absDir)
+	modCfg, err := module.ParseConfig(tomlPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("module directory '%s' has no promise.toml", absDir)
+		}
+		return nil, fmt.Errorf("error reading promise.toml in '%s': %w", absDir, err)
 	}
+
+	// Check for duplicate canonical names — two different modules claiming the same identity
+	if existingDir, ok := ml.canonicalNames[modCfg.Name]; ok && existingDir != absDir {
+		return nil, fmt.Errorf("duplicate module name %q: declared by both %s and %s", modCfg.Name, existingDir, absDir)
+	}
+	ml.canonicalNames[modCfg.Name] = absDir
 
 	// Parse all .pr files in the module directory
 	entries, err := os.ReadDir(absDir)
@@ -2324,18 +2395,21 @@ func loadLocalModule(modPath, projectRoot string, stdFiles []*ast.File) (*sema.M
 
 	// Merge module files into a single AST, then merge std decls
 	merged := mergeModuleFiles(modFileList)
-	if len(stdFiles) > 0 {
-		merged = mergeStdDecls(merged, stdFiles)
+	if len(ml.stdFiles) > 0 {
+		merged = mergeStdDecls(merged, ml.stdFiles)
 	}
 
-	// Run sema on the module
-	semaInfo, errs := sema.Check(merged)
+	// Recursively load this module's own dependencies
+	depScopes, err := ml.loadDeps(merged, modPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Run sema on the module with its dependency scopes
+	semaInfo, errs := sema.CheckWithModules(merged, depScopes)
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("errors in module '%s': %v", modPath, errs[0])
 	}
-
-	// Extract the module alias from the path (last component)
-	alias := filepath.Base(modPath)
 
 	// Compute implementation hash from source files
 	implHash, err := module.HashModuleSources(absDir)
@@ -2343,14 +2417,72 @@ func loadLocalModule(modPath, projectRoot string, stdFiles []*ast.File) (*sema.M
 		return nil, fmt.Errorf("cannot hash module sources: %w", err)
 	}
 
-	return &sema.ModuleInfo{
-		Name:     alias,
-		Path:     modPath,
-		File:     merged,
-		SemaInfo: semaInfo,
-		AbsDir:   absDir,
-		ImplHash: implHash,
-	}, nil
+	mi := &sema.ModuleInfo{
+		Name:          modCfg.Name, // default to canonical name; consumer may override
+		CanonicalName: modCfg.Name, // stable IR identity from promise.toml
+		Path:          modPath,
+		File:          merged,
+		SemaInfo:      semaInfo,
+		AbsDir:        absDir,
+		ImplHash:      implHash,
+	}
+
+	// Cache the loaded module and register for codegen.
+	// depOrder is post-order DFS: deps are added before dependents.
+	ml.loaded[absDir] = mi
+	ml.allModInfos[modPath] = mi
+	ml.depOrder = append(ml.depOrder, modPath)
+	return mi, nil
+}
+
+// loadDeps scans a module's use declarations and recursively loads its local dependencies.
+// Returns module scopes for sema.CheckWithModules.
+func (ml *moduleLoader) loadDeps(file *ast.File, parentPath string) (map[string]*types.Scope, error) {
+	if len(file.Uses) == 0 {
+		return nil, nil
+	}
+
+	scopes := make(map[string]*types.Scope)
+	for _, u := range file.Uses {
+		if u.Path == "" || !module.IsLocalPath(u.Path) {
+			continue // catalog or remote — skip for now
+		}
+
+		depInfo, err := ml.load(u.Path)
+		if err != nil {
+			return nil, fmt.Errorf("in module '%s': %w", parentPath, err)
+		}
+		exportedScope := sema.ExportedScope(depInfo.SemaInfo, depInfo.File)
+		depInfo.InterfaceHash = module.HashModuleInterface(exportedScope)
+		scopes[u.Path] = exportedScope
+	}
+
+	if len(scopes) == 0 {
+		return nil, nil
+	}
+	return scopes, nil
+}
+
+// buildCyclePath formats a circular dependency error showing the cycle.
+// e.g., "a → b → c → a"
+func buildCyclePath(stack []string, target string) string {
+	// Find where the cycle starts in the stack
+	start := -1
+	for i, p := range stack {
+		if p == target {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		// Target not in stack — shouldn't happen, but handle gracefully
+		return strings.Join(stack, " → ") + " → " + target
+	}
+	// Copy the cycle slice to avoid corrupting the caller's stack via append.
+	cycle := make([]string, len(stack[start:])+1)
+	copy(cycle, stack[start:])
+	cycle[len(cycle)-1] = target
+	return strings.Join(cycle, " → ")
 }
 
 // mergeModuleFiles combines multiple parsed .pr files from a module directory

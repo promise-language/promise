@@ -1,0 +1,39 @@
+// Test transitive module dependencies: this file imports geometry,
+// which imports utils. The compiler must recursively load utils
+// before sema-checking geometry.
+
+use geometry "./geometry";
+use utils "./utils";
+
+test_geometry_uses_utils() `test {
+    // geometry.Point2D uses utils.abs internally
+    a := geometry.Point2D(x: 3, y: 4);
+    assert(a.distance_to(7, 1) == 7, "manhattan distance (3,4)->(7,1) = 7");
+}
+
+test_geometry_midpoint() `test {
+    mid := geometry.midpoint(2, 8, 6, 4);
+    assert(mid.x == 4, "midpoint x = 4");
+    assert(mid.y == 6, "midpoint y = 6");
+}
+
+test_geometry_clamped_uses_utils() `test {
+    // Point2D.clamped uses utils.clamp internally
+    p := geometry.Point2D(x: 100, y: -5);
+    c := p.clamped(0, 50, 0, 50);
+    assert(c.x == 50, "clamped x to 50");
+    assert(c.y == 0, "clamped y to 0");
+}
+
+test_direct_utils_access() `test {
+    // We also import utils directly — should reuse the same loaded module
+    assert(utils.abs(0 - 42) == 42, "direct utils.abs works");
+    assert(utils.clamp(5, 0, 3) == 3, "direct utils.clamp works");
+}
+
+test_utils_range_direct() `test {
+    r := utils.Range(lo: 10, hi: 20);
+    assert(r.contains(15) == true, "15 in [10,20]");
+    assert(r.contains(5) == false, "5 not in [10,20]");
+    assert(r.size() == 10, "size of [10,20] = 10");
+}

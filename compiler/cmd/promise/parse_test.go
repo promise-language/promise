@@ -740,6 +740,18 @@ func testStdFiles(t *testing.T) []*ast.File {
 	return files
 }
 
+// testModuleLoader creates a moduleLoader for use in tests.
+func testModuleLoader(projectDir string, stdFiles []*ast.File) *moduleLoader {
+	return &moduleLoader{
+		projectRoot:    projectDir,
+		stdFiles:       stdFiles,
+		loaded:         make(map[string]*sema.ModuleInfo),
+		canonicalNames: make(map[string]string),
+		visiting:       make(map[string]string),
+		allModInfos:    make(map[string]*sema.ModuleInfo),
+	}
+}
+
 // TestLoadLocalModuleBasic creates a temp module directory and verifies
 // that loadLocalModule parses, sema-checks, and extracts the exported scope.
 func TestLoadLocalModuleBasic(t *testing.T) {
@@ -784,9 +796,10 @@ helper() int { return 1; }
 
 	// Load the module (with std so sema validation passes)
 	stdFiles := testStdFiles(t)
-	modInfo, err := loadLocalModule("./libs/mymod", projectDir, stdFiles)
+	loader := testModuleLoader(projectDir, stdFiles)
+	modInfo, err := loader.load("./libs/mymod")
 	if err != nil {
-		t.Fatalf("loadLocalModule failed: %v", err)
+		t.Fatalf("loader.load failed: %v", err)
 	}
 	if modInfo == nil {
 		t.Fatal("expected non-nil ModuleInfo")
@@ -844,9 +857,10 @@ type Bar `+"`public"+` { int y; }
 	}
 
 	stdFiles := testStdFiles(t)
-	modInfo, err := loadLocalModule("./mylib", projectDir, stdFiles)
+	loader := testModuleLoader(projectDir, stdFiles)
+	modInfo, err := loader.load("./mylib")
 	if err != nil {
-		t.Fatalf("loadLocalModule failed: %v", err)
+		t.Fatalf("loader.load failed: %v", err)
 	}
 
 	scope := sema.ExportedScope(modInfo.SemaInfo, modInfo.File)
@@ -869,11 +883,12 @@ func TestLoadLocalModuleNoPromiseToml(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := loadLocalModule("./badmod", projectDir, nil)
+	loader := testModuleLoader(projectDir, nil)
+	_, err := loader.load("./badmod")
 	if err == nil {
 		t.Fatal("expected error for missing promise.toml")
 	}
-	if !strings.Contains(err.Error(), "no promise.toml") {
+	if !strings.Contains(err.Error(), "promise.toml") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
@@ -881,7 +896,8 @@ func TestLoadLocalModuleNoPromiseToml(t *testing.T) {
 // TestLoadLocalModuleDirNotFound verifies error when module directory doesn't exist.
 func TestLoadLocalModuleDirNotFound(t *testing.T) {
 	projectDir := t.TempDir()
-	_, err := loadLocalModule("./nonexistent", projectDir, nil)
+	loader := testModuleLoader(projectDir, nil)
+	_, err := loader.load("./nonexistent")
 	if err == nil {
 		t.Fatal("expected error for missing directory")
 	}
@@ -905,7 +921,8 @@ epoch = "2026.3"
 		t.Fatal(err)
 	}
 
-	_, err := loadLocalModule("./empty", projectDir, nil)
+	loader := testModuleLoader(projectDir, nil)
+	_, err := loader.load("./empty")
 	if err == nil {
 		t.Fatal("expected error for module with no .pr files")
 	}
@@ -936,7 +953,8 @@ compute() int `+"`public"+` { return "not an int"; }
 	}
 
 	stdFiles := testStdFiles(t)
-	_, err := loadLocalModule("./badmod", projectDir, stdFiles)
+	loader := testModuleLoader(projectDir, stdFiles)
+	_, err := loader.load("./badmod")
 	if err == nil {
 		t.Fatal("expected error for module with sema errors")
 	}
@@ -979,9 +997,10 @@ sum(int[] nums) int `+"`public"+` {
 	}
 
 	stdFiles := testStdFiles(t)
-	modInfo, err := loadLocalModule("./mymod", projectDir, stdFiles)
+	loader := testModuleLoader(projectDir, stdFiles)
+	modInfo, err := loader.load("./mymod")
 	if err != nil {
-		t.Fatalf("loadLocalModule failed: %v", err)
+		t.Fatalf("loader.load failed: %v", err)
 	}
 	scope := sema.ExportedScope(modInfo.SemaInfo, modInfo.File)
 	if scope.Lookup("greet") == nil {
@@ -989,6 +1008,265 @@ sum(int[] nums) int `+"`public"+` {
 	}
 	if scope.Lookup("sum") == nil {
 		t.Error("expected 'sum' in exported scope")
+	}
+}
+
+// TestLoadModuleTransitive verifies that modules can import other modules.
+// Module B depends on module A; loading B should recursively load A first.
+func TestLoadModuleTransitive(t *testing.T) {
+	projectDir := t.TempDir()
+	modA := filepath.Join(projectDir, "moda")
+	modB := filepath.Join(projectDir, "modb")
+	if err := os.MkdirAll(modA, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(modB, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, item := range []struct{ path, content string }{
+		{filepath.Join(projectDir, "promise.toml"), "[module]\nname = \"proj\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(modA, "promise.toml"), "[module]\nname = \"moda\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(modA, "lib.pr"), "helper() int `public { return 42; }\n"},
+		{filepath.Join(modB, "promise.toml"), "[module]\nname = \"modb\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(modB, "lib.pr"), "use moda \"./moda\";\nwrap() int `public { return moda.helper(); }\n"},
+	} {
+		if err := os.WriteFile(item.path, []byte(item.content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stdFiles := testStdFiles(t)
+	loader := testModuleLoader(projectDir, stdFiles)
+	modInfo, err := loader.load("./modb")
+	if err != nil {
+		t.Fatalf("loader.load failed: %v", err)
+	}
+	if modInfo == nil {
+		t.Fatal("expected non-nil ModuleInfo")
+	}
+	if modInfo.CanonicalName != "modb" {
+		t.Errorf("expected canonical name 'modb', got '%s'", modInfo.CanonicalName)
+	}
+
+	// moda should also be in allModInfos (transitive dependency)
+	if _, ok := loader.allModInfos["./moda"]; !ok {
+		t.Error("expected moda in allModInfos (transitive dep)")
+	}
+	if _, ok := loader.allModInfos["./modb"]; !ok {
+		t.Error("expected modb in allModInfos")
+	}
+
+	// depOrder should be [moda, modb] — deps before dependents
+	if len(loader.depOrder) != 2 {
+		t.Fatalf("expected 2 entries in depOrder, got %d", len(loader.depOrder))
+	}
+	if loader.depOrder[0] != "./moda" || loader.depOrder[1] != "./modb" {
+		t.Errorf("expected depOrder [./moda, ./modb], got %v", loader.depOrder)
+	}
+}
+
+// TestLoadModuleDiamond verifies that diamond dependencies are handled correctly.
+// Both B and C depend on A; loading them should not produce errors or duplicates.
+func TestLoadModuleDiamond(t *testing.T) {
+	projectDir := t.TempDir()
+	modA := filepath.Join(projectDir, "a")
+	modB := filepath.Join(projectDir, "b")
+	modC := filepath.Join(projectDir, "c")
+	for _, d := range []string{modA, modB, modC} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, item := range []struct{ path, content string }{
+		{filepath.Join(projectDir, "promise.toml"), "[module]\nname = \"proj\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(modA, "promise.toml"), "[module]\nname = \"a\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(modA, "lib.pr"), "base() int `public { return 1; }\n"},
+		{filepath.Join(modB, "promise.toml"), "[module]\nname = \"b\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(modB, "lib.pr"), "use a \"./a\";\nfrom_b() int `public { return a.base(); }\n"},
+		{filepath.Join(modC, "promise.toml"), "[module]\nname = \"c\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(modC, "lib.pr"), "use a \"./a\";\nfrom_c() int `public { return a.base(); }\n"},
+	} {
+		if err := os.WriteFile(item.path, []byte(item.content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stdFiles := testStdFiles(t)
+	loader := testModuleLoader(projectDir, stdFiles)
+
+	// Load both B and C
+	_, err := loader.load("./b")
+	if err != nil {
+		t.Fatalf("loader.load(b) failed: %v", err)
+	}
+	_, err = loader.load("./c")
+	if err != nil {
+		t.Fatalf("loader.load(c) failed: %v", err)
+	}
+
+	// A should appear exactly once in allModInfos
+	if len(loader.allModInfos) != 3 {
+		t.Errorf("expected 3 modules (a, b, c), got %d", len(loader.allModInfos))
+	}
+
+	// depOrder should have A first (loaded as dep of B), then B, then C
+	if len(loader.depOrder) != 3 {
+		t.Fatalf("expected 3 entries in depOrder, got %d", len(loader.depOrder))
+	}
+	if loader.depOrder[0] != "./a" {
+		t.Errorf("expected ./a first in depOrder, got %s", loader.depOrder[0])
+	}
+}
+
+// TestLoadModuleCircular verifies that circular dependencies are detected.
+func TestLoadModuleCircular(t *testing.T) {
+	projectDir := t.TempDir()
+	modA := filepath.Join(projectDir, "x")
+	modB := filepath.Join(projectDir, "y")
+	for _, d := range []string{modA, modB} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, item := range []struct{ path, content string }{
+		{filepath.Join(projectDir, "promise.toml"), "[module]\nname = \"proj\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(modA, "promise.toml"), "[module]\nname = \"x\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(modA, "lib.pr"), "use y \"./y\";\nfx() int `public { return 1; }\n"},
+		{filepath.Join(modB, "promise.toml"), "[module]\nname = \"y\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(modB, "lib.pr"), "use x \"./x\";\nfy() int `public { return 1; }\n"},
+	} {
+		if err := os.WriteFile(item.path, []byte(item.content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stdFiles := testStdFiles(t)
+	loader := testModuleLoader(projectDir, stdFiles)
+	_, err := loader.load("./x")
+	if err == nil {
+		t.Fatal("expected error for circular dependency")
+	}
+	if !strings.Contains(err.Error(), "circular dependency") {
+		t.Errorf("expected 'circular dependency' error, got: %v", err)
+	}
+}
+
+// TestLoadModuleCircularThreeModules verifies cycle detection through 3 modules: A→B→C→A.
+func TestLoadModuleCircularThreeModules(t *testing.T) {
+	projectDir := t.TempDir()
+	for _, d := range []string{"a", "b", "c"} {
+		if err := os.MkdirAll(filepath.Join(projectDir, d), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, item := range []struct{ path, content string }{
+		{filepath.Join(projectDir, "promise.toml"), "[module]\nname = \"proj\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(projectDir, "a", "promise.toml"), "[module]\nname = \"a\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(projectDir, "a", "lib.pr"), "use b \"./b\";\nfa() int `public { return 1; }\n"},
+		{filepath.Join(projectDir, "b", "promise.toml"), "[module]\nname = \"b\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(projectDir, "b", "lib.pr"), "use c \"./c\";\nfb() int `public { return 2; }\n"},
+		{filepath.Join(projectDir, "c", "promise.toml"), "[module]\nname = \"c\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(projectDir, "c", "lib.pr"), "use a \"./a\";\nfc() int `public { return 3; }\n"},
+	} {
+		if err := os.WriteFile(item.path, []byte(item.content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stdFiles := testStdFiles(t)
+	loader := testModuleLoader(projectDir, stdFiles)
+	_, err := loader.load("./a")
+	if err == nil {
+		t.Fatal("expected error for 3-module circular dependency")
+	}
+	if !strings.Contains(err.Error(), "circular dependency") {
+		t.Errorf("expected 'circular dependency' error, got: %v", err)
+	}
+	// The cycle path should mention all 3 modules
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "./a") || !strings.Contains(errMsg, "./b") || !strings.Contains(errMsg, "./c") {
+		t.Errorf("expected cycle path to mention a, b, c; got: %v", errMsg)
+	}
+}
+
+// TestLoadModuleCanonicalName verifies that the canonical name comes from promise.toml,
+// not the import path or alias.
+func TestLoadModuleCanonicalName(t *testing.T) {
+	projectDir := t.TempDir()
+	modDir := filepath.Join(projectDir, "my-local-path")
+	if err := os.MkdirAll(modDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, item := range []struct{ path, content string }{
+		{filepath.Join(projectDir, "promise.toml"), "[module]\nname = \"proj\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(modDir, "promise.toml"), "[module]\nname = \"my_canonical\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(modDir, "lib.pr"), "greet() int `public { return 1; }\n"},
+	} {
+		if err := os.WriteFile(item.path, []byte(item.content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stdFiles := testStdFiles(t)
+	loader := testModuleLoader(projectDir, stdFiles)
+	modInfo, err := loader.load("./my-local-path")
+	if err != nil {
+		t.Fatalf("loader.load failed: %v", err)
+	}
+	if modInfo.CanonicalName != "my_canonical" {
+		t.Errorf("expected canonical name 'my_canonical', got '%s'", modInfo.CanonicalName)
+	}
+}
+
+// TestLoadModuleDuplicateCanonicalName verifies that two different modules
+// declaring the same canonical name in their promise.toml produce an error.
+func TestLoadModuleDuplicateCanonicalName(t *testing.T) {
+	projectDir := t.TempDir()
+	modA := filepath.Join(projectDir, "mod_a")
+	modB := filepath.Join(projectDir, "mod_b")
+	for _, d := range []string{modA, modB} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, item := range []struct{ path, content string }{
+		{filepath.Join(projectDir, "promise.toml"), "[module]\nname = \"proj\"\nepoch = \"2026.3\"\n"},
+		// Both modules claim the name "shared_name"
+		{filepath.Join(modA, "promise.toml"), "[module]\nname = \"shared_name\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(modA, "lib.pr"), "fa() int `public { return 1; }\n"},
+		{filepath.Join(modB, "promise.toml"), "[module]\nname = \"shared_name\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(modB, "lib.pr"), "fb() int `public { return 2; }\n"},
+	} {
+		if err := os.WriteFile(item.path, []byte(item.content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stdFiles := testStdFiles(t)
+	loader := testModuleLoader(projectDir, stdFiles)
+
+	// Load first module — should succeed
+	_, err := loader.load("./mod_a")
+	if err != nil {
+		t.Fatalf("loader.load(mod_a) failed: %v", err)
+	}
+
+	// Load second module with same canonical name — should fail
+	_, err = loader.load("./mod_b")
+	if err == nil {
+		t.Fatal("expected error for duplicate canonical name")
+	}
+	if !strings.Contains(err.Error(), "duplicate module name") {
+		t.Errorf("expected 'duplicate module name' error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "shared_name") {
+		t.Errorf("expected error to mention 'shared_name', got: %v", err)
 	}
 }
 

@@ -22,6 +22,7 @@ type CapturedVar struct {
 // the module's merged AST file and its sema output.
 type ModuleInfo struct {
 	Name          string    // module alias (binding name used in consumer code)
+	CanonicalName string    // module's own name from its promise.toml (stable IR identity)
 	Path          string    // source path (empty for catalog modules)
 	File          *ast.File // the module's merged AST (with std decls merged in)
 	SemaInfo      *Info     // the module's sema output
@@ -106,6 +107,11 @@ type Info struct {
 	// full module compilation result. Used by codegen to inline module
 	// declarations into the main IR module.
 	ModuleInfos map[string]*ModuleInfo
+
+	// ModuleOrder lists module keys in topological order (dependencies first).
+	// Codegen must process modules in this order so that a module's dependencies
+	// are compiled before the module itself.
+	ModuleOrder []string
 }
 
 // NarrowedVar records a single variable narrowing (T? → T).

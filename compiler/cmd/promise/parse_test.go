@@ -1432,7 +1432,7 @@ func TestIsTopLevelPin(t *testing.T) {
 		Name:  "myproject",
 		Epoch: "2026.3",
 		Require: map[string]string{
-			"github.com/someone/parser":          "abc123",
+			"github.com/someone/parser":            "abc123",
 			"https://github.com/someone/utils.git": "def456",
 		},
 		Replace: map[string]string{},
@@ -1499,9 +1499,9 @@ b_func() int `+"`"+`public { return 2; }
 
 	// Root project uses both via [replace]
 	cfg := &module.Config{
-		Name:  "myproject",
-		Epoch: "2026.3",
-		Dir:   projectDir,
+		Name:    "myproject",
+		Epoch:   "2026.3",
+		Dir:     projectDir,
 		Require: map[string]string{},
 		Replace: map[string]string{
 			"github.com/someone/mod_a": "./mod_a",

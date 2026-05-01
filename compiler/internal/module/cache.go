@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 
 	"djabi.dev/go/promise_lang/internal/types"
 )
@@ -353,6 +354,7 @@ func CleanBuildCache() error {
 }
 
 // CleanAll removes all entries from a cache directory, including subdirectories.
+// Preserves .lock files to avoid breaking flock held by concurrent processes.
 func CleanAll(cacheDir string) error {
 	entries, err := os.ReadDir(cacheDir)
 	if err != nil {
@@ -362,6 +364,9 @@ func CleanAll(cacheDir string) error {
 		return err
 	}
 	for _, e := range entries {
+		if e.Name() == ".lock" {
+			continue
+		}
 		path := filepath.Join(cacheDir, e.Name())
 		if e.IsDir() {
 			os.RemoveAll(path)
@@ -444,4 +449,34 @@ func LoadTestBinaryMeta(cacheDir, cacheKey string) *TestCacheMeta {
 		return nil
 	}
 	return &meta
+}
+
+// LockBuildDir acquires an exclusive flock on the build cache directory.
+// Serializes concurrent promise test/build operations sharing the same cache.
+// The lock is held on the file descriptor — automatically released when the
+// process exits or crashes (no stale lockfiles).
+// Returns an unlock function (call via defer). No-op if locking fails.
+func LockBuildDir() func() {
+	dir, err := BuildCacheDir()
+	if err != nil {
+		return func() {}
+	}
+	lockPath := filepath.Join(dir, ".lock")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return func() {}
+	}
+	// Try non-blocking first to detect contention.
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Waiting for concurrent build to finish...\n")
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+			f.Close()
+			return func() {}
+		}
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		f.Close()
+	}
 }

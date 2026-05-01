@@ -976,9 +976,12 @@ If a module's source changes but its interface hash stays the same, **no depende
 ```
 ~/.promise/cache/                        # global cache (shared across all projects)
   build/                                 # content-addressed build cache
+    .lock                                # flock file for concurrent build serialization
     a3/                                  # two-level directory (first 2 hex chars)
       a3b4c5d8...o                       # compiled object file
       a3b4c5d8...interface               # public API hash
+      a3b4c5d8...bin                     # cached test binary
+      a3b4c5d8...bin.meta                # test binary metadata (JSON)
     f1/
       f1e2d3c4...o
       f1e2d3c4...interface
@@ -991,6 +994,7 @@ If a module's source changes but its interface hash stays the same, **no depende
 
 - **All caches are global** (`~/.promise/cache/`). Module build cache keys are content-addressed (SHA-256 of impl hash + compiler hash + target + module paths). Test binary cache keys use FNV-128a of source content + compiler hash + std hash + target + local module deps. Both ensure the same inputs produce the same cache key regardless of which project triggered the build.
 - **`PROMISE_HOME` env var** overrides the `~/.promise/` base directory for all Promise data (caches, LLVM tools, CRT, installs). Useful when `$HOME` is unavailable or for CI environments.
+- **Concurrent build serialization.** Multiple `promise test` or `promise build` processes sharing the same cache directory are serialized via `flock(2)` on `build/.lock`. The lock is tied to the file descriptor — automatically released when the process exits or crashes (no stale lockfiles). `promise clean` also acquires the lock before clearing the cache. The `.lock` file is preserved by `promise clean` to avoid invalidating locks held by concurrent processes.
 
 #### The AI Modify-Build-Test Loop
 
@@ -1217,6 +1221,18 @@ promise build    # ~300ms — recompiles changed module + myapp if API changed
 ```bash
 promise clean              # remove global build cache (~/.promise/cache/build/)
 promise clean --global     # remove all global caches (build + module source)
+```
+
+Both commands acquire the build cache lock before deleting, so they are safe to run while other `promise` processes are building or testing.
+
+#### Debugging the cache
+
+Set `PROMISE_CACHE_DEBUG=1` to see cache hit/miss/skip diagnostics on stderr:
+
+```
+[cache HIT]  basics.pr key=a3b4c5d8f1e2d3c4
+[cache MISS] test_vector.pr key=f1e2d3c4a3b4c5d8 compiler=ac449a35... std=7b2e1f08... target=x86_64-unknown-linux-musl
+[cache SKIP] remote_import.pr (not cacheable)
 ```
 
 ### 12.2 Community Module Developer: Create & Publish a Module

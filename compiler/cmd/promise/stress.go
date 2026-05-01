@@ -159,6 +159,9 @@ func (f *fileStats) recalcInterval() {
 // --- Compile phase ---
 
 func compileTargets(files []string, baseDir string, targetTriple string) (targets []stressTarget, cleanup func()) {
+	unlock := module.LockBuildDir()
+	defer unlock()
+
 	var tempFiles []string
 	target := targetTriple
 	if target == "" {

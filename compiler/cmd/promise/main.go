@@ -402,6 +402,9 @@ func runTestFile(filename string, timeout time.Duration, targetTriple string) {
 	// Check cache.
 	if cacheDir != "" {
 		if cachedBin := module.LookupTestBinaryCache(cacheDir, cacheKey); cachedBin != "" {
+			if os.Getenv("PROMISE_CACHE_DEBUG") != "" {
+				fmt.Fprintf(os.Stderr, "[cache HIT] %s key=%s\n", filepath.Base(filename), cacheKey[:16])
+			}
 			meta := module.LoadTestBinaryMeta(cacheDir, cacheKey)
 			if meta != nil && meta.E2E {
 				executeE2EBinary(cachedBin, meta.ExpectedOutput, meta.ExcludeTargets,
@@ -414,6 +417,14 @@ func runTestFile(filename string, timeout time.Duration, targetTriple string) {
 	}
 
 	// Cache miss — compile.
+	if os.Getenv("PROMISE_CACHE_DEBUG") != "" {
+		if cacheable {
+			fmt.Fprintf(os.Stderr, "[cache MISS] %s key=%s compiler=%s std=%s target=%s\n",
+				filepath.Base(filename), cacheKey[:16], module.CompilerHash()[:16], cachedStdHash()[:16], target)
+		} else {
+			fmt.Fprintf(os.Stderr, "[cache SKIP] %s (not cacheable)\n", filepath.Base(filename))
+		}
+	}
 	file, info := compileFrontend(filename)
 
 	if info.HasExpectOutput {
@@ -700,6 +711,9 @@ func firstLines(s string, n int) string {
 // runTestFiles runs tests from a list of .pr files, printing per-file results
 // and a combined summary at the end.
 func runTestFiles(files []string, timeout time.Duration, targetTriple string) {
+	unlock := module.LockBuildDir()
+	defer unlock()
+
 	totalStart := time.Now()
 
 	if len(files) == 0 {
@@ -3652,6 +3666,10 @@ func runClean(args []string) {
 			os.Exit(1)
 		}
 	}
+
+	// Serialize with concurrent test/build operations.
+	unlock := module.LockBuildDir()
+	defer unlock()
 
 	// Clean build cache
 	if err := module.CleanBuildCache(); err != nil {

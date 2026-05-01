@@ -50,6 +50,9 @@ promise test -stress tests/...                       # run until Ctrl+C
 promise test -stress 100 tests/concurrency/...       # run 100 iterations
 promise test -stress 30s tests/concurrency/...       # run for 30 seconds
 promise test -timeout 10s -stress 50 tests/...       # per-run timeout + stress
+
+# Cache diagnostics
+PROMISE_CACHE_DEBUG=1 promise test tests/...         # show cache HIT/MISS/SKIP on stderr
 ```
 
 **Test output format** — designed for AI-agent tail-friendliness:

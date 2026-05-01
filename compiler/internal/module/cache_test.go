@@ -390,6 +390,29 @@ func TestCleanAll(t *testing.T) {
 	}
 }
 
+func TestCleanAllPreservesLock(t *testing.T) {
+	dir := t.TempDir()
+
+	os.WriteFile(filepath.Join(dir, ".lock"), []byte{}, 0644)
+	os.WriteFile(filepath.Join(dir, "data.o"), []byte("obj"), 0644)
+
+	if err := CleanAll(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != ".lock" {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Errorf("expected only .lock to survive, got %v", names)
+	}
+}
+
 func TestCleanAllNonexistent(t *testing.T) {
 	// Should not error on nonexistent directory
 	if err := CleanAll("/tmp/nonexistent-promise-test-dir-12345"); err != nil {
@@ -673,10 +696,80 @@ func TestHashDir(t *testing.T) {
 		t.Error("changed .pr file should change hash")
 	}
 
+	// Subdirectories should be ignored (flat only).
+	sub := filepath.Join(dir, "subdir")
+	os.MkdirAll(sub, 0755)
+	os.WriteFile(filepath.Join(sub, "nested.pr"), []byte("func nested() {}"), 0644)
+	h4, err := HashDir(dir, ".pr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h3 != h4 {
+		t.Error("subdirectory files should not affect hash (flat only)")
+	}
+
 	// Nonexistent dir → error
 	_, err = HashDir("/nonexistent/dir/12345", ".pr")
 	if err == nil {
 		t.Error("expected error for nonexistent directory")
+	}
+}
+
+func TestTestBinaryCacheRoundTrip(t *testing.T) {
+	cacheDir := t.TempDir()
+	cacheKey := "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+
+	// Initially no cached binary.
+	if got := LookupTestBinaryCache(cacheDir, cacheKey); got != "" {
+		t.Errorf("expected no cached binary, got %q", got)
+	}
+
+	// Create a fake binary and save it.
+	binFile := filepath.Join(t.TempDir(), "test-bin")
+	os.WriteFile(binFile, []byte("fake binary data"), 0755)
+
+	if err := SaveTestBinaryCache(cacheDir, cacheKey, binFile); err != nil {
+		t.Fatal(err)
+	}
+
+	// Lookup should succeed.
+	cached := LookupTestBinaryCache(cacheDir, cacheKey)
+	if cached == "" {
+		t.Fatal("expected cached binary after save")
+	}
+
+	// Read back and verify content.
+	data, err := os.ReadFile(cached)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "fake binary data" {
+		t.Errorf("cached data = %q, want %q", string(data), "fake binary data")
+	}
+
+	// Verify executable permissions.
+	info, err := os.Stat(cached)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&0111 == 0 {
+		t.Errorf("cached binary should be executable, mode = %v", info.Mode())
+	}
+
+	// Two-level directory structure should exist.
+	subdir := filepath.Join(cacheDir, cacheKey[:2])
+	if _, err := os.Stat(subdir); err != nil {
+		t.Errorf("expected two-level subdir %s to exist", subdir)
+	}
+}
+
+func TestSaveTestBinaryCacheBadFile(t *testing.T) {
+	cacheDir := t.TempDir()
+	cacheKey := "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+
+	err := SaveTestBinaryCache(cacheDir, cacheKey, "/nonexistent/binary")
+	if err == nil {
+		t.Fatal("expected error for nonexistent binary file")
 	}
 }
 
@@ -735,6 +828,27 @@ func TestTestBinaryMetaRoundTrip(t *testing.T) {
 	if len(got.ExcludeTargets) != 1 || got.ExcludeTargets[0] != "wasm32-wasi" {
 		t.Errorf("unexpected exclude targets: %v", got.ExcludeTargets)
 	}
+}
+
+func TestLockBuildDir(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmpHome)
+
+	// First lock should succeed immediately.
+	unlock1 := LockBuildDir()
+
+	// Lock file should exist.
+	lockPath := filepath.Join(tmpHome, "cache", "build", ".lock")
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("lock file should exist: %v", err)
+	}
+
+	// Release.
+	unlock1()
+
+	// Re-acquire should succeed (no stale lock).
+	unlock2 := LockBuildDir()
+	unlock2()
 }
 
 func TestPromiseHome(t *testing.T) {

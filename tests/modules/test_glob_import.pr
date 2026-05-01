@@ -1,0 +1,18 @@
+use _ "./mathlib";
+
+test_glob_add() `test {
+    assert(add(10, 20) == 30, "add(10, 20) == 30");
+}
+
+test_glob_square() `test {
+    assert(square(6) == 36, "square(6) == 36");
+}
+
+test_glob_greet() `test {
+    assert(greet("globe") == "hello globe", "greet globe");
+}
+
+test_glob_color() `test {
+    c := Color.Red;
+    assert(color_name(c) == "red", "glob color_name Red");
+}

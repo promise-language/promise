@@ -1,0 +1,18 @@
+use mathlib "./mathlib";
+
+test_qualified_add() `test {
+    assert(mathlib.add(3, 4) == 7, "mathlib.add(3, 4) == 7");
+    assert(mathlib.add(0, 0) == 0, "mathlib.add(0, 0) == 0");
+    assert(mathlib.add(-1, 1) == 0, "mathlib.add(-1, 1) == 0");
+}
+
+test_qualified_square() `test {
+    assert(mathlib.square(5) == 25, "mathlib.square(5) == 25");
+    assert(mathlib.square(0) == 0, "mathlib.square(0) == 0");
+    assert(mathlib.square(-3) == 9, "mathlib.square(-3) == 9");
+}
+
+test_qualified_greet() `test {
+    assert(mathlib.greet("world") == "hello world", "greet world");
+    assert(mathlib.greet("promise") == "hello promise", "greet promise");
+}

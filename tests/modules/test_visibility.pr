@@ -1,0 +1,9 @@
+use vis "./visibility";
+
+test_public_value() `test {
+    assert(vis.public_value() == 42, "public_value() == 42");
+}
+
+test_public_greet() `test {
+    assert(vis.public_greet("tester") == "hi tester (via 7)", "public_greet uses private helper internally");
+}

@@ -1,0 +1,25 @@
+use _ "./mathlib";
+
+// Test generic type from module with single type parameter.
+// Note: multi-param generics like Pair[int, string] are a known parser
+// limitation (comma ambiguity in expression context).
+
+type Box[T] `public {
+    T value;
+}
+
+wrap_int() Box[int] `public {
+    return Box[int](value: 99);
+}
+
+test_local_generic_with_module() `test {
+    b := Box[int](value: square(3));
+    assert(b.value == 9, "Box wrapping module square");
+}
+
+test_module_func_in_generic_context() `test {
+    int[] items = [add(1, 2), add(3, 4), square(5)];
+    assert(items[0] == 3, "items[0] == add(1,2)");
+    assert(items[1] == 7, "items[1] == add(3,4)");
+    assert(items[2] == 25, "items[2] == square(5)");
+}

@@ -665,6 +665,13 @@ func discoverTestFiles(dir string, recursive bool) []string {
 			if err != nil {
 				return nil
 			}
+			// Skip module directories (contain promise.toml) — their .pr files
+			// are module source, not test files, and can't be compiled standalone.
+			if d.IsDir() && path != dir {
+				if _, err := os.Stat(filepath.Join(path, "promise.toml")); err == nil {
+					return filepath.SkipDir
+				}
+			}
 			if !d.IsDir() && strings.HasSuffix(d.Name(), ".pr") {
 				files = append(files, path)
 			}
@@ -1906,6 +1913,12 @@ func loadModuleScopes(filename string, file *ast.File, stdFiles []*ast.File) (ma
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s: error loading module '%s': %v\n", filename, u.Path, err)
 			os.Exit(1)
+		}
+		// Use the alias from the use declaration as the module name for codegen.
+		// This ensures qualified calls like vis.func() resolve correctly even when
+		// the alias differs from the directory name (e.g., use vis "./visibility").
+		if u.Alias != "_" {
+			modInfo.Name = u.Alias
 		}
 		scopes[u.Path] = sema.ExportedScope(modInfo.SemaInfo, modInfo.File)
 		modInfos[u.Path] = modInfo

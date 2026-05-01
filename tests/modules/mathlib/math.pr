@@ -1,0 +1,81 @@
+// mathlib: a test module exercising functions, types, enums, generics, failables, and drop.
+
+// --- Public functions ---
+
+add(int a, int b) int `public {
+    return a + b;
+}
+
+square(int x) int `public {
+    return x * x;
+}
+
+greet(string name) string `public {
+    return "hello " + name;
+}
+
+// --- Public type with methods ---
+
+type Vec2 `public {
+    int x;
+    int y;
+
+    sum(&this) int {
+        return this.x + this.y;
+    }
+
+    scale(~this, int factor) {
+        this.x = this.x * factor;
+        this.y = this.y * factor;
+    }
+
+    to_string(&this) string {
+        return "({this.x}, {this.y})";
+    }
+}
+
+// --- Public enum with methods ---
+
+enum Color `public {
+    Red,
+    Green,
+    Blue,
+}
+
+color_name(Color c) string `public {
+    return match c {
+        Color.Red => "red",
+        Color.Green => "green",
+        Color.Blue => "blue",
+    };
+}
+
+// --- Public generic type ---
+
+type Pair[A, B] `public {
+    A first;
+    B second;
+}
+
+// --- Public failable function ---
+
+safe_divide(int a, int b) int! `public {
+    if b == 0 {
+        raise error(message: "division by zero");
+    }
+    return a / b;
+}
+
+// --- Public type with drop ---
+
+type Resource `public {
+    int id;
+
+    drop(~this) { }
+}
+
+// --- Private function (not exported) ---
+
+_internal_helper() int {
+    return 999;
+}

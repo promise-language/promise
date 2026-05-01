@@ -1,0 +1,11 @@
+public_value() int `public {
+    return 42;
+}
+
+public_greet(string name) string `public {
+    return "hi " + name + " (via {_secret()})";
+}
+
+_secret() int {
+    return 7;
+}

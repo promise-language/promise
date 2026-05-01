@@ -1,0 +1,24 @@
+use mathlib "./mathlib";
+
+test_drop_basic() `test {
+    r := mathlib.Resource(id: 1);
+    assert(r.id == 1, "resource id == 1");
+    // r dropped at scope exit
+}
+
+test_drop_multiple() `test {
+    r1 := mathlib.Resource(id: 10);
+    r2 := mathlib.Resource(id: 20);
+    assert(r1.id + r2.id == 30, "sum of resource ids");
+    // both dropped at scope exit
+}
+
+test_drop_in_if_block() `test {
+    int x = 0;
+    if true {
+        r := mathlib.Resource(id: 42);
+        x = r.id;
+        // r dropped at block exit
+    }
+    assert(x == 42, "resource used before drop");
+}

@@ -2577,7 +2577,9 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo) {
 	c.file = modInfo.File
 	c.compilingModule = modInfo.Name
 
-	modFile := modInfo.File
+	// Create a filtered file containing only the module's own declarations,
+	// excluding merged std library declarations that are already compiled.
+	modFile := stripStdDecls(modInfo.File)
 
 	// 1. Compute enum layouts for module types
 	c.computeEnumLayouts(modFile)
@@ -2619,6 +2621,31 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo) {
 	c.info = savedInfo
 	c.file = savedFile
 	c.compilingModule = savedModule
+}
+
+// stripStdDecls returns a shallow copy of the file with only non-std declarations.
+// Module files have std library declarations merged in for sema, but codegen must
+// skip them to avoid redefinition of types/functions already emitted by the main file.
+func stripStdDecls(file *ast.File) *ast.File {
+	stripped := &ast.File{Uses: file.Uses}
+	for _, d := range file.Decls {
+		switch decl := d.(type) {
+		case *ast.TypeDecl:
+			if decl.IsStd {
+				continue
+			}
+		case *ast.EnumDecl:
+			if decl.IsStd {
+				continue
+			}
+		case *ast.FuncDecl:
+			if decl.IsStd {
+				continue
+			}
+		}
+		stripped.Decls = append(stripped.Decls, d)
+	}
+	return stripped
 }
 
 // declareModuleExterns declares extern functions from a module, deduplicating

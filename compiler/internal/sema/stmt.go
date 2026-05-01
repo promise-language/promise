@@ -104,6 +104,8 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 					delegateElem = elem
 				} else if elem, ok := types.AsIterator(valType); ok {
 					delegateElem = elem
+				} else if arr, ok := valType.(*types.Array); ok {
+					delegateElem = arr.Elem()
 				} else if elem, ok := types.AsVector(valType); ok {
 					delegateElem = elem
 				} else if types.Identical(valType, types.TypRange) {
@@ -748,7 +750,9 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 	if iterType != nil {
 		// Determine element type from iterable
 		var elemType types.Type
-		if elem, ok := types.AsVector(iterType); ok {
+		if arr, ok := iterType.(*types.Array); ok {
+			elemType = arr.Elem()
+		} else if elem, ok := types.AsVector(iterType); ok {
 			elemType = elem
 		} else if key, val, ok := types.AsMap(iterType); ok {
 			// Iterating a map yields (key, value) tuples

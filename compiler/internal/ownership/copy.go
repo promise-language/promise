@@ -34,6 +34,8 @@ func isCopyType(typ types.Type) bool {
 		return true
 	case *types.Optional:
 		return isCopyType(t.Elem())
+	case *types.Array:
+		return isCopyType(t.Elem())
 	}
 	return false
 }

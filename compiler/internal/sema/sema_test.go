@@ -4493,6 +4493,67 @@ func TestArrayMutatingMethodsRejected(t *testing.T) {
 	expectError(t, errs, "cannot pop on fixed-size array")
 }
 
+func TestFixedArrayLiteralHint(t *testing.T) {
+	// Array literal with fixed-size hint produces Array type
+	checkOK(t, `
+		main() {
+			int[3] a = [1, 2, 3];
+			int x = a[0];
+			int n = a.len;
+		}
+	`)
+}
+
+func TestFixedArraySizeMismatch(t *testing.T) {
+	errs := checkErrs(t, `
+		main() {
+			int[3] a = [1, 2];
+		}
+	`)
+	expectError(t, errs, "array literal has 2 elements but type int[3] requires 3")
+}
+
+func TestFixedArraySizeMismatchOver(t *testing.T) {
+	errs := checkErrs(t, `
+		main() {
+			int[2] a = [1, 2, 3];
+		}
+	`)
+	expectError(t, errs, "array literal has 3 elements but type int[2] requires 2")
+}
+
+func TestFixedArrayForIn(t *testing.T) {
+	checkOK(t, `
+		main() {
+			int[3] arr = [1, 2, 3];
+			int sum = 0;
+			for x in arr { sum += x; }
+			for i, x in arr { sum += x; }
+		}
+	`)
+}
+
+func TestFixedArrayAssignment(t *testing.T) {
+	checkOK(t, `
+		main() {
+			int[3] a = [1, 2, 3];
+			int[3] b = a;
+			b[0] = 42;
+		}
+	`)
+}
+
+func TestFixedArrayFieldAccess(t *testing.T) {
+	checkOK(t, `
+		type Grid { int[3] data; }
+		main() {
+			g := Grid(data: [1, 2, 3]);
+			int x = g.data[0];
+			g.data[1] = 42;
+		}
+	`)
+}
+
 func TestMapLenProperty(t *testing.T) {
 	checkOKWithStd(t, stdContainers, `
 		main() {

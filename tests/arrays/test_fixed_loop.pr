@@ -1,0 +1,36 @@
+// Fixed-size array for-in with break/continue and f64 arrays
+
+main() `test(expected: """3
+4
+1.5
+2.5
+4""") {
+    // Break: sum until we hit 0
+    int[5] vals = [1, 1, 1, 0, 99];
+    int sum = 0;
+    for x in vals {
+        if x == 0 { break; }
+        sum += x;
+    }
+    println("{sum}");
+
+    // Continue: count non-zero elements
+    int count = 0;
+    for x in vals {
+        if x == 0 { continue; }
+        count += 1;
+    }
+    println("{count}");
+
+    // f64 array
+    f64[2] floats = [1.5, 2.5];
+    println("{floats[0]}");
+    println("{floats[1]}");
+
+    // f64 array for-in sum
+    f64 fsum = 0.0;
+    for f in floats {
+        fsum += f;
+    }
+    println("{fsum}");
+}

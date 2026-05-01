@@ -66,16 +66,22 @@ func IsVector(t Type) bool {
 	return ok && inst.origin == TypVector
 }
 
-// AsVector extracts the element type from a Vector instance or Array.
-// Returns (elem, true) for Vector instances and Arrays, (nil, false) otherwise.
+// AsVector extracts the element type from a Vector instance.
+// Returns (elem, true) for Vector instances, (nil, false) otherwise.
 func AsVector(t Type) (elem Type, ok bool) {
 	if inst, ok := t.(*Instance); ok && inst.origin == TypVector {
 		return inst.typeArgs[0], true
 	}
-	if arr, ok := t.(*Array); ok {
-		return arr.elem, true
-	}
 	return nil, false
+}
+
+// AsArray extracts the element type and size from a fixed-size Array.
+// Returns (elem, size, true) for Array types, (nil, 0, false) otherwise.
+func AsArray(t Type) (elem Type, size int64, ok bool) {
+	if arr, ok := t.(*Array); ok {
+		return arr.elem, arr.size, true
+	}
+	return nil, 0, false
 }
 
 // IsChannel reports whether t is a channel instance (Instance{TypChannel, _}).

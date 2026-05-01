@@ -99,7 +99,7 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 		typ = c.checkTupleLit(e)
 
 	case *ast.ArrayLit:
-		typ = c.checkArrayLit(e)
+		typ = c.checkArrayLit(e, hint)
 
 	case *ast.MapLit:
 		typ = c.checkMapLit(e)
@@ -271,7 +271,7 @@ func (c *Checker) checkTupleLit(e *ast.TupleLit) types.Type {
 	return types.NewTuple(elems)
 }
 
-func (c *Checker) checkArrayLit(e *ast.ArrayLit) types.Type {
+func (c *Checker) checkArrayLit(e *ast.ArrayLit, hint types.Type) types.Type {
 	if len(e.Elements) == 0 {
 		c.errorf(e.Pos(), "cannot infer type of empty array literal")
 		return nil
@@ -290,6 +290,16 @@ func (c *Checker) checkArrayLit(e *ast.ArrayLit) types.Type {
 		if !types.Identical(et, elemType) {
 			c.errorf(e.Elements[i].Pos(), "array element type mismatch: expected %s, got %s", elemType, et)
 		}
+	}
+
+	// If hint is a fixed-size array type, produce Array instead of Vector
+	if arr, ok := hint.(*types.Array); ok {
+		if int64(len(e.Elements)) != arr.Size() {
+			c.errorf(e.Pos(), "array literal has %d elements but type %s requires %d",
+				len(e.Elements), arr, arr.Size())
+			return nil
+		}
+		return types.NewArray(elemType, arr.Size())
 	}
 
 	inst := types.NewVector(elemType)

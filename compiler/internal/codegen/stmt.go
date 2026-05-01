@@ -1455,7 +1455,9 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 		iterableType = types.Substitute(iterableType, c.typeSubst)
 	}
 
-	if elem, ok := types.AsVector(iterableType); ok {
+	if arr, ok := iterableType.(*types.Array); ok {
+		c.genForInArray(s, arr)
+	} else if elem, ok := types.AsVector(iterableType); ok {
 		slicePtr := c.genExpr(s.Iterable)
 		c.genForInVector(s, slicePtr, elem)
 	} else if key, val, ok := types.AsMap(iterableType); ok {
@@ -1747,6 +1749,12 @@ func (c *Compiler) genIndexAssign(target *ast.IndexExpr, op ast.AssignOp, val va
 		targetType = types.Substitute(targetType, c.typeSubst)
 	}
 
+	// Fixed-size array index assignment
+	if arr, ok := targetType.(*types.Array); ok {
+		c.genArrayIndexAssign(target, arr, op, val)
+		return
+	}
+
 	named := extractNamed(targetType)
 	if named != nil {
 		if m := named.LookupMethod("[]="); m != nil {
@@ -1759,6 +1767,40 @@ func (c *Compiler) genIndexAssign(target *ast.IndexExpr, op ast.AssignOp, val va
 		}
 	}
 	panic(fmt.Sprintf("codegen: cannot assign to index of type %s", targetType))
+}
+
+// genArrayIndexAssign handles arr[i] = val for fixed-size arrays with bounds checking.
+func (c *Compiler) genArrayIndexAssign(target *ast.IndexExpr, arr *types.Array, op ast.AssignOp, val value.Value) {
+	basePtr := c.genArrayBasePtr(target.Target, arr)
+	idx := c.genExpr(target.Index)
+	elemLLVM := c.resolveType(arr.Elem())
+	arrType := irtypes.NewArray(uint64(arr.Size()), elemLLVM)
+
+	// Bounds check
+	size := constant.NewInt(irtypes.I64, arr.Size())
+	inBounds := c.block.NewICmp(enum.IPredULT, idx, size)
+	okBlock := c.newBlock("arrassign.ok")
+	panicBlock := c.newBlock("arrassign.oob")
+	c.block.NewCondBr(inBounds, okBlock, panicBlock)
+
+	c.block = panicBlock
+	oobMsg := c.makeGlobalString("array index out of bounds")
+	c.block.NewCall(c.funcs["promise_panic"], oobMsg)
+	c.block.NewUnreachable()
+
+	c.block = okBlock
+	elemPtr := c.block.NewGetElementPtr(arrType, basePtr,
+		constant.NewInt(irtypes.I32, 0), idx)
+
+	if op == ast.OpAssign {
+		c.block.NewStore(val, elemPtr)
+		return
+	}
+
+	// Compound assignment
+	current := c.block.NewLoad(elemLLVM, elemPtr)
+	result := c.genCompoundOp(op, current, val)
+	c.block.NewStore(result, elemPtr)
 }
 
 // genNativeIndexAssign dispatches native []= implementations for built-in types.
@@ -1846,6 +1888,14 @@ func (c *Compiler) genCompoundIndexAssign(target *ast.IndexExpr, op ast.AssignOp
 	targetType := c.info.Types[target.Target]
 	if c.typeSubst != nil {
 		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+
+	// Fixed-size array compound assignment.
+	// Evaluation order (RHS before target) is safe: arrays are stack-local copy types, no aliasing.
+	if arr, ok := targetType.(*types.Array); ok {
+		val := c.genExpr(valueExpr)
+		c.genArrayIndexAssign(target, arr, op, val)
+		return
 	}
 
 	named := extractNamed(targetType)
@@ -2149,6 +2199,87 @@ func (c *Compiler) genForInVector(s *ast.ForInStmt, slicePtr value.Value, elemTy
 	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
 	curCounter := c.block.NewLoad(irtypes.I64, counterAlloca)
 	elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, curCounter)
+	elem := c.block.NewLoad(elemLLVM, elemPtr)
+	c.block.NewStore(elem, elemAlloca)
+
+	c.genBlock(s.Body)
+	if c.block.Term == nil {
+		c.block.NewBr(updateBlock)
+	}
+
+	// Update: increment counter (and index if present)
+	c.block = updateBlock
+	cur := c.block.NewLoad(irtypes.I64, counterAlloca)
+	next := c.block.NewAdd(cur, constant.NewInt(irtypes.I64, 1))
+	c.block.NewStore(next, counterAlloca)
+
+	if s.Index != "" {
+		idxAlloca := c.locals[s.Index]
+		curIdx := c.block.NewLoad(irtypes.I64, idxAlloca)
+		nextIdx := c.block.NewAdd(curIdx, constant.NewInt(irtypes.I64, 1))
+		c.block.NewStore(nextIdx, idxAlloca)
+	}
+
+	c.emitYieldCheck()
+	c.block.NewBr(headerBlock)
+
+	c.breakTarget = savedBreak
+	c.continueTarget = savedContinue
+	c.loopScopeDepth = savedLoopUseDepth
+	c.block = exitBlock
+}
+
+// --- For-in over fixed-size arrays ---
+
+// genForInArray iterates a fixed-size array with a compile-time-known length.
+func (c *Compiler) genForInArray(s *ast.ForInStmt, arr *types.Array) {
+	basePtr := c.genArrayBasePtr(s.Iterable, arr)
+	elemLLVM := c.resolveType(arr.Elem())
+	arrType := irtypes.NewArray(uint64(arr.Size()), elemLLVM)
+	length := constant.NewInt(irtypes.I64, arr.Size())
+
+	// Counter alloca
+	counterAlloca := c.block.NewAlloca(irtypes.I64)
+	c.block.NewStore(constant.NewInt(irtypes.I64, 0), counterAlloca)
+
+	// Element binding alloca
+	elemAlloca := c.block.NewAlloca(elemLLVM)
+	elemAlloca.SetName(c.uniqueLocalName(s.Binding))
+	c.locals[s.Binding] = elemAlloca
+
+	// Index variable if present
+	if s.Index != "" {
+		indexAlloca := c.block.NewAlloca(irtypes.I64)
+		indexAlloca.SetName(c.uniqueLocalName(s.Index))
+		c.block.NewStore(constant.NewInt(irtypes.I64, 0), indexAlloca)
+		c.locals[s.Index] = indexAlloca
+	}
+
+	headerBlock := c.newBlock("forin.header")
+	bodyBlock := c.newBlock("forin.body")
+	updateBlock := c.newBlock("forin.update")
+	exitBlock := c.newBlock("forin.exit")
+
+	c.block.NewBr(headerBlock)
+
+	// Header: counter < length
+	c.block = headerBlock
+	counter := c.block.NewLoad(irtypes.I64, counterAlloca)
+	cond := c.block.NewICmp(enum.IPredULT, counter, length)
+	c.block.NewCondBr(cond, bodyBlock, exitBlock)
+
+	// Body: load element, store to binding
+	savedBreak := c.breakTarget
+	savedContinue := c.continueTarget
+	savedLoopUseDepth := c.loopScopeDepth
+	c.breakTarget = exitBlock
+	c.continueTarget = updateBlock
+	c.loopScopeDepth = len(c.scopeBindings)
+
+	c.block = bodyBlock
+	curCounter := c.block.NewLoad(irtypes.I64, counterAlloca)
+	elemPtr := c.block.NewGetElementPtr(arrType, basePtr,
+		constant.NewInt(irtypes.I32, 0), curCounter)
 	elem := c.block.NewLoad(elemLLVM, elemPtr)
 	c.block.NewStore(elem, elemAlloca)
 

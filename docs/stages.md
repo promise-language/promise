@@ -367,7 +367,8 @@ Codegen for container types (tuples, optionals, slices, maps) and capturing lamb
 - **Lambda ownership**: Move captures mark the variable as `Moved` in the enclosing scope. Captured variables are `Owned` inside the lambda body. Copy captures leave the original variable usable.
 - **Intrinsics** (`compiler.go`): 7 new map runtime functions declared in `declareIntrinsics`. `lambdaCounter` and `targetType` fields added to Compiler.
 - **Scope**: Tuple literals/destructure/return, optional none/some/wrapping/elvis, array literals, slice/array indexing (read/write/compound), for-in over slices/arrays/maps, map literals/indexing/assignment, capturing lambdas (expression/block body, indirect calls, copy/move captures, nested capture propagation, env allocation/cleanup, named function reference thunks).
-- **Deferred**: Slice growth (`.push()`), container methods (`.contains`), fixed-size arrays as stack-allocated `[N x T]`, `llvmTypeSize` struct alignment (current implementation sums without padding — correct for primitive elements, under-allocates for struct-typed slice elements). String interpolation, if-unwrap/while-unwrap, optional chaining, and unsafe blocks completed in Stage 8h. Container `.len` completed in Stage 8i.
+- **Deferred**: Slice growth (`.push()`), container methods (`.contains`), `llvmTypeSize` struct alignment (current implementation sums without padding — correct for primitive elements, under-allocates for struct-typed slice elements). String interpolation, if-unwrap/while-unwrap, optional chaining, and unsafe blocks completed in Stage 8h. Container `.len` completed in Stage 8i.
+- **Fixed-size arrays** (`T[N]`): Stack-allocated `[N x T]` LLVM array type. Hint-based literal inference: `int[3] x = [1,2,3]` types the literal as `*types.Array`, bare `[1,2,3]` remains Vector. `genFixedArrayLit` allocas `[N x T]` and stores elements via GEP. `genArrayIndex`/`genArrayIndexAssign` emit bounds check (`icmp ult idx, N`) and GEP into the array. `.len` returns compile-time constant. `genForInArray` iterates with constant-bound loop. `genArrayBasePtr` returns alloca for identifiers, `genFieldPtr` for struct field access (MemberExpr), temp alloca for computed expressions. Copy semantics: arrays of copy-type elements are copy. Element count mismatch (`int[3] x = [1,2]`) is a sema error. Mutating vector methods (push/pop/remove) rejected on fixed arrays.
 
 ## Stage 8h — Optional Patterns, String Interpolation & Expression Completeness (Done)
 
@@ -697,7 +698,7 @@ Dependency fetching and resolution.
 
 The compiler pipeline (Stages 1-8p) is complete. Runtime is fully codegen-emitted LLVM IR — no C files remain. All major cross-cutting features are done: M:N scheduler (Phase 5c), WASM target (Phases 4b/5d/7a), yield generators, structural interfaces, operator dispatch, naming conventions, pure value types, documentation system (Phase 1), and module system (Phase 2 with transitive deps, separate/incremental compilation).
 
-Test suite: 775 native pass, 761 WASM pass (3 skip).
+Test suite: 781 native pass, 761 WASM pass (3 skip).
 
 ### Near-term: Compiler Infrastructure
 
@@ -714,7 +715,7 @@ Test suite: 775 native pass, 761 WASM pass (3 skip).
 |------|----------|
 | Blocking select optimization (waiter-list parking instead of yield-and-retry polling) | Medium |
 | Stack overflow detection (guard page + SIGSEGV handler) | Medium |
-| Fixed-size arrays as stack-allocated `[N x T]` | Medium |
+| ~~Fixed-size arrays as stack-allocated `[N x T]`~~ | ~~Done~~ |
 | Destructure is-patterns (`x is Dog(name)`) | Medium |
 | `yield*` delegate (forward all values from sub-iterator) | Medium |
 
@@ -731,7 +732,7 @@ Test suite: 775 native pass, 761 WASM pass (3 skip).
 
 ### WASM remaining work
 
-Tests: 761 pass, 0 fail, 3 skip on `wasm32-wasi` (764 native pass)
+Tests: 761 pass, 0 fail, 3 skip on `wasm32-wasi` (781 native pass)
 
 | Item | Skipped tests | Effort | Notes |
 |------|--------------|--------|-------|
@@ -775,7 +776,7 @@ Known gaps and improvements deferred from completed stages.
 | Blocking select uses polling (yield-and-retry) instead of waiter-list parking. Correct but spins when no case is ready. Proper fix requires multi-mutex unlock in scheduler or atomic wake-once protocol for select waiters. | 5c | Medium |
 | Fire-and-forget goroutine G struct leak: all `go { }` blocks set `result_ptr` to sentinel `0x1`, preventing goroutine_exit from freeing the G. Only `task[T]` should use the sentinel. | 5c | Low |
 | Stack overflow detection: deep recursion segfaults with no message. Add guard page (`mprotect` bottom page of M stack) + `SIGSEGV` handler on `sigaltstack` to print "stack overflow" and terminate cleanly. Consider `probe-stack` for large frames. | 5c | Medium |
-| Fixed-size arrays as stack-allocated `[N x T]` | 8g | Medium |
+| ~~Fixed-size arrays as stack-allocated `[N x T]`~~ | ~~8g~~ | ~~Done~~ |
 | Destructure is-patterns (`x is Dog(name)`) | 8k | Medium |
 | Generic type RTTI | 8k | Medium |
 | Failable `close()` error propagation in `use` | 8m | Medium |

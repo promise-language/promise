@@ -71,7 +71,7 @@ func llvmType(typ types.Type) irtypes.Type {
 		}
 		return irtypes.NewStruct(irtypes.I1, inner)
 	case *types.Array:
-		return irtypes.I8Ptr // treated as heap-allocated slice for now
+		return irtypes.NewArray(uint64(t.Size()), llvmType(t.Elem()))
 	case *types.Instance:
 		origin := t.Origin()
 		if origin == types.TypIter || origin == types.TypStream {
@@ -247,6 +247,12 @@ func (c *Compiler) resolveType(typ types.Type) irtypes.Type {
 			return irtypes.I1
 		}
 		return irtypes.NewStruct(irtypes.I1, inner)
+	}
+
+	// Handle Array types (element type may need substitution)
+	if arr, ok := typ.(*types.Array); ok {
+		elemLLVM := c.resolveType(arr.Elem())
+		return irtypes.NewArray(uint64(arr.Size()), elemLLVM)
 	}
 
 	// Handle Instance types

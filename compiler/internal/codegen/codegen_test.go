@@ -4123,12 +4123,139 @@ func TestSliceLen(t *testing.T) {
 }
 
 func TestArrayLen(t *testing.T) {
-	ir := generateIRWithStd(t, stdContainers, `
-		check(int[3] arr) int { return arr.len; }
-		main() { }
+	ir := generateIR(t, `
+		main() {
+			int[] items = [1, 2, 3];
+			int n = items.len;
+		}
 	`)
 	assertContains(t, ir, "getelementptr { i64, i64 }")
 	assertContains(t, ir, "load i64")
+}
+
+// --- Fixed-size array tests ---
+
+func TestFixedArrayLiteral(t *testing.T) {
+	ir := generateIR(t, `
+		main() { int[3] x = [1, 2, 3]; }
+	`)
+	// Should use alloca [3 x i64] for stack allocation
+	assertContains(t, ir, "alloca [3 x i64]")
+	// Should store elements via GEP
+	assertContains(t, ir, "store i64 1")
+	assertContains(t, ir, "store i64 2")
+	assertContains(t, ir, "store i64 3")
+}
+
+func TestFixedArrayIndex(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[3] items = [1, 2, 3];
+			int x = items[0];
+		}
+	`)
+	// Should have bounds check against constant 3
+	assertContains(t, ir, "icmp ult i64")
+	assertContains(t, ir, "arridx.ok")
+	assertContains(t, ir, "arridx.oob")
+	assertContains(t, ir, "call void @promise_panic(")
+}
+
+func TestFixedArrayIndexAssign(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[3] items = [1, 2, 3];
+			items[0] = 42;
+		}
+	`)
+	assertContains(t, ir, "icmp ult i64")
+	assertContains(t, ir, "arrassign.ok")
+	assertContains(t, ir, "store i64 42")
+}
+
+func TestFixedArrayLen(t *testing.T) {
+	ir := generateIR(t, `
+		get_len(int[3] arr) int { return arr.len; }
+		main() { }
+	`)
+	// .len on fixed array should be a compile-time constant 3
+	// The function body should just return i64 3 without loading from a header
+	assertContains(t, ir, "ret i64 3")
+}
+
+func TestFixedArrayForIn(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[3] items = [1, 2, 3];
+			for x in items {
+				int y = x;
+			}
+		}
+	`)
+	assertContains(t, ir, "forin.header")
+	assertContains(t, ir, "forin.body")
+	assertContains(t, ir, "forin.update")
+	assertContains(t, ir, "forin.exit")
+	assertContains(t, ir, "icmp ult")
+}
+
+func TestFixedArrayCopy(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[3] a = [1, 2, 3];
+			int[3] b = a;
+		}
+	`)
+	// Fixed arrays are value types — stored/loaded as [3 x i64]
+	assertContains(t, ir, "alloca [3 x i64]")
+	assertContains(t, ir, "store [3 x i64]")
+	assertContains(t, ir, "load [3 x i64]")
+}
+
+func TestFixedArrayParam(t *testing.T) {
+	ir := generateIR(t, `
+		sum(int[3] arr) int { return arr[0]; }
+		main() {
+			int[3] items = [1, 2, 3];
+			int s = sum(items);
+		}
+	`)
+	// Function should take [3 x i64] parameter
+	assertContains(t, ir, "[3 x i64]")
+}
+
+func TestFixedArrayFieldAssign(t *testing.T) {
+	ir := generateIR(t, `
+		type Grid { int[3] data; }
+		main() {
+			g := Grid(data: [1, 2, 3]);
+			g.data[0] = 42;
+		}
+	`)
+	// Should GEP into the instance field directly (not a temp copy)
+	assertContains(t, ir, "getelementptr [3 x i64]")
+}
+
+func TestFixedArrayF64(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			f64[2] arr = [1.5, 2.5];
+			f64 x = arr[0];
+		}
+	`)
+	assertContains(t, ir, "alloca [2 x double]")
+	assertContains(t, ir, "getelementptr [2 x double]")
+}
+
+func TestFixedArrayBool(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			bool[2] arr = [true, false];
+			bool x = arr[0];
+		}
+	`)
+	assertContains(t, ir, "alloca [2 x i1]")
+	assertContains(t, ir, "getelementptr [2 x i1]")
 }
 
 func TestMapLen(t *testing.T) {

@@ -1331,9 +1331,12 @@ func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 		targetType = types.SubstituteSelf(targetType, c.selfSubst.iface, c.selfSubst.concrete)
 	}
 
-	// Container .len property (string, vector)
+	// Container .len property (string, vector, fixed array)
 	// Check both Instance wrappers (user code: Vector[int]) and bare Named (method body: this is TypVector)
 	if e.Field == "len" {
+		if arr, ok := targetType.(*types.Array); ok {
+			return constant.NewInt(irtypes.I64, arr.Size())
+		}
 		named := extractNamed(targetType)
 		if named == types.TypString {
 			return c.genStringLen(e)
@@ -3046,9 +3049,15 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 	if c.typeSubst != nil {
 		typ = types.Substitute(typ, c.typeSubst)
 	}
+
+	// Fixed-size array: stack-allocated [N x T]
+	if arr, ok := typ.(*types.Array); ok {
+		return c.genFixedArrayLit(e, arr)
+	}
+
 	elem, ok := types.AsVector(typ)
 	if !ok {
-		panic(fmt.Sprintf("codegen: array literal type is %T, want Vector instance", typ))
+		panic(fmt.Sprintf("codegen: array literal type is %T, want Vector instance or Array", typ))
 	}
 	elemLLVM := c.resolveType(elem)
 	elemSize := int64(c.typeSize(elemLLVM))
@@ -3085,6 +3094,22 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 	}
 
 	return rawPtr // i8*
+}
+
+// genFixedArrayLit generates a stack-allocated fixed-size array literal.
+// Returns the full [N x T] value (not a pointer).
+func (c *Compiler) genFixedArrayLit(e *ast.ArrayLit, arr *types.Array) value.Value {
+	elemLLVM := c.resolveType(arr.Elem())
+	arrType := irtypes.NewArray(uint64(arr.Size()), elemLLVM)
+
+	tmp := c.block.NewAlloca(arrType)
+	for i, elemExpr := range e.Elements {
+		val := c.genExpr(elemExpr)
+		ptr := c.block.NewGetElementPtr(arrType, tmp,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
+		c.block.NewStore(val, ptr)
+	}
+	return c.block.NewLoad(arrType, tmp)
 }
 
 // --- Index Expression ---
@@ -3159,6 +3184,11 @@ func (c *Compiler) genIndexExpr(e *ast.IndexExpr) value.Value {
 		targetType = types.Substitute(targetType, c.typeSubst)
 	}
 
+	// Fixed-size array indexing
+	if arr, ok := targetType.(*types.Array); ok {
+		return c.genArrayIndex(e, arr)
+	}
+
 	named := extractNamed(targetType)
 	if named != nil {
 		if m := named.LookupMethod("[]"); m != nil {
@@ -3170,6 +3200,53 @@ func (c *Compiler) genIndexExpr(e *ast.IndexExpr) value.Value {
 	}
 
 	panic(fmt.Sprintf("codegen: cannot index type %s", targetType))
+}
+
+// genArrayBasePtr returns a pointer to the base of a fixed-size array.
+// For identifier targets, returns the alloca directly (needed for index assignment).
+// For struct field targets, returns a pointer to the field in the instance.
+// For other expressions, allocas a temp and stores the value.
+func (c *Compiler) genArrayBasePtr(target ast.Expr, arr *types.Array) value.Value {
+	if ident, ok := target.(*ast.IdentExpr); ok {
+		if alloca, ok := c.locals[ident.Name]; ok {
+			return alloca
+		}
+	}
+	// Struct field: return pointer to the field directly (not a copy)
+	if memberExpr, ok := target.(*ast.MemberExpr); ok {
+		return c.genFieldPtr(memberExpr)
+	}
+	arrVal := c.genExpr(target)
+	elemLLVM := c.resolveType(arr.Elem())
+	arrType := irtypes.NewArray(uint64(arr.Size()), elemLLVM)
+	tmp := c.block.NewAlloca(arrType)
+	c.block.NewStore(arrVal, tmp)
+	return tmp
+}
+
+// genArrayIndex handles arr[i] for fixed-size arrays with bounds checking.
+func (c *Compiler) genArrayIndex(e *ast.IndexExpr, arr *types.Array) value.Value {
+	basePtr := c.genArrayBasePtr(e.Target, arr)
+	idx := c.genExpr(e.Index)
+	elemLLVM := c.resolveType(arr.Elem())
+	arrType := irtypes.NewArray(uint64(arr.Size()), elemLLVM)
+
+	// Bounds check: idx < N
+	size := constant.NewInt(irtypes.I64, arr.Size())
+	inBounds := c.block.NewICmp(enum.IPredULT, idx, size)
+	okBlock := c.newBlock("arridx.ok")
+	panicBlock := c.newBlock("arridx.oob")
+	c.block.NewCondBr(inBounds, okBlock, panicBlock)
+
+	c.block = panicBlock
+	oobMsg := c.makeGlobalString("array index out of bounds")
+	c.block.NewCall(c.funcs["promise_panic"], oobMsg)
+	c.block.NewUnreachable()
+
+	c.block = okBlock
+	elemPtr := c.block.NewGetElementPtr(arrType, basePtr,
+		constant.NewInt(irtypes.I32, 0), idx)
+	return c.block.NewLoad(elemLLVM, elemPtr)
 }
 
 // genNativeIndex dispatches native [] implementations for built-in types.

@@ -464,8 +464,12 @@ func computeValueTypeLayout(module *ir.Module, named *types.Named, allLayouts ma
 }
 
 // userFieldCType returns the C type string for a user type field.
-// Primitives use their raw C type; strings and user types use "void*".
+// Primitives use their raw C type; arrays use element C type + [N]; strings and user types use "void*".
 func userFieldCType(typ types.Type, allLayouts map[*types.Named]*TypeDeclLayout) string {
+	if arr, ok := typ.(*types.Array); ok {
+		elemCType := userFieldCType(arr.Elem(), allLayouts)
+		return fmt.Sprintf("%s[%d]", elemCType, arr.Size())
+	}
 	named := extractNamed(typ)
 	if named == nil {
 		return "void*"

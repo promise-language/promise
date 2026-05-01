@@ -645,30 +645,20 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 		if ident, ok := member.Target.(*ast.IdentExpr); ok && ident.Name == "std" {
 			return c.genStdCall(e, member.Field)
 		}
-		// Handle mod.func() — qualified call to imported module function
-		// Only dispatch as a module call if the callee resolves to a function
-		// (not a type — type constructors use the constructor path below).
+		// Handle mod.func() / mod.Type() — qualified call to imported module
 		if ident, ok := member.Target.(*ast.IdentExpr); ok {
 			if modName := c.resolveModuleName(ident); modName != "" {
 				calleeType := c.info.Types[e.Callee]
-				if _, isNamed := calleeType.(*types.Named); !isNamed {
-					if _, isInst := calleeType.(*types.Instance); !isInst {
-						if _, isEnum := calleeType.(*types.Enum); !isEnum {
-							return c.genModuleCall(e, modName, member.Field)
-						}
-					}
+				switch calleeType.(type) {
+				case *types.Named, *types.Instance:
+					// Module-qualified constructor: mod.Type(args)
+					return c.genConstructorCallMono(e, calleeType)
+				case *types.Enum:
+					// Module-qualified enum — fall through to enum dispatch below
+				default:
+					// Module-qualified function call: mod.func(args)
+					return c.genModuleCall(e, modName, member.Field)
 				}
-			}
-		}
-		// Module-qualified constructor: mod.Type(args) — the callee MemberExpr
-		// resolves to a Named/Instance type, so redirect to constructor path.
-		memberCalleeType := c.info.Types[e.Callee]
-		if memberCalleeType != nil {
-			if _, isNamed := memberCalleeType.(*types.Named); isNamed {
-				return c.genConstructorCallMono(e, memberCalleeType)
-			}
-			if _, isInst := memberCalleeType.(*types.Instance); isInst {
-				return c.genConstructorCallMono(e, memberCalleeType)
 			}
 		}
 
@@ -841,33 +831,9 @@ func (c *Compiler) genModuleCall(e *ast.CallExpr, moduleName, funcName string) v
 		panic(fmt.Sprintf("codegen: undefined module function %s.%s", moduleName, funcName))
 	}
 
-	// Coerce arguments
-	if c.info.ModuleInfos != nil {
-		for _, modInfo := range c.info.ModuleInfos {
-			if modInfo.Name == moduleName {
-				if modInfo.SemaInfo.StdScope != nil {
-					if obj := modInfo.SemaInfo.StdScope.Lookup(funcName); obj != nil {
-						if callee, ok := obj.(*types.Func); ok {
-							if sig, ok := callee.Type().(*types.Signature); ok {
-								argVals = c.coerceCallArgs(argVals, argTypes, sig.Params())
-							}
-						}
-					}
-				}
-				// Check file scope
-				fileScope := modInfo.SemaInfo.Scopes[modInfo.File]
-				if fileScope != nil {
-					if obj := fileScope.Lookup(funcName); obj != nil {
-						if callee, ok := obj.(*types.Func); ok {
-							if sig, ok := callee.Type().(*types.Signature); ok {
-								argVals = c.coerceCallArgs(argVals, argTypes, sig.Params())
-							}
-						}
-					}
-				}
-				break
-			}
-		}
+	// Coerce arguments using the callee's signature from sema
+	if sig, ok := c.info.Types[e.Callee].(*types.Signature); ok {
+		argVals = c.coerceCallArgs(argVals, argTypes, sig.Params())
 	}
 
 	return c.block.NewCall(fn, argVals...)

@@ -21,8 +21,8 @@ type CapturedVar struct {
 // ModuleInfo bundles everything codegen needs about an imported module:
 // the module's merged AST file and its sema output.
 type ModuleInfo struct {
-	Name     string   // module alias (binding name used in consumer code)
-	Path     string   // source path (empty for catalog modules)
+	Name     string    // module alias (binding name used in consumer code)
+	Path     string    // source path (empty for catalog modules)
 	File     *ast.File // the module's merged AST (with std decls merged in)
 	SemaInfo *Info     // the module's sema output
 }

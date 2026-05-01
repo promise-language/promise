@@ -58,9 +58,9 @@ type Compiler struct {
 	file *ast.File
 
 	// Module codegen state
-	moduleFuncs map[string]*ir.Func    // "modname.funcname" → IR func (cross-module calls)
-	moduleExterns map[string]*ExternFunc // "modname.funcname" → extern (cross-module externs)
-	compilingModule string              // non-empty when compiling a module's declarations
+	moduleFuncs     map[string]*ir.Func    // "modname.funcname" → IR func (cross-module calls)
+	moduleExterns   map[string]*ExternFunc // "modname.funcname" → extern (cross-module externs)
+	compilingModule string                 // non-empty when compiling a module's declarations
 
 	// Loop control targets for break/continue
 	breakTarget    *ir.Block
@@ -2552,11 +2552,6 @@ func mangleModuleMethodName(moduleName, typeName, methodName string, isSetter bo
 	return "__mod_" + moduleName + "_" + base
 }
 
-// mangleModuleTypeName produces a module-qualified LLVM struct name prefix.
-func mangleModuleTypeName(moduleName, typeName string) string {
-	return moduleName + "." + typeName
-}
-
 // compileModules inlines all imported module declarations into the current IR module.
 // For each module, it temporarily swaps c.info and c.file to the module's context,
 // runs the same layout/declare/define pipeline, then restores.
@@ -2630,11 +2625,7 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo) {
 // against already-declared C functions. Registers in moduleExterns for qualified access.
 func (c *Compiler) declareModuleExterns(moduleName string, externs []*ExternFunc) {
 	// Use the standard extern declaration pipeline (handles dedup, sret, etc.)
-	modLayouts := make(map[*types.Named]*TypeDeclLayout)
-	for k, v := range c.layouts {
-		modLayouts[k] = v
-	}
-	c.declareExterns(externs, modLayouts)
+	c.declareExterns(externs, c.layouts)
 
 	// Register module externs for qualified access
 	for _, ext := range externs {
@@ -2704,15 +2695,10 @@ func (c *Compiler) defineModuleFuncs(file *ast.File, moduleName string) {
 			continue
 		}
 
-		irName := mangleModuleFuncName(moduleName, fd.Name)
-		fn, ok := c.funcs[irName]
+		key := moduleName + "." + fd.Name
+		fn, ok := c.moduleFuncs[key]
 		if !ok {
-			// Try moduleFuncs
-			key := moduleName + "." + fd.Name
-			fn, ok = c.moduleFuncs[key]
-			if !ok {
-				continue
-			}
+			continue
 		}
 
 		obj := c.lookupFunc(fd.Name)

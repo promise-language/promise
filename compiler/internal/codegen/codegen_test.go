@@ -5705,6 +5705,226 @@ func TestModuleGlobImportCall(t *testing.T) {
 	assertContains(t, ir, "call i64 @__mod_helpers_greet")
 }
 
+func TestModuleFuncWithParams(t *testing.T) {
+	ir := generateIRWithModule(t, "math",
+		"add(int a, int b) int `public { return a + b; }",
+		`
+		use math "./math";
+		main() {
+			int x = math.add(3, 4);
+		}
+		`,
+	)
+	assertContains(t, ir, "define i64 @__mod_math_add(i64 %a, i64 %b)")
+	assertContains(t, ir, "call i64 @__mod_math_add(i64 3, i64 4)")
+}
+
+func TestModuleVoidFunc(t *testing.T) {
+	ir := generateIRWithModule(t, "logger",
+		"noop() `public {}",
+		`
+		use logger "./logger";
+		main() {
+			logger.noop();
+		}
+		`,
+	)
+	assertContains(t, ir, "define void @__mod_logger_noop()")
+	assertContains(t, ir, "call void @__mod_logger_noop()")
+}
+
+func TestModuleFailableFunc(t *testing.T) {
+	ir := generateIRWithModule(t, "parser",
+		`
+		parse(int x) int! `+"`public"+` {
+			return x;
+		}
+		`,
+		`
+		use parser "./parser";
+		main()! {
+			int v = parser.parse(10)?;
+		}
+		`,
+	)
+	// Failable function should return a result struct { i1, i64, i8* }
+	assertContains(t, ir, "define { i1, i64, i8* } @__mod_parser_parse(i64 %x)")
+	assertContains(t, ir, "call { i1, i64, i8* } @__mod_parser_parse(i64 10)")
+}
+
+func TestModuleExternFunc(t *testing.T) {
+	ir := generateIRWithModule(t, "ffi",
+		`
+		cfunc(int x) `+"`public `extern(\"test_cfunc\")"+`;
+		wrapper(int x) int `+"`public"+` { return x; }
+		`,
+		`
+		use ffi "./ffi";
+		main() {
+			ffi.cfunc(1);
+			int y = ffi.wrapper(2);
+		}
+		`,
+	)
+	// Extern should be declared (not defined)
+	assertContains(t, ir, "declare void @test_cfunc")
+	// Wrapper should be a module function
+	assertContains(t, ir, "define i64 @__mod_ffi_wrapper")
+}
+
+func TestModuleEnumVariant(t *testing.T) {
+	ir := generateIRWithModule(t, "shapes",
+		`
+		enum Shape `+"`public"+` {
+			Circle(int radius),
+			Rect(int w, int h),
+		}
+		`,
+		`
+		use shapes "./shapes";
+		main() {
+			shapes.Shape s = shapes.Shape.Circle(radius: 5);
+		}
+		`,
+	)
+	// Enum layout should exist
+	assertContains(t, ir, "Shape")
+	// Variant constructor stores the tag and payload
+	assertContains(t, ir, "store i64 5")
+}
+
+func TestModuleGlobImportType(t *testing.T) {
+	ir := generateIRWithModule(t, "models",
+		`
+		type Item `+"`public"+` {
+			int id;
+			get_id(this) int `+"`public"+` { return this.id; }
+		}
+		`,
+		`
+		use _ "./models";
+		main() {
+			Item it = Item(id: 7);
+			int v = it.get_id();
+		}
+		`,
+	)
+	// Type layout and method should use module-prefixed names
+	assertContains(t, ir, "define i64 @__mod_models_Item.get_id")
+	assertContains(t, ir, "call i64 @__mod_models_Item.get_id")
+	// Constructor stores the field value
+	assertContains(t, ir, "store i64 7")
+}
+
+func TestModuleGlobImportMultipleSymbols(t *testing.T) {
+	ir := generateIRWithModule(t, "utils",
+		`
+		foo() int `+"`public"+` { return 1; }
+		bar() int `+"`public"+` { return 2; }
+		`,
+		`
+		use _ "./utils";
+		main() {
+			int a = foo();
+			int b = bar();
+		}
+		`,
+	)
+	// Both glob-imported functions should resolve to module-prefixed names
+	assertContains(t, ir, "define i64 @__mod_utils_foo")
+	assertContains(t, ir, "define i64 @__mod_utils_bar")
+	assertContains(t, ir, "call i64 @__mod_utils_foo()")
+	assertContains(t, ir, "call i64 @__mod_utils_bar()")
+}
+
+// generateIRWithTwoModules parses two modules and user source, runs sema+codegen
+// with both modules available.
+func generateIRWithTwoModules(t *testing.T,
+	mod1Name, mod1Src, mod2Name, mod2Src, userSrc string) string {
+	t.Helper()
+
+	mod1Info, mod1Scope := parseModuleSource(t, mod1Name, mod1Src)
+	mod2Info, mod2Scope := parseModuleSource(t, mod2Name, mod2Src)
+
+	// Parse std + user
+	stdInput := antlr.NewInputStream(stdAll)
+	stdLexer := parser.NewPromiseLexer(stdInput)
+	stdLexer.RemoveErrorListeners()
+	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
+	stdP := parser.NewPromiseParser(stdStream)
+	stdP.RemoveErrorListeners()
+	stdTree := stdP.CompilationUnit()
+	stdFile, errs := ast.Build("std.pr", stdTree)
+	if len(errs) > 0 {
+		t.Fatalf("std AST build errors: %v", errs)
+	}
+	for _, d := range stdFile.Decls {
+		switch dd := d.(type) {
+		case *ast.FuncDecl:
+			dd.IsStd = true
+		case *ast.TypeDecl:
+			dd.IsStd = true
+		case *ast.EnumDecl:
+			dd.IsStd = true
+		}
+	}
+
+	userInput := antlr.NewInputStream(userSrc)
+	userLexer := parser.NewPromiseLexer(userInput)
+	userLexer.RemoveErrorListeners()
+	userStream := antlr.NewCommonTokenStream(userLexer, antlr.TokenDefaultChannel)
+	userP := parser.NewPromiseParser(userStream)
+	userP.RemoveErrorListeners()
+	userTree := userP.CompilationUnit()
+	userFile, errs := ast.Build("test.pr", userTree)
+	if len(errs) > 0 {
+		t.Fatalf("user AST build errors: %v", errs)
+	}
+
+	mergedDecls := make([]ast.Decl, 0, len(stdFile.Decls)+len(userFile.Decls))
+	mergedDecls = append(mergedDecls, stdFile.Decls...)
+	mergedDecls = append(mergedDecls, userFile.Decls...)
+	userFile.Decls = mergedDecls
+
+	mod1Key := "./" + mod1Name
+	mod2Key := "./" + mod2Name
+	moduleScopes := map[string]*types.Scope{
+		mod1Key: mod1Scope,
+		mod2Key: mod2Scope,
+	}
+	info, semaErrs := sema.CheckWithModules(userFile, moduleScopes)
+	if len(semaErrs) > 0 {
+		t.Fatalf("sema errors: %v", semaErrs)
+	}
+
+	info.ModuleInfos = map[string]*sema.ModuleInfo{
+		mod1Key: mod1Info,
+		mod2Key: mod2Info,
+	}
+
+	result := Compile(userFile, info, "")
+	return result.Module.String()
+}
+
+func TestMultipleModules(t *testing.T) {
+	ir := generateIRWithTwoModules(t,
+		"alpha", "get_a() int `public { return 1; }",
+		"beta", "get_b() int `public { return 2; }",
+		`
+		use alpha "./alpha";
+		use beta "./beta";
+		main() {
+			int a = alpha.get_a();
+			int b = beta.get_b();
+		}
+		`,
+	)
+	assertContains(t, ir, "define i64 @__mod_alpha_get_a")
+	assertContains(t, ir, "define i64 @__mod_beta_get_b")
+	assertContains(t, ir, "call i64 @__mod_alpha_get_a")
+	assertContains(t, ir, "call i64 @__mod_beta_get_b")
+}
+
 // --- Operator Method Dispatch Tests ---
 
 func TestIncDecVariable(t *testing.T) {

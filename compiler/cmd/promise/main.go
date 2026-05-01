@@ -913,8 +913,7 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	if isDarwinTarget(target) {
 		linkDarwinMulti(objFiles, target, outputFile)
 	} else if isWasmTarget(target) {
-		// WASM: not yet supported for separate compilation
-		linkWasm(objFiles[0], outputFile)
+		linkWasmMulti(objFiles, outputFile)
 	} else {
 		linkLinuxMulti(objFiles, target, outputFile)
 	}
@@ -1918,22 +1917,9 @@ func linkDarwin(objFile, target, outputFile string) {
 	}
 }
 
-// linkWasm runs wasm-ld for WebAssembly linking.
+// linkWasm runs wasm-ld for WebAssembly linking (single .o file).
 func linkWasm(objFile, outputFile string) {
-	lldPath, err := findLLVMTool("wasm-ld")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-	checkLLVMToolVersion(lldPath)
-
-	linkArgs := buildWasmLinkArgs(objFile, outputFile)
-	linkCmd := exec.Command(lldPath, linkArgs...)
-	linkCmd.Stderr = os.Stderr
-	if err := linkCmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "error linking (wasm-ld): %v\n", err)
-		os.Exit(1)
-	}
+	linkWasmMulti([]string{objFile}, outputFile)
 }
 
 // ensureWasmAllocObj extracts the embedded WASM allocator object to cache.
@@ -1963,22 +1949,41 @@ func ensureWasmAllocObj() (string, error) {
 	return objPath, nil
 }
 
+// linkWasmMulti links multiple .o files for WebAssembly.
+func linkWasmMulti(objFiles []string, outputFile string) {
+	lldPath, err := findLLVMTool("wasm-ld")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	checkLLVMToolVersion(lldPath)
+
+	linkArgs := buildWasmLinkArgs(objFiles, outputFile)
+	linkCmd := exec.Command(lldPath, linkArgs...)
+	linkCmd.Stderr = os.Stderr
+	if err := linkCmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "error linking (wasm-ld): %v\n", err)
+		os.Exit(1)
+	}
+}
+
 // buildWasmLinkArgs builds the wasm-ld argument list for WASI linking.
 // Links user code with the embedded free-list allocator (wasm_alloc.o).
-func buildWasmLinkArgs(objFile, outputFile string) []string {
+func buildWasmLinkArgs(objFiles []string, outputFile string) []string {
 	allocObj, err := ensureWasmAllocObj()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	return []string{
+	args := []string{
 		"--no-entry",
 		"--export=_start",
 		"--allow-undefined", // WASI imports (fd_write, proc_exit) resolved at runtime
 		"-o", outputFile,
-		objFile,
-		allocObj,
 	}
+	args = append(args, objFiles...)
+	args = append(args, allocObj)
+	return args
 }
 
 // linkLinux runs ld.lld for Linux ELF linking (glibc or musl).

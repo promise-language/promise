@@ -8214,3 +8214,52 @@ func TestNumericSuffixFloatMismatchReverse(t *testing.T) {
 	`)
 	expectError(t, errs, "cannot assign")
 }
+
+// --- Property-not-method diagnostics ---
+
+func TestPropertyCalledAsMethod(t *testing.T) {
+	errs := checkErrs(t, `
+		main() {
+			int[] v = [1, 2, 3];
+			print_int(v.len());
+		}
+	`)
+	expectError(t, errs, "is a property")
+	expectError(t, errs, "not a method")
+}
+
+func TestPropertyCalledAsMethodString(t *testing.T) {
+	errs := checkErrs(t, `
+		main() {
+			s := "hello";
+			print_int(s.len());
+		}
+	`)
+	expectError(t, errs, "is a property")
+	expectError(t, errs, "not a method")
+}
+
+func TestPropertyCalledAsMethodUserType(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo {
+			int count;
+		}
+		main() {
+			f := Foo(count: 5);
+			print_int(f.count());
+		}
+	`)
+	expectError(t, errs, "is a property")
+	expectError(t, errs, "not a method")
+}
+
+func TestPropertyCalledAsMethodMap(t *testing.T) {
+	errs := checkErrs(t, `
+		main() {
+			map[string, int] m = {"a": 1};
+			print_int(m.len());
+		}
+	`)
+	expectError(t, errs, "is a property")
+	expectError(t, errs, "not a method")
+}

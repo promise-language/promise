@@ -128,6 +128,7 @@ Four-pass analysis: declare → define → check → verify.
 - **Match exhaustiveness** checking for enum types (variant coverage) and non-enum types (wildcard required)
 - **Missing return** detection across if/else chains, match expressions, and infinite loops
 - Error reporting with source positions
+- **Agent-friendly diagnostics**: Property-called-as-method detection (`v.len()` → `'len' is a property on int[], not a method — remove ()`)
 
 ---
 

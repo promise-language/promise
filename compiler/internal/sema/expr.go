@@ -832,6 +832,47 @@ func (c *Checker) checkInstanceConstructorCall(e *ast.CallExpr, inst *types.Inst
 	return inst
 }
 
+// isMemberPropertyCall detects when a field/getter is being called as a method
+// (e.g. v.len()) and emits a helpful error. Returns true if the error was emitted.
+// isMemberPropertyCall detects when a field/getter is being called as a method
+// (e.g. v.len()) and emits a helpful error. Returns true if the error was emitted.
+func (c *Checker) isMemberPropertyCall(e *ast.CallExpr) bool {
+	mem, ok := e.Callee.(*ast.MemberExpr)
+	if !ok {
+		return false
+	}
+	// Check the target type of the member expression to see if the field is
+	// a property (field/getter), not a type/module namespace access.
+	targetType := c.info.Types[mem.Target]
+	if targetType == nil {
+		return false
+	}
+	// Unwrap references
+	if ref, ok := targetType.(*types.MutRef); ok {
+		targetType = ref.Elem()
+	}
+	if ref, ok := targetType.(*types.SharedRef); ok {
+		targetType = ref.Elem()
+	}
+	// Check if the member is a field or getter on the target type
+	var isProperty bool
+	switch tt := targetType.(type) {
+	case *types.Named:
+		isProperty = tt.LookupField(mem.Field) != nil || tt.LookupGetter(mem.Field) != nil
+	case *types.Instance:
+		if origin, ok := tt.Origin().(*types.Named); ok {
+			isProperty = origin.LookupField(mem.Field) != nil || origin.LookupGetter(mem.Field) != nil
+		}
+	case *types.Array:
+		isProperty = types.TypVector.LookupField(mem.Field) != nil || types.TypVector.LookupGetter(mem.Field) != nil
+	}
+	if isProperty {
+		c.errorf(e.Pos(), "'%s' is a property on %s, not a method — remove ()", mem.Field, targetType)
+		return true
+	}
+	return false
+}
+
 func (c *Checker) checkCallExpr(e *ast.CallExpr) types.Type {
 	// Handle super() calls in constructor bodies
 	if ident, ok := e.Callee.(*ast.IdentExpr); ok && ident.Name == "super" {
@@ -844,10 +885,17 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) types.Type {
 	}
 
 	// Handle constructor calls: Type(field: value, ...)
+	// But detect when a field/getter is being called as a method (e.g. v.len()).
 	switch t := calleeType.(type) {
 	case *types.Named:
+		if c.isMemberPropertyCall(e) {
+			return nil
+		}
 		return c.checkConstructorCall(e, t)
 	case *types.Instance:
+		if c.isMemberPropertyCall(e) {
+			return nil
+		}
 		return c.checkInstanceConstructorCall(e, t)
 	case *types.Enum:
 		// Enum constructors aren't called directly (use Enum.Variant syntax)

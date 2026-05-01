@@ -705,14 +705,38 @@ func TestExecWrapCode(t *testing.T) {
 
 // --- Module loading integration tests ---
 
-// testStdFiles parses the standard library for use in module loading tests.
+// testStdFiles parses std library from the embedded FS (resources/std/*.pr).
+// Uses embedded resources rather than findStdDir() to avoid picking up stale
+// files from ~/.promise/lib/std/.
 func testStdFiles(t *testing.T) []*ast.File {
 	t.Helper()
-	stdDir := findStdDir()
-	if stdDir == "" {
-		t.Skip("std directory not found")
+	entries, err := embeddedStd.ReadDir("resources/std")
+	if err != nil {
+		t.Fatalf("cannot read embedded std: %v", err)
 	}
-	return parseStdFiles(stdDir)
+	var files []*ast.File
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".pr") {
+			continue
+		}
+		data, err := embeddedStd.ReadFile("resources/std/" + e.Name())
+		if err != nil {
+			t.Fatalf("cannot read embedded %s: %v", e.Name(), err)
+		}
+		input := antlr.NewInputStream(string(data))
+		lexer := parser.NewPromiseLexer(input)
+		lexer.RemoveErrorListeners()
+		stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+		p := parser.NewPromiseParser(stream)
+		p.RemoveErrorListeners()
+		tree := p.CompilationUnit()
+		f, buildErrs := ast.Build(e.Name(), tree)
+		if len(buildErrs) > 0 {
+			t.Fatalf("AST build errors in embedded %s: %v", e.Name(), buildErrs)
+		}
+		files = append(files, f)
+	}
+	return files
 }
 
 // TestLoadLocalModuleBasic creates a temp module directory and verifies

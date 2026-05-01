@@ -9,14 +9,15 @@ import (
 	"time"
 )
 
-// GlobalCacheDir returns the global module cache directory (~/.promise/cache/modules/).
+// GlobalCacheDir returns the global module cache directory.
+// Uses PromiseHome() which respects PROMISE_HOME env var.
 // Creates it if it doesn't exist.
 func GlobalCacheDir() (string, error) {
-	home, err := os.UserHomeDir()
+	home, err := PromiseHome()
 	if err != nil {
-		return "", fmt.Errorf("cannot determine home directory: %w", err)
+		return "", fmt.Errorf("cannot determine Promise home: %w", err)
 	}
-	dir := filepath.Join(home, ".promise", "cache", "modules")
+	dir := filepath.Join(home, "cache", "modules")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", fmt.Errorf("cannot create global cache directory: %w", err)
 	}
@@ -280,10 +281,10 @@ func acquireLock(lockPath string) (func(), error) {
 
 // CleanGlobalCache removes the entire global module cache.
 func CleanGlobalCache() error {
-	home, err := os.UserHomeDir()
+	home, err := PromiseHome()
 	if err != nil {
 		return err
 	}
-	dir := filepath.Join(home, ".promise", "cache", "modules")
+	dir := filepath.Join(home, "cache", "modules")
 	return os.RemoveAll(dir)
 }

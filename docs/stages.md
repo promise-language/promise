@@ -613,7 +613,7 @@ Module resolution and dependency management. See [module-system-proposal.md](mod
 - **Std as catalog module**: `use std;` / `use std as s;` for qualified access (`std.min()`, `std.int[]`). `use std as _;` is a no-op (std symbols already in scope via parent chain). Unqualified access still works without any `use` statement.
 - **Cross-module codegen (inline strategy)**: All module declarations compiled into one LLVM IR module via `compileModules()` with context save/restore (`c.info`/`c.file`/`c.compilingModule` swap). Name mangling: `__mod_<module>_<func>` for functions, `__mod_<module>_<Type>.<method>` for methods. `moduleFuncs`/`moduleExterns` maps for qualified call dispatch; plain names registered in `c.funcs` for glob imports. MemberExpr dispatch: std check → module check (function/constructor/enum switch) → enum layout → method call. Coercion uses callee's `*types.Signature` from sema directly.
 - **Separate compilation**: Post-codegen IR split — single codegen pass produces unified `ir.Module`, then `SplitModuleIRs()` (in `codegen/separate.go`) toggles function blocks and global initializers to produce per-module `.ll` files. Module IRs contain only module-owned function bodies; all other functions become `declare`, all globals become `external`. Main IR keeps everything except module function bodies. Each `.ll` → `opt` → `llc` → `.o` (modules compiled in parallel via goroutines). `linkLinuxMulti()`/`linkDarwinMulti()`/`linkWasmMulti()` link all `.o` files together. `moduleOwnedFuncs map[string]string` tracks which IR functions belong to which module (populated during `declareModuleFuncs`, `declareModuleTypeMethods`, `declareMonoMethods`, `declareMonoFuncs`).
-- **Incremental compilation**: Dual content-hash caching in `.promise-build/` directory (in `module/cache.go`). **Implementation hash** (SHA-256 of sorted source file contents) determines when a module's `.o` needs recompilation. **Interface hash** (SHA-256 of public API signatures: function names+signatures, type fields+methods, enum variants) determines when dependents need recompilation. On cache hit, the expensive `opt`→`llc` pipeline is skipped entirely — the cached `.o` is linked directly. Stale cache entries are cleaned automatically when source changes. Main file always recompiles (most frequent change target). Cache key includes filename separators to prevent hash collisions from file splits.
+- **Incremental compilation**: Content-addressed build cache at `~/.promise/cache/build/` (overridable via `PROMISE_HOME`). **Implementation hash** (SHA-256 of sorted source file contents) determines when a module's `.o` needs recompilation. **Interface hash** (SHA-256 of public API signatures: function names+signatures, type fields+methods, enum variants) determines when dependents need recompilation. Cache key is SHA-256 of impl hash + compiler hash + target + sorted module paths. Files stored in two-level directory structure (`<hash[:2]>/<hash>.o`). Atomic writes via temp + rename with rollback. On cache hit, the expensive `opt`→`llc` pipeline is skipped entirely — the cached `.o` is linked directly. Main file always recompiles (most frequent change target). Cache key includes filename separators to prevent hash collisions from file splits.
 - **Tests**: 7 std-module sema tests, 26 general module sema tests, 4 ExportedScope tests, 10 module load integration tests, 5 `cmd/promise` integration tests, 6 codegen std tests, 15 cross-module codegen tests (qualified calls, constructors, methods, enums, glob imports, failable functions, externs, multi-module, multi-param generics). 42 e2e tests across 12 files in `tests/modules/` (qualified calls, glob imports with struct types/enums/match, aliases, multi-file modules, generics including multi-param `Pair[int, string]`, failable functions, drop types, closures, visibility, two-module interop, module type as param/return).
 
 **Phase 2 — Transitive Dependencies & Canonical Identity (done):**
@@ -642,7 +642,7 @@ See [phase3-remote-modules.md](phase3-remote-modules.md) for the full design.
 - **Transitive pin merging**: `mergeTransitivePins()` reads remote module's `promise.toml` [require] and merges into effective pins. Top-level project pins always win (override). Conflicting pins from different modules → error. Called from both `[replace]` and git-fetch paths.
 - **`promise pin`**: CLI command resolves tag/branch/HEAD/commit to full SHA via `PinResolve()`, writes to `promise.toml` via `SetRequire()`. Creates `[require]` section if absent; updates existing entries in-place (normalized URL match).
 - **Epoch mismatch warnings**: `load()` compares module's epoch vs project epoch, collects warnings in `ml.warnings`. Printed to stderr after all modules loaded.
-- **`promise clean --global`**: `runClean(args)` accepts `--global` flag; removes both `.promise-build/` and `~/.promise/cache/modules/`.
+- **`promise clean`**: removes the build cache (`~/.promise/cache/build/`). `--global` additionally removes the module cache (`~/.promise/cache/modules/`). All cache paths respect `PROMISE_HOME` env var.
 - **Tests**: 17 git tests, 2+5 config tests (URL normalization + SetRequire), 7+2 integration tests (remote module + epoch warnings).
 
 **Deferred to Phase 4+:**
@@ -666,7 +666,7 @@ Command-line interface. Core commands implemented; formatter planned.
 - `promise install` — install compiler + std + runtime to `~/.promise/`
 - Bare pipe detection: `echo '<code>' | promise` auto-enters exec mode
 - Inline error formatting: source line + `^` caret marker, no temp filenames
-- `promise clean` — remove `.promise-build/` cache directory
+- `promise clean` — remove build cache (`~/.promise/cache/build/`), `--global` also removes module cache
 - Embedded `std/` and `runtime/` in the binary via `go:embed` for self-contained install
 - **Test suite**: 775 tests across 149 files — `tests/e2e/` (language features), `tests/std/` (standard library), `tests/concurrency/` (scheduler, channels, select, panic recovery, stress tests), `tests/modules/` (module system e2e), `tests/value_types/` (pure value types)
 - `promise doc <file.pr>` — generate documentation from `doc()` meta tags (**Phase 1 done**: `cmd/promise/doc.go`)
@@ -719,7 +719,7 @@ Test suite: 781 native pass, 761 WASM pass (3 skip).
 
 | Work | Priority |
 |------|----------|
-| Global build cache — wire `~/.promise/cache/build/` into build pipeline | High |
+| ~~Global build cache~~ — **Done.** `~/.promise/cache/build/` wired into `compileAndLinkSeparate()`. `PROMISE_HOME` override. | ~~High~~ Resolved |
 | CLI: `promise fmt` code formatter — Stage 10 | Medium |
 | Module system Phase 4 (catalog infrastructure) — Stage 9 | Medium |
 | Package manager (fetch, resolve, lock) — Stage 11 | Medium |
@@ -847,7 +847,7 @@ Known gaps and improvements deferred from completed stages.
 | Item | Priority |
 |------|----------|
 | ~~**Module identity redesign**~~ — **Done.** Two-layer architecture implemented: GlobalIdentity (Layer 1) + SanitizeIRPrefix (Layer 2). See implementation notes below. | ~~High~~ Resolved |
-| Global content-addressable build cache (`~/.promise/cache/build/`) — two-level directory structure, atomic writes. Helper functions implemented but not yet wired into build pipeline. See design notes below. | High |
+| ~~Global content-addressable build cache~~ — **Done.** `~/.promise/cache/build/` wired into `compileAndLinkSeparate()`. Two-level dirs, atomic writes, `PROMISE_HOME` override. No local `.promise-build/` cache — global only. | ~~High~~ Resolved |
 | Catalog infrastructure and versioning (Phase 4) | Medium |
 | Std as a regular cacheable module (remove AST-merge special case) | Low |
 
@@ -869,30 +869,26 @@ Duplicate detection uses GlobalIdentity (not `promise.toml` name): two modules w
   - `github.com/alice/parser` → `github_com_alice_parser_<hash6>`
   - `github.com/bob/parser` → `github_com_bob_parser_<hash6>` (different hash, no collision)
 
-IR symbols use the pattern `__mod_<IRPrefix>_<symbol>`. Cache filenames use `CacheSafeName()` which truncates long names and appends a longer hash for filesystem safety.
+IR symbols use the pattern `__mod_<IRPrefix>_<symbol>`. Cache keys use the content-addressed build cache key (SHA-256 of impl hash + compiler hash + target + module paths).
 
-**Files:** `internal/module/identity.go` (SanitizeIRPrefix, CacheSafeName, GlobalIdentityFor*), `internal/sema/info.go` (ModuleInfo.GlobalIdentity, ModuleInfo.IRPrefix), `internal/codegen/compiler.go` (compileModules/compileModule use IRPrefix), `internal/codegen/expr.go` (resolveModuleName returns IRPrefix), `cmd/promise/main.go` (load sets GlobalIdentity/IRPrefix, loadRemote overrides with URL identity, globalIdentities dedup map)
+**Files:** `internal/module/identity.go` (SanitizeIRPrefix, GlobalIdentityFor*), `internal/module/cache.go` (BuildCacheKey, HashModuleSources, HashModuleInterface, SaveBuildCache, LookupBuildCache), `internal/module/home.go` (PromiseHome), `internal/sema/info.go` (ModuleInfo.GlobalIdentity, ModuleInfo.IRPrefix), `internal/codegen/compiler.go` (compileModules/compileModule use IRPrefix), `internal/codegen/expr.go` (resolveModuleName returns IRPrefix), `cmd/promise/main.go` (load sets GlobalIdentity/IRPrefix, loadRemote overrides with URL identity, globalIdentities dedup map)
 
-**Global content-addressable build cache (design + helpers implemented):**
+**Global content-addressable build cache (implemented):**
 
-The current `.promise-build/` is project-local — every project rebuilds all its modules from scratch even when another project already compiled the same module at the same commit with the same compiler. Worse, project-less commands like `promise exec` have no cache at all — every invocation recompiles std and everything else from scratch. This is especially costly for the AI-agent use case (Promise's core design target): an agent using `promise exec` as a tool in a loop pays full `opt+llc` cost every time.
+A device-wide build cache at `~/.promise/cache/build/` (overridable via `PROMISE_HOME` env var) stores `.o` files keyed by a content address derived from all inputs that affect the output:
+- Compiler binary hash (`CompilerHash()`)
+- Target triple
+- Module source hash (impl hash — `HashModuleSources()`)
+- Sorted list of all module paths in the build
 
-A device-wide global build cache at `~/.promise/cache/build/` stores `.o` files keyed by a content address derived from all inputs that affect the output:
-- Compiler binary hash (or version)
-- Build mode (debug/release), optimization level, target triple
-- Module source hash (impl hash — already computed)
-- Module interface hashes of all direct dependencies (already computed)
-- IR prefix strategy output for this module (part of the `.o` content)
+The cache key is a SHA-256 of these inputs (`BuildCacheKey()`). Files are stored in a **two-level directory structure** using the first 2 hex characters of the hash as a subdirectory: `~/.promise/cache/build/a3/a3b4c5d8...o`. Writes are atomic (temp file + rename with rollback on failure).
 
-The cache key is a SHA-256 of these inputs. Files are stored in a **two-level directory structure** using the first 2 hex characters of the hash as a subdirectory: `~/.promise/cache/build/a3/a3b4c5d8...o`. This avoids slow directory lookups when thousands of entries accumulate (256 subdirectories, each with ~N/256 entries).
+Wired into `compileAndLinkSeparate()` in `main.go`: lookup → cache hit skips `opt+llc` → cache miss compiles and saves. Interface hashes stored alongside `.o` files for incremental dependency tracking.
 
-Helper functions implemented in `internal/module/cache.go`: `GlobalBuildCacheDir()`, `GlobalBuildCachePath()`, `LookupGlobalBuildCache()`, `SaveGlobalBuildCache()` (atomic write via temp + rename). Not yet wired into the build pipeline.
+`PromiseHome()` in `module/home.go` provides the base directory for all Promise data (`~/.promise/` by default, overridable via `PROMISE_HOME` env var). Used by build cache, module cache, LLVM tools, CRT, and `promise install`.
 
 Remaining work:
-- Wire global cache lookup/save into `compileAndLinkSeparate()` in `main.go`
 - **Garbage collection**: LRU eviction by access time, max size limit, or `promise clean --build-cache` manual purge
-- **Cache key correctness**: must include everything that affects the `.o` output
-- **`promise exec` integration**: look up global cache even without a project directory
 
 ### Unscheduled Features
 

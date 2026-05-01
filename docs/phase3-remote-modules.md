@@ -90,7 +90,7 @@ When loading a module, compares its `epoch` field against the project's `epoch`.
 
 ### Step 7: `promise clean --global` [DONE]
 
-`promise clean` removes `.promise-build/` (local build cache). `promise clean --global` additionally removes `~/.promise/cache/modules/` (global remote module cache) via `CleanGlobalCache()`.
+`promise clean` removes the build cache (`~/.promise/cache/build/`). `promise clean --global` additionally removes the module cache (`~/.promise/cache/modules/`) via `CleanGlobalCache()`. All paths respect the `PROMISE_HOME` env var.
 
 ## Files
 

@@ -341,6 +341,18 @@ epoch = "2026.3"
 	}
 }
 
+func TestIsCatalogImport(t *testing.T) {
+	if !IsCatalogImport("") {
+		t.Error("empty path should be catalog import")
+	}
+	if IsCatalogImport("./local") {
+		t.Error("local path should not be catalog import")
+	}
+	if IsCatalogImport("github.com/foo/bar") {
+		t.Error("remote URL should not be catalog import")
+	}
+}
+
 func TestSetRequirePreservesComments(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "promise.toml")

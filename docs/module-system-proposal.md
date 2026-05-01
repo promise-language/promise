@@ -880,11 +880,11 @@ The linker (`ld.lld` on Linux, system `ld` on macOS) combines all object files:
 ```bash
 # Conceptual steps (handled internally by `promise build`)
 # 1. Compile each module to object file
-promise compile-module ~/.promise/cache/modules/json/a1b2c3d/ -o .promise-build/json.o
-promise compile-module ./libs/models/                          -o .promise-build/models.o
-promise compile-module ./                                      -o .promise-build/myapp.o
+promise compile-module ~/.promise/cache/modules/json/a1b2c3d/ -o /tmp/json.o
+promise compile-module ./libs/models/                          -o /tmp/models.o
+promise compile-module ./                                      -o /tmp/myapp.o
 # 2. Link
-ld.lld .promise-build/myapp.o .promise-build/json.o .promise-build/models.o -o myapp
+ld.lld /tmp/myapp.o /tmp/json.o /tmp/models.o -o myapp
 ```
 
 Modules without dependencies on each other can compile **in parallel** (they're at the same level in the topological sort).
@@ -941,30 +941,23 @@ If a module's source changes but its interface hash stays the same, **no depende
 #### Cache Layout
 
 ```
-.promise-build/                          # project-local build cache (gitignored)
-  myapp.o                                # user's module object file
-  myapp.interface                        # public API description
-  models.o                               # local module object file
-  models.interface
-
-~/.promise/cache/                        # global cache (shared across projects)
-  catalog/                               # catalog modules (keyed by name/commit)
-    json/
-      a1b2c3d.o                          # compiled object
-      a1b2c3d.interface                  # public API description
-    http/
-      e4f5a6b.o
-      e4f5a6b.interface
+~/.promise/cache/                        # global cache (shared across all projects)
+  build/                                 # content-addressed build cache
+    a3/                                  # two-level directory (first 2 hex chars)
+      a3b4c5d8...o                       # compiled object file
+      a3b4c5d8...interface               # public API hash
+    f1/
+      f1e2d3c4...o
+      f1e2d3c4...interface
   modules/                               # remote modules (keyed by URL/commit)
     github.com/someone/promise-parser/
-      a1b2c3d/                           # source checkout
+      repo.git/                          # bare clone
+      a1b2c3d4e5f6/                      # source checkout (first 12 chars of commit)
         ...
-      a1b2c3d.o                          # compiled object
-      a1b2c3d.interface
 ```
 
-- **Catalog and remote module caches are global** (`~/.promise/cache/`). Since they're immutable at a given commit, the compiled output is valid for any project using the same epoch/commit. Multiple projects on the same epoch share cached catalog builds.
-- **Project module cache is local** (`.promise-build/`). It's specific to this project and gitignored.
+- **All caches are global** (`~/.promise/cache/`). Build cache keys are content-addressed (SHA-256 of impl hash + compiler hash + target + module paths), so the same module compiled with the same inputs produces the same cache key regardless of which project triggered the build.
+- **`PROMISE_HOME` env var** overrides the `~/.promise/` base directory for all Promise data (caches, LLVM tools, CRT, installs). Useful when `$HOME` is unavailable or for CI environments.
 
 #### The AI Modify-Build-Test Loop
 

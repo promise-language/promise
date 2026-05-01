@@ -139,56 +139,6 @@ func TestSanitizeIRPrefixMultipleParentDirs(t *testing.T) {
 	}
 }
 
-func TestCacheSafeNameSimple(t *testing.T) {
-	if got := CacheSafeName("mylib"); got != "mylib" {
-		t.Errorf("CacheSafeName(mylib) = %q, want mylib", got)
-	}
-}
-
-func TestCacheSafeNameLocalPath(t *testing.T) {
-	// Local paths get hash suffix (must not collide with catalog names)
-	got := CacheSafeName("./mylib")
-	if got == "mylib" {
-		t.Error("CacheSafeName(./mylib) should differ from catalog 'mylib'")
-	}
-	if !strings.HasPrefix(got, "mylib_") {
-		t.Errorf("CacheSafeName(./mylib) = %q, expected prefix 'mylib_'", got)
-	}
-}
-
-func TestCacheSafeNameURL(t *testing.T) {
-	name := CacheSafeName("github.com/alice/parser")
-	if name == "" {
-		t.Fatal("expected non-empty cache name")
-	}
-	// Should not contain path separators
-	for _, c := range name {
-		if c == '/' || c == '\\' {
-			t.Errorf("CacheSafeName contains path separator: %q", name)
-			break
-		}
-	}
-}
-
-func TestCacheSafeNameStartsWithLetter(t *testing.T) {
-	// Cache names should start with a letter for filesystem safety
-	inputs := []string{
-		"github.com/alice/parser",
-		"123numeric",
-		"---special---",
-	}
-	for _, input := range inputs {
-		got := CacheSafeName(input)
-		if len(got) == 0 {
-			t.Errorf("CacheSafeName(%q) returned empty string", input)
-			continue
-		}
-		if !isLetter(rune(got[0])) && got[0] != '_' {
-			t.Errorf("CacheSafeName(%q) = %q, starts with non-letter", input, got)
-		}
-	}
-}
-
 func TestGlobalIdentityFunctions(t *testing.T) {
 	if got := GlobalIdentityForLocal("./mylib"); got != "./mylib" {
 		t.Errorf("GlobalIdentityForLocal = %q", got)

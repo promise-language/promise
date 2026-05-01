@@ -47,8 +47,8 @@ Commands:
   exec      Execute inline Promise code
   init      Initialize a new Promise project (creates promise.toml)
   pin       Pin a remote module to a specific commit
-  clean     Remove build cache (--global for remote module cache)
-  install   Install Promise to ~/.promise/
+  clean     Remove build cache (--global also clears module cache)
+  install   Install Promise to PROMISE_HOME (default: ~/.promise/)
 
 Options (build):
   -o <output>   Output file name (default: input file without extension)
@@ -843,20 +843,8 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	checkLLVMToolVersion(optPath)
 	checkLLVMToolVersion(llcPath)
 
-	// Find cache directory from project root
-	var cacheDir string
-	if sourceFile != "" {
-		projectRoot := filepath.Dir(sourceFile)
-		if abs, err := filepath.Abs(projectRoot); err == nil {
-			projectRoot = abs
-		}
-		if cfg, err := module.FindConfig(projectRoot); err == nil && cfg != nil {
-			projectRoot = cfg.Dir
-		}
-		if dir, err := module.CacheDir(projectRoot); err == nil {
-			cacheDir = dir
-		}
-	}
+	// Build cache (~/.promise/cache/build/, overridable via PROMISE_HOME)
+	cacheDir, _ := module.BuildCacheDir()
 
 	// Build context for cache keys: compiler hash + all module paths
 	compilerHash := module.CompilerHash()
@@ -897,12 +885,9 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 		go func(name, irText string) {
 			defer wg.Done()
 
-			// Try cache lookup. name is the module's IR prefix (from SplitModuleIRs),
-			// already sanitized to [a-zA-Z][a-zA-Z0-9_]* by SanitizeIRPrefix.
-			// CacheSafeName passes it through unchanged for filesystem-safe filenames.
-			cacheName := module.CacheSafeName(name)
+			// Try cache lookup
 			if cacheKey, ok := modCacheKeys[name]; ok && cacheDir != "" {
-				if cachedObj := module.LookupCachedObj(cacheDir, cacheName, cacheKey); cachedObj != "" {
+				if cachedObj := module.LookupBuildCache(cacheDir, cacheKey); cachedObj != "" {
 					mu.Lock()
 					moduleObjs = append(moduleObjs, moduleObj{name: name, objFile: cachedObj, cached: true})
 					mu.Unlock()
@@ -913,7 +898,7 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 			// Cache miss — compile
 			obj := compileLLToObj(irText, "promise-mod-"+name, target, optPath, llcPath)
 
-			// Save to cache (use CacheSafeName for filesystem-safe filenames)
+			// Save to cache
 			if cacheKey, ok := modCacheKeys[name]; ok && cacheDir != "" {
 				interfaceHash := ""
 				for _, mi := range modInfos {
@@ -922,8 +907,7 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 						break
 					}
 				}
-				_ = module.SaveCachedObj(cacheDir, cacheName, cacheKey, interfaceHash, obj)
-				module.CleanStaleCache(cacheDir, cacheName, cacheKey)
+				_ = module.SaveBuildCache(cacheDir, cacheKey, interfaceHash, obj)
 			}
 
 			mu.Lock()
@@ -1104,11 +1088,11 @@ var embeddedLLVMSymlinks = map[string]string{
 
 // llvmCacheDirPath returns the path where embedded LLVM tools are extracted.
 func llvmCacheDirPath() (string, error) {
-	homeDir, err := os.UserHomeDir()
+	home, err := module.PromiseHome()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(homeDir, ".promise", "cache", "llvm", "linux-amd64"), nil
+	return filepath.Join(home, "cache", "llvm", "linux-amd64"), nil
 }
 
 // llvmCacheComplete checks if all expected LLVM tools exist in the cache dir.
@@ -1208,7 +1192,7 @@ func extractCompressedLLVM(destDir string) {
 // findLLVMTool locates an LLVM tool (opt, llc, ld.lld, ld64.lld) by searching:
 // 1. Sibling directory of the promise binary
 // 2. Environment variable override (PROMISE_OPT, PROMISE_LLC, PROMISE_LLD, PROMISE_LD64LLD)
-// 3. Embedded LLVM cache (~/.promise/cache/llvm/linux-amd64/)
+// 3. Embedded LLVM cache (<PROMISE_HOME>/cache/llvm/linux-amd64/)
 // 4. Homebrew LLVM (macOS)
 // 5. Versioned names on PATH (e.g., opt-22, llc-22, ld.lld-22) from newest to minLLVMMajor
 // 6. Unversioned names on PATH (e.g., opt, llc, ld.lld)
@@ -1783,8 +1767,8 @@ func muslCRTValid(dir string) bool {
 // findMuslCRT locates musl CRT objects for static linking.
 // Discovery order:
 // 1. Sibling of promise binary: {exe_dir}/crt/{arch}/
-// 2. Installed location: ~/.promise/lib/crt/{arch}/
-// 3. Cache dir: ~/.promise/cache/crt/{arch}/
+// 2. Installed location: <PROMISE_HOME>/lib/crt/{arch}/
+// 3. Cache dir: <PROMISE_HOME>/cache/crt/{arch}/
 // 4. Extract embedded CRT to cache (first build only)
 func findMuslCRT(target string) (string, error) {
 	arch := muslArchDir(target)
@@ -1797,19 +1781,19 @@ func findMuslCRT(target string) (string, error) {
 		}
 	}
 
-	homeDir, err := os.UserHomeDir()
+	promiseHome, err := module.PromiseHome()
 	if err != nil {
-		return "", fmt.Errorf("cannot determine home directory: %v", err)
+		return "", fmt.Errorf("cannot determine Promise home: %v", err)
 	}
 
-	// 2. Installed location (~/.promise/lib/crt/{arch}/)
-	installDir := filepath.Join(homeDir, ".promise", "lib", "crt", arch)
+	// 2. Installed location (<PROMISE_HOME>/lib/crt/{arch}/)
+	installDir := filepath.Join(promiseHome, "lib", "crt", arch)
 	if muslCRTComplete(installDir) {
 		return installDir, nil
 	}
 
-	// 3. Cache dir (~/.promise/cache/crt/{arch}/)
-	cacheDir := filepath.Join(homeDir, ".promise", "cache", "crt", arch)
+	// 3. Cache dir (<PROMISE_HOME>/cache/crt/{arch}/)
+	cacheDir := filepath.Join(promiseHome, "cache", "crt", arch)
 
 	if muslCRTValid(cacheDir) {
 		return cacheDir, nil
@@ -1962,11 +1946,11 @@ func linkWasm(objFile, outputFile string) {
 // ensureWasmAllocObj extracts the embedded WASM allocator object to cache.
 // Returns the path to the .o file.
 func ensureWasmAllocObj() (string, error) {
-	homeDir, err := os.UserHomeDir()
+	promiseHome, err := module.PromiseHome()
 	if err != nil {
-		return "", fmt.Errorf("cannot determine home dir: %v", err)
+		return "", fmt.Errorf("cannot determine Promise home: %v", err)
 	}
-	cacheDir := filepath.Join(homeDir, ".promise", "cache", "crt", "wasm32")
+	cacheDir := filepath.Join(promiseHome, "cache", "crt", "wasm32")
 	objPath := filepath.Join(cacheDir, "wasm_alloc.o")
 
 	// Check if cached version matches embedded (by size)
@@ -2707,9 +2691,9 @@ func findStdDir() string {
 	}
 
 	// Check installed location
-	if homeDir, err := os.UserHomeDir(); err == nil {
+	if promiseHome, err := module.PromiseHome(); err == nil {
 		candidates = append(candidates,
-			filepath.Join(homeDir, ".promise", "lib", "std"),
+			filepath.Join(promiseHome, "lib", "std"),
 		)
 	}
 
@@ -3062,9 +3046,9 @@ func printFileErrors(filename string, errs []error) {
 
 // --- Install ---
 
-// runInstall installs the Promise compiler to ~/.promise/.
+// runInstall installs the Promise compiler to PROMISE_HOME (default: ~/.promise/).
 // runInit creates a promise.toml in the current directory.
-// runClean removes the .promise-build/ cache directory.
+// runClean removes the build cache and optionally the global module cache.
 func runClean(args []string) {
 	global := false
 	for _, a := range args {
@@ -3076,28 +3060,19 @@ func runClean(args []string) {
 		}
 	}
 
-	// Always clean local build cache
-	dir, err := os.Getwd()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-	if cfg, err := module.FindConfig(dir); err == nil && cfg != nil {
-		dir = cfg.Dir
-	}
-	cacheDir := filepath.Join(dir, ".promise-build")
-	if err := os.RemoveAll(cacheDir); err != nil {
-		fmt.Fprintf(os.Stderr, "error removing %s: %v\n", cacheDir, err)
+	// Clean build cache
+	if err := module.CleanBuildCache(); err != nil {
+		fmt.Fprintf(os.Stderr, "error cleaning build cache: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println("Cleaned build cache")
 
 	if global {
 		if err := module.CleanGlobalCache(); err != nil {
-			fmt.Fprintf(os.Stderr, "error cleaning global cache: %v\n", err)
+			fmt.Fprintf(os.Stderr, "error cleaning module cache: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println("Cleaned global module cache")
+		fmt.Println("Cleaned module cache")
 	}
 }
 
@@ -3174,13 +3149,11 @@ func runInit() {
 }
 
 func runInstall() {
-	homeDir, err := os.UserHomeDir()
+	promiseDir, err := module.PromiseHome()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: cannot determine home directory: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error: cannot determine Promise home: %v\n", err)
 		os.Exit(1)
 	}
-
-	promiseDir := filepath.Join(homeDir, ".promise")
 	binDir := filepath.Join(promiseDir, "bin")
 	libDir := filepath.Join(promiseDir, "lib")
 	stdDest := filepath.Join(libDir, "std")

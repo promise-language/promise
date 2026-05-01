@@ -72,28 +72,6 @@ func SanitizeIRPrefix(globalID string) string {
 	return sanitized + "_" + suffix
 }
 
-// CacheSafeName converts a GlobalIdentity into a filesystem-safe string
-// for use in cache file names. Unlike SanitizeIRPrefix, this always uses
-// a hash to keep filenames short and avoid filesystem path length limits.
-func CacheSafeName(globalID string) string {
-	clean := stripPathPrefixes(globalID)
-
-	// Pass through only if no stripping occurred (same logic as SanitizeIRPrefix).
-	if clean == globalID && isSimpleIdent(clean) && len(clean) <= 64 {
-		return clean
-	}
-
-	// Use sanitized name + longer hash for safety
-	sanitized := sanitizeChars(clean)
-	sanitized = ensureLetterStart(sanitized)
-	if len(sanitized) > 32 {
-		sanitized = sanitized[:32]
-	}
-	h := sha256.Sum256([]byte(globalID))
-	suffix := hex.EncodeToString(h[:8]) // 16 hex chars
-	return sanitized + "_" + suffix
-}
-
 // stripPathPrefixes removes all leading "./" and "../" components.
 func stripPathPrefixes(s string) string {
 	for strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../") {

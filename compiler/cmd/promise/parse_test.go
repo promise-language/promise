@@ -754,15 +754,15 @@ func testModuleLoaderWithConfig(projectDir string, stdFiles []*ast.File, cfg *mo
 		}
 	}
 	return &moduleLoader{
-		projectRoot:    projectDir,
-		stdFiles:       stdFiles,
-		projectCfg:     cfg,
-		loaded:         make(map[string]*sema.ModuleInfo),
-		canonicalNames: make(map[string]string),
-		visiting:       make(map[string]string),
-		allModInfos:    make(map[string]*sema.ModuleInfo),
-		remoteResolved: make(map[string]string),
-		commitPins:     commitPins,
+		projectRoot:      projectDir,
+		stdFiles:         stdFiles,
+		projectCfg:       cfg,
+		loaded:           make(map[string]*sema.ModuleInfo),
+		globalIdentities: make(map[string]string),
+		visiting:         make(map[string]string),
+		allModInfos:      make(map[string]*sema.ModuleInfo),
+		remoteResolved:   make(map[string]string),
+		commitPins:       commitPins,
 	}
 }
 
@@ -1208,7 +1208,7 @@ func TestLoadModuleCircularThreeModules(t *testing.T) {
 }
 
 // TestLoadModuleCanonicalName verifies that the canonical name comes from promise.toml,
-// not the import path or alias.
+// and GlobalIdentity is derived from the import path.
 func TestLoadModuleCanonicalName(t *testing.T) {
 	projectDir := t.TempDir()
 	modDir := filepath.Join(projectDir, "my-local-path")
@@ -1235,11 +1235,21 @@ func TestLoadModuleCanonicalName(t *testing.T) {
 	if modInfo.CanonicalName != "my_canonical" {
 		t.Errorf("expected canonical name 'my_canonical', got '%s'", modInfo.CanonicalName)
 	}
+	// GlobalIdentity should be the import path, not the canonical name
+	if modInfo.GlobalIdentity != "./my-local-path" {
+		t.Errorf("expected GlobalIdentity './my-local-path', got '%s'", modInfo.GlobalIdentity)
+	}
+	// IRPrefix should be derived from GlobalIdentity (sanitized path)
+	expectedPrefix := module.SanitizeIRPrefix("./my-local-path")
+	if modInfo.IRPrefix != expectedPrefix {
+		t.Errorf("expected IRPrefix '%s', got '%s'", expectedPrefix, modInfo.IRPrefix)
+	}
 }
 
-// TestLoadModuleDuplicateCanonicalName verifies that two different modules
-// declaring the same canonical name in their promise.toml produce an error.
-func TestLoadModuleDuplicateCanonicalName(t *testing.T) {
+// TestLoadModuleSameNameDifferentPaths verifies that two modules with the same
+// promise.toml name but different import paths can coexist (no collision).
+// This is the key improvement of GlobalIdentity over the old CanonicalName system.
+func TestLoadModuleSameNameDifferentPaths(t *testing.T) {
 	projectDir := t.TempDir()
 	modA := filepath.Join(projectDir, "mod_a")
 	modB := filepath.Join(projectDir, "mod_b")
@@ -1251,10 +1261,10 @@ func TestLoadModuleDuplicateCanonicalName(t *testing.T) {
 
 	for _, item := range []struct{ path, content string }{
 		{filepath.Join(projectDir, "promise.toml"), "[module]\nname = \"proj\"\nepoch = \"2026.3\"\n"},
-		// Both modules claim the name "shared_name"
-		{filepath.Join(modA, "promise.toml"), "[module]\nname = \"shared_name\"\nepoch = \"2026.3\"\n"},
+		// Both modules claim the same name "parser" — but they have different paths
+		{filepath.Join(modA, "promise.toml"), "[module]\nname = \"parser\"\nepoch = \"2026.3\"\n"},
 		{filepath.Join(modA, "lib.pr"), "fa() int `public { return 1; }\n"},
-		{filepath.Join(modB, "promise.toml"), "[module]\nname = \"shared_name\"\nepoch = \"2026.3\"\n"},
+		{filepath.Join(modB, "promise.toml"), "[module]\nname = \"parser\"\nepoch = \"2026.3\"\n"},
 		{filepath.Join(modB, "lib.pr"), "fb() int `public { return 2; }\n"},
 	} {
 		if err := os.WriteFile(item.path, []byte(item.content), 0644); err != nil {
@@ -1266,21 +1276,26 @@ func TestLoadModuleDuplicateCanonicalName(t *testing.T) {
 	loader := testModuleLoader(projectDir, stdFiles)
 
 	// Load first module — should succeed
-	_, err := loader.load("./mod_a")
+	miA, err := loader.load("./mod_a")
 	if err != nil {
 		t.Fatalf("loader.load(mod_a) failed: %v", err)
 	}
 
-	// Load second module with same canonical name — should fail
-	_, err = loader.load("./mod_b")
-	if err == nil {
-		t.Fatal("expected error for duplicate canonical name")
+	// Load second module with same name but different path — should also succeed
+	miB, err := loader.load("./mod_b")
+	if err != nil {
+		t.Fatalf("loader.load(mod_b) failed: %v", err)
 	}
-	if !strings.Contains(err.Error(), "duplicate module name") {
-		t.Errorf("expected 'duplicate module name' error, got: %v", err)
+
+	// Both have same CanonicalName but different GlobalIdentity and IRPrefix
+	if miA.CanonicalName != "parser" || miB.CanonicalName != "parser" {
+		t.Errorf("expected both to have canonical name 'parser'")
 	}
-	if !strings.Contains(err.Error(), "shared_name") {
-		t.Errorf("expected error to mention 'shared_name', got: %v", err)
+	if miA.GlobalIdentity == miB.GlobalIdentity {
+		t.Errorf("expected different global identities, both got %q", miA.GlobalIdentity)
+	}
+	if miA.IRPrefix == miB.IRPrefix {
+		t.Errorf("expected different IR prefixes, both got %q", miA.IRPrefix)
 	}
 }
 
@@ -1325,6 +1340,10 @@ parse(int x) int `+"`"+`public {
 	}
 	if modInfo.CanonicalName != "parser" {
 		t.Errorf("expected canonical name 'parser', got %q", modInfo.CanonicalName)
+	}
+	// GlobalIdentity should be the remote URL (not the local path)
+	if modInfo.GlobalIdentity != "github.com/someone/parser" {
+		t.Errorf("expected GlobalIdentity 'github.com/someone/parser', got %q", modInfo.GlobalIdentity)
 	}
 
 	// Verify it's cached in remoteResolved

@@ -5746,12 +5746,15 @@ func parseModuleSource(t *testing.T, moduleName, src string) (*sema.ModuleInfo, 
 	}
 
 	scope := sema.ExportedScope(modInfo, modFile)
+	globalID := "./" + moduleName
 	return &sema.ModuleInfo{
-		Name:          moduleName,
-		CanonicalName: moduleName,
-		Path:          "./" + moduleName,
-		File:          modFile,
-		SemaInfo:      modInfo,
+		Name:           moduleName,
+		CanonicalName:  moduleName,
+		GlobalIdentity: globalID,
+		IRPrefix:       moduleName, // test convenience: use plain name as IR prefix
+		Path:           globalID,
+		File:           modFile,
+		SemaInfo:       modInfo,
 	}, scope
 }
 
@@ -6243,12 +6246,13 @@ func TestModuleSplitModuleIRs(t *testing.T) {
 	assertContains(t, mainIR, "declare i64 @__mod_beta_get_b")
 }
 
-func TestModuleCanonicalNameUsedForIR(t *testing.T) {
-	// Verify that even when the user alias differs from the canonical name,
-	// the IR uses the canonical name (from CanonicalName field).
+func TestModuleIRPrefixUsedForIR(t *testing.T) {
+	// Verify that when the user alias differs from the IRPrefix,
+	// the IR uses the IRPrefix (derived from GlobalIdentity), not the alias.
 	mod1Info, mod1Scope := parseModuleSource(t, "myalias", "helper() int `public { return 42; }")
-	// Override canonical name to differ from alias
-	mod1Info.CanonicalName = "real_name"
+	// Override GlobalIdentity and IRPrefix to simulate a remote module
+	mod1Info.GlobalIdentity = "github.com/alice/mylib"
+	mod1Info.IRPrefix = "github_com_alice_mylib_abc123"
 
 	stdInput := antlr.NewInputStream(stdAll)
 	stdLexer := parser.NewPromiseLexer(stdInput)
@@ -6305,8 +6309,8 @@ func TestModuleCanonicalNameUsedForIR(t *testing.T) {
 	result := Compile(userFile, info, "")
 	ir := result.Module.String()
 
-	// IR should use canonical name "real_name", not the alias "myalias"
-	assertContains(t, ir, "define i64 @__mod_real_name_helper")
+	// IR should use IRPrefix, not the alias "myalias"
+	assertContains(t, ir, "define i64 @__mod_github_com_alice_mylib_abc123_helper")
 	assertNotContains(t, ir, "__mod_myalias_")
 }
 

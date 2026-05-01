@@ -37,7 +37,7 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 
 | Stage | Package | Description | Status |
 |-------|---------|-------------|--------|
-| 9 | `compiler/internal/module/`, `sema/`, `codegen/`, `std/` | Module system: visibility, qualified access, local imports, cross-module codegen, separate/incremental compilation, transitive deps, circular detection, remote git fetching | Phase 3 Done |
+| 9 | `compiler/internal/module/`, `sema/`, `codegen/`, `std/` | Module system: visibility, qualified access, local imports, cross-module codegen, separate/incremental compilation, transitive deps, circular detection, remote git fetching, globally unique module identity | Phase 3 Done + Identity Redesign |
 | 10 | `cmd/promise/` | CLI entry point (build, run, test, fmt, etc.) | Done (except `fmt`) |
 | 11 | `pkg/` | Package manager: fetch, resolve, lock | Planned |
 
@@ -596,7 +596,7 @@ Generator functions: `stream[T]` return type with `yield` statements, compiled t
 
 **Deferred**: `yield*` (delegate to sub-iterator), failable generators (`stream[T]!`), stored generator values (first-class generator variables outside for-in), generator closures (capturing lambdas as generators).
 
-## Stage 9 — Module System (Phase 3 Done)
+## Stage 9 — Module System (Phase 3 Done + Identity Redesign)
 
 Module resolution and dependency management. See [module-system-proposal.md](module-system-proposal.md) for the full design.
 
@@ -623,9 +623,9 @@ Module resolution and dependency management. See [module-system-proposal.md](mod
 - **Recursive module loading**: `moduleLoader` struct with DFS walk — replaces flat `loadLocalModule()`. Modules are parsed, their `use` declarations scanned, and dependencies recursively loaded via `loadDeps()` before `sema.CheckWithModules()`. Results cached by absolute directory path to handle diamond dependencies (same module loaded once, shared across consumers).
 - **Cycle detection**: `visiting` set (maps absDir → import path) tracks in-progress modules. If a module is encountered while it's being loaded, a cycle error with the full path is reported (e.g., `"./a → ./b → ./c → ./a"`). `buildCyclePath()` formats the cycle from the visit stack.
 - **Topological ordering**: `depOrder` records modules in post-order DFS — leaf dependencies first. Stored in `Info.ModuleOrder` for codegen. `compileModules()` processes modules in this order so that a module's types and functions are available when its dependents are compiled.
-- **Canonical module identity**: Each module's `promise.toml` `name` field is the stable IR identity (`CanonicalName`), independent of the consumer's alias or import path. IR symbols use `__mod_<canonical>_<func>`, not the consumer's alias. This enables cross-project `.o` reuse — the same module compiled in different projects produces identical IR symbols.
-- **Duplicate canonical name detection**: `canonicalNames` map (canonical → absDir) in `moduleLoader` detects two different modules claiming the same identity. Error: `"duplicate module name "X": declared by both /path/a and /path/b"`.
-- **Module-prefixed IR globals**: `typeGlobalName()` returns `__mod_<canonical>_<Type>` for typeinfo, vtable, and RTTI globals when compiling a module. Prevents name collisions between module types and std library types (e.g., module `Range` vs std `Range`). `resolveModuleName()` maps consumer aliases to canonical names via `moduleCanonical` map.
+- **Module identity**: Each module has a globally unique identity (`GlobalIdentity`) derived from its source — relative path for local, normalized URL for remote, catalog name for catalog. IR symbols use `__mod_<IRPrefix>_<func>` where `IRPrefix` is derived from GlobalIdentity via `SanitizeIRPrefix()`. This enables cross-project `.o` reuse. `EffectiveIRPrefix()` helper on `ModuleInfo` provides the fallback chain (IRPrefix → CanonicalName → Name) for test compatibility.
+- **Duplicate identity detection**: `globalIdentities` map (GlobalIdentity → absDir) in `moduleLoader` detects two different modules resolving to the same identity. Two modules with the same `promise.toml` name but different paths can coexist.
+- **Module-prefixed IR globals**: `typeGlobalName()` returns `__mod_<IRPrefix>_<Type>` for typeinfo, vtable, and RTTI globals when compiling a module. Prevents name collisions between module types and std library types (e.g., module `Range` vs std `Range`). `resolveModuleName()` maps consumer aliases to IR prefixes via `moduleCanonical` map.
 - **Tests**: 3 new loader tests (transitive, diamond, circular, 3-module circular, canonical name, duplicate canonical name), 4 new codegen tests (prefixed globals, SplitModuleIRs, canonical vs alias IR identity), 8 new cache unit tests (hashing, determinism, round-trip, stale cleanup), 1 new e2e test file (4-level deep transitive chain: test → renderer → geometry → utils). Total: 53 e2e module tests across 15 files, 775 total tests.
 
 **Phase 3 — Remote Module Fetching (done):**
@@ -711,7 +711,7 @@ Dependency fetching and resolution.
 
 ## What's Next
 
-The compiler pipeline (Stages 1-8p) is complete. Runtime is fully codegen-emitted LLVM IR — no C files remain. All major cross-cutting features are done: M:N scheduler (Phase 5c), WASM target (Phases 4b/5d/7a), yield generators, structural interfaces, operator dispatch, naming conventions, pure value types, documentation system (Phase 1), and module system (Phase 3 done: local+remote modules, git fetching, `promise pin`, epoch warnings, separate/incremental compilation).
+The compiler pipeline (Stages 1-8p) is complete. Runtime is fully codegen-emitted LLVM IR — no C files remain. All major cross-cutting features are done: M:N scheduler (Phase 5c), WASM target (Phases 4b/5d/7a), yield generators, structural interfaces, operator dispatch, naming conventions, pure value types, documentation system (Phase 1), and module system (Phase 3 done + identity redesign: local+remote modules, git fetching, `promise pin`, epoch warnings, separate/incremental compilation, globally unique module identity with two-layer architecture).
 
 Test suite: 781 native pass, 761 WASM pass (3 skip).
 
@@ -719,6 +719,7 @@ Test suite: 781 native pass, 761 WASM pass (3 skip).
 
 | Work | Priority |
 |------|----------|
+| Global build cache — wire `~/.promise/cache/build/` into build pipeline | High |
 | CLI: `promise fmt` code formatter — Stage 10 | Medium |
 | Module system Phase 4 (catalog infrastructure) — Stage 9 | Medium |
 | Package manager (fetch, resolve, lock) — Stage 11 | Medium |
@@ -845,46 +846,53 @@ Known gaps and improvements deferred from completed stages.
 
 | Item | Priority |
 |------|----------|
-| **Module identity redesign** — current `name` field causes collisions when two community modules use the same name (e.g. two "parser" modules can't coexist). Need a globally unique canonical identity scheme. See design notes below. | High |
+| ~~**Module identity redesign**~~ — **Done.** Two-layer architecture implemented: GlobalIdentity (Layer 1) + SanitizeIRPrefix (Layer 2). See implementation notes below. | ~~High~~ Resolved |
+| Global content-addressable build cache (`~/.promise/cache/build/`) — two-level directory structure, atomic writes. Helper functions implemented but not yet wired into build pipeline. See design notes below. | High |
 | Catalog infrastructure and versioning (Phase 4) | Medium |
 | Std as a regular cacheable module (remove AST-merge special case) | Low |
 
-**Module identity design — two-layer architecture:**
+**Module identity — two-layer architecture (implemented):**
 
-The current scheme uses `promise.toml` `name` as the canonical IR identity (`__mod_<name>_<func>`). This is simple but not globally unique — two unrelated remote modules with `name = "parser"` collide.
+**Layer 1 — Global identity** (`ModuleInfo.GlobalIdentity`): Every module has a globally unique identity:
+- **Local modules**: the import path from project root (e.g. `./libs/parser`). Computed by `GlobalIdentityForLocal()`.
+- **Remote modules**: the normalized URL (e.g. `github.com/alice/parser`). Computed by `GlobalIdentityForRemote()` via `NormalizeURL()`. Overrides the local path identity after `load()` returns.
+- **Catalog modules**: the catalog-assigned name (e.g. `json`). Computed by `GlobalIdentityForCatalog()`.
+- **Std**: not applicable (compiled inline, no module prefix).
 
-**Layer 1 — Global identity (canonical, stable, unique):**
-Every module has a globally unique identity derived from its source:
-- **Remote modules**: the normalized URL (e.g. `github.com/alice/parser`) — already computed by `NormalizeURL()`.
-- **Catalog modules**: the catalog-assigned name (e.g. `json`, `http`). Guaranteed unique within an epoch by the catalog registry. Short, descriptive, and ideal as-is.
-- **Local modules**: the full normalized URL of the root project + relative path (e.g. `github.com/myorg/myapp/libs/parser`), or just the relative path for non-published projects.
-- **Std**: `std` — singleton, always the same.
+Duplicate detection uses GlobalIdentity (not `promise.toml` name): two modules with the same `name` but different GlobalIdentities can coexist without collision.
 
-**Layer 2 — Local identity (IR symbols, build-specific):**
-The build system maps global identities to local IR symbol prefixes. The mapping strategy is an implementation detail — the build system doesn't care *how* the mapping works, only that it is **stable** (same input → same output) and **collision-free** (no two distinct global identities map to the same local identity). Possible strategies:
-- **Verbatim**: use the full global identity in quoted LLVM identifiers (`@"github.com/alice/parser.parse"`). Best for debugging. Verbose but unambiguous.
-- **Hash-based**: deterministic hash of the global identity → short prefix (`__mod_a3b4c5_parse`). Compact but opaque.
-- **Dictionary-based**: compiler maintains a persisted mapping file (global identity → short index). `github.com/alice/parser` → `__mod43`. Compact and stable across builds if the dictionary is shared.
-- **Catalog shortcut**: for catalog modules, the catalog ID *is* the local identity (e.g. `__mod_json_parse`). Short, readable, globally unique by construction.
-- **Mixed**: use catalog IDs for catalog modules, hashes for remote git modules, relative paths for local modules. Each strategy is optimal for its source type.
+**Layer 2 — IR prefix** (`ModuleInfo.IRPrefix`): Sanitized prefix for LLVM IR symbols, derived from GlobalIdentity via `SanitizeIRPrefix()`:
+- Simple identifiers (matching `[a-zA-Z_][a-zA-Z0-9_]*`) **that required no stripping** pass through unchanged. This covers catalog modules only (e.g. `"json"` → `"json"`).
+- All other inputs (local paths, remote URLs) are sanitized: non-alphanumeric characters replaced with `_`, runs collapsed, leading/trailing `_` trimmed. A 6-character SHA-256 hash suffix (of the original globalID) is appended for collision-freedom. This ensures `"json"` (catalog) and `"./json"` (local) never collide.
+  - `./mylib` → `mylib_<hash6>` (local path gets hash suffix)
+  - `./libs/parser` → `libs_parser_<hash6>`
+  - `github.com/alice/parser` → `github_com_alice_parser_<hash6>`
+  - `github.com/bob/parser` → `github_com_bob_parser_<hash6>` (different hash, no collision)
 
-The build system should treat Layer 2 as a pluggable concern: any function `f(global_identity) → local_prefix` that satisfies stability and collision-freedom is valid. This separation means the local identity strategy can evolve (e.g. switch from hash to dictionary) without changing the module system, cache keys, or dependency resolution.
+IR symbols use the pattern `__mod_<IRPrefix>_<symbol>`. Cache filenames use `CacheSafeName()` which truncates long names and appends a longer hash for filesystem safety.
 
-**Global content-addressable build cache:**
+**Files:** `internal/module/identity.go` (SanitizeIRPrefix, CacheSafeName, GlobalIdentityFor*), `internal/sema/info.go` (ModuleInfo.GlobalIdentity, ModuleInfo.IRPrefix), `internal/codegen/compiler.go` (compileModules/compileModule use IRPrefix), `internal/codegen/expr.go` (resolveModuleName returns IRPrefix), `cmd/promise/main.go` (load sets GlobalIdentity/IRPrefix, loadRemote overrides with URL identity, globalIdentities dedup map)
 
-The current `.promise-build/` is project-local — every project rebuilds all its modules from scratch even when another project already compiled the same module at the same commit with the same compiler. Worse, project-less commands like `promise exec` have no cache at all — every invocation recompiles std and everything else from scratch. This is especially costly for the AI-agent use case (Promise's core design target): an agent using `promise exec` as a tool in a loop pays full `opt+llc` cost every time. A device-wide global build cache (e.g. `~/.promise/cache/build/`) would store `.o` files keyed by a content address derived from all inputs that affect the output:
+**Global content-addressable build cache (design + helpers implemented):**
+
+The current `.promise-build/` is project-local — every project rebuilds all its modules from scratch even when another project already compiled the same module at the same commit with the same compiler. Worse, project-less commands like `promise exec` have no cache at all — every invocation recompiles std and everything else from scratch. This is especially costly for the AI-agent use case (Promise's core design target): an agent using `promise exec` as a tool in a loop pays full `opt+llc` cost every time.
+
+A device-wide global build cache at `~/.promise/cache/build/` stores `.o` files keyed by a content address derived from all inputs that affect the output:
 - Compiler binary hash (or version)
 - Build mode (debug/release), optimization level, target triple
 - Module source hash (impl hash — already computed)
 - Module interface hashes of all direct dependencies (already computed)
-- Local identity strategy + its output for this module (part of the `.o` content)
+- IR prefix strategy output for this module (part of the `.o` content)
 
-The cache key is a SHA-256 of these inputs → `~/.promise/cache/build/<hash>.o`. Any build on the device that produces the same key reuses the cached `.o`. This is especially valuable for common dependencies — if 10 projects all use `github.com/alice/parser` at the same commit, it's compiled once. Because the local identity mapping is deterministic (same global identity → same local prefix regardless of which project), both debug and release `.o` files are globally cacheable.
+The cache key is a SHA-256 of these inputs. Files are stored in a **two-level directory structure** using the first 2 hex characters of the hash as a subdirectory: `~/.promise/cache/build/a3/a3b4c5d8...o`. This avoids slow directory lookups when thousands of entries accumulate (256 subdirectories, each with ~N/256 entries).
 
-Challenges:
-- **Garbage collection**: unlike project-local `.promise-build/` (cleaned by `promise clean`), a global cache grows unboundedly. Options: LRU eviction by access time, max size limit, `promise clean --build-cache` manual purge, or reference counting (track which projects use which entries — complex).
-- **Cache key correctness**: must include everything that affects the `.o` output. Missing an input (e.g. a codegen flag) causes silent miscompilation. Over-including inputs (e.g. absolute paths) defeats sharing.
-- **Atomic writes**: concurrent builds must not corrupt cache entries. Write to temp file + atomic rename (already used for the remote module cache).
+Helper functions implemented in `internal/module/cache.go`: `GlobalBuildCacheDir()`, `GlobalBuildCachePath()`, `LookupGlobalBuildCache()`, `SaveGlobalBuildCache()` (atomic write via temp + rename). Not yet wired into the build pipeline.
+
+Remaining work:
+- Wire global cache lookup/save into `compileAndLinkSeparate()` in `main.go`
+- **Garbage collection**: LRU eviction by access time, max size limit, or `promise clean --build-cache` manual purge
+- **Cache key correctness**: must include everything that affects the `.o` output
+- **`promise exec` integration**: look up global cache even without a project directory
 
 ### Unscheduled Features
 

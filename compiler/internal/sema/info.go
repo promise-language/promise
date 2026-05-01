@@ -21,14 +21,28 @@ type CapturedVar struct {
 // ModuleInfo bundles everything codegen needs about an imported module:
 // the module's merged AST file and its sema output.
 type ModuleInfo struct {
-	Name          string    // module alias (binding name used in consumer code)
-	CanonicalName string    // module's own name from its promise.toml (stable IR identity)
-	Path          string    // source path (empty for catalog modules)
-	File          *ast.File // the module's merged AST (with std decls merged in)
-	SemaInfo      *Info     // the module's sema output
-	AbsDir        string    // absolute path to module directory
-	ImplHash      string    // SHA-256 of module source files (implementation hash)
-	InterfaceHash string    // SHA-256 of public API signatures (interface hash)
+	Name           string    // module alias (binding name used in consumer code)
+	CanonicalName  string    // module's own name from its promise.toml (display only)
+	GlobalIdentity string    // globally unique identity (URL for remote, path for local, name for catalog)
+	IRPrefix       string    // sanitized prefix for IR symbols (derived from GlobalIdentity)
+	Path           string    // source path (empty for catalog modules)
+	File           *ast.File // the module's merged AST (with std decls merged in)
+	SemaInfo       *Info     // the module's sema output
+	AbsDir         string    // absolute path to module directory
+	ImplHash       string    // SHA-256 of module source files (implementation hash)
+	InterfaceHash  string    // SHA-256 of public API signatures (interface hash)
+}
+
+// EffectiveIRPrefix returns the IR prefix to use for this module's symbols.
+// Falls back to CanonicalName then Name for tests that don't set GlobalIdentity.
+func (mi *ModuleInfo) EffectiveIRPrefix() string {
+	if mi.IRPrefix != "" {
+		return mi.IRPrefix
+	}
+	if mi.CanonicalName != "" {
+		return mi.CanonicalName
+	}
+	return mi.Name
 }
 
 // Info holds the results of semantic analysis.

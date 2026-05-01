@@ -58,11 +58,11 @@ type Compiler struct {
 	file *ast.File
 
 	// Module codegen state
-	moduleFuncs      map[string]*ir.Func    // "canonical.funcname" → IR func (cross-module calls)
-	moduleExterns    map[string]*ExternFunc // "canonical.funcname" → extern (cross-module externs)
-	compilingModule  string                 // non-empty when compiling a module's declarations (canonical name)
-	moduleOwnedFuncs map[string]string      // IR func name → canonical module name (for separate compilation)
-	moduleCanonical  map[string]string      // module path → canonical name (for alias→canonical mapping)
+	moduleFuncs      map[string]*ir.Func    // "irprefix.funcname" → IR func (cross-module calls)
+	moduleExterns    map[string]*ExternFunc // "irprefix.funcname" → extern (cross-module externs)
+	compilingModule  string                 // non-empty when compiling a module's declarations (IR prefix)
+	moduleOwnedFuncs map[string]string      // IR func name → module IR prefix (for separate compilation)
+	moduleCanonical  map[string]string      // module path → IR prefix (for alias→prefix mapping)
 
 	// Loop control targets for break/continue
 	breakTarget    *ir.Block
@@ -2582,14 +2582,10 @@ func (c *Compiler) compileModules() {
 		return
 	}
 
-	// Build path → canonical name mapping for alias resolution in genModuleCall.
+	// Build path → IR prefix mapping for alias resolution in genModuleCall.
 	for _, modInfo := range c.info.ModuleInfos {
-		canonical := modInfo.CanonicalName
-		if canonical == "" {
-			canonical = modInfo.Name
-		}
 		if modInfo.Path != "" {
-			c.moduleCanonical[modInfo.Path] = canonical
+			c.moduleCanonical[modInfo.Path] = modInfo.EffectiveIRPrefix()
 		}
 	}
 
@@ -2615,12 +2611,9 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo) {
 	savedModule := c.compilingModule
 
 	// Switch to module context.
-	// Use CanonicalName (from promise.toml) for IR symbols — this is stable
-	// regardless of the consumer's alias, enabling cross-project .o reuse.
-	irName := modInfo.CanonicalName
-	if irName == "" {
-		irName = modInfo.Name // fallback for tests without promise.toml
-	}
+	// Use IRPrefix (derived from GlobalIdentity) for IR symbols — this is stable
+	// and globally unique, enabling cross-project .o reuse.
+	irName := modInfo.EffectiveIRPrefix()
 	c.info = modInfo.SemaInfo
 	c.file = modInfo.File
 	c.compilingModule = irName
@@ -3098,8 +3091,6 @@ func (c *Compiler) defineTypeMethods(file *ast.File) {
 	}
 }
 
-// mangleMethodName returns the mangled IR function name for a method, appending
-// a "$set" suffix for setters to avoid collisions with same-name getters.
 // typeGlobalName returns the IR global name for a type's typeinfo/vtable/rtti globals.
 // When compiling a module, the name is prefixed with "__mod_<module>_" to avoid
 // collisions with std library types or types from other modules.
@@ -3111,6 +3102,8 @@ func (c *Compiler) typeGlobalName(named *types.Named) string {
 	return name
 }
 
+// mangleMethodName returns the mangled IR function name for a method, appending
+// a "$set" suffix for setters to avoid collisions with same-name getters.
 func mangleMethodName(typeName, methodName string, isSetter bool) string {
 	if isSetter {
 		return typeName + "." + methodName + "$set"

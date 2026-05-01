@@ -257,7 +257,90 @@ func CleanStaleCache(cacheDir, moduleName, currentCacheKey string) {
 	}
 }
 
-// CleanAll removes all files from the cache directory.
+// GlobalBuildCacheDir returns the global build cache directory.
+// Creates it if it doesn't exist.
+func GlobalBuildCacheDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine home directory: %w", err)
+	}
+	dir := filepath.Join(home, ".promise", "cache", "build")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", fmt.Errorf("cannot create global build cache: %w", err)
+	}
+	return dir, nil
+}
+
+// GlobalBuildCachePath returns the path for a cached .o file in the global build cache.
+// Uses a two-level directory structure (first 2 hex chars of the cache key as subdirectory)
+// to avoid slow directory lookups when thousands of entries accumulate.
+// E.g., key "a3b4c5..." → "<cacheDir>/a3/a3b4c5...o"
+func GlobalBuildCachePath(cacheDir, cacheKey string) string {
+	subdir := cacheKey[:2]
+	return filepath.Join(cacheDir, subdir, cacheKey+".o")
+}
+
+// GlobalBuildCacheInterfacePath returns the interface hash path in the global build cache.
+func GlobalBuildCacheInterfacePath(cacheDir, cacheKey string) string {
+	subdir := cacheKey[:2]
+	return filepath.Join(cacheDir, subdir, cacheKey+".interface")
+}
+
+// LookupGlobalBuildCache checks if a cached .o file exists in the global build cache.
+// Returns the path if found, empty string if not cached.
+func LookupGlobalBuildCache(cacheDir, cacheKey string) string {
+	path := GlobalBuildCachePath(cacheDir, cacheKey)
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	return ""
+}
+
+// SaveGlobalBuildCache stores a compiled .o and interface hash in the global build cache.
+// Creates the two-level subdirectory if needed. Uses atomic write (temp + rename)
+// to prevent concurrent builds from corrupting entries.
+func SaveGlobalBuildCache(cacheDir, cacheKey, interfaceHash, objFile string) error {
+	subdir := filepath.Join(cacheDir, cacheKey[:2])
+	if err := os.MkdirAll(subdir, 0755); err != nil {
+		return fmt.Errorf("cannot create cache subdir: %w", err)
+	}
+
+	// Atomic write: write to temp file, then rename
+	data, err := os.ReadFile(objFile)
+	if err != nil {
+		return fmt.Errorf("cannot read object file: %w", err)
+	}
+
+	objPath := GlobalBuildCachePath(cacheDir, cacheKey)
+	tmpPath := objPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		os.Remove(tmpPath) // clean up partial write
+		return fmt.Errorf("cannot write cached object: %w", err)
+	}
+	if err := os.Rename(tmpPath, objPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("cannot finalize cached object: %w", err)
+	}
+
+	// Write interface hash (also atomic)
+	ifacePath := GlobalBuildCacheInterfacePath(cacheDir, cacheKey)
+	tmpIface := ifacePath + ".tmp"
+	if err := os.WriteFile(tmpIface, []byte(interfaceHash), 0644); err != nil {
+		os.Remove(tmpIface) // clean up partial write
+		os.Remove(objPath)  // roll back .o to keep cache consistent
+		return fmt.Errorf("cannot write interface hash: %w", err)
+	}
+	if err := os.Rename(tmpIface, ifacePath); err != nil {
+		os.Remove(tmpIface)
+		os.Remove(objPath) // roll back .o to keep cache consistent
+		return fmt.Errorf("cannot finalize interface hash: %w", err)
+	}
+
+	return nil
+}
+
+// CleanAll removes all entries from the cache directory, including
+// subdirectories (e.g., the two-level global build cache structure).
 func CleanAll(cacheDir string) error {
 	entries, err := os.ReadDir(cacheDir)
 	if err != nil {
@@ -267,7 +350,12 @@ func CleanAll(cacheDir string) error {
 		return err
 	}
 	for _, e := range entries {
-		os.Remove(filepath.Join(cacheDir, e.Name()))
+		path := filepath.Join(cacheDir, e.Name())
+		if e.IsDir() {
+			os.RemoveAll(path)
+		} else {
+			os.Remove(path)
+		}
 	}
 	return nil
 }

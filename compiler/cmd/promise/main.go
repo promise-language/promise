@@ -868,16 +868,12 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 		}
 	}
 
-	// Precompute cache keys for each module (keyed by canonical name for IR consistency)
-	modCacheKeys := make(map[string]string) // canonical name → cache key
+	// Precompute cache keys for each module (keyed by IR prefix — matches SplitModuleIRs keys)
+	modCacheKeys := make(map[string]string) // IR prefix → cache key
 	if cacheDir != "" && modInfos != nil {
 		for _, mi := range modInfos {
 			if mi.ImplHash != "" {
-				cn := mi.CanonicalName
-				if cn == "" {
-					cn = mi.Name
-				}
-				modCacheKeys[cn] = module.BuildCacheKey(mi.ImplHash, compilerHash, target, allModPaths)
+				modCacheKeys[mi.EffectiveIRPrefix()] = module.BuildCacheKey(mi.ImplHash, compilerHash, target, allModPaths)
 			}
 		}
 	}
@@ -901,9 +897,12 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 		go func(name, irText string) {
 			defer wg.Done()
 
-			// Try cache lookup
+			// Try cache lookup. name is the module's IR prefix (from SplitModuleIRs),
+			// already sanitized to [a-zA-Z][a-zA-Z0-9_]* by SanitizeIRPrefix.
+			// CacheSafeName passes it through unchanged for filesystem-safe filenames.
+			cacheName := module.CacheSafeName(name)
 			if cacheKey, ok := modCacheKeys[name]; ok && cacheDir != "" {
-				if cachedObj := module.LookupCachedObj(cacheDir, name, cacheKey); cachedObj != "" {
+				if cachedObj := module.LookupCachedObj(cacheDir, cacheName, cacheKey); cachedObj != "" {
 					mu.Lock()
 					moduleObjs = append(moduleObjs, moduleObj{name: name, objFile: cachedObj, cached: true})
 					mu.Unlock()
@@ -914,21 +913,17 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 			// Cache miss — compile
 			obj := compileLLToObj(irText, "promise-mod-"+name, target, optPath, llcPath)
 
-			// Save to cache
+			// Save to cache (use CacheSafeName for filesystem-safe filenames)
 			if cacheKey, ok := modCacheKeys[name]; ok && cacheDir != "" {
 				interfaceHash := ""
 				for _, mi := range modInfos {
-					cn := mi.CanonicalName
-					if cn == "" {
-						cn = mi.Name
-					}
-					if cn == name {
+					if mi.EffectiveIRPrefix() == name {
 						interfaceHash = mi.InterfaceHash
 						break
 					}
 				}
-				_ = module.SaveCachedObj(cacheDir, name, cacheKey, interfaceHash, obj)
-				module.CleanStaleCache(cacheDir, name, cacheKey)
+				_ = module.SaveCachedObj(cacheDir, cacheName, cacheKey, interfaceHash, obj)
+				module.CleanStaleCache(cacheDir, cacheName, cacheKey)
 			}
 
 			mu.Lock()
@@ -2274,9 +2269,9 @@ type moduleLoader struct {
 	// loaded caches fully loaded modules by absolute directory path.
 	// This prevents re-loading the same module when multiple consumers import it.
 	loaded map[string]*sema.ModuleInfo
-	// canonicalNames maps canonical name (from promise.toml) → absolute directory path.
-	// Used to detect two different modules claiming the same identity.
-	canonicalNames map[string]string
+	// globalIdentities maps global identity → absolute directory path.
+	// Used to detect two different modules resolving to the same identity.
+	globalIdentities map[string]string
 	// visiting tracks modules currently being loaded (for cycle detection).
 	// Maps absolute directory path → import path (for error messages).
 	visiting map[string]string
@@ -2326,15 +2321,15 @@ func loadModuleScopes(filename string, file *ast.File, stdFiles []*ast.File) (ma
 	}
 
 	loader := &moduleLoader{
-		projectRoot:    projectRoot,
-		stdFiles:       stdFiles,
-		projectCfg:     projectCfg,
-		loaded:         make(map[string]*sema.ModuleInfo),
-		canonicalNames: make(map[string]string),
-		visiting:       make(map[string]string),
-		allModInfos:    make(map[string]*sema.ModuleInfo),
-		remoteResolved: make(map[string]string),
-		commitPins:     commitPins,
+		projectRoot:      projectRoot,
+		stdFiles:         stdFiles,
+		projectCfg:       projectCfg,
+		loaded:           make(map[string]*sema.ModuleInfo),
+		globalIdentities: make(map[string]string),
+		visiting:         make(map[string]string),
+		allModInfos:      make(map[string]*sema.ModuleInfo),
+		remoteResolved:   make(map[string]string),
+		commitPins:       commitPins,
 	}
 
 	scopes := make(map[string]*types.Scope)
@@ -2431,11 +2426,17 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 		return nil, fmt.Errorf("error reading promise.toml in '%s': %w", absDir, err)
 	}
 
-	// Check for duplicate canonical names — two different modules claiming the same identity
-	if existingDir, ok := ml.canonicalNames[modCfg.Name]; ok && existingDir != absDir {
-		return nil, fmt.Errorf("duplicate module name %q: declared by both %s and %s", modCfg.Name, existingDir, absDir)
+	// Compute globally unique identity for this module.
+	// For local modules, this is the relative path from project root.
+	// loadRemote() overrides this with the normalized URL for remote modules.
+	globalID := module.GlobalIdentityForLocal(modPath)
+	irPrefix := module.SanitizeIRPrefix(globalID)
+
+	// Check for duplicate global identities — two different directories resolving to the same identity
+	if existingDir, ok := ml.globalIdentities[globalID]; ok && existingDir != absDir {
+		return nil, fmt.Errorf("duplicate module identity %q: resolved by both %s and %s", globalID, existingDir, absDir)
 	}
-	ml.canonicalNames[modCfg.Name] = absDir
+	ml.globalIdentities[globalID] = absDir
 
 	// Epoch mismatch warning
 	if ml.projectCfg != nil && modCfg.Epoch != "" && ml.projectCfg.Epoch != "" && modCfg.Epoch != ml.projectCfg.Epoch {
@@ -2485,13 +2486,15 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 	}
 
 	mi := &sema.ModuleInfo{
-		Name:          modCfg.Name, // default to canonical name; consumer may override
-		CanonicalName: modCfg.Name, // stable IR identity from promise.toml
-		Path:          modPath,
-		File:          merged,
-		SemaInfo:      semaInfo,
-		AbsDir:        absDir,
-		ImplHash:      implHash,
+		Name:           modCfg.Name, // default to canonical name; consumer may override
+		CanonicalName:  modCfg.Name, // display only (from promise.toml)
+		GlobalIdentity: globalID,    // globally unique identity for dedup and cache
+		IRPrefix:       irPrefix,    // sanitized prefix for IR symbols
+		Path:           modPath,
+		File:           merged,
+		SemaInfo:       semaInfo,
+		AbsDir:         absDir,
+		ImplHash:       implHash,
 	}
 
 	// Cache the loaded module and register for codegen.
@@ -2526,6 +2529,14 @@ func (ml *moduleLoader) loadRemote(remoteURL, alias string) (*sema.ModuleInfo, e
 				if err != nil {
 					return nil, fmt.Errorf("replace %s → %s: %w", remoteURL, localPath, err)
 				}
+				// Override identity: replaced remote modules use the remote URL identity.
+				// Read back the identity that load() stored, then replace with URL identity.
+				oldID := mi.GlobalIdentity
+				mi.GlobalIdentity = module.GlobalIdentityForRemote(normalized)
+				mi.IRPrefix = module.SanitizeIRPrefix(mi.GlobalIdentity)
+				delete(ml.globalIdentities, oldID)
+				ml.globalIdentities[mi.GlobalIdentity] = mi.AbsDir
+
 				ml.remoteResolved[normalized] = mi.AbsDir
 				if err := ml.mergeTransitivePins(mi.AbsDir, remoteURL); err != nil {
 					return nil, err
@@ -2555,6 +2566,15 @@ func (ml *moduleLoader) loadRemote(remoteURL, alias string) (*sema.ModuleInfo, e
 	if err != nil {
 		return nil, fmt.Errorf("remote module %s: %w", remoteURL, err)
 	}
+
+	// Override identity: remote modules use normalized URL as global identity,
+	// not the local path that load() derived from the checkout directory.
+	// Read back the identity that load() stored, then replace with URL identity.
+	oldID := mi.GlobalIdentity
+	mi.GlobalIdentity = module.GlobalIdentityForRemote(normalized)
+	mi.IRPrefix = module.SanitizeIRPrefix(mi.GlobalIdentity)
+	delete(ml.globalIdentities, oldID)
+	ml.globalIdentities[mi.GlobalIdentity] = mi.AbsDir
 
 	if err := ml.mergeTransitivePins(absDir, remoteURL); err != nil {
 		return nil, err

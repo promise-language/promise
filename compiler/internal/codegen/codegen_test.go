@@ -8824,3 +8824,154 @@ func TestMultiParamGenericFunc(t *testing.T) {
 	// Monomorphized function name should contain both type args
 	assertContains(t, ir, "make_pair__int__string")
 }
+
+// --- Value type codegen tests ---
+
+func TestValueTypeNoMalloc(t *testing.T) {
+	ir := generateIR(t, `
+		type Point {
+			int x `+"`value"+`;
+			int y `+"`value"+`;
+		}
+		main() {
+			p := Point(x: 1, y: 2);
+		}
+	`)
+	// Value struct layout: {i8*, promise_Point_i*, i64, i64}
+	assertContains(t, ir, "%promise_Point_v = type { i8*, %promise_Point_i*, i64, i64 }")
+	// Instance struct is RTTI-only: {promise_Point_m*}
+	assertContains(t, ir, "%promise_Point_i = type { %promise_Point_m* }")
+	// Should use insertvalue to build the value struct
+	assertContains(t, ir, "insertvalue")
+}
+
+func TestValueTypeInsertValue(t *testing.T) {
+	ir := generateIR(t, `
+		type Point {
+			int x `+"`value"+`;
+			int y `+"`value"+`;
+		}
+		main() {
+			p := Point(x: 10, y: 20);
+		}
+	`)
+	// Value struct has vtable + rtti + fields
+	assertContains(t, ir, "insertvalue")
+	// Should have the RTTI global
+	assertContains(t, ir, "@promise_rtti_Point")
+}
+
+func TestValueTypeFieldAccess(t *testing.T) {
+	ir := generateIR(t, `
+		type Point {
+			int x `+"`value"+`;
+			int y `+"`value"+`;
+		}
+		main() {
+			p := Point(x: 1, y: 2);
+			int x = p.x;
+		}
+	`)
+	// Field access uses extractvalue (no instance deref)
+	assertContains(t, ir, "extractvalue")
+}
+
+func TestValueTypeMethodReceiver(t *testing.T) {
+	ir := generateIR(t, `
+		type Point {
+			int x `+"`value"+`;
+			int y `+"`value"+`;
+			fn sum() -> int { return this.x + this.y; }
+		}
+		main() {
+			p := Point(x: 3, y: 4);
+			int s = p.sum();
+		}
+	`)
+	// Method should be defined and callable
+	assertContains(t, ir, "define")
+	assertContains(t, ir, "Point.sum")
+}
+
+func TestValueTypeFieldAssignment(t *testing.T) {
+	ir := generateIR(t, `
+		type Point {
+			int x `+"`value"+`;
+			int y `+"`value"+`;
+		}
+		main() {
+			Point p = Point(x: 1, y: 2);
+			p.x = 5;
+		}
+	`)
+	// Field assignment uses GEP into the alloca, then store
+	assertContains(t, ir, "getelementptr %promise_Point_v")
+	assertContains(t, ir, "store i64 5")
+}
+
+func TestValueTypeCompoundAssignment(t *testing.T) {
+	ir := generateIR(t, `
+		type Point {
+			int x `+"`value"+`;
+			int y `+"`value"+`;
+		}
+		main() {
+			Point p = Point(x: 3, y: 4);
+			p.x += 10;
+		}
+	`)
+	// Compound assignment loads current value, adds, stores back
+	assertContains(t, ir, "getelementptr %promise_Point_v")
+	assertContains(t, ir, "add i64")
+}
+
+func TestValueTypeNewConstructor(t *testing.T) {
+	ir := generateIR(t, `
+		type Clamped {
+			int value `+"`value"+`;
+			new(~this, int v) {
+				if v < 0 { this.value = 0; }
+				else { this.value = v; }
+			}
+		}
+		main() {
+			Clamped c = Clamped(v: 42);
+		}
+	`)
+	// new() constructor called, value loaded from alloca after
+	assertContains(t, ir, "call void @Clamped.new(")
+	assertContains(t, ir, "load %promise_Clamped_v")
+}
+
+func TestValueTypeOperatorDispatch(t *testing.T) {
+	ir := generateIR(t, `
+		type Vec2 {
+			int x `+"`value"+`;
+			int y `+"`value"+`;
+			+(Vec2 other) Vec2 {
+				return Vec2(x: this.x + other.x, y: this.y + other.y);
+			}
+		}
+		main() {
+			Vec2 a = Vec2(x: 1, y: 2);
+			Vec2 b = Vec2(x: 3, y: 4);
+			Vec2 c = a + b;
+		}
+	`)
+	// Operator dispatches to Vec2.+ method
+	assertContains(t, ir, `call %promise_Vec2_v @"Vec2.+"(`)
+}
+
+func TestValueTypeOptional(t *testing.T) {
+	ir := generateIR(t, `
+		type Point {
+			int x `+"`value"+`;
+			int y `+"`value"+`;
+		}
+		main() {
+			Point? maybe = Point(x: 1, y: 2);
+		}
+	`)
+	// Optional wraps the full value struct: { i1, %promise_Point_v }
+	assertContains(t, ir, "{ i1, %promise_Point_v }")
+}

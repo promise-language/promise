@@ -3,18 +3,19 @@ package types
 // Named represents a named type: user-defined types and built-in primitives alike.
 // int, bool, string are Named types just like Dog and Shape.
 type Named struct {
-	obj        *TypeName
-	typeParams []*TypeParam
-	parents    []*Named // inheritance via `is`
-	fields     []*Field
-	methods    []*Method
-	isCopy     bool   // `copy meta — bitwise copy on assignment
-	hasDrop    bool   // type has a validated drop(~this) method
-	hasNew     bool   // type has a validated new() constructor method
-	structural bool   // `structural meta — allows structural interface satisfaction
-	exported   bool   // `public meta — visible to other modules
-	doc        string // `doc meta — documentation string
-	deprecated string // `deprecated meta — empty means not deprecated
+	obj         *TypeName
+	typeParams  []*TypeParam
+	parents     []*Named // inheritance via `is`
+	fields      []*Field
+	methods     []*Method
+	isCopy      bool   // `copy meta — bitwise copy on assignment
+	hasDrop     bool   // type has a validated drop(~this) method
+	hasNew      bool   // type has a validated new() constructor method
+	structural  bool   // `structural meta — allows structural interface satisfaction
+	exported    bool   // `public meta — visible to other modules
+	isValueType bool   // all fields are `value placement — pass by value, no heap alloc
+	doc         string // `doc meta — documentation string
+	deprecated  string // `deprecated meta — empty means not deprecated
 }
 
 // NewNamed creates a new named type and sets the TypeName's type to it.
@@ -38,6 +39,8 @@ func (n *Named) HasNew() bool             { return n.hasNew }
 func (n *Named) SetHasNew(v bool)         { n.hasNew = v }
 func (n *Named) IsStructural() bool       { return n.structural }
 func (n *Named) SetStructural(v bool)     { n.structural = v }
+func (n *Named) IsValueType() bool        { return n.isValueType }
+func (n *Named) SetIsValueType(v bool)    { n.isValueType = v }
 func (n *Named) IsExported() bool         { return n.exported }
 func (n *Named) SetExported(v bool)       { n.exported = v }
 func (n *Named) Doc() string              { return n.doc }
@@ -90,6 +93,7 @@ func (n *Named) ResetMembers() {
 	n.hasNew = false
 	n.isCopy = false
 	n.structural = false
+	n.isValueType = false
 	n.exported = false
 	n.doc = ""
 	n.deprecated = ""

@@ -318,6 +318,11 @@ func (c *Checker) validateNewMethod(named *types.Named, m *types.Method, d *ast.
 	if m.IsAbstract() {
 		c.errorf(pos, "new() method on %s must not be abstract", d.Name)
 	}
+	// Value types cannot have failable new() — codegen builds the value struct
+	// inline and doesn't support error propagation in that path.
+	if named.IsValueType() && sig.CanError() {
+		c.errorf(pos, "value type %s cannot have a failable new() method", d.Name)
+	}
 }
 
 // validateFactoryMethod checks that a `factory method has a valid signature:
@@ -408,6 +413,51 @@ func (c *Checker) validateCopyEnum(enum *types.Enum, d *ast.EnumDecl) {
 					d.Name, v.Name(), f.Type())
 			}
 		}
+	}
+}
+
+// detectValueType checks if a type is a pure value type (all fields are `value placement)
+// and validates the constraints. If valid, sets IsValueType and auto-enables Copy.
+func (c *Checker) detectValueType(named *types.Named, d *ast.TypeDecl) {
+	// Must have at least one field, and all must be `value placed
+	if named.NumFields() == 0 {
+		return
+	}
+	for _, f := range named.Fields() {
+		if f.Placement() != types.PlaceValue {
+			return // not a pure value type
+		}
+	}
+
+	// Native types handle their own layout — skip value type detection
+	if c.hasAnnotation(d.Annotations, "native") {
+		return
+	}
+
+	// Validate: value types cannot have parent types (no inheritance)
+	if len(named.Parents()) > 0 {
+		c.errorf(d.Pos(), "value type %s cannot have parent types (all fields are `value)", d.Name)
+		return
+	}
+
+	// Validate: all `value fields must be copy types
+	for _, f := range named.Fields() {
+		if !isCopyField(f.Type()) {
+			c.errorf(d.Pos(), "value field %s.%s must be a copy type, got %s", d.Name, f.Name(), f.Type())
+			return
+		}
+	}
+
+	// Validate: value types cannot have drop() methods
+	if named.LookupMethod("drop") != nil {
+		c.errorf(d.Pos(), "value type %s cannot have a drop() method", d.Name)
+		return
+	}
+
+	// All checks passed — mark as value type and auto-enable copy
+	named.SetIsValueType(true)
+	if !named.IsCopy() {
+		named.SetCopy(true)
 	}
 }
 

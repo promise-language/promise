@@ -147,7 +147,23 @@ func (c *Compiler) emitTypeInfoGlobals(file *ast.File) {
 		if len(named.TypeParams()) > 0 {
 			continue // generic — monomorphic instances handled separately
 		}
-		c.typeInfoGlobals[named] = c.emitTypeInfo(named)
+		tiGlobal := c.emitTypeInfo(named)
+		c.typeInfoGlobals[named] = tiGlobal
+
+		// For value types: emit a global RTTI instance { variant_ptr } that the
+		// value struct stores in field 1. loadVariantPtr loads from this to get RTTI.
+		if named.IsValueType() {
+			layout := c.layouts[named]
+			if layout != nil {
+				instanceStructType := layout.Instance.LLVMType
+				variantFieldType := layout.Instance.Fields[0].LLVMType
+				rttiInit := constant.NewStruct(instanceStructType,
+					constant.NewBitCast(tiGlobal, variantFieldType))
+				rttiGlobal := c.module.NewGlobalDef("promise_rtti_"+named.Obj().Name(), rttiInit)
+				rttiGlobal.Immutable = true
+				c.valueTypeRTTI[named] = rttiGlobal
+			}
+		}
 	}
 }
 

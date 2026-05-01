@@ -272,7 +272,7 @@ User-defined type codegen: four-struct layout, constructors, field access/assign
 - **Extern ABI** (`extern.go`): `packUserType`/`unpackUserType` follow same pattern as strings — `{ null_vtable, bitcast(i8* → T_i*) }` via insertvalue/extractvalue.
 - **Compilation order**: `computeLayouts` → `computeUserTypeLayouts` → `declareIntrinsics` → `declareExterns` → `declareTypeMethods` → `declareFuncs` → `defineTypeMethods` → `defineFuncs`.
 - **Scope**: Type layout, constructors (named args), field read/write, compound field assignment, methods with receiver (`this`/`&this`/`~this`), method calls, nested user type fields, extern pack/unpack.
-- **Deferred**: Vtable/virtual dispatch, inheritance (parent fields/methods), static method calls (`Type.method()`), operator overloading on user types, non-instance field placements (`value`/`variant`/`type`), default field values. Generic user types handled in Stage 8f.
+- **Deferred**: Vtable/virtual dispatch, inheritance (parent fields/methods), static method calls (`Type.method()`), operator overloading on user types, ~~non-instance field placements (`value`/`variant`/`type`)~~ pure value types done in Stage 8p, mixed placements and `variant`/`type` still deferred, default field values. Generic user types handled in Stage 8f.
 
 ## Stage 8d — Enums and Pattern Matching (Done)
 
@@ -516,6 +516,57 @@ Compiler-inserted `drop()` calls when a value's owner goes out of scope and the 
 - Extend control flow merge to track drop eligibility across branches
 
 **Runtime:** No runtime changes — `drop()` is a regular method call.
+
+## Stage 8p — Pure Value Types (Done)
+
+Types where ALL fields have `` `value `` placement behave like primitives: data embedded directly in the Value struct, no heap allocation, automatic `` `copy `` semantics. Enables stack-allocated types like `Point`, `Duration`, `Range`, `Color`.
+
+**Files:** `types/named.go`, `sema/decl.go`, `sema/meta.go`, `codegen/layout.go`, `codegen/compiler.go`, `codegen/rtti.go`, `codegen/types.go`, `codegen/expr.go`, `codegen/stmt.go`; 9 sema tests, 4 codegen tests, 5 e2e tests in `tests/value_types/`
+
+**Type system** (`types/named.go`):
+- `IsValueType()` / `SetIsValueType()` flag on `Named` — set when all fields are `` `value `` placement
+
+**Sema** (`sema/decl.go`, `sema/meta.go`):
+- `detectValueType()` runs after field/meta processing in `defineType()`. Checks: all fields `` `value ``, not native, no parent types (`is`), all fields are copy types, no `drop()` method. Sets `IsValueType(true)` and auto-enables `Copy`.
+- Validation: value types cannot have `is` parents, failable `new()`, `drop()`, or non-copy `` `value `` fields
+
+**Layout** (`codegen/layout.go`):
+- `LayoutValueType` enum value. `computeValueTypeLayout()` builds four structs:
+  - Type: `{}` (empty, standard)
+  - Variant: `{ T_t* _type }` (standard)
+  - Instance: `{ T_m* _variant }` — RTTI-only global singleton, no user fields
+  - Value: `{ i8* _vtable, T_i* _rtti, field1, field2, ... }` — user data at indices 2+
+- `ValueFieldIndex map[string]int` maps field names to Value struct indices
+- `instanceFieldLLVMType()` takes `allLayouts` parameter to resolve nested value type field types
+
+**Codegen** (`codegen/compiler.go`, `codegen/rtti.go`):
+- `valueTypeRTTI map[*types.Named]*ir.Global` stores global RTTI instance singletons
+- `emitTypeInfoGlobals()` creates `promise_rtti_T` globals pointing to variant struct for RTTI chain
+- Value type dispatch in `computeUserTypeLayouts()` → `computeValueTypeLayout()`
+
+**Type resolution** (`codegen/types.go`):
+- `resolveType()` returns `layout.Value.LLVMType` for value types (full struct, not `{i8*, i8*}`)
+
+**Constructor** (`codegen/expr.go`):
+- `genValueTypeConstructor()` builds value via `insertvalue` chain — no `malloc`. Sets vtable (field 0), RTTI pointer (field 1), user fields (2+). Supports implicit constructors and `new()` methods (via alloca + store + call + load).
+
+**Field access** (`codegen/expr.go`):
+- Value type fields: `extractvalue` from SSA value, or GEP from `this` pointer
+- `genFieldPtr()` updated for value type `this` and variable targets
+
+**Method calls** (`codegen/expr.go`, `codegen/stmt.go`):
+- `valueTypeReceiverPtr()` helper: stores value to temp alloca, returns bitcast to `i8*`
+- Updated `genMethodCall`, `genGetterCall`, `genSetterCall`, operator dispatch, `genMethodIndex`
+- `extractInstancePtrForThis()` helper: extracts RTTI pointer (field 1) from value type `this` for `loadVariantPtr` — prevents reading vtable (field 0) instead of variant pointer
+
+**Rules**:
+- No `is` inheritance — value types are leaf types
+- All fields must be copy types — no string, vector, or heap-allocated types
+- Automatically `` `copy `` — no explicit annotation needed
+- No `drop()` method — nothing to clean up
+- No failable `new()` — constructor builds inline, no error propagation
+
+**Deferred**: Structural interface coercion (stack boxing), generic value types, mixed `value`+instance field placements, `variant`/`type` field placements.
 
 ## Yield Generators (Done)
 
@@ -798,7 +849,9 @@ Known gaps and improvements deferred from completed stages.
 | Failable extern functions (C ABI for errors) | 8e | Low |
 | Type argument inference (explicit type args only currently) | 8f | Low |
 | Extern ABI for generic types | 8f | Low |
-| Non-instance field placements (`value`/`variant`/`type`) | 8c | Low |
+| Non-instance field placements: mixed `value`+instance, `variant`, `type` | 8c | Low |
+| Value type structural interface coercion (stack boxing) | 8p | Low |
+| Generic value types (`type Pair[T] { T first \`value; T second \`value; }`) | 8p | Low |
 | User type `toString()` for interpolation | 8h | Low |
 | `yield*` delegate (forward all values from sub-iterator) | Generators | Medium |
 | Failable generators (`stream[T]!` with error propagation through yield) | Generators | Low |

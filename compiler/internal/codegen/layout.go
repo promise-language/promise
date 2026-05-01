@@ -19,6 +19,7 @@ const (
 	LayoutString
 	LayoutUserType
 	LayoutEnum
+	LayoutValueType // pure value type — all fields in value struct, no heap alloc
 	// Future stages:
 	// LayoutArray
 	// LayoutSlice
@@ -39,6 +40,10 @@ type TypeDeclLayout struct {
 	IsSigned           bool                 // for integer widening in coercion
 	InstanceFieldIndex map[string]int       // field name → GEP index in instance struct (user types)
 	InstancePtrType    *irtypes.PointerType // cached pointer to instance struct (user types + string)
+
+	// Value-type-specific fields
+	IsValueType     bool           // true if all fields are value-placed (no heap alloc)
+	ValueFieldIndex map[string]int // field name → index in value struct (starts at 2)
 
 	// Enum-specific fields
 	EnumInternalType   irtypes.Type                   // i32 (fieldless) or { i32, [N x i8] } (data enum)
@@ -307,7 +312,7 @@ func computeUserTypeLayout(module *ir.Module, named *types.Named, allLayouts map
 		if f.Placement() != types.PlaceInstance {
 			panic("codegen: non-instance field placement not yet supported for " + name + "." + f.Name())
 		}
-		llvmFT := instanceFieldLLVMType(f.Type())
+		llvmFT := instanceFieldLLVMType(f.Type(), allLayouts)
 		cType := userFieldCType(f.Type(), allLayouts)
 		instanceLLVMFields = append(instanceLLVMFields, llvmFT)
 		idx := len(fieldLayouts) // GEP index
@@ -363,6 +368,96 @@ func computeUserTypeLayout(module *ir.Module, named *types.Named, allLayouts map
 				{Name: "_vtable", CType: "void*", LLVMType: irtypes.I8Ptr, IsInternal: true},
 				{Name: "_instance", CType: "promise_" + name + "_i*", LLVMType: instancePtr, IsInternal: true},
 			},
+			LLVMType: valueStruct,
+		},
+	}
+}
+
+// computeValueTypeLayout creates a TypeDeclLayout for a pure value type (all fields `value).
+// Data lives in the value struct: { i8* _vtable, T_i* _rtti, field1, field2, ... }.
+// Instance struct is RTTI-only (no user fields), allocated as a global singleton.
+func computeValueTypeLayout(module *ir.Module, named *types.Named, allLayouts map[*types.Named]*TypeDeclLayout) *TypeDeclLayout {
+	name := named.Obj().Name()
+
+	// Type struct: empty {}
+	typeStruct := irtypes.NewStruct()
+	typeStruct.SetName("promise_" + name + "_t")
+	module.NewTypeDef("promise_"+name+"_t", typeStruct)
+
+	typePtr := irtypes.NewPointer(typeStruct)
+
+	// Variant struct: { promise_T_t* _type }
+	variantStruct := irtypes.NewStruct(typePtr)
+	variantStruct.SetName("promise_" + name + "_m")
+	module.NewTypeDef("promise_"+name+"_m", variantStruct)
+
+	variantPtr := irtypes.NewPointer(variantStruct)
+
+	// Instance struct: { promise_T_m* _variant } — RTTI only, no user fields
+	instanceStruct := irtypes.NewStruct(variantPtr)
+	instanceStruct.SetName("promise_" + name + "_i")
+	module.NewTypeDef("promise_"+name+"_i", instanceStruct)
+
+	instancePtr := irtypes.NewPointer(instanceStruct)
+
+	// Value struct: { i8* _vtable, promise_T_i* _rtti, field1, field2, ... }
+	valueLLVMFields := []irtypes.Type{irtypes.I8Ptr, instancePtr}
+	valueFieldLayouts := []FieldLayout{
+		{Name: "_vtable", CType: "void*", LLVMType: irtypes.I8Ptr, IsInternal: true},
+		{Name: "_rtti", CType: "promise_" + name + "_i*", LLVMType: instancePtr, IsInternal: true},
+	}
+	fieldIndex := map[string]int{}
+
+	for _, f := range named.AllFields() {
+		llvmFT := instanceFieldLLVMType(f.Type(), allLayouts)
+		cType := userFieldCType(f.Type(), allLayouts)
+		idx := len(valueFieldLayouts) // GEP index in value struct
+		valueLLVMFields = append(valueLLVMFields, llvmFT)
+		valueFieldLayouts = append(valueFieldLayouts, FieldLayout{
+			Name: f.Name(), CType: cType, LLVMType: llvmFT, IsInternal: false,
+		})
+		fieldIndex[f.Name()] = idx
+	}
+
+	valueStruct := irtypes.NewStruct(valueLLVMFields...)
+	valueStruct.SetName("promise_" + name + "_v")
+	module.NewTypeDef("promise_"+name+"_v", valueStruct)
+
+	return &TypeDeclLayout{
+		PromiseName:     name,
+		Kind:            LayoutValueType,
+		RawLLVM:         nil,
+		RawCType:        "",
+		IsSigned:        false,
+		IsValueType:     true,
+		ValueFieldIndex: fieldIndex,
+		InstancePtrType: instancePtr,
+		Type: &StructLayout{
+			CName:    "promise_" + name + "_t",
+			Suffix:   "_t",
+			Fields:   []FieldLayout{},
+			LLVMType: typeStruct,
+		},
+		Variant: &StructLayout{
+			CName:  "promise_" + name + "_m",
+			Suffix: "_m",
+			Fields: []FieldLayout{
+				{Name: "_type", CType: "promise_" + name + "_t*", LLVMType: typePtr, IsInternal: true},
+			},
+			LLVMType: variantStruct,
+		},
+		Instance: &StructLayout{
+			CName:  "promise_" + name + "_i",
+			Suffix: "_i",
+			Fields: []FieldLayout{
+				{Name: "_variant", CType: "promise_" + name + "_m*", LLVMType: variantPtr, IsInternal: true},
+			},
+			LLVMType: instanceStruct,
+		},
+		Value: &StructLayout{
+			CName:    "promise_" + name + "_v",
+			Suffix:   "_v",
+			Fields:   valueFieldLayouts,
 			LLVMType: valueStruct,
 		},
 	}

@@ -1,0 +1,37 @@
+type Point {
+    int x `value;
+    int y `value;
+}
+
+main() `test(expected: """3
+4
+none
+10
+20""") {
+    Point? maybe = Point(x: 3, y: 4);
+    if p := maybe {
+        print_int(p.x);
+        print_int(p.y);
+    }
+
+    Point? empty = none;
+    if p := empty {
+        print_int(p.x);
+    } else {
+        println("none");
+    }
+
+    // Return optional from function
+    Point? result = find_point(target: 10);
+    if p := result {
+        print_int(p.x);
+        print_int(p.y);
+    }
+}
+
+find_point(int target) Point? {
+    if target > 5 {
+        return Point(x: target, y: target * 2);
+    }
+    return none;
+}

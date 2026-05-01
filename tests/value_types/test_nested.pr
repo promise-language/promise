@@ -1,0 +1,22 @@
+type Vec2 {
+    f64 x `value;
+    f64 y `value;
+}
+
+type Rect {
+    Vec2 origin `value;
+    Vec2 size `value;
+}
+
+main() `test(expected: """1
+2
+10
+20""") {
+    Vec2 o = Vec2(x: 1.0, y: 2.0);
+    Vec2 s = Vec2(x: 10.0, y: 20.0);
+    Rect r = Rect(origin: o, size: s);
+    print_f64(r.origin.x);
+    print_f64(r.origin.y);
+    print_f64(r.size.x);
+    print_f64(r.size.y);
+}

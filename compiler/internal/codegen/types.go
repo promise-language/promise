@@ -200,10 +200,18 @@ func userValueType() *irtypes.StructType {
 // instanceFieldLLVMType returns the LLVM type for an instance struct field.
 // User-defined types are stored as value structs { vtable, instance } to
 // preserve vtable information for dispatch. All other types use llvmType.
-func instanceFieldLLVMType(typ types.Type) irtypes.Type {
+// Value types use their wider value struct (with embedded fields) instead of
+// the standard {i8*, i8*} layout.
+func instanceFieldLLVMType(typ types.Type, allLayouts map[*types.Named]*TypeDeclLayout) irtypes.Type {
 	if n := extractNamed(typ); n != nil && classify(n) == CatUnknown {
 		if n != types.TypString && n != types.TypVoid && n != types.TypNone &&
 			n != types.TypVector && n != types.TypMap {
+			// Value types have a wider value struct with embedded fields
+			if n.IsValueType() {
+				if layout, ok := allLayouts[n]; ok {
+					return layout.Value.LLVMType
+				}
+			}
 			return userValueType()
 		}
 	}
@@ -278,6 +286,12 @@ func (c *Compiler) resolveType(typ types.Type) irtypes.Type {
 	// User-defined Named types → value struct { vtable, instance }
 	if n := extractNamed(typ); n != nil && classify(n) == CatUnknown {
 		if n != types.TypString && n != types.TypVoid && n != types.TypNone {
+			// Value types have a wider value struct with embedded fields
+			if n.IsValueType() {
+				if layout := c.lookupTypeLayout(typ); layout != nil {
+					return layout.Value.LLVMType
+				}
+			}
 			return userValueType()
 		}
 	}

@@ -7645,3 +7645,205 @@ func TestMultiParamGenericExtraIndicesOnNonGeneric(t *testing.T) {
 	`)
 	expectError(t, errs, "multiple indices not supported")
 }
+
+// --- Value type tests ---
+
+func TestValueTypeValid(t *testing.T) {
+	checkOK(t, `
+		type Point {
+			int x `+"`value"+`;
+			int y `+"`value"+`;
+		}
+	`)
+}
+
+func TestValueTypeAutoCopy(t *testing.T) {
+	// Value types are automatically copy — should be usable where copy is required
+	checkOK(t, `
+		type Point {
+			int x `+"`value"+`;
+			int y `+"`value"+`;
+		}
+		main() {
+			Point p = Point(x: 1, y: 2);
+			Point q = p;
+			Point r = q;
+		}
+	`)
+}
+
+func TestValueTypeNoInheritance(t *testing.T) {
+	errs := checkErrs(t, `
+		type Base { int id; }
+		type Child is Base {
+			int x `+"`value"+`;
+			int y `+"`value"+`;
+		}
+	`)
+	expectError(t, errs, "value type Child cannot have parent types")
+}
+
+func TestValueTypeNonCopyField(t *testing.T) {
+	errs := checkErrs(t, `
+		type Bad {
+			string name `+"`value"+`;
+		}
+	`)
+	expectError(t, errs, "value field Bad.name must be a copy type")
+}
+
+func TestValueTypeNoDrop(t *testing.T) {
+	errs := checkErrs(t, `
+		type Bad {
+			int x `+"`value"+`;
+			drop(~this) {}
+		}
+	`)
+	expectError(t, errs, "value type Bad cannot have a drop() method")
+}
+
+func TestValueTypeMixedNotValueType(t *testing.T) {
+	// Mix of `value and default placement is NOT a value type — it's a regular type
+	checkOK(t, `
+		type Mixed {
+			int x `+"`value"+`;
+			int y;
+		}
+	`)
+}
+
+func TestValueTypeWithMethods(t *testing.T) {
+	checkOK(t, `
+		type Point {
+			int x `+"`value"+`;
+			int y `+"`value"+`;
+			fn sum() -> int { return this.x + this.y; }
+		}
+	`)
+}
+
+func TestValueTypeWithBoolField(t *testing.T) {
+	checkOK(t, `
+		type Flags {
+			bool a `+"`value"+`;
+			bool b `+"`value"+`;
+			bool c `+"`value"+`;
+		}
+	`)
+}
+
+func TestValueTypeWithF64Field(t *testing.T) {
+	checkOK(t, `
+		type Vec2 {
+			f64 x `+"`value"+`;
+			f64 y `+"`value"+`;
+		}
+	`)
+}
+
+func TestValueTypeNestedValueType(t *testing.T) {
+	// A value type containing another value type field should be valid
+	checkOK(t, `
+		type Vec2 {
+			f64 x `+"`value"+`;
+			f64 y `+"`value"+`;
+		}
+		type Rect {
+			Vec2 origin `+"`value"+`;
+			Vec2 size `+"`value"+`;
+		}
+	`)
+}
+
+func TestValueTypeNonCopyUserTypeField(t *testing.T) {
+	errs := checkErrs(t, `
+		type Resource {
+			int id;
+			drop(~this) {}
+		}
+		type Bad {
+			Resource r `+"`value"+`;
+		}
+	`)
+	expectError(t, errs, "value field Bad.r must be a copy type")
+}
+
+func TestValueTypeFailableNew(t *testing.T) {
+	errs := checkErrs(t, `
+		type Percentage {
+			int value `+"`value"+`;
+			new(~this, int value) int! {
+				if value < 0 { return error(0); }
+				this.value = value;
+			}
+		}
+	`)
+	expectError(t, errs, "value type Percentage cannot have a failable new() method")
+}
+
+func TestValueTypeWithNewConstructor(t *testing.T) {
+	checkOK(t, `
+		type Clamped {
+			int value `+"`value"+`;
+			new(~this, int v) {
+				if v < 0 { this.value = 0; }
+				else if v > 100 { this.value = 100; }
+				else { this.value = v; }
+			}
+		}
+		test() {
+			Clamped c = Clamped(v: 50);
+		}
+	`)
+}
+
+func TestValueTypeWithOperators(t *testing.T) {
+	checkOK(t, `
+		type Vec2 {
+			int x `+"`value"+`;
+			int y `+"`value"+`;
+			+(Vec2 other) Vec2 {
+				return Vec2(x: this.x + other.x, y: this.y + other.y);
+			}
+			==(Vec2 other) bool {
+				return this.x == other.x && this.y == other.y;
+			}
+		}
+		test() {
+			Vec2 a = Vec2(x: 1, y: 2);
+			Vec2 b = Vec2(x: 3, y: 4);
+			Vec2 c = a + b;
+			bool eq = a == b;
+		}
+	`)
+}
+
+func TestValueTypeOptionalField(t *testing.T) {
+	checkOK(t, `
+		type MaybePoint {
+			int? x `+"`value"+`;
+			int? y `+"`value"+`;
+		}
+	`)
+}
+
+func TestValueTypeEnumField(t *testing.T) {
+	checkOK(t, `
+		enum Dir `+"`copy"+` { N; S; E; W; }
+		type Step {
+			Dir dir `+"`value"+`;
+			int distance `+"`value"+`;
+		}
+	`)
+}
+
+func TestValueTypeNonCopyEnumField(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Dir { N; S; E; W; }
+		type Step {
+			Dir dir `+"`value"+`;
+			int distance `+"`value"+`;
+		}
+	`)
+	expectError(t, errs, "value field Step.dir must be a copy type")
+}

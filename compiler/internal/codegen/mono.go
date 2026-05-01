@@ -184,7 +184,7 @@ func computeMonoUserTypeLayout(module *ir.Module, named *types.Named, name strin
 	for _, f := range named.AllFields() {
 		// Substitute TypeParams with concrete types
 		fieldType := types.Substitute(f.Type(), subst)
-		llvmFT := instanceFieldLLVMType(fieldType)
+		llvmFT := instanceFieldLLVMType(fieldType, allLayouts)
 		cType := userFieldCType(fieldType, allLayouts)
 		instanceLLVMFields = append(instanceLLVMFields, llvmFT)
 		idx := len(fieldLayouts)

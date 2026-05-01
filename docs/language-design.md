@@ -607,6 +607,44 @@ type Player {
 - **`` `variant `` fields**: shared across all instances of the same generic monomorphization. Useful for per-specialization metadata (e.g., a sprite path shared by all `Player[Warrior]` instances). Mutable only at initialization.
 - **`` `type `` fields**: shared across all instances of the type declaration regardless of generic parameters. Useful for reflection metadata. Mutable only at initialization.
 
+#### Pure Value Types
+
+When **all** fields in a type have `` `value `` placement, the type is a **pure value type** — it behaves like a primitive:
+
+```promise
+type Point {
+  int x `value;
+  int y `value;
+
+  sum(&this) int {
+    return this.x + this.y;
+  }
+
+  scale(&this, int factor) Point {
+    return Point(x: this.x * factor, y: this.y * factor);
+  }
+}
+
+main() {
+  p := Point(x: 3, y: 4);
+  Point q = p;          // copy, not move — q is independent
+  q.x = 10;             // does not affect p
+  print_int(p.sum());   // 7
+}
+```
+
+**Value struct layout**: `{ i8* _vtable, T_i* _rtti, field1, field2, ... }` — fields embedded at indices 2+, no heap allocation. The Instance struct is a global RTTI-only singleton `{ T_m* _variant }`.
+
+**Rules**:
+- Automatically `` `copy `` — no explicit annotation needed
+- All fields must themselves be copy types (primitives, other value types, bool, char)
+- Cannot have `is` parents (leaf types only)
+- Cannot have `drop()` methods (nothing to clean up)
+- Cannot have failable `new()` methods
+- Methods work normally — `this`/`&this` receive a pointer to the value struct alloca
+
+**Use cases**: coordinates (`Point`, `Vec2`), dimensions (`Size`, `Rect`), colors (`Color`), ranges, small fixed-size data.
+
 #### Primitives in the Four-Struct Model
 
 Since primitives are regular types, `int` works like any other type in the four-struct model:
@@ -1188,10 +1226,17 @@ longest['a](string &'a a, string &'a b) string &'a {
 `` `copy `` and `` `clone `` are built-in meta annotations that control assignment semantics:
 
 ```promise
-// Bitwise copy — compiler verifies all fields are also `copy
-type Point `copy {
+// Pure value type — automatically `copy, no explicit annotation needed
+type Point {
   f64 x `value;
   f64 y `value;
+}
+
+// Explicit `copy on a type with instance fields
+type Color `copy {
+  int r;
+  int g;
+  int b;
 }
 
 // Auto-generated deep clone — compiler generates clone() Self method
@@ -1210,6 +1255,7 @@ type Connection {
 }
 ```
 
+- **Pure value types**: Types where ALL fields have `` `value `` placement are automatically `` `copy ``. No heap allocation — all data is embedded directly in the Value struct. Behave like primitives (pass-by-value, no `drop()`). Cannot have `is` parents, non-copy fields, or `drop()` methods.
 - `` `copy ``: Bitwise copy on assignment (primitives, small value types). The compiler verifies all fields are themselves `` `copy ``. No method generated — the copy is a direct memory copy.
 - `` `clone ``: The compiler auto-generates a `clone() Self` method that deep-copies all fields. If the type also defines an explicit `clone() Self` method, the explicit method takes precedence.
 - Types that are `` `copy `` are implicitly copied on assignment. Others are moved.

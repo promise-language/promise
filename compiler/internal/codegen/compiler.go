@@ -101,6 +101,7 @@ type Compiler struct {
 	hasChildren   map[*types.Named]bool        // true if any type declares `is ThisType`
 	vtableGlobals map[*types.Named]*ir.Global  // type → @promise_vtable_TypeName
 	viewVtables   map[viewVtableKey]*ir.Global // (concrete, view) → view-specific vtable
+	valueTypeRTTI map[*types.Named]*ir.Global  // value type → global RTTI instance (field 1 of value struct)
 
 	// Scope cleanup state: stack of active bindings for automatic close()/drop() at scope exit
 	scopeBindings  []scopeBinding
@@ -334,6 +335,7 @@ func Compile(file *ast.File, info *sema.Info, target string) *CompileResult {
 		hasChildren:      make(map[*types.Named]bool),
 		vtableGlobals:    make(map[*types.Named]*ir.Global),
 		viewVtables:      make(map[viewVtableKey]*ir.Global),
+		valueTypeRTTI:    make(map[*types.Named]*ir.Global),
 		dropFlags:        make(map[string]*ir.InstAlloca),
 		dropBindings:     make(map[string]scopeBinding),
 		thunks:           make(map[string]*ir.Func),
@@ -2950,7 +2952,11 @@ func (c *Compiler) computeUserTypeLayouts(file *ast.File) {
 				compute(pName)
 			}
 		}
-		c.layouts[named] = computeUserTypeLayout(c.module, named, c.layouts)
+		if named.IsValueType() {
+			c.layouts[named] = computeValueTypeLayout(c.module, named, c.layouts)
+		} else {
+			c.layouts[named] = computeUserTypeLayout(c.module, named, c.layouts)
+		}
 		computed[name] = true
 	}
 	for _, name := range names {

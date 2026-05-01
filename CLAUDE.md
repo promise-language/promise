@@ -106,7 +106,7 @@ Entry point: `cmd/promise/main.go` → `compileFrontend()` orchestrates parse �
 
 ## Key Architecture Concepts
 
-**Four-struct type layout**: Each user type generates up to 4 LLVM structs — Type (static), Instance (heap fields), Value (`{vtable_ptr, instance_ptr}`), and Variant (enum payload). Value structs are passed around; instance ptrs are what methods receive as `this`.
+**Four-struct type layout**: Each user type generates up to 4 LLVM structs — Type (static), Instance (heap fields), Value (`{vtable_ptr, instance_ptr}`), and Variant (enum payload). Value structs are passed around; instance ptrs are what methods receive as `this`. **Pure value types** (all fields `` `value ``): Value struct is `{vtable_ptr, rtti_ptr, field1, field2, ...}` with data embedded directly — no heap allocation. Instance struct is a global RTTI-only singleton. Automatically `` `copy ``, no `is` parents, no `drop()`. See `layout.go:computeValueTypeLayout()`.
 
 **Scope cleanup stack**: `scopeBindings` is a LIFO stack of `bindingClose` (use vars), `bindingDrop` (droppable vars), and `bindingFreeEnv` (closure env structs). Emitted in reverse at scope exit, return, raise, break, continue. Drop bindings have an `i1` drop flag that's cleared at move sites. Env free bindings null-check the env pointer before calling `free()`.
 

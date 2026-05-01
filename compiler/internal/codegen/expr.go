@@ -429,6 +429,8 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 	if method.Sig().Recv() != nil {
 		if _, isThis := e.Left.(*ast.ThisExpr); isThis {
 			args = append(args, left)
+		} else if named.IsValueType() {
+			args = append(args, c.valueTypeReceiverPtr(left, named))
 		} else {
 			args = append(args, c.extractInstancePtr(left))
 		}
@@ -992,6 +994,11 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 		panic(fmt.Sprintf("codegen: no layout for type %s", typ))
 	}
 
+	// Value types: no heap allocation, build value struct with insertvalue chain
+	if layout.IsValueType {
+		return c.genValueTypeConstructor(e, named, layout, typ)
+	}
+
 	instanceStructType := layout.Instance.LLVMType
 	instancePtrType := layout.InstancePtrType
 
@@ -1177,6 +1184,130 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 	valStruct = c.block.NewInsertValue(valStruct, vtablePtr, 0)
 	valStruct = c.block.NewInsertValue(valStruct, rawPtr, 1)
 	return valStruct
+}
+
+// genValueTypeConstructor builds a value type by insertvalue chain — no heap allocation.
+// Value struct layout: { i8* _vtable, T_i* _rtti, field1, field2, ... }
+func (c *Compiler) genValueTypeConstructor(e *ast.CallExpr, named *types.Named, layout *TypeDeclLayout, typ types.Type) value.Value {
+	valueStructType := layout.Value.LLVMType
+
+	// Start with undef
+	var val value.Value = constant.NewUndef(valueStructType)
+
+	// Field 0: vtable pointer
+	if vtGlobal, ok := c.vtableGlobals[named]; ok && vtGlobal != nil {
+		val = c.block.NewInsertValue(val, constant.NewBitCast(vtGlobal, irtypes.I8Ptr), 0)
+	} else {
+		val = c.block.NewInsertValue(val, constant.NewNull(irtypes.I8Ptr), 0)
+	}
+
+	// Field 1: RTTI pointer (global instance singleton)
+	if rttiGlobal, ok := c.valueTypeRTTI[named]; ok {
+		rttiPtr := c.block.NewBitCast(rttiGlobal, layout.Value.Fields[1].LLVMType)
+		val = c.block.NewInsertValue(val, rttiPtr, 1)
+	} else {
+		val = c.block.NewInsertValue(val, constant.NewNull(layout.Value.Fields[1].LLVMType.(*irtypes.PointerType)), 1)
+	}
+
+	// If the type has an explicit new() constructor, alloca + store + call new() + load
+	if named != nil && named.HasNew() {
+		alloca := c.block.NewAlloca(valueStructType)
+		c.block.NewStore(val, alloca)
+
+		// Zero-init all user fields
+		for _, f := range named.AllFields() {
+			fieldIdx := layout.ValueFieldIndex[f.Name()]
+			fieldPtr := c.block.NewGetElementPtr(valueStructType, alloca,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+			c.block.NewStore(c.zeroValue(layout.Value.Fields[fieldIdx].LLVMType), fieldPtr)
+		}
+
+		// Call new() with pointer to value struct as receiver
+		mangledName := mangleMethodName(c.resolveTypeName(typ), "new", false)
+		fn, ok := c.funcs[mangledName]
+		if !ok {
+			panic(fmt.Sprintf("codegen: undeclared new() for value type %s (mangled: %s)", typ, mangledName))
+		}
+		var argVals []value.Value
+		var argTypes []types.Type
+		for _, arg := range e.Args {
+			argVals = append(argVals, c.genExpr(arg.Value))
+			argTypes = append(argTypes, c.info.Types[arg.Value])
+			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+				c.clearDropFlag(ident.Name)
+			}
+		}
+		newMethod := named.LookupMethod("new")
+		if newMethod != nil {
+			argVals = c.coerceCallArgs(argVals, argTypes, newMethod.Sig().Params())
+		}
+		thisPtr := c.block.NewBitCast(alloca, irtypes.I8Ptr)
+		args := append([]value.Value{thisPtr}, argVals...)
+		c.block.NewCall(fn, args...)
+		return c.block.NewLoad(valueStructType, alloca)
+	}
+
+	// Implicit constructor: match arguments to field names
+	fieldTypeMap := make(map[string]types.Type)
+	for _, f := range named.AllFields() {
+		ft := f.Type()
+		if c.typeSubst != nil {
+			ft = types.Substitute(ft, c.typeSubst)
+		}
+		fieldTypeMap[f.Name()] = ft
+	}
+
+	maybeWrapOptional := func(v value.Value, expr ast.Expr, fieldName string, fieldIdx int) value.Value {
+		if _, isOpt := fieldTypeMap[fieldName].(*types.Optional); !isOpt {
+			return v
+		}
+		exprType := c.info.Types[expr]
+		if c.typeSubst != nil {
+			exprType = types.Substitute(exprType, c.typeSubst)
+		}
+		if exprType == types.TypNone {
+			return v
+		}
+		if _, exprOpt := exprType.(*types.Optional); exprOpt {
+			return v
+		}
+		return c.wrapOptional(v, layout.Value.Fields[fieldIdx].LLVMType.(*irtypes.StructType))
+	}
+
+	provided := make(map[string]bool)
+	for _, arg := range e.Args {
+		if arg.Name == "" {
+			panic(fmt.Sprintf("codegen: positional constructor args not supported for %s", typ))
+		}
+		provided[arg.Name] = true
+		fieldIdx, ok := layout.ValueFieldIndex[arg.Name]
+		if !ok {
+			panic(fmt.Sprintf("codegen: unknown field %s on type %s", arg.Name, typ))
+		}
+		fieldVal := c.genExpr(arg.Value)
+		fieldVal = maybeWrapOptional(fieldVal, arg.Value, arg.Name, fieldIdx)
+		val = c.block.NewInsertValue(val, fieldVal, uint64(fieldIdx))
+		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		}
+	}
+
+	// Initialize omitted fields: evaluate default expression if present, otherwise zero-init
+	for _, f := range named.AllFields() {
+		if provided[f.Name()] {
+			continue
+		}
+		fieldIdx := layout.ValueFieldIndex[f.Name()]
+		if defExpr, ok := c.info.FieldDefaults[f]; ok {
+			defVal := c.genExpr(defExpr)
+			defVal = maybeWrapOptional(defVal, defExpr, f.Name(), fieldIdx)
+			val = c.block.NewInsertValue(val, defVal, uint64(fieldIdx))
+		} else {
+			val = c.block.NewInsertValue(val, c.zeroValue(layout.Value.Fields[fieldIdx].LLVMType), uint64(fieldIdx))
+		}
+	}
+
+	return val
 }
 
 // --- Member access ---
@@ -1684,6 +1815,25 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 		panic(fmt.Sprintf("codegen: no layout for type %s", typ))
 	}
 
+	// Value types: fields are in the value struct, not an instance struct
+	if layout.IsValueType {
+		fieldIdx, ok := layout.ValueFieldIndex[field.Name()]
+		if !ok {
+			panic(fmt.Sprintf("codegen: field %s not in value layout for %s", field.Name(), typ))
+		}
+		targetVal := c.genExpr(e.Target)
+		// `this` in value type methods is an i8* pointing to value struct
+		if _, isThis := e.Target.(*ast.ThisExpr); isThis {
+			valuePtrType := irtypes.NewPointer(layout.Value.LLVMType)
+			typedPtr := c.block.NewBitCast(targetVal, valuePtrType)
+			fieldPtr := c.block.NewGetElementPtr(layout.Value.LLVMType, typedPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+			return c.block.NewLoad(layout.Value.Fields[fieldIdx].LLVMType, fieldPtr)
+		}
+		// For non-this targets, the value is the full value struct — extractvalue
+		return c.block.NewExtractValue(targetVal, uint64(fieldIdx))
+	}
+
 	fieldIdx, ok := layout.InstanceFieldIndex[field.Name()]
 	if !ok {
 		panic(fmt.Sprintf("codegen: field %s not in instance layout for %s", field.Name(), typ))
@@ -1773,11 +1923,14 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 		target := c.genExpr(member.Target)
 		// Container types (Vector, Map, string) are already i8* pointers — pass directly.
 		// `this` in a method body is also i8*.
+		// Value types: store to temp alloca, pass pointer (value semantics).
 		// Regular user types are value structs — extract the instance pointer.
 		if _, isThis := member.Target.(*ast.ThisExpr); isThis {
 			args = append(args, target)
 		} else if isContainerType(targetType) {
 			args = append(args, target)
+		} else if named.IsValueType() {
+			args = append(args, c.valueTypeReceiverPtr(target, named))
 		} else {
 			args = append(args, c.extractInstancePtr(target))
 		}
@@ -1825,6 +1978,8 @@ func (c *Compiler) genGetterCall(e *ast.MemberExpr, targetType types.Type, named
 		args = append(args, target)
 	} else if isContainerType(targetType) {
 		args = append(args, target)
+	} else if named.IsValueType() {
+		args = append(args, c.valueTypeReceiverPtr(target, named))
 	} else {
 		args = append(args, c.extractInstancePtr(target))
 	}
@@ -2120,6 +2275,31 @@ func (c *Compiler) genFieldPtr(target *ast.MemberExpr) value.Value {
 	field := named.LookupField(target.Field)
 	if field == nil {
 		panic(fmt.Sprintf("codegen: no field %s on type %s", target.Field, named))
+	}
+
+	// Value types: GEP directly into the variable's alloca or this pointer
+	if layout.IsValueType {
+		fieldIdx, ok := layout.ValueFieldIndex[field.Name()]
+		if !ok {
+			panic(fmt.Sprintf("codegen: field %s not in value layout for %s", field.Name(), named))
+		}
+		valuePtrType := irtypes.NewPointer(layout.Value.LLVMType)
+		if _, isThis := target.Target.(*ast.ThisExpr); isThis {
+			// this is an i8* pointing to the value struct
+			thisVal := c.genExpr(target.Target)
+			typedPtr := c.block.NewBitCast(thisVal, valuePtrType)
+			return c.block.NewGetElementPtr(layout.Value.LLVMType, typedPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+		}
+		// For local variables, get the alloca directly
+		if ident, ok := target.Target.(*ast.IdentExpr); ok {
+			if alloca, ok := c.locals[ident.Name]; ok {
+				typedPtr := c.block.NewBitCast(alloca, valuePtrType)
+				return c.block.NewGetElementPtr(layout.Value.LLVMType, typedPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+			}
+		}
+		panic(fmt.Sprintf("codegen: value type field assignment requires addressable target for %s.%s", named, field.Name()))
 	}
 
 	fieldIdx, ok := layout.InstanceFieldIndex[field.Name()]
@@ -2940,6 +3120,8 @@ func (c *Compiler) genSliceExpr(e *ast.SliceExpr) value.Value {
 	var instancePtr value.Value
 	if isContainerType(targetType) {
 		instancePtr = target
+	} else if named != nil && named.IsValueType() {
+		instancePtr = c.valueTypeReceiverPtr(target, named)
 	} else {
 		instancePtr = c.extractInstancePtr(target)
 	}
@@ -3063,10 +3245,13 @@ func (c *Compiler) genMethodIndex(e *ast.IndexExpr, targetType types.Type) value
 	keyVal := c.genExpr(e.Index)
 
 	// Extract instance pointer: container types (Vector, Map) are already i8*,
-	// regular user types are value structs needing extraction.
+	// value types store to temp alloca, regular user types extract instance ptr.
+	named := extractNamed(targetType)
 	var instancePtr value.Value
 	if isContainerType(targetType) {
 		instancePtr = target
+	} else if named != nil && named.IsValueType() {
+		instancePtr = c.valueTypeReceiverPtr(target, named)
 	} else {
 		instancePtr = c.extractInstancePtr(target)
 	}
@@ -3516,6 +3701,15 @@ func (c *Compiler) genFieldOnValue(val value.Value, typ types.Type, fieldName st
 			panic(fmt.Sprintf("codegen: no layout for type %s", typ))
 		}
 
+		// Value types: fields are in the value struct
+		if layout.IsValueType {
+			fieldIdx, ok := layout.ValueFieldIndex[field.Name()]
+			if !ok {
+				panic(fmt.Sprintf("codegen: field %s not in value layout for %s", field.Name(), typ))
+			}
+			return c.block.NewExtractValue(val, uint64(fieldIdx))
+		}
+
 		fieldIdx, ok := layout.InstanceFieldIndex[field.Name()]
 		if !ok {
 			panic(fmt.Sprintf("codegen: field %s not in instance layout for %s", field.Name(), typ))
@@ -3675,10 +3869,11 @@ func (c *Compiler) genIsNamedType(expr ast.Expr, typeName string) value.Value {
 	}
 	targetID := c.assignTypeID(targetNamed)
 
-	// Extract instance pointer — `this` is already i8*, others are value structs
+	// Extract instance pointer — `this` is already i8*, others are value structs.
+	// For value type `this`, extract the RTTI instance pointer (field 1) first.
 	var instance value.Value
 	if _, isThis := expr.(*ast.ThisExpr); isThis {
-		instance = subject
+		instance = c.extractInstancePtrForThis(subject)
 	} else {
 		instance = c.extractInstancePtr(subject)
 	}
@@ -3698,6 +3893,32 @@ func (c *Compiler) extractInstancePtr(val value.Value) value.Value {
 // extractVtablePtr extracts the i8* vtable pointer (field 0) from a user type value struct.
 func (c *Compiler) extractVtablePtr(val value.Value) value.Value {
 	return c.block.NewExtractValue(val, 0)
+}
+
+// valueTypeReceiverPtr creates a temp alloca for a value type receiver and returns
+// an i8* pointer to it. Methods on value types receive a pointer to the value struct.
+func (c *Compiler) valueTypeReceiverPtr(val value.Value, named *types.Named) value.Value {
+	layout := c.lookupTypeLayout(named)
+	tmp := c.block.NewAlloca(layout.Value.LLVMType)
+	c.block.NewStore(val, tmp)
+	return c.block.NewBitCast(tmp, irtypes.I8Ptr)
+}
+
+// extractInstancePtrForThis extracts the instance/RTTI pointer from a `this` value.
+// For regular types, `this` (i8*) IS the instance pointer.
+// For value types, `this` (i8*) points to the value struct — field 1 is the RTTI instance pointer.
+func (c *Compiler) extractInstancePtrForThis(thisVal value.Value) value.Value {
+	if c.currentNamed != nil && c.currentNamed.IsValueType() {
+		layout := c.lookupTypeLayout(c.currentNamed)
+		if layout != nil {
+			valuePtrType := irtypes.NewPointer(layout.Value.LLVMType)
+			typedPtr := c.block.NewBitCast(thisVal, valuePtrType)
+			rttiFieldPtr := c.block.NewGetElementPtr(layout.Value.LLVMType, typedPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+			return c.block.NewLoad(layout.Value.Fields[1].LLVMType, rttiFieldPtr)
+		}
+	}
+	return thisVal
 }
 
 // loadVariantPtr loads the _variant pointer (RTTI info) from a user type instance.
@@ -3733,10 +3954,11 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 
 	targetID := c.assignTypeID(targetNamed)
 
-	// Extract instance pointer — `this` is already i8*, others are value structs
+	// Extract instance pointer — `this` is already i8*, others are value structs.
+	// For value type `this`, extract the RTTI instance pointer (field 1) first.
 	var instance value.Value
 	if _, isThis := e.Expr.(*ast.ThisExpr); isThis {
-		instance = subject
+		instance = c.extractInstancePtrForThis(subject)
 	} else {
 		instance = c.extractInstancePtr(subject)
 	}

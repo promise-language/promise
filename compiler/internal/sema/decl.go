@@ -336,6 +336,10 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 	named.SetDoc(extractDoc(d.Annotations))
 	named.SetDeprecated(extractDeprecated(d.Annotations))
 
+	// Detect and validate value types (all fields are `value placement).
+	// Must run after field/meta processing, before drop/new validation.
+	c.detectValueType(named, d)
+
 	// Validate drop() method if present (after copy processing so IsCopy() is set)
 	if dropMethod := named.LookupMethod("drop"); dropMethod != nil {
 		c.validateDropMethod(named, dropMethod, d)

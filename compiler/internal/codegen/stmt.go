@@ -699,8 +699,14 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 	// Compound assignment: resolve field LLVM type for load
 	layout := c.lookupTypeLayout(targetType)
 	field := named.LookupField(target.Field)
-	fieldIdx := layout.InstanceFieldIndex[field.Name()]
-	fieldLLVMType := layout.Instance.Fields[fieldIdx].LLVMType
+	var fieldLLVMType irtypes.Type
+	if layout.IsValueType {
+		fieldIdx := layout.ValueFieldIndex[field.Name()]
+		fieldLLVMType = layout.Value.Fields[fieldIdx].LLVMType
+	} else {
+		fieldIdx := layout.InstanceFieldIndex[field.Name()]
+		fieldLLVMType = layout.Instance.Fields[fieldIdx].LLVMType
+	}
 	current := c.block.NewLoad(fieldLLVMType, fieldPtr)
 	result := c.genCompoundOp(op, current, val)
 	c.block.NewStore(result, fieldPtr)
@@ -734,6 +740,8 @@ func (c *Compiler) genSetterCall(target *ast.MemberExpr, targetType types.Type, 
 		args = append(args, recv)
 	} else if isContainerType(targetType) {
 		args = append(args, recv)
+	} else if named != nil && named.IsValueType() {
+		args = append(args, c.valueTypeReceiverPtr(recv, named))
 	} else {
 		args = append(args, c.extractInstancePtr(recv))
 	}

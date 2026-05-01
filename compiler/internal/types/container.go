@@ -123,6 +123,15 @@ func AsIterator(t Type) (elem Type, ok bool) {
 	return nil, false
 }
 
+// AsRange extracts the element type from a Range instance.
+// Returns (elem, true) for Range instances, (nil, false) otherwise.
+func AsRange(t Type) (elem Type, ok bool) {
+	if inst, ok := t.(*Instance); ok && inst.origin == TypRange {
+		return inst.typeArgs[0], true
+	}
+	return nil, false
+}
+
 // AsStream extracts the element type from a Stream instance.
 // Returns (elem, true) for Stream instances, (nil, false) otherwise.
 func AsStream(t Type) (elem Type, ok bool) {

@@ -1,6 +1,4 @@
-// Test char equality and comparisons
-//
-// TODO: test char range operators (.., ..=) and for-in over char ranges — blocked on codegen (i32 vs i64 mismatch in genRange)
+// Test char equality, comparisons, and range operators
 test_equality() `test {
   assert('a' == 'a', "'a' == 'a'");
   assert(!('a' == 'b'), "!('a' == 'b')");
@@ -32,4 +30,22 @@ test_hash() `test {
   assert('z'.hash != 'A'.hash, "z != A hash");
   int h = 'x'.hash;
   assert(h == 'x'.hash, "hash via variable");
+}
+
+// --- Char ranges ---
+
+test_char_range() `test {
+  int count = 0;
+  for c in 'a'..'d' {
+    count++;
+  }
+  assert(count == 3, "char range 'a'..'d' has 3 elements");
+}
+
+test_char_range_inclusive() `test {
+  int count = 0;
+  for c in 'a'..='d' {
+    count++;
+  }
+  assert(count == 4, "char range 'a'..='d' has 4 elements");
 }

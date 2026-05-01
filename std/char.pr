@@ -6,7 +6,7 @@ type char `native `public {
     >(char other) bool `native;
     <=(char other) bool `native;
     >=(char other) bool `native;
-    ..(char end) range `native;
-    ..=(char end) range `native;
+    ..(char end) Range[char] `native;
+    ..=(char end) Range[char] `native;
     get hash int `native;
 }

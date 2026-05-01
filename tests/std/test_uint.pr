@@ -1,6 +1,4 @@
-// Test uint arithmetic, comparisons, bitwise, and unary operators
-//
-// TODO: test range operators (.., ..=) on uint values — blocked: for-in yields int, not uint
+// Test uint arithmetic, comparisons, bitwise, range, and unary operators
 test_addition() `test {
   uint a = 1 + 2;
   assert(a == 3, "1 + 2 == 3");
@@ -204,4 +202,28 @@ test_u64() `test {
   u64 b = 1;
   assert(a + b == 1000000, "u64 large addition");
   assert(a > b, "u64 comparison");
+}
+
+// --- Range operators ---
+
+test_uint_range() `test {
+  uint a = 0;
+  uint b = 5;
+  uint sum = 0;
+  for i in a..b {
+    sum += i;
+  }
+  uint expected = 10;
+  assert(sum == expected, "uint range: 0..5 sum == 10");
+}
+
+test_uint_range_inclusive() `test {
+  uint a = 0;
+  uint b = 5;
+  uint sum = 0;
+  for i in a..=b {
+    sum += i;
+  }
+  uint expected = 15;
+  assert(sum == expected, "uint range: 0..=5 sum == 15");
 }

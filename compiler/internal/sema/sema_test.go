@@ -2576,11 +2576,11 @@ func TestMapIndex(t *testing.T) {
 func TestRangeExclusive(t *testing.T) {
 	info := checkOK(t, `test() { r := 0..10; }`)
 	for _, typ := range info.Types {
-		if typ == types.TypRange {
+		if _, ok := types.AsRange(typ); ok {
 			return
 		}
 	}
-	t.Error("no range type recorded")
+	t.Error("no Range instance recorded")
 }
 
 func TestRangeInclusive(t *testing.T) {
@@ -2800,6 +2800,9 @@ func TestUniverseChannelType(t *testing.T) {
 func TestUniverseRangeType(t *testing.T) {
 	if types.TypRange == nil {
 		t.Fatal("TypRange is nil")
+	}
+	if len(types.TypRange.TypeParams()) != 1 {
+		t.Errorf("Range should have 1 type param, got %d", len(types.TypRange.TypeParams()))
 	}
 }
 
@@ -7431,7 +7434,7 @@ func TestStdQualifiedConstructorCall(t *testing.T) {
 	checkOK(t, `
 		use std;
 		main() {
-			std.Range r = std.Range(start: 0, end: 10, inclusive: false);
+			std.Range[int] r = std.Range[int](start: 0, end: 10, inclusive: false);
 		}
 	`)
 }

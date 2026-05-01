@@ -268,6 +268,12 @@ func (c *Compiler) resolveType(typ types.Type) irtypes.Type {
 			}
 			// Instance wrapping Named user type → value struct
 			if classify(origin) == CatUnknown && origin != types.TypString && origin != types.TypVoid && origin != types.TypNone {
+				// Check for monomorphized value type layout
+				if origin.IsValueType() {
+					if layout := c.monoLayouts[monoName(inst)]; layout != nil {
+						return layout.Value.LLVMType
+					}
+				}
 				return userValueType()
 			}
 		}

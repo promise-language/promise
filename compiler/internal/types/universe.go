@@ -32,7 +32,7 @@ var (
 	TypStream  *Named // Stream[T] — asynchronous iterator interface
 	TypVector  *Named // Vector[T] — dynamic array
 	TypMap     *Named // Map[K, V] — map container type
-	TypRange   *Named // Range — integer range from .. and ..= operators
+	TypRange   *Named // Range[T] — generic range from .. and ..= operators
 )
 
 func init() {
@@ -84,7 +84,7 @@ func init() {
 	TypVector = defGeneric("Vector", "T")
 	TypMap = defGeneric("Map", "K", "V")
 
-	TypRange = defNamed("Range")
+	TypRange = defGeneric("Range", "T")
 
 	// Lowercase sugar aliases — same singletons, accessible by old names
 	defAlias := func(alias string, target *Named) {
@@ -96,5 +96,5 @@ func init() {
 	defAlias("iter", TypIter)
 	defAlias("stream", TypStream)
 	defAlias("map", TypMap)
-	defAlias("range", TypRange)
+	// Note: no lowercase 'range' alias — Range is generic, requires type arg
 }

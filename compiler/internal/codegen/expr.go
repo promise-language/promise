@@ -429,7 +429,7 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 		if _, isThis := e.Left.(*ast.ThisExpr); isThis {
 			args = append(args, left)
 		} else if named.IsValueType() {
-			args = append(args, c.valueTypeReceiverPtr(left, named))
+			args = append(args, c.valueTypeReceiverPtr(left, leftType))
 		} else {
 			args = append(args, c.extractInstancePtr(left))
 		}
@@ -613,8 +613,8 @@ func (c *Compiler) genShortCircuitOr(e *ast.BinaryExpr) value.Value {
 
 // --- range construction ---
 
-// genRange constructs a range struct { i64 start, i64 end, i1 inclusive }.
-// For for-in loops, the struct fields are extracted by the loop codegen.
+// genRange constructs a Range[T] value type struct via insertvalue chain.
+// Layout: { i8* _vtable, T_i* _rtti, T start, T end, i1 inclusive }
 func (c *Compiler) genRange(e *ast.BinaryExpr) value.Value {
 	start := c.genExpr(e.Left)
 	end := c.genExpr(e.Right)
@@ -623,25 +623,25 @@ func (c *Compiler) genRange(e *ast.BinaryExpr) value.Value {
 		inclusive = constant.NewInt(irtypes.I1, 1)
 	}
 
-	// Pack into a range struct: { i64, i64, i1 }
-	rangeType := c.rangeStructType()
-	alloca := c.block.NewAlloca(rangeType)
-	startPtr := c.block.NewGetElementPtr(rangeType, alloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	c.block.NewStore(start, startPtr)
-	endPtr := c.block.NewGetElementPtr(rangeType, alloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	c.block.NewStore(end, endPtr)
-	inclPtr := c.block.NewGetElementPtr(rangeType, alloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
-	c.block.NewStore(inclusive, inclPtr)
+	// Look up the mono value type layout for Range[T]
+	resultType := c.info.Types[e]
+	if c.typeSubst != nil {
+		resultType = types.Substitute(resultType, c.typeSubst)
+	}
+	layout := c.lookupTypeLayout(resultType)
+	if layout == nil {
+		panic(fmt.Sprintf("codegen: no layout for range type %s", resultType))
+	}
+	valueStructType := layout.Value.LLVMType
 
-	return c.block.NewLoad(rangeType, alloca)
-}
-
-// rangeStructType returns the LLVM struct type for range: { i64, i64, i1 }.
-func (c *Compiler) rangeStructType() *irtypes.StructType {
-	return irtypes.NewStruct(irtypes.I64, irtypes.I64, irtypes.I1)
+	// Build value struct via insertvalue
+	var val value.Value = constant.NewUndef(valueStructType)
+	val = c.block.NewInsertValue(val, constant.NewNull(irtypes.I8Ptr), 0)                                          // vtable = null
+	val = c.block.NewInsertValue(val, constant.NewNull(layout.Value.Fields[1].LLVMType.(*irtypes.PointerType)), 1) // rtti = null
+	val = c.block.NewInsertValue(val, start, uint64(layout.ValueFieldIndex["start"]))                              // start
+	val = c.block.NewInsertValue(val, end, uint64(layout.ValueFieldIndex["end"]))                                  // end
+	val = c.block.NewInsertValue(val, inclusive, uint64(layout.ValueFieldIndex["inclusive"]))                      // inclusive
+	return val
 }
 
 // --- Call expressions ---
@@ -1329,9 +1329,6 @@ func (c *Compiler) genValueTypeConstructor(e *ast.CallExpr, named *types.Named, 
 // --- Member access ---
 
 // genMemberExpr generates a field access on a user type instance or an enum variant value.
-// TODO: range member access (e.g. r.start) is allowed by sema but will panic here
-// because range has no user type layout — it uses a hardcoded { i64, i64, i1 } struct.
-// When range field access is needed, add special-case handling similar to genStringLen.
 func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 	targetType := c.info.Types[e.Target]
 	// Apply typeSubst for mono context
@@ -1952,7 +1949,7 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 		} else if isContainerType(targetType) {
 			args = append(args, target)
 		} else if named.IsValueType() {
-			args = append(args, c.valueTypeReceiverPtr(target, named))
+			args = append(args, c.valueTypeReceiverPtr(target, targetType))
 		} else {
 			args = append(args, c.extractInstancePtr(target))
 		}
@@ -2001,7 +1998,7 @@ func (c *Compiler) genGetterCall(e *ast.MemberExpr, targetType types.Type, named
 	} else if isContainerType(targetType) {
 		args = append(args, target)
 	} else if named.IsValueType() {
-		args = append(args, c.valueTypeReceiverPtr(target, named))
+		args = append(args, c.valueTypeReceiverPtr(target, targetType))
 	} else {
 		args = append(args, c.extractInstancePtr(target))
 	}
@@ -3178,7 +3175,7 @@ func (c *Compiler) genSliceExpr(e *ast.SliceExpr) value.Value {
 	if isContainerType(targetType) {
 		instancePtr = target
 	} else if named != nil && named.IsValueType() {
-		instancePtr = c.valueTypeReceiverPtr(target, named)
+		instancePtr = c.valueTypeReceiverPtr(target, targetType)
 	} else {
 		instancePtr = c.extractInstancePtr(target)
 	}
@@ -3360,7 +3357,7 @@ func (c *Compiler) genMethodIndex(e *ast.IndexExpr, targetType types.Type) value
 	if isContainerType(targetType) {
 		instancePtr = target
 	} else if named != nil && named.IsValueType() {
-		instancePtr = c.valueTypeReceiverPtr(target, named)
+		instancePtr = c.valueTypeReceiverPtr(target, targetType)
 	} else {
 		instancePtr = c.extractInstancePtr(target)
 	}
@@ -4006,8 +4003,11 @@ func (c *Compiler) extractVtablePtr(val value.Value) value.Value {
 
 // valueTypeReceiverPtr creates a temp alloca for a value type receiver and returns
 // an i8* pointer to it. Methods on value types receive a pointer to the value struct.
-func (c *Compiler) valueTypeReceiverPtr(val value.Value, named *types.Named) value.Value {
-	layout := c.lookupTypeLayout(named)
+func (c *Compiler) valueTypeReceiverPtr(val value.Value, typ types.Type) value.Value {
+	layout := c.lookupTypeLayout(typ)
+	if layout == nil {
+		panic(fmt.Sprintf("codegen: no layout for value type receiver %s", typ))
+	}
 	tmp := c.block.NewAlloca(layout.Value.LLVMType)
 	c.block.NewStore(val, tmp)
 	return c.block.NewBitCast(tmp, irtypes.I8Ptr)

@@ -741,7 +741,7 @@ func (c *Compiler) genSetterCall(target *ast.MemberExpr, targetType types.Type, 
 	} else if isContainerType(targetType) {
 		args = append(args, recv)
 	} else if named != nil && named.IsValueType() {
-		args = append(args, c.valueTypeReceiverPtr(recv, named))
+		args = append(args, c.valueTypeReceiverPtr(recv, targetType))
 	} else {
 		args = append(args, c.extractInstancePtr(recv))
 	}
@@ -1472,6 +1472,8 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 	} else if elem, ok := types.AsIterator(iterableType); ok {
 		genVal := c.genExpr(s.Iterable)
 		c.genForInGenerator(s, genVal, elem)
+	} else if elem, ok := types.AsRange(iterableType); ok {
+		c.genForInRange(s, elem)
 	} else {
 		// String iteration
 		named := extractNamed(iterableType)
@@ -1480,32 +1482,42 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 			c.genForInString(s, strPtr)
 			return
 		}
-		// range iteration (existing behavior)
-		c.genForInRange(s)
+		panic(fmt.Sprintf("codegen: unsupported for-in iterable type %s", iterableType))
 	}
 }
 
-// genForInRange handles for-in over a range (e.g., 0..10).
-func (c *Compiler) genForInRange(s *ast.ForInStmt) {
+// genForInRange handles for-in over a Range[T] value type (e.g., 0..10, 'a'..'z').
+// Extracts start/end/inclusive from the value type struct and uses a direct counter loop.
+func (c *Compiler) genForInRange(s *ast.ForInStmt, elemType types.Type) {
 	rangeVal := c.genExpr(s.Iterable)
 
-	rangeType := c.rangeStructType()
-	rangeAlloca := c.block.NewAlloca(rangeType)
-	c.block.NewStore(rangeVal, rangeAlloca)
+	// Get the layout to find field indices
+	iterableType := c.info.Types[s.Iterable]
+	if c.typeSubst != nil {
+		iterableType = types.Substitute(iterableType, c.typeSubst)
+	}
+	layout := c.lookupTypeLayout(iterableType)
+	if layout == nil {
+		panic(fmt.Sprintf("codegen: no layout for range type %s", iterableType))
+	}
 
-	startPtr := c.block.NewGetElementPtr(rangeType, rangeAlloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	start := c.block.NewLoad(irtypes.I64, startPtr)
+	// Extract fields from value struct via extractvalue
+	startIdx := uint64(layout.ValueFieldIndex["start"])
+	endIdx := uint64(layout.ValueFieldIndex["end"])
+	inclIdx := uint64(layout.ValueFieldIndex["inclusive"])
+	start := c.block.NewExtractValue(rangeVal, startIdx)
+	end := c.block.NewExtractValue(rangeVal, endIdx)
+	inclusive := c.block.NewExtractValue(rangeVal, inclIdx)
 
-	endPtr := c.block.NewGetElementPtr(rangeType, rangeAlloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	end := c.block.NewLoad(irtypes.I64, endPtr)
+	// Determine element LLVM type and comparison predicate
+	elemLLVM := c.resolveType(elemType)
+	ltPred := enum.IPredSLT // signed less-than by default
+	named := extractNamed(elemType)
+	if named != nil && classify(named) == CatUnsignedInt {
+		ltPred = enum.IPredULT
+	}
 
-	inclPtr := c.block.NewGetElementPtr(rangeType, rangeAlloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
-	inclusive := c.block.NewLoad(irtypes.I1, inclPtr)
-
-	counterAlloca := c.block.NewAlloca(irtypes.I64)
+	counterAlloca := c.block.NewAlloca(elemLLVM)
 	counterAlloca.SetName(c.uniqueLocalName(s.Binding))
 	c.block.NewStore(start, counterAlloca)
 	c.locals[s.Binding] = counterAlloca
@@ -1524,9 +1536,10 @@ func (c *Compiler) genForInRange(s *ast.ForInStmt) {
 
 	c.block.NewBr(headerBlock)
 
+	// Header: counter < end || (counter == end && inclusive)
 	c.block = headerBlock
-	counter := c.block.NewLoad(irtypes.I64, counterAlloca)
-	ltCond := c.block.NewICmp(enum.IPredSLT, counter, end)
+	counter := c.block.NewLoad(elemLLVM, counterAlloca)
+	ltCond := c.block.NewICmp(ltPred, counter, end)
 	eqCond := c.block.NewICmp(enum.IPredEQ, counter, end)
 	inclAndEq := c.block.NewAnd(inclusive, eqCond)
 	cond := c.block.NewOr(ltCond, inclAndEq)
@@ -1545,9 +1558,11 @@ func (c *Compiler) genForInRange(s *ast.ForInStmt) {
 		c.block.NewBr(updateBlock)
 	}
 
+	// Update: increment counter
 	c.block = updateBlock
-	cur := c.block.NewLoad(irtypes.I64, counterAlloca)
-	next := c.block.NewAdd(cur, constant.NewInt(irtypes.I64, 1))
+	cur := c.block.NewLoad(elemLLVM, counterAlloca)
+	one := constant.NewInt(elemLLVM.(*irtypes.IntType), 1)
+	next := c.block.NewAdd(cur, one)
 	c.block.NewStore(next, counterAlloca)
 
 	if s.Index != "" {

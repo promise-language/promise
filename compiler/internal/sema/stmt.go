@@ -108,8 +108,8 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 					delegateElem = arr.Elem()
 				} else if elem, ok := types.AsVector(valType); ok {
 					delegateElem = elem
-				} else if types.Identical(valType, types.TypRange) {
-					delegateElem = types.TypInt
+				} else if elem, ok := types.AsRange(valType); ok {
+					delegateElem = elem
 				} else if types.Identical(valType, types.TypString) {
 					delegateElem = types.TypChar
 				} else {
@@ -764,6 +764,8 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 				// for entry in map: entry = (key, value) tuple
 				elemType = types.NewTuple([]types.Type{key, val})
 			}
+		} else if elem, ok := types.AsRange(iterType); ok {
+			elemType = elem
 		} else if inst, ok := iterType.(*types.Instance); ok {
 			// Iterator[T] yields T, Stream[T] yields T, Channel[T] yields T
 			origin := inst.Origin()
@@ -778,9 +780,7 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 				elemType = iterType
 			}
 		} else {
-			if types.Identical(iterType, types.TypRange) {
-				elemType = types.TypInt
-			} else if types.Identical(iterType, types.TypString) {
+			if types.Identical(iterType, types.TypString) {
 				elemType = types.TypChar
 			} else {
 				c.errorf(s.Iterable.Pos(), "cannot iterate over type %s", iterType)

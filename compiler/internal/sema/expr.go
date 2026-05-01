@@ -485,7 +485,11 @@ func (c *Checker) checkOperator(pos ast.Pos, left types.Type, op string, right t
 	}
 
 	if sig.Result() != nil {
-		return sig.Result()
+		result := sig.Result()
+		if inst, ok := result.(*types.Instance); ok {
+			c.recordInstance(inst)
+		}
+		return result
 	}
 	return types.TypVoid
 }

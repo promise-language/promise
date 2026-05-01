@@ -242,6 +242,91 @@ func computeMonoUserTypeLayout(module *ir.Module, named *types.Named, name strin
 	}
 }
 
+// computeMonoValueTypeLayout computes a TypeDeclLayout for a monomorphic value type instance.
+// Value types embed fields directly in the value struct: { i8* _vtable, T_i* _rtti, field1, field2, ... }.
+func computeMonoValueTypeLayout(module *ir.Module, named *types.Named, name string, subst map[*types.TypeParam]types.Type, allLayouts map[*types.Named]*TypeDeclLayout) *TypeDeclLayout {
+	// Type struct: empty {}
+	typeStruct := irtypes.NewStruct()
+	typeStruct.SetName("promise_" + name + "_t")
+	module.NewTypeDef("promise_"+name+"_t", typeStruct)
+
+	typePtr := irtypes.NewPointer(typeStruct)
+
+	// Variant struct: { promise_T_t* _type }
+	variantStruct := irtypes.NewStruct(typePtr)
+	variantStruct.SetName("promise_" + name + "_m")
+	module.NewTypeDef("promise_"+name+"_m", variantStruct)
+
+	variantPtr := irtypes.NewPointer(variantStruct)
+
+	// Instance struct: { promise_T_m* _variant } — RTTI only, no user fields
+	instanceStruct := irtypes.NewStruct(variantPtr)
+	instanceStruct.SetName("promise_" + name + "_i")
+	module.NewTypeDef("promise_"+name+"_i", instanceStruct)
+
+	instancePtr := irtypes.NewPointer(instanceStruct)
+
+	// Value struct: { i8* _vtable, promise_T_i* _rtti, field1, field2, ... }
+	valueLLVMFields := []irtypes.Type{irtypes.I8Ptr, instancePtr}
+	valueFieldLayouts := []FieldLayout{
+		{Name: "_vtable", CType: "void*", LLVMType: irtypes.I8Ptr, IsInternal: true},
+		{Name: "_rtti", CType: "promise_" + name + "_i*", LLVMType: instancePtr, IsInternal: true},
+	}
+	fieldIndex := map[string]int{}
+
+	for _, f := range named.AllFields() {
+		fieldType := types.Substitute(f.Type(), subst)
+		llvmFT := instanceFieldLLVMType(fieldType, allLayouts)
+		cType := userFieldCType(fieldType, allLayouts)
+		idx := len(valueFieldLayouts)
+		valueLLVMFields = append(valueLLVMFields, llvmFT)
+		valueFieldLayouts = append(valueFieldLayouts, FieldLayout{
+			Name: f.Name(), CType: cType, LLVMType: llvmFT, IsInternal: false,
+		})
+		fieldIndex[f.Name()] = idx
+	}
+
+	valueStruct := irtypes.NewStruct(valueLLVMFields...)
+	valueStruct.SetName("promise_" + name + "_v")
+	module.NewTypeDef("promise_"+name+"_v", valueStruct)
+
+	return &TypeDeclLayout{
+		PromiseName:     name,
+		Kind:            LayoutValueType,
+		IsValueType:     true,
+		ValueFieldIndex: fieldIndex,
+		InstancePtrType: instancePtr,
+		Type: &StructLayout{
+			CName:    "promise_" + name + "_t",
+			Suffix:   "_t",
+			Fields:   []FieldLayout{},
+			LLVMType: typeStruct,
+		},
+		Variant: &StructLayout{
+			CName:  "promise_" + name + "_m",
+			Suffix: "_m",
+			Fields: []FieldLayout{
+				{Name: "_type", CType: "promise_" + name + "_t*", LLVMType: typePtr, IsInternal: true},
+			},
+			LLVMType: variantStruct,
+		},
+		Instance: &StructLayout{
+			CName:  "promise_" + name + "_i",
+			Suffix: "_i",
+			Fields: []FieldLayout{
+				{Name: "_variant", CType: "promise_" + name + "_m*", LLVMType: variantPtr, IsInternal: true},
+			},
+			LLVMType: instanceStruct,
+		},
+		Value: &StructLayout{
+			CName:    "promise_" + name + "_v",
+			Suffix:   "_v",
+			Fields:   valueFieldLayouts,
+			LLVMType: valueStruct,
+		},
+	}
+}
+
 // computeMonoEnumLayout computes a TypeDeclLayout for a monomorphic enum instance.
 func computeMonoEnumLayout(module *ir.Module, enum *types.Enum, name string, subst map[*types.TypeParam]types.Type, ptrSize int) *TypeDeclLayout {
 	variantTag := map[string]int{}
@@ -360,7 +445,11 @@ func (c *Compiler) computeMonoLayouts(instances []*types.Instance) {
 				continue // already computed (e.g., same instance from main file)
 			}
 			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
-			c.monoLayouts[name] = computeMonoUserTypeLayout(c.module, origin, name, subst, c.layouts)
+			if origin.IsValueType() {
+				c.monoLayouts[name] = computeMonoValueTypeLayout(c.module, origin, name, subst, c.layouts)
+			} else {
+				c.monoLayouts[name] = computeMonoUserTypeLayout(c.module, origin, name, subst, c.layouts)
+			}
 		case *types.Enum:
 			if len(origin.TypeParams()) == 0 {
 				continue
@@ -387,6 +476,11 @@ func (c *Compiler) declareMonoMethods(file *ast.File, instances []*types.Instanc
 		// Find the TypeDecl AST node for this type
 		td := c.findTypeDecl(file, named.Obj().Name())
 		if td == nil {
+			continue
+		}
+		// Verify the found decl matches the mono origin (avoid name collisions
+		// with user-defined types sharing the same name as std types)
+		if foundNamed := c.lookupNamedType(td.Name); foundNamed != nil && foundNamed != named {
 			continue
 		}
 
@@ -448,6 +542,11 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 		if td == nil {
 			continue
 		}
+		// Verify the found decl matches the mono origin (avoid name collisions
+		// with user-defined types sharing the same name as std types)
+		if foundNamed := c.lookupNamedType(td.Name); foundNamed != nil && foundNamed != named {
+			continue
+		}
 
 		for _, md := range td.Methods {
 			if md.Body == nil {
@@ -460,8 +559,8 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 
 			mangledName := mangleMethodName(name, md.Name, md.IsSetter)
 			fn, ok := c.funcs[mangledName]
-			if !ok {
-				continue
+			if !ok || len(fn.Blocks) > 0 {
+				continue // already defined (e.g., from main file mono pass)
 			}
 
 			c.typeSubst = subst

@@ -120,11 +120,11 @@ Four-pass analysis: declare → define → check → verify.
 - Enum variant access and constructor signatures
 - Operator dispatch via method lookup on named types
 - **Map literals** resolve to `map[K, V]` type with key/value consistency checking
-- **Range operators** (`..`, `..=`) resolve to `range` type
+- **Range operators** (`..`, `..=`) resolve to `Range[T]` generic value type
 - **Go expressions** resolve to `task[T]` with inner type inference
 - **Receive operator** (`<-`) extracts `T` from `task[T]` or `channel[T]`
 - **Map indexing** returns `V?` (optional) for `map[K, V]`
-- **For-in** supports vector, array, `map` (single binding yields `(K,V)` tuple; `for k, v in m` yields separate key/value), `range`, `string`, and `channel[T]` iteration
+- **For-in** supports vector, array, `map` (single binding yields `(K,V)` tuple; `for k, v in m` yields separate key/value), `Range[T]`, `string`, and `channel[T]` iteration
 - **Match exhaustiveness** checking for enum types (variant coverage) and non-enum types (wildcard required)
 - **Missing return** detection across if/else chains, match expressions, and infinite loops
 - Error reporting with source positions
@@ -566,7 +566,9 @@ Types where ALL fields have `` `value `` placement behave like primitives: data 
 - No `drop()` method — nothing to clean up
 - No failable `new()` — constructor builds inline, no error propagation
 
-**Deferred**: Structural interface coercion (stack boxing), generic value types, mixed `value`+instance field placements, `variant`/`type` field placements.
+**Generic value types**: Supported via monomorphization (`computeMonoValueTypeLayout` in `mono.go`). `Range[T]` is the first generic value type — `Range[int]`, `Range[char]`, `Range[uint]`, etc. are monomorphized with correct field types.
+
+**Deferred**: Structural interface coercion (stack boxing), mixed `value`+instance field placements, `variant`/`type` field placements.
 
 ## Yield Generators (Done)
 
@@ -766,7 +768,7 @@ Tests: 761 pass, 0 fail, 3 skip on `wasm32-wasi` (781 native pass)
 
 ## Naming Convention Migration (Done)
 
-All non-scalar types now use PascalCase canonical names in the universe, stdlib, codegen, sema, ownership, and tests. Lowercase forms (`map[K,V]`, `channel[T]`, `task[T]`, `iter[T]`, `stream[T]`, `range`) are syntactic sugar resolved by the compiler. See [standard-runtime.md](standard-runtime.md#naming-conventions).
+All non-scalar types now use PascalCase canonical names in the universe, stdlib, codegen, sema, ownership, and tests. Lowercase forms (`map[K,V]`, `channel[T]`, `task[T]`, `iter[T]`, `stream[T]`) are syntactic sugar resolved by the compiler. `Range[T]` is generic (no lowercase alias). See [standard-runtime.md](standard-runtime.md#naming-conventions).
 
 ---
 
@@ -812,9 +814,9 @@ Known gaps and improvements deferred from completed stages.
 | Generator closures (capturing lambdas as generators) | Generators | Low |
 | Devirtualization optimization (direct call when concrete type known) | 8L | Low |
 | ~~String comparison operators (`<`, `>`, `<=`, `>=`)~~ — **Resolved**: lexicographic byte comparison via `memcmp` | 8b | ~~Medium~~ |
-| Range value type variable binding — `r := 1..5` panics in codegen (store type mismatch: `{ i64, i64, i1 }` vs `{ i8*, i8* }*`) | 8g | Medium |
-| Char range iteration — `for c in 'a'..'z'` panics in codegen (i32 vs i64 mismatch in `genRange`) | 8g | Medium |
-| Uint range iteration — `for i in a..b` (uint bounds) yields `int`, not `uint`, causing type errors in loop body | 8g | Low |
+| ~~Range value type variable binding~~ — resolved: Range is now `Range[T]` generic value type | 8g | ~~Medium~~ |
+| ~~Char range iteration~~ — resolved: `Range[char]` uses correct i32 element type | 8g | ~~Medium~~ |
+| ~~Uint range iteration~~ — resolved: `Range[uint]` uses correct uint element type | 8g | ~~Low~~ |
 | ~~Map for-in tuple handling — `for entry in map` panics in codegen~~ — **Fixed.** Renamed `entry` basic block to `.entry` to avoid LLVM IR name collision. Added `for k, v in map` with proper key/value type bindings in sema+codegen. Added `get_or`, `pop`, `update`, `entries`, `merge` methods. | 8g | ~~Medium~~ Resolved |
 | ~~`map[bool, T]` — bool key hashing/lookup is broken~~ — **Fixed.** Bool hash now uses hardcoded constants via `select i1` instead of `fnv1a_hash`. Map literal key types are validated against `Hashable + Equal` constraints via `validateConstraints`. | 8i | ~~Medium~~ Resolved |
 | ~~Variable name collisions in repeated `if v := opt { }` blocks~~ — **Fixed.** `uniqueLocalName()` with per-function `localNameCount` appends `.N` suffix to duplicate alloca names in inner scopes. | 8n | ~~Medium~~ Resolved |

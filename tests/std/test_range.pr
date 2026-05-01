@@ -1,6 +1,7 @@
-// Test range creation and for-in iteration
-//
-// TODO: test range field access (start, end, inclusive) — blocked on codegen (Range value type mismatch in store)
+// Test Range[T] generic value type: creation, iteration, field access, methods
+
+// --- Basic for-in iteration ---
+
 test_exclusive_range() `test {
   int sum = 0;
   for i in 0..5 {
@@ -39,4 +40,136 @@ test_range_in_expressions() `test {
     sum += i * i;
   }
   assert(sum == 14, "sum of squares 1+4+9 == 14");
+}
+
+// --- Variable binding ---
+
+test_range_variable() `test {
+  Range[int] r = 1..5;
+  int sum = 0;
+  for i in r {
+    sum += i;
+  }
+  assert(sum == 10, "range variable: 1..5 sum == 10");
+}
+
+test_range_variable_inclusive() `test {
+  Range[int] r = 1..=5;
+  int sum = 0;
+  for i in r {
+    sum += i;
+  }
+  assert(sum == 15, "inclusive range variable: 1..=5 sum == 15");
+}
+
+// --- Field access ---
+
+test_range_field_access() `test {
+  Range[int] r = 3..10;
+  assert(r.start == 3, "exclusive range start == 3");
+  assert(r.end == 10, "exclusive range end == 10");
+  assert(!r.inclusive, "exclusive range inclusive == false");
+}
+
+test_range_field_access_inclusive() `test {
+  Range[int] r = 3..=10;
+  assert(r.start == 3, "inclusive range start == 3");
+  assert(r.end == 10, "inclusive range end == 10");
+  assert(r.inclusive, "inclusive range inclusive == true");
+}
+
+// --- contains method ---
+
+test_range_contains() `test {
+  Range[int] r = 1..5;
+  assert(r.contains(1), "exclusive contains start");
+  assert(r.contains(3), "exclusive contains middle");
+  assert(r.contains(4), "exclusive contains end-1");
+  assert(!r.contains(0), "exclusive !contains below");
+  assert(!r.contains(5), "exclusive !contains end");
+  assert(!r.contains(6), "exclusive !contains above");
+}
+
+test_range_contains_inclusive() `test {
+  Range[int] r = 1..=5;
+  assert(r.contains(1), "inclusive contains start");
+  assert(r.contains(3), "inclusive contains middle");
+  assert(r.contains(5), "inclusive contains end");
+  assert(!r.contains(0), "inclusive !contains below");
+  assert(!r.contains(6), "inclusive !contains above");
+}
+
+// --- is_empty getter ---
+
+test_range_is_empty() `test {
+  assert(!(1..5).is_empty, "1..5 not empty");
+  assert((5..5).is_empty, "5..5 is empty (exclusive)");
+  assert(!(5..=5).is_empty, "5..=5 not empty (inclusive, single element)");
+  assert((5..3).is_empty, "5..3 is empty (reversed)");
+  assert((5..=3).is_empty, "5..=3 is empty (inclusive reversed)");
+}
+
+// --- Negative ranges ---
+
+test_range_negative() `test {
+  int sum = 0;
+  for i in -3..3 {
+    sum += i;
+  }
+  assert(sum == -3, "negative range: -3+(-2)+(-1)+0+1+2 == -3");
+}
+
+// --- Index binding ---
+
+test_range_index() `test {
+  int last_idx = -1;
+  int last_val = -1;
+  for idx, val in 3..6 {
+    last_idx = idx;
+    last_val = val;
+  }
+  assert(last_idx == 2, "range index: last index == 2");
+  assert(last_val == 5, "range index: last value == 5");
+}
+
+// --- Char ranges ---
+
+test_char_range() `test {
+  int count = 0;
+  for c in 'a'..'e' {
+    count++;
+  }
+  assert(count == 4, "char range 'a'..'e' has 4 elements");
+}
+
+test_char_range_inclusive() `test {
+  int count = 0;
+  for c in 'a'..='e' {
+    count++;
+  }
+  assert(count == 5, "char range 'a'..='e' has 5 elements");
+}
+
+// --- Uint ranges ---
+
+test_uint_range() `test {
+  uint a = 0;
+  uint b = 5;
+  uint sum = 0;
+  for i in a..b {
+    sum += i;
+  }
+  uint expected = 10;
+  assert(sum == expected, "uint range: 0..5 sum == 10");
+}
+
+test_uint_range_inclusive() `test {
+  uint a = 0;
+  uint b = 5;
+  uint sum = 0;
+  for i in a..=b {
+    sum += i;
+  }
+  uint expected = 15;
+  assert(sum == expected, "uint range: 0..=5 sum == 15");
 }

@@ -1,6 +1,20 @@
-// std/range.pr — Range type with start, end, and inclusive fields
-type Range `native `public {
-    int start `value;
-    int end `value;
+// std/range.pr — Generic range type for .. and ..= operators
+type Range[T: Ordered] `public {
+    T start `value;
+    T end `value;
     bool inclusive `value;
+
+    contains(T val) bool {
+        if this.inclusive {
+            return val >= this.start && val <= this.end;
+        }
+        return val >= this.start && val < this.end;
+    }
+
+    get is_empty bool {
+        if this.inclusive {
+            return this.start > this.end;
+        }
+        return this.start >= this.end;
+    }
 }

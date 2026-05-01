@@ -492,6 +492,9 @@ func isCopyField(typ types.Type) bool {
 		return isCopyField(t.Elem())
 	case *types.Array:
 		return isCopyField(t.Elem())
+	case *types.TypeParam:
+		// Generic type params are assumed copy — validated at instantiation
+		return true
 	}
 	return false
 }

@@ -491,8 +491,8 @@ func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr) types.Type {
 		return c.checkUnaryOperator(e.Pos(), operand, "~")
 
 	case ast.UnaryReceive:
-		// <-expr: operand should be task[T] or channel[T]
-		// task[T] returns T, channel[T] returns T? (none when closed+empty)
+		// <-expr: operand should be Task[T] or Channel[T]
+		// Task[T] returns T, Channel[T] returns T? (none when closed+empty)
 		if inst, ok := operand.(*types.Instance); ok {
 			origin := inst.Origin()
 			if origin == types.TypTask {
@@ -506,7 +506,7 @@ func (c *Checker) checkUnaryExpr(e *ast.UnaryExpr) types.Type {
 				}
 			}
 		}
-		c.errorf(e.Pos(), "receive operator (<-) requires task[T] or channel[T], got %s", operand)
+		c.errorf(e.Pos(), "receive operator (<-) requires Task[T] or Channel[T], got %s", operand)
 		return nil
 
 	default:
@@ -649,7 +649,7 @@ func (c *Checker) checkInstanceConstructorCall(e *ast.CallExpr, inst *types.Inst
 
 	// Built-in types with special constructors managed by codegen.
 	if origin == types.TypChannel {
-		// channel[T]() or channel[T](capacity: n) — at most 1 arg
+		// Channel[T]() or Channel[T](capacity: n) — at most 1 arg
 		if len(e.Args) > 1 {
 			c.errorf(e.Pos(), "channel constructor expects at most 1 argument, got %d", len(e.Args))
 		}

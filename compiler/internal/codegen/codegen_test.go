@@ -161,7 +161,7 @@ func init() {
 	Tombstone,
 	Used(K key, V value),
 }
-type map[K: Hashable + Equal, V] {
+type Map[K: Hashable + Equal, V] {
 	Slot[K, V][] _buckets;
 	int _count;
 	new(~this) {
@@ -319,19 +319,22 @@ type map[K: Hashable + Equal, V] {
 }
 `)
 
-	// Iter/Stream
-	b.WriteString("type iter[T] `native {\n\tnext() T? `abstract;\n}\n")
-	b.WriteString("type stream[T] `native {\n\titer() iter[T] `abstract;\n}\n")
+	// Iterator/Stream
+	b.WriteString("type Iterator[T] `native {\n\tnext() T? `abstract;\n}\n")
+	b.WriteString("type Stream[T] `native {\n\titer() Iterator[T] `abstract;\n}\n")
 
 	// Channel
-	b.WriteString("type channel[T] `native {\n")
+	b.WriteString("type Channel[T] `native {\n")
 	b.WriteString("\tnew(int? capacity) `native;\n")
 	b.WriteString("\tsend(T value) `native;\n")
 	b.WriteString("\tclose() `native;\n")
 	b.WriteString("}\n")
 
+	// Task
+	b.WriteString("type Task[T] `native {}\n")
+
 	// Range
-	b.WriteString("type range `native {\n\tint start `value;\n\tint end `value;\n\tbool inclusive `value;\n}\n")
+	b.WriteString("type Range `native {\n\tint start `value;\n\tint end `value;\n\tbool inclusive `value;\n}\n")
 
 	// Constraint interfaces
 	b.WriteString("type Equal `structural {\n\t==(Self other) bool `abstract;\n\t!=(Self other) bool => !(this == other);\n}\n")
@@ -3179,8 +3182,8 @@ func TestArrayVariable(t *testing.T) {
 func TestMapLiteral(t *testing.T) {
 	ir := generateIR(t, `main() { m := {"a": 1}; }`)
 	// Should call monomorphized constructor and index assign
-	assertContains(t, ir, "call void @map__string__int.new(")
-	assertContains(t, ir, `call void @"map__string__int.[]="(`)
+	assertContains(t, ir, "call void @Map__string__int.new(")
+	assertContains(t, ir, `call void @"Map__string__int.[]="(`)
 }
 
 func TestMapIndex(t *testing.T) {
@@ -3191,7 +3194,7 @@ func TestMapIndex(t *testing.T) {
 		}
 	`)
 	// Should call monomorphized [] method (returns optional { i1, i64 })
-	assertContains(t, ir, `call { i1, i64 } @"map__string__int.[]"(`)
+	assertContains(t, ir, `call { i1, i64 } @"Map__string__int.[]"(`)
 }
 
 func TestMapIndexWithElvis(t *testing.T) {
@@ -3202,7 +3205,7 @@ func TestMapIndexWithElvis(t *testing.T) {
 		}
 	`)
 	// Should call monomorphized [] method + elvis
-	assertContains(t, ir, `call { i1, i64 } @"map__string__int.[]"(`)
+	assertContains(t, ir, `call { i1, i64 } @"Map__string__int.[]"(`)
 	assertContains(t, ir, "elvis.some")
 }
 
@@ -3214,14 +3217,14 @@ func TestMapIndexAssign(t *testing.T) {
 		}
 	`)
 	// Should call monomorphized []= method
-	assertContains(t, ir, `call void @"map__string__int.[]="(`)
+	assertContains(t, ir, `call void @"Map__string__int.[]="(`)
 }
 
 func TestMapIntKeys(t *testing.T) {
 	ir := generateIR(t, `main() { m := {1: "one", 2: "two"}; }`)
 	// Should create monomorphized map with int keys
-	assertContains(t, ir, "call void @map__int__string.new(")
-	assertContains(t, ir, `call void @"map__int__string.[]="(`)
+	assertContains(t, ir, "call void @Map__int__string.new(")
+	assertContains(t, ir, `call void @"Map__int__string.[]="(`)
 }
 
 func TestMapForIn(t *testing.T) {
@@ -4027,7 +4030,7 @@ func TestMapLen(t *testing.T) {
 		}
 	`)
 	// Should call monomorphized len getter
-	assertContains(t, ir, "call i64 @map__string__int.len(")
+	assertContains(t, ir, "call i64 @Map__string__int.len(")
 }
 
 func TestStringLen(t *testing.T) {
@@ -4107,11 +4110,11 @@ func TestMapCompoundAssign(t *testing.T) {
 		}
 	`)
 	// Should call [] to get, add, then []= to set
-	assertContains(t, ir, `call { i1, i64 } @"map__string__int.[]"(`)
+	assertContains(t, ir, `call { i1, i64 } @"Map__string__int.[]"(`)
 	assertContains(t, ir, "mapcomp.ok")
 	assertContains(t, ir, "mapcomp.panic")
 	assertContains(t, ir, "add i64")
-	assertContains(t, ir, `call void @"map__string__int.[]="(`)
+	assertContains(t, ir, `call void @"Map__string__int.[]="(`)
 }
 
 func TestMapCompoundAssignMul(t *testing.T) {
@@ -4121,9 +4124,9 @@ func TestMapCompoundAssignMul(t *testing.T) {
 			m["x"] *= 3;
 		}
 	`)
-	assertContains(t, ir, `call { i1, i64 } @"map__string__int.[]"(`)
+	assertContains(t, ir, `call { i1, i64 } @"Map__string__int.[]"(`)
 	assertContains(t, ir, "mul i64")
-	assertContains(t, ir, `call void @"map__string__int.[]="(`)
+	assertContains(t, ir, `call void @"Map__string__int.[]="(`)
 }
 
 // --- Stage 8k: Inheritance Codegen Tests ---
@@ -6975,7 +6978,7 @@ func TestReturnOptionalInMonoMethod(t *testing.T) {
 		}
 	`)
 	// The monomorphized [] method should produce { i1, i64 } return type
-	assertContains(t, ir, `define { i1, i64 } @"map__string__int.[]"(`)
+	assertContains(t, ir, `define { i1, i64 } @"Map__string__int.[]"(`)
 	// Should contain insertvalue for wrapping the value in Optional { true, val }
 	assertContains(t, ir, "insertvalue { i1, i64 }")
 }
@@ -7943,7 +7946,7 @@ func TestIndexMethodDispatchMap(t *testing.T) {
 			int? v = m["a"];
 		}
 	`)
-	assertContains(t, ir, `call { i1, i64 } @"map__string__int.[]"(`)
+	assertContains(t, ir, `call { i1, i64 } @"Map__string__int.[]"(`)
 }
 
 func TestIndexAssignMethodDispatchMap(t *testing.T) {
@@ -7954,7 +7957,7 @@ func TestIndexAssignMethodDispatchMap(t *testing.T) {
 			m["b"] = 2;
 		}
 	`)
-	assertContains(t, ir, `call void @"map__string__int.[]="(`)
+	assertContains(t, ir, `call void @"Map__string__int.[]="(`)
 }
 
 func TestIndexNativeDispatchVector(t *testing.T) {

@@ -1,4 +1,4 @@
-// std/map.pr — map[K, V] implemented as an open-addressing hash map
+// std/map.pr — Map[K, V] implemented as an open-addressing hash map
 
 enum Slot[K, V] {
     Empty,
@@ -6,7 +6,7 @@ enum Slot[K, V] {
     Used(K key, V value),
 }
 
-type map[K: Hashable + Equal, V] {
+type Map[K: Hashable + Equal, V] {
     Slot[K, V][] _buckets;
     int _count;
 

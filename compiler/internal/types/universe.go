@@ -25,14 +25,14 @@ var (
 	TypNone   *Named
 	TypError  *Named
 
-	// Generic stdlib types
-	TypTask    *Named // task[T] — concurrency handle from go expressions
-	TypChannel *Named // channel[T] — channel type
-	TypIter    *Named // iter[T] — synchronous iterator interface
-	TypStream  *Named // stream[T] — asynchronous iterator interface
+	// Generic stdlib types (PascalCase canonical; lowercase sugar aliases in universe)
+	TypTask    *Named // Task[T] — concurrency handle from go expressions
+	TypChannel *Named // Channel[T] — channel type
+	TypIter    *Named // Iterator[T] — synchronous iterator interface
+	TypStream  *Named // Stream[T] — asynchronous iterator interface
 	TypVector  *Named // Vector[T] — dynamic array
-	TypMap     *Named // map[K, V] — map container type
-	TypRange   *Named // range — integer range from .. and ..= operators
+	TypMap     *Named // Map[K, V] — map container type
+	TypRange   *Named // Range — integer range from .. and ..= operators
 )
 
 func init() {
@@ -76,13 +76,25 @@ func init() {
 	TypNone = defNamed("none")
 	TypError = defNamed("error")
 
-	// Generic stdlib types
-	TypTask = defGeneric("task", "T")
-	TypChannel = defGeneric("channel", "T")
-	TypIter = defGeneric("iter", "T")
-	TypStream = defGeneric("stream", "T")
+	// Generic stdlib types — PascalCase canonical names
+	TypTask = defGeneric("Task", "T")
+	TypChannel = defGeneric("Channel", "T")
+	TypIter = defGeneric("Iterator", "T")
+	TypStream = defGeneric("Stream", "T")
 	TypVector = defGeneric("Vector", "T")
-	TypMap = defGeneric("map", "K", "V")
+	TypMap = defGeneric("Map", "K", "V")
 
-	TypRange = defNamed("range")
+	TypRange = defNamed("Range")
+
+	// Lowercase sugar aliases — same singletons, accessible by old names
+	defAlias := func(alias string, target *Named) {
+		tn := NewTypeName(Pos{}, alias, target.Obj().Type())
+		Universe.Insert(tn)
+	}
+	defAlias("task", TypTask)
+	defAlias("channel", TypChannel)
+	defAlias("iter", TypIter)
+	defAlias("stream", TypStream)
+	defAlias("map", TypMap)
+	defAlias("range", TypRange)
 }

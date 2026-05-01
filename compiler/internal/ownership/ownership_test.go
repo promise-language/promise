@@ -161,7 +161,7 @@ func init() {
 	Tombstone,
 	Used(K key, V value),
 }
-type map[K: Hashable + Equal, V] {
+type Map[K: Hashable + Equal, V] {
 	Slot[K, V][] _buckets;
 	int _count;
 	new(~this) {
@@ -319,12 +319,12 @@ type map[K: Hashable + Equal, V] {
 }
 `)
 
-	// Iter/Stream
-	b.WriteString("type iter[T] `native {\n\tnext() T? `abstract;\n}\n")
-	b.WriteString("type stream[T] `native {\n\titer() iter[T] `abstract;\n}\n")
+	// Iterator/Stream
+	b.WriteString("type Iterator[T] `native {\n\tnext() T? `abstract;\n}\n")
+	b.WriteString("type Stream[T] `native {\n\titer() Iterator[T] `abstract;\n}\n")
 
 	// Range
-	b.WriteString("type range `native {\n\tint start `value;\n\tint end `value;\n\tbool inclusive `value;\n}\n")
+	b.WriteString("type Range `native {\n\tint start `value;\n\tint end `value;\n\tbool inclusive `value;\n}\n")
 
 	// Constraint interfaces
 	b.WriteString("type Equal `structural {\n\t==(Self other) bool `abstract;\n\t!=(Self other) bool => !(this == other);\n}\n")

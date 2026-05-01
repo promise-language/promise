@@ -702,7 +702,7 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 			// Iterating a map yields (key, value) tuples
 			elemType = types.NewTuple([]types.Type{key, val})
 		} else if inst, ok := iterType.(*types.Instance); ok {
-			// iter[T] yields T, stream[T] yields T, channel[T] yields T
+			// Iterator[T] yields T, Stream[T] yields T, Channel[T] yields T
 			origin := inst.Origin()
 			if origin == types.TypIter || origin == types.TypStream || origin == types.TypChannel {
 				if len(inst.TypeArgs()) > 0 {
@@ -830,7 +830,7 @@ func (c *Checker) checkSelectStmt(s *ast.SelectStmt) {
 			if sc.SendValue != nil && elemType != nil {
 				valType := c.checkExprWithHint(sc.SendValue, elemType)
 				if valType != nil && !types.AssignableTo(valType, elemType) {
-					c.errorf(sc.SendValue.Pos(), "cannot send %s on channel[%s]", valType, elemType)
+					c.errorf(sc.SendValue.Pos(), "cannot send %s on Channel[%s]", valType, elemType)
 				}
 			}
 		} else {

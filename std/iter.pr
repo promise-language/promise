@@ -1,8 +1,8 @@
 // std/iter.pr — Iterator and async stream abstract types
-type iter[T] `native {
+type Iterator[T] `native {
     next() T? `abstract;
 }
 
-type stream[T] `native {
-    iter() iter[T] `abstract;
+type Stream[T] `native {
+    iter() Iterator[T] `abstract;
 }

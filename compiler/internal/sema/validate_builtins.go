@@ -56,14 +56,14 @@ func (c *Checker) validateBuiltins() {
 		c.requireBinaryOp("char", types.TypChar, op)
 	}
 
-	// iter[T].next(), stream[T].iter()
-	c.requireMethod("iter", types.TypIter, "next")
-	c.requireMethod("stream", types.TypStream, "iter")
+	// Iterator[T].next(), Stream[T].iter()
+	c.requireMethod("Iterator", types.TypIter, "next")
+	c.requireMethod("Stream", types.TypStream, "iter")
 
-	// range fields
-	c.requireField("range", types.TypRange, "start")
-	c.requireField("range", types.TypRange, "end")
-	c.requireField("range", types.TypRange, "inclusive")
+	// Range fields
+	c.requireField("Range", types.TypRange, "start")
+	c.requireField("Range", types.TypRange, "end")
+	c.requireField("Range", types.TypRange, "inclusive")
 }
 
 // requireBinaryOp checks that a Named type has a method with the given name

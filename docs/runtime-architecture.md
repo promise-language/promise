@@ -24,10 +24,10 @@ No C runtime files remain. All runtime functions are codegen-emitted LLVM IR or 
 - Conversion: `int_to_string`, `uint_to_string`, `f64_to_string`, `bool_to_string`, `char_to_string`
 - Hash: `hash_string` (FNV-1a for string map keys)
 
-**Pure Promise** (`std/*.pr`):
-- Hash: FNV-1a for int/bool/char/float (`std/hash.pr`)
-- String methods: `contains`, `starts_with`, `ends_with`, `index_of` (`std/string.pr`)
-- Map: full HashMap implementation (`std/map.pr`)
+**Pure Promise** (`modules/std/*.pr`):
+- Hash: FNV-1a for int/bool/char/float (`modules/std/hash.pr`)
+- String methods: `contains`, `starts_with`, `ends_with`, `index_of` (`modules/std/string.pr`)
+- Map: full HashMap implementation (`modules/std/map.pr`)
 
 **Libc surface**: `malloc`, `free`, `realloc`, `memcmp`, `snprintf`, `strlen`, `write`, `exit`, `fork`, `waitpid`, `fflush`, `_exit`.
 
@@ -76,8 +76,8 @@ Completed in 10 steps. All computation-only C functions replaced with codegen-em
 | Step | What moved | Where it went |
 |------|-----------|---------------|
 | 1 | Bitwise operators | Codegen native emitter table |
-| 2 | Hash (FNV-1a) | `std/hash.pr` (int/bool/char/float), codegen LLVM IR (string) |
-| 3 | String methods (contains, starts_with, ends_with, index_of) | `std/string.pr` (pure Promise) |
+| 2 | Hash (FNV-1a) | `modules/std/hash.pr` (int/bool/char/float), codegen LLVM IR (string) |
+| 3 | String methods (contains, starts_with, ends_with, index_of) | `modules/std/string.pr` (pure Promise) |
 | 4 | Vector contains/remove | Codegen LLVM IR |
 | 5 | int/float/bool/char/uint to string | Codegen LLVM IR (float uses libc `snprintf`) |
 | 6 | UTF-8 char encode | Included in step 5 (`defineCharToStringFunc`) |
@@ -88,7 +88,7 @@ Completed in 10 steps. All computation-only C functions replaced with codegen-em
 
 Also done: LLVM intrinsics for all `memcpy`/`memmove`, libc `memcmp` for equality functions (SIMD-accelerated), optimizer attributes on all externs.
 
-**Remaining opportunity**: Pure Promise string methods in `std/string.pr` still use char-by-char comparison. Could add a `memcmp`-backed `string.eq_region` builtin for acceleration on long strings.
+**Remaining opportunity**: Pure Promise string methods in `modules/std/string.pr` still use char-by-char comparison. Could add a `memcmp`-backed `string.eq_region` builtin for acceleration on long strings.
 
 ---
 

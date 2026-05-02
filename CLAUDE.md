@@ -37,7 +37,7 @@ make                  # download ANTLR4 JAR, generate parser, embed resources, b
 make release          # release build: embed LLVM tools (~61-71MB self-contained binary)
 make test             # run all Go tests (go test ./...)
 make generate         # regenerate ANTLR4 parser from grammar
-make resources        # copy std/ into embedded resources
+make resources        # copy modules/ into embedded resources
 make clean            # remove generated code and binary
 ```
 
@@ -166,7 +166,7 @@ Entry point: `cmd/promise/main.go` → `compileFrontend()` orchestrates parse �
 - **Waiter lists**: Intrusive linked list via `G.wait_next`. Protected by channel mutex. `promise_waiter_enqueue/dequeue/remove/wake_all` helpers in sched.go.
 - **Sysmon**: Background thread sets `G.preempt=1` every 10ms; yield checks at loop back-edges call `coro.suspend`.
 
-**Standard library**: `.pr` files in `std/` are embedded via `go:embed` and merged into user AST before sema. Runtime is codegen-emitted LLVM IR (no C runtime).
+**Standard library**: `.pr` files in `modules/std/` are compiled as a regular embedded catalog module and auto-imported into every file via an injected `use std as _;`. Runtime is codegen-emitted LLVM IR (no C runtime).
 
 ## Test Patterns
 
@@ -208,7 +208,7 @@ Methods must be declared inside the type body. Numeric literals infer as `int`/`
 
 ## Implementation Philosophy
 
-- **Prefer Promise over IR**: When adding new standard library functionality (e.g., container methods, operators), implement in the Promise language (`std/*.pr`) rather than generating custom LLVM IR in codegen. Only use `native` methods when direct memory access or runtime calls are unavoidable (e.g., `Vector.push`, `Vector.[]`, string byte access). Non-native methods written in Promise are type-checked by sema, monomorphized automatically, and far easier to maintain.
+- **Prefer Promise over IR**: When adding new standard library functionality (e.g., container methods, operators), implement in the Promise language (`modules/std/*.pr`) rather than generating custom LLVM IR in codegen. Only use `native` methods when direct memory access or runtime calls are unavoidable (e.g., `Vector.push`, `Vector.[]`, string byte access). Non-native methods written in Promise are type-checked by sema, monomorphized automatically, and far easier to maintain.
 - **Test at every level**: Significant changes need both Go unit tests (`codegen_test.go`, `sema_test.go`) AND Promise-level e2e tests (`tests/` directory, run via `promise test`). Go tests verify IR shape; Promise tests verify runtime correctness.
 - **No hidden effects**: When designing language features, avoid implicit side effects, hidden control flow, or magic behaviors. Every effect should be visible at the call site. If a function can fail, it must be marked failable (`!`). If a value is consumed, it must be moved (`~`). If a variable is mutable, it must be declared so.
 - **Self-contained by default**: Design features so that programs are understandable in isolation. Avoid global state, implicit initialization, and ambient context. A reader (human or AI) should be able to read a `.pr` file top-to-bottom and know exactly what it does without consulting external docs or hidden configuration.
@@ -221,4 +221,4 @@ Methods must be declared inside the type body. Numeric literals infer as `int`/`
 - `mangleMethodName(owner, name, failable)` produces LLVM function names like `TypeName.method`
 - Move sites must call `clearDropFlag(name)` — there are 8 call variant sites in expr.go plus assignment sites in stmt.go
 - All tests must pass after changes. Significant changes need accompanying tests.
-- When updating `std/*.pr`, run `./build` — it automatically embeds the updated stdlib. The `stdAll` mini-stdlib in test files is auto-populated from the embedded std via `go:embed` — no manual update needed.
+- When updating `modules/std/*.pr`, run `./build` — it automatically embeds the updated stdlib. The `stdAll` mini-stdlib in test files is auto-populated from the embedded std via `go:embed` — no manual update needed.

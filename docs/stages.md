@@ -37,7 +37,7 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 
 | Stage | Package | Description | Status |
 |-------|---------|-------------|--------|
-| 9 | `compiler/internal/module/`, `sema/`, `codegen/`, `std/` | Module system: visibility, qualified access, local imports, cross-module codegen, separate/incremental compilation, transitive deps, circular detection, remote git fetching, globally unique module identity | Phase 3 Done + Identity Redesign |
+| 9 | `compiler/internal/module/`, `sema/`, `codegen/`, `modules/std/` | Module system: visibility, qualified access, local imports, cross-module codegen, separate/incremental compilation, transitive deps, circular detection, remote git fetching, globally unique module identity | Phase 3 Done + Identity Redesign |
 | 10 | `cmd/promise/` | CLI entry point (build, run, test, fmt, etc.) | Done (except `fmt`) |
 | 11 | `pkg/` | Package manager: fetch, resolve, lock | Planned |
 
@@ -297,9 +297,9 @@ Enum type codegen: tagged unions, fieldless enums, variant constructors, pattern
 
 Error handling codegen: failable function declarations, raise statements, error propagation (`?`), forced unwrap (`!`), error handler expressions, typed error handlers.
 
-**Files:** Updates to `codegen/compiler.go`, `codegen/expr.go`, `codegen/stmt.go`, `codegen/types.go`, `sema/expr.go`, `sema/stmt.go`, `sema/info.go`, `sema/meta.go`, `sema/decl.go`, `types/named.go`, `grammar/PromiseParser.g4`, `ast/expr.go`, `ast/visit_expr.go`, `std/error.pr`; 17 error handling tests + 46 sema tests + 12 codegen tests + 40 e2e tests
+**Files:** Updates to `codegen/compiler.go`, `codegen/expr.go`, `codegen/stmt.go`, `codegen/types.go`, `sema/expr.go`, `sema/stmt.go`, `sema/info.go`, `sema/meta.go`, `sema/decl.go`, `types/named.go`, `grammar/PromiseParser.g4`, `ast/expr.go`, `ast/visit_expr.go`, `modules/std/error.pr`; 17 error handling tests + 46 sema tests + 12 codegen tests + 40 e2e tests
 
-- **Error base type**: `type error { string message; }` defined in `std/error.pr`. Universe type reuse merges std fields into `TypError`. All error types inherit from `error` via `is error`.
+- **Error base type**: `type error { string message; }` defined in `modules/std/error.pr`. Universe type reuse merges std fields into `TypError`. All error types inherit from `error` via `is error`.
 - **Result struct**: Non-void `T!` → `{ i1, T, i8* }` (tag, ok value, error pointer). Void `void!` → `{ i1, i8* }` (tag, error pointer). Tag: `i1 false` = Ok, `i1 true` = Error.
 - **Error values are `i8*`**: Error instance pointers stored in result struct. `raise` on user types extracts the instance pointer from the value struct `{vtable, instance}`.
 - **Failable declarations**: Functions/methods with `CanError()` return the result struct. `declareFuncs`/`declareTypeMethods` wrap return type with `computeResultType`.
@@ -360,7 +360,7 @@ Generic function sema support and type-specialized code generation for all gener
 
 Codegen for container types (tuples, optionals, slices, maps) and capturing lambdas.
 
-**Files:** Updates to `codegen/compiler.go`, `codegen/types.go`, `codegen/expr.go`, `codegen/stmt.go`; ~~new `runtime/runtime_map.c` (~205 LOC)~~ (superseded by `std/map.pr`); 29 new tests (119 total codegen tests)
+**Files:** Updates to `codegen/compiler.go`, `codegen/types.go`, `codegen/expr.go`, `codegen/stmt.go`; ~~new `runtime/runtime_map.c` (~205 LOC)~~ (superseded by `modules/std/map.pr`); 29 new tests (119 total codegen tests)
 
 - **Tuples**: Value type, LLVM struct `{ T0, T1, ... }`. Literals via `insertvalue`, destructuring (`(a, b) := expr`) via `extractvalue`. Mixed-type tuples supported.
 - **Optionals**: Value type, `{ i1, T }` struct. `none` = zeroinitializer, some = `{ true, val }`. `targetType` field on Compiler resolves contextual type for `NoneLit` (sema records `TypNone` but codegen needs `Optional(T)`). `lookupLocalType` detects `OptionalTypeRef` annotations and resolves declared types from sema scopes.
@@ -368,7 +368,7 @@ Codegen for container types (tuples, optionals, slices, maps) and capturing lamb
 - **Optional wrapping**: Assigning `T` to `T?` variable auto-wraps via `wrapOptional` (insertvalue `{ true, val }`).
 - **Slices / Array literals**: Heap-allocated `i8*` → `{ i64 len, i64 cap, [data...] }`. 16-byte header + inline elements. `genArrayLit` mallocs, stores header via GEP, stores elements via typed GEP past header. Both `*types.Slice` and `*types.Array` map to `i8Ptr`.
 - **Slice indexing**: Bounds-checked with `icmp ult` (unsigned, catches negative indices). Out-of-bounds calls `promise_panic` + `unreachable`. Read via `genSliceIndex`, write via `genSliceIndexAssign` (supports compound assignment like `arr[i] += 1`).
-- **Maps**: ~~Type-erased C runtime hash table (`runtime/runtime_map.c`)~~ — **Superseded.** Now a pure Promise self-hosted implementation in `std/map.pr`: generic `Map[K: Hashable + Equal, V]` using open-addressing with `Slot[K, V]` enum (Empty/Tombstone/Used), FNV-1a key hashing via `.hash` property, 75% load-factor rehash. Methods: `[]`, `[]=`, `contains`, `remove`, `keys`, `values`, `get_or`, `pop`, `update`, `entries`, `merge`, `clear`. Monomorphized at codegen time.
+- **Maps**: ~~Type-erased C runtime hash table (`runtime/runtime_map.c`)~~ — **Superseded.** Now a pure Promise self-hosted implementation in `modules/std/map.pr`: generic `Map[K: Hashable + Equal, V]` using open-addressing with `Slot[K, V]` enum (Empty/Tombstone/Used), FNV-1a key hashing via `.hash` property, 75% load-factor rehash. Methods: `[]`, `[]=`, `contains`, `remove`, `keys`, `values`, `get_or`, `pop`, `update`, `entries`, `merge`, `clear`. Monomorphized at codegen time.
 - **Map indexing**: `m["key"]` returns `V?` (optional). Assignment via `m["key"] = val`. Both compile to monomorphized method calls on the Map instance.
 - **For-in iteration**: `genForInStmt` dispatches on iterable type. Vectors: counter loop with bounds check per element. Maps: `genForInMap` calls monomorphized `keys()`/`values()`, iterates both vectors in parallel — single binding yields `(K, V)` tuple, two bindings (`for k, v in m`) yield separate key and value. Ranges: `genForInRange`. Strings: `genForInString` (UTF-8 codepoints). Channels: `genForInChannel`.
 - **Lambdas (capturing)**: Anonymous LLVM functions (`.lambda.N`) with `i8* %env` as first parameter (uniform ABI). Fat pointer representation `{ i8*, i8* }` (fn ptr + env ptr) for all function values. Non-capturing lambdas use null env. Compiler state saved/restored (fn, block, locals, canError, scopeBindings, dropFlags). Handles both expression body (`|x| -> x + 1`) and block body (`|x| -> int { return x * 2; }`).
@@ -377,7 +377,7 @@ Codegen for container types (tuples, optionals, slices, maps) and capturing lamb
 - **Lambda calls**: `genCallExpr` detects local variables with `*types.Signature` type before regular function lookup. Loads fat pointer `{ i8*, i8* }`, calls `genIndirectCall` which extracts fn/env, bitcasts to typed function pointer with env-first ABI, calls with env as first arg.
 - **Named function references**: When a named function is used as a first-class value (e.g., `f := add`), a thunk with env-first ABI is generated (`.thunk.add`) that forwards to the original function. Fat pointer uses `{ @.thunk.add, null }`.
 - **Lambda ownership**: Move captures mark the variable as `Moved` in the enclosing scope. Captured variables are `Owned` inside the lambda body. Copy captures leave the original variable usable.
-- **Intrinsics** (`compiler.go`): ~~7 new map runtime functions declared in `declareIntrinsics`~~ (superseded by self-hosted `std/map.pr`). `lambdaCounter` and `targetType` fields added to Compiler.
+- **Intrinsics** (`compiler.go`): ~~7 new map runtime functions declared in `declareIntrinsics`~~ (superseded by self-hosted `modules/std/map.pr`). `lambdaCounter` and `targetType` fields added to Compiler.
 - **Scope**: Tuple literals/destructure/return, optional none/some/wrapping/elvis, array literals, slice/array indexing (read/write/compound), for-in over slices/arrays/maps, map literals/indexing/assignment, capturing lambdas (expression/block body, indirect calls, copy/move captures, nested capture propagation, env allocation/cleanup, named function reference thunks).
 - **Deferred**: ~~Slice growth (`.push()`)~~ done (Vector.push). ~~Container methods (`.contains`)~~ done (Vector.contains, string.contains). ~~`llvmTypeSize` struct alignment~~ fixed (`llvmTypeSizeWithPtr` now handles padding). String interpolation, if-unwrap/while-unwrap, optional chaining, and unsafe blocks completed in Stage 8h. Container `.len` completed in Stage 8i.
 - **Fixed-size arrays** (`T[N]`): Stack-allocated `[N x T]` LLVM array type. Hint-based literal inference: `int[3] x = [1,2,3]` types the literal as `*types.Array`, bare `[1,2,3]` remains Vector. `genFixedArrayLit` allocas `[N x T]` and stores elements via GEP. `genArrayIndex`/`genArrayIndexAssign` emit bounds check (`icmp ult idx, N`) and GEP into the array. `.len` returns compile-time constant. `genForInArray` iterates with constant-bound loop. `genArrayBasePtr` returns alloca for identifiers, `genFieldPtr` for struct field access (MemberExpr), temp alloca for computed expressions. Copy semantics: arrays of copy-type elements are copy. Element count mismatch (`int[3] x = [1,2]`) is a sema error. Mutating vector methods (push/pop/remove) rejected on fixed arrays.
@@ -395,7 +395,7 @@ Codegen for if-unwrap, while-unwrap, optional chaining, string interpolation, an
   - **AST**: `StringInterp` gains `Expr` field (parsed expression from `{expr}` syntax).
   - **AST builder**: `parseInterpolationExpr` re-lexes/re-parses expression text via fresh ANTLR lexer/parser. `offsetExprPositions` recursively adjusts AST node positions to match original source locations.
   - **Sema**: StringLit case extended to type-check interpolation expressions.
-  - **Runtime**: ~~`promise_int_to_string`, `promise_f64_to_string`, `promise_bool_to_string` conversion functions in `runtime_string.c` using `snprintf`~~ — now codegen-emitted LLVM IR (`defineIntToStringFunc`, `defineUintToStringFunc`, `defineBoolToStringFunc`, `defineCharToStringFunc` in compiler.go). f64→string uses `_f64_to_str` in `std/format.pr` (pure Promise, no libc dep).
+  - **Runtime**: ~~`promise_int_to_string`, `promise_f64_to_string`, `promise_bool_to_string` conversion functions in `runtime_string.c` using `snprintf`~~ — now codegen-emitted LLVM IR (`defineIntToStringFunc`, `defineUintToStringFunc`, `defineBoolToStringFunc`, `defineCharToStringFunc` in compiler.go). f64→string uses `_f64_to_str` in `modules/std/format.pr` (pure Promise, no libc dep).
   - **Codegen**: `genStringLit` split into `genStaticString` (compile-time, no interpolation) and `genInterpolatedString` (runtime). `convertToString` handles all primitive types with sext/zext/fpext as needed. Parts concatenated via `promise_string_concat`. Both `promise_string_new` and `promise_string_concat` are codegen-emitted LLVM IR using `@llvm.memcpy` intrinsic.
   - **Intrinsics**: 14 functions defined as codegen LLVM IR in `declareIntrinsics`: `promise_string_new`, `promise_string_concat`, 5 conversion functions (`bool`, `int`, `uint`, `f64`, `char` to string), `promise_vector_with_capacity`, `promise_vector_push`, `promise_vector_pop`, `promise_string_trim`, `promise_string_split`, `promise_string_next_char`, `promise_type_is`.
 - **Unsafe blocks**: `genUnsafeExpr` trivially generates block contents. Ownership analysis handles the "unsafe" semantics, not codegen.
@@ -443,12 +443,12 @@ Promoted `slice[T]` and `map[K,V]` from structural placeholder types (`*types.Sl
 
 **Native Methods Registered in `builtins.go`:**
 - **slice[T]**: `get len` getter, `new(int capacity = 16)`, `push(T)`, `pop() → T?`, `contains(T) → bool`, `remove(int)`
-- **map[K,V]**: ~~`get len` getter, `contains(K) → bool`, `remove(K) → bool`, `keys() → K[]`, `values() → V[]`~~ (superseded by self-hosted `std/map.pr` — all methods are pure Promise, only `[]`/`[]=` dispatch through codegen for subscript syntax)
+- **map[K,V]**: ~~`get len` getter, `contains(K) → bool`, `remove(K) → bool`, `keys() → K[]`, `values() → V[]`~~ (superseded by self-hosted `modules/std/map.pr` — all methods are pure Promise, only `[]`/`[]=` dispatch through codegen for subscript syntax)
 - **string**: `get len` getter, `contains(string) → bool`, `starts_with(string) → bool`, `ends_with(string) → bool`, `index_of(string) → int?`, `trim() → string`, `split(string) → string[]`
 
 **Runtime:**
 - New `runtime_slice.c`: push (with realloc growth), pop, contains, remove
-- ~~Updated `runtime_map.c`: tombstone support~~ (superseded by self-hosted `std/map.pr` with `Slot[K,V]` enum: Empty/Tombstone/Used)
+- ~~Updated `runtime_map.c`: tombstone support~~ (superseded by self-hosted `modules/std/map.pr` with `Slot[K,V]` enum: Empty/Tombstone/Used)
 - Updated `runtime_string.c`: ~~contains, starts_with, ends_with, index_of~~ (migrated to pure Promise), trim, split
 
 **Sema/Codegen Migration:**
@@ -634,15 +634,15 @@ Module resolution and dependency management. See [module-system.md](module-syste
 
 **Phase 1 — Module Boundaries & Local Imports (done):**
 
-**Files:** `grammar/PromiseParser.g4` (use decl alts), `internal/module/config.go`, `internal/module/cache.go`, `internal/sema/decl.go`, `internal/sema/expr.go`, `internal/sema/resolve.go`, `internal/sema/export.go`, `internal/sema/info.go`, `internal/codegen/compiler.go`, `internal/codegen/expr.go`, `internal/codegen/separate.go`, `internal/codegen/mono.go`, `ast/decl.go`, `ast/visit_decl.go`, `types/object.go`, `cmd/promise/main.go`, `std/*.pr` (22 files)
+**Files:** `grammar/PromiseParser.g4` (use decl alts), `internal/module/config.go`, `internal/module/cache.go`, `internal/sema/decl.go`, `internal/sema/expr.go`, `internal/sema/resolve.go`, `internal/sema/export.go`, `internal/sema/info.go`, `internal/codegen/compiler.go`, `internal/codegen/expr.go`, `internal/codegen/separate.go`, `internal/codegen/mono.go`, `ast/decl.go`, `ast/visit_decl.go`, `types/object.go`, `cmd/promise/main.go`, `modules/std/*.pr` (22 files)
 
 - **Grammar**: `useDecl` has two labeled alternatives — `catalogImport` (`use json;` / `use json as j;` / `use json as _;`) and `sourcedImport` (`use parser "url";` / `use _ "url";`). `qualifiedType` alt in `typeRef` for `mod.Type` references.
 - **`promise.toml`**: TOML parser for `[module]`, `[require]`, `[replace]` sections. `promise init` creates the file.
-- **`public` visibility**: Explicit `` `public `` meta annotation on types, enums, functions, fields, and methods. `isObjectExported()` checks Func/Named/Enum exported flags. All 22 `std/*.pr` files annotated with explicit `public` on exported symbols.
+- **`public` visibility**: Explicit `` `public `` meta annotation on types, enums, functions, fields, and methods. `isObjectExported()` checks Func/Named/Enum exported flags. All 22 `modules/std/*.pr` files annotated with explicit `public` on exported symbols.
 - **Module scope resolution**: `resolveModuleScope()` handles catalog modules via `loadCatalog()`, local modules via `moduleScopes` map. `mergeGlobImport()` for `as _` with eager conflict detection, filtering by `public` visibility.
 - **Qualified access**: `resolveModuleMember()` for `mod.func()` calls with visibility enforcement. `resolveQualifiedType()` for `mod.Type` in type position.
 - **Local module loading**: `loadLocalModule()` in `cmd/promise/main.go` — scans use decls for local paths, parses+sema+exports. `ExportedScope()` extracts only `public` symbols. `mergeModuleFiles()` combines multiple `.pr` files in a module dir.
-- **Std as catalog module**: `std` is a regular embedded catalog module (`std/promise.toml`, `catalog.toml`). Every file auto-receives an injected `use std as _;` glob import — no special `stdScope` parent chain. `CheckForStdModule` compiles std with `compilingStd=true` to avoid self-import. `use std;` / `use std as s;` still work for qualified access.
+- **Std as catalog module**: `std` is a regular embedded catalog module (`modules/std/promise.toml`, `catalog.toml`). Every file auto-receives an injected `use std as _;` glob import — no special `stdScope` parent chain. `CheckForStdModule` compiles std with `compilingStd=true` to avoid self-import. `use std;` / `use std as s;` still work for qualified access.
 - **Cross-module codegen (inline strategy)**: All module declarations compiled into one LLVM IR module via `compileModules()` with context save/restore (`c.info`/`c.file`/`c.compilingModule` swap). Name mangling: `__mod_<module>_<func>` for functions, `__mod_<module>_<Type>.<method>` for methods. `moduleFuncs`/`moduleExterns` maps for qualified call dispatch; plain names registered in `c.funcs` for glob imports. MemberExpr dispatch: std check → module check (function/constructor/enum switch) → enum layout → method call. Coercion uses callee's `*types.Signature` from sema directly.
 - **Separate compilation**: Post-codegen IR split — single codegen pass produces unified `ir.Module`, then `SplitModuleIRs()` (in `codegen/separate.go`) toggles function blocks and global initializers to produce per-module `.ll` files. Module IRs contain only module-owned function bodies; all other functions become `declare`, all globals become `external`. Main IR keeps everything except module function bodies. Each `.ll` → `opt -O1 → .bc` (non-Windows; modules compiled in parallel via goroutines). `linkLinuxMulti()`/`linkDarwinMulti()`/`linkWasmMulti()` pass all `.bc` files to the LTO-capable linker. Windows: `.ll` → `opt → llc → .o` → `lld-link`. `moduleOwnedFuncs map[string]string` tracks which IR functions belong to which module (populated during `declareModuleFuncs`, `declareModuleTypeMethods`, `declareMonoMethods`, `declareMonoFuncs`).
 - **Incremental compilation**: Content-addressed build cache at `~/.promise/cache/build/` (overridable via `PROMISE_HOME`). **Implementation hash** (FNV-128a of sorted source file contents) determines when a module's `.bc` needs recompilation. **Interface hash** (FNV-128a of public API signatures: function names+signatures, type fields+methods, enum variants) determines when dependents need recompilation. Cache key is FNV-128a of impl hash + compiler hash + target + sorted module paths. Files stored in two-level directory structure (`<hash[:2]>/<hash>.bc`). Atomic writes via temp + rename with rollback. On cache hit, the `opt` pipeline is skipped entirely — the cached `.bc` is passed directly to the LTO linker. Main file always recompiles (most frequent change target). Cache key includes filename separators to prevent hash collisions from file splits.
@@ -684,15 +684,15 @@ See [phase3-remote-modules.md](phase3-remote-modules.md) for the full design.
 
 ### Stdlib Catalog Modules (Tier 1)
 
-Catalog modules shipped as embedded `.pr` files in `std/`. Registered in `internal/module/catalog.go` via the embedded `catalog.toml`. Available via `use math;`, `use sort;`, `use set;`, `use random;`.
+Catalog modules shipped as embedded `.pr` files in `modules/std/`. Registered in `internal/module/catalog.go` via the embedded `catalog.toml`. Available via `use math;`, `use sort;`, `use set;`, `use random;`.
 
-**`std/math.pr`** — Integer math (`min`, `max`, `abs`, `clamp`), constants (`PI`, `E`, `TAU`, `MAX_INT`, `MIN_INT`), f64 math via LLVM intrinsics (`sqrt`, `sin`, `cos`, `pow`, `exp`, `log`, `fabs`, `floor`, `ceil`, `round`), derived f64 functions (`tan`, `log2`, `log10`, `is_nan`, `is_inf`), integer power (`ipow`). LLVM intrinsics declared as `extern` functions mapped to codegen-emitted declarations (`promise_sqrt` → `@llvm.sqrt.f64`, etc). 7 intrinsic functions in `expr.go:genCallExpr`.
+**`modules/std/math.pr`** — Integer math (`min`, `max`, `abs`, `clamp`), constants (`PI`, `E`, `TAU`, `MAX_INT`, `MIN_INT`), f64 math via LLVM intrinsics (`sqrt`, `sin`, `cos`, `pow`, `exp`, `log`, `fabs`, `floor`, `ceil`, `round`), derived f64 functions (`tan`, `log2`, `log10`, `is_nan`, `is_inf`), integer power (`ipow`). LLVM intrinsics declared as `extern` functions mapped to codegen-emitted declarations (`promise_sqrt` → `@llvm.sqrt.f64`, etc). 7 intrinsic functions in `expr.go:genCallExpr`.
 
-**`std/sort.pr`** — Insertion sort for `Vector[int]` and `Vector[string]` (`sort_ints`, `sort_strings`). Comparison-based variants (`sort_ints_by`, `sort_strings_by`) taking `(int, int) bool` / `(string, string) bool` comparators. Pure Promise implementation (no native methods). `reverse_ints`, `reverse_strings`.
+**`modules/std/sort.pr`** — Insertion sort for `Vector[int]` and `Vector[string]` (`sort_ints`, `sort_strings`). Comparison-based variants (`sort_ints_by`, `sort_strings_by`) taking `(int, int) bool` / `(string, string) bool` comparators. Pure Promise implementation (no native methods). `reverse_ints`, `reverse_strings`.
 
-**`std/set.pr`** — `Set[T]` wrapper around `Map[T, bool]`. Methods: `add`, `remove`, `contains`, `get len`, `to_vector`, `union`, `intersection`, `difference`. All pure Promise.
+**`modules/std/set.pr`** — `Set[T]` wrapper around `Map[T, bool]`. Methods: `add`, `remove`, `contains`, `get len`, `to_vector`, `union`, `intersection`, `difference`. All pure Promise.
 
-**`std/random.pr`** — xorshift64 PRNG seeded from `nanotime()`. Functions: `random_int`, `random_range`, `random_f64`, `random_bool`, `shuffle_ints`. Uses `nanotime() int` extern for seeding.
+**`modules/std/random.pr`** — xorshift64 PRNG seeded from `nanotime()`. Functions: `random_int`, `random_range`, `random_f64`, `random_bool`, `shuffle_ints`. Uses `nanotime() int` extern for seeding.
 
 **Codegen support:** `genCallExpr` handles LLVM math intrinsics via name-based dispatch. `instanceFieldLLVMType` updated to not special-case `Map` (already `i8*`). `genCallExpr` applies `typeSubst` to constructor callee types for generic constructors inside generic methods.
 
@@ -717,7 +717,7 @@ Command-line interface. Core commands implemented; formatter planned.
 - Bare pipe detection: `echo '<code>' | promise` auto-enters exec mode
 - Inline error formatting: source line + `^` caret marker, no temp filenames
 - `promise clean` — remove build cache (`~/.promise/cache/build/`), `--global` also removes module cache
-- Embedded `std/` and `runtime/` in the binary via `go:embed` for self-contained install
+- Embedded `modules/std/` and `runtime/` in the binary via `go:embed` for self-contained install
 - **Test suite**: 1202 tests across 175 files — `tests/e2e/` (language features), `tests/std/` (standard library), `tests/concurrency/` (scheduler, channels, select, panic recovery, stress tests), `tests/modules/` (module system e2e), `tests/value_types/` (pure value types)
 - `promise doc <file.pr>` — generate documentation from `doc()` meta tags (**Phase 1 done**: `cmd/promise/doc.go`)
   - `-public` (default) / `-all` — filter by visibility
@@ -863,7 +863,7 @@ Tests: 1576 pass, 0 fail, 5 skip on `wasm32-wasi` (1581 native pass)
 
 | Item | Skipped tests | Effort | Notes |
 |------|--------------|--------|-------|
-| ~~f64→string (custom dtoa)~~ | ~~12~~ → 0 | ~~Medium~~ Done | Custom `_f64_to_str` in `std/format.pr` (pure Promise, %g format, 6 sig digits). No snprintf dependency. |
+| ~~f64→string (custom dtoa)~~ | ~~12~~ → 0 | ~~Medium~~ Done | Custom `_f64_to_str` in `modules/std/format.pr` (pure Promise, %g format, 6 sig digits). No snprintf dependency. |
 | f64→string full precision (Grisu2/Ryu) | 0 | Medium | Current implementation uses 6 significant digits (matches `%g`). For full round-trip precision (~17 digits), implement Grisu2 or Ryu algorithm. Needed for serialization/deserialization fidelity. |
 | Panic recovery (`setjmp`/`longjmp`) | 2 (panic_recovery_basic, panic_recovery_channel) | Medium | WASM has no `setjmp`/`longjmp`. Options: Emscripten-style JS exception handling, or WASM exception handling proposal (`try`/`catch`/`throw` instructions). |
 | ~~Free-list allocator~~ | ~~1~~ → 0 | ~~Medium~~ Done | Pre-compiled C free-list allocator (`wasm_alloc.c`) linked via wasm-ld. Size-class buckets (16B–64KB), sbrk via `memory.grow`. Replaces bump allocator. |
@@ -1108,5 +1108,5 @@ All non-module test files (`tests/...`) — both unit tests (`` `test ``) and E2
 
 | Item |
 |------|
-| ~~String slicing~~ — **Done.** `string[:]` operator implemented in `std/string.pr` and codegen. Tested in `tests/std/test_string.pr` (7 slice tests). |
+| ~~String slicing~~ — **Done.** `string[:]` operator implemented in `modules/std/string.pr` and codegen. Tested in `tests/std/test_string.pr` (7 slice tests). |
 | Unicode normalization |

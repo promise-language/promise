@@ -23,7 +23,7 @@ The only special behavior is that every source file automatically receives an in
 prefix needed). This is how Python's builtins work; it is how Rust's prelude works.
 
 **How it works**:
-- `std/promise.toml` marks std as a module (`[module] name = "std"`)
+- `modules/std/promise.toml` marks std as a module (`[module] name = "std"`)
 - `catalog.toml` registers std as an embedded catalog module (no URL/commit — lives in
   `resources/modules/std/`)
 - Every parsed file gets an auto-injected `UseDecl{CatalogName: "std", Alias: "_"}` so std
@@ -199,7 +199,7 @@ syscall on WASM" — there is no filesystem. `\`target(!wasm)` on `File` means W
 that import `modules/io` and try to use `File` get a sema error at compile time, not a runtime
 failure. That is strictly better.
 
-### Example: `std/time.pr` sleep
+### Example: `modules/std/time.pr` sleep
 
 Currently `defineNanotimeSleepFunc` in `io.go` has:
 
@@ -214,7 +214,7 @@ if c.isWasm {
 With `\`target`:
 
 ```promise
-// std/time.pr
+// modules/std/time.pr
 _sleep_nanos(int ns) `extern("promise_sleep_nanos") `target(!wasm);
 
 sleep(Duration d) `public `target(!wasm) {
@@ -254,7 +254,7 @@ functions, no `promise_path_sep` to maintain:
 sep() string `target(windows)  { return "\\"; }
 sep() string `target(!windows) { return "/"; }
 
-// std/io.pr
+// modules/std/io.pr
 `public `doc("Returns the platform line ending: `\\n` on POSIX, `\\r\\n` on Windows.")
 line_sep() string `target(windows)  { return "\r\n"; }
 line_sep() string `target(!windows) { return "\n"; }
@@ -270,12 +270,12 @@ Use `write_line` when writing to files or pipes where the platform convention ma
 
 ---
 
-## 4. `std/time.pr` — Stays in `std/`
+## 4. `modules/std/time.pr` — Stays in `std`
 
-`Duration` and `Instant` are already implemented in `std/time.pr` and the question is whether
+`Duration` and `Instant` are already implemented in `modules/std/time.pr` and the question is whether
 they should move to `modules/time`.
 
-**They stay in `std/`** for two reasons:
+**They stay in `std`** for two reasons:
 
 1. `Duration` is a pure value type (`int nanos \`value`). It has no PAL dependency and zero binary
    cost beyond the type definition. It is used everywhere: timeouts, retry delays, benchmarking,
@@ -284,11 +284,11 @@ they should move to `modules/time`.
 2. `promise_nanotime` is already emitted in every binary (used by the test runner infrastructure).
    `Instant.now()` calling it costs nothing additional.
 
-`sleep(Duration)` stays in `std/time.pr` with a `\`target` pair — the WASM no-op variant is
+`sleep(Duration)` stays in `modules/std/time.pr` with a `\`target` pair — the WASM no-op variant is
 explicit in source (see §2 example). The `promise_sleep_nanos` Go codegen branch is removed.
 
 **`modules/time`** then becomes the home for *higher-level* time operations that build on top of
-`std/time.pr`: calendar date/time representation, time zone handling, formatted parsing and
+`modules/std/time.pr`: calendar date/time representation, time zone handling, formatted parsing and
 serialization (RFC 3339, Unix timestamps). These are not universally needed and are significantly
 heavier.
 
@@ -609,7 +609,7 @@ pal_exec_wait(i8** argv) {i32, i8*, i8*}  // captures stdout/stderr as strings
 
 ## 9. `modules/time` — Higher-Level Time Operations
 
-**Status**: Placeholder. `std/time.pr` already provides `Duration`, `Instant`, and `sleep`. The
+**Status**: Placeholder. `modules/std/time.pr` already provides `Duration`, `Instant`, and `sleep`. The
 `modules/time` placeholder should become higher-level time utilities that build on top of those:
 
 ```promise
@@ -638,9 +638,9 @@ unix_now() int `public;  // seconds since Unix epoch
 ```
 
 The PAL function for wall clock time (`pal_wall_clock` / `CLOCK_REALTIME`) belongs here, not in
-`std/time.pr` (which uses `CLOCK_MONOTONIC` for `Instant.now()`).
+`modules/std/time.pr` (which uses `CLOCK_MONOTONIC` for `Instant.now()`).
 
-`modules/time` depends on `std/time.pr` (for `Duration`, `Instant`) but not vice versa.
+`modules/time` depends on `modules/std/time.pr` (for `Duration`, `Instant`) but not vice versa.
 
 ---
 
@@ -655,7 +655,7 @@ These are placeholders in the catalog for future design:
 | `modules/process` | Child process streams, pipes | PAL fork/exec with pipe capture |
 | `modules/fs` | Advanced filesystem: symlinks, watch, temp files | PAL extensions |
 | `modules/crypto` | Hashing, HMAC, random bytes | LLVM intrinsics + PAL getrandom |
-| `modules/json` | JSON parse/serialize | `modules/io`, `std/error.pr` |
+| `modules/json` | JSON parse/serialize | `modules/io`, `modules/std/error.pr` |
 
 None of these belong in `std/`. They are progressively heavier and progressively less universal.
 
@@ -664,7 +664,7 @@ None of these belong in `std/`. They are progressively heavier and progressively
 ## 11. Complete Layout
 
 ```
-std/                (auto-imported via implicit `use std as _;` — once §1 refactor is done)
+modules/std/        (auto-imported via implicit `use std as _;`)
   io.pr         — println, write_line, Closer, line_sep()
   format.pr     — Writer, Format
   parse.pr      — Reader, Parse, Scanner, scan[T]
@@ -746,7 +746,7 @@ Add a new Phase 4 header: "Platform Modules — see `docs/platform-modules.md`."
 
 ### ~~Phase A — std-as-module refactor~~ (Done)
 
-1. ~~Add `std/promise.toml` (`[module] name = "std"`)~~ — done
+1. ~~Add `modules/std/promise.toml` (`[module] name = "std"`)~~ — done
 2. ~~In `main.go`: remove `mergeStdDecls`/`parseStdFiles`; auto-inject `UseDecl{CatalogName: "std", Alias: "_"}` into every file instead~~ — done
 3. ~~In `sema/decl.go`: remove `stdScope`-as-parent special case; std resolved like any catalog module via `loadCatalog("std")`~~ — done (`CheckForStdModule`, `globScope`)
 4. ~~Remove `IsStd` flag from AST nodes and `isDeclStd` from sema~~ — done
@@ -758,7 +758,7 @@ No language changes — all existing programs continue to work identically. Buil
 
 ### Phase B — platform constants (minimal, immediate value)
 
-7. **`line_sep()` in `std/io.pr`** + codegen `promise_line_sep`
+7. **`line_sep()` in `modules/std/io.pr`** + codegen `promise_line_sep`
 8. **Update `write_line`** to use `line_sep()` instead of `"\n"`
 9. **`sep()` in `modules/path`** + codegen `promise_path_sep`
 

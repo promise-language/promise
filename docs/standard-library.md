@@ -3,7 +3,7 @@
 Promise's standard library design: module inventory, implementation phases, PAL extensions needed, and testing strategy.
 
 **Design principles** (from CLAUDE.md):
-- Implement in Promise (`std/*.pr`) wherever possible — only use `native` for unavoidable low-level operations
+- Implement in Promise (`modules/std/*.pr`) wherever possible — only use `native` for unavoidable low-level operations
 - Small, orthogonal, predictable — an AI agent should be able to generate correct code without ecosystem knowledge
 - Every effect visible at the call site — no hidden initialization, no implicit state
 
@@ -87,7 +87,7 @@ These features are incomplete or deferred and must be finished before the stdlib
 
 Fully implemented with inheritance-based error types, typed handlers, and exhaustiveness checking.
 
-**Implementation** (in `std/error.pr`):
+**Implementation** (in `modules/std/error.pr`):
 
 ```promise
 type error {
@@ -123,7 +123,7 @@ type TimeoutError is DbError is AppError is error { }
 
 Fully implemented with structural interfaces, duck-typed for-in, all combinators (lazy intermediate + eager terminal), and generic combinators (map[R], fold[R], zip[U], enumerate, flat_map[R]).
 
-**Implementation** (in `std/iter.pr`):
+**Implementation** (in `modules/std/iter.pr`):
 
 - `Iterator[T]` — structural interface with `next() T?` abstract method and 20 default combinator methods
 - `_FnIter[T]` — closure-based iterator (`is Iterator[T]`) with `() -> T?` function-typed field
@@ -154,14 +154,14 @@ Fully implemented with structural interfaces, duck-typed for-in, all combinators
 | Aspect | Current State | Remaining |
 |--------|--------------|-----------|
 | String interpolation | Works for all primitives (`string`, `int`, `f64`, `bool`, `char`, etc.) and **user-defined types** implementing `format(Writer ~w)!` | — |
-| `Writer` interface | **Defined** in `std/format.pr` | — |
-| `Format` interface | **Defined** in `std/format.pr` — `format(Writer ~w)!` (failable) | — |
+| `Writer` interface | **Defined** in `modules/std/format.pr` | — |
+| `Format` interface | **Defined** in `modules/std/format.pr` — `format(Writer ~w)!` (failable) | — |
 | `to_string()` | **Available** on all primitives via `"{this}"` | — |
 | `format()` | **Available** on all primitives — delegates to `w.write_string(to_string())` | — |
-| `Builder` | **Implemented** in `std/builder.pr` (pure Promise) | — |
+| `Builder` | **Implemented** in `modules/std/builder.pr` (pure Promise) | — |
 | User type interpolation | **Implemented** — `"{x}"` desugars to Builder + `x.format(~builder)!` + `builder.to_string()` for types implementing `Format` | — |
 
-**Types** (in `std/format.pr`):
+**Types** (in `modules/std/format.pr`):
 
 ```promise
 type Writer `structural {
@@ -225,13 +225,13 @@ println("point: {p}");   // point: (3, 4)
 | Aspect | Status | Details |
 |--------|--------|---------|
 | Parsing | **Done** | `int.parse`, `bool.parse`, `uint.parse`, `f64.parse` — all pure Promise |
-| Byte input | **Done** | `Reader` structural interface in `std/parse.pr` with `read_byte` default method |
-| `Scanner` | **Done** | Wraps string, satisfies Reader, tracks position. In `std/parse.pr` |
+| Byte input | **Done** | `Reader` structural interface in `modules/std/parse.pr` with `read_byte` default method |
+| `Scanner` | **Done** | Wraps string, satisfies Reader, tracks position. In `modules/std/parse.pr` |
 | `scan[T]()` | **Done** | Generic convenience: `scan[int]("42")!` — wraps string in Scanner, calls `T.parse` |
 
 **The problem**: `Format` works as a structural interface because it's an instance method — you have a value and call `value.format(~writer)`. Parsing is the inverse: you need to **create** a value by reading from a source. There's no instance to call a method on. The operation lives on the type, not on an instance. Additionally, a parser may not consume all the input — it should read what it needs and leave the rest.
 
-**Proposed types** (in `std/parse.pr`):
+**Proposed types** (in `modules/std/parse.pr`):
 
 ```promise
 type Reader `structural {
@@ -458,7 +458,7 @@ declare double @llvm.minnum.f64(double, double)
 declare double @llvm.maxnum.f64(double, double)
 ```
 
-These are pure computational intrinsics that map directly to hardware instructions. Declared in codegen, wrapped by Promise functions in `std/math.pr`.
+These are pure computational intrinsics that map directly to hardware instructions. Declared in codegen, wrapped by Promise functions in `modules/std/math.pr`.
 
 ### 3.6 String Utilities
 
@@ -488,12 +488,12 @@ EmitMemcpy(module *ir.Module) *ir.Func      // i8* dst, i8* src, i64 len → voi
 Complete the features from Section 2 before building stdlib modules.
 
 **0a. Error type system — DONE**
-- File: `std/error.pr` — defines `error` with `string message` field
+- File: `modules/std/error.pr` — defines `error` with `string message` field
 - Sema: `checkRaiseStmt` validates inheritance, `checkErrorHandlerExpr` supports typed handlers with exhaustiveness
 - Tests: 22+ sema tests, 5 e2e test files
 
 **0b. Stream combinators — DONE**
-- File: `std/iter.pr` — `Iterator[T]` structural interface with `next() T?` + 20 default combinator methods, `_FnIter[T]` closure-based iterator, `Stream[T]` structural interface, `Generator[T]` coroutine-based iterator
+- File: `modules/std/iter.pr` — `Iterator[T]` structural interface with `next() T?` + 20 default combinator methods, `_FnIter[T]` closure-based iterator, `Stream[T]` structural interface, `Generator[T]` coroutine-based iterator
 - Duck-typed for-in: `ForInKind` enum (ForInNext/ForInIter) in sema, `genForInCustomIter` in codegen
 - `Vector[T].iter()` returns `Iterator[T]`
 - All combinators: filter, take, skip, take_while, skip_while, chain, map[R], zip[U], enumerate, flat_map[R] (lazy), collect, count, fold[R], reduce, any, every, first, last, find, for_each (eager)
@@ -507,14 +507,14 @@ Complete the features from Section 2 before building stdlib modules.
 - Tests: 32 e2e tests in `tests/e2e/test_scalar_casts.pr`, 9 sema tests, 6 codegen tests
 
 **0d. Format & Writer — DONE**
-- File: `std/format.pr` — `Writer` and `Format` structural interfaces with default `write_string` method
-- File: `std/builder.pr` — `Builder` type (pure Promise, wraps `Vector[u8]`, satisfies `Writer`)
+- File: `modules/std/format.pr` — `Writer` and `Format` structural interfaces with default `write_string` method
+- File: `modules/std/builder.pr` — `Builder` type (pure Promise, wraps `Vector[u8]`, satisfies `Writer`)
 - Primitives have `to_string()` via string interpolation (`"{this}"`)
 - All primitives (`int`, `i8`-`i64`, `uint`, `u8`-`u64`, `f32`, `f64`, `bool`, `char`, `string`) implement `format(Writer ~w)!`
 - String interpolation desugaring to Format — **DONE**. User-defined types implementing `format(Writer ~w)!` are now supported in `{}` interpolation. A Builder is created internally, the type's format method writes to it, and the result is converted to string via `Builder.to_string()`. Both direct dispatch and vtable dispatch (polymorphic) are supported. Value types are also supported.
 
 **0e. Parse & Reader — DONE**
-- File: `std/parse.pr` — `Reader` structural interface (with `read_byte` default), `Parse` structural interface with factory method, `Scanner` type, `scan[T]()` convenience function
+- File: `modules/std/parse.pr` — `Reader` structural interface (with `read_byte` default), `Parse` structural interface with factory method, `Scanner` type, `scan[T]()` convenience function
 - `int.parse(Reader ~r) int!`, `bool.parse(Reader ~r) bool!`, `uint.parse(Reader ~r) uint!`, `f64.parse(Reader ~r) f64!` — all pure Promise
 - `string.from_bytes(u8[]) string` native factory, `string.bytes() u8[]` and `string.byte_at(int) u8` native methods
 - `Vector[T].filled(T, int) T[]` factory for buffer pre-allocation
@@ -527,7 +527,7 @@ Complete the features from Section 2 before building stdlib modules.
 
 These modules are implemented entirely in Promise, using only existing native operations.
 
-#### 1a. `std/set.pr` — Set[T]
+#### 1a. `modules/std/set.pr` — Set[T]
 
 ```promise
 type Set[T: Hashable + Equal] {
@@ -555,12 +555,12 @@ type Set[T: Hashable + Equal] {
 }
 ```
 
-- **File**: `std/set.pr`
+- **File**: `modules/std/set.pr`
 - **Dependencies**: `map.pr`, `hashable.pr`, `equal.pr`
 - **Implementation**: Wrapper around `map[T, bool]`
 - **Test**: `tests/std/test_set.pr`
 
-#### 1b. `std/sort.pr` — Sorting
+#### 1b. `modules/std/sort.pr` — Sorting
 
 ```promise
 // Sort a vector in-place using natural ordering
@@ -579,14 +579,14 @@ sorted_by[T](T[] &vec, |T, T| bool less_than) T[];
 binary_search[T: Ordered](T[] &vec, T target) int?;
 ```
 
-- **File**: `std/sort.pr`
+- **File**: `modules/std/sort.pr`
 - **Dependencies**: `ordered.pr`, `vector.pr`
 - **Implementation**: Introsort (quicksort + heapsort fallback + insertion sort for small partitions). Pure Promise.
 - **Test**: `tests/std/test_sort.pr`
 
-#### 1c. `std/string_util.pr` — String Utilities
+#### 1c. `modules/std/string_util.pr` — String Utilities
 
-Additional `string` methods (extend `std/string.pr`):
+Additional `string` methods (extend `modules/std/string.pr`):
 
 ```promise
 type string `native {
@@ -613,18 +613,18 @@ join(string[] parts, string sep) string;
 count(string s, string sub) int;
 ```
 
-- **File**: `std/string_util.pr` (free functions), extend `std/string.pr` (methods)
+- **File**: `modules/std/string_util.pr` (free functions), extend `modules/std/string.pr` (methods)
 - **Dependencies**: `string.pr`, `vector.pr`
 - **Implementation**: Pure Promise using existing `string.[]`, `string.[:]`, `string.+`
 - **Test**: `tests/std/test_string_util.pr`
 
-#### 1d. `std/result.pr` — Result Utilities — DEFERRED
+#### 1d. `modules/std/result.pr` — Result Utilities — DEFERRED
 
 Failable types (`T!`) in Promise are a function-level concept — they cannot be used as parameter or variable types. The planned `unwrap_or[T](T! value, T default_val)` and `is_error[T](T! value)` are not expressible. Promise's built-in error handling syntax already covers these use cases concisely:
 - `unwrap_or` → `failable_call() ? e { default_val }`
 - `is_error` → `bool err = false; failable_call() ? e { err = true; }`
 
-No `std/result.pr` is needed.
+No `modules/std/result.pr` is needed.
 
 ---
 
@@ -644,10 +644,10 @@ No `std/result.pr` is needed.
 
 **Design change from original plan**: `to_string()` uses string interpolation (`"{this}"`) directly instead of wrapping `format()` through a Builder. This is simpler, has zero native codegen, and works today. `format(Writer ~w)!` is separately implemented for composable output to arbitrary Writers.
 
-- **Files**: `std/int.pr`, `std/uint.pr`, `std/float.pr`, `std/bool.pr`, `std/char.pr`, `std/string.pr`
+- **Files**: `modules/std/int.pr`, `modules/std/uint.pr`, `modules/std/float.pr`, `modules/std/bool.pr`, `modules/std/char.pr`, `modules/std/string.pr`
 - **Test**: `tests/std/test_to_string.pr`, `tests/std/test_parse.pr`, `tests/std/test_format.pr`
 
-#### 2b. `std/builder.pr` — Builder — DONE
+#### 2b. `modules/std/builder.pr` — Builder — DONE
 
 ```promise
 type Builder `public {
@@ -661,20 +661,20 @@ type Builder `public {
 }
 ```
 
-- **File**: `std/builder.pr` — 100% pure Promise, no native/extern methods
+- **File**: `modules/std/builder.pr` — 100% pure Promise, no native/extern methods
 - **Dependencies**: `vector.pr` (backed by `u8[]` internally), `string.from_bytes()` native factory
 - **Implementation**: Wraps a `Vector[u8]`. `write()` and `write_string()` push bytes individually. `to_string()` calls `string.from_bytes()` which reads Vector[u8] data+count and calls `promise_string_new`. `write_char` not yet implemented.
 - **Test**: `tests/std/test_builder.pr` (9 tests)
 
-#### 2c. `std/fmt.pr` — Runtime Template Formatting — DEFERRED
+#### 2c. `modules/std/fmt.pr` — Runtime Template Formatting — DEFERRED
 
-Runtime template formatting (`fmt1`-`fmt6`) is deferred. String interpolation (`"{x} is {age} years old"`) covers the vast majority of formatting needs at compile time. Runtime template formatting, if needed, belongs in a catalog module (`modules/templates/`) rather than `std/`, since it is not a core primitive.
+Runtime template formatting (`fmt1`-`fmt6`) is deferred. String interpolation (`"{x} is {age} years old"`) covers the vast majority of formatting needs at compile time. Runtime template formatting, if needed, belongs in a catalog module (`modules/templates/`) rather than `modules/std/`, since it is not a core primitive.
 
 ---
 
 ### Phase 3: Math & Time
 
-#### 3a. `std/math.pr` — Extended Math (LLVM Intrinsics)
+#### 3a. `modules/std/math.pr` — Extended Math (LLVM Intrinsics)
 
 ```promise
 // Extend existing std/math.pr which has: min, max, abs, clamp (int only)
@@ -721,13 +721,13 @@ is_inf(f64 x) bool;
 is_finite(f64 x) bool;
 ```
 
-- **File**: `std/math.pr` (extend)
+- **File**: `modules/std/math.pr` (extend)
 - **Dependencies**: None (LLVM intrinsics)
 - **Native codegen**: Declare LLVM intrinsics (`@llvm.sqrt.f64`, etc.), generate wrapper functions
 - **Implementation**: `native` functions backed by LLVM intrinsics. `min`, `max`, `clamp` are generic via Ordered constraint (pure Promise). `abs(f64)` uses `llvm.fabs.f64`; `abs(int)` is pure Promise. `tan`, `log2`, `log10`, `trunc`, `is_nan`, `is_inf`, `is_finite` implemented in pure Promise on top of native primitives.
 - **Test**: `tests/std/test_math.pr`
 
-#### 3b. `std/random.pr` — Pseudorandom Numbers
+#### 3b. `modules/std/random.pr` — Pseudorandom Numbers
 
 ```promise
 type Random {
@@ -750,33 +750,33 @@ type Random {
 }
 ```
 
-- **File**: `std/random.pr`
+- **File**: `modules/std/random.pr`
 - **Dependencies**: `uint` bitwise operators (exist), `as!` casts (exist)
 - **Implementation**: Pure Promise. xoshiro256** state is 4 `uint` fields. Seed expansion via splitmix64. Float conversion: mask top bits, OR into exponent, subtract 1.0.
 - **Test**: `tests/std/test_random.pr`
 
-#### 3c. `std/time.pr` — Duration & Instant — DONE
+#### 3c. `modules/std/time.pr` — Duration & Instant — DONE
 
 - `Duration` — pure value type (`int nanos `value`). Factory constructors: `from_nanos`, `from_micros`, `from_millis`, `from_secs`, `zero`. Getters: `as_nanos`, `as_micros`, `as_millis`, `as_secs`. Arithmetic: `+`, `-`, `*`. Full comparison operators. `to_string()` with adaptive units (ns/us/ms/s). `format(Writer ~w)!`.
 - `Instant` — pure value type. `now()` factory (calls `_nanotime` extern). `elapsed()`, `duration_since()`. Comparison operators.
 - `sleep(Duration d)` — free function, calls `_sleep_nanos` extern. WASM: no-op.
 - Native codegen: `promise_nanotime` (clock_gettime CLOCK_MONOTONIC), `promise_sleep_nanos` (nanosleep(2)). Bodies in `io.go:definePALBodies`. Test runner uses separate `.promise_nanotime_raw` to avoid ABI conflict.
-- **File**: `std/time.pr`
+- **File**: `modules/std/time.pr`
 - **Test**: `tests/std/test_time.pr` (23 tests)
 
 ---
 
 ### Phase 4: System I/O
 
-#### 4a. `std/io.pr` — Extended I/O (Closer Interface, Utilities) — DONE
+#### 4a. `modules/std/io.pr` — Extended I/O (Closer Interface, Utilities) — DONE
 
 - `Closer` — structural interface with `close(~this)!` abstract method. Any type with a matching `close` method satisfies it.
 - `write_line(Writer ~w, string s)!` — convenience function, writes string + newline.
 - `read_all`/`read_string` deferred to Phase 4b (File) when there are concrete Reader sources beyond Scanner.
-- **File**: `std/io.pr` (extended)
+- **File**: `modules/std/io.pr` (extended)
 - **Test**: `tests/std/test_io.pr` (4 tests)
 
-#### 4b. `std/file.pr` — File System Access
+#### 4b. `modules/std/file.pr` — File System Access
 
 ```promise
 type File {
@@ -810,13 +810,13 @@ remove_file(string path)!;
 mkdir(string path)!;
 ```
 
-- **File**: `std/file.pr`
+- **File**: `modules/std/file.pr`
 - **Dependencies**: PAL file I/O (3.1), Error type (Phase 0a), `Reader`/`Writer`/`Closer` (4a)
 - **Native codegen**: `File.open` → PAL `EmitFileOpen`, `File.read` → PAL `EmitFileRead`, etc.
 - **Implementation**: Thin wrapper around PAL calls. Free functions construct/use/close a `File` internally.
 - **Test**: `tests/std/test_file.pr`
 
-#### 4c. `std/path.pr` — Path Manipulation
+#### 4c. `modules/std/path.pr` — Path Manipulation
 
 ```promise
 // Pure string-based path operations (no filesystem access)
@@ -829,12 +829,12 @@ path_is_abs(string path) bool;
 path_normalize(string path) string;
 ```
 
-- **File**: `std/path.pr`
+- **File**: `modules/std/path.pr`
 - **Dependencies**: `string.pr` methods only
 - **Implementation**: Pure Promise string manipulation. Uses `/` as separator (POSIX-first; Windows support deferred).
 - **Test**: `tests/std/test_path.pr`
 
-#### 4d. `std/os.pr` — OS Interaction
+#### 4d. `modules/std/os.pr` — OS Interaction
 
 ```promise
 // Environment
@@ -857,12 +857,12 @@ type ProcessResult {
 exec(string program, string[] args) ProcessResult!;
 ```
 
-- **File**: `std/os.pr`
+- **File**: `modules/std/os.pr`
 - **Dependencies**: PAL OS (3.2), PAL process (3.4), Error type (Phase 0a)
 - **Native codegen**: `get_env` → PAL `EmitGetEnv`, `os_args` → global captured in main, `exec` → PAL `EmitProcessExec` + `EmitProcessWait`
 - **Test**: `tests/std/test_os.pr`
 
-#### 4e. `std/stdin.pr` — Standard Input
+#### 4e. `modules/std/stdin.pr` — Standard Input
 
 ```promise
 // Read a line from stdin (blocking)
@@ -872,7 +872,7 @@ read_line() string!;
 read_stdin() string!;
 ```
 
-- **File**: `std/stdin.pr`
+- **File**: `modules/std/stdin.pr`
 - **Dependencies**: PAL `EmitFileRead` (fd 0)
 - **Implementation**: Read into buffer until newline (for `read_line`) or EOF (for `read_stdin`).
 - **Test**: `tests/std/test_stdin.pr`
@@ -883,7 +883,7 @@ read_stdin() string!;
 
 These modules are lower priority. Full API design to be done when dependencies are ready.
 
-#### 5a. `std/json.pr` — JSON Parsing/Serialization
+#### 5a. `modules/std/json.pr` — JSON Parsing/Serialization
 
 ```promise
 enum JsonValue {
@@ -902,7 +902,7 @@ to_json(JsonValue value) string;
 - **Dependencies**: Phase 2 (string operations), Phase 0a (error types)
 - **Implementation**: Recursive descent parser in pure Promise
 
-#### 5b. `std/regex.pr` — Regular Expressions
+#### 5b. `modules/std/regex.pr` — Regular Expressions
 
 ```promise
 type Regex {
@@ -923,7 +923,7 @@ type Match {
 - **Dependencies**: Phase 1 (string utilities)
 - **Implementation**: Thompson NFA in pure Promise (no PCRE dependency)
 
-#### 5c. `std/net.pr` — TCP Networking
+#### 5c. `modules/std/net.pr` — TCP Networking
 
 ```promise
 type TcpListener {
@@ -943,7 +943,7 @@ type TcpStream {
 - **Dependencies**: PAL socket extensions, IO reactor (epoll/kqueue)
 - **Note**: Requires significant PAL work and potentially goroutine-aware I/O integration
 
-#### 5d. `std/http.pr` — HTTP Client
+#### 5d. `modules/std/http.pr` — HTTP Client
 
 ```promise
 type HttpResponse {
@@ -956,9 +956,9 @@ http_get(string url) HttpResponse!;
 http_post(string url, string body, map[string, string] headers) HttpResponse!;
 ```
 
-- **Dependencies**: `std/net.pr`, `std/json.pr`
+- **Dependencies**: `modules/std/net.pr`, `modules/std/json.pr`
 
-#### 5e. `std/crypto.pr` — Cryptographic Hashing
+#### 5e. `modules/std/crypto.pr` — Cryptographic Hashing
 
 ```promise
 sha256(u8[] data) u8[];
@@ -975,7 +975,7 @@ sha256_hex(u8[] data) string;
 
 For each PAL-backed function, the implementation follows this pattern:
 
-**1. Declare in `std/X.pr`:**
+**1. Declare in `modules/std/X.pr`:**
 ```promise
 _pal_file_open(string path, int flags, int mode) int `extern("promise_file_open");
 ```
@@ -1033,7 +1033,7 @@ sqrtF64 := c.module.NewFunc("llvm.sqrt.f64", irtypes.Double,
 sqrtF64.FuncAttrs = append(sqrtF64.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrReadNone)
 ```
 
-**2. Mark as native in `std/math.pr`:**
+**2. Mark as native in `modules/std/math.pr`:**
 ```promise
 sqrt(f64 x) f64 `native;
 ```
@@ -1081,7 +1081,7 @@ bin/test.sh                                  # full e2e suite
 
 ### 5.4 Embedding Updated Stdlib
 
-When adding new types or functions to `std/*.pr`, run `./build` from the repo root — it automatically embeds the updated stdlib before compiling.
+When adding new types or functions to `modules/std/*.pr`, run `./build` from the repo root — it automatically embeds the updated stdlib before compiling.
 
 The `stdAll` mini-stdlib used in Go unit tests (`codegen_test.go`, `sema_test.go`, `ownership_test.go`) is **auto-populated from the embedded std** via `go:embed` at test init time — no manual update needed. `TestResourcesFresh` (in `cmd/promise/resources_test.go`) detects stale embedded copies when `go test ./...` is run.
 
@@ -1126,30 +1126,30 @@ bin/test.sh                            # rebuild + all tests pass (including new
 
 | Phase | File | Type | New PAL | Lines (est.) |
 |-------|------|------|---------|-------------|
-| 0a | `std/error.pr` | Promise | No | 15 |
-| 0b | `std/iter.pr` | Promise | No | 300 |
-| 0c | `std/int.pr` etc. | Native | No | 156 |
-| 0d | `std/format.pr` | Promise | No | 15 |
-| 0e | `std/parse.pr` | Promise | No | 15 |
-| 1a | `std/set.pr` | Promise | No | 80 |
-| 1b | `std/sort.pr` | Promise | No | 120 |
-| 1c | `std/string_util.pr` | Promise | No | 80 |
-| 1d | `std/result.pr` | ~~Promise~~ | No | ~~30~~ DEFERRED |
-| 2a | `std/int.pr` etc. | Native + Promise | No | 60 |
-| 2b | `std/builder.pr` | Mostly Promise | No | 60 |
-| 2c | `std/fmt.pr` | ~~Promise~~ | No | ~~50~~ DEFERRED |
-| 3a | `std/math.pr` | Native + Promise | No | 100 |
-| 3b | `std/random.pr` | Promise | No | 80 |
-| 3c | `std/time.pr` | Promise + Native | 3 | 120 |
-| 4a | `std/io.pr` | Promise | No | 40 |
-| 4b | `std/file.pr` | Promise + Native | 6 | 100 |
-| 4c | `std/path.pr` | Promise | No | 60 |
-| 4d | `std/os.pr` | Promise + Native | 2 | 60 |
-| 4e | `std/stdin.pr` | Promise + Native | No | 30 |
-| 5a | `std/json.pr` | Promise | No | 300 |
-| 5b | `std/regex.pr` | Promise | No | 400 |
-| 5c | `std/net.pr` | Promise + Native | 6+ | 150 |
-| 5d | `std/http.pr` | Promise | No | 200 |
-| 5e | `std/crypto.pr` | Promise | No | 150 |
+| 0a | `modules/std/error.pr` | Promise | No | 15 |
+| 0b | `modules/std/iter.pr` | Promise | No | 300 |
+| 0c | `modules/std/int.pr` etc. | Native | No | 156 |
+| 0d | `modules/std/format.pr` | Promise | No | 15 |
+| 0e | `modules/std/parse.pr` | Promise | No | 15 |
+| 1a | `modules/std/set.pr` | Promise | No | 80 |
+| 1b | `modules/std/sort.pr` | Promise | No | 120 |
+| 1c | `modules/std/string_util.pr` | Promise | No | 80 |
+| 1d | `modules/std/result.pr` | ~~Promise~~ | No | ~~30~~ DEFERRED |
+| 2a | `modules/std/int.pr` etc. | Native + Promise | No | 60 |
+| 2b | `modules/std/builder.pr` | Mostly Promise | No | 60 |
+| 2c | `modules/std/fmt.pr` | ~~Promise~~ | No | ~~50~~ DEFERRED |
+| 3a | `modules/std/math.pr` | Native + Promise | No | 100 |
+| 3b | `modules/std/random.pr` | Promise | No | 80 |
+| 3c | `modules/std/time.pr` | Promise + Native | 3 | 120 |
+| 4a | `modules/std/io.pr` | Promise | No | 40 |
+| 4b | `modules/std/file.pr` | Promise + Native | 6 | 100 |
+| 4c | `modules/std/path.pr` | Promise | No | 60 |
+| 4d | `modules/std/os.pr` | Promise + Native | 2 | 60 |
+| 4e | `modules/std/stdin.pr` | Promise + Native | No | 30 |
+| 5a | `modules/std/json.pr` | Promise | No | 300 |
+| 5b | `modules/std/regex.pr` | Promise | No | 400 |
+| 5c | `modules/std/net.pr` | Promise + Native | 6+ | 150 |
+| 5d | `modules/std/http.pr` | Promise | No | 200 |
+| 5e | `modules/std/crypto.pr` | Promise | No | 150 |
 | | **Total (Phases 0-4)** | | **11** | **~1365** |
 | | **Total (all phases)** | | **17+** | **~2665** |

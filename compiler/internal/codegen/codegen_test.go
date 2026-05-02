@@ -4430,6 +4430,257 @@ func TestAsForcecast(t *testing.T) {
 	assertContains(t, ir, "call void @promise_panic")
 }
 
+func TestScalarCastCharToInt(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			char c = 'A';
+			int x = c as int;
+		}
+	`)
+	// char (i32) → int (i64): zero extension (codepoints are unsigned)
+	assertContains(t, ir, "zext i32")
+}
+
+func TestScalarCastIntToChar(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int x = 65;
+			char c = x as char;
+		}
+	`)
+	// int (i64) → char (i32): truncation
+	assertContains(t, ir, "trunc i64")
+}
+
+func TestScalarCastBoolToInt(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			bool b = true;
+			int x = b as int;
+		}
+	`)
+	// bool (i1) → int (i64): zero extension
+	assertContains(t, ir, "zext i1")
+}
+
+func TestScalarCastIntToBoolIR(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int x = 42;
+			bool b = x as bool;
+		}
+	`)
+	// int → bool uses icmp ne (not trunc), so 2 as bool == true
+	assertContains(t, ir, "icmp ne i64")
+}
+
+func TestScalarCastF64ToBoolIR(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			f64 f = 1.5;
+			bool b = f as bool;
+		}
+	`)
+	// float → bool uses fcmp une (unordered not-equal to 0.0, so NaN is truthy)
+	assertContains(t, ir, "fcmp une double")
+}
+
+func TestScalarCastNoRTTI(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			char c = 'A';
+			int x = c as int;
+			bool b = x as bool;
+		}
+	`)
+	// Scalar casts should use zext/icmp, not RTTI cast blocks
+	assertContains(t, ir, "zext i32")
+	assertContains(t, ir, "icmp ne i64")
+	assertNotContains(t, ir, "cast.some")
+	assertNotContains(t, ir, "cast.none")
+}
+
+func TestScalarCastCharToF64(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			char c = 'A';
+			f64 f = c as f64;
+		}
+	`)
+	// char (i32, unsigned) → f64: uitofp
+	assertContains(t, ir, "uitofp i32")
+}
+
+func TestScalarCastF64ToChar(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			f64 f = 65.0;
+			char c = f as char;
+		}
+	`)
+	// f64 → char (i32, unsigned): fptoui
+	assertContains(t, ir, "fptoui double")
+}
+
+func TestScalarCastBoolToF64(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			bool b = true;
+			f64 f = b as f64;
+		}
+	`)
+	// bool (i1, unsigned) → f64: uitofp
+	assertContains(t, ir, "uitofp i1")
+}
+
+func TestScalarCastF32ToBoolIR(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			f32 f = 1.0f32;
+			bool b = f as bool;
+		}
+	`)
+	// f32 → bool: fcmp une float
+	assertContains(t, ir, "fcmp une float")
+}
+
+func TestScalarCastSameWidthNoop(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int x = 42;
+			uint u = x as uint;
+		}
+	`)
+	// Same-width cast (i64 → i64) is a no-op — value is loaded and stored directly.
+	// The main function should NOT contain zext/sext/trunc of i64 for this cast.
+	// Just verify it compiles and the RTTI cast path is not used.
+	assertNotContains(t, ir, "cast.some")
+	assertNotContains(t, ir, "cast.none")
+}
+
+func TestScalarCastI8SextToInt(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			i8 x = 42i8;
+			int y = x as int;
+		}
+	`)
+	// i8 (signed) → int (i64): sign extension
+	assertContains(t, ir, "sext i8")
+}
+
+func TestScalarCastU8ZextToInt(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			u8 x = 200u8;
+			int y = x as int;
+		}
+	`)
+	// u8 (unsigned) → int (i64): zero extension
+	assertContains(t, ir, "zext i8")
+}
+
+func TestScalarCastIntSitofp(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int x = 42;
+			f64 f = x as f64;
+		}
+	`)
+	// int (signed) → f64: sitofp
+	assertContains(t, ir, "sitofp i64")
+}
+
+func TestScalarCastUintUitofp(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			uint x = 42 as! uint;
+			f64 f = x as f64;
+		}
+	`)
+	// uint (unsigned) → f64: uitofp
+	assertContains(t, ir, "uitofp i64")
+}
+
+func TestScalarCastF64Fptosi(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			f64 f = 3.14;
+			int x = f as int;
+		}
+	`)
+	// f64 → int (signed): fptosi
+	assertContains(t, ir, "fptosi double")
+}
+
+func TestScalarCastF64Fptoui(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			f64 f = 3.14;
+			uint x = f as uint;
+		}
+	`)
+	// f64 → uint (unsigned): fptoui
+	assertContains(t, ir, "fptoui double")
+}
+
+func TestScalarCastF32Fpext(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			f32 x = 1.5f32;
+			f64 y = x as f64;
+		}
+	`)
+	// f32 → f64: fpext
+	assertContains(t, ir, "fpext float")
+}
+
+func TestScalarCastF64Fptrunc(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			f64 x = 1.5;
+			f32 y = x as f32;
+		}
+	`)
+	// f64 → f32: fptrunc
+	assertContains(t, ir, "fptrunc double")
+}
+
+func TestScalarCastI16ToBoolIR(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			i16 x = 100i16;
+			bool b = x as bool;
+		}
+	`)
+	// i16 → bool: icmp ne i16
+	assertContains(t, ir, "icmp ne i16")
+}
+
+func TestScalarCastCharToBoolIR(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			char c = 'A';
+			bool b = c as bool;
+		}
+	`)
+	// char (i32) → bool: icmp ne i32
+	assertContains(t, ir, "icmp ne i32")
+}
+
+func TestScalarCastAsBangScalarNoRTTI(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			char c = 'A';
+			int x = c as! int;
+		}
+	`)
+	// as! on scalar types should also use direct cast, not RTTI path
+	assertContains(t, ir, "zext i32")
+	assertNotContains(t, ir, "cast.ok")
+	assertNotContains(t, ir, "cast.panic")
+}
+
 func TestFieldShadowing(t *testing.T) {
 	ir := generateIR(t, `
 		type Base { int x; int y; }

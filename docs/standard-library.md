@@ -34,11 +34,11 @@ The stdlib today (27 files) provides:
 | Math | `math.pr`, `random.pr` | `min`, `max`, `abs`, `clamp`, `sqrt`, `sin`, `cos`, `tan`, `pow`, `exp`, `log`, `floor`, `ceil`, `round`, `Random` PRNG |
 | Sorting | `sort.pr` | `sort(T[])` for `Ordered` types |
 | Interfaces | `equal.pr`, `ordered.pr`, `hashable.pr` | `Equal`, `Ordered`, `Hashable` structural types |
-| Iterators | `iter.pr` | `Iterator[T]`, `Stream[T]` abstract type stubs (no combinators) |
+| Iterators | `iter.pr` | `Iterator[T]` structural interface with 20 default combinator methods, `Stream[T]` structural interface, `_FnIter[T]` closure-based iterator, `Generator[T]` coroutine-based iterator, duck-typed for-in |
 | Concurrency | `channel.pr`, `task.pr`, `runtime.pr` | `Channel[T]` / `channel[T]` send/close, `Task[T]` / `task[T]` handle, scheduler stats |
 | Other | `range.pr`, `hash.pr`, `assert.pr`, `error.pr` | `Range` / `..`/`..=`, FNV-1a hash, `assert(bool, string)`, `error` base type |
 
-**What's missing**: file I/O, numeric conversions (u8↔char, int↔uint cross-width casts), time, OS access, process execution, path manipulation, stream/iterator combinators, string interpolation desugaring to Format.
+**What's missing**: file I/O, OS access, process execution, string interpolation desugaring to Format.
 
 ### Naming Conventions
 
@@ -119,62 +119,35 @@ type TimeoutError is DbError is AppError is error { }
 - Error types cannot have `drop` methods (enforced in decl.go)
 - 22+ Go unit tests in `sema_test.go`, 5 e2e test files covering construction, inheritance chains, typed handlers, nested handlers, and generic errors
 
-### 2.2 Stream/Iterator Combinators
+### 2.2 Stream/Iterator Combinators — DONE
 
-| Aspect | Current State | Required Change |
-|--------|--------------|-----------------|
-| `Iterator[T]` | Abstract type with `next() T?` only | Make `structural` interface — any type with `next() T?` satisfies it |
-| `Stream[T]` | Abstract type with `iterator() Iterator[T]` only | Make `structural` interface, add combinator methods (lazy intermediate + eager terminal) |
-| `for-in` desugaring | Not implemented in codegen | Desugar to `stream.iterator()` + while loop |
-| Collection `.iterator()` | Not implemented | Vector, Map, string, range need `iterator()` methods returning `Iterator[T]` |
+Fully implemented with structural interfaces, duck-typed for-in, all combinators (lazy intermediate + eager terminal), and generic combinators (map[R], fold[R], zip[U], enumerate, flat_map[R]).
 
-**Proposed stream combinators** (in `std/iter.pr`):
+**Implementation** (in `std/iter.pr`):
 
-```promise
-type Iterator[T] `structural {
-    next() T? `abstract;
-}
+- `Iterator[T]` — structural interface with `next() T?` abstract method and 20 default combinator methods
+- `_FnIter[T]` — closure-based iterator (`is Iterator[T]`) with `() -> T?` function-typed field
+- `Stream[T]` — structural interface with `iter() Iterator[T]` abstract method (duck-typed for-in)
+- `Generator[T]` — coroutine-based iterator (`is Iterator[T]`)
+- Duck-typed for-in: any type with `next() T?` or `iter()` returning iterator works in `for` loops
+- `Vector[T].iter()` returns `Iterator[T]`
+- All combinators: `filter`, `take`, `skip`, `take_while`, `skip_while`, `chain`, `map[R]`, `zip[U]`, `enumerate`, `flat_map[R]` (lazy), `collect`, `count`, `fold[R]`, `reduce`, `any`, `every`, `first`, `last`, `find`, `for_each` (eager)
+- Tests: 104 e2e tests in `tests/std/test_iter.pr`, 9 sema tests, 6 codegen tests
 
-type Stream[T] `structural {
-    iterator() Iterator[T] `abstract;
+### 2.3 Numeric Type Conversions — DONE
 
-    // Intermediate (lazy) — return new stream
-    map[R](|T| R transform) Stream[R];
-    filter(|T| bool predicate) Stream[T];
-    take(int n) Stream[T];
-    skip(int n) Stream[T];
-    enumerate() Stream[(int, T)];
-    chain(Stream[T] other) Stream[T];
-    zip[U](Stream[U] other) Stream[(T, U)];
+| Aspect | Status |
+|--------|--------|
+| `as`/`as!` scalar casts | **Done** — all scalar types (int, i8-i64, uint, u8-u64, f32, f64, char, bool) castable via `as`/`as!` |
+| char ↔ integer | **Done** — `'A' as int` → 65, `65 as char` → 'A' (zext/trunc) |
+| bool ↔ integer/float | **Done** — `true as int` → 1, `42 as bool` → true (icmp ne 0), `0 as bool` → false |
+| float → bool | **Done** — `0.0 as bool` → false, any non-zero → true including NaN (fcmp une 0.0) |
+| Int↔String | **Done** — `to_string()`, `format(Writer ~w)!`, `int.parse(Reader ~r) int!` |
+| Float↔String | **Done** — `to_string()`, `format(Writer ~w)!`, `f64.parse(Reader ~r) f64!` |
 
-    // Terminal (eager) — consume the stream
-    fold[R](R init, |R, T| R combine) R;
-    reduce(|T, T| T combine) T?;
-    collect() T[];
-    count() int;
-    any(|T| bool predicate) bool;
-    every(|T| bool predicate) bool;
-    first() T?;
-    last() T?;
-    find(|T| bool predicate) T?;
-    for_each(|T| void action);
-}
-```
+**Implemented approach**: `as`/`as!` work identically for scalar types (both return target type directly, no optional). For polymorphic casts (inheritance), `as` returns optional, `as!` panics on mismatch. All primitives have `to_string()` via `"{this}"` and `format(Writer ~w)!`. `int.parse`, `bool.parse`, `uint.parse`, `f64.parse` are pure Promise. No snprintf/strtol needed.
 
-**Implementation**: `Iterator[T]` and `Stream[T]` are structural interfaces — any type with matching methods automatically satisfies them. No `native` codegen needed. Each intermediate combinator returns a concrete internal type (e.g., `_MapStream[T,R]`, `_FilterStream[T]`) that wraps the source stream and structurally satisfies `Stream[R]`. Terminal combinators call `this.iterator()` and loop via `next()`. Collection types (Vector, Map, string, range) implement `iterator()` returning their own concrete iterator type that satisfies `Iterator[T]`.
-
-**Dependency**: Generators (`yield`) are designed but codegen-deferred. Stream combinators do NOT require generators — they can be implemented as wrapper types whose concrete `next()` satisfies `Iterator[T]`. Generators are a future ergonomic improvement.
-
-### 2.3 Numeric Type Conversions
-
-| Aspect | Current State | Required Change |
-|--------|--------------|-----------------|
-| `as!` (unsafe cast) | Works for numeric widening/narrowing (confirmed in `std/hash.pr`) | No change needed |
-| `as` (safe cast) | Works for inheritance downcasts; unclear for numeric | Define numeric `as` as safe widening only (e.g., `int as i64`) |
-| Int↔String | **Done** | `to_string()`, `format(Writer ~w)!`, `int.parse(Reader ~r) int!` — all pure Promise |
-| Float↔String | **Done** | `to_string()`, `format(Writer ~w)!`, `f64.parse(Reader ~r) f64!` — all pure Promise. f64→string via `_f64_to_str` in `std/format.pr` |
-
-**Implemented approach**: All primitives have `to_string() string` via `"{this}"` (string interpolation, zero native codegen) and `format(Writer ~w)!` via `w.write_string(this.to_string())`. `int.parse`, `bool.parse`, `uint.parse`, `f64.parse` are pure Promise factory methods that read from a Reader byte-by-byte. `scan[int]("42")!` works via generic `scan[T: Parse]()`. No `snprintf`/`strtol`/`strtod` needed — everything is pure Promise except `string.from_bytes()` and `string.bytes()`/`byte_at()` which are native.
+**Key codegen detail**: `int → bool` uses `icmp ne val, 0` (not `trunc`, which would give wrong result for even numbers like 2). `float → bool` uses `fcmp one val, 0.0`. Tests: 32 e2e tests in `tests/e2e/test_scalar_casts.pr`, 9 sema tests, 6 codegen tests.
 
 ### 2.4 Format & Writer for String Interpolation — DONE (interfaces defined, interpolation desugaring deferred)
 
@@ -411,8 +384,8 @@ x := s.next[int]()!;
 | Feature | Blocks | Status |
 |---------|--------|--------|
 | Error type system (2.1) | All failable stdlib APIs | **DONE** — inheritance-based errors, typed handlers, exhaustiveness |
-| Stream combinators (2.2) | Sorting, functional patterns | Medium — ~15 wrapper types + methods |
-| Numeric conversions (2.3) | String formatting, parsing, math display | **DONE** — `to_string()` + `format()` on all primitives, `int/bool/uint/f64.parse` done. Interpolation desugaring deferred |
+| Stream combinators (2.2) | Sorting, functional patterns | **DONE** — Iterator[T] structural interface with 20 default combinators, _FnIter[T], duck-typed for-in, Vector.iter(), 104 e2e tests |
+| Numeric conversions (2.3) | String formatting, parsing, math display | **DONE** — all scalar as/as! casts (numeric, char, bool), `to_string()` + `format()` on all primitives, `int/bool/uint/f64.parse`. Interpolation desugaring deferred |
 | Format & Writer (2.4) | String interpolation, user type display, stream join | **DONE** — Writer/Format interfaces defined, Builder implemented, `format(Writer ~w)!` on all primitives. Interpolation desugaring deferred |
 | Parse & Reader (2.5) | Generic parsing, Scanner | **DONE** — Reader/Parse interfaces, Scanner, `scan[T]()`, `int/bool/uint/f64.parse` |
 
@@ -518,13 +491,19 @@ Complete the features from Section 2 before building stdlib modules.
 - Sema: `checkRaiseStmt` validates inheritance, `checkErrorHandlerExpr` supports typed handlers with exhaustiveness
 - Tests: 22+ sema tests, 5 e2e test files
 
-**0b. Stream combinators**
-- File: `std/iter.pr` (extend)
-- New internal types for lazy combinators
+**0b. Stream combinators — DONE**
+- File: `std/iter.pr` — `Iterator[T]` structural interface with `next() T?` + 20 default combinator methods, `_FnIter[T]` closure-based iterator, `Stream[T]` structural interface, `Generator[T]` coroutine-based iterator
+- Duck-typed for-in: `ForInKind` enum (ForInNext/ForInIter) in sema, `genForInCustomIter` in codegen
+- `Vector[T].iter()` returns `Iterator[T]`
+- All combinators: filter, take, skip, take_while, skip_while, chain, map[R], zip[U], enumerate, flat_map[R] (lazy), collect, count, fold[R], reduce, any, every, first, last, find, for_each (eager)
+- Tests: 104 e2e tests in `tests/std/test_iter.pr`
 
-**0c. Numeric conversions**
-- Files: `std/int.pr`, `std/uint.pr`, `std/float.pr` (extend)
-- Cross-width casts, u8↔char conversions
+**0c. Numeric conversions — DONE**
+- Sema: `isScalarCastType()` extends `isNumericType()` with char and bool for `as`/`as!` casts
+- Codegen: `emitScalarCast()` replaces `emitNumericCast()` with `int → bool` (icmp ne 0), `float → bool` (fcmp une 0.0 — NaN is truthy), char ↔ int (zext/trunc)
+- All scalar types (int, i8-i64, uint, u8-u64, f32, f64, char, bool) are castable to each other via `as`/`as!`
+- Int↔String, Float↔String: `to_string()`, `format(Writer ~w)!`, `int/bool/uint/f64.parse` — all pure Promise
+- Tests: 32 e2e tests in `tests/e2e/test_scalar_casts.pr`, 9 sema tests, 6 codegen tests
 
 **0d. Format & Writer — DONE**
 - File: `std/format.pr` — `Writer` and `Format` structural interfaces with default `write_string` method
@@ -1148,7 +1127,7 @@ bin/test.sh                            # rebuild + all tests pass (including new
 |-------|------|------|---------|-------------|
 | 0a | `std/error.pr` | Promise | No | 15 |
 | 0b | `std/iter.pr` | Promise | No | 300 |
-| 0c | `std/int.pr` etc. | Native | No | 50 |
+| 0c | `std/int.pr` etc. | Native | No | 156 |
 | 0d | `std/format.pr` | Promise | No | 15 |
 | 0e | `std/parse.pr` | Promise | No | 15 |
 | 1a | `std/set.pr` | Promise | No | 80 |

@@ -909,7 +909,7 @@ Known gaps and improvements deferred from completed stages.
 | ~~Mono type vtable/RTTI~~: **Fixed.** Added `computeMonoVtableInfo`, `emitMonoVtableGlobals`, `emitMonoTypeInfoGlobals` in `rtti.go` plus unified lookup helpers (`lookupVtableGlobal`, `lookupTypeInfoGlobal`, `lookupValueTypeRTTI`) in `compiler.go`. Constructor codegen (`expr.go`) uses these to resolve vtable/typeinfo for both mono and non-mono types. | 8f | ~~Medium~~ Resolved |
 | Devirtualization optimization (direct call when concrete type known) | 8L | Low |
 | ~~Factory `Self` return type on generic types resolves to raw `Vector` instead of monomorphized `Vector[T]`~~ — **Resolved**: `selfType()` helper returns self-instantiation (`Instance{curType, [T1, T2, ...]}`) for generic types; used in `resolveNamedType`, `checkIdentExpr`, and implicit abstract factory return | Sema | ~~Low~~ |
-| `as!` cast between u8/char crashes (extractInstancePtr on scalar) — numeric cast path doesn't cover char | Codegen | Low |
+| ~~`as!` cast between u8/char crashes (extractInstancePtr on scalar)~~ — **Fixed.** `emitScalarCast()` handles all scalar types (numeric, char, bool). `isScalarCastType()` in sema routes char/bool through the scalar cast path instead of the RTTI path. `int → bool` uses `icmp ne 0` (not trunc). `float → bool` uses `fcmp une 0.0` (NaN is truthy). 156 tests (106 e2e + 22 codegen IR + 28 sema). | Codegen | ~~Low~~ Resolved |
 | ~~String comparison operators (`<`, `>`, `<=`, `>=`)~~ — **Resolved**: lexicographic byte comparison via `memcmp` | 8b | ~~Medium~~ |
 | ~~Range value type variable binding~~ — resolved: Range is now `Range[T]` generic value type | 8g | ~~Medium~~ |
 | ~~Char range iteration~~ — resolved: `Range[char]` uses correct i32 element type | 8g | ~~Medium~~ |

@@ -4316,11 +4316,11 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 
 	subject := c.genExpr(e.Expr)
 
-	// Primitive numeric casts — compile-time conversions, no RTTI needed
+	// Primitive scalar casts (numeric, char, bool) — compile-time conversions, no RTTI needed
 	srcType := c.info.Types[e.Expr]
 	srcNamed := extractNamed(srcType)
-	if srcNamed != nil && isPrimitiveNumeric(srcNamed) && isPrimitiveNumeric(targetNamed) {
-		return c.emitNumericCast(subject, srcNamed, targetNamed)
+	if srcNamed != nil && isPrimitiveScalar(srcNamed) && isPrimitiveScalar(targetNamed) {
+		return c.emitScalarCast(subject, srcNamed, targetNamed)
 	}
 
 	targetID := c.assignTypeID(targetNamed)
@@ -4379,10 +4379,13 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 	return phi
 }
 
-// emitNumericCast emits LLVM IR for a primitive numeric type conversion.
+// emitScalarCast emits LLVM IR for a primitive scalar type conversion.
 // Handles int↔int (trunc/sext/zext), float↔float (fptrunc/fpext),
-// int→float (sitofp/uitofp), and float→int (fptosi/fptoui).
-func (c *Compiler) emitNumericCast(val value.Value, src, dst *types.Named) value.Value {
+// int→float (sitofp/uitofp), float→int (fptosi/fptoui),
+// char↔int (trunc/zext — char is i32 codepoint),
+// bool→int/char (zext), int/char→bool (icmp ne 0), float→bool (fcmp one 0.0),
+// bool→float (uitofp).
+func (c *Compiler) emitScalarCast(val value.Value, src, dst *types.Named) value.Value {
 	srcLLVM := llvmNamedType(src)
 	dstLLVM := llvmNamedType(dst)
 
@@ -4391,10 +4394,16 @@ func (c *Compiler) emitNumericCast(val value.Value, src, dst *types.Named) value
 	_, srcIsFloat := srcLLVM.(*irtypes.FloatType)
 	dstFloat, dstIsFloat := dstLLVM.(*irtypes.FloatType)
 
+	dstIsBool := dst == types.TypBool
+
 	switch {
 	case srcIsInt && dstIsInt:
 		if srcInt.BitSize == dstInt.BitSize {
-			return val // same width: no-op (e.g., int ↔ uint)
+			return val // same width: no-op (e.g., int ↔ uint, char ↔ i32)
+		} else if dstIsBool {
+			// int/char → bool: non-zero = true (icmp ne, not trunc)
+			zero := constant.NewInt(srcInt, 0)
+			return c.block.NewICmp(enum.IPredNE, val, zero)
 		} else if srcInt.BitSize > dstInt.BitSize {
 			return c.block.NewTrunc(val, dstInt)
 		} else if isSignedType(src) {
@@ -4416,12 +4425,17 @@ func (c *Compiler) emitNumericCast(val value.Value, src, dst *types.Named) value
 		}
 		return c.block.NewUIToFP(val, dstFloat)
 	case srcIsFloat && dstIsInt:
+		if dstIsBool {
+			// float → bool: non-zero = true (une handles NaN as truthy)
+			zero := constant.NewFloat(srcLLVM.(*irtypes.FloatType), 0.0)
+			return c.block.NewFCmp(enum.FPredUNE, val, zero)
+		}
 		if isSignedType(dst) {
 			return c.block.NewFPToSI(val, dstInt)
 		}
 		return c.block.NewFPToUI(val, dstInt)
 	default:
-		panic(fmt.Sprintf("codegen: unsupported numeric cast %s → %s", src, dst))
+		panic(fmt.Sprintf("codegen: unsupported scalar cast %s → %s", src, dst))
 	}
 }
 

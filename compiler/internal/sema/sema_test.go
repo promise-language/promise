@@ -1552,6 +1552,279 @@ func TestForceCast(t *testing.T) {
 	`)
 }
 
+func TestScalarCastCharToInt(t *testing.T) {
+	checkOK(t, `
+		test() {
+			char c = 'A';
+			int x = c as int;
+		}
+	`)
+}
+
+func TestScalarCastIntToChar(t *testing.T) {
+	checkOK(t, `
+		test() {
+			int x = 65;
+			char c = x as char;
+		}
+	`)
+}
+
+func TestScalarCastU8ToChar(t *testing.T) {
+	checkOK(t, `
+		test() {
+			u8 b = 65u8;
+			char c = b as char;
+		}
+	`)
+}
+
+func TestScalarCastBoolToInt(t *testing.T) {
+	checkOK(t, `
+		test() {
+			bool b = true;
+			int x = b as int;
+		}
+	`)
+}
+
+func TestScalarCastIntToBool(t *testing.T) {
+	checkOK(t, `
+		test() {
+			int x = 42;
+			bool b = x as bool;
+		}
+	`)
+}
+
+func TestScalarCastCharToF64(t *testing.T) {
+	checkOK(t, `
+		test() {
+			char c = 'A';
+			f64 f = c as f64;
+		}
+	`)
+}
+
+func TestScalarCastBoolToF64(t *testing.T) {
+	checkOK(t, `
+		test() {
+			bool b = true;
+			f64 f = b as f64;
+		}
+	`)
+}
+
+func TestScalarCastF64ToBool(t *testing.T) {
+	checkOK(t, `
+		test() {
+			f64 f = 1.5;
+			bool b = f as bool;
+		}
+	`)
+}
+
+// Scalar casts return target type directly (not optional), even with 'as'
+func TestScalarCastNotOptional(t *testing.T) {
+	checkOK(t, `
+		test() {
+			char c = 'A';
+			int x = c as int;
+			int y = x + 1;
+		}
+	`)
+}
+
+func TestScalarCastBoolNotOptional(t *testing.T) {
+	// bool as int should return int (not int?), so arithmetic works
+	checkOK(t, `
+		test() {
+			bool b = true;
+			int x = b as int;
+			int y = x + 10;
+		}
+	`)
+}
+
+func TestScalarCastF64ToBoolNotOptional(t *testing.T) {
+	// f64 as bool should return bool (not bool?), so direct comparison works
+	checkOK(t, `
+		test() {
+			f64 f = 1.5;
+			bool b = f as bool;
+			if b { }
+		}
+	`)
+}
+
+func TestScalarCastChainedTypes(t *testing.T) {
+	checkOK(t, `
+		test() {
+			bool b = true;
+			f64 f = (b as int) as f64;
+		}
+	`)
+}
+
+func TestScalarCastAllIntWidths(t *testing.T) {
+	checkOK(t, `
+		test() {
+			i8 a = 1i8;
+			i16 b = a as i16;
+			i32 c = b as i32;
+			int d = c as int;
+			u8 e = 1u8;
+			u16 f = e as u16;
+			u32 g = f as u32;
+			uint h = g as uint;
+		}
+	`)
+}
+
+func TestScalarCastF32ToF64(t *testing.T) {
+	checkOK(t, `
+		test() {
+			f32 x = 1.5f32;
+			f64 y = x as f64;
+		}
+	`)
+}
+
+func TestScalarCastF64ToF32(t *testing.T) {
+	checkOK(t, `
+		test() {
+			f64 x = 1.5;
+			f32 y = x as f32;
+		}
+	`)
+}
+
+func TestScalarCastBoolToChar(t *testing.T) {
+	checkOK(t, `
+		test() {
+			bool b = true;
+			char c = b as char;
+		}
+	`)
+}
+
+func TestScalarCastCharToBool(t *testing.T) {
+	checkOK(t, `
+		test() {
+			char c = 'A';
+			bool b = c as bool;
+		}
+	`)
+}
+
+func TestScalarCastBoolToF32(t *testing.T) {
+	checkOK(t, `
+		test() {
+			bool b = true;
+			f32 f = b as f32;
+		}
+	`)
+}
+
+func TestScalarCastF32ToBool(t *testing.T) {
+	checkOK(t, `
+		test() {
+			f32 f = 1.0f32;
+			bool b = f as bool;
+		}
+	`)
+}
+
+func TestScalarCastCharToF32(t *testing.T) {
+	checkOK(t, `
+		test() {
+			char c = 'A';
+			f32 f = c as f32;
+		}
+	`)
+}
+
+func TestScalarCastF32ToChar(t *testing.T) {
+	checkOK(t, `
+		test() {
+			f32 f = 65.0f32;
+			char c = f as char;
+		}
+	`)
+}
+
+func TestScalarCastAsBangNotOptional(t *testing.T) {
+	// as! on scalars returns target type directly (same as 'as' for scalars)
+	checkOK(t, `
+		test() {
+			char c = 'A';
+			int x = c as! int;
+			int y = x + 1;
+		}
+	`)
+}
+
+func TestScalarCastIdentity(t *testing.T) {
+	checkOK(t, `
+		test() {
+			int x = 42;
+			int y = x as int;
+			bool b = true;
+			bool b2 = b as bool;
+			char c = 'A';
+			char c2 = c as char;
+			f64 f = 1.5;
+			f64 f2 = f as f64;
+		}
+	`)
+}
+
+func TestScalarCastUintToBool(t *testing.T) {
+	checkOK(t, `
+		test() {
+			uint x = 1 as! uint;
+			bool b = x as bool;
+		}
+	`)
+}
+
+func TestScalarCastBoolToUint(t *testing.T) {
+	checkOK(t, `
+		test() {
+			bool b = true;
+			uint x = b as uint;
+		}
+	`)
+}
+
+func TestScalarCastInArithmetic(t *testing.T) {
+	// Cast result used directly in arithmetic expression
+	checkOK(t, `
+		test() {
+			char c = 'A';
+			int x = (c as int) + 1;
+		}
+	`)
+}
+
+func TestScalarCastF64ToUint(t *testing.T) {
+	checkOK(t, `
+		test() {
+			f64 f = 42.5;
+			uint u = f as uint;
+		}
+	`)
+}
+
+func TestScalarCastUintToF64(t *testing.T) {
+	checkOK(t, `
+		test() {
+			uint u = 100 as! uint;
+			f64 f = u as f64;
+		}
+	`)
+}
+
 // --- Lambda Tests ---
 
 func TestLambdaExprBody(t *testing.T) {

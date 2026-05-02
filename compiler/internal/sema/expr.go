@@ -120,6 +120,12 @@ func isNumericType(t types.Type) bool {
 	return isIntegerType(t) || isFloatType(t)
 }
 
+// isScalarCastType reports whether t is a scalar type that can participate
+// in as/as! casts: numeric types, char (i32 codepoint), and bool (i1).
+func isScalarCastType(t types.Type) bool {
+	return isNumericType(t) || t == types.TypChar || t == types.TypBool
+}
+
 // checkExprWithHint type-checks an expression with an optional expected type.
 // The hint propagates through arithmetic expressions so that nested literals
 // (e.g. 1 + 2 in `uint a = 1 + 2`) adapt to the expected type.
@@ -1750,9 +1756,9 @@ func (c *Checker) checkCastExpr(e *ast.CastExpr) types.Type {
 		return nil
 	}
 
-	// Numeric casts always succeed — return target type directly (not optional)
+	// Scalar casts (numeric, char, bool) always succeed — return target type directly (not optional)
 	srcType := c.info.Types[e.Expr]
-	if isNumericType(srcType) && isNumericType(target) {
+	if isScalarCastType(srcType) && isScalarCastType(target) {
 		return target
 	}
 

@@ -1695,6 +1695,15 @@ raise IoError("disk full", code: 28);                   // mixed
 
 Backtick `` ` `` provides metadata on declarations. Meta annotations are placed **after** the definition name (and any parameters/return type) and **before** the body or statement terminator.
 
+**Why backtick?** The backtick creates an alternative namespace for compiler directives without polluting the keyword namespace — new meta tags can be added without breaking existing code. The backtick was chosen for its **visual lightness**: it recedes into the background, keeping the reader's focus on the actual code rather than the annotations. Alternatives were considered:
+
+- `@` (Java/Python style) — too visually heavy; meta tags are *modifiers*, not the main event, and `@native` dominates the line far more than `` `native `` does.
+- `#` — conflicts with markdown headings in documentation, and with shell comments.
+- `$` — conflicts with shell variable expansion; problematic in `promise exec` and bash scripts.
+- Non-ASCII characters (e.g., `·` middle dot) — fragile across terminals, SSH, CI systems, and LLM code generation.
+
+The backtick has one known friction point: bash, markdown, and some IDEs treat it as a string delimiter. This is a manageable trade-off — the backtick's visual quietness in source code outweighs the occasional need to escape it in documentation or shell contexts.
+
 ### 8.1 Syntax
 
 ```

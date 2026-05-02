@@ -559,24 +559,30 @@ Clang is currently used as a convenience driver — it compiles LLVM IR, runs op
 
 On Linux, `compileAndLink()` dispatches to the LLVM pipeline by default. Non-Linux platforms and `PROMISE_USE_CLANG=1` use the clang fallback.
 
-**Pipeline**:
+**Pipeline** (non-Windows):
 ```
-promise.ll → opt -O1 → promise.bc → llc -filetype=obj → promise.o → ld.lld + CRT → binary
+promise.ll → opt -O1 → promise.bc → ld.lld --lto-O1 + CRT → binary
 ```
 
-Three steps:
-1. **`opt -O1`** — run optimization passes including CoroSplit/CoroElide (coroutine lowering). `opt` is needed because `llc` alone doesn't run module-level optimization passes.
-2. **`llc -mtriple={triple} -filetype=obj -relocation-model=pic`** — compile optimized bitcode to a PIE-compatible ELF object file.
-3. **`ld.lld`** — link with system glibc CRT objects (`Scrt1.o`, `crti.o`, `crtbeginS.o`, `crtendS.o`, `crtn.o`) and libraries (`-lc`, `-lpthread`, `-lgcc`, `-lgcc_s`).
+Two steps (no `llc` for non-Windows):
+1. **`opt -O1`** — run optimization passes including CoroSplit/CoroElide (coroutine lowering), emit LLVM bitcode (`.bc`). `opt` is needed because `llc` alone doesn't run module-level optimization passes.
+2. **`ld.lld --lto-O1`** — link bitcode files with link-time optimization. LTO performs cross-module inlining and dead code elimination at IR level across all modules (main + std + user modules). Produces the final ELF binary.
+
+**Windows pipeline** (`opt → llc → .o → lld-link`):
+```
+promise.ll → opt -O1 → promise.bc → llc -filetype=obj → promise.o → lld-link → binary
+```
+Windows uses the native object pipeline because MSVC COFF LTO is not yet wired up.
 
 **Code** (`cmd/promise/main.go`):
 - `compileAndLink()` — writes `.ll` to temp file, dispatches to LLVM or clang pipeline based on target
 - `useClangPipeline(target)` — returns true for non-Linux targets or when `PROMISE_USE_CLANG=1`
-- `compileAndLinkLLVM()` — the `opt` → `llc` → `ld.lld` pipeline with temp file cleanup
+- `compileAndLinkLLVM()` — the `opt → .bc → linker --lto-O1` pipeline (non-Windows) or `opt → llc → .o → lld-link` (Windows)
+- `compileLLToBC(irText, prefix, optPath)` — runs `opt -O1` on IR text, returns `.bc` temp file path
 - `compileAndLinkClang()` — the old clang driver path (fallback)
 - `findLLVMTool(name)` — discovers `opt`/`llc`/`ld.lld` (sibling of binary → env override → versioned PATH → unversioned PATH)
 - `findCRT(target)` — discovers system glibc CRT objects via `cc -print-file-name` with fallback path probing
-- `buildLinuxLinkArgs()` — builds the full `ld.lld` argument list matching clang's link order
+- `buildLinuxLinkArgs()` — builds the full `ld.lld` argument list (includes `--lto-O1`)
 
 **LLVM version**: requires LLVM 22+. The generated IR uses `llvm.coro.end → void` (LLVM 22+ signature). All tools (`opt`, `llc`, linker) are version-checked.
 
@@ -649,27 +655,31 @@ Library search paths (`-L`) are derived from the CRT locations plus standard pat
 ```bash
 ld.lld \
   -m elf_x86_64 -static \
-  --build-id --eh-frame-hdr --gc-sections \
+  --build-id --eh-frame-hdr \
+  --lto-O1 \
   -o output \
   ~/.promise/cache/crt/x86_64-linux-musl/crt1.o \
   ~/.promise/cache/crt/x86_64-linux-musl/crti.o \
-  promise.o \
+  promise.bc [module.bc ...] \
   ~/.promise/cache/crt/x86_64-linux-musl/libc.a \
   ~/.promise/cache/crt/x86_64-linux-musl/crtn.o
 ```
 
-No `-lpthread`, `-lgcc`, `-lgcc_s` needed — musl's `libc.a` includes everything. Produces fully static binaries that run on any Linux kernel ≥2.6 regardless of distro.
+`--lto-O1` performs whole-program optimization on the bitcode inputs — inlining, DCE, and dead
+code stripping across all modules. No `-lpthread`, `-lgcc`, `-lgcc_s` needed — musl's `libc.a`
+includes everything. Produces fully static binaries that run on any Linux kernel ≥2.6.
 
 **Fallback: glibc dynamic** (`PROMISE_USE_CLANG=1`, or internal glibc path) — target triple `x86_64-unknown-linux-gnu`:
 ```bash
 ld.lld \
   -z relro --hash-style=gnu --build-id --eh-frame-hdr \
+  --lto-O1 \
   -m elf_x86_64 -pie \
   -dynamic-linker /lib64/ld-linux-x86-64.so.2 \
   -o output \
   Scrt1.o crti.o crtbeginS.o \
   -L/lib/x86_64-linux-gnu -L/usr/lib/gcc/x86_64-linux-gnu/13 \
-  promise.o \
+  promise.bc [module.bc ...] \
   -lpthread -lgcc --as-needed -lgcc_s --no-as-needed -lc \
   -lgcc --as-needed -lgcc_s --no-as-needed \
   crtendS.o crtn.o
@@ -677,24 +687,26 @@ ld.lld \
 
 Both paths support x86_64 and aarch64 (different emulation mode and dynamic linker path).
 
-### Remaining Per-Platform Work
-
 ### Per-Platform Linker Commands
 
-| Target | Current (clang) | New (llc + lld) |
-|--------|---------|---------------|
-| macOS | ~~`clang -O1 -target {triple} in.ll -o out`~~ | `llc` + `ld64.lld` (or system `ld`) — **Done** |
-| Linux | `clang -O1 -target {triple} in.ll -o out -lpthread` | `llc` + `ld.lld` |
-| Windows | `clang -O1 -target {triple} in.ll -o out` | `llc` + `lld-link` |
-| WASM | `clang -O1 --target=wasm32 in.ll -o out` | `llc` + `wasm-ld` |
+| Target | Pipeline | LTO |
+|--------|---------|-----|
+| Linux (musl) | `opt → .bc → ld.lld --lto-O1` | **Done** |
+| Linux (glibc) | `opt → .bc → ld.lld --lto-O1` | **Done** |
+| macOS (ld64.lld) | `opt → .bc → ld64.lld --lto-O1` | **Done** |
+| macOS (system ld) | `opt → .bc → llc → .o → system ld` | No LTO (system ld can't process bitcode) |
+| WASM | `opt → .bc → wasm-ld --lto-O2` | **Done** (O2 needed for math intrinsic folding) |
+| Windows | `opt → .bc → llc → .o → lld-link` | Not yet (MSVC COFF LTO not wired up) |
 
 `lld` supports all four output formats (Mach-O, ELF, PE/COFF, WASM) via different driver modes.
 
-**WASM** (simplest — no CRT):
+**WASM** (no CRT, LTO O2):
 ```bash
-llc -O1 -mtriple=wasm32-unknown-wasi -filetype=obj promise.ll -o promise.o
-wasm-ld promise.o -o output.wasm --no-entry --export-all
+opt -O1 promise.ll -o promise.bc
+wasm-ld --lto-O2 promise.bc -o output.wasm --no-entry --export=_start --allow-undefined
 ```
+WASM uses `--lto-O2` (not O1) to constant-fold math intrinsics (e.g. `sin(0.0)`) through
+the test trampoline's indirect call chain.
 
 **Linux** (ELF — bundled musl CRT, fully static):
 ```bash

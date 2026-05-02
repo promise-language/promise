@@ -79,9 +79,6 @@ type Info struct {
 	// use this instead of ranging over the Scopes map directly.
 	ScopeOrder []*types.Scope
 
-	// StdScope is the std library scope (parent of file scope). Nil if no std loaded.
-	StdScope *types.Scope
-
 	// Instances records all concrete generic type instantiations for later monomorphization.
 	Instances []*types.Instance
 
@@ -163,6 +160,11 @@ type Info struct {
 	// Codegen must process modules in this order so that a module's dependencies
 	// are compiled before the module itself.
 	ModuleOrder []string
+
+	// GlobImportedObjs records objects that were injected into file scope via
+	// `use X as _` (glob imports). ExportedScope uses this to exclude re-exported
+	// imported symbols — a module should only export its own declarations.
+	GlobImportedObjs map[types.Object]bool
 }
 
 // NarrowedVar records a single variable narrowing (T? → T).

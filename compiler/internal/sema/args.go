@@ -171,7 +171,16 @@ func (c *Checker) resolveCallArgs(
 
 		if param.HasDefault() {
 			// Has a default — insert the default expression as a synthetic arg.
-			if defExpr, ok := c.info.ParamDefaults[param]; ok {
+			// First check the current file's ParamDefaults (fast path for local functions).
+			// Fall back to the default stored on the param itself for cross-module calls
+			// (e.g., calling a std module function from user code).
+			var defExpr ast.Expr
+			if expr, ok := c.info.ParamDefaults[param]; ok {
+				defExpr = expr
+			} else if raw := param.DefaultExpr(); raw != nil {
+				defExpr, _ = raw.(ast.Expr)
+			}
+			if defExpr != nil {
 				resolved[i] = &ast.Arg{Name: param.Name(), Value: defExpr}
 			}
 			continue

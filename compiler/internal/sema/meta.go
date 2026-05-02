@@ -358,15 +358,14 @@ func (c *Checker) validateFactoryMethod(named *types.Named, m *types.Method, md 
 // types may not have their HasNew() set yet during defineType if declared after children.
 func (c *Checker) validateConstructors(file *ast.File) {
 	for _, decl := range file.Decls {
+		if c.info.FilteredDecls[decl] {
+			continue
+		}
 		td, ok := decl.(*ast.TypeDecl)
 		if !ok {
 			continue
 		}
 		obj := c.fileScope.Lookup(td.Name)
-		if obj == nil {
-			// Try stdScope for std types
-			obj = c.stdScope.Lookup(td.Name)
-		}
 		if obj == nil {
 			continue
 		}

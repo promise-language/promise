@@ -40,9 +40,6 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 			ext.IRFunc = fn
 			ext.HasSret = hasSret
 			c.funcs[ext.PromiseName] = fn
-			if ext.IsStd {
-				c.stdExterns[ext.PromiseName] = ext
-			}
 			continue
 		}
 
@@ -82,10 +79,6 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 		ext.HasSret = hasSret
 		c.funcs[ext.PromiseName] = fn
 		cFuncs[ext.CName] = fn
-
-		if ext.IsStd {
-			c.stdExterns[ext.PromiseName] = ext
-		}
 	}
 }
 

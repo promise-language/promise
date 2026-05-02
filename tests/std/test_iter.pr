@@ -318,20 +318,25 @@ test_vector_iter_chain() `test {
 
 // --- Custom Stream type (duck-typed for-in via iter()) ---
 
+// NumberIter is a user-defined iterator that satisfies Iterator[int] structurally.
+type NumberIter {
+    int i;
+    int n;
+    next() int? {
+        if this.n <= 0 { return none; }
+        int val = this.i;
+        this.i = this.i + 1;
+        this.n = this.n - 1;
+        return val;
+    }
+}
+
 type NumberStream {
     int start;
     int count;
 
-    iter() Iterator[int] {
-        int i = this.start;
-        int n = this.count;
-        return _FnIter[int](_next: move || -> int? {
-            if n <= 0 { return none; }
-            int val = i;
-            i = i + 1;
-            n = n - 1;
-            return val;
-        });
+    iter() NumberIter {
+        return NumberIter(i: this.start, n: this.count);
     }
 }
 

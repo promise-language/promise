@@ -215,6 +215,19 @@ func userValueType() *irtypes.StructType {
 	return irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
 }
 
+// llvmTypeForEnumFieldFromPromise returns the LLVM type for an enum variant field
+// given the original Promise type. User-defined Named types use {i8*, i8*} (value
+// struct) to match the representation produced by genExpr.
+func llvmTypeForEnumFieldFromPromise(typ types.Type) irtypes.Type {
+	// User-defined Named types (not primitives, string, void) → value struct
+	if n := extractNamed(typ); n != nil && classify(n) == CatUnknown {
+		if n != types.TypString && n != types.TypVoid && n != types.TypNone && n != types.TypVector {
+			return userValueType() // {i8*, i8*}
+		}
+	}
+	return llvmType(typ)
+}
+
 // instanceFieldLLVMType returns the LLVM type for an instance struct field.
 // User-defined types are stored as value structs { vtable, instance } to
 // preserve vtable information for dispatch. All other types use llvmType.

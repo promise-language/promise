@@ -597,7 +597,20 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 
 	// Direct dispatch: call the concrete type's operator method.
 	ownerName := c.resolveMethodOwner(named, op)
-	mangledName := mangleMethodName(ownerName, op, false)
+	var mangledName string
+	if ownerName != named.Obj().Name() {
+		// Operator inherited from a parent. If the parent is structural, the method
+		// was synthesized under the concrete type's name — use that, not the parent's.
+		// (Mirrors the same logic in genMethodCall for structural inheritance.)
+		if structParent := c.findStructuralOwner(named, op); structParent != nil {
+			c.ensureDefaultMethodsSynthesized(named, structParent)
+			mangledName = mangleMethodName(named.Obj().Name(), op, false)
+		} else {
+			mangledName = mangleMethodName(ownerName, op, false)
+		}
+	} else {
+		mangledName = mangleMethodName(ownerName, op, false)
+	}
 	fn, ok := c.funcs[mangledName]
 	if !ok {
 		panic(fmt.Sprintf("codegen: undeclared operator method %s", mangledName))
@@ -611,6 +624,30 @@ func (c *Compiler) genBinaryExpr(e *ast.BinaryExpr) value.Value {
 			args = append(args, c.valueTypeReceiverPtr(left, leftType))
 		} else {
 			args = append(args, c.extractInstancePtr(left))
+		}
+	}
+	// If right came from genThisExpr() (returns i8* receiver ptr) but the method expects a
+	// value struct, wrap it as {null_vtable, instance_ptr}. This happens in synthesized default
+	// method bodies like Priority.> containing "other < this", where 'this' appears as an
+	// argument rather than the receiver.
+	if _, isThis := e.Right.(*ast.ThisExpr); isThis {
+		var paramIdx int
+		if method.Sig().Recv() != nil {
+			paramIdx = 1
+		}
+		if paramIdx < len(fn.Params) {
+			if st, ok := fn.Params[paramIdx].Typ.(*irtypes.StructType); ok {
+				if _, rightIsPtr := right.Type().(*irtypes.PointerType); rightIsPtr {
+					alloca := c.block.NewAlloca(st)
+					vtableField := c.block.NewGetElementPtr(st, alloca,
+						constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+					c.block.NewStore(constant.NewNull(irtypes.I8Ptr), vtableField)
+					instField := c.block.NewGetElementPtr(st, alloca,
+						constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+					c.block.NewStore(right, instField)
+					right = c.block.NewLoad(st, alloca)
+				}
+			}
 		}
 	}
 	args = append(args, right)
@@ -833,10 +870,6 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 
 	// Method call or enum variant constructor: callee is MemberExpr
 	if member, ok := e.Callee.(*ast.MemberExpr); ok {
-		// Handle std.X() — treat as a regular function call to X
-		if ident, ok := member.Target.(*ast.IdentExpr); ok && ident.Name == "std" {
-			return c.genStdCall(e, member.Field)
-		}
 		// Handle mod.func() / mod.Type() — qualified call to imported module
 		if ident, ok := member.Target.(*ast.IdentExpr); ok {
 			if modName := c.resolveModuleName(ident); modName != "" {
@@ -975,44 +1008,6 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 	if callee := c.lookupFunc(ident.Name); callee != nil {
 		if sig, ok := callee.Type().(*types.Signature); ok {
 			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params())
-		}
-	}
-
-	return c.block.NewCall(fn, argVals...)
-}
-
-// genStdCall handles std.X() calls — resolves X in std scope, bypassing user shadows.
-func (c *Compiler) genStdCall(e *ast.CallExpr, funcName string) value.Value {
-	var argVals []value.Value
-	var argTypes []types.Type
-	for _, arg := range e.Args {
-		argVals = append(argVals, c.genExpr(arg.Value))
-		argTypes = append(argTypes, c.info.Types[arg.Value])
-		// Clear drop flag: argument is moved into the callee
-		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
-			c.clearDropFlag(ident.Name)
-		}
-	}
-
-	// Std extern function
-	if ext, ok := c.stdExterns[funcName]; ok {
-		return c.genExternCall(ext, argVals, argTypes)
-	}
-
-	// Std regular function — must be in stdFuncs
-	fn, ok := c.stdFuncs[funcName]
-	if !ok {
-		panic(fmt.Sprintf("codegen: undefined std function %q", funcName))
-	}
-
-	// Look up signature from std scope directly (not general scope chain)
-	if c.info.StdScope != nil {
-		if obj := c.info.StdScope.Lookup(funcName); obj != nil {
-			if callee, ok := obj.(*types.Func); ok {
-				if sig, ok := callee.Type().(*types.Signature); ok {
-					argVals = c.coerceCallArgs(argVals, argTypes, sig.Params())
-				}
-			}
 		}
 	}
 
@@ -2066,7 +2061,7 @@ func (c *Compiler) genVectorLen(e *ast.MemberExpr) value.Value {
 // String hash uses a codegen-emitted LLVM IR function (__promise_hash_string).
 func (c *Compiler) genNativeHashGetter(e *ast.MemberExpr, named *types.Named) (value.Value, bool) {
 	target := c.genExpr(e.Target)
-	hashFn := c.stdFuncs["_fnv1a_hash"]
+	hashFn := c.funcs["_fnv1a_hash"]
 	switch named {
 	case types.TypInt, types.TypI64, types.TypUint, types.TypU64:
 		// Already i64 — call _fnv1a_hash directly
@@ -4786,9 +4781,6 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 func (c *Compiler) resolveGoTarget(callExpr *ast.CallExpr) *ir.Func {
 	if ident, ok := callExpr.Callee.(*ast.IdentExpr); ok {
 		if fn, ok := c.funcs[ident.Name]; ok {
-			return fn
-		}
-		if fn, ok := c.stdFuncs[ident.Name]; ok {
 			return fn
 		}
 	}

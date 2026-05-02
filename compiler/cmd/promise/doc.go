@@ -78,18 +78,12 @@ func runDoc(args []string) {
 	runDocModule(w, target, opts)
 }
 
-// docFrontend runs parse + merge std + DeclareAndDefine (no Check/Verify/Ownership).
+// docFrontend runs parse + inject std + DeclareAndDefine (no Check/Verify/Ownership).
 func docFrontend(filename string) (*ast.File, *sema.Info) {
 	file := parseSourceFile(filename)
+	file = injectStdImport(file)
 
-	stdDir := findStdDir()
-	var stdFiles []*ast.File
-	if stdDir != "" {
-		stdFiles = parseStdFiles(stdDir)
-		file = mergeStdDecls(file, stdFiles)
-	}
-
-	moduleScopes, _, _ := loadModuleScopes(filename, file, stdFiles, sema.TargetInfo{})
+	moduleScopes, _, _ := loadModuleScopes(filename, file, sema.TargetInfo{})
 	info, errs := sema.DeclareAndDefineWithModules(file, moduleScopes)
 	if len(errs) > 0 {
 		printFileErrors(filename, errs)
@@ -185,9 +179,6 @@ func emitModuleFileDoc(w io.Writer, file *ast.File, info *sema.Info, opts docOpt
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
 		case *ast.TypeDecl:
-			if d.IsStd {
-				continue
-			}
 			if opts.publicOnly {
 				named := lookupNamed(d.Name, fileScope, info)
 				if named == nil || !named.IsExported() {
@@ -196,9 +187,6 @@ func emitModuleFileDoc(w io.Writer, file *ast.File, info *sema.Info, opts docOpt
 			}
 			typeDecls = append(typeDecls, d)
 		case *ast.EnumDecl:
-			if d.IsStd {
-				continue
-			}
 			if opts.publicOnly {
 				enum := lookupEnum(d.Name, fileScope)
 				if enum == nil || !enum.IsExported() {
@@ -207,9 +195,6 @@ func emitModuleFileDoc(w io.Writer, file *ast.File, info *sema.Info, opts docOpt
 			}
 			enumDecls = append(enumDecls, d)
 		case *ast.FuncDecl:
-			if d.IsStd {
-				continue
-			}
 			fn := lookupFunc(d.Name, fileScope)
 			if fn == nil {
 				continue
@@ -828,9 +813,6 @@ func collectEnumMethods(enum *types.Enum, opts docOpts) []*types.Method {
 
 func lookupNamed(name string, scope *types.Scope, info *sema.Info) *types.Named {
 	obj := scope.Lookup(name)
-	if obj == nil && info.StdScope != nil {
-		obj = info.StdScope.Lookup(name)
-	}
 	if obj == nil {
 		return nil
 	}

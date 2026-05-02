@@ -2300,14 +2300,6 @@ func (c *Compiler) resolveTypeRefToType(ref ast.TypeRef) types.Type {
 				return tn.Type()
 			}
 		}
-		// Check std scope (std-declared types)
-		if c.info.StdScope != nil {
-			if obj := c.info.StdScope.Lookup(r.Name); obj != nil {
-				if tn, ok := obj.(*types.TypeName); ok {
-					return tn.Type()
-				}
-			}
-		}
 		// Check file scope (user-defined types)
 		for _, scope := range c.info.ScopeOrder {
 			if obj := scope.Lookup(r.Name); obj != nil {

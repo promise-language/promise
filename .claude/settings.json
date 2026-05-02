@@ -34,11 +34,17 @@
       "Bash(codesign -v ~/.promise/cache/llvm/darwin-arm64/libLLVM.dylib)",
       "Bash(xattr ~/.promise/cache/llvm/darwin-arm64/opt)",
       "Bash(xattr -cr ~/.promise/cache/llvm/darwin-arm64/)",
-      "Bash(~/.promise/cache/llvm/darwin-arm64/opt --version)"
+      "Bash(~/.promise/cache/llvm/darwin-arm64/opt --version)",
+      "Bash(bin/promise test:*)",
+      "Bash(echo \"Exit: $?\")",
+      "Bash(bin/promise emit-ir:*)",
+      "Bash(wasmtime --version)",
+      "Bash(wasmtime --help)"
     ],
     "additionalDirectories": [
       "/tmp",
-      "~.promise"
+      "~.promise",
+      "~/.promise/cache/build"
     ]
   },
   "spinnerVerbs": {

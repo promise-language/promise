@@ -15,37 +15,24 @@ module infrastructure existed.
 The difference is **purely ergonomic** — not architectural. Both are compiled the same way.
 This is the key insight that determines what belongs where.
 
-### The desired architecture: `std` as a regular catalog module
+### The architecture: `std` as a regular catalog module (Done)
 
-The correct long-term architecture is for `std` to be a regular catalog module, identical in
-treatment to `modules/path` or `modules/io`. The only special behavior is that every source file
-automatically receives an injected `use std as _;` (a glob import that merges all public std
-symbols into the file's scope, no prefix needed). This is how Python's builtins work; it is how
-Rust's prelude works.
+`std` is a regular catalog module, identical in treatment to `modules/path` or `modules/io`.
+The only special behavior is that every source file automatically receives an injected
+`use std as _;` (a glob import that merges all public std symbols into the file's scope, no
+prefix needed). This is how Python's builtins work; it is how Rust's prelude works.
 
-**The glob import mechanism already exists**: `mergeGlobImport` in `sema/decl.go` handles
-`use xyz as _;` — it flattens all public exports from a module's scope into `fileScope`. The
-`use ... as _;` grammar is fully parsed and the AST `Alias: "_"` field is recognized.
-
-**What does NOT exist yet** is the plumbing to make `std` use this path:
-- Currently `resolveModuleScope` in `sema/decl.go` has a hard-coded special case for `std`:
-  it sets the module's scope to `c.stdScope` (a parent scope built from merged AST declarations)
-- `main.go` calls `mergeStdDecls` which prepends all `std/*.pr` AST nodes into the user file,
-  tagging them `IsStd = true`, causing them to be declared into `stdScope`
-- `loadModuleScopes` skips `use std;` entirely (`continue // std handled by sema via stdScope`)
-
-**The refactor to make std a proper module**:
-1. Add `std/promise.toml` (`[module] name = "std"`)
-2. Auto-inject `UseDecl{CatalogName: "std", Alias: "_"}` into every parsed file
-   (instead of `mergeStdDecls`)
-3. Compile std as a catalog module — `loadCatalog("std")` returns its `ModuleInfo` with
-   pre-built `ExportedScope`
-4. Remove the `stdScope`-as-parent-scope mechanism; std symbols live in fileScope via glob import
-5. Remove `IsStd` tagging and `isDeclStd` — no longer needed
-6. Update test infrastructure (`testutil.LoadStdFiles()` → compile std as a module)
-
-This is a meaningful refactor (moderate effort, touches `main.go`, `sema/`, test infra) but
-the end state is significantly cleaner: no special-casing of std anywhere in the compiler.
+**How it works**:
+- `std/promise.toml` marks std as a module (`[module] name = "std"`)
+- `catalog.toml` registers std as an embedded catalog module (no URL/commit — lives in
+  `resources/modules/std/`)
+- Every parsed file gets an auto-injected `UseDecl{CatalogName: "std", Alias: "_"}` so std
+  symbols appear in scope without any `use` statement
+- `mergeGlobImport` in `sema/decl.go` flattens all public std exports into `fileScope`
+- `CheckForStdModule` in `sema/check.go` compiles std itself with `compilingStd=true`
+  (prevents std from trying to import itself)
+- No `IsStd` flag on AST nodes, no `stdScope` parent chain, no `mergeStdDecls` — std is
+  compiled once via the normal module pipeline and cached in the build cache
 
 ### Benefits of std as a regular module
 
@@ -53,31 +40,30 @@ the end state is significantly cleaner: no special-casing of std anywhere in the
 As a proper module, std gets its own cached `.o` file. Since std rarely changes, this is nearly
 always a cache hit — a meaningful compile-time improvement, especially noticeable in the test suite.
 
-**2. Simpler compiler.** Removes `mergeStdDecls`, `parseStdFiles`, `stdScope` parent chain,
+**2. Simpler compiler.** Removed `mergeStdDecls`, `parseStdFiles`, `stdScope` parent chain,
 `IsStd` flags, and the special cases in `resolveModuleScope` and `loadModuleScopes`. Fewer
 moving parts = fewer bugs = easier to understand.
 
-**3. Std/modules boundary is purely ergonomic.** Once std compiles like any module, the only
+**3. Std/modules boundary is purely ergonomic.** Since std compiles like any module, the only
 question is "does this auto-import or require `use`?" — not "does this affect binary size or
 compile time?" This makes the design conversation simpler and reduces incentive to game the
 std/modules line for performance reasons.
 
 ### Binary size: the full picture
 
-With `std` as a proper module, binary size is determined by the linker's dead-code elimination.
-But there is one gap: Promise currently does NOT pass `-function-sections` to `llc`. Without
-per-function sections, `--gc-sections` cannot eliminate individual unused functions — it can only
-eliminate entire sections. All functions from any `.o` file land in the same `.text` section.
+With `std` as a proper module compiled to LLVM bitcode (`.bc`), and the linker running LTO
+(`--lto-O1` on Linux/macOS/WASM), dead code elimination works at IR level across all modules.
+Unused std functions are stripped at link time — a hello-world binary contains only what it
+actually calls.
 
-To get true function-level dead-code elimination (paying only for what you call), two things are
-needed:
-1. `std` as a proper module (separate `.o`)
-2. Add `-function-sections` to `llc` invocation and `--gc-sections` to the lld link line
+**How it works**: Promise's pipeline is `opt -O1 → .bc → linker --lto-O1`. The linker receives
+bitcode from each module and performs whole-program optimization: inlining, constant folding,
+and DCE across module boundaries. This replaces the old `--gc-sections` approach (which required
+`-function-sections` per llc invocation and could only eliminate whole sections, not functions).
+WASM uses `--lto-O2` to fold math intrinsics through indirect call chains in the test trampoline.
+Windows is the only exception: it uses `opt → llc → .o → lld-link` (MSVC LTO not yet wired up).
 
-With both in place, binary size is equalized: unused functions from std (or any module) are
-eliminated at link time. A hello-world binary would contain only what it actually calls.
-
-Until that optimization is in place, binary size IS affected by what goes in `std/`. But the
+Until LTO was in place, binary size WAS affected by what goes in `std/`. But the
 effect is bounded — today std is ~28 files of pure Promise code plus some PAL bindings, which
 compiles to perhaps 50–100KB of object code. Not megabytes.
 
@@ -758,18 +744,17 @@ Add a new Phase 4 header: "Platform Modules — see `docs/platform-modules.md`."
 
 ## 14. Implementation Order
 
-### Phase A — std-as-module refactor (compiler cleanup, no user-visible change)
+### ~~Phase A — std-as-module refactor~~ (Done)
 
-1. Add `std/promise.toml` (`[module] name = "std"`)
-2. In `main.go`: remove `mergeStdDecls`/`parseStdFiles`; auto-inject `UseDecl{CatalogName: "std", Alias: "_"}` into every file instead
-3. In `sema/decl.go`: remove `stdScope`-as-parent special case; std resolved like any catalog module via `loadCatalog("std")`; `mergeGlobImport` already handles `Alias == "_"`
-4. Remove `IsStd` flag from AST nodes and `isDeclStd` from sema
-5. Update test infrastructure: `testutil.LoadStdFiles()` → compile std as a module
-6. Add `-function-sections` to `llc` invocation + `--gc-sections` to `lld` link line for function-level DCE
+1. ~~Add `std/promise.toml` (`[module] name = "std"`)~~ — done
+2. ~~In `main.go`: remove `mergeStdDecls`/`parseStdFiles`; auto-inject `UseDecl{CatalogName: "std", Alias: "_"}` into every file instead~~ — done
+3. ~~In `sema/decl.go`: remove `stdScope`-as-parent special case; std resolved like any catalog module via `loadCatalog("std")`~~ — done (`CheckForStdModule`, `globScope`)
+4. ~~Remove `IsStd` flag from AST nodes and `isDeclStd` from sema~~ — done
+5. ~~Update test infrastructure: `testutil.LoadStdFiles()` → compile std as a module~~ — done
+6. ~~Add `-function-sections` to `llc` + `--gc-sections` to `lld` for function-level DCE~~ — superseded by LTO pipeline (`opt → .bc → linker --lto-O1`)
 
-This phase has no language changes — all existing programs continue to work identically. The
-payoff is build cache for std (nearly always a cache hit), cleaner compiler internals, and the
-correct mental model for std/modules going forward.
+No language changes — all existing programs continue to work identically. Build cache for std
+(nearly always a cache hit), cleaner compiler internals, correct mental model for std/modules.
 
 ### Phase B — platform constants (minimal, immediate value)
 

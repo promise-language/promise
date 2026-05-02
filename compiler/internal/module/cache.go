@@ -1,7 +1,6 @@
 package module
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -65,7 +64,7 @@ func HashModuleSources(modDir string, includeTests bool) (string, error) {
 		return "", err
 	}
 
-	h := sha256.New()
+	h := fnv.New128a()
 	for _, path := range files {
 		// Use relative path as separator for determinism across machines
 		rel, err := filepath.Rel(modDir, path)
@@ -165,8 +164,9 @@ func writeTypeParams(b *strings.Builder, params []*types.TypeParam) {
 }
 
 func hashString(s string) string {
-	h := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(h[:])
+	h := fnv.New128a()
+	h.Write([]byte(s))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // BuildCacheKey combines a module's source hash with its build context to produce
@@ -175,7 +175,7 @@ func hashString(s string) string {
 // .o is only reused when compiled in the exact same context (same co-modules,
 // same compiler, same target).
 func BuildCacheKey(implHash, compilerHash, target string, allModulePaths []string) string {
-	h := sha256.New()
+	h := fnv.New128a()
 	fmt.Fprintf(h, "impl:%s\n", implHash)
 	fmt.Fprintf(h, "compiler:%s\n", compilerHash)
 	fmt.Fprintf(h, "target:%s\n", target)
@@ -204,8 +204,9 @@ func CompilerHash() string {
 	if err != nil {
 		return "unknown"
 	}
-	h := sha256.Sum256(data)
-	return hex.EncodeToString(h[:])
+	h := fnv.New128a()
+	h.Write(data)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // BuildCacheDir returns the build cache directory (~/.promise/cache/build/ by default).
@@ -223,13 +224,13 @@ func BuildCacheDir() (string, error) {
 	return dir, nil
 }
 
-// BuildCachePath returns the path for a cached .o file in the build cache.
+// BuildCachePath returns the path for a cached module bitcode file in the build cache.
 // Uses a two-level directory structure (first 2 hex chars of the cache key as subdirectory)
 // to avoid slow directory lookups when thousands of entries accumulate.
-// E.g., key "a3b4c5..." -> "<cacheDir>/a3/a3b4c5...o"
+// E.g., key "a3b4c5..." -> "<cacheDir>/a3/a3b4c5.bc"
 func BuildCachePath(cacheDir, cacheKey string) string {
 	subdir := cacheKey[:2]
-	return filepath.Join(cacheDir, subdir, cacheKey+".o")
+	return filepath.Join(cacheDir, subdir, cacheKey+".bc")
 }
 
 // BuildCacheInterfacePath returns the interface hash path in the build cache.

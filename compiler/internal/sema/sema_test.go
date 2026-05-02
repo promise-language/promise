@@ -2,6 +2,7 @@ package sema
 
 import (
 	"strings"
+	"sync"
 	"testing"
 
 	"djabi.dev/go/promise_lang/internal/ast"
@@ -25,9 +26,47 @@ func init() {
 // that pass explicit std via checkOKWithStd.
 var stdContainers = "" // subsumed by stdAll; tests using checkOKWithStd get stdAll automatically
 
+var (
+	semaStdOnce  sync.Once
+	semaStdScope *types.Scope
+)
+
+func getSemaStdScope() *types.Scope {
+	semaStdOnce.Do(func() {
+		input := antlr.NewInputStream(stdAll)
+		lexer := parser.NewPromiseLexer(input)
+		lexer.RemoveErrorListeners()
+		stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+		p := parser.NewPromiseParser(stream)
+		p.RemoveErrorListeners()
+		tree := p.CompilationUnit()
+		stdFile, buildErrs := ast.Build("std.pr", tree)
+		if len(buildErrs) > 0 {
+			panic("std AST build errors: " + buildErrs[0].Error())
+		}
+		stdInfo, _ := CheckForStdModule(stdFile, TargetInfo{})
+		semaStdScope = ExportedScope(stdInfo, stdFile)
+	})
+	return semaStdScope
+}
+
 func checkSource(t *testing.T, src string) (*Info, []error) {
 	t.Helper()
-	return checkSourceWithStd(t, "", src)
+	input := antlr.NewInputStream(src)
+	lexer := parser.NewPromiseLexer(input)
+	lexer.RemoveErrorListeners()
+	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+	p := parser.NewPromiseParser(stream)
+	p.RemoveErrorListeners()
+	tree := p.CompilationUnit()
+	file, buildErrs := ast.Build("test.pr", tree)
+	if len(buildErrs) > 0 {
+		t.Fatalf("AST build errors: %v", buildErrs)
+	}
+	// Inject use std as _
+	stdUse := &ast.UseDecl{Alias: "_", CatalogName: "std"}
+	file.Uses = append([]*ast.UseDecl{stdUse}, file.Uses...)
+	return CheckWithModules(file, map[string]*types.Scope{"std": getSemaStdScope()})
 }
 
 func checkOK(t *testing.T, src string) *Info {
@@ -3926,13 +3965,13 @@ func TestConstraintValidationPasses(t *testing.T) {
 	// Multi-arg generics use type annotation (function parameter) since
 	// expression-context multi-arg is a grammar limitation.
 	checkOK(t, `
-		type Hashable {
+		type MyHashable {
 			hash() int `+"`abstract;"+`
 		}
-		type MyKey is Hashable {
+		type MyKey is MyHashable {
 			hash() int { return 0; }
 		}
-		type MyMap[K: Hashable, V] { K key; V val; }
+		type MyMap[K: MyHashable, V] { K key; V val; }
 		test(MyMap[MyKey, int] m) {
 			MyKey k = m.key;
 			int v = m.val;
@@ -4277,17 +4316,17 @@ func TestReachableAfterIfWithElseOneReturns(t *testing.T) {
 
 func TestMultiConstraintBothSatisfied(t *testing.T) {
 	checkOK(t, `
-		type Hashable {
+		type MyHashable {
 			hash() int `+"`abstract;"+`
 		}
 		type Printable {
 			toString() string `+"`abstract;"+`
 		}
-		type MyKey is Hashable, Printable {
+		type MyKey is MyHashable, Printable {
 			hash() int { return 0; }
 			toString() string { return "key"; }
 		}
-		type MyMap[K: Hashable + Printable, V] { K key; V val; }
+		type MyMap[K: MyHashable + Printable, V] { K key; V val; }
 		test(MyMap[MyKey, int] m) {
 			MyKey k = m.key;
 		}
@@ -4314,13 +4353,13 @@ func TestMultiConstraintOneFails(t *testing.T) {
 func TestSingleConstraintStillWorks(t *testing.T) {
 	// Existing single-constraint behavior should be unchanged
 	checkOK(t, `
-		type Hashable {
+		type MyHashable {
 			hash() int `+"`abstract;"+`
 		}
-		type MyKey is Hashable {
+		type MyKey is MyHashable {
 			hash() int { return 0; }
 		}
-		type MyMap[K: Hashable, V] { K key; V val; }
+		type MyMap[K: MyHashable, V] { K key; V val; }
 		test(MyMap[MyKey, int] m) {
 			MyKey k = m.key;
 		}
@@ -4426,15 +4465,15 @@ func TestUnreachableAfterIfElseBothReturn(t *testing.T) {
 func TestMultiConstraintAssignability(t *testing.T) {
 	// TypeParam T: A + B should be assignable to both A and B
 	checkOK(t, `
-		type Hashable {
+		type MyHashable {
 			hash() int `+"`abstract;"+`
 		}
 		type Printable {
 			toString() string `+"`abstract;"+`
 		}
-		type Container[T: Hashable + Printable] {
+		type Container[T: MyHashable + Printable] {
 			T item;
-			asHashable() Hashable { return this.item; }
+			asHashable() MyHashable { return this.item; }
 			asPrintable() Printable { return this.item; }
 		}
 	`)
@@ -5320,91 +5359,14 @@ func TestReservedStdNameEnum(t *testing.T) {
 
 // --- Stage 9: Std scope and test annotation tests ---
 
-// checkSourceWithStd parses stdSrc as std declarations (IsStd=true) and userSrc as
-// user declarations, merges them (std first), and runs sema.Check.
+// checkSourceWithStd combines stdSrc and userSrc as user code and runs checkSource.
+// stdSrc is treated as extra user-level declarations (not actual std).
 func checkSourceWithStd(t *testing.T, stdSrc, userSrc string) (*Info, []error) {
 	t.Helper()
-	// Always include stdAll; additional stdSrc is appended
-	combinedStd := stdAll + "\n" + stdSrc
-	// Parse std
-	stdInput := antlr.NewInputStream(combinedStd)
-	stdLexer := parser.NewPromiseLexer(stdInput)
-	stdLexer.RemoveErrorListeners()
-	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
-	stdP := parser.NewPromiseParser(stdStream)
-	stdP.RemoveErrorListeners()
-	stdTree := stdP.CompilationUnit()
-	stdFile, errs := ast.Build("std.pr", stdTree)
-	if len(errs) > 0 {
-		t.Fatalf("std AST build errors: %v", errs)
+	if stdSrc == "" {
+		return checkSource(t, userSrc)
 	}
-	// Tag std decls
-	for _, d := range stdFile.Decls {
-		switch dd := d.(type) {
-		case *ast.FuncDecl:
-			dd.IsStd = true
-		case *ast.TypeDecl:
-			dd.IsStd = true
-		case *ast.EnumDecl:
-			dd.IsStd = true
-		}
-	}
-
-	// Parse user
-	userInput := antlr.NewInputStream(userSrc)
-	userLexer := parser.NewPromiseLexer(userInput)
-	userLexer.RemoveErrorListeners()
-	userStream := antlr.NewCommonTokenStream(userLexer, antlr.TokenDefaultChannel)
-	userP := parser.NewPromiseParser(userStream)
-	userP.RemoveErrorListeners()
-	userTree := userP.CompilationUnit()
-	userFile, errs := ast.Build("test.pr", userTree)
-	if len(errs) > 0 {
-		t.Fatalf("user AST build errors: %v", errs)
-	}
-
-	// Merge: std decls first, then user decls
-	merged := make([]ast.Decl, 0, len(stdFile.Decls)+len(userFile.Decls))
-	merged = append(merged, stdFile.Decls...)
-	merged = append(merged, userFile.Decls...)
-	userFile.Decls = merged
-
-	return Check(userFile)
-}
-
-func TestStdScopeIsPopulated(t *testing.T) {
-	info, errs := checkSourceWithStd(t,
-		`helper() int { return 42; }`,
-		`main() { x := helper(); }`,
-	)
-	expectNoErrors(t, errs)
-	if info.StdScope == nil {
-		t.Fatal("expected StdScope to be non-nil")
-	}
-	if obj := info.StdScope.Lookup("helper"); obj == nil {
-		t.Error("expected 'helper' to be in StdScope")
-	}
-}
-
-func TestStdMemberUndefined(t *testing.T) {
-	_, errs := checkSourceWithStd(t,
-		`helper() {}`,
-		`main() { std.nonexistent(); }`,
-	)
-	expectError(t, errs, "std has no member 'nonexistent'")
-}
-
-func TestStdIsStdBypassesReservedName(t *testing.T) {
-	// A std-marked declaration named "std" would bypass the reserved check,
-	// but in practice the std library never declares "std". Verify no error.
-	info, errs := checkSourceWithStd(t,
-		`helper() int { return 1; }`,
-		`main() { x := helper(); }`,
-	)
-	expectNoErrors(t, errs)
-	if info.StdScope == nil {
-		t.Fatal("expected StdScope to be non-nil")
-	}
+	return checkSource(t, stdSrc+"\n"+userSrc)
 }
 
 func TestMultipleTestsAccumulation(t *testing.T) {
@@ -5447,41 +5409,13 @@ func TestTestFuncGenericFails(t *testing.T) {
 	expectError(t, errs, "must not be generic")
 }
 
-func TestStdScopeRouting(t *testing.T) {
-	// Std function that calls another std function should resolve correctly
-	info, errs := checkSourceWithStd(t,
-		`
-		inner() int { return 42; }
-		outer() int { return inner(); }
-		`,
-		`main() { x := outer(); }`,
-	)
-	expectNoErrors(t, errs)
-	if info.StdScope.Lookup("inner") == nil {
-		t.Error("expected 'inner' in stdScope")
-	}
-	if info.StdScope.Lookup("outer") == nil {
-		t.Error("expected 'outer' in stdScope")
-	}
-}
-
 func TestStdFuncMissingReturnDetected(t *testing.T) {
-	// Std function with missing return should be caught by checkMissingReturn
+	// Function with missing return should be caught by checkMissingReturn
 	_, errs := checkSourceWithStd(t,
 		`broken() int { }`,
 		`main() {}`,
 	)
 	expectError(t, errs, "missing return")
-}
-
-func TestStdScopeDoesNotLeakToUser(t *testing.T) {
-	// Std function should not see user functions (stdScope is parent of fileScope,
-	// so lookups from stdScope do NOT descend into fileScope)
-	_, errs := checkSourceWithStd(t,
-		`stdFunc() int { return userFunc(); }`,
-		`userFunc() int { return 1; }`,
-	)
-	expectError(t, errs, "undefined")
 }
 
 // --- Stage 8k: Native type declaration tests ---
@@ -5538,8 +5472,8 @@ func TestNativeTypeMissingReturnDetected(t *testing.T) {
 
 // --- Stage 8f: Builtin Validation Tests ---
 
-// checkWithRawStd parses stdSrc as the ONLY std (no stdAll prepended) and
-// userSrc as user code. Used for testing validateBuiltins() error detection.
+// checkWithRawStd parses stdSrc as the std module using CheckForStdModule,
+// and userSrc as user code. Used for testing validateBuiltins() error detection.
 func checkWithRawStd(t *testing.T, stdSrc, userSrc string) (*Info, []error) {
 	t.Helper()
 	stdInput := antlr.NewInputStream(stdSrc)
@@ -5553,16 +5487,12 @@ func checkWithRawStd(t *testing.T, stdSrc, userSrc string) (*Info, []error) {
 	if len(errs) > 0 {
 		t.Fatalf("std AST build errors: %v", errs)
 	}
-	for _, d := range stdFile.Decls {
-		switch dd := d.(type) {
-		case *ast.FuncDecl:
-			dd.IsStd = true
-		case *ast.TypeDecl:
-			dd.IsStd = true
-		case *ast.EnumDecl:
-			dd.IsStd = true
-		}
+	stdInfo, stdErrs := CheckForStdModule(stdFile, TargetInfo{})
+	if len(stdErrs) > 0 {
+		return stdInfo, stdErrs
 	}
+	rawStdScope := ExportedScope(stdInfo, stdFile)
+
 	userInput := antlr.NewInputStream(userSrc)
 	userLexer := parser.NewPromiseLexer(userInput)
 	userLexer.RemoveErrorListeners()
@@ -5574,11 +5504,9 @@ func checkWithRawStd(t *testing.T, stdSrc, userSrc string) (*Info, []error) {
 	if len(errs) > 0 {
 		t.Fatalf("user AST build errors: %v", errs)
 	}
-	merged := make([]ast.Decl, 0, len(stdFile.Decls)+len(userFile.Decls))
-	merged = append(merged, stdFile.Decls...)
-	merged = append(merged, userFile.Decls...)
-	userFile.Decls = merged
-	return Check(userFile)
+	stdUse := &ast.UseDecl{Alias: "_", CatalogName: "std"}
+	userFile.Uses = append([]*ast.UseDecl{stdUse}, userFile.Uses...)
+	return CheckWithModules(userFile, map[string]*types.Scope{"std": rawStdScope})
 }
 
 func TestValidateAllPresent(t *testing.T) {
@@ -7272,32 +7200,9 @@ func TestGeneratorMethodBasic(t *testing.T) {
 // --- Module System Tests ---
 
 // checkWithModules parses user source with pre-loaded module scopes.
+// std is always included via the module approach.
 func checkWithModules(t *testing.T, userSrc string, moduleScopes map[string]*types.Scope) (*Info, []error) {
 	t.Helper()
-	// Parse std
-	combinedStd := stdAll
-	stdInput := antlr.NewInputStream(combinedStd)
-	stdLexer := parser.NewPromiseLexer(stdInput)
-	stdLexer.RemoveErrorListeners()
-	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
-	stdP := parser.NewPromiseParser(stdStream)
-	stdP.RemoveErrorListeners()
-	stdTree := stdP.CompilationUnit()
-	stdFile, errs := ast.Build("std.pr", stdTree)
-	if len(errs) > 0 {
-		t.Fatalf("std AST build errors: %v", errs)
-	}
-	for _, d := range stdFile.Decls {
-		switch dd := d.(type) {
-		case *ast.FuncDecl:
-			dd.IsStd = true
-		case *ast.TypeDecl:
-			dd.IsStd = true
-		case *ast.EnumDecl:
-			dd.IsStd = true
-		}
-	}
-
 	// Parse user
 	userInput := antlr.NewInputStream(userSrc)
 	userLexer := parser.NewPromiseLexer(userInput)
@@ -7310,13 +7215,15 @@ func checkWithModules(t *testing.T, userSrc string, moduleScopes map[string]*typ
 	if len(errs) > 0 {
 		t.Fatalf("user AST build errors: %v", errs)
 	}
-
-	merged := make([]ast.Decl, 0, len(stdFile.Decls)+len(userFile.Decls))
-	merged = append(merged, stdFile.Decls...)
-	merged = append(merged, userFile.Decls...)
-	userFile.Decls = merged
-
-	return CheckWithModules(userFile, moduleScopes)
+	// Inject use std as _
+	stdUse := &ast.UseDecl{Alias: "_", CatalogName: "std"}
+	userFile.Uses = append([]*ast.UseDecl{stdUse}, userFile.Uses...)
+	// Merge std scope into provided module scopes
+	allScopes := map[string]*types.Scope{"std": getSemaStdScope()}
+	for k, v := range moduleScopes {
+		allScopes[k] = v
+	}
+	return CheckWithModules(userFile, allScopes)
 }
 
 // makeModuleScope creates a module scope with exported function declarations.
@@ -7678,29 +7585,6 @@ func TestModuleQualifiedTypeRefAsReturn(t *testing.T) {
 // checkModuleSource runs sema on module source code and returns its ExportedScope.
 func checkModuleSource(t *testing.T, src string) *types.Scope {
 	t.Helper()
-	// Parse std
-	stdInput := antlr.NewInputStream(stdAll)
-	stdLexer := parser.NewPromiseLexer(stdInput)
-	stdLexer.RemoveErrorListeners()
-	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
-	stdP := parser.NewPromiseParser(stdStream)
-	stdP.RemoveErrorListeners()
-	stdTree := stdP.CompilationUnit()
-	stdFile, errs := ast.Build("std.pr", stdTree)
-	if len(errs) > 0 {
-		t.Fatalf("std AST build errors: %v", errs)
-	}
-	for _, d := range stdFile.Decls {
-		switch dd := d.(type) {
-		case *ast.FuncDecl:
-			dd.IsStd = true
-		case *ast.TypeDecl:
-			dd.IsStd = true
-		case *ast.EnumDecl:
-			dd.IsStd = true
-		}
-	}
-
 	// Parse module source
 	modInput := antlr.NewInputStream(src)
 	modLexer := parser.NewPromiseLexer(modInput)
@@ -7713,18 +7597,13 @@ func checkModuleSource(t *testing.T, src string) *types.Scope {
 	if len(errs) > 0 {
 		t.Fatalf("module AST build errors: %v", errs)
 	}
-
-	// Merge std + module
-	merged := make([]ast.Decl, 0, len(stdFile.Decls)+len(modFile.Decls))
-	merged = append(merged, stdFile.Decls...)
-	merged = append(merged, modFile.Decls...)
-	modFile.Decls = merged
-
-	info, errs := Check(modFile)
+	// Inject use std as _
+	stdUse := &ast.UseDecl{Alias: "_", CatalogName: "std"}
+	modFile.Uses = append([]*ast.UseDecl{stdUse}, modFile.Uses...)
+	info, errs := CheckWithModules(modFile, map[string]*types.Scope{"std": getSemaStdScope()})
 	if len(errs) > 0 {
 		t.Fatalf("module sema errors: %v", errs)
 	}
-
 	return ExportedScope(info, modFile)
 }
 
@@ -8193,7 +8072,7 @@ func TestUseStdPrivateMemberDenied(t *testing.T) {
 			std._print_string("hi");
 		}
 	`)
-	expectError(t, errs, "private to module")
+	expectError(t, errs, "has no exported member '_print_string'")
 }
 
 func TestUseStdGlobNoop(t *testing.T) {
@@ -8223,7 +8102,7 @@ func TestUseStdNoSuchMember(t *testing.T) {
 			std.nonexistent();
 		}
 	`)
-	expectError(t, errs, "has no member")
+	expectError(t, errs, "has no exported member 'nonexistent'")
 }
 
 func TestUseStdAliasQualifiedType(t *testing.T) {
@@ -8242,12 +8121,13 @@ func TestUseStdAliasPrivateDenied(t *testing.T) {
 			s._print_string("hi");
 		}
 	`)
-	expectError(t, errs, "private to module")
+	expectError(t, errs, "has no exported member '_print_string'")
 }
 
 func TestStdQualifiedFuncWithoutUse(t *testing.T) {
-	// std.min() works without "use std;" via checkMemberExpr shortcut
+	// std.min() works with explicit "use std;"
 	checkOK(t, `
+		use std;
 		main() {
 			int x = std.min(1, 2);
 		}
@@ -8255,8 +8135,9 @@ func TestStdQualifiedFuncWithoutUse(t *testing.T) {
 }
 
 func TestStdQualifiedTypeWithoutUse(t *testing.T) {
-	// std.int[] works without "use std;" via resolveQualifiedType shortcut
+	// std.int[] works with explicit "use std;"
 	checkOK(t, `
+		use std;
 		main() {
 			std.int[] v = [];
 		}
@@ -8495,7 +8376,7 @@ func TestValueTypeOptionalField(t *testing.T) {
 
 func TestValueTypeEnumField(t *testing.T) {
 	checkOK(t, `
-		enum Dir `+"`copy"+` { N; S; E; W; }
+		enum Dir `+"`copy"+` { North; South; East; West; }
 		type Step {
 			Dir dir `+"`value"+`;
 			int distance `+"`value"+`;
@@ -8614,13 +8495,13 @@ func TestVariadicNamedVectorArg(t *testing.T) {
 func TestVariadicWithDefaultsAndOptionals(t *testing.T) {
 	// Variadic after params with defaults and optionals.
 	checkOK(t, `
-		log(string level = "info", string? tag, ...string msgs) {
+		mylog(string level = "info", string? tag, ...string msgs) {
 		}
 		main() {
-			log();
-			log("warn");
-			log("warn", "a", "b");
-			log(level: "debug", tag: "sys", msgs: ["x", "y"]);
+			mylog();
+			mylog("warn");
+			mylog("warn", "a", "b");
+			mylog(level: "debug", tag: "sys", msgs: ["x", "y"]);
 		}
 	`)
 }
@@ -8730,11 +8611,11 @@ func TestVariadicComputedVectorPassThrough(t *testing.T) {
 func TestVariadicMixedPositionalAndNamed(t *testing.T) {
 	// Fixed params positional, variadic by name.
 	checkOK(t, `
-		log(string level, string tag, ...string msgs) {
+		mylog(string level, string tag, ...string msgs) {
 		}
 		main() {
-			log("warn", "sys", "a", "b");
-			log("info", tag: "app", msgs: ["x", "y"]);
+			mylog("warn", "sys", "a", "b");
+			mylog("info", tag: "app", msgs: ["x", "y"]);
 		}
 	`)
 }
@@ -9224,10 +9105,10 @@ func TestMonoMethodSelfAllowed(t *testing.T) {
 
 func TestGenericInheritanceBasic(t *testing.T) {
 	checkOK(t, `
-		type Stream[T] {
+		type DataStream[T] {
 			next() T? `+"`abstract;\n"+`
 		}
-		type IntStream is Stream[int] {
+		type IntStream is DataStream[int] {
 			int pos;
 			next() int? { return this.pos; }
 		}
@@ -9301,13 +9182,13 @@ func TestGenericInheritanceNonGenericChild(t *testing.T) {
 
 func TestGenericInheritanceAssignability(t *testing.T) {
 	checkOK(t, `
-		type Stream[T] {
+		type DataStream[T] {
 			next() T? `+"`abstract;\n"+`
 		}
-		type MyStream[T] is Stream[T] {
+		type MyStream[T] is DataStream[T] {
 			next() T? { return none; }
 		}
-		acceptStream(Stream[int] s) {
+		acceptStream(DataStream[int] s) {
 			int? v = s.next();
 		}
 		test() {
@@ -9641,19 +9522,15 @@ func TestStringInterpPrimitivesStillWork(t *testing.T) {
 // Target functions annotated `target(cond)` are only declared if cond matches target.
 func checkSourceWithTarget(t *testing.T, src, triple string) (*Info, []error) {
 	t.Helper()
-	// Build std file
-	stdFile := parseTargetTestFile(t, stdAll, "std.pr", true)
 	// Build user file
-	userFile := parseTargetTestFile(t, src, "test.pr", false)
-	// Merge: std decls first, then user decls
-	merged := make([]ast.Decl, 0, len(stdFile.Decls)+len(userFile.Decls))
-	merged = append(merged, stdFile.Decls...)
-	merged = append(merged, userFile.Decls...)
-	userFile.Decls = merged
-	return CheckWithTarget(userFile, nil, ParseTargetInfo(triple))
+	userFile := parseTargetTestFile(t, src, "test.pr")
+	// Inject use std as _
+	stdUse := &ast.UseDecl{Alias: "_", CatalogName: "std"}
+	userFile.Uses = append([]*ast.UseDecl{stdUse}, userFile.Uses...)
+	return CheckWithTarget(userFile, map[string]*types.Scope{"std": getSemaStdScope()}, ParseTargetInfo(triple))
 }
 
-func parseTargetTestFile(t *testing.T, src, name string, isStd bool) *ast.File {
+func parseTargetTestFile(t *testing.T, src, name string) *ast.File {
 	t.Helper()
 	input := antlr.NewInputStream(src)
 	lexer := parser.NewPromiseLexer(input)
@@ -9665,18 +9542,6 @@ func parseTargetTestFile(t *testing.T, src, name string, isStd bool) *ast.File {
 	file, errs := ast.Build(name, tree)
 	if len(errs) > 0 {
 		t.Fatalf("%s AST build errors: %v", name, errs)
-	}
-	if isStd {
-		for _, d := range file.Decls {
-			switch dd := d.(type) {
-			case *ast.FuncDecl:
-				dd.IsStd = true
-			case *ast.TypeDecl:
-				dd.IsStd = true
-			case *ast.EnumDecl:
-				dd.IsStd = true
-			}
-		}
 	}
 	return file
 }
@@ -9753,7 +9618,7 @@ func TestTargetNoFilteringWhenTargetUnknown(t *testing.T) {
 		sep() string ` + "`target(windows)" + ` { return "\\"; }
 		sep() string ` + "`target(!windows)" + ` { return "/"; }
 	`
-	file := parseTargetTestFile(t, src, "test.pr", false)
+	file := parseTargetTestFile(t, src, "test.pr")
 	_, errs := CheckWithTarget(file, nil, TargetInfo{})
 	// With zero target, both variants are declared — duplicate name error.
 	if len(errs) == 0 {

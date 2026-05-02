@@ -31,14 +31,13 @@ func (a rawFuncAttr) String() string   { return string(a) }
 type Compiler struct {
 	module         *ir.Module
 	info           *sema.Info
+	rootInfo       *sema.Info                       // original user sema info — never swapped, used for full module tree search
 	fn             *ir.Func                         // current function being generated
 	block          *ir.Block                        // current basic block
 	entryBlock     *ir.Block                        // entry block of current function (for allocas)
 	locals         map[string]*ir.InstAlloca        // local variable allocas
 	localNameCount map[string]int                   // per-function alloca name counter for dedup
 	funcs          map[string]*ir.Func              // declared Promise functions by name
-	stdFuncs       map[string]*ir.Func              // std library functions by name (for std.X)
-	stdExterns     map[string]*ExternFunc           // std library externs by name (for std.X)
 	layouts        map[*types.Named]*TypeDeclLayout // type layouts for extern ABI
 	enumLayouts    map[*types.Enum]*TypeDeclLayout  // enum type layouts
 	externs        map[string]*ExternFunc           // extern functions by Promise name
@@ -348,13 +347,12 @@ func Compile(file *ast.File, info *sema.Info, target string) *CompileResult {
 	}
 
 	c := &Compiler{
-		module:     module,
-		info:       info,
-		target:     target,
-		isWasm:     strings.Contains(target, "wasm"),
-		funcs:      make(map[string]*ir.Func),
-		stdFuncs:   make(map[string]*ir.Func),
-		stdExterns: make(map[string]*ExternFunc),
+		module:   module,
+		info:     info,
+		rootInfo: info,
+		target:   target,
+		isWasm:   strings.Contains(target, "wasm"),
+		funcs:    make(map[string]*ir.Func),
 
 		monoLayouts:         make(map[string]*TypeDeclLayout),
 		monoEnumLayouts:     make(map[string]*TypeDeclLayout),
@@ -408,11 +406,6 @@ func Compile(file *ast.File, info *sema.Info, target string) *CompileResult {
 	// layouts are available when resolving extern parameter/return types.
 	c.declareExterns(externList, c.layouts)
 
-	// Add PAL-based function bodies to print/panic declarations.
-	// Must run after declareIntrinsics (to-string funcs) and declareExterns (print funcs).
-	c.definePALBodies()
-	c.defineMathBodies()
-
 	// Declare method stubs before vtable/typeinfo emission (vtable needs function pointers)
 	c.declareTypeMethods(file)
 	c.declareMonoMethods(file, monoInstances)
@@ -429,12 +422,20 @@ func Compile(file *ast.File, info *sema.Info, target string) *CompileResult {
 	c.emitMonoTypeInfoGlobals(monoInstances)
 
 	c.declareFuncs(file)
-	c.defineF64ToStringBridge() // bridge promise_f64_to_string → Promise _f64_to_str
 	c.declareMonoFuncs(file, monoFuncInstances)
 	c.declareMonoMethodInstances(file, monoMethodInstances)
 
-	// Compile imported modules into the same IR module (inline strategy)
+	// Compile imported modules into the same IR module (inline strategy).
+	// Must run before definePALBodies/defineMathBodies/defineF64ToStringBridge so that
+	// std module externs (promise_print_int, promise_nanotime, etc.) and functions
+	// (_f64_to_str) are declared and available in c.module.Funcs / c.funcs.
 	c.compileModules()
+	// Add PAL-based function bodies to print/panic/time declarations.
+	// Must run after compileModules so that std-declared externs (from std/io.pr,
+	// std/time.pr, std/math.pr) are already in c.module.Funcs for lookup.
+	c.definePALBodies()
+	c.defineMathBodies()
+	c.defineF64ToStringBridge() // bridge promise_f64_to_string → Promise _f64_to_str
 
 	c.defineTypeMethods(file)
 	c.defineMonoMethods(file, monoInstances)
@@ -2669,24 +2670,8 @@ func (c *Compiler) declareFuncs(file *ast.File) {
 			retType = irtypes.I32
 		}
 
-		// Std functions use mangled LLVM names to avoid collision with user functions
-		irName := fd.Name
-		if fd.IsStd {
-			irName = "__std_" + fd.Name
-		}
-
-		fn := c.module.NewFunc(irName, retType, params...)
-
-		if fd.IsStd {
-			// Always register in stdFuncs for std.X access
-			c.stdFuncs[fd.Name] = fn
-			// Also register in funcs if no user function shadows it
-			if _, shadowed := c.funcs[fd.Name]; !shadowed {
-				c.funcs[fd.Name] = fn
-			}
-		} else {
-			c.funcs[fd.Name] = fn
-		}
+		fn := c.module.NewFunc(fd.Name, retType, params...)
+		c.funcs[fd.Name] = fn
 	}
 }
 
@@ -2707,19 +2692,13 @@ func (c *Compiler) defineFuncs(file *ast.File) {
 		if len(fd.TypeParams) > 0 {
 			continue // generic — handled by monomorphization
 		}
-		// Skip user main — its body is compiled inline inside .goroutine.main
+		// Skip main — its body is compiled inline inside .goroutine.main
 		// by wrapMainWithScheduler (with inCoroutine=true for proper channel ops).
-		if fd.Name == "main" && !fd.IsStd {
+		if fd.Name == "main" {
 			c.mainDecl = fd
 			continue
 		}
-		// Std functions use stdFuncs map; user functions use funcs map
-		var fn *ir.Func
-		if fd.IsStd {
-			fn = c.stdFuncs[fd.Name]
-		} else {
-			fn = c.funcs[fd.Name]
-		}
+		fn := c.funcs[fd.Name]
 		if fn == nil {
 			continue
 		}
@@ -2791,14 +2770,6 @@ func (c *Compiler) lookupFunc(name string) *types.Func {
 	// Walk all recorded scopes
 	for _, scope := range c.info.ScopeOrder {
 		if obj := scope.Lookup(name); obj != nil {
-			if fn, ok := obj.(*types.Func); ok {
-				return fn
-			}
-		}
-	}
-	// Check std scope
-	if c.info.StdScope != nil {
-		if obj := c.info.StdScope.Lookup(name); obj != nil {
 			if fn, ok := obj.(*types.Func); ok {
 				return fn
 			}
@@ -2896,22 +2867,35 @@ func (c *Compiler) compileModules() {
 		}
 	}
 
+	// Collect mono instances, func instances, and method instances from the main
+	// (user) sema info. These include instances of module-defined types/methods
+	// (e.g. Map[string,int], Iterator[int].map[int]) and calls to module generic
+	// functions (e.g. sort[int]) that were created by user code. We pass them to
+	// compileModule so they are processed under the correct module context.
+	mainMonoInstances := collectMonoInstances(c.info)
+	mainMonoFuncInstances := collectMonoFuncInstances(c.info)
+	mainMonoMethodInstances := collectMonoMethodInstances(c.info)
+
 	// Use topological order if available, otherwise fall back to map iteration.
 	if len(c.info.ModuleOrder) > 0 {
 		for _, key := range c.info.ModuleOrder {
 			if modInfo, ok := c.info.ModuleInfos[key]; ok {
-				c.compileModule(modInfo)
+				c.compileModule(modInfo, mainMonoInstances, mainMonoFuncInstances, mainMonoMethodInstances)
 			}
 		}
 	} else {
 		for _, modInfo := range c.info.ModuleInfos {
-			c.compileModule(modInfo)
+			c.compileModule(modInfo, mainMonoInstances, mainMonoFuncInstances, mainMonoMethodInstances)
 		}
 	}
 }
 
 // compileModule compiles a single module's declarations into the current IR module.
-func (c *Compiler) compileModule(modInfo *sema.ModuleInfo) {
+// extraInstances contains mono instances from the caller's sema info (e.g., the
+// main file) that may include instances of this module's types; they are merged
+// in so that user-created instantiations of module-defined generics are processed
+// under the correct module context (module's c.info and c.file).
+func (c *Compiler) compileModule(modInfo *sema.ModuleInfo, extraInstances []*types.Instance, extraFuncInstances []*sema.FuncInstance, extraMethodInstances []*sema.MethodInstance) {
 	// Save main context
 	savedInfo := c.info
 	savedFile := c.file
@@ -2925,9 +2909,7 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo) {
 	c.file = modInfo.File
 	c.compilingModule = irName
 
-	// Create a filtered file containing only the module's own declarations,
-	// excluding merged std library declarations that are already compiled.
-	modFile := stripStdDecls(modInfo.File)
+	modFile := modInfo.File
 
 	// 1. Compute enum layouts for module types
 	c.computeEnumLayouts(modFile)
@@ -2935,11 +2917,13 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo) {
 	// 2. Compute user type layouts for module types
 	c.computeUserTypeLayouts(modFile)
 
-	// 3. Compute mono layouts for module generic instantiations
-	monoInstances := collectMonoInstances(modInfo.SemaInfo)
+	// 3. Collect mono instances: module's own + any extra from caller that belong
+	//    to types defined in this module's file. Transitive expansion uses the
+	//    module's sema info so method-body references (e.g. _FnIter[T]) resolve.
+	monoInstances := collectMonoInstancesWithExtra(modInfo, modFile, extraInstances)
 	c.computeMonoLayouts(monoInstances)
-	monoFuncInstances := collectMonoFuncInstances(modInfo.SemaInfo)
-	monoMethodInstances := collectMonoMethodInstances(modInfo.SemaInfo)
+	monoFuncInstances := collectMonoFuncInstancesWithExtra(modInfo.SemaInfo, modFile, extraFuncInstances)
+	monoMethodInstances := collectMonoMethodInstancesWithExtra(modInfo.SemaInfo, modFile, extraMethodInstances)
 
 	// 4. Declare module externs
 	modExterns := collectExterns(modFile, modInfo.SemaInfo)
@@ -2979,31 +2963,6 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo) {
 	c.compilingModule = savedModule
 }
 
-// stripStdDecls returns a shallow copy of the file with only non-std declarations.
-// Module files have std library declarations merged in for sema, but codegen must
-// skip them to avoid redefinition of types/functions already emitted by the main file.
-func stripStdDecls(file *ast.File) *ast.File {
-	stripped := &ast.File{Uses: file.Uses}
-	for _, d := range file.Decls {
-		switch decl := d.(type) {
-		case *ast.TypeDecl:
-			if decl.IsStd {
-				continue
-			}
-		case *ast.EnumDecl:
-			if decl.IsStd {
-				continue
-			}
-		case *ast.FuncDecl:
-			if decl.IsStd {
-				continue
-			}
-		}
-		stripped.Decls = append(stripped.Decls, d)
-	}
-	return stripped
-}
-
 // declareModuleExterns declares extern functions from a module, deduplicating
 // against already-declared C functions. Registers in moduleExterns for qualified access.
 func (c *Compiler) declareModuleExterns(moduleName string, externs []*ExternFunc) {
@@ -3030,9 +2989,6 @@ func (c *Compiler) declareModuleFuncs(file *ast.File, moduleName string) {
 		}
 		if c.info.FilteredDecls[decl] {
 			continue // excluded by `target(cond) annotation for this build target
-		}
-		if fd.IsStd {
-			continue // std functions already compiled by main pipeline
 		}
 
 		obj := c.lookupFunc(fd.Name)
@@ -3080,7 +3036,7 @@ func (c *Compiler) declareModuleFuncs(file *ast.File, moduleName string) {
 func (c *Compiler) defineModuleFuncs(file *ast.File, moduleName string) {
 	for _, decl := range file.Decls {
 		fd, ok := decl.(*ast.FuncDecl)
-		if !ok || fd.Body == nil || len(fd.TypeParams) > 0 || fd.IsStd {
+		if !ok || fd.Body == nil || len(fd.TypeParams) > 0 {
 			continue
 		}
 		if c.info.FilteredDecls[decl] {
@@ -3146,9 +3102,6 @@ func (c *Compiler) declareModuleTypeMethods(file *ast.File, moduleName string) {
 		if c.info.FilteredDecls[decl] {
 			continue // excluded by `target(cond) annotation for this build target
 		}
-		if td.IsStd {
-			continue
-		}
 		named := c.lookupNamedType(td.Name)
 		if named == nil || len(named.TypeParams()) > 0 {
 			continue
@@ -3207,7 +3160,7 @@ func (c *Compiler) declareModuleTypeMethods(file *ast.File, moduleName string) {
 func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 	for _, decl := range file.Decls {
 		td, ok := decl.(*ast.TypeDecl)
-		if !ok || td.IsStd {
+		if !ok {
 			continue
 		}
 		if c.info.FilteredDecls[decl] {
@@ -3252,7 +3205,11 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 			// Bind 'this' and parameters
 			paramIdx := 0
 			if m.Sig().Recv() != nil {
-				alloca := c.entryBlock.NewAlloca(irtypes.I8Ptr)
+				receiverType := irtypes.Type(irtypes.I8Ptr)
+				if isPrimitiveScalar(named) {
+					receiverType = llvmNamedType(named)
+				}
+				alloca := c.entryBlock.NewAlloca(receiverType)
 				c.entryBlock.NewStore(fn.Params[0], alloca)
 				c.locals["this"] = alloca
 				paramIdx = 1
@@ -3605,15 +3562,6 @@ func (c *Compiler) lookupNamedType(name string) *types.Named {
 			}
 		}
 	}
-	if c.info.StdScope != nil {
-		if obj := c.info.StdScope.Lookup(name); obj != nil {
-			if tn, ok := obj.(*types.TypeName); ok {
-				if named, ok := tn.Type().(*types.Named); ok {
-					return named
-				}
-			}
-		}
-	}
 	return nil
 }
 
@@ -3621,15 +3569,6 @@ func (c *Compiler) lookupNamedType(name string) *types.Named {
 func (c *Compiler) lookupEnumType(name string) *types.Enum {
 	for _, scope := range c.info.ScopeOrder {
 		if obj := scope.Lookup(name); obj != nil {
-			if tn, ok := obj.(*types.TypeName); ok {
-				if enum, ok := tn.Type().(*types.Enum); ok {
-					return enum
-				}
-			}
-		}
-	}
-	if c.info.StdScope != nil {
-		if obj := c.info.StdScope.Lookup(name); obj != nil {
 			if tn, ok := obj.(*types.TypeName); ok {
 				if enum, ok := tn.Type().(*types.Enum); ok {
 					return enum
@@ -3962,14 +3901,48 @@ func (c *Compiler) restoreState(s compilerState) {
 	c.lambdaWritebacks = s.lambdaWritebacks
 }
 
+// findTypeDeclAnyFile searches for a TypeDecl by name in c.file first,
+// then in all loaded module files. Returns the decl and (if found in a module)
+// the module's sema.Info so callers can switch context for body generation.
+func (c *Compiler) findTypeDeclAnyFile(name string) (*ast.TypeDecl, *sema.Info) {
+	if td := c.findTypeDecl(c.file, name); td != nil {
+		return td, nil // nil Info means "use current context"
+	}
+	// Always search from rootInfo (original user sema info) so that module lookups
+	// work correctly even when c.info has been temporarily swapped during synthesis.
+	root := c.rootInfo
+	if root == nil {
+		root = c.info
+	}
+	if root != nil {
+		for _, modInfo := range root.ModuleInfos {
+			if modInfo.File != nil {
+				if td := c.findTypeDecl(modInfo.File, name); td != nil {
+					return td, modInfo.SemaInfo
+				}
+			}
+		}
+	}
+	return nil, nil
+}
+
 // synthesizeDefaultMethods generates LLVM functions for default methods from
 // a structural interface that a concrete type does not override.
 // Called lazily when a view vtable is needed for (concrete, iface).
 func (c *Compiler) synthesizeDefaultMethods(concrete, iface *types.Named) {
-	// Find the interface's AST TypeDecl to get method bodies
-	ifaceTD := c.findTypeDecl(c.file, iface.Obj().Name())
+	// Find the interface's AST TypeDecl to get method bodies.
+	// The interface may be defined in a module file (e.g., std.Iterator[T]),
+	// so search all available files, not just c.file.
+	ifaceTD, ifaceModInfo := c.findTypeDeclAnyFile(iface.Obj().Name())
 	if ifaceTD == nil {
 		return
+	}
+	// If the interface lives in a module, use the module's sema info for type
+	// lookups inside method bodies (e.g., _FnIter[T] type args in Iterator[T]).
+	if ifaceModInfo != nil {
+		savedInfo := c.info
+		c.info = ifaceModInfo
+		defer func() { c.info = savedInfo }()
 	}
 
 	concreteName := concrete.Obj().Name()

@@ -639,13 +639,13 @@ Module resolution and dependency management. See [module-system.md](module-syste
 - **Grammar**: `useDecl` has two labeled alternatives — `catalogImport` (`use json;` / `use json as j;` / `use json as _;`) and `sourcedImport` (`use parser "url";` / `use _ "url";`). `qualifiedType` alt in `typeRef` for `mod.Type` references.
 - **`promise.toml`**: TOML parser for `[module]`, `[require]`, `[replace]` sections. `promise init` creates the file.
 - **`public` visibility**: Explicit `` `public `` meta annotation on types, enums, functions, fields, and methods. `isObjectExported()` checks Func/Named/Enum exported flags. All 22 `std/*.pr` files annotated with explicit `public` on exported symbols.
-- **Module scope resolution**: `resolveModuleScope()` handles catalog modules (special case for `"std"` → uses built-in `stdScope`), local modules via `moduleScopes` map. `mergeGlobImport()` for `as _` with eager conflict detection, filtering by `public` visibility.
-- **Qualified access**: `resolveModuleMember()` for `mod.func()` calls with visibility enforcement. `resolveStdMember()` shortcut for `std.func()` (works with or without `use std;`). `resolveQualifiedType()` for `mod.Type` in type position (also works for `std.Type` without `use std;`).
+- **Module scope resolution**: `resolveModuleScope()` handles catalog modules via `loadCatalog()`, local modules via `moduleScopes` map. `mergeGlobImport()` for `as _` with eager conflict detection, filtering by `public` visibility.
+- **Qualified access**: `resolveModuleMember()` for `mod.func()` calls with visibility enforcement. `resolveQualifiedType()` for `mod.Type` in type position.
 - **Local module loading**: `loadLocalModule()` in `cmd/promise/main.go` — scans use decls for local paths, parses+sema+exports. `ExportedScope()` extracts only `public` symbols. `mergeModuleFiles()` combines multiple `.pr` files in a module dir.
-- **Std as catalog module**: `use std;` / `use std as s;` for qualified access (`std.min()`, `std.int[]`). `use std as _;` is a no-op (std symbols already in scope via parent chain). Unqualified access still works without any `use` statement.
+- **Std as catalog module**: `std` is a regular embedded catalog module (`std/promise.toml`, `catalog.toml`). Every file auto-receives an injected `use std as _;` glob import — no special `stdScope` parent chain. `CheckForStdModule` compiles std with `compilingStd=true` to avoid self-import. `use std;` / `use std as s;` still work for qualified access.
 - **Cross-module codegen (inline strategy)**: All module declarations compiled into one LLVM IR module via `compileModules()` with context save/restore (`c.info`/`c.file`/`c.compilingModule` swap). Name mangling: `__mod_<module>_<func>` for functions, `__mod_<module>_<Type>.<method>` for methods. `moduleFuncs`/`moduleExterns` maps for qualified call dispatch; plain names registered in `c.funcs` for glob imports. MemberExpr dispatch: std check → module check (function/constructor/enum switch) → enum layout → method call. Coercion uses callee's `*types.Signature` from sema directly.
-- **Separate compilation**: Post-codegen IR split — single codegen pass produces unified `ir.Module`, then `SplitModuleIRs()` (in `codegen/separate.go`) toggles function blocks and global initializers to produce per-module `.ll` files. Module IRs contain only module-owned function bodies; all other functions become `declare`, all globals become `external`. Main IR keeps everything except module function bodies. Each `.ll` → `opt` → `llc` → `.o` (modules compiled in parallel via goroutines). `linkLinuxMulti()`/`linkDarwinMulti()`/`linkWasmMulti()` link all `.o` files together. `moduleOwnedFuncs map[string]string` tracks which IR functions belong to which module (populated during `declareModuleFuncs`, `declareModuleTypeMethods`, `declareMonoMethods`, `declareMonoFuncs`).
-- **Incremental compilation**: Content-addressed build cache at `~/.promise/cache/build/` (overridable via `PROMISE_HOME`). **Implementation hash** (SHA-256 of sorted source file contents) determines when a module's `.o` needs recompilation. **Interface hash** (SHA-256 of public API signatures: function names+signatures, type fields+methods, enum variants) determines when dependents need recompilation. Cache key is SHA-256 of impl hash + compiler hash + target + sorted module paths. Files stored in two-level directory structure (`<hash[:2]>/<hash>.o`). Atomic writes via temp + rename with rollback. On cache hit, the expensive `opt`→`llc` pipeline is skipped entirely — the cached `.o` is linked directly. Main file always recompiles (most frequent change target). Cache key includes filename separators to prevent hash collisions from file splits.
+- **Separate compilation**: Post-codegen IR split — single codegen pass produces unified `ir.Module`, then `SplitModuleIRs()` (in `codegen/separate.go`) toggles function blocks and global initializers to produce per-module `.ll` files. Module IRs contain only module-owned function bodies; all other functions become `declare`, all globals become `external`. Main IR keeps everything except module function bodies. Each `.ll` → `opt -O1 → .bc` (non-Windows; modules compiled in parallel via goroutines). `linkLinuxMulti()`/`linkDarwinMulti()`/`linkWasmMulti()` pass all `.bc` files to the LTO-capable linker. Windows: `.ll` → `opt → llc → .o` → `lld-link`. `moduleOwnedFuncs map[string]string` tracks which IR functions belong to which module (populated during `declareModuleFuncs`, `declareModuleTypeMethods`, `declareMonoMethods`, `declareMonoFuncs`).
+- **Incremental compilation**: Content-addressed build cache at `~/.promise/cache/build/` (overridable via `PROMISE_HOME`). **Implementation hash** (FNV-128a of sorted source file contents) determines when a module's `.bc` needs recompilation. **Interface hash** (FNV-128a of public API signatures: function names+signatures, type fields+methods, enum variants) determines when dependents need recompilation. Cache key is FNV-128a of impl hash + compiler hash + target + sorted module paths. Files stored in two-level directory structure (`<hash[:2]>/<hash>.bc`). Atomic writes via temp + rename with rollback. On cache hit, the `opt` pipeline is skipped entirely — the cached `.bc` is passed directly to the LTO linker. Main file always recompiles (most frequent change target). Cache key includes filename separators to prevent hash collisions from file splits.
 - **Tests**: 7 std-module sema tests, 26 general module sema tests, 4 ExportedScope tests, 10 module load integration tests, 5 `cmd/promise` integration tests, 6 codegen std tests, 15 cross-module codegen tests (qualified calls, constructors, methods, enums, glob imports, failable functions, externs, multi-module, multi-param generics). 42 e2e tests across 12 files in `tests/modules/` (qualified calls, glob imports with struct types/enums/match, aliases, multi-file modules, generics including multi-param `Pair[int, string]`, failable functions, drop types, closures, visibility, two-module interop, module type as param/return).
 
 **Phase 2 — Transitive Dependencies & Canonical Identity (done):**
@@ -855,11 +855,11 @@ Test suite: 1554 native pass, 1549 WASM pass (5 skipped).
 | ~~Generic value types~~ | — | ~~Done~~ |
 | ~~User type `format(Writer ~w)` for interpolation (desugar `"{x}"` to `x.format(~builder)`)~~ | — | ~~Low~~ Done |
 | Type argument inference | — | Low |
-| Output binary size optimization (rodata literals, dead code, LTO) | See [§Output Binary Size](#output-binary-size-optimization) | Medium |
+| Output binary size optimization (rodata literals, dead code) | See [§Output Binary Size](#output-binary-size-optimization) | Medium |
 
 ### WASM remaining work
 
-Tests: 761 pass, 0 fail, 3 skip on `wasm32-wasi` (920 native pass)
+Tests: 1576 pass, 0 fail, 5 skip on `wasm32-wasi` (1581 native pass)
 
 | Item | Skipped tests | Effort | Notes |
 |------|--------------|--------|-------|
@@ -887,18 +887,20 @@ The size of compiled Promise programs matters for startup speed, deployment cost
 
 ### Current state
 
-- **No dead code elimination**: All monomorphized functions, vtables, RTTI structs, and std methods are emitted even if unused by the program.
+- **Dead code eliminated via LTO**: The `opt → .bc → linker --lto-O1` pipeline performs whole-program DCE across all modules (main + std + user modules). Unused functions, vtables, and RTTI structs are stripped at link time. WASM uses `--lto-O2` for stronger folding.
 - **All string literals heap-allocated**: Every string literal (`"hello"`) calls `malloc` at runtime, copies the bytes, and frees on scope exit. The literal bytes exist in the `.rodata` section of the binary *and* are duplicated on the heap.
 - **All container literals heap-allocated**: Vector and Map literals allocate heap storage and copy elements at runtime, even for compile-time-known constant data.
-- **No LTO**: Each compilation unit is self-contained; no cross-module optimization.
 
 ### Proposed optimizations (phased)
 
-**Phase 1 — LLVM-level dead code elimination (low effort, high impact)**
+**~~Phase 1 — LLVM-level dead code elimination~~ (Done via LTO)**
 
-Pass `-internalize` and `-globaldce` to `opt` to strip unreferenced functions, globals, and vtable entries. This is purely an LLVM optimization pipeline change — no codegen modifications needed. Expected to significantly reduce binary size for small programs that use few std methods.
+The `opt → .bc → linker --lto-O1` pipeline provides whole-program DCE: unused functions,
+globals, and vtable entries are stripped at link time by the LTO-capable linker. This subsumes
+the `-internalize`/`-globaldce` approach — LTO is strictly more powerful (cross-module).
 
-Additionally, pass `-Oz` or `-Os` to `opt` instead of `-O1` for size-optimized builds (e.g., `promise build --small` or `promise build --target wasm32-wasi` default). Consider LTO (`-flto`) for cross-module dead code elimination when separate compilation is used.
+Additionally, consider `-Oz` or `-Os` instead of `-O1` for size-optimized builds (e.g.,
+`promise build --small`). WASM already uses `--lto-O2` for stronger optimization.
 
 **Phase 2 — Read-only string literals (medium effort, high impact)**
 
@@ -1042,13 +1044,13 @@ Duplicate detection uses GlobalIdentity (not `promise.toml` name): two modules w
 
 **Layer 2 — IR prefix** (`ModuleInfo.IRPrefix`): Sanitized prefix for LLVM IR symbols, derived from GlobalIdentity via `SanitizeIRPrefix()`:
 - Simple identifiers (matching `[a-zA-Z_][a-zA-Z0-9_]*`) **that required no stripping** pass through unchanged. This covers catalog modules only (e.g. `"json"` → `"json"`).
-- All other inputs (local paths, remote URLs) are sanitized: non-alphanumeric characters replaced with `_`, runs collapsed, leading/trailing `_` trimmed. A 6-character SHA-256 hash suffix (of the original globalID) is appended for collision-freedom. This ensures `"json"` (catalog) and `"./json"` (local) never collide.
+- All other inputs (local paths, remote URLs) are sanitized: non-alphanumeric characters replaced with `_`, runs collapsed, leading/trailing `_` trimmed. A 6-character FNV-128a hash suffix (of the original globalID) is appended for collision-freedom. This ensures `"json"` (catalog) and `"./json"` (local) never collide.
   - `./mylib` → `mylib_<hash6>` (local path gets hash suffix)
   - `./libs/parser` → `libs_parser_<hash6>`
   - `github.com/alice/parser` → `github_com_alice_parser_<hash6>`
   - `github.com/bob/parser` → `github_com_bob_parser_<hash6>` (different hash, no collision)
 
-IR symbols use the pattern `__mod_<IRPrefix>_<symbol>`. Cache keys use the content-addressed build cache key (SHA-256 of impl hash + compiler hash + target + module paths).
+IR symbols use the pattern `__mod_<IRPrefix>_<symbol>`. Cache keys use the content-addressed build cache key (FNV-128a of impl hash + compiler hash + target + module paths).
 
 **Files:** `internal/module/identity.go` (SanitizeIRPrefix, GlobalIdentityFor*), `internal/module/cache.go` (BuildCacheKey, HashModuleSources, HashModuleInterface, SaveBuildCache, LookupBuildCache), `internal/module/home.go` (PromiseHome), `internal/sema/info.go` (ModuleInfo.GlobalIdentity, ModuleInfo.IRPrefix), `internal/codegen/compiler.go` (compileModules/compileModule use IRPrefix), `internal/codegen/expr.go` (resolveModuleName returns IRPrefix), `cmd/promise/main.go` (load sets GlobalIdentity/IRPrefix, loadRemote overrides with URL identity, globalIdentities dedup map)
 
@@ -1060,7 +1062,7 @@ A device-wide build cache at `~/.promise/cache/build/` (overridable via `PROMISE
 - Module source hash (impl hash — `HashModuleSources()`)
 - Sorted list of all module paths in the build
 
-The cache key is a SHA-256 of these inputs (`BuildCacheKey()`). Files are stored in a **two-level directory structure** using the first 2 hex characters of the hash as a subdirectory: `~/.promise/cache/build/a3/a3b4c5d8...o`. Writes are atomic (`os.CreateTemp` unique temp file + `os.Rename`, with rollback on failure) — concurrent processes writing the same cache key use independent temp files, preventing corruption.
+The cache key is an FNV-128a of these inputs (`BuildCacheKey()`). Files are stored in a **two-level directory structure** using the first 2 hex characters of the hash as a subdirectory: `~/.promise/cache/build/a3/a3b4c5d8....bc`. Writes are atomic (`os.CreateTemp` unique temp file + `os.Rename`, with rollback on failure) — concurrent processes writing the same cache key use independent temp files, preventing corruption.
 
 Wired into `compileAndLinkSeparate()` in `main.go`: lookup → cache hit skips `opt+llc` → cache miss compiles and saves. Interface hashes stored alongside `.o` files for incremental dependency tracking.
 

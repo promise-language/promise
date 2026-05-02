@@ -970,11 +970,6 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) types.Type {
 }
 
 func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
-	// Handle std.X — resolve against stdScope directly
-	if ident, ok := e.Target.(*ast.IdentExpr); ok && ident.Name == "std" {
-		return c.resolveStdMember(e)
-	}
-
 	// Handle module-qualified access: mod.symbol
 	if ident, ok := e.Target.(*ast.IdentExpr); ok {
 		if obj := c.lookup(ident.Name); obj != nil {
@@ -2288,25 +2283,6 @@ func (c *Checker) checkUnsafeExpr(e *ast.UnsafeExpr) types.Type {
 	c.closeScope()
 	// Unsafe block type is the last expression's type (if any)
 	return types.TypVoid
-}
-
-// resolveStdMember handles std.X expressions by looking up X in the std scope.
-// Checks visibility: only `public symbols are accessible via std.X.
-func (c *Checker) resolveStdMember(e *ast.MemberExpr) types.Type {
-	if c.stdScope == nil {
-		c.errorf(e.Pos(), "std library is not available")
-		return nil
-	}
-	obj := c.stdScope.Lookup(e.Field)
-	if obj == nil {
-		c.errorf(e.Pos(), "std has no member '%s'", e.Field)
-		return nil
-	}
-	if !isObjectExported(obj) {
-		c.errorf(e.Pos(), "'%s' is private to module 'std'", e.Field)
-		return nil
-	}
-	return obj.Type()
 }
 
 // resolveModuleMember resolves a qualified access like mod.symbol against

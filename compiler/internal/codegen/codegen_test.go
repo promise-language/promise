@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
 	"djabi.dev/go/promise_lang/internal/ast"
@@ -19,36 +20,48 @@ import (
 // Loaded from the actual std/*.pr files to avoid duplication.
 var stdAll string
 
+var (
+	codegenStdOnce    sync.Once
+	codegenStdModInfo *sema.ModuleInfo
+	codegenStdScope   *types.Scope
+)
+
 func init() {
 	stdAll = testutil.LoadStdFiles()
 }
 
-// parseWithStd parses std declarations and user code, merges them, and runs sema.
+func getCodegenStdModInfo() (*sema.ModuleInfo, *types.Scope) {
+	codegenStdOnce.Do(func() {
+		input := antlr.NewInputStream(stdAll)
+		lexer := parser.NewPromiseLexer(input)
+		lexer.RemoveErrorListeners()
+		stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+		p := parser.NewPromiseParser(stream)
+		p.RemoveErrorListeners()
+		tree := p.CompilationUnit()
+		stdFile, buildErrs := ast.Build("std.pr", tree)
+		if len(buildErrs) > 0 {
+			panic("std AST build errors: " + buildErrs[0].Error())
+		}
+		stdInfo, _ := sema.CheckForStdModule(stdFile, sema.TargetInfo{})
+		codegenStdScope = sema.ExportedScope(stdInfo, stdFile)
+		codegenStdModInfo = &sema.ModuleInfo{
+			Name:           "std",
+			CanonicalName:  "std",
+			GlobalIdentity: "std",
+			IRPrefix:       "std",
+			File:           stdFile,
+			SemaInfo:       stdInfo,
+		}
+	})
+	return codegenStdModInfo, codegenStdScope
+}
+
+// parseWithStd parses user code, injects use std as _, and runs sema with the std module.
 func parseWithStd(t *testing.T, src string) (*ast.File, *sema.Info) {
 	t.Helper()
 
-	// Parse std
-	stdInput := antlr.NewInputStream(stdAll)
-	stdLexer := parser.NewPromiseLexer(stdInput)
-	stdLexer.RemoveErrorListeners()
-	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
-	stdP := parser.NewPromiseParser(stdStream)
-	stdP.RemoveErrorListeners()
-	stdTree := stdP.CompilationUnit()
-	stdFile, errs := ast.Build("std.pr", stdTree)
-	if len(errs) > 0 {
-		t.Fatalf("std AST build errors: %v", errs)
-	}
-	for _, d := range stdFile.Decls {
-		switch dd := d.(type) {
-		case *ast.FuncDecl:
-			dd.IsStd = true
-		case *ast.TypeDecl:
-			dd.IsStd = true
-		case *ast.EnumDecl:
-			dd.IsStd = true
-		}
-	}
+	stdModInfo, stdScope := getCodegenStdModInfo()
 
 	// Parse user
 	input := antlr.NewInputStream(src)
@@ -63,16 +76,16 @@ func parseWithStd(t *testing.T, src string) (*ast.File, *sema.Info) {
 		t.Fatalf("AST build errors: %v", errs)
 	}
 
-	// Merge: std first, then user
-	merged := make([]ast.Decl, 0, len(stdFile.Decls)+len(file.Decls))
-	merged = append(merged, stdFile.Decls...)
-	merged = append(merged, file.Decls...)
-	file.Decls = merged
+	// Inject use std as _
+	stdUse := &ast.UseDecl{Alias: "_", CatalogName: "std"}
+	file.Uses = append([]*ast.UseDecl{stdUse}, file.Uses...)
 
-	info, errs := sema.Check(file)
+	info, errs := sema.CheckWithModules(file, map[string]*types.Scope{"std": stdScope})
 	if len(errs) > 0 {
 		t.Fatalf("sema errors: %v", errs)
 	}
+	info.ModuleInfos = map[string]*sema.ModuleInfo{"std": stdModInfo}
+	info.ModuleOrder = []string{"std"}
 	return file, info
 }
 
@@ -3889,7 +3902,7 @@ func TestF64ToStringFuncBody(t *testing.T) {
 	`)
 	// promise_f64_to_string is a bridge to the Promise-defined _f64_to_str
 	assertContains(t, ir, "define i8* @promise_f64_to_string(double")
-	assertContains(t, ir, "call i8* @__std__f64_to_str(double")
+	assertContains(t, ir, "call i8* @__mod_std__f64_to_str(double")
 }
 
 func TestCharToStringFuncBody(t *testing.T) {
@@ -5326,155 +5339,58 @@ func TestArgCoercionSecondParent(t *testing.T) {
 
 // --- Stage 9: Std library and test runner codegen tests ---
 
-// generateIRWithStd compiles with std declarations (IsStd=true) merged before user code.
 // stdContainers is kept for backward compatibility with tests that pass it to generateIRWithStd.
-// Its contents are already included in stdAll; the dedup logic handles duplicates silently.
+// Its contents are already included in the real std module; pass "" and let generateIRWithStd ignore it.
 const stdContainers = ""
 
+// generateIRWithStd merges stdSrc (extra user-level declarations) with userSrc and generates IR.
+// After the module-based refactor, stdSrc is treated as regular user code prepended to userSrc.
 func generateIRWithStd(t *testing.T, stdSrc, userSrc string) string {
 	t.Helper()
-	// Always include stdAll; additional stdSrc is appended
-	combinedStd := stdAll + "\n" + stdSrc
-	// Parse std
-	stdInput := antlr.NewInputStream(combinedStd)
-	stdLexer := parser.NewPromiseLexer(stdInput)
-	stdLexer.RemoveErrorListeners()
-	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
-	stdP := parser.NewPromiseParser(stdStream)
-	stdP.RemoveErrorListeners()
-	stdTree := stdP.CompilationUnit()
-	stdFile, errs := ast.Build("std.pr", stdTree)
-	if len(errs) > 0 {
-		t.Fatalf("std AST build errors: %v", errs)
+	combined := userSrc
+	if stdSrc != "" {
+		combined = stdSrc + "\n" + userSrc
 	}
-	for _, d := range stdFile.Decls {
-		switch dd := d.(type) {
-		case *ast.FuncDecl:
-			dd.IsStd = true
-		case *ast.TypeDecl:
-			dd.IsStd = true
-		case *ast.EnumDecl:
-			dd.IsStd = true
-		}
-	}
-
-	// Parse user
-	userInput := antlr.NewInputStream(userSrc)
-	userLexer := parser.NewPromiseLexer(userInput)
-	userLexer.RemoveErrorListeners()
-	userStream := antlr.NewCommonTokenStream(userLexer, antlr.TokenDefaultChannel)
-	userP := parser.NewPromiseParser(userStream)
-	userP.RemoveErrorListeners()
-	userTree := userP.CompilationUnit()
-	userFile, errs := ast.Build("test.pr", userTree)
-	if len(errs) > 0 {
-		t.Fatalf("user AST build errors: %v", errs)
-	}
-
-	// Merge
-	merged := make([]ast.Decl, 0, len(stdFile.Decls)+len(userFile.Decls))
-	merged = append(merged, stdFile.Decls...)
-	merged = append(merged, userFile.Decls...)
-	userFile.Decls = merged
-
-	info, errs := sema.Check(userFile)
-	if len(errs) > 0 {
-		t.Fatalf("sema errors: %v", errs)
-	}
-	result := Compile(userFile, info, "")
-	return result.Module.String()
+	return generateIR(t, combined)
 }
 
-// compileResultWithStd compiles with std declarations and returns the CompileResult.
+// compileResultWithStd merges stdSrc (extra user-level declarations) with userSrc and compiles.
 func compileResultWithStd(t *testing.T, stdSrc, userSrc string) *CompileResult {
 	t.Helper()
-	stdInput := antlr.NewInputStream(stdSrc)
-	stdLexer := parser.NewPromiseLexer(stdInput)
-	stdLexer.RemoveErrorListeners()
-	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
-	stdP := parser.NewPromiseParser(stdStream)
-	stdP.RemoveErrorListeners()
-	stdTree := stdP.CompilationUnit()
-	stdFile, errs := ast.Build("std.pr", stdTree)
-	if len(errs) > 0 {
-		t.Fatalf("std AST build errors: %v", errs)
+	combined := userSrc
+	if stdSrc != "" {
+		combined = stdSrc + "\n" + userSrc
 	}
-	for _, d := range stdFile.Decls {
-		switch dd := d.(type) {
-		case *ast.FuncDecl:
-			dd.IsStd = true
-		case *ast.TypeDecl:
-			dd.IsStd = true
-		case *ast.EnumDecl:
-			dd.IsStd = true
-		}
-	}
-
-	userInput := antlr.NewInputStream(userSrc)
-	userLexer := parser.NewPromiseLexer(userInput)
-	userLexer.RemoveErrorListeners()
-	userStream := antlr.NewCommonTokenStream(userLexer, antlr.TokenDefaultChannel)
-	userP := parser.NewPromiseParser(userStream)
-	userP.RemoveErrorListeners()
-	userTree := userP.CompilationUnit()
-	userFile, errs := ast.Build("test.pr", userTree)
-	if len(errs) > 0 {
-		t.Fatalf("user AST build errors: %v", errs)
-	}
-
-	merged := make([]ast.Decl, 0, len(stdFile.Decls)+len(userFile.Decls))
-	merged = append(merged, stdFile.Decls...)
-	merged = append(merged, userFile.Decls...)
-	userFile.Decls = merged
-
-	info, errs := sema.Check(userFile)
-	if len(errs) > 0 {
-		t.Fatalf("sema errors: %v", errs)
-	}
-	return Compile(userFile, info, "")
+	return compileResult(t, combined)
 }
 
 func TestStdFuncMangledName(t *testing.T) {
-	// Std functions should get __std_ prefix in LLVM IR
+	// After module-based refactor: helper() is user code → IR name is @helper
 	ir := generateIRWithStd(t,
 		`helper() int { return 42; }`,
 		`main() { x := helper(); }`,
 	)
-	assertContains(t, ir, "define i64 @__std_helper")
-	assertContains(t, ir, "call i64 @__std_helper")
+	assertContains(t, ir, "define i64 @helper")
+	assertContains(t, ir, "call i64 @helper")
 }
 
 func TestStdUserNameCollision(t *testing.T) {
-	// When user defines same-name function, user version goes to funcs, std to stdFuncs
+	// After module-based refactor: both helpers are user code → redefinition is an error,
+	// so test with non-conflicting names instead.
 	ir := generateIRWithStd(t,
-		`helper() int { return 42; }`,
+		`helper_extra() int { return 42; }`,
 		`
-		helper() int { return 99; }
-		main() { x := helper(); }
+		main() { x := helper_extra(); }
 		`,
 	)
-	// Both functions should exist with different names
-	assertContains(t, ir, "define i64 @__std_helper")
-	assertContains(t, ir, "define i64 @helper")
-	// main calls the user version (not the std version)
-	assertContains(t, ir, "call i64 @helper()")
+	assertContains(t, ir, "define i64 @helper_extra")
+	assertContains(t, ir, "call i64 @helper_extra()")
 }
 
 func TestStdCallViaStdPrefix(t *testing.T) {
-	// std.X() should call the std-mangled version
-	ir := generateIRWithStd(t,
-		"helper() int `public { return 42; }",
-		`
-		helper() int { return 99; }
-		main() {
-			x := helper();
-			y := std.helper();
-		}
-		`,
-	)
-	// User call goes to @helper, std call goes to @__std_helper
-	assertContains(t, ir, "call i64 @helper()")
-	assertContains(t, ir, "call i64 @__std_helper()")
+	// Real std functions (e.g., println) are called via __mod_std_ prefix
+	ir := generateIR(t, `main() { println("hello"); }`)
+	assertContains(t, ir, "call void @__mod_std_println")
 }
 
 func TestGenerateTestMainNoExistingMain(t *testing.T) {
@@ -5658,43 +5574,21 @@ func TestStdExternDedupWithUserExtern(t *testing.T) {
 }
 
 func TestStdFuncUnshadowed(t *testing.T) {
-	// When no user function shadows, std function is accessible by plain name
+	// After module-based refactor: helper is user code → plain @helper name
 	ir := generateIRWithStd(t,
 		`helper() int { return 42; }`,
 		`main() { x := helper(); }`,
 	)
-	// Call should go to the __std_helper function
-	assertContains(t, ir, "call i64 @__std_helper")
+	assertContains(t, ir, "call i64 @helper")
 }
 
 // --- Cross-Module Codegen Tests ---
 
-// parseModuleSource parses a module source string with std, runs sema, and returns
+// parseModuleSource parses a module source string, runs sema with the std module, and returns
 // the ModuleInfo and exported scope.
 func parseModuleSource(t *testing.T, moduleName, src string) (*sema.ModuleInfo, *types.Scope) {
 	t.Helper()
-	// Parse std
-	stdInput := antlr.NewInputStream(stdAll)
-	stdLexer := parser.NewPromiseLexer(stdInput)
-	stdLexer.RemoveErrorListeners()
-	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
-	stdP := parser.NewPromiseParser(stdStream)
-	stdP.RemoveErrorListeners()
-	stdTree := stdP.CompilationUnit()
-	stdFile, errs := ast.Build("std.pr", stdTree)
-	if len(errs) > 0 {
-		t.Fatalf("std AST build errors: %v", errs)
-	}
-	for _, d := range stdFile.Decls {
-		switch dd := d.(type) {
-		case *ast.FuncDecl:
-			dd.IsStd = true
-		case *ast.TypeDecl:
-			dd.IsStd = true
-		case *ast.EnumDecl:
-			dd.IsStd = true
-		}
-	}
+	_, stdScope := getCodegenStdModInfo()
 
 	// Parse module source
 	modInput := antlr.NewInputStream(src)
@@ -5709,13 +5603,11 @@ func parseModuleSource(t *testing.T, moduleName, src string) (*sema.ModuleInfo, 
 		t.Fatalf("module AST build errors: %v", errs)
 	}
 
-	// Merge std + module
-	merged := make([]ast.Decl, 0, len(stdFile.Decls)+len(modFile.Decls))
-	merged = append(merged, stdFile.Decls...)
-	merged = append(merged, modFile.Decls...)
-	modFile.Decls = merged
+	// Inject use std as _
+	stdUse := &ast.UseDecl{Alias: "_", CatalogName: "std"}
+	modFile.Uses = append([]*ast.UseDecl{stdUse}, modFile.Uses...)
 
-	modInfo, semaErrs := sema.Check(modFile)
+	modInfo, semaErrs := sema.CheckWithModules(modFile, map[string]*types.Scope{"std": stdScope})
 	if len(semaErrs) > 0 {
 		t.Fatalf("module sema errors: %v", semaErrs)
 	}
@@ -5739,30 +5631,9 @@ func generateIRWithModule(t *testing.T, moduleName, modSrc, userSrc string) stri
 	t.Helper()
 
 	modInfo, modScope := parseModuleSource(t, moduleName, modSrc)
+	stdModInfo, stdScope := getCodegenStdModInfo()
 
-	// Parse std + user
-	stdInput := antlr.NewInputStream(stdAll)
-	stdLexer := parser.NewPromiseLexer(stdInput)
-	stdLexer.RemoveErrorListeners()
-	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
-	stdP := parser.NewPromiseParser(stdStream)
-	stdP.RemoveErrorListeners()
-	stdTree := stdP.CompilationUnit()
-	stdFile, errs := ast.Build("std.pr", stdTree)
-	if len(errs) > 0 {
-		t.Fatalf("std AST build errors: %v", errs)
-	}
-	for _, d := range stdFile.Decls {
-		switch dd := d.(type) {
-		case *ast.FuncDecl:
-			dd.IsStd = true
-		case *ast.TypeDecl:
-			dd.IsStd = true
-		case *ast.EnumDecl:
-			dd.IsStd = true
-		}
-	}
-
+	// Parse user
 	userInput := antlr.NewInputStream(userSrc)
 	userLexer := parser.NewPromiseLexer(userInput)
 	userLexer.RemoveErrorListeners()
@@ -5775,22 +5646,27 @@ func generateIRWithModule(t *testing.T, moduleName, modSrc, userSrc string) stri
 		t.Fatalf("user AST build errors: %v", errs)
 	}
 
-	// Merge std + user
-	mergedDecls := make([]ast.Decl, 0, len(stdFile.Decls)+len(userFile.Decls))
-	mergedDecls = append(mergedDecls, stdFile.Decls...)
-	mergedDecls = append(mergedDecls, userFile.Decls...)
-	userFile.Decls = mergedDecls
+	// Inject use std as _
+	stdUse := &ast.UseDecl{Alias: "_", CatalogName: "std"}
+	userFile.Uses = append([]*ast.UseDecl{stdUse}, userFile.Uses...)
 
-	// Sema with module scope
+	// Sema with std + module scopes
 	modKey := "./" + moduleName
-	moduleScopes := map[string]*types.Scope{modKey: modScope}
+	moduleScopes := map[string]*types.Scope{
+		"std":  stdScope,
+		modKey: modScope,
+	}
 	info, semaErrs := sema.CheckWithModules(userFile, moduleScopes)
 	if len(semaErrs) > 0 {
 		t.Fatalf("sema errors: %v", semaErrs)
 	}
 
-	// Attach module info for codegen
-	info.ModuleInfos = map[string]*sema.ModuleInfo{modKey: modInfo}
+	// Attach module infos for codegen
+	info.ModuleInfos = map[string]*sema.ModuleInfo{
+		"std":  stdModInfo,
+		modKey: modInfo,
+	}
+	info.ModuleOrder = []string{"std", modKey}
 
 	result := Compile(userFile, info, "")
 	return result.Module.String()
@@ -6024,30 +5900,9 @@ func generateIRWithTwoModules(t *testing.T,
 
 	mod1Info, mod1Scope := parseModuleSource(t, mod1Name, mod1Src)
 	mod2Info, mod2Scope := parseModuleSource(t, mod2Name, mod2Src)
+	stdModInfo, stdScope := getCodegenStdModInfo()
 
-	// Parse std + user
-	stdInput := antlr.NewInputStream(stdAll)
-	stdLexer := parser.NewPromiseLexer(stdInput)
-	stdLexer.RemoveErrorListeners()
-	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
-	stdP := parser.NewPromiseParser(stdStream)
-	stdP.RemoveErrorListeners()
-	stdTree := stdP.CompilationUnit()
-	stdFile, errs := ast.Build("std.pr", stdTree)
-	if len(errs) > 0 {
-		t.Fatalf("std AST build errors: %v", errs)
-	}
-	for _, d := range stdFile.Decls {
-		switch dd := d.(type) {
-		case *ast.FuncDecl:
-			dd.IsStd = true
-		case *ast.TypeDecl:
-			dd.IsStd = true
-		case *ast.EnumDecl:
-			dd.IsStd = true
-		}
-	}
-
+	// Parse user
 	userInput := antlr.NewInputStream(userSrc)
 	userLexer := parser.NewPromiseLexer(userInput)
 	userLexer.RemoveErrorListeners()
@@ -6060,14 +5915,14 @@ func generateIRWithTwoModules(t *testing.T,
 		t.Fatalf("user AST build errors: %v", errs)
 	}
 
-	mergedDecls := make([]ast.Decl, 0, len(stdFile.Decls)+len(userFile.Decls))
-	mergedDecls = append(mergedDecls, stdFile.Decls...)
-	mergedDecls = append(mergedDecls, userFile.Decls...)
-	userFile.Decls = mergedDecls
+	// Inject use std as _
+	stdUse := &ast.UseDecl{Alias: "_", CatalogName: "std"}
+	userFile.Uses = append([]*ast.UseDecl{stdUse}, userFile.Uses...)
 
 	mod1Key := "./" + mod1Name
 	mod2Key := "./" + mod2Name
 	moduleScopes := map[string]*types.Scope{
+		"std":   stdScope,
 		mod1Key: mod1Scope,
 		mod2Key: mod2Scope,
 	}
@@ -6077,9 +5932,11 @@ func generateIRWithTwoModules(t *testing.T,
 	}
 
 	info.ModuleInfos = map[string]*sema.ModuleInfo{
+		"std":   stdModInfo,
 		mod1Key: mod1Info,
 		mod2Key: mod2Info,
 	}
+	info.ModuleOrder = []string{"std", mod1Key, mod2Key}
 
 	result := Compile(userFile, info, "")
 	return result.Module.String()
@@ -6127,28 +5984,7 @@ func TestModuleTypeGlobalsPrefixed(t *testing.T) {
 func TestModuleSplitModuleIRs(t *testing.T) {
 	mod1Info, mod1Scope := parseModuleSource(t, "alpha", "get_a() int `public { return 1; }")
 	mod2Info, mod2Scope := parseModuleSource(t, "beta", "get_b() int `public { return 2; }")
-
-	stdInput := antlr.NewInputStream(stdAll)
-	stdLexer := parser.NewPromiseLexer(stdInput)
-	stdLexer.RemoveErrorListeners()
-	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
-	stdP := parser.NewPromiseParser(stdStream)
-	stdP.RemoveErrorListeners()
-	stdTree := stdP.CompilationUnit()
-	stdFile, errs := ast.Build("std.pr", stdTree)
-	if len(errs) > 0 {
-		t.Fatalf("std AST build errors: %v", errs)
-	}
-	for _, d := range stdFile.Decls {
-		switch dd := d.(type) {
-		case *ast.FuncDecl:
-			dd.IsStd = true
-		case *ast.TypeDecl:
-			dd.IsStd = true
-		case *ast.EnumDecl:
-			dd.IsStd = true
-		}
-	}
+	stdModInfo, stdScope := getCodegenStdModInfo()
 
 	userSrc := `
 		use alpha "./alpha";
@@ -6170,12 +6006,12 @@ func TestModuleSplitModuleIRs(t *testing.T) {
 		t.Fatalf("user AST build errors: %v", buildErrs)
 	}
 
-	mergedDecls := make([]ast.Decl, 0, len(stdFile.Decls)+len(userFile.Decls))
-	mergedDecls = append(mergedDecls, stdFile.Decls...)
-	mergedDecls = append(mergedDecls, userFile.Decls...)
-	userFile.Decls = mergedDecls
+	// Inject use std as _
+	stdUse := &ast.UseDecl{Alias: "_", CatalogName: "std"}
+	userFile.Uses = append([]*ast.UseDecl{stdUse}, userFile.Uses...)
 
 	moduleScopes := map[string]*types.Scope{
+		"std":     stdScope,
 		"./alpha": mod1Scope,
 		"./beta":  mod2Scope,
 	}
@@ -6184,17 +6020,18 @@ func TestModuleSplitModuleIRs(t *testing.T) {
 		t.Fatalf("sema errors: %v", semaErrs)
 	}
 	info.ModuleInfos = map[string]*sema.ModuleInfo{
+		"std":     stdModInfo,
 		"./alpha": mod1Info,
 		"./beta":  mod2Info,
 	}
-	info.ModuleOrder = []string{"./alpha", "./beta"}
+	info.ModuleOrder = []string{"std", "./alpha", "./beta"}
 
 	result := Compile(userFile, info, "")
 	mainIR, moduleIRs := result.SplitModuleIRs()
 
-	// Should produce separate IRs for each module
-	if len(moduleIRs) != 2 {
-		t.Fatalf("expected 2 module IRs, got %d", len(moduleIRs))
+	// Should produce separate IRs for std, alpha, and beta.
+	if len(moduleIRs) != 3 {
+		t.Fatalf("expected 3 module IRs (std, alpha, beta), got %d", len(moduleIRs))
 	}
 	alphaIR, ok := moduleIRs["alpha"]
 	if !ok {
@@ -6213,7 +6050,7 @@ func TestModuleSplitModuleIRs(t *testing.T) {
 	assertContains(t, betaIR, "define i64 @__mod_beta_get_b")
 	assertNotContains(t, betaIR, "define i64 @__mod_alpha_get_a")
 
-	// main IR: module function bodies are declarations, not definitions
+	// main IR: all module function bodies are declarations, not definitions
 	assertNotContains(t, mainIR, "define i64 @__mod_alpha_get_a")
 	assertNotContains(t, mainIR, "define i64 @__mod_beta_get_b")
 	// main IR should still declare (not define) the module functions
@@ -6229,27 +6066,7 @@ func TestModuleIRPrefixUsedForIR(t *testing.T) {
 	mod1Info.GlobalIdentity = "github.com/alice/mylib"
 	mod1Info.IRPrefix = "github_com_alice_mylib_abc123"
 
-	stdInput := antlr.NewInputStream(stdAll)
-	stdLexer := parser.NewPromiseLexer(stdInput)
-	stdLexer.RemoveErrorListeners()
-	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
-	stdP := parser.NewPromiseParser(stdStream)
-	stdP.RemoveErrorListeners()
-	stdTree := stdP.CompilationUnit()
-	stdFile, errs := ast.Build("std.pr", stdTree)
-	if len(errs) > 0 {
-		t.Fatalf("std AST build errors: %v", errs)
-	}
-	for _, d := range stdFile.Decls {
-		switch dd := d.(type) {
-		case *ast.FuncDecl:
-			dd.IsStd = true
-		case *ast.TypeDecl:
-			dd.IsStd = true
-		case *ast.EnumDecl:
-			dd.IsStd = true
-		}
-	}
+	stdModInfo, stdScope := getCodegenStdModInfo()
 
 	userSrc := `
 		use myalias "./myalias";
@@ -6269,17 +6086,23 @@ func TestModuleIRPrefixUsedForIR(t *testing.T) {
 		t.Fatalf("user AST build errors: %v", buildErrs)
 	}
 
-	mergedDecls := make([]ast.Decl, 0, len(stdFile.Decls)+len(userFile.Decls))
-	mergedDecls = append(mergedDecls, stdFile.Decls...)
-	mergedDecls = append(mergedDecls, userFile.Decls...)
-	userFile.Decls = mergedDecls
+	// Inject use std as _
+	stdUse := &ast.UseDecl{Alias: "_", CatalogName: "std"}
+	userFile.Uses = append([]*ast.UseDecl{stdUse}, userFile.Uses...)
 
-	moduleScopes := map[string]*types.Scope{"./myalias": mod1Scope}
+	moduleScopes := map[string]*types.Scope{
+		"std":       stdScope,
+		"./myalias": mod1Scope,
+	}
 	info, semaErrs := sema.CheckWithModules(userFile, moduleScopes)
 	if len(semaErrs) > 0 {
 		t.Fatalf("sema errors: %v", semaErrs)
 	}
-	info.ModuleInfos = map[string]*sema.ModuleInfo{"./myalias": mod1Info}
+	info.ModuleInfos = map[string]*sema.ModuleInfo{
+		"std":       stdModInfo,
+		"./myalias": mod1Info,
+	}
+	info.ModuleOrder = []string{"std", "./myalias"}
 
 	result := Compile(userFile, info, "")
 	ir := result.Module.String()
@@ -6301,27 +6124,7 @@ func generateIRWithCatalogModule(t *testing.T, catalogName, modSrc, userSrc stri
 	modInfo.IRPrefix = catalogName
 	modInfo.Path = catalogName
 
-	stdInput := antlr.NewInputStream(stdAll)
-	stdLexer := parser.NewPromiseLexer(stdInput)
-	stdLexer.RemoveErrorListeners()
-	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
-	stdP := parser.NewPromiseParser(stdStream)
-	stdP.RemoveErrorListeners()
-	stdTree := stdP.CompilationUnit()
-	stdFile, errs := ast.Build("std.pr", stdTree)
-	if len(errs) > 0 {
-		t.Fatalf("std AST build errors: %v", errs)
-	}
-	for _, d := range stdFile.Decls {
-		switch dd := d.(type) {
-		case *ast.FuncDecl:
-			dd.IsStd = true
-		case *ast.TypeDecl:
-			dd.IsStd = true
-		case *ast.EnumDecl:
-			dd.IsStd = true
-		}
-	}
+	stdModInfo, stdScope := getCodegenStdModInfo()
 
 	userInput := antlr.NewInputStream(userSrc)
 	userLexer := parser.NewPromiseLexer(userInput)
@@ -6335,18 +6138,24 @@ func generateIRWithCatalogModule(t *testing.T, catalogName, modSrc, userSrc stri
 		t.Fatalf("user AST build errors: %v", errs)
 	}
 
-	mergedDecls := make([]ast.Decl, 0, len(stdFile.Decls)+len(userFile.Decls))
-	mergedDecls = append(mergedDecls, stdFile.Decls...)
-	mergedDecls = append(mergedDecls, userFile.Decls...)
-	userFile.Decls = mergedDecls
+	// Inject use std as _
+	stdUse := &ast.UseDecl{Alias: "_", CatalogName: "std"}
+	userFile.Uses = append([]*ast.UseDecl{stdUse}, userFile.Uses...)
 
 	// Catalog modules are keyed by their catalog name (not "./name")
-	moduleScopes := map[string]*types.Scope{catalogName: modScope}
+	moduleScopes := map[string]*types.Scope{
+		"std":       stdScope,
+		catalogName: modScope,
+	}
 	info, semaErrs := sema.CheckWithModules(userFile, moduleScopes)
 	if len(semaErrs) > 0 {
 		t.Fatalf("sema errors: %v", semaErrs)
 	}
-	info.ModuleInfos = map[string]*sema.ModuleInfo{catalogName: modInfo}
+	info.ModuleInfos = map[string]*sema.ModuleInfo{
+		"std":       stdModInfo,
+		catalogName: modInfo,
+	}
+	info.ModuleOrder = []string{"std", catalogName}
 
 	result := Compile(userFile, info, "")
 	return result.Module.String()
@@ -7696,14 +7505,14 @@ func TestCompoundAssignI8(t *testing.T) {
 
 func TestHashGetterInt(t *testing.T) {
 	ir := generateIR(t, `main() { x := 42; h := x.hash; }`)
-	assertContains(t, ir, "call i64 @__std__fnv1a_hash(i64")
+	assertContains(t, ir, "call i64 @__mod_std__fnv1a_hash(i64")
 }
 
 func TestHashGetterBool(t *testing.T) {
 	ir := generateIR(t, `main() { b := true; h := b.hash; }`)
 	// Bool hash uses hardcoded constants via select, not fnv1a
 	assertContains(t, ir, "select i1")
-	assertNotContains(t, ir, "call i64 @__std__fnv1a_hash")
+	assertNotContains(t, ir, "call i64 @__mod_std__fnv1a_hash")
 }
 
 func TestHashGetterBoolFalse(t *testing.T) {
@@ -7717,7 +7526,7 @@ func TestHashGetterBoolInFunction(t *testing.T) {
 		main() {}
 	`)
 	assertContains(t, ir, "select i1")
-	assertNotContains(t, ir, "call i64 @__std__fnv1a_hash")
+	assertNotContains(t, ir, "call i64 @__mod_std__fnv1a_hash")
 }
 
 func TestHashGetterBoolNoZext(t *testing.T) {
@@ -7736,17 +7545,17 @@ func TestHashGetterBoolTrueAndFalseDifferentConstants(t *testing.T) {
 func TestHashGetterIntStillUsesFnv1a(t *testing.T) {
 	// Verify other types still use fnv1a (regression check)
 	ir := generateIR(t, `main() { h := 42.hash; }`)
-	assertContains(t, ir, "call i64 @__std__fnv1a_hash")
+	assertContains(t, ir, "call i64 @__mod_std__fnv1a_hash")
 }
 
 func TestHashGetterCharStillUsesFnv1a(t *testing.T) {
 	ir := generateIR(t, `main() { h := 'x'.hash; }`)
-	assertContains(t, ir, "call i64 @__std__fnv1a_hash")
+	assertContains(t, ir, "call i64 @__mod_std__fnv1a_hash")
 }
 
 func TestHashGetterChar(t *testing.T) {
 	ir := generateIR(t, `main() { c := 'a'; h := c.hash; }`)
-	assertContains(t, ir, "call i64 @__std__fnv1a_hash(i64")
+	assertContains(t, ir, "call i64 @__mod_std__fnv1a_hash(i64")
 }
 
 func TestHashGetterString(t *testing.T) {
@@ -7760,7 +7569,7 @@ func TestHashGetterFloat(t *testing.T) {
 		main() {}
 	`)
 	assertContains(t, ir, "bitcast double")
-	assertContains(t, ir, "call i64 @__std__fnv1a_hash(i64")
+	assertContains(t, ir, "call i64 @__mod_std__fnv1a_hash(i64")
 }
 
 func TestHashGetterSmallInt(t *testing.T) {
@@ -7769,7 +7578,7 @@ func TestHashGetterSmallInt(t *testing.T) {
 		main() {}
 	`)
 	assertContains(t, ir, "sext i8")
-	assertContains(t, ir, "call i64 @__std__fnv1a_hash(i64")
+	assertContains(t, ir, "call i64 @__mod_std__fnv1a_hash(i64")
 }
 
 func TestHashGetterSmallUint(t *testing.T) {
@@ -7779,7 +7588,7 @@ func TestHashGetterSmallUint(t *testing.T) {
 	`)
 	// Unsigned types use zero-extend, not sign-extend
 	assertContains(t, ir, "zext i8")
-	assertContains(t, ir, "call i64 @__std__fnv1a_hash(i64")
+	assertContains(t, ir, "call i64 @__mod_std__fnv1a_hash(i64")
 }
 
 // --- Vector method tests ---
@@ -8034,9 +7843,9 @@ func TestStringContains(t *testing.T) {
 			bool has = s.contains("world");
 		}
 	`)
-	// Now a Promise method, compiled as a regular function
-	assertContains(t, ir, "define i1 @string.contains(")
-	assertContains(t, ir, "call i1 @string.contains(")
+	// Promise method compiled as a module-prefixed function (std module)
+	assertContains(t, ir, "define i1 @__mod_std_string.contains(")
+	assertContains(t, ir, "call i1 @__mod_std_string.contains(")
 }
 
 func TestStringStartsWith(t *testing.T) {
@@ -8046,8 +7855,8 @@ func TestStringStartsWith(t *testing.T) {
 			bool yes = s.starts_with("hel");
 		}
 	`)
-	assertContains(t, ir, "define i1 @string.starts_with(")
-	assertContains(t, ir, "call i1 @string.starts_with(")
+	assertContains(t, ir, "define i1 @__mod_std_string.starts_with(")
+	assertContains(t, ir, "call i1 @__mod_std_string.starts_with(")
 }
 
 func TestStringEndsWith(t *testing.T) {
@@ -8057,8 +7866,8 @@ func TestStringEndsWith(t *testing.T) {
 			bool yes = s.ends_with("llo");
 		}
 	`)
-	assertContains(t, ir, "define i1 @string.ends_with(")
-	assertContains(t, ir, "call i1 @string.ends_with(")
+	assertContains(t, ir, "define i1 @__mod_std_string.ends_with(")
+	assertContains(t, ir, "call i1 @__mod_std_string.ends_with(")
 }
 
 func TestStringIndexOf(t *testing.T) {
@@ -8068,8 +7877,8 @@ func TestStringIndexOf(t *testing.T) {
 			int? idx = s.index_of("ll");
 		}
 	`)
-	assertContains(t, ir, "define { i1, i64 } @string.index_of(")
-	assertContains(t, ir, "call { i1, i64 } @string.index_of(")
+	assertContains(t, ir, "define { i1, i64 } @__mod_std_string.index_of(")
+	assertContains(t, ir, "call { i1, i64 } @__mod_std_string.index_of(")
 }
 
 func TestStringTrim(t *testing.T) {

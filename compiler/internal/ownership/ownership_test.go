@@ -2,6 +2,7 @@ package ownership
 
 import (
 	"strings"
+	"sync"
 	"testing"
 
 	"djabi.dev/go/promise_lang/internal/ast"
@@ -14,41 +15,34 @@ import (
 
 // --- Test helpers ---
 
-// stdAll provides all builtin type declarations needed by tests.
-// Loaded from the actual std/*.pr files to avoid duplication.
-var stdAll string
+var (
+	ownerStdOnce  sync.Once
+	ownerStdScope *types.Scope
+)
 
-func init() {
-	stdAll = testutil.LoadStdFiles()
+func getOwnerStdScope() *types.Scope {
+	ownerStdOnce.Do(func() {
+		src := testutil.LoadStdFiles()
+		input := antlr.NewInputStream(src)
+		lexer := parser.NewPromiseLexer(input)
+		lexer.RemoveErrorListeners()
+		stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+		p := parser.NewPromiseParser(stream)
+		p.RemoveErrorListeners()
+		tree := p.CompilationUnit()
+		stdFile, buildErrs := ast.Build("std.pr", tree)
+		if len(buildErrs) > 0 {
+			panic("std AST build errors: " + buildErrs[0].Error())
+		}
+		stdInfo, _ := sema.CheckForStdModule(stdFile, sema.TargetInfo{})
+		ownerStdScope = sema.ExportedScope(stdInfo, stdFile)
+	})
+	return ownerStdScope
 }
 
-// checkOwnership parses source, runs sema, then runs ownership analysis.
-// It automatically includes stdAll as std declarations.
+// checkOwnership parses source, runs sema with the std module, then runs ownership analysis.
 func checkOwnership(t *testing.T, src string) []error {
 	t.Helper()
-
-	// Parse std
-	stdInput := antlr.NewInputStream(stdAll)
-	stdLexer := parser.NewPromiseLexer(stdInput)
-	stdLexer.RemoveErrorListeners()
-	stdStream := antlr.NewCommonTokenStream(stdLexer, antlr.TokenDefaultChannel)
-	stdP := parser.NewPromiseParser(stdStream)
-	stdP.RemoveErrorListeners()
-	stdTree := stdP.CompilationUnit()
-	stdFile, buildErrs := ast.Build("std.pr", stdTree)
-	if len(buildErrs) > 0 {
-		t.Fatalf("std AST build errors: %v", buildErrs)
-	}
-	for _, d := range stdFile.Decls {
-		switch dd := d.(type) {
-		case *ast.FuncDecl:
-			dd.IsStd = true
-		case *ast.TypeDecl:
-			dd.IsStd = true
-		case *ast.EnumDecl:
-			dd.IsStd = true
-		}
-	}
 
 	// Parse user
 	input := antlr.NewInputStream(src)
@@ -63,13 +57,11 @@ func checkOwnership(t *testing.T, src string) []error {
 		t.Fatalf("AST build errors: %v", buildErrs)
 	}
 
-	// Merge: std first, then user
-	merged := make([]ast.Decl, 0, len(stdFile.Decls)+len(file.Decls))
-	merged = append(merged, stdFile.Decls...)
-	merged = append(merged, file.Decls...)
-	file.Decls = merged
+	// Inject use std as _
+	stdUse := &ast.UseDecl{Alias: "_", CatalogName: "std"}
+	file.Uses = append([]*ast.UseDecl{stdUse}, file.Uses...)
 
-	info, semaErrs := sema.Check(file)
+	info, semaErrs := sema.CheckWithModules(file, map[string]*types.Scope{"std": getOwnerStdScope()})
 	if len(semaErrs) > 0 {
 		t.Fatalf("sema errors: %v", semaErrs)
 	}
@@ -1934,9 +1926,9 @@ func TestVariadicEmptyCallOwnership(t *testing.T) {
 func TestVariadicWithFixedParamsOwnership(t *testing.T) {
 	// Mixed fixed + variadic, all copy types.
 	ownerOK(t, `
-		log(string level, ...string msgs) {}
+		mylog(string level, ...string msgs) {}
 		test() {
-			log("info", "a", "b", "c");
+			mylog("info", "a", "b", "c");
 		}
 	`)
 }

@@ -1,3 +1,5 @@
+use std;
+
 // User-defined min shadows std min
 min(int a, int b) int { return 999; }
 

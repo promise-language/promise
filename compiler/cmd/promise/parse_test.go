@@ -8,7 +8,6 @@ import (
 
 	"github.com/antlr4-go/antlr/v4"
 
-	"djabi.dev/go/promise_lang/internal/ast"
 	"djabi.dev/go/promise_lang/internal/module"
 	"djabi.dev/go/promise_lang/internal/parser"
 	"djabi.dev/go/promise_lang/internal/sema"
@@ -707,62 +706,35 @@ func TestExecWrapCode(t *testing.T) {
 
 // --- Module loading integration tests ---
 
-// testStdFiles parses std library from the embedded FS (resources/std/*.pr).
-// Uses embedded resources rather than findStdDir() to avoid picking up stale
-// files from ~/.promise/lib/std/.
-func testStdFiles(t *testing.T) []*ast.File {
-	t.Helper()
-	entries, err := embeddedStd.ReadDir("resources/std")
-	if err != nil {
-		t.Fatalf("cannot read embedded std: %v", err)
-	}
-	var files []*ast.File
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".pr") {
-			continue
-		}
-		data, err := embeddedStd.ReadFile("resources/std/" + e.Name())
-		if err != nil {
-			t.Fatalf("cannot read embedded %s: %v", e.Name(), err)
-		}
-		input := antlr.NewInputStream(string(data))
-		lexer := parser.NewPromiseLexer(input)
-		lexer.RemoveErrorListeners()
-		stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
-		p := parser.NewPromiseParser(stream)
-		p.RemoveErrorListeners()
-		tree := p.CompilationUnit()
-		f, buildErrs := ast.Build(e.Name(), tree)
-		if len(buildErrs) > 0 {
-			t.Fatalf("AST build errors in embedded %s: %v", e.Name(), buildErrs)
-		}
-		files = append(files, f)
-	}
-	return files
-}
-
 // testModuleLoader creates a moduleLoader for use in tests.
-func testModuleLoader(projectDir string, stdFiles []*ast.File) *moduleLoader {
-	return testModuleLoaderWithConfig(projectDir, stdFiles, nil)
+func testModuleLoader(projectDir string) *moduleLoader {
+	return testModuleLoaderWithConfig(projectDir, nil)
 }
 
-func testModuleLoaderWithConfig(projectDir string, stdFiles []*ast.File, cfg *module.Config) *moduleLoader {
+func testModuleLoaderWithConfig(projectDir string, cfg *module.Config) *moduleLoader {
 	commitPins := make(map[string]string)
 	if cfg != nil {
 		for url, pin := range cfg.Require {
 			commitPins[module.NormalizeURL(url)] = pin
 		}
 	}
+	var cat *module.Catalog
+	if len(embeddedCatalog) > 0 {
+		if c, err := module.ParseCatalog(embeddedCatalog); err == nil {
+			cat = c
+		}
+	}
 	return &moduleLoader{
 		projectRoot:      projectDir,
-		stdFiles:         stdFiles,
 		projectCfg:       cfg,
 		loaded:           make(map[string]*sema.ModuleInfo),
 		globalIdentities: make(map[string]string),
 		visiting:         make(map[string]string),
 		allModInfos:      make(map[string]*sema.ModuleInfo),
 		remoteResolved:   make(map[string]string),
+		catalogLoaded:    make(map[string]*sema.ModuleInfo),
 		commitPins:       commitPins,
+		catalog:          cat,
 	}
 }
 
@@ -809,8 +781,7 @@ helper() int { return 1; }
 	}
 
 	// Load the module (with std so sema validation passes)
-	stdFiles := testStdFiles(t)
-	loader := testModuleLoader(projectDir, stdFiles)
+	loader := testModuleLoader(projectDir)
 	modInfo, err := loader.load("./libs/mymod")
 	if err != nil {
 		t.Fatalf("loader.load failed: %v", err)
@@ -870,8 +841,7 @@ type Bar `+"`public"+` { int y; }
 		t.Fatal(err)
 	}
 
-	stdFiles := testStdFiles(t)
-	loader := testModuleLoader(projectDir, stdFiles)
+	loader := testModuleLoader(projectDir)
 	modInfo, err := loader.load("./mylib")
 	if err != nil {
 		t.Fatalf("loader.load failed: %v", err)
@@ -897,7 +867,7 @@ func TestLoadLocalModuleNoPromiseToml(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	loader := testModuleLoader(projectDir, nil)
+	loader := testModuleLoader(projectDir)
 	_, err := loader.load("./badmod")
 	if err == nil {
 		t.Fatal("expected error for missing promise.toml")
@@ -910,7 +880,7 @@ func TestLoadLocalModuleNoPromiseToml(t *testing.T) {
 // TestLoadLocalModuleDirNotFound verifies error when module directory doesn't exist.
 func TestLoadLocalModuleDirNotFound(t *testing.T) {
 	projectDir := t.TempDir()
-	loader := testModuleLoader(projectDir, nil)
+	loader := testModuleLoader(projectDir)
 	_, err := loader.load("./nonexistent")
 	if err == nil {
 		t.Fatal("expected error for missing directory")
@@ -935,7 +905,7 @@ epoch = "2026.3"
 		t.Fatal(err)
 	}
 
-	loader := testModuleLoader(projectDir, nil)
+	loader := testModuleLoader(projectDir)
 	_, err := loader.load("./empty")
 	if err == nil {
 		t.Fatal("expected error for module with no .pr files")
@@ -966,8 +936,7 @@ compute() int `+"`public"+` { return "not an int"; }
 		t.Fatal(err)
 	}
 
-	stdFiles := testStdFiles(t)
-	loader := testModuleLoader(projectDir, stdFiles)
+	loader := testModuleLoader(projectDir)
 	_, err := loader.load("./badmod")
 	if err == nil {
 		t.Fatal("expected error for module with sema errors")
@@ -1010,8 +979,7 @@ sum(int[] nums) int `+"`public"+` {
 		t.Fatal(err)
 	}
 
-	stdFiles := testStdFiles(t)
-	loader := testModuleLoader(projectDir, stdFiles)
+	loader := testModuleLoader(projectDir)
 	modInfo, err := loader.load("./mymod")
 	if err != nil {
 		t.Fatalf("loader.load failed: %v", err)
@@ -1050,8 +1018,7 @@ func TestLoadModuleTransitive(t *testing.T) {
 		}
 	}
 
-	stdFiles := testStdFiles(t)
-	loader := testModuleLoader(projectDir, stdFiles)
+	loader := testModuleLoader(projectDir)
 	modInfo, err := loader.load("./modb")
 	if err != nil {
 		t.Fatalf("loader.load failed: %v", err)
@@ -1071,12 +1038,19 @@ func TestLoadModuleTransitive(t *testing.T) {
 		t.Error("expected modb in allModInfos")
 	}
 
-	// depOrder should be [moda, modb] — deps before dependents
-	if len(loader.depOrder) != 2 {
-		t.Fatalf("expected 2 entries in depOrder, got %d", len(loader.depOrder))
+	// depOrder should contain [moda, modb] in order — deps before dependents.
+	// Catalog modules (e.g. std) may also appear in depOrder; filter to local paths only.
+	var localOrder []string
+	for _, p := range loader.depOrder {
+		if strings.HasPrefix(p, "./") {
+			localOrder = append(localOrder, p)
+		}
 	}
-	if loader.depOrder[0] != "./moda" || loader.depOrder[1] != "./modb" {
-		t.Errorf("expected depOrder [./moda, ./modb], got %v", loader.depOrder)
+	if len(localOrder) != 2 {
+		t.Fatalf("expected 2 local entries in depOrder, got %d: %v", len(localOrder), loader.depOrder)
+	}
+	if localOrder[0] != "./moda" || localOrder[1] != "./modb" {
+		t.Errorf("expected depOrder [./moda, ./modb], got %v", localOrder)
 	}
 }
 
@@ -1107,8 +1081,7 @@ func TestLoadModuleDiamond(t *testing.T) {
 		}
 	}
 
-	stdFiles := testStdFiles(t)
-	loader := testModuleLoader(projectDir, stdFiles)
+	loader := testModuleLoader(projectDir)
 
 	// Load both B and C
 	_, err := loader.load("./b")
@@ -1120,17 +1093,29 @@ func TestLoadModuleDiamond(t *testing.T) {
 		t.Fatalf("loader.load(c) failed: %v", err)
 	}
 
-	// A should appear exactly once in allModInfos
-	if len(loader.allModInfos) != 3 {
-		t.Errorf("expected 3 modules (a, b, c), got %d", len(loader.allModInfos))
+	// A, B, C should all be in allModInfos (catalog modules may also appear)
+	if _, ok := loader.allModInfos["./a"]; !ok {
+		t.Error("expected ./a in allModInfos")
+	}
+	if _, ok := loader.allModInfos["./b"]; !ok {
+		t.Error("expected ./b in allModInfos")
+	}
+	if _, ok := loader.allModInfos["./c"]; !ok {
+		t.Error("expected ./c in allModInfos")
 	}
 
-	// depOrder should have A first (loaded as dep of B), then B, then C
-	if len(loader.depOrder) != 3 {
-		t.Fatalf("expected 3 entries in depOrder, got %d", len(loader.depOrder))
+	// depOrder should have ./a before ./b and ./c — filter to local paths only.
+	var localOrder []string
+	for _, p := range loader.depOrder {
+		if strings.HasPrefix(p, "./") {
+			localOrder = append(localOrder, p)
+		}
 	}
-	if loader.depOrder[0] != "./a" {
-		t.Errorf("expected ./a first in depOrder, got %s", loader.depOrder[0])
+	if len(localOrder) != 3 {
+		t.Fatalf("expected 3 local entries in depOrder, got %d: %v", len(localOrder), loader.depOrder)
+	}
+	if localOrder[0] != "./a" {
+		t.Errorf("expected ./a first in local depOrder, got %s", localOrder[0])
 	}
 }
 
@@ -1157,8 +1142,7 @@ func TestLoadModuleCircular(t *testing.T) {
 		}
 	}
 
-	stdFiles := testStdFiles(t)
-	loader := testModuleLoader(projectDir, stdFiles)
+	loader := testModuleLoader(projectDir)
 	_, err := loader.load("./x")
 	if err == nil {
 		t.Fatal("expected error for circular dependency")
@@ -1191,8 +1175,7 @@ func TestLoadModuleCircularThreeModules(t *testing.T) {
 		}
 	}
 
-	stdFiles := testStdFiles(t)
-	loader := testModuleLoader(projectDir, stdFiles)
+	loader := testModuleLoader(projectDir)
 	_, err := loader.load("./a")
 	if err == nil {
 		t.Fatal("expected error for 3-module circular dependency")
@@ -1226,8 +1209,7 @@ func TestLoadModuleCanonicalName(t *testing.T) {
 		}
 	}
 
-	stdFiles := testStdFiles(t)
-	loader := testModuleLoader(projectDir, stdFiles)
+	loader := testModuleLoader(projectDir)
 	modInfo, err := loader.load("./my-local-path")
 	if err != nil {
 		t.Fatalf("loader.load failed: %v", err)
@@ -1272,8 +1254,7 @@ func TestLoadModuleSameNameDifferentPaths(t *testing.T) {
 		}
 	}
 
-	stdFiles := testStdFiles(t)
-	loader := testModuleLoader(projectDir, stdFiles)
+	loader := testModuleLoader(projectDir)
 
 	// Load first module — should succeed
 	miA, err := loader.load("./mod_a")
@@ -1328,8 +1309,7 @@ parse(int x) int `+"`"+`public {
 		},
 	}
 
-	stdFiles := testStdFiles(t)
-	loader := testModuleLoaderWithConfig(projectDir, stdFiles, cfg)
+	loader := testModuleLoaderWithConfig(projectDir, cfg)
 
 	modInfo, err := loader.loadRemote("github.com/someone/parser", "parser")
 	if err != nil {
@@ -1389,8 +1369,7 @@ parse(int x) int `+"`"+`public { return x; }
 		},
 	}
 
-	stdFiles := testStdFiles(t)
-	loader := testModuleLoaderWithConfig(projectDir, stdFiles, cfg)
+	loader := testModuleLoaderWithConfig(projectDir, cfg)
 
 	// Import with https:// scheme — should still match the replace
 	modInfo, err := loader.loadRemote("https://github.com/someone/parser", "parser")
@@ -1414,8 +1393,7 @@ func TestLoadRemoteModuleNoPinError(t *testing.T) {
 		Replace: map[string]string{},
 	}
 
-	stdFiles := testStdFiles(t)
-	loader := testModuleLoaderWithConfig(projectDir, stdFiles, cfg)
+	loader := testModuleLoaderWithConfig(projectDir, cfg)
 
 	_, err := loader.loadRemote("github.com/someone/parser", "parser")
 	if err == nil {
@@ -1432,9 +1410,8 @@ func TestLoadRemoteModuleNoPinError(t *testing.T) {
 // TestLoadRemoteModuleNilConfig verifies loadRemote works when there's no promise.toml (single-file mode).
 func TestLoadRemoteModuleNilConfig(t *testing.T) {
 	projectDir := t.TempDir()
-	stdFiles := testStdFiles(t)
 	// nil config — no [require], no [replace]
-	loader := testModuleLoaderWithConfig(projectDir, stdFiles, nil)
+	loader := testModuleLoaderWithConfig(projectDir, nil)
 
 	_, err := loader.loadRemote("github.com/someone/parser", "parser")
 	if err == nil {
@@ -1457,7 +1434,7 @@ func TestIsTopLevelPin(t *testing.T) {
 		Replace: map[string]string{},
 	}
 
-	loader := testModuleLoaderWithConfig(t.TempDir(), nil, cfg)
+	loader := testModuleLoaderWithConfig(t.TempDir(), cfg)
 
 	// Exact match
 	if !loader.isTopLevelPin("github.com/someone/parser") {
@@ -1475,7 +1452,7 @@ func TestIsTopLevelPin(t *testing.T) {
 	}
 
 	// Nil config
-	loaderNil := testModuleLoaderWithConfig(t.TempDir(), nil, nil)
+	loaderNil := testModuleLoaderWithConfig(t.TempDir(), nil)
 	if loaderNil.isTopLevelPin("github.com/someone/parser") {
 		t.Error("expected false with nil config")
 	}
@@ -1528,8 +1505,7 @@ b_func() int `+"`"+`public { return 2; }
 		},
 	}
 
-	stdFiles := testStdFiles(t)
-	loader := testModuleLoaderWithConfig(projectDir, stdFiles, cfg)
+	loader := testModuleLoaderWithConfig(projectDir, cfg)
 
 	// Load A — should succeed and register its pin for shared/lib
 	_, err := loader.loadRemote("github.com/someone/mod_a", "mod_a")
@@ -1602,8 +1578,7 @@ b_func() int `+"`"+`public { return 2; }
 		},
 	}
 
-	stdFiles := testStdFiles(t)
-	loader := testModuleLoaderWithConfig(projectDir, stdFiles, cfg)
+	loader := testModuleLoaderWithConfig(projectDir, cfg)
 
 	// Load A — should succeed, its pin for shared/lib is overridden by top-level
 	_, err := loader.loadRemote("github.com/someone/mod_a", "mod_a")
@@ -1682,7 +1657,7 @@ epoch = "2025.1"
 		t.Fatal(err)
 	}
 
-	loader := testModuleLoaderWithConfig(projectDir, testStdFiles(t), projectCfg)
+	loader := testModuleLoaderWithConfig(projectDir, projectCfg)
 	_, loadErr := loader.load(modDir)
 	if loadErr != nil {
 		t.Fatal(loadErr)
@@ -1723,7 +1698,7 @@ epoch = "2026.3"
 		t.Fatal(err)
 	}
 
-	loader := testModuleLoaderWithConfig(projectDir, testStdFiles(t), projectCfg)
+	loader := testModuleLoaderWithConfig(projectDir, projectCfg)
 	_, loadErr := loader.load(modDir)
 	if loadErr != nil {
 		t.Fatal(loadErr)

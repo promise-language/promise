@@ -47,13 +47,12 @@ generate: $(ANTLR_JAR)
 TESTDATA_STD  := internal/testutil/testdata/std
 
 resources:
-	@rm -rf $(RESOURCES)/std
-	@mkdir -p $(RESOURCES)/std
-	@cp ../std/*.pr $(RESOURCES)/std/
 	@cp ../catalog.toml $(RESOURCES)/catalog.toml
 	@rm -rf $(RESOURCES)/modules
 	@mkdir -p $(RESOURCES)/modules
 	@touch $(RESOURCES)/modules/.keep
+	@mkdir -p $(RESOURCES)/modules/std
+	@cp ../std/*.pr ../std/promise.toml $(RESOURCES)/modules/std/
 	@if [ -d ../modules ]; then for d in ../modules/*/; do [ -d "$$d" ] && cp -r "$${d%/}" $(RESOURCES)/modules/; done; fi
 	@rm -rf $(TESTDATA_STD)
 	@mkdir -p $(TESTDATA_STD)

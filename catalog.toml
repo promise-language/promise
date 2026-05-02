@@ -1,6 +1,9 @@
 [catalog]
 epoch = "2026.3"
 
+[modules.std]
+description = "Standard library (auto-imported into every file)"
+
 [modules.strings]
 description = "String utility functions: join, reverse, is_blank, spaces, repeat_join"
 

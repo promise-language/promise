@@ -1,8 +1,8 @@
 package module
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
+	"hash/fnv"
 	"strings"
 )
 
@@ -67,8 +67,10 @@ func SanitizeIRPrefix(globalID string) string {
 	// Append hash suffix for collision-freedom.
 	// Without the suffix, "github.com/alice_parser" and "github.com/alice/parser"
 	// would both sanitize to "github_com_alice_parser".
-	h := sha256.Sum256([]byte(globalID))
-	suffix := hex.EncodeToString(h[:3]) // 6 hex chars
+	h := fnv.New128a()
+	h.Write([]byte(globalID))
+	raw := h.Sum(nil)
+	suffix := hex.EncodeToString(raw[:3]) // 6 hex chars
 	return sanitized + "_" + suffix
 }
 

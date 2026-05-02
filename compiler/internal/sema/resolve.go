@@ -195,9 +195,6 @@ func (c *Checker) resolveQualifiedType(r *ast.QualifiedTypeRef) types.Type {
 			c.errorf(r.Pos(), "module '%s' has no loaded scope", r.Module)
 			return nil
 		}
-	} else if r.Module == "std" && c.stdScope != nil {
-		// Handle std.Type without "use std;" — consistent with checkMemberExpr shortcut
-		scope = c.stdScope
 	} else {
 		c.errorf(r.Pos(), "undefined module: %s", r.Module)
 		return nil

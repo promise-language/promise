@@ -31,9 +31,6 @@ import (
 	"djabi.dev/go/promise_lang/internal/types"
 )
 
-//go:embed resources/std/*.pr
-var embeddedStd embed.FS
-
 //go:embed resources/catalog.toml
 var embeddedCatalog []byte
 
@@ -1147,8 +1144,11 @@ func compileAndLink(result *codegen.CompileResult, outputFile, target, sourceFil
 	}
 }
 
-// compileAndLinkSeparate compiles each module to its own .o file, then links them.
-// Uses content-hash caching: if a module's source hasn't changed, its cached .o is reused.
+// compileAndLinkSeparate compiles each module to its own bitcode file, then links
+// them together using link-time optimization (LTO). Windows still uses the opt+llc
+// object pipeline (no LTO) as lld-link LTO support is not yet wired up.
+// Uses content-hash caching: if a module's source hasn't changed, its cached bitcode
+// is reused.
 func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, sourceFile string) {
 	mainIR, moduleIRs := result.SplitModuleIRs()
 
@@ -1157,13 +1157,20 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	llcPath, err := findLLVMTool("llc")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
 	checkLLVMToolVersion(optPath)
-	checkLLVMToolVersion(llcPath)
+
+	useLTO := !isWindowsTarget(target)
+
+	// Windows needs llc for the non-LTO object pipeline.
+	var llcPath string
+	if !useLTO {
+		llcPath, err = findLLVMTool("llc")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		checkLLVMToolVersion(llcPath)
+	}
 
 	// Build cache (~/.promise/cache/build/, overridable via PROMISE_HOME)
 	cacheDir, _ := module.BuildCacheDir()
@@ -1188,11 +1195,19 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 		}
 	}
 
-	// Compile main IR → .o (always recompiled)
-	mainObj := compileLLToObj(mainIR, "promise-main", target, optPath, llcPath)
+	// compileModule compiles one IR text to bitcode (LTO path) or object (Windows).
+	compileModule := func(irText, prefix string) string {
+		if useLTO {
+			return compileLLToBC(irText, prefix, optPath)
+		}
+		return compileLLToObj(irText, prefix, target, optPath, llcPath)
+	}
+
+	// Compile main IR (always recompiled — main changes with every build).
+	mainObj := compileModule(mainIR, "promise-main")
 	defer os.Remove(mainObj)
 
-	// Compile each module IR → .o (in parallel, with caching)
+	// Compile each module IR in parallel, with caching.
 	type moduleObj struct {
 		name    string
 		objFile string
@@ -1218,7 +1233,7 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 			}
 
 			// Cache miss — compile
-			obj := compileLLToObj(irText, "promise-mod-"+name, target, optPath, llcPath)
+			obj := compileModule(irText, "promise-mod-"+name)
 
 			// Save to cache
 			if cacheKey, ok := modCacheKeys[name]; ok && cacheDir != "" {
@@ -1239,20 +1254,20 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	}
 	wg.Wait()
 
-	// Clean up non-cached temp .o files after linking
+	// Clean up non-cached temp files after linking
 	for _, mo := range moduleObjs {
 		if !mo.cached {
 			defer os.Remove(mo.objFile)
 		}
 	}
 
-	// Collect all .o files for linking
+	// Collect all bitcode/object files for linking
 	objFiles := []string{mainObj}
 	for _, mo := range moduleObjs {
 		objFiles = append(objFiles, mo.objFile)
 	}
 
-	// Link all .o files together
+	// Link all files together (LTO linkers handle cross-module optimization)
 	if isDarwinTarget(target) {
 		linkDarwinMulti(objFiles, target, outputFile)
 	} else if isWasmTarget(target) {
@@ -1306,7 +1321,7 @@ func compileLLToObj(irText, prefix, target, optPath, llcPath string) string {
 	if isWasmTarget(target) {
 		llcArgs = append(llcArgs, "-mattr=+bulk-memory,+mutable-globals,+sign-ext")
 	} else {
-		llcArgs = append(llcArgs, "-relocation-model=pic")
+		llcArgs = append(llcArgs, "-function-sections", "-relocation-model=pic")
 	}
 	llcArgs = append(llcArgs, bcFile.Name(), "-o", objFile.Name())
 
@@ -1318,6 +1333,38 @@ func compileLLToObj(irText, prefix, target, optPath, llcPath string) string {
 	}
 
 	return objFile.Name()
+}
+
+// compileLLToBC compiles LLVM IR text to LLVM bitcode via opt.
+// The bitcode is passed to LTO-capable linkers (ld.lld/wasm-ld/ld64.lld with --lto-O1).
+func compileLLToBC(irText, prefix, optPath string) string {
+	llFile, err := os.CreateTemp("", prefix+"-*.ll")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
+		os.Exit(1)
+	}
+	if _, err := fmt.Fprint(llFile, irText); err != nil {
+		fmt.Fprintf(os.Stderr, "error writing IR: %v\n", err)
+		os.Exit(1)
+	}
+	llFile.Close()
+	defer os.Remove(llFile.Name())
+
+	bcFile, err := os.CreateTemp("", prefix+"-*.bc")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
+		os.Exit(1)
+	}
+	bcFile.Close()
+
+	optCmd := runLLVMCmd(optPath, "-O1", llFile.Name(), "-o", bcFile.Name())
+	optCmd.Stderr = os.Stderr
+	if err := optCmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "error running opt on %s: %v\n", prefix, err)
+		os.Exit(1)
+	}
+
+	return bcFile.Name()
 }
 
 // useClangPipeline returns true if the clang pipeline should be used instead of opt+llc+linker.
@@ -2089,6 +2136,7 @@ func buildLinuxLinkArgs(target, objFile, outputFile string) []string {
 		"--hash-style=gnu",
 		"--build-id",
 		"--eh-frame-hdr",
+		"--lto-O1", // LTO: cross-module inlining and DCE
 		"-m", emulationMode(target),
 		"-pie",
 		"-dynamic-linker", dynamicLinker(target),
@@ -2248,7 +2296,7 @@ func buildMuslLinkArgs(target, objFile, outputFile, crtDir string) []string {
 		"-static",
 		"--build-id",
 		"--eh-frame-hdr",
-		"--gc-sections",
+		"--lto-O1", // LTO: cross-module inlining and DCE (replaces --gc-sections for bitcode inputs)
 		"-o", outputFile,
 		filepath.Join(crtDir, "crt1.o"),
 		filepath.Join(crtDir, "crti.o"),
@@ -2258,24 +2306,18 @@ func buildMuslLinkArgs(target, objFile, outputFile, crtDir string) []string {
 	}
 }
 
-// compileAndLinkLLVM runs the opt + llc + linker pipeline.
-// Linux: opt → llc → ld.lld. macOS: opt → llc → ld64.lld (or system ld). WASM: opt → llc → wasm-ld.
+// compileAndLinkLLVM runs the opt + linker pipeline.
+// Non-Windows: opt -O1 → .bc → linker with --lto-O1 (LTO handles cross-module DCE/inlining).
+// Windows: opt -O1 → .bc → llc → .o → lld-link (LTO not wired up for MSVC yet).
 func compileAndLinkLLVM(llFile, target, outputFile string) {
 	optPath, err := findLLVMTool("opt")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	llcPath, err := findLLVMTool("llc")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-
 	checkLLVMToolVersion(optPath)
-	checkLLVMToolVersion(llcPath)
 
-	// Step 1: opt -O1 (optimization + coroutine passes CoroSplit/CoroElide)
+	// Step 1: opt -O1 (coroutine lowering + optimization → bitcode)
 	bcFile, err := os.CreateTemp("", "promise-*.bc")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
@@ -2291,47 +2333,48 @@ func compileAndLinkLLVM(llFile, target, outputFile string) {
 		os.Exit(1)
 	}
 
-	// Step 2: llc (bitcode → object file)
-	objFile, err := os.CreateTemp("", "promise-*.o")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
-		os.Exit(1)
-	}
-	objFile.Close()
-	defer os.Remove(objFile.Name())
+	if isWindowsTarget(target) {
+		// Windows: llc → lld-link (LTO not yet wired up for MSVC COFF)
+		llcPath, err := findLLVMTool("llc")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		checkLLVMToolVersion(llcPath)
 
-	llcArgs := []string{
-		"-mtriple=" + target,
-		"-filetype=obj",
-	}
-	if isWasmTarget(target) {
-		llcArgs = append(llcArgs, "-mattr=+bulk-memory,+mutable-globals,+sign-ext")
-	} else {
-		llcArgs = append(llcArgs, "-relocation-model=pic")
-	}
-	llcArgs = append(llcArgs, bcFile.Name(), "-o", objFile.Name())
+		objFile, err := os.CreateTemp("", "promise-*.o")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
+			os.Exit(1)
+		}
+		objFile.Close()
+		defer os.Remove(objFile.Name())
 
-	llcCmd := runLLVMCmd(llcPath, llcArgs...)
-	llcCmd.Stderr = os.Stderr
-	if err := llcCmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "error running llc: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Step 3: Link (platform-specific)
-	if isDarwinTarget(target) {
-		linkDarwin(objFile.Name(), target, outputFile)
-	} else if isWasmTarget(target) {
-		linkWasm(objFile.Name(), outputFile)
-	} else if isWindowsTarget(target) {
+		llcArgs := []string{"-mtriple=" + target, "-filetype=obj", bcFile.Name(), "-o", objFile.Name()}
+		llcCmd := runLLVMCmd(llcPath, llcArgs...)
+		llcCmd.Stderr = os.Stderr
+		if err := llcCmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "error running llc: %v\n", err)
+			os.Exit(1)
+		}
 		linkWindows(objFile.Name(), target, outputFile)
+		return
+	}
+
+	// Step 2: Link with LTO — linker performs cross-module inlining and DCE on bitcode.
+	if isDarwinTarget(target) {
+		linkDarwin(bcFile.Name(), target, outputFile)
+	} else if isWasmTarget(target) {
+		linkWasm(bcFile.Name(), outputFile)
 	} else {
-		linkLinux(objFile.Name(), target, outputFile)
+		linkLinux(bcFile.Name(), target, outputFile)
 	}
 }
 
 // linkDarwin runs ld64.lld or system ld for macOS Mach-O linking.
-func linkDarwin(objFile, target, outputFile string) {
+// Accepts LLVM bitcode (.bc) or native object (.o) as input.
+// ld64.lld: uses --lto-O1 for LTO. System ld: compiles bitcode to .o via llc first.
+func linkDarwin(bcOrObjFile, target, outputFile string) {
 	linkerPath, isLLD, err := findDarwinLinker()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -2341,9 +2384,39 @@ func linkDarwin(objFile, target, outputFile string) {
 		checkLLVMToolVersion(linkerPath)
 	}
 
-	linkArgs := buildDarwinLinkArgs(target, objFile, outputFile)
+	fileToLink := bcOrObjFile
+	// System ld cannot process LLVM bitcode — run llc to produce a native object first.
+	if !isLLD && strings.HasSuffix(bcOrObjFile, ".bc") {
+		llcPath, lerr := findLLVMTool("llc")
+		if lerr != nil {
+			fmt.Fprintf(os.Stderr, "error: system ld requires native object but llc not found: %v\n", lerr)
+			os.Exit(1)
+		}
+		nativeObj, nerr := os.CreateTemp("", "promise-darwin-*.o")
+		if nerr != nil {
+			fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", nerr)
+			os.Exit(1)
+		}
+		nativeObj.Close()
+		defer os.Remove(nativeObj.Name())
+		llcArgs := []string{
+			"-mtriple=" + target, "-filetype=obj",
+			"-function-sections", "-relocation-model=pic",
+			bcOrObjFile, "-o", nativeObj.Name(),
+		}
+		llcCmd := runLLVMCmd(llcPath, llcArgs...)
+		llcCmd.Stderr = os.Stderr
+		if err := llcCmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "error running llc for darwin system ld: %v\n", err)
+			os.Exit(1)
+		}
+		fileToLink = nativeObj.Name()
+	}
+
+	linkArgs := buildDarwinLinkArgs(target, fileToLink, outputFile)
 	var linkCmd *exec.Cmd
 	if isLLD {
+		linkArgs = append([]string{"--lto-O1"}, linkArgs...)
 		linkCmd = runLLVMCmd(linkerPath, linkArgs...)
 	} else {
 		linkCmd = exec.Command(linkerPath, linkArgs...)
@@ -2418,6 +2491,7 @@ func buildWasmLinkArgs(objFiles []string, outputFile string) []string {
 		os.Exit(1)
 	}
 	args := []string{
+		"--lto-O2", // O2 needed to fold math intrinsics (e.g. sin(0.0)) across module boundaries
 		"--no-entry",
 		"--export=_start",
 		"--allow-undefined", // WASI imports (fd_write, proc_exit) resolved at runtime
@@ -2490,6 +2564,7 @@ func linkDarwinMulti(objFiles []string, target, outputFile string) {
 
 	var linkCmd *exec.Cmd
 	if isLLD {
+		linkArgs = append([]string{"--lto-O1"}, linkArgs...)
 		linkCmd = runLLVMCmd(linkerPath, linkArgs...)
 	} else {
 		linkCmd = exec.Command(linkerPath, linkArgs...)
@@ -2526,7 +2601,7 @@ func linkLinuxMulti(objFiles []string, target, outputFile string) {
 			"-static",
 			"--build-id",
 			"--eh-frame-hdr",
-			"--gc-sections",
+			"--lto-O1", // LTO: cross-module inlining and DCE
 			"-o", outputFile,
 			filepath.Join(crtDir, "crt1.o"),
 			filepath.Join(crtDir, "crti.o"),
@@ -2547,6 +2622,7 @@ func linkLinuxMulti(objFiles []string, target, outputFile string) {
 			"--hash-style=gnu",
 			"--build-id",
 			"--eh-frame-hdr",
+			"--lto-O1", // LTO: cross-module inlining and DCE
 			"-m", emulationMode(target),
 			"-pie",
 			"-dynamic-linker", dynamicLinker(target),
@@ -2880,16 +2956,11 @@ func compileFrontendForTarget(filename, triple string) (*ast.File, *sema.Info) {
 	}
 	target := sema.ParseTargetInfo(filterTriple)
 
-	// Merge standard library declarations
-	stdDir := findStdDir()
-	var stdFiles []*ast.File
-	if stdDir != "" {
-		stdFiles = parseStdFiles(stdDir)
-		file = mergeStdDecls(file, stdFiles)
-	}
+	// Inject std as a glob import so all std symbols are available without explicit `use std;`
+	file = injectStdImport(file)
 
 	// Load local modules from use declarations
-	moduleScopes, modInfos, depOrder := loadModuleScopes(filename, file, stdFiles, target)
+	moduleScopes, modInfos, depOrder := loadModuleScopes(filename, file, target)
 
 	info, errs := sema.CheckWithTarget(file, moduleScopes, target)
 	if modInfos != nil {
@@ -2910,8 +2981,8 @@ func compileFrontendForTarget(filename, triple string) (*ast.File, *sema.Info) {
 	return file, info
 }
 
-// cachedStdHash returns a memoized hash of the std library directory.
-// Computed once per process since std doesn't change mid-run.
+// cachedStdHash returns a stable hash of the embedded std library content.
+// Derived from the embedded .sources.sha256 checksum file, computed once per process.
 var (
 	stdHashOnce sync.Once
 	stdHashVal  string
@@ -2919,11 +2990,10 @@ var (
 
 func cachedStdHash() string {
 	stdHashOnce.Do(func() {
-		dir := findStdDir()
-		if dir != "" {
-			if h, err := module.HashDir(dir, ".pr"); err == nil {
-				stdHashVal = h
-			}
+		if len(embeddedSourcesChecksum) > 0 {
+			h := fnv.New128a()
+			h.Write(embeddedSourcesChecksum)
+			stdHashVal = hex.EncodeToString(h.Sum(nil))
 		}
 	})
 	return stdHashVal
@@ -3051,14 +3121,6 @@ func compileModuleTestFrontend(modDir, triple string) (*ast.File, *sema.Info) {
 		}
 	}
 
-	// Merge standard library declarations
-	stdDir := findStdDir()
-	var stdFiles []*ast.File
-	if stdDir != "" {
-		stdFiles = parseStdFiles(stdDir)
-		merged = mergeStdDecls(merged, stdFiles)
-	}
-
 	// Resolve the effective target for `target(cond)` filtering (host when unspecified).
 	filterTriple := triple
 	if filterTriple == "" {
@@ -3066,8 +3128,11 @@ func compileModuleTestFrontend(modDir, triple string) (*ast.File, *sema.Info) {
 	}
 	target := sema.ParseTargetInfo(filterTriple)
 
+	// Inject std as a glob import
+	merged = injectStdImport(merged)
+
 	// Load module dependencies (the module's own `use` declarations)
-	moduleScopes, modInfos, depOrder := loadModuleScopes(filepath.Join(modDir, "promise.toml"), merged, stdFiles, target)
+	moduleScopes, modInfos, depOrder := loadModuleScopes(filepath.Join(modDir, "promise.toml"), merged, target)
 
 	info, errs := sema.CheckWithTarget(merged, moduleScopes, target)
 	if modInfos != nil {
@@ -3092,7 +3157,6 @@ func compileModuleTestFrontend(modDir, triple string) (*ast.File, *sema.Info) {
 // A single loader instance is shared across the entire dependency graph walk.
 type moduleLoader struct {
 	projectRoot string
-	stdFiles    []*ast.File
 	// projectCfg is the root project's parsed promise.toml.
 	// Provides [require] pins and [replace] overrides for remote modules.
 	projectCfg *module.Config
@@ -3122,6 +3186,9 @@ type moduleLoader struct {
 	warnings []string
 	// catalog is the parsed embedded catalog manifest (nil if unavailable).
 	catalog *module.Catalog
+	// catalogLoaded caches catalog modules by name to prevent re-loading when a
+	// file has both `use std as _` (auto-injected) and `use std;` (user-written).
+	catalogLoaded map[string]*sema.ModuleInfo
 	// target is the build target for `target(cond)` filtering in sema.
 	target sema.TargetInfo
 }
@@ -3129,7 +3196,7 @@ type moduleLoader struct {
 // loadModuleScopes scans use declarations for local module paths, loads each
 // module (parse + sema), and returns scopes for sema + ModuleInfos for codegen.
 // Modules are loaded recursively: if module A imports module B, B is loaded first.
-func loadModuleScopes(filename string, file *ast.File, stdFiles []*ast.File, target sema.TargetInfo) (map[string]*types.Scope, map[string]*sema.ModuleInfo, []string) {
+func loadModuleScopes(filename string, file *ast.File, target sema.TargetInfo) (map[string]*types.Scope, map[string]*sema.ModuleInfo, []string) {
 	if len(file.Uses) == 0 {
 		return nil, nil, nil
 	}
@@ -3167,13 +3234,13 @@ func loadModuleScopes(filename string, file *ast.File, stdFiles []*ast.File, tar
 
 	loader := &moduleLoader{
 		projectRoot:      projectRoot,
-		stdFiles:         stdFiles,
 		projectCfg:       projectCfg,
 		loaded:           make(map[string]*sema.ModuleInfo),
 		globalIdentities: make(map[string]string),
 		visiting:         make(map[string]string),
 		allModInfos:      make(map[string]*sema.ModuleInfo),
 		remoteResolved:   make(map[string]string),
+		catalogLoaded:    make(map[string]*sema.ModuleInfo),
 		commitPins:       commitPins,
 		catalog:          catalog,
 		target:           target,
@@ -3183,9 +3250,6 @@ func loadModuleScopes(filename string, file *ast.File, stdFiles []*ast.File, tar
 	for _, u := range file.Uses {
 		if u.Path == "" {
 			// Catalog import — look up in embedded catalog
-			if u.CatalogName == "std" {
-				continue // std handled by sema via stdScope
-			}
 			modInfo, err := loader.loadCatalog(u.CatalogName)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s: error loading catalog module '%s': %v\n", filename, u.CatalogName, err)
@@ -3324,10 +3388,11 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 		return nil, fmt.Errorf("module '%s' contains no .pr files", modPath)
 	}
 
-	// Merge module files into a single AST, then merge std decls
+	// Merge module files into a single AST, then inject std import
 	merged := mergeModuleFiles(modFileList)
-	if len(ml.stdFiles) > 0 {
-		merged = mergeStdDecls(merged, ml.stdFiles)
+	// Don't inject std into the std module itself
+	if modCfg.Name != "std" {
+		merged = injectStdImport(merged)
 	}
 
 	// Recursively load this module's own dependencies
@@ -3336,8 +3401,15 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 		return nil, err
 	}
 
-	// Run sema on the module with its dependency scopes
-	semaInfo, errs := sema.CheckWithTarget(merged, depScopes, ml.target)
+	// Run sema on the module with its dependency scopes.
+	// The std module itself uses CheckForStdModule so universe-type singletons are reused correctly.
+	var semaInfo *sema.Info
+	var errs []error
+	if modCfg.Name == "std" {
+		semaInfo, errs = sema.CheckForStdModule(merged, ml.target)
+	} else {
+		semaInfo, errs = sema.CheckWithTarget(merged, depScopes, ml.target)
+	}
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("errors in module '%s': %v", modPath, errs[0])
 	}
@@ -3440,8 +3512,11 @@ func (ml *moduleLoader) loadRemote(remoteURL, alias string) (*sema.ModuleInfo, e
 // catalog manifest. Embedded modules (no URL) are extracted from go:embed;
 // external modules (with URL + commit) are fetched via git.
 func (ml *moduleLoader) loadCatalog(catalogName string) (*sema.ModuleInfo, error) {
-	if catalogName == "std" {
-		return nil, nil // handled by sema directly
+
+	// Return cached result to prevent re-loading the same catalog module when it
+	// appears multiple times (e.g., auto-injected `use std as _` + user `use std;`).
+	if mi, ok := ml.catalogLoaded[catalogName]; ok {
+		return mi, nil
 	}
 
 	// Check [replace] — catalog name as key
@@ -3459,6 +3534,7 @@ func (ml *moduleLoader) loadCatalog(catalogName string) (*sema.ModuleInfo, error
 			}
 			// Override identity: use catalog identity, not local path identity
 			ml.overrideIdentity(mi, module.GlobalIdentityForCatalog(catalogName))
+			ml.catalogLoaded[catalogName] = mi
 			return mi, nil
 		}
 	}
@@ -3506,6 +3582,7 @@ func (ml *moduleLoader) loadCatalog(catalogName string) (*sema.ModuleInfo, error
 	// Override identity: catalog modules use their name as global identity
 	ml.overrideIdentity(mi, module.GlobalIdentityForCatalog(catalogName))
 
+	ml.catalogLoaded[catalogName] = mi
 	return mi, nil
 }
 
@@ -3596,9 +3673,6 @@ func (ml *moduleLoader) loadDeps(file *ast.File, parentPath string) (map[string]
 	for _, u := range file.Uses {
 		if u.Path == "" {
 			// Catalog import
-			if u.CatalogName == "std" {
-				continue // std handled by sema via stdScope
-			}
 			depInfo, err := ml.loadCatalog(u.CatalogName)
 			if err != nil {
 				return nil, fmt.Errorf("in module '%s': %w", parentPath, err)
@@ -3668,85 +3742,16 @@ func mergeModuleFiles(files []*ast.File) *ast.File {
 	return merged
 }
 
-// findStdDir searches for the std/ directory containing standard library .pr files.
-func findStdDir() string {
-	candidates := []string{
-		"std",
-		"../std",
-		"../../std",
+// injectStdImport returns a shallow copy of the file with a `use std as _;` UseDecl prepended.
+// This makes all std library symbols available without requiring an explicit `use std;`.
+func injectStdImport(file *ast.File) *ast.File {
+	stdUse := &ast.UseDecl{
+		Alias:       "_",
+		CatalogName: "std",
 	}
-
-	// Check relative to executable
-	if execPath, err := os.Executable(); err == nil {
-		dir := filepath.Dir(execPath)
-		candidates = append(candidates,
-			filepath.Join(dir, "std"),
-			filepath.Join(dir, "..", "std"),
-			filepath.Join(dir, "..", "..", "std"),
-		)
-	}
-
-	// Check installed location
-	if promiseHome, err := module.PromiseHome(); err == nil {
-		candidates = append(candidates,
-			filepath.Join(promiseHome, "lib", "std"),
-		)
-	}
-
-	for _, c := range candidates {
-		info, err := os.Stat(c)
-		if err == nil && info.IsDir() {
-			abs, err := filepath.Abs(c)
-			if err == nil {
-				return abs
-			}
-			return c
-		}
-	}
-	return ""
-}
-
-// parseStdFiles parses all .pr files in the std directory.
-// TODO: OS errors (unreadable dir) and parse errors in std files silently return nil — add error reporting
-func parseStdFiles(stdDir string) []*ast.File {
-	entries, err := os.ReadDir(stdDir)
-	if err != nil {
-		return nil
-	}
-	var files []*ast.File
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".pr") {
-			f := parseSourceFile(filepath.Join(stdDir, e.Name()))
-			files = append(files, f)
-		}
-	}
-	return files
-}
-
-// mergeStdDecls prepends std library declarations into the user file, tagging them with IsStd.
-func mergeStdDecls(userFile *ast.File, stdFiles []*ast.File) *ast.File {
-	var stdDecls []ast.Decl
-	for _, sf := range stdFiles {
-		for _, d := range sf.Decls {
-			// Tag each declaration as coming from std
-			switch decl := d.(type) {
-			case *ast.FuncDecl:
-				decl.IsStd = true
-			case *ast.TypeDecl:
-				decl.IsStd = true
-			case *ast.EnumDecl:
-				decl.IsStd = true // TODO: no std enums exist yet; add test when one is added
-			}
-			stdDecls = append(stdDecls, d)
-		}
-	}
-
-	// Prepend std declarations before user declarations
-	merged := make([]ast.Decl, 0, len(stdDecls)+len(userFile.Decls))
-	merged = append(merged, stdDecls...)
-	merged = append(merged, userFile.Decls...)
-	userFile.Decls = merged
-	return userFile
+	result := *file // shallow copy
+	result.Uses = append([]*ast.UseDecl{stdUse}, file.Uses...)
+	return &result
 }
 
 type errorListener struct {
@@ -3845,15 +3850,23 @@ func runExec(args []string) {
 	// Parse from string with inline error formatting
 	file := parseSourceString(source, wrapped)
 
-	// Merge standard library
-	stdDir := findStdDir()
-	if stdDir != "" {
-		stdFiles := parseStdFiles(stdDir)
-		file = mergeStdDecls(file, stdFiles)
+	// Inject std as a glob import so all std symbols are available
+	file = injectStdImport(file)
+
+	// Load local modules from use declarations
+	filterTriple := target
+	if filterTriple == "" {
+		filterTriple = codegen.HostTargetTriple()
 	}
+	targetInfo := sema.ParseTargetInfo(filterTriple)
+	moduleScopes, modInfos, depOrder := loadModuleScopes("<exec>", file, targetInfo)
 
 	// Semantic analysis
-	info, errs := sema.Check(file)
+	info, errs := sema.CheckWithTarget(file, moduleScopes, targetInfo)
+	if modInfos != nil {
+		info.ModuleInfos = modInfos
+		info.ModuleOrder = depOrder
+	}
 	if len(errs) > 0 {
 		printInlineErrors(source, errs, wrapped)
 		os.Exit(1)
@@ -4232,8 +4245,8 @@ func runInstall() {
 	}
 	copyFile(execPath, filepath.Join(binDir, binaryName), 0755)
 
-	// Extract embedded std files
-	extractEmbedded(embeddedStd, "resources/std", stdDest)
+	// Extract embedded std files (now live in resources/modules/std/)
+	extractEmbedded(embeddedModules, "resources/modules/std", stdDest)
 
 	// Extract embedded musl CRT (if available)
 	if hasEmbeddedMuslCRT {

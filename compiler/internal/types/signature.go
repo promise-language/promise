@@ -4,12 +4,13 @@ import "strings"
 
 // Param represents a function parameter.
 type Param struct {
-	name       string
-	typ        Type
-	ref        RefMod
-	hasDef     bool   // true if parameter has a default value
-	doc        string // `doc meta annotation
-	isVariadic bool   // true for ...T params (receives T[])
+	name        string
+	typ         Type
+	ref         RefMod
+	hasDef      bool        // true if parameter has a default value
+	defaultExpr interface{} // AST expression for the default value (ast.Expr, stored as interface{} to avoid import cycle)
+	doc         string      // `doc meta annotation
+	isVariadic  bool        // true for ...T params (receives T[])
 }
 
 // NewParam creates a new parameter.
@@ -26,6 +27,14 @@ func (p *Param) IsVariadic() bool { return p.isVariadic }
 
 // SetHasDefault marks this parameter as having a default value.
 func (p *Param) SetHasDefault(v bool) { p.hasDef = v }
+
+// SetDefaultExpr stores the AST default expression for cross-module default lookup.
+// expr should be an ast.Expr; stored as interface{} to avoid import cycle.
+func (p *Param) SetDefaultExpr(expr interface{}) { p.defaultExpr = expr }
+
+// DefaultExpr returns the stored AST default expression, or nil if not set.
+// Callers in sema should cast to ast.Expr.
+func (p *Param) DefaultExpr() interface{} { return p.defaultExpr }
 
 // SetDoc sets the documentation string from a `doc annotation.
 func (p *Param) SetDoc(s string) { p.doc = s }

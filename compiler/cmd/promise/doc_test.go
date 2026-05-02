@@ -12,7 +12,7 @@ import (
 	"djabi.dev/go/promise_lang/internal/sema"
 )
 
-// docFromSource parses a .pr source string, merges with std, runs DeclareAndDefine,
+// docFromSource parses a .pr source string, injects std, runs DeclareAndDefine,
 // and returns the emitDoc output.
 func docFromSource(t *testing.T, source string, opts docOpts) string {
 	t.Helper()
@@ -30,12 +30,12 @@ func docFromSource(t *testing.T, source string, opts docOpts) string {
 		t.Fatalf("AST build errors: %v", buildErrs)
 	}
 
-	// Merge with std
-	stdFiles := testStdFiles(t)
-	file = mergeStdDecls(file, stdFiles)
+	// Inject std as a glob import and load module scopes
+	file = injectStdImport(file)
+	moduleScopes, _, _ := loadModuleScopes("test.pr", file, sema.TargetInfo{})
 
-	// Run DeclareAndDefine
-	info, errs := sema.DeclareAndDefineWithModules(file, nil)
+	// Run DeclareAndDefine with module scopes
+	info, errs := sema.DeclareAndDefineWithModules(file, moduleScopes)
 	if len(errs) > 0 {
 		t.Fatalf("sema errors: %v", errs)
 	}
@@ -689,17 +689,17 @@ func TestDocGenericEnumCompact(t *testing.T) {
 
 func TestDocFactoryMethod(t *testing.T) {
 	out := docFromSource(t, `
-		type Builder `+"`public"+` {
+		type MyBuilder `+"`public"+` {
 			int value `+"`public"+`;
-			create() Builder `+"`public `factory `doc(\"Creates a new Builder.\")"+` {
-				return Builder(value: 0);
+			create() MyBuilder `+"`public `factory `doc(\"Creates a new MyBuilder.\")"+` {
+				return MyBuilder(value: 0);
 			}
 		}
 	`, docOpts{publicOnly: true})
 
-	assertContainsDoc(t, out, "#### Builder.create")
+	assertContainsDoc(t, out, "#### MyBuilder.create")
 	assertContainsDoc(t, out, "`factory")
-	assertContainsDoc(t, out, "Creates a new Builder.")
+	assertContainsDoc(t, out, "Creates a new MyBuilder.")
 }
 
 // === Enum with private method (collectEnumMethods filtering) ===

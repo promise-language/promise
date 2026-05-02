@@ -10,8 +10,9 @@ type Checker struct {
 	file              *ast.File
 	info              *Info
 	errors            []error
-	stdScope          *types.Scope            // std library scope (child of Universe, parent of fileScope)
-	fileScope         *types.Scope            // file-level scope (child of stdScope)
+	compilingStd      bool                    // true when compiling the std module itself
+	globScope         *types.Scope            // glob-import scope (child of Universe, parent of fileScope)
+	fileScope         *types.Scope            // file-level scope (child of globScope, holds user declarations)
 	scope             *types.Scope            // current scope during traversal
 	curFunc           *types.Signature        // current function being checked (for return/raise)
 	curType           *types.Named            // current type being defined/checked (for Self resolution)
@@ -88,16 +89,64 @@ func CheckWithTarget(file *ast.File, moduleScopes map[string]*types.Scope, targe
 		},
 	}
 
-	c.stdScope = types.NewScope(
-		types.Universe, tpos(file.Pos()), tpos(file.End()), "std",
+	c.globScope = types.NewScope(
+		types.Universe, tpos(file.Pos()), tpos(file.End()), "glob",
 	)
 	c.fileScope = types.NewScope(
-		c.stdScope, tpos(file.Pos()), tpos(file.End()), "file",
+		c.globScope, tpos(file.Pos()), tpos(file.End()), "file",
+	)
+	c.scope = c.fileScope
+	c.info.Scopes[file] = c.fileScope
+	// fileScope before globScope: user declarations (fileScope) take priority over
+	// glob-imported symbols (globScope) in codegen's ScopeOrder-based lookups.
+	c.info.ScopeOrder = append(c.info.ScopeOrder, c.fileScope)
+	c.info.ScopeOrder = append(c.info.ScopeOrder, c.globScope)
+
+	c.declare(file)              // Pass 1: collect all declarations
+	c.define(file)               // Pass 2: resolve types, populate type structures
+	c.validateConstructors(file) // Validate: constructor inheritance (after all types defined)
+	c.validateBuiltins()         // Validate: .pr files declare all required operators/methods/fields
+	c.check(file)                // Pass 3: type-check function/method bodies
+	c.checkMissingReturn(file)   // Pass 4: verify non-void functions return
+
+	return c.info, c.errors
+}
+
+// CheckForStdModule performs semantic analysis on the std module itself.
+// It sets compilingStd=true so that universe-type singletons are reused correctly.
+func CheckForStdModule(file *ast.File, target TargetInfo) (*Info, []error) {
+	c := &Checker{
+		compilingStd: true,
+		moduleScopes: nil,
+		target:       target,
+		file:         file,
+		info: &Info{
+			Types:                make(map[ast.Expr]types.Type),
+			Objects:              make(map[*ast.IdentExpr]types.Object),
+			Scopes:               make(map[ast.Node]*types.Scope),
+			FieldDefaults:        make(map[*types.Field]ast.Expr),
+			ParamDefaults:        make(map[*types.Param]ast.Expr),
+			LambdaCaptures:       make(map[*ast.LambdaExpr][]*CapturedVar),
+			OptionalNarrowings:   make(map[*ast.IfStmt]*OptionalNarrowing),
+			FailableExprs:        make(map[ast.Expr]bool),
+			AutoPropagateExprs:   make(map[ast.Expr]bool),
+			FailableDestructures: make(map[*ast.DestructureVarDecl]bool),
+			ForInKinds:           make(map[*ast.ForInStmt]ForInKind),
+			GeneratorFuncs:       make(map[ast.Node]types.Type),
+			FilteredDecls:        make(map[ast.Decl]bool),
+		},
+	}
+
+	c.globScope = types.NewScope(
+		types.Universe, tpos(file.Pos()), tpos(file.End()), "glob",
+	)
+	c.fileScope = types.NewScope(
+		c.globScope, tpos(file.Pos()), tpos(file.End()), "file",
 	)
 	c.scope = c.fileScope
 	c.info.Scopes[file] = c.fileScope
 	c.info.ScopeOrder = append(c.info.ScopeOrder, c.fileScope)
-	c.info.StdScope = c.stdScope
+	c.info.ScopeOrder = append(c.info.ScopeOrder, c.globScope)
 
 	c.declare(file)              // Pass 1: collect all declarations
 	c.define(file)               // Pass 2: resolve types, populate type structures
@@ -135,19 +184,20 @@ func DeclareAndDefineWithModules(file *ast.File, moduleScopes map[string]*types.
 			FailableDestructures: make(map[*ast.DestructureVarDecl]bool),
 			ForInKinds:           make(map[*ast.ForInStmt]ForInKind),
 			GeneratorFuncs:       make(map[ast.Node]types.Type),
+			FilteredDecls:        make(map[ast.Decl]bool),
 		},
 	}
 
-	c.stdScope = types.NewScope(
-		types.Universe, tpos(file.Pos()), tpos(file.End()), "std",
+	c.globScope = types.NewScope(
+		types.Universe, tpos(file.Pos()), tpos(file.End()), "glob",
 	)
 	c.fileScope = types.NewScope(
-		c.stdScope, tpos(file.Pos()), tpos(file.End()), "file",
+		c.globScope, tpos(file.Pos()), tpos(file.End()), "file",
 	)
 	c.scope = c.fileScope
 	c.info.Scopes[file] = c.fileScope
 	c.info.ScopeOrder = append(c.info.ScopeOrder, c.fileScope)
-	c.info.StdScope = c.stdScope
+	c.info.ScopeOrder = append(c.info.ScopeOrder, c.globScope)
 
 	c.declare(file)              // Pass 1: collect all declarations
 	c.define(file)               // Pass 2: resolve types, populate type structures
@@ -210,12 +260,12 @@ func (c *Checker) insert(obj types.Object) bool {
 // check performs Pass 3: type-check all function and method bodies.
 func (c *Checker) check(file *ast.File) {
 	for _, decl := range file.Decls {
-		// Route scope so std decl bodies resolve names against stdScope
-		if isDeclStd(decl) {
-			c.scope = c.stdScope
-		} else {
-			c.scope = c.fileScope
+		// Skip declarations that were rejected in the declare pass (redeclaration
+		// errors) or filtered by `target(cond) — their symbols don't exist in scope.
+		if c.info.FilteredDecls[decl] {
+			continue
 		}
+		c.scope = c.fileScope
 
 		switch d := decl.(type) {
 		case *ast.FuncDecl:

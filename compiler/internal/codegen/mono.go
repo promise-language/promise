@@ -278,6 +278,76 @@ func collectMonoFuncInstances(info *sema.Info) []*sema.FuncInstance {
 	return result
 }
 
+// collectMonoMethodInstancesWithExtra collects mono method instances from modSemaInfo
+// plus any extra instances from the caller (e.g. user file) that are instantiations
+// of methods on types declared in modFile. This handles cross-module generic method
+// calls like iter.map[int](...) in user code where Iterator[T].map is defined in std.
+func collectMonoMethodInstancesWithExtra(modSemaInfo *sema.Info, modFile *ast.File, extra []*sema.MethodInstance) []*sema.MethodInstance {
+	// Build set of type names declared in modFile
+	modTypeNames := make(map[string]bool)
+	for _, decl := range modFile.Decls {
+		if td, ok := decl.(*ast.TypeDecl); ok {
+			modTypeNames[td.Name] = true
+		}
+	}
+
+	// Start with the module's own instances (deduped)
+	result := collectMonoMethodInstances(modSemaInfo)
+	seen := make(map[string]bool, len(result))
+	for _, mi := range result {
+		seen[monoMethodInstanceName(mi)] = true
+	}
+
+	// Add extra instances whose owner type is declared in this module
+	for _, mi := range extra {
+		if !modTypeNames[mi.Owner.Obj().Name()] {
+			continue
+		}
+		name := monoMethodInstanceName(mi)
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		result = append(result, mi)
+	}
+	return result
+}
+
+// collectMonoFuncInstancesWithExtra collects mono func instances from modSemaInfo
+// plus any extra instances from the caller (e.g. user file) that are instantiations
+// of functions declared in modFile. This handles cross-module generic calls like
+// sort[int](...) in user code where sort is defined in the std module.
+func collectMonoFuncInstancesWithExtra(modSemaInfo *sema.Info, modFile *ast.File, extra []*sema.FuncInstance) []*sema.FuncInstance {
+	// Build set of function names declared in modFile
+	modFuncNames := make(map[string]bool)
+	for _, decl := range modFile.Decls {
+		if fd, ok := decl.(*ast.FuncDecl); ok {
+			modFuncNames[fd.Name] = true
+		}
+	}
+
+	// Start with the module's own instances (deduped)
+	result := collectMonoFuncInstances(modSemaInfo)
+	seen := make(map[string]bool, len(result))
+	for _, fi := range result {
+		seen[monoFuncName(fi)] = true
+	}
+
+	// Add extra instances whose function is declared in this module
+	for _, fi := range extra {
+		if !modFuncNames[fi.Func.Name()] {
+			continue
+		}
+		name := monoFuncName(fi)
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		result = append(result, fi)
+	}
+	return result
+}
+
 // computeMonoUserTypeLayout computes a TypeDeclLayout for a monomorphic user type instance.
 // It substitutes all TypeParam fields with concrete types from the subst map.
 func computeMonoUserTypeLayout(module *ir.Module, named *types.Named, name string, subst map[*types.TypeParam]types.Type, allLayouts map[*types.Named]*TypeDeclLayout) *TypeDeclLayout {
@@ -461,7 +531,9 @@ func computeMonoEnumLayout(module *ir.Module, enum *types.Enum, name string, sub
 			var fieldTypes []irtypes.Type
 			for _, f := range v.Fields() {
 				ft := types.Substitute(f.Type(), subst)
-				fieldTypes = append(fieldTypes, llvmType(ft))
+				// Use llvmTypeForEnumFieldFromPromise so user-defined types
+				// use {i8*, i8*} (value struct) not bare i8* (instance ptr).
+				fieldTypes = append(fieldTypes, llvmTypeForEnumFieldFromPromise(ft))
 			}
 			dataType := irtypes.NewStruct(fieldTypes...)
 			variantDataTypes[v.Name()] = dataType
@@ -926,6 +998,96 @@ func (c *Compiler) defineMonoFuncs(file *ast.File, funcInsts []*sema.FuncInstanc
 }
 
 // findTypeDecl finds a TypeDecl AST node by name.
+// collectMonoInstancesWithExtra is like collectMonoInstances but seeds the
+// transitive expansion with both the module's own recorded instances and any
+// extra instances from the caller (e.g. user-file mono instances of module
+// types like Map[string,int]). Only extra instances whose origin type is
+// declared in modFile are included. The unresolved-instance expansion uses
+// the module's own sema info so that method-body type references (e.g.
+// _FnIter[T] inside Vector[T].iter()) are resolved correctly.
+func collectMonoInstancesWithExtra(modInfo *sema.ModuleInfo, modFile *ast.File, extra []*types.Instance) []*types.Instance {
+	// Build seen set for type names declared in modFile for O(1) membership test.
+	modTypeNames := make(map[string]bool)
+	for _, decl := range modFile.Decls {
+		if td, ok := decl.(*ast.TypeDecl); ok {
+			modTypeNames[td.Name] = true
+		}
+	}
+
+	seen := map[string]bool{}
+	var result []*types.Instance
+
+	// Seed with module's own recorded instances.
+	for _, inst := range modInfo.SemaInfo.Instances {
+		key := monoName(inst)
+		if !seen[key] {
+			seen[key] = true
+			result = append(result, inst)
+		}
+	}
+
+	// Seed with extra instances that belong to types declared in modFile.
+	for _, inst := range extra {
+		named, ok := inst.Origin().(*types.Named)
+		if !ok {
+			continue
+		}
+		if !modTypeNames[named.Obj().Name()] {
+			continue
+		}
+		key := monoName(inst)
+		if !seen[key] {
+			seen[key] = true
+			result = append(result, inst)
+		}
+	}
+
+	// Unresolved instances from module's method bodies (e.g. _FnIter[T] inside
+	// Vector[T].iter()). These will be resolved transitively for each concrete inst.
+	unresolvedInsts := collectUnresolvedInstances(modInfo.SemaInfo)
+
+	// Transitively expand (same logic as collectMonoInstances).
+	for i := 0; i < len(result); i++ {
+		inst := result[i]
+		switch origin := inst.Origin().(type) {
+		case *types.Named:
+			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+			for _, f := range origin.AllFields() {
+				ft := types.Substitute(f.Type(), subst)
+				discoverInstances(ft, &result, seen)
+			}
+			for _, pr := range origin.Parents() {
+				if len(pr.TypeArgs) > 0 {
+					resolvedArgs := make([]types.Type, len(pr.TypeArgs))
+					for j, ta := range pr.TypeArgs {
+						resolvedArgs[j] = types.Substitute(ta, subst)
+					}
+					parentInst := types.NewInstance(pr.Named, resolvedArgs)
+					if !types.ContainsTypeParam(parentInst) {
+						discoverInstances(parentInst, &result, seen)
+					}
+				}
+			}
+			if len(subst) > 0 {
+				resolveUnresolvedInstances(unresolvedInsts, subst, &result, seen)
+			}
+		case *types.Enum:
+			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+			for _, v := range origin.Variants() {
+				for _, f := range v.Fields() {
+					ft := types.Substitute(f.Type(), subst)
+					discoverInstances(ft, &result, seen)
+				}
+			}
+			if len(subst) > 0 {
+				resolveUnresolvedInstances(unresolvedInsts, subst, &result, seen)
+			}
+		}
+	}
+
+	return result
+}
+
 func (c *Compiler) findTypeDecl(file *ast.File, name string) *ast.TypeDecl {
 	for _, decl := range file.Decls {
 		if td, ok := decl.(*ast.TypeDecl); ok && td.Name == name {

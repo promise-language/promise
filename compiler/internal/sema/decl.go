@@ -6,7 +6,6 @@ import (
 )
 
 // declare performs Pass 1: walk top-level declarations and insert names.
-// Std library declarations go into stdScope; user declarations go into fileScope.
 func (c *Checker) declare(file *ast.File) {
 	// Process use declarations — create module objects and resolve scopes
 	for _, u := range file.Uses {
@@ -33,16 +32,8 @@ func (c *Checker) declare(file *ast.File) {
 		c.modules = append(c.modules, mod)
 	}
 
+	c.scope = c.fileScope
 	for _, decl := range file.Decls {
-		isStd := isDeclStd(decl)
-
-		// Route std declarations to stdScope, user declarations to fileScope
-		if isStd {
-			c.scope = c.stdScope
-		} else {
-			c.scope = c.fileScope
-		}
-
 		switch d := decl.(type) {
 		case *ast.TypeDecl:
 			c.declareType(d)
@@ -59,13 +50,6 @@ func (c *Checker) declare(file *ast.File) {
 
 // resolveModuleScope looks up the module's scope from pre-loaded moduleScopes.
 func (c *Checker) resolveModuleScope(u *ast.UseDecl, mod *types.Module) {
-	// Special case: "std" catalog module uses the built-in stdScope.
-	// stdScope is a live reference populated during the declare pass,
-	// so by the time qualified lookups happen (define/check), it's full.
-	if mod.CatalogName() == "std" {
-		mod.SetScope(c.stdScope)
-		return
-	}
 	if c.moduleScopes == nil {
 		if u.CatalogName != "" {
 			c.errorf(u.Pos(), "unknown catalog module '%s'", u.CatalogName)
@@ -84,8 +68,9 @@ func (c *Checker) resolveModuleScope(u *ast.UseDecl, mod *types.Module) {
 	}
 }
 
-// mergeGlobImport dumps all exports from a module's scope into fileScope.
-// Eagerly checks for name conflicts with existing declarations.
+// mergeGlobImport dumps all exports from a module's scope into globScope.
+// Glob-imported symbols go into globScope (parent of fileScope) so that
+// user declarations in fileScope can shadow them without conflict.
 func (c *Checker) mergeGlobImport(u *ast.UseDecl, mod *types.Module) {
 	scope := mod.Scope()
 	if scope == nil {
@@ -101,30 +86,21 @@ func (c *Checker) mergeGlobImport(u *ast.UseDecl, mod *types.Module) {
 		if !isObjectExported(obj) {
 			continue
 		}
-		if existing := c.fileScope.Lookup(name); existing != nil {
+		if existing := c.globScope.Lookup(name); existing != nil {
+			if existing == obj {
+				continue // already imported (idempotent glob import)
+			}
+			// Two different glob imports export the same name — that's a conflict.
 			c.errorf(u.Pos(), "importing module '%s' as _ conflicts with existing symbol '%s'", modName, name)
 			c.errorf(u.Pos(), "hint: use `use %s` or `use %s as <alias>` to avoid conflict", modName, modName)
 			continue
 		}
-		c.fileScope.Insert(obj)
+		c.globScope.Insert(obj)
 	}
-}
-
-// isDeclStd returns true if a declaration has the IsStd flag set.
-func isDeclStd(decl ast.Decl) bool {
-	switch d := decl.(type) {
-	case *ast.TypeDecl:
-		return d.IsStd
-	case *ast.EnumDecl:
-		return d.IsStd
-	case *ast.FuncDecl:
-		return d.IsStd
-	}
-	return false
 }
 
 func (c *Checker) declareType(d *ast.TypeDecl) {
-	if !d.IsStd && d.Name == "std" {
+	if d.Name == "std" {
 		c.errorf(d.Pos(), "'std' is reserved for the standard library namespace")
 		return
 	}
@@ -146,7 +122,7 @@ func (c *Checker) declareType(d *ast.TypeDecl) {
 	// reuse the universe Named singleton so that identity checks (TypMap,
 	// TypError, etc.) continue to work. The define pass will add fields,
 	// methods, and type-param constraints from the source declaration.
-	if d.IsStd {
+	if c.compilingStd {
 		if obj := types.Universe.Lookup(d.Name); obj != nil {
 			c.scope.Insert(obj)
 			return
@@ -160,6 +136,11 @@ func (c *Checker) declareType(d *ast.TypeDecl) {
 
 	tn := types.NewTypeName(tpos(d.Pos()), d.Name, nil)
 	if !c.insert(tn) {
+		// Insertion failed (redeclaration error). Mark as filtered so that
+		// defineType/check passes skip this declaration — if we allow
+		// defineType to proceed, it would find the existing (e.g. std-imported)
+		// type and incorrectly add this declaration's methods to it.
+		c.info.FilteredDecls[d] = true
 		return
 	}
 	tparams := c.declareTypeParams(d.TypeParams)
@@ -167,7 +148,7 @@ func (c *Checker) declareType(d *ast.TypeDecl) {
 }
 
 func (c *Checker) declareEnum(d *ast.EnumDecl) {
-	if !d.IsStd && d.Name == "std" {
+	if d.Name == "std" {
 		c.errorf(d.Pos(), "'std' is reserved for the standard library namespace")
 		return
 	}
@@ -177,6 +158,8 @@ func (c *Checker) declareEnum(d *ast.EnumDecl) {
 	}
 	tn := types.NewTypeName(tpos(d.Pos()), d.Name, nil)
 	if !c.insert(tn) {
+		// Insertion failed (redeclaration). Mark filtered so define/check passes skip it.
+		c.info.FilteredDecls[d] = true
 		return
 	}
 	tparams := c.declareTypeParams(d.TypeParams)
@@ -184,7 +167,7 @@ func (c *Checker) declareEnum(d *ast.EnumDecl) {
 }
 
 func (c *Checker) declareFunc(d *ast.FuncDecl) {
-	if !d.IsStd && d.Name == "std" {
+	if d.Name == "std" {
 		c.errorf(d.Pos(), "'std' is reserved for the standard library namespace")
 		return
 	}
@@ -193,7 +176,10 @@ func (c *Checker) declareFunc(d *ast.FuncDecl) {
 		return
 	}
 	fn := types.NewFunc(tpos(d.Pos()), d.Name, nil)
-	c.insert(fn)
+	if !c.insert(fn) {
+		// Insertion failed (redeclaration). Mark filtered so define/check passes skip it.
+		c.info.FilteredDecls[d] = true
+	}
 }
 
 // declareTypeParams creates TypeParam objects from AST type parameters.
@@ -213,14 +199,14 @@ func (c *Checker) declareTypeParams(astParams []*ast.TypeParam) []*types.TypePar
 
 // define performs Pass 2: resolve type structures, populate fields/methods/variants.
 func (c *Checker) define(file *ast.File) {
+	c.scope = c.fileScope
 	for _, decl := range file.Decls {
-		// Set scope to match where the decl was declared
-		if isDeclStd(decl) {
-			c.scope = c.stdScope
-		} else {
-			c.scope = c.fileScope
+		// Skip declarations that were rejected in the declare pass (redeclaration
+		// errors) or filtered by `target(cond) — processing them would corrupt
+		// existing types by adding methods to the wrong Named object.
+		if c.info.FilteredDecls[decl] {
+			continue
 		}
-
 		switch d := decl.(type) {
 		case *ast.TypeDecl:
 			c.defineType(d)
@@ -294,7 +280,7 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 	// For universe type singletons being redeclared from source (e.g., map),
 	// reset accumulated fields/methods from previous sema runs to avoid duplicates
 	// and stale type references (e.g., a Slot enum pointer from a prior test run).
-	if d.IsStd && types.Universe.Lookup(d.Name) != nil {
+	if c.compilingStd && types.Universe.Lookup(d.Name) != nil {
 		named.ResetMembers()
 	}
 
@@ -566,6 +552,7 @@ func (c *Checker) resolveMethodSignature(named *types.Named, md *ast.MethodDecl)
 		}
 		if p.Default != nil {
 			params[i].SetHasDefault(true)
+			params[i].SetDefaultExpr(p.Default) // stored on param for cross-module lookup
 			c.info.ParamDefaults[params[i]] = p.Default
 		}
 		params[i].SetDoc(extractDoc(p.Annotations))
@@ -753,6 +740,7 @@ func (c *Checker) resolveFuncSignature(d *ast.FuncDecl) *types.Signature {
 		}
 		if p.Default != nil {
 			params[i].SetHasDefault(true)
+			params[i].SetDefaultExpr(p.Default) // stored on param for cross-module lookup
 			c.info.ParamDefaults[params[i]] = p.Default
 		}
 		params[i].SetDoc(extractDoc(p.Annotations))

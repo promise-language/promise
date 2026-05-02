@@ -31,7 +31,6 @@ type TypeDecl struct {
 	Annotations []*MetaAnnotation
 	Fields      []*FieldDecl
 	Methods     []*MethodDecl
-	IsStd       bool // true if this declaration comes from the std library
 }
 
 func (*TypeDecl) declTag() {}
@@ -67,7 +66,6 @@ type EnumDecl struct {
 	TypeParams  []*TypeParam
 	Annotations []*MetaAnnotation
 	Variants    []*EnumVariant
-	IsStd       bool // true if this declaration comes from the std library
 }
 
 func (*EnumDecl) declTag() {}
@@ -96,7 +94,6 @@ type FuncDecl struct {
 	ReturnType  *ReturnTypeSpec // nil if no return type
 	Annotations []*MetaAnnotation
 	Body        *Block
-	IsStd       bool // true if this declaration comes from the std library
 }
 
 func (*FuncDecl) declTag() {}

@@ -10,12 +10,10 @@ import (
 // Uses already-resolved signatures from pass 2 rather than re-resolving types.
 func (c *Checker) checkMissingReturn(file *ast.File) {
 	for _, decl := range file.Decls {
-		// Route scope so std decl lookups resolve against stdScope
-		if isDeclStd(decl) {
-			c.scope = c.stdScope
-		} else {
-			c.scope = c.fileScope
+		if c.info.FilteredDecls[decl] {
+			continue
 		}
+		c.scope = c.fileScope
 
 		switch d := decl.(type) {
 		case *ast.FuncDecl:

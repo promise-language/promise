@@ -56,7 +56,7 @@ if [ "$SUITE" = "promise" ] || [ "$SUITE" = "all" ]; then
     fi
     echo ""
     echo "Running promise tests (wasm32-wasi)..."
-    "$PROMISE" test -timeout 30 -target wasm32-wasi tests/... modules/... || exit 1
+    "$PROMISE" test -timeout 10 -target wasm32-wasi tests/... modules/... || exit 1
   fi
 fi
 

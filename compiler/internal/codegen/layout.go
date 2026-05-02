@@ -79,7 +79,6 @@ type ExternFunc struct {
 	ParamTypes  []types.Type     // Promise types of each parameter
 	ResultType  types.Type       // Promise return type (nil for void)
 	HasSret     bool             // true if return uses sret pointer (large struct return)
-	IsStd       bool             // true if this extern comes from the std library
 }
 
 // CompileResult bundles the output of compilation for downstream consumers.
@@ -592,7 +591,6 @@ func collectExterns(file *ast.File, info *sema.Info) []*ExternFunc {
 			Sig:         sig,
 			ParamTypes:  paramTypes,
 			ResultType:  sig.Result(),
-			IsStd:       fd.IsStd,
 		})
 	}
 	return externs
@@ -639,7 +637,9 @@ func computeEnumLayout(module *ir.Module, enum *types.Enum, ptrSize int) *TypeDe
 		if v.NumFields() > 0 {
 			var fieldTypes []irtypes.Type
 			for _, f := range v.Fields() {
-				fieldTypes = append(fieldTypes, llvmType(f.Type()))
+				// Use llvmTypeForEnumFieldFromPromise so user-defined types
+				// use {i8*, i8*} (value struct) not bare i8* (instance ptr).
+				fieldTypes = append(fieldTypes, llvmTypeForEnumFieldFromPromise(f.Type()))
 			}
 			dataType := irtypes.NewStruct(fieldTypes...)
 			variantDataTypes[v.Name()] = dataType
@@ -750,16 +750,6 @@ func computeEnumLayout(module *ir.Module, enum *types.Enum, ptrSize int) *TypeDe
 func lookupFuncSig(name string, info *sema.Info) *types.Signature {
 	for _, scope := range info.ScopeOrder {
 		if obj := scope.Lookup(name); obj != nil {
-			if fn, ok := obj.(*types.Func); ok {
-				if sig, ok := fn.Type().(*types.Signature); ok {
-					return sig
-				}
-			}
-		}
-	}
-	// Check std scope
-	if info.StdScope != nil {
-		if obj := info.StdScope.Lookup(name); obj != nil {
 			if fn, ok := obj.(*types.Func); ok {
 				if sig, ok := fn.Type().(*types.Signature); ok {
 					return sig

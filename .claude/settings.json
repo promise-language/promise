@@ -2,26 +2,30 @@
   "permissions": {
     "allow": [
       "Bash(make generate:*)",
+      "Bash(make resources:*)",
+      "Bash(make test:*)",
+      "Bash(make clean:*)",
       "Bash(go build:*)",
       "Bash(go test:*)",
+      "Bash(go fmt:*)",
       "Bash(gofmt:*)",
-      "Bash(git -C /Users/djabi/prog/promise_lang/compiler status:*)",
-      "Bash(git -C /Users/djabi/prog/promise_lang/compiler diff:*)",
-      "Bash(git -C /Users/djabi/prog/promise_lang/compiler log:*)",
-      "Bash(git -C /Users/djabi/prog/promise_lang/compiler add:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git fetch:*)",
+      "Bash(git pull:*)",
+      "Bash(git stash list:*)",
+      "Bash(git config core.hooksPath .githooks)",
       "Bash(sed:*)",
       "Bash(wc:*)",
-      "Bash(./promise exec: *)",
-      "Bash(./promise test: *)",
-      "Bash(./promise run: *)",
-      "Bash(./compiler/promise run: *)",
-      "Bash(./compiler/promise exec: *)",
-      "Bash(./compiler/promise test: *)",
-      "Bash(git config core.hooksPath .githooks)",
-      "Bash(bin/test.sh)"
+      "Bash(./build:*)",
+      "Bash(bin/test.sh:*)",
+      "Bash(bin/verify.sh:*)",
+      "Bash(bin/promise :*)"
     ],
     "additionalDirectories": [
-      "/Users/djabi/prog2/promise_lang/.git/hooks",
       "/tmp"
     ]
   },

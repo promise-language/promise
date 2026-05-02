@@ -23,10 +23,22 @@
       "Bash(./build:*)",
       "Bash(bin/test.sh:*)",
       "Bash(bin/verify.sh:*)",
-      "Bash(bin/promise :*)"
+      "Bash(bin/promise :*)",
+      "Read(~.promise/cache/llvm/darwin-arm64/**)",
+      "Bash(otool -L ~/.promise/cache/llvm/darwin-arm64/lld)",
+      "Bash(~/.promise/cache/llvm/darwin-arm64/lld --version)",
+      "Bash(rm -rf ~/.promise/cache/:*)",
+      "Bash(bin/promise exec:*)",
+      "Bash(codesign -v ~/.promise/cache/llvm/darwin-arm64/opt)",
+      "Bash(codesign -v ~/.promise/cache/llvm/darwin-arm64/lld)",
+      "Bash(codesign -v ~/.promise/cache/llvm/darwin-arm64/libLLVM.dylib)",
+      "Bash(xattr ~/.promise/cache/llvm/darwin-arm64/opt)",
+      "Bash(xattr -cr ~/.promise/cache/llvm/darwin-arm64/)",
+      "Bash(~/.promise/cache/llvm/darwin-arm64/opt --version)"
     ],
     "additionalDirectories": [
-      "/tmp"
+      "/tmp",
+      "~.promise"
     ]
   },
   "spinnerVerbs": {

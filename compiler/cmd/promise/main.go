@@ -1310,7 +1310,7 @@ func compileLLToObj(irText, prefix, target, optPath, llcPath string) string {
 	}
 	llcArgs = append(llcArgs, bcFile.Name(), "-o", objFile.Name())
 
-	llcCmd := exec.Command(llcPath, llcArgs...)
+	llcCmd := runLLVMCmd(llcPath, llcArgs...)
 	llcCmd.Stderr = os.Stderr
 	if err := llcCmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error running llc on %s: %v\n", prefix, err)
@@ -1399,9 +1399,8 @@ var llvmExtractOnce sync.Once
 // llvmCacheDir is set by ensureEmbeddedLLVM after successful extraction.
 var llvmCacheDir string
 
-// embeddedLLVMFiles are the compressed files we expect in the embed FS.
+// embeddedLLVMFiles is defined per-platform in llvm_*.go files.
 // The base names (without .gz) become executables in the cache dir.
-var embeddedLLVMFiles = []string{"opt.gz", "llc.gz", "lld.gz", "libLLVM.so.gz"}
 
 // embeddedLLVMSymlinks maps symlink name → target for lld mode selection.
 var embeddedLLVMSymlinks = map[string]string{
@@ -1417,12 +1416,33 @@ func llvmCacheDirPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, "cache", "llvm", "linux-amd64"), nil
+	return filepath.Join(home, "cache", "llvm", llvmCacheSubdir), nil
+}
+
+// llvmEmbeddedFiles returns all .gz files in the embedded LLVM FS.
+func llvmEmbeddedFiles() []string {
+	if !hasEmbeddedLLVM || llvmEmbedPrefix == "" {
+		return embeddedLLVMFiles
+	}
+	entries, err := embeddedLLVM.ReadDir(llvmEmbedPrefix)
+	if err != nil {
+		return embeddedLLVMFiles // fallback to static list
+	}
+	var files []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".gz") {
+			files = append(files, e.Name())
+		}
+	}
+	if len(files) == 0 {
+		return embeddedLLVMFiles
+	}
+	return files
 }
 
 // llvmCacheComplete checks if all expected LLVM tools exist in the cache dir.
 func llvmCacheComplete(dir string) bool {
-	for _, gz := range embeddedLLVMFiles {
+	for _, gz := range llvmEmbeddedFiles() {
 		name := strings.TrimSuffix(gz, ".gz")
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			return false
@@ -1468,8 +1488,9 @@ func ensureEmbeddedLLVM() {
 // extractCompressedLLVM decompresses embedded LLVM tools to the given directory.
 // Used by both ensureEmbeddedLLVM (cache) and runInstall (install dir).
 func extractCompressedLLVM(destDir string) {
-	prefix := "resources/llvm/linux-amd64"
-	for _, gz := range embeddedLLVMFiles {
+	prefix := llvmEmbedPrefix
+	gzFiles := llvmEmbeddedFiles()
+	for _, gz := range gzFiles {
 		data, err := embeddedLLVM.ReadFile(prefix + "/" + gz)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: cannot read embedded %s: %v\n", gz, err)
@@ -1510,6 +1531,49 @@ func extractCompressedLLVM(destDir string) {
 			os.Exit(1)
 		}
 	}
+
+	// On macOS, patch extracted Mach-O binaries to find dylibs in the same directory.
+	// Homebrew tools have @rpath set to @loader_path/../lib and may have hardcoded
+	// absolute paths to Homebrew dylibs. We:
+	// 1. Add @loader_path as an rpath so tools find dylibs in their own directory
+	// 2. Change absolute Homebrew dylib references to @rpath/name.dylib
+	// 3. Change dylib install names to @rpath/name.dylib (so other binaries find them)
+	// 4. Re-sign with ad-hoc signature (install_name_tool invalidates code signatures)
+	if runtime.GOOS == "darwin" {
+		for _, gz := range gzFiles {
+			name := strings.TrimSuffix(gz, ".gz")
+			filePath := filepath.Join(destDir, name)
+
+			if strings.HasSuffix(name, ".dylib") {
+				// Patch dylib install name to @rpath/<name>
+				exec.Command("install_name_tool", "-id", "@rpath/"+name, filePath).CombinedOutput()
+				// Also add @loader_path rpath for dylibs that load other dylibs
+				exec.Command("install_name_tool", "-add_rpath", "@loader_path", filePath).CombinedOutput()
+			} else {
+				// Patch executable: add @loader_path to rpath
+				exec.Command("install_name_tool", "-add_rpath", "@loader_path", filePath).CombinedOutput()
+			}
+
+			// Rewrite any absolute Homebrew dylib references to @rpath/<name>
+			out, err := exec.Command("otool", "-L", filePath).Output()
+			if err == nil {
+				for _, line := range strings.Split(string(out), "\n") {
+					line = strings.TrimSpace(line)
+					// Match absolute paths like /opt/homebrew/.../*.dylib
+					if (strings.HasPrefix(line, "/opt/homebrew/") || strings.HasPrefix(line, "/usr/local/opt/")) && strings.Contains(line, ".dylib") {
+						if idx := strings.Index(line, " (compatibility"); idx > 0 {
+							oldPath := line[:idx]
+							newName := "@rpath/" + filepath.Base(oldPath)
+							exec.Command("install_name_tool", "-change", oldPath, newName, filePath).CombinedOutput()
+						}
+					}
+				}
+			}
+
+			// Re-sign with ad-hoc signature (install_name_tool invalidates code signatures)
+			exec.Command("codesign", "--force", "--sign", "-", filePath).CombinedOutput()
+		}
+	}
 }
 
 // --- LLVM tool pipeline ---
@@ -1517,7 +1581,7 @@ func extractCompressedLLVM(destDir string) {
 // findLLVMTool locates an LLVM tool (opt, llc, ld.lld, ld64.lld) by searching:
 // 1. Sibling directory of the promise binary
 // 2. Environment variable override (PROMISE_OPT, PROMISE_LLC, PROMISE_LLD, PROMISE_LD64LLD)
-// 3. Embedded LLVM cache (<PROMISE_HOME>/cache/llvm/linux-amd64/)
+// 3. Embedded LLVM cache (<PROMISE_HOME>/cache/llvm/<platform>/)
 // 4. Homebrew LLVM (macOS)
 // 5. Versioned names on PATH (e.g., opt-22, llc-22, ld.lld-22) from newest to minLLVMMajor
 // 6. Unversioned names on PATH (e.g., opt, llc, ld.lld)
@@ -1606,32 +1670,34 @@ func findLLVMTool(name string) (string, error) {
 		name, envName, name, maxLLVMSearch, minLLVMMajor, name, minLLVMMajor)
 }
 
-// runLLVMCmd creates an exec.Cmd for an LLVM tool, setting LD_LIBRARY_PATH
-// so dynamically-linked tools can find libLLVM.so when running from the cache dir.
+// runLLVMCmd creates an exec.Cmd for an LLVM tool, setting the platform-appropriate
+// library path env var so dynamically-linked tools can find libLLVM when running
+// from the cache dir. Uses LD_LIBRARY_PATH on Linux, DYLD_LIBRARY_PATH on macOS.
 func runLLVMCmd(toolPath string, args ...string) *exec.Cmd {
 	cmd := exec.Command(toolPath, args...)
-	// If the tool is in the embedded cache, ensure LD_LIBRARY_PATH includes that dir
-	// so it can find libLLVM.so alongside it.
+	// If the tool is in the embedded cache, ensure the library path includes that dir
+	// so it can find libLLVM alongside it.
 	toolDir := filepath.Dir(toolPath)
 	if llvmCacheDir != "" && toolDir == llvmCacheDir {
+		envKey := llvmLibEnvKey
 		env := os.Environ()
-		ldPath := os.Getenv("LD_LIBRARY_PATH")
+		ldPath := os.Getenv(envKey)
 		if ldPath != "" {
 			ldPath = toolDir + ":" + ldPath
 		} else {
 			ldPath = toolDir
 		}
-		// Replace or append LD_LIBRARY_PATH
+		prefix := envKey + "="
 		found := false
 		for i, e := range env {
-			if strings.HasPrefix(e, "LD_LIBRARY_PATH=") {
-				env[i] = "LD_LIBRARY_PATH=" + ldPath
+			if strings.HasPrefix(e, prefix) {
+				env[i] = prefix + ldPath
 				found = true
 				break
 			}
 		}
 		if !found {
-			env = append(env, "LD_LIBRARY_PATH="+ldPath)
+			env = append(env, prefix+ldPath)
 		}
 		cmd.Env = env
 	}
@@ -2245,7 +2311,7 @@ func compileAndLinkLLVM(llFile, target, outputFile string) {
 	}
 	llcArgs = append(llcArgs, bcFile.Name(), "-o", objFile.Name())
 
-	llcCmd := exec.Command(llcPath, llcArgs...)
+	llcCmd := runLLVMCmd(llcPath, llcArgs...)
 	llcCmd.Stderr = os.Stderr
 	if err := llcCmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error running llc: %v\n", err)
@@ -2335,7 +2401,7 @@ func linkWasmMulti(objFiles []string, outputFile string) {
 	checkLLVMToolVersion(lldPath)
 
 	linkArgs := buildWasmLinkArgs(objFiles, outputFile)
-	linkCmd := exec.Command(lldPath, linkArgs...)
+	linkCmd := runLLVMCmd(lldPath, linkArgs...)
 	linkCmd.Stderr = os.Stderr
 	if err := linkCmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error linking (wasm-ld): %v\n", err)

@@ -14,7 +14,11 @@ MUSL_CRT_DST  := $(RESOURCES)/crt/x86_64-linux-musl
 # LLVM tool bundling (release builds only)
 LLVM_DST      := $(RESOURCES)/llvm/linux-amd64
 
-.PHONY: all generate build test clean download-antlr fmt install resources musl-crt llvm-bundle release wasm-alloc
+# macOS LLVM bundling — detect GOARCH for darwin-arm64 or darwin-amd64
+GOARCH        := $(shell go env GOARCH 2>/dev/null || echo amd64)
+LLVM_DST_DARWIN := $(RESOURCES)/llvm/darwin-$(GOARCH)
+
+.PHONY: all generate build test clean download-antlr fmt install resources musl-crt llvm-bundle llvm-bundle-darwin release wasm-alloc
 
 all: generate build
 
@@ -105,11 +109,62 @@ llvm-bundle:
 	echo "  lld.gz: $$(du -h $(LLVM_DST)/lld.gz | cut -f1)"; \
 	echo "  libLLVM.so.gz: $$(du -h $(LLVM_DST)/libLLVM.so.gz | cut -f1)"
 
+llvm-bundle-darwin:
+	@BREW_LLVM=""; \
+	for v in $$(seq 25 -1 22); do \
+		for prefix in /opt/homebrew/opt/llvm@$$v /usr/local/opt/llvm@$$v; do \
+			if [ -x "$$prefix/bin/opt" ]; then BREW_LLVM="$$prefix"; break 2; fi; \
+		done; \
+	done; \
+	if [ -z "$$BREW_LLVM" ]; then \
+		for prefix in /opt/homebrew/opt/llvm /usr/local/opt/llvm; do \
+			if [ -x "$$prefix/bin/opt" ]; then BREW_LLVM="$$prefix"; break; fi; \
+		done; \
+	fi; \
+	if [ -z "$$BREW_LLVM" ]; then echo "ERROR: no Homebrew LLVM 22+ found (brew install llvm)"; exit 1; fi; \
+	VER=$$($$BREW_LLVM/bin/opt --version 2>&1 | grep -oE 'LLVM version [0-9]+' | grep -oE '[0-9]+'); \
+	if [ -z "$$VER" ] || [ "$$VER" -lt 22 ]; then echo "ERROR: LLVM $$VER < 22 at $$BREW_LLVM"; exit 1; fi; \
+	BREW_LLD_DIR=""; \
+	if [ -x "$$BREW_LLVM/bin/lld" ]; then BREW_LLD_DIR="$$BREW_LLVM"; \
+	else \
+		for prefix in /opt/homebrew/opt/lld /usr/local/opt/lld; do \
+			if [ -x "$$prefix/bin/lld" ]; then BREW_LLD_DIR="$$prefix"; break; fi; \
+		done; \
+	fi; \
+	if [ -z "$$BREW_LLD_DIR" ]; then echo "ERROR: lld not found (brew install lld)"; exit 1; fi; \
+	echo "Bundling LLVM $$VER tools from $$BREW_LLVM + lld from $$BREW_LLD_DIR (darwin-$(GOARCH))..."; \
+	mkdir -p $(LLVM_DST_DARWIN); \
+	gzip -9 -c $$BREW_LLVM/bin/opt > $(LLVM_DST_DARWIN)/opt.gz; \
+	gzip -9 -c $$BREW_LLVM/bin/llc > $(LLVM_DST_DARWIN)/llc.gz; \
+	gzip -9 -c $$BREW_LLD_DIR/bin/lld > $(LLVM_DST_DARWIN)/lld.gz; \
+	gzip -9 -c $$BREW_LLVM/lib/libLLVM.dylib > $(LLVM_DST_DARWIN)/libLLVM.dylib.gz; \
+	for f in $$BREW_LLD_DIR/lib/liblld*.dylib; do \
+		name=$$(basename $$f); \
+		gzip -9 -c $$f > $(LLVM_DST_DARWIN)/$$name.gz; \
+		echo "  $$name.gz: $$(du -h $(LLVM_DST_DARWIN)/$$name.gz | cut -f1)"; \
+	done; \
+	for dep in $$(otool -L $$BREW_LLVM/lib/libLLVM.dylib 2>/dev/null | awk '{print $$1}' | grep -E '^/opt/(homebrew|local)/' | grep -v libLLVM); do \
+		name=$$(basename $$dep); \
+		gzip -9 -c $$dep > $(LLVM_DST_DARWIN)/$$name.gz; \
+		echo "  $$name.gz: $$(du -h $(LLVM_DST_DARWIN)/$$name.gz | cut -f1)"; \
+	done; \
+	echo "  opt.gz: $$(du -h $(LLVM_DST_DARWIN)/opt.gz | cut -f1)"; \
+	echo "  llc.gz: $$(du -h $(LLVM_DST_DARWIN)/llc.gz | cut -f1)"; \
+	echo "  lld.gz: $$(du -h $(LLVM_DST_DARWIN)/lld.gz | cut -f1)"; \
+	echo "  libLLVM.dylib.gz: $$(du -h $(LLVM_DST_DARWIN)/libLLVM.dylib.gz | cut -f1)"
+
 ifeq ($(UNAME),Linux)
 release: generate resources musl-crt llvm-bundle
 	@mkdir -p $(dir $(BINARY))
 	go build -tags embed_llvm -o $(BINARY) ./cmd/promise
 	@echo "Release binary: $$(du -h $(BINARY) | cut -f1) (self-contained)"
+endif
+
+ifeq ($(UNAME),Darwin)
+release: generate resources llvm-bundle-darwin
+	@mkdir -p $(dir $(BINARY))
+	go build -tags embed_llvm -o $(BINARY) ./cmd/promise
+	@echo "Release binary: $$(du -h $(BINARY) | cut -f1) (self-contained, requires macOS SDK)"
 endif
 
 install: build

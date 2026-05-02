@@ -53,7 +53,7 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 | Operator dispatch | `[]`, `[]=`, `[:]`, `[:]=` as method-dispatched operators | Done | [subscript-slice-operators.md](subscript-slice-operators.md) |
 | Naming conventions | PascalCase canonical names for all non-scalar types; lowercase sugar | Done | [standard-library.md](standard-library.md#naming-conventions) |
 | C binding | Extern ABI coercion (`extern.go`), C header generation (`headergen.go`) | Done (dormant — header gen implemented but not exposed via CLI; original use case obsolete after C runtime migration) | [c-binding-architecture.md](c-binding-architecture.md) |
-| Self-contained binary | Embed gzip-compressed LLVM tools (opt, llc, lld, libLLVM.so) via `go:embed` for release builds | Done (Phase 7f, Linux x86_64). macOS planned (see Near-term). | [runtime-architecture.md](runtime-architecture.md) |
+| Self-contained binary | Embed gzip-compressed LLVM tools via `go:embed` for release builds | Done (Phase 7f). Linux x86_64: fully static (musl). macOS arm64+amd64: embedded LLVM, requires Xcode CLT for SDK. | [runtime-architecture.md](runtime-architecture.md), [distribution.md](distribution.md#4-macos-notes) |
 | Distribution | Release binaries, install script, GitHub Actions CI/release workflows | Planned | [distribution.md](distribution.md) |
 | Windows support | Native MSVC ABI, Win32 PAL threading, lld-link, Windows SDK discovery | Phase W1 done (code). W2 pending (testing on Windows). | [windows-support.md](windows-support.md) |
 | Yield generators | `stream[T]` functions with `yield`, LLVM presplit coroutines, `for-in` consumption | Done | — |
@@ -764,7 +764,7 @@ Each check has three states: `[✓]` ok, `[!]` warning (works but suboptimal), `
 | Module cache | Directory exists, reachable git hosts (optional network check) |
 | `PROMISE_HOME` | If set, verifies it points to a valid install |
 | Java | Whether `java` is on PATH (development only — needed to regenerate the ANTLR parser) |
-| macOS: Xcode CLT | Whether `xcode-select -p` returns a valid path (macOS only). Will become obsolete once `ld64.lld` is embedded in the macOS binary. |
+| macOS: Xcode CLT | Whether `xcode-select -p` returns a valid path (macOS only). Required for macOS SDK sysroot even with embedded LLVM. |
 | PATH | Whether `~/.promise/bin` is on PATH |
 
 **Implementation notes:**
@@ -812,7 +812,8 @@ Test suite: 1554 native pass, 761 WASM pass (3 skip).
 | Work | Priority |
 |------|----------|
 | ~~Global build cache~~ — **Done.** `~/.promise/cache/build/` wired into `compileAndLinkSeparate()`. `PROMISE_HOME` override. | ~~High~~ Resolved |
-| Self-contained macOS binary: embed `opt`, `llc`, `ld64.lld`, `libLLVM.dylib` via `go:embed` for darwin-amd64 and darwin-arm64 release builds — same pattern as Linux (`llvm_linux_amd64.go` → add `llvm_darwin_amd64.go` + `llvm_darwin_arm64.go`). Eliminates the Xcode CLT requirement, making macOS fully self-contained like Linux. | High |
+| ~~Self-contained macOS binary~~ — **Done.** `llvm_darwin_arm64.go` + `llvm_darwin_amd64.go`, `make llvm-bundle-darwin`, `./build --release` on macOS. Embeds opt, llc, lld, libLLVM.dylib. Still requires Xcode CLT for macOS SDK sysroot. | ~~High~~ Resolved |
+| Fully self-contained macOS binary — Bundle macOS SDK stubs (`libSystem.tbd` + headers) so linking doesn't require Xcode CLT. Go ships its own linker and doesn't need system tools; we could embed the minimal SDK surface needed for `-lSystem`. Would make macOS release binary zero-dependency like Linux. | Medium |
 | CLI: `promise fmt` code formatter — Stage 10 | Medium |
 | Module system Phase 4 (catalog infrastructure) — Stage 9 | Medium |
 | Package manager (fetch, resolve, lock) — Stage 11 | Medium |

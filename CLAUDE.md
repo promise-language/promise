@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Promise is a statically-typed programming language with Dart-inspired syntax and Rust-inspired ownership semantics. The compiler is a single Go binary (`promise`) that uses ANTLR4 for parsing and targets LLVM IR (compiled via `opt` + `llc` + `ld.lld` on Linux, clang on other platforms).
+Promise is a statically-typed programming language with Dart-inspired syntax and Rust-inspired ownership semantics. The compiler is a single Go binary (`promise`) that uses ANTLR4 for parsing and targets LLVM IR (compiled via `opt` + `llc` + `ld.lld` on Linux, `opt` + `llc` + `ld64.lld` on macOS, clang on other platforms).
 
 **Primary goal**: Promise is designed for AI-agent efficiency — making it easy for LLMs to generate correct, self-contained programs in one shot or use them as tools. Every design decision should optimize for:
 - **Self-contained readability**: Looking at a single source file should be enough to understand with certainty what it does. Avoid hidden effects, implicit behaviors, and action-at-a-distance.
@@ -34,7 +34,7 @@ The following `make` targets run from `compiler/` and also output to `bin/promis
 
 ```bash
 make                  # download ANTLR4 JAR, generate parser, embed resources, build binary
-make release          # release build: embed LLVM tools (~61MB self-contained binary, Linux only)
+make release          # release build: embed LLVM tools (~61-71MB self-contained binary)
 make test             # run all Go tests (go test ./...)
 make generate         # regenerate ANTLR4 parser from grammar
 make resources        # copy std/ into embedded resources
@@ -133,7 +133,7 @@ Stress mode compiles once and re-runs binaries. Stable files are gradually suppr
 .pr source → ANTLR4 (grammar/) → AST (ast/) → Sema 4-pass (sema/) → Ownership (ownership/) → LLVM IR (codegen/) → opt+llc+lld → binary
 ```
 
-On Linux: `opt -O1` (coroutine lowering) → `llc -filetype=obj` → `ld.lld -static` (link with bundled musl CRT → fully static binaries). On macOS: `opt -O1` → `llc -filetype=obj` → system `ld` (or `ld64.lld`) with `-lSystem -syslibroot`. On other platforms (or `PROMISE_USE_CLANG=1`): `clang -O1`. Requires LLVM 22+. Release builds (`make release`) embed gzip-compressed LLVM tools in the binary (~61MB), extracted lazily to `~/.promise/cache/llvm/`.
+On Linux: `opt -O1` (coroutine lowering) → `llc -filetype=obj` → `ld.lld -static` (link with bundled musl CRT → fully static binaries). On macOS: `opt -O1` → `llc -filetype=obj` → `ld64.lld` with `-lSystem -syslibroot`. On other platforms (or `PROMISE_USE_CLANG=1`): `clang -O1`. Requires LLVM 22+. Release builds (`./build --release`) embed gzip-compressed LLVM tools in the binary (~61-71MB), extracted lazily to `~/.promise/cache/llvm/<platform>/`. Platform-specific embed files (`llvm_linux_amd64.go`, `llvm_darwin_arm64.go`, `llvm_darwin_amd64.go`) select the correct tools. On macOS, extracted Mach-O binaries are patched with `install_name_tool` (rpath + dylib references) and re-signed with `codesign`.
 
 Entry point: `cmd/promise/main.go` → `compileFrontend()` orchestrates parse → std merge → sema → ownership.
 

@@ -832,24 +832,37 @@ Validated: `promise test -stress 20 tests/concurrency/...` — 71 tests, 100% pa
 
 **Goal**: once `promise` is installed, it has zero external dependencies. No system LLVM, no Homebrew, no Xcode CLT (except macOS `-lSystem`). A fresh machine with the Promise tarball can compile and link.
 
-**Phase 7f (Done)**: LLVM tools are gzip-compressed and embedded in the Go binary via `go:embed` for release builds. The release binary is fully self-contained (~61MB on Linux x86_64).
+**Phase 7f (Done)**: LLVM tools are gzip-compressed and embedded in the Go binary via `go:embed` for release builds. Platform-specific embed files select the correct tools per OS/arch combination.
+
+**Supported platforms**:
+- **Linux x86_64**: Fully self-contained (~61MB). Embeds opt, llc, lld, libLLVM.so + musl CRT. Produces fully static binaries.
+- **macOS arm64 + amd64**: Self-contained (~71MB). Embeds opt, llc, lld, libLLVM.dylib + liblld*.dylib + transitive deps (libz3, libzstd). Requires Xcode CLT for macOS SDK sysroot (`-lSystem`).
 
 **Build modes**:
-- `make build` — dev build (~16MB), uses system LLVM tools
-- `make release` — release build (~61MB), embeds opt + llc + lld + libLLVM.so (gzip-compressed)
-- `./build --release` — same as `make release`
+- `make build` / `./build` — dev build (~14-16MB), uses system LLVM tools
+- `make release` / `./build --release` — release build, embeds LLVM tools (gzip-compressed)
 
-**Embedded LLVM tools** (Linux x86_64, gated by `-tags embed_llvm`):
-- `opt.gz` (76K), `llc.gz` (60K), `lld.gz` (2.1M), `libLLVM.so.gz` (44M)
-- Extracted lazily on first use to `~/.promise/cache/llvm/linux-amd64/`
+**Embedded LLVM tools** (gated by `-tags embed_llvm`):
+- Platform-specific embed files: `llvm_linux_amd64.go`, `llvm_darwin_arm64.go`, `llvm_darwin_amd64.go`
+- Fallback: `llvm_other.go` (build tag `!embed_llvm`) — no embedded tools
+- Each file defines: `embeddedLLVMFiles`, `llvmEmbedPrefix`, `llvmCacheSubdir`, `llvmLibEnvKey`
+- Extracted lazily on first use to `~/.promise/cache/llvm/<platform>/`
 - Symlinks created: `ld.lld → lld`, `ld64.lld → lld`, `lld-link → lld`, `wasm-ld → lld`
-- `LD_LIBRARY_PATH` set at exec time so tools find `libLLVM.so` in the cache dir
+- Library path env var set at exec time: `LD_LIBRARY_PATH` (Linux), `DYLD_LIBRARY_PATH` (macOS)
+
+**macOS Mach-O patching** (during extraction):
+- `install_name_tool -add_rpath @loader_path` — tools find dylibs in their own directory
+- `install_name_tool -change` — rewrites absolute Homebrew paths to `@rpath/<name>`
+- `install_name_tool -id @rpath/<name>` — patches dylib install names
+- `codesign --force --sign -` — ad-hoc re-signing after modification
+
+**`make llvm-bundle-darwin`** bundles from Homebrew: finds `llvm` and `lld` formulas separately, discovers transitive non-system deps via `otool -L`, gzip-compresses all files.
 
 **Tool discovery order** (implemented in `findLLVMTool()`):
 1. **Sibling directory**: `{promise_dir}/opt`, `{promise_dir}/llvm/opt` (install layout)
-2. **Env override**: `PROMISE_OPT`, `PROMISE_LLC`, `PROMISE_LLD` (for development/testing)
-3. **Embedded cache**: `~/.promise/cache/llvm/linux-amd64/` (extracted from embedded on first access)
-4. **Homebrew LLVM** (macOS): `/opt/homebrew/opt/llvm/bin`, `/usr/local/opt/llvm/bin`
+2. **Env override**: `PROMISE_OPT`, `PROMISE_LLC`, `PROMISE_LLD`, `PROMISE_LD64LLD` (for development/testing)
+3. **Embedded cache**: `~/.promise/cache/llvm/<platform>/` (extracted from embedded on first access)
+4. **Homebrew LLVM** (macOS): `/opt/homebrew/opt/llvm/bin`, `/usr/local/opt/llvm/bin`, `/opt/homebrew/opt/lld/bin`, `/usr/local/opt/lld/bin`
 5. **Versioned PATH**: `opt-25` down to `opt-22`, `llc-25` down to `llc-22`, etc.
 6. **Unversioned PATH**: `opt`, `llc`, `ld.lld`
 

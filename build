@@ -23,8 +23,18 @@ fi
 
 # Release build: bundle LLVM tools into the binary
 BUILD_TAGS=""
-if [ "${1:-}" = "--release" ] && [ "$(uname -s)" = "Linux" ]; then
-  make llvm-bundle --no-print-directory
+if [ "${1:-}" = "--release" ]; then
+  case "$(uname -s)" in
+    Linux)
+      make llvm-bundle --no-print-directory
+      ;;
+    Darwin)
+      make llvm-bundle-darwin --no-print-directory
+      ;;
+    *)
+      echo "WARNING: --release not supported on $(uname -s), building without embedded LLVM"
+      ;;
+  esac
   BUILD_TAGS="-tags embed_llvm"
 fi
 

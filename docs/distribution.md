@@ -1,6 +1,6 @@
 # Distribution & Installation
 
-> The self-contained binary model is implemented for Linux (amd64). macOS is partially implemented (binary is portable but requires Xcode Command Line Tools). Windows support is in progress — PAL threading, linker, and SDK discovery implemented; needs end-to-end testing (see `docs/windows-support.md`). Multi-epoch toolchain management (`promise sync`, shim) is described in `docs/module-system.md` Section 7.
+> The self-contained binary model is implemented for Linux (amd64) and macOS (arm64 + amd64). Linux embeds LLVM tools + musl CRT for fully static binaries. macOS embeds LLVM tools (opt, llc, lld, libLLVM.dylib) but still requires Xcode Command Line Tools for the macOS SDK (sysroot for `-lSystem`). Windows support is in progress — PAL threading, linker, and SDK discovery implemented; needs end-to-end testing (see `docs/windows-support.md`). Multi-epoch toolchain management (`promise sync`, shim) is described in `docs/module-system.md` Section 7.
 
 ---
 
@@ -59,10 +59,10 @@ chmod +x promise-linux-amd64
 ~/.promise/
   bin/
     promise          ← the binary (copied from the downloaded file)
-    llvm/            ← LLVM tools extracted from the binary (Linux)
+    llvm/            ← LLVM tools extracted from the binary (Linux + macOS)
   lib/
     std/             ← embedded standard library source
-    crt/             ← musl CRT objects (Linux)
+    crt/             ← musl CRT objects (Linux only)
 ```
 
 It then prints the PATH export line. Users add `~/.promise/bin` to their `PATH` once; all future `promise` invocations use the installed binary.
@@ -96,8 +96,8 @@ Each release publishes to **GitHub Releases** at `github.com/promise-lang/promis
 |--------|----------|
 | `promise-linux-amd64` | Linux x86_64, fully static (musl). Implemented. |
 | `promise-linux-arm64` | Linux ARM64. Planned. |
-| `promise-darwin-amd64` | macOS Intel. Needs Xcode CLT. Planned. |
-| `promise-darwin-arm64` | macOS Apple Silicon. Needs Xcode CLT. Planned. |
+| `promise-darwin-amd64` | macOS Intel. Needs Xcode CLT. Implemented. |
+| `promise-darwin-arm64` | macOS Apple Silicon. Needs Xcode CLT. Implemented. |
 | `promise-windows-amd64.exe` | Windows x86_64. Needs VS Build Tools. In progress. |
 
 Each release also includes a `SHA256SUMS` file. `scripts/install.sh` verifies the checksum before running `promise install`.
@@ -106,21 +106,36 @@ Each release also includes a `SHA256SUMS` file. `scripts/install.sh` verifies th
 
 ## 4. macOS Notes
 
-The macOS binary requires **Xcode Command Line Tools** for linking:
+The macOS release binary embeds LLVM tools (`opt`, `llc`, `lld`, `libLLVM.dylib`) using the same gzip + `go:embed` pattern as Linux. This eliminates the need for `brew install llvm`. However, the macOS SDK is still required for linking (provides `-lSystem`).
+
+**Requirement:** Install Xcode Command Line Tools:
 
 ```sh
 xcode-select --install
 ```
 
-This provides `ld` (the Mach-O linker). `opt` and `llc` are embedded in the binary (same as Linux). The error message when CLT is missing is:
+This provides the macOS SDK sysroot. The embedded `ld64.lld` (a symlink to the bundled `lld`) handles Mach-O linking — the system `ld` is not needed.
 
-```
-no Mach-O linker found
-  install Xcode CommandLineTools: xcode-select --install
-  or set PROMISE_USE_CLANG=1 to use clang
+**Build a release binary on macOS:**
+
+```sh
+# Requires: brew install llvm (22+) — used at build time to bundle tools
+./build --release
 ```
 
-**Planned:** embed `opt`, `llc`, `ld64.lld`, and `libLLVM.dylib` in the macOS release binary — the same gzip + `go:embed` pattern used on Linux (`llvm_linux_amd64.go`). This requires adding `llvm_darwin_amd64.go` and `llvm_darwin_arm64.go` with matching build tags, and extending `make llvm-bundle` to run on macOS. Once done, macOS will be fully self-contained with no Xcode CLT dependency, matching the Linux experience. Tracked in `docs/stages.md` (Near-term).
+This runs `make llvm-bundle-darwin`, which finds Homebrew LLVM (and separately the `lld` formula), gzip-compresses `opt`, `llc`, `lld`, `libLLVM.dylib`, all `liblld*.dylib` libraries, and any transitive non-system Homebrew dependencies (e.g., `libz3`, `libzstd`), then builds with `-tags embed_llvm`. Platform-specific embed files (`llvm_darwin_arm64.go` / `llvm_darwin_amd64.go`) include the compressed tools via `go:embed`.
+
+**Runtime extraction:** On first use, embedded tools are extracted to `~/.promise/cache/llvm/darwin-{arm64,amd64}/`. After extraction, Mach-O binaries are patched:
+1. `install_name_tool -add_rpath @loader_path` — so tools find dylibs in their own directory
+2. `install_name_tool -change` — rewrites absolute Homebrew paths (`/opt/homebrew/...`) to `@rpath/<name>`
+3. `install_name_tool -id @rpath/<name>` — patches dylib install names
+4. `codesign --force --sign -` — ad-hoc re-signing (required after Mach-O modification on macOS)
+
+`DYLD_LIBRARY_PATH` is set when running extracted tools so they can find `libLLVM.dylib` and transitive dependencies (e.g., `libz3`, `libzstd`).
+
+**Non-release builds** (dev builds without `--release`) continue to use Homebrew LLVM or system tools from PATH, same as before.
+
+**Planned: zero-dependency macOS binary.** The current macOS release binary still requires Xcode Command Line Tools for the macOS SDK sysroot (needed by `ld64.lld` for `-lSystem`). A future improvement could bundle the minimal SDK surface — `libSystem.tbd` stubs and essential headers — directly in the binary, similar to how Go ships its own linker and doesn't require system tools. This would make the macOS binary fully self-contained: download and run with no prerequisites.
 
 ---
 
@@ -332,10 +347,12 @@ jobs:
         with:
           path: compiler/tools/antlr-4.13.1-complete.jar
           key: antlr-4.13.1
-      # macOS release binary: compiler + stdlib embedded. LLVM tools NOT embedded yet
-      # (embed_llvm is Linux-only for now). Binary requires Xcode CLT at runtime.
-      - name: Build
-        run: ./build
+      - name: Install LLVM
+        run: brew install llvm
+      # macOS release binary: embeds LLVM tools (opt, llc, lld, libLLVM.dylib).
+      # Requires Xcode CLT at runtime for macOS SDK (sysroot).
+      - name: Build (release)
+        run: ./build --release
       - uses: actions/upload-artifact@v4
         with:
           name: promise-darwin-arm64
@@ -360,8 +377,10 @@ jobs:
         with:
           path: compiler/tools/antlr-4.13.1-complete.jar
           key: antlr-4.13.1
-      - name: Build
-        run: ./build
+      - name: Install LLVM
+        run: brew install llvm
+      - name: Build (release)
+        run: ./build --release
       - uses: actions/upload-artifact@v4
         with:
           name: promise-darwin-amd64
@@ -429,3 +448,4 @@ That's it. The tag push triggers the release workflow, which builds all platform
 |----------|---------|-------|
 | `linux-arm64` | Cross-compile + arm64 runner | Go cross-compiles fine. Musl CRT arm64 objects needed. `embed_llvm` needs arm64 LLVM tools bundled. |
 | `windows-amd64` | End-to-end testing on Windows | PAL threading, linker (lld-link), SDK discovery, `promise install` implemented. Needs testing on Windows machine, then add `build-windows-amd64` CI job on `windows-latest`. See `docs/windows-support.md`. |
+| macOS zero-dep | Bundle macOS SDK stubs | Currently requires Xcode CLT for `-lSystem` sysroot. Could embed minimal SDK surface (`libSystem.tbd` + headers) like Go embeds its own linker. Would make macOS binary fully self-contained (download and run, no prerequisites). |

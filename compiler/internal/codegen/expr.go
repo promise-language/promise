@@ -302,8 +302,183 @@ func (c *Compiler) convertToString(val value.Value, typ types.Type) value.Value 
 	case types.TypChar:
 		return c.block.NewCall(c.funcs["promise_char_to_string"], val)
 	default:
-		panic(fmt.Sprintf("codegen: cannot convert %s to string for interpolation", typ))
+		// User-defined type: call format(Writer ~w)! via Builder
+		if named.LookupMethod("format") == nil {
+			panic(fmt.Sprintf("codegen: type %s has no format method for interpolation", typ))
+		}
+		return c.callFormatToString(val, typ, named)
 	}
+}
+
+// callFormatToString creates a Builder, calls the type's format() method to write
+// into it, then returns the resulting string from Builder.to_string().
+func (c *Compiler) callFormatToString(val value.Value, typ types.Type, named *types.Named) value.Value {
+	// 1. Create a Builder instance
+	builderNamed := c.lookupNamedType("Builder")
+	layout := c.layouts[builderNamed]
+	if layout == nil {
+		panic("codegen: Builder type layout not found")
+	}
+	instanceStructType := layout.Instance.LLVMType
+	instancePtrType := layout.InstancePtrType
+
+	// Compute size via GEP-from-null trick
+	nullPtr := constant.NewNull(instancePtrType)
+	sizePtr := c.block.NewGetElementPtr(instanceStructType, nullPtr,
+		constant.NewInt(irtypes.I32, 1))
+	sizeRaw := c.block.NewPtrToInt(sizePtr, c.ptrIntType())
+	var size value.Value = sizeRaw
+	if c.isWasm {
+		size = c.block.NewZExt(sizeRaw, irtypes.I64)
+	}
+
+	rawPtr := c.block.NewCall(c.palAlloc, size)
+	typedPtr := c.block.NewBitCast(rawPtr, instancePtrType)
+
+	// Store type info pointer in _variant slot (field 0)
+	variantFieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	variantPtrType := layout.Instance.Fields[0].LLVMType.(*irtypes.PointerType)
+	if tiGlobal := c.typeInfoGlobals[builderNamed]; tiGlobal != nil {
+		c.block.NewStore(c.block.NewBitCast(tiGlobal, variantPtrType), variantFieldPtr)
+	} else {
+		c.block.NewStore(constant.NewNull(variantPtrType), variantFieldPtr)
+	}
+
+	// Zero-init remaining fields before calling new()
+	for _, f := range builderNamed.AllFields() {
+		fieldIdx, ok := layout.InstanceFieldIndex[f.Name()]
+		if !ok {
+			continue
+		}
+		fieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+		c.block.NewStore(c.zeroValue(layout.Instance.Fields[fieldIdx].LLVMType), fieldPtr)
+	}
+
+	// Call Builder.new(this, 16) — default capacity
+	newFn := c.funcs["Builder.new"]
+	c.block.NewCall(newFn, rawPtr, constant.NewInt(irtypes.I64, 16))
+
+	// 2. Create Writer value struct {vtable_ptr, instance_ptr} from Builder
+	writerVtable := c.getInterpBuilderWriterVtable()
+	writerVal := c.block.NewInsertValue(
+		constant.NewZeroInitializer(userValueType()),
+		constant.NewBitCast(writerVtable, irtypes.I8Ptr), 0)
+	writerVal = c.block.NewInsertValue(writerVal, rawPtr, 1)
+
+	// 3. Get format method receiver from the user type value
+	var receiver value.Value
+	if named.IsValueType() {
+		receiver = c.valueTypeReceiverPtr(val, typ)
+	} else if _, ok := val.Type().(*irtypes.StructType); ok {
+		// Value struct {vtable, instance} — extract instance ptr
+		receiver = c.extractInstancePtr(val)
+	} else {
+		// Already i8* (this reference in a method body)
+		receiver = val
+	}
+
+	// 4. Call TypeName.format(receiver, writer) — failable void returns {i1, i8*}
+	formatResult := c.callFormatMethod(receiver, writerVal, val, named, typ)
+
+	// 5. Handle failable result: panic on error
+	tag := c.block.NewExtractValue(formatResult, 0)
+	okBlock := c.newBlock("interp.format.ok")
+	errBlock := c.newBlock("interp.format.err")
+	c.block.NewCondBr(tag, errBlock, okBlock)
+
+	c.block = errBlock
+	errPtr := c.block.NewExtractValue(formatResult, 1)
+	c.block.NewCall(c.funcs["promise_panic"], errPtr)
+	c.block.NewUnreachable()
+
+	c.block = okBlock
+
+	// 6. Call Builder.to_string(builder_ptr) → string (i8*)
+	toStringFn := c.funcs["Builder.to_string"]
+	return c.block.NewCall(toStringFn, rawPtr)
+}
+
+// callFormatMethod dispatches the format(Writer ~w)! call on the user type,
+// using virtual dispatch when the type has children, direct dispatch otherwise.
+func (c *Compiler) callFormatMethod(receiver, writerVal, originalVal value.Value,
+	named *types.Named, typ types.Type) value.Value {
+
+	// Failable void result type: {i1, i8*}
+	resultType := irtypes.NewStruct(irtypes.I1, irtypes.I8Ptr)
+
+	if c.needsVtable(named) {
+		// Virtual dispatch through vtable
+		slotIndex := named.VirtualMethodIndex("format", false)
+		if slotIndex < 0 {
+			panic(fmt.Sprintf("codegen: format method not in vtable for %s", named))
+		}
+
+		// Get vtable pointer from the original value
+		var vtableRaw value.Value
+		if _, ok := originalVal.Type().(*irtypes.StructType); ok {
+			vtableRaw = c.extractVtablePtr(originalVal)
+		} else {
+			// this reference (i8*) — load vtable from variant→typeinfo chain
+			variantPtr := c.loadVariantPtr(originalVal)
+			typeinfoStruct := irtypes.NewStruct(irtypes.I8Ptr)
+			typeinfoPtr := c.block.NewBitCast(variantPtr, irtypes.NewPointer(typeinfoStruct))
+			vtableFieldPtr := c.block.NewGetElementPtr(typeinfoStruct, typeinfoPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+			vtableRaw = c.block.NewLoad(irtypes.I8Ptr, vtableFieldPtr)
+		}
+
+		vtablePtr := c.block.NewBitCast(vtableRaw, irtypes.NewPointer(irtypes.I8Ptr))
+		fnSlotPtr := c.block.NewGetElementPtr(irtypes.I8Ptr, vtablePtr,
+			constant.NewInt(irtypes.I32, int64(slotIndex)))
+		fnRaw := c.block.NewLoad(irtypes.I8Ptr, fnSlotPtr)
+		fnType := irtypes.NewFunc(resultType, irtypes.I8Ptr, userValueType())
+		fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(fnType))
+		return c.block.NewCall(fnTyped, receiver, writerVal)
+	}
+
+	// Direct dispatch
+	mangledName := mangleMethodName(c.resolveTypeName(typ), "format", false)
+	fn, ok := c.funcs[mangledName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undeclared method %s for interpolation", mangledName))
+	}
+	return c.block.NewCall(fn, receiver, writerVal)
+}
+
+// getInterpBuilderWriterVtable returns the Writer vtable global for Builder,
+// creating it lazily on first use. The vtable maps Writer's virtual methods
+// (write, write_string) to Builder's implementations.
+func (c *Compiler) getInterpBuilderWriterVtable() *ir.Global {
+	if c.interpBuilderWriterVtable != nil {
+		return c.interpBuilderWriterVtable
+	}
+
+	// Look up Writer to determine vtable slot ordering
+	writerNamed := c.lookupNamedType("Writer")
+	if writerNamed == nil {
+		panic("codegen: Writer type not found for interpolation")
+	}
+	methods := writerNamed.AllVirtualMethods()
+
+	// Build vtable entries mapping Writer methods → Builder implementations
+	var entries []constant.Constant
+	for _, m := range methods {
+		mangledName := mangleMethodName("Builder", m.Name(), m.IsSetter())
+		fn, ok := c.funcs[mangledName]
+		if !ok {
+			panic(fmt.Sprintf("codegen: Builder.%s not found for Writer vtable", m.Name()))
+		}
+		entries = append(entries, constant.NewBitCast(fn, irtypes.I8Ptr))
+	}
+
+	arrayType := irtypes.NewArray(uint64(len(entries)), irtypes.I8Ptr)
+	init := constant.NewArray(arrayType, entries...)
+	global := c.module.NewGlobalDef("__interp_builder_writer_vtable", init)
+	global.Immutable = true
+	c.interpBuilderWriterVtable = global
+	return global
 }
 
 // hasInterpolation checks if a string literal contains any interpolation parts.

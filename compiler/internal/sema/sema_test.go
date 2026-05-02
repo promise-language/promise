@@ -9587,3 +9587,50 @@ func TestMethodGenericOnGenericChildType(t *testing.T) {
 		}
 	`))
 }
+
+// ============================================================
+// String interpolation — Format validation
+// ============================================================
+
+func TestStringInterpFormatTypeOK(t *testing.T) {
+	checkOK(t, `
+		type Foo {
+			int x;
+			format(Writer ~w)! { w.write_string("foo"); }
+		}
+		test() { Foo f = Foo(x: 1); string s = "{f}"; }
+	`)
+}
+
+func TestStringInterpMissingFormat(t *testing.T) {
+	errs := checkErrs(t, `
+		type Bar { int x; }
+		test() { Bar b = Bar(x: 1); string s = "{b}"; }
+	`)
+	expectError(t, errs, "does not implement Format")
+}
+
+func TestStringInterpOptionalFormatType(t *testing.T) {
+	checkOK(t, `
+		type Qux {
+			int v;
+			format(Writer ~w)! { w.write_string("qux"); }
+		}
+		test() { Qux? q = Qux(v: 1); string s = "{q}"; }
+	`)
+}
+
+func TestStringInterpPrimitivesStillWork(t *testing.T) {
+	checkOK(t, `
+		test() {
+			int x = 42;
+			string s = "{x}";
+			f64 f = 3.14;
+			string s2 = "{f}";
+			bool b = true;
+			string s3 = "{b}";
+			char c = 'A';
+			string s4 = "{c}";
+		}
+	`)
+}

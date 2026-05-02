@@ -9027,6 +9027,40 @@ func TestStringInterpolationOptionalString(t *testing.T) {
 	assertContains(t, ir, "interp.none")
 }
 
+// --- User type interpolation codegen tests ---
+
+func TestStringInterpolationUserTypeDirect(t *testing.T) {
+	ir := generateIR(t, `
+		type Foo {
+			int x;
+			format(Writer ~w)! { w.write_string("foo"); }
+		}
+		main() { Foo f = Foo(x: 1); string s = "{f}"; }
+	`)
+	// Should call Foo.format and Builder.to_string
+	assertContains(t, ir, "Foo.format")
+	assertContains(t, ir, "Builder.to_string")
+	assertContains(t, ir, "interp.format.ok")
+}
+
+func TestStringInterpolationUserTypeVtable(t *testing.T) {
+	ir := generateIR(t, `
+		type Shape {
+			format(Writer ~w)! { w.write_string("shape"); }
+		}
+		type Circle is Shape {
+			format(Writer ~w)! { w.write_string("circle"); }
+		}
+		main() {
+			Shape s = Circle();
+			string x = "{s}";
+		}
+	`)
+	// Virtual dispatch: should have vtable load + indirect call, not direct Shape.format
+	assertContains(t, ir, "__interp_builder_writer_vtable")
+	assertContains(t, ir, "interp.format.ok")
+}
+
 // --- Optional narrowing codegen tests ---
 
 func TestOptionalTruthinessNarrowingCodegen(t *testing.T) {

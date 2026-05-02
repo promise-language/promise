@@ -2,9 +2,9 @@
 
 test_basic() `test {
     Builder b = Builder();
-    b.write_string("hello");
-    b.write_string(" ");
-    b.write_string("world");
+    b.write_string("hello")!;
+    b.write_string(" ")!;
+    b.write_string("world")!;
     assert(b.to_string() == "hello world", "basic write_string");
 }
 
@@ -16,13 +16,13 @@ test_empty() `test {
 test_len() `test {
     Builder b = Builder();
     assert(b.len == 0, "initial len 0");
-    b.write_string("hello");
+    b.write_string("hello")!;
     assert(b.len == 5, "after write len 5");
 }
 
 test_clear() `test {
     Builder b = Builder();
-    b.write_string("hello");
+    b.write_string("hello")!;
     assert(b.len == 5, "before clear");
     b.clear();
     assert(b.len == 0, "after clear");
@@ -31,13 +31,13 @@ test_clear() `test {
 test_write_bytes() `test {
     Builder b = Builder();
     u8[] data = "ABC".bytes();
-    b.write(data);
+    b.write(data)!;
     assert(b.to_string() == "ABC", "write bytes");
 }
 
 test_capacity() `test {
     Builder b = Builder(capacity: 64);
-    b.write_string("hello");
+    b.write_string("hello")!;
     assert(b.to_string() == "hello", "with capacity");
 }
 
@@ -45,7 +45,7 @@ test_multiple_writes() `test {
     Builder b = Builder();
     int i = 0;
     while i < 10 {
-        b.write_string("x");
+        b.write_string("x")!;
         i = i + 1;
     }
     assert(b.to_string() == "xxxxxxxxxx", "10 x's");
@@ -54,17 +54,17 @@ test_multiple_writes() `test {
 
 test_clear_then_reuse() `test {
     Builder b = Builder();
-    b.write_string("first");
+    b.write_string("first")!;
     b.clear();
-    b.write_string("second");
+    b.write_string("second")!;
     assert(b.to_string() == "second", "reuse after clear");
 }
 
 test_write_returns_count() `test {
     Builder b = Builder();
-    int n = b.write_string("hello");
+    int n = b.write_string("hello")!;
     assert(n == 5, "write_string returns 5");
     u8[] data = "AB".bytes();
-    int m = b.write(data);
+    int m = b.write(data)!;
     assert(m == 2, "write returns 2");
 }

@@ -106,10 +106,11 @@ type Compiler struct {
 	typeInfoGlobals map[*types.Named]*ir.Global
 
 	// VTable state
-	hasChildren   map[*types.Named]bool        // true if any type declares `is ThisType`
-	vtableGlobals map[*types.Named]*ir.Global  // type → @promise_vtable_TypeName
-	viewVtables   map[viewVtableKey]*ir.Global // (concrete, view) → view-specific vtable
-	valueTypeRTTI map[*types.Named]*ir.Global  // value type → global RTTI instance (field 1 of value struct)
+	hasChildren               map[*types.Named]bool        // true if any type declares `is ThisType`
+	vtableGlobals             map[*types.Named]*ir.Global  // type → @promise_vtable_TypeName
+	viewVtables               map[viewVtableKey]*ir.Global // (concrete, view) → view-specific vtable
+	valueTypeRTTI             map[*types.Named]*ir.Global  // value type → global RTTI instance (field 1 of value struct)
+	interpBuilderWriterVtable *ir.Global                   // lazy: Builder→Writer vtable for string interpolation
 
 	// Scope cleanup state: stack of active bindings for automatic close()/drop() at scope exit
 	scopeBindings  []scopeBinding

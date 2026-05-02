@@ -256,7 +256,7 @@ String type codegen: representation, literals, concatenation, equality, extern A
 - **C runtime** (`runtime_string.c`): `promise_string_new` (malloc + memcpy), `promise_string_concat`, `promise_string_eq`, `promise_print_string` (fwrite). No null terminator — uses `len` field exclusively.
 - **Header generation**: String layout always emitted (built-in type). Instance struct uses C99 flexible array member `char data[]`.
 - **Scope**: Literals, variables, concatenation (`+`), equality (`==`, `!=`), extern passing/returning, empty strings.
-- **Deferred**: Methods (`.len`, `.contains`, etc.), slicing, Unicode normalization. String interpolation completed in Stage 8h.
+- **Deferred**: Slicing, Unicode normalization. Methods (`.len`, `.contains`), string interpolation completed in later stages.
 
 ## Stage 8c — User Types (Done)
 
@@ -379,7 +379,7 @@ Codegen for container types (tuples, optionals, slices, maps) and capturing lamb
 - **Lambda ownership**: Move captures mark the variable as `Moved` in the enclosing scope. Captured variables are `Owned` inside the lambda body. Copy captures leave the original variable usable.
 - **Intrinsics** (`compiler.go`): ~~7 new map runtime functions declared in `declareIntrinsics`~~ (superseded by self-hosted `std/map.pr`). `lambdaCounter` and `targetType` fields added to Compiler.
 - **Scope**: Tuple literals/destructure/return, optional none/some/wrapping/elvis, array literals, slice/array indexing (read/write/compound), for-in over slices/arrays/maps, map literals/indexing/assignment, capturing lambdas (expression/block body, indirect calls, copy/move captures, nested capture propagation, env allocation/cleanup, named function reference thunks).
-- **Deferred**: Slice growth (`.push()`), container methods (`.contains`), `llvmTypeSize` struct alignment (current implementation sums without padding — correct for primitive elements, under-allocates for struct-typed slice elements). String interpolation, if-unwrap/while-unwrap, optional chaining, and unsafe blocks completed in Stage 8h. Container `.len` completed in Stage 8i.
+- **Deferred**: ~~Slice growth (`.push()`)~~ done (Vector.push). ~~Container methods (`.contains`)~~ done (Vector.contains, string.contains). ~~`llvmTypeSize` struct alignment~~ fixed (`llvmTypeSizeWithPtr` now handles padding). String interpolation, if-unwrap/while-unwrap, optional chaining, and unsafe blocks completed in Stage 8h. Container `.len` completed in Stage 8i.
 - **Fixed-size arrays** (`T[N]`): Stack-allocated `[N x T]` LLVM array type. Hint-based literal inference: `int[3] x = [1,2,3]` types the literal as `*types.Array`, bare `[1,2,3]` remains Vector. `genFixedArrayLit` allocas `[N x T]` and stores elements via GEP. `genArrayIndex`/`genArrayIndexAssign` emit bounds check (`icmp ult idx, N`) and GEP into the array. `.len` returns compile-time constant. `genForInArray` iterates with constant-bound loop. `genArrayBasePtr` returns alloca for identifiers, `genFieldPtr` for struct field access (MemberExpr), temp alloca for computed expressions. Copy semantics: arrays of copy-type elements are copy. Element count mismatch (`int[3] x = [1,2]`) is a sema error. Mutating vector methods (push/pop/remove) rejected on fixed arrays.
 
 ## Stage 8h — Optional Patterns, String Interpolation & Expression Completeness (Done)
@@ -400,7 +400,7 @@ Codegen for if-unwrap, while-unwrap, optional chaining, string interpolation, an
   - **Intrinsics**: 14 functions defined as codegen LLVM IR in `declareIntrinsics`: `promise_string_new`, `promise_string_concat`, 5 conversion functions (`bool`, `int`, `uint`, `f64`, `char` to string), `promise_vector_with_capacity`, `promise_vector_push`, `promise_vector_pop`, `promise_string_trim`, `promise_string_split`, `promise_string_next_char`, `promise_type_is`.
 - **Unsafe blocks**: `genUnsafeExpr` trivially generates block contents. Ownership analysis handles the "unsafe" semantics, not codegen.
 - **Scope**: If-unwrap (with/without else), while-unwrap (with break/continue), optional chaining on user type fields, string interpolation with identifiers/literals/expressions/multiple parts, unsafe blocks.
-- **Deferred**: `is`/`as` expressions (need RTTI), generators (`yield`), container methods (`.push`, `.pop`, `.contains`), user type `toString()` for interpolation. Container `.len` completed in Stage 8i. `go`/`<-task` concurrency completed in Phase 5a. `channel[T]` completed in Phase 5b.
+- **All former deferrals resolved**: `is`/`as` expressions completed in Stage 8k. Generators (`yield`) completed in Phase 7c. Container methods (`.push`, `.pop`, `.contains`) completed. Container `.len` completed in Stage 8i. `go`/`<-task` concurrency completed in Phase 5a. `channel[T]` completed in Phase 5b. User type interpolation via `format(Writer ~w)!` now implemented.
 
 ## Stage 8i — Char Literals, Container `.len`, String Iteration & Map Compound Assignment (Done)
 
@@ -805,7 +805,7 @@ Dependency fetching and resolution.
 
 The compiler pipeline (Stages 1-8p) is complete. Runtime is fully codegen-emitted LLVM IR — no C files remain. All major cross-cutting features are done: M:N scheduler (Phase 5c), WASM target (Phases 4b/5d/7a), yield generators, structural interfaces, operator dispatch, naming conventions, pure value types, documentation system (Phase 1), module system (Phase 3 done + identity redesign), stdlib expansion (math, sort, set, random catalog modules), Format/Parse infrastructure (Writer, Reader, Builder, Scanner, `to_string()`, `format(Writer ~w)!` on all primitives, `int/bool/uint/f64.parse`, `string.from_bytes`, `Vector.filled`), time measurement (Duration, Instant, sleep), and extended I/O (Closer, write_line). String pad_left/pad_right methods. Strings module `join` uses variadic params.
 
-Test suite: 1068+ native pass, 761 WASM pass (3 skip).
+Test suite: 1554 native pass, 761 WASM pass (3 skip).
 
 ### Near-term: Compiler Infrastructure
 
@@ -836,7 +836,7 @@ Test suite: 1068+ native pass, 761 WASM pass (3 skip).
 | Generic type RTTI | — | Low |
 | Value type structural interface coercion (stack boxing) | — | Low |
 | ~~Generic value types~~ | — | ~~Done~~ |
-| User type `format(Writer ~w)` for interpolation (desugar `"${x}"` to `x.format(~builder)`) | — | Low |
+| ~~User type `format(Writer ~w)` for interpolation (desugar `"{x}"` to `x.format(~builder)`)~~ | — | ~~Low~~ Done |
 | Type argument inference | — | Low |
 
 ### WASM remaining work
@@ -879,7 +879,7 @@ Known gaps and improvements deferred from completed stages.
 | ~~PHI nodes not grouped in failable destructuring~~ — **Fixed.** `genFailableDestructure` interleaved PHI nodes with alloca/store in the merge block. LLVM requires all PHIs at block top. Reordered to emit both PHIs first, then stores. Affected `(val, err) := failable()` patterns. | 8e | ~~Medium~~ Resolved |
 | ~~Non-deterministic scope iteration~~ — **Fixed.** Codegen iterated `info.Scopes` (Go map) for type/variable lookups, causing 50/50 test failures due to Go map randomization. Added `ScopeOrder []*types.Scope` to `Info` — insertion-ordered slice appended in `openScope()` and `Check()`. Replaced all 7 `range info.Scopes` sites in codegen with `range info.ScopeOrder`. Also added `StdScope` check in `resolveTypeRefToType` for std-declared types. | 9 | ~~Medium~~ Resolved |
 | ~~Dynamic allocas in loop body cause stack overflow~~ — **Fixed.** Temporary allocas in `genVectorMethodCall` (push/pop/contains), `valueTypeReceiverPtr`, and `genExternCall` (sret + args) used `c.block.NewAlloca()`, placing them in the current basic block. Inside loops, each iteration allocated new stack space that was never freed until function return, overflowing the 2MB thread stack at ~131K iterations. Changed to `c.createEntryAlloca()` which places allocas in the function entry block (allocated once, reused across iterations). Regression tests at 200K–10M iterations in `tests/std/test_vector_advanced.pr`. | 5c | ~~High~~ Resolved |
-| Pre-existing failable `?` handler phi node type mismatch — when using `? e { ... }` handler on method calls, the phi node in the merge block has a type mismatch between the success path (value type) and the handler path (recovery value). Affects all methods, not just generic ones. Discovered during method generics work. | 8k | High |
+| ~~Pre-existing failable `?` handler phi node type mismatch~~ — **Verified — not reproducible.** 10 e2e tests added in `test_error_handler_phi.pr` covering value-producing handlers (no return), method calls, user types. All pass. | 8k | ~~High~~ Resolved |
 
 ### Codegen Gaps
 
@@ -902,7 +902,7 @@ Known gaps and improvements deferred from completed stages.
 | Non-instance field placements: mixed `value`+instance, `variant`/`type` fields, `global`/`mono` data placement | 8c | Low |
 | Value type structural interface coercion (stack boxing) | 8p | Low |
 | ~~Generic value types~~ — **Done.** `computeMonoValueTypeLayout` in `mono.go`. `Range[T]` is the first generic value type. | 8p | ~~Low~~ Resolved |
-| User type `format(Writer ~w)` for interpolation (desugar `"${x}"` to `x.format(~builder)`) | 8h | Low |
+| ~~User type `format(Writer ~w)` for interpolation (desugar `"{x}"` to `x.format(~builder)`)~~ — **Done.** User-defined types implementing `format(Writer ~w)!` now work in `{}` interpolation. Compiler creates a Builder, calls `format(~builder)!`, and converts to string via `Builder.to_string()`. Both direct dispatch and vtable dispatch (polymorphic) supported. Value types also supported. | 8h | ~~Low~~ Resolved |
 | `yield*` delegate (forward all values from sub-iterator) | Generators | Medium |
 | Failable generators (`stream[T]!` with error propagation through yield) | Generators | Low |
 | Stored generator values (first-class generator variables outside for-in) | Generators | Low |

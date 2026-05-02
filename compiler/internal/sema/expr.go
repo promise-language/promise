@@ -193,6 +193,7 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 		for _, part := range e.Parts {
 			if interp, ok := part.(ast.StringInterp); ok && interp.Expr != nil {
 				c.checkExpr(interp.Expr)
+				c.validateInterpolationType(c.info.Types[interp.Expr], interp.Expr)
 			}
 		}
 		typ = types.TypString
@@ -2348,6 +2349,67 @@ func isObjectExported(obj types.Object) bool {
 		case *types.Enum:
 			return t.IsExported()
 		}
+	}
+	return false
+}
+
+// validateInterpolationType checks that a type used in string interpolation
+// can be converted to a string. Primitives are handled by built-in codegen;
+// user types must implement the Format structural interface (have a format method).
+func (c *Checker) validateInterpolationType(typ types.Type, node ast.Expr) {
+	if typ == nil {
+		return
+	}
+	// Unwrap optional layers
+	inner := typ
+	for {
+		if opt, ok := inner.(*types.Optional); ok {
+			inner = opt.Elem()
+		} else {
+			break
+		}
+	}
+	named := semaExtractNamed(inner)
+	if named == nil {
+		c.errorf(node.Pos(), "type %s cannot be used in string interpolation", inner)
+		return
+	}
+	// Primitives and string are handled by built-in codegen conversions
+	if isPrimitiveOrString(named) {
+		return
+	}
+	// User types must have a format() method (Format structural interface)
+	if named.LookupMethod("format") != nil {
+		return
+	}
+	c.errorf(node.Pos(), "type %s cannot be used in string interpolation (does not implement Format)", named)
+}
+
+// semaExtractNamed unwraps Instance/SharedRef/MutRef to get the underlying *Named type.
+func semaExtractNamed(typ types.Type) *types.Named {
+	switch t := typ.(type) {
+	case *types.Named:
+		return t
+	case *types.Instance:
+		if n, ok := t.Origin().(*types.Named); ok {
+			return n
+		}
+	case *types.SharedRef:
+		return semaExtractNamed(t.Elem())
+	case *types.MutRef:
+		return semaExtractNamed(t.Elem())
+	}
+	return nil
+}
+
+// isPrimitiveOrString returns true for built-in scalar types and string,
+// which have hardcoded string conversion in codegen.
+func isPrimitiveOrString(n *types.Named) bool {
+	switch n {
+	case types.TypInt, types.TypI8, types.TypI16, types.TypI32, types.TypI64,
+		types.TypUint, types.TypU8, types.TypU16, types.TypU32, types.TypU64,
+		types.TypF32, types.TypF64, types.TypBool, types.TypChar, types.TypString:
+		return true
 	}
 	return false
 }

@@ -336,3 +336,270 @@ test_mixed_interpolation() `test {
   string name = "world";
   assert("hello {name}, x={x}" == "hello world, x=42", "mixed interpolation");
 }
+
+// Escaped braces — \{ produces a literal { without triggering interpolation
+test_escaped_brace() `test {
+  string s = "literal \{a} here";
+  assert(s == "literal \{a} here", "escaped brace not interpolated");
+}
+
+test_escaped_brace_mixed() `test {
+  int x = 42;
+  string s = "\{x} is not {x}";
+  assert(s == "\{x} is not 42", "escaped vs real interpolation");
+}
+
+test_escaped_brace_at_start() `test {
+  string s = "\{start}";
+  assert(s == "\{start}", "escaped brace at string start");
+}
+
+test_multiple_escaped_braces() `test {
+  string s = "\{a} and \{b}";
+  assert(s == "\{a} and \{b}", "multiple escaped braces");
+}
+
+test_escaped_adjacent_to_real() `test {
+  int x = 5;
+  string s = "\{x}={x}";
+  assert(s == "\{x}=5", "escaped then real interpolation adjacent");
+}
+
+// --- Small integer types ---
+
+test_i8_interp() `test {
+  i8 x = 127;
+  assert("{x}" == "127", "i8 max");
+  i8 y = -128;
+  assert("{y}" == "-128", "i8 min");
+}
+
+test_i16_interp() `test {
+  i16 x = 32767;
+  assert("{x}" == "32767", "i16 max");
+  i16 y = -32768;
+  assert("{y}" == "-32768", "i16 min");
+}
+
+test_i32_interp() `test {
+  i32 x = 2147483647;
+  assert("{x}" == "2147483647", "i32 max");
+  i32 y = -2147483648;
+  assert("{y}" == "-2147483648", "i32 min");
+}
+
+test_i64_interp() `test {
+  i64 x = 9223372036854775807;
+  assert("{x}" == "9223372036854775807", "i64 max");
+}
+
+test_u8_interp() `test {
+  u8 x = 0;
+  assert("{x}" == "0", "u8 zero");
+  u8 y = 255;
+  assert("{y}" == "255", "u8 max");
+}
+
+test_u16_interp() `test {
+  u16 x = 65535;
+  assert("{x}" == "65535", "u16 max");
+}
+
+test_u32_interp() `test {
+  u32 x = 4294967295;
+  assert("{x}" == "4294967295", "u32 max");
+}
+
+test_u64_interp() `test {
+  u64 x = 18446744073709551615;
+  assert("{x}" == "18446744073709551615", "u64 max");
+}
+
+// --- Optional primitive types ---
+
+test_optional_int_some() `test {
+  int? x = 42;
+  assert("{x}" == "42", "optional int some");
+}
+
+test_optional_int_none() `test {
+  int? x = none;
+  assert("{x}" == "none", "optional int none");
+}
+
+test_optional_bool_some() `test {
+  bool? b = true;
+  assert("{b}" == "true", "optional bool some");
+}
+
+test_optional_bool_none() `test {
+  bool? b = none;
+  assert("{b}" == "none", "optional bool none");
+}
+
+test_optional_f64_some() `test {
+  f64? x = 3.14;
+  assert("{x}" == "3.14", "optional f64 some");
+}
+
+test_optional_f64_none() `test {
+  f64? x = none;
+  assert("{x}" == "none", "optional f64 none");
+}
+
+test_optional_string_some() `test {
+  string? s = "hi";
+  assert("{s}" == "hi", "optional string some");
+}
+
+test_optional_string_none() `test {
+  string? s = none;
+  assert("{s}" == "none", "optional string none");
+}
+
+test_optional_char_some() `test {
+  char? c = 'A';
+  assert("{c}" == "A", "optional char some");
+}
+
+test_optional_char_none() `test {
+  char? c = none;
+  assert("{c}" == "none", "optional char none");
+}
+
+test_optional_u8_some() `test {
+  u8 v = 255;
+  u8? x = v;
+  assert("{x}" == "255", "optional u8 some");
+}
+
+test_optional_u8_none() `test {
+  u8? x = none;
+  assert("{x}" == "none", "optional u8 none");
+}
+
+test_optional_i32_some() `test {
+  i32 v = -100;
+  i32? x = v;
+  assert("{x}" == "-100", "optional i32 some");
+}
+
+test_optional_i32_none() `test {
+  i32? x = none;
+  assert("{x}" == "none", "optional i32 none");
+}
+
+// --- Expressions inside interpolation ---
+
+test_interp_subtraction() `test {
+  int x = 10;
+  assert("{x - 3}" == "7", "subtraction in interp");
+}
+
+test_interp_division() `test {
+  int x = 20;
+  assert("{x / 4}" == "5", "division in interp");
+}
+
+test_interp_comparison_true() `test {
+  int x = 10;
+  assert("{x > 5}" == "true", "comparison true");
+}
+
+test_interp_comparison_false() `test {
+  int x = 3;
+  assert("{x > 5}" == "false", "comparison false");
+}
+
+test_interp_field_access() `test {
+  Duration d = Duration.from_secs(5);
+  assert("{d.nanos}" == "5000000000", "field access in interp");
+}
+
+add_nums(int a, int b) int { return a + b; }
+
+test_interp_func_call() `test {
+  assert("{add_nums(3, 4)}" == "7", "func call in interp");
+}
+
+test_interp_method_call() `test {
+  string s = "HELLO";
+  assert("{s.to_lower()}" == "hello", "method call in interp");
+}
+
+test_interp_chained() `test {
+  int x = 10;
+  int y = 20;
+  assert("{x + y * 2}" == "50", "chained arithmetic in interp");
+}
+
+// --- Adjacent interpolation segments ---
+
+test_adjacent_two() `test {
+  int a = 1;
+  int b = 2;
+  assert("{a}{b}" == "12", "two adjacent interps");
+}
+
+test_adjacent_three() `test {
+  int a = 1;
+  int b = 2;
+  int c = 3;
+  assert("{a}{b}{c}" == "123", "three adjacent interps");
+}
+
+test_adjacent_mixed_types() `test {
+  int n = 42;
+  bool b = true;
+  string s = "hi";
+  assert("{n}{b}{s}" == "42truehi", "adjacent mixed types");
+}
+
+test_alternating_text_interp() `test {
+  int x = 5;
+  assert("a{x}b{x}c{x}d" == "a5b5c5d", "alternating text and interp");
+}
+
+// --- Interpolation positions ---
+
+test_interp_only() `test {
+  int x = 42;
+  assert("{x}" == "42", "interpolation only");
+}
+
+test_interp_at_start() `test {
+  int x = 42;
+  assert("{x} end" == "42 end", "interp at start");
+}
+
+test_interp_at_end() `test {
+  int x = 42;
+  assert("start {x}" == "start 42", "interp at end");
+}
+
+test_interp_in_middle() `test {
+  int x = 42;
+  assert("start {x} end" == "start 42 end", "interp in middle");
+}
+
+// --- Empty and edge cases ---
+
+test_empty_string_no_interp() `test {
+  string s = "";
+  assert(s == "", "empty string no interp");
+}
+
+test_string_var_interp() `test {
+  string name = "world";
+  assert("{name}" == "world", "string var in interp");
+}
+
+test_empty_string_var_interp() `test {
+  string s = "";
+  assert("{s}" == "", "empty string var in interp");
+}
+
+test_multiple_same_var() `test {
+  int x = 7;
+  assert("{x}{x}{x}" == "777", "same var three times");
+}

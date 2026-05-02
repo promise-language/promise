@@ -6,7 +6,7 @@ type Builder `public {
     new(~this, int capacity = 16) { this.buf = Vector[u8](capacity: capacity); }
 
     // Satisfies Writer
-    write(~this, u8[] data) int {
+    write(~this, u8[] data) int! {
         int i = 0;
         while i < data.len {
             this.buf.push(data[i]);
@@ -16,7 +16,7 @@ type Builder `public {
     }
 
     // Override for efficiency (avoids intermediate u8[])
-    write_string(~this, string s) int {
+    write_string(~this, string s) int! {
         u8[] b = s.bytes();
         int i = 0;
         while i < b.len {

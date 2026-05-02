@@ -38,7 +38,7 @@ The stdlib today (27 files) provides:
 | Concurrency | `channel.pr`, `task.pr`, `runtime.pr` | `Channel[T]` / `channel[T]` send/close, `Task[T]` / `task[T]` handle, scheduler stats |
 | Other | `range.pr`, `hash.pr`, `assert.pr`, `error.pr` | `Range` / `..`/`..=`, FNV-1a hash, `assert(bool, string)`, `error` base type |
 
-**What's missing**: file I/O, OS access, process execution, string interpolation desugaring to Format.
+**What's missing**: file I/O, OS access, process execution.
 
 ### Naming Conventions
 
@@ -50,7 +50,7 @@ Promise uses a two-tier naming scheme. Casing tells the reader whether a type is
 |------|--------------|
 | `int`, `i8`..`i64`, `uint`, `u8`..`u64`, `f32`, `f64` | LLVM scalar integers/floats |
 | `bool`, `char` | LLVM scalar `i1` / `i32` |
-| `string` | Has literal syntax `"..."`, interpolation `${}` |
+| `string` | Has literal syntax `"..."`, interpolation `{}` |
 | `error` | Base type for `?`/`!`/`raise` error system |
 
 **PascalCase — all other types.** Structural interfaces, user-defined types, stdlib types. Some PascalCase types have **syntactic sugar** — a lowercase shorthand the compiler resolves:
@@ -149,18 +149,19 @@ Fully implemented with structural interfaces, duck-typed for-in, all combinators
 
 **Key codegen detail**: `int → bool` uses `icmp ne val, 0` (not `trunc`, which would give wrong result for even numbers like 2). `float → bool` uses `fcmp one val, 0.0`. Tests: 32 e2e tests in `tests/e2e/test_scalar_casts.pr`, 9 sema tests, 6 codegen tests.
 
-### 2.4 Format & Writer for String Interpolation — DONE (interfaces defined, interpolation desugaring deferred)
+### 2.4 Format & Writer for String Interpolation — DONE
 
 | Aspect | Current State | Remaining |
 |--------|--------------|-----------|
-| String interpolation | Works for `string`, `int`, `f64`, `bool`, `char` via hardcoded codegen paths | User types need `format(Writer ~w)!` + interpolation desugaring |
+| String interpolation | Works for all primitives (`string`, `int`, `f64`, `bool`, `char`, etc.) and **user-defined types** implementing `format(Writer ~w)!` | — |
 | `Writer` interface | **Defined** in `std/format.pr` | — |
 | `Format` interface | **Defined** in `std/format.pr` — `format(Writer ~w)!` (failable) | — |
-| `to_string()` | **Available** on all primitives via `"{this}"` | User types need `format()` → `to_string()` synthesis |
-| `format()` | **Available** on all primitives — delegates to `w.write_string(to_string())` | Interpolation desugaring to `format()` deferred |
+| `to_string()` | **Available** on all primitives via `"{this}"` | — |
+| `format()` | **Available** on all primitives — delegates to `w.write_string(to_string())` | — |
 | `Builder` | **Implemented** in `std/builder.pr` (pure Promise) | — |
+| User type interpolation | **Implemented** — `"{x}"` desugars to Builder + `x.format(~builder)!` + `builder.to_string()` for types implementing `Format` | — |
 
-**Proposed types** (in `std/format.pr`):
+**Types** (in `std/format.pr`):
 
 ```promise
 type Writer `structural {
@@ -186,7 +187,7 @@ Writer is byte-oriented (like Go's `io.Writer`), making it usable for files, net
 
 `to_string()` is synthesized from `format()`: create a Builder (which satisfies `Writer`), call `format(~builder)!`, return `builder.to_string()`. No need for types to implement `to_string()` separately. Builder's `write()` never fails, so the `!` is safe.
 
-**String interpolation** `"value: ${x}"` desugars to:
+**String interpolation** `"value: {x}"` desugars to:
 ```promise
 // compiler-generated:
 mut _sb := Builder();
@@ -216,7 +217,7 @@ type Point {
 
 // Now works in string interpolation:
 p := Point(x: 3, y: 4);
-println("point: ${p}");   // point: (3, 4)
+println("point: {p}");   // point: (3, 4)
 ```
 
 ### 2.5 Parse & Reader — Structural Interface on Factory Methods — DONE
@@ -385,8 +386,8 @@ x := s.next[int]()!;
 |---------|--------|--------|
 | Error type system (2.1) | All failable stdlib APIs | **DONE** — inheritance-based errors, typed handlers, exhaustiveness |
 | Stream combinators (2.2) | Sorting, functional patterns | **DONE** — Iterator[T] structural interface with 20 default combinators, _FnIter[T], duck-typed for-in, Vector.iter(), 104 e2e tests |
-| Numeric conversions (2.3) | String formatting, parsing, math display | **DONE** — all scalar as/as! casts (numeric, char, bool), `to_string()` + `format()` on all primitives, `int/bool/uint/f64.parse`. Interpolation desugaring deferred |
-| Format & Writer (2.4) | String interpolation, user type display, stream join | **DONE** — Writer/Format interfaces defined, Builder implemented, `format(Writer ~w)!` on all primitives. Interpolation desugaring deferred |
+| Numeric conversions (2.3) | String formatting, parsing, math display | **DONE** — all scalar as/as! casts (numeric, char, bool), `to_string()` + `format()` on all primitives, `int/bool/uint/f64.parse` |
+| Format & Writer (2.4) | String interpolation, user type display, stream join | **DONE** — Writer/Format interfaces defined, Builder implemented, `format(Writer ~w)!` on all primitives. User-defined type interpolation via Format now implemented |
 | Parse & Reader (2.5) | Generic parsing, Scanner | **DONE** — Reader/Parse interfaces, Scanner, `scan[T]()`, `int/bool/uint/f64.parse` |
 
 ---
@@ -510,7 +511,7 @@ Complete the features from Section 2 before building stdlib modules.
 - File: `std/builder.pr` — `Builder` type (pure Promise, wraps `Vector[u8]`, satisfies `Writer`)
 - Primitives have `to_string()` via string interpolation (`"{this}"`)
 - All primitives (`int`, `i8`-`i64`, `uint`, `u8`-`u64`, `f32`, `f64`, `bool`, `char`, `string`) implement `format(Writer ~w)!`
-- String interpolation desugaring to Format deferred — existing codegen paths work.
+- String interpolation desugaring to Format — **DONE**. User-defined types implementing `format(Writer ~w)!` are now supported in `{}` interpolation. A Builder is created internally, the type's format method writes to it, and the result is converted to string via `Builder.to_string()`. Both direct dispatch and vtable dispatch (polymorphic) are supported. Value types are also supported.
 
 **0e. Parse & Reader — DONE**
 - File: `std/parse.pr` — `Reader` structural interface (with `read_byte` default), `Parse` structural interface with factory method, `Scanner` type, `scan[T]()` convenience function
@@ -639,7 +640,7 @@ No `std/result.pr` is needed.
 - `f64.parse(Reader ~r) f64!` — pure Promise, handles sign, integer/fractional parts, scientific notation (e/E)
 - Tests: `tests/std/test_to_string.pr` (21 tests), `tests/std/test_parse.pr` (38 tests), `tests/std/test_format.pr` (20 tests)
 
-**Remaining (separate from 2a):** String interpolation desugaring to `format()` — big codegen change, current approach works.
+**String interpolation desugaring to `format()` — DONE.** User-defined types implementing `format(Writer ~w)!` are now supported in `{}` interpolation via Builder. Both direct and vtable (polymorphic) dispatch supported.
 
 **Design change from original plan**: `to_string()` uses string interpolation (`"{this}"`) directly instead of wrapping `format()` through a Builder. This is simpler, has zero native codegen, and works today. `format(Writer ~w)!` is separately implemented for composable output to arbitrary Writers.
 

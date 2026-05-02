@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd "$(dirname "$0")/../compiler"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PROMISE="$ROOT/bin/promise"
+cd "$ROOT"
 
 clear
 
 echo "Building compiler..."
-go build -o promise ./cmd/promise 2>&1
+./build
 
 echo "Running continuous stress test (Ctrl+C to stop)..."
-exec ./promise test -timeout 5s -stress ../tests/...
+exec "$PROMISE" test -timeout 5s -stress tests/...

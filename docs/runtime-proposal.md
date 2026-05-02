@@ -837,7 +837,7 @@ Validated: `promise test -stress 20 tests/concurrency/...` — 71 tests, 100% pa
 **Build modes**:
 - `make build` — dev build (~16MB), uses system LLVM tools
 - `make release` — release build (~61MB), embeds opt + llc + lld + libLLVM.so (gzip-compressed)
-- `bin/build.sh --release` — same as `make release`
+- `./build --release` — same as `make release`
 
 **Embedded LLVM tools** (Linux x86_64, gated by `-tags embed_llvm`):
 - `opt.gz` (76K), `llc.gz` (60K), `lld.gz` (2.1M), `libLLVM.so.gz` (44M)

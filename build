@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Build the Promise compiler. Output: bin/promise
+# This is the ONLY correct way to build. Do not run `go build` directly.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT/compiler"
+
+# Generate parser from grammar (no-op if up to date)
+make generate --no-print-directory
+
+# Embed resources (std library, catalog, modules)
+make resources --no-print-directory
+
+# Embed musl CRT on Linux
+if [ "$(uname -s)" = "Linux" ]; then
+  make musl-crt --no-print-directory
+fi
+
+# Release build: bundle LLVM tools into the binary
+BUILD_TAGS=""
+if [ "${1:-}" = "--release" ] && [ "$(uname -s)" = "Linux" ]; then
+  make llvm-bundle --no-print-directory
+  BUILD_TAGS="-tags embed_llvm"
+fi
+
+# Build
+mkdir -p "$ROOT/bin"
+go build -buildvcs=false $BUILD_TAGS -o "$ROOT/bin/promise" ./cmd/promise

@@ -14,7 +14,16 @@ Promise is a statically-typed programming language with Dart-inspired syntax and
 
 ## Build & Test Commands
 
-All commands run from `compiler/`:
+**IMPORTANT: Always use `./build` from the repo root to build the compiler. NEVER run `go build` directly — it skips resource embedding and produces a broken binary. The output is always `bin/promise`.**
+
+```bash
+# From repo root:
+./build                # embed resources + build → bin/promise
+bin/verify.sh          # full verify: generate + format + vet + build + go test + promise test
+bin/verify.sh --clean  # same but clears caches first
+```
+
+The following `make` targets run from `compiler/` and also output to `bin/promise`:
 
 ```bash
 make                  # download ANTLR4 JAR, generate parser, embed resources, build binary
@@ -23,7 +32,11 @@ make test             # run all Go tests (go test ./...)
 make generate         # regenerate ANTLR4 parser from grammar
 make resources        # copy std/ into embedded resources
 make clean            # remove generated code and binary
+```
 
+Go tests run from `compiler/`:
+
+```bash
 # Run tests for a single package
 go test ./internal/codegen/ -count=1
 go test ./internal/sema/ -count=1
@@ -35,24 +48,23 @@ go test ./internal/codegen/ -run TestDropBasicScopeExit -v -count=1
 # Coverage
 go test ./internal/codegen/ -coverprofile=/tmp/cov.out -count=1
 go tool cover -func=/tmp/cov.out
+```
 
-# End-to-end tests (from repo root)
-bin/e2e.sh
-PROMISE_E2E_TIMEOUT=120 bin/e2e.sh  # custom timeout (default: 60s)
+Promise test commands (use `bin/promise` from repo root):
 
-# Promise test with timeout
-promise test file.pr                       # default 60s timeout
-promise test -timeout 30s file.pr          # custom timeout (Go duration or seconds)
-promise exec -timeout 10s 'println("hi")'  # exec with timeout
+```bash
+bin/promise test file.pr                       # default 60s timeout
+bin/promise test -timeout 30s file.pr          # custom timeout (Go duration or seconds)
+bin/promise exec -timeout 10s 'println("hi")'  # exec with timeout
 
 # Stress testing (flaky test detection)
-promise test -stress tests/...                       # run until Ctrl+C
-promise test -stress 100 tests/concurrency/...       # run 100 iterations
-promise test -stress 30s tests/concurrency/...       # run for 30 seconds
-promise test -timeout 10s -stress 50 tests/...       # per-run timeout + stress
+bin/promise test -stress tests/...                       # run until Ctrl+C
+bin/promise test -stress 100 tests/concurrency/...       # run 100 iterations
+bin/promise test -stress 30s tests/concurrency/...       # run for 30 seconds
+bin/promise test -timeout 10s -stress 50 tests/...       # per-run timeout + stress
 
 # Cache diagnostics
-PROMISE_CACHE_DEBUG=1 promise test tests/...         # show cache HIT/MISS/SKIP on stderr
+PROMISE_CACHE_DEBUG=1 bin/promise test tests/...         # show cache HIT/MISS/SKIP on stderr
 ```
 
 **Test output format** — designed for AI-agent tail-friendliness:

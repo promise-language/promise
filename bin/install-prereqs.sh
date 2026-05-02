@@ -182,7 +182,7 @@ install_linux() {
     fi
 
     echo ""
-    echo "Done. Run 'bin/build.sh' to build."
+    echo "Done. Run './build' to build."
 }
 
 # --- macOS ---
@@ -246,7 +246,7 @@ install_macos() {
     fi
 
     echo ""
-    echo "Done. Run 'bin/build.sh' to build."
+    echo "Done. Run './build' to build."
 }
 
 # --- Main ---

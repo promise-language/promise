@@ -3,7 +3,7 @@ ANTLR_JAR     := tools/antlr-$(ANTLR_VERSION)-complete.jar
 ANTLR_URL     := https://www.antlr.org/download/antlr-$(ANTLR_VERSION)-complete.jar
 GRAMMAR_DIR   := grammar
 PARSER_PKG    := internal/parser
-BINARY        := promise
+BINARY        := ../bin/promise
 RESOURCES     := cmd/promise/resources
 UNAME         := $(shell uname -s)
 
@@ -68,6 +68,7 @@ build: generate resources musl-crt
 else
 build: generate resources
 endif
+	@mkdir -p $(dir $(BINARY))
 	go build -o $(BINARY) ./cmd/promise
 
 ifeq ($(UNAME),Linux)
@@ -78,7 +79,7 @@ endif
 	go test ./...
 
 clean:
-	rm -f $(BINARY)
+	rm -f $(BINARY) promise
 	rm -rf $(PARSER_PKG)/*.go $(PARSER_PKG)/*.interp $(PARSER_PKG)/*.tokens
 	rm -rf $(RESOURCES)
 	rm -rf $(TESTDATA_STD)
@@ -106,12 +107,13 @@ llvm-bundle:
 
 ifeq ($(UNAME),Linux)
 release: generate resources musl-crt llvm-bundle
+	@mkdir -p $(dir $(BINARY))
 	go build -tags embed_llvm -o $(BINARY) ./cmd/promise
 	@echo "Release binary: $$(du -h $(BINARY) | cut -f1) (self-contained)"
 endif
 
 install: build
-	./promise install
+	$(BINARY) install
 
 fmt:
 	go fmt ./...

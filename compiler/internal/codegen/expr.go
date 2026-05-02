@@ -698,6 +698,31 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 				return c.genEnumVariantCallLayout(e, member, enumLayout)
 			}
 		}
+		// Function-typed field call: this._next() where _next is a () -> T? field.
+		// Check if the member name is a field (not a method) on the target type,
+		// and the field type is a Signature — treat as indirect call through the field.
+		if sig, ok := c.info.Types[e.Callee].(*types.Signature); ok {
+			memberTargetType := c.info.Types[member.Target]
+			if c.typeSubst != nil {
+				memberTargetType = types.Substitute(memberTargetType, c.typeSubst)
+			}
+			if c.selfSubst != nil {
+				memberTargetType = types.SubstituteSelf(memberTargetType, c.selfSubst.iface, c.selfSubst.concrete)
+			}
+			if named := extractNamed(memberTargetType); named != nil {
+				if named.LookupField(member.Field) != nil {
+					closure := c.genExpr(e.Callee) // genMemberExpr loads the field
+					var argVals []value.Value
+					for _, arg := range e.Args {
+						argVals = append(argVals, c.genExpr(arg.Value))
+						if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+							c.clearDropFlag(ident.Name)
+						}
+					}
+					return c.genIndirectCall(closure, sig, argVals)
+				}
+			}
+		}
 		return c.genMethodCall(e, member)
 	}
 
@@ -3816,13 +3841,18 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 		captureVals := make([]value.Value, len(captures))
 		for i, cv := range captures {
 			captureType := c.resolveType(cv.Obj.Type())
-			envFieldTypes[i] = captureType
-			// Load the captured variable's current value from the enclosing scope
+			// For 'this', use the alloca's element type (instance pointer) rather
+			// than the sema type (value struct). The receiver is stored as a pointer
+			// in method bodies, not as a full value struct.
 			if alloca, ok := c.locals[cv.Obj.Name()]; ok {
+				if cv.Obj.Name() == "this" {
+					captureType = alloca.ElemType
+				}
 				captureVals[i] = c.block.NewLoad(captureType, alloca)
 			} else {
 				captureVals[i] = constant.NewZeroInitializer(captureType)
 			}
+			envFieldTypes[i] = captureType
 			// For move captures, clear the drop flag in the enclosing scope
 			if cv.ByMove {
 				c.clearDropFlag(cv.Obj.Name())
@@ -3878,7 +3908,8 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	if len(captures) > 0 && envStructType != nil {
 		typedEnvPtr := entry.NewBitCast(fn.Params[0], irtypes.NewPointer(envStructType))
 		for i, cv := range captures {
-			captureType := c.resolveType(cv.Obj.Type())
+			// Use the env struct's field type — matches what was stored during capture
+			captureType := envStructType.Fields[i]
 			fieldPtr := entry.NewGetElementPtr(envStructType, typedEnvPtr,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
 			val := entry.NewLoad(captureType, fieldPtr)

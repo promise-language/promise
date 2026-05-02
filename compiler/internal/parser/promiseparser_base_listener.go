@@ -302,6 +302,12 @@ func (s *BasePromiseParserListener) EnterSliceType(ctx *SliceTypeContext) {}
 // ExitSliceType is called when production sliceType is exited.
 func (s *BasePromiseParserListener) ExitSliceType(ctx *SliceTypeContext) {}
 
+// EnterFuncTypeReturn is called when production funcTypeReturn is entered.
+func (s *BasePromiseParserListener) EnterFuncTypeReturn(ctx *FuncTypeReturnContext) {}
+
+// ExitFuncTypeReturn is called when production funcTypeReturn is exited.
+func (s *BasePromiseParserListener) ExitFuncTypeReturn(ctx *FuncTypeReturnContext) {}
+
 // EnterTypeArgs is called when production typeArgs is entered.
 func (s *BasePromiseParserListener) EnterTypeArgs(ctx *TypeArgsContext) {}
 

@@ -148,6 +148,9 @@ type PromiseParserVisitor interface {
 	// Visit a parse tree produced by PromiseParser#sliceType.
 	VisitSliceType(ctx *SliceTypeContext) interface{}
 
+	// Visit a parse tree produced by PromiseParser#funcTypeReturn.
+	VisitFuncTypeReturn(ctx *FuncTypeReturnContext) interface{}
+
 	// Visit a parse tree produced by PromiseParser#typeArgs.
 	VisitTypeArgs(ctx *TypeArgsContext) interface{}
 

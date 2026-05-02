@@ -43,7 +43,9 @@ func (b *Builder) VisitTupleType(ctx *parser.TupleTypeContext) interface{} {
 func (b *Builder) VisitFunctionType(ctx *parser.FunctionTypeContext) interface{} {
 	node := &FunctionTypeRef{
 		nodeBase: b.baseFromContext(ctx),
-		Return:   b.visitTypeRef(ctx.TypeRef()),
+	}
+	if ftr := ctx.FuncTypeReturn(); ftr != nil {
+		node.Return = b.visitTypeRef(ftr.(*parser.FuncTypeReturnContext).TypeRef())
 	}
 	if trl := ctx.TypeRefList(); trl != nil {
 		trlc := trl.(*parser.TypeRefListContext)

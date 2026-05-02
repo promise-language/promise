@@ -215,7 +215,7 @@ typeRef
     : IDENT DOT IDENT typeArgs?                                # qualifiedType
     | IDENT typeArgs?                                          # namedType
     | LPAREN typeRef (COMMA typeRef)+ RPAREN                   # tupleType
-    | LPAREN typeRefList RPAREN ARROW typeRef                  # functionType
+    | LPAREN typeRefList? RPAREN ARROW funcTypeReturn          # functionType
     | LPAREN typeRef RPAREN                                    # parenType
     | typeRef AMP                                              # sharedRefType
     | typeRef TILDE                                            # mutRefType
@@ -223,6 +223,13 @@ typeRef
     | typeRef QUESTION                                         # optionalType
     | typeRef LBRACKET RBRACKET                                # sliceType
     | typeRef LBRACKET INT_LITERAL RBRACKET                    # arrayType
+    ;
+
+// Helper rule for function type return position.
+// Using a separate rule avoids ANTLR4's precedence-climbing from
+// blocking suffix operators (?, [], &, ~, *) on the return type.
+funcTypeReturn
+    : typeRef
     ;
 
 typeArgs

@@ -42,9 +42,14 @@ func (c *Checker) resolveType(ref ast.TypeRef) types.Type {
 		}
 		var result types.Type
 		if r.Return != nil {
-			result = c.resolveType(r.Return)
-			if result == nil {
-				return nil
+			// "void" in return position means no return value
+			if named, ok := r.Return.(*ast.NamedTypeRef); ok && named.Name == "void" && len(named.TypeArgs) == 0 {
+				// result stays nil
+			} else {
+				result = c.resolveType(r.Return)
+				if result == nil {
+					return nil
+				}
 			}
 		}
 		return types.NewSignature(nil, params, result, false)

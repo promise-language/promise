@@ -2915,6 +2915,271 @@ func TestVoidFunctionNoReturnOK(t *testing.T) {
 	checkOK(t, `foo() { int x = 42; }`)
 }
 
+// --- Function Type Tests ---
+
+func TestFunctionTypeReturnOptional(t *testing.T) {
+	// Grammar fix: () -> T? must parse as function returning T?, not optional of function returning T
+	checkOK(t, `
+		type Box {
+			() -> int? getter;
+			get_val() int? { return this.getter(); }
+		}
+		main() {
+			b := Box(getter: || -> int? { return 42; });
+		}
+	`)
+}
+
+func TestZeroArgFunctionType(t *testing.T) {
+	checkOK(t, `
+		call(() -> int fn) int { return fn(); }
+		main() {
+			int r = call(|| -> int { return 42; });
+		}
+	`)
+}
+
+func TestVoidFunctionType(t *testing.T) {
+	checkOK(t, `
+		apply((int) -> void fn) {
+			fn(42);
+		}
+		main() {
+			apply(|int x| { });
+		}
+	`)
+}
+
+func TestVoidFunctionTypeAssignFromLambda(t *testing.T) {
+	// A lambda with no return value should be assignable to (T) -> void
+	checkOK(t, `
+		run((int) -> void action) { action(1); }
+		main() {
+			run(|int x| { int y = x; });
+		}
+	`)
+}
+
+func TestFunctionTypeReturnSlice(t *testing.T) {
+	// Suffix operators on function type return position
+	checkOK(t, `
+		make(() -> int[] fn) int[] { return fn(); }
+		main() {
+			int[] v = make(|| -> int[] { return [1, 2]; });
+		}
+	`)
+}
+
+// --- Function-typed Field Call Tests ---
+
+func TestFunctionTypedFieldCallSema(t *testing.T) {
+	// Calling a function-typed field via this.field()
+	checkOK(t, `
+		type Wrapper {
+			() -> int getter;
+			get_val() int { return this.getter(); }
+		}
+		main() {
+			w := Wrapper(getter: || -> int { return 1; });
+			int x = w.get_val();
+		}
+	`)
+}
+
+func TestFunctionTypedFieldCallWithArgsSema(t *testing.T) {
+	// Calling a function-typed field with arguments
+	checkOK(t, `
+		type Adder {
+			(int, int) -> int op;
+			apply(int a, int b) int { return this.op(a, b); }
+		}
+		main() {
+			a := Adder(op: |int x, int y| -> x + y);
+			int r = a.apply(3, 4);
+		}
+	`)
+}
+
+func TestFunctionTypedFieldOptionalReturn(t *testing.T) {
+	// Field returning optional — critical for _FnIter pattern
+	checkOK(t, `
+		type Iter {
+			() -> int? supplier;
+			next() int? { return this.supplier(); }
+		}
+		main() {
+			i := Iter(supplier: || -> int? { return 42; });
+			int? v = i.next();
+		}
+	`)
+}
+
+func TestFunctionTypedFieldVoidReturn(t *testing.T) {
+	// Void function field
+	checkOK(t, `
+		type Handler {
+			(int) -> void action;
+			run(int x) { this.action(x); }
+		}
+		main() {
+			h := Handler(action: |int x| { });
+			h.run(1);
+		}
+	`)
+}
+
+func TestFunctionTypedFieldTypeMismatch(t *testing.T) {
+	// Field type doesn't match constructor arg
+	errs := checkErrs(t, `
+		type Wrapper {
+			() -> int getter;
+		}
+		main() {
+			w := Wrapper(getter: || -> string { return "oops"; });
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+// --- This Capture in Lambda Tests ---
+
+func TestThisCaptureInMethodLambdaMove(t *testing.T) {
+	// Capturing 'this' in a move lambda inside a method body
+	checkOK(t, `
+		type Counter {
+			int count;
+			make_incrementer() () -> int {
+				return move || -> int {
+					return this.count + 1;
+				};
+			}
+		}
+		main() {
+			c := Counter(count: 10);
+			() -> int fn = c.make_incrementer();
+		}
+	`)
+}
+
+func TestThisCaptureInMethodLambdaNoMoveError(t *testing.T) {
+	// Non-copy type captured without move should error
+	errs := checkErrs(t, `
+		type Heavy {
+			int x;
+			make_fn() () -> int {
+				return || -> int { return this.x; };
+			}
+		}
+		main() {}
+	`)
+	expectError(t, errs, "cannot capture 'this' without move")
+}
+
+func TestThisCaptureOutsideMethodError(t *testing.T) {
+	// Using 'this' outside a method body should error
+	errs := checkErrs(t, `
+		main() {
+			fn := || -> int { return this.x; };
+		}
+	`)
+	expectError(t, errs, "'this' used outside of a method")
+}
+
+func TestThisCaptureInNestedLambda(t *testing.T) {
+	// Nested lambda capturing 'this' through intermediate lambda
+	checkOK(t, `
+		type Wrapper {
+			int val;
+			make_nested() () -> int {
+				return move || -> int {
+					() -> int inner = move || -> int {
+						return this.val;
+					};
+					return inner();
+				};
+			}
+		}
+		main() {
+			w := Wrapper(val: 42);
+			() -> int fn = w.make_nested();
+		}
+	`)
+}
+
+// --- Additional Function Type Parsing Tests ---
+
+func TestFunctionTypeMultiParamReturn(t *testing.T) {
+	// Multi-parameter function type
+	checkOK(t, `
+		apply((int, string) -> bool pred) bool {
+			return pred(1, "x");
+		}
+		main() {
+			bool r = apply(|int a, string b| -> a > 0);
+		}
+	`)
+}
+
+func TestFunctionTypeAsReturnType(t *testing.T) {
+	// Function returning a function type
+	checkOK(t, `
+		make_adder(int x) (int) -> int {
+			return move |int y| -> x + y;
+		}
+		main() {
+			(int) -> int add5 = make_adder(5);
+			int r = add5(10);
+		}
+	`)
+}
+
+func TestFunctionTypeNested(t *testing.T) {
+	// Function type taking a function type parameter
+	checkOK(t, `
+		apply_twice((int) -> int f, int x) int {
+			return f(f(x));
+		}
+		main() {
+			int r = apply_twice(|int x| -> x * 2, 3);
+		}
+	`)
+}
+
+func TestZeroArgFunctionTypeField(t *testing.T) {
+	// Zero-arg function type as a struct field
+	checkOK(t, `
+		type Lazy {
+			() -> int compute;
+		}
+		main() {
+			l := Lazy(compute: || -> int { return 42; });
+		}
+	`)
+}
+
+func TestVoidFunctionTypeField(t *testing.T) {
+	// Void function type as a struct field
+	checkOK(t, `
+		type Logger {
+			(string) -> void log;
+		}
+		main() {
+			l := Logger(log: |string s| { });
+		}
+	`)
+}
+
+func TestVoidFunctionTypeCallResult(t *testing.T) {
+	// Cannot assign void function result to a variable
+	errs := checkErrs(t, `
+		run((int) -> void fn) {
+			int x = fn(1);
+		}
+		main() {}
+	`)
+	expectError(t, errs, "cannot")
+}
+
 // --- Match Exhaustiveness Tests ---
 
 func TestMatchExhaustiveEnum(t *testing.T) {
@@ -7845,7 +8110,7 @@ func TestValueTypeWithMethods(t *testing.T) {
 		type Point {
 			int x `+"`value"+`;
 			int y `+"`value"+`;
-			fn sum() -> int { return this.x + this.y; }
+			sum() int { return this.x + this.y; }
 		}
 	`)
 }

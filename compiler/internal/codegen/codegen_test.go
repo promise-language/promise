@@ -3191,6 +3191,115 @@ func TestNamedFuncRefThunk(t *testing.T) {
 	assertContains(t, ir, "extractvalue { i8*, i8* }")
 }
 
+func TestFunctionTypedFieldCall(t *testing.T) {
+	ir := generateIR(t, `
+		type Wrapper {
+			() -> int getter;
+			get_val() int { return this.getter(); }
+		}
+		main() {
+			w := Wrapper(getter: || -> int { return 99; });
+		}
+	`)
+	// Should call through indirect call path (extractvalue from fat pointer)
+	assertContains(t, ir, "define i64 @Wrapper.get_val")
+	assertContains(t, ir, "extractvalue { i8*, i8* }")
+}
+
+func TestFunctionTypedFieldCallWithArgs(t *testing.T) {
+	ir := generateIR(t, `
+		type Calc {
+			(int, int) -> int op;
+			run(int a, int b) int { return this.op(a, b); }
+		}
+		main() {
+			c := Calc(op: |int x, int y| -> x + y);
+		}
+	`)
+	// Method should exist and use indirect call
+	assertContains(t, ir, "define i64 @Calc.run")
+	assertContains(t, ir, "extractvalue { i8*, i8* }")
+}
+
+func TestFunctionTypedFieldOptionalReturn(t *testing.T) {
+	// Critical for _FnIter[T] pattern where _next is () -> T?
+	ir := generateIR(t, `
+		type Supplier {
+			() -> int? produce;
+			next() int? { return this.produce(); }
+		}
+		main() {
+			s := Supplier(produce: || -> int? { return 42; });
+		}
+	`)
+	assertContains(t, ir, "@Supplier.next")
+	// Should call through indirect call path (fat pointer)
+	assertContains(t, ir, "extractvalue { i8*, i8* }")
+}
+
+func TestFunctionTypedFieldVoidReturn(t *testing.T) {
+	ir := generateIR(t, `
+		type Handler {
+			(int) -> void action;
+			run(int x) { this.action(x); }
+		}
+		main() {
+			h := Handler(action: |int x| { });
+		}
+	`)
+	assertContains(t, ir, "define void @Handler.run")
+	assertContains(t, ir, "extractvalue { i8*, i8* }")
+}
+
+func TestThisCaptureInMethodLambda(t *testing.T) {
+	ir := generateIR(t, `
+		type Counter {
+			int count;
+			make_fn() () -> int {
+				return move || -> int {
+					return this.count;
+				};
+			}
+		}
+		main() {
+			c := Counter(count: 10);
+		}
+	`)
+	// Method should return a fat pointer (closure)
+	assertContains(t, ir, "define { i8*, i8* } @Counter.make_fn")
+	// The lambda builds a fat pointer with env
+	assertContains(t, ir, "insertvalue { i8*, i8* }")
+}
+
+func TestVoidFunctionTypeParam(t *testing.T) {
+	ir := generateIR(t, `
+		apply((int) -> void fn) {
+			fn(42);
+		}
+		main() {
+			apply(|int x| { });
+		}
+	`)
+	assertContains(t, ir, "define void @apply")
+	assertContains(t, ir, "extractvalue { i8*, i8* }")
+}
+
+func TestFunctionTypeReturnFunction(t *testing.T) {
+	ir := generateIR(t, `
+		make_adder(int x) (int) -> int {
+			return move |int y| -> x + y;
+		}
+		main() {
+			(int) -> int add5 = make_adder(5);
+			int r = add5(10);
+		}
+	`)
+	// Should return a fat pointer
+	assertContains(t, ir, "define { i8*, i8* } @make_adder")
+	// Main should do indirect call on the result
+	assertContains(t, ir, "extractvalue { i8*, i8* }")
+}
+
 // ================================================================
 // Stage 8h — Optional Patterns, String Interpolation & Expression Completeness
 // ================================================================
@@ -9049,7 +9158,7 @@ func TestValueTypeMethodReceiver(t *testing.T) {
 		type Point {
 			int x `+"`value"+`;
 			int y `+"`value"+`;
-			fn sum() -> int { return this.x + this.y; }
+			sum() int { return this.x + this.y; }
 		}
 		main() {
 			p := Point(x: 3, y: 4);

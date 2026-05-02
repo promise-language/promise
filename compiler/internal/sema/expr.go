@@ -365,11 +365,31 @@ func (c *Checker) checkLambdaCapture(e *ast.IdentExpr, obj types.Object) {
 }
 
 func (c *Checker) checkThisExpr(e *ast.ThisExpr) types.Type {
-	if c.curFunc == nil || c.curFunc.Recv() == nil {
-		c.errorf(e.Pos(), "'this' used outside of a method")
-		return nil
+	if c.curFunc != nil && c.curFunc.Recv() != nil {
+		return c.curFunc.Recv().Type()
 	}
-	return c.curFunc.Recv().Type()
+	// Inside a lambda inside a method: capture 'this' from outer scope
+	if c.lambdaDepth > 0 {
+		obj, _ := c.scope.LookupParent("this")
+		if obj != nil {
+			if v, ok := obj.(*types.Var); ok {
+				if _, already := c.lambdaCaptures["this"]; !already {
+					byMove := c.lambdaMove
+					if !byMove && !isCopyField(v.Type()) {
+						c.errorf(e.Pos(), "cannot capture 'this' without move")
+						return v.Type()
+					}
+					c.lambdaCaptures["this"] = &CapturedVar{
+						Obj:    obj,
+						ByMove: byMove,
+					}
+				}
+				return v.Type()
+			}
+		}
+	}
+	c.errorf(e.Pos(), "'this' used outside of a method")
+	return nil
 }
 
 func (c *Checker) checkTupleLit(e *ast.TupleLit) types.Type {

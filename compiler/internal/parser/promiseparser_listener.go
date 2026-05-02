@@ -148,6 +148,9 @@ type PromiseParserListener interface {
 	// EnterSliceType is called when entering the sliceType production.
 	EnterSliceType(c *SliceTypeContext)
 
+	// EnterFuncTypeReturn is called when entering the funcTypeReturn production.
+	EnterFuncTypeReturn(c *FuncTypeReturnContext)
+
 	// EnterTypeArgs is called when entering the typeArgs production.
 	EnterTypeArgs(c *TypeArgsContext)
 
@@ -603,6 +606,9 @@ type PromiseParserListener interface {
 
 	// ExitSliceType is called when exiting the sliceType production.
 	ExitSliceType(c *SliceTypeContext)
+
+	// ExitFuncTypeReturn is called when exiting the funcTypeReturn production.
+	ExitFuncTypeReturn(c *FuncTypeReturnContext)
 
 	// ExitTypeArgs is called when exiting the typeArgs production.
 	ExitTypeArgs(c *TypeArgsContext)

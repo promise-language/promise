@@ -195,6 +195,10 @@ func (v *BasePromiseParserVisitor) VisitSliceType(ctx *SliceTypeContext) interfa
 	return v.VisitChildren(ctx)
 }
 
+func (v *BasePromiseParserVisitor) VisitFuncTypeReturn(ctx *FuncTypeReturnContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
 func (v *BasePromiseParserVisitor) VisitTypeArgs(ctx *TypeArgsContext) interface{} {
 	return v.VisitChildren(ctx)
 }

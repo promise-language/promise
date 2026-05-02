@@ -758,17 +758,29 @@ func runTestFiles(files []string, timeout time.Duration, targetTriple string) {
 	}
 
 	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?`)
-	failLineRe := regexp.MustCompile(`^FAIL \(\d+\.\d+s\)(?: (.+))?$`)
+	failLineRe := regexp.MustCompile(`^FAIL \([\d.]+s\)(?: (.+))?$`)
+	passLineRe := regexp.MustCompile(`^PASS \([\d.]+s\)`)
+	panicContextRe := regexp.MustCompile(`^  (panic:|expected:|actual:|exit:)`)
+
+	type failureInfo struct {
+		name    string // e.g. "file.pr: test_name" or "file.pr (timeout)"
+		context string // panic message or error context (may be empty)
+	}
 
 	totalPassed := 0
 	totalFailed := 0
 	totalSkipped := 0
 	totalFiles := 0
 	failedFiles := 0
-	var failures []string
+	var failures []failureInfo
 
 	// Find common base directory for relative path display.
 	baseDir := commonDir(files)
+
+	targetSuffix := ""
+	if targetTriple != "" && targetTriple != codegen.HostTargetTriple() {
+		targetSuffix = fmt.Sprintf(" [%s]", targetTriple)
+	}
 
 	// Dedup module test files: all *_test.pr files in the same module compile
 	// together into one binary, so we only need to run one per module.
@@ -781,6 +793,8 @@ func runTestFiles(files []string, timeout time.Duration, targetTriple string) {
 			}
 			moduleTestSeen[modDir] = true
 		}
+		fileStart := time.Now()
+
 		// Run "promise test <file>" as subprocess with timeout
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		testArgs := []string{"test", "-timeout", fmt.Sprintf("%gs", timeout.Seconds())}
@@ -789,10 +803,11 @@ func runTestFiles(files []string, timeout time.Duration, targetTriple string) {
 		}
 		testArgs = append(testArgs, f)
 		cmd := exec.CommandContext(ctx, selfExe, testArgs...)
-		output, err := cmd.CombinedOutput()
+		output, cmdErr := cmd.CombinedOutput()
 		timedOut := ctx.Err() == context.DeadlineExceeded
 		cancel()
 		outStr := strings.TrimSpace(string(output))
+		fileElapsed := time.Since(fileStart)
 
 		// Skip files with no tests or excluded for this target
 		// Use lastLine because subprocess may prefix output with "target: ..." line
@@ -806,57 +821,104 @@ func runTestFiles(files []string, timeout time.Duration, targetTriple string) {
 
 		totalFiles++
 
-		// Print file header and output
 		relPath, relErr := filepath.Rel(baseDir, f)
 		if relErr != nil {
 			relPath = f
 		}
-		fmt.Printf("--- %s ---\n", relPath)
 
 		if timedOut {
-			fmt.Printf("TIMEOUT: exceeded %s timeout\n", timeout)
+			fmt.Printf("FAIL (%.3fs) %s (timeout)%s\n", fileElapsed.Seconds(), relPath, targetSuffix)
 			failedFiles++
 			totalFailed++
-			failures = append(failures, relPath+" (timeout)")
+			failures = append(failures, failureInfo{name: relPath + " (timeout)"})
 			continue
 		}
 
-		if err != nil {
-			// Compilation or runtime error
-			printTestOutput(outStr)
+		// Parse the subprocess output into structured results
+		lines := strings.Split(outStr, "\n")
+		filePassed := 0
+		fileFailed := 0
+		var failDetails []string // "test_name" or "test_name\n  panic: msg"
+
+		for i := 0; i < len(lines); i++ {
+			line := lines[i]
+			if passLineRe.MatchString(line) {
+				filePassed++
+			} else if m := failLineRe.FindStringSubmatch(line); m != nil {
+				fileFailed++
+				detail := m[1] // may be empty for e2e tests
+				// Collect indented panic context lines that follow
+				for i+1 < len(lines) && panicContextRe.MatchString(lines[i+1]) {
+					i++
+					if detail == "" {
+						detail = strings.TrimSpace(lines[i])
+					} else {
+						detail += "\n" + lines[i]
+					}
+				}
+				if detail != "" {
+					failDetails = append(failDetails, detail)
+				}
+			}
+		}
+
+		if cmdErr != nil {
 			failedFiles++
 
-			// Try to parse summary from output
 			if m := summaryRe.FindStringSubmatch(lastLine(outStr)); m != nil {
+				// Had a summary — use parsed counts
 				totalPassed += atoi(m[1])
 				totalFailed += atoi(m[2])
 				if m[3] != "" {
 					totalSkipped += atoi(m[3])
 				}
+			} else if fileFailed > 0 || filePassed > 0 {
+				// Had some test results but no summary (process died mid-run)
+				totalPassed += filePassed
+				totalFailed += fileFailed
 			} else {
-				// Count entire file as one failure
+				// No test output at all — compilation error
 				totalFailed++
+				fmt.Printf("FAIL (%.3fs) %s (compilation error)%s\n", fileElapsed.Seconds(), relPath, targetSuffix)
+				// Print and capture first non-empty error line as context
+				var errCtx string
+				for _, line := range lines {
+					if line != "" && !summaryRe.MatchString(line) {
+						errCtx = line
+						fmt.Printf("  %s\n", line)
+						break
+					}
+				}
+				failures = append(failures, failureInfo{name: relPath + " (compilation error)", context: errCtx})
+				continue
 			}
 
-			// Extract individual FAIL lines from output
-			foundFailLines := false
-			for _, line := range strings.Split(outStr, "\n") {
-				if m := failLineRe.FindStringSubmatch(line); m != nil {
-					if m[1] != "" {
-						failures = append(failures, relPath+": "+m[1])
-					} else {
-						failures = append(failures, relPath)
-					}
-					foundFailLines = true
-				}
+			// Print compact FAIL line with details
+			totalTests := filePassed + fileFailed
+			if totalTests > 0 {
+				fmt.Printf("FAIL (%.3fs) %s (%d/%d failed)%s\n", fileElapsed.Seconds(), relPath, fileFailed, totalTests, targetSuffix)
+			} else {
+				fmt.Printf("FAIL (%.3fs) %s%s\n", fileElapsed.Seconds(), relPath, targetSuffix)
 			}
-			if !foundFailLines {
-				failures = append(failures, relPath+" (compilation error)")
+			for _, detail := range failDetails {
+				parts := strings.SplitN(detail, "\n", 2)
+				testName := parts[0]
+				var panicCtx string
+				for _, dl := range strings.Split(detail, "\n") {
+					fmt.Printf("  %s\n", dl)
+				}
+				if len(parts) > 1 {
+					panicCtx = strings.TrimPrefix(parts[1], "  ")
+				}
+				failures = append(failures, failureInfo{name: relPath + ": " + testName, context: panicCtx})
+			}
+			if len(failDetails) == 0 {
+				failures = append(failures, failureInfo{name: relPath})
 			}
 			continue
 		}
 
-		// Parse summary before printing
+		// Success — all tests passed
 		if m := summaryRe.FindStringSubmatch(lastLine(outStr)); m != nil {
 			totalPassed += atoi(m[1])
 			totalFailed += atoi(m[2])
@@ -865,12 +927,11 @@ func runTestFiles(files []string, timeout time.Duration, targetTriple string) {
 			}
 		}
 
-		// Print test output (strip the summary line and empty lines)
-		for _, line := range strings.Split(outStr, "\n") {
-			if line == "" || summaryRe.MatchString(line) {
-				continue
-			}
-			fmt.Println(line)
+		totalTests := filePassed + fileFailed
+		if totalTests > 1 {
+			fmt.Printf("PASS (%.3fs) %s (%d tests)%s\n", fileElapsed.Seconds(), relPath, totalTests, targetSuffix)
+		} else {
+			fmt.Printf("PASS (%.3fs) %s%s\n", fileElapsed.Seconds(), relPath, targetSuffix)
 		}
 	}
 
@@ -882,21 +943,20 @@ func runTestFiles(files []string, timeout time.Duration, targetTriple string) {
 	// Print grand summary
 	fmt.Println() // empty line before summary
 	totalElapsed := time.Since(totalStart)
-	targetSuffix := ""
-	if targetTriple != "" && targetTriple != codegen.HostTargetTriple() {
-		targetSuffix = fmt.Sprintf(" [%s]", targetTriple)
-	}
 	if totalSkipped > 0 {
 		fmt.Printf("%d passed, %d failed, %d skipped (%d files, %.3fs)%s\n", totalPassed, totalFailed, totalSkipped, totalFiles, totalElapsed.Seconds(), targetSuffix)
 	} else {
 		fmt.Printf("%d passed, %d failed (%d files, %.3fs)%s\n", totalPassed, totalFailed, totalFiles, totalElapsed.Seconds(), targetSuffix)
 	}
 
-	// Print failure list if any
+	// Print failure list with context if any
 	if len(failures) > 0 {
 		fmt.Printf("\nFAILED:\n")
 		for _, f := range failures {
-			fmt.Printf("  %s\n", f)
+			fmt.Printf("  %s\n", f.name)
+			if f.context != "" {
+				fmt.Printf("    %s\n", f.context)
+			}
 		}
 	}
 

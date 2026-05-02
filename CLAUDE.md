@@ -77,19 +77,36 @@ PROMISE_CACHE_DEBUG=1 bin/promise test tests/...         # show cache HIT/MISS/S
 ```
 
 **Test output format** — designed for AI-agent tail-friendliness:
-```
-PASS (0.000s) test_name        # individual results: PASS/FAIL (time) name
-FAIL (0.001s) test_broken
-20 passed, 1 failed (0.423s)   # summary line (single file)
-20 passed, 1 failed, 2 skipped (0.423s)  # with target-excluded tests
-FAILED:                         # only appears when failures exist
-  test_broken
 
-568 passed, 2 failed (117 files, 30.810s)  # directory summary
-568 passed, 2 failed, 3 skipped (117 files, 30.810s)  # with skipped tests
+Single-file output (verbose — shows every test with timing):
+```
+PASS (0.001s) test_add
+PASS (0.002s) test_sub
+FAIL (0.003s) test_broken
+  panic: assertion failed: expected 3, got 4   # panic context shown under FAIL
+PASS (0.001s) test_other                       # subsequent tests still run after panic
+
+3 passed, 1 failed (0.423s)
 FAILED:
-  std/test_vector.pr: test_push
-  e2e/basics.pr (timeout)
+  test_broken
+```
+
+Multi-file output (compact — one line per file):
+```
+PASS (0.004s) e2e/basics.pr (3 tests)         # passing file with test count
+PASS (0.001s) e2e/hello.pr                    # single-test file (no count)
+FAIL (0.005s) e2e/strings.pr (1/3 failed)     # failing file with ratio
+  test_split                                   # failed test name
+    panic: assertion failed                    # panic context
+FAIL (0.000s) broken.pr (compilation error)    # compilation failure
+  broken.pr:5:3: type Foo has no field 'bar'   # error context
+
+568 passed, 2 failed (117 files, 30.810s)
+FAILED:                                        # summary with failure context
+  e2e/strings.pr: test_split
+    panic: assertion failed
+  broken.pr (compilation error)
+    broken.pr:5:3: type Foo has no field 'bar'
 ```
 An agent can read the last ~20 lines of output to identify all failures without re-running or grepping.
 

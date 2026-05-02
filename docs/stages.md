@@ -691,6 +691,8 @@ Command-line interface. Core commands implemented; formatter planned.
 - `promise test <dir>` — scan directory for `.pr` files and run tests from each
 - `promise test <dir>/...` — recursive directory scan (Go-style `...` wildcard)
 - `promise test -timeout <duration>` — per-test timeout (default: 60s, accepts Go durations or plain seconds)
+- **Per-test panic recovery** (non-WASM): setjmp/longjmp in test trampoline — a panicking test prints `FAIL` with panic context and continues to the next test, instead of killing the process. Uses separate TLS `@__promise_test_jmpbuf` (not the scheduler's `@__promise_panic_jmpbuf`) so normal program panics are unaffected. On WASM, panics still terminate (no longjmp support).
+- **Compact multi-file output**: `promise test <dir>` prints one line per file (`PASS (time) file.pr (N tests)` or `FAIL (time) file.pr (M/N failed)` with indented failure details). Single-file runs remain verbose (every test with timing). End-of-run `FAILED:` summary includes panic/error context for AI-agent tail-friendliness.
 - `promise ast <file.pr>` — print the AST
 - `promise exec <code>` — execute inline code (auto-wraps in `main()` if needed)
 - `promise install` — install compiler + std + runtime to `~/.promise/`
@@ -698,7 +700,7 @@ Command-line interface. Core commands implemented; formatter planned.
 - Inline error formatting: source line + `^` caret marker, no temp filenames
 - `promise clean` — remove build cache (`~/.promise/cache/build/`), `--global` also removes module cache
 - Embedded `std/` and `runtime/` in the binary via `go:embed` for self-contained install
-- **Test suite**: 920 tests across 158 files — `tests/e2e/` (language features), `tests/std/` (standard library), `tests/concurrency/` (scheduler, channels, select, panic recovery, stress tests), `tests/modules/` (module system e2e), `tests/value_types/` (pure value types)
+- **Test suite**: 1202 tests across 175 files — `tests/e2e/` (language features), `tests/std/` (standard library), `tests/concurrency/` (scheduler, channels, select, panic recovery, stress tests), `tests/modules/` (module system e2e), `tests/value_types/` (pure value types)
 - `promise doc <file.pr>` — generate documentation from `doc()` meta tags (**Phase 1 done**: `cmd/promise/doc.go`)
   - `-public` (default) / `-all` — filter by visibility
   - `-signatures` — compact signature-only output (minimal tokens for AI agents)

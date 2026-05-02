@@ -17,10 +17,12 @@
       "Bash(./compiler/promise run: *)",
       "Bash(./compiler/promise exec: *)",
       "Bash(./compiler/promise test: *)",
-      "Bash(git config core.hooksPath .githooks)"
+      "Bash(git config core.hooksPath .githooks)",
+      "Bash(bin/test.sh)"
     ],
     "additionalDirectories": [
-      "/Users/djabi/prog2/promise_lang/.git/hooks"
+      "/Users/djabi/prog2/promise_lang/.git/hooks",
+      "/tmp"
     ]
   },
   "spinnerVerbs": {

@@ -210,6 +210,26 @@ func (c *Compiler) defineSchedulerGlobals() {
 		panicJmpBuf.TLSModel = enum.TLSModelGeneric
 	}
 	c.panicJmpBufGlobal = panicJmpBuf
+
+	// @__promise_test_jmpbuf = [thread_local] global i8* null
+	// Separate from panicJmpBuf — used ONLY by the test trampoline for per-test
+	// panic recovery. The test thread sets this before calling the test function.
+	// promise_panic checks this (for main goroutine / no goroutine context) to
+	// longjmp back to the trampoline instead of exiting.
+	testJmpBuf := c.module.NewGlobal("__promise_test_jmpbuf", irtypes.I8Ptr)
+	testJmpBuf.Init = constant.NewNull(irtypes.I8Ptr)
+	if !c.isWasm {
+		testJmpBuf.TLSModel = enum.TLSModelGeneric
+	}
+	c.testJmpBufGlobal = testJmpBuf
+
+	// @__promise_test_panic_msg = global i8* null (non-TLS)
+	// Used by per-test panic recovery to pass the panic message from the test
+	// thread back to the main thread. Non-TLS because the main thread reads it
+	// after pal_thread_join (tests run sequentially, so no race).
+	testPanicMsg := c.module.NewGlobal("__promise_test_panic_msg", irtypes.I8Ptr)
+	testPanicMsg.Init = constant.NewNull(irtypes.I8Ptr)
+	c.testPanicMsgGlobal = testPanicMsg
 }
 
 // defineGNewFunc emits @promise_g_new(i8* %coro_handle) → i8*

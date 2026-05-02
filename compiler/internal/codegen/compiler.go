@@ -154,13 +154,15 @@ type Compiler struct {
 	palNumCPUs *ir.Func // @pal_num_cpus() → i32
 
 	// Scheduler globals (Phase 5c — M:N scheduler)
-	currentGGlobal    *ir.Global // @__promise_current_g (TLS, i8*)
-	currentPGlobal    *ir.Global // @__promise_current_p (TLS, i8*) — current P for local queue ops
-	schedGlobal       *ir.Global // @__promise_sched (global Sched struct)
-	panicJmpBufGlobal *ir.Global // @__promise_panic_jmpbuf (TLS, i8*) — setjmp buf for panic recovery
-	inCoroutine       bool       // true when compiling inside a go block coroutine body
-	coroCleanupBlk    *ir.Block  // coroutine cleanup block (destroy path: coro.free + free)
-	coroSuspendBlk    *ir.Block  // coroutine suspend block (suspend path: coro.end + ret)
+	currentGGlobal     *ir.Global // @__promise_current_g (TLS, i8*)
+	currentPGlobal     *ir.Global // @__promise_current_p (TLS, i8*) — current P for local queue ops
+	schedGlobal        *ir.Global // @__promise_sched (global Sched struct)
+	panicJmpBufGlobal  *ir.Global // @__promise_panic_jmpbuf (TLS, i8*) — setjmp buf for goroutine panic recovery
+	testJmpBufGlobal   *ir.Global // @__promise_test_jmpbuf (TLS, i8*) — setjmp buf for per-test panic recovery
+	testPanicMsgGlobal *ir.Global // @__promise_test_panic_msg (non-TLS, i8*) — panic msg for test recovery
+	inCoroutine        bool       // true when compiling inside a go block coroutine body
+	coroCleanupBlk     *ir.Block  // coroutine cleanup block (destroy path: coro.free + free)
+	coroSuspendBlk     *ir.Block  // coroutine suspend block (suspend path: coro.end + ret)
 
 	// Main function AST — saved so wrapMainWithScheduler can compile it inline
 	mainDecl *ast.FuncDecl
@@ -431,12 +433,11 @@ func Compile(file *ast.File, info *sema.Info, target string) *CompileResult {
 
 // GenerateTestMain replaces the user's main() with a test runner that calls
 // each test function via a codegen-emitted thread-based runner.
+// On non-WASM targets, per-test panic recovery allows subsequent tests to run
+// after a panic. The panic message is printed indented under the FAIL line.
 func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 	c := r.compiler
 
-	// Codegen-emitted test runner — replaces the C extern (fork/waitpid).
-	// Runs each test in a thread via PAL. If the test panics, pal_exit
-	// terminates the whole process (no fork isolation). Same as Go's testing.
 	testRunFn := c.defineTestRunFunc()
 	nanotimeFn := c.defineNanotimeFunc()
 	testPrintFn := c.module.NewFunc("promise_test_print_result",
@@ -494,6 +495,14 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 	failedNamesAlloca := entry.NewAlloca(failedNamesArrayType)
 	failedCountAlloca := entry.NewAlloca(irtypes.I32)
 	entry.NewStore(constant.NewInt(irtypes.I32, 0), failedCountAlloca)
+
+	// Shared global for panic context prefix (used by all tests)
+	var panicIndentGlobal *ir.Global
+	if !c.isWasm {
+		panicIndentData := constant.NewCharArrayFromString("  panic: ")
+		panicIndentGlobal = c.module.NewGlobalDef(".str.panic_indent", panicIndentData)
+		panicIndentGlobal.Immutable = true
+	}
 
 	for _, test := range tests {
 		// Skip tests excluded for this target
@@ -561,11 +570,36 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 		entry.NewStore(newPassed, passedAlloca)
 		entry.NewStore(newFailed, failedAlloca)
 
-		// If failed, store name pointer in failedNames array
+		// If failed, print panic context (if any) and store name in failedNames
 		failStoreBlock := mainFn.NewBlock(fmt.Sprintf("store_fail_%s", nameStr))
 		skipStoreBlock := mainFn.NewBlock(fmt.Sprintf("skip_fail_%s", nameStr))
 		isFail := entry.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 0))
 		entry.NewCondBr(isFail, failStoreBlock, skipStoreBlock)
+
+		// Print panic message if one was captured (non-WASM only)
+		if !c.isWasm {
+			panicMsg := failStoreBlock.NewLoad(irtypes.I8Ptr, c.testPanicMsgGlobal)
+			hasPanicMsg := failStoreBlock.NewICmp(enum.IPredNE, panicMsg, constant.NewNull(irtypes.I8Ptr))
+			printPanicBlk := mainFn.NewBlock(fmt.Sprintf("print_panic_%s", nameStr))
+			afterPanicBlk := mainFn.NewBlock(fmt.Sprintf("after_panic_%s", nameStr))
+			failStoreBlock.NewCondBr(hasPanicMsg, printPanicBlk, afterPanicBlk)
+
+			// Print "  panic: <msg>\n" to stdout
+			stdout := constant.NewInt(irtypes.I32, 1)
+			indentPtr := printPanicBlk.NewGetElementPtr(panicIndentGlobal.ContentType, panicIndentGlobal,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+			printPanicBlk.NewCall(c.palWrite, stdout, indentPtr, constant.NewInt(irtypes.I64, 9))
+			msgLen := printPanicBlk.NewCall(c.funcs["strlen"], panicMsg)
+			printPanicBlk.NewCall(c.palWrite, stdout, panicMsg, msgLen)
+			nlPtr := printPanicBlk.NewGetElementPtr(c.newlineGlobal.ContentType, c.newlineGlobal,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+			printPanicBlk.NewCall(c.palWrite, stdout, nlPtr, constant.NewInt(irtypes.I64, 1))
+			// Clear the panic message for the next test
+			printPanicBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.testPanicMsgGlobal)
+			printPanicBlk.NewBr(afterPanicBlk)
+
+			failStoreBlock = afterPanicBlk
+		}
 
 		// Store the name pointer at failedNames[failedCount], then increment
 		failIdx := failStoreBlock.NewLoad(irtypes.I32, failedCountAlloca)

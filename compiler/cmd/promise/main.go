@@ -804,6 +804,7 @@ func runTestFiles(files []string, timeout time.Duration, targetTriple string) {
 		}
 		testArgs = append(testArgs, f)
 		cmd := exec.CommandContext(ctx, selfExe, testArgs...)
+		setupProcessGroupKill(cmd)
 		output, cmdErr := cmd.CombinedOutput()
 		timedOut := ctx.Err() == context.DeadlineExceeded
 		cancel()

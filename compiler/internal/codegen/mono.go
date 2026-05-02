@@ -978,8 +978,8 @@ func (c *Compiler) defineMonoFuncs(file *ast.File, funcInsts []*sema.FuncInstanc
 		}
 
 		fn, ok := c.funcs[name]
-		if !ok {
-			continue
+		if !ok || len(fn.Blocks) > 0 {
+			continue // skip if not declared or already defined (e.g., from module phase)
 		}
 
 		sig := fi.Func.Type().(*types.Signature)

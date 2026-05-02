@@ -117,13 +117,19 @@ type savedGlobal struct {
 	tlsModel enum.TLSModel
 }
 
-// stripGlobals converts all global definitions to external declarations.
-// Module .o files reference globals but don't define them — main owns all globals.
+// stripGlobals converts non-private global definitions to external declarations.
+// Non-private globals (scheduler state, RTTI, vtables) are owned by the main module.
+// Private globals (string constants) are kept as-is: LTO handles them as separate
+// private copies per module — each module's functions reference their own copy,
+// and LTO renames them during merge to avoid symbol conflicts.
 func stripGlobals(c *Compiler) map[*ir.Global]savedGlobal {
 	saved := make(map[*ir.Global]savedGlobal)
 	for _, g := range c.module.Globals {
 		if g.Init == nil {
 			continue // already a declaration
+		}
+		if g.Linkage == enum.LinkagePrivate {
+			continue // private globals (string constants) stay in module IR
 		}
 		saved[g] = savedGlobal{
 			init:     g.Init,

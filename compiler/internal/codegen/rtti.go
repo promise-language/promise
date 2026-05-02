@@ -196,6 +196,11 @@ func (c *Compiler) computeMonoVtableInfo(instances []*types.Instance) {
 // emitMonoVtableGlobals creates vtable globals for monomorphic type instances
 // that have virtual methods. Each mono instance gets its own vtable with
 // method pointers resolved to the mono-specialized functions.
+//
+// Called twice: once before module compilation (may produce null entries for
+// module-owned types whose methods aren't declared yet) and once inside
+// compileModule (methods now declared). The second call updates any null
+// entries filled in by the module's method declarations.
 func (c *Compiler) emitMonoVtableGlobals(instances []*types.Instance) {
 	for _, inst := range instances {
 		named, ok := inst.Origin().(*types.Named)
@@ -203,9 +208,6 @@ func (c *Compiler) emitMonoVtableGlobals(instances []*types.Instance) {
 			continue
 		}
 		name := monoName(inst)
-		if _, exists := c.monoVtableGlobals[name]; exists {
-			continue
-		}
 		methods := named.AllVirtualMethods()
 		if len(methods) == 0 {
 			continue
@@ -236,6 +238,13 @@ func (c *Compiler) emitMonoVtableGlobals(instances []*types.Instance) {
 		}
 		arrayType := irtypes.NewArray(uint64(len(entries)), irtypes.I8Ptr)
 		init := constant.NewArray(arrayType, entries...)
+		if existing, exists := c.monoVtableGlobals[name]; exists {
+			// Update the existing vtable with newly available function pointers.
+			// This handles module-owned generic types (e.g. Map[K,V]) whose
+			// methods weren't declared when the vtable was first created.
+			existing.Init = init
+			continue
+		}
 		global := c.module.NewGlobalDef("promise_vtable_"+name, init)
 		global.Immutable = true
 		c.monoVtableGlobals[name] = global

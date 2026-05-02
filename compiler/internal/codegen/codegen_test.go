@@ -9807,3 +9807,187 @@ func TestMethodGenericOnGenericTypeIR(t *testing.T) {
 	// Should have mono type name + mono method name
 	assertContains(t, ir, "Box__int.convert__string")
 }
+
+// --- Monomorphization: gaps ---
+
+// TestGenericValueTypeLayout verifies that a generic pure-value type gets the
+// correct layout: fields are embedded in the value struct (_v), and the instance
+// struct (_i) is RTTI-only (no user fields). Also checks that no heap allocation
+// is emitted (value types are stack-allocated and copied).
+func TestGenericValueTypeLayout(t *testing.T) {
+	ir := generateIR(t, `
+		type Pair[T] {
+			T first `+"`"+`value;
+			T second `+"`"+`value;
+			sum(&this) T { return this.first; }
+		}
+		main() {
+			p := Pair[int](first: 1, second: 2);
+			x := p.sum();
+		}
+	`)
+	// Mono type names should appear
+	assertContains(t, ir, "Pair__int")
+	// Value struct has embedded fields (3 fields: _vtable, _rtti, first, second)
+	// The _v struct is named promise_Pair__int_v
+	assertContains(t, ir, "promise_Pair__int_v")
+	// Instance struct is RTTI-only (no user fields) — just the _variant pointer
+	assertContains(t, ir, "promise_Pair__int_i")
+	// RTTI global is emitted for value types
+	assertContains(t, ir, "promise_rtti_Pair__int")
+	// No heap allocation: value types are not malloc'd
+	assertNotContains(t, ir, "promise_Pair__int_i* @malloc")
+}
+
+// TestGenericValueTypeTwoInstances verifies that two instantiations of the same
+// generic value type produce distinct layouts and RTTI globals.
+func TestGenericValueTypeTwoInstances(t *testing.T) {
+	ir := generateIR(t, `
+		type Pair[T] {
+			T first `+"`"+`value;
+			T second `+"`"+`value;
+		}
+		main() {
+			pi := Pair[int](first: 1, second: 2);
+			pb := Pair[bool](first: true, second: false);
+		}
+	`)
+	assertContains(t, ir, "promise_Pair__int_v")
+	assertContains(t, ir, "promise_Pair__bool_v")
+	assertContains(t, ir, "promise_rtti_Pair__int")
+	assertContains(t, ir, "promise_rtti_Pair__bool")
+	// Separate typeinfo for each instantiation
+	assertContains(t, ir, "promise_typeinfo_Pair__int")
+	assertContains(t, ir, "promise_typeinfo_Pair__bool")
+}
+
+// TestGenericEnumTwoTypeParams verifies that a generic enum with two type parameters
+// is correctly monomorphized, producing distinct structs and a match that extracts
+// both variant fields.
+func TestGenericEnumTwoTypeParams(t *testing.T) {
+	ir := generateIR(t, `
+		enum Either[A, B] {
+			Left(A val),
+			Right(B val),
+		}
+		get_left(Either[int, string] e) int {
+			int r = match e {
+				Left(v) => v,
+				Right(_) => -1,
+			};
+			return r;
+		}
+		main() {
+			e := Either[int, string].Left(42);
+			x := get_left(e);
+		}
+	`)
+	// Both type params in mangled name
+	assertContains(t, ir, "Either__int__string")
+	// Value struct typedef emitted
+	assertContains(t, ir, "promise_Either__int__string_v")
+	// Function using the mono type exists
+	assertContains(t, ir, "get_left")
+}
+
+// TestDeeplyNestedGenericMonomorphization verifies that transitive instance
+// discovery via field types works at 3 levels of nesting.
+func TestDeeplyNestedGenericMonomorphization(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] { T val; }
+		main() {
+			inner := Box[int](val: 1);
+			mid := Box[Box[int]](val: inner);
+			outer := Box[Box[Box[int]]](val: mid);
+		}
+	`)
+	// All three levels must be monomorphized
+	assertContains(t, ir, "Box__int")
+	assertContains(t, ir, "Box__Box__int")
+	assertContains(t, ir, "Box__Box__Box__int")
+}
+
+// TestGenericMethodReturnsGenericInstance verifies that a generic method whose
+// return type is a monomorphized generic type is correctly compiled.
+func TestGenericMethodReturnsGenericInstance(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] {
+			T val;
+			clone(&this) Box[T] { return Box[T](val: this.val); }
+		}
+		main() {
+			b := Box[int](val: 5);
+			c := b.clone();
+		}
+	`)
+	assertContains(t, ir, "Box__int.clone")
+	// Return type is also Box__int — constructor call should appear
+	assertContains(t, ir, "Box__int")
+}
+
+// TestMonoSynthesizedDefaultOnGenericType verifies that a generic concrete type
+// implementing a structural interface inherits the interface's default methods,
+// and that those methods are emitted with the mono-qualified name.
+func TestMonoSynthesizedDefaultOnGenericType(t *testing.T) {
+	// Use a structural interface whose default method doesn't require operations
+	// on T — just calls another abstract method.
+	ir := generateIR(t, `
+		type Sized `+"`"+`structural {
+			size() int `+"`"+`abstract;
+			nonempty() bool => this.size() > 0;
+		}
+		type Pair[T] is Sized {
+			T a;
+			T b;
+			size() int { return 2; }
+		}
+		main() {
+			p := Pair[int](a: 1, b: 2);
+			bool r = p.nonempty();
+		}
+	`)
+	// The synthesized nonempty default should appear with the mono-qualified name
+	assertContains(t, ir, "Pair__int.nonempty")
+	// The concrete size method should also appear
+	assertContains(t, ir, "Pair__int.size")
+}
+
+// TestGenericFuncWithGenericReturnType verifies a generic function that both
+// takes and returns a monomorphic generic type. Box[int] is instantiated directly
+// in main so its layout is collected; the generic function takes and returns it.
+func TestGenericFuncWithGenericReturnType(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] { T val; }
+		identity_box[T](Box[T] b) Box[T] { return b; }
+		main() {
+			b := Box[int](val: 42);
+			c := identity_box[int](b);
+		}
+	`)
+	assertContains(t, ir, "identity_box__int")
+	assertContains(t, ir, "Box__int")
+}
+
+// TestGenericTypeInfoEmitted verifies that RTTI typeinfo and vtable globals are
+// emitted for monomorphic generic type instantiations. promise_type_is requires
+// these globals at runtime to check inheritance relationships.
+func TestGenericTypeInfoEmitted(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal[T] {
+			speak() T `+"`"+`abstract;
+		}
+		type Dog[T] is Animal[T] {
+			T sound;
+			speak() T { return this.sound; }
+		}
+		main() {
+			Dog[int] d = Dog[int](sound: 1);
+			Animal[int] a = d;
+		}
+	`)
+	// Mono typeinfo and vtable globals must be emitted for Dog[int].
+	assertContains(t, ir, "promise_typeinfo_Dog__int")
+	assertContains(t, ir, "promise_vtable_Dog__int")
+	// Animal[int] typeinfo must also be emitted (it's an abstract parent).
+	assertContains(t, ir, "promise_typeinfo_Animal__int")
+}

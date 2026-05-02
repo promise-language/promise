@@ -1230,9 +1230,21 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 		go func(name, irText string) {
 			defer wg.Done()
 
+			// Compute content-sensitive cache key: base key + hash of IR text.
+			// The IR encodes which monomorphic instances are present, so different
+			// user files that import the same module but use different generic
+			// instances produce different module IRs → different cache entries.
+			contentCacheKey := ""
+			if baseKey, ok := modCacheKeys[name]; ok && cacheDir != "" {
+				h := fnv.New128a()
+				fmt.Fprintf(h, "base:%s\n", baseKey)
+				h.Write([]byte(irText))
+				contentCacheKey = hex.EncodeToString(h.Sum(nil))
+			}
+
 			// Try cache lookup
-			if cacheKey, ok := modCacheKeys[name]; ok && cacheDir != "" {
-				if cachedObj := module.LookupBuildCache(cacheDir, cacheKey); cachedObj != "" {
+			if contentCacheKey != "" {
+				if cachedObj := module.LookupBuildCache(cacheDir, contentCacheKey); cachedObj != "" {
 					mu.Lock()
 					moduleObjs = append(moduleObjs, moduleObj{name: name, objFile: cachedObj, cached: true})
 					mu.Unlock()
@@ -1244,7 +1256,7 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 			obj := compileModule(irText, "promise-mod-"+name)
 
 			// Save to cache
-			if cacheKey, ok := modCacheKeys[name]; ok && cacheDir != "" {
+			if contentCacheKey != "" {
 				interfaceHash := ""
 				for _, mi := range modInfos {
 					if mi.EffectiveIRPrefix() == name {
@@ -1252,7 +1264,7 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 						break
 					}
 				}
-				_ = module.SaveBuildCache(cacheDir, cacheKey, interfaceHash, obj)
+				_ = module.SaveBuildCache(cacheDir, contentCacheKey, interfaceHash, obj)
 			}
 
 			mu.Lock()

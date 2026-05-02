@@ -228,10 +228,18 @@ func (c *Compiler) genInterpolatedString(e *ast.StringLit) value.Value {
 }
 
 // makeRuntimeString creates a global string constant and calls promise_string_new.
+// When compiling module code, names use a per-module counter so the constant
+// names are stable (independent of how many string constants user code has).
 func (c *Compiler) makeRuntimeString(s string) value.Value {
 	data := constant.NewCharArrayFromString(s)
-	globalName := fmt.Sprintf(".str.%d", c.strCounter)
-	c.strCounter++
+	var globalName string
+	if c.compilingModule != "" {
+		globalName = fmt.Sprintf(".str.__mod_%s.%d", c.compilingModule, c.moduleStrCounter)
+		c.moduleStrCounter++
+	} else {
+		globalName = fmt.Sprintf(".str.%d", c.strCounter)
+		c.strCounter++
+	}
 	global := c.module.NewGlobalDef(globalName, data)
 	global.Immutable = true
 

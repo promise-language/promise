@@ -79,8 +79,12 @@ type Compiler struct {
 	// Current type being compiled (set during method body generation)
 	currentNamed *types.Named
 
-	// String literal counter for unique global names
+	// String literal counter for unique global names (main code)
 	strCounter int
+
+	// Per-module string literal counter: reset to 0 for each module compilation so
+	// module string constant names are stable (independent of main code's strCounter).
+	moduleStrCounter int
 
 	// Lambda counter for unique anonymous function names
 	lambdaCounter int
@@ -2908,6 +2912,9 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo, extraInstances []*typ
 	c.info = modInfo.SemaInfo
 	c.file = modInfo.File
 	c.compilingModule = irName
+	// Reset per-module string counter so module string constant names are stable
+	// (independent of how many string constants main code has emitted so far).
+	c.moduleStrCounter = 0
 
 	modFile := modInfo.File
 
@@ -3930,6 +3937,12 @@ func (c *Compiler) findTypeDeclAnyFile(name string) (*ast.TypeDecl, *sema.Info) 
 // a structural interface that a concrete type does not override.
 // Called lazily when a view vtable is needed for (concrete, iface).
 func (c *Compiler) synthesizeDefaultMethods(concrete, iface *types.Named) {
+	// Generic types (with unresolved TypeParams) must not be synthesized here.
+	// Each concrete instantiation gets its own synthesized defaults via
+	// defineMonoSynthesizedDefaults / defineStructuralDefaultBodies.
+	if len(concrete.TypeParams()) > 0 {
+		return
+	}
 	// Find the interface's AST TypeDecl to get method bodies.
 	// The interface may be defined in a module file (e.g., std.Iterator[T]),
 	// so search all available files, not just c.file.

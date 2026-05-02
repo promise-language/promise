@@ -141,28 +141,27 @@ The key insight: **all remaining C functions reduce to just two primitives** —
 
 // PAL defines platform-specific function emitters.
 // Each method emits an LLVM IR function definition into the module.
+// Currently 32 methods: write, exit, alloc, free, realloc, 11 threading/sync,
+// num_cpus, and 12 file I/O (open, read, write, close, seek, stat_size,
+// remove, exists, mkdir, dir_remove, dir_exists, errno).
 type PAL interface {
-    // EmitWrite emits pal_write(fd i32, buf i8*, len i64) → i64
-    EmitWrite(module *ir.Module) *ir.Func
-
-    // EmitExit emits pal_exit(code i32) → void
-    EmitExit(module *ir.Module) *ir.Func
-
-    // EmitSpawn emits pal_spawn(fn i8*) → i32 (0=pass, 1=fail)
-    EmitSpawn(module *ir.Module) *ir.Func
+    EmitWrite(module *ir.Module) *ir.Func     // pal_write(fd, buf, len) → i64
+    EmitExit(module *ir.Module) *ir.Func      // pal_exit(code) → void [noreturn]
+    EmitAlloc(module *ir.Module) *ir.Func     // pal_alloc(size) → i8*
+    EmitFree(module *ir.Module) *ir.Func      // pal_free(ptr) → void
+    EmitRealloc(module *ir.Module) *ir.Func   // pal_realloc(ptr, size) → i8*
+    // ... threading (11 methods), num_cpus, file I/O (12 methods)
 }
 
 // ForTarget returns the PAL implementation for the given target triple.
 func ForTarget(triple string) PAL {
     switch {
-    case strings.Contains(triple, "darwin"):
-        return &DarwinPAL{}
-    case strings.Contains(triple, "linux"):
-        return &LinuxPAL{}
+    case strings.Contains(triple, "windows"):
+        return &WindowsPAL{}
     case strings.Contains(triple, "wasm"):
         return &WasmPAL{}
     default:
-        return &LinuxPAL{} // fallback
+        return &PosixPAL{target: triple}
     }
 }
 ```
@@ -340,21 +339,23 @@ The generated `.ll` file contains everything: user code, intrinsic functions, PA
 ```
 compiler/internal/codegen/
 ├── pal/
-│   ├── pal.go          # PAL interface + ForTarget() selector
-│   ├── darwin.go       # DarwinPAL: libSystem.dylib (write, exit)
-│   └── linux.go        # LinuxPAL: raw syscall (write, exit_group)
+│   ├── pal.go          # PAL interface + ForTarget() + shared stubs
+│   ├── posix.go        # PosixPAL: libc wrappers (macOS + Linux)
+│   ├── windows.go      # WindowsPAL: Win32 API + UCRT wrappers
+│   ├── wasm.go         # WasmPAL: WASI imports + stubs
+│   └── pal_test.go     # Cross-platform IR shape tests
 ├── io.go               # definePrintStringFunc, definePrintIntFunc, etc.
 ├── compiler.go         # PAL field, wiring into declareIntrinsics
 └── ...existing files...
 ```
 
-Windows and WASM PAL backends added in Phases 3b/3c. The `pal.go` interface grows as needed (Threading, IO Reactor functions added in Phases 5-6).
+Three PAL backends: PosixPAL (macOS + Linux via libc), WindowsPAL (Win32 API + UCRT), WasmPAL (WASI imports + stubs). The interface has grown to 32 methods covering memory, threading, sync, CPU count, and file I/O.
 
 ### Target Platforms
 
 | Feature | macOS | Linux | Windows | WASM (browser) |
 |---------|-------|-------|---------|----------------|
-| Syscall style | libSystem.dylib | raw `syscall` | kernel32.dll (Win32 API) | host imports (JS FFI / WASI) |
+| Syscall style | libSystem.dylib (libc) | musl/glibc (libc) | kernel32.dll + UCRT | WASI imports |
 | IO multiplex | kqueue | epoll | IOCP | event loop (JS) |
 | Memory pages | mmap/munmap | mmap/munmap | VirtualAlloc/VirtualFree | memory.grow |
 | Threads | pthread | pthread/clone | CreateThread | **none** (single-threaded) |

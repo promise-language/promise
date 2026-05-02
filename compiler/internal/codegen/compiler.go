@@ -165,6 +165,20 @@ type Compiler struct {
 	// PAL scheduler primitives (Phase 5c)
 	palNumCPUs *ir.Func // @pal_num_cpus() → i32
 
+	// PAL file I/O primitives (Phase D)
+	palFileOpen     *ir.Func // @pal_file_open(i8* path, i32 mode) → i32
+	palFileRead     *ir.Func // @pal_file_read(i32 fd, i8* buf, i64 len) → i64
+	palFileWrite    *ir.Func // @pal_file_write(i32 fd, i8* buf, i64 len) → i64
+	palFileClose    *ir.Func // @pal_file_close(i32 fd) → i32
+	palFileSeek     *ir.Func // @pal_file_seek(i32 fd, i64 offset, i32 whence) → i64
+	palFileStatSize *ir.Func // @pal_file_stat_size(i8* path) → i64
+	palFileRemove   *ir.Func // @pal_file_remove(i8* path) → i32
+	palFileExists   *ir.Func // @pal_file_exists(i8* path) → i32
+	palFileMkdir    *ir.Func // @pal_file_mkdir(i8* path) → i32
+	palDirRemove    *ir.Func // @pal_dir_remove(i8* path) → i32
+	palDirExists    *ir.Func // @pal_dir_exists(i8* path) → i32
+	palErrno        *ir.Func // @pal_errno() → i32
+
 	// Scheduler globals (Phase 5c — M:N scheduler)
 	currentGGlobal     *ir.Global // @__promise_current_g (TLS, i8*)
 	currentPGlobal     *ir.Global // @__promise_current_p (TLS, i8*) — current P for local queue ops
@@ -911,6 +925,20 @@ func (c *Compiler) declareIntrinsics() {
 	// PAL: emit platform-specific IO/exit primitives
 	c.palWrite = p.EmitWrite(c.module)
 	c.palExit = p.EmitExit(c.module)
+
+	// PAL: emit file I/O primitives (Phase D)
+	c.palFileOpen = p.EmitFileOpen(c.module)
+	c.palFileRead = p.EmitFileRead(c.module)
+	c.palFileWrite = p.EmitFileWrite(c.module)
+	c.palFileClose = p.EmitFileClose(c.module)
+	c.palFileSeek = p.EmitFileSeek(c.module)
+	c.palFileStatSize = p.EmitFileStatSize(c.module)
+	c.palFileRemove = p.EmitFileRemove(c.module)
+	c.palFileExists = p.EmitFileExists(c.module)
+	c.palFileMkdir = p.EmitFileMkdir(c.module)
+	c.palDirRemove = p.EmitDirRemove(c.module)
+	c.palDirExists = p.EmitDirExists(c.module)
+	c.palErrno = p.EmitErrno(c.module)
 
 	// strlen — needed by definePanicBody to get C string length
 	if c.isWasm {

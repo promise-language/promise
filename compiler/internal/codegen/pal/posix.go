@@ -308,6 +308,287 @@ func (p *PosixPAL) EmitCondDestroy(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// --- POSIX file I/O (Phase D) ---
+
+// isMacOS returns true if the target is macOS/Apple.
+func (p *PosixPAL) isMacOS() bool {
+	return strings.Contains(p.target, "darwin") || strings.Contains(p.target, "apple")
+}
+
+// EmitFileOpen declares libc @open and defines @pal_file_open.
+// Maps mode (0=open-rw, 1=read, 2=create, 3=append) to platform-specific O_* flags.
+func (p *PosixPAL) EmitFileOpen(module *ir.Module) *ir.Func {
+	// declare i32 @open(i8*, i32, i32) nounwind
+	openFn := module.NewFunc("open", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr),
+		ir.NewParam("oflag", irtypes.I32),
+		ir.NewParam("mode", irtypes.I32))
+	openFn.FuncAttrs = append(openFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	// Platform-specific O_* flag constants
+	var oRDWR, oRDONLY, oCreateTrunc, oCreateAppend int64
+	if p.isMacOS() {
+		// macOS: O_RDONLY=0, O_RDWR=2, O_CREAT=0x200, O_TRUNC=0x400, O_APPEND=0x8
+		oRDONLY = 0
+		oRDWR = 2
+		oCreateTrunc = 2 | 0x200 | 0x400 // O_RDWR|O_CREAT|O_TRUNC
+		oCreateAppend = 2 | 0x200 | 0x8  // O_RDWR|O_CREAT|O_APPEND
+	} else {
+		// Linux: O_RDONLY=0, O_RDWR=2, O_CREAT=0x40, O_TRUNC=0x200, O_APPEND=0x400
+		oRDONLY = 0
+		oRDWR = 2
+		oCreateTrunc = 2 | 0x40 | 0x200  // O_RDWR|O_CREAT|O_TRUNC
+		oCreateAppend = 2 | 0x40 | 0x400 // O_RDWR|O_CREAT|O_APPEND
+	}
+
+	fn := module.NewFunc("pal_file_open", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr),
+		ir.NewParam("mode", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	// Map mode to flags using select chain
+	isRead := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 1))
+	isCreate := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 2))
+	isAppend := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 3))
+
+	f1 := entry.NewSelect(isRead, constant.NewInt(irtypes.I32, oRDONLY), constant.NewInt(irtypes.I32, oRDWR))
+	f2 := entry.NewSelect(isCreate, constant.NewInt(irtypes.I32, oCreateTrunc), f1)
+	flags := entry.NewSelect(isAppend, constant.NewInt(irtypes.I32, oCreateAppend), f2)
+
+	// open(path, flags, 0644)
+	fd := entry.NewCall(openFn, fn.Params[0], flags, constant.NewInt(irtypes.I32, 0644))
+	entry.NewRet(fd)
+	return fn
+}
+
+// EmitFileRead declares libc @read and defines @pal_file_read.
+func (p *PosixPAL) EmitFileRead(module *ir.Module) *ir.Func {
+	// declare i64 @read(i32, i8*, i64) nounwind
+	readFn := module.NewFunc("read", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("nbyte", irtypes.I64))
+	readFn.FuncAttrs = append(readFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_file_read", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(readFn, fn.Params[0], fn.Params[1], fn.Params[2])
+	entry.NewRet(ret)
+	return fn
+}
+
+// EmitFileWrite declares libc @write (reuses existing declaration if present)
+// and defines @pal_file_write.
+func (p *PosixPAL) EmitFileWrite(module *ir.Module) *ir.Func {
+	// Reuse existing write declaration if already emitted by EmitWrite
+	writeFn := lookupFunc(module, "write")
+	if writeFn == nil {
+		writeFn = module.NewFunc("write", irtypes.I64,
+			ir.NewParam("fd", irtypes.I32),
+			ir.NewParam("buf", irtypes.I8Ptr),
+			ir.NewParam("len", irtypes.I64))
+		writeFn.FuncAttrs = append(writeFn.FuncAttrs, enum.FuncAttrNoUnwind)
+	}
+
+	fn := module.NewFunc("pal_file_write", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(writeFn, fn.Params[0], fn.Params[1], fn.Params[2])
+	entry.NewRet(ret)
+	return fn
+}
+
+// EmitFileClose declares libc @close and defines @pal_file_close.
+func (p *PosixPAL) EmitFileClose(module *ir.Module) *ir.Func {
+	closeFn := module.NewFunc("close", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	closeFn.FuncAttrs = append(closeFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_file_close", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(closeFn, fn.Params[0])
+	entry.NewRet(ret)
+	return fn
+}
+
+// EmitFileSeek declares libc @lseek and defines @pal_file_seek.
+func (p *PosixPAL) EmitFileSeek(module *ir.Module) *ir.Func {
+	lseekFn := module.NewFunc("lseek", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("offset", irtypes.I64),
+		ir.NewParam("whence", irtypes.I32))
+	lseekFn.FuncAttrs = append(lseekFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_file_seek", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("offset", irtypes.I64),
+		ir.NewParam("whence", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(lseekFn, fn.Params[0], fn.Params[1], fn.Params[2])
+	entry.NewRet(ret)
+	return fn
+}
+
+// EmitFileStatSize defines @pal_file_stat_size using open+lseek+close.
+// Avoids struct stat layout differences between macOS and Linux.
+func (p *PosixPAL) EmitFileStatSize(module *ir.Module) *ir.Func {
+	openFn := lookupFunc(module, "open")
+	closeFn := lookupFunc(module, "close")
+	lseekFn := lookupFunc(module, "lseek")
+
+	fn := module.NewFunc("pal_file_stat_size", irtypes.I64,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	entry := fn.NewBlock(".entry")
+	failBlk := fn.NewBlock(".fail")
+	gotFdBlk := fn.NewBlock(".got_fd")
+
+	// open(path, O_RDONLY=0, 0)
+	fd := entry.NewCall(openFn, fn.Params[0], constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	isNeg := entry.NewICmp(enum.IPredSLT, fd, constant.NewInt(irtypes.I32, 0))
+	entry.NewCondBr(isNeg, failBlk, gotFdBlk)
+
+	// lseek(fd, 0, SEEK_END=2)
+	size := gotFdBlk.NewCall(lseekFn, fd, constant.NewInt(irtypes.I64, 0), constant.NewInt(irtypes.I32, 2))
+	gotFdBlk.NewCall(closeFn, fd)
+	gotFdBlk.NewRet(size)
+
+	failBlk.NewRet(constant.NewInt(irtypes.I64, -1))
+	return fn
+}
+
+// EmitFileRemove declares libc @unlink and defines @pal_file_remove.
+func (p *PosixPAL) EmitFileRemove(module *ir.Module) *ir.Func {
+	unlinkFn := module.NewFunc("unlink", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	unlinkFn.FuncAttrs = append(unlinkFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_file_remove", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(unlinkFn, fn.Params[0])
+	entry.NewRet(ret)
+	return fn
+}
+
+// EmitFileExists declares libc @access and defines @pal_file_exists.
+// Uses access(path, F_OK=0) to check existence.
+func (p *PosixPAL) EmitFileExists(module *ir.Module) *ir.Func {
+	accessFn := module.NewFunc("access", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr),
+		ir.NewParam("amode", irtypes.I32))
+	accessFn.FuncAttrs = append(accessFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_file_exists", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	// access(path, F_OK=0) returns 0 on success, -1 on failure
+	ret := entry.NewCall(accessFn, fn.Params[0], constant.NewInt(irtypes.I32, 0))
+	isZero := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, 0))
+	result := entry.NewSelect(isZero, constant.NewInt(irtypes.I32, 1), constant.NewInt(irtypes.I32, 0))
+	entry.NewRet(result)
+	return fn
+}
+
+// EmitFileMkdir declares libc @mkdir and defines @pal_file_mkdir.
+// Uses mode 0755 (493 decimal).
+func (p *PosixPAL) EmitFileMkdir(module *ir.Module) *ir.Func {
+	mkdirFn := module.NewFunc("mkdir", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr),
+		ir.NewParam("mode", irtypes.I32))
+	mkdirFn.FuncAttrs = append(mkdirFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_file_mkdir", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(mkdirFn, fn.Params[0], constant.NewInt(irtypes.I32, 0755))
+	entry.NewRet(ret)
+	return fn
+}
+
+// EmitDirRemove declares libc @rmdir and defines @pal_dir_remove.
+func (p *PosixPAL) EmitDirRemove(module *ir.Module) *ir.Func {
+	rmdirFn := module.NewFunc("rmdir", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	rmdirFn.FuncAttrs = append(rmdirFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_dir_remove", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(rmdirFn, fn.Params[0])
+	entry.NewRet(ret)
+	return fn
+}
+
+// EmitDirExists declares libc @opendir/@closedir and defines @pal_dir_exists.
+// Uses opendir(path) to test if the path is a directory.
+func (p *PosixPAL) EmitDirExists(module *ir.Module) *ir.Func {
+	opendirFn := module.NewFunc("opendir", irtypes.I8Ptr,
+		ir.NewParam("dirname", irtypes.I8Ptr))
+	opendirFn.FuncAttrs = append(opendirFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	closedirFn := module.NewFunc("closedir", irtypes.I32,
+		ir.NewParam("dirp", irtypes.I8Ptr))
+	closedirFn.FuncAttrs = append(closedirFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_dir_exists", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	entry := fn.NewBlock(".entry")
+	yesBlk := fn.NewBlock(".yes")
+	noBlk := fn.NewBlock(".no")
+
+	dir := entry.NewCall(opendirFn, fn.Params[0])
+	isNull := entry.NewICmp(enum.IPredEQ, dir, constant.NewNull(irtypes.I8Ptr))
+	entry.NewCondBr(isNull, noBlk, yesBlk)
+
+	yesBlk.NewCall(closedirFn, dir)
+	yesBlk.NewRet(constant.NewInt(irtypes.I32, 1))
+
+	noBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
+}
+
+// EmitErrno defines @pal_errno using the platform-specific errno location function.
+// Linux: __errno_location(), macOS: __error(). Both return i32*.
+func (p *PosixPAL) EmitErrno(module *ir.Module) *ir.Func {
+	// errno location function name differs by platform
+	errnoFnName := "__errno_location" // Linux
+	if p.isMacOS() {
+		errnoFnName = "__error" // macOS
+	}
+
+	errnoLocFn := module.NewFunc(errnoFnName, irtypes.NewPointer(irtypes.I32))
+	errnoLocFn.FuncAttrs = append(errnoLocFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_errno", irtypes.I32)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	ptr := entry.NewCall(errnoLocFn)
+	val := entry.NewLoad(irtypes.I32, ptr)
+	entry.NewRet(val)
+	return fn
+}
+
 // EmitNumCPUs declares libc @sysconf and defines @pal_num_cpus() → i32.
 // Uses _SC_NPROCESSORS_ONLN which differs between macOS (58) and Linux (84).
 func (p *PosixPAL) EmitNumCPUs(module *ir.Module) *ir.Func {
@@ -318,7 +599,7 @@ func (p *PosixPAL) EmitNumCPUs(module *ir.Module) *ir.Func {
 
 	// _SC_NPROCESSORS_ONLN: macOS=58, Linux=84
 	scNprocessorsOnln := int64(84) // Linux default
-	if strings.Contains(p.target, "darwin") || strings.Contains(p.target, "apple") {
+	if p.isMacOS() {
 		scNprocessorsOnln = 58
 	}
 

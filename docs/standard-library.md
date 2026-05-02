@@ -394,23 +394,28 @@ x := s.next[int]()!;
 
 ## 3. PAL Extensions
 
-The PAL (Platform Abstraction Layer) isolates all OS interaction. Currently 20 methods covering memory, threads, mutexes, condvars, and CPU count. New methods needed:
+The PAL (Platform Abstraction Layer) isolates all OS interaction. Currently 32 methods covering memory, threads, mutexes, condvars, CPU count, and file I/O. New methods needed:
 
-### 3.1 File I/O
+### 3.1 File I/O — Done
+
+12 PAL methods implemented in `codegen/pal/` across POSIX, Windows, and WASM:
 
 ```go
-// PAL interface additions
-EmitFileOpen(module *ir.Module) *ir.Func    // i8* path, i32 flags, i32 mode → i32 (fd or -1)
-EmitFileRead(module *ir.Module) *ir.Func    // i32 fd, i8* buf, i64 len → i64 (bytes read or -1)
-EmitFileClose(module *ir.Module) *ir.Func   // i32 fd → i32 (0 or -1)
-EmitFileStat(module *ir.Module) *ir.Func    // i8* path → {i64 size, i64 mtime_ns, i32 mode, i32 err}
-EmitFileRemove(module *ir.Module) *ir.Func  // i8* path → i32 (0 or -1)
-EmitFileMkdir(module *ir.Module) *ir.Func   // i8* path, i32 mode → i32 (0 or -1)
+EmitFileOpen(module *ir.Module) *ir.Func      // i8* path, i32 mode → i32 (fd or -1)
+EmitFileRead(module *ir.Module) *ir.Func      // i32 fd, i8* buf, i64 len → i64 (bytes read or -1)
+EmitFileWrite(module *ir.Module) *ir.Func     // i32 fd, i8* buf, i64 len → i64 (bytes written or -1)
+EmitFileClose(module *ir.Module) *ir.Func     // i32 fd → i32 (0 or -1)
+EmitFileSeek(module *ir.Module) *ir.Func      // i32 fd, i64 offset, i32 whence → i64 (position or -1)
+EmitFileStatSize(module *ir.Module) *ir.Func  // i8* path → i64 (size or -1, via open+lseek+close)
+EmitFileRemove(module *ir.Module) *ir.Func    // i8* path → i32 (0 or -1)
+EmitFileExists(module *ir.Module) *ir.Func    // i8* path → i32 (1=yes, 0=no)
+EmitFileMkdir(module *ir.Module) *ir.Func     // i8* path → i32 (0 or -1)
+EmitDirRemove(module *ir.Module) *ir.Func     // i8* path → i32 (0 or -1)
+EmitDirExists(module *ir.Module) *ir.Func     // i8* path → i32 (1=yes, 0=no)
+EmitErrno(module *ir.Module) *ir.Func         // → i32 (thread-local errno)
 ```
 
-Note: `EmitFileWrite` already exists in PAL (currently used for stdout/stderr fd 1/2). `EmitFileRead` is new. `EmitFileWrite` works for any fd.
-
-POSIX implementation: direct `open(2)`, `read(2)`, `close(2)`, `stat(2)`, `unlink(2)`, `mkdir(2)` syscall wrappers.
+`EmitFileOpen` takes a mode enum (0=rw, 1=ro, 2=create-trunc, 3=append) mapped to platform O_* flags internally. `EmitFileStatSize` uses open+lseek(SEEK_END)+close to avoid `struct stat` layout portability issues. POSIX uses libc wrappers; Windows uses UCRT (`_open`, `_read`, etc.) with `_O_BINARY`; WASM stubs return error.
 
 ### 3.2 OS / Environment
 
@@ -471,7 +476,7 @@ EmitMemcpy(module *ir.Module) *ir.Func      // i8* dst, i8* src, i64 len → voi
 
 | Category | New Methods | POSIX Backing |
 |----------|-------------|---------------|
-| File I/O | 6 | `open`, `read`, `close`, `stat`, `unlink`, `mkdir` |
+| File I/O | 12 (done) | `open`, `read`, `write`, `close`, `seek`, `stat_size`, `remove`, `exists`, `mkdir`, `dir_remove`, `dir_exists`, `errno` |
 | OS | 2 | `getenv`, `getcwd` |
 | Time | 3 | `clock_gettime` (×2), `nanosleep` |
 | Process | 2 | `posix_spawn` or `fork`+`exec`, `waitpid` |

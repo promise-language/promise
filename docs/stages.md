@@ -46,7 +46,7 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 | Area | Description | Status | Design Doc |
 |------|-------------|--------|------------|
 | Runtime migration | Move C runtime to codegen LLVM IR / pure Promise | Done (Phases 1-4) | [runtime-architecture.md](runtime-architecture.md) |
-| Platform abstraction | PAL for macOS/Linux/Windows/WASM | Done (Phase 3). Windows W1 done (threading + linker). | [runtime-architecture.md](runtime-architecture.md), [windows-support.md](windows-support.md) |
+| Platform abstraction | PAL for macOS/Linux/Windows/WASM | Done (Phase 3). Windows W1 done (threading + linker). Phase D PAL done (12 sync file I/O functions). | [runtime-architecture.md](runtime-architecture.md), [windows-support.md](windows-support.md), [platform-modules.md](platform-modules.md) |
 | 1:1 Threading | `go`/`<-` with OS threads via PAL | Done (Phase 5a) | [runtime-architecture.md](runtime-architecture.md) |
 | Channels | `channel[T]` with buffered/unbuffered send/receive/for-in | Done (Phase 5b) | [runtime-architecture.md](runtime-architecture.md) |
 | M:N Scheduler | LLVM coroutines, GMP model, work stealing | Done (Phase 5c) | [runtime-architecture.md](runtime-architecture.md) |
@@ -989,6 +989,9 @@ Known gaps and improvements deferred from completed stages.
 | Generator closures (capturing lambdas as generators) | Generators | Low |
 | ~~Mono type vtable/RTTI~~: **Fixed.** Added `computeMonoVtableInfo`, `emitMonoVtableGlobals`, `emitMonoTypeInfoGlobals` in `rtti.go` plus unified lookup helpers (`lookupVtableGlobal`, `lookupTypeInfoGlobal`, `lookupValueTypeRTTI`) in `compiler.go`. Constructor codegen (`expr.go`) uses these to resolve vtable/typeinfo for both mono and non-mono types. | 8f | ~~Medium~~ Resolved |
 | Devirtualization optimization (direct call when concrete type known) | 8L | Low |
+| PAL `EmitFileStatSize` depends on `lookupFunc` for `pal_file_open`/`pal_file_close` — will panic if emission order in `declareIntrinsics()` changes. Consider explicit func parameters or nil-check with clear error. Same pattern in Windows `EmitFileStatSize`. | D | Low |
+| PAL file I/O functions emitted but not yet wired to Promise-level `io` module. Fields stored in Compiler struct (`palFileOpen`, etc.) awaiting `modules/io` implementation. | D | Low |
+| PAL dir listing (`pal_dir_open`/`pal_dir_next`/`pal_dir_close`) deferred — `readdir`/`dirent` struct layout varies across platforms (glibc vs musl vs macOS vs Windows). Needs per-platform struct definitions or alternative approach. | D | Low |
 | ~~Factory `Self` return type on generic types resolves to raw `Vector` instead of monomorphized `Vector[T]`~~ — **Resolved**: `selfType()` helper returns self-instantiation (`Instance{curType, [T1, T2, ...]}`) for generic types; used in `resolveNamedType`, `checkIdentExpr`, and implicit abstract factory return | Sema | ~~Low~~ |
 | ~~`as!` cast between u8/char crashes (extractInstancePtr on scalar)~~ — **Fixed.** `emitScalarCast()` handles all scalar types (numeric, char, bool). `isScalarCastType()` in sema routes char/bool through the scalar cast path instead of the RTTI path. `int → bool` uses `icmp ne 0` (not trunc). `float → bool` uses `fcmp une 0.0` (NaN is truthy). 156 tests (106 e2e + 22 codegen IR + 28 sema). | Codegen | ~~Low~~ Resolved |
 | ~~String comparison operators (`<`, `>`, `<=`, `>=`)~~ — **Resolved**: lexicographic byte comparison via `memcmp` | 8b | ~~Medium~~ |

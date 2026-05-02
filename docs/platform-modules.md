@@ -612,21 +612,33 @@ is possible on WASI-capable runtimes (Wasmtime, WasmEdge). Whether to support th
 For now: `\`target(!wasm)` on `File` and `Dir`. WASM programs that try to use `io.File` get a
 compile-time error. This can be relaxed later when WASI support is designed properly.
 
-### PAL additions
+### PAL additions (implemented)
 
 ```
-pal_file_open(i8* path, i32 flags, i32 mode) i32      // fd or -1
+pal_file_open(i8* path, i32 mode) i32                 // fd or -1; mode: 0=rw, 1=ro, 2=create-trunc, 3=append
 pal_file_read(i32 fd, i8* buf, i64 len) i64           // bytes read, 0=EOF, -1=error
 pal_file_write(i32 fd, i8* buf, i64 len) i64          // bytes written or -1
 pal_file_close(i32 fd) i32                            // 0 or -1
-pal_file_stat_size(i8* path) i64                      // -1 = does not exist
-pal_file_remove(i8* path) i32                         // 0 or -1
-pal_file_mkdir(i8* path) i32                          // 0 or -1
-pal_file_readdir(i8* path, i8* buf, i64 len) i32      // null-separated names; returns count
 pal_file_seek(i32 fd, i64 offset, i32 whence) i64     // new position or -1
+pal_file_stat_size(i8* path) i64                      // file size or -1 (uses open+lseek+close)
+pal_file_remove(i8* path) i32                         // 0 or -1
 pal_file_exists(i8* path) i32                         // 1 = exists, 0 = not found
+pal_file_mkdir(i8* path) i32                          // 0 or -1
+pal_dir_remove(i8* path) i32                          // 0 or -1
 pal_dir_exists(i8* path) i32                          // 1 = is directory, 0 = not
+pal_errno() i32                                       // current thread-local errno value
 ```
+
+**Design decisions:**
+- `pal_file_open` takes a mode enum (not raw O_* flags) — the PAL maps to platform-specific constants internally. This avoids leaking POSIX vs Windows flag differences.
+- `pal_file_stat_size` uses open+lseek(SEEK_END)+close instead of `stat()` — avoids `struct stat` layout differences between macOS and Linux.
+- POSIX `pal_dir_exists` uses opendir/closedir instead of `stat()` for the same reason.
+- Windows uses UCRT POSIX wrappers (`_open`, `_read`, etc.) with `_O_BINARY` always set. `pal_dir_exists` uses `GetFileAttributesA` since UCRT has no `opendir`.
+- WASM stubs return -1 (error) or 0 (not found) for all file ops — no filesystem access yet.
+- `pal_errno` uses `__errno_location()` (Linux), `__error()` (macOS), `_errno()` (Windows).
+
+**Deferred:**
+- `pal_dir_open`/`pal_dir_next`/`pal_dir_close` (dir listing) — readdir struct layout differences + Windows FindFirstFile state management
 
 ### Reactor PAL
 
@@ -865,8 +877,7 @@ First real use of `` `target `` in production code. Platform constants consolida
 
 12. **Reactor infrastructure** — global reactor in `codegen/reactor.go`: epoll (Linux), kqueue (macOS)
     integration with sysmon (`reactor_poll(0)`) and idle Ms (`reactor_poll(block)`)
-13. **PAL file functions** — add to `codegen/io.go`: open, read, write, close, stat, remove, mkdir,
-    readdir, seek, exists, dir_exists
+13. ~~**PAL file functions**~~ — **Done.** 12 sync PAL functions in `codegen/pal/` (open, read, write, close, seek, stat_size, remove, exists, mkdir, dir_remove, dir_exists, errno) across POSIX/Windows/WASM. Dir listing deferred (readdir struct layout complexity).
 14. **`modules/io`** — `IoError`, `File` (4 factory constructors + handle methods + one-shot helpers),
     `Dir` (global namespace for directory ops), `read_line`, `read_stdin`
 15. **BufReader** — deferred until real usage drives it

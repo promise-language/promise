@@ -52,6 +52,33 @@ type PAL interface {
 	// Scheduler primitives (Phase 5c)
 	// EmitNumCPUs defines @pal_num_cpus() → i32
 	EmitNumCPUs(module *ir.Module) *ir.Func
+
+	// File I/O primitives (Phase D)
+	// EmitFileOpen defines @pal_file_open(i8* path, i32 mode) → i32 (fd or -1)
+	// mode: 0=open(rw), 1=read(ro), 2=create(rw,trunc), 3=append(rw,create)
+	EmitFileOpen(module *ir.Module) *ir.Func
+	// EmitFileRead defines @pal_file_read(i32 fd, i8* buf, i64 len) → i64
+	EmitFileRead(module *ir.Module) *ir.Func
+	// EmitFileWrite defines @pal_file_write(i32 fd, i8* buf, i64 len) → i64
+	EmitFileWrite(module *ir.Module) *ir.Func
+	// EmitFileClose defines @pal_file_close(i32 fd) → i32 (0=ok, -1=error)
+	EmitFileClose(module *ir.Module) *ir.Func
+	// EmitFileSeek defines @pal_file_seek(i32 fd, i64 offset, i32 whence) → i64
+	EmitFileSeek(module *ir.Module) *ir.Func
+	// EmitFileStatSize defines @pal_file_stat_size(i8* path) → i64 (-1=error)
+	EmitFileStatSize(module *ir.Module) *ir.Func
+	// EmitFileRemove defines @pal_file_remove(i8* path) → i32 (0=ok, -1=error)
+	EmitFileRemove(module *ir.Module) *ir.Func
+	// EmitFileExists defines @pal_file_exists(i8* path) → i32 (1=yes, 0=no)
+	EmitFileExists(module *ir.Module) *ir.Func
+	// EmitFileMkdir defines @pal_file_mkdir(i8* path) → i32 (0=ok, -1=error)
+	EmitFileMkdir(module *ir.Module) *ir.Func
+	// EmitDirRemove defines @pal_dir_remove(i8* path) → i32 (0=ok, -1=error)
+	EmitDirRemove(module *ir.Module) *ir.Func
+	// EmitDirExists defines @pal_dir_exists(i8* path) → i32 (1=yes, 0=no)
+	EmitDirExists(module *ir.Module) *ir.Func
+	// EmitErrno defines @pal_errno() → i32
+	EmitErrno(module *ir.Module) *ir.Func
 }
 
 // ForTarget returns a PAL implementation for the given LLVM target triple.
@@ -262,15 +289,6 @@ func emitStubCondBroadcast(module *ir.Module) *ir.Func {
 	return fn
 }
 
-// emitStubNumCPUs returns 1 (single-threaded platforms: WASM, Windows stub).
-func emitStubNumCPUs(module *ir.Module) *ir.Func {
-	fn := module.NewFunc("pal_num_cpus", irtypes.I32)
-	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	entry := fn.NewBlock(".entry")
-	entry.NewRet(constant.NewInt(irtypes.I32, 1))
-	return fn
-}
-
 // emitStubCondDestroy frees the dummy handle.
 func emitStubCondDestroy(module *ir.Module) *ir.Func {
 	palFree := lookupFunc(module, "pal_free")
@@ -280,5 +298,142 @@ func emitStubCondDestroy(module *ir.Module) *ir.Func {
 	entry := fn.NewBlock(".entry")
 	entry.NewCall(palFree, fn.Params[0])
 	entry.NewRet(nil)
+	return fn
+}
+
+// emitStubNumCPUs returns 1 (single-threaded platforms: WASM, Windows stub).
+func emitStubNumCPUs(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_num_cpus", irtypes.I32)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, 1))
+	return fn
+}
+
+// --- Stub file I/O implementations (used by WASM PAL) ---
+
+// emitStubFileOpen returns -1 (no file I/O support).
+func emitStubFileOpen(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_file_open", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr),
+		ir.NewParam("mode", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}
+
+// emitStubFileRead returns -1.
+func emitStubFileRead(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_file_read", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I64, -1))
+	return fn
+}
+
+// emitStubFileWrite returns -1.
+func emitStubFileWrite(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_file_write", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I64, -1))
+	return fn
+}
+
+// emitStubFileClose returns -1.
+func emitStubFileClose(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_file_close", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}
+
+// emitStubFileSeek returns -1.
+func emitStubFileSeek(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_file_seek", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("offset", irtypes.I64),
+		ir.NewParam("whence", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I64, -1))
+	return fn
+}
+
+// emitStubFileStatSize returns -1.
+func emitStubFileStatSize(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_file_stat_size", irtypes.I64,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I64, -1))
+	return fn
+}
+
+// emitStubFileRemove returns -1.
+func emitStubFileRemove(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_file_remove", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}
+
+// emitStubFileExists returns 0 (not found).
+func emitStubFileExists(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_file_exists", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
+}
+
+// emitStubFileMkdir returns -1.
+func emitStubFileMkdir(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_file_mkdir", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}
+
+// emitStubDirRemove returns -1.
+func emitStubDirRemove(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_dir_remove", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}
+
+// emitStubDirExists returns 0 (not found).
+func emitStubDirExists(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_dir_exists", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
+}
+
+// emitStubErrno returns 0.
+func emitStubErrno(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_errno", irtypes.I32)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, 0))
 	return fn
 }

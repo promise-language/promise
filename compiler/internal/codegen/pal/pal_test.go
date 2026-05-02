@@ -1268,3 +1268,482 @@ func TestWindowsNumCPUsStructDetails(t *testing.T) {
 		t.Error("missing icmp slt for clamp comparison")
 	}
 }
+
+// --- File I/O PAL Tests (Phase D) ---
+
+// assertContains is a test helper that checks for a substring in the IR output.
+func assertContains(t *testing.T, out, substr, msg string) {
+	t.Helper()
+	if !strings.Contains(out, substr) {
+		t.Errorf("%s: missing %q", msg, substr)
+	}
+}
+
+func TestFileOpenPosix(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target string
+		// mode 2 (create) flags: O_RDWR|O_CREAT|O_TRUNC
+		createFlags string
+	}{
+		{"Linux", "x86_64-unknown-linux-gnu", "i32 578"},  // 2|0x40|0x200
+		{"macOS", "arm64-apple-darwin23.0.0", "i32 1538"}, // 2|0x200|0x400
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			p := &PosixPAL{target: tc.target}
+			fn := p.EmitFileOpen(module)
+			out := module.String()
+
+			if fn.Name() != "pal_file_open" {
+				t.Errorf("expected pal_file_open, got %s", fn.Name())
+			}
+			assertContains(t, out, "@open(i8*", "open declaration")
+			assertContains(t, out, "define i32 @pal_file_open(i8* %path, i32 %mode)", "pal_file_open definition")
+			// Mode-to-flags select chain
+			assertContains(t, out, "icmp eq i32 %mode, 1", "read mode check")
+			assertContains(t, out, "icmp eq i32 %mode, 2", "create mode check")
+			assertContains(t, out, "icmp eq i32 %mode, 3", "append mode check")
+			// Platform-specific create flags
+			assertContains(t, out, tc.createFlags, "platform-specific create flags")
+			// Permission mode 0644 = 420
+			assertContains(t, out, "i32 420", "0644 permission mode")
+		})
+	}
+}
+
+func TestFileOpenWindows(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	fn := p.EmitFileOpen(module)
+	out := module.String()
+
+	if fn.Name() != "pal_file_open" {
+		t.Errorf("expected pal_file_open, got %s", fn.Name())
+	}
+	assertContains(t, out, "@_open(i8*", "_open declaration")
+	assertContains(t, out, "define i32 @pal_file_open(", "pal_file_open definition")
+	// _O_BINARY=0x8000 flag must be included (llir renders as u0x8000)
+	assertContains(t, out, "0x8000", "_O_BINARY flag in mode mapping")
+	// _open called with permission mode argument
+	assertContains(t, out, "call i32 @_open(", "_open called")
+}
+
+func TestFileOpenWasm(t *testing.T) {
+	module := ir.NewModule()
+	p := &WasmPAL{}
+	fn := p.EmitFileOpen(module)
+	out := module.String()
+
+	if fn.Name() != "pal_file_open" {
+		t.Errorf("expected pal_file_open, got %s", fn.Name())
+	}
+	assertContains(t, out, "ret i32 -1", "WASM stub returns -1")
+}
+
+func TestFileReadAllPlatforms(t *testing.T) {
+	pals := []struct {
+		name string
+		pal  PAL
+		decl string // expected libc function declaration
+	}{
+		{"POSIX", &PosixPAL{}, "@read("},
+		{"Windows", &WindowsPAL{}, "@_read("},
+		{"WASM", &WasmPAL{}, ""},
+	}
+	for _, tc := range pals {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitFileRead(module)
+			out := module.String()
+
+			if fn.Name() != "pal_file_read" {
+				t.Errorf("expected pal_file_read, got %s", fn.Name())
+			}
+			assertContains(t, out, "define i64 @pal_file_read(i32 %fd, i8* %buf, i64 %len)", "definition")
+			if tc.decl != "" {
+				assertContains(t, out, tc.decl, "libc declaration")
+			}
+		})
+	}
+}
+
+func TestFileWriteAllPlatforms(t *testing.T) {
+	pals := []struct {
+		name string
+		pal  PAL
+		decl string
+	}{
+		{"POSIX", &PosixPAL{}, "@write("},
+		{"Windows", &WindowsPAL{}, "@_write("},
+		{"WASM", &WasmPAL{}, ""},
+	}
+	for _, tc := range pals {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitFileWrite(module)
+			out := module.String()
+
+			if fn.Name() != "pal_file_write" {
+				t.Errorf("expected pal_file_write, got %s", fn.Name())
+			}
+			assertContains(t, out, "define i64 @pal_file_write(i32 %fd, i8* %buf, i64 %len)", "definition")
+			if tc.decl != "" {
+				assertContains(t, out, tc.decl, "libc declaration")
+			}
+		})
+	}
+}
+
+func TestFileCloseAllPlatforms(t *testing.T) {
+	pals := []struct {
+		name string
+		pal  PAL
+		decl string
+	}{
+		{"POSIX", &PosixPAL{}, "@close("},
+		{"Windows", &WindowsPAL{}, "@_close("},
+		{"WASM", &WasmPAL{}, ""},
+	}
+	for _, tc := range pals {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitFileClose(module)
+			out := module.String()
+
+			if fn.Name() != "pal_file_close" {
+				t.Errorf("expected pal_file_close, got %s", fn.Name())
+			}
+			assertContains(t, out, "define i32 @pal_file_close(i32 %fd)", "definition")
+			if tc.decl != "" {
+				assertContains(t, out, tc.decl, "libc declaration")
+			}
+		})
+	}
+}
+
+func TestFileSeekAllPlatforms(t *testing.T) {
+	pals := []struct {
+		name string
+		pal  PAL
+		decl string
+	}{
+		{"POSIX", &PosixPAL{}, "@lseek("},
+		{"Windows", &WindowsPAL{}, "@_lseeki64("},
+		{"WASM", &WasmPAL{}, ""},
+	}
+	for _, tc := range pals {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitFileSeek(module)
+			out := module.String()
+
+			if fn.Name() != "pal_file_seek" {
+				t.Errorf("expected pal_file_seek, got %s", fn.Name())
+			}
+			assertContains(t, out, "define i64 @pal_file_seek(i32 %fd, i64 %offset, i32 %whence)", "definition")
+			if tc.decl != "" {
+				assertContains(t, out, tc.decl, "libc declaration")
+			}
+		})
+	}
+}
+
+func TestFileStatSizePosix(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{}
+	// StatSize needs open, close, lseek already declared
+	p.EmitFileOpen(module)
+	p.EmitFileClose(module)
+	p.EmitFileSeek(module)
+	fn := p.EmitFileStatSize(module)
+	out := module.String()
+
+	if fn.Name() != "pal_file_stat_size" {
+		t.Errorf("expected pal_file_stat_size, got %s", fn.Name())
+	}
+	assertContains(t, out, "define i64 @pal_file_stat_size(i8* %path)", "definition")
+	// Uses open+lseek+close pattern
+	assertContains(t, out, "call i32 @open(", "calls open")
+	assertContains(t, out, "call i64 @lseek(", "calls lseek for SEEK_END")
+	assertContains(t, out, "call i32 @close(", "calls close")
+	// SEEK_END = 2
+	assertContains(t, out, "i32 2)", "SEEK_END constant")
+	// Failure branch returns -1
+	assertContains(t, out, "ret i64 -1", "returns -1 on failure")
+}
+
+func TestFileStatSizeWindows(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	p.EmitFileOpen(module)
+	p.EmitFileClose(module)
+	p.EmitFileSeek(module)
+	fn := p.EmitFileStatSize(module)
+	out := module.String()
+
+	if fn.Name() != "pal_file_stat_size" {
+		t.Errorf("expected pal_file_stat_size, got %s", fn.Name())
+	}
+	assertContains(t, out, "call i32 @_open(", "calls _open")
+	assertContains(t, out, "call i64 @_lseeki64(", "calls _lseeki64")
+	assertContains(t, out, "call i32 @_close(", "calls _close")
+}
+
+func TestFileRemoveAllPlatforms(t *testing.T) {
+	pals := []struct {
+		name string
+		pal  PAL
+		decl string
+	}{
+		{"POSIX", &PosixPAL{}, "@unlink("},
+		{"Windows", &WindowsPAL{}, "@_unlink("},
+		{"WASM", &WasmPAL{}, ""},
+	}
+	for _, tc := range pals {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitFileRemove(module)
+			out := module.String()
+
+			if fn.Name() != "pal_file_remove" {
+				t.Errorf("expected pal_file_remove, got %s", fn.Name())
+			}
+			assertContains(t, out, "define i32 @pal_file_remove(i8* %path)", "definition")
+			if tc.decl != "" {
+				assertContains(t, out, tc.decl, "libc declaration")
+			}
+		})
+	}
+}
+
+func TestFileExistsPosix(t *testing.T) {
+	module := ir.NewModule()
+	fn := (&PosixPAL{}).EmitFileExists(module)
+	out := module.String()
+
+	if fn.Name() != "pal_file_exists" {
+		t.Errorf("expected pal_file_exists, got %s", fn.Name())
+	}
+	assertContains(t, out, "@access(", "access declaration")
+	// F_OK = 0
+	assertContains(t, out, "call i32 @access(i8* %path, i32 0)", "access(path, F_OK)")
+	// Returns 1 for exists, 0 for not found
+	assertContains(t, out, "select i1", "select for return value mapping")
+}
+
+func TestFileExistsWindows(t *testing.T) {
+	module := ir.NewModule()
+	fn := (&WindowsPAL{}).EmitFileExists(module)
+	out := module.String()
+
+	if fn.Name() != "pal_file_exists" {
+		t.Errorf("expected pal_file_exists, got %s", fn.Name())
+	}
+	assertContains(t, out, "@_access(", "_access declaration")
+}
+
+func TestFileExistsWasm(t *testing.T) {
+	module := ir.NewModule()
+	fn := (&WasmPAL{}).EmitFileExists(module)
+	out := module.String()
+
+	if fn.Name() != "pal_file_exists" {
+		t.Errorf("expected pal_file_exists, got %s", fn.Name())
+	}
+	assertContains(t, out, "ret i32 0", "WASM stub returns 0")
+}
+
+func TestFileMkdirPosix(t *testing.T) {
+	module := ir.NewModule()
+	fn := (&PosixPAL{}).EmitFileMkdir(module)
+	out := module.String()
+
+	if fn.Name() != "pal_file_mkdir" {
+		t.Errorf("expected pal_file_mkdir, got %s", fn.Name())
+	}
+	assertContains(t, out, "@mkdir(", "mkdir declaration")
+	// 0755 = 493
+	assertContains(t, out, "i32 493", "0755 mode")
+}
+
+func TestFileMkdirWindows(t *testing.T) {
+	module := ir.NewModule()
+	fn := (&WindowsPAL{}).EmitFileMkdir(module)
+	out := module.String()
+
+	if fn.Name() != "pal_file_mkdir" {
+		t.Errorf("expected pal_file_mkdir, got %s", fn.Name())
+	}
+	assertContains(t, out, "@_mkdir(", "_mkdir declaration")
+}
+
+func TestDirRemoveAllPlatforms(t *testing.T) {
+	pals := []struct {
+		name string
+		pal  PAL
+		decl string
+	}{
+		{"POSIX", &PosixPAL{}, "@rmdir("},
+		{"Windows", &WindowsPAL{}, "@_rmdir("},
+		{"WASM", &WasmPAL{}, ""},
+	}
+	for _, tc := range pals {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitDirRemove(module)
+			out := module.String()
+
+			if fn.Name() != "pal_dir_remove" {
+				t.Errorf("expected pal_dir_remove, got %s", fn.Name())
+			}
+			assertContains(t, out, "define i32 @pal_dir_remove(i8* %path)", "definition")
+			if tc.decl != "" {
+				assertContains(t, out, tc.decl, "libc declaration")
+			}
+		})
+	}
+}
+
+func TestDirExistsPosix(t *testing.T) {
+	module := ir.NewModule()
+	fn := (&PosixPAL{}).EmitDirExists(module)
+	out := module.String()
+
+	if fn.Name() != "pal_dir_exists" {
+		t.Errorf("expected pal_dir_exists, got %s", fn.Name())
+	}
+	assertContains(t, out, "@opendir(", "opendir declaration")
+	assertContains(t, out, "@closedir(", "closedir declaration")
+	// Checks for null (directory doesn't exist)
+	assertContains(t, out, "icmp eq", "null check for opendir result")
+	assertContains(t, out, "ret i32 1", "returns 1 for exists")
+	assertContains(t, out, "ret i32 0", "returns 0 for not found")
+}
+
+func TestDirExistsWindows(t *testing.T) {
+	module := ir.NewModule()
+	fn := (&WindowsPAL{}).EmitDirExists(module)
+	out := module.String()
+
+	if fn.Name() != "pal_dir_exists" {
+		t.Errorf("expected pal_dir_exists, got %s", fn.Name())
+	}
+	assertContains(t, out, "@GetFileAttributesA(", "GetFileAttributesA declaration")
+	// FILE_ATTRIBUTE_DIRECTORY = 0x10 = 16 (used in and instruction)
+	assertContains(t, out, ", 16", "FILE_ATTRIBUTE_DIRECTORY")
+}
+
+func TestDirExistsWasm(t *testing.T) {
+	module := ir.NewModule()
+	fn := (&WasmPAL{}).EmitDirExists(module)
+	out := module.String()
+
+	if fn.Name() != "pal_dir_exists" {
+		t.Errorf("expected pal_dir_exists, got %s", fn.Name())
+	}
+	assertContains(t, out, "ret i32 0", "WASM stub returns 0")
+}
+
+func TestErrnoPosix(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target string
+		fnName string
+	}{
+		{"Linux", "x86_64-unknown-linux-gnu", "__errno_location"},
+		{"macOS", "arm64-apple-darwin23.0.0", "__error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := (&PosixPAL{target: tc.target}).EmitErrno(module)
+			out := module.String()
+
+			if fn.Name() != "pal_errno" {
+				t.Errorf("expected pal_errno, got %s", fn.Name())
+			}
+			assertContains(t, out, "@"+tc.fnName+"()", "errno location function")
+			assertContains(t, out, "load i32, i32*", "loads errno value from pointer")
+		})
+	}
+}
+
+func TestErrnoWindows(t *testing.T) {
+	module := ir.NewModule()
+	fn := (&WindowsPAL{}).EmitErrno(module)
+	out := module.String()
+
+	if fn.Name() != "pal_errno" {
+		t.Errorf("expected pal_errno, got %s", fn.Name())
+	}
+	assertContains(t, out, "@_errno()", "_errno declaration")
+	assertContains(t, out, "load i32, i32*", "loads errno value from pointer")
+}
+
+func TestErrnoWasm(t *testing.T) {
+	module := ir.NewModule()
+	fn := (&WasmPAL{}).EmitErrno(module)
+	out := module.String()
+
+	if fn.Name() != "pal_errno" {
+		t.Errorf("expected pal_errno, got %s", fn.Name())
+	}
+	assertContains(t, out, "ret i32 0", "WASM stub returns 0")
+}
+
+func TestForTargetFileIOInterface(t *testing.T) {
+	// Verify that all PAL implementations satisfy the interface with file I/O methods
+	triples := []string{
+		"x86_64-unknown-linux-gnu",
+		"arm64-apple-darwin23.0.0",
+		"x86_64-pc-windows-msvc",
+		"wasm32-unknown-wasi",
+	}
+	for _, triple := range triples {
+		t.Run(triple, func(t *testing.T) {
+			p := ForTarget(triple)
+			module := ir.NewModule()
+			// Must be able to call all file I/O methods without panic
+			p.EmitAlloc(module)
+			p.EmitFree(module)
+			p.EmitFileOpen(module)
+			p.EmitFileRead(module)
+			p.EmitFileWrite(module)
+			p.EmitFileClose(module)
+			p.EmitFileSeek(module)
+			p.EmitFileStatSize(module)
+			p.EmitFileRemove(module)
+			p.EmitFileExists(module)
+			p.EmitFileMkdir(module)
+			p.EmitDirRemove(module)
+			p.EmitDirExists(module)
+			p.EmitErrno(module)
+		})
+	}
+}
+
+func TestWindowsFileReadWriteTruncation(t *testing.T) {
+	// Windows UCRT _read/_write take i32 count, PAL takes i64 — verify truncation + sign extension
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	p.EmitFileRead(module)
+	out := module.String()
+
+	assertContains(t, out, "trunc i64 %len to i32", "truncates i64 len to i32")
+	assertContains(t, out, "sext i32", "sign-extends i32 result to i64")
+}
+
+func TestPosixFileWriteReusesWriteDecl(t *testing.T) {
+	// When EmitWrite was already called, EmitFileWrite should reuse the @write declaration
+	module := ir.NewModule()
+	p := &PosixPAL{}
+	p.EmitWrite(module)
+	p.EmitFileWrite(module)
+	out := module.String()
+
+	// Should have exactly one @write declaration (not two)
+	count := strings.Count(out, "declare i64 @write(")
+	if count != 1 {
+		t.Errorf("expected 1 @write declaration, got %d", count)
+	}
+}

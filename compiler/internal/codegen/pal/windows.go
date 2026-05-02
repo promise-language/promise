@@ -380,6 +380,262 @@ func (p *WindowsPAL) EmitCondDestroy(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// --- Windows file I/O via UCRT (Phase D) ---
+
+// EmitFileOpen declares UCRT @_open and defines @pal_file_open.
+// Maps mode (0=open-rw, 1=read, 2=create, 3=append) to _O_* flags.
+func (p *WindowsPAL) EmitFileOpen(module *ir.Module) *ir.Func {
+	// declare i32 @_open(i8*, i32, i32) nounwind
+	ucrtOpen := module.NewFunc("_open", irtypes.I32,
+		ir.NewParam("filename", irtypes.I8Ptr),
+		ir.NewParam("oflag", irtypes.I32),
+		ir.NewParam("pmode", irtypes.I32))
+	ucrtOpen.FuncAttrs = append(ucrtOpen.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	// Windows UCRT flags: _O_RDONLY=0, _O_RDWR=2, _O_CREAT=0x100,
+	// _O_TRUNC=0x200, _O_APPEND=0x8, _O_BINARY=0x8000
+	const (
+		oBinary       = 0x8000
+		oRDWR         = 2 | oBinary
+		oRDONLY       = 0 | oBinary
+		oCreateTrunc  = 2 | 0x100 | 0x200 | oBinary
+		oCreateAppend = 2 | 0x100 | 0x8 | oBinary
+	)
+
+	fn := module.NewFunc("pal_file_open", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr),
+		ir.NewParam("mode", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	isRead := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 1))
+	isCreate := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 2))
+	isAppend := entry.NewICmp(enum.IPredEQ, fn.Params[1], constant.NewInt(irtypes.I32, 3))
+
+	f1 := entry.NewSelect(isRead, constant.NewInt(irtypes.I32, oRDONLY), constant.NewInt(irtypes.I32, oRDWR))
+	f2 := entry.NewSelect(isCreate, constant.NewInt(irtypes.I32, oCreateTrunc), f1)
+	flags := entry.NewSelect(isAppend, constant.NewInt(irtypes.I32, oCreateAppend), f2)
+
+	// _open(path, flags, _S_IREAD|_S_IWRITE=0x180)
+	fd := entry.NewCall(ucrtOpen, fn.Params[0], flags, constant.NewInt(irtypes.I32, 0x180))
+	entry.NewRet(fd)
+	return fn
+}
+
+// EmitFileRead declares UCRT @_read and defines @pal_file_read.
+func (p *WindowsPAL) EmitFileRead(module *ir.Module) *ir.Func {
+	// declare i32 @_read(i32, i8*, i32) nounwind
+	ucrtRead := module.NewFunc("_read", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buffer", irtypes.I8Ptr),
+		ir.NewParam("count", irtypes.I32))
+	ucrtRead.FuncAttrs = append(ucrtRead.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_file_read", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	// Truncate i64 len to i32 (UCRT _read takes unsigned int)
+	len32 := entry.NewTrunc(fn.Params[2], irtypes.I32)
+	ret32 := entry.NewCall(ucrtRead, fn.Params[0], fn.Params[1], len32)
+	ret64 := entry.NewSExt(ret32, irtypes.I64)
+	entry.NewRet(ret64)
+	return fn
+}
+
+// EmitFileWrite declares UCRT @_write and defines @pal_file_write.
+func (p *WindowsPAL) EmitFileWrite(module *ir.Module) *ir.Func {
+	// declare i32 @_write(i32, i8*, i32) nounwind
+	ucrtWrite := module.NewFunc("_write", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buffer", irtypes.I8Ptr),
+		ir.NewParam("count", irtypes.I32))
+	ucrtWrite.FuncAttrs = append(ucrtWrite.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_file_write", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	len32 := entry.NewTrunc(fn.Params[2], irtypes.I32)
+	ret32 := entry.NewCall(ucrtWrite, fn.Params[0], fn.Params[1], len32)
+	ret64 := entry.NewSExt(ret32, irtypes.I64)
+	entry.NewRet(ret64)
+	return fn
+}
+
+// EmitFileClose declares UCRT @_close and defines @pal_file_close.
+func (p *WindowsPAL) EmitFileClose(module *ir.Module) *ir.Func {
+	ucrtClose := module.NewFunc("_close", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	ucrtClose.FuncAttrs = append(ucrtClose.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_file_close", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(ucrtClose, fn.Params[0])
+	entry.NewRet(ret)
+	return fn
+}
+
+// EmitFileSeek declares UCRT @_lseeki64 and defines @pal_file_seek.
+func (p *WindowsPAL) EmitFileSeek(module *ir.Module) *ir.Func {
+	ucrtLseek := module.NewFunc("_lseeki64", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("offset", irtypes.I64),
+		ir.NewParam("origin", irtypes.I32))
+	ucrtLseek.FuncAttrs = append(ucrtLseek.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_file_seek", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("offset", irtypes.I64),
+		ir.NewParam("whence", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(ucrtLseek, fn.Params[0], fn.Params[1], fn.Params[2])
+	entry.NewRet(ret)
+	return fn
+}
+
+// EmitFileStatSize defines @pal_file_stat_size using _open+_lseeki64+_close.
+func (p *WindowsPAL) EmitFileStatSize(module *ir.Module) *ir.Func {
+	ucrtOpen := lookupFunc(module, "_open")
+	ucrtLseek := lookupFunc(module, "_lseeki64")
+	ucrtClose := lookupFunc(module, "_close")
+
+	fn := module.NewFunc("pal_file_stat_size", irtypes.I64,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	entry := fn.NewBlock(".entry")
+	failBlk := fn.NewBlock(".fail")
+	gotFdBlk := fn.NewBlock(".got_fd")
+
+	// _open(path, _O_RDONLY|_O_BINARY=0x8000, 0)
+	fd := entry.NewCall(ucrtOpen, fn.Params[0], constant.NewInt(irtypes.I32, 0x8000), constant.NewInt(irtypes.I32, 0))
+	isNeg := entry.NewICmp(enum.IPredSLT, fd, constant.NewInt(irtypes.I32, 0))
+	entry.NewCondBr(isNeg, failBlk, gotFdBlk)
+
+	size := gotFdBlk.NewCall(ucrtLseek, fd, constant.NewInt(irtypes.I64, 0), constant.NewInt(irtypes.I32, 2))
+	gotFdBlk.NewCall(ucrtClose, fd)
+	gotFdBlk.NewRet(size)
+
+	failBlk.NewRet(constant.NewInt(irtypes.I64, -1))
+	return fn
+}
+
+// EmitFileRemove declares UCRT @_unlink and defines @pal_file_remove.
+func (p *WindowsPAL) EmitFileRemove(module *ir.Module) *ir.Func {
+	ucrtUnlink := module.NewFunc("_unlink", irtypes.I32,
+		ir.NewParam("filename", irtypes.I8Ptr))
+	ucrtUnlink.FuncAttrs = append(ucrtUnlink.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_file_remove", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(ucrtUnlink, fn.Params[0])
+	entry.NewRet(ret)
+	return fn
+}
+
+// EmitFileExists declares UCRT @_access and defines @pal_file_exists.
+func (p *WindowsPAL) EmitFileExists(module *ir.Module) *ir.Func {
+	ucrtAccess := module.NewFunc("_access", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr),
+		ir.NewParam("mode", irtypes.I32))
+	ucrtAccess.FuncAttrs = append(ucrtAccess.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_file_exists", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	ret := entry.NewCall(ucrtAccess, fn.Params[0], constant.NewInt(irtypes.I32, 0))
+	isZero := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, 0))
+	result := entry.NewSelect(isZero, constant.NewInt(irtypes.I32, 1), constant.NewInt(irtypes.I32, 0))
+	entry.NewRet(result)
+	return fn
+}
+
+// EmitFileMkdir declares UCRT @_mkdir and defines @pal_file_mkdir.
+func (p *WindowsPAL) EmitFileMkdir(module *ir.Module) *ir.Func {
+	// Windows _mkdir takes only path (no mode parameter)
+	ucrtMkdir := module.NewFunc("_mkdir", irtypes.I32,
+		ir.NewParam("dirname", irtypes.I8Ptr))
+	ucrtMkdir.FuncAttrs = append(ucrtMkdir.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_file_mkdir", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(ucrtMkdir, fn.Params[0])
+	entry.NewRet(ret)
+	return fn
+}
+
+// EmitDirRemove declares UCRT @_rmdir and defines @pal_dir_remove.
+func (p *WindowsPAL) EmitDirRemove(module *ir.Module) *ir.Func {
+	ucrtRmdir := module.NewFunc("_rmdir", irtypes.I32,
+		ir.NewParam("dirname", irtypes.I8Ptr))
+	ucrtRmdir.FuncAttrs = append(ucrtRmdir.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_dir_remove", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(ucrtRmdir, fn.Params[0])
+	entry.NewRet(ret)
+	return fn
+}
+
+// EmitDirExists declares Win32 @GetFileAttributesA and defines @pal_dir_exists.
+// Checks FILE_ATTRIBUTE_DIRECTORY (0x10).
+func (p *WindowsPAL) EmitDirExists(module *ir.Module) *ir.Func {
+	getFileAttrs := module.NewFunc("GetFileAttributesA", irtypes.I32,
+		ir.NewParam("lpFileName", irtypes.I8Ptr))
+	getFileAttrs.FuncAttrs = append(getFileAttrs.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_dir_exists", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	attrs := entry.NewCall(getFileAttrs, fn.Params[0])
+	// INVALID_FILE_ATTRIBUTES = -1
+	isInvalid := entry.NewICmp(enum.IPredEQ, attrs, constant.NewInt(irtypes.I32, -1))
+	// FILE_ATTRIBUTE_DIRECTORY = 0x10
+	dirBit := entry.NewAnd(attrs, constant.NewInt(irtypes.I32, 0x10))
+	isDir := entry.NewICmp(enum.IPredNE, dirBit, constant.NewInt(irtypes.I32, 0))
+	// Return 1 only if valid AND directory
+	validAndDir := entry.NewSelect(isInvalid, constant.False, isDir)
+	result := entry.NewZExt(validAndDir, irtypes.I32)
+	entry.NewRet(result)
+	return fn
+}
+
+// EmitErrno declares UCRT @_errno and defines @pal_errno.
+func (p *WindowsPAL) EmitErrno(module *ir.Module) *ir.Func {
+	// _errno() returns int* (pointer to thread-local errno)
+	ucrtErrno := module.NewFunc("_errno", irtypes.NewPointer(irtypes.I32))
+	ucrtErrno.FuncAttrs = append(ucrtErrno.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_errno", irtypes.I32)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	ptr := entry.NewCall(ucrtErrno)
+	val := entry.NewLoad(irtypes.I32, ptr)
+	entry.NewRet(val)
+	return fn
+}
+
 // EmitNumCPUs defines @pal_num_cpus using GetSystemInfo.
 // Reads dwNumberOfProcessors from SYSTEM_INFO struct (offset 32 on x64).
 func (p *WindowsPAL) EmitNumCPUs(module *ir.Module) *ir.Func {

@@ -401,6 +401,34 @@ module-level getters land.
 
 **Status**: Placeholder file (`io.pr` with comment only). Implement from scratch.
 
+### I/O Architecture: Reactor + Async/Sync Backends
+
+All file and network I/O goes through a **global reactor** (one per process, like Go's netpoller).
+The reactor uses the best available async mechanism per platform:
+
+| Platform | Async backend | Fallback |
+|---|---|---|
+| Linux | io_uring (probed at init via `io_uring_setup` — ENOSYS means unsupported) | epoll → blocking syscalls |
+| macOS | kqueue | blocking syscalls |
+| Windows | IOCP (truly async file + network I/O) | N/A — IOCP is always available |
+| WASM | (TBD — see WASM section) | N/A |
+
+**User-facing API is always synchronous.** `File.read`, `File.write`, etc. look like blocking
+calls from Promise code. Under the hood, the goroutine parks (via the existing `coro.suspend` +
+`park_mutex` mechanism) and the reactor wakes it when I/O completes. This is identical to how
+channel operations work — the goroutine suspends transparently.
+
+**Global reactor** (like Go's `runtime/netpoll`):
+- Single poller instance, thread-safe (epoll_wait/kevent are safe from any thread)
+- Sysmon calls `reactor_poll(0)` (non-blocking) every tick to harvest ready fds
+- Idle Ms call `reactor_poll(block)` in `park_m` instead of just `cond_wait`
+- Ready goroutines injected back onto P run queues via existing `enqueue_goroutine`
+- No per-P reactors — avoids fd registration migration during work stealing
+
+**Sync fallback**: When async is unavailable (old kernels, unsupported platforms), I/O ops
+block the M thread directly. The goroutine parks via the existing `park_mutex` mechanism.
+The scheduler can spin up additional Ms to maintain parallelism (same as Go's `entersyscall`).
+
 ### Error type
 
 ```promise
@@ -412,30 +440,38 @@ type IoError is error `public `doc("An operating system I/O error.") {
 }
 ```
 
-### `File` — handle methods and `\`global` one-shot operations
+### `File` — factory constructors and handle methods
 
-Applying §6 principles: one-shot path operations (`read_file`, `write_file`, etc.) move inside
-`File` as `\`global` methods. The module-level namespace then has only `File`, `BufReader`,
-`IoError`, `read_line`, `read_stdin`.
+Factory constructors are the **complete** set of ways to open a file. No string modes — the
+intent is in the constructor name, validated at compile time.
+
+Applying §6 principles: one-shot convenience operations use longer names (prefixed with
+`read_content`/`write_content`). The module-level namespace has `File`, `Dir`, `IoError`,
+`read_line`, `read_stdin`.
 
 ```promise
 type File `public `doc("A file handle. Satisfies Reader, Writer, and Closer.") {
     int _fd;
 
-    // ── Construction (factory — returns Self) ──────────────────────────────
-    `doc("Opens a file for reading.")
+    // ── Factory constructors (short — fundamental) ──────────────────────────
+    `doc("Opens an existing file for reading and writing. Fails if not found.")
     open(string path) Self! `factory `public;
 
-    `doc("Creates or truncates a file for writing.")
+    `doc("Opens an existing file for reading only. Fails if not found.")
+    read(string path) Self! `factory `public;
+
+    `doc("Creates a new file or truncates an existing one. Opens for reading and writing.")
     create(string path) Self! `factory `public;
 
-    `doc("Opens with an explicit mode string: `r`, `w`, `a`, `rw`.")
-    open_mode(string path, string mode) Self! `factory `public;
+    `doc("Opens or creates a file for appending. Read and write, seek position at end.")
+    append(string path) Self! `factory `public;
 
     // ── Handle methods (instance — require an open file) ───────────────────
     read(~this, u8[] ~buf) int! `public;          // satisfies Reader
     write(~this, u8[] &buf) int! `public;         // satisfies Writer
-    close(~this)! `public;                        // satisfies Closer
+
+    `doc("Closes the file handle. Returns error on failure (double-close returns error, does not panic).")
+    close(~this)! `public;
 
     `doc("Reads all remaining content into a string.")
     read_all(~this) string! `public;
@@ -449,15 +485,12 @@ type File `public `doc("A file handle. Satisfies Reader, Writer, and Closer.") {
     `doc("Seeks to a byte offset from the start.")
     seek(~this, int offset)! `public;
 
-    // ── One-shot operations (global — no open handle needed) ───────────────
-    `doc("Reads the entire contents of a file as a string.")
-    read(string path) string! `global `public;
+    // ── One-shot convenience (global — longer names) ────────────────────────
+    `doc("Reads the entire contents of a file as a string. Opens, reads, auto-closes.")
+    read_content(string path) string! `global `public;
 
-    `doc("Writes content to a file, creating or truncating it.")
-    write(string path, string content)! `global `public;
-
-    `doc("Appends content to a file, creating it if needed.")
-    append(string path, string content)! `global `public;
+    `doc("Writes content to a file, creating or truncating it. Opens, writes, auto-closes.")
+    write_content(string path, string content)! `global `public;
 
     `doc("Returns true if the path exists (file, directory, or symlink).")
     exists(string path) bool `global `public;
@@ -465,8 +498,50 @@ type File `public `doc("A file handle. Satisfies Reader, Writer, and Closer.") {
     `doc("Returns the size of the file in bytes.")
     size(string path) int! `global `public;
 
-    `doc("Removes a file.")
+    `doc("Removes a file. Use Dir.remove for directories.")
     remove(string path)! `global `public;
+
+    drop(~this) { close(~this) ? _ {}; }  // auto-close on scope exit; ignore error
+}
+```
+
+Usage:
+
+```promise
+use io;
+
+// Factory constructors — short, fundamental
+f := File.read("config.json")!;
+string data = f.read_all()!;
+
+// One-shot — longer, convenience (auto-closes via drop)
+string content = File.read_content("data.txt")!;
+File.write_content("out.txt", result)!;
+
+// Equivalent to read_content (explicit):
+f2 := File.read("data.txt")!;
+string same = f2.read_all()!;
+// f2 auto-closed by drop
+```
+
+**Double-close semantics**: `close()` on an already-closed file returns `IoError`, does NOT
+panic. Closing a file multiple times is a logic error but not a catastrophic flow error like
+double-closing a channel (which corrupts waiter lists). The `drop` ignores close errors so
+auto-close after explicit close is safe.
+
+**Embedded filesystem compatibility**: The instance methods (`read`, `write`, `read_all`,
+`close`) work through structural interfaces (`Reader`, `Writer`, `Closer`). A future `EmbedFS`
+type would have its own factory (`assets.open("path")!`) but return handles satisfying the same
+interfaces. User code taking `Reader &r` works identically with real and embedded files.
+
+### `Dir` — directory operations
+
+Directory operations live on a separate `Dir` namespace type, not on `File`. Directories are
+not files — conflating them adds noise to `File` and misleads readers about what `File` does.
+
+```promise
+// TODO: Add `namespace annotation to prevent instantiation.
+type Dir `public `doc("Directory operations. All methods are global — no Dir instances needed.") {
 
     `doc("Creates a directory. Parent must exist.")
     mkdir(string path)! `global `public;
@@ -475,44 +550,33 @@ type File `public `doc("A file handle. Satisfies Reader, Writer, and Closer.") {
     mkdir_all(string path)! `global `public;
 
     `doc("Returns the names (not full paths) of entries in a directory.")
-    list_dir(string path) string[]! `global `public;
+    list(string path) string[]! `global `public;
+
+    `doc("Removes an empty directory.")
+    remove(string path)! `global `public;
+
+    `doc("Returns true if the path is a directory.")
+    exists(string path) bool `global `public;
 }
 ```
 
-Usage contrast:
+Usage:
 
 ```promise
-// Before (free functions — 9 names in module namespace):
-content := read_file("data.txt")!;
-write_file("out.txt", result)!;
-if exists("log/") { list_dir("log/")!; }
+use io;
 
-// After (type methods — 1 name in module namespace):
-content := File.read("data.txt")!;
-File.write("out.txt", result)!;
-if File.exists("log/") { File.list_dir("log/")!; }
+Dir.mkdir_all("/tmp/myapp/cache")!;
+string[] entries = Dir.list("/tmp/myapp")!;
+if Dir.exists("output/") {
+    Dir.remove("output/old")!;
+}
 ```
-
-Note: `\`global` and `\`factory` are mutually exclusive (factory implies variant placement).
-The instance `read(~this, u8[] ~buf)` and global `read(string path)` have different signatures
-(receiver vs no receiver, different params) — sema distinguishes them correctly.
 
 ### `BufReader`
 
-```promise
-type BufReader `public `doc("Wraps a Reader with an internal buffer. Efficient for line-by-line reading.") {
-    `doc("Creates a BufReader. Default buffer capacity: 4096 bytes.")
-    new(~this, Reader ~r, int capacity = 4096) `public;
-
-    read(~this, u8[] ~buf) int! `public;       // satisfies Reader
-
-    `doc("Reads one line. Returns absent at EOF, raises IoError on error.")
-    read_line(~this) string?! `public;
-
-    `doc("Reads one byte. Returns absent at EOF.")
-    read_byte(~this) u8?! `public;
-}
-```
+Deferred until real usage drives the design. The structural interface (`Reader`) means a
+`BufReader` wrapper can be added later without changing `File` or any code that reads through
+`Reader`.
 
 ### `read_line()` and `read_stdin()`
 
@@ -538,20 +602,43 @@ while line := read_line()! {
 }
 ```
 
+### WASM file I/O
+
+**Open question.** WASI Preview 1 provides `fd_read`, `fd_write`, `path_open` — basic file I/O
+is possible on WASI-capable runtimes (Wasmtime, WasmEdge). Whether to support this depends on:
+- Do we target WASI P1 only, or also browser/non-WASI environments?
+- WASI P2 (component model) has a different I/O story
+
+For now: `\`target(!wasm)` on `File` and `Dir`. WASM programs that try to use `io.File` get a
+compile-time error. This can be relaxed later when WASI support is designed properly.
+
 ### PAL additions
 
 ```
 pal_file_open(i8* path, i32 flags, i32 mode) i32      // fd or -1
 pal_file_read(i32 fd, i8* buf, i64 len) i64           // bytes read, 0=EOF, -1=error
+pal_file_write(i32 fd, i8* buf, i64 len) i64          // bytes written or -1
 pal_file_close(i32 fd) i32                            // 0 or -1
 pal_file_stat_size(i8* path) i64                      // -1 = does not exist
 pal_file_remove(i8* path) i32                         // 0 or -1
 pal_file_mkdir(i8* path) i32                          // 0 or -1
 pal_file_readdir(i8* path, i8* buf, i64 len) i32      // null-separated names; returns count
 pal_file_seek(i32 fd, i64 offset, i32 whence) i64     // new position or -1
+pal_file_exists(i8* path) i32                         // 1 = exists, 0 = not found
+pal_dir_exists(i8* path) i32                          // 1 = is directory, 0 = not
 ```
 
-`pal_write` already exists. File writes use it (takes arbitrary fd). No `pal_file_write` needed.
+### Reactor PAL
+
+```
+pal_reactor_create() i8*                              // opaque reactor handle
+pal_reactor_register(i8* reactor, i32 fd, i32 events) i32  // 0 or -1
+pal_reactor_poll(i8* reactor, i8* events_buf, i32 max, i64 timeout_ns) i32  // count
+pal_reactor_deregister(i8* reactor, i32 fd) i32       // 0 or -1
+```
+
+The reactor PAL abstracts over epoll/kqueue/IOCP. `timeout_ns = 0` is non-blocking (sysmon),
+`timeout_ns = -1` is blocking (idle M).
 
 ---
 
@@ -677,7 +764,7 @@ modules/
   path/           — join, file_name, parent, extension, stem, split, normalize  (DONE)
   math/           — lerp, map_range, deg_to_rad, sign_f64            (DONE)
   strings/        — join, spaces, reverse, ...                        (DONE)
-  io/             — File, BufReader, IoError, read_line, read_stdin   (PLACEHOLDER)
+  io/             — File, Dir, IoError, read_line, read_stdin          (PLACEHOLDER)
   os/             — args, get_env, get_cwd, exit, exec, OsError       (PLACEHOLDER)
   time/           — DateTime, unix_now, format/parse calendar ops     (PLACEHOLDER)
   http/           — HTTP server/client                                 (PLACEHOLDER)
@@ -774,10 +861,15 @@ First real use of `` `target `` in production code. Platform constants consolida
 16. ~~**`normalize` and `split`** in `modules/path`~~ — done (pure Promise, no new PAL)
     (`join_all` superseded by variadic `join(base, child, ...rest)`)
 
-### Phase D — file I/O (biggest phase — needs PAL work)
+### Phase D — file I/O (biggest phase — needs PAL + reactor)
 
-12. **PAL file functions** — add to `codegen/io.go`: open, read, close, stat, remove, mkdir, readdir, seek
-13. **`modules/io`** — `IoError`, `File`, `BufReader`, `read_line`, `read_stdin`
+12. **Reactor infrastructure** — global reactor in `codegen/reactor.go`: epoll (Linux), kqueue (macOS)
+    integration with sysmon (`reactor_poll(0)`) and idle Ms (`reactor_poll(block)`)
+13. **PAL file functions** — add to `codegen/io.go`: open, read, write, close, stat, remove, mkdir,
+    readdir, seek, exists, dir_exists
+14. **`modules/io`** — `IoError`, `File` (4 factory constructors + handle methods + one-shot helpers),
+    `Dir` (global namespace for directory ops), `read_line`, `read_stdin`
+15. **BufReader** — deferred until real usage drives it
 
 ### Phase E — OS and process
 

@@ -711,7 +711,7 @@ func firstLines(s string, n int) string {
 // runTestFiles runs tests from a list of .pr files, printing per-file results
 // and a combined summary at the end.
 func runTestFiles(files []string, timeout time.Duration, targetTriple string) {
-	unlock := module.LockBuildDir()
+	unlock := module.LockBuildDirShared()
 	defer unlock()
 
 	totalStart := time.Now()
@@ -3668,7 +3668,7 @@ func runClean(args []string) {
 	}
 
 	// Serialize with concurrent test/build operations.
-	unlock := module.LockBuildDir()
+	unlock := module.LockBuildDirExclusive()
 	defer unlock()
 
 	// Clean build cache

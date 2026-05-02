@@ -451,12 +451,25 @@ func LoadTestBinaryMeta(cacheDir, cacheKey string) *TestCacheMeta {
 	return &meta
 }
 
-// LockBuildDir acquires an exclusive flock on the build cache directory.
-// Serializes concurrent promise test/build operations sharing the same cache.
-// The lock is held on the file descriptor — automatically released when the
-// process exits or crashes (no stale lockfiles).
+// LockBuildDirShared acquires a shared flock on the build cache directory.
+// Multiple test/build processes can hold shared locks concurrently — the
+// content-addressed cache is safe for concurrent reads and atomic writes.
+// Only promise clean acquires an exclusive lock, waiting for all shared
+// holders to finish before clearing the cache.
 // Returns an unlock function (call via defer). No-op if locking fails.
-func LockBuildDir() func() {
+func LockBuildDirShared() func() {
+	return lockBuildDir(syscall.LOCK_SH, "Waiting for cache clean to finish...\n")
+}
+
+// LockBuildDirExclusive acquires an exclusive flock on the build cache directory.
+// Used by promise clean to ensure no concurrent test/build processes are
+// accessing the cache while it is being cleared.
+// Returns an unlock function (call via defer). No-op if locking fails.
+func LockBuildDirExclusive() func() {
+	return lockBuildDir(syscall.LOCK_EX, "Waiting for concurrent build to finish...\n")
+}
+
+func lockBuildDir(mode int, waitMsg string) func() {
 	dir, err := BuildCacheDir()
 	if err != nil {
 		return func() {}
@@ -467,10 +480,10 @@ func LockBuildDir() func() {
 		return func() {}
 	}
 	// Try non-blocking first to detect contention.
-	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	err = syscall.Flock(int(f.Fd()), mode|syscall.LOCK_NB)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Waiting for concurrent build to finish...\n")
-		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		fmt.Fprint(os.Stderr, waitMsg)
+		if err := syscall.Flock(int(f.Fd()), mode); err != nil {
 			f.Close()
 			return func() {}
 		}

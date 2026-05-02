@@ -925,7 +925,7 @@ Wired into `compileAndLinkSeparate()` in `main.go`: lookup → cache hit skips `
 
 `PromiseHome()` in `module/home.go` provides the base directory for all Promise data (`~/.promise/` by default, overridable via `PROMISE_HOME` env var). Used by build cache, module cache, LLVM tools, CRT, and `promise install`.
 
-**Concurrent build serialization:** Multiple `promise test`/`build`/`clean` processes sharing the same cache are serialized via `flock(2)` on `build/.lock`. The lock is tied to the file descriptor — automatically released on process exit or crash (no stale lockfiles). `LockBuildDir()` in `cache.go` tries non-blocking first, prints "Waiting for concurrent build to finish..." on contention, then blocks. `CleanAll()` preserves `.lock` to avoid invalidating locks held by concurrent processes.
+**Concurrent build safety:** Multiple `promise test`/`build` processes use shared `flock(2)` on `build/.lock` — they run concurrently without blocking each other (content-addressed cache is safe for concurrent reads and atomic writes). `promise clean` acquires an exclusive lock via `LockBuildDirExclusive()`, waiting for all running test/build processes to finish. The lock is tied to the file descriptor — automatically released on process exit or crash (no stale lockfiles). `CleanAll()` preserves `.lock` to avoid invalidating locks held by concurrent processes.
 
 **Cache diagnostics:** Set `PROMISE_CACHE_DEBUG=1` to see `[cache HIT/MISS/SKIP]` lines on stderr with cache key components. Useful for debugging cache invalidation issues.
 

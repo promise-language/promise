@@ -830,12 +830,12 @@ func TestTestBinaryMetaRoundTrip(t *testing.T) {
 	}
 }
 
-func TestLockBuildDir(t *testing.T) {
+func TestLockBuildDirShared(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("PROMISE_HOME", tmpHome)
 
-	// First lock should succeed immediately.
-	unlock1 := LockBuildDir()
+	// First shared lock should succeed immediately.
+	unlock1 := LockBuildDirShared()
 
 	// Lock file should exist.
 	lockPath := filepath.Join(tmpHome, "cache", "build", ".lock")
@@ -843,12 +843,16 @@ func TestLockBuildDir(t *testing.T) {
 		t.Fatalf("lock file should exist: %v", err)
 	}
 
-	// Release.
+	// Second shared lock should also succeed (shared locks are concurrent).
+	unlock2 := LockBuildDirShared()
+
+	// Release both.
+	unlock2()
 	unlock1()
 
-	// Re-acquire should succeed (no stale lock).
-	unlock2 := LockBuildDir()
-	unlock2()
+	// Re-acquire exclusive should succeed (no stale lock).
+	unlock3 := LockBuildDirExclusive()
+	unlock3()
 }
 
 func TestPromiseHome(t *testing.T) {

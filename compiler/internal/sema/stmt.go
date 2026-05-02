@@ -767,25 +767,43 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 		} else if elem, ok := types.AsRange(iterType); ok {
 			elemType = elem
 		} else if inst, ok := iterType.(*types.Instance); ok {
-			// Iterator[T] yields T, Stream[T] yields T, Channel[T] yields T
 			origin := inst.Origin()
-			if origin == types.TypIter || origin == types.TypStream || origin == types.TypChannel {
+			if origin == types.TypIter {
+				// Iterator[T] yields T via next() — record for duck-typed codegen
 				if len(inst.TypeArgs()) > 0 {
 					elemType = inst.TypeArgs()[0]
 				} else {
 					elemType = iterType
 				}
+				c.info.ForInKinds[s] = ForInNext
+			} else if origin == types.TypStream {
+				// Stream[T] yields T via iter() → next()
+				if len(inst.TypeArgs()) > 0 {
+					elemType = inst.TypeArgs()[0]
+				} else {
+					elemType = iterType
+				}
+				// Stream still uses genForInGenerator (raw coroutine path)
+			} else if origin == types.TypChannel {
+				// Channel[T] yields T via channel receive
+				if len(inst.TypeArgs()) > 0 {
+					elemType = inst.TypeArgs()[0]
+				} else {
+					elemType = iterType
+				}
+			} else if duckElem := c.checkDuckTypedForIn(s, iterType); duckElem != nil {
+				elemType = duckElem
 			} else {
 				c.errorf(s.Iterable.Pos(), "cannot iterate over type %s", iterType)
 				elemType = iterType
 			}
+		} else if types.Identical(iterType, types.TypString) {
+			elemType = types.TypChar
+		} else if duckElem := c.checkDuckTypedForIn(s, iterType); duckElem != nil {
+			elemType = duckElem
 		} else {
-			if types.Identical(iterType, types.TypString) {
-				elemType = types.TypChar
-			} else {
-				c.errorf(s.Iterable.Pos(), "cannot iterate over type %s", iterType)
-				elemType = iterType
-			}
+			c.errorf(s.Iterable.Pos(), "cannot iterate over type %s", iterType)
+			elemType = iterType
 		}
 
 		if s.Binding != "_" {
@@ -805,6 +823,78 @@ func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 	c.checkBlock(s.Body)
 	c.closeScope()
 	c.inLoop--
+}
+
+// checkDuckTypedForIn checks if a type supports iteration via duck-typing:
+// 1. Has next() T? method → ForInNext, returns T
+// 2. Has iter() returning type with next() T? → ForInIter, returns T
+// Returns the element type, or nil if the type doesn't support iteration.
+func (c *Checker) checkDuckTypedForIn(s *ast.ForInStmt, iterType types.Type) types.Type {
+	// Get the Named type (handles both Named and Instance)
+	var named *types.Named
+	var subst map[*types.TypeParam]types.Type
+	switch t := iterType.(type) {
+	case *types.Named:
+		named = t
+	case *types.Instance:
+		if origin, ok := t.Origin().(*types.Named); ok {
+			named = origin
+			if len(origin.TypeParams()) > 0 {
+				subst = types.BuildSubstMap(origin.TypeParams(), t.TypeArgs())
+			}
+		}
+	}
+	if named == nil {
+		return nil
+	}
+
+	// Check for next() T? method
+	if nextMethod := named.LookupMethod("next"); nextMethod != nil {
+		retType := nextMethod.Sig().Result()
+		if subst != nil {
+			retType = types.Substitute(retType, subst)
+		}
+		if opt, ok := retType.(*types.Optional); ok {
+			c.info.ForInKinds[s] = ForInNext
+			return opt.Elem()
+		}
+	}
+
+	// Check for iter() returning type with next() T?
+	if iterMethod := named.LookupMethod("iter"); iterMethod != nil {
+		iterRetType := iterMethod.Sig().Result()
+		if subst != nil {
+			iterRetType = types.Substitute(iterRetType, subst)
+		}
+		// Resolve the iterator type returned by iter()
+		var iterNamed *types.Named
+		var iterSubst map[*types.TypeParam]types.Type
+		switch t := iterRetType.(type) {
+		case *types.Named:
+			iterNamed = t
+		case *types.Instance:
+			if origin, ok := t.Origin().(*types.Named); ok {
+				iterNamed = origin
+				if len(origin.TypeParams()) > 0 {
+					iterSubst = types.BuildSubstMap(origin.TypeParams(), t.TypeArgs())
+				}
+			}
+		}
+		if iterNamed != nil {
+			if nextMethod := iterNamed.LookupMethod("next"); nextMethod != nil {
+				nextRetType := nextMethod.Sig().Result()
+				if iterSubst != nil {
+					nextRetType = types.Substitute(nextRetType, iterSubst)
+				}
+				if opt, ok := nextRetType.(*types.Optional); ok {
+					c.info.ForInKinds[s] = ForInIter
+					return opt.Elem()
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 func (c *Checker) checkClassicForStmt(s *ast.ClassicForStmt) {

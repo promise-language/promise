@@ -73,10 +73,6 @@ func llvmType(typ types.Type) irtypes.Type {
 	case *types.Array:
 		return irtypes.NewArray(uint64(t.Size()), llvmType(t.Elem()))
 	case *types.Instance:
-		origin := t.Origin()
-		if origin == types.TypIter || origin == types.TypStream {
-			return generatorValueType() // {i8* handle, i8* yield_slot}
-		}
 		return irtypes.I8Ptr // generic instances (resolveType/instanceFieldLLVMType handle user types)
 	default:
 		return irtypes.I8Ptr // opaque pointer placeholder for future types

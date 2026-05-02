@@ -100,7 +100,14 @@ func collectMonoInstances(info *sema.Info) []*types.Instance {
 		result = append(result, inst)
 	}
 
-	// Transitively expand: walk substituted field types and parent instances.
+	// Collect unresolved instances from info.Types (instances with TypeParams).
+	// These arise in generic method bodies: e.g., Iterator[T].filter() creates
+	// _FnIter[T]. Sema records the expression types but skips recording the
+	// instance because it contains TypeParams.
+	unresolvedInsts := collectUnresolvedInstances(info)
+
+	// Transitively expand: walk substituted field types, parent instances,
+	// and resolve unresolved method-body instances.
 	for i := 0; i < len(result); i++ {
 		inst := result[i]
 		switch origin := inst.Origin().(type) {
@@ -123,6 +130,12 @@ func collectMonoInstances(info *sema.Info) []*types.Instance {
 					}
 				}
 			}
+			// Resolve unresolved instances from method bodies.
+			// E.g., Iterator[int] has subst {T→int}; _FnIter[T] in method
+			// bodies resolves to _FnIter[int].
+			if len(subst) > 0 {
+				resolveUnresolvedInstances(unresolvedInsts, subst, &result, seen)
+			}
 		case *types.Enum:
 			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
 			for _, v := range origin.Variants() {
@@ -131,10 +144,81 @@ func collectMonoInstances(info *sema.Info) []*types.Instance {
 					discoverInstances(ft, &result, seen)
 				}
 			}
+			if len(subst) > 0 {
+				resolveUnresolvedInstances(unresolvedInsts, subst, &result, seen)
+			}
 		}
 	}
 
 	return result
+}
+
+// collectUnresolvedInstances scans info.Types for Instance types that contain
+// TypeParams. These come from generic method bodies where sema type-checks
+// once with TypeParams unresolved (e.g., _FnIter[T] inside Iterator[T].filter()).
+func collectUnresolvedInstances(info *sema.Info) []*types.Instance {
+	visited := make(map[*types.Instance]bool)
+	var result []*types.Instance
+	for _, typ := range info.Types {
+		findUnresolvedInstances(typ, &result, visited)
+	}
+	return result
+}
+
+// findUnresolvedInstances recursively walks a type to find Instance types
+// that contain TypeParams.
+func findUnresolvedInstances(typ types.Type, result *[]*types.Instance, visited map[*types.Instance]bool) {
+	if typ == nil {
+		return
+	}
+	switch t := typ.(type) {
+	case *types.Instance:
+		if types.ContainsTypeParam(t) && !visited[t] {
+			visited[t] = true
+			*result = append(*result, t)
+		}
+		for _, arg := range t.TypeArgs() {
+			findUnresolvedInstances(arg, result, visited)
+		}
+	case *types.Optional:
+		findUnresolvedInstances(t.Elem(), result, visited)
+	case *types.Tuple:
+		for _, e := range t.Elems() {
+			findUnresolvedInstances(e, result, visited)
+		}
+	case *types.Signature:
+		for _, p := range t.Params() {
+			findUnresolvedInstances(p.Type(), result, visited)
+		}
+		findUnresolvedInstances(t.Result(), result, visited)
+	case *types.SharedRef:
+		findUnresolvedInstances(t.Elem(), result, visited)
+	case *types.MutRef:
+		findUnresolvedInstances(t.Elem(), result, visited)
+	case *types.Array:
+		findUnresolvedInstances(t.Elem(), result, visited)
+	}
+}
+
+// resolveUnresolvedInstances applies a substitution map to unresolved instances
+// and adds any newly concrete instances to the result.
+func resolveUnresolvedInstances(unresolved []*types.Instance, subst map[*types.TypeParam]types.Type, result *[]*types.Instance, seen map[string]bool) {
+	for _, ui := range unresolved {
+		resolved := types.Substitute(ui, subst)
+		if resolved == ui {
+			continue // substitution didn't change anything
+		}
+		if types.ContainsTypeParam(resolved) {
+			continue // still has unresolved TypeParams
+		}
+		if ri, ok := resolved.(*types.Instance); ok {
+			key := monoName(ri)
+			if !seen[key] {
+				seen[key] = true
+				*result = append(*result, ri)
+			}
+		}
+	}
 }
 
 // discoverInstances recursively walks a type and collects any concrete Instance types.
@@ -508,6 +592,11 @@ func (c *Compiler) declareMonoMethods(file *ast.File, instances []*types.Instanc
 		if !ok {
 			continue
 		}
+		// Skip structural types — their default methods are synthesized for
+		// concrete implementors via synthesizeDefaultMethods.
+		if named.IsStructural() {
+			continue
+		}
 		name := monoName(inst)
 		subst := types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
 		mergeParentSubst(named, subst)
@@ -577,6 +666,11 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 		if !ok {
 			continue
 		}
+		// Skip structural types — their default methods are synthesized for
+		// concrete implementors via synthesizeDefaultMethods.
+		if named.IsStructural() {
+			continue
+		}
 		name := monoName(inst)
 		subst := types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
 		mergeParentSubst(named, subst)
@@ -619,6 +713,147 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 					c.defineMethodFunc(md, m, fn, named)
 				}
 			}()
+		}
+	}
+}
+
+// declareMonoSynthesizedDefaults declares stubs for default methods from structural
+// parents that need to be synthesized for mono instances of concrete types.
+// E.g., _FnIter[int] inherits filter/take/skip from Iterator[T] — these become
+// _FnIter__int.filter, _FnIter__int.take, etc. Must run BEFORE vtable emission.
+func (c *Compiler) declareMonoSynthesizedDefaults(file *ast.File, instances []*types.Instance) {
+	for _, inst := range instances {
+		named, ok := inst.Origin().(*types.Named)
+		if !ok || named.IsStructural() {
+			continue
+		}
+		name := monoName(inst)
+		subst := types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
+		mergeParentSubst(named, subst)
+
+		for _, pr := range named.Parents() {
+			if pr.Named.IsStructural() {
+				c.declareStructuralDefaultStubs(file, name, named, pr.Named, subst)
+			}
+		}
+	}
+}
+
+// declareStructuralDefaultStubs declares function stubs for default methods from
+// a structural interface, using mono-qualified names for the concrete type.
+func (c *Compiler) declareStructuralDefaultStubs(file *ast.File, mName string, concrete, iface *types.Named, subst map[*types.TypeParam]types.Type) {
+	ifaceTD := c.findTypeDecl(file, iface.Obj().Name())
+	if ifaceTD == nil {
+		return
+	}
+	for _, md := range ifaceTD.Methods {
+		if md.Body == nil {
+			continue
+		}
+		m := c.lookupAnyMethod(iface, md.Name, md.IsGetter, md.IsSetter)
+		if m == nil || m.IsAbstract() {
+			continue
+		}
+		if hasOwnMethod(concrete, md.Name) {
+			continue
+		}
+		if len(md.TypeParams) > 0 {
+			continue // generic methods are not virtual
+		}
+		mangledName := mangleMethodName(mName, md.Name, md.IsSetter)
+		if _, exists := c.funcs[mangledName]; exists {
+			continue
+		}
+
+		sig := m.Sig()
+		var params []*ir.Param
+		if sig.Recv() != nil {
+			params = append(params, ir.NewParam("this", irtypes.I8Ptr))
+		}
+		c.typeSubst = subst
+		for _, p := range sig.Params() {
+			params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
+		}
+		retType := irtypes.Type(irtypes.Void)
+		if sig.Result() != nil {
+			retType = c.resolveType(sig.Result())
+		}
+		c.typeSubst = nil
+		if sig.CanError() {
+			retType = computeResultType(retType)
+		}
+
+		fn := c.module.NewFunc(mangledName, retType, params...)
+		c.funcs[mangledName] = fn
+	}
+
+	// Recurse into parent interfaces
+	for _, pr := range iface.Parents() {
+		if pr.Named.IsStructural() {
+			c.declareStructuralDefaultStubs(file, mName, concrete, pr.Named, subst)
+		}
+	}
+}
+
+// defineMonoSynthesizedDefaults generates bodies for synthesized default methods
+// on mono instances of concrete types with structural parents.
+func (c *Compiler) defineMonoSynthesizedDefaults(file *ast.File, instances []*types.Instance) {
+	for _, inst := range instances {
+		named, ok := inst.Origin().(*types.Named)
+		if !ok || named.IsStructural() {
+			continue
+		}
+		name := monoName(inst)
+		subst := types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
+		mergeParentSubst(named, subst)
+
+		for _, pr := range named.Parents() {
+			if pr.Named.IsStructural() {
+				c.defineStructuralDefaultBodies(file, name, named, pr.Named, subst, inst)
+			}
+		}
+	}
+}
+
+// defineStructuralDefaultBodies generates method bodies for already-declared
+// synthesized default method stubs with mono-qualified names.
+func (c *Compiler) defineStructuralDefaultBodies(file *ast.File, mName string, concrete, iface *types.Named, subst map[*types.TypeParam]types.Type, inst *types.Instance) {
+	ifaceTD := c.findTypeDecl(file, iface.Obj().Name())
+	if ifaceTD == nil {
+		return
+	}
+	for _, md := range ifaceTD.Methods {
+		if md.Body == nil {
+			continue
+		}
+		m := c.lookupAnyMethod(iface, md.Name, md.IsGetter, md.IsSetter)
+		if m == nil || m.IsAbstract() {
+			continue
+		}
+		if hasOwnMethod(concrete, md.Name) {
+			continue
+		}
+		if len(md.TypeParams) > 0 {
+			continue
+		}
+		mangledName := mangleMethodName(mName, md.Name, md.IsSetter)
+		fn, ok := c.funcs[mangledName]
+		if !ok || len(fn.Blocks) > 0 {
+			continue
+		}
+
+		saved := c.saveState()
+		c.selfSubst = &selfSubstInfo{iface: iface, concrete: concrete}
+		c.typeSubst = subst
+		c.monoCtx = &monoContext{inst: inst, origin: concrete, name: mName}
+		c.defineMethodFunc(md, m, fn, concrete)
+		c.restoreState(saved)
+	}
+
+	// Recurse into parent interfaces
+	for _, pr := range iface.Parents() {
+		if pr.Named.IsStructural() {
+			c.defineStructuralDefaultBodies(file, mName, concrete, pr.Named, subst, inst)
 		}
 	}
 }

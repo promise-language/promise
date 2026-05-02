@@ -997,6 +997,9 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		return
 	}
 
+	// Write back move-captured variables to env struct before returning
+	c.emitLambdaWritebacks()
+
 	// Clear drop flag for returned variable (it's being moved out, not dropped)
 	if s.Value != nil {
 		if ident, ok := s.Value.(*ast.IdentExpr); ok {
@@ -1469,9 +1472,6 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 	} else if elem, ok := types.AsStream(iterableType); ok {
 		genVal := c.genExpr(s.Iterable)
 		c.genForInGenerator(s, genVal, elem)
-	} else if elem, ok := types.AsIterator(iterableType); ok {
-		genVal := c.genExpr(s.Iterable)
-		c.genForInGenerator(s, genVal, elem)
 	} else if elem, ok := types.AsRange(iterableType); ok {
 		c.genForInRange(s, elem)
 	} else {
@@ -1482,8 +1482,194 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 			c.genForInString(s, strPtr)
 			return
 		}
+		// Duck-typed for-in: check sema ForInKinds
+		if kind, ok := c.info.ForInKinds[s]; ok {
+			iterVal := c.genExpr(s.Iterable)
+			switch kind {
+			case sema.ForInNext:
+				c.genForInCustomIter(s, iterVal, iterableType)
+			case sema.ForInIter:
+				c.genForInCustomStream(s, iterVal, iterableType)
+			}
+			return
+		}
 		panic(fmt.Sprintf("codegen: unsupported for-in iterable type %s", iterableType))
 	}
+}
+
+// genForInCustomIter handles for-in over any type with a next() T? method.
+// Calls .next() in a loop via virtual dispatch (structural interface) or direct call (concrete type).
+func (c *Compiler) genForInCustomIter(s *ast.ForInStmt, iterVal value.Value, iterType types.Type) {
+	// Resolve element type from the next() return type
+	named := extractNamed(iterType)
+	if named == nil {
+		panic(fmt.Sprintf("codegen: genForInCustomIter on non-named type %s", iterType))
+	}
+	nextMethod := named.LookupMethod("next")
+	if nextMethod == nil {
+		panic(fmt.Sprintf("codegen: type %s has no next() method", named))
+	}
+
+	// Resolve the optional return type: next() returns T?
+	retType := nextMethod.Sig().Result()
+	if inst, ok := iterType.(*types.Instance); ok {
+		if origin, ok := inst.Origin().(*types.Named); ok && len(origin.TypeParams()) > 0 {
+			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+			retType = types.Substitute(retType, subst)
+		}
+	}
+	if c.typeSubst != nil {
+		retType = types.Substitute(retType, c.typeSubst)
+	}
+	optType, ok := retType.(*types.Optional)
+	if !ok {
+		panic(fmt.Sprintf("codegen: next() on %s does not return optional", named))
+	}
+	elemType := optType.Elem()
+	elemLLVM := c.resolveType(elemType)
+	optLLVM := c.resolveType(retType)
+
+	// Store iterable value in alloca for repeated .next() calls
+	iterAlloca := c.createEntryAlloca(iterVal.Type())
+	iterAlloca.SetName(c.uniqueLocalName("iter.val"))
+	c.block.NewStore(iterVal, iterAlloca)
+
+	// Element binding
+	elemAlloca := c.createEntryAlloca(elemLLVM)
+	elemAlloca.SetName(c.uniqueLocalName(s.Binding))
+	if s.Binding != "_" {
+		c.locals[s.Binding] = elemAlloca
+	}
+
+	// Optional index variable
+	if s.Index != "" && s.Index != "_" {
+		indexAlloca := c.createEntryAlloca(irtypes.I64)
+		indexAlloca.SetName(c.uniqueLocalName(s.Index))
+		c.block.NewStore(constant.NewInt(irtypes.I64, 0), indexAlloca)
+		c.locals[s.Index] = indexAlloca
+	}
+
+	headerBlk := c.newBlock("iter.header")
+	bodyBlk := c.newBlock("iter.body")
+	updateBlk := c.newBlock("iter.update")
+	exitBlk := c.newBlock("iter.exit")
+
+	c.block.NewBr(headerBlk)
+
+	// Header: call .next(), check optional
+	c.block = headerBlk
+	curIter := c.block.NewLoad(iterVal.Type(), iterAlloca)
+	nextResult := c.emitIterNext(curIter, iterType, named, nextMethod, optLLVM)
+
+	// Check optional discriminant: field 0 is i1 (true=some, false=none)
+	tag := c.block.NewExtractValue(nextResult, 0)
+	isNone := c.block.NewICmp(enum.IPredEQ, tag, constant.NewInt(irtypes.I1, 0))
+	c.block.NewCondBr(isNone, exitBlk, bodyBlk)
+
+	// Body: extract value, bind, execute
+	savedBreak := c.breakTarget
+	savedContinue := c.continueTarget
+	savedLoopScopeDepth := c.loopScopeDepth
+	c.breakTarget = exitBlk
+	c.continueTarget = updateBlk
+	c.loopScopeDepth = len(c.scopeBindings)
+
+	c.block = bodyBlk
+	val := c.block.NewExtractValue(nextResult, 1)
+	c.block.NewStore(val, elemAlloca)
+
+	c.genBlock(s.Body)
+
+	if c.block.Term == nil {
+		c.block.NewBr(updateBlk)
+	}
+
+	// Update: increment index, branch back to header
+	c.block = updateBlk
+	if s.Index != "" && s.Index != "_" {
+		idxAlloca := c.locals[s.Index]
+		curIdx := c.block.NewLoad(irtypes.I64, idxAlloca)
+		nextIdx := c.block.NewAdd(curIdx, constant.NewInt(irtypes.I64, 1))
+		c.block.NewStore(nextIdx, idxAlloca)
+	}
+	c.block.NewBr(headerBlk)
+
+	c.breakTarget = savedBreak
+	c.continueTarget = savedContinue
+	c.loopScopeDepth = savedLoopScopeDepth
+
+	c.block = exitBlk
+}
+
+// genForInCustomStream handles for-in over any type with an iter() method.
+// Calls .iter() to get an iterator, then delegates to genForInCustomIter.
+func (c *Compiler) genForInCustomStream(s *ast.ForInStmt, streamVal value.Value, streamType types.Type) {
+	named := extractNamed(streamType)
+	if named == nil {
+		panic(fmt.Sprintf("codegen: genForInCustomStream on non-named type %s", streamType))
+	}
+	iterMethod := named.LookupMethod("iter")
+	if iterMethod == nil {
+		panic(fmt.Sprintf("codegen: type %s has no iter() method", named))
+	}
+
+	// Resolve iter() return type
+	iterRetType := iterMethod.Sig().Result()
+	if inst, ok := streamType.(*types.Instance); ok {
+		if origin, ok := inst.Origin().(*types.Named); ok && len(origin.TypeParams()) > 0 {
+			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+			iterRetType = types.Substitute(iterRetType, subst)
+		}
+	}
+	if c.typeSubst != nil {
+		iterRetType = types.Substitute(iterRetType, c.typeSubst)
+	}
+
+	// Call .iter() on the stream value
+	iterResult := c.emitIterNext(streamVal, streamType, named, iterMethod, c.resolveType(iterRetType))
+
+	// Delegate to genForInCustomIter with the iterator value
+	c.genForInCustomIter(s, iterResult, iterRetType)
+}
+
+// emitIterNext emits a call to a method on a value, using virtual dispatch
+// for types that need vtables (structural interfaces) or direct dispatch otherwise.
+// This is a synthetic method call (no AST nodes) used by duck-typed for-in iteration.
+func (c *Compiler) emitIterNext(receiverVal value.Value, receiverType types.Type,
+	named *types.Named, method *types.Method, retLLVM irtypes.Type) value.Value {
+
+	if c.needsVtable(named) && !method.IsNative() {
+		// Virtual dispatch: extract vtable + instance, call through vtable slot
+		vtableRaw := c.extractVtablePtr(receiverVal)
+		instance := c.extractInstancePtr(receiverVal)
+
+		slotIndex := named.VirtualMethodIndex(method.Name(), false)
+		if slotIndex < 0 {
+			panic(fmt.Sprintf("codegen: method %s not in vtable for %s", method.Name(), named))
+		}
+		vtablePtr := c.block.NewBitCast(vtableRaw, irtypes.NewPointer(irtypes.I8Ptr))
+		fnSlotPtr := c.block.NewGetElementPtr(irtypes.I8Ptr, vtablePtr,
+			constant.NewInt(irtypes.I32, int64(slotIndex)))
+		fnRaw := c.block.NewLoad(irtypes.I8Ptr, fnSlotPtr)
+
+		// Build function type: (i8*) -> retLLVM  (receiver only, no other args)
+		funcType := irtypes.NewFunc(retLLVM, irtypes.I8Ptr)
+		fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))
+
+		return c.block.NewCall(fnTyped, instance)
+	}
+
+	// Direct dispatch: call the concrete method function
+	ownerName := c.resolveTypeName(receiverType)
+	mangledName := mangleMethodName(ownerName, method.Name(), false)
+	fn, ok := c.funcs[mangledName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undeclared method %s", mangledName))
+	}
+
+	// Extract instance pointer as receiver
+	instance := c.extractInstancePtr(receiverVal)
+	return c.block.NewCall(fn, instance)
 }
 
 // genForInRange handles for-in over a Range[T] value type (e.g., 0..10, 'a'..'z').
@@ -2098,6 +2284,16 @@ func (c *Compiler) lookupLocalType(s *ast.TypedVarDecl) types.Type {
 func (c *Compiler) resolveTypeRefToType(ref ast.TypeRef) types.Type {
 	switch r := ref.(type) {
 	case *ast.NamedTypeRef:
+		// If typeSubst is active, check if this name matches a TypeParam in the
+		// substitution map. This avoids finding the wrong TypeParam from a different
+		// generic type's scope during synthesized method body generation.
+		if c.typeSubst != nil {
+			for tp, concrete := range c.typeSubst {
+				if tp.Obj().Name() == r.Name {
+					return concrete
+				}
+			}
+		}
 		// Check Universe scope first (primitives)
 		if obj, _ := types.Universe.LookupParent(r.Name); obj != nil {
 			if tn, ok := obj.(*types.TypeName); ok {

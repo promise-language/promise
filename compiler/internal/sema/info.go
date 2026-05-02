@@ -21,6 +21,14 @@ type MethodInstance struct {
 	Sig       *types.Signature // fully substituted signature (no TypeParams)
 }
 
+// ForInKind indicates how a for-in loop iterates over a duck-typed iterable.
+type ForInKind int
+
+const (
+	ForInNext ForInKind = iota + 1 // type has next() T? method
+	ForInIter                      // type has iter() returning type with next() T?
+)
+
 // CapturedVar records a variable captured by a lambda/closure.
 type CapturedVar struct {
 	Obj    types.Object // the captured variable (always *types.Var)
@@ -128,6 +136,11 @@ type Info struct {
 	// failable call. Codegen extracts (value, error?) from the result struct
 	// instead of a tuple.
 	FailableDestructures map[*ast.DestructureVarDecl]bool
+
+	// ForInKinds maps for-in statements to their duck-typed iteration kind.
+	// Set when the iterable type is not a built-in (Array, Vector, Map, Channel, Range, String)
+	// but satisfies the iterator protocol via next() T? or iter() methods.
+	ForInKinds map[*ast.ForInStmt]ForInKind
 
 	// GeneratorFuncs maps generator function/method declarations to their
 	// element type T. A function is a generator if its return type is

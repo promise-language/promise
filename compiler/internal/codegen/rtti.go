@@ -222,6 +222,11 @@ func (c *Compiler) emitMonoVtableGlobals(instances []*types.Instance) {
 				// Inherited method — resolve through mono parent chain
 				monoOwner := c.resolveMonoParentName(named, inst, ownerName)
 				mangledName = mangleMethodName(monoOwner, m.Name(), m.IsSetter())
+				// Structural parents skip mono method generation — fall back to
+				// concrete mono name where synthesized defaults are registered.
+				if _, ok := c.funcs[mangledName]; !ok {
+					mangledName = mangleMethodName(name, m.Name(), m.IsSetter())
+				}
 			}
 			if fn, ok := c.funcs[mangledName]; ok {
 				entries = append(entries, constant.NewBitCast(fn, irtypes.I8Ptr))

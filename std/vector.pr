@@ -52,4 +52,15 @@ type Vector[T] `native `public {
     remove(int index) `native;
 
     get is_empty bool => this.len == 0;
+
+    iter() Iterator[T] `public `doc("Returns a lazy iterator over the elements.") {
+        int i = 0;
+        int n = this.len;
+        return _FnIter[T](_next: move || -> T? {
+            if i >= n { return none; }
+            T val = this[i];
+            i = i + 1;
+            return val;
+        });
+    }
 }

@@ -86,6 +86,10 @@ type Compiler struct {
 	// Lambda counter for unique anonymous function names
 	lambdaCounter int
 
+	// Lambda capture write-back: for move-captured variables, writes local values
+	// back to the env struct before return so mutations persist across calls.
+	lambdaWritebacks []lambdaWriteback
+
 	// Thunks for named function references used as first-class values.
 	// Maps original function name to a wrapper with env-first ABI.
 	thunks map[string]*ir.Func
@@ -260,6 +264,23 @@ type viewVtableKey struct {
 	view     *types.Named
 }
 
+// lambdaWriteback tracks a move-captured variable that needs its local value
+// written back to the env struct on function exit, so mutations persist across calls.
+type lambdaWriteback struct {
+	localAlloca *ir.InstAlloca // local alloca in the lambda body
+	envFieldPtr value.Value    // pointer into the env struct field
+	elemType    irtypes.Type   // element type for load/store
+}
+
+// emitLambdaWritebacks stores local alloca values back to the env struct
+// so that mutations to move-captured variables persist across lambda calls.
+func (c *Compiler) emitLambdaWritebacks() {
+	for _, wb := range c.lambdaWritebacks {
+		val := c.block.NewLoad(wb.elemType, wb.localAlloca)
+		c.block.NewStore(val, wb.envFieldPtr)
+	}
+}
+
 // selfSubstInfo tracks a Self-type substitution for generating default method
 // bodies from structural interfaces specialized to a concrete type.
 type selfSubstInfo struct {
@@ -394,6 +415,7 @@ func Compile(file *ast.File, info *sema.Info, target string) *CompileResult {
 	// Declare method stubs before vtable/typeinfo emission (vtable needs function pointers)
 	c.declareTypeMethods(file)
 	c.declareMonoMethods(file, monoInstances)
+	c.declareMonoSynthesizedDefaults(file, monoInstances) // structural parent defaults
 
 	// Compute vtable info and emit vtable globals (after method stubs are declared)
 	c.computeVtableInfo(file)
@@ -415,6 +437,7 @@ func Compile(file *ast.File, info *sema.Info, target string) *CompileResult {
 
 	c.defineTypeMethods(file)
 	c.defineMonoMethods(file, monoInstances)
+	c.defineMonoSynthesizedDefaults(file, monoInstances) // structural parent defaults
 	c.defineFuncs(file)
 	c.defineMonoFuncs(file, monoFuncInstances)
 	c.defineMonoMethodInstances(file, monoMethodInstances)
@@ -2918,6 +2941,7 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo) {
 	// 5. Declare method stubs for module types
 	c.declareModuleTypeMethods(modFile, irName)
 	c.declareMonoMethods(modFile, monoInstances)
+	c.declareMonoSynthesizedDefaults(modFile, monoInstances)
 
 	// 6. Compute vtable info and emit for module types
 	c.computeVtableInfo(modFile)
@@ -2935,6 +2959,7 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo) {
 	// 8. Define module method bodies
 	c.defineModuleTypeMethods(modFile, irName)
 	c.defineMonoMethods(modFile, monoInstances)
+	c.defineMonoSynthesizedDefaults(modFile, monoInstances)
 
 	// 9. Define module function bodies
 	c.defineModuleFuncs(modFile, irName)
@@ -3724,6 +3749,76 @@ func (c *Compiler) resolveMethodOwner(named *types.Named, methodName string) str
 	return named.Obj().Name() // fallback
 }
 
+// hasOwnMethod returns true if the Named type declares the method itself (not inherited).
+func hasOwnMethod(named *types.Named, name string) bool {
+	for _, m := range named.Methods() {
+		if m.Name() == name {
+			return true
+		}
+	}
+	return false
+}
+
+// findStructuralOwner returns the structural parent type that owns a method
+// inherited by `named`, or nil if the method comes from a non-structural parent.
+func (c *Compiler) findStructuralOwner(named *types.Named, methodName string) *types.Named {
+	for _, pr := range named.Parents() {
+		if pr.Named.LookupMethod(methodName) != nil {
+			if pr.Named.IsStructural() {
+				return pr.Named
+			}
+			// Recurse into parent's parents
+			if found := c.findStructuralOwner(pr.Named, methodName); found != nil {
+				return found
+			}
+		}
+	}
+	return nil
+}
+
+// ensureDefaultMethodsSynthesized triggers synthesis of default methods from a
+// structural parent for a concrete type. For generic interfaces (e.g., Iterator[T]),
+// also sets typeSubst from the parent ref's concrete type args.
+func (c *Compiler) ensureDefaultMethodsSynthesized(concrete, iface *types.Named) {
+	// Build typeSubst from the concrete type's parent ref to the interface.
+	var typeSubst map[*types.TypeParam]types.Type
+	for _, pr := range concrete.Parents() {
+		if pr.Named == iface && len(pr.TypeArgs) > 0 {
+			typeSubst = types.BuildSubstMap(iface.TypeParams(), pr.TypeArgs)
+			break
+		}
+	}
+	// If not a direct parent, walk transitively
+	if typeSubst == nil {
+		typeSubst = c.buildTransitiveParentSubst(concrete, iface)
+	}
+
+	savedSubst := c.typeSubst
+	if typeSubst != nil {
+		c.typeSubst = typeSubst
+	}
+	c.synthesizeDefaultMethods(concrete, iface)
+	c.typeSubst = savedSubst
+}
+
+// buildTransitiveParentSubst builds a type substitution map for a structural
+// interface that is a transitive (not direct) parent of concrete.
+func (c *Compiler) buildTransitiveParentSubst(concrete, iface *types.Named) map[*types.TypeParam]types.Type {
+	for _, pr := range concrete.Parents() {
+		if pr.Named == iface {
+			if len(pr.TypeArgs) > 0 {
+				return types.BuildSubstMap(iface.TypeParams(), pr.TypeArgs)
+			}
+			return nil
+		}
+		// Recurse: build subst through intermediate parent
+		if sub := c.buildTransitiveParentSubst(pr.Named, iface); sub != nil {
+			return sub
+		}
+	}
+	return nil
+}
+
 // resolveMonoParentName resolves the monomorphized name of a parent type that owns
 // a method inherited by `named`. If the parent is generic and the child is accessed
 // through a concrete type (Instance or Named with generic parents), the parent's
@@ -3775,38 +3870,44 @@ func findMonoParentName(named *types.Named, ownerName string, subst map[*types.T
 // compilerState captures the mutable compiler fields that defineMethodFunc overwrites.
 // Used to save/restore state when synthesizing default methods during another function's codegen.
 type compilerState struct {
-	fn             *ir.Func
-	block          *ir.Block
-	entryBlock     *ir.Block
-	locals         map[string]*ir.InstAlloca
-	dropFlags      map[string]*ir.InstAlloca
-	dropBindings   map[string]scopeBinding
-	blockCounter   int
-	canError       bool
-	currentRetType types.Type
-	currentNamed   *types.Named
-	scopeBindings  []scopeBinding
-	loopScopeDepth int
-	selfSubst      *selfSubstInfo
-	targetType     types.Type
+	fn               *ir.Func
+	block            *ir.Block
+	entryBlock       *ir.Block
+	locals           map[string]*ir.InstAlloca
+	dropFlags        map[string]*ir.InstAlloca
+	dropBindings     map[string]scopeBinding
+	blockCounter     int
+	canError         bool
+	currentRetType   types.Type
+	currentNamed     *types.Named
+	scopeBindings    []scopeBinding
+	loopScopeDepth   int
+	selfSubst        *selfSubstInfo
+	targetType       types.Type
+	typeSubst        map[*types.TypeParam]types.Type
+	monoCtx          *monoContext
+	lambdaWritebacks []lambdaWriteback
 }
 
 func (c *Compiler) saveState() compilerState {
 	return compilerState{
-		fn:             c.fn,
-		block:          c.block,
-		entryBlock:     c.entryBlock,
-		locals:         c.locals,
-		dropFlags:      c.dropFlags,
-		dropBindings:   c.dropBindings,
-		blockCounter:   c.blockCounter,
-		canError:       c.canError,
-		currentRetType: c.currentRetType,
-		currentNamed:   c.currentNamed,
-		scopeBindings:  c.scopeBindings,
-		loopScopeDepth: c.loopScopeDepth,
-		selfSubst:      c.selfSubst,
-		targetType:     c.targetType,
+		fn:               c.fn,
+		block:            c.block,
+		entryBlock:       c.entryBlock,
+		locals:           c.locals,
+		dropFlags:        c.dropFlags,
+		dropBindings:     c.dropBindings,
+		blockCounter:     c.blockCounter,
+		canError:         c.canError,
+		currentRetType:   c.currentRetType,
+		currentNamed:     c.currentNamed,
+		scopeBindings:    c.scopeBindings,
+		loopScopeDepth:   c.loopScopeDepth,
+		selfSubst:        c.selfSubst,
+		targetType:       c.targetType,
+		typeSubst:        c.typeSubst,
+		monoCtx:          c.monoCtx,
+		lambdaWritebacks: c.lambdaWritebacks,
 	}
 }
 
@@ -3825,6 +3926,9 @@ func (c *Compiler) restoreState(s compilerState) {
 	c.loopScopeDepth = s.loopScopeDepth
 	c.selfSubst = s.selfSubst
 	c.targetType = s.targetType
+	c.typeSubst = s.typeSubst
+	c.monoCtx = s.monoCtx
+	c.lambdaWritebacks = s.lambdaWritebacks
 }
 
 // synthesizeDefaultMethods generates LLVM functions for default methods from
@@ -3849,8 +3953,9 @@ func (c *Compiler) synthesizeDefaultMethods(concrete, iface *types.Named) {
 		if ifaceMethod == nil || ifaceMethod.IsAbstract() {
 			continue
 		}
-		concreteMethod := c.lookupAnyMethod(concrete, md.Name, md.IsGetter, md.IsSetter)
-		if concreteMethod != nil && !concreteMethod.IsAbstract() {
+		// Only skip if the concrete type has its OWN implementation (not inherited).
+		// LookupMethod traverses parents, so we check own methods directly.
+		if hasOwnMethod(concrete, md.Name) {
 			continue // concrete type overrides the default
 		}
 

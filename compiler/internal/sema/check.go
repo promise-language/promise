@@ -72,6 +72,7 @@ func CheckWithModules(file *ast.File, moduleScopes map[string]*types.Scope) (*In
 			FailableExprs:        make(map[ast.Expr]bool),
 			AutoPropagateExprs:   make(map[ast.Expr]bool),
 			FailableDestructures: make(map[*ast.DestructureVarDecl]bool),
+			ForInKinds:           make(map[*ast.ForInStmt]ForInKind),
 			GeneratorFuncs:       make(map[ast.Node]types.Type),
 		},
 	}
@@ -121,6 +122,7 @@ func DeclareAndDefineWithModules(file *ast.File, moduleScopes map[string]*types.
 			FailableExprs:        make(map[ast.Expr]bool),
 			AutoPropagateExprs:   make(map[ast.Expr]bool),
 			FailableDestructures: make(map[*ast.DestructureVarDecl]bool),
+			ForInKinds:           make(map[*ast.ForInStmt]ForInKind),
 			GeneratorFuncs:       make(map[ast.Node]types.Type),
 		},
 	}

@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"bytes"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -94,6 +95,14 @@ func assertContains(t *testing.T, ir, substr string) {
 	t.Helper()
 	if !strings.Contains(ir, substr) {
 		t.Errorf("expected IR to contain %q\ngot:\n%s", substr, ir)
+	}
+}
+
+func assertContainsMatch(t *testing.T, ir, pattern string) {
+	t.Helper()
+	re := regexp.MustCompile(pattern)
+	if !re.MatchString(ir) {
+		t.Errorf("expected IR to match %q\ngot:\n%s", pattern, ir)
 	}
 }
 
@@ -3034,7 +3043,7 @@ func TestLambdaExpr(t *testing.T) {
 		}
 	`)
 	// Lambda function has env (i8*) as first parameter
-	assertContains(t, ir, "define i64 @.lambda.0(i8* %env, i64 %x)")
+	assertContainsMatch(t, ir, `define i64 @\.lambda\.\d+\(i8\* %env, i64 %x\)`)
 	// Lambda returned as fat pointer {fn_ptr, env_ptr}
 	assertContains(t, ir, "insertvalue { i8*, i8* }")
 }
@@ -3057,7 +3066,7 @@ func TestLambdaBlock(t *testing.T) {
 			f := |int x| -> int { return x * 2; };
 		}
 	`)
-	assertContains(t, ir, "define i64 @.lambda.0(i8* %env, i64 %x)")
+	assertContainsMatch(t, ir, `define i64 @\.lambda\.\d+\(i8\* %env, i64 %x\)`)
 	assertContains(t, ir, "mul i64")
 }
 
@@ -3067,7 +3076,7 @@ func TestLambdaVoid(t *testing.T) {
 			f := |int x| -> void { return; };
 		}
 	`)
-	assertContains(t, ir, "define void @.lambda.0(i8* %env, i64 %x)")
+	assertContainsMatch(t, ir, `define void @\.lambda\.\d+\(i8\* %env, i64 %x\)`)
 }
 
 func TestLambdaVariable(t *testing.T) {
@@ -3093,7 +3102,7 @@ func TestLambdaCaptureInt(t *testing.T) {
 	// Env struct should be allocated via malloc
 	assertContains(t, ir, "call i8* @pal_alloc(i64")
 	// Lambda function should have env param
-	assertContains(t, ir, "define i64 @.lambda.0(i8* %env, i64 %y)")
+	assertContainsMatch(t, ir, `define i64 @\.lambda\.\d+\(i8\* %env, i64 %y\)`)
 	// Should load captured var from env struct inside lambda
 	assertContains(t, ir, "cap")
 }
@@ -3109,7 +3118,7 @@ func TestLambdaCaptureMultiple(t *testing.T) {
 	// Env should be allocated
 	assertContains(t, ir, "call i8* @pal_alloc(i64")
 	// Lambda should have env param
-	assertContains(t, ir, "define i64 @.lambda.0(i8* %env")
+	assertContainsMatch(t, ir, `define i64 @\.lambda\.\d+\(i8\* %env`)
 }
 
 func TestLambdaNoCaptures(t *testing.T) {
@@ -3147,8 +3156,11 @@ func TestLambdaNestedCapture(t *testing.T) {
 	`)
 	// Outer lambda should also capture x (propagated from inner)
 	// Both lambdas should have env params and malloc for env
-	assertContains(t, ir, "define i64 @.lambda.0(i8* %env")
-	assertContains(t, ir, "define i64 @.lambda.1(i8* %env")
+	// Count lambda functions that take i8* %env and return i64
+	matches := regexp.MustCompile(`define i64 @\.lambda\.\d+\(i8\* %env`).FindAllString(ir, -1)
+	if len(matches) < 2 {
+		t.Errorf("expected at least 2 i64 lambda functions with env, got %d", len(matches))
+	}
 	// Two malloc calls — one for outer lambda env, one for inner
 	assertContains(t, ir, "call i8* @pal_alloc(i64")
 }

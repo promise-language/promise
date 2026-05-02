@@ -2041,10 +2041,17 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 	var mangledName string
 	ownerName := c.resolveMethodOwner(named, member.Field)
 	if ownerName != named.Obj().Name() {
-		// Method inherited from parent. Check if the parent is generic —
-		// if so, resolve to the monomorphized parent name.
-		monoOwner := c.resolveMonoParentName(named, targetType, ownerName)
-		mangledName = mangleMethodName(monoOwner, member.Field, false)
+		// Method inherited from parent. Check if the parent is structural —
+		// if so, use the concrete type's name (methods are synthesized per-concrete).
+		if structParent := c.findStructuralOwner(named, member.Field); structParent != nil {
+			concreteName := c.resolveTypeName(targetType)
+			c.ensureDefaultMethodsSynthesized(named, structParent)
+			mangledName = mangleMethodName(concreteName, member.Field, false)
+		} else {
+			// Non-structural parent: use the monomorphized parent name.
+			monoOwner := c.resolveMonoParentName(named, targetType, ownerName)
+			mangledName = mangleMethodName(monoOwner, member.Field, false)
+		}
 	} else {
 		mangledName = mangleMethodName(c.resolveTypeName(targetType), member.Field, false)
 	}
@@ -3887,6 +3894,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	savedScopeBindings := c.scopeBindings
 	savedDropFlags := c.dropFlags
 	savedLoopScopeDepth := c.loopScopeDepth
+	savedWritebacks := c.lambdaWritebacks
 
 	// Generate lambda body with fresh scope state
 	c.fn = fn
@@ -3899,6 +3907,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.dropFlags = make(map[string]*ir.InstAlloca)
 	c.dropBindings = make(map[string]scopeBinding)
 	c.loopScopeDepth = 0
+	c.lambdaWritebacks = nil
 
 	entry := fn.NewBlock(".entry")
 	c.block = entry
@@ -3917,8 +3926,13 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 			alloca.SetName(c.uniqueLocalName(cv.Obj.Name() + ".cap"))
 			entry.NewStore(val, alloca)
 			c.locals[cv.Obj.Name()] = alloca
-			// Register drop for move-captured droppable types
+			// For move captures, register write-back so mutations persist across calls
 			if cv.ByMove {
+				c.lambdaWritebacks = append(c.lambdaWritebacks, lambdaWriteback{
+					localAlloca: alloca,
+					envFieldPtr: fieldPtr,
+					elemType:    captureType,
+				})
 				c.maybeRegisterDrop(cv.Obj.Name(), alloca, cv.Obj.Type())
 			}
 		}
@@ -3951,6 +3965,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 
 	// Ensure terminator — clean up remaining capture bindings on fallthrough
 	if c.block != nil && c.block.Term == nil {
+		c.emitLambdaWritebacks()
 		if len(c.scopeBindings) > 0 {
 			c.emitScopeCleanup(0)
 		}
@@ -3972,6 +3987,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.scopeBindings = savedScopeBindings
 	c.dropFlags = savedDropFlags
 	c.loopScopeDepth = savedLoopScopeDepth
+	c.lambdaWritebacks = savedWritebacks
 
 	// Return fat pointer: {fn_ptr as i8*, env_ptr}
 	fnPtr := c.block.NewBitCast(fn, irtypes.I8Ptr)

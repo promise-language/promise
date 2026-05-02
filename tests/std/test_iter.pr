@@ -1,0 +1,974 @@
+// Tests for structural iterators, duck-typed for-in, and combinator chains.
+// Phase 0b: Iterator[T] protocol, _FnIter[T], combinators, collection .iter().
+
+// --- Custom iterator type (duck-typed for-in via next() T?) ---
+
+type CountUp {
+    int current;
+    int limit;
+
+    next() int? {
+        if this.current >= this.limit { return none; }
+        int val = this.current;
+        this.current = this.current + 1;
+        return val;
+    }
+}
+
+test_custom_iter_for_in() `test {
+    c := CountUp(current: 0, limit: 5);
+    int sum = 0;
+    for x in c {
+        sum = sum + x;
+    }
+    assert(sum == 10, "0+1+2+3+4=10");
+}
+
+test_custom_iter_empty() `test {
+    c := CountUp(current: 5, limit: 5);
+    int count = 0;
+    for _ in c {
+        count = count + 1;
+    }
+    assert(count == 0, "empty iterator yields nothing");
+}
+
+test_custom_iter_single() `test {
+    c := CountUp(current: 42, limit: 43);
+    int val = -1;
+    for x in c {
+        val = x;
+    }
+    assert(val == 42, "single element iterator");
+}
+
+test_custom_iter_with_index() `test {
+    c := CountUp(current: 10, limit: 13);
+    int last_idx = -1;
+    int last_val = -1;
+    for i, x in c {
+        last_idx = i;
+        last_val = x;
+    }
+    assert(last_idx == 2, "last index is 2");
+    assert(last_val == 12, "last value is 12");
+}
+
+test_custom_iter_break() `test {
+    c := CountUp(current: 0, limit: 100);
+    int sum = 0;
+    for x in c {
+        if x >= 5 { break; }
+        sum = sum + x;
+    }
+    assert(sum == 10, "break at 5: 0+1+2+3+4=10");
+}
+
+test_custom_iter_continue() `test {
+    c := CountUp(current: 0, limit: 10);
+    int sum = 0;
+    for x in c {
+        if x % 2 == 0 { continue; }
+        sum = sum + x;
+    }
+    assert(sum == 25, "odd sum: 1+3+5+7+9=25");
+}
+
+// --- Iterator[T] conformance: type with `is` inherits combinators ---
+
+type Counter is Iterator[int] {
+    int current;
+    int limit;
+
+    next() int? {
+        if this.current >= this.limit { return none; }
+        int val = this.current;
+        this.current = this.current + 1;
+        return val;
+    }
+}
+
+// --- Terminal combinator tests (no _FnIter creation) ---
+
+test_count() `test {
+    c := Counter(current: 0, limit: 5);
+    assert(c.count() == 5, "count 0..5 = 5");
+}
+
+test_count_empty() `test {
+    c := Counter(current: 0, limit: 0);
+    assert(c.count() == 0, "count empty = 0");
+}
+
+test_first() `test {
+    c := Counter(current: 10, limit: 15);
+    if v := c.first() {
+        assert(v == 10, "first = 10");
+    } else {
+        assert(false, "first should not be none");
+    }
+}
+
+test_first_empty() `test {
+    c := Counter(current: 0, limit: 0);
+    if _ := c.first() {
+        assert(false, "first on empty should be none");
+    }
+}
+
+test_last() `test {
+    c := Counter(current: 0, limit: 5);
+    if v := c.last() {
+        assert(v == 4, "last = 4");
+    } else {
+        assert(false, "last should not be none");
+    }
+}
+
+test_any_true() `test {
+    c := Counter(current: 0, limit: 10);
+    assert(c.any(|int x| -> bool { return x == 7; }), "any finds 7");
+}
+
+test_any_false() `test {
+    c := Counter(current: 0, limit: 5);
+    assert(!c.any(|int x| -> bool { return x == 99; }), "any finds nothing");
+}
+
+test_every_true() `test {
+    c := Counter(current: 0, limit: 5);
+    assert(c.every(|int x| -> bool { return x < 10; }), "every < 10");
+}
+
+test_every_false() `test {
+    c := Counter(current: 0, limit: 5);
+    assert(!c.every(|int x| -> bool { return x < 3; }), "not every < 3");
+}
+
+test_find() `test {
+    c := Counter(current: 0, limit: 10);
+    if v := c.find(|int x| -> bool { return x > 5; }) {
+        assert(v == 6, "find first > 5 = 6");
+    } else {
+        assert(false, "find should not be none");
+    }
+}
+
+test_find_none() `test {
+    c := Counter(current: 0, limit: 5);
+    if _ := c.find(|int x| -> bool { return x > 100; }) {
+        assert(false, "find should be none");
+    }
+}
+
+test_reduce() `test {
+    c := Counter(current: 1, limit: 6);
+    if v := c.reduce(|int a, int b| -> int { return a + b; }) {
+        assert(v == 15, "reduce 1+2+3+4+5=15");
+    } else {
+        assert(false, "reduce should not be none");
+    }
+}
+
+test_reduce_single() `test {
+    c := Counter(current: 42, limit: 43);
+    if v := c.reduce(|int a, int b| -> int { return a + b; }) {
+        assert(v == 42, "reduce single = 42");
+    } else {
+        assert(false, "reduce should not be none");
+    }
+}
+
+// --- Intermediate combinator tests (creates _FnIter[int]) ---
+
+test_filter() `test {
+    c := Counter(current: 0, limit: 10);
+    Iterator[int] evens = c.filter(|int x| -> bool { return x % 2 == 0; });
+    int sum = 0;
+    for x in evens {
+        sum = sum + x;
+    }
+    assert(sum == 20, "filter evens: 0+2+4+6+8=20");
+}
+
+test_take() `test {
+    c := Counter(current: 0, limit: 100);
+    Iterator[int] first3 = c.take(3);
+    int sum = 0;
+    for x in first3 {
+        sum = sum + x;
+    }
+    assert(sum == 3, "take 3: 0+1+2=3");
+}
+
+test_skip() `test {
+    c := Counter(current: 0, limit: 5);
+    Iterator[int] skipped = c.skip(3);
+    int sum = 0;
+    for x in skipped {
+        sum = sum + x;
+    }
+    assert(sum == 7, "skip 3: 3+4=7");
+}
+
+test_take_while() `test {
+    c := Counter(current: 0, limit: 100);
+    Iterator[int] small = c.take_while(|int x| -> bool { return x < 4; });
+    int sum = 0;
+    for x in small {
+        sum = sum + x;
+    }
+    assert(sum == 6, "take_while < 4: 0+1+2+3=6");
+}
+
+test_skip_while() `test {
+    c := Counter(current: 0, limit: 8);
+    Iterator[int] rest = c.skip_while(|int x| -> bool { return x < 5; });
+    int sum = 0;
+    for x in rest {
+        sum = sum + x;
+    }
+    assert(sum == 18, "skip_while < 5: 5+6+7=18");
+}
+
+test_chain() `test {
+    a := Counter(current: 0, limit: 3);
+    b := Counter(current: 10, limit: 13);
+    Iterator[int] chained = a.chain(b);
+    int sum = 0;
+    for x in chained {
+        sum = sum + x;
+    }
+    assert(sum == 36, "chain: 0+1+2+10+11+12=36");
+}
+
+test_collect() `test {
+    c := Counter(current: 0, limit: 5);
+    int[] v = c.collect();
+    assert(v.len == 5, "collect len = 5");
+    assert(v[0] == 0, "collect[0] = 0");
+    assert(v[4] == 4, "collect[4] = 4");
+}
+
+// --- Chaining multiple combinators ---
+
+test_filter_take() `test {
+    c := Counter(current: 0, limit: 100);
+    Iterator[int] result = c.filter(|int x| -> bool { return x % 2 == 1; }).take(3);
+    int sum = 0;
+    for x in result {
+        sum = sum + x;
+    }
+    assert(sum == 9, "filter odd, take 3: 1+3+5=9");
+}
+
+test_skip_filter_collect() `test {
+    c := Counter(current: 0, limit: 20);
+    int[] result = c.skip(10).filter(|int x| -> bool { return x % 3 == 0; }).collect();
+    assert(result.len == 3, "skip(10).filter(x%3==0): 12,15,18");
+    assert(result[0] == 12, "first = 12");
+    assert(result[1] == 15, "second = 15");
+    assert(result[2] == 18, "third = 18");
+}
+
+test_filter_count() `test {
+    c := Counter(current: 0, limit: 10);
+    int n = c.filter(|int x| -> bool { return x > 5; }).count();
+    assert(n == 4, "filter > 5, count: 6,7,8,9 = 4");
+}
+
+// --- Vector.iter() ---
+
+test_vector_iter_basic() `test {
+    int[] v = [10, 20, 30];
+    int sum = 0;
+    for x in v.iter() {
+        sum = sum + x;
+    }
+    assert(sum == 60, "vec iter: 10+20+30=60");
+}
+
+test_vector_iter_empty() `test {
+    int[] v = [];
+    int count = 0;
+    for _ in v.iter() {
+        count = count + 1;
+    }
+    assert(count == 0, "empty vec iter yields nothing");
+}
+
+test_vector_iter_collect() `test {
+    int[] v = [1, 2, 3, 4, 5];
+    int[] result = v.iter().filter(|int x| -> bool { return x % 2 == 1; }).collect();
+    assert(result.len == 3, "filter odd: len=3");
+    assert(result[0] == 1, "first=1");
+    assert(result[1] == 3, "second=3");
+    assert(result[2] == 5, "third=5");
+}
+
+test_vector_iter_chain() `test {
+    int[] a = [1, 2];
+    int[] b = [3, 4];
+    int sum = 0;
+    for x in a.iter().chain(b.iter()) {
+        sum = sum + x;
+    }
+    assert(sum == 10, "chain: 1+2+3+4=10");
+}
+
+// --- Custom Stream type (duck-typed for-in via iter()) ---
+
+type NumberStream {
+    int start;
+    int count;
+
+    iter() Iterator[int] {
+        int i = this.start;
+        int n = this.count;
+        return _FnIter[int](_next: move || -> int? {
+            if n <= 0 { return none; }
+            int val = i;
+            i = i + 1;
+            n = n - 1;
+            return val;
+        });
+    }
+}
+
+test_custom_stream_for_in() `test {
+    s := NumberStream(start: 10, count: 3);
+    int sum = 0;
+    for x in s {
+        sum = sum + x;
+    }
+    assert(sum == 33, "10+11+12=33");
+}
+
+test_custom_stream_empty() `test {
+    s := NumberStream(start: 0, count: 0);
+    int count = 0;
+    for _ in s {
+        count = count + 1;
+    }
+    assert(count == 0, "empty stream yields nothing");
+}
+
+test_custom_stream_with_index() `test {
+    s := NumberStream(start: 100, count: 3);
+    int last_idx = -1;
+    int last_val = -1;
+    for i, x in s {
+        last_idx = i;
+        last_val = x;
+    }
+    assert(last_idx == 2, "last idx=2");
+    assert(last_val == 102, "last val=102");
+}
+
+test_custom_stream_break() `test {
+    s := NumberStream(start: 0, count: 100);
+    int sum = 0;
+    for x in s {
+        if x >= 3 { break; }
+        sum = sum + x;
+    }
+    assert(sum == 3, "stream break: 0+1+2=3");
+}
+
+test_custom_stream_continue() `test {
+    s := NumberStream(start: 0, count: 6);
+    int sum = 0;
+    for x in s {
+        if x % 2 == 0 { continue; }
+        sum = sum + x;
+    }
+    assert(sum == 9, "stream continue odd: 1+3+5=9");
+}
+
+// --- Edge cases for existing combinators ---
+
+test_take_zero() `test {
+    c := Counter(current: 0, limit: 10);
+    assert(c.take(0).count() == 0, "take(0) yields nothing");
+}
+
+test_take_more_than_available() `test {
+    c := Counter(current: 0, limit: 3);
+    int[] result = c.take(100).collect();
+    assert(result.len == 3, "take(100) on 3 items yields 3");
+}
+
+test_skip_zero() `test {
+    c := Counter(current: 0, limit: 3);
+    int[] result = c.skip(0).collect();
+    assert(result.len == 3, "skip(0) yields all");
+    assert(result[0] == 0, "first=0");
+}
+
+test_skip_more_than_available() `test {
+    c := Counter(current: 0, limit: 3);
+    assert(c.skip(100).count() == 0, "skip(100) on 3 items yields nothing");
+}
+
+test_filter_all() `test {
+    c := Counter(current: 0, limit: 5);
+    assert(c.filter(|int x| -> bool { return false; }).count() == 0, "filter all out");
+}
+
+test_filter_none() `test {
+    c := Counter(current: 0, limit: 5);
+    assert(c.filter(|int x| -> bool { return true; }).count() == 5, "filter none out");
+}
+
+test_chain_empty_first() `test {
+    a := Counter(current: 0, limit: 0);
+    b := Counter(current: 10, limit: 13);
+    int[] result = a.chain(b).collect();
+    assert(result.len == 3, "chain empty+3 = 3");
+    assert(result[0] == 10, "first=10");
+}
+
+test_chain_empty_second() `test {
+    a := Counter(current: 0, limit: 3);
+    b := Counter(current: 0, limit: 0);
+    int[] result = a.chain(b).collect();
+    assert(result.len == 3, "chain 3+empty = 3");
+    assert(result[2] == 2, "last=2");
+}
+
+test_chain_both_empty() `test {
+    a := Counter(current: 0, limit: 0);
+    b := Counter(current: 0, limit: 0);
+    assert(a.chain(b).count() == 0, "chain empty+empty = 0");
+}
+
+test_reduce_empty() `test {
+    c := Counter(current: 0, limit: 0);
+    if _ := c.reduce(|int a, int b| -> int { return a + b; }) {
+        assert(false, "reduce on empty should be none");
+    }
+}
+
+test_last_empty() `test {
+    c := Counter(current: 0, limit: 0);
+    if _ := c.last() {
+        assert(false, "last on empty should be none");
+    }
+}
+
+test_last_single() `test {
+    c := Counter(current: 7, limit: 8);
+    if v := c.last() {
+        assert(v == 7, "last single=7");
+    } else {
+        assert(false, "should not be none");
+    }
+}
+
+test_any_empty() `test {
+    c := Counter(current: 0, limit: 0);
+    assert(!c.any(|int x| -> bool { return true; }), "any on empty is false");
+}
+
+test_every_empty() `test {
+    c := Counter(current: 0, limit: 0);
+    assert(c.every(|int x| -> bool { return false; }), "every on empty is true");
+}
+
+test_find_first() `test {
+    c := Counter(current: 0, limit: 10);
+    if v := c.find(|int x| -> bool { return x >= 0; }) {
+        assert(v == 0, "find first matching = 0");
+    } else {
+        assert(false, "should find something");
+    }
+}
+
+test_take_while_empty() `test {
+    c := Counter(current: 10, limit: 20);
+    int[] result = c.take_while(|int x| -> bool { return x < 10; }).collect();
+    assert(result.len == 0, "take_while with no match yields nothing");
+}
+
+test_take_while_all() `test {
+    c := Counter(current: 0, limit: 3);
+    int[] result = c.take_while(|int x| -> bool { return true; }).collect();
+    assert(result.len == 3, "take_while always true yields all");
+}
+
+test_skip_while_all() `test {
+    c := Counter(current: 0, limit: 5);
+    int[] result = c.skip_while(|int x| -> bool { return true; }).collect();
+    assert(result.len == 0, "skip_while always true yields nothing");
+}
+
+test_skip_while_none() `test {
+    c := Counter(current: 0, limit: 3);
+    int[] result = c.skip_while(|int x| -> bool { return false; }).collect();
+    assert(result.len == 3, "skip_while false yields all");
+    assert(result[0] == 0, "first=0");
+}
+
+// --- for_each combinator ---
+
+test_for_each() `test {
+    int[] v = [10, 20, 30];
+    int[] collected = [];
+    v.iter().for_each(move |int x| { collected.push(x); });
+    // collected is moved into closure — runs without crash
+}
+
+// --- Generic combinators: map[R] ---
+
+test_map_double() `test {
+    int[] v = [1, 2, 3, 4, 5];
+    int[] result = v.iter().map[int](|int x| -> int { return x * 2; }).collect();
+    assert(result.len == 5, "map len=5");
+    assert(result[0] == 2, "2");
+    assert(result[4] == 10, "10");
+}
+
+test_map_cross_type() `test {
+    int[] v = [1, 2, 3, 4];
+    bool[] result = v.iter().map[bool](|int x| -> bool { return x > 2; }).collect();
+    assert(result.len == 4, "len=4");
+    assert(result[0] == false, "1>2=false");
+    assert(result[1] == false, "2>2=false");
+    assert(result[2] == true, "3>2=true");
+    assert(result[3] == true, "4>2=true");
+}
+
+test_map_empty() `test {
+    int[] v = [];
+    int[] result = v.iter().map[int](|int x| -> int { return x * 10; }).collect();
+    assert(result.len == 0, "map on empty = empty");
+}
+
+// --- Generic combinators: fold[R] ---
+
+test_fold_sum() `test {
+    int[] v = [1, 2, 3, 4, 5];
+    int sum = v.iter().fold[int](0, |int acc, int x| -> int { return acc + x; });
+    assert(sum == 15, "fold sum=15");
+}
+
+test_fold_product() `test {
+    int[] v = [1, 2, 3, 4];
+    int prod = v.iter().fold[int](1, |int acc, int x| -> int { return acc * x; });
+    assert(prod == 24, "fold product=24");
+}
+
+test_fold_empty() `test {
+    int[] v = [];
+    int result = v.iter().fold[int](42, |int acc, int x| -> int { return acc + x; });
+    assert(result == 42, "fold on empty = init");
+}
+
+test_fold_cross_type() `test {
+    int[] v = [3, 7, 2];
+    bool has_big = v.iter().fold[bool](false, |bool acc, int x| -> bool {
+        if x > 5 { return true; }
+        return acc;
+    });
+    assert(has_big == true, "fold found big number");
+}
+
+// --- Generic combinators: enumerate ---
+
+test_enumerate() `test {
+    int[] v = [10, 20, 30];
+    int idx_sum = 0;
+    int val_sum = 0;
+    for tup in v.iter().enumerate() {
+        (i, x) := tup;
+        idx_sum = idx_sum + i;
+        val_sum = val_sum + x;
+    }
+    assert(idx_sum == 3, "enumerate idx sum: 0+1+2=3");
+    assert(val_sum == 60, "enumerate val sum: 10+20+30=60");
+}
+
+test_enumerate_empty() `test {
+    int[] v = [];
+    int count = 0;
+    for _ in v.iter().enumerate() {
+        count = count + 1;
+    }
+    assert(count == 0, "enumerate empty = 0 iterations");
+}
+
+// --- Generic combinators: zip[U] ---
+
+test_zip() `test {
+    int[] a = [1, 2, 3];
+    int[] b = [10, 20, 30];
+    int sum = 0;
+    for tup in a.iter().zip[int](b.iter()) {
+        (x, y) := tup;
+        sum = sum + x + y;
+    }
+    assert(sum == 66, "zip sum: (1+10)+(2+20)+(3+30)=66");
+}
+
+test_zip_unequal_first_shorter() `test {
+    int[] a = [1, 2];
+    int[] b = [10, 20, 30, 40];
+    int count = 0;
+    for _ in a.iter().zip[int](b.iter()) {
+        count = count + 1;
+    }
+    assert(count == 2, "zip stops at shorter (first)");
+}
+
+test_zip_unequal_second_shorter() `test {
+    int[] a = [1, 2, 3, 4];
+    int[] b = [10];
+    int count = 0;
+    for _ in a.iter().zip[int](b.iter()) {
+        count = count + 1;
+    }
+    assert(count == 1, "zip stops at shorter (second)");
+}
+
+test_zip_empty() `test {
+    int[] a = [];
+    int[] b = [1, 2, 3];
+    int count = 0;
+    for _ in a.iter().zip[int](b.iter()) {
+        count = count + 1;
+    }
+    assert(count == 0, "zip with empty = 0");
+}
+
+// --- Generic combinators: flat_map[R] ---
+
+test_flat_map() `test {
+    int[] v = [1, 2, 3];
+    int[] result = v.iter().flat_map[int](|int x| -> Iterator[int] {
+        return Counter(current: 0, limit: x);
+    }).collect();
+    // 1->[0], 2->[0,1], 3->[0,1,2]
+    assert(result.len == 6, "flat_map len=6");
+    assert(result[0] == 0, "r[0]=0");
+    assert(result[1] == 0, "r[1]=0");
+    assert(result[2] == 1, "r[2]=1");
+    assert(result[3] == 0, "r[3]=0");
+    assert(result[4] == 1, "r[4]=1");
+    assert(result[5] == 2, "r[5]=2");
+}
+
+test_flat_map_empty_inner() `test {
+    int[] v = [0, 0, 0];
+    int[] result = v.iter().flat_map[int](|int x| -> Iterator[int] {
+        return Counter(current: 0, limit: x);
+    }).collect();
+    assert(result.len == 0, "flat_map with all empty inners = empty");
+}
+
+test_flat_map_empty_outer() `test {
+    int[] v = [];
+    int[] result = v.iter().flat_map[int](|int x| -> Iterator[int] {
+        return Counter(current: 0, limit: x);
+    }).collect();
+    assert(result.len == 0, "flat_map on empty = empty");
+}
+
+// --- Deep combinator chains ---
+
+test_chain_filter_take_collect() `test {
+    int[] a = [1, 2, 3, 4, 5];
+    int[] b = [6, 7, 8, 9, 10];
+    int[] result = a.iter().chain(b.iter())
+        .filter(|int x| -> bool { return x % 2 == 0; })
+        .take(3)
+        .collect();
+    assert(result.len == 3, "chain+filter+take len=3");
+    assert(result[0] == 2, "first=2");
+    assert(result[1] == 4, "second=4");
+    assert(result[2] == 6, "third=6");
+}
+
+test_skip_take_while_collect() `test {
+    c := Counter(current: 0, limit: 20);
+    int[] result = c.skip(5).take_while(|int x| -> bool { return x < 10; }).collect();
+    assert(result.len == 5, "skip(5).take_while(<10): 5,6,7,8,9");
+    assert(result[0] == 5, "first=5");
+    assert(result[4] == 9, "last=9");
+}
+
+test_filter_skip_while_take() `test {
+    c := Counter(current: 0, limit: 30);
+    int[] result = c.filter(|int x| -> bool { return x % 3 == 0; })
+        .skip_while(|int x| -> bool { return x < 10; })
+        .take(3)
+        .collect();
+    // Multiples of 3: 0,3,6,9,12,15,18,21,...
+    // skip_while < 10: skip 0,3,6,9 → start at 12
+    // take 3: 12,15,18
+    assert(result.len == 3, "filter+skip_while+take len=3");
+    assert(result[0] == 12, "first=12");
+    assert(result[1] == 15, "second=15");
+    assert(result[2] == 18, "third=18");
+}
+
+test_take_filter_count() `test {
+    c := Counter(current: 0, limit: 100);
+    int n = c.take(20).filter(|int x| -> bool { return x > 10; }).count();
+    assert(n == 9, "take(20).filter(>10).count: 11..19 = 9");
+}
+
+test_map_filter_collect() `test {
+    int[] v = [1, 2, 3, 4, 5];
+    int[] result = v.iter()
+        .map[int](|int x| -> int { return x * x; })
+        .filter(|int x| -> bool { return x > 5; })
+        .collect();
+    // squares: 1,4,9,16,25 → filter >5: 9,16,25
+    assert(result.len == 3, "map+filter len=3");
+    assert(result[0] == 9, "first=9");
+    assert(result[1] == 16, "second=16");
+    assert(result[2] == 25, "third=25");
+}
+
+test_filter_map_fold() `test {
+    int[] v = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    int sum = v.iter()
+        .filter(|int x| -> bool { return x % 2 == 0; })
+        .map[int](|int x| -> int { return x * 10; })
+        .fold[int](0, |int acc, int x| -> int { return acc + x; });
+    // evens: 2,4,6,8,10 → *10: 20,40,60,80,100 → sum: 300
+    assert(sum == 300, "filter+map+fold=300");
+}
+
+// --- Vector.iter() with more combinators ---
+
+test_vector_iter_take() `test {
+    int[] v = [10, 20, 30, 40, 50];
+    int[] result = v.iter().take(3).collect();
+    assert(result.len == 3, "take 3 from 5");
+    assert(result[0] == 10, "first=10");
+    assert(result[2] == 30, "third=30");
+}
+
+test_vector_iter_skip() `test {
+    int[] v = [10, 20, 30, 40, 50];
+    int[] result = v.iter().skip(3).collect();
+    assert(result.len == 2, "skip 3 from 5");
+    assert(result[0] == 40, "first=40");
+    assert(result[1] == 50, "second=50");
+}
+
+test_vector_iter_count() `test {
+    int[] v = [1, 2, 3, 4, 5, 6, 7];
+    int n = v.iter().count();
+    assert(n == 7, "vector iter count=7");
+}
+
+test_vector_iter_any() `test {
+    int[] v = [1, 2, 3, 4, 5];
+    assert(v.iter().any(|int x| -> bool { return x == 3; }), "any finds 3");
+    int[] v2 = [1, 2, 3];
+    assert(!v2.iter().any(|int x| -> bool { return x == 99; }), "any finds nothing");
+}
+
+test_vector_iter_every() `test {
+    int[] v = [2, 4, 6, 8];
+    assert(v.iter().every(|int x| -> bool { return x % 2 == 0; }), "all even");
+    int[] v2 = [2, 4, 5, 8];
+    assert(!v2.iter().every(|int x| -> bool { return x % 2 == 0; }), "not all even");
+}
+
+test_vector_iter_find() `test {
+    int[] v = [10, 20, 30, 40];
+    if val := v.iter().find(|int x| -> bool { return x > 25; }) {
+        assert(val == 30, "find first > 25 = 30");
+    } else {
+        assert(false, "should find 30");
+    }
+}
+
+test_vector_iter_reduce() `test {
+    int[] v = [3, 1, 4, 1, 5];
+    if val := v.iter().reduce(|int a, int b| -> int {
+        if a > b { return a; }
+        return b;
+    }) {
+        assert(val == 5, "reduce max=5");
+    } else {
+        assert(false, "should not be none");
+    }
+}
+
+test_vector_iter_last() `test {
+    int[] v = [10, 20, 30];
+    if val := v.iter().last() {
+        assert(val == 30, "last=30");
+    } else {
+        assert(false, "should not be none");
+    }
+}
+
+test_vector_iter_first() `test {
+    int[] v = [10, 20, 30];
+    if val := v.iter().first() {
+        assert(val == 10, "first=10");
+    } else {
+        assert(false, "should not be none");
+    }
+}
+
+// --- Multiple independent iterations on same collection ---
+
+test_multiple_iters_same_vector() `test {
+    int[] v = [1, 2, 3, 4, 5];
+    int sum1 = v.iter().fold[int](0, |int acc, int x| -> int { return acc + x; });
+    int sum2 = v.iter().fold[int](0, |int acc, int x| -> int { return acc + x; });
+    assert(sum1 == 15, "first iteration sum=15");
+    assert(sum2 == 15, "second iteration sum=15");
+}
+
+test_independent_filter_and_count() `test {
+    int[] v = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    int even_count = v.iter().filter(|int x| -> bool { return x % 2 == 0; }).count();
+    int odd_count = v.iter().filter(|int x| -> bool { return x % 2 == 1; }).count();
+    assert(even_count == 5, "5 evens");
+    assert(odd_count == 5, "5 odds");
+}
+
+// --- Generator regression ---
+
+count_gen(int n) stream[int] {
+    for i in 0..n {
+        yield i;
+    }
+}
+
+test_generator_still_works() `test {
+    int sum = 0;
+    for x in count_gen(5) {
+        sum = sum + x;
+    }
+    assert(sum == 10, "generator: 0+1+2+3+4=10");
+}
+
+test_generator_empty() `test {
+    int count = 0;
+    for _ in count_gen(0) {
+        count = count + 1;
+    }
+    assert(count == 0, "empty generator yields nothing");
+}
+
+test_generator_with_index() `test {
+    int last_idx = -1;
+    int last_val = -1;
+    for i, x in count_gen(3) {
+        last_idx = i;
+        last_val = x;
+    }
+    assert(last_idx == 2, "gen last idx=2");
+    assert(last_val == 2, "gen last val=2");
+}
+
+test_generator_break() `test {
+    int sum = 0;
+    for x in count_gen(100) {
+        if x >= 5 { break; }
+        sum = sum + x;
+    }
+    assert(sum == 10, "gen break: 0+1+2+3+4=10");
+}
+
+test_generator_continue() `test {
+    int sum = 0;
+    for x in count_gen(6) {
+        if x % 2 == 0 { continue; }
+        sum = sum + x;
+    }
+    assert(sum == 9, "gen continue odd: 1+3+5=9");
+}
+
+// --- Iterator consumed from Counter directly (not via for-in) ---
+
+test_collect_empty() `test {
+    c := Counter(current: 0, limit: 0);
+    int[] result = c.collect();
+    assert(result.len == 0, "collect empty = empty vec");
+}
+
+test_chain_three() `test {
+    a := Counter(current: 0, limit: 2);
+    b := Counter(current: 10, limit: 12);
+    c := Counter(current: 100, limit: 102);
+    int[] result = a.chain(b).chain(c).collect();
+    assert(result.len == 6, "chain 3 iterators len=6");
+    assert(result[0] == 0, "first=0");
+    assert(result[2] == 10, "third=10");
+    assert(result[4] == 100, "fifth=100");
+}
+
+// --- Combinator on combinator result (tests _FnIter inherits combinators) ---
+
+test_fniter_inherits_combinators() `test {
+    c := Counter(current: 0, limit: 20);
+    // filter returns _FnIter[int] which should have .any() via inheritance
+    bool found = c.filter(|int x| -> bool { return x > 10; })
+                  .any(|int x| -> bool { return x == 15; });
+    assert(found, "_FnIter has inherited .any()");
+}
+
+test_fniter_chain_find() `test {
+    a := Counter(current: 0, limit: 5);
+    b := Counter(current: 100, limit: 105);
+    // chain returns _FnIter — test find on it
+    if val := a.chain(b).find(|int x| -> bool { return x > 50; }) {
+        assert(val == 100, "chain.find=100");
+    } else {
+        assert(false, "should find 100");
+    }
+}
+
+test_fniter_reduce() `test {
+    c := Counter(current: 1, limit: 6);
+    // filter returns _FnIter, then reduce on it
+    if val := c.filter(|int x| -> bool { return x % 2 == 1; })
+               .reduce(|int a, int b| -> int { return a + b; }) {
+        assert(val == 9, "filter odd then reduce: 1+3+5=9");
+    } else {
+        assert(false, "should not be none");
+    }
+}
+
+// --- Lambda closure captures in combinator context ---
+
+test_closure_captures_outer_var() `test {
+    int threshold = 5;
+    c := Counter(current: 0, limit: 10);
+    int n = c.filter(|int x| -> bool { return x > threshold; }).count();
+    assert(n == 4, "closure captures threshold: 6,7,8,9 = 4");
+}
+
+test_closure_captures_multiple_vars() `test {
+    int lo = 3;
+    int hi = 7;
+    c := Counter(current: 0, limit: 10);
+    int[] result = c.filter(|int x| -> bool { return x >= lo && x <= hi; }).collect();
+    assert(result.len == 5, "captures lo and hi: 3,4,5,6,7");
+    assert(result[0] == 3, "first=3");
+    assert(result[4] == 7, "last=7");
+}
+
+test_nested_closures_in_chain() `test {
+    int multiplier = 3;
+    int limit = 30;
+    c := Counter(current: 1, limit: 10);
+    int[] result = c.map[int](|int x| -> int { return x * multiplier; })
+                    .filter(|int x| -> bool { return x < limit; })
+                    .collect();
+    // map: 3,6,9,12,15,18,21,24,27 → filter <30: all 9
+    assert(result.len == 9, "nested closures len=9");
+    assert(result[0] == 3, "first=3");
+    assert(result[8] == 27, "last=27");
+}
+
+main() {}

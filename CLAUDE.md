@@ -221,4 +221,4 @@ Methods must be declared inside the type body. Numeric literals infer as `int`/`
 - `mangleMethodName(owner, name, failable)` produces LLVM function names like `TypeName.method`
 - Move sites must call `clearDropFlag(name)` — there are 8 call variant sites in expr.go plus assignment sites in stmt.go
 - All tests must pass after changes. Significant changes need accompanying tests.
-- When updating `std/*.pr`, also update the `stdAll` mini standard library in test files (`codegen_test.go`, `sema_test.go`, `ownership_test.go`) to match, then run `make resources` to embed changes.
+- When updating `std/*.pr`, run `./build` — it automatically embeds the updated stdlib. The `stdAll` mini-stdlib in test files is auto-populated from the embedded std via `go:embed` — no manual update needed.

@@ -45,15 +45,15 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 
 | Area | Description | Status | Design Doc |
 |------|-------------|--------|------------|
-| Runtime migration | Move C runtime to codegen LLVM IR / pure Promise | Done (Phases 1-4) | [runtime-proposal.md](runtime-proposal.md) |
-| Platform abstraction | PAL for macOS/Linux/Windows/WASM | Done (Phase 3) | [runtime-proposal.md](runtime-proposal.md) |
-| 1:1 Threading | `go`/`<-` with OS threads via PAL | Done (Phase 5a) | [runtime-proposal.md](runtime-proposal.md) |
-| Channels | `channel[T]` with buffered/unbuffered send/receive/for-in | Done (Phase 5b) | [runtime-proposal.md](runtime-proposal.md) |
-| M:N Scheduler | LLVM coroutines, GMP model, work stealing | Done (Phase 5c) | [runtime-proposal.md](runtime-proposal.md) |
+| Runtime migration | Move C runtime to codegen LLVM IR / pure Promise | Done (Phases 1-4) | [runtime-architecture.md](runtime-architecture.md) |
+| Platform abstraction | PAL for macOS/Linux/Windows/WASM | Done (Phase 3) | [runtime-architecture.md](runtime-architecture.md) |
+| 1:1 Threading | `go`/`<-` with OS threads via PAL | Done (Phase 5a) | [runtime-architecture.md](runtime-architecture.md) |
+| Channels | `channel[T]` with buffered/unbuffered send/receive/for-in | Done (Phase 5b) | [runtime-architecture.md](runtime-architecture.md) |
+| M:N Scheduler | LLVM coroutines, GMP model, work stealing | Done (Phase 5c) | [runtime-architecture.md](runtime-architecture.md) |
 | Operator dispatch | `[]`, `[]=`, `[:]`, `[:]=` as method-dispatched operators | Done | [subscript-slice-operators.md](subscript-slice-operators.md) |
-| Naming conventions | PascalCase canonical names for all non-scalar types; lowercase sugar | Done | [standard-runtime.md](standard-runtime.md#naming-conventions) |
+| Naming conventions | PascalCase canonical names for all non-scalar types; lowercase sugar | Done | [standard-library.md](standard-library.md#naming-conventions) |
 | C binding | Extern ABI coercion (`extern.go`), C header generation (`headergen.go`) | Done (dormant — header gen implemented but not exposed via CLI; original use case obsolete after C runtime migration) | [c-binding-architecture.md](c-binding-architecture.md) |
-| Self-contained binary | Embed gzip-compressed LLVM tools (opt, llc, lld, libLLVM.so) via `go:embed` for release builds | Done (Phase 7f, Linux x86_64) | [runtime-proposal.md](runtime-proposal.md) |
+| Self-contained binary | Embed gzip-compressed LLVM tools (opt, llc, lld, libLLVM.so) via `go:embed` for release builds | Done (Phase 7f, Linux x86_64) | [runtime-architecture.md](runtime-architecture.md) |
 | Yield generators | `stream[T]` functions with `yield`, LLVM presplit coroutines, `for-in` consumption | Done | — |
 | Structural interfaces | Relaxed matching (extra optional/default params, non-failable→failable, T→T?), adapter thunks, abstract factory methods with implicit Self, generic factory patterns (`T.parse(data)`) | Done | [language-design.md](language-design.md#structural-interface-satisfaction) |
 | Documentation system | `promise doc` command: extract `doc()` meta tags, emit markdown to stdout, `-signatures` compact mode, `-std` for stdlib reference | Phase 1 done (single-file doc, `-public`/`-all`/`-signatures`/`-o` flags, param/variant doc propagation, `DeclareAndDefine` early-exit sema) | [documentation-proposal.md](documentation-proposal.md) |
@@ -771,7 +771,7 @@ Test suite: 1068+ native pass, 761 WASM pass (3 skip).
 
 | Work | Design Doc | Priority |
 |------|-----------|----------|
-| IO reactor (kqueue/epoll/IOCP) — Phase 6 | [runtime-proposal.md](runtime-proposal.md) | Low |
+| IO reactor (kqueue/epoll/IOCP) — Phase 6 | [runtime-architecture.md](runtime-architecture.md) | Low |
 | Generic type RTTI | — | Low |
 | Value type structural interface coercion (stack boxing) | — | Low |
 | ~~Generic value types~~ | — | ~~Done~~ |
@@ -798,7 +798,7 @@ Tests: 761 pass, 0 fail, 3 skip on `wasm32-wasi` (920 native pass)
 
 ## Naming Convention Migration (Done)
 
-All non-scalar types now use PascalCase canonical names in the universe, stdlib, codegen, sema, ownership, and tests. Lowercase forms (`map[K,V]`, `channel[T]`, `task[T]`, `iter[T]`, `stream[T]`) are syntactic sugar resolved by the compiler. `Range[T]` is generic (no lowercase alias). See [standard-runtime.md](standard-runtime.md#naming-conventions).
+All non-scalar types now use PascalCase canonical names in the universe, stdlib, codegen, sema, ownership, and tests. Lowercase forms (`map[K,V]`, `channel[T]`, `task[T]`, `iter[T]`, `stream[T]`) are syntactic sugar resolved by the compiler. `Range[T]` is generic (no lowercase alias). See [standard-library.md](standard-library.md#naming-conventions).
 
 ---
 

@@ -1,6 +1,6 @@
 # C Binding Architecture — Generated Header Approach
 
-> **Status: Implemented but dormant.** The extern ABI coercion (`extern.go`) and header generation (`headergen.go`) were built and are tested. However, the original motivation — type-safe binding to a C runtime — is obsolete: all runtime functions were migrated to codegen-emitted LLVM IR (see [runtime-proposal.md](runtime-proposal.md), Phases 1-4). The `extern` keyword and ABI coercion remain actively used for PAL function declarations in `std/*.pr`. Header generation could be revived for future C FFI if needed.
+> **Status: Implemented but dormant.** The extern ABI coercion (`extern.go`) and header generation (`headergen.go`) were built and are tested. However, the original motivation — type-safe binding to a C runtime — is obsolete: all runtime functions were migrated to codegen-emitted LLVM IR (see [runtime-architecture.md](runtime-architecture.md), Phases 1-4). The `extern` keyword and ABI coercion remain actively used for PAL function declarations in `std/*.pr`. Header generation could be revived for future C FFI if needed.
 
 ## Problem (historical)
 

@@ -1,6 +1,6 @@
-# Standard Library & Runtime Design
+# Standard Library
 
-This document defines the complete standard library architecture for Promise. It identifies prerequisite language features that must be completed first, specifies all new PAL (Platform Abstraction Layer) extensions needed, and lays out the full API surface organized into implementation phases.
+Promise's standard library design: module inventory, implementation phases, PAL extensions needed, and testing strategy.
 
 **Design principles** (from CLAUDE.md):
 - Implement in Promise (`std/*.pr`) wherever possible — only use `native` for unavoidable low-level operations
@@ -1099,15 +1099,11 @@ promise test tests/std/                     # all std tests
 bin/test.sh                                  # full e2e suite
 ```
 
-### 5.4 stdAll Sync Requirement
+### 5.4 Embedding Updated Stdlib
 
-When adding new types or functions to `std/*.pr`, the `stdAll` mini-stdlib in test files must be updated:
+When adding new types or functions to `std/*.pr`, run `./build` from the repo root — it automatically embeds the updated stdlib before compiling.
 
-- `compiler/internal/codegen/codegen_test.go` — codegen tests
-- `compiler/internal/sema/sema_test.go` — sema tests
-- `compiler/internal/ownership/ownership_test.go` — ownership tests
-
-Then run `./build` to embed the updated stdlib and rebuild.
+The `stdAll` mini-stdlib used in Go unit tests (`codegen_test.go`, `sema_test.go`, `ownership_test.go`) is **auto-populated from the embedded std** via `go:embed` at test init time — no manual update needed. `TestResourcesFresh` (in `cmd/promise/resources_test.go`) detects stale embedded copies when `go test ./...` is run.
 
 ---
 

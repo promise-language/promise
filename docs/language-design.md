@@ -77,34 +77,33 @@ promise lock                      # Regenerate lockfile (planned)
 
 ```
 myproject/
-├── promise.mod              # Module definition file
-├── promise.lock             # Lockfile (generated)
+├── promise.toml             # Module definition file
 ├── main.pr                  # Entry point
 ├── helpers.pr               # Other source files at top level
 ├── models/
-│   ├── promise.mod          # Separate module (excluded from myproject)
+│   ├── promise.toml         # Separate module (excluded from myproject)
 │   ├── user.pr
 │   ├── user_test.pr         # Test file alongside source
 │   └── account.pr
 └── utils/
-    ├── promise.mod          # Separate module (excluded from myproject)
+    ├── promise.toml         # Separate module (excluded from myproject)
     └── strings.pr
 ```
 
-Source files (`.pr`) and directories live directly inside the module root — there is no required `src/` directory. This keeps the layout flat and avoids an extra level of nesting that adds no information. The module root is wherever `promise.mod` is.
+Source files (`.pr`) and directories live directly inside the module root — there is no required `src/` directory. This keeps the layout flat and avoids an extra level of nesting that adds no information. The module root is wherever `promise.toml` is.
 
 ### 3.1 Module Boundaries
 
-There is no concept of "sub-modules." Every `promise.mod` file defines a standalone module. When the compiler scans a module's directory tree, any subdirectory that contains its own `promise.mod` is **excluded** — it is a separate module, not part of the parent. Directories without a `promise.mod` are just organizational folders whose `.pr` files belong to the enclosing module.
+There is no concept of "sub-modules." Every `promise.toml` file defines a standalone module. When the compiler scans a module's directory tree, any subdirectory that contains its own `promise.toml` is **excluded** — it is a separate module, not part of the parent. Directories without a `promise.toml` are just organizational folders whose `.pr` files belong to the enclosing module.
 
 In the layout above, `myproject/`, `models/`, and `utils/` are three independent modules that happen to be nested on disk. The `myproject` module contains `main.pr` and `helpers.pr`. It does **not** contain anything inside `models/` or `utils/` — those are their own modules with their own identities, dependencies, and compilation scopes.
 
-This means a `promise.mod` file serves exactly one purpose: **it marks the root of a module.** The compiler needs this marker because:
+This means a `promise.toml` file serves exactly one purpose: **it marks the root of a module.** The compiler needs this marker because:
 
 1. **No guessing.** Without it, the compiler cannot distinguish "this directory is a separate module" from "this directory just organizes files." An explicit marker removes ambiguity — you can freely create directories for readability without accidentally splitting your module.
-2. **Independent compilation.** Each module is a separate compilation unit with its own dependency graph. The `promise.mod` file tells the compiler "start a new compilation scope here."
-3. **Visibility boundaries.** Visibility rules apply at module boundaries. Without a `promise.mod`, a directory has no boundary — its files are part of the parent module and share its namespace.
-4. **Tooling clarity.** Tools, IDEs, and AI agents identify module structure by scanning for `promise.mod` files. No heuristics, no configuration — the file system is the source of truth.
+2. **Independent compilation.** Each module is a separate compilation unit with its own dependency graph. The `promise.toml` file tells the compiler "start a new compilation scope here."
+3. **Visibility boundaries.** Visibility rules apply at module boundaries. Without a `promise.toml`, a directory has no boundary — its files are part of the parent module and share its namespace.
+4. **Tooling clarity.** Tools, IDEs, and AI agents identify module structure by scanning for `promise.toml` files. No heuristics, no configuration — the file system is the source of truth.
 
 ### 3.2 Testing Convention
 
@@ -159,47 +158,68 @@ Stress mode compiles all target files once, then repeatedly runs the binaries. I
 
 ## 4. Module System
 
-### 4.1 Module Identity
+### 4.1 Module File (`promise.toml`)
 
-A module is identified by a URL where every path segment is a valid identifier, except segments that are purely numeric, which denote a **version**.
+Every module has a `promise.toml` at its root (TOML format). A minimal module file:
 
-```
-github.com/acme/collections/2     → module "collections", version 2
-github.com/acme/collections/2/3   → module "collections", version 2.3
-github.com/std/io/1               → module "io", version 1
-```
-
-Version segments are parsed left-to-right as `major`, `minor`, `patch`.
-
-### 4.2 Module File
-
-> **Current implementation**: The module file is `promise.toml` (TOML format) with `[module]`, `[require]`, and `[replace]` sections. The design below describes the target format; the current TOML format supports local module imports via sourced paths.
-
-The module file declares only the module's own identity:
-
-```
-module github.com/acme/myapp/1
+```toml
+[module]
+name = "myapp"
+epoch = "2026.3"
 ```
 
-There is no `require` block. Dependencies are inferred from `use` declarations in source files. This keeps the module file minimal and avoids duplication between the module file and source code.
+The `epoch` field declares which catalog version this module targets — it determines which catalog modules and standard library APIs are available. It also acts as a compatibility signal: when a remote module's epoch differs from the consuming project's, the compiler warns that catalog APIs may differ.
 
-### 4.3 `use` Declarations
+**External dependencies** are declared in `[require]` and optional `[replace]` sections. Catalog modules (built into the compiler) are **not** listed here — adding a catalog module to `[require]` is a compile error:
 
-At the top of any `.pr` file, `use` imports a module with a local alias. The URL is a **string literal** and is the single source of truth for that dependency:
+```toml
+[module]
+name = "myapp"
+epoch = "2026.3"
+
+[require]
+"github.com/acme/parser" = "a1b2c3d4e5f6"   # URL = commit hash (or tag)
+
+[replace]
+"github.com/acme/parser" = "../parser"        # local override for development
+```
+
+The `[require]` key is the git repository URL; the value is a commit hash or tag that pins an exact revision. Local overrides in `[replace]` map the same URL key to a local directory path.
+
+### 4.2 `use` Declarations
+
+At the top of any `.pr` file, `use` imports a module. There are two forms:
+
+**Catalog import** — reference a built-in catalog module by name:
 
 ```promise
-use io "github.com/std/io/1"
-use col "github.com/acme/collections/2/1"
+use json;
+use path;
+```
+
+**Sourced import** — give a local alias to any module declared in `[require]`. The URL must match a key in `[require]`:
+
+```promise
+use parser "github.com/acme/parser";
 
 main() {
-  io.println("hello")
-  col.Vector[int] list = col.Vector[int]()
+  parser.parse("...")
 }
 ```
 
-The identifier before the URL is **mandatory** and is the only way to reference that module's exports in the file.
+The alias is the only way to reference that module's exports in the file. Both forms make every dependency visible at the top of the file — a reader never needs to consult `promise.toml` to understand what `json.parse` or `parser.parse` refers to.
 
-**Design rationale:** Each source file is self-contained — you can read a `.pr` file and understand every reference without consulting other files. The full URL next to the alias makes it immediately clear what `io.println` or `col.Vector` refers to. This optimizes for reading and understanding code locally, which is the most common operation.
+**Catalog vs. external:** Catalog modules are built into the compiler and always available — `use json;` with no `[require]` entry. External modules must be declared in `[require]` before they can be imported with a sourced `use`. Attempting to add a catalog module to `[require]` is a compile error.
+
+### 4.3 Module Identity and Pinning
+
+Remote modules are pinned by commit hash directly in `promise.toml` — the `[require]` value is the exact commit (or tag) to check out. `promise pin` fetches all declared remote dependencies, resolves their transitive deps, and writes the resolved commit hashes back to `promise.toml`. The file is checked in and guarantees reproducible builds.
+
+```bash
+promise pin          # fetch + lock all dependencies
+promise clean        # clear local build cache
+promise clean --global   # clear global module + build cache
+```
 
 ### 4.4 Visibility
 

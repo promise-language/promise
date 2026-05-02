@@ -1,6 +1,6 @@
-# Runtime Architecture Proposal
+# Runtime Architecture
 
-Proposal for Promise's runtime, syscall layer, concurrency model, and multi-platform support.
+Promise's runtime infrastructure: PAL (platform abstraction), build pipeline (opt/llc/lld/musl), M:N scheduler (GMP model, LLVM coroutines), and multi-platform support.
 
 ## Current State
 

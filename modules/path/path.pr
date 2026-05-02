@@ -48,7 +48,7 @@ parent(string p) string `public `doc("Returns the directory part of a path (ever
     int i = end - 1;
     while i >= 0 {
         if Platform.is_path_separator(p[i]) {
-            if i == 0 { return "/"; }
+            if i == 0 { return Platform.path_separator; }
             return p[0:i];
         }
         i = i - 1;
@@ -91,4 +91,83 @@ is_absolute(string p) bool `public `doc("Returns true if the path is absolute. O
 
 is_relative(string p) bool `public `doc("Returns true if the path is not absolute.") {
     return !is_absolute(p);
+}
+
+split(string p) string[] `public `doc("Splits a path into all its components. A leading separator becomes the platform path separator as the first element.") {
+    if p.len == 0 { return string[](capacity: 0); }
+    string[] parts = string[]();
+    int start = 0;
+    // Handle leading separator as root component
+    if Platform.is_path_separator(p[0]) {
+        parts.push(Platform.path_separator);
+        start = 1;
+        // Skip consecutive leading separators
+        while start < p.len && Platform.is_path_separator(p[start]) {
+            start = start + 1;
+        }
+    }
+    // Scan remaining components
+    int i = start;
+    while i < p.len {
+        if Platform.is_path_separator(p[i]) {
+            if i > start {
+                parts.push(p[start:i]);
+            }
+            i = i + 1;
+            start = i;
+        } else {
+            i = i + 1;
+        }
+    }
+    // Last component (no trailing separator)
+    if start < p.len {
+        parts.push(p[start:p.len]);
+    }
+    return parts;
+}
+
+normalize(string p) string `public `doc("Collapses `.`, `..`, and redundant separators in a path. Pure string operation — does not access the filesystem.") {
+    if p.len == 0 { return "."; }
+    string[] parts = split(p);
+    bool absolute = parts.len > 0 && parts[0] == Platform.path_separator;
+    string[] result = string[]();
+    int i = 0;
+    // Skip root separator if absolute — we re-add it at the end
+    if absolute {
+        i = 1;
+    }
+    while i < parts.len {
+        string part = parts[i];
+        if part == "." {
+            // Skip current-directory marker
+        } else if part == ".." {
+            if result.len > 0 && result[result.len - 1] != ".." {
+                result.pop();
+            } else if !absolute {
+                // Relative path: keep leading ".."
+                result.push(part);
+            }
+            // Absolute path: ".." above root is a no-op
+        } else {
+            result.push(part);
+        }
+        i = i + 1;
+    }
+    if result.len == 0 {
+        if absolute {
+            return Platform.path_separator;
+        }
+        return ".";
+    }
+    // Rebuild path
+    string out = result[0];
+    int j = 1;
+    while j < result.len {
+        out = _join_two(out, result[j]);
+        j = j + 1;
+    }
+    if absolute {
+        out = Platform.path_separator + out;
+    }
+    return out;
 }

@@ -66,6 +66,47 @@ test_is_relative() `test {
     assert(!path.is_relative("/absolute"), "not relative /absolute");
 }
 
+test_split_absolute() `test {
+    string[] parts = path.split("/usr/local/bin");
+    assert(parts.len == 4, "split abs len");
+    assert(parts[0] == "/", "split root");
+    assert(parts[1] == "usr", "split usr");
+    assert(parts[2] == "local", "split local");
+    assert(parts[3] == "bin", "split bin");
+}
+
+test_split_relative() `test {
+    string[] parts = path.split("a/b/c");
+    assert(parts.len == 3, "split rel len");
+    assert(parts[0] == "a", "split a");
+    assert(parts[1] == "b", "split b");
+    assert(parts[2] == "c", "split c");
+}
+
+test_split_empty() `test {
+    assert(path.split("").len == 0, "split empty");
+}
+
+test_normalize_dotdot() `test {
+    assert(path.normalize("/a/b/../c") == "/a/c", "normalize dotdot");
+}
+
+test_normalize_dot() `test {
+    assert(path.normalize("./a/./b") == "a/b", "normalize dot");
+}
+
+test_normalize_redundant() `test {
+    assert(path.normalize("a//b///c") == "a/b/c", "normalize redundant separators");
+}
+
+test_normalize_empty() `test {
+    assert(path.normalize("") == ".", "normalize empty");
+}
+
+test_normalize_root() `test {
+    assert(path.normalize("/") == "/", "normalize root");
+}
+
 test_path_separator() `test {
     // Platform.path_separator is used by join()
     string sep = Platform.path_separator;

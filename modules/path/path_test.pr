@@ -47,3 +47,38 @@ is_relative_test() `test {
     assert(is_relative("home/user"), "rel basic");
     assert(!is_relative("/home"), "abs not rel");
 }
+
+split_test() `test {
+    string[] r1 = split("/home/user/file.txt");
+    assert(r1.len == 4, "split abs len");
+    assert(r1[0] == "/", "split abs root");
+    assert(r1[1] == "home", "split abs 1");
+    assert(r1[2] == "user", "split abs 2");
+    assert(r1[3] == "file.txt", "split abs 3");
+
+    string[] r2 = split("relative/path");
+    assert(r2.len == 2, "split rel len");
+    assert(r2[0] == "relative", "split rel 0");
+    assert(r2[1] == "path", "split rel 1");
+
+    string[] r3 = split("");
+    assert(r3.len == 0, "split empty");
+
+    string[] r4 = split("/");
+    assert(r4.len == 1, "split root len");
+    assert(r4[0] == "/", "split root");
+}
+
+normalize_test() `test {
+    assert(normalize("/home/user/../user/./file.txt") == "/home/user/file.txt", "norm dotdot");
+    assert(normalize("./a/b/../c") == "a/c", "norm relative");
+    assert(normalize("/a/b/c/../../d") == "/a/d", "norm multi dotdot");
+    assert(normalize("") == ".", "norm empty");
+    assert(normalize(".") == ".", "norm dot");
+    assert(normalize("/") == "/", "norm root");
+    assert(normalize("a/b/c") == "a/b/c", "norm no change");
+    assert(normalize("../a/b") == "../a/b", "norm leading dotdot");
+    assert(normalize("a/../../b") == "../b", "norm past root rel");
+    assert(normalize("/a/../../b") == "/b", "norm past root abs");
+    assert(normalize("a//b///c") == "a/b/c", "norm redundant seps");
+}

@@ -330,28 +330,13 @@ extension(string path) string                           // ".txt" or ""
 stem(string path) string                                // file_name without extension
 is_absolute(string path) bool
 is_relative(string path) bool
+split(string path) string[]                             // split into all components
+normalize(string path) string                           // collapse ., .., redundant separators
 ```
 
 Platform awareness is handled via `Platform.is_path_separator(c)` and `Platform.path_separator`
 from `std/platform.pr`. All `` `target `` annotations are confined to std — the path module
 contains no target-filtered code.
-
-### Additions needed
-
-**`normalize(string path) string`** — collapses `.`, `..`, and redundant separators. Pure Promise,
-no syscalls:
-
-```promise
-normalize("/home/user/../user/./file.txt") // → "/home/user/file.txt"
-normalize("./a/b/../c")                    // → "a/c"
-```
-
-**`split_all(string path) string[]`** — splits into all components:
-
-```promise
-split_all("/home/user/file.txt")  // → ["/", "home", "user", "file.txt"]
-split_all("relative/path")        // → ["relative", "path"]
-```
 
 **What NOT to add**: filesystem operations (`exists`, `is_dir`, `stat`). Those require syscalls and
 belong in `modules/io`. The module comment "no filesystem access" is correct and intentional.
@@ -689,7 +674,7 @@ modules/
     iter.pr       — Iterator[T], combinators
     ... (28 files total)
 
-  path/           — join, file_name, parent, extension, stem, is_absolute  (DONE)
+  path/           — join, file_name, parent, extension, stem, split, normalize  (DONE)
   math/           — lerp, map_range, deg_to_rad, sign_f64            (DONE)
   strings/        — join, spaces, reverse, ...                        (DONE)
   io/             — File, BufReader, IoError, read_line, read_stdin   (PLACEHOLDER)
@@ -784,9 +769,9 @@ First real use of `` `target `` in production code. Platform constants consolida
 14. ~~**Global getter codegen**~~ — done (handle no-receiver dispatch in `expr.go`)
 15. ~~**`HostTargetInfo()` for Go test helpers**~~ — done (`target.go`, all test helpers updated)
 
-### Phase C — path module completion
+### ~~Phase C — path module completion~~ (Done)
 
-16. **`normalize` and `split_all`** in `modules/path` — pure Promise, no new PAL
+16. ~~**`normalize` and `split`** in `modules/path`~~ — done (pure Promise, no new PAL)
     (`join_all` superseded by variadic `join(base, child, ...rest)`)
 
 ### Phase D — file I/O (biggest phase — needs PAL work)

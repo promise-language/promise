@@ -919,7 +919,7 @@ A device-wide build cache at `~/.promise/cache/build/` (overridable via `PROMISE
 - Module source hash (impl hash — `HashModuleSources()`)
 - Sorted list of all module paths in the build
 
-The cache key is a SHA-256 of these inputs (`BuildCacheKey()`). Files are stored in a **two-level directory structure** using the first 2 hex characters of the hash as a subdirectory: `~/.promise/cache/build/a3/a3b4c5d8...o`. Writes are atomic (temp file + rename with rollback on failure).
+The cache key is a SHA-256 of these inputs (`BuildCacheKey()`). Files are stored in a **two-level directory structure** using the first 2 hex characters of the hash as a subdirectory: `~/.promise/cache/build/a3/a3b4c5d8...o`. Writes are atomic (`os.CreateTemp` unique temp file + `os.Rename`, with rollback on failure) — concurrent processes writing the same cache key use independent temp files, preventing corruption.
 
 Wired into `compileAndLinkSeparate()` in `main.go`: lookup → cache hit skips `opt+llc` → cache miss compiles and saves. Interface hashes stored alongside `.o` files for incremental dependency tracking.
 

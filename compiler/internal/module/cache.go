@@ -255,7 +255,8 @@ func LookupTestBinaryCache(cacheDir, cacheKey string) string {
 }
 
 // SaveTestBinaryCache stores a compiled test binary in the build cache.
-// Uses executable permissions (0755) and atomic write.
+// Uses executable permissions (0755) and atomic write with a unique temp file
+// to prevent corruption when concurrent processes save the same cache key.
 func SaveTestBinaryCache(cacheDir, cacheKey, binaryFile string) error {
 	subdir := filepath.Join(cacheDir, cacheKey[:2])
 	if err := os.MkdirAll(subdir, 0755); err != nil {
@@ -268,10 +269,24 @@ func SaveTestBinaryCache(cacheDir, cacheKey, binaryFile string) error {
 	}
 
 	binPath := TestBinaryCachePath(cacheDir, cacheKey)
-	tmpPath := binPath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0755); err != nil {
+	tmp, err := os.CreateTemp(subdir, ".tmp-*")
+	if err != nil {
+		return fmt.Errorf("cannot create temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
 		os.Remove(tmpPath)
 		return fmt.Errorf("cannot write cached binary: %w", err)
+	}
+	if err := tmp.Chmod(0755); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("cannot set binary permissions: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("cannot close temp file: %w", err)
 	}
 	if err := os.Rename(tmpPath, binPath); err != nil {
 		os.Remove(tmpPath)
@@ -291,42 +306,62 @@ func LookupBuildCache(cacheDir, cacheKey string) string {
 }
 
 // SaveBuildCache stores a compiled .o and interface hash in the build cache.
-// Creates the two-level subdirectory if needed. Uses atomic write (temp + rename)
-// to prevent concurrent builds from corrupting entries.
+// Creates the two-level subdirectory if needed. Uses atomic write (unique temp
+// file + rename) to prevent corruption from concurrent builds.
 func SaveBuildCache(cacheDir, cacheKey, interfaceHash, objFile string) error {
 	subdir := filepath.Join(cacheDir, cacheKey[:2])
 	if err := os.MkdirAll(subdir, 0755); err != nil {
 		return fmt.Errorf("cannot create cache subdir: %w", err)
 	}
 
-	// Atomic write: write to temp file, then rename
+	// Atomic write: write to unique temp file, then rename
 	data, err := os.ReadFile(objFile)
 	if err != nil {
 		return fmt.Errorf("cannot read object file: %w", err)
 	}
 
 	objPath := BuildCachePath(cacheDir, cacheKey)
-	tmpPath := objPath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
-		os.Remove(tmpPath) // clean up partial write
+	tmpObj, err := os.CreateTemp(subdir, ".tmp-*")
+	if err != nil {
+		return fmt.Errorf("cannot create temp file: %w", err)
+	}
+	tmpObjPath := tmpObj.Name()
+	if _, err := tmpObj.Write(data); err != nil {
+		tmpObj.Close()
+		os.Remove(tmpObjPath)
 		return fmt.Errorf("cannot write cached object: %w", err)
 	}
-	if err := os.Rename(tmpPath, objPath); err != nil {
-		os.Remove(tmpPath)
+	if err := tmpObj.Close(); err != nil {
+		os.Remove(tmpObjPath)
+		return fmt.Errorf("cannot close temp file: %w", err)
+	}
+	if err := os.Rename(tmpObjPath, objPath); err != nil {
+		os.Remove(tmpObjPath)
 		return fmt.Errorf("cannot finalize cached object: %w", err)
 	}
 
-	// Write interface hash (also atomic)
+	// Write interface hash (also atomic with unique temp)
 	ifacePath := BuildCacheInterfacePath(cacheDir, cacheKey)
-	tmpIface := ifacePath + ".tmp"
-	if err := os.WriteFile(tmpIface, []byte(interfaceHash), 0644); err != nil {
-		os.Remove(tmpIface) // clean up partial write
-		os.Remove(objPath)  // roll back .o to keep cache consistent
+	tmpIface, err := os.CreateTemp(subdir, ".tmp-*")
+	if err != nil {
+		os.Remove(objPath) // roll back .o to keep cache consistent
+		return fmt.Errorf("cannot create temp file for interface: %w", err)
+	}
+	tmpIfacePath := tmpIface.Name()
+	if _, err := tmpIface.Write([]byte(interfaceHash)); err != nil {
+		tmpIface.Close()
+		os.Remove(tmpIfacePath)
+		os.Remove(objPath)
 		return fmt.Errorf("cannot write interface hash: %w", err)
 	}
-	if err := os.Rename(tmpIface, ifacePath); err != nil {
-		os.Remove(tmpIface)
-		os.Remove(objPath) // roll back .o to keep cache consistent
+	if err := tmpIface.Close(); err != nil {
+		os.Remove(tmpIfacePath)
+		os.Remove(objPath)
+		return fmt.Errorf("cannot close temp file: %w", err)
+	}
+	if err := os.Rename(tmpIfacePath, ifacePath); err != nil {
+		os.Remove(tmpIfacePath)
+		os.Remove(objPath)
 		return fmt.Errorf("cannot finalize interface hash: %w", err)
 	}
 
@@ -425,6 +460,7 @@ func TestBinaryMetaPath(cacheDir, cacheKey string) string {
 }
 
 // SaveTestBinaryMeta writes test binary metadata to the cache.
+// Uses atomic write with a unique temp file for concurrent safety.
 func SaveTestBinaryMeta(cacheDir, cacheKey string, meta *TestCacheMeta) error {
 	subdir := filepath.Join(cacheDir, cacheKey[:2])
 	if err := os.MkdirAll(subdir, 0755); err != nil {
@@ -434,7 +470,21 @@ func SaveTestBinaryMeta(cacheDir, cacheKey string, meta *TestCacheMeta) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(TestBinaryMetaPath(cacheDir, cacheKey), data, 0644)
+	tmp, err := os.CreateTemp(subdir, ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return os.Rename(tmpPath, TestBinaryMetaPath(cacheDir, cacheKey))
 }
 
 // LoadTestBinaryMeta reads cached test binary metadata.

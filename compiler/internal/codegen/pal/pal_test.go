@@ -569,32 +569,112 @@ func TestPosixThreadCreateDeclaresLibc(t *testing.T) {
 }
 
 func TestStubThreadCreateCallsSynchronously(t *testing.T) {
-	pals := []struct {
-		name string
-		pal  PAL
-	}{
-		{"Windows", &WindowsPAL{}},
-		{"Wasm", &WasmPAL{}},
-	}
-	for _, tc := range pals {
-		t.Run(tc.name, func(t *testing.T) {
-			module := newModuleWithAlloc(tc.pal)
-			tc.pal.EmitThreadCreate(module)
-			out := module.String()
+	// Only WASM uses stub threading (synchronous, no real threads)
+	module := newModuleWithAlloc(&WasmPAL{})
+	(&WasmPAL{}).EmitThreadCreate(module)
+	out := module.String()
 
-			// Stubs bitcast fn i8* to function pointer and call synchronously
-			if !strings.Contains(out, "bitcast i8* %fn to i8* (i8*)*") {
-				t.Error("missing bitcast of fn to function pointer")
-			}
-			// Return null handle (no real thread)
-			if !strings.Contains(out, "ret i8* null") {
-				t.Error("missing null return (no real thread handle)")
-			}
-			// Should NOT declare pthread_create
-			if strings.Contains(out, "pthread_create") {
-				t.Error("stub should not declare pthread_create")
-			}
-		})
+	// Stubs bitcast fn i8* to function pointer and call synchronously
+	if !strings.Contains(out, "bitcast i8* %fn to i8* (i8*)*") {
+		t.Error("missing bitcast of fn to function pointer")
+	}
+	// Return null handle (no real thread)
+	if !strings.Contains(out, "ret i8* null") {
+		t.Error("missing null return (no real thread handle)")
+	}
+	// Should NOT declare pthread_create
+	if strings.Contains(out, "pthread_create") {
+		t.Error("stub should not declare pthread_create")
+	}
+}
+
+func TestWindowsThreadCreateUsesCreateThread(t *testing.T) {
+	module := newModuleWithAlloc(&WindowsPAL{})
+	(&WindowsPAL{}).EmitThreadCreate(module)
+	out := module.String()
+
+	// Should declare CreateThread
+	if !strings.Contains(out, "@CreateThread") {
+		t.Error("missing CreateThread declaration")
+	}
+	// Should emit trampoline function
+	if !strings.Contains(out, "@__pal_thread_trampoline") {
+		t.Error("missing thread trampoline function")
+	}
+	// Should NOT use pthreads
+	if strings.Contains(out, "pthread_create") {
+		t.Error("Windows should not use pthread_create")
+	}
+}
+
+func TestWindowsThreadCreateDetails(t *testing.T) {
+	module := newModuleWithAlloc(&WindowsPAL{})
+	(&WindowsPAL{}).EmitThreadCreate(module)
+	out := module.String()
+
+	// 2MB stack size constant passed to CreateThread (0x200000 = 2097152)
+	if !strings.Contains(out, "i64 u0x200000") {
+		t.Error("missing 2MB stack size constant (u0x200000) in CreateThread call")
+	}
+	// Allocate 16-byte struct to pack fn+arg for trampoline
+	if !strings.Contains(out, "call i8* @pal_alloc(i64 16)") {
+		t.Error("missing 16-byte allocation for {fn, arg} struct")
+	}
+	// Bitcast to {i8*, i8*}* for struct access
+	if !strings.Contains(out, "bitcast i8*") {
+		t.Error("missing bitcast to struct pointer")
+	}
+	// GEP to store fn pointer (field 0) and arg (field 1)
+	if strings.Count(out, "getelementptr { i8*, i8* }") < 2 {
+		t.Error("expected at least 2 GEPs into {i8*, i8*} for fn and arg fields")
+	}
+	// Store fn and arg into packed struct
+	if strings.Count(out, "store i8*") < 2 {
+		t.Error("expected at least 2 stores for fn and arg into packed struct")
+	}
+	// Trampoline function frees the packed struct
+	if !strings.Contains(out, "call void @pal_free(i8* %packed)") {
+		t.Error("trampoline should free packed struct via pal_free")
+	}
+	// Trampoline returns i32 0 (DWORD success)
+	if !strings.Contains(out, "ret i32 0") {
+		t.Error("trampoline should return i32 0")
+	}
+	// Null thread attributes and null thread ID pointer
+	if strings.Count(out, "null") < 2 {
+		t.Error("expected null for lpThreadAttributes and lpThreadId")
+	}
+}
+
+func TestWindowsThreadJoinDeclaresWin32(t *testing.T) {
+	module := newModuleWithAlloc(&WindowsPAL{})
+	(&WindowsPAL{}).EmitThreadJoin(module)
+	out := module.String()
+
+	// WaitForSingleObject declaration
+	if !strings.Contains(out, "@WaitForSingleObject(") {
+		t.Error("missing @WaitForSingleObject declaration")
+	}
+	// Call with INFINITE timeout (0xFFFFFFFF = -1 as i32)
+	if !strings.Contains(out, "call i32 @WaitForSingleObject(i8* %handle, i32 -1)") {
+		t.Error("missing call to WaitForSingleObject with INFINITE timeout")
+	}
+	// CloseHandle declaration and call
+	if !strings.Contains(out, "@CloseHandle(") {
+		t.Error("missing @CloseHandle declaration")
+	}
+	if !strings.Contains(out, "call i32 @CloseHandle(i8* %handle)") {
+		t.Error("missing call to CloseHandle")
+	}
+	// Should NOT use pthreads
+	if strings.Contains(out, "pthread_join") {
+		t.Error("Windows should not use pthread_join")
+	}
+	// pal_thread_join body should NOT call pal_free (CloseHandle is sufficient,
+	// unlike posix which frees the alloc'd pthread_t). Extract just the join function body.
+	joinBody := out[strings.Index(out, "@pal_thread_join"):]
+	if strings.Contains(joinBody, "call void @pal_free(") {
+		t.Error("Windows thread join should not call pal_free (CloseHandle suffices)")
 	}
 }
 
@@ -683,6 +763,28 @@ func TestPosixMutexInitDeclaresLibc(t *testing.T) {
 	}
 }
 
+func TestWindowsMutexInitDeclaresWin32(t *testing.T) {
+	module := newModuleWithAlloc(&WindowsPAL{})
+	(&WindowsPAL{}).EmitMutexInit(module)
+	out := module.String()
+
+	// 40-byte allocation for CRITICAL_SECTION
+	if !strings.Contains(out, "call i8* @pal_alloc(i64 40)") {
+		t.Error("missing 40-byte allocation for CRITICAL_SECTION")
+	}
+	// InitializeCriticalSection declaration and call
+	if !strings.Contains(out, "@InitializeCriticalSection(") {
+		t.Error("missing @InitializeCriticalSection declaration")
+	}
+	if !strings.Contains(out, "call void @InitializeCriticalSection(") {
+		t.Error("missing call to @InitializeCriticalSection")
+	}
+	// Should NOT use pthreads
+	if strings.Contains(out, "pthread_mutex_init") {
+		t.Error("Windows should not use pthread_mutex_init")
+	}
+}
+
 func TestPosixMutexLockUnlockDestroyDeclaresLibc(t *testing.T) {
 	module := newModuleWithAlloc(&PosixPAL{})
 	(&PosixPAL{}).EmitMutexLock(module)
@@ -710,6 +812,44 @@ func TestPosixMutexLockUnlockDestroyDeclaresLibc(t *testing.T) {
 	}
 	if !strings.Contains(out, "call void @pal_free(") {
 		t.Error("missing call to @pal_free in pal_mutex_destroy")
+	}
+}
+
+func TestWindowsMutexLockUnlockDestroyDeclaresWin32(t *testing.T) {
+	module := newModuleWithAlloc(&WindowsPAL{})
+	(&WindowsPAL{}).EmitMutexLock(module)
+	(&WindowsPAL{}).EmitMutexUnlock(module)
+	(&WindowsPAL{}).EmitMutexDestroy(module)
+	out := module.String()
+
+	// EnterCriticalSection for lock
+	if !strings.Contains(out, "@EnterCriticalSection(") {
+		t.Error("missing @EnterCriticalSection declaration")
+	}
+	if !strings.Contains(out, "call void @EnterCriticalSection(") {
+		t.Error("missing call to @EnterCriticalSection")
+	}
+	// LeaveCriticalSection for unlock
+	if !strings.Contains(out, "@LeaveCriticalSection(") {
+		t.Error("missing @LeaveCriticalSection declaration")
+	}
+	if !strings.Contains(out, "call void @LeaveCriticalSection(") {
+		t.Error("missing call to @LeaveCriticalSection")
+	}
+	// DeleteCriticalSection for destroy
+	if !strings.Contains(out, "@DeleteCriticalSection(") {
+		t.Error("missing @DeleteCriticalSection declaration")
+	}
+	if !strings.Contains(out, "call void @DeleteCriticalSection(") {
+		t.Error("missing call to @DeleteCriticalSection")
+	}
+	// Free after delete
+	if !strings.Contains(out, "call void @pal_free(") {
+		t.Error("missing call to @pal_free in pal_mutex_destroy")
+	}
+	// Should NOT use pthreads
+	if strings.Contains(out, "pthread_mutex") {
+		t.Error("Windows should not use pthread_mutex functions")
 	}
 }
 
@@ -886,6 +1026,73 @@ func TestEmitCondBroadcast(t *testing.T) {
 	}
 }
 
+func TestWindowsCondInitDeclaresWin32(t *testing.T) {
+	module := newModuleWithAlloc(&WindowsPAL{})
+	(&WindowsPAL{}).EmitCondInit(module)
+	out := module.String()
+
+	// 8-byte allocation for CONDITION_VARIABLE
+	if !strings.Contains(out, "call i8* @pal_alloc(i64 8)") {
+		t.Error("missing 8-byte allocation for CONDITION_VARIABLE")
+	}
+	// InitializeConditionVariable declaration and call
+	if !strings.Contains(out, "@InitializeConditionVariable(") {
+		t.Error("missing @InitializeConditionVariable declaration")
+	}
+	if !strings.Contains(out, "call void @InitializeConditionVariable(") {
+		t.Error("missing call to @InitializeConditionVariable")
+	}
+	// Should NOT use pthreads
+	if strings.Contains(out, "pthread_cond_init") {
+		t.Error("Windows should not use pthread_cond_init")
+	}
+}
+
+func TestWindowsCondWaitSignalDeclaresWin32(t *testing.T) {
+	module := newModuleWithAlloc(&WindowsPAL{})
+	(&WindowsPAL{}).EmitCondWait(module)
+	(&WindowsPAL{}).EmitCondSignal(module)
+	out := module.String()
+
+	// SleepConditionVariableCS declaration and call with INFINITE
+	if !strings.Contains(out, "@SleepConditionVariableCS(") {
+		t.Error("missing @SleepConditionVariableCS declaration")
+	}
+	if !strings.Contains(out, "call i32 @SleepConditionVariableCS(i8* %cond, i8* %mutex, i32 -1)") {
+		t.Error("missing call to SleepConditionVariableCS with INFINITE timeout")
+	}
+	// WakeConditionVariable declaration and call
+	if !strings.Contains(out, "@WakeConditionVariable(") {
+		t.Error("missing @WakeConditionVariable declaration")
+	}
+	if !strings.Contains(out, "call void @WakeConditionVariable(") {
+		t.Error("missing call to @WakeConditionVariable")
+	}
+	// Should NOT use pthreads
+	if strings.Contains(out, "pthread_cond") {
+		t.Error("Windows should not use pthread_cond functions")
+	}
+}
+
+func TestWindowsCondDestroyJustFrees(t *testing.T) {
+	module := newModuleWithAlloc(&WindowsPAL{})
+	(&WindowsPAL{}).EmitCondDestroy(module)
+	out := module.String()
+
+	// Should call pal_free (no Windows API destroy for CONDITION_VARIABLE)
+	if !strings.Contains(out, "call void @pal_free(") {
+		t.Error("missing call to @pal_free in pal_cond_destroy")
+	}
+	// Should NOT declare any DeleteConditionVariable (doesn't exist in Win32)
+	if strings.Contains(out, "DeleteConditionVariable") {
+		t.Error("Windows has no DeleteConditionVariable API")
+	}
+	// Should NOT use pthreads
+	if strings.Contains(out, "pthread_cond_destroy") {
+		t.Error("Windows should not use pthread_cond_destroy")
+	}
+}
+
 func TestPosixCondBroadcastDeclaresLibc(t *testing.T) {
 	module := newModuleWithAlloc(&PosixPAL{})
 	(&PosixPAL{}).EmitCondBroadcast(module)
@@ -900,28 +1107,29 @@ func TestPosixCondBroadcastDeclaresLibc(t *testing.T) {
 }
 
 func TestStubCondBroadcastIsNoOp(t *testing.T) {
-	pals := []struct {
-		name string
-		pal  PAL
-	}{
-		{"Windows", &WindowsPAL{}},
-		{"Wasm", &WasmPAL{}},
-	}
-	for _, tc := range pals {
-		t.Run(tc.name, func(t *testing.T) {
-			module := newModuleWithAlloc(tc.pal)
-			tc.pal.EmitCondBroadcast(module)
-			out := module.String()
+	// Only WASM uses stub cond_broadcast (no-op)
+	module := newModuleWithAlloc(&WasmPAL{})
+	(&WasmPAL{}).EmitCondBroadcast(module)
+	out := module.String()
 
-			// Stubs should NOT declare pthread_cond_broadcast
-			if strings.Contains(out, "pthread_cond_broadcast") {
-				t.Error("stub should not declare pthread_cond_broadcast")
-			}
-			// Should just return void (no-op)
-			if !strings.Contains(out, "ret void") {
-				t.Error("stub should return void (no-op)")
-			}
-		})
+	if strings.Contains(out, "pthread_cond_broadcast") {
+		t.Error("stub should not declare pthread_cond_broadcast")
+	}
+	if !strings.Contains(out, "ret void") {
+		t.Error("stub should return void (no-op)")
+	}
+}
+
+func TestWindowsCondBroadcastUsesWakeAll(t *testing.T) {
+	module := newModuleWithAlloc(&WindowsPAL{})
+	(&WindowsPAL{}).EmitCondBroadcast(module)
+	out := module.String()
+
+	if !strings.Contains(out, "@WakeAllConditionVariable") {
+		t.Error("Windows pal_cond_broadcast should use WakeAllConditionVariable")
+	}
+	if strings.Contains(out, "pthread_cond_broadcast") {
+		t.Error("Windows should not use pthread_cond_broadcast")
 	}
 }
 
@@ -1005,21 +1213,58 @@ func TestPosixNumCPUsLinuxConstant(t *testing.T) {
 }
 
 func TestStubNumCPUsReturnsOne(t *testing.T) {
-	tests := []struct {
-		name string
-		pal  PAL
-	}{
-		{"Windows", &WindowsPAL{}},
-		{"Wasm", &WasmPAL{}},
+	// Only WASM uses stub num_cpus (returns 1)
+	module := ir.NewModule()
+	(&WasmPAL{}).EmitNumCPUs(module)
+	out := module.String()
+	if !strings.Contains(out, "ret i32 1") {
+		t.Error("stub pal_num_cpus should return 1")
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			module := ir.NewModule()
-			tt.pal.EmitNumCPUs(module)
-			out := module.String()
-			if !strings.Contains(out, "ret i32 1") {
-				t.Error("stub pal_num_cpus should return 1")
-			}
-		})
+}
+
+func TestWindowsNumCPUsUsesGetSystemInfo(t *testing.T) {
+	module := ir.NewModule()
+	(&WindowsPAL{}).EmitNumCPUs(module)
+	out := module.String()
+	if !strings.Contains(out, "@GetSystemInfo") {
+		t.Error("Windows pal_num_cpus should use GetSystemInfo")
+	}
+	// Should NOT return a hardcoded 1
+	if strings.Contains(out, "ret i32 1") {
+		t.Error("Windows pal_num_cpus should not return hardcoded 1")
+	}
+}
+
+func TestWindowsNumCPUsStructDetails(t *testing.T) {
+	module := ir.NewModule()
+	(&WindowsPAL{}).EmitNumCPUs(module)
+	out := module.String()
+
+	// 48-byte stack alloca for SYSTEM_INFO struct
+	if !strings.Contains(out, "alloca [48 x i8]") {
+		t.Error("missing 48-byte alloca for SYSTEM_INFO struct")
+	}
+	// GEP to byte offset 32 for dwNumberOfProcessors
+	if !strings.Contains(out, "getelementptr i8, i8*") {
+		t.Error("missing GEP to access dwNumberOfProcessors field")
+	}
+	if !strings.Contains(out, "i64 32") {
+		t.Error("missing offset 32 for dwNumberOfProcessors in SYSTEM_INFO")
+	}
+	// Bitcast to i32* for loading the DWORD field
+	if !strings.Contains(out, "bitcast i8*") {
+		t.Error("missing bitcast to i32* for dwNumberOfProcessors")
+	}
+	// Load i32 from the field
+	if !strings.Contains(out, "load i32, i32*") {
+		t.Error("missing load i32 from dwNumberOfProcessors")
+	}
+	// Select for clamping to at least 1
+	if !strings.Contains(out, "select i1") {
+		t.Error("missing select for clamping numCPUs to >= 1")
+	}
+	// icmp for the clamp check
+	if !strings.Contains(out, "icmp slt") {
+		t.Error("missing icmp slt for clamp comparison")
 	}
 }

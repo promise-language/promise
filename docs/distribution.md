@@ -1,6 +1,6 @@
 # Distribution & Installation
 
-> The self-contained binary model is implemented for Linux (amd64). macOS is partially implemented (binary is portable but requires Xcode Command Line Tools). Windows support is planned but not yet available. Multi-epoch toolchain management (`promise sync`, shim) is described in `docs/module-system.md` Section 7.
+> The self-contained binary model is implemented for Linux (amd64). macOS is partially implemented (binary is portable but requires Xcode Command Line Tools). Windows support is in progress — PAL threading, linker, and SDK discovery implemented; needs end-to-end testing (see `docs/windows-support.md`). Multi-epoch toolchain management (`promise sync`, shim) is described in `docs/module-system.md` Section 7.
 
 ---
 
@@ -73,7 +73,18 @@ Re-running `promise install` with a newer binary replaces the installation in pl
 
 ### 2.5 Windows
 
-Windows support is planned but not yet implemented. The model is identical — a self-contained `promise.exe` embedding the compiler, stdlib, and LLVM tools; `promise install` sets up `%USERPROFILE%\.promise\`. Until then, Windows users can use WSL2 with the Linux binary.
+Windows support uses native MSVC ABI (`x86_64-pc-windows-msvc`). The compiler binary `promise.exe` is built on Windows and produces Windows executables by compiling LLVM IR through `opt` → `llc` → `lld-link`, linking against the Windows SDK and UCRT.
+
+**Prerequisites:** Visual Studio Build Tools (provides MSVC libs + Windows SDK) and LLVM 22+. See `docs/windows-support.md` for full details.
+
+**Build from source:**
+```batch
+build.bat
+```
+
+**Install:** `bin\promise.exe install` sets up `%USERPROFILE%\.promise\` with the binary and stdlib.
+
+**Status:** PAL threading (CreateThread, CRITICAL_SECTION, CONDITION_VARIABLE), linker support (lld-link), and SDK discovery are implemented. Needs end-to-end testing on Windows.
 
 ---
 
@@ -87,7 +98,7 @@ Each release publishes to **GitHub Releases** at `github.com/promise-lang/promis
 | `promise-linux-arm64` | Linux ARM64. Planned. |
 | `promise-darwin-amd64` | macOS Intel. Needs Xcode CLT. Planned. |
 | `promise-darwin-arm64` | macOS Apple Silicon. Needs Xcode CLT. Planned. |
-| `promise-windows-amd64.exe` | Windows x86_64. Planned. |
+| `promise-windows-amd64.exe` | Windows x86_64. Needs VS Build Tools. In progress. |
 
 Each release also includes a `SHA256SUMS` file. `scripts/install.sh` verifies the checksum before running `promise install`.
 
@@ -249,7 +260,7 @@ jobs:
 **Platform notes:**
 - **Linux**: LLVM 22 installed from `apt.llvm.org`. `musl-dev` provides the musl CRT objects that get embedded in the binary by `make musl-crt`.
 - **macOS**: `PROMISE_USE_CLANG=1` uses Xcode's bundled clang as the compilation driver, avoiding the `brew install llvm` overhead. This tests the same compiler frontend and codegen — only the backend driver differs.
-- **Windows**: Not yet. Will be added to the matrix once `promise install` supports Windows.
+- **Windows**: In progress. PAL, linker, and `promise install` are implemented. Add `windows-latest` to the CI matrix after end-to-end validation on a Windows machine. Requires VS Build Tools + LLVM 22+ on the runner.
 
 ### 7.3 Release Workflow
 
@@ -417,4 +428,4 @@ That's it. The tag push triggers the release workflow, which builds all platform
 | Platform | Blocker | Notes |
 |----------|---------|-------|
 | `linux-arm64` | Cross-compile + arm64 runner | Go cross-compiles fine. Musl CRT arm64 objects needed. `embed_llvm` needs arm64 LLVM tools bundled. |
-| `windows-amd64` | `promise install` Windows support | Once implemented, add a `build-windows-amd64` job on `windows-latest`. The Go binary cross-compiles from Linux with `GOOS=windows`. |
+| `windows-amd64` | End-to-end testing on Windows | PAL threading, linker (lld-link), SDK discovery, `promise install` implemented. Needs testing on Windows machine, then add `build-windows-amd64` CI job on `windows-latest`. See `docs/windows-support.md`. |

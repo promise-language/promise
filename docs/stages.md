@@ -46,7 +46,7 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 | Area | Description | Status | Design Doc |
 |------|-------------|--------|------------|
 | Runtime migration | Move C runtime to codegen LLVM IR / pure Promise | Done (Phases 1-4) | [runtime-architecture.md](runtime-architecture.md) |
-| Platform abstraction | PAL for macOS/Linux/Windows/WASM | Done (Phase 3) | [runtime-architecture.md](runtime-architecture.md) |
+| Platform abstraction | PAL for macOS/Linux/Windows/WASM | Done (Phase 3). Windows W1 done (threading + linker). | [runtime-architecture.md](runtime-architecture.md), [windows-support.md](windows-support.md) |
 | 1:1 Threading | `go`/`<-` with OS threads via PAL | Done (Phase 5a) | [runtime-architecture.md](runtime-architecture.md) |
 | Channels | `channel[T]` with buffered/unbuffered send/receive/for-in | Done (Phase 5b) | [runtime-architecture.md](runtime-architecture.md) |
 | M:N Scheduler | LLVM coroutines, GMP model, work stealing | Done (Phase 5c) | [runtime-architecture.md](runtime-architecture.md) |
@@ -55,6 +55,7 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 | C binding | Extern ABI coercion (`extern.go`), C header generation (`headergen.go`) | Done (dormant — header gen implemented but not exposed via CLI; original use case obsolete after C runtime migration) | [c-binding-architecture.md](c-binding-architecture.md) |
 | Self-contained binary | Embed gzip-compressed LLVM tools (opt, llc, lld, libLLVM.so) via `go:embed` for release builds | Done (Phase 7f, Linux x86_64). macOS planned (see Near-term). | [runtime-architecture.md](runtime-architecture.md) |
 | Distribution | Release binaries, install script, GitHub Actions CI/release workflows | Planned | [distribution.md](distribution.md) |
+| Windows support | Native MSVC ABI, Win32 PAL threading, lld-link, Windows SDK discovery | Phase W1 done (code). W2 pending (testing on Windows). | [windows-support.md](windows-support.md) |
 | Yield generators | `stream[T]` functions with `yield`, LLVM presplit coroutines, `for-in` consumption | Done | — |
 | Structural interfaces | Relaxed matching (extra optional/default params, non-failable→failable, T→T?), adapter thunks, abstract factory methods with implicit Self, generic factory patterns (`T.parse(data)`) | Done | [language-design.md](language-design.md#structural-interface-satisfaction) |
 | Documentation system | `promise doc` command: extract `doc()` meta tags, emit markdown to stdout, `-signatures` compact mode, `-std` for stdlib reference | Phase 1 done (single-file doc, `-public`/`-all`/`-signatures`/`-o` flags, param/variant doc propagation, `DeclareAndDefine` early-exit sema) | [documentation-proposal.md](documentation-proposal.md) |

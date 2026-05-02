@@ -273,6 +273,8 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 		base := strings.TrimSuffix(filepath.Base(filename), ".pr")
 		if isWasmTarget(target) {
 			outputFile = base + ".wasm"
+		} else if isWindowsTarget(target) {
+			outputFile = base + ".exe"
 		} else {
 			outputFile = base
 		}
@@ -544,10 +546,7 @@ func compileTestBinary(file *ast.File, info *sema.Info, targetTriple, sourceFile
 	result := codegen.Compile(file, info, target)
 	result.GenerateTestMain(info.Tests)
 
-	ext := ""
-	if isWasmTarget(target) {
-		ext = ".wasm"
-	}
+	ext := binaryExtension(target)
 	tmpOutput, err := os.CreateTemp("", "promise-test-*"+ext)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
@@ -700,10 +699,7 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string,
 	// Codegen with normal main (no GenerateTestMain)
 	result := codegen.Compile(file, info, target)
 
-	ext := ""
-	if isWasmTarget(target) {
-		ext = ".wasm"
-	}
+	ext := binaryExtension(target)
 	tmpOutput, err := os.CreateTemp("", "promise-e2e-*"+ext)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
@@ -1261,6 +1257,8 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 		linkDarwinMulti(objFiles, target, outputFile)
 	} else if isWasmTarget(target) {
 		linkWasmMulti(objFiles, outputFile)
+	} else if isWindowsTarget(target) {
+		linkWindowsMulti(objFiles, target, outputFile)
 	} else {
 		linkLinuxMulti(objFiles, target, outputFile)
 	}
@@ -1327,8 +1325,9 @@ func useClangPipeline(target string) bool {
 	if os.Getenv("PROMISE_USE_CLANG") == "1" {
 		return true
 	}
-	// Linux, macOS, and WASM use the LLVM pipeline. Other platforms use clang.
-	return !strings.Contains(target, "linux") && !strings.Contains(target, "macosx") && !strings.Contains(target, "wasm")
+	// Linux, macOS, Windows, and WASM use the LLVM pipeline. Other platforms use clang.
+	return !strings.Contains(target, "linux") && !strings.Contains(target, "macosx") &&
+		!strings.Contains(target, "windows") && !strings.Contains(target, "wasm")
 }
 
 // minLLVMMajor is the minimum LLVM/clang major version required.
@@ -1529,18 +1528,28 @@ func findLLVMTool(name string) (string, error) {
 		"ld.lld":   "PROMISE_LLD",
 		"ld64.lld": "PROMISE_LD64LLD",
 		"wasm-ld":  "PROMISE_WASM_LD",
+		"lld-link": "PROMISE_LLD",
+	}
+
+	// On Windows, tools have .exe extension — try with suffix first, then bare name.
+	// On other platforms, just search the bare name.
+	searchNames := []string{name}
+	if runtime.GOOS == "windows" && !strings.HasSuffix(name, ".exe") {
+		searchNames = []string{name + ".exe", name}
 	}
 
 	// 1. Sibling of promise binary (also check llvm/ subdirectory for install layout)
 	if execPath, err := os.Executable(); err == nil {
 		dir := filepath.Dir(execPath)
-		sibling := filepath.Join(dir, name)
-		if _, err := os.Stat(sibling); err == nil {
-			return sibling, nil
-		}
-		subdir := filepath.Join(dir, "llvm", name)
-		if _, err := os.Stat(subdir); err == nil {
-			return subdir, nil
+		for _, n := range searchNames {
+			for _, candidate := range []string{
+				filepath.Join(dir, n),
+				filepath.Join(dir, "llvm", n),
+			} {
+				if _, err := os.Stat(candidate); err == nil {
+					return candidate, nil
+				}
+			}
 		}
 	}
 
@@ -1551,13 +1560,15 @@ func findLLVMTool(name string) (string, error) {
 		}
 	}
 
-	// 3. Embedded LLVM cache (Linux only — extract on first access)
+	// 3. Embedded LLVM cache (extract on first access)
 	if hasEmbeddedLLVM {
 		llvmExtractOnce.Do(ensureEmbeddedLLVM)
 		if llvmCacheDir != "" {
-			p := filepath.Join(llvmCacheDir, name)
-			if _, err := os.Stat(p); err == nil {
-				return p, nil
+			for _, n := range searchNames {
+				p := filepath.Join(llvmCacheDir, n)
+				if _, err := os.Stat(p); err == nil {
+					return p, nil
+				}
 			}
 		}
 	}
@@ -1928,6 +1939,22 @@ func isWasmTarget(target string) bool {
 	return strings.Contains(target, "wasm")
 }
 
+// isWindowsTarget returns true if the target triple is Windows.
+func isWindowsTarget(target string) bool {
+	return strings.Contains(target, "windows")
+}
+
+// binaryExtension returns the file extension for compiled binaries on the target.
+func binaryExtension(target string) string {
+	if isWasmTarget(target) {
+		return ".wasm"
+	}
+	if isWindowsTarget(target) {
+		return ".exe"
+	}
+	return ""
+}
+
 // isTestExcluded checks if the current target matches any of the exclude substrings.
 func isTestExcluded(target string, excludes []string) bool {
 	for _, ex := range excludes {
@@ -2230,6 +2257,8 @@ func compileAndLinkLLVM(llFile, target, outputFile string) {
 		linkDarwin(objFile.Name(), target, outputFile)
 	} else if isWasmTarget(target) {
 		linkWasm(objFile.Name(), outputFile)
+	} else if isWindowsTarget(target) {
+		linkWindows(objFile.Name(), target, outputFile)
 	} else {
 		linkLinux(objFile.Name(), target, outputFile)
 	}
@@ -2477,6 +2506,239 @@ func linkLinuxMulti(objFiles []string, target, outputFile string) {
 	linkCmd.Stderr = os.Stderr
 	if err := linkCmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error linking (ld.lld): %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// --- Windows linking via lld-link (MSVC-compatible COFF linker) ---
+
+// windowsSDKInfo holds paths to Windows SDK and MSVC libraries.
+type windowsSDKInfo struct {
+	ucrtLibDir string // e.g. C:\Program Files (x86)\Windows Kits\10\Lib\10.0.22621.0\ucrt\x64
+	umLibDir   string // e.g. C:\Program Files (x86)\Windows Kits\10\Lib\10.0.22621.0\um\x64
+	msvcLibDir string // e.g. C:\...\VC\Tools\MSVC\14.40.33807\lib\x64
+}
+
+// findWindowsSDK locates the Windows SDK and MSVC lib directories.
+// Probes environment variables (set by VS Developer Command Prompt), then common paths.
+func findWindowsSDK() (*windowsSDKInfo, error) {
+	arch := "x64"
+	if runtime.GOARCH == "arm64" {
+		arch = "arm64"
+	}
+
+	info := &windowsSDKInfo{}
+
+	// Try environment variables first (set by vcvarsall.bat / VS Developer Prompt)
+	if libPath := os.Getenv("LIB"); libPath != "" {
+		// LIB contains semicolon-separated paths with all needed lib dirs
+		for _, dir := range strings.Split(libPath, ";") {
+			dir = strings.TrimSpace(dir)
+			if dir == "" {
+				continue
+			}
+			if info.ucrtLibDir == "" && containsFile(dir, "libucrt.lib") {
+				info.ucrtLibDir = dir
+			}
+			if info.umLibDir == "" && containsFile(dir, "kernel32.lib") {
+				info.umLibDir = dir
+			}
+			if info.msvcLibDir == "" && containsFile(dir, "libcmt.lib") {
+				info.msvcLibDir = dir
+			}
+		}
+		if info.ucrtLibDir != "" && info.umLibDir != "" && info.msvcLibDir != "" {
+			return info, nil
+		}
+	}
+
+	// Try WindowsSdkDir + WindowsSDKVersion environment variables
+	sdkDir := os.Getenv("WindowsSdkDir")
+	sdkVer := os.Getenv("WindowsSDKVersion")
+	if sdkDir != "" && sdkVer != "" {
+		sdkVer = strings.TrimRight(sdkVer, `\`)
+		ucrt := filepath.Join(sdkDir, "Lib", sdkVer, "ucrt", arch)
+		um := filepath.Join(sdkDir, "Lib", sdkVer, "um", arch)
+		if containsFile(ucrt, "libucrt.lib") {
+			info.ucrtLibDir = ucrt
+		}
+		if containsFile(um, "kernel32.lib") {
+			info.umLibDir = um
+		}
+	}
+
+	// Try VCToolsInstallDir for MSVC libs
+	if vcDir := os.Getenv("VCToolsInstallDir"); vcDir != "" {
+		msvcLib := filepath.Join(vcDir, "lib", arch)
+		if containsFile(msvcLib, "libcmt.lib") {
+			info.msvcLibDir = msvcLib
+		}
+	}
+
+	if info.ucrtLibDir != "" && info.umLibDir != "" && info.msvcLibDir != "" {
+		return info, nil
+	}
+
+	// Probe common installation paths
+	programFilesX86 := os.Getenv("ProgramFiles(x86)")
+	if programFilesX86 == "" {
+		programFilesX86 = `C:\Program Files (x86)`
+	}
+	programFiles := os.Getenv("ProgramFiles")
+	if programFiles == "" {
+		programFiles = `C:\Program Files`
+	}
+
+	// Find Windows SDK (newest version)
+	if info.ucrtLibDir == "" || info.umLibDir == "" {
+		sdkRoot := filepath.Join(programFilesX86, "Windows Kits", "10", "Lib")
+		if versions, err := os.ReadDir(sdkRoot); err == nil {
+			// Iterate in reverse to find newest version first
+			for i := len(versions) - 1; i >= 0; i-- {
+				ver := versions[i]
+				if !ver.IsDir() || !strings.HasPrefix(ver.Name(), "10.") {
+					continue
+				}
+				ucrt := filepath.Join(sdkRoot, ver.Name(), "ucrt", arch)
+				um := filepath.Join(sdkRoot, ver.Name(), "um", arch)
+				if info.ucrtLibDir == "" && containsFile(ucrt, "libucrt.lib") {
+					info.ucrtLibDir = ucrt
+				}
+				if info.umLibDir == "" && containsFile(um, "kernel32.lib") {
+					info.umLibDir = um
+				}
+				if info.ucrtLibDir != "" && info.umLibDir != "" {
+					break
+				}
+			}
+		}
+	}
+
+	// Find MSVC libs via vswhere.exe or common paths
+	if info.msvcLibDir == "" {
+		// Try vswhere.exe (ships with VS 2017+ and Build Tools)
+		vswhere := filepath.Join(programFilesX86, "Microsoft Visual Studio", "Installer", "vswhere.exe")
+		if _, err := os.Stat(vswhere); err == nil {
+			out, err := exec.Command(vswhere, "-latest", "-property", "installationPath").Output()
+			if err == nil {
+				vsPath := strings.TrimSpace(string(out))
+				msvcRoot := filepath.Join(vsPath, "VC", "Tools", "MSVC")
+				if versions, err := os.ReadDir(msvcRoot); err == nil {
+					for i := len(versions) - 1; i >= 0; i-- {
+						dir := filepath.Join(msvcRoot, versions[i].Name(), "lib", arch)
+						if containsFile(dir, "libcmt.lib") {
+							info.msvcLibDir = dir
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Probe common VS paths as fallback
+	if info.msvcLibDir == "" {
+		for _, edition := range []string{"BuildTools", "Community", "Professional", "Enterprise"} {
+			vsRoot := filepath.Join(programFiles, "Microsoft Visual Studio", "2022", edition, "VC", "Tools", "MSVC")
+			if versions, err := os.ReadDir(vsRoot); err == nil {
+				for i := len(versions) - 1; i >= 0; i-- {
+					dir := filepath.Join(vsRoot, versions[i].Name(), "lib", arch)
+					if containsFile(dir, "libcmt.lib") {
+						info.msvcLibDir = dir
+						break
+					}
+				}
+			}
+			if info.msvcLibDir != "" {
+				break
+			}
+		}
+	}
+
+	// Validate
+	var missing []string
+	if info.ucrtLibDir == "" {
+		missing = append(missing, "Windows SDK ucrt libs (libucrt.lib)")
+	}
+	if info.umLibDir == "" {
+		missing = append(missing, "Windows SDK um libs (kernel32.lib)")
+	}
+	if info.msvcLibDir == "" {
+		missing = append(missing, "MSVC libs (libcmt.lib)")
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("Windows SDK/MSVC libraries not found: %s\n  install Visual Studio Build Tools: https://visualstudio.microsoft.com/downloads/\n  or run from a VS Developer Command Prompt",
+			strings.Join(missing, ", "))
+	}
+
+	return info, nil
+}
+
+// containsFile checks if a file exists in a directory.
+func containsFile(dir, name string) bool {
+	_, err := os.Stat(filepath.Join(dir, name))
+	return err == nil
+}
+
+// buildWindowsLinkArgs builds the lld-link argument list for COFF linking.
+func buildWindowsLinkArgs(target string, objFiles []string, outputFile string) []string {
+	sdk, err := findWindowsSDK()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	args := []string{
+		"/nologo",
+		"/entry:mainCRTStartup",
+		"/subsystem:console",
+		"/out:" + outputFile,
+		// Library search paths
+		"/libpath:" + sdk.ucrtLibDir,
+		"/libpath:" + sdk.umLibDir,
+		"/libpath:" + sdk.msvcLibDir,
+		// Required libraries
+		"libucrt.lib",
+		"libvcruntime.lib",
+		"libcmt.lib",
+		"kernel32.lib",
+	}
+	args = append(args, objFiles...)
+	return args
+}
+
+// linkWindows runs lld-link for a single .obj file.
+func linkWindows(objFile, target, outputFile string) {
+	lldPath, err := findLLVMTool("lld-link")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	checkLLVMToolVersion(lldPath)
+
+	linkArgs := buildWindowsLinkArgs(target, []string{objFile}, outputFile)
+	linkCmd := runLLVMCmd(lldPath, linkArgs...)
+	linkCmd.Stderr = os.Stderr
+	if err := linkCmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "error linking (lld-link): %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// linkWindowsMulti links multiple .obj files on Windows via lld-link.
+func linkWindowsMulti(objFiles []string, target, outputFile string) {
+	lldPath, err := findLLVMTool("lld-link")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	checkLLVMToolVersion(lldPath)
+
+	linkArgs := buildWindowsLinkArgs(target, objFiles, outputFile)
+	linkCmd := runLLVMCmd(lldPath, linkArgs...)
+	linkCmd.Stderr = os.Stderr
+	if err := linkCmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "error linking (lld-link): %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -3867,13 +4129,17 @@ func runInstall() {
 		}
 	}
 
-	// Copy binary
+	// Copy binary (promise.exe on Windows, promise on others)
+	binaryName := "promise"
+	if runtime.GOOS == "windows" {
+		binaryName = "promise.exe"
+	}
 	execPath, err := os.Executable()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: cannot determine executable path: %v\n", err)
 		os.Exit(1)
 	}
-	copyFile(execPath, filepath.Join(binDir, "promise"), 0755)
+	copyFile(execPath, filepath.Join(binDir, binaryName), 0755)
 
 	// Extract embedded std files
 	extractEmbedded(embeddedStd, "resources/std", stdDest)
@@ -3900,13 +4166,18 @@ func runInstall() {
 	}
 
 	fmt.Printf("Installed Promise to %s\n", promiseDir)
-	fmt.Printf("  binary: %s\n", filepath.Join(binDir, "promise"))
+	fmt.Printf("  binary: %s\n", filepath.Join(binDir, binaryName))
 	fmt.Printf("  std:    %s\n", stdDest)
 	if hasEmbeddedLLVM {
 		fmt.Printf("  llvm:   %s\n", filepath.Join(binDir, "llvm"))
 	}
-	fmt.Printf("Add to your shell profile:\n\n")
-	fmt.Printf("  export PATH=\"%s:$PATH\"\n", binDir)
+	if runtime.GOOS == "windows" {
+		fmt.Printf("\nAdd to your PATH:\n\n")
+		fmt.Printf("  setx PATH \"%%PATH%%;%s\"\n", binDir)
+	} else {
+		fmt.Printf("Add to your shell profile:\n\n")
+		fmt.Printf("  export PATH=\"%s:$PATH\"\n", binDir)
+	}
 }
 
 // extractEmbedded writes all files from an embedded FS directory to a destination.

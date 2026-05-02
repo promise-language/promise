@@ -189,10 +189,7 @@ func compileTargets(files []string, baseDir string, targetTriple string) (target
 			if len(info.Tests) == 0 {
 				continue
 			}
-			ext := ""
-			if isWasmTarget(target) {
-				ext = ".wasm"
-			}
+			ext := binaryExtension(target)
 			tmp, err := os.CreateTemp("", "promise-stress-*"+ext)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
@@ -264,10 +261,7 @@ func compileTargets(files []string, baseDir string, targetTriple string) (target
 		// Cache miss — compile.
 		file, info := compileFrontend(f)
 
-		ext := ""
-		if isWasmTarget(target) {
-			ext = ".wasm"
-		}
+		ext := binaryExtension(target)
 		tmp, err := os.CreateTemp("", "promise-stress-*"+ext)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)

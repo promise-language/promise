@@ -53,7 +53,8 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 | Operator dispatch | `[]`, `[]=`, `[:]`, `[:]=` as method-dispatched operators | Done | [subscript-slice-operators.md](subscript-slice-operators.md) |
 | Naming conventions | PascalCase canonical names for all non-scalar types; lowercase sugar | Done | [standard-library.md](standard-library.md#naming-conventions) |
 | C binding | Extern ABI coercion (`extern.go`), C header generation (`headergen.go`) | Done (dormant — header gen implemented but not exposed via CLI; original use case obsolete after C runtime migration) | [c-binding-architecture.md](c-binding-architecture.md) |
-| Self-contained binary | Embed gzip-compressed LLVM tools (opt, llc, lld, libLLVM.so) via `go:embed` for release builds | Done (Phase 7f, Linux x86_64) | [runtime-architecture.md](runtime-architecture.md) |
+| Self-contained binary | Embed gzip-compressed LLVM tools (opt, llc, lld, libLLVM.so) via `go:embed` for release builds | Done (Phase 7f, Linux x86_64). macOS planned (see Near-term). | [runtime-architecture.md](runtime-architecture.md) |
+| Distribution | Release binaries, install script, GitHub Actions CI/release workflows | Planned | [distribution.md](distribution.md) |
 | Yield generators | `stream[T]` functions with `yield`, LLVM presplit coroutines, `for-in` consumption | Done | — |
 | Structural interfaces | Relaxed matching (extra optional/default params, non-failable→failable, T→T?), adapter thunks, abstract factory methods with implicit Self, generic factory patterns (`T.parse(data)`) | Done | [language-design.md](language-design.md#structural-interface-satisfaction) |
 | Documentation system | `promise doc` command: extract `doc()` meta tags, emit markdown to stdout, `-signatures` compact mode, `-std` for stdlib reference | Phase 1 done (single-file doc, `-public`/`-all`/`-signatures`/`-o` flags, param/variant doc propagation, `DeclareAndDefine` early-exit sema) | [documentation-proposal.md](documentation-proposal.md) |
@@ -612,7 +613,7 @@ Generator functions: `stream[T]` return type with `yield` statements, compiled t
 
 ## Stage 9 — Module System (Phase 3 Done + Identity Redesign)
 
-Module resolution and dependency management. See [module-system-proposal.md](module-system-proposal.md) for the full design.
+Module resolution and dependency management. See [module-system.md](module-system.md) for the full design.
 
 **Phase 1 — Module Boundaries & Local Imports (done):**
 
@@ -712,6 +713,64 @@ Command-line interface. Core commands implemented; formatter planned.
   - Phase 2 (planned): directory/recursive docs, `-std`, `-expand`, index generation
   - Phase 3 (planned): `-query "has:drop"`, `-lint`, IDE integration
 - `promise fmt` — code formatter (planned)
+- `promise doctor` — environment diagnostics (planned, see below)
+
+### `promise doctor` (Planned)
+
+Inspired by `flutter doctor`: a single command that checks the entire Promise environment and reports what's working, what's missing, and how to fix it. Designed for both human troubleshooting and CI environment validation.
+
+```
+$ promise doctor
+
+Promise doctor — checking your environment
+
+[✓] Promise installation
+    Version: epoch 2026.3 (linux-amd64)
+    Home:    ~/.promise/
+    Binary:  ~/.promise/bin/promise
+    Stdlib:  ~/.promise/lib/std/ (48 files)
+
+[✓] LLVM toolchain
+    opt:  ~/.promise/bin/llvm/opt (LLVM 22.0.0, embedded)
+    llc:  ~/.promise/bin/llvm/llc (LLVM 22.0.0, embedded)
+    lld:  ~/.promise/bin/llvm/lld (LLVM 22.0.0, embedded)
+
+[✓] Build cache
+    Location: ~/.promise/cache/build/ (142 entries, 38 MB)
+    Lock:     ~/.promise/cache/build/.lock (no contention)
+
+[!] Module cache
+    Location: ~/.promise/cache/modules/
+    Warning:  no modules fetched yet (expected after first `promise build` with catalog deps)
+
+[✗] Java (optional — required for compiler development only)
+    Not found on PATH
+    Install: https://adoptium.net  or  brew install java
+
+No issues found. 1 optional tool missing.
+```
+
+Each check has three states: `[✓]` ok, `[!]` warning (works but suboptimal), `[✗]` error (broken or missing required component).
+
+**Checks performed:**
+
+| Check | What it verifies |
+|-------|-----------------|
+| Promise installation | Binary path, home dir, stdlib files present, version readable |
+| LLVM toolchain | `opt`, `llc`, `lld` (or `ld` on macOS) found and version ≥ 22; embedded vs system |
+| musl CRT | `crt1.o`, `crti.o`, `crtn.o`, `libc.a` present (Linux only) |
+| Build cache | Directory exists, `.lock` accessible, disk usage |
+| Module cache | Directory exists, reachable git hosts (optional network check) |
+| `PROMISE_HOME` | If set, verifies it points to a valid install |
+| Java | Whether `java` is on PATH (development only — needed to regenerate the ANTLR parser) |
+| macOS: Xcode CLT | Whether `xcode-select -p` returns a valid path (macOS only). Will become obsolete once `ld64.lld` is embedded in the macOS binary. |
+| PATH | Whether `~/.promise/bin` is on PATH |
+
+**Implementation notes:**
+- All checks are independent — a failure in one doesn't skip others
+- `--json` flag emits machine-readable output (for CI scripts and AI agents)
+- `--fix` flag attempts automatic fixes where safe (e.g., PATH instructions, `xcode-select --install` hint)
+- Fast: no compilation, no network requests by default; `--network` enables the git reachability check
 
 ### Stress test mode (`-stress`)
 
@@ -752,6 +811,7 @@ Test suite: 1068+ native pass, 761 WASM pass (3 skip).
 | Work | Priority |
 |------|----------|
 | ~~Global build cache~~ — **Done.** `~/.promise/cache/build/` wired into `compileAndLinkSeparate()`. `PROMISE_HOME` override. | ~~High~~ Resolved |
+| Self-contained macOS binary: embed `opt`, `llc`, `ld64.lld`, `libLLVM.dylib` via `go:embed` for darwin-amd64 and darwin-arm64 release builds — same pattern as Linux (`llvm_linux_amd64.go` → add `llvm_darwin_amd64.go` + `llvm_darwin_arm64.go`). Eliminates the Xcode CLT requirement, making macOS fully self-contained like Linux. | High |
 | CLI: `promise fmt` code formatter — Stage 10 | Medium |
 | Module system Phase 4 (catalog infrastructure) — Stage 9 | Medium |
 | Package manager (fetch, resolve, lock) — Stage 11 | Medium |

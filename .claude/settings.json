@@ -1,28 +1,32 @@
 {
-    "permissions": {
-        "allow": [
-            "Bash(make generate:*)",
-            "Bash(go build:*)",
-            "Bash(go test:*)",
-            "Bash(gofmt:*)",
-            "Bash(git -C /Users/djabi/prog/promise_lang/compiler status:*)",
-            "Bash(git -C /Users/djabi/prog/promise_lang/compiler diff:*)",
-            "Bash(git -C /Users/djabi/prog/promise_lang/compiler log:*)",
-            "Bash(git -C /Users/djabi/prog/promise_lang/compiler add:*)",
-            "Bash(sed:*)",
-            "Bash(wc:*)",
-            "Bash(./promise exec: *)",
-            "Bash(./promise test: *)",
-            "Bash(./promise run: *)",
-            "Bash(./compiler/promise run: *)",
-            "Bash(./compiler/promise exec: *)",
-            "Bash(./compiler/promise test: *)"
-        ]
-    },
-    "spinnerVerbs": {
-        "mode": "replace",
-        "verbs": [
-            "Processing"
-        ]
-    }
+  "permissions": {
+    "allow": [
+      "Bash(make generate:*)",
+      "Bash(go build:*)",
+      "Bash(go test:*)",
+      "Bash(gofmt:*)",
+      "Bash(git -C /Users/djabi/prog/promise_lang/compiler status:*)",
+      "Bash(git -C /Users/djabi/prog/promise_lang/compiler diff:*)",
+      "Bash(git -C /Users/djabi/prog/promise_lang/compiler log:*)",
+      "Bash(git -C /Users/djabi/prog/promise_lang/compiler add:*)",
+      "Bash(sed:*)",
+      "Bash(wc:*)",
+      "Bash(./promise exec: *)",
+      "Bash(./promise test: *)",
+      "Bash(./promise run: *)",
+      "Bash(./compiler/promise run: *)",
+      "Bash(./compiler/promise exec: *)",
+      "Bash(./compiler/promise test: *)",
+      "Bash(git config core.hooksPath .githooks)"
+    ],
+    "additionalDirectories": [
+      "/Users/djabi/prog2/promise_lang/.git/hooks"
+    ]
+  },
+  "spinnerVerbs": {
+    "mode": "replace",
+    "verbs": [
+      "Processing"
+    ]
+  }
 }

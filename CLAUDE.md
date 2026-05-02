@@ -16,6 +16,8 @@ Promise is a statically-typed programming language with Dart-inspired syntax and
 
 **IMPORTANT: Always use `./build` from the repo root to build the compiler. NEVER run `go build` directly — it skips resource embedding and produces a broken binary. The output is always `bin/promise`.**
 
+**Setup (once per clone):** `bin/setup.sh` — enables git hooks and local dev environment. Also runs automatically on `./build`.
+
 ```bash
 # From repo root:
 ./build                    # generate parser + embed resources + build → bin/promise
@@ -61,6 +63,8 @@ Promise test commands (use `bin/promise` from repo root):
 bin/promise test file.pr                       # default 60s timeout
 bin/promise test -timeout 30s file.pr          # custom timeout (Go duration or seconds)
 bin/promise exec -timeout 10s 'println("hi")'  # exec with timeout
+bin/promise emit-ir file.pr                    # print LLVM IR to stdout
+bin/promise emit-ir file.pr > out.ll           # save IR to file
 
 # Stress testing (flaky test detection)
 bin/promise test -stress tests/...                       # run until Ctrl+C

@@ -4,6 +4,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+
+# Ensure git hooks are configured (idempotent)
+git -C "$ROOT" config core.hooksPath .githooks 2>/dev/null || true
+
 cd "$ROOT/compiler"
 
 # Generate parser from grammar (no-op if up to date)

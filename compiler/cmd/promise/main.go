@@ -53,6 +53,7 @@ Commands:
   run       Compile and run a Promise source file
   test      Discover and run test functions
   check     Run semantic analysis (type checking)
+  emit-ir   Print generated LLVM IR to stdout
   doc       Generate documentation (file.pr or module name)
   ast       Print the AST
   exec      Execute inline Promise code
@@ -127,6 +128,12 @@ func main() {
 		_ = file
 		fmt.Printf("OK: %d types, %d objects, %d scopes\n",
 			len(info.Types), len(info.Objects), len(info.Scopes))
+	case "emit-ir":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: promise emit-ir [--target triple] <file.pr>")
+			os.Exit(1)
+		}
+		runEmitIR(os.Args[2:])
 	case "ast":
 		if len(os.Args) < 3 {
 			fmt.Fprintln(os.Stderr, "usage: promise ast <file.pr>")
@@ -202,6 +209,29 @@ func runLegacy(args []string) {
 		tree := p.CompilationUnit()
 		fmt.Println(tree.ToStringTree(nil, p))
 	}
+}
+
+// runEmitIR compiles a .pr file and prints the generated LLVM IR to stdout.
+func runEmitIR(args []string) {
+	var filename, target string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-target", "--target":
+			if i+1 < len(args) {
+				target = args[i+1]
+				i++
+			}
+		default:
+			filename = args[i]
+		}
+	}
+	if filename == "" {
+		fmt.Fprintln(os.Stderr, "usage: promise emit-ir [--target triple] <file.pr>")
+		os.Exit(1)
+	}
+	file, info := compileFrontend(filename)
+	result := codegen.Compile(file, info, target)
+	fmt.Print(result.Module.String())
 }
 
 // runBuild compiles a .pr file to an executable.

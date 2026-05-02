@@ -66,6 +66,10 @@ type Compiler struct {
 	moduleOwnedFuncs map[string]string      // IR func name → module IR prefix (for separate compilation)
 	moduleCanonical  map[string]string      // module path → IR prefix (for alias→prefix mapping)
 
+	// Instance BC codegen state
+	instanceOwnedFuncs map[string]string // IR func name → mono instance name (e.g., "Box__int")
+	cachedInstances    map[string]bool   // mono instance names whose .bc is already cached
+
 	// Loop control targets for break/continue
 	breakTarget    *ir.Block
 	continueTarget *ir.Block
@@ -338,9 +342,31 @@ func HostTargetTriple() string {
 	}
 }
 
-// Compile generates an LLVM IR module from a type-checked Promise AST.
-// If target is empty, defaults to the host platform triple.
+// CollectMonoInstances returns all concrete generic type instances for the given sema info.
+// Exported for use in main.go to enumerate instances before codegen (for cache key computation).
+func CollectMonoInstances(info *sema.Info) []*types.Instance {
+	return collectMonoInstances(info)
+}
+
+// MonoName returns the mangled name for a generic type instance (e.g., "Box__int").
+// Exported for use in main.go to construct per-instance cache keys.
+func MonoName(inst *types.Instance) string {
+	return monoName(inst)
+}
+
+// CompileWithCache is like Compile but skips method body codegen for instances
+// whose .bc files are already cached. cachedInstances maps mono instance names
+// (e.g., "Box__int") to true. Nil is treated the same as an empty map.
+func CompileWithCache(file *ast.File, info *sema.Info, target string, cachedInstances map[string]bool) *CompileResult {
+	return compile(file, info, target, cachedInstances)
+}
+
+// Compile generates LLVM IR from a type-checked Promise AST.
 func Compile(file *ast.File, info *sema.Info, target string) *CompileResult {
+	return compile(file, info, target, nil)
+}
+
+func compile(file *ast.File, info *sema.Info, target string, cachedInstances map[string]bool) *CompileResult {
 	module := ir.NewModule()
 	if target == "" {
 		target = HostTargetTriple()
@@ -364,21 +390,23 @@ func Compile(file *ast.File, info *sema.Info, target string) *CompileResult {
 		monoTypeInfoGlobals: make(map[string]*ir.Global),
 		monoValueTypeRTTI:   make(map[string]*ir.Global),
 
-		typeIDs:          make(map[*types.Named]int32),
-		nextTypeID:       1, // 0 reserved for "no type info"
-		typeInfoGlobals:  make(map[*types.Named]*ir.Global),
-		hasChildren:      make(map[*types.Named]bool),
-		vtableGlobals:    make(map[*types.Named]*ir.Global),
-		viewVtables:      make(map[viewVtableKey]*ir.Global),
-		valueTypeRTTI:    make(map[*types.Named]*ir.Global),
-		dropFlags:        make(map[string]*ir.InstAlloca),
-		dropBindings:     make(map[string]scopeBinding),
-		thunks:           make(map[string]*ir.Func),
-		file:             file,
-		moduleFuncs:      make(map[string]*ir.Func),
-		moduleExterns:    make(map[string]*ExternFunc),
-		moduleOwnedFuncs: make(map[string]string),
-		moduleCanonical:  make(map[string]string),
+		typeIDs:            make(map[*types.Named]int32),
+		nextTypeID:         1, // 0 reserved for "no type info"
+		typeInfoGlobals:    make(map[*types.Named]*ir.Global),
+		hasChildren:        make(map[*types.Named]bool),
+		vtableGlobals:      make(map[*types.Named]*ir.Global),
+		viewVtables:        make(map[viewVtableKey]*ir.Global),
+		valueTypeRTTI:      make(map[*types.Named]*ir.Global),
+		dropFlags:          make(map[string]*ir.InstAlloca),
+		dropBindings:       make(map[string]scopeBinding),
+		thunks:             make(map[string]*ir.Func),
+		file:               file,
+		moduleFuncs:        make(map[string]*ir.Func),
+		moduleExterns:      make(map[string]*ExternFunc),
+		moduleOwnedFuncs:   make(map[string]string),
+		moduleCanonical:    make(map[string]string),
+		instanceOwnedFuncs: make(map[string]string),
+		cachedInstances:    cachedInstances,
 	}
 
 	// Collect extern declarations and compute type layouts

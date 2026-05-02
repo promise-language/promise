@@ -190,6 +190,31 @@ func BuildCacheKey(implHash, compilerHash, target string, allModulePaths []strin
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// InstanceCacheKey produces a cache key for a single generic type instantiation.
+// The key is derived from:
+//   - irPrefix: the module's IR symbol prefix (disambiguates same-named types
+//     from different modules; empty for types in the main file)
+//   - monoName: the mangled instance name including type args (e.g., "Vector__int")
+//   - typeDeclHash: FNV-128a hash of the TypeDecl/EnumDecl AST — covers all
+//     fields, methods, variants, and their bodies, but NOT unrelated declarations
+//     in the same file
+//   - compilerHash: fingerprint of the compiler binary for invalidating stale entries
+//   - target: LLVM target triple
+//
+// Two instances with the same key are guaranteed to produce identical LLVM IR.
+// Changes to unrelated declarations in the same file do NOT change typeDeclHash
+// and therefore do NOT invalidate the cached .bc file.
+func InstanceCacheKey(irPrefix, monoName, typeDeclHash, compilerHash, target string) string {
+	h := fnv.New128a()
+	fmt.Fprintf(h, "instance\n")
+	fmt.Fprintf(h, "prefix:%s\n", irPrefix)
+	fmt.Fprintf(h, "mono:%s\n", monoName)
+	fmt.Fprintf(h, "decl:%s\n", typeDeclHash)
+	fmt.Fprintf(h, "compiler:%s\n", compilerHash)
+	fmt.Fprintf(h, "target:%s\n", target)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // compilerHashOnce memoizes CompilerHash — the sidecar read is cheap but
 // no reason to repeat it within a single process.
 var (

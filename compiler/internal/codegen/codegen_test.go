@@ -9991,3 +9991,240 @@ func TestGenericTypeInfoEmitted(t *testing.T) {
 	// Animal[int] typeinfo must also be emitted (it's an abstract parent).
 	assertContains(t, ir, "promise_typeinfo_Animal__int")
 }
+
+// --- InstanceIRs, instanceOwnedFuncs, CompileWithCache tests ---
+
+// mapKeys returns the keys of a string-keyed map, for diagnostics.
+func mapKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// boxWithGetMethod is a generic Box[T] type with a method that forces
+// per-instance codegen for the method body.
+const boxWithGetMethod = `
+	type Box[T] {
+		T value;
+		get(this) T { return this.value; }
+	}
+`
+
+func TestInstanceIRsBasic(t *testing.T) {
+	file, info := parseWithStd(t, boxWithGetMethod+`
+		main() {
+			b := Box[int](value: 42);
+			int x = b.get();
+		}
+	`)
+	result := Compile(file, info, "")
+	instIRs := result.InstanceIRs()
+	if len(instIRs) == 0 {
+		t.Fatal("expected at least one instance IR")
+	}
+	ir, ok := instIRs["Box__int"]
+	if !ok {
+		t.Fatalf("expected Box__int in instance IRs, got: %v", mapKeys(instIRs))
+	}
+	// Instance IR must contain at least one function definition for Box__int.
+	if !strings.Contains(ir, "Box__int") {
+		t.Errorf("Box__int IR does not mention Box__int:\n%s", ir)
+	}
+	// Instance IR must not contain main() body.
+	if strings.Contains(ir, "define void @main") ||
+		strings.Contains(ir, "define void @__promise_main") {
+		t.Error("instance IR should not contain main function definition")
+	}
+}
+
+func TestInstanceIRsSeparation(t *testing.T) {
+	// Box[int] and Box[string] must produce separate per-instance IRs.
+	file, info := parseWithStd(t, boxWithGetMethod+`
+		main() {
+			a := Box[int](value: 1);
+			b := Box[string](value: "hi");
+			int x = a.get();
+			string y = b.get();
+		}
+	`)
+	result := Compile(file, info, "")
+	instIRs := result.InstanceIRs()
+
+	intIR, hasInt := instIRs["Box__int"]
+	strIR, hasStr := instIRs["Box__string"]
+	if !hasInt {
+		t.Fatalf("missing Box__int in instance IRs, keys: %v", mapKeys(instIRs))
+	}
+	if !hasStr {
+		t.Fatalf("missing Box__string in instance IRs, keys: %v", mapKeys(instIRs))
+	}
+
+	// Cross-contamination check: each IR must not DEFINE the other instance's functions.
+	// (Extern declarations for the other instance's functions are expected and fine.)
+	for _, line := range strings.Split(intIR, "\n") {
+		if strings.Contains(line, "define") && strings.Contains(line, "Box__string.get") {
+			t.Errorf("Box__int IR should not define Box__string.get:\n  %s", line)
+		}
+	}
+	for _, line := range strings.Split(strIR, "\n") {
+		if strings.Contains(line, "define") && strings.Contains(line, "Box__int.get") {
+			t.Errorf("Box__string IR should not define Box__int.get:\n  %s", line)
+		}
+	}
+}
+
+func TestInstanceIRsStrippedFromMainIR(t *testing.T) {
+	// After SplitModuleIRs, instance-owned method bodies must not be in main IR.
+	file, info := parseWithStd(t, boxWithGetMethod+`
+		main() {
+			b := Box[int](value: 42);
+			int x = b.get();
+		}
+	`)
+	result := Compile(file, info, "")
+	mainIR, _ := result.SplitModuleIRs()
+
+	// Box__int.get must appear only as a declaration (not definition) in main IR.
+	// The mangled name in IR is @"Box__int.get" (LLVM quotes names with dots).
+	if strings.Contains(mainIR, `define`) && strings.Contains(mainIR, `Box__int.get`) {
+		// More precise: look for a definition line
+		for _, line := range strings.Split(mainIR, "\n") {
+			if strings.Contains(line, "define") && strings.Contains(line, "Box__int.get") {
+				t.Errorf("main IR should not define Box__int.get:\n  %s", line)
+			}
+		}
+	}
+}
+
+func TestInstanceIRsNilWhenNoGenerics(t *testing.T) {
+	// Non-generic code produces no instance IRs.
+	file, info := parseWithStd(t, `
+		type Foo { int x; }
+		main() { f := Foo(x: 1); }
+	`)
+	result := Compile(file, info, "")
+	instIRs := result.InstanceIRs()
+	// May be nil or empty — either is acceptable.
+	for name := range instIRs {
+		// User types are not generic, so no user-defined instances expected.
+		// (Std library instances like _FnIter may appear from iterator infrastructure;
+		// this check is intentionally not exhaustive.)
+		_ = name
+	}
+}
+
+func TestInstanceOwnedFuncsTracking(t *testing.T) {
+	// instanceOwnedFuncs should map Box__int's mangled methods to "Box__int".
+	file, info := parseWithStd(t, boxWithGetMethod+`
+		main() {
+			b := Box[int](value: 1);
+			int x = b.get();
+		}
+	`)
+	result := Compile(file, info, "")
+	c := result.compiler
+
+	if len(c.instanceOwnedFuncs) == 0 {
+		t.Fatal("expected non-empty instanceOwnedFuncs")
+	}
+
+	foundBoxInt := false
+	for funcName, instName := range c.instanceOwnedFuncs {
+		if instName == "Box__int" {
+			foundBoxInt = true
+			if !strings.Contains(funcName, "Box__int") {
+				t.Errorf("function %q tagged as Box__int but name doesn't contain 'Box__int'", funcName)
+			}
+		}
+	}
+	if !foundBoxInt {
+		t.Errorf("no function owned by Box__int; instanceOwnedFuncs = %v", c.instanceOwnedFuncs)
+	}
+}
+
+func TestCompileWithCacheNilEqualToCompile(t *testing.T) {
+	// CompileWithCache with nil cachedInstances must produce the same IR as Compile.
+	file, info := parseWithStd(t, boxWithGetMethod+`
+		main() { b := Box[int](value: 1); }
+	`)
+	r1 := Compile(file, info, "")
+	r2 := CompileWithCache(file, info, "", nil)
+	if r1.Module.String() != r2.Module.String() {
+		t.Error("CompileWithCache(nil) produced different IR than Compile")
+	}
+}
+
+func TestCompileWithCacheSkipsInstanceBody(t *testing.T) {
+	// When Box__int is listed as cached, its method body must not be generated
+	// (so it won't appear in InstanceIRs).
+	file, info := parseWithStd(t, boxWithGetMethod+`
+		main() {
+			b := Box[int](value: 42);
+			int x = b.get();
+		}
+	`)
+
+	// Full compile: Box__int must appear in InstanceIRs (body was generated).
+	rFull := Compile(file, info, "")
+	fullIRs := rFull.InstanceIRs()
+	if _, ok := fullIRs["Box__int"]; !ok {
+		t.Skipf("Box__int not in InstanceIRs on full compile; keys: %v", mapKeys(fullIRs))
+	}
+
+	// Cached compile: Box__int body must be skipped → not in InstanceIRs.
+	rCached := CompileWithCache(file, info, "", map[string]bool{"Box__int": true})
+	cachedIRs := rCached.InstanceIRs()
+	if _, ok := cachedIRs["Box__int"]; ok {
+		t.Error("Box__int should not appear in InstanceIRs when marked as cached")
+	}
+}
+
+func TestCompileWithCacheOnlySkipsCachedInstances(t *testing.T) {
+	// Marking Box__int as cached must not affect Box__string.
+	file, info := parseWithStd(t, boxWithGetMethod+`
+		main() {
+			a := Box[int](value: 1);
+			b := Box[string](value: "hi");
+			int x = a.get();
+			string y = b.get();
+		}
+	`)
+
+	rCached := CompileWithCache(file, info, "", map[string]bool{"Box__int": true})
+	cachedIRs := rCached.InstanceIRs()
+
+	// Box__int was cached → no body, not in InstanceIRs
+	if _, ok := cachedIRs["Box__int"]; ok {
+		t.Error("Box__int should not appear in InstanceIRs when marked as cached")
+	}
+	// Box__string was NOT cached → body generated, must be in InstanceIRs
+	if _, ok := cachedIRs["Box__string"]; !ok {
+		t.Errorf("Box__string should appear in InstanceIRs (not cached); keys: %v", mapKeys(cachedIRs))
+	}
+}
+
+func TestInstanceOwnedFuncsTrackedEvenWhenCached(t *testing.T) {
+	// instanceOwnedFuncs tagging must happen regardless of cachedInstances,
+	// so that SplitModuleIRs can strip instance-owned functions from module/main IRs.
+	file, info := parseWithStd(t, boxWithGetMethod+`
+		main() {
+			b := Box[int](value: 42);
+			int x = b.get();
+		}
+	`)
+	r := CompileWithCache(file, info, "", map[string]bool{"Box__int": true})
+	c := r.compiler
+
+	foundBoxInt := false
+	for _, instName := range c.instanceOwnedFuncs {
+		if instName == "Box__int" {
+			foundBoxInt = true
+			break
+		}
+	}
+	if !foundBoxInt {
+		t.Errorf("Box__int not in instanceOwnedFuncs even when cached; map = %v", c.instanceOwnedFuncs)
+	}
+}

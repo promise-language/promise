@@ -145,6 +145,7 @@ func (c *Checker) declareType(d *ast.TypeDecl) {
 	}
 	tparams := c.declareTypeParams(d.TypeParams)
 	types.NewNamed(tn, tparams)
+	c.info.DeclHashes[tn] = HashTypeDecl(d)
 }
 
 func (c *Checker) declareEnum(d *ast.EnumDecl) {
@@ -164,6 +165,7 @@ func (c *Checker) declareEnum(d *ast.EnumDecl) {
 	}
 	tparams := c.declareTypeParams(d.TypeParams)
 	types.NewEnum(tn, tparams)
+	c.info.DeclHashes[tn] = HashEnumDecl(d)
 }
 
 func (c *Checker) declareFunc(d *ast.FuncDecl) {

@@ -771,8 +771,17 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 
 			mangledName := mangleMethodName(name, md.Name, md.IsSetter)
 			fn, ok := c.funcs[mangledName]
-			if !ok || len(fn.Blocks) > 0 {
+			if !ok {
+				continue
+			}
+			// Tag as instance-owned (before body check, so SplitInstanceIRs can find it)
+			c.instanceOwnedFuncs[mangledName] = name
+			if len(fn.Blocks) > 0 {
 				continue // already defined (e.g., from main file mono pass)
+			}
+			// Skip body generation for cached instances
+			if c.cachedInstances[name] {
+				continue
 			}
 
 			c.typeSubst = subst
@@ -910,7 +919,16 @@ func (c *Compiler) defineStructuralDefaultBodies(file *ast.File, mName string, c
 		}
 		mangledName := mangleMethodName(mName, md.Name, md.IsSetter)
 		fn, ok := c.funcs[mangledName]
-		if !ok || len(fn.Blocks) > 0 {
+		if !ok {
+			continue
+		}
+		// Tag as instance-owned (before body check)
+		c.instanceOwnedFuncs[mangledName] = mName
+		if len(fn.Blocks) > 0 {
+			continue
+		}
+		// Skip body generation for cached instances
+		if c.cachedInstances[mName] {
 			continue
 		}
 

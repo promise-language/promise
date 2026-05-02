@@ -86,6 +86,7 @@ func CheckWithTarget(file *ast.File, moduleScopes map[string]*types.Scope, targe
 			ForInKinds:           make(map[*ast.ForInStmt]ForInKind),
 			GeneratorFuncs:       make(map[ast.Node]types.Type),
 			FilteredDecls:        make(map[ast.Decl]bool),
+			DeclHashes:           make(map[*types.TypeName]string),
 		},
 	}
 
@@ -134,6 +135,7 @@ func CheckForStdModule(file *ast.File, target TargetInfo) (*Info, []error) {
 			ForInKinds:           make(map[*ast.ForInStmt]ForInKind),
 			GeneratorFuncs:       make(map[ast.Node]types.Type),
 			FilteredDecls:        make(map[ast.Decl]bool),
+			DeclHashes:           make(map[*types.TypeName]string),
 		},
 	}
 
@@ -185,6 +187,7 @@ func DeclareAndDefineWithModules(file *ast.File, moduleScopes map[string]*types.
 			ForInKinds:           make(map[*ast.ForInStmt]ForInKind),
 			GeneratorFuncs:       make(map[ast.Node]types.Type),
 			FilteredDecls:        make(map[ast.Decl]bool),
+			DeclHashes:           make(map[*types.TypeName]string),
 		},
 	}
 

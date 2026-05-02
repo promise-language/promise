@@ -875,3 +875,91 @@ func TestPromiseHome(t *testing.T) {
 		t.Errorf("PromiseHome() = %q, want /tmp/test-promise-home", home)
 	}
 }
+
+// --- InstanceCacheKey tests ---
+
+func TestInstanceCacheKeyNonEmpty(t *testing.T) {
+	key := InstanceCacheKey("", "Vector__int", "decl123", "compiler456", "x86_64-linux-musl")
+	if key == "" {
+		t.Error("expected non-empty key")
+	}
+	// FNV-128a → 16 bytes → 32 hex chars
+	if len(key) != 32 {
+		t.Errorf("expected 32 hex chars, got %d: %q", len(key), key)
+	}
+}
+
+func TestInstanceCacheKeyDeterminism(t *testing.T) {
+	k1 := InstanceCacheKey("", "Vector__int", "decl", "cmp", "linux")
+	k2 := InstanceCacheKey("", "Vector__int", "decl", "cmp", "linux")
+	if k1 != k2 {
+		t.Errorf("non-deterministic: %q != %q", k1, k2)
+	}
+}
+
+func TestInstanceCacheKeyDifferentIRPrefix(t *testing.T) {
+	k1 := InstanceCacheKey("", "Vector__int", "decl", "cmp", "linux")
+	k2 := InstanceCacheKey("mymod", "Vector__int", "decl", "cmp", "linux")
+	if k1 == k2 {
+		t.Error("different irPrefix should produce different key")
+	}
+}
+
+func TestInstanceCacheKeyDifferentMonoName(t *testing.T) {
+	k1 := InstanceCacheKey("", "Vector__int", "decl", "cmp", "linux")
+	k2 := InstanceCacheKey("", "Vector__string", "decl", "cmp", "linux")
+	if k1 == k2 {
+		t.Error("different monoName should produce different key")
+	}
+}
+
+func TestInstanceCacheKeyDifferentDeclHash(t *testing.T) {
+	k1 := InstanceCacheKey("", "Vector__int", "hash1", "cmp", "linux")
+	k2 := InstanceCacheKey("", "Vector__int", "hash2", "cmp", "linux")
+	if k1 == k2 {
+		t.Error("different typeDeclHash should produce different key")
+	}
+}
+
+func TestInstanceCacheKeyDifferentCompilerHash(t *testing.T) {
+	k1 := InstanceCacheKey("", "Vector__int", "decl", "compiler1", "linux")
+	k2 := InstanceCacheKey("", "Vector__int", "decl", "compiler2", "linux")
+	if k1 == k2 {
+		t.Error("different compilerHash should produce different key")
+	}
+}
+
+func TestInstanceCacheKeyDifferentTarget(t *testing.T) {
+	k1 := InstanceCacheKey("", "Vector__int", "decl", "cmp", "x86_64-linux-musl")
+	k2 := InstanceCacheKey("", "Vector__int", "decl", "cmp", "aarch64-apple-macos14")
+	if k1 == k2 {
+		t.Error("different target should produce different key")
+	}
+}
+
+func TestInstanceCacheKeyPrefixCollisionFree(t *testing.T) {
+	// Distinct (irPrefix, monoName) pairs that share a naive concatenation must not collide.
+	// e.g., ("ab", "cdef") vs ("abc", "def") should differ.
+	k1 := InstanceCacheKey("ab", "cdef", "d", "c", "t")
+	k2 := InstanceCacheKey("abc", "def", "d", "c", "t")
+	if k1 == k2 {
+		t.Error("prefix/name boundary collision: different (irPrefix, monoName) pairs produced same key")
+	}
+}
+
+func TestInstanceCacheKeyAllDistinct(t *testing.T) {
+	// All six parameters independently affect the key.
+	base := InstanceCacheKey("pfx", "Box__int", "decl", "cmp", "linux")
+	variants := []string{
+		InstanceCacheKey("pfx2", "Box__int", "decl", "cmp", "linux"),      // irPrefix differs
+		InstanceCacheKey("pfx", "Box__string", "decl", "cmp", "linux"),    // monoName differs
+		InstanceCacheKey("pfx", "Box__int", "decl2", "cmp", "linux"),      // typeDeclHash differs
+		InstanceCacheKey("pfx", "Box__int", "decl", "cmp2", "linux"),      // compilerHash differs
+		InstanceCacheKey("pfx", "Box__int", "decl", "cmp", "wasm32-wasi"), // target differs
+	}
+	for i, k := range variants {
+		if k == base {
+			t.Errorf("variant %d produced same key as base: %q", i, base)
+		}
+	}
+}

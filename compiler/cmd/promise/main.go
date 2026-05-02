@@ -286,7 +286,7 @@ func buildToFile(args []string) (filename, outputFile, target string) {
 	}
 
 	file, info := compileFrontend(filename)
-	result := codegen.Compile(file, info, target)
+	result := codegen.CompileWithCache(file, info, target, lookupCachedInstances(info, target))
 
 	compileAndLink(result, outputFile, target, filename)
 	return filename, outputFile, target
@@ -548,7 +548,7 @@ func compileTestBinary(file *ast.File, info *sema.Info, targetTriple, sourceFile
 	if target == "" {
 		target = codegen.HostTargetTriple()
 	}
-	result := codegen.Compile(file, info, target)
+	result := codegen.CompileWithCache(file, info, target, lookupCachedInstances(info, target))
 	result.GenerateTestMain(info.Tests)
 
 	ext := binaryExtension(target)
@@ -702,7 +702,7 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string,
 	}
 
 	// Codegen with normal main (no GenerateTestMain)
-	result := codegen.Compile(file, info, target)
+	result := codegen.CompileWithCache(file, info, target, lookupCachedInstances(info, target))
 
 	ext := binaryExtension(target)
 	tmpOutput, err := os.CreateTemp("", "promise-e2e-*"+ext)
@@ -1281,10 +1281,79 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 		}
 	}
 
+	// Compile per-instance .bc files (each generic type instantiation gets its own .bc).
+	// Cache keys are derived from the type declaration hash, making them stable across
+	// unrelated source changes.
+	instIRs := result.InstanceIRs()
+	instCacheKeys := buildInstCacheKeys(result.SemaInfo(), compilerHash, target)
+
+	type instObj struct {
+		name    string
+		objFile string
+		cached  bool
+	}
+	var instObjs []instObj
+	var instWg sync.WaitGroup
+	var instMu sync.Mutex
+
+	// Pre-cached instances: body generation was skipped (CompileWithCache), so they
+	// won't appear in instIRs. Load their .bc directly from the build cache.
+	for instName, cacheKey := range instCacheKeys {
+		if _, hasBody := instIRs[instName]; hasBody {
+			continue // body was generated — handled in the goroutine loop below
+		}
+		if cachedFile := module.LookupBuildCache(cacheDir, cacheKey); cachedFile != "" {
+			instObjs = append(instObjs, instObj{name: instName, objFile: cachedFile, cached: true})
+		}
+		// If the file has vanished (e.g., concurrent promise clean), the instance
+		// won't be linked and the linker will report an undefined symbol — correct.
+	}
+
+	// Compile instances that had bodies generated (cache miss on pre-check, or
+	// caching not applicable). Results are saved to cache for future builds.
+	for instName, instIR := range instIRs {
+		instWg.Add(1)
+		go func(name, irText string) {
+			defer instWg.Done()
+
+			contentCacheKey := instCacheKeys[name] // "" if not cacheable
+
+			if contentCacheKey != "" {
+				if cachedFile := module.LookupBuildCache(cacheDir, contentCacheKey); cachedFile != "" {
+					instMu.Lock()
+					instObjs = append(instObjs, instObj{name: name, objFile: cachedFile, cached: true})
+					instMu.Unlock()
+					return
+				}
+			}
+
+			// Cache miss — compile
+			obj := compileModule(irText, "promise-inst-"+name)
+
+			if contentCacheKey != "" {
+				_ = module.SaveBuildCache(cacheDir, contentCacheKey, "", obj)
+			}
+
+			instMu.Lock()
+			instObjs = append(instObjs, instObj{name: name, objFile: obj})
+			instMu.Unlock()
+		}(instName, instIR)
+	}
+	instWg.Wait()
+
+	for _, iobj := range instObjs {
+		if !iobj.cached {
+			defer os.Remove(iobj.objFile)
+		}
+	}
+
 	// Collect all bitcode/object files for linking
 	objFiles := []string{mainObj}
 	for _, mo := range moduleObjs {
 		objFiles = append(objFiles, mo.objFile)
+	}
+	for _, iobj := range instObjs {
+		objFiles = append(objFiles, iobj.objFile)
 	}
 
 	// Link all files together (LTO linkers handle cross-module optimization)
@@ -1297,6 +1366,82 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	} else {
 		linkLinuxMulti(objFiles, target, outputFile)
 	}
+}
+
+// buildInstCacheKeys builds a map from mono instance name (e.g., "Vector__int")
+// to a stable cache key derived from the type declaration hash. Instances whose
+// origin type has no hash (e.g., native/universe types) are omitted.
+func buildInstCacheKeys(mainInfo *sema.Info, compilerHash, target string) map[string]string {
+	if mainInfo == nil {
+		return nil
+	}
+	instances := codegen.CollectMonoInstances(mainInfo)
+	result := make(map[string]string, len(instances))
+	for _, inst := range instances {
+		mName := codegen.MonoName(inst)
+		var tn *types.TypeName
+		switch o := inst.Origin().(type) {
+		case *types.Named:
+			tn = o.Obj()
+		case *types.Enum:
+			tn = o.Obj()
+		default:
+			continue
+		}
+		typeDeclHash, irPrefix := findDeclHashInInfo(tn, mainInfo)
+		if typeDeclHash == "" {
+			continue // not cacheable
+		}
+		result[mName] = module.InstanceCacheKey(irPrefix, mName, typeDeclHash, compilerHash, target)
+	}
+	return result
+}
+
+// findDeclHashInInfo looks up the type decl hash for a TypeName.
+// Searches the main info first, then all module infos.
+// Returns (hash, irPrefix) where irPrefix is "" for types in the main file.
+func findDeclHashInInfo(tn *types.TypeName, mainInfo *sema.Info) (string, string) {
+	if h, ok := mainInfo.DeclHashes[tn]; ok {
+		return h, ""
+	}
+	for _, mi := range mainInfo.ModuleInfos {
+		if mi.SemaInfo == nil {
+			continue
+		}
+		if h, ok := mi.SemaInfo.DeclHashes[tn]; ok {
+			return h, mi.EffectiveIRPrefix()
+		}
+	}
+	return "", ""
+}
+
+// lookupCachedInstances checks which generic type instances already have a
+// cached .bc file and can be skipped during codegen. Returns a map of
+// mono instance name → true for each cached instance. Returns nil when
+// instance caching doesn't apply (no modules, clang pipeline, no cache dir).
+func lookupCachedInstances(info *sema.Info, target string) map[string]bool {
+	// Instance caching only applies to the separate compilation (LTO) path.
+	if len(info.ModuleInfos) == 0 || useClangPipeline(target) {
+		return nil
+	}
+	cacheDir, _ := module.BuildCacheDir()
+	if cacheDir == "" {
+		return nil
+	}
+	keys := buildInstCacheKeys(info, module.CompilerHash(), target)
+	if len(keys) == 0 {
+		return nil
+	}
+	cached := make(map[string]bool, len(keys))
+	for name, key := range keys {
+		if module.LookupBuildCache(cacheDir, key) != "" {
+			cached[name] = true
+		}
+	}
+	if len(cached) == 0 {
+		return nil
+	}
+	return cached
 }
 
 // compileLLToObj compiles LLVM IR text to an object file via opt + llc.
@@ -3955,7 +4100,7 @@ func runExec(args []string) {
 	if target == "" {
 		target = codegen.HostTargetTriple()
 	}
-	result := codegen.Compile(file, info, target)
+	result := codegen.CompileWithCache(file, info, target, lookupCachedInstances(info, target))
 
 	// Compile and link to temp binary
 	ext := ""

@@ -165,6 +165,13 @@ type Info struct {
 	// `use X as _` (glob imports). ExportedScope uses this to exclude re-exported
 	// imported symbols — a module should only export its own declarations.
 	GlobImportedObjs map[types.Object]bool
+
+	// DeclHashes maps each declared TypeName to the hash of its AST declaration
+	// (TypeDecl or EnumDecl). The hash covers all fields, methods, variants, and
+	// annotations — everything that affects the generated IR for a generic instance.
+	// Used to key per-instance .bc cache entries so that changes to unrelated
+	// declarations in the same file do not invalidate cached instances.
+	DeclHashes map[*types.TypeName]string
 }
 
 // NarrowedVar records a single variable narrowing (T? → T).

@@ -68,7 +68,8 @@ func (r *CompileResult) SplitModuleIRs() (mainIR string, moduleIRs map[string]st
 }
 
 // saveAndStripNonOwned strips function bodies from all functions NOT owned by
-// the given module. Returns saved blocks for restoration.
+// the given module. Instance-owned functions are always stripped (they live in
+// instance .bc files, not module .bc files). Returns saved blocks for restoration.
 func saveAndStripNonOwned(c *Compiler, moduleName string) map[*ir.Func][]*ir.Block {
 	saved := make(map[*ir.Func][]*ir.Block)
 	for _, fn := range c.module.Funcs {
@@ -77,7 +78,10 @@ func saveAndStripNonOwned(c *Compiler, moduleName string) map[*ir.Func][]*ir.Blo
 		}
 		owner, isModule := c.moduleOwnedFuncs[fn.Name()]
 		if isModule && owner == moduleName {
-			continue // this function belongs to our module — keep it
+			// Also strip if this is instance-owned (instance .bc takes precedence)
+			if _, isInst := c.instanceOwnedFuncs[fn.Name()]; !isInst {
+				continue // this function belongs to our module — keep it
+			}
 		}
 		// Strip body: save blocks and clear them
 		saved[fn] = fn.Blocks
@@ -86,7 +90,8 @@ func saveAndStripNonOwned(c *Compiler, moduleName string) map[*ir.Func][]*ir.Blo
 	return saved
 }
 
-// saveAndStripOwned strips function bodies from all module-owned functions.
+// saveAndStripOwned strips function bodies from all module-owned and instance-owned
+// functions. The main .bc only contains "main code" (non-module, non-instance functions).
 // Returns saved blocks for restoration.
 func saveAndStripOwned(c *Compiler) map[*ir.Func][]*ir.Block {
 	saved := make(map[*ir.Func][]*ir.Block)
@@ -94,7 +99,9 @@ func saveAndStripOwned(c *Compiler) map[*ir.Func][]*ir.Block {
 		if len(fn.Blocks) == 0 {
 			continue
 		}
-		if _, isModule := c.moduleOwnedFuncs[fn.Name()]; isModule {
+		_, isModule := c.moduleOwnedFuncs[fn.Name()]
+		_, isInst := c.instanceOwnedFuncs[fn.Name()]
+		if isModule || isInst {
 			saved[fn] = fn.Blocks
 			fn.Blocks = nil
 		}
@@ -140,6 +147,61 @@ func stripGlobals(c *Compiler) map[*ir.Global]savedGlobal {
 		g.Init = nil
 		g.Linkage = enum.LinkageExternal
 		// Keep Immutable, TLSModel, ContentType — these are part of the type signature
+	}
+	return saved
+}
+
+// InstanceIRs returns a map of mono instance name → IR string for all instances
+// that have method bodies in the current module. Used to extract per-instance
+// .bc files for caching. Each instance IR contains:
+//   - All LLVM named struct type definitions (LLVM LTO merges identical types)
+//   - Only this instance's owned function bodies
+//   - All private globals (string constants etc.)
+//   - All non-private globals as external declarations (including vtables/typeinfos)
+//
+// Vtable and typeinfo global definitions stay in the main IR to preserve type-ID
+// consistency — instance .bc files reference them as extern declarations only.
+func (r *CompileResult) InstanceIRs() map[string]string {
+	c := r.compiler
+	if len(c.instanceOwnedFuncs) == 0 {
+		return nil
+	}
+
+	// Collect all instance names that have at least one function with a body.
+	instNames := make(map[string]bool)
+	for funcName, instName := range c.instanceOwnedFuncs {
+		if fn, ok := c.funcs[funcName]; ok && len(fn.Blocks) > 0 {
+			instNames[instName] = true
+		}
+	}
+	if len(instNames) == 0 {
+		return nil
+	}
+
+	result := make(map[string]string, len(instNames))
+	for instName := range instNames {
+		savedFuncs := saveAndStripNonOwnedInst(c, instName)
+		savedGlobals := stripGlobals(c)
+		result[instName] = r.Module.String()
+		restoreGlobals(savedGlobals)
+		restoreBlocks(savedFuncs)
+	}
+	return result
+}
+
+// saveAndStripNonOwnedInst strips function bodies from all functions NOT owned
+// by the given mono instance. Returns saved blocks for restoration.
+func saveAndStripNonOwnedInst(c *Compiler, instName string) map[*ir.Func][]*ir.Block {
+	saved := make(map[*ir.Func][]*ir.Block)
+	for _, fn := range c.module.Funcs {
+		if len(fn.Blocks) == 0 {
+			continue // already a declaration
+		}
+		if owner, isInst := c.instanceOwnedFuncs[fn.Name()]; isInst && owner == instName {
+			continue // this function belongs to our instance — keep it
+		}
+		saved[fn] = fn.Blocks
+		fn.Blocks = nil
 	}
 	return saved
 }

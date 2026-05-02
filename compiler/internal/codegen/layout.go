@@ -90,6 +90,12 @@ type CompileResult struct {
 	compiler    *Compiler // internal reference for GenerateTestMain
 }
 
+// SemaInfo returns the main sema.Info used for this compilation.
+// Used by main.go for per-instance .bc cache key computation.
+func (r *CompileResult) SemaInfo() *sema.Info {
+	return r.compiler.rootInfo
+}
+
 // primitiveRawType returns the raw LLVM type, C type string, and signedness
 // for a primitive Named type. Returns nil/""/false for non-primitives.
 func primitiveRawType(n *types.Named) (irtypes.Type, string, bool) {

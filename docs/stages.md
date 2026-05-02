@@ -1088,6 +1088,26 @@ Wired into `compileAndLinkSeparate()` in `main.go`: lookup → cache hit skips `
 Remaining work:
 - **Garbage collection**: LRU eviction by access time, max size limit, or `promise clean --build-cache` manual purge
 
+**Per-instance `.bc` caching (implemented):**
+
+Each generic type instantiation gets its own cached LLVM bitcode file, enabling fine-grained reuse when only some instances change.
+
+**TypeDecl hashing** (`sema/typehash.go`): `HashTypeDecl(td *ast.TypeDecl) string` and `HashEnumDecl(ed *ast.EnumDecl) string` compute a FNV-128a hash (32-char hex, 128 bits) of the full declaration AST — fields, method signatures + bodies, annotations, type params, inheritance parent name. Source positions and comments are excluded. This hash changes when *any* part of the type definition changes, but remains stable when unrelated declarations in the same file change. Hashes are computed in the sema declare pass and stored in `sema.Info.DeclHashes map[*types.TypeName]string`.
+
+**Cache key** (`module.InstanceCacheKey`): `FNV-128a("instance\nprefix:<irPrefix>\nmono:<monoName>\ndecl:<typeDeclHash>\ncompiler:<compilerHash>\ntarget:<target>\n")`. The `monoName` encodes the concrete type args (`Box__int`, `Map__string__Vector__int`). The `typeDeclHash` covers the entire generic type definition. The `irPrefix` scopes it to the owning module.
+
+**Pre-codegen lookup** (`lookupCachedInstances` in `main.go`): Before calling `codegen.Compile`, collects all mono instance names from `sema.Info`, builds their cache keys via `buildInstCacheKeys`, and checks the build cache (`module.LookupBuildCache`). Only active when modules are present and not using the clang pipeline. Returns `map[string]bool` of pre-cached instance names.
+
+**Codegen integration** (`codegen.CompileWithCache`): Takes a `cachedInstances map[string]bool` alongside the normal inputs. Instances in the map are registered in `instanceOwnedFuncs` (so `SplitModuleIRs` knows to strip them from other IRs) but **body generation is skipped** in `defineMonoMethods` and `defineStructuralDefaultBodies`. This means `InstanceIRs()` returns `nil` for those instances (no bodies → nothing to extract).
+
+**Post-codegen pre-cached loop** (`compileAndLinkSeparate` in `main.go`): Before the goroutine loop that compiles fresh instance IRs, a synchronous loop iterates all instance cache keys. For instances missing from `InstanceIRs()` (pre-cached), it calls `module.LookupBuildCache` and appends the cached `.bc` path directly to `instObjs`. If a cache file has vanished concurrently (e.g., `promise clean`), the linker reports an undefined symbol — correct and safe.
+
+**Instance IR extraction** (`InstanceIRs()` in `codegen/separate.go`): Post-codegen, iterates instances that *have* generated bodies. For each, calls `saveAndStripNonOwnedInst` (strips all functions not owned by this instance), `stripGlobals` (strips non-private global definitions), captures the IR string, then restores. The resulting per-instance IR contains only this instance's `define` entries; all other functions appear as `declare` (extern declarations). Vtable and typeinfo global definitions stay in the main IR — instance BCs reference them as extern.
+
+**Files:** `compiler/internal/sema/typehash.go` (HashTypeDecl/HashEnumDecl), `compiler/internal/sema/info.go` (DeclHashes field), `compiler/internal/module/cache.go` (InstanceCacheKey), `compiler/internal/codegen/compiler.go` (CompileWithCache, instanceOwnedFuncs, cachedInstances), `compiler/internal/codegen/separate.go` (InstanceIRs, saveAndStripNonOwnedInst), `compiler/cmd/promise/main.go` (lookupCachedInstances, buildInstCacheKeys, pre-cached loop in compileAndLinkSeparate)
+
+**Tests:** `compiler/internal/sema/typehash_test.go` (27 tests: HashTypeDecl/HashEnumDecl determinism, field/method/annotation/inheritance changes, DeclHashes population via full sema), `compiler/internal/module/cache_test.go` (9 tests: InstanceCacheKey properties), `compiler/internal/codegen/codegen_test.go` (9 tests: InstanceIRs separation, instanceOwnedFuncs registration, CompileWithCache skips/registers)
+
 **Module-internal test files (implemented — Option B):**
 
 `*_test.pr` files in module directories are compiled as **part of the module** during `promise test` (Go-style `_test.go` pattern). All module source files (including all `_test.pr` files) are merged into a single compilation unit, giving test functions access to private declarations without needing `use <self>`.

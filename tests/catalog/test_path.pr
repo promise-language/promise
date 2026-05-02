@@ -107,6 +107,107 @@ test_normalize_root() `test {
     assert(path.normalize("/") == "/", "normalize root");
 }
 
+// --- Security-critical: normalize traversal clamping ---
+
+test_normalize_abs_traversal_clamped() `test {
+    // Absolute paths must never escape root
+    assert(path.normalize("/..") == "/", "abs root dotdot");
+    assert(path.normalize("/../../../etc/passwd") == "/etc/passwd", "abs traversal clamped");
+    assert(path.normalize("/a/b/../../../../etc/passwd") == "/etc/passwd", "abs deep traversal clamped");
+    assert(path.normalize("/home/../../../etc/shadow") == "/etc/shadow", "abs escape attempt");
+}
+
+test_normalize_rel_traversal_preserved() `test {
+    // Relative paths preserve leading ".." — caller must validate
+    assert(path.normalize("../../etc/passwd") == "../../etc/passwd", "rel traversal preserved");
+    assert(path.normalize("../../../a/b") == "../../../a/b", "rel deep traversal");
+    assert(path.normalize("a/b/c/../../../../d") == "../d", "rel overshoot");
+}
+
+test_normalize_mixed_dots() `test {
+    assert(path.normalize("a/./b/../c/./d/../e") == "a/c/e", "mixed dots");
+    assert(path.normalize("./././.") == ".", "only dots");
+    assert(path.normalize("../../..") == "../../..", "only dotdots");
+    assert(path.normalize("a/b/../../c/../d") == "d", "consecutive dotdots");
+}
+
+test_normalize_trailing() `test {
+    assert(path.normalize("a/b/.") == "a/b", "trailing dot");
+    assert(path.normalize("a/b/..") == "a", "trailing dotdot");
+    assert(path.normalize("a/b/c/") == "a/b/c", "trailing sep");
+    assert(path.normalize("///a///b///") == "/a/b", "heavy redundant seps");
+}
+
+test_normalize_dot_prefixed_names() `test {
+    // Dot-prefixed filenames must NOT be treated as "." or ".."
+    assert(path.normalize("/home/.hidden/file") == "/home/.hidden/file", "dot-prefix not dot");
+    assert(path.normalize("/home/..config/file") == "/home/..config/file", "dotdot-prefix not dotdot");
+    assert(path.normalize(".hidden") == ".hidden", "bare dot-prefix");
+    assert(path.normalize("..hidden") == "..hidden", "bare dotdot-prefix");
+}
+
+test_normalize_idempotent() `test {
+    assert(path.normalize(path.normalize("/a/b/../c")) == "/a/c", "idempotent abs");
+    assert(path.normalize(path.normalize("../../a")) == "../../a", "idempotent rel");
+}
+
+// --- Additional edge cases ---
+
+test_join_both_empty() `test {
+    assert(path.join("", "") == "", "join both empty");
+}
+
+test_join_dotdot_child() `test {
+    assert(path.join("a", "..") == "a/..", "join dotdot child");
+    assert(path.join("a", ".") == "a/.", "join dot child");
+}
+
+test_file_name_edge_cases() `test {
+    assert(path.file_name(".") == ".", "file_name dot");
+    assert(path.file_name("..") == "..", "file_name dotdot");
+    assert(path.file_name(".hidden") == ".hidden", "file_name dot file");
+    assert(path.file_name("../../../etc/passwd") == "passwd", "file_name traversal");
+}
+
+test_parent_edge_cases() `test {
+    assert(path.parent("/") == "/", "parent root");
+    assert(path.parent(".") == ".", "parent dot");
+    assert(path.parent("..") == ".", "parent dotdot");
+    assert(path.parent("/home/user/") == "/home", "parent trailing slash");
+    assert(path.parent("../../../etc/passwd") == "../../../etc", "parent traversal");
+}
+
+test_extension_edge_cases() `test {
+    assert(path.extension(".hidden") == "", "ext dot file");
+    assert(path.extension("..hidden") == ".hidden", "ext double dot prefix");
+    assert(path.extension("file.") == ".", "ext trailing dot");
+    assert(path.extension("") == "", "ext empty");
+    assert(path.extension(".") == "", "ext single dot");
+}
+
+test_stem_edge_cases() `test {
+    assert(path.stem(".hidden") == ".hidden", "stem dot file");
+    assert(path.stem("file.") == "file", "stem trailing dot");
+    assert(path.stem("") == "", "stem empty");
+    assert(path.stem(".") == ".", "stem single dot");
+}
+
+test_split_edge_cases() `test {
+    // Single component
+    string[] r1 = path.split("file.txt");
+    assert(r1.len == 1, "split single len");
+    assert(r1[0] == "file.txt", "split single");
+
+    // Trailing separator dropped
+    string[] r2 = path.split("a/b/");
+    assert(r2.len == 2, "split trailing sep len");
+
+    // Dot-prefixed names preserved
+    string[] r3 = path.split("/home/.hidden");
+    assert(r3.len == 3, "split hidden len");
+    assert(r3[2] == ".hidden", "split hidden name");
+}
+
 test_path_separator() `test {
     // Platform.path_separator is used by join()
     string sep = Platform.path_separator;

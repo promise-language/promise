@@ -38,7 +38,16 @@
       "Bash(bin/promise test:*)",
       "Bash(promise format:*)",
       "Bash(xxd:*)",
-      "Bash(bin/promise fmt:*)"
+      "Bash(bin/promise fmt:*)",
+      "Bash(bin/promise emit-ir:*)",
+      "Bash(PROMISE_CACHE_DEBUG=1 bin/promise test tests/std/test_sort.pr)",
+      "Read(//home/djabi/go/pkg/mod/github.com/llir/llvm@v0.3.6/ir/**)",
+      "Bash(PROMISE_HOME=/tmp/nocache_test bin/promise test tests/std/test_sort.pr tests/std/test_map.pr tests/std/test_set.pr tests/std/test_iter.pr tests/std/test_parse.pr)",
+      "Bash(PROMISE_HOME=/tmp/fresh_$$ bin/promise test tests/std/test_map.pr)",
+      "Bash(PROMISE_HOME=/tmp/fresh2_$$ bin/promise test tests/std/test_sort.pr tests/std/test_map.pr tests/std/test_set.pr tests/std/test_iter.pr tests/std/test_parse.pr tests/value_types/test_nested.pr)",
+      "Bash(PROMISE_HOME=/tmp/fresh3_$$ bin/promise test tests/std/test_sort.pr tests/std/test_map.pr tests/std/test_set.pr tests/std/test_iter.pr tests/std/test_parse.pr)",
+      "Bash(PROMISE_HOME=/tmp/verify_$$ bin/verify.sh)",
+      "Bash(PROMISE_HOME=/tmp/verify2_$$ bin/verify.sh)"
     ],
     "additionalDirectories": [
       "/tmp",

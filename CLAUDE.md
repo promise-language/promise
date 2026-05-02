@@ -205,6 +205,8 @@ Methods must be declared inside the type body. Numeric literals infer as `int`/`
 - `compiler/internal/sema/info.go` — sema output (type map, objects, lambda captures)
 - `compiler/internal/sema/decl.go` — type/method/func definition passes
 - `compiler/internal/types/named.go` — Named type with fields, methods, generics, flags
+- `compiler/internal/formatter/formatter.go` — token-based source formatter (lexer + reformatter)
+- `compiler/cmd/promise/fmt.go` — `promise format` CLI wiring
 
 ## Implementation Philosophy
 

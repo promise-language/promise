@@ -67,7 +67,7 @@ promise clean                     # Remove .promise-build/ cache
 promise add <url>                 # Add dependency (planned)
 promise remove <url>              # Remove dependency (planned)
 promise update                    # Update dependencies (planned)
-promise fmt                       # Format source code (planned)
+promise format                    # Format source code
 promise lock                      # Regenerate lockfile (planned)
 ```
 

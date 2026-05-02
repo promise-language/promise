@@ -57,6 +57,7 @@ Commands:
   init      Initialize a new Promise project (creates promise.toml)
   pin       Pin a remote module to a specific commit
   catalog   Catalog operations (list)
+  format    Format Promise source files
   clean     Remove build cache (--global also clears module cache)
   install   Install Promise to PROMISE_HOME (default: ~/.promise/)
 
@@ -68,6 +69,11 @@ Options (doc):
   -all            Show all symbols including private
   -signatures     Compact mode: signatures only, no doc text
   -o <output>     Write output to file instead of stdout
+
+Options (format):
+  -w            Write result to source file instead of stdout
+  --check       Exit 1 if any file not formatted (CI mode)
+  --diff        Show unified diff of changes
 
 Options (test):
   -timeout <duration>   Per-test timeout (default: 60s)
@@ -140,6 +146,8 @@ func main() {
 		ast.Print(os.Stdout, file)
 	case "exec":
 		runExec(os.Args[2:])
+	case "format":
+		runFmt(os.Args[2:])
 	case "doc":
 		runDoc(os.Args[2:])
 	case "init":

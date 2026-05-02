@@ -729,7 +729,7 @@ Command-line interface. Core commands implemented; formatter planned.
   - Bug fix: `extractDoc()` now uses `evalStringLit()` for triple-quoted doc strings
   - Phase 2 (planned): directory/recursive docs, `-std`, `-expand`, index generation
   - Phase 3 (planned): `-query "has:drop"`, `-lint`, IDE integration
-- `promise fmt` — code formatter (planned)
+- `promise format` — code formatter (implemented, see `docs/formatting.md`)
 - `promise doctor` — environment diagnostics (planned, see below)
 
 ### `promise doctor` (Planned)
@@ -830,7 +830,7 @@ Test suite: 1554 native pass, 1549 WASM pass (5 skipped).
 | ~~Global build cache~~ — **Done.** `~/.promise/cache/build/` wired into `compileAndLinkSeparate()`. `PROMISE_HOME` override. | ~~High~~ Resolved |
 | ~~Self-contained macOS binary~~ — **Done.** `llvm_darwin_arm64.go` + `llvm_darwin_amd64.go`, `make llvm-bundle-darwin`, `./build --release` on macOS. Embeds opt, llc, lld, libLLVM.dylib. Still requires Xcode CLT for macOS SDK sysroot. | ~~High~~ Resolved |
 | Fully self-contained macOS binary — Bundle macOS SDK stubs (`libSystem.tbd` + headers) so linking doesn't require Xcode CLT. Go ships its own linker and doesn't need system tools; we could embed the minimal SDK surface needed for `-lSystem`. Would make macOS release binary zero-dependency like Linux. | Medium |
-| CLI: `promise fmt` code formatter — Stage 10 | Medium |
+| ~~CLI: `promise format` code formatter~~ — **Done.** Token-based reformatter, 2-space indent, ~130 unit tests. See `docs/formatting.md`. | ~~Medium~~ Resolved |
 | Module system Phase 4 (catalog infrastructure) — Stage 9 | Medium |
 | Package manager (fetch, resolve, lock) — Stage 11 | Medium |
 | Documentation system Phase 2 (directory/recursive docs, `-std`, index generation) | Medium |
@@ -1021,6 +1021,17 @@ Known gaps and improvements deferred from completed stages.
 |------|--------|----------|
 | ~~Default values for constructor parameters~~ — **Done.** Implemented in Stage 8n. Defaults recorded in `Info.FieldDefaults` during sema, evaluated in `genConstructorCallMono` during codegen. | 5b | ~~Medium~~ Resolved |
 | ~~Unified parameter handling for constructors and methods~~ — **Done.** Implemented in Stage 8n. Named args, defaults, optional params, and `Self` all work for constructors. | 5b | ~~Medium~~ Resolved |
+
+### Formatter (`promise format`)
+
+| Item | Priority |
+|------|----------|
+| `a & b` formats as `a &b` — binary AND (`&`) between two value-producing tokens loses space after `&`. The formatter treats `&` as a unary ref modifier before identifiers because it can't distinguish `a & b` (bitwise AND) from `Reader &r` (ownership modifier) — both are `ident & ident`. The specific case `& !d` (binary AND + unary NOT) is handled, but the general `value & value` case is not. Fix requires either context tracking (expression vs parameter) or accepting the asymmetry. | Medium |
+| Own-line comments after `;` pulled up as trailing comments — `x := 1;\n\n// comment` formats as `x := 1; // comment`. The semicolon handler calls `skipNewlines()` (consuming blank lines) then checks `next.kind == tkLineComment` to detect trailing comments, but doesn't check whether blank lines were consumed. Fix: only treat as trailing comment when `pendingNLs <= 1`. | Medium |
+| `>` operator method declaration loses space before `(` — `>(Foo other)` instead of `> (Foo other)`. The `needsSpace` rule for `tkLParen` has `if p == tkGT { return false }` to handle generic close (`Foo[T]()`), but this also matches operator method declarations. Other operators like `<`, `==`, `!=` format correctly. Ambiguity: can't distinguish generic close from operator decl without parsing. | Low |
+| Import sorting (`use` declarations sorted alphabetically) | Low |
+| Trailing comma normalization in match/enum | Low |
+| `--check` integration into `bin/verify.sh` | Low |
 
 ### Module System (Phase 4+)
 

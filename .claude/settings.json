@@ -35,7 +35,10 @@
       "Bash(xattr ~/.promise/cache/llvm/darwin-arm64/opt)",
       "Bash(xattr -cr ~/.promise/cache/llvm/darwin-arm64/)",
       "Bash(~/.promise/cache/llvm/darwin-arm64/opt --version)",
-      "Bash(bin/promise test:*)"
+      "Bash(bin/promise test:*)",
+      "Bash(promise format:*)",
+      "Bash(xxd:*)",
+      "Bash(bin/promise fmt:*)"
     ],
     "additionalDirectories": [
       "/tmp",

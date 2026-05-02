@@ -1096,7 +1096,7 @@ Run with:
 ```bash
 promise test tests/std/test_sort.pr        # single file
 promise test tests/std/                     # all std tests
-bin/e2e.sh                                  # full e2e suite
+bin/test.sh                                  # full e2e suite
 ```
 
 ### 5.4 stdAll Sync Requirement
@@ -1107,7 +1107,7 @@ When adding new types or functions to `std/*.pr`, the `stdAll` mini-stdlib in te
 - `compiler/internal/sema/sema_test.go` — sema tests
 - `compiler/internal/ownership/ownership_test.go` — ownership tests
 
-Then run `make resources` to embed the updated stdlib.
+Then run `./build` to embed the updated stdlib and rebuild.
 
 ---
 
@@ -1136,15 +1136,12 @@ Then run `make resources` to embed the updated stdlib.
 
 Before any stdlib change:
 ```bash
-cd compiler && make test              # all Go tests pass
-cd .. && bin/e2e.sh                   # all Promise tests pass
+bin/test.sh                            # all tests pass
 ```
 
 After:
 ```bash
-cd compiler && make resources && make  # rebuild with new std
-cd compiler && make test               # Go tests still pass
-cd .. && bin/e2e.sh                    # all Promise tests pass (including new ones)
+bin/test.sh                            # rebuild + all tests pass (including new ones)
 ```
 
 ---

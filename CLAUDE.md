@@ -18,9 +18,14 @@ Promise is a statically-typed programming language with Dart-inspired syntax and
 
 ```bash
 # From repo root:
-./build                # embed resources + build → bin/promise
-bin/verify.sh          # full verify: generate + format + vet + build + go test + promise test
-bin/verify.sh --clean  # same but clears caches first
+./build                    # generate parser + embed resources + build → bin/promise
+bin/test.sh                # build + run all tests (go + promise)
+bin/test.sh go             # Go unit tests only
+bin/test.sh promise        # Promise tests only
+bin/test.sh --wasm         # include wasm32-wasi target
+bin/test.sh --clean        # clear caches first
+bin/verify.sh              # format + vet + all tests (pre-commit check)
+bin/verify.sh --wasm       # include wasm target
 ```
 
 The following `make` targets run from `compiler/` and also output to `bin/promise`:

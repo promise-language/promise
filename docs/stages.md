@@ -839,6 +839,7 @@ Test suite: 1554 native pass, 761 WASM pass (3 skip).
 | ~~Generic value types~~ | — | ~~Done~~ |
 | ~~User type `format(Writer ~w)` for interpolation (desugar `"{x}"` to `x.format(~builder)`)~~ | — | ~~Low~~ Done |
 | Type argument inference | — | Low |
+| Output binary size optimization (rodata literals, dead code, LTO) | See [§Output Binary Size](#output-binary-size-optimization) | Medium |
 
 ### WASM remaining work
 
@@ -861,6 +862,66 @@ Tests: 761 pass, 0 fail, 3 skip on `wasm32-wasi` (920 native pass)
 ## Naming Convention Migration (Done)
 
 All non-scalar types now use PascalCase canonical names in the universe, stdlib, codegen, sema, ownership, and tests. Lowercase forms (`map[K,V]`, `channel[T]`, `task[T]`, `iter[T]`, `stream[T]`) are syntactic sugar resolved by the compiler. `Range[T]` is generic (no lowercase alias). See [standard-library.md](standard-library.md#naming-conventions).
+
+---
+
+## Output Binary Size Optimization
+
+The size of compiled Promise programs matters for startup speed, deployment cost, WASM module size (web pages), and embedded/serverless use cases. Currently no work has been done to optimize output binary size — the compiler emits all reachable code and allocates all literals on the heap at runtime.
+
+### Current state
+
+- **No dead code elimination**: All monomorphized functions, vtables, RTTI structs, and std methods are emitted even if unused by the program.
+- **All string literals heap-allocated**: Every string literal (`"hello"`) calls `malloc` at runtime, copies the bytes, and frees on scope exit. The literal bytes exist in the `.rodata` section of the binary *and* are duplicated on the heap.
+- **All container literals heap-allocated**: Vector and Map literals allocate heap storage and copy elements at runtime, even for compile-time-known constant data.
+- **No LTO**: Each compilation unit is self-contained; no cross-module optimization.
+
+### Proposed optimizations (phased)
+
+**Phase 1 — LLVM-level dead code elimination (low effort, high impact)**
+
+Pass `-internalize` and `-globaldce` to `opt` to strip unreferenced functions, globals, and vtable entries. This is purely an LLVM optimization pipeline change — no codegen modifications needed. Expected to significantly reduce binary size for small programs that use few std methods.
+
+Additionally, pass `-Oz` or `-Os` to `opt` instead of `-O1` for size-optimized builds (e.g., `promise build --small` or `promise build --target wasm32-wasi` default). Consider LTO (`-flto`) for cross-module dead code elimination when separate compilation is used.
+
+**Phase 2 — Read-only string literals (medium effort, high impact)**
+
+String literals whose content is known at compile time should point directly into the binary's `.rodata` section instead of heap-allocating a copy. Since strings in Promise are immutable, this is semantically transparent.
+
+Implementation sketch:
+- Emit string literal bytes as LLVM `@.str.N = private unnamed_addr constant [N x i8] c"..."` globals (already done for the raw bytes passed to `promise_string_new`).
+- Change the string value representation: instead of `{i8* heap_ptr, i64 len}` where `heap_ptr` is malloc'd, use `{i8* data_ptr, i64 len}` where `data_ptr` points to the rodata global.
+- The string "owns nothing" — no allocation, no free. The `drop`/scope-exit path for string must distinguish rodata-backed strings from heap-backed strings (e.g., a flag bit in the length field, or a separate `i1 owned` field, or comparing the pointer against the rodata range).
+- Concatenation and mutation (StringBuilder) still produce heap strings — only literals benefit.
+- Substring/slice could return rodata-backed views (no copy) if the source is rodata-backed.
+
+This eliminates malloc+memcpy+free for every string literal in the program — a significant win for programs with many string constants (format strings, error messages, CLI help text).
+
+**Phase 3 — Read-only container literals (medium effort, medium impact)**
+
+Vector and Map literals with compile-time-known constant elements could be placed in `.rodata` and used directly without heap allocation.
+
+- **Vector literals**: `[1, 2, 3]` could emit as a global `[3 x i64]` constant. The Vector header points to rodata with `len=3, cap=3`. Any mutation (push, pop, `[]=`) must COW (copy-on-write) to a heap-allocated buffer first.
+- **Map literals**: More complex. Could emit a frozen hash table in rodata. Any mutation triggers COW. May not be worth the complexity initially.
+- **Fixed-size arrays**: Already stack-allocated `[N x T]` — these could be rodata globals when all elements are constants and the array is not mutated.
+
+**Phase 4 — Monomorphization pruning (medium effort, medium impact)**
+
+Currently, all methods of a monomorphized generic type are emitted even if only some are called. Track which methods are actually referenced per monomorphization instance and only emit those. This requires a reachability analysis pass after sema (or lazy emission during codegen).
+
+**Phase 5 — Strip and section optimization (low effort, low impact)**
+
+- Strip debug info and symbol tables in release builds (`llc` flags or `llvm-strip`).
+- Merge identical constants (LLVM's `-mergefunc` and `-constmerge` passes).
+- For WASM: `wasm-opt -Oz` post-processing (Binaryen) for additional size reduction.
+
+### Size budget targets (aspirational)
+
+| Program | Current | Target | Notes |
+|---------|---------|--------|-------|
+| `main() {}` (empty) | ~20KB native, ~2KB wasm | <5KB native, <500B wasm | Dead code elimination |
+| `main() { println("hello") }` | ~25KB native, ~3KB wasm | <8KB native, <1KB wasm | + rodata strings |
+| Typical CLI tool | ~100-200KB | ~50-100KB | + mono pruning |
 
 ---
 

@@ -2629,6 +2629,9 @@ func (c *Compiler) declareFuncs(file *ast.File) {
 		if !ok {
 			continue
 		}
+		if c.info.FilteredDecls[decl] {
+			continue // excluded by `target(cond) annotation for this build target
+		}
 		if fd.Body == nil {
 			continue // extern — already handled by declareExterns
 		}
@@ -2694,6 +2697,9 @@ func (c *Compiler) defineFuncs(file *ast.File) {
 		fd, ok := decl.(*ast.FuncDecl)
 		if !ok {
 			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue // excluded by `target(cond) annotation for this build target
 		}
 		if fd.Body == nil {
 			continue // native function — no body to generate
@@ -3022,6 +3028,9 @@ func (c *Compiler) declareModuleFuncs(file *ast.File, moduleName string) {
 		if !ok || fd.Body == nil || len(fd.TypeParams) > 0 {
 			continue
 		}
+		if c.info.FilteredDecls[decl] {
+			continue // excluded by `target(cond) annotation for this build target
+		}
 		if fd.IsStd {
 			continue // std functions already compiled by main pipeline
 		}
@@ -3073,6 +3082,9 @@ func (c *Compiler) defineModuleFuncs(file *ast.File, moduleName string) {
 		fd, ok := decl.(*ast.FuncDecl)
 		if !ok || fd.Body == nil || len(fd.TypeParams) > 0 || fd.IsStd {
 			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue // excluded by `target(cond) annotation for this build target
 		}
 
 		key := moduleName + "." + fd.Name
@@ -3130,6 +3142,9 @@ func (c *Compiler) declareModuleTypeMethods(file *ast.File, moduleName string) {
 		td, ok := decl.(*ast.TypeDecl)
 		if !ok {
 			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue // excluded by `target(cond) annotation for this build target
 		}
 		if td.IsStd {
 			continue
@@ -3194,6 +3209,9 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 		td, ok := decl.(*ast.TypeDecl)
 		if !ok || td.IsStd {
 			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue // excluded by `target(cond) annotation for this build target
 		}
 		named := c.lookupNamedType(td.Name)
 		if named == nil || len(named.TypeParams()) > 0 {
@@ -3273,6 +3291,9 @@ func (c *Compiler) computeUserTypeLayouts(file *ast.File) {
 		if !ok {
 			continue
 		}
+		if c.info.FilteredDecls[decl] {
+			continue // excluded by `target(cond) annotation for this build target
+		}
 		named := c.lookupNamedType(td.Name)
 		if named == nil {
 			continue
@@ -3327,6 +3348,9 @@ func (c *Compiler) declareTypeMethods(file *ast.File) {
 		td, ok := decl.(*ast.TypeDecl)
 		if !ok {
 			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue // excluded by `target(cond) annotation for this build target
 		}
 		named := c.lookupNamedType(td.Name)
 		if named == nil {
@@ -3383,6 +3407,9 @@ func (c *Compiler) defineTypeMethods(file *ast.File) {
 		td, ok := decl.(*ast.TypeDecl)
 		if !ok {
 			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue // excluded by `target(cond) annotation for this build target
 		}
 		named := c.lookupNamedType(td.Name)
 		if named == nil {
@@ -3620,6 +3647,9 @@ func (c *Compiler) computeEnumLayouts(file *ast.File) {
 		ed, ok := decl.(*ast.EnumDecl)
 		if !ok {
 			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue // excluded by `target(cond) annotation for this build target
 		}
 		enum := c.lookupEnumType(ed.Name)
 		if enum == nil {
@@ -4012,6 +4042,9 @@ func (c *Compiler) computeVtableInfo(file *ast.File) {
 		td, ok := decl.(*ast.TypeDecl)
 		if !ok {
 			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue // excluded by `target(cond) annotation for this build target
 		}
 		named := c.lookupNamedType(td.Name)
 		if named == nil {

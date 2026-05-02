@@ -91,6 +91,13 @@ type Info struct {
 	// MethodInstances records all concrete generic method instantiations for later monomorphization.
 	MethodInstances []*MethodInstance
 
+	// FilteredDecls records top-level declarations that were excluded by a `target(cond)
+	// annotation whose condition did not match the build target.
+	// Codegen uses this to skip generating code for filtered-out declarations.
+	// Reading from a nil map is safe in Go (returns false); it is populated only
+	// when target filtering is active (non-zero TargetInfo in CheckWithTarget).
+	FilteredDecls map[ast.Decl]bool
+
 	// Tests records functions annotated with `test.
 	Tests []*types.Func
 

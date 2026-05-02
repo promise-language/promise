@@ -612,6 +612,22 @@ Generator functions: `stream[T]` return type with `yield` statements, compiled t
 
 **Deferred**: `yield*` (delegate to sub-iterator), failable generators (`stream[T]!`), stored generator values (first-class generator variables outside for-in), generator closures (capturing lambdas as generators).
 
+## Stage 8q — `\`target(cond)` Compile-Time Platform Filtering (Done)
+
+Compile-time declaration filtering via `` `target(cond) `` annotations. Allows platform-specific function/type/enum variants without preprocessor directives.
+
+**Files:** New `sema/target.go`; updates to `sema/check.go`, `sema/decl.go`, `sema/info.go`, `sema/meta.go`, `sema/sema_test.go`, `codegen/compiler.go` (11 sites), `cmd/promise/main.go`, `cmd/promise/stress.go`, `cmd/promise/doc.go`; 6 sema tests + 1 e2e test file
+
+- **Annotation**: `` `target(cond) `` on `func`, `type`, `enum` declarations. Methods not individually filterable — filter the whole type.
+- **Condition expressions**: identifiers (`linux`, `macos`, `windows`, `wasm`, `posix`, `x86_64`, `aarch64`, `arm64`), logical `!`, `||`, `&&`. `posix` is shorthand for `linux || macos`. `arm64` is an alias for `aarch64` (Apple convention).
+- **Sema**: `matchesTarget()` evaluated in declare pass (pass 1). Non-matching declarations are skipped (`FilteredDecls[d] = true`) and never inserted into scope. Define (pass 2) and check (pass 3) naturally skip filtered names since `scope.Lookup` returns nil. Zero `TargetInfo` = no filtering (all existing `sema.Check`/`CheckWithModules` callers unchanged).
+- **Host triple defaulting**: `compileFrontendForTarget(filename, "")` defaults to `codegen.HostTargetTriple()` when no explicit target is given. Without this, both `sep() \`target(linux)` and `sep() \`target(!linux)` would survive sema → redeclaration error.
+- **Codegen guard**: all 11 `for _, decl := range file.Decls` loop sites check `c.info.FilteredDecls[decl]` and skip filtered declarations. Without this, codegen would emit IR for both variants of a filtered pair → LLVM "invalid redefinition of function" error.
+- **`ParseTargetInfo(triple)`**: derives `TargetInfo{OS, Arch}` from LLVM target triple. Handles linux-musl, linux-gnu, apple/darwin/macos, windows-msvc, wasm32-wasi.
+- **Module loader**: target info flows into `moduleLoader.load()` so dependency modules also filter correctly during their own sema pass.
+- **`promise doc`**: uses zero `TargetInfo` intentionally — shows all declarations regardless of target.
+- **E2e test**: `tests/e2e/test_target_filter.pr` — function pairs filtered by `linux`/`!linux`, `posix`/`!posix`, `x86_64`/`!x86_64`, `wasm`/`!wasm`. Passes on Linux host and WASM cross-compile target.
+
 ## Stage 9 — Module System (Phase 3 Done + Identity Redesign)
 
 Module resolution and dependency management. See [module-system.md](module-system.md) for the full design.
@@ -803,9 +819,9 @@ Dependency fetching and resolution.
 
 ## What's Next
 
-The compiler pipeline (Stages 1-8p) is complete. Runtime is fully codegen-emitted LLVM IR — no C files remain. All major cross-cutting features are done: M:N scheduler (Phase 5c), WASM target (Phases 4b/5d/7a), yield generators, structural interfaces, operator dispatch, naming conventions, pure value types, documentation system (Phase 1), module system (Phase 3 done + identity redesign), stdlib expansion (math, sort, set, random catalog modules), Format/Parse infrastructure (Writer, Reader, Builder, Scanner, `to_string()`, `format(Writer ~w)!` on all primitives, `int/bool/uint/f64.parse`, `string.from_bytes`, `Vector.filled`), time measurement (Duration, Instant, sleep), and extended I/O (Closer, write_line). String pad_left/pad_right methods. Strings module `join` uses variadic params.
+The compiler pipeline (Stages 1-8q) is complete. Runtime is fully codegen-emitted LLVM IR — no C files remain. All major cross-cutting features are done: M:N scheduler (Phase 5c), WASM target (Phases 4b/5d/7a), yield generators, structural interfaces, operator dispatch, naming conventions, pure value types, documentation system (Phase 1), module system (Phase 3 done + identity redesign), stdlib expansion (math, sort, set, random catalog modules), Format/Parse infrastructure (Writer, Reader, Builder, Scanner, `to_string()`, `format(Writer ~w)!` on all primitives, `int/bool/uint/f64.parse`, `string.from_bytes`, `Vector.filled`), time measurement (Duration, Instant, sleep), extended I/O (Closer, write_line), and compile-time platform filtering (`` `target(cond) ``). String pad_left/pad_right methods. Strings module `join` uses variadic params.
 
-Test suite: 1554 native pass, 761 WASM pass (3 skip).
+Test suite: 1554 native pass, 1549 WASM pass (5 skipped).
 
 ### Near-term: Compiler Infrastructure
 

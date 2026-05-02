@@ -457,7 +457,7 @@ func runTestFile(filename string, timeout time.Duration, targetTriple string) {
 			fmt.Fprintf(os.Stderr, "[cache SKIP] %s (not cacheable)\n", filepath.Base(filename))
 		}
 	}
-	file, info := compileFrontend(filename)
+	file, info := compileFrontendForTarget(filename, targetTriple)
 
 	if info.HasExpectOutput {
 		runE2ETest(file, info, filename, timeout, start, targetTriple, cacheDir, cacheKey)
@@ -519,7 +519,7 @@ func runModuleTestFile(modDir string, timeout time.Duration, start time.Time, ta
 	}
 
 	// Cache miss — compile the module test suite.
-	file, info := compileModuleTestFrontend(modDir)
+	file, info := compileModuleTestFrontend(modDir, targetTriple)
 
 	if len(info.Tests) == 0 {
 		fmt.Println("no tests found")
@@ -2862,9 +2862,23 @@ func parseSourceFile(filename string) *ast.File {
 	return file
 }
 
-// compileFrontend runs the full frontend pipeline: parse → merge std → sema → ownership.
+// compileFrontend runs the full frontend pipeline for the host target.
 func compileFrontend(filename string) (*ast.File, *sema.Info) {
+	return compileFrontendForTarget(filename, "")
+}
+
+// compileFrontendForTarget runs the full frontend pipeline: parse → merge std → sema → ownership.
+// triple is the LLVM target triple used for `target(cond)` filtering (empty = host target).
+func compileFrontendForTarget(filename, triple string) (*ast.File, *sema.Info) {
 	file := parseSourceFile(filename)
+	// Resolve the effective target for `target(cond)` filtering.
+	// Use the host triple when none is specified so platform-conditional functions
+	// (e.g. `sep() string `target(windows)`) compile correctly without --target.
+	filterTriple := triple
+	if filterTriple == "" {
+		filterTriple = codegen.HostTargetTriple()
+	}
+	target := sema.ParseTargetInfo(filterTriple)
 
 	// Merge standard library declarations
 	stdDir := findStdDir()
@@ -2875,9 +2889,9 @@ func compileFrontend(filename string) (*ast.File, *sema.Info) {
 	}
 
 	// Load local modules from use declarations
-	moduleScopes, modInfos, depOrder := loadModuleScopes(filename, file, stdFiles)
+	moduleScopes, modInfos, depOrder := loadModuleScopes(filename, file, stdFiles, target)
 
-	info, errs := sema.CheckWithModules(file, moduleScopes)
+	info, errs := sema.CheckWithTarget(file, moduleScopes, target)
 	if modInfos != nil {
 		info.ModuleInfos = modInfos
 		info.ModuleOrder = depOrder
@@ -2999,7 +3013,8 @@ func isModuleTestFile(filename string) string {
 // source files (including *_test.pr files) into a single AST. This gives test
 // functions access to all module-private declarations without needing `use <self>`.
 // All test files in the module compile together (Go-style).
-func compileModuleTestFrontend(modDir string) (*ast.File, *sema.Info) {
+// triple is the LLVM target triple for `target(cond)` filtering (empty = no filtering).
+func compileModuleTestFrontend(modDir, triple string) (*ast.File, *sema.Info) {
 	// Read module config for name (used for self-import detection)
 	modCfg, err := module.ParseConfig(filepath.Join(modDir, "promise.toml"))
 	if err != nil {
@@ -3044,10 +3059,17 @@ func compileModuleTestFrontend(modDir string) (*ast.File, *sema.Info) {
 		merged = mergeStdDecls(merged, stdFiles)
 	}
 
-	// Load module dependencies (the module's own `use` declarations)
-	moduleScopes, modInfos, depOrder := loadModuleScopes(filepath.Join(modDir, "promise.toml"), merged, stdFiles)
+	// Resolve the effective target for `target(cond)` filtering (host when unspecified).
+	filterTriple := triple
+	if filterTriple == "" {
+		filterTriple = codegen.HostTargetTriple()
+	}
+	target := sema.ParseTargetInfo(filterTriple)
 
-	info, errs := sema.CheckWithModules(merged, moduleScopes)
+	// Load module dependencies (the module's own `use` declarations)
+	moduleScopes, modInfos, depOrder := loadModuleScopes(filepath.Join(modDir, "promise.toml"), merged, stdFiles, target)
+
+	info, errs := sema.CheckWithTarget(merged, moduleScopes, target)
 	if modInfos != nil {
 		info.ModuleInfos = modInfos
 		info.ModuleOrder = depOrder
@@ -3100,12 +3122,14 @@ type moduleLoader struct {
 	warnings []string
 	// catalog is the parsed embedded catalog manifest (nil if unavailable).
 	catalog *module.Catalog
+	// target is the build target for `target(cond)` filtering in sema.
+	target sema.TargetInfo
 }
 
 // loadModuleScopes scans use declarations for local module paths, loads each
 // module (parse + sema), and returns scopes for sema + ModuleInfos for codegen.
 // Modules are loaded recursively: if module A imports module B, B is loaded first.
-func loadModuleScopes(filename string, file *ast.File, stdFiles []*ast.File) (map[string]*types.Scope, map[string]*sema.ModuleInfo, []string) {
+func loadModuleScopes(filename string, file *ast.File, stdFiles []*ast.File, target sema.TargetInfo) (map[string]*types.Scope, map[string]*sema.ModuleInfo, []string) {
 	if len(file.Uses) == 0 {
 		return nil, nil, nil
 	}
@@ -3152,6 +3176,7 @@ func loadModuleScopes(filename string, file *ast.File, stdFiles []*ast.File) (ma
 		remoteResolved:   make(map[string]string),
 		commitPins:       commitPins,
 		catalog:          catalog,
+		target:           target,
 	}
 
 	scopes := make(map[string]*types.Scope)
@@ -3312,7 +3337,7 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 	}
 
 	// Run sema on the module with its dependency scopes
-	semaInfo, errs := sema.CheckWithModules(merged, depScopes)
+	semaInfo, errs := sema.CheckWithTarget(merged, depScopes, ml.target)
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("errors in module '%s': %v", modPath, errs[0])
 	}

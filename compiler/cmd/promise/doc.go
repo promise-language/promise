@@ -89,7 +89,7 @@ func docFrontend(filename string) (*ast.File, *sema.Info) {
 		file = mergeStdDecls(file, stdFiles)
 	}
 
-	moduleScopes, _, _ := loadModuleScopes(filename, file, stdFiles)
+	moduleScopes, _, _ := loadModuleScopes(filename, file, stdFiles, sema.TargetInfo{})
 	info, errs := sema.DeclareAndDefineWithModules(file, moduleScopes)
 	if len(errs) > 0 {
 		printFileErrors(filename, errs)

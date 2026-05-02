@@ -9634,3 +9634,172 @@ func TestStringInterpPrimitivesStillWork(t *testing.T) {
 		}
 	`)
 }
+
+// --- `target(cond) filtering tests ---
+
+// checkSourceWithTarget parses src as user code and checks with a specific target.
+// Target functions annotated `target(cond)` are only declared if cond matches target.
+func checkSourceWithTarget(t *testing.T, src, triple string) (*Info, []error) {
+	t.Helper()
+	// Build std file
+	stdFile := parseTargetTestFile(t, stdAll, "std.pr", true)
+	// Build user file
+	userFile := parseTargetTestFile(t, src, "test.pr", false)
+	// Merge: std decls first, then user decls
+	merged := make([]ast.Decl, 0, len(stdFile.Decls)+len(userFile.Decls))
+	merged = append(merged, stdFile.Decls...)
+	merged = append(merged, userFile.Decls...)
+	userFile.Decls = merged
+	return CheckWithTarget(userFile, nil, ParseTargetInfo(triple))
+}
+
+func parseTargetTestFile(t *testing.T, src, name string, isStd bool) *ast.File {
+	t.Helper()
+	input := antlr.NewInputStream(src)
+	lexer := parser.NewPromiseLexer(input)
+	lexer.RemoveErrorListeners()
+	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+	p := parser.NewPromiseParser(stream)
+	p.RemoveErrorListeners()
+	tree := p.CompilationUnit()
+	file, errs := ast.Build(name, tree)
+	if len(errs) > 0 {
+		t.Fatalf("%s AST build errors: %v", name, errs)
+	}
+	if isStd {
+		for _, d := range file.Decls {
+			switch dd := d.(type) {
+			case *ast.FuncDecl:
+				dd.IsStd = true
+			case *ast.TypeDecl:
+				dd.IsStd = true
+			case *ast.EnumDecl:
+				dd.IsStd = true
+			}
+		}
+	}
+	return file
+}
+
+func TestTargetFilterFunc(t *testing.T) {
+	src := `
+		sep() string ` + "`target(windows)" + ` { return "\\"; }
+		sep() string ` + "`target(!windows)" + ` { return "/"; }
+		main() { sep(); }
+	`
+
+	// On Linux: only the !windows variant is declared; calling sep() works.
+	infoLinux, errs := checkSourceWithTarget(t, src, "x86_64-unknown-linux-musl")
+	if len(errs) != 0 {
+		t.Fatalf("linux: unexpected errors: %v", errs)
+	}
+	_ = infoLinux
+
+	// On Windows: only the windows variant is declared; calling sep() works.
+	infoWin, errs := checkSourceWithTarget(t, src, "x86_64-pc-windows-msvc")
+	if len(errs) != 0 {
+		t.Fatalf("windows: unexpected errors: %v", errs)
+	}
+	_ = infoWin
+}
+
+func TestTargetFilterExclusion(t *testing.T) {
+	// A function with `target(wasm) — only exists on WASM.
+	// On Linux it should be absent: calling it gives "undefined".
+	src := `
+		wasm_only() string ` + "`target(wasm)" + ` { return "wasm"; }
+		main() { wasm_only(); }
+	`
+	_, errs := checkSourceWithTarget(t, src, "x86_64-unknown-linux-musl")
+	if len(errs) == 0 {
+		t.Fatal("expected error calling wasm_only() on linux, got none")
+	}
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e.Error(), "wasm_only") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'wasm_only' in errors, got: %v", errs)
+	}
+}
+
+func TestTargetFilterOrCondition(t *testing.T) {
+	// `target(linux || macos) — present on both POSIX targets, absent on Windows.
+	src := `
+		posix_thing() string ` + "`target(linux || macos)" + ` { return "posix"; }
+		main() { posix_thing(); }
+	`
+	_, errs := checkSourceWithTarget(t, src, "x86_64-unknown-linux-musl")
+	if len(errs) != 0 {
+		t.Errorf("linux: unexpected errors: %v", errs)
+	}
+	_, errs = checkSourceWithTarget(t, src, "aarch64-apple-macosx14.0.0")
+	if len(errs) != 0 {
+		t.Errorf("macos: unexpected errors: %v", errs)
+	}
+	_, errs = checkSourceWithTarget(t, src, "x86_64-pc-windows-msvc")
+	if len(errs) == 0 {
+		t.Error("windows: expected error calling posix_thing(), got none")
+	}
+}
+
+func TestTargetNoFilteringWhenTargetUnknown(t *testing.T) {
+	// Zero TargetInfo = no filtering. Both `target variants are declared.
+	// This causes a redeclaration error (both sep() variants visible).
+	src := `
+		sep() string ` + "`target(windows)" + ` { return "\\"; }
+		sep() string ` + "`target(!windows)" + ` { return "/"; }
+	`
+	file := parseTargetTestFile(t, src, "test.pr", false)
+	_, errs := CheckWithTarget(file, nil, TargetInfo{})
+	// With zero target, both variants are declared — duplicate name error.
+	if len(errs) == 0 {
+		t.Fatal("expected redeclaration error with zero TargetInfo, got none")
+	}
+}
+
+func TestParseTargetInfo(t *testing.T) {
+	tests := []struct {
+		triple   string
+		wantOS   string
+		wantArch string
+	}{
+		{"x86_64-unknown-linux-musl", "linux", "x86_64"},
+		{"x86_64-unknown-linux-gnu", "linux", "x86_64"},
+		{"x86_64-pc-windows-msvc", "windows", "x86_64"},
+		{"x86_64-apple-macosx14.0.0", "macos", "x86_64"},
+		{"aarch64-apple-macosx14.0.0", "macos", "aarch64"},
+		{"arm64-apple-macosx14.0.0", "macos", "aarch64"}, // Apple uses arm64 in their triples
+		{"wasm32-wasi", "wasm", "wasm32"},
+		{"", "", ""},
+	}
+	for _, tt := range tests {
+		ti := ParseTargetInfo(tt.triple)
+		if ti.OS != tt.wantOS {
+			t.Errorf("ParseTargetInfo(%q).OS = %q, want %q", tt.triple, ti.OS, tt.wantOS)
+		}
+		if ti.Arch != tt.wantArch {
+			t.Errorf("ParseTargetInfo(%q).Arch = %q, want %q", tt.triple, ti.Arch, tt.wantArch)
+		}
+	}
+}
+
+func TestTargetFilterArm64Alias(t *testing.T) {
+	// arm64 is Apple's name for aarch64; `target(arm64) should match aarch64 targets.
+	src := `
+		apple_thing() string ` + "`target(arm64)" + ` { return "arm"; }
+		main() { apple_thing(); }
+	`
+	_, errs := checkSourceWithTarget(t, src, "arm64-apple-macosx14.0.0")
+	if len(errs) != 0 {
+		t.Errorf("arm64 target: unexpected errors: %v", errs)
+	}
+	// On x86_64, arm64-only function should be absent.
+	_, errs = checkSourceWithTarget(t, src, "x86_64-unknown-linux-musl")
+	if len(errs) == 0 {
+		t.Error("x86_64: expected error calling arm64-only function, got none")
+	}
+}

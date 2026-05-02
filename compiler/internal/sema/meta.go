@@ -60,6 +60,7 @@ var builtinMetas = map[string][]MetaTarget{
 	"packed":       {TargetType},
 	"align":        {TargetType},
 	"extern":       {TargetFunc},
+	"target":       {TargetType, TargetEnum, TargetFunc},
 	"serializable": {TargetType, TargetEnum},
 	"public":       {TargetType, TargetField, TargetMethod, TargetFunc, TargetEnum},
 	"unsafe":       {TargetFunc, TargetMethod},

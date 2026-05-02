@@ -153,6 +153,11 @@ func (c *Checker) declareType(d *ast.TypeDecl) {
 		}
 	}
 
+	if !c.matchesTarget(d.Annotations) {
+		c.info.FilteredDecls[d] = true
+		return
+	}
+
 	tn := types.NewTypeName(tpos(d.Pos()), d.Name, nil)
 	if !c.insert(tn) {
 		return
@@ -166,6 +171,10 @@ func (c *Checker) declareEnum(d *ast.EnumDecl) {
 		c.errorf(d.Pos(), "'std' is reserved for the standard library namespace")
 		return
 	}
+	if !c.matchesTarget(d.Annotations) {
+		c.info.FilteredDecls[d] = true
+		return
+	}
 	tn := types.NewTypeName(tpos(d.Pos()), d.Name, nil)
 	if !c.insert(tn) {
 		return
@@ -177,6 +186,10 @@ func (c *Checker) declareEnum(d *ast.EnumDecl) {
 func (c *Checker) declareFunc(d *ast.FuncDecl) {
 	if !d.IsStd && d.Name == "std" {
 		c.errorf(d.Pos(), "'std' is reserved for the standard library namespace")
+		return
+	}
+	if !c.matchesTarget(d.Annotations) {
+		c.info.FilteredDecls[d] = true
 		return
 	}
 	fn := types.NewFunc(tpos(d.Pos()), d.Name, nil)

@@ -30,6 +30,7 @@ type Checker struct {
 	yieldFound        bool                    // true if at least one yield seen in current generator func
 	modules           []*types.Module         // all modules from use declarations
 	moduleScopes      map[string]*types.Scope // pre-loaded module scopes (catalog name or path → scope)
+	target            TargetInfo              // compile target for `target(cond)` filtering (zero = no filtering)
 }
 
 // selfType returns the current type as Self would resolve:
@@ -58,8 +59,17 @@ func Check(file *ast.File) (*Info, []error) {
 // CheckWithModules performs semantic analysis with pre-loaded module scopes.
 // moduleScopes maps module keys (catalog name or source path) to their exported scopes.
 func CheckWithModules(file *ast.File, moduleScopes map[string]*types.Scope) (*Info, []error) {
+	return CheckWithTarget(file, moduleScopes, TargetInfo{})
+}
+
+// CheckWithTarget performs semantic analysis with pre-loaded module scopes and a specific
+// build target. Declarations annotated with `target(cond) are filtered: declarations whose
+// condition does not match target are skipped entirely (not declared, not type-checked).
+// Use ParseTargetInfo to derive a TargetInfo from an LLVM target triple.
+func CheckWithTarget(file *ast.File, moduleScopes map[string]*types.Scope, target TargetInfo) (*Info, []error) {
 	c := &Checker{
 		moduleScopes: moduleScopes,
+		target:       target,
 		file:         file,
 		info: &Info{
 			Types:                make(map[ast.Expr]types.Type),
@@ -74,6 +84,7 @@ func CheckWithModules(file *ast.File, moduleScopes map[string]*types.Scope) (*In
 			FailableDestructures: make(map[*ast.DestructureVarDecl]bool),
 			ForInKinds:           make(map[*ast.ForInStmt]ForInKind),
 			GeneratorFuncs:       make(map[ast.Node]types.Type),
+			FilteredDecls:        make(map[ast.Decl]bool),
 		},
 	}
 

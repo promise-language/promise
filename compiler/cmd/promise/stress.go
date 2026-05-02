@@ -185,7 +185,7 @@ func compileTargets(files []string, baseDir string, targetTriple string) (target
 				continue
 			}
 			moduleTestSeen[modDir] = true
-			file, info := compileModuleTestFrontend(modDir)
+			file, info := compileModuleTestFrontend(modDir, targetTriple)
 			if len(info.Tests) == 0 {
 				continue
 			}
@@ -259,7 +259,7 @@ func compileTargets(files []string, baseDir string, targetTriple string) (target
 		}
 
 		// Cache miss — compile.
-		file, info := compileFrontend(f)
+		file, info := compileFrontendForTarget(f, targetTriple)
 
 		ext := binaryExtension(target)
 		tmp, err := os.CreateTemp("", "promise-stress-*"+ext)

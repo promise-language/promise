@@ -4,7 +4,7 @@
 
 **Promise** is a systems-aware, statically-typed programming language with Dart-inspired syntax, Rust-inspired ownership semantics, and a rich type system featuring inheritance, generics, and algebraic error handling. The toolchain (compiler + package manager) is a single Go binary called `promise`, uses ANTLR4 for parsing, and targets LLVM IR for code generation.
 
-**No macros, no conditional compilation.** All code is fully defined and understandable in the source file — there are no preprocessor directives, procedural macros, or build flags that alter semantics. This is a deliberate design choice: Promise is intended for AI agents, where hidden code generation and flag-dependent behavior create costly inference overhead. It also maximizes compiled unit reuse — a compilation unit always produces the same output, so incremental builds stay fast.
+**No macros.** There are no preprocessor directives or procedural macros — code generation is not programmable. Platform differences are handled by `` `target(cond) `` annotations that select which declarations to compile for a given target (see [Platform Filtering](#platform-filtering)). This is a deliberate design choice: Promise is intended for AI agents, where hidden code generation and flag-dependent behavior create costly inference overhead.
 
 ---
 
@@ -1754,6 +1754,7 @@ testAddition() `test {
 | `` `final `` | fields          | Immutable after construction; can only be set in `new` or `` `factory `` body (see Section 5.7) |
 | `` `factory ``| methods        | Factory constructor with `` `variant `` placement; no `this`, returns `Self` or child (see Section 5.7) |
 | `` `doc ``   | any, parameters | AST-attached documentation (see Section 8.4)      |
+| `` `target(cond) ``| types, enums, functions | Compile-time platform filtering (see Section 8.5) |
 
 User-defined metas are available through the type system at compile time for meta-programming and code generation.
 
@@ -1784,6 +1785,47 @@ divide(f64 a `doc("dividend"), f64 b `doc("divisor"))
 The parameter is a plain string. Tooling can extract structured sections (parameters, return values, errors) from the text by convention, but the language itself treats it as an opaque string. This keeps the meta simple while giving AI agents a reliable, parseable documentation source that is always in sync with the code structure.
 
 Parameter-level `` `doc `` annotations are placed after the parameter name (and before any default value), providing per-parameter documentation that is structurally bound to each parameter rather than embedded in a free-text block.
+
+### 8.5 Platform Filtering (`` `target ``) {#platform-filtering}
+
+`` `target(cond) `` is a compile-time annotation that includes or excludes a declaration based on the current build target. Only one variant of a filtered pair is compiled per target — the other is invisible to both the type checker and codegen.
+
+```promise
+// Exactly one sep() is compiled per platform
+sep() `target(linux)   { println("linux"); }
+sep() `target(!linux)  { println("non-linux"); }
+
+// posix = linux || macos
+greet() `target(posix)  { println("posix"); }
+greet() `target(!posix) { println("non-posix"); }
+
+// Platform-specific types
+type Handle `target(linux)   { int fd; }
+type Handle `target(!linux)  { int opaque; }
+```
+
+**Supported conditions:**
+
+| Identifier  | Meaning                       |
+|-------------|-------------------------------|
+| `linux`     | Linux (any triple)            |
+| `macos`     | macOS / Darwin                |
+| `windows`   | Windows (MSVC ABI)            |
+| `wasm`      | WebAssembly (wasm32-wasi)     |
+| `posix`     | `linux \|\| macos`            |
+| `x86_64`    | x86-64 architecture           |
+| `aarch64`   | AArch64 / ARM64               |
+| `arm64`     | Alias for `aarch64` (Apple convention) |
+
+Conditions can be combined with `!` (not), `||` (or), and `&&` (and).
+
+**Rules:**
+- `` `target `` applies to `type`, `enum`, and `func` declarations. Individual methods cannot be filtered — filter the whole type.
+- Without a `` `target `` annotation, a declaration is included on all targets.
+- When no explicit `--target` is given, the host platform's triple is used for filtering.
+- The `promise doc` command always shows all declarations regardless of target.
+
+This is Promise's only form of platform-specific variation. There are no preprocessor directives, `#ifdef` blocks, or build tags. Platform variants are explicit, structurally separate declarations — visible to the reader and verifiable by the type checker on the appropriate target.
 
 ---
 

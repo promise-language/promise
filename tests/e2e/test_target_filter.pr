@@ -1,0 +1,39 @@
+// Tests for `target(cond) compile-time platform filtering.
+// Only one variant of each filtered function pair is compiled per target.
+
+// On linux: sep_os prints "linux"; on non-linux: prints "non-linux"
+sep_os() `target(linux)  { println("linux"); }
+sep_os() `target(!linux) { println("non-linux"); }
+
+// posix covers linux + macos
+greet_posix() `target(posix)  { println("posix"); }
+greet_posix() `target(!posix) { println("non-posix"); }
+
+// arch-specific
+arch_label() `target(x86_64)  { println("x86_64"); }
+arch_label() `target(!x86_64) { println("non-x86_64"); }
+
+// Returns a platform-dependent int: 1 on linux, 2 otherwise
+platform_val() int `target(linux)  { return 1; }
+platform_val() int `target(!linux) { return 2; }
+
+test_platform_functions_run() `test {
+    // All these call exactly one compiled variant per target
+    sep_os();
+    greet_posix();
+    arch_label();
+}
+
+test_platform_return_value() `test {
+    v := platform_val();
+    // On linux: v==1, on wasm/macos/windows: v==2; either is correct
+    assert(v == 1 || v == 2, "expected 1 or 2");
+}
+
+// Wasm target
+wasm_only() `target(wasm)  { println("wasm"); }
+wasm_only() `target(!wasm) { println("not-wasm"); }
+
+test_wasm_variant() `test {
+    wasm_only();
+}

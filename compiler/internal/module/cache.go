@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 
 	"djabi.dev/go/promise_lang/internal/types"
@@ -188,25 +190,49 @@ func BuildCacheKey(implHash, compilerHash, target string, allModulePaths []strin
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// CompilerHash computes a hash of the compiler binary for cache invalidation.
-// When the compiler changes, all cached modules are invalidated.
+// compilerHashOnce memoizes CompilerHash — the sidecar read is cheap but
+// no reason to repeat it within a single process.
+var (
+	compilerHashOnce sync.Once
+	compilerHashVal  string
+)
+
+// CompilerHash returns a fingerprint of the compiler binary for cache
+// invalidation. Reads a pre-computed hash from a sidecar file (.promise.hash)
+// next to the binary — written by the build script after `go build`.
+// Falls back to hashing the binary if the sidecar is missing (e.g. manual
+// `go build` or installed via `go install`).
 func CompilerHash() string {
-	exe, err := os.Executable()
-	if err != nil {
-		return "unknown"
-	}
-	// Resolve symlinks
-	exe, err = filepath.EvalSymlinks(exe)
-	if err != nil {
-		return "unknown"
-	}
-	data, err := os.ReadFile(exe)
-	if err != nil {
-		return "unknown"
-	}
-	h := fnv.New128a()
-	h.Write(data)
-	return hex.EncodeToString(h.Sum(nil))
+	compilerHashOnce.Do(func() {
+		exe, err := os.Executable()
+		if err != nil {
+			compilerHashVal = "unknown"
+			return
+		}
+		exe, err = filepath.EvalSymlinks(exe)
+		if err != nil {
+			compilerHashVal = "unknown"
+			return
+		}
+		// Fast path: read sidecar hash written by ./build
+		sidecar := filepath.Join(filepath.Dir(exe), ".promise.hash")
+		if data, err := os.ReadFile(sidecar); err == nil {
+			if h := strings.TrimSpace(string(data)); h != "" {
+				compilerHashVal = h
+				return
+			}
+		}
+		// Fallback: hash the binary (slow but correct)
+		data, err := os.ReadFile(exe)
+		if err != nil {
+			compilerHashVal = "unknown"
+			return
+		}
+		h := fnv.New128a()
+		h.Write(data)
+		compilerHashVal = hex.EncodeToString(h.Sum(nil))
+	})
+	return compilerHashVal
 }
 
 // BuildCacheDir returns the build cache directory (~/.promise/cache/build/ by default).
@@ -224,13 +250,13 @@ func BuildCacheDir() (string, error) {
 	return dir, nil
 }
 
-// BuildCachePath returns the path for a cached module bitcode file in the build cache.
+// BuildCachePath returns the path for a cached .o file in the build cache.
 // Uses a two-level directory structure (first 2 hex chars of the cache key as subdirectory)
 // to avoid slow directory lookups when thousands of entries accumulate.
-// E.g., key "a3b4c5..." -> "<cacheDir>/a3/a3b4c5.bc"
+// E.g., key "a3b4c5..." -> "<cacheDir>/a3/a3b4c5...o"
 func BuildCachePath(cacheDir, cacheKey string) string {
 	subdir := cacheKey[:2]
-	return filepath.Join(cacheDir, subdir, cacheKey+".bc")
+	return filepath.Join(cacheDir, subdir, cacheKey+".o")
 }
 
 // BuildCacheInterfacePath returns the interface hash path in the build cache.
@@ -378,6 +404,178 @@ func ReadBuildCacheInterfaceHash(cacheDir, cacheKey string) string {
 		return ""
 	}
 	return string(data)
+}
+
+// --- Compiler stamp: tracks which binary populated the extraction caches ---
+
+// compilerStampFile is the filename within ~/.promise/cache/ that records which
+// compiler binary last extracted embedded resources (LLVM tools, CRT, catalog modules).
+const compilerStampFile = ".compiler_hash"
+
+// CompilerStampPath returns the path to the compiler hash stamp file.
+func CompilerStampPath() (string, error) {
+	home, err := PromiseHome()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "cache", compilerStampFile), nil
+}
+
+// compilerStamp stores size, mtime, and content hash of the compiler binary
+// that last populated the extraction caches.
+type compilerStamp struct {
+	Size  int64
+	Mtime int64 // UnixNano
+	Hash  string
+}
+
+// parseCompilerStamp parses "size mtime hash\n" from the stamp file.
+func parseCompilerStamp(data string) *compilerStamp {
+	parts := strings.Fields(strings.TrimSpace(data))
+	if len(parts) != 3 {
+		return nil
+	}
+	size, err1 := strconv.ParseInt(parts[0], 10, 64)
+	mtime, err2 := strconv.ParseInt(parts[1], 10, 64)
+	if err1 != nil || err2 != nil {
+		return nil
+	}
+	return &compilerStamp{Size: size, Mtime: mtime, Hash: parts[2]}
+}
+
+func (s *compilerStamp) String() string {
+	return fmt.Sprintf("%d %d %s", s.Size, s.Mtime, s.Hash)
+}
+
+// ReadCompilerStamp reads the stored compiler stamp from the stamp file.
+func ReadCompilerStamp() *compilerStamp {
+	path, err := CompilerStampPath()
+	if err != nil {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	return parseCompilerStamp(string(data))
+}
+
+// WriteCompilerStamp writes the compiler stamp to disk.
+// Creates parent directories if needed. Uses atomic write.
+func WriteCompilerStamp(stamp *compilerStamp) error {
+	path, err := CompilerStampPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".stamp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.WriteString(stamp.String() + "\n"); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
+// CompilerChanged checks whether the running compiler binary differs from the
+// one that last populated the extraction caches. Uses a two-level check:
+//  1. Fast path: compare file size + mtime (one stat, no reads). If both match
+//     the stamp, the binary hasn't changed.
+//  2. Slow path: size or mtime changed — read the content hash (from sidecar or
+//     by hashing the binary). If the hash matches, the binary is the same
+//     (just touched/rebuilt identically) — update the stamp's mtime.
+//     If the hash differs, the binary truly changed — caller must clear caches.
+//
+// Returns (changed, currentStamp). On first run (no stamp), changed is true.
+func CompilerChanged() (changed bool, stamp *compilerStamp) {
+	exe, err := os.Executable()
+	if err != nil {
+		return true, nil
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		return true, nil
+	}
+	fi, err := os.Stat(exe)
+	if err != nil {
+		return true, nil
+	}
+
+	curSize := fi.Size()
+	curMtime := fi.ModTime().UnixNano()
+
+	stored := ReadCompilerStamp()
+
+	// Fast path: size + mtime match → binary unchanged.
+	if stored != nil && stored.Size == curSize && stored.Mtime == curMtime {
+		return false, stored
+	}
+
+	// Slow path: metadata changed — check content hash.
+	curHash := CompilerHash()
+	if curHash == "unknown" {
+		return true, nil
+	}
+
+	stamp = &compilerStamp{Size: curSize, Mtime: curMtime, Hash: curHash}
+
+	if stored != nil && stored.Hash == curHash {
+		// Same content, different mtime (e.g. identical rebuild).
+		// Update stamp with new mtime so next check hits fast path.
+		WriteCompilerStamp(stamp)
+		return false, stamp
+	}
+
+	// Truly changed (or first run).
+	return true, stamp
+}
+
+// EmbeddedModuleCacheDir returns a persistent cache directory for an embedded
+// catalog module: ~/.promise/cache/embedded_modules/<name>/
+func EmbeddedModuleCacheDir(name string) (string, error) {
+	home, err := PromiseHome()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(home, "cache", "embedded_modules", name)
+	return dir, nil
+}
+
+// CleanEmbeddedModuleCache removes all cached embedded catalog modules.
+func CleanEmbeddedModuleCache() error {
+	home, err := PromiseHome()
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(filepath.Join(home, "cache", "embedded_modules"))
+}
+
+// CleanLLVMCache removes all cached LLVM tool extractions.
+func CleanLLVMCache() error {
+	home, err := PromiseHome()
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(filepath.Join(home, "cache", "llvm"))
+}
+
+// CleanCRTCache removes all cached CRT extractions (musl, WASM).
+func CleanCRTCache() error {
+	home, err := PromiseHome()
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(filepath.Join(home, "cache", "crt"))
 }
 
 // CleanBuildCache removes all entries from the build cache.

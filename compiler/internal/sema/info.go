@@ -46,8 +46,8 @@ type ModuleInfo struct {
 	File           *ast.File // the module's merged AST (with std decls merged in)
 	SemaInfo       *Info     // the module's sema output
 	AbsDir         string    // absolute path to module directory
-	ImplHash       string    // SHA-256 of module source files (implementation hash)
-	InterfaceHash  string    // SHA-256 of public API signatures (interface hash)
+	ImplHash       string    // FNV-128a of module source files (implementation hash)
+	InterfaceHash  string    // FNV-128a of public API signatures (interface hash)
 }
 
 // EffectiveIRPrefix returns the IR prefix to use for this module's symbols.

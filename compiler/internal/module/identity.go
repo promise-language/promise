@@ -69,8 +69,7 @@ func SanitizeIRPrefix(globalID string) string {
 	// would both sanitize to "github_com_alice_parser".
 	h := fnv.New128a()
 	h.Write([]byte(globalID))
-	raw := h.Sum(nil)
-	suffix := hex.EncodeToString(raw[:3]) // 6 hex chars
+	suffix := hex.EncodeToString(h.Sum(nil)[:3]) // 6 hex chars
 	return sanitized + "_" + suffix
 }
 

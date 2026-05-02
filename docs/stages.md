@@ -1029,6 +1029,8 @@ Known gaps and improvements deferred from completed stages.
 | ~~**Module identity redesign**~~ — **Done.** Two-layer architecture implemented: GlobalIdentity (Layer 1) + SanitizeIRPrefix (Layer 2). See implementation notes below. | ~~High~~ Resolved |
 | ~~Global content-addressable build cache~~ — **Done.** `~/.promise/cache/build/` wired into `compileAndLinkSeparate()`. Two-level dirs, atomic writes, `PROMISE_HOME` override. No local `.promise-build/` cache — global only. | ~~High~~ Resolved |
 | Catalog infrastructure and versioning (Phase 4) | Medium |
+| `promise exec` catalog module access — allow `use math;` etc. without `promise.toml` (catalog is always available) | Medium |
+| Epoch-versioned side-by-side installs — multiple Promise epochs coexist (`~/.promise/versions/<epoch>/`), each with its own binary, cache, and catalog. `~/.promise/bin/promise` symlinks to the latest (or user-selected default) epoch. Projects pin their epoch in `promise.toml`; the wrapper dispatches to the correct versioned binary. | Low |
 | Std as a regular cacheable module (remove AST-merge special case) | Low |
 | Test file structure redesign (see below) | Medium |
 
@@ -1098,6 +1100,7 @@ All non-module test files (`tests/...`) — both unit tests (`` `test ``) and E2
 - **E2E metadata**: Cached E2E test binaries have a `.bin.meta` JSON sidecar storing expected output and exclude targets, so cache hits bypass compilation while preserving output comparison semantics.
 - **Stress mode**: `compileTargets()` also checks the test binary cache before compiling, using metadata for test names and exclude lists.
 - **Remote imports**: Files with non-local `use` imports (remote URLs) are not cached (too complex to hash; none exist in the test suite currently).
+- **macOS first-run overhead**: On macOS, cached test binaries show ~0.1s/file on the first execution after cache population vs ~0.015s/file on subsequent runs (observed pattern: run 1 compile+exec ~0.5s, run 2 cached ~0.1s, run 3 cached ~0.015s). Cause not fully understood — may be macOS Gatekeeper/XProtect scanning unsigned binaries on first exec, though run 1 also executes each binary so the overhead should already be paid. Needs investigation.
 
 **Remaining TODO — file naming**: The `test_*.pr` prefix convention in `tests/` should be renamed to `*_test.pr` for consistency (e.g., `test_arithmetic.pr` → `arithmetic_test.pr`).
 

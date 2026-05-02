@@ -41,3 +41,7 @@ fi
 # Build
 mkdir -p "$ROOT/bin"
 go build -buildvcs=false $BUILD_TAGS -o "$ROOT/bin/promise" ./cmd/promise
+
+# Write compiler fingerprint sidecar. CompilerHash() reads this tiny file
+# instead of hashing the full binary (14MB dev / 60-70MB release).
+shasum -a 256 "$ROOT/bin/promise" | cut -d' ' -f1 > "$ROOT/bin/.promise.hash"

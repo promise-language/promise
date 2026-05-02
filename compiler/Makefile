@@ -71,6 +71,7 @@ build: generate resources
 endif
 	@mkdir -p $(dir $(BINARY))
 	go build -o $(BINARY) ./cmd/promise
+	@shasum -a 256 $(BINARY) | cut -d' ' -f1 > $(dir $(BINARY)).promise.hash
 
 ifeq ($(UNAME),Linux)
 test: generate resources musl-crt
@@ -154,6 +155,7 @@ ifeq ($(UNAME),Linux)
 release: generate resources musl-crt llvm-bundle
 	@mkdir -p $(dir $(BINARY))
 	go build -tags embed_llvm -o $(BINARY) ./cmd/promise
+	@shasum -a 256 $(BINARY) | cut -d' ' -f1 > $(dir $(BINARY)).promise.hash
 	@echo "Release binary: $$(du -h $(BINARY) | cut -f1) (self-contained)"
 endif
 
@@ -161,6 +163,7 @@ ifeq ($(UNAME),Darwin)
 release: generate resources llvm-bundle-darwin
 	@mkdir -p $(dir $(BINARY))
 	go build -tags embed_llvm -o $(BINARY) ./cmd/promise
+	@shasum -a 256 $(BINARY) | cut -d' ' -f1 > $(dir $(BINARY)).promise.hash
 	@echo "Release binary: $$(du -h $(BINARY) | cut -f1) (self-contained, requires macOS SDK)"
 endif
 

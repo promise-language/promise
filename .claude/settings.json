@@ -35,16 +35,11 @@
       "Bash(xattr ~/.promise/cache/llvm/darwin-arm64/opt)",
       "Bash(xattr -cr ~/.promise/cache/llvm/darwin-arm64/)",
       "Bash(~/.promise/cache/llvm/darwin-arm64/opt --version)",
-      "Bash(bin/promise test:*)",
-      "Bash(echo \"Exit: $?\")",
-      "Bash(bin/promise emit-ir:*)",
-      "Bash(wasmtime --version)",
-      "Bash(wasmtime --help)"
+      "Bash(bin/promise test:*)"
     ],
     "additionalDirectories": [
       "/tmp",
-      "~.promise",
-      "~/.promise/cache/build"
+      "~.promise"
     ]
   },
   "spinnerVerbs": {

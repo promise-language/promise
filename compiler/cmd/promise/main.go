@@ -1438,6 +1438,35 @@ func checkClangVersion(clangPath string) {
 	}
 }
 
+// --- Compiler stamp & extraction cache validity ---
+
+// ensureCacheValidOnce runs the compiler stamp check at most once per process.
+var ensureCacheValidOnce sync.Once
+
+// ensureCacheValid checks whether the running compiler binary matches the one
+// that last populated the extraction caches (LLVM tools, CRT, embedded catalog
+// modules). If the binary has changed (new build, new version), all extraction
+// caches are wiped so they will be re-populated from the current binary's
+// embedded resources. The stamp is written after cleanup so subsequent runs
+// of the same binary skip this entirely.
+func ensureCacheValid() {
+	ensureCacheValidOnce.Do(func() {
+		changed, stamp := module.CompilerChanged()
+		if !changed {
+			return
+		}
+		// Compiler binary changed — clear all extraction caches.
+		// Errors are non-fatal: worst case we re-extract on top of stale files.
+		module.CleanLLVMCache()
+		module.CleanCRTCache()
+		module.CleanEmbeddedModuleCache()
+		// Write the new stamp so the next invocation skips cleanup.
+		if stamp != nil {
+			module.WriteCompilerStamp(stamp)
+		}
+	})
+}
+
 // --- Embedded LLVM tool extraction ---
 
 // llvmExtractOnce ensures embedded LLVM tools are extracted at most once per process.
@@ -1510,6 +1539,9 @@ func ensureEmbeddedLLVM() {
 	if !hasEmbeddedLLVM {
 		return
 	}
+
+	// Ensure stale caches from a different compiler binary are cleared first.
+	ensureCacheValid()
 
 	dir, err := llvmCacheDirPath()
 	if err != nil {
@@ -2238,6 +2270,9 @@ func muslCRTValid(dir string) bool {
 // 3. Cache dir: <PROMISE_HOME>/cache/crt/{arch}/
 // 4. Extract embedded CRT to cache (first build only)
 func findMuslCRT(target string) (string, error) {
+	// Ensure stale caches from a different compiler binary are cleared first.
+	ensureCacheValid()
+
 	arch := muslArchDir(target)
 
 	// 1. Sibling of promise binary
@@ -2440,6 +2475,9 @@ func linkWasm(objFile, outputFile string) {
 // ensureWasmAllocObj extracts the embedded WASM allocator object to cache.
 // Returns the path to the .o file.
 func ensureWasmAllocObj() (string, error) {
+	// Ensure stale caches from a different compiler binary are cleared first.
+	ensureCacheValid()
+
 	promiseHome, err := module.PromiseHome()
 	if err != nil {
 		return "", fmt.Errorf("cannot determine Promise home: %v", err)
@@ -3586,18 +3624,32 @@ func (ml *moduleLoader) loadCatalog(catalogName string) (*sema.ModuleInfo, error
 	return mi, nil
 }
 
-// extractEmbeddedModule extracts an embedded catalog module from go:embed to
-// a temporary directory and returns the path. The OS cleans up temp directories
-// on reboot; for short-lived compiler invocations this is acceptable.
+// extractEmbeddedModule extracts an embedded catalog module from go:embed to a
+// persistent cache directory (~/.promise/cache/embedded_modules/<name>/).
+// The compiler stamp mechanism (ensureCacheValid) clears these when the binary
+// changes, so within a binary version the cache is always valid.
 func extractEmbeddedModule(name string) (string, error) {
+	// Ensure stale caches from a different compiler binary are cleared first.
+	ensureCacheValid()
+
 	prefix := "resources/modules/" + name
 	entries, err := embeddedModules.ReadDir(prefix)
 	if err != nil {
 		return "", fmt.Errorf("no embedded source for module '%s'", name)
 	}
 
-	tmpDir, err := os.MkdirTemp("", "promise-mod-"+name+"-")
+	cacheDir, err := module.EmbeddedModuleCacheDir(name)
 	if err != nil {
+		return "", err
+	}
+
+	// Fast path: if the directory already exists with files, reuse it.
+	// The compiler stamp guarantees these are from the current binary.
+	if info, err := os.ReadDir(cacheDir); err == nil && len(info) > 0 {
+		return cacheDir, nil
+	}
+
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		return "", err
 	}
 
@@ -3609,12 +3661,12 @@ func extractEmbeddedModule(name string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("reading embedded %s/%s: %w", name, e.Name(), err)
 		}
-		if err := os.WriteFile(filepath.Join(tmpDir, e.Name()), data, 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(cacheDir, e.Name()), data, 0644); err != nil {
 			return "", err
 		}
 	}
 
-	return tmpDir, nil
+	return cacheDir, nil
 }
 
 // overrideIdentity replaces a module's identity (GlobalIdentity + IRPrefix) and
@@ -4138,6 +4190,14 @@ func runClean(args []string) {
 		if err := module.CleanGlobalCache(); err != nil {
 			fmt.Fprintf(os.Stderr, "error cleaning module cache: %v\n", err)
 			os.Exit(1)
+		}
+		// Also clean extraction caches and stamp so next build re-extracts
+		module.CleanEmbeddedModuleCache()
+		module.CleanLLVMCache()
+		module.CleanCRTCache()
+		// Remove the compiler stamp so the next run re-populates
+		if path, err := module.CompilerStampPath(); err == nil {
+			os.Remove(path)
 		}
 		fmt.Println("Cleaned module cache")
 	}

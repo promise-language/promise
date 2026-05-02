@@ -8,8 +8,9 @@ compiler/tools/antlr-*.jar
 compiler/internal/parser/*.interp
 compiler/internal/parser/*.tokens
 
-# Compiler: binary
+# Compiler: binary + hash sidecar
 bin/promise
+bin/.promise.hash
 compiler/grammar/.antlr/PromiseLexer.interp
 compiler/grammar/.antlr/PromiseLexer.java
 compiler/grammar/.antlr/PromiseLexer.tokens

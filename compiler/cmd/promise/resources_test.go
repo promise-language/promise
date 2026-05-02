@@ -23,8 +23,8 @@ func TestResourcesFresh(t *testing.T) {
 	}
 	repoRoot := filepath.Join(filepath.Dir(thisFile), "..", "..", "..")
 
-	// Verify the repo root looks right (has std/ directory).
-	if _, err := os.Stat(filepath.Join(repoRoot, "std")); err != nil {
+	// Verify the repo root looks right (has modules/std/ directory).
+	if _, err := os.Stat(filepath.Join(repoRoot, "modules", "std")); err != nil {
 		t.Skipf("repo root not available at %s (running from installed binary?)", repoRoot)
 	}
 

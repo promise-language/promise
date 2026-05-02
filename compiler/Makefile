@@ -51,13 +51,11 @@ resources:
 	@rm -rf $(RESOURCES)/modules
 	@mkdir -p $(RESOURCES)/modules
 	@touch $(RESOURCES)/modules/.keep
-	@mkdir -p $(RESOURCES)/modules/std
-	@cp ../std/*.pr ../std/promise.toml $(RESOURCES)/modules/std/
 	@if [ -d ../modules ]; then for d in ../modules/*/; do [ -d "$$d" ] && cp -r "$${d%/}" $(RESOURCES)/modules/; done; fi
 	@rm -rf $(TESTDATA_STD)
 	@mkdir -p $(TESTDATA_STD)
-	@cp ../std/*.pr $(TESTDATA_STD)/
-	@(cd .. && find std/ modules/ catalog.toml -type f | sort | xargs sha256sum) > $(RESOURCES)/.sources.sha256
+	@cp ../modules/std/*.pr $(TESTDATA_STD)/
+	@(cd .. && find modules/ catalog.toml -type f | sort | xargs sha256sum) > $(RESOURCES)/.sources.sha256
 
 musl-crt:
 	@mkdir -p $(MUSL_CRT_DST)

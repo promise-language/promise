@@ -844,7 +844,7 @@ Known gaps and improvements deferred from completed stages.
 | Failable generators (`stream[T]!` with error propagation through yield) | Generators | Low |
 | Stored generator values (first-class generator variables outside for-in) | Generators | Low |
 | Generator closures (capturing lambdas as generators) | Generators | Low |
-| Mono type vtable/RTTI: generic instances (e.g. `ConstProducer[int]`) lack vtable and typeinfo globals — virtual dispatch crashes when a mono instance is passed as a parent type (e.g. `ConstProducer[int]` as `Producer[int]`). Non-generic children of generic parents work (vtable emitted by `emitVtableGlobals`). Fix: emit vtable/typeinfo for mono instances in `computeMonoLayouts` or a dedicated `emitMonoVtables` pass. | 8f | Medium |
+| ~~Mono type vtable/RTTI~~: **Fixed.** Added `computeMonoVtableInfo`, `emitMonoVtableGlobals`, `emitMonoTypeInfoGlobals` in `rtti.go` plus unified lookup helpers (`lookupVtableGlobal`, `lookupTypeInfoGlobal`, `lookupValueTypeRTTI`) in `compiler.go`. Constructor codegen (`expr.go`) uses these to resolve vtable/typeinfo for both mono and non-mono types. | 8f | ~~Medium~~ Resolved |
 | Devirtualization optimization (direct call when concrete type known) | 8L | Low |
 | ~~Factory `Self` return type on generic types resolves to raw `Vector` instead of monomorphized `Vector[T]`~~ — **Resolved**: `selfType()` helper returns self-instantiation (`Instance{curType, [T1, T2, ...]}`) for generic types; used in `resolveNamedType`, `checkIdentExpr`, and implicit abstract factory return | Sema | ~~Low~~ |
 | `as!` cast between u8/char crashes (extractInstancePtr on scalar) — numeric cast path doesn't cover char | Codegen | Low |

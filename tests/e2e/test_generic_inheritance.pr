@@ -264,3 +264,179 @@ test_non_generic_child_to_generic_parent() `test {
     ip := IntProducer();
     assert(accept_producer(ip) == 42, "non-generic child to generic parent");
 }
+
+// --- Assignability: generic child instance to generic parent instance ---
+
+test_generic_child_to_parent_assignability() `test {
+    cp := ConstProducer[int](value: 5);
+    assert(accept_producer(cp) == 5, "generic child instance assignability");
+
+    ip := IntProducer();
+    assert(accept_producer(ip) == 42, "non-generic child assignability");
+}
+
+// --- Polymorphic dispatch: multiple children through same parent type ---
+
+type Negator is Transformer[int] {
+    transform(int input) int {
+        return 0 - input;
+    }
+}
+
+type Tripler is Transformer[int] {
+    transform(int input) int {
+        return input * 3;
+    }
+}
+
+test_polymorphic_dispatch() `test {
+    Transformer[int] a = Doubler();
+    Transformer[int] b = Negator();
+    Transformer[int] c = Tripler();
+    assert(a.transform(4) == 8, "polymorphic doubler");
+    assert(b.transform(4) == -4, "polymorphic negator");
+    assert(c.transform(4) == 12, "polymorphic tripler");
+}
+
+// --- Virtual dispatch: multiple mono instantiations through parent ---
+
+type Adder[T] {
+    add(T a, T b) T `abstract;
+}
+
+type IntAdder is Adder[int] {
+    add(int a, int b) int { return a + b; }
+}
+
+type StrAdder is Adder[string] {
+    add(string a, string b) string { return a + b; }
+}
+
+accept_int_adder(Adder[int] a) int {
+    return a.add(10, 20);
+}
+
+accept_str_adder(Adder[string] a) string {
+    return a.add("foo", "bar");
+}
+
+test_multi_instantiation_dispatch() `test {
+    assert(accept_int_adder(IntAdder()) == 30, "int adder dispatch");
+    assert(accept_str_adder(StrAdder()) == "foobar", "str adder dispatch");
+}
+
+// --- Virtual dispatch through 3-level abstract chain ---
+
+type Shape[T] {
+    area() T `abstract;
+}
+
+type Polygon[T] is Shape[T] {
+    int sides;
+}
+
+type Square is Polygon[int] {
+    int size;
+    area() int { return this.size * this.size; }
+}
+
+type Circle is Polygon[f64] {
+    f64 radius;
+    area() f64 { return this.radius * this.radius * 3.14; }
+}
+
+accept_int_shape(Shape[int] s) int {
+    return s.area();
+}
+
+test_deep_chain_virtual_dispatch() `test {
+    sq := Square(sides: 4, size: 5);
+    assert(accept_int_shape(sq) == 25, "deep chain virtual dispatch");
+}
+
+// --- is-check: non-generic child against parent origin ---
+
+test_is_check_non_generic_child() `test {
+    Producer[int] p = ConstProducer[int](value: 10);
+    assert(p is Producer, "mono instance is parent");
+}
+
+// --- is-check: non-generic child of generic parent ---
+
+test_is_check_nongeneric_child_of_generic_parent() `test {
+    Producer[int] p = IntProducer();
+    assert(p is IntProducer, "nongeneric child is concrete type");
+    assert(p is Producer, "nongeneric child is parent");
+}
+
+// --- Virtual dispatch: override in mono child ---
+
+accept_greeter(Greeter[int] g) string {
+    return g.greet();
+}
+
+test_override_virtual_dispatch() `test {
+    Greeter[int] plain = Greeter[int](name: 1);
+    Greeter[int] fancy = FancyGreeter[int](name: 2);
+    assert(accept_greeter(plain) == "hello", "parent dispatch");
+    assert(accept_greeter(fancy) == "greetings", "override dispatch");
+}
+
+// --- Partial type arg application with virtual dispatch ---
+
+accept_kvpair(KVPair[int, string] kv) string {
+    return kv.get_val();
+}
+
+test_partial_app_virtual_dispatch() `test {
+    kv := IntKV[string](key: 1, val: "one");
+    assert(accept_kvpair(kv) == "one", "partial app virtual dispatch");
+}
+
+// --- Virtual dispatch: generic child instance with own methods ---
+
+accept_animal(Animal[int] a) int {
+    return a.get_id();
+}
+
+test_inherited_method_virtual_dispatch() `test {
+    d := Dog[int](id: 9, breed: "pug");
+    assert(accept_animal(d) == 9, "child dispatched through parent");
+}
+
+// --- Transitive virtual dispatch: GLeaf[T] → GBase[T] ---
+
+accept_gbase(GBase[int] g) int {
+    return g.fetch();
+}
+
+test_transitive_virtual_dispatch() `test {
+    g := GLeaf[int](val: 42);
+    assert(accept_gbase(g) == 42, "transitive generic virtual dispatch");
+}
+
+// --- Multiple mono children of same generic parent, dispatched polymorphically ---
+
+type ConstTransformer is Transformer[int] {
+    int offset;
+    transform(int input) int {
+        return input + this.offset;
+    }
+}
+
+test_mixed_child_polymorphic_dispatch() `test {
+    Transformer[int] a = Doubler();
+    Transformer[int] b = ConstTransformer(offset: 100);
+    assert(accept_transformer(a) == 10, "non-generic child dispatch");
+    assert(accept_transformer(b) == 105, "const child dispatch");
+}
+
+// --- Generic mono child dispatched alongside non-generic child ---
+
+test_mono_and_nongeneric_siblings() `test {
+    // ConstProducer[int] (mono) and IntProducer (non-generic) both implement Producer[int]
+    Producer[int] a = ConstProducer[int](value: 99);
+    Producer[int] b = IntProducer();
+    assert(a.produce() == 99, "mono sibling dispatch");
+    assert(b.produce() == 42, "non-generic sibling dispatch");
+}

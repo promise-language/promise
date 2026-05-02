@@ -1129,13 +1129,9 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 	variantFieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	variantPtrType := layout.Instance.Fields[0].LLVMType.(*irtypes.PointerType)
-	if named != nil {
-		if tiGlobal, ok := c.typeInfoGlobals[named]; ok {
-			tiPtr := c.block.NewBitCast(tiGlobal, variantPtrType)
-			c.block.NewStore(tiPtr, variantFieldPtr)
-		} else {
-			c.block.NewStore(constant.NewNull(variantPtrType), variantFieldPtr)
-		}
+	if tiGlobal := c.lookupTypeInfoGlobal(typ); tiGlobal != nil {
+		tiPtr := c.block.NewBitCast(tiGlobal, variantPtrType)
+		c.block.NewStore(tiPtr, variantFieldPtr)
 	} else {
 		c.block.NewStore(constant.NewNull(variantPtrType), variantFieldPtr)
 	}
@@ -1196,7 +1192,7 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 			// Ok path: build value struct and wrap
 			c.block = okBlock
 			var vtablePtr2 value.Value
-			if vtGlobal, ok := c.vtableGlobals[named]; ok && vtGlobal != nil {
+			if vtGlobal := c.lookupVtableGlobal(typ); vtGlobal != nil {
 				vtablePtr2 = constant.NewBitCast(vtGlobal, irtypes.I8Ptr)
 			} else {
 				vtablePtr2 = constant.NewNull(irtypes.I8Ptr)
@@ -1284,7 +1280,7 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 
 	// Build value struct: { vtable_ptr, instance_ptr }
 	var vtablePtr value.Value
-	if vtGlobal, ok := c.vtableGlobals[named]; ok && vtGlobal != nil {
+	if vtGlobal := c.lookupVtableGlobal(typ); vtGlobal != nil {
 		vtablePtr = constant.NewBitCast(vtGlobal, irtypes.I8Ptr)
 	} else {
 		vtablePtr = constant.NewNull(irtypes.I8Ptr)
@@ -1304,14 +1300,14 @@ func (c *Compiler) genValueTypeConstructor(e *ast.CallExpr, named *types.Named, 
 	var val value.Value = constant.NewUndef(valueStructType)
 
 	// Field 0: vtable pointer
-	if vtGlobal, ok := c.vtableGlobals[named]; ok && vtGlobal != nil {
+	if vtGlobal := c.lookupVtableGlobal(typ); vtGlobal != nil {
 		val = c.block.NewInsertValue(val, constant.NewBitCast(vtGlobal, irtypes.I8Ptr), 0)
 	} else {
 		val = c.block.NewInsertValue(val, constant.NewNull(irtypes.I8Ptr), 0)
 	}
 
 	// Field 1: RTTI pointer (global instance singleton)
-	if rttiGlobal, ok := c.valueTypeRTTI[named]; ok {
+	if rttiGlobal := c.lookupValueTypeRTTI(typ); rttiGlobal != nil {
 		rttiPtr := c.block.NewBitCast(rttiGlobal, layout.Value.Fields[1].LLVMType)
 		val = c.block.NewInsertValue(val, rttiPtr, 1)
 	} else {
@@ -3746,14 +3742,9 @@ func (c *Compiler) genMapConstructor(inst *types.Instance) value.Value {
 	variantFieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	variantPtrType := layout.Instance.Fields[0].LLVMType.(*irtypes.PointerType)
-	named := extractNamed(inst)
-	if named != nil {
-		if tiGlobal, ok := c.typeInfoGlobals[named]; ok {
-			tiPtr := c.block.NewBitCast(tiGlobal, variantPtrType)
-			c.block.NewStore(tiPtr, variantFieldPtr)
-		} else {
-			c.block.NewStore(constant.NewNull(variantPtrType), variantFieldPtr)
-		}
+	if tiGlobal := c.lookupTypeInfoGlobal(inst); tiGlobal != nil {
+		tiPtr := c.block.NewBitCast(tiGlobal, variantPtrType)
+		c.block.NewStore(tiPtr, variantFieldPtr)
 	} else {
 		c.block.NewStore(constant.NewNull(variantPtrType), variantFieldPtr)
 	}
@@ -3778,12 +3769,8 @@ func (c *Compiler) genMapConstructor(inst *types.Instance) value.Value {
 
 	// Build value struct { vtable_ptr, instance_ptr }
 	var vtablePtr value.Value
-	if named != nil {
-		if vtableGlobal := c.vtableGlobals[named]; vtableGlobal != nil {
-			vtablePtr = c.block.NewBitCast(vtableGlobal, irtypes.I8Ptr)
-		} else {
-			vtablePtr = constant.NewNull(irtypes.I8Ptr)
-		}
+	if vtableGlobal := c.lookupVtableGlobal(inst); vtableGlobal != nil {
+		vtablePtr = c.block.NewBitCast(vtableGlobal, irtypes.I8Ptr)
 	} else {
 		vtablePtr = constant.NewNull(irtypes.I8Ptr)
 	}

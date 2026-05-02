@@ -87,3 +87,4 @@ Phase A first (generic inheritance — done), then Phase B (method generics — 
 | Bug | Scope | Status |
 |-----|-------|--------|
 | Failable `? e { ... }` handler phi node type mismatch on method calls — the phi node in the merge block has a type mismatch between the success path (value type) and the handler path (recovery value). Discovered during method generics work but affects all methods, not just generic ones. | codegen | Open |
+| ~~Mono type vtable/RTTI~~ — generic instances lacked vtable and typeinfo globals, causing virtual dispatch crashes when passed as parent types. Fixed by adding `computeMonoVtableInfo`, `emitMonoVtableGlobals`, `emitMonoTypeInfoGlobals` and unified lookup helpers. | codegen/rtti | **Fixed** |

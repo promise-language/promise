@@ -9391,6 +9391,177 @@ func TestGenericInheritanceForwardedTypeParams(t *testing.T) {
 	assertContains(t, ir, "Base__int")
 }
 
+func TestMonoTypeVtableEmission(t *testing.T) {
+	ir := generateIR(t, `
+		type Producer[T] {
+			produce() T `+"`"+`abstract;
+		}
+		type ConstProducer[T] is Producer[T] {
+			T value;
+			produce() T { return this.value; }
+		}
+		accept_producer(Producer[int] p) int {
+			return p.produce();
+		}
+		main() {
+			cp := ConstProducer[int](value: 5);
+			int x = accept_producer(cp);
+		}
+	`)
+	// Mono vtable and typeinfo should be emitted for ConstProducer__int
+	assertContains(t, ir, "promise_vtable_ConstProducer__int")
+	assertContains(t, ir, "promise_typeinfo_ConstProducer__int")
+	// The vtable should contain the mono method pointer
+	assertContains(t, ir, "ConstProducer__int.produce")
+}
+
+func TestMonoVtableVirtualDispatchIR(t *testing.T) {
+	ir := generateIR(t, `
+		type Shape[T] {
+			area() T `+"`"+`abstract;
+		}
+		type Circle[T] is Shape[T] {
+			T radius;
+			area() T { return this.radius; }
+		}
+		accept_shape(Shape[int] s) int {
+			return s.area();
+		}
+		main() {
+			c := Circle[int](radius: 5);
+			int x = accept_shape(c);
+		}
+	`)
+	// Vtable should exist for both parent and child mono instances
+	assertContains(t, ir, "promise_vtable_Circle__int")
+	assertContains(t, ir, "promise_vtable_Shape__int")
+	// accept_shape should do virtual dispatch (load from vtable, indirect call)
+	assertContains(t, ir, "promise_vtable_Shape__int")
+	// Mono method should be defined
+	assertContains(t, ir, "Circle__int.area")
+}
+
+func TestMultipleMonoVtablesDistinct(t *testing.T) {
+	ir := generateIR(t, `
+		type Producer[T] {
+			produce() T `+"`"+`abstract;
+		}
+		type ConstProducer[T] is Producer[T] {
+			T value;
+			produce() T { return this.value; }
+		}
+		use_int(Producer[int] p) int { return p.produce(); }
+		use_str(Producer[string] p) string { return p.produce(); }
+		main() {
+			ci := ConstProducer[int](value: 1);
+			cs := ConstProducer[string](value: "x");
+			int i = use_int(ci);
+			string s = use_str(cs);
+		}
+	`)
+	// Separate vtables for int and string instantiations
+	assertContains(t, ir, "promise_vtable_ConstProducer__int")
+	assertContains(t, ir, "promise_vtable_ConstProducer__string")
+	assertContains(t, ir, "promise_typeinfo_ConstProducer__int")
+	assertContains(t, ir, "promise_typeinfo_ConstProducer__string")
+	// Separate methods
+	assertContains(t, ir, "ConstProducer__int.produce")
+	assertContains(t, ir, "ConstProducer__string.produce")
+}
+
+func TestMonoVtableInheritedMethodResolution(t *testing.T) {
+	ir := generateIR(t, `
+		type Base[T] {
+			T val;
+			get() T { return this.val; }
+		}
+		type Mid[T] is Base[T] {}
+		type Leaf[T] is Mid[T] {}
+		accept(Base[int] b) int { return b.get(); }
+		main() {
+			l := Leaf[int](val: 7);
+			int x = accept(l);
+		}
+	`)
+	// Leaf__int vtable should reference Base__int.get (inherited method)
+	assertContains(t, ir, "promise_vtable_Leaf__int")
+	assertContains(t, ir, "Base__int.get")
+}
+
+func TestMonoTypeInfoEmittedForParent(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal[T] {
+			T id;
+			name() string `+"`"+`abstract;
+		}
+		type Dog[T] is Animal[T] {
+			name() string { return "dog"; }
+		}
+		accept(Animal[int] a) string { return a.name(); }
+		main() {
+			d := Dog[int](id: 1);
+			string s = accept(d);
+		}
+	`)
+	// Both parent and child should have typeinfo
+	assertContains(t, ir, "promise_typeinfo_Dog__int")
+	assertContains(t, ir, "promise_typeinfo_Animal__int")
+	assertContains(t, ir, "promise_vtable_Dog__int")
+}
+
+func TestMonoVtableOverrideDispatches(t *testing.T) {
+	ir := generateIR(t, `
+		type Greeter[T] {
+			T name;
+			greet() string { return "hello"; }
+		}
+		type Fancy[T] is Greeter[T] {
+			greet() string { return "fancy"; }
+		}
+		accept(Greeter[int] g) string { return g.greet(); }
+		main() {
+			Greeter[int] a = Greeter[int](name: 1);
+			Greeter[int] b = Fancy[int](name: 2);
+			string x = accept(a);
+			string y = accept(b);
+		}
+	`)
+	// Both should have vtables with their own greet method
+	assertContains(t, ir, "promise_vtable_Greeter__int")
+	assertContains(t, ir, "promise_vtable_Fancy__int")
+	assertContains(t, ir, "Greeter__int.greet")
+	assertContains(t, ir, "Fancy__int.greet")
+}
+
+func TestMonoVtableNonGenericChildOfGenericParent(t *testing.T) {
+	// Non-generic children already have vtables via emitVtableGlobals.
+	// Verify they coexist with mono vtables for the parent.
+	ir := generateIR(t, `
+		type Fabricator[T] {
+			fabricate() T `+"`"+`abstract;
+		}
+		type IntFabricator is Fabricator[int] {
+			fabricate() int { return 42; }
+		}
+		type GenFabricator[T] is Fabricator[T] {
+			T val;
+			fabricate() T { return this.val; }
+		}
+		use_fab(Fabricator[int] m) int { return m.fabricate(); }
+		main() {
+			int a = use_fab(IntFabricator());
+			int b = use_fab(GenFabricator[int](val: 7));
+		}
+	`)
+	// Non-generic child uses regular vtable naming
+	assertContains(t, ir, "promise_vtable_IntFabricator")
+	// Generic child uses mono vtable naming
+	assertContains(t, ir, "promise_vtable_GenFabricator__int")
+	// Both methods exist
+	assertContains(t, ir, "IntFabricator.fabricate")
+	assertContains(t, ir, "GenFabricator__int.fabricate")
+}
+
 func TestMethodGenericIR(t *testing.T) {
 	ir := generateIR(t, `
 		type Echo {

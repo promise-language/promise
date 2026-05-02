@@ -172,6 +172,139 @@ func (c *Compiler) emitTypeInfoGlobals(file *ast.File) {
 	}
 }
 
+// computeMonoVtableInfo marks mono instance origin types that have children
+// among the mono instances. For example, if ConstProducer[int] is Producer[int],
+// Producer needs to be marked as having children so its vtable slots are recognized.
+func (c *Compiler) computeMonoVtableInfo(instances []*types.Instance) {
+	for _, inst := range instances {
+		named, ok := inst.Origin().(*types.Named)
+		if !ok || len(named.TypeParams()) == 0 {
+			continue
+		}
+		// Walk parent chain and mark each parent origin as having children
+		var markParents func(n *types.Named)
+		markParents = func(n *types.Named) {
+			for _, pr := range n.Parents() {
+				c.hasChildren[pr.Named] = true
+				markParents(pr.Named)
+			}
+		}
+		markParents(named)
+	}
+}
+
+// emitMonoVtableGlobals creates vtable globals for monomorphic type instances
+// that have virtual methods. Each mono instance gets its own vtable with
+// method pointers resolved to the mono-specialized functions.
+func (c *Compiler) emitMonoVtableGlobals(instances []*types.Instance) {
+	for _, inst := range instances {
+		named, ok := inst.Origin().(*types.Named)
+		if !ok || len(named.TypeParams()) == 0 {
+			continue
+		}
+		name := monoName(inst)
+		if _, exists := c.monoVtableGlobals[name]; exists {
+			continue
+		}
+		methods := named.AllVirtualMethods()
+		if len(methods) == 0 {
+			continue
+		}
+		var entries []constant.Constant
+		for _, m := range methods {
+			ownerName := c.resolveMethodOwner(named, m.Name())
+			// Resolve to mono method name: Owner__typeargs.method
+			var mangledName string
+			if ownerName == named.Obj().Name() {
+				// Method defined on this type — use mono instance name
+				mangledName = mangleMethodName(name, m.Name(), m.IsSetter())
+			} else {
+				// Inherited method — resolve through mono parent chain
+				monoOwner := c.resolveMonoParentName(named, inst, ownerName)
+				mangledName = mangleMethodName(monoOwner, m.Name(), m.IsSetter())
+			}
+			if fn, ok := c.funcs[mangledName]; ok {
+				entries = append(entries, constant.NewBitCast(fn, irtypes.I8Ptr))
+			} else {
+				entries = append(entries, constant.NewNull(irtypes.I8Ptr))
+			}
+		}
+		arrayType := irtypes.NewArray(uint64(len(entries)), irtypes.I8Ptr)
+		init := constant.NewArray(arrayType, entries...)
+		global := c.module.NewGlobalDef("promise_vtable_"+name, init)
+		global.Immutable = true
+		c.monoVtableGlobals[name] = global
+	}
+}
+
+// emitMonoTypeInfoGlobals creates type info globals for monomorphic type instances.
+// Each mono instance gets its own typeinfo with a unique type ID and parent IDs.
+func (c *Compiler) emitMonoTypeInfoGlobals(instances []*types.Instance) {
+	for _, inst := range instances {
+		named, ok := inst.Origin().(*types.Named)
+		if !ok || len(named.TypeParams()) == 0 {
+			continue
+		}
+		name := monoName(inst)
+		if _, exists := c.monoTypeInfoGlobals[name]; exists {
+			continue
+		}
+
+		// Assign a unique type ID for this mono instance
+		typeID := c.nextTypeID
+		c.nextTypeID++
+
+		// Collect parent IDs (using origin Named types, same as non-mono)
+		parentIDs := c.collectAllParentIDs(named)
+		numParents := len(parentIDs)
+
+		var structType *irtypes.StructType
+		var fields []constant.Constant
+
+		// Field 0: vtable pointer (from mono vtable globals)
+		if vtGlobal, ok := c.monoVtableGlobals[name]; ok && vtGlobal != nil {
+			fields = append(fields, constant.NewBitCast(vtGlobal, irtypes.I8Ptr))
+		} else {
+			fields = append(fields, constant.NewNull(irtypes.I8Ptr))
+		}
+
+		fields = append(fields, constant.NewInt(irtypes.I32, int64(typeID)))
+		fields = append(fields, constant.NewInt(irtypes.I32, int64(numParents)))
+
+		if numParents > 0 {
+			arrayType := irtypes.NewArray(uint64(numParents), irtypes.I32)
+			structType = irtypes.NewStruct(irtypes.I8Ptr, irtypes.I32, irtypes.I32, arrayType)
+			var parentConsts []constant.Constant
+			for _, pid := range parentIDs {
+				parentConsts = append(parentConsts, constant.NewInt(irtypes.I32, int64(pid)))
+			}
+			parentArray := constant.NewArray(arrayType, parentConsts...)
+			fields = append(fields, parentArray)
+		} else {
+			structType = irtypes.NewStruct(irtypes.I8Ptr, irtypes.I32, irtypes.I32)
+		}
+
+		init := constant.NewStruct(structType, fields...)
+		tiGlobal := c.module.NewGlobalDef("promise_typeinfo_"+name, init)
+		tiGlobal.Immutable = true
+		c.monoTypeInfoGlobals[name] = tiGlobal
+
+		// For value types: emit a global RTTI instance
+		if named.IsValueType() {
+			layout := c.monoLayouts[name]
+			if layout != nil {
+				instanceStructType := layout.Instance.LLVMType
+				variantFieldType := layout.Instance.Fields[0].LLVMType
+				rttiInit := constant.NewStruct(instanceStructType,
+					constant.NewBitCast(tiGlobal, variantFieldType))
+				rttiGlobal := c.module.NewGlobalDef("promise_rtti_"+name, rttiInit)
+				rttiGlobal.Immutable = true
+				c.monoValueTypeRTTI[name] = rttiGlobal
+			}
+		}
+	}
+}
+
 // defineTypeIsFunc emits an LLVM IR function that checks if a type identified
 // by its variant pointer is or inherits from the expected type ID.
 // Replaces the C runtime promise_type_is.

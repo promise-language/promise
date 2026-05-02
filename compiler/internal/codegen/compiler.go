@@ -44,10 +44,13 @@ type Compiler struct {
 	externs        map[string]*ExternFunc           // extern functions by Promise name
 
 	// Monomorphization state
-	monoLayouts     map[string]*TypeDeclLayout      // mono name → layout (user types)
-	monoEnumLayouts map[string]*TypeDeclLayout      // mono name → layout (enums)
-	typeSubst       map[*types.TypeParam]types.Type // nil outside mono codegen
-	monoCtx         *monoContext                    // nil outside mono method codegen
+	monoLayouts         map[string]*TypeDeclLayout      // mono name → layout (user types)
+	monoEnumLayouts     map[string]*TypeDeclLayout      // mono name → layout (enums)
+	monoVtableGlobals   map[string]*ir.Global           // mono name → vtable global
+	monoTypeInfoGlobals map[string]*ir.Global           // mono name → typeinfo global
+	monoValueTypeRTTI   map[string]*ir.Global           // mono name → value type RTTI instance
+	typeSubst           map[*types.TypeParam]types.Type // nil outside mono codegen
+	monoCtx             *monoContext                    // nil outside mono method codegen
 
 	// Self-substitution for default method synthesis on structural interfaces.
 	// When non-nil, replaces occurrences of selfSubst.iface with selfSubst.concrete
@@ -321,15 +324,20 @@ func Compile(file *ast.File, info *sema.Info, target string) *CompileResult {
 	}
 
 	c := &Compiler{
-		module:           module,
-		info:             info,
-		target:           target,
-		isWasm:           strings.Contains(target, "wasm"),
-		funcs:            make(map[string]*ir.Func),
-		stdFuncs:         make(map[string]*ir.Func),
-		stdExterns:       make(map[string]*ExternFunc),
-		monoLayouts:      make(map[string]*TypeDeclLayout),
-		monoEnumLayouts:  make(map[string]*TypeDeclLayout),
+		module:     module,
+		info:       info,
+		target:     target,
+		isWasm:     strings.Contains(target, "wasm"),
+		funcs:      make(map[string]*ir.Func),
+		stdFuncs:   make(map[string]*ir.Func),
+		stdExterns: make(map[string]*ExternFunc),
+
+		monoLayouts:         make(map[string]*TypeDeclLayout),
+		monoEnumLayouts:     make(map[string]*TypeDeclLayout),
+		monoVtableGlobals:   make(map[string]*ir.Global),
+		monoTypeInfoGlobals: make(map[string]*ir.Global),
+		monoValueTypeRTTI:   make(map[string]*ir.Global),
+
 		typeIDs:          make(map[*types.Named]int32),
 		nextTypeID:       1, // 0 reserved for "no type info"
 		typeInfoGlobals:  make(map[*types.Named]*ir.Global),
@@ -387,10 +395,13 @@ func Compile(file *ast.File, info *sema.Info, target string) *CompileResult {
 
 	// Compute vtable info and emit vtable globals (after method stubs are declared)
 	c.computeVtableInfo(file)
+	c.computeMonoVtableInfo(monoInstances)
 	c.emitVtableGlobals(file)
+	c.emitMonoVtableGlobals(monoInstances)
 
 	// Emit RTTI type info globals (after vtable globals, since typeinfo includes vtable ptr)
 	c.emitTypeInfoGlobals(file)
+	c.emitMonoTypeInfoGlobals(monoInstances)
 
 	c.declareFuncs(file)
 	c.defineF64ToStringBridge() // bridge promise_f64_to_string → Promise _f64_to_str
@@ -2876,8 +2887,11 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo) {
 
 	// 6. Compute vtable info and emit for module types
 	c.computeVtableInfo(modFile)
+	c.computeMonoVtableInfo(monoInstances)
 	c.emitVtableGlobals(modFile)
+	c.emitMonoVtableGlobals(monoInstances)
 	c.emitTypeInfoGlobals(modFile)
+	c.emitMonoTypeInfoGlobals(monoInstances)
 
 	// 7. Declare and define module functions
 	c.declareModuleFuncs(modFile, irName)
@@ -3587,6 +3601,54 @@ func (c *Compiler) lookupEnumLayout(typ types.Type) *TypeDeclLayout {
 			}
 		}
 		return c.enumLayouts[e]
+	}
+	return nil
+}
+
+// lookupVtableGlobal finds the vtable global for a type, handling Instance and monoCtx.
+func (c *Compiler) lookupVtableGlobal(typ types.Type) *ir.Global {
+	if inst, ok := typ.(*types.Instance); ok {
+		return c.monoVtableGlobals[monoName(inst)]
+	}
+	if n := extractNamed(typ); n != nil {
+		if c.monoCtx != nil {
+			if origin, ok := c.monoCtx.origin.(*types.Named); ok && n == origin {
+				return c.monoVtableGlobals[c.monoCtx.name]
+			}
+		}
+		return c.vtableGlobals[n]
+	}
+	return nil
+}
+
+// lookupTypeInfoGlobal finds the typeinfo global for a type, handling Instance and monoCtx.
+func (c *Compiler) lookupTypeInfoGlobal(typ types.Type) *ir.Global {
+	if inst, ok := typ.(*types.Instance); ok {
+		return c.monoTypeInfoGlobals[monoName(inst)]
+	}
+	if n := extractNamed(typ); n != nil {
+		if c.monoCtx != nil {
+			if origin, ok := c.monoCtx.origin.(*types.Named); ok && n == origin {
+				return c.monoTypeInfoGlobals[c.monoCtx.name]
+			}
+		}
+		return c.typeInfoGlobals[n]
+	}
+	return nil
+}
+
+// lookupValueTypeRTTI finds the value type RTTI global for a type, handling Instance and monoCtx.
+func (c *Compiler) lookupValueTypeRTTI(typ types.Type) *ir.Global {
+	if inst, ok := typ.(*types.Instance); ok {
+		return c.monoValueTypeRTTI[monoName(inst)]
+	}
+	if n := extractNamed(typ); n != nil {
+		if c.monoCtx != nil {
+			if origin, ok := c.monoCtx.origin.(*types.Named); ok && n == origin {
+				return c.monoValueTypeRTTI[c.monoCtx.name]
+			}
+		}
+		return c.valueTypeRTTI[n]
 	}
 	return nil
 }

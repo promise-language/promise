@@ -321,7 +321,12 @@ func TestBuildCacheKey(t *testing.T) {
 func TestBuildCacheRoundTrip(t *testing.T) {
 	cacheDir := t.TempDir()
 	cacheKey := "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
-	ifaceHash := "iface_hash_123"
+	meta := &CacheMeta{
+		Kind:          CacheKindLLVMModule,
+		Name:          "mymod",
+		CacheKey:      cacheKey,
+		InterfaceHash: "iface_hash_123",
+	}
 
 	// Initially no cache
 	if got := LookupBuildCache(cacheDir, cacheKey); got != "" {
@@ -332,7 +337,7 @@ func TestBuildCacheRoundTrip(t *testing.T) {
 	objFile := filepath.Join(t.TempDir(), "test.o")
 	os.WriteFile(objFile, []byte("fake object data"), 0644)
 
-	err := SaveBuildCache(cacheDir, cacheKey, ifaceHash, objFile)
+	err := SaveBuildCache(cacheDir, cacheKey, meta, objFile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,7 +348,7 @@ func TestBuildCacheRoundTrip(t *testing.T) {
 		t.Fatal("expected cached obj after save")
 	}
 
-	// Read back the data
+	// Read back the object data
 	data, err := os.ReadFile(cached)
 	if err != nil {
 		t.Fatal(err)
@@ -352,10 +357,22 @@ func TestBuildCacheRoundTrip(t *testing.T) {
 		t.Errorf("cached data = %q, want %q", string(data), "fake object data")
 	}
 
-	// Interface hash should be readable
-	gotIface := ReadBuildCacheInterfaceHash(cacheDir, cacheKey)
-	if gotIface != ifaceHash {
-		t.Errorf("interface hash = %q, want %q", gotIface, ifaceHash)
+	// Sidecar metadata should be readable
+	gotMeta := ReadBuildCacheMeta(cacheDir, cacheKey)
+	if gotMeta == nil {
+		t.Fatal("expected non-nil meta after save")
+	}
+	if gotMeta.Kind != CacheKindLLVMModule {
+		t.Errorf("meta.Kind = %q, want %q", gotMeta.Kind, CacheKindLLVMModule)
+	}
+	if gotMeta.Name != "mymod" {
+		t.Errorf("meta.Name = %q, want %q", gotMeta.Name, "mymod")
+	}
+	if gotMeta.InterfaceHash != "iface_hash_123" {
+		t.Errorf("meta.InterfaceHash = %q, want %q", gotMeta.InterfaceHash, "iface_hash_123")
+	}
+	if gotMeta.CreatedAt == "" {
+		t.Error("meta.CreatedAt should be set")
 	}
 
 	// Two-level directory structure should exist
@@ -371,7 +388,7 @@ func TestCleanAll(t *testing.T) {
 	// Create files and subdirectories
 	os.MkdirAll(filepath.Join(dir, "ab"), 0755)
 	os.WriteFile(filepath.Join(dir, "ab", "abc123.o"), []byte("obj"), 0644)
-	os.WriteFile(filepath.Join(dir, "ab", "abc123.interface"), []byte("hash"), 0644)
+	os.WriteFile(filepath.Join(dir, "ab", "abc123.o.meta"), []byte(`{"kind":"module"}`), 0644)
 	os.MkdirAll(filepath.Join(dir, "cd"), 0755)
 	os.WriteFile(filepath.Join(dir, "cd", "cde456.o"), []byte("obj2"), 0644)
 	os.WriteFile(filepath.Join(dir, "loose.txt"), []byte("data"), 0644)
@@ -468,7 +485,7 @@ func TestSaveBuildCacheBadObjFile(t *testing.T) {
 	cacheDir := t.TempDir()
 	cacheKey := "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
 
-	err := SaveBuildCache(cacheDir, cacheKey, "hash", "/nonexistent/file.o")
+	err := SaveBuildCache(cacheDir, cacheKey, &CacheMeta{Kind: CacheKindLLVMModule, Name: "test"}, "/nonexistent/file.o")
 	if err == nil {
 		t.Fatal("expected error for nonexistent object file")
 	}
@@ -486,11 +503,11 @@ func TestCompilerHash(t *testing.T) {
 	}
 }
 
-func TestReadBuildCacheInterfaceHashMissing(t *testing.T) {
+func TestReadBuildCacheMetaMissing(t *testing.T) {
 	dir := t.TempDir()
-	got := ReadBuildCacheInterfaceHash(dir, "nonexistent_key_000000000000000000000000000000000000000000000000000000000000")
-	if got != "" {
-		t.Errorf("expected empty string for missing interface hash, got %q", got)
+	got := ReadBuildCacheMeta(dir, "nonexistent_key_000000000000000000000000000000000000000000000000000000000000")
+	if got != nil {
+		t.Errorf("expected nil for missing meta, got %+v", got)
 	}
 }
 
@@ -783,7 +800,10 @@ func TestTestBinaryMetaRoundTrip(t *testing.T) {
 	}
 
 	// Save unit test metadata
-	unitMeta := &TestCacheMeta{
+	unitMeta := &CacheMeta{
+		Kind:         CacheKindBinary,
+		Name:         "tests/unit_test.pr",
+		CacheKey:     cacheKey,
 		Tests:        []string{"test_add", "test_sub"},
 		TestExcludes: map[string][]string{"test_sub": {"wasm32-wasi"}},
 	}
@@ -804,9 +824,21 @@ func TestTestBinaryMetaRoundTrip(t *testing.T) {
 	if excludes, ok := got.TestExcludes["test_sub"]; !ok || len(excludes) != 1 || excludes[0] != "wasm32-wasi" {
 		t.Errorf("unexpected test excludes: %v", got.TestExcludes)
 	}
+	if got.Kind != CacheKindBinary {
+		t.Errorf("meta.Kind = %q, want %q", got.Kind, CacheKindBinary)
+	}
+	if got.CacheKey != cacheKey {
+		t.Errorf("meta.CacheKey = %q, want %q", got.CacheKey, cacheKey)
+	}
+	if got.CreatedAt == "" {
+		t.Error("meta.CreatedAt should be set")
+	}
 
 	// Save E2E metadata (overwrites)
-	e2eMeta := &TestCacheMeta{
+	e2eMeta := &CacheMeta{
+		Kind:           CacheKindBinary,
+		Name:           "tests/e2e_test.pr",
+		CacheKey:       cacheKey,
 		E2E:            true,
 		ExpectedOutput: "hello\nworld",
 		ExcludeTargets: []string{"wasm32-wasi"},

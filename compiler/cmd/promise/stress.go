@@ -281,7 +281,10 @@ func compileTargets(files []string, baseDir string, targetTriple string) (target
 			// Save to cache.
 			if cacheDir != "" {
 				module.SaveTestBinaryCache(cacheDir, cacheKey, tmp.Name())
-				module.SaveTestBinaryMeta(cacheDir, cacheKey, &module.TestCacheMeta{
+				module.SaveTestBinaryMeta(cacheDir, cacheKey, &module.CacheMeta{
+					Kind:           module.CacheKindBinary,
+					Name:           f,
+					CacheKey:       cacheKey,
 					E2E:            true,
 					ExpectedOutput: info.ExpectOutput,
 					ExcludeTargets: info.ExcludeTargets,
@@ -313,7 +316,10 @@ func compileTargets(files []string, baseDir string, targetTriple string) (target
 			// Save to cache.
 			if cacheDir != "" {
 				module.SaveTestBinaryCache(cacheDir, cacheKey, tmp.Name())
-				module.SaveTestBinaryMeta(cacheDir, cacheKey, &module.TestCacheMeta{
+				module.SaveTestBinaryMeta(cacheDir, cacheKey, &module.CacheMeta{
+					Kind:         module.CacheKindBinary,
+					Name:         f,
+					CacheKey:     cacheKey,
 					Tests:        testNames,
 					TestExcludes: testExcludes,
 				})

@@ -487,7 +487,10 @@ func runTestFile(filename string, timeout time.Duration, targetTriple string) {
 				testExcludes[t.Name()] = excludes
 			}
 		}
-		module.SaveTestBinaryMeta(cacheDir, cacheKey, &module.TestCacheMeta{
+		module.SaveTestBinaryMeta(cacheDir, cacheKey, &module.CacheMeta{
+			Kind:         module.CacheKindBinary,
+			Name:         filename,
+			CacheKey:     cacheKey,
 			Tests:        testNames,
 			TestExcludes: testExcludes,
 		})
@@ -718,7 +721,10 @@ func runE2ETest(file *ast.File, info *sema.Info, filename string,
 	// Save to cache
 	if cacheDir != "" {
 		module.SaveTestBinaryCache(cacheDir, cacheKey, tmpOutput.Name())
-		module.SaveTestBinaryMeta(cacheDir, cacheKey, &module.TestCacheMeta{
+		module.SaveTestBinaryMeta(cacheDir, cacheKey, &module.CacheMeta{
+			Kind:           module.CacheKindBinary,
+			Name:           filename,
+			CacheKey:       cacheKey,
 			E2E:            true,
 			ExpectedOutput: info.ExpectOutput,
 			ExcludeTargets: info.ExcludeTargets,
@@ -1184,22 +1190,19 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	// Build cache (~/.promise/cache/build/, overridable via PROMISE_HOME)
 	cacheDir, _ := module.BuildCacheDir()
 
-	// Build context for cache keys: compiler hash + all module paths
 	compilerHash := module.CompilerHash()
 	modInfos := result.ModuleInfos()
-	var allModPaths []string
-	if modInfos != nil {
-		for path := range modInfos {
-			allModPaths = append(allModPaths, path)
-		}
-	}
 
-	// Precompute cache keys for each module (keyed by IR prefix — matches SplitModuleIRs keys)
+	// Precompute cache keys for each module (keyed by IR prefix — matches SplitModuleIRs keys).
+	// allModPaths is intentionally NOT included: the contentCacheKey (computed below) already
+	// hashes the IR text, which fully captures what is compiled. Including allModPaths would
+	// produce a different base key for every distinct import set that happens to include the
+	// same module, causing duplicate cache entries for identical IR.
 	modCacheKeys := make(map[string]string) // IR prefix → cache key
 	if cacheDir != "" && modInfos != nil {
 		for _, mi := range modInfos {
 			if mi.ImplHash != "" {
-				modCacheKeys[mi.EffectiveIRPrefix()] = module.BuildCacheKey(mi.ImplHash, compilerHash, target, allModPaths)
+				modCacheKeys[mi.EffectiveIRPrefix()] = module.BuildCacheKey(mi.ImplHash, compilerHash, target, nil)
 			}
 		}
 	}
@@ -1231,16 +1234,13 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 		go func(name, irText string) {
 			defer wg.Done()
 
-			// Compute content-sensitive cache key: base key + hash of IR text.
-			// The IR encodes which monomorphic instances are present, so different
-			// user files that import the same module but use different generic
-			// instances produce different module IRs → different cache entries.
+			// The module cache key is purely source-derived (implHash + compiler + target).
+			// Generic free-function monomorphizations are now instance-owned (declareMonoFuncs),
+			// so the module IR contains only stable non-generic function bodies and the IR
+			// text is identical for the same module version regardless of caller.
 			contentCacheKey := ""
 			if baseKey, ok := modCacheKeys[name]; ok && cacheDir != "" {
-				h := fnv.New128a()
-				fmt.Fprintf(h, "base:%s\n", baseKey)
-				h.Write([]byte(irText))
-				contentCacheKey = hex.EncodeToString(h.Sum(nil))
+				contentCacheKey = baseKey
 			}
 
 			// Try cache lookup
@@ -1258,14 +1258,21 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 
 			// Save to cache
 			if contentCacheKey != "" {
-				interfaceHash := ""
+				meta := &module.CacheMeta{
+					Kind:     module.CacheKindLLVMModule,
+					Name:     name,
+					CacheKey: contentCacheKey,
+				}
 				for _, mi := range modInfos {
 					if mi.EffectiveIRPrefix() == name {
-						interfaceHash = mi.InterfaceHash
+						meta.InterfaceHash = mi.InterfaceHash
+						if mi.SemaInfo != nil && mi.File != nil {
+							meta.Symbols = sema.ExportedScope(mi.SemaInfo, mi.File).Names()
+						}
 						break
 					}
 				}
-				_ = module.SaveBuildCache(cacheDir, contentCacheKey, interfaceHash, obj)
+				_ = module.SaveBuildCache(cacheDir, contentCacheKey, meta, obj)
 			}
 
 			mu.Lock()
@@ -1286,7 +1293,7 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	// Cache keys are derived from the type declaration hash, making them stable across
 	// unrelated source changes.
 	instIRs := result.InstanceIRs()
-	instCacheKeys := buildInstCacheKeys(result.SemaInfo(), compilerHash, target)
+	instMetas := buildInstCacheMetas(result.SemaInfo(), compilerHash, target)
 
 	type instObj struct {
 		name    string
@@ -1299,11 +1306,11 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 
 	// Pre-cached instances: body generation was skipped (CompileWithCache), so they
 	// won't appear in instIRs. Load their .bc directly from the build cache.
-	for instName, cacheKey := range instCacheKeys {
+	for instName, instMeta := range instMetas {
 		if _, hasBody := instIRs[instName]; hasBody {
 			continue // body was generated — handled in the goroutine loop below
 		}
-		if cachedFile := module.LookupBuildCache(cacheDir, cacheKey); cachedFile != "" {
+		if cachedFile := module.LookupBuildCache(cacheDir, instMeta.CacheKey); cachedFile != "" {
 			instObjs = append(instObjs, instObj{name: instName, objFile: cachedFile, cached: true})
 		}
 		// If the file has vanished (e.g., concurrent promise clean), the instance
@@ -1317,10 +1324,10 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 		go func(name, irText string) {
 			defer instWg.Done()
 
-			contentCacheKey := instCacheKeys[name] // "" if not cacheable
+			instMeta := instMetas[name] // nil if not cacheable
 
-			if contentCacheKey != "" {
-				if cachedFile := module.LookupBuildCache(cacheDir, contentCacheKey); cachedFile != "" {
+			if instMeta != nil {
+				if cachedFile := module.LookupBuildCache(cacheDir, instMeta.CacheKey); cachedFile != "" {
 					instMu.Lock()
 					instObjs = append(instObjs, instObj{name: name, objFile: cachedFile, cached: true})
 					instMu.Unlock()
@@ -1331,8 +1338,8 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 			// Cache miss — compile
 			obj := compileModule(irText, "promise-inst-"+name)
 
-			if contentCacheKey != "" {
-				_ = module.SaveBuildCache(cacheDir, contentCacheKey, "", obj)
+			if instMeta != nil {
+				_ = module.SaveBuildCache(cacheDir, instMeta.CacheKey, instMeta, obj)
 			}
 
 			instMu.Lock()
@@ -1369,15 +1376,15 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	}
 }
 
-// buildInstCacheKeys builds a map from mono instance name (e.g., "Vector__int")
-// to a stable cache key derived from the type declaration hash. Instances whose
-// origin type has no hash (e.g., native/universe types) are omitted.
-func buildInstCacheKeys(mainInfo *sema.Info, compilerHash, target string) map[string]string {
+// buildInstCacheMetas builds a map from mono instance name (e.g., "Vector__int")
+// to a CacheMeta containing the stable cache key and debug metadata. Instances
+// whose origin type has no hash (e.g., native/universe types) are omitted.
+func buildInstCacheMetas(mainInfo *sema.Info, compilerHash, target string) map[string]*module.CacheMeta {
 	if mainInfo == nil {
 		return nil
 	}
 	instances := codegen.CollectMonoInstances(mainInfo)
-	result := make(map[string]string, len(instances))
+	result := make(map[string]*module.CacheMeta, len(instances))
 	for _, inst := range instances {
 		mName := codegen.MonoName(inst)
 		var tn *types.TypeName
@@ -1393,7 +1400,14 @@ func buildInstCacheKeys(mainInfo *sema.Info, compilerHash, target string) map[st
 		if typeDeclHash == "" {
 			continue // not cacheable
 		}
-		result[mName] = module.InstanceCacheKey(irPrefix, mName, typeDeclHash, compilerHash, target)
+		key := module.InstanceCacheKey(irPrefix, mName, typeDeclHash, compilerHash, target)
+		result[mName] = &module.CacheMeta{
+			Kind:         module.CacheKindInstance,
+			Name:         mName,
+			CacheKey:     key,
+			TypeDeclHash: typeDeclHash,
+			IRPrefix:     irPrefix,
+		}
 	}
 	return result
 }
@@ -1429,13 +1443,13 @@ func lookupCachedInstances(info *sema.Info, target string) map[string]bool {
 	if cacheDir == "" {
 		return nil
 	}
-	keys := buildInstCacheKeys(info, module.CompilerHash(), target)
-	if len(keys) == 0 {
+	metas := buildInstCacheMetas(info, module.CompilerHash(), target)
+	if len(metas) == 0 {
 		return nil
 	}
-	cached := make(map[string]bool, len(keys))
-	for name, key := range keys {
-		if module.LookupBuildCache(cacheDir, key) != "" {
+	cached := make(map[string]bool, len(metas))
+	for name, meta := range metas {
+		if module.LookupBuildCache(cacheDir, meta.CacheKey) != "" {
 			cached[name] = true
 		}
 	}

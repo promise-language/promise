@@ -982,6 +982,10 @@ func (c *Compiler) declareMonoFuncs(file *ast.File, funcInsts []*sema.FuncInstan
 		c.funcs[name] = fn
 		if c.compilingModule != "" {
 			c.moduleOwnedFuncs[name] = c.compilingModule
+			// Also mark as instance-owned so SplitModuleIRs puts it in its own .bc
+			// instead of the module IR. This keeps the module IR stable across
+			// compilations (different callers trigger different mono functions).
+			c.instanceOwnedFuncs[name] = name
 		}
 	}
 }
@@ -1223,6 +1227,9 @@ func (c *Compiler) declareMonoMethodInstances(file *ast.File, methodInsts []*sem
 		c.funcs[name] = fn
 		if c.compilingModule != "" {
 			c.moduleOwnedFuncs[name] = c.compilingModule
+			// Also mark as instance-owned so this generic method instance gets its own
+			// .bc file, keeping the module IR stable across compilations.
+			c.instanceOwnedFuncs[name] = name
 		}
 	}
 }

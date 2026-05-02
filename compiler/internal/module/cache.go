@@ -12,9 +12,99 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"djabi.dev/go/promise_lang/internal/types"
 )
+
+// CacheKind identifies what artifact a CacheMeta sidecar describes.
+type CacheKind string
+
+const (
+	// CacheKindLLVMModule is the compiled object/bitcode for a whole Promise module.
+	// "LLVM module" distinguishes this from the Promise-language module concept.
+	CacheKindLLVMModule CacheKind = "llvm_module"
+	// CacheKindInstance is the compiled object/bitcode for a single generic type instantiation.
+	CacheKindInstance CacheKind = "instance"
+	// CacheKindBinary is a fully linked test binary.
+	CacheKindBinary CacheKind = "test_binary"
+)
+
+// CacheMeta is the unified JSON sidecar stored alongside every cached artifact
+// (.o, .bin). All artifacts share this struct; kind-specific fields are
+// populated only for the relevant kind and omitted (zero/nil) otherwise.
+//
+// Stored as <cacheKey>.o.meta (next to <cacheKey>.o) or
+//
+//	<cacheKey>.bin.meta (next to <cacheKey>.bin).
+type CacheMeta struct {
+	Kind      CacheKind `json:"kind"`
+	Name      string    `json:"name"`       // human-readable: module IR prefix, mono name, or source path
+	CacheKey  string    `json:"cache_key"`  // the hex key used to look up the primary artifact
+	CreatedAt string    `json:"created_at"` // RFC3339 UTC
+
+	// CacheKindLLVMModule-specific
+	InterfaceHash string   `json:"interface_hash,omitempty"`
+	Symbols       []string `json:"symbols,omitempty"` // sorted list of public exported symbol names
+
+	// CacheKindInstance-specific
+	TypeDeclHash string `json:"type_decl_hash,omitempty"`
+	IRPrefix     string `json:"ir_prefix,omitempty"`
+
+	// CacheKindBinary-specific
+	E2E            bool                `json:"e2e,omitempty"`
+	ExpectedOutput string              `json:"expected_output,omitempty"`
+	ExcludeTargets []string            `json:"exclude_targets,omitempty"`
+	Tests          []string            `json:"tests,omitempty"`
+	TestExcludes   map[string][]string `json:"test_excludes,omitempty"`
+}
+
+// saveCacheMeta atomically writes meta as JSON to path.
+// Sets CreatedAt if not already set.
+func saveCacheMeta(path string, meta *CacheMeta) error {
+	m := *meta // copy so we don't mutate the caller's struct
+	if m.CreatedAt == "" {
+		m.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	data, err := json.Marshal(&m)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}
+
+// loadCacheMeta reads and parses a JSON sidecar.
+// Returns nil if not found or invalid.
+func loadCacheMeta(path string) *CacheMeta {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var m CacheMeta
+	if json.Unmarshal(data, &m) != nil {
+		return nil
+	}
+	return &m
+}
 
 // CollectModuleSources walks a module directory recursively and returns all .pr
 // source files. Subdirectories containing their own promise.toml (nested modules)
@@ -203,7 +293,7 @@ func BuildCacheKey(implHash, compilerHash, target string, allModulePaths []strin
 //
 // Two instances with the same key are guaranteed to produce identical LLVM IR.
 // Changes to unrelated declarations in the same file do NOT change typeDeclHash
-// and therefore do NOT invalidate the cached .bc file.
+// and therefore do NOT invalidate the cached .o file.
 func InstanceCacheKey(irPrefix, monoName, typeDeclHash, compilerHash, target string) string {
 	h := fnv.New128a()
 	fmt.Fprintf(h, "instance\n")
@@ -284,10 +374,10 @@ func BuildCachePath(cacheDir, cacheKey string) string {
 	return filepath.Join(cacheDir, subdir, cacheKey+".o")
 }
 
-// BuildCacheInterfacePath returns the interface hash path in the build cache.
-func BuildCacheInterfacePath(cacheDir, cacheKey string) string {
+// BuildCacheMetaPath returns the sidecar metadata path for a cached .o file.
+func BuildCacheMetaPath(cacheDir, cacheKey string) string {
 	subdir := cacheKey[:2]
-	return filepath.Join(cacheDir, subdir, cacheKey+".interface")
+	return filepath.Join(cacheDir, subdir, cacheKey+".o.meta")
 }
 
 // TestBinaryCachePath returns the path for a cached test binary in the build cache.
@@ -360,13 +450,13 @@ func LookupBuildCache(cacheDir, cacheKey string) string {
 // SaveBuildCache stores a compiled .o and interface hash in the build cache.
 // Creates the two-level subdirectory if needed. Uses atomic write (unique temp
 // file + rename) to prevent corruption from concurrent builds.
-func SaveBuildCache(cacheDir, cacheKey, interfaceHash, objFile string) error {
+func SaveBuildCache(cacheDir, cacheKey string, meta *CacheMeta, objFile string) error {
 	subdir := filepath.Join(cacheDir, cacheKey[:2])
 	if err := os.MkdirAll(subdir, 0755); err != nil {
 		return fmt.Errorf("cannot create cache subdir: %w", err)
 	}
 
-	// Atomic write: write to unique temp file, then rename
+	// Atomic write of the object file
 	data, err := os.ReadFile(objFile)
 	if err != nil {
 		return fmt.Errorf("cannot read object file: %w", err)
@@ -392,43 +482,19 @@ func SaveBuildCache(cacheDir, cacheKey, interfaceHash, objFile string) error {
 		return fmt.Errorf("cannot finalize cached object: %w", err)
 	}
 
-	// Write interface hash (also atomic with unique temp)
-	ifacePath := BuildCacheInterfacePath(cacheDir, cacheKey)
-	tmpIface, err := os.CreateTemp(subdir, ".tmp-*")
-	if err != nil {
-		os.Remove(objPath) // roll back .o to keep cache consistent
-		return fmt.Errorf("cannot create temp file for interface: %w", err)
-	}
-	tmpIfacePath := tmpIface.Name()
-	if _, err := tmpIface.Write([]byte(interfaceHash)); err != nil {
-		tmpIface.Close()
-		os.Remove(tmpIfacePath)
+	// Atomic write of the sidecar metadata
+	if err := saveCacheMeta(BuildCacheMetaPath(cacheDir, cacheKey), meta); err != nil {
 		os.Remove(objPath)
-		return fmt.Errorf("cannot write interface hash: %w", err)
-	}
-	if err := tmpIface.Close(); err != nil {
-		os.Remove(tmpIfacePath)
-		os.Remove(objPath)
-		return fmt.Errorf("cannot close temp file: %w", err)
-	}
-	if err := os.Rename(tmpIfacePath, ifacePath); err != nil {
-		os.Remove(tmpIfacePath)
-		os.Remove(objPath)
-		return fmt.Errorf("cannot finalize interface hash: %w", err)
+		return fmt.Errorf("cannot write cache metadata: %w", err)
 	}
 
 	return nil
 }
 
-// ReadBuildCacheInterfaceHash reads the cached interface hash for a cache key.
-// Returns empty string if not found.
-func ReadBuildCacheInterfaceHash(cacheDir, cacheKey string) string {
-	path := BuildCacheInterfacePath(cacheDir, cacheKey)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	return string(data)
+// ReadBuildCacheMeta reads the sidecar metadata for a cached object.
+// Returns nil if not found or invalid.
+func ReadBuildCacheMeta(cacheDir, cacheKey string) *CacheMeta {
+	return loadCacheMeta(BuildCacheMetaPath(cacheDir, cacheKey))
 }
 
 // --- Compiler stamp: tracks which binary populated the extraction caches ---
@@ -669,60 +735,25 @@ func HashDir(dir, suffix string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// TestCacheMeta holds metadata for a cached test binary.
-type TestCacheMeta struct {
-	E2E            bool                `json:"e2e"`
-	ExpectedOutput string              `json:"expected_output,omitempty"`
-	ExcludeTargets []string            `json:"exclude_targets,omitempty"`
-	Tests          []string            `json:"tests,omitempty"`
-	TestExcludes   map[string][]string `json:"test_excludes,omitempty"`
-}
-
-// TestBinaryMetaPath returns the metadata path for a cached test binary.
+// TestBinaryMetaPath returns the sidecar metadata path for a cached test binary.
 func TestBinaryMetaPath(cacheDir, cacheKey string) string {
 	return TestBinaryCachePath(cacheDir, cacheKey) + ".meta"
 }
 
 // SaveTestBinaryMeta writes test binary metadata to the cache.
 // Uses atomic write with a unique temp file for concurrent safety.
-func SaveTestBinaryMeta(cacheDir, cacheKey string, meta *TestCacheMeta) error {
+func SaveTestBinaryMeta(cacheDir, cacheKey string, meta *CacheMeta) error {
 	subdir := filepath.Join(cacheDir, cacheKey[:2])
 	if err := os.MkdirAll(subdir, 0755); err != nil {
 		return err
 	}
-	data, err := json.Marshal(meta)
-	if err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(subdir, ".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
-		return err
-	}
-	return os.Rename(tmpPath, TestBinaryMetaPath(cacheDir, cacheKey))
+	return saveCacheMeta(TestBinaryMetaPath(cacheDir, cacheKey), meta)
 }
 
 // LoadTestBinaryMeta reads cached test binary metadata.
 // Returns nil if not found or invalid.
-func LoadTestBinaryMeta(cacheDir, cacheKey string) *TestCacheMeta {
-	data, err := os.ReadFile(TestBinaryMetaPath(cacheDir, cacheKey))
-	if err != nil {
-		return nil
-	}
-	var meta TestCacheMeta
-	if json.Unmarshal(data, &meta) != nil {
-		return nil
-	}
-	return &meta
+func LoadTestBinaryMeta(cacheDir, cacheKey string) *CacheMeta {
+	return loadCacheMeta(TestBinaryMetaPath(cacheDir, cacheKey))
 }
 
 // LockBuildDirShared acquires a shared flock on the build cache directory.

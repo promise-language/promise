@@ -735,6 +735,7 @@ func testModuleLoaderWithConfig(projectDir string, cfg *module.Config) *moduleLo
 		catalogLoaded:    make(map[string]*sema.ModuleInfo),
 		commitPins:       commitPins,
 		catalog:          cat,
+		target:           sema.HostTargetInfo(),
 	}
 }
 

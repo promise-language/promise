@@ -83,7 +83,9 @@ func docFrontend(filename string) (*ast.File, *sema.Info) {
 	file := parseSourceFile(filename)
 	file = injectStdImport(file)
 
-	moduleScopes, _, _ := loadModuleScopes(filename, file, sema.TargetInfo{})
+	// Use host target so std module loads correctly (target-filtered functions
+	// in std would cause redeclaration errors with zero target).
+	moduleScopes, _, _ := loadModuleScopes(filename, file, sema.HostTargetInfo())
 	info, errs := sema.DeclareAndDefineWithModules(file, moduleScopes)
 	if len(errs) > 0 {
 		printFileErrors(filename, errs)

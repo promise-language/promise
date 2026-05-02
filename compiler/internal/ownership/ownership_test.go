@@ -34,7 +34,7 @@ func getOwnerStdScope() *types.Scope {
 		if len(buildErrs) > 0 {
 			panic("std AST build errors: " + buildErrs[0].Error())
 		}
-		stdInfo, _ := sema.CheckForStdModule(stdFile, sema.TargetInfo{})
+		stdInfo, _ := sema.CheckForStdModule(stdFile, sema.HostTargetInfo())
 		ownerStdScope = sema.ExportedScope(stdInfo, stdFile)
 	})
 	return ownerStdScope

@@ -5,21 +5,23 @@ join_test() `test {
     assert(join("/home/", "user") == "/home/user", "join trailing slash");
     assert(join("", "file") == "file", "join empty base");
     assert(join("/home", "") == "/home", "join empty child");
+    assert(join("/home", "user", "file.txt") == "/home/user/file.txt", "join three");
+    assert(join("/", "a", "b", "c") == "/a/b/c", "join four");
 }
 
-basename_test() `test {
-    assert(basename("/home/user/file.txt") == "file.txt", "basename file");
-    assert(basename("/home/user/") == "user", "basename trailing slash");
-    assert(basename("file.txt") == "file.txt", "basename no dir");
-    assert(basename("/") == "", "basename root");
-    assert(basename("") == "", "basename empty");
+file_name_test() `test {
+    assert(file_name("/home/user/file.txt") == "file.txt", "file_name file");
+    assert(file_name("/home/user/") == "user", "file_name trailing slash");
+    assert(file_name("file.txt") == "file.txt", "file_name no dir");
+    assert(file_name("/") == "", "file_name root");
+    assert(file_name("") == "", "file_name empty");
 }
 
-dirname_test() `test {
-    assert(dirname("/home/user/file.txt") == "/home/user", "dirname basic");
-    assert(dirname("file.txt") == ".", "dirname no dir");
-    assert(dirname("/file.txt") == "/", "dirname root file");
-    assert(dirname("") == ".", "dirname empty");
+parent_test() `test {
+    assert(parent("/home/user/file.txt") == "/home/user", "parent basic");
+    assert(parent("file.txt") == ".", "parent no dir");
+    assert(parent("/file.txt") == "/", "parent root file");
+    assert(parent("") == ".", "parent empty");
 }
 
 extension_test() `test {

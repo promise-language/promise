@@ -1,10 +1,32 @@
 package sema
 
 import (
+	"runtime"
 	"strings"
 
 	"djabi.dev/go/promise_lang/internal/ast"
 )
+
+// HostTargetInfo returns a TargetInfo for the current host platform.
+// Useful for Go unit tests that parse std files containing `target(cond)` annotations.
+func HostTargetInfo() TargetInfo {
+	ti := TargetInfo{}
+	switch runtime.GOOS {
+	case "linux":
+		ti.OS = "linux"
+	case "darwin":
+		ti.OS = "macos"
+	case "windows":
+		ti.OS = "windows"
+	}
+	switch runtime.GOARCH {
+	case "amd64":
+		ti.Arch = "x86_64"
+	case "arm64":
+		ti.Arch = "aarch64"
+	}
+	return ti
+}
 
 // TargetInfo holds compile-time platform information used for `target(cond)` filtering.
 // Zero value means "unknown" — no `target annotations are filtered out.

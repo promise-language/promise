@@ -1,19 +1,22 @@
 # Platform Modules Layout
 
-Design document for Promise's platform-facing standard library: the boundary between `std/` and
-`modules/`, what each platform module contains, and why the layout is what it is. This supersedes
-the Phase 4 plan in `standard-library.md` (sections 4b–4e), which was written before catalog
-module infrastructure existed.
+Design document for Promise's platform-facing standard library: the boundary between `modules/std/`
+and other `modules/`, what each platform module contains, and why the layout is what it is. This
+supersedes the Phase 4 plan in `standard-library.md` (sections 4b–4e), which was written before
+catalog module infrastructure existed.
+
+All modules (including std) live under `modules/`. `std` is special only in that it is
+auto-imported via an injected `use std as _;`.
 
 ---
 
 ## 1. The Core Principle
 
-**`std/` = auto-imported into every file, no `use` needed.**
-**`modules/` = explicitly imported, available only when the program says so.**
+**`modules/std/` = auto-imported into every file, no `use` needed.**
+**`modules/<name>/` = explicitly imported, available only when the program says so.**
 
-The difference is **purely ergonomic** — not architectural. Both are compiled the same way.
-This is the key insight that determines what belongs where.
+The difference is **purely ergonomic** — not architectural. Both live under `modules/` and are
+compiled the same way. This is the key insight that determines what belongs where.
 
 ### The architecture: `std` as a regular catalog module (Done)
 
@@ -36,9 +39,9 @@ prefix needed). This is how Python's builtins work; it is how Rust's prelude wor
 
 ### Benefits of std as a regular module
 
-**1. Build cache for std.** Currently every compilation re-compiles all 28 std files from scratch.
-As a proper module, std gets its own cached `.o` file. Since std rarely changes, this is nearly
-always a cache hit — a meaningful compile-time improvement, especially noticeable in the test suite.
+**1. Build cache for std.** Std gets its own cached `.o` file. Since std rarely changes, this is
+nearly always a cache hit — a meaningful compile-time improvement, especially noticeable in the
+test suite.
 
 **2. Simpler compiler.** Removed `mergeStdDecls`, `parseStdFiles`, `stdScope` parent chain,
 `IsStd` flags, and the special cases in `resolveModuleScope` and `loadModuleScopes`. Fewer
@@ -87,7 +90,7 @@ in scope. Fewer choices = lower probability of picking the wrong one = more corr
 | `File`, `BufReader` | **`modules/io`** | Not needed by compute-only programs; `use io;` is a meaningful signal |
 | `read_line`, `read_stdin` | **`modules/io`** | Same PAL path as File; co-locates all stdin/file I/O |
 | `get_env`, `args`, `exec` | **`modules/os`** | Process model — irrelevant to library code and pure computation |
-| `path.join`, `basename` | **`modules/path`** | Not every program works with paths |
+| `path.join`, `path.file_name` | **`modules/path`** | Not every program works with paths |
 | Higher-level time ops | **`modules/time`** | Calendar/TZ/formatting builds on std; not universally needed |
 
 **The `use` statement as a semantic signal.** Beyond scope noise, `use io;` at the top of a file
@@ -97,7 +100,9 @@ documentation.
 
 ---
 
-## 2. `\`target(cond)` — Compile-Time Platform Filtering
+## 2. `\`target(cond)` — Compile-Time Platform Filtering (Done)
+
+Implemented in Stage 8q. See `docs/stages.md` for implementation details.
 
 ### The feature
 
@@ -106,12 +111,18 @@ entirely when the condition does not match the current build target. Only the ma
 is compiled. Non-matching variants are as if they were never written.
 
 ```promise
-// modules/path/path.pr
-sep() string `public `target(windows)  { return "\\"; }
-sep() string `public `target(!windows) { return "/";  }
+// modules/std/platform.pr
+_platform_path_separator() string `target(windows) { return "\\"; }
+_platform_path_separator() string `target(!windows) { return "/"; }
 
-line_sep() string `public `target(windows)  { return "\r\n"; }
-line_sep() string `public `target(!windows) { return "\n";   }
+_platform_line_separator() string `target(windows) { return "\r\n"; }
+_platform_line_separator() string `target(!windows) { return "\n"; }
+
+type Platform `public {
+    get path_separator string `public `global => _platform_path_separator();
+    get line_separator string `public `global => _platform_line_separator();
+    is_path_separator(char c) bool `public `global { ... }
+}
 ```
 
 This is exactly the `\`test` pattern: `\`test` includes a function only when compiling tests;
@@ -148,16 +159,19 @@ Target identifiers:
 
 Operators: `!` (not), `\|\|` (or), `&&` (and), `()` grouping.
 
-### Implementation scope
+### Implementation (Done — Stage 8q)
 
-Small — entirely in sema:
+Entirely in sema (`sema/target.go`):
 
-1. Add `TargetInfo` struct (OS string, Arch string) to `Checker`
-2. In `declareFunc`, `declareType`, `declareEnum`: extract `\`target` annotation, evaluate condition against `c.target`, return early if false
-3. `evalTargetExpr` walks the expression AST: IDENT → match against known names, LOGNOT → negate, LOGOR/LOGAND → combine
-4. Pass `TargetInfo` from `main.go` through `CheckWithModules` (derive from the target triple string already known at compile time)
+- `TargetInfo` struct (OS string, Arch string) on `Checker`
+- `matchesTarget()` evaluated in declare pass (pass 1) — non-matching declarations are skipped
+- `ParseTargetInfo(triple)` derives OS/Arch from LLVM target triple
+- 11 codegen sites check `FilteredDecls[decl]` to skip filtered declarations
+- Module loader passes target info so dependencies also filter correctly
+- `promise doc` uses `HostTargetInfo()` — shows declarations for the current host platform
 
-No codegen changes. Filtered declarations are absent from the scope — codegen never sees them.
+No grammar changes were needed. `` `target `` is used in production code in `modules/std/platform.pr`
+(Platform constants) and in e2e tests (`tests/e2e/test_target_filter.pr`).
 
 ### Where `\`target` applies vs where it does not
 
@@ -173,9 +187,10 @@ Concrete inventory across std and modules:
 
 | Function/Type | Target variants | Currently handled by |
 |---|---|---|
-| `sep() string` | `windows` / `!windows` | Go codegen native function |
-| `line_sep() string` | `windows` / `!windows` | Go codegen native function |
-| `is_absolute(string) bool` | Windows drive letters vs POSIX `/` | hardcoded `/` (bug on Windows) |
+| `Platform.path_separator` | `windows` / `!windows` | `std/platform.pr` global getter |
+| `Platform.line_separator` | `windows` / `!windows` | `std/platform.pr` global getter |
+| `Platform.is_path_separator(char)` | `windows` / `!windows` | `std/platform.pr` global method |
+| `is_absolute(string) bool` | Windows drive letters vs POSIX `/` | `modules/path/path.pr` using `Platform.is_path_separator` |
 | `sleep(Duration)` | WASM no-op vs `nanosleep` | Go codegen `if c.isWasm` |
 | `File` type | `!wasm` only (no filesystem on WASM) | (not yet implemented) |
 | `read_line/read_stdin` | `!wasm` only | (not yet implemented) |
@@ -232,8 +247,8 @@ std source, not in Go internals.
 
 ### Exhaustiveness
 
-The compiler does not verify that `\`target` variants cover all targets. If `sep()` is only
-defined with `\`target(windows)` and a Windows program calls `sep()`, it works. On Linux, `sep()`
+The compiler does not verify that `\`target` variants cover all targets. If a function is only
+defined with `\`target(windows)` and a Windows program calls it, it works. On Linux, the function
 is undefined — caller gets a "function not found" error. This is correct: incomplete coverage
 is a programmer error caught at compile time.
 
@@ -243,26 +258,33 @@ annotation as the default (no annotation = always compiled).
 
 ---
 
-## 3. Platform Constants: `sep()` and `line_sep()`
+## 3. Platform Constants: `Platform` Type (Done)
 
-With `\`target`, platform constants are simple functions with two variants. No Go codegen native
-functions, no `promise_path_sep` to maintain:
+Platform constants live in `modules/std/platform.pr` as global getters and methods on a `Platform`
+namespace type. All `` `target `` annotations are confined to `std/` — external modules like
+`modules/path/` call `Platform.path_separator`, `Platform.is_path_separator(c)`, etc.
 
 ```promise
-// modules/path/path.pr
-`public `doc("Returns the platform path separator: `/` on POSIX, `\\` on Windows.")
-sep() string `target(windows)  { return "\\"; }
-sep() string `target(!windows) { return "/"; }
+// modules/std/platform.pr
+_platform_path_separator() string `target(windows) { return "\\"; }
+_platform_path_separator() string `target(!windows) { return "/"; }
 
-// modules/std/io.pr
-`public `doc("Returns the platform line ending: `\\n` on POSIX, `\\r\\n` on Windows.")
-line_sep() string `target(windows)  { return "\r\n"; }
-line_sep() string `target(!windows) { return "\n"; }
+_platform_line_separator() string `target(windows) { return "\r\n"; }
+_platform_line_separator() string `target(!windows) { return "\n"; }
+
+_platform_is_path_separator(char c) bool `target(windows) { return c == '/' || c == '\\'; }
+_platform_is_path_separator(char c) bool `target(!windows) { return c == '/'; }
+
+type Platform `public {
+    get line_separator string `public `global => _platform_line_separator();
+    get path_separator string `public `global => _platform_path_separator();
+    is_path_separator(char c) bool `public `global { return _platform_is_path_separator(c); }
+}
 ```
 
-`line_sep()` belongs in `std/io` (not `modules/path`) because line endings affect all text output,
-including programs that never touch the filesystem. `write_line` should call `line_sep()` rather
-than hardcoding `"\n"`.
+`Platform.line_separator` is in `std` (not `modules/path`) because line endings affect all text
+output, including programs that never touch the filesystem. `write_line` uses
+`Platform.line_separator` rather than hardcoding `"\n"`.
 
 **`println` and `\r\n`**: `println` always emits `\n`. Modern Windows terminals (Windows Terminal,
 VS Code, PowerShell) handle `\n` correctly. `println` is for human-readable terminal output.
@@ -296,27 +318,25 @@ heavier.
 
 ## 5. `modules/path` — Path Manipulation
 
-**Status**: Implemented. Pure string operations, POSIX-only (`/` separator hardcoded).
+**Status**: Implemented. Pure string operations, platform-aware via `Platform.is_path_separator`.
 
-### Current API (keep as-is)
+### Current API (Done)
 
 ```promise
-join(string base, string child) string          // join two path components
-basename(string path) string                    // last path component
-dirname(string path) string                     // all but last component
-extension(string path) string                   // ".txt" or ""
-stem(string path) string                        // basename without extension
+join(string base, string child, ...string rest) string  // join two or more path components
+file_name(string path) string                           // last path component
+parent(string path) string                              // all but last component
+extension(string path) string                           // ".txt" or ""
+stem(string path) string                                // file_name without extension
 is_absolute(string path) bool
 is_relative(string path) bool
 ```
 
+Platform awareness is handled via `Platform.is_path_separator(c)` and `Platform.path_separator`
+from `std/platform.pr`. All `` `target `` annotations are confined to std — the path module
+contains no target-filtered code.
+
 ### Additions needed
-
-**`sep() string`** — platform separator constant (see §2).
-
-**Windows-awareness in existing functions**: once `sep()` exists, update `join`, `is_absolute`,
-and `basename` to treat both `/` and `\` as separators on Windows targets, and to recognize
-drive letters (`C:\`) as absolute paths.
 
 **`normalize(string path) string`** — collapses `.`, `..`, and redundant separators. Pure Promise,
 no syscalls:
@@ -325,16 +345,6 @@ no syscalls:
 normalize("/home/user/../user/./file.txt") // → "/home/user/file.txt"
 normalize("./a/b/../c")                    // → "a/c"
 ```
-
-**`join_all(string[] parts) string`** — joins any number of components. Complements the existing
-two-argument `join` for when the number of components is dynamic:
-
-```promise
-join_all(["home", "user", "file.txt"])  // → "home/user/file.txt"
-```
-
-Keep the two-argument `join` — it is the common case and is more readable than constructing a slice
-literal for two fixed components.
 
 **`split_all(string path) string[]`** — splits into all components:
 
@@ -376,28 +386,29 @@ This reduces visual noise and signals the right semantics to readers.
 
 ```promise
 // Function: signals "doing something"
-sep()         // requires ()
+Platform.path_separator()   // if it were a function — requires ()
 
 // Getter: signals "reading a property"
-sep           // no ()  — cleaner, reads like a variable
+Platform.path_separator     // global getter — no () — cleaner, reads like a variable
 ```
 
 **Where this applies today**:
-- `sep`, `line_sep` — compile-time constants, clearly properties
+- `Platform.path_separator`, `Platform.line_separator` — compile-time constants, clearly properties
+  (implemented as `` `global `` getters on the `Platform` type)
 - `args` — set once at startup, effectively readonly after that
 
 **Implementation state**:
 - Type-level getters: fully implemented. `get name type { ... }` inside a type body.
-- `\`global` getters on types: currently blocked (sema error). Removing the restriction
-  is a one-line sema change (delete the `if md.IsGetter || md.IsSetter` error in `decl.go:460`).
+- `` `global `` getters on types: fully implemented. `get name type \`public \`global { ... }`
+  inside a type body. No receiver, called as `TypeName.getter_name`.
 - **Module-level getters**: NOT in the grammar. `declaration` only has `typeDecl | enumDecl | funcDecl`.
   Adding `getterDecl` to `declaration` requires a grammar change (ANTLR regen), sema handling
   (declare getter at module scope), and call-site resolution (bare `args` resolves to getter call,
   not variable). Moderate effort — track as a language enhancement.
 
 **For now**: failable operations (`get_cwd() string!`) stay as functions — `()` correctly signals
-that something is happening. Pure-value properties (`sep`, `line_sep`, `args`) are candidates for
-getter syntax once module-level getters land.
+that something is happening. Pure-value properties (`args`) are candidates for getter syntax once
+module-level getters land.
 
 ---
 
@@ -664,28 +675,27 @@ None of these belong in `std/`. They are progressively heavier and progressively
 ## 11. Complete Layout
 
 ```
-modules/std/        (auto-imported via implicit `use std as _;`)
-  io.pr         — println, write_line, Closer, line_sep()
-  format.pr     — Writer, Format
-  parse.pr      — Reader, Parse, Scanner, scan[T]
-  time.pr       — Duration, Instant, sleep
-  math.pr       — PI, sqrt, sin, min, max, ...
-  string.pr     — string methods
-  vector.pr     — Vector[T]
-  map.pr        — Map[K,V]
-  ... (other std)
+modules/
+  std/            (auto-imported via implicit `use std as _;`)
+    io.pr         — println, write_line, Closer
+    platform.pr   — Platform (path_separator, line_separator, is_path_separator)
+    format.pr     — Writer, Format, Builder
+    parse.pr      — Reader, Parse, Scanner, scan[T]
+    time.pr       — Duration, Instant, sleep
+    math.pr       — PI, sqrt, sin, min, max, ...
+    string.pr     — string methods
+    vector.pr     — Vector[T]
+    map.pr        — Map[K,V]
+    iter.pr       — Iterator[T], combinators
+    ... (28 files total)
 
-modules/              (explicit import — use path; / use io; / etc.)
-  path/         — join, basename, dirname, ext, sep(), normalize
-  io/           — File, BufReader, IoError, read_file, write_file,
-                  read_line, read_stdin, list_dir, mkdir, ...
-  os/           — args, get_env, get_cwd, exit, exec, OsError
-  time/         — DateTime, unix_now, format/parse calendar ops
-  math/         — lerp, map_range, deg_to_rad, sign_f64
-  strings/      — join, spaces, reverse, ...
-  net/          — (future)
-  http/         — (future)
-  json/         — (future)
+  path/           — join, file_name, parent, extension, stem, is_absolute  (DONE)
+  math/           — lerp, map_range, deg_to_rad, sign_f64            (DONE)
+  strings/        — join, spaces, reverse, ...                        (DONE)
+  io/             — File, BufReader, IoError, read_line, read_stdin   (PLACEHOLDER)
+  os/             — args, get_env, get_cwd, exit, exec, OsError       (PLACEHOLDER)
+  time/           — DateTime, unix_now, format/parse calendar ops     (PLACEHOLDER)
+  http/           — HTTP server/client                                 (PLACEHOLDER)
 ```
 
 **The invariant**: the `std` module is auto-imported everywhere (convenience), but compiled and
@@ -747,30 +757,42 @@ Add a new Phase 4 header: "Platform Modules — see `docs/platform-modules.md`."
 ### ~~Phase A — std-as-module refactor~~ (Done)
 
 1. ~~Add `modules/std/promise.toml` (`[module] name = "std"`)~~ — done
-2. ~~In `main.go`: remove `mergeStdDecls`/`parseStdFiles`; auto-inject `UseDecl{CatalogName: "std", Alias: "_"}` into every file instead~~ — done
-3. ~~In `sema/decl.go`: remove `stdScope`-as-parent special case; std resolved like any catalog module via `loadCatalog("std")`~~ — done (`CheckForStdModule`, `globScope`)
+2. ~~In `main.go`: auto-inject `UseDecl{CatalogName: "std", Alias: "_"}` into every file~~ — done
+3. ~~In `sema/decl.go`: std resolved like any catalog module via `loadCatalog("std")`~~ — done
 4. ~~Remove `IsStd` flag from AST nodes and `isDeclStd` from sema~~ — done
-5. ~~Update test infrastructure: `testutil.LoadStdFiles()` → compile std as a module~~ — done
-6. ~~Add `-function-sections` to `llc` + `--gc-sections` to `lld` for function-level DCE~~ — superseded by LTO pipeline (`opt → .bc → linker --lto-O1`)
+5. ~~Update test infrastructure: compile std as a module~~ — done
+6. ~~DCE: superseded by LTO pipeline (`opt → .bc → linker --lto-O1`)~~ — done
 
-No language changes — all existing programs continue to work identically. Build cache for std
-(nearly always a cache hit), cleaner compiler internals, correct mental model for std/modules.
+Also done since this doc was written:
+- ~~`\`target(cond)` compile-time platform filtering~~ — done (Stage 8q, `sema/target.go`)
+- ~~Std moved from `std/` to `modules/std/`~~ — done (all modules under `modules/`)
+- ~~Build cache with FNV-128a hashing, compiler stamp, persistent module cache~~ — done
+- ~~`promise format` code formatter~~ — done
 
-### Phase B — platform constants (minimal, immediate value)
+### ~~Phase B — platform constants~~ (Done)
 
-7. **`line_sep()` in `modules/std/io.pr`** + codegen `promise_line_sep`
-8. **Update `write_line`** to use `line_sep()` instead of `"\n"`
-9. **`sep()` in `modules/path`** + codegen `promise_path_sep`
+First real use of `` `target `` in production code. Platform constants consolidated into
+`Platform` namespace type in `modules/std/platform.pr` with `` `global `` getters and methods.
+
+7. ~~**`Platform.line_separator`** global getter in `modules/std/platform.pr`~~ — done
+8. ~~**Update `write_line`** to use `Platform.line_separator`~~ — done
+9. ~~**`Platform.path_separator`** global getter in `modules/std/platform.pr`~~ — done
+10. ~~**`Platform.is_path_separator(char)`** global method in `modules/std/platform.pr`~~ — done
+11. ~~**Windows-aware `join`/`is_absolute`/`file_name`/`parent`**~~ — done (use `Platform.is_path_separator`)
+12. ~~**Rename `basename` → `file_name`, `dirname` → `parent`**~~ — done (Rust-style naming)
+13. ~~**Enable `` `global `` getters in sema**~~ — done (removed restriction in `decl.go`)
+14. ~~**Global getter codegen**~~ — done (handle no-receiver dispatch in `expr.go`)
+15. ~~**`HostTargetInfo()` for Go test helpers**~~ — done (`target.go`, all test helpers updated)
 
 ### Phase C — path module completion
 
-10. **`normalize` and `join_all`** in `modules/path` — pure Promise, no new PAL
-11. **Windows-aware `join`/`is_absolute`/`basename`** — uses `sep()` internally
+16. **`normalize` and `split_all`** in `modules/path` — pure Promise, no new PAL
+    (`join_all` superseded by variadic `join(base, child, ...rest)`)
 
-### Phase D — file I/O
+### Phase D — file I/O (biggest phase — needs PAL work)
 
 12. **PAL file functions** — add to `codegen/io.go`: open, read, close, stat, remove, mkdir, readdir, seek
-13. **`modules/io`** — `IoError`, `File`, `BufReader`, all free functions, `read_line`, `read_stdin`
+13. **`modules/io`** — `IoError`, `File`, `BufReader`, `read_line`, `read_stdin`
 
 ### Phase E — OS and process
 

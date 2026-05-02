@@ -1,0 +1,73 @@
+use path;
+
+test_join_basic() `test {
+    assert(path.join("foo", "bar") == "foo/bar", "join basic");
+}
+
+test_join_trailing_slash() `test {
+    assert(path.join("foo/", "bar") == "foo/bar", "join trailing slash");
+}
+
+test_join_empty_base() `test {
+    assert(path.join("", "bar") == "bar", "join empty base");
+}
+
+test_join_empty_child() `test {
+    assert(path.join("foo", "") == "foo", "join empty child");
+}
+
+test_join_three() `test {
+    assert(path.join("home", "user", "docs") == "home/user/docs", "join three segments");
+}
+
+test_join_four() `test {
+    assert(path.join("/", "usr", "local", "bin") == "/usr/local/bin", "join four segments");
+}
+
+test_file_name() `test {
+    assert(path.file_name("/usr/local/bin") == "bin", "file_name");
+}
+
+test_file_name_trailing_slash() `test {
+    assert(path.file_name("/usr/local/") == "local", "file_name trailing slash");
+}
+
+test_parent() `test {
+    assert(path.parent("/usr/local/bin") == "/usr/local", "parent");
+}
+
+test_parent_bare() `test {
+    assert(path.parent("file.txt") == ".", "parent bare filename");
+}
+
+test_extension() `test {
+    assert(path.extension("file.txt") == ".txt", "extension");
+}
+
+test_extension_none() `test {
+    assert(path.extension("Makefile") == "", "extension none");
+}
+
+test_stem() `test {
+    assert(path.stem("file.txt") == "file", "stem");
+}
+
+test_stem_multi_dot() `test {
+    assert(path.stem("archive.tar.gz") == "archive.tar", "stem multi dot");
+}
+
+test_is_absolute() `test {
+    assert(path.is_absolute("/usr/bin"), "is_absolute /usr/bin");
+    assert(!path.is_absolute("relative/path"), "not absolute relative");
+}
+
+test_is_relative() `test {
+    assert(path.is_relative("relative/path"), "is_relative relative");
+    assert(!path.is_relative("/absolute"), "not relative /absolute");
+}
+
+test_path_separator() `test {
+    // Platform.path_separator is used by join()
+    string sep = Platform.path_separator;
+    assert(sep == "/" || sep == "\\", "path separator valid");
+}

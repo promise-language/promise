@@ -44,7 +44,7 @@ func getSemaStdScope() *types.Scope {
 		if len(buildErrs) > 0 {
 			panic("std AST build errors: " + buildErrs[0].Error())
 		}
-		stdInfo, _ := CheckForStdModule(stdFile, TargetInfo{})
+		stdInfo, _ := CheckForStdModule(stdFile, HostTargetInfo())
 		semaStdScope = ExportedScope(stdInfo, stdFile)
 	})
 	return semaStdScope
@@ -5487,7 +5487,7 @@ func checkWithRawStd(t *testing.T, stdSrc, userSrc string) (*Info, []error) {
 	if len(errs) > 0 {
 		t.Fatalf("std AST build errors: %v", errs)
 	}
-	stdInfo, stdErrs := CheckForStdModule(stdFile, TargetInfo{})
+	stdInfo, stdErrs := CheckForStdModule(stdFile, HostTargetInfo())
 	if len(stdErrs) > 0 {
 		return stdInfo, stdErrs
 	}
@@ -9032,13 +9032,23 @@ func TestGlobalMethodNoSelfInReturnType(t *testing.T) {
 		"}\n")
 }
 
-func TestGlobalMethodNoGetterSetter(t *testing.T) {
-	errs := checkErrs(t, "type Foo {\n"+
+func TestGlobalGetterAllowed(t *testing.T) {
+	checkOK(t, "type Foo {\n"+
 		"int x;\n"+
 		"get count int `global { return 0; }\n"+
 		"}\n"+
+		"main() {\n"+
+		"n := Foo.count;\n"+
+		"}\n")
+}
+
+func TestGlobalSetterNotAllowed(t *testing.T) {
+	errs := checkErrs(t, "type Foo {\n"+
+		"int x;\n"+
+		"set count(int v) `global { }\n"+
+		"}\n"+
 		"main() {}\n")
-	expectError(t, errs, "cannot be a getter or setter")
+	expectError(t, errs, "cannot be a setter")
 }
 
 func TestGlobalMethodOnGenericTypeError(t *testing.T) {

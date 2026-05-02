@@ -5,20 +5,23 @@
 test_write_line() `test {
     Builder b = Builder();
     write_line(b, "hello")!;
-    assert(b.to_string() == "hello\n", "write_line appends newline");
+    string sep = Platform.line_separator;
+    assert(b.to_string() == "hello" + sep, "write_line appends platform line separator");
 }
 
 test_write_line_multiple() `test {
     Builder b = Builder();
     write_line(b, "first")!;
     write_line(b, "second")!;
-    assert(b.to_string() == "first\nsecond\n", "multiple write_lines");
+    string sep = Platform.line_separator;
+    assert(b.to_string() == "first" + sep + "second" + sep, "multiple write_lines");
 }
 
 test_write_line_empty() `test {
     Builder b = Builder();
     write_line(b, "")!;
-    assert(b.to_string() == "\n", "write_line empty string");
+    string sep = Platform.line_separator;
+    assert(b.to_string() == sep, "write_line empty string");
 }
 
 // --- Closer structural interface ---

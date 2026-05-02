@@ -1,0 +1,22 @@
+// std/platform.pr — Compile-time platform constants via `target(cond) filtering.
+
+// Internal helpers — target-filtered, one variant compiled per platform.
+_platform_line_separator() string `target(windows) { return "\r\n"; }
+_platform_line_separator() string `target(!windows) { return "\n"; }
+
+_platform_path_separator() string `target(windows) { return "\\"; }
+_platform_path_separator() string `target(!windows) { return "/"; }
+
+_platform_is_path_separator(char c) bool `target(windows) { return c == '/' || c == '\\'; }
+_platform_is_path_separator(char c) bool `target(!windows) { return c == '/'; }
+
+// TODO: Add `namespace annotation to prevent instantiation of types used purely as namespaces.
+// Platform should not be instantiated — it serves only as a namespace for platform constants.
+type Platform `public `doc("Platform-specific constants determined at compile time. Each getter returns the value appropriate for the current build target via `target(cond) filtering.") {
+    get line_separator string `public `global `doc("Line ending for the current platform. \"\\r\\n\" on Windows, \"\\n\" elsewhere.") => _platform_line_separator();
+    get path_separator string `public `global `doc("File path component separator. \"\\\\\" on Windows, \"/\" elsewhere.") => _platform_path_separator();
+
+    is_path_separator(char c) bool `public `global `doc("Returns true if the character is a path separator. On Windows, both '/' and '\\\\' are separators. On POSIX, only '/'.") {
+        return _platform_is_path_separator(c);
+    }
+}

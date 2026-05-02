@@ -2278,6 +2278,16 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 // genGetterCall emits a call to a getter method (zero args beyond receiver).
 // Uses virtual dispatch through the vtable when the static type needs it.
 func (c *Compiler) genGetterCall(e *ast.MemberExpr, targetType types.Type, named *types.Named, getter *types.Method) value.Value {
+	// Global getter: no receiver, just call the function directly.
+	if getter.Sig().Recv() == nil {
+		mangledName := mangleMethodName(c.resolveTypeName(targetType), e.Field, false)
+		fn, ok := c.funcs[mangledName]
+		if !ok {
+			panic(fmt.Sprintf("codegen: undeclared global getter %s", mangledName))
+		}
+		return c.block.NewCall(fn)
+	}
+
 	// Virtual dispatch for getter when static type needs vtable
 	if c.needsVtable(named) && !getter.IsNative() {
 		return c.genVirtualGetterCall(e, named, getter, targetType)
@@ -4276,6 +4286,10 @@ func (c *Compiler) genFieldOnValue(val value.Value, typ types.Type, fieldName st
 		fn, ok := c.funcs[mangledName]
 		if !ok {
 			panic(fmt.Sprintf("codegen: undeclared getter %s", mangledName))
+		}
+		// Global getter: no receiver
+		if g.Sig().Recv() == nil {
+			return c.block.NewCall(fn)
 		}
 		// val is a value struct — pass it directly (getters expect the value struct as receiver)
 		return c.block.NewCall(fn, val)

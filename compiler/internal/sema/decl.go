@@ -456,8 +456,11 @@ func (c *Checker) defineMethod(named *types.Named, md *ast.MethodDecl, typeName 
 		if md.Receiver != nil {
 			c.errorf(md.Pos(), "`%s method %s.%s must not declare a receiver", metaName, typeName, md.Name)
 		}
-		if md.IsGetter || md.IsSetter {
-			c.errorf(md.Pos(), "`%s method %s.%s cannot be a getter or setter", metaName, typeName, md.Name)
+		if md.IsSetter {
+			c.errorf(md.Pos(), "`%s method %s.%s cannot be a setter", metaName, typeName, md.Name)
+		}
+		if isMono && md.IsGetter {
+			c.errorf(md.Pos(), "`mono method %s.%s cannot be a getter", typeName, md.Name)
 		}
 		if isGlobal && len(named.TypeParams()) > 0 {
 			c.errorf(md.Pos(), "`global method %s.%s cannot be on a generic type — use `mono instead", typeName, md.Name)

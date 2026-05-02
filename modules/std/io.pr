@@ -15,7 +15,7 @@ type Closer `structural `public `doc("Structural interface for resources that ne
     close(~this)! `abstract;
 }
 
-write_line(Writer ~w, string s)! `public `doc("Writes a string followed by a newline to a Writer.") {
+write_line(Writer ~w, string s)! `public `doc("Writes a string followed by the platform line separator to a Writer.") {
     w.write_string(s);
-    w.write_string("\n");
+    w.write_string(Platform.line_separator);
 }

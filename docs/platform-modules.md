@@ -693,7 +693,8 @@ to the browser event loop, and JS callbacks re-enqueue goroutines when IO comple
 ## 8. `modules/os` — Operating System Interface
 
 **Status**: Core implemented (`get_environment_variable`, `get_working_directory`, `exit_process`,
-`arguments`, `executable_path`). Remaining: `execute`.
+`arguments`, `executable_path`). Remaining: `execute`, `set_environment_variable`,
+`set_working_directory`, signal handling.
 
 Applying §6 principles: `arguments` is a getter candidate (read-once at startup, effectively readonly).
 `exit_process` and `execute` stay as functions (they perform actions). `get_environment_variable` and
@@ -729,7 +730,7 @@ executable_path() string `public
     `doc("Returns the path to the running executable as provided by the
           operating system (argv[0]).");
 
-// --- Planned ---
+// --- Planned: subprocess execution ---
 
 type ProcessResult `public `doc("The result of a subprocess execution.") {
     int exit_code;
@@ -737,7 +738,36 @@ type ProcessResult `public `doc("The result of a subprocess execution.") {
     string stderr;
 }
 
-execute(string program, string[] arguments) ProcessResult! `public;
+execute(string program, string[] arguments) ProcessResult! `public
+    `doc("Runs a subprocess, waits for it to exit, and captures its output.
+          Raises an error if the process could not be started.");
+
+// --- Planned: environment mutation ---
+
+set_environment_variable(string name, string? value) `public
+    `doc("Sets the named environment variable to the given value.
+          Creates the variable if it does not exist.
+          Pass absent to remove the variable.");
+
+// --- Planned: working directory mutation ---
+
+set_working_directory(string path) `public
+    `doc("Changes the current working directory to the given path.
+          Raises an error if the path does not exist or is not a directory.");
+
+// --- Planned: signal handling ---
+
+type Signal `public `doc("An OS signal (SIGINT, SIGTERM, etc.).") {
+    int number;
+}
+
+on_signal(Signal signal, () handler) `public
+    `doc("Registers a handler to be called when the given signal is received.
+          Replaces any previously registered handler for that signal.");
+
+// --- Future: streaming subprocess (modules/process) ---
+// Streaming subprocess I/O (piped stdin/stdout/stderr) is a separate concern.
+// Will live in modules/process, not modules/os. See Q4 below.
 ```
 
 **Implementation notes**:
@@ -954,7 +984,11 @@ First real use of `` `target `` in production code. Platform constants consolida
 
 14. ~~**Args capture in `main` prologue**~~ — **Done.** `main(argc, argv)` stores to `@__promise_argc`/`@__promise_argv` globals. WASM `_start` passes 0/null.
 15. ~~**`modules/os` core**~~ — **Done.** `get_environment_variable` (string?), `get_working_directory` (string!), `exit_process`, `arguments` (string[]), `executable_path` (string). Failable and optional extern bridge infrastructure. PAL getenv/getcwd for POSIX/Windows/WASM. 11 tests (excluded on WASM).
-16. **`modules/os` remaining** — `execute`
+16. **`execute`** — synchronous subprocess execution via `posix_spawn`/`CreateProcess`. Returns `ProcessResult!` with exit code + captured stdout/stderr. PAL: POSIX `posix_spawn` + `waitpid` + pipe reads; Windows `CreateProcessW`; WASM stub returns error.
+17. **`set_environment_variable(name, value?)`** — `string?` value: present sets, absent unsets. PAL: POSIX `setenv`/`unsetenv`; Windows `_putenv_s`/`_putenv`; WASM stub.
+18. **`set_working_directory`** — PAL: POSIX `chdir`; Windows `_chdir`; WASM stub returns error.
+19. **Signal handling** — `on_signal(Signal, () handler)`. PAL: POSIX `sigaction`; Windows `SetConsoleCtrlHandler`; WASM no-op.
+20. **Streaming subprocess** — `modules/process` (separate module). Piped stdin/stdout/stderr, async I/O integration with scheduler.
 
 ### Phase F — calendar time
 

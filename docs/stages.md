@@ -1184,47 +1184,23 @@ All non-module test files (`tests/...`) — both unit tests (`` `test ``) and E2
 |------|
 | ~~String slicing~~ — **Done.** `string[:]` operator implemented in `modules/std/string.pr` and codegen. Tested in `tests/std/test_string.pr` (7 slice tests). |
 | Unicode normalization |
-| **Module-level getters and setters** — Allow `get name Type` and `set name(Type param)` declarations at file/module level (not just inside type bodies). Enables `os.arguments` instead of `os.arguments()` and `os.working_directory = "/tmp"` instead of `os.set_working_directory("/tmp")`. See plan below. |
+| **Module-level getters and setters** (Done) — `get name Type` and `set name(Type param)` declarations at file/module level. Enables `os.arguments` instead of `os.arguments()` and `os.working_directory = "/tmp"` instead of `os.set_working_directory("/tmp")`. |
 
-### Module-Level Getters and Setters (Planned)
+### Module-Level Getters and Setters (Done)
 
-**Motivation:** Functions like `os.get_working_directory()`, `os.arguments()`, and `os.set_working_directory("/tmp")` are computed properties of the environment. Calling them with `()` is noise, and `set_x(value)` is less readable than assignment. Module-level getters and setters let these be accessed as properties:
+Implemented. Module-level `get name Type { ... }` and `set name(Type param) { ... }` declarations work at file/module scope, consistent with type-level getters/setters. Getters are zero-arg functions called implicitly on property access; setters are one-arg void functions called on assignment (stored under `name$set` to avoid collision).
 
 ```promise
 use os;
-string[] args = os.arguments;            // getter: instead of os.arguments()
-string cwd = os.working_directory;       // getter: instead of os.get_working_directory()
-os.working_directory = "/tmp";           // setter: instead of os.set_working_directory("/tmp")
+string[] args = os.arguments;            // getter: no ()
+string cwd = os.working_directory!;      // failable getter with ! unwrap
 ```
 
-This is consistent with how type-level getters/setters already work (`v.len`, `v.is_empty`, `d.as_millis`) and extends the same pattern to modules. Setters are syntactic sugar — `os.working_directory = "/tmp"` desugars to calling the setter function with the assigned value.
-
-**Current state:** Both getters (`get name Type`) and setters (`set name(Type param)`) can only appear inside `type { ... }` bodies. The grammar rules `getterDecl` and `setterDecl` are only reachable via `typeMember`. Codegen has a defensive `if getter.Sig().Recv() == nil` path in `genGetterCall` that would become the real path.
-
-**Implementation plan:**
-
-1. **Grammar** (`PromiseParser.g4`): Add `getterDecl` and `setterDecl` as alternatives in `topLevelDecl` (alongside `funcDecl`, `typeDecl`, etc.). The existing rules work as-is — `get` and `set` are already contextual keywords (lexed as IDENT).
-
-2. **AST builder** (`visit_decl.go`): Handle `getterDecl` and `setterDecl` in `VisitSourceFile` / `VisitTopLevelDecl`. Create `MethodDecl{IsGetter: true}` / `MethodDecl{IsSetter: true}` with no receiver. Attach to the file's function declarations.
-
-3. **Sema**:
-   - **Declare pass** (`decl.go`): Register module-level getters as `() ReturnType` functions (or `() ReturnType!` for failable). Register module-level setters as `(ParamType) void` functions (or `(ParamType) void!` for failable).
-   - **Check pass**: Type-check getter/setter bodies as regular function bodies (no `this` in scope).
-   - **Module visibility**: Respect `` `public `` annotation for module export.
-   - **Pairing**: A setter without a matching getter is allowed (write-only property). A getter without a setter is read-only. The compiler does not require them to be paired.
-
-4. **Codegen** (`expr.go`, `compiler.go`):
-   - Emit module-level getters/setters as regular LLVM functions (e.g., `@os.arguments`, `@os.working_directory$set`).
-   - **Getter resolution**: In `genMemberAccessExpr`, when resolving `module.name`, check if `name` is a module-level getter. If so, emit a call with no arguments.
-   - **Setter resolution**: In `genAssignment`, when the LHS is `module.name` and `name` is a module-level setter, emit a call with the RHS as the argument. Compound assignment (`module.x += 1`) desugars to getter + operator + setter.
-   - Consistent with type-level getter/setter dispatch.
-
-5. **Module system**: Module-level getters/setters participate in `ExportedScope` when annotated `` `public ``. The `promise doc` command should list them alongside functions.
-
-**Scope:** Small-medium. Grammar change is trivial. Main work is in sema (declare/check without receiver) and codegen (module-qualified getter/setter resolution, assignment LHS handling).
-
-**Candidates for conversion** (once implemented):
+**Converted to getters:**
 - `os.arguments` — command-line arguments (`string[]`, getter only)
-- `os.working_directory` — current working directory (`string!`, getter + setter)
-- `os.environment` — all environment variables (`map[string, string]`, getter only)
-- `platform.line_separator` — already exists as a type-level `get` on `Platform`, could also be a module-level getter
+- `os.executable_path` — path to running executable (`string`, getter only)
+- `os.working_directory` — current working directory (`string!`, getter only — setter planned)
+
+**Remaining as functions:**
+- `os.get_environment_variable(name)` — takes a parameter, cannot be a getter
+- `os.exit_process(code)` — performs an action, function syntax is correct

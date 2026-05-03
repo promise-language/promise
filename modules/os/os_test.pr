@@ -58,13 +58,13 @@ test_working_directory_absolute() `test(exclude: "wasm32") {
 }
 
 test_arguments_returns_empty_in_test_runner() `test(exclude: "wasm32") {
-  string[] a = arguments();
-  // Test runner passes no user arguments, so arguments() should be empty
+  string[] a = arguments;
+  // Test runner passes no user arguments, so arguments should be empty
   assert(a.len == 0, "arguments should be empty in test runner");
 }
 
 test_arguments_is_iterable() `test(exclude: "wasm32") {
-  string[] a = arguments();
+  string[] a = arguments;
   int count = 0;
   for _ in a {
     count = count + 1;
@@ -73,18 +73,18 @@ test_arguments_is_iterable() `test(exclude: "wasm32") {
 }
 
 test_executable_path_returns_string() `test(exclude: "wasm32") {
-  string exe = executable_path();
+  string exe = executable_path;
   assert(exe.len > 0, "executable_path should be non-empty");
 }
 
 test_executable_path_contains_slash() `test(exclude: "wasm32") {
-  string exe = executable_path();
+  string exe = executable_path;
   // The executable path should be an absolute or relative path with a separator
   assert(exe.contains("/"), "executable_path should contain a path separator");
 }
 
 test_executable_path_is_stable() `test(exclude: "wasm32") {
-  string exe1 = executable_path();
-  string exe2 = executable_path();
-  assert(exe1 == exe2, "calling executable_path() twice should return the same value");
+  string exe1 = executable_path;
+  string exe2 = executable_path;
+  assert(exe1 == exe2, "reading executable_path twice should return the same value");
 }

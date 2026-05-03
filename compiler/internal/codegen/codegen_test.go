@@ -5620,7 +5620,7 @@ func TestGenerateTestMainReplacesExistingMain(t *testing.T) {
 }
 
 func TestGenerateTestMainStoresArgcArgv(t *testing.T) {
-	// GenerateTestMain should store argc/argv to globals for os.arguments()/os.executable_path()
+	// GenerateTestMain should store argc/argv to globals for os.arguments/os.executable_path
 	result := compileResult(t, `
 		myTest() `+"`test"+` { }
 	`)

@@ -37,10 +37,10 @@ exit_process(int code) `public `doc("Terminates the process immediately with the
   _os_exit(code);
 }
 
-arguments() string[] `public `doc("Returns the command-line arguments passed to the program, excluding the executable path. Returns an empty list if no arguments were provided.") {
+get arguments string[] `public `doc("Returns the command-line arguments passed to the program, excluding the executable path. Returns an empty list if no arguments were provided.") {
   return _os_arguments();
 }
 
-executable_path() string `public `doc("Returns the path to the running executable as provided by the operating system (argv[0]). Returns an empty string on platforms without command-line arguments.") {
+get executable_path string `public `doc("Returns the path to the running executable as provided by the operating system (argv[0]). Returns an empty string on platforms without command-line arguments.") {
   return _os_executable_path();
 }

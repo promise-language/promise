@@ -442,7 +442,7 @@ EmitGetEnv(module *ir.Module) *ir.Func      // i8* name → i8* (value or null)
 EmitGetCwd(module *ir.Module) *ir.Func      // i8* buf, i64 len → i8* (path or null)
 ```
 
-Command-line arguments: captured in `main()` prologue from `argc`/`argv` and stored in a global `string[]`. Exposed via `os_args() string[]`.
+Command-line arguments: captured in `main()` prologue from `argc`/`argv` and stored in a global `string[]`. Exposed via `os.arguments` (module-level getter).
 
 ### 3.3 Time
 

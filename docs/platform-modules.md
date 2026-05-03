@@ -195,7 +195,7 @@ Concrete inventory across std and modules:
 | `File` type | `!wasm` only (no filesystem on WASM) | `modules/io/io.pr` — 4 factory constructors, handle methods, one-shot helpers |
 | `read_line/read_stdin` | `!wasm` only | `modules/io/io.pr` — free functions, `read_line` returns `string?!` (optional+failable) |
 | `exec(...)` | `!wasm` only (no subprocess on WASM) | (not yet implemented) |
-| `arguments()` | different impl on WASM | `modules/os/os.pr` — returns `string[]` from argc/argv globals |
+| `arguments` (getter) | different impl on WASM | `modules/os/os.pr` — returns `string[]` from argc/argv globals |
 | `get_env(string)` | `!wasm` (WASM env access varies) | (not yet implemented) |
 
 That's ~18 `\`target` annotation uses across std+modules. This replaces an equal number of
@@ -386,14 +386,14 @@ Platform.path_separator     // global getter — no () — cleaner, reads like a
 - Type-level getters: fully implemented. `get name type { ... }` inside a type body.
 - `` `global `` getters on types: fully implemented. `get name type \`public \`global { ... }`
   inside a type body. No receiver, called as `TypeName.getter_name`.
-- **Module-level getters**: NOT in the grammar. `declaration` only has `typeDecl | enumDecl | funcDecl`.
-  Adding `getterDecl` to `declaration` requires a grammar change (ANTLR regen), sema handling
-  (declare getter at module scope), and call-site resolution (bare `arguments` resolves to getter call,
-  not variable). Moderate effort — track as a language enhancement.
+- **Module-level getters**: fully implemented. `get name type { ... }` at file/module scope.
+  Grammar includes `getterDecl | setterDecl` in `topLevelDecl`. Sema declares getters as
+  zero-arg functions and setters as one-arg void functions (with `$set` suffix). Codegen emits
+  calls on property access and assignment.
 
-**For now**: failable operations (`get_cwd() string!`) stay as functions — `()` correctly signals
-that something is happening. Pure-value properties (`arguments`) are candidates for getter syntax once
-module-level getters land.
+`os.arguments`, `os.executable_path`, and `os.working_directory` are now module-level getters.
+Failable getters like `working_directory` use `!` unwrap at the call site (`os.working_directory!`).
+`get_environment_variable(name)` remains a function because it takes a parameter.
 
 ---
 
@@ -692,13 +692,14 @@ to the browser event loop, and JS callbacks re-enqueue goroutines when IO comple
 
 ## 8. `modules/os` — Operating System Interface
 
-**Status**: Core implemented (`get_environment_variable`, `get_working_directory`, `exit_process`,
+**Status**: Core implemented (`get_environment_variable`, `working_directory`, `exit_process`,
 `arguments`, `executable_path`). Remaining: `execute`, `set_environment_variable`,
 `set_working_directory`, signal handling.
 
-Applying §6 principles: `arguments` is a getter candidate (read-once at startup, effectively readonly).
-`exit_process` and `execute` stay as functions (they perform actions). `get_environment_variable` and
-`get_working_directory` stay as functions — the `()` signals that something is read from the OS.
+Applying §6 principles: `arguments`, `executable_path`, and `working_directory` are module-level
+getters (accessed as `os.arguments`, `os.executable_path`, `os.working_directory!`). `exit_process`
+and `execute` stay as functions (they perform actions). `get_environment_variable` stays as a function
+because it takes a parameter.
 
 Note: `exit_process` instead of `exit` because the bare name collides with libc's `@exit` symbol
 when the module is compiled inline (e.g., module tests). The qualified form `os.exit_process(code)`
@@ -714,7 +715,7 @@ get_environment_variable(string name) string? `public
           Returns none if the variable is not defined.
           An empty string is returned when the variable is set but empty.");
 
-get_working_directory() string! `public
+get working_directory string! `public
     `doc("Returns the absolute path of the current working directory.
           Raises an error if the OS call fails.");
 
@@ -722,11 +723,11 @@ exit_process(int code) `public
     `doc("Terminates the process immediately with the given exit code.
           Does not return. Does not run destructors or cleanup.");
 
-arguments() string[] `public
+get arguments string[] `public
     `doc("Returns the command-line arguments passed to the program,
           excluding the executable path.");
 
-executable_path() string `public
+get executable_path string `public
     `doc("Returns the path to the running executable as provided by the
           operating system (argv[0]).");
 
@@ -785,12 +786,12 @@ infrastructure patterns were introduced:
 - **Error construction** (`constructErrorFromCStr`/`constructErrorFromGlobalStr`): Allocates
   error instances with RTTI and message fields in LLVM IR, for use in bridge error paths.
 
-**`arguments()`/`executable_path()` implementation**: The C `main(argc, argv)` stores both values into
+**`arguments`/`executable_path` implementation**: The C `main(argc, argv)` stores both values into
 globals (`@__promise_argc`, `@__promise_argv`) at the start of the entry point, before scheduler
 init. The bridge functions (`defineArgsBody`, `defineExecutableBody`) read these globals and
-build the return values. `arguments()` skips `argv[0]` (program name) and returns `argv[1..argc-1]`
-as a `Vector[string]`. `executable_path()` returns `argv[0]` as a string.
-On WASM, `_start` passes `argc=0, argv=null` — both functions return empty results.
+build the return values. `arguments` skips `argv[0]` (program name) and returns `argv[1..argc-1]`
+as a `Vector[string]`. `executable_path` returns `argv[0]` as a string.
+On WASM, `_start` passes `argc=0, argv=null` — both getters return empty results.
 
 **PAL functions** (POSIX/Windows/WASM):
 ```

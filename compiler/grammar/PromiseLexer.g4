@@ -117,7 +117,7 @@ UNDERSCORE  : '_';
 // ============================================================
 
 fragment FLOAT_SUFFIX : 'f32' | 'f64' ;
-fragment INT_SUFFIX   : [iu] ('8' | '16' | '32' | '64') ;
+fragment INT_SUFFIX   : [iu] ('8' | '16' | '32' | '64')? ;
 
 FLOAT_LITERAL
     : ('0' | [1-9] ([0-9_]* [0-9])?) '.' [0-9] ([0-9_]* [0-9])? ([eE] [+-]? [0-9]+)? FLOAT_SUFFIX?

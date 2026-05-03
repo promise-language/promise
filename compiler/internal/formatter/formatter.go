@@ -434,7 +434,7 @@ func (l *lexer) lexIntSuffix() {
 		return
 	}
 	ch := l.src[l.pos]
-	if (ch == 'i' || ch == 'u') && l.pos+1 < len(l.src) {
+	if ch == 'i' || ch == 'u' {
 		rest := l.src[l.pos:]
 		for _, suf := range []string{"i64", "i32", "i16", "i8", "u64", "u32", "u16", "u8"} {
 			if strings.HasPrefix(rest, suf) {
@@ -442,6 +442,8 @@ func (l *lexer) lexIntSuffix() {
 				return
 			}
 		}
+		// Bare 'i' (int) or 'u' (uint) suffix
+		l.pos++
 	}
 }
 

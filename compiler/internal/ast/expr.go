@@ -225,6 +225,7 @@ func splitNumericSuffix(text string) (raw, suffix string) {
 	suffixes := []string{
 		"i16", "i32", "i64", "u16", "u32", "u64", "f32", "f64",
 		"i8", "u8",
+		"i", "u",
 	}
 	for _, s := range suffixes {
 		if len(text) > len(s) && text[len(text)-len(s):] == s {

@@ -30,6 +30,10 @@ func suffixToType(suffix string) types.Type {
 		return types.TypU32
 	case "u64":
 		return types.TypU64
+	case "i":
+		return types.TypInt
+	case "u":
+		return types.TypUint
 	case "f32":
 		return types.TypF32
 	case "f64":
@@ -40,7 +44,7 @@ func suffixToType(suffix string) types.Type {
 
 // isSignedIntSuffix reports whether suffix is a signed integer suffix.
 func isSignedIntSuffix(suffix string) bool {
-	return suffix == "i8" || suffix == "i16" || suffix == "i32" || suffix == "i64"
+	return suffix == "i" || suffix == "i8" || suffix == "i16" || suffix == "i32" || suffix == "i64"
 }
 
 // validateIntRange checks that a raw integer literal value fits in the target
@@ -67,7 +71,7 @@ func validateIntRange(raw string, typ types.Type, negated bool) string {
 		maxPos, minNeg = math.MaxInt16, 32768
 	case types.TypI32:
 		maxPos, minNeg = math.MaxInt32, 2147483648
-	case types.TypI64:
+	case types.TypInt, types.TypI64:
 		maxPos, minNeg = math.MaxInt64, 9223372036854775808
 	case types.TypU8:
 		maxPos = math.MaxUint8
@@ -75,14 +79,14 @@ func validateIntRange(raw string, typ types.Type, negated bool) string {
 		maxPos = math.MaxUint16
 	case types.TypU32:
 		maxPos = math.MaxUint32
-	case types.TypU64:
+	case types.TypUint, types.TypU64:
 		maxPos = math.MaxUint64
 	default:
 		return ""
 	}
 
 	switch {
-	case typ == types.TypU8 || typ == types.TypU16 || typ == types.TypU32 || typ == types.TypU64:
+	case typ == types.TypUint || typ == types.TypU8 || typ == types.TypU16 || typ == types.TypU32 || typ == types.TypU64:
 		if val > maxPos {
 			return fmt.Sprintf("value %s overflows %s (max %d)", raw, typ, maxPos)
 		}

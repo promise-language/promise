@@ -396,6 +396,16 @@ func TestFormat(t *testing.T) {
 			expected: "int x = 42i32;\n",
 		},
 		{
+			name:     "bare i suffix",
+			input:    "int x = 42i;",
+			expected: "int x = 42i;\n",
+		},
+		{
+			name:     "bare u suffix",
+			input:    "uint x = 42u;",
+			expected: "uint x = 42u;\n",
+		},
+		{
 			name:     "hex literal",
 			input:    "int x = 0xFF;",
 			expected: "int x = 0xFF;\n",

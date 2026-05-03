@@ -149,3 +149,58 @@ test_hex_u16() `test {
   x := 0xFFFFu16;
   assert((x as! int) == 65535, "hex u16 max");
 }
+
+// --- Bare i (int) and u (uint) suffixes ---
+
+test_int_suffix() `test {
+  x := 42i;
+  assert(x == 42, "bare i suffix");
+  int y = 0i;
+  assert(y == 0, "bare i zero");
+}
+
+test_uint_suffix() `test {
+  x := 42u;
+  assert(x == (42 as! uint), "bare u suffix");
+  uint y = 0u;
+  assert(y == (0 as! uint), "bare u zero");
+}
+
+test_int_suffix_negative() `test {
+  x := -42i;
+  assert(x == -42, "bare i negative");
+}
+
+test_int_suffix_hex() `test {
+  x := 0xFFi;
+  assert(x == 255, "bare i hex");
+}
+
+test_uint_suffix_hex() `test {
+  uint x = 0xFFu;
+  assert(x == (255 as! uint), "bare u hex");
+}
+
+test_int_suffix_arithmetic() `test {
+  int a = 10i;
+  int b = 20i;
+  assert(a + b == 30, "bare i arithmetic");
+}
+
+test_uint_suffix_arithmetic() `test {
+  uint a = 10u;
+  uint b = 20u;
+  assert(a + b == (30 as! uint), "bare u arithmetic");
+}
+
+test_int_suffix_inference() `test {
+  x := 99i;
+  int y = x + 1;
+  assert(y == 100, "bare i inference");
+}
+
+test_uint_suffix_inference() `test {
+  x := 99u;
+  uint y = x + 1u;
+  assert(y == (100 as! uint), "bare u inference");
+}

@@ -9633,6 +9633,24 @@ func TestNumericSuffixF64IR(t *testing.T) {
 	assertContains(t, ir, "store double")
 }
 
+func TestNumericSuffixBareIIR(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int x = 42i;
+		}
+	`)
+	assertContains(t, ir, "store i64 42")
+}
+
+func TestNumericSuffixBareUIR(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			uint x = 42u;
+		}
+	`)
+	assertContains(t, ir, "store i64 42")
+}
+
 func TestGlobalMethodIR(t *testing.T) {
 	ir := generateIR(t, "type Counter {\n"+
 		"int value;\n"+

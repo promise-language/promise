@@ -9107,6 +9107,88 @@ func TestNumericSuffixFloatMismatchReverse(t *testing.T) {
 	expectError(t, errs, "cannot assign")
 }
 
+// --- Bare i/u suffix (int/uint) ---
+
+func TestNumericSuffixBareI(t *testing.T) {
+	checkOK(t, `
+		main() {
+			int a = 42i;
+			b := 100i;
+			int c = 0i;
+		}
+	`)
+}
+
+func TestNumericSuffixBareU(t *testing.T) {
+	checkOK(t, `
+		main() {
+			uint a = 42u;
+			b := 100u;
+			uint c = 0u;
+		}
+	`)
+}
+
+func TestNumericSuffixBareIMismatch(t *testing.T) {
+	errs := checkErrs(t, `
+		main() {
+			u8 x = 10i;
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+func TestNumericSuffixBareUMismatch(t *testing.T) {
+	errs := checkErrs(t, `
+		main() {
+			int x = 10u;
+		}
+	`)
+	expectError(t, errs, "cannot assign")
+}
+
+func TestNumericSuffixBareIInference(t *testing.T) {
+	checkOK(t, `
+		main() {
+			x := 42i;
+			int y = x + 1;
+		}
+	`)
+}
+
+func TestNumericSuffixBareUInference(t *testing.T) {
+	checkOK(t, `
+		main() {
+			x := 42u;
+			uint y = x + 1u;
+		}
+	`)
+}
+
+func TestNumericSuffixBareIHex(t *testing.T) {
+	checkOK(t, `
+		main() {
+			int x = 0xFFi;
+		}
+	`)
+}
+
+func TestNumericSuffixBareUHex(t *testing.T) {
+	checkOK(t, `
+		main() {
+			uint x = 0xFFu;
+		}
+	`)
+}
+
+func TestNumericSuffixBareINeg(t *testing.T) {
+	checkOK(t, `
+		main() {
+			int x = -42i;
+		}
+	`)
+}
+
 // --- Property-not-method diagnostics ---
 
 func TestPropertyCalledAsMethod(t *testing.T) {

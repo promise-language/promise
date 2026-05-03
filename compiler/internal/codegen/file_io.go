@@ -488,9 +488,11 @@ func (c *Compiler) defineFileReadLineBody(fn *ir.Func) {
 	entry.NewBr(loopBlk)
 
 	// ── Read loop: read one byte at a time ──
+	c.emitEnterSyscall(loopBlk)
 	n := loopBlk.NewCall(c.palFileRead, fdI32,
 		loopBlk.NewBitCast(oneByte, irtypes.I8Ptr),
 		constant.NewInt(irtypes.I64, 1))
+	c.emitExitSyscall(loopBlk)
 
 	// Check error (n < 0)
 	isErr := loopBlk.NewICmp(enum.IPredSLT, n, constant.NewInt(irtypes.I64, 0))
@@ -618,7 +620,9 @@ func (c *Compiler) defineDirOpenBody(fn *ir.Func) {
 	sret := fn.Params[0]
 
 	cstr := c.stringToCStr(entry, fn.Params[1])
+	c.emitEnterSyscall(entry)
 	handle := entry.NewCall(c.palDirOpen, cstr)
+	c.emitExitSyscall(entry)
 	entry.NewCall(c.palFree, cstr)
 
 	// Check if null (error)
@@ -657,7 +661,9 @@ func (c *Compiler) defineDirNextNameBody(fn *ir.Func) {
 	handleI64 := c.extractRawInt(entry, fn.Params[1])
 	handlePtr := entry.NewIntToPtr(handleI64, irtypes.I8Ptr)
 
+	c.emitEnterSyscall(entry)
 	namePtr := entry.NewCall(c.palDirNextName, handlePtr)
+	c.emitExitSyscall(entry)
 
 	isNull := entry.NewICmp(enum.IPredEQ, namePtr, constant.NewNull(irtypes.I8Ptr))
 	gotName := fn.NewBlock(".got_name")
@@ -688,7 +694,9 @@ func (c *Compiler) defineDirCloseHandleBody(fn *ir.Func) {
 	handleI64 := c.extractRawInt(entry, fn.Params[1])
 	handlePtr := entry.NewIntToPtr(handleI64, irtypes.I8Ptr)
 
+	c.emitEnterSyscall(entry)
 	entry.NewCall(c.palDirClose, handlePtr)
+	c.emitExitSyscall(entry)
 
 	c.storeIntResult(entry, sret, constant.NewInt(irtypes.I64, 0))
 	entry.NewRet(nil)

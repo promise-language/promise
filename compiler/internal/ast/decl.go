@@ -86,6 +86,7 @@ type EnumField struct {
 }
 
 // FuncDecl represents a top-level function declaration.
+// Module-level getters and setters are also represented as FuncDecl with IsGetter/IsSetter flags.
 type FuncDecl struct {
 	nodeBase
 	Name        string
@@ -94,6 +95,8 @@ type FuncDecl struct {
 	ReturnType  *ReturnTypeSpec // nil if no return type
 	Annotations []*MetaAnnotation
 	Body        *Block
+	IsGetter    bool // true for module-level getter declarations (get name Type { ... })
+	IsSetter    bool // true for module-level setter declarations (set name(Type param) { ... })
 }
 
 func (*FuncDecl) declTag() {}

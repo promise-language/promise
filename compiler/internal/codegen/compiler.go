@@ -2743,7 +2743,13 @@ func (c *Compiler) declareFuncs(file *ast.File) {
 			continue // generic — handled by monomorphization
 		}
 
-		obj := c.lookupFunc(fd.Name)
+		// Module-level setters are stored under "name$set" in sema scope.
+		scopeName := fd.Name
+		if fd.IsSetter {
+			scopeName = fd.Name + "$set"
+		}
+
+		obj := c.lookupFunc(scopeName)
 		if obj == nil {
 			continue
 		}
@@ -2777,8 +2783,8 @@ func (c *Compiler) declareFuncs(file *ast.File) {
 			}
 		}
 
-		fn := c.module.NewFunc(fd.Name, retType, params...)
-		c.funcs[fd.Name] = fn
+		fn := c.module.NewFunc(scopeName, retType, params...)
+		c.funcs[scopeName] = fn
 	}
 }
 
@@ -2805,7 +2811,12 @@ func (c *Compiler) defineFuncs(file *ast.File) {
 			c.mainDecl = fd
 			continue
 		}
-		fn := c.funcs[fd.Name]
+		// Module-level setters are stored under "name$set" in sema scope.
+		scopeName := fd.Name
+		if fd.IsSetter {
+			scopeName = fd.Name + "$set"
+		}
+		fn := c.funcs[scopeName]
 		if fn == nil {
 			continue
 		}
@@ -3101,7 +3112,13 @@ func (c *Compiler) declareModuleFuncs(file *ast.File, moduleName string) {
 			continue // excluded by `target(cond) annotation for this build target
 		}
 
-		obj := c.lookupFunc(fd.Name)
+		// Module-level setters are stored under "name$set" in sema scope.
+		scopeName := fd.Name
+		if fd.IsSetter {
+			scopeName = fd.Name + "$set"
+		}
+
+		obj := c.lookupFunc(scopeName)
 		if obj == nil {
 			continue
 		}
@@ -3125,19 +3142,19 @@ func (c *Compiler) declareModuleFuncs(file *ast.File, moduleName string) {
 			params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
 		}
 
-		irName := mangleModuleFuncName(moduleName, fd.Name)
+		irName := mangleModuleFuncName(moduleName, scopeName)
 		fn := c.module.NewFunc(irName, retType, params...)
 
 		// Track ownership for separate compilation
 		c.moduleOwnedFuncs[irName] = moduleName
 
-		// Register in moduleFuncs for qualified access (mod.func())
-		key := moduleName + "." + fd.Name
+		// Register in moduleFuncs for qualified access (mod.property / mod.property$set)
+		key := moduleName + "." + scopeName
 		c.moduleFuncs[key] = fn
 
 		// Also register in main funcs if no collision (for glob imports)
-		if _, shadowed := c.funcs[fd.Name]; !shadowed {
-			c.funcs[fd.Name] = fn
+		if _, shadowed := c.funcs[scopeName]; !shadowed {
+			c.funcs[scopeName] = fn
 		}
 	}
 }
@@ -3153,13 +3170,19 @@ func (c *Compiler) defineModuleFuncs(file *ast.File, moduleName string) {
 			continue // excluded by `target(cond) annotation for this build target
 		}
 
-		key := moduleName + "." + fd.Name
+		// Module-level setters are stored under "name$set" in sema scope.
+		scopeName := fd.Name
+		if fd.IsSetter {
+			scopeName = fd.Name + "$set"
+		}
+
+		key := moduleName + "." + scopeName
 		fn, ok := c.moduleFuncs[key]
 		if !ok {
 			continue
 		}
 
-		obj := c.lookupFunc(fd.Name)
+		obj := c.lookupFunc(scopeName)
 		if obj == nil {
 			continue
 		}

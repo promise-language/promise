@@ -405,6 +405,18 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 		c.checkSetterAvailable(me)
 	}
 
+	// Same-file / glob-import getter assignment: counter = 10
+	if ident, ok := s.Target.(*ast.IdentExpr); ok {
+		if obj := c.lookup(ident.Name); obj != nil {
+			if fn, ok := obj.(*types.Func); ok && fn.IsGetter() {
+				setterObj := c.lookup(ident.Name + "$set")
+				if setterObj == nil {
+					c.errorf(ident.Pos(), "property '%s' has no setter", ident.Name)
+				}
+			}
+		}
+	}
+
 	// Validate []= exists when assigning to an index target
 	if idx, ok := s.Target.(*ast.IndexExpr); ok {
 		c.checkIndexAssignAvailable(idx)
@@ -452,6 +464,30 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 // checkSetterAvailable validates that assignment to a getter property
 // has a corresponding setter. Fields are always assignable.
 func (c *Checker) checkSetterAvailable(me *ast.MemberExpr) {
+	// Module-level setter check: mod.property = value
+	if ident, ok := me.Target.(*ast.IdentExpr); ok {
+		if obj := c.lookup(ident.Name); obj != nil {
+			if mod, ok := obj.(*types.Module); ok {
+				scope := mod.Scope()
+				if scope == nil {
+					return
+				}
+				// Check for a setter (stored as name$set)
+				setterObj := scope.Lookup(me.Field + "$set")
+				if setterObj == nil {
+					// No setter — check if getter exists (read-only property)
+					getterObj := scope.Lookup(me.Field)
+					if getterObj != nil {
+						if fn, ok := getterObj.(*types.Func); ok && fn.IsGetter() {
+							c.errorf(me.Pos(), "property '%s' on module '%s' has no setter", me.Field, mod.Name())
+						}
+					}
+				}
+				return
+			}
+		}
+	}
+
 	targetType := c.info.Types[me.Target]
 	if targetType == nil {
 		return

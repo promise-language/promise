@@ -24,7 +24,12 @@ func (c *Checker) checkMissingReturn(file *ast.File) {
 			if c.info.GeneratorFuncs[d] != nil {
 				continue
 			}
-			obj := c.lookup(d.Name)
+			// Module-level setters are stored under "name$set" in scope.
+			scopeName := d.Name
+			if d.IsSetter {
+				scopeName = d.Name + "$set"
+			}
+			obj := c.lookup(scopeName)
 			if obj == nil {
 				continue
 			}

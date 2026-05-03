@@ -40,6 +40,8 @@ type Func struct {
 	deprecated string
 	isTest     bool // `test meta — marks test function
 	exported   bool // `public meta — visible to other modules
+	isGetter   bool // module-level getter — accessed without ()
+	isSetter   bool // module-level setter — called on assignment
 }
 
 // NewFunc creates a new function object.
@@ -61,6 +63,10 @@ func (f *Func) IsTest() bool           { return f.isTest }
 func (f *Func) SetTest(v bool)         { f.isTest = v }
 func (f *Func) IsExported() bool       { return f.exported }
 func (f *Func) SetExported(v bool)     { f.exported = v }
+func (f *Func) IsGetter() bool         { return f.isGetter }
+func (f *Func) SetGetter(v bool)       { f.isGetter = v }
+func (f *Func) IsSetter() bool         { return f.isSetter }
+func (f *Func) SetSetter(v bool)       { f.isSetter = v }
 
 // TypeName represents a type declaration.
 type TypeName struct {

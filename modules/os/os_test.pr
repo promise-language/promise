@@ -41,19 +41,19 @@ test_get_environment_variable_empty_value() `test(exclude: "wasm32") {
   }
 }
 
-test_get_working_directory_is_stable() `test(exclude: "wasm32") {
-  string cwd1 = get_working_directory()!;
-  string cwd2 = get_working_directory()!;
-  assert(cwd1 == cwd2, "calling get_working_directory() twice should return the same value");
+test_working_directory_is_stable() `test(exclude: "wasm32") {
+  string cwd1 = working_directory!;
+  string cwd2 = working_directory!;
+  assert(cwd1 == cwd2, "reading working_directory twice should return the same value");
 }
 
-test_get_working_directory() `test(exclude: "wasm32") {
-  string cwd = get_working_directory()!;
+test_working_directory_nonempty() `test(exclude: "wasm32") {
+  string cwd = working_directory!;
   assert(cwd.len > 0, "working directory should be non-empty");
 }
 
-test_get_working_directory_absolute() `test(exclude: "wasm32") {
-  string cwd = get_working_directory()!;
+test_working_directory_absolute() `test(exclude: "wasm32") {
+  string cwd = working_directory!;
   assert(cwd.starts_with("/"), "working directory should be absolute path");
 }
 

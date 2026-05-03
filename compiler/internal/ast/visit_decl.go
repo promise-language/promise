@@ -62,7 +62,63 @@ func (b *Builder) VisitDeclaration(ctx *parser.DeclarationContext) interface{} {
 	if c := ctx.FuncDecl(); c != nil {
 		return c.Accept(b)
 	}
+	if c := ctx.GetterDecl(); c != nil {
+		return b.visitTopLevelGetterDecl(c.(*parser.GetterDeclContext))
+	}
+	if c := ctx.SetterDecl(); c != nil {
+		return b.visitTopLevelSetterDecl(c.(*parser.SetterDeclContext))
+	}
 	return nil
+}
+
+// visitTopLevelGetterDecl creates a FuncDecl from a top-level getter declaration.
+func (b *Builder) visitTopLevelGetterDecl(ctx *parser.GetterDeclContext) *FuncDecl {
+	keyword := ctx.IDENT(0).GetText()
+	if keyword != "get" {
+		panic("expected 'get' keyword in getter declaration, got '" + keyword + "'")
+	}
+	node := &FuncDecl{
+		nodeBase: b.baseFromContext(ctx),
+		Name:     ctx.IDENT(1).GetText(),
+		IsGetter: true,
+		ReturnType: &ReturnTypeSpec{
+			nodeBase: b.baseFromContext(ctx),
+			Type:     b.visitTypeRef(ctx.TypeRef()),
+			CanError: ctx.BANG() != nil,
+		},
+	}
+	for _, ma := range ctx.AllMetaAnnotation() {
+		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))
+	}
+	if mb := ctx.MemberBody(); mb != nil {
+		node.Body = b.visitMemberBody(mb, true)
+	}
+	return node
+}
+
+// visitTopLevelSetterDecl creates a FuncDecl from a top-level setter declaration.
+func (b *Builder) visitTopLevelSetterDecl(ctx *parser.SetterDeclContext) *FuncDecl {
+	keyword := ctx.IDENT(0).GetText()
+	if keyword != "set" {
+		panic("expected 'set' keyword in setter declaration, got '" + keyword + "'")
+	}
+	node := &FuncDecl{
+		nodeBase: b.baseFromContext(ctx),
+		Name:     ctx.IDENT(1).GetText(),
+		IsSetter: true,
+		Params: []*Param{{
+			nodeBase: b.baseFromContext(ctx),
+			Type:     b.visitTypeRef(ctx.TypeRef()),
+			Name:     ctx.IDENT(2).GetText(),
+		}},
+	}
+	for _, ma := range ctx.AllMetaAnnotation() {
+		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))
+	}
+	if mb := ctx.MemberBody(); mb != nil {
+		node.Body = b.visitMemberBody(mb, false)
+	}
+	return node
 }
 
 func (b *Builder) VisitTypeDecl(ctx *parser.TypeDeclContext) interface{} {

@@ -2004,6 +2004,24 @@ Module-level getters and setters follow the same visibility rules as functions. 
 
 Type-level getters and setters (declared inside `type { ... }`) dispatch through the vtable and receive `this`. Module-level getters and setters have no receiver — they are plain functions with property syntax. The grammar rules are shared; the distinction is whether the declaration appears inside a type body or at file scope.
 
+#### No Module-Level Variables
+
+Promise does **not** support module-level mutable variables (global mutable state). There is no way to declare a variable at file scope — all mutable state must live inside function-scoped locals, type instances, or be threaded explicitly through parameters.
+
+This is a deliberate design decision driven by three of Promise's core goals:
+
+1. **Self-contained readability.** A function that reads or writes a global variable has an invisible dependency on every other function that touches that variable. A reader cannot understand what the function does without tracing all callers and all other mutators — the opposite of "look at one file and know what it does."
+
+2. **Concurrency safety.** With an M:N scheduler running goroutines across OS threads, unsynchronized global mutable state is a data race. Requiring explicit state passing makes sharing intentional and auditable.
+
+3. **AI-agent efficiency.** An LLM generating a Promise program should not need to reason about hidden global state to produce correct code. Every input to a function is visible in its signature.
+
+Module-level getters and setters (Section 9.3) provide property syntax for computed values without requiring mutable file-scope storage. When persistent module-level state is needed, it should be modeled as a type instance passed through the program.
+
+#### No Module Initializers
+
+There are no module-level initializer blocks, `init()` functions, or static constructors. No code runs automatically when a module is imported — code only executes when something explicitly calls it. This eliminates an entire class of ordering bugs (module A's initializer depends on module B's initializer having already run) and makes the program's startup behavior fully predictable from `main()`.
+
 ### 9.4 Named Arguments, Defaults & Optional Parameters
 
 #### Definition Syntax

@@ -322,6 +322,18 @@ func (c *Checker) checkIdentExpr(e *ast.IdentExpr) types.Type {
 	// Check for deprecated usage
 	c.checkDeprecatedObj(e.Pos(), obj)
 
+	// Module-level getter accessed without module prefix (same file or glob import):
+	// treat as implicit call — return result type, not Signature.
+	if fn, ok := obj.(*types.Func); ok && fn.IsGetter() {
+		sig, ok := fn.Type().(*types.Signature)
+		if ok && sig != nil {
+			if sig.CanError() {
+				c.info.FailableExprs[e] = true
+			}
+			return sig.Result()
+		}
+	}
+
 	// Capture analysis: if inside a lambda, check if this variable is from an outer scope
 	if c.lambdaDepth > 0 {
 		c.checkLambdaCapture(e, obj)
@@ -878,13 +890,28 @@ func (c *Checker) checkInstanceConstructorCall(e *ast.CallExpr, inst *types.Inst
 
 // isMemberPropertyCall detects when a field/getter is being called as a method
 // (e.g. v.len()) and emits a helpful error. Returns true if the error was emitted.
-// isMemberPropertyCall detects when a field/getter is being called as a method
-// (e.g. v.len()) and emits a helpful error. Returns true if the error was emitted.
 func (c *Checker) isMemberPropertyCall(e *ast.CallExpr) bool {
 	mem, ok := e.Callee.(*ast.MemberExpr)
 	if !ok {
 		return false
 	}
+
+	// Check for module-level getter being called as a function: mod.getter()
+	if ident, ok := mem.Target.(*ast.IdentExpr); ok {
+		if obj := c.lookup(ident.Name); obj != nil {
+			if mod, ok := obj.(*types.Module); ok {
+				if scope := mod.Scope(); scope != nil {
+					if fobj := scope.Lookup(mem.Field); fobj != nil {
+						if fn, ok := fobj.(*types.Func); ok && fn.IsGetter() {
+							c.errorf(e.Pos(), "'%s' is a property on module '%s', not a function — remove ()", mem.Field, mod.Name())
+							return true
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// Check the target type of the member expression to see if the field is
 	// a property (field/getter), not a type/module namespace access.
 	targetType := c.info.Types[mem.Target]
@@ -926,6 +953,16 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) types.Type {
 	calleeType := c.checkExpr(e.Callee)
 	if calleeType == nil {
 		return nil
+	}
+
+	// Same-file getter called as function: greeting() → error
+	if ident, ok := e.Callee.(*ast.IdentExpr); ok {
+		if obj := c.lookup(ident.Name); obj != nil {
+			if fn, ok := obj.(*types.Func); ok && fn.IsGetter() {
+				c.errorf(e.Pos(), "'%s' is a property, not a function — remove ()", ident.Name)
+				return nil
+			}
+		}
 	}
 
 	// Handle constructor calls: Type(field: value, ...)
@@ -2374,6 +2411,17 @@ func (c *Checker) resolveModuleMember(e *ast.MemberExpr, mod *types.Module) type
 	// Record the resolved object for codegen
 	if ident, ok := e.Target.(*ast.IdentExpr); ok {
 		c.recordObject(ident, mod)
+	}
+
+	// Module-level getter: treat as implicit call — return result type, not Signature.
+	if fn, ok := obj.(*types.Func); ok && fn.IsGetter() {
+		sig, ok := fn.Type().(*types.Signature)
+		if ok && sig != nil {
+			if sig.CanError() {
+				c.info.FailableExprs[e] = true
+			}
+			return sig.Result()
+		}
 	}
 
 	return obj.Type()

@@ -601,6 +601,16 @@ func TestFormat(t *testing.T) {
 			expected: "get len int `native;\n",
 		},
 		{
+			name:     "set accessor",
+			input:    "set val(int v){this._val=v;}",
+			expected: "set val(int v) {\n  this._val = v;\n}\n",
+		},
+		{
+			name:     "module-level get with body",
+			input:    "get answer int{return 42;}",
+			expected: "get answer int {\n  return 42;\n}\n",
+		},
+		{
 			name:     "operator method declaration",
 			input:    "+(int other) int `native;",
 			expected: "+(int other) int `native;\n",

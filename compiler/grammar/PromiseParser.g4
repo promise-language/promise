@@ -19,6 +19,8 @@ declaration
     : typeDecl
     | enumDecl
     | funcDecl
+    | getterDecl
+    | setterDecl
     ;
 
 // ============================================================

@@ -10020,3 +10020,114 @@ func TestNonFailableGetterBangError(t *testing.T) {
 	`)
 	expectError(t, errs, "failable")
 }
+
+// --- Module-level getter/setter tests ---
+
+func TestModuleLevelGetterOK(t *testing.T) {
+	checkOK(t, `
+		get greeting string { return "hello"; }
+		test() { string s = greeting; }
+	`)
+}
+
+func TestModuleLevelGetterComputedOK(t *testing.T) {
+	checkOK(t, `
+		get answer int { return 6 * 7; }
+		test() { int v = answer; }
+	`)
+}
+
+func TestModuleLevelGetterReadOnlyAssignError(t *testing.T) {
+	errs := checkErrs(t, `
+		get greeting string { return "hello"; }
+		test() { greeting = "bye"; }
+	`)
+	expectError(t, errs, "has no setter")
+}
+
+func TestModuleLevelGetterWithSetterOK(t *testing.T) {
+	checkOK(t, `
+		get counter int { return 0; }
+		set counter(int value) {}
+		test() {
+			int v = counter;
+			counter = 10;
+		}
+	`)
+}
+
+func TestModuleLevelFailableGetterOK(t *testing.T) {
+	checkOK(t, `
+		get safe string! { return "ok"; }
+		test() { string s = safe!; }
+	`)
+}
+
+func TestModuleLevelOptionalGetterOK(t *testing.T) {
+	checkOK(t, `
+		get maybe string? { return "present"; }
+		test() {
+			string? v = maybe;
+			if s := v { assert(s == "present", ""); }
+		}
+	`)
+}
+
+func TestModuleLevelGetterCalledAsFunctionError(t *testing.T) {
+	errs := checkErrs(t, `
+		get greeting string { return "hello"; }
+		test() { string s = greeting(); }
+	`)
+	expectError(t, errs, "not a function")
+}
+
+func TestModuleLevelSetterOnlyReadError(t *testing.T) {
+	errs := checkErrs(t, `
+		set counter(int value) {}
+		test() { int v = counter; }
+	`)
+	expectError(t, errs, "undefined: counter")
+}
+
+func TestModuleLevelCompoundAssignWithSetterOK(t *testing.T) {
+	checkOK(t, `
+		get counter int { return 0; }
+		set counter(int value) {}
+		test() { counter += 5; }
+	`)
+}
+
+func TestModuleLevelSetterMissingReturn(t *testing.T) {
+	// Setters are void — no missing return error expected.
+	checkOK(t, `
+		set counter(int value) {}
+		test() {}
+	`)
+}
+
+func TestModuleLevelGetterMissingReturnError(t *testing.T) {
+	errs := checkErrs(t, `
+		get counter int {
+			if true {}
+		}
+		test() {}
+	`)
+	expectError(t, errs, "missing return")
+}
+
+func TestModuleLevelFailableGetterInNonFailableError(t *testing.T) {
+	errs := checkErrs(t, `
+		get risky string! { return "ok"; }
+		test() { string s = risky; }
+	`)
+	expectError(t, errs, "failable")
+}
+
+func TestModuleLevelFailableGetterHandlerOK(t *testing.T) {
+	checkOK(t, `
+		get risky string! { return "ok"; }
+		test() {
+			string s = risky ? e { "fallback"; };
+		}
+	`)
+}

@@ -298,7 +298,12 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 		return // native or abstract
 	}
 
-	obj := c.lookup(d.Name)
+	// Module-level setters are stored under "name$set" in scope.
+	scopeName := d.Name
+	if d.IsSetter {
+		scopeName = d.Name + "$set"
+	}
+	obj := c.lookup(scopeName)
 	if obj == nil {
 		return // error already reported
 	}

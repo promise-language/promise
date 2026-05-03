@@ -1,0 +1,39 @@
+// propmod — test module for module-level getters and setters.
+type PropError is error `public {
+  int code;
+}
+
+// Module-level getter returning a constant.
+get greeting string `public `doc("Returns a greeting.") {
+  return "hello from propmod";
+}
+
+// Module-level getter returning a computed value.
+get answer int `public `doc("Returns the answer.") {
+  return 6 * 7;
+}
+
+// Failable getter — returns string! (success case).
+get safe_value string! `public `doc("Returns a value or raises.") {
+  return "safe";
+}
+
+// Failable getter that always raises.
+get risky_value string! `public `doc("Always raises an error.") {
+  raise PropError(code: 42, message: "risky error");
+}
+
+// Optional getter — returns string? (present case).
+get maybe_value string? `public `doc("Returns an optional value.") {
+  return "present";
+}
+
+// Optional getter that returns none.
+get empty_value string? `public `doc("Returns none.") {
+  return none;
+}
+
+// Regular function for comparison.
+add(int a, int b) int `public `doc("Adds two integers.") {
+  return a + b;
+}

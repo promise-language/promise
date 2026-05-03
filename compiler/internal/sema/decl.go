@@ -177,7 +177,12 @@ func (c *Checker) declareFunc(d *ast.FuncDecl) {
 		c.info.FilteredDecls[d] = true
 		return
 	}
-	fn := types.NewFunc(tpos(d.Pos()), d.Name, nil)
+	// Module-level setters are stored under "name$set" to avoid collision with getters.
+	scopeName := d.Name
+	if d.IsSetter {
+		scopeName = d.Name + "$set"
+	}
+	fn := types.NewFunc(tpos(d.Pos()), scopeName, nil)
 	if !c.insert(fn) {
 		// Insertion failed (redeclaration). Mark filtered so define/check passes skip it.
 		c.info.FilteredDecls[d] = true
@@ -665,13 +670,40 @@ func (c *Checker) defineEnum(d *ast.EnumDecl) {
 }
 
 func (c *Checker) defineFunc(d *ast.FuncDecl) {
-	obj := c.scope.Lookup(d.Name)
+	// Module-level setters are stored under "name$set" in scope.
+	scopeName := d.Name
+	if d.IsSetter {
+		scopeName = d.Name + "$set"
+	}
+	obj := c.scope.Lookup(scopeName)
 	if obj == nil {
 		return
 	}
 	fn, ok := obj.(*types.Func)
 	if !ok {
 		return
+	}
+
+	// Validate getter/setter constraints
+	if d.IsGetter || d.IsSetter {
+		if len(d.TypeParams) > 0 {
+			kind := "getter"
+			if d.IsSetter {
+				kind = "setter"
+			}
+			c.errorf(d.Pos(), "module-level %s '%s' cannot be generic", kind, d.Name)
+		}
+		if d.IsGetter && len(d.Params) > 0 {
+			c.errorf(d.Pos(), "module-level getter '%s' must have no parameters", d.Name)
+		}
+		if d.IsGetter && d.ReturnType == nil {
+			c.errorf(d.Pos(), "module-level getter '%s' must have a return type", d.Name)
+		}
+		if d.IsSetter && len(d.Params) != 1 {
+			c.errorf(d.Pos(), "module-level setter '%s' must have exactly one parameter", d.Name)
+		}
+		fn.SetGetter(d.IsGetter)
+		fn.SetSetter(d.IsSetter)
 	}
 
 	// Open type-params scope if generic and create TypeParam objects

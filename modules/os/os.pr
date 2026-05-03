@@ -28,7 +28,8 @@ get_environment_variable(string name) string? `public `doc("Returns the value of
   return _os_get_environment_variable(name);
 }
 
-get_working_directory() string! `public `doc("Returns the absolute path of the current working directory. Raises an error if the OS call fails.") {
+// Module-level getter: accessed as os.working_directory (no parentheses).
+get working_directory string! `public `doc("Returns the absolute path of the current working directory. Raises an error if the OS call fails.") {
   return _os_get_working_directory();
 }
 

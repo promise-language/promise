@@ -650,6 +650,26 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 
 	switch target := s.Target.(type) {
 	case *ast.IdentExpr:
+		// Same-file setter: property = value (or property += value)
+		if setterFn, ok := c.funcs[target.Name+"$set"]; ok {
+			if obj := c.lookupFunc(target.Name + "$set"); obj != nil && obj.IsSetter() {
+				if s.Op != ast.OpAssign {
+					getterFn, ok := c.funcs[target.Name]
+					if !ok {
+						panic(fmt.Sprintf("codegen: compound assignment to setter %s but no getter found", target.Name))
+					}
+					current := c.block.NewCall(getterFn)
+					val = c.genCompoundOp(s.Op, current, val)
+				}
+				c.block.NewCall(setterFn, val)
+				if s.Op == ast.OpAssign {
+					if rhsIdent, ok := s.Value.(*ast.IdentExpr); ok {
+						c.clearDropFlag(rhsIdent.Name)
+					}
+				}
+				return
+			}
+		}
 		alloca, ok := c.locals[target.Name]
 		if !ok {
 			panic(fmt.Sprintf("codegen: undefined variable %q in assignment", target.Name))
@@ -697,6 +717,18 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 		c.block.NewStore(result, alloca)
 
 	case *ast.MemberExpr:
+		// Module-level setter: mod.property = value
+		if ident, ok := target.Target.(*ast.IdentExpr); ok {
+			if modName := c.resolveModuleName(ident); modName != "" {
+				c.genModuleSetterAssign(target, modName, s.Op, val)
+				if s.Op == ast.OpAssign {
+					if rhsIdent, ok := s.Value.(*ast.IdentExpr); ok {
+						c.clearDropFlag(rhsIdent.Name)
+					}
+				}
+				break
+			}
+		}
 		c.genMemberAssign(target, s.Op, val)
 		// Clear drop flag on RHS if it's being moved via simple assign
 		if s.Op == ast.OpAssign {
@@ -852,6 +884,29 @@ func (c *Compiler) genVirtualSetterCall(target *ast.MemberExpr, named *types.Nam
 	fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))
 
 	c.block.NewCall(fnTyped, instance, val)
+}
+
+// genModuleSetterAssign handles assignment to a module-level setter property.
+// For compound assignment (+=, -=, etc.), calls getter first, applies op, then calls setter.
+func (c *Compiler) genModuleSetterAssign(target *ast.MemberExpr, moduleName string, op ast.AssignOp, val value.Value) {
+	setterKey := moduleName + "." + target.Field + "$set"
+	setterFn, ok := c.moduleFuncs[setterKey]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undefined module setter %s.%s", moduleName, target.Field))
+	}
+
+	if op != ast.OpAssign {
+		// Compound assignment: call getter, apply op, then call setter
+		getterKey := moduleName + "." + target.Field
+		getterFn, ok := c.moduleFuncs[getterKey]
+		if !ok {
+			panic(fmt.Sprintf("codegen: compound assignment to module setter %s.%s but no getter found", moduleName, target.Field))
+		}
+		current := c.block.NewCall(getterFn)
+		val = c.genCompoundOp(op, current, val)
+	}
+
+	c.block.NewCall(setterFn, val)
 }
 
 // genCompoundOp applies a compound assignment operator through the type system.

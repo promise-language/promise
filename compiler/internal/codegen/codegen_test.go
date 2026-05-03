@@ -10654,3 +10654,53 @@ func TestFailableExternSret(t *testing.T) {
 	// Caller allocates sret and loads result
 	assertContains(t, ir, "call void @promise_get_cwd(")
 }
+
+// --- Module-level getter/setter codegen tests ---
+
+func TestModuleLevelGetterCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		get answer int { return 42; }
+		main() { int v = answer; }
+	`)
+	// Getter should generate a zero-arg function returning i64
+	assertContains(t, ir, "define i64 @answer()")
+	// Usage should call the getter (no args)
+	assertContains(t, ir, "call i64 @answer()")
+}
+
+func TestModuleLevelSetterCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		get counter int { return 0; }
+		set counter(int value) {}
+		main() { counter = 42; }
+	`)
+	// Setter stored as counter$set, takes one i64 param
+	assertContains(t, ir, "define void @counter$set(i64")
+	// Assignment should call the setter
+	assertContains(t, ir, "call void @counter$set(i64")
+}
+
+func TestModuleLevelCompoundAssignCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		get counter int { return 0; }
+		set counter(int value) {}
+		main() { counter += 5; }
+	`)
+	// Should call getter then setter
+	assertContains(t, ir, "call i64 @counter()")
+	assertContains(t, ir, "call void @counter$set(i64")
+}
+
+func TestModuleLevelGetterDistinctFromSetter(t *testing.T) {
+	ir := generateIR(t, `
+		get val int { return 0; }
+		set val(int v) {}
+		main() {
+			int x = val;
+			val = 10;
+		}
+	`)
+	// Getter and setter should be distinct LLVM functions
+	assertContains(t, ir, "define i64 @val()")
+	assertContains(t, ir, "define void @val$set(i64")
+}

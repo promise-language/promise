@@ -542,8 +542,12 @@ func (c *Compiler) genIdentExpr(e *ast.IdentExpr) value.Value {
 	if alloca, ok := c.locals[e.Name]; ok {
 		return c.block.NewLoad(alloca.ElemType, alloca)
 	}
-	// Check for function reference — wrap in fat pointer if used as a value
+	// Module-level getter accessed without prefix (same file or glob import):
+	// call the function with no args.
 	if fn, ok := c.funcs[e.Name]; ok {
+		if obj := c.lookupFunc(e.Name); obj != nil && obj.IsGetter() {
+			return c.block.NewCall(fn)
+		}
 		if _, isSig := c.info.Types[e].(*types.Signature); isSig {
 			// Named function used as first-class value: generate a thunk with
 			// the env-first ABI so it can be called through genIndirectCall.
@@ -1082,6 +1086,16 @@ func (c *Compiler) genModuleCall(e *ast.CallExpr, moduleName, funcName string) v
 	}
 
 	return c.block.NewCall(fn, argVals...)
+}
+
+// genModuleGetterCall handles mod.property access — calls the getter function with no args.
+func (c *Compiler) genModuleGetterCall(e *ast.MemberExpr, moduleName, propName string) value.Value {
+	key := moduleName + "." + propName
+	fn, ok := c.moduleFuncs[key]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undefined module getter %s.%s", moduleName, propName))
+	}
+	return c.block.NewCall(fn)
 }
 
 // genGenericFuncCall generates a call to a monomorphic generic function instance.
@@ -1637,6 +1651,18 @@ func (c *Compiler) genValueTypeConstructor(e *ast.CallExpr, named *types.Named, 
 
 // genMemberExpr generates a field access on a user type instance or an enum variant value.
 func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
+	// Module-level getter: mod.property → call getter function with no args.
+	// Guard: only intercept when sema resolved this as a getter (non-Signature type).
+	// A Signature type means it's a function reference (e.g., auto f = mod.func),
+	// which should NOT be called implicitly.
+	if ident, ok := e.Target.(*ast.IdentExpr); ok {
+		if modName := c.resolveModuleName(ident); modName != "" {
+			if _, isSig := c.info.Types[e].(*types.Signature); !isSig {
+				return c.genModuleGetterCall(e, modName, e.Field)
+			}
+		}
+	}
+
 	targetType := c.info.Types[e.Target]
 	// Apply typeSubst for mono context
 	if c.typeSubst != nil {

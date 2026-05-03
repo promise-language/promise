@@ -1,0 +1,61 @@
+use propmod "./propmod";
+
+// Test reading a module-level getter returning a constant.
+test_getter_constant() `test {
+  string msg = propmod.greeting;
+  assert(msg == "hello from propmod", "greeting should match");
+}
+
+// Test reading a computed getter.
+test_getter_computed() `test {
+  int val = propmod.answer;
+  assert(val == 42, "answer should be 42");
+}
+
+// Test that regular functions still work alongside getters.
+test_regular_function() `test {
+  int sum = propmod.add(3, 4);
+  assert(sum == 7, "add(3, 4) should be 7");
+}
+
+// Test failable getter with ! unwrap (success case).
+test_failable_getter_success() `test {
+  string val = propmod.safe_value!;
+  assert(val == "safe", "safe_value should return 'safe'");
+}
+
+// Test failable getter that raises (error handling with ? handler).
+test_failable_getter_raises() `test {
+  string result = propmod.risky_value? e {
+    "recovered";
+  };
+  assert(result == "recovered", "should recover from risky_value");
+}
+
+// Test failable getter with auto-propagation in failable function.
+_check_risky() string! {
+  string val = propmod.risky_value;
+  return val;
+}
+
+test_failable_getter_propagation() `test {
+  string result = _check_risky()? e {
+    "propagated";
+  };
+  assert(result == "propagated", "should propagate error from risky_value");
+}
+
+// Test optional getter (present case).
+test_optional_getter_present() `test {
+  string? val = propmod.maybe_value;
+  assert(val is present, "maybe_value should be present");
+  if v := val {
+    assert(v == "present", "maybe_value should be 'present'");
+  }
+}
+
+// Test optional getter (absent case).
+test_optional_getter_absent() `test {
+  string? val = propmod.empty_value;
+  assert(val is absent, "empty_value should be absent");
+}

@@ -26,6 +26,27 @@ func (c *Checker) processSerializableType(named *types.Named, d *ast.TypeDecl) {
 		}
 	}
 
+	// Validate: generic type parameters used in serialized fields must have
+	// Encodable + Decodable constraints. Skip fields are exempt.
+	hasConstraintErrors := false
+	if len(d.Fields) == len(named.Fields()) {
+		for i, fd := range d.Fields {
+			f := named.Fields()[i]
+			if f.Skip() {
+				continue
+			}
+			if !c.validateSerializableFieldType(f.Type(), fd, d.Name) {
+				hasConstraintErrors = true
+			}
+		}
+	}
+
+	// Don't synthesize methods if constraint validation failed — the methods
+	// would produce confusing follow-on errors.
+	if hasConstraintErrors {
+		return
+	}
+
 	// Synthesize encode method if not user-defined.
 	if lookupOwnMethod(named, "encode") == nil {
 		md := c.synthesizeEncodeMethod(named, d)
@@ -34,7 +55,16 @@ func (c *Checker) processSerializableType(named *types.Named, d *ast.TypeDecl) {
 	}
 
 	// Synthesize decode factory method if not user-defined.
-	if lookupOwnMethod(named, "decode") == nil {
+	// Skip synthesis if any skip field has a type with no zero value (e.g., TypeParam) —
+	// the constructor can't be called without a value for that field.
+	canDecode := true
+	for _, f := range named.Fields() {
+		if f.Skip() && c.zeroValueExpr(f.Type()) == nil {
+			canDecode = false
+			break
+		}
+	}
+	if canDecode && lookupOwnMethod(named, "decode") == nil {
 		md := c.synthesizeDecodeMethod(named, d)
 		d.Methods = append(d.Methods, md)
 		c.defineMethod(named, md, d.Name)
@@ -274,6 +304,42 @@ func (c *Checker) fieldNeedsUnwrap(f *types.Field) bool {
 		return false
 	}
 	return c.zeroValueExpr(f.Type()) == nil
+}
+
+// validateSerializableFieldType checks that a field's type can be serialized.
+// If the type involves a TypeParam, the TypeParam must be constrained with
+// Encodable + Decodable. This catches errors early with a clear message instead
+// of letting the synthesized encode/decode methods fail with confusing errors.
+func (c *Checker) validateSerializableFieldType(typ types.Type, fd *ast.FieldDecl, typeName string) bool {
+	switch t := typ.(type) {
+	case *types.TypeParam:
+		if !hasConstraint(t, "Encodable") || !hasConstraint(t, "Decodable") {
+			c.errorf(fd.Pos(),
+				"type %s is `serializable but field '%s' has unconstrained type parameter %s — "+
+					"add constraint %s: Encodable + Decodable, or mark the field `skip",
+				typeName, fd.Name, t.Obj().Name(), t.Obj().Name())
+			return false
+		}
+	case *types.Optional:
+		return c.validateSerializableFieldType(t.Elem(), fd, typeName)
+	case *types.Instance:
+		for _, arg := range t.TypeArgs() {
+			if !c.validateSerializableFieldType(arg, fd, typeName) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// hasConstraint checks if a TypeParam has a constraint with the given type name.
+func hasConstraint(tp *types.TypeParam, name string) bool {
+	for _, c := range tp.Constraints() {
+		if named, ok := c.(*types.Named); ok && named.Obj().Name() == name {
+			return true
+		}
+	}
+	return false
 }
 
 // vectorElemType returns the element type if typ is Vector[T], or nil otherwise.

@@ -80,6 +80,16 @@ type Flags `serializable {
   bool[] bits;
 }
 
+type GoodWrapper[T: Encodable + Decodable] `serializable {
+  T value;
+  string label;
+}
+
+type SkipWrapper[T] `serializable {
+  T value `skip;
+  string label;
+}
+
 type Located `serializable {
   string name;
   Point pos `key("position");
@@ -397,6 +407,73 @@ mixed_array_and_map_test() `test {
   assert(d2.title == "main", "mixed: title");
   assert(d2.labels.len == 2, "mixed: labels count");
   assert(d2.labels[0] == "a", "mixed: label 0");
+}
+
+// ── Generic serializable types ──────────────────────────────────────────────
+
+generic_wrapper_int_test() `test {
+  GoodWrapper[int] w = GoodWrapper[int](value: 42, label: "answer");
+  json.JsonEncoder enc = json.JsonEncoder();
+  w.encode(enc)!;
+  string s = enc.to_string();
+  assert(s.contains("\"value\":42"), "generic int: value");
+  assert(s.contains("\"label\":\"answer\""), "generic int: label");
+}
+
+generic_wrapper_string_test() `test {
+  GoodWrapper[string] w = GoodWrapper[string](value: "hello", label: "greet");
+  json.JsonEncoder enc = json.JsonEncoder();
+  w.encode(enc)!;
+  string s = enc.to_string();
+  assert(s.contains("\"value\":\"hello\""), "generic string: value");
+}
+
+generic_wrapper_round_trip_test() `test {
+  GoodWrapper[int] w1 = GoodWrapper[int](value: 99, label: "test");
+  json.JsonEncoder enc = json.JsonEncoder();
+  w1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  GoodWrapper[int] w2 = GoodWrapper[int].decode(dec)!;
+  assert(w2.value == 99, "generic rt: value");
+  assert(w2.label == "test", "generic rt: label");
+}
+
+skip_wrapper_test() `test {
+  SkipWrapper[int] w = SkipWrapper[int](value: 42, label: "test");
+  json.JsonEncoder enc = json.JsonEncoder();
+  w.encode(enc)!;
+  string s = enc.to_string();
+  assert(s.contains("\"label\":\"test\""), "skip wrapper: label");
+  assert(!s.contains("\"value\""), "skip wrapper: value skipped");
+}
+
+generic_wrapper_user_type_test() `test {
+  GoodWrapper[Point] w1 = GoodWrapper[Point](value: Point(x: 1, y: 2), label: "pt");
+  json.JsonEncoder enc = json.JsonEncoder();
+  w1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  GoodWrapper[Point] w2 = GoodWrapper[Point].decode(dec)!;
+  assert(w2.value.x == 1, "generic user type: x");
+  assert(w2.value.y == 2, "generic user type: y");
+  assert(w2.label == "pt", "generic user type: label");
+}
+
+generic_wrapper_bool_test() `test {
+  GoodWrapper[bool] w1 = GoodWrapper[bool](value: true, label: "flag");
+  json.JsonEncoder enc = json.JsonEncoder();
+  w1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  GoodWrapper[bool] w2 = GoodWrapper[bool].decode(dec)!;
+  assert(w2.value == true, "generic bool: value");
+}
+
+generic_wrapper_f64_test() `test {
+  GoodWrapper[f64] w1 = GoodWrapper[f64](value: 3.14, label: "pi");
+  json.JsonEncoder enc = json.JsonEncoder();
+  w1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  GoodWrapper[f64] w2 = GoodWrapper[f64].decode(dec)!;
+  assert(w2.value == 3.14, "generic f64: value");
 }
 
 // ── Field annotations ───────────────────────────────────────────────────────

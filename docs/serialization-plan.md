@@ -727,14 +727,14 @@ type DecodeError is error `public {
 4. ~~Validate field annotations (`include_none` only on `T?` fields)~~ — **Done** (`sema/serialize.go`)
 5. ~~Synthesize `encode` method AST if not user-defined~~ — **Done** — handles `key` renaming, `skip` exclusion, optional omission (if-unwrap), `include_none` null encoding
 6. ~~Synthesize `decode` factory method AST if not user-defined~~ — **Done** for primitive fields — handles key matching loop, optional null checking, error propagation, `skip` zero-fill, `key` renaming
-7. Add implicit constraints for generic type params — deferred
-8. ~~Tests~~ — **Done**: 43 e2e tests in `tests/e2e/serializable_test.pr` covering: encode/decode round-trip, mixed types (string/int/f64/bool), nested types (3 levels, key annotation, multiple nested fields), array fields (`T[]` — string/int/f64/bool/user-type arrays, empty, single element), map fields (`map[K,V]` — string keys, int keys, encode/decode/empty), mixed array+map, field annotations (key/skip/include_none), multiple optionals, string escaping, zero/negative/large values, custom encode override, key renaming in decode
+7. ~~Generic type param constraints~~ — **Done** in Phase 4 with explicit constraints (not implicit)
+8. ~~Tests~~ — **Done**: 50 e2e tests in `tests/e2e/serializable_test.pr` covering: encode/decode round-trip, mixed types (string/int/f64/bool), nested types (3 levels, key annotation, multiple nested fields), array fields (`T[]` — string/int/f64/bool/user-type arrays, empty, single element), map fields (`map[K,V]` — string keys, int keys, encode/decode/empty), mixed array+map, field annotations (key/skip/include_none), multiple optionals, string escaping, zero/negative/large values, custom encode override, key renaming in decode
 
 **Known limitations (Phase 3+4):**
 - ~~**Nested user-type decode**~~ — **Fixed.** Now uses `T?` local with `!` unwrap in constructor args. Panics if a required nested field is missing from the JSON.
 - ~~**Structural interface coercion for user types**~~ — **Fixed.** Synthesized methods use `MutRefTypeRef`. Variable assignment and value type boxing also fixed.
 - ~~**Container fields**~~ — **Fixed.** `T[]` encodes as JSON array with inline for-in loop; decodes with `has_next_element` + push loop. `map[K, V]` supports any key type — string keys use directly, non-string keys use `to_string()` for encode and `scan[K]()` for decode (reversible via Format/Parse).
-- **Generic serializable types** (`Wrapper[T]`) — deferred pending implicit constraint support.
+- ~~**Generic serializable types**~~ — **Fixed.** Requires explicit constraints: `Wrapper[T: Encodable + Decodable]`. Unconstrained type params in non-skip fields produce a clear error. Skip fields with TypeParam type are exempt (encode-only, no decode synthesis if constructor can't be satisfied).
 
 ### Phase 4: Nested Types, Enums, and Advanced Features
 
@@ -746,7 +746,7 @@ type DecodeError is error `public {
 4. `` `flatten `` support
 5. `` `serializable(tag: "kind") `` parameter for custom discriminator field names
 6. Nested generic serialization (`Wrapper[User]`, `map[string, User[]]`)
-7. Implicit `Encodable`/`Decodable` constraints on generic type parameters
+7. ~~Generic type parameter validation~~ — **Done.** Explicit constraints required (`T: Encodable + Decodable`). Clear error for unconstrained params. Skip fields exempt. 7 tests (int, string, bool, f64, user type, round-trip, skip).
 8. Tests: nested round-trip, container round-trip, enum round-trip, flatten, custom tags
 
 ### Phase 5: Additional Format Modules (future)

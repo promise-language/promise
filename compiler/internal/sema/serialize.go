@@ -1,6 +1,7 @@
 package sema
 
 import (
+	"fmt"
 	"strconv"
 
 	"djabi.dev/go/promise_lang/internal/ast"
@@ -599,25 +600,32 @@ func isSimpleEnum(enum *types.Enum) bool {
 }
 
 // processSerializableEnum handles `serializable on an enum declaration.
-// Currently supports simple enums (no data variants) — encoded as strings.
+// Simple enums (no data variants) encode as strings.
+// Data enums use tagged object format: {"type":"Variant",...fields...}.
+// Decoder requires the "type" discriminator as the first key (discriminator-first constraint).
 func (c *Checker) processSerializableEnum(enum *types.Enum, d *ast.EnumDecl) {
 	enum.SetSerializable(true)
 
-	if !isSimpleEnum(enum) {
-		c.errorf(d.Pos(), "`serializable on data enums is not yet supported (T0008) — only simple enums (no variant fields) are supported")
-		return
-	}
-
 	// Synthesize encode method if not user-defined.
 	if lookupOwnEnumMethod(enum, "encode") == nil {
-		md := c.synthesizeEnumEncodeMethod(enum, d)
+		var md *ast.MethodDecl
+		if isSimpleEnum(enum) {
+			md = c.synthesizeEnumEncodeMethod(enum, d)
+		} else {
+			md = c.synthesizeDataEnumEncodeMethod(enum, d)
+		}
 		d.Methods = append(d.Methods, md)
 		c.defineEnumMethod(enum, md, d.Name)
 	}
 
 	// Synthesize decode factory method if not user-defined.
 	if lookupOwnEnumMethod(enum, "decode") == nil {
-		md := c.synthesizeEnumDecodeMethod(enum, d)
+		var md *ast.MethodDecl
+		if isSimpleEnum(enum) {
+			md = c.synthesizeEnumDecodeMethod(enum, d)
+		} else {
+			md = c.synthesizeDataEnumDecodeMethod(enum, d)
+		}
 		d.Methods = append(d.Methods, md)
 		c.defineEnumMethod(enum, md, d.Name)
 	}
@@ -736,6 +744,338 @@ func (c *Checker) synthesizeEnumDecodeMethod(enum *types.Enum, d *ast.EnumDecl) 
 		},
 		Annotations: []*ast.MetaAnnotation{{Name: "factory"}, {Name: "public"}},
 		Body:        &ast.Block{Stmts: stmts},
+	}
+}
+
+// ── Data enum serialization (tagged object format) ────────────────────────
+
+// synthesizeDataEnumEncodeMethod builds:
+//
+//	encode(Encoder ~e)! `public {
+//	  match this {
+//	    Enum.Variant1(f1, f2) => {
+//	      e.begin_object(0); e.encode_key("type"); e.encode_string("Variant1");
+//	      e.encode_key("f1"); f1.encode(e); e.encode_key("f2"); f2.encode(e);
+//	      e.end_object();
+//	    },
+//	    Enum.Fieldless => {
+//	      e.begin_object(0); e.encode_key("type"); e.encode_string("Fieldless");
+//	      e.end_object();
+//	    },
+//	  }
+//	}
+func (c *Checker) synthesizeDataEnumEncodeMethod(enum *types.Enum, d *ast.EnumDecl) *ast.MethodDecl {
+	enumName := d.Name
+
+	var arms []*ast.MatchArm
+	for _, v := range enum.Variants() {
+		var stmts []ast.Stmt
+		stmts = append(stmts, makeExprStmt(callMember(ident("e"), "begin_object", intLit(0))))
+		stmts = append(stmts, makeExprStmt(callMember(ident("e"), "encode_key", strLit("type"))))
+		stmts = append(stmts, makeExprStmt(callMember(ident("e"), "encode_string", strLit(v.Name()))))
+
+		if v.NumFields() > 0 {
+			// Build bindings for destructure pattern
+			bindings := make([]string, v.NumFields())
+			for i, f := range v.Fields() {
+				bindName := "_v_" + f.Name()
+				if f.Name() == "" {
+					bindName = fmt.Sprintf("_v_%d", i)
+				}
+				bindings[i] = bindName
+				wireName := f.Name()
+				if wireName == "" {
+					wireName = fmt.Sprintf("_%d", i)
+				}
+				stmts = append(stmts, makeExprStmt(callMember(ident("e"), "encode_key", strLit(wireName))))
+				stmts = append(stmts, makeExprStmt(callMember(ident(bindName), "encode", ident("e"))))
+			}
+			stmts = append(stmts, makeExprStmt(callMember(ident("e"), "end_object")))
+			arms = append(arms, &ast.MatchArm{
+				Pattern: &ast.EnumDestructureMatchPattern{Enum: enumName, Variant: v.Name(), Bindings: bindings},
+				Block:   &ast.Block{Stmts: stmts},
+			})
+		} else {
+			stmts = append(stmts, makeExprStmt(callMember(ident("e"), "end_object")))
+			arms = append(arms, &ast.MatchArm{
+				Pattern: &ast.EnumVariantMatchPattern{Enum: enumName, Variant: v.Name()},
+				Block:   &ast.Block{Stmts: stmts},
+			})
+		}
+	}
+
+	body := &ast.Block{Stmts: []ast.Stmt{
+		makeExprStmt(&ast.MatchExpr{
+			Subject: &ast.ThisExpr{},
+			Arms:    arms,
+		}),
+	}}
+
+	return &ast.MethodDecl{
+		Name:        "encode",
+		Receiver:    &ast.ReceiverParam{RefMod: ast.RefNone},
+		Params:      []*ast.Param{{Type: &ast.MutRefTypeRef{Inner: &ast.NamedTypeRef{Name: "Encoder"}}, Name: "e"}},
+		ReturnType:  &ast.ReturnTypeSpec{CanError: true},
+		Annotations: []*ast.MetaAnnotation{{Name: "public"}},
+		Body:        body,
+	}
+}
+
+// synthesizeDataEnumDecodeMethod builds a tagged-object decoder.
+// The "type" discriminator key MUST appear first in the JSON object.
+//
+//	decode(Decoder ~d) EnumName! `factory `public {
+//	  d.begin_object()?;
+//	  string? _dk = d.next_key()?;
+//	  if _dk is absent { raise DecodeError(...); }
+//	  if _dk != "type" { raise DecodeError(...); }  // _dk narrowed to string
+//	  string _tag = d.decode_string()?;
+//	  if _tag == "Circle" {
+//	    f64 _f_radius = 0.0;
+//	    for { ... key matching ... }
+//	    d.end_object()?;
+//	    return EnumName.Circle(radius: _f_radius);
+//	  } else if ...
+//	  else { raise DecodeError(...); }
+//	}
+func (c *Checker) synthesizeDataEnumDecodeMethod(enum *types.Enum, d *ast.EnumDecl) *ast.MethodDecl {
+	enumName := d.Name
+	var stmts []ast.Stmt
+
+	// d.begin_object()?;
+	stmts = append(stmts, makeExprStmt(callMember(ident("d"), "begin_object")))
+
+	// string? _dk = d.next_key()?;
+	stmts = append(stmts, &ast.TypedVarDecl{
+		Type: &ast.OptionalTypeRef{Inner: &ast.NamedTypeRef{Name: "string"}},
+		Name: "_dk", Value: propagate(callMember(ident("d"), "next_key")),
+	})
+
+	// if _dk is absent { raise DecodeError(...); }
+	// After this check, _dk is narrowed from string? to string.
+	stmts = append(stmts, &ast.IfStmt{
+		Cond: &ast.IsExpr{Expr: ident("_dk"), Pattern: &ast.IdentIsPattern{Name: "absent"}},
+		Body: &ast.Block{Stmts: []ast.Stmt{
+			&ast.RaiseStmt{Value: c.makeDecodeError("expected 'type' discriminator key in enum object")},
+		}},
+	})
+
+	// if _dk != "type" { raise DecodeError(...); }
+	// _dk is narrowed to string after the absent check above.
+	stmts = append(stmts, &ast.IfStmt{
+		Cond: &ast.BinaryExpr{Left: ident("_dk"), Op: ast.BinNeq, Right: strLit("type")},
+		Body: &ast.Block{Stmts: []ast.Stmt{
+			&ast.RaiseStmt{Value: c.makeDecodeError("first key in serializable enum must be 'type' (discriminator-first constraint)")},
+		}},
+	})
+
+	// string _tag = d.decode_string()?;
+	stmts = append(stmts, &ast.TypedVarDecl{
+		Type: &ast.NamedTypeRef{Name: "string"}, Name: "_tag",
+		Value: propagate(callMember(ident("d"), "decode_string")),
+	})
+
+	// Build if/else chain for each variant.
+	variants := enum.Variants()
+	if len(variants) > 0 {
+		// Final else: unknown variant error
+		var tail ast.Stmt = &ast.Block{Stmts: []ast.Stmt{
+			&ast.RaiseStmt{Value: &ast.CallExpr{
+				Callee: ident("DecodeError"),
+				Args: []*ast.Arg{
+					{Name: "message", Value: &ast.BinaryExpr{
+						Left: strLit("unknown enum variant: "), Op: ast.BinAdd, Right: ident("_tag"),
+					}},
+					{Name: "field", Value: strLit("")},
+					{Name: "position", Value: intLit(0)},
+				},
+			}},
+		}}
+
+		for i := len(variants) - 1; i >= 0; i-- {
+			v := variants[i]
+			tail = &ast.IfStmt{
+				Cond: &ast.BinaryExpr{Left: ident("_tag"), Op: ast.BinEq, Right: strLit(v.Name())},
+				Body: &ast.Block{Stmts: c.buildVariantDecodeBody(enumName, v)},
+				Else: tail,
+			}
+		}
+		stmts = append(stmts, tail)
+	}
+
+	return &ast.MethodDecl{
+		Name:   "decode",
+		Params: []*ast.Param{{Type: &ast.MutRefTypeRef{Inner: &ast.NamedTypeRef{Name: "Decoder"}}, Name: "d"}},
+		ReturnType: &ast.ReturnTypeSpec{
+			Type:     &ast.NamedTypeRef{Name: enumName},
+			CanError: true,
+		},
+		Annotations: []*ast.MetaAnnotation{{Name: "factory"}, {Name: "public"}},
+		Body:        &ast.Block{Stmts: stmts},
+	}
+}
+
+// buildVariantDecodeBody builds the decode body for a single variant.
+// For fieldless variants: skip remaining keys, end_object, return.
+// For data variants: declare locals, key-match loop, end_object, return with args.
+func (c *Checker) buildVariantDecodeBody(enumName string, v *types.Variant) []ast.Stmt {
+	var stmts []ast.Stmt
+
+	if v.NumFields() == 0 {
+		// Fieldless: consume remaining keys and return
+		stmts = append(stmts, c.buildSkipRemainingKeys())
+		stmts = append(stmts, makeExprStmt(callMember(ident("d"), "end_object")))
+		stmts = append(stmts, &ast.ReturnStmt{Value: memberExpr(ident(enumName), v.Name())})
+		return stmts
+	}
+
+	// Declare local variables for each field
+	for i, f := range v.Fields() {
+		localName := "_f_" + varFieldLocalName(f, i)
+		stmts = append(stmts, c.makeVarFieldLocalDecl(localName, f.Type()))
+	}
+
+	// Key-matching loop
+	stmts = append(stmts, c.buildVarFieldKeyMatchLoop(v))
+
+	// d.end_object()?;
+	stmts = append(stmts, makeExprStmt(callMember(ident("d"), "end_object")))
+
+	// return EnumName.Variant(field1: _f_field1, ...);
+	var args []*ast.Arg
+	for i, f := range v.Fields() {
+		localName := "_f_" + varFieldLocalName(f, i)
+		localExpr := ident(localName)
+		// If the type has no zero value, we used T? — unwrap with !
+		if c.varFieldNeedsUnwrap(f.Type()) {
+			localExpr = &ast.IdentExpr{Name: localName}
+			args = append(args, &ast.Arg{
+				Name:  f.Name(),
+				Value: &ast.ErrorUnwrapExpr{Expr: localExpr},
+			})
+		} else {
+			args = append(args, &ast.Arg{Name: f.Name(), Value: localExpr})
+		}
+	}
+	stmts = append(stmts, &ast.ReturnStmt{
+		Value: &ast.CallExpr{
+			Callee: memberExpr(ident(enumName), v.Name()),
+			Args:   args,
+		},
+	})
+
+	return stmts
+}
+
+// buildSkipRemainingKeys builds a loop that reads and skips all remaining keys.
+func (c *Checker) buildSkipRemainingKeys() ast.Stmt {
+	return &ast.InfiniteLoop{Body: &ast.Block{Stmts: []ast.Stmt{
+		&ast.TypedVarDecl{
+			Type: &ast.OptionalTypeRef{Inner: &ast.NamedTypeRef{Name: "string"}},
+			Name: "_sk", Value: propagate(callMember(ident("d"), "next_key")),
+		},
+		&ast.IfStmt{
+			Cond: &ast.IsExpr{Expr: ident("_sk"), Pattern: &ast.IdentIsPattern{Name: "absent"}},
+			Body: &ast.Block{Stmts: []ast.Stmt{&ast.BreakStmt{}}},
+		},
+		makeExprStmt(callMember(ident("d"), "skip_value")),
+	}}}
+}
+
+// buildVarFieldKeyMatchLoop builds the key-matching loop for a variant's fields.
+func (c *Checker) buildVarFieldKeyMatchLoop(v *types.Variant) ast.Stmt {
+	var loopStmts []ast.Stmt
+
+	loopStmts = append(loopStmts, &ast.TypedVarDecl{
+		Type: &ast.OptionalTypeRef{Inner: &ast.NamedTypeRef{Name: "string"}},
+		Name: "_k", Value: propagate(callMember(ident("d"), "next_key")),
+	})
+	loopStmts = append(loopStmts, &ast.IfStmt{
+		Cond: &ast.IsExpr{Expr: ident("_k"), Pattern: &ast.IdentIsPattern{Name: "absent"}},
+		Body: &ast.Block{Stmts: []ast.Stmt{&ast.BreakStmt{}}},
+	})
+	loopStmts = append(loopStmts, &ast.TypedVarDecl{
+		Type: &ast.NamedTypeRef{Name: "string"}, Name: "_key",
+		Value: &ast.BinaryExpr{Left: ident("_k"), Op: ast.BinElvis, Right: strLit("")},
+	})
+
+	// Build if/else chain for field keys
+	if v.NumFields() > 0 {
+		var tail ast.Stmt = &ast.Block{Stmts: []ast.Stmt{
+			makeExprStmt(callMember(ident("d"), "skip_value")),
+		}}
+
+		for i := v.NumFields() - 1; i >= 0; i-- {
+			f := v.Fields()[i]
+			localName := "_f_" + varFieldLocalName(f, i)
+			wireName := f.Name()
+			if wireName == "" {
+				wireName = fmt.Sprintf("_%d", i)
+			}
+
+			tail = &ast.IfStmt{
+				Cond: &ast.BinaryExpr{Left: ident("_key"), Op: ast.BinEq, Right: strLit(wireName)},
+				Body: &ast.Block{Stmts: []ast.Stmt{
+					&ast.AssignStmt{
+						Target: ident(localName), Op: ast.OpAssign,
+						Value: propagate(c.makeDecodeCall(f.Type())),
+					},
+				}},
+				Else: tail,
+			}
+		}
+		loopStmts = append(loopStmts, tail)
+	}
+
+	return &ast.InfiniteLoop{Body: &ast.Block{Stmts: loopStmts}}
+}
+
+// varFieldLocalName returns a local variable name for a variant field.
+// Uses the field name, or a positional index for unnamed fields.
+func varFieldLocalName(f *types.VarField, index int) string {
+	if f.Name() != "" {
+		return f.Name()
+	}
+	return fmt.Sprintf("field_%d", index)
+}
+
+// makeVarFieldLocalDecl creates a typed variable declaration with a zero value for a variant field type.
+func (c *Checker) makeVarFieldLocalDecl(localName string, typ types.Type) ast.Stmt {
+	if _, ok := typ.(*types.Optional); ok {
+		return &ast.TypedVarDecl{
+			Type: c.typeToTypeRef(typ), Name: localName, Value: &ast.NoneLit{},
+		}
+	}
+	zv := c.zeroValueExpr(typ)
+	if zv != nil {
+		return &ast.TypedVarDecl{
+			Type: c.typeToTypeRef(typ), Name: localName, Value: zv,
+		}
+	}
+	// No known zero value — use T? with none, unwrap at construction.
+	return &ast.TypedVarDecl{
+		Type: &ast.OptionalTypeRef{Inner: c.typeToTypeRef(typ)}, Name: localName, Value: &ast.NoneLit{},
+	}
+}
+
+// varFieldNeedsUnwrap returns true if the field type has no zero value and was
+// stored as T? during decode.
+func (c *Checker) varFieldNeedsUnwrap(typ types.Type) bool {
+	if _, ok := typ.(*types.Optional); ok {
+		return false
+	}
+	return c.zeroValueExpr(typ) == nil
+}
+
+// makeDecodeError creates a DecodeError constructor call expression.
+func (c *Checker) makeDecodeError(msg string) ast.Expr {
+	return &ast.CallExpr{
+		Callee: ident("DecodeError"),
+		Args: []*ast.Arg{
+			{Name: "message", Value: strLit(msg)},
+			{Name: "field", Value: strLit("")},
+			{Name: "position", Value: intLit(0)},
+		},
 	}
 }
 

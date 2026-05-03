@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "tracker": {
+      "url": "http://localhost:9121/mcp"
+    }
+  }
+}

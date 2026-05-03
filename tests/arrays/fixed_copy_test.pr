@@ -8,12 +8,12 @@ main() `test(expected: """99
   int[3] a = [1, 2, 3];
   int[3] b = a;
   b[0] = 99;
-  println("{b[0]}");
-  println("{a[0]}");
+  print_line("{b[0]}");
+  print_line("{a[0]}");
 
   // For-in with index
   int[3] items = [5, 2, 3];
   for i, x in items {
-    println("{x}");
+    print_line("{x}");
   }
 }

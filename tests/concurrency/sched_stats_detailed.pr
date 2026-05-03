@@ -33,5 +33,5 @@ main() `test(expected: "ok") {
   // Context switches should be positive
   assert(context_switches() > 0, "has context switches");
 
-  println("ok");
+  print_line("ok");
 }

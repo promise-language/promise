@@ -12,6 +12,6 @@ main() `test(expected: """42
   t2 := go add(10, 32);
   r1 := <-t1;
   r2 := <-t2;
-  print_int(r1);
-  print_int(r2);
+  print_line(r1);
+  print_line(r2);
 }

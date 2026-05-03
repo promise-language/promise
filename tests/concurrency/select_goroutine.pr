@@ -11,9 +11,9 @@ main() `test(expected: "42") {
   select {
     v := <-ch:
     if val := v {
-      print_int(val);
+      print_line(val);
     }
     v := <-dummy:
-    println("unexpected");
+    print_line("unexpected");
   }
 }

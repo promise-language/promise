@@ -11,5 +11,5 @@ main() `test(expected: "210") {
     int r = <-t;
     sum = sum + r;
   }
-  print_int(sum);
+  print_line(sum);
 }

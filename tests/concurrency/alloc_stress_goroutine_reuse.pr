@@ -19,5 +19,5 @@ main() `test(expected: "2000") {
     }
   }
   // Each goroutine sends 3 (vector length), so sum = 2000 * 3 = 6000
-  print_int(sum / 3);
+  print_line(sum / 3);
 }

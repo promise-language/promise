@@ -23,7 +23,7 @@ concurrent_main_io ok""", exclude: "wasm32") {
   if val := r1 {
     assert(val == 499500, "goroutine computed sum");
   }
-  println("main_io ok");
+  print_line("main_io ok");
 
   // Test 2: Main and goroutines both do IO simultaneously
   channel[string] done = channel[string](capacity: 3);
@@ -55,5 +55,5 @@ concurrent_main_io ok""", exclude: "wasm32") {
     }
   }
   assert(count == 2, "both goroutines completed");
-  println("concurrent_main_io ok");
+  print_line("concurrent_main_io ok");
 }

@@ -132,7 +132,7 @@ The `promise test` command discovers and runs all `` `test ``-annotated function
 
 ```promise
 main() `test(expected: "42") {
-  print_int(42);
+  print_line(42);
 }
 ```
 
@@ -700,7 +700,7 @@ main() {
   p := Point(x: 3, y: 4);
   Point q = p;          // copy, not move — q is independent
   q.x = 10;             // does not affect p
-  print_int(p.sum());   // 7
+  print_line(p.sum());   // 7
 }
 ```
 
@@ -1393,7 +1393,7 @@ Promise uses Rust-style ownership with borrowing and lifetimes.
 
 ```promise
 process(string &data) {              // shared borrow
-  io.println(data);
+  io.print_line(data);
 }
 
 modify(string ~data) {               // mutable borrow
@@ -1524,7 +1524,7 @@ In a **non-failable function**, calling a failable function without handling is 
 main() {
   // Handle with ? — block must provide recovery value or diverge (return/panic)
   string content = readFile("data.txt") ? e {
-    io.println("Failed: {e.message()}");
+    io.print_line("Failed: {e.message()}");
     return;
   };
 
@@ -1562,7 +1562,7 @@ string content = readFile("data.txt") ? { "" };    // use empty string on failur
 
 // Diverge
 string content = readFile("data.txt") ? e {
-  io.println("Error: {e.message}");
+  io.print_line("Error: {e.message}");
   return;
 };
 
@@ -1600,9 +1600,9 @@ To inspect both the value and error without propagation, destructure into a tupl
 ```promise
 (content, err) := readFile("data.txt");
 if err is present {
-  io.println("Failed: {err.message()}");
+  io.print_line("Failed: {err.message()}");
 } else {
-  io.println(content);
+  io.print_line(content);
 }
 ```
 
@@ -1801,12 +1801,12 @@ Parameter-level `` `doc `` annotations are placed after the parameter name (and 
 
 ```promise
 // Exactly one sep() is compiled per platform
-sep() `target(linux)   { println("linux"); }
-sep() `target(!linux)  { println("non-linux"); }
+sep() `target(linux)   { print_line("linux"); }
+sep() `target(!linux)  { print_line("non-linux"); }
 
 // posix = linux || macos
-greet() `target(posix)  { println("posix"); }
-greet() `target(!posix) { println("non-posix"); }
+greet() `target(posix)  { print_line("posix"); }
+greet() `target(!posix) { print_line("non-posix"); }
 
 // Platform-specific types
 type Handle `target(linux)   { int fd; }
@@ -2162,10 +2162,10 @@ label := match status {
 
 ```promise
 match color {
-  Color.Red => io.println("red"),
-  Color.Green => io.println("green"),
-  Color.Custom(r, g, b) => io.println("rgb({r},{g},{b})"),
-  _ => io.println("other"),
+  Color.Red => io.print_line("red"),
+  Color.Green => io.print_line("green"),
+  Color.Custom(r, g, b) => io.print_line("rgb({r},{g},{b})"),
+  _ => io.print_line("other"),
 }
 ```
 
@@ -2185,9 +2185,9 @@ A type pattern without binding just checks the type:
 
 ```promise
 match animal {
-  Dog => io.println("it's a dog"),
-  Cat => io.println("it's a cat"),
-  _ => io.println("something else"),
+  Dog => io.print_line("it's a dog"),
+  Cat => io.print_line("it's a cat"),
+  _ => io.print_line("something else"),
 }
 ```
 
@@ -2496,7 +2496,7 @@ fibonacci() stream[int] {
 // Consuming:
 for n in fibonacci() {
   if n > 100 { break; }
-  io.println("{n}");
+  io.print_line("{n}");
 }
 ```
 
@@ -2567,7 +2567,7 @@ go {
 // Use stream combinators on channel
 evens := ch.filter((n) -> n % 2 == 0);
 for n in evens {
-  io.println("{n}");
+  io.print_line("{n}");
 }
 ```
 
@@ -2653,7 +2653,7 @@ for i in 0..5 { v.push(i * i); }     // [0, 1, 4, 9, 16]
 v.remove(2);                           // [0, 1, 9, 16]
 
 if val := v.pop() {
-    println("{val}");                  // 16
+    print_line("{val}");                  // 16
 }
 
 assert(v.contains(9));                 // true
@@ -2666,8 +2666,8 @@ Vectors support `for-in` iteration:
 
 ```promise
 int[] nums = [10, 20, 30];
-for n in nums { println("{n}"); }          // value iteration
-for i, n in nums { println("{i}: {n}"); }  // indexed iteration
+for n in nums { print_line("{n}"); }          // value iteration
+for i, n in nums { print_line("{i}: {n}"); }  // indexed iteration
 ```
 
 ### 13.2 Map (`map[K, V]`)
@@ -2704,7 +2704,7 @@ m["x"] = 10;
 m["y"] = 20;
 
 if val := m["x"] {
-    println("{val}");            // 10
+    print_line("{val}");            // 10
 }
 
 name := m.get_or("z", 0);       // 0
@@ -2753,12 +2753,12 @@ When a `T?` value appears as an `if` condition, it is treated as a presence chec
 string? cc = getCC();
 
 if cc {
-  io.println(cc);              // cc is string here, not string?
+  io.print_line(cc);              // cc is string here, not string?
 }
 
 if !cc {
-  io.println("no value");
-  io.println(cc);               // ERROR: cc is known to be none here
+  io.print_line("no value");
+  io.print_line(cc);               // ERROR: cc is known to be none here
 }
 ```
 
@@ -2777,12 +2777,12 @@ if verbose is present {
   // verbose is bool here — narrowed from bool?
   if verbose { enableLogging(); }
 } else {
-  io.println(verbose);           // ERROR: verbose is known to be none here
+  io.print_line(verbose);           // ERROR: verbose is known to be none here
 }
 
 if verbose is absent {
-  io.println("no flag provided");
-  io.println(verbose);           // ERROR: verbose is known to be none here
+  io.print_line("no flag provided");
+  io.print_line(verbose);           // ERROR: verbose is known to be none here
 }
 ```
 
@@ -2798,7 +2798,7 @@ When you want to unwrap into a **new name**, use `:=` inside an `if` condition:
 User? user = find(42);
 
 if u := user {
-  io.println(u.name);          // u is User — unwrapped
+  io.print_line(u.name);          // u is User — unwrapped
 }
 ```
 
@@ -3130,7 +3130,7 @@ main() {
   };
 
   for value in ch {
-    io.println("{value}");
+    io.print_line("{value}");
   }
 }
 ```
@@ -3203,7 +3203,7 @@ loadFromFile(string &path) TodoList! {
 
 main() {
   TodoList todos = loadFromFile("todos.json") ? err {
-    io.println("Starting fresh: {err.message()}");
+    io.print_line("Starting fresh: {err.message()}");
     TodoList(items: []);
   };
 
@@ -3212,7 +3212,7 @@ main() {
 
   for i, todo in todos.items {
     status := if todo.done { "done" } else { "    " };
-    io.println("[{status}] {todo.title}");
+    io.print_line("[{status}] {todo.title}");
   }
 }
 ```

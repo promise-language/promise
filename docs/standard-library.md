@@ -30,7 +30,7 @@ The stdlib today (27 files) provides:
 | Strings | `string.pr` | Concatenation, comparison, `contains`, `starts_with`, `ends_with`, `index_of`, `trim`, `split`, `[]`, `[:]`, `bytes()`, `byte_at()`, `from_bytes()`, `to_string()`, `to_upper`, `to_lower`, `repeat`, `replace`, `count`, `chars` |
 | Containers | `vector.pr`, `map.pr`, `set.pr` | `Vector[T]` / `T[]` (push/pop/remove/contains/slice/`filled`), `Map[K,V]` / `map[K,V]` (open-addressing, rehash), `Set[T]` |
 | Format/Parse | `format.pr`, `builder.pr`, `parse.pr` | `Format` structural interface, `Builder` (string building, satisfies `Writer`), `Parse` structural interface, `Scanner` (string parsing, satisfies `Reader`), `scan[T]()` |
-| I/O (std) | `io.pr` | `Reader` (read, read_byte) / `Writer` (write, write_string, write_line) / `Closer` structural interfaces, `println`, `print_int`, `print_f64`, `print_bool` |
+| I/O (std) | `io.pr` | `Reader` (read, read_byte) / `Writer` (write, write_string, write_line) / `Closer` structural interfaces, `print(Format)`, `print_line(Format)` |
 | I/O (module) | `modules/io/io.pr` | `File` (open/create/append, read/write bytes, read_line, write_line, read_all, seek), `BufferedReader`, `BufferedWriter` (write_line), `Dir` (make/make_all/list/remove/exists), `IoError`, `read_line()`, `read_stdin()` |
 | Path (module) | `modules/path/path.pr` | `path_join`, `path_dir`, `path_base`, `path_ext`, `path_is_abs`, `path_normalize` |
 | Math | `math.pr`, `random.pr` | `min`, `max`, `abs`, `clamp`, `sqrt`, `sin`, `cos`, `tan`, `pow`, `exp`, `log`, `floor`, `ceil`, `round`, `Random` PRNG |
@@ -219,7 +219,7 @@ type Point {
 
 // Now works in string interpolation:
 p := Point(x: 3, y: 4);
-println("point: {p}");   // point: (3, 4)
+print_line("point: {p}");   // point: (3, 4)
 ```
 
 ### 2.5 Parse & Reader — Structural Interface on Factory Methods — DONE

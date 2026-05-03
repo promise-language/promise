@@ -21,9 +21,9 @@ blue
 circle
 rect""") {
   // Fieldless enum + match
-  println(color_name(Color.Red));
-  println(color_name(Color.Green));
-  println(color_name(Color.Blue));
+  print_line(color_name(Color.Red));
+  print_line(color_name(Color.Green));
+  print_line(color_name(Color.Blue));
 
   // Data enum + match
   Shape s = Shape.Circle(3.14);
@@ -31,12 +31,12 @@ rect""") {
     Shape.Circle(r) => "circle",
     Shape.Rect(w, h) => "rect",
   };
-  println(desc);
+  print_line(desc);
 
   Shape s2 = Shape.Rect(10.0, 20.0);
   string desc2 = match s2 {
     Shape.Circle(r) => "circle",
     Shape.Rect(w, h) => "rect",
   };
-  println(desc2);
+  print_line(desc2);
 }

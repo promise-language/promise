@@ -232,7 +232,7 @@ Type-system-driven LLVM IR generation for primitive types, arithmetic, control f
 - **Variable handling**: alloca + mem2reg strategy — every local gets `alloca`, reads use `load`, writes use `store`. LLVM's `mem2reg` pass promotes to SSA.
 - **Two-pass compilation** (`compiler.go`): pass 1 declares all functions, pass 2 generates bodies.
 - **Extern functions**: `funcDecl` with `(block | SEMI)` grammar — bodyless functions mapped to runtime print functions.
-- **C runtime** (`runtime/runtime.c`): `promise_print_int`, `promise_print_f64`, `promise_print_bool`, `promise_panic`.
+- **C runtime** (`runtime/runtime.c`): `promise_panic`.
 - **CLI**: `promise build file.pr [-o output]` and `promise run file.pr` compile through the full pipeline (parse → sema → ownership → codegen → clang).
 - **Scope**: `int`/`i8`–`i64`/`uint`/`u8`–`u64`/`f32`/`f64`/`bool`, all arithmetic/comparison/logical ops, if/else, while, for-in (range), classic for, infinite loop, break/continue, function calls, compound assignment.
 
@@ -868,7 +868,7 @@ IO reactor work is phased to minimize risk and enable incremental progress. File
 | Work | Design Doc | Priority |
 |------|-----------|----------|
 | Generic type RTTI | — | Low |
-| Value type structural interface coercion (stack boxing) | — | Low |
+| Value type structural interface coercion (stack boxing) — primitive/string boxing done (`boxForStructuralView`); remaining: user-defined value types, variable assignment (`Showable s = 42`) | — | Low |
 | ~~Generic value types~~ | — | ~~Done~~ |
 | ~~User type `format(Writer ~w)` for interpolation (desugar `"{x}"` to `x.format(~builder)`)~~ | — | ~~Low~~ Done |
 | Type argument inference | — | Low |
@@ -955,7 +955,7 @@ Currently, all methods of a monomorphized generic type are emitted even if only 
 | Program | Current | Target | Notes |
 |---------|---------|--------|-------|
 | `main() {}` (empty) | ~20KB native, ~2KB wasm | <5KB native, <500B wasm | Dead code elimination |
-| `main() { println("hello") }` | ~25KB native, ~3KB wasm | <8KB native, <1KB wasm | + rodata strings |
+| `main() { print_line("hello") }` | ~25KB native, ~3KB wasm | <8KB native, <1KB wasm | + rodata strings |
 | Typical CLI tool | ~100-200KB | ~50-100KB | + mono pruning |
 
 ---
@@ -988,7 +988,7 @@ Known gaps and improvements deferred from completed stages.
 | Blocking select uses polling (yield-and-retry) instead of waiter-list parking. Correct but spins when no case is ready. Proper fix requires multi-mutex unlock in scheduler or atomic wake-once protocol for select waiters. | 5c | Medium |
 | Fire-and-forget goroutine G struct leak: all `go { }` blocks set `result_ptr` to sentinel `0x1`, preventing goroutine_exit from freeing the G. Only `task[T]` should use the sentinel. | 5c | Low |
 | Stack overflow detection: deep recursion segfaults with no message. Add guard page (`mprotect` bottom page of M stack) + `SIGSEGV` handler on `sigaltstack` to print "stack overflow" and terminate cleanly. Consider `probe-stack` for large frames. | 5c | Medium |
-| Console output API refactor: delete obsolete `print_int`/`print_f64`/`print_bool` (string interpolation covers all), rename and change `println(string)` to `print_line(Format)` (full English words), add `print(Format)` (no newline). ~400 replacements across ~100 test files. Also remove codegen bridges `promise_print_int`/`promise_print_f64`/`promise_print_bool`. | Std | Medium |
+| ~~Console output API refactor~~ — **Done.** Deleted `print_int`/`print_f64`/`print_bool`/`println(string)` and their codegen bridges. Added `print(Format)` (no newline) and `print_line(Format)` (with newline) — both accept any type implementing the `Format` structural interface. New `promise_print_string_no_nl` PAL bridge for `print`. Implemented primitive/string→structural interface boxing (`boxForStructuralView` in `rtti.go`): stack-allocates scalar values and creates `{vtable, instance}` fat pointers with adapter thunks for primitive receivers. Fixed `saveState`/`restoreState` to preserve `localNameCount` across adapter thunk emission. ~400 replacements across ~120 files. 10 Go codegen tests + 35 e2e tests. | Std | ~~Medium~~ Resolved |
 | ~~Fixed-size arrays as stack-allocated `[N x T]`~~ | ~~8g~~ | ~~Done~~ |
 | Destructure is-patterns (`x is Dog(name)`) | 8k | Medium |
 | Generic type RTTI — partially resolved: mono type `is` checks work (origin ID in parent chain, view vtable cache keyed by mono name). Remaining: `is` patterns with full type expressions (`x is Box[int]`, `e is DataError[string]`) — currently only bare `IDENT` accepted. | 8k | Medium |
@@ -1000,7 +1000,7 @@ Known gaps and improvements deferred from completed stages.
 | Type argument inference (explicit type args only currently) | 8f | Low |
 | Extern ABI for generic types | 8f | Low |
 | Non-instance field placements: mixed `value`+instance, `variant`/`type` fields, `global`/`mono` data placement | 8c | Low |
-| Value type structural interface coercion (stack boxing) | 8p | Low |
+| Value type structural interface coercion (stack boxing) — primitive/string→structural boxing done (function args); remaining: user-defined value types, variable assignment to structural interface type | 8p | Low |
 | ~~Generic value types~~ — **Done.** `computeMonoValueTypeLayout` in `mono.go`. `Range[T]` is the first generic value type. | 8p | ~~Low~~ Resolved |
 | ~~User type `format(Writer ~w)` for interpolation (desugar `"{x}"` to `x.format(~builder)`)~~ — **Done.** User-defined types implementing `format(Writer ~w)!` now work in `{}` interpolation. Compiler creates a Builder, calls `format(~builder)!`, and converts to string via `Builder.to_string()`. Both direct dispatch and vtable dispatch (polymorphic) supported. Value types also supported. | 8h | ~~Low~~ Resolved |
 | `yield*` delegate (forward all values from sub-iterator) | Generators | Medium |

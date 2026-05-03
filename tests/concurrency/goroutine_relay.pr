@@ -80,6 +80,6 @@ main() `test(expected: "110") {
   // Should get 100 + 10 = 110
   r := <-out;
   if v := r {
-    print_int(v);
+    print_line(v);
   }
 }

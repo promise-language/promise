@@ -15,5 +15,5 @@ main() `test(expected: "3") {
     }
   }
   // Should get exactly 3 values, then nones
-  print_int(count);
+  print_line(count);
 }

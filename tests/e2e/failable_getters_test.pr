@@ -190,7 +190,7 @@ test_getter_auto_prop_string_fail() `test {
 test_getter_optional_inferred_error() `test {
   Sensor s = Sensor(_raw: -1);
   x := s.value? e {
-    println("handled");
+    print_line("handled");
   };
   assert("{x}" == "none", "inferred optional recovery on getter error");
 }
@@ -198,7 +198,7 @@ test_getter_optional_inferred_error() `test {
 test_getter_optional_inferred_success() `test {
   Sensor s = Sensor(_raw: 42);
   x := s.value? e {
-    println("handled");
+    print_line("handled");
   };
   assert("{x}" == "42", "inferred optional recovery on getter success");
 }
@@ -206,7 +206,7 @@ test_getter_optional_inferred_success() `test {
 test_getter_optional_typed_error() `test {
   Sensor s = Sensor(_raw: -1);
   int? x = s.value? e {
-    println("handled");
+    print_line("handled");
   };
   assert("{x}" == "none", "typed optional recovery on getter error");
 }
@@ -214,7 +214,7 @@ test_getter_optional_typed_error() `test {
 test_getter_optional_typed_success() `test {
   Sensor s = Sensor(_raw: 7);
   int? x = s.value? e {
-    println("handled");
+    print_line("handled");
   };
   assert("{x}" == "7", "typed optional recovery on getter success");
 }
@@ -320,7 +320,7 @@ test_getter_typed_else_optional() `test {
   v := c.mode? e is ConfigError {
     -99;
   } else e {
-    println("else");
+    print_line("else");
   };
   assert("{v}" == "none", "typed handler else non-recovery produces none");
 }
@@ -330,7 +330,7 @@ test_getter_typed_else_optional_match() `test {
   v := c.mode? e is ConfigError {
     -99;
   } else e {
-    println("else");
+    print_line("else");
   };
   assert("{v}" == "-99", "typed handler match produces some value");
 }

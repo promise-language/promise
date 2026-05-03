@@ -19,9 +19,9 @@ main() `test(expected: """4
   r3 := <-t3;
   r4 := <-t4;
 
-  print_int(r1);
-  print_int(r2);
-  print_int(r3);
-  print_int(r4);
-  print_int(r1 + r2 + r3 + r4);
+  print_line(r1);
+  print_line(r2);
+  print_line(r3);
+  print_line(r4);
+  print_line(r1 + r2 + r3 + r4);
 }

@@ -14,27 +14,27 @@ main() `test(expected: """1
 20""") {
   // Read array field elements
   g := Grid(data: [1, 2, 3]);
-  println("{g.data[0]}");
-  println("{g.data[1]}");
-  println("{g.data[2]}");
+  print_line("{g.data[0]}");
+  print_line("{g.data[1]}");
+  print_line("{g.data[2]}");
 
   // Write array field element
   g.data[0] = 42;
-  println("{g.data[0]}");
-  println("{g.data[1]}");
-  println("{g.data[2]}");
+  print_line("{g.data[0]}");
+  print_line("{g.data[1]}");
+  print_line("{g.data[2]}");
 
   // Compound assign to array field element
   g.data[0] += -27;
-  println("{g.data[0]}");
+  print_line("{g.data[0]}");
 
   // Field array .len
-  println("{g.data.len}");
+  print_line("{g.data.len}");
 
   // For-in over field array
   int sum = 0;
   for x in g.data {
     sum += x;
   }
-  println("{sum}");
+  print_line("{sum}");
 }

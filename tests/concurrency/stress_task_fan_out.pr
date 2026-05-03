@@ -13,5 +13,5 @@ main() `test(expected: "39800") {
     sum = sum + r;
   }
   // Sum of 2*0 + 2*1 + ... + 2*199 = 2 * (199*200/2) = 39800
-  print_int(sum);
+  print_line(sum);
 }

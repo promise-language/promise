@@ -480,7 +480,7 @@ func compile(file *ast.File, info *sema.Info, target string, cachedInstances map
 
 	// Compile imported modules into the same IR module (inline strategy).
 	// Must run before definePALBodies/defineMathBodies/defineF64ToStringBridge so that
-	// std module externs (promise_print_int, promise_nanotime, etc.) and functions
+	// std module externs (promise_print_string, promise_nanotime, etc.) and functions
 	// (_f64_to_str) are declared and available in c.module.Funcs / c.funcs.
 	c.compileModules()
 	// Add PAL-based function bodies to print/panic/time declarations.
@@ -3931,6 +3931,7 @@ type compilerState struct {
 	block            *ir.Block
 	entryBlock       *ir.Block
 	locals           map[string]*ir.InstAlloca
+	localNameCount   map[string]int
 	dropFlags        map[string]*ir.InstAlloca
 	dropBindings     map[string]scopeBinding
 	blockCounter     int
@@ -3952,6 +3953,7 @@ func (c *Compiler) saveState() compilerState {
 		block:            c.block,
 		entryBlock:       c.entryBlock,
 		locals:           c.locals,
+		localNameCount:   c.localNameCount,
 		dropFlags:        c.dropFlags,
 		dropBindings:     c.dropBindings,
 		blockCounter:     c.blockCounter,
@@ -3973,6 +3975,7 @@ func (c *Compiler) restoreState(s compilerState) {
 	c.block = s.block
 	c.entryBlock = s.entryBlock
 	c.locals = s.locals
+	c.localNameCount = s.localNameCount
 	c.dropFlags = s.dropFlags
 	c.dropBindings = s.dropBindings
 	c.blockCounter = s.blockCounter

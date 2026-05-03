@@ -10,5 +10,5 @@ type Greeter {
 
 main() {
   Greeter g = Greeter(name: "World");
-  io.println(g.greet());
+  io.print_line(g.greet());
 }

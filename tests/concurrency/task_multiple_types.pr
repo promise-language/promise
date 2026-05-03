@@ -17,11 +17,11 @@ true""") {
   t_bool := go get_bool();
 
   int ri = <-t_int;
-  print_int(ri);
+  print_line(ri);
 
   string rs = <-t_str;
-  println(rs);
+  print_line(rs);
 
   bool rb = <-t_bool;
-  print_bool(rb);
+  print_line(rb);
 }

@@ -20,5 +20,5 @@ main() `test(expected: "10") {
       count += v;
     }
   }
-  print_int(count);
+  print_line(count);
 }

@@ -39,5 +39,5 @@ main() `test(expected: "ok") {
   assert(new_completed >= 5, "should have completed at least 5 goroutines");
   assert(context_switches() > 0, "should have context switches");
 
-  println("ok");
+  print_line("ok");
 }

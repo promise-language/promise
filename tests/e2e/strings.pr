@@ -13,34 +13,34 @@ c""") {
   string s = "hello world";
 
   // contains
-  print_bool(s.contains("world")); // true
-  print_bool(s.contains("xyz")); // false
+  print_line(s.contains("world")); // true
+  print_line(s.contains("xyz")); // false
 
   // starts_with / ends_with
-  print_bool(s.starts_with("hello")); // true
-  print_bool(s.ends_with("world")); // true
-  print_bool(s.starts_with("world")); // false
+  print_line(s.starts_with("hello")); // true
+  print_line(s.ends_with("world")); // true
+  print_line(s.starts_with("world")); // false
 
   // index_of
   if idx := s.index_of("world") {
-    print_int(idx); // 6
+    print_line(idx); // 6
   }
 
   bool found = false;
   if idx2 := s.index_of("xyz") {
     found = true;
   }
-  print_bool(found); // false
+  print_line(found); // false
 
   // trim
   string padded = "  hi  ";
-  println(padded.trim()); // hi
+  print_line(padded.trim()); // hi
 
   // split
   string csv = "a,b,c";
   string[] parts = csv.split(",");
-  print_int(parts.len); // 3
-  println(parts[0]); // a
-  println(parts[1]); // b
-  println(parts[2]); // c
+  print_line(parts.len); // 3
+  print_line(parts[0]); // a
+  print_line(parts[1]); // b
+  print_line(parts[2]); // c
 }

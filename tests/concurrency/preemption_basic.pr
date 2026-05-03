@@ -24,6 +24,6 @@ main() `test(expected: "done") {
 
   r := <-done;
   if v := r {
-    println(v);
+    print_line(v);
   }
 }

@@ -13,7 +13,7 @@ No C runtime files remain. All runtime functions are codegen-emitted LLVM IR or 
 - `pal_exit(code)` — wraps libc `@exit` (PosixPAL)
 
 **Codegen-emitted print/panic functions** (`codegen/io.go`):
-- `promise_print_string`, `promise_print_int`, `promise_print_f64`, `promise_print_bool` — via PAL `pal_write`
+- `promise_print_string`, `promise_print_string_no_nl` — via PAL `pal_write`
 - `promise_panic`, `promise_panic_msg` — via PAL `pal_write` + `pal_exit`
 - `promise_test_print_result`, `promise_test_summary` — via PAL `pal_write` (test mode)
 
@@ -100,9 +100,6 @@ The remaining C runtime functions all depend on IO or process control. Phase 3 r
 
 | C function | File | Libc calls | What it does |
 |------------|------|------------|--------------|
-| `promise_print_int` | `runtime.c` | `printf` | Print int64 + newline to stdout |
-| `promise_print_f64` | `runtime.c` | `printf` | Print f64 + newline to stdout |
-| `promise_print_bool` | `runtime.c` | `printf` | Print "true"/"false" + newline to stdout |
 | `promise_panic` | `runtime.c` | `fprintf`, `exit` | Print "panic: msg" to stderr, exit(1) |
 | `promise_panic_msg` | `runtime.c` | `fprintf`, `exit` | Print "panic: msg" (Promise string) to stderr, exit(1) |
 | `promise_print_string` | `runtime_string.c` | `fwrite`, `putchar` | Print string bytes + newline to stdout |
@@ -111,7 +108,7 @@ The remaining C runtime functions all depend on IO or process control. Phase 3 r
 | `promise_test_summary` | `runtime_test.c` | `printf` | Print "N passed, M failed" |
 
 These are called from:
-- **std/io.pr**: `_print_int`, `_print_f64`, `_print_bool`, `_print_string` as `extern` bindings
+- **std/io.pr**: `_print_string`, `_print_string_no_nl` as `extern` bindings
 - **std/assert.pr**: `_panic_msg` as `extern` binding
 - **codegen/compiler.go**: `promise_panic` declared as intrinsic (line 324), used for bounds checks, cast failures, OOM
 - **codegen/compiler.go**: `GenerateTestMain()` declares test runner functions (lines 231-244)
@@ -236,10 +233,8 @@ Each C print function becomes a codegen-emitted LLVM IR function that formats th
 
 | C function | Replacement strategy |
 |------------|---------------------|
-| `promise_print_int` | Codegen: call existing `promise_int_to_string`, extract buf/len, call `pal_write(1, buf, len)`, write `\n` |
-| `promise_print_f64` | Codegen: call existing `promise_f64_to_string`, extract buf/len, call `pal_write(1, buf, len)`, write `\n` |
-| `promise_print_bool` | Codegen: call existing `promise_bool_to_string`, extract buf/len, call `pal_write(1, buf, len)`, write `\n` |
-| `promise_print_string` | Codegen: extract `data`/`len` from string instance, call `pal_write(1, data, len)`, write `\n` |
+| `promise_print_string` | **Done.** Codegen: extract `data`/`len` from string instance, call `pal_write(1, data, len)`, write `\n` |
+| `promise_print_string_no_nl` | **Done.** Codegen: same but without trailing newline. Used by `print(Format)`. |
 | `promise_panic` | Codegen: write "panic: " + msg to fd 2 (stderr), call `pal_exit(1)` |
 | `promise_panic_msg` | Codegen: write "panic: " + string data to fd 2, call `pal_exit(1)` |
 | `promise_test_run` | Keep as C initially (fork/waitpid); replace in Phase 5 with thread-based isolation |
@@ -255,7 +250,7 @@ Current C functions append `\n` via `printf` format strings. In PAL, two options
 1. **Two writes**: `pal_write(fd, data, len)` then `pal_write(fd, "\n", 1)` — simple, two syscalls
 2. **Buffer copy**: copy string + `\n` into a stack buffer, single `pal_write` — one syscall, small alloca
 
-Option 2 is better for performance. The codegen allocates a stack buffer (`alloca [N x i8]` or dynamically sized via alloca), copies the string data + newline byte, calls `pal_write` once. For short strings (most `println` calls), this is a single `alloca` + `memcpy` + `store \n` + `pal_write`.
+Option 2 is better for performance. The codegen allocates a stack buffer (`alloca [N x i8]` or dynamically sized via alloca), copies the string data + newline byte, calls `pal_write` once. For short strings (most `print_line` calls), this is a single `alloca` + `memcpy` + `store \n` + `pal_write`.
 
 ### File Descriptors
 

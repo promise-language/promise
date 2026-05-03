@@ -39,21 +39,20 @@ type Closer `structural `public `doc("Structural interface for resources that ne
 // ── Console output ──────────────────────────────────────────────────────────
 
 // Low-level C bindings (prefixed with _ by convention)
-_print_int(int x) `extern("promise_print_int");
-_print_f64(f64 x) `extern("promise_print_f64");
-_print_bool(bool x) `extern("promise_print_bool");
 _print_string(string s) `extern("promise_print_string");
+_print_string_no_nl(string s) `extern("promise_print_string_no_nl");
 
 // Public API
-print_int(int x) `public `doc("Prints an integer to stdout.") {
-  _print_int(x);
+print(Format f) `public `doc("Prints a formatted value to stdout without a trailing newline.") {
+  Builder b = Builder();
+  f.format(b)? {
+  };
+  _print_string_no_nl(b.to_string());
 }
-print_f64(f64 x) `public `doc("Prints a float to stdout.") {
-  _print_f64(x);
-}
-print_bool(bool x) `public `doc("Prints a boolean to stdout.") {
-  _print_bool(x);
-}
-println(string s) `public `doc("Prints a string followed by a newline to stdout.") {
-  _print_string(s);
+
+print_line(Format f) `public `doc("Prints a formatted value followed by a newline to stdout.") {
+  Builder b = Builder();
+  f.format(b)? {
+  };
+  _print_string(b.to_string());
 }

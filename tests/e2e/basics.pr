@@ -12,34 +12,34 @@ x < y
 5
 7""") {
   // Integers
-  print_int(42);
-  print_int(-7);
+  print_line(42);
+  print_line(-7);
 
   // Float
-  print_f64(3.14);
+  print_line(3.14);
 
   // Bool
-  print_bool(true);
-  print_bool(false);
+  print_line(true);
+  print_line(false);
 
   // String
-  println("hello world");
+  print_line("hello world");
 
   // Variables and arithmetic
   int x = 10;
   int y = 20;
-  print_int(x + y);
+  print_line(x + y);
 
   // String concat
   string a = "foo";
   string b = "bar";
-  println(a + b);
+  print_line(a + b);
 
   // If/else
   if x < y {
-    println("x < y");
+    print_line("x < y");
   } else {
-    println("x >= y");
+    print_line("x >= y");
   }
 
   // While loop
@@ -49,25 +49,25 @@ x < y
     sum += i;
     i += 1;
   }
-  print_int(sum);
+  print_line(sum);
 
   // For range
   int total = 0;
   for n in 0..10 {
     total += n;
   }
-  print_int(total);
+  print_line(total);
 
   // Increment/decrement
   int c = 0;
   for j := 0; j < 5; j++ {
     c++;
   }
-  print_int(c);
+  print_line(c);
 
   int d = 10;
   d--;
   d--;
   d--;
-  print_int(d);
+  print_line(d);
 }

@@ -15,8 +15,8 @@ main() `test(expected: """1
   Vec2 o = Vec2(x: 1.0, y: 2.0);
   Vec2 s = Vec2(x: 10.0, y: 20.0);
   Rect r = Rect(origin: o, size: s);
-  print_f64(r.origin.x);
-  print_f64(r.origin.y);
-  print_f64(r.size.x);
-  print_f64(r.size.y);
+  print_line(r.origin.x);
+  print_line(r.origin.y);
+  print_line(r.size.x);
+  print_line(r.size.y);
 }

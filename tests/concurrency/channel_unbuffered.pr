@@ -6,6 +6,6 @@ main() `test(expected: "99") {
   };
   result := <-ch;
   if v := result {
-    print_int(v);
+    print_line(v);
   }
 }

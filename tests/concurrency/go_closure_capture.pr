@@ -17,5 +17,5 @@ main() `test(expected: "100") {
     }
   }
   // 10 * 10 = 100
-  print_int(sum);
+  print_line(sum);
 }

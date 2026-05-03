@@ -15,9 +15,9 @@ main() `test(expected: """15
 100
 200""") {
   Point p = Point(x: 5, y: 10);
-  print_int(sum_point(p: p));
+  print_line(sum_point(p: p));
 
   Point q = make_point(a: 100, b: 200);
-  print_int(q.x);
-  print_int(q.y);
+  print_line(q.x);
+  print_line(q.y);
 }

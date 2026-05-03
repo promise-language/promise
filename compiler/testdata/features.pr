@@ -59,41 +59,41 @@ main() {
   Circle c = Circle(radius: 5.0);
   Rectangle r = Rectangle(width: 3.0, height: 4.0);
 
-  io.println(c.area());
-  io.println(r.area());
+  io.print_line(c.area());
+  io.print_line(r.area());
 
   Color color = Color.Blue;
   match color {
-    Color.Red => io.println("red"),
-    Color.Green => io.println("green"),
-    Color.Blue => io.println("blue"),
-    Color.Custom(r, g, b) => io.println("custom"),
+    Color.Red => io.print_line("red"),
+    Color.Green => io.print_line("green"),
+    Color.Blue => io.print_line("blue"),
+    Color.Custom(r, g, b) => io.print_line("custom"),
   }
 
   Int[] numbers = [1, 2, 3, 4, 5];
   for i, n in numbers {
-    io.println("{i}: {n}");
+    io.print_line("{i}: {n}");
   }
 
   for x in 0..10 {
-    io.println(x);
+    io.print_line(x);
   }
 
   Shape &s = c;
   if s is Circle {
-    io.println("it's a circle");
+    io.print_line("it's a circle");
   }
 
   Circle? maybeCircle = s as Circle;
   if mc := maybeCircle {
-    io.println(mc.radius);
+    io.print_line(mc.radius);
   }
 
   task[Int] task = go computeValue();
   Int result = <-task;
 
   Int sum = numbers.filter(|n| -> n > 2).fold(0, |acc, n| -> acc + n);
-  io.println(sum);
+  io.print_line(sum);
 }
 
 computeValue() Int {

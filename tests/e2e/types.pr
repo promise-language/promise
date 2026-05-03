@@ -37,28 +37,28 @@ Luna
 meow""") {
   // Constructor + field access
   p := Point(x: 3, y: 4);
-  print_int(p.x);
-  print_int(p.y);
+  print_line(p.x);
+  print_line(p.y);
 
   // Method call
-  print_int(p.sum());
+  print_line(p.sum());
 
   // Inheritance + virtual dispatch
   Dog d = Dog(name: "Rex");
-  println(d.name);
-  println(d.speak());
+  print_line(d.name);
+  print_line(d.speak());
 
   Cat c = Cat(name: "Whiskers");
-  println(c.name);
-  println(c.speak());
+  print_line(c.name);
+  print_line(c.speak());
 
   // Polymorphic: Animal variable holding Dog
   Animal a = Dog(name: "Buddy");
-  println(a.name);
-  println(a.speak());
+  print_line(a.name);
+  print_line(a.speak());
 
   // Polymorphic: Animal variable holding Cat
   Animal a2 = Cat(name: "Luna");
-  println(a2.name);
-  println(a2.speak());
+  print_line(a2.name);
+  print_line(a2.speak());
 }

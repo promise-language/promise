@@ -20,5 +20,5 @@ main() `test(expected: "ok") {
   restored := set_max_procs(0);
   assert(restored == initial, "should be restored");
 
-  println("ok");
+  print_line("ok");
 }

@@ -1,0 +1,22 @@
+// E2E test for print/print_line with primitives via Format structural interface.
+main() `test(expected: """42
+true
+3.14
+hello
+X
+ab
+42
+true
+3.14""") {
+  print_line(42);
+  print_line(true);
+  print_line(3.14);
+  print_line("hello");
+  print_line('X');
+  print("a");
+  print("b");
+  print_line("");
+  print_line(42);
+  print_line(true);
+  print_line(3.14);
+}

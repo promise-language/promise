@@ -14,5 +14,5 @@ main() `test(expected: "survived", exclude: "wasm32") {
   r := <-ch;
 
   // Main should still be running
-  println("survived");
+  print_line("survived");
 }

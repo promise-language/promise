@@ -445,10 +445,12 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named, fromType typ
 		}
 		if fn, ok := c.funcs[mangledName]; ok {
 			// Check if the concrete method signature differs from the interface method
-			// (extra optional/default params, non-failable→failable, T→T? return).
+			// (extra optional/default params, non-failable→failable, T→T? return,
+			// or primitive scalar receiver vs i8* receiver).
 			// If so, generate an adapter thunk with the interface's signature.
 			concreteMethod := c.lookupAnyMethod(concrete, m.Name(), m.IsGetter(), m.IsSetter())
-			if concreteMethod != nil && needsViewAdapter(concreteMethod.Sig(), m.Sig()) {
+			needsAdapter := concreteMethod != nil && (needsViewAdapter(concreteMethod.Sig(), m.Sig()) || isPrimitiveScalar(concrete))
+			if needsAdapter {
 				adapter := c.emitViewMethodAdapter(concrete, concreteMethod, m, fn)
 				entries = append(entries, constant.NewBitCast(adapter, irtypes.I8Ptr))
 			} else {
@@ -537,7 +539,15 @@ func (c *Compiler) emitViewMethodAdapter(
 
 	// Forward receiver
 	if concreteSig.Recv() != nil {
-		args = append(args, params[paramIdx])
+		if isPrimitiveScalar(concreteType) {
+			// Primitive receiver: load scalar from i8* pointer
+			scalarType := llvmNamedType(concreteType)
+			typedPtr := c.block.NewBitCast(params[paramIdx], irtypes.NewPointer(scalarType))
+			scalar := c.block.NewLoad(scalarType, typedPtr)
+			args = append(args, scalar)
+		} else {
+			args = append(args, params[paramIdx])
+		}
 		paramIdx++
 	}
 
@@ -600,7 +610,7 @@ func (c *Compiler) emitViewMethodAdapter(
 		// T → T?: wrap as some(T)
 		optVal := c.wrapSome(result, c.resolveType(concreteResult))
 		c.block.NewRet(optVal)
-	} else if concreteResult == nil {
+	} else if concreteResult == nil && !concreteCanError {
 		c.block.NewRet(nil)
 	} else {
 		c.block.NewRet(result)
@@ -647,16 +657,23 @@ func isInFirstParentChain(concrete, target *types.Named) bool {
 // coerceToView swaps the vtable pointer in a value struct when the value crosses
 // a type boundary to a non-first-parent view. For first parent chain coercion
 // (prefix-compatible), the vtable is left unchanged.
+// Also handles boxing of primitives and strings into structural interface views.
 func (c *Compiler) coerceToView(val value.Value, fromType, toType types.Type) value.Value {
 	fromNamed := extractNamed(fromType)
 	toNamed := extractNamed(toType)
 	if fromNamed == nil || toNamed == nil {
 		return val
 	}
-	if !c.isUserValueType(fromType) || !c.isUserValueType(toType) {
+	if fromNamed == toNamed {
 		return val
 	}
-	if fromNamed == toNamed {
+
+	// Non-user-value types (primitives, string) → structural interface: box into view
+	if !c.isUserValueType(fromType) && c.isUserValueType(toType) {
+		return c.boxForStructuralView(val, fromNamed, toNamed, fromType)
+	}
+
+	if !c.isUserValueType(fromType) || !c.isUserValueType(toType) {
 		return val
 	}
 
@@ -677,6 +694,44 @@ func (c *Compiler) coerceToView(val value.Value, fromType, toType types.Type) va
 	viewVtable := c.getOrEmitViewVtable(fromNamed, toNamed, fromType)
 	vtablePtr := constant.NewBitCast(viewVtable, irtypes.I8Ptr)
 	return c.block.NewInsertValue(val, vtablePtr, 0)
+}
+
+// boxForStructuralView boxes a primitive or string value into a structural interface
+// view ({i8*, i8*}) when the target is a structural interface.
+// For primitives: stack-allocates the scalar and creates {vtable, &scalar}.
+// For string: creates {vtable, string_ptr} (string is already i8*).
+func (c *Compiler) boxForStructuralView(val value.Value, fromNamed, toNamed *types.Named, fromType types.Type) value.Value {
+	// Only box when target is a structural interface
+	if !toNamed.IsStructural() {
+		return val
+	}
+	// Skip void/none
+	if fromNamed == types.TypVoid || fromNamed == types.TypNone {
+		return val
+	}
+
+	// Get view vtable for concrete → structural interface
+	viewVtable := c.getOrEmitViewVtable(fromNamed, toNamed, fromType)
+	vtablePtr := constant.NewBitCast(viewVtable, irtypes.I8Ptr)
+
+	// Create the instance pointer
+	var instancePtr value.Value
+	if isPrimitiveScalar(fromNamed) {
+		// Alloca the scalar on stack, store, bitcast to i8*
+		scalarType := llvmNamedType(fromNamed)
+		alloca := c.entryBlock.NewAlloca(scalarType)
+		c.block.NewStore(val, alloca)
+		instancePtr = c.block.NewBitCast(alloca, irtypes.I8Ptr)
+	} else {
+		// String and other i8* types: already an i8* pointer
+		instancePtr = val
+	}
+
+	// Construct the view struct: { vtable_ptr, instance_ptr }
+	viewType := userValueType()
+	result := constant.NewZeroInitializer(viewType)
+	tmp := c.block.NewInsertValue(result, vtablePtr, 0)
+	return c.block.NewInsertValue(tmp, instancePtr, 1)
 }
 
 // coerceCallArgs applies optional wrapping (T→T?) and view coercion to each
@@ -715,7 +770,7 @@ func (c *Compiler) coerceCallArgs(argVals []value.Value, argTypes []types.Type, 
 			}
 		}
 
-		// View coercion (structural interface vtable swap)
+		// View coercion (structural interface vtable swap, or boxing for primitives/string)
 		v = c.coerceToView(v, argTypes[i], params[i].Type())
 
 		if v != argVals[i] && !coerced {

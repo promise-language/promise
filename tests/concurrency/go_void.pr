@@ -5,5 +5,5 @@ doWork() {
 main() `test(expected: "done") {
   t := go doWork();
   <-t;
-  println("done");
+  print_line("done");
 }

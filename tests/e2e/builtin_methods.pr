@@ -5,19 +5,19 @@ true
 false""") {
   // --- String is_empty (getter) ---
   s := "hello";
-  print_bool(s.is_empty); // false
-  print_bool("".is_empty); // true
+  print_line(s.is_empty); // false
+  print_line("".is_empty); // true
 
   // --- Slice is_empty (getter) ---
   int[] nums = [1, 2];
-  print_bool(nums.is_empty); // false
+  print_line(nums.is_empty); // false
   int[] empty = [1];
   empty.pop();
-  print_bool(empty.is_empty); // true
+  print_line(empty.is_empty); // true
 
   // --- Map is_empty (getter) ---
   map[string, int] m = {
     "a": 1
   };
-  print_bool(m.is_empty); // false
+  print_line(m.is_empty); // false
 }

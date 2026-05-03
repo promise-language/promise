@@ -10,7 +10,7 @@ true""") {
   for i in 0..3 {
     r := <-ch;
     if v := r {
-      print_bool(v);
+      print_line(v);
     }
   }
 }

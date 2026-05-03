@@ -30,5 +30,5 @@ main() `test(expected: "6") {
   if c := r3 {
     sum = sum + c;
   }
-  print_int(sum);
+  print_line(sum);
 }

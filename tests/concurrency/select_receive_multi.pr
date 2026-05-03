@@ -9,12 +9,12 @@ main() `test(expected: "got 99") {
 
   select {
     v := <-ch1:
-    println("from ch1");
+    print_line("from ch1");
     v := <-ch2:
     if val := v {
-      println("got {val}");
+      print_line("got {val}");
     }
     v := <-ch3:
-    println("from ch3");
+    print_line("from ch3");
   }
 }

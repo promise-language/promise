@@ -111,7 +111,7 @@ concurrencyExample() {
   };
   Int r1 = <-t1;
   Int r2 = <-t2;
-  io.println(r1 + r2);
+  io.print_line(r1 + r2);
 }
 
 // ============================================================
@@ -127,38 +127,38 @@ controlFlowExamples() {
 
   // While unwrap
   // while val := getNext() {
-  //   io.println(val);
+  //   io.print_line(val);
   // }
 
   // Classic for loop with assignment update
   for Int i = 0; i < 10; i += 1 {
-    io.println(i);
+    io.print_line(i);
   }
 
   // Inferred classic for
   for j := 0; j < 5; j += 1 {
-    io.println(j);
+    io.print_line(j);
   }
 
   // For-in with index
   String[] names = ["alice", "bob"];
   for i, name in names {
-    io.println("{i}: {name}");
+    io.print_line("{i}: {name}");
   }
 
   // For-in with discard
   for _, name in names {
-    io.println(name);
+    io.print_line(name);
   }
 
   // Range
   for x in 0..10 {
-    io.println(x);
+    io.print_line(x);
   }
 
   // Inclusive range
   for x in 0..=9 {
-    io.println(x);
+    io.print_line(x);
   }
 
   // Infinite loop
@@ -168,22 +168,22 @@ controlFlowExamples() {
 
   // If-else
   if x > 5 {
-    io.println("big");
+    io.print_line("big");
   } else if x > 2 {
-    io.println("medium");
+    io.print_line("medium");
   } else {
-    io.println("small");
+    io.print_line("small");
   }
 
   // If unwrap binding
   Int? maybe = 42;
   if val := maybe {
-    io.println(val);
+    io.print_line(val);
   }
 
   // If with discard binding
   if _ := maybe {
-    io.println("present");
+    io.print_line("present");
   }
 }
 
@@ -194,39 +194,39 @@ controlFlowExamples() {
 matchExamples() {
   Direction dir = Direction.North;
   match dir {
-    Direction.North => io.println("north"),
-    Direction.South => io.println("south"),
-    Direction.East => io.println("east"),
-    Direction.West => io.println("west"),
+    Direction.North => io.print_line("north"),
+    Direction.South => io.print_line("south"),
+    Direction.East => io.print_line("east"),
+    Direction.West => io.print_line("west"),
   }
 
   Int value = 42;
   match value {
-    0 => io.println("zero"),
-    1 => io.println("one"),
-    _ => io.println("other"),
+    0 => io.print_line("zero"),
+    1 => io.print_line("one"),
+    _ => io.print_line("other"),
   }
 
   Result[Int, String] res = Result.Ok(value: 42);
   match res {
-    Result.Ok(v) => io.println(v),
-    Result.Err(e) => io.println(e),
+    Result.Ok(v) => io.print_line(v),
+    Result.Err(e) => io.print_line(e),
   }
 
   // Match with guard
   Int n = 15;
   match n {
-    x if x > 10 => io.println("large"),
-    x if x > 0 => io.println("positive"),
-    _ => io.println("non-positive"),
+    x if x > 10 => io.print_line("large"),
+    x if x > 0 => io.print_line("positive"),
+    _ => io.print_line("non-positive"),
   }
 
   // Match with block arm
   match n {
     x if x > 10 => {
-      io.println("large: {x}");
+      io.print_line("large: {x}");
     },
-    _ => io.println("small"),
+    _ => io.print_line("small"),
   }
 }
 
@@ -246,7 +246,7 @@ optionalExamples() {
   // Type check
   Animal &a = Dog(name: "Buddy");
   if a is Dog {
-    io.println("is a dog");
+    io.print_line("is a dog");
   }
 
   // Safe cast
@@ -269,7 +269,7 @@ lambdaExamples() {
 
   // Block body
   fn3 := |x| {
-    io.println(x);
+    io.print_line(x);
     return x + 1;
   };
 
@@ -294,7 +294,7 @@ lambdaExamples() {
   Int sum = numbers
     .filter(|n| -> n > 2)
     .fold(0, |acc, n| -> acc + n);
-  io.println(sum);
+  io.print_line(sum);
 }
 
 // ============================================================
@@ -370,7 +370,7 @@ arrayExamples() {
 tupleExamples() {
   t := (1, "hello");
   (a, b) := (10, 20);
-  io.println(a + b);
+  io.print_line(a + b);
 }
 
 // ============================================================

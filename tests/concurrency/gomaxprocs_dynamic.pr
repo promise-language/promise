@@ -28,5 +28,5 @@ main() `test(expected: "done") {
     }
   }
   assert(sum == 20, "all 20 goroutines completed");
-  println("done");
+  print_line("done");
 }

@@ -187,7 +187,7 @@ func TestLambdaSyntax(t *testing.T) {
 		{"typed_return_block", `main() { f := |Int x| -> Int { return x; }; }`},
 		{"ref_param", `main() { f := |String &s| -> s.len(); }`},
 		{"chained_lambdas", `main() { a.map(|x| -> x * 2).filter(|x| -> x > 0); }`},
-		{"lambda_as_arg", `main() { run(|| { io.println("hi"); }); }`},
+		{"lambda_as_arg", `main() { run(|| { io.print_line("hi"); }); }`},
 		{"nested_lambda", `main() { f := |x| -> |y| -> x + y; }`},
 	}
 	for _, tc := range cases {
@@ -382,7 +382,7 @@ func TestMatchExpressions(t *testing.T) {
 		{"block_arm", `main() { match x { 0 => { a(); b(); }, _ => c(), } }`},
 		{"trailing_comma", `main() { match x { 0 => a(), 1 => b(), } }`},
 		{"no_trailing_comma", `main() { match x { 0 => a(), 1 => b() } }`},
-		{"as_statement", `main() { match x { _ => y(), } io.println("after"); }`},
+		{"as_statement", `main() { match x { _ => y(), } io.print_line("after"); }`},
 		{"nested_match", `main() { match a { 0 => match b { 0 => x(), _ => y(), }, _ => z(), } }`},
 	}
 	for _, tc := range cases {
@@ -597,8 +597,8 @@ func TestEdgeCases(t *testing.T) {
 		{"multiple_assignments", `main() { Int x = 0; x = 1; x += 2; x -= 1; x *= 3; x /= 2; x %= 5; }`},
 		{"increment", `main() { Int x = 0; x++; }`},
 		{"decrement", `main() { Int x = 5; x--; }`},
-		{"inc_dec_for_loop", `main() { for i := 0; i < 10; i++ { print_int(i); } }`},
-		{"dec_for_loop", `main() { for i := 10; i > 0; i-- { print_int(i); } }`},
+		{"inc_dec_for_loop", `main() { for i := 0; i < 10; i++ { print_line(i); } }`},
+		{"dec_for_loop", `main() { for i := 10; i > 0; i-- { print_line(i); } }`},
 		{"member_increment", `type C { Int n; } main() { C c = C(n: 0); c.n++; }`},
 		{"yield_in_loop", `gen() Stream[Int] { for x in 0..10 { yield x; } }`},
 		{"yield_delegate", `gen() Stream[Int] { yield* other(); }`},
@@ -634,11 +634,11 @@ func TestIsFullFile(t *testing.T) {
 		name string
 		code string
 	}{
-		{"main_function", `main() { println("hi"); }`},
-		{"main_with_helper", `add(int a, int b) int { return a + b; } main() { print_int(add(1, 2)); }`},
+		{"main_function", `main() { print_line("hi"); }`},
+		{"main_with_helper", `add(int a, int b) int { return a + b; } main() { print_line(add(1, 2)); }`},
 		{"type_decl", `type Foo { int x; } main() { Foo f = Foo(x: 1); }`},
 		{"enum_decl", `enum Dir { N, S } main() { Dir d = Dir.N; }`},
-		{"use_statement", `use io "std/io"; main() { io.println("hi"); }`},
+		{"use_statement", `use io "std/io"; main() { io.print_line("hi"); }`},
 		{"use_only", `use io "std/io";`},
 		{"type_only", `type Point { int x; int y; }`},
 		{"enum_only", `enum Color { Red, Green, Blue }`},
@@ -655,12 +655,12 @@ func TestIsFullFile(t *testing.T) {
 		name string
 		code string
 	}{
-		{"bare_call", `print_int(42)`},
-		{"bare_println", `println("hello")`},
-		{"assignment", `x := 10; print_int(x)`},
-		{"multi_statement", `x := 10; y := 20; print_int(x + y)`},
-		{"if_statement", `if true { print_int(1); }`},
-		{"for_loop", `for i in 0..10 { print_int(i); }`},
+		{"bare_call", `print_line(42)`},
+		{"bare_print_line", `print_line("hello")`},
+		{"assignment", `x := 10; print_line(x)`},
+		{"multi_statement", `x := 10; y := 20; print_line(x + y)`},
+		{"if_statement", `if true { print_line(1); }`},
+		{"for_loop", `for i in 0..10 { print_line(i); }`},
 	}
 	for _, tc := range expr {
 		t.Run("expr/"+tc.name, func(t *testing.T) {
@@ -679,13 +679,13 @@ func TestExecWrapCode(t *testing.T) {
 		name   string
 		source string
 	}{
-		{"bare_call", `print_int(42)`},
-		{"with_semi", `print_int(42);`},
-		{"multi_statement", `x := 10; print_int(x);`},
-		{"string_call", `println("hello")`},
-		{"if_stmt", `if true { print_int(1); }`},
-		{"for_loop", `for i := 0; i < 3; i += 1 { print_int(i); }`},
-		{"for_loop_inc", `for i := 0; i < 3; i++ { print_int(i); }`},
+		{"bare_call", `print_line(42)`},
+		{"with_semi", `print_line(42);`},
+		{"multi_statement", `x := 10; print_line(x);`},
+		{"string_call", `print_line("hello")`},
+		{"if_stmt", `if true { print_line(1); }`},
+		{"for_loop", `for i := 0; i < 3; i += 1 { print_line(i); }`},
+		{"for_loop_inc", `for i := 0; i < 3; i++ { print_line(i); }`},
 		{"increment", `x := 0; x++;`},
 		{"while_loop", `while true { break; }`},
 	}

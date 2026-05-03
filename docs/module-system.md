@@ -213,7 +213,7 @@ use json
 
 main() {
     data := json.parse('{"name": "Alice"}')
-    io.println(data)
+    io.print_line(data)
 }
 ```
 
@@ -596,7 +596,7 @@ cat > main.pr << 'EOF'
 use io
 
 main() {
-    io.println("hello")
+    io.print_line("hello")
 }
 EOF
 promise run main.pr
@@ -1117,10 +1117,10 @@ No `promise sync` needed on first install — the binary IS the epoch. The catal
 
 ```bash
 # Run a one-liner — no promise.toml needed
-promise exec 'println("hello world")'
+promise exec 'print_line("hello world")'
 
 # Run a single file — uses the compiler's default epoch
-echo 'use io; main() { io.println("hello") }' > hello.pr
+echo 'use io; main() { io.print_line("hello") }' > hello.pr
 promise run hello.pr
 
 # Catalog modules work in single-file mode
@@ -1129,7 +1129,7 @@ use json
 
 main() {
     obj := json.parse("{\"name\": \"Alice\"}")
-    println(obj)
+    print_line(obj)
 }
 ' > parse.pr
 promise run parse.pr
@@ -1160,7 +1160,7 @@ use http
 main()! {
     resp := http.get("https://api.example.com/data")!
     data := json.parse(resp.body)!
-    println(data["name"])
+    print_line(data["name"])
 }
 ```
 
@@ -1191,7 +1191,7 @@ use parser "github.com/someone/promise-parser"
 
 main() {
     ast := parser.parse("1 + 2")
-    println(json.serialize(ast))
+    print_line(json.serialize(ast))
 }
 ```
 
@@ -1317,7 +1317,7 @@ use csv "github.com/yourname/promise-csv"
 
 main() {
     rows := csv.parse("a,b\n1,2")
-    println(rows[0].fields)
+    print_line(rows[0].fields)
 }
 ```
 
@@ -1603,7 +1603,7 @@ The closest analog is **NixOS** — a mono-versioned global package set with CI 
 - Parse `promise.toml` (TOML format: `[module]` with `name` and `epoch`)
 - Extend grammar: add bare `USE IDENT (AS IDENT)? SEMI` for catalog imports alongside existing `USE IDENT stringLiteral SEMI` for sourced imports
 - Resolve `use` names against standard library modules (already embedded)
-- Qualified name resolution in sema (`io.println` → look up `println` in `io` module's scope)
+- Qualified name resolution in sema (`io.print_line` → look up `print_line` in `io` module's scope)
 - `` `public `` meta annotation for visibility enforcement at module boundaries
 - Local module imports (`use models "./libs/models"` — path relative to `promise.toml`)
 - Compile multi-module projects (project + local modules as separate compilation units, linked together)

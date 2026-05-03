@@ -4,14 +4,14 @@ main() `test(expected: "sent\n99") {
 
   select {
     ch.send(99):
-    println("sent");
+    print_line("sent");
     default:
-    println("default");
+    print_line("default");
   }
 
   // Verify the value was sent
   r := <-ch;
   if v := r {
-    print_int(v);
+    print_line(v);
   }
 }

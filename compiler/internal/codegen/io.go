@@ -18,8 +18,8 @@ import (
 // primitives (pal_write, pal_exit).
 //
 // Functions are looked up by their LLVM name (C symbol name), not by Promise name,
-// because declareExterns stores them in c.funcs under the Promise name (e.g. "_print_int")
-// while the LLVM function is named by the C name (e.g. "promise_print_int").
+// because declareExterns stores them in c.funcs under the Promise name (e.g. "_print_string")
+// while the LLVM function is named by the C name (e.g. "promise_print_string").
 func (c *Compiler) definePALBodies() {
 	// Global constants shared by print/panic functions
 	nlData := constant.NewCharArrayFromString("\n")
@@ -42,14 +42,8 @@ func (c *Compiler) definePALBodies() {
 	if fn, ok := irFuncByName["promise_print_string"]; ok {
 		c.definePrintStringBody(fn)
 	}
-	if fn, ok := irFuncByName["promise_print_int"]; ok {
-		c.definePrintIntBody(fn)
-	}
-	if fn, ok := irFuncByName["promise_print_f64"]; ok {
-		c.definePrintF64Body(fn)
-	}
-	if fn, ok := irFuncByName["promise_print_bool"]; ok {
-		c.definePrintBoolBody(fn)
+	if fn, ok := irFuncByName["promise_print_string_no_nl"]; ok {
+		c.definePrintStringNoNewlineBody(fn)
 	}
 
 	// Panic functions
@@ -164,93 +158,16 @@ func (c *Compiler) definePrintStringBody(fn *ir.Func) {
 	entry.NewRet(nil)
 }
 
-// definePrintIntBody adds a function body to promise_print_int(i8* %x).
-// Extracts raw i64, converts to string via promise_int_to_string, writes via pal_write.
-func (c *Compiler) definePrintIntBody(fn *ir.Func) {
+// definePrintStringNoNewlineBody adds a function body to promise_print_string_no_nl(i8* %s).
+// Same as definePrintStringBody but without the trailing newline.
+func (c *Compiler) definePrintStringNoNewlineBody(fn *ir.Func) {
 	entry := fn.NewBlock(".entry")
 	stdout := constant.NewInt(irtypes.I32, 1)
 
-	intLayout := c.layouts[types.TypInt]
-	valType := intLayout.Value.LLVMType
+	dataPtr, dataLen := c.extractStringDataLen(entry, fn.Params[0])
 
-	// Bitcast i8* → %promise_int_v*
-	valPtr := entry.NewBitCast(fn.Params[0], irtypes.NewPointer(valType))
-
-	// GEP to field 2 (raw), load i64
-	rawPtr := entry.NewGetElementPtr(valType, valPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
-	raw := entry.NewLoad(irtypes.I64, rawPtr)
-
-	// Convert to string instance
-	strInst := entry.NewCall(c.funcs["promise_int_to_string"], raw)
-
-	// Extract data/len from string instance
-	dataPtr, dataLen := c.extractStringDataLenFromInstance(entry, strInst)
-
+	// Write string data (no newline)
 	entry.NewCall(c.palWrite, stdout, dataPtr, dataLen)
-	c.emitWriteNewline(entry, stdout)
-	// Free the temporary string instance allocated by promise_int_to_string
-	entry.NewCall(c.palFree, strInst)
-	entry.NewRet(nil)
-}
-
-// definePrintF64Body adds a function body to promise_print_f64(i8* %x).
-// Extracts raw double, converts to string via promise_f64_to_string, writes via pal_write.
-func (c *Compiler) definePrintF64Body(fn *ir.Func) {
-	entry := fn.NewBlock(".entry")
-	stdout := constant.NewInt(irtypes.I32, 1)
-
-	f64Layout := c.layouts[types.TypF64]
-	valType := f64Layout.Value.LLVMType
-
-	// Bitcast i8* → %promise_f64_v*
-	valPtr := entry.NewBitCast(fn.Params[0], irtypes.NewPointer(valType))
-
-	// GEP to field 2 (raw), load double
-	rawPtr := entry.NewGetElementPtr(valType, valPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
-	raw := entry.NewLoad(irtypes.Double, rawPtr)
-
-	// Convert to string instance
-	strInst := entry.NewCall(c.funcs["promise_f64_to_string"], raw)
-
-	// Extract data/len from string instance
-	dataPtr, dataLen := c.extractStringDataLenFromInstance(entry, strInst)
-
-	entry.NewCall(c.palWrite, stdout, dataPtr, dataLen)
-	c.emitWriteNewline(entry, stdout)
-	// Free the temporary string instance allocated by promise_f64_to_string
-	entry.NewCall(c.palFree, strInst)
-	entry.NewRet(nil)
-}
-
-// definePrintBoolBody adds a function body to promise_print_bool(i8* %x).
-// Extracts raw i8, converts to string via promise_bool_to_string, writes via pal_write.
-func (c *Compiler) definePrintBoolBody(fn *ir.Func) {
-	entry := fn.NewBlock(".entry")
-	stdout := constant.NewInt(irtypes.I32, 1)
-
-	boolLayout := c.layouts[types.TypBool]
-	valType := boolLayout.Value.LLVMType
-
-	// Bitcast i8* → %promise_bool_v*
-	valPtr := entry.NewBitCast(fn.Params[0], irtypes.NewPointer(valType))
-
-	// GEP to field 2 (raw), load i8
-	rawPtr := entry.NewGetElementPtr(valType, valPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
-	raw := entry.NewLoad(irtypes.I8, rawPtr)
-
-	// Convert to string instance
-	strInst := entry.NewCall(c.funcs["promise_bool_to_string"], raw)
-
-	// Extract data/len from string instance
-	dataPtr, dataLen := c.extractStringDataLenFromInstance(entry, strInst)
-
-	entry.NewCall(c.palWrite, stdout, dataPtr, dataLen)
-	c.emitWriteNewline(entry, stdout)
-	// Free the temporary string instance allocated by promise_bool_to_string
-	entry.NewCall(c.palFree, strInst)
 	entry.NewRet(nil)
 }
 

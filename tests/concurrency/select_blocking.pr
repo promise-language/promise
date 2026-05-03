@@ -12,11 +12,11 @@ main() `test(expected: "42") {
   select {
     v := <-ch1:
     if val := v {
-      print_int(0);
+      print_line(0);
     }
     v := <-ch2:
     if val := v {
-      print_int(val);
+      print_line(val);
     }
   }
 }

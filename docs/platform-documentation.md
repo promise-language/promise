@@ -390,7 +390,7 @@ Documenting `std/*.pr` with `doc()` is the **highest-impact item** in this propo
 3. **`map.pr`** — `new()`, subscript `[]`/`[]=`, `contains`, `remove`, `keys`, `values`, `clear`, getters (`len`, `is_empty`); also the internal `Slot[K,V]` enum
 4. **`error.pr`** — `string message` field, inheritance pattern for custom errors
 5. **`channel.pr`** — `new(capacity)`, `send`, `close`, receive via `<-` operator
-6. **`io.pr`** — `println`, `print_int`, `print_f64`, `print_bool`
+6. **`io.pr`** — `print(Format)`, `print_line(Format)`
 7. **Structural interfaces** — `Equal` (`==`, `!=`), `Hashable` (`get hash`), `Ordered` (`<`, `>`, `<=`, `>=`; extends Equal)
 8. **Numeric types** (`int.pr`, `uint.pr`, `float.pr`) — operators, range (`..`, `..=`), `hash`
 9. **Other** — `iter.pr` (Iterator, Stream), `range.pr`, `task.pr`, `math.pr`, `format.pr`, `bool.pr`, `char.pr`

@@ -1125,7 +1125,7 @@ func TestErrorHandlerNoRecoveryInTypedDecl(t *testing.T) {
 	errs := checkErrs(t, `
 		parse() int! { return 42; }
 		main() {
-			int x = parse() ? e { println(e.message); };
+			int x = parse() ? e { print_line(e.message); };
 		}
 	`)
 	expectError(t, errs, "error handler must produce a recovery value or diverge")
@@ -1136,7 +1136,7 @@ func TestErrorHandlerNoRecoveryInInferredDecl(t *testing.T) {
 	checkOK(t, `
 		parse() int! { return 42; }
 		main() {
-			x := parse() ? e { println(e.message); };
+			x := parse() ? e { print_line(e.message); };
 		}
 	`)
 }
@@ -1146,7 +1146,7 @@ func TestErrorHandlerNoRecoveryInNonOptionalTypedDecl(t *testing.T) {
 	errs := checkErrs(t, `
 		parse() int! { return 42; }
 		main() {
-			int x = parse() ? e { println(e.message); };
+			int x = parse() ? e { print_line(e.message); };
 		}
 	`)
 	expectError(t, errs, "error handler must produce a recovery value or diverge")
@@ -1157,7 +1157,7 @@ func TestErrorHandlerNoRecoveryInOptionalTypedDecl(t *testing.T) {
 	checkOK(t, `
 		parse() int! { return 42; }
 		main() {
-			int? x = parse() ? e { println(e.message); };
+			int? x = parse() ? e { print_line(e.message); };
 		}
 	`)
 }
@@ -1167,7 +1167,7 @@ func TestErrorHandlerNoRecoveryAsStatement(t *testing.T) {
 	checkOK(t, `
 		parse() int! { return 42; }
 		main() {
-			parse() ? e { println(e.message); };
+			parse() ? e { print_line(e.message); };
 		}
 	`)
 }
@@ -1177,7 +1177,7 @@ func TestErrorHandlerNoRecoveryVoidFailable(t *testing.T) {
 	checkOK(t, `
 		validate() void! { raise error(message: "bad"); }
 		main() {
-			validate() ? e { println(e.message); };
+			validate() ? e { print_line(e.message); };
 		}
 	`)
 }
@@ -9195,7 +9195,7 @@ func TestPropertyCalledAsMethod(t *testing.T) {
 	errs := checkErrs(t, `
 		main() {
 			int[] v = [1, 2, 3];
-			print_int(v.len());
+			print_line(v.len());
 		}
 	`)
 	expectError(t, errs, "is a property")
@@ -9206,7 +9206,7 @@ func TestPropertyCalledAsMethodString(t *testing.T) {
 	errs := checkErrs(t, `
 		main() {
 			s := "hello";
-			print_int(s.len());
+			print_line(s.len());
 		}
 	`)
 	expectError(t, errs, "is a property")
@@ -9220,7 +9220,7 @@ func TestPropertyCalledAsMethodUserType(t *testing.T) {
 		}
 		main() {
 			f := Foo(count: 5);
-			print_int(f.count());
+			print_line(f.count());
 		}
 	`)
 	expectError(t, errs, "is a property")
@@ -9231,7 +9231,7 @@ func TestPropertyCalledAsMethodMap(t *testing.T) {
 	errs := checkErrs(t, `
 		main() {
 			map[string, int] m = {"a": 1};
-			print_int(m.len());
+			print_line(m.len());
 		}
 	`)
 	expectError(t, errs, "is a property")

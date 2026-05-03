@@ -19,11 +19,11 @@ type Circle {
 
 main() {
   Circle c = Circle(radius: 5.0);
-  io.println("Area: {c.area()}");
+  io.print_line("Area: {c.area()}");
 
   Int[] numbers = [1, 2, 3, 4, 5];
   Int sum = numbers.filter(|n| -> n > 2).fold(0, |acc, n| -> acc + n);
-  io.println("Sum: {sum}");
+  io.print_line("Sum: {sum}");
 }
 ```
 
@@ -98,19 +98,19 @@ suppressed to focus resources on unreliable ones.
 Run Promise code directly from the command line:
 
 ```sh
-promise exec 'print_int(42)'                        # expression (auto-wrapped in main)
-promise exec 'main() { println("hello"); }'         # full program
-echo 'println("hello")' | promise exec              # from stdin
-echo 'println("hello")' | promise                   # bare pipe (auto-detected)
-cat program.pr | promise                             # pipe a file
+promise exec 'print_line(42)'                        # expression (auto-wrapped in main)
+promise exec 'main() { print_line("hello"); }'       # full program
+echo 'print_line("hello")' | promise exec            # from stdin
+echo 'print_line("hello")' | promise                 # bare pipe (auto-detected)
+cat program.pr | promise                              # pipe a file
 ```
 
 Errors in inline mode show the source line with a caret marker:
 
 ```
-1:10: undefined: foo
-    print_int(foo);
-              ^
+1:12: undefined: foo
+    print_line(foo);
+               ^
 ```
 
 ### Install

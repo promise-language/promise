@@ -9,5 +9,5 @@ main() `test(expected: "100") {
     }
     count = count + 1;
   }
-  print_int(count);
+  print_line(count);
 }

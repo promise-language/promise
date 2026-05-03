@@ -18,5 +18,5 @@ main() `test(expected: "34") {
   for v in ch {
     last = v;
   }
-  print_int(last);
+  print_line(last);
 }

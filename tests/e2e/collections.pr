@@ -24,30 +24,30 @@ x
   int[] nums = [1, 2, 3];
   nums.push(4);
   nums.push(5);
-  print_int(nums.len); // 5
-  print_int(nums[3]); // 4
-  print_int(nums[4]); // 5
+  print_line(nums.len); // 5
+  print_line(nums[3]); // 4
+  print_line(nums[4]); // 5
 
   // --- Slice contains ---
-  print_bool(nums.contains(3)); // true
-  print_bool(nums.contains(99)); // false
+  print_line(nums.contains(3)); // true
+  print_line(nums.contains(99)); // false
 
   // --- Slice contains (string elements) ---
   string[] words = ["hello", "world"];
-  print_bool(words.contains("world")); // true
-  print_bool(words.contains("nope")); // false
+  print_line(words.contains("world")); // true
+  print_line(words.contains("nope")); // false
 
   // --- Slice remove ---
   nums.remove(1); // remove index 1 (value 2)
-  print_int(nums.len); // 4
-  print_int(nums[0]); // 1
-  print_int(nums[1]); // 3
+  print_line(nums.len); // 4
+  print_line(nums[0]); // 1
+  print_line(nums[1]); // 3
 
   // --- Slice pop ---
   if val := nums.pop() {
-    print_int(val); // 5
+    print_line(val); // 5
   }
-  print_int(nums.len); // 3
+  print_line(nums.len); // 3
 
   // --- Empty slice pop ---
   int[] empty = [1];
@@ -56,29 +56,29 @@ x
   if v := empty.pop() {
     got_none = false;
   }
-  print_bool(got_none); // true
+  print_line(got_none); // true
 
   // --- Map contains ---
   map[string, int] m = {
     "a": 1, "b": 2, "c": 3
   };
-  print_bool(m.contains("a")); // true
-  print_bool(m.contains("z")); // false
+  print_line(m.contains("a")); // true
+  print_line(m.contains("z")); // false
 
   // --- Map remove ---
   bool removed = m.remove("b");
-  print_bool(removed); // true
-  print_int(m.len); // 2
-  print_bool(m.contains("b")); // false
+  print_line(removed); // true
+  print_line(m.len); // 2
+  print_line(m.contains("b")); // false
 
   // --- Map keys/values ---
   map[string, int] m2 = {
     "x": 10
   };
   string[] keys = m2.keys();
-  print_int(keys.len); // 1
-  println(keys[0]); // x
+  print_line(keys.len); // 1
+  print_line(keys[0]); // x
   int[] vals = m2.values();
-  print_int(vals[0]); // 10
-  print_int(vals.len); // 1
+  print_line(vals[0]); // 10
+  print_line(vals.len); // 1
 }

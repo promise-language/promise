@@ -356,80 +356,17 @@ func TestVoidFunction(t *testing.T) {
 
 // --- Extern print (struct-based ABI) ---
 
-func TestPrintInt(t *testing.T) {
+func TestPrintStringExtern(t *testing.T) {
 	ir := generateIR(t, `
-		print(int x) `+"`"+`extern("promise_print_int");
-		main() { print(42); }
+		print_s(string s) `+"`"+`extern("promise_print_string");
+		main() { print_s("hello"); }
 	`)
-	// Struct type definition
-	assertContains(t, ir, "%promise_int_v = type")
-	// PAL-defined print function: extern turned into define with body
-	assertContains(t, ir, "define void @promise_print_int(i8*")
-	// Struct packing via insertvalue
-	assertContains(t, ir, "insertvalue %promise_int_v")
-}
-
-func TestPrintBool(t *testing.T) {
-	ir := generateIR(t, `
-		print(bool x) `+"`"+`extern("promise_print_bool");
-		main() { print(true); }
-	`)
-	assertContains(t, ir, "%promise_bool_v = type")
-	assertContains(t, ir, "define void @promise_print_bool(i8*")
-	// Bool coercion: i1 → i8
-	assertContains(t, ir, "zext i1 true to i8")
-	assertContains(t, ir, "insertvalue %promise_bool_v")
-}
-
-func TestPrintF64(t *testing.T) {
-	ir := generateIR(t, `
-		print(f64 x) `+"`"+`extern("promise_print_f64");
-		main() { print(3.14); }
-	`)
-	assertContains(t, ir, "%promise_f64_v = type")
-	assertContains(t, ir, "define void @promise_print_f64(i8*")
-	assertContains(t, ir, "insertvalue %promise_f64_v")
+	assertContains(t, ir, "%promise_string_v = type")
+	assertContains(t, ir, "define void @promise_print_string(i8*")
 }
 
 // --- PAL function body tests ---
 // These verify that definePALBodies() generates correct IR for print/panic functions.
-
-func TestPrintIntBody(t *testing.T) {
-	ir := generateIR(t, `
-		print(int x) `+"`"+`extern("promise_print_int");
-		main() { print(42); }
-	`)
-	// Function body: extracts raw from value struct, converts to string, writes via PAL
-	assertContains(t, ir, "define void @promise_print_int(i8*")
-	assertContains(t, ir, "bitcast i8* %x to %promise_int_v*")
-	assertContains(t, ir, "call i8* @promise_int_to_string(i64")
-	assertContains(t, ir, "call i64 @pal_write(i32 1,") // stdout
-	assertContains(t, ir, "call void @pal_free(i8*")    // free temp string
-}
-
-func TestPrintF64Body(t *testing.T) {
-	ir := generateIR(t, `
-		print(f64 x) `+"`"+`extern("promise_print_f64");
-		main() { print(3.14); }
-	`)
-	assertContains(t, ir, "define void @promise_print_f64(i8*")
-	assertContains(t, ir, "bitcast i8* %x to %promise_f64_v*")
-	assertContains(t, ir, "call i8* @promise_f64_to_string(double")
-	assertContains(t, ir, "call i64 @pal_write(i32 1,")
-	assertContains(t, ir, "call void @pal_free(i8*")
-}
-
-func TestPrintBoolBody(t *testing.T) {
-	ir := generateIR(t, `
-		print(bool x) `+"`"+`extern("promise_print_bool");
-		main() { print(true); }
-	`)
-	assertContains(t, ir, "define void @promise_print_bool(i8*")
-	assertContains(t, ir, "bitcast i8* %x to %promise_bool_v*")
-	assertContains(t, ir, "call i8* @promise_bool_to_string(i8")
-	assertContains(t, ir, "call i64 @pal_write(i32 1,")
-	assertContains(t, ir, "call void @pal_free(i8*")
-}
 
 func TestPrintStringBody(t *testing.T) {
 	ir := generateIR(t, `
@@ -479,12 +416,11 @@ func TestPALWriteExitDefined(t *testing.T) {
 
 func TestPrintNewlineEmission(t *testing.T) {
 	ir := generateIR(t, `
-		print(int x) `+"`"+`extern("promise_print_int");
-		main() { print(1); }
+		print_s(string s) `+"`"+`extern("promise_print_string");
+		main() { print_s("hello"); }
 	`)
-	// Newline global constant and two pal_write calls (data + newline)
+	// Newline global constant (used by print_string body)
 	assertContains(t, ir, `@.str.newline = constant [1 x i8] c"\0A"`)
-	// The print_int body should have exactly two pal_write calls
 	assertContains(t, ir, `@.str.panic_prefix = constant [7 x i8] c"panic: "`)
 }
 
@@ -632,8 +568,8 @@ func TestExternReturnValue(t *testing.T) {
 
 func TestExternStructTypeDefs(t *testing.T) {
 	ir := generateIR(t, `
-		print(int x) `+"`"+`extern("promise_print_int");
-		main() { print(42); }
+		use_int(int x) `+"`"+`extern("test_use_int");
+		main() { use_int(42); }
 	`)
 	// All four struct types should be defined
 	assertContains(t, ir, "%promise_int_t = type {}")
@@ -870,9 +806,9 @@ func TestHeaderExternMutRefParam(t *testing.T) {
 
 func TestHeaderGeneration(t *testing.T) {
 	result := compileResult(t, `
-		print(int x) `+"`"+`extern("promise_print_int");
-		print_f(f64 x) `+"`"+`extern("promise_print_f64");
-		main() { print(42); print_f(3.14); }
+		use_int(int x) `+"`"+`extern("test_use_int");
+		use_f(f64 x) `+"`"+`extern("test_use_f64");
+		main() { use_int(42); use_f(3.14); }
 	`)
 
 	var buf bytes.Buffer
@@ -894,8 +830,8 @@ func TestHeaderGeneration(t *testing.T) {
 	assertContains(t, header, "promise_f64_v;")
 
 	// Function declarations: all params by pointer
-	assertContains(t, header, "void promise_print_int(promise_int_v *x);")
-	assertContains(t, header, "void promise_print_f64(promise_f64_v *x);")
+	assertContains(t, header, "void test_use_int(promise_int_v *x);")
+	assertContains(t, header, "void test_use_f64(promise_f64_v *x);")
 }
 
 // --- String tests ---
@@ -5301,6 +5237,166 @@ func TestStructuralAdapterNonOptionalToOptionalReturn(t *testing.T) {
 	assertContains(t, ir, "Always.find$view_adapt")
 }
 
+// --- Primitive → structural interface boxing tests ---
+// These test the boxForStructuralView codegen path: when a primitive or string
+// value is passed to a function parameter typed as a structural interface,
+// the compiler must box it into a {vtable_ptr, instance_ptr} view struct.
+
+func TestPrimitiveIntToStructuralView(t *testing.T) {
+	ir := generateIR(t, `
+		type Showable `+"`"+`structural {
+			to_string() string `+"`"+`abstract;
+		}
+		display(Showable s) string { return s.to_string(); }
+		main() { display(42); }
+	`)
+	// View vtable for int satisfying Showable
+	assertContains(t, ir, "@promise_vtable_int_as_Showable")
+	// Adapter thunk: int methods take i64 receiver, vtable passes i8*
+	assertContains(t, ir, "int.to_string$view_adapt")
+	// Boxing: alloca for scalar + insertvalue to build {i8*, i8*}
+	assertContains(t, ir, "insertvalue { i8*, i8* }")
+}
+
+func TestPrimitiveBoolToStructuralView(t *testing.T) {
+	ir := generateIR(t, `
+		type Showable `+"`"+`structural {
+			to_string() string `+"`"+`abstract;
+		}
+		display(Showable s) string { return s.to_string(); }
+		main() { display(true); }
+	`)
+	assertContains(t, ir, "@promise_vtable_bool_as_Showable")
+	assertContains(t, ir, "bool.to_string$view_adapt")
+}
+
+func TestPrimitiveF64ToStructuralView(t *testing.T) {
+	ir := generateIR(t, `
+		type Showable `+"`"+`structural {
+			to_string() string `+"`"+`abstract;
+		}
+		display(Showable s) string { return s.to_string(); }
+		main() { display(3.14); }
+	`)
+	assertContains(t, ir, "@promise_vtable_f64_as_Showable")
+	assertContains(t, ir, "f64.to_string$view_adapt")
+}
+
+func TestStringToStructuralView(t *testing.T) {
+	ir := generateIR(t, `
+		type Showable `+"`"+`structural {
+			to_string() string `+"`"+`abstract;
+		}
+		display(Showable s) string { return s.to_string(); }
+		main() { display("hello"); }
+	`)
+	// String is i8* — no scalar alloca needed, but still needs view vtable
+	assertContains(t, ir, "@promise_vtable_string_as_Showable")
+}
+
+func TestPrimitiveCharToStructuralView(t *testing.T) {
+	ir := generateIR(t, `
+		type Showable `+"`"+`structural {
+			to_string() string `+"`"+`abstract;
+		}
+		display(Showable s) string { return s.to_string(); }
+		main() { display('A'); }
+	`)
+	assertContains(t, ir, "@promise_vtable_char_as_Showable")
+	assertContains(t, ir, "char.to_string$view_adapt")
+}
+
+func TestMultiplePrimitivesToStructuralView(t *testing.T) {
+	// Multiple different primitives boxed in the same function
+	ir := generateIR(t, `
+		type Showable `+"`"+`structural {
+			to_string() string `+"`"+`abstract;
+		}
+		display(Showable s) string { return s.to_string(); }
+		main() {
+			display(42);
+			display(true);
+			display("hi");
+		}
+	`)
+	assertContains(t, ir, "@promise_vtable_int_as_Showable")
+	assertContains(t, ir, "@promise_vtable_bool_as_Showable")
+	assertContains(t, ir, "@promise_vtable_string_as_Showable")
+}
+
+func TestPrimitiveViewAdapterLoadsScalarFromPointer(t *testing.T) {
+	// The adapter thunk receives i8* (interface convention) and must
+	// bitcast + load to get the scalar value for the concrete method
+	ir := generateIR(t, `
+		type Showable `+"`"+`structural {
+			to_string() string `+"`"+`abstract;
+		}
+		display(Showable s) string { return s.to_string(); }
+		main() { display(42); }
+	`)
+	assertContains(t, ir, "int.to_string$view_adapt")
+	// Adapter should bitcast i8* to i64* and load the scalar
+	assertContains(t, ir, "bitcast i8* %this to i64*")
+	assertContains(t, ir, "load i64, i64*")
+}
+
+func TestPrimitiveToFailableStructuralView(t *testing.T) {
+	// Primitive method is non-failable, interface method is failable
+	// → adapter wraps result as success
+	ir := generateIR(t, `
+		type Converter `+"`"+`structural {
+			to_string() string! `+"`"+`abstract;
+		}
+		convert(Converter c) string { return c.to_string()!; }
+		main() { convert(42); }
+	`)
+	assertContains(t, ir, "@promise_vtable_int_as_Converter")
+	assertContains(t, ir, "int.to_string$view_adapt")
+}
+
+func TestPrimitiveMixedWithUserTypeToStructuralView(t *testing.T) {
+	// Same function call mixes primitives and user types as structural params
+	ir := generateIR(t, `
+		type Showable `+"`"+`structural {
+			to_string() string `+"`"+`abstract;
+		}
+		type Pair {
+			to_string() string { return "pair"; }
+		}
+		both(Showable a, Showable b) string { return a.to_string() + b.to_string(); }
+		main() { both(42, Pair()); }
+	`)
+	assertContains(t, ir, "@promise_vtable_int_as_Showable")
+	assertContains(t, ir, "@promise_vtable_Pair_as_Showable")
+}
+
+func TestSaveRestoreLocalNameCountAcrossAdapter(t *testing.T) {
+	// Regression test: emitting a view adapter mid-function used to reset
+	// localNameCount, causing duplicate LLVM local names. This test verifies
+	// that two variables with the same name in different scopes get unique
+	// LLVM names even when a view adapter is emitted between them.
+	ir := generateIR(t, `
+		type Showable `+"`"+`structural {
+			to_string() string `+"`"+`abstract;
+		}
+		display(Showable s) string { return s.to_string(); }
+		main() {
+			int? opt = 10;
+			if opt is present {
+				int x = opt;
+				display(x);
+			}
+			int x = 20;
+			display(x);
+		}
+	`)
+	// Both x variables should compile without "multiple definition" errors.
+	// The first x gets %x, the second gets %x.1 (or similar unique name).
+	assertContains(t, ir, "call")
+	// If this test compiles at all, the localNameCount save/restore works.
+	assertContains(t, ir, "@promise_vtable_int_as_Showable")
+}
+
 func TestOptionalParamWrapping(t *testing.T) {
 	ir := generateIR(t, `
 		foo(int? x) int {
@@ -5464,9 +5560,9 @@ func TestStdUserNameCollision(t *testing.T) {
 }
 
 func TestStdCallViaStdPrefix(t *testing.T) {
-	// Real std functions (e.g., println) are called via __mod_std_ prefix
-	ir := generateIR(t, `main() { println("hello"); }`)
-	assertContains(t, ir, "call void @__mod_std_println")
+	// Real std functions (e.g., print_line) are called via __mod_std_ prefix
+	ir := generateIR(t, `main() { print_line("hello"); }`)
+	assertContains(t, ir, "call void @__mod_std_print_line")
 }
 
 func TestGenerateTestMainNoExistingMain(t *testing.T) {
@@ -10332,7 +10428,7 @@ func TestMatchMixedVoidAndValueArms(t *testing.T) {
 		test(int n) int {
 			int result = match n {
 				1 => 10,
-				2 => { println("side effect"); 20; },
+				2 => { print_line("side effect"); 20; },
 				_ => 0,
 			};
 			return result;
@@ -10349,9 +10445,9 @@ func TestMatchAllVoidArms(t *testing.T) {
 	ir := generateIR(t, `
 		test(int n) {
 			match n {
-				1 => { println("one"); },
-				2 => { println("two"); },
-				_ => { println("other"); },
+				1 => { print_line("one"); },
+				2 => { print_line("two"); },
+				_ => { print_line("other"); },
 			};
 		}
 		main() { }
@@ -10365,7 +10461,7 @@ func TestOptionalRecoveryCodegen(t *testing.T) {
 	ir := generateIR(t, `
 		fail() int! { raise error(message: "oops"); }
 		main() {
-			x := fail() ? e { println("handled"); };
+			x := fail() ? e { print_line("handled"); };
 		}
 	`)
 	// Should wrap success value as optional some (insertvalue with i1 true)

@@ -5,9 +5,9 @@ min(int a, int b) int {
   return 999;
 }
 
-// User-defined println shadows std println
-println(string s) {
-  std.print_int(0);
+// User-defined print_line shadows std print_line
+print_line(Format f) {
+  std.print_line(0);
 }
 
 main() `test(expected: """999
@@ -16,14 +16,15 @@ main() `test(expected: """999
 via std
 2.72
 true""") {
-  print_int(min(3, 7));
-  print_int(std.min(3, 7));
+  // Use std.print_line to bypass shadow, verify user min vs std min
+  std.print_line(min(3, 7));
+  std.print_line(std.min(3, 7));
 
-  // User println (prints 0), then std.println (prints the string)
-  println("ignored");
-  std.println("via std");
+  // User print_line (prints 0), then std.print_line (prints the string)
+  print_line("ignored");
+  std.print_line("via std");
 
-  // Verify std.print_f64 and std.print_bool work via std namespace
-  std.print_f64(2.72);
-  std.print_bool(true);
+  // Verify std.print_line works with f64 and bool via std namespace
+  std.print_line(2.72);
+  std.print_line(true);
 }

@@ -15,5 +15,5 @@ main() `test(expected: "ok", exclude: "wasm32") {
   // Restore
   set_max_procs(old);
 
-  println("ok");
+  print_line("ok");
 }

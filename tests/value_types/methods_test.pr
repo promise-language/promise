@@ -15,9 +15,9 @@ main() `test(expected: """7
 6
 8""") {
   p := Point(x: 3, y: 4);
-  print_int(p.sum());
+  print_line(p.sum());
 
   Point q = p.scale(factor: 2);
-  print_int(q.x);
-  print_int(q.y);
+  print_line(q.x);
+  print_line(q.y);
 }

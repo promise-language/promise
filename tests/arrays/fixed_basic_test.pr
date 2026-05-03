@@ -10,24 +10,24 @@ main() `test(expected: """3
 6""") {
   // Literal + len
   int[3] arr = [1, 2, 3];
-  println("{arr.len}");
+  print_line("{arr.len}");
 
   // Index read
-  println("{arr[0]}");
-  println("{arr[1]}");
-  println("{arr[2]}");
+  print_line("{arr[0]}");
+  print_line("{arr[1]}");
+  print_line("{arr[2]}");
 
   // Index assign
   arr[0] = 10;
   arr[1] = 20;
   arr[2] = 30;
-  println("{arr[0]}");
-  println("{arr[1]}");
-  println("{arr[2]}");
+  print_line("{arr[0]}");
+  print_line("{arr[1]}");
+  print_line("{arr[2]}");
 
   // Compound assign
   arr[0] += 12;
-  println("{arr[0]}");
+  print_line("{arr[0]}");
 
   // For-in
   int[3] items = [1, 2, 3];
@@ -35,5 +35,5 @@ main() `test(expected: """3
   for x in items {
     sum += x;
   }
-  println("{sum}");
+  print_line("{sum}");
 }

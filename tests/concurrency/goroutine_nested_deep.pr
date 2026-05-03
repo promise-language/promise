@@ -11,6 +11,6 @@ main() `test(expected: "42") {
   };
   r := <-ch;
   if v := r {
-    print_int(v);
+    print_line(v);
   }
 }

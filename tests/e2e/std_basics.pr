@@ -9,15 +9,15 @@ main() `test(expected: """42
 true
 false
 hello from std""") {
-  print_int(42);
-  print_int(min(3, 7));
-  print_int(max(3, 7));
-  print_int(abs(0 - 5));
-  print_int(clamp(10, 0, 5));
-  print_int(clamp(0 - 3, 0, 5));
-  print_int(clamp(3, 0, 5));
-  print_f64(3.14);
-  print_bool(true);
-  print_bool(false);
-  println("hello from std");
+  print_line(42);
+  print_line(min(3, 7));
+  print_line(max(3, 7));
+  print_line(abs(0 - 5));
+  print_line(clamp(10, 0, 5));
+  print_line(clamp(0 - 3, 0, 5));
+  print_line(clamp(3, 0, 5));
+  print_line(3.14);
+  print_line(true);
+  print_line(false);
+  print_line("hello from std");
 }

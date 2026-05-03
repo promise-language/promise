@@ -32,8 +32,8 @@ func TestFormat(t *testing.T) {
 		},
 		{
 			name:     "function declaration",
-			input:    "main(){\nprintln(\"hello\");\n}",
-			expected: "main() {\n  println(\"hello\");\n}\n",
+			input:    "main(){\nprint_line(\"hello\");\n}",
+			expected: "main() {\n  print_line(\"hello\");\n}\n",
 		},
 		{
 			name:     "2-space indent",
@@ -734,8 +734,8 @@ func TestFormat(t *testing.T) {
 		},
 		{
 			name:     "test annotation with triple string",
-			input:    "main() `test(expected: \"\"\"42\nhello\"\"\") {\nprintln(42);\n}",
-			expected: "main() `test(expected: \"\"\"42\nhello\"\"\") {\n  println(42);\n}\n",
+			input:    "main() `test(expected: \"\"\"42\nhello\"\"\") {\nprint_line(42);\n}",
+			expected: "main() `test(expected: \"\"\"42\nhello\"\"\") {\n  print_line(42);\n}\n",
 		},
 		{
 			name:     "factory shorthand",
@@ -786,7 +786,7 @@ func TestFormat(t *testing.T) {
 
 func TestIdempotent(t *testing.T) {
 	inputs := []string{
-		"main() {\n  int x = 1;\n  if x > 0 {\n    println(\"positive\");\n  }\n}\n",
+		"main() {\n  int x = 1;\n  if x > 0 {\n    print_line(\"positive\");\n  }\n}\n",
 		"type Foo `native `public {\n  get len int `native;\n\n  push(T elem) `native;\n}\n",
 		"enum Color {\n  Red,\n  Green,\n  Blue,\n}\n",
 		"// comment\nuse json;\n\nmain() {\n  int x = 1; // value\n}\n",

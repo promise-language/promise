@@ -14,5 +14,5 @@ main() `test(expected: "100") {
       sum = sum + v;
     }
   }
-  print_int(sum);
+  print_line(sum);
 }

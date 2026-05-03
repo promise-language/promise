@@ -615,7 +615,7 @@ main()! {
 
     // One-shot: returns final text after all tool use is resolved
     string result = agent.run("What's the weather in Paris?");
-    println(result);
+    print_line(result);
 }
 ```
 
@@ -635,7 +635,7 @@ main()! {
         Turn turn = agent.turn(line);
 
         if text := turn.text {
-            println(text);
+            print_line(text);
         }
     }
 }
@@ -650,14 +650,14 @@ Both modes support streaming via `stream[T]` (Promise's generator/iterator type)
 for chunk in agent.run_stream("Explain quantum computing") {
     print(chunk);    // no newline — partial tokens
 }
-println("");
+print_line("");
 
 // Interactive streaming — yields structured events
 for event in agent.turn_stream("Write a haiku") {
     match event {
         TurnEvent.TextDelta(text) => print(text),
-        TurnEvent.ToolCallStart(id, name) => println("[calling {name}...]"),
-        TurnEvent.ToolCallComplete(id, name, result) => println("[{name} done]"),
+        TurnEvent.ToolCallStart(id, name) => print_line("[calling {name}...]"),
+        TurnEvent.ToolCallComplete(id, name, result) => print_line("[{name} done]"),
         TurnEvent.TurnComplete(turn) => {},
     }
 }
@@ -691,7 +691,7 @@ sensitive operations:
 ```promise
 agent.config.tool_filter = |ToolCallEvent evt| -> bool {
     if evt.name == "delete_file" {
-        println("Agent wants to delete: {evt.arguments_json}");
+        print_line("Agent wants to delete: {evt.arguments_json}");
         print("Allow? (y/n): ");
         return io.read_line()!.trim() == "y";
     }
@@ -892,7 +892,7 @@ main()! {
         }
 
         Turn turn = agent.turn(line);
-        if text := turn.text { println(text); }
+        if text := turn.text { print_line(text); }
 
         // Sync session from agent (clone history)
         session.set_history(agent.get_history().clone());
@@ -1022,7 +1022,7 @@ main()! {
     result := orchestrator.run(
         "Research Promise language design, write a blog post, and review it."
     );
-    println(result);
+    print_line(result);
 }
 ```
 
@@ -1325,7 +1325,7 @@ main()! {
 
     // Agent can now use tools from both MCP servers
     result := agent.run("Read the config file and update the database");
-    println(result);
+    print_line(result);
 }
 ```
 
@@ -1495,9 +1495,9 @@ main()! {
     sandbox.ExecutionResult result = sb.run_code(code);
 
     if result.exit_code == 0 {
-        println("Output: {result.stdout}");
+        print_line("Output: {result.stdout}");
     } else {
-        println("Error: {result.stderr}");
+        print_line("Error: {result.stderr}");
         // Feed error back to agent for self-correction
         string fixed = agent.run("The code failed with: {result.stderr}. Fix it.");
         result = sb.run_code(fixed);
@@ -1528,7 +1528,7 @@ main()! {
         "Recommend a sci-fi movie for someone who loved Arrival."
     );
 
-    println("{rec.title} ({rec.year}): {rec.reason}");
+    print_line("{rec.title} ({rec.year}): {rec.reason}");
 }
 ```
 
@@ -1613,7 +1613,7 @@ main()! {
     agent.set_system("You are a friendly assistant.");
     agent.set_history(session.history.clone());
 
-    println("Chat (type /quit to exit, /clear to reset)");
+    print_line("Chat (type /quit to exit, /clear to reset)");
 
     while line := io.read_line()! {
         match line.trim() {
@@ -1621,11 +1621,11 @@ main()! {
             "/clear" => {
                 agent.clear_history();
                 session.set_history([]);
-                println("History cleared.");
+                print_line("History cleared.");
                 continue;
             },
             "/tokens" => {
-                println("Estimated tokens: {session.estimate_tokens()}");
+                print_line("Estimated tokens: {session.estimate_tokens()}");
                 continue;
             },
             _ => {},
@@ -1635,7 +1635,7 @@ main()! {
         for event in agent.turn_stream(line) {
             match event {
                 ai.TurnEvent.TextDelta(text) => print(text),
-                ai.TurnEvent.TurnComplete(turn) => println(""),
+                ai.TurnEvent.TurnComplete(turn) => print_line(""),
                 _ => {},
             }
         }
@@ -1669,13 +1669,13 @@ main()! {
         result := sb.run_code(code);
 
         if result.exit_code == 0 {
-            println("Output:\n{result.stdout}");
+            print_line("Output:\n{result.stdout}");
             break;
         }
 
         // Self-correction: feed the error back
         prompt = "The code failed:\n{result.stderr}\nFix the code.";
-        println("Attempt {attempt + 1} failed, retrying...");
+        print_line("Attempt {attempt + 1} failed, retrying...");
     }
 }
 ```
@@ -1750,7 +1750,7 @@ main()! {
     // Require approval for write operations
     agent.config.tool_filter = |ai.ToolCallEvent evt| -> bool {
         if evt.name == "write_file" || evt.name == "insert" || evt.name == "delete" {
-            println("[{evt.name}] {evt.arguments_json}");
+            print_line("[{evt.name}] {evt.arguments_json}");
             print("Approve? (y/n): ");
             return io.read_line()!.trim() == "y";
         }
@@ -1766,14 +1766,14 @@ main()! {
         for event in agent.turn_stream(line) {
             match event {
                 ai.TurnEvent.TextDelta(text) => print(text),
-                ai.TurnEvent.TurnComplete(_) => println(""),
-                ai.TurnEvent.ToolCallStart(_, name) => println("\n[calling {name}...]"),
+                ai.TurnEvent.TurnComplete(_) => print_line(""),
+                ai.TurnEvent.ToolCallStart(_, name) => print_line("\n[calling {name}...]"),
                 _ => {},
             }
         }
     }
 
-    println(tracker.summary());
+    print_line(tracker.summary());
 }
 ```
 

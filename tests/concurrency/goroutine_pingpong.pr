@@ -20,5 +20,5 @@ main() `test(expected: "4") {
       pong.send(v);
     }
   }
-  print_int(last);
+  print_line(last);
 }

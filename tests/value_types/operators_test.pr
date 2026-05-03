@@ -30,27 +30,27 @@ diff""") {
   Vec2 b = Vec2(x: 3, y: 4);
 
   Vec2 c = a + b;
-  print_int(c.x);
-  print_int(c.y);
+  print_line(c.x);
+  print_line(c.y);
 
   Vec2 d = b - a;
-  print_int(d.x);
-  print_int(d.y);
+  print_line(d.x);
+  print_line(d.y);
 
   Vec2 e = Vec2(x: 1, y: 2);
   if a == e {
-    println("eq");
+    print_line("eq");
   } else {
-    println("neq");
+    print_line("neq");
   }
   if a == b {
-    println("eq");
+    print_line("eq");
   } else {
-    println("neq");
+    print_line("neq");
   }
   if a != b {
-    println("diff");
+    print_line("diff");
   } else {
-    println("same");
+    print_line("same");
   }
 }

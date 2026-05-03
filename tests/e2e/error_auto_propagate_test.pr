@@ -312,14 +312,14 @@ test_handler_recovery_expression() `test {
 // Inferred: x becomes int?
 test_optional_recovery_inferred_error() `test {
   x := parse_int("bad")? e {
-    println("handled");
+    print_line("handled");
   };
   assert("{x}" == "none", "inferred optional recovery on error");
 }
 
 test_optional_recovery_inferred_success() `test {
   x := parse_int("42")? e {
-    println("handled");
+    print_line("handled");
   };
   assert("{x}" == "42", "inferred optional recovery on success");
 }
@@ -327,14 +327,14 @@ test_optional_recovery_inferred_success() `test {
 // Typed: int? x
 test_optional_recovery_typed_error() `test {
   int? x = parse_int("bad")? e {
-    println("handled");
+    print_line("handled");
   };
   assert("{x}" == "none", "typed optional recovery on error");
 }
 
 test_optional_recovery_typed_success() `test {
   int? x = parse_int("42")? e {
-    println("handled");
+    print_line("handled");
   };
   assert("{x}" == "42", "typed optional recovery on success");
 }
@@ -342,14 +342,14 @@ test_optional_recovery_typed_success() `test {
 // String type optional recovery
 test_optional_recovery_string_error() `test {
   s := get_string(true)? e {
-    println("caught");
+    print_line("caught");
   };
   assert("{s}" == "none", "string optional recovery on error");
 }
 
 test_optional_recovery_string_success() `test {
   s := get_string(false)? e {
-    println("caught");
+    print_line("caught");
   };
   assert("{s}" == "hello", "string optional recovery on success");
 }
@@ -605,7 +605,7 @@ test_typed_handler_else_optional_inferred() `test {
   v := fail_with_io(true)? e is IoError {
     e.code;
   } else e {
-    println("else");
+    print_line("else");
   };
   assert("{v}" == "42", "typed match produces some value");
 }
@@ -614,7 +614,7 @@ test_typed_handler_else_optional_nomatch() `test {
   v := fail_with_io(false)? e is IoError {
     e.code;
   } else e {
-    println("else");
+    print_line("else");
   };
   assert("{v}" == "none", "else non-recovery produces none");
 }

@@ -66,7 +66,7 @@ rapid_cycle ok""", exclude: "wasm32") {
   for _ in 0..8 {
     <-done;
   }
-  println("stress_8 ok");
+  print_line("stress_8 ok");
 
   // Test 2: Goroutine does multiple IO operations in sequence (rapid enter/exit cycling)
   channel[int] ch2 = channel[int](capacity: 1);
@@ -103,5 +103,5 @@ rapid_cycle ok""", exclude: "wasm32") {
   if val := r2 {
     assert(val == 5, "rapid cycle count");
   }
-  println("rapid_cycle ok");
+  print_line("rapid_cycle ok");
 }

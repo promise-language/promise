@@ -6,5 +6,5 @@ get_greeting() string {
 main() `test(expected: "hello from task") {
   t := go get_greeting();
   string result = <-t;
-  println(result);
+  print_line(result);
 }

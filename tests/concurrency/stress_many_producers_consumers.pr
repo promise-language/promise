@@ -35,5 +35,5 @@ main() `test(expected: "1000") {
       total = total + v;
     }
   }
-  print_int(total);
+  print_line(total);
 }

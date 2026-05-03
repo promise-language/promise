@@ -17,5 +17,5 @@ main() `test(expected: "3") {
       count += v;
     }
   }
-  print_int(count);
+  print_line(count);
 }

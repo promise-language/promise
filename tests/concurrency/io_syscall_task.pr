@@ -37,7 +37,7 @@ multi_task ok""", exclude: "wasm32") {
   task[string] t = go _write_and_read_1();
   string result = <-t;
   assert(result == "task data", "task file IO");
-  println("task_io ok");
+  print_line("task_io ok");
 
   // Test 2: Multiple tasks doing IO, await all
   task[string] t1 = go _write_and_read_2a();
@@ -49,5 +49,5 @@ multi_task ok""", exclude: "wasm32") {
   assert(r1 == "alpha", "task 1");
   assert(r2 == "beta", "task 2");
   assert(r3 == "gamma", "task 3");
-  println("multi_task ok");
+  print_line("multi_task ok");
 }

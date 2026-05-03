@@ -1,5 +1,5 @@
 // Fixed-size array out-of-bounds panic
 main() `test(expected: """panic: array index out of bounds""") {
   int[3] arr = [1, 2, 3];
-  println("{arr[5]}");
+  print_line("{arr[5]}");
 }

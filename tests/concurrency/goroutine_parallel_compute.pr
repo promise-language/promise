@@ -41,5 +41,5 @@ main() `test(expected: "done") {
   }
   // 100+200+300+400 = 1000
   assert(total == 1000, "parallel sum = 1000");
-  println("done");
+  print_line("done");
 }

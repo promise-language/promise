@@ -2,26 +2,26 @@
 // Only one variant of each filtered function pair is compiled per target.
 // On linux: sep_os prints "linux"; on non-linux: prints "non-linux"
 sep_os() `target(linux) {
-  println("linux");
+  print_line("linux");
 }
 sep_os() `target(!linux) {
-  println("non-linux");
+  print_line("non-linux");
 }
 
 // posix covers linux + macos
 greet_posix() `target(posix) {
-  println("posix");
+  print_line("posix");
 }
 greet_posix() `target(!posix) {
-  println("non-posix");
+  print_line("non-posix");
 }
 
 // arch-specific
 arch_label() `target(x86_64) {
-  println("x86_64");
+  print_line("x86_64");
 }
 arch_label() `target(!x86_64) {
-  println("non-x86_64");
+  print_line("non-x86_64");
 }
 
 // Returns a platform-dependent int: 1 on linux, 2 otherwise
@@ -47,10 +47,10 @@ test_platform_return_value() `test {
 
 // Wasm target
 wasm_only() `target(wasm) {
-  println("wasm");
+  print_line("wasm");
 }
 wasm_only() `target(!wasm) {
-  println("not-wasm");
+  print_line("not-wasm");
 }
 
 test_wasm_variant() `test {

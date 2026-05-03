@@ -49,5 +49,5 @@ main() `test(expected: "16") {
   }
 
   // 1 * 2 * 2 * 2 * 2 = 16
-  print_int(v5);
+  print_line(v5);
 }

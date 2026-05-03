@@ -10,22 +10,22 @@ none
 20""") {
   Point? maybe = Point(x: 3, y: 4);
   if p := maybe {
-    print_int(p.x);
-    print_int(p.y);
+    print_line(p.x);
+    print_line(p.y);
   }
 
   Point? empty = none;
   if p := empty {
-    print_int(p.x);
+    print_line(p.x);
   } else {
-    println("none");
+    print_line("none");
   }
 
   // Return optional from function
   Point? result = find_point(target: 10);
   if p := result {
-    print_int(p.x);
-    print_int(p.y);
+    print_line(p.x);
+    print_line(p.y);
   }
 }
 

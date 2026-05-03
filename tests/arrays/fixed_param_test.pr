@@ -16,9 +16,9 @@ main() `test(expected: """6
 60
 3""") {
   int[3] nums = [1, 2, 3];
-  println("{sum(nums)}");
+  print_line("{sum(nums)}");
 
   int[3] arr = make_arr();
-  println("{sum(arr)}");
-  println("{arr.len}");
+  print_line("{sum(arr)}");
+  print_line("{arr.len}");
 }

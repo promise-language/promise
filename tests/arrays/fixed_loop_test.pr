@@ -13,7 +13,7 @@ main() `test(expected: """3
     }
     sum += x;
   }
-  println("{sum}");
+  print_line("{sum}");
 
   // Continue: count non-zero elements
   int count = 0;
@@ -23,17 +23,17 @@ main() `test(expected: """3
     }
     count += 1;
   }
-  println("{count}");
+  print_line("{count}");
 
   // f64 array
   f64[2] floats = [1.5, 2.5];
-  println("{floats[0]}");
-  println("{floats[1]}");
+  print_line("{floats[0]}");
+  print_line("{floats[1]}");
 
   // f64 array for-in sum
   f64 fsum = 0.0;
   for f in floats {
     fsum += f;
   }
-  println("{fsum}");
+  print_line("{fsum}");
 }

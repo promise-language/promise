@@ -31,5 +31,5 @@ main() `test(expected: "120") {
   for v in ch3 {
     sum = sum + v;
   }
-  print_int(sum);
+  print_line(sum);
 }

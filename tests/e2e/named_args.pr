@@ -103,118 +103,118 @@ Husky
   // === Functions ===
 
   // 1. all positional
-  print_int(add(1, 2, 3));
+  print_line(add(1, 2, 3));
 
   // 2. all named (reordered)
-  print_int(add(c: 30, a: 10, b: 20));
+  print_line(add(c: 30, a: 10, b: 20));
 
   // 3. positional then named
-  print_int(add(100, c: 300, b: 200));
+  print_line(add(100, c: 300, b: 200));
 
   // 4. function with default: omit defaulted param
-  print_int(compute(1));
+  print_line(compute(1));
 
   // 5. function with default: override default via name
-  print_int(compute(1, z: 50));
+  print_line(compute(1, z: 50));
 
   // 6. function with default: all named, reordered
-  print_int(compute(z: 1000, x: 1, y: 2));
+  print_line(compute(z: 1000, x: 1, y: 2));
 
   // === Constructors (implicit) ===
 
   // 7. all named (reordered)
   Point p1 = Point(y: 20, x: 10);
-  print_int(p1.x);
-  print_int(p1.y);
+  print_line(p1.x);
+  print_line(p1.y);
 
   // 8. all positional
   Point p2 = Point(30, 40);
-  print_int(p2.x);
-  print_int(p2.y);
+  print_line(p2.x);
+  print_line(p2.y);
 
   // 9. positional then named
   Point p3 = Point(50, y: 60);
-  print_int(p3.x);
-  print_int(p3.y);
+  print_line(p3.x);
+  print_line(p3.y);
 
   // 10. skip optional field
   Config c1 = Config(host: "localhost", port: 8080);
-  println(c1.host);
-  print_int(c1.port);
+  print_line(c1.host);
+  print_line(c1.port);
 
   // 11. provide optional field
   Config c2 = Config(host: "remote", port: 443, label: "prod");
-  println(c2.host);
-  print_int(c2.port);
+  print_line(c2.host);
+  print_line(c2.port);
 
   // 12. all positional with optional skipped
   Config c3 = Config("direct", 9090);
-  println(c3.host);
-  print_int(c3.port);
+  print_line(c3.host);
+  print_line(c3.port);
 
   // 13. field defaults: omit all (use defaults)
   Defaults d1 = Defaults();
-  print_int(d1.port);
-  println(d1.host);
+  print_line(d1.port);
+  print_line(d1.host);
 
   // 14. field defaults: override one, keep other default
   Defaults d2 = Defaults(port: 3000);
-  print_int(d2.port);
-  println(d2.host);
+  print_line(d2.port);
+  print_line(d2.host);
 
   // 15. field defaults: override both, reordered
   Defaults d3 = Defaults(host: "example.com", port: 443);
-  print_int(d3.port);
-  println(d3.host);
+  print_line(d3.port);
+  print_line(d3.host);
 
   // === new() constructor ===
 
   // 16. named reordered
   Validated v1 = Validated(scale: 3, raw: 10);
-  print_int(v1.value);
+  print_line(v1.value);
 
   // 17. positional
   Validated v2 = Validated(7, 6);
-  print_int(v2.value);
+  print_line(v2.value);
 
   // 18. positional then named
   Validated v3 = Validated(5, scale: 9);
-  print_int(v3.value);
+  print_line(v3.value);
 
   // === Methods ===
 
   // 19. method: all named reordered
   Point mp = Point(x: 3, y: 7);
-  print_int(mp.scale(offset: 5, factor: 2));
+  print_line(mp.scale(offset: 5, factor: 2));
 
   // 20. method: positional
-  print_int(mp.scale(3, 1));
+  print_line(mp.scale(3, 1));
 
   // 21. method: positional then named
-  print_int(mp.scale(4, offset: 10));
+  print_line(mp.scale(4, offset: 10));
 
   // 22. method: no extra params
-  print_int(mp.sum());
+  print_line(mp.sum());
 
   // === Inheritance ===
 
   // 23. child constructor: all named, mixed parent+child fields
   Dog dog1 = Dog(breed: "Lab", name: "Rex", age: 5);
-  println(dog1.name);
-  print_int(dog1.age);
-  println(dog1.breed);
+  print_line(dog1.name);
+  print_line(dog1.age);
+  print_line(dog1.breed);
 
   // 24. child constructor: all positional (parent fields first)
   Dog dog2 = Dog("Buddy", 3, "Golden");
-  println(dog2.name);
-  print_int(dog2.age);
-  println(dog2.breed);
+  print_line(dog2.name);
+  print_line(dog2.age);
+  print_line(dog2.breed);
 
   // 25. child constructor: positional then named
   Dog dog3 = Dog("Max", 7, breed: "Husky");
-  println(dog3.name);
-  print_int(dog3.age);
-  println(dog3.breed);
+  print_line(dog3.name);
+  print_line(dog3.age);
+  print_line(dog3.breed);
 
   // === Enum variants ===
 
@@ -226,8 +226,8 @@ Husky
   f64 s1h = match s1 {
     Shape.Rect(w, h) => h, Shape.Circle(r) => 0.0,
   };
-  print_f64(s1w);
-  print_f64(s1h);
+  print_line(s1w);
+  print_line(s1h);
 
   // 27. enum variant: positional
   Shape s2 = Shape.Rect(5.0, 15.0);
@@ -237,13 +237,13 @@ Husky
   f64 s2h = match s2 {
     Shape.Rect(w, h) => h, Shape.Circle(r) => 0.0,
   };
-  print_f64(s2w);
-  print_f64(s2h);
+  print_line(s2w);
+  print_line(s2h);
 
   // 28. enum variant: single arg named
   Shape s3 = Shape.Circle(radius: 3.14);
   f64 s3r = match s3 {
     Shape.Circle(r) => r, Shape.Rect(w, h) => 0.0,
   };
-  print_f64(s3r);
+  print_line(s3r);
 }

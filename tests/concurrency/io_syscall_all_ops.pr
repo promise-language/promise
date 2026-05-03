@@ -26,7 +26,7 @@ error_handling ok""", exclude: "wasm32") {
   if v1 := r1 {
     assert(v1 == "goroutine wrote this", "open/close/write/read");
   }
-  println("open_close ok");
+  print_line("open_close ok");
 
   // Test 2: write_content + read_content from goroutine
   channel[string] ch2 = channel[string](capacity: 1);
@@ -40,7 +40,7 @@ error_handling ok""", exclude: "wasm32") {
   if v2 := r2 {
     assert(v2 == "content ops", "write_content/read_content");
   }
-  println("write_read ok");
+  print_line("write_read ok");
 
   // Test 3: seek from goroutine
   channel[string] ch3 = channel[string](capacity: 1);
@@ -57,7 +57,7 @@ error_handling ok""", exclude: "wasm32") {
   if v3 := r3 {
     assert(v3 == "efgh", "seek + read_all");
   }
-  println("seek ok");
+  print_line("seek ok");
 
   // Test 4: stat_size from goroutine
   channel[int] ch4 = channel[int](capacity: 1);
@@ -71,7 +71,7 @@ error_handling ok""", exclude: "wasm32") {
   if v4 := r4 {
     assert(v4 == 8, "stat_size");
   }
-  println("stat_size ok");
+  print_line("stat_size ok");
 
   // Test 5: exists from goroutine
   channel[int] ch5 = channel[int](capacity: 1);
@@ -93,7 +93,7 @@ error_handling ok""", exclude: "wasm32") {
   if v5 := r5 {
     assert(v5 == 11, "exists before/after remove");
   }
-  println("exists ok");
+  print_line("exists ok");
 
   // Test 6: mkdir, dir_exists, dir_remove from goroutine
   channel[int] ch6 = channel[int](capacity: 1);
@@ -118,7 +118,7 @@ error_handling ok""", exclude: "wasm32") {
   if v6 := r6 {
     assert(v6 == 11, "mkdir/dir_exists/dir_remove");
   }
-  println("mkdir_dir ok");
+  print_line("mkdir_dir ok");
 
   // Test 7: error handling from goroutine (read nonexistent file)
   channel[string] ch7 = channel[string](capacity: 1);
@@ -133,5 +133,5 @@ error_handling ok""", exclude: "wasm32") {
   if v7 := r7 {
     assert(v7 == "caught", "error from goroutine");
   }
-  println("error_handling ok");
+  print_line("error_handling ok");
 }

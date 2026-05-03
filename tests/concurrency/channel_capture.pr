@@ -8,6 +8,6 @@ main() `test(expected: "300") {
   };
   result := <-ch;
   if v := result {
-    print_int(v);
+    print_line(v);
   }
 }

@@ -49,7 +49,7 @@ test_multi_write_format() `test {
   assert("{n}" == "John Doe", "format with multiple writes");
 }
 
-test_user_type_in_println() `test {
+test_user_type_in_print_line() `test {
   Pt p = Pt(x: 10, y: 20);
   string s = "coords: {p}";
   assert(s == "coords: (10, 20)", "user type in variable");

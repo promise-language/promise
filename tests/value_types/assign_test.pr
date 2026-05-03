@@ -13,16 +13,16 @@ main() `test(expected: """5
 
   // Direct field assignment
   p.x = 5;
-  print_int(p.x);
-  print_int(p.y);
+  print_line(p.x);
+  print_line(p.y);
 
   // Compound assignment
   p.x += 1;
-  print_int(p.x);
-  print_int(p.y);
+  print_line(p.x);
+  print_line(p.y);
 
   // Compound assignment with multiplication
   p.x += 5;
-  print_int(p.x);
-  print_int(p.y);
+  print_line(p.x);
+  print_line(p.y);
 }

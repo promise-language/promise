@@ -16,11 +16,11 @@ main() `test(expected: """50
 0
 100""") {
   Clamped a = Clamped(v: 50);
-  print_int(a.value);
+  print_line(a.value);
 
   Clamped b = Clamped(v: -10);
-  print_int(b.value);
+  print_line(b.value);
 
   Clamped c = Clamped(v: 200);
-  print_int(c.value);
+  print_line(c.value);
 }

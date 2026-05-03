@@ -18,7 +18,7 @@ interleaved ok""", exclude: "wasm32") {
     assert(result == "hello from goroutine", "goroutine file IO");
   }
   io.File.remove("/tmp/pr_syscall_t1")!;
-  println("single ok");
+  print_line("single ok");
 
   // Test 2: Multiple goroutines doing file IO concurrently
   channel[int] done = channel[int](capacity: 4);
@@ -53,7 +53,7 @@ interleaved ok""", exclude: "wasm32") {
   for _ in 0..4 {
     <-done;
   }
-  println("concurrent ok");
+  print_line("concurrent ok");
 
   // Test 3: Goroutine file IO interleaved with channel ops
   channel[string] ch2 = channel[string](capacity: 1);
@@ -68,5 +68,5 @@ interleaved ok""", exclude: "wasm32") {
   string data = io.File.read_content("/tmp/pr_syscall_t3")!;
   assert(data == "ping", "read after channel sync");
   io.File.remove("/tmp/pr_syscall_t3")!;
-  println("interleaved ok");
+  print_line("interleaved ok");
 }

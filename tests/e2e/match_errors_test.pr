@@ -315,14 +315,14 @@ test_match_result_success() `test {
 
 test_match_result_optional_error() `test {
   r := get_value(99)? e {
-    println("caught");
+    print_line("caught");
   };
   assert("{r}" == "none", "optional recovery on error");
 }
 
 test_match_result_optional_success() `test {
   r := get_value(1)? e {
-    println("caught");
+    print_line("caught");
   };
   assert("{r}" == "one", "optional recovery on success");
 }

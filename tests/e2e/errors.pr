@@ -15,8 +15,8 @@ compute() int! {
 main() `test(expected: """6
 10""") {
   // Successful bang unwrap
-  print_int(safe_div(42, 7)!);
+  print_line(safe_div(42, 7)!);
 
   // Chain propagation
-  print_int(compute()!);
+  print_line(compute()!);
 }

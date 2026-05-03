@@ -11,11 +11,11 @@ main() `test(expected: """1
   Point q = p; // copy, not alias
 
   // Verify q has the same values
-  print_int(q.x);
-  print_int(q.y);
+  print_line(q.x);
+  print_line(q.y);
 
   // Modify q (via reassignment) — p should be unchanged
   q = Point(x: 10, y: 2);
-  print_int(q.x);
-  print_int(p.y);
+  print_line(q.x);
+  print_line(p.y);
 }

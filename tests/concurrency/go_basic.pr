@@ -5,5 +5,5 @@ compute() int {
 main() `test(expected: "42") {
   t := go compute();
   result := <-t;
-  print_int(result);
+  print_line(result);
 }

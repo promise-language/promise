@@ -6,9 +6,9 @@
 
 The C binding described below was fragile and wouldn't scale:
 
-1. **Hardcoded mappings.** `builtins.go` manually declares `promise_print_int`, `promise_print_f64`, etc. `declareExternFunc` pattern-matches "1 arg, void return, print-like" to select a runtime function. Every new extern requires touching three places: `declareRuntime()`, `declareExternFunc()`, and `runtime.c`.
+1. **Hardcoded mappings.** `builtins.go` manually declared `promise_print_string`, etc. `declareExternFunc` pattern-matched "1 arg, void return, print-like" to select a runtime function. Every new extern required touching three places: `declareRuntime()`, `declareExternFunc()`, and `runtime.c`.
 
-2. **No type verification.** The LLVM IR codegen emits `call void @promise_print_bool(i8 %x)` and `runtime.c` defines `void promise_print_bool(char x)`. These happen to agree, but nothing checks that. A mismatch (e.g., changing bool to `i16` in codegen but not in C) silently produces undefined behavior.
+2. **No type verification.** The LLVM IR codegen emits `call void @promise_print_string(i8* %s)` and the PAL defines `void promise_print_string(char* s)`. These happen to agree, but nothing checks that. A mismatch silently produces undefined behavior.
 
 3. **No compound types.** When strings, arrays, slices, user structs, and enums cross the C boundary, both sides must agree on struct layout, field order, padding, and pointer indirection. The current approach has no mechanism for this.
 
@@ -666,10 +666,8 @@ typedef struct {
 // (all value params passed by pointer; struct returns use sret)
 // ============================================================
 
-void promise_print_int(promise_int_v *x);
-void promise_print_f64(promise_f64_v *x);
-void promise_print_bool(promise_bool_v *x);
 void promise_print_string(promise_string_v *s);
+void promise_print_string_no_nl(promise_string_v *s);
 void promise_panic(const char* msg);
 
 // User-declared extern functions
@@ -693,7 +691,7 @@ The header always includes:
 The C symbol for an extern function is derived from the Promise function name:
 
 - **Default:** `promise_<funcName>`. E.g., `printInt(int x) \`extern;` → `void promise_printInt(promise_int x);`
-- **Explicit override:** `printInt(int x) \`extern("my_print_int");` → `void my_print_int(promise_int x);`
+- **Explicit override:** `greet(int x) \`extern("my_greet");` → `void my_greet(promise_int x);`
 
 The `extern` meta annotation gains an optional string parameter for the C symbol name. When absent, the `promise_` prefix is applied automatically.
 

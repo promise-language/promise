@@ -34,5 +34,5 @@ main() `test(expected: "50") {
       total += v;
     }
   }
-  print_int(total);
+  print_line(total);
 }

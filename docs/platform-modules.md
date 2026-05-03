@@ -83,7 +83,7 @@ in scope. Fewer choices = lower probability of picking the wrong one = more corr
 
 | Candidate | Verdict | Reason |
 |---|---|---|
-| `println`, `Writer`, `Closer`, `write_line` | **`std/`** | Every program produces output |
+| `print`, `print_line`, `Writer`, `Closer`, `write_line` | **`std/`** | Every program produces output |
 | `Vector`, `Map`, `Set`, `Iterator` | **`std/`** | Data structures are universal |
 | `Channel`, `Task`, `error`, `assert` | **`std/`** | Concurrency and errors are language-level |
 | `Duration`, `Instant` | **`std/`** | Timing is universal; pure value type; zero API noise |
@@ -286,8 +286,8 @@ type Platform `public {
 output, including programs that never touch the filesystem. `write_line` uses
 `Platform.line_separator` rather than hardcoding `"\n"`.
 
-**`println` and `\r\n`**: `println` always emits `\n`. Modern Windows terminals (Windows Terminal,
-VS Code, PowerShell) handle `\n` correctly. `println` is for human-readable terminal output.
+**`print_line` and `\r\n`**: `print_line` always emits `\n`. Modern Windows terminals (Windows Terminal,
+VS Code, PowerShell) handle `\n` correctly. `print_line` is for human-readable terminal output.
 Use `write_line` when writing to files or pipes where the platform convention matters.
 
 ---
@@ -598,7 +598,7 @@ The `while` loop unwraps the optional automatically:
 use io;
 
 while line := read_line()! {
-    println(line);
+    print_line(line);
 }
 ```
 
@@ -797,7 +797,7 @@ None of these belong in `std/`. They are progressively heavier and progressively
 ```
 modules/
   std/            (auto-imported via implicit `use std as _;`)
-    io.pr         — println, write_line, Closer
+    io.pr         — print, print_line, write_line, Closer
     platform.pr   — Platform (path_separator, line_separator, is_path_separator)
     format.pr     — Writer, Format, Builder
     parse.pr      — Reader, Parse, Scanner, scan[T]

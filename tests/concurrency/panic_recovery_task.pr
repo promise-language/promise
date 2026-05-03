@@ -9,5 +9,5 @@ main() `test(expected: "panic: task failure") {
   // Receiving from a panicked task should re-panic.
   // Since main goroutine panics, the process exits with code 1.
   <-t;
-  println("should not reach here");
+  print_line("should not reach here");
 }

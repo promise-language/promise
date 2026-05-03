@@ -88,10 +88,10 @@ Test discovery:
   promise test dir/...          Scan directory recursively for test files
 
 Inline execution:
-  promise exec 'println("hello")'
-  promise exec -timeout 30s 'println("hello")'
-  echo 'println("hello")' | promise exec
-  echo 'println("hello")' | promise
+  promise exec 'print_line("hello")'
+  promise exec -timeout 30s 'print_line("hello")'
+  echo 'print_line("hello")' | promise exec
+  echo 'print_line("hello")' | promise
 `)
 }
 

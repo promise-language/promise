@@ -29,5 +29,5 @@ main() `test(expected: "25") {
       sum = sum + v;
     }
   }
-  print_int(sum);
+  print_line(sum);
 }

@@ -1,0 +1,243 @@
+// E2E tests for structural interface views: passing primitives, strings,
+// and user types to functions that accept structural interface parameters.
+// Covers the boxForStructuralView codegen path and adapter thunks.
+// --- User-defined structural interface ---
+type Showable `structural {
+  to_string() string `abstract;
+}
+
+display(Showable s) string {
+  return s.to_string();
+}
+
+// --- Basic primitive boxing ---
+
+test_int_to_structural() `test {
+  assert(display(42) == "42", "int to Showable");
+}
+
+test_negative_int_to_structural() `test {
+  assert(display(-7) == "-7", "negative int to Showable");
+}
+
+test_zero_to_structural() `test {
+  assert(display(0) == "0", "zero to Showable");
+}
+
+test_bool_true_to_structural() `test {
+  assert(display(true) == "true", "bool true to Showable");
+}
+
+test_bool_false_to_structural() `test {
+  assert(display(false) == "false", "bool false to Showable");
+}
+
+test_f64_to_structural() `test {
+  assert(display(3.14) == "3.14", "f64 to Showable");
+}
+
+test_string_to_structural() `test {
+  assert(display("hello") == "hello", "string to Showable");
+}
+
+test_empty_string_to_structural() `test {
+  assert(display("") == "", "empty string to Showable");
+}
+
+test_char_to_structural() `test {
+  assert(display('A') == "A", "char to Showable");
+}
+
+// --- Primitive variables (not just literals) ---
+
+test_int_var_to_structural() `test {
+  int x = 99;
+  assert(display(x) == "99", "int variable to Showable");
+}
+
+test_bool_var_to_structural() `test {
+  bool b = false;
+  assert(display(b) == "false", "bool variable to Showable");
+}
+
+test_f64_var_to_structural() `test {
+  f64 pi = 3.14;
+  assert(display(pi) == "3.14", "f64 variable to Showable");
+}
+
+test_string_var_to_structural() `test {
+  string s = "world";
+  assert(display(s) == "world", "string variable to Showable");
+}
+
+// --- Narrow integer types ---
+
+test_i8_to_structural() `test {
+  i8 v = 42 as! i8;
+  assert(display(v) == "42", "i8 to Showable");
+}
+
+test_i16_to_structural() `test {
+  i16 v = 1000 as! i16;
+  assert(display(v) == "1000", "i16 to Showable");
+}
+
+test_i32_to_structural() `test {
+  i32 v = 100000 as! i32;
+  assert(display(v) == "100000", "i32 to Showable");
+}
+
+test_u8_to_structural() `test {
+  u8 v = 200 as! u8;
+  assert(display(v) == "200", "u8 to Showable");
+}
+
+test_u16_to_structural() `test {
+  u16 v = 50000 as! u16;
+  assert(display(v) == "50000", "u16 to Showable");
+}
+
+test_u32_to_structural() `test {
+  u32 v = 3000000 as! u32;
+  assert(display(v) == "3000000", "u32 to Showable");
+}
+
+// --- Multiple different primitives in sequence ---
+
+test_mixed_primitives_sequential() `test {
+  assert(display(1) == "1", "first int");
+  assert(display(true) == "true", "then bool");
+  assert(display("hi") == "hi", "then string");
+  assert(display(2.5) == "2.5", "then f64");
+  assert(display('Z') == "Z", "then char");
+}
+
+// --- User type alongside primitives ---
+
+type Pair {
+  int x;
+  int y;
+  to_string() string {
+    return "({this.x},{this.y})";
+  }
+}
+
+test_user_type_to_structural() `test {
+  Pair p = Pair(x: 3, y: 4);
+  assert(display(p) == "(3,4)", "user type to Showable");
+}
+
+test_primitive_then_user_type() `test {
+  Pair p = Pair(x: 1, y: 2);
+  assert(display(42) == "42", "int before user type");
+  assert(display(p) == "(1,2)", "user type after int");
+}
+
+test_user_type_then_primitive() `test {
+  Pair p = Pair(x: 5, y: 6);
+  assert(display(p) == "(5,6)", "user type before int");
+  assert(display(99) == "99", "int after user type");
+}
+
+// --- Multiple structural params in same function ---
+
+both(Showable a, Showable b) string {
+  return a.to_string() + "," + b.to_string();
+}
+
+test_two_primitives_structural_params() `test {
+  assert(both(1, 2) == "1,2", "two ints");
+}
+
+test_int_and_string_structural_params() `test {
+  assert(both(42, "hi") == "42,hi", "int and string");
+}
+
+test_int_and_user_type_structural_params() `test {
+  Pair p = Pair(x: 7, y: 8);
+  assert(both(42, p) == "42,(7,8)", "int and user type");
+}
+
+// --- Primitives in a loop ---
+
+test_primitive_in_loop() `test {
+  string result = "";
+  for i in 0..3 {
+    result = result + display(i);
+  }
+  assert(result == "012", "primitives boxed in loop");
+}
+
+// --- Structural interface with failable method (Format uses format(Writer ~w)!) ---
+
+format_to_string(Format f) string {
+  Builder b = Builder();
+  f.format(b)? {
+  };
+  return b.to_string();
+}
+
+test_int_to_format_structural() `test {
+  assert(format_to_string(42) == "42", "int to Format");
+}
+
+test_bool_to_format_structural() `test {
+  assert(format_to_string(true) == "true", "bool to Format");
+}
+
+test_f64_to_format_structural() `test {
+  assert(format_to_string(3.14) == "3.14", "f64 to Format");
+}
+
+test_string_to_format_structural() `test {
+  assert(format_to_string("hello") == "hello", "string to Format");
+}
+
+// --- Structural interface parameter with void failable method ---
+
+type Logger `structural {
+  log(string msg)! `abstract;
+}
+
+type LogSink {
+  string[] entries;
+  log(~this, string msg) {
+    this.entries.push(msg);
+  }
+}
+
+run_logger(Logger ~l) {
+  l.log("hello")!;
+  l.log("world")!;
+}
+
+test_user_type_void_failable_structural() `test {
+  LogSink sink = LogSink(entries: []);
+  run_logger(sink);
+  assert(sink.entries.len == 2, "logger received 2 messages");
+  assert(sink.entries[0] == "hello", "first message");
+  assert(sink.entries[1] == "world", "second message");
+}
+
+// --- Duplicate variable names across scopes (regression for localNameCount) ---
+
+test_duplicate_var_names_with_boxing() `test {
+  // This triggered the localNameCount bug: emitting an adapter thunk
+  // mid-function would reset the name counter, causing duplicate %x allocas
+  int? opt = 10;
+  if opt is present {
+    int x = opt;
+    assert(display(x) == "10", "x in narrowing scope");
+  }
+  int x = 20;
+  assert(display(x) == "20", "x in outer scope");
+}
+
+test_duplicate_var_names_multiple_scopes() `test {
+  for i in 0..2 {
+    int v = i * 10;
+    assert(display(v) == display(i * 10), "v in loop iteration {i}");
+  }
+  int v = 99;
+  assert(display(v) == "99", "v after loop");
+}

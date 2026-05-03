@@ -23,5 +23,5 @@ main() `test(expected: "100") {
       total = total + v;
     }
   }
-  print_int(total);
+  print_line(total);
 }

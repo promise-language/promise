@@ -43,6 +43,9 @@ type Decoder `public `doc("Format-agnostic decoding interface. Implementations m
   // Field navigation in object context
   next_key(~this) string?! `abstract `doc("Returns next key in object, or none at end.");
   skip_value(~this)! `abstract `doc("Skips the current value (including nested objects/arrays).");
+
+  // Array element iteration
+  has_next_element(~this) bool! `abstract `doc("Returns true if there are more elements in the current array. Handles comma skipping.");
 }
 
 // ── Encodable/Decodable structural interfaces (1 method each — widely satisfied) ──

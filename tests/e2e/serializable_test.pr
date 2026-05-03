@@ -38,6 +38,48 @@ type Person `serializable {
   Address address;
 }
 
+type TaggedItem `serializable {
+  string name;
+  string[] tags;
+}
+
+type Scores `serializable {
+  string label;
+  int[] values;
+}
+
+type Config `serializable {
+  string title;
+  map[string, string] settings;
+}
+
+type Route `serializable {
+  string name;
+  Point[] waypoints;
+}
+
+type Counters `serializable {
+  map[string, int] counts;
+}
+
+type IntKeyMap `serializable {
+  map[int, string] data;
+}
+
+type Dashboard `serializable {
+  string title;
+  string[] labels;
+  map[string, int] metrics;
+}
+
+type Measurements `serializable {
+  f64[] values;
+}
+
+type Flags `serializable {
+  bool[] bits;
+}
+
 type Located `serializable {
   string name;
   Point pos `key("position");
@@ -189,6 +231,172 @@ multiple_nested_fields_test() `test {
   assert(r2.origin.y == 0, "multi nested: origin y");
   assert(r2.size.x == 100, "multi nested: size x");
   assert(r2.size.y == 50, "multi nested: size y");
+}
+
+// ── Array fields (T[]) ──────────────────────────────────────────────────────
+
+array_encode_test() `test {
+  TaggedItem item = TaggedItem(name: "bolt", tags: ["metal", "small", "round"]);
+  json.JsonEncoder enc = json.JsonEncoder();
+  item.encode(enc)!;
+  string s = enc.to_string();
+  assert(s.contains("\"name\":\"bolt\""), "array encode: name");
+  assert(s.contains("\"metal\""), "array encode: tag metal");
+  assert(s.contains("\"small\""), "array encode: tag small");
+}
+
+array_round_trip_test() `test {
+  TaggedItem item1 = TaggedItem(name: "nut", tags: ["hex", "steel"]);
+  json.JsonEncoder enc = json.JsonEncoder();
+  item1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  TaggedItem item2 = TaggedItem.decode(dec)!;
+  assert(item2.name == "nut", "array rt: name");
+  assert(item2.tags.len == 2, "array rt: count");
+  assert(item2.tags[0] == "hex", "array rt: 0");
+  assert(item2.tags[1] == "steel", "array rt: 1");
+}
+
+array_empty_test() `test {
+  TaggedItem item1 = TaggedItem(name: "bare", tags: string[]());
+  json.JsonEncoder enc = json.JsonEncoder();
+  item1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  TaggedItem item2 = TaggedItem.decode(dec)!;
+  assert(item2.tags.len == 0, "array empty: no tags");
+}
+
+int_array_round_trip_test() `test {
+  Scores s1 = Scores(label: "test", values: [10, 20, 30]);
+  json.JsonEncoder enc = json.JsonEncoder();
+  s1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  Scores s2 = Scores.decode(dec)!;
+  assert(s2.values.len == 3, "int array: count");
+  assert(s2.values[0] == 10, "int array: 0");
+  assert(s2.values[2] == 30, "int array: 2");
+}
+
+// ── Map fields (map[string, V]) ─────────────────────────────────────────────
+
+map_encode_test() `test {
+  Config cfg = Config(title: "app", settings: map[string, string]());
+  cfg.settings["color"] = "blue";
+  cfg.settings["mode"] = "dark";
+  json.JsonEncoder enc = json.JsonEncoder();
+  cfg.encode(enc)!;
+  string s = enc.to_string();
+  assert(s.contains("\"title\":\"app\""), "map encode: title");
+  assert(s.contains("\"color\":\"blue\""), "map encode: color");
+}
+
+map_round_trip_test() `test {
+  Config cfg1 = Config(title: "web", settings: map[string, string]());
+  cfg1.settings["port"] = "8080";
+  json.JsonEncoder enc = json.JsonEncoder();
+  cfg1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  Config cfg2 = Config.decode(dec)!;
+  assert(cfg2.title == "web", "map rt: title");
+}
+
+map_empty_test() `test {
+  Config cfg1 = Config(title: "empty", settings: map[string, string]());
+  json.JsonEncoder enc = json.JsonEncoder();
+  cfg1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  Config cfg2 = Config.decode(dec)!;
+  assert(cfg2.title == "empty", "map empty: title");
+}
+
+// ── Array of user types ─────────────────────────────────────────────────────
+
+array_of_user_types_test() `test {
+  Route r1 = Route(name: "trail", waypoints: [Point(x: 0, y: 0), Point(x: 10, y: 5), Point(x: 20, y: 10)]);
+  json.JsonEncoder enc = json.JsonEncoder();
+  r1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  Route r2 = Route.decode(dec)!;
+  assert(r2.name == "trail", "user type array: name");
+  assert(r2.waypoints.len == 3, "user type array: count");
+  assert(r2.waypoints[1].x == 10, "user type array: pt 2 x");
+  assert(r2.waypoints[2].y == 10, "user type array: pt 3 y");
+}
+
+f64_array_test() `test {
+  Measurements m1 = Measurements(values: [1.5, 2.5, 3.5]);
+  json.JsonEncoder enc = json.JsonEncoder();
+  m1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  Measurements m2 = Measurements.decode(dec)!;
+  assert(m2.values.len == 3, "f64 array: count");
+  assert(m2.values[0] == 1.5, "f64 array: 0");
+}
+
+bool_array_test() `test {
+  Flags f1 = Flags(bits: [true, false, true]);
+  json.JsonEncoder enc = json.JsonEncoder();
+  f1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  Flags f2 = Flags.decode(dec)!;
+  assert(f2.bits.len == 3, "bool array: count");
+  assert(f2.bits[0] == true, "bool array: 0");
+  assert(f2.bits[1] == false, "bool array: 1");
+}
+
+single_element_array_test() `test {
+  Flags f1 = Flags(bits: [true]);
+  json.JsonEncoder enc = json.JsonEncoder();
+  f1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  Flags f2 = Flags.decode(dec)!;
+  assert(f2.bits.len == 1, "single elem: count");
+}
+
+// ── Map with non-string values ──────────────────────────────────────────────
+
+map_string_int_test() `test {
+  Counters c1 = Counters(counts: map[string, int]());
+  c1.counts["views"] = 100;
+  c1.counts["clicks"] = 5;
+  json.JsonEncoder enc = json.JsonEncoder();
+  c1.encode(enc)!;
+  string s = enc.to_string();
+  assert(s.contains("\"views\":100"), "map int: views");
+}
+
+// ── Map with non-string keys ────────────────────────────────────────────────
+
+int_key_map_encode_test() `test {
+  IntKeyMap m = IntKeyMap(data: map[int, string]());
+  m.data[42] = "answer";
+  json.JsonEncoder enc = json.JsonEncoder();
+  m.encode(enc)!;
+  string s = enc.to_string();
+  assert(s.contains("\"answer\""), "int key encode: has value");
+}
+
+int_key_map_round_trip_test() `test {
+  IntKeyMap m1 = IntKeyMap(data: map[int, string]());
+  m1.data[100] = "hundred";
+  json.JsonEncoder enc = json.JsonEncoder();
+  m1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  IntKeyMap m2 = IntKeyMap.decode(dec)!;
+}
+
+// ── Mixed array + map in same type ──────────────────────────────────────────
+
+mixed_array_and_map_test() `test {
+  Dashboard d1 = Dashboard(title: "main", labels: ["a", "b"], metrics: map[string, int]());
+  d1.metrics["total"] = 42;
+  json.JsonEncoder enc = json.JsonEncoder();
+  d1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  Dashboard d2 = Dashboard.decode(dec)!;
+  assert(d2.title == "main", "mixed: title");
+  assert(d2.labels.len == 2, "mixed: labels count");
+  assert(d2.labels[0] == "a", "mixed: label 0");
 }
 
 // ── Field annotations ───────────────────────────────────────────────────────

@@ -516,6 +516,21 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
     this._expect(']');
   }
 
+  has_next_element(~this) bool! `public {
+    this._skip_whitespace();
+    if this._pos >= this._data.len {
+      return false;
+    }
+    if this._data[this._pos] == ']' {
+      return false;
+    }
+    // Skip comma between elements
+    if this._data[this._pos] == ',' {
+      this._advance();
+    }
+    return true;
+  }
+
   next_key(~this) string?! `public {
     this._skip_whitespace();
     if this._pos >= this._data.len {

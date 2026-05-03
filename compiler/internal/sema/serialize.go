@@ -92,6 +92,50 @@ func (c *Checker) synthesizeEncodeMethod(named *types.Named, d *ast.TypeDecl) *a
 					makeExprStmt(callMember(ident("e"), "encode_none")),
 				}},
 			})
+		} else if elemType := vectorElemType(f.Type()); elemType != nil {
+			// Vector field: encode as JSON array.
+			//   e.encode_key("items");
+			//   e.begin_array(this.items.len);
+			//   for _item in this.items { _item.encode(e); }
+			//   e.end_array();
+			iterName := "_arr_" + f.Name()
+			stmts = append(stmts, makeExprStmt(callMember(ident("e"), "encode_key", strLit(wireName))))
+			stmts = append(stmts, makeExprStmt(callMember(ident("e"), "begin_array",
+				memberExpr(memberExpr(&ast.ThisExpr{}, f.Name()), "len"))))
+			stmts = append(stmts, &ast.ForInStmt{
+				Binding:  iterName,
+				Iterable: memberExpr(&ast.ThisExpr{}, f.Name()),
+				Body: &ast.Block{Stmts: []ast.Stmt{
+					makeExprStmt(callMember(ident(iterName), "encode", ident("e"))),
+				}},
+			})
+			stmts = append(stmts, makeExprStmt(callMember(ident("e"), "end_array")))
+		} else if keyType, valType := mapKeyValueTypes(f.Type()); valType != nil {
+			// Map[K, V] field: encode as JSON object.
+			// Keys are converted to string via to_string() (works for all Format types).
+			_ = valType // used below
+			mkName := "_mk_" + f.Name()
+			mvName := "_mv_" + f.Name()
+			// For string keys: e.encode_key(_mk) directly.
+			// For non-string keys: e.encode_key(_mk.to_string()).
+			var encodeKeyExpr ast.Expr
+			if keyType == types.TypString {
+				encodeKeyExpr = ident(mkName)
+			} else {
+				encodeKeyExpr = callMember(ident(mkName), "to_string")
+			}
+			stmts = append(stmts, makeExprStmt(callMember(ident("e"), "encode_key", strLit(wireName))))
+			stmts = append(stmts, makeExprStmt(callMember(ident("e"), "begin_object", intLit(0))))
+			stmts = append(stmts, &ast.ForInStmt{
+				Binding:  mvName,
+				Index:    mkName,
+				Iterable: memberExpr(&ast.ThisExpr{}, f.Name()),
+				Body: &ast.Block{Stmts: []ast.Stmt{
+					makeExprStmt(callMember(ident("e"), "encode_key", encodeKeyExpr)),
+					makeExprStmt(callMember(ident(mvName), "encode", ident("e"))),
+				}},
+			})
+			stmts = append(stmts, makeExprStmt(callMember(ident("e"), "end_object")))
 		} else {
 			// Required field: always encode.
 			stmts = append(stmts, makeExprStmt(callMember(ident("e"), "encode_key", strLit(wireName))))
@@ -232,6 +276,34 @@ func (c *Checker) fieldNeedsUnwrap(f *types.Field) bool {
 	return c.zeroValueExpr(f.Type()) == nil
 }
 
+// vectorElemType returns the element type if typ is Vector[T], or nil otherwise.
+func vectorElemType(typ types.Type) types.Type {
+	inst, ok := typ.(*types.Instance)
+	if !ok {
+		return nil
+	}
+	if origin, ok := inst.Origin().(*types.Named); ok && origin == types.TypVector {
+		if len(inst.TypeArgs()) > 0 {
+			return inst.TypeArgs()[0]
+		}
+	}
+	return nil
+}
+
+// mapKeyValueTypes returns (keyType, valueType) if typ is Map[K, V], or (nil, nil) otherwise.
+func mapKeyValueTypes(typ types.Type) (types.Type, types.Type) {
+	inst, ok := typ.(*types.Instance)
+	if !ok {
+		return nil, nil
+	}
+	if origin, ok := inst.Origin().(*types.Named); ok && origin == types.TypMap {
+		if len(inst.TypeArgs()) >= 2 {
+			return inst.TypeArgs()[0], inst.TypeArgs()[1]
+		}
+	}
+	return nil, nil
+}
+
 // buildKeyMatchChain builds the if/else chain for matching decoded keys to fields.
 func (c *Checker) buildKeyMatchChain(fields []*types.Field) ast.Stmt {
 	// Build from last to first so else clauses chain correctly.
@@ -252,8 +324,6 @@ func (c *Checker) buildKeyMatchChain(fields []*types.Field) ast.Stmt {
 
 		if isOptional {
 			// Decode optional: check for null first, then decode inner type.
-			//   _is_null := d.decode_none();
-			//   if !_is_null { _f_field = d.decode_TYPE()?; }
 			nullVar := "_null_" + f.Name()
 			bodyStmts = append(bodyStmts, &ast.InferredVarDecl{
 				Name: nullVar, Value: callMember(ident("d"), "decode_none"),
@@ -267,6 +337,74 @@ func (c *Checker) buildKeyMatchChain(fields []*types.Field) ast.Stmt {
 					},
 				}},
 			})
+		} else if elemType := vectorElemType(f.Type()); elemType != nil {
+			// Decode array field:
+			//   d.begin_array();
+			//   for { bool _more := d.has_next_element(); if !_more { break; } _f_items.push(...); }
+			//   d.end_array();
+			moreVar := "_more_" + f.Name()
+			bodyStmts = append(bodyStmts, makeExprStmt(callMember(ident("d"), "begin_array")))
+			bodyStmts = append(bodyStmts, &ast.InfiniteLoop{
+				Body: &ast.Block{Stmts: []ast.Stmt{
+					&ast.InferredVarDecl{Name: moreVar, Value: callMember(ident("d"), "has_next_element")},
+					&ast.IfStmt{
+						Cond: &ast.UnaryExpr{Op: ast.UnaryNot, Operand: ident(moreVar)},
+						Body: &ast.Block{Stmts: []ast.Stmt{&ast.BreakStmt{}}},
+					},
+					makeExprStmt(callMember(ident(localName), "push", propagate(c.makeDecodeCall(elemType)))),
+				}},
+			})
+			bodyStmts = append(bodyStmts, makeExprStmt(callMember(ident("d"), "end_array")))
+		} else if keyType, valType := mapKeyValueTypes(f.Type()); valType != nil {
+			// Decode map[K, V] field:
+			// Keys come as strings from next_key(). For string keys, use directly.
+			// For non-string keys, parse via scan[K](key_string).
+			mkVar := "_dmk_" + f.Name()
+			parsedKeyVar := "_dpk_" + f.Name()
+
+			var loopStmts []ast.Stmt
+			loopStmts = append(loopStmts, &ast.TypedVarDecl{
+				Type: &ast.OptionalTypeRef{Inner: &ast.NamedTypeRef{Name: "string"}},
+				Name: mkVar, Value: callMember(ident("d"), "next_key"),
+			})
+			loopStmts = append(loopStmts, &ast.IfStmt{
+				Cond: &ast.IsExpr{Expr: ident(mkVar), Pattern: &ast.IdentIsPattern{Name: "absent"}},
+				Body: &ast.Block{Stmts: []ast.Stmt{&ast.BreakStmt{}}},
+			})
+
+			// Key expression for map index: string keys use unwrapped key directly,
+			// non-string keys parse via scan[K](key!).
+			var indexExpr ast.Expr
+			if keyType == types.TypString {
+				indexExpr = &ast.ErrorUnwrapExpr{Expr: ident(mkVar)}
+			} else {
+				// Parse the string key: K _dpk = scan[K](_mk!)?;
+				keyTypeName := ""
+				if n, ok := keyType.(*types.Named); ok {
+					keyTypeName = n.Obj().Name()
+				}
+				loopStmts = append(loopStmts, &ast.InferredVarDecl{
+					Name: parsedKeyVar,
+					Value: propagate(&ast.CallExpr{
+						Callee: &ast.IndexExpr{
+							Target: ident("scan"),
+							Index:  ident(keyTypeName),
+						},
+						Args: []*ast.Arg{{Value: &ast.ErrorUnwrapExpr{Expr: ident(mkVar)}}},
+					}),
+				})
+				indexExpr = ident(parsedKeyVar)
+			}
+
+			loopStmts = append(loopStmts, &ast.AssignStmt{
+				Target: &ast.IndexExpr{Target: ident(localName), Index: indexExpr},
+				Op:     ast.OpAssign,
+				Value:  propagate(c.makeDecodeCall(valType)),
+			})
+
+			bodyStmts = append(bodyStmts, makeExprStmt(callMember(ident("d"), "begin_object")))
+			bodyStmts = append(bodyStmts, &ast.InfiniteLoop{Body: &ast.Block{Stmts: loopStmts}})
+			bodyStmts = append(bodyStmts, makeExprStmt(callMember(ident("d"), "end_object")))
 		} else {
 			// Decode required field with error propagation.
 			bodyStmts = append(bodyStmts, &ast.AssignStmt{
@@ -314,6 +452,19 @@ func (c *Checker) typeToTypeRef(typ types.Type) ast.TypeRef {
 		return &ast.NamedTypeRef{Name: t.Obj().Name()}
 	case *types.Optional:
 		return &ast.OptionalTypeRef{Inner: c.typeToTypeRef(t.Elem())}
+	case *types.Instance:
+		if origin, ok := t.Origin().(*types.Named); ok {
+			if origin == types.TypVector && len(t.TypeArgs()) > 0 {
+				return &ast.SliceTypeRef{Element: c.typeToTypeRef(t.TypeArgs()[0])}
+			}
+			if origin == types.TypMap && len(t.TypeArgs()) >= 2 {
+				return &ast.NamedTypeRef{
+					Name:     "map",
+					TypeArgs: []ast.TypeRef{c.typeToTypeRef(t.TypeArgs()[0]), c.typeToTypeRef(t.TypeArgs()[1])},
+				}
+			}
+		}
+		return &ast.NamedTypeRef{Name: typ.String()}
 	default:
 		return &ast.NamedTypeRef{Name: typ.String()}
 	}
@@ -337,6 +488,30 @@ func (c *Checker) zeroValueExpr(typ types.Type) ast.Expr {
 	}
 	if _, ok := typ.(*types.Optional); ok {
 		return &ast.NoneLit{}
+	}
+	// Vector: T[]() — empty vector
+	if inst, ok := typ.(*types.Instance); ok {
+		if origin, ok := inst.Origin().(*types.Named); ok && origin == types.TypVector {
+			elemRef := c.typeToTypeRef(inst.TypeArgs()[0])
+			if ntr, ok := elemRef.(*ast.NamedTypeRef); ok {
+				return &ast.CallExpr{Callee: &ast.SliceTypeExpr{Inner: ident(ntr.Name)}, Args: nil}
+			}
+		}
+		// Map: map[K,V]() — empty map
+		if origin, ok := inst.Origin().(*types.Named); ok && origin == types.TypMap {
+			kRef, kOk := c.typeToTypeRef(inst.TypeArgs()[0]).(*ast.NamedTypeRef)
+			vRef, vOk := c.typeToTypeRef(inst.TypeArgs()[1]).(*ast.NamedTypeRef)
+			if kOk && vOk {
+				return &ast.CallExpr{
+					Callee: &ast.IndexExpr{
+						Target:       ident("map"),
+						Index:        ident(kRef.Name),
+						ExtraIndices: []ast.Expr{ident(vRef.Name)},
+					},
+					Args: nil,
+				}
+			}
+		}
 	}
 	return nil
 }

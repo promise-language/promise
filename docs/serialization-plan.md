@@ -728,12 +728,12 @@ type DecodeError is error `public {
 5. ~~Synthesize `encode` method AST if not user-defined~~ — **Done** — handles `key` renaming, `skip` exclusion, optional omission (if-unwrap), `include_none` null encoding
 6. ~~Synthesize `decode` factory method AST if not user-defined~~ — **Done** for primitive fields — handles key matching loop, optional null checking, error propagation, `skip` zero-fill, `key` renaming
 7. Add implicit constraints for generic type params — deferred
-8. ~~Tests~~ — **Done**: 28 e2e tests in `tests/e2e/serializable_test.pr` covering: encode/decode round-trip, mixed types (string/int/f64/bool), nested types (3 levels, key annotation, multiple nested fields), field annotations (key/skip/include_none), multiple optionals, string escaping, zero/negative/large values, custom encode override, key renaming in decode
+8. ~~Tests~~ — **Done**: 43 e2e tests in `tests/e2e/serializable_test.pr` covering: encode/decode round-trip, mixed types (string/int/f64/bool), nested types (3 levels, key annotation, multiple nested fields), array fields (`T[]` — string/int/f64/bool/user-type arrays, empty, single element), map fields (`map[K,V]` — string keys, int keys, encode/decode/empty), mixed array+map, field annotations (key/skip/include_none), multiple optionals, string escaping, zero/negative/large values, custom encode override, key renaming in decode
 
 **Known limitations (Phase 3+4):**
 - ~~**Nested user-type decode**~~ — **Fixed.** Now uses `T?` local with `!` unwrap in constructor args. Panics if a required nested field is missing from the JSON.
 - ~~**Structural interface coercion for user types**~~ — **Fixed.** Synthesized methods use `MutRefTypeRef`. Variable assignment and value type boxing also fixed.
-- **Container fields** (`T[]`, `map[K,V]`) — not yet supported in synthesized code. Requires generic constraints on container methods or inline codegen.
+- ~~**Container fields**~~ — **Fixed.** `T[]` encodes as JSON array with inline for-in loop; decodes with `has_next_element` + push loop. `map[K, V]` supports any key type — string keys use directly, non-string keys use `to_string()` for encode and `scan[K]()` for decode (reversible via Format/Parse).
 - **Generic serializable types** (`Wrapper[T]`) — deferred pending implicit constraint support.
 
 ### Phase 4: Nested Types, Enums, and Advanced Features
@@ -741,7 +741,7 @@ type DecodeError is error `public {
 **Scope:** Compiler + standard library.
 
 1. ~~Nested user-type decode~~ — **Done.** Uses `T?` local + `!` unwrap. 3 tests (encode, decode, round-trip).
-2. Container field serialization (`T[]`, `map[string, V]`)
+2. ~~Container field serialization (`T[]`, `map[K, V]`)~~ — **Done.** Inline codegen. Non-string map keys use `to_string()`/`scan[K]()`. Added `has_next_element` to Decoder interface. 9 tests.
 3. Enum `` `serializable `` codegen (tag-based for data enums, string for simple enums)
 4. `` `flatten `` support
 5. `` `serializable(tag: "kind") `` parameter for custom discriminator field names
@@ -845,12 +845,7 @@ Format/Parse is for **human-readable text** (stdout, logs, debug display). Encod
 
 ### 8.2 How should `map[K, V]` serialize when K is not string?
 
-JSON only supports string keys. Options:
-- **Compile error**: `map[int, V]` with `` `serializable `` is an error (strictest)
-- **Convert to string**: `map[int, V]` serializes keys via `to_string()` (Go's approach)
-- **Encode as array of pairs**: `map[int, V]` becomes `[{"key": 1, "value": "x"}, ...]`
-
-**Recommendation:** Make this format-specific. The `Encoder` interface only has `encode_key(string)` — so non-string keys must be converted to string before encoding. The `` `serializable `` codegen calls `key.to_string()` for non-string map keys. This works for most cases and formats can reject it if needed.
+**Resolved: convert via Format/Parse.** Non-string keys are converted to string via `to_string()` for encoding and parsed back via `scan[K]()` for decoding. This leverages the existing `Format`/`Parse` structural interfaces — any type that can format to string and parse from string can be a map key. String keys are used directly (no conversion overhead). The `Encoder` interface has `encode_key(string)`, so all keys must ultimately become strings at the wire level.
 
 ### 8.3 Should unknown keys during decode be an error or silently skipped?
 
@@ -873,15 +868,15 @@ JSON only supports string keys. Options:
 | `Encoder`/`Decoder` interfaces | `modules/std/encode.pr` | 1 | **Done** |
 | `Encodable`/`Decodable` interfaces | `modules/std/encode.pr` | 1 | **Done** |
 | Primitive encode/decode | `modules/std/int.pr`, etc. | 1 | **Done** — all 17 types with range checking |
-| Container encode/decode | `modules/std/vector.pr`, `map.pr` | 1 | Deferred (needs generic constraints) |
+| Container encode/decode | `sema/serialize.go` (inline codegen) | 4 | **Done** — `T[]` and `map[K,V]` via inline loops |
 | `DecodeError` | `modules/std/encode.pr` | 1 | **Done** |
 | `JsonEncoder`/`JsonDecoder` | `modules/json/json.pr` | 2 | **Done** — 61 tests |
 | `JsonValue` enum | `modules/json/json.pr` | 2 | Deferred |
 | `json.encode_string`/`json.decode_string` | `modules/json/json.pr` | 2 | **Done** |
 | `` `serializable `` flag in types | `types/named.go` | 3 | **Done** |
 | Field annotations (`key`, `skip`, `include_none`, `required`, `flatten`) | `sema/meta.go`, `sema/decl.go` | 3 | **Done** |
-| AST synthesis for encode/decode | `sema/serialize.go` | 3 | **Done** — primitive + optional fields |
-| Nested user-type decode | `sema/serialize.go` | 4 | Blocked (needs optional force-unwrap) |
+| AST synthesis for encode/decode | `sema/serialize.go` | 3 | **Done** — primitives, optionals, nested, containers |
+| Nested user-type decode | `sema/serialize.go` | 4 | **Done** — `T?` local + `!` unwrap |
 | Enum serialization | `sema/serialize.go` | 4 | Planned |
 | `` `flatten `` support | `sema/serialize.go` | 4 | Planned |
 | TOML/YAML/MsgPack modules | `modules/toml/`, etc. | 5 | Planned |

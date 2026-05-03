@@ -645,6 +645,173 @@ encode_string_pretty[T: Encodable](T value, int indent = 2) string! `public `doc
   return enc.to_string();
 }
 
+// ── JsonValue — tree-based JSON representation ──────────────────────────────
+
+enum JsonValue `public `doc("Tree-based JSON representation for dynamic/untyped JSON manipulation.") {
+  Null,
+  Bool(bool value),
+  Number(f64 value),
+  Str(string value),
+  Array(JsonValue[] items),
+  Object(string[] keys, JsonValue[] vals),
+}
+
+// Encode a JsonValue tree to a JsonEncoder.
+encode_value(JsonValue v, Encoder ~e)! `public `doc("Writes a JsonValue tree to an Encoder.") {
+  match v {
+    JsonValue.Null => e.encode_none(),
+    JsonValue.Bool(b) => e.encode_bool(b),
+    JsonValue.Number(n) => e.encode_f64(n),
+    JsonValue.Str(s) => e.encode_string(s),
+    JsonValue.Array(items) => {
+      e.begin_array(items.len);
+      for item in items {
+        encode_value(item, e);
+      }
+      e.end_array();
+    },
+    JsonValue.Object(keys, vals) => {
+      e.begin_object(keys.len);
+      int i = 0;
+      while i < keys.len {
+        e.encode_key(keys[i]);
+        encode_value(vals[i], e);
+        i = i + 1;
+      }
+      e.end_object();
+    },
+  }
+}
+
+// Parse a JSON string into a JsonValue tree.
+parse_value(string input) JsonValue! `public `doc("Parses a JSON string into a JsonValue tree.") {
+  JsonDecoder dec = JsonDecoder(data: input);
+  return _parse_json_value(dec);
+}
+
+// Format a JsonValue tree as a JSON string.
+format_value(JsonValue v) string! `public `doc("Formats a JsonValue tree as a JSON string.") {
+  JsonEncoder enc = JsonEncoder();
+  encode_value(v, enc);
+  return enc.to_string();
+}
+
+// Format a JsonValue tree as a pretty-printed JSON string.
+format_value_pretty(JsonValue v, int indent = 2) string! `public `doc("Formats a JsonValue tree as a pretty-printed JSON string.") {
+  JsonEncoder enc = JsonEncoder(pretty: true, indent: indent);
+  encode_value(v, enc);
+  return enc.to_string();
+}
+
+// Internal: parse a single JSON value from a JsonDecoder, using internal methods.
+_parse_json_value(JsonDecoder ~dec) JsonValue! {
+  dec._skip_whitespace();
+  if dec._pos >= dec._data.len {
+    raise DecodeError(message: "unexpected end of input", field: "", position: dec._pos);
+  }
+  char c = dec._data[dec._pos];
+
+  if c == 'n' {
+    dec._pos = dec._pos + 4;
+    return JsonValue.Null;
+  }
+  if c == 't' {
+    dec._pos = dec._pos + 4;
+    return JsonValue.Bool(true);
+  }
+  if c == 'f' {
+    dec._pos = dec._pos + 5;
+    return JsonValue.Bool(false);
+  }
+  if c == '"' {
+    string s = dec._read_string_value();
+    return JsonValue.Str(s);
+  }
+  if c == '[' {
+    return _parse_json_array(dec);
+  }
+  if c == '{' {
+    return _parse_json_object(dec);
+  }
+
+  // Must be a number
+  f64 num = dec._read_number();
+  return JsonValue.Number(num);
+}
+
+_parse_json_array(JsonDecoder ~dec) JsonValue! {
+  dec._advance(); // skip [
+  JsonValue[] items = JsonValue[]();
+  bool done = false;
+  dec._skip_whitespace();
+  if dec._pos < dec._data.len && dec._data[dec._pos] == ']' {
+    dec._advance();
+    done = true;
+  }
+  if !done {
+    bool first = true;
+    while dec._pos < dec._data.len {
+      dec._skip_whitespace();
+      if dec._data[dec._pos] == ']' {
+        dec._advance();
+        done = true;
+        break;
+      }
+      if !first {
+        if dec._data[dec._pos] == ',' {
+          dec._advance();
+        }
+      }
+      first = false;
+      JsonValue _item = _parse_json_value(dec);
+      items.push(_item);
+    }
+  }
+  if !done {
+    raise DecodeError(message: "unterminated array", field: "", position: dec._pos);
+  }
+  return JsonValue.Array(items);
+}
+
+_parse_json_object(JsonDecoder ~dec) JsonValue! {
+  dec._advance(); // skip {
+  string[] keys = string[]();
+  JsonValue[] vals = JsonValue[]();
+  bool done = false;
+  dec._skip_whitespace();
+  if dec._pos < dec._data.len && dec._data[dec._pos] == '}' {
+    dec._advance();
+    done = true;
+  }
+  if !done {
+    bool first = true;
+    while dec._pos < dec._data.len {
+      dec._skip_whitespace();
+      if dec._data[dec._pos] == '}' {
+        dec._advance();
+        done = true;
+        break;
+      }
+      if !first {
+        if dec._data[dec._pos] == ',' {
+          dec._advance();
+        }
+      }
+      first = false;
+      dec._skip_whitespace();
+      string key = dec._read_string_value();
+      dec._expect(':');
+      JsonValue val = _parse_json_value(dec);
+      keys.push(key);
+      vals.push(val);
+    }
+  }
+  if !done {
+    raise DecodeError(message: "unterminated object", field: "", position: dec._pos);
+  }
+  return JsonValue.Object(keys, vals);
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 _json_lbrace() string {

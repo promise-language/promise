@@ -871,7 +871,7 @@ Format/Parse is for **human-readable text** (stdout, logs, debug display). Encod
 | Container encode/decode | `sema/serialize.go` (inline codegen) | 4 | **Done** — `T[]` and `map[K,V]` via inline loops |
 | `DecodeError` | `modules/std/encode.pr` | 1 | **Done** |
 | `JsonEncoder`/`JsonDecoder` | `modules/json/json.pr` | 2 | **Done** — 61 tests |
-| `JsonValue` enum | `modules/json/json.pr` | 2 | Deferred |
+| `JsonValue` enum | `modules/json/json.pr` | 2 | **Done** — parse_value, format_value, encode_value, 27 tests |
 | `json.encode_string`/`json.decode_string` | `modules/json/json.pr` | 2 | **Done** |
 | `` `serializable `` flag in types | `types/named.go` | 3 | **Done** |
 | Field annotations (`key`, `skip`, `include_none`, `required`, `flatten`) | `sema/meta.go`, `sema/decl.go` | 3 | **Done** |

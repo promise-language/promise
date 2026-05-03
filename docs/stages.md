@@ -984,34 +984,34 @@ Known gaps and improvements deferred from completed stages.
 
 | Item | Origin | Priority |
 |------|--------|----------|
-| `typeArgStr` only handles `*Named`, `*Enum`, `*Instance`; falls through to `"unknown"` for all other `types.Type` variants (`*Tuple`, `*Optional`, `*SharedRef`, `*MutRef`, `*Pointer`, `*TypeParam`, function types). Tuple type args are syntactically and semantically valid (e.g., `Wrapper[(int, string)]`) and currently produce `Wrapper[unknown]`. Two different tuple args for the same generic → identical mono name → name collision → codegen panic (`store operands are not compatible`). Fix: use `typ.String()` as fallback (all types implement `String()` with Promise source syntax), with explicit `*Instance` case kept to use `monoName()` instead of the Vector-shorthand form from `String()`. Also add a nil guard. All four `typeArgStr` call sites (in `mono.go` and `expr.go`) would benefit from this fix automatically. | 8f | Medium |
-| Channel send/recv and select allocas are still dynamic (in-block `alloca`). Non-blocking channel ops in a tight loop accumulate stack per iteration (bounded by channel capacity before a blocking suspend resets the stack). Moving them to entry-block allocas caused LLVM dominator violations in presplit coroutines — needs investigation into why vector method allocas in `coro.start` work but channel allocas don't. Related: the vector/extern/value-type-receiver fix in `createEntryAlloca`. | 5c | Medium |
-| Blocking select uses polling (yield-and-retry) instead of waiter-list parking. Correct but spins when no case is ready. Proper fix requires multi-mutex unlock in scheduler or atomic wake-once protocol for select waiters. | 5c | Medium |
-| Fire-and-forget goroutine G struct leak: all `go { }` blocks set `result_ptr` to sentinel `0x1`, preventing goroutine_exit from freeing the G. Only `task[T]` should use the sentinel. | 5c | Low |
-| Stack overflow detection: deep recursion segfaults with no message. Add guard page (`mprotect` bottom page of M stack) + `SIGSEGV` handler on `sigaltstack` to print "stack overflow" and terminate cleanly. Consider `probe-stack` for large frames. | 5c | Medium |
+| B-006 | `typeArgStr` only handles `*Named`, `*Enum`, `*Instance`; falls through to `"unknown"` for all other `types.Type` variants (`*Tuple`, `*Optional`, `*SharedRef`, `*MutRef`, `*Pointer`, `*TypeParam`, function types). Tuple type args are syntactically and semantically valid (e.g., `Wrapper[(int, string)]`) and currently produce `Wrapper[unknown]`. Two different tuple args for the same generic → identical mono name → name collision → codegen panic (`store operands are not compatible`). Fix: use `typ.String()` as fallback (all types implement `String()` with Promise source syntax), with explicit `*Instance` case kept to use `monoName()` instead of the Vector-shorthand form from `String()`. Also add a nil guard. All four `typeArgStr` call sites (in `mono.go` and `expr.go`) would benefit from this fix automatically. | 8f | Medium |
+| B-007 | Channel send/recv and select allocas are still dynamic (in-block `alloca`). Non-blocking channel ops in a tight loop accumulate stack per iteration (bounded by channel capacity before a blocking suspend resets the stack). Moving them to entry-block allocas caused LLVM dominator violations in presplit coroutines — needs investigation into why vector method allocas in `coro.start` work but channel allocas don't. Related: the vector/extern/value-type-receiver fix in `createEntryAlloca`. | 5c | Medium |
+| B-008 | Blocking select uses polling (yield-and-retry) instead of waiter-list parking. Correct but spins when no case is ready. Proper fix requires multi-mutex unlock in scheduler or atomic wake-once protocol for select waiters. | 5c | Medium |
+| B-009 | Fire-and-forget goroutine G struct leak: all `go { }` blocks set `result_ptr` to sentinel `0x1`, preventing goroutine_exit from freeing the G. Only `task[T]` should use the sentinel. | 5c | Low |
+| B-010 | Stack overflow detection: deep recursion segfaults with no message. Add guard page (`mprotect` bottom page of M stack) + `SIGSEGV` handler on `sigaltstack` to print "stack overflow" and terminate cleanly. Consider `probe-stack` for large frames. | 5c | Medium |
 | ~~Console output API refactor~~ — **Done.** Deleted `print_int`/`print_f64`/`print_bool`/`println(string)` and their codegen bridges. Added `print(Format)` (no newline) and `print_line(Format)` (with newline) — both accept any type implementing the `Format` structural interface. Single `promise_print_string` extern (no newline); `print_line` appends `Platform.line_separator` to the Builder before the single syscall. Implemented primitive/string→structural interface boxing (`boxForStructuralView` in `rtti.go`): stack-allocates scalar values and creates `{vtable, instance}` fat pointers with adapter thunks for primitive receivers. Fixed `saveState`/`restoreState` to preserve `localNameCount` across adapter thunk emission. ~400 replacements across ~120 files. 10 Go codegen tests + 35 e2e tests. | Std | ~~Medium~~ Resolved |
 | ~~Fixed-size arrays as stack-allocated `[N x T]`~~ | ~~8g~~ | ~~Done~~ |
-| Destructure is-patterns (`x is Dog(name)`) | 8k | Medium |
-| Generic type RTTI — partially resolved: mono type `is` checks work (origin ID in parent chain, view vtable cache keyed by mono name). Remaining: `is` patterns with full type expressions (`x is Box[int]`, `e is DataError[string]`) — currently only bare `IDENT` accepted. | 8k | Medium |
-| Failable `close()` error propagation in `use` | 8m | Medium |
-| Named enum fields in constructors | 8d | Low |
-| Enum methods | 8d | Low |
-| Extern ABI pack/unpack for enums | 8d | Low |
-| Failable extern functions (C ABI for errors) | 8e | Low |
-| Type argument inference (explicit type args only currently) | 8f | Low |
-| Extern ABI for generic types | 8f | Low |
-| Non-instance field placements: mixed `value`+instance, `variant`/`type` fields, `global`/`mono` data placement | 8c | Low |
+| B-011 | Destructure is-patterns (`x is Dog(name)`) | 8k | Medium |
+| B-012 | Generic type RTTI — partially resolved: mono type `is` checks work (origin ID in parent chain, view vtable cache keyed by mono name). Remaining: `is` patterns with full type expressions (`x is Box[int]`, `e is DataError[string]`) — currently only bare `IDENT` accepted. | 8k | Medium |
+| B-013 | Failable `close()` error propagation in `use` | 8m | Medium |
+| B-014 | Named enum fields in constructors | 8d | Low |
+| B-015 | Enum methods | 8d | Low |
+| B-016 | Extern ABI pack/unpack for enums | 8d | Low |
+| B-017 | Failable extern functions (C ABI for errors) | 8e | Low |
+| B-018 | Type argument inference (explicit type args only currently) | 8f | Low |
+| B-019 | Extern ABI for generic types | 8f | Low |
+| B-020 | Non-instance field placements: mixed `value`+instance, `variant`/`type` fields, `global`/`mono` data placement | 8c | Low |
 | ~~Value type structural interface coercion~~ — **Fixed.** Variable assignment (`Encodable e = 42;`) via `genTypedVarDecl` structural detection. Pure value types (`Vec2` with `value` fields) via `boxValueTypeForStructuralView` — stack-allocates the wider value struct and creates `{vtable, &alloca}` view. All coercion paths (primitives, strings, heap types, value types) now work for both function params and variable assignment. | 8p | ~~Medium~~ Resolved |
 | ~~Generic value types~~ — **Done.** `computeMonoValueTypeLayout` in `mono.go`. `Range[T]` is the first generic value type. | 8p | ~~Low~~ Resolved |
 | ~~User type `format(Writer ~w)` for interpolation (desugar `"{x}"` to `x.format(~builder)`)~~ — **Done.** User-defined types implementing `format(Writer ~w)!` now work in `{}` interpolation. Compiler creates a Builder, calls `format(~builder)!`, and converts to string via `Builder.to_string()`. Both direct dispatch and vtable dispatch (polymorphic) supported. Value types also supported. | 8h | ~~Low~~ Resolved |
-| `yield*` delegate (forward all values from sub-iterator) | Generators | Medium |
-| Failable generators (`stream[T]!` with error propagation through yield) | Generators | Low |
-| Stored generator values (first-class generator variables outside for-in) | Generators | Low |
-| Generator closures (capturing lambdas as generators) | Generators | Low |
+| B-021 | `yield*` delegate (forward all values from sub-iterator) | Generators | Medium |
+| B-022 | Failable generators (`stream[T]!` with error propagation through yield) | Generators | Low |
+| B-023 | Stored generator values (first-class generator variables outside for-in) | Generators | Low |
+| B-024 | Generator closures (capturing lambdas as generators) | Generators | Low |
 | ~~Mono type vtable/RTTI~~: **Fixed.** Added `computeMonoVtableInfo`, `emitMonoVtableGlobals`, `emitMonoTypeInfoGlobals` in `rtti.go` plus unified lookup helpers (`lookupVtableGlobal`, `lookupTypeInfoGlobal`, `lookupValueTypeRTTI`) in `compiler.go`. Constructor codegen (`expr.go`) uses these to resolve vtable/typeinfo for both mono and non-mono types. | 8f | ~~Medium~~ Resolved |
-| Devirtualization optimization (direct call when concrete type known) | 8L | Low |
-| PAL `EmitFileStatSize` depends on `lookupFunc` for `pal_file_open`/`pal_file_close` — will panic if emission order in `declareIntrinsics()` changes. Consider explicit func parameters or nil-check with clear error. Same pattern in Windows `EmitFileStatSize`. | D | Low |
-| `os.execute` reads stdout/stderr sequentially — deadlock if child writes >64KB to stderr while stdout pipe is not drained. Fix: read both pipes concurrently (second thread or `poll`/`select` multiplexing in PAL `EmitExecute`). | E | Medium |
+| B-025 | Devirtualization optimization (direct call when concrete type known) | 8L | Low |
+| B-026 | PAL `EmitFileStatSize` depends on `lookupFunc` for `pal_file_open`/`pal_file_close` — will panic if emission order in `declareIntrinsics()` changes. Consider explicit func parameters or nil-check with clear error. Same pattern in Windows `EmitFileStatSize`. | D | Low |
+| B-027 | `os.execute` reads stdout/stderr sequentially — deadlock if child writes >64KB to stderr while stdout pipe is not drained. Fix: read both pipes concurrently (second thread or `poll`/`select` multiplexing in PAL `EmitExecute`). | E | Medium |
 | ~~PAL file I/O functions emitted but not yet wired to Promise-level `io` module~~ — **Done.** `modules/io/io.pr` implements `File` (3 factory constructors: `open`/`create`/`append`; ~~`open_mode` not implementing~~), byte-level I/O (`File.read(~this, u8[]~buf) int!`, `File.write(~this, u8[]~buf) int!` — satisfies `Reader`/`Writer` structural interfaces), `File.read_line(~this) string?!` instance method, `File.write_line`, `read_all`, `write_string`, `seek`, `position`, one-shot helpers (`read_content`/`write_content`/`exists`/`size`/`remove`), `Dir` (make/make_all/list/remove/exists), `IoError`, `BufferedReader` (chunked read with `read(~this, u8[]~buf) int!`/`read_line`/`read_byte` — satisfies `Reader`), `BufferedWriter` (batched write with `write(~this, u8[]~buf) int!`/`write_string`/`write_line`/`flush` — satisfies `Writer`), plus free functions `read_line()`/`read_stdin()` for stdin. 69 tests in `io_test.pr`. | D | ~~Low~~ Resolved |
 | ~~PAL dir listing (`pal_dir_open`/`pal_dir_next`/`pal_dir_close`)~~ — **Done.** 3 new PAL functions across POSIX (opendir/readdir/closedir with platform-specific d_name offset), Windows (FindFirstFileA/FindNextFileA/FindClose with heap-allocated state struct), WASM (stubs). Codegen bridges in `file_io.go`. | D | ~~Low~~ Resolved |
 | ~~Factory `Self` return type on generic types resolves to raw `Vector` instead of monomorphized `Vector[T]`~~ — **Resolved**: `selfType()` helper returns self-instantiation (`Instance{curType, [T1, T2, ...]}`) for generic types; used in `resolveNamedType`, `checkIdentExpr`, and implicit abstract factory return | Sema | ~~Low~~ |
@@ -1023,36 +1023,38 @@ Known gaps and improvements deferred from completed stages.
 | ~~Map for-in tuple handling — `for entry in map` panics in codegen~~ — **Fixed.** Renamed `entry` basic block to `.entry` to avoid LLVM IR name collision. Added `for k, v in map` with proper key/value type bindings in sema+codegen. Added `get_or`, `pop`, `update`, `entries`, `merge` methods. | 8g | ~~Medium~~ Resolved |
 | ~~`map[bool, T]` — bool key hashing/lookup is broken~~ — **Fixed.** Bool hash now uses hardcoded constants via `select i1` instead of `fnv1a_hash`. Map literal key types are validated against `Hashable + Equal` constraints via `validateConstraints`. | 8i | ~~Medium~~ Resolved |
 | ~~Variable name collisions in repeated `if v := opt { }` blocks~~ — **Fixed.** `uniqueLocalName()` with per-function `localNameCount` appends `.N` suffix to duplicate alloca names in inner scopes. | 8n | ~~Medium~~ Resolved |
-| `is` type check on optional primitive types (`u8?`, `int?`, etc.) generates invalid IR: `bitcast i8 %val to {i8*}*` — tries to extract a vtable pointer from a scalar value. The `is` codegen path assumes all optionals contain value types with vtable pointers, but optional primitives use `{i1, <scalar>}` representation with no vtable. Workaround: use `if v := opt { }` pattern instead of `opt is T`. | Codegen | Medium |
-| Optional user-defined type in constructor — `Coord? location` field causes codegen panic in `genConstructorCallMono`: `store operands not compatible: src={i1, {i8*, i8*}}; dst={i1, i8*}*`. The optional wrapping of a user type produces `{i1, {i8*, i8*}}` but the constructor field expects `{i1, i8*}`. Workaround: none — optional fields of user-defined types in constructors don't work. Blocks `T? field` in `serializable` types where T is a user type. | Codegen | Medium |
+| B-028 | `is` type check on optional primitive types (`u8?`, `int?`, etc.) generates invalid IR: `bitcast i8 %val to {i8*}*` — tries to extract a vtable pointer from a scalar value. The `is` codegen path assumes all optionals contain value types with vtable pointers, but optional primitives use `{i1, <scalar>}` representation with no vtable. Workaround: use `if v := opt { }` pattern instead of `opt is T`. | Codegen | Medium |
+| B-029 | Optional user-defined type in constructor — `Coord? location` field causes codegen panic in `genConstructorCallMono`: `store operands not compatible: src={i1, {i8*, i8*}}; dst={i1, i8*}*`. The optional wrapping of a user type produces `{i1, {i8*, i8*}}` but the constructor field expects `{i1, i8*}`. Workaround: none — optional fields of user-defined types in constructors don't work. Blocks `T? field` in `serializable` types where T is a user type. | Codegen | Medium |
+| B-030 | `map[K, Enum]` monomorphization — any `map[K, V]` where V is an enum type causes codegen panic in `wrapOptional`: `insertvalue elem type mismatch, expected %Enum_enum, got i8*`. The map module's monomorphized methods (e.g., `get() V?`) return raw `i8*` but optional wrapping expects the enum's LLVM struct type. Not specific to recursive enums — any `map[string, SomeEnum]` triggers it. Workaround: use parallel arrays (`string[] keys, Enum[] vals`) instead. | Codegen | Medium |
+| B-031 | Failable result in Vector.push argument — `items.push(failable_call())` panics in codegen with `store operands not compatible`: the failable result struct is passed directly to push instead of being unwrapped first. Workaround: assign to a local variable first, then push. | Codegen | Low |
 | ~~Runtime hang when assigning generic multi-inherit type to second parent~~ — **Fixed.** `getOrEmitViewVtable` now accepts the full `fromType` (may be `*types.Instance`) and applies `resolveMonoParentName` fallback for inherited methods from generic parents — same pattern as `emitVtableGlobal`. Cache key changed from `*Named` pair to string-based key (`monoName`) so `Entity[int]` and `Entity[string]` get separate view vtables. Previously, `getOrEmitViewVtable` used origin-only names to look up monomorphized method functions, resulting in NULL vtable slots and a hang on dispatch. | Codegen | ~~Medium~~ Resolved |
 | ~~`is` check with unqualified generic type silently returns false~~ — **Fixed.** `emitMonoTypeInfoGlobals` now includes the origin `Named` type's own type ID in the mono instance's parent ID chain. Previously, `LabeledBox[int]`'s RTTI parent list only contained `Box`'s ID (the parent), not `LabeledBox`'s origin ID, so `b is LabeledBox` always returned false. Now the origin ID is prepended to the parent chain so it matches during the `promise_type_is` walk. | Codegen | ~~Medium~~ Resolved |
 
 ### Ownership & Type System
 
-| Item | Origin |
-|------|--------|
-| Explicit lifetime annotations | 6b |
-| Stored references in structs | 6b |
-| Full NLL last-use analysis | 6b |
-| Drop ordering | 6b |
-| Disjoint field borrows | 6b |
+| # | Item | Origin |
+|---|------|--------|
+| B-032 | Explicit lifetime annotations | 6b |
+| B-033 | Stored references in structs | 6b |
+| B-034 | Full NLL last-use analysis | 6b |
+| B-035 | Drop ordering | 6b |
+| B-036 | Disjoint field borrows | 6b |
 
 ### Meta Annotations
 
-| Item | Origin |
-|------|--------|
-| `inline`, `packed`, `align`, `extern`, `serializable`, `public`, `unsafe` processing | 7 |
+| # | Item | Origin |
+|---|------|--------|
+| B-037 | `inline`, `packed`, `align`, `extern`, `serializable`, `public`, `unsafe` processing | 7 |
 
 ### Parser / Codegen Bugs
 
-| Item | Origin | Priority |
-|------|--------|----------|
-| `match` as expression in return context (`return match v { ... }`) does not parse — the parser rejects `match` as an expression after `return`. Workaround: use if/else chains or assign match result to a variable first. | Parser | Medium |
-| `match` arms with block bodies and commas — `'a' => { stmt; }, 'b' => { stmt; },` does not parse. The comma after `}` is rejected. Match works for expression arms (`'a' => value,`) but block-body arms for side-effecting code (writes, mutations) cannot use `match`. Workaround: use if/else chains for imperative dispatch. | Parser | Medium |
-| `\{` escape in string literals (to emit a literal `{` without triggering interpolation) causes a codegen panic in `convertToString` — the escape is recognized by the lexer but the codegen interpolation path receives a nil type. Workaround: build `{` from char code (`(123 as! char).to_string()`). This blocks any string literal containing a literal `{` character — significant for JSON, template engines, and any code-generation use case. | Codegen | High |
-| `while` unwrap binding borrow conflict — `while key := obj.next_key()! { obj.decode_string()!; }` fails ownership checking because the `while` unwrap borrows `obj` for the binding, and the loop body cannot re-borrow it. This is the natural pattern for iterating decoder keys but cannot be used. Workaround: `for { string? k = obj.next_key()!; if k is absent { break; } ... }` with manual unwrap. | Ownership | Medium |
-| Stale module cache on std file addition — adding a new `.pr` file to `modules/std/` (e.g., `encode.pr`) shifts string constant numbering in the module IR, but previously cached `.bc` files for other modules referencing those constants are not invalidated. Results in linker errors (`undefined symbol: .str.N`). Workaround: `promise clean` to clear the cache. The cache key hashes module IR text, but the old cache entries from before the std change persist and are matched by stale callers. | Cache | Medium |
+| # | Item | Origin | Priority |
+|---|------|--------|----------|
+| B-001 | `match` as expression in return context (`return match v { ... }`) does not parse — the parser rejects `match` as an expression after `return`. Workaround: use if/else chains or assign match result to a variable first. | Parser | Medium |
+| B-002 | `match` arms with block bodies and commas — `'a' => { stmt; }, 'b' => { stmt; },` does not parse. The comma after `}` is rejected. Match works for expression arms (`'a' => value,`) but block-body arms for side-effecting code (writes, mutations) cannot use `match`. Workaround: use if/else chains for imperative dispatch. | Parser | Medium |
+| B-003 | `\{` escape in string literals (to emit a literal `{` without triggering interpolation) causes a codegen panic in `convertToString` — the escape is recognized by the lexer but the codegen interpolation path receives a nil type. Workaround: build `{` from char code (`(123 as! char).to_string()`). This blocks any string literal containing a literal `{` character — significant for JSON, template engines, and any code-generation use case. | Codegen | High |
+| B-004 | `while` unwrap binding borrow conflict — `while key := obj.next_key()! { obj.decode_string()!; }` fails ownership checking because the `while` unwrap borrows `obj` for the binding, and the loop body cannot re-borrow it. This is the natural pattern for iterating decoder keys but cannot be used. Workaround: `for { string? k = obj.next_key()!; if k is absent { break; } ... }` with manual unwrap. | Ownership | Medium |
+| B-005 | Stale module cache on std file addition — adding a new `.pr` file to `modules/std/` (e.g., `encode.pr`) shifts string constant numbering in the module IR, but previously cached `.bc` files for other modules referencing those constants are not invalidated. Results in linker errors (`undefined symbol: .str.N`). Workaround: `promise clean` to clear the cache. The cache key hashes module IR text, but the old cache entries from before the std change persist and are matched by stale callers. | Cache | Medium |
 | ~~`as!` on optionals (`T? as! T`)~~ — **Done.** Codegen detects `Optional[T] as! T` and routes to `genOptionalForceUnwrap` which extracts the flag, panics on none, returns inner value. | Codegen | ~~High~~ Resolved |
 | ~~Optional force-unwrap (`x!`)~~ — **Done.** `!` now works on both `T!` (failable) and `T?` (optional). Sema records `OptionalUnwraps` map; codegen routes to `genOptionalForceUnwrap`. Panics with "unwrap failed: optional is none" on none. | Language | ~~High~~ Resolved |
 | ~~Optional handler (`x ? _ { }`)~~ — **Done.** `? _ { recovery }` works on `T?` expressions. Sema records `OptionalHandlers` map; codegen generates `genOptionalHandlerExpr` with flag check, none/some blocks, and phi merge. Requires `_` binding to disambiguate from error propagation in the parser. | Language | ~~Medium~~ Resolved |
@@ -1068,14 +1070,28 @@ Known gaps and improvements deferred from completed stages.
 
 ### Formatter (`promise format`)
 
-| Item | Priority |
-|------|----------|
-| `a & b` formats as `a &b` — binary AND (`&`) between two value-producing tokens loses space after `&`. The formatter treats `&` as a unary ref modifier before identifiers because it can't distinguish `a & b` (bitwise AND) from `Reader &r` (ownership modifier) — both are `ident & ident`. The specific case `& !d` (binary AND + unary NOT) is handled, but the general `value & value` case is not. Fix requires either context tracking (expression vs parameter) or accepting the asymmetry. | Medium |
-| Own-line comments after `;` pulled up as trailing comments — `x := 1;\n\n// comment` formats as `x := 1; // comment`. The semicolon handler calls `skipNewlines()` (consuming blank lines) then checks `next.kind == tkLineComment` to detect trailing comments, but doesn't check whether blank lines were consumed. Fix: only treat as trailing comment when `pendingNLs <= 1`. | Medium |
-| `>` operator method declaration loses space before `(` — `>(Foo other)` instead of `> (Foo other)`. The `needsSpace` rule for `tkLParen` has `if p == tkGT { return false }` to handle generic close (`Foo[T]()`), but this also matches operator method declarations. Other operators like `<`, `==`, `!=` format correctly. Ambiguity: can't distinguish generic close from operator decl without parsing. | Low |
+| # | Item | Priority |
+|---|------|----------|
+| B-038 | `a & b` formats as `a &b` — binary AND (`&`) between two value-producing tokens loses space after `&`. The formatter treats `&` as a unary ref modifier before identifiers because it can't distinguish `a & b` (bitwise AND) from `Reader &r` (ownership modifier) — both are `ident & ident`. The specific case `& !d` (binary AND + unary NOT) is handled, but the general `value & value` case is not. Fix requires either context tracking (expression vs parameter) or accepting the asymmetry. | Medium |
+| B-039 | Own-line comments after `;` pulled up as trailing comments — `x := 1;\n\n// comment` formats as `x := 1; // comment`. The semicolon handler calls `skipNewlines()` (consuming blank lines) then checks `next.kind == tkLineComment` to detect trailing comments, but doesn't check whether blank lines were consumed. Fix: only treat as trailing comment when `pendingNLs <= 1`. | Medium |
+| B-040 | `>` operator method declaration loses space before `(` — `>(Foo other)` instead of `> (Foo other)`. The `needsSpace` rule for `tkLParen` has `if p == tkGT { return false }` to handle generic close (`Foo[T]()`), but this also matches operator method declarations. Other operators like `<`, `==`, `!=` format correctly. Ambiguity: can't distinguish generic close from operator decl without parsing. | Low |
 | Import sorting (`use` declarations sorted alphabetically) | Low |
 | Trailing comma normalization in match/enum | Low |
 | `--check` integration into `bin/verify.sh` | Low |
+
+### TODOs
+
+Planned work items. `T-NNN` IDs are stable — never reused or renumbered.
+
+| # | Item | Depends on | Priority |
+|---|------|-----------|----------|
+| T-001 | `JsonValue` use `map[string, JsonValue]` for Object variant instead of parallel arrays | B-030 (`map[K, Enum]` codegen fix) | High |
+| T-002 | Enum `` `serializable `` codegen — auto-generate encode/decode for enums. Simple enums (no data) encode as strings. Data enums use tagged representation with discriminator field. | B-015 (enum methods, optional) | Medium |
+| T-003 | `` `serializable(tag: "kind") `` parameter — custom discriminator field name for enum serialization (default: `"type"`). | T-002 | Low |
+| T-004 | `` `flatten `` field annotation — inline nested object fields into the parent during encode/decode. | — | Medium |
+| T-005 | `json.encode_string[T]` / `json.decode_string[T]` with `serializable` user types — generic convenience functions don't work due to structural coercion through generic constraints. | — | Medium |
+| T-006 | Enum methods (B-015) — needed for ergonomic `JsonValue` API (e.g., `v.is_null()`, `v.as_string()`, `v.get("key")`). Currently uses free functions. | B-015 | Low |
+| T-007 | Additional format modules — `modules/toml/`, `modules/yaml/`, `modules/msgpack/`. Each implements `Encoder`/`Decoder`. All `` `serializable `` types work automatically. | — | Low |
 
 ### Module System (Phase 4+)
 

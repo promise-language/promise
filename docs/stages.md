@@ -869,7 +869,7 @@ IO reactor work is phased to minimize risk and enable incremental progress. File
 | Work | Design Doc | Priority |
 |------|-----------|----------|
 | Generic type RTTI | — | Low |
-| ~~Value type structural interface coercion (stack boxing)~~ — **Resolved.** Primitive/string boxing done via `boxForStructuralView` (function args). Variable assignment fixed in `genTypedVarDecl` (structural interface detection). Remaining: user-defined value types (non-primitive, non-structural). | — | ~~Low~~ Mostly resolved |
+| ~~Value type structural interface coercion (stack boxing)~~ — **Resolved.** Primitive/string boxing via `boxForStructuralView`. Variable assignment via `genTypedVarDecl` structural detection. Pure value types via `boxValueTypeForStructuralView` (stack-allocates value struct, creates view with structural vtable). All paths (function params, variable assignment, value types) now work. | — | ~~Low~~ Resolved |
 | ~~Generic value types~~ | — | ~~Done~~ |
 | ~~User type `format(Writer ~w)` for interpolation (desugar `"{x}"` to `x.format(~builder)`)~~ | — | ~~Low~~ Done |
 | Type argument inference | — | Low |
@@ -1001,7 +1001,7 @@ Known gaps and improvements deferred from completed stages.
 | Type argument inference (explicit type args only currently) | 8f | Low |
 | Extern ABI for generic types | 8f | Low |
 | Non-instance field placements: mixed `value`+instance, `variant`/`type` fields, `global`/`mono` data placement | 8c | Low |
-| ~~Value type structural interface coercion (variable assignment)~~ — **Fixed.** `Encodable e = 42;` now works. `genTypedVarDecl` detects structural interface declarations and uses the interface type for the alloca instead of the expression's concrete type. Scoped to structural interfaces only to avoid breaking generics/value types. | 8p | ~~Medium~~ Resolved |
+| ~~Value type structural interface coercion~~ — **Fixed.** Variable assignment (`Encodable e = 42;`) via `genTypedVarDecl` structural detection. Pure value types (`Vec2` with `value` fields) via `boxValueTypeForStructuralView` — stack-allocates the wider value struct and creates `{vtable, &alloca}` view. All coercion paths (primitives, strings, heap types, value types) now work for both function params and variable assignment. | 8p | ~~Medium~~ Resolved |
 | ~~Generic value types~~ — **Done.** `computeMonoValueTypeLayout` in `mono.go`. `Range[T]` is the first generic value type. | 8p | ~~Low~~ Resolved |
 | ~~User type `format(Writer ~w)` for interpolation (desugar `"{x}"` to `x.format(~builder)`)~~ — **Done.** User-defined types implementing `format(Writer ~w)!` now work in `{}` interpolation. Compiler creates a Builder, calls `format(~builder)!`, and converts to string via `Builder.to_string()`. Both direct dispatch and vtable dispatch (polymorphic) supported. Value types also supported. | 8h | ~~Low~~ Resolved |
 | `yield*` delegate (forward all values from sub-iterator) | Generators | Medium |

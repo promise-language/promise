@@ -22,6 +22,24 @@ type ManualEncode {
   }
 }
 
+type Vec2 {
+  int x `value;
+  int y `value;
+  encode(Encoder ~e)! {
+    e.begin_object(2);
+    e.encode_key("x");
+    e.encode_int(this.x);
+    e.encode_key("y");
+    e.encode_int(this.y);
+    e.end_object();
+  }
+}
+
+type Dims `serializable {
+  int w `value;
+  int h `value;
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 // Accept any Encodable and produce JSON.
@@ -273,4 +291,55 @@ int_and_serializable_as_encodable() `test {
   string s = encode_pair(99, w);
   assert(s.starts_with("[99,"), "int and serializable pair: starts with 99");
   assert(s.contains("\"name\":\"a\""), "int and serializable pair: has widget");
+}
+
+// ── Pure value type → structural interface ──────────────────────────────────
+
+value_type_as_encodable_param() `test {
+  Vec2 v = Vec2(x: 3, y: 4);
+  string s = _to_json(v);
+  assert(s.contains("\"x\":3"), "value type param: x");
+  assert(s.contains("\"y\":4"), "value type param: y");
+}
+
+value_type_as_encodable_var() `test {
+  Vec2 v = Vec2(x: 5, y: 6);
+  Encodable e = v;
+  json.JsonEncoder enc = json.JsonEncoder();
+  e.encode(enc)!;
+  string s = enc.to_string();
+  assert(s.contains("\"x\":5"), "value type var: x");
+  assert(s.contains("\"y\":6"), "value type var: y");
+}
+
+value_type_assign_then_pass() `test {
+  Vec2 v = Vec2(x: 7, y: 8);
+  Encodable e = v;
+  string s = _to_json(e);
+  assert(s.contains("\"x\":7"), "value type assign then pass: x");
+  assert(s.contains("\"y\":8"), "value type assign then pass: y");
+}
+
+value_type_in_pair() `test {
+  Vec2 v = Vec2(x: 1, y: 2);
+  string s = encode_pair(v, 42);
+  assert(s.contains("\"x\":1"), "value type in pair: x");
+  assert(s.contains(",42]"), "value type in pair: int");
+}
+
+value_type_serializable_as_encodable_param() `test {
+  Dims d = Dims(w: 800, h: 600);
+  string s = _to_json(d);
+  assert(s.contains("\"w\":800"), "vt serializable param: w");
+  assert(s.contains("\"h\":600"), "vt serializable param: h");
+}
+
+value_type_serializable_as_encodable_var() `test {
+  Dims d = Dims(w: 1920, h: 1080);
+  Encodable e = d;
+  json.JsonEncoder enc = json.JsonEncoder();
+  e.encode(enc)!;
+  string s = enc.to_string();
+  assert(s.contains("\"w\":1920"), "vt serializable var: w");
+  assert(s.contains("\"h\":1080"), "vt serializable var: h");
 }

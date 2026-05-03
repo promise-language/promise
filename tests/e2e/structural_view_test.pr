@@ -241,3 +241,113 @@ test_duplicate_var_names_multiple_scopes() `test {
   int v = 99;
   assert(display(v) == "99", "v after loop");
 }
+
+// ── Heap user type → structural interface (variable assignment) ─────────────
+
+type Animal {
+  string sound;
+  to_string() string {
+    return this.sound;
+  }
+  format(Writer ~w)! {
+    w.write_string(this.sound);
+  }
+}
+
+test_heap_user_showable_var() `test {
+  Animal a = Animal(sound: "woof");
+  Showable s = a;
+  assert(s.to_string() == "woof", "heap user showable var");
+}
+
+test_heap_user_showable_assign_then_pass() `test {
+  Animal a = Animal(sound: "meow");
+  Showable s = a;
+  assert(display(s) == "meow", "heap user showable assign then pass");
+}
+
+test_heap_user_format_var() `test {
+  Animal a = Animal(sound: "quack");
+  Format f = a;
+  Builder b = Builder();
+  f.format(b)? {
+  };
+  assert(b.to_string() == "quack", "heap user format var");
+}
+
+test_heap_user_format_assign_then_pass() `test {
+  Animal a = Animal(sound: "moo");
+  Format f = a;
+  assert(format_to_string(f) == "moo", "heap user format assign then pass");
+}
+
+// ── Pure value type → structural interface ──────────────────────────────────
+
+type Pos {
+  int x `value;
+  int y `value;
+  to_string() string {
+    return "({this.x},{this.y})";
+  }
+}
+
+type Color {
+  int r `value;
+  int g `value;
+  int b `value;
+  to_string() string {
+    return "rgb({this.r},{this.g},{this.b})";
+  }
+  format(Writer ~w)! {
+    w.write_string("rgb(");
+    this.r.format(w);
+    w.write_string(",");
+    this.g.format(w);
+    w.write_string(",");
+    this.b.format(w);
+    w.write_string(")");
+  }
+}
+
+test_value_type_showable_param() `test {
+  Pos p = Pos(x: 3, y: 4);
+  assert(display(p) == "(3,4)", "value type showable param");
+}
+
+test_value_type_showable_var() `test {
+  Pos p = Pos(x: 5, y: 6);
+  Showable s = p;
+  assert(s.to_string() == "(5,6)", "value type showable var");
+}
+
+test_value_type_showable_assign_then_pass() `test {
+  Pos p = Pos(x: 7, y: 8);
+  Showable s = p;
+  assert(display(s) == "(7,8)", "value type showable assign then pass");
+}
+
+test_value_type_format_var() `test {
+  Color c = Color(r: 10, g: 20, b: 30);
+  Format f = c;
+  Builder b = Builder();
+  f.format(b)? {
+  };
+  assert(b.to_string() == "rgb(10,20,30)", "value type format var");
+}
+
+test_value_type_format_param() `test {
+  Color c = Color(r: 255, g: 128, b: 0);
+  assert(format_to_string(c) == "rgb(255,128,0)", "value type format param");
+}
+
+test_value_type_interpolation() `test {
+  Color c = Color(r: 1, g: 2, b: 3);
+  string s = "{c}";
+  assert(s == "rgb(1,2,3)", "value type interpolation");
+}
+
+test_value_type_mixed_with_primitives() `test {
+  Pos p = Pos(x: 1, y: 2);
+  assert(both(p, 42) == "(1,2),42", "value type and int");
+  assert(both(99, p) == "99,(1,2)", "int and value type");
+}

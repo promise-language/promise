@@ -677,6 +677,12 @@ func (c *Compiler) coerceToView(val value.Value, fromType, toType types.Type) va
 		return val
 	}
 
+	// Pure value type → structural interface: the value struct is wider than {i8*, i8*}.
+	// Stack-allocate the value, store it, and create a view with {vtable, &alloca}.
+	if fromNamed.IsValueType() && toNamed.IsStructural() {
+		return c.boxValueTypeForStructuralView(val, fromNamed, toNamed, fromType)
+	}
+
 	// Guard: verify the LLVM value is actually a {i8*, i8*} struct before modifying it.
 	// During monomorphization, type substitution can produce non-user-value LLVM types
 	// even when the sema type passes isUserValueType.
@@ -726,6 +732,28 @@ func (c *Compiler) boxForStructuralView(val value.Value, fromNamed, toNamed *typ
 		// String and other i8* types: already an i8* pointer
 		instancePtr = val
 	}
+
+	// Construct the view struct: { vtable_ptr, instance_ptr }
+	viewType := userValueType()
+	result := constant.NewZeroInitializer(viewType)
+	tmp := c.block.NewInsertValue(result, vtablePtr, 0)
+	return c.block.NewInsertValue(tmp, instancePtr, 1)
+}
+
+// boxValueTypeForStructuralView boxes a pure value type into a structural interface
+// view ({i8*, i8*}). Value types have wider value structs (e.g., {vtable, rtti, x, y})
+// that don't fit in the standard {i8*, i8*} layout. The fix: stack-allocate the value
+// struct, store it, and create a view with {structural_vtable, &alloca_as_i8*}.
+func (c *Compiler) boxValueTypeForStructuralView(val value.Value, fromNamed, toNamed *types.Named, fromType types.Type) value.Value {
+	// Get view vtable for value type → structural interface
+	viewVtable := c.getOrEmitViewVtable(fromNamed, toNamed, fromType)
+	vtablePtr := constant.NewBitCast(viewVtable, irtypes.I8Ptr)
+
+	// Stack-allocate the value type struct and store the value
+	valType := val.Type()
+	alloca := c.createEntryAlloca(valType)
+	c.block.NewStore(val, alloca)
+	instancePtr := c.block.NewBitCast(alloca, irtypes.I8Ptr)
 
 	// Construct the view struct: { vtable_ptr, instance_ptr }
 	viewType := userValueType()

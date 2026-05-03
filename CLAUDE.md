@@ -266,7 +266,7 @@ The standard library (`modules/std/`, 29 files) is auto-imported via `use std as
 
 ## Test Suite
 
-~2190 test functions across ~206 `.pr` files, organized by category:
+~2220 test functions across ~206 `.pr` files, organized by category:
 
 | Directory | What it tests | Files |
 |-----------|--------------|-------|

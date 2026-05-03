@@ -22,4 +22,14 @@ type char `native `public {
   format(Writer ~w)! `public {
     w.write_string(this.to_string());
   }
+  encode(Encoder ~e)! `public `doc("Encodes this char to an Encoder as a string.") {
+    e.encode_string(this.to_string());
+  }
+  decode(Decoder ~d) Self! `factory `public `doc("Decodes a char from a Decoder (reads a single-character string).") {
+    string s = d.decode_string();
+    if s.len == 0 {
+      raise DecodeError(message: "expected single character, got empty string", field: "");
+    }
+    return s[0];
+  }
 }

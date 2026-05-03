@@ -16,6 +16,9 @@ description = "File path manipulation: join, basename, dirname, extension, stem"
 [modules.io]
 description = "File and directory I/O: File (open/create/append/read/write/close), Dir (make/remove/exists), IoError"
 
+[modules.json]
+description = "JSON encoding and decoding: JsonEncoder, JsonDecoder, encode_string, decode_string"
+
 [modules.http]
 description = "HTTP client and server (placeholder — pending native networking support)"
 

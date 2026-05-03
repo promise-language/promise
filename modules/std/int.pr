@@ -66,6 +66,12 @@ type int `native `public {
   format(Writer ~w)! `public {
     w.write_string(this.to_string());
   }
+  encode(Encoder ~e)! `public `doc("Encodes this int to an Encoder.") {
+    e.encode_int(this);
+  }
+  decode(Decoder ~d) Self! `factory `public `doc("Decodes an int from a Decoder.") {
+    return d.decode_int();
+  }
 }
 
 type i8 `native `public {
@@ -106,6 +112,16 @@ type i8 `native `public {
   to_string() string `public => "{this}";
   format(Writer ~w)! `public {
     w.write_string(this.to_string());
+  }
+  encode(Encoder ~e)! `public `doc("Encodes this value to an Encoder.") {
+    e.encode_int(this as! int);
+  }
+  decode(Decoder ~d) Self! `factory `public `doc("Decodes a value from a Decoder.") {
+    int v = d.decode_int();
+    if v < -128 || v > 127 {
+      raise DecodeError(message: "value out of range for i8", field: "");
+    }
+    return v as! i8;
   }
 }
 
@@ -148,6 +164,16 @@ type i16 `native `public {
   format(Writer ~w)! `public {
     w.write_string(this.to_string());
   }
+  encode(Encoder ~e)! `public `doc("Encodes this value to an Encoder.") {
+    e.encode_int(this as! int);
+  }
+  decode(Decoder ~d) Self! `factory `public `doc("Decodes a value from a Decoder.") {
+    int v = d.decode_int();
+    if v < -32768 || v > 32767 {
+      raise DecodeError(message: "value out of range for i16", field: "");
+    }
+    return v as! i16;
+  }
 }
 
 type i32 `native `public {
@@ -189,6 +215,16 @@ type i32 `native `public {
   format(Writer ~w)! `public {
     w.write_string(this.to_string());
   }
+  encode(Encoder ~e)! `public `doc("Encodes this value to an Encoder.") {
+    e.encode_int(this as! int);
+  }
+  decode(Decoder ~d) Self! `factory `public `doc("Decodes a value from a Decoder.") {
+    int v = d.decode_int();
+    if v < -2147483648 || v > 2147483647 {
+      raise DecodeError(message: "value out of range for i32", field: "");
+    }
+    return v as! i32;
+  }
 }
 
 type i64 `native `public {
@@ -226,5 +262,12 @@ type i64 `native `public {
   to_string() string `public => "{this}";
   format(Writer ~w)! `public {
     w.write_string(this.to_string());
+  }
+  encode(Encoder ~e)! `public `doc("Encodes this value to an Encoder.") {
+    e.encode_int(this as! int);
+  }
+  decode(Decoder ~d) Self! `factory `public `doc("Decodes a value from a Decoder.") {
+    int v = d.decode_int();
+    return v as! i64;
   }
 }

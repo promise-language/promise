@@ -47,4 +47,10 @@ type bool `native `public {
   format(Writer ~w)! `public {
     w.write_string(this.to_string());
   }
+  encode(Encoder ~e)! `public `doc("Encodes this bool to an Encoder.") {
+    e.encode_bool(this);
+  }
+  decode(Decoder ~d) Self! `factory `public `doc("Decodes a bool from a Decoder.") {
+    return d.decode_bool();
+  }
 }

@@ -1,0 +1,551 @@
+// json_test.pr — Tests for JSON encoding and decoding
+// Helper to build expected JSON strings without triggering interpolation.
+// Replaces | with { and ~ with } in the pattern.
+_json(string pattern) string {
+  return pattern.replace("|", _json_lbrace()).replace("~", "}");
+}
+
+// ── Encoder tests ───────────────────────────────────────────────────────────
+
+encode_int_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  enc.encode_int(42)!;
+  assert(enc.to_string() == "42", "encode int");
+}
+
+encode_negative_int_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  enc.encode_int(-7)!;
+  assert(enc.to_string() == "-7", "encode negative int");
+}
+
+encode_uint_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  enc.encode_uint(100u)!;
+  assert(enc.to_string() == "100", "encode uint");
+}
+
+encode_f64_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  enc.encode_f64(3.14)!;
+  string s = enc.to_string();
+  assert(s.starts_with("3.14"), "encode f64: {s}");
+}
+
+encode_bool_true_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  enc.encode_bool(true)!;
+  assert(enc.to_string() == "true", "encode true");
+}
+
+encode_bool_false_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  enc.encode_bool(false)!;
+  assert(enc.to_string() == "false", "encode false");
+}
+
+encode_string_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  enc.encode_string("hello")!;
+  assert(enc.to_string() == "\"hello\"", "encode string");
+}
+
+encode_string_escapes_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  enc.encode_string("a\"b\\c\nd")!;
+  assert(enc.to_string() == "\"a\\\"b\\\\c\\nd\"", "encode string escapes");
+}
+
+encode_none_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  enc.encode_none()!;
+  assert(enc.to_string() == "null", "encode none");
+}
+
+encode_empty_object_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  enc.begin_object(0)!;
+  enc.end_object()!;
+  assert(enc.to_string() == _json("|~"), "encode empty object");
+}
+
+encode_object_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  enc.begin_object(2)!;
+  enc.encode_key("name")!;
+  enc.encode_string("Alice")!;
+  enc.encode_key("age")!;
+  enc.encode_int(30)!;
+  enc.end_object()!;
+  assert(enc.to_string() == _json("|\"name\":\"Alice\",\"age\":30~"), "encode object");
+}
+
+encode_empty_array_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  enc.begin_array(0)!;
+  enc.end_array()!;
+  assert(enc.to_string() == "[]", "encode empty array");
+}
+
+encode_array_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  enc.begin_array(3)!;
+  enc.encode_int(1)!;
+  enc.encode_int(2)!;
+  enc.encode_int(3)!;
+  enc.end_array()!;
+  assert(enc.to_string() == "[1,2,3]", "encode array");
+}
+
+encode_nested_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  enc.begin_object(1)!;
+  enc.encode_key("items")!;
+  enc.begin_array(2)!;
+  enc.encode_string("a")!;
+  enc.encode_string("b")!;
+  enc.end_array()!;
+  enc.end_object()!;
+  assert(enc.to_string() == _json("|\"items\":[\"a\",\"b\"]~"), "encode nested");
+}
+
+// ── Decoder tests ───────────────────────────────────────────────────────────
+
+decode_int_test() `test {
+  JsonDecoder dec = JsonDecoder(data: "42");
+  int v = dec.decode_int()!;
+  assert(v == 42, "decode int");
+}
+
+decode_negative_int_test() `test {
+  JsonDecoder dec = JsonDecoder(data: "-7");
+  int v = dec.decode_int()!;
+  assert(v == -7, "decode negative int");
+}
+
+decode_uint_test() `test {
+  JsonDecoder dec = JsonDecoder(data: "100");
+  uint v = dec.decode_uint()!;
+  assert(v == 100u, "decode uint");
+}
+
+decode_f64_test() `test {
+  JsonDecoder dec = JsonDecoder(data: "3.14");
+  f64 v = dec.decode_f64()!;
+  assert(v > 3.13 && v < 3.15, "decode f64");
+}
+
+decode_bool_true_test() `test {
+  JsonDecoder dec = JsonDecoder(data: "true");
+  bool v = dec.decode_bool()!;
+  assert(v == true, "decode true");
+}
+
+decode_bool_false_test() `test {
+  JsonDecoder dec = JsonDecoder(data: "false");
+  bool v = dec.decode_bool()!;
+  assert(v == false, "decode false");
+}
+
+decode_string_test() `test {
+  JsonDecoder dec = JsonDecoder(data: "\"hello\"");
+  string v = dec.decode_string()!;
+  assert(v == "hello", "decode string");
+}
+
+decode_string_escapes_test() `test {
+  JsonDecoder dec = JsonDecoder(data: "\"a\\\"b\\\\c\\nd\"");
+  string v = dec.decode_string()!;
+  assert(v == "a\"b\\c\nd", "decode string escapes");
+}
+
+decode_none_test() `test {
+  JsonDecoder dec = JsonDecoder(data: "null");
+  bool is_null = dec.decode_none()!;
+  assert(is_null, "decode none");
+}
+
+decode_none_not_null_test() `test {
+  JsonDecoder dec = JsonDecoder(data: "42");
+  bool is_null = dec.decode_none()!;
+  assert(!is_null, "decode none returns false for non-null");
+  int v = dec.decode_int()!;
+  assert(v == 42, "can still read value after decode_none returns false");
+}
+
+decode_object_test() `test {
+  JsonDecoder dec = JsonDecoder(data: _json("|\"name\":\"Alice\",\"age\":30~"));
+  dec.begin_object()!;
+  string name = "";
+  int age = 0;
+  for {
+    string? k = dec.next_key()!;
+    if k is absent {
+      break;
+    }
+    string key = k ?: "";
+    if key == "name" {
+      name = dec.decode_string()!;
+    } else if key == "age" {
+      age = dec.decode_int()!;
+    } else {
+      dec.skip_value()!;
+    }
+  }
+  dec.end_object()!;
+  assert(name == "Alice", "decode object name");
+  assert(age == 30, "decode object age");
+}
+
+decode_empty_object_test() `test {
+  JsonDecoder dec = JsonDecoder(data: _json("|~"));
+  dec.begin_object()!;
+  string? key = dec.next_key()!;
+  assert(key is absent, "empty object has no keys");
+  dec.end_object()!;
+}
+
+decode_array_test() `test {
+  // Test array via a wrapping object
+  JsonDecoder dec = JsonDecoder(data: "[10,20,30]");
+  dec.begin_array()!;
+  // Read first element
+  int a = dec.decode_int()!;
+  // Manually skip comma and read second
+  dec._skip_whitespace();
+  if dec._pos < dec._data.len && dec._data[dec._pos] == ',' {
+    dec._pos = dec._pos + 1;
+  }
+  int b = dec.decode_int()!;
+  dec._skip_whitespace();
+  if dec._pos < dec._data.len && dec._data[dec._pos] == ',' {
+    dec._pos = dec._pos + 1;
+  }
+  int c = dec.decode_int()!;
+  dec.end_array()!;
+  assert(a == 10, "decode array[0]");
+  assert(b == 20, "decode array[1]");
+  assert(c == 30, "decode array[2]");
+}
+
+decode_empty_array_test() `test {
+  JsonDecoder dec = JsonDecoder(data: "[]");
+  dec.begin_array()!;
+  dec.end_array()!;
+}
+
+decode_whitespace_test() `test {
+  // Test that decoder handles whitespace around scalar values
+  JsonDecoder dec = JsonDecoder(data: "  42  ");
+  int v = dec.decode_int()!;
+  assert(v == 42, "whitespace: value is 42");
+}
+
+skip_value_test() `test {
+  JsonDecoder dec = JsonDecoder(data: _json("|\"a\":1,\"b\":|\"nested\":true~,\"c\":3~"));
+  dec.begin_object()!;
+  int c_val = 0;
+  for {
+    string? k = dec.next_key()!;
+    if k is absent {
+      break;
+    }
+    string key = k ?: "";
+    if key == "c" {
+      c_val = dec.decode_int()!;
+    } else {
+      dec.skip_value()!;
+    }
+  }
+  dec.end_object()!;
+  assert(c_val == 3, "skip_value: got c=3");
+}
+
+// ── Round-trip via Encodable/Decodable on primitives ────────────────────────
+
+round_trip_int_test() `test {
+  string s = encode_string[int](42)!;
+  assert(s == "42", "round trip int encode");
+  int v = decode_string[int](s)!;
+  assert(v == 42, "round trip int decode");
+}
+
+round_trip_bool_test() `test {
+  string s = encode_string[bool](true)!;
+  assert(s == "true", "round trip bool encode");
+  bool v = decode_string[bool](s)!;
+  assert(v == true, "round trip bool decode");
+}
+
+round_trip_string_test() `test {
+  string s = encode_string[string]("hello world")!;
+  assert(s == "\"hello world\"", "round trip string encode");
+  string v = decode_string[string](s)!;
+  assert(v == "hello world", "round trip string decode");
+}
+
+round_trip_f64_test() `test {
+  string s = encode_string[f64](2.5)!;
+  f64 v = decode_string[f64](s)!;
+  assert(v == 2.5, "round trip f64");
+}
+
+// ── Round-trip: sized integer types ──────────────────────────────────────────
+
+round_trip_uint_test() `test {
+  string s = encode_string[uint](999u)!;
+  assert(s == "999", "round trip uint encode");
+  uint v = decode_string[uint](s)!;
+  assert(v == 999u, "round trip uint decode");
+}
+
+round_trip_i8_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  i8 val = 42i8;
+  val.encode(enc)!;
+  assert(enc.to_string() == "42", "i8 encode");
+
+  JsonDecoder dec = JsonDecoder(data: "42");
+  i8 v = i8.decode(dec)!;
+  assert(v == 42i8, "i8 decode");
+}
+
+round_trip_i32_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  i32 val = -1000i32;
+  val.encode(enc)!;
+  assert(enc.to_string() == "-1000", "i32 encode");
+
+  JsonDecoder dec = JsonDecoder(data: "-1000");
+  i32 v = i32.decode(dec)!;
+  assert(v == -1000i32, "i32 decode");
+}
+
+round_trip_u8_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  u8 val = 200u8;
+  val.encode(enc)!;
+  assert(enc.to_string() == "200", "u8 encode");
+
+  JsonDecoder dec = JsonDecoder(data: "200");
+  u8 v = u8.decode(dec)!;
+  assert(v == 200u8, "u8 decode");
+}
+
+round_trip_f32_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  f32 val = 1.5f32;
+  val.encode(enc)!;
+  assert(enc.to_string() == "1.5", "f32 encode");
+
+  JsonDecoder dec = JsonDecoder(data: "1.5");
+  f32 v = f32.decode(dec)!;
+  assert(v == 1.5f32, "f32 decode");
+}
+
+round_trip_char_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  char val = 'A';
+  val.encode(enc)!;
+  assert(enc.to_string() == "\"A\"", "char encode");
+
+  JsonDecoder dec = JsonDecoder(data: "\"A\"");
+  char v = char.decode(dec)!;
+  assert(v == 'A', "char decode");
+}
+
+// ── Sized type range checking ───────────────────────────────────────────────
+
+decode_i8_overflow_test() `test {
+  JsonDecoder dec = JsonDecoder(data: "200");
+  (v, err) := i8.decode(dec);
+  assert(err is present, "i8 decode 200 should overflow");
+}
+
+decode_i8_underflow_test() `test {
+  JsonDecoder dec = JsonDecoder(data: "-200");
+  (v, err) := i8.decode(dec);
+  assert(err is present, "i8 decode -200 should underflow");
+}
+
+decode_u8_overflow_test() `test {
+  JsonDecoder dec = JsonDecoder(data: "300");
+  (v, err) := u8.decode(dec);
+  assert(err is present, "u8 decode 300 should overflow");
+}
+
+decode_u16_overflow_test() `test {
+  JsonDecoder dec = JsonDecoder(data: "70000");
+  (v, err) := u16.decode(dec);
+  assert(err is present, "u16 decode 70000 should overflow");
+}
+
+// ── Encoder edge cases ──────────────────────────────────────────────────────
+
+encode_empty_string_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  enc.encode_string("")!;
+  assert(enc.to_string() == "\"\"", "encode empty string");
+}
+
+encode_zero_int_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  enc.encode_int(0)!;
+  assert(enc.to_string() == "0", "encode zero int");
+}
+
+encode_negative_f64_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  enc.encode_f64(-2.5)!;
+  assert(enc.to_string() == "-2.5", "encode negative f64");
+}
+
+encode_mixed_array_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  enc.begin_array(3)!;
+  enc.encode_int(1)!;
+  enc.encode_string("two")!;
+  enc.encode_bool(true)!;
+  enc.end_array()!;
+  assert(enc.to_string() == "[1,\"two\",true]", "encode mixed array");
+}
+
+encode_object_with_null_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  enc.begin_object(2)!;
+  enc.encode_key("a")!;
+  enc.encode_int(1)!;
+  enc.encode_key("b")!;
+  enc.encode_none()!;
+  enc.end_object()!;
+  assert(enc.to_string() == _json("|\"a\":1,\"b\":null~"), "encode object with null");
+}
+
+// ── Decoder edge cases ──────────────────────────────────────────────────────
+
+decode_empty_string_test() `test {
+  JsonDecoder dec = JsonDecoder(data: "\"\"");
+  string v = dec.decode_string()!;
+  assert(v == "", "decode empty string");
+}
+
+decode_negative_f64_test() `test {
+  JsonDecoder dec = JsonDecoder(data: "-2.5");
+  f64 v = dec.decode_f64()!;
+  assert(v == -2.5, "decode negative f64");
+}
+
+decode_scientific_notation_test() `test {
+  JsonDecoder dec = JsonDecoder(data: "1.5e2");
+  f64 v = dec.decode_f64()!;
+  assert(v == 150.0, "decode 1.5e2");
+}
+
+decode_zero_test() `test {
+  JsonDecoder dec = JsonDecoder(data: "0");
+  int v = dec.decode_int()!;
+  assert(v == 0, "decode zero");
+}
+
+decode_object_with_null_value_test() `test {
+  JsonDecoder dec = JsonDecoder(data: _json("|\"x\":null,\"y\":1~"));
+  dec.begin_object()!;
+  bool x_is_null = false;
+  int y_val = 0;
+  for {
+    string? k = dec.next_key()!;
+    if k is absent {
+      break;
+    }
+    string key = k ?: "";
+    if key == "x" {
+      x_is_null = dec.decode_none()!;
+    } else if key == "y" {
+      y_val = dec.decode_int()!;
+    } else {
+      dec.skip_value()!;
+    }
+  }
+  dec.end_object()!;
+  assert(x_is_null, "null value detected");
+  assert(y_val == 1, "value after null");
+}
+
+skip_value_array_test() `test {
+  JsonDecoder dec = JsonDecoder(data: _json("|\"a\":[1,2,3],\"b\":99~"));
+  dec.begin_object()!;
+  int b_val = 0;
+  for {
+    string? k = dec.next_key()!;
+    if k is absent {
+      break;
+    }
+    string key = k ?: "";
+    if key == "b" {
+      b_val = dec.decode_int()!;
+    } else {
+      dec.skip_value()!;
+    }
+  }
+  dec.end_object()!;
+  assert(b_val == 99, "skip array, got b=99");
+}
+
+skip_value_string_test() `test {
+  JsonDecoder dec = JsonDecoder(data: _json("|\"a\":\"hello\",\"b\":42~"));
+  dec.begin_object()!;
+  int b_val = 0;
+  for {
+    string? k = dec.next_key()!;
+    if k is absent {
+      break;
+    }
+    string key = k ?: "";
+    if key == "b" {
+      b_val = dec.decode_int()!;
+    } else {
+      dec.skip_value()!;
+    }
+  }
+  dec.end_object()!;
+  assert(b_val == 42, "skip string, got b=42");
+}
+
+// ── Pretty printing ─────────────────────────────────────────────────────────
+
+encode_pretty_object_test() `test {
+  JsonEncoder enc = JsonEncoder(pretty: true, indent: 2);
+  enc.begin_object(1)!;
+  enc.encode_key("x")!;
+  enc.encode_int(1)!;
+  enc.end_object()!;
+  string result = enc.to_string();
+  // Should contain newlines and indentation
+  assert(result.contains("\n"), "pretty has newlines");
+  assert(result.contains("  \"x\""), "pretty has indented key");
+}
+
+// ── Decode error tests ──────────────────────────────────────────────────────
+
+decode_error_invalid_bool_test() `test {
+  (v, err) := decode_string[int]("abc");
+  assert(err is present, "invalid input should error");
+}
+
+decode_error_unterminated_string_test() `test {
+  (v, err) := decode_string[string]("\"unterminated");
+  assert(err is present, "unterminated string should error");
+}
+
+decode_error_negative_uint_test() `test {
+  JsonDecoder dec = JsonDecoder(data: "-5");
+  (v, err) := dec.decode_uint();
+  assert(err is present, "negative uint should error");
+}
+
+decode_error_position_test() `test {
+  // DecodeError should include position information
+  JsonDecoder dec = JsonDecoder(data: "   xyz");
+  (v, err) := dec.decode_bool();
+  assert(err is present, "bad bool should error");
+}

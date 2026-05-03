@@ -327,6 +327,7 @@ The standard library (`modules/std/`, 29 files) is auto-imported via `use std as
 
 ## Conventions
 
+- **Document workarounds immediately.** When you encounter a compiler bug, language limitation, or missing feature and work around it, add an entry to the "Parser / Codegen Bugs" or appropriate section in `docs/stages.md` right away. Each entry must include: what the bug is, what the workaround is, and the priority. Do not leave undocumented workarounds in the code — they will be forgotten and never fixed.
 - Compiler errors are accumulated (not fatal on first error) and printed together
 - `extractNamed(typ)` unwraps Instance/SharedRef/MutRef to get underlying `*types.Named`
 - `needsVtable(named)` returns true if type has children or is abstract → virtual dispatch

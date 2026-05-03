@@ -1042,6 +1042,16 @@ Known gaps and improvements deferred from completed stages.
 |------|--------|
 | `inline`, `packed`, `align`, `extern`, `serializable`, `public`, `unsafe` processing | 7 |
 
+### Parser / Codegen Bugs
+
+| Item | Origin | Priority |
+|------|--------|----------|
+| `match` as expression in return context (`return match v { ... }`) does not parse — the parser rejects `match` as an expression after `return`. Workaround: use if/else chains or assign match result to a variable first. | Parser | Medium |
+| `match` arms with block bodies and commas — `'a' => { stmt; }, 'b' => { stmt; },` does not parse. The comma after `}` is rejected. Match works for expression arms (`'a' => value,`) but block-body arms for side-effecting code (writes, mutations) cannot use `match`. Workaround: use if/else chains for imperative dispatch. | Parser | Medium |
+| `\{` escape in string literals (to emit a literal `{` without triggering interpolation) causes a codegen panic in `convertToString` — the escape is recognized by the lexer but the codegen interpolation path receives a nil type. Workaround: build `{` from char code (`(123 as! char).to_string()`). This blocks any string literal containing a literal `{` character — significant for JSON, template engines, and any code-generation use case. | Codegen | High |
+| `while` unwrap binding borrow conflict — `while key := obj.next_key()! { obj.decode_string()!; }` fails ownership checking because the `while` unwrap borrows `obj` for the binding, and the loop body cannot re-borrow it. This is the natural pattern for iterating decoder keys but cannot be used. Workaround: `for { string? k = obj.next_key()!; if k is absent { break; } ... }` with manual unwrap. | Ownership | Medium |
+| Stale module cache on std file addition — adding a new `.pr` file to `modules/std/` (e.g., `encode.pr`) shifts string constant numbering in the module IR, but previously cached `.bc` files for other modules referencing those constants are not invalidated. Results in linker errors (`undefined symbol: .str.N`). Workaround: `promise clean` to clear the cache. The cache key hashes module IR text, but the old cache entries from before the std change persist and are matched by stale callers. | Cache | Medium |
+
 ### Parameter Handling
 
 | Item | Origin | Priority |

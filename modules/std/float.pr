@@ -30,6 +30,13 @@ type f32 `native `public {
   format(Writer ~w)! `public {
     w.write_string(this.to_string());
   }
+  encode(Encoder ~e)! `public `doc("Encodes this value to an Encoder.") {
+    e.encode_f64(this as! f64);
+  }
+  decode(Decoder ~d) Self! `factory `public `doc("Decodes a value from a Decoder.") {
+    f64 v = d.decode_f64();
+    return v as! f32;
+  }
 }
 
 type f64 `native `public {
@@ -200,5 +207,11 @@ type f64 `native `public {
   to_string() string `public => "{this}";
   format(Writer ~w)! `public {
     w.write_string(this.to_string());
+  }
+  encode(Encoder ~e)! `public `doc("Encodes this f64 to an Encoder.") {
+    e.encode_f64(this);
+  }
+  decode(Decoder ~d) Self! `factory `public `doc("Decodes an f64 from a Decoder.") {
+    return d.decode_f64();
   }
 }

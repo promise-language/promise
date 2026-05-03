@@ -188,4 +188,10 @@ type string `native `public {
   format(Writer ~w)! `public {
     w.write_string(this);
   }
+  encode(Encoder ~e)! `public `doc("Encodes this string to an Encoder.") {
+    e.encode_string(this);
+  }
+  decode(Decoder ~d) Self! `factory `public `doc("Decodes a string from a Decoder.") {
+    return d.decode_string();
+  }
 }

@@ -1,0 +1,674 @@
+// json — JSON encoding and decoding
+//
+// Provides JsonEncoder (is Encoder) and JsonDecoder (is Decoder) for
+// serializing and deserializing Promise values as JSON text.
+// ── JsonEncoder ─────────────────────────────────────────────────────────────
+// _JsonState tracks nesting context for comma insertion.
+enum _JsonState {
+  Empty,
+  HasItems,
+  AfterKey,
+}
+
+type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies the Encoder interface.") {
+  Builder _buf;
+  _JsonState[] _stack;
+  bool _pretty;
+  int _indent;
+  int _depth;
+
+  new(~this, bool pretty = false, int indent = 2) {
+    this._buf = Builder();
+    this._stack = _JsonState[]();
+    this._stack.push(_JsonState.Empty);
+    this._pretty = pretty;
+    this._indent = indent;
+    this._depth = 0;
+  }
+
+  to_string() string `public `doc("Returns the accumulated JSON string.") => this._buf.to_string();
+
+  // ── Internal helpers ──
+
+  _write_comma(~this) {
+    if this._stack.len > 0 {
+      _JsonState top = this._stack[this._stack.len - 1];
+      match top {
+        _JsonState.HasItems => {
+          this._buf.write_string(",")? {
+          };
+          if this._pretty {
+            this._buf.write_string("\n")? {
+            };
+            this._write_indent();
+          }
+        },
+        _JsonState.AfterKey => {
+          // Value follows key — no comma needed, state already handled.
+          this._stack[this._stack.len - 1] = _JsonState.HasItems;
+        },
+        _JsonState.Empty => {
+          this._stack[this._stack.len - 1] = _JsonState.HasItems;
+          if this._pretty {
+            this._buf.write_string("\n")? {
+            };
+            this._write_indent();
+          }
+        },
+      }
+    }
+  }
+
+  _write_indent(~this) {
+    int i = 0;
+    int total = this._depth * this._indent;
+    while i < total {
+      this._buf.write_string(" ")? {
+      };
+      i = i + 1;
+    }
+  }
+
+  _write_escaped_string(~this, string s) {
+    this._buf.write_string("\"")? {
+    };
+    int i = 0;
+    while i < s.len {
+      char c = s[i];
+      if c == '"' {
+        this._buf.write_string("\\\"")? {
+        };
+      } else if c == '\\' {
+        this._buf.write_string("\\\\")? {
+        };
+      } else if c == '\n' {
+        this._buf.write_string("\\n")? {
+        };
+      } else if c == '\r' {
+        this._buf.write_string("\\r")? {
+        };
+      } else if c == '\t' {
+        this._buf.write_string("\\t")? {
+        };
+      } else {
+        int code = c as! int;
+        if code < 32 {
+          this._buf.write_string("\\u00")? {
+          };
+          int hi = code / 16;
+          int lo = code % 16;
+          this._buf.write_string(_hex_digit(hi))? {
+          };
+          this._buf.write_string(_hex_digit(lo))? {
+          };
+        } else {
+          this._buf.write_string(c.to_string())? {
+          };
+        }
+      }
+      i = i + 1;
+    }
+    this._buf.write_string("\"")? {
+    };
+  }
+
+  // ── Encoder interface implementation ──
+
+  encode_bool(~this, bool value)! `public {
+    this._write_comma();
+    if value {
+      this._buf.write_string("true")? {
+      };
+    } else {
+      this._buf.write_string("false")? {
+      };
+    }
+  }
+
+  encode_int(~this, int value)! `public {
+    this._write_comma();
+    this._buf.write_string(value.to_string())? {
+    };
+  }
+
+  encode_uint(~this, uint value)! `public {
+    this._write_comma();
+    this._buf.write_string(value.to_string())? {
+    };
+  }
+
+  encode_f64(~this, f64 value)! `public {
+    this._write_comma();
+    this._buf.write_string(value.to_string())? {
+    };
+  }
+
+  encode_string(~this, string value)! `public {
+    this._write_comma();
+    this._write_escaped_string(value);
+  }
+
+  encode_none(~this)! `public {
+    this._write_comma();
+    this._buf.write_string("null")? {
+    };
+  }
+
+  begin_object(~this, int field_count)! `public {
+    this._write_comma();
+    this._buf.write_string(_json_lbrace())? {
+    };
+    this._depth = this._depth + 1;
+    this._stack.push(_JsonState.Empty);
+  }
+
+  end_object(~this)! `public {
+    this._depth = this._depth - 1;
+    if this._stack.len > 0 {
+      _JsonState top = this._stack[this._stack.len - 1];
+      match top {
+        _JsonState.HasItems => {
+          if this._pretty {
+            this._buf.write_string("\n")? {
+            };
+            this._write_indent();
+          }
+        },
+        _ => {
+        },
+      }
+      this._stack.pop();
+    }
+    this._buf.write_string("}")? {
+    };
+  }
+
+  begin_array(~this, int length)! `public {
+    this._write_comma();
+    this._buf.write_string("[")? {
+    };
+    this._depth = this._depth + 1;
+    this._stack.push(_JsonState.Empty);
+  }
+
+  end_array(~this)! `public {
+    this._depth = this._depth - 1;
+    if this._stack.len > 0 {
+      _JsonState top = this._stack[this._stack.len - 1];
+      match top {
+        _JsonState.HasItems => {
+          if this._pretty {
+            this._buf.write_string("\n")? {
+            };
+            this._write_indent();
+          }
+        },
+        _ => {
+        },
+      }
+      this._stack.pop();
+    }
+    this._buf.write_string("]")? {
+    };
+  }
+
+  encode_key(~this, string name)! `public {
+    if this._stack.len > 0 {
+      _JsonState top = this._stack[this._stack.len - 1];
+      match top {
+        _JsonState.HasItems => {
+          this._buf.write_string(",")? {
+          };
+          if this._pretty {
+            this._buf.write_string("\n")? {
+            };
+            this._write_indent();
+          }
+        },
+        _JsonState.Empty => {
+          this._stack[this._stack.len - 1] = _JsonState.HasItems;
+          if this._pretty {
+            this._buf.write_string("\n")? {
+            };
+            this._write_indent();
+          }
+        },
+        _ => {
+        },
+      }
+    }
+    this._write_escaped_string(name);
+    if this._pretty {
+      this._buf.write_string(": ")? {
+      };
+    } else {
+      this._buf.write_string(":")? {
+      };
+    }
+    // Mark that next value should not insert comma
+    if this._stack.len > 0 {
+      this._stack[this._stack.len - 1] = _JsonState.AfterKey;
+    }
+  }
+}
+
+// ── JsonDecoder ─────────────────────────────────────────────────────────────
+
+type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Satisfies the Decoder interface.") {
+  string _data;
+  int _pos;
+
+  new(~this, string data) {
+    this._data = data;
+    this._pos = 0;
+  }
+
+  // ── Internal helpers ──
+
+  _skip_whitespace(~this) {
+    while this._pos < this._data.len {
+      char c = this._data[this._pos];
+      if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+        this._pos = this._pos + 1;
+      } else {
+        break;
+      }
+    }
+  }
+
+  _peek(~this) char! {
+    this._skip_whitespace();
+    if this._pos >= this._data.len {
+      raise DecodeError(message: "unexpected end of JSON input", field: "", position: this._pos);
+    }
+    return this._data[this._pos];
+  }
+
+  _advance(~this) {
+    this._pos = this._pos + 1;
+  }
+
+  _expect(~this, char expected)! {
+    char c = this._peek()!;
+    if c != expected {
+      raise DecodeError(message: "unexpected character in JSON", field: "", position: this._pos);
+    }
+    this._advance();
+  }
+
+  _read_string_value(~this) string! {
+    this._expect('"');
+    Builder buf = Builder();
+    while this._pos < this._data.len {
+      char c = this._data[this._pos];
+      if c == '"' {
+        this._advance();
+        return buf.to_string();
+      }
+      if c == '\\' {
+        this._advance();
+        if this._pos >= this._data.len {
+          raise DecodeError(message: "unterminated string escape", field: "", position: this._pos);
+        }
+        char esc = this._data[this._pos];
+        if esc == '"' {
+          buf.write_string("\"")? {
+          };
+          this._advance();
+        } else if esc == '\\' {
+          buf.write_string("\\")? {
+          };
+          this._advance();
+        } else if esc == '/' {
+          buf.write_string("/")? {
+          };
+          this._advance();
+        } else if esc == 'n' {
+          buf.write_string("\n")? {
+          };
+          this._advance();
+        } else if esc == 'r' {
+          buf.write_string("\r")? {
+          };
+          this._advance();
+        } else if esc == 't' {
+          buf.write_string("\t")? {
+          };
+          this._advance();
+        } else if esc == 'b' {
+          char bs = 8 as! char;
+          buf.write_string(bs.to_string())? {
+          };
+          this._advance();
+        } else if esc == 'f' {
+          char ff = 12 as! char;
+          buf.write_string(ff.to_string())? {
+          };
+          this._advance();
+        } else if esc == 'u' {
+          // \uXXXX — read 4 hex digits, emit as character
+          this._advance();
+          int code = 0;
+          int h = 0;
+          while h < 4 {
+            if this._pos >= this._data.len {
+              raise DecodeError(message: "unterminated \\u escape", field: "", position: this._pos);
+            }
+            int digit = _hex_value(this._data[this._pos]);
+            if digit < 0 {
+              raise DecodeError(message: "invalid hex digit in \\u escape", field: "", position: this._pos);
+            }
+            code = code * 16 + digit;
+            this._advance();
+            h = h + 1;
+          }
+          char uc = code as! char;
+          buf.write_string(uc.to_string())? {
+          };
+        } else {
+          raise DecodeError(message: "unknown escape sequence in JSON string", field: "", position: this._pos);
+        }
+      } else {
+        buf.write_string(c.to_string())? {
+        };
+        this._advance();
+      }
+    }
+    raise DecodeError(message: "unterminated string", field: "", position: this._pos);
+  }
+
+  _read_number(~this) f64! {
+    this._skip_whitespace();
+    int start = this._pos;
+    bool is_float = false;
+
+    // Optional minus
+    if this._pos < this._data.len && this._data[this._pos] == '-' {
+      this._advance();
+    }
+
+    // Integer digits
+    if this._pos >= this._data.len {
+      raise DecodeError(message: "expected digit", field: "", position: this._pos);
+    }
+    while this._pos < this._data.len {
+      char c = this._data[this._pos];
+      if c >= '0' && c <= '9' {
+        this._advance();
+      } else {
+        break;
+      }
+    }
+
+    // Fractional part
+    if this._pos < this._data.len && this._data[this._pos] == '.' {
+      is_float = true;
+      this._advance();
+      while this._pos < this._data.len {
+        char c = this._data[this._pos];
+        if c >= '0' && c <= '9' {
+          this._advance();
+        } else {
+          break;
+        }
+      }
+    }
+
+    // Exponent
+    if this._pos < this._data.len {
+      char ec = this._data[this._pos];
+      if ec == 'e' || ec == 'E' {
+        is_float = true;
+        this._advance();
+        if this._pos < this._data.len {
+          char sign = this._data[this._pos];
+          if sign == '+' || sign == '-' {
+            this._advance();
+          }
+        }
+        while this._pos < this._data.len {
+          char c = this._data[this._pos];
+          if c >= '0' && c <= '9' {
+            this._advance();
+          } else {
+            break;
+          }
+        }
+      }
+    }
+
+    string num_str = this._data[start: this._pos];
+    Scanner s = Scanner(s: num_str);
+    f64 result = f64.parse(s);
+    return result;
+  }
+
+  _skip_comma(~this) {
+    this._skip_whitespace();
+    if this._pos < this._data.len && this._data[this._pos] == ',' {
+      this._advance();
+    }
+  }
+
+  // ── Decoder interface implementation ──
+
+  decode_bool(~this) bool! `public {
+    this._skip_whitespace();
+    if this._pos + 4 <= this._data.len && this._data[this._pos:this._pos + 4] == "true" {
+      this._pos = this._pos + 4;
+      return true;
+    }
+    if this._pos + 5 <= this._data.len && this._data[this._pos:this._pos + 5] == "false" {
+      this._pos = this._pos + 5;
+      return false;
+    }
+    raise DecodeError(message: "expected 'true' or 'false'", field: "", position: this._pos);
+  }
+
+  decode_int(~this) int! `public {
+    f64 v = this._read_number();
+    return v as! int;
+  }
+
+  decode_uint(~this) uint! `public {
+    f64 v = this._read_number();
+    if v < 0.0 {
+      raise DecodeError(message: "expected unsigned integer, got negative value", field: "", position: this._pos);
+    }
+    return v as! uint;
+  }
+
+  decode_f64(~this) f64! `public {
+    return this._read_number();
+  }
+
+  decode_string(~this) string! `public {
+    return this._read_string_value();
+  }
+
+  decode_none(~this) bool! `public {
+    this._skip_whitespace();
+    if this._pos + 4 <= this._data.len && this._data[this._pos:this._pos + 4] == "null" {
+      this._pos = this._pos + 4;
+      return true;
+    }
+    return false;
+  }
+
+  begin_object(~this)! `public {
+    this._expect('{');
+  }
+
+  end_object(~this)! `public {
+    this._skip_whitespace();
+    // May have trailing comma consumed by next_key returning none
+    this._expect('}');
+  }
+
+  begin_array(~this) int! `public {
+    this._expect('[');
+    // JSON arrays don't declare their length
+    return -1;
+  }
+
+  end_array(~this)! `public {
+    this._skip_whitespace();
+    this._expect(']');
+  }
+
+  next_key(~this) string?! `public {
+    this._skip_whitespace();
+    if this._pos >= this._data.len {
+      return none;
+    }
+    if this._data[this._pos] == '}' {
+      return none;
+    }
+    // Skip comma between entries
+    if this._data[this._pos] == ',' {
+      this._advance();
+      this._skip_whitespace();
+    }
+    if this._pos < this._data.len && this._data[this._pos] == '}' {
+      return none;
+    }
+    string key = this._read_string_value();
+    this._expect(':');
+    return key;
+  }
+
+  skip_value(~this)! `public {
+    this._skip_whitespace();
+    if this._pos >= this._data.len {
+      raise DecodeError(message: "unexpected end of input while skipping value", field: "", position: this._pos);
+    }
+    char c = this._data[this._pos];
+    if c == '"' {
+      this._read_string_value();
+    } else if c == '{' {
+      this._advance();
+      this._skip_whitespace();
+      if this._pos < this._data.len && this._data[this._pos] == '}' {
+        this._advance();
+        return;
+      }
+      // Skip key-value pairs
+      bool first = true;
+      while this._pos < this._data.len {
+        this._skip_whitespace();
+        if this._data[this._pos] == '}' {
+          this._advance();
+          return;
+        }
+        if !first {
+          if this._data[this._pos] == ',' {
+            this._advance();
+          }
+        }
+        first = false;
+        this._skip_whitespace();
+        this._read_string_value(); // key
+        this._expect(':');
+        this.skip_value(); // value (recursive)
+      }
+      raise DecodeError(message: "unterminated object", field: "", position: this._pos);
+    } else if c == '[' {
+      this._advance();
+      this._skip_whitespace();
+      if this._pos < this._data.len && this._data[this._pos] == ']' {
+        this._advance();
+        return;
+      }
+      bool first = true;
+      while this._pos < this._data.len {
+        this._skip_whitespace();
+        if this._data[this._pos] == ']' {
+          this._advance();
+          return;
+        }
+        if !first {
+          if this._data[this._pos] == ',' {
+            this._advance();
+          }
+        }
+        first = false;
+        this.skip_value(); // element (recursive)
+      }
+      raise DecodeError(message: "unterminated array", field: "", position: this._pos);
+    } else if c == 't' {
+      // true
+      this._pos = this._pos + 4;
+    } else if c == 'f' {
+      // false
+      this._pos = this._pos + 5;
+    } else if c == 'n' {
+      // null
+      this._pos = this._pos + 4;
+    } else {
+      // number — read until non-number character
+      this._read_number();
+    }
+  }
+}
+
+// ── Convenience functions ───────────────────────────────────────────────────
+
+encode_string[T: Encodable](T value) string! `public `doc("Serializes a value to a JSON string") {
+  JsonEncoder enc = JsonEncoder();
+  value.encode(enc);
+  return enc.to_string();
+}
+
+decode_string[T: Decodable](string data) T! `public `doc("Deserializes a value from a JSON string") {
+  JsonDecoder dec = JsonDecoder(data: data);
+  return T.decode(dec);
+}
+
+encode_string_pretty[T: Encodable](T value, int indent = 2) string! `public `doc("Serializes a value to a pretty-printed JSON string") {
+  JsonEncoder enc = JsonEncoder(pretty: true, indent: indent);
+  value.encode(enc);
+  return enc.to_string();
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+_json_lbrace() string {
+  // Returns "{" without triggering string interpolation
+  char c = 123 as! char;
+  return c.to_string();
+}
+
+_hex_digit(int v) string {
+  if v < 10 {
+    return v.to_string();
+  }
+  if v == 10 {
+    return "a";
+  }
+  if v == 11 {
+    return "b";
+  }
+  if v == 12 {
+    return "c";
+  }
+  if v == 13 {
+    return "d";
+  }
+  if v == 14 {
+    return "e";
+  }
+  return "f";
+}
+
+_hex_value(char c) int {
+  if c >= '0' && c <= '9' {
+    return (c as! int) - 48;
+  }
+  if c >= 'a' && c <= 'f' {
+    return (c as! int) - 87;
+  }
+  if c >= 'A' && c <= 'F' {
+    return (c as! int) - 55;
+  }
+  return -1;
+}

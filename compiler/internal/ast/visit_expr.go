@@ -259,8 +259,7 @@ func (b *Builder) VisitSliceTypeExpr(ctx *parser.SliceTypeExprContext) interface
 func (b *Builder) VisitErrorHandlerExpr(ctx *parser.ErrorHandlerExprContext) interface{} {
 	node := &ErrorHandlerExpr{
 		nodeBase: b.baseFromContext(ctx),
-		Expr:     b.visitExpr(ctx.Expression()),
-		Body:     b.visitBlock(ctx.Block(0)),
+		Expr:     b.visitExpr(ctx.Expression(0)),
 	}
 	bindings := ctx.AllBindingName()
 	if len(bindings) > 0 {
@@ -269,14 +268,23 @@ func (b *Builder) VisitErrorHandlerExpr(ctx *parser.ErrorHandlerExprContext) int
 	if ctx.IS() != nil {
 		node.TypeName = ctx.IDENT().GetText()
 	}
-	if ctx.ELSE() != nil {
-		node.ElseBody = b.visitBlock(ctx.Block(1))
-		if len(bindings) > 1 {
-			node.ElseBinding = b.bindingText(bindings[1])
+	if ctx.FAT_ARROW() != nil {
+		// Arrow form: ? e => expr — wrap in synthetic block with ExprStmt
+		expr := b.visitExpr(ctx.Expression(1))
+		base := b.baseFromContext(ctx)
+		node.Body = &Block{nodeBase: base, Stmts: []Stmt{&ExprStmt{nodeBase: base, Expr: expr}}}
+	} else {
+		// Block form: ? e { ... }
+		node.Body = b.visitBlock(ctx.Block(0))
+		if ctx.ELSE() != nil {
+			node.ElseBody = b.visitBlock(ctx.Block(1))
+			if len(bindings) > 1 {
+				node.ElseBinding = b.bindingText(bindings[1])
+			}
 		}
-	}
-	if ctx.BANG() != nil {
-		node.PanicOnNomatch = true
+		if ctx.BANG() != nil {
+			node.PanicOnNomatch = true
+		}
 	}
 	return node
 }

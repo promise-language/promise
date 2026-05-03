@@ -412,7 +412,7 @@ expression
     | expression LBRACKET expression (COMMA expression)* RBRACKET  # indexExpr
     | expression LBRACKET expression? COLON expression? RBRACKET  # sliceExpr
     | expression LBRACKET RBRACKET                               # sliceTypeExpr
-    | expression QUESTION bindingName? (IS IDENT)? block (ELSE bindingName? block | BANG)?  # errorHandlerExpr
+    | expression QUESTION bindingName? (IS IDENT)? (block (ELSE bindingName? block | BANG)? | FAT_ARROW expression)  # errorHandlerExpr
     | expression QUESTION                                      # errorPropagateExpr
     | expression BANG                                          # errorUnwrapExpr
 

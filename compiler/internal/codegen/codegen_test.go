@@ -5016,6 +5016,72 @@ func TestIsPresentStringOptional(t *testing.T) {
 	assertContains(t, ir, "extractvalue { i1, i8* }")
 }
 
+func TestIsTypeOnOptionalPrimitive(t *testing.T) {
+	// B0029: `is` type check on optional primitives should not try to extract vtable.
+	// Before the fix, this panicked with "bitcast i64 to {i8*}*".
+	ir := generateIR(t, `
+		main() {
+			int? x = 42;
+			bool b = x is int;
+		}
+	`)
+	// Should extract i1 flag from {i1, i64} — presence check only
+	assertContains(t, ir, "extractvalue { i1, i64 }")
+}
+
+func TestIsTypeOnOptionalUserType(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal {
+			string name;
+			speak() string `+"`"+`abstract;
+		}
+		type Dog is Animal {
+			speak() string { return "Woof"; }
+		}
+		main() {
+			Animal d = Dog(name: "Rex");
+			Animal? a = d;
+			bool b = a is Dog;
+		}
+	`)
+	// Should use RTTI check on unwrapped value, guarded by presence flag
+	assertContains(t, ir, "promise_type_is")
+}
+
+func TestIsTypeOnOptionalString(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string? s = "hello";
+			bool b = s is string;
+		}
+	`)
+	// String optional: {i1, i8*} — should extract flag only, no RTTI
+	assertContains(t, ir, "extractvalue { i1, i8* }")
+}
+
+func TestIsTypeOnOptionalEnum(t *testing.T) {
+	ir := generateIR(t, `
+		enum Color { Red, Green, Blue }
+		main() {
+			Color? c = Color.Red;
+			bool b = c is Color;
+		}
+	`)
+	// Enum optional: should extract flag only, no RTTI
+	assertContains(t, ir, "extractvalue")
+}
+
+func TestIsTypeOnOptionalBoolFalse(t *testing.T) {
+	// false is a valid present value — is bool must return true
+	ir := generateIR(t, `
+		main() {
+			bool? b = false;
+			bool ok = b is bool;
+		}
+	`)
+	assertContains(t, ir, "extractvalue { i1, i8 }")
+}
+
 // --- VTable dispatch tests (Stage 8l) ---
 
 func TestVtableGlobalEmitted(t *testing.T) {

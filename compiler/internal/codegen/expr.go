@@ -4738,17 +4738,77 @@ func (c *Compiler) genIsIdentPattern(expr ast.Expr, p *ast.IdentIsPattern) value
 		return c.block.NewXor(flag, constant.NewInt(irtypes.I1, 1)) // negate
 	}
 
-	// Check if the subject is an enum type — use tag comparison
+	// Check if the subject is an optional type — unwrap before checking inner type
 	exprType := c.info.Types[expr]
 	if c.typeSubst != nil {
 		exprType = types.Substitute(exprType, c.typeSubst)
 	}
+	if opt, ok := exprType.(*types.Optional); ok {
+		return c.genIsOptionalType(expr, p.Name, opt)
+	}
+
+	// Check if the subject is an enum type — use tag comparison
 	if enumLayout := c.lookupEnumLayout(exprType); enumLayout != nil {
 		return c.genIsEnumVariant(expr, p.Name, enumLayout)
 	}
 
 	// Named type check via RTTI
 	return c.genIsNamedType(expr, p.Name)
+}
+
+// genIsOptionalType generates code for `optExpr is TypeName` where optExpr has type T?.
+// For primitive/string optionals (no RTTI), this is equivalent to a presence check.
+// For user types with RTTI, this checks presence AND performs RTTI on the unwrapped value.
+func (c *Compiler) genIsOptionalType(expr ast.Expr, typeName string, opt *types.Optional) value.Value {
+	optVal := c.genExpr(expr)
+	flag := c.block.NewExtractValue(optVal, 0) // i1 presence flag
+
+	elem := opt.Elem()
+	// For enums, primitives, and strings there is no subtyping,
+	// so T? is T is equivalent to T? is present — just check the flag.
+	if c.lookupEnumLayout(elem) != nil {
+		return flag
+	}
+	named := extractNamed(elem)
+	if named != nil && (isPrimitiveScalar(named) || named == types.TypString) {
+		return flag
+	}
+
+	// User type with RTTI: check presence AND type via RTTI on the unwrapped value.
+	// We need branching to avoid accessing RTTI on a none value.
+	targetNamed := c.lookupNamedType(typeName)
+	if targetNamed == nil {
+		panic(fmt.Sprintf("codegen: undefined type %s in is-expression", typeName))
+	}
+	targetID := c.assignTypeID(targetNamed)
+
+	fn := c.block.Parent
+	thenBlock := fn.NewBlock("")
+	elseBlock := fn.NewBlock("")
+	mergeBlock := fn.NewBlock("")
+
+	c.block.NewCondBr(flag, thenBlock, elseBlock)
+
+	// Then: extract inner value and do RTTI check
+	c.block = thenBlock
+	inner := c.block.NewExtractValue(optVal, 1)
+	instance := c.extractInstancePtr(inner)
+	variantPtr := c.loadVariantPtr(instance)
+	result := c.block.NewCall(c.funcs["promise_type_is"],
+		variantPtr, constant.NewInt(irtypes.I32, int64(targetID)))
+	rttiResult := c.block.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 0))
+	c.block.NewBr(mergeBlock)
+	thenExit := c.block
+
+	// Else: not present → false
+	c.block = elseBlock
+	c.block.NewBr(mergeBlock)
+	elseExit := c.block
+
+	// Merge
+	c.block = mergeBlock
+	phi := c.block.NewPhi(ir.NewIncoming(rttiResult, thenExit), ir.NewIncoming(constant.NewInt(irtypes.I1, 0), elseExit))
+	return phi
 }
 
 func (c *Compiler) genIsEnumVariant(expr ast.Expr, variantName string, layout *TypeDeclLayout) value.Value {

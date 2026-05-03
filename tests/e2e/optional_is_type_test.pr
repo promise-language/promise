@@ -1,0 +1,202 @@
+// Tests for `is TypeName` on optional types (B0029).
+// --- Optional primitives: is <type> is equivalent to is present ---
+optional_int_is_type() `test {
+  int? x = 42;
+  int? n = none;
+  assert(x is int, "present int? is int");
+  assert(!(n is int), "none int? is not int");
+}
+
+optional_u8_is_type() `test {
+  u8? x = 255u8;
+  u8? n = none;
+  assert(x is u8, "present u8? is u8");
+  assert(!(n is u8), "none u8? is not u8");
+}
+
+optional_f64_is_type() `test {
+  f64? x = 3.14;
+  f64? n = none;
+  assert(x is f64, "present f64? is f64");
+  assert(!(n is f64), "none f64? is not f64");
+}
+
+optional_bool_is_type() `test {
+  bool? x = true;
+  bool? n = none;
+  assert(x is bool, "present bool? is bool");
+  assert(!(n is bool), "none bool? is not bool");
+}
+
+optional_char_is_type() `test {
+  char? x = 'a';
+  char? n = none;
+  assert(x is char, "present char? is char");
+  assert(!(n is char), "none char? is not char");
+}
+
+optional_string_is_type() `test {
+  string? x = "hello";
+  string? n = none;
+  assert(x is string, "present string? is string");
+  assert(!(n is string), "none string? is not string");
+}
+
+// --- Optional user type with inheritance ---
+
+type Animal {
+  string name;
+  speak(&this) string `abstract;
+}
+
+type Dog is Animal {
+  speak(&this) string {
+    return "Woof";
+  }
+}
+
+type Cat is Animal {
+  speak(&this) string {
+    return "Meow";
+  }
+}
+
+optional_user_type_is_subtype() `test {
+  Animal d = Dog(name: "Rex");
+  Animal? a = d;
+  Animal? n = none;
+  assert(a is Dog, "present Animal? is Dog");
+  assert(!(a is Cat), "present Animal? Dog is not Cat");
+  assert(!(n is Dog), "none Animal? is not Dog");
+  assert(!(n is Cat), "none Animal? is not Cat");
+}
+
+// --- Optional non-polymorphic user type ---
+
+type Point {
+  int x;
+  int y;
+}
+
+optional_user_type_exact() `test {
+  Point? p = Point(x: 1, y: 2);
+  Point? n = none;
+  assert(p is Point, "present Point? is Point");
+  assert(!(n is Point), "none Point? is not Point");
+}
+
+// --- Optional value type ---
+
+type Vec2 {
+  f64 x `value;
+  f64 y `value;
+}
+
+optional_value_type() `test {
+  Vec2? v = Vec2(x: 1.0, y: 2.0);
+  Vec2? n = none;
+  assert(v is Vec2, "present Vec2? is Vec2");
+  assert(!(n is Vec2), "none Vec2? is not Vec2");
+}
+
+// --- Optional enum type name (not variant) ---
+
+enum Color {
+  Red, Green, Blue
+}
+
+optional_enum_type() `test {
+  Color? c = Color.Red;
+  Color? n = none;
+  assert(c is Color, "present Color? is Color");
+  assert(!(n is Color), "none Color? is not Color");
+}
+
+// --- Falsy values that are still present ---
+
+optional_bool_false_is_present() `test {
+  bool? b = false;
+  assert(b is bool, "false is still present");
+  assert(b is present, "false is present");
+}
+
+optional_int_zero_is_present() `test {
+  int? x = 0;
+  assert(x is int, "zero int is still present");
+  assert(x is present, "zero int is present");
+}
+
+optional_string_empty_is_present() `test {
+  string? s = "";
+  assert(s is string, "empty string is still present");
+  assert(s is present, "empty string is present");
+}
+
+// --- is type agrees with is present ---
+
+optional_is_type_matches_is_present() `test {
+  int? a = 42;
+  int? b = none;
+  assert((a is int) == (a is present), "is int == is present for 42");
+  assert((b is int) == (b is present), "is int == is present for none");
+}
+
+// --- Base type check on polymorphic optional ---
+
+optional_user_type_is_base() `test {
+  Animal d = Dog(name: "Rex");
+  Animal? a = d;
+  Animal? n = none;
+  assert(a is Animal, "Dog in Animal? is Animal");
+  assert(!(n is Animal), "none Animal? is not Animal");
+}
+
+// --- Data enum (enum with fields) ---
+
+enum Shape {
+  Circle(f64 radius),
+  Rectangle(f64 width, f64 height),
+  Point,
+}
+
+optional_data_enum_type() `test {
+  Shape? s = Shape.Circle(radius: 3.14);
+  Shape? n = none;
+  assert(s is Shape, "present Shape? is Shape");
+  assert(!(n is Shape), "none Shape? is not Shape");
+}
+
+// --- Negated is-check ---
+
+optional_negated_is_type() `test {
+  int? x = 42;
+  int? n = none;
+  assert(!(x is int) == false, "negated is type on present");
+  assert(!(n is int) == true, "negated is type on none");
+}
+
+// --- is type in if/else branches ---
+
+optional_is_type_if_else() `test {
+  int? x = 42;
+  bool then_branch = false;
+  bool else_branch = false;
+  if x is int {
+    then_branch = true;
+  } else {
+    else_branch = true;
+  }
+  assert(then_branch, "present enters then");
+  assert(!else_branch, "present skips else");
+
+  int? n = none;
+  then_branch = false;
+  else_branch = false;
+  if n is int {
+    then_branch = true;
+  } else {
+    else_branch = true;
+  }
+  assert(!then_branch, "none skips then");
+  assert(else_branch, "none enters else");
+}

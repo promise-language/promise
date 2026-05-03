@@ -1,0 +1,182 @@
+// E2E tests for Encodable/Decodable structural interface coercion.
+// Covers: primitives, user types with manual encode, serializable types,
+// variable assignment, function parameters, and generic constraints.
+
+use json;
+
+// ── Test types ──────────────────────────────────────────────────────────────
+
+type Widget `serializable {
+  string name;
+  int count;
+}
+
+type Tag `serializable {
+  string label `key("tag_label");
+  bool active;
+}
+
+type ManualEncode {
+  int value;
+  encode(Encoder ~e)! {
+    e.encode_int(this.value * 2);
+  }
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+// Accept any Encodable and produce JSON.
+_to_json(Encodable val) string {
+  json.JsonEncoder enc = json.JsonEncoder();
+  val.encode(enc)? {};
+  return enc.to_string();
+}
+
+// ── Primitives as Encodable ─────────────────────────────────────────────────
+
+primitive_int_as_encodable() `test {
+  assert(_to_json(42) == "42", "int as Encodable");
+}
+
+primitive_bool_as_encodable() `test {
+  assert(_to_json(true) == "true", "bool as Encodable");
+}
+
+primitive_string_as_encodable() `test {
+  assert(_to_json("hello") == "\"hello\"", "string as Encodable");
+}
+
+primitive_f64_as_encodable() `test {
+  assert(_to_json(2.5) == "2.5", "f64 as Encodable");
+}
+
+// ── Primitive variables as Encodable ────────────────────────────────────────
+
+primitive_var_int() `test {
+  int x = 99;
+  assert(_to_json(x) == "99", "int var as Encodable");
+}
+
+primitive_var_bool() `test {
+  bool b = false;
+  assert(_to_json(b) == "false", "bool var as Encodable");
+}
+
+primitive_var_string() `test {
+  string s = "world";
+  assert(_to_json(s) == "\"world\"", "string var as Encodable");
+}
+
+// ── Manual encode type as Encodable ─────────────────────────────────────────
+
+manual_encode_as_encodable() `test {
+  ManualEncode m = ManualEncode(value: 21);
+  assert(_to_json(m) == "42", "manual encode as Encodable (21*2=42)");
+}
+
+// ── Serializable type as Encodable ──────────────────────────────────────────
+
+serializable_as_encodable() `test {
+  Widget w = Widget(name: "bolt", count: 10);
+  string s = _to_json(w);
+  assert(s.contains("\"name\":\"bolt\""), "serializable: name");
+  assert(s.contains("\"count\":10"), "serializable: count");
+}
+
+serializable_with_key_as_encodable() `test {
+  Tag t = Tag(label: "important", active: true);
+  string s = _to_json(t);
+  assert(s.contains("\"tag_label\":\"important\""), "serializable key: label");
+  assert(s.contains("\"active\":true"), "serializable key: active");
+}
+
+// Variable assignment (Encodable e = val) is a known codegen gap for
+// value type boxing — tested via function parameters instead.
+// See stages.md "Value type structural interface coercion".
+
+// ── Mixed: primitives and user types in same call sequence ──────────────────
+
+mixed_sequence() `test {
+  assert(_to_json(1) == "1", "mixed: int");
+  assert(_to_json("a") == "\"a\"", "mixed: string");
+  Widget w = Widget(name: "x", count: 0);
+  string s = _to_json(w);
+  assert(s.contains("\"name\":\"x\""), "mixed: widget after primitives");
+  assert(_to_json(true) == "true", "mixed: bool after widget");
+}
+
+// ── Generic function with Encodable constraint ──────────────────────────────
+
+encode_one[T: Encodable](T val) string {
+  json.JsonEncoder enc = json.JsonEncoder();
+  val.encode(enc)? {};
+  return enc.to_string();
+}
+
+generic_constraint_int() `test {
+  assert(encode_one[int](7) == "7", "generic Encodable constraint: int");
+}
+
+generic_constraint_bool() `test {
+  assert(encode_one[bool](true) == "true", "generic Encodable constraint: bool");
+}
+
+generic_constraint_string() `test {
+  assert(encode_one[string]("a") == "\"a\"", "generic Encodable constraint: string");
+}
+
+generic_constraint_serializable() `test {
+  Widget w = Widget(name: "x", count: 1);
+  string s = encode_one[Widget](w);
+  assert(s.contains("\"name\":\"x\""), "generic Encodable constraint: serializable");
+}
+
+// ── Decodable via generic constraint ────────────────────────────────────────
+
+round_trip_via_generic[T: Encodable + Decodable](T val) T! {
+  json.JsonEncoder enc = json.JsonEncoder();
+  val.encode(enc);
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  return T.decode(dec);
+}
+
+generic_round_trip_int() `test {
+  int v = round_trip_via_generic[int](42)!;
+  assert(v == 42, "generic round trip: int");
+}
+
+generic_round_trip_string() `test {
+  string v = round_trip_via_generic[string]("hello")!;
+  assert(v == "hello", "generic round trip: string");
+}
+
+generic_round_trip_bool() `test {
+  bool v = round_trip_via_generic[bool](true)!;
+  assert(v == true, "generic round trip: bool");
+}
+
+// ── Multiple Encodable params ───────────────────────────────────────────────
+
+encode_pair(Encodable a, Encodable b) string {
+  json.JsonEncoder enc = json.JsonEncoder();
+  enc.begin_array(2)!;
+  a.encode(enc)? {};
+  b.encode(enc)? {};
+  enc.end_array()!;
+  return enc.to_string();
+}
+
+two_ints_as_encodable() `test {
+  assert(encode_pair(1, 2) == "[1,2]", "two ints as Encodable");
+}
+
+int_and_string_as_encodable() `test {
+  assert(encode_pair(42, "hi") == "[42,\"hi\"]", "int and string as Encodable");
+}
+
+int_and_serializable_as_encodable() `test {
+  Widget w = Widget(name: "a", count: 1);
+  string s = encode_pair(99, w);
+  assert(s.starts_with("[99,"), "int and serializable pair: starts with 99");
+  assert(s.contains("\"name\":\"a\""), "int and serializable pair: has widget");
+}

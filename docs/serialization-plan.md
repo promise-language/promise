@@ -732,7 +732,7 @@ type DecodeError is error `public {
 
 **Known limitations (Phase 3):**
 - **Nested user-type decode** — decode for fields of user-defined types (e.g., `Address address`) is blocked by the lack of optional force-unwrap in Promise. The decode local must be `T?` (no zero value for user types) but the constructor expects `T`. Encode works. Requires one of: `opt!` for optionals, `opt as! T` codegen fix, `opt ? { handler }`, or narrowing after diverging `is absent` check. See `docs/stages.md` Parser/Codegen Bugs section.
-- **Structural interface coercion for user types** — passing a `serializable` user type to a function taking `Encodable` fails. Call `value.encode(enc)!` directly instead of through a generic helper.
+- ~~**Structural interface coercion for user types**~~ — **Fixed.** Synthesized methods now use `MutRefTypeRef` matching the parser's representation.
 - **Container fields** (`T[]`, `map[K,V]`) — not yet supported in synthesized code. Requires generic constraints on container methods or inline codegen.
 - **Generic serializable types** (`Wrapper[T]`) — deferred pending implicit constraint support.
 

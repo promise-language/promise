@@ -104,7 +104,7 @@ func (c *Checker) synthesizeEncodeMethod(named *types.Named, d *ast.TypeDecl) *a
 	return &ast.MethodDecl{
 		Name:        "encode",
 		Receiver:    &ast.ReceiverParam{RefMod: ast.RefNone},
-		Params:      []*ast.Param{{Type: &ast.NamedTypeRef{Name: "Encoder"}, RefMod: ast.RefMut, Name: "e"}},
+		Params:      []*ast.Param{{Type: &ast.MutRefTypeRef{Inner: &ast.NamedTypeRef{Name: "Encoder"}}, Name: "e"}},
 		ReturnType:  &ast.ReturnTypeSpec{CanError: true},
 		Annotations: []*ast.MetaAnnotation{{Name: "public"}},
 		Body:        &ast.Block{Stmts: stmts},
@@ -184,7 +184,7 @@ func (c *Checker) synthesizeDecodeMethod(named *types.Named, d *ast.TypeDecl) *a
 
 	return &ast.MethodDecl{
 		Name:   "decode",
-		Params: []*ast.Param{{Type: &ast.NamedTypeRef{Name: "Decoder"}, RefMod: ast.RefMut, Name: "d"}},
+		Params: []*ast.Param{{Type: &ast.MutRefTypeRef{Inner: &ast.NamedTypeRef{Name: "Decoder"}}, Name: "d"}},
 		ReturnType: &ast.ReturnTypeSpec{
 			Type:     &ast.NamedTypeRef{Name: "Self"},
 			CanError: true,

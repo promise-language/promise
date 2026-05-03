@@ -1001,7 +1001,7 @@ Known gaps and improvements deferred from completed stages.
 | Type argument inference (explicit type args only currently) | 8f | Low |
 | Extern ABI for generic types | 8f | Low |
 | Non-instance field placements: mixed `value`+instance, `variant`/`type` fields, `global`/`mono` data placement | 8c | Low |
-| Value type structural interface coercion (stack boxing) — primitive/string→structural boxing done (function args); remaining: user-defined value types, variable assignment to structural interface type | 8p | Low |
+| Value type structural interface coercion (stack boxing) — primitive/string→structural boxing done (function args); remaining: variable assignment to structural interface type (`Encodable e = 42;` passes sema but codegen panics with `store operands not compatible: src={i8*, i8*}; dst=i64*`). Workaround: pass values as function parameters instead of assigning to interface-typed variables. | 8p | Medium |
 | ~~Generic value types~~ — **Done.** `computeMonoValueTypeLayout` in `mono.go`. `Range[T]` is the first generic value type. | 8p | ~~Low~~ Resolved |
 | ~~User type `format(Writer ~w)` for interpolation (desugar `"{x}"` to `x.format(~builder)`)~~ — **Done.** User-defined types implementing `format(Writer ~w)!` now work in `{}` interpolation. Compiler creates a Builder, calls `format(~builder)!`, and converts to string via `Builder.to_string()`. Both direct dispatch and vtable dispatch (polymorphic) supported. Value types also supported. | 8h | ~~Low~~ Resolved |
 | `yield*` delegate (forward all values from sub-iterator) | Generators | Medium |
@@ -1055,7 +1055,7 @@ Known gaps and improvements deferred from completed stages.
 | Optional force-unwrap (`x!`) — `int? x; int y = x!;` should extract T from T?, panic on none. Symmetric with failable `!`. Currently `!` only works on `T!` (failable), not `T?` (optional). This is the most natural syntax for "I know this is present." | Language | High |
 | Optional handler (`x ? { }`) — `int? x; int y = x ? { print_line("missing"); return 0; };` should handle the none case inline, mirroring the error handler syntax (`expr ? e { }`) but for optionals. The handler block provides a recovery value or diverges (return/break/panic). | Language | Medium |
 | No narrowing after diverging `is absent` check — `if x is absent { raise error(...); }` should narrow `x` from `T?` to `T` after the if (the absent path diverges), but the compiler doesn't perform this narrowing. Only `is present` narrows, and only inside the if-block. Fixing this would also unblock nested serializable decode. | Sema | High |
-| Structural interface coercion for user types — passing a user-defined `serializable` type to a function taking `Encodable` fails with "cannot assign TYPE to parameter of type Encodable". Structural boxing works for primitives/strings but not for user types. Workaround: call `value.encode(enc)!` directly instead of through a generic `_encode(Encodable)` helper. | Codegen | Medium |
+| ~~Structural interface coercion for user types~~ — **Fixed.** Synthesized `encode`/`decode` methods used `RefMod: ast.RefMut` on the parameter, but the parser represents `Encoder ~e` as `MutRefTypeRef{Encoder}` with no ref mod. The mismatch caused `identicalSignaturesWithSelf` to fail. Fixed by using `MutRefTypeRef` in synthesized AST, matching the parser's representation. | Sema | ~~Medium~~ Resolved |
 
 ### Parameter Handling
 

@@ -266,7 +266,7 @@ The standard library (`modules/std/`, 29 files) is auto-imported via `use std as
 
 ## Test Suite
 
-~1920 test functions across ~202 `.pr` files, organized by category:
+~2190 test functions across ~206 `.pr` files, organized by category:
 
 | Directory | What it tests | Files |
 |-----------|--------------|-------|
@@ -277,7 +277,7 @@ The standard library (`modules/std/`, 29 files) is auto-imported via `use std as
 | `tests/value_types/` | Pure value types: construction, copying, operators, methods, nested, optional | ~9 |
 | `tests/arrays/` | Fixed-size arrays: basic, copy, field, loop, OOB, parameters | ~6 |
 | `tests/catalog/` | Catalog module integration tests | ~1 |
-| `modules/*/` | Catalog module internal tests (`*_test.pr`) | ~4 |
+| `modules/*/` | Catalog module internal tests (`*_test.pr`) | ~5 |
 
 ## Important Files
 

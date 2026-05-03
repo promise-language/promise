@@ -1,7 +1,6 @@
 // E2E tests for Encodable/Decodable structural interface coercion.
 // Covers: primitives, user types with manual encode, serializable types,
 // variable assignment, function parameters, and generic constraints.
-
 use json;
 
 // ── Test types ──────────────────────────────────────────────────────────────
@@ -28,7 +27,8 @@ type ManualEncode {
 // Accept any Encodable and produce JSON.
 _to_json(Encodable val) string {
   json.JsonEncoder enc = json.JsonEncoder();
-  val.encode(enc)? {};
+  val.encode(enc)? {
+  };
   return enc.to_string();
 }
 
@@ -90,9 +90,100 @@ serializable_with_key_as_encodable() `test {
   assert(s.contains("\"active\":true"), "serializable key: active");
 }
 
-// Variable assignment (Encodable e = val) is a known codegen gap for
-// value type boxing — tested via function parameters instead.
-// See stages.md "Value type structural interface coercion".
+// ── Variable assignment to Encodable ────────────────────────────────────────
+
+assign_int_to_encodable() `test {
+  Encodable e = 42;
+  json.JsonEncoder enc = json.JsonEncoder();
+  e.encode(enc)!;
+  assert(enc.to_string() == "42", "assign int to Encodable");
+}
+
+assign_string_to_encodable() `test {
+  Encodable e = "hello";
+  json.JsonEncoder enc = json.JsonEncoder();
+  e.encode(enc)!;
+  assert(enc.to_string() == "\"hello\"", "assign string to Encodable");
+}
+
+assign_bool_to_encodable() `test {
+  Encodable e = true;
+  json.JsonEncoder enc = json.JsonEncoder();
+  e.encode(enc)!;
+  assert(enc.to_string() == "true", "assign bool to Encodable");
+}
+
+assign_f64_to_encodable() `test {
+  Encodable e = 2.5;
+  json.JsonEncoder enc = json.JsonEncoder();
+  e.encode(enc)!;
+  assert(enc.to_string() == "2.5", "assign f64 to Encodable");
+}
+
+assign_char_to_encodable() `test {
+  Encodable e = 'A';
+  json.JsonEncoder enc = json.JsonEncoder();
+  e.encode(enc)!;
+  assert(enc.to_string() == "\"A\"", "assign char to Encodable");
+}
+
+assign_var_to_encodable() `test {
+  int x = 99;
+  Encodable e = x;
+  json.JsonEncoder enc = json.JsonEncoder();
+  e.encode(enc)!;
+  assert(enc.to_string() == "99", "assign int var to Encodable");
+}
+
+assign_serializable_to_encodable() `test {
+  Widget w = Widget(name: "nut", count: 5);
+  Encodable e = w;
+  json.JsonEncoder enc = json.JsonEncoder();
+  e.encode(enc)!;
+  string s = enc.to_string();
+  assert(s.contains("\"name\":\"nut\""), "assign serializable to Encodable");
+}
+
+// ── Variable assignment to Format (most common structural interface) ────────
+
+assign_int_to_format() `test {
+  Format f = 42;
+  Builder b = Builder();
+  f.format(b)? {
+  };
+  assert(b.to_string() == "42", "assign int to Format");
+}
+
+assign_string_to_format() `test {
+  Format f = "hello";
+  Builder b = Builder();
+  f.format(b)? {
+  };
+  assert(b.to_string() == "hello", "assign string to Format");
+}
+
+assign_bool_to_format() `test {
+  Format f = false;
+  Builder b = Builder();
+  f.format(b)? {
+  };
+  assert(b.to_string() == "false", "assign bool to Format");
+}
+
+// ── Pass assigned structural variable to function ───────────────────────────
+
+pass_assigned_var() `test {
+  Encodable e = 42;
+  string s = _to_json(e);
+  assert(s == "42", "pass assigned Encodable var to function");
+}
+
+pass_assigned_serializable_var() `test {
+  Widget w = Widget(name: "x", count: 1);
+  Encodable e = w;
+  string s = _to_json(e);
+  assert(s.contains("\"name\":\"x\""), "pass assigned serializable Encodable var");
+}
 
 // ── Mixed: primitives and user types in same call sequence ──────────────────
 
@@ -109,7 +200,8 @@ mixed_sequence() `test {
 
 encode_one[T: Encodable](T val) string {
   json.JsonEncoder enc = json.JsonEncoder();
-  val.encode(enc)? {};
+  val.encode(enc)? {
+  };
   return enc.to_string();
 }
 
@@ -160,8 +252,10 @@ generic_round_trip_bool() `test {
 encode_pair(Encodable a, Encodable b) string {
   json.JsonEncoder enc = json.JsonEncoder();
   enc.begin_array(2)!;
-  a.encode(enc)? {};
-  b.encode(enc)? {};
+  a.encode(enc)? {
+  };
+  b.encode(enc)? {
+  };
   enc.end_array()!;
   return enc.to_string();
 }

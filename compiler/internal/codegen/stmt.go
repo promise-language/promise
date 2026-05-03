@@ -195,7 +195,20 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	if declType != nil {
 		lt = c.resolveType(declType)
 	} else {
-		lt = c.resolveType(exprType)
+		// Check if the AST declares a structural interface type that differs from the
+		// expression type (e.g., `Encodable e = 42;` — alloca must be {i8*,i8*} not i64).
+		// Only apply for structural interfaces to avoid breaking generics/value types.
+		astDeclType := c.resolveTypeRefToType(s.Type)
+		if astDeclNamed := extractNamed(astDeclType); astDeclNamed != nil && astDeclNamed.IsStructural() {
+			if exprNamed := extractNamed(exprType); exprNamed != nil && exprNamed != astDeclNamed {
+				lt = c.resolveType(astDeclType)
+				declType = astDeclType
+			} else {
+				lt = c.resolveType(exprType)
+			}
+		} else {
+			lt = c.resolveType(exprType)
+		}
 	}
 	alloca := c.block.NewAlloca(lt)
 	alloca.SetName(c.uniqueLocalName(s.Name))

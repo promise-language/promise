@@ -172,8 +172,15 @@ func DeclareAndDefine(file *ast.File) (*Info, []error) {
 
 // DeclareAndDefineWithModules runs Declare + Define with pre-loaded module scopes.
 func DeclareAndDefineWithModules(file *ast.File, moduleScopes map[string]*types.Scope) (*Info, []error) {
+	return DeclareAndDefineWithTarget(file, moduleScopes, TargetInfo{})
+}
+
+// DeclareAndDefineWithTarget runs Declare + Define with pre-loaded module scopes
+// and target filtering for `target(cond)` annotations.
+func DeclareAndDefineWithTarget(file *ast.File, moduleScopes map[string]*types.Scope, target TargetInfo) (*Info, []error) {
 	c := &Checker{
 		moduleScopes: moduleScopes,
+		target:       target,
 		file:         file,
 		info: &Info{
 			Types:                    make(map[ast.Expr]types.Type),

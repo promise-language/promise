@@ -83,10 +83,11 @@ func docFrontend(filename string) (*ast.File, *sema.Info) {
 	file := parseSourceFile(filename)
 	file = injectStdImport(file)
 
-	// Use host target so std module loads correctly (target-filtered functions
-	// in std would cause redeclaration errors with zero target).
-	moduleScopes, _, _ := loadModuleScopes(filename, file, sema.HostTargetInfo())
-	info, errs := sema.DeclareAndDefineWithModules(file, moduleScopes)
+	// Use host target so target-filtered functions (e.g., platform.pr) are
+	// properly filtered instead of causing redeclaration errors.
+	target := sema.HostTargetInfo()
+	moduleScopes, _, _ := loadModuleScopes(filename, file, target)
+	info, errs := sema.DeclareAndDefineWithTarget(file, moduleScopes, target)
 	if len(errs) > 0 {
 		printFileErrors(filename, errs)
 		os.Exit(1)
@@ -159,10 +160,103 @@ func runDocModule(w io.Writer, name string, opts docOpts) {
 	// Module heading
 	fmt.Fprintf(w, "# %s\n", name)
 
-	// Generate docs for each source file
+	// Collect declarations from all files
+	type typeEntry struct {
+		decl  *ast.TypeDecl
+		named *types.Named
+		info  *sema.Info
+		scope *types.Scope
+	}
+	type enumEntry struct {
+		decl *ast.EnumDecl
+		enum *types.Enum
+		info *sema.Info
+	}
+	type funcEntry struct {
+		decl *ast.FuncDecl
+		fn   *types.Func
+		info *sema.Info
+	}
+
+	var allTypes []typeEntry
+	var allEnums []enumEntry
+	var allFuncs []funcEntry
+
 	for _, sf := range sourceFiles {
 		file, info := docFrontend(sf)
-		emitModuleFileDoc(w, file, info, opts)
+		fileScope := info.Scopes[file]
+		if fileScope == nil {
+			continue
+		}
+
+		for _, decl := range file.Decls {
+			switch d := decl.(type) {
+			case *ast.TypeDecl:
+				named := lookupNamed(d.Name, fileScope, info)
+				if named == nil {
+					continue
+				}
+				if opts.publicOnly && !named.IsExported() {
+					continue
+				}
+				allTypes = append(allTypes, typeEntry{d, named, info, fileScope})
+			case *ast.EnumDecl:
+				enum := lookupEnum(d.Name, fileScope)
+				if enum == nil {
+					continue
+				}
+				if opts.publicOnly && !enum.IsExported() {
+					continue
+				}
+				allEnums = append(allEnums, enumEntry{d, enum, info})
+			case *ast.FuncDecl:
+				fn := lookupFunc(d.Name, fileScope)
+				if fn == nil {
+					continue
+				}
+				if fn.IsTest() || d.Name == "main" {
+					continue
+				}
+				if opts.publicOnly && !fn.IsExported() {
+					continue
+				}
+				allFuncs = append(allFuncs, funcEntry{d, fn, info})
+			}
+		}
+	}
+
+	// Emit grouped sections
+	if len(allTypes) > 0 {
+		if !opts.sigOnly {
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, "## Types")
+		}
+		for _, e := range allTypes {
+			fmt.Fprintln(w)
+			emitType(w, e.decl, e.named, e.info, opts, e.scope)
+		}
+	}
+
+	if len(allEnums) > 0 {
+		if !opts.sigOnly {
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, "## Enums")
+		}
+		for _, e := range allEnums {
+			fmt.Fprintln(w)
+			emitEnum(w, e.decl, e.enum, e.info, opts)
+		}
+	}
+
+	if len(allFuncs) > 0 {
+		if !opts.sigOnly {
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, "## Functions")
+		}
+		for _, e := range allFuncs {
+			fmt.Fprintln(w)
+			emitFunc(w, e.decl, e.fn, e.info, opts)
+		}
 	}
 }
 
@@ -332,6 +426,9 @@ func emitTypeSummary(w io.Writer, d *ast.TypeDecl, named *types.Named, info *sem
 	if named.IsStructural() {
 		line += " `structural"
 	}
+	if named.IsCopy() {
+		line += " `copy"
+	}
 	fmt.Fprintln(w, line+" {")
 
 	// Build field→default map from AST (DeclareAndDefine skips pass 3
@@ -355,6 +452,12 @@ func emitTypeSummary(w io.Writer, d *ast.TypeDecl, named *types.Named, info *sem
 				fieldLine += " = " + exprToString(expr)
 			}
 		}
+		if f.Placement() == types.PlaceValue {
+			fieldLine += " `value"
+		}
+		if f.IsFinal() {
+			fieldLine += " `final"
+		}
 		if f.Doc() != "" {
 			fieldLine += "    — " + f.Doc()
 		}
@@ -377,13 +480,15 @@ func emitTypeSummary(w io.Writer, d *ast.TypeDecl, named *types.Named, info *sem
 }
 
 func emitOperators(w io.Writer, named *types.Named, opts docOpts) {
+	seen := make(map[string]bool)
 	var ops []string
 	for _, m := range named.Methods() {
 		if opts.publicOnly && !isMemberPublic(m.Name(), m.IsExported()) {
 			continue
 		}
 		name := m.Name()
-		if isOperatorName(name) && !isSubscriptOp(name) {
+		if isOperatorName(name) && !isSubscriptOp(name) && !seen[name] {
+			seen[name] = true
 			ops = append(ops, name)
 		}
 	}
@@ -506,6 +611,9 @@ func emitEnum(w io.Writer, d *ast.EnumDecl, enum *types.Enum, info *sema.Info, o
 		}
 		emitMethodSection(w, d.Name, m, info)
 	}
+
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "---")
 }
 
 func emitEnumCompact(w io.Writer, d *ast.EnumDecl, enum *types.Enum) {
@@ -888,7 +996,10 @@ func isOperatorName(name string) bool {
 	switch name {
 	case "==", "!=", "<", ">", "<=", ">=",
 		"+", "-", "*", "/", "%",
-		"&", "|", "^", "<<", ">>",
+		"&", "|", "^", "<<", ">>", "~",
+		"&&", "||", "!",
+		"++", "--",
+		"..", "..=",
 		"[]", "[]=", "[:]", "[:]=":
 		return true
 	}

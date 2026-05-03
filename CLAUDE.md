@@ -235,7 +235,7 @@ The standard library (`modules/std/`, 29 files) is auto-imported via `use std as
 
 | Category | Files | What it covers |
 |----------|-------|---------------|
-| Primitives | `int.pr`, `uint.pr`, `float.pr`, `bool.pr`, `char.pr` | Arithmetic, comparison, bitwise, hash, `to_string()`, `format()`, `parse()` for all numeric/bool types |
+| Primitives | `int.pr`, `uint.pr`, `float.pr`, `bool.pr`, `char.pr` | Arithmetic, comparison, bitwise, hash, `to_string()`, `format()`, `parse()`, `encode(Encoder)`, `decode(Decoder)` for all numeric/bool/char/string types |
 | Strings | `string.pr` | Concatenation, comparison, `contains`, `starts_with`, `ends_with`, `index_of`, `trim`, `split`, `[]`, `[:]`, `bytes()`, `byte_at()`, `from_bytes()`, `to_upper`, `to_lower`, `repeat`, `replace`, `count`, `chars` |
 | Containers | `vector.pr`, `map.pr`, `set.pr` | `Vector[T]`/`T[]` (push/pop/remove/contains/slice/`filled`), `Map[K,V]`/`map[K,V]` (open-addressing, rehash), `Set[T]` |
 | Format/Parse | `format.pr`, `builder.pr`, `parse.pr` | `Writer`/`Format` structural interfaces, `Builder` (string building, satisfies `Writer`), `Reader`/`Parse` structural interfaces, `Scanner`, `scan[T]()` |
@@ -246,6 +246,7 @@ The standard library (`modules/std/`, 29 files) is auto-imported via `use std as
 | Interfaces | `equal.pr`, `ordered.pr`, `hashable.pr` | `Equal`, `Ordered`, `Hashable` structural types |
 | Concurrency | `channel.pr`, `task.pr`, `runtime.pr` | `Channel[T]`/`channel[T]` send/close, `Task[T]`/`task[T]` handle, scheduler stats |
 | Time | `time.pr` | `Duration` (value type), `Instant`, `sleep()` |
+| Serialization | `encode.pr` | `Encoder`/`Decoder` (non-structural), `Encodable`/`Decodable` (structural), `DecodeError` |
 | Other | `range.pr`, `hash.pr`, `assert.pr`, `error.pr`, `platform.pr` | `Range`/`..`/`..=`, FNV-1a hash, `assert()`, `error` base type, platform detection |
 
 **Catalog modules** (separate `promise.toml`, imported via `use <name>;`):
@@ -253,6 +254,7 @@ The standard library (`modules/std/`, 29 files) is auto-imported via `use std as
 | Module | File | What it covers |
 |--------|------|---------------|
 | `io` | `modules/io/io.pr` | `File` (open/create/append, read/write bytes, read_line, write_line, read_all, seek), `BufferedReader`, `BufferedWriter`, `Dir`, `IoError`, `read_line()`, `read_stdin()` |
+| `json` | `modules/json/json.pr` | `JsonEncoder` (is Encoder), `JsonDecoder` (is Decoder), `encode_string`, `decode_string`, `encode_string_pretty` |
 | `path` | `modules/path/path.pr` | `path_join`, `path_dir`, `path_base`, `path_ext`, `path_is_abs`, `path_normalize` |
 | `math` | `modules/math/math.pr` | Extended math functions |
 | `strings` | `modules/strings/strings.pr` | Extended string utilities |

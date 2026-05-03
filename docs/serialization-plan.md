@@ -717,28 +717,37 @@ type DecodeError is error `public {
 
 **At this point, users can manually implement `encode`/`decode` on their types and use the JSON module.** This validates the Encoder/Decoder interface design before investing in compiler codegen.
 
-### Phase 3: `` `serializable `` Compiler Feature
+### Phase 3: `` `serializable `` Compiler Feature — DONE (primitive fields)
 
-**Scope:** Compiler changes.
+**Scope:** Compiler changes. Implementation: AST synthesis in `sema/serialize.go`.
 
-1. Store `isSerializable` flag on `Named`/`Enum` (types package)
-2. Extract flag during sema define pass (sema/decl.go)
-3. Register new meta annotations (`key`, `skip`, `skip_if_none`, `flatten`, `default`) in `builtinMetas`
-4. Validate field annotations (e.g., `` `skip_if_none `` only on `T?` fields)
-5. Synthesize `encode` method AST if not user-defined
-6. Synthesize `decode` factory method AST if not user-defined
-7. Add implicit constraints for generic type params
-8. Tests: sema tests for annotation validation, codegen tests for generated methods, e2e round-trip tests
+1. ~~Store `isSerializable` flag on `Named`~~ — **Done** (`types/named.go`)
+2. ~~Extract flag during sema define pass~~ — **Done** (`sema/decl.go`)
+3. ~~Register new meta annotations (`key`, `skip`, `include_none`, `required`, `flatten`)~~ — **Done** (`sema/meta.go`)
+4. ~~Validate field annotations (`include_none` only on `T?` fields)~~ — **Done** (`sema/serialize.go`)
+5. ~~Synthesize `encode` method AST if not user-defined~~ — **Done** — handles `key` renaming, `skip` exclusion, optional omission (if-unwrap), `include_none` null encoding
+6. ~~Synthesize `decode` factory method AST if not user-defined~~ — **Done** for primitive fields — handles key matching loop, optional null checking, error propagation, `skip` zero-fill, `key` renaming
+7. Add implicit constraints for generic type params — deferred
+8. ~~Tests~~ — **Done**: 22 e2e tests in `tests/e2e/serializable_test.pr` covering: encode/decode round-trip, mixed types (string/int/f64/bool), field annotations (key/skip/include_none), multiple optionals, string escaping, zero/negative/large values, custom encode override, key renaming in decode
 
-### Phase 4: Enum Serialization + Advanced Features
+**Known limitations (Phase 3):**
+- **Nested user-type decode** — decode for fields of user-defined types (e.g., `Address address`) is blocked by the lack of optional force-unwrap in Promise. The decode local must be `T?` (no zero value for user types) but the constructor expects `T`. Encode works. Requires one of: `opt!` for optionals, `opt as! T` codegen fix, `opt ? { handler }`, or narrowing after diverging `is absent` check. See `docs/stages.md` Parser/Codegen Bugs section.
+- **Structural interface coercion for user types** — passing a `serializable` user type to a function taking `Encodable` fails. Call `value.encode(enc)!` directly instead of through a generic helper.
+- **Container fields** (`T[]`, `map[K,V]`) — not yet supported in synthesized code. Requires generic constraints on container methods or inline codegen.
+- **Generic serializable types** (`Wrapper[T]`) — deferred pending implicit constraint support.
 
-**Scope:** Compiler + standard library.
+### Phase 4: Nested Types, Enums, and Advanced Features
 
-1. Enum `` `serializable `` codegen (tag-based for data enums, string for simple enums)
-2. `` `flatten `` support
-3. `` `serializable(tag: "kind") `` parameter for custom discriminator field names
-4. Nested generic serialization (`Wrapper[User]`, `map[string, User[]]`)
-5. Tests: enum round-trip, flatten, custom tags, nested generics
+**Scope:** Compiler + standard library. Depends on optional force-unwrap language feature.
+
+1. Nested user-type decode (requires `opt!`, `as!` fix, or narrowing fix)
+2. Container field serialization (`T[]`, `map[string, V]`)
+3. Enum `` `serializable `` codegen (tag-based for data enums, string for simple enums)
+4. `` `flatten `` support
+5. `` `serializable(tag: "kind") `` parameter for custom discriminator field names
+6. Nested generic serialization (`Wrapper[User]`, `map[string, User[]]`)
+7. Implicit `Encodable`/`Decodable` constraints on generic type parameters
+8. Tests: nested round-trip, container round-trip, enum round-trip, flatten, custom tags
 
 ### Phase 5: Additional Format Modules (future)
 
@@ -849,9 +858,7 @@ JSON only supports string keys. Options:
 
 ### 8.4 AST synthesis vs a dedicated codegen path?
 
-AST synthesis is the cleaner design but has no precedent in this compiler. An alternative is a dedicated codegen path in `codegen/serialize.go` that generates LLVM IR directly for serializable types. This avoids touching sema but makes the generated code invisible to type-checking and documentation.
-
-**Recommendation:** Start with AST synthesis. If it proves too complex, fall back to a codegen path for Phase 3 only. Phase 1 and Phase 2 don't require either — they're pure library code.
+**Resolved: AST synthesis.** The Phase 3 implementation (`sema/serialize.go`) synthesizes `MethodDecl` AST nodes during sema pass 2. These flow through normal type-checking (pass 3), return analysis (pass 4), and codegen — no special codegen path needed. The approach works well for primitive and optional fields. The synthesized AST is formulaic (if-unwrap for optionals, call-member for encode/decode, for-loop for key matching) and uses existing AST node types.
 
 ### 8.5 Naming: `encode`/`decode` vs `serialize`/`deserialize`?
 
@@ -861,19 +868,20 @@ AST synthesis is the cleaner design but has no precedent in this compiler. An al
 
 ## 9. Summary
 
-| Component | Location | Phase |
-|-----------|---------|-------|
-| `Encoder`/`Decoder` interfaces | `modules/std/encode.pr` | 1 |
-| `Encodable`/`Decodable` interfaces | `modules/std/encode.pr` | 1 |
-| Primitive encode/decode | `modules/std/int.pr`, etc. | 1 |
-| Container encode/decode | `modules/std/vector.pr`, `map.pr` | 1 |
-| `DecodeError` | `modules/std/encode.pr` | 1 |
-| `JsonEncoder`/`JsonDecoder` | `modules/json/json.pr` | 2 |
-| `JsonValue` enum | `modules/json/json.pr` | 2 |
-| `json.encode_string`/`json.decode_string` | `modules/json/json.pr` | 2 |
-| `` `serializable `` flag in types | `types/named.go`, `types/enum.go` | 3 |
-| Field annotations (`key`, `skip`, `include_none`, `required`, `flatten`) | `sema/meta.go` | 3 |
-| AST synthesis for encode/decode | `sema/serialize.go` (new) | 3 |
-| Enum serialization | `sema/serialize.go` | 4 |
-| `` `flatten `` support | `sema/serialize.go` | 4 |
-| TOML/YAML/MsgPack modules | `modules/toml/`, etc. | 5 |
+| Component | Location | Phase | Status |
+|-----------|---------|-------|--------|
+| `Encoder`/`Decoder` interfaces | `modules/std/encode.pr` | 1 | **Done** |
+| `Encodable`/`Decodable` interfaces | `modules/std/encode.pr` | 1 | **Done** |
+| Primitive encode/decode | `modules/std/int.pr`, etc. | 1 | **Done** — all 17 types with range checking |
+| Container encode/decode | `modules/std/vector.pr`, `map.pr` | 1 | Deferred (needs generic constraints) |
+| `DecodeError` | `modules/std/encode.pr` | 1 | **Done** |
+| `JsonEncoder`/`JsonDecoder` | `modules/json/json.pr` | 2 | **Done** — 61 tests |
+| `JsonValue` enum | `modules/json/json.pr` | 2 | Deferred |
+| `json.encode_string`/`json.decode_string` | `modules/json/json.pr` | 2 | **Done** |
+| `` `serializable `` flag in types | `types/named.go` | 3 | **Done** |
+| Field annotations (`key`, `skip`, `include_none`, `required`, `flatten`) | `sema/meta.go`, `sema/decl.go` | 3 | **Done** |
+| AST synthesis for encode/decode | `sema/serialize.go` | 3 | **Done** — primitive + optional fields |
+| Nested user-type decode | `sema/serialize.go` | 4 | Blocked (needs optional force-unwrap) |
+| Enum serialization | `sema/serialize.go` | 4 | Planned |
+| `` `flatten `` support | `sema/serialize.go` | 4 | Planned |
+| TOML/YAML/MsgPack modules | `modules/toml/`, etc. | 5 | Planned |

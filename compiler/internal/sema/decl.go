@@ -360,6 +360,11 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 	named.SetDoc(extractDoc(d.Annotations))
 	named.SetDeprecated(extractDeprecated(d.Annotations))
 
+	// Process `serializable: extract field annotations, synthesize encode/decode methods.
+	if c.hasAnnotation(d.Annotations, "serializable") {
+		c.processSerializableType(named, d)
+	}
+
 	// Detect and validate value types (all fields are `value placement).
 	// Must run after field/meta processing, before drop/new validation.
 	c.detectValueType(named, d)
@@ -397,6 +402,19 @@ func (c *Checker) defineField(named *types.Named, fd *ast.FieldDecl) {
 	c.validateMetas(fd.Annotations, TargetField)
 	f.SetDoc(extractDoc(fd.Annotations))
 	f.SetDeprecated(extractDeprecated(fd.Annotations))
+	// Serialization annotations — stored on field for later use by processSerializableType.
+	if c.hasAnnotation(fd.Annotations, "skip") {
+		f.SetSkip(true)
+	}
+	if c.hasAnnotation(fd.Annotations, "include_none") {
+		f.SetIncludeNone(true)
+	}
+	if c.hasAnnotation(fd.Annotations, "required") {
+		f.SetRequired(true)
+	}
+	if key := extractKey(fd.Annotations); key != "" {
+		f.SetKeyName(key)
+	}
 	named.AddField(f)
 }
 

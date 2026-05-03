@@ -1,0 +1,282 @@
+use json;
+
+// ── Test types ──────────────────────────────────────────────────────────────
+
+type Point `serializable {
+  int x;
+  int y;
+}
+
+type User `serializable {
+  string name `key("user_name");
+  int age;
+  string? email;
+  string _internal `skip;
+}
+
+type MixedFields `serializable {
+  string label;
+  int count;
+  f64 score;
+  bool active;
+}
+
+type WithOptionals `serializable {
+  string name;
+  string? bio;
+  int? level;
+}
+
+type Address `serializable {
+  string street;
+  string city;
+}
+
+// Note: nested serializable decode (Person with Address field) deferred to Phase 4.
+// Encode works, but decode requires optional force-unwrap which Promise doesn't have yet.
+
+type WithIncludeNone `serializable {
+  string name;
+  string? tag `include_none;
+}
+
+type CustomEncode `serializable {
+  int value;
+
+  // User-provided encode overrides the generated one.
+  encode(Encoder ~e)! {
+    e.encode_string("custom:" + this.value.to_string());
+  }
+}
+
+// ── Basic encode/decode ─────────────────────────────────────────────────────
+
+encode_point_test() `test {
+  Point p = Point(x: 3, y: 4);
+  json.JsonEncoder enc = json.JsonEncoder();
+  p.encode(enc)!;
+  string s = enc.to_string();
+  assert(s.contains("\"x\":3"), "has x:3");
+  assert(s.contains("\"y\":4"), "has y:4");
+}
+
+decode_point_test() `test {
+  Point p1 = Point(x: 10, y: 20);
+  json.JsonEncoder enc = json.JsonEncoder();
+  p1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  Point p2 = Point.decode(dec)!;
+  assert(p2.x == 10, "decoded x");
+  assert(p2.y == 20, "decoded y");
+}
+
+round_trip_point_test() `test {
+  Point p1 = Point(x: 42, y: 99);
+  json.JsonEncoder enc = json.JsonEncoder();
+  p1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  Point p2 = Point.decode(dec)!;
+  assert(p2.x == p1.x, "round trip x");
+  assert(p2.y == p1.y, "round trip y");
+}
+
+// ── Mixed field types ───────────────────────────────────────────────────────
+
+mixed_fields_encode_test() `test {
+  MixedFields m = MixedFields(label: "test", count: 5, score: 3.14, active: true);
+  json.JsonEncoder enc = json.JsonEncoder();
+  m.encode(enc)!;
+  string s = enc.to_string();
+  assert(s.contains("\"label\":\"test\""), "mixed: label");
+  assert(s.contains("\"count\":5"), "mixed: count");
+  assert(s.contains("\"active\":true"), "mixed: active");
+  assert(s.contains("\"score\":"), "mixed: score present");
+}
+
+mixed_fields_round_trip_test() `test {
+  MixedFields m1 = MixedFields(label: "hello", count: 0, score: 2.5, active: false);
+  json.JsonEncoder enc = json.JsonEncoder();
+  m1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  MixedFields m2 = MixedFields.decode(dec)!;
+  assert(m2.label == "hello", "rt label");
+  assert(m2.count == 0, "rt count zero");
+  assert(m2.score == 2.5, "rt score");
+  assert(m2.active == false, "rt active false");
+}
+
+// Nested encode/decode deferred to Phase 4 (requires optional force-unwrap for decode).
+
+// ── Field annotations ───────────────────────────────────────────────────────
+
+key_annotation_test() `test {
+  User u = User(name: "Alice", age: 30, _internal: "secret");
+  json.JsonEncoder enc = json.JsonEncoder();
+  u.encode(enc)!;
+  string s = enc.to_string();
+  assert(s.contains("\"user_name\":"), "key: has user_name");
+  assert(!s.contains("\"name\":"), "key: no raw name");
+}
+
+skip_annotation_test() `test {
+  User u = User(name: "Bob", age: 25, _internal: "hidden");
+  json.JsonEncoder enc = json.JsonEncoder();
+  u.encode(enc)!;
+  string s = enc.to_string();
+  assert(!s.contains("internal"), "skip: no internal field");
+  assert(!s.contains("hidden"), "skip: no hidden value");
+}
+
+optional_omit_none_test() `test {
+  User u = User(name: "Carol", age: 28, _internal: "x");
+  json.JsonEncoder enc = json.JsonEncoder();
+  u.encode(enc)!;
+  string s = enc.to_string();
+  assert(!s.contains("email"), "optional none: email omitted");
+}
+
+optional_present_test() `test {
+  User u = User(name: "Dave", age: 35, email: "d@test.com", _internal: "x");
+  json.JsonEncoder enc = json.JsonEncoder();
+  u.encode(enc)!;
+  string s = enc.to_string();
+  assert(s.contains("\"email\":\"d@test.com\""), "optional present: email included");
+}
+
+include_none_test() `test {
+  WithIncludeNone w = WithIncludeNone(name: "test");
+  json.JsonEncoder enc = json.JsonEncoder();
+  w.encode(enc)!;
+  string s = enc.to_string();
+  assert(s.contains("\"tag\":null"), "include_none: tag is null");
+}
+
+include_none_present_test() `test {
+  WithIncludeNone w = WithIncludeNone(name: "test", tag: "hello");
+  json.JsonEncoder enc = json.JsonEncoder();
+  w.encode(enc)!;
+  string s = enc.to_string();
+  assert(s.contains("\"tag\":\"hello\""), "include_none present: tag has value");
+}
+
+// ── Multiple optional fields ────────────────────────────────────────────────
+
+multiple_optionals_none_test() `test {
+  WithOptionals w = WithOptionals(name: "test");
+  json.JsonEncoder enc = json.JsonEncoder();
+  w.encode(enc)!;
+  string s = enc.to_string();
+  assert(!s.contains("bio"), "multi opt: bio omitted");
+  assert(!s.contains("level"), "multi opt: level omitted");
+}
+
+multiple_optionals_some_test() `test {
+  WithOptionals w = WithOptionals(name: "test", bio: "hello", level: 5);
+  json.JsonEncoder enc = json.JsonEncoder();
+  w.encode(enc)!;
+  string s = enc.to_string();
+  assert(s.contains("\"bio\":\"hello\""), "multi opt: bio present");
+  assert(s.contains("\"level\":5"), "multi opt: level present");
+}
+
+multiple_optionals_round_trip_test() `test {
+  WithOptionals w1 = WithOptionals(name: "test", level: 3);
+  json.JsonEncoder enc = json.JsonEncoder();
+  w1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  WithOptionals w2 = WithOptionals.decode(dec)!;
+  assert(w2.name == "test", "multi opt rt: name");
+  assert(w2.bio is absent, "multi opt rt: bio absent");
+  assert(w2.level is present, "multi opt rt: level present");
+}
+
+// ── Decode with optional fields ─────────────────────────────────────────────
+
+decode_optional_present_test() `test {
+  User u1 = User(name: "Eve", age: 40, email: "eve@test.com", _internal: "s");
+  json.JsonEncoder enc = json.JsonEncoder();
+  u1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  User u2 = User.decode(dec)!;
+  assert(u2.name == "Eve", "decode opt present: name");
+  assert(u2.age == 40, "decode opt present: age");
+  assert(u2.email is present, "decode opt present: email exists");
+}
+
+decode_optional_missing_test() `test {
+  User u1 = User(name: "Frank", age: 50, _internal: "s");
+  json.JsonEncoder enc = json.JsonEncoder();
+  u1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  User u2 = User.decode(dec)!;
+  assert(u2.name == "Frank", "decode opt missing: name");
+  assert(u2.age == 50, "decode opt missing: age");
+  assert(u2.email is absent, "decode opt missing: email absent");
+}
+
+// ── String escaping in field values ─────────────────────────────────────────
+
+string_escape_round_trip_test() `test {
+  MixedFields m1 = MixedFields(label: "has \"quotes\" and\nnewlines", count: 1, score: 0.0, active: true);
+  json.JsonEncoder enc = json.JsonEncoder();
+  m1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  MixedFields m2 = MixedFields.decode(dec)!;
+  assert(m2.label == "has \"quotes\" and\nnewlines", "escape rt: label preserved");
+}
+
+// ── Edge cases ──────────────────────────────────────────────────────────────
+
+zero_values_test() `test {
+  MixedFields m1 = MixedFields(label: "", count: 0, score: 0.0, active: false);
+  json.JsonEncoder enc = json.JsonEncoder();
+  m1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  MixedFields m2 = MixedFields.decode(dec)!;
+  assert(m2.label == "", "zero: empty string");
+  assert(m2.count == 0, "zero: count");
+  assert(m2.active == false, "zero: bool false");
+}
+
+negative_values_test() `test {
+  Point p1 = Point(x: -42, y: -1);
+  json.JsonEncoder enc = json.JsonEncoder();
+  p1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  Point p2 = Point.decode(dec)!;
+  assert(p2.x == -42, "negative: x");
+  assert(p2.y == -1, "negative: y");
+}
+
+large_values_test() `test {
+  Point p1 = Point(x: 1000000, y: -999999);
+  json.JsonEncoder enc = json.JsonEncoder();
+  p1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  Point p2 = Point.decode(dec)!;
+  assert(p2.x == 1000000, "large: x");
+  assert(p2.y == -999999, "large: y");
+}
+
+// ── Custom encode override ──────────────────────────────────────────────────
+
+custom_encode_test() `test {
+  CustomEncode c = CustomEncode(value: 42);
+  json.JsonEncoder enc = json.JsonEncoder();
+  c.encode(enc)!;
+  string s = enc.to_string();
+  assert(s == "\"custom:42\"", "custom encode: " + s);
+}
+
+// ── Decode with key renaming ────────────────────────────────────────────────
+
+decode_with_key_test() `test {
+  User u1 = User(name: "Grace", age: 28, _internal: "x");
+  json.JsonEncoder enc = json.JsonEncoder();
+  u1.encode(enc)!;
+  // The encoded JSON uses "user_name" not "name" — decode must match.
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  User u2 = User.decode(dec)!;
+  assert(u2.name == "Grace", "decode key: name via user_name");
+  assert(u2.age == 28, "decode key: age");
+}

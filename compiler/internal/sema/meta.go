@@ -62,6 +62,11 @@ var builtinMetas = map[string][]MetaTarget{
 	"extern":       {TargetFunc},
 	"target":       {TargetType, TargetEnum, TargetFunc},
 	"serializable": {TargetType, TargetEnum},
+	"key":          {TargetField, TargetVariant},
+	"skip":         {TargetField},
+	"include_none": {TargetField},
+	"required":     {TargetField},
+	"flatten":      {TargetField},
 	"public":       {TargetType, TargetField, TargetMethod, TargetFunc, TargetEnum},
 	"unsafe":       {TargetFunc, TargetMethod},
 	"final":        {TargetField},
@@ -203,6 +208,20 @@ func resolveEscape(seq string) string {
 	default:
 		return "\\" + seq
 	}
+}
+
+// extractKey returns the key name from a `key("name") annotation, or "".
+func extractKey(annotations []*ast.MetaAnnotation) string {
+	for _, ann := range annotations {
+		if ann.Name != "key" {
+			continue
+		}
+		if len(ann.Params) > 0 {
+			return evalStringLit(ann.Params[0].Value)
+		}
+		return ""
+	}
+	return ""
 }
 
 // extractTestExpected extracts the expected output from a `test(expected="...") annotation.

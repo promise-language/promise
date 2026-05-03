@@ -185,6 +185,10 @@ type Compiler struct {
 	palGetEnv       *ir.Func // @pal_getenv(i8* name) → i8* (value or null)
 	palGetCwd       *ir.Func // @pal_getcwd(i8* buf, i64 len) → i8* (buf or null)
 
+	// Command-line argument globals (populated from main's argc/argv)
+	argcGlobal *ir.Global // @__promise_argc (i32)
+	argvGlobal *ir.Global // @__promise_argv (i8**)
+
 	// Scheduler globals (Phase 5c — M:N scheduler)
 	currentGGlobal     *ir.Global // @__promise_current_g (TLS, i8*)
 	currentPGlobal     *ir.Global // @__promise_current_p (TLS, i8*) — current P for local queue ops
@@ -546,11 +550,17 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 		// Clear existing blocks
 		mainFn.Blocks = nil
 	} else {
-		mainFn = c.module.NewFunc("main", irtypes.I32)
+		mainFn = c.module.NewFunc("main", irtypes.I32,
+			ir.NewParam("argc", irtypes.I32),
+			ir.NewParam("argv", irtypes.NewPointer(irtypes.I8Ptr)))
 		c.funcs["main"] = mainFn
 	}
 
 	entry := mainFn.NewBlock(".entry")
+
+	// Store argc/argv into globals for os.args() / os.executable()
+	entry.NewStore(mainFn.Params[0], c.argcGlobal)
+	entry.NewStore(mainFn.Params[1], c.argvGlobal)
 
 	// Allocate counters: passed and failed
 	passedAlloca := entry.NewAlloca(irtypes.I32)
@@ -957,6 +967,10 @@ func (c *Compiler) declareIntrinsics() {
 	c.palDirClose = p.EmitDirClose(c.module)
 	c.palGetEnv = p.EmitGetEnv(c.module)
 	c.palGetCwd = p.EmitGetCwd(c.module)
+
+	// Command-line argument globals — populated from main's argc/argv
+	c.argcGlobal = c.module.NewGlobalDef("__promise_argc", constant.NewInt(irtypes.I32, 0))
+	c.argvGlobal = c.module.NewGlobalDef("__promise_argv", constant.NewNull(irtypes.NewPointer(irtypes.I8Ptr)))
 
 	// strlen — needed by definePanicBody to get C string length.
 	// May already be declared by PAL (e.g., Windows EmitDirOpen), so check first.
@@ -2754,9 +2768,13 @@ func (c *Compiler) declareFuncs(file *ast.File) {
 			params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
 		}
 
-		// C ABI requires main to return i32 (overrides canError)
+		// C ABI requires main to return i32 and receive argc/argv
 		if fd.Name == "main" {
 			retType = irtypes.I32
+			params = []*ir.Param{
+				ir.NewParam("argc", irtypes.I32),
+				ir.NewParam("argv", irtypes.NewPointer(irtypes.I8Ptr)),
+			}
 		}
 
 		fn := c.module.NewFunc(fd.Name, retType, params...)

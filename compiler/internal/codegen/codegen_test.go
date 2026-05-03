@@ -949,7 +949,7 @@ func TestStringExternReturn(t *testing.T) {
 		main() { s := get_greeting(); }
 	`)
 	// Extern returns promise_string_v
-	assertContains(t, ir, "define i32 @main()")
+	assertContains(t, ir, "define i32 @main(i32 %argc, i8** %argv)")
 	// Unpack: extractvalue + bitcast back to i8*
 	assertContains(t, ir, "extractvalue %promise_string_v")
 	assertContains(t, ir, "bitcast %promise_string_i*")
@@ -5619,6 +5619,30 @@ func TestGenerateTestMainReplacesExistingMain(t *testing.T) {
 	assertContains(t, ir, "call void @promise_test_summary")
 }
 
+func TestGenerateTestMainStoresArgcArgv(t *testing.T) {
+	// GenerateTestMain should store argc/argv to globals for os.arguments()/os.executable_path()
+	result := compileResult(t, `
+		myTest() `+"`test"+` { }
+	`)
+	info, _ := sema.Check(func() *ast.File {
+		input := antlr.NewInputStream(`myTest() ` + "`test" + ` { }`)
+		lexer := parser.NewPromiseLexer(input)
+		lexer.RemoveErrorListeners()
+		stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+		p := parser.NewPromiseParser(stream)
+		p.RemoveErrorListeners()
+		tree := p.CompilationUnit()
+		file, _ := ast.Build("test.pr", tree)
+		return file
+	}())
+	result.GenerateTestMain(info.Tests)
+	ir := result.Module.String()
+	// Test main receives argc/argv and stores to globals
+	assertContains(t, ir, "define i32 @main(i32 %argc, i8** %argv)")
+	assertContains(t, ir, "store i32 %argc, i32* @__promise_argc")
+	assertContains(t, ir, "store i8** %argv, i8*** @__promise_argv")
+}
+
 func TestTestPrintResultBody(t *testing.T) {
 	result := compileResult(t, `
 		myTest() `+"`test"+` { }
@@ -8512,7 +8536,7 @@ func TestMainWrappedAsG0(t *testing.T) {
 		main() { }
 	`)
 	// Main is the OS entry point that initializes the scheduler
-	assertContains(t, ir, "define i32 @main()")
+	assertContains(t, ir, "define i32 @main(i32 %argc, i8** %argv)")
 	assertContains(t, ir, "call i32 @pal_num_cpus()")
 	assertContains(t, ir, "call void @promise_sched_init(")
 	assertContains(t, ir, "call void @promise_sched_run_until_main(")
@@ -10573,4 +10597,60 @@ func TestSchedLoopSetsCurrentM(t *testing.T) {
 	// sched_loop stores m to current_m
 	assertContains(t, ir, "__promise_current_m")
 	assertContains(t, ir, "promise_sched_loop")
+}
+
+// --- OS bridge tests ---
+
+func TestArgcArgvGlobals(t *testing.T) {
+	ir := generateIR(t, `
+		main() { }
+	`)
+	// argc/argv globals are always declared for os.args()/os.executable()
+	assertContains(t, ir, "@__promise_argc = global i32 0")
+	assertContains(t, ir, "@__promise_argv = global i8**")
+}
+
+func TestMainStoresArgcArgv(t *testing.T) {
+	ir := generateIR(t, `
+		main() { }
+	`)
+	// main receives argc/argv and stores them to globals
+	assertContains(t, ir, "define i32 @main(i32 %argc, i8** %argv)")
+	assertContains(t, ir, "store i32 %argc, i32* @__promise_argc")
+	assertContains(t, ir, "store i8** %argv, i8*** @__promise_argv")
+}
+
+func TestPALGetEnvGetCwdDefined(t *testing.T) {
+	ir := generateIR(t, `
+		main() { }
+	`)
+	// PAL getenv/getcwd wrappers are always declared
+	assertContains(t, ir, "@pal_getenv")
+	assertContains(t, ir, "@pal_getcwd")
+}
+
+func TestOptionalExternSret(t *testing.T) {
+	ir := generateIR(t, `
+		get_val(string name) string? `+"`"+`extern("promise_get_val");
+		main() {
+			string? v = get_val("key");
+		}
+	`)
+	// Optional extern uses sret with {i1, T} struct
+	assertContains(t, ir, "declare void @promise_get_val(")
+	// Caller allocates sret and loads result
+	assertContains(t, ir, "call void @promise_get_val(")
+}
+
+func TestFailableExternSret(t *testing.T) {
+	ir := generateIR(t, `
+		get_cwd() string! `+"`"+`extern("promise_get_cwd");
+		main() {
+			string s = get_cwd()!;
+		}
+	`)
+	// Failable extern uses sret with {i1, T, i8*} struct
+	assertContains(t, ir, "declare void @promise_get_cwd(")
+	// Caller allocates sret and loads result
+	assertContains(t, ir, "call void @promise_get_cwd(")
 }

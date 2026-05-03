@@ -121,8 +121,10 @@ func (c *Compiler) emitWasmStart(mainFn *ir.Func) {
 	startFn.FuncAttrs = append(startFn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := startFn.NewBlock(".entry")
 
-	// Call @main (scheduler setup + coroutine run)
-	exitCode := entry.NewCall(mainFn)
+	// Call @main(argc=0, argv=null) — WASM has no command-line arguments
+	exitCode := entry.NewCall(mainFn,
+		constant.NewInt(irtypes.I32, 0),
+		constant.NewNull(irtypes.NewPointer(irtypes.I8Ptr)))
 
 	// Exit with main's return code
 	entry.NewCall(c.palExit, exitCode)

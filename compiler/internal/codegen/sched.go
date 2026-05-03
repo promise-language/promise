@@ -1897,9 +1897,13 @@ func (c *Compiler) wrapMainWithScheduler() {
 		}
 	}
 
-	// mainFn was declared by declareFuncs with i32 return but no body defined.
+	// mainFn was declared by declareFuncs with i32 return and argc/argv params.
 	// Use it directly as the OS entry point — add scheduler setup code.
 	entry := mainFn.NewBlock(".entry")
+
+	// Store argc/argv into globals for os.args() / os.executable()
+	entry.NewStore(mainFn.Params[0], c.argcGlobal)
+	entry.NewStore(mainFn.Params[1], c.argvGlobal)
 
 	if c.isWasm {
 		// WASM: create @_start entry point that calls __promise_init_heap then @main

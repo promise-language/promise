@@ -751,3 +751,182 @@ func (p *WindowsPAL) EmitNumCPUs(module *ir.Module) *ir.Func {
 	entry.NewRet(clamped)
 	return fn
 }
+
+// --- Windows directory listing (Phase D) ---
+//
+// Windows uses FindFirstFileA/FindNextFileA/FindClose.
+// State struct layout (heap-allocated, returned as i8* handle):
+//   offset 0:  i8*  hFind (HANDLE, 8 bytes)
+//   offset 8:  i32  first (flag: 1 = first entry already in findData, 0 = need FindNextFileA)
+//   offset 12: i32  padding
+//   offset 16: [328 x i8] WIN32_FIND_DATAA
+// cFileName is at offset 44 within WIN32_FIND_DATAA → offset 60 within state struct.
+// Total state struct size: 344 bytes.
+
+const winDirStateSize = 344
+const winDirFindDataOffset = 16
+const winDirCFileNameOffset = 60 // 16 (findData start) + 44 (cFileName within WIN32_FIND_DATAA)
+
+// EmitDirOpen declares Win32 FindFirstFileA and defines @pal_dir_open.
+// Appends "\\*" to the path, calls FindFirstFileA, allocates state struct.
+// Returns i8* handle (state struct) or null on error.
+func (p *WindowsPAL) EmitDirOpen(module *ir.Module) *ir.Func {
+	// declare i8* @FindFirstFileA(i8*, i8*) nounwind
+	findFirst := module.NewFunc("FindFirstFileA", irtypes.I8Ptr,
+		ir.NewParam("lpFileName", irtypes.I8Ptr),
+		ir.NewParam("lpFindFileData", irtypes.I8Ptr))
+	findFirst.FuncAttrs = append(findFirst.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	palAlloc := lookupFunc(module, "pal_alloc")
+	palFree := lookupFunc(module, "pal_free")
+	strlenFn := lookupFunc(module, "strlen")
+	if strlenFn == nil {
+		strlenFn = module.NewFunc("strlen", irtypes.I64,
+			ir.NewParam("s", irtypes.I8Ptr))
+		strlenFn.FuncAttrs = append(strlenFn.FuncAttrs, enum.FuncAttrNoUnwind)
+	}
+
+	fn := module.NewFunc("pal_dir_open", irtypes.I8Ptr,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	// Build "path\\*" pattern: allocate len+3 bytes (path + "\\*" + null)
+	pathLen := entry.NewCall(strlenFn, fn.Params[0])
+	patternSize := entry.NewAdd(pathLen, constant.NewInt(irtypes.I64, 3))
+	pattern := entry.NewCall(palAlloc, patternSize)
+
+	// memcpy path into pattern buffer
+	memcpyFn := lookupFunc(module, "memcpy")
+	if memcpyFn == nil {
+		memcpyFn = module.NewFunc("memcpy", irtypes.I8Ptr,
+			ir.NewParam("dst", irtypes.I8Ptr),
+			ir.NewParam("src", irtypes.I8Ptr),
+			ir.NewParam("n", irtypes.I64))
+		memcpyFn.FuncAttrs = append(memcpyFn.FuncAttrs, enum.FuncAttrNoUnwind)
+	}
+	entry.NewCall(memcpyFn, pattern, fn.Params[0], pathLen)
+
+	// Append "\\*\0"
+	slashPos := entry.NewGetElementPtr(irtypes.I8, pattern, pathLen)
+	entry.NewStore(constant.NewInt(irtypes.I8, '\\'), slashPos)
+	starPos := entry.NewGetElementPtr(irtypes.I8, pattern,
+		entry.NewAdd(pathLen, constant.NewInt(irtypes.I64, 1)))
+	entry.NewStore(constant.NewInt(irtypes.I8, '*'), starPos)
+	nullPos := entry.NewGetElementPtr(irtypes.I8, pattern,
+		entry.NewAdd(pathLen, constant.NewInt(irtypes.I64, 2)))
+	entry.NewStore(constant.NewInt(irtypes.I8, 0), nullPos)
+
+	// Allocate state struct
+	state := entry.NewCall(palAlloc, constant.NewInt(irtypes.I64, winDirStateSize))
+
+	// FindFirstFileA(pattern, &state[findDataOffset])
+	findDataPtr := entry.NewGetElementPtr(irtypes.I8, state,
+		constant.NewInt(irtypes.I64, winDirFindDataOffset))
+	hFind := entry.NewCall(findFirst, pattern, findDataPtr)
+
+	// Free pattern
+	entry.NewCall(palFree, pattern)
+
+	// Check INVALID_HANDLE_VALUE (-1 as i8*)
+	hFindInt := entry.NewPtrToInt(hFind, irtypes.I64)
+	isInvalid := entry.NewICmp(enum.IPredEQ, hFindInt, constant.NewInt(irtypes.I64, -1))
+	okBlk := fn.NewBlock(".ok")
+	failBlk := fn.NewBlock(".fail")
+	entry.NewCondBr(isInvalid, failBlk, okBlk)
+
+	// Failure: free state, return null
+	failBlk.NewCall(palFree, state)
+	failBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
+
+	// Success: store hFind at offset 0, set first=1 at offset 8
+	hFindPtr := okBlk.NewBitCast(state, irtypes.NewPointer(irtypes.I8Ptr))
+	okBlk.NewStore(hFind, hFindPtr)
+	firstFlagPtr := okBlk.NewGetElementPtr(irtypes.I8, state, constant.NewInt(irtypes.I64, 8))
+	firstFlagPtrI32 := okBlk.NewBitCast(firstFlagPtr, irtypes.NewPointer(irtypes.I32))
+	okBlk.NewStore(constant.NewInt(irtypes.I32, 1), firstFlagPtrI32)
+
+	okBlk.NewRet(state)
+	return fn
+}
+
+// EmitDirNextName defines @pal_dir_next_name for Windows.
+// If first flag is set, returns cFileName from current findData, clears first.
+// Otherwise calls FindNextFileA; returns cFileName or null when done.
+func (p *WindowsPAL) EmitDirNextName(module *ir.Module) *ir.Func {
+	// declare i32 @FindNextFileA(i8*, i8*) nounwind
+	findNext := module.NewFunc("FindNextFileA", irtypes.I32,
+		ir.NewParam("hFindFile", irtypes.I8Ptr),
+		ir.NewParam("lpFindFileData", irtypes.I8Ptr))
+	findNext.FuncAttrs = append(findNext.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_dir_next_name", irtypes.I8Ptr,
+		ir.NewParam("handle", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	// Load first flag from offset 8
+	firstFlagPtr := entry.NewGetElementPtr(irtypes.I8, fn.Params[0],
+		constant.NewInt(irtypes.I64, 8))
+	firstFlagPtrI32 := entry.NewBitCast(firstFlagPtr, irtypes.NewPointer(irtypes.I32))
+	firstFlag := entry.NewLoad(irtypes.I32, firstFlagPtrI32)
+	isFirst := entry.NewICmp(enum.IPredNE, firstFlag, constant.NewInt(irtypes.I32, 0))
+
+	firstBlk := fn.NewBlock(".first")
+	nextBlk := fn.NewBlock(".next")
+	entry.NewCondBr(isFirst, firstBlk, nextBlk)
+
+	// First entry: clear flag, return cFileName pointer
+	firstBlk.NewStore(constant.NewInt(irtypes.I32, 0), firstFlagPtrI32)
+	firstName := firstBlk.NewGetElementPtr(irtypes.I8, fn.Params[0],
+		constant.NewInt(irtypes.I64, winDirCFileNameOffset))
+	firstBlk.NewRet(firstName)
+
+	// Subsequent entries: call FindNextFileA
+	hFindPtr := nextBlk.NewBitCast(fn.Params[0], irtypes.NewPointer(irtypes.I8Ptr))
+	hFind := nextBlk.NewLoad(irtypes.I8Ptr, hFindPtr)
+	findDataPtr := nextBlk.NewGetElementPtr(irtypes.I8, fn.Params[0],
+		constant.NewInt(irtypes.I64, winDirFindDataOffset))
+	rc := nextBlk.NewCall(findNext, hFind, findDataPtr)
+
+	isZero := nextBlk.NewICmp(enum.IPredEQ, rc, constant.NewInt(irtypes.I32, 0))
+	gotBlk := fn.NewBlock(".got")
+	doneBlk := fn.NewBlock(".done")
+	nextBlk.NewCondBr(isZero, doneBlk, gotBlk)
+
+	// Got entry: return cFileName
+	gotName := gotBlk.NewGetElementPtr(irtypes.I8, fn.Params[0],
+		constant.NewInt(irtypes.I64, winDirCFileNameOffset))
+	gotBlk.NewRet(gotName)
+
+	// Done: return null
+	doneBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
+
+	return fn
+}
+
+// EmitDirClose defines @pal_dir_close for Windows.
+// Calls FindClose on the stored HANDLE, then frees the state struct.
+func (p *WindowsPAL) EmitDirClose(module *ir.Module) *ir.Func {
+	// declare i32 @FindClose(i8*) nounwind
+	findClose := module.NewFunc("FindClose", irtypes.I32,
+		ir.NewParam("hFindFile", irtypes.I8Ptr))
+	findClose.FuncAttrs = append(findClose.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	palFree := lookupFunc(module, "pal_free")
+
+	fn := module.NewFunc("pal_dir_close", irtypes.Void,
+		ir.NewParam("handle", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	// Load HANDLE from offset 0
+	hFindPtr := entry.NewBitCast(fn.Params[0], irtypes.NewPointer(irtypes.I8Ptr))
+	hFind := entry.NewLoad(irtypes.I8Ptr, hFindPtr)
+	entry.NewCall(findClose, hFind)
+
+	// Free state struct
+	entry.NewCall(palFree, fn.Params[0])
+	entry.NewRet(nil)
+	return fn
+}

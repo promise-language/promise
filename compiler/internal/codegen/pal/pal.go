@@ -79,6 +79,16 @@ type PAL interface {
 	EmitDirExists(module *ir.Module) *ir.Func
 	// EmitErrno defines @pal_errno() → i32
 	EmitErrno(module *ir.Module) *ir.Func
+
+	// Directory listing primitives (Phase D)
+	// EmitDirOpen defines @pal_dir_open(i8* path) → i8* (DIR*/handle or null)
+	EmitDirOpen(module *ir.Module) *ir.Func
+	// EmitDirNextName defines @pal_dir_next_name(i8* handle) → i8* (name or null)
+	// Returns pointer to null-terminated entry name, or null when done.
+	// On error, returns null and errno is set.
+	EmitDirNextName(module *ir.Module) *ir.Func
+	// EmitDirClose defines @pal_dir_close(i8* handle) → void
+	EmitDirClose(module *ir.Module) *ir.Func
 }
 
 // ForTarget returns a PAL implementation for the given LLVM target triple.
@@ -435,5 +445,37 @@ func emitStubErrno(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	entry.NewRet(constant.NewInt(irtypes.I32, 0))
+	return fn
+}
+
+// --- Stub directory listing implementations (used by WASM PAL) ---
+
+// emitStubDirOpen returns null (no dir listing support).
+func emitStubDirOpen(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_dir_open", irtypes.I8Ptr,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewNull(irtypes.I8Ptr))
+	return fn
+}
+
+// emitStubDirNextName returns null.
+func emitStubDirNextName(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_dir_next_name", irtypes.I8Ptr,
+		ir.NewParam("handle", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewNull(irtypes.I8Ptr))
+	return fn
+}
+
+// emitStubDirClose is a no-op.
+func emitStubDirClose(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_dir_close", irtypes.Void,
+		ir.NewParam("handle", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(nil)
 	return fn
 }

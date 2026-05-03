@@ -175,6 +175,11 @@ func (p *WasmPAL) EmitDirRemove(module *ir.Module) *ir.Func    { return emitStub
 func (p *WasmPAL) EmitDirExists(module *ir.Module) *ir.Func    { return emitStubDirExists(module) }
 func (p *WasmPAL) EmitErrno(module *ir.Module) *ir.Func        { return emitStubErrno(module) }
 
+// WASM directory listing stubs — no filesystem access.
+func (p *WasmPAL) EmitDirOpen(module *ir.Module) *ir.Func     { return emitStubDirOpen(module) }
+func (p *WasmPAL) EmitDirNextName(module *ir.Module) *ir.Func { return emitStubDirNextName(module) }
+func (p *WasmPAL) EmitDirClose(module *ir.Module) *ir.Func    { return emitStubDirClose(module) }
+
 // WASM threading stubs — run synchronously. WASM has no threads (Phase 5d: cooperative scheduler).
 func (p *WasmPAL) EmitThreadCreate(module *ir.Module) *ir.Func  { return emitStubThreadCreate(module) }
 func (p *WasmPAL) EmitThreadJoin(module *ir.Module) *ir.Func    { return emitStubThreadJoin(module) }

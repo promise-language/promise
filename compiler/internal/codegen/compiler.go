@@ -178,6 +178,9 @@ type Compiler struct {
 	palFileMkdir    *ir.Func // @pal_file_mkdir(i8* path) → i32
 	palDirRemove    *ir.Func // @pal_dir_remove(i8* path) → i32
 	palDirExists    *ir.Func // @pal_dir_exists(i8* path) → i32
+	palDirOpen      *ir.Func // @pal_dir_open(i8* path) → i8*
+	palDirNextName  *ir.Func // @pal_dir_next_name(i8* handle) → i8*
+	palDirClose     *ir.Func // @pal_dir_close(i8* handle) → void
 	palErrno        *ir.Func // @pal_errno() → i32
 
 	// Scheduler globals (Phase 5c — M:N scheduler)
@@ -942,15 +945,29 @@ func (c *Compiler) declareIntrinsics() {
 	c.palDirRemove = p.EmitDirRemove(c.module)
 	c.palDirExists = p.EmitDirExists(c.module)
 	c.palErrno = p.EmitErrno(c.module)
+	c.palDirOpen = p.EmitDirOpen(c.module)
+	c.palDirNextName = p.EmitDirNextName(c.module)
+	c.palDirClose = p.EmitDirClose(c.module)
 
-	// strlen — needed by definePanicBody to get C string length
+	// strlen — needed by definePanicBody to get C string length.
+	// May already be declared by PAL (e.g., Windows EmitDirOpen), so check first.
 	if c.isWasm {
 		c.funcs["strlen"] = c.defineWasmStrlen()
 	} else {
-		strlenFn := c.module.NewFunc("strlen", irtypes.I64,
-			ir.NewParam("s", irtypes.I8Ptr))
-		strlenFn.FuncAttrs = append(strlenFn.FuncAttrs,
-			enum.FuncAttrNoUnwind, enum.FuncAttrReadOnly, enum.FuncAttrWillReturn)
+		// Check if already declared (e.g., by Windows PAL EmitDirOpen)
+		var strlenFn *ir.Func
+		for _, f := range c.module.Funcs {
+			if f.Name() == "strlen" {
+				strlenFn = f
+				break
+			}
+		}
+		if strlenFn == nil {
+			strlenFn = c.module.NewFunc("strlen", irtypes.I64,
+				ir.NewParam("s", irtypes.I8Ptr))
+			strlenFn.FuncAttrs = append(strlenFn.FuncAttrs,
+				enum.FuncAttrNoUnwind, enum.FuncAttrReadOnly, enum.FuncAttrWillReturn)
+		}
 		c.funcs["strlen"] = strlenFn
 	}
 

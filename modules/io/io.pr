@@ -16,6 +16,16 @@ _io_file_mkdir(string path) int `extern("promise_io_file_mkdir");
 _io_dir_remove(string path) int `extern("promise_io_dir_remove");
 _io_dir_exists(string path) int `extern("promise_io_dir_exists");
 _io_errno() int `extern("promise_io_errno");
+// read_line bridge: reads one line from fd, sets errno to _io_eof_sentinel() on EOF
+_io_file_read_line(int fd) string `extern("promise_io_file_read_line");
+// dir listing bridge: open → iterate → close
+_io_dir_open(string path) int `extern("promise_io_dir_open");
+_io_dir_next_name(int handle) string `extern("promise_io_dir_next_name");
+_io_dir_close_handle(int handle) int `extern("promise_io_dir_close_handle");
+
+// EOF sentinel value used by the read_line bridge to signal end-of-file.
+// Set in errno by the codegen bridge. Value 0x7FFF0001 — above all real POSIX errno values.
+_io_eof_sentinel() int { return 2147418113; }
 
 // ── Error type ───────────────────────────────────────────────────────────────
 
@@ -52,6 +62,23 @@ _io_strerror(int code) string {
         66 => "directory not empty",      // macOS ENOTEMPTY
         _ => "I/O error (errno {code})",
     };
+}
+
+// ── Stdin functions ──────────────────────────────────────────────────────────
+
+read_line() string?! `public `doc("Reads one line from stdin. Returns absent at EOF, raises IoError on error. Strips trailing newline.") {
+    string line = _io_file_read_line(0);
+    int rc = _io_errno();
+    if rc == _io_eof_sentinel() { return none; }
+    if rc != 0 { raise IoError(code: rc, message: _io_strerror(rc)); }
+    return line;
+}
+
+read_stdin() string! `public `doc("Reads all of stdin into a string.") {
+    string data = _io_file_read_all(0);
+    int rc = _io_errno();
+    if rc != 0 { raise IoError(code: rc, message: _io_strerror(rc)); }
+    return data;
 }
 
 // ── File type ────────────────────────────────────────────────────────────────
@@ -161,6 +188,52 @@ type Dir `public `doc("Directory operations. All methods are global.") {
     make(string path)! `global `public `doc("Creates a directory. Parent must exist.") {
         int rc = _io_file_mkdir(path);
         if rc < 0 { raise _make_io_error(rc); }
+    }
+
+    make_all(string path)! `global `public `doc("Creates a directory and all missing parent directories.") {
+        // _io_dir_exists / _io_file_mkdir consume their string arg, so we must
+        // pass distinct string values for each call (strings are move types).
+        if path.len == 0 { return; }
+        // Check if already exists — pass a substring copy to preserve path
+        if _io_dir_exists(path[0:path.len]) == 1 { return; }
+        // Find parent directory by searching backwards for '/'
+        int i = path.len - 1;
+        // Skip trailing slashes
+        while i > 0 && path[i] == '/' { i -= 1; }
+        // Find previous separator
+        while i > 0 && path[i] != '/' { i -= 1; }
+        if i > 0 {
+            string parent = path[0:i];
+            if _io_dir_exists(parent[0:parent.len]) != 1 {
+                Dir.make_all(parent);
+            }
+        }
+        // Ignore "already exists" errors (errno 17 on Linux, on macOS too)
+        int rc = _io_file_mkdir(path);
+        if rc < 0 {
+            int code = 0 - rc;
+            if code != 17 { raise _make_io_error(rc); }
+        }
+    }
+
+    list(string path) string[]! `global `public `doc("Returns the names of entries in a directory, excluding '.' and '..'.") {
+        int handle = _io_dir_open(path);
+        if handle < 0 { raise _make_io_error(handle); }
+        string[] result = string[]();
+        while true {
+            string name = _io_dir_next_name(handle);
+            int rc = _io_errno();
+            if rc != 0 {
+                _io_dir_close_handle(handle);
+                raise IoError(code: rc, message: _io_strerror(rc));
+            }
+            if name.len == 0 { break; }
+            if name != "." && name != ".." {
+                result.push(name);
+            }
+        }
+        _io_dir_close_handle(handle);
+        return result;
     }
 
     remove(string path)! `global `public `doc("Removes an empty directory.") {

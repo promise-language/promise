@@ -333,6 +333,39 @@ func (p *PosixPAL) getOrDeclareErrnoLocFn(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// getOrDeclareOpendir returns (or declares) libc @opendir(i8*) → i8*.
+func (p *PosixPAL) getOrDeclareOpendir(module *ir.Module) *ir.Func {
+	if fn := lookupFunc(module, "opendir"); fn != nil {
+		return fn
+	}
+	fn := module.NewFunc("opendir", irtypes.I8Ptr,
+		ir.NewParam("dirname", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	return fn
+}
+
+// getOrDeclareClosedir returns (or declares) libc @closedir(i8*) → i32.
+func (p *PosixPAL) getOrDeclareClosedir(module *ir.Module) *ir.Func {
+	if fn := lookupFunc(module, "closedir"); fn != nil {
+		return fn
+	}
+	fn := module.NewFunc("closedir", irtypes.I32,
+		ir.NewParam("dirp", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	return fn
+}
+
+// getOrDeclareReaddir returns (or declares) libc @readdir(i8*) → i8*.
+func (p *PosixPAL) getOrDeclareReaddir(module *ir.Module) *ir.Func {
+	if fn := lookupFunc(module, "readdir"); fn != nil {
+		return fn
+	}
+	fn := module.NewFunc("readdir", irtypes.I8Ptr,
+		ir.NewParam("dirp", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	return fn
+}
+
 // emitNegErrnoReturn emits a block that reads errno and returns -errno.
 // For i32 return type functions.
 func (p *PosixPAL) emitNegErrnoReturnI32(errBlk *ir.Block, errnoLocFn *ir.Func) {
@@ -642,13 +675,8 @@ func (p *PosixPAL) EmitDirRemove(module *ir.Module) *ir.Func {
 // EmitDirExists declares libc @opendir/@closedir and defines @pal_dir_exists.
 // Uses opendir(path) to test if the path is a directory.
 func (p *PosixPAL) EmitDirExists(module *ir.Module) *ir.Func {
-	opendirFn := module.NewFunc("opendir", irtypes.I8Ptr,
-		ir.NewParam("dirname", irtypes.I8Ptr))
-	opendirFn.FuncAttrs = append(opendirFn.FuncAttrs, enum.FuncAttrNoUnwind)
-
-	closedirFn := module.NewFunc("closedir", irtypes.I32,
-		ir.NewParam("dirp", irtypes.I8Ptr))
-	closedirFn.FuncAttrs = append(closedirFn.FuncAttrs, enum.FuncAttrNoUnwind)
+	opendirFn := p.getOrDeclareOpendir(module)
+	closedirFn := p.getOrDeclareClosedir(module)
 
 	fn := module.NewFunc("pal_dir_exists", irtypes.I32,
 		ir.NewParam("path", irtypes.I8Ptr))
@@ -708,5 +736,81 @@ func (p *PosixPAL) EmitNumCPUs(module *ir.Module) *ir.Func {
 	clamped := entry.NewSelect(isLess, constant.NewInt(irtypes.I64, 1), n)
 	result := entry.NewTrunc(clamped, irtypes.I32)
 	entry.NewRet(result)
+	return fn
+}
+
+// --- POSIX directory listing (Phase D) ---
+
+// EmitDirOpen declares libc @opendir and defines @pal_dir_open.
+// Signature: @pal_dir_open(i8* path) → i8* (DIR* or null on error)
+func (p *PosixPAL) EmitDirOpen(module *ir.Module) *ir.Func {
+	opendirFn := p.getOrDeclareOpendir(module)
+
+	// define i8* @pal_dir_open(i8* %path) nounwind
+	fn := module.NewFunc("pal_dir_open", irtypes.I8Ptr,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	dirp := entry.NewCall(opendirFn, fn.Params[0])
+	entry.NewRet(dirp)
+	return fn
+}
+
+// EmitDirNextName declares libc @readdir and defines @pal_dir_next_name.
+// Returns pointer to d_name within the dirent struct, or null when done/error.
+// Clears errno before calling readdir so null+errno==0 means end-of-directory.
+// Signature: @pal_dir_next_name(i8* handle) → i8* (name or null)
+func (p *PosixPAL) EmitDirNextName(module *ir.Module) *ir.Func {
+	readdirFn := p.getOrDeclareReaddir(module)
+
+	errnoLocFn := p.getOrDeclareErrnoLocFn(module)
+
+	// d_name byte offset within struct dirent: macOS=21, Linux=19
+	dNameOffset := int64(19) // Linux
+	if p.isMacOS() {
+		dNameOffset = 21
+	}
+
+	// define i8* @pal_dir_next_name(i8* %handle) nounwind
+	fn := module.NewFunc("pal_dir_next_name", irtypes.I8Ptr,
+		ir.NewParam("handle", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	// Clear errno before readdir so we can distinguish end-of-dir from error
+	errnoPtr := entry.NewCall(errnoLocFn)
+	entry.NewStore(constant.NewInt(irtypes.I32, 0), errnoPtr)
+
+	dirent := entry.NewCall(readdirFn, fn.Params[0])
+
+	isNull := entry.NewICmp(enum.IPredEQ, dirent, constant.NewNull(irtypes.I8Ptr))
+	gotEntry := fn.NewBlock(".got_entry")
+	nullBlk := fn.NewBlock(".null")
+	entry.NewCondBr(isNull, nullBlk, gotEntry)
+
+	// null result — either end-of-dir or error (errno distinguishes)
+	nullBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
+
+	// Got a dirent — GEP by byte offset to d_name
+	namePtr := gotEntry.NewGetElementPtr(irtypes.I8, dirent,
+		constant.NewInt(irtypes.I64, dNameOffset))
+	gotEntry.NewRet(namePtr)
+
+	return fn
+}
+
+// EmitDirClose declares libc @closedir and defines @pal_dir_close.
+// Signature: @pal_dir_close(i8* handle) → void
+func (p *PosixPAL) EmitDirClose(module *ir.Module) *ir.Func {
+	closedirFn := p.getOrDeclareClosedir(module)
+
+	// define void @pal_dir_close(i8* %handle) nounwind
+	fn := module.NewFunc("pal_dir_close", irtypes.Void,
+		ir.NewParam("handle", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewCall(closedirFn, fn.Params[0])
+	entry.NewRet(nil)
 	return fn
 }

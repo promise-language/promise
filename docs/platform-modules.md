@@ -192,8 +192,8 @@ Concrete inventory across std and modules:
 | `Platform.is_path_separator(char)` | `windows` / `!windows` | `std/platform.pr` global method |
 | `is_absolute(string) bool` | Windows drive letters vs POSIX `/` | `modules/path/path.pr` using `Platform.is_path_separator` |
 | `sleep(Duration)` | WASM no-op vs `nanosleep` | Go codegen `if c.isWasm` |
-| `File` type | `!wasm` only (no filesystem on WASM) | (not yet implemented) |
-| `read_line/read_stdin` | `!wasm` only | (not yet implemented) |
+| `File` type | `!wasm` only (no filesystem on WASM) | `modules/io/io.pr` — 4 factory constructors, handle methods, one-shot helpers |
+| `read_line/read_stdin` | `!wasm` only | `modules/io/io.pr` — free functions, `read_line` returns `string?!` (optional+failable) |
 | `exec(...)` | `!wasm` only (no subprocess on WASM) | (not yet implemented) |
 | `args()` | different impl on WASM | (not yet implemented) |
 | `get_env(string)` | `!wasm` (WASM env access varies) | (not yet implemented) |
@@ -637,8 +637,22 @@ pal_errno() i32                                       // current thread-local er
 - WASM stubs return -1 (error) or 0 (not found) for all file ops — no filesystem access yet.
 - `pal_errno` uses `__errno_location()` (Linux), `__error()` (macOS), `_errno()` (Windows).
 
-**Deferred:**
-- `pal_dir_open`/`pal_dir_next`/`pal_dir_close` (dir listing) — readdir struct layout differences + Windows FindFirstFile state management
+**Dir listing PAL (implemented):**
+```
+pal_dir_open(i8* path) i8*                            // DIR*/state ptr or null
+pal_dir_next_name(i8* handle) i8*                     // d_name ptr or null (end/error)
+pal_dir_close(i8* handle) void                        // closedir / FindClose+free
+```
+
+- POSIX uses `opendir`/`readdir`/`closedir`. `d_name` offset: 19 bytes (Linux), 21 bytes (macOS).
+- Windows uses `FindFirstFileA`/`FindNextFileA`/`FindClose` with a 344-byte heap-allocated state struct (HANDLE + first-entry flag + WIN32_FIND_DATAA). `cFileName` at offset 60 in state.
+- WASM stubs return null (dir open) or no-op (close).
+
+**Codegen bridges** (`file_io.go`):
+- `promise_io_file_read_line` — byte-by-byte `pal_file_read` loop, 256-byte initial buffer with doubling growth, strips `\r\n`/`\n`, sets errno `0x7FFF0001` on EOF.
+- `promise_io_dir_open` — string→cstr, `pal_dir_open`, cast handle to i64, returns `-errno` on null.
+- `promise_io_dir_next_name` — cast int→ptr, `pal_dir_next_name`, `strlen`+`promise_string_new`.
+- `promise_io_dir_close_handle` — cast int→ptr, `pal_dir_close`.
 
 ### Reactor PAL
 
@@ -776,7 +790,7 @@ modules/
   path/           — join, file_name, parent, extension, stem, split, normalize  (DONE)
   math/           — lerp, map_range, deg_to_rad, sign_f64            (DONE)
   strings/        — join, spaces, reverse, ...                        (DONE)
-  io/             — File, Dir, IoError, read_line, read_stdin          (PLACEHOLDER)
+  io/             — File, Dir, IoError, read_line, read_stdin          (DONE)
   os/             — args, get_env, get_cwd, exit, exec, OsError       (PLACEHOLDER)
   time/           — DateTime, unix_now, format/parse calendar ops     (PLACEHOLDER)
   http/           — HTTP server/client                                 (PLACEHOLDER)
@@ -877,9 +891,9 @@ First real use of `` `target `` in production code. Platform constants consolida
 
 12. **Reactor infrastructure** — global reactor in `codegen/reactor.go`: epoll (Linux), kqueue (macOS)
     integration with sysmon (`reactor_poll(0)`) and idle Ms (`reactor_poll(block)`)
-13. ~~**PAL file functions**~~ — **Done.** 12 sync PAL functions in `codegen/pal/` (open, read, write, close, seek, stat_size, remove, exists, mkdir, dir_remove, dir_exists, errno) across POSIX/Windows/WASM. Dir listing deferred (readdir struct layout complexity).
-14. **`modules/io`** — `IoError`, `File` (4 factory constructors + handle methods + one-shot helpers),
-    `Dir` (global namespace for directory ops), `read_line`, `read_stdin`
+13. ~~**PAL file functions**~~ — **Done.** 15 PAL functions in `codegen/pal/` (open, read, write, close, seek, stat_size, remove, exists, mkdir, dir_remove, dir_exists, errno, dir_open, dir_next_name, dir_close) across POSIX/Windows/WASM.
+14. ~~**`modules/io`**~~ — **Done.** `IoError`, `File` (4 factory constructors + handle methods + one-shot helpers),
+    `Dir` (make/make_all/list/remove/exists), `read_line`, `read_stdin`. 54 tests covering edge cases.
 15. **BufReader** — deferred until real usage drives it
 
 ### Phase E — OS and process

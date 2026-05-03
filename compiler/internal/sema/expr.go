@@ -1381,6 +1381,14 @@ func (c *Checker) checkIndexExpr(e *ast.IndexExpr) types.Type {
 
 	index := c.checkExpr(e.Index)
 
+	// Unwrap MutRef/SharedRef for indexing (auto-deref through borrows)
+	if ref, ok := target.(*types.MutRef); ok {
+		target = ref.Elem()
+	}
+	if ref, ok := target.(*types.SharedRef); ok {
+		target = ref.Elem()
+	}
+
 	// Method dispatch: look up [] on Named/Instance types
 	var named *types.Named
 	var subst map[*types.TypeParam]types.Type

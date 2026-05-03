@@ -1,17 +1,7 @@
-// std/format.pr — Writer, Format interfaces and value-to-string formatting
-// Writer is the byte-oriented output structural interface.
-// Concrete types implement write() to accept raw bytes.
-type Writer `structural `public {
-  write(~this, u8[] buf) int! `abstract;
-  write_string(~this, string s) int! {
-    u8[] b = s.bytes();
-    return this.write(b);
-  }
-}
-
-// Format is the structural interface for types that can format themselves.
-type Format `structural `public {
-  format(Writer ~w)! `abstract;
+// std/format.pr — Format interface and value-to-string formatting
+// (Writer moved to io.pr — the core I/O interfaces file)
+type Format `structural `public `doc("Structural interface for types that can format themselves to a Writer.") {
+  format(Writer ~w)! `abstract `doc("Writes a human-readable representation of this value to the writer.");
 }
 
 // _f64_to_str converts an f64 to its string representation,

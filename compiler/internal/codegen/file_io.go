@@ -72,6 +72,12 @@ func (c *Compiler) defineFileIOBodies() {
 	if fn, ok := irFuncByName["promise_io_dir_close_handle"]; ok {
 		c.defineDirCloseHandleBody(fn)
 	}
+	if fn, ok := irFuncByName["promise_io_file_read"]; ok {
+		c.defineFileReadBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_io_file_write"]; ok {
+		c.defineFileWriteBody(fn)
+	}
 }
 
 // ── Syscall handoff helpers ──────────────────────────────────────────────────
@@ -699,5 +705,70 @@ func (c *Compiler) defineDirCloseHandleBody(fn *ir.Func) {
 	c.emitExitSyscall(entry)
 
 	c.storeIntResult(entry, sret, constant.NewInt(irtypes.I64, 0))
+	entry.NewRet(nil)
+}
+
+// ── Byte-level read/write (direct u8[] vector access) ────────────────────────
+
+// extractVectorDataLen extracts the data pointer (i8*) and length (i64) from a
+// Vector's raw allocation pointer. Vector layout: {i64 len, i64 cap} header at
+// offset 0, element data at offset 16.
+func extractVectorDataLen(block *ir.Block, vecPtr value.Value) (dataPtr value.Value, dataLen value.Value) {
+	headerType := vectorHeaderType() // {i64, i64}
+	headerPtr := block.NewBitCast(vecPtr, irtypes.NewPointer(headerType))
+	lenPtr := block.NewGetElementPtr(headerType, headerPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	dataLen = block.NewLoad(irtypes.I64, lenPtr)
+	dataPtr = block.NewGetElementPtr(irtypes.I8, vecPtr,
+		constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
+	return
+}
+
+// defineFileReadBody: void @promise_io_file_read(i8* sret, i8* fd, i8* ~buf)
+// Reads up to buf.len bytes from fd into the provided u8[] buffer.
+// Returns bytes read as Promise int (negative = -errno on error, 0 = EOF).
+// No allocation — writes directly into the caller's buffer data area.
+func (c *Compiler) defineFileReadBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	fdRaw := c.extractRawInt(entry, fn.Params[1])
+	fdI32 := entry.NewTrunc(fdRaw, irtypes.I32)
+
+	// fn.Params[2] is the u8[] vector (~buf — mutable borrow, LLVM type is still i8*)
+	vecPtr := fn.Params[2]
+	dataPtr, dataLen := extractVectorDataLen(entry, vecPtr)
+
+	// Call PAL: i64 @pal_file_read(i32 fd, i8* buf, i64 len)
+	c.emitEnterSyscall(entry)
+	n := entry.NewCall(c.palFileRead, fdI32, dataPtr, dataLen)
+	c.emitExitSyscall(entry)
+
+	// Return bytes read as Promise int (negative = -errno)
+	c.storeIntResult(entry, sret, n)
+	entry.NewRet(nil)
+}
+
+// defineFileWriteBody: void @promise_io_file_write(i8* sret, i8* fd, i8* buf)
+// Writes buf.len bytes from the u8[] buffer to fd.
+// Returns bytes written as Promise int (negative = -errno).
+func (c *Compiler) defineFileWriteBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	fdRaw := c.extractRawInt(entry, fn.Params[1])
+	fdI32 := entry.NewTrunc(fdRaw, irtypes.I32)
+
+	// fn.Params[2] is the u8[] vector
+	vecPtr := fn.Params[2]
+	dataPtr, dataLen := extractVectorDataLen(entry, vecPtr)
+
+	// Call PAL: i64 @pal_file_write(i32 fd, i8* buf, i64 len)
+	c.emitEnterSyscall(entry)
+	written := entry.NewCall(c.palFileWrite, fdI32, dataPtr, dataLen)
+	c.emitExitSyscall(entry)
+
+	// Return bytes written as Promise int (negative = -errno)
+	c.storeIntResult(entry, sret, written)
 	entry.NewRet(nil)
 }

@@ -500,6 +500,13 @@ func (c *Checker) checkIndexAssignAvailable(idx *ast.IndexExpr) {
 	if targetType == nil {
 		return
 	}
+	// Unwrap MutRef/SharedRef for index assignment (auto-deref through borrows)
+	if ref, ok := targetType.(*types.MutRef); ok {
+		targetType = ref.Elem()
+	}
+	if ref, ok := targetType.(*types.SharedRef); ok {
+		targetType = ref.Elem()
+	}
 	var named *types.Named
 	switch t := targetType.(type) {
 	case *types.Named:

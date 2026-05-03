@@ -468,6 +468,13 @@ func (c *Compiler) getInterpBuilderWriterVtable() *ir.Global {
 	if writerNamed == nil {
 		panic("codegen: Writer type not found for interpolation")
 	}
+
+	// Ensure default methods from Writer are synthesized for Builder
+	builderNamed := c.lookupNamedType("Builder")
+	if builderNamed != nil {
+		c.ensureDefaultMethodsSynthesized(builderNamed, writerNamed)
+	}
+
 	methods := writerNamed.AllVirtualMethods()
 
 	// Build vtable entries mapping Writer methods → Builder implementations
@@ -3778,6 +3785,13 @@ func (c *Compiler) genIndexExpr(e *ast.IndexExpr) value.Value {
 	targetType := c.info.Types[e.Target]
 	if c.typeSubst != nil {
 		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+	// Unwrap MutRef/SharedRef for indexing (auto-deref through borrows)
+	if ref, ok := targetType.(*types.MutRef); ok {
+		targetType = ref.Elem()
+	}
+	if ref, ok := targetType.(*types.SharedRef); ok {
+		targetType = ref.Elem()
 	}
 
 	// Fixed-size array indexing

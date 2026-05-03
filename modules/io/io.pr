@@ -17,6 +17,9 @@ _io_dir_exists(string path) int `extern("promise_io_dir_exists");
 _io_errno() int `extern("promise_io_errno");
 // read_line bridge: reads one line from fd, sets errno to _io_eof_sentinel() on EOF
 _io_file_read_line(int fd) string `extern("promise_io_file_read_line");
+// byte-level read/write: operate directly on u8[] vectors
+_io_file_read(int fd, u8[]~buf) int `extern("promise_io_file_read");
+_io_file_write(int fd, u8[]~buf) int `extern("promise_io_file_write");
 // dir listing bridge: open → iterate → close
 _io_dir_open(string path) int `extern("promise_io_dir_open");
 _io_dir_next_name(int handle) string `extern("promise_io_dir_next_name");
@@ -181,6 +184,50 @@ type File `public `doc("A file handle. Use factory constructors to open files. A
     }
   }
 
+  // ── Byte-level I/O (Reader/Writer interface) ──────────────────────────
+
+  read(~this, u8[]~buf) int! `public `doc("Reads up to buf.len bytes into buf. Returns bytes read (0 = EOF). Satisfies Reader.") {
+    if this._fd < 0 {
+      raise IoError(code: 9, message: "bad file descriptor");
+    }
+    int n = _io_file_read(this._fd, buf);
+    if n < 0 {
+      raise _make_io_error(n);
+    }
+    return n;
+  }
+
+  write(~this, u8[]~buf) int! `public `doc("Writes bytes from buf to the file. Returns bytes written. Satisfies Writer.") {
+    if this._fd < 0 {
+      raise IoError(code: 9, message: "bad file descriptor");
+    }
+    int written = _io_file_write(this._fd, buf);
+    if written < 0 {
+      raise _make_io_error(written);
+    }
+    return written;
+  }
+
+  write_line(~this, string s)! `public `doc("Writes a string followed by the platform line separator.") {
+    this.write_string(s);
+    this.write_string(Platform.line_separator);
+  }
+
+  read_line(~this) string?! `public `doc("Reads one line from the file. Returns absent at EOF. Strips trailing newline.") {
+    if this._fd < 0 {
+      raise IoError(code: 9, message: "bad file descriptor");
+    }
+    string line = _io_file_read_line(this._fd);
+    int rc = _io_errno();
+    if rc == _io_eof_sentinel() {
+      return none;
+    }
+    if rc != 0 {
+      raise IoError(code: rc, message: _io_strerror(rc));
+    }
+    return line;
+  }
+
   // ── One-shot convenience (global) ────────────────────────────────────
 
   read_content(string path) string! `global `public `doc("Reads entire file contents as a string.") {
@@ -299,4 +346,156 @@ type Dir `public `doc("Directory operations. All methods are global.") {
   }
 
   exists(string path) bool `global `public `doc("Returns true if the path is a directory.") => _io_dir_exists(path) == 1;
+}
+
+// ── BufferedReader ───────────────────────────────────────────────────────────
+
+type BufferedReader `public `doc("Buffered file reader. Reduces syscalls by reading in chunks. Satisfies Reader.") {
+  File _file;
+  u8[] _buf;
+  int _pos;
+  int _end;
+
+  new(~this, File file, int buf_size = 4096) `public `doc("Wraps a file in a buffered reader.") {
+    this._file = file;
+    this._buf = Vector[u8].filled(0u8, buf_size);
+    this._pos = 0;
+    this._end = 0;
+  }
+
+  read(~this, u8[]~buf) int! `public `doc("Reads up to buf.len bytes. Returns bytes read (0 = EOF). Satisfies Reader.") {
+    if buf.len == 0 {
+      return 0;
+    }
+    // Refill internal buffer if empty
+    if this._pos >= this._end {
+      this._end = this._file.read(this._buf)!;
+      this._pos = 0;
+      if this._end == 0 {
+        return 0;
+      }
+    }
+    // Copy available data to output
+    int avail = this._end - this._pos;
+    int n = min(avail, buf.len);
+    int i = 0;
+    while i < n {
+      buf[i] = this._buf[this._pos + i];
+      i += 1;
+    }
+    this._pos += n;
+    return n;
+  }
+
+  read_line(~this) string?! `public `doc("Reads one line from the buffer. Returns absent at EOF. Strips trailing newline.") {
+    u8[] line = u8[]();
+    while true {
+      // Refill if buffer exhausted
+      if this._pos >= this._end {
+        this._end = this._file.read(this._buf)!;
+        this._pos = 0;
+        if this._end == 0 {
+          if line.len == 0 {
+            return none;
+          }
+          break;
+        }
+      }
+      u8 ch = this._buf[this._pos];
+      this._pos += 1;
+      if ch as! int == 10 {
+        break;
+      }
+      // '\n'
+      line.push(ch);
+    }
+    // Strip trailing \r
+    if line.len > 0 && line[line.len - 1] as! int == 13 {
+      line.pop();
+    }
+    return string.from_bytes(line);
+  }
+
+  read_byte(~this) u8?! `public `doc("Reads a single byte. Returns absent at EOF.") {
+    if this._pos >= this._end {
+      this._end = this._file.read(this._buf)!;
+      this._pos = 0;
+      if this._end == 0 {
+        return none;
+      }
+    }
+    u8 b = this._buf[this._pos];
+    this._pos += 1;
+    return b;
+  }
+
+  close(~this)! `public `doc("Closes the underlying file.") {
+    this._file.close();
+  }
+
+  drop(~this) {
+    // File.drop handles close
+  }
+}
+
+// ── BufferedWriter ───────────────────────────────────────────────────────────
+
+type BufferedWriter `public `doc("Buffered file writer. Reduces syscalls by batching writes. Satisfies Writer. Call flush() before drop.") {
+  File _file;
+  u8[] _buf;
+  int _len;
+
+  new(~this, File file, int buf_size = 4096) `public `doc("Wraps a file in a buffered writer.") {
+    this._file = file;
+    this._buf = Vector[u8].filled(0u8, buf_size);
+    this._len = 0;
+  }
+
+  write(~this, u8[]~buf) int! `public `doc("Writes bytes through the buffer. Returns bytes written. Satisfies Writer.") {
+    int total = 0;
+    while total < buf.len {
+      // Copy to internal buffer
+      while this._len < this._buf.len && total < buf.len {
+        this._buf[this._len] = buf[total];
+        this._len += 1;
+        total += 1;
+      }
+      // Flush if internal buffer is full
+      if this._len >= this._buf.len {
+        this.flush()!;
+      }
+    }
+    return total;
+  }
+
+  write_string(~this, string s)! `public `doc("Writes a string through the buffer.") {
+    u8[] bytes = s.bytes();
+    this.write(bytes);
+  }
+
+  write_line(~this, string s)! `public `doc("Writes a string followed by the platform line separator through the buffer.") {
+    this.write_string(s);
+    this.write_string(Platform.line_separator);
+  }
+
+  flush(~this)! `public `doc("Flushes buffered data to the underlying file.") {
+    if this._len > 0 {
+      u8[] data = this._buf[0:this._len];
+      this._file.write(data)!;
+      this._len = 0;
+    }
+  }
+
+  close(~this)! `public `doc("Flushes remaining data and closes the underlying file.") {
+    this.flush();
+    this._file.close();
+  }
+
+  drop(~this) {
+    // Best-effort flush: write remaining data, ignore errors.
+    // Users should call flush()/close() explicitly for error handling.
+    if this._len > 0 {
+      _io_file_write(this._file._fd, this._buf[0:this._len]);
+    }
+  }
 }

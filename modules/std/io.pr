@@ -1,4 +1,43 @@
-// std/io.pr — Standard I/O functions
+// std/io.pr — Core I/O interfaces and console output
+// Reader, Writer, and Closer are the fundamental I/O structural interfaces.
+// They are used throughout the platform (File, BufferedReader, Builder, Scanner, etc.).
+// ── Core I/O interfaces ─────────────────────────────────────────────────────
+// Reader is the byte-oriented input structural interface.
+// Go-style: caller pre-sizes buf, reader overwrites buf[0..n-1], returns n.
+type Reader `structural `public `doc("Byte-oriented input interface. Caller pre-sizes buf, reader fills buf[0..n-1] and returns n. Returns 0 at EOF.") {
+  read(~this, u8[]~buf) int! `abstract `doc("Reads up to buf.len bytes into buf. Returns the number of bytes read (0 = EOF).");
+
+  read_byte(~this) u8? `doc("Reads a single byte. Returns absent at EOF. Default: allocates a 1-byte buffer and calls read().") {
+    u8[] buf = Vector[u8].filled(0u8, 1);
+    int n = this.read(buf)!;
+    if n == 0 {
+      return none;
+    }
+    return buf[0];
+  }
+}
+
+// Writer is the byte-oriented output structural interface.
+// Concrete types implement write() to accept raw bytes.
+type Writer `structural `public `doc("Byte-oriented output interface. Writes raw bytes from buf and returns the number of bytes written.") {
+  write(~this, u8[]~buf) int! `abstract `doc("Writes bytes from buf. Returns the number of bytes written.");
+  write_string(~this, string s) int! `doc("Writes a string as bytes. Default: converts to bytes and calls write().") {
+    u8[] b = s.bytes();
+    return this.write(b);
+  }
+  write_line(~this, string s)! `doc("Writes a string followed by the platform line separator.") {
+    this.write_string(s);
+    this.write_string(Platform.line_separator);
+  }
+}
+
+// Closer is the structural interface for resources that need cleanup.
+type Closer `structural `public `doc("Structural interface for resources that need cleanup. Implement `close(~this)!` to satisfy.") {
+  close(~this)! `abstract `doc("Releases the underlying resource.");
+}
+
+// ── Console output ──────────────────────────────────────────────────────────
+
 // Low-level C bindings (prefixed with _ by convention)
 _print_int(int x) `extern("promise_print_int");
 _print_f64(f64 x) `extern("promise_print_f64");
@@ -6,24 +45,15 @@ _print_bool(bool x) `extern("promise_print_bool");
 _print_string(string s) `extern("promise_print_string");
 
 // Public API
-print_int(int x) `public {
+print_int(int x) `public `doc("Prints an integer to stdout.") {
   _print_int(x);
 }
-print_f64(f64 x) `public {
+print_f64(f64 x) `public `doc("Prints a float to stdout.") {
   _print_f64(x);
 }
-print_bool(bool x) `public {
+print_bool(bool x) `public `doc("Prints a boolean to stdout.") {
   _print_bool(x);
 }
-println(string s) `public {
+println(string s) `public `doc("Prints a string followed by a newline to stdout.") {
   _print_string(s);
-}
-
-type Closer `structural `public `doc("Structural interface for resources that need cleanup. Implement `close(~this)!` to satisfy.") {
-  close(~this)! `abstract;
-}
-
-write_line(Writer ~w, string s)! `public `doc("Writes a string followed by the platform line separator to a Writer.") {
-  w.write_string(s);
-  w.write_string(Platform.line_separator);
 }

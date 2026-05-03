@@ -1,13 +1,11 @@
-// std/builder.pr — String builder using byte buffer
-type Builder `public {
+type Builder `public `doc("Byte-buffer string builder. Satisfies Writer.") {
   u8[] buf;
 
   new(~this, int capacity = 16) {
     this.buf = Vector[u8](capacity: capacity);
   }
 
-  // Satisfies Writer
-  write(~this, u8[] data) int! {
+  write(~this, u8[]~data) int! `doc("Appends raw bytes. Satisfies Writer.") {
     int i = 0;
     while i < data.len {
       this.buf.push(data[i]);
@@ -16,8 +14,12 @@ type Builder `public {
     return data.len;
   }
 
-  // Override for efficiency (avoids intermediate u8[])
-  write_string(~this, string s) int! {
+  write_line(~this, string s)! `doc("Writes a string followed by the platform line separator.") {
+    this.write_string(s);
+    this.write_string(Platform.line_separator);
+  }
+
+  write_string(~this, string s) int! `doc("Appends a string as bytes.") {
     u8[] b = s.bytes();
     int i = 0;
     while i < b.len {
@@ -27,10 +29,10 @@ type Builder `public {
     return b.len;
   }
 
-  to_string() string => string.from_bytes(this.buf);
+  to_string() string `doc("Returns the accumulated content as a string.") => string.from_bytes(this.buf);
 
-  get len int => this.buf.len;
-  clear(~this) {
+  get len int `doc("Number of bytes written so far.") => this.buf.len;
+  clear(~this) `doc("Resets the builder to empty.") {
     this.buf = Vector[u8]();
   }
 }

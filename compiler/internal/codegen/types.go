@@ -262,6 +262,14 @@ func (c *Compiler) resolveType(typ types.Type) irtypes.Type {
 		typ = types.SubstituteSelf(typ, c.selfSubst.iface, c.selfSubst.concrete)
 	}
 
+	// Unwrap MutRef/SharedRef — borrows have the same LLVM representation as the inner type
+	if ref, ok := typ.(*types.MutRef); ok {
+		return c.resolveType(ref.Elem())
+	}
+	if ref, ok := typ.(*types.SharedRef); ok {
+		return c.resolveType(ref.Elem())
+	}
+
 	// Handle Tuple types (elements may contain TypeParams needing substitution)
 	if tup, ok := typ.(*types.Tuple); ok {
 		fields := make([]irtypes.Type, len(tup.Elems()))

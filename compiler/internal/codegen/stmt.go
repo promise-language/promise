@@ -2001,6 +2001,13 @@ func (c *Compiler) genIndexAssign(target *ast.IndexExpr, op ast.AssignOp, val va
 	if c.typeSubst != nil {
 		targetType = types.Substitute(targetType, c.typeSubst)
 	}
+	// Unwrap MutRef/SharedRef for index assignment (auto-deref through borrows)
+	if ref, ok := targetType.(*types.MutRef); ok {
+		targetType = ref.Elem()
+	}
+	if ref, ok := targetType.(*types.SharedRef); ok {
+		targetType = ref.Elem()
+	}
 
 	// Fixed-size array index assignment
 	if arr, ok := targetType.(*types.Array); ok {

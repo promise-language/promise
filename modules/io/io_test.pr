@@ -684,3 +684,257 @@ file_write_empty_string() `test(exclude: "wasm32") {
   assert(d == "hello", "empty writes are no-ops");
   File.remove("/tmp/pr_iot_wes")!;
 }
+
+// ── File.read / File.write (byte-level) ──────────────────────────────────────
+
+file_write_read_bytes() `test(exclude: "wasm32") {
+  File fw = File.create("/tmp/pr_iot_wrb")!;
+  u8[] data = u8[]();
+  data.push(72u8); // H
+  data.push(105u8); // i
+  int written = fw.write(data)!;
+  assert(written == 2, "wrote 2 bytes");
+  fw.close()!;
+
+  File fr = File.open("/tmp/pr_iot_wrb", readonly: true)!;
+  u8[] buf = Vector[u8].filled(0u8, 10);
+  int n = fr.read(buf)!;
+  assert(n == 2, "read 2 bytes");
+  assert(buf[0] as! int == 72, "first byte is H");
+  assert(buf[1] as! int == 105, "second byte is i");
+  fr.close()!;
+  File.remove("/tmp/pr_iot_wrb")!;
+}
+
+file_read_method() `test(exclude: "wasm32") {
+  File.write_content("/tmp/pr_iot_rby", "abc")!;
+  File f = File.open("/tmp/pr_iot_rby", readonly: true)!;
+  u8[] buf = Vector[u8].filled(0u8, 10);
+  int n = f.read(buf)!;
+  assert(n == 3, "read returns 3 bytes");
+  assert(buf[0] as! int == 97, "a");
+  assert(buf[1] as! int == 98, "b");
+  assert(buf[2] as! int == 99, "c");
+  f.close()!;
+  File.remove("/tmp/pr_iot_rby")!;
+}
+
+file_read_eof() `test(exclude: "wasm32") {
+  File.write_content("/tmp/pr_iot_reof", "x")!;
+  File f = File.open("/tmp/pr_iot_reof", readonly: true)!;
+  u8[] buf = Vector[u8].filled(0u8, 10);
+  int n1 = f.read(buf)!;
+  assert(n1 == 1, "first read got 1 byte");
+  int n2 = f.read(buf)!;
+  assert(n2 == 0, "second read returns 0 (EOF)");
+  f.close()!;
+  File.remove("/tmp/pr_iot_reof")!;
+}
+
+file_read_after_close_bytes() `test(exclude: "wasm32") {
+  File f = File.create("/tmp/pr_iot_racb")!;
+  f.close()!;
+  bool caught = false;
+  u8[] buf = Vector[u8].filled(0u8, 4);
+  f.read(buf)? e {
+    caught = true;
+  };
+  assert(caught, "byte read after close raises error");
+  File.remove("/tmp/pr_iot_racb")!;
+}
+
+file_write_after_close_bytes() `test(exclude: "wasm32") {
+  File f = File.create("/tmp/pr_iot_wacb")!;
+  f.close()!;
+  bool caught = false;
+  u8[] buf = u8[]();
+  buf.push(65u8);
+  f.write(buf)? e {
+    caught = true;
+  };
+  assert(caught, "byte write after close raises error");
+  File.remove("/tmp/pr_iot_wacb")!;
+}
+
+// ── File.read_line (instance method) ─────────────────────────────────────────
+
+file_read_line_method() `test(exclude: "wasm32") {
+  File.write_content("/tmp/pr_iot_frl", "alpha\nbeta\ngamma")!;
+  File f = File.open("/tmp/pr_iot_frl", readonly: true)!;
+  if v := f.read_line()! {
+    assert(v == "alpha", "line1");
+  } else {
+    assert(false, "line1 present");
+  }
+  if v := f.read_line()! {
+    assert(v == "beta", "line2");
+  } else {
+    assert(false, "line2 present");
+  }
+  if v := f.read_line()! {
+    assert(v == "gamma", "line3");
+  } else {
+    assert(false, "line3 present");
+  }
+  if _ := f.read_line()! {
+    assert(false, "should be EOF");
+  }
+  f.close()!;
+  File.remove("/tmp/pr_iot_frl")!;
+}
+
+// ── BufferedReader ───────────────────────────────────────────────────────────
+
+buffered_reader_basic() `test(exclude: "wasm32") {
+  File.write_content("/tmp/pr_iot_br", "hello world")!;
+  File f = File.open("/tmp/pr_iot_br", readonly: true)!;
+  BufferedReader r = BufferedReader(f, buf_size: 4);
+  u8[] buf = Vector[u8].filled(0u8, 5);
+  int n1 = r.read(buf)!;
+  // Buffer is 4 bytes, so first read fills internal buf (4 bytes), copies up to 4
+  assert(n1 == 4, "first buffered read");
+  assert(buf[0] as! int == 104, "h");
+  assert(buf[1] as! int == 101, "e");
+  int n2 = r.read(buf)!;
+  assert(n2 > 0, "second read returns data");
+  r.close()!;
+  File.remove("/tmp/pr_iot_br")!;
+}
+
+buffered_reader_read_line() `test(exclude: "wasm32") {
+  File.write_content("/tmp/pr_iot_brl", "one\ntwo\nthree")!;
+  File f = File.open("/tmp/pr_iot_brl", readonly: true)!;
+  BufferedReader r = BufferedReader(f, buf_size: 8);
+  if v := r.read_line()! {
+    assert(v == "one", "line1");
+  } else {
+    assert(false, "line1 present");
+  }
+  if v := r.read_line()! {
+    assert(v == "two", "line2");
+  } else {
+    assert(false, "line2 present");
+  }
+  if v := r.read_line()! {
+    assert(v == "three", "line3");
+  } else {
+    assert(false, "line3 present");
+  }
+  if _ := r.read_line()! {
+    assert(false, "should be EOF");
+  }
+  r.close()!;
+  File.remove("/tmp/pr_iot_brl")!;
+}
+
+buffered_reader_read_line_crlf() `test(exclude: "wasm32") {
+  File.write_content("/tmp/pr_iot_brlc", "aa\r\nbb\r\n")!;
+  File f = File.open("/tmp/pr_iot_brlc", readonly: true)!;
+  BufferedReader r = BufferedReader(f, buf_size: 4);
+  if v := r.read_line()! {
+    assert(v == "aa", "crlf line1");
+  } else {
+    assert(false, "line1 present");
+  }
+  if v := r.read_line()! {
+    assert(v == "bb", "crlf line2");
+  } else {
+    assert(false, "line2 present");
+  }
+  if _ := r.read_line()! {
+    assert(false, "should be EOF after crlf");
+  }
+  r.close()!;
+  File.remove("/tmp/pr_iot_brlc")!;
+}
+
+buffered_reader_read_byte() `test(exclude: "wasm32") {
+  File.write_content("/tmp/pr_iot_brb", "AB")!;
+  File f = File.open("/tmp/pr_iot_brb", readonly: true)!;
+  BufferedReader r = BufferedReader(f);
+  if b := r.read_byte()! {
+    assert(b as! int == 65, "A");
+  } else {
+    assert(false, "byte1 present");
+  }
+  if b := r.read_byte()! {
+    assert(b as! int == 66, "B");
+  } else {
+    assert(false, "byte2 present");
+  }
+  if _ := r.read_byte()! {
+    assert(false, "should be EOF");
+  }
+  r.close()!;
+  File.remove("/tmp/pr_iot_brb")!;
+}
+
+// ── BufferedWriter ───────────────────────────────────────────────────────────
+
+buffered_writer_basic() `test(exclude: "wasm32") {
+  File f = File.create("/tmp/pr_iot_bw")!;
+  BufferedWriter w = BufferedWriter(f, buf_size: 8);
+  u8[] data = u8[]();
+  data.push(72u8); // H
+  data.push(105u8); // i
+  w.write(data)!;
+  w.close()!;
+  string content = File.read_content("/tmp/pr_iot_bw")!;
+  assert(content == "Hi", "buffered write round-trip");
+  File.remove("/tmp/pr_iot_bw")!;
+}
+
+buffered_writer_flush() `test(exclude: "wasm32") {
+  File f = File.create("/tmp/pr_iot_bwf")!;
+  BufferedWriter w = BufferedWriter(f, buf_size: 4);
+  // Write more than buffer size to trigger auto-flush
+  u8[] data = u8[]();
+  int i = 0;
+  while i < 10 {
+    data.push(65u8); // A
+    i += 1;
+  }
+  w.write(data)!;
+  w.close()!;
+  string content = File.read_content("/tmp/pr_iot_bwf")!;
+  assert(content.len == 10, "all bytes flushed");
+  File.remove("/tmp/pr_iot_bwf")!;
+}
+
+buffered_writer_write_string() `test(exclude: "wasm32") {
+  File f = File.create("/tmp/pr_iot_bws")!;
+  BufferedWriter w = BufferedWriter(f, buf_size: 16);
+  w.write_string("hello ")!;
+  w.write_string("world")!;
+  w.close()!;
+  string content = File.read_content("/tmp/pr_iot_bws")!;
+  assert(content == "hello world", "write_string through buffer");
+  File.remove("/tmp/pr_iot_bws")!;
+}
+
+// ── File.write_line ──────────────────────────────────────────────────────────
+
+file_write_line() `test(exclude: "wasm32") {
+  File f = File.create("/tmp/pr_iot_fwl")!;
+  f.write_line("hello")!;
+  f.write_line("world")!;
+  f.close()!;
+  string content = File.read_content("/tmp/pr_iot_fwl")!;
+  string sep = Platform.line_separator;
+  assert(content == "hello" + sep + "world" + sep, "file write_line");
+  File.remove("/tmp/pr_iot_fwl")!;
+}
+
+// ── BufferedWriter.write_line ────────────────────────────────────────────────
+
+buffered_writer_write_line() `test(exclude: "wasm32") {
+  File f = File.create("/tmp/pr_iot_bwl")!;
+  BufferedWriter w = BufferedWriter(f, buf_size: 16);
+  w.write_line("alpha")!;
+  w.write_line("beta")!;
+  w.close()!;
+  string content = File.read_content("/tmp/pr_iot_bwl")!;
+  string sep = Platform.line_separator;
+  assert(content == "alpha" + sep + "beta" + sep, "buffered write_line");
+  File.remove("/tmp/pr_iot_bwl")!;
+}

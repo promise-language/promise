@@ -31,7 +31,7 @@ test_is_path_separator_letter() `test {
 
 test_write_line_uses_platform_separator() `test {
   Builder b = Builder();
-  write_line(b, "hello")!;
+  b.write_line("hello")!;
   string result = b.to_string();
   // Result should be "hello" + Platform.line_separator
   string expected = "hello" + Platform.line_separator;

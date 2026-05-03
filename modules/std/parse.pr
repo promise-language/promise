@@ -1,26 +1,10 @@
-// std/parse.pr — Reader, Parse, Scanner, scan
-// Reader is the byte-oriented input structural interface.
-// Go-style: caller pre-sizes buf, reader overwrites buf[0..n-1], returns n.
-type Reader `structural `public {
-  read(~this, u8[] buf) int! `abstract;
-
-  read_byte(~this) u8? {
-    u8[] buf = Vector[u8].filled(0 as! u8, 1);
-    int n = this.read(buf)!;
-    if n == 0 {
-      return none;
-    }
-    return buf[0];
-  }
+// std/parse.pr — Parse, Scanner, scan
+// (Reader moved to io.pr — the core I/O interfaces file)
+type Parse `structural `public `doc("Structural interface for types that can parse themselves from a Reader.") {
+  parse(Reader ~r) Self! `factory `abstract `doc("Parses an instance of Self from a byte reader.");
 }
 
-// Parse is the structural interface for types that can parse themselves from a Reader.
-type Parse `structural `public {
-  parse(Reader ~r) Self! `factory `abstract;
-}
-
-// Scanner wraps a string for byte-by-byte reading, satisfying Reader.
-type Scanner `public {
+type Scanner `public `doc("Wraps a string for byte-by-byte reading. Satisfies Reader.") {
   string source;
   int pos;
 
@@ -29,8 +13,7 @@ type Scanner `public {
     this.pos = 0;
   }
 
-  // Satisfies Reader — Go-style overwrite
-  read(~this, u8[] buf) int {
+  read(~this, u8[]~buf) int `doc("Reads bytes from the source string into buf. Satisfies Reader.") {
     int count = 0;
     while this.pos < this.source.len && count < buf.len {
       buf[count] = this.source.byte_at(this.pos);
@@ -40,8 +23,7 @@ type Scanner `public {
     return count;
   }
 
-  // Override default — no allocation, direct byte access
-  read_byte(~this) u8? {
+  read_byte(~this) u8? `doc("Reads a single byte directly. Returns absent at EOF.") {
     if this.pos >= this.source.len {
       return none;
     }
@@ -50,13 +32,12 @@ type Scanner `public {
     return b;
   }
 
-  rest() string `public => this.source[this.pos:];
-  get has_next bool `public => this.pos < this.source.len;
-  get position int `public => this.pos;
+  rest() string `public `doc("Returns the unread portion of the source string.") => this.source[this.pos:];
+  get has_next bool `public `doc("True if there are more bytes to read.") => this.pos < this.source.len;
+  get position int `public `doc("Current byte offset in the source string.") => this.pos;
 }
 
-// scan is a convenience function to parse a value from a string.
-scan[T: Parse](string s) T! `public {
+scan[T: Parse](string s) T! `public `doc("Parses a value of type T from a string.") {
   Scanner r = Scanner(s: s);
   return T.parse(r);
 }

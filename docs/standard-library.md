@@ -29,8 +29,10 @@ The stdlib today (27 files) provides:
 | Primitives | `int.pr`, `uint.pr`, `float.pr`, `bool.pr`, `char.pr` | Arithmetic, comparison, bitwise, hash, `to_string()`, `format()`, `int.parse()`, `bool.parse()`, `uint.parse()`, `f64.parse()` |
 | Strings | `string.pr` | Concatenation, comparison, `contains`, `starts_with`, `ends_with`, `index_of`, `trim`, `split`, `[]`, `[:]`, `bytes()`, `byte_at()`, `from_bytes()`, `to_string()`, `to_upper`, `to_lower`, `repeat`, `replace`, `count`, `chars` |
 | Containers | `vector.pr`, `map.pr`, `set.pr` | `Vector[T]` / `T[]` (push/pop/remove/contains/slice/`filled`), `Map[K,V]` / `map[K,V]` (open-addressing, rehash), `Set[T]` |
-| Format/Parse | `format.pr`, `builder.pr`, `parse.pr` | `Writer`/`Format` structural interfaces, `Builder` (string building), `Reader`/`Parse` structural interfaces, `Scanner` (string parsing), `scan[T]()` |
-| I/O | `io.pr` | `println`, `print_int`, `print_f64`, `print_bool` (4 functions total) |
+| Format/Parse | `format.pr`, `builder.pr`, `parse.pr` | `Format` structural interface, `Builder` (string building, satisfies `Writer`), `Parse` structural interface, `Scanner` (string parsing, satisfies `Reader`), `scan[T]()` |
+| I/O (std) | `io.pr` | `Reader` (read, read_byte) / `Writer` (write, write_string, write_line) / `Closer` structural interfaces, `println`, `print_int`, `print_f64`, `print_bool` |
+| I/O (module) | `modules/io/io.pr` | `File` (open/create/append, read/write bytes, read_line, write_line, read_all, seek), `BufferedReader`, `BufferedWriter` (write_line), `Dir` (make/make_all/list/remove/exists), `IoError`, `read_line()`, `read_stdin()` |
+| Path (module) | `modules/path/path.pr` | `path_join`, `path_dir`, `path_base`, `path_ext`, `path_is_abs`, `path_normalize` |
 | Math | `math.pr`, `random.pr` | `min`, `max`, `abs`, `clamp`, `sqrt`, `sin`, `cos`, `tan`, `pow`, `exp`, `log`, `floor`, `ceil`, `round`, `Random` PRNG |
 | Sorting | `sort.pr` | `sort(T[])` for `Ordered` types |
 | Interfaces | `equal.pr`, `ordered.pr`, `hashable.pr` | `Equal`, `Ordered`, `Hashable` structural types |
@@ -38,7 +40,7 @@ The stdlib today (27 files) provides:
 | Concurrency | `channel.pr`, `task.pr`, `runtime.pr` | `Channel[T]` / `channel[T]` send/close, `Task[T]` / `task[T]` handle, scheduler stats |
 | Other | `range.pr`, `hash.pr`, `assert.pr`, `error.pr` | `Range` / `..`/`..=`, FNV-1a hash, `assert(bool, string)`, `error` base type |
 
-**What's missing**: file I/O, OS access, process execution.
+**What's missing**: OS access, process execution.
 
 ### Naming Conventions
 
@@ -781,47 +783,71 @@ type Random {
 - **File**: `modules/std/io.pr` (extended)
 - **Test**: `tests/std/test_io.pr` (4 tests)
 
-#### 4b. `modules/std/file.pr` — File System Access
+#### 4b. `modules/io/io.pr` — File System Access — DONE
 
 ```promise
 type File {
     // File handle with RAII cleanup
 
-    int fd;
+    int _fd;
 
     // Factory constructors
-    open(string path) Self! `factory;                  // read-only
-    create(string path) Self! `factory;                // write, create/truncate
-    open_mode(string path, string mode) Self! `factory; // "r", "w", "a", "rw"
+    open(string path, bool readonly = false) Self! `factory;  // read-write (or read-only)
+    create(string path) Self! `factory;                       // write, create/truncate
+    append(string path) Self! `factory;                       // append, create if needed
+    ~~open_mode(string path, string mode) Self! `factory;~~   // NOT implementing
 
-    // Reader/Writer implementation
-    read(~this, u8[] ~buf) int!;
-    write(~this, u8[] &buf) int!;
+    // Byte-level I/O (Reader/Writer interface compliance)
+    read(~this, u8[] ~buf) int!;           // reads up to buf.len bytes into buf; returns bytes read (0 = EOF)
+    write(~this, u8[] ~buf) int!;          // writes bytes from buf; returns bytes written
 
     // Convenience methods
-    read_all() string!;
-    write_string(string s) int!;
+    read_all(~this) string!;
+    write_string(~this, string s)!;
+    read_line(~this) string?!;             // reads one line, absent at EOF
+
+    // Position
+    get position int!;
+    seek(~this, int offset)!;
 
     // Resource management
     close(~this)!;
+    drop(~this);                           // auto-close on scope exit
+
+    // Global (static) convenience methods
+    read_content(string path) string! `global;
+    write_content(string path, string content)! `global;
+    exists(string path) bool `global;
+    size(string path) int! `global;
+    remove(string path)! `global;
 }
 
-// Free functions for one-shot operations
-read_file(string path) string!;
-write_file(string path, string content)!;
-append_file(string path, string content)!;
-file_exists(string path) bool;
-remove_file(string path)!;
-mkdir(string path)!;
+type BufferedReader {
+    // Buffered file reader — reduces syscalls by reading in chunks.
+    new(~this, File file, int buf_size = 4096);
+    read(~this, u8[] ~buf) int!;
+    read_line(~this) string?!;
+    read_byte(~this) u8?!;
+    close(~this)!;
+}
+
+type BufferedWriter {
+    // Buffered file writer — reduces syscalls by batching writes.
+    new(~this, File file, int buf_size = 4096);
+    write(~this, u8[] ~buf) int!;
+    write_string(~this, string s)!;
+    flush(~this)!;
+    close(~this)!;
+}
 ```
 
-- **File**: `modules/std/file.pr`
+- **File**: `modules/io/io.pr` (separate `io` module, not part of `std`)
 - **Dependencies**: PAL file I/O (3.1), Error type (Phase 0a), `Reader`/`Writer`/`Closer` (4a)
 - **Native codegen**: `File.open` → PAL `EmitFileOpen`, `File.read` → PAL `EmitFileRead`, etc.
-- **Implementation**: Thin wrapper around PAL calls. Free functions construct/use/close a `File` internally.
-- **Test**: `tests/std/test_file.pr`
+- **Implementation**: Thin wrapper around PAL calls. `File.read(~this, u8[] ~buf) int!` and `File.write(~this, u8[] ~buf) int!` satisfy the `Reader`/`Writer` structural interfaces. `read_line` is a File instance method (not a free function). `BufferedReader`/`BufferedWriter` are pure Promise wrappers around `File` that reduce syscalls by chunked I/O; both also satisfy `Reader`/`Writer` via their `read`/`write` methods.
+- **Test**: `modules/io/io_test.pr` (54 tests)
 
-#### 4c. `modules/std/path.pr` — Path Manipulation
+#### 4c. `modules/path/path.pr` — Path Manipulation
 
 ```promise
 // Pure string-based path operations (no filesystem access)
@@ -834,10 +860,10 @@ path_is_abs(string path) bool;
 path_normalize(string path) string;
 ```
 
-- **File**: `modules/std/path.pr`
+- **File**: `modules/path/path.pr` (separate `path` module, not part of `std`)
 - **Dependencies**: `string.pr` methods only
 - **Implementation**: Pure Promise string manipulation. Uses `/` as separator (POSIX-first; Windows support deferred).
-- **Test**: `tests/std/test_path.pr`
+- **Test**: `modules/path/path_test.pr`
 
 #### 4d. `modules/std/os.pr` — OS Interaction
 
@@ -867,20 +893,23 @@ exec(string program, string[] args) ProcessResult!;
 - **Native codegen**: `get_env` → PAL `EmitGetEnv`, `os_args` → global captured in main, `exec` → PAL `EmitProcessExec` + `EmitProcessWait`
 - **Test**: `tests/std/test_os.pr`
 
-#### 4e. `modules/std/stdin.pr` — Standard Input
+#### 4e. Standard Input — DONE (merged into `modules/io/io.pr`)
 
 ```promise
-// Read a line from stdin (blocking)
-read_line() string!;
+// Read a line from stdin (blocking) — free function in io module
+read_line() string?!;
 
 // Read all of stdin
 read_stdin() string!;
+
+// Per-file read_line is a File instance method:
+//   file.read_line() string?!;
 ```
 
-- **File**: `modules/std/stdin.pr`
-- **Dependencies**: PAL `EmitFileRead` (fd 0)
-- **Implementation**: Read into buffer until newline (for `read_line`) or EOF (for `read_stdin`).
-- **Test**: `tests/std/test_stdin.pr`
+- **File**: `modules/io/io.pr` (stdin functions are free functions in the `io` module)
+- **Dependencies**: PAL `EmitFileRead` (fd 0), PAL `EmitFileReadLine`
+- **Implementation**: `read_line()` free function reads from fd 0 (stdin). `File.read_line(~this)` is an instance method for reading lines from any open file. Both return `string?!` (absent at EOF, raises `IoError` on error).
+- **Test**: `modules/io/io_test.pr`
 
 ---
 
@@ -1147,10 +1176,10 @@ bin/test.sh                            # rebuild + all tests pass (including new
 | 3b | `modules/std/random.pr` | Promise | No | 80 |
 | 3c | `modules/std/time.pr` | Promise + Native | 3 | 120 |
 | 4a | `modules/std/io.pr` | Promise | No | 40 |
-| 4b | `modules/std/file.pr` | Promise + Native | 6 | 100 |
-| 4c | `modules/std/path.pr` | Promise | No | 60 |
+| 4b | `modules/io/io.pr` | Promise + Native | 12 | 480 |
+| 4c | `modules/path/path.pr` | Promise | No | 60 |
 | 4d | `modules/std/os.pr` | Promise + Native | 2 | 60 |
-| 4e | `modules/std/stdin.pr` | Promise + Native | No | 30 |
+| 4e | (merged into 4b) | — | — | — |
 | 5a | `modules/std/json.pr` | Promise | No | 300 |
 | 5b | `modules/std/regex.pr` | Promise | No | 400 |
 | 5c | `modules/std/net.pr` | Promise + Native | 6+ | 150 |

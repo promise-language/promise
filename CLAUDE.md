@@ -322,6 +322,8 @@ The standard library (`modules/std/`, 29 files) is auto-imported via `use std as
 
 - **Co-locate tests with source files.** Place `*_test.pr` files alongside the `.pr` files they test (not in a separate `tests/` tree). This makes tests easier to find and maintains context. The `tests/` directory is for cross-cutting integration and e2e tests that don't belong to a specific module or file.
 
+- **Use full English words in APIs — never abbreviate.** All public names in the standard library and language APIs must use complete, unabbreviated words, even when abbreviations are industry-standard (e.g., `print_line` not `println`, `make_directory` not `mkdir`, `concatenate` not `concat`, `execute` not `exec`, `arguments` not `args`). This optimizes for AI-agent readability — an LLM can always predict the full word but must memorize each abbreviation.
+
 ## Conventions
 
 - Compiler errors are accumulated (not fatal on first error) and printed together

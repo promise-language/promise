@@ -1,0 +1,24 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Promise: Debug program",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/.promise-build/debug",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "MIMode": "lldb",
+      "stopAtEntry": true,
+      "setupCommands": [
+        {
+          // find binary symbols with 
+          // nm /tmp/hello_dbg
+          "text": "breakpoint set --name main",
+          "description": "Break at program main()"
+        }
+      ],
+      "preLaunchTask": "build-promise-program"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build-promise-program",
+      "type": "shell",
+      "command": "${workspaceFolder}/bin/promise build ${file} -o ${workspaceFolder}/.promise-build/debug",
+      "group": "build",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    }
+  ]
+}

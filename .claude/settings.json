@@ -48,7 +48,8 @@
       "Bash(/opt/homebrew/opt/llvm/bin/opt:*)",
       "mcp__tracker__list",
       "mcp__tracker__create",
-      "mcp__tracker__update"
+      "mcp__tracker__update",
+      "mcp__tracker__get"
     ],
     "deny": [
       "Read(.tracker/**)",

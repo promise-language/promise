@@ -4211,12 +4211,33 @@ func (c *Compiler) genVectorIndex(e *ast.IndexExpr, elemType types.Type) value.V
 }
 
 // makeGlobalString creates a global null-terminated string constant and returns an i8* to it.
+// fnv1aStr computes a 32-bit FNV-1a hash of a string for content-based naming.
+func fnv1aStr(s string) uint32 {
+	h := uint32(2166136261)
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= 16777619
+	}
+	return h
+}
+
+// getCStrGlobal returns a deduplicated immutable global for a null-terminated
+// C string. Content-based naming (.cstr.<hash>) makes these stable across
+// compilations regardless of which mono instances are present.
+func (c *Compiler) getCStrGlobal(s string) *ir.Global {
+	global, ok := c.cstrGlobals[s]
+	if !ok {
+		data := constant.NewCharArrayFromString(s + "\x00")
+		globalName := fmt.Sprintf(".cstr.%x", fnv1aStr(s))
+		global = c.module.NewGlobalDef(globalName, data)
+		global.Immutable = true
+		c.cstrGlobals[s] = global
+	}
+	return global
+}
+
 func (c *Compiler) makeGlobalString(s string) value.Value {
-	data := constant.NewCharArrayFromString(s + "\x00")
-	globalName := fmt.Sprintf(".str.%d", c.strCounter)
-	c.strCounter++
-	global := c.module.NewGlobalDef(globalName, data)
-	global.Immutable = true
+	global := c.getCStrGlobal(s)
 	return c.block.NewGetElementPtr(global.ContentType, global,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 }

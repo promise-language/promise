@@ -91,6 +91,12 @@ type Compiler struct {
 	// module string constant names are stable (independent of main code's strCounter).
 	moduleStrCounter int
 
+	// Cache for C-string globals (null-terminated, used for panic messages etc.).
+	// Keyed by content, returns the ir.Global. This deduplicates strings like
+	// "out of memory" and "string index out of bounds" so they have stable names
+	// across compilations regardless of mono instance ordering.
+	cstrGlobals map[string]*ir.Global
+
 	// Lambda counter for unique anonymous function names
 	lambdaCounter int
 
@@ -444,6 +450,7 @@ func compile(file *ast.File, info *sema.Info, target string, cachedInstances map
 		instanceOwnedFuncs: make(map[string]string),
 		cachedInstances:    cachedInstances,
 		spiralInstances:    make(map[string]bool),
+		cstrGlobals:        make(map[string]*ir.Global),
 	}
 
 	// Collect extern declarations and compute type layouts
@@ -2135,11 +2142,7 @@ func (c *Compiler) defineVectorWithCapacityFunc() {
 	entry.NewCondBr(isNull, oom, init)
 
 	// OOM: panic
-	panicMsg := constant.NewCharArrayFromString("out of memory\x00")
-	globalName := fmt.Sprintf(".str.vecwithcap.%d", c.strCounter)
-	c.strCounter++
-	panicGlobal := c.module.NewGlobalDef(globalName, panicMsg)
-	panicGlobal.Immutable = true
+	panicGlobal := c.getCStrGlobal("out of memory")
 	msgPtr := oom.NewGetElementPtr(panicGlobal.ContentType, panicGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	oom.NewCall(c.funcs["promise_panic"], msgPtr)
@@ -2204,11 +2207,7 @@ func (c *Compiler) defineVectorPushFunc() {
 	grow.NewCondBr(isNull, oom, updateCap)
 
 	// OOM: panic
-	panicMsg := constant.NewCharArrayFromString("out of memory\x00")
-	globalName := fmt.Sprintf(".str.vecpush.%d", c.strCounter)
-	c.strCounter++
-	panicGlobal := c.module.NewGlobalDef(globalName, panicMsg)
-	panicGlobal.Immutable = true
+	panicGlobal := c.getCStrGlobal("out of memory")
 	msgPtr := oom.NewGetElementPtr(panicGlobal.ContentType, panicGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	oom.NewCall(c.funcs["promise_panic"], msgPtr)
@@ -2399,11 +2398,7 @@ func (c *Compiler) defineVectorRemoveFunc() {
 	entry.NewCondBr(oob, panicBlk, checkShift)
 
 	// panic: call promise_panic with out-of-bounds message
-	panicMsg := constant.NewCharArrayFromString("vector remove: index out of bounds\x00")
-	globalName := fmt.Sprintf(".str.vecremove.%d", c.strCounter)
-	c.strCounter++
-	panicGlobal := c.module.NewGlobalDef(globalName, panicMsg)
-	panicGlobal.Immutable = true
+	panicGlobal := c.getCStrGlobal("vector remove: index out of bounds")
 	msgPtr := panicBlk.NewGetElementPtr(panicGlobal.ContentType, panicGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	panicBlk.NewCall(c.funcs["promise_panic"], msgPtr)
@@ -3047,6 +3042,16 @@ func (c *Compiler) compileModules() {
 	mainMonoInstances := collectMonoInstances(c.info, c.spiralInstances)
 	mainMonoFuncInstances := collectMonoFuncInstances(c.info)
 	mainMonoMethodInstances := collectMonoMethodInstances(c.info)
+
+	// Also include instances from other modules — a catalog module (e.g., json)
+	// might create instances of std types (e.g., Map[string, JsonValue]) that the
+	// user code doesn't directly reference. Without this, the std module wouldn't
+	// know to monomorphize Map[string, JsonValue] and its methods/getters.
+	for _, modInfo := range c.info.ModuleInfos {
+		mainMonoInstances = append(mainMonoInstances, modInfo.SemaInfo.Instances...)
+		mainMonoFuncInstances = append(mainMonoFuncInstances, modInfo.SemaInfo.FuncInstances...)
+		mainMonoMethodInstances = append(mainMonoMethodInstances, modInfo.SemaInfo.MethodInstances...)
+	}
 
 	// Use topological order if available, otherwise fall back to map iteration.
 	if len(c.info.ModuleOrder) > 0 {

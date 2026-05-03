@@ -1036,6 +1036,7 @@ Known gaps and improvements deferred from completed stages.
 | B0032 | Failable result in Vector.push argument — `items.push(failable_call())` panics in codegen with `store operands not compatible`: the failable result struct is passed directly to push instead of being unwrapped first. Workaround: assign to a local variable first, then push. | Codegen | Low |
 | ~~Runtime hang when assigning generic multi-inherit type to second parent~~ — **Fixed.** `getOrEmitViewVtable` now accepts the full `fromType` (may be `*types.Instance`) and applies `resolveMonoParentName` fallback for inherited methods from generic parents — same pattern as `emitVtableGlobal`. Cache key changed from `*Named` pair to string-based key (`monoName`) so `Entity[int]` and `Entity[string]` get separate view vtables. Previously, `getOrEmitViewVtable` used origin-only names to look up monomorphized method functions, resulting in NULL vtable slots and a hang on dispatch. | Codegen | ~~Medium~~ Resolved |
 | ~~`is` check with unqualified generic type silently returns false~~ — **Fixed.** `emitMonoTypeInfoGlobals` now includes the origin `Named` type's own type ID in the mono instance's parent ID chain. Previously, `LabeledBox[int]`'s RTTI parent list only contained `Box`'s ID (the parent), not `LabeledBox`'s origin ID, so `b is LabeledBox` always returned false. Now the origin ID is prepended to the parent chain so it matches during the `promise_type_is` walk. | Codegen | ~~Medium~~ Resolved |
+| ~~B0088~~ | ~~Cross-module mono instances not propagated between modules~~ — **Fixed.** When module A (json) creates instances of types from module B (std's `Map[string, JsonValue]`), and user code doesn't directly reference that instance, module B's compilation didn't include it — causing undeclared getter/method panics. Fix: `compileModules()` now collects instances from ALL module sema infos (not just user code) and passes them as extras to each module compilation. `collectMonoInstancesWithExtra` deduplicates via `seen` map. | Codegen | ~~High~~ Resolved |
 
 ### Ownership & Type System
 
@@ -1093,7 +1094,7 @@ Planned work items. `T-NNN` IDs are stable — never reused or renumbered.
 
 | # | Item | Depends on | Priority |
 |---|------|-----------|----------|
-| T0001 | `JsonValue` use `map[string, JsonValue]` for Object variant instead of parallel arrays | ~~B0031~~ ~~B0044~~ (resolved) | High |
+| ~~T0001~~ | ~~`JsonValue` use `map[string, JsonValue]` for Object variant instead of parallel arrays~~ — **Done.** `Object(string[] keys, JsonValue[] vals)` replaced with `Object(map[string, JsonValue] fields)`. Also required fixing B0088 (cross-module mono instance propagation). JSON object key order is now non-deterministic (correct per RFC 8259). 122 tests. | ~~B0031~~ ~~B0044~~ ~~B0088~~ (resolved) | ~~High~~ Resolved |
 | T0002 | Enum `` `serializable `` codegen — auto-generate encode/decode for enums. Simple enums (no data) encode as strings. Data enums use tagged representation with discriminator field. | B0015 (enum methods, optional) | Medium |
 | T0003 | `` `serializable(tag: "kind") `` parameter — custom discriminator field name for enum serialization (default: `"type"`). | T0002 | Low |
 | T0004 | `` `flatten `` field annotation — inline nested object fields into the parent during encode/decode. | — | Medium |

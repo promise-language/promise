@@ -1,8 +1,6 @@
 package codegen
 
 import (
-	"fmt"
-
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
 	irtypes "github.com/llir/llvm/ir/types"
@@ -113,12 +111,7 @@ func (c *Compiler) constructErrorFromCStr(block *ir.Block, msgPtr value.Value, m
 // constructErrorFromGlobalStr constructs a base error instance from a global string constant.
 // msg is used as the error message. Safe to call from bridge functions (does not use c.block).
 func (c *Compiler) constructErrorFromGlobalStr(block *ir.Block, msg string) value.Value {
-	// Create global string constant directly (bridge-safe — doesn't use c.block)
-	data := constant.NewCharArrayFromString(msg + "\x00")
-	globalName := fmt.Sprintf(".str.%d", c.strCounter)
-	c.strCounter++
-	global := c.module.NewGlobalDef(globalName, data)
-	global.Immutable = true
+	global := c.getCStrGlobal(msg)
 	msgPtr := block.NewGetElementPtr(global.ContentType, global,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	msgLen := constant.NewInt(irtypes.I64, int64(len(msg)))

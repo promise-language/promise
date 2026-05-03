@@ -653,7 +653,7 @@ enum JsonValue `public `doc("Tree-based JSON representation for dynamic/untyped 
   Number(f64 value),
   Str(string value),
   Array(JsonValue[] items),
-  Object(string[] keys, JsonValue[] vals),
+  Object(map[string, JsonValue] fields),
 }
 
 // Encode a JsonValue tree to a JsonEncoder.
@@ -670,13 +670,11 @@ encode_value(JsonValue v, Encoder ~e)! `public `doc("Writes a JsonValue tree to 
       }
       e.end_array();
     },
-    JsonValue.Object(keys, vals) => {
-      e.begin_object(keys.len);
-      int i = 0;
-      while i < keys.len {
-        e.encode_key(keys[i]);
-        encode_value(vals[i], e);
-        i = i + 1;
+    JsonValue.Object(fields) => {
+      e.begin_object(fields.len);
+      for key, val in fields {
+        e.encode_key(key);
+        encode_value(val, e);
       }
       e.end_object();
     },
@@ -775,8 +773,7 @@ _parse_json_array(JsonDecoder ~dec) JsonValue! {
 
 _parse_json_object(JsonDecoder ~dec) JsonValue! {
   dec._advance(); // skip {
-  string[] keys = string[]();
-  JsonValue[] vals = JsonValue[]();
+  map[string, JsonValue] fields = map[string, JsonValue]();
   bool done = false;
   dec._skip_whitespace();
   if dec._pos < dec._data.len && dec._data[dec._pos] == '}' {
@@ -802,14 +799,13 @@ _parse_json_object(JsonDecoder ~dec) JsonValue! {
       string key = dec._read_string_value();
       dec._expect(':');
       JsonValue val = _parse_json_value(dec);
-      keys.push(key);
-      vals.push(val);
+      fields[key] = val;
     }
   }
   if !done {
     raise DecodeError(message: "unterminated object", field: "", position: dec._pos);
   }
-  return JsonValue.Object(keys, vals);
+  return JsonValue.Object(fields);
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

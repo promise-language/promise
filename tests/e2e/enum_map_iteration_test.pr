@@ -1,0 +1,279 @@
+// Tests for for-in iteration on map[K, Enum] — regression tests for B0043.
+// Also tests map-inside-enum-variant pattern needed by T0001.
+enum Color {
+  Red, Green, Blue
+}
+
+enum Shape {
+  Circle(f64 radius),
+  Rect(f64 w, f64 h),
+  Point,
+}
+
+// --- for-in on map[string, fieldless enum] ---
+
+test_forin_fieldless_enum_map() `test {
+  map[string, Color] m = {
+    "r": Color.Red, "g": Color.Green, "b": Color.Blue
+  };
+  int count = 0;
+  for k, v in m {
+    count += 1;
+    match v {
+      Color.Red => assert(k == "r", "red key"),
+      Color.Green => assert(k == "g", "green key"),
+      Color.Blue => assert(k == "b", "blue key"),
+    }
+  }
+  assert(count == 3, "count");
+}
+
+// --- for-in on map[string, data enum] ---
+
+test_forin_data_enum_map() `test {
+  map[string, Shape] m = {
+    "c": Shape.Circle(radius: 3.14),
+    "r": Shape.Rect(w: 2.0, h: 3.0),
+    "p": Shape.Point,
+  };
+  int circles = 0;
+  int rects = 0;
+  int points = 0;
+  for k, v in m {
+    match v {
+      Shape.Circle(r) => {
+        assert(k == "c", "circle key");
+        assert(r == 3.14, "circle radius");
+        circles += 1;
+      },
+      Shape.Rect(w, h) => {
+        assert(k == "r", "rect key");
+        assert(w == 2.0, "rect w");
+        assert(h == 3.0, "rect h");
+        rects += 1;
+      },
+      Shape.Point => {
+        assert(k == "p", "point key");
+        points += 1;
+      },
+    }
+  }
+  assert(circles == 1, "circle count");
+  assert(rects == 1, "rect count");
+  assert(points == 1, "point count");
+}
+
+// --- for-in on map[int, enum] ---
+
+test_forin_int_key_enum_map() `test {
+  map[int, Color] m = {
+    1: Color.Red, 2: Color.Green, 3: Color.Blue
+  };
+  int count = 0;
+  for k, v in m {
+    count += 1;
+    match v {
+      Color.Red => assert(k == 1, "red key"),
+      Color.Green => assert(k == 2, "green key"),
+      Color.Blue => assert(k == 3, "blue key"),
+    }
+  }
+  assert(count == 3, "count");
+}
+
+// --- keys(), values() with content verification ---
+
+test_values_fieldless_enum_content() `test {
+  map[string, Color] m = {
+    "a": Color.Red
+  };
+  Color[] vals = m.values();
+  assert(vals.len == 1, "vals len");
+  match vals[0] {
+    Color.Red => {
+    }, _ => assert(false, "val content")
+  }
+}
+
+test_values_data_enum_content() `test {
+  map[string, Shape] m = {
+    "c": Shape.Circle(radius: 7.0)
+  };
+  Shape[] vals = m.values();
+  assert(vals.len == 1, "vals len");
+  match vals[0] {
+    Shape.Circle(r) => assert(r == 7.0, "val radius"),
+    _ => assert(false, "val content"),
+  }
+}
+
+// --- entries() with content verification ---
+
+test_entries_fieldless_enum_content() `test {
+  map[string, Color] m = {
+    "x": Color.Blue
+  };
+  (string, Color)[] ents = m.entries();
+  assert(ents.len == 1, "ents len");
+  (k, v) := ents[0];
+  assert(k == "x", "entry key");
+  match v {
+    Color.Blue => {
+    }, _ => assert(false, "entry val")
+  }
+}
+
+test_entries_data_enum_content() `test {
+  map[string, Shape] m = {
+    "s": Shape.Rect(w: 4.0, h: 5.0)
+  };
+  (string, Shape)[] ents = m.entries();
+  assert(ents.len == 1, "ents len");
+  (k, v) := ents[0];
+  assert(k == "s", "entry key");
+  match v {
+    Shape.Rect(w, h) => {
+      assert(w == 4.0, "entry w");
+      assert(h == 5.0, "entry h");
+    },
+    _ => assert(false, "entry val"),
+  }
+}
+
+// --- Mutate then iterate ---
+
+test_mutate_then_forin() `test {
+  map[string, Color] m = {
+    "a": Color.Red
+  };
+  m["b"] = Color.Green;
+  m["c"] = Color.Blue;
+  int count = 0;
+  for k, v in m {
+    count += 1;
+  }
+  assert(count == 3, "count after mutation");
+}
+
+// --- T0001 pattern: map[string, RecursiveEnum] inside enum variant ---
+
+enum JsonNode {
+  Null,
+  Bool(bool value),
+  Num(f64 value),
+  Text(string value),
+  List(JsonNode[] items),
+  Dict(map[string, JsonNode] fields),
+}
+
+test_map_in_enum_variant_construct() `test {
+  map[string, JsonNode] fields = {
+    "name": JsonNode.Text(value: "Alice"),
+    "age": JsonNode.Num(value: 30.0),
+  };
+  JsonNode obj = JsonNode.Dict(fields: fields);
+  match obj {
+    JsonNode.Dict(f) => assert(f.len == 2, "dict len"),
+    _ => assert(false, "expected Dict"),
+  }
+}
+
+test_map_in_enum_variant_lookup() `test {
+  map[string, JsonNode] fields = {
+    "x": JsonNode.Bool(value: true),
+    "y": JsonNode.Null,
+  };
+  JsonNode obj = JsonNode.Dict(fields: fields);
+  match obj {
+    JsonNode.Dict(f) => {
+      match f["x"]! {
+        JsonNode.Bool(b) => assert(b == true, "bool value"),
+        _ => assert(false, "expected Bool"),
+      }
+      match f["y"]! {
+        JsonNode.Null => {
+        },
+        _ => assert(false, "expected Null"),
+      }
+    },
+    _ => assert(false, "expected Dict"),
+  }
+}
+
+test_map_in_enum_variant_forin() `test {
+  map[string, JsonNode] fields = {
+    "a": JsonNode.Num(value: 1.0),
+    "b": JsonNode.Text(value: "hi"),
+  };
+  JsonNode obj = JsonNode.Dict(fields: fields);
+  match obj {
+    JsonNode.Dict(f) => {
+      int nums = 0;
+      int texts = 0;
+      for k, v in f {
+        match v {
+          JsonNode.Num(n) => {
+            assert(k == "a", "num key");
+            assert(n == 1.0, "num val");
+            nums += 1;
+          },
+          JsonNode.Text(s) => {
+            assert(k == "b", "text key");
+            assert(s == "hi", "text val");
+            texts += 1;
+          },
+          _ => assert(false, "unexpected variant"),
+        }
+      }
+      assert(nums == 1, "num count");
+      assert(texts == 1, "text count");
+    },
+    _ => assert(false, "expected Dict"),
+  }
+}
+
+test_nested_map_in_enum_variant() `test {
+  // {"user": {"name": "Bob", "active": true}}
+  map[string, JsonNode] inner = {
+    "name": JsonNode.Text(value: "Bob"),
+    "active": JsonNode.Bool(value: true),
+  };
+  map[string, JsonNode] outer = {
+    "user": JsonNode.Dict(fields: inner),
+  };
+  JsonNode root = JsonNode.Dict(fields: outer);
+
+  match root {
+    JsonNode.Dict(f) => {
+      match f["user"]! {
+        JsonNode.Dict(uf) => {
+          match uf["name"]! {
+            JsonNode.Text(s) => assert(s == "Bob", "nested name"),
+            _ => assert(false, "expected Text"),
+          }
+          match uf["active"]! {
+            JsonNode.Bool(b) => assert(b == true, "nested active"),
+            _ => assert(false, "expected Bool"),
+          }
+        },
+        _ => assert(false, "expected nested Dict"),
+      }
+    },
+    _ => assert(false, "expected Dict"),
+  }
+}
+
+test_map_in_enum_variant_values() `test {
+  map[string, JsonNode] fields = {
+    "a": JsonNode.Null,
+    "b": JsonNode.Bool(value: false),
+  };
+  JsonNode obj = JsonNode.Dict(fields: fields);
+  match obj {
+    JsonNode.Dict(f) => {
+      JsonNode[] vals = f.values();
+      assert(vals.len == 2, "vals len");
+    },
+    _ => assert(false, "expected Dict"),
+  }
+}

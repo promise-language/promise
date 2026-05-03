@@ -165,7 +165,7 @@ func (c *Checker) synthesizeDecodeMethod(named *types.Named, d *ast.TypeDecl) *a
 	stmts = append(stmts, makeExprStmt(callMember(ident("d"), "end_object")))
 
 	// return Self(field1: _f_field1, ...);
-	// Skip fields get zero values.
+	// Skip fields get zero values. Fields stored as T? (user-defined types) use !  to unwrap.
 	var args []*ast.Arg
 	for _, f := range named.Fields() {
 		if f.Skip() {
@@ -176,7 +176,13 @@ func (c *Checker) synthesizeDecodeMethod(named *types.Named, d *ast.TypeDecl) *a
 			args = append(args, &ast.Arg{Name: f.Name(), Value: zv})
 			continue
 		}
-		args = append(args, &ast.Arg{Name: f.Name(), Value: ident("_f_" + f.Name())})
+		localExpr := ident("_f_" + f.Name())
+		if c.fieldNeedsUnwrap(f) {
+			// Local was declared as T? — unwrap with ! (panics if field was missing from JSON).
+			args = append(args, &ast.Arg{Name: f.Name(), Value: &ast.ErrorUnwrapExpr{Expr: localExpr}})
+		} else {
+			args = append(args, &ast.Arg{Name: f.Name(), Value: localExpr})
+		}
 	}
 	stmts = append(stmts, &ast.ReturnStmt{
 		Value: &ast.CallExpr{Callee: ident("Self"), Args: args},
@@ -219,17 +225,12 @@ func (c *Checker) makeFieldLocalDecl(localName string, f *types.Field) ast.Stmt 
 
 // fieldNeedsUnwrap returns true if the field's local variable uses T? wrapping
 // because the type has no known zero value (user-defined types).
-// NOTE: unused in Phase 3 — nested user-type decode deferred to Phase 4.
-// Kept for future use.
 func (c *Checker) fieldNeedsUnwrap(f *types.Field) bool {
 	if _, ok := f.Type().(*types.Optional); ok {
 		return false
 	}
 	return c.zeroValueExpr(f.Type()) == nil
 }
-
-// Ensure fieldNeedsUnwrap is referenceable to silence unused warnings.
-var _ = (*Checker).fieldNeedsUnwrap
 
 // buildKeyMatchChain builds the if/else chain for matching decoded keys to fields.
 func (c *Checker) buildKeyMatchChain(fields []*types.Field) ast.Stmt {

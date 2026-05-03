@@ -728,19 +728,19 @@ type DecodeError is error `public {
 5. ~~Synthesize `encode` method AST if not user-defined~~ — **Done** — handles `key` renaming, `skip` exclusion, optional omission (if-unwrap), `include_none` null encoding
 6. ~~Synthesize `decode` factory method AST if not user-defined~~ — **Done** for primitive fields — handles key matching loop, optional null checking, error propagation, `skip` zero-fill, `key` renaming
 7. Add implicit constraints for generic type params — deferred
-8. ~~Tests~~ — **Done**: 22 e2e tests in `tests/e2e/serializable_test.pr` covering: encode/decode round-trip, mixed types (string/int/f64/bool), field annotations (key/skip/include_none), multiple optionals, string escaping, zero/negative/large values, custom encode override, key renaming in decode
+8. ~~Tests~~ — **Done**: 28 e2e tests in `tests/e2e/serializable_test.pr` covering: encode/decode round-trip, mixed types (string/int/f64/bool), nested types (3 levels, key annotation, multiple nested fields), field annotations (key/skip/include_none), multiple optionals, string escaping, zero/negative/large values, custom encode override, key renaming in decode
 
-**Known limitations (Phase 3):**
-- **Nested user-type decode** — decode for fields of user-defined types (e.g., `Address address`) is blocked by the lack of optional force-unwrap in Promise. The decode local must be `T?` (no zero value for user types) but the constructor expects `T`. Encode works. Requires one of: `opt!` for optionals, `opt as! T` codegen fix, `opt ? { handler }`, or narrowing after diverging `is absent` check. See `docs/stages.md` Parser/Codegen Bugs section.
-- ~~**Structural interface coercion for user types**~~ — **Fixed.** Synthesized methods now use `MutRefTypeRef` matching the parser's representation. Variable assignment (`Encodable e = val;`) also fixed — `genTypedVarDecl` detects structural interface declarations.
+**Known limitations (Phase 3+4):**
+- ~~**Nested user-type decode**~~ — **Fixed.** Now uses `T?` local with `!` unwrap in constructor args. Panics if a required nested field is missing from the JSON.
+- ~~**Structural interface coercion for user types**~~ — **Fixed.** Synthesized methods use `MutRefTypeRef`. Variable assignment and value type boxing also fixed.
 - **Container fields** (`T[]`, `map[K,V]`) — not yet supported in synthesized code. Requires generic constraints on container methods or inline codegen.
 - **Generic serializable types** (`Wrapper[T]`) — deferred pending implicit constraint support.
 
 ### Phase 4: Nested Types, Enums, and Advanced Features
 
-**Scope:** Compiler + standard library. Depends on optional force-unwrap language feature.
+**Scope:** Compiler + standard library.
 
-1. Nested user-type decode (requires `opt!`, `as!` fix, or narrowing fix)
+1. ~~Nested user-type decode~~ — **Done.** Uses `T?` local + `!` unwrap. 3 tests (encode, decode, round-trip).
 2. Container field serialization (`T[]`, `map[string, V]`)
 3. Enum `` `serializable `` codegen (tag-based for data enums, string for simple enums)
 4. `` `flatten `` support

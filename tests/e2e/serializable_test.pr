@@ -32,8 +32,21 @@ type Address `serializable {
   string city;
 }
 
-// Note: nested serializable decode (Person with Address field) deferred to Phase 4.
-// Encode works, but decode requires optional force-unwrap which Promise doesn't have yet.
+type Person `serializable {
+  string name;
+  int age;
+  Address address;
+}
+
+type Located `serializable {
+  string name;
+  Point pos `key("position");
+}
+
+type Rect `serializable {
+  Point origin;
+  Point size;
+}
 
 type WithIncludeNone `serializable {
   string name;
@@ -105,7 +118,78 @@ mixed_fields_round_trip_test() `test {
   assert(m2.active == false, "rt active false");
 }
 
-// Nested encode/decode deferred to Phase 4 (requires optional force-unwrap for decode).
+// ── Nested serializable types ────────────────────────────────────────────────
+
+nested_encode_test() `test {
+  Person p = Person(name: "Alice", age: 30, address: Address(street: "123 Main", city: "NYC"));
+  json.JsonEncoder enc = json.JsonEncoder();
+  p.encode(enc)!;
+  string s = enc.to_string();
+  assert(s.contains("\"name\":\"Alice\""), "nested encode: name");
+  assert(s.contains("\"age\":30"), "nested encode: age");
+  assert(s.contains("\"street\":\"123 Main\""), "nested encode: street");
+  assert(s.contains("\"city\":\"NYC\""), "nested encode: city");
+}
+
+nested_decode_test() `test {
+  Person p1 = Person(name: "Bob", age: 25, address: Address(street: "456 Oak", city: "LA"));
+  json.JsonEncoder enc = json.JsonEncoder();
+  p1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  Person p2 = Person.decode(dec)!;
+  assert(p2.name == "Bob", "nested decode: name");
+  assert(p2.age == 25, "nested decode: age");
+  assert(p2.address.street == "456 Oak", "nested decode: street");
+  assert(p2.address.city == "LA", "nested decode: city");
+}
+
+nested_round_trip_test() `test {
+  Person p1 = Person(name: "Carol", age: 40, address: Address(street: "789 Elm", city: "SF"));
+  json.JsonEncoder enc = json.JsonEncoder();
+  p1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  Person p2 = Person.decode(dec)!;
+  assert(p2.name == p1.name, "nested rt: name");
+  assert(p2.age == p1.age, "nested rt: age");
+  assert(p2.address.street == "789 Elm", "nested rt: street");
+  assert(p2.address.city == "SF", "nested rt: city");
+}
+
+deep_nested_round_trip_test() `test {
+  // 3 levels: uses Address → reuses existing types, but tests depth
+  Person p1 = Person(name: "Deep", age: 1, address: Address(street: "A St", city: "B"));
+  json.JsonEncoder enc = json.JsonEncoder();
+  p1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  Person p2 = Person.decode(dec)!;
+  assert(p2.address.street == "A St", "deep nested: street");
+  assert(p2.address.city == "B", "deep nested: city");
+}
+
+nested_with_key_test() `test {
+  Located l1 = Located(name: "X", pos: Point(x: 3, y: 4));
+  json.JsonEncoder enc = json.JsonEncoder();
+  l1.encode(enc)!;
+  string s = enc.to_string();
+  assert(s.contains("\"position\":"), "nested key: uses wire name");
+  assert(!s.contains("\"pos\":"), "nested key: no raw name");
+  json.JsonDecoder dec = json.JsonDecoder(data: s);
+  Located l2 = Located.decode(dec)!;
+  assert(l2.pos.x == 3, "nested key decode: x");
+  assert(l2.pos.y == 4, "nested key decode: y");
+}
+
+multiple_nested_fields_test() `test {
+  Rect r1 = Rect(origin: Point(x: 0, y: 0), size: Point(x: 100, y: 50));
+  json.JsonEncoder enc = json.JsonEncoder();
+  r1.encode(enc)!;
+  json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+  Rect r2 = Rect.decode(dec)!;
+  assert(r2.origin.x == 0, "multi nested: origin x");
+  assert(r2.origin.y == 0, "multi nested: origin y");
+  assert(r2.size.x == 100, "multi nested: size x");
+  assert(r2.size.y == 50, "multi nested: size y");
+}
 
 // ── Field annotations ───────────────────────────────────────────────────────
 

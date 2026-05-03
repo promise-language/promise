@@ -1116,7 +1116,7 @@ The `stdAll` mini-stdlib used in Go unit tests (`codegen_test.go`, `sema_test.go
 
 ### Test Categories
 
-~2220 test functions across ~206 `.pr` files:
+~2285 test functions across ~207 `.pr` files:
 
 | Category | Location | What it verifies |
 |----------|----------|-----------------|

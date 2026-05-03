@@ -507,6 +507,10 @@ func (c *Checker) makeDecodeCall(typ types.Type) ast.Expr {
 	if named, ok := typ.(*types.Named); ok {
 		return callMember(ident(named.Obj().Name()), "decode", ident("d"))
 	}
+	// Enum types: call the factory ENUM.decode(d).
+	if enum, ok := typ.(*types.Enum); ok {
+		return callMember(ident(enum.Obj().Name()), "decode", ident("d"))
+	}
 	// Fallback — will likely fail type-checking, which is the right behavior.
 	return callMember(ident(typ.String()), "decode", ident("d"))
 }
@@ -580,6 +584,159 @@ func (c *Checker) zeroValueExpr(typ types.Type) ast.Expr {
 		}
 	}
 	return nil
+}
+
+// ── Enum serialization ────────────────────────────────────────────────────
+
+// isSimpleEnum returns true if no variant has data fields.
+func isSimpleEnum(enum *types.Enum) bool {
+	for _, v := range enum.Variants() {
+		if v.NumFields() > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// processSerializableEnum handles `serializable on an enum declaration.
+// Currently supports simple enums (no data variants) — encoded as strings.
+func (c *Checker) processSerializableEnum(enum *types.Enum, d *ast.EnumDecl) {
+	enum.SetSerializable(true)
+
+	if !isSimpleEnum(enum) {
+		c.errorf(d.Pos(), "`serializable on data enums is not yet supported (T0008) — only simple enums (no variant fields) are supported")
+		return
+	}
+
+	// Synthesize encode method if not user-defined.
+	if lookupOwnEnumMethod(enum, "encode") == nil {
+		md := c.synthesizeEnumEncodeMethod(enum, d)
+		d.Methods = append(d.Methods, md)
+		c.defineEnumMethod(enum, md, d.Name)
+	}
+
+	// Synthesize decode factory method if not user-defined.
+	if lookupOwnEnumMethod(enum, "decode") == nil {
+		md := c.synthesizeEnumDecodeMethod(enum, d)
+		d.Methods = append(d.Methods, md)
+		c.defineEnumMethod(enum, md, d.Name)
+	}
+}
+
+// lookupOwnEnumMethod checks if an enum already has a method with the given name.
+func lookupOwnEnumMethod(enum *types.Enum, name string) *types.Method {
+	for _, m := range enum.Methods() {
+		if m.Name() == name {
+			return m
+		}
+	}
+	return nil
+}
+
+// synthesizeEnumEncodeMethod builds:
+//
+//	encode(Encoder ~e)! `public {
+//	  match this {
+//	    EnumName.Variant1 => e.encode_string("Variant1"),
+//	    EnumName.Variant2 => e.encode_string("Variant2"),
+//	    ...
+//	  }
+//	}
+func (c *Checker) synthesizeEnumEncodeMethod(enum *types.Enum, d *ast.EnumDecl) *ast.MethodDecl {
+	enumName := d.Name
+
+	var arms []*ast.MatchArm
+	for _, v := range enum.Variants() {
+		arms = append(arms, &ast.MatchArm{
+			Pattern: &ast.EnumVariantMatchPattern{Enum: enumName, Variant: v.Name()},
+			Block: &ast.Block{Stmts: []ast.Stmt{
+				makeExprStmt(callMember(ident("e"), "encode_string", strLit(v.Name()))),
+			}},
+		})
+	}
+
+	body := &ast.Block{Stmts: []ast.Stmt{
+		makeExprStmt(&ast.MatchExpr{
+			Subject: &ast.ThisExpr{},
+			Arms:    arms,
+		}),
+	}}
+
+	return &ast.MethodDecl{
+		Name:        "encode",
+		Receiver:    &ast.ReceiverParam{RefMod: ast.RefNone},
+		Params:      []*ast.Param{{Type: &ast.MutRefTypeRef{Inner: &ast.NamedTypeRef{Name: "Encoder"}}, Name: "e"}},
+		ReturnType:  &ast.ReturnTypeSpec{CanError: true},
+		Annotations: []*ast.MetaAnnotation{{Name: "public"}},
+		Body:        body,
+	}
+}
+
+// synthesizeEnumDecodeMethod builds:
+//
+//	decode(Decoder ~d) EnumName! `factory `public {
+//	  string _tag = d.decode_string()?;
+//	  if _tag == "Variant1" { return EnumName.Variant1; }
+//	  else if _tag == "Variant2" { return EnumName.Variant2; }
+//	  ...
+//	  else { raise DecodeError(message: "unknown enum variant: " + _tag, field: "", position: 0); }
+//	}
+func (c *Checker) synthesizeEnumDecodeMethod(enum *types.Enum, d *ast.EnumDecl) *ast.MethodDecl {
+	enumName := d.Name
+	var stmts []ast.Stmt
+
+	// string _tag = d.decode_string()?;
+	stmts = append(stmts, &ast.TypedVarDecl{
+		Type:  &ast.NamedTypeRef{Name: "string"},
+		Name:  "_tag",
+		Value: propagate(callMember(ident("d"), "decode_string")),
+	})
+
+	// Build if/else chain matching tag to variants.
+	variants := enum.Variants()
+	if len(variants) > 0 {
+		// The final else raises a DecodeError.
+		var tail ast.Stmt = &ast.Block{Stmts: []ast.Stmt{
+			&ast.RaiseStmt{
+				Value: &ast.CallExpr{
+					Callee: ident("DecodeError"),
+					Args: []*ast.Arg{
+						{Name: "message", Value: &ast.BinaryExpr{
+							Left:  strLit("unknown enum variant: "),
+							Op:    ast.BinAdd,
+							Right: ident("_tag"),
+						}},
+						{Name: "field", Value: strLit("")},
+						{Name: "position", Value: intLit(0)},
+					},
+				},
+			},
+		}}
+
+		// Build from last to first for proper else chaining.
+		for i := len(variants) - 1; i >= 0; i-- {
+			v := variants[i]
+			tail = &ast.IfStmt{
+				Cond: &ast.BinaryExpr{Left: ident("_tag"), Op: ast.BinEq, Right: strLit(v.Name())},
+				Body: &ast.Block{Stmts: []ast.Stmt{
+					&ast.ReturnStmt{Value: memberExpr(ident(enumName), v.Name())},
+				}},
+				Else: tail,
+			}
+		}
+		stmts = append(stmts, tail)
+	}
+
+	return &ast.MethodDecl{
+		Name:   "decode",
+		Params: []*ast.Param{{Type: &ast.MutRefTypeRef{Inner: &ast.NamedTypeRef{Name: "Decoder"}}, Name: "d"}},
+		ReturnType: &ast.ReturnTypeSpec{
+			Type:     &ast.NamedTypeRef{Name: enumName},
+			CanError: true,
+		},
+		Annotations: []*ast.MetaAnnotation{{Name: "factory"}, {Name: "public"}},
+		Body:        &ast.Block{Stmts: stmts},
+	}
 }
 
 // ── AST node construction helpers ─────────────────────────────────────────

@@ -10478,14 +10478,14 @@ func TestEnumMethodNativeError(t *testing.T) {
 	expectError(t, errs, "cannot be native")
 }
 
-func TestEnumMethodFactoryError(t *testing.T) {
-	errs := checkErrs(t, `
+func TestEnumMethodFactory(t *testing.T) {
+	// Enum factory methods are supported (needed for serializable decode).
+	checkOK(t, `
 		enum Color { Red,
 			make() Color `+"`"+`factory { return Color.Red; }
 		}
 		test() {}
 	`)
-	expectError(t, errs, "cannot be a factory")
 }
 
 func TestEnumMethodMissingReturn(t *testing.T) {

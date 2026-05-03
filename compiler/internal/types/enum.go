@@ -38,14 +38,15 @@ func (v *Variant) SetDoc(s string) { v.doc = s }
 
 // Enum represents an enum/ADT type.
 type Enum struct {
-	obj        *TypeName
-	typeParams []*TypeParam
-	variants   []*Variant
-	methods    []*Method
-	isCopy     bool   // `copy meta — bitwise copy on assignment
-	exported   bool   // `public meta — visible to other modules
-	doc        string // `doc meta — documentation string
-	deprecated string // `deprecated meta — empty means not deprecated
+	obj            *TypeName
+	typeParams     []*TypeParam
+	variants       []*Variant
+	methods        []*Method
+	isCopy         bool   // `copy meta — bitwise copy on assignment
+	isSerializable bool   // `serializable meta — auto-generate encode/decode
+	exported       bool   // `public meta — visible to other modules
+	doc            string // `doc meta — documentation string
+	deprecated     string // `deprecated meta — empty means not deprecated
 }
 
 // NewEnum creates a new enum type and sets the TypeName's type to it.
@@ -62,6 +63,8 @@ func (e *Enum) Methods() []*Method       { return e.methods }
 func (e *Enum) Underlying() Type         { return e }
 func (e *Enum) IsCopy() bool             { return e.isCopy }
 func (e *Enum) SetCopy(v bool)           { e.isCopy = v }
+func (e *Enum) IsSerializable() bool     { return e.isSerializable }
+func (e *Enum) SetSerializable(v bool)   { e.isSerializable = v }
 func (e *Enum) IsExported() bool         { return e.exported }
 func (e *Enum) SetExported(v bool)       { e.exported = v }
 func (e *Enum) Doc() string              { return e.doc }

@@ -1095,8 +1095,9 @@ Planned work items. `T-NNN` IDs are stable — never reused or renumbered.
 | # | Item | Depends on | Priority |
 |---|------|-----------|----------|
 | ~~T0001~~ | ~~`JsonValue` use `map[string, JsonValue]` for Object variant instead of parallel arrays~~ — **Done.** `Object(string[] keys, JsonValue[] vals)` replaced with `Object(map[string, JsonValue] fields)`. Also required fixing B0088 (cross-module mono instance propagation). JSON object key order is now non-deterministic (correct per RFC 8259). 122 tests. | ~~B0031~~ ~~B0044~~ ~~B0088~~ (resolved) | ~~High~~ Resolved |
-| T0002 | Enum `` `serializable `` codegen — auto-generate encode/decode for enums. Simple enums (no data) encode as strings. Data enums use tagged representation with discriminator field. | B0015 (enum methods, optional) | Medium |
-| T0003 | `` `serializable(tag: "kind") `` parameter — custom discriminator field name for enum serialization (default: `"type"`). | T0002 | Low |
+| ~~T0002~~ | ~~Enum `` `serializable `` codegen~~ — **Done.** Simple enums (no data variants) auto-generate `encode(Encoder ~e)!` (writes variant name as string) and `decode(Decoder ~d) Enum!` factory (matches string to variant, raises `DecodeError` on unknown). Also enabled `factory` annotation on enum methods. Data enum serializable deferred to T0008. 24 tests in `enum_serializable_test.pr`. | ~~B0015~~ (resolved) | ~~Medium~~ Resolved |
+| T0003 | `` `serializable(tag: "kind") `` parameter — custom discriminator field name for enum serialization (default: `"type"`). | T0008 | Low |
+| T0008 | Data enum `` `serializable `` codegen — auto-generate encode/decode for data enums (variants with fields). Tagged object representation with discriminator field. | T0002 (resolved) | Medium |
 | T0004 | `` `flatten `` field annotation — inline nested object fields into the parent during encode/decode. | — | Medium |
 | T0005 | `json.encode_string[T]` / `json.decode_string[T]` with `serializable` user types — generic convenience functions don't work due to structural coercion through generic constraints. | — | Medium |
 | T0006 | Enum methods (B0015) — needed for ergonomic `JsonValue` API (e.g., `v.is_null()`, `v.as_string()`, `v.get("key")`). Currently uses free functions. | B0015 | Low |

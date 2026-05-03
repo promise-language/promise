@@ -1,0 +1,280 @@
+use json;
+
+enum Color `serializable `copy {
+  Red,
+  Green,
+  Blue,
+}
+
+enum Priority `serializable `copy {
+  Low,
+  Medium,
+  High,
+}
+
+type Task `serializable {
+  string name;
+  Priority priority;
+}
+
+// ── Simple enum encode/decode ──
+
+encode_color_test() `test {
+  json.JsonEncoder enc = json.JsonEncoder();
+  Color.Red.encode(enc)!;
+  assert(enc.to_string() == "\"Red\"", "encode Red");
+}
+
+encode_all_variants_test() `test {
+  json.JsonEncoder e1 = json.JsonEncoder();
+  Color.Green.encode(e1)!;
+  assert(e1.to_string() == "\"Green\"", "encode Green");
+
+  json.JsonEncoder e2 = json.JsonEncoder();
+  Color.Blue.encode(e2)!;
+  assert(e2.to_string() == "\"Blue\"", "encode Blue");
+}
+
+decode_color_test() `test {
+  json.JsonDecoder dec = json.JsonDecoder(data: "\"Green\"");
+  Color c = Color.decode(dec)!;
+  json.JsonEncoder enc = json.JsonEncoder();
+  c.encode(enc)!;
+  assert(enc.to_string() == "\"Green\"", "decode Green");
+}
+
+decode_error_unknown_variant_test() `test {
+  json.JsonDecoder dec = json.JsonDecoder(data: "\"Purple\"");
+  (v, err) := Color.decode(dec);
+  assert(err is present, "unknown variant should error");
+}
+
+round_trip_all_priorities_test() `test {
+  Priority[] all = [Priority.Low, Priority.Medium, Priority.High];
+  string[] expected = ["\"Low\"", "\"Medium\"", "\"High\""];
+  int i = 0;
+  for p in all {
+    json.JsonEncoder enc = json.JsonEncoder();
+    p.encode(enc)!;
+    assert(enc.to_string() == expected[i], "encode priority");
+    i = i + 1;
+  }
+}
+
+// ── Enum as field in serializable type ──
+
+encode_task_with_enum_test() `test {
+  Task t = Task(name: "Fix bug", priority: Priority.High);
+  json.JsonEncoder enc = json.JsonEncoder();
+  t.encode(enc)!;
+  string s = enc.to_string();
+  assert(s.contains("\"name\":\"Fix bug\""), "task name");
+  assert(s.contains("\"priority\":\"High\""), "task priority");
+}
+
+decode_task_with_enum_test() `test {
+  json.JsonDecoder dec = json.JsonDecoder(data: "\{\"name\":\"Deploy\",\"priority\":\"Low\"}");
+  Task t = Task.decode(dec)!;
+  assert(t.name == "Deploy", "decoded name");
+  json.JsonEncoder enc = json.JsonEncoder();
+  t.priority.encode(enc)!;
+  assert(enc.to_string() == "\"Low\"", "decoded priority");
+}
+
+// ── Full Task round-trip ──
+
+round_trip_task_test() `test {
+  Task t = Task(name: "Ship", priority: Priority.Medium);
+  json.JsonEncoder enc = json.JsonEncoder();
+  t.encode(enc)!;
+  string s = enc.to_string();
+  json.JsonDecoder dec = json.JsonDecoder(data: s);
+  Task t2 = Task.decode(dec)!;
+  assert(t2.name == "Ship", "rt task name");
+  // Verify priority round-trips
+  json.JsonEncoder enc2 = json.JsonEncoder();
+  t2.priority.encode(enc2)!;
+  assert(enc2.to_string() == "\"Medium\"", "rt task priority");
+}
+
+// ── Single-variant enum ──
+
+enum Singleton `serializable `copy {
+  Only,
+}
+
+encode_singleton_test() `test {
+  json.JsonEncoder enc = json.JsonEncoder();
+  Singleton.Only.encode(enc)!;
+  assert(enc.to_string() == "\"Only\"", "encode singleton");
+}
+
+decode_singleton_test() `test {
+  json.JsonDecoder dec = json.JsonDecoder(data: "\"Only\"");
+  Singleton s = Singleton.decode(dec)!;
+  json.JsonEncoder enc = json.JsonEncoder();
+  s.encode(enc)!;
+  assert(enc.to_string() == "\"Only\"", "decode singleton");
+}
+
+// ── Optional enum field ──
+
+type Config `serializable {
+  string name;
+  Priority? level;
+}
+
+optional_enum_field_present_test() `test {
+  Config c = Config(name: "prod", level: Priority.High);
+  json.JsonEncoder enc = json.JsonEncoder();
+  c.encode(enc)!;
+  string s = enc.to_string();
+  assert(s.contains("\"level\":\"High\""), "optional enum present");
+}
+
+optional_enum_field_absent_test() `test {
+  Config c = Config(name: "dev");
+  json.JsonEncoder enc = json.JsonEncoder();
+  c.encode(enc)!;
+  string s = enc.to_string();
+  assert(!s.contains("level"), "optional enum absent: no level key");
+  assert(s.contains("\"name\":\"dev\""), "optional enum absent: has name");
+}
+
+// ── Enum vector field ──
+
+type Schedule `serializable {
+  Priority[] priorities;
+}
+
+enum_vector_field_encode_test() `test {
+  Schedule s = Schedule(priorities: [Priority.Low, Priority.High, Priority.Medium]);
+  json.JsonEncoder enc = json.JsonEncoder();
+  s.encode(enc)!;
+  string result = enc.to_string();
+  assert(result.contains("[\"Low\",\"High\",\"Medium\"]"), "enum vector encode: {result}");
+}
+
+enum_vector_field_decode_test() `test {
+  json.JsonDecoder dec = json.JsonDecoder(data: "\{\"priorities\":[\"High\",\"Low\"]}");
+  Schedule s = Schedule.decode(dec)!;
+  assert(s.priorities.len == 2, "enum vector decode: len");
+  json.JsonEncoder e1 = json.JsonEncoder();
+  s.priorities[0].encode(e1)!;
+  assert(e1.to_string() == "\"High\"", "enum vector decode: [0]");
+  json.JsonEncoder e2 = json.JsonEncoder();
+  s.priorities[1].encode(e2)!;
+  assert(e2.to_string() == "\"Low\"", "enum vector decode: [1]");
+}
+
+// ── Optional enum field decode ──
+
+optional_enum_decode_present_test() `test {
+  json.JsonDecoder dec = json.JsonDecoder(data: "\{\"name\":\"prod\",\"level\":\"High\"}");
+  Config c = Config.decode(dec)!;
+  assert(c.name == "prod", "opt enum decode: name");
+  // level should be present
+  json.JsonEncoder enc = json.JsonEncoder();
+  Priority? lv = c.level;
+  if l := lv {
+    l.encode(enc)!;
+    assert(enc.to_string() == "\"High\"", "opt enum decode: level");
+  } else {
+    assert(false, "expected level present");
+  }
+}
+
+optional_enum_decode_null_test() `test {
+  json.JsonDecoder dec = json.JsonDecoder(data: "\{\"name\":\"dev\",\"level\":null}");
+  Config c = Config.decode(dec)!;
+  assert(c.name == "dev", "opt enum decode null: name");
+  assert(c.level is absent, "opt enum decode null: level absent");
+}
+
+optional_enum_decode_missing_test() `test {
+  // Key not present at all — should default to none
+  json.JsonDecoder dec = json.JsonDecoder(data: "\{\"name\":\"test\"}");
+  Config c = Config.decode(dec)!;
+  assert(c.name == "test", "opt enum decode missing: name");
+  assert(c.level is absent, "opt enum decode missing: level absent");
+}
+
+// ── Decode error cases ──
+
+decode_error_non_string_input_test() `test {
+  // JSON has a number where a string enum variant is expected
+  json.JsonDecoder dec = json.JsonDecoder(data: "42");
+  (v, err) := Color.decode(dec);
+  assert(err is present, "non-string input should error");
+}
+
+decode_error_empty_string_test() `test {
+  json.JsonDecoder dec = json.JsonDecoder(data: "\"\"");
+  (v, err) := Color.decode(dec);
+  assert(err is present, "empty string should error");
+}
+
+// ── Multiple enum fields ──
+
+type Event `serializable {
+  string title;
+  Color color;
+  Priority priority;
+}
+
+multiple_enum_fields_encode_test() `test {
+  Event e = Event(title: "Launch", color: Color.Blue, priority: Priority.High);
+  json.JsonEncoder enc = json.JsonEncoder();
+  e.encode(enc)!;
+  string s = enc.to_string();
+  assert(s.contains("\"color\":\"Blue\""), "multi enum: color");
+  assert(s.contains("\"priority\":\"High\""), "multi enum: priority");
+  assert(s.contains("\"title\":\"Launch\""), "multi enum: title");
+}
+
+multiple_enum_fields_decode_test() `test {
+  json.JsonDecoder dec = json.JsonDecoder(data: "\{\"title\":\"Test\",\"color\":\"Red\",\"priority\":\"Low\"}");
+  Event e = Event.decode(dec)!;
+  assert(e.title == "Test", "multi enum decode: title");
+  json.JsonEncoder ec = json.JsonEncoder();
+  e.color.encode(ec)!;
+  assert(ec.to_string() == "\"Red\"", "multi enum decode: color");
+  json.JsonEncoder ep = json.JsonEncoder();
+  e.priority.encode(ep)!;
+  assert(ep.to_string() == "\"Low\"", "multi enum decode: priority");
+}
+
+// ── Decode with extra keys ──
+
+decode_extra_keys_test() `test {
+  // Extra keys should be silently skipped
+  json.JsonDecoder dec = json.JsonDecoder(data: "\{\"name\":\"x\",\"unknown\":true,\"priority\":\"Low\",\"extra\":[1,2]}");
+  Task t = Task.decode(dec)!;
+  assert(t.name == "x", "extra keys: name");
+  json.JsonEncoder enc = json.JsonEncoder();
+  t.priority.encode(enc)!;
+  assert(enc.to_string() == "\"Low\"", "extra keys: priority");
+}
+
+// ── include_none on optional enum ──
+
+type Notification `serializable {
+  string text;
+  Priority? urgency `include_none;
+}
+
+include_none_present_test() `test {
+  Notification n = Notification(text: "hi", urgency: Priority.High);
+  json.JsonEncoder enc = json.JsonEncoder();
+  n.encode(enc)!;
+  string s = enc.to_string();
+  assert(s.contains("\"urgency\":\"High\""), "include_none present");
+}
+
+include_none_absent_test() `test {
+  Notification n = Notification(text: "hi");
+  json.JsonEncoder enc = json.JsonEncoder();
+  n.encode(enc)!;
+  string s = enc.to_string();
+  assert(s.contains("\"urgency\":null"), "include_none absent: null");
+}

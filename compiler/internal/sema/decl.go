@@ -672,6 +672,10 @@ func (c *Checker) defineEnum(d *ast.EnumDecl) {
 	}
 	enum.SetDoc(extractDoc(d.Annotations))
 	enum.SetDeprecated(extractDeprecated(d.Annotations))
+
+	if c.hasAnnotation(d.Annotations, "serializable") {
+		c.processSerializableEnum(enum, d)
+	}
 }
 
 func (c *Checker) defineEnumMethod(enum *types.Enum, md *ast.MethodDecl, enumName string) {
@@ -683,15 +687,12 @@ func (c *Checker) defineEnumMethod(enum *types.Enum, md *ast.MethodDecl, enumNam
 	abstract := c.hasAnnotation(md.Annotations, "abstract")
 	native := c.hasAnnotation(md.Annotations, "native")
 
-	// Enum methods cannot be abstract, native, factory, global, or mono
+	// Enum methods cannot be abstract, native, global, or mono
 	if abstract {
 		c.errorf(md.Pos(), "enum method %s.%s cannot be abstract", enumName, md.Name)
 	}
 	if native {
 		c.errorf(md.Pos(), "enum method %s.%s cannot be native", enumName, md.Name)
-	}
-	if c.hasAnnotation(md.Annotations, "factory") {
-		c.errorf(md.Pos(), "enum method %s.%s cannot be a factory", enumName, md.Name)
 	}
 	if c.hasAnnotation(md.Annotations, "global") {
 		c.errorf(md.Pos(), "enum method %s.%s cannot be `global", enumName, md.Name)
@@ -706,6 +707,10 @@ func (c *Checker) defineEnumMethod(enum *types.Enum, md *ast.MethodDecl, enumNam
 	}
 
 	placement := types.PlaceInstance // default
+	isFactory := c.hasAnnotation(md.Annotations, "factory")
+	if isFactory {
+		placement = types.PlaceType
+	}
 
 	m := types.NewMethod(tpos(md.Pos()), md.Name, sig, placement, false, false)
 	m.SetGetter(md.IsGetter)
@@ -720,9 +725,12 @@ func (c *Checker) defineEnumMethod(enum *types.Enum, md *ast.MethodDecl, enumNam
 }
 
 func (c *Checker) resolveEnumMethodSignature(enum *types.Enum, md *ast.MethodDecl) *types.Signature {
-	// Resolve receiver — enum methods always receive the enum type
+	// Resolve receiver — enum methods receive the enum type, unless factory.
+	isFactory := c.hasAnnotation(md.Annotations, "factory")
 	var recv *types.Param
-	if md.Receiver != nil {
+	if isFactory {
+		recv = nil // factory methods have no receiver
+	} else if md.Receiver != nil {
 		ref := resolveRefMod(md.Receiver.RefMod)
 		recv = types.NewParam("this", enum, ref)
 	} else {

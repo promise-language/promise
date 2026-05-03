@@ -16,6 +16,8 @@ Promise is a statically-typed programming language with Dart-inspired syntax and
 
 **IMPORTANT: Always use `./build` from the repo root to build the compiler. NEVER run `go build` directly — it skips resource embedding and produces a broken binary. The output is always `bin/promise`.**
 
+**IMPORTANT: Never commit, push, or create PRs unless the user explicitly asks you to.** Wait for an explicit instruction like "commit", "push", or "create a PR" before performing any git write operations.
+
 **IMPORTANT: Always run `bin/verify.sh --local --wasm` before committing changes.** This formats Go and Promise code, runs `go vet`, and executes the full test suite (including WASM target). The `--local` flag uses a local cache directory to avoid polluting `~/.promise`. Do not commit if verify fails.
 
 **Setup (once per clone):** `bin/setup.sh` — enables git hooks and local dev environment. Also runs automatically on `./build`.

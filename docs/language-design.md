@@ -2438,12 +2438,15 @@ strings are UTF-8 encoded, owned, and heap-allocated.
 ```promise
 string name = "world";
 string msg = "hello, {name}!";           // string interpolation with {}
+string literal_brace = "json: \{key}";   // \{ escapes to literal { (no interpolation)
 string raw = r"no \n escape here";        // raw string
 string multi = """
   multi-line
   string literal
 """;
 ```
+
+**Escape sequences:** `\n` (newline), `\t` (tab), `\r` (carriage return), `\b` (backspace), `\\` (backslash), `\"` (double quote), `\0` (null), `\{` (literal `{` — suppresses interpolation). Raw strings (`r"..."`) do not process escape sequences.
 
 string slices (`&str` equivalent) use `string&` for borrowed string data.
 

@@ -969,6 +969,38 @@ func TestStringEscapeBrace(t *testing.T) {
 	assertContains(t, ir, `c"a{b"`)
 }
 
+func TestStringEscapeBraceOnly(t *testing.T) {
+	// \{ alone — no interpolation, should take static string path
+	ir := generateIR(t, `main() { s := "\{"; }`)
+	assertContains(t, ir, `c"{"`)
+}
+
+func TestStringEscapeBraceMultiple(t *testing.T) {
+	ir := generateIR(t, `main() { s := "\{a} and \{b}"; }`)
+	assertContains(t, ir, `c"{a} and {b}"`)
+}
+
+func TestStringEscapeBraceWithInterpolation(t *testing.T) {
+	// \{ mixed with real interpolation — takes interpolated path
+	ir := generateIR(t, `main() { int x = 42; s := "\{x}={x}"; }`)
+	// The escaped \{ produces static text "{x}="
+	assertContains(t, ir, `c"{x}="`)
+	// The real {x} produces a call to promise_int_to_string
+	assertContains(t, ir, "call i8* @promise_int_to_string(")
+}
+
+func TestStringEscapeBraceAtEnd(t *testing.T) {
+	ir := generateIR(t, `main() { s := "end\{"; }`)
+	assertContains(t, ir, `c"end{"`)
+}
+
+func TestStringEscapeBraceAdjacentInterp(t *testing.T) {
+	// \{ immediately followed by real interpolation {x}
+	ir := generateIR(t, `main() { int x = 1; s := "\{{x}"; }`)
+	assertContains(t, ir, `c"{"`)
+	assertContains(t, ir, "call i8* @promise_int_to_string(")
+}
+
 func TestStringIntrinsicsDeclared(t *testing.T) {
 	ir := generateIR(t, `main() { x := 42; }`)
 	// String intrinsics should always be defined (codegen-emitted LLVM IR)

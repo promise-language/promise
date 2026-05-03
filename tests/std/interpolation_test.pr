@@ -379,6 +379,57 @@ test_escaped_adjacent_to_real() `test {
   assert(s == "\{x}=5", "escaped then real interpolation adjacent");
 }
 
+// Verify \{ produces actual { character (char code 123)
+test_escaped_brace_char_value() `test {
+  string s = "\{";
+  assert(s.len == 1, "escaped brace is 1 byte");
+  assert(s.byte_at(0) == 123, "escaped brace is char code 123");
+}
+
+test_escaped_brace_len_in_context() `test {
+  string s = "a\{b";
+  assert(s.len == 3, "a + brace + b = 3 bytes");
+}
+
+// Verify \{ does NOT interpolate — variable name stays literal
+test_escaped_brace_no_interpolation() `test {
+  int x = 999;
+  string s = "\{x}";
+  assert(s.len == 3, "escaped brace: 3 chars, not interpolated");
+  assert(s.contains("x"), "escaped brace: literal x present");
+  assert(!s.contains("999"), "escaped brace: variable value absent");
+}
+
+// \{ at end of string (no text after)
+test_escaped_brace_at_end() `test {
+  string s = "end\{";
+  assert(s.len == 4, "end + brace = 4 bytes");
+  assert(s.byte_at(3) == 123, "last byte is open brace");
+}
+
+// \{ only, no other text
+test_escaped_brace_only() `test {
+  string s = "\{";
+  assert(s == "\{", "escaped brace only");
+  assert(s.len == 1, "single char");
+}
+
+// \{ immediately before real interpolation
+test_escaped_brace_before_interp() `test {
+  int v = 7;
+  string s = "\{{v}";
+  assert(s == "\{7", "escaped brace then interp");
+  assert(s.len == 2, "brace + 7 = 2 bytes");
+}
+
+// Real interpolation then \{
+test_interp_then_escaped_brace() `test {
+  int v = 3;
+  string s = "{v}\{";
+  assert(s == "3\{", "interp then escaped brace");
+  assert(s.len == 2, "3 + brace = 2 bytes");
+}
+
 // --- Small integer types ---
 
 test_i8_interp() `test {

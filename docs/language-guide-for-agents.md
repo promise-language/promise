@@ -40,6 +40,8 @@ print_line("interpolation: {x} + {name}");
 
 Bare numeric literals infer as `int` or `f64`. Use suffixes for specific types.
 
+**String escapes:** `\n` `\t` `\r` `\b` `\\` `\"` `\0` `\{` (literal `{`, suppresses interpolation). Raw strings (`r"..."`) skip all escapes.
+
 ## Type Declarations
 
 ```promise

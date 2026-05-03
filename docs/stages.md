@@ -354,7 +354,7 @@ Generic function sema support and type-specialized code generation for all gener
 - **Codegen: layout + mono** (`codegen/layout.go`, `codegen/mono.go`): `buildParentFieldSubst` → recursive `mergeParentFieldSubst` for correct LLVM field types. `collectMonoInstances` discovers parent instances transitively. `mergeParentSubst` recursive for transitive chains.
 - **Codegen: dispatch + RTTI** (`codegen/compiler.go`, `codegen/expr.go`, `codegen/rtti.go`): `resolveMonoParentName` builds full subst map for method name mangling through generic parents. `genVirtualMethodCall`/`genVirtualGetterCall` apply `vtableSubst` from Instance type args for correct LLVM return/param types. `emitVtableGlobal` falls back to mono parent names for inherited method lookup.
 - **Scope**: Non-generic child of generic parent (`IntHolder is Holder[int]`), generic child forwarding params (`Wrapper[T] is Container[T]`), partial type arg application (`StringPair[V] is Pair[string, V]`), abstract generic parents, transitive 3-level chains, assignability (child→parent instance, instance→instance, transitive through generic intermediaries), method override, own+inherited fields/methods.
-- **Tests**: 17 e2e tests (`test_generic_inheritance.pr`), 13 sema tests, 2 codegen IR tests.
+- **Tests**: 17 e2e tests (`generic_inheritance_test.pr`), 13 sema tests, 2 codegen IR tests. Additional coverage: 109 inheritance e2e tests in `inheritance_test.pr` covering single/multiple/generic inheritance, abstract interfaces, deep chains, is-checks, mutable methods, drop with inheritance, second-parent default overrides, generic multi-inherit is-checks, functions returning parent types, error type inheritance, and value-type parent inheritance.
 
 ## Stage 8g — Container Codegen (Done)
 
@@ -718,7 +718,7 @@ Command-line interface. Core commands implemented; formatter planned.
 - Inline error formatting: source line + `^` caret marker, no temp filenames
 - `promise clean` — remove build cache (`~/.promise/cache/build/`), `--global` also removes module cache
 - Embedded `modules/std/` and `runtime/` in the binary via `go:embed` for self-contained install
-- **Test suite**: 1202 tests across 175 files — `tests/e2e/` (language features), `tests/std/` (standard library), `tests/concurrency/` (scheduler, channels, select, panic recovery, stress tests), `tests/modules/` (module system e2e), `tests/value_types/` (pure value types)
+- **Test suite**: 1949 tests across 198 files — `tests/e2e/` (language features), `tests/std/` (standard library), `tests/concurrency/` (scheduler, channels, select, panic recovery, stress tests), `tests/modules/` (module system e2e), `tests/value_types/` (pure value types), `modules/*/` (catalog module tests)
 - `promise doc <file.pr>` — generate documentation from `doc()` meta tags (**Phase 1 done**: `cmd/promise/doc.go`)
   - `-public` (default) / `-all` — filter by visibility
   - `-signatures` — compact signature-only output (minimal tokens for AI agents)
@@ -991,7 +991,7 @@ Known gaps and improvements deferred from completed stages.
 | Console output API refactor: delete obsolete `print_int`/`print_f64`/`print_bool` (string interpolation covers all), rename and change `println(string)` to `print_line(Format)` (full English words), add `print(Format)` (no newline). ~400 replacements across ~100 test files. Also remove codegen bridges `promise_print_int`/`promise_print_f64`/`promise_print_bool`. | Std | Medium |
 | ~~Fixed-size arrays as stack-allocated `[N x T]`~~ | ~~8g~~ | ~~Done~~ |
 | Destructure is-patterns (`x is Dog(name)`) | 8k | Medium |
-| Generic type RTTI | 8k | Medium |
+| Generic type RTTI — partially resolved: mono type `is` checks work (origin ID in parent chain, view vtable cache keyed by mono name). Remaining: `is` patterns with full type expressions (`x is Box[int]`, `e is DataError[string]`) — currently only bare `IDENT` accepted. | 8k | Medium |
 | Failable `close()` error propagation in `use` | 8m | Medium |
 | Named enum fields in constructors | 8d | Low |
 | Enum methods | 8d | Low |
@@ -1022,6 +1022,8 @@ Known gaps and improvements deferred from completed stages.
 | ~~`map[bool, T]` — bool key hashing/lookup is broken~~ — **Fixed.** Bool hash now uses hardcoded constants via `select i1` instead of `fnv1a_hash`. Map literal key types are validated against `Hashable + Equal` constraints via `validateConstraints`. | 8i | ~~Medium~~ Resolved |
 | ~~Variable name collisions in repeated `if v := opt { }` blocks~~ — **Fixed.** `uniqueLocalName()` with per-function `localNameCount` appends `.N` suffix to duplicate alloca names in inner scopes. | 8n | ~~Medium~~ Resolved |
 | `is` type check on optional primitive types (`u8?`, `int?`, etc.) generates invalid IR: `bitcast i8 %val to {i8*}*` — tries to extract a vtable pointer from a scalar value. The `is` codegen path assumes all optionals contain value types with vtable pointers, but optional primitives use `{i1, <scalar>}` representation with no vtable. Workaround: use `if v := opt { }` pattern instead of `opt is T`. | Codegen | Medium |
+| ~~Runtime hang when assigning generic multi-inherit type to second parent~~ — **Fixed.** `getOrEmitViewVtable` now accepts the full `fromType` (may be `*types.Instance`) and applies `resolveMonoParentName` fallback for inherited methods from generic parents — same pattern as `emitVtableGlobal`. Cache key changed from `*Named` pair to string-based key (`monoName`) so `Entity[int]` and `Entity[string]` get separate view vtables. Previously, `getOrEmitViewVtable` used origin-only names to look up monomorphized method functions, resulting in NULL vtable slots and a hang on dispatch. | Codegen | ~~Medium~~ Resolved |
+| ~~`is` check with unqualified generic type silently returns false~~ — **Fixed.** `emitMonoTypeInfoGlobals` now includes the origin `Named` type's own type ID in the mono instance's parent ID chain. Previously, `LabeledBox[int]`'s RTTI parent list only contained `Box`'s ID (the parent), not `LabeledBox`'s origin ID, so `b is LabeledBox` always returned false. Now the origin ID is prepended to the parent chain so it matches during the `promise_type_is` walk. | Codegen | ~~Medium~~ Resolved |
 
 ### Ownership & Type System
 

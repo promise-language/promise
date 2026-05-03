@@ -1,0 +1,1641 @@
+// Extensive tests for inheritance: single, multiple, generic, abstract interfaces,
+// default methods, virtual dispatch, is-checks, and deep chains.
+// =============================================================================
+// Part 1: Basic single inheritance
+// =============================================================================
+type Animal {
+  string name;
+  speak(&this) string `abstract;
+}
+
+type Dog is Animal {
+  speak(&this) string {
+    return "woof";
+  }
+}
+
+type Cat is Animal {
+  speak(&this) string {
+    return "meow";
+  }
+}
+
+test_basic_inheritance_field_access() `test {
+  d := Dog(name: "Rex");
+  assert(d.name == "Rex", "child accesses parent field");
+}
+
+test_basic_override() `test {
+  d := Dog(name: "Rex");
+  assert(d.speak() == "woof", "dog speaks woof");
+  c := Cat(name: "Luna");
+  assert(c.speak() == "meow", "cat speaks meow");
+}
+
+test_basic_polymorphism() `test {
+  Animal a = Dog(name: "Buddy");
+  assert(a.speak() == "woof", "polymorphic dispatch to Dog");
+  Animal b = Cat(name: "Whiskers");
+  assert(b.speak() == "meow", "polymorphic dispatch to Cat");
+}
+
+test_parent_field_via_polymorphic_ref() `test {
+  Animal a = Dog(name: "Max");
+  assert(a.name == "Max", "parent field via parent-typed var");
+}
+
+// =============================================================================
+// Part 2: Inheritance with concrete (non-abstract) parent methods
+// =============================================================================
+
+type Logger {
+  string prefix;
+
+  log(&this, string msg) string {
+    return this.prefix + ": " + msg;
+  }
+}
+
+type TimestampLogger is Logger {
+  // Override parent's concrete method
+  log(&this, string msg) string {
+    return "[TS] " + this.prefix + ": " + msg;
+  }
+}
+
+type SimpleLogger is Logger {
+  // Inherits log() without override
+}
+
+test_concrete_parent_method_inherited() `test {
+  s := SimpleLogger(prefix: "INFO");
+  assert(s.log("hello") == "INFO: hello", "inherited concrete method");
+}
+
+test_concrete_parent_method_overridden() `test {
+  t := TimestampLogger(prefix: "WARN");
+  assert(t.log("danger") == "[TS] WARN: danger", "overridden concrete method");
+}
+
+test_concrete_override_polymorphic() `test {
+  Logger a = SimpleLogger(prefix: "A");
+  Logger b = TimestampLogger(prefix: "B");
+  assert(a.log("x") == "A: x", "polymorphic inherited method");
+  assert(b.log("x") == "[TS] B: x", "polymorphic overridden method");
+}
+
+// =============================================================================
+// Part 3: Abstract interface types (all methods abstract)
+// =============================================================================
+
+type Renderable {
+  render(&this) string `abstract;
+  width(&this) int `abstract;
+  height(&this) int `abstract;
+}
+
+type TextBox is Renderable {
+  string content;
+  int w;
+  int h;
+
+  render(&this) string {
+    return "TextBox(" + this.content + ")";
+  }
+
+  width(&this) int {
+    return this.w;
+  }
+
+  height(&this) int {
+    return this.h;
+  }
+}
+
+type ImageBox is Renderable {
+  string src;
+  int w;
+  int h;
+
+  render(&this) string {
+    return "Image(" + this.src + ")";
+  }
+
+  width(&this) int {
+    return this.w;
+  }
+
+  height(&this) int {
+    return this.h;
+  }
+}
+
+test_interface_implementation() `test {
+  t := TextBox(content: "hello", w: 100, h: 20);
+  assert(t.render() == "TextBox(hello)", "TextBox render");
+  assert(t.width() == 100, "TextBox width");
+  assert(t.height() == 20, "TextBox height");
+}
+
+test_interface_polymorphism() `test {
+  Renderable a = TextBox(content: "hi", w: 50, h: 10);
+  Renderable b = ImageBox(src: "logo.png", w: 200, h: 150);
+  assert(a.render() == "TextBox(hi)", "polymorphic TextBox");
+  assert(b.render() == "Image(logo.png)", "polymorphic ImageBox");
+  assert(a.width() == 50, "polymorphic TextBox width");
+  assert(b.width() == 200, "polymorphic ImageBox width");
+}
+
+// =============================================================================
+// Part 4: Mix of abstract and concrete methods in parent
+// =============================================================================
+
+type Formatter {
+  format(&this) string `abstract;
+
+  display(&this) string {
+    return "[" + this.format() + "]";
+  }
+}
+
+type NumberFormatter is Formatter {
+  int value;
+
+  format(&this) string {
+    return "{this.value}";
+  }
+}
+
+type StringFormatter is Formatter {
+  string value;
+
+  format(&this) string {
+    return "\"" + this.value + "\"";
+  }
+}
+
+test_abstract_with_concrete_default() `test {
+  n := NumberFormatter(value: 42);
+  assert(n.format() == "42", "abstract method implemented");
+  assert(n.display() == "[42]", "concrete method uses abstract override");
+}
+
+test_abstract_with_concrete_polymorphic() `test {
+  Formatter a = NumberFormatter(value: 7);
+  Formatter b = StringFormatter(value: "hi");
+  assert(a.display() == "[7]", "polymorphic display for number");
+  assert(b.display() == "[\"hi\"]", "polymorphic display for string");
+}
+
+// =============================================================================
+// Part 5: Multiple inheritance (implementing multiple interfaces)
+// =============================================================================
+
+type Describable {
+  describe(&this) string `abstract;
+}
+
+type Measurable {
+  measure(&this) int `abstract;
+}
+
+type Widget is Describable, Measurable {
+  string label;
+  int size;
+
+  describe(&this) string {
+    return "Widget:" + this.label;
+  }
+
+  measure(&this) int {
+    return this.size;
+  }
+}
+
+test_multiple_inheritance_basic() `test {
+  w := Widget(label: "btn", size: 42);
+  assert(w.describe() == "Widget:btn", "first parent method");
+  assert(w.measure() == 42, "second parent method");
+}
+
+test_multiple_inheritance_first_parent_polymorphism() `test {
+  Describable d = Widget(label: "input", size: 10);
+  assert(d.describe() == "Widget:input", "viewed as Describable");
+}
+
+test_multiple_inheritance_second_parent_polymorphism() `test {
+  Measurable m = Widget(label: "slider", size: 200);
+  assert(m.measure() == 200, "viewed as Measurable");
+}
+
+// Multiple children of multiple parents
+
+type Button is Describable, Measurable {
+  string text;
+
+  describe(&this) string {
+    return "Button:" + this.text;
+  }
+
+  measure(&this) int {
+    return this.text.len;
+  }
+}
+
+test_multiple_children_same_interfaces() `test {
+  Describable a = Widget(label: "w", size: 5);
+  Describable b = Button(text: "click");
+  assert(a.describe() == "Widget:w", "Widget as Describable");
+  assert(b.describe() == "Button:click", "Button as Describable");
+}
+
+test_multiple_children_second_interface() `test {
+  Measurable a = Widget(label: "w", size: 99);
+  Measurable b = Button(text: "ok");
+  assert(a.measure() == 99, "Widget as Measurable");
+  assert(b.measure() == 2, "Button as Measurable");
+}
+
+// =============================================================================
+// Part 6: Multiple inheritance with default methods
+// Both parents declare the same abstract method name(); child satisfies both
+// with a single implementation.
+// =============================================================================
+
+type Greetable {
+  name(&this) string `abstract;
+
+  greet(&this) string {
+    return "Hello, " + this.name();
+  }
+}
+
+type Farewell {
+  name(&this) string `abstract;
+
+  farewell(&this) string {
+    return "Goodbye, " + this.name();
+  }
+}
+
+type Person is Greetable, Farewell {
+  string full_name;
+
+  name(&this) string {
+    return this.full_name;
+  }
+}
+
+test_multi_inherit_default_methods() `test {
+  p := Person(full_name: "Alice");
+  assert(p.greet() == "Hello, Alice", "default from first parent");
+  assert(p.farewell() == "Goodbye, Alice", "default from second parent");
+}
+
+test_multi_inherit_defaults_polymorphic() `test {
+  Greetable g = Person(full_name: "Bob");
+  assert(g.greet() == "Hello, Bob", "default method via first parent type");
+  Farewell f = Person(full_name: "Bob");
+  assert(f.farewell() == "Goodbye, Bob", "default method via second parent type");
+}
+
+// =============================================================================
+// Part 7: Deep inheritance chains (3+ levels)
+// =============================================================================
+
+type Base {
+  string id;
+
+  get_id(&this) string {
+    return this.id;
+  }
+}
+
+type Mid is Base {
+  int level;
+
+  get_level(&this) int {
+    return this.level;
+  }
+}
+
+type Derived is Mid {
+  string tag;
+
+  get_tag(&this) string {
+    return this.tag;
+  }
+}
+
+type DeepDerived is Derived {
+  bool active;
+}
+
+test_deep_chain_field_access() `test {
+  d := DeepDerived(id: "x", level: 3, tag: "deep", active: true);
+  assert(d.id == "x", "grandparent field");
+  assert(d.level == 3, "parent field");
+  assert(d.tag == "deep", "immediate parent field");
+  assert(d.active == true, "own field");
+}
+
+test_deep_chain_method_access() `test {
+  d := Derived(id: "r1", level: 2, tag: "leaf");
+  assert(d.get_id() == "r1", "grandparent method");
+  assert(d.get_level() == 2, "parent method");
+  assert(d.get_tag() == "leaf", "own method");
+}
+
+test_deep_chain_assignability() `test {
+  Base b = DeepDerived(id: "dd", level: 1, tag: "t", active: false);
+  assert(b.get_id() == "dd", "deep child assignable to root");
+}
+
+test_deep_chain_mid_assignability() `test {
+  Mid m = Derived(id: "d", level: 5, tag: "mid");
+  assert(m.get_id() == "d", "derived assignable to mid");
+  assert(m.get_level() == 5, "inherited method via mid ref");
+}
+
+// =============================================================================
+// Part 8: Deep chain with abstract override
+// =============================================================================
+
+type AbstractBase {
+  compute(&this) int `abstract;
+}
+
+type AbstractMid is AbstractBase {
+  // Still abstract — does not implement compute
+  label(&this) string `abstract;
+}
+
+type ConcreteLeaf is AbstractMid {
+  int val;
+
+  compute(&this) int {
+    return this.val * 2;
+  }
+
+  label(&this) string {
+    return "leaf";
+  }
+}
+
+test_deep_abstract_chain() `test {
+  c := ConcreteLeaf(val: 21);
+  assert(c.compute() == 42, "deep abstract override compute");
+  assert(c.label() == "leaf", "deep abstract override label");
+}
+
+test_deep_abstract_polymorphic() `test {
+  AbstractBase b = ConcreteLeaf(val: 10);
+  assert(b.compute() == 20, "polymorphic through deep abstract");
+}
+
+test_deep_abstract_mid_polymorphic() `test {
+  AbstractMid m = ConcreteLeaf(val: 5);
+  assert(m.compute() == 10, "compute via mid-level ref");
+  assert(m.label() == "leaf", "label via mid-level ref");
+}
+
+// =============================================================================
+// Part 9: is-checks across hierarchy
+// =============================================================================
+
+test_is_check_direct_child() `test {
+  Animal a = Dog(name: "Rex");
+  assert(a is Dog, "Dog is Dog");
+  assert(!(a is Cat), "Dog is not Cat");
+}
+
+test_is_check_siblings() `test {
+  Animal a = Cat(name: "Luna");
+  assert(a is Cat, "Cat is Cat");
+  assert(!(a is Dog), "Cat is not Dog");
+  assert(a is Animal, "Cat is Animal");
+}
+
+test_is_check_deep_chain() `test {
+  Base b = DeepDerived(id: "dd", level: 1, tag: "t", active: true);
+  assert(b is DeepDerived, "is DeepDerived");
+  assert(b is Derived, "is Derived (transitive)");
+  assert(b is Mid, "is Mid (transitive)");
+  assert(b is Base, "is Base");
+}
+
+test_is_check_mid_ref() `test {
+  Mid m = Derived(id: "d", level: 1, tag: "t");
+  assert(m is Derived, "Derived is Derived");
+  assert(m is Mid, "Derived is Mid");
+  assert(m is Base, "Derived is Base (transitive)");
+}
+
+// =============================================================================
+// Part 10: Generic inheritance — single parent
+// =============================================================================
+
+type Box[T] {
+  T value;
+
+  get(&this) T {
+    return this.value;
+  }
+}
+
+// Non-generic child of generic parent
+type IntBox is Box[int] {
+}
+
+test_generic_non_generic_child() `test {
+  b := IntBox(value: 42);
+  assert(b.value == 42, "field access");
+  assert(b.get() == 42, "inherited generic method");
+}
+
+// Generic child forwarding type param
+type LabeledBox[T] is Box[T] {
+  string label;
+}
+
+test_generic_forwarding_child() `test {
+  b := LabeledBox[string](value: "hello", label: "greeting");
+  assert(b.get() == "hello", "forwarded type param method");
+  assert(b.label == "greeting", "own field");
+}
+
+// Generic child with own methods
+type CountedBox[T] is Box[T] {
+  int count;
+
+  get_count(&this) int {
+    return this.count;
+  }
+}
+
+test_generic_child_own_methods() `test {
+  b := CountedBox[int](value: 99, count: 3);
+  assert(b.get() == 99, "inherited method");
+  assert(b.get_count() == 3, "own method");
+}
+
+// Assignability: generic child to generic parent
+accept_box(Box[int] b) int {
+  return b.get();
+}
+
+test_generic_assignability() `test {
+  lb := LabeledBox[int](value: 77, label: "x");
+  assert(accept_box(lb) == 77, "generic child assignable to generic parent");
+}
+
+test_generic_non_generic_assignability() `test {
+  ib := IntBox(value: 55);
+  assert(accept_box(ib) == 55, "non-generic child assignable to generic parent");
+}
+
+// =============================================================================
+// Part 11: Generic abstract parent
+// =============================================================================
+
+type Mapper[A, B] {
+  apply(A input) B `abstract;
+}
+
+type IntToString is Mapper[int, string] {
+  apply(int input) string {
+    return "{input}";
+  }
+}
+
+type StringToInt is Mapper[string, int] {
+  apply(string input) int {
+    return input.len;
+  }
+}
+
+accept_int_mapper(Mapper[int, string] m) string {
+  return m.apply(42);
+}
+
+test_generic_abstract_implement() `test {
+  m := IntToString();
+  assert(m.apply(7) == "7", "non-generic child of generic abstract");
+}
+
+test_generic_abstract_polymorphic() `test {
+  Mapper[int, string] m = IntToString();
+  assert(m.apply(100) == "100", "polymorphic generic abstract dispatch");
+}
+
+test_generic_abstract_different_instantiations() `test {
+  assert(accept_int_mapper(IntToString()) == "42", "int->string mapper");
+  s2i := StringToInt();
+  assert(s2i.apply("hello") == 5, "string->int mapper");
+}
+
+// =============================================================================
+// Part 12: Generic child of generic abstract parent
+// =============================================================================
+
+type GenericMapper[A, B] is Mapper[A, B] {
+  (A) -> B fn;
+
+  apply(A input) B {
+    return this.fn(input);
+  }
+}
+
+int_to_str_fn(int x) string {
+  return "{x}";
+}
+
+test_generic_child_of_generic_abstract() `test {
+  m := GenericMapper[int, string](fn: int_to_str_fn);
+  assert(m.apply(55) == "55", "generic child implements generic abstract");
+}
+
+test_generic_child_polymorphic() `test {
+  Mapper[int, string] m = GenericMapper[int, string](fn: int_to_str_fn);
+  assert(m.apply(33) == "33", "generic child polymorphic through generic parent");
+}
+
+// =============================================================================
+// Part 13: Partial type argument application
+// =============================================================================
+
+type Triple[A, B, C] {
+  A first;
+  B second;
+  C third;
+}
+
+type StringTriple[B, C] is Triple[string, B, C] {
+}
+
+type FullyFixed is Triple[string, int, bool] {
+}
+
+test_partial_type_args() `test {
+  st := StringTriple[int, bool](first: "x", second: 1, third: true);
+  assert(st.first == "x", "fixed first param");
+  assert(st.second == 1, "open second param");
+  assert(st.third == true, "open third param");
+}
+
+test_fully_fixed_type_args() `test {
+  ff := FullyFixed(first: "a", second: 2, third: false);
+  assert(ff.first == "a", "fully fixed first");
+  assert(ff.second == 2, "fully fixed second");
+  assert(ff.third == false, "fully fixed third");
+}
+
+// =============================================================================
+// Part 14: Generic inheritance chains (3 levels)
+// =============================================================================
+
+type GBase[T] {
+  T data;
+
+  get_data(&this) T {
+    return this.data;
+  }
+}
+
+type GMid[T] is GBase[T] {
+  string label;
+}
+
+type GLeaf[T] is GMid[T] {
+  int priority;
+}
+
+test_generic_three_level_chain() `test {
+  g := GLeaf[int](data: 42, label: "top", priority: 1);
+  assert(g.get_data() == 42, "method from grandparent");
+  assert(g.label == "top", "field from parent");
+  assert(g.priority == 1, "own field");
+}
+
+test_generic_chain_assignability() `test {
+  GBase[int] b = GLeaf[int](data: 99, label: "x", priority: 0);
+  assert(b.get_data() == 99, "deep generic assignability");
+}
+
+test_generic_chain_multiple_instantiations() `test {
+  gi := GLeaf[int](data: 10, label: "int", priority: 1);
+  gs := GLeaf[string](data: "hi", label: "str", priority: 2);
+  assert(gi.get_data() == 10, "int instantiation");
+  assert(gs.get_data() == "hi", "string instantiation");
+}
+
+// Fix type param at bottom level
+type FixedLeaf is GMid[string] {
+  int priority;
+}
+
+test_generic_chain_fix_at_leaf() `test {
+  f := FixedLeaf(data: "fixed", label: "l", priority: 5);
+  assert(f.get_data() == "fixed", "grandparent method with fixed type");
+  assert(f.label == "l", "parent field");
+  assert(f.priority == 5, "own field");
+}
+
+// =============================================================================
+// Part 15: Multiple inheritance with generics
+// =============================================================================
+
+type Identifiable[T] {
+  get_id(&this) T `abstract;
+}
+
+type Printable {
+  to_string(&this) string `abstract;
+}
+
+type Entity[T] is Identifiable[T], Printable {
+  T id;
+  string name;
+
+  get_id(&this) T {
+    return this.id;
+  }
+
+  to_string(&this) string {
+    return this.name;
+  }
+}
+
+test_multi_inherit_generic_basic() `test {
+  e := Entity[int](id: 1, name: "Alice");
+  assert(e.get_id() == 1, "generic parent method");
+  assert(e.to_string() == "Alice", "non-generic parent method");
+}
+
+test_multi_inherit_generic_first_parent_poly() `test {
+  Identifiable[int] i = Entity[int](id: 42, name: "Bob");
+  assert(i.get_id() == 42, "generic parent polymorphism");
+}
+
+test_multi_inherit_generic_second_parent_poly() `test {
+  Printable p = Entity[int](id: 1, name: "Charlie");
+  assert(p.to_string() == "Charlie", "non-generic parent polymorphism");
+}
+
+// Multiple instantiations with multiple inheritance
+
+type StringEntity is Identifiable[string], Printable {
+  string code;
+  string display;
+
+  get_id(&this) string {
+    return this.code;
+  }
+
+  to_string(&this) string {
+    return this.display;
+  }
+}
+
+test_multi_inherit_non_generic_child() `test {
+  se := StringEntity(code: "ABC", display: "Alpha Bravo Charlie");
+  assert(se.get_id() == "ABC", "string id");
+  assert(se.to_string() == "Alpha Bravo Charlie", "string display");
+}
+
+test_multi_inherit_different_children_same_interfaces() `test {
+  Identifiable[int] a = Entity[int](id: 1, name: "one");
+  Printable b = StringEntity(code: "X", display: "ex");
+  assert(a.get_id() == 1, "Entity as Identifiable[int]");
+  assert(b.to_string() == "ex", "StringEntity as Printable");
+}
+
+// =============================================================================
+// Part 16: Virtual dispatch with method override at different levels
+// =============================================================================
+
+type Transport {
+  speed(&this) int `abstract;
+  describe(&this) string {
+    return "transport";
+  }
+}
+
+type LandVehicle is Transport {
+  describe(&this) string {
+    return "land vehicle";
+  }
+}
+
+type SportsCar is LandVehicle {
+  int top_speed;
+
+  speed(&this) int {
+    return this.top_speed;
+  }
+
+  // Override describe again at third level
+  describe(&this) string {
+    return "sports car";
+  }
+}
+
+type Bicycle is LandVehicle {
+  speed(&this) int {
+    return 25;
+  }
+  // Inherits describe from LandVehicle
+}
+
+test_override_at_different_levels() `test {
+  sc := SportsCar(top_speed: 300);
+  assert(sc.describe() == "sports car", "third level override");
+  assert(sc.speed() == 300, "abstract impl at leaf");
+}
+
+test_override_inherit_mid_level() `test {
+  b := Bicycle();
+  assert(b.describe() == "land vehicle", "inherits mid-level override");
+  assert(b.speed() == 25, "abstract impl at leaf");
+}
+
+test_override_levels_polymorphic() `test {
+  Transport a = SportsCar(top_speed: 200);
+  Transport b = Bicycle();
+  assert(a.describe() == "sports car", "polymorphic third-level override");
+  assert(b.describe() == "land vehicle", "polymorphic mid-level inherited");
+  assert(a.speed() == 200, "polymorphic abstract impl sports car");
+  assert(b.speed() == 25, "polymorphic abstract impl bicycle");
+}
+
+// =============================================================================
+// Part 17: is-checks with multiple inheritance
+// =============================================================================
+
+test_is_check_multiple_parents() `test {
+  w := Widget(label: "btn", size: 5);
+  assert(w is Widget, "is own type");
+  assert(w is Describable, "is first parent");
+  assert(w is Measurable, "is second parent");
+}
+
+test_is_check_multiple_parents_polymorphic() `test {
+  Describable d = Widget(label: "w", size: 10);
+  assert(d is Widget, "polymorphic is concrete type");
+  assert(d is Describable, "polymorphic is first parent");
+  assert(d is Measurable, "polymorphic is second parent");
+}
+
+test_is_check_multiple_children() `test {
+  Describable a = Widget(label: "w", size: 1);
+  Describable b = Button(text: "go");
+  assert(a is Widget, "first child check");
+  assert(!(a is Button), "not second child");
+  assert(b is Button, "second child check");
+  assert(!(b is Widget), "not first child");
+}
+
+// =============================================================================
+// Part 18: Generic inheritance with virtual dispatch
+// =============================================================================
+
+type Transformer[T] {
+  transform(T input) T `abstract;
+}
+
+type Doubler is Transformer[int] {
+  transform(int input) int {
+    return input * 2;
+  }
+}
+
+type Negator is Transformer[int] {
+  transform(int input) int {
+    return 0 - input;
+  }
+}
+
+type StringPrefixer is Transformer[string] {
+  transform(string input) string {
+    return "pfx:" + input;
+  }
+}
+
+apply_transform(Transformer[int] t, int val) int {
+  return t.transform(val);
+}
+
+test_generic_virtual_dispatch() `test {
+  assert(apply_transform(Doubler(), 5) == 10, "doubler dispatch");
+  assert(apply_transform(Negator(), 5) == -5, "negator dispatch");
+}
+
+test_generic_virtual_different_instantiations() `test {
+  Transformer[int] a = Doubler();
+  Transformer[string] b = StringPrefixer();
+  assert(a.transform(3) == 6, "int transformer");
+  assert(b.transform("hi") == "pfx:hi", "string transformer");
+}
+
+// =============================================================================
+// Part 19: Child adds fields to parent with methods
+// =============================================================================
+
+type Timestamped {
+  int created_at;
+
+  age(&this, int now) int {
+    return now - this.created_at;
+  }
+}
+
+type Event is Timestamped {
+  string title;
+  string location;
+
+  summary(&this) string {
+    return this.title + " @ " + this.location;
+  }
+}
+
+test_child_adds_fields_and_methods() `test {
+  e := Event(created_at: 100, title: "Conf", location: "NYC");
+  assert(e.age(150) == 50, "inherited method with parent field");
+  assert(e.summary() == "Conf @ NYC", "own method with own fields");
+  assert(e.created_at == 100, "parent field direct access");
+}
+
+test_child_adds_fields_polymorphic() `test {
+  Timestamped t = Event(created_at: 200, title: "X", location: "Y");
+  assert(t.age(250) == 50, "polymorphic parent method");
+}
+
+// =============================================================================
+// Part 20: Generic inheritance with default methods
+// =============================================================================
+
+type Collection[T] {
+  size(&this) int `abstract;
+
+  is_empty(&this) bool {
+    return this.size() == 0;
+  }
+}
+
+type VecCollection[T] is Collection[T] {
+  T[] items;
+
+  size(&this) int {
+    return this.items.len;
+  }
+}
+
+test_generic_default_method() `test {
+  VecCollection[int] v = VecCollection[int](items: [1, 2, 3]);
+  assert(v.size() == 3, "abstract method implemented");
+  assert(!v.is_empty(), "default method uses abstract impl");
+}
+
+test_generic_default_method_empty() `test {
+  int[] empty = [];
+  VecCollection[int] v = VecCollection[int](items: empty);
+  assert(v.size() == 0, "size is 0");
+  assert(v.is_empty(), "default is_empty returns true");
+}
+
+test_generic_default_polymorphic() `test {
+  Collection[int] c = VecCollection[int](items: [10, 20]);
+  assert(c.size() == 2, "polymorphic abstract method");
+  assert(!c.is_empty(), "polymorphic default method");
+}
+
+// =============================================================================
+// Part 21: Concrete parent with no abstract methods — child adds behavior
+// =============================================================================
+
+type Config {
+  string name;
+  int version;
+
+  info(&this) string {
+    return "{this.name} v{this.version}";
+  }
+}
+
+type ExtendedConfig is Config {
+  bool debug;
+
+  info(&this) string {
+    if this.debug {
+      return "{this.name} v{this.version} [DEBUG]";
+    }
+    return "{this.name} v{this.version}";
+  }
+}
+
+test_concrete_parent_no_abstract() `test {
+  c := Config(name: "app", version: 1);
+  assert(c.info() == "app v1", "parent concrete method");
+}
+
+test_concrete_child_override() `test {
+  e := ExtendedConfig(name: "app", version: 2, debug: true);
+  assert(e.info() == "app v2 [DEBUG]", "child override with extra field");
+}
+
+test_concrete_child_override_false() `test {
+  e := ExtendedConfig(name: "app", version: 2, debug: false);
+  assert(e.info() == "app v2", "child override without debug");
+}
+
+test_concrete_hierarchy_polymorphic() `test {
+  Config a = Config(name: "base", version: 1);
+  Config b = ExtendedConfig(name: "ext", version: 3, debug: true);
+  assert(a.info() == "base v1", "polymorphic parent");
+  assert(b.info() == "ext v3 [DEBUG]", "polymorphic child override");
+}
+
+// =============================================================================
+// Part 22: Multiple children implementing same abstract interface
+// =============================================================================
+
+type Validator {
+  validate(&this, string input) bool `abstract;
+  error_msg(&this) string `abstract;
+}
+
+type LengthValidator is Validator {
+  int min_len;
+
+  validate(&this, string input) bool {
+    return input.len >= this.min_len;
+  }
+
+  error_msg(&this) string {
+    return "too short";
+  }
+}
+
+type NotEmptyValidator is Validator {
+  validate(&this, string input) bool {
+    return input.len > 0;
+  }
+
+  error_msg(&this) string {
+    return "cannot be empty";
+  }
+}
+
+type AlwaysValid is Validator {
+  validate(&this, string input) bool {
+    return true;
+  }
+
+  error_msg(&this) string {
+    return "";
+  }
+}
+
+run_validator(Validator v, string input) bool {
+  return v.validate(input);
+}
+
+get_error(Validator v) string {
+  return v.error_msg();
+}
+
+test_multiple_implementors() `test {
+  assert(run_validator(LengthValidator(min_len: 3), "hi") == false, "too short");
+  assert(run_validator(LengthValidator(min_len: 3), "hello") == true, "long enough");
+  assert(run_validator(NotEmptyValidator(), "") == false, "empty fails");
+  assert(run_validator(NotEmptyValidator(), "x") == true, "non-empty passes");
+  assert(run_validator(AlwaysValid(), "") == true, "always valid");
+}
+
+test_multiple_implementors_error_msg() `test {
+  assert(get_error(LengthValidator(min_len: 3)) == "too short", "length error msg");
+  assert(get_error(NotEmptyValidator()) == "cannot be empty", "not-empty error msg");
+  assert(get_error(AlwaysValid()) == "", "always valid no error");
+}
+
+// =============================================================================
+// Part 23: Generic abstract interface with multiple implementations
+// =============================================================================
+
+type Converter[A, B] {
+  convert(A input) B `abstract;
+}
+
+type IntToStr is Converter[int, string] {
+  convert(int input) string {
+    return "{input}";
+  }
+}
+
+type StrToLen is Converter[string, int] {
+  convert(string input) int {
+    return input.len;
+  }
+}
+
+type IntDoubler is Converter[int, int] {
+  convert(int input) int {
+    return input * 2;
+  }
+}
+
+test_converter_int_to_str() `test {
+  c := IntToStr();
+  assert(c.convert(42) == "42", "int to string");
+}
+
+test_converter_str_to_len() `test {
+  c := StrToLen();
+  assert(c.convert("hello") == 5, "string to len");
+}
+
+test_converter_int_to_int() `test {
+  c := IntDoubler();
+  assert(c.convert(21) == 42, "int doubler");
+}
+
+test_converter_polymorphic() `test {
+  Converter[int, string] c = IntToStr();
+  assert(c.convert(7) == "7", "polymorphic int to string");
+  Converter[int, int] d = IntDoubler();
+  assert(d.convert(5) == 10, "polymorphic int doubler");
+}
+
+// =============================================================================
+// Part 24: is-checks with generic types
+// =============================================================================
+
+test_is_check_generic_child() `test {
+  Box[int] b = LabeledBox[int](value: 1, label: "x");
+  assert(b is LabeledBox, "generic child is check");
+  assert(b is Box, "generic child is parent check");
+}
+
+test_is_check_non_generic_of_generic() `test {
+  Box[int] b = IntBox(value: 5);
+  assert(b is IntBox, "non-generic child of generic parent");
+  assert(b is Box, "non-generic child is generic parent");
+}
+
+// =============================================================================
+// Part 25: Polymorphic array-like usage (multiple children stored and dispatched)
+// =============================================================================
+
+get_all_descriptions(Describable a, Describable b, Describable c) string {
+  return a.describe() + "," + b.describe() + "," + c.describe();
+}
+
+test_polymorphic_multiple_dispatch() `test {
+  Describable x = Widget(label: "w1", size: 1);
+  Describable y = Button(text: "b1");
+  Describable z = Widget(label: "w2", size: 2);
+  result := get_all_descriptions(x, y, z);
+  assert(result == "Widget:w1,Button:b1,Widget:w2", "multiple polymorphic dispatch");
+}
+
+// =============================================================================
+// Part 26: Mutable methods (~this) in inheritance
+// =============================================================================
+
+type Stateful {
+  int state;
+  advance(~this) `abstract;
+  get_state(&this) int {
+    return this.state;
+  }
+}
+
+type LinearState is Stateful {
+  advance(~this) {
+    this.state += 1;
+  }
+}
+
+type DoubleState is Stateful {
+  advance(~this) {
+    this.state += 2;
+  }
+}
+
+test_mutable_abstract_direct() `test {
+  ls := LinearState(state: 0);
+  ls.advance();
+  ls.advance();
+  assert(ls.get_state() == 2, "linear advance twice");
+  ds := DoubleState(state: 0);
+  ds.advance();
+  assert(ds.get_state() == 2, "double advance once");
+}
+
+test_mutable_polymorphic_dispatch() `test {
+  Stateful s = LinearState(state: 10);
+  s.advance();
+  assert(s.get_state() == 11, "polymorphic mutable linear");
+  Stateful s2 = DoubleState(state: 10);
+  s2.advance();
+  assert(s2.get_state() == 12, "polymorphic mutable double");
+}
+
+// Mutable concrete method inherited and overridden
+
+type MutCounter {
+  int count;
+
+  bump(~this) {
+    this.count += 1;
+  }
+
+  get_count(&this) int {
+    return this.count;
+  }
+}
+
+type FastCounter is MutCounter {
+  bump(~this) {
+    this.count += 10;
+  }
+}
+
+type SlowCounter is MutCounter {
+  // inherits bump
+}
+
+test_mutable_concrete_inherited() `test {
+  sc := SlowCounter(count: 0);
+  sc.bump();
+  sc.bump();
+  assert(sc.get_count() == 2, "inherited mutable method");
+}
+
+test_mutable_concrete_overridden() `test {
+  fc := FastCounter(count: 0);
+  fc.bump();
+  assert(fc.get_count() == 10, "overridden mutable method");
+}
+
+test_mutable_concrete_polymorphic() `test {
+  MutCounter a = SlowCounter(count: 0);
+  MutCounter b = FastCounter(count: 0);
+  a.bump();
+  b.bump();
+  assert(a.get_count() == 1, "polymorphic inherited mutable");
+  assert(b.get_count() == 10, "polymorphic overridden mutable");
+}
+
+// =============================================================================
+// Part 27: drop(~this) with inheritance
+// =============================================================================
+
+type DropResource {
+  int id;
+  drop(~this) {
+  }
+}
+
+type DropFile is DropResource {
+  string path;
+  // inherits drop from parent
+}
+
+type DropNet is DropResource {
+  string host;
+  // overrides drop
+  drop(~this) {
+  }
+}
+
+test_drop_inherited_from_parent() `test {
+  f := DropFile(id: 1, path: "/tmp/a");
+  assert(f.id == 1, "inherits parent drop — field access");
+  assert(f.path == "/tmp/a", "own field with inherited drop");
+}
+
+test_drop_overridden_in_child() `test {
+  n := DropNet(id: 2, host: "localhost");
+  assert(n.id == 2, "overridden drop — field access");
+  assert(n.host == "localhost", "own field with overridden drop");
+}
+
+test_drop_polymorphic_ref() `test {
+  DropResource r1 = DropFile(id: 3, path: "/b");
+  assert(r1.id == 3, "polymorphic ref with inherited drop");
+  DropResource r2 = DropNet(id: 4, host: "x");
+  assert(r2.id == 4, "polymorphic ref with overridden drop");
+}
+
+// Drop in a loop to test cleanup
+test_drop_in_loop_inherited() `test {
+  for i in 0..5 {
+    f := DropFile(id: i, path: "/loop");
+    assert(f.id == i, "drop cleanup in loop iteration");
+  }
+}
+
+// =============================================================================
+// Part 28: Override default method from second parent
+// =============================================================================
+
+type Greeter {
+  greet(&this) string {
+    return "hello from Greeter";
+  }
+}
+
+type Farewell2 {
+  farewell(&this) string {
+    return "bye from Farewell2";
+  }
+}
+
+// Child overrides second parent's default method
+type Polite is Greeter, Farewell2 {
+  farewell(&this) string {
+    return "goodbye from Polite";
+  }
+}
+
+// Child overrides first parent's default method
+type Casual is Greeter, Farewell2 {
+  greet(&this) string {
+    return "hey from Casual";
+  }
+}
+
+// Child overrides both defaults
+type Custom is Greeter, Farewell2 {
+  greet(&this) string {
+    return "yo";
+  }
+  farewell(&this) string {
+    return "later";
+  }
+}
+
+// Child inherits both defaults
+type Default2 is Greeter, Farewell2 {
+}
+
+test_override_second_parent_default() `test {
+  p := Polite();
+  assert(p.greet() == "hello from Greeter", "inherited first parent default");
+  assert(p.farewell() == "goodbye from Polite", "overridden second parent default");
+}
+
+test_override_first_parent_default() `test {
+  c := Casual();
+  assert(c.greet() == "hey from Casual", "overridden first parent default");
+  assert(c.farewell() == "bye from Farewell2", "inherited second parent default");
+}
+
+test_override_both_defaults() `test {
+  cu := Custom();
+  assert(cu.greet() == "yo", "overridden first");
+  assert(cu.farewell() == "later", "overridden second");
+}
+
+test_inherit_both_defaults() `test {
+  d := Default2();
+  assert(d.greet() == "hello from Greeter", "inherited first");
+  assert(d.farewell() == "bye from Farewell2", "inherited second");
+}
+
+test_second_parent_override_polymorphic() `test {
+  Farewell2 f = Polite();
+  assert(f.farewell() == "goodbye from Polite", "polymorphic overridden second parent");
+  Greeter g = Casual();
+  assert(g.greet() == "hey from Casual", "polymorphic overridden first parent");
+}
+
+test_inherit_default_polymorphic() `test {
+  Greeter g = Default2();
+  assert(g.greet() == "hello from Greeter", "polymorphic inherited first default");
+  Farewell2 f = Default2();
+  assert(f.farewell() == "bye from Farewell2", "polymorphic inherited second default");
+}
+
+// =============================================================================
+// Part 29: is-checks across generic multi-inherit parents
+// =============================================================================
+
+type Keyed[K] {
+  get_key(&this) K `abstract;
+}
+
+type Labeled2 {
+  get_label(&this) string `abstract;
+}
+
+type Record[K] is Keyed[K], Labeled2 {
+  K key;
+  string label;
+
+  get_key(&this) K {
+    return this.key;
+  }
+
+  get_label(&this) string {
+    return this.label;
+  }
+}
+
+type FixedRecord is Keyed[int], Labeled2 {
+  int key;
+  string label;
+
+  get_key(&this) int {
+    return this.key;
+  }
+
+  get_label(&this) string {
+    return this.label;
+  }
+}
+
+test_is_generic_multi_via_first_parent() `test {
+  Keyed[int] k = Record[int](key: 1, label: "one");
+  assert(k is Record, "is Record via first parent");
+  assert(k is Keyed, "is Keyed (own type)");
+  assert(k is Labeled2, "is Labeled2 via cross-check");
+}
+
+test_is_generic_multi_via_second_parent() `test {
+  Labeled2 l = Record[string](key: "k", label: "val");
+  assert(l is Record, "is Record via second parent ref");
+  assert(l is Labeled2, "is Labeled2 (own type)");
+  assert(l is Keyed, "is Keyed via cross-check");
+}
+
+test_is_generic_multi_negative() `test {
+  Keyed[int] k = Record[int](key: 1, label: "one");
+  assert(!(k is FixedRecord), "Record is not FixedRecord");
+  Keyed[int] f = FixedRecord(key: 2, label: "two");
+  assert(!(f is Record), "FixedRecord is not Record");
+  assert(f is FixedRecord, "FixedRecord is FixedRecord");
+}
+
+test_is_fixed_vs_generic() `test {
+  Labeled2 a = Record[int](key: 1, label: "a");
+  Labeled2 b = FixedRecord(key: 2, label: "b");
+  assert(a is Record, "generic Record via Labeled2");
+  assert(b is FixedRecord, "FixedRecord via Labeled2");
+  assert(!(a is FixedRecord), "Record is not FixedRecord via Labeled2");
+  assert(!(b is Record), "FixedRecord is not Record via Labeled2");
+}
+
+// =============================================================================
+// Part 30: Functions returning parent types
+// =============================================================================
+
+type Shape2 {
+  area(&this) int `abstract;
+}
+
+type Rect2 is Shape2 {
+  int w;
+  int h;
+  area(&this) int {
+    return this.w * this.h;
+  }
+}
+
+type Circle2 is Shape2 {
+  int r;
+  area(&this) int {
+    return this.r * this.r * 3;
+  }
+}
+
+make_shape(bool circle) Shape2 {
+  if circle {
+    return Circle2(r: 5);
+  }
+  return Rect2(w: 3, h: 4);
+}
+
+test_return_parent_type() `test {
+  Shape2 s1 = make_shape(true);
+  assert(s1.area() == 75, "circle via return parent type");
+  Shape2 s2 = make_shape(false);
+  assert(s2.area() == 12, "rect via return parent type");
+}
+
+test_return_parent_is_check() `test {
+  Shape2 s1 = make_shape(true);
+  assert(s1 is Circle2, "returned circle is Circle2");
+  assert(!(s1 is Rect2), "returned circle is not Rect2");
+  Shape2 s2 = make_shape(false);
+  assert(s2 is Rect2, "returned rect is Rect2");
+  assert(!(s2 is Circle2), "returned rect is not Circle2");
+}
+
+// Generic function returning parent type
+
+make_box(bool labeled) Box[int] {
+  if labeled {
+    return LabeledBox[int](value: 42, label: "x");
+  }
+  return IntBox(value: 99);
+}
+
+test_return_generic_parent_type() `test {
+  Box[int] b1 = make_box(true);
+  assert(b1.get() == 42, "labeled box via generic parent return");
+  Box[int] b2 = make_box(false);
+  assert(b2.get() == 99, "int box via generic parent return");
+}
+
+test_return_generic_parent_is_check() `test {
+  Box[int] b1 = make_box(true);
+  assert(b1 is LabeledBox, "returned labeled is LabeledBox");
+  Box[int] b2 = make_box(false);
+  assert(b2 is IntBox, "returned intbox is IntBox");
+}
+
+// Multi-parent return
+
+make_describable(int which) Describable {
+  if which == 0 {
+    return Widget(label: "w", size: 1);
+  }
+  return Button(text: "b");
+}
+
+test_return_multi_parent() `test {
+  Describable d1 = make_describable(0);
+  assert(d1.describe() == "Widget:w", "widget via multi-parent return");
+  Describable d2 = make_describable(1);
+  assert(d2.describe() == "Button:b", "button via multi-parent return");
+}
+
+// =============================================================================
+// Part 31: Error type inheritance
+// =============================================================================
+
+type IoError2 is error {
+  int code;
+}
+
+type ParseError2 is error {
+  int line;
+  int col;
+}
+
+type DetailedIoError is IoError2 {
+  string device;
+}
+
+fail_io2() void! {
+  raise IoError2(message: "disk full", code: 28);
+}
+
+fail_parse2() void! {
+  raise ParseError2(message: "unexpected token", line: 10, col: 5);
+}
+
+fail_detailed_io() void! {
+  raise DetailedIoError(message: "read error", code: 5, device: "/dev/sda");
+}
+
+get_io_code() int {
+  fail_io2()? e is IoError2 {
+    return e.code;
+  } else {
+    return -2;
+  };
+  return -1;
+}
+
+get_parse_location() int {
+  fail_parse2()? e is ParseError2 {
+    return e.line * 100 + e.col;
+  } else {
+    return -2;
+  };
+  return -1;
+}
+
+test_error_inherit_custom_fields() `test {
+  assert(get_io_code() == 28, "IoError code field");
+  assert(get_parse_location() == 1005, "ParseError line*100+col");
+}
+
+test_error_inherit_message() `test {
+  fail_io2()? e {
+    assert(e.message == "disk full", "inherited message field");
+    return;
+  };
+}
+
+check_error_is_type() string {
+  fail_io2()? e {
+    if e is IoError2 {
+      return "io";
+    }
+    return "other";
+  };
+  return "no error";
+}
+
+test_error_is_check() `test {
+  assert(check_error_is_type() == "io", "error is-check works");
+}
+
+// Deep error inheritance
+get_detailed_device() string {
+  fail_detailed_io()? e is DetailedIoError {
+    return e.device;
+  } else {
+    return "unknown";
+  };
+  return "no error";
+}
+
+get_detailed_code() int {
+  fail_detailed_io()? e is DetailedIoError {
+    return e.code;
+  } else {
+    return -2;
+  };
+  return -1;
+}
+
+test_deep_error_inherit() `test {
+  assert(get_detailed_device() == "/dev/sda", "deep error own field");
+  assert(get_detailed_code() == 5, "deep error parent field");
+}
+
+check_detailed_is_io() string {
+  fail_detailed_io()? e {
+    if e is DetailedIoError {
+      return "detailed";
+    }
+    if e is IoError2 {
+      return "io";
+    }
+    return "other";
+  };
+  return "no error";
+}
+
+test_deep_error_is_check() `test {
+  assert(check_detailed_is_io() == "detailed", "deep error is most-specific type");
+}
+
+// =============================================================================
+// Part 32: Value-type parent inheritance (no polymorphism, slicing)
+// =============================================================================
+// Value types (all fields `value) cannot have parents — that's a compile error.
+// But a parent type that has `value fields can be inherited by a heap child.
+// The child is a heap type (because it adds non-value fields or is not all-value).
+// This part tests that regular heap types can inherit from parents that happen
+// to have int/bool fields, and that polymorphism works normally.
+
+type Metric {
+  string name;
+  int value;
+
+  format(&this) string {
+    return this.name + "=" + "{this.value}";
+  }
+}
+
+type TaggedMetric is Metric {
+  string tag;
+
+  format(&this) string {
+    return this.tag + ":" + this.name + "=" + "{this.value}";
+  }
+}
+
+type SimpleMetric is Metric {
+  // inherits format
+}
+
+test_metric_inheritance() `test {
+  m := SimpleMetric(name: "cpu", value: 80);
+  assert(m.format() == "cpu=80", "inherited format");
+}
+
+test_metric_override() `test {
+  tm := TaggedMetric(name: "mem", value: 60, tag: "host1");
+  assert(tm.format() == "host1:mem=60", "overridden format with extra field");
+}
+
+test_metric_polymorphic() `test {
+  Metric a = SimpleMetric(name: "disk", value: 90);
+  Metric b = TaggedMetric(name: "net", value: 50, tag: "eth0");
+  assert(a.format() == "disk=90", "polymorphic inherited");
+  assert(b.format() == "eth0:net=50", "polymorphic overridden");
+}
+
+test_metric_is_check() `test {
+  Metric m = TaggedMetric(name: "x", value: 1, tag: "t");
+  assert(m is TaggedMetric, "is TaggedMetric");
+  assert(m is Metric, "is Metric");
+  assert(!(m is SimpleMetric), "is not SimpleMetric");
+}

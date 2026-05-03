@@ -286,9 +286,10 @@ type scopeBinding struct {
 }
 
 // viewVtableKey identifies a view-specific vtable for a (concrete, view) pair.
+// For generic types, concreteName includes type args (e.g., "Entity__int").
 type viewVtableKey struct {
-	concrete *types.Named
-	view     *types.Named
+	concreteName string
+	view         *types.Named
 }
 
 // lambdaWriteback tracks a move-captured variable that needs its local value

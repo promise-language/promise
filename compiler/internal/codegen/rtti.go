@@ -268,8 +268,24 @@ func (c *Compiler) emitMonoTypeInfoGlobals(instances []*types.Instance) {
 		typeID := c.nextTypeID
 		c.nextTypeID++
 
-		// Collect parent IDs (using origin Named types, same as non-mono)
+		// Collect parent IDs (using origin Named types, same as non-mono).
+		// Include the origin Named type's own ID so that `x is OriginName`
+		// matches when x holds a mono instance (e.g., `b is LabeledBox`
+		// where b holds LabeledBox[int]).
 		parentIDs := c.collectAllParentIDs(named)
+		originID := c.assignTypeID(named)
+		// Prepend origin ID (dedup handled below)
+		parentIDs = append([]int32{originID}, parentIDs...)
+		// Deduplicate in case origin ID was already in parent chain
+		seen := make(map[int32]bool)
+		var deduped []int32
+		for _, id := range parentIDs {
+			if !seen[id] {
+				seen[id] = true
+				deduped = append(deduped, id)
+			}
+		}
+		parentIDs = deduped
 		numParents := len(parentIDs)
 
 		var structType *irtypes.StructType
@@ -391,8 +407,15 @@ func (c *Compiler) defineTypeIsFunc() {
 // getOrEmitViewVtable emits a vtable ordered by the view type's AllVirtualMethods(),
 // with function pointers resolved from the concrete type. Used when a concrete type
 // is viewed through a non-first-parent interface (where slot layout differs).
-func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named) *ir.Global {
-	key := viewVtableKey{concrete, view}
+// fromType is the full concrete type (may be *types.Instance for generic types),
+// needed to resolve monomorphized parent method names.
+func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named, fromType types.Type) *ir.Global {
+	// Build cache key that distinguishes mono instances (Entity[int] vs Entity[string]).
+	concreteCacheKey := concrete.Obj().Name()
+	if inst, ok := fromType.(*types.Instance); ok {
+		concreteCacheKey = monoName(inst)
+	}
+	key := viewVtableKey{concreteCacheKey, view}
 	if vt, ok := c.viewVtables[key]; ok {
 		return vt
 	}
@@ -407,6 +430,19 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named) *ir.Global {
 	for _, m := range methods {
 		ownerName := c.resolveMethodOwner(concrete, m.Name())
 		mangledName := mangleMethodName(ownerName, m.Name(), m.IsSetter())
+		if _, ok := c.funcs[mangledName]; !ok && ownerName != concrete.Obj().Name() {
+			// Inherited method from a generic parent — resolve to mono name,
+			// same fallback as emitVtableGlobal.
+			monoOwner := c.resolveMonoParentName(concrete, fromType, ownerName)
+			mangledName = mangleMethodName(monoOwner, m.Name(), m.IsSetter())
+		}
+		// Also try the mono concrete name (e.g., Entity__int.method)
+		if _, ok := c.funcs[mangledName]; !ok {
+			monoMangledName := mangleMethodName(concreteCacheKey, m.Name(), m.IsSetter())
+			if _, ok2 := c.funcs[monoMangledName]; ok2 {
+				mangledName = monoMangledName
+			}
+		}
 		if fn, ok := c.funcs[mangledName]; ok {
 			// Check if the concrete method signature differs from the interface method
 			// (extra optional/default params, non-failable→failable, T→T? return).
@@ -424,7 +460,7 @@ func (c *Compiler) getOrEmitViewVtable(concrete, view *types.Named) *ir.Global {
 	}
 	arrayType := irtypes.NewArray(uint64(len(entries)), irtypes.I8Ptr)
 	init := constant.NewArray(arrayType, entries...)
-	name := fmt.Sprintf("promise_vtable_%s_as_%s", concrete.Obj().Name(), view.Obj().Name())
+	name := fmt.Sprintf("promise_vtable_%s_as_%s", concreteCacheKey, view.Obj().Name())
 	global := c.module.NewGlobalDef(name, init)
 	global.Immutable = true
 	c.viewVtables[key] = global
@@ -638,7 +674,7 @@ func (c *Compiler) coerceToView(val value.Value, fromType, toType types.Type) va
 	}
 
 	// Need view-specific vtable (second+ parent or structural satisfaction)
-	viewVtable := c.getOrEmitViewVtable(fromNamed, toNamed)
+	viewVtable := c.getOrEmitViewVtable(fromNamed, toNamed, fromType)
 	vtablePtr := constant.NewBitCast(viewVtable, irtypes.I8Ptr)
 	return c.block.NewInsertValue(val, vtablePtr, 0)
 }

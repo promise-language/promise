@@ -1,6 +1,10 @@
 package codegen
 
 import (
+	"fmt"
+	"sort"
+	"strings"
+
 	"github.com/llir/llvm/ir"
 	irtypes "github.com/llir/llvm/ir/types"
 
@@ -15,11 +19,19 @@ import (
 type monoContext struct {
 	inst   *types.Instance
 	origin types.Type // *Named or *Enum
-	name   string     // "Box__int"
+	name   string     // "Box[int]"
 }
 
 // monoName generates a unique mangled name for a generic type instantiation.
-// Example: Instance{Box, [int]} → "Box__int", Instance{Pair, [int, string]} → "Pair__int__string"
+// Uses bracket notation so the name is human-readable and unambiguous:
+//
+//	Instance{Box, [int]}           → "Box[int]"
+//	Instance{Pair, [int, string]}  → "Pair[int, string]"
+//	Instance{Map, [string, Vec[int]]} → "Map[string, Vec[int]]"
+//
+// Since '[' and ']' are not valid Promise identifier characters, there is no
+// collision with user-defined type names. The llir/llvm library automatically
+// quotes LLVM identifiers containing these characters (e.g. @"Box[int].push").
 func monoName(inst *types.Instance) string {
 	var name string
 	switch o := inst.Origin().(type) {
@@ -30,14 +42,29 @@ func monoName(inst *types.Instance) string {
 	default:
 		name = "unknown"
 	}
-	for _, arg := range inst.TypeArgs() {
-		name += "__" + typeArgSuffix(arg)
+	args := inst.TypeArgs()
+	name += "["
+	for i, arg := range args {
+		if i > 0 {
+			name += ", "
+		}
+		name += typeArgStr(arg)
 	}
+	name += "]"
 	return name
 }
 
-// typeArgSuffix returns a suffix string for a type argument used in mangling.
-func typeArgSuffix(typ types.Type) string {
+// typeArgStr returns the string representation of a type argument in mono names.
+// Named and Enum use their short name. Instance uses monoName() (which uses
+// bracket notation and avoids Instance.String()'s Vector short-form "T[]").
+// Compound types (Tuple, Optional, SharedRef, MutRef, Pointer, Array) are
+// formatted by recursively calling typeArgStr on their elements, so that any
+// nested Instance types also use bracket notation. TypeParam uses the param name.
+// Other types (function signatures) fall back to typ.String().
+func typeArgStr(typ types.Type) string {
+	if typ == nil {
+		panic("codegen: nil type in generic type argument")
+	}
 	switch t := typ.(type) {
 	case *types.Named:
 		return t.Obj().Name()
@@ -45,19 +72,45 @@ func typeArgSuffix(typ types.Type) string {
 		return t.Obj().Name()
 	case *types.Instance:
 		return monoName(t)
+	case *types.Tuple:
+		var b strings.Builder
+		b.WriteByte('(')
+		for i, e := range t.Elems() {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(typeArgStr(e))
+		}
+		b.WriteByte(')')
+		return b.String()
+	case *types.Optional:
+		return typeArgStr(t.Elem()) + "?"
+	case *types.SharedRef:
+		return typeArgStr(t.Elem()) + "&"
+	case *types.MutRef:
+		return typeArgStr(t.Elem()) + "~"
+	case *types.Pointer:
+		return typeArgStr(t.Elem()) + "*"
+	case *types.Array:
+		return fmt.Sprintf("%s[%d]", typeArgStr(t.Elem()), t.Size())
+	case *types.TypeParam:
+		return t.Obj().Name()
 	default:
-		return "unknown"
+		return typ.String()
 	}
 }
 
 // monoFuncName generates a unique mangled name for a generic function instantiation.
-// Example: identity[int] → "identity__int"
+// Example: identity[int] → "identity[int]"
 func monoFuncName(fi *sema.FuncInstance) string {
-	name := fi.Func.Name()
-	for _, arg := range fi.TypeArgs {
-		name += "__" + typeArgSuffix(arg)
+	name := fi.Func.Name() + "["
+	for i, arg := range fi.TypeArgs {
+		if i > 0 {
+			name += ", "
+		}
+		name += typeArgStr(arg)
 	}
-	return name
+	return name + "]"
 }
 
 // mergeParentSubst augments a type param substitution map with mappings for
@@ -88,7 +141,10 @@ func mergeParentSubst(origin *types.Named, subst map[*types.TypeParam]types.Type
 // Also transitively discovers instances referenced by field types of already-collected
 // instances (e.g., map[string, int] has a Slot[K, V][] field which after substitution
 // requires Slot[string, int] to be monomorphized).
-func collectMonoInstances(info *sema.Info) []*types.Instance {
+// Returns the instances and a set of "spiral" instance names: instances added by the
+// spiral guard that should not have their inherited default method bodies generated
+// (see instanceArgSpiralCheck for details).
+func collectMonoInstances(info *sema.Info, spiralInstances map[string]bool) []*types.Instance {
 	seen := map[string]bool{}
 	var result []*types.Instance
 	for _, inst := range info.Instances {
@@ -110,6 +166,10 @@ func collectMonoInstances(info *sema.Info) []*types.Instance {
 	// and resolve unresolved method-body instances.
 	for i := 0; i < len(result); i++ {
 		inst := result[i]
+		instKey := monoName(inst)
+		if spiralInstances[instKey] {
+			continue // spiral instances: skip transitive expansion to prevent infinite growth
+		}
 		switch origin := inst.Origin().(type) {
 		case *types.Named:
 			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
@@ -134,7 +194,7 @@ func collectMonoInstances(info *sema.Info) []*types.Instance {
 			// E.g., Iterator[int] has subst {T→int}; _FnIter[T] in method
 			// bodies resolves to _FnIter[int].
 			if len(subst) > 0 {
-				resolveUnresolvedInstances(unresolvedInsts, subst, &result, seen)
+				resolveUnresolvedInstances(unresolvedInsts, subst, &result, seen, spiralInstances)
 			}
 		case *types.Enum:
 			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
@@ -145,11 +205,14 @@ func collectMonoInstances(info *sema.Info) []*types.Instance {
 				}
 			}
 			if len(subst) > 0 {
-				resolveUnresolvedInstances(unresolvedInsts, subst, &result, seen)
+				resolveUnresolvedInstances(unresolvedInsts, subst, &result, seen, spiralInstances)
 			}
 		}
 	}
 
+	// Sort by name for deterministic LLVM type declaration order (info.Types
+	// iteration in collectUnresolvedInstances is non-deterministic).
+	sort.Slice(result, func(i, j int) bool { return monoName(result[i]) < monoName(result[j]) })
 	return result
 }
 
@@ -202,7 +265,16 @@ func findUnresolvedInstances(typ types.Type, result *[]*types.Instance, visited 
 
 // resolveUnresolvedInstances applies a substitution map to unresolved instances
 // and adds any newly concrete instances to the result.
-func resolveUnresolvedInstances(unresolved []*types.Instance, subst map[*types.TypeParam]types.Type, result *[]*types.Instance, seen map[string]bool) {
+//
+// Spiral guard: methods like Iterator.enumerate create unresolved instances of the
+// form _FnIter[(int, T)]. When T is substituted with a compound type X (Tuple,
+// Instance, etc.), this produces _FnIter[(int, X)]. Its parent Iterator[(int, X)]
+// then re-triggers the substitution with {T → (int, X)}, producing
+// _FnIter[(int, (int, X))], and so on infinitely. We detect this pattern by
+// checking whether any resolved type arg strictly contains a compound substitution
+// value as a proper sub-expression. Direct user code seeded via info.Instances
+// bypasses this guard, so explicit .enumerate() calls still work.
+func resolveUnresolvedInstances(unresolved []*types.Instance, subst map[*types.TypeParam]types.Type, result *[]*types.Instance, seen map[string]bool, spiralInstances map[string]bool) {
 	for _, ui := range unresolved {
 		resolved := types.Substitute(ui, subst)
 		if resolved == ui {
@@ -213,12 +285,70 @@ func resolveUnresolvedInstances(unresolved []*types.Instance, subst map[*types.T
 		}
 		if ri, ok := resolved.(*types.Instance); ok {
 			key := monoName(ri)
-			if !seen[key] {
-				seen[key] = true
-				*result = append(*result, ri)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			*result = append(*result, ri)
+			// Spiral guard: instances whose type args strictly contain a compound
+			// substitution value are added for layout purposes but marked no-expand.
+			// Their inherited default method bodies use unreachable to avoid
+			// requiring yet-deeper instances (e.g. _FnIter[(int,(int,X))] from
+			// Iterator[(int,X)].enumerate won't try to build _FnIter[(int,(int,(int,X)))]).
+			if instanceArgSpiralCheck(ri, subst) {
+				spiralInstances[key] = true
 			}
 		}
 	}
+}
+
+// instanceArgSpiralCheck reports whether any type arg of inst strictly contains
+// a compound (non-Named, non-Enum) substitution value as a proper sub-expression.
+// This detects expanding spirals like enumerate: Iterator[X] → _FnIter[(int,X)]
+// → Iterator[(int,X)] → _FnIter[(int,(int,X))] → ... when X is a compound type.
+func instanceArgSpiralCheck(inst *types.Instance, subst map[*types.TypeParam]types.Type) bool {
+	for _, sv := range subst {
+		// Only compound substitution values can cause spiral expansion.
+		// Named/Enum primitives (int, string, MyType) never trigger this.
+		switch sv.(type) {
+		case *types.Named, *types.Enum, *types.TypeParam:
+			continue
+		}
+		for _, ta := range inst.TypeArgs() {
+			if typeStrictlyContains(ta, sv) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// typeStrictlyContains reports whether haystack contains needle as a proper
+// sub-expression (i.e., needle appears strictly inside haystack, not equal to it).
+func typeStrictlyContains(haystack, needle types.Type) bool {
+	switch h := haystack.(type) {
+	case *types.Instance:
+		for _, a := range h.TypeArgs() {
+			if a == needle || typeStrictlyContains(a, needle) {
+				return true
+			}
+		}
+	case *types.Tuple:
+		for _, e := range h.Elems() {
+			if e == needle || typeStrictlyContains(e, needle) {
+				return true
+			}
+		}
+	case *types.Optional:
+		return h.Elem() == needle || typeStrictlyContains(h.Elem(), needle)
+	case *types.SharedRef:
+		return h.Elem() == needle || typeStrictlyContains(h.Elem(), needle)
+	case *types.MutRef:
+		return h.Elem() == needle || typeStrictlyContains(h.Elem(), needle)
+	case *types.Pointer:
+		return h.Elem() == needle || typeStrictlyContains(h.Elem(), needle)
+	}
+	return false
 }
 
 // discoverInstances recursively walks a type and collects any concrete Instance types.
@@ -931,6 +1061,13 @@ func (c *Compiler) defineStructuralDefaultBodies(file *ast.File, mName string, c
 		if c.cachedInstances[mName] {
 			continue
 		}
+		// Spiral instances have no child layouts — emit unreachable so the body
+		// never requests yet-deeper instances (e.g. _FnIter[(int,(int,u8))].enumerate).
+		if c.spiralInstances[mName] {
+			b := fn.NewBlock("")
+			b.NewUnreachable()
+			continue
+		}
 
 		saved := c.saveState()
 		c.selfSubst = &selfSubstInfo{iface: iface, concrete: concrete}
@@ -1027,7 +1164,7 @@ func (c *Compiler) defineMonoFuncs(file *ast.File, funcInsts []*sema.FuncInstanc
 // declared in modFile are included. The unresolved-instance expansion uses
 // the module's own sema info so that method-body type references (e.g.
 // _FnIter[T] inside Vector[T].iter()) are resolved correctly.
-func collectMonoInstancesWithExtra(modInfo *sema.ModuleInfo, modFile *ast.File, extra []*types.Instance) []*types.Instance {
+func collectMonoInstancesWithExtra(modInfo *sema.ModuleInfo, modFile *ast.File, extra []*types.Instance, spiralInstances map[string]bool) []*types.Instance {
 	// Build seen set for type names declared in modFile for O(1) membership test.
 	modTypeNames := make(map[string]bool)
 	for _, decl := range modFile.Decls {
@@ -1071,6 +1208,10 @@ func collectMonoInstancesWithExtra(modInfo *sema.ModuleInfo, modFile *ast.File, 
 	// Transitively expand (same logic as collectMonoInstances).
 	for i := 0; i < len(result); i++ {
 		inst := result[i]
+		instKey := monoName(inst)
+		if spiralInstances[instKey] {
+			continue // spiral instances: skip transitive expansion
+		}
 		switch origin := inst.Origin().(type) {
 		case *types.Named:
 			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
@@ -1091,7 +1232,7 @@ func collectMonoInstancesWithExtra(modInfo *sema.ModuleInfo, modFile *ast.File, 
 				}
 			}
 			if len(subst) > 0 {
-				resolveUnresolvedInstances(unresolvedInsts, subst, &result, seen)
+				resolveUnresolvedInstances(unresolvedInsts, subst, &result, seen, spiralInstances)
 			}
 		case *types.Enum:
 			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
@@ -1102,11 +1243,12 @@ func collectMonoInstancesWithExtra(modInfo *sema.ModuleInfo, modFile *ast.File, 
 				}
 			}
 			if len(subst) > 0 {
-				resolveUnresolvedInstances(unresolvedInsts, subst, &result, seen)
+				resolveUnresolvedInstances(unresolvedInsts, subst, &result, seen, spiralInstances)
 			}
 		}
 	}
 
+	sort.Slice(result, func(i, j int) bool { return monoName(result[i]) < monoName(result[j]) })
 	return result
 }
 
@@ -1130,16 +1272,23 @@ func (c *Compiler) findFuncDecl(file *ast.File, name string) *ast.FuncDecl {
 }
 
 // monoMethodInstanceName generates a unique mangled name for a generic method instantiation.
-// Example: Box.transform[string] → "Box.transform__string"
-// Example: Box[int].transform[string] → "Box__int.transform__string"
+// Example: Box.transform[string]     → "Box.transform[string]"
+// Example: Box[int].transform[string] → "Box[int].transform[string]"
 func monoMethodInstanceName(mi *sema.MethodInstance) string {
 	ownerName := mi.Owner.Obj().Name()
 	if mi.OwnerInst != nil {
 		ownerName = monoName(mi.OwnerInst)
 	}
 	base := mangleMethodName(ownerName, mi.Method.Name(), false)
-	for _, arg := range mi.TypeArgs {
-		base += "__" + typeArgSuffix(arg)
+	if len(mi.TypeArgs) > 0 {
+		base += "["
+		for i, arg := range mi.TypeArgs {
+			if i > 0 {
+				base += ", "
+			}
+			base += typeArgStr(arg)
+		}
+		base += "]"
 	}
 	return base
 }

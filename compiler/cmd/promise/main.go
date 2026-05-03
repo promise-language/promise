@@ -1376,7 +1376,7 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	}
 }
 
-// buildInstCacheMetas builds a map from mono instance name (e.g., "Vector__int")
+// buildInstCacheMetas builds a map from mono instance name (e.g., "Vector[int]")
 // to a CacheMeta containing the stable cache key and debug metadata. Instances
 // whose origin type has no hash (e.g., native/universe types) are omitted.
 func buildInstCacheMetas(mainInfo *sema.Info, compilerHash, target string) map[string]*module.CacheMeta {

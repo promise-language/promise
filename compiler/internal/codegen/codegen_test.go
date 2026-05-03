@@ -1471,9 +1471,9 @@ func TestGenericFailableFactoryPassthrough(t *testing.T) {
 	`)
 	// Monomorphized tryLoad[Strict] should call Strict.tryParse directly
 	assertContains(t, ir, "call { i1, { i8*, i8* }, i8* } @Strict.tryParse(")
-	// Failable passthrough: tryLoad__Strict should return the result directly
+	// Failable passthrough: tryLoad[Strict] should return the result directly
 	// (single ret of the call result, no insertvalue wrapping)
-	assertContains(t, ir, "@tryLoad__Strict(")
+	assertContains(t, ir, "@\"tryLoad[Strict]\"(")
 	assertContains(t, ir, "ret { i1, { i8*, i8* }, i8* } %")
 }
 
@@ -1491,9 +1491,9 @@ func TestSelfGenericFactoryCodegen(t *testing.T) {
 		}
 	`)
 	// Factory should be monomorphized for int
-	assertContains(t, ir, "@Box__int.wrap(")
-	// Should call the Box__int constructor
-	assertContains(t, ir, "@Box__int.new(")
+	assertContains(t, ir, "@\"Box[int].wrap\"(")
+	// Should call the Box[int] constructor
+	assertContains(t, ir, "@\"Box[int].new\"(")
 }
 
 func TestSelfGenericMethodReturnCodegen(t *testing.T) {
@@ -1511,7 +1511,7 @@ func TestSelfGenericMethodReturnCodegen(t *testing.T) {
 		}
 	`)
 	// Instance method should exist for int monomorphization
-	assertContains(t, ir, "@Box__int.rewrap(")
+	assertContains(t, ir, "@\"Box[int].rewrap\"(")
 }
 
 func TestSelfGenericMultiParamCodegen(t *testing.T) {
@@ -1529,8 +1529,8 @@ func TestSelfGenericMultiParamCodegen(t *testing.T) {
 		}
 	`)
 	// Factory monomorphized for (int, string)
-	assertContains(t, ir, "@Pair__int__string.make(")
-	assertContains(t, ir, "@Pair__int__string.new(")
+	assertContains(t, ir, "@\"Pair[int, string].make\"(")
+	assertContains(t, ir, "@\"Pair[int, string].new\"(")
 }
 
 func TestSuperCallCodegen(t *testing.T) {
@@ -2387,7 +2387,7 @@ func TestGenericErrorTypeRaise(t *testing.T) {
 		main() { foo() ? e { }; }
 	`)
 	// Should monomorphize DataError[int]
-	assertContains(t, ir, "DataError__int")
+	assertContains(t, ir, "DataError[int]")
 	assertContains(t, ir, "error.handler")
 }
 
@@ -2525,7 +2525,7 @@ func TestGenericTypeLayout(t *testing.T) {
 			b := Box[int](value: 42);
 		}
 	`)
-	assertContains(t, ir, "Box__int_i")
+	assertContains(t, ir, "Box[int]_i")
 	assertContains(t, ir, "store i64 42")
 }
 
@@ -2537,7 +2537,7 @@ func TestGenericFieldAccess(t *testing.T) {
 			int v = b.value;
 		}
 	`)
-	assertContains(t, ir, "Box__int_i")
+	assertContains(t, ir, "Box[int]_i")
 	// Field access should load i64 (not i8*)
 	assertContains(t, ir, "load i64")
 }
@@ -2564,7 +2564,7 @@ func TestGenericMethod(t *testing.T) {
 			int v = b.get();
 		}
 	`)
-	assertContains(t, ir, "define i64 @Box__int.get")
+	assertContains(t, ir, "define i64 @\"Box[int].get\"")
 }
 
 func TestGenericMethodSet(t *testing.T) {
@@ -2578,7 +2578,7 @@ func TestGenericMethodSet(t *testing.T) {
 			b.set(10);
 		}
 	`)
-	assertContains(t, ir, "define void @Box__int.set")
+	assertContains(t, ir, "define void @\"Box[int].set\"")
 }
 
 func TestGenericMultipleInstances(t *testing.T) {
@@ -2589,8 +2589,8 @@ func TestGenericMultipleInstances(t *testing.T) {
 			b := Box[string](value: "hi");
 		}
 	`)
-	assertContains(t, ir, "Box__int_i")
-	assertContains(t, ir, "Box__string_i")
+	assertContains(t, ir, "Box[int]_i")
+	assertContains(t, ir, "Box[string]_i")
 }
 
 func TestGenericNestedField(t *testing.T) {
@@ -2604,8 +2604,8 @@ func TestGenericNestedField(t *testing.T) {
 		}
 	`)
 	// Both Box[int] and Box[string] fields accessed with correct types
-	assertContains(t, ir, "Box__int_i")
-	assertContains(t, ir, "Box__string_i")
+	assertContains(t, ir, "Box[int]_i")
+	assertContains(t, ir, "Box[string]_i")
 	assertContains(t, ir, "load i64")
 	assertContains(t, ir, "load i8*")
 }
@@ -2617,7 +2617,7 @@ func TestGenericEnum(t *testing.T) {
 			x := Option[int].Some(42);
 		}
 	`)
-	assertContains(t, ir, "Option__int_enum")
+	assertContains(t, ir, "Option[int]_enum")
 	assertContains(t, ir, "store i64 42")
 }
 
@@ -2628,7 +2628,7 @@ func TestGenericEnumNone(t *testing.T) {
 			x := Option[int].None;
 		}
 	`)
-	assertContains(t, ir, "Option__int_enum")
+	assertContains(t, ir, "Option[int]_enum")
 }
 
 func TestGenericEnumMatch(t *testing.T) {
@@ -2664,7 +2664,23 @@ func TestGenericConstructorZeroInit(t *testing.T) {
 		}
 	`)
 	// Generic type instance for Box[int]
-	assertContains(t, ir, "Box__int_i")
+	assertContains(t, ir, "Box[int]_i")
+}
+
+// TestGenericTupleTypeArg verifies that a Tuple used as a generic type argument
+// produces a correct mono name ("Wrapper[(int, string)]") instead of "Wrapper[unknown]".
+// Two different tuple args for the same generic must not collide.
+func TestGenericTupleTypeArg(t *testing.T) {
+	ir := generateIR(t, `
+		type Wrapper[T] { T val; }
+		main() {
+			w1 := Wrapper[(int, string)](val: (1, "a"));
+			w2 := Wrapper[(bool, int)](val: (true, 42));
+		}
+	`)
+	assertContains(t, ir, `Wrapper[(int, string)]`)
+	assertContains(t, ir, `Wrapper[(bool, int)]`)
+	assertNotContains(t, ir, `Wrapper[unknown]`)
 }
 
 // --- Generic function tests ---
@@ -2676,7 +2692,7 @@ func TestGenericFunc(t *testing.T) {
 			int r = identity[int](42);
 		}
 	`)
-	assertContains(t, ir, "define i64 @identity__int")
+	assertContains(t, ir, "define i64 @\"identity[int]\"")
 	assertContains(t, ir, "ret i64")
 }
 
@@ -2687,7 +2703,7 @@ func TestGenericFuncString(t *testing.T) {
 			string s = identity[string]("hello");
 		}
 	`)
-	assertContains(t, ir, "define i8* @identity__string")
+	assertContains(t, ir, "define i8* @\"identity[string]\"")
 }
 
 func TestGenericFuncMultipleInstances(t *testing.T) {
@@ -2698,8 +2714,8 @@ func TestGenericFuncMultipleInstances(t *testing.T) {
 			string b = identity[string]("hi");
 		}
 	`)
-	assertContains(t, ir, "@identity__int")
-	assertContains(t, ir, "@identity__string")
+	assertContains(t, ir, "@\"identity[int]\"")
+	assertContains(t, ir, "@\"identity[string]\"")
 }
 
 func TestGenericMethodMutReceiverAssign(t *testing.T) {
@@ -2713,7 +2729,7 @@ func TestGenericMethodMutReceiverAssign(t *testing.T) {
 			b.replace(99);
 		}
 	`)
-	assertContains(t, ir, "define void @Box__int.replace")
+	assertContains(t, ir, "define void @\"Box[int].replace\"")
 	// Should store i64 (the new value into the field)
 	assertContains(t, ir, "store i64")
 }
@@ -2725,7 +2741,7 @@ func TestGenericFuncVoid(t *testing.T) {
 			consume[int](42);
 		}
 	`)
-	assertContains(t, ir, "define void @consume__int")
+	assertContains(t, ir, "define void @\"consume[int]\"")
 }
 
 func TestGenericFuncFailable(t *testing.T) {
@@ -2737,7 +2753,7 @@ func TestGenericFuncFailable(t *testing.T) {
 			int v = tryIdentity[int](42)!;
 		}
 	`)
-	assertContains(t, ir, "define { i1, i64, i8* } @tryIdentity__int")
+	assertContains(t, ir, "define { i1, i64, i8* } @\"tryIdentity[int]\"")
 }
 
 func TestGenericTypeAsParam(t *testing.T) {
@@ -2988,8 +3004,8 @@ func TestArrayVariable(t *testing.T) {
 func TestMapLiteral(t *testing.T) {
 	ir := generateIR(t, `main() { m := {"a": 1}; }`)
 	// Should call monomorphized constructor and index assign
-	assertContains(t, ir, "call void @Map__string__int.new(")
-	assertContains(t, ir, `call void @"Map__string__int.[]="(`)
+	assertContains(t, ir, "call void @\"Map[string, int].new\"(")
+	assertContains(t, ir, `call void @"Map[string, int].[]="(`)
 }
 
 func TestMapIndex(t *testing.T) {
@@ -3000,7 +3016,7 @@ func TestMapIndex(t *testing.T) {
 		}
 	`)
 	// Should call monomorphized [] method (returns optional { i1, i64 })
-	assertContains(t, ir, `call { i1, i64 } @"Map__string__int.[]"(`)
+	assertContains(t, ir, `call { i1, i64 } @"Map[string, int].[]"(`)
 }
 
 func TestMapIndexWithElvis(t *testing.T) {
@@ -3011,7 +3027,7 @@ func TestMapIndexWithElvis(t *testing.T) {
 		}
 	`)
 	// Should call monomorphized [] method + elvis
-	assertContains(t, ir, `call { i1, i64 } @"Map__string__int.[]"(`)
+	assertContains(t, ir, `call { i1, i64 } @"Map[string, int].[]"(`)
 	assertContains(t, ir, "elvis.some")
 }
 
@@ -3023,14 +3039,14 @@ func TestMapIndexAssign(t *testing.T) {
 		}
 	`)
 	// Should call monomorphized []= method
-	assertContains(t, ir, `call void @"Map__string__int.[]="(`)
+	assertContains(t, ir, `call void @"Map[string, int].[]="(`)
 }
 
 func TestMapIntKeys(t *testing.T) {
 	ir := generateIR(t, `main() { m := {1: "one", 2: "two"}; }`)
 	// Should create monomorphized map with int keys
-	assertContains(t, ir, "call void @Map__int__string.new(")
-	assertContains(t, ir, `call void @"Map__int__string.[]="(`)
+	assertContains(t, ir, "call void @\"Map[int, string].new\"(")
+	assertContains(t, ir, `call void @"Map[int, string].[]="(`)
 }
 
 func TestMapForIn(t *testing.T) {
@@ -4073,7 +4089,7 @@ func TestMapLen(t *testing.T) {
 		}
 	`)
 	// Should call monomorphized len getter
-	assertContains(t, ir, "call i64 @Map__string__int.len(")
+	assertContains(t, ir, "call i64 @\"Map[string, int].len\"(")
 }
 
 func TestStringLen(t *testing.T) {
@@ -4153,11 +4169,11 @@ func TestMapCompoundAssign(t *testing.T) {
 		}
 	`)
 	// Should call [] to get, add, then []= to set
-	assertContains(t, ir, `call { i1, i64 } @"Map__string__int.[]"(`)
+	assertContains(t, ir, `call { i1, i64 } @"Map[string, int].[]"(`)
 	assertContains(t, ir, "mapcomp.ok")
 	assertContains(t, ir, "mapcomp.panic")
 	assertContains(t, ir, "add i64")
-	assertContains(t, ir, `call void @"Map__string__int.[]="(`)
+	assertContains(t, ir, `call void @"Map[string, int].[]="(`)
 }
 
 func TestMapCompoundAssignMul(t *testing.T) {
@@ -4167,9 +4183,9 @@ func TestMapCompoundAssignMul(t *testing.T) {
 			m["x"] *= 3;
 		}
 	`)
-	assertContains(t, ir, `call { i1, i64 } @"Map__string__int.[]"(`)
+	assertContains(t, ir, `call { i1, i64 } @"Map[string, int].[]"(`)
 	assertContains(t, ir, "mul i64")
-	assertContains(t, ir, `call void @"Map__string__int.[]="(`)
+	assertContains(t, ir, `call void @"Map[string, int].[]="(`)
 }
 
 // --- Stage 8k: Inheritance Codegen Tests ---
@@ -6497,8 +6513,8 @@ func TestGenericGetterSetterSameName(t *testing.T) {
 		}
 	`)
 	// Monomorphized getter and setter should have distinct names
-	assertContains(t, ir, "define i64 @Box__int.val(")
-	assertContains(t, ir, "define void @Box__int.val$set(")
+	assertContains(t, ir, "define i64 @\"Box[int].val\"(")
+	assertContains(t, ir, "define void @\"Box[int].val$set\"(")
 }
 
 // --- Drop method tests ---
@@ -7981,7 +7997,7 @@ func TestReturnOptionalInMonoMethod(t *testing.T) {
 		}
 	`)
 	// The monomorphized [] method should produce { i1, i64 } return type
-	assertContains(t, ir, `define { i1, i64 } @"Map__string__int.[]"(`)
+	assertContains(t, ir, `define { i1, i64 } @"Map[string, int].[]"(`)
 	// Should contain insertvalue for wrapping the value in Optional { true, val }
 	assertContains(t, ir, "insertvalue { i1, i64 }")
 }
@@ -7997,8 +8013,8 @@ func TestNestedGenericMonomorphization(t *testing.T) {
 		}
 	`)
 	// Both Wrapper[int] and Box[int] should be monomorphized
-	assertContains(t, ir, "Wrapper__int")
-	assertContains(t, ir, "Box__int")
+	assertContains(t, ir, "Wrapper[int]")
+	assertContains(t, ir, "Box[int]")
 }
 
 // --- Non-native operator dispatch ---
@@ -8983,7 +8999,7 @@ func TestIndexMethodDispatchMap(t *testing.T) {
 			int? v = m["a"];
 		}
 	`)
-	assertContains(t, ir, `call { i1, i64 } @"Map__string__int.[]"(`)
+	assertContains(t, ir, `call { i1, i64 } @"Map[string, int].[]"(`)
 }
 
 func TestIndexAssignMethodDispatchMap(t *testing.T) {
@@ -8994,7 +9010,7 @@ func TestIndexAssignMethodDispatchMap(t *testing.T) {
 			m["b"] = 2;
 		}
 	`)
-	assertContains(t, ir, `call void @"Map__string__int.[]="(`)
+	assertContains(t, ir, `call void @"Map[string, int].[]="(`)
 }
 
 func TestIndexNativeDispatchVector(t *testing.T) {
@@ -9060,7 +9076,7 @@ func TestSliceExprVector(t *testing.T) {
 			int[] sub = v[1:3];
 		}
 	`)
-	assertContains(t, ir, `call i8* @"Vector__int.[:]"(`)
+	assertContains(t, ir, `call i8* @"Vector[int].[:]"(`)
 }
 
 func TestSliceAssignVector(t *testing.T) {
@@ -9071,7 +9087,7 @@ func TestSliceAssignVector(t *testing.T) {
 			v[1:3] = [10, 20];
 		}
 	`)
-	assertContains(t, ir, `call void @"Vector__int.[:]=`)
+	assertContains(t, ir, `call void @"Vector[int].[:]=`)
 }
 
 func TestUserDefinedIndexOperator(t *testing.T) {
@@ -9192,7 +9208,7 @@ func TestMultiParamGenericType(t *testing.T) {
 		}
 	`)
 	// Monomorphized struct name should contain both type args
-	assertContains(t, ir, "Pair__int__string")
+	assertContains(t, ir, "Pair[int, string]")
 }
 
 func TestMultiParamGenericFunc(t *testing.T) {
@@ -9205,7 +9221,7 @@ func TestMultiParamGenericFunc(t *testing.T) {
 		}
 	`)
 	// Monomorphized function name should contain both type args
-	assertContains(t, ir, "make_pair__int__string")
+	assertContains(t, ir, "make_pair[int, string]")
 }
 
 // --- Value type codegen tests ---
@@ -9602,8 +9618,8 @@ func TestGenericInheritanceForwardedTypeParams(t *testing.T) {
 		}
 	`)
 	// Monomorphized names should appear
-	assertContains(t, ir, "Derived__int")
-	assertContains(t, ir, "Base__int")
+	assertContains(t, ir, "Derived[int]")
+	assertContains(t, ir, "Base[int]")
 }
 
 func TestMonoTypeVtableEmission(t *testing.T) {
@@ -9623,11 +9639,11 @@ func TestMonoTypeVtableEmission(t *testing.T) {
 			int x = accept_producer(cp);
 		}
 	`)
-	// Mono vtable and typeinfo should be emitted for ConstProducer__int
-	assertContains(t, ir, "promise_vtable_ConstProducer__int")
-	assertContains(t, ir, "promise_typeinfo_ConstProducer__int")
+	// Mono vtable and typeinfo should be emitted for ConstProducer[int]
+	assertContains(t, ir, "promise_vtable_ConstProducer[int]")
+	assertContains(t, ir, "promise_typeinfo_ConstProducer[int]")
 	// The vtable should contain the mono method pointer
-	assertContains(t, ir, "ConstProducer__int.produce")
+	assertContains(t, ir, "ConstProducer[int].produce")
 }
 
 func TestMonoVtableVirtualDispatchIR(t *testing.T) {
@@ -9648,12 +9664,12 @@ func TestMonoVtableVirtualDispatchIR(t *testing.T) {
 		}
 	`)
 	// Vtable should exist for both parent and child mono instances
-	assertContains(t, ir, "promise_vtable_Circle__int")
-	assertContains(t, ir, "promise_vtable_Shape__int")
+	assertContains(t, ir, "promise_vtable_Circle[int]")
+	assertContains(t, ir, "promise_vtable_Shape[int]")
 	// accept_shape should do virtual dispatch (load from vtable, indirect call)
-	assertContains(t, ir, "promise_vtable_Shape__int")
+	assertContains(t, ir, "promise_vtable_Shape[int]")
 	// Mono method should be defined
-	assertContains(t, ir, "Circle__int.area")
+	assertContains(t, ir, "Circle[int].area")
 }
 
 func TestMultipleMonoVtablesDistinct(t *testing.T) {
@@ -9675,13 +9691,13 @@ func TestMultipleMonoVtablesDistinct(t *testing.T) {
 		}
 	`)
 	// Separate vtables for int and string instantiations
-	assertContains(t, ir, "promise_vtable_ConstProducer__int")
-	assertContains(t, ir, "promise_vtable_ConstProducer__string")
-	assertContains(t, ir, "promise_typeinfo_ConstProducer__int")
-	assertContains(t, ir, "promise_typeinfo_ConstProducer__string")
+	assertContains(t, ir, "promise_vtable_ConstProducer[int]")
+	assertContains(t, ir, "promise_vtable_ConstProducer[string]")
+	assertContains(t, ir, "promise_typeinfo_ConstProducer[int]")
+	assertContains(t, ir, "promise_typeinfo_ConstProducer[string]")
 	// Separate methods
-	assertContains(t, ir, "ConstProducer__int.produce")
-	assertContains(t, ir, "ConstProducer__string.produce")
+	assertContains(t, ir, "ConstProducer[int].produce")
+	assertContains(t, ir, "ConstProducer[string].produce")
 }
 
 func TestMonoVtableInheritedMethodResolution(t *testing.T) {
@@ -9698,9 +9714,9 @@ func TestMonoVtableInheritedMethodResolution(t *testing.T) {
 			int x = accept(l);
 		}
 	`)
-	// Leaf__int vtable should reference Base__int.get (inherited method)
-	assertContains(t, ir, "promise_vtable_Leaf__int")
-	assertContains(t, ir, "Base__int.get")
+	// Leaf[int] vtable should reference Base[int].get (inherited method)
+	assertContains(t, ir, "promise_vtable_Leaf[int]")
+	assertContains(t, ir, "Base[int].get")
 }
 
 func TestMonoTypeInfoEmittedForParent(t *testing.T) {
@@ -9719,9 +9735,9 @@ func TestMonoTypeInfoEmittedForParent(t *testing.T) {
 		}
 	`)
 	// Both parent and child should have typeinfo
-	assertContains(t, ir, "promise_typeinfo_Dog__int")
-	assertContains(t, ir, "promise_typeinfo_Animal__int")
-	assertContains(t, ir, "promise_vtable_Dog__int")
+	assertContains(t, ir, "promise_typeinfo_Dog[int]")
+	assertContains(t, ir, "promise_typeinfo_Animal[int]")
+	assertContains(t, ir, "promise_vtable_Dog[int]")
 }
 
 func TestMonoVtableOverrideDispatches(t *testing.T) {
@@ -9742,10 +9758,10 @@ func TestMonoVtableOverrideDispatches(t *testing.T) {
 		}
 	`)
 	// Both should have vtables with their own greet method
-	assertContains(t, ir, "promise_vtable_Greeter__int")
-	assertContains(t, ir, "promise_vtable_Fancy__int")
-	assertContains(t, ir, "Greeter__int.greet")
-	assertContains(t, ir, "Fancy__int.greet")
+	assertContains(t, ir, "promise_vtable_Greeter[int]")
+	assertContains(t, ir, "promise_vtable_Fancy[int]")
+	assertContains(t, ir, "Greeter[int].greet")
+	assertContains(t, ir, "Fancy[int].greet")
 }
 
 func TestMonoVtableNonGenericChildOfGenericParent(t *testing.T) {
@@ -9771,10 +9787,10 @@ func TestMonoVtableNonGenericChildOfGenericParent(t *testing.T) {
 	// Non-generic child uses regular vtable naming
 	assertContains(t, ir, "promise_vtable_IntFabricator")
 	// Generic child uses mono vtable naming
-	assertContains(t, ir, "promise_vtable_GenFabricator__int")
+	assertContains(t, ir, "promise_vtable_GenFabricator[int]")
 	// Both methods exist
 	assertContains(t, ir, "IntFabricator.fabricate")
-	assertContains(t, ir, "GenFabricator__int.fabricate")
+	assertContains(t, ir, "GenFabricator[int].fabricate")
 }
 
 func TestMethodGenericIR(t *testing.T) {
@@ -9789,8 +9805,8 @@ func TestMethodGenericIR(t *testing.T) {
 		}
 	`)
 	// Monomorphized method names should appear
-	assertContains(t, ir, "Echo.echo__int")
-	assertContains(t, ir, "Echo.echo__string")
+	assertContains(t, ir, "Echo.echo[int]")
+	assertContains(t, ir, "Echo.echo[string]")
 }
 
 func TestMethodGenericOnGenericTypeIR(t *testing.T) {
@@ -9805,7 +9821,7 @@ func TestMethodGenericOnGenericTypeIR(t *testing.T) {
 		}
 	`)
 	// Should have mono type name + mono method name
-	assertContains(t, ir, "Box__int.convert__string")
+	assertContains(t, ir, "Box[int].convert[string]")
 }
 
 // --- Monomorphization: gaps ---
@@ -9827,16 +9843,16 @@ func TestGenericValueTypeLayout(t *testing.T) {
 		}
 	`)
 	// Mono type names should appear
-	assertContains(t, ir, "Pair__int")
+	assertContains(t, ir, "Pair[int]")
 	// Value struct has embedded fields (3 fields: _vtable, _rtti, first, second)
-	// The _v struct is named promise_Pair__int_v
-	assertContains(t, ir, "promise_Pair__int_v")
+	// The _v struct is named promise_Pair[int]_v
+	assertContains(t, ir, "promise_Pair[int]_v")
 	// Instance struct is RTTI-only (no user fields) — just the _variant pointer
-	assertContains(t, ir, "promise_Pair__int_i")
+	assertContains(t, ir, "promise_Pair[int]_i")
 	// RTTI global is emitted for value types
-	assertContains(t, ir, "promise_rtti_Pair__int")
+	assertContains(t, ir, "promise_rtti_Pair[int]")
 	// No heap allocation: value types are not malloc'd
-	assertNotContains(t, ir, "promise_Pair__int_i* @malloc")
+	assertNotContains(t, ir, "promise_Pair[int]_i* @malloc")
 }
 
 // TestGenericValueTypeTwoInstances verifies that two instantiations of the same
@@ -9852,13 +9868,13 @@ func TestGenericValueTypeTwoInstances(t *testing.T) {
 			pb := Pair[bool](first: true, second: false);
 		}
 	`)
-	assertContains(t, ir, "promise_Pair__int_v")
-	assertContains(t, ir, "promise_Pair__bool_v")
-	assertContains(t, ir, "promise_rtti_Pair__int")
-	assertContains(t, ir, "promise_rtti_Pair__bool")
+	assertContains(t, ir, "promise_Pair[int]_v")
+	assertContains(t, ir, "promise_Pair[bool]_v")
+	assertContains(t, ir, "promise_rtti_Pair[int]")
+	assertContains(t, ir, "promise_rtti_Pair[bool]")
 	// Separate typeinfo for each instantiation
-	assertContains(t, ir, "promise_typeinfo_Pair__int")
-	assertContains(t, ir, "promise_typeinfo_Pair__bool")
+	assertContains(t, ir, "promise_typeinfo_Pair[int]")
+	assertContains(t, ir, "promise_typeinfo_Pair[bool]")
 }
 
 // TestGenericEnumTwoTypeParams verifies that a generic enum with two type parameters
@@ -9883,9 +9899,9 @@ func TestGenericEnumTwoTypeParams(t *testing.T) {
 		}
 	`)
 	// Both type params in mangled name
-	assertContains(t, ir, "Either__int__string")
+	assertContains(t, ir, "Either[int, string]")
 	// Value struct typedef emitted
-	assertContains(t, ir, "promise_Either__int__string_v")
+	assertContains(t, ir, "promise_Either[int, string]_v")
 	// Function using the mono type exists
 	assertContains(t, ir, "get_left")
 }
@@ -9902,9 +9918,9 @@ func TestDeeplyNestedGenericMonomorphization(t *testing.T) {
 		}
 	`)
 	// All three levels must be monomorphized
-	assertContains(t, ir, "Box__int")
-	assertContains(t, ir, "Box__Box__int")
-	assertContains(t, ir, "Box__Box__Box__int")
+	assertContains(t, ir, "Box[int]")
+	assertContains(t, ir, "Box[Box[int]]")
+	assertContains(t, ir, "Box[Box[Box[int]]]")
 }
 
 // TestGenericMethodReturnsGenericInstance verifies that a generic method whose
@@ -9920,9 +9936,9 @@ func TestGenericMethodReturnsGenericInstance(t *testing.T) {
 			c := b.clone();
 		}
 	`)
-	assertContains(t, ir, "Box__int.clone")
-	// Return type is also Box__int — constructor call should appear
-	assertContains(t, ir, "Box__int")
+	assertContains(t, ir, "Box[int].clone")
+	// Return type is also Box[int] — constructor call should appear
+	assertContains(t, ir, "Box[int]")
 }
 
 // TestMonoSynthesizedDefaultOnGenericType verifies that a generic concrete type
@@ -9947,9 +9963,9 @@ func TestMonoSynthesizedDefaultOnGenericType(t *testing.T) {
 		}
 	`)
 	// The synthesized nonempty default should appear with the mono-qualified name
-	assertContains(t, ir, "Pair__int.nonempty")
+	assertContains(t, ir, "Pair[int].nonempty")
 	// The concrete size method should also appear
-	assertContains(t, ir, "Pair__int.size")
+	assertContains(t, ir, "Pair[int].size")
 }
 
 // TestGenericFuncWithGenericReturnType verifies a generic function that both
@@ -9964,8 +9980,8 @@ func TestGenericFuncWithGenericReturnType(t *testing.T) {
 			c := identity_box[int](b);
 		}
 	`)
-	assertContains(t, ir, "identity_box__int")
-	assertContains(t, ir, "Box__int")
+	assertContains(t, ir, "identity_box[int]")
+	assertContains(t, ir, "Box[int]")
 }
 
 // TestGenericTypeInfoEmitted verifies that RTTI typeinfo and vtable globals are
@@ -9986,10 +10002,10 @@ func TestGenericTypeInfoEmitted(t *testing.T) {
 		}
 	`)
 	// Mono typeinfo and vtable globals must be emitted for Dog[int].
-	assertContains(t, ir, "promise_typeinfo_Dog__int")
-	assertContains(t, ir, "promise_vtable_Dog__int")
+	assertContains(t, ir, "promise_typeinfo_Dog[int]")
+	assertContains(t, ir, "promise_vtable_Dog[int]")
 	// Animal[int] typeinfo must also be emitted (it's an abstract parent).
-	assertContains(t, ir, "promise_typeinfo_Animal__int")
+	assertContains(t, ir, "promise_typeinfo_Animal[int]")
 }
 
 // --- InstanceIRs, instanceOwnedFuncs, CompileWithCache tests ---
@@ -10024,13 +10040,13 @@ func TestInstanceIRsBasic(t *testing.T) {
 	if len(instIRs) == 0 {
 		t.Fatal("expected at least one instance IR")
 	}
-	ir, ok := instIRs["Box__int"]
+	ir, ok := instIRs["Box[int]"]
 	if !ok {
-		t.Fatalf("expected Box__int in instance IRs, got: %v", mapKeys(instIRs))
+		t.Fatalf("expected Box[int] in instance IRs, got: %v", mapKeys(instIRs))
 	}
-	// Instance IR must contain at least one function definition for Box__int.
-	if !strings.Contains(ir, "Box__int") {
-		t.Errorf("Box__int IR does not mention Box__int:\n%s", ir)
+	// Instance IR must contain at least one function definition for Box[int].
+	if !strings.Contains(ir, "Box[int]") {
+		t.Errorf("Box[int] IR does not mention Box[int]:\n%s", ir)
 	}
 	// Instance IR must not contain main() body.
 	if strings.Contains(ir, "define void @main") ||
@@ -10052,25 +10068,25 @@ func TestInstanceIRsSeparation(t *testing.T) {
 	result := Compile(file, info, "")
 	instIRs := result.InstanceIRs()
 
-	intIR, hasInt := instIRs["Box__int"]
-	strIR, hasStr := instIRs["Box__string"]
+	intIR, hasInt := instIRs["Box[int]"]
+	strIR, hasStr := instIRs["Box[string]"]
 	if !hasInt {
-		t.Fatalf("missing Box__int in instance IRs, keys: %v", mapKeys(instIRs))
+		t.Fatalf("missing Box[int] in instance IRs, keys: %v", mapKeys(instIRs))
 	}
 	if !hasStr {
-		t.Fatalf("missing Box__string in instance IRs, keys: %v", mapKeys(instIRs))
+		t.Fatalf("missing Box[string] in instance IRs, keys: %v", mapKeys(instIRs))
 	}
 
 	// Cross-contamination check: each IR must not DEFINE the other instance's functions.
 	// (Extern declarations for the other instance's functions are expected and fine.)
 	for _, line := range strings.Split(intIR, "\n") {
-		if strings.Contains(line, "define") && strings.Contains(line, "Box__string.get") {
-			t.Errorf("Box__int IR should not define Box__string.get:\n  %s", line)
+		if strings.Contains(line, "define") && strings.Contains(line, "Box[string].get") {
+			t.Errorf("Box[int] IR should not define Box[string].get:\n  %s", line)
 		}
 	}
 	for _, line := range strings.Split(strIR, "\n") {
-		if strings.Contains(line, "define") && strings.Contains(line, "Box__int.get") {
-			t.Errorf("Box__string IR should not define Box__int.get:\n  %s", line)
+		if strings.Contains(line, "define") && strings.Contains(line, "Box[int].get") {
+			t.Errorf("Box[string] IR should not define Box[int].get:\n  %s", line)
 		}
 	}
 }
@@ -10086,13 +10102,13 @@ func TestInstanceIRsStrippedFromMainIR(t *testing.T) {
 	result := Compile(file, info, "")
 	mainIR, _ := result.SplitModuleIRs()
 
-	// Box__int.get must appear only as a declaration (not definition) in main IR.
-	// The mangled name in IR is @"Box__int.get" (LLVM quotes names with dots).
-	if strings.Contains(mainIR, `define`) && strings.Contains(mainIR, `Box__int.get`) {
+	// Box[int].get must appear only as a declaration (not definition) in main IR.
+	// The mangled name in IR is @"Box[int].get" (LLVM quotes names with dots).
+	if strings.Contains(mainIR, `define`) && strings.Contains(mainIR, `Box[int].get`) {
 		// More precise: look for a definition line
 		for _, line := range strings.Split(mainIR, "\n") {
-			if strings.Contains(line, "define") && strings.Contains(line, "Box__int.get") {
-				t.Errorf("main IR should not define Box__int.get:\n  %s", line)
+			if strings.Contains(line, "define") && strings.Contains(line, "Box[int].get") {
+				t.Errorf("main IR should not define Box[int].get:\n  %s", line)
 			}
 		}
 	}
@@ -10116,7 +10132,7 @@ func TestInstanceIRsNilWhenNoGenerics(t *testing.T) {
 }
 
 func TestInstanceOwnedFuncsTracking(t *testing.T) {
-	// instanceOwnedFuncs should map Box__int's mangled methods to "Box__int".
+	// instanceOwnedFuncs should map Box[int]'s mangled methods to "Box[int]".
 	file, info := parseWithStd(t, boxWithGetMethod+`
 		main() {
 			b := Box[int](value: 1);
@@ -10132,15 +10148,15 @@ func TestInstanceOwnedFuncsTracking(t *testing.T) {
 
 	foundBoxInt := false
 	for funcName, instName := range c.instanceOwnedFuncs {
-		if instName == "Box__int" {
+		if instName == "Box[int]" {
 			foundBoxInt = true
-			if !strings.Contains(funcName, "Box__int") {
-				t.Errorf("function %q tagged as Box__int but name doesn't contain 'Box__int'", funcName)
+			if !strings.Contains(funcName, "Box[int]") {
+				t.Errorf("function %q tagged as Box[int] but name doesn't contain 'Box[int]'", funcName)
 			}
 		}
 	}
 	if !foundBoxInt {
-		t.Errorf("no function owned by Box__int; instanceOwnedFuncs = %v", c.instanceOwnedFuncs)
+		t.Errorf("no function owned by Box[int]; instanceOwnedFuncs = %v", c.instanceOwnedFuncs)
 	}
 }
 
@@ -10157,7 +10173,7 @@ func TestCompileWithCacheNilEqualToCompile(t *testing.T) {
 }
 
 func TestCompileWithCacheSkipsInstanceBody(t *testing.T) {
-	// When Box__int is listed as cached, its method body must not be generated
+	// When Box[int] is listed as cached, its method body must not be generated
 	// (so it won't appear in InstanceIRs).
 	file, info := parseWithStd(t, boxWithGetMethod+`
 		main() {
@@ -10166,23 +10182,23 @@ func TestCompileWithCacheSkipsInstanceBody(t *testing.T) {
 		}
 	`)
 
-	// Full compile: Box__int must appear in InstanceIRs (body was generated).
+	// Full compile: Box[int] must appear in InstanceIRs (body was generated).
 	rFull := Compile(file, info, "")
 	fullIRs := rFull.InstanceIRs()
-	if _, ok := fullIRs["Box__int"]; !ok {
-		t.Skipf("Box__int not in InstanceIRs on full compile; keys: %v", mapKeys(fullIRs))
+	if _, ok := fullIRs["Box[int]"]; !ok {
+		t.Skipf("Box[int] not in InstanceIRs on full compile; keys: %v", mapKeys(fullIRs))
 	}
 
-	// Cached compile: Box__int body must be skipped → not in InstanceIRs.
-	rCached := CompileWithCache(file, info, "", map[string]bool{"Box__int": true})
+	// Cached compile: Box[int] body must be skipped → not in InstanceIRs.
+	rCached := CompileWithCache(file, info, "", map[string]bool{"Box[int]": true})
 	cachedIRs := rCached.InstanceIRs()
-	if _, ok := cachedIRs["Box__int"]; ok {
-		t.Error("Box__int should not appear in InstanceIRs when marked as cached")
+	if _, ok := cachedIRs["Box[int]"]; ok {
+		t.Error("Box[int] should not appear in InstanceIRs when marked as cached")
 	}
 }
 
 func TestCompileWithCacheOnlySkipsCachedInstances(t *testing.T) {
-	// Marking Box__int as cached must not affect Box__string.
+	// Marking Box[int] as cached must not affect Box[string].
 	file, info := parseWithStd(t, boxWithGetMethod+`
 		main() {
 			a := Box[int](value: 1);
@@ -10192,16 +10208,16 @@ func TestCompileWithCacheOnlySkipsCachedInstances(t *testing.T) {
 		}
 	`)
 
-	rCached := CompileWithCache(file, info, "", map[string]bool{"Box__int": true})
+	rCached := CompileWithCache(file, info, "", map[string]bool{"Box[int]": true})
 	cachedIRs := rCached.InstanceIRs()
 
-	// Box__int was cached → no body, not in InstanceIRs
-	if _, ok := cachedIRs["Box__int"]; ok {
-		t.Error("Box__int should not appear in InstanceIRs when marked as cached")
+	// Box[int] was cached → no body, not in InstanceIRs
+	if _, ok := cachedIRs["Box[int]"]; ok {
+		t.Error("Box[int] should not appear in InstanceIRs when marked as cached")
 	}
-	// Box__string was NOT cached → body generated, must be in InstanceIRs
-	if _, ok := cachedIRs["Box__string"]; !ok {
-		t.Errorf("Box__string should appear in InstanceIRs (not cached); keys: %v", mapKeys(cachedIRs))
+	// Box[string] was NOT cached → body generated, must be in InstanceIRs
+	if _, ok := cachedIRs["Box[string]"]; !ok {
+		t.Errorf("Box[string] should appear in InstanceIRs (not cached); keys: %v", mapKeys(cachedIRs))
 	}
 }
 
@@ -10214,17 +10230,17 @@ func TestInstanceOwnedFuncsTrackedEvenWhenCached(t *testing.T) {
 			int x = b.get();
 		}
 	`)
-	r := CompileWithCache(file, info, "", map[string]bool{"Box__int": true})
+	r := CompileWithCache(file, info, "", map[string]bool{"Box[int]": true})
 	c := r.compiler
 
 	foundBoxInt := false
 	for _, instName := range c.instanceOwnedFuncs {
-		if instName == "Box__int" {
+		if instName == "Box[int]" {
 			foundBoxInt = true
 			break
 		}
 	}
 	if !foundBoxInt {
-		t.Errorf("Box__int not in instanceOwnedFuncs even when cached; map = %v", c.instanceOwnedFuncs)
+		t.Errorf("Box[int] not in instanceOwnedFuncs even when cached; map = %v", c.instanceOwnedFuncs)
 	}
 }

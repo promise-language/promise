@@ -1085,15 +1085,19 @@ func (c *Compiler) genGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr) value
 		panic(fmt.Sprintf("codegen: generic function target is not IdentExpr: %T", idx.Target))
 	}
 
-	mangledName := ident.Name
 	allTypeArgExprs := append([]ast.Expr{idx.Index}, idx.ExtraIndices...)
-	for _, argExpr := range allTypeArgExprs {
+	mangledName := ident.Name + "["
+	for i, argExpr := range allTypeArgExprs {
 		typeArgType := c.info.Types[argExpr]
 		if c.typeSubst != nil && typeArgType != nil {
 			typeArgType = types.Substitute(typeArgType, c.typeSubst)
 		}
-		mangledName += "__" + typeArgSuffix(typeArgType)
+		if i > 0 {
+			mangledName += ", "
+		}
+		mangledName += typeArgStr(typeArgType)
 	}
+	mangledName += "]"
 
 	fn, ok := c.funcs[mangledName]
 	if !ok {
@@ -1122,8 +1126,8 @@ func (c *Compiler) genGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr) value
 }
 
 // genGenericMethodCall generates a call to a monomorphized generic method.
-// Example: box.transform[string](fn) → Box.transform__string(this, fn)
-// Example: box.transform[string](fn) where box is Box[int] → Box__int.transform__string(this, fn)
+// Example: box.transform[string](fn) → "Box.transform[string]"(this, fn)
+// Example: box.transform[string](fn) where box is Box[int] → "Box[int].transform[string]"(this, fn)
 func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, idx *ast.IndexExpr, member *ast.MemberExpr) value.Value {
 	targetType := c.info.Types[member.Target]
 	if c.typeSubst != nil {
@@ -1140,7 +1144,7 @@ func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, idx *ast.IndexExpr, mem
 		panic(fmt.Sprintf("codegen: no method %s on type %s", member.Field, named))
 	}
 
-	// Build mono method name: DefiningType.method__typearg1__typearg2
+	// Build mono method name: DefiningType.method[typearg1, typearg2]
 	// Use the method's defining type (which may be a parent), not the target type.
 	defOwnerName := c.resolveMethodOwner(named, member.Field)
 	if defOwnerName != named.Obj().Name() {
@@ -1149,15 +1153,19 @@ func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, idx *ast.IndexExpr, mem
 	} else {
 		defOwnerName = c.resolveTypeName(targetType)
 	}
-	mangledName := mangleMethodName(defOwnerName, member.Field, false)
 	allTypeArgExprs := append([]ast.Expr{idx.Index}, idx.ExtraIndices...)
-	for _, argExpr := range allTypeArgExprs {
+	mangledName := mangleMethodName(defOwnerName, member.Field, false) + "["
+	for i, argExpr := range allTypeArgExprs {
 		typeArgType := c.info.Types[argExpr]
 		if c.typeSubst != nil && typeArgType != nil {
 			typeArgType = types.Substitute(typeArgType, c.typeSubst)
 		}
-		mangledName += "__" + typeArgSuffix(typeArgType)
+		if i > 0 {
+			mangledName += ", "
+		}
+		mangledName += typeArgStr(typeArgType)
 	}
+	mangledName += "]"
 
 	fn, ok := c.funcs[mangledName]
 	if !ok {

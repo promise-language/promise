@@ -911,7 +911,7 @@ func TestPromiseHome(t *testing.T) {
 // --- InstanceCacheKey tests ---
 
 func TestInstanceCacheKeyNonEmpty(t *testing.T) {
-	key := InstanceCacheKey("", "Vector__int", "decl123", "compiler456", "x86_64-linux-musl")
+	key := InstanceCacheKey("", "Vector[int]", "decl123", "compiler456", "x86_64-linux-musl")
 	if key == "" {
 		t.Error("expected non-empty key")
 	}
@@ -922,48 +922,48 @@ func TestInstanceCacheKeyNonEmpty(t *testing.T) {
 }
 
 func TestInstanceCacheKeyDeterminism(t *testing.T) {
-	k1 := InstanceCacheKey("", "Vector__int", "decl", "cmp", "linux")
-	k2 := InstanceCacheKey("", "Vector__int", "decl", "cmp", "linux")
+	k1 := InstanceCacheKey("", "Vector[int]", "decl", "cmp", "linux")
+	k2 := InstanceCacheKey("", "Vector[int]", "decl", "cmp", "linux")
 	if k1 != k2 {
 		t.Errorf("non-deterministic: %q != %q", k1, k2)
 	}
 }
 
 func TestInstanceCacheKeyDifferentIRPrefix(t *testing.T) {
-	k1 := InstanceCacheKey("", "Vector__int", "decl", "cmp", "linux")
-	k2 := InstanceCacheKey("mymod", "Vector__int", "decl", "cmp", "linux")
+	k1 := InstanceCacheKey("", "Vector[int]", "decl", "cmp", "linux")
+	k2 := InstanceCacheKey("mymod", "Vector[int]", "decl", "cmp", "linux")
 	if k1 == k2 {
 		t.Error("different irPrefix should produce different key")
 	}
 }
 
 func TestInstanceCacheKeyDifferentMonoName(t *testing.T) {
-	k1 := InstanceCacheKey("", "Vector__int", "decl", "cmp", "linux")
-	k2 := InstanceCacheKey("", "Vector__string", "decl", "cmp", "linux")
+	k1 := InstanceCacheKey("", "Vector[int]", "decl", "cmp", "linux")
+	k2 := InstanceCacheKey("", "Vector[string]", "decl", "cmp", "linux")
 	if k1 == k2 {
 		t.Error("different monoName should produce different key")
 	}
 }
 
 func TestInstanceCacheKeyDifferentDeclHash(t *testing.T) {
-	k1 := InstanceCacheKey("", "Vector__int", "hash1", "cmp", "linux")
-	k2 := InstanceCacheKey("", "Vector__int", "hash2", "cmp", "linux")
+	k1 := InstanceCacheKey("", "Vector[int]", "hash1", "cmp", "linux")
+	k2 := InstanceCacheKey("", "Vector[int]", "hash2", "cmp", "linux")
 	if k1 == k2 {
 		t.Error("different typeDeclHash should produce different key")
 	}
 }
 
 func TestInstanceCacheKeyDifferentCompilerHash(t *testing.T) {
-	k1 := InstanceCacheKey("", "Vector__int", "decl", "compiler1", "linux")
-	k2 := InstanceCacheKey("", "Vector__int", "decl", "compiler2", "linux")
+	k1 := InstanceCacheKey("", "Vector[int]", "decl", "compiler1", "linux")
+	k2 := InstanceCacheKey("", "Vector[int]", "decl", "compiler2", "linux")
 	if k1 == k2 {
 		t.Error("different compilerHash should produce different key")
 	}
 }
 
 func TestInstanceCacheKeyDifferentTarget(t *testing.T) {
-	k1 := InstanceCacheKey("", "Vector__int", "decl", "cmp", "x86_64-linux-musl")
-	k2 := InstanceCacheKey("", "Vector__int", "decl", "cmp", "aarch64-apple-macos14")
+	k1 := InstanceCacheKey("", "Vector[int]", "decl", "cmp", "x86_64-linux-musl")
+	k2 := InstanceCacheKey("", "Vector[int]", "decl", "cmp", "aarch64-apple-macos14")
 	if k1 == k2 {
 		t.Error("different target should produce different key")
 	}
@@ -981,13 +981,13 @@ func TestInstanceCacheKeyPrefixCollisionFree(t *testing.T) {
 
 func TestInstanceCacheKeyAllDistinct(t *testing.T) {
 	// All six parameters independently affect the key.
-	base := InstanceCacheKey("pfx", "Box__int", "decl", "cmp", "linux")
+	base := InstanceCacheKey("pfx", "Box[int]", "decl", "cmp", "linux")
 	variants := []string{
-		InstanceCacheKey("pfx2", "Box__int", "decl", "cmp", "linux"),      // irPrefix differs
-		InstanceCacheKey("pfx", "Box__string", "decl", "cmp", "linux"),    // monoName differs
-		InstanceCacheKey("pfx", "Box__int", "decl2", "cmp", "linux"),      // typeDeclHash differs
-		InstanceCacheKey("pfx", "Box__int", "decl", "cmp2", "linux"),      // compilerHash differs
-		InstanceCacheKey("pfx", "Box__int", "decl", "cmp", "wasm32-wasi"), // target differs
+		InstanceCacheKey("pfx2", "Box[int]", "decl", "cmp", "linux"),      // irPrefix differs
+		InstanceCacheKey("pfx", "Box[string]", "decl", "cmp", "linux"),    // monoName differs
+		InstanceCacheKey("pfx", "Box[int]", "decl2", "cmp", "linux"),      // typeDeclHash differs
+		InstanceCacheKey("pfx", "Box[int]", "decl", "cmp2", "linux"),      // compilerHash differs
+		InstanceCacheKey("pfx", "Box[int]", "decl", "cmp", "wasm32-wasi"), // target differs
 	}
 	for i, k := range variants {
 		if k == base {

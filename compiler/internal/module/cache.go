@@ -284,7 +284,7 @@ func BuildCacheKey(implHash, compilerHash, target string, allModulePaths []strin
 // The key is derived from:
 //   - irPrefix: the module's IR symbol prefix (disambiguates same-named types
 //     from different modules; empty for types in the main file)
-//   - monoName: the mangled instance name including type args (e.g., "Vector__int")
+//   - monoName: the mangled instance name including type args (e.g., "Vector[int]")
 //   - typeDeclHash: FNV-128a hash of the TypeDecl/EnumDecl AST — covers all
 //     fields, methods, variants, and their bodies, but NOT unrelated declarations
 //     in the same file

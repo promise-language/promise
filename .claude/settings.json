@@ -1,10 +1,5 @@
 {
   "permissions": {
-    "deny": [
-      "Read(.tracker/**)",
-      "Edit(.tracker/**)",
-      "Write(.tracker/**)"
-    ],
     "allow": [
       "Bash(make generate:*)",
       "Bash(make resources:*)",
@@ -50,7 +45,15 @@
       "Bash(do echo:*)",
       "Read(~/prog/promise_lang/**)",
       "Bash(brew --prefix llvm)",
-      "Bash(/opt/homebrew/opt/llvm/bin/opt:*)"
+      "Bash(/opt/homebrew/opt/llvm/bin/opt:*)",
+      "mcp__tracker__list",
+      "mcp__tracker__create",
+      "mcp__tracker__update"
+    ],
+    "deny": [
+      "Read(.tracker/**)",
+      "Edit(.tracker/**)",
+      "Write(.tracker/**)"
     ],
     "additionalDirectories": [
       "/tmp",

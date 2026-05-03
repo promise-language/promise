@@ -187,9 +187,12 @@ func TestResolveRemoteModuleLocalRepo(t *testing.T) {
 
 	// Override global cache to a temp dir for testing
 	origHome := os.Getenv("HOME")
+	origPromiseHome := os.Getenv("PROMISE_HOME")
 	tmpHome := t.TempDir()
+	os.Unsetenv("PROMISE_HOME")
 	os.Setenv("HOME", tmpHome)
 	defer os.Setenv("HOME", origHome)
+	defer os.Setenv("PROMISE_HOME", origPromiseHome)
 
 	// First resolve — should clone and checkout
 	dir, err := ResolveRemoteModule(bareRepo, commitHash)
@@ -257,9 +260,12 @@ func TestResolveRemoteModuleTwoCommits(t *testing.T) {
 
 	// Override HOME
 	origHome := os.Getenv("HOME")
+	origPromiseHome := os.Getenv("PROMISE_HOME")
 	tmpHome := t.TempDir()
+	os.Unsetenv("PROMISE_HOME")
 	os.Setenv("HOME", tmpHome)
 	defer os.Setenv("HOME", origHome)
+	defer os.Setenv("PROMISE_HOME", origPromiseHome)
 
 	// Resolve first commit
 	dir1, err := ResolveRemoteModule(bareRepo, hash1)
@@ -431,9 +437,12 @@ func TestPinResolveNotFound(t *testing.T) {
 func TestCleanGlobalCache(t *testing.T) {
 	// Override HOME to a temp dir so we don't destroy real cache
 	origHome := os.Getenv("HOME")
+	origPromiseHome := os.Getenv("PROMISE_HOME")
 	tmpHome := t.TempDir()
+	os.Unsetenv("PROMISE_HOME")
 	os.Setenv("HOME", tmpHome)
 	defer os.Setenv("HOME", origHome)
+	defer os.Setenv("PROMISE_HOME", origPromiseHome)
 
 	// Create cache dir with some content
 	cacheDir := filepath.Join(tmpHome, ".promise", "cache", "modules", "github.com", "someone", "parser")
@@ -460,9 +469,12 @@ func TestCleanGlobalCache(t *testing.T) {
 func TestCleanGlobalCacheNonexistent(t *testing.T) {
 	// Should not error when cache doesn't exist
 	origHome := os.Getenv("HOME")
+	origPromiseHome := os.Getenv("PROMISE_HOME")
 	tmpHome := t.TempDir()
+	os.Unsetenv("PROMISE_HOME")
 	os.Setenv("HOME", tmpHome)
 	defer os.Setenv("HOME", origHome)
+	defer os.Setenv("PROMISE_HOME", origPromiseHome)
 
 	if err := CleanGlobalCache(); err != nil {
 		t.Fatalf("CleanGlobalCache on nonexistent dir: %v", err)
@@ -477,9 +489,12 @@ func TestResolveRemoteModuleShortHash(t *testing.T) {
 	bareRepo, commitHash := createTestRepo(t, "shorthash")
 
 	origHome := os.Getenv("HOME")
+	origPromiseHome := os.Getenv("PROMISE_HOME")
 	tmpHome := t.TempDir()
+	os.Unsetenv("PROMISE_HOME")
 	os.Setenv("HOME", tmpHome)
 	defer os.Setenv("HOME", origHome)
+	defer os.Setenv("PROMISE_HOME", origPromiseHome)
 
 	// Use the full hash — checkout dir should use first 12 chars
 	dir, err := ResolveRemoteModule(bareRepo, commitHash)

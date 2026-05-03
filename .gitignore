@@ -21,5 +21,8 @@ compiler/grammar/.antlr/PromiseParser.tokens
 # Debug build output
 .promise-build/
 
+# Local promise home for testing
+.promise-home/
+
 # Build cache
 **/.DS_Store

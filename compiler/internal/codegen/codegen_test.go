@@ -10307,6 +10307,55 @@ func TestInstanceOwnedFuncsTrackedEvenWhenCached(t *testing.T) {
 
 // --- Failable getter codegen ---
 
+func TestMatchMixedVoidAndValueArms(t *testing.T) {
+	// Match where some arms produce a value and some call a void function.
+	// buildMatchPhi must filter void-typed values before constructing the PHI.
+	ir := generateIR(t, `
+		test(int n) int {
+			int result = match n {
+				1 => 10,
+				2 => { println("side effect"); 20; },
+				_ => 0,
+			};
+			return result;
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "phi i64")
+	assertContains(t, ir, "match.end")
+}
+
+func TestMatchAllVoidArms(t *testing.T) {
+	// Match used as statement where all arms are void (no arm produces a value).
+	// buildMatchPhi should return nil (no PHI node needed).
+	ir := generateIR(t, `
+		test(int n) {
+			match n {
+				1 => { println("one"); },
+				2 => { println("two"); },
+				_ => { println("other"); },
+			};
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "match.arm")
+	assertContains(t, ir, "match.end")
+}
+
+func TestOptionalRecoveryCodegen(t *testing.T) {
+	// Optional recovery: non-recovering handler wraps result as T?
+	ir := generateIR(t, `
+		fail() int! { raise error(message: "oops"); }
+		main() {
+			x := fail() ? e { println("handled"); };
+		}
+	`)
+	// Should wrap success value as optional some (insertvalue with i1 true)
+	// and produce a phi node merging ok/error paths
+	assertContains(t, ir, "insertvalue")
+	assertContains(t, ir, "i1 true")
+}
+
 func TestFailableGetterResultType(t *testing.T) {
 	ir := generateIR(t, `
 		type MyErr is error { int code; }

@@ -334,7 +334,7 @@ The standard library (`modules/std/`, 29 files) is auto-imported via `use std as
 ## Conventions
 
 - **Document workarounds immediately.** When you encounter a compiler bug, language limitation, or missing feature and work around it, add an entry to the "Parser / Codegen Bugs" or appropriate section in `docs/stages.md` right away. Each entry must include: what the bug is, what the workaround is, and the priority. Do not leave undocumented workarounds in the code — they will be forgotten and never fixed.
-- **Assign a unique ID to every bug and TODO.** Every open bug/gap/limitation in `docs/stages.md` must have a stable ID. Bugs use `B-NNN` (e.g., `B-030`), planned work items use `T-NNN` (e.g., `T-001`). IDs are sequential within their namespace, never reused, and never renumbered — even after resolution, the ID stays. This allows items to be referenced from code comments, commit messages, and conversations. When adding a new entry, use the next available number in the appropriate namespace.
+- **Assign a unique ID to every bug and TODO.** Every open bug/gap/limitation in `docs/stages.md` must have a stable ID. Bugs use `BNNNN` (e.g., `B0030`), planned work items use `TNNNN` (e.g., `T0001`). IDs are sequential within their namespace, never reused, and never renumbered — even after resolution, the ID stays. This allows items to be referenced from code comments, commit messages, and conversations. When adding a new entry, use the next available number in the appropriate namespace.
 - Compiler errors are accumulated (not fatal on first error) and printed together
 - `extractNamed(typ)` unwraps Instance/SharedRef/MutRef to get underlying `*types.Named`
 - `needsVtable(named)` returns true if type has children or is abstract → virtual dispatch

@@ -62,6 +62,7 @@ Promise test commands (use `bin/promise` from repo root):
 ```bash
 bin/promise test file.pr                       # default 60s timeout
 bin/promise test -timeout 30s file.pr          # custom timeout (Go duration or seconds)
+bin/promise test -parallel 4 tests/...         # run up to 4 tests in parallel (default: NumCPU)
 bin/promise exec -timeout 10s 'print_line("hi")'  # exec with timeout (failable main, ? works)
 bin/promise emit-ir file.pr                    # print LLVM IR to stdout
 bin/promise emit-ir file.pr > out.ll           # save IR to file

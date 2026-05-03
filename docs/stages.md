@@ -709,6 +709,7 @@ Command-line interface. Core commands implemented; formatter planned.
 - `promise test <dir>` — scan directory for `.pr` files and run tests from each
 - `promise test <dir>/...` — recursive directory scan (Go-style `...` wildcard)
 - `promise test -timeout <duration>` — per-test timeout (default: 60s, accepts Go durations or plain seconds)
+- `promise test -parallel <N>` — run up to N test files concurrently (default: number of CPUs). Results stream in file order as they complete.
 - **Per-test panic recovery** (non-WASM): setjmp/longjmp in test trampoline — a panicking test prints `FAIL` with panic context and continues to the next test, instead of killing the process. Uses separate TLS `@__promise_test_jmpbuf` (not the scheduler's `@__promise_panic_jmpbuf`) so normal program panics are unaffected. On WASM, panics still terminate (no longjmp support).
 - **Compact multi-file output**: `promise test <dir>` prints one line per file (`PASS (time) file.pr (N tests)` or `FAIL (time) file.pr (M/N failed)` with indented failure details). Single-file runs remain verbose (every test with timing). End-of-run `FAILED:` summary includes panic/error context for AI-agent tail-friendliness.
 - `promise ast <file.pr>` — print the AST

@@ -52,6 +52,7 @@ promise run file.pr               # Build and run
 promise test file.pr              # Run @test functions
 promise test dir/...              # Recursive directory scan
 promise test -timeout 30s ...     # Per-test timeout (default: 60s)
+promise test -parallel 4 ...     # Run up to 4 tests in parallel (default: NumCPU)
 promise test -stress ...          # Stress test until Ctrl+C
 promise test -stress 100 ...      # Stress test for 100 iterations
 promise test -stress 30s ...      # Stress test for 30 seconds

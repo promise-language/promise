@@ -76,6 +76,7 @@ Options (format):
 
 Options (test):
   -timeout <duration>   Per-test timeout (default: 60s)
+  -parallel <N>         Run up to N tests in parallel (default: number of CPUs)
   -stress [N|duration]  Stress test mode: run repeatedly to find flaky tests
                         N = iteration count, duration = time limit, bare = until Ctrl+C
 
@@ -329,6 +330,7 @@ func runRun(args []string) {
 // Accepts a single file, a directory (non-recursive), or dir/... (recursive).
 func runTest(args []string) {
 	timeout := 60 * time.Second
+	parallel := runtime.NumCPU()
 	var stressMode bool
 	var stressCount int              // 0 = unlimited
 	var stressDuration time.Duration // 0 = unlimited
@@ -342,6 +344,14 @@ func runTest(args []string) {
 				os.Exit(1)
 			}
 			timeout = d
+			i++
+		} else if args[i] == "-parallel" && i+1 < len(args) {
+			n, err := strconv.Atoi(args[i+1])
+			if err != nil || n < 1 {
+				fmt.Fprintln(os.Stderr, "error: -parallel requires a positive integer")
+				os.Exit(1)
+			}
+			parallel = n
 			i++
 		} else if (args[i] == "-target" || args[i] == "--target") && i+1 < len(args) {
 			targetTriple = args[i+1]
@@ -366,7 +376,7 @@ func runTest(args []string) {
 	}
 
 	if len(remaining) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: promise test [-timeout duration] [-stress [N|duration]] <file.pr | dir | dir/...> ...")
+		fmt.Fprintln(os.Stderr, "usage: promise test [-timeout duration] [-parallel N] [-stress [N|duration]] <file.pr | dir | dir/...> ...")
 		os.Exit(1)
 	}
 
@@ -407,7 +417,7 @@ func runTest(args []string) {
 	if len(allFiles) == 1 {
 		runTestFile(allFiles[0], timeout, targetTriple)
 	} else {
-		runTestFiles(allFiles, timeout, targetTriple)
+		runTestFiles(allFiles, timeout, targetTriple, parallel)
 	}
 }
 
@@ -745,10 +755,28 @@ func firstLines(s string, n int) string {
 }
 
 // runTestFiles runs tests from a list of .pr files, printing per-file results
-// and a combined summary at the end.
-func runTestFiles(files []string, timeout time.Duration, targetTriple string) {
+// and a combined summary at the end. Tests are compiled and run concurrently
+// up to the parallel limit. Results are printed in file order.
+func runTestFiles(files []string, timeout time.Duration, targetTriple string, parallel int) {
 	unlock := module.LockBuildDirShared()
 	defer unlock()
+
+	// Ensure embedded module extraction completes before spawning child
+	// processes. Each child calls extractEmbeddedModule independently; if
+	// the cache is empty (first run or after compiler change), concurrent
+	// children race on directory creation + file writes. Extracting all
+	// modules here in the parent ensures the cache is populated first.
+	ensureCacheValid()
+	if entries, err := embeddedModules.ReadDir("resources/modules"); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				if _, err := extractEmbeddedModule(e.Name()); err != nil {
+					fmt.Fprintf(os.Stderr, "error extracting module %s: %v\n", e.Name(), err)
+					os.Exit(1)
+				}
+			}
+		}
+	}
 
 	totalStart := time.Now()
 
@@ -763,23 +791,6 @@ func runTestFiles(files []string, timeout time.Duration, targetTriple string) {
 		os.Exit(1)
 	}
 
-	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?`)
-	failLineRe := regexp.MustCompile(`^FAIL \([\d.]+s\)(?: (.+))?$`)
-	passLineRe := regexp.MustCompile(`^PASS \([\d.]+s\)`)
-	panicContextRe := regexp.MustCompile(`^  (panic:|expected:|actual:|exit:)`)
-
-	type failureInfo struct {
-		name    string // e.g. "file.pr: test_name" or "file.pr (timeout)"
-		context string // panic message or error context (may be empty)
-	}
-
-	totalPassed := 0
-	totalFailed := 0
-	totalSkipped := 0
-	totalFiles := 0
-	failedFiles := 0
-	var failures []failureInfo
-
 	// Find common base directory for relative path display.
 	baseDir := commonDir(files)
 
@@ -791,7 +802,7 @@ func runTestFiles(files []string, timeout time.Duration, targetTriple string) {
 	// Dedup module test files: all *_test.pr files in the same module compile
 	// together into one binary, so we only need to run one per module.
 	moduleTestSeen := map[string]bool{}
-
+	var dedupedFiles []string
 	for _, f := range files {
 		if modDir := isModuleTestFile(f); modDir != "" {
 			if moduleTestSeen[modDir] {
@@ -799,27 +810,77 @@ func runTestFiles(files []string, timeout time.Duration, targetTriple string) {
 			}
 			moduleTestSeen[modDir] = true
 		}
-		fileStart := time.Now()
+		dedupedFiles = append(dedupedFiles, f)
+	}
 
-		// Run "promise test <file>" as subprocess with timeout
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		testArgs := []string{"test", "-timeout", fmt.Sprintf("%gs", timeout.Seconds())}
-		if targetTriple != "" {
-			testArgs = append(testArgs, "--target", targetTriple)
-		}
-		testArgs = append(testArgs, f)
-		cmd := exec.CommandContext(ctx, selfExe, testArgs...)
-		setupProcessGroupKill(cmd)
-		output, cmdErr := cmd.CombinedOutput()
-		timedOut := ctx.Err() == context.DeadlineExceeded
-		cancel()
-		outStr := strings.TrimSpace(string(output))
-		fileElapsed := time.Since(fileStart)
+	type fileResult struct {
+		file     string
+		output   string
+		cmdErr   error
+		timedOut bool
+		elapsed  time.Duration
+		done     chan struct{} // closed when result is ready
+	}
 
+	// Run all tests concurrently with a semaphore.
+	results := make([]fileResult, len(dedupedFiles))
+	for i, f := range dedupedFiles {
+		results[i].file = f
+		results[i].done = make(chan struct{})
+	}
+	sem := make(chan struct{}, parallel)
+
+	for i := range dedupedFiles {
+		go func(idx int) {
+			sem <- struct{}{}        // acquire
+			defer func() { <-sem }() // release
+
+			r := &results[idx]
+			fileStart := time.Now()
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			testArgs := []string{"test", "-timeout", fmt.Sprintf("%gs", timeout.Seconds())}
+			if targetTriple != "" {
+				testArgs = append(testArgs, "--target", targetTriple)
+			}
+			testArgs = append(testArgs, r.file)
+			cmd := exec.CommandContext(ctx, selfExe, testArgs...)
+			cmd.Env = append(os.Environ(), "PROMISE_NO_INSTANCE_CACHE=1")
+			setupProcessGroupKill(cmd)
+			output, cmdErr := cmd.CombinedOutput()
+
+			r.output = strings.TrimSpace(string(output))
+			r.cmdErr = cmdErr
+			r.timedOut = ctx.Err() == context.DeadlineExceeded
+			r.elapsed = time.Since(fileStart)
+			close(r.done)
+		}(i)
+	}
+
+	// Print results in file order, streaming as each slot completes.
+	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?`)
+	failLineRe := regexp.MustCompile(`^FAIL \([\d.]+s\)(?: (.+))?$`)
+	passLineRe := regexp.MustCompile(`^PASS \([\d.]+s\)`)
+	panicContextRe := regexp.MustCompile(`^  (panic:|expected:|actual:|exit:)`)
+
+	type failureInfo struct {
+		name    string
+		context string
+	}
+
+	totalPassed := 0
+	totalFailed := 0
+	totalSkipped := 0
+	totalFiles := 0
+	failedFiles := 0
+	var failures []failureInfo
+
+	for i := range results {
+		<-results[i].done
+		r := &results[i]
 		// Skip files with no tests or excluded for this target
-		// Use lastLine because subprocess may prefix output with "target: ..." line
-		last := lastLine(outStr)
-		if !timedOut && (last == "no tests found" || strings.HasPrefix(last, "SKIP")) {
+		last := lastLine(r.output)
+		if !r.timedOut && (last == "no tests found" || strings.HasPrefix(last, "SKIP")) {
 			if strings.HasPrefix(last, "SKIP") {
 				totalSkipped++
 			}
@@ -828,13 +889,13 @@ func runTestFiles(files []string, timeout time.Duration, targetTriple string) {
 
 		totalFiles++
 
-		relPath, relErr := filepath.Rel(baseDir, f)
+		relPath, relErr := filepath.Rel(baseDir, r.file)
 		if relErr != nil {
-			relPath = f
+			relPath = r.file
 		}
 
-		if timedOut {
-			fmt.Printf("FAIL (%.3fs) %s (timeout)%s\n", fileElapsed.Seconds(), relPath, targetSuffix)
+		if r.timedOut {
+			fmt.Printf("FAIL (%.3fs) %s (timeout)%s\n", r.elapsed.Seconds(), relPath, targetSuffix)
 			failedFiles++
 			totalFailed++
 			failures = append(failures, failureInfo{name: relPath + " (timeout)"})
@@ -842,10 +903,10 @@ func runTestFiles(files []string, timeout time.Duration, targetTriple string) {
 		}
 
 		// Parse the subprocess output into structured results
-		lines := strings.Split(outStr, "\n")
+		lines := strings.Split(r.output, "\n")
 		filePassed := 0
 		fileFailed := 0
-		var failDetails []string // "test_name" or "test_name\n  panic: msg"
+		var failDetails []string
 
 		for i := 0; i < len(lines); i++ {
 			line := lines[i]
@@ -853,8 +914,7 @@ func runTestFiles(files []string, timeout time.Duration, targetTriple string) {
 				filePassed++
 			} else if m := failLineRe.FindStringSubmatch(line); m != nil {
 				fileFailed++
-				detail := m[1] // may be empty for e2e tests
-				// Collect indented panic context lines that follow
+				detail := m[1]
 				for i+1 < len(lines) && panicContextRe.MatchString(lines[i+1]) {
 					i++
 					if detail == "" {
@@ -869,25 +929,21 @@ func runTestFiles(files []string, timeout time.Duration, targetTriple string) {
 			}
 		}
 
-		if cmdErr != nil {
+		if r.cmdErr != nil {
 			failedFiles++
 
-			if m := summaryRe.FindStringSubmatch(lastLine(outStr)); m != nil {
-				// Had a summary — use parsed counts
+			if m := summaryRe.FindStringSubmatch(lastLine(r.output)); m != nil {
 				totalPassed += atoi(m[1])
 				totalFailed += atoi(m[2])
 				if m[3] != "" {
 					totalSkipped += atoi(m[3])
 				}
 			} else if fileFailed > 0 || filePassed > 0 {
-				// Had some test results but no summary (process died mid-run)
 				totalPassed += filePassed
 				totalFailed += fileFailed
 			} else {
-				// No test output at all — compilation error
 				totalFailed++
-				fmt.Printf("FAIL (%.3fs) %s (compilation error)%s\n", fileElapsed.Seconds(), relPath, targetSuffix)
-				// Print and capture first non-empty error line as context
+				fmt.Printf("FAIL (%.3fs) %s (compilation error)%s\n", r.elapsed.Seconds(), relPath, targetSuffix)
 				var errCtx string
 				for _, line := range lines {
 					if line != "" && !summaryRe.MatchString(line) {
@@ -900,12 +956,11 @@ func runTestFiles(files []string, timeout time.Duration, targetTriple string) {
 				continue
 			}
 
-			// Print compact FAIL line with details
 			totalTests := filePassed + fileFailed
 			if totalTests > 0 {
-				fmt.Printf("FAIL (%.3fs) %s (%d/%d failed)%s\n", fileElapsed.Seconds(), relPath, fileFailed, totalTests, targetSuffix)
+				fmt.Printf("FAIL (%.3fs) %s (%d/%d failed)%s\n", r.elapsed.Seconds(), relPath, fileFailed, totalTests, targetSuffix)
 			} else {
-				fmt.Printf("FAIL (%.3fs) %s%s\n", fileElapsed.Seconds(), relPath, targetSuffix)
+				fmt.Printf("FAIL (%.3fs) %s%s\n", r.elapsed.Seconds(), relPath, targetSuffix)
 			}
 			for _, detail := range failDetails {
 				parts := strings.SplitN(detail, "\n", 2)
@@ -925,8 +980,8 @@ func runTestFiles(files []string, timeout time.Duration, targetTriple string) {
 			continue
 		}
 
-		// Success — all tests passed
-		if m := summaryRe.FindStringSubmatch(lastLine(outStr)); m != nil {
+		// Success
+		if m := summaryRe.FindStringSubmatch(lastLine(r.output)); m != nil {
 			totalPassed += atoi(m[1])
 			totalFailed += atoi(m[2])
 			if m[3] != "" {
@@ -936,9 +991,9 @@ func runTestFiles(files []string, timeout time.Duration, targetTriple string) {
 
 		totalTests := filePassed + fileFailed
 		if totalTests > 1 {
-			fmt.Printf("PASS (%.3fs) %s (%d tests)%s\n", fileElapsed.Seconds(), relPath, totalTests, targetSuffix)
+			fmt.Printf("PASS (%.3fs) %s (%d tests)%s\n", r.elapsed.Seconds(), relPath, totalTests, targetSuffix)
 		} else {
-			fmt.Printf("PASS (%.3fs) %s%s\n", fileElapsed.Seconds(), relPath, targetSuffix)
+			fmt.Printf("PASS (%.3fs) %s%s\n", r.elapsed.Seconds(), relPath, targetSuffix)
 		}
 	}
 
@@ -948,7 +1003,7 @@ func runTestFiles(files []string, timeout time.Duration, targetTriple string) {
 	}
 
 	// Print grand summary
-	fmt.Println() // empty line before summary
+	fmt.Println()
 	totalElapsed := time.Since(totalStart)
 	if totalSkipped > 0 {
 		fmt.Printf("%d passed, %d failed, %d skipped (%d files, %.3fs)%s\n", totalPassed, totalFailed, totalSkipped, totalFiles, totalElapsed.Seconds(), targetSuffix)
@@ -956,7 +1011,6 @@ func runTestFiles(files []string, timeout time.Duration, targetTriple string) {
 		fmt.Printf("%d passed, %d failed (%d files, %.3fs)%s\n", totalPassed, totalFailed, totalFiles, totalElapsed.Seconds(), targetSuffix)
 	}
 
-	// Print failure list with context if any
 	if len(failures) > 0 {
 		fmt.Printf("\nFAILED:\n")
 		for _, f := range failures {
@@ -1377,6 +1431,11 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 // whose origin type has no hash (e.g., native/universe types) are omitted.
 func buildInstCacheMetas(mainInfo *sema.Info, compilerHash, target string) map[string]*module.CacheMeta {
 	if mainInfo == nil {
+		return nil
+	}
+	// Disabled in parallel test children: instance .bc files may reference
+	// main-IR string constants (@.str.N) whose numbering varies per program.
+	if os.Getenv("PROMISE_NO_INSTANCE_CACHE") != "" {
 		return nil
 	}
 	instances := codegen.CollectMonoInstances(mainInfo)

@@ -216,6 +216,18 @@ func (c *Checker) resolveCallArgs(
 			c.errorf(arg.Pos(), "cannot assign %s to parameter '%s' of type %s in %s",
 				argType, param.Name(), paramType, callDesc)
 		}
+		// Check for failable calls used as arguments: auto-propagate in ! functions,
+		// compile error in non-! functions. For variadic params whose args were
+		// wrapped in a synthetic ArrayLit, check each element individually (the
+		// ArrayLit itself is never failable).
+		if param.IsVariadic() {
+			if arrayLit, ok := arg.Value.(*ast.ArrayLit); ok {
+				for _, elem := range arrayLit.Elements {
+					c.checkVarDeclFailable(elem)
+				}
+			}
+		}
+		c.checkVarDeclFailable(arg.Value)
 	}
 
 	// 7. Set e.Args to resolved (full param order, with defaults/nones filled).
@@ -342,6 +354,9 @@ func (c *Checker) resolveImplicitConstructorArgs(
 			c.errorf(arg.Pos(), "cannot assign %s to field '%s' of type %s",
 				argType, f.Name(), fieldType)
 		}
+		// Check for failable calls used as constructor arguments: auto-propagate
+		// in ! functions, compile error in non-! functions.
+		c.checkVarDeclFailable(arg.Value)
 	}
 
 	// 7. Reorder e.Args: keep only provided args, in field declaration order,

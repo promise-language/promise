@@ -172,6 +172,11 @@ read_config(string path) string! {
   return content.trim();
 }
 
+// Auto-propagation works in all expression positions:
+process_config(string path) string! {
+  return transform(io.File.read_content(path));  // call argument: auto-propagates
+}
+
 // Void failable function
 validate(string input)! {
   if input.is_empty { raise error(message: "empty"); }
@@ -203,11 +208,13 @@ main() {
 | Syntax | Behavior | Where |
 |--------|----------|-------|
 | `foo()` | Auto-propagate error | In `!` functions only |
+| `bar(foo())` | Auto-propagate error from argument | In `!` functions only |
+| `x = foo()` | Auto-propagate error from assignment | In `!` functions only |
 | `foo()!` | **Panic** on error | Anywhere |
 | `foo() ? e { ... }` | Handle error | Anywhere |
 | `foo() ? e is T { ... }` | Handle typed error | Anywhere |
 
-**Rule: In a failable (`!`) function, just call failable functions bare — errors auto-propagate. Never use `!` to propagate; `!` always means panic.**
+**Rule: In a failable (`!`) function, just call failable functions bare — errors auto-propagate. This works in variable declarations, assignments, and call arguments. Never use `!` to propagate; `!` always means panic.**
 
 ## Optionals
 

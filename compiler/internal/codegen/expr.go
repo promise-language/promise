@@ -946,7 +946,7 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 					closure := c.genExpr(e.Callee) // genMemberExpr loads the field
 					var argVals []value.Value
 					for _, arg := range e.Args {
-						argVals = append(argVals, c.genExpr(arg.Value))
+						argVals = append(argVals, c.genCallArgExpr(arg.Value))
 						if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 							c.clearDropFlag(ident.Name)
 						}
@@ -994,7 +994,7 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 	var argVals []value.Value
 	var argTypes []types.Type
 	for _, arg := range e.Args {
-		argVals = append(argVals, c.genExpr(arg.Value))
+		argVals = append(argVals, c.genCallArgExpr(arg.Value))
 		argTypes = append(argTypes, c.info.Types[arg.Value])
 		// Clear drop flag: argument is moved into the callee
 		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
@@ -1066,7 +1066,7 @@ func (c *Compiler) genModuleCall(e *ast.CallExpr, moduleName, funcName string) v
 	var argVals []value.Value
 	var argTypes []types.Type
 	for _, arg := range e.Args {
-		argVals = append(argVals, c.genExpr(arg.Value))
+		argVals = append(argVals, c.genCallArgExpr(arg.Value))
 		argTypes = append(argTypes, c.info.Types[arg.Value])
 		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 			c.clearDropFlag(ident.Name)
@@ -1133,7 +1133,7 @@ func (c *Compiler) genGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr) value
 	var argVals []value.Value
 	var argTypes []types.Type
 	for _, arg := range e.Args {
-		argVals = append(argVals, c.genExpr(arg.Value))
+		argVals = append(argVals, c.genCallArgExpr(arg.Value))
 		argTypes = append(argTypes, c.info.Types[arg.Value])
 		// Clear drop flag: argument is moved into the callee
 		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
@@ -1219,7 +1219,7 @@ func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, idx *ast.IndexExpr, mem
 	var argVals []value.Value
 	var argTypes []types.Type
 	for _, arg := range e.Args {
-		argVals = append(argVals, c.genExpr(arg.Value))
+		argVals = append(argVals, c.genCallArgExpr(arg.Value))
 		argTypes = append(argTypes, c.info.Types[arg.Value])
 		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 			c.clearDropFlag(ident.Name)
@@ -1258,7 +1258,7 @@ func (c *Compiler) genSuperCall(e *ast.CallExpr) value.Value {
 		var argVals []value.Value
 		var argTypes []types.Type
 		for _, arg := range e.Args {
-			argVals = append(argVals, c.genExpr(arg.Value))
+			argVals = append(argVals, c.genCallArgExpr(arg.Value))
 			argTypes = append(argTypes, c.info.Types[arg.Value])
 			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 				c.clearDropFlag(ident.Name)
@@ -1301,7 +1301,7 @@ func (c *Compiler) genSuperCall(e *ast.CallExpr) value.Value {
 	provided := make(map[string]value.Value)
 	for _, arg := range e.Args {
 		if arg.Name != "" {
-			provided[arg.Name] = c.genExpr(arg.Value)
+			provided[arg.Name] = c.genCallArgExpr(arg.Value)
 			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 				c.clearDropFlag(ident.Name)
 			}
@@ -1392,7 +1392,7 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 		var argVals []value.Value
 		var argTypes []types.Type
 		for _, arg := range e.Args {
-			argVals = append(argVals, c.genExpr(arg.Value))
+			argVals = append(argVals, c.genCallArgExpr(arg.Value))
 			argTypes = append(argTypes, c.info.Types[arg.Value])
 			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 				c.clearDropFlag(ident.Name)
@@ -1486,7 +1486,7 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 			if !ok {
 				panic(fmt.Sprintf("codegen: unknown field %s on type %s", arg.Name, typ))
 			}
-			val := c.genExpr(arg.Value)
+			val := c.genCallArgExpr(arg.Value)
 			val = maybeWrapOptional(val, arg.Value, arg.Name, fieldIdx)
 			fieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
@@ -1573,7 +1573,7 @@ func (c *Compiler) genValueTypeConstructor(e *ast.CallExpr, named *types.Named, 
 		var argVals []value.Value
 		var argTypes []types.Type
 		for _, arg := range e.Args {
-			argVals = append(argVals, c.genExpr(arg.Value))
+			argVals = append(argVals, c.genCallArgExpr(arg.Value))
 			argTypes = append(argTypes, c.info.Types[arg.Value])
 			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 				c.clearDropFlag(ident.Name)
@@ -1626,7 +1626,7 @@ func (c *Compiler) genValueTypeConstructor(e *ast.CallExpr, named *types.Named, 
 		if !ok {
 			panic(fmt.Sprintf("codegen: unknown field %s on type %s", arg.Name, typ))
 		}
-		fieldVal := c.genExpr(arg.Value)
+		fieldVal := c.genCallArgExpr(arg.Value)
 		fieldVal = maybeWrapOptional(fieldVal, arg.Value, arg.Name, fieldIdx)
 		val = c.block.NewInsertValue(val, fieldVal, uint64(fieldIdx))
 		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
@@ -1743,7 +1743,7 @@ func (c *Compiler) genVectorCapacityConstructor(e *ast.CallExpr, inst *types.Ins
 	// capacity defaults to 16 when no argument provided
 	var capacity value.Value
 	if len(e.Args) > 0 {
-		capacity = c.genExpr(e.Args[0].Value)
+		capacity = c.genCallArgExpr(e.Args[0].Value)
 	} else {
 		capacity = constant.NewInt(irtypes.I64, 16)
 	}
@@ -1768,7 +1768,7 @@ func (c *Compiler) genChannelConstructor(e *ast.CallExpr, inst *types.Instance) 
 	// capacity defaults to 0 (unbuffered) when no argument provided
 	var capacity value.Value
 	if len(e.Args) > 0 {
-		capArg := c.genExpr(e.Args[0].Value)
+		capArg := c.genCallArgExpr(e.Args[0].Value)
 		// Argument is int? — unwrap the optional to get the int value.
 		// If it's a bare int literal, sema may pass it as int? via AssignableTo.
 		argType := c.info.Types[e.Args[0].Value]
@@ -1911,7 +1911,7 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 	c.block = writeBlock
 
 	// Alloca value and store
-	argVal := c.genExpr(e.Args[0].Value)
+	argVal := c.genCallArgExpr(e.Args[0].Value)
 	argAlloca := c.block.NewAlloca(elemLLVM)
 	c.block.NewStore(argVal, argAlloca)
 	argAsI8 := c.block.NewBitCast(argAlloca, irtypes.I8Ptr)
@@ -2308,7 +2308,7 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 	var argVals []value.Value
 	var argTypes []types.Type
 	for _, arg := range e.Args {
-		argVals = append(argVals, c.genExpr(arg.Value))
+		argVals = append(argVals, c.genCallArgExpr(arg.Value))
 		argTypes = append(argTypes, c.info.Types[arg.Value])
 		// Clear drop flag: argument is moved into the callee
 		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
@@ -2505,7 +2505,7 @@ func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 	var argVals []value.Value
 	var argTypes []types.Type
 	for _, arg := range e.Args {
-		argVals = append(argVals, c.genExpr(arg.Value))
+		argVals = append(argVals, c.genCallArgExpr(arg.Value))
 		argTypes = append(argTypes, c.info.Types[arg.Value])
 		// Clear drop flag: argument is moved into the callee
 		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
@@ -2582,7 +2582,7 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 
 	switch method {
 	case "push":
-		argVal := c.genExpr(e.Args[0].Value)
+		argVal := c.genCallArgExpr(e.Args[0].Value)
 		argAlloca := c.createEntryAlloca(elemLLVM)
 		// Zero-initialize before store to clear padding bytes for memcmp correctness
 		c.block.NewStore(constant.NewZeroInitializer(elemLLVM), argAlloca)
@@ -2623,7 +2623,7 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		return phi
 
 	case "contains":
-		argVal := c.genExpr(e.Args[0].Value)
+		argVal := c.genCallArgExpr(e.Args[0].Value)
 		argAlloca := c.createEntryAlloca(elemLLVM)
 		// Zero-initialize before store to clear padding bytes for memcmp correctness
 		c.block.NewStore(constant.NewZeroInitializer(elemLLVM), argAlloca)
@@ -2641,7 +2641,7 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		return c.block.NewTrunc(result, irtypes.I1)
 
 	case "remove":
-		idx := c.genExpr(e.Args[0].Value)
+		idx := c.genCallArgExpr(e.Args[0].Value)
 		c.block.NewCall(c.funcs["promise_vector_remove"],
 			slicePtr, idx, constant.NewInt(irtypes.I64, elemSize))
 		return nil
@@ -2749,7 +2749,7 @@ func (c *Compiler) genStringMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		return result, true
 
 	case "split":
-		argVal := c.genExpr(e.Args[0].Value)
+		argVal := c.genCallArgExpr(e.Args[0].Value)
 		result := c.block.NewCall(c.funcs["promise_string_split"], strPtr, argVal)
 		return result, true
 
@@ -2762,7 +2762,7 @@ func (c *Compiler) genStringMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		return result, true
 
 	case "repeat":
-		argVal := c.genExpr(e.Args[0].Value)
+		argVal := c.genCallArgExpr(e.Args[0].Value)
 		result := c.block.NewCall(c.funcs["promise_string_repeat"], strPtr, argVal)
 		return result, true
 
@@ -2770,7 +2770,7 @@ func (c *Compiler) genStringMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		return c.genStringBytes(strPtr), true
 
 	case "byte_at":
-		argVal := c.genExpr(e.Args[0].Value)
+		argVal := c.genCallArgExpr(e.Args[0].Value)
 		return c.genStringByteAt(strPtr, argVal), true
 
 	default:
@@ -2781,7 +2781,7 @@ func (c *Compiler) genStringMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 // genStringFromBytes creates a string from a Vector[u8] (factory method).
 // Reads the vector's count and data pointer, calls promise_string_new.
 func (c *Compiler) genStringFromBytes(e *ast.CallExpr) value.Value {
-	vecPtr := c.genExpr(e.Args[0].Value)
+	vecPtr := c.genCallArgExpr(e.Args[0].Value)
 	// Clear drop flag for moved argument
 	if ident, ok := e.Args[0].Value.(*ast.IdentExpr); ok {
 		c.clearDropFlag(ident.Name)
@@ -2916,7 +2916,7 @@ func (c *Compiler) genEnumVariantCallLayout(e *ast.CallExpr, member *ast.MemberE
 		typedDataPtr := c.block.NewBitCast(dataPtr, irtypes.NewPointer(dataType))
 
 		for i, arg := range e.Args {
-			val := c.genExpr(arg.Value)
+			val := c.genCallArgExpr(arg.Value)
 			fieldPtr := c.block.NewGetElementPtr(dataType, typedDataPtr,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
 			c.block.NewStore(val, fieldPtr)
@@ -3732,7 +3732,7 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
 
 	for i, elemExpr := range e.Elements {
-		val := c.genExpr(elemExpr)
+		val := c.genCallArgExpr(elemExpr)
 		elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr,
 			constant.NewInt(irtypes.I64, int64(i)))
 		c.block.NewStore(val, elemPtr)
@@ -3749,7 +3749,7 @@ func (c *Compiler) genFixedArrayLit(e *ast.ArrayLit, arr *types.Array) value.Val
 
 	tmp := c.block.NewAlloca(arrType)
 	for i, elemExpr := range e.Elements {
-		val := c.genExpr(elemExpr)
+		val := c.genCallArgExpr(elemExpr)
 		ptr := c.block.NewGetElementPtr(arrType, tmp,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
 		c.block.NewStore(val, ptr)
@@ -4918,7 +4918,7 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 	var argVals []value.Value
 	var argLLVMTypes []irtypes.Type
 	for _, arg := range callExpr.Args {
-		v := c.genExpr(arg.Value)
+		v := c.genCallArgExpr(arg.Value)
 		argVals = append(argVals, v)
 		argLLVMTypes = append(argLLVMTypes, v.Type())
 		if ident, ok := arg.Value.(*ast.IdentExpr); ok {

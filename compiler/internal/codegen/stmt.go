@@ -169,6 +169,17 @@ func (c *Compiler) genAutoPropagateValue(result value.Value) value.Value {
 	return nil
 }
 
+// genCallArgExpr generates an expression used as a call argument.
+// If the expression is a failable call registered for auto-propagation,
+// it extracts the success value (propagating the error on failure).
+func (c *Compiler) genCallArgExpr(expr ast.Expr) value.Value {
+	val := c.genExpr(expr)
+	if c.info.AutoPropagateExprs[expr] {
+		val = c.genAutoPropagateValue(val)
+	}
+	return val
+}
+
 // --- Variable declarations ---
 
 func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
@@ -647,6 +658,11 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 	}
 
 	val := c.genExpr(s.Value)
+
+	// Auto-propagate failable call in assignment RHS.
+	if c.info.AutoPropagateExprs[s.Value] {
+		val = c.genAutoPropagateValue(val)
+	}
 
 	switch target := s.Target.(type) {
 	case *ast.IdentExpr:
@@ -2253,6 +2269,9 @@ func (c *Compiler) genCompoundIndexAssign(target *ast.IndexExpr, op ast.AssignOp
 	// Evaluation order (RHS before target) is safe: arrays are stack-local copy types, no aliasing.
 	if arr, ok := targetType.(*types.Array); ok {
 		val := c.genExpr(valueExpr)
+		if c.info.AutoPropagateExprs[valueExpr] {
+			val = c.genAutoPropagateValue(val)
+		}
 		c.genArrayIndexAssign(target, arr, op, val)
 		return
 	}
@@ -2271,6 +2290,9 @@ func (c *Compiler) genCompoundIndexAssign(target *ast.IndexExpr, op ast.AssignOp
 					slicePtr := c.genExpr(target.Target)
 					idx := c.genExpr(target.Index)
 					val := c.genExpr(valueExpr)
+					if c.info.AutoPropagateExprs[valueExpr] {
+						val = c.genAutoPropagateValue(val)
+					}
 					c.genVectorCompoundAssign(slicePtr, idx, elem, op, val)
 					return
 				}
@@ -2303,6 +2325,9 @@ func (c *Compiler) genMethodCompoundAssign(target *ast.IndexExpr, targetType typ
 	targetVal := c.genExpr(target.Target)
 	keyVal := c.genExpr(target.Index)
 	val := c.genExpr(valueExpr)
+	if c.info.AutoPropagateExprs[valueExpr] {
+		val = c.genAutoPropagateValue(val)
+	}
 
 	var instancePtr value.Value
 	if isContainerType(targetType) {

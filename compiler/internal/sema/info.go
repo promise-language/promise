@@ -131,8 +131,9 @@ type Info struct {
 	// error operators (?, !, ? handler) to validate their inner expression.
 	FailableExprs map[ast.Expr]bool
 
-	// AutoPropagateExprs records ExprStmt expressions (failable calls used as
-	// statements in failable functions) that need implicit error propagation.
+	// AutoPropagateExprs records failable call expressions that need implicit
+	// error propagation. Applies to: expression statements, variable declaration
+	// initializers, and call arguments — all in failable functions.
 	// Codegen emits the same tag-check + early-return as explicit `?`.
 	AutoPropagateExprs map[ast.Expr]bool
 

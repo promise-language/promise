@@ -400,6 +400,9 @@ func (c *Checker) checkAssignStmt(s *ast.AssignStmt) {
 		return
 	}
 
+	// Check for failable calls in the assigned value.
+	c.checkVarDeclFailable(s.Value)
+
 	// Validate setter exists when assigning to a getter property
 	if me, ok := s.Target.(*ast.MemberExpr); ok {
 		c.checkSetterAvailable(me)

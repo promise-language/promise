@@ -1087,6 +1087,159 @@ func TestAutoPropagateVoidAssignStmt(t *testing.T) {
 	`)
 }
 
+// === Auto-propagation in call arguments ===
+
+func TestAutoPropagateInFuncArg(t *testing.T) {
+	checkOK(t, `
+		parse() int! { return 42; }
+		use_value(int x) {}
+		wrapper() void! {
+			use_value(parse());
+		}
+	`)
+}
+
+func TestAutoPropagateInMethodArg(t *testing.T) {
+	checkOK(t, `
+		parse() int! { return 42; }
+		type Foo { use_value(int x) {} }
+		wrapper() void! {
+			f := Foo();
+			f.use_value(parse());
+		}
+	`)
+}
+
+func TestAutoPropagateInConstructorArg(t *testing.T) {
+	checkOK(t, `
+		parse() int! { return 42; }
+		type Foo { int x; }
+		wrapper() void! {
+			Foo(x: parse());
+		}
+	`)
+}
+
+func TestAutoPropagateInArgNonFailable(t *testing.T) {
+	errs := checkErrs(t, `
+		parse() int! { return 42; }
+		use_value(int x) {}
+		main() {
+			use_value(parse());
+		}
+	`)
+	expectError(t, errs, "failable call must be handled")
+}
+
+func TestAutoPropagateInConstructorArgNonFailable(t *testing.T) {
+	errs := checkErrs(t, `
+		parse() int! { return 42; }
+		type Foo { int x; }
+		main() {
+			Foo(x: parse());
+		}
+	`)
+	expectError(t, errs, "failable call must be handled")
+}
+
+func TestAutoPropagateMultipleArgs(t *testing.T) {
+	checkOK(t, `
+		parse_a() int! { return 1; }
+		parse_b() int! { return 2; }
+		add(int a, int b) int { return a + b; }
+		wrapper() void! {
+			add(parse_a(), parse_b());
+		}
+	`)
+}
+
+func TestAutoPropagateVariadicArg(t *testing.T) {
+	checkOK(t, `
+		parse() int! { return 42; }
+		sum(...int nums) int { return 0; }
+		wrapper() void! {
+			sum(parse(), 10);
+		}
+	`)
+}
+
+func TestAutoPropagateVariadicArgNonFailable(t *testing.T) {
+	errs := checkErrs(t, `
+		parse() int! { return 42; }
+		sum(...int nums) int { return 0; }
+		main() {
+			sum(parse(), 10);
+		}
+	`)
+	expectError(t, errs, "failable call must be handled")
+}
+
+func TestAutoPropagateInAssignment(t *testing.T) {
+	checkOK(t, `
+		parse() int! { return 42; }
+		wrapper() int! {
+			int x = 0;
+			x = parse();
+			return x;
+		}
+	`)
+}
+
+func TestAutoPropagateInAssignmentNonFailable(t *testing.T) {
+	errs := checkErrs(t, `
+		parse() int! { return 42; }
+		main() {
+			int x = 0;
+			x = parse();
+		}
+	`)
+	expectError(t, errs, "failable call must be handled")
+}
+
+func TestAutoPropagateInExplicitNewArg(t *testing.T) {
+	checkOK(t, `
+		parse() int! { return 42; }
+		type Foo {
+			int v;
+			new(~this, int v) { this.v = v; }
+		}
+		wrapper() void! {
+			Foo(v: parse());
+		}
+	`)
+}
+
+func TestAutoPropagateInEnumVariantArg(t *testing.T) {
+	checkOK(t, `
+		parse() int! { return 42; }
+		enum Box { Val(int v) }
+		wrapper() void! {
+			Box.Val(v: parse());
+		}
+	`)
+}
+
+func TestAutoPropagateInGenericFuncArg(t *testing.T) {
+	checkOK(t, `
+		parse() int! { return 42; }
+		identity[T](T v) T { return v; }
+		wrapper() void! {
+			identity[int](parse());
+		}
+	`)
+}
+
+func TestAutoPropagateInSuperArg(t *testing.T) {
+	checkOK(t, `
+		parse() int! { return 42; }
+		type Base { int v; new(~this, int v) { this.v = v; } }
+		type Child is Base { new(~this, int v) { super(v: v); } }
+		wrapper() void! {
+			Child(v: parse());
+		}
+	`)
+}
+
 // === Error handler recovery validation ===
 
 func TestErrorHandlerRecoveryValue(t *testing.T) {

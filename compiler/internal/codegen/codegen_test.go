@@ -2490,6 +2490,136 @@ func TestAutoPropagateMultipleAssignments(t *testing.T) {
 	assertContains(t, ir, "auto.ok")
 }
 
+func TestAutoPropagateInFuncArg(t *testing.T) {
+	ir := generateIR(t, `
+		parse() int! { return 42; }
+		use_value(int x) {}
+		wrapper() void! {
+			use_value(parse());
+		}
+		main() { }
+	`)
+	// Should have auto-propagation blocks for the argument
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+	// The ok path extracts the value (index 1 from failable result)
+	assertContains(t, ir, "extractvalue { i1, i64, i8* }")
+}
+
+func TestAutoPropagateInMethodArg(t *testing.T) {
+	ir := generateIR(t, `
+		parse() int! { return 42; }
+		type Foo { use_value(int x) {} }
+		wrapper() void! {
+			f := Foo();
+			f.use_value(parse());
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+}
+
+func TestAutoPropagateInConstructorArg(t *testing.T) {
+	ir := generateIR(t, `
+		parse() int! { return 42; }
+		type Foo { int x; }
+		wrapper() void! {
+			Foo(x: parse());
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+}
+
+func TestAutoPropagateMultipleArgs(t *testing.T) {
+	ir := generateIR(t, `
+		parse_a() int! { return 1; }
+		parse_b() int! { return 2; }
+		add(int a, int b) int { return a + b; }
+		wrapper() void! {
+			add(parse_a(), parse_b());
+		}
+		main() { }
+	`)
+	// Both arguments should have auto-propagation
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+}
+
+func TestAutoPropagateInAssignStmt(t *testing.T) {
+	ir := generateIR(t, `
+		parse() int! { return 42; }
+		wrapper() int! {
+			int x = 0;
+			x = parse();
+			return x;
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+}
+
+func TestAutoPropagateInExplicitNewArg(t *testing.T) {
+	ir := generateIR(t, `
+		parse() int! { return 42; }
+		type Foo {
+			int v;
+			new(~this, int v) { this.v = v; }
+		}
+		wrapper() void! {
+			Foo(v: parse());
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+}
+
+func TestAutoPropagateInValueTypeArg(t *testing.T) {
+	ir := generateIR(t, `
+		parse() int! { return 42; }
+		type Vec2 {
+			int x `+"`"+`value;
+			int y `+"`"+`value;
+		}
+		wrapper() void! {
+			Vec2(x: parse(), y: 0);
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+}
+
+func TestAutoPropagateInEnumVariantArg(t *testing.T) {
+	ir := generateIR(t, `
+		parse() int! { return 42; }
+		enum Box { Val(int v) }
+		wrapper() void! {
+			Box.Val(v: parse());
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+}
+
+func TestAutoPropagateInVecPushArg(t *testing.T) {
+	ir := generateIR(t, `
+		parse() int! { return 42; }
+		wrapper() void! {
+			int[] v = int[]();
+			v.push(parse());
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+}
+
 func TestDropNullSafe(t *testing.T) {
 	ir := generateIR(t, `
 		type Resource {

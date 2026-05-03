@@ -1504,14 +1504,28 @@ validate(string input)! {
 
 ### 7.2 Calling Failable Functions
 
-In a **failable function** (return type has `!`), a naked call to another failable function **auto-propagates** the error — if the callee fails, the caller immediately returns the error to its own caller. This is the most common case and requires no extra syntax:
+In a **failable function** (return type has `!`), a naked call to another failable function **auto-propagates** the error — if the callee fails, the caller immediately returns the error to its own caller. This is the most common case and requires no extra syntax.
+
+Auto-propagation works in **all expression positions** — statements, variable declarations, assignments, and call arguments:
 
 ```promise
 process() string! {
-  string content = readFile("data.txt");    // auto-propagates on error
+  string content = readFile("data.txt");    // variable declaration — auto-propagates
   return content.trim();
 }
+
+transform() string! {
+  return toUpper(readFile("data.txt"));     // call argument — auto-propagates
+}
+
+update() string! {
+  string content = "";
+  content = readFile("data.txt");           // assignment — auto-propagates
+  return content;
+}
 ```
+
+When a failable call appears as a call argument, the compiler evaluates the argument, checks the error tag, propagates on failure, and passes the success value to the outer call. Multiple failable arguments are evaluated left-to-right; if any fails, the error propagates immediately and subsequent arguments are not evaluated.
 
 The explicit `?` suffix is allowed for self-documentation but has the same effect:
 
@@ -1612,6 +1626,8 @@ if err is present {
 | Call form | Behavior | Context |
 |-----------|----------|---------|
 | `foo()` | Auto-propagate error | `!` function only |
+| `bar(foo())` | Auto-propagate error from argument | `!` function only |
+| `x = foo()` | Auto-propagate error from assignment | `!` function only |
 | `foo()?` | Explicit propagate (same as naked) | `!` function only |
 | `foo() ? e { ... }` | Handle any error, bind to `e` | Any function |
 | `foo() ? { ... }` | Handle any error, discard value | Any function |
@@ -1630,6 +1646,11 @@ if err is present {
 wrapper() string! {
   string content = readFile("data.txt");  // bare call → auto-propagates error
   return content;
+}
+
+// CORRECT — auto-propagation in call arguments:
+wrapper() string! {
+  return process(readFile("data.txt"));   // bare call as arg → auto-propagates error
 }
 
 // WRONG — panics instead of propagating:

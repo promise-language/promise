@@ -266,18 +266,18 @@ The standard library (`modules/std/`, 29 files) is auto-imported via `use std as
 
 ## Test Suite
 
-~2300 test functions across ~208 `.pr` files, organized by category:
+~2465 test functions across ~211 `.pr` files, organized by category:
 
 | Directory | What it tests | Files |
 |-----------|--------------|-------|
-| `tests/e2e/` | Language features: inheritance, generics, errors, lambdas, match, enums (incl. enum methods), casting, control flow | ~56 |
+| `tests/e2e/` | Language features: inheritance, generics, errors, lambdas, match, enums (incl. enum methods, enum fields), casting, control flow | ~67 |
 | `tests/std/` | Standard library: all primitive types, containers, iterators, math, time, formatting, parsing | ~27 |
-| `tests/concurrency/` | M:N scheduler, channels, select, tasks, goroutines, panic recovery, stress tests, IO syscall handoff | ~78 |
-| `tests/modules/` | Module system: imports, visibility, generics across modules, transitive deps, diamond deps | ~18 |
+| `tests/concurrency/` | M:N scheduler, channels, select, tasks, goroutines, panic recovery, stress tests, IO syscall handoff | ~79 |
+| `tests/modules/` | Module system: imports, visibility, generics across modules, transitive deps, diamond deps | ~16 |
 | `tests/value_types/` | Pure value types: construction, copying, operators, methods, nested, optional | ~9 |
 | `tests/arrays/` | Fixed-size arrays: basic, copy, field, loop, OOB, parameters | ~6 |
 | `tests/catalog/` | Catalog module integration tests | ~1 |
-| `modules/*/` | Catalog module internal tests (`*_test.pr`) | ~5 |
+| `modules/*/` | Catalog module internal tests (`*_test.pr`) | ~6 |
 
 ## Important Files
 

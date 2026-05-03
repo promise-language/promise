@@ -745,6 +745,25 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				break
 			}
 		}
+		// Wrap value in Optional if field type is Optional but expr is not
+		if s.Op == ast.OpAssign {
+			memberType := c.info.Types[target]
+			exprType := c.info.Types[s.Value]
+			if c.typeSubst != nil {
+				memberType = types.Substitute(memberType, c.typeSubst)
+				exprType = types.Substitute(exprType, c.typeSubst)
+			}
+			if _, isOpt := memberType.(*types.Optional); isOpt {
+				if exprType != types.TypNone {
+					if _, exprOpt := exprType.(*types.Optional); !exprOpt {
+						optType := c.resolveType(memberType)
+						if st, ok := optType.(*irtypes.StructType); ok {
+							val = c.wrapOptional(val, st)
+						}
+					}
+				}
+			}
+		}
 		c.genMemberAssign(target, s.Op, val)
 		// Clear drop flag on RHS if it's being moved via simple assign
 		if s.Op == ast.OpAssign {

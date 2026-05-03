@@ -1,0 +1,468 @@
+// Tests for enum types used as fields in user types, map values, and nested enums.
+// Regression tests for map[K, Enum] codegen panic in wrapOptional.
+enum Color {
+  Red, Green, Blue
+}
+
+enum Shape {
+  Circle(f64 radius),
+  Rect(f64 w, f64 h),
+  Point,
+}
+
+type Wrapper {
+  Color c;
+}
+
+type ShapeHolder {
+  Shape s;
+  string label;
+}
+
+// --- Fieldless enum as map value ---
+
+test_map_fieldless_enum_lookup() `test {
+  map[string, Color] m = {
+    "r": Color.Red, "g": Color.Green, "b": Color.Blue
+  };
+  if c := m["r"] {
+    match c {
+      Color.Red => {
+      },
+      _ => assert(false, "expected Red"),
+    }
+  } else {
+    assert(false, "key 'r' not found");
+  }
+}
+
+test_map_fieldless_enum_missing() `test {
+  map[string, Color] m = {
+    "r": Color.Red
+  };
+  if c := m["x"] {
+    assert(false, "should not find 'x'");
+  }
+}
+
+test_map_fieldless_enum_all_values() `test {
+  map[string, Color] m = {
+    "r": Color.Red, "g": Color.Green, "b": Color.Blue
+  };
+  Color r = m["r"]!;
+  Color g = m["g"]!;
+  Color b = m["b"]!;
+  match r {
+    Color.Red => {
+    }, _ => assert(false, "expected Red")
+  }
+  match g {
+    Color.Green => {
+    }, _ => assert(false, "expected Green")
+  }
+  match b {
+    Color.Blue => {
+    }, _ => assert(false, "expected Blue")
+  }
+}
+
+test_map_fieldless_enum_overwrite() `test {
+  map[string, Color] m = {
+    "x": Color.Red
+  };
+  m["x"] = Color.Blue;
+  Color c = m["x"]!;
+  match c {
+    Color.Blue => {
+    }, _ => assert(false, "expected Blue after overwrite")
+  }
+}
+
+test_map_fieldless_enum_remove() `test {
+  map[string, Color] m = {
+    "a": Color.Red
+  };
+  assert(m.remove("a"), "remove should succeed");
+  assert(m["a"] is absent, "should be absent after remove");
+}
+
+test_map_fieldless_enum_contains() `test {
+  map[string, Color] m = {
+    "a": Color.Red
+  };
+  assert(m.contains("a"), "should contain 'a'");
+  assert(!m.contains("b"), "should not contain 'b'");
+}
+
+test_map_fieldless_enum_keys_values() `test {
+  map[string, Color] m = {
+    "r": Color.Red, "g": Color.Green
+  };
+  string[] keys = m.keys();
+  Color[] vals = m.values();
+  assert(keys.len == 2, "expected 2 keys");
+  assert(vals.len == 2, "expected 2 values");
+}
+
+test_map_fieldless_enum_iteration() `test {
+  map[string, Color] m = {
+    "r": Color.Red, "g": Color.Green, "b": Color.Blue
+  };
+  int count = 0;
+  for k, v in m {
+    count += 1;
+  }
+  assert(count == 3, "expected 3 entries");
+}
+
+// --- Data enum as map value ---
+
+test_map_data_enum_lookup() `test {
+  map[string, Shape] m = {
+    "c": Shape.Circle(radius: 3.14)
+  };
+  if s := m["c"] {
+    match s {
+      Shape.Circle(r) => assert(r > 3.0, "radius should be > 3"),
+      _ => assert(false, "expected Circle"),
+    }
+  } else {
+    assert(false, "key 'c' not found");
+  }
+}
+
+test_map_data_enum_multiple_variants() `test {
+  map[string, Shape] m = {
+    "c": Shape.Circle(radius: 1.0),
+    "r": Shape.Rect(w: 2.0, h: 3.0),
+    "p": Shape.Point,
+  };
+  Shape circle = m["c"]!;
+  Shape rect = m["r"]!;
+  Shape point = m["p"]!;
+
+  match circle {
+    Shape.Circle(r) => assert(r == 1.0, "circle radius"),
+    _ => assert(false, "expected Circle"),
+  }
+  match rect {
+    Shape.Rect(w, h) => {
+      assert(w == 2.0, "rect width");
+      assert(h == 3.0, "rect height");
+    },
+    _ => assert(false, "expected Rect"),
+  }
+  match point {
+    Shape.Point => {
+    },
+    _ => assert(false, "expected Point"),
+  }
+}
+
+test_map_data_enum_overwrite() `test {
+  map[string, Shape] m = {
+    "s": Shape.Point
+  };
+  m["s"] = Shape.Circle(radius: 5.0);
+  Shape s = m["s"]!;
+  match s {
+    Shape.Circle(r) => assert(r == 5.0, "expected overwritten Circle"),
+    _ => assert(false, "expected Circle"),
+  }
+}
+
+test_map_data_enum_pop() `test {
+  map[string, Shape] m = {
+    "x": Shape.Circle(radius: 7.0)
+  };
+  Shape? popped = m.pop("x");
+  assert(m.is_empty, "map should be empty after pop");
+  if s := popped {
+    match s {
+      Shape.Circle(r) => assert(r == 7.0, "popped circle radius"),
+      _ => assert(false, "expected Circle"),
+    }
+  } else {
+    assert(false, "pop should return value");
+  }
+}
+
+test_map_data_enum_get_or() `test {
+  map[string, Shape] m = {
+    "a": Shape.Point
+  };
+  Shape s = m.get_or("missing", Shape.Point);
+  match s {
+    Shape.Point => {
+    },
+    _ => assert(false, "expected default Point"),
+  }
+}
+
+// --- Enum as field in user type ---
+
+test_enum_field_in_struct() `test {
+  Wrapper w = Wrapper(c: Color.Green);
+  match w.c {
+    Color.Green => {
+    },
+    _ => assert(false, "expected Green"),
+  }
+}
+
+test_enum_field_modification() `test {
+  Wrapper w = Wrapper(c: Color.Red);
+  w.c = Color.Blue;
+  match w.c {
+    Color.Blue => {
+    },
+    _ => assert(false, "expected Blue after modification"),
+  }
+}
+
+test_data_enum_field_in_struct() `test {
+  ShapeHolder h = ShapeHolder(s: Shape.Circle(radius: 2.5), label: "circle");
+  assert(h.label == "circle", "label");
+  match h.s {
+    Shape.Circle(r) => assert(r == 2.5, "radius"),
+    _ => assert(false, "expected Circle"),
+  }
+}
+
+test_data_enum_field_modification() `test {
+  ShapeHolder h = ShapeHolder(s: Shape.Point, label: "p");
+  h.s = Shape.Rect(w: 10.0, h: 20.0);
+  match h.s {
+    Shape.Rect(w, hh) => {
+      assert(w == 10.0, "width");
+      assert(hh == 20.0, "height");
+    },
+    _ => assert(false, "expected Rect"),
+  }
+}
+
+// --- Enum in map with int keys ---
+
+test_map_int_key_enum_value() `test {
+  map[int, Color] m = {
+    1: Color.Red, 2: Color.Green, 3: Color.Blue
+  };
+  Color c = m[2]!;
+  match c {
+    Color.Green => {
+    }, _ => assert(false, "expected Green")
+  }
+}
+
+test_map_int_key_data_enum() `test {
+  map[int, Shape] m = {
+    0: Shape.Point, 1: Shape.Circle(radius: 1.0)
+  };
+  Shape s = m[1]!;
+  match s {
+    Shape.Circle(r) => assert(r == 1.0, "radius"),
+    _ => assert(false, "expected Circle"),
+  }
+}
+
+// --- Enum-in-enum nesting ---
+
+enum Outer {
+  Wrapped(Color inner),
+  Plain,
+}
+
+test_enum_containing_enum() `test {
+  Outer o = Outer.Wrapped(inner: Color.Blue);
+  match o {
+    Outer.Wrapped(c) => {
+      match c {
+        Color.Blue => {
+        }, _ => assert(false, "expected Blue")
+      }
+    },
+    Outer.Plain => assert(false, "expected Wrapped"),
+  }
+}
+
+enum NestedData {
+  Item(Shape shape, int id),
+  Empty,
+}
+
+test_data_enum_containing_data_enum() `test {
+  NestedData nd = NestedData.Item(shape: Shape.Circle(radius: 9.0), id: 42);
+  match nd {
+    NestedData.Item(s, id) => {
+      assert(id == 42, "id");
+      match s {
+        Shape.Circle(r) => assert(r == 9.0, "radius"),
+        _ => assert(false, "expected Circle"),
+      }
+    },
+    NestedData.Empty => assert(false, "expected Item"),
+  }
+}
+
+// --- Forward enum reference (A declared before B, A has field of type B) ---
+
+enum ForwardA {
+  Wrap(ForwardB inner, int id),
+  None,
+}
+
+enum ForwardB {
+  Circle(f64 radius),
+  Point,
+}
+
+test_forward_enum_reference() `test {
+  ForwardA a = ForwardA.Wrap(inner: ForwardB.Circle(radius: 5.0), id: 99);
+  match a {
+    ForwardA.Wrap(b, id) => {
+      assert(id == 99, "id");
+      match b {
+        ForwardB.Circle(r) => assert(r == 5.0, "radius"),
+        ForwardB.Point => assert(false, "expected Circle"),
+      }
+    },
+    ForwardA.None => assert(false, "expected Wrap"),
+  }
+}
+
+test_forward_enum_in_map() `test {
+  map[string, ForwardA] m = {
+    "x": ForwardA.Wrap(inner: ForwardB.Point, id: 7),
+  };
+  ForwardA a = m["x"]!;
+  match a {
+    ForwardA.Wrap(b, id) => {
+      assert(id == 7, "id");
+      match b {
+        ForwardB.Point => {
+        },
+        _ => assert(false, "expected Point"),
+      }
+    },
+    ForwardA.None => assert(false, "expected Wrap"),
+  }
+}
+
+// --- Map with enum keys --- (enums need Hashable + Equal; skipped for now)
+
+// --- Vector of enums (sanity check) ---
+
+test_vector_of_fieldless_enum() `test {
+  Color[] colors = [Color.Red, Color.Green, Color.Blue];
+  assert(colors.len == 3, "len");
+  match colors[0] {
+    Color.Red => {
+    }, _ => assert(false, "expected Red")
+  }
+  match colors[2] {
+    Color.Blue => {
+    }, _ => assert(false, "expected Blue")
+  }
+}
+
+test_vector_of_data_enum() `test {
+  Shape[] shapes = [Shape.Point, Shape.Circle(radius: 1.0)];
+  assert(shapes.len == 2, "len");
+  match shapes[1] {
+    Shape.Circle(r) => assert(r == 1.0, "radius"),
+    _ => assert(false, "expected Circle"),
+  }
+}
+
+// --- Map methods with enum values ---
+
+test_map_enum_merge() `test {
+  map[string, Color] m1 = {
+    "a": Color.Red
+  };
+  map[string, Color] m2 = {
+    "b": Color.Green, "c": Color.Blue
+  };
+  m1.merge(m2);
+  assert(m1.len == 3, "merged len");
+  match m1["b"]! {
+    Color.Green => {
+    }, _ => assert(false, "expected Green")
+  }
+}
+
+test_map_enum_clear() `test {
+  map[string, Color] m = {
+    "a": Color.Red, "b": Color.Green
+  };
+  m.clear();
+  assert(m.is_empty, "should be empty after clear");
+  assert(m["a"] is absent, "should be absent after clear");
+}
+
+test_map_enum_update() `test {
+  map[string, Color] m = {
+    "x": Color.Red
+  };
+  assert(m.update("x", Color.Blue), "update should succeed");
+  assert(!m.update("y", Color.Green), "update non-existing should fail");
+  match m["x"]! {
+    Color.Blue => {
+    }, _ => assert(false, "expected Blue")
+  }
+}
+
+test_map_enum_entries() `test {
+  map[string, Color] m = {
+    "a": Color.Red, "b": Color.Green
+  };
+  (string, Color)[] ents = m.entries();
+  assert(ents.len == 2, "entries len");
+}
+
+// --- Large map with enum values (triggers rehash) ---
+
+test_map_enum_rehash() `test {
+  map[int, Color] m = {
+    0: Color.Red
+  };
+  m.remove(0);
+  for i in 0..100 {
+    if i % 3 == 0 {
+      m[i] = Color.Red;
+    } else if i % 3 == 1 {
+      m[i] = Color.Green;
+    } else {
+      m[i] = Color.Blue;
+    }
+  }
+  assert(m.len == 100, "len after filling");
+  match m[0]! {
+    Color.Red => {
+    }, _ => assert(false, "expected Red at 0")
+  }
+  match m[1]! {
+    Color.Green => {
+    }, _ => assert(false, "expected Green at 1")
+  }
+  match m[2]! {
+    Color.Blue => {
+    }, _ => assert(false, "expected Blue at 2")
+  }
+}
+
+test_map_data_enum_rehash() `test {
+  map[int, Shape] m = {
+    0: Shape.Point
+  };
+  m.remove(0);
+  for i in 0..50 {
+    m[i] = Shape.Circle(radius: 1.0);
+  }
+  assert(m.len == 50, "len");
+  Shape s = m[25]!;
+  match s {
+    Shape.Circle(r) => assert(r == 1.0, "radius at key 25"),
+    _ => assert(false, "expected Circle"),
+  }
+}

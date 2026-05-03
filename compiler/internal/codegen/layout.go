@@ -290,7 +290,7 @@ func computeStringLayout(module *ir.Module) *TypeDeclLayout {
 // computeUserTypeLayout creates a TypeDeclLayout for a user-defined Named type.
 // It registers four named LLVM struct types in the module: _t, _m, _i, _v.
 // Only PlaceInstance fields are supported; other placements panic.
-func computeUserTypeLayout(module *ir.Module, named *types.Named, allLayouts map[*types.Named]*TypeDeclLayout) *TypeDeclLayout {
+func computeUserTypeLayout(module *ir.Module, named *types.Named, allLayouts map[*types.Named]*TypeDeclLayout, ptrSize int, enumLayouts map[*types.Enum]*TypeDeclLayout) *TypeDeclLayout {
 	name := named.Obj().Name()
 
 	// Type struct: empty {}
@@ -322,7 +322,7 @@ func computeUserTypeLayout(module *ir.Module, named *types.Named, allLayouts map
 			panic("codegen: non-instance field placement not yet supported for " + name + "." + f.Name())
 		}
 		fType := types.Substitute(f.Type(), parentSubst)
-		llvmFT := instanceFieldLLVMType(fType, allLayouts)
+		llvmFT := instanceFieldLLVMType(fType, allLayouts, ptrSize, enumLayouts, nil)
 		cType := userFieldCType(fType, allLayouts)
 		instanceLLVMFields = append(instanceLLVMFields, llvmFT)
 		idx := len(fieldLayouts) // GEP index
@@ -419,7 +419,7 @@ func mergeParentFieldSubst(named *types.Named, subst map[*types.TypeParam]types.
 // computeValueTypeLayout creates a TypeDeclLayout for a pure value type (all fields `value).
 // Data lives in the value struct: { i8* _vtable, T_i* _rtti, field1, field2, ... }.
 // Instance struct is RTTI-only (no user fields), allocated as a global singleton.
-func computeValueTypeLayout(module *ir.Module, named *types.Named, allLayouts map[*types.Named]*TypeDeclLayout) *TypeDeclLayout {
+func computeValueTypeLayout(module *ir.Module, named *types.Named, allLayouts map[*types.Named]*TypeDeclLayout, ptrSize int, enumLayouts map[*types.Enum]*TypeDeclLayout) *TypeDeclLayout {
 	name := named.Obj().Name()
 
 	// Type struct: empty {}
@@ -452,7 +452,7 @@ func computeValueTypeLayout(module *ir.Module, named *types.Named, allLayouts ma
 	fieldIndex := map[string]int{}
 
 	for _, f := range named.AllFields() {
-		llvmFT := instanceFieldLLVMType(f.Type(), allLayouts)
+		llvmFT := instanceFieldLLVMType(f.Type(), allLayouts, ptrSize, enumLayouts, nil)
 		cType := userFieldCType(f.Type(), allLayouts)
 		idx := len(valueFieldLayouts) // GEP index in value struct
 		valueLLVMFields = append(valueLLVMFields, llvmFT)
@@ -631,7 +631,7 @@ func externCName(fd *ast.FuncDecl) string {
 // computeEnumLayout creates a TypeDeclLayout for an enum type.
 // Enums are value types: data lives in the value struct (tag + union data),
 // not heap-allocated like user types. The instance struct is empty.
-func computeEnumLayout(module *ir.Module, enum *types.Enum, ptrSize int) *TypeDeclLayout {
+func computeEnumLayout(module *ir.Module, enum *types.Enum, ptrSize int, enumLayouts map[*types.Enum]*TypeDeclLayout) *TypeDeclLayout {
 	name := enum.Obj().Name()
 
 	// Compute variant tags and per-variant data struct types
@@ -647,16 +647,13 @@ func computeEnumLayout(module *ir.Module, enum *types.Enum, ptrSize int) *TypeDe
 			for _, f := range v.Fields() {
 				// Use llvmTypeForEnumFieldFromPromise so user-defined types
 				// use {i8*, i8*} (value struct) not bare i8* (instance ptr).
-				fieldTypes = append(fieldTypes, llvmTypeForEnumFieldFromPromise(f.Type()))
+				fieldTypes = append(fieldTypes, llvmTypeForEnumFieldFromPromise(f.Type(), ptrSize, enumLayouts, nil))
 			}
 			dataType := irtypes.NewStruct(fieldTypes...)
 			variantDataTypes[v.Name()] = dataType
 
-			// Compute data size: sum of field sizes (conservative 8-byte per field)
-			ds := 0
-			for _, ft := range fieldTypes {
-				ds += llvmTypeSizeWithPtr(ft, ptrSize)
-			}
+			// Compute data size from the struct type to account for alignment padding
+			ds := llvmTypeSizeWithPtr(dataType, ptrSize)
 			if ds > maxDataSize {
 				maxDataSize = ds
 			}

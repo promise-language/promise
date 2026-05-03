@@ -3462,9 +3462,9 @@ func (c *Compiler) computeUserTypeLayouts(file *ast.File) {
 			}
 		}
 		if named.IsValueType() {
-			c.layouts[named] = computeValueTypeLayout(c.module, named, c.layouts)
+			c.layouts[named] = computeValueTypeLayout(c.module, named, c.layouts, c.ptrSize(), c.enumLayouts)
 		} else {
-			c.layouts[named] = computeUserTypeLayout(c.module, named, c.layouts)
+			c.layouts[named] = computeUserTypeLayout(c.module, named, c.layouts, c.ptrSize(), c.enumLayouts)
 		}
 		computed[name] = true
 	}
@@ -3857,23 +3857,58 @@ func (c *Compiler) lookupEnumType(name string) *types.Enum {
 
 // computeEnumLayouts computes layouts for all enum declarations in the file.
 // Generic enums (with TypeParams) are skipped — handled by computeMonoLayouts.
+// Uses dependency resolution to ensure that if enum A has a variant field of enum B,
+// B's layout is computed before A's (so A can use B's named LLVM struct type).
 func (c *Compiler) computeEnumLayouts(file *ast.File) {
+	// Collect all non-generic enum decls
+	pending := make(map[string]*types.Enum)
+	var names []string
 	for _, decl := range file.Decls {
 		ed, ok := decl.(*ast.EnumDecl)
 		if !ok {
 			continue
 		}
 		if c.info.FilteredDecls[decl] {
-			continue // excluded by `target(cond) annotation for this build target
+			continue
 		}
 		enum := c.lookupEnumType(ed.Name)
 		if enum == nil {
 			continue
 		}
 		if len(enum.TypeParams()) > 0 {
-			continue // generic — handled by monomorphization
+			continue
 		}
-		c.enumLayouts[enum] = computeEnumLayout(c.module, enum, c.ptrSize())
+		pending[ed.Name] = enum
+		names = append(names, ed.Name)
+	}
+
+	// Compute layouts with dependency resolution
+	computed := make(map[string]bool)
+	var compute func(name string)
+	compute = func(name string) {
+		if computed[name] {
+			return
+		}
+		enum := pending[name]
+		if enum == nil {
+			return
+		}
+		// Ensure layouts for enum types referenced in variant fields are computed first
+		for _, v := range enum.Variants() {
+			for _, f := range v.Fields() {
+				if dep := extractEnum(f.Type()); dep != nil {
+					depName := dep.Obj().Name()
+					if _, ok := pending[depName]; ok {
+						compute(depName)
+					}
+				}
+			}
+		}
+		c.enumLayouts[enum] = computeEnumLayout(c.module, enum, c.ptrSize(), c.enumLayouts)
+		computed[name] = true
+	}
+	for _, name := range names {
+		compute(name)
 	}
 }
 

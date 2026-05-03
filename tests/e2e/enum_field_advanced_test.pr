@@ -1,0 +1,335 @@
+// Advanced tests for enum types as fields: optional fields, alignment padding,
+// generic types, mixed-type variants, function round-trips, nesting depth.
+enum Color {
+  Red, Green, Blue
+}
+
+enum Shape {
+  Circle(f64 radius),
+  Rect(f64 w, f64 h),
+  Point,
+}
+
+// --- Optional enum fields in user types ---
+
+type OptHolder {
+  Color? maybe;
+  string name;
+}
+
+test_optional_enum_field_present() `test {
+  OptHolder h = OptHolder(name: "with");
+  h.maybe = Color.Red;
+  if c := h.maybe {
+    match c {
+      Color.Red => {
+      }, _ => assert(false, "opt present")
+    }
+  } else {
+    assert(false, "opt should be present");
+  }
+}
+
+test_optional_enum_field_absent() `test {
+  OptHolder h = OptHolder(name: "without");
+  assert(h.maybe is absent, "opt should be absent");
+}
+
+// --- Optional enum standalone ---
+
+test_optional_enum_if_bind() `test {
+  Color? c = Color.Green;
+  if color := c {
+    match color {
+      Color.Green => {
+      }, _ => assert(false, "if bind")
+    }
+  } else {
+    assert(false, "should be present");
+  }
+}
+
+test_optional_enum_elvis() `test {
+  Color? c = none;
+  Color d = c ?: Color.Blue;
+  match d {
+    Color.Blue => {
+    }, _ => assert(false, "elvis")
+  }
+}
+
+test_optional_enum_force_unwrap() `test {
+  Color? c = Color.Red;
+  Color d = c!;
+  match d {
+    Color.Red => {
+    }, _ => assert(false, "force unwrap")
+  }
+}
+
+test_optional_data_enum() `test {
+  Shape? s = Shape.Circle(radius: 4.0);
+  if shape := s {
+    match shape {
+      Shape.Circle(r) => assert(r == 4.0, "opt data radius"),
+      _ => assert(false, "opt data match"),
+    }
+  } else {
+    assert(false, "opt data present");
+  }
+}
+
+test_optional_data_enum_elvis() `test {
+  Shape? s = none;
+  Shape d = s ?: Shape.Point;
+  match d {
+    Shape.Point => {
+    }, _ => assert(false, "opt data elvis")
+  }
+}
+
+// --- Enum through functions ---
+
+get_color() Color {
+  return Color.Green;
+}
+
+take_color(Color c) bool {
+  match c {
+    Color.Green => {
+      return true;
+    },
+    _ => {
+      return false;
+    },
+  }
+}
+
+get_shape_opt() Shape? {
+  return Shape.Circle(radius: 2.0);
+}
+get_no_shape() Shape? {
+  return none;
+}
+
+test_enum_function_roundtrip() `test {
+  assert(take_color(get_color()), "roundtrip");
+}
+
+test_data_enum_optional_return() `test {
+  if shape := get_shape_opt() {
+    match shape {
+      Shape.Circle(r) => assert(r == 2.0, "opt return"),
+      _ => assert(false, "opt return match"),
+    }
+  } else {
+    assert(false, "opt return present");
+  }
+  assert(get_no_shape() is absent, "none return");
+}
+
+// --- Alignment padding in enum variants ---
+
+enum Aligned {
+  Data(bool flag, int value),
+  Empty,
+}
+
+test_alignment_padding() `test {
+  Aligned a = Aligned.Data(flag: true, value: 12345);
+  match a {
+    Aligned.Data(f, v) => {
+      assert(f == true, "flag");
+      assert(v == 12345, "value");
+    },
+    Aligned.Empty => assert(false, "empty"),
+  }
+}
+
+test_alignment_in_map() `test {
+  map[string, Aligned] m = {
+    "x": Aligned.Data(flag: false, value: 99)
+  };
+  match m["x"]! {
+    Aligned.Data(f, v) => {
+      assert(f == false, "flag");
+      assert(v == 99, "value");
+    },
+    Aligned.Empty => assert(false, "empty"),
+  }
+}
+
+enum AlignMix {
+  A(bool a, f64 b),
+  B(i8 x, int y, bool z),
+  C(char c, f64 d),
+}
+
+test_alignment_mix_a() `test {
+  match AlignMix.A(a: true, b: 3.14) {
+    AlignMix.A(a, b) => {
+      assert(a == true, "a");
+      assert(b == 3.14, "b");
+    },
+    _ => assert(false, "match"),
+  }
+}
+
+test_alignment_mix_b() `test {
+  match AlignMix.B(x: 42i8, y: 100, z: false) {
+    AlignMix.B(x, y, z) => {
+      assert(x == 42i8, "x");
+      assert(y == 100, "y");
+      assert(z == false, "z");
+    },
+    _ => assert(false, "match"),
+  }
+}
+
+test_alignment_mix_c() `test {
+  match AlignMix.C(c: 'X', d: 2.718) {
+    AlignMix.C(c, d) => {
+      assert(c == 'X', "c");
+      assert(d == 2.718, "d");
+    },
+    _ => assert(false, "match"),
+  }
+}
+
+// --- Multiple enum fields in one type ---
+
+enum Direction {
+  North, South, East, West
+}
+
+type MultiEnum {
+  Color color;
+  Direction dir;
+  int id;
+}
+
+test_multiple_enum_fields() `test {
+  MultiEnum me = MultiEnum(color: Color.Blue, dir: Direction.West, id: 42);
+  match me.color {
+    Color.Blue => {
+    }, _ => assert(false, "color")
+  }
+  match me.dir {
+    Direction.West => {
+    }, _ => assert(false, "dir")
+  }
+  assert(me.id == 42, "id");
+}
+
+// --- Enum variant with mixed string + enum fields ---
+
+enum Tagged {
+  Label(string text, Color c),
+  Blank,
+}
+
+test_tagged_enum() `test {
+  Tagged t = Tagged.Label(text: "hello", c: Color.Blue);
+  match t {
+    Tagged.Label(txt, c) => {
+      assert(txt == "hello", "text");
+      match c {
+        Color.Blue => {
+        }, _ => assert(false, "color")
+      }
+    },
+    Tagged.Blank => assert(false, "blank"),
+  }
+}
+
+test_tagged_in_map() `test {
+  map[string, Tagged] m = {
+    "x": Tagged.Label(text: "world", c: Color.Green)
+  };
+  match m["x"]! {
+    Tagged.Label(txt, c) => {
+      assert(txt == "world", "text");
+      match c {
+        Color.Green => {
+        }, _ => assert(false, "color")
+      }
+    },
+    Tagged.Blank => assert(false, "blank"),
+  }
+}
+
+// --- Generic type with enum field ---
+
+type Box[T] {
+  T value;
+}
+
+test_generic_type_with_enum() `test {
+  Box[Color] b = Box[Color](value: Color.Red);
+  match b.value {
+    Color.Red => {
+    }, _ => assert(false, "box")
+  }
+}
+
+test_generic_type_with_data_enum() `test {
+  Box[Shape] b = Box[Shape](value: Shape.Circle(radius: 3.0));
+  match b.value {
+    Shape.Circle(r) => assert(r == 3.0, "box shape"),
+    _ => assert(false, "box match"),
+  }
+}
+
+// --- Enum in tuple ---
+
+test_enum_in_tuple() `test {
+  (Color, int) t = (Color.Blue, 42);
+  (c, n) := t;
+  match c {
+    Color.Blue => {
+    }, _ => assert(false, "tuple")
+  }
+  assert(n == 42, "tuple int");
+}
+
+// --- Three-level enum nesting as map value ---
+
+enum Inner {
+  Val(int n), Zero
+}
+enum Middle {
+  Wrap(Inner inner, bool flag), Skip
+}
+
+test_three_level_nesting_in_map() `test {
+  map[string, Middle] m = {
+    "a": Middle.Wrap(inner: Inner.Val(n: 77), flag: true),
+  };
+  match m["a"]! {
+    Middle.Wrap(inner, flag) => {
+      assert(flag == true, "flag");
+      match inner {
+        Inner.Val(n) => assert(n == 77, "n"),
+        Inner.Zero => assert(false, "zero"),
+      }
+    },
+    Middle.Skip => assert(false, "skip"),
+  }
+}
+
+// --- Map with struct-containing-enum ---
+
+type Wrapper {
+  Color c;
+}
+
+test_map_struct_with_enum_value() `test {
+  map[string, Wrapper] m = {
+    "a": Wrapper(c: Color.Red)
+  };
+  Wrapper w = m["a"]!;
+  match w.c {
+    Color.Red => {
+    }, _ => assert(false, "struct map")
+  }
+}

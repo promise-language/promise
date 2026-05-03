@@ -181,6 +181,9 @@ func (p *WasmPAL) EmitDirNextName(module *ir.Module) *ir.Func { return emitStubD
 func (p *WasmPAL) EmitDirClose(module *ir.Module) *ir.Func    { return emitStubDirClose(module) }
 func (p *WasmPAL) EmitGetEnv(module *ir.Module) *ir.Func      { return emitStubGetEnv(module) }
 func (p *WasmPAL) EmitGetCwd(module *ir.Module) *ir.Func      { return emitStubGetCwd(module) }
+func (p *WasmPAL) EmitSetEnv(module *ir.Module) *ir.Func      { return emitStubSetEnv(module) }
+func (p *WasmPAL) EmitUnsetEnv(module *ir.Module) *ir.Func    { return emitStubUnsetEnv(module) }
+func (p *WasmPAL) EmitChdir(module *ir.Module) *ir.Func       { return emitStubChdir(module) }
 func (p *WasmPAL) EmitExecute(module *ir.Module) *ir.Func     { return emitStubExecute(module) }
 
 // WASM threading stubs — run synchronously. WASM has no threads (Phase 5d: cooperative scheduler).

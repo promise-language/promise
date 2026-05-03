@@ -52,11 +52,11 @@ The stdlib today (29 files, ~2,440 lines) provides:
 | `strings` | `modules/strings/strings.pr` | 65 | **Done** — `join`, `spaces`, `reverse`, `is_blank`, `repeat_join`. 10 tests. |
 | `math` | `modules/math/math.pr` | 67 | **Done** — `lerp`, `map_range`, `deg_to_rad`, `rad_to_deg`, `sign`, `sign_f64`, `is_even`, `is_odd`, `gcd`, `lcm`. 26 tests. |
 | `json` | `modules/json/json.pr` | ~600 | **Done** — `JsonEncoder` (is Encoder), `JsonDecoder` (is Decoder), `encode_string`, `decode_string`, `encode_string_pretty`. 61 tests. |
-| `os` | `modules/os/os.pr` | 4 | **Done** — get_environment_variable, get_working_directory, exit_process, arguments, executable_path, execute |
+| `os` | `modules/os/os.pr` | 4 | **Done** — get_environment_variable, get_working_directory, exit_process, arguments, executable_path, execute, set_environment_variable, set_working_directory |
 | `time` | `modules/time/time.pr` | 4 | **Placeholder** — planned: extended time utilities beyond `std/time.pr` |
 | `http` | `modules/http/http.pr` | 4 | **Placeholder** — planned: get, post, Request, Response, Server, Handler |
 
-**What's missing**: Networking, HTTP. OS access (args, env, cwd, execute) is done.
+**What's missing**: Networking, HTTP, signal handling. OS access (args, env, cwd, execute, set env, set cwd) is done.
 
 ### Naming Conventions
 
@@ -874,13 +874,15 @@ get_working_directory() string!;
 exit_process(int code);
 arguments() string[];
 executable_path() string;
-execute(string program, string[] arguments) ProcessResult!;
+execute(string program, ...string arguments) ProcessResult!;
+set_environment_variable(string name, string? value);
+set_working_directory(string path) !;
 ```
 
 - **File**: `modules/os/os.pr` (separate `os` module, not part of `std`)
-- **Dependencies**: PAL OS (getenv, getcwd, exit, execute), argc/argv globals from main prologue
+- **Dependencies**: PAL OS (getenv, getcwd, exit, execute, setenv, unsetenv, chdir), argc/argv globals from main prologue
 - **Native codegen**: Extern bridge pattern in `os_bridges.go` — Promise declares `_os_func() T \`extern("promise_os_func");`, codegen provides LLVM IR body bridging Promise types ↔ PAL. `execute` uses three-extern + TLS caching pattern (see `platform-modules.md`).
-- **Test**: `modules/os/os_test.pr` (23 tests, excluded on WASM)
+- **Test**: `modules/os/os_test.pr` (47 tests, excluded on WASM)
 
 #### 4e. Standard Input — DONE (merged into `modules/io/io.pr`)
 

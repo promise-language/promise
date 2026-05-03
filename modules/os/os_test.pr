@@ -1,4 +1,4 @@
-// Tests for os module: environment variables, working directory, exit, arguments, executable_path.
+// Tests for os module: environment variables, working directory, exit, arguments, executable_path, execute.
 test_get_environment_variable_path() `test(exclude: "wasm32") {
   string? path = get_environment_variable("PATH");
   assert(path is present, "PATH should be present");
@@ -230,4 +230,146 @@ test_execute_many_arguments() `test(exclude: "wasm32") {
   ProcessResult result = execute("echo", ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"])!;
   assert(result.exit_code == 0, "echo should exit with 0");
   assert(result.standard_output.starts_with("a b c d e f g h i j"), "all 10 arguments should be passed");
+}
+
+// ── execute variadic tests ───────────────────────────────────────────────────
+
+test_execute_variadic_inline() `test(exclude: "wasm32") {
+  // Pass arguments inline (variadic calling convention)
+  ProcessResult result = execute("echo", "hello", "world")!;
+  assert(result.exit_code == 0, "echo should exit with 0");
+  assert(result.standard_output.starts_with("hello world"), "variadic inline args should work");
+}
+
+test_execute_variadic_array_passthrough() `test(exclude: "wasm32") {
+  // Pass a pre-built string[] to variadic parameter
+  string[] args = ["-c", "echo from_array"];
+  ProcessResult result = execute("sh", args)!;
+  assert(result.exit_code == 0, "sh should exit with 0");
+  assert(result.standard_output.starts_with("from_array"), "array passthrough should work");
+}
+
+test_execute_variadic_no_args() `test(exclude: "wasm32") {
+  // No arguments at all (variadic receives empty array)
+  ProcessResult result = execute("true")!;
+  assert(result.exit_code == 0, "true with no variadic args should succeed");
+}
+
+test_execute_variadic_single_arg() `test(exclude: "wasm32") {
+  // Single variadic argument (edge case: must not be confused with array)
+  ProcessResult result = execute("echo", "solo")!;
+  assert(result.standard_output.starts_with("solo"), "single variadic arg should work");
+}
+
+// ── execute + environment/cwd interaction tests ─────────────────────────────
+
+test_execute_inherits_env() `test(exclude: "wasm32") {
+  // Child process should see environment variables set by parent
+  set_environment_variable("PROMISE_TEST_EXEC_ENV", "inherited_value");
+  ProcessResult result = execute("sh", "-c", "echo $PROMISE_TEST_EXEC_ENV")!;
+  assert(result.exit_code == 0, "sh should exit with 0");
+  assert(result.standard_output.starts_with("inherited_value"), "child should inherit env var");
+  // Clean up
+  string? absent;
+  set_environment_variable("PROMISE_TEST_EXEC_ENV", absent);
+}
+
+test_execute_inherits_cwd() `test(exclude: "wasm32") {
+  // Child process should run in the parent's current working directory
+  string original = working_directory!;
+  set_working_directory("/usr")!;
+  ProcessResult result = execute("sh", "-c", "pwd")!;
+  assert(result.exit_code == 0, "sh should exit with 0");
+  assert(result.standard_output.starts_with("/usr"), "child should inherit working directory");
+  set_working_directory(original)!;
+}
+
+// ── set_environment_variable tests ──────────────────────────────────────────
+
+test_set_environment_variable_new() `test(exclude: "wasm32") {
+  // Set a new variable and read it back
+  set_environment_variable("PROMISE_TEST_SET_ENV_1", "hello");
+  string? val = get_environment_variable("PROMISE_TEST_SET_ENV_1");
+  assert(val is present, "newly set variable should be present");
+  if v := val {
+    assert(v == "hello", "variable should have the value we set");
+  }
+}
+
+test_set_environment_variable_overwrite() `test(exclude: "wasm32") {
+  // Set, then overwrite with a different value
+  set_environment_variable("PROMISE_TEST_SET_ENV_2", "first");
+  set_environment_variable("PROMISE_TEST_SET_ENV_2", "second");
+  string? val = get_environment_variable("PROMISE_TEST_SET_ENV_2");
+  if v := val {
+    assert(v == "second", "overwritten variable should have the new value");
+  } else {
+    assert(false, "overwritten variable should be present");
+  }
+}
+
+test_set_environment_variable_empty() `test(exclude: "wasm32") {
+  // Set to empty string — should be present but empty
+  set_environment_variable("PROMISE_TEST_SET_ENV_3", "");
+  string? val = get_environment_variable("PROMISE_TEST_SET_ENV_3");
+  assert(val is present, "variable set to empty should be present");
+  if v := val {
+    assert(v.len == 0, "variable set to empty should have zero length");
+  }
+}
+
+test_set_environment_variable_unset() `test(exclude: "wasm32") {
+  // Set a variable then unset it
+  set_environment_variable("PROMISE_TEST_SET_ENV_4", "temp");
+  string? val1 = get_environment_variable("PROMISE_TEST_SET_ENV_4");
+  assert(val1 is present, "variable should be present after set");
+
+  // Unset by passing absent
+  string? absent;
+  set_environment_variable("PROMISE_TEST_SET_ENV_4", absent);
+  string? val2 = get_environment_variable("PROMISE_TEST_SET_ENV_4");
+  assert(val2 is absent, "variable should be absent after unset");
+}
+
+test_set_environment_variable_unset_nonexistent() `test(exclude: "wasm32") {
+  // Unsetting a variable that doesn't exist should not error
+  string? absent;
+  set_environment_variable("PROMISE_NONEXISTENT_UNSET_TEST", absent);
+  string? val = get_environment_variable("PROMISE_NONEXISTENT_UNSET_TEST");
+  assert(val is absent, "nonexistent variable should remain absent");
+}
+
+// ── set_working_directory tests ─────────────────────────────────────────────
+
+test_set_working_directory() `test(exclude: "wasm32") {
+  // Save original, change to /usr, verify, restore
+  // (avoid /tmp which is a symlink to /private/tmp on macOS)
+  string original = working_directory!;
+  string original2 = working_directory!;
+  set_working_directory("/usr")!;
+  string cwd = working_directory!;
+  assert(cwd == "/usr", "working directory should be /usr after set");
+  // Restore
+  set_working_directory(original)!;
+  string restored = working_directory!;
+  assert(restored == original2, "working directory should be restored");
+}
+
+test_set_working_directory_nonexistent() `test(exclude: "wasm32") {
+  // Changing to a nonexistent path should raise an error
+  bool got_error = false;
+  set_working_directory("/promise_nonexistent_path_12345")? e {
+    got_error = true;
+  };
+  assert(got_error, "set_working_directory to nonexistent path should raise error");
+}
+
+test_set_working_directory_preserves_env() `test(exclude: "wasm32") {
+  // Verify that changing cwd doesn't affect environment variables
+  set_environment_variable("PROMISE_TEST_CWD_ENV", "keep");
+  string original = working_directory!;
+  set_working_directory("/tmp")!;
+  string? val = get_environment_variable("PROMISE_TEST_CWD_ENV");
+  assert(val is present, "env var should survive cwd change");
+  set_working_directory(original)!;
 }

@@ -16,6 +16,15 @@ _os_arguments() string[] `extern("promise_os_get_args");
 // Returns the path to the running executable (argv[0]).
 _os_executable_path() string `extern("promise_os_get_executable");
 
+// Sets an environment variable (overwrite=1). Non-failable.
+_os_set_env(string name, string value) `extern("promise_os_set_env");
+
+// Removes an environment variable. Non-failable.
+_os_unset_env(string name) `extern("promise_os_unset_env");
+
+// Changes the current working directory. Returns 0 on success.
+_os_set_working_directory(string path) int! `extern("promise_os_set_cwd");
+
 // Executes a program, caches stdout/stderr in TLS, returns exit code or raises error.
 _os_execute(string program, string[] arguments) int! `extern("promise_os_execute");
 
@@ -62,7 +71,19 @@ get executable_path string `public `doc("Returns the path to the running executa
   return _os_executable_path();
 }
 
-execute(string program, string[] arguments) ProcessResult! `public `doc("Executes a program with the given arguments and waits for it to complete. Returns a ProcessResult containing the exit code and captured standard output and standard error. Raises an error if the process could not be started. The program is searched using the system PATH. If the program is not found, the child process exits with code 127. Note: stdout and stderr are read sequentially; if the child writes more than ~64KB to stderr while stdout is not fully consumed, a deadlock may occur.") {
+set_environment_variable(string name, string? value) `public `doc("Sets or removes the named environment variable. When value is present, the variable is set to that value (creating it if needed, overwriting if it exists). When value is absent, the variable is removed from the environment.") {
+  if v := value {
+    _os_set_env(name, v);
+  } else {
+    _os_unset_env(name);
+  }
+}
+
+set_working_directory(string path)! `public `doc("Changes the current working directory to the given path. Raises an error if the path does not exist or is not a directory.") {
+  _os_set_working_directory(path);
+}
+
+execute(string program, ...string arguments) ProcessResult! `public `doc("Executes a program with the given arguments and waits for it to complete. Returns a ProcessResult containing the exit code and captured standard output and standard error. Raises an error if the process could not be started. The program is searched using the system PATH. If the program is not found, the child process exits with code 127. Accepts arguments inline (execute(\"ls\", \"-la\", \"/tmp\")) or as a pre-built string[] (execute(\"ls\", args)). Note: stdout and stderr are read sequentially; if the child writes more than ~64KB to stderr while stdout is not fully consumed, a deadlock may occur.") {
   int exit_code = _os_execute(program, arguments)!;
   string stdout = _os_execute_stdout();
   string stderr = _os_execute_stderr();

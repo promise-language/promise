@@ -184,6 +184,9 @@ type Compiler struct {
 	palErrno        *ir.Func // @pal_errno() → i32
 	palGetEnv       *ir.Func // @pal_getenv(i8* name) → i8* (value or null)
 	palGetCwd       *ir.Func // @pal_getcwd(i8* buf, i64 len) → i8* (buf or null)
+	palSetEnv       *ir.Func // @pal_setenv(i8* name, i8* value) → i32
+	palUnsetEnv     *ir.Func // @pal_unsetenv(i8* name) → i32
+	palChdir        *ir.Func // @pal_chdir(i8* path) → i32
 	palExecute      *ir.Func // @pal_execute(i8* program, i8** argv, ...) → i32
 
 	// Command-line argument globals (populated from main's argc/argv)
@@ -974,6 +977,9 @@ func (c *Compiler) declareIntrinsics() {
 	c.palDirClose = p.EmitDirClose(c.module)
 	c.palGetEnv = p.EmitGetEnv(c.module)
 	c.palGetCwd = p.EmitGetCwd(c.module)
+	c.palSetEnv = p.EmitSetEnv(c.module)
+	c.palUnsetEnv = p.EmitUnsetEnv(c.module)
+	c.palChdir = p.EmitChdir(c.module)
 	c.palExecute = p.EmitExecute(c.module)
 
 	// Command-line argument globals — populated from main's argc/argv

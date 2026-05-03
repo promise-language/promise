@@ -692,9 +692,9 @@ to the browser event loop, and JS callbacks re-enqueue goroutines when IO comple
 
 ## 8. `modules/os` — Operating System Interface
 
-**Status**: Core + execute implemented (`get_environment_variable`, `working_directory`, `exit_process`,
-`arguments`, `executable_path`, `execute`). Remaining: `set_environment_variable`,
-`set_working_directory`, signal handling.
+**Status**: Full OS interface implemented (`get_environment_variable`, `working_directory`, `exit_process`,
+`arguments`, `executable_path`, `execute`, `set_environment_variable`, `set_working_directory`).
+Remaining: signal handling.
 
 Applying §6 principles: `arguments`, `executable_path`, and `working_directory` are module-level
 getters (accessed as `os.arguments`, `os.executable_path`, `os.working_directory!`). `exit_process`
@@ -740,23 +740,23 @@ type ProcessResult `public `doc("The result of executing a subprocess.
     string standard_error;
 }
 
-execute(string program, string[] arguments) ProcessResult! `public
+execute(string program, ...string arguments) ProcessResult! `public
     `doc("Executes a program with the given arguments and waits for it to complete.
+          Accepts arguments inline or as a pre-built string[].
           Returns a ProcessResult containing the exit code and captured standard
           output and standard error. Raises an error if the process could not be
           started. The program is searched using the system PATH. If the program
           is not found, the child process exits with code 127.");
 
-// --- Planned: environment mutation ---
+// --- Environment mutation (implemented) ---
 
 set_environment_variable(string name, string? value) `public
-    `doc("Sets the named environment variable to the given value.
-          Creates the variable if it does not exist.
-          Pass absent to remove the variable.");
+    `doc("Sets or removes the named environment variable.
+          When value is present, sets the variable. When absent, removes it.");
 
-// --- Planned: working directory mutation ---
+// --- Working directory mutation (implemented) ---
 
-set_working_directory(string path) `public
+set_working_directory(string path) ! `public
     `doc("Changes the current working directory to the given path.
           Raises an error if the path does not exist or is not a directory.");
 
@@ -1001,11 +1001,12 @@ First real use of `` `target `` in production code. Platform constants consolida
 
 14. ~~**Args capture in `main` prologue**~~ — **Done.** `main(argc, argv)` stores to `@__promise_argc`/`@__promise_argv` globals. WASM `_start` passes 0/null.
 15. ~~**`modules/os` core**~~ — **Done.** `get_environment_variable` (string?), `get_working_directory` (string!), `exit_process`, `arguments` (string[]), `executable_path` (string). Failable and optional extern bridge infrastructure. PAL getenv/getcwd for POSIX/Windows/WASM. 11 tests (excluded on WASM).
-16. ~~**`execute`**~~ — **Done.** Synchronous subprocess execution. Returns `ProcessResult!` with exit code + captured stdout/stderr. Three-extern + TLS caching pattern: `_os_execute` returns `int!` and caches stdout/stderr in TLS globals; `_os_execute_stdout`/`_os_execute_stderr` consume cached data. PAL: POSIX `fork` + `execvp` + `pipe` + `read` + `waitpid` (with EINTR retry); Windows/WASM stubs return -1. `ProcessResult` wrapper constructed in pure Promise. 23 tests (excluded on WASM). Known limitation: stdout/stderr read sequentially (deadlock possible if child writes >64KB to stderr while stdout not consumed).
-17. **`set_environment_variable(name, value?)`** — `string?` value: present sets, absent unsets. PAL: POSIX `setenv`/`unsetenv`; Windows `_putenv_s`/`_putenv`; WASM stub.
-18. **`set_working_directory`** — PAL: POSIX `chdir`; Windows `_chdir`; WASM stub returns error.
-19. **Signal handling** — `on_signal(Signal, () handler)`. PAL: POSIX `sigaction`; Windows `SetConsoleCtrlHandler`; WASM no-op.
-20. **Streaming subprocess** — `modules/process` (separate module). Piped stdin/stdout/stderr, async I/O integration with scheduler.
+16. ~~**`execute`**~~ — **Done.** Synchronous subprocess execution with variadic arguments (`...string`). Returns `ProcessResult!` with exit code + captured stdout/stderr. Three-extern + TLS caching pattern: `_os_execute` returns `int!` and caches stdout/stderr in TLS globals; `_os_execute_stdout`/`_os_execute_stderr` consume cached data. PAL: POSIX `fork` + `execvp` + `pipe` + `read` + `waitpid` (with EINTR retry); Windows/WASM stubs return -1. `ProcessResult` wrapper constructed in pure Promise. Accepts inline args (`execute("ls", "-la")`) or pre-built `string[]` (`execute("sh", args)`). 29 tests (excluded on WASM). Known limitation: stdout/stderr read sequentially (deadlock possible if child writes >64KB to stderr while stdout not consumed).
+17. ~~**`set_environment_variable(name, value?)`**~~ — **Done.** `string?` value: present sets, absent unsets. Two-extern pattern: `_os_set_env(name, value)` and `_os_unset_env(name)`, dispatched in pure Promise via optional unwrap. PAL: POSIX `setenv`/`unsetenv`; Windows `_putenv_s`/empty-string unset; WASM stub. 5 tests (excluded on WASM).
+18. ~~**`set_working_directory`**~~ — **Done.** PAL: POSIX `chdir`; Windows `_chdir`; WASM stub returns error. Failable `int!` extern bridge (`_os_set_working_directory`), auto-propagation in void failable Promise wrapper. 3 tests (excluded on WASM).
+19. **Concurrent stdout/stderr read in `execute`** — Read stdout and stderr in parallel (two threads or non-blocking I/O) to eliminate the 64KB deadlock. Currently `__pal_read_all(stdout_fd)` blocks until EOF before `__pal_read_all(stderr_fd)` starts; if the child fills the stderr pipe buffer (~64KB) before stdout is drained, both sides block. Fix: spawn a second thread to read stderr while the main thread reads stdout, or use `poll`/`select` to multiplex. PAL-level change in `posix.go` `EmitExecute`.
+20. **Signal handling** — `on_signal(Signal, () handler)`. PAL: POSIX `sigaction`; Windows `SetConsoleCtrlHandler`; WASM no-op.
+21. **Streaming subprocess** — `modules/process` (separate module). Piped stdin/stdout/stderr, async I/O integration with scheduler.
 
 ### Phase F — calendar time
 

@@ -947,6 +947,65 @@ func (p *WindowsPAL) EmitGetEnv(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// EmitSetEnv declares UCRT @_putenv_s and defines @pal_setenv.
+func (p *WindowsPAL) EmitSetEnv(module *ir.Module) *ir.Func {
+	// Windows _putenv_s(name, value) returns 0 on success, errno on error
+	putenvsFn := module.NewFunc("_putenv_s", irtypes.I32,
+		ir.NewParam("name", irtypes.I8Ptr),
+		ir.NewParam("value", irtypes.I8Ptr))
+	putenvsFn.FuncAttrs = append(putenvsFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_setenv", irtypes.I32,
+		ir.NewParam("name", irtypes.I8Ptr),
+		ir.NewParam("value", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	result := entry.NewCall(putenvsFn, fn.Params[0], fn.Params[1])
+	// _putenv_s returns 0 on success; convert non-zero to -1
+	isErr := entry.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 0))
+	entry.NewRet(entry.NewSelect(isErr, constant.NewInt(irtypes.I32, -1), constant.NewInt(irtypes.I32, 0)))
+	return fn
+}
+
+// EmitUnsetEnv uses _putenv_s with empty string to unset on Windows.
+func (p *WindowsPAL) EmitUnsetEnv(module *ir.Module) *ir.Func {
+	// On Windows, _putenv_s(name, "") removes the variable
+	putenvsFn := lookupFunc(module, "_putenv_s")
+	if putenvsFn == nil {
+		putenvsFn = module.NewFunc("_putenv_s", irtypes.I32,
+			ir.NewParam("name", irtypes.I8Ptr),
+			ir.NewParam("value", irtypes.I8Ptr))
+		putenvsFn.FuncAttrs = append(putenvsFn.FuncAttrs, enum.FuncAttrNoUnwind)
+	}
+
+	fn := module.NewFunc("pal_unsetenv", irtypes.I32,
+		ir.NewParam("name", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	// Pass empty string as value to remove the variable
+	emptyStr := module.NewGlobalDef(".str.empty_env", constant.NewCharArrayFromString("\x00"))
+	emptyPtr := entry.NewGetElementPtr(irtypes.NewArray(1, irtypes.I8), emptyStr, constant.NewInt(irtypes.I64, 0), constant.NewInt(irtypes.I64, 0))
+	result := entry.NewCall(putenvsFn, fn.Params[0], emptyPtr)
+	isErr := entry.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 0))
+	entry.NewRet(entry.NewSelect(isErr, constant.NewInt(irtypes.I32, -1), constant.NewInt(irtypes.I32, 0)))
+	return fn
+}
+
+// EmitChdir declares UCRT @_chdir and defines @pal_chdir.
+func (p *WindowsPAL) EmitChdir(module *ir.Module) *ir.Func {
+	chdirFn := module.NewFunc("_chdir", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	chdirFn.FuncAttrs = append(chdirFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_chdir", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	result := entry.NewCall(chdirFn, fn.Params[0])
+	entry.NewRet(result)
+	return fn
+}
+
 // EmitExecute returns -1 stub (not yet implemented on Windows).
 func (p *WindowsPAL) EmitExecute(module *ir.Module) *ir.Func {
 	return emitStubExecute(module)

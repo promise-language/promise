@@ -1090,6 +1090,61 @@ func (p *PosixPAL) EmitGetEnv(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// EmitSetEnv declares libc @setenv and defines @pal_setenv.
+// Signature: @pal_setenv(i8* name, i8* value) → i32 (0=ok, -1=error)
+func (p *PosixPAL) EmitSetEnv(module *ir.Module) *ir.Func {
+	// declare i32 @setenv(i8* name, i8* value, i32 overwrite) nounwind
+	setenvFn := module.NewFunc("setenv", irtypes.I32,
+		ir.NewParam("name", irtypes.I8Ptr),
+		ir.NewParam("value", irtypes.I8Ptr),
+		ir.NewParam("overwrite", irtypes.I32))
+	setenvFn.FuncAttrs = append(setenvFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_setenv", irtypes.I32,
+		ir.NewParam("name", irtypes.I8Ptr),
+		ir.NewParam("value", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	result := entry.NewCall(setenvFn, fn.Params[0], fn.Params[1],
+		constant.NewInt(irtypes.I32, 1)) // overwrite = 1
+	entry.NewRet(result)
+	return fn
+}
+
+// EmitUnsetEnv declares libc @unsetenv and defines @pal_unsetenv.
+// Signature: @pal_unsetenv(i8* name) → i32 (0=ok, -1=error)
+func (p *PosixPAL) EmitUnsetEnv(module *ir.Module) *ir.Func {
+	// declare i32 @unsetenv(i8* name) nounwind
+	unsetenvFn := module.NewFunc("unsetenv", irtypes.I32,
+		ir.NewParam("name", irtypes.I8Ptr))
+	unsetenvFn.FuncAttrs = append(unsetenvFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_unsetenv", irtypes.I32,
+		ir.NewParam("name", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	result := entry.NewCall(unsetenvFn, fn.Params[0])
+	entry.NewRet(result)
+	return fn
+}
+
+// EmitChdir declares libc @chdir and defines @pal_chdir.
+// Signature: @pal_chdir(i8* path) → i32 (0=ok, -1=error)
+func (p *PosixPAL) EmitChdir(module *ir.Module) *ir.Func {
+	// declare i32 @chdir(i8* path) nounwind
+	chdirFn := module.NewFunc("chdir", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	chdirFn.FuncAttrs = append(chdirFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_chdir", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	result := entry.NewCall(chdirFn, fn.Params[0])
+	entry.NewRet(result)
+	return fn
+}
+
 // EmitGetCwd declares libc @getcwd and defines @pal_getcwd.
 // Signature: @pal_getcwd(i8* buf, i64 len) → i8* (buf or null)
 // On success returns buf filled with the cwd path. On failure returns null and sets errno.

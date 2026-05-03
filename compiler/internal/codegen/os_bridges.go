@@ -47,6 +47,15 @@ func (c *Compiler) defineOSBodies() {
 	if fn, ok := irFuncByName["promise_os_execute_stderr"]; ok {
 		c.defineExecuteStderrBody(fn)
 	}
+	if fn, ok := irFuncByName["promise_os_set_env"]; ok {
+		c.defineSetEnvBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_os_unset_env"]; ok {
+		c.defineUnsetEnvBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_os_set_cwd"]; ok {
+		c.defineSetCwdBody(fn)
+	}
 }
 
 // defineGetEnvBody: void @promise_os_get_env(i8* sret, i8* name)
@@ -463,4 +472,76 @@ func (c *Compiler) defineExecuteStderrBody(fn *ir.Func) {
 		constant.NewNull(irtypes.I8Ptr), constant.NewInt(irtypes.I64, 0))
 	c.storeStringResult(noData, sret, emptyStr)
 	noData.NewRet(nil)
+}
+
+// defineSetEnvBody: void @promise_os_set_env(i8* name, i8* value)
+// Converts Promise name and value strings to C strings, calls pal_setenv, frees temps.
+// Non-failable — setenv failures (ENOMEM) are silently ignored.
+func (c *Compiler) defineSetEnvBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	nameParam := fn.Params[0]
+	valueParam := fn.Params[1]
+
+	nameCStr := c.stringToCStr(entry, nameParam)
+	valueCStr := c.stringToCStr(entry, valueParam)
+
+	c.emitEnterSyscall(entry)
+	entry.NewCall(c.palSetEnv, nameCStr, valueCStr)
+	c.emitExitSyscall(entry)
+
+	entry.NewCall(c.palFree, nameCStr)
+	entry.NewCall(c.palFree, valueCStr)
+	entry.NewRet(nil)
+}
+
+// defineUnsetEnvBody: void @promise_os_unset_env(i8* name)
+// Converts Promise name string to C string, calls pal_unsetenv, frees temp.
+// Non-failable — unsetenv failures are silently ignored.
+func (c *Compiler) defineUnsetEnvBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	nameParam := fn.Params[0]
+
+	nameCStr := c.stringToCStr(entry, nameParam)
+
+	c.emitEnterSyscall(entry)
+	entry.NewCall(c.palUnsetEnv, nameCStr)
+	c.emitExitSyscall(entry)
+
+	entry.NewCall(c.palFree, nameCStr)
+	entry.NewRet(nil)
+}
+
+// defineSetCwdBody: void @promise_os_set_cwd(i8* sret, i8* path)
+// Converts Promise path string to C string, calls pal_chdir.
+// Returns int! (0 on success, raises error on failure).
+func (c *Compiler) defineSetCwdBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+	pathParam := fn.Params[1]
+
+	// Compute the failable result type for int!: {i1, i64, i8*}
+	innerType := c.resolveType(types.TypInt)
+	resultType := computeResultType(innerType)
+
+	pathCStr := c.stringToCStr(entry, pathParam)
+
+	c.emitEnterSyscall(entry)
+	ret := entry.NewCall(c.palChdir, pathCStr)
+	c.emitExitSyscall(entry)
+
+	entry.NewCall(c.palFree, pathCStr)
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	successBlk := fn.NewBlock(".success")
+	errorBlk := fn.NewBlock(".error")
+	entry.NewCondBr(isErr, errorBlk, successBlk)
+
+	// Success: store 0 as failable success
+	c.storeFailableSuccess(successBlk, sret, constant.NewInt(irtypes.I64, 0), resultType)
+	successBlk.NewRet(nil)
+
+	// Error: construct error, store failable error
+	errInst := c.constructErrorFromGlobalStr(errorBlk, "failed to change working directory")
+	c.storeFailableError(errorBlk, sret, errInst, resultType)
+	errorBlk.NewRet(nil)
 }

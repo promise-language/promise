@@ -86,6 +86,14 @@ type PAL interface {
 	// EmitGetCwd defines @pal_getcwd(i8* buf, i64 len) → i8* (buf or null)
 	EmitGetCwd(module *ir.Module) *ir.Func
 
+	// Environment mutation primitives
+	// EmitSetEnv defines @pal_setenv(i8* name, i8* value) → i32 (0=ok, -1=error)
+	EmitSetEnv(module *ir.Module) *ir.Func
+	// EmitUnsetEnv defines @pal_unsetenv(i8* name) → i32 (0=ok, -1=error)
+	EmitUnsetEnv(module *ir.Module) *ir.Func
+	// EmitChdir defines @pal_chdir(i8* path) → i32 (0=ok, -1=error)
+	EmitChdir(module *ir.Module) *ir.Func
+
 	// Process execution primitives
 	// EmitExecute defines @pal_execute(i8* program, i8** argv,
 	//   i8** out_stdout, i64* out_stdout_len, i8** out_stderr, i64* out_stderr_len) → i32
@@ -512,6 +520,39 @@ func emitStubExecute(module *ir.Module) *ir.Func {
 	entry.NewStore(constant.NewInt(irtypes.I64, 0), fn.Params[3])
 	entry.NewStore(constant.NewNull(irtypes.I8Ptr), fn.Params[4])
 	entry.NewStore(constant.NewInt(irtypes.I64, 0), fn.Params[5])
+	entry.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}
+
+// --- Stub environment mutation / chdir implementations ---
+
+// emitStubSetEnv returns -1 (no env mutation support).
+func emitStubSetEnv(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_setenv", irtypes.I32,
+		ir.NewParam("name", irtypes.I8Ptr),
+		ir.NewParam("value", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}
+
+// emitStubUnsetEnv returns -1 (no env mutation support).
+func emitStubUnsetEnv(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_unsetenv", irtypes.I32,
+		ir.NewParam("name", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}
+
+// emitStubChdir returns -1 (no filesystem).
+func emitStubChdir(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_chdir", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
 	entry.NewRet(constant.NewInt(irtypes.I32, -1))
 	return fn
 }

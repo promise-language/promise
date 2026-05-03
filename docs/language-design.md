@@ -1623,6 +1623,22 @@ if err is present {
 | `opt!` | Panic on none (optional unwrap) | Any function |
 | `opt ? _ { ... }` | Handle none inline (optional handler) | Any function |
 
+**Critical distinction for AI agents:** `!` after a failable call **always means "panic on error"** — it does not propagate. To propagate errors in a failable function, simply call the function with no suffix (bare call). This is the most common pattern and the one AI-generated code should default to:
+
+```promise
+// CORRECT — auto-propagation (most common):
+wrapper() string! {
+  string content = readFile("data.txt");  // bare call → auto-propagates error
+  return content;
+}
+
+// WRONG — panics instead of propagating:
+wrapper() string! {
+  string content = readFile("data.txt")!; // ! → panics on error, does NOT propagate
+  return content;
+}
+```
+
 **Note:** `!` and `? _ { }` also work on `T?` optionals (see Section 14). When the inner expression is failable, these target the error layer; when optional, the optional layer. Auto-propagation does not cross lambda boundaries. Inside a non-`!` lambda, failable calls must be handled explicitly with `?` or `!`.
 
 ### 7.3 Error Types

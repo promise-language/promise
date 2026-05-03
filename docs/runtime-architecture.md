@@ -13,7 +13,7 @@ No C runtime files remain. All runtime functions are codegen-emitted LLVM IR or 
 - `pal_exit(code)` — wraps libc `@exit` (PosixPAL)
 
 **Codegen-emitted print/panic functions** (`codegen/io.go`):
-- `promise_print_string`, `promise_print_string_no_nl` — via PAL `pal_write`
+- `promise_print_string` — via PAL `pal_write`
 - `promise_panic`, `promise_panic_msg` — via PAL `pal_write` + `pal_exit`
 - `promise_test_print_result`, `promise_test_summary` — via PAL `pal_write` (test mode)
 
@@ -108,7 +108,7 @@ The remaining C runtime functions all depend on IO or process control. Phase 3 r
 | `promise_test_summary` | `runtime_test.c` | `printf` | Print "N passed, M failed" |
 
 These are called from:
-- **std/io.pr**: `_print_string`, `_print_string_no_nl` as `extern` bindings
+- **std/io.pr**: `_print_string` as `extern` binding
 - **std/assert.pr**: `_panic_msg` as `extern` binding
 - **codegen/compiler.go**: `promise_panic` declared as intrinsic (line 324), used for bounds checks, cast failures, OOM
 - **codegen/compiler.go**: `GenerateTestMain()` declares test runner functions (lines 231-244)
@@ -233,8 +233,7 @@ Each C print function becomes a codegen-emitted LLVM IR function that formats th
 
 | C function | Replacement strategy |
 |------------|---------------------|
-| `promise_print_string` | **Done.** Codegen: extract `data`/`len` from string instance, call `pal_write(1, data, len)`, write `\n` |
-| `promise_print_string_no_nl` | **Done.** Codegen: same but without trailing newline. Used by `print(Format)`. |
+| `promise_print_string` | **Done.** Codegen: extract `data`/`len` from string instance, call `pal_write(1, data, len)`. Newline handling done at Promise level (`print_line` appends `Platform.line_separator` to the Builder before calling this). |
 | `promise_panic` | Codegen: write "panic: " + msg to fd 2 (stderr), call `pal_exit(1)` |
 | `promise_panic_msg` | Codegen: write "panic: " + string data to fd 2, call `pal_exit(1)` |
 | `promise_test_run` | Keep as C initially (fork/waitpid); replace in Phase 5 with thread-based isolation |

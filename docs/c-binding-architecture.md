@@ -667,7 +667,6 @@ typedef struct {
 // ============================================================
 
 void promise_print_string(promise_string_v *s);
-void promise_print_string_no_nl(promise_string_v *s);
 void promise_panic(const char* msg);
 
 // User-declared extern functions

@@ -38,12 +38,9 @@ func (c *Compiler) definePALBodies() {
 		}
 	}
 
-	// Print functions — declared by extern from std/io.pr
+	// Print function — declared by extern from std/io.pr
 	if fn, ok := irFuncByName["promise_print_string"]; ok {
 		c.definePrintStringBody(fn)
-	}
-	if fn, ok := irFuncByName["promise_print_string_no_nl"]; ok {
-		c.definePrintStringNoNewlineBody(fn)
 	}
 
 	// Panic functions
@@ -145,28 +142,14 @@ func (c *Compiler) emitWriteNewline(block *ir.Block, fd value.Value) {
 
 // definePrintStringBody adds a function body to promise_print_string(i8* %s).
 // Extracts data/len from the string value struct and writes via pal_write.
+// Newline handling is done at the Promise level (print_line appends Platform.line_separator
+// to the Builder before calling this function).
 func (c *Compiler) definePrintStringBody(fn *ir.Func) {
 	entry := fn.NewBlock(".entry")
 	stdout := constant.NewInt(irtypes.I32, 1)
 
 	dataPtr, dataLen := c.extractStringDataLen(entry, fn.Params[0])
 
-	// Write string data
-	entry.NewCall(c.palWrite, stdout, dataPtr, dataLen)
-	// Write newline
-	c.emitWriteNewline(entry, stdout)
-	entry.NewRet(nil)
-}
-
-// definePrintStringNoNewlineBody adds a function body to promise_print_string_no_nl(i8* %s).
-// Same as definePrintStringBody but without the trailing newline.
-func (c *Compiler) definePrintStringNoNewlineBody(fn *ir.Func) {
-	entry := fn.NewBlock(".entry")
-	stdout := constant.NewInt(irtypes.I32, 1)
-
-	dataPtr, dataLen := c.extractStringDataLen(entry, fn.Params[0])
-
-	// Write string data (no newline)
 	entry.NewCall(c.palWrite, stdout, dataPtr, dataLen)
 	entry.NewRet(nil)
 }

@@ -38,21 +38,22 @@ type Closer `structural `public `doc("Structural interface for resources that ne
 
 // ── Console output ──────────────────────────────────────────────────────────
 
-// Low-level C bindings (prefixed with _ by convention)
+// Low-level C binding (prefixed with _ by convention)
 _print_string(string s) `extern("promise_print_string");
-_print_string_no_nl(string s) `extern("promise_print_string_no_nl");
 
 // Public API
 print(Format f) `public `doc("Prints a formatted value to stdout without a trailing newline.") {
   Builder b = Builder();
   f.format(b)? {
   };
-  _print_string_no_nl(b.to_string());
+  _print_string(b.to_string());
 }
 
 print_line(Format f) `public `doc("Prints a formatted value followed by a newline to stdout.") {
   Builder b = Builder();
   f.format(b)? {
+  };
+  b.write_string(Platform.line_separator)? {
   };
   _print_string(b.to_string());
 }

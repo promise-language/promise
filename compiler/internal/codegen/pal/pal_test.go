@@ -1463,14 +1463,14 @@ func TestFileStatSizePosix(t *testing.T) {
 		t.Errorf("expected pal_file_stat_size, got %s", fn.Name())
 	}
 	assertContains(t, out, "define i64 @pal_file_stat_size(i8* %path)", "definition")
-	// Uses open+lseek+close pattern
-	assertContains(t, out, "call i32 @open(", "calls open")
+	// Uses open+lseek+close pattern (open is variadic)
+	assertContains(t, out, "@open(", "calls open")
 	assertContains(t, out, "call i64 @lseek(", "calls lseek for SEEK_END")
 	assertContains(t, out, "call i32 @close(", "calls close")
 	// SEEK_END = 2
 	assertContains(t, out, "i32 2)", "SEEK_END constant")
-	// Failure branch returns -1
-	assertContains(t, out, "ret i64 -1", "returns -1 on failure")
+	// Failure branch returns -errno (via __errno_location)
+	assertContains(t, out, "__errno_location", "reads errno on failure")
 }
 
 func TestFileStatSizeWindows(t *testing.T) {

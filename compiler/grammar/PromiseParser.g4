@@ -88,7 +88,7 @@ methodDecl
 // Getter: `get <name> <type> <annotations>? (<body> | ;)`
 // `get` is contextual — lexed as IDENT, validated in AST builder.
 getterDecl
-    : IDENT IDENT typeRef metaAnnotation* (memberBody | SEMI)
+    : IDENT IDENT typeRef BANG? metaAnnotation* (memberBody | SEMI)
     ;
 
 // Setter: `set <name>(<type> <param>) <annotations>? (<body> | ;)`

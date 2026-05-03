@@ -1024,6 +1024,184 @@ func TestFailableDestructureInNonFailable(t *testing.T) {
 	`)
 }
 
+// === Auto-propagation in assignments ===
+
+func TestAutoPropagateInTypedVarDecl(t *testing.T) {
+	checkOK(t, `
+		parse() int! { return 42; }
+		wrapper() int! {
+			int x = parse();
+			return x;
+		}
+	`)
+}
+
+func TestAutoPropagateInInferredVarDecl(t *testing.T) {
+	checkOK(t, `
+		parse() int! { return 42; }
+		wrapper() int! {
+			x := parse();
+			return x;
+		}
+	`)
+}
+
+func TestAutoPropagateAssignInNonFailable(t *testing.T) {
+	errs := checkErrs(t, `
+		parse() int! { return 42; }
+		main() {
+			int x = parse();
+		}
+	`)
+	expectError(t, errs, "failable call must be handled")
+}
+
+func TestAutoPropagateInferredInNonFailable(t *testing.T) {
+	errs := checkErrs(t, `
+		parse() int! { return 42; }
+		main() {
+			x := parse();
+		}
+	`)
+	expectError(t, errs, "failable call must be handled")
+}
+
+func TestAutoPropagateMultipleAssigns(t *testing.T) {
+	checkOK(t, `
+		parse(string s) int! { return 0; }
+		wrapper() int! {
+			int a = parse("1");
+			int b = parse("2");
+			return a + b;
+		}
+	`)
+}
+
+func TestAutoPropagateVoidAssignStmt(t *testing.T) {
+	// Void failable as statement (not assignment) in failable fn — auto-propagates
+	checkOK(t, `
+		validate() void! { raise error(message: "bad"); }
+		wrapper() void! {
+			validate();
+		}
+	`)
+}
+
+// === Error handler recovery validation ===
+
+func TestErrorHandlerRecoveryValue(t *testing.T) {
+	// Handler produces recovery value — OK
+	checkOK(t, `
+		parse() int! { return 42; }
+		main() {
+			int x = parse() ? e { 0; };
+		}
+	`)
+}
+
+func TestErrorHandlerRecoveryDiverges(t *testing.T) {
+	// Handler diverges with return — OK
+	checkOK(t, `
+		parse() int! { return 42; }
+		main() {
+			int x = parse() ? e { return; };
+		}
+	`)
+}
+
+func TestErrorHandlerRecoveryRaise(t *testing.T) {
+	// Handler diverges with raise — OK
+	checkOK(t, `
+		parse() int! { return 42; }
+		wrapper() int! {
+			int x = parse() ? e { raise e; };
+			return x;
+		}
+	`)
+}
+
+func TestErrorHandlerNoRecoveryInTypedDecl(t *testing.T) {
+	// Handler doesn't produce value or diverge — ERROR
+	errs := checkErrs(t, `
+		parse() int! { return 42; }
+		main() {
+			int x = parse() ? e { println(e.message); };
+		}
+	`)
+	expectError(t, errs, "error handler must produce a recovery value or diverge")
+}
+
+func TestErrorHandlerNoRecoveryInInferredDecl(t *testing.T) {
+	// Non-recovering handler in inferred decl: x becomes int? (optional)
+	checkOK(t, `
+		parse() int! { return 42; }
+		main() {
+			x := parse() ? e { println(e.message); };
+		}
+	`)
+}
+
+func TestErrorHandlerNoRecoveryInNonOptionalTypedDecl(t *testing.T) {
+	// Non-recovering handler in non-optional typed decl: error
+	errs := checkErrs(t, `
+		parse() int! { return 42; }
+		main() {
+			int x = parse() ? e { println(e.message); };
+		}
+	`)
+	expectError(t, errs, "error handler must produce a recovery value or diverge")
+}
+
+func TestErrorHandlerNoRecoveryInOptionalTypedDecl(t *testing.T) {
+	// Non-recovering handler in optional typed decl: OK, x becomes int?
+	checkOK(t, `
+		parse() int! { return 42; }
+		main() {
+			int? x = parse() ? e { println(e.message); };
+		}
+	`)
+}
+
+func TestErrorHandlerNoRecoveryAsStatement(t *testing.T) {
+	// As expression statement (not assignment) — OK, value is discarded
+	checkOK(t, `
+		parse() int! { return 42; }
+		main() {
+			parse() ? e { println(e.message); };
+		}
+	`)
+}
+
+func TestErrorHandlerNoRecoveryVoidFailable(t *testing.T) {
+	// Void failable with handler — OK (no value to recover)
+	checkOK(t, `
+		validate() void! { raise error(message: "bad"); }
+		main() {
+			validate() ? e { println(e.message); };
+		}
+	`)
+}
+
+func TestErrorHandlerRecoveryOptional(t *testing.T) {
+	// Handler produces none for optional type — OK
+	checkOK(t, `
+		parse() int! { return 42; }
+		main() {
+			int? x = parse() ? e { none; };
+		}
+	`)
+}
+
+func TestErrorHandlerRecoveryExpression(t *testing.T) {
+	// Handler produces computed expression — OK
+	checkOK(t, `
+		parse() int! { return 42; }
+		main() {
+			int x = parse() ? e { 1 + 2; };
+		}
+	`)
+}
+
 func TestFailableDestructureDiscardValue(t *testing.T) {
 	checkOK(t, `
 		parse() int! { return 42; }
@@ -9677,4 +9855,86 @@ func TestTargetFilterArm64Alias(t *testing.T) {
 	if len(errs) == 0 {
 		t.Error("x86_64: expected error calling arm64-only function, got none")
 	}
+}
+
+// --- Failable getters ---
+
+func TestFailableGetterOK(t *testing.T) {
+	checkOK(t, `
+		type MyErr is error { int code; }
+		type Foo {
+			int _val;
+			get value int! {
+				if this._val < 0 { raise MyErr(code: 1, message: "neg"); }
+				return this._val;
+			}
+		}
+		main() {
+			Foo f = Foo(_val: 42);
+			int v = f.value!;
+		}
+	`)
+}
+
+func TestFailableGetterPropagate(t *testing.T) {
+	checkOK(t, `
+		type MyErr is error { int code; }
+		type Foo {
+			int _val;
+			get value int! {
+				if this._val < 0 { raise MyErr(code: 1, message: "neg"); }
+				return this._val;
+			}
+		}
+		bar(Foo f) int! {
+			return f.value?;
+		}
+	`)
+}
+
+func TestFailableGetterHandler(t *testing.T) {
+	checkOK(t, `
+		type MyErr is error { int code; }
+		type Foo {
+			int _val;
+			get value int! {
+				if this._val < 0 { raise MyErr(code: 1, message: "neg"); }
+				return this._val;
+			}
+		}
+		main() {
+			Foo f = Foo(_val: -1);
+			int v = f.value ? e { 0; };
+		}
+	`)
+}
+
+func TestFailableGetterAbstract(t *testing.T) {
+	checkOK(t, `
+		type Base {
+			get value int! `+"`"+`abstract;
+		}
+		type Impl is Base {
+			int _v;
+			get value int! { return this._v; }
+		}
+		main() {
+			Base b = Impl(_v: 10);
+			int v = b.value!;
+		}
+	`)
+}
+
+func TestNonFailableGetterBangError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo {
+			int _val;
+			get value int { return this._val; }
+		}
+		main() {
+			Foo f = Foo(_val: 1);
+			int v = f.value!;
+		}
+	`)
+	expectError(t, errs, "failable")
 }

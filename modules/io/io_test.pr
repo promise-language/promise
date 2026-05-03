@@ -1,0 +1,182 @@
+// Test the io module (compiled as part of the module).
+
+// ── IoError / _io_strerror ───────────────────────────────────────────────────
+
+strerror_known_codes() `test {
+    assert(_io_strerror(1) == "operation not permitted", "errno 1");
+    assert(_io_strerror(2) == "no such file or directory", "errno 2");
+    assert(_io_strerror(13) == "permission denied", "errno 13");
+    assert(_io_strerror(22) == "invalid argument", "errno 22");
+}
+
+strerror_unknown_code() `test {
+    string msg = _io_strerror(9999);
+    assert(msg == "I/O error (errno 9999)", "unknown errno fallback");
+}
+
+make_io_error_test() `test {
+    IoError e = _make_io_error(-2);
+    assert(e.code == 2, "io error code from -errno");
+    assert(e.message == "no such file or directory", "io error message");
+}
+
+// ── File.create / File.exists / File.remove ──────────────────────────────────
+
+file_create_exists_remove() `test {
+    if File.exists("/tmp/pr_iot_cer") { File.remove("/tmp/pr_iot_cer")!; }
+    File f = File.create("/tmp/pr_iot_cer")!;
+    f.close()!;
+    assert(File.exists("/tmp/pr_iot_cer"), "file exists after create");
+    File.remove("/tmp/pr_iot_cer")!;
+    assert(!File.exists("/tmp/pr_iot_cer"), "file gone after remove");
+}
+
+// ── File.write_string / File.read_all ────────────────────────────────────────
+
+file_write_read() `test {
+    File fw = File.create("/tmp/pr_iot_wr")!;
+    fw.write_string("hello world")!;
+    fw.close()!;
+    File fr = File.open("/tmp/pr_iot_wr", readonly: true)!;
+    string data = fr.read_all()!;
+    fr.close()!;
+    assert(data == "hello world", "read back what was written");
+    File.remove("/tmp/pr_iot_wr")!;
+}
+
+// ── File.read_content / File.write_content ───────────────────────────────────
+
+file_content_oneshot() `test {
+    File.write_content("/tmp/pr_iot_rwc", "one-shot")!;
+    string d = File.read_content("/tmp/pr_iot_rwc")!;
+    assert(d == "one-shot", "read_content matches write_content");
+    File.remove("/tmp/pr_iot_rwc")!;
+}
+
+// ── File.size ────────────────────────────────────────────────────────────────
+
+file_size_test() `test {
+    File.write_content("/tmp/pr_iot_sz", "12345")!;
+    int sz = File.size("/tmp/pr_iot_sz")!;
+    assert(sz == 5, "size matches content length");
+    File.remove("/tmp/pr_iot_sz")!;
+}
+
+// ── File.position / File.seek ────────────────────────────────────────────────
+
+file_seek_test() `test {
+    File.write_content("/tmp/pr_iot_seek", "abcdef")!;
+    File f = File.open("/tmp/pr_iot_seek")!;
+    int pos0 = f.position!;
+    assert(pos0 == 0, "initial position is 0");
+    f.seek(3)!;
+    int pos3 = f.position!;
+    assert(pos3 == 3, "position after seek");
+    string rest = f.read_all()!;
+    assert(rest == "def", "read after seek");
+    f.close()!;
+    File.remove("/tmp/pr_iot_seek")!;
+}
+
+// ── File.append ──────────────────────────────────────────────────────────────
+
+file_append_test() `test {
+    File.write_content("/tmp/pr_iot_app", "first")!;
+    File fa = File.append("/tmp/pr_iot_app")!;
+    fa.write_string(" second")!;
+    fa.close()!;
+    string d = File.read_content("/tmp/pr_iot_app")!;
+    assert(d == "first second", "append adds to existing content");
+    File.remove("/tmp/pr_iot_app")!;
+}
+
+// ── File.create truncates ────────────────────────────────────────────────────
+
+file_truncate_test() `test {
+    File.write_content("/tmp/pr_iot_trunc", "long content here")!;
+    File.write_content("/tmp/pr_iot_trunc", "short")!;
+    string d = File.read_content("/tmp/pr_iot_trunc")!;
+    assert(d == "short", "write_content truncates");
+    File.remove("/tmp/pr_iot_trunc")!;
+}
+
+// ── Multiple writes ──────────────────────────────────────────────────────────
+
+file_multi_write() `test {
+    File f = File.create("/tmp/pr_iot_multi")!;
+    f.write_string("aaa")!;
+    f.write_string("bbb")!;
+    f.write_string("ccc")!;
+    f.close()!;
+    string d = File.read_content("/tmp/pr_iot_multi")!;
+    assert(d == "aaabbbccc", "multiple writes concatenate");
+    File.remove("/tmp/pr_iot_multi")!;
+}
+
+// ── Empty file ───────────────────────────────────────────────────────────────
+
+file_empty_test() `test {
+    File.write_content("/tmp/pr_iot_empty", "")!;
+    string d = File.read_content("/tmp/pr_iot_empty")!;
+    assert(d == "", "empty file reads as empty string");
+    int sz = File.size("/tmp/pr_iot_empty")!;
+    assert(sz == 0, "empty file has size 0");
+    File.remove("/tmp/pr_iot_empty")!;
+}
+
+// ── Error: open nonexistent ──────────────────────────────────────────────────
+
+file_open_nonexistent() `test {
+    bool caught = false;
+    File.open("/tmp/pr_iot_noexist_xyz") ? e {
+        caught = true;
+    };
+    assert(caught, "opening nonexistent file raises error");
+}
+
+file_read_content_nonexistent() `test {
+    bool caught = false;
+    File.read_content("/tmp/pr_iot_noexist_abc") ? e {
+        caught = true;
+    };
+    assert(caught, "read_content on nonexistent raises error");
+}
+
+// ── Error: remove nonexistent ────────────────────────────────────────────────
+
+file_remove_nonexistent() `test {
+    bool caught = false;
+    File.remove("/tmp/pr_iot_rm_nofile") ? e {
+        caught = true;
+    };
+    assert(caught, "remove nonexistent raises error");
+}
+
+// ── Error: double close ──────────────────────────────────────────────────────
+
+file_double_close() `test {
+    File f = File.create("/tmp/pr_iot_dblc")!;
+    f.close()!;
+    bool caught = false;
+    f.close() ? e {
+        caught = true;
+    };
+    assert(caught, "double close raises error");
+    File.remove("/tmp/pr_iot_dblc")!;
+}
+
+// ── Dir operations ───────────────────────────────────────────────────────────
+
+dir_make_exists_remove() `test {
+    if Dir.exists("/tmp/pr_iot_dir") { Dir.remove("/tmp/pr_iot_dir")!; }
+    Dir.make("/tmp/pr_iot_dir")!;
+    assert(Dir.exists("/tmp/pr_iot_dir"), "dir exists after make");
+    Dir.remove("/tmp/pr_iot_dir")!;
+    assert(!Dir.exists("/tmp/pr_iot_dir"), "dir gone after remove");
+}
+
+dir_exists_on_file() `test {
+    File.write_content("/tmp/pr_iot_df", "x")!;
+    assert(!Dir.exists("/tmp/pr_iot_df"), "Dir.exists returns false for a file");
+    File.remove("/tmp/pr_iot_df")!;
+}

@@ -14,7 +14,7 @@ description = "Pure math utilities: lerp, map_range, deg/rad conversion, sign, g
 description = "File path manipulation: join, basename, dirname, extension, stem"
 
 [modules.io]
-description = "File and stream I/O operations (placeholder — pending native PAL support)"
+description = "File and directory I/O: File (open/create/append/read/write/close), Dir (make/remove/exists), IoError"
 
 [modules.http]
 description = "HTTP client and server (placeholder — pending native networking support)"

@@ -2075,7 +2075,7 @@ func TestErrorHandler(t *testing.T) {
 	ir := generateIR(t, `
 		parse(string s) int! { return 0; }
 		main() {
-			x := parse("42") ? e { 0 };
+			x := parse("42") ? e { 0; };
 		}
 	`)
 	// Should have handler, ok, and merge blocks
@@ -2088,7 +2088,7 @@ func TestErrorHandlerDiscard(t *testing.T) {
 	ir := generateIR(t, `
 		parse(string s) int! { return 0; }
 		main() {
-			x := parse("42") ? _ { 0 };
+			x := parse("42") ? _ { 0; };
 		}
 	`)
 	assertContains(t, ir, "error.handler")
@@ -2476,6 +2476,66 @@ func TestAutoPropagate_NonVoid(t *testing.T) {
 	`)
 	assertContains(t, ir, "auto.propagate")
 	assertContains(t, ir, "auto.ok")
+}
+
+func TestAutoPropagateInTypedAssignment(t *testing.T) {
+	ir := generateIR(t, `
+		parse() int! { return 42; }
+		wrapper() int! {
+			int x = parse();
+			return x;
+		}
+		main() { }
+	`)
+	// Should have auto-propagation blocks in wrapper
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+	// The ok path extracts the value (index 1 from failable result)
+	assertContains(t, ir, "extractvalue { i1, i64, i8* }")
+}
+
+func TestAutoPropagateInInferredAssignment(t *testing.T) {
+	ir := generateIR(t, `
+		parse() int! { return 42; }
+		wrapper() int! {
+			x := parse();
+			return x;
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+}
+
+func TestAutoPropagateMultipleAssignments(t *testing.T) {
+	ir := generateIR(t, `
+		parse(string s) int! { return 0; }
+		wrapper() int! {
+			int a = parse("x");
+			int b = parse("y");
+			return a + b;
+		}
+		main() { }
+	`)
+	// Should have two sets of auto-propagation blocks
+	assertContains(t, ir, "auto.propagate")
+	assertContains(t, ir, "auto.ok")
+}
+
+func TestDropNullSafe(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		make() Resource! { return Resource(id: 1); }
+		main() {
+			Resource r = make() ? e { return; };
+		}
+	`)
+	// Drop should null-check instance pointer before calling drop
+	assertContains(t, ir, "drop.exec")
+	assertContains(t, ir, "drop.done")
 }
 
 func TestRaiseExtractsInstancePtr(t *testing.T) {
@@ -10243,4 +10303,65 @@ func TestInstanceOwnedFuncsTrackedEvenWhenCached(t *testing.T) {
 	if !foundBoxInt {
 		t.Errorf("Box[int] not in instanceOwnedFuncs even when cached; map = %v", c.instanceOwnedFuncs)
 	}
+}
+
+// --- Failable getter codegen ---
+
+func TestFailableGetterResultType(t *testing.T) {
+	ir := generateIR(t, `
+		type MyErr is error { int code; }
+		type Foo {
+			int _val;
+			get value int! {
+				if this._val < 0 { raise MyErr(code: 1, message: "neg"); }
+				return this._val;
+			}
+		}
+		main() {
+			Foo f = Foo(_val: 42);
+			int v = f.value!;
+		}
+	`)
+	// Failable getter should return result type {i1, i64, i8*}
+	assertContains(t, ir, "define { i1, i64, i8* } @Foo.value(")
+}
+
+func TestFailableGetterVirtualDispatch(t *testing.T) {
+	ir := generateIR(t, `
+		type MyErr is error { int code; }
+		type Base {
+			get value int! `+"`"+`abstract;
+		}
+		type Impl is Base {
+			int _v;
+			get value int! { return this._v; }
+		}
+		main() {
+			Base b = Impl(_v: 10);
+			int v = b.value!;
+		}
+	`)
+	// Abstract failable getter should use vtable dispatch
+	assertContains(t, ir, "@promise_vtable_Base")
+	assertContains(t, ir, "@promise_vtable_Impl")
+	assertContains(t, ir, "define { i1, i64, i8* } @Impl.value(")
+}
+
+func TestFailableGetterStringResult(t *testing.T) {
+	ir := generateIR(t, `
+		type MyErr is error { int code; }
+		type Foo {
+			int _mode;
+			get label string! {
+				if this._mode < 0 { raise MyErr(code: 1, message: "bad"); }
+				return "ok";
+			}
+		}
+		main() {
+			Foo f = Foo(_mode: 1);
+			string s = f.label!;
+		}
+	`)
+	// Failable getter returning string should have result type in signature
+	assertContains(t, ir, "define { i1, i8*, i8* } @Foo.label(")
 }

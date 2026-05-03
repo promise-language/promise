@@ -150,6 +150,7 @@ func (b *Builder) VisitGetterDecl(ctx *parser.GetterDeclContext) interface{} {
 	node.ReturnType = &ReturnTypeSpec{
 		nodeBase: b.baseFromContext(ctx),
 		Type:     b.visitTypeRef(ctx.TypeRef()),
+		CanError: ctx.BANG() != nil,
 	}
 	for _, ma := range ctx.AllMetaAnnotation() {
 		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))

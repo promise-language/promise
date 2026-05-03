@@ -382,6 +382,36 @@ func (p *WindowsPAL) EmitCondDestroy(module *ir.Module) *ir.Func {
 
 // --- Windows file I/O via UCRT (Phase D) ---
 
+// getOrDeclareErrnoFn returns (or declares) the UCRT _errno function.
+// Returns a function with signature () -> i32*.
+func (p *WindowsPAL) getOrDeclareErrnoFn(module *ir.Module) *ir.Func {
+	for _, fn := range module.Funcs {
+		if fn.Name() == "_errno" {
+			return fn
+		}
+	}
+	fn := module.NewFunc("_errno", irtypes.NewPointer(irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	return fn
+}
+
+// emitNegErrnoReturnI32 emits a block that reads errno and returns -errno (i32).
+func (p *WindowsPAL) emitNegErrnoReturnI32(errBlk *ir.Block, errnoFn *ir.Func) {
+	errnoPtr := errBlk.NewCall(errnoFn)
+	errnoVal := errBlk.NewLoad(irtypes.I32, errnoPtr)
+	negErrno := errBlk.NewSub(constant.NewInt(irtypes.I32, 0), errnoVal)
+	errBlk.NewRet(negErrno)
+}
+
+// emitNegErrnoReturnI64 emits a block that reads errno and returns -errno as i64.
+func (p *WindowsPAL) emitNegErrnoReturnI64(errBlk *ir.Block, errnoFn *ir.Func) {
+	errnoPtr := errBlk.NewCall(errnoFn)
+	errnoVal := errBlk.NewLoad(irtypes.I32, errnoPtr)
+	errnoI64 := errBlk.NewSExt(errnoVal, irtypes.I64)
+	negErrno := errBlk.NewSub(constant.NewInt(irtypes.I64, 0), errnoI64)
+	errBlk.NewRet(negErrno)
+}
+
 // EmitFileOpen declares UCRT @_open and defines @pal_file_open.
 // Maps mode (0=open-rw, 1=read, 2=create, 3=append) to _O_* flags.
 func (p *WindowsPAL) EmitFileOpen(module *ir.Module) *ir.Func {
@@ -418,7 +448,14 @@ func (p *WindowsPAL) EmitFileOpen(module *ir.Module) *ir.Func {
 
 	// _open(path, flags, _S_IREAD|_S_IWRITE=0x180)
 	fd := entry.NewCall(ucrtOpen, fn.Params[0], flags, constant.NewInt(irtypes.I32, 0x180))
-	entry.NewRet(fd)
+
+	isErr := entry.NewICmp(enum.IPredSLT, fd, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoFn(module))
+	okBlk.NewRet(fd)
 	return fn
 }
 
@@ -442,7 +479,14 @@ func (p *WindowsPAL) EmitFileRead(module *ir.Module) *ir.Func {
 	len32 := entry.NewTrunc(fn.Params[2], irtypes.I32)
 	ret32 := entry.NewCall(ucrtRead, fn.Params[0], fn.Params[1], len32)
 	ret64 := entry.NewSExt(ret32, irtypes.I64)
-	entry.NewRet(ret64)
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret64, constant.NewInt(irtypes.I64, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI64(errBlk, p.getOrDeclareErrnoFn(module))
+	okBlk.NewRet(ret64)
 	return fn
 }
 
@@ -465,7 +509,14 @@ func (p *WindowsPAL) EmitFileWrite(module *ir.Module) *ir.Func {
 	len32 := entry.NewTrunc(fn.Params[2], irtypes.I32)
 	ret32 := entry.NewCall(ucrtWrite, fn.Params[0], fn.Params[1], len32)
 	ret64 := entry.NewSExt(ret32, irtypes.I64)
-	entry.NewRet(ret64)
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret64, constant.NewInt(irtypes.I64, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI64(errBlk, p.getOrDeclareErrnoFn(module))
+	okBlk.NewRet(ret64)
 	return fn
 }
 
@@ -480,7 +531,14 @@ func (p *WindowsPAL) EmitFileClose(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	ret := entry.NewCall(ucrtClose, fn.Params[0])
-	entry.NewRet(ret)
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoFn(module))
+	okBlk.NewRet(ret)
 	return fn
 }
 
@@ -499,7 +557,14 @@ func (p *WindowsPAL) EmitFileSeek(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	ret := entry.NewCall(ucrtLseek, fn.Params[0], fn.Params[1], fn.Params[2])
-	entry.NewRet(ret)
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I64, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI64(errBlk, p.getOrDeclareErrnoFn(module))
+	okBlk.NewRet(ret)
 	return fn
 }
 
@@ -526,7 +591,7 @@ func (p *WindowsPAL) EmitFileStatSize(module *ir.Module) *ir.Func {
 	gotFdBlk.NewCall(ucrtClose, fd)
 	gotFdBlk.NewRet(size)
 
-	failBlk.NewRet(constant.NewInt(irtypes.I64, -1))
+	p.emitNegErrnoReturnI64(failBlk, p.getOrDeclareErrnoFn(module))
 	return fn
 }
 
@@ -541,7 +606,14 @@ func (p *WindowsPAL) EmitFileRemove(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	ret := entry.NewCall(ucrtUnlink, fn.Params[0])
-	entry.NewRet(ret)
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoFn(module))
+	okBlk.NewRet(ret)
 	return fn
 }
 
@@ -576,7 +648,14 @@ func (p *WindowsPAL) EmitFileMkdir(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	ret := entry.NewCall(ucrtMkdir, fn.Params[0])
-	entry.NewRet(ret)
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoFn(module))
+	okBlk.NewRet(ret)
 	return fn
 }
 
@@ -591,7 +670,14 @@ func (p *WindowsPAL) EmitDirRemove(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	ret := entry.NewCall(ucrtRmdir, fn.Params[0])
-	entry.NewRet(ret)
+
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoFn(module))
+	okBlk.NewRet(ret)
 	return fn
 }
 
@@ -622,9 +708,7 @@ func (p *WindowsPAL) EmitDirExists(module *ir.Module) *ir.Func {
 
 // EmitErrno declares UCRT @_errno and defines @pal_errno.
 func (p *WindowsPAL) EmitErrno(module *ir.Module) *ir.Func {
-	// _errno() returns int* (pointer to thread-local errno)
-	ucrtErrno := module.NewFunc("_errno", irtypes.NewPointer(irtypes.I32))
-	ucrtErrno.FuncAttrs = append(ucrtErrno.FuncAttrs, enum.FuncAttrNoUnwind)
+	ucrtErrno := p.getOrDeclareErrnoFn(module)
 
 	fn := module.NewFunc("pal_errno", irtypes.I32)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)

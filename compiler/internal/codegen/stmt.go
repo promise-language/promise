@@ -140,6 +140,35 @@ func (c *Compiler) genAutoPropagate(expr ast.Expr) {
 	c.block = okBlock
 }
 
+// genAutoPropagateValue extracts the ok value from a failable result,
+// propagating the error to the caller if the call failed.
+// Used for auto-propagation in variable declarations.
+func (c *Compiler) genAutoPropagateValue(result value.Value) value.Value {
+	calleeResultType := result.Type().(*irtypes.StructType)
+
+	tag := c.block.NewExtractValue(result, 0)
+
+	propagateBlock := c.newBlock("auto.propagate")
+	okBlock := c.newBlock("auto.ok")
+	c.block.NewCondBr(tag, propagateBlock, okBlock)
+
+	// Error path: cleanup scope bindings, extract error, wrap in caller's result type, early return
+	c.block = propagateBlock
+	if len(c.scopeBindings) > 0 {
+		c.emitScopeCleanup(0)
+	}
+	errVal := c.block.NewExtractValue(result, resultErrIdx(calleeResultType))
+	callerResultType := c.currentResultType()
+	c.block.NewRet(c.wrapError(errVal, callerResultType))
+
+	// Ok path: extract the success value
+	c.block = okBlock
+	if !isVoidResult(calleeResultType) {
+		return c.block.NewExtractValue(result, 1)
+	}
+	return nil
+}
+
 // --- Variable declarations ---
 
 func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
@@ -177,6 +206,11 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	}
 	val := c.genExpr(s.Value)
 	c.targetType = nil
+
+	// Auto-propagate failable call in assignment: check tag, propagate error, extract ok value.
+	if c.info.AutoPropagateExprs[s.Value] {
+		val = c.genAutoPropagateValue(val)
+	}
 
 	// Wrap value in Optional if declared type is Optional but expr is not
 	if declType != nil {
@@ -223,6 +257,12 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	alloca := c.block.NewAlloca(lt)
 	alloca.SetName(c.uniqueLocalName(s.Name))
 	val := c.genExpr(s.Value)
+
+	// Auto-propagate failable call in assignment: check tag, propagate error, extract ok value.
+	if c.info.AutoPropagateExprs[s.Value] {
+		val = c.genAutoPropagateValue(val)
+	}
+
 	c.block.NewStore(val, alloca)
 	c.locals[s.Name] = alloca
 	c.maybeRegisterDrop(s.Name, alloca, typ)
@@ -498,15 +538,24 @@ func (c *Compiler) emitDropCall(b scopeBinding) {
 }
 
 // emitDropCallDirect emits the actual drop() call (direct or virtual dispatch).
+// Guards against null instance pointers (e.g., zero-initialized values from
+// error handler paths that don't produce a recovery value).
 func (c *Compiler) emitDropCallDirect(b scopeBinding) {
 	val := c.block.NewLoad(b.alloca.ElemType, b.alloca)
+	instance := c.extractInstancePtr(val)
 
+	// Null-check instance pointer: zero-initialized values (from error handler
+	// fallthrough) have null instance — skip drop to avoid dereferencing null.
+	nullCheck := c.block.NewICmp(enum.IPredEQ, instance, constant.NewNull(irtypes.I8Ptr))
+	dropExecBlock := c.newBlock("drop.exec")
+	dropDoneBlock := c.newBlock("drop.done")
+	c.block.NewCondBr(nullCheck, dropDoneBlock, dropExecBlock)
+
+	c.block = dropExecBlock
 	if b.dropFunc != nil {
-		instance := c.extractInstancePtr(val)
 		c.block.NewCall(b.dropFunc, instance)
 	} else if b.named != nil {
 		vtableRaw := c.extractVtablePtr(val)
-		instance := c.extractInstancePtr(val)
 
 		slotIndex := b.named.VirtualMethodIndex("drop", false)
 		if slotIndex < 0 {
@@ -521,6 +570,9 @@ func (c *Compiler) emitDropCallDirect(b scopeBinding) {
 		fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))
 		c.block.NewCall(fnTyped, instance)
 	}
+	c.block.NewBr(dropDoneBlock)
+
+	c.block = dropDoneBlock
 }
 
 // emitEnvFree frees a closure's env struct at scope exit.

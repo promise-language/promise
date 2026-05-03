@@ -315,14 +315,52 @@ func (p *PosixPAL) isMacOS() bool {
 	return strings.Contains(p.target, "darwin") || strings.Contains(p.target, "apple")
 }
 
+// getOrDeclareErrnoLocFn returns (or declares) the platform-specific errno
+// location function: __error on macOS, __errno_location on Linux.
+// Returns a function with signature () -> i32*.
+func (p *PosixPAL) getOrDeclareErrnoLocFn(module *ir.Module) *ir.Func {
+	name := "__errno_location"
+	if p.isMacOS() {
+		name = "__error"
+	}
+	for _, fn := range module.Funcs {
+		if fn.Name() == name {
+			return fn
+		}
+	}
+	fn := module.NewFunc(name, irtypes.NewPointer(irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	return fn
+}
+
+// emitNegErrnoReturn emits a block that reads errno and returns -errno.
+// For i32 return type functions.
+func (p *PosixPAL) emitNegErrnoReturnI32(errBlk *ir.Block, errnoLocFn *ir.Func) {
+	errnoPtr := errBlk.NewCall(errnoLocFn)
+	errnoVal := errBlk.NewLoad(irtypes.I32, errnoPtr)
+	negErrno := errBlk.NewSub(constant.NewInt(irtypes.I32, 0), errnoVal)
+	errBlk.NewRet(negErrno)
+}
+
+// emitNegErrnoReturnI64 emits a block that reads errno and returns -errno as i64.
+func (p *PosixPAL) emitNegErrnoReturnI64(errBlk *ir.Block, errnoLocFn *ir.Func) {
+	errnoPtr := errBlk.NewCall(errnoLocFn)
+	errnoVal := errBlk.NewLoad(irtypes.I32, errnoPtr)
+	errnoI64 := errBlk.NewSExt(errnoVal, irtypes.I64)
+	negErrno := errBlk.NewSub(constant.NewInt(irtypes.I64, 0), errnoI64)
+	errBlk.NewRet(negErrno)
+}
+
 // EmitFileOpen declares libc @open and defines @pal_file_open.
 // Maps mode (0=open-rw, 1=read, 2=create, 3=append) to platform-specific O_* flags.
 func (p *PosixPAL) EmitFileOpen(module *ir.Module) *ir.Func {
-	// declare i32 @open(i8*, i32, i32) nounwind
+	// declare i32 @open(i8*, i32, ...) nounwind
+	// open() is variadic: mode_t is a variadic arg, which matters on AArch64
+	// Apple where variadic args are passed on the stack, not in registers.
 	openFn := module.NewFunc("open", irtypes.I32,
 		ir.NewParam("path", irtypes.I8Ptr),
-		ir.NewParam("oflag", irtypes.I32),
-		ir.NewParam("mode", irtypes.I32))
+		ir.NewParam("oflag", irtypes.I32))
+	openFn.Sig.Variadic = true
 	openFn.FuncAttrs = append(openFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// Platform-specific O_* flag constants
@@ -358,7 +396,15 @@ func (p *PosixPAL) EmitFileOpen(module *ir.Module) *ir.Func {
 
 	// open(path, flags, 0644)
 	fd := entry.NewCall(openFn, fn.Params[0], flags, constant.NewInt(irtypes.I32, 0644))
-	entry.NewRet(fd)
+
+	// On failure (fd < 0), return -errno instead of -1
+	isErr := entry.NewICmp(enum.IPredSLT, fd, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(fd)
 	return fn
 }
 
@@ -378,7 +424,15 @@ func (p *PosixPAL) EmitFileRead(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	ret := entry.NewCall(readFn, fn.Params[0], fn.Params[1], fn.Params[2])
-	entry.NewRet(ret)
+
+	// On failure (ret < 0), return -errno
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I64, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI64(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(ret)
 	return fn
 }
 
@@ -402,7 +456,15 @@ func (p *PosixPAL) EmitFileWrite(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	ret := entry.NewCall(writeFn, fn.Params[0], fn.Params[1], fn.Params[2])
-	entry.NewRet(ret)
+
+	// On failure (ret < 0), return -errno
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I64, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI64(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(ret)
 	return fn
 }
 
@@ -417,7 +479,15 @@ func (p *PosixPAL) EmitFileClose(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	ret := entry.NewCall(closeFn, fn.Params[0])
-	entry.NewRet(ret)
+
+	// On failure (ret < 0), return -errno
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(ret)
 	return fn
 }
 
@@ -436,7 +506,15 @@ func (p *PosixPAL) EmitFileSeek(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	ret := entry.NewCall(lseekFn, fn.Params[0], fn.Params[1], fn.Params[2])
-	entry.NewRet(ret)
+
+	// On failure (ret < 0), return -errno
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I64, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI64(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(ret)
 	return fn
 }
 
@@ -465,7 +543,7 @@ func (p *PosixPAL) EmitFileStatSize(module *ir.Module) *ir.Func {
 	gotFdBlk.NewCall(closeFn, fd)
 	gotFdBlk.NewRet(size)
 
-	failBlk.NewRet(constant.NewInt(irtypes.I64, -1))
+	p.emitNegErrnoReturnI64(failBlk, p.getOrDeclareErrnoLocFn(module))
 	return fn
 }
 
@@ -480,7 +558,15 @@ func (p *PosixPAL) EmitFileRemove(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	ret := entry.NewCall(unlinkFn, fn.Params[0])
-	entry.NewRet(ret)
+
+	// On failure (ret < 0), return -errno
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(ret)
 	return fn
 }
 
@@ -518,7 +604,15 @@ func (p *PosixPAL) EmitFileMkdir(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	ret := entry.NewCall(mkdirFn, fn.Params[0], constant.NewInt(irtypes.I32, 0755))
-	entry.NewRet(ret)
+
+	// On failure (ret < 0), return -errno
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(ret)
 	return fn
 }
 
@@ -533,7 +627,15 @@ func (p *PosixPAL) EmitDirRemove(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	ret := entry.NewCall(rmdirFn, fn.Params[0])
-	entry.NewRet(ret)
+
+	// On failure (ret < 0), return -errno
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	p.emitNegErrnoReturnI32(errBlk, p.getOrDeclareErrnoLocFn(module))
+	okBlk.NewRet(ret)
 	return fn
 }
 
@@ -570,14 +672,7 @@ func (p *PosixPAL) EmitDirExists(module *ir.Module) *ir.Func {
 // EmitErrno defines @pal_errno using the platform-specific errno location function.
 // Linux: __errno_location(), macOS: __error(). Both return i32*.
 func (p *PosixPAL) EmitErrno(module *ir.Module) *ir.Func {
-	// errno location function name differs by platform
-	errnoFnName := "__errno_location" // Linux
-	if p.isMacOS() {
-		errnoFnName = "__error" // macOS
-	}
-
-	errnoLocFn := module.NewFunc(errnoFnName, irtypes.NewPointer(irtypes.I32))
-	errnoLocFn.FuncAttrs = append(errnoLocFn.FuncAttrs, enum.FuncAttrNoUnwind)
+	errnoLocFn := p.getOrDeclareErrnoLocFn(module)
 
 	fn := module.NewFunc("pal_errno", irtypes.I32)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)

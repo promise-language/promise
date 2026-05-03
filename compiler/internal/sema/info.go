@@ -136,6 +136,12 @@ type Info struct {
 	// Codegen emits the same tag-check + early-return as explicit `?`.
 	AutoPropagateExprs map[ast.Expr]bool
 
+	// OptionalRecoveryHandlers records ErrorHandlerExpr nodes whose handler
+	// body does not produce a recovery value or diverge, used in an assignment
+	// where the declared/inferred type becomes optional. Codegen wraps the
+	// success value as some(T) and uses none for the error path.
+	OptionalRecoveryHandlers map[ast.Expr]bool
+
 	// FailableDestructures records destructure declarations whose RHS is a
 	// failable call. Codegen extracts (value, error?) from the result struct
 	// instead of a tuple.

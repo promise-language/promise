@@ -1,4 +1,172 @@
-// io module — file and stream I/O operations.
-// Planned: open, read, write, close, read_all, read_lines, write_all.
-// Requires native runtime support (file descriptors, syscalls).
-// Currently a placeholder — functions will be added as native I/O lands.
+// io module — File and directory I/O operations.
+// Requires: use io;
+
+// ── Extern PAL wrappers (codegen provides LLVM IR bodies) ────────────────────
+// All functions that can fail return -errno on failure (errno is folded into the
+// return value atomically, eliminating thread-local errno races in M:N scheduling).
+_io_file_open(string path, int mode) int `extern("promise_io_file_open");
+_io_file_close(int fd) int `extern("promise_io_file_close");
+_io_file_write_string(int fd, string data) int `extern("promise_io_file_write_string");
+_io_file_read_all(int fd) string `extern("promise_io_file_read_all");
+_io_file_seek(int fd, int offset, int whence) int `extern("promise_io_file_seek");
+_io_file_stat_size(string path) int `extern("promise_io_file_stat_size");
+_io_file_remove(string path) int `extern("promise_io_file_remove");
+_io_file_exists(string path) int `extern("promise_io_file_exists");
+_io_file_mkdir(string path) int `extern("promise_io_file_mkdir");
+_io_dir_remove(string path) int `extern("promise_io_dir_remove");
+_io_dir_exists(string path) int `extern("promise_io_dir_exists");
+_io_errno() int `extern("promise_io_errno");
+
+// ── Error type ───────────────────────────────────────────────────────────────
+
+type IoError is error `public `doc("An operating system I/O error with an errno code.") {
+    int code;
+}
+
+// Creates an IoError from a negative return code (-errno).
+// PAL functions return -errno on failure, so code = 0 - rc.
+_make_io_error(int rc) IoError {
+    int c = 0 - rc;
+    return IoError(code: c, message: _io_strerror(c));
+}
+
+// Returns a human-readable message for common POSIX errno values.
+_io_strerror(int code) string {
+    return match code {
+        1 => "operation not permitted",
+        2 => "no such file or directory",
+        5 => "input/output error",
+        9 => "bad file descriptor",
+        12 => "out of memory",
+        13 => "permission denied",
+        17 => "file exists",
+        20 => "not a directory",
+        21 => "is a directory",
+        22 => "invalid argument",
+        24 => "too many open files",
+        28 => "no space left on device",
+        30 => "read-only file system",
+        36 => "file name too long",       // Linux ENAMETOOLONG
+        39 => "directory not empty",      // Linux ENOTEMPTY
+        63 => "file name too long",       // macOS ENAMETOOLONG
+        66 => "directory not empty",      // macOS ENOTEMPTY
+        _ => "I/O error (errno {code})",
+    };
+}
+
+// ── File type ────────────────────────────────────────────────────────────────
+
+type File `public `doc("A file handle. Use factory constructors to open files. Auto-closes on drop.") {
+    int _fd;
+
+    // ── Factory constructors ─────────────────────────────────────────────
+
+    open(string path, bool readonly = false) Self! `factory `public `doc("Opens an existing file. Pass readonly: true for read-only access.") {
+        int mode = 0;
+        if readonly { mode = 1; }
+        int fd = _io_file_open(path, mode);
+        if fd < 0 { raise _make_io_error(fd); }
+        return File(_fd: fd);
+    }
+
+    create(string path) Self! `factory `public `doc("Creates or truncates a file for reading and writing.") {
+        int fd = _io_file_open(path, 2);
+        if fd < 0 { raise _make_io_error(fd); }
+        return File(_fd: fd);
+    }
+
+    append(string path) Self! `factory `public `doc("Opens or creates a file for appending.") {
+        int fd = _io_file_open(path, 3);
+        if fd < 0 { raise _make_io_error(fd); }
+        return File(_fd: fd);
+    }
+
+    // ── Handle methods ───────────────────────────────────────────────────
+
+    close(~this)! `public `doc("Closes the file handle. Returns error on double-close.") {
+        if this._fd < 0 { raise IoError(code: 9, message: "bad file descriptor"); }
+        int rc = _io_file_close(this._fd);
+        this._fd = -1;
+        if rc < 0 { raise _make_io_error(rc); }
+    }
+
+    read_all(~this) string! `public `doc("Reads all remaining content into a string.") {
+        if this._fd < 0 { raise IoError(code: 9, message: "bad file descriptor"); }
+        string data = _io_file_read_all(this._fd);
+        // read_all bridge clears errno on success and preserves it on error.
+        // errno is read within the same bridge function (no thread migration).
+        int rc = _io_errno();
+        if rc != 0 { raise IoError(code: rc, message: _io_strerror(rc)); }
+        return data;
+    }
+
+    write_string(~this, string s)! `public `doc("Writes a string to the file.") {
+        if this._fd < 0 { raise IoError(code: 9, message: "bad file descriptor"); }
+        int written = _io_file_write_string(this._fd, s);
+        if written < 0 { raise _make_io_error(written); }
+    }
+
+    get position int! `public `doc("Returns the current byte position in the file.") {
+        if this._fd < 0 { raise IoError(code: 9, message: "bad file descriptor"); }
+        int pos = _io_file_seek(this._fd, 0, 1);
+        if pos < 0 { raise _make_io_error(pos); }
+        return pos;
+    }
+
+    seek(~this, int offset)! `public `doc("Seeks to a byte offset from the start of the file.") {
+        if this._fd < 0 { raise IoError(code: 9, message: "bad file descriptor"); }
+        int pos = _io_file_seek(this._fd, offset, 0);
+        if pos < 0 { raise _make_io_error(pos); }
+    }
+
+    // ── One-shot convenience (global) ────────────────────────────────────
+
+    read_content(string path) string! `global `public `doc("Reads entire file contents as a string.") {
+        File f = File.open(path, readonly: true);
+        string data = f.read_all();
+        f.close();
+        return data;
+    }
+
+    write_content(string path, string content)! `global `public `doc("Writes content to a file, creating or truncating it.") {
+        File f = File.create(path);
+        f.write_string(content);
+        f.close();
+    }
+
+    exists(string path) bool `global `public `doc("Returns true if the path exists.") => _io_file_exists(path) == 1;
+
+    size(string path) int! `global `public `doc("Returns the size of a file in bytes.") {
+        int s = _io_file_stat_size(path);
+        if s < 0 { raise _make_io_error(s); }
+        return s;
+    }
+
+    remove(string path)! `global `public `doc("Removes a file.") {
+        int rc = _io_file_remove(path);
+        if rc < 0 { raise _make_io_error(rc); }
+    }
+
+    // ── Auto-close on scope exit ─────────────────────────────────────────
+    drop(~this) {
+        if this._fd >= 0 {
+            _io_file_close(this._fd);
+        }
+    }
+}
+
+// ── Dir type ─────────────────────────────────────────────────────────────────
+
+type Dir `public `doc("Directory operations. All methods are global.") {
+    make(string path)! `global `public `doc("Creates a directory. Parent must exist.") {
+        int rc = _io_file_mkdir(path);
+        if rc < 0 { raise _make_io_error(rc); }
+    }
+
+    remove(string path)! `global `public `doc("Removes an empty directory.") {
+        int rc = _io_dir_remove(path);
+        if rc < 0 { raise _make_io_error(rc); }
+    }
+
+    exists(string path) bool `global `public `doc("Returns true if the path is a directory.") => _io_dir_exists(path) == 1;
+}

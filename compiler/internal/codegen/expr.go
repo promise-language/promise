@@ -2960,7 +2960,7 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *typ
 		if arm.Body != nil {
 			armVal = c.genExpr(arm.Body)
 		} else if arm.Block != nil {
-			c.genBlock(arm.Block)
+			armVal = c.genBlockValue(arm.Block)
 		}
 
 		armEnd := c.block
@@ -2996,6 +2996,16 @@ type matchArmInfo struct {
 // Arms that branch to mergeBlock but produce no value get a null placeholder.
 // Returns nil if no arm produces a value (match used as statement).
 func buildMatchPhi(mergeBlock *ir.Block, arms []matchArmInfo) value.Value {
+	// Filter out void-typed values — they cannot participate in phi nodes.
+	for i := range arms {
+		if arms[i].val != nil {
+			if _, isVoid := arms[i].val.Type().(*irtypes.VoidType); isVoid {
+				arms[i].val = nil
+				arms[i].hasV = false
+			}
+		}
+	}
+
 	hasAnyValue := false
 	for _, a := range arms {
 		if a.hasV {
@@ -3005,6 +3015,15 @@ func buildMatchPhi(mergeBlock *ir.Block, arms []matchArmInfo) value.Value {
 	}
 	if !hasAnyValue {
 		return nil
+	}
+
+	// Find a representative non-nil value type for zero-filling arms without values.
+	var valType irtypes.Type
+	for _, a := range arms {
+		if a.hasV && a.val != nil {
+			valType = a.val.Type()
+			break
+		}
 	}
 
 	var incomings []*ir.Incoming
@@ -3020,7 +3039,9 @@ func buildMatchPhi(mergeBlock *ir.Block, arms []matchArmInfo) value.Value {
 			continue
 		}
 		v := a.val
-		if v == nil {
+		if v == nil && valType != nil {
+			v = constant.NewZeroInitializer(valType)
+		} else if v == nil {
 			v = constant.NewNull(irtypes.I8Ptr)
 		}
 		incomings = append(incomings, &ir.Incoming{X: v, Pred: a.end})
@@ -3068,7 +3089,7 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 			if arm.Body != nil {
 				armVal = c.genExpr(arm.Body)
 			} else if arm.Block != nil {
-				c.genBlock(arm.Block)
+				armVal = c.genBlockValue(arm.Block)
 			}
 			armEnd := c.block
 			if c.block.Term == nil {
@@ -3096,7 +3117,7 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 			if arm.Body != nil {
 				armVal = c.genExpr(arm.Body)
 			} else if arm.Block != nil {
-				c.genBlock(arm.Block)
+				armVal = c.genBlockValue(arm.Block)
 			}
 			armEnd := c.block
 			if c.block.Term == nil {
@@ -3387,20 +3408,119 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 	if !isVoidResult(resultType) {
 		okVal = c.block.NewExtractValue(result, 1)
 	}
+
+	// Optional recovery: wrap ok value as some(T), non-recovering paths produce none.
+	if c.info.OptionalRecoveryHandlers[e] {
+		semaType := c.info.Types[e]
+		if c.typeSubst != nil {
+			semaType = types.Substitute(semaType, c.typeSubst)
+		}
+		optLLVM := c.resolveType(semaType)
+		optStructType, _ := optLLVM.(*irtypes.StructType)
+
+		// Wrap ok value as some(T) in the ok block.
+		if optStructType != nil && okVal != nil {
+			okVal = c.wrapOptional(okVal, optStructType)
+		}
+		c.block.NewBr(mergeBlock)
+		okEnd := c.block
+
+		noneVal := c.zeroValue(optLLVM)
+
+		// Wrap handler value in its block (before its br to merge).
+		var handlerOptVal value.Value = noneVal
+		handlerReachesMerge := false
+		if handlerEnd.Term != nil {
+			if _, isBr := handlerEnd.Term.(*ir.TermBr); isBr {
+				handlerReachesMerge = true
+				if handlerVal != nil {
+					if _, isVoid := handlerVal.Type().(*irtypes.VoidType); !isVoid {
+						// Insert wrapOptional before the existing br terminator.
+						savedBlock := c.block
+						c.block = handlerEnd
+						handlerEnd.Term = nil // remove br temporarily
+						handlerOptVal = c.wrapOptional(handlerVal, optStructType)
+						c.block.NewBr(mergeBlock) // re-add br
+						c.block = savedBlock
+					}
+				}
+			}
+		}
+
+		// Wrap noMatch value in its block.
+		var noMatchOptVal value.Value = noneVal
+		noMatchReachesMerge := false
+		if noMatchEnd != nil {
+			noMatchReachesMerge = true
+			if noMatchVal != nil {
+				if _, isVoid := noMatchVal.Type().(*irtypes.VoidType); !isVoid {
+					savedBlock := c.block
+					c.block = noMatchEnd
+					noMatchEnd.Term = nil
+					noMatchOptVal = c.wrapOptional(noMatchVal, optStructType)
+					c.block.NewBr(mergeBlock)
+					c.block = savedBlock
+				}
+			}
+		}
+
+		c.block = mergeBlock
+		var incomings []*ir.Incoming
+		incomings = append(incomings, &ir.Incoming{X: okVal, Pred: okEnd})
+		if handlerReachesMerge {
+			incomings = append(incomings, &ir.Incoming{X: handlerOptVal, Pred: handlerEnd})
+		}
+		if noMatchReachesMerge {
+			incomings = append(incomings, &ir.Incoming{X: noMatchOptVal, Pred: noMatchEnd})
+		}
+
+		if len(incomings) > 1 {
+			return mergeBlock.NewPhi(incomings...)
+		}
+		return okVal
+	}
+
 	c.block.NewBr(mergeBlock)
 	okEnd := c.block
 
-	// Merge with phi if both paths produce values
+	// Merge with phi if both paths produce compatible values.
+	// Treat void-typed values as nil (void call results cannot participate in phi).
 	c.block = mergeBlock
+	if handlerVal != nil {
+		if _, isVoid := handlerVal.Type().(*irtypes.VoidType); isVoid {
+			handlerVal = nil
+		}
+	}
+	if noMatchVal != nil {
+		if _, isVoid := noMatchVal.Type().(*irtypes.VoidType); isVoid {
+			noMatchVal = nil
+		}
+	}
 	if okVal != nil && handlerVal != nil {
 		incomings := []*ir.Incoming{
 			{X: okVal, Pred: okEnd},
 			{X: handlerVal, Pred: handlerEnd},
 		}
-		if noMatchEnd != nil {
+		if noMatchEnd != nil && noMatchVal != nil {
 			incomings = append(incomings, &ir.Incoming{X: noMatchVal, Pred: noMatchEnd})
 		}
 		return mergeBlock.NewPhi(incomings...)
+	}
+	// okVal defined in okBlock doesn't dominate mergeBlock when handler also
+	// reaches mergeBlock. Use a phi with a zero default from the handler path.
+	if okVal != nil && handlerEnd.Term != nil {
+		if _, isBr := handlerEnd.Term.(*ir.TermBr); isBr {
+			zeroVal := c.zeroValue(okVal.Type())
+			incomings := []*ir.Incoming{
+				{X: okVal, Pred: okEnd},
+				{X: zeroVal, Pred: handlerEnd},
+			}
+			if noMatchEnd != nil {
+				noMatchZero := c.zeroValue(okVal.Type())
+				incomings = append(incomings, &ir.Incoming{X: noMatchZero, Pred: noMatchEnd})
+			}
+			return mergeBlock.NewPhi(incomings...)
+		}
 	}
 	return okVal
 }

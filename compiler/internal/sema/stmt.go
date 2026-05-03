@@ -187,6 +187,16 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 				c.factoryLocals[s.Name] = true
 			}
 		}
+
+		// Auto-propagate failable calls in assignments within failable functions.
+		c.checkVarDeclFailable(s.Value)
+
+		// Error handler in value context must produce recovery value or diverge.
+		c.checkErrorHandlerRecovery(s.Value, declType)
+		// Update recorded type for optional recovery handlers
+		if c.info.OptionalRecoveryHandlers[s.Value] {
+			c.recordType(s.Value, declType)
+		}
 	}
 
 	if s.Name != "_" {
@@ -206,10 +216,103 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 		c.factoryLocals[s.Name] = true
 	}
 
+	// Auto-propagate failable calls in assignments within failable functions.
+	c.checkVarDeclFailable(s.Value)
+
+	// Error handler in value context must produce recovery value or diverge.
+	c.checkErrorHandlerRecovery(s.Value, nil)
+
+	// Non-recovering error handler in inferred decl: wrap type as optional
+	if c.info.OptionalRecoveryHandlers[s.Value] {
+		valType = types.NewOptional(valType)
+		c.recordType(s.Value, valType)
+	}
+
 	if s.Name != "_" {
 		c.checkNoShadow(s.Name, s.Pos())
 		c.insert(types.NewVar(tpos(s.Pos()), s.Name, valType))
 	}
+}
+
+// checkVarDeclFailable handles naked failable calls in variable declarations.
+// In failable functions, the error is auto-propagated to the caller.
+// In non-failable functions, it is a compile error.
+func (c *Checker) checkVarDeclFailable(expr ast.Expr) {
+	if !c.info.FailableExprs[expr] {
+		return
+	}
+	if c.curFunc != nil && c.curFunc.CanError() {
+		c.info.AutoPropagateExprs[expr] = true
+	} else {
+		c.errorf(expr.Pos(), "failable call must be handled with '?', '!', or an error handler")
+	}
+}
+
+// checkErrorHandlerRecovery validates that an error handler used in a value
+// context (variable declaration) either produces a recovery value or diverges.
+// Without this, the variable would get a zero-initialized value, which is
+// unsafe for types with drop methods (e.g., File with _fd=0 → closes stdin).
+//
+// declType is the declared type for typed declarations, or nil for inferred.
+// When the handler doesn't recover, optional-typed or inferred declarations
+// are allowed (variable becomes T?); non-optional typed declarations error.
+func (c *Checker) checkErrorHandlerRecovery(expr ast.Expr, declType types.Type) {
+	handler, ok := expr.(*ast.ErrorHandlerExpr)
+	if !ok {
+		return
+	}
+
+	// Check if a block either diverges or produces a non-void recovery value.
+	blockRecovers := func(body *ast.Block) bool {
+		if body == nil {
+			return false
+		}
+		if c.blockReturns(body) {
+			return true // diverges
+		}
+		if len(body.Stmts) > 0 {
+			if es, ok := body.Stmts[len(body.Stmts)-1].(*ast.ExprStmt); ok {
+				if typ := c.info.Types[es.Expr]; typ != nil && !types.Identical(typ, types.TypVoid) {
+					return true // produces a non-void value
+				}
+			}
+		}
+		return false
+	}
+
+	// All reachable error paths must recover for the handler to be "fully recovering".
+	// For typed handlers with else: both match body and else body are reachable.
+	// For typed handlers with ! suffix: non-match panics, only match body matters.
+	// For plain handlers: only the handler body matters.
+	handlerRecovers := blockRecovers(handler.Body)
+	if handlerRecovers {
+		if handler.ElseBody != nil {
+			// Typed handler with else: both bodies must recover.
+			if blockRecovers(handler.ElseBody) {
+				return // fully recovering
+			}
+		} else if handler.PanicOnNomatch || handler.TypeName == "" {
+			return // fully recovering (no else path or panic on nomatch)
+		} else {
+			// Typed handler without else/! in failable function — nomatch propagates.
+			return // fully recovering (nomatch auto-propagates)
+		}
+	}
+
+	// At least one path doesn't produce a recovery value and doesn't diverge.
+	// For optional-typed or inferred declarations, this is allowed — the
+	// variable becomes T? (some on success, none on error).
+	if declType != nil {
+		if _, isOpt := declType.(*types.Optional); isOpt {
+			c.info.OptionalRecoveryHandlers[expr] = true
+			return
+		}
+	} else {
+		// Inferred declaration — mark for optional wrapping
+		c.info.OptionalRecoveryHandlers[expr] = true
+		return
+	}
+	c.errorf(handler.Pos(), "error handler must produce a recovery value or diverge (return/raise) when used in an assignment")
 }
 
 func (c *Checker) checkDestructureVarDecl(s *ast.DestructureVarDecl) {

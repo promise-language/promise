@@ -1,0 +1,429 @@
+// Tests for failable getters: get name type! { ... }
+// Covers: bang unwrap, error handler recovery, auto-propagation,
+// optional recovery, typed error handlers, abstract/virtual dispatch,
+// string return type, match on getter result, chained getters.
+
+type ParseError is error { int code; }
+
+type Sensor {
+    int _raw;
+
+    get value int! {
+        if this._raw < 0 { raise ParseError(code: 1, message: "negative reading"); }
+        return this._raw;
+    }
+
+    get label string! {
+        if this._raw < 0 { raise error(message: "no label for negative"); }
+        if this._raw == 0 { return "zero"; }
+        if this._raw == 1 { return "one"; }
+        return "other";
+    }
+
+    get is_valid bool! {
+        if this._raw < 0 { raise error(message: "cannot validate negative"); }
+        return this._raw > 0;
+    }
+}
+
+// ============================================================
+// Section 1: Bang unwrap on failable getter
+// ============================================================
+
+test_getter_bang_success() `test {
+    Sensor s = Sensor(_raw: 42);
+    int v = s.value!;
+    assert(v == 42, "bang unwrap getter success");
+}
+
+test_getter_bang_zero() `test {
+    Sensor s = Sensor(_raw: 0);
+    int v = s.value!;
+    assert(v == 0, "bang unwrap getter zero");
+}
+
+test_getter_string_bang() `test {
+    Sensor s = Sensor(_raw: 1);
+    string l = s.label!;
+    assert(l == "one", "bang unwrap string getter");
+}
+
+test_getter_bool_bang() `test {
+    Sensor s = Sensor(_raw: 5);
+    bool b = s.is_valid!;
+    assert(b, "bang unwrap bool getter");
+}
+
+test_getter_bool_bang_false() `test {
+    Sensor s = Sensor(_raw: 0);
+    bool b = s.is_valid!;
+    assert(!b, "bang unwrap bool getter false");
+}
+
+// ============================================================
+// Section 2: Error handler recovery on failable getter
+// ============================================================
+
+test_getter_handler_recovery() `test {
+    Sensor s = Sensor(_raw: -1);
+    int v = s.value ? e { -99; };
+    assert(v == -99, "handler recovery on getter error");
+}
+
+test_getter_handler_success() `test {
+    Sensor s = Sensor(_raw: 10);
+    int v = s.value ? e { -99; };
+    assert(v == 10, "handler not triggered on getter success");
+}
+
+test_getter_string_handler() `test {
+    Sensor s = Sensor(_raw: -1);
+    string l = s.label ? e { "fallback"; };
+    assert(l == "fallback", "string getter handler recovery");
+}
+
+test_getter_string_handler_success() `test {
+    Sensor s = Sensor(_raw: 0);
+    string l = s.label ? e { "fallback"; };
+    assert(l == "zero", "string getter handler success path");
+}
+
+test_getter_handler_expression() `test {
+    Sensor s = Sensor(_raw: -5);
+    int base = 100;
+    int v = s.value ? e { base + 1; };
+    assert(v == 101, "handler recovery expression using outer scope");
+}
+
+// ============================================================
+// Section 3: Error handler with error inspection
+// ============================================================
+
+test_getter_handler_message() `test {
+    Sensor s = Sensor(_raw: -1);
+    string msg = "";
+    s.value ? e {
+        msg = e.message;
+    };
+    assert(msg == "negative reading", "getter error message accessible");
+}
+
+test_getter_typed_handler() `test {
+    Sensor s = Sensor(_raw: -1);
+    int code = 0;
+    s.value ? e is ParseError {
+        code = e.code;
+    }!;
+    assert(code == 1, "typed handler catches ParseError from getter");
+}
+
+// ============================================================
+// Section 4: Auto-propagation of failable getter
+// ============================================================
+
+read_sensor(Sensor s) int! {
+    int v = s.value;
+    return v * 2;
+}
+
+test_getter_auto_prop_success() `test {
+    Sensor s = Sensor(_raw: 21);
+    int r = read_sensor(s)!;
+    assert(r == 42, "auto-propagation of getter success");
+}
+
+test_getter_auto_prop_fail() `test {
+    Sensor s = Sensor(_raw: -1);
+    bool caught = false;
+    read_sensor(s) ? e {
+        caught = true;
+        assert(e.message == "negative reading", "auto-propagated getter error");
+    };
+    assert(caught, "auto-propagated getter failure caught");
+}
+
+read_label(Sensor s) string! {
+    string l = s.label;
+    return "label: " + l;
+}
+
+test_getter_auto_prop_string() `test {
+    Sensor s = Sensor(_raw: 0);
+    string r = read_label(s)!;
+    assert(r == "label: zero", "auto-propagation of string getter");
+}
+
+test_getter_auto_prop_string_fail() `test {
+    Sensor s = Sensor(_raw: -1);
+    bool caught = false;
+    read_label(s) ? e {
+        caught = true;
+    };
+    assert(caught, "string getter auto-prop failure");
+}
+
+// ============================================================
+// Section 5: Optional recovery (non-recovering handler)
+// ============================================================
+
+test_getter_optional_inferred_error() `test {
+    Sensor s = Sensor(_raw: -1);
+    x := s.value ? e { println("handled"); };
+    assert("{x}" == "none", "inferred optional recovery on getter error");
+}
+
+test_getter_optional_inferred_success() `test {
+    Sensor s = Sensor(_raw: 42);
+    x := s.value ? e { println("handled"); };
+    assert("{x}" == "42", "inferred optional recovery on getter success");
+}
+
+test_getter_optional_typed_error() `test {
+    Sensor s = Sensor(_raw: -1);
+    int? x = s.value ? e { println("handled"); };
+    assert("{x}" == "none", "typed optional recovery on getter error");
+}
+
+test_getter_optional_typed_success() `test {
+    Sensor s = Sensor(_raw: 7);
+    int? x = s.value ? e { println("handled"); };
+    assert("{x}" == "7", "typed optional recovery on getter success");
+}
+
+// ============================================================
+// Section 6: Handler with divergence (return)
+// ============================================================
+
+read_or_default(Sensor s) int {
+    int v = s.value ? e { return -1; };
+    return v;
+}
+
+test_getter_diverge_return_error() `test {
+    Sensor s = Sensor(_raw: -5);
+    int r = read_or_default(s);
+    assert(r == -1, "getter handler diverges with return on error");
+}
+
+test_getter_diverge_return_success() `test {
+    Sensor s = Sensor(_raw: 50);
+    int r = read_or_default(s);
+    assert(r == 50, "getter success when handler would diverge");
+}
+
+// ============================================================
+// Section 7: Handler with divergence (re-raise)
+// ============================================================
+
+reraise_getter(Sensor s) int! {
+    int v = s.value ? e { raise e; };
+    return v;
+}
+
+test_getter_reraise() `test {
+    Sensor s = Sensor(_raw: -1);
+    bool caught = false;
+    reraise_getter(s) ? e {
+        caught = true;
+        assert(e.message == "negative reading", "re-raised getter error");
+    };
+    assert(caught, "re-raised getter error caught");
+}
+
+// ============================================================
+// Section 8: Typed handler with else on getter
+// ============================================================
+
+type ConfigError is error { string key; }
+
+type Config {
+    int _mode;
+
+    get mode int! {
+        if this._mode == -1 { raise ConfigError(key: "mode", message: "missing mode"); }
+        if this._mode == -2 { raise error(message: "generic config error"); }
+        return this._mode;
+    }
+}
+
+test_getter_typed_else_match() `test {
+    Config c = Config(_mode: -1);
+    int v = c.mode ? e is ConfigError { -99; } else e { -1; };
+    assert(v == -99, "typed handler matched ConfigError from getter");
+}
+
+test_getter_typed_else_nomatch() `test {
+    Config c = Config(_mode: -2);
+    int v = c.mode ? e is ConfigError { -99; } else e { -1; };
+    assert(v == -1, "typed handler fell through to else on getter");
+}
+
+test_getter_typed_else_success() `test {
+    Config c = Config(_mode: 5);
+    int v = c.mode ? e is ConfigError { -99; } else e { -1; };
+    assert(v == 5, "typed handler not triggered on getter success");
+}
+
+test_getter_typed_else_optional() `test {
+    Config c = Config(_mode: -2);
+    v := c.mode ? e is ConfigError { -99; } else e { println("else"); };
+    assert("{v}" == "none", "typed handler else non-recovery produces none");
+}
+
+test_getter_typed_else_optional_match() `test {
+    Config c = Config(_mode: -1);
+    v := c.mode ? e is ConfigError { -99; } else e { println("else"); };
+    assert("{v}" == "-99", "typed handler match produces some value");
+}
+
+test_getter_typed_bang_match() `test {
+    Config c = Config(_mode: -1);
+    int v = c.mode ? e is ConfigError { -99; }!;
+    assert(v == -99, "typed handler with ! matched ConfigError from getter");
+}
+
+// ============================================================
+// Section 9: Abstract/virtual failable getter dispatch
+// ============================================================
+
+type Source {
+    get data int! `abstract;
+}
+
+type GoodSource is Source {
+    int _val;
+    get data int! { return this._val; }
+}
+
+type BadSource is Source {
+    get data int! { raise error(message: "no data"); }
+}
+
+read_source(Source src) int! {
+    return src.data;
+}
+
+test_virtual_getter_success() `test {
+    Source s = GoodSource(_val: 77);
+    int v = read_source(s)!;
+    assert(v == 77, "virtual getter dispatch success");
+}
+
+test_virtual_getter_fail() `test {
+    Source s = BadSource();
+    bool caught = false;
+    read_source(s) ? e {
+        caught = true;
+        assert(e.message == "no data", "virtual getter dispatch error");
+    };
+    assert(caught, "virtual getter error caught");
+}
+
+test_virtual_getter_handler() `test {
+    Source s = BadSource();
+    int v = read_source(s) ? e { 0; };
+    assert(v == 0, "virtual getter with handler recovery");
+}
+
+// ============================================================
+// Section 10: Match on failable getter result
+// ============================================================
+
+test_match_getter_bang() `test {
+    Sensor s = Sensor(_raw: 0);
+    string r = match s.label! {
+        "zero" => "got zero",
+        _ => "other",
+    };
+    assert(r == "got zero", "match on getter! result");
+}
+
+test_match_getter_via_temp() `test {
+    Sensor s = Sensor(_raw: 1);
+    string l = s.label ? e { "error"; };
+    string r = match l {
+        "one" => "got one",
+        "error" => "was error",
+        _ => "other",
+    };
+    assert(r == "got one", "match on getter via temp variable");
+}
+
+test_match_getter_via_temp_error() `test {
+    Sensor s = Sensor(_raw: -1);
+    string l = s.label ? e { "error"; };
+    string r = match l {
+        "one" => "got one",
+        "error" => "was error",
+        _ => "other",
+    };
+    assert(r == "was error", "match on getter error via temp");
+}
+
+// ============================================================
+// Section 11: Failable getter in chain
+// ============================================================
+
+classify_reading(Sensor s) string! {
+    int v = s.value;
+    if v == 0 { return "zero"; }
+    if v > 100 { return "high"; }
+    return "normal";
+}
+
+test_getter_chain_success() `test {
+    Sensor s = Sensor(_raw: 50);
+    string r = classify_reading(s)!;
+    assert(r == "normal", "getter chain classify normal");
+}
+
+test_getter_chain_high() `test {
+    Sensor s = Sensor(_raw: 200);
+    string r = classify_reading(s)!;
+    assert(r == "high", "getter chain classify high");
+}
+
+test_getter_chain_fail() `test {
+    Sensor s = Sensor(_raw: -1);
+    bool caught = false;
+    classify_reading(s) ? e {
+        caught = true;
+    };
+    assert(caught, "getter chain propagates failure");
+}
+
+// ============================================================
+// Section 12: Multiple getters on same object
+// ============================================================
+
+test_multiple_getters_success() `test {
+    Sensor s = Sensor(_raw: 1);
+    int v = s.value!;
+    string l = s.label!;
+    bool b = s.is_valid!;
+    assert(v == 1, "multi getter: value");
+    assert(l == "one", "multi getter: label");
+    assert(b, "multi getter: is_valid");
+}
+
+describe_sensor(Sensor s) string! {
+    int v = s.value;
+    string l = s.label;
+    return "{l}={v}";
+}
+
+test_multiple_getters_auto_prop() `test {
+    Sensor s = Sensor(_raw: 0);
+    string r = describe_sensor(s)!;
+    assert(r == "zero=0", "multiple getters auto-prop");
+}
+
+test_multiple_getters_first_fails() `test {
+    Sensor s = Sensor(_raw: -1);
+    bool caught = false;
+    describe_sensor(s) ? e {
+        caught = true;
+        assert(e.message == "negative reading", "first getter fails in chain");
+    };
+    assert(caught, "first getter failure propagated");
+}

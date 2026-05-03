@@ -1,0 +1,506 @@
+// Tests for error propagation interacting with match expressions.
+// Tests cover: failable subjects, handlers in arms, raise in arm blocks,
+// enum match with failable blocks, failable function chains with match,
+// optional recovery from match-based functions.
+
+type IoError is error { int code; }
+
+parse_int(string s) int! {
+    if s == "42" { return 42; }
+    if s == "0" { return 0; }
+    if s == "7" { return 7; }
+    if s == "99" { return 99; }
+    raise error(message: "bad: " + s);
+}
+
+get_value(int key) string! {
+    if key == 1 { return "one"; }
+    if key == 2 { return "two"; }
+    raise error(message: "unknown key");
+}
+
+classify_code(int code) string! {
+    if code < 0 { raise error(message: "negative code"); }
+    return match code {
+        0 => "ok",
+        1 => "warn",
+        2 => "err",
+        _ => "unknown",
+    };
+}
+
+enum Status { Ok, Warn, Err }
+
+status_for_code(int code) Status! {
+    if code < 0 { raise error(message: "negative"); }
+    return match code {
+        0 => Status.Ok,
+        1 => Status.Warn,
+        _ => Status.Err,
+    };
+}
+
+// ============================================================
+// Section 1: Match subject is failable call with !
+// ============================================================
+
+test_match_subject_bang_42() `test {
+    string r = match parse_int("42")! {
+        42 => "got 42",
+        _ => "other",
+    };
+    assert(r == "got 42", "match on failable! subject 42");
+}
+
+test_match_subject_bang_zero() `test {
+    string r = match parse_int("0")! {
+        0 => "zero",
+        42 => "42",
+        _ => "other",
+    };
+    assert(r == "zero", "match on failable! subject zero");
+}
+
+// ============================================================
+// Section 2: Match subject from ? handler (via temp variable)
+// ============================================================
+
+test_match_subject_handler_success() `test {
+    int subject = parse_int("42") ? e { 0; };
+    string r = match subject {
+        42 => "got 42",
+        0 => "error fallback",
+        _ => "other",
+    };
+    assert(r == "got 42", "match on handled subject success");
+}
+
+test_match_subject_handler_error() `test {
+    int subject = parse_int("bad") ? e { 0; };
+    string r = match subject {
+        42 => "got 42",
+        0 => "error fallback",
+        _ => "other",
+    };
+    assert(r == "error fallback", "match on handled subject error path");
+}
+
+// ============================================================
+// Section 3: Failable call in match arm with ! unwrap
+// ============================================================
+
+test_match_arm_bang_success() `test {
+    int selector = 1;
+    int r = match selector {
+        1 => parse_int("42")!,
+        _ => 0,
+    };
+    assert(r == 42, "bang in match arm success");
+}
+
+test_match_arm_bang_second() `test {
+    int selector = 2;
+    int r = match selector {
+        1 => 99,
+        2 => parse_int("0")!,
+        _ => 0,
+    };
+    assert(r == 0, "bang in second match arm");
+}
+
+// ============================================================
+// Section 4: Failable call in match arm with ? handler
+// ============================================================
+
+test_match_arm_handler_error() `test {
+    int selector = 1;
+    int r = match selector {
+        1 => parse_int("bad") ? e { 0; },
+        _ => 99,
+    };
+    assert(r == 0, "handler in match arm recovers on error");
+}
+
+test_match_arm_handler_success() `test {
+    int selector = 1;
+    int r = match selector {
+        1 => parse_int("42") ? e { 0; },
+        _ => 99,
+    };
+    assert(r == 42, "handler in match arm, success path");
+}
+
+test_match_arm_handler_multiple() `test {
+    int selector = 2;
+    int r = match selector {
+        1 => parse_int("42") ? e { 0; },
+        2 => parse_int("bad") ? e { 0; },
+        _ => 99,
+    };
+    assert(r == 0, "handler in second match arm recovers");
+}
+
+test_match_arm_handler_wildcard() `test {
+    int selector = 99;
+    int r = match selector {
+        1 => parse_int("42") ? e { 0; },
+        _ => 77,
+    };
+    assert(r == 77, "wildcard arm when failable arms exist");
+}
+
+// ============================================================
+// Section 5: raise inside match arm (block form)
+// ============================================================
+
+match_with_raise(int code) string! {
+    return match code {
+        0 => "ok",
+        1 => { raise error(message: "code 1"); },
+        2 => { raise IoError(code: code, message: "io error"); },
+        _ => "unknown",
+    };
+}
+
+test_match_raise_success() `test {
+    string r = match_with_raise(0)!;
+    assert(r == "ok", "match raise: success path");
+}
+
+test_match_raise_error() `test {
+    bool caught = false;
+    match_with_raise(1) ? e {
+        caught = true;
+        assert(e.message == "code 1", "raise in match arm propagates");
+    };
+    assert(caught, "match raise error caught");
+}
+
+test_match_raise_custom() `test {
+    bool caught = false;
+    match_with_raise(2) ? e is IoError {
+        caught = true;
+        assert(e.code == 2, "custom error from match arm");
+    }!;
+    assert(caught, "custom error type from match arm");
+}
+
+test_match_raise_wildcard() `test {
+    string r = match_with_raise(99)!;
+    assert(r == "unknown", "match wildcard, no raise");
+}
+
+// ============================================================
+// Section 6: Enum match with failable block in arm
+// ============================================================
+
+enum Op { Add, Sub, Div }
+
+compute(Op op, int a, int b) int! {
+    return match op {
+        Op.Add => a + b,
+        Op.Sub => a - b,
+        Op.Div => {
+            if b == 0 { raise error(message: "division by zero"); }
+            a / b;
+        },
+    };
+}
+
+test_compute_add() `test {
+    int r = compute(Op.Add, 10, 3)!;
+    assert(r == 13, "enum match add");
+}
+
+test_compute_sub() `test {
+    int r = compute(Op.Sub, 10, 3)!;
+    assert(r == 7, "enum match sub");
+}
+
+test_compute_div_ok() `test {
+    int r = compute(Op.Div, 10, 2)!;
+    assert(r == 5, "enum match div ok");
+}
+
+test_compute_div_zero() `test {
+    bool caught = false;
+    compute(Op.Div, 10, 0) ? e {
+        caught = true;
+        assert(e.message == "division by zero", "div by zero error");
+    };
+    assert(caught, "division by zero caught");
+}
+
+// ============================================================
+// Section 7: Failable function that returns match (non-failable arms)
+// ============================================================
+
+test_get_value_one() `test {
+    string r = get_value(1)!;
+    assert(r == "one", "get_value(1)");
+}
+
+test_get_value_two() `test {
+    string r = get_value(2)!;
+    assert(r == "two", "get_value(2)");
+}
+
+test_get_value_error() `test {
+    bool caught = false;
+    get_value(99) ? e {
+        caught = true;
+        assert(e.message == "unknown key", "get_value error");
+    };
+    assert(caught, "get_value error caught");
+}
+
+// ============================================================
+// Section 8: Match result with ? handler (recovery + optional)
+// ============================================================
+
+test_match_result_recovery() `test {
+    string s = get_value(99) ? e { "fallback"; };
+    assert(s == "fallback", "handler recovery on failable match function");
+}
+
+test_match_result_success() `test {
+    string s = get_value(1) ? e { "fallback"; };
+    assert(s == "one", "success through handler");
+}
+
+test_match_result_optional_error() `test {
+    r := get_value(99) ? e { println("caught"); };
+    assert("{r}" == "none", "optional recovery on error");
+}
+
+test_match_result_optional_success() `test {
+    r := get_value(1) ? e { println("caught"); };
+    assert("{r}" == "one", "optional recovery on success");
+}
+
+// ============================================================
+// Section 9: Auto-propagation chain through match-returning function
+// ============================================================
+
+classify_and_parse(string input) string! {
+    int code = parse_int(input);
+    return classify_code(code);
+}
+
+test_chain_ok() `test {
+    string r = classify_and_parse("0")!;
+    assert(r == "ok", "chain: parse -> classify -> ok");
+}
+
+test_chain_unknown() `test {
+    string r = classify_and_parse("7")!;
+    assert(r == "unknown", "chain: parse -> classify -> unknown");
+}
+
+test_chain_parse_fail() `test {
+    bool caught = false;
+    classify_and_parse("bad") ? e {
+        caught = true;
+        assert(e.message == "bad: bad", "chain: parse fails");
+    };
+    assert(caught, "parse failure propagated");
+}
+
+// ============================================================
+// Section 10: Match on enum from failable function
+// ============================================================
+
+describe_status(int code) string! {
+    Status s = status_for_code(code);
+    return match s {
+        Status.Ok => "all good",
+        Status.Warn => "warning",
+        Status.Err => "error",
+    };
+}
+
+test_status_ok() `test {
+    string r = describe_status(0)!;
+    assert(r == "all good", "status ok");
+}
+
+test_status_warn() `test {
+    string r = describe_status(1)!;
+    assert(r == "warning", "status warn");
+}
+
+test_status_err() `test {
+    string r = describe_status(5)!;
+    assert(r == "error", "status err");
+}
+
+test_status_negative() `test {
+    bool caught = false;
+    describe_status(-1) ? e {
+        caught = true;
+        assert(e.message == "negative", "negative propagated");
+    };
+    assert(caught, "failable enum function error caught");
+}
+
+// ============================================================
+// Section 11: Nested auto-prop then match on result
+// ============================================================
+
+nested_match_errors(int outer_sel, int inner_val) string! {
+    if outer_sel == 1 {
+        int parsed = parse_int("{inner_val}");
+        return match parsed {
+            42 => "found 42",
+            _ => "other",
+        };
+    }
+    if outer_sel == 2 {
+        int v = parse_int("{inner_val}");
+        return "parsed: {v}";
+    }
+    return "default";
+}
+
+test_nested_outer1_inner42() `test {
+    string r = nested_match_errors(1, 42)!;
+    assert(r == "found 42", "nested: outer=1, inner=42");
+}
+
+test_nested_outer1_inner0() `test {
+    string r = nested_match_errors(1, 0)!;
+    assert(r == "other", "nested: outer=1, inner=0");
+}
+
+test_nested_outer2_success() `test {
+    string r = nested_match_errors(2, 0)!;
+    assert(r == "parsed: 0", "nested: outer=2, success");
+}
+
+test_nested_outer2_fail() `test {
+    bool caught = false;
+    nested_match_errors(2, 5) ? e {
+        caught = true;
+    };
+    assert(caught, "nested: outer=2, auto-prop fails");
+}
+
+test_nested_default() `test {
+    string r = nested_match_errors(99, 0)!;
+    assert(r == "default", "nested default");
+}
+
+// ============================================================
+// Section 12: Enum match dispatch to failable functions
+// ============================================================
+
+enum Shape {
+    Circle(int radius),
+    Rect(int width, int height),
+}
+
+validate_circle(int radius) int! {
+    if radius <= 0 { raise error(message: "invalid radius"); }
+    return radius * radius * 3;
+}
+
+validate_rect(int width, int height) int! {
+    if width <= 0 { raise error(message: "invalid width"); }
+    if height <= 0 { raise error(message: "invalid height"); }
+    return width * height;
+}
+
+test_circle_ok() `test {
+    int a = validate_circle(5)!;
+    assert(a == 75, "circle 5*5*3");
+}
+
+test_rect_ok() `test {
+    int a = validate_rect(4, 6)!;
+    assert(a == 24, "rect 4*6");
+}
+
+test_circle_invalid() `test {
+    bool caught = false;
+    validate_circle(0) ? e {
+        caught = true;
+        assert(e.message == "invalid radius", "radius error");
+    };
+    assert(caught, "invalid radius caught");
+}
+
+test_rect_invalid_width() `test {
+    bool caught = false;
+    validate_rect(0, 5) ? e {
+        caught = true;
+        assert(e.message == "invalid width", "width error");
+    };
+    assert(caught, "invalid width caught");
+}
+
+test_rect_invalid_height() `test {
+    bool caught = false;
+    validate_rect(3, 0) ? e {
+        caught = true;
+        assert(e.message == "invalid height", "height error");
+    };
+    assert(caught, "invalid height caught");
+}
+
+// Dispatch via enum match using ! in arm expression
+test_shape_dispatch_circle() `test {
+    Shape s = Shape.Circle(5);
+    int r = match s {
+        Shape.Circle(rad) => validate_circle(rad)!,
+        Shape.Rect(w, h) => validate_rect(w, h)!,
+    };
+    assert(r == 75, "shape dispatch circle");
+}
+
+test_shape_dispatch_rect() `test {
+    Shape s = Shape.Rect(3, 4);
+    int r = match s {
+        Shape.Circle(rad) => validate_circle(rad)!,
+        Shape.Rect(w, h) => validate_rect(w, h)!,
+    };
+    assert(r == 12, "shape dispatch rect");
+}
+
+// Dispatch via enum match using ? handler in arm
+test_shape_dispatch_with_handler() `test {
+    Shape s = Shape.Circle(0);
+    int r = match s {
+        Shape.Circle(rad) => validate_circle(rad) ? e { 0; },
+        Shape.Rect(w, h) => validate_rect(w, h) ? e { 0; },
+    };
+    assert(r == 0, "shape dispatch with handler recovery");
+}
+
+// ============================================================
+// Section 13: Mixed error handling strategies in match arms
+// ============================================================
+
+test_mixed_strategies() `test {
+    // Handler recovery
+    int sel = 1;
+    int r1 = match sel {
+        1 => parse_int("bad") ? e { 0; },
+        _ => 99,
+    };
+    assert(r1 == 0, "handler recovery in arm");
+
+    // Bang unwrap
+    sel = 2;
+    int r2 = match sel {
+        2 => parse_int("42")!,
+        _ => 0,
+    };
+    assert(r2 == 42, "bang unwrap in arm");
+
+    // Subject with handler
+    int r3 = match (parse_int("42") ? e { 0; }) {
+        42 => 1,
+        _ => 0,
+    };
+    assert(r3 == 1, "handler on subject");
+}

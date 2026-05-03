@@ -1006,6 +1006,9 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 			if g.Deprecated() != "" {
 				c.warnf(e.Pos(), "use of deprecated getter '%s'", e.Field)
 			}
+			if g.Sig().CanError() {
+				c.info.FailableExprs[e] = true
+			}
 			return types.Substitute(g.Sig().Result(), parentSubst)
 		}
 		if m := t.LookupMethod(e.Field); m != nil {
@@ -1064,7 +1067,7 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 		return nil
 
 	case *types.Instance:
-		return c.resolveInstanceMember(e.Pos(), t, e.Field)
+		return c.resolveInstanceMember(e, e.Pos(), t, e.Field)
 
 	case *types.Array:
 		// Arrays delegate to TypVector for field/method lookup
@@ -1073,6 +1076,9 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 			return types.Substitute(f.Type(), subst)
 		}
 		if g := types.TypVector.LookupGetter(e.Field); g != nil {
+			if g.Sig().CanError() {
+				c.info.FailableExprs[e] = true
+			}
 			return types.Substitute(g.Sig().Result(), subst)
 		}
 		if m := types.TypVector.LookupMethod(e.Field); m != nil {
@@ -1115,7 +1121,7 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 }
 
 // resolveInstanceMember resolves field/method/variant access on a generic Instance.
-func (c *Checker) resolveInstanceMember(pos ast.Pos, inst *types.Instance, name string) types.Type {
+func (c *Checker) resolveInstanceMember(expr ast.Expr, pos ast.Pos, inst *types.Instance, name string) types.Type {
 	switch origin := inst.Origin().(type) {
 	case *types.Named:
 		subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
@@ -1131,6 +1137,9 @@ func (c *Checker) resolveInstanceMember(pos ast.Pos, inst *types.Instance, name 
 		if g := origin.LookupGetter(name); g != nil {
 			if g.Deprecated() != "" {
 				c.warnf(pos, "use of deprecated getter '%s'", name)
+			}
+			if g.Sig().CanError() {
+				c.info.FailableExprs[expr] = true
 			}
 			if !hasOwnGetter(origin, name) {
 				subst = c.composeParentSubst(origin, inst.TypeArgs(), name, memberGetter)
@@ -1737,7 +1746,7 @@ func (c *Checker) checkOptionalChainExpr(e *ast.OptionalChainExpr) types.Type {
 		return nil
 
 	case *types.Instance:
-		result := c.resolveInstanceMember(e.Pos(), t, e.Field)
+		result := c.resolveInstanceMember(e, e.Pos(), t, e.Field)
 		if result != nil {
 			return types.NewOptional(result)
 		}

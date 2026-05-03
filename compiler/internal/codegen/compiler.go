@@ -484,6 +484,7 @@ func compile(file *ast.File, info *sema.Info, target string, cachedInstances map
 	c.definePALBodies()
 	c.defineMathBodies()
 	c.defineF64ToStringBridge() // bridge promise_f64_to_string → Promise _f64_to_str
+	c.defineFileIOBodies()      // bridge io module externs → PAL file I/O functions
 
 	c.defineTypeMethods(file)
 	c.defineMonoMethods(file, monoInstances)

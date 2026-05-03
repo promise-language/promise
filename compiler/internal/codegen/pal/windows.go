@@ -1006,10 +1006,14 @@ func (p *WindowsPAL) EmitChdir(module *ir.Module) *ir.Func {
 	return fn
 }
 
-// EmitExecute returns -1 stub (not yet implemented on Windows).
-func (p *WindowsPAL) EmitExecute(module *ir.Module) *ir.Func {
-	return emitStubExecute(module)
-}
+// EmitSpawn returns -1 stub (not yet implemented on Windows).
+func (p *WindowsPAL) EmitSpawn(module *ir.Module) *ir.Func { return emitStubSpawn(module) }
+
+// EmitReadPipe stub (not yet implemented on Windows).
+func (p *WindowsPAL) EmitReadPipe(module *ir.Module) *ir.Func { return emitStubReadPipe(module) }
+
+// EmitWaitPid returns -1 stub (not yet implemented on Windows).
+func (p *WindowsPAL) EmitWaitPid(module *ir.Module) *ir.Func { return emitStubWaitPid(module) }
 
 // EmitGetCwd declares UCRT @_getcwd and defines @pal_getcwd.
 // Signature: @pal_getcwd(i8* buf, i64 len) → i8* (buf or null)

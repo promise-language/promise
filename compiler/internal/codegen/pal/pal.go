@@ -94,12 +94,18 @@ type PAL interface {
 	// EmitChdir defines @pal_chdir(i8* path) → i32 (0=ok, -1=error)
 	EmitChdir(module *ir.Module) *ir.Func
 
-	// Process execution primitives
-	// EmitExecute defines @pal_execute(i8* program, i8** argv,
-	//   i8** out_stdout, i64* out_stdout_len, i8** out_stderr, i64* out_stderr_len) → i32
-	// Returns exit code (0-255) on success, -1 on error.
-	// out_stdout/out_stderr are malloc'd buffers — caller must free.
-	EmitExecute(module *ir.Module) *ir.Func
+	// Process execution primitives (decomposed for concurrent pipe reads)
+	// EmitSpawn defines @pal_spawn(i8* program, i8** argv, i32* out_stdout_fd, i32* out_stderr_fd) → i32
+	// Forks and execs program with argv. Returns child pid on success, -1 on error.
+	// Output params receive the read ends of stdout/stderr pipes.
+	EmitSpawn(module *ir.Module) *ir.Func
+	// EmitReadPipe defines @pal_read_pipe(i32 fd, i8** out_buf, i64* out_len) → void
+	// Reads fd to EOF into malloc'd buffer, then closes fd. Caller must free out_buf.
+	EmitReadPipe(module *ir.Module) *ir.Func
+	// EmitWaitPid defines @pal_wait_pid(i32 pid) → i32
+	// Waits for child process. Returns exit code (0-255) on success, -1 on error.
+	// Retries on EINTR.
+	EmitWaitPid(module *ir.Module) *ir.Func
 
 	// Directory listing primitives (Phase D)
 	// EmitDirOpen defines @pal_dir_open(i8* path) → i8* (DIR*/handle or null)
@@ -503,23 +509,44 @@ func emitStubDirClose(module *ir.Module) *ir.Func {
 
 // --- Stub process execution implementations (used by WASM and Windows PALs) ---
 
-// emitStubExecute returns -1 (no process execution support).
-// Sets out pointers to null/0.
-func emitStubExecute(module *ir.Module) *ir.Func {
+// emitStubSpawn returns -1 (no process execution support).
+// Sets out fd pointers to -1.
+func emitStubSpawn(module *ir.Module) *ir.Func {
 	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
-	fn := module.NewFunc("pal_execute", irtypes.I32,
+	i32PtrType := irtypes.NewPointer(irtypes.I32)
+	fn := module.NewFunc("pal_spawn", irtypes.I32,
 		ir.NewParam("program", irtypes.I8Ptr),
 		ir.NewParam("argv", i8PtrPtrType),
-		ir.NewParam("out_stdout", irtypes.NewPointer(irtypes.I8Ptr)),
-		ir.NewParam("out_stdout_len", irtypes.NewPointer(irtypes.I64)),
-		ir.NewParam("out_stderr", irtypes.NewPointer(irtypes.I8Ptr)),
-		ir.NewParam("out_stderr_len", irtypes.NewPointer(irtypes.I64)))
+		ir.NewParam("out_stdout_fd", i32PtrType),
+		ir.NewParam("out_stderr_fd", i32PtrType))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
-	entry.NewStore(constant.NewNull(irtypes.I8Ptr), fn.Params[2])
-	entry.NewStore(constant.NewInt(irtypes.I64, 0), fn.Params[3])
-	entry.NewStore(constant.NewNull(irtypes.I8Ptr), fn.Params[4])
-	entry.NewStore(constant.NewInt(irtypes.I64, 0), fn.Params[5])
+	entry.NewStore(constant.NewInt(irtypes.I32, -1), fn.Params[2])
+	entry.NewStore(constant.NewInt(irtypes.I32, -1), fn.Params[3])
+	entry.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}
+
+// emitStubReadPipe stores null/0 to output pointers (no I/O support).
+func emitStubReadPipe(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_read_pipe", irtypes.Void,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("out_buf", irtypes.NewPointer(irtypes.I8Ptr)),
+		ir.NewParam("out_len", irtypes.NewPointer(irtypes.I64)))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewStore(constant.NewNull(irtypes.I8Ptr), fn.Params[1])
+	entry.NewStore(constant.NewInt(irtypes.I64, 0), fn.Params[2])
+	entry.NewRet(nil)
+	return fn
+}
+
+// emitStubWaitPid returns -1 (no process support).
+func emitStubWaitPid(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_wait_pid", irtypes.I32,
+		ir.NewParam("pid", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
 	entry.NewRet(constant.NewInt(irtypes.I32, -1))
 	return fn
 }

@@ -187,17 +187,17 @@ type Compiler struct {
 	palSetEnv       *ir.Func // @pal_setenv(i8* name, i8* value) → i32
 	palUnsetEnv     *ir.Func // @pal_unsetenv(i8* name) → i32
 	palChdir        *ir.Func // @pal_chdir(i8* path) → i32
-	palExecute      *ir.Func // @pal_execute(i8* program, i8** argv, ...) → i32
+	palSpawn        *ir.Func // @pal_spawn(i8* program, i8** argv, i32* out_stdout_fd, i32* out_stderr_fd) → i32
+	palReadPipe     *ir.Func // @pal_read_pipe(i32 fd, i8** out_buf, i64* out_len) → void
+	palWaitPid      *ir.Func // @pal_wait_pid(i32 pid) → i32
 
 	// Command-line argument globals (populated from main's argc/argv)
 	argcGlobal *ir.Global // @__promise_argc (i32)
 	argvGlobal *ir.Global // @__promise_argv (i8**)
 
-	// Execute result TLS globals (cached between _os_execute and _os_execute_stdout/stderr)
-	execStdoutPtr *ir.Global // @__promise_exec_stdout_ptr (TLS, i8*)
-	execStdoutLen *ir.Global // @__promise_exec_stdout_len (TLS, i64)
-	execStderrPtr *ir.Global // @__promise_exec_stderr_ptr (TLS, i8*)
-	execStderrLen *ir.Global // @__promise_exec_stderr_len (TLS, i64)
+	// Spawn result TLS globals (cached between _os_spawn and _os_spawn_stdout_fd/stderr_fd)
+	spawnStdoutFd *ir.Global // @__promise_spawn_stdout_fd (TLS, i32)
+	spawnStderrFd *ir.Global // @__promise_spawn_stderr_fd (TLS, i32)
 
 	// Scheduler globals (Phase 5c — M:N scheduler)
 	currentGGlobal     *ir.Global // @__promise_current_g (TLS, i8*)
@@ -997,26 +997,22 @@ func (c *Compiler) declareIntrinsics() {
 	c.palSetEnv = p.EmitSetEnv(c.module)
 	c.palUnsetEnv = p.EmitUnsetEnv(c.module)
 	c.palChdir = p.EmitChdir(c.module)
-	c.palExecute = p.EmitExecute(c.module)
+	c.palSpawn = p.EmitSpawn(c.module)
+	c.palReadPipe = p.EmitReadPipe(c.module)
+	c.palWaitPid = p.EmitWaitPid(c.module)
 
 	// Command-line argument globals — populated from main's argc/argv
 	c.argcGlobal = c.module.NewGlobalDef("__promise_argc", constant.NewInt(irtypes.I32, 0))
 	c.argvGlobal = c.module.NewGlobalDef("__promise_argv", constant.NewNull(irtypes.NewPointer(irtypes.I8Ptr)))
 
-	// Execute result TLS globals — cached between _os_execute and _os_execute_stdout/stderr
-	c.execStdoutPtr = c.module.NewGlobal("__promise_exec_stdout_ptr", irtypes.I8Ptr)
-	c.execStdoutPtr.Init = constant.NewNull(irtypes.I8Ptr)
-	c.execStdoutLen = c.module.NewGlobal("__promise_exec_stdout_len", irtypes.I64)
-	c.execStdoutLen.Init = constant.NewInt(irtypes.I64, 0)
-	c.execStderrPtr = c.module.NewGlobal("__promise_exec_stderr_ptr", irtypes.I8Ptr)
-	c.execStderrPtr.Init = constant.NewNull(irtypes.I8Ptr)
-	c.execStderrLen = c.module.NewGlobal("__promise_exec_stderr_len", irtypes.I64)
-	c.execStderrLen.Init = constant.NewInt(irtypes.I64, 0)
+	// Spawn result TLS globals — cached between _os_spawn and _os_spawn_stdout_fd/stderr_fd
+	c.spawnStdoutFd = c.module.NewGlobal("__promise_spawn_stdout_fd", irtypes.I32)
+	c.spawnStdoutFd.Init = constant.NewInt(irtypes.I32, -1)
+	c.spawnStderrFd = c.module.NewGlobal("__promise_spawn_stderr_fd", irtypes.I32)
+	c.spawnStderrFd.Init = constant.NewInt(irtypes.I32, -1)
 	if !c.isWasm {
-		c.execStdoutPtr.TLSModel = enum.TLSModelGeneric
-		c.execStdoutLen.TLSModel = enum.TLSModelGeneric
-		c.execStderrPtr.TLSModel = enum.TLSModelGeneric
-		c.execStderrLen.TLSModel = enum.TLSModelGeneric
+		c.spawnStdoutFd.TLSModel = enum.TLSModelGeneric
+		c.spawnStderrFd.TLSModel = enum.TLSModelGeneric
 	}
 
 	// strlen — needed by definePanicBody to get C string length.

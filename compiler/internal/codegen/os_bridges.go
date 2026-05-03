@@ -38,14 +38,20 @@ func (c *Compiler) defineOSBodies() {
 	if fn, ok := irFuncByName["promise_os_get_executable"]; ok {
 		c.defineExecutableBody(fn)
 	}
-	if fn, ok := irFuncByName["promise_os_execute"]; ok {
-		c.defineExecuteBody(fn)
+	if fn, ok := irFuncByName["promise_os_spawn"]; ok {
+		c.defineSpawnBody(fn)
 	}
-	if fn, ok := irFuncByName["promise_os_execute_stdout"]; ok {
-		c.defineExecuteStdoutBody(fn)
+	if fn, ok := irFuncByName["promise_os_spawn_stdout_fd"]; ok {
+		c.defineSpawnStdoutFdBody(fn)
 	}
-	if fn, ok := irFuncByName["promise_os_execute_stderr"]; ok {
-		c.defineExecuteStderrBody(fn)
+	if fn, ok := irFuncByName["promise_os_spawn_stderr_fd"]; ok {
+		c.defineSpawnStderrFdBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_os_read_pipe"]; ok {
+		c.defineReadPipeBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_os_wait_pid"]; ok {
+		c.defineWaitPidBody(fn)
 	}
 	if fn, ok := irFuncByName["promise_os_set_env"]; ok {
 		c.defineSetEnvBody(fn)
@@ -275,10 +281,10 @@ func (c *Compiler) defineExecutableBody(fn *ir.Func) {
 	noArgv.NewRet(nil)
 }
 
-// defineExecuteBody: void @promise_os_execute(i8* sret, i8* program, i8* arguments)
-// Converts program string and arguments vector to C argv, calls pal_execute,
-// caches stdout/stderr in TLS globals, returns int! (failable int).
-func (c *Compiler) defineExecuteBody(fn *ir.Func) {
+// defineSpawnBody: void @promise_os_spawn(i8* sret, i8* program, i8* arguments)
+// Converts program string and arguments vector to C argv, calls pal_spawn,
+// caches stdout/stderr fds in TLS globals, returns int! (pid).
+func (c *Compiler) defineSpawnBody(fn *ir.Func) {
 	zero32 := constant.NewInt(irtypes.I32, 0)
 	zero64 := constant.NewInt(irtypes.I64, 0)
 	one64 := constant.NewInt(irtypes.I64, 1)
@@ -305,7 +311,6 @@ func (c *Compiler) defineExecuteBody(fn *ir.Func) {
 	argsCount := entry.NewLoad(irtypes.I64, lenField)
 
 	// Allocate argv array: (1 + argsCount + 1) * ptrSize
-	// argv[0] = program, argv[1..N] = args, argv[N+1] = null
 	totalSlots := entry.NewAdd(argsCount, constant.NewInt(irtypes.I64, 2))
 	argvSize := entry.NewMul(totalSlots, ptrSize)
 	argvRaw := entry.NewCall(c.palAlloc, argvSize)
@@ -326,17 +331,13 @@ func (c *Compiler) defineExecuteBody(fn *ir.Func) {
 	cond := loopHdr.NewICmp(enum.IPredSLT, iPhi, argsCount)
 	loopHdr.NewCondBr(cond, loopBody, loopDone)
 
-	// Load string instance pointer from vector at offset headerSize + i * ptrSize
 	elemOff := loopBody.NewMul(iPhi, ptrSize)
 	elemOff2 := loopBody.NewAdd(headerSize, elemOff)
 	elemPtr := loopBody.NewGetElementPtr(irtypes.I8, argsParam, elemOff2)
 	elemPtrTyped := loopBody.NewBitCast(elemPtr, irtypes.NewPointer(irtypes.I8Ptr))
 	strInst := loopBody.NewLoad(irtypes.I8Ptr, elemPtrTyped)
-
-	// Convert string instance to C string
 	argCStr := c.stringInstanceToCStr(loopBody, strInst)
 
-	// Store at argv[i+1]
 	argIdx := loopBody.NewAdd(iPhi, one64)
 	argvSlotPtr := loopBody.NewGetElementPtr(irtypes.I8Ptr, argv, argIdx)
 	loopBody.NewStore(argCStr, argvSlotPtr)
@@ -345,34 +346,27 @@ func (c *Compiler) defineExecuteBody(fn *ir.Func) {
 	iPhi.Incs = append(iPhi.Incs, ir.NewIncoming(iNext, loopBody))
 	loopBody.NewBr(loopHdr)
 
-	// Store null terminator at argv[argsCount + 1]
+	// Null terminator at argv[argsCount + 1]
 	nullIdx := loopDone.NewAdd(argsCount, one64)
 	nullSlotPtr := loopDone.NewGetElementPtr(irtypes.I8Ptr, argv, nullIdx)
 	loopDone.NewStore(constant.NewNull(irtypes.I8Ptr), nullSlotPtr)
 
-	// Allocate output pointers on stack for pal_execute
-	outStdoutPtr := loopDone.NewAlloca(irtypes.I8Ptr)
-	outStdoutLen := loopDone.NewAlloca(irtypes.I64)
-	outStderrPtr := loopDone.NewAlloca(irtypes.I8Ptr)
-	outStderrLen := loopDone.NewAlloca(irtypes.I64)
+	// Allocate output fd pointers on stack
+	outStdoutFd := loopDone.NewAlloca(irtypes.I32)
+	outStderrFd := loopDone.NewAlloca(irtypes.I32)
 
-	// Call pal_execute
+	// Call pal_spawn
 	c.emitEnterSyscall(loopDone)
-	exitCode := loopDone.NewCall(c.palExecute, programCStr, argv,
-		outStdoutPtr, outStdoutLen, outStderrPtr, outStderrLen)
+	pid := loopDone.NewCall(c.palSpawn, programCStr, argv, outStdoutFd, outStderrFd)
 	c.emitExitSyscall(loopDone)
 
-	// Cache stdout/stderr in TLS globals
-	stdoutBuf := loopDone.NewLoad(irtypes.I8Ptr, outStdoutPtr)
-	stdoutLen := loopDone.NewLoad(irtypes.I64, outStdoutLen)
-	stderrBuf := loopDone.NewLoad(irtypes.I8Ptr, outStderrPtr)
-	stderrLen := loopDone.NewLoad(irtypes.I64, outStderrLen)
-	loopDone.NewStore(stdoutBuf, c.execStdoutPtr)
-	loopDone.NewStore(stdoutLen, c.execStdoutLen)
-	loopDone.NewStore(stderrBuf, c.execStderrPtr)
-	loopDone.NewStore(stderrLen, c.execStderrLen)
+	// Cache fds in TLS globals
+	stdoutFd := loopDone.NewLoad(irtypes.I32, outStdoutFd)
+	stderrFd := loopDone.NewLoad(irtypes.I32, outStderrFd)
+	loopDone.NewStore(stdoutFd, c.spawnStdoutFd)
+	loopDone.NewStore(stderrFd, c.spawnStderrFd)
 
-	// Free argv C strings: argv[1..argsCount] (not argv[0] which is programCStr)
+	// Free argv C strings: argv[1..argsCount]
 	hasFreeArgs := loopDone.NewICmp(enum.IPredSGT, argsCount, zero64)
 	freeLoopHdr := fn.NewBlock(".free_loop_hdr")
 	freeDone := fn.NewBlock(".free_done")
@@ -396,31 +390,70 @@ func (c *Compiler) defineExecuteBody(fn *ir.Func) {
 	freeDone.NewCall(c.palFree, argvRaw)
 
 	// Check result: -1 means error
-	isErr := freeDone.NewICmp(enum.IPredSLT, exitCode, zero32)
+	isErr := freeDone.NewICmp(enum.IPredSLT, pid, zero32)
 	successBlk := fn.NewBlock(".success")
 	errorBlk := fn.NewBlock(".error")
 	freeDone.NewCondBr(isErr, errorBlk, successBlk)
 
-	// Success: store raw i64 exit code as failable success (resolveType(int) = i64)
-	exitCodeI64 := successBlk.NewSExt(exitCode, irtypes.I64)
-	c.storeFailableSuccess(successBlk, sret, exitCodeI64, resultType)
+	// Success: store pid as i64 failable success
+	pidI64 := successBlk.NewSExt(pid, irtypes.I64)
+	c.storeFailableSuccess(successBlk, sret, pidI64, resultType)
 	successBlk.NewRet(nil)
 
 	// Error: construct error, store failable error
-	errInst := c.constructErrorFromGlobalStr(errorBlk, "failed to execute process")
+	errInst := c.constructErrorFromGlobalStr(errorBlk, "failed to spawn process")
 	c.storeFailableError(errorBlk, sret, errInst, resultType)
 	errorBlk.NewRet(nil)
 }
 
-// defineExecuteStdoutBody: void @promise_os_execute_stdout(i8* sret)
-// Returns cached stdout string from TLS globals, then clears the TLS cache.
-func (c *Compiler) defineExecuteStdoutBody(fn *ir.Func) {
+// defineSpawnStdoutFdBody: void @promise_os_spawn_stdout_fd(i8* sret)
+// Returns cached TLS stdout fd as int via sret. The sret points to a
+// promise_int_v struct {i8* vtable, i8* rtti, i64 value} — store at field 2.
+func (c *Compiler) defineSpawnStdoutFdBody(fn *ir.Func) {
 	entry := fn.NewBlock(".entry")
 	sret := fn.Params[0]
+	fd := entry.NewLoad(irtypes.I32, c.spawnStdoutFd)
+	entry.NewStore(constant.NewInt(irtypes.I32, -1), c.spawnStdoutFd)
+	fdI64 := entry.NewSExt(fd, irtypes.I64)
+	c.storeIntResult(entry, sret, fdI64)
+	entry.NewRet(nil)
+}
 
-	// Load cached stdout from TLS
-	buf := entry.NewLoad(irtypes.I8Ptr, c.execStdoutPtr)
-	bufLen := entry.NewLoad(irtypes.I64, c.execStdoutLen)
+// defineSpawnStderrFdBody: void @promise_os_spawn_stderr_fd(i8* sret)
+// Returns cached TLS stderr fd as int via sret. Same struct layout as above.
+func (c *Compiler) defineSpawnStderrFdBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+	fd := entry.NewLoad(irtypes.I32, c.spawnStderrFd)
+	entry.NewStore(constant.NewInt(irtypes.I32, -1), c.spawnStderrFd)
+	fdI64 := entry.NewSExt(fd, irtypes.I64)
+	c.storeIntResult(entry, sret, fdI64)
+	entry.NewRet(nil)
+}
+
+// defineReadPipeBody: void @promise_os_read_pipe(i8* sret, i8* fd_value)
+// Extracts int fd, calls pal_read_pipe with enter/exit_syscall, returns string.
+func (c *Compiler) defineReadPipeBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+	fdParam := fn.Params[1] // Promise int value
+
+	// Extract raw i64 from Promise int, truncate to i32
+	fdRaw := c.extractRawInt(entry, fdParam)
+	fdI32 := entry.NewTrunc(fdRaw, irtypes.I32)
+
+	// Allocate output pointers on stack
+	outBuf := entry.NewAlloca(irtypes.I8Ptr)
+	outLen := entry.NewAlloca(irtypes.I64)
+
+	// Call pal_read_pipe with syscall handoff
+	c.emitEnterSyscall(entry)
+	entry.NewCall(c.palReadPipe, fdI32, outBuf, outLen)
+	c.emitExitSyscall(entry)
+
+	// Load buffer and length
+	buf := entry.NewLoad(irtypes.I8Ptr, outBuf)
+	bufLen := entry.NewLoad(irtypes.I64, outLen)
 
 	// Create Promise string from buffer
 	isNull := entry.NewICmp(enum.IPredEQ, buf, constant.NewNull(irtypes.I8Ptr))
@@ -428,50 +461,49 @@ func (c *Compiler) defineExecuteStdoutBody(fn *ir.Func) {
 	noData := fn.NewBlock(".no_data")
 	entry.NewCondBr(isNull, noData, hasData)
 
-	// has_data: create string from buffer, free buffer, clear TLS
 	str := hasData.NewCall(c.funcs["promise_string_new"], buf, bufLen)
 	hasData.NewCall(c.palFree, buf)
-	hasData.NewStore(constant.NewNull(irtypes.I8Ptr), c.execStdoutPtr)
-	hasData.NewStore(constant.NewInt(irtypes.I64, 0), c.execStdoutLen)
 	c.storeStringResult(hasData, sret, str)
 	hasData.NewRet(nil)
 
-	// no_data: return empty string
 	emptyStr := noData.NewCall(c.funcs["promise_string_new"],
 		constant.NewNull(irtypes.I8Ptr), constant.NewInt(irtypes.I64, 0))
 	c.storeStringResult(noData, sret, emptyStr)
 	noData.NewRet(nil)
 }
 
-// defineExecuteStderrBody: void @promise_os_execute_stderr(i8* sret)
-// Returns cached stderr string from TLS globals, then clears the TLS cache.
-func (c *Compiler) defineExecuteStderrBody(fn *ir.Func) {
+// defineWaitPidBody: void @promise_os_wait_pid(i8* sret, i8* pid_value)
+// Extracts int pid, calls pal_wait_pid with enter/exit_syscall, returns int!.
+func (c *Compiler) defineWaitPidBody(fn *ir.Func) {
 	entry := fn.NewBlock(".entry")
 	sret := fn.Params[0]
+	pidParam := fn.Params[1] // Promise int value
 
-	// Load cached stderr from TLS
-	buf := entry.NewLoad(irtypes.I8Ptr, c.execStderrPtr)
-	bufLen := entry.NewLoad(irtypes.I64, c.execStderrLen)
+	innerType := c.resolveType(types.TypInt)
+	resultType := computeResultType(innerType)
 
-	// Create Promise string from buffer
-	isNull := entry.NewICmp(enum.IPredEQ, buf, constant.NewNull(irtypes.I8Ptr))
-	hasData := fn.NewBlock(".has_data")
-	noData := fn.NewBlock(".no_data")
-	entry.NewCondBr(isNull, noData, hasData)
+	// Extract raw i64 from Promise int, truncate to i32
+	pidRaw := c.extractRawInt(entry, pidParam)
+	pidI32 := entry.NewTrunc(pidRaw, irtypes.I32)
 
-	// has_data: create string from buffer, free buffer, clear TLS
-	str := hasData.NewCall(c.funcs["promise_string_new"], buf, bufLen)
-	hasData.NewCall(c.palFree, buf)
-	hasData.NewStore(constant.NewNull(irtypes.I8Ptr), c.execStderrPtr)
-	hasData.NewStore(constant.NewInt(irtypes.I64, 0), c.execStderrLen)
-	c.storeStringResult(hasData, sret, str)
-	hasData.NewRet(nil)
+	// Call pal_wait_pid with syscall handoff
+	c.emitEnterSyscall(entry)
+	exitCode := entry.NewCall(c.palWaitPid, pidI32)
+	c.emitExitSyscall(entry)
 
-	// no_data: return empty string
-	emptyStr := noData.NewCall(c.funcs["promise_string_new"],
-		constant.NewNull(irtypes.I8Ptr), constant.NewInt(irtypes.I64, 0))
-	c.storeStringResult(noData, sret, emptyStr)
-	noData.NewRet(nil)
+	// Check result: -1 means error
+	isErr := entry.NewICmp(enum.IPredSLT, exitCode, constant.NewInt(irtypes.I32, 0))
+	successBlk := fn.NewBlock(".success")
+	errorBlk := fn.NewBlock(".error")
+	entry.NewCondBr(isErr, errorBlk, successBlk)
+
+	exitCodeI64 := successBlk.NewSExt(exitCode, irtypes.I64)
+	c.storeFailableSuccess(successBlk, sret, exitCodeI64, resultType)
+	successBlk.NewRet(nil)
+
+	errInst := c.constructErrorFromGlobalStr(errorBlk, "failed to wait for process")
+	c.storeFailableError(errorBlk, sret, errInst, resultType)
+	errorBlk.NewRet(nil)
 }
 
 // defineSetEnvBody: void @promise_os_set_env(i8* name, i8* value)

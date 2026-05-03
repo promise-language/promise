@@ -798,22 +798,23 @@ as a `Vector[string]`. `executable_path` returns `argv[0]` as a string.
 On WASM, `_start` passes `argc=0, argv=null` — both getters return empty results.
 
 **`execute()` implementation**: Three-layer architecture — PAL (raw OS calls) → Bridge (type
-conversion in `os_bridges.go`) → Promise wrapper (constructs `ProcessResult`). Uses a three-extern
-+ TLS caching pattern to avoid constructing user types in LLVM IR: `_os_execute(program, arguments)`
-calls `pal_execute` (POSIX: `fork` + `execvp` + `pipe` + `read` + `waitpid`), caches stdout/stderr
-buffers in TLS globals, and returns `int!`. The two helper externs `_os_execute_stdout()` and
-`_os_execute_stderr()` consume the cached TLS data and return `string`. The Promise-level
-`execute()` calls all three and constructs `ProcessResult` in pure Promise code. POSIX waitpid
-retries on EINTR. If the program is not found, the child `_exit(127)`. Known v1 limitation:
-stdout and stderr are read sequentially — deadlock possible if child writes >64KB to stderr
-while stdout is not fully consumed.
+conversion in `os_bridges.go`) → Promise wrapper (constructs `ProcessResult`). Decomposed into
+fine-grained PAL primitives: `pal_spawn` (fork+exec+pipe, returns pid + fd out-params),
+`pal_read_pipe` (read fd to EOF into malloc'd buffer), and `pal_wait_pid` (waitpid with EINTR
+retry). The bridge layer uses TLS globals to cache spawn file descriptors between extern calls.
+The Promise-level `execute()` calls `_os_spawn`, retrieves fds, reads both pipes concurrently
+using goroutines (`go _read_pipe(stderr_fd)` for stderr, `_read_pipe(stdout_fd)` for stdout),
+and waits for exit code. If the program is not found, the child `_exit(127)`.
 
 **PAL functions** (POSIX/Windows/WASM):
 ```
 pal_getenv(i8* name) i8*               // pointer to value or null
 pal_getcwd(i8* buf, i64 len) i8*       // fills buf, returns pointer or null on error
-pal_execute(i8* prog, i8** argv, i8** out_stdout, i64* out_stdout_len, i8** out_stderr, i64* out_stderr_len) i32
-                                           // fork+execvp+pipe+waitpid; returns exit code or -1
+pal_spawn(i8* prog, i8** argv, i32* out_stdout_fd, i32* out_stderr_fd) i32
+                                           // fork+execvp+pipe; returns pid or -1
+pal_read_pipe(i32 fd, i8** out_buf, i64* out_len) void
+                                           // read fd to EOF, close fd; caller frees buffer
+pal_wait_pid(i32 pid) i32              // waitpid with EINTR retry; returns exit code or -1
 ```
 
 ---
@@ -1001,10 +1002,35 @@ First real use of `` `target `` in production code. Platform constants consolida
 
 14. ~~**Args capture in `main` prologue**~~ — **Done.** `main(argc, argv)` stores to `@__promise_argc`/`@__promise_argv` globals. WASM `_start` passes 0/null.
 15. ~~**`modules/os` core**~~ — **Done.** `get_environment_variable` (string?), `get_working_directory` (string!), `exit_process`, `arguments` (string[]), `executable_path` (string). Failable and optional extern bridge infrastructure. PAL getenv/getcwd for POSIX/Windows/WASM. 11 tests (excluded on WASM).
-16. ~~**`execute`**~~ — **Done.** Synchronous subprocess execution with variadic arguments (`...string`). Returns `ProcessResult!` with exit code + captured stdout/stderr. Three-extern + TLS caching pattern: `_os_execute` returns `int!` and caches stdout/stderr in TLS globals; `_os_execute_stdout`/`_os_execute_stderr` consume cached data. PAL: POSIX `fork` + `execvp` + `pipe` + `read` + `waitpid` (with EINTR retry); Windows/WASM stubs return -1. `ProcessResult` wrapper constructed in pure Promise. Accepts inline args (`execute("ls", "-la")`) or pre-built `string[]` (`execute("sh", args)`). 29 tests (excluded on WASM). Known limitation: stdout/stderr read sequentially (deadlock possible if child writes >64KB to stderr while stdout not consumed).
+16. ~~**`execute`**~~ — **Done.** Synchronous subprocess execution with variadic arguments (`...string`). Returns `ProcessResult!` with exit code + captured stdout/stderr. Decomposed PAL: `pal_spawn` (fork+exec+pipe, returns pid), `pal_read_pipe` (read fd to EOF), `pal_wait_pid` (EINTR retry). TLS caching for spawn fds. Windows/WASM stubs return -1. `ProcessResult` wrapper constructed in pure Promise. Concurrent pipe reads via goroutines eliminate the 64KB deadlock. Accepts inline args (`execute("ls", "-la")`) or pre-built `string[]` (`execute("sh", args)`). 50 tests (excluded on WASM).
 17. ~~**`set_environment_variable(name, value?)`**~~ — **Done.** `string?` value: present sets, absent unsets. Two-extern pattern: `_os_set_env(name, value)` and `_os_unset_env(name)`, dispatched in pure Promise via optional unwrap. PAL: POSIX `setenv`/`unsetenv`; Windows `_putenv_s`/empty-string unset; WASM stub. 5 tests (excluded on WASM).
 18. ~~**`set_working_directory`**~~ — **Done.** PAL: POSIX `chdir`; Windows `_chdir`; WASM stub returns error. Failable `int!` extern bridge (`_os_set_working_directory`), auto-propagation in void failable Promise wrapper. 3 tests (excluded on WASM).
-19. **Concurrent stdout/stderr read in `execute`** — Read stdout and stderr in parallel (two threads or non-blocking I/O) to eliminate the 64KB deadlock. Currently `__pal_read_all(stdout_fd)` blocks until EOF before `__pal_read_all(stderr_fd)` starts; if the child fills the stderr pipe buffer (~64KB) before stdout is drained, both sides block. Fix: spawn a second thread to read stderr while the main thread reads stdout, or use `poll`/`select` to multiplex. PAL-level change in `posix.go` `EmitExecute`.
+19. ~~**Concurrent stdout/stderr read in `execute`**~~ — **Done.** Decomposed monolithic `pal_execute` into fine-grained PAL primitives (`pal_spawn`, `pal_read_pipe`, `pal_wait_pid`). Concurrent reads use Promise goroutines — stderr is read in a background goroutine while stdout is read in the current goroutine.
+
+    **Architecture — PAL decomposition + goroutine concurrency:**
+
+    *PAL layer* (posix.go): 3 functions replacing `pal_execute`:
+    - `pal_spawn(program, argv, out_stdout_fd, out_stderr_fd) → i32` — fork+exec+pipe, return pid (or -1)
+    - `pal_read_pipe(fd, out_buf, out_len)` — read pipe to EOF into malloc'd buffer, close fd
+    - `pal_wait_pid(pid) → i32` — waitpid with EINTR retry, return exit code (or -1)
+
+    *Bridge layer* (os_bridges.go): 5 bridges:
+    - `promise_os_spawn(sret, program, args)` — argv construction, call pal_spawn, cache fds in TLS, return int! (pid)
+    - `promise_os_spawn_stdout_fd()` / `promise_os_spawn_stderr_fd()` — return cached TLS fd as int
+    - `promise_os_read_pipe(sret, fd)` — extract int, pal_read_pipe with enter/exit_syscall, return string
+    - `promise_os_wait_pid(sret, pid)` — extract int, pal_wait_pid with enter/exit_syscall, return int!
+
+    *Promise layer* (os.pr): `execute()` uses goroutines for concurrent pipe reads:
+    ```
+    int pid = _os_spawn(program, arguments)!;
+    int stdout_fd = _os_spawn_stdout_fd();
+    int stderr_fd = _os_spawn_stderr_fd();
+    task[string] stderr_task = go _read_pipe(stderr_fd);
+    string stdout = _read_pipe(stdout_fd);
+    string stderr = <-stderr_task;
+    int exit_code = _os_wait_pid(pid)!;
+    ```
+    The `_read_pipe` wrapper calls the `_os_read_pipe` extern (B0042: `go` cannot call externs directly). Each `pal_read_pipe` call releases the scheduler P via enter/exit_syscall, allowing both goroutines to run concurrently on separate Ms.
 20. **Signal handling** — `on_signal(Signal, () handler)`. PAL: POSIX `sigaction`; Windows `SetConsoleCtrlHandler`; WASM no-op.
 21. **Streaming subprocess** — `modules/process` (separate module). Piped stdin/stdout/stderr, async I/O integration with scheduler.
 

@@ -882,7 +882,7 @@ set_working_directory(string path) !;
 - **File**: `modules/os/os.pr` (separate `os` module, not part of `std`)
 - **Dependencies**: PAL OS (getenv, getcwd, exit, execute, setenv, unsetenv, chdir), argc/argv globals from main prologue
 - **Native codegen**: Extern bridge pattern in `os_bridges.go` — Promise declares `_os_func() T \`extern("promise_os_func");`, codegen provides LLVM IR body bridging Promise types ↔ PAL. `execute` uses three-extern + TLS caching pattern (see `platform-modules.md`).
-- **Test**: `modules/os/os_test.pr` (47 tests, excluded on WASM)
+- **Test**: `modules/os/os_test.pr` (50 tests, excluded on WASM)
 
 #### 4e. Standard Input — DONE (merged into `modules/io/io.pr`)
 

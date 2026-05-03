@@ -184,6 +184,39 @@ test_execute_large_output() `test(exclude: "wasm32") {
   assert(result.standard_output.ends_with("2000\n"), "output should end with last number");
 }
 
+test_execute_large_stderr() `test(exclude: "wasm32") {
+  // Generate >4KB on stderr to exercise the goroutine read path.
+  ProcessResult result = execute("sh", "-c", "seq 1 2000 >&2")!;
+  assert(result.exit_code == 0, "seq to stderr should exit with 0");
+  assert(result.standard_error.len > 4096, "stderr should exceed 4096 bytes");
+  assert(result.standard_error.starts_with("1\n2\n3\n"), "stderr should start with first numbers");
+  assert(result.standard_error.ends_with("2000\n"), "stderr should end with last number");
+  assert(result.standard_output.len == 0, "stdout should be empty");
+}
+
+test_execute_large_stdout_and_stderr() `test(exclude: "wasm32") {
+  // Write >64KB to BOTH streams simultaneously — the exact scenario that
+  // deadlocked before concurrent reads (B0027). The child writes to stdout
+  // and stderr in alternating chunks; if either pipe blocks because the
+  // reader isn't draining it, the child stalls and the test hangs.
+  ProcessResult result = execute("sh", "-c", "seq 1 10000; seq 1 10000 >&2")!;
+  assert(result.exit_code == 0, "should exit with 0");
+  assert(result.standard_output.len > 40000, "stdout should be large");
+  assert(result.standard_error.len > 40000, "stderr should be large");
+  assert(result.standard_output.starts_with("1\n"), "stdout should start correctly");
+  assert(result.standard_error.starts_with("1\n"), "stderr should start correctly");
+  assert(result.standard_output.ends_with("10000\n"), "stdout should end correctly");
+  assert(result.standard_error.ends_with("10000\n"), "stderr should end correctly");
+}
+
+test_execute_only_stderr() `test(exclude: "wasm32") {
+  // No stdout, only stderr — goroutine reads empty stdout while main thread gets content.
+  ProcessResult result = execute("sh", "-c", "echo error_only >&2")!;
+  assert(result.exit_code == 0, "should exit with 0");
+  assert(result.standard_output.len == 0, "stdout should be empty");
+  assert(result.standard_error.starts_with("error_only"), "stderr should have content");
+}
+
 test_execute_empty_string_arguments() `test(exclude: "wasm32") {
   // Empty strings should be passed as distinct argv entries
   ProcessResult result = execute("printf", ["%s|%s|%s", "", "mid", ""])!;

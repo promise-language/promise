@@ -1,11 +1,11 @@
 // std/random.pr — Pseudorandom number generator (xoshiro256**)
-type Random `public {
+type Random `public `doc("Deterministic pseudorandom number generator using the xoshiro256** algorithm. Fast, high-quality, and reproducible — the same seed always produces the same sequence. State is 4 uint fields expanded from a single seed via splitmix64. Not cryptographically secure.") {
   uint _s0;
   uint _s1;
   uint _s2;
   uint _s3;
 
-  new(~this, uint seed) {
+  new(~this, uint seed `doc("Initial seed value. Different seeds produce independent, non-overlapping sequences. Zero is a valid seed.")) {
     // splitmix64 seed expansion to initialize all 4 state words
     uint s = seed;
     s = s + _sm_c1();
@@ -18,8 +18,7 @@ type Random `public {
     this._s3 = _sm_mix(s);
   }
 
-  // Core xoshiro256** generator. Returns a random uint.
-  next_uint(~this) uint {
+  next_uint(~this) uint `doc("Returns a uniformly distributed random uint across the full 64-bit range [0, 2^64). This is the core generator — all other methods delegate to it.") {
     uint s0 = this._s0;
     uint s1 = this._s1;
     uint s2 = this._s2;
@@ -43,33 +42,92 @@ type Random `public {
     return result;
   }
 
-  // Random int (full range).
-  next_int(~this) int {
+  next_int(~this) int `doc("Returns a random int across the full 64-bit signed range. The result is the raw uint output reinterpreted as a signed integer, so negative values are equally likely.") {
     return this.next_uint() as! int;
   }
 
-  // Random f64 in [0.0, 1.0).
-  next_f64(~this) f64 {
+  next_f64(~this) f64 `doc("Returns a uniformly distributed random f64 in the half-open interval [0.0, 1.0). Uses the upper 53 bits of next_uint() scaled by 2^-53 to produce all representable doubles in the range.") {
     uint bits = this.next_uint() >> _u(11);
     return (bits as! f64) * 1.1102230246251565e-16;
   }
 
-  // Random int in [lo, hi).
-  next_int_range(~this, int lo, int hi) int {
-    int range = hi - lo;
+  next_int_range(~this, int low `doc("Inclusive lower bound."), int high `doc("Exclusive upper bound. If high <= low, returns low.")) int `doc("Returns a random int in the half-open interval [low, high). Uses modulo reduction of next_uint(), which introduces negligible bias for ranges much smaller than 2^64.") {
+    int range = high - low;
     if range <= 0 {
-      return lo;
+      return low;
     }
     uint r = this.next_uint();
     uint urange = range as! uint;
     int offset = (r % urange) as! int;
-    return lo + offset;
+    return low + offset;
   }
 
-  // Random bool.
-  next_bool(~this) bool {
+  next_f64_range(~this, f64 low `doc("Inclusive lower bound."), f64 high `doc("Exclusive upper bound. If high == low, returns low. If high < low, behavior is undefined.")) f64 `doc("Returns a uniformly distributed random f64 in the half-open interval [low, high). Computed as low + next_f64() * (high - low).") {
+    return low + this.next_f64() * (high - low);
+  }
+
+  shuffle[T](~this, T[] vec `doc("The vector to shuffle. Ownership is taken and the shuffled vector is returned.")) T[] `doc("Returns a new vector with elements in uniformly random order using the Fisher-Yates algorithm. Every permutation is equally likely. O(n) time, O(1) extra space.") {
+    int i = vec.len - 1;
+    while i > 0 {
+      int j = this.next_int_range(0, i + 1);
+      T tmp = vec[i];
+      vec[i] = vec[j];
+      vec[j] = tmp;
+      i--;
+    }
+    return vec;
+  }
+
+  next_bool(~this) bool `doc("Returns a random boolean with equal probability of true and false. Uses the highest bit of next_uint(), which has the best statistical properties in xoshiro256**.") {
     uint bit = this.next_uint() >> _u(63);
     return bit == _u(1);
+  }
+
+  ints(~this, int n `doc("Number of values to generate."), int low `doc("Inclusive lower bound.") = -9223372036854775808, int high `doc("Exclusive upper bound.") = 9223372036854775807) stream[int] `doc("Yields n random ints in [low, high). Defaults to full int range if bounds are omitted. Yields nothing if low >= high.") {
+    if low >= high {
+      return;
+    }
+    int i = 0;
+    while i < n {
+      yield this.next_int_range(low, high);
+      i++;
+    }
+  }
+
+  uints(~this, int n `doc("Number of values to generate."), uint low `doc("Inclusive lower bound.") = 0u, uint high `doc("Exclusive upper bound.") = 18446744073709551615u) stream[uint] `doc("Yields n random uints in [low, high). Defaults to full uint range if bounds are omitted. Yields nothing if low >= high.") {
+    if low >= high {
+      return;
+    }
+    int i = 0;
+    while i < n {
+      if low == 0u && high == 18446744073709551615u {
+        yield this.next_uint();
+      } else {
+        uint range = high - low;
+        uint offset = this.next_uint() % range;
+        yield low + offset;
+      }
+      i++;
+    }
+  }
+
+  floats(~this, int n `doc("Number of values to generate."), f64 low `doc("Inclusive lower bound.") = 0.0, f64 high `doc("Exclusive upper bound.") = 1.0) stream[f64] `doc("Yields n random f64 values in [low, high). Defaults to [0.0, 1.0) if bounds are omitted. Yields nothing if low >= high.") {
+    if low >= high {
+      return;
+    }
+    int i = 0;
+    while i < n {
+      yield this.next_f64_range(low, high);
+      i++;
+    }
+  }
+
+  bools(~this, int n `doc("Number of values to generate.")) stream[bool] `doc("Yields n random booleans. Usable in for-in loops.") {
+    int i = 0;
+    while i < n {
+      yield this.next_bool();
+      i++;
+    }
   }
 }
 
@@ -81,9 +139,9 @@ _u(int x) uint {
 }
 
 // Construct 64-bit uint from two 32-bit halves.
-_u64(int hi, int lo) uint {
-  uint h = hi as! uint;
-  uint l = lo as! uint;
+_u64(int upper, int lower) uint {
+  uint h = upper as! uint;
+  uint l = lower as! uint;
   uint shift = 32 as! uint;
   return (h << shift) | l;
 }

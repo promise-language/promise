@@ -1,15 +1,15 @@
 // Test Random type: deterministic PRNG, range, distribution
 test_random_deterministic() `test {
-  Random r1 = Random(seed: 42 as! uint);
-  Random r2 = Random(seed: 42 as! uint);
+  Random r1 = Random(seed: 42u);
+  Random r2 = Random(seed: 42u);
   assert(r1.next_uint() == r2.next_uint(), "same seed same output 1");
   assert(r1.next_uint() == r2.next_uint(), "same seed same output 2");
   assert(r1.next_uint() == r2.next_uint(), "same seed same output 3");
 }
 
 test_random_different_seeds() `test {
-  Random r1 = Random(seed: 1 as! uint);
-  Random r2 = Random(seed: 2 as! uint);
+  Random r1 = Random(seed: 1u);
+  Random r2 = Random(seed: 2u);
   // different seeds should produce different sequences
   // (statistically guaranteed for xoshiro256**)
   uint a = r1.next_uint();
@@ -18,7 +18,7 @@ test_random_different_seeds() `test {
 }
 
 test_random_next_int() `test {
-  Random r = Random(seed: 123 as! uint);
+  Random r = Random(seed: 123u);
   int x = r.next_int();
   int y = r.next_int();
   // just verify it produces values without crashing
@@ -26,7 +26,7 @@ test_random_next_int() `test {
 }
 
 test_random_next_f64_range() `test {
-  Random r = Random(seed: 99 as! uint);
+  Random r = Random(seed: 99u);
   int i = 0;
   while i < 100 {
     f64 x = r.next_f64();
@@ -37,7 +37,7 @@ test_random_next_f64_range() `test {
 }
 
 test_random_next_int_range() `test {
-  Random r = Random(seed: 77 as! uint);
+  Random r = Random(seed: 77u);
   int i = 0;
   while i < 100 {
     int x = r.next_int_range(10, 20);
@@ -48,7 +48,7 @@ test_random_next_int_range() `test {
 }
 
 test_random_next_bool() `test {
-  Random r = Random(seed: 55 as! uint);
+  Random r = Random(seed: 55u);
   int true_count = 0;
   int i = 0;
   while i < 100 {
@@ -63,7 +63,331 @@ test_random_next_bool() `test {
 }
 
 test_random_int_range_single() `test {
-  Random r = Random(seed: 1 as! uint);
+  Random r = Random(seed: 1u);
   int x = r.next_int_range(5, 6);
   assert(x == 5, "int_range [5,6) always 5");
+}
+
+test_random_f64_range_bounds() `test {
+  Random r = Random(seed: 42u);
+  int i = 0;
+  while i < 100 {
+    f64 x = r.next_f64_range(5.0, 10.0);
+    assert(x >= 5.0, "f64_range >= 5.0");
+    assert(x < 10.0, "f64_range < 10.0");
+    i++;
+  }
+}
+
+test_random_f64_range_degenerate() `test {
+  Random r = Random(seed: 1u);
+  f64 x = r.next_f64_range(3.0, 3.0);
+  assert(x == 3.0, "f64_range [3,3) returns 3.0");
+}
+
+test_random_shuffle_preserves() `test {
+  Random r = Random(seed: 42u);
+  int[] v = r.shuffle[int]([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  // All elements should still be present — sum is invariant
+  int sum = 0;
+  int i = 0;
+  while i < v.len {
+    sum = sum + v[i];
+    i++;
+  }
+  assert(sum == 55, "shuffle preserves all elements");
+}
+
+test_random_shuffle_empty() `test {
+  Random r = Random(seed: 1u);
+  int[] v = r.shuffle[int](int[]());
+  assert(v.len == 0, "shuffle empty is no-op");
+}
+
+test_random_shuffle_single() `test {
+  Random r = Random(seed: 1u);
+  int[] v = r.shuffle[int]([42]);
+  assert(v[0] == 42, "shuffle single element unchanged");
+}
+
+test_random_shuffle_changes_order() `test {
+  Random r = Random(seed: 42u);
+  int[] v = r.shuffle[int]([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  bool changed = false;
+  int i = 0;
+  while i < 10 {
+    if v[i] != i + 1 {
+      changed = true;
+    }
+    i++;
+  }
+  assert(changed, "shuffle should change order of 10 elements");
+}
+
+test_random_ints_stream() `test {
+  Random r = Random(seed: 42u);
+  int count = 0;
+  for x in r.ints(10, 0, 100) {
+    assert(x >= 0, "ints stream >= 0");
+    assert(x < 100, "ints stream < 100");
+    count++;
+  }
+  assert(count == 10, "ints stream yields 10 values");
+}
+
+test_random_uints_stream() `test {
+  Random r = Random(seed: 42u);
+  int count = 0;
+  for x in r.uints(5) {
+    count++;
+  }
+  assert(count == 5, "uints stream yields 5 values");
+}
+
+test_random_floats_stream() `test {
+  Random r = Random(seed: 42u);
+  int count = 0;
+  for x in r.floats(10, 1.0, 5.0) {
+    assert(x >= 1.0, "floats stream >= 1.0");
+    assert(x < 5.0, "floats stream < 5.0");
+    count++;
+  }
+  assert(count == 10, "floats stream yields 10 values");
+}
+
+test_random_bools_stream() `test {
+  Random r = Random(seed: 42u);
+  int trues = 0;
+  int count = 0;
+  for b in r.bools(100) {
+    if b {
+      trues++;
+    }
+    count++;
+  }
+  assert(count == 100, "bools stream yields 100 values");
+  assert(trues > 0, "bools stream produces true");
+  assert(trues < 100, "bools stream produces false");
+}
+
+test_random_ints_stream_deterministic() `test {
+  Random r1 = Random(seed: 7u);
+  Random r2 = Random(seed: 7u);
+  int[] a = int[]();
+  int[] b = int[]();
+  for x in r1.ints(5, 0, 1000) {
+    a.push(x);
+  }
+  for x in r2.ints(5, 0, 1000) {
+    b.push(x);
+  }
+  int i = 0;
+  while i < 5 {
+    assert(a[i] == b[i], "ints stream deterministic");
+    i++;
+  }
+}
+
+test_random_ints_stream_zero() `test {
+  Random r = Random(seed: 1u);
+  int count = 0;
+  for x in r.ints(0, 0, 10) {
+    count++;
+  }
+  assert(count == 0, "ints(0, ...) yields nothing");
+}
+
+test_random_ints_default_range() `test {
+  Random r = Random(seed: 42u);
+  int count = 0;
+  for x in r.ints(5) {
+    count++;
+  }
+  assert(count == 5, "ints with default range yields values");
+}
+
+test_random_ints_lo_only() `test {
+  Random r = Random(seed: 42u);
+  int count = 0;
+  for x in r.ints(20, low: 100) {
+    assert(x >= 100, "ints(low: 100) >= 100");
+    count++;
+  }
+  assert(count == 20, "ints with low only yields values");
+}
+
+test_random_uints_bounded() `test {
+  Random r = Random(seed: 42u);
+  int count = 0;
+  for x in r.uints(50, low: 10u, high: 100u) {
+    assert(x >= 10u, "uints bounded >= 10");
+    assert(x < 100u, "uints bounded < 100");
+    count++;
+  }
+  assert(count == 50, "uints bounded yields 50 values");
+}
+
+test_random_uints_default_range() `test {
+  Random r = Random(seed: 42u);
+  int count = 0;
+  for x in r.uints(5) {
+    count++;
+  }
+  assert(count == 5, "uints with default range yields values");
+}
+
+test_random_floats_default_range() `test {
+  Random r = Random(seed: 42u);
+  int count = 0;
+  for x in r.floats(10) {
+    assert(x >= 0.0, "floats default >= 0.0");
+    assert(x < 1.0, "floats default < 1.0");
+    count++;
+  }
+  assert(count == 10, "floats with default range yields values");
+}
+
+test_random_ints_invalid_range() `test {
+  Random r = Random(seed: 42u);
+  int count = 0;
+  for x in r.ints(10, 100, 50) {
+    count++;
+  }
+  assert(count == 0, "ints with low >= high yields nothing");
+}
+
+test_random_ints_equal_range() `test {
+  Random r = Random(seed: 42u);
+  int count = 0;
+  for x in r.ints(10, 5, 5) {
+    count++;
+  }
+  assert(count == 0, "ints with low == high yields nothing");
+}
+
+test_random_uints_invalid_range() `test {
+  Random r = Random(seed: 42u);
+  int count = 0;
+  for x in r.uints(10, low: 100u, high: 50u) {
+    count++;
+  }
+  assert(count == 0, "uints with low >= high yields nothing");
+}
+
+test_random_floats_invalid_range() `test {
+  Random r = Random(seed: 42u);
+  int count = 0;
+  for x in r.floats(10, 5.0, 2.0) {
+    count++;
+  }
+  assert(count == 0, "floats with low >= high yields nothing");
+}
+
+test_random_seed_zero() `test {
+  Random r1 = Random(seed: 0u);
+  Random r2 = Random(seed: 0u);
+  assert(r1.next_uint() == r2.next_uint(), "zero seed is deterministic");
+  assert(r1.next_uint() != 0u, "zero seed produces non-zero output");
+}
+
+test_random_next_int_range_degenerate() `test {
+  Random r = Random(seed: 42u);
+  int x = r.next_int_range(10, 10);
+  assert(x == 10, "int_range [10,10) returns low");
+  int y = r.next_int_range(20, 5);
+  assert(y == 20, "int_range [20,5) returns low");
+}
+
+test_random_next_int_negatives() `test {
+  Random r = Random(seed: 42u);
+  bool has_negative = false;
+  int i = 0;
+  while i < 100 {
+    if r.next_int() < 0 {
+      has_negative = true;
+    }
+    i++;
+  }
+  assert(has_negative, "next_int produces negative values");
+}
+
+test_random_next_f64_range_negative() `test {
+  Random r = Random(seed: 42u);
+  int i = 0;
+  while i < 100 {
+    f64 x = r.next_f64_range(-5.0, -1.0);
+    assert(x >= -5.0, "f64_range negative >= -5.0");
+    assert(x < -1.0, "f64_range negative < -1.0");
+    i++;
+  }
+}
+
+test_random_shuffle_strings() `test {
+  Random r = Random(seed: 42u);
+  string[] v = r.shuffle[string](["a", "b", "c", "d", "e"]);
+  assert(v.len == 5, "shuffle strings preserves length");
+  // verify all elements present by concatenating sorted
+  bool has_a = false;
+  bool has_b = false;
+  bool has_c = false;
+  bool has_d = false;
+  bool has_e = false;
+  int i = 0;
+  while i < 5 {
+    if v[i] == "a" {
+      has_a = true;
+    }
+    if v[i] == "b" {
+      has_b = true;
+    }
+    if v[i] == "c" {
+      has_c = true;
+    }
+    if v[i] == "d" {
+      has_d = true;
+    }
+    if v[i] == "e" {
+      has_e = true;
+    }
+    i++;
+  }
+  assert(has_a && has_b && has_c && has_d && has_e, "shuffle strings preserves all elements");
+}
+
+test_random_ints_high_only() `test {
+  Random r = Random(seed: 42u);
+  int count = 0;
+  for x in r.ints(20, high: 10) {
+    assert(x < 10, "ints(high: 10) < 10");
+    count++;
+  }
+  assert(count == 20, "ints with high only yields values");
+}
+
+test_random_floats_high_only() `test {
+  Random r = Random(seed: 42u);
+  int count = 0;
+  for x in r.floats(20, high: 0.5) {
+    assert(x >= 0.0, "floats(high: 0.5) >= 0.0");
+    assert(x < 0.5, "floats(high: 0.5) < 0.5");
+    count++;
+  }
+  assert(count == 20, "floats with high only yields values");
+}
+
+test_random_sequential_state() `test {
+  Random r = Random(seed: 42u);
+  // Call different methods in sequence — state should advance consistently
+  uint a = r.next_uint();
+  int b = r.next_int();
+  f64 c = r.next_f64();
+  bool d = r.next_bool();
+  int e = r.next_int_range(0, 1000);
+  // Replay with same seed
+  Random r2 = Random(seed: 42u);
+  assert(r2.next_uint() == a, "sequential state: uint");
+  assert(r2.next_int() == b, "sequential state: int");
+  assert(r2.next_f64() == c, "sequential state: f64");
+  assert(r2.next_bool() == d, "sequential state: bool");
+  assert(r2.next_int_range(0, 1000) == e, "sequential state: int_range");
 }

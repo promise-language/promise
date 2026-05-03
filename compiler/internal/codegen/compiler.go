@@ -3221,10 +3221,12 @@ func (c *Compiler) declareModuleTypeMethods(file *ast.File, moduleName string) {
 			}
 
 			retType := irtypes.Type(irtypes.Void)
-			if m.Sig().Result() != nil {
+			if c.info.GeneratorFuncs[md] != nil {
+				retType = generatorValueType()
+			} else if m.Sig().Result() != nil {
 				retType = c.resolveType(m.Sig().Result())
 			}
-			if m.Sig().CanError() {
+			if m.Sig().CanError() && c.info.GeneratorFuncs[md] == nil {
 				retType = computeResultType(retType)
 			}
 
@@ -3277,6 +3279,14 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 			}
 
 			c.currentNamed = named
+
+			// Route generator methods to the generator codegen path
+			if elemType := c.info.GeneratorFuncs[md]; elemType != nil {
+				c.defineGeneratorMethod(md, m, fn, elemType, named)
+				c.currentNamed = nil
+				continue
+			}
+
 			c.fn = fn
 			c.block = fn.NewBlock(".entry")
 			c.entryBlock = c.block

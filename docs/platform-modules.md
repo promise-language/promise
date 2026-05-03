@@ -1030,7 +1030,7 @@ First real use of `` `target `` in production code. Platform constants consolida
     string stderr = <-stderr_task;
     int exit_code = _os_wait_pid(pid)!;
     ```
-    The `_read_pipe` wrapper calls the `_os_read_pipe` extern (B0042: `go` cannot call externs directly). Each `pal_read_pipe` call releases the scheduler P via enter/exit_syscall, allowing both goroutines to run concurrently on separate Ms.
+    The `_read_pipe` wrapper calls the `_os_read_pipe` extern (B0044: `go` cannot call externs directly). Each `pal_read_pipe` call releases the scheduler P via enter/exit_syscall, allowing both goroutines to run concurrently on separate Ms.
 20. **Signal handling** — `on_signal(Signal, () handler)`. PAL: POSIX `sigaction`; Windows `SetConsoleCtrlHandler`; WASM no-op.
 21. **Streaming subprocess** — `modules/process` (separate module). Piped stdin/stdout/stderr, async I/O integration with scheduler.
 

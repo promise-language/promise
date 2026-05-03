@@ -41,6 +41,27 @@ _os_read_pipe(int fd) string `extern("promise_os_read_pipe");
 // Waits for a child process to exit. Returns exit code or raises error.
 _os_wait_pid(int pid) int! `extern("promise_os_wait_pid");
 
+// ── Streaming process externs ────────────────────────────────────────────────
+
+// Spawns a child process with piped stdin/stdout/stderr. Returns pid or raises error.
+// Caches all 3 pipe fds in TLS — retrieve with _os_spawn_stdin_fd/_os_spawn_stdout_fd/_os_spawn_stderr_fd.
+_os_spawn_streaming(string program, string[] arguments) int! `extern("promise_os_spawn_streaming");
+
+// Returns cached stdin pipe write fd from the last _os_spawn_streaming call.
+_os_spawn_stdin_fd() int `extern("promise_os_spawn_stdin_fd");
+
+// Reads up to buf.len bytes from a pipe fd. Returns bytes read (0=EOF, negative=error).
+_os_pipe_read_bytes(int fd, u8[]~buf) int `extern("promise_os_pipe_read_bytes");
+
+// Writes bytes from buf to a pipe fd. Returns bytes written (negative=error).
+_os_pipe_write_bytes(int fd, u8[]~buf) int `extern("promise_os_pipe_write_bytes");
+
+// Closes a pipe fd. Returns 0 on success, negative on error.
+_os_pipe_close(int fd) int `extern("promise_os_pipe_close");
+
+// Sends SIGKILL to a process. Returns 0 on success, -1 on error.
+_os_kill(int pid) int `extern("promise_os_kill");
+
 // ── Error type ───────────────────────────────────────────────────────────────
 
 type OsError is error `public `doc("An operating system error.") {
@@ -53,6 +74,192 @@ type ProcessResult `public `doc("The result of executing a subprocess. Contains 
   int exit_code;
   string standard_output;
   string standard_error;
+}
+
+// ── ProcessInput (satisfies Writer) ──────────────────────────────────────────
+
+type ProcessInput `public `doc("Write end of a subprocess stdin pipe. Satisfies the Writer structural interface. Auto-closes on drop.") {
+  int _fd;
+
+  write(~this, u8[]~buf) int! `public `doc("Writes bytes from buf to the subprocess stdin pipe. Returns the number of bytes written. Raises an error on I/O failure.") {
+    if this._fd < 0 {
+      raise OsError(code: 9, message: "pipe already closed");
+    }
+    int n = _os_pipe_write_bytes(this._fd, buf);
+    if n < 0 {
+      raise OsError(code: -n, message: "write to pipe failed");
+    }
+    return n;
+  }
+
+  write_string(~this, string s) int! `public `doc("Writes a string to the subprocess stdin pipe. Returns the number of bytes written. Raises an error on I/O failure.") {
+    u8[] b = s.bytes();
+    return this.write(b);
+  }
+
+  write_line(~this, string s)! `public `doc("Writes a string followed by a newline to the subprocess stdin pipe.") {
+    this.write_string(s);
+    this.write_string(Platform.line_separator);
+  }
+
+  close(~this)! `public `doc("Closes the stdin pipe, sending EOF to the child process. Safe to call multiple times.") {
+    if this._fd < 0 {
+      return;
+    }
+    int rc = _os_pipe_close(this._fd);
+    this._fd = -1;
+    if rc < 0 {
+      raise OsError(code: -rc, message: "failed to close pipe");
+    }
+  }
+
+  drop(~this) {
+    if this._fd >= 0 {
+      _os_pipe_close(this._fd);
+      this._fd = -1;
+    }
+  }
+}
+
+// ── ProcessOutput (satisfies Reader) ─────────────────────────────────────────
+
+type ProcessOutput `public `doc("Read end of a subprocess stdout or stderr pipe. Satisfies the Reader structural interface. Auto-closes on drop.") {
+  int _fd;
+
+  read(~this, u8[]~buf) int! `public `doc("Reads up to buf.len bytes from the pipe. Returns the number of bytes read, or 0 at EOF. Raises an error on I/O failure.") {
+    if this._fd < 0 {
+      return 0;
+    }
+    int n = _os_pipe_read_bytes(this._fd, buf);
+    if n < 0 {
+      raise OsError(code: -n, message: "read from pipe failed");
+    }
+    return n;
+  }
+
+  read_all(~this) string! `public `doc("Reads all remaining data from the pipe until EOF. Returns the complete output as a string.") {
+    Builder b = Builder();
+    u8[] buf = u8[].filled(0u8, 4096);
+    while true {
+      int n = this.read(buf)!;
+      if n == 0 {
+        break;
+      }
+      b.write_string(string.from_bytes(buf[0:n]))? {
+      };
+    }
+    return b.to_string();
+  }
+
+  close(~this)! `public `doc("Closes the pipe. Safe to call multiple times.") {
+    if this._fd < 0 {
+      return;
+    }
+    int rc = _os_pipe_close(this._fd);
+    this._fd = -1;
+    if rc < 0 {
+      raise OsError(code: -rc, message: "failed to close pipe");
+    }
+  }
+
+  drop(~this) {
+    if this._fd >= 0 {
+      _os_pipe_close(this._fd);
+      this._fd = -1;
+    }
+  }
+}
+
+// ── Process ──────────────────────────────────────────────────────────────────
+
+type Process `public `doc("A running subprocess with piped stdin, stdout, and stderr. Created via Process.spawn(). Pipe handles are obtained via take_standard_input(), take_standard_output(), and take_standard_error(), which transfer ownership of the pipe out of the Process. The Process must be waited on (or dropped) to avoid zombie processes.") {
+  int _pid;
+  int _stdin_fd;
+  int _stdout_fd;
+  int _stderr_fd;
+  int _exit_code;
+  bool _waited;
+
+  spawn(string program, ...string arguments) Self! `factory `public `doc("Spawns a subprocess with piped stdin, stdout, and stderr. The child process inherits the parent environment and working directory. The program is searched using the system PATH. Returns a Process handle for interacting with the child. Raises an error if the process cannot be started.") {
+    int pid = _os_spawn_streaming(program, arguments)!;
+    int stdin_fd = _os_spawn_stdin_fd();
+    int stdout_fd = _os_spawn_stdout_fd();
+    int stderr_fd = _os_spawn_stderr_fd();
+    return Process(_pid: pid, _stdin_fd: stdin_fd, _stdout_fd: stdout_fd, _stderr_fd: stderr_fd, _exit_code: 0, _waited: false);
+  }
+
+  take_standard_input(~this) ProcessInput! `public `doc("Transfers ownership of the stdin pipe out of the Process. Returns a ProcessInput handle that satisfies the Writer structural interface. Raises an error if the stdin pipe has already been taken or closed.") {
+    if this._stdin_fd < 0 {
+      raise OsError(code: 9, message: "stdin pipe already taken or closed");
+    }
+    int fd = this._stdin_fd;
+    this._stdin_fd = -1;
+    return ProcessInput(_fd: fd);
+  }
+
+  take_standard_output(~this) ProcessOutput! `public `doc("Transfers ownership of the stdout pipe out of the Process. Returns a ProcessOutput handle that satisfies the Reader structural interface. Raises an error if the stdout pipe has already been taken or closed.") {
+    if this._stdout_fd < 0 {
+      raise OsError(code: 9, message: "stdout pipe already taken or closed");
+    }
+    int fd = this._stdout_fd;
+    this._stdout_fd = -1;
+    return ProcessOutput(_fd: fd);
+  }
+
+  take_standard_error(~this) ProcessOutput! `public `doc("Transfers ownership of the stderr pipe out of the Process. Returns a ProcessOutput handle that satisfies the Reader structural interface. Raises an error if the stderr pipe has already been taken or closed.") {
+    if this._stderr_fd < 0 {
+      raise OsError(code: 9, message: "stderr pipe already taken or closed");
+    }
+    int fd = this._stderr_fd;
+    this._stderr_fd = -1;
+    return ProcessOutput(_fd: fd);
+  }
+
+  wait(~this) int! `public `doc("Waits for the child process to exit and returns the exit code. Closes stdin if still open to prevent the child from hanging. Safe to call multiple times — returns the cached exit code on subsequent calls.") {
+    if this._waited {
+      return this._exit_code;
+    }
+    // Close stdin to signal EOF to child
+    if this._stdin_fd >= 0 {
+      _os_pipe_close(this._stdin_fd);
+      this._stdin_fd = -1;
+    }
+    int code = _os_wait_pid(this._pid)!;
+    this._exit_code = code;
+    this._waited = true;
+    return code;
+  }
+
+  kill(~this)! `public `doc("Sends SIGKILL to the child process. Does not wait for the process to exit — call wait() after kill() to collect the exit status. Raises an error if the signal cannot be sent.") {
+    int rc = _os_kill(this._pid);
+    if rc < 0 {
+      raise OsError(code: 1, message: "failed to kill process");
+    }
+  }
+
+  get identifier int `public `doc("Returns the operating system process ID of the child process.") => this._pid;
+
+  drop(~this) {
+    // Close any remaining pipe fds
+    if this._stdin_fd >= 0 {
+      _os_pipe_close(this._stdin_fd);
+      this._stdin_fd = -1;
+    }
+    if this._stdout_fd >= 0 {
+      _os_pipe_close(this._stdout_fd);
+      this._stdout_fd = -1;
+    }
+    if this._stderr_fd >= 0 {
+      _os_pipe_close(this._stderr_fd);
+      this._stderr_fd = -1;
+    }
+    // Reap zombie if not already waited
+    if !this._waited {
+      _os_wait_pid(this._pid)? {
+      };
+      this._waited = true;
+    }
+  }
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────

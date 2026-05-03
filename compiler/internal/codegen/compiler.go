@@ -173,29 +173,31 @@ type Compiler struct {
 	palNumCPUs *ir.Func // @pal_num_cpus() → i32
 
 	// PAL file I/O primitives (Phase D)
-	palFileOpen     *ir.Func // @pal_file_open(i8* path, i32 mode) → i32
-	palFileRead     *ir.Func // @pal_file_read(i32 fd, i8* buf, i64 len) → i64
-	palFileWrite    *ir.Func // @pal_file_write(i32 fd, i8* buf, i64 len) → i64
-	palFileClose    *ir.Func // @pal_file_close(i32 fd) → i32
-	palFileSeek     *ir.Func // @pal_file_seek(i32 fd, i64 offset, i32 whence) → i64
-	palFileStatSize *ir.Func // @pal_file_stat_size(i8* path) → i64
-	palFileRemove   *ir.Func // @pal_file_remove(i8* path) → i32
-	palFileExists   *ir.Func // @pal_file_exists(i8* path) → i32
-	palFileMkdir    *ir.Func // @pal_file_mkdir(i8* path) → i32
-	palDirRemove    *ir.Func // @pal_dir_remove(i8* path) → i32
-	palDirExists    *ir.Func // @pal_dir_exists(i8* path) → i32
-	palDirOpen      *ir.Func // @pal_dir_open(i8* path) → i8*
-	palDirNextName  *ir.Func // @pal_dir_next_name(i8* handle) → i8*
-	palDirClose     *ir.Func // @pal_dir_close(i8* handle) → void
-	palErrno        *ir.Func // @pal_errno() → i32
-	palGetEnv       *ir.Func // @pal_getenv(i8* name) → i8* (value or null)
-	palGetCwd       *ir.Func // @pal_getcwd(i8* buf, i64 len) → i8* (buf or null)
-	palSetEnv       *ir.Func // @pal_setenv(i8* name, i8* value) → i32
-	palUnsetEnv     *ir.Func // @pal_unsetenv(i8* name) → i32
-	palChdir        *ir.Func // @pal_chdir(i8* path) → i32
-	palSpawn        *ir.Func // @pal_spawn(i8* program, i8** argv, i32* out_stdout_fd, i32* out_stderr_fd) → i32
-	palReadPipe     *ir.Func // @pal_read_pipe(i32 fd, i8** out_buf, i64* out_len) → void
-	palWaitPid      *ir.Func // @pal_wait_pid(i32 pid) → i32
+	palFileOpen       *ir.Func // @pal_file_open(i8* path, i32 mode) → i32
+	palFileRead       *ir.Func // @pal_file_read(i32 fd, i8* buf, i64 len) → i64
+	palFileWrite      *ir.Func // @pal_file_write(i32 fd, i8* buf, i64 len) → i64
+	palFileClose      *ir.Func // @pal_file_close(i32 fd) → i32
+	palFileSeek       *ir.Func // @pal_file_seek(i32 fd, i64 offset, i32 whence) → i64
+	palFileStatSize   *ir.Func // @pal_file_stat_size(i8* path) → i64
+	palFileRemove     *ir.Func // @pal_file_remove(i8* path) → i32
+	palFileExists     *ir.Func // @pal_file_exists(i8* path) → i32
+	palFileMkdir      *ir.Func // @pal_file_mkdir(i8* path) → i32
+	palDirRemove      *ir.Func // @pal_dir_remove(i8* path) → i32
+	palDirExists      *ir.Func // @pal_dir_exists(i8* path) → i32
+	palDirOpen        *ir.Func // @pal_dir_open(i8* path) → i8*
+	palDirNextName    *ir.Func // @pal_dir_next_name(i8* handle) → i8*
+	palDirClose       *ir.Func // @pal_dir_close(i8* handle) → void
+	palErrno          *ir.Func // @pal_errno() → i32
+	palGetEnv         *ir.Func // @pal_getenv(i8* name) → i8* (value or null)
+	palGetCwd         *ir.Func // @pal_getcwd(i8* buf, i64 len) → i8* (buf or null)
+	palSetEnv         *ir.Func // @pal_setenv(i8* name, i8* value) → i32
+	palUnsetEnv       *ir.Func // @pal_unsetenv(i8* name) → i32
+	palChdir          *ir.Func // @pal_chdir(i8* path) → i32
+	palSpawn          *ir.Func // @pal_spawn(i8* program, i8** argv, i32* out_stdout_fd, i32* out_stderr_fd) → i32
+	palReadPipe       *ir.Func // @pal_read_pipe(i32 fd, i8** out_buf, i64* out_len) → void
+	palWaitPid        *ir.Func // @pal_wait_pid(i32 pid) → i32
+	palSpawnStreaming *ir.Func // @pal_spawn_streaming(..., i32* out_stdin_fd, i32* out_stdout_fd, i32* out_stderr_fd) → i32
+	palKill           *ir.Func // @pal_kill(i32 pid, i32 signal) → i32
 
 	// Command-line argument globals (populated from main's argc/argv)
 	argcGlobal *ir.Global // @__promise_argc (i32)
@@ -204,6 +206,7 @@ type Compiler struct {
 	// Spawn result TLS globals (cached between _os_spawn and _os_spawn_stdout_fd/stderr_fd)
 	spawnStdoutFd *ir.Global // @__promise_spawn_stdout_fd (TLS, i32)
 	spawnStderrFd *ir.Global // @__promise_spawn_stderr_fd (TLS, i32)
+	spawnStdinFd  *ir.Global // @__promise_spawn_stdin_fd (TLS, i32)
 
 	// Scheduler globals (Phase 5c — M:N scheduler)
 	currentGGlobal     *ir.Global // @__promise_current_g (TLS, i8*)
@@ -1018,6 +1021,8 @@ func (c *Compiler) declareIntrinsics() {
 	c.palSpawn = p.EmitSpawn(c.module)
 	c.palReadPipe = p.EmitReadPipe(c.module)
 	c.palWaitPid = p.EmitWaitPid(c.module)
+	c.palSpawnStreaming = p.EmitSpawnStreaming(c.module)
+	c.palKill = p.EmitKill(c.module)
 
 	// Command-line argument globals — populated from main's argc/argv
 	c.argcGlobal = c.module.NewGlobalDef("__promise_argc", constant.NewInt(irtypes.I32, 0))
@@ -1028,9 +1033,12 @@ func (c *Compiler) declareIntrinsics() {
 	c.spawnStdoutFd.Init = constant.NewInt(irtypes.I32, -1)
 	c.spawnStderrFd = c.module.NewGlobal("__promise_spawn_stderr_fd", irtypes.I32)
 	c.spawnStderrFd.Init = constant.NewInt(irtypes.I32, -1)
+	c.spawnStdinFd = c.module.NewGlobal("__promise_spawn_stdin_fd", irtypes.I32)
+	c.spawnStdinFd.Init = constant.NewInt(irtypes.I32, -1)
 	if !c.isWasm {
 		c.spawnStdoutFd.TLSModel = enum.TLSModelGeneric
 		c.spawnStderrFd.TLSModel = enum.TLSModelGeneric
+		c.spawnStdinFd.TLSModel = enum.TLSModelGeneric
 	}
 
 	// strlen — needed by definePanicBody to get C string length.
@@ -3746,6 +3754,8 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 	c.localNameCount = make(map[string]int)
 	c.dropFlags = make(map[string]*ir.InstAlloca)
 	c.dropBindings = make(map[string]scopeBinding)
+	c.scopeBindings = nil
+	c.loopScopeDepth = 0
 	c.blockCounter = 0
 	c.canError = m.Sig().CanError()
 	c.currentRetType = m.Sig().Result()

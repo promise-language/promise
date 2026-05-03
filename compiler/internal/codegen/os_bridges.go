@@ -62,6 +62,24 @@ func (c *Compiler) defineOSBodies() {
 	if fn, ok := irFuncByName["promise_os_set_cwd"]; ok {
 		c.defineSetCwdBody(fn)
 	}
+	if fn, ok := irFuncByName["promise_os_spawn_streaming"]; ok {
+		c.defineSpawnStreamingBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_os_spawn_stdin_fd"]; ok {
+		c.defineSpawnStdinFdBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_os_pipe_read_bytes"]; ok {
+		c.definePipeReadBytesBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_os_pipe_write_bytes"]; ok {
+		c.definePipeWriteBytesBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_os_pipe_close"]; ok {
+		c.definePipeCloseBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_os_kill"]; ok {
+		c.defineKillBody(fn)
+	}
 }
 
 // defineGetEnvBody: void @promise_os_get_env(i8* sret, i8* name)
@@ -576,4 +594,221 @@ func (c *Compiler) defineSetCwdBody(fn *ir.Func) {
 	errInst := c.constructErrorFromGlobalStr(errorBlk, "failed to change working directory")
 	c.storeFailableError(errorBlk, sret, errInst, resultType)
 	errorBlk.NewRet(nil)
+}
+
+// defineSpawnStreamingBody: void @promise_os_spawn_streaming(i8* sret, i8* program, i8* arguments)
+// Like defineSpawnBody but calls pal_spawn_streaming (3 pipes: stdin+stdout+stderr).
+// Caches all 3 pipe fds in TLS globals, returns int! (pid).
+func (c *Compiler) defineSpawnStreamingBody(fn *ir.Func) {
+	zero32 := constant.NewInt(irtypes.I32, 0)
+	zero64 := constant.NewInt(irtypes.I64, 0)
+	one64 := constant.NewInt(irtypes.I64, 1)
+	ptrSize := constant.NewInt(irtypes.I64, int64(c.ptrSize()))
+	headerSize := constant.NewInt(irtypes.I64, vectorHeaderSize)
+	vectorHdrType := vectorHeaderType()
+	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
+
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+	programParam := fn.Params[1]
+	argsParam := fn.Params[2]
+
+	innerType := c.resolveType(types.TypInt)
+	resultType := computeResultType(innerType)
+
+	// Convert program string to C string
+	programCStr := c.stringToCStr(entry, programParam)
+
+	// Load vector length from header
+	hdrPtr := entry.NewBitCast(argsParam, irtypes.NewPointer(vectorHdrType))
+	lenField := entry.NewGetElementPtr(vectorHdrType, hdrPtr, zero32, zero32)
+	argsCount := entry.NewLoad(irtypes.I64, lenField)
+
+	// Allocate argv array: (1 + argsCount + 1) * ptrSize
+	totalSlots := entry.NewAdd(argsCount, constant.NewInt(irtypes.I64, 2))
+	argvSize := entry.NewMul(totalSlots, ptrSize)
+	argvRaw := entry.NewCall(c.palAlloc, argvSize)
+	argv := entry.NewBitCast(argvRaw, i8PtrPtrType)
+
+	// argv[0] = program C string
+	argv0Ptr := entry.NewGetElementPtr(irtypes.I8Ptr, argv, zero64)
+	entry.NewStore(programCStr, argv0Ptr)
+
+	// Loop: convert each vector element to C string and store in argv
+	hasArgs := entry.NewICmp(enum.IPredSGT, argsCount, zero64)
+	loopHdr := fn.NewBlock(".argv_loop_hdr")
+	loopDone := fn.NewBlock(".argv_loop_done")
+	entry.NewCondBr(hasArgs, loopHdr, loopDone)
+
+	loopBody := fn.NewBlock(".argv_loop_body")
+	iPhi := loopHdr.NewPhi(ir.NewIncoming(zero64, entry))
+	cond := loopHdr.NewICmp(enum.IPredSLT, iPhi, argsCount)
+	loopHdr.NewCondBr(cond, loopBody, loopDone)
+
+	elemOff := loopBody.NewMul(iPhi, ptrSize)
+	elemOff2 := loopBody.NewAdd(headerSize, elemOff)
+	elemPtr := loopBody.NewGetElementPtr(irtypes.I8, argsParam, elemOff2)
+	elemPtrTyped := loopBody.NewBitCast(elemPtr, irtypes.NewPointer(irtypes.I8Ptr))
+	strInst := loopBody.NewLoad(irtypes.I8Ptr, elemPtrTyped)
+	argCStr := c.stringInstanceToCStr(loopBody, strInst)
+
+	argIdx := loopBody.NewAdd(iPhi, one64)
+	argvSlotPtr := loopBody.NewGetElementPtr(irtypes.I8Ptr, argv, argIdx)
+	loopBody.NewStore(argCStr, argvSlotPtr)
+
+	iNext := loopBody.NewAdd(iPhi, one64)
+	iPhi.Incs = append(iPhi.Incs, ir.NewIncoming(iNext, loopBody))
+	loopBody.NewBr(loopHdr)
+
+	// Null terminator at argv[argsCount + 1]
+	nullIdx := loopDone.NewAdd(argsCount, one64)
+	nullSlotPtr := loopDone.NewGetElementPtr(irtypes.I8Ptr, argv, nullIdx)
+	loopDone.NewStore(constant.NewNull(irtypes.I8Ptr), nullSlotPtr)
+
+	// Allocate output fd pointers on stack (3 fds: stdin, stdout, stderr)
+	outStdinFd := loopDone.NewAlloca(irtypes.I32)
+	outStdoutFd := loopDone.NewAlloca(irtypes.I32)
+	outStderrFd := loopDone.NewAlloca(irtypes.I32)
+
+	// Call pal_spawn_streaming
+	c.emitEnterSyscall(loopDone)
+	pid := loopDone.NewCall(c.palSpawnStreaming, programCStr, argv, outStdinFd, outStdoutFd, outStderrFd)
+	c.emitExitSyscall(loopDone)
+
+	// Cache all 3 fds in TLS globals
+	stdinFd := loopDone.NewLoad(irtypes.I32, outStdinFd)
+	stdoutFd := loopDone.NewLoad(irtypes.I32, outStdoutFd)
+	stderrFd := loopDone.NewLoad(irtypes.I32, outStderrFd)
+	loopDone.NewStore(stdinFd, c.spawnStdinFd)
+	loopDone.NewStore(stdoutFd, c.spawnStdoutFd)
+	loopDone.NewStore(stderrFd, c.spawnStderrFd)
+
+	// Free argv C strings: argv[1..argsCount]
+	hasFreeArgs := loopDone.NewICmp(enum.IPredSGT, argsCount, zero64)
+	freeLoopHdr := fn.NewBlock(".free_loop_hdr")
+	freeDone := fn.NewBlock(".free_done")
+	loopDone.NewCondBr(hasFreeArgs, freeLoopHdr, freeDone)
+
+	freeLoopBody := fn.NewBlock(".free_loop_body")
+	jPhi := freeLoopHdr.NewPhi(ir.NewIncoming(zero64, loopDone))
+	freeCond := freeLoopHdr.NewICmp(enum.IPredSLT, jPhi, argsCount)
+	freeLoopHdr.NewCondBr(freeCond, freeLoopBody, freeDone)
+
+	freeIdx := freeLoopBody.NewAdd(jPhi, one64)
+	freeSlotPtr := freeLoopBody.NewGetElementPtr(irtypes.I8Ptr, argv, freeIdx)
+	freeStr := freeLoopBody.NewLoad(irtypes.I8Ptr, freeSlotPtr)
+	freeLoopBody.NewCall(c.palFree, freeStr)
+	jNext := freeLoopBody.NewAdd(jPhi, one64)
+	jPhi.Incs = append(jPhi.Incs, ir.NewIncoming(jNext, freeLoopBody))
+	freeLoopBody.NewBr(freeLoopHdr)
+
+	// Free program C string and argv array
+	freeDone.NewCall(c.palFree, programCStr)
+	freeDone.NewCall(c.palFree, argvRaw)
+
+	// Check result: -1 means error
+	isErr := freeDone.NewICmp(enum.IPredSLT, pid, zero32)
+	successBlk := fn.NewBlock(".success")
+	errorBlk := fn.NewBlock(".error")
+	freeDone.NewCondBr(isErr, errorBlk, successBlk)
+
+	// Success: store pid as i64 failable success
+	pidI64 := successBlk.NewSExt(pid, irtypes.I64)
+	c.storeFailableSuccess(successBlk, sret, pidI64, resultType)
+	successBlk.NewRet(nil)
+
+	// Error: construct error, store failable error
+	errInst := c.constructErrorFromGlobalStr(errorBlk, "failed to spawn process")
+	c.storeFailableError(errorBlk, sret, errInst, resultType)
+	errorBlk.NewRet(nil)
+}
+
+// defineSpawnStdinFdBody: void @promise_os_spawn_stdin_fd(i8* sret)
+// Returns cached TLS stdin fd as int via sret, then resets to -1.
+func (c *Compiler) defineSpawnStdinFdBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+	fd := entry.NewLoad(irtypes.I32, c.spawnStdinFd)
+	entry.NewStore(constant.NewInt(irtypes.I32, -1), c.spawnStdinFd)
+	fdI64 := entry.NewSExt(fd, irtypes.I64)
+	c.storeIntResult(entry, sret, fdI64)
+	entry.NewRet(nil)
+}
+
+// definePipeReadBytesBody: void @promise_os_pipe_read_bytes(i8* sret, i8* fd, i8* ~buf)
+// Reads up to buf.len bytes from fd into the provided u8[] buffer.
+// Returns bytes read as Promise int (negative = -errno on error, 0 = EOF).
+func (c *Compiler) definePipeReadBytesBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	fdRaw := c.extractRawInt(entry, fn.Params[1])
+	fdI32 := entry.NewTrunc(fdRaw, irtypes.I32)
+
+	vecPtr := fn.Params[2]
+	dataPtr, dataLen := extractVectorDataLen(entry, vecPtr)
+
+	c.emitEnterSyscall(entry)
+	n := entry.NewCall(c.palFileRead, fdI32, dataPtr, dataLen)
+	c.emitExitSyscall(entry)
+
+	c.storeIntResult(entry, sret, n)
+	entry.NewRet(nil)
+}
+
+// definePipeWriteBytesBody: void @promise_os_pipe_write_bytes(i8* sret, i8* fd, i8* buf)
+// Writes buf.len bytes from the u8[] buffer to fd.
+// Returns bytes written as Promise int (negative = -errno).
+func (c *Compiler) definePipeWriteBytesBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	fdRaw := c.extractRawInt(entry, fn.Params[1])
+	fdI32 := entry.NewTrunc(fdRaw, irtypes.I32)
+
+	vecPtr := fn.Params[2]
+	dataPtr, dataLen := extractVectorDataLen(entry, vecPtr)
+
+	c.emitEnterSyscall(entry)
+	written := entry.NewCall(c.palFileWrite, fdI32, dataPtr, dataLen)
+	c.emitExitSyscall(entry)
+
+	c.storeIntResult(entry, sret, written)
+	entry.NewRet(nil)
+}
+
+// definePipeCloseBody: void @promise_os_pipe_close(i8* sret, i8* fd)
+// Closes a pipe fd. Returns 0 on success, negative on error.
+func (c *Compiler) definePipeCloseBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+	fdParam := fn.Params[1]
+
+	fdRaw := c.extractRawInt(entry, fdParam)
+	fdI32 := entry.NewTrunc(fdRaw, irtypes.I32)
+
+	c.emitEnterSyscall(entry)
+	rc := entry.NewCall(c.palFileClose, fdI32)
+	c.emitExitSyscall(entry)
+
+	rcI64 := entry.NewSExt(rc, irtypes.I64)
+	c.storeIntResult(entry, sret, rcI64)
+	entry.NewRet(nil)
+}
+
+// defineKillBody: void @promise_os_kill(i8* sret, i8* pid)
+// Sends SIGKILL (signal 9) to a process. Returns 0 on success, -1 on error.
+func (c *Compiler) defineKillBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+	pidParam := fn.Params[1]
+
+	pidRaw := c.extractRawInt(entry, pidParam)
+	pidI32 := entry.NewTrunc(pidRaw, irtypes.I32)
+
+	rc := entry.NewCall(c.palKill, pidI32, constant.NewInt(irtypes.I32, 9))
+
+	rcI64 := entry.NewSExt(rc, irtypes.I64)
+	c.storeIntResult(entry, sret, rcI64)
+	entry.NewRet(nil)
 }

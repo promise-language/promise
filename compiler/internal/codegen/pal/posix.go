@@ -1072,6 +1072,182 @@ func (p *PosixPAL) EmitWaitPid(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// EmitSpawnStreaming defines @pal_spawn_streaming using fork+execvp+pipe.
+// Like EmitSpawn but also creates a stdin pipe.
+// Signature: @pal_spawn_streaming(i8* program, i8** argv, i32* out_stdin_fd, i32* out_stdout_fd, i32* out_stderr_fd) → i32
+// Returns child pid on success, -1 on error.
+// out_stdin_fd receives the write end of the stdin pipe; out_stdout/stderr_fd receive read ends.
+func (p *PosixPAL) EmitSpawnStreaming(module *ir.Module) *ir.Func {
+	closeFn := lookupFunc(module, "close")
+
+	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
+	i32PtrType := irtypes.NewPointer(irtypes.I32)
+
+	pipeFn := getOrDeclareFunc(module, "pipe", irtypes.I32, ir.NewParam("fds", i32PtrType))
+	forkFn := getOrDeclareFunc(module, "fork", irtypes.I32)
+	dup2Fn := getOrDeclareFunc(module, "dup2", irtypes.I32, ir.NewParam("oldfd", irtypes.I32), ir.NewParam("newfd", irtypes.I32))
+	execvpFn := getOrDeclareFunc(module, "execvp", irtypes.I32, ir.NewParam("file", irtypes.I8Ptr), ir.NewParam("argv", i8PtrPtrType))
+	exitFn := getOrDeclareFunc(module, "_exit", irtypes.Void, ir.NewParam("status", irtypes.I32))
+
+	fn := module.NewFunc("pal_spawn_streaming", irtypes.I32,
+		ir.NewParam("program", irtypes.I8Ptr),
+		ir.NewParam("argv", i8PtrPtrType),
+		ir.NewParam("out_stdin_fd", i32PtrType),
+		ir.NewParam("out_stdout_fd", i32PtrType),
+		ir.NewParam("out_stderr_fd", i32PtrType))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	zero32 := constant.NewInt(irtypes.I32, 0)
+	one32 := constant.NewInt(irtypes.I32, 1)
+	two32 := constant.NewInt(irtypes.I32, 2)
+	negOne32 := constant.NewInt(irtypes.I32, -1)
+
+	storeErrorFds := func(blk *ir.Block) {
+		blk.NewStore(negOne32, fn.Params[2])
+		blk.NewStore(negOne32, fn.Params[3])
+		blk.NewStore(negOne32, fn.Params[4])
+	}
+
+	entry := fn.NewBlock(".entry")
+
+	// Allocate pipe fd arrays on stack: [2 x i32] for stdin, stdout, stderr
+	stdinFds := entry.NewAlloca(irtypes.NewArray(2, irtypes.I32))
+	stdoutFds := entry.NewAlloca(irtypes.NewArray(2, irtypes.I32))
+	stderrFds := entry.NewAlloca(irtypes.NewArray(2, irtypes.I32))
+	stdinFdsPtr := entry.NewBitCast(stdinFds, i32PtrType)
+	stdoutFdsPtr := entry.NewBitCast(stdoutFds, i32PtrType)
+	stderrFdsPtr := entry.NewBitCast(stderrFds, i32PtrType)
+
+	// pipe(stdin_fds)
+	pipeRet0 := entry.NewCall(pipeFn, stdinFdsPtr)
+	isPipeErr0 := entry.NewICmp(enum.IPredSLT, pipeRet0, zero32)
+	pipeOk0 := fn.NewBlock(".pipe_ok0")
+	pipe0ErrBlk := fn.NewBlock(".pipe0_err")
+	entry.NewCondBr(isPipeErr0, pipe0ErrBlk, pipeOk0)
+
+	storeErrorFds(pipe0ErrBlk)
+	pipe0ErrBlk.NewRet(negOne32)
+
+	// pipe(stdout_fds)
+	pipeRet1 := pipeOk0.NewCall(pipeFn, stdoutFdsPtr)
+	isPipeErr1 := pipeOk0.NewICmp(enum.IPredSLT, pipeRet1, zero32)
+	pipeOk1 := fn.NewBlock(".pipe_ok1")
+	pipe1ErrBlk := fn.NewBlock(".pipe1_err")
+	pipeOk0.NewCondBr(isPipeErr1, pipe1ErrBlk, pipeOk1)
+
+	// pipe1 error: close stdin pipe fds
+	stdinRdPtrErr1 := pipe1ErrBlk.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdinFds, zero32, zero32)
+	stdinWrPtrErr1 := pipe1ErrBlk.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdinFds, zero32, one32)
+	pipe1ErrBlk.NewCall(closeFn, pipe1ErrBlk.NewLoad(irtypes.I32, stdinRdPtrErr1))
+	pipe1ErrBlk.NewCall(closeFn, pipe1ErrBlk.NewLoad(irtypes.I32, stdinWrPtrErr1))
+	storeErrorFds(pipe1ErrBlk)
+	pipe1ErrBlk.NewRet(negOne32)
+
+	// pipe(stderr_fds)
+	pipeRet2 := pipeOk1.NewCall(pipeFn, stderrFdsPtr)
+	isPipeErr2 := pipeOk1.NewICmp(enum.IPredSLT, pipeRet2, zero32)
+	pipeOk2 := fn.NewBlock(".pipe_ok2")
+	pipe2ErrBlk := fn.NewBlock(".pipe2_err")
+	pipeOk1.NewCondBr(isPipeErr2, pipe2ErrBlk, pipeOk2)
+
+	// pipe2 error: close stdin + stdout pipe fds
+	stdinRdPtrErr2 := pipe2ErrBlk.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdinFds, zero32, zero32)
+	stdinWrPtrErr2 := pipe2ErrBlk.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdinFds, zero32, one32)
+	stdoutRdPtrErr2 := pipe2ErrBlk.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdoutFds, zero32, zero32)
+	stdoutWrPtrErr2 := pipe2ErrBlk.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdoutFds, zero32, one32)
+	pipe2ErrBlk.NewCall(closeFn, pipe2ErrBlk.NewLoad(irtypes.I32, stdinRdPtrErr2))
+	pipe2ErrBlk.NewCall(closeFn, pipe2ErrBlk.NewLoad(irtypes.I32, stdinWrPtrErr2))
+	pipe2ErrBlk.NewCall(closeFn, pipe2ErrBlk.NewLoad(irtypes.I32, stdoutRdPtrErr2))
+	pipe2ErrBlk.NewCall(closeFn, pipe2ErrBlk.NewLoad(irtypes.I32, stdoutWrPtrErr2))
+	storeErrorFds(pipe2ErrBlk)
+	pipe2ErrBlk.NewRet(negOne32)
+
+	// Load all pipe fds
+	stdinReadFdPtr := pipeOk2.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdinFds, zero32, zero32)
+	stdinWriteFdPtr := pipeOk2.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdinFds, zero32, one32)
+	stdoutReadFdPtr := pipeOk2.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdoutFds, zero32, zero32)
+	stdoutWriteFdPtr := pipeOk2.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdoutFds, zero32, one32)
+	stderrReadFdPtr := pipeOk2.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stderrFds, zero32, zero32)
+	stderrWriteFdPtr := pipeOk2.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stderrFds, zero32, one32)
+	stdinReadFd := pipeOk2.NewLoad(irtypes.I32, stdinReadFdPtr)
+	stdinWriteFd := pipeOk2.NewLoad(irtypes.I32, stdinWriteFdPtr)
+	stdoutReadFd := pipeOk2.NewLoad(irtypes.I32, stdoutReadFdPtr)
+	stdoutWriteFd := pipeOk2.NewLoad(irtypes.I32, stdoutWriteFdPtr)
+	stderrReadFd := pipeOk2.NewLoad(irtypes.I32, stderrReadFdPtr)
+	stderrWriteFd := pipeOk2.NewLoad(irtypes.I32, stderrWriteFdPtr)
+
+	// fork()
+	pid := pipeOk2.NewCall(forkFn)
+	isChild := pipeOk2.NewICmp(enum.IPredEQ, pid, zero32)
+	childBlk := fn.NewBlock(".child")
+	checkForkErr := fn.NewBlock(".check_fork_err")
+	pipeOk2.NewCondBr(isChild, childBlk, checkForkErr)
+
+	isForkErr := checkForkErr.NewICmp(enum.IPredSLT, pid, zero32)
+	parentBlk := fn.NewBlock(".parent")
+	forkErrBlk := fn.NewBlock(".fork_err")
+	checkForkErr.NewCondBr(isForkErr, forkErrBlk, parentBlk)
+
+	// --- Child process ---
+	// Close parent ends of pipes
+	childBlk.NewCall(closeFn, stdinWriteFd)
+	childBlk.NewCall(closeFn, stdoutReadFd)
+	childBlk.NewCall(closeFn, stderrReadFd)
+	// Redirect stdin/stdout/stderr
+	childBlk.NewCall(dup2Fn, stdinReadFd, zero32)  // stdin read end → fd 0
+	childBlk.NewCall(dup2Fn, stdoutWriteFd, one32) // stdout write end → fd 1
+	childBlk.NewCall(dup2Fn, stderrWriteFd, two32) // stderr write end → fd 2
+	// Close child ends (now duplicated)
+	childBlk.NewCall(closeFn, stdinReadFd)
+	childBlk.NewCall(closeFn, stdoutWriteFd)
+	childBlk.NewCall(closeFn, stderrWriteFd)
+	childBlk.NewCall(execvpFn, fn.Params[0], fn.Params[1])
+	childBlk.NewCall(exitFn, constant.NewInt(irtypes.I32, 127))
+	childBlk.NewUnreachable()
+
+	// --- Fork error: close all 6 pipe fds ---
+	forkErrBlk.NewCall(closeFn, stdinReadFd)
+	forkErrBlk.NewCall(closeFn, stdinWriteFd)
+	forkErrBlk.NewCall(closeFn, stdoutReadFd)
+	forkErrBlk.NewCall(closeFn, stdoutWriteFd)
+	forkErrBlk.NewCall(closeFn, stderrReadFd)
+	forkErrBlk.NewCall(closeFn, stderrWriteFd)
+	storeErrorFds(forkErrBlk)
+	forkErrBlk.NewRet(negOne32)
+
+	// --- Parent: close child ends, output parent ends, return pid ---
+	parentBlk.NewCall(closeFn, stdinReadFd)        // close read end of stdin pipe
+	parentBlk.NewCall(closeFn, stdoutWriteFd)      // close write end of stdout pipe
+	parentBlk.NewCall(closeFn, stderrWriteFd)      // close write end of stderr pipe
+	parentBlk.NewStore(stdinWriteFd, fn.Params[2]) // parent writes to stdin
+	parentBlk.NewStore(stdoutReadFd, fn.Params[3]) // parent reads from stdout
+	parentBlk.NewStore(stderrReadFd, fn.Params[4]) // parent reads from stderr
+	parentBlk.NewRet(pid)
+
+	return fn
+}
+
+// EmitKill defines @pal_kill using POSIX kill(2).
+// Signature: @pal_kill(i32 pid, i32 signal) → i32
+// Returns 0 on success, -1 on error.
+func (p *PosixPAL) EmitKill(module *ir.Module) *ir.Func {
+	killFn := module.NewFunc("kill", irtypes.I32,
+		ir.NewParam("pid", irtypes.I32),
+		ir.NewParam("sig", irtypes.I32))
+	killFn.FuncAttrs = append(killFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_kill", irtypes.I32,
+		ir.NewParam("pid", irtypes.I32),
+		ir.NewParam("signal", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(killFn, fn.Params[0], fn.Params[1])
+	entry.NewRet(ret)
+
+	return fn
+}
+
 // EmitGetEnv declares libc @getenv and defines @pal_getenv.
 // Signature: @pal_getenv(i8* name) → i8* (value or null)
 // Returns a pointer to the environment value string, or null if not found.

@@ -107,6 +107,15 @@ type PAL interface {
 	// Retries on EINTR.
 	EmitWaitPid(module *ir.Module) *ir.Func
 
+	// Streaming process execution (stdin+stdout+stderr pipes)
+	// EmitSpawnStreaming defines @pal_spawn_streaming(i8* program, i8** argv, i32* out_stdin_fd, i32* out_stdout_fd, i32* out_stderr_fd) → i32
+	// Like EmitSpawn but also creates a stdin pipe. Returns child pid on success, -1 on error.
+	// out_stdin_fd receives the write end of the stdin pipe; out_stdout_fd/out_stderr_fd receive read ends.
+	EmitSpawnStreaming(module *ir.Module) *ir.Func
+	// EmitKill defines @pal_kill(i32 pid, i32 signal) → i32
+	// Sends a signal to a process. Returns 0 on success, -1 on error.
+	EmitKill(module *ir.Module) *ir.Func
+
 	// Directory listing primitives (Phase D)
 	// EmitDirOpen defines @pal_dir_open(i8* path) → i8* (DIR*/handle or null)
 	EmitDirOpen(module *ir.Module) *ir.Func
@@ -557,6 +566,37 @@ func emitStubReadPipe(module *ir.Module) *ir.Func {
 func emitStubWaitPid(module *ir.Module) *ir.Func {
 	fn := module.NewFunc("pal_wait_pid", irtypes.I32,
 		ir.NewParam("pid", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}
+
+// emitStubSpawnStreaming returns -1 (no streaming process support).
+// Sets all out fd pointers to -1.
+func emitStubSpawnStreaming(module *ir.Module) *ir.Func {
+	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
+	i32PtrType := irtypes.NewPointer(irtypes.I32)
+	fn := module.NewFunc("pal_spawn_streaming", irtypes.I32,
+		ir.NewParam("program", irtypes.I8Ptr),
+		ir.NewParam("argv", i8PtrPtrType),
+		ir.NewParam("out_stdin_fd", i32PtrType),
+		ir.NewParam("out_stdout_fd", i32PtrType),
+		ir.NewParam("out_stderr_fd", i32PtrType))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewStore(constant.NewInt(irtypes.I32, -1), fn.Params[2])
+	entry.NewStore(constant.NewInt(irtypes.I32, -1), fn.Params[3])
+	entry.NewStore(constant.NewInt(irtypes.I32, -1), fn.Params[4])
+	entry.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}
+
+// emitStubKill returns -1 (no signal support).
+func emitStubKill(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_kill", irtypes.I32,
+		ir.NewParam("pid", irtypes.I32),
+		ir.NewParam("signal", irtypes.I32))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	entry.NewRet(constant.NewInt(irtypes.I32, -1))

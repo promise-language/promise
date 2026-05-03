@@ -1022,6 +1022,14 @@ func (p *WindowsPAL) EmitReadPipe(module *ir.Module) *ir.Func { return emitStubR
 // EmitWaitPid returns -1 stub (not yet implemented on Windows).
 func (p *WindowsPAL) EmitWaitPid(module *ir.Module) *ir.Func { return emitStubWaitPid(module) }
 
+// EmitSpawnStreaming returns -1 stub (not yet implemented on Windows).
+func (p *WindowsPAL) EmitSpawnStreaming(module *ir.Module) *ir.Func {
+	return emitStubSpawnStreaming(module)
+}
+
+// EmitKill returns -1 stub (not yet implemented on Windows).
+func (p *WindowsPAL) EmitKill(module *ir.Module) *ir.Func { return emitStubKill(module) }
+
 // EmitGetCwd declares UCRT @_getcwd and defines @pal_getcwd.
 // Signature: @pal_getcwd(i8* buf, i64 len) → i8* (buf or null)
 func (p *WindowsPAL) EmitGetCwd(module *ir.Module) *ir.Func {

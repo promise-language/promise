@@ -52,11 +52,11 @@ The stdlib today (29 files, ~2,440 lines) provides:
 | `strings` | `modules/strings/strings.pr` | 65 | **Done** — `join`, `spaces`, `reverse`, `is_blank`, `repeat_join`. 10 tests. |
 | `math` | `modules/math/math.pr` | 67 | **Done** — `lerp`, `map_range`, `deg_to_rad`, `rad_to_deg`, `sign`, `sign_f64`, `is_even`, `is_odd`, `gcd`, `lcm`. 26 tests. |
 | `json` | `modules/json/json.pr` | ~600 | **Done** — `JsonEncoder` (is Encoder), `JsonDecoder` (is Decoder), `encode_string`, `decode_string`, `encode_string_pretty`. 61 tests. |
-| `os` | `modules/os/os.pr` | 4 | **Done** — get_environment_variable, get_working_directory, exit_process, arguments, executable_path, execute, set_environment_variable, set_working_directory |
+| `os` | `modules/os/os.pr` | 4 | **Done** — get_environment_variable, get_working_directory, exit_process, arguments, executable_path, execute, set_environment_variable, set_working_directory, Process (streaming spawn with piped stdin/stdout/stderr), ProcessInput (satisfies Writer), ProcessOutput (satisfies Reader) |
 | `time` | `modules/time/time.pr` | 4 | **Placeholder** — planned: extended time utilities beyond `std/time.pr` |
 | `http` | `modules/http/http.pr` | 4 | **Placeholder** — planned: get, post, Request, Response, Server, Handler |
 
-**What's missing**: Networking, HTTP, signal handling. OS access (args, env, cwd, execute, set env, set cwd) is done.
+**What's missing**: Networking, HTTP, signal handling. OS access (args, env, cwd, execute, set env, set cwd, streaming process execution) is done.
 
 ### Naming Conventions
 
@@ -412,7 +412,7 @@ x := s.next[int]()!;
 
 ## 3. PAL Extensions
 
-The PAL (Platform Abstraction Layer) isolates all OS interaction. Currently 40 methods covering memory (5), threads/sync (11), CPU count (1), file I/O (12), OS/environment (5), process execution (3), and directory listing (3). New methods needed:
+The PAL (Platform Abstraction Layer) isolates all OS interaction. Currently 42 methods covering memory (5), threads/sync (11), CPU count (1), file I/O (12), OS/environment (5), process execution (5: spawn, read_pipe, wait_pid, spawn_streaming, kill), and directory listing (3). New methods needed:
 
 ### 3.1 File I/O — Done
 
@@ -461,17 +461,23 @@ Note: `promise_nanotime` already exists as a hardcoded function in `io.go:define
 
 ### 3.4 Process Execution — DONE
 
-3 PAL methods (decomposed for concurrent pipe reads via goroutines):
+5 PAL methods (3 original for one-shot execute, 2 new for streaming):
 
 ```go
+// One-shot (used by execute())
 EmitSpawn(module *ir.Module) *ir.Func       // i8* program, i8** argv, i32* out_stdout_fd, i32* out_stderr_fd → i32 (pid or -1)
 EmitReadPipe(module *ir.Module) *ir.Func    // i32 fd, i8** out_buf, i64* out_len → void (reads to EOF, closes fd)
 EmitWaitPid(module *ir.Module) *ir.Func     // i32 pid → i32 (exit code 0-255, or -1; retries EINTR)
-// POSIX: fork + execvp + pipe (spawn), read loop + close (read_pipe), waitpid (wait_pid)
+// Streaming (used by Process.spawn())
+EmitSpawnStreaming(module *ir.Module) *ir.Func // i8* program, i8** argv, i32* out_stdin_fd, i32* out_stdout_fd, i32* out_stderr_fd → i32 (pid or -1)
+EmitKill(module *ir.Module) *ir.Func          // i32 pid, i32 signal → i32 (0 or -1)
+// POSIX: fork + execvp + pipe (spawn/spawn_streaming), read loop + close (read_pipe), waitpid (wait_pid), kill(2) (kill)
 // Windows/WASM: stubs returning -1
 ```
 
 `execute()` in `modules/os/os.pr` reads stdout and stderr concurrently using `go _os_read_pipe(stderr_fd)` while the main goroutine reads stdout. This prevents deadlock when a child writes >64KB to stderr.
+
+`Process.spawn()` creates stdin+stdout+stderr pipes. Pipe handles are obtained via `take_standard_input()` (returns `ProcessInput`, satisfies `Writer`), `take_standard_output()`/`take_standard_error()` (returns `ProcessOutput`, satisfies `Reader`). The streaming pipe read/write/close bridges reuse existing `pal_file_read`/`pal_file_write`/`pal_file_close` PAL functions (pipes are just fds).
 
 ### 3.5 Math (No PAL Needed)
 
@@ -508,7 +514,7 @@ EmitMemcpy(module *ir.Module) *ir.Func      // i8* dst, i8* src, i64 len → voi
 |----------|-------------|---------------|
 | File I/O | 12 (done) | `open`, `read`, `write`, `close`, `seek`, `stat_size`, `remove`, `exists`, `mkdir`, `dir_remove`, `dir_exists`, `errno` |
 | OS / Env | 5 (done) | `getenv`, `getcwd`, `setenv`, `unsetenv`, `chdir` |
-| Process | 3 (done) | `spawn` (`fork`+`execvp`+`pipe`), `read_pipe` (read+close), `wait_pid` (`waitpid`) |
+| Process | 5 (done) | `spawn` (`fork`+`execvp`+`pipe`), `read_pipe` (read+close), `wait_pid` (`waitpid`), `spawn_streaming` (stdin+stdout+stderr pipes), `kill` (`kill(2)`) |
 | Dir Listing | 3 (done) | `dir_open` (`opendir`), `dir_next_name` (`readdir`), `dir_close` (`closedir`) |
 | Time | 3 | `clock_gettime` (×2), `nanosleep` |
 | Math | 0 | LLVM intrinsics |
@@ -880,6 +886,7 @@ type ProcessResult `public {
     string standard_error;
 }
 
+// One-shot execution
 get_environment_variable(string name) string?;
 get_working_directory() string!;
 exit_process(int code);
@@ -888,12 +895,26 @@ executable_path() string;
 execute(string program, ...string arguments) ProcessResult!;
 set_environment_variable(string name, string? value);
 set_working_directory(string path) !;
+
+// Streaming process execution
+type ProcessInput `public { ... }   // satisfies Writer: write, write_string, write_line, close, drop
+type ProcessOutput `public { ... }  // satisfies Reader: read, read_all, close, drop
+type Process `public {
+    spawn(string program, ...string arguments) Self! `factory;
+    take_standard_input(~this) ProcessInput!;
+    take_standard_output(~this) ProcessOutput!;
+    take_standard_error(~this) ProcessOutput!;
+    wait(~this) int!;              // closes stdin, returns exit code (cached)
+    kill(~this)!;                  // SIGKILL
+    get identifier int;            // pid
+    drop(~this);                   // close fds + reap zombie
+}
 ```
 
 - **File**: `modules/os/os.pr` (separate `os` module, not part of `std`)
-- **Dependencies**: PAL OS (getenv, getcwd, exit, execute, setenv, unsetenv, chdir), argc/argv globals from main prologue
-- **Native codegen**: Extern bridge pattern in `os_bridges.go` — Promise declares `_os_func() T \`extern("promise_os_func");`, codegen provides LLVM IR body bridging Promise types ↔ PAL. `execute` uses three-extern + TLS caching pattern (see `platform-modules.md`).
-- **Test**: `modules/os/os_test.pr` (50 tests, excluded on WASM)
+- **Dependencies**: PAL OS (getenv, getcwd, exit, setenv, unsetenv, chdir, spawn, spawn_streaming, kill), argc/argv globals from main prologue
+- **Native codegen**: Extern bridge pattern in `os_bridges.go` — Promise declares `_os_func() T \`extern("promise_os_func");`, codegen provides LLVM IR body bridging Promise types ↔ PAL. `execute` uses three-extern + TLS caching pattern. Streaming process uses six new externs: `spawn_streaming`, `spawn_stdin_fd`, `pipe_read_bytes`, `pipe_write_bytes`, `pipe_close`, `kill`. Pipe read/write/close bridges reuse existing PAL file I/O functions (`pal_file_read`, `pal_file_write`, `pal_file_close`).
+- **Test**: `modules/os/os_test.pr` (78 tests, excluded on WASM)
 
 #### 4e. Standard Input — DONE (merged into `modules/io/io.pr`)
 
@@ -1187,7 +1208,7 @@ bin/test.sh                            # rebuild + all tests pass (including new
 | 4a | `modules/std/io.pr` | Promise | No | 59 | **DONE** |
 | 4b | `modules/io/io.pr` | Promise + Native | 12 | 501 | **DONE** |
 | 4c | `modules/path/path.pr` | Promise | No | 192 | **DONE** |
-| 4d | `modules/os/os.pr` | Promise + Native | 2 | 69 | **DONE** |
+| 4d | `modules/os/os.pr` | Promise + Native | 8 | 311 | **DONE** |
 | 4e | (merged into 4b) | — | — | — | **DONE** |
 | — | `modules/std/platform.pr` | Promise | No | 33 | **DONE** |
 | 5a | `modules/json/json.pr` | Promise | No | ~300 | Future |

@@ -260,7 +260,7 @@ The standard library (`modules/std/`, 29 files) is auto-imported via `use std as
 | `path` | `modules/path/path.pr` | `path_join`, `path_dir`, `path_base`, `path_ext`, `path_is_abs`, `path_normalize` |
 | `math` | `modules/math/math.pr` | Extended math functions |
 | `strings` | `modules/strings/strings.pr` | Extended string utilities |
-| `os` | `modules/os/os.pr` | OS interaction, environment, process |
+| `os` | `modules/os/os.pr` | OS interaction, environment, one-shot `execute`, streaming `Process`/`ProcessInput` (Writer)/`ProcessOutput` (Reader) |
 | `time` | `modules/time/time.pr` | Extended time utilities |
 | `http` | `modules/http/http.pr` | HTTP client (in progress) |
 

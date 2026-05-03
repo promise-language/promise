@@ -574,6 +574,16 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 	entry.NewStore(mainFn.Params[0], c.argcGlobal)
 	entry.NewStore(mainFn.Params[1], c.argvGlobal)
 
+	// Initialize the M:N scheduler so goroutines spawned by test functions
+	// get picked up by worker Ms. Without this, `go` blocks in batch tests
+	// enqueue Gs that never get scheduled → deadlock (B0041).
+	// WASM is excluded: cooperative scheduler can't run goroutines from
+	// non-coroutine batch test functions (no sched_coop_run call site).
+	if !c.isWasm {
+		numCPUs := entry.NewCall(c.palNumCPUs)
+		entry.NewCall(c.funcs["promise_sched_init"], numCPUs)
+	}
+
 	// Allocate counters: passed and failed
 	passedAlloca := entry.NewAlloca(irtypes.I32)
 	failedAlloca := entry.NewAlloca(irtypes.I32)
@@ -775,6 +785,11 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 	loopBlock.NewCondBr(loopDone, loopEndBlock, loopBlock)
 
 	loopEndBlock.NewBr(doneBlock)
+
+	// Shut down the scheduler (join worker Ms) before exiting
+	if !c.isWasm {
+		doneBlock.NewCall(c.funcs["promise_sched_shutdown"])
+	}
 
 	// Return 0 if all passed, 1 if any failed
 	retHasFailures := doneBlock.NewICmp(enum.IPredSGT, finalFailed, constant.NewInt(irtypes.I32, 0))

@@ -1,0 +1,132 @@
+// Batch tests for goroutines — verifies that the scheduler is properly
+// initialized in the batch test harness (B0041 fix).
+// Excluded on wasm32: cooperative scheduler cannot run goroutines from
+// non-coroutine batch test functions.
+get_int() int {
+  return 42;
+}
+
+get_string() string {
+  return "hello";
+}
+
+add(int a, int b) int {
+  return a + b;
+}
+
+do_nothing() {
+}
+
+// --- Task await (usleep spin loop on G.done) ---
+
+test_task_basic() `test(exclude: "wasm32") {
+  t := go get_int();
+  int x = <-t;
+  assert(x == 42, "task returns int");
+}
+
+test_task_string() `test(exclude: "wasm32") {
+  t := go get_string();
+  string s = <-t;
+  assert(s == "hello", "task returns string");
+}
+
+test_task_with_args() `test(exclude: "wasm32") {
+  t := go add(10, 20);
+  int x = <-t;
+  assert(x == 30, "task with args");
+}
+
+test_multiple_tasks() `test(exclude: "wasm32") {
+  t1 := go get_int();
+  t2 := go get_int();
+  t3 := go get_string();
+  int a = <-t1;
+  int b = <-t2;
+  string s = <-t3;
+  assert(a == 42, "first task");
+  assert(b == 42, "second task");
+  assert(s == "hello", "third task");
+}
+
+test_sequential_tasks() `test(exclude: "wasm32") {
+  t1 := go get_int();
+  int x = <-t1;
+  t2 := go add(x, 8);
+  int y = <-t2;
+  assert(y == 50, "sequential tasks");
+}
+
+// --- Channel recv (cond_wait on notEmpty) ---
+
+test_buffered_channel() `test(exclude: "wasm32") {
+  ch := channel[int](capacity: 1);
+  go {
+    ch.send(99);
+  };
+  int v = (<-ch)!;
+  assert(v == 99, "buffered channel recv");
+}
+
+test_unbuffered_channel() `test(exclude: "wasm32") {
+  ch := channel[int]();
+  go {
+    ch.send(77);
+  };
+  int v = (<-ch)!;
+  assert(v == 77, "unbuffered channel recv");
+}
+
+// --- For-in on channel (cond_wait loop until close) ---
+
+test_for_in_channel() `test(exclude: "wasm32") {
+  ch := channel[int](capacity: 3);
+  go {
+    ch.send(1);
+    ch.send(2);
+    ch.send(3);
+    ch.close();
+  };
+  int sum = 0;
+  for val in ch {
+    sum = sum + val;
+  }
+  assert(sum == 6, "for-in channel");
+}
+
+// --- Fire-and-forget (scheduler handles abandoned G) ---
+
+test_fire_and_forget() `test(exclude: "wasm32") {
+  go do_nothing();
+  assert(true, "fire-and-forget did not crash");
+}
+
+// --- Select with default (non-blocking) ---
+
+test_select_default() `test(exclude: "wasm32") {
+  ch1 := channel[int](capacity: 1);
+  ch2 := channel[int](capacity: 1);
+  ch1.send(42);
+  int result = 0;
+  select {
+    v := <-ch1:
+    result = v!;
+    v := <-ch2:
+    result = v!;
+    default:
+    result = -1;
+  }
+  assert(result == 42, "select picks ready channel");
+}
+
+test_select_default_noop() `test(exclude: "wasm32") {
+  ch := channel[int](capacity: 1);
+  int result = -1;
+  select {
+    v := <-ch:
+    result = v!;
+    default:
+    result = 0;
+  }
+  assert(result == 0, "select falls to default when no channel ready");
+}

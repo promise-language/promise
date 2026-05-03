@@ -195,9 +195,13 @@ func (c *Checker) checkExpr(expr ast.Expr) types.Type {
 
 	case *ast.StringLit:
 		for _, part := range e.Parts {
-			if interp, ok := part.(ast.StringInterp); ok && interp.Expr != nil {
-				c.checkExpr(interp.Expr)
-				c.validateInterpolationType(c.info.Types[interp.Expr], interp.Expr)
+			if interp, ok := part.(ast.StringInterp); ok {
+				if interp.Expr == nil {
+					c.errorf(e.Pos(), "empty interpolation '{}' in string literal")
+				} else {
+					c.checkExpr(interp.Expr)
+					c.validateInterpolationType(c.info.Types[interp.Expr], interp.Expr)
+				}
 			}
 		}
 		typ = types.TypString

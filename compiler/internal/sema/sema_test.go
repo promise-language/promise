@@ -10260,3 +10260,16 @@ func TestModuleLevelFailableGetterHandlerOK(t *testing.T) {
 		}
 	`)
 }
+
+func TestEmptyInterpolationError(t *testing.T) {
+	errs := checkErrs(t, `main() { s := "{}"; }`)
+	expectError(t, errs, "empty interpolation")
+}
+
+func TestEscapedBraceOK(t *testing.T) {
+	checkOK(t, `main() { s := "\{"; }`)
+}
+
+func TestEscapedBraceWithInterpolationOK(t *testing.T) {
+	checkOK(t, `main() { int x = 1; s := "\{x}={x}"; }`)
+}

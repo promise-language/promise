@@ -200,6 +200,11 @@ func (c *Compiler) genInterpolatedString(e *ast.StringLit) value.Value {
 		case ast.StringEscape:
 			staticBuf.WriteString(resolveEscape(p.Sequence))
 		case ast.StringInterp:
+			// Skip interpolation with nil Expr (empty {} or parse failure —
+			// sema reports the error; treat as empty string to avoid panic).
+			if p.Expr == nil {
+				continue
+			}
 			// Flush static buffer as a string
 			if staticBuf.Len() > 0 {
 				parts = append(parts, c.makeRuntimeString(staticBuf.String()))

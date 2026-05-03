@@ -49,7 +49,8 @@
       "mcp__tracker__list",
       "mcp__tracker__create",
       "mcp__tracker__update",
-      "mcp__tracker__get"
+      "mcp__tracker__get",
+      "mcp__tracker__search"
     ],
     "deny": [
       "Read(.tracker/**)",

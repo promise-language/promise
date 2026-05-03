@@ -4236,12 +4236,51 @@ func printErrorContext(lines []string, srcIdx, column int) {
 	}
 	// Show the previous line for context when the error line is not the first.
 	if srcIdx > 0 {
-		fmt.Fprintf(os.Stderr, "    %s\n", lines[srcIdx-1])
+		fmt.Fprintf(os.Stderr, "    %s\n", expandTabs(lines[srcIdx-1]))
 	}
-	fmt.Fprintf(os.Stderr, "  > %s\n", lines[srcIdx])
+	line := lines[srcIdx]
+	fmt.Fprintf(os.Stderr, "  > %s\n", expandTabs(line))
 	if column >= 0 {
-		fmt.Fprintf(os.Stderr, "    %s^\n", strings.Repeat(" ", column))
+		visualCol := tabExpandedColumn(line, column)
+		fmt.Fprintf(os.Stderr, "    %s^\n", strings.Repeat(" ", visualCol))
 	}
+}
+
+// expandTabs replaces tab characters with spaces using 4-column tab stops.
+func expandTabs(s string) string {
+	if !strings.Contains(s, "\t") {
+		return s
+	}
+	var buf strings.Builder
+	col := 0
+	for _, c := range s {
+		if c == '\t' {
+			spaces := 4 - (col % 4)
+			buf.WriteString(strings.Repeat(" ", spaces))
+			col += spaces
+		} else {
+			buf.WriteRune(c)
+			col++
+		}
+	}
+	return buf.String()
+}
+
+// tabExpandedColumn converts a character column to a visual column,
+// accounting for tab characters that expand to 4-column tab stops.
+func tabExpandedColumn(line string, charCol int) int {
+	visual := 0
+	for i := 0; i < charCol && i < len(line); i++ {
+		if line[i] == '\t' {
+			visual += 4 - (visual % 4)
+		} else {
+			visual++
+		}
+	}
+	if charCol > len(line) {
+		visual += charCol - len(line)
+	}
+	return visual
 }
 
 // fileLineCache caches file contents read for error reporting.

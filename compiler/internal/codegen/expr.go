@@ -3315,7 +3315,13 @@ func (c *Compiler) genErrorPropagateExpr(e *ast.ErrorPropagateExpr) value.Value 
 
 // genErrorUnwrapExpr generates the `expr!` operator.
 // Evaluates the inner failable call, panics on error, or extracts the Ok value.
+// Also handles optional unwrap: T? ! → T, panic on none.
 func (c *Compiler) genErrorUnwrapExpr(e *ast.ErrorUnwrapExpr) value.Value {
+	// Optional unwrap: T? ! → extract T, panic on none
+	if c.info.OptionalUnwraps[e] {
+		return c.genOptionalForceUnwrap(e.Expr)
+	}
+
 	result := c.genExpr(e.Expr)
 	resultType := result.Type().(*irtypes.StructType)
 
@@ -3348,6 +3354,11 @@ func (c *Compiler) genErrorUnwrapExpr(e *ast.ErrorUnwrapExpr) value.Value {
 // the error instance. If the check fails, the error is propagated (in failable
 // functions) or causes a panic (in non-failable functions).
 func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
+	// Optional handler: T? ? { recovery } → T
+	if c.info.OptionalHandlers[e] {
+		return c.genOptionalHandlerExpr(e)
+	}
+
 	result := c.genExpr(e.Expr)
 	resultType := result.Type().(*irtypes.StructType)
 
@@ -4664,6 +4675,17 @@ func (c *Compiler) loadVariantPtr(subject value.Value) value.Value {
 
 // genCastExpr generates code for `expr as Type` and `expr as! Type`.
 func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
+	// Optional unwrap: T? as! T → extract inner value, panic on none.
+	if e.Force {
+		srcType := c.info.Types[e.Expr]
+		if opt, ok := srcType.(*types.Optional); ok {
+			targetType := c.resolveTypeRefToType(e.Type)
+			if targetType != nil && types.Identical(opt.Elem(), targetType) {
+				return c.genOptionalForceUnwrap(e.Expr)
+			}
+		}
+	}
+
 	// Resolve the target Named type from the TypeRef
 	targetRef, ok := e.Type.(*ast.NamedTypeRef)
 	if !ok {
@@ -4737,6 +4759,68 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 		&ir.Incoming{X: noneResult, Pred: noneEnd},
 	)
 	return phi
+}
+
+// genOptionalHandlerExpr generates code for `optExpr ? { recovery }`.
+// Checks the optional flag, runs the handler on none, extracts inner value on some.
+func (c *Compiler) genOptionalHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
+	optVal := c.genExpr(e.Expr)
+	flag := c.block.NewExtractValue(optVal, 0)
+
+	noneBlock := c.newBlock("opt.none")
+	someBlock := c.newBlock("opt.some")
+	mergeBlock := c.newBlock("opt.merge")
+	c.block.NewCondBr(flag, someBlock, noneBlock)
+
+	// None path: run handler body
+	c.block = noneBlock
+	handlerVal := c.genBlockValue(e.Body)
+	handlerDiverged := c.block.Term != nil
+	handlerEnd := c.block
+	if !handlerDiverged {
+		c.block.NewBr(mergeBlock)
+	}
+
+	// Some path: extract inner value
+	c.block = someBlock
+	okVal := c.block.NewExtractValue(optVal, 1)
+	c.block.NewBr(mergeBlock)
+	someEnd := c.block
+
+	c.block = mergeBlock
+
+	// If handler diverges, no phi needed - only the some path reaches merge
+	if handlerDiverged {
+		return okVal
+	}
+
+	// Both paths reach merge - phi merge the values
+	if handlerVal != nil && okVal != nil {
+		return c.block.NewPhi(
+			&ir.Incoming{X: okVal, Pred: someEnd},
+			&ir.Incoming{X: handlerVal, Pred: handlerEnd},
+		)
+	}
+	return okVal
+}
+
+// genOptionalForceUnwrap generates code for T? → T, panicking on none.
+// Used by `as!` on optionals and `x!` on optionals.
+func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
+	optVal := c.genExpr(expr)
+	flag := c.block.NewExtractValue(optVal, 0)
+
+	okBlock := c.newBlock("unwrap.ok")
+	panicBlock := c.newBlock("unwrap.panic")
+	c.block.NewCondBr(flag, okBlock, panicBlock)
+
+	c.block = panicBlock
+	panicMsg := c.makeGlobalString("unwrap failed: optional is none")
+	c.block.NewCall(c.funcs["promise_panic"], panicMsg)
+	c.block.NewUnreachable()
+
+	c.block = okBlock
+	return c.block.NewExtractValue(optVal, 1)
 }
 
 // emitScalarCast emits LLVM IR for a primitive scalar type conversion.

@@ -358,3 +358,219 @@ optional_chain_none() `test {
   int? px = mp?.x;
   assert("{px}" == "none", "optional chain on none gives none");
 }
+
+// --- is absent narrowing (post-divergence) ---
+
+is_absent_narrows_after_diverge() `test {
+  int? x = 42;
+  if x is absent {
+    assert(false, "should not enter then");
+    return;
+  }
+  // x is narrowed to int here
+  int y = x;
+  assert(y == 42, "is absent diverge narrows x to int");
+}
+
+negated_narrows_after_diverge() `test {
+  int? x = 10;
+  if !x {
+    assert(false, "should not enter then");
+    return;
+  }
+  // x is narrowed to int here
+  int y = x;
+  assert(y == 10, "!x diverge narrows x to int");
+}
+
+is_absent_else_narrows() `test {
+  int? x = 99;
+  if x is absent {
+    assert(false, "should not enter then");
+  } else {
+    int n = x;
+    assert(n == 99, "is absent else narrows x");
+  }
+}
+
+// --- as! on optionals ---
+
+as_bang_optional_present() `test {
+  int? x = 42;
+  int y = x as! int;
+  assert(y == 42, "as! unwraps present optional");
+}
+
+// --- Optional force-unwrap (x!) ---
+
+force_unwrap_present() `test {
+  int? x = 42;
+  int y = x!;
+  assert(y == 42, "x! unwraps present optional");
+}
+
+force_unwrap_string() `test {
+  string? s = "hello";
+  string v = s!;
+  assert(v == "hello", "s! unwraps present string optional");
+}
+
+// --- Optional handler (x ? _ { recovery }) ---
+
+optional_handler_none() `test {
+  int? x = none;
+  int y = x? _ {
+    0;
+  };
+  assert(y == 0, "handler provides recovery for none");
+}
+
+optional_handler_present() `test {
+  int? x = 42;
+  int y = x? _ {
+    0;
+  };
+  assert(y == 42, "handler keeps present value");
+}
+
+optional_handler_diverge() `test {
+  int? x = none;
+  int result = -1;
+  if true {
+    int y = x? _ {
+      result = 99;
+      return;
+    };
+  }
+  assert(result == 99, "handler can diverge");
+}
+
+// --- Double unwrap: failable returning optional ---
+
+get_value() int?! {
+  return 42;
+}
+
+get_none() int?! {
+  return none;
+}
+
+double_unwrap_error_then_optional() `test {
+  int? val = get_value()!;
+  int y = val!;
+  assert(y == 42, "double unwrap: error then optional");
+}
+
+double_unwrap_failable_optional_handler() `test {
+  int? val = get_none()!;
+  int y = val? _ {
+    -1;
+  };
+  assert(y == -1, "handler on none after error unwrap");
+}
+
+// --- is absent narrowing: user-defined types ---
+
+is_absent_narrows_user_type() `test {
+  Point? p = Point(x: 5, y: 6);
+  if p is absent {
+    return;
+  }
+  Point q = p;
+  assert(q.x == 5, "is absent narrows user type field x");
+  assert(q.y == 6, "is absent narrows user type field y");
+}
+
+// is_absent narrowing with return (not raise, since test funcs can't be failable)
+is_absent_narrows_user_type_return() `test {
+  Point? p = Point(x: 1, y: 2);
+  if p is absent {
+    return;
+  }
+  // p narrowed to Point after return
+  assert(p.x == 1, "narrowed after return x");
+  assert(p.y == 2, "narrowed after return y");
+}
+
+// narrowing does NOT apply when then-body doesn't diverge
+is_absent_no_post_narrow_without_diverge() `test {
+  int? x = 42;
+  if x is absent {
+    // does NOT diverge — no post-narrowing
+  }
+  // x is still int? here, so interpolation should work
+  string s = "{x}";
+  assert(s == "42", "x remains int? without diverge");
+}
+
+// --- Force-unwrap: expression positions ---
+
+force_unwrap_in_expression() `test {
+  int? x = 10;
+  int y = x! + 5;
+  assert(y == 15, "x! in arithmetic expression");
+}
+
+force_unwrap_user_type() `test {
+  Point? p = Point(x: 3, y: 4);
+  Point q = p!;
+  assert(q.x == 3, "force unwrap user type x");
+  assert(q.y == 4, "force unwrap user type y");
+}
+
+force_unwrap_in_call() `test {
+  int? x = 7;
+  string s = "{x!}";
+  assert(s == "7", "force unwrap in interpolation");
+}
+
+// --- as! on optionals: more types ---
+
+as_bang_string_optional() `test {
+  string? s = "world";
+  string v = s as! string;
+  assert(v == "world", "as! on string optional");
+}
+
+as_bang_user_type() `test {
+  Point? p = Point(x: 8, y: 9);
+  Point q = p as! Point;
+  assert(q.x == 8, "as! on user type optional x");
+  assert(q.y == 9, "as! on user type optional y");
+}
+
+// --- Optional handler: more types ---
+
+handler_string_recovery() `test {
+  string? s = none;
+  string v = s? _ {
+    "fallback";
+  };
+  assert(v == "fallback", "handler string recovery on none");
+}
+
+handler_string_present() `test {
+  string? s = "actual";
+  string v = s? _ {
+    "fallback";
+  };
+  assert(v == "actual", "handler keeps present string");
+}
+
+handler_user_type() `test {
+  Point? p = none;
+  Point q = p? _ {
+    Point(x: 0, y: 0);
+  };
+  assert(q.x == 0, "handler user type recovery x");
+  assert(q.y == 0, "handler user type recovery y");
+}
+
+handler_user_type_present() `test {
+  Point? p = Point(x: 5, y: 6);
+  Point q = p? _ {
+    Point(x: 0, y: 0);
+  };
+  assert(q.x == 5, "handler keeps present user type x");
+  assert(q.y == 6, "handler keeps present user type y");
+}

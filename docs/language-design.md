@@ -1620,8 +1620,10 @@ if err is present {
 | `foo() ? e is T { ... }!` | Handle `T`, panic on non-match | Any function |
 | `foo()!` | Panic on error | Any function |
 | `(val, err) := foo()` | Capture raw result | Any function |
+| `opt!` | Panic on none (optional unwrap) | Any function |
+| `opt ? _ { ... }` | Handle none inline (optional handler) | Any function |
 
-**Note:** Auto-propagation does not cross lambda boundaries. Inside a non-`!` lambda, failable calls must be handled explicitly with `?` or `!`.
+**Note:** `!` and `? _ { }` also work on `T?` optionals (see Section 14). When the inner expression is failable, these target the error layer; when optional, the optional layer. Auto-propagation does not cross lambda boundaries. Inside a non-`!` lambda, failable calls must be handled explicitly with `?` or `!`.
 
 ### 7.3 Error Types
 
@@ -2877,6 +2879,26 @@ if verbose is absent {
 
 As with truthiness narrowing, the inverse blocks enforce negative narrowing: inside `is absent` or the `else` of `is present`, the variable is known to be `none` and any use of it as type `T` is a **compile-time error**.
 
+**Post-divergence narrowing:** When `is absent` (or `!cc`) guards a block that **always diverges** (return, raise, break), the compiler narrows the variable to `T` in all subsequent code — the absent path can never reach it:
+
+```promise
+int? x = find(id);
+if x is absent {
+  raise error(message: "not found");  // diverges
+}
+// x is T here — narrowed for all subsequent code
+int y = x + 1;
+```
+
+This also works with `!cc`:
+
+```promise
+if !x { return; }
+int y = x;           // x is T — guaranteed present
+```
+
+Post-divergence narrowing requires: (1) the condition is `is absent` or `!cc`, (2) the then-body diverges on all paths, and (3) there is no `else` clause.
+
 `is present` and `is absent` extend the existing `is` pattern matching keyword (see Section 10.3 for the full `is` keyword disambiguation table). They cannot collide with type names — `present` and `absent` are contextual keywords recognized only after `is` in pattern position.
 
 #### Unwrap binding with `:=`
@@ -2903,7 +2925,60 @@ while item := iter.next() {
 
 This is the mechanism underlying `for-in` loop desugaring (see Section 12.2).
 
-### 14.2 Other Optional Operations
+### 14.2 Force Unwrap (`!`)
+
+The `!` operator on an optional extracts the inner value, panicking at runtime if the optional is `none`. This is symmetric with failable `!` (which panics on error):
+
+```promise
+int? x = 42;
+int y = x!;           // y is 42
+
+int? z = none;
+int w = z!;           // panic: unwrap failed: optional is none
+```
+
+Force unwrap is useful in contexts where you know a value is present but the type system hasn't narrowed it:
+
+```promise
+int? x = find(42);
+int y = x! + 1;                 // use in expressions
+string s = "{x!}";              // use in interpolation
+process(x!);                    // use as function argument
+```
+
+The `as!` operator also works for optional unwrapping: `x as! T` where `x` is `T?` extracts `T` and panics on none. This is equivalent to `x!` but uses cast syntax.
+
+### 14.3 Optional Handler (`? _ { }`)
+
+The `?` operator on an optional handles the `none` case inline, mirroring the error handler syntax. The handler block provides a recovery value or diverges:
+
+```promise
+int? x = none;
+
+// Recovery value — handler provides fallback
+int y = x ? _ { 0; };                        // y is 0
+
+// Diverge — handler exits the function
+int z = x ? _ { return; };                   // never reaches z
+```
+
+The `_` binding is required to disambiguate from error propagation (`x?`). Optional handlers do not support typed patterns or `else` clauses — use `is present`/`is absent` for more complex control flow.
+
+**Interaction with failable functions:** When a failable function returns an optional (`int?!`), `?` and `!` compose naturally. The first operator targets the failable layer, the second targets the optional:
+
+```promise
+fetch() int?! { ... }
+
+// Chain: error handler then optional handler
+int result = fetch() ? e { 0; } ? _ { -1; };
+
+// Chain: error unwrap then optional unwrap
+int result = fetch()!!;
+```
+
+The disambiguation rule: `?` and `!` on a failable expression target the error layer. On an `Optional[T]` target the optional layer. Failable is always consumed first.
+
+### 14.4 Other Optional Operations
 
 ```promise
 // `?.` chaining — short-circuits to none if the receiver is absent
@@ -2919,7 +2994,7 @@ match result {
 }
 ```
 
-### 14.3 Optional Parameters
+### 14.5 Optional Parameters
 
 When `T?` is used as a **function/method parameter type**, the parameter is implicitly optional — the caller may omit it, and the function receives `none` (see Section 9.4). To declare a required parameter of type `Option[T]`, use `Option[T]` explicitly instead of the `T?` sugar. For how `T?` interacts with stream iteration, see Section 12.
 
@@ -3406,10 +3481,10 @@ forStmt: forInStmt | classicForStmt | 'for' block;   // infinite loop
 goExpr: 'go' (block | expression);    // returns task[T]
 receiveExpr: '<-' expression;          // receive from task[T] or channel[T]
 
-// Error handling
-errorPropagate: expression '?';                          // explicit propagate
-errorHandler: expression '?' IDENT? block;               // ? e { ... } or ? { ... }
-errorUnwrap: expression '!';                             // panic on error
+// Error handling (also used for optional unwrap/handler — sema disambiguates by type)
+errorPropagate: expression '?';                          // explicit propagate (failable only)
+errorHandler: expression '?' IDENT? block;               // ? e { ... } (error) or ? _ { ... } (optional)
+errorUnwrap: expression '!';                             // panic on error or none
 resultDestructure: '(' IDENT ',' IDENT ')' ':=' expression;  // (val, err) := expr
 
 // range expressions

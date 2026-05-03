@@ -4706,6 +4706,43 @@ func TestScalarCastAsBangScalarNoRTTI(t *testing.T) {
 	assertNotContains(t, ir, "cast.panic")
 }
 
+func TestOptionalHandlerRecovery(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int? x = none;
+			int y = x ? _ { 0; };
+		}
+	`)
+	assertContains(t, ir, "opt.none")
+	assertContains(t, ir, "opt.some")
+	assertContains(t, ir, "opt.merge")
+}
+
+func TestOptionalForceUnwrapBang(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int? x = 42;
+			int y = x!;
+		}
+	`)
+	assertContains(t, ir, "unwrap.ok")
+	assertContains(t, ir, "unwrap.panic")
+	assertContains(t, ir, "promise_panic")
+}
+
+func TestOptionalForceUnwrapAsBang(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int? x = 42;
+			int y = x as! int;
+		}
+	`)
+	// Should extractvalue to check flag, then extractvalue to get inner value
+	assertContains(t, ir, "unwrap.ok")
+	assertContains(t, ir, "unwrap.panic")
+	assertContains(t, ir, "promise_panic")
+}
+
 func TestFieldShadowing(t *testing.T) {
 	ir := generateIR(t, `
 		type Base { int x; int y; }

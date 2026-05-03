@@ -136,6 +136,14 @@ type Info struct {
 	// Codegen emits the same tag-check + early-return as explicit `?`.
 	AutoPropagateExprs map[ast.Expr]bool
 
+	// OptionalUnwraps records ErrorUnwrapExpr nodes that are optional unwraps
+	// (T? ! → T, panic on none) rather than error unwraps (T! ! → T, panic on error).
+	OptionalUnwraps map[ast.Expr]bool
+
+	// OptionalHandlers records ErrorHandlerExpr nodes that are optional handlers
+	// (T? ? { recovery } → T) rather than error handlers.
+	OptionalHandlers map[ast.Expr]bool
+
 	// OptionalRecoveryHandlers records ErrorHandlerExpr nodes whose handler
 	// body does not produce a recovery value or diverge, used in an assignment
 	// where the declared/inferred type becomes optional. Codegen wraps the
@@ -188,8 +196,9 @@ type NarrowedVar struct {
 
 // OptionalNarrowing records that an if-statement narrows one or more optional variables.
 type OptionalNarrowing struct {
-	Vars    []NarrowedVar // one or more narrowed variables
-	Negated bool          // if true, narrowing applies to else branch (!cc form)
+	Vars       []NarrowedVar // one or more narrowed variables
+	Negated    bool          // if true, narrowing applies to else branch (!cc form)
+	PostNarrow bool          // if true, narrowing persists after the if (diverging then-body)
 }
 
 // recordType stores the resolved type for an expression.

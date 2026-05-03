@@ -32,6 +32,7 @@ type Checker struct {
 	modules           []*types.Module         // all modules from use declarations
 	moduleScopes      map[string]*types.Scope // pre-loaded module scopes (catalog name or path → scope)
 	target            TargetInfo              // compile target for `target(cond)` filtering (zero = no filtering)
+	pendingNarrowings []NarrowedVar           // post-divergence narrowings to apply before next statement
 }
 
 // selfType returns the current type as Self would resolve:
@@ -83,6 +84,8 @@ func CheckWithTarget(file *ast.File, moduleScopes map[string]*types.Scope, targe
 			FailableExprs:            make(map[ast.Expr]bool),
 			AutoPropagateExprs:       make(map[ast.Expr]bool),
 			OptionalRecoveryHandlers: make(map[ast.Expr]bool),
+			OptionalUnwraps:          make(map[ast.Expr]bool),
+			OptionalHandlers:         make(map[ast.Expr]bool),
 			FailableDestructures:     make(map[*ast.DestructureVarDecl]bool),
 			ForInKinds:               make(map[*ast.ForInStmt]ForInKind),
 			GeneratorFuncs:           make(map[ast.Node]types.Type),
@@ -133,6 +136,8 @@ func CheckForStdModule(file *ast.File, target TargetInfo) (*Info, []error) {
 			FailableExprs:            make(map[ast.Expr]bool),
 			AutoPropagateExprs:       make(map[ast.Expr]bool),
 			OptionalRecoveryHandlers: make(map[ast.Expr]bool),
+			OptionalUnwraps:          make(map[ast.Expr]bool),
+			OptionalHandlers:         make(map[ast.Expr]bool),
 			FailableDestructures:     make(map[*ast.DestructureVarDecl]bool),
 			ForInKinds:               make(map[*ast.ForInStmt]ForInKind),
 			GeneratorFuncs:           make(map[ast.Node]types.Type),
@@ -193,6 +198,8 @@ func DeclareAndDefineWithTarget(file *ast.File, moduleScopes map[string]*types.S
 			FailableExprs:            make(map[ast.Expr]bool),
 			AutoPropagateExprs:       make(map[ast.Expr]bool),
 			OptionalRecoveryHandlers: make(map[ast.Expr]bool),
+			OptionalUnwraps:          make(map[ast.Expr]bool),
+			OptionalHandlers:         make(map[ast.Expr]bool),
 			FailableDestructures:     make(map[*ast.DestructureVarDecl]bool),
 			ForInKinds:               make(map[*ast.ForInStmt]ForInKind),
 			GeneratorFuncs:           make(map[ast.Node]types.Type),
@@ -539,13 +546,28 @@ func (c *Checker) checkEnumDecl(d *ast.EnumDecl) {
 // Detects unreachable code after statements that always exit (return/raise/break/continue).
 func (c *Checker) checkBlock(block *ast.Block) {
 	dead := false
+	narrowScopes := 0
 	for _, stmt := range block.Stmts {
 		if dead {
 			c.errorf(stmt.Pos(), "unreachable code")
 			break // report once per block
 		}
 		c.checkStmt(stmt)
+		// Post-divergence narrowing: if an if-statement produced narrowings
+		// (e.g., `if x is absent { return; }`), open a scope and shadow the
+		// narrowed variables for all subsequent statements in this block.
+		if len(c.pendingNarrowings) > 0 {
+			c.openScope(block, "post-narrow")
+			for _, v := range c.pendingNarrowings {
+				c.scope.Insert(types.NewVar(tpos(stmt.Pos()), v.VarName, v.InnerType))
+			}
+			c.pendingNarrowings = nil
+			narrowScopes++
+		}
 		dead = c.stmtAlwaysExits(stmt)
+	}
+	for range narrowScopes {
+		c.closeScope()
 	}
 }
 

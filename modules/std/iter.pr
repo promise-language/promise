@@ -215,14 +215,14 @@ type Iterator[T] `structural `public `doc("Structural iterator protocol. Any typ
   }
 
   reduce((T, T) -> T fn) T? `public `doc("Reduces using a binary function.") {
-    T? acc = this.next();
-    if acc is absent {
+    T? first = this.next();
+    if first is absent {
       return none;
     }
+    // first is narrowed to T here (absent path returned)
+    T acc = first;
     while item := this.next() {
-      if a := acc {
-        acc = fn(a, item);
-      }
+      acc = fn(acc, item);
     }
     return acc;
   }

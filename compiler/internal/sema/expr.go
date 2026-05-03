@@ -1884,7 +1884,12 @@ func (c *Checker) checkErrorPropagateExpr(e *ast.ErrorPropagateExpr) types.Type 
 func (c *Checker) checkErrorUnwrapExpr(e *ast.ErrorUnwrapExpr) types.Type {
 	inner := c.checkExpr(e.Expr)
 	if !c.info.FailableExprs[e.Expr] {
-		c.errorf(e.Pos(), "error unwrap (!) requires a failable expression")
+		// Not failable — check if it's an optional (T? ! → T, panic on none)
+		if opt, ok := inner.(*types.Optional); ok {
+			c.info.OptionalUnwraps[e] = true
+			return opt.Elem()
+		}
+		c.errorf(e.Pos(), "unwrap (!) requires a failable or optional expression")
 	}
 	// Unwrap panics on error, returns success type
 	return inner
@@ -1893,7 +1898,19 @@ func (c *Checker) checkErrorUnwrapExpr(e *ast.ErrorUnwrapExpr) types.Type {
 func (c *Checker) checkErrorHandlerExpr(e *ast.ErrorHandlerExpr) types.Type {
 	inner := c.checkExpr(e.Expr)
 	if !c.info.FailableExprs[e.Expr] {
-		c.errorf(e.Pos(), "error handler requires a failable expression")
+		// Not failable — check if it's an optional handler (T? ? { } → T)
+		if opt, ok := inner.(*types.Optional); ok {
+			// Optional handler: no error binding, no typed handler, no else
+			if e.TypeName != "" || e.ElseBody != nil {
+				c.errorf(e.Pos(), "optional handler does not support typed patterns or else clauses")
+			}
+			c.info.OptionalHandlers[e] = true
+			c.openScope(e.Body, "optional-handler")
+			c.checkBlock(e.Body)
+			c.closeScope()
+			return opt.Elem()
+		}
+		c.errorf(e.Pos(), "handler (?) requires a failable or optional expression")
 	}
 
 	// Validate else/! only on typed handlers

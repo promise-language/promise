@@ -1358,6 +1358,16 @@ func (c *Compiler) genNegatedNarrowStmt(s *ast.IfStmt, narrow *sema.OptionalNarr
 	}
 
 	c.block = mergeBlock
+
+	// Post-divergence narrowing: if the then-body diverges and there's no else,
+	// we know the variable is present at the merge point. Shadow it with the
+	// unwrapped inner value for all subsequent code.
+	if narrow.PostNarrow {
+		innerVal := c.block.NewExtractValue(optVal, 1)
+		innerAlloca := c.block.NewAlloca(innerVal.Type())
+		c.block.NewStore(innerVal, innerAlloca)
+		c.locals[v.VarName] = innerAlloca
+	}
 }
 
 // genCompoundNarrowStmt handles `if a && b { ... }` — both narrowed in then-block.
@@ -1437,6 +1447,27 @@ func (c *Compiler) genCompoundNarrowStmt(s *ast.IfStmt, narrow *sema.OptionalNar
 // Evaluates the optional, checks the present flag, binds the unwrapped value in the then block.
 func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 	optVal := c.genExpr(s.Init)
+
+	// Guard: if the expression is not an optional struct (e.g., post-narrowing
+	// made it a plain value), treat the if as always-true with no unwrapping.
+	// Bind the value directly to the unwrap variable name.
+	if _, ok := optVal.Type().(*irtypes.StructType); !ok {
+		if s.Binding != "" && s.Binding != "_" {
+			alloca := c.block.NewAlloca(optVal.Type())
+			c.block.NewStore(optVal, alloca)
+			prev, had := c.locals[s.Binding]
+			c.locals[s.Binding] = alloca
+			c.genBlock(s.Body)
+			if had {
+				c.locals[s.Binding] = prev
+			} else {
+				delete(c.locals, s.Binding)
+			}
+		} else {
+			c.genBlock(s.Body)
+		}
+		return
+	}
 
 	// Extract flag (field 0 of { i1, T } struct)
 	flag := c.block.NewExtractValue(optVal, 0)

@@ -693,9 +693,10 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 			// Optional narrowing: record and shadow variables in the appropriate branch
 			c.info.OptionalNarrowings[s] = narrow
 			if narrow.Negated {
-				// Negated (!cc): then-block has NO narrowing, else-block has narrowing
+				// Negated (!cc, is absent): then-block has NO narrowing, else-block has narrowing
 				c.openScope(s.Body, "if-then")
 				c.checkBlock(s.Body)
+				thenDiverges := c.blockReturns(s.Body)
 				c.closeScope()
 				if s.Else != nil {
 					// Insert narrowed vars into else scope
@@ -710,6 +711,13 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 					default:
 						c.checkStmt(s.Else)
 					}
+				}
+				// Post-divergence narrowing: if the then-body always diverges
+				// (return/raise), the variable must be present in all subsequent
+				// code. Set pendingNarrowings for checkBlock to pick up.
+				if thenDiverges && s.Else == nil {
+					narrow.PostNarrow = true
+					c.pendingNarrowings = narrow.Vars
 				}
 				return // else already handled
 			}
@@ -777,10 +785,10 @@ func (c *Checker) detectOptionalNarrowing(cond ast.Expr, condType types.Type) *O
 	return nil
 }
 
-// preDetectIfNarrowing detects compound (!cc, a && b) optional narrowing patterns
-// BEFORE the condition is fully type-checked. Uses scope lookups to resolve types
-// and manually records type info for the sub-expressions.
-// Returns nil if no compound/negated pattern is found.
+// preDetectIfNarrowing detects compound (!cc, a && b) and negated (is absent)
+// optional narrowing patterns BEFORE the condition is fully type-checked.
+// Uses scope lookups to resolve types and manually records type info for the
+// sub-expressions. Returns nil if no compound/negated pattern is found.
 func (c *Checker) preDetectIfNarrowing(cond ast.Expr) *OptionalNarrowing {
 	// Case: !cc (negated narrowing)
 	if unary, ok := cond.(*ast.UnaryExpr); ok && unary.Op == ast.UnaryNot {
@@ -790,6 +798,26 @@ func (c *Checker) preDetectIfNarrowing(cond ast.Expr) *OptionalNarrowing {
 			return &OptionalNarrowing{Vars: vars, Negated: true}
 		}
 		return nil
+	}
+
+	// Case: x is absent (negated narrowing — equivalent to !x for optionals)
+	if isExpr, ok := cond.(*ast.IsExpr); ok {
+		if pat, ok := isExpr.Pattern.(*ast.IdentIsPattern); ok && pat.Name == "absent" {
+			if ident, ok := isExpr.Expr.(*ast.IdentExpr); ok {
+				obj := c.lookup(ident.Name)
+				if obj != nil {
+					if opt, ok := obj.Type().(*types.Optional); ok {
+						c.recordType(isExpr.Expr, opt)
+						c.recordObject(ident, obj)
+						c.recordType(cond, types.TypBool)
+						return &OptionalNarrowing{
+							Vars:    []NarrowedVar{{VarName: ident.Name, InnerType: opt.Elem()}},
+							Negated: true,
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// Case: a && b (compound narrowing)

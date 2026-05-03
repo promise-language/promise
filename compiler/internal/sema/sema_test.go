@@ -649,7 +649,7 @@ func TestErrorUnwrapOnNonFailable(t *testing.T) {
 		foo() int { return 42; }
 		bar() { int x = foo()!; }
 	`)
-	expectError(t, errs, "requires a failable expression")
+	expectError(t, errs, "requires a failable or optional expression")
 }
 
 func TestErrorHandlerOnNonFailable(t *testing.T) {
@@ -657,7 +657,7 @@ func TestErrorHandlerOnNonFailable(t *testing.T) {
 		foo() int { return 42; }
 		bar() { foo() ? e { }; }
 	`)
-	expectError(t, errs, "requires a failable expression")
+	expectError(t, errs, "requires a failable or optional expression")
 }
 
 // --- Generic Error Types ---
@@ -7122,8 +7122,36 @@ func TestIsPresentNarrowingBoolOptional(t *testing.T) {
 	`)
 }
 
+func TestIsAbsentNarrowing(t *testing.T) {
+	// is absent with diverging body should narrow x to T after the if
+	checkOK(t, `
+		test() int! {
+			int? x = 42;
+			if x is absent {
+				raise error(message: "missing");
+			}
+			int y = x;
+			return y;
+		}
+	`)
+}
+
+func TestIsAbsentNarrowingElse(t *testing.T) {
+	// is absent: else branch should have narrowed (present) variable
+	checkOK(t, `
+		test() {
+			int? x = 42;
+			if x is absent {
+				int y = 0;
+			} else {
+				int y = x;
+			}
+		}
+	`)
+}
+
 func TestIsAbsentNoNarrowing(t *testing.T) {
-	// is absent returns bool, no narrowing needed
+	// is absent then-block: x is none, no narrowing to T
 	checkOK(t, `
 		test() {
 			int? x = 42;
@@ -7203,6 +7231,107 @@ func TestNegatedNarrowingNoElse(t *testing.T) {
 			}
 		}
 	`)
+}
+
+func TestNegatedNarrowingPostDivergence(t *testing.T) {
+	// if !x { return; } should narrow x to T after the if
+	checkOK(t, `
+		test() int! {
+			int? x = 42;
+			if !x {
+				raise error(message: "missing");
+			}
+			int y = x;
+			return y;
+		}
+	`)
+}
+
+func TestIsAbsentNarrowingPostDivergenceReturn(t *testing.T) {
+	// if x is absent { return; } should narrow x to T after the if
+	checkOK(t, `
+		test() {
+			int? x = 42;
+			if x is absent {
+				return;
+			}
+			int y = x;
+		}
+	`)
+}
+
+func TestIsAbsentNarrowingBoolOptional(t *testing.T) {
+	// is absent should work with bool? (unlike truthiness narrowing)
+	checkOK(t, `
+		test() {
+			bool? flag = true;
+			if flag is absent {
+				return;
+			}
+			bool b = flag;
+		}
+	`)
+}
+
+func TestOptionalForceUnwrap(t *testing.T) {
+	checkOK(t, "test() { int? x = 42; int y = x!; }")
+}
+
+func TestOptionalForceUnwrapError(t *testing.T) {
+	errs := checkErrs(t, "test() { int x = 42; int y = x!; }")
+	expectError(t, errs, "unwrap (!) requires a failable or optional expression")
+}
+
+func TestOptionalHandler(t *testing.T) {
+	checkOK(t, "test() { int? x = 42; int y = x ? _ { 0; }; }")
+}
+
+func TestOptionalHandlerDiverge(t *testing.T) {
+	checkOK(t, "test() { int? x = 42; int y = x ? _ { return; }; }")
+}
+
+func TestOptionalHandlerTypedPatternError(t *testing.T) {
+	// Optional handler does not support typed patterns
+	errs := checkErrs(t, `
+		type MyErr is error { int code; }
+		test() { int? x = 42; int y = x ? _ is MyErr { 0; }; }
+	`)
+	expectError(t, errs, "optional handler does not support typed patterns")
+}
+
+func TestOptionalForceUnwrapReturnType(t *testing.T) {
+	// x! should return T, usable in arithmetic
+	checkOK(t, "test() { int? x = 42; int y = x! + 1; }")
+}
+
+func TestIsAbsentNoPostNarrowWithElse(t *testing.T) {
+	// post-narrowing should NOT fire when else is present
+	errs := checkErrs(t, `
+		test() {
+			int? x = 42;
+			if x is absent {
+				return;
+			} else {
+				int y = 0;
+			}
+			int z = x;
+		}
+	`)
+	expectError(t, errs, "cannot assign int? to variable of type int")
+}
+
+func TestIsPresentNoPostNarrow(t *testing.T) {
+	// non-negated narrowing should NOT post-narrow after diverging then-body
+	errs := checkErrs(t, `
+		test() {
+			int? x = 42;
+			if x is present {
+				return;
+			}
+			int z = x;
+		}
+	`)
+	expectError(t, errs, "cannot assign int? to variable of type int")
 }
 
 // --- Compound narrowing (&&) ---

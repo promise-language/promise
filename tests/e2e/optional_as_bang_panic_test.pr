@@ -1,0 +1,6 @@
+// as! on none optional should panic
+main() `test(expected: """panic: unwrap failed: optional is none""") {
+  int? x = none;
+  int y = x as! int;
+  print_line(y);
+}

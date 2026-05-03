@@ -1043,7 +1043,7 @@ User(name: "Alice", age: 30, bio: "hi")   // OK
 User(name: "Alice")                       // ERROR: missing required field 'age'
 ```
 
-A field is **required** if it is not `T?` and does not have `= default`. All required fields must be provided. Default expressions are evaluated at the call site each time the argument is omitted (see Section 9.3).
+A field is **required** if it is not `T?` and does not have `= default`. All required fields must be provided. Default expressions are evaluated at the call site each time the argument is omitted (see Section 9.4).
 
 #### `Self` Type Alias
 
@@ -1934,7 +1934,77 @@ m := Wrapper[string].defaultCount();
 
 **Future: Data Placement** — `` `global `` and `` `mono `` can also apply to fields, enabling type-scoped or monomorphization-scoped shared data (e.g., `int instanceCount `global` or `string typeName `mono`). This is deferred pending mixed-placement codegen support.
 
-### 9.3 Named Arguments, Defaults & Optional Parameters
+### 9.3 Module-Level Getters and Setters
+
+Functions like `os.get_working_directory()` and `os.set_working_directory("/tmp")` are computed properties of the environment. The call-site parentheses are noise, and the `get_`/`set_` prefixes are boilerplate. Module-level getters and setters extend the same property syntax already used on types (see Section 5.2.1) to file and module scope.
+
+#### Getter Declaration
+
+A module-level getter is declared at the top level of a `.pr` file using the `get` contextual keyword, with no receiver:
+
+```promise
+// os.pr — inside the os module
+get arguments string[] `public `doc("Returns the command-line arguments.") {
+  return _os_get_arguments();
+}
+
+get working_directory string! `public `doc("Returns the current working directory.") {
+  return _os_get_working_directory();
+}
+```
+
+The syntax mirrors type-level getters but appears at file scope instead of inside a `type { ... }` body. The return type may be failable (`!`) or optional (`?`).
+
+#### Setter Declaration
+
+A module-level setter uses the `set` keyword with a single parameter:
+
+```promise
+// os.pr
+set working_directory(string path) `public `doc("Changes the current working directory.") {
+  _os_set_working_directory(path);
+}
+```
+
+The setter body receives the assigned value as its parameter. Setters may also be failable.
+
+#### Call-Site Syntax
+
+At the call site, getters are accessed with dot syntax (no parentheses) and setters via assignment:
+
+```promise
+use os;
+
+// Getter — reads like a property
+string[] args = os.arguments;
+string cwd = os.working_directory!;
+
+// Setter — writes like assignment
+os.working_directory = "/tmp";
+
+// Compound assignment — desugars to getter + operator + setter
+// os.some_counter += 1  →  os.set_some_counter(os.some_counter + 1)
+```
+
+This is identical to how type-level field access works: `animal.name` calls a vtable getter, `animal.name = "Rex"` calls a vtable setter (Section 5.2.1). Module-level getters and setters follow the same principle at module scope.
+
+#### Pairing Rules
+
+Getters and setters are independent declarations — they do not need to be paired:
+
+- **Getter only** → read-only property (e.g., `os.arguments`). Attempting to assign is a compile error.
+- **Setter only** → write-only property. Useful for fire-and-forget configuration.
+- **Both** → read-write property (e.g., `os.working_directory`).
+
+#### Visibility
+
+Module-level getters and setters follow the same visibility rules as functions. The `` `public `` annotation exports them to importers. Without it, they are file-private.
+
+#### Relationship to Type-Level Getters
+
+Type-level getters and setters (declared inside `type { ... }`) dispatch through the vtable and receive `this`. Module-level getters and setters have no receiver — they are plain functions with property syntax. The grammar rules are shared; the distinction is whether the declaration appears inside a type body or at file scope.
+
+### 9.4 Named Arguments, Defaults & Optional Parameters
 
 #### Definition Syntax
 
@@ -2042,7 +2112,7 @@ Config(port: 9090);                                 // ERROR: missing required f
 
 When a type defines an explicit `new` constructor, the implicit constructor is replaced — call site arguments match `new`'s parameter names instead of field names. See Section 5.7 for full constructor design including `new`, failable constructors, factories, `` `final `` fields, and inheritance.
 
-### 9.4 Lambdas / Closures
+### 9.5 Lambdas / Closures
 
 ```promise
 add := |int a, int b| -> int { return a + b; };
@@ -2085,9 +2155,9 @@ f := |int a| -> int {
 };
 ```
 
-Named arguments are **not available** when calling through a function-type variable, because function types erase parameter names (see Section 9.5). Named arguments only work when calling a known function or lambda directly.
+Named arguments are **not available** when calling through a function-type variable, because function types erase parameter names (see Section 9.6). Named arguments only work when calling a known function or lambda directly.
 
-### 9.5 Function Types
+### 9.6 Function Types
 
 Function types use arrow syntax instead of a keyword:
 
@@ -2108,7 +2178,7 @@ fn(1, 2);                  // VALID: positional through function-type variable
 fn(a: 1, b: 2);            // ERROR: function type has no parameter names
 ```
 
-### 9.6 No Function/Method Overloading
+### 9.7 No Function/Method Overloading
 
 Promise does not support **function or method overloading** — defining multiple functions or methods with the same name but different parameter signatures. Each function name within a scope must be unique.
 
@@ -2833,7 +2903,7 @@ match result {
 
 ### 14.3 Optional Parameters
 
-When `T?` is used as a **function/method parameter type**, the parameter is implicitly optional — the caller may omit it, and the function receives `none` (see Section 9.3). To declare a required parameter of type `Option[T]`, use `Option[T]` explicitly instead of the `T?` sugar. For how `T?` interacts with stream iteration, see Section 12.
+When `T?` is used as a **function/method parameter type**, the parameter is implicitly optional — the caller may omit it, and the function receives `none` (see Section 9.4). To declare a required parameter of type `Option[T]`, use `Option[T]` explicitly instead of the `T?` sugar. For how `T?` interacts with stream iteration, see Section 12.
 
 ---
 

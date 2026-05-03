@@ -974,17 +974,14 @@ func runTestFiles(files []string, timeout time.Duration, targetTriple string) {
 }
 
 // dirHasTestFiles checks if a directory contains any test .pr files (non-recursive).
-// Matches both test_*.pr (standalone test files) and *_test.pr (module companion tests).
+// dirHasTestFiles reports whether dir contains any *_test.pr files.
 func dirHasTestFiles(dir string) bool {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return false
 	}
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".pr") {
-			continue
-		}
-		if strings.HasPrefix(e.Name(), "test_") || strings.HasSuffix(e.Name(), "_test.pr") {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), "_test.pr") {
 			return true
 		}
 	}
@@ -1009,9 +1006,9 @@ func discoverTestFiles(dir string, recursive bool) []string {
 		return v
 	}
 
-	// isTestFile returns true if the file name matches test naming conventions.
+	// isTestFile returns true if the file name matches the *_test.pr convention.
 	isTestFile := func(name string) bool {
-		return strings.HasPrefix(name, "test_") || strings.HasSuffix(name, "_test.pr")
+		return strings.HasSuffix(name, "_test.pr")
 	}
 
 	// isInModuleTree checks if a file is inside a module directory tree

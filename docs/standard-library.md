@@ -1100,7 +1100,7 @@ The `stdAll` mini-stdlib used in Go unit tests (`codegen_test.go`, `sema_test.go
 |----------|----------|-----------------|
 | Go unit tests | `internal/codegen/*_test.go` | IR shape for native functions |
 | Go unit tests | `internal/sema/*_test.go` | Type checking, error messages |
-| Promise e2e | `tests/std/test_*.pr` | Runtime correctness |
+| Promise e2e | `tests/std/*_test.pr` | Runtime correctness |
 | Promise e2e | `tests/e2e/*.pr` | Integration across modules |
 
 ### Test Coverage Requirements

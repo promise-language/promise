@@ -1141,8 +1141,6 @@ All non-module test files (`tests/...`) — both unit tests (`` `test ``) and E2
 - **Remote imports**: Files with non-local `use` imports (remote URLs) are not cached (too complex to hash; none exist in the test suite currently).
 - **macOS first-run overhead**: On macOS, cached test binaries show ~0.1s/file on the first execution after cache population vs ~0.015s/file on subsequent runs (observed pattern: run 1 compile+exec ~0.5s, run 2 cached ~0.1s, run 3 cached ~0.015s). Cause not fully understood — may be macOS Gatekeeper/XProtect scanning unsigned binaries on first exec, though run 1 also executes each binary so the overhead should already be paid. Needs investigation.
 
-**Remaining TODO — file naming**: The `test_*.pr` prefix convention in `tests/` should be renamed to `*_test.pr` for consistency (e.g., `test_arithmetic.pr` → `arithmetic_test.pr`).
-
 ### Unscheduled Features
 
 | Item |

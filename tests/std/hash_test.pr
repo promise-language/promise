@@ -1,4 +1,4 @@
-// test_hash.pr — Tests for FNV-1a hash implementation
+// hash_test.pr — Tests for FNV-1a hash implementation
 
 test_int_hash_deterministic() `test {
     int x = 42;

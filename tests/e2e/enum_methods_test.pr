@@ -1,0 +1,441 @@
+// Tests for enum methods feature.
+enum Color {
+  Red, Green, Blue,
+
+  describe(&this) string {
+    match this {
+      Color.Red => {
+        return "red";
+      },
+      Color.Green => {
+        return "green";
+      },
+      Color.Blue => {
+        return "blue";
+      },
+    }
+  }
+
+  is_warm(&this) bool {
+    match this {
+      Color.Red => {
+        return true;
+      },
+      _ => {
+        return false;
+      },
+    }
+  }
+
+  get opposite Color {
+    match this {
+      Color.Red => {
+        return Color.Green;
+      },
+      Color.Green => {
+        return Color.Blue;
+      },
+      Color.Blue => {
+        return Color.Red;
+      },
+    }
+  }
+}
+
+test_enum_method_basic() `test {
+  c := Color.Red;
+  assert(c.describe() == "red", "Red.describe()");
+  assert(Color.Green.describe() == "green", "Green.describe()");
+  assert(Color.Blue.describe() == "blue", "Blue.describe()");
+}
+
+test_enum_method_bool_return() `test {
+  assert(Color.Red.is_warm() == true, "Red is warm");
+  assert(Color.Green.is_warm() == false, "Green is not warm");
+  assert(Color.Blue.is_warm() == false, "Blue is not warm");
+}
+
+test_enum_getter() `test {
+  c := Color.Red;
+  opp := c.opposite;
+  match opp {
+    Color.Green => {
+    },
+    _ => {
+      assert(false, "Red.opposite should be Green");
+    },
+  }
+  match Color.Blue.opposite {
+    Color.Red => {
+    },
+    _ => {
+      assert(false, "Blue.opposite should be Red");
+    },
+  }
+}
+
+// Data enum with methods
+enum Shape {
+  Circle(f64 radius),
+  Rectangle(f64 width, f64 height),
+  Point,
+
+  area(&this) f64 {
+    match this {
+      Shape.Circle(r) => {
+        return 3.14159 * r * r;
+      },
+      Shape.Rectangle(w, h) => {
+        return w * h;
+      },
+      Shape.Point => {
+        return 0.0;
+      },
+    }
+  }
+
+  is_point(&this) bool {
+    match this {
+      Shape.Point => {
+        return true;
+      },
+      _ => {
+        return false;
+      },
+    }
+  }
+}
+
+test_data_enum_method() `test {
+  c := Shape.Circle(radius: 1.0);
+  a := c.area();
+  assert(a > 3.14 && a < 3.15, "Circle area ~3.14159");
+
+  r := Shape.Rectangle(width: 4.0, height: 5.0);
+  assert(r.area() == 20.0, "Rectangle area 20");
+
+  p := Shape.Point;
+  assert(p.area() == 0.0, "Point area 0");
+}
+
+test_data_enum_method_is_point() `test {
+  assert(Shape.Point.is_point() == true, "Point.is_point");
+  assert(Shape.Circle(radius: 1.0).is_point() == false, "Circle.is_point");
+}
+
+// Enum method with parameters
+enum Direction {
+  North, South, East, West,
+
+  equals(&this, Direction other) bool {
+    match this {
+      Direction.North => {
+        match other {
+          Direction.North => {
+            return true;
+          },
+          _ => {
+            return false;
+          },
+        }
+      },
+      Direction.South => {
+        match other {
+          Direction.South => {
+            return true;
+          },
+          _ => {
+            return false;
+          },
+        }
+      },
+      Direction.East => {
+        match other {
+          Direction.East => {
+            return true;
+          },
+          _ => {
+            return false;
+          },
+        }
+      },
+      Direction.West => {
+        match other {
+          Direction.West => {
+            return true;
+          },
+          _ => {
+            return false;
+          },
+        }
+      },
+    }
+  }
+}
+
+test_enum_method_with_params() `test {
+  n := Direction.North;
+  s := Direction.South;
+  assert(n.equals(Direction.North) == true, "North equals North");
+  assert(n.equals(Direction.South) == false, "North not equals South");
+  assert(s.equals(Direction.South) == true, "South equals South");
+}
+
+// Enum method calling another method on this
+enum Level {
+  Low, Medium, High,
+
+  rank(&this) int {
+    match this {
+      Level.Low => {
+        return 1;
+      },
+      Level.Medium => {
+        return 2;
+      },
+      Level.High => {
+        return 3;
+      },
+    }
+  }
+
+  is_higher_than(&this, Level other) bool {
+    return this.rank() > other.rank();
+  }
+
+  get label string {
+    match this {
+      Level.Low => {
+        return "low";
+      },
+      Level.Medium => {
+        return "medium";
+      },
+      Level.High => {
+        return "high";
+      },
+    }
+  }
+
+  full_description(&this) string {
+    return this.label;
+  }
+}
+
+test_enum_method_calls_method() `test {
+  assert(Level.High.is_higher_than(Level.Low) == true, "High > Low");
+  assert(Level.Low.is_higher_than(Level.High) == false, "Low !> High");
+  assert(Level.Medium.is_higher_than(Level.Medium) == false, "Medium !> Medium");
+}
+
+test_enum_method_calls_getter() `test {
+  assert(Level.Low.full_description() == "low", "Low.full_description");
+  assert(Level.High.full_description() == "high", "High.full_description");
+}
+
+// Enum method with expression body
+enum Toggle {
+  On, Off,
+
+  is_on(&this) bool => this.to_int() == 1;
+
+  to_int(&this) int {
+    match this {
+      Toggle.On => {
+        return 1;
+      },
+      Toggle.Off => {
+        return 0;
+      },
+    }
+  }
+}
+
+test_enum_expression_body() `test {
+  assert(Toggle.On.is_on() == true, "On.is_on");
+  assert(Toggle.Off.is_on() == false, "Off.is_on");
+  assert(Toggle.On.to_int() == 1, "On.to_int");
+  assert(Toggle.Off.to_int() == 0, "Off.to_int");
+}
+
+// Failable enum method
+enum Config {
+  Debug, Release,
+
+  validate(&this) string! {
+    match this {
+      Config.Debug => {
+        return "debug-mode";
+      },
+      Config.Release => {
+        return "release-mode";
+      },
+    }
+  }
+}
+
+test_enum_failable_method() `test {
+  result := Config.Debug.validate()!;
+  assert(result == "debug-mode", "Debug.validate");
+  result2 := Config.Release.validate()!;
+  assert(result2 == "release-mode", "Release.validate");
+}
+
+// Getter chaining
+enum Season {
+  Spring, Summer, Autumn, Winter,
+
+  get next Season {
+    match this {
+      Season.Spring => {
+        return Season.Summer;
+      },
+      Season.Summer => {
+        return Season.Autumn;
+      },
+      Season.Autumn => {
+        return Season.Winter;
+      },
+      Season.Winter => {
+        return Season.Spring;
+      },
+    }
+  }
+}
+
+test_getter_chaining() `test {
+  s := Season.Spring;
+  // s.next = Summer, s.next.next = Autumn
+  s2 := s.next.next;
+  match s2 {
+    Season.Autumn => {
+    },
+    _ => {
+      assert(false, "Spring.next.next should be Autumn");
+    },
+  }
+  // Full cycle: 4 nexts returns to start
+  s4 := s.next.next.next.next;
+  match s4 {
+    Season.Spring => {
+    },
+    _ => {
+      assert(false, "4 nexts should cycle back");
+    },
+  }
+}
+
+// Data enum getter
+enum Expr {
+  Literal(int value),
+  Negate(int inner),
+
+  get result int {
+    match this {
+      Expr.Literal(v) => {
+        return v;
+      },
+      Expr.Negate(v) => {
+        return 0 - v;
+      },
+    }
+  }
+}
+
+test_data_enum_getter() `test {
+  e1 := Expr.Literal(value: 42);
+  assert(e1.result == 42, "Literal.result");
+  e2 := Expr.Negate(inner: 10);
+  assert(e2.result == -10, "Negate.result");
+}
+
+// Void method
+enum Logger {
+  Info, Warn,
+
+  tag(&this) string {
+    match this {
+      Logger.Info => {
+        return "INFO";
+      },
+      Logger.Warn => {
+        return "WARN";
+      },
+    }
+  }
+}
+
+test_void_enum_method() `test {
+  // Just verify it compiles and runs without panic
+  l := Logger.Info;
+  string t = l.tag();
+  assert(t == "INFO", "Info.tag");
+}
+
+// Enum method with default parameter
+enum Severity {
+  Low, High,
+
+  format(&this, string prefix = "severity") string {
+    match this {
+      Severity.Low => {
+        return "{prefix}: low";
+      },
+      Severity.High => {
+        return "{prefix}: high";
+      },
+    }
+  }
+}
+
+test_enum_method_default_param() `test {
+  assert(Severity.Low.format() == "severity: low", "default prefix");
+  assert(Severity.High.format(prefix: "level") == "level: high", "custom prefix");
+}
+
+// Failable method with error handler
+enum Source {
+  Valid, Invalid,
+
+  load(&this) string! {
+    match this {
+      Source.Valid => {
+        return "data";
+      },
+      Source.Invalid => {
+        raise error(message: "invalid source");
+      },
+    }
+  }
+}
+
+test_failable_enum_method_handler() `test {
+  result := Source.Valid.load()? e {
+    "fallback";
+  };
+  assert(result == "data", "Valid.load should succeed");
+  result2 := Source.Invalid.load()? e {
+    "fallback";
+  };
+  assert(result2 == "fallback", "Invalid.load should use fallback");
+}
+
+// Enum method called on value stored in variable from function return
+get_color() Color {
+  return Color.Blue;
+}
+
+test_method_on_returned_enum() `test {
+  c := get_color();
+  assert(c.describe() == "blue", "method on returned enum");
+}
+
+// Enum passed to function, method called inside
+check_warmth(Color c) bool {
+  return c.is_warm();
+}
+
+test_enum_method_via_function() `test {
+  assert(check_warmth(Color.Red) == true, "Red warm via function");
+  assert(check_warmth(Color.Blue) == false, "Blue not warm via function");
+}

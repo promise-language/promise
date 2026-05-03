@@ -66,6 +66,7 @@ type EnumDecl struct {
 	TypeParams  []*TypeParam
 	Annotations []*MetaAnnotation
 	Variants    []*EnumVariant
+	Methods     []*MethodDecl
 }
 
 func (*EnumDecl) declTag() {}

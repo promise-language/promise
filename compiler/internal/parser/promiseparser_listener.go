@@ -73,6 +73,9 @@ type PromiseParserListener interface {
 	// EnterEnumField is called when entering the enumField production.
 	EnterEnumField(c *EnumFieldContext)
 
+	// EnterEnumMember is called when entering the enumMember production.
+	EnterEnumMember(c *EnumMemberContext)
+
 	// EnterFuncDecl is called when entering the funcDecl production.
 	EnterFuncDecl(c *FuncDeclContext)
 
@@ -531,6 +534,9 @@ type PromiseParserListener interface {
 
 	// ExitEnumField is called when exiting the enumField production.
 	ExitEnumField(c *EnumFieldContext)
+
+	// ExitEnumMember is called when exiting the enumMember production.
+	ExitEnumMember(c *EnumMemberContext)
 
 	// ExitFuncDecl is called when exiting the funcDecl production.
 	ExitFuncDecl(c *FuncDeclContext)

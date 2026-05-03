@@ -917,7 +917,10 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 			targetType = types.Substitute(targetType, c.typeSubst)
 		}
 		if enumLayout := c.lookupEnumLayout(targetType); enumLayout != nil {
-			return c.genEnumVariantCallLayout(e, member, enumLayout)
+			if _, isVariant := enumLayout.VariantTag[member.Field]; isVariant {
+				return c.genEnumVariantCallLayout(e, member, enumLayout)
+			}
+			// Not a variant — fall through to method dispatch
 		}
 		// Fallback for generic enum variant constructors in mono context:
 		// target is bare *types.Enum; use the call result type (Instance after subst).
@@ -927,7 +930,9 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 				resultType = types.Substitute(resultType, c.typeSubst)
 			}
 			if enumLayout := c.lookupEnumLayout(resultType); enumLayout != nil {
-				return c.genEnumVariantCallLayout(e, member, enumLayout)
+				if _, isVariant := enumLayout.VariantTag[member.Field]; isVariant {
+					return c.genEnumVariantCallLayout(e, member, enumLayout)
+				}
 			}
 		}
 		// Function-typed field call: this._next() where _next is a () -> T? field.
@@ -1703,8 +1708,15 @@ func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 	}
 
 	// Enum variant access: Color.Red or Option[int].None
+	// Check variant first; if the field is not a variant, check for enum getters.
 	if enumLayout := c.lookupEnumLayout(targetType); enumLayout != nil {
-		return c.genEnumVariantValueLayout(enumLayout, e.Field)
+		if _, isVariant := enumLayout.VariantTag[e.Field]; isVariant {
+			return c.genEnumVariantValueLayout(enumLayout, e.Field)
+		}
+		// Not a variant — check for enum getter
+		if result, ok := c.genEnumGetterAccess(e, targetType, enumLayout); ok {
+			return result
+		}
 	}
 
 	// For generic enum variants (e.g. Slot.Empty inside a generic type body),
@@ -1716,7 +1728,12 @@ func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 			resultType = types.Substitute(resultType, c.typeSubst)
 		}
 		if enumLayout := c.lookupEnumLayout(resultType); enumLayout != nil {
-			return c.genEnumVariantValueLayout(enumLayout, e.Field)
+			if _, isVariant := enumLayout.VariantTag[e.Field]; isVariant {
+				return c.genEnumVariantValueLayout(enumLayout, e.Field)
+			}
+			if result, ok := c.genEnumGetterAccess(e, targetType, enumLayout); ok {
+				return result
+			}
 		}
 	}
 
@@ -2242,6 +2259,11 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 		return result
 	}
 
+	// Enum method dispatch
+	if result, ok := c.genEnumMethodCall(e, member, targetType); ok {
+		return result
+	}
+
 	named := extractNamed(targetType)
 	if named == nil {
 		panic(fmt.Sprintf("codegen: cannot resolve type for method call on %T", targetType))
@@ -2319,6 +2341,116 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 	args = append(args, argVals...)
 
 	return c.block.NewCall(fn, args...)
+}
+
+// genEnumGetterAccess emits a getter call on an enum value (e.g., s.name where name is a getter on enum Shape).
+// Returns (result, true) if the enum has a matching getter, (nil, false) otherwise.
+func (c *Compiler) genEnumGetterAccess(e *ast.MemberExpr, targetType types.Type, layout *TypeDeclLayout) (value.Value, bool) {
+	var enum *types.Enum
+	var enumName string
+	switch t := targetType.(type) {
+	case *types.Enum:
+		enum = t
+		enumName = t.Obj().Name()
+	case *types.Instance:
+		if en, ok := t.Origin().(*types.Enum); ok {
+			enum = en
+			enumName = monoName(t)
+		}
+	}
+	if enum == nil {
+		return nil, false
+	}
+	getter := enum.LookupGetter(e.Field)
+	if getter == nil {
+		return nil, false
+	}
+
+	mangledName := mangleMethodName(enumName, e.Field, false)
+	fn, ok := c.funcs[mangledName]
+	if !ok {
+		return nil, false
+	}
+
+	// Pass the enum value as receiver
+	target := c.genExpr(e.Target)
+	var ptr value.Value
+	// `this` inside an enum method is already i8* pointing to the enum alloca — pass directly.
+	if _, isThis := e.Target.(*ast.ThisExpr); isThis {
+		ptr = target
+	} else {
+		alloca := c.entryBlock.NewAlloca(target.Type())
+		alloca.SetName(c.uniqueLocalName("enum.getter"))
+		c.block.NewStore(target, alloca)
+		ptr = c.block.NewBitCast(alloca, irtypes.I8Ptr)
+	}
+
+	return c.block.NewCall(fn, ptr), true
+}
+
+// genEnumMethodCall generates a method call on an enum value.
+// Returns (result, true) if the target is an enum with a matching method, (nil, false) otherwise.
+func (c *Compiler) genEnumMethodCall(e *ast.CallExpr, member *ast.MemberExpr, targetType types.Type) (value.Value, bool) {
+	var enum *types.Enum
+	var enumName string
+
+	switch t := targetType.(type) {
+	case *types.Enum:
+		enum = t
+		enumName = t.Obj().Name()
+	case *types.Instance:
+		if en, ok := t.Origin().(*types.Enum); ok {
+			enum = en
+			enumName = monoName(t)
+		}
+	default:
+		return nil, false
+	}
+
+	if enum == nil {
+		return nil, false
+	}
+
+	method := enum.LookupMethod(member.Field)
+	if method == nil {
+		return nil, false
+	}
+
+	mangledName := mangleMethodName(enumName, member.Field, false)
+	fn, ok := c.funcs[mangledName]
+	if !ok {
+		return nil, false
+	}
+
+	var args []value.Value
+	if method.Sig().Recv() != nil {
+		target := c.genExpr(member.Target)
+		// `this` inside an enum method is already i8* pointing to the enum alloca — pass directly.
+		if _, isThis := member.Target.(*ast.ThisExpr); isThis {
+			args = append(args, target)
+		} else {
+			// Store the enum value to a temp alloca and pass pointer as i8*.
+			// Use the actual LLVM type of the value (i32 for fieldless, struct for data enums).
+			alloca := c.entryBlock.NewAlloca(target.Type())
+			alloca.SetName(c.uniqueLocalName("enum.this"))
+			c.block.NewStore(target, alloca)
+			ptr := c.block.NewBitCast(alloca, irtypes.I8Ptr)
+			args = append(args, ptr)
+		}
+	}
+	var argVals []value.Value
+	var argTypes []types.Type
+	for _, arg := range e.Args {
+		argVals = append(argVals, c.genExpr(arg.Value))
+		argTypes = append(argTypes, c.info.Types[arg.Value])
+		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		}
+	}
+	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params())
+	args = append(args, argVals...)
+
+	return c.block.NewCall(fn, args...), true
 }
 
 // genGetterCall emits a call to a getter method (zero args beyond receiver).
@@ -2944,6 +3076,17 @@ func (c *Compiler) genMatchExpr(e *ast.MatchExpr) value.Value {
 
 	if enumLayout := c.lookupEnumLayout(subjectType); enumLayout != nil {
 		enum := extractEnum(subjectType)
+		// If subject is i8* (e.g., `this` inside an enum method), load the enum value
+		if subject.Type().Equal(irtypes.I8Ptr) {
+			var loadType irtypes.Type
+			if enumLayout.MaxVariantDataSize == 0 {
+				loadType = irtypes.I32 // fieldless enum: tag only
+			} else {
+				loadType = enumLayout.EnumInternalType // data enum: {i32 tag, [N x i8] data}
+			}
+			typedPtr := c.block.NewBitCast(subject, irtypes.NewPointer(loadType))
+			subject = c.block.NewLoad(loadType, typedPtr)
+		}
 		return c.genEnumMatch(e, subject, enum, enumLayout)
 	}
 

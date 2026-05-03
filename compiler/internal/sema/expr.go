@@ -1102,6 +1102,15 @@ func (c *Checker) checkMemberExpr(e *ast.MemberExpr) types.Type {
 			}
 			return types.NewSignature(nil, params, t, false)
 		}
+		if g := t.LookupGetter(e.Field); g != nil {
+			if g.Deprecated() != "" {
+				c.warnf(e.Pos(), "use of deprecated getter '%s'", e.Field)
+			}
+			if g.Sig().CanError() {
+				c.info.FailableExprs[e] = true
+			}
+			return g.Sig().Result()
+		}
 		if m := t.LookupMethod(e.Field); m != nil {
 			if m.Deprecated() != "" {
 				c.warnf(e.Pos(), "use of deprecated method '%s'", e.Field)
@@ -1359,6 +1368,12 @@ func (c *Checker) resolveEnumMemberInst(pos ast.Pos, enum *types.Enum, name stri
 			params[i] = types.NewParam(f.Name(), types.Substitute(f.Type(), subst), types.RefNone)
 		}
 		return types.NewSignature(nil, params, inst, false)
+	}
+	if g := enum.LookupGetter(name); g != nil {
+		if g.Deprecated() != "" {
+			c.warnf(pos, "use of deprecated getter '%s'", name)
+		}
+		return types.Substitute(g.Sig().Result(), subst)
 	}
 	if m := enum.LookupMethod(name); m != nil {
 		if m.Deprecated() != "" {

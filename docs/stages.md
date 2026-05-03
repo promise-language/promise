@@ -290,8 +290,9 @@ Enum type codegen: tagged unions, fieldless enums, variant constructors, pattern
 - **Pattern matching**: `match` on enum generates LLVM `switch` on tag. Each arm branches to a dedicated basic block. Wildcard/name patterns use the default target.
 - **Destructure bindings**: `Some(v) =>` extracts the data area, bitcasts to variant struct, loads fields into local allocas. Supports `EnumDestructureMatchPattern`, `ShortDestructureMatchPattern`, and `NameMatchPattern` (binding the whole subject).
 - **Enum layout** (`layout.go`): `computeEnumLayout` computes tag map, per-variant data struct types, max data size. Four-struct ABI model maintained (type/variant/instance/value structs) for future extern compatibility.
-- **Scope**: Fieldless enums, data enums with positional fields, variant values, variant constructors, match with switch, destructure bindings, wildcard/name patterns.
-- **Deferred**: Named enum fields in constructors, enum methods, extern ABI pack/unpack for enums.
+- **Enum methods**: Methods and getters declared inside `enum { ... }` body after variants. Receiver is `i8*` pointer to enum value alloca. `match this` inside enum methods bitcasts and loads the enum value (i32 for fieldless, struct for data enums). Sema uses `Enum.LookupMethod`/`LookupGetter`/`LookupAnyMethod` (mirrors Named type pattern). Codegen: `declareEnumMethods`/`defineEnumMethods` in compiler.go, `genEnumMethodCall`/`genEnumGetterAccess` in expr.go. Non-generic only (generic enum methods deferred to monomorphization support).
+- **Scope**: Fieldless enums, data enums with positional fields, variant values, variant constructors, match with switch, destructure bindings, wildcard/name patterns, enum methods and getters.
+- **Deferred**: Named enum fields in constructors, extern ABI pack/unpack for enums.
 
 ## Stage 8e — Error Handling (Done)
 
@@ -997,7 +998,8 @@ Known gaps and improvements deferred from completed stages.
 | B0012 | Generic type RTTI — partially resolved: mono type `is` checks work (origin ID in parent chain, view vtable cache keyed by mono name). Remaining: `is` patterns with full type expressions (`x is Box[int]`, `e is DataError[string]`) — currently only bare `IDENT` accepted. | 8k | Medium |
 | B0013 | Failable `close()` error propagation in `use` | 8m | Medium |
 | B0014 | Named enum fields in constructors | 8d | Low |
-| B0015 | Enum methods | 8d | Low |
+| ~~B0015~~ | ~~Enum methods~~ | ~~8d~~ | ~~Done~~ |
+| B0015a | Generic enum methods (monomorphization) | 8d | Low |
 | B0016 | Extern ABI pack/unpack for enums | 8d | Low |
 | B0017 | Failable extern functions (C ABI for errors) | 8e | Low |
 | B0018 | Type argument inference (explicit type args only currently) | 8f | Low |

@@ -10903,3 +10903,114 @@ func TestModuleLevelGetterDistinctFromSetter(t *testing.T) {
 	assertContains(t, ir, "define i64 @val()")
 	assertContains(t, ir, "define void @val$set(i64")
 }
+
+func TestEnumMethodDecl(t *testing.T) {
+	ir := generateIR(t, `
+		enum Color { Red, Green, Blue,
+			describe(&this) string {
+				match this {
+					Color.Red => { return "red"; },
+					_ => { return "other"; },
+				}
+			}
+		}
+		main() { string s = Color.Red.describe(); }
+	`)
+	assertContains(t, ir, "@Color.describe(i8* %this)")
+	assertContains(t, ir, "call i8* @Color.describe(")
+}
+
+func TestEnumGetterDecl(t *testing.T) {
+	ir := generateIR(t, `
+		enum Color { Red, Green, Blue,
+			get opposite Color {
+				match this {
+					Color.Red => { return Color.Green; },
+					Color.Green => { return Color.Blue; },
+					Color.Blue => { return Color.Red; },
+				}
+			}
+		}
+		main() { Color c = Color.Red.opposite; }
+	`)
+	assertContains(t, ir, "define i32 @Color.opposite(i8* %this)")
+	assertContains(t, ir, "call i32 @Color.opposite(")
+}
+
+func TestEnumMethodOnDataEnum(t *testing.T) {
+	ir := generateIR(t, `
+		enum Shape { Circle(f64 radius), Point,
+			is_point(&this) bool {
+				match this {
+					Shape.Point => { return true; },
+					_ => { return false; },
+				}
+			}
+		}
+		main() { bool b = Shape.Point.is_point(); }
+	`)
+	assertContains(t, ir, "define i1 @Shape.is_point(i8* %this)")
+	assertContains(t, ir, "call i1 @Shape.is_point(")
+}
+
+func TestEnumMethodCallsMethod(t *testing.T) {
+	ir := generateIR(t, `
+		enum Level { Low, High,
+			rank(&this) int {
+				match this {
+					Level.Low => { return 1; },
+					Level.High => { return 2; },
+				}
+			}
+			gt(&this, Level other) bool {
+				return this.rank() > other.rank();
+			}
+		}
+		main() { bool b = Level.High.gt(Level.Low); }
+	`)
+	// Both methods declared with i8* receiver
+	assertContains(t, ir, "@Level.rank(i8* %this)")
+	assertContains(t, ir, "@Level.gt(i8* %this, i32 %other)")
+}
+
+func TestEnumMethodFailable(t *testing.T) {
+	ir := generateIR(t, `
+		enum Mode { A, B,
+			check(&this) string! {
+				match this {
+					Mode.A => { return "a"; },
+					Mode.B => { return "b"; },
+				}
+			}
+		}
+		main() { string s = Mode.A.check()!; }
+	`)
+	// Failable method returns result struct
+	assertContains(t, ir, "@Mode.check(i8* %this)")
+}
+
+func TestEnumMethodVoid(t *testing.T) {
+	ir := generateIR(t, `
+		enum State { On, Off,
+			log(&this) { print_line("x"); }
+		}
+		main() { State.On.log(); }
+	`)
+	assertContains(t, ir, "define void @State.log(i8* %this)")
+}
+
+func TestEnumGetterOnDataEnum(t *testing.T) {
+	ir := generateIR(t, `
+		enum Shape { Circle(f64 radius), Point,
+			get has_area bool {
+				match this {
+					Shape.Circle(r) => { return true; },
+					Shape.Point => { return false; },
+				}
+			}
+		}
+		main() { bool b = Shape.Circle(radius: 1.0).has_area; }
+	`)
+	assertContains(t, ir, "define i1 @Shape.has_area(i8* %this)")
+	assertContains(t, ir, "call i1 @Shape.has_area(")
+}

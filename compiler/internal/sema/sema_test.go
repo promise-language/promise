@@ -10426,3 +10426,214 @@ func TestEscapedBraceOK(t *testing.T) {
 func TestEscapedBraceWithInterpolationOK(t *testing.T) {
 	checkOK(t, `main() { int x = 1; s := "\{x}={x}"; }`)
 }
+
+// --- Enum Methods ---
+
+func TestEnumMethodOK(t *testing.T) {
+	checkOK(t, `
+		enum Color { Red, Green, Blue,
+			describe(&this) string {
+				match this {
+					Color.Red => { return "red"; },
+					_ => { return "other"; },
+				}
+			}
+		}
+		test() { string s = Color.Red.describe(); }
+	`)
+}
+
+func TestEnumGetterOK(t *testing.T) {
+	checkOK(t, `
+		enum Color { Red, Green, Blue,
+			get opposite Color {
+				match this {
+					Color.Red => { return Color.Green; },
+					Color.Green => { return Color.Blue; },
+					Color.Blue => { return Color.Red; },
+				}
+			}
+		}
+		test() { Color c = Color.Red.opposite; }
+	`)
+}
+
+func TestEnumMethodAbstractError(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Color { Red,
+			describe(&this) string `+"`"+`abstract;
+		}
+		test() {}
+	`)
+	expectError(t, errs, "cannot be abstract")
+}
+
+func TestEnumMethodNativeError(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Color { Red,
+			describe(&this) string `+"`"+`native;
+		}
+		test() {}
+	`)
+	expectError(t, errs, "cannot be native")
+}
+
+func TestEnumMethodFactoryError(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Color { Red,
+			make() Color `+"`"+`factory { return Color.Red; }
+		}
+		test() {}
+	`)
+	expectError(t, errs, "cannot be a factory")
+}
+
+func TestEnumMethodMissingReturn(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Color { Red,
+			describe(&this) string {
+			}
+		}
+		test() {}
+	`)
+	expectError(t, errs, "missing return")
+}
+
+func TestEnumMethodUndefined(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Color { Red, Green, Blue }
+		test() { string s = Color.Red.describe(); }
+	`)
+	expectError(t, errs, "has no variant or method describe")
+}
+
+func TestEnumMethodGlobalError(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Color { Red,
+			make() Color `+"`"+`global { return Color.Red; }
+		}
+		test() {}
+	`)
+	expectError(t, errs, "cannot be `global")
+}
+
+func TestEnumMethodMonoError(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Color { Red,
+			make() Color `+"`"+`mono { return Color.Red; }
+		}
+		test() {}
+	`)
+	expectError(t, errs, "cannot be `mono")
+}
+
+func TestEnumMethodDataEnumOK(t *testing.T) {
+	checkOK(t, `
+		enum Shape { Circle(f64 radius), Point,
+			area(&this) f64 {
+				match this {
+					Shape.Circle(r) => { return 3.14 * r * r; },
+					Shape.Point => { return 0.0; },
+				}
+			}
+		}
+		test() { f64 a = Shape.Circle(radius: 1.0).area(); }
+	`)
+}
+
+func TestEnumMethodExprBodyOK(t *testing.T) {
+	checkOK(t, `
+		enum Toggle { On, Off,
+			to_int(&this) int {
+				match this {
+					Toggle.On => { return 1; },
+					Toggle.Off => { return 0; },
+				}
+			}
+			is_on(&this) bool => this.to_int() == 1;
+		}
+		test() { bool b = Toggle.On.is_on(); }
+	`)
+}
+
+func TestEnumMethodFailableOK(t *testing.T) {
+	checkOK(t, `
+		enum Mode { A, B,
+			validate(&this) string! {
+				match this {
+					Mode.A => { return "a"; },
+					Mode.B => { return "b"; },
+				}
+			}
+		}
+		test() { string s = Mode.A.validate()!; }
+	`)
+}
+
+func TestEnumMethodVoidOK(t *testing.T) {
+	checkOK(t, `
+		enum State { On, Off,
+			log(&this) {
+				print_line("state");
+			}
+		}
+		test() { State.On.log(); }
+	`)
+}
+
+func TestEnumMethodCallsMethodOK(t *testing.T) {
+	checkOK(t, `
+		enum Level { Low, High,
+			rank(&this) int {
+				match this {
+					Level.Low => { return 1; },
+					Level.High => { return 2; },
+				}
+			}
+			is_higher(&this, Level other) bool {
+				return this.rank() > other.rank();
+			}
+		}
+		test() { bool b = Level.High.is_higher(Level.Low); }
+	`)
+}
+
+func TestEnumGetterTypeMismatch(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Color { Red,
+			get name int {
+				return "hello";
+			}
+		}
+		test() {}
+	`)
+	expectError(t, errs, "cannot return string from function returning int")
+}
+
+func TestEnumMethodWithDefaultParam(t *testing.T) {
+	checkOK(t, `
+		enum Color { Red, Green,
+			format(&this, string prefix = "Color") string {
+				return prefix;
+			}
+		}
+		test() {
+			string s = Color.Red.format();
+			string s2 = Color.Red.format(prefix: "C");
+		}
+	`)
+}
+
+func TestEnumGetterOnDataEnumOK(t *testing.T) {
+	checkOK(t, `
+		enum Shape { Circle(f64 radius), Point,
+			get has_area bool {
+				match this {
+					Shape.Circle(r) => { return true; },
+					Shape.Point => { return false; },
+				}
+			}
+		}
+		test() { bool b = Shape.Circle(radius: 1.0).has_area; }
+	`)
+}

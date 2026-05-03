@@ -125,7 +125,7 @@ methodName
 // ============================================================
 
 enumDecl
-    : ENUM IDENT typeParams? metaAnnotation* LBRACE enumVariant (COMMA enumVariant)* COMMA? RBRACE
+    : ENUM IDENT typeParams? metaAnnotation* LBRACE enumVariant (COMMA enumVariant)* COMMA? enumMember* RBRACE
     ;
 
 enumVariant
@@ -134,6 +134,11 @@ enumVariant
 
 enumField
     : typeRef IDENT
+    ;
+
+enumMember
+    : methodDecl
+    | getterDecl
     ;
 
 // ============================================================

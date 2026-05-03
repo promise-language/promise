@@ -477,6 +477,7 @@ func compile(file *ast.File, info *sema.Info, target string, cachedInstances map
 
 	// Declare method stubs before vtable/typeinfo emission (vtable needs function pointers)
 	c.declareTypeMethods(file)
+	c.declareEnumMethods(file)
 	c.declareMonoMethods(file, monoInstances)
 	c.declareMonoSynthesizedDefaults(file, monoInstances) // structural parent defaults
 
@@ -509,6 +510,7 @@ func compile(file *ast.File, info *sema.Info, target string, cachedInstances map
 	c.defineOSBodies()          // bridge os module externs → PAL OS functions
 
 	c.defineTypeMethods(file)
+	c.defineEnumMethods(file)
 	c.defineMonoMethods(file, monoInstances)
 	c.defineMonoSynthesizedDefaults(file, monoInstances) // structural parent defaults
 	c.defineFuncs(file)
@@ -3575,6 +3577,107 @@ func (c *Compiler) defineTypeMethods(file *ast.File) {
 			c.defineMethodFunc(md, m, fn, named)
 		}
 	}
+}
+
+// declareEnumMethods creates LLVM function stubs for enum methods (pass 1).
+// Generic enums are skipped — their methods are handled by monomorphization.
+func (c *Compiler) declareEnumMethods(file *ast.File) {
+	for _, decl := range file.Decls {
+		ed, ok := decl.(*ast.EnumDecl)
+		if !ok {
+			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue
+		}
+		enum := c.lookupEnumType(ed.Name)
+		if enum == nil {
+			continue
+		}
+		if len(enum.TypeParams()) > 0 {
+			continue // generic — handled by monomorphization
+		}
+
+		for _, md := range ed.Methods {
+			if md.Body == nil {
+				continue
+			}
+			m := c.lookupEnumMethod(enum, md)
+			if m == nil || m.Sig() == nil {
+				continue
+			}
+
+			mangledName := mangleMethodName(ed.Name, md.Name, md.IsSetter)
+
+			var params []*ir.Param
+			if m.Sig().Recv() != nil {
+				// Enum methods receive a pointer to the enum value struct (i8*)
+				params = append(params, ir.NewParam("this", irtypes.I8Ptr))
+			}
+			for _, p := range m.Sig().Params() {
+				params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
+			}
+
+			retType := irtypes.Type(irtypes.Void)
+			if m.Sig().Result() != nil {
+				retType = c.resolveType(m.Sig().Result())
+			}
+			if m.Sig().CanError() {
+				retType = computeResultType(retType)
+			}
+
+			fn := c.module.NewFunc(mangledName, retType, params...)
+			c.funcs[mangledName] = fn
+		}
+	}
+}
+
+// defineEnumMethods generates enum method bodies (pass 2).
+// Generic enums are skipped — their methods are handled by monomorphization.
+func (c *Compiler) defineEnumMethods(file *ast.File) {
+	for _, decl := range file.Decls {
+		ed, ok := decl.(*ast.EnumDecl)
+		if !ok {
+			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue
+		}
+		enum := c.lookupEnumType(ed.Name)
+		if enum == nil {
+			continue
+		}
+		if len(enum.TypeParams()) > 0 {
+			continue // generic — handled by monomorphization
+		}
+
+		for _, md := range ed.Methods {
+			if md.Body == nil {
+				continue
+			}
+			m := c.lookupEnumMethod(enum, md)
+			if m == nil || m.Sig() == nil {
+				continue
+			}
+
+			mangledName := mangleMethodName(ed.Name, md.Name, md.IsSetter)
+			fn, ok := c.funcs[mangledName]
+			if !ok {
+				continue
+			}
+
+			c.defineMethodFunc(md, m, fn)
+		}
+	}
+}
+
+// lookupEnumMethod finds a method on an enum, dispatching to the appropriate
+// lookup based on the AST declaration's getter/setter flags.
+func (c *Compiler) lookupEnumMethod(enum *types.Enum, md *ast.MethodDecl) *types.Method {
+	if md.IsGetter {
+		return enum.LookupGetter(md.Name)
+	}
+	return enum.LookupMethod(md.Name)
 }
 
 // typeGlobalName returns the IR global name for a type's typeinfo/vtable/rtti globals.

@@ -95,6 +95,10 @@ func (v *BasePromiseParserVisitor) VisitEnumField(ctx *EnumFieldContext) interfa
 	return v.VisitChildren(ctx)
 }
 
+func (v *BasePromiseParserVisitor) VisitEnumMember(ctx *EnumMemberContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
 func (v *BasePromiseParserVisitor) VisitFuncDecl(ctx *FuncDeclContext) interface{} {
 	return v.VisitChildren(ctx)
 }

@@ -87,6 +87,10 @@ func hEnumDecl(h hash.Hash, td *ast.EnumDecl) {
 	for _, v := range td.Variants {
 		hEnumVariant(h, v)
 	}
+	wb(h, 0xFF)
+	for _, m := range td.Methods {
+		hMethodDecl(h, m)
+	}
 }
 
 func hTypeParam(h hash.Hash, tp *ast.TypeParam) {

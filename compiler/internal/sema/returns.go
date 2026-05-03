@@ -80,6 +80,43 @@ func (c *Checker) checkMissingReturn(file *ast.File) {
 					c.errorf(md.End(), "method %s.%s missing return statement", d.Name, md.Name)
 				}
 			}
+
+		case *ast.EnumDecl:
+			obj := c.lookup(d.Name)
+			if obj == nil {
+				continue
+			}
+			tn, ok := obj.(*types.TypeName)
+			if !ok {
+				continue
+			}
+			enum, ok := tn.Type().(*types.Enum)
+			if !ok {
+				continue
+			}
+			for _, md := range d.Methods {
+				if md.Body == nil {
+					continue
+				}
+				if c.info.GeneratorFuncs[md] != nil {
+					continue
+				}
+				var m *types.Method
+				if md.IsGetter {
+					m = enum.LookupGetter(md.Name)
+				} else {
+					m = enum.LookupMethod(md.Name)
+				}
+				if m == nil || m.Sig() == nil {
+					continue
+				}
+				if m.Sig().Result() == nil || types.Identical(m.Sig().Result(), types.TypVoid) {
+					continue
+				}
+				if !c.blockReturns(md.Body) {
+					c.errorf(md.End(), "method %s.%s missing return statement", d.Name, md.Name)
+				}
+			}
 		}
 	}
 	c.scope = c.fileScope

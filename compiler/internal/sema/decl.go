@@ -656,6 +656,11 @@ func (c *Checker) defineEnum(d *ast.EnumDecl) {
 		enum.AddVariant(variant)
 	}
 
+	// Resolve methods
+	for _, md := range d.Methods {
+		c.defineEnumMethod(enum, md, d.Name)
+	}
+
 	// Process meta annotations
 	c.validateMetas(d.Annotations, TargetEnum)
 	if c.hasAnnotation(d.Annotations, "copy") {
@@ -667,6 +672,103 @@ func (c *Checker) defineEnum(d *ast.EnumDecl) {
 	}
 	enum.SetDoc(extractDoc(d.Annotations))
 	enum.SetDeprecated(extractDeprecated(d.Annotations))
+}
+
+func (c *Checker) defineEnumMethod(enum *types.Enum, md *ast.MethodDecl, enumName string) {
+	sig := c.resolveEnumMethodSignature(enum, md)
+	if sig == nil {
+		return
+	}
+
+	abstract := c.hasAnnotation(md.Annotations, "abstract")
+	native := c.hasAnnotation(md.Annotations, "native")
+
+	// Enum methods cannot be abstract, native, factory, global, or mono
+	if abstract {
+		c.errorf(md.Pos(), "enum method %s.%s cannot be abstract", enumName, md.Name)
+	}
+	if native {
+		c.errorf(md.Pos(), "enum method %s.%s cannot be native", enumName, md.Name)
+	}
+	if c.hasAnnotation(md.Annotations, "factory") {
+		c.errorf(md.Pos(), "enum method %s.%s cannot be a factory", enumName, md.Name)
+	}
+	if c.hasAnnotation(md.Annotations, "global") {
+		c.errorf(md.Pos(), "enum method %s.%s cannot be `global", enumName, md.Name)
+	}
+	if c.hasAnnotation(md.Annotations, "mono") {
+		c.errorf(md.Pos(), "enum method %s.%s cannot be `mono", enumName, md.Name)
+	}
+
+	// Methods must have a body
+	if md.Body == nil {
+		c.errorf(md.Pos(), "enum method %s.%s must have a body", enumName, md.Name)
+	}
+
+	placement := types.PlaceInstance // default
+
+	m := types.NewMethod(tpos(md.Pos()), md.Name, sig, placement, false, false)
+	m.SetGetter(md.IsGetter)
+	m.SetSetter(md.IsSetter)
+	if c.hasAnnotation(md.Annotations, "public") {
+		m.SetExported(true)
+	}
+	c.validateMetas(md.Annotations, TargetMethod)
+	m.SetDoc(extractDoc(md.Annotations))
+	m.SetDeprecated(extractDeprecated(md.Annotations))
+	enum.AddMethod(m)
+}
+
+func (c *Checker) resolveEnumMethodSignature(enum *types.Enum, md *ast.MethodDecl) *types.Signature {
+	// Resolve receiver — enum methods always receive the enum type
+	var recv *types.Param
+	if md.Receiver != nil {
+		ref := resolveRefMod(md.Receiver.RefMod)
+		recv = types.NewParam("this", enum, ref)
+	} else {
+		// Methods without explicit receiver default to value receiver
+		recv = types.NewParam("this", enum, types.RefNone)
+	}
+
+	// Resolve parameters
+	params := make([]*types.Param, len(md.Params))
+	for i, p := range md.Params {
+		pt := c.resolveType(p.Type)
+		if pt == nil {
+			return nil
+		}
+		if p.IsVariadic {
+			vecType := types.NewVector(pt)
+			c.recordInstance(vecType)
+			params[i] = types.NewParam(p.Name, vecType, types.RefNone)
+			params[i].SetVariadic(true)
+		} else {
+			params[i] = types.NewParam(p.Name, pt, resolveRefMod(p.RefMod))
+		}
+		if p.Default != nil {
+			params[i].SetHasDefault(true)
+			params[i].SetDefaultExpr(p.Default)
+			c.info.ParamDefaults[params[i]] = p.Default
+		}
+		params[i].SetDoc(extractDoc(p.Annotations))
+		c.validateMetas(p.Annotations, TargetParam)
+	}
+	c.validateVariadicParams(md.Params, params, "method '"+md.Name+"'")
+
+	// Resolve return type
+	var result types.Type
+	var canError bool
+	if md.ReturnType != nil {
+		if md.ReturnType.Type != nil {
+			result = c.resolveType(md.ReturnType.Type)
+			if result == nil {
+				return nil
+			}
+		}
+		canError = md.ReturnType.CanError
+	}
+
+	return types.NewSignature(recv, params, result, canError)
 }
 
 func (c *Checker) defineFunc(d *ast.FuncDecl) {

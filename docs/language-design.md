@@ -1022,6 +1022,57 @@ enum Color {
 }
 ```
 
+#### Enum Methods
+
+Enums can declare methods and getters inside the body, after the variant list. Methods receive the enum value as `this` and can pattern-match on it to implement variant-specific behavior.
+
+```promise
+enum Shape {
+  Circle(f64 radius),
+  Rectangle(f64 width, f64 height),
+  Point,
+
+  // Method — called as s.area()
+  area(&this) f64 {
+    match this {
+      Shape.Circle(r) => { return 3.14159 * r * r; },
+      Shape.Rectangle(w, h) => { return w * h; },
+      Shape.Point => { return 0.0; },
+    }
+  }
+
+  // Getter — accessed as s.is_flat (no parens)
+  get is_flat bool {
+    match this {
+      Shape.Point => { return true; },
+      _ => { return false; },
+    }
+  }
+
+  // Expression body shorthand
+  is_circle(&this) bool => !this.is_flat;
+
+  // Failable method
+  validate(&this) string! {
+    if this.is_flat { raise error(message: "flat shapes not allowed"); }
+    return "ok";
+  }
+}
+
+s := Shape.Circle(radius: 5.0);
+f64 a = s.area();        // method call
+bool flat = s.is_flat;   // getter (property syntax)
+```
+
+**Rules:**
+
+- Methods are declared after all variants, separated by commas from the last variant.
+- Methods receive `this` as the enum value (value semantics, not a pointer from the caller's perspective). The default receiver is value; `&this` (shared borrow) and `~this` (mutable borrow) are also accepted.
+- Methods can call other methods on `this` (e.g., `this.rank()` or `this.label` for getters).
+- Enum methods **cannot** be `` `abstract ``, `` `native ``, `` `factory ``, `` `global ``, or `` `mono ``.
+- Enum methods support expression bodies (`=> expr;`), failable return types (`!`), default parameters, and all standard method features.
+- Generic enum methods are not yet supported (deferred to monomorphization support).
+
 ### 5.7 Constructors
 
 Promise supports implicit constructors (auto-generated from fields) and explicit `new` constructors (user-defined with validation). Factory constructors provide named alternative construction paths. The `new`/`drop` pair forms a symmetric constructor/destructor lifecycle.

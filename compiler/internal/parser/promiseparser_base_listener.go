@@ -152,6 +152,12 @@ func (s *BasePromiseParserListener) EnterEnumField(ctx *EnumFieldContext) {}
 // ExitEnumField is called when production enumField is exited.
 func (s *BasePromiseParserListener) ExitEnumField(ctx *EnumFieldContext) {}
 
+// EnterEnumMember is called when production enumMember is entered.
+func (s *BasePromiseParserListener) EnterEnumMember(ctx *EnumMemberContext) {}
+
+// ExitEnumMember is called when production enumMember is exited.
+func (s *BasePromiseParserListener) ExitEnumMember(ctx *EnumMemberContext) {}
+
 // EnterFuncDecl is called when production funcDecl is entered.
 func (s *BasePromiseParserListener) EnterFuncDecl(ctx *FuncDeclContext) {}
 

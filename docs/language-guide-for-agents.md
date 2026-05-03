@@ -90,11 +90,30 @@ enum Shape {
   Circle(f64 radius),
   Rectangle(f64 width, f64 height),
   Point,
+
+  // Methods declared after variants
+  area(&this) f64 {
+    match this {
+      Shape.Circle(r) => { return 3.14159 * r * r; },
+      Shape.Rectangle(w, h) => { return w * h; },
+      Shape.Point => { return 0.0; },
+    }
+  }
+
+  // Getter (accessed as .name, no parens)
+  get is_flat bool {
+    match this {
+      Shape.Point => { return true; },
+      _ => { return false; },
+    }
+  }
 }
 
 // Usage
 d := Direction.North;
 s := Shape.Circle(radius: 3.14);
+print_line("{s.area()}");      // method call
+print_line("{s.is_flat}");     // getter, no parens
 
 // Pattern matching (must be exhaustive)
 match s {

@@ -367,7 +367,20 @@ func (b *Builder) VisitEnumDecl(ctx *parser.EnumDeclContext) interface{} {
 	for _, ev := range ctx.AllEnumVariant() {
 		node.Variants = append(node.Variants, ev.Accept(b).(*EnumVariant))
 	}
+	for _, em := range ctx.AllEnumMember() {
+		b.visitEnumMember(em, node)
+	}
 	return node
+}
+
+func (b *Builder) visitEnumMember(ctx parser.IEnumMemberContext, ed *EnumDecl) {
+	ec := ctx.(*parser.EnumMemberContext)
+	if m := ec.MethodDecl(); m != nil {
+		ed.Methods = append(ed.Methods, m.Accept(b).(*MethodDecl))
+	}
+	if g := ec.GetterDecl(); g != nil {
+		ed.Methods = append(ed.Methods, g.Accept(b).(*MethodDecl))
+	}
 }
 
 func (b *Builder) VisitEnumVariant(ctx *parser.EnumVariantContext) interface{} {

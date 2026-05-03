@@ -227,7 +227,7 @@ errs := ownerErrs(t, `...`)
 expectOwnerError(t, errs, "use of moved variable")
 ```
 
-Methods must be declared inside the type body. Numeric literals infer as `int`/`f64` — use typed parameters for i8/i16/i32/f32 tests.
+Methods must be declared inside the type body (for types) or after variants (for enums). Numeric literals infer as `int`/`f64` — use typed parameters for i8/i16/i32/f32 tests.
 
 ## Standard Library & Catalog Modules
 
@@ -266,11 +266,11 @@ The standard library (`modules/std/`, 29 files) is auto-imported via `use std as
 
 ## Test Suite
 
-~2285 test functions across ~207 `.pr` files, organized by category:
+~2300 test functions across ~208 `.pr` files, organized by category:
 
 | Directory | What it tests | Files |
 |-----------|--------------|-------|
-| `tests/e2e/` | Language features: inheritance, generics, errors, lambdas, match, enums, casting, control flow | ~55 |
+| `tests/e2e/` | Language features: inheritance, generics, errors, lambdas, match, enums (incl. enum methods), casting, control flow | ~56 |
 | `tests/std/` | Standard library: all primitive types, containers, iterators, math, time, formatting, parsing | ~27 |
 | `tests/concurrency/` | M:N scheduler, channels, select, tasks, goroutines, panic recovery, stress tests, IO syscall handoff | ~78 |
 | `tests/modules/` | Module system: imports, visibility, generics across modules, transitive deps, diamond deps | ~18 |

@@ -538,8 +538,43 @@ func (c *Checker) checkMethodBody(typeName string, md *ast.MethodDecl, m *types.
 
 // checkEnumDecl type-checks method bodies in an enum declaration.
 func (c *Checker) checkEnumDecl(d *ast.EnumDecl) {
-	// Enum methods are not yet supported in the AST
-	// This is a placeholder for future implementation
+	obj := c.lookup(d.Name)
+	if obj == nil {
+		return
+	}
+	tn, ok := obj.(*types.TypeName)
+	if !ok {
+		return
+	}
+	enum, ok := tn.Type().(*types.Enum)
+	if !ok {
+		return
+	}
+
+	// For generic enums, open type param scope so method bodies can reference T, K, V, etc.
+	if len(enum.TypeParams()) > 0 {
+		c.openScope(d, "typeparams:"+d.Name)
+		for _, tp := range enum.TypeParams() {
+			c.insert(tp.Obj())
+		}
+		defer c.closeScope()
+	}
+
+	for _, md := range d.Methods {
+		if md.Body == nil {
+			continue
+		}
+		var m *types.Method
+		if md.IsGetter {
+			m = enum.LookupGetter(md.Name)
+		} else {
+			m = enum.LookupMethod(md.Name)
+		}
+		if m == nil || m.Sig() == nil {
+			continue
+		}
+		c.checkMethodBody(d.Name, md, m)
+	}
 }
 
 // checkBlock type-checks a block of statements.

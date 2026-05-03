@@ -37,6 +37,8 @@ func (c *Checker) check() {
 			c.checkFuncDecl(d)
 		case *ast.TypeDecl:
 			c.checkTypeDecl(d)
+		case *ast.EnumDecl:
+			c.checkEnumDecl(d)
 		}
 	}
 }
@@ -111,6 +113,37 @@ func (c *Checker) checkTypeDecl(d *ast.TypeDecl) {
 			m = named.LookupSetter(md.Name)
 		} else {
 			m = named.LookupMethod(md.Name)
+		}
+		if m == nil || m.Sig() == nil {
+			continue
+		}
+		c.checkMethodBody(md, m)
+	}
+}
+
+func (c *Checker) checkEnumDecl(d *ast.EnumDecl) {
+	obj := c.lookupFileScope(d.Name)
+	if obj == nil {
+		return
+	}
+	tn, ok := obj.(*types.TypeName)
+	if !ok {
+		return
+	}
+	enum, ok := tn.Type().(*types.Enum)
+	if !ok {
+		return
+	}
+
+	for _, md := range d.Methods {
+		if md.Body == nil {
+			continue
+		}
+		var m *types.Method
+		if md.IsGetter {
+			m = enum.LookupGetter(md.Name)
+		} else {
+			m = enum.LookupMethod(md.Name)
 		}
 		if m == nil || m.Sig() == nil {
 			continue

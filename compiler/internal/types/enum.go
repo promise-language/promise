@@ -93,8 +93,28 @@ func (e *Enum) LookupVariant(name string) *Variant {
 	return nil
 }
 
-// LookupMethod searches for a method by name.
+// LookupMethod searches for a non-getter, non-setter method by name.
 func (e *Enum) LookupMethod(name string) *Method {
+	for _, m := range e.methods {
+		if m.name == name && !m.isGetter && !m.isSetter {
+			return m
+		}
+	}
+	return nil
+}
+
+// LookupGetter searches for a getter method by name.
+func (e *Enum) LookupGetter(name string) *Method {
+	for _, m := range e.methods {
+		if m.name == name && m.isGetter {
+			return m
+		}
+	}
+	return nil
+}
+
+// LookupAnyMethod searches for any method (getter, setter, or regular) by name.
+func (e *Enum) LookupAnyMethod(name string) *Method {
 	for _, m := range e.methods {
 		if m.name == name {
 			return m

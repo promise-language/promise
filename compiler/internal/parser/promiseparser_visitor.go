@@ -73,6 +73,9 @@ type PromiseParserVisitor interface {
 	// Visit a parse tree produced by PromiseParser#enumField.
 	VisitEnumField(ctx *EnumFieldContext) interface{}
 
+	// Visit a parse tree produced by PromiseParser#enumMember.
+	VisitEnumMember(ctx *EnumMemberContext) interface{}
+
 	// Visit a parse tree produced by PromiseParser#funcDecl.
 	VisitFuncDecl(ctx *FuncDeclContext) interface{}
 

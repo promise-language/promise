@@ -33,7 +33,11 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 		// Struct return: use sret pattern (return void, first param is pointer to result).
 		// This matches C ABI on ARM64 where large structs are returned via pointer.
 		// Container types (Vector, Channel, string) return i8* directly — no sret.
+		// Failable externs always use sret for the {i1, value, i8*} result struct.
 		hasSret := ext.ResultType != nil && !isOpaqueContainerType(ext.ResultType)
+		if ext.IsFailable {
+			hasSret = true // failable result {i1, ..., i8*} always via sret
+		}
 
 		// Deduplicate by C name — multiple Promise externs may map to the same C function
 		if fn, ok := cFuncs[ext.CName]; ok {
@@ -71,7 +75,7 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 		}
 
 		retType := irtypes.Type(irtypes.Void)
-		if ext.ResultType != nil && isOpaqueContainerType(ext.ResultType) {
+		if !ext.IsFailable && ext.ResultType != nil && isOpaqueContainerType(ext.ResultType) {
 			retType = irtypes.I8Ptr
 		}
 		fn := c.module.NewFunc(ext.CName, retType, params...)
@@ -85,14 +89,34 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 // genExternCall generates an extern function call with ABI coercion.
 // Struct params are passed by pointer and struct returns use sret pattern,
 // matching C ABI on ARM64 where large structs are passed/returned indirectly.
+// Failable externs use sret for the {i1, value, i8*} result struct and return
+// the failable result directly — the caller handles error checking via genErrorHandlerExpr.
 func (c *Compiler) genExternCall(ext *ExternFunc, argVals []value.Value, argTypes []types.Type) value.Value {
 	var callArgs []value.Value
 
-	// sret: allocate space for the return struct, pass pointer as first arg
+	// sret: allocate space for the return struct, pass pointer as first arg.
+	// Failable externs use sret for the failable result type {i1, T, i8*}.
+	// Optional externs use sret for the optional type {i1, T}.
 	var sretAlloca *ir.InstAlloca
+	var failResultType *irtypes.StructType
+	var optResultType irtypes.Type
 	if ext.HasSret {
-		layout := c.lookupLayout(ext.ResultType)
-		sretAlloca = c.createEntryAlloca(layout.Value.LLVMType)
+		if ext.IsFailable {
+			// Failable: sret holds {i1, internal_type, i8*} — same as regular failable functions
+			var innerType irtypes.Type = irtypes.Void
+			if ext.ResultType != nil {
+				innerType = c.resolveType(ext.ResultType)
+			}
+			failResultType = computeResultType(innerType)
+			sretAlloca = c.createEntryAlloca(failResultType)
+		} else if _, isOpt := ext.ResultType.(*types.Optional); isOpt {
+			// Optional: sret holds {i1, T} — bridge writes internal-form optional directly
+			optResultType = c.resolveType(ext.ResultType)
+			sretAlloca = c.createEntryAlloca(optResultType)
+		} else {
+			layout := c.lookupLayout(ext.ResultType)
+			sretAlloca = c.createEntryAlloca(layout.Value.LLVMType)
+		}
 		sretPtr := c.block.NewBitCast(sretAlloca, irtypes.I8Ptr)
 		callArgs = append(callArgs, sretPtr)
 	}
@@ -123,12 +147,24 @@ func (c *Compiler) genExternCall(ext *ExternFunc, argVals []value.Value, argType
 		callArgs = append(callArgs, c.block.NewBitCast(alloca, irtypes.I8Ptr))
 	}
 
-	// Container return types return i8* directly — no sret
-	if ext.ResultType != nil && isOpaqueContainerType(ext.ResultType) {
+	// Container return types return i8* directly — no sret (non-failable only)
+	if !ext.IsFailable && ext.ResultType != nil && isOpaqueContainerType(ext.ResultType) {
 		return c.block.NewCall(ext.IRFunc, callArgs...)
 	}
 
 	c.block.NewCall(ext.IRFunc, callArgs...)
+
+	// Failable: load the {i1, T, i8*} result and return directly.
+	// The bridge writes internal-form values, so no value struct unpacking needed.
+	if ext.IsFailable {
+		return c.block.NewLoad(failResultType, sretAlloca)
+	}
+
+	// Optional: load the {i1, T} result and return directly.
+	// The bridge writes internal-form optional values, so no value struct unpacking needed.
+	if optResultType != nil {
+		return c.block.NewLoad(optResultType, sretAlloca)
+	}
 
 	// sret: load result from the alloca and unpack to internal representation
 	if ext.HasSret {

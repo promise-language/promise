@@ -814,3 +814,44 @@ func (p *PosixPAL) EmitDirClose(module *ir.Module) *ir.Func {
 	entry.NewRet(nil)
 	return fn
 }
+
+// EmitGetEnv declares libc @getenv and defines @pal_getenv.
+// Signature: @pal_getenv(i8* name) → i8* (value or null)
+// Returns a pointer to the environment value string, or null if not found.
+// The returned pointer refers to the process environment — caller must NOT free it.
+func (p *PosixPAL) EmitGetEnv(module *ir.Module) *ir.Func {
+	// declare i8* @getenv(i8* name) nounwind
+	getenvFn := module.NewFunc("getenv", irtypes.I8Ptr,
+		ir.NewParam("name", irtypes.I8Ptr))
+	getenvFn.FuncAttrs = append(getenvFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	// define i8* @pal_getenv(i8* %name) nounwind
+	fn := module.NewFunc("pal_getenv", irtypes.I8Ptr,
+		ir.NewParam("name", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	result := entry.NewCall(getenvFn, fn.Params[0])
+	entry.NewRet(result)
+	return fn
+}
+
+// EmitGetCwd declares libc @getcwd and defines @pal_getcwd.
+// Signature: @pal_getcwd(i8* buf, i64 len) → i8* (buf or null)
+// On success returns buf filled with the cwd path. On failure returns null and sets errno.
+func (p *PosixPAL) EmitGetCwd(module *ir.Module) *ir.Func {
+	// declare i8* @getcwd(i8* buf, i64 size) nounwind
+	getcwdFn := module.NewFunc("getcwd", irtypes.I8Ptr,
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("size", irtypes.I64))
+	getcwdFn.FuncAttrs = append(getcwdFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	// define i8* @pal_getcwd(i8* %buf, i64 %len) nounwind
+	fn := module.NewFunc("pal_getcwd", irtypes.I8Ptr,
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	result := entry.NewCall(getcwdFn, fn.Params[0], fn.Params[1])
+	entry.NewRet(result)
+	return fn
+}

@@ -1,0 +1,37 @@
+// Tests for os module: environment variables, working directory, exit.
+test_get_environment_variable_path() `test(exclude: "wasm32") {
+  string? path = get_environment_variable("PATH");
+  assert(path is present, "PATH should be present");
+}
+
+test_get_environment_variable_home() `test(exclude: "wasm32") {
+  string? home = get_environment_variable("HOME");
+  assert(home is present, "HOME should be present");
+  if h := home {
+    assert(h.len > 0, "HOME should be non-empty");
+  }
+}
+
+test_get_environment_variable_absent() `test(exclude: "wasm32") {
+  string? val = get_environment_variable("PROMISE_NONEXISTENT_VAR_12345");
+  assert(val is absent, "absent variable returns none");
+}
+
+test_get_environment_variable_unwrap() `test(exclude: "wasm32") {
+  string? path = get_environment_variable("PATH");
+  if p := path {
+    assert(p.len > 0, "PATH value should be non-empty");
+  } else {
+    assert(false, "PATH should be present");
+  }
+}
+
+test_get_working_directory() `test(exclude: "wasm32") {
+  string cwd = get_working_directory()!;
+  assert(cwd.len > 0, "working directory should be non-empty");
+}
+
+test_get_working_directory_absolute() `test(exclude: "wasm32") {
+  string cwd = get_working_directory()!;
+  assert(cwd.starts_with("/"), "working directory should be absolute path");
+}

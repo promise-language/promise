@@ -930,3 +930,40 @@ func (p *WindowsPAL) EmitDirClose(module *ir.Module) *ir.Func {
 	entry.NewRet(nil)
 	return fn
 }
+
+// EmitGetEnv declares UCRT @getenv and defines @pal_getenv.
+// Signature: @pal_getenv(i8* name) → i8* (value or null)
+func (p *WindowsPAL) EmitGetEnv(module *ir.Module) *ir.Func {
+	getenvFn := module.NewFunc("getenv", irtypes.I8Ptr,
+		ir.NewParam("name", irtypes.I8Ptr))
+	getenvFn.FuncAttrs = append(getenvFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_getenv", irtypes.I8Ptr,
+		ir.NewParam("name", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	result := entry.NewCall(getenvFn, fn.Params[0])
+	entry.NewRet(result)
+	return fn
+}
+
+// EmitGetCwd declares UCRT @_getcwd and defines @pal_getcwd.
+// Signature: @pal_getcwd(i8* buf, i64 len) → i8* (buf or null)
+func (p *WindowsPAL) EmitGetCwd(module *ir.Module) *ir.Func {
+	// Windows _getcwd takes (char* buf, int maxlen) — i32 for length
+	getcwdFn := module.NewFunc("_getcwd", irtypes.I8Ptr,
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("maxlen", irtypes.I32))
+	getcwdFn.FuncAttrs = append(getcwdFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_getcwd", irtypes.I8Ptr,
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	// Truncate i64 len to i32 for Windows API
+	lenI32 := entry.NewTrunc(fn.Params[1], irtypes.I32)
+	result := entry.NewCall(getcwdFn, fn.Params[0], lenI32)
+	entry.NewRet(result)
+	return fn
+}

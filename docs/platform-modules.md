@@ -692,29 +692,38 @@ to the browser event loop, and JS callbacks re-enqueue goroutines when IO comple
 
 ## 8. `modules/os` — Operating System Interface
 
-**Status**: Placeholder file (`os.pr` with comment only). Implement from scratch.
+**Status**: Core implemented (`get_environment_variable`, `get_working_directory`, `exit_process`).
+Remaining: `args`, `exec`.
 
 Applying §6 principles: `args` is a getter candidate (read-once at startup, effectively readonly).
-`exit` and `exec` stay as functions (they perform actions). `get_env` and `get_cwd` stay as
-functions — the `()` signals that something is read from the OS.
+`exit_process` and `exec` stay as functions (they perform actions). `get_environment_variable` and
+`get_working_directory` stay as functions — the `()` signals that something is read from the OS.
+
+Note: `exit_process` instead of `exit` because the bare name collides with libc's `@exit` symbol
+when the module is compiled inline (e.g., module tests). The qualified form `os.exit_process(code)`
+is clear enough.
 
 ```promise
-type OsError is error `public `doc("An operating system error not related to file I/O.") {
+type OsError is error `public `doc("An operating system error.") {
     int code;
-    message() string `native;
 }
 
-`doc("Returns the value of environment variable `name`. Returns absent if not set.")
-get_env(string name) string? `public;
+get_environment_variable(string name) string? `public
+    `doc("Returns the value of the named environment variable.
+          Returns none if the variable is not defined.
+          An empty string is returned when the variable is set but empty.");
 
-`doc("Returns the current working directory.")
-get_cwd() string! `public;
+get_working_directory() string! `public
+    `doc("Returns the absolute path of the current working directory.
+          Raises an error if the OS call fails.");
 
-`doc("Returns the command-line arguments (index 0 = program name).")
+exit_process(int code) `public
+    `doc("Terminates the process immediately with the given exit code.
+          Does not return. Does not run destructors or cleanup.");
+
+// --- Planned ---
+
 args() string[] `public;     // getter candidate once module-level getters land
-
-`doc("Terminates the process immediately with the given exit code.")
-exit(int code) `public;
 
 type ProcessResult `public `doc("The result of a subprocess execution.") {
     int exit_code;
@@ -722,18 +731,32 @@ type ProcessResult `public `doc("The result of a subprocess execution.") {
     string stderr;
 }
 
-`doc("Runs a program, captures stdout and stderr, and blocks until it exits.")
 exec(string program, string[] args) ProcessResult! `public;
 ```
+
+**Implementation notes**:
+
+The first three functions use the **extern bridge** pattern: Promise declares
+`_os_func() T \`extern("promise_os_func");` and codegen provides the LLVM IR body in
+`os_bridges.go`, bridging Promise types ↔ raw PAL syscall wrappers. Two reusable bridge
+infrastructure patterns were introduced:
+
+- **Failable extern bridges** (`failable_bridge.go`): Bridge writes `{i1, T, i8*}` result
+  struct matching regular failable functions. `genExternCall` loads the result directly.
+  Used by `get_working_directory`.
+- **Optional extern bridges**: Bridge writes `{i1, T}` optional struct. `genExternCall`
+  detects `*types.Optional` return types and loads directly. Used by `get_environment_variable`.
+- **Error construction** (`constructErrorFromCStr`/`constructErrorFromGlobalStr`): Allocates
+  error instances with RTTI and message fields in LLVM IR, for use in bridge error paths.
 
 **`args()` implementation**: captured in the main prologue. Codegen emits `@__promise_args_data`
 (a `string[]`) from `argc`/`argv` before user code runs.
 
-**PAL additions**:
+**PAL functions** (POSIX/Windows/WASM):
 ```
 pal_getenv(i8* name) i8*               // pointer to value or null
 pal_getcwd(i8* buf, i64 len) i8*       // fills buf, returns pointer or null on error
-pal_exec_wait(i8** argv) {i32, i8*, i8*}  // captures stdout/stderr as strings
+pal_exec_wait(i8** argv) {i32, i8*, i8*}  // captures stdout/stderr as strings (planned)
 ```
 
 ---
@@ -921,7 +944,8 @@ First real use of `` `target `` in production code. Platform constants consolida
 ### Phase E — OS and process
 
 14. **Args capture in `main` prologue** — emit `@__promise_args_data` global from `argc`/`argv`
-15. **`modules/os`** — `get_env`, `get_cwd`, `args`, `exit`, then `exec`
+15. ~~**`modules/os` core**~~ — **Done.** `get_environment_variable` (string?), `get_working_directory` (string!), `exit_process`. Failable and optional extern bridge infrastructure. PAL getenv/getcwd for POSIX/Windows/WASM. 6 tests (excluded on WASM).
+16. **`modules/os` remaining** — `args`, `exec`
 
 ### Phase F — calendar time
 

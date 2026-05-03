@@ -80,6 +80,12 @@ type PAL interface {
 	// EmitErrno defines @pal_errno() → i32
 	EmitErrno(module *ir.Module) *ir.Func
 
+	// OS / Environment primitives
+	// EmitGetEnv defines @pal_getenv(i8* name) → i8* (value or null)
+	EmitGetEnv(module *ir.Module) *ir.Func
+	// EmitGetCwd defines @pal_getcwd(i8* buf, i64 len) → i8* (buf or null)
+	EmitGetCwd(module *ir.Module) *ir.Func
+
 	// Directory listing primitives (Phase D)
 	// EmitDirOpen defines @pal_dir_open(i8* path) → i8* (DIR*/handle or null)
 	EmitDirOpen(module *ir.Module) *ir.Func
@@ -477,5 +483,28 @@ func emitStubDirClose(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	entry.NewRet(nil)
+	return fn
+}
+
+// --- Stub OS / Environment implementations (used by WASM PAL) ---
+
+// emitStubGetEnv returns null (variable not found).
+func emitStubGetEnv(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_getenv", irtypes.I8Ptr,
+		ir.NewParam("name", irtypes.I8Ptr))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewNull(irtypes.I8Ptr))
+	return fn
+}
+
+// emitStubGetCwd returns null (no filesystem).
+func emitStubGetCwd(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_getcwd", irtypes.I8Ptr,
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewNull(irtypes.I8Ptr))
 	return fn
 }

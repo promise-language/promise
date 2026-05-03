@@ -1,4 +1,31 @@
 // os module — operating system interface.
-// Planned: args, env, exit, getenv, setenv, getcwd, hostname.
-// Requires native runtime support (syscalls).
-// Currently a placeholder — functions will be added as native OS support lands.
+// Requires: use os;
+// ── Extern PAL wrappers (codegen provides LLVM IR bodies) ────────────────────
+// Returns the value as string? — present if set, none if not defined.
+_os_get_environment_variable(string name) string? `extern("promise_os_get_env");
+
+// Returns cwd path on success, raises error on failure (failable extern).
+_os_get_working_directory() string! `extern("promise_os_get_cwd");
+
+// Terminates the process immediately.
+_os_exit(int code) `extern("promise_os_exit");
+
+// ── Error type ───────────────────────────────────────────────────────────────
+
+type OsError is error `public `doc("An operating system error.") {
+  int code;
+}
+
+// ── Public API ───────────────────────────────────────────────────────────────
+
+get_environment_variable(string name) string? `public `doc("Returns the value of the named environment variable. Returns none if the variable is not defined. An empty string is returned when the variable is set but empty.") {
+  return _os_get_environment_variable(name);
+}
+
+get_working_directory() string! `public `doc("Returns the absolute path of the current working directory. Raises an error if the OS call fails.") {
+  return _os_get_working_directory();
+}
+
+exit_process(int code) `public `doc("Terminates the process immediately with the given exit code. Does not return. Does not run destructors or cleanup.") {
+  _os_exit(code);
+}

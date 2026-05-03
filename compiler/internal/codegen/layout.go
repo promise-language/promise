@@ -79,6 +79,7 @@ type ExternFunc struct {
 	ParamTypes  []types.Type     // Promise types of each parameter
 	ResultType  types.Type       // Promise return type (nil for void)
 	HasSret     bool             // true if return uses sret pointer (large struct return)
+	IsFailable  bool             // true if the extern is failable (returns T!)
 }
 
 // CompileResult bundles the output of compilation for downstream consumers.
@@ -597,6 +598,7 @@ func collectExterns(file *ast.File, info *sema.Info) []*ExternFunc {
 			Sig:         sig,
 			ParamTypes:  paramTypes,
 			ResultType:  sig.Result(),
+			IsFailable:  sig.CanError(),
 		})
 	}
 	return externs

@@ -182,6 +182,8 @@ type Compiler struct {
 	palDirNextName  *ir.Func // @pal_dir_next_name(i8* handle) → i8*
 	palDirClose     *ir.Func // @pal_dir_close(i8* handle) → void
 	palErrno        *ir.Func // @pal_errno() → i32
+	palGetEnv       *ir.Func // @pal_getenv(i8* name) → i8* (value or null)
+	palGetCwd       *ir.Func // @pal_getcwd(i8* buf, i64 len) → i8* (buf or null)
 
 	// Scheduler globals (Phase 5c — M:N scheduler)
 	currentGGlobal     *ir.Global // @__promise_current_g (TLS, i8*)
@@ -490,6 +492,7 @@ func compile(file *ast.File, info *sema.Info, target string, cachedInstances map
 	c.defineMathBodies()
 	c.defineF64ToStringBridge() // bridge promise_f64_to_string → Promise _f64_to_str
 	c.defineFileIOBodies()      // bridge io module externs → PAL file I/O functions
+	c.defineOSBodies()          // bridge os module externs → PAL OS functions
 
 	c.defineTypeMethods(file)
 	c.defineMonoMethods(file, monoInstances)
@@ -952,6 +955,8 @@ func (c *Compiler) declareIntrinsics() {
 	c.palDirOpen = p.EmitDirOpen(c.module)
 	c.palDirNextName = p.EmitDirNextName(c.module)
 	c.palDirClose = p.EmitDirClose(c.module)
+	c.palGetEnv = p.EmitGetEnv(c.module)
+	c.palGetCwd = p.EmitGetCwd(c.module)
 
 	// strlen — needed by definePanicBody to get C string length.
 	// May already be declared by PAL (e.g., Windows EmitDirOpen), so check first.

@@ -1452,7 +1452,6 @@ func TestFileSeekAllPlatforms(t *testing.T) {
 func TestFileStatSizePosix(t *testing.T) {
 	module := ir.NewModule()
 	p := &PosixPAL{}
-	// StatSize needs open, close, lseek already declared
 	p.EmitFileOpen(module)
 	p.EmitFileClose(module)
 	p.EmitFileSeek(module)
@@ -1488,6 +1487,39 @@ func TestFileStatSizeWindows(t *testing.T) {
 	assertContains(t, out, "call i32 @_open(", "calls _open")
 	assertContains(t, out, "call i64 @_lseeki64(", "calls _lseeki64")
 	assertContains(t, out, "call i32 @_close(", "calls _close")
+}
+
+// B0026: EmitFileStatSize must work without prior EmitFileOpen/Close/Seek.
+func TestFileStatSizeOrderIndependent(t *testing.T) {
+	t.Run("POSIX", func(t *testing.T) {
+		module := ir.NewModule()
+		p := &PosixPAL{}
+		// Only EmitErrno needed (for errno_location) — no file open/close/seek
+		p.EmitErrno(module)
+		fn := p.EmitFileStatSize(module)
+		out := module.String()
+
+		if fn.Name() != "pal_file_stat_size" {
+			t.Errorf("expected pal_file_stat_size, got %s", fn.Name())
+		}
+		assertContains(t, out, "@open(", "declares open via getOrDeclareFunc")
+		assertContains(t, out, "@close(", "declares close via getOrDeclareFunc")
+		assertContains(t, out, "@lseek(", "declares lseek via getOrDeclareFunc")
+	})
+	t.Run("Windows", func(t *testing.T) {
+		module := ir.NewModule()
+		p := &WindowsPAL{}
+		p.EmitErrno(module)
+		fn := p.EmitFileStatSize(module)
+		out := module.String()
+
+		if fn.Name() != "pal_file_stat_size" {
+			t.Errorf("expected pal_file_stat_size, got %s", fn.Name())
+		}
+		assertContains(t, out, "@_open(", "declares _open via getOrDeclareFunc")
+		assertContains(t, out, "@_lseeki64(", "declares _lseeki64 via getOrDeclareFunc")
+		assertContains(t, out, "@_close(", "declares _close via getOrDeclareFunc")
+	})
 }
 
 func TestFileRemoveAllPlatforms(t *testing.T) {

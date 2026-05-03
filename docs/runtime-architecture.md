@@ -138,16 +138,16 @@ The key insight: **all remaining C functions reduce to just two primitives** —
 
 // PAL defines platform-specific function emitters.
 // Each method emits an LLVM IR function definition into the module.
-// Currently 32 methods: write, exit, alloc, free, realloc, 11 threading/sync,
-// num_cpus, and 12 file I/O (open, read, write, close, seek, stat_size,
-// remove, exists, mkdir, dir_remove, dir_exists, errno).
+// Currently 40 methods: write, exit, alloc, free, realloc, 11 threading/sync,
+// num_cpus, 12 file I/O, 5 OS/env, 3 process execution, 3 dir listing.
 type PAL interface {
     EmitWrite(module *ir.Module) *ir.Func     // pal_write(fd, buf, len) → i64
     EmitExit(module *ir.Module) *ir.Func      // pal_exit(code) → void [noreturn]
     EmitAlloc(module *ir.Module) *ir.Func     // pal_alloc(size) → i8*
     EmitFree(module *ir.Module) *ir.Func      // pal_free(ptr) → void
     EmitRealloc(module *ir.Module) *ir.Func   // pal_realloc(ptr, size) → i8*
-    // ... threading (11 methods), num_cpus, file I/O (12 methods)
+    // ... threading (11), num_cpus, file I/O (12), OS/env (5),
+    //     process (3: spawn, read_pipe, wait_pid), dir listing (3)
 }
 
 // ForTarget returns the PAL implementation for the given target triple.
@@ -333,7 +333,7 @@ The generated `.ll` file contains everything: user code, intrinsic functions, PA
 ```
 compiler/internal/codegen/
 ├── pal/
-│   ├── pal.go          # PAL interface + ForTarget() + shared stubs
+│   ├── pal.go          # PAL interface + ForTarget() + shared helpers (getOrDeclareFunc, stubs)
 │   ├── posix.go        # PosixPAL: libc wrappers (macOS + Linux)
 │   ├── windows.go      # WindowsPAL: Win32 API + UCRT wrappers
 │   ├── wasm.go         # WasmPAL: WASI imports + stubs

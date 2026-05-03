@@ -570,9 +570,16 @@ func (p *WindowsPAL) EmitFileSeek(module *ir.Module) *ir.Func {
 
 // EmitFileStatSize defines @pal_file_stat_size using _open+_lseeki64+_close.
 func (p *WindowsPAL) EmitFileStatSize(module *ir.Module) *ir.Func {
-	ucrtOpen := lookupFunc(module, "_open")
-	ucrtLseek := lookupFunc(module, "_lseeki64")
-	ucrtClose := lookupFunc(module, "_close")
+	ucrtOpen := getOrDeclareFunc(module, "_open", irtypes.I32,
+		ir.NewParam("filename", irtypes.I8Ptr),
+		ir.NewParam("oflag", irtypes.I32),
+		ir.NewParam("pmode", irtypes.I32))
+	ucrtLseek := getOrDeclareFunc(module, "_lseeki64", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("offset", irtypes.I64),
+		ir.NewParam("origin", irtypes.I32))
+	ucrtClose := getOrDeclareFunc(module, "_close", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
 
 	fn := module.NewFunc("pal_file_stat_size", irtypes.I64,
 		ir.NewParam("path", irtypes.I8Ptr))

@@ -554,9 +554,16 @@ func (p *PosixPAL) EmitFileSeek(module *ir.Module) *ir.Func {
 // EmitFileStatSize defines @pal_file_stat_size using open+lseek+close.
 // Avoids struct stat layout differences between macOS and Linux.
 func (p *PosixPAL) EmitFileStatSize(module *ir.Module) *ir.Func {
-	openFn := lookupFunc(module, "open")
-	closeFn := lookupFunc(module, "close")
-	lseekFn := lookupFunc(module, "lseek")
+	openFn := getOrDeclareFunc(module, "open", irtypes.I32,
+		ir.NewParam("path", irtypes.I8Ptr),
+		ir.NewParam("oflag", irtypes.I32))
+	openFn.Sig.Variadic = true // open(path, oflag, ...) — mode is variadic
+	closeFn := getOrDeclareFunc(module, "close", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
+	lseekFn := getOrDeclareFunc(module, "lseek", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("offset", irtypes.I64),
+		ir.NewParam("whence", irtypes.I32))
 
 	fn := module.NewFunc("pal_file_stat_size", irtypes.I64,
 		ir.NewParam("path", irtypes.I8Ptr))

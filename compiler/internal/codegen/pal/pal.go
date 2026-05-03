@@ -141,6 +141,18 @@ func lookupFunc(module *ir.Module, name string) *ir.Func {
 	return nil
 }
 
+// getOrDeclareFunc looks up an existing function by name, or declares it if not found.
+// This makes Emit* functions order-independent — they no longer panic if a dependency
+// hasn't been emitted yet. The function is declared (no body) with the given signature.
+func getOrDeclareFunc(module *ir.Module, name string, retType irtypes.Type, params ...*ir.Param) *ir.Func {
+	if fn := lookupFunc(module, name); fn != nil {
+		return fn
+	}
+	fn := module.NewFunc(name, retType, params...)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	return fn
+}
+
 // emitLibcAlloc declares libc @malloc and defines @pal_alloc as a wrapper.
 // Shared by all PALs that use libc for allocation.
 func emitLibcAlloc(module *ir.Module) *ir.Func {

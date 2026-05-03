@@ -412,7 +412,7 @@ x := s.next[int]()!;
 
 ## 3. PAL Extensions
 
-The PAL (Platform Abstraction Layer) isolates all OS interaction. Currently 32 methods covering memory, threads, mutexes, condvars, CPU count, and file I/O. New methods needed:
+The PAL (Platform Abstraction Layer) isolates all OS interaction. Currently 40 methods covering memory (5), threads/sync (11), CPU count (1), file I/O (12), OS/environment (5), process execution (3), and directory listing (3). New methods needed:
 
 ### 3.1 File I/O — Done
 
@@ -435,11 +435,16 @@ EmitErrno(module *ir.Module) *ir.Func         // → i32 (thread-local errno)
 
 `EmitFileOpen` takes a mode enum (0=rw, 1=ro, 2=create-trunc, 3=append) mapped to platform O_* flags internally. `EmitFileStatSize` uses open+lseek(SEEK_END)+close to avoid `struct stat` layout portability issues. POSIX uses libc wrappers; Windows uses UCRT (`_open`, `_read`, etc.) with `_O_BINARY`; WASM stubs return error.
 
-### 3.2 OS / Environment
+### 3.2 OS / Environment — Done
+
+5 PAL methods:
 
 ```go
 EmitGetEnv(module *ir.Module) *ir.Func      // i8* name → i8* (value or null)
 EmitGetCwd(module *ir.Module) *ir.Func      // i8* buf, i64 len → i8* (path or null)
+EmitSetEnv(module *ir.Module) *ir.Func      // i8* name, i8* value → i32 (0 or -1)
+EmitUnsetEnv(module *ir.Module) *ir.Func    // i8* name → i32 (0 or -1)
+EmitChdir(module *ir.Module) *ir.Func       // i8* path → i32 (0 or -1)
 ```
 
 Command-line arguments: captured in `main()` prologue from `argc`/`argv` and stored in a global `string[]`. Exposed via `os.arguments` (module-level getter).
@@ -456,13 +461,17 @@ Note: `promise_nanotime` already exists as a hardcoded function in `io.go:define
 
 ### 3.4 Process Execution — DONE
 
+3 PAL methods (decomposed for concurrent pipe reads via goroutines):
+
 ```go
-EmitExecute(module *ir.Module) *ir.Func
-// i8* program, i8** argv, i8** out_stdout, i64* out_stdout_len,
-// i8** out_stderr, i64* out_stderr_len → i32 (exit code or -1)
-// POSIX: fork + execvp + pipe + read + waitpid (EINTR retry)
-// Windows/WASM: stub returning -1
+EmitSpawn(module *ir.Module) *ir.Func       // i8* program, i8** argv, i32* out_stdout_fd, i32* out_stderr_fd → i32 (pid or -1)
+EmitReadPipe(module *ir.Module) *ir.Func    // i32 fd, i8** out_buf, i64* out_len → void (reads to EOF, closes fd)
+EmitWaitPid(module *ir.Module) *ir.Func     // i32 pid → i32 (exit code 0-255, or -1; retries EINTR)
+// POSIX: fork + execvp + pipe (spawn), read loop + close (read_pipe), waitpid (wait_pid)
+// Windows/WASM: stubs returning -1
 ```
+
+`execute()` in `modules/os/os.pr` reads stdout and stderr concurrently using `go _read_pipe(stderr_fd)` while the main goroutine reads stdout. This prevents deadlock when a child writes >64KB to stderr.
 
 ### 3.5 Math (No PAL Needed)
 
@@ -498,11 +507,13 @@ EmitMemcpy(module *ir.Module) *ir.Func      // i8* dst, i8* src, i64 len → voi
 | Category | New Methods | POSIX Backing |
 |----------|-------------|---------------|
 | File I/O | 12 (done) | `open`, `read`, `write`, `close`, `seek`, `stat_size`, `remove`, `exists`, `mkdir`, `dir_remove`, `dir_exists`, `errno` |
-| OS | 3 (done) | `getenv`, `getcwd`, `execute` (`fork`+`execvp`+`pipe`+`read`+`waitpid`) |
+| OS / Env | 5 (done) | `getenv`, `getcwd`, `setenv`, `unsetenv`, `chdir` |
+| Process | 3 (done) | `spawn` (`fork`+`execvp`+`pipe`), `read_pipe` (read+close), `wait_pid` (`waitpid`) |
+| Dir Listing | 3 (done) | `dir_open` (`opendir`), `dir_next_name` (`readdir`), `dir_close` (`closedir`) |
 | Time | 3 | `clock_gettime` (×2), `nanosleep` |
 | Math | 0 | LLVM intrinsics |
 | String | 1 | `memcpy` |
-| **Total** | **15** | |
+| **Total** | **27** (23 done) | |
 
 ---
 

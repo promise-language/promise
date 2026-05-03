@@ -1,119 +1,127 @@
 // Tests for function type parsing and semantics.
 // Covers grammar fixes: funcTypeReturn rule, zero-arg function types,
 // suffix operators on return position.
-
 // --- Zero-arg function type returning int ---
 test_zero_arg_fn_type() `test {
-    () -> int getter = || -> int { return 42; };
-    assert(getter() == 42, "zero-arg fn type returns 42");
+  () -> int getter = || -> int {
+    return 42;
+  };
+  assert(getter() == 42, "zero-arg fn type returns 42");
 }
 
 // --- Zero-arg function type returning optional ---
 test_fn_type_return_optional() `test {
-    () -> int? maybe = || -> int? { return 99; };
-    if v := maybe() {
-        assert(v == 99, "optional return is 99");
-    } else {
-        assert(false, "should not be none");
-    }
+  () -> int? maybe = || -> int? {
+    return 99;
+  };
+  if v := maybe() {
+    assert(v == 99, "optional return is 99");
+  } else {
+    assert(false, "should not be none");
+  }
 }
 
 // --- Function type returning optional none ---
 test_fn_type_return_optional_none() `test {
-    () -> int? empty = || -> int? { return none; };
-    if _ := empty() {
-        assert(false, "should be none");
-    }
+  () -> int? empty = || -> int? {
+    return none;
+  };
+  if _ := empty() {
+    assert(false, "should be none");
+  }
 }
 
 // --- Function type returning vector ---
 test_fn_type_return_vector() `test {
-    () -> int[] maker = || -> int[] { return [1, 2, 3]; };
-    int[] v = maker();
-    assert(v.len == 3, "vector has 3 elements");
-    assert(v[0] == 1, "first is 1");
-    assert(v[2] == 3, "third is 3");
+  () -> int[] maker = || -> int[] {
+    return[1, 2, 3];
+  };
+  int[] v = maker();
+  assert(v.len == 3, "vector has 3 elements");
+  assert(v[0] == 1, "first is 1");
+  assert(v[2] == 3, "third is 3");
 }
 
 // --- Single-param function type ---
 test_single_param_fn_type() `test {
-    (int) -> int doubler = |int x| -> x * 2;
-    assert(doubler(5) == 10, "5*2=10");
-    assert(doubler(0) == 0, "0*2=0");
+  (int) -> int doubler = |int x| -> x * 2;
+  assert(doubler(5) == 10, "5*2=10");
+  assert(doubler(0) == 0, "0*2=0");
 }
 
 // --- Multi-param function type ---
 test_multi_param_fn_type() `test {
-    (int, int) -> int adder = |int a, int b| -> a + b;
-    assert(adder(3, 4) == 7, "3+4=7");
-    assert(adder(-1, 1) == 0, "-1+1=0");
+  (int, int) -> int adder = |int a, int b| -> a + b;
+  assert(adder(3, 4) == 7, "3+4=7");
+  assert(adder(-1, 1) == 0, "-1+1=0");
 }
 
 // --- Function type returning bool ---
 test_fn_type_return_bool() `test {
-    (int) -> bool is_positive = |int x| -> x > 0;
-    assert(is_positive(5) == true, "5 is positive");
-    assert(is_positive(-1) == false, "-1 not positive");
-    assert(is_positive(0) == false, "0 not positive");
+  (int) -> bool is_positive = |int x| -> x > 0;
+  assert(is_positive(5) == true, "5 is positive");
+  assert(is_positive(-1) == false, "-1 not positive");
+  assert(is_positive(0) == false, "0 not positive");
 }
 
 // --- Function type returning string ---
 test_fn_type_return_string() `test {
-    (int) -> string formatter = |int x| -> x.to_string();
-    assert(formatter(42) == "42", "formats 42");
-    assert(formatter(0) == "0", "formats 0");
+  (int) -> string formatter = |int x| -> x.to_string();
+  assert(formatter(42) == "42", "formats 42");
+  assert(formatter(0) == "0", "formats 0");
 }
 
 // --- Higher-order: function taking function param ---
 test_fn_taking_fn_param() `test {
-    int result = apply_fn(|int x| -> x + 10, 5);
-    assert(result == 15, "5+10=15");
+  int result = apply_fn(|int x| -> x + 10, 5);
+  assert(result == 15, "5+10=15");
 }
 
 apply_fn((int) -> int f, int x) int {
-    return f(x);
+  return f(x);
 }
 
 // --- Higher-order: function returning function ---
 test_fn_returning_fn() `test {
-    (int) -> int add5 = make_adder(5);
-    assert(add5(10) == 15, "10+5=15");
-    assert(add5(0) == 5, "0+5=5");
-    (int) -> int add100 = make_adder(100);
-    assert(add100(1) == 101, "1+100=101");
+  (int) -> int add5 = make_adder(5);
+  assert(add5(10) == 15, "10+5=15");
+  assert(add5(0) == 5, "0+5=5");
+  (int) -> int add100 = make_adder(100);
+  assert(add100(1) == 101, "1+100=101");
 }
 
-make_adder(int n) (int) -> int {
-    return move |int x| -> n + x;
+make_adder(int n)(int) -> int {
+  return move |int x| -> n + x;
 }
 
 // --- Apply twice: function type used in composition ---
 test_apply_twice() `test {
-    int result = apply_twice(|int x| -> x * 2, 3);
-    assert(result == 12, "(3*2)*2=12");
+  int result = apply_twice(|int x| -> x * 2, 3);
+  assert(result == 12, "(3*2)*2=12");
 }
 
 apply_twice((int) -> int f, int x) int {
-    return f(f(x));
+  return f(f(x));
 }
 
 // --- Function type stored and called later ---
 test_fn_stored_in_variable() `test {
-    (int) -> int fn = |int x| -> x * x;
-    int a = fn(3);
-    int b = fn(4);
-    int c = fn(5);
-    assert(a == 9, "3^2=9");
-    assert(b == 16, "4^2=16");
-    assert(c == 25, "5^2=25");
+  (int) -> int fn = |int x| -> x * x;
+  int a = fn(3);
+  int b = fn(4);
+  int c = fn(5);
+  assert(a == 9, "3^2=9");
+  assert(b == 16, "4^2=16");
+  assert(c == 25, "5^2=25");
 }
 
 // --- Function type with captured values ---
 test_fn_with_capture() `test {
-    int base = 100;
-    (int) -> int offset = move |int x| -> base + x;
-    assert(offset(1) == 101, "100+1=101");
-    assert(offset(50) == 150, "100+50=150");
+  int base = 100;
+  (int) -> int offset = move |int x| -> base + x;
+  assert(offset(1) == 101, "100+1=101");
+  assert(offset(50) == 150, "100+50=150");
 }
 
-main() {}
+main() {
+}

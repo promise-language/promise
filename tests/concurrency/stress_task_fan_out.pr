@@ -1,7 +1,8 @@
 // Stress test: fan-out of 200 task goroutines via go-call, all awaited.
 // Tests done_waiters linked list under heavy concurrent completion.
-
-compute(int x) int { return x * 2; }
+compute(int x) int {
+  return x * 2;
+}
 
 main() `test(expected: "39800") {
   int n = 200;

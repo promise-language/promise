@@ -1,22 +1,22 @@
 type Vec2 {
-    int x `value;
-    int y `value;
+  int x `value;
+  int y `value;
 
-    +(Vec2 other) Vec2 {
-        return Vec2(x: this.x + other.x, y: this.y + other.y);
-    }
+  +(Vec2 other) Vec2 {
+    return Vec2(x: this.x + other.x, y: this.y + other.y);
+  }
 
-    -(Vec2 other) Vec2 {
-        return Vec2(x: this.x - other.x, y: this.y - other.y);
-    }
+  - (Vec2 other) Vec2 {
+    return Vec2(x: this.x - other.x, y: this.y - other.y);
+  }
 
-    ==(Vec2 other) bool {
-        return this.x == other.x && this.y == other.y;
-    }
+  == (Vec2 other) bool {
+    return this.x == other.x && this.y == other.y;
+  }
 
-    !=(Vec2 other) bool {
-        return !(this == other);
-    }
+  != (Vec2 other) bool {
+    return !(this == other);
+  }
 }
 
 main() `test(expected: """4
@@ -26,19 +26,31 @@ main() `test(expected: """4
 eq
 neq
 diff""") {
-    Vec2 a = Vec2(x: 1, y: 2);
-    Vec2 b = Vec2(x: 3, y: 4);
+  Vec2 a = Vec2(x: 1, y: 2);
+  Vec2 b = Vec2(x: 3, y: 4);
 
-    Vec2 c = a + b;
-    print_int(c.x);
-    print_int(c.y);
+  Vec2 c = a + b;
+  print_int(c.x);
+  print_int(c.y);
 
-    Vec2 d = b - a;
-    print_int(d.x);
-    print_int(d.y);
+  Vec2 d = b - a;
+  print_int(d.x);
+  print_int(d.y);
 
-    Vec2 e = Vec2(x: 1, y: 2);
-    if a == e { println("eq"); } else { println("neq"); }
-    if a == b { println("eq"); } else { println("neq"); }
-    if a != b { println("diff"); } else { println("same"); }
+  Vec2 e = Vec2(x: 1, y: 2);
+  if a == e {
+    println("eq");
+  } else {
+    println("neq");
+  }
+  if a == b {
+    println("eq");
+  } else {
+    println("neq");
+  }
+  if a != b {
+    println("diff");
+  } else {
+    println("same");
+  }
 }

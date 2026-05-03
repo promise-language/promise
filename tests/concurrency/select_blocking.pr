@@ -1,5 +1,4 @@
 // Select with blocking: no channel is ready, goroutine parks and waits.
-
 main() `test(expected: "42") {
   ch1 := channel[int](capacity: 1);
   ch2 := channel[int](capacity: 1);
@@ -12,8 +11,12 @@ main() `test(expected: "42") {
   // Both channels are empty — select blocks until ch2 is ready
   select {
     v := <-ch1:
-      if val := v { print_int(0); }
+    if val := v {
+      print_int(0);
+    }
     v := <-ch2:
-      if val := v { print_int(val); }
+    if val := v {
+      print_int(val);
+    }
   }
 }

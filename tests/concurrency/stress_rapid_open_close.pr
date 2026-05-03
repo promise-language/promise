@@ -1,7 +1,6 @@
 // Stress test: rapid channel creation, send, receive, and close cycles.
 // 100 goroutines each create a channel, send a value, receive, and close.
 // Tests scheduler under rapid lifecycle churn.
-
 main() `test(expected: "100") {
   done := channel[int](capacity: 100);
 
@@ -20,7 +19,9 @@ main() `test(expected: "100") {
   int total = 0;
   for j in 0..100 {
     r := <-done;
-    if v := r { total = total + v; }
+    if v := r {
+      total = total + v;
+    }
   }
   print_int(total);
 }

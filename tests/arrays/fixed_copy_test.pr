@@ -1,20 +1,19 @@
 // Fixed-size array copy semantics
-
 main() `test(expected: """99
 1
 5
 2
 3""") {
-    // Arrays are copy types - modifying copy doesn't affect original
-    int[3] a = [1, 2, 3];
-    int[3] b = a;
-    b[0] = 99;
-    println("{b[0]}");
-    println("{a[0]}");
+  // Arrays are copy types - modifying copy doesn't affect original
+  int[3] a = [1, 2, 3];
+  int[3] b = a;
+  b[0] = 99;
+  println("{b[0]}");
+  println("{a[0]}");
 
-    // For-in with index
-    int[3] items = [5, 2, 3];
-    for i, x in items {
-        println("{x}");
-    }
+  // For-in with index
+  int[3] items = [5, 2, 3];
+  for i, x in items {
+    println("{x}");
+  }
 }

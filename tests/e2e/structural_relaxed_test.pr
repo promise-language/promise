@@ -2,212 +2,222 @@
 // - Extra optional/default params
 // - Non-failable satisfies failable
 // - Non-optional return satisfies optional return
-
 // --- Extra optional param ---
-
 type Printable `structural {
-    print() string `abstract;
+  print() string `abstract;
 }
 
 type Doc {
-    print(int? indent) string {
-        if indent is present {
-            return "doc(indent:{indent})";
-        }
-        return "doc";
+  print(int? indent) string {
+    if indent is present {
+      return "doc(indent:{indent})";
     }
+    return "doc";
+  }
 }
 
 test_extra_optional_param() `test {
-    Printable p = Doc();
-    assert(p.print() == "doc", "called through interface with none default");
+  Printable p = Doc();
+  assert(p.print() == "doc", "called through interface with none default");
 }
 
 // --- Extra defaulted param ---
 
 type Formatter `structural {
-    format() string `abstract;
+  format() string `abstract;
 }
 
 type Report {
-    format(int width = 80) string {
-        return "report(w:{width})";
-    }
+  format(int width = 80) string {
+    return "report(w:{width})";
+  }
 }
 
 test_extra_default_param() `test {
-    Formatter f = Report();
-    assert(f.format() == "report(w:80)", "called through interface with default param");
+  Formatter f = Report();
+  assert(f.format() == "report(w:80)", "called through interface with default param");
 }
 
 // --- Non-failable satisfies failable ---
 
 type Processor `structural {
-    process(int x) int! `abstract;
+  process(int x) int! `abstract;
 }
 
 type Doubler {
-    process(int x) int { return x * 2; }
+  process(int x) int {
+    return x * 2;
+  }
 }
 
 test_non_failable_satisfies_failable() `test {
-    Processor p = Doubler();
-    int result = p.process(5)!;
-    assert(result == 10, "non-failable through failable interface");
+  Processor p = Doubler();
+  int result = p.process(5)!;
+  assert(result == 10, "non-failable through failable interface");
 }
 
 // --- Non-optional return satisfies optional return ---
 
 type Finder `structural {
-    find() int? `abstract;
+  find() int? `abstract;
 }
 
 type Always42 {
-    find() int { return 42; }
+  find() int {
+    return 42;
+  }
 }
 
 test_non_optional_return() `test {
-    Finder f = Always42();
-    int? result = f.find();
-    if result is present {
-        assert(result == 42, "non-optional return wrapped as some");
-    } else {
-        assert(false, "should not be none");
-    }
+  Finder f = Always42();
+  int? result = f.find();
+  if result is present {
+    assert(result == 42, "non-optional return wrapped as some");
+  } else {
+    assert(false, "should not be none");
+  }
 }
 
 // --- Combined: extra optional param + non-failable→failable ---
 
 type Parser `structural {
-    parse(string input) int! `abstract;
+  parse(string input) int! `abstract;
 }
 
 type SimpleParser {
-    parse(string input, int? base) int {
-        if input == "hello" { return 5; }
-        return 0;
+  parse(string input, int? base) int {
+    if input == "hello" {
+      return 5;
     }
+    return 0;
+  }
 }
 
 test_combined_adapter() `test {
-    Parser p = SimpleParser();
-    int result = p.parse("hello")!;
-    assert(result == 5, "combined adapter: extra param + failable");
+  Parser p = SimpleParser();
+  int result = p.parse("hello")!;
+  assert(result == 5, "combined adapter: extra param + failable");
 }
 
 // --- Combined: extra optional param + non-optional→optional return ---
 
 type Lookup `structural {
-    get(string key) int? `abstract;
+  get(string key) int? `abstract;
 }
 
 type Dict {
-    get(string key, int? fallback) int {
-        if key == "x" { return 42; }
-        if fallback is present { return fallback; }
-        return 0;
+  get(string key, int? fallback) int {
+    if key == "x" {
+      return 42;
     }
+    if fallback is present {
+      return fallback;
+    }
+    return 0;
+  }
 }
 
 test_combined_extra_param_optional_return() `test {
-    Lookup l = Dict();
-    int? result = l.get("x");
-    if result is present {
-        assert(result == 42, "combined: extra param + optional return");
-    } else {
-        assert(false, "should not be none");
-    }
+  Lookup l = Dict();
+  int? result = l.get("x");
+  if result is present {
+    assert(result == 42, "combined: extra param + optional return");
+  } else {
+    assert(false, "should not be none");
+  }
 }
 
 // --- Direct calls with optional params still work ---
 
 test_direct_call_no_params() `test {
-    Doc d = Doc();
-    assert(d.print() == "doc", "direct call without optional param");
+  Doc d = Doc();
+  assert(d.print() == "doc", "direct call without optional param");
 }
 
 test_direct_call_with_optional_param() `test {
-    Doc d = Doc();
-    assert(d.print(indent: 4) == "doc(indent:4)", "direct call with optional param");
+  Doc d = Doc();
+  assert(d.print(indent: 4) == "doc(indent:4)", "direct call with optional param");
 }
 
 test_direct_call_default_param() `test {
-    Report r = Report();
-    assert(r.format(width: 120) == "report(w:120)", "direct call with non-default value");
+  Report r = Report();
+  assert(r.format(width: 120) == "report(w:120)", "direct call with non-default value");
 }
 
 // --- Optional param wrapping in standalone functions ---
 
 greet(string? name) string {
-    if name is present {
-        return "hello {name}";
-    }
-    return "hello world";
+  if name is present {
+    return "hello {name}";
+  }
+  return "hello world";
 }
 
 test_standalone_optional_param_with_value() `test {
-    assert(greet("alice") == "hello alice", "standalone fn: optional param with value");
+  assert(greet("alice") == "hello alice", "standalone fn: optional param with value");
 }
 
 test_standalone_optional_param_omitted() `test {
-    assert(greet() == "hello world", "standalone fn: optional param omitted");
+  assert(greet() == "hello world", "standalone fn: optional param omitted");
 }
 
 // --- Optional param wrapping in constructors ---
 
 type Config {
-    int timeout;
-    string mode;
-    new(~this, int? timeout, string mode = "fast") {
-        if timeout is present {
-            this.timeout = timeout;
-        } else {
-            this.timeout = 30;
-        }
-        this.mode = mode;
+  int timeout;
+  string mode;
+  new(~this, int? timeout, string mode = "fast") {
+    if timeout is present {
+      this.timeout = timeout;
+    } else {
+      this.timeout = 30;
     }
+    this.mode = mode;
+  }
 }
 
 test_constructor_optional_param_with_value() `test {
-    Config c = Config(timeout: 10);
-    assert(c.timeout == 10, "constructor: optional param with value");
-    assert(c.mode == "fast", "constructor: default param used");
+  Config c = Config(timeout: 10);
+  assert(c.timeout == 10, "constructor: optional param with value");
+  assert(c.mode == "fast", "constructor: default param used");
 }
 
 test_constructor_optional_param_omitted() `test {
-    Config c = Config();
-    assert(c.timeout == 30, "constructor: optional param omitted");
-    assert(c.mode == "fast", "constructor: default param used");
+  Config c = Config();
+  assert(c.timeout == 30, "constructor: optional param omitted");
+  assert(c.mode == "fast", "constructor: default param used");
 }
 
 test_constructor_all_params_provided() `test {
-    Config c = Config(timeout: 5, mode: "slow");
-    assert(c.timeout == 5, "constructor: all params provided");
-    assert(c.mode == "slow", "constructor: explicit mode");
+  Config c = Config(timeout: 5, mode: "slow");
+  assert(c.timeout == 5, "constructor: all params provided");
+  assert(c.mode == "slow", "constructor: explicit mode");
 }
 
 // --- Multiple extra params through structural interface ---
 
 type Executor `structural {
-    execute() int `abstract;
+  execute() int `abstract;
 }
 
 type Job {
-    execute(int? priority, int retries = 1) int {
-        int p = 0;
-        if priority is present { p = priority; }
-        return p + retries;
+  execute(int? priority, int retries = 1) int {
+    int p = 0;
+    if priority is present {
+      p = priority;
     }
+    return p + retries;
+  }
 }
 
 test_multiple_extra_params_through_interface() `test {
-    Executor e = Job();
-    assert(e.execute() == 1, "multiple extra params: defaults used");
+  Executor e = Job();
+  assert(e.execute() == 1, "multiple extra params: defaults used");
 }
 
 test_multiple_extra_params_direct() `test {
-    Job j = Job();
-    assert(j.execute(priority: 10, retries: 3) == 13, "multiple extra params: all provided");
-    assert(j.execute(priority: 5) == 6, "multiple extra params: partial");
-    assert(j.execute() == 1, "multiple extra params: none provided");
+  Job j = Job();
+  assert(j.execute(priority: 10, retries: 3) == 13, "multiple extra params: all provided");
+  assert(j.execute(priority: 5) == 6, "multiple extra params: partial");
+  assert(j.execute() == 1, "multiple extra params: none provided");
 }

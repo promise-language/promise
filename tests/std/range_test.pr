@@ -1,7 +1,5 @@
 // Test Range[T] generic value type: creation, iteration, field access, methods
-
 // --- Basic for-in iteration ---
-
 test_exclusive_range() `test {
   int sum = 0;
   for i in 0..5 {

@@ -1,4 +1,6 @@
-enum Color { Red, Green, Blue }
+enum Color {
+  Red, Green, Blue
+}
 
 enum Shape {
   Circle(f64 radius),

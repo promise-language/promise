@@ -1,12 +1,12 @@
 use mathlib "./mathlib";
 
 test_enum_construct() `test {
-    c := mathlib.Color.Red;
-    assert(mathlib.color_name(c) == "red", "Color.Red name");
+  c := mathlib.Color.Red;
+  assert(mathlib.color_name(c) == "red", "Color.Red name");
 }
 
 test_enum_all_variants() `test {
-    assert(mathlib.color_name(mathlib.Color.Red) == "red", "red");
-    assert(mathlib.color_name(mathlib.Color.Green) == "green", "green");
-    assert(mathlib.color_name(mathlib.Color.Blue) == "blue", "blue");
+  assert(mathlib.color_name(mathlib.Color.Red) == "red", "red");
+  assert(mathlib.color_name(mathlib.Color.Green) == "green", "green");
+  assert(mathlib.color_name(mathlib.Color.Blue) == "blue", "blue");
 }

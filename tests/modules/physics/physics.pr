@@ -2,14 +2,14 @@
 use utils "./utils";
 
 type Velocity `public {
-    int vx;
-    int vy;
+  int vx;
+  int vy;
 
-    speed(&this) int {
-        return utils.abs(this.vx) + utils.abs(this.vy);
-    }
+  speed(&this) int {
+    return utils.abs(this.vx) + utils.abs(this.vy);
+  }
 }
 
 apply_gravity(int vx, int vy, int g) Velocity `public {
-    return Velocity(vx: vx, vy: vy - g);
+  return Velocity(vx: vx, vy: vy - g);
 }

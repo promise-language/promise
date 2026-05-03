@@ -2,7 +2,6 @@
 // should not starve other goroutines. The sysmon thread sets G.preempt=1
 // on long-running Gs, and yield checks at loop back-edges cause them
 // to yield. Without preemption, the result channel receive would hang.
-
 main() `test(expected: "done") {
   ch := channel[int](capacity: 1);
 
@@ -24,5 +23,7 @@ main() `test(expected: "done") {
   };
 
   r := <-done;
-  if v := r { println(v); }
+  if v := r {
+    println(v);
+  }
 }

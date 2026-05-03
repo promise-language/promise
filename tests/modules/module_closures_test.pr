@@ -1,18 +1,18 @@
 use mathlib "./mathlib";
 
 test_closure_with_module_func() `test {
-    fn := |int x| -> mathlib.square(x);
-    assert(fn(5) == 25, "closure calling mathlib.square");
-    assert(fn(3) == 9, "closure calling mathlib.square(3)");
+  fn := |int x| -> mathlib.square(x);
+  assert(fn(5) == 25, "closure calling mathlib.square");
+  assert(fn(3) == 9, "closure calling mathlib.square(3)");
 }
 
 test_closure_with_module_func_add() `test {
-    fn := |int a, int b| -> mathlib.add(a, b);
-    assert(fn(10, 20) == 30, "closure calling mathlib.add");
+  fn := |int a, int b| -> mathlib.add(a, b);
+  assert(fn(10, 20) == 30, "closure calling mathlib.add");
 }
 
 test_closure_capturing_int() `test {
-    int x = mathlib.square(5);
-    double := || -> x * 2;
-    assert(double() == 50, "closure capturing result of module func");
+  int x = mathlib.square(5);
+  double := || -> x * 2;
+  assert(double() == 50, "closure capturing result of module func");
 }

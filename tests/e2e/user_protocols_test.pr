@@ -1,283 +1,301 @@
 // Tests for user-defined types implementing Equal, Hashable, and Ordered protocols.
 // Verifies that default methods (!=, >, <=, >=) are inherited and that user types
 // work correctly as map/set keys and with sort.
-
 // --- Equal protocol: user type with is Equal (gets != default method) ---
-
 type Color is Equal {
-    int r;
-    int g;
-    int b;
+  int r;
+  int g;
+  int b;
 
-    ==(Self other) bool {
-        return this.r == other.r && this.g == other.g && this.b == other.b;
-    }
+  == (Self other) bool {
+    return this.r == other.r && this.g == other.g && this.b == other.b;
+  }
 }
 
 test_equal_same_values() `test {
-    Color a = Color(r: 255, g: 0, b: 0);
-    Color b = Color(r: 255, g: 0, b: 0);
-    assert(a == b, "same color == true");
+  Color a = Color(r: 255, g: 0, b: 0);
+  Color b = Color(r: 255, g: 0, b: 0);
+  assert(a == b, "same color == true");
 }
 
 test_equal_different_values() `test {
-    Color a = Color(r: 255, g: 0, b: 0);
-    Color b = Color(r: 0, g: 255, b: 0);
-    assert(!(a == b), "different color == false");
+  Color a = Color(r: 255, g: 0, b: 0);
+  Color b = Color(r: 0, g: 255, b: 0);
+  assert(!(a == b), "different color == false");
 }
 
 test_not_equal_inherited_default() `test {
-    // != comes from Equal's default method: !(this == other)
-    Color a = Color(r: 255, g: 0, b: 0);
-    Color b = Color(r: 0, g: 255, b: 0);
-    assert(a != b, "different colors != true");
-    Color c = Color(r: 255, g: 0, b: 0);
-    assert(!(a != c), "same colors != false");
+  // != comes from Equal's default method: !(this == other)
+  Color a = Color(r: 255, g: 0, b: 0);
+  Color b = Color(r: 0, g: 255, b: 0);
+  assert(a != b, "different colors != true");
+  Color c = Color(r: 255, g: 0, b: 0);
+  assert(!(a != c), "same colors != false");
 }
 
 // --- Hashable + Equal: user type as map/set key ---
 
 type Point is Equal {
-    int x;
-    int y;
+  int x;
+  int y;
 
-    get hash int {
-        return this.x.hash ^ (this.y.hash * 1000003);
-    }
+  get hash int {
+    return this.x.hash ^ (this.y.hash * 1000003);
+  }
 
-    ==(Self other) bool {
-        return this.x == other.x && this.y == other.y;
-    }
+  == (Self other) bool {
+    return this.x == other.x && this.y == other.y;
+  }
 }
 
 test_hash_deterministic() `test {
-    Point p = Point(x: 3, y: 4);
-    assert(p.hash == p.hash, "hash is deterministic");
+  Point p = Point(x: 3, y: 4);
+  assert(p.hash == p.hash, "hash is deterministic");
 }
 
 test_hash_equal_values_same_hash() `test {
-    Point a = Point(x: 3, y: 4);
-    Point b = Point(x: 3, y: 4);
-    assert(a.hash == b.hash, "equal points have same hash");
+  Point a = Point(x: 3, y: 4);
+  Point b = Point(x: 3, y: 4);
+  assert(a.hash == b.hash, "equal points have same hash");
 }
 
 test_hash_different_values_different_hash() `test {
-    Point a = Point(x: 3, y: 4);
-    Point b = Point(x: 4, y: 3);
-    assert(a.hash != b.hash, "different points have different hash");
+  Point a = Point(x: 3, y: 4);
+  Point b = Point(x: 4, y: 3);
+  assert(a.hash != b.hash, "different points have different hash");
 }
 
 // --- User type as map key ---
 
 test_user_type_as_map_key_basic() `test {
-    map[Point, string] m = {:};
-    m[Point(x: 0, y: 0)] = "origin";
-    m[Point(x: 1, y: 0)] = "unit x";
-    m[Point(x: 0, y: 1)] = "unit y";
+  map[Point, string] m = {:};
+  m[Point(x: 0, y: 0)] = "origin";
+  m[Point(x: 1, y: 0)] = "unit x";
+  m[Point(x: 0, y: 1)] = "unit y";
 
-    if v := m[Point(x: 0, y: 0)] { assert(v == "origin", "origin"); }
-    else { assert(false, "origin missing"); }
+  if v := m[Point(x: 0, y: 0)] {
+    assert(v == "origin", "origin");
+  } else {
+    assert(false, "origin missing");
+  }
 
-    if v := m[Point(x: 1, y: 0)] { assert(v == "unit x", "unit x"); }
-    else { assert(false, "unit x missing"); }
+  if v := m[Point(x: 1, y: 0)] {
+    assert(v == "unit x", "unit x");
+  } else {
+    assert(false, "unit x missing");
+  }
 
-    if v := m[Point(x: 0, y: 1)] { assert(v == "unit y", "unit y"); }
-    else { assert(false, "unit y missing"); }
+  if v := m[Point(x: 0, y: 1)] {
+    assert(v == "unit y", "unit y");
+  } else {
+    assert(false, "unit y missing");
+  }
 }
 
 test_user_type_map_key_overwrite() `test {
-    map[Point, int] m = {:};
-    m[Point(x: 5, y: 5)] = 1;
-    m[Point(x: 5, y: 5)] = 2;  // overwrite same key
-    if v := m[Point(x: 5, y: 5)] { assert(v == 2, "overwrite works"); }
-    else { assert(false, "key missing after overwrite"); }
+  map[Point, int] m = {:};
+  m[Point(x: 5, y: 5)] = 1;
+  m[Point(x: 5, y: 5)] = 2; // overwrite same key
+  if v := m[Point(x: 5, y: 5)] {
+    assert(v == 2, "overwrite works");
+  } else {
+    assert(false, "key missing after overwrite");
+  }
 }
 
 test_user_type_map_key_absent() `test {
-    map[Point, int] m = {:};
-    m[Point(x: 1, y: 1)] = 42;
-    if _ := m[Point(x: 2, y: 2)] { assert(false, "absent key should not exist"); }
+  map[Point, int] m = {:};
+  m[Point(x: 1, y: 1)] = 42;
+  if _ := m[Point(x: 2, y: 2)] {
+    assert(false, "absent key should not exist");
+  }
 }
 
 test_user_type_map_key_len() `test {
-    map[Point, bool] m = {:};
-    m[Point(x: 0, y: 0)] = true;
-    m[Point(x: 1, y: 0)] = true;
-    m[Point(x: 0, y: 1)] = true;
-    // Adding same key again should not increase len
-    m[Point(x: 0, y: 0)] = false;
-    assert(m.len == 3, "map has 3 distinct keys");
+  map[Point, bool] m = {:};
+  m[Point(x: 0, y: 0)] = true;
+  m[Point(x: 1, y: 0)] = true;
+  m[Point(x: 0, y: 1)] = true;
+  // Adding same key again should not increase len
+  m[Point(x: 0, y: 0)] = false;
+  assert(m.len == 3, "map has 3 distinct keys");
 }
 
 // --- User type in Set ---
 
 test_user_type_in_set_basic() `test {
-    Set[Point] s = Set[Point]();
-    s.add(Point(x: 1, y: 2));
-    s.add(Point(x: 3, y: 4));
-    assert(s.contains(Point(x: 1, y: 2)), "set has (1,2)");
-    assert(s.contains(Point(x: 3, y: 4)), "set has (3,4)");
-    assert(!s.contains(Point(x: 0, y: 0)), "set doesn't have (0,0)");
+  Set[Point] s = Set[Point]();
+  s.add(Point(x: 1, y: 2));
+  s.add(Point(x: 3, y: 4));
+  assert(s.contains(Point(x: 1, y: 2)), "set has (1,2)");
+  assert(s.contains(Point(x: 3, y: 4)), "set has (3,4)");
+  assert(!s.contains(Point(x: 0, y: 0)), "set doesn't have (0,0)");
 }
 
 test_user_type_set_dedup() `test {
-    Set[Point] s = Set[Point]();
-    s.add(Point(x: 7, y: 8));
-    s.add(Point(x: 7, y: 8));  // duplicate
-    s.add(Point(x: 7, y: 8));  // duplicate
-    assert(s.len == 1, "set deduplicates equal points");
+  Set[Point] s = Set[Point]();
+  s.add(Point(x: 7, y: 8));
+  s.add(Point(x: 7, y: 8)); // duplicate
+  s.add(Point(x: 7, y: 8)); // duplicate
+  assert(s.len == 1, "set deduplicates equal points");
 }
 
 test_user_type_set_remove() `test {
-    Set[Point] s = Set[Point]();
-    s.add(Point(x: 1, y: 1));
-    s.add(Point(x: 2, y: 2));
-    bool removed = s.remove(Point(x: 1, y: 1));
-    assert(removed, "remove returns true for existing element");
-    assert(!s.contains(Point(x: 1, y: 1)), "element removed");
-    assert(s.contains(Point(x: 2, y: 2)), "other element unchanged");
-    assert(s.len == 1, "len decremented");
+  Set[Point] s = Set[Point]();
+  s.add(Point(x: 1, y: 1));
+  s.add(Point(x: 2, y: 2));
+  bool removed = s.remove(Point(x: 1, y: 1));
+  assert(removed, "remove returns true for existing element");
+  assert(!s.contains(Point(x: 1, y: 1)), "element removed");
+  assert(s.contains(Point(x: 2, y: 2)), "other element unchanged");
+  assert(s.len == 1, "len decremented");
 }
 
 // --- Ordered protocol: user type with is Ordered (gets >, <=, >= defaults) ---
 
 type Priority is Ordered {
-    int level;
+  int level;
 
-    ==(Self other) bool {
-        return this.level == other.level;
-    }
+  == (Self other) bool {
+    return this.level == other.level;
+  }
 
-    <(Self other) bool {
-        return this.level < other.level;
-    }
+  < (Self other) bool {
+    return this.level < other.level;
+  }
 }
 
 test_ordered_less_than() `test {
-    Priority low = Priority(level: 1);
-    Priority high = Priority(level: 5);
-    assert(low < high, "low < high");
-    assert(!(high < low), "high < low is false");
-    assert(!(low < low), "low < low is false");
+  Priority low = Priority(level: 1);
+  Priority high = Priority(level: 5);
+  assert(low < high, "low < high");
+  assert(!(high < low), "high < low is false");
+  assert(!(low < low), "low < low is false");
 }
 
 test_ordered_greater_than_default() `test {
-    // > is a default method from Ordered: other < this
-    Priority low = Priority(level: 1);
-    Priority high = Priority(level: 5);
-    assert(high > low, "high > low");
-    assert(!(low > high), "low > high is false");
-    assert(!(low > low), "low > low is false");
+  // > is a default method from Ordered: other < this
+  Priority low = Priority(level: 1);
+  Priority high = Priority(level: 5);
+  assert(high > low, "high > low");
+  assert(!(low > high), "low > high is false");
+  assert(!(low > low), "low > low is false");
 }
 
 test_ordered_less_equal_default() `test {
-    // <= is a default method from Ordered: !(other < this)
-    Priority low = Priority(level: 1);
-    Priority mid = Priority(level: 3);
-    Priority high = Priority(level: 5);
-    assert(low <= mid, "low <= mid");
-    assert(low <= low, "low <= low (equal)");
-    assert(!(high <= low), "high <= low is false");
+  // <= is a default method from Ordered: !(other < this)
+  Priority low = Priority(level: 1);
+  Priority mid = Priority(level: 3);
+  Priority high = Priority(level: 5);
+  assert(low <= mid, "low <= mid");
+  assert(low <= low, "low <= low (equal)");
+  assert(!(high <= low), "high <= low is false");
 }
 
 test_ordered_greater_equal_default() `test {
-    // >= is a default method from Ordered: !(this < other)
-    Priority low = Priority(level: 1);
-    Priority high = Priority(level: 5);
-    assert(high >= low, "high >= low");
-    assert(high >= high, "high >= high (equal)");
-    assert(!(low >= high), "low >= high is false");
+  // >= is a default method from Ordered: !(this < other)
+  Priority low = Priority(level: 1);
+  Priority high = Priority(level: 5);
+  assert(high >= low, "high >= low");
+  assert(high >= high, "high >= high (equal)");
+  assert(!(low >= high), "low >= high is false");
 }
 
 test_ordered_not_equal_inherited() `test {
-    // != comes from Equal (via Ordered is Equal)
-    Priority a = Priority(level: 3);
-    Priority b = Priority(level: 5);
-    Priority c = Priority(level: 3);
-    assert(a != b, "3 != 5");
-    assert(!(a != c), "3 != 3 is false");
+  // != comes from Equal (via Ordered is Equal)
+  Priority a = Priority(level: 3);
+  Priority b = Priority(level: 5);
+  Priority c = Priority(level: 3);
+  assert(a != b, "3 != 5");
+  assert(!(a != c), "3 != 3 is false");
 }
 
 // --- User type with sort ---
 
 test_sort_user_type() `test {
-    Priority[] tasks = [
-        Priority(level: 3),
-        Priority(level: 1),
-        Priority(level: 5),
-        Priority(level: 2),
-        Priority(level: 4),
-    ];
-    tasks = sort[Priority](tasks);
-    assert(tasks[0].level == 1, "sorted[0] = 1");
-    assert(tasks[1].level == 2, "sorted[1] = 2");
-    assert(tasks[2].level == 3, "sorted[2] = 3");
-    assert(tasks[3].level == 4, "sorted[3] = 4");
-    assert(tasks[4].level == 5, "sorted[4] = 5");
+  Priority[] tasks = [Priority(level: 3),
+  Priority(level: 1),
+  Priority(level: 5),
+  Priority(level: 2),
+  Priority(level: 4),
+  ];
+  tasks = sort[Priority](tasks);
+  assert(tasks[0].level == 1, "sorted[0] = 1");
+  assert(tasks[1].level == 2, "sorted[1] = 2");
+  assert(tasks[2].level == 3, "sorted[2] = 3");
+  assert(tasks[3].level == 4, "sorted[3] = 4");
+  assert(tasks[4].level == 5, "sorted[4] = 5");
 }
 
 test_sort_user_type_duplicates() `test {
-    Priority[] tasks = [
-        Priority(level: 2),
-        Priority(level: 1),
-        Priority(level: 2),
-        Priority(level: 1),
-    ];
-    tasks = sort[Priority](tasks);
-    assert(tasks[0].level == 1, "first is 1");
-    assert(tasks[1].level == 1, "second is 1");
-    assert(tasks[2].level == 2, "third is 2");
-    assert(tasks[3].level == 2, "fourth is 2");
+  Priority[] tasks = [Priority(level: 2),
+  Priority(level: 1),
+  Priority(level: 2),
+  Priority(level: 1),
+  ];
+  tasks = sort[Priority](tasks);
+  assert(tasks[0].level == 1, "first is 1");
+  assert(tasks[1].level == 1, "second is 1");
+  assert(tasks[2].level == 2, "third is 2");
+  assert(tasks[3].level == 2, "fourth is 2");
 }
 
 test_sort_user_type_single() `test {
-    Priority[] tasks = [Priority(level: 42)];
-    tasks = sort[Priority](tasks);
-    assert(tasks[0].level == 42, "single element unchanged");
+  Priority[] tasks = [Priority(level: 42)];
+  tasks = sort[Priority](tasks);
+  assert(tasks[0].level == 42, "single element unchanged");
 }
 
 test_sort_user_type_empty() `test {
-    Priority[] tasks = [];
-    tasks = sort[Priority](tasks);
-    assert(tasks.len == 0, "empty sort stays empty");
+  Priority[] tasks = [];
+  tasks = sort[Priority](tasks);
+  assert(tasks.len == 0, "empty sort stays empty");
 }
 
 // --- Multi-field key type ---
 
 type Pair is Equal {
-    int first;
-    int second;
+  int first;
+  int second;
 
-    ==(Self other) bool {
-        return this.first == other.first && this.second == other.second;
-    }
+  == (Self other) bool {
+    return this.first == other.first && this.second == other.second;
+  }
 
-    get hash int {
-        return this.first.hash ^ (this.second.hash * 2654435761);
-    }
+  get hash int {
+    return this.first.hash ^ (this.second.hash * 2654435761);
+  }
 }
 
 test_pair_as_map_key() `test {
-    map[Pair, string] m = {:};
-    m[Pair(first: 1, second: 2)] = "one-two";
-    m[Pair(first: 3, second: 4)] = "three-four";
-    m[Pair(first: 1, second: 3)] = "one-three";
+  map[Pair, string] m = {:};
+  m[Pair(first: 1, second: 2)] = "one-two";
+  m[Pair(first: 3, second: 4)] = "three-four";
+  m[Pair(first: 1, second: 3)] = "one-three";
 
-    if v := m[Pair(first: 1, second: 2)] { assert(v == "one-two", "1,2"); }
-    else { assert(false, "1,2 missing"); }
-    if v := m[Pair(first: 3, second: 4)] { assert(v == "three-four", "3,4"); }
-    else { assert(false, "3,4 missing"); }
-    // Keys differing only in one field
-    if _ := m[Pair(first: 2, second: 1)] { assert(false, "2,1 should be absent"); }
+  if v := m[Pair(first: 1, second: 2)] {
+    assert(v == "one-two", "1,2");
+  } else {
+    assert(false, "1,2 missing");
+  }
+  if v := m[Pair(first: 3, second: 4)] {
+    assert(v == "three-four", "3,4");
+  } else {
+    assert(false, "3,4 missing");
+  }
+  // Keys differing only in one field
+  if _ := m[Pair(first: 2, second: 1)] {
+    assert(false, "2,1 should be absent");
+  }
 }
 
 test_pair_in_set() `test {
-    Set[Pair] s = Set[Pair]();
-    s.add(Pair(first: 10, second: 20));
-    s.add(Pair(first: 10, second: 20));  // duplicate
-    s.add(Pair(first: 20, second: 10));  // different key
-    assert(s.len == 2, "set has 2 distinct pairs");
-    assert(s.contains(Pair(first: 10, second: 20)), "has (10,20)");
-    assert(s.contains(Pair(first: 20, second: 10)), "has (20,10)");
-    assert(!s.contains(Pair(first: 1, second: 2)), "does not have (1,2)");
+  Set[Pair] s = Set[Pair]();
+  s.add(Pair(first: 10, second: 20));
+  s.add(Pair(first: 10, second: 20)); // duplicate
+  s.add(Pair(first: 20, second: 10)); // different key
+  assert(s.len == 2, "set has 2 distinct pairs");
+  assert(s.contains(Pair(first: 10, second: 20)), "has (10,20)");
+  assert(s.contains(Pair(first: 20, second: 10)), "has (20,10)");
+  assert(!s.contains(Pair(first: 1, second: 2)), "does not have (1,2)");
 }

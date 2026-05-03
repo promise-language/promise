@@ -1,40 +1,39 @@
 // Tests for std/platform.pr — Platform constants via global getters
-
 test_line_separator_not_empty() `test {
-    string sep = Platform.line_separator;
-    assert(sep.len > 0, "line_separator must not be empty");
+  string sep = Platform.line_separator;
+  assert(sep.len > 0, "line_separator must not be empty");
 }
 
 test_line_separator_is_newline() `test {
-    // On POSIX: "\n", on Windows: "\r\n" — both end with '\n'
-    string sep = Platform.line_separator;
-    assert(sep[sep.len - 1] == '\n', "line_separator must end with newline");
+  // On POSIX: "\n", on Windows: "\r\n" — both end with '\n'
+  string sep = Platform.line_separator;
+  assert(sep[sep.len - 1] == '\n', "line_separator must end with newline");
 }
 
 test_path_separator_not_empty() `test {
-    string sep = Platform.path_separator;
-    assert(sep.len == 1, "path_separator must be a single character");
+  string sep = Platform.path_separator;
+  assert(sep.len == 1, "path_separator must be a single character");
 }
 
 test_path_separator_is_slash() `test {
-    // On POSIX: "/", on Windows: "\\"
-    string sep = Platform.path_separator;
-    assert(sep == "/" || sep == "\\", "path_separator must be / or \\");
+  // On POSIX: "/", on Windows: "\\"
+  string sep = Platform.path_separator;
+  assert(sep == "/" || sep == "\\", "path_separator must be / or \\");
 }
 
 test_is_path_separator_slash() `test {
-    assert(Platform.is_path_separator('/'), "/ is always a path separator");
+  assert(Platform.is_path_separator('/'), "/ is always a path separator");
 }
 
 test_is_path_separator_letter() `test {
-    assert(!Platform.is_path_separator('a'), "a is not a path separator");
+  assert(!Platform.is_path_separator('a'), "a is not a path separator");
 }
 
 test_write_line_uses_platform_separator() `test {
-    Builder b = Builder();
-    write_line(b, "hello")!;
-    string result = b.to_string();
-    // Result should be "hello" + Platform.line_separator
-    string expected = "hello" + Platform.line_separator;
-    assert(result == expected, "write_line should use platform line separator");
+  Builder b = Builder();
+  write_line(b, "hello")!;
+  string result = b.to_string();
+  // Result should be "hello" + Platform.line_separator
+  string expected = "hello" + Platform.line_separator;
+  assert(result == expected, "write_line should use platform line separator");
 }

@@ -1,34 +1,85 @@
 // Relay race: pass a value through a chain of goroutines via channels.
-
 main() `test(expected: "110") {
-    // Chain of 10 goroutines, each adds 1 and passes along
-    ch1 := channel[int](capacity: 1);
-    ch2 := channel[int](capacity: 1);
-    ch3 := channel[int](capacity: 1);
-    ch4 := channel[int](capacity: 1);
-    ch5 := channel[int](capacity: 1);
-    ch6 := channel[int](capacity: 1);
-    ch7 := channel[int](capacity: 1);
-    ch8 := channel[int](capacity: 1);
-    ch9 := channel[int](capacity: 1);
-    ch10 := channel[int](capacity: 1);
-    out := channel[int](capacity: 1);
+  // Chain of 10 goroutines, each adds 1 and passes along
+  ch1 := channel[int](capacity: 1);
+  ch2 := channel[int](capacity: 1);
+  ch3 := channel[int](capacity: 1);
+  ch4 := channel[int](capacity: 1);
+  ch5 := channel[int](capacity: 1);
+  ch6 := channel[int](capacity: 1);
+  ch7 := channel[int](capacity: 1);
+  ch8 := channel[int](capacity: 1);
+  ch9 := channel[int](capacity: 1);
+  ch10 := channel[int](capacity: 1);
+  out := channel[int](capacity: 1);
 
-    go { r := <-ch1; if v := r { ch2.send(v + 1); } };
-    go { r := <-ch2; if v := r { ch3.send(v + 1); } };
-    go { r := <-ch3; if v := r { ch4.send(v + 1); } };
-    go { r := <-ch4; if v := r { ch5.send(v + 1); } };
-    go { r := <-ch5; if v := r { ch6.send(v + 1); } };
-    go { r := <-ch6; if v := r { ch7.send(v + 1); } };
-    go { r := <-ch7; if v := r { ch8.send(v + 1); } };
-    go { r := <-ch8; if v := r { ch9.send(v + 1); } };
-    go { r := <-ch9; if v := r { ch10.send(v + 1); } };
-    go { r := <-ch10; if v := r { out.send(v + 1); } };
+  go {
+    r := <-ch1;
+    if v := r {
+      ch2.send(v + 1);
+    }
+  };
+  go {
+    r := <-ch2;
+    if v := r {
+      ch3.send(v + 1);
+    }
+  };
+  go {
+    r := <-ch3;
+    if v := r {
+      ch4.send(v + 1);
+    }
+  };
+  go {
+    r := <-ch4;
+    if v := r {
+      ch5.send(v + 1);
+    }
+  };
+  go {
+    r := <-ch5;
+    if v := r {
+      ch6.send(v + 1);
+    }
+  };
+  go {
+    r := <-ch6;
+    if v := r {
+      ch7.send(v + 1);
+    }
+  };
+  go {
+    r := <-ch7;
+    if v := r {
+      ch8.send(v + 1);
+    }
+  };
+  go {
+    r := <-ch8;
+    if v := r {
+      ch9.send(v + 1);
+    }
+  };
+  go {
+    r := <-ch9;
+    if v := r {
+      ch10.send(v + 1);
+    }
+  };
+  go {
+    r := <-ch10;
+    if v := r {
+      out.send(v + 1);
+    }
+  };
 
-    // Start the relay with 100
-    ch1.send(100);
+  // Start the relay with 100
+  ch1.send(100);
 
-    // Should get 100 + 10 = 110
-    r := <-out;
-    if v := r { print_int(v); }
+  // Should get 100 + 10 = 110
+  r := <-out;
+  if v := r {
+    print_int(v);
+  }
 }

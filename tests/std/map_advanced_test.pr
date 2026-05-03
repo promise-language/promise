@@ -1,113 +1,160 @@
 // Advanced map tests: operations, iteration, edge cases.
-
 test_empty_map_len() `test {
-    map[string, int] m = {:};
-    assert(m.len == 0, "empty map len = 0");
-    assert(m.is_empty, "empty map is_empty");
+  map[string, int] m = {:};
+  assert(m.len == 0, "empty map len = 0");
+  assert(m.is_empty, "empty map is_empty");
 }
 
 test_single_entry() `test {
-    map[string, int] m = {"key": 42};
-    assert(m.len == 1, "single entry len = 1");
-    if v := m["key"] { assert(v == 42, "value is 42"); }
-    assert(m.contains("key"), "contains key");
+  map[string, int] m = {
+    "key": 42
+  };
+  assert(m.len == 1, "single entry len = 1");
+  if v := m["key"] {
+    assert(v == 42, "value is 42");
+  }
+  assert(m.contains("key"), "contains key");
 }
 
 test_overwrite() `test {
-    map[string, int] m = {"a": 1};
-    m["a"] = 100;
-    assert(m.len == 1, "still 1 entry");
-    if v := m["a"] { assert(v == 100, "updated to 100"); }
+  map[string, int] m = {
+    "a": 1
+  };
+  m["a"] = 100;
+  assert(m.len == 1, "still 1 entry");
+  if v := m["a"] {
+    assert(v == 100, "updated to 100");
+  }
 }
 
 test_multiple_insert() `test {
-    map[int, int] m = {:};
-    for i in 0..10 {
-        m[i] = i * 10;
-    }
-    assert(m.len == 10, "10 entries");
-    if v := m[0] { assert(v == 0, "key 0 = 0"); }
-    if v := m[5] { assert(v == 50, "key 5 = 50"); }
-    if v := m[9] { assert(v == 90, "key 9 = 90"); }
+  map[int, int] m = {:};
+  for i in 0..10 {
+    m[i] = i * 10;
+  }
+  assert(m.len == 10, "10 entries");
+  if v := m[0] {
+    assert(v == 0, "key 0 = 0");
+  }
+  if v := m[5] {
+    assert(v == 50, "key 5 = 50");
+  }
+  if v := m[9] {
+    assert(v == 90, "key 9 = 90");
+  }
 }
 
 test_remove_nonexistent() `test {
-    map[string, int] m = {"a": 1};
-    bool removed = m.remove("b");
-    assert(!removed, "remove nonexistent returns false");
-    assert(m.len == 1, "len unchanged");
+  map[string, int] m = {
+    "a": 1
+  };
+  bool removed = m.remove("b");
+  assert(!removed, "remove nonexistent returns false");
+  assert(m.len == 1, "len unchanged");
 }
 
 test_remove_and_reinsert() `test {
-    map[string, int] m = {"x": 10, "y": 20};
-    m.remove("x");
-    assert(!m.contains("x"), "x removed");
-    m["x"] = 30;
-    assert(m.contains("x"), "x reinserted");
-    if v := m["x"] { assert(v == 30, "new value 30"); }
+  map[string, int] m = {
+    "x": 10, "y": 20
+  };
+  m.remove("x");
+  assert(!m.contains("x"), "x removed");
+  m["x"] = 30;
+  assert(m.contains("x"), "x reinserted");
+  if v := m["x"] {
+    assert(v == 30, "new value 30");
+  }
 }
 
 test_keys_order_independent() `test {
-    map[string, int] m = {"a": 1, "b": 2};
-    string[] keys = m.keys();
-    assert(keys.len == 2, "2 keys");
-    // Both keys present (order may vary)
-    bool has_a = false;
-    bool has_b = false;
-    for k in keys {
-        if k == "a" { has_a = true; }
-        if k == "b" { has_b = true; }
+  map[string, int] m = {
+    "a": 1, "b": 2
+  };
+  string[] keys = m.keys();
+  assert(keys.len == 2, "2 keys");
+  // Both keys present (order may vary)
+  bool has_a = false;
+  bool has_b = false;
+  for k in keys {
+    if k == "a" {
+      has_a = true;
     }
-    assert(has_a, "has key a");
-    assert(has_b, "has key b");
+    if k == "b" {
+      has_b = true;
+    }
+  }
+  assert(has_a, "has key a");
+  assert(has_b, "has key b");
 }
 
 test_values_sum() `test {
-    map[string, int] m = {"x": 10, "y": 20, "z": 30};
-    int[] vals = m.values();
-    int sum = 0;
-    for v in vals {
-        sum += v;
-    }
-    assert(sum == 60, "values sum = 60");
+  map[string, int] m = {
+    "x": 10, "y": 20, "z": 30
+  };
+  int[] vals = m.values();
+  int sum = 0;
+  for v in vals {
+    sum += v;
+  }
+  assert(sum == 60, "values sum = 60");
 }
 
 test_int_keys_negative() `test {
-    map[int, string] m = {:};
-    m[-1] = "neg";
-    m[0] = "zero";
-    m[1] = "pos";
-    assert(m.len == 3, "3 entries");
-    if v := m[-1] { assert(v == "neg", "negative key"); }
-    if v := m[0] { assert(v == "zero", "zero key"); }
-    if v := m[1] { assert(v == "pos", "positive key"); }
+  map[int, string] m = {:};
+  m[-1] = "neg";
+  m[0] = "zero";
+  m[1] = "pos";
+  assert(m.len == 3, "3 entries");
+  if v := m[-1] {
+    assert(v == "neg", "negative key");
+  }
+  if v := m[0] {
+    assert(v == "zero", "zero key");
+  }
+  if v := m[1] {
+    assert(v == "pos", "positive key");
+  }
 }
 
 test_large_map() `test {
-    map[int, int] m = {:};
-    for i in 0..100 {
-        m[i] = i * i;
-    }
-    assert(m.len == 100, "100 entries");
-    if v := m[50] { assert(v == 2500, "50^2 = 2500"); }
-    if v := m[99] { assert(v == 9801, "99^2 = 9801"); }
-    assert(m.contains(0), "contains 0");
-    assert(!m.contains(100), "no 100");
+  map[int, int] m = {:};
+  for i in 0..100 {
+    m[i] = i * i;
+  }
+  assert(m.len == 100, "100 entries");
+  if v := m[50] {
+    assert(v == 2500, "50^2 = 2500");
+  }
+  if v := m[99] {
+    assert(v == 9801, "99^2 = 9801");
+  }
+  assert(m.contains(0), "contains 0");
+  assert(!m.contains(100), "no 100");
 }
 
 test_string_values() `test {
-    map[int, string] m = {1: "one", 2: "two", 3: "three"};
-    if v := m[1] { assert(v == "one", "1 => one"); }
-    if v := m[2] { assert(v == "two", "2 => two"); }
-    if v := m[3] { assert(v == "three", "3 => three"); }
+  map[int, string] m = {
+    1: "one", 2: "two", 3: "three"
+  };
+  if v := m[1] {
+    assert(v == "one", "1 => one");
+  }
+  if v := m[2] {
+    assert(v == "two", "2 => two");
+  }
+  if v := m[3] {
+    assert(v == "three", "3 => three");
+  }
 }
 
 test_remove_all_entries() `test {
-    map[string, int] m = {"a": 1, "b": 2, "c": 3};
-    string[] keys = m.keys();
-    for k in keys {
-        m.remove(k);
-    }
-    assert(m.len == 0, "all removed");
-    assert(m.is_empty, "is empty");
+  map[string, int] m = {
+    "a": 1, "b": 2, "c": 3
+  };
+  string[] keys = m.keys();
+  for k in keys {
+    m.remove(k);
+  }
+  assert(m.len == 0, "all removed");
+  assert(m.is_empty, "is empty");
 }

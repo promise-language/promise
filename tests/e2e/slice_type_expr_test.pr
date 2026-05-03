@@ -1,85 +1,84 @@
 // T[] in expression position works as a constructor call, equivalent to Vector[T]().
-
 test_int_vector_constructor() `test {
-    v := int[]();
-    v.push(10);
-    v.push(20);
-    assert(v.len == 2, "len = 2");
-    assert(v[0] == 10, "first = 10");
+  v := int[]();
+  v.push(10);
+  v.push(20);
+  assert(v.len == 2, "len = 2");
+  assert(v[0] == 10, "first = 10");
 }
 
 test_int_vector_with_capacity() `test {
-    v := int[](capacity: 1000);
-    for i in 0..1000 {
-        v.push(i);
-    }
-    assert(v.len == 1000, "len = 1000");
-    assert(v[999] == 999, "last = 999");
+  v := int[](capacity: 1000);
+  for i in 0..1000 {
+    v.push(i);
+  }
+  assert(v.len == 1000, "len = 1000");
+  assert(v[999] == 999, "last = 999");
 }
 
 test_string_vector_constructor() `test {
-    v := string[]();
-    v.push("hello");
-    v.push("world");
-    assert(v.len == 2, "len = 2");
-    assert(v.contains("hello"), "contains hello");
+  v := string[]();
+  v.push("hello");
+  v.push("world");
+  assert(v.len == 2, "len = 2");
+  assert(v.contains("hello"), "contains hello");
 }
 
 test_nested_vector_constructor() `test {
-    v := int[][]();
-    inner1 := int[]();
-    inner1.push(1);
-    inner1.push(2);
-    inner2 := int[]();
-    inner2.push(3);
-    v.push(inner1);
-    v.push(inner2);
-    assert(v.len == 2, "outer len = 2");
-    assert(v[0].len == 2, "inner0 len = 2");
-    assert(v[1][0] == 3, "inner1[0] = 3");
+  v := int[][]();
+  inner1 := int[]();
+  inner1.push(1);
+  inner1.push(2);
+  inner2 := int[]();
+  inner2.push(3);
+  v.push(inner1);
+  v.push(inner2);
+  assert(v.len == 2, "outer len = 2");
+  assert(v[0].len == 2, "inner0 len = 2");
+  assert(v[1][0] == 3, "inner1[0] = 3");
 }
 
 test_equivalent_to_type_annotation() `test {
-    int[] v1 = [];
-    v1.push(42);
-    v2 := int[]();
-    v2.push(42);
-    assert(v1[0] == v2[0], "same value");
+  int[] v1 = [];
+  v1.push(42);
+  v2 := int[]();
+  v2.push(42);
+  assert(v1[0] == v2[0], "same value");
 }
 
 test_bool_vector_constructor() `test {
-    v := bool[]();
-    v.push(true);
-    v.push(false);
-    v.push(true);
-    assert(v.len == 3, "len = 3");
-    assert(v[0] == true, "first = true");
-    assert(v[1] == false, "second = false");
+  v := bool[]();
+  v.push(true);
+  v.push(false);
+  v.push(true);
+  assert(v.len == 3, "len = 3");
+  assert(v[0] == true, "first = true");
+  assert(v[1] == false, "second = false");
 }
 
 test_filled_factory() `test {
-    v := int[].filled(value: 7, count: 5);
-    assert(v.len == 5, "len = 5");
-    assert(v[0] == 7, "first = 7");
-    assert(v[4] == 7, "last = 7");
+  v := int[].filled(value: 7, count: 5);
+  assert(v.len == 5, "len = 5");
+  assert(v[0] == 7, "first = 7");
+  assert(v[4] == 7, "last = 7");
 }
 
 test_filled_factory_strings() `test {
-    v := string[].filled(value: "x", count: 3);
-    assert(v.len == 3, "len = 3");
-    assert(v[0] == "x", "first = x");
-    assert(v[2] == "x", "last = x");
+  v := string[].filled(value: "x", count: 3);
+  assert(v.len == 3, "len = 3");
+  assert(v[0] == "x", "first = x");
+  assert(v[2] == "x", "last = x");
 }
 
 test_filled_factory_zero_count() `test {
-    v := int[].filled(value: 0, count: 0);
-    assert(v.len == 0, "empty");
+  v := int[].filled(value: 0, count: 0);
+  assert(v.len == 0, "empty");
 }
 
 test_nested_filled_factory() `test {
-    inner := int[].filled(value: 1, count: 3);
-    v := int[][].filled(value: inner, count: 2);
-    assert(v.len == 2, "outer len = 2");
-    assert(v[0].len == 3, "inner len = 3");
-    assert(v[0][0] == 1, "inner value = 1");
+  inner := int[].filled(value: 1, count: 3);
+  v := int[][].filled(value: inner, count: 2);
+  assert(v.len == 2, "outer len = 2");
+  assert(v[0].len == 3, "inner len = 3");
+  assert(v[0][0] == 1, "inner value = 1");
 }

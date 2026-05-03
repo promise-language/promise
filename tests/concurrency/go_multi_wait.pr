@@ -1,21 +1,28 @@
 // Nested goroutines: outer goroutine spawns inner goroutines that write
 // to a shared buffered channel. Main collects results.
 // Tests that nested goroutine scheduling works correctly.
-
 main() `test(expected: "62") {
   ch := channel[int](capacity: 2);
 
   // Outer goroutine spawns two inner goroutines
   go {
-    go { ch.send(10 * 2); };
-    go { ch.send(21 * 2); };
+    go {
+      ch.send(10 * 2);
+    };
+    go {
+      ch.send(21 * 2);
+    };
   };
 
   // Main collects both results (thread-blocking mode, always safe)
   int sum = 0;
   a := <-ch;
-  if x := a { sum = sum + x; }
+  if x := a {
+    sum = sum + x;
+  }
   b := <-ch;
-  if y := b { sum = sum + y; }
+  if y := b {
+    sum = sum + y;
+  }
   print_int(sum);
 }

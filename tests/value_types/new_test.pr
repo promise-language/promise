@@ -1,22 +1,26 @@
 type Clamped {
-    int value `value;
+  int value `value;
 
-    new(~this, int v) {
-        if v < 0 { this.value = 0; }
-        else if v > 100 { this.value = 100; }
-        else { this.value = v; }
+  new(~this, int v) {
+    if v < 0 {
+      this.value = 0;
+    } else if v > 100 {
+      this.value = 100;
+    } else {
+      this.value = v;
     }
+  }
 }
 
 main() `test(expected: """50
 0
 100""") {
-    Clamped a = Clamped(v: 50);
-    print_int(a.value);
+  Clamped a = Clamped(v: 50);
+  print_int(a.value);
 
-    Clamped b = Clamped(v: -10);
-    print_int(b.value);
+  Clamped b = Clamped(v: -10);
+  print_int(b.value);
 
-    Clamped c = Clamped(v: 200);
-    print_int(c.value);
+  Clamped c = Clamped(v: 200);
+  print_int(c.value);
 }

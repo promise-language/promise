@@ -1,91 +1,96 @@
 // std/time.pr — Duration and Instant for time measurement
-
 // Native externs — bodies defined in codegen/io.go definePALBodies()
 _nanotime() int `extern("promise_nanotime");
 _sleep_nanos(int ns) `extern("promise_sleep_nanos");
 
 type Duration `public `doc("A span of time measured in nanoseconds. Pure value type with arithmetic, comparison, and human-readable formatting.") {
-    int nanos `value;
+  int nanos `value;
 
-    // Factory constructors
-    from_nanos(int ns) Duration `factory => Duration(nanos: ns);
-    from_micros(int us) Duration `factory => Duration(nanos: us * 1000);
-    from_millis(int ms) Duration `factory => Duration(nanos: ms * 1000000);
-    from_secs(int s) Duration `factory => Duration(nanos: s * 1000000000);
-    zero() Duration `factory => Duration(nanos: 0);
+  // Factory constructors
+  from_nanos(int ns) Duration `factory => Duration(nanos: ns);
+  from_micros(int us) Duration `factory => Duration(nanos: us * 1000);
+  from_millis(int ms) Duration `factory => Duration(nanos: ms * 1000000);
+  from_secs(int s) Duration `factory => Duration(nanos: s * 1000000000);
+  zero() Duration `factory => Duration(nanos: 0);
 
-    // Accessors
-    get as_nanos int => this.nanos;
-    get as_micros int => this.nanos / 1000;
-    get as_millis int => this.nanos / 1000000;
-    get as_secs int => this.nanos / 1000000000;
+  // Accessors
+  get as_nanos int => this.nanos;
+  get as_micros int => this.nanos / 1000;
+  get as_millis int => this.nanos / 1000000;
+  get as_secs int => this.nanos / 1000000000;
 
-    // Arithmetic
-    +(Duration other) Duration => Duration(nanos: this.nanos + other.nanos);
-    -(Duration other) Duration => Duration(nanos: this.nanos - other.nanos);
-    *(int factor) Duration => Duration(nanos: this.nanos * factor);
+  // Arithmetic
+  +(Duration other) Duration => Duration(nanos: this.nanos + other.nanos);
+  -(Duration other) Duration => Duration(nanos: this.nanos - other.nanos);
+  * (int factor) Duration => Duration(nanos: this.nanos * factor);
 
-    // Comparison
-    ==(Duration other) bool => this.nanos == other.nanos;
-    !=(Duration other) bool => this.nanos != other.nanos;
-    <(Duration other) bool => this.nanos < other.nanos;
-    >(Duration other) bool => this.nanos > other.nanos;
-    <=(Duration other) bool => this.nanos <= other.nanos;
-    >=(Duration other) bool => this.nanos >= other.nanos;
+  // Comparison
+  == (Duration other) bool => this.nanos == other.nanos;
+  != (Duration other) bool => this.nanos != other.nanos;
+  < (Duration other) bool => this.nanos < other.nanos;
+  >(Duration other) bool => this.nanos > other.nanos;
+  <= (Duration other) bool => this.nanos <= other.nanos;
+  >= (Duration other) bool => this.nanos >= other.nanos;
 
-    get is_zero bool => this.nanos == 0;
+  get is_zero bool => this.nanos == 0;
 
-    to_string() string `public {
-        if this.nanos < 0 {
-            return "-" + Duration(nanos: -this.nanos).to_string();
-        }
-        if this.nanos < 1000 {
-            return this.nanos.to_string() + "ns";
-        }
-        if this.nanos < 1000000 {
-            int us = this.nanos / 1000;
-            int frac = (this.nanos % 1000) / 100;
-            if frac == 0 { return us.to_string() + "us"; }
-            return us.to_string() + "." + frac.to_string() + "us";
-        }
-        if this.nanos < 1000000000 {
-            int ms = this.nanos / 1000000;
-            int frac = (this.nanos % 1000000) / 100000;
-            if frac == 0 { return ms.to_string() + "ms"; }
-            return ms.to_string() + "." + frac.to_string() + "ms";
-        }
-        int s = this.nanos / 1000000000;
-        int frac = (this.nanos % 1000000000) / 100000000;
-        if frac == 0 { return s.to_string() + "s"; }
-        return s.to_string() + "." + frac.to_string() + "s";
+  to_string() string `public {
+    if this.nanos < 0 {
+      return "-" + Duration(nanos: -this.nanos).to_string();
     }
-
-    format(Writer ~w)! `public {
-        w.write_string(this.to_string());
+    if this.nanos < 1000 {
+      return this.nanos.to_string() + "ns";
     }
+    if this.nanos < 1000000 {
+      int us = this.nanos / 1000;
+      int frac = (this.nanos % 1000) / 100;
+      if frac == 0 {
+        return us.to_string() + "us";
+      }
+      return us.to_string() + "." + frac.to_string() + "us";
+    }
+    if this.nanos < 1000000000 {
+      int ms = this.nanos / 1000000;
+      int frac = (this.nanos % 1000000) / 100000;
+      if frac == 0 {
+        return ms.to_string() + "ms";
+      }
+      return ms.to_string() + "." + frac.to_string() + "ms";
+    }
+    int s = this.nanos / 1000000000;
+    int frac = (this.nanos % 1000000000) / 100000000;
+    if frac == 0 {
+      return s.to_string() + "s";
+    }
+    return s.to_string() + "." + frac.to_string() + "s";
+  }
+
+  format(Writer ~w)! `public {
+    w.write_string(this.to_string());
+  }
 }
 
 type Instant `public `doc("A point in monotonic time. Use `now()` to capture the current time, `elapsed()` to measure duration since capture.") {
-    int nanos `value;
+  int nanos `value;
 
-    // Factory — captures current monotonic time
-    now() Instant `factory => Instant(nanos: _nanotime());
+  // Factory — captures current monotonic time
+  now() Instant `factory => Instant(nanos: _nanotime());
 
-    // elapsed returns the Duration since this instant.
-    elapsed() Duration => Duration(nanos: _nanotime() - this.nanos);
+  // elapsed returns the Duration since this instant.
+  elapsed() Duration => Duration(nanos: _nanotime() - this.nanos);
 
-    // duration_since returns the Duration between this instant and an earlier one.
-    duration_since(Instant earlier) Duration => Duration(nanos: this.nanos - earlier.nanos);
+  // duration_since returns the Duration between this instant and an earlier one.
+  duration_since(Instant earlier) Duration => Duration(nanos: this.nanos - earlier.nanos);
 
-    // Comparison
-    ==(Instant other) bool => this.nanos == other.nanos;
-    !=(Instant other) bool => this.nanos != other.nanos;
-    <(Instant other) bool => this.nanos < other.nanos;
-    >(Instant other) bool => this.nanos > other.nanos;
-    <=(Instant other) bool => this.nanos <= other.nanos;
-    >=(Instant other) bool => this.nanos >= other.nanos;
+  // Comparison
+  == (Instant other) bool => this.nanos == other.nanos;
+  != (Instant other) bool => this.nanos != other.nanos;
+  < (Instant other) bool => this.nanos < other.nanos;
+  >(Instant other) bool => this.nanos > other.nanos;
+  <= (Instant other) bool => this.nanos <= other.nanos;
+  >= (Instant other) bool => this.nanos >= other.nanos;
 }
 
 sleep(Duration d) `public `doc("Pauses the current thread or goroutine for the given duration.") {
-    _sleep_nanos(d.nanos);
+  _sleep_nanos(d.nanos);
 }

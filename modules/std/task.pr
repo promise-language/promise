@@ -1,2 +1,3 @@
 // std/task.pr — Concurrency handle from go expressions
-type Task[T] `native `public {}
+type Task[T] `native `public {
+}

@@ -71,9 +71,8 @@ Options (doc):
   -o <output>     Write output to file instead of stdout
 
 Options (format):
-  -w            Write result to source file instead of stdout
-  --check       Exit 1 if any file not formatted (CI mode)
-  --diff        Show unified diff of changes
+  --check       Check formatting without writing (exit 1 if unformatted)
+  --diff        Show diff of changes without writing
 
 Options (test):
   -timeout <duration>   Per-test timeout (default: 60s)

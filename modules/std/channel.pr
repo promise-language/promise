@@ -1,6 +1,6 @@
 // std/channel.pr — Channel type for concurrent communication
 type Channel[T] `native `public {
-    new(int? capacity) `native;
-    send(T value) `native;
-    close() `native;
+  new(int? capacity) `native;
+  send(T value) `native;
+  close() `native;
 }

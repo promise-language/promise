@@ -1,66 +1,65 @@
 // Test the strings module (compiled as part of the module).
-
 join_basic() `test {
-    assert(join(", ", "a", "b", "c") == "a, b, c", "join basic");
+  assert(join(", ", "a", "b", "c") == "a, b, c", "join basic");
 }
 
 join_empty() `test {
-    assert(join(",") == "", "join empty");
+  assert(join(",") == "", "join empty");
 }
 
 join_single() `test {
-    assert(join(",", "hello") == "hello", "join single");
+  assert(join(",", "hello") == "hello", "join single");
 }
 
 join_vector_passthrough() `test {
-    string[] parts = ["x", "y", "z"];
-    assert(join("-", parts) == "x-y-z", "join vector passthrough");
+  string[] parts = ["x", "y", "z"];
+  assert(join("-", parts) == "x-y-z", "join vector passthrough");
 }
 
 join_empty_separator() `test {
-    assert(join("", "a", "b", "c") == "abc", "join empty separator");
+  assert(join("", "a", "b", "c") == "abc", "join empty separator");
 }
 
 join_two_args() `test {
-    assert(join("|", "x", "y") == "x|y", "join two args");
+  assert(join("|", "x", "y") == "x|y", "join two args");
 }
 
 reverse_basic() `test {
-    assert(reverse("hello") == "olleh", "reverse basic");
+  assert(reverse("hello") == "olleh", "reverse basic");
 }
 
 reverse_empty() `test {
-    assert(reverse("") == "", "reverse empty");
+  assert(reverse("") == "", "reverse empty");
 }
 
 reverse_single() `test {
-    assert(reverse("x") == "x", "reverse single");
+  assert(reverse("x") == "x", "reverse single");
 }
 
 is_blank_spaces() `test {
-    assert(is_blank("   "), "blank spaces");
+  assert(is_blank("   "), "blank spaces");
 }
 
 is_blank_empty() `test {
-    assert(is_blank(""), "blank empty");
+  assert(is_blank(""), "blank empty");
 }
 
 is_blank_tabs_newlines() `test {
-    assert(is_blank("\t\n\r "), "blank tabs newlines");
+  assert(is_blank("\t\n\r "), "blank tabs newlines");
 }
 
 is_blank_false() `test {
-    assert(!is_blank("hi"), "not blank hi");
-    assert(!is_blank(" x "), "not blank x");
+  assert(!is_blank("hi"), "not blank hi");
+  assert(!is_blank(" x "), "not blank x");
 }
 
 spaces_test() `test {
-    assert(spaces(0) == "", "spaces 0");
-    assert(spaces(3) == "   ", "spaces 3");
+  assert(spaces(0) == "", "spaces 0");
+  assert(spaces(3) == "   ", "spaces 3");
 }
 
 repeat_join_test() `test {
-    assert(repeat_join("ab", 3, "-") == "ab-ab-ab", "repeat_join 3");
-    assert(repeat_join("x", 1, ",") == "x", "repeat_join 1");
-    assert(repeat_join("x", 0, ",") == "", "repeat_join 0");
+  assert(repeat_join("ab", 3, "-") == "ab-ab-ab", "repeat_join 3");
+  assert(repeat_join("x", 1, ",") == "x", "repeat_join 1");
+  assert(repeat_join("x", 0, ",") == "", "repeat_join 0");
 }

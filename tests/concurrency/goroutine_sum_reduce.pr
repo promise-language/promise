@@ -1,18 +1,21 @@
 // Sum reduction: many goroutines each contribute a partial sum.
-
 main() `test(expected: "4950") {
-    ch := channel[int](capacity: 100);
+  ch := channel[int](capacity: 100);
 
-    // 100 goroutines, each sends its index
-    for i in 0..100 {
-        go { ch.send(i); };
-    }
+  // 100 goroutines, each sends its index
+  for i in 0..100 {
+    go {
+      ch.send(i);
+    };
+  }
 
-    int total = 0;
-    for j in 0..100 {
-        r := <-ch;
-        if v := r { total += v; }
+  int total = 0;
+  for j in 0..100 {
+    r := <-ch;
+    if v := r {
+      total += v;
     }
-    // 0+1+2+...+99 = 4950
-    print_int(total);
+  }
+  // 0+1+2+...+99 = 4950
+  print_int(total);
 }

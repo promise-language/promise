@@ -1,66 +1,78 @@
 // std/vector.pr — Vector[T] type methods
 type Vector[T] `native `public {
-    get len int `native;
+  get len int `native;
 
-    new(int capacity = 16) `native;
+  new(int capacity = 16) `native;
 
-    // Factory: creates a Vector filled with `count` copies of `value`.
-    filled(T value, int count) Self `factory `public {
-        Self result = Vector[T](capacity: count);
-        int i = 0;
-        while i < count {
-            result.push(value);
-            i = i + 1;
-        }
-        return result;
+  // Factory: creates a Vector filled with `count` copies of `value`.
+  filled(T value, int count) Self `factory `public {
+    Self result = Vector[T](capacity: count);
+    int i = 0;
+    while i < count {
+      result.push(value);
+      i = i + 1;
     }
+    return result;
+  }
 
-    [](int index) T `native;
-    []=(int index, T value) `native;
-    [:](int? start, int? end) T[] {
-        int s = 0;
-        if val := start { s = val; }
-        int e = this.len;
-        if val := end { e = val; }
-        T[] result = [];
-        int i = s;
-        while i < e {
-            result.push(this[i]);
-            i = i + 1;
-        }
-        return result;
+  [](int index) T `native;
+  []=(int index, T value) `native;
+  [:](int? start, int? end) T[] {
+    int s = 0;
+    if val := start {
+      s = val;
     }
-
-    [:]=(int? start, int? end, T[] value) {
-        int s = 0;
-        if val := start { s = val; }
-        int e = this.len;
-        if val := end { e = val; }
-        int vi = 0;
-        int i = s;
-        while i < e {
-            if vi >= value.len { break; }
-            this[i] = value[vi];
-            vi = vi + 1;
-            i = i + 1;
-        }
+    int e = this.len;
+    if val := end {
+      e = val;
     }
-
-    push(T elem) `native;
-    pop() T? `native;
-    contains(T elem) bool `native;
-    remove(int index) `native;
-
-    get is_empty bool => this.len == 0;
-
-    iter() Iterator[T] `public `doc("Returns a lazy iterator over the elements.") {
-        int i = 0;
-        int n = this.len;
-        return _FnIter[T](_next: move || -> T? {
-            if i >= n { return none; }
-            T val = this[i];
-            i = i + 1;
-            return val;
-        });
+    T[] result = [];
+    int i = s;
+    while i < e {
+      result.push(this[i]);
+      i = i + 1;
     }
+    return result;
+  }
+
+  [:]=(int? start, int? end, T[] value) {
+    int s = 0;
+    if val := start {
+      s = val;
+    }
+    int e = this.len;
+    if val := end {
+      e = val;
+    }
+    int vi = 0;
+    int i = s;
+    while i < e {
+      if vi >= value.len {
+        break;
+      }
+      this[i] = value[vi];
+      vi = vi + 1;
+      i = i + 1;
+    }
+  }
+
+  push(T elem) `native;
+  pop() T? `native;
+  contains(T elem) bool `native;
+  remove(int index) `native;
+
+  get is_empty bool => this.len == 0;
+
+  iter() Iterator[T] `public `doc("Returns a lazy iterator over the elements.") {
+    int i = 0;
+    int n = this.len;
+    return _FnIter[T](_next: move || -> T? {
+      if i >= n {
+        return none;
+      }
+      T val = this[i];
+      i = i + 1;
+      return val;
+    });
+  }
 }

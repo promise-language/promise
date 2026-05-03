@@ -1,14 +1,14 @@
 type Point {
-    int x `value;
-    int y `value;
+  int x `value;
+  int y `value;
 }
 
 main() `test(expected: """1
 2
 3""") {
-    p := Point(x: 1, y: 2);
-    print_int(p.x);
-    print_int(p.y);
-    int sum = p.x + p.y;
-    print_int(sum);
+  p := Point(x: 1, y: 2);
+  print_int(p.x);
+  print_int(p.y);
+  int sum = p.x + p.y;
+  print_int(sum);
 }

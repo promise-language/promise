@@ -1,21 +1,28 @@
 // Pipeline: 3-stage goroutine chain connected by channels.
 // Each stage adds 10 to the value.
-
 main() `test(expected: "30") {
   ch1 := channel[int](capacity: 1);
   ch2 := channel[int](capacity: 1);
   ch3 := channel[int](capacity: 1);
 
-  go { ch1.send(10); };
+  go {
+    ch1.send(10);
+  };
   go {
     r := <-ch1;
-    if v := r { ch2.send(v + 10); }
+    if v := r {
+      ch2.send(v + 10);
+    }
   };
   go {
     r := <-ch2;
-    if v := r { ch3.send(v + 10); }
+    if v := r {
+      ch3.send(v + 10);
+    }
   };
 
   r := <-ch3;
-  if v := r { print_int(v); }
+  if v := r {
+    print_int(v);
+  }
 }

@@ -1,10 +1,14 @@
 use std;
 
 // User-defined min shadows std min
-min(int a, int b) int { return 999; }
+min(int a, int b) int {
+  return 999;
+}
 
 // User-defined println shadows std println
-println(string s) { std.print_int(0); }
+println(string s) {
+  std.print_int(0);
+}
 
 main() `test(expected: """999
 3

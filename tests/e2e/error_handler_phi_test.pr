@@ -1,176 +1,223 @@
 // Tests for failable ? handler phi node merge
 // These test value-producing handlers WITHOUT return, exercising the phi path.
-
 parse(string s) int! {
-    if s == "1" { return 1; }
-    raise error(message: "bad");
+  if s == "1" {
+    return 1;
+  }
+  raise error(message: "bad");
 }
 
 test_handler_int_recovery() `test {
-    int v = parse("bad") ? e { 42; };
-    assert(v == 42, "int handler recovery");
+  int v = parse("bad")? e {
+    42;
+  };
+  assert(v == 42, "int handler recovery");
 }
 
 test_handler_int_success() `test {
-    int v = parse("1") ? e { 42; };
-    assert(v == 1, "int success path");
+  int v = parse("1")? e {
+    42;
+  };
+  assert(v == 1, "int success path");
 }
 
 get_name() string! {
-    raise error(message: "no name");
+  raise error(message: "no name");
 }
 
 test_handler_string_recovery() `test {
-    string s = get_name() ? e { "anonymous"; };
-    assert(s == "anonymous", "string handler recovery");
+  string s = get_name()? e {
+    "anonymous";
+  };
+  assert(s == "anonymous", "string handler recovery");
 }
 
 get_ok_name() string! {
-    return "Alice";
+  return "Alice";
 }
 
 test_handler_string_success() `test {
-    string s = get_ok_name() ? e { "anonymous"; };
-    assert(s == "Alice", "string success path");
+  string s = get_ok_name()? e {
+    "anonymous";
+  };
+  assert(s == "Alice", "string success path");
 }
 
 // Method call with ? handler (specific scenario in bug report)
 type Parser {
-    parse(&this, string s) int! {
-        if s == "ok" { return 100; }
-        raise error(message: "parse error");
+  parse(&this, string s) int! {
+    if s == "ok" {
+      return 100;
     }
+    raise error(message: "parse error");
+  }
 }
 
 test_method_handler_recovery() `test {
-    Parser p = Parser();
-    int v = p.parse("bad") ? e { -1; };
-    assert(v == -1, "method call handler recovery");
+  Parser p = Parser();
+  int v = p.parse("bad")? e {
+    -1;
+  };
+  assert(v == -1, "method call handler recovery");
 }
 
 test_method_handler_success() `test {
-    Parser p = Parser();
-    int v = p.parse("ok") ? e { -1; };
-    assert(v == 100, "method call success path");
+  Parser p = Parser();
+  int v = p.parse("ok")? e {
+    -1;
+  };
+  assert(v == 100, "method call success path");
 }
 
 // Method returning user type with handler
 type Result {
-    int value;
+  int value;
 }
 
 type Factory {
-    make(&this, bool fail) Result! {
-        if fail { raise error(message: "failed"); }
-        return Result(value: 42);
+  make(&this, bool fail) Result! {
+    if fail {
+      raise error(message: "failed");
     }
+    return Result(value: 42);
+  }
 }
 
 test_method_user_type_handler() `test {
-    Factory f = Factory();
-    Result r = f.make(true) ? e { Result(value: 0); };
-    assert(r.value == 0, "method user type handler recovery");
+  Factory f = Factory();
+  Result r = f.make(true)? e {
+    Result(value: 0);
+  };
+  assert(r.value == 0, "method user type handler recovery");
 }
 
 test_method_user_type_success() `test {
-    Factory f = Factory();
-    Result r = f.make(false) ? e { Result(value: 0); };
-    assert(r.value == 42, "method user type success path");
+  Factory f = Factory();
+  Result r = f.make(false)? e {
+    Result(value: 0);
+  };
+  assert(r.value == 42, "method user type success path");
 }
 
 // Handler with expression (not just literal)
 test_handler_expression() `test {
-    int base = 40;
-    int v = parse("bad") ? e { base + 2; };
-    assert(v == 42, "handler with expression");
+  int base = 40;
+  int v = parse("bad")? e {
+    base + 2;
+  };
+  assert(v == 42, "handler with expression");
 }
 
 // Void failable with handler (no phi needed, but verify no crash)
-void_fail() ! {
-    raise error(message: "void fail");
+void_fail()! {
+  raise error(message: "void fail");
 }
 
 test_void_handler() `test {
-    bool caught = false;
-    void_fail() ? e { caught = true; };
-    assert(caught, "void handler caught error");
+  bool caught = false;
+  void_fail()? e {
+    caught = true;
+  };
+  assert(caught, "void handler caught error");
 }
 
 // Bool failable with handler
 get_flag() bool! {
-    raise error(message: "no flag");
+  raise error(message: "no flag");
 }
 
 test_handler_bool_recovery() `test {
-    bool v = get_flag() ? e { false; };
-    assert(v == false, "bool handler recovery");
+  bool v = get_flag()? e {
+    false;
+  };
+  assert(v == false, "bool handler recovery");
 }
 
 get_flag_ok() bool! {
-    return true;
+  return true;
 }
 
 test_handler_bool_success() `test {
-    bool v = get_flag_ok() ? e { false; };
-    assert(v == true, "bool success path");
+  bool v = get_flag_ok()? e {
+    false;
+  };
+  assert(v == true, "bool success path");
 }
 
 // Handler in a loop (repeated phi merge)
 test_handler_in_loop() `test {
-    int sum = 0;
-    int i = 0;
-    while i < 5 {
-        int v = parse("{i}") ? e { 0; };
-        sum = sum + v;
-        i = i + 1;
-    }
-    // parse("1") returns 1, all others raise → 0
-    assert(sum == 1, "handler in loop");
+  int sum = 0;
+  int i = 0;
+  while i < 5 {
+    int v = parse("{i}")? e {
+      0;
+    };
+    sum = sum + v;
+    i = i + 1;
+  }
+  // parse("1") returns 1, all others raise → 0
+  assert(sum == 1, "handler in loop");
 }
 
 // Nested handlers
 get_int() int! {
-    raise error(message: "fail");
+  raise error(message: "fail");
 }
 
 test_nested_handlers() `test {
-    int a = get_int() ? e { 10; };
-    int b = get_int() ? e { a + 5; };
-    assert(b == 15, "nested handler uses prior recovery");
+  int a = get_int()? e {
+    10;
+  };
+  int b = get_int()? e {
+    a + 5;
+  };
+  assert(b == 15, "nested handler uses prior recovery");
 }
 
 // Handler with variable from outer scope
 test_handler_outer_scope() `test {
-    int fallback = 99;
-    int v = parse("bad") ? e { fallback; };
-    assert(v == fallback, "handler uses outer scope variable");
+  int fallback = 99;
+  int v = parse("bad")? e {
+    fallback;
+  };
+  assert(v == fallback, "handler uses outer scope variable");
 }
 
 // Multiple handlers in same function
 test_multiple_handlers_same_func() `test {
-    int a = parse("bad") ? e { 1; };
-    string s = get_name() ? e { "default"; };
-    int b = parse("1") ? e { 0; };
-    assert(a == 1, "first handler");
-    assert(s == "default", "second handler");
-    assert(b == 1, "third handler success");
+  int a = parse("bad")? e {
+    1;
+  };
+  string s = get_name()? e {
+    "default";
+  };
+  int b = parse("1")? e {
+    0;
+  };
+  assert(a == 1, "first handler");
+  assert(s == "default", "second handler");
+  assert(b == 1, "third handler success");
 }
 
 // Handler on optional-returning failable
 get_opt() int?! {
-    raise error(message: "no opt");
+  raise error(message: "no opt");
 }
 
 get_opt_ok() int?! {
-    return 42;
+  return 42;
 }
 
 test_handler_optional_recovery() `test {
-    int? v = get_opt() ? e { none; };
-    assert("{v}" == "none", "optional failable handler recovery");
+  int? v = get_opt()? e {
+    none;
+  };
+  assert("{v}" == "none", "optional failable handler recovery");
 }
 
 test_handler_optional_success() `test {
-    int? v = get_opt_ok() ? e { none; };
-    assert("{v}" == "42", "optional failable handler success");
+  int? v = get_opt_ok()? e {
+    none;
+  };
+  assert("{v}" == "42", "optional failable handler success");
 }

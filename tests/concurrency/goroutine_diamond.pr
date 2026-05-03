@@ -1,6 +1,5 @@
 // Diamond pattern: 1 producer sends work, 1 worker doubles it, 1 collector sums.
 // Tests producer-worker-collector pattern with channels.
-
 main() `test(expected: "60") {
   work := channel[int](capacity: 2);
   results := channel[int](capacity: 2);

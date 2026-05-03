@@ -1,6 +1,5 @@
 // Stress test: create and destroy 5000 vectors.
 // Verifies the free-list allocator recycles memory — bump allocator would OOM.
-
 main() `test(expected: "5000") {
   int count = 0;
   for i in 0..5000 {

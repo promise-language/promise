@@ -1,64 +1,64 @@
 // Tests for std/io.pr — Closer interface, write_line
-
 // --- write_line ---
-
 test_write_line() `test {
-    Builder b = Builder();
-    write_line(b, "hello")!;
-    string sep = Platform.line_separator;
-    assert(b.to_string() == "hello" + sep, "write_line appends platform line separator");
+  Builder b = Builder();
+  write_line(b, "hello")!;
+  string sep = Platform.line_separator;
+  assert(b.to_string() == "hello" + sep, "write_line appends platform line separator");
 }
 
 test_write_line_multiple() `test {
-    Builder b = Builder();
-    write_line(b, "first")!;
-    write_line(b, "second")!;
-    string sep = Platform.line_separator;
-    assert(b.to_string() == "first" + sep + "second" + sep, "multiple write_lines");
+  Builder b = Builder();
+  write_line(b, "first")!;
+  write_line(b, "second")!;
+  string sep = Platform.line_separator;
+  assert(b.to_string() == "first" + sep + "second" + sep, "multiple write_lines");
 }
 
 test_write_line_empty() `test {
-    Builder b = Builder();
-    write_line(b, "")!;
-    string sep = Platform.line_separator;
-    assert(b.to_string() == sep, "write_line empty string");
+  Builder b = Builder();
+  write_line(b, "")!;
+  string sep = Platform.line_separator;
+  assert(b.to_string() == sep, "write_line empty string");
 }
 
 // --- Closer structural interface ---
 
 type TestCloser {
-    bool closed;
+  bool closed;
 
-    close(~this)! {
-        this.closed = true;
-    }
+  close(~this)! {
+    this.closed = true;
+  }
 }
 
 _do_close(Closer ~c)! {
-    c.close();
+  c.close();
 }
 
 test_closer_structural() `test {
-    TestCloser tc = TestCloser(closed: false);
-    _do_close(tc)!;
-    assert(tc.closed, "closer was called");
+  TestCloser tc = TestCloser(closed: false);
+  _do_close(tc)!;
+  assert(tc.closed, "closer was called");
 }
 
 // --- Closer error propagation ---
 
 type FailCloser {
-    close(~this)! {
-        raise error(message: "close failed");
-    }
+  close(~this)! {
+    raise error(message: "close failed");
+  }
 }
 
 _try_close(Closer ~c) string {
-    c.close() ? e { return e.message; };
-    return "ok";
+  c.close()? e {
+    return e.message;
+  };
+  return "ok";
 }
 
 test_closer_error() `test {
-    FailCloser fc = FailCloser();
-    string result = _try_close(fc);
-    assert(result == "close failed", "closer error propagated");
+  FailCloser fc = FailCloser();
+  string result = _try_close(fc);
+  assert(result == "close failed", "closer error propagated");
 }

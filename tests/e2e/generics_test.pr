@@ -1,155 +1,153 @@
 // Generic type and function tests: monomorphization, generic methods,
 // multiple instantiations.
-
 // --- generic box type ---
-
 type Box[T] {
-    T value;
+  T value;
 
-    get(&this) T {
-        return this.value;
-    }
+  get(&this) T {
+    return this.value;
+  }
 
-    set(~this, T val) {
-        this.value = val;
-    }
+  set(~this, T val) {
+    this.value = val;
+  }
 }
 
 test_box_int() `test {
-    b := Box[int](value: 42);
-    assert(b.get() == 42, "Box[int] get returns 42");
-    b.set(100);
-    assert(b.get() == 100, "Box[int] set to 100");
+  b := Box[int](value: 42);
+  assert(b.get() == 42, "Box[int] get returns 42");
+  b.set(100);
+  assert(b.get() == 100, "Box[int] set to 100");
 }
 
 test_box_string() `test {
-    b := Box[string](value: "hello");
-    assert(b.get() == "hello", "Box[string] get returns hello");
-    b.set("world");
-    assert(b.get() == "world", "Box[string] set to world");
+  b := Box[string](value: "hello");
+  assert(b.get() == "hello", "Box[string] get returns hello");
+  b.set("world");
+  assert(b.get() == "world", "Box[string] set to world");
 }
 
 test_box_bool() `test {
-    b := Box[bool](value: true);
-    assert(b.get() == true, "Box[bool] get returns true");
-    b.set(false);
-    assert(b.get() == false, "Box[bool] set to false");
+  b := Box[bool](value: true);
+  assert(b.get() == true, "Box[bool] get returns true");
+  b.set(false);
+  assert(b.get() == false, "Box[bool] set to false");
 }
 
 // --- generic enum ---
 
 enum Maybe[T] {
-    Just(T value),
-    Nothing,
+  Just(T value),
+  Nothing,
 }
 
 test_maybe_just() `test {
-    Maybe[int] m = Maybe[int].Just(42);
-    int val = match m {
-        Just(v) => v,
-        Nothing => 0,
-    };
-    assert(val == 42, "Just(42) extracts 42");
+  Maybe[int] m = Maybe[int].Just(42);
+  int val = match m {
+    Just(v) => v,
+    Nothing => 0,
+  };
+  assert(val == 42, "Just(42) extracts 42");
 }
 
 test_maybe_nothing() `test {
-    Maybe[int] m = Maybe[int].Nothing;
-    int val = match m {
-        Just(v) => v,
-        Nothing => -1,
-    };
-    assert(val == -1, "Nothing gives -1");
+  Maybe[int] m = Maybe[int].Nothing;
+  int val = match m {
+    Just(v) => v,
+    Nothing => -1,
+  };
+  assert(val == -1, "Nothing gives -1");
 }
 
 test_maybe_string() `test {
-    Maybe[string] m = Maybe[string].Just("hello");
-    string val = match m {
-        Just(v) => v,
-        Nothing => "empty",
-    };
-    assert(val == "hello", "Just(hello)");
+  Maybe[string] m = Maybe[string].Just("hello");
+  string val = match m {
+    Just(v) => v,
+    Nothing => "empty",
+  };
+  assert(val == "hello", "Just(hello)");
 }
 
 // --- generic function ---
 
 identity[T](T x) T {
-    return x;
+  return x;
 }
 
 test_identity_int() `test {
-    int r = identity[int](42);
-    assert(r == 42, "identity[int](42) = 42");
+  int r = identity[int](42);
+  assert(r == 42, "identity[int](42) = 42");
 }
 
 test_identity_string() `test {
-    string r = identity[string]("hi");
-    assert(r == "hi", "identity[string](hi) = hi");
+  string r = identity[string]("hi");
+  assert(r == "hi", "identity[string](hi) = hi");
 }
 
 // --- generic with method using type param ---
 
 type Container[T] {
-    T[] items;
+  T[] items;
 
-    count(&this) int {
-        return this.items.len;
-    }
+  count(&this) int {
+    return this.items.len;
+  }
 
-    first(&this) T? {
-        if this.items.len > 0 {
-            return this.items[0];
-        }
-        return none;
+  first(&this) T? {
+    if this.items.len > 0 {
+      return this.items[0];
     }
+    return none;
+  }
 
-    add(~this, T item) {
-        this.items.push(item);
-    }
+  add(~this, T item) {
+    this.items.push(item);
+  }
 }
 
 test_container_int() `test {
-    int[] empty_ints = [];
-    c := Container[int](items: empty_ints);
-    assert(c.count() == 0, "empty container");
-    c.add(10);
-    c.add(20);
-    assert(c.count() == 2, "2 items");
-    if v := c.first() {
-        assert(v == 10, "first item is 10");
-    } else {
-        assert(false, "first should be present");
-    }
+  int[] empty_ints = [];
+  c := Container[int](items: empty_ints);
+  assert(c.count() == 0, "empty container");
+  c.add(10);
+  c.add(20);
+  assert(c.count() == 2, "2 items");
+  if v := c.first() {
+    assert(v == 10, "first item is 10");
+  } else {
+    assert(false, "first should be present");
+  }
 }
 
 test_container_string() `test {
-    c := Container[string](items: ["hello"]);
-    assert(c.count() == 1, "1 item");
-    c.add("world");
-    assert(c.count() == 2, "2 items");
-    if v := c.first() {
-        assert(v == "hello", "first item is hello");
-    }
+  c := Container[string](items: ["hello"]);
+  assert(c.count() == 1, "1 item");
+  c.add("world");
+  assert(c.count() == 2, "2 items");
+  if v := c.first() {
+    assert(v == "hello", "first item is hello");
+  }
 }
 
 // --- multiple generic instantiations in same function ---
 
 test_multi_instantiation() `test {
-    bi := Box[int](value: 1);
-    bs := Box[string](value: "a");
-    bb := Box[bool](value: false);
-    assert(bi.get() == 1, "box int");
-    assert(bs.get() == "a", "box string");
-    assert(bb.get() == false, "box bool");
+  bi := Box[int](value: 1);
+  bs := Box[string](value: "a");
+  bb := Box[bool](value: false);
+  assert(bi.get() == 1, "box int");
+  assert(bs.get() == "a", "box string");
+  assert(bb.get() == false, "box bool");
 }
 
 // --- generic with field mutation ---
 
 test_generic_mutation() `test {
-    b := Box[int](value: 0);
-    for i in 0..10 {
-        int cur = b.get();
-        b.set(cur + i);
-    }
-    // 0+1+2+3+4+5+6+7+8+9 = 45
-    assert(b.get() == 45, "accumulated 45 via generic set/get");
+  b := Box[int](value: 0);
+  for i in 0..10 {
+    int cur = b.get();
+    b.set(cur + i);
+  }
+  // 0+1+2+3+4+5+6+7+8+9 = 45
+  assert(b.get() == 45, "accumulated 45 via generic set/get");
 }

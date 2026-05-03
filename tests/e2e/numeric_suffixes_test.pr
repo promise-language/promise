@@ -1,149 +1,151 @@
 // Tests for typed numeric literal suffixes.
-
 // --- Unsigned integer suffixes ---
-
 test_u8_literal() `test {
-    x := 255u8;
-    assert((x as! int) == 255, "u8 max");
-    y := 0u8;
-    assert((y as! int) == 0, "u8 zero");
+  x := 255u8;
+  assert((x as! int) == 255, "u8 max");
+  y := 0u8;
+  assert((y as! int) == 0, "u8 zero");
 }
 
 test_u16_literal() `test {
-    x := 1000u16;
-    assert((x as! int) == 1000, "u16 value");
-    y := 65535u16;
-    assert((y as! int) == 65535, "u16 max");
+  x := 1000u16;
+  assert((x as! int) == 1000, "u16 value");
+  y := 65535u16;
+  assert((y as! int) == 65535, "u16 max");
 }
 
 test_u32_literal() `test {
-    x := 100000u32;
-    assert((x as! int) == 100000, "u32 value");
+  x := 100000u32;
+  assert((x as! int) == 100000, "u32 value");
 }
 
 // --- Signed integer suffixes ---
 
 test_i8_literal() `test {
-    x := 127i8;
-    assert((x as! int) == 127, "i8 max");
-    y := -128i8;
-    assert((y as! int) == -128, "i8 min");
+  x := 127i8;
+  assert((x as! int) == 127, "i8 max");
+  y := -128i8;
+  assert((y as! int) == -128, "i8 min");
 }
 
 test_i16_literal() `test {
-    x := 32767i16;
-    assert((x as! int) == 32767, "i16 max");
-    y := -32768i16;
-    assert((y as! int) == -32768, "i16 min");
+  x := 32767i16;
+  assert((x as! int) == 32767, "i16 max");
+  y := -32768i16;
+  assert((y as! int) == -32768, "i16 min");
 }
 
 test_i32_literal() `test {
-    x := 100i32;
-    assert((x as! int) == 100, "i32 value");
+  x := 100i32;
+  assert((x as! int) == 100, "i32 value");
 }
 
 // --- Hex with suffix ---
 
 test_hex_u8() `test {
-    x := 0xFFu8;
-    assert((x as! int) == 255, "hex u8");
+  x := 0xFFu8;
+  assert((x as! int) == 255, "hex u8");
 }
 
 test_hex_i32() `test {
-    x := 0xFFi32;
-    assert((x as! int) == 255, "hex i32");
+  x := 0xFFi32;
+  assert((x as! int) == 255, "hex i32");
 }
 
 // --- Binary with suffix ---
 
 test_binary_u8() `test {
-    x := 0b11111111u8;
-    assert((x as! int) == 255, "binary u8");
+  x := 0b11111111u8;
+  assert((x as! int) == 255, "binary u8");
 }
 
 // --- Float suffixes ---
 
 test_f32_literal() `test {
-    x := 1.5f32;
-    f32 y = 2.5f32;
-    f32 z = x + y;
-    assert((z as! f64) == 4.0, "f32 arithmetic");
+  x := 1.5f32;
+  f32 y = 2.5f32;
+  f32 z = x + y;
+  assert((z as! f64) == 4.0, "f32 arithmetic");
 }
 
 test_f64_literal() `test {
-    x := 3.14f64;
-    assert(x > 3.0, "f64 suffix");
+  x := 3.14f64;
+  assert(x > 3.0, "f64 suffix");
 }
 
 // --- Arithmetic with suffixed values ---
 
 test_u8_arithmetic() `test {
-    u8 a = 10u8;
-    u8 b = 20u8;
-    u8 c = a + b;
-    assert((c as! int) == 30, "u8 add");
+  u8 a = 10u8;
+  u8 b = 20u8;
+  u8 c = a + b;
+  assert((c as! int) == 30, "u8 add");
 }
 
 test_i16_arithmetic() `test {
-    i16 a = 100i16;
-    i16 b = 200i16;
-    i16 c = a + b;
-    assert((c as! int) == 300, "i16 add");
+  i16 a = 100i16;
+  i16 b = 200i16;
+  i16 c = a + b;
+  assert((c as! int) == 300, "i16 add");
 }
 
 // --- 64-bit suffixes ---
 
 test_u64_literal() `test {
-    x := 42u64;
-    assert((x as! int) == 42, "u64 value");
+  x := 42u64;
+  assert((x as! int) == 42, "u64 value");
 }
 
 test_i64_literal() `test {
-    x := 999i64;
-    assert((x as! int) == 999, "i64 value");
+  x := 999i64;
+  assert((x as! int) == 999, "i64 value");
 }
 
 // --- Underscore-separated suffixed literals ---
 
 test_underscore_u32() `test {
-    x := 1_000_000u32;
-    assert((x as! int) == 1000000, "underscore u32");
+  x := 1_000_000u32;
+  assert((x as! int) == 1000000, "underscore u32");
 }
 
 // --- Octal with suffix ---
 
 test_octal_u8() `test {
-    x := 0o77u8;
-    assert((x as! int) == 63, "octal u8");
+  x := 0o77u8;
+  assert((x as! int) == 63, "octal u8");
 }
 
 // --- Negative signed minimums at runtime ---
 
 test_i32_neg_min() `test {
-    x := -2147483648i32;
-    assert((x as! int) == -2147483648, "i32 neg min");
+  x := -2147483648i32;
+  assert((x as! int) == -2147483648, "i32 neg min");
 }
 
 // --- Suffixed return value ---
 
-get_u8() u8 { return 42u8; }
+get_u8() u8 {
+  return 42u8;
+}
 
 test_suffix_return() `test {
-    assert((get_u8() as! int) == 42, "suffixed return");
+  assert((get_u8() as! int) == 42, "suffixed return");
 }
 
 // --- Suffixed in function args ---
 
-add_u8(u8 a, u8 b) u8 { return a + b; }
+add_u8(u8 a, u8 b) u8 {
+  return a + b;
+}
 
 test_suffix_args() `test {
-    u8 r = add_u8(10u8, 20u8);
-    assert((r as! int) == 30, "suffixed args");
+  u8 r = add_u8(10u8, 20u8);
+  assert((r as! int) == 30, "suffixed args");
 }
 
 // --- Hex u16 ---
 
 test_hex_u16() `test {
-    x := 0xFFFFu16;
-    assert((x as! int) == 65535, "hex u16 max");
+  x := 0xFFFFu16;
+  assert((x as! int) == 65535, "hex u16 max");
 }

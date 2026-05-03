@@ -1,19 +1,20 @@
 // Buffered channel: fill to capacity, then drain completely.
-
 main() `test(expected: "55") {
-    ch := channel[int](capacity: 10);
+  ch := channel[int](capacity: 10);
 
-    // Fill buffer completely
-    for i in 1..=10 {
-        ch.send(i);
-    }
+  // Fill buffer completely
+  for i in 1..=10 {
+    ch.send(i);
+  }
 
-    // Drain and sum
-    int sum = 0;
-    for j in 0..10 {
-        r := <-ch;
-        if v := r { sum += v; }
+  // Drain and sum
+  int sum = 0;
+  for j in 0..10 {
+    r := <-ch;
+    if v := r {
+      sum += v;
     }
-    // 1+2+...+10 = 55
-    print_int(sum);
+  }
+  // 1+2+...+10 = 55
+  print_int(sum);
 }

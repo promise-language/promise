@@ -1,8 +1,8 @@
 type Circle `public {
-    Point center;
-    int radius;
+  Point center;
+  int radius;
 
-    describe(&this) string {
-        return "circle at " + this.center.to_string() + " r={this.radius}";
-    }
+  describe(&this) string {
+    return "circle at " + this.center.to_string() + " r={this.radius}";
+  }
 }

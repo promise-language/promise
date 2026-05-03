@@ -1,27 +1,32 @@
 // Dynamic GOMAXPROCS: change parallelism during execution.
-
 main() `test(expected: "done") {
-    ch := channel[int](capacity: 20);
+  ch := channel[int](capacity: 20);
 
-    // Spawn work at default parallelism
-    for a in 0..10 {
-        go { ch.send(1); };
+  // Spawn work at default parallelism
+  for a in 0..10 {
+    go {
+      ch.send(1);
+    };
+  }
+
+  // Change parallelism mid-flight
+  set_max_procs(2);
+
+  // Spawn more work
+  for b in 0..10 {
+    go {
+      ch.send(1);
+    };
+  }
+
+  // Collect all results
+  int sum = 0;
+  for j in 0..20 {
+    r := <-ch;
+    if v := r {
+      sum += v;
     }
-
-    // Change parallelism mid-flight
-    set_max_procs(2);
-
-    // Spawn more work
-    for b in 0..10 {
-        go { ch.send(1); };
-    }
-
-    // Collect all results
-    int sum = 0;
-    for j in 0..20 {
-        r := <-ch;
-        if v := r { sum += v; }
-    }
-    assert(sum == 20, "all 20 goroutines completed");
-    println("done");
+  }
+  assert(sum == 20, "all 20 goroutines completed");
+  println("done");
 }

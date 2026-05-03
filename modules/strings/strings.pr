@@ -1,62 +1,65 @@
 // strings module — standalone string utility functions.
 // These complement string's built-in methods with operations that work
 // on collections of strings or produce strings from non-string inputs.
-
 join(string sep, ...string parts) string `public `doc("Joins strings with a separator between each element.") {
-    if parts.len == 0 { return ""; }
-    string result = parts[0];
-    int i = 1;
-    while i < parts.len {
-        result = result + sep + parts[i];
-        i = i + 1;
-    }
-    return result;
+  if parts.len == 0 {
+    return "";
+  }
+  string result = parts[0];
+  int i = 1;
+  while i < parts.len {
+    result = result + sep + parts[i];
+    i = i + 1;
+  }
+  return result;
 }
 
 spaces(int n) string `public `doc("Returns a string of `n` spaces.") {
-    return " ".repeat(n);
+  return " ".repeat(n);
 }
 
 reverse(string s) string `public `doc("Reverses a string byte-by-byte.") {
-    if s.len <= 1 {
-        return s;
-    } else {
-        string result = "";
-        int i = s.len - 1;
-        while i >= 0 {
-            result = result + s[i:i + 1];
-            i = i - 1;
-        }
-        return result;
+  if s.len <= 1 {
+    return s;
+  } else {
+    string result = "";
+    int i = s.len - 1;
+    while i >= 0 {
+      result = result + s[i: i + 1];
+      i = i - 1;
     }
+    return result;
+  }
 }
 
 is_blank(string s) bool `public `doc("Returns true if the string is empty or contains only whitespace (space, tab, newline, carriage return).") {
-    if s.len == 0 { return true; }
-    int i = 0;
-    while i < s.len {
-        char c = s[i];
-        if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
-            return false;
-        }
-        i = i + 1;
-    }
+  if s.len == 0 {
     return true;
+  }
+  int i = 0;
+  while i < s.len {
+    char c = s[i];
+    if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
 }
 
 repeat_join(string s, int n, string sep) string `public `doc("Repeats a string `n` times with a separator between each repetition.") {
-    if n <= 0 {
-        return "";
-    } else {
-        string result = "";
-        int i = 0;
-        while i < n {
-            if i > 0 {
-                result = result + sep;
-            }
-            result = result + s;
-            i = i + 1;
-        }
-        return result;
+  if n <= 0 {
+    return "";
+  } else {
+    string result = "";
+    int i = 0;
+    while i < n {
+      if i > 0 {
+        result = result + sep;
+      }
+      result = result + s;
+      i = i + 1;
     }
+    return result;
+  }
 }

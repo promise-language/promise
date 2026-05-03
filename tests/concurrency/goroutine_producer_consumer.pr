@@ -1,35 +1,38 @@
 // Producer-consumer: N producers send items, M consumers receive and count.
-
 main() `test(expected: "50") {
-    ch := channel[int](capacity: 10);
-    done := channel[int](capacity: 5);
+  ch := channel[int](capacity: 10);
+  done := channel[int](capacity: 5);
 
-    // 5 producers, each sends 10 items
-    for p in 0..5 {
-        go {
-            for i in 0..10 {
-                ch.send(1);
-            }
-        };
-    }
+  // 5 producers, each sends 10 items
+  for p in 0..5 {
+    go {
+      for i in 0..10 {
+        ch.send(1);
+      }
+    };
+  }
 
-    // 5 consumers, each receives 10 items
-    for c in 0..5 {
-        go {
-            int local_count = 0;
-            for j in 0..10 {
-                r := <-ch;
-                if v := r { local_count += v; }
-            }
-            done.send(local_count);
-        };
-    }
+  // 5 consumers, each receives 10 items
+  for c in 0..5 {
+    go {
+      int local_count = 0;
+      for j in 0..10 {
+        r := <-ch;
+        if v := r {
+          local_count += v;
+        }
+      }
+      done.send(local_count);
+    };
+  }
 
-    // Collect consumer results
-    int total = 0;
-    for k in 0..5 {
-        r := <-done;
-        if v := r { total += v; }
+  // Collect consumer results
+  int total = 0;
+  for k in 0..5 {
+    r := <-done;
+    if v := r {
+      total += v;
     }
-    print_int(total);
+  }
+  print_int(total);
 }

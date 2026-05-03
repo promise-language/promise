@@ -287,26 +287,40 @@ test_f64_pow10_pos() `test {
 }
 
 test_f64_pow10_neg() `test {
-  f64 a = 0.1; assert("{a}" == "0.1", "1e-1");
-  f64 b = 0.01; assert("{b}" == "0.01", "1e-2");
-  f64 c = 0.001; assert("{c}" == "0.001", "1e-3");
-  f64 d = 0.0001; assert("{d}" == "0.0001", "1e-4");
+  f64 a = 0.1;
+  assert("{a}" == "0.1", "1e-1");
+  f64 b = 0.01;
+  assert("{b}" == "0.01", "1e-2");
+  f64 c = 0.001;
+  assert("{c}" == "0.001", "1e-3");
+  f64 d = 0.0001;
+  assert("{d}" == "0.0001", "1e-4");
 }
 
 test_f64_pow10_sci() `test {
-  f64 a = 1e6;  assert("{a}" == "1e+06", "1e6");
-  f64 b = 1e10; assert("{b}" == "1e+10", "1e10");
-  f64 c = 1e15; assert("{c}" == "1e+15", "1e15");
-  f64 d = 1e50; assert("{d}" == "1e+50", "1e50");
-  f64 e = 1e200; assert("{e}" == "1e+200", "1e200");
+  f64 a = 1e6;
+  assert("{a}" == "1e+06", "1e6");
+  f64 b = 1e10;
+  assert("{b}" == "1e+10", "1e10");
+  f64 c = 1e15;
+  assert("{c}" == "1e+15", "1e15");
+  f64 d = 1e50;
+  assert("{d}" == "1e+50", "1e50");
+  f64 e = 1e200;
+  assert("{e}" == "1e+200", "1e200");
 }
 
 test_f64_pow10_neg_sci() `test {
-  f64 a = 1e-5;  assert("{a}" == "1e-05", "1e-5");
-  f64 b = 1e-10; assert("{b}" == "1e-10", "1e-10");
-  f64 c = 1e-15; assert("{c}" == "1e-15", "1e-15");
-  f64 d = 1e-50; assert("{d}" == "1e-50", "1e-50");
-  f64 e = 1e-200; assert("{e}" == "1e-200", "1e-200");
+  f64 a = 1e-5;
+  assert("{a}" == "1e-05", "1e-5");
+  f64 b = 1e-10;
+  assert("{b}" == "1e-10", "1e-10");
+  f64 c = 1e-15;
+  assert("{c}" == "1e-15", "1e-15");
+  f64 d = 1e-50;
+  assert("{d}" == "1e-50", "1e-50");
+  f64 e = 1e-200;
+  assert("{e}" == "1e-200", "1e-200");
 }
 
 // --- f64 edge cases: f32 (fpext path) ---
@@ -516,7 +530,9 @@ test_interp_field_access() `test {
   assert("{d.nanos}" == "5000000000", "field access in interp");
 }
 
-add_nums(int a, int b) int { return a + b; }
+add_nums(int a, int b) int {
+  return a + b;
+}
 
 test_interp_func_call() `test {
   assert("{add_nums(3, 4)}" == "7", "func call in interp");

@@ -1,21 +1,24 @@
 // Nested goroutine spawning: goroutines spawn more goroutines.
-
 main() `test(expected: "10") {
-    ch := channel[int](capacity: 10);
+  ch := channel[int](capacity: 10);
 
-    // 2 outer goroutines, each spawns 5 inner goroutines
-    for i in 0..2 {
+  // 2 outer goroutines, each spawns 5 inner goroutines
+  for i in 0..2 {
+    go {
+      for j in 0..5 {
         go {
-            for j in 0..5 {
-                go { ch.send(1); };
-            }
+          ch.send(1);
         };
-    }
+      }
+    };
+  }
 
-    int count = 0;
-    for k in 0..10 {
-        r := <-ch;
-        if v := r { count += v; }
+  int count = 0;
+  for k in 0..10 {
+    r := <-ch;
+    if v := r {
+      count += v;
     }
-    print_int(count);
+  }
+  print_int(count);
 }

@@ -494,9 +494,12 @@ type formatter struct {
 	afterOpen      bool // just emitted { and newline (suppress blank line after open brace)
 
 	// Context tracking
-	forHeaderDepth    int  // >0 when inside for(...;...;...) header — suppress semi newlines
-	inLambdaPipes     bool // inside |...| lambda parameter list
-	spacedAfterRBrace bool // true when } handler already emitted a space
+	forHeaderDepth       int   // >0 when inside for(...;...;...) header — suppress semi newlines
+	inLambdaPipes        bool  // inside |...| lambda parameter list
+	spacedAfterRBrace    bool  // true when } handler already emitted a space
+	inOperatorMethodName bool  // true after emitting ]= as part of operator method name
+	totalBracketDepth    int   // total [...] nesting depth
+	sliceBracketStack    []int // depths at which slice brackets were opened
 }
 
 func (f *formatter) peek() token {
@@ -650,6 +653,32 @@ func (f *formatter) emitToken() {
 
 	case tkLBrace:
 		f.consume()
+
+		// Empty map literal {:} — keep on one line
+		if f.isEmptyMapLiteral() {
+			if f.lineHasContent {
+				f.write(" ")
+			} else {
+				f.emitBlankLineIfNeeded()
+				f.writeIndent()
+			}
+			f.write("{:}")
+			f.lineHasContent = true
+			// Consume the : and } tokens (and any newlines between them)
+			f.skipNewlines()
+			f.pos++ // :
+			f.skipNewlines()
+			f.pos++ // }
+			rbrace := token{tkRBrace, "}"}
+			f.prevPrev = tok
+			f.prev = rbrace
+			f.prevEmit = rbrace
+			f.pendingNLs = 0
+			f.afterOpen = false
+			f.skipNewlines()
+			return
+		}
+
 		if f.lineHasContent {
 			f.write(" ")
 		} else {
@@ -696,12 +725,34 @@ func (f *formatter) emitRegular(tok token) {
 		}
 		f.write(tok.text)
 	}
+	// Track operator method name []= / [:]=
+	if tok.kind == tkAssign && f.prev.kind == tkRBracket && (f.prevPrev.kind == tkLBracket || f.prevPrev.kind == tkColon) {
+		f.inOperatorMethodName = true
+	} else if f.inOperatorMethodName && tok.kind != tkAssign {
+		f.inOperatorMethodName = false
+	}
+
 	f.prevPrev = f.prev
 	f.prev = tok
 	f.prevEmit = tok
 	f.pendingNLs = 0
 	f.afterOpen = false
 	f.spacedAfterRBrace = false
+
+	// Track bracket depth for slice colon detection.
+	// Push onto sliceBracketStack when a slice [ is opened; pop when its matching ] is hit.
+	if tok.kind == tkLBracket {
+		if f.isSliceBracket() {
+			f.sliceBracketStack = append(f.sliceBracketStack, f.totalBracketDepth)
+		}
+		f.totalBracketDepth++
+	} else if tok.kind == tkRBracket && f.totalBracketDepth > 0 {
+		f.totalBracketDepth--
+		// Pop if this ] closes a slice bracket
+		if n := len(f.sliceBracketStack); n > 0 && f.sliceBracketStack[n-1] == f.totalBracketDepth {
+			f.sliceBracketStack = f.sliceBracketStack[:n-1]
+		}
+	}
 
 	// Track for-header context: `for ... ; ... ; ... {`
 	if tok.kind == tkIdent && tok.text == "for" {
@@ -730,7 +781,11 @@ func (f *formatter) emitRegular(tok token) {
 			f.skipNewlines()
 			next := f.peek()
 			if next.kind == tkLineComment {
-				// trailing comment stays on this line
+				if f.pendingNLs > 0 {
+					// Comment is on its own line — emit newline so it stays standalone
+					f.newline()
+				}
+				// else: comment is on the same line as the semicolon — trailing
 			} else {
 				f.newline()
 			}
@@ -752,6 +807,74 @@ func (f *formatter) emitRegular(tok token) {
 			f.newline()
 		}
 	}
+}
+
+// isSliceBracket peeks ahead from the current [ to determine if it's a slice/index bracket
+// (not a generic type parameter bracket). Scans to find : before ] at the same depth.
+// Generic constraints are always [Ident: Type, ...] — a single ident before :.
+// Slice expressions have [:], [expr:], or complex expressions (operators) before :.
+func (f *formatter) isSliceBracket() bool {
+	depth := 0
+	hasNonIdent := false // saw a non-ident token before :
+	tokenCount := 0      // number of non-newline tokens before :
+	for i := f.pos; i < len(f.tokens); i++ {
+		tk := f.tokens[i]
+		if tk.kind == tkNewline {
+			continue
+		}
+		if tk.kind == tkLBracket || tk.kind == tkLParen {
+			if depth == 0 {
+				hasNonIdent = true
+			}
+			depth++
+			continue
+		}
+		if tk.kind == tkRBracket || tk.kind == tkRParen {
+			if depth > 0 {
+				depth--
+				continue
+			}
+			// Hit ] at our level — no colon found, not a slice
+			return false
+		}
+		if depth > 0 {
+			continue
+		}
+		if tk.kind == tkColon {
+			// [:...] — empty start slice
+			if tokenCount == 0 {
+				return true
+			}
+			// [expr op ... :] — has operators/non-idents, must be a slice
+			if hasNonIdent {
+				return true
+			}
+			// [ident:] — ambiguous (could be constraint or variable slice)
+			// Treat as generic constraint (space after :)
+			return false
+		}
+		tokenCount++
+		if tk.kind != tkIdent {
+			hasNonIdent = true
+		}
+	}
+	return false
+}
+
+// isEmptyMapLiteral peeks ahead (skipping newlines) to check if the next tokens are `:` `}`.
+func (f *formatter) isEmptyMapLiteral() bool {
+	i := f.pos
+	for i < len(f.tokens) && f.tokens[i].kind == tkNewline {
+		i++
+	}
+	if i >= len(f.tokens) || f.tokens[i].kind != tkColon {
+		return false
+	}
+	i++
+	for i < len(f.tokens) && f.tokens[i].kind == tkNewline {
+		i++
+	}
+	return i < len(f.tokens) && f.tokens[i].kind == tkRBrace
 }
 
 // detectForHeader checks if current `for` is a classic for (with semicolons).
@@ -815,10 +938,14 @@ func (f *formatter) needsSpace(prev, cur token) bool {
 	}
 
 	// Colon: no space before, space after
+	// Exception: slice expressions inside [...] — no space after :
 	if c == tkColon {
 		return false
 	}
 	if p == tkColon {
+		if len(f.sliceBracketStack) > 0 {
+			return false
+		}
 		return true
 	}
 
@@ -831,6 +958,10 @@ func (f *formatter) needsSpace(prev, cur token) bool {
 		if p == tkRParen || p == tkRBracket || p == tkGT {
 			return false
 		}
+		// Operator method names: []=( and [:]=( — no space before (
+		if p == tkAssign && f.inOperatorMethodName {
+			return false
+		}
 		// Unary prefix ops before ( — no space: !(expr), -(expr), ~(expr)
 		if isUnaryPrefixOp(p) && !isValue(f.prevPrev) {
 			return false
@@ -840,7 +971,7 @@ func (f *formatter) needsSpace(prev, cur token) bool {
 
 	// No space before [ if preceded by ident/)/] (indexing, generics)
 	if c == tkLBracket {
-		if p == tkIdent || p == tkRParen || p == tkRBracket || p == tkGT || p == tkQuestion {
+		if p == tkIdent || p == tkRParen || p == tkRBracket || p == tkGT || p == tkQuestion || p == tkString {
 			return false
 		}
 		return true
@@ -864,8 +995,8 @@ func (f *formatter) needsSpace(prev, cur token) bool {
 		return false
 	}
 
-	// Ellipsis: no space
-	if c == tkEllipsis || p == tkEllipsis {
+	// Ellipsis: no space after ..., but space before ... (e.g., ", ...string")
+	if p == tkEllipsis {
 		return false
 	}
 
@@ -879,9 +1010,12 @@ func (f *formatter) needsSpace(prev, cur token) bool {
 	if isUnaryPrefixOp(p) && !isValue(f.prevPrev) {
 		return false
 	}
-	// & used as binary AND (prevPrev is value) followed by unary prefix op: need space
-	// e.g., `c & !d` — & is binary AND, ! is unary NOT on d
-	if p == tkAmp && isValue(f.prevPrev) && isUnaryPrefixOp(c) {
+	// & as binary AND: space around when preceded by a value
+	// e.g., `a & b`, `c & !d`
+	if p == tkAmp && isValue(f.prevPrev) {
+		return true
+	}
+	if c == tkAmp && isValue(prev) {
 		return true
 	}
 
@@ -897,6 +1031,11 @@ func (f *formatter) needsSpace(prev, cur token) bool {
 		}
 	}
 
+	// Operator method names: []= and [:]= — no space around the = in the name
+	// But NOT index assignment like m["a"] = 1 (prevPrev is the expression inside brackets)
+	if c == tkAssign && p == tkRBracket && (f.prevPrev.kind == tkLBracket || f.prevPrev.kind == tkColon) {
+		return false
+	}
 	// Binary operators: space on both sides
 	// But NOT pipe | when used in lambda context (handled above)
 	if isBinaryOp(c) || isBinaryOp(p) {
@@ -906,8 +1045,8 @@ func (f *formatter) needsSpace(prev, cur token) bool {
 		}
 		// cur is a binary op — but some could be unary prefix
 		if (c == tkMinus || c == tkPlus || c == tkStar || c == tkAmp || c == tkTilde || c == tkBang || c == tkLArrow) && !isValue(prev) {
-			// Unary op after non-value, but still need space if prev is a word or binary op
-			if isWord(prev) || p == tkBlockComment || isBinaryOp(p) {
+			// Unary op after non-value, but still need space if prev is a word, binary op, or comma
+			if isWord(prev) || p == tkBlockComment || isBinaryOp(p) || p == tkComma {
 				return true
 			}
 			return false
@@ -1036,7 +1175,7 @@ func isWord(tok token) bool {
 func isControlKeyword(text string) bool {
 	switch text {
 	case "if", "for", "while", "match", "select", "go", "else", "unsafe",
-		"return", "raise", "yield":
+		"return", "raise", "yield", "in":
 		return true
 	}
 	return false

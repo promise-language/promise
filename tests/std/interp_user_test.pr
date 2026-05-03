@@ -1,330 +1,352 @@
 // Tests for user-defined type string interpolation via Format
-
 type Pt {
-    int x;
-    int y;
-    format(Writer ~w)! { w.write_string("({this.x}, {this.y})"); }
+  int x;
+  int y;
+  format(Writer ~w)! {
+    w.write_string("({this.x}, {this.y})");
+  }
 }
 
 test_user_type_basic() `test {
-    Pt p = Pt(x: 3, y: 4);
-    assert("{p}" == "(3, 4)", "user type format interp");
+  Pt p = Pt(x: 3, y: 4);
+  assert("{p}" == "(3, 4)", "user type format interp");
 }
 
 test_user_type_mixed() `test {
-    Pt p = Pt(x: 1, y: 2);
-    assert("point: {p}" == "point: (1, 2)", "mixed text + user type");
+  Pt p = Pt(x: 1, y: 2);
+  assert("point: {p}" == "point: (1, 2)", "mixed text + user type");
 }
 
 test_optional_user_type_some() `test {
-    Pt? p = Pt(x: 5, y: 6);
-    assert("{p}" == "(5, 6)", "optional user type some");
+  Pt? p = Pt(x: 5, y: 6);
+  assert("{p}" == "(5, 6)", "optional user type some");
 }
 
 test_optional_user_type_none() `test {
-    Pt? p = none;
-    assert("{p}" == "none", "optional user type none");
+  Pt? p = none;
+  assert("{p}" == "none", "optional user type none");
 }
 
 test_multiple_user_types() `test {
-    Pt a = Pt(x: 1, y: 2);
-    Pt b = Pt(x: 3, y: 4);
-    assert("{a} -> {b}" == "(1, 2) -> (3, 4)", "multiple user types");
+  Pt a = Pt(x: 1, y: 2);
+  Pt b = Pt(x: 3, y: 4);
+  assert("{a} -> {b}" == "(1, 2) -> (3, 4)", "multiple user types");
 }
 
 // User type with format that uses multiple write_string calls
 type Name {
-    string first;
-    string last;
-    format(Writer ~w)! {
-        w.write_string(this.first);
-        w.write_string(" ");
-        w.write_string(this.last);
-    }
+  string first;
+  string last;
+  format(Writer ~w)! {
+    w.write_string(this.first);
+    w.write_string(" ");
+    w.write_string(this.last);
+  }
 }
 
 test_multi_write_format() `test {
-    Name n = Name(first: "John", last: "Doe");
-    assert("{n}" == "John Doe", "format with multiple writes");
+  Name n = Name(first: "John", last: "Doe");
+  assert("{n}" == "John Doe", "format with multiple writes");
 }
 
 test_user_type_in_println() `test {
-    Pt p = Pt(x: 10, y: 20);
-    string s = "coords: {p}";
-    assert(s == "coords: (10, 20)", "user type in variable");
+  Pt p = Pt(x: 10, y: 20);
+  string s = "coords: {p}";
+  assert(s == "coords: (10, 20)", "user type in variable");
 }
 
 // Polymorphic dispatch: Shape variable holding Circle
 type Shape {
-    format(Writer ~w)! { w.write_string("shape"); }
+  format(Writer ~w)! {
+    w.write_string("shape");
+  }
 }
 
 type Circle is Shape {
-    int radius;
-    format(Writer ~w)! { w.write_string("circle({this.radius})"); }
+  int radius;
+  format(Writer ~w)! {
+    w.write_string("circle({this.radius})");
+  }
 }
 
 test_polymorphic_interp() `test {
-    Shape s = Circle(radius: 5);
-    assert("{s}" == "circle(5)", "polymorphic format dispatch");
+  Shape s = Circle(radius: 5);
+  assert("{s}" == "circle(5)", "polymorphic format dispatch");
 }
 
 test_direct_child_interp() `test {
-    Circle c = Circle(radius: 3);
-    assert("{c}" == "circle(3)", "direct child type interp");
+  Circle c = Circle(radius: 3);
+  assert("{c}" == "circle(3)", "direct child type interp");
 }
 
 // User type with nested interpolation inside format
 type Pair {
-    int a;
-    int b;
-    format(Writer ~w)! { w.write_string("{this.a}:{this.b}"); }
+  int a;
+  int b;
+  format(Writer ~w)! {
+    w.write_string("{this.a}:{this.b}");
+  }
 }
 
 test_nested_interp_in_format() `test {
-    Pair p = Pair(a: 10, b: 20);
-    assert("{p}" == "10:20", "nested interpolation in format");
+  Pair p = Pair(a: 10, b: 20);
+  assert("{p}" == "10:20", "nested interpolation in format");
 }
 
 // Duration (value type from std) also has format()
 test_duration_interp() `test {
-    Duration d = Duration.from_millis(500);
-    assert("{d}" == "500ms", "value type interpolation via Duration");
+  Duration d = Duration.from_millis(500);
+  assert("{d}" == "500ms", "value type interpolation via Duration");
 }
 
 // Empty format
 type Empty {
-    format(Writer ~w)! { }
+  format(Writer ~w)! {
+  }
 }
 
 test_empty_format() `test {
-    Empty e = Empty();
-    assert("{e}" == "", "empty format produces empty string");
+  Empty e = Empty();
+  assert("{e}" == "", "empty format produces empty string");
 }
 
 // Pure value type with all `value fields
 type Color `public {
-    int r `value;
-    int g `value;
-    int b `value;
-    format(Writer ~w)! { w.write_string("rgb({this.r},{this.g},{this.b})"); }
+  int r `value;
+  int g `value;
+  int b `value;
+  format(Writer ~w)! {
+    w.write_string("rgb({this.r},{this.g},{this.b})");
+  }
 }
 
 test_value_type_interp() `test {
-    Color c = Color(r: 255, g: 128, b: 0);
-    assert("{c}" == "rgb(255,128,0)", "pure value type interpolation");
+  Color c = Color(r: 255, g: 128, b: 0);
+  assert("{c}" == "rgb(255,128,0)", "pure value type interpolation");
 }
 
 test_value_type_optional_some() `test {
-    Color? c = Color(r: 0, g: 0, b: 0);
-    assert("{c}" == "rgb(0,0,0)", "optional value type some");
+  Color? c = Color(r: 0, g: 0, b: 0);
+  assert("{c}" == "rgb(0,0,0)", "optional value type some");
 }
 
 test_value_type_optional_none() `test {
-    Color? c = none;
-    assert("{c}" == "none", "optional value type none");
+  Color? c = none;
+  assert("{c}" == "none", "optional value type none");
 }
 
 test_value_type_mixed() `test {
-    Color c = Color(r: 10, g: 20, b: 30);
-    assert("color: {c}" == "color: rgb(10,20,30)", "value type mixed with text");
+  Color c = Color(r: 10, g: 20, b: 30);
+  assert("color: {c}" == "color: rgb(10,20,30)", "value type mixed with text");
 }
 
 // User type mixed with primitives
 test_mixed_primitives_and_user() `test {
-    Pt p = Pt(x: 1, y: 2);
-    int n = 42;
-    bool b = true;
-    assert("{n} at {p} is {b}" == "42 at (1, 2) is true", "mixed primitives and user type");
+  Pt p = Pt(x: 1, y: 2);
+  int n = 42;
+  bool b = true;
+  assert("{n} at {p} is {b}" == "42 at (1, 2) is true", "mixed primitives and user type");
 }
 
 // Nested type: outer format calls inner format via interpolation
 type Inner {
-    int v;
-    format(Writer ~w)! { w.write_string("I{this.v}"); }
+  int v;
+  format(Writer ~w)! {
+    w.write_string("I{this.v}");
+  }
 }
 
 type Outer {
-    Inner inner;
-    format(Writer ~w)! { w.write_string("[{this.inner}]"); }
+  Inner inner;
+  format(Writer ~w)! {
+    w.write_string("[{this.inner}]");
+  }
 }
 
 test_nested_type_interp() `test {
-    Outer o = Outer(inner: Inner(v: 42));
-    assert("{o}" == "[I42]", "nested type format");
+  Outer o = Outer(inner: Inner(v: 42));
+  assert("{o}" == "[I42]", "nested type format");
 }
 
 test_nested_type_mixed() `test {
-    Outer o = Outer(inner: Inner(v: 7));
-    assert("result: {o}!" == "result: [I7]!", "nested type with surrounding text");
+  Outer o = Outer(inner: Inner(v: 7));
+  assert("result: {o}!" == "result: [I7]!", "nested type with surrounding text");
 }
 
 // Three-level inheritance dispatch
 type Animal {
-    format(Writer ~w)! { w.write_string("animal"); }
+  format(Writer ~w)! {
+    w.write_string("animal");
+  }
 }
 
 type Dog is Animal {
-    format(Writer ~w)! { w.write_string("dog"); }
+  format(Writer ~w)! {
+    w.write_string("dog");
+  }
 }
 
 type Poodle is Dog {
-    format(Writer ~w)! { w.write_string("poodle"); }
+  format(Writer ~w)! {
+    w.write_string("poodle");
+  }
 }
 
 test_three_level_vtable() `test {
-    Animal a = Poodle();
-    assert("{a}" == "poodle", "three-level vtable dispatch");
+  Animal a = Poodle();
+  assert("{a}" == "poodle", "three-level vtable dispatch");
 }
 
 test_mid_level_vtable() `test {
-    Animal a = Dog();
-    assert("{a}" == "dog", "mid-level vtable dispatch");
+  Animal a = Dog();
+  assert("{a}" == "dog", "mid-level vtable dispatch");
 }
 
 test_base_level_vtable() `test {
-    Animal a = Animal();
-    assert("{a}" == "animal", "base-level vtable dispatch");
+  Animal a = Animal();
+  assert("{a}" == "animal", "base-level vtable dispatch");
 }
 
 // User type in loop (repeated Builder allocation)
 test_user_type_in_loop() `test {
-    string result = "";
-    int i = 0;
-    while i < 5 {
-        Pt p = Pt(x: i, y: i * 2);
-        result = result + "{p}";
-        i = i + 1;
-    }
-    assert(result == "(0, 0)(1, 2)(2, 4)(3, 6)(4, 8)", "user type formatted in loop");
+  string result = "";
+  int i = 0;
+  while i < 5 {
+    Pt p = Pt(x: i, y: i * 2);
+    result = result + "{p}";
+    i = i + 1;
+  }
+  assert(result == "(0, 0)(1, 2)(2, 4)(3, 6)(4, 8)", "user type formatted in loop");
 }
 
 // User type with string field containing special characters
 type Wrapper {
-    string text;
-    format(Writer ~w)! { w.write_string(this.text); }
+  string text;
+  format(Writer ~w)! {
+    w.write_string(this.text);
+  }
 }
 
 test_special_chars_newline() `test {
-    Wrapper w = Wrapper(text: "line1\nline2");
-    string s = "{w}";
-    assert(s.len == 11, "newline preserved in format output");
+  Wrapper w = Wrapper(text: "line1\nline2");
+  string s = "{w}";
+  assert(s.len == 11, "newline preserved in format output");
 }
 
 test_special_chars_tab() `test {
-    Wrapper w = Wrapper(text: "a\tb");
-    string s = "{w}";
-    assert(s.len == 3, "tab preserved in format output");
+  Wrapper w = Wrapper(text: "a\tb");
+  string s = "{w}";
+  assert(s.len == 3, "tab preserved in format output");
 }
 
 test_special_chars_empty() `test {
-    Wrapper w = Wrapper(text: "");
-    assert("{w}" == "", "empty string field in format");
+  Wrapper w = Wrapper(text: "");
+  assert("{w}" == "", "empty string field in format");
 }
 
 // User type adjacent to other user types (no text between)
 test_adjacent_user_types() `test {
-    Pt a = Pt(x: 1, y: 2);
-    Pt b = Pt(x: 3, y: 4);
-    assert("{a}{b}" == "(1, 2)(3, 4)", "adjacent user types no separator");
+  Pt a = Pt(x: 1, y: 2);
+  Pt b = Pt(x: 3, y: 4);
+  assert("{a}{b}" == "(1, 2)(3, 4)", "adjacent user types no separator");
 }
 
 // Multiple different user types in one string
 test_mixed_user_types() `test {
-    Pt p = Pt(x: 1, y: 2);
-    Name n = Name(first: "Alice", last: "Smith");
-    Color c = Color(r: 255, g: 0, b: 0);
-    assert("{n} at {p} in {c}" == "Alice Smith at (1, 2) in rgb(255,0,0)", "three different user types");
+  Pt p = Pt(x: 1, y: 2);
+  Name n = Name(first: "Alice", last: "Smith");
+  Color c = Color(r: 255, g: 0, b: 0);
+  assert("{n} at {p} in {c}" == "Alice Smith at (1, 2) in rgb(255,0,0)", "three different user types");
 }
 
 // User type interpolation result assigned to variable and reused
 test_interp_result_reuse() `test {
-    Pt p = Pt(x: 10, y: 20);
-    string s1 = "first: {p}";
-    string s2 = "second: {p}";
-    assert(s1 == "first: (10, 20)", "first use");
-    assert(s2 == "second: (10, 20)", "second use");
+  Pt p = Pt(x: 10, y: 20);
+  string s1 = "first: {p}";
+  string s2 = "second: {p}";
+  assert(s1 == "first: (10, 20)", "first use");
+  assert(s2 == "second: (10, 20)", "second use");
 }
 
 // Optional user type in mixed context
 test_optional_user_mixed_some() `test {
-    Pt? p = Pt(x: 1, y: 2);
-    int n = 99;
-    assert("{n} -> {p}" == "99 -> (1, 2)", "optional some in mixed");
+  Pt? p = Pt(x: 1, y: 2);
+  int n = 99;
+  assert("{n} -> {p}" == "99 -> (1, 2)", "optional some in mixed");
 }
 
 test_optional_user_mixed_none() `test {
-    Pt? p = none;
-    int n = 99;
-    assert("{n} -> {p}" == "99 -> none", "optional none in mixed");
+  Pt? p = none;
+  int n = 99;
+  assert("{n} -> {p}" == "99 -> none", "optional none in mixed");
 }
 
 // Duration format edge cases (std value type)
 test_duration_zero() `test {
-    Duration d = Duration.from_millis(0);
-    assert("{d}" == "0ns", "zero duration");
+  Duration d = Duration.from_millis(0);
+  assert("{d}" == "0ns", "zero duration");
 }
 
 test_duration_seconds() `test {
-    Duration d = Duration.from_secs(3);
-    assert("{d}" == "3s", "seconds duration");
+  Duration d = Duration.from_secs(3);
+  assert("{d}" == "3s", "seconds duration");
 }
 
 test_duration_mixed_interp() `test {
-    Duration d = Duration.from_millis(1500);
-    assert("took {d}" == "took 1.5s", "duration in mixed string");
+  Duration d = Duration.from_millis(1500);
+  assert("took {d}" == "took 1.5s", "duration in mixed string");
 }
 
 // Format that conditionally writes
 type Status {
-    bool ok;
-    string msg;
-    format(Writer ~w)! {
-        if this.ok {
-            w.write_string("OK");
-        } else {
-            w.write_string("ERR: ");
-            w.write_string(this.msg);
-        }
+  bool ok;
+  string msg;
+  format(Writer ~w)! {
+    if this.ok {
+      w.write_string("OK");
+    } else {
+      w.write_string("ERR: ");
+      w.write_string(this.msg);
     }
+  }
 }
 
 test_conditional_format_ok() `test {
-    Status s = Status(ok: true, msg: "");
-    assert("{s}" == "OK", "conditional format ok path");
+  Status s = Status(ok: true, msg: "");
+  assert("{s}" == "OK", "conditional format ok path");
 }
 
 test_conditional_format_err() `test {
-    Status s = Status(ok: false, msg: "timeout");
-    assert("{s}" == "ERR: timeout", "conditional format error path");
+  Status s = Status(ok: false, msg: "timeout");
+  assert("{s}" == "ERR: timeout", "conditional format error path");
 }
 
 // Format that writes nothing for some states
 type Toggle {
-    bool on;
-    format(Writer ~w)! {
-        if this.on {
-            w.write_string("ON");
-        }
+  bool on;
+  format(Writer ~w)! {
+    if this.on {
+      w.write_string("ON");
     }
+  }
 }
 
 test_format_conditional_write() `test {
-    Toggle t1 = Toggle(on: true);
-    assert("{t1}" == "ON", "conditional write active");
-    Toggle t2 = Toggle(on: false);
-    assert("{t2}" == "", "conditional write inactive");
+  Toggle t1 = Toggle(on: true);
+  assert("{t1}" == "ON", "conditional write active");
+  Toggle t2 = Toggle(on: false);
+  assert("{t2}" == "", "conditional write inactive");
 }
 
 // Polymorphic in a collection context
 test_polymorphic_in_vector() `test {
-    Shape[] shapes = Vector[Shape]();
-    shapes.push(Circle(radius: 1));
-    shapes.push(Circle(radius: 2));
-    shapes.push(Circle(radius: 3));
-    string result = "";
-    for s in shapes {
-        result = result + "{s} ";
-    }
-    assert(result == "circle(1) circle(2) circle(3) ", "polymorphic format in vector loop");
+  Shape[] shapes = Vector[Shape]();
+  shapes.push(Circle(radius: 1));
+  shapes.push(Circle(radius: 2));
+  shapes.push(Circle(radius: 3));
+  string result = "";
+  for s in shapes {
+    result = result + "{s} ";
+  }
+  assert(result == "circle(1) circle(2) circle(3) ", "polymorphic format in vector loop");
 }

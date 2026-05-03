@@ -1,173 +1,192 @@
 // path module — file path manipulation.
 // All functions are pure string operations; no filesystem access.
-
 _join_two(string base, string child) string {
-    if base.len == 0 {
-        return child;
-    } else if child.len == 0 {
-        return base;
-    } else if Platform.is_path_separator(base[base.len - 1]) {
-        return base + child;
-    } else {
-        return base + Platform.path_separator + child;
-    }
+  if base.len == 0 {
+    return child;
+  } else if child.len == 0 {
+    return base;
+  } else if Platform.is_path_separator(base[base.len - 1]) {
+    return base + child;
+  } else {
+    return base + Platform.path_separator + child;
+  }
 }
 
 join(string base, string child, ...string rest) string `public `doc("Joins path segments with the platform path separator. Handles trailing separators. Accepts two or more segments.") {
-    string result = _join_two(base, child);
-    for part in rest {
-        result = _join_two(result, part);
-    }
-    return result;
+  string result = _join_two(base, child);
+  for part in rest {
+    result = _join_two(result, part);
+  }
+  return result;
 }
 
 file_name(string p) string `public `doc("Returns the last component of a path. Strips trailing separators.") {
-    if p.len == 0 { return ""; }
-    // Strip trailing separator
-    int end = p.len;
-    if end > 1 && Platform.is_path_separator(p[end - 1]) {
-        end = end - 1;
+  if p.len == 0 {
+    return "";
+  }
+  // Strip trailing separator
+  int end = p.len;
+  if end > 1 && Platform.is_path_separator(p[end - 1]) {
+    end = end - 1;
+  }
+  // Find last separator
+  int i = end - 1;
+  while i >= 0 {
+    if Platform.is_path_separator(p[i]) {
+      return p[i + 1:end];
     }
-    // Find last separator
-    int i = end - 1;
-    while i >= 0 {
-        if Platform.is_path_separator(p[i]) { return p[i + 1:end]; }
-        i = i - 1;
-    }
-    return p[0:end];
+    i = i - 1;
+  }
+  return p[0:end];
 }
 
 parent(string p) string `public `doc("Returns the directory part of a path (everything before the last component). Returns `.` for bare filenames.") {
-    if p.len == 0 { return "."; }
-    // Strip trailing separator
-    int end = p.len;
-    if end > 1 && Platform.is_path_separator(p[end - 1]) {
-        end = end - 1;
-    }
-    // Find last separator
-    int i = end - 1;
-    while i >= 0 {
-        if Platform.is_path_separator(p[i]) {
-            if i == 0 { return Platform.path_separator; }
-            return p[0:i];
-        }
-        i = i - 1;
-    }
+  if p.len == 0 {
     return ".";
+  }
+  // Strip trailing separator
+  int end = p.len;
+  if end > 1 && Platform.is_path_separator(p[end - 1]) {
+    end = end - 1;
+  }
+  // Find last separator
+  int i = end - 1;
+  while i >= 0 {
+    if Platform.is_path_separator(p[i]) {
+      if i == 0 {
+        return Platform.path_separator;
+      }
+      return p[0:i];
+    }
+    i = i - 1;
+  }
+  return ".";
 }
 
 extension(string p) string `public `doc("Returns the file extension including the leading dot. Returns empty string if no extension.") {
-    string base = file_name(p);
-    int i = base.len - 1;
-    while i > 0 {
-        if base[i] == '.' { return base[i:base.len]; }
-        i = i - 1;
+  string base = file_name(p);
+  int i = base.len - 1;
+  while i > 0 {
+    if base[i] == '.' {
+      return base[i: base.len];
     }
-    return "";
+    i = i - 1;
+  }
+  return "";
 }
 
 stem(string p) string `public `doc("Returns the filename without its extension. For `archive.tar.gz` returns `archive.tar`.") {
-    string base = file_name(p);
-    int i = base.len - 1;
-    while i > 0 {
-        if base[i] == '.' { return base[0:i]; }
-        i = i - 1;
+  string base = file_name(p);
+  int i = base.len - 1;
+  while i > 0 {
+    if base[i] == '.' {
+      return base[0:i];
     }
-    return base;
+    i = i - 1;
+  }
+  return base;
 }
 
 is_absolute(string p) bool `public `doc("Returns true if the path is absolute. On POSIX: starts with `/`. On Windows: starts with a separator or drive letter (e.g. `C:\\`).") {
-    if p.len == 0 { return false; }
-    if Platform.is_path_separator(p[0]) { return true; }
-    // Windows drive letter: C:\ or C:/
-    if p.len >= 3 && p[1] == ':' && Platform.is_path_separator(p[2]) {
-        char c = p[0];
-        if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') {
-            return true;
-        }
-    }
+  if p.len == 0 {
     return false;
+  }
+  if Platform.is_path_separator(p[0]) {
+    return true;
+  }
+  // Windows drive letter: C:\ or C:/
+  if p.len >= 3 && p[1] == ':' && Platform.is_path_separator(p[2]) {
+    char c = p[0];
+    if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') {
+      return true;
+    }
+  }
+  return false;
 }
 
 is_relative(string p) bool `public `doc("Returns true if the path is not absolute.") {
-    return !is_absolute(p);
+  return !is_absolute(p);
 }
 
 split(string p) string[] `public `doc("Splits a path into all its components. A leading separator becomes the platform path separator as the first element.") {
-    if p.len == 0 { return string[](capacity: 0); }
-    string[] parts = string[]();
-    int start = 0;
-    // Handle leading separator as root component
-    if Platform.is_path_separator(p[0]) {
-        parts.push(Platform.path_separator);
-        start = 1;
-        // Skip consecutive leading separators
-        while start < p.len && Platform.is_path_separator(p[start]) {
-            start = start + 1;
-        }
+  if p.len == 0 {
+    return string[](capacity: 0);
+  }
+  string[] parts = string[]();
+  int start = 0;
+  // Handle leading separator as root component
+  if Platform.is_path_separator(p[0]) {
+    parts.push(Platform.path_separator);
+    start = 1;
+    // Skip consecutive leading separators
+    while start < p.len && Platform.is_path_separator(p[start]) {
+      start = start + 1;
     }
-    // Scan remaining components
-    int i = start;
-    while i < p.len {
-        if Platform.is_path_separator(p[i]) {
-            if i > start {
-                parts.push(p[start:i]);
-            }
-            i = i + 1;
-            start = i;
-        } else {
-            i = i + 1;
-        }
+  }
+  // Scan remaining components
+  int i = start;
+  while i < p.len {
+    if Platform.is_path_separator(p[i]) {
+      if i > start {
+        parts.push(p[start: i]);
+      }
+      i = i + 1;
+      start = i;
+    } else {
+      i = i + 1;
     }
-    // Last component (no trailing separator)
-    if start < p.len {
-        parts.push(p[start:p.len]);
-    }
-    return parts;
+  }
+  // Last component (no trailing separator)
+  if start < p.len {
+    parts.push(p[start: p.len]);
+  }
+  return parts;
 }
 
 normalize(string p) string `public `doc("Collapses `.`, `..`, and redundant separators in a path. Pure string operation — does not access the filesystem.") {
-    if p.len == 0 { return "."; }
-    string[] parts = split(p);
-    bool absolute = parts.len > 0 && parts[0] == Platform.path_separator;
-    string[] result = string[]();
-    int i = 0;
-    // Skip root separator if absolute — we re-add it at the end
+  if p.len == 0 {
+    return ".";
+  }
+  string[] parts = split(p);
+  bool absolute = parts.len > 0 && parts[0] == Platform.path_separator;
+  string[] result = string[]();
+  int i = 0;
+  // Skip root separator if absolute — we re-add it at the end
+  if absolute {
+    i = 1;
+  }
+  while i < parts.len {
+    string part = parts[i];
+    if part == "." {
+      // Skip current-directory marker
+    } else if part == ".." {
+      if result.len > 0 && result[result.len - 1] != ".." {
+        result.pop();
+      } else if !absolute {
+        // Relative path: keep leading ".."
+        result.push(part);
+      }
+      // Absolute path: ".." above root is a no-op
+    } else {
+      result.push(part);
+    }
+    i = i + 1;
+  }
+  if result.len == 0 {
     if absolute {
-        i = 1;
+      return Platform.path_separator;
     }
-    while i < parts.len {
-        string part = parts[i];
-        if part == "." {
-            // Skip current-directory marker
-        } else if part == ".." {
-            if result.len > 0 && result[result.len - 1] != ".." {
-                result.pop();
-            } else if !absolute {
-                // Relative path: keep leading ".."
-                result.push(part);
-            }
-            // Absolute path: ".." above root is a no-op
-        } else {
-            result.push(part);
-        }
-        i = i + 1;
-    }
-    if result.len == 0 {
-        if absolute {
-            return Platform.path_separator;
-        }
-        return ".";
-    }
-    // Rebuild path
-    string out = result[0];
-    int j = 1;
-    while j < result.len {
-        out = _join_two(out, result[j]);
-        j = j + 1;
-    }
-    if absolute {
-        out = Platform.path_separator + out;
-    }
-    return out;
+    return ".";
+  }
+  // Rebuild path
+  string out = result[0];
+  int j = 1;
+  while j < result.len {
+    out = _join_two(out, result[j]);
+    j = j + 1;
+  }
+  if absolute {
+    out = Platform.path_separator + out;
+  }
+  return out;
 }

@@ -1,17 +1,20 @@
 // GOMAXPROCS with parallelism=1: goroutines should still complete.
-
 main() `test(expected: "10") {
   set_max_procs(1);
 
   ch := channel[int](capacity: 10);
   for i in 0..10 {
-    go { ch.send(1); };
+    go {
+      ch.send(1);
+    };
   }
 
   int count = 0;
   for j in 0..10 {
     r := <-ch;
-    if v := r { count = count + v; }
+    if v := r {
+      count = count + v;
+    }
   }
   print_int(count);
 }

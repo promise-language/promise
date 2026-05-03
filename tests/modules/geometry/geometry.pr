@@ -2,23 +2,21 @@
 use utils "./utils";
 
 type Point2D `public {
-    int x;
-    int y;
+  int x;
+  int y;
 
-    distance_to(&this, int ox, int oy) int {
-        int dx = utils.abs(this.x - ox);
-        int dy = utils.abs(this.y - oy);
-        return dx + dy; // manhattan distance
-    }
+  distance_to(&this, int ox, int oy) int {
+    int dx = utils.abs(this.x - ox);
+    int dy = utils.abs(this.y - oy);
+    return dx + dy; // manhattan distance
+  }
 
-    clamped(&this, int xlo, int xhi, int ylo, int yhi) Point2D {
-        return Point2D(
-            x: utils.clamp(this.x, xlo, xhi),
-            y: utils.clamp(this.y, ylo, yhi)
-        );
-    }
+  clamped(&this, int xlo, int xhi, int ylo, int yhi) Point2D {
+    return Point2D(x: utils.clamp(this.x, xlo, xhi),
+    y: utils.clamp(this.y, ylo, yhi));
+  }
 }
 
 midpoint(int x1, int y1, int x2, int y2) Point2D `public {
-    return Point2D(x: (x1 + x2) / 2, y: (y1 + y2) / 2);
+  return Point2D(x: (x1 + x2) / 2, y: (y1 + y2) / 2);
 }

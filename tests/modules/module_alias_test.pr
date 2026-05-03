@@ -1,16 +1,16 @@
 use m "./mathlib";
 
 test_alias_function() `test {
-    assert(m.add(5, 5) == 10, "m.add(5, 5) == 10");
-    assert(m.square(4) == 16, "m.square(4) == 16");
+  assert(m.add(5, 5) == 10, "m.add(5, 5) == 10");
+  assert(m.square(4) == 16, "m.square(4) == 16");
 }
 
 test_alias_type() `test {
-    v := m.Vec2(x: 7, y: 8);
-    assert(v.sum() == 15, "m.Vec2 sum == 15");
+  v := m.Vec2(x: 7, y: 8);
+  assert(v.sum() == 15, "m.Vec2 sum == 15");
 }
 
 test_alias_enum() `test {
-    c := m.Color.Blue;
-    assert(m.color_name(c) == "blue", "m.Color.Blue name");
+  c := m.Color.Blue;
+  assert(m.color_name(c) == "blue", "m.Color.Blue name");
 }

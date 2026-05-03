@@ -1,15 +1,18 @@
 // Barrier: 10 goroutines all signal completion to a barrier channel.
 // Main waits for all 10 to finish.
-
 main() `test(expected: "10") {
   barrier := channel[int](capacity: 10);
   for idx in 0..10 {
-    go { barrier.send(1); };
+    go {
+      barrier.send(1);
+    };
   }
   int count = 0;
   for j in 0..10 {
     r := <-barrier;
-    if v := r { count = count + v; }
+    if v := r {
+      count = count + v;
+    }
   }
   print_int(count);
 }

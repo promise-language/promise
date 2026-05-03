@@ -3,22 +3,27 @@
 // Stage 2: add 10
 // Stage 3: double
 // Result: sum of (i+10)*2 for i=0..4 = 120
-
 main() `test(expected: "120") {
   ch1 := channel[int](capacity: 5);
   ch2 := channel[int](capacity: 5);
   ch3 := channel[int](capacity: 5);
 
   go {
-    for idx in 0..5 { ch1.send(idx); }
+    for idx in 0..5 {
+      ch1.send(idx);
+    }
     ch1.close();
   };
   go {
-    for v in ch1 { ch2.send(v + 10); }
+    for v in ch1 {
+      ch2.send(v + 10);
+    }
     ch2.close();
   };
   go {
-    for v in ch2 { ch3.send(v * 2); }
+    for v in ch2 {
+      ch3.send(v * 2);
+    }
     ch3.close();
   };
 

@@ -3,7 +3,6 @@
 // goroutines_completed() may lag behind channel receives because gs_completed
 // is incremented in goroutine_exit (after the coroutine finishes), so we
 // spin-wait briefly for the counter to catch up.
-
 main() `test(expected: "ok") {
   // Snapshot before spawning
   created_before := goroutines_created();
@@ -11,7 +10,9 @@ main() `test(expected: "ok") {
 
   ch := channel[int](capacity: 5);
   for i in 0..5 {
-    go { ch.send(1); };
+    go {
+      ch.send(1);
+    };
   }
 
   // Wait for all goroutines to finish sending
@@ -28,7 +29,9 @@ main() `test(expected: "ok") {
   // after the coroutine body finishes, so there's a small lag)
   int target = completed_before + 5;
   for spin in 0..10000000 {
-    if goroutines_completed() >= target { break; }
+    if goroutines_completed() >= target {
+      break;
+    }
   }
 
   completed_after := goroutines_completed();

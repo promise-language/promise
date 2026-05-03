@@ -1,8 +1,8 @@
 type Point `public {
-    int x;
-    int y;
+  int x;
+  int y;
 
-    to_string(&this) string {
-        return "({this.x}, {this.y})";
-    }
+  to_string(&this) string {
+    return "({this.x}, {this.y})";
+  }
 }

@@ -1,7 +1,6 @@
 // Fixed-size array as struct field
-
 type Grid {
-    int[3] data;
+  int[3] data;
 }
 
 main() `test(expected: """1
@@ -13,29 +12,29 @@ main() `test(expected: """1
 15
 3
 20""") {
-    // Read array field elements
-    g := Grid(data: [1, 2, 3]);
-    println("{g.data[0]}");
-    println("{g.data[1]}");
-    println("{g.data[2]}");
+  // Read array field elements
+  g := Grid(data: [1, 2, 3]);
+  println("{g.data[0]}");
+  println("{g.data[1]}");
+  println("{g.data[2]}");
 
-    // Write array field element
-    g.data[0] = 42;
-    println("{g.data[0]}");
-    println("{g.data[1]}");
-    println("{g.data[2]}");
+  // Write array field element
+  g.data[0] = 42;
+  println("{g.data[0]}");
+  println("{g.data[1]}");
+  println("{g.data[2]}");
 
-    // Compound assign to array field element
-    g.data[0] += -27;
-    println("{g.data[0]}");
+  // Compound assign to array field element
+  g.data[0] += -27;
+  println("{g.data[0]}");
 
-    // Field array .len
-    println("{g.data.len}");
+  // Field array .len
+  println("{g.data.len}");
 
-    // For-in over field array
-    int sum = 0;
-    for x in g.data {
-        sum += x;
-    }
-    println("{sum}");
+  // For-in over field array
+  int sum = 0;
+  for x in g.data {
+    sum += x;
+  }
+  println("{sum}");
 }

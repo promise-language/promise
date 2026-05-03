@@ -1,7 +1,7 @@
 // std/ordered.pr — Structural ordering interface (extends Equal)
 type Ordered is Equal `structural `public {
-    <(Self other) bool `abstract;
-    >(Self other) bool => other < this;
-    <=(Self other) bool => !(other < this);
-    >=(Self other) bool => !(this < other);
+  < (Self other) bool `abstract;
+  >(Self other) bool => other < this;
+  <= (Self other) bool => !(other < this);
+  >= (Self other) bool => !(this < other);
 }

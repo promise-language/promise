@@ -1,21 +1,21 @@
 type Point {
-    int x `value;
-    int y `value;
+  int x `value;
+  int y `value;
 }
 
 main() `test(expected: """1
 2
 10
 2""") {
-    Point p = Point(x: 1, y: 2);
-    Point q = p;  // copy, not alias
+  Point p = Point(x: 1, y: 2);
+  Point q = p; // copy, not alias
 
-    // Verify q has the same values
-    print_int(q.x);
-    print_int(q.y);
+  // Verify q has the same values
+  print_int(q.x);
+  print_int(q.y);
 
-    // Modify q (via reassignment) — p should be unchanged
-    q = Point(x: 10, y: 2);
-    print_int(q.x);
-    print_int(p.y);
+  // Modify q (via reassignment) — p should be unchanged
+  q = Point(x: 10, y: 2);
+  print_int(q.x);
+  print_int(p.y);
 }

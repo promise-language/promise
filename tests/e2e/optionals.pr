@@ -1,8 +1,7 @@
 // E2E tests for optional values: narrowing, interpolation, elvis.
-
 type Config {
-    int port;
-    string host;
+  int port;
+  string host;
 }
 
 main() `test(expected: """Alice
@@ -30,135 +29,135 @@ negated
 100
 both
 8080""") {
-    // --- Implicit T to T? conversion ---
-    string name = "Alice";
-    string? maybeName = name;
-    println("{maybeName}");
+  // --- Implicit T to T? conversion ---
+  string name = "Alice";
+  string? maybeName = name;
+  println("{maybeName}");
 
-    // --- Optional with none ---
-    int? absent = none;
-    println("{absent}");
+  // --- Optional with none ---
+  int? absent = none;
+  println("{absent}");
 
-    // --- String interpolation with optional types ---
-    int? x = 42;
-    println("{x}");
+  // --- String interpolation with optional types ---
+  int? x = 42;
+  println("{x}");
 
-    string? greeting = "hi";
-    println("{greeting}");
+  string? greeting = "hi";
+  println("{greeting}");
 
-    bool? flag = true;
-    println("{flag}");
+  bool? flag = true;
+  println("{flag}");
 
-    f64? pi = 3.14;
-    println("{pi}");
+  f64? pi = 3.14;
+  println("{pi}");
 
-    // --- Truthiness narrowing: if cc { ... } ---
-    string? cc = "hello";
-    if cc {
-        // cc is narrowed to string here
-        println(cc);
-    }
+  // --- Truthiness narrowing: if cc { ... } ---
+  string? cc = "hello";
+  if cc {
+    // cc is narrowed to string here
+    println(cc);
+  }
 
-    string? noVal = none;
-    if noVal {
-        println("should not print");
-    } else {
-        println("noVal is none");
-    }
+  string? noVal = none;
+  if noVal {
+    println("should not print");
+  } else {
+    println("noVal is none");
+  }
 
-    // --- is present narrowing ---
-    int? num = 100;
-    if num is present {
-        // num is narrowed to int here
-        int n = num;
-        print_int(n);
-    }
+  // --- is present narrowing ---
+  int? num = 100;
+  if num is present {
+    // num is narrowed to int here
+    int n = num;
+    print_int(n);
+  }
 
-    // --- is present with bool? (truthiness is ambiguous, is present works) ---
-    bool? verbose = true;
-    if verbose is present {
-        bool b = verbose;
-        print_bool(b);
-    }
+  // --- is present with bool? (truthiness is ambiguous, is present works) ---
+  bool? verbose = true;
+  if verbose is present {
+    bool b = verbose;
+    print_bool(b);
+  }
 
-    // --- is absent ---
-    int? missing = none;
-    if missing is absent {
-        println("missing is absent");
-    }
+  // --- is absent ---
+  int? missing = none;
+  if missing is absent {
+    println("missing is absent");
+  }
 
-    // --- if-unwrap binding ---
-    string? user = "Bob";
-    if u := user {
-        println(u);
-    }
+  // --- if-unwrap binding ---
+  string? user = "Bob";
+  if u := user {
+    println(u);
+  }
 
-    // --- Elvis operator ---
-    string? maybeHost = none;
-    string host = maybeHost ?: "localhost";
-    println(host);
+  // --- Elvis operator ---
+  string? maybeHost = none;
+  string host = maybeHost ?: "localhost";
+  println(host);
 
-    string? maybePort = "8080";
-    string port = maybePort ?: "3000";
-    println(port);
+  string? maybePort = "8080";
+  string port = maybePort ?: "3000";
+  println(port);
 
-    // --- Narrowing with int ---
-    int? score = 99;
-    if score {
-        int s = score;
-        print_int(s);
-    }
+  // --- Narrowing with int ---
+  int? score = 99;
+  if score {
+    int s = score;
+    print_int(s);
+  }
 
-    // --- Multiple narrowings ---
-    string? a = "first";
-    string? b = none;
-    if a {
-        println(a);
-    }
-    if b {
-        println("should not print");
-    } else {
-        println("b is none");
-    }
+  // --- Multiple narrowings ---
+  string? a = "first";
+  string? b = none;
+  if a {
+    println(a);
+  }
+  if b {
+    println("should not print");
+  } else {
+    println("b is none");
+  }
 
-    // --- Narrowing user-defined types ---
-    Config cfg = Config(port: 8080, host: "localhost");
-    Config? maybeCfg = cfg;
-    if maybeCfg {
-        println("{maybeCfg.port}");
-        println(maybeCfg.host);
-    }
+  // --- Narrowing user-defined types ---
+  Config cfg = Config(port: 8080, host: "localhost");
+  Config? maybeCfg = cfg;
+  if maybeCfg {
+    println("{maybeCfg.port}");
+    println(maybeCfg.host);
+  }
 
-    Config? noCfg = none;
-    if noCfg {
-        println("should not print");
-    } else {
-        println("noCfg is none");
-    }
+  Config? noCfg = none;
+  if noCfg {
+    println("should not print");
+  } else {
+    println("noCfg is none");
+  }
 
-    // --- Uninitialized optional var ---
-    int? uninit;
-    println("{uninit}");
+  // --- Uninitialized optional var ---
+  int? uninit;
+  println("{uninit}");
 
-    // --- Negated narrowing ---
-    string? neg = "negated";
-    if !neg {
-        println("should not print");
-    } else {
-        println(neg);
-    }
+  // --- Negated narrowing ---
+  string? neg = "negated";
+  if !neg {
+    println("should not print");
+  } else {
+    println(neg);
+  }
 
-    // --- Compound narrowing ---
-    int? ca = 100;
-    string? cb = "both";
-    if ca && cb {
-        print_int(ca);
-        println(cb);
-    }
+  // --- Compound narrowing ---
+  int? ca = 100;
+  string? cb = "both";
+  if ca && cb {
+    print_int(ca);
+    println(cb);
+  }
 
-    // --- Optional chaining ---
-    Config cfg2 = Config(port: 8080, host: "localhost");
-    Config? maybeCfg2 = cfg2;
-    int? p = maybeCfg2?.port;
-    println("{p}");
+  // --- Optional chaining ---
+  Config cfg2 = Config(port: 8080, host: "localhost");
+  Config? maybeCfg2 = cfg2;
+  int? p = maybeCfg2?.port;
+  println("{p}");
 }

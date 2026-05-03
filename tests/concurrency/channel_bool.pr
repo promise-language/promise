@@ -1,15 +1,16 @@
 // Channel with bool type.
-
 main() `test(expected: """true
 false
 true""") {
-    ch := channel[bool](capacity: 3);
-    ch.send(true);
-    ch.send(false);
-    ch.send(true);
+  ch := channel[bool](capacity: 3);
+  ch.send(true);
+  ch.send(false);
+  ch.send(true);
 
-    for i in 0..3 {
-        r := <-ch;
-        if v := r { print_bool(v); }
+  for i in 0..3 {
+    r := <-ch;
+    if v := r {
+      print_bool(v);
     }
+  }
 }

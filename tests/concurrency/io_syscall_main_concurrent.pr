@@ -1,60 +1,59 @@
 // Tests that main goroutine can do file IO while other goroutines run.
 // Phase 6a: verifies P handoff from main's M allows other Gs to progress.
 // Uses main() form because `test annotation + goroutines is not yet supported.
-
 use io;
 
 main() `test(expected: """main_io ok
 concurrent_main_io ok""", exclude: "wasm32") {
-    // Test 1: Main does file IO, goroutine does CPU work + channel send
-    io.File.write_content("/tmp/pr_sc_main1", "from main")!;
-    channel[int] ch = channel[int](capacity: 1);
-    go {
-        int sum = 0;
-        for i in 0..1000 {
-            sum = sum + i;
-        }
-        ch.send(sum);
-    };
-    // Main does more IO while goroutine runs
-    string data = io.File.read_content("/tmp/pr_sc_main1")!;
-    assert(data == "from main", "main read");
-    io.File.remove("/tmp/pr_sc_main1")!;
-    r1 := <-ch;
-    if val := r1 {
-        assert(val == 499500, "goroutine computed sum");
+  // Test 1: Main does file IO, goroutine does CPU work + channel send
+  io.File.write_content("/tmp/pr_sc_main1", "from main")!;
+  channel[int] ch = channel[int](capacity: 1);
+  go {
+    int sum = 0;
+    for i in 0..1000 {
+      sum = sum + i;
     }
-    println("main_io ok");
+    ch.send(sum);
+  };
+  // Main does more IO while goroutine runs
+  string data = io.File.read_content("/tmp/pr_sc_main1")!;
+  assert(data == "from main", "main read");
+  io.File.remove("/tmp/pr_sc_main1")!;
+  r1 := <-ch;
+  if val := r1 {
+    assert(val == 499500, "goroutine computed sum");
+  }
+  println("main_io ok");
 
-    // Test 2: Main and goroutines both do IO simultaneously
-    channel[string] done = channel[string](capacity: 3);
-    go {
-        io.File.write_content("/tmp/pr_sc_main2a", "goroutine_a")!;
-        string d = io.File.read_content("/tmp/pr_sc_main2a")!;
-        io.File.remove("/tmp/pr_sc_main2a")!;
-        done.send(d);
-    };
-    go {
-        io.File.write_content("/tmp/pr_sc_main2b", "goroutine_b")!;
-        string d = io.File.read_content("/tmp/pr_sc_main2b")!;
-        io.File.remove("/tmp/pr_sc_main2b")!;
-        done.send(d);
-    };
-    // Main also does IO concurrently
-    io.File.write_content("/tmp/pr_sc_main2c", "main_data")!;
-    string mainData = io.File.read_content("/tmp/pr_sc_main2c")!;
-    io.File.remove("/tmp/pr_sc_main2c")!;
-    assert(mainData == "main_data", "main concurrent IO");
+  // Test 2: Main and goroutines both do IO simultaneously
+  channel[string] done = channel[string](capacity: 3);
+  go {
+    io.File.write_content("/tmp/pr_sc_main2a", "goroutine_a")!;
+    string d = io.File.read_content("/tmp/pr_sc_main2a")!;
+    io.File.remove("/tmp/pr_sc_main2a")!;
+    done.send(d);
+  };
+  go {
+    io.File.write_content("/tmp/pr_sc_main2b", "goroutine_b")!;
+    string d = io.File.read_content("/tmp/pr_sc_main2b")!;
+    io.File.remove("/tmp/pr_sc_main2b")!;
+    done.send(d);
+  };
+  // Main also does IO concurrently
+  io.File.write_content("/tmp/pr_sc_main2c", "main_data")!;
+  string mainData = io.File.read_content("/tmp/pr_sc_main2c")!;
+  io.File.remove("/tmp/pr_sc_main2c")!;
+  assert(mainData == "main_data", "main concurrent IO");
 
-    // Collect goroutine results
-    int count = 0;
-    for _ in 0..2 {
-        gr := <-done;
-        if gv := gr {
-            assert(gv == "goroutine_a" || gv == "goroutine_b", "goroutine result");
-            count = count + 1;
-        }
+  // Collect goroutine results
+  int count = 0;
+  for _ in 0..2 {
+    gr := <-done;
+    if gv := gr {
+      assert(gv == "goroutine_a" || gv == "goroutine_b", "goroutine result");
+      count = count + 1;
     }
-    assert(count == 2, "both goroutines completed");
-    println("concurrent_main_io ok");
+  }
+  assert(count == 2, "both goroutines completed");
+  println("concurrent_main_io ok");
 }

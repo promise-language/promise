@@ -1,183 +1,197 @@
 // std/int.pr — Signed integer types with arithmetic, comparison, bitwise, and unary operators
 type int `native `public {
-    +(int other) int `native;
-    -(int other) int `native;
-    *(int other) int `native;
-    /(int other) int `native;
-    %(int other) int `native;
-    ==(int other) bool `native;
-    !=(int other) bool `native;
-    <(int other) bool `native;
-    >(int other) bool `native;
-    <=(int other) bool `native;
-    >=(int other) bool `native;
-    -() int `native;
-    ++() int `native;
-    --() int `native;
-    &(int other) int `native;
-    |(int other) int `native;
-    ^(int other) int `native;
-    <<(int other) int `native;
-    >>(int other) int `native;
-    ~() int `native;
-    ..(int end) Range[int] `native;
-    ..=(int end) Range[int] `native;
-    get hash int `native;
-    get max int `public `global => 9223372036854775807;
-    get min int `public `global => -9223372036854775807 - 1;
+  +(int other) int `native;
+  -(int other) int `native;
+  * (int other) int `native;
+  / (int other) int `native;
+  % (int other) int `native;
+  == (int other) bool `native;
+  != (int other) bool `native;
+  < (int other) bool `native;
+  >(int other) bool `native;
+  <= (int other) bool `native;
+  >= (int other) bool `native;
+  -() int `native;
+  ++ () int `native;
+  -- () int `native;
+  &(int other) int `native;
+  | (int other) int `native;
+  ^ (int other) int `native;
+  << (int other) int `native;
+  >> (int other) int `native;
+  ~() int `native;
+  .. (int end) Range[int] `native;
+  ..= (int end) Range[int] `native;
+  get hash int `native;
+  get max int `public `global => 9223372036854775807;
+  get min int `public `global => -9223372036854775807 - 1;
 
-    parse(Reader ~r) int! `factory `public {
-        int result = 0;
-        bool negative = false;
-        bool started = false;
-        bool has_digit = false;
+  parse(Reader ~r) int! `factory `public {
+    int result = 0;
+    bool negative = false;
+    bool started = false;
+    bool has_digit = false;
 
-        while true {
-            if byte := r.read_byte() {
-                int c = byte as! int;
-                if !started && c == 45 {
-                    negative = true;
-                    started = true;
-                } else if c >= 48 && c <= 57 {
-                    result = result * 10 + (c - 48);
-                    has_digit = true;
-                    started = true;
-                } else {
-                    break;
-                }
-            } else {
-                if !started {
-                    raise error(message: "unexpected end of input");
-                }
-                break;
-            }
+    while true {
+      if byte := r.read_byte() {
+        int c = byte as! int;
+        if !started && c == 45 {
+          negative = true;
+          started = true;
+        } else if c >= 48 && c <= 57 {
+          result = result * 10 + (c - 48);
+          has_digit = true;
+          started = true;
+        } else {
+          break;
         }
-
-        if !has_digit { raise error(message: "expected digit"); }
-        if negative { result = 0 - result; }
-        return result;
+      } else {
+        if !started {
+          raise error(message: "unexpected end of input");
+        }
+        break;
+      }
     }
 
-    to_string() string `public => "{this}";
-    format(Writer ~w)! `public { w.write_string(this.to_string()); }
+    if !has_digit {
+      raise error(message: "expected digit");
+    }
+    if negative {
+      result = 0 - result;
+    }
+    return result;
+  }
+
+  to_string() string `public => "{this}";
+  format(Writer ~w)! `public {
+    w.write_string(this.to_string());
+  }
 }
 
 type i8 `native `public {
-    +(i8 other) i8 `native;
-    -(i8 other) i8 `native;
-    *(i8 other) i8 `native;
-    /(i8 other) i8 `native;
-    %(i8 other) i8 `native;
-    ==(i8 other) bool `native;
-    !=(i8 other) bool `native;
-    <(i8 other) bool `native;
-    >(i8 other) bool `native;
-    <=(i8 other) bool `native;
-    >=(i8 other) bool `native;
-    -() i8 `native;
-    ++() i8 `native;
-    --() i8 `native;
-    &(i8 other) i8 `native;
-    |(i8 other) i8 `native;
-    ^(i8 other) i8 `native;
-    <<(i8 other) i8 `native;
-    >>(i8 other) i8 `native;
-    ~() i8 `native;
-    ..(i8 end) Range[i8] `native;
-    ..=(i8 end) Range[i8] `native;
-    get hash int `native;
-    get max i8 `public `global => 127i8;
-    get min i8 `public `global => -128i8;
-    to_string() string `public => "{this}";
-    format(Writer ~w)! `public { w.write_string(this.to_string()); }
+  +(i8 other) i8 `native;
+  -(i8 other) i8 `native;
+  * (i8 other) i8 `native;
+  / (i8 other) i8 `native;
+  % (i8 other) i8 `native;
+  == (i8 other) bool `native;
+  != (i8 other) bool `native;
+  < (i8 other) bool `native;
+  >(i8 other) bool `native;
+  <= (i8 other) bool `native;
+  >= (i8 other) bool `native;
+  -() i8 `native;
+  ++ () i8 `native;
+  -- () i8 `native;
+  &(i8 other) i8 `native;
+  | (i8 other) i8 `native;
+  ^ (i8 other) i8 `native;
+  << (i8 other) i8 `native;
+  >> (i8 other) i8 `native;
+  ~() i8 `native;
+  .. (i8 end) Range[i8] `native;
+  ..= (i8 end) Range[i8] `native;
+  get hash int `native;
+  get max i8 `public `global => 127i8;
+  get min i8 `public `global => -128i8;
+  to_string() string `public => "{this}";
+  format(Writer ~w)! `public {
+    w.write_string(this.to_string());
+  }
 }
 
 type i16 `native `public {
-    +(i16 other) i16 `native;
-    -(i16 other) i16 `native;
-    *(i16 other) i16 `native;
-    /(i16 other) i16 `native;
-    %(i16 other) i16 `native;
-    ==(i16 other) bool `native;
-    !=(i16 other) bool `native;
-    <(i16 other) bool `native;
-    >(i16 other) bool `native;
-    <=(i16 other) bool `native;
-    >=(i16 other) bool `native;
-    -() i16 `native;
-    ++() i16 `native;
-    --() i16 `native;
-    &(i16 other) i16 `native;
-    |(i16 other) i16 `native;
-    ^(i16 other) i16 `native;
-    <<(i16 other) i16 `native;
-    >>(i16 other) i16 `native;
-    ~() i16 `native;
-    ..(i16 end) Range[i16] `native;
-    ..=(i16 end) Range[i16] `native;
-    get hash int `native;
-    get max i16 `public `global => 32767i16;
-    get min i16 `public `global => -32768i16;
-    to_string() string `public => "{this}";
-    format(Writer ~w)! `public { w.write_string(this.to_string()); }
+  +(i16 other) i16 `native;
+  -(i16 other) i16 `native;
+  * (i16 other) i16 `native;
+  / (i16 other) i16 `native;
+  % (i16 other) i16 `native;
+  == (i16 other) bool `native;
+  != (i16 other) bool `native;
+  < (i16 other) bool `native;
+  >(i16 other) bool `native;
+  <= (i16 other) bool `native;
+  >= (i16 other) bool `native;
+  -() i16 `native;
+  ++ () i16 `native;
+  -- () i16 `native;
+  &(i16 other) i16 `native;
+  | (i16 other) i16 `native;
+  ^ (i16 other) i16 `native;
+  << (i16 other) i16 `native;
+  >> (i16 other) i16 `native;
+  ~() i16 `native;
+  .. (i16 end) Range[i16] `native;
+  ..= (i16 end) Range[i16] `native;
+  get hash int `native;
+  get max i16 `public `global => 32767i16;
+  get min i16 `public `global => -32768i16;
+  to_string() string `public => "{this}";
+  format(Writer ~w)! `public {
+    w.write_string(this.to_string());
+  }
 }
 
 type i32 `native `public {
-    +(i32 other) i32 `native;
-    -(i32 other) i32 `native;
-    *(i32 other) i32 `native;
-    /(i32 other) i32 `native;
-    %(i32 other) i32 `native;
-    ==(i32 other) bool `native;
-    !=(i32 other) bool `native;
-    <(i32 other) bool `native;
-    >(i32 other) bool `native;
-    <=(i32 other) bool `native;
-    >=(i32 other) bool `native;
-    -() i32 `native;
-    ++() i32 `native;
-    --() i32 `native;
-    &(i32 other) i32 `native;
-    |(i32 other) i32 `native;
-    ^(i32 other) i32 `native;
-    <<(i32 other) i32 `native;
-    >>(i32 other) i32 `native;
-    ~() i32 `native;
-    ..(i32 end) Range[i32] `native;
-    ..=(i32 end) Range[i32] `native;
-    get hash int `native;
-    get max i32 `public `global => 2147483647i32;
-    get min i32 `public `global => -2147483648i32;
-    to_string() string `public => "{this}";
-    format(Writer ~w)! `public { w.write_string(this.to_string()); }
+  +(i32 other) i32 `native;
+  -(i32 other) i32 `native;
+  * (i32 other) i32 `native;
+  / (i32 other) i32 `native;
+  % (i32 other) i32 `native;
+  == (i32 other) bool `native;
+  != (i32 other) bool `native;
+  < (i32 other) bool `native;
+  >(i32 other) bool `native;
+  <= (i32 other) bool `native;
+  >= (i32 other) bool `native;
+  -() i32 `native;
+  ++ () i32 `native;
+  -- () i32 `native;
+  &(i32 other) i32 `native;
+  | (i32 other) i32 `native;
+  ^ (i32 other) i32 `native;
+  << (i32 other) i32 `native;
+  >> (i32 other) i32 `native;
+  ~() i32 `native;
+  .. (i32 end) Range[i32] `native;
+  ..= (i32 end) Range[i32] `native;
+  get hash int `native;
+  get max i32 `public `global => 2147483647i32;
+  get min i32 `public `global => -2147483648i32;
+  to_string() string `public => "{this}";
+  format(Writer ~w)! `public {
+    w.write_string(this.to_string());
+  }
 }
 
 type i64 `native `public {
-    +(i64 other) i64 `native;
-    -(i64 other) i64 `native;
-    *(i64 other) i64 `native;
-    /(i64 other) i64 `native;
-    %(i64 other) i64 `native;
-    ==(i64 other) bool `native;
-    !=(i64 other) bool `native;
-    <(i64 other) bool `native;
-    >(i64 other) bool `native;
-    <=(i64 other) bool `native;
-    >=(i64 other) bool `native;
-    -() i64 `native;
-    ++() i64 `native;
-    --() i64 `native;
-    &(i64 other) i64 `native;
-    |(i64 other) i64 `native;
-    ^(i64 other) i64 `native;
-    <<(i64 other) i64 `native;
-    >>(i64 other) i64 `native;
-    ~() i64 `native;
-    ..(i64 end) Range[i64] `native;
-    ..=(i64 end) Range[i64] `native;
-    get hash int `native;
-    get max i64 `public `global => 9223372036854775807i64;
-    get min i64 `public `global => -9223372036854775807i64 - 1i64;
-    to_string() string `public => "{this}";
-    format(Writer ~w)! `public { w.write_string(this.to_string()); }
+  +(i64 other) i64 `native;
+  -(i64 other) i64 `native;
+  * (i64 other) i64 `native;
+  / (i64 other) i64 `native;
+  % (i64 other) i64 `native;
+  == (i64 other) bool `native;
+  != (i64 other) bool `native;
+  < (i64 other) bool `native;
+  >(i64 other) bool `native;
+  <= (i64 other) bool `native;
+  >= (i64 other) bool `native;
+  -() i64 `native;
+  ++ () i64 `native;
+  -- () i64 `native;
+  &(i64 other) i64 `native;
+  | (i64 other) i64 `native;
+  ^ (i64 other) i64 `native;
+  << (i64 other) i64 `native;
+  >> (i64 other) i64 `native;
+  ~() i64 `native;
+  .. (i64 end) Range[i64] `native;
+  ..= (i64 end) Range[i64] `native;
+  get hash int `native;
+  get max i64 `public `global => 9223372036854775807i64;
+  get min i64 `public `global => -9223372036854775807i64 - 1i64;
+  to_string() string `public => "{this}";
+  format(Writer ~w)! `public {
+    w.write_string(this.to_string());
+  }
 }

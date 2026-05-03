@@ -1,20 +1,21 @@
 // Multiple goroutines panicking: verify main survives them.
-
 main() `test(expected: "3") {
-    ch := channel[int](capacity: 10);
+  ch := channel[int](capacity: 10);
 
-    // 3 goroutines: each sends a value, then panics
-    for i in 0..3 {
-        go {
-            ch.send(1);
-        };
-    }
+  // 3 goroutines: each sends a value, then panics
+  for i in 0..3 {
+    go {
+      ch.send(1);
+    };
+  }
 
-    // Collect all 3 values - this proves main survived
-    int count = 0;
-    for j in 0..3 {
-        r := <-ch;
-        if v := r { count += v; }
+  // Collect all 3 values - this proves main survived
+  int count = 0;
+  for j in 0..3 {
+    r := <-ch;
+    if v := r {
+      count += v;
     }
-    print_int(count);
+  }
+  print_int(count);
 }

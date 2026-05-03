@@ -1,151 +1,191 @@
 // std/string.pr — String type with operators and methods
 type string `native `public {
-    from_bytes(u8[] bytes) string `native `factory;
+  from_bytes(u8[] bytes) string `native `factory;
 
-    get len int `native;
+  get len int `native;
 
-    +(string other) string `native;
-    ==(string other) bool `native;
-    !=(string other) bool `native;
-    <(string other) bool `native;
-    >(string other) bool `native;
-    <=(string other) bool `native;
-    >=(string other) bool `native;
+  +(string other) string `native;
+  == (string other) bool `native;
+  != (string other) bool `native;
+  < (string other) bool `native;
+  >(string other) bool `native;
+  <= (string other) bool `native;
+  >= (string other) bool `native;
 
-    [](int index) char `native;
-    [:](int? start, int? end) string `native;
+  [](int index) char `native;
+  [:](int? start, int? end) string `native;
 
-    contains(string sub) bool {
-        if sub.len == 0 { return true; }
-        if sub.len > this.len { return false; }
-        int limit = this.len - sub.len;
-        int i = 0;
-        while i <= limit {
-            int j = 0;
-            while j < sub.len {
-                if this[i + j] != sub[j] { break; }
-                j = j + 1;
-            }
-            if j == sub.len { return true; }
-            i = i + 1;
+  contains(string sub) bool {
+    if sub.len == 0 {
+      return true;
+    }
+    if sub.len > this.len {
+      return false;
+    }
+    int limit = this.len - sub.len;
+    int i = 0;
+    while i <= limit {
+      int j = 0;
+      while j < sub.len {
+        if this[i + j] != sub[j] {
+          break;
         }
+        j = j + 1;
+      }
+      if j == sub.len {
+        return true;
+      }
+      i = i + 1;
+    }
+    return false;
+  }
+
+  starts_with(string prefix) bool {
+    if prefix.len > this.len {
+      return false;
+    }
+    int i = 0;
+    while i < prefix.len {
+      if this[i] != prefix[i] {
         return false;
+      }
+      i = i + 1;
     }
+    return true;
+  }
 
-    starts_with(string prefix) bool {
-        if prefix.len > this.len { return false; }
-        int i = 0;
-        while i < prefix.len {
-            if this[i] != prefix[i] { return false; }
-            i = i + 1;
+  ends_with(string suffix) bool {
+    if suffix.len > this.len {
+      return false;
+    }
+    int offset = this.len - suffix.len;
+    int i = 0;
+    while i < suffix.len {
+      if this[offset + i] != suffix[i] {
+        return false;
+      }
+      i = i + 1;
+    }
+    return true;
+  }
+
+  index_of(string sub) int? {
+    if sub.len == 0 {
+      return 0;
+    }
+    if sub.len > this.len {
+      return none;
+    }
+    int limit = this.len - sub.len;
+    int i = 0;
+    while i <= limit {
+      int j = 0;
+      while j < sub.len {
+        if this[i + j] != sub[j] {
+          break;
         }
-        return true;
+        j = j + 1;
+      }
+      if j == sub.len {
+        return i;
+      }
+      i = i + 1;
     }
+    return none;
+  }
+  trim() string `native;
+  split(string sep) string[] `native;
+  bytes() u8[] `native;
+  byte_at(int index) u8 `native;
 
-    ends_with(string suffix) bool {
-        if suffix.len > this.len { return false; }
-        int offset = this.len - suffix.len;
-        int i = 0;
-        while i < suffix.len {
-            if this[offset + i] != suffix[i] { return false; }
-            i = i + 1;
+  to_upper() string `native;
+  to_lower() string `native;
+  repeat(int n) string `native;
+
+  replace(string old, string new_val) string {
+    if old.len == 0 {
+      return this;
+    }
+    string result = "";
+    int i = 0;
+    while i <= this.len - old.len {
+      int j = 0;
+      while j < old.len {
+        if this[i + j] != old[j] {
+          break;
         }
-        return true;
+        j = j + 1;
+      }
+      if j == old.len {
+        result = result + new_val;
+        i = i + old.len;
+      } else {
+        result = result + this[i: i + 1];
+        i = i + 1;
+      }
     }
+    // Append remaining characters
+    while i < this.len {
+      result = result + this[i: i + 1];
+      i = i + 1;
+    }
+    return result;
+  }
 
-    index_of(string sub) int? {
-        if sub.len == 0 { return 0; }
-        if sub.len > this.len { return none; }
-        int limit = this.len - sub.len;
-        int i = 0;
-        while i <= limit {
-            int j = 0;
-            while j < sub.len {
-                if this[i + j] != sub[j] { break; }
-                j = j + 1;
-            }
-            if j == sub.len { return i; }
-            i = i + 1;
+  count(string sub) int {
+    if sub.len == 0 {
+      return 0;
+    }
+    if sub.len > this.len {
+      return 0;
+    }
+    int result = 0;
+    int limit = this.len - sub.len;
+    int i = 0;
+    while i <= limit {
+      int j = 0;
+      while j < sub.len {
+        if this[i + j] != sub[j] {
+          break;
         }
-        return none;
+        j = j + 1;
+      }
+      if j == sub.len {
+        result = result + 1;
+        i = i + sub.len;
+      } else {
+        i = i + 1;
+      }
     }
-    trim() string `native;
-    split(string sep) string[] `native;
-    bytes() u8[] `native;
-    byte_at(int index) u8 `native;
+    return result;
+  }
 
-    to_upper() string `native;
-    to_lower() string `native;
-    repeat(int n) string `native;
-
-    replace(string old, string new_val) string {
-        if old.len == 0 { return this; }
-        string result = "";
-        int i = 0;
-        while i <= this.len - old.len {
-            int j = 0;
-            while j < old.len {
-                if this[i + j] != old[j] { break; }
-                j = j + 1;
-            }
-            if j == old.len {
-                result = result + new_val;
-                i = i + old.len;
-            } else {
-                result = result + this[i:i + 1];
-                i = i + 1;
-            }
-        }
-        // Append remaining characters
-        while i < this.len {
-            result = result + this[i:i + 1];
-            i = i + 1;
-        }
-        return result;
+  chars() char[] {
+    char[] result = Vector[char](this.len);
+    for c in this {
+      result.push(c);
     }
+    return result;
+  }
 
-    count(string sub) int {
-        if sub.len == 0 { return 0; }
-        if sub.len > this.len { return 0; }
-        int result = 0;
-        int limit = this.len - sub.len;
-        int i = 0;
-        while i <= limit {
-            int j = 0;
-            while j < sub.len {
-                if this[i + j] != sub[j] { break; }
-                j = j + 1;
-            }
-            if j == sub.len {
-                result = result + 1;
-                i = i + sub.len;
-            } else {
-                i = i + 1;
-            }
-        }
-        return result;
+  pad_left(int width, char fill) string `doc("Pads the string on the left with `fill` to reach `width`. Returns unchanged if already wide enough.") {
+    if this.len >= width {
+      return this;
     }
+    return fill.to_string().repeat(width - this.len) + this;
+  }
 
-    chars() char[] {
-        char[] result = Vector[char](this.len);
-        for c in this {
-            result.push(c);
-        }
-        return result;
+  pad_right(int width, char fill) string `doc("Pads the string on the right with `fill` to reach `width`. Returns unchanged if already wide enough.") {
+    if this.len >= width {
+      return this;
     }
+    return this + fill.to_string().repeat(width - this.len);
+  }
 
-    pad_left(int width, char fill) string `doc("Pads the string on the left with `fill` to reach `width`. Returns unchanged if already wide enough.") {
-        if this.len >= width { return this; }
-        return fill.to_string().repeat(width - this.len) + this;
-    }
-
-    pad_right(int width, char fill) string `doc("Pads the string on the right with `fill` to reach `width`. Returns unchanged if already wide enough.") {
-        if this.len >= width { return this; }
-        return this + fill.to_string().repeat(width - this.len);
-    }
-
-    get hash int `native;
-    get is_empty bool => this.len == 0;
-    to_string() string `public => this;
-    format(Writer ~w)! `public { w.write_string(this); }
+  get hash int `native;
+  get is_empty bool => this.len == 0;
+  to_string() string `public => this;
+  format(Writer ~w)! `public {
+    w.write_string(this);
+  }
 }

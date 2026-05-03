@@ -1,18 +1,21 @@
 // Map-reduce pattern: goroutines compute partial results, main aggregates.
-
 main() `test(expected: "285") {
-    ch := channel[int](capacity: 10);
+  ch := channel[int](capacity: 10);
 
-    // 10 goroutines, each sends its index squared
-    for i in 0..10 {
-        go { ch.send(i * i); };
-    }
+  // 10 goroutines, each sends its index squared
+  for i in 0..10 {
+    go {
+      ch.send(i * i);
+    };
+  }
 
-    // Aggregate: sum of squares 0^2 + 1^2 + ... + 9^2 = 285
-    int total = 0;
-    for k in 0..10 {
-        r := <-ch;
-        if v := r { total += v; }
+  // Aggregate: sum of squares 0^2 + 1^2 + ... + 9^2 = 285
+  int total = 0;
+  for k in 0..10 {
+    r := <-ch;
+    if v := r {
+      total += v;
     }
-    print_int(total);
+  }
+  print_int(total);
 }

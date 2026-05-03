@@ -1,168 +1,198 @@
 // std/float.pr — Floating-point types with arithmetic, comparison, and unary operators
 type f32 `native `public {
-    +(f32 other) f32 `native;
-    -(f32 other) f32 `native;
-    *(f32 other) f32 `native;
-    /(f32 other) f32 `native;
-    %(f32 other) f32 `native;
-    ==(f32 other) bool `native;
-    !=(f32 other) bool `native;
-    <(f32 other) bool `native;
-    >(f32 other) bool `native;
-    <=(f32 other) bool `native;
-    >=(f32 other) bool `native;
-    -() f32 `native;
-    ++() f32 `native;
-    --() f32 `native;
-    get hash int `native;
-    get max f32 `public `global => 3.4028235e+38f32;
-    get min f32 `public `global => -3.4028235e+38f32;
-    get pi f32 `public `global => 3.14159265f32;
-    get e f32 `public `global => 2.71828183f32;
-    get tau f32 `public `global => 6.28318531f32;
-    to_string() string `public => "{this}";
-    format(Writer ~w)! `public { w.write_string(this.to_string()); }
+  +(f32 other) f32 `native;
+  -(f32 other) f32 `native;
+  * (f32 other) f32 `native;
+  / (f32 other) f32 `native;
+  % (f32 other) f32 `native;
+  == (f32 other) bool `native;
+  != (f32 other) bool `native;
+  < (f32 other) bool `native;
+  >(f32 other) bool `native;
+  <= (f32 other) bool `native;
+  >= (f32 other) bool `native;
+  -() f32 `native;
+  ++ () f32 `native;
+  -- () f32 `native;
+  get hash int `native;
+  get max f32 `public `global => 3.4028235e+38f32;
+  get min f32 `public `global => -3.4028235e+38f32;
+  get pi f32 `public `global => 3.14159265f32;
+  get e f32 `public `global => 2.71828183f32;
+  get tau f32 `public `global => 6.28318531f32;
+  to_string() string `public => "{this}";
+  format(Writer ~w)! `public {
+    w.write_string(this.to_string());
+  }
 }
 
 type f64 `native `public {
-    +(f64 other) f64 `native;
-    -(f64 other) f64 `native;
-    *(f64 other) f64 `native;
-    /(f64 other) f64 `native;
-    %(f64 other) f64 `native;
-    ==(f64 other) bool `native;
-    !=(f64 other) bool `native;
-    <(f64 other) bool `native;
-    >(f64 other) bool `native;
-    <=(f64 other) bool `native;
-    >=(f64 other) bool `native;
-    -() f64 `native;
-    ++() f64 `native;
-    --() f64 `native;
-    get hash int `native;
-    get max f64 `public `global => 1.7976931348623157e+308;
-    get min f64 `public `global => -1.7976931348623157e+308;
-    get pi f64 `public `global => 3.14159265358979323846;
-    get e f64 `public `global => 2.71828182845904523536;
-    get tau f64 `public `global => 6.28318530717958647692;
+  +(f64 other) f64 `native;
+  -(f64 other) f64 `native;
+  * (f64 other) f64 `native;
+  / (f64 other) f64 `native;
+  % (f64 other) f64 `native;
+  == (f64 other) bool `native;
+  != (f64 other) bool `native;
+  < (f64 other) bool `native;
+  >(f64 other) bool `native;
+  <= (f64 other) bool `native;
+  >= (f64 other) bool `native;
+  -() f64 `native;
+  ++ () f64 `native;
+  -- () f64 `native;
+  get hash int `native;
+  get max f64 `public `global => 1.7976931348623157e+308;
+  get min f64 `public `global => -1.7976931348623157e+308;
+  get pi f64 `public `global => 3.14159265358979323846;
+  get e f64 `public `global => 2.71828182845904523536;
+  get tau f64 `public `global => 6.28318530717958647692;
 
-    parse(Reader ~r) f64! `factory `public {
-        f64 result = 0.0;
-        bool negative = false;
-        bool started = false;
-        bool has_digit = false;
-        bool got_exp = false;
+  parse(Reader ~r) f64! `factory `public {
+    f64 result = 0.0;
+    bool negative = false;
+    bool started = false;
+    bool has_digit = false;
+    bool got_exp = false;
 
-        // Integer part (with optional leading '-')
-        while true {
-            if byte := r.read_byte() {
-                int c = byte as! int;
-                if !started && c == 45 {
-                    negative = true;
-                    started = true;
-                } else if c >= 48 && c <= 57 {
-                    result = result * 10.0 + ((c - 48) as! f64);
-                    has_digit = true;
-                    started = true;
-                } else if c == 46 {
-                    started = true;
-                    break;
-                } else if (c == 101 || c == 69) && has_digit {
-                    if negative { result = -result; }
-                    got_exp = true;
-                    break;
-                } else {
-                    if !has_digit { raise error(message: "expected digit"); }
-                    if negative { result = -result; }
-                    return result;
-                }
-            } else {
-                if !started { raise error(message: "unexpected end of input"); }
-                if !has_digit { raise error(message: "expected digit"); }
-                if negative { result = -result; }
-                return result;
-            }
+    // Integer part (with optional leading '-')
+    while true {
+      if byte := r.read_byte() {
+        int c = byte as! int;
+        if !started && c == 45 {
+          negative = true;
+          started = true;
+        } else if c >= 48 && c <= 57 {
+          result = result * 10.0 + ((c - 48) as! f64);
+          has_digit = true;
+          started = true;
+        } else if c == 46 {
+          started = true;
+          break;
+        } else if (c == 101 || c == 69) && has_digit {
+          if negative {
+            result = -result;
+          }
+          got_exp = true;
+          break;
+        } else {
+          if !has_digit {
+            raise error(message: "expected digit");
+          }
+          if negative {
+            result = -result;
+          }
+          return result;
         }
-
-        // Fractional part (after '.')
-        if !got_exp {
-            f64 frac = 0.0;
-            f64 place = 0.1;
-            while true {
-                if byte := r.read_byte() {
-                    int c = byte as! int;
-                    if c >= 48 && c <= 57 {
-                        frac = frac + ((c - 48) as! f64) * place;
-                        place = place * 0.1;
-                        has_digit = true;
-                    } else if (c == 101 || c == 69) && has_digit {
-                        got_exp = true;
-                        break;
-                    } else {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-            if !has_digit { raise error(message: "expected digit"); }
-            result = result + frac;
-            if negative { result = -result; }
+      } else {
+        if !started {
+          raise error(message: "unexpected end of input");
         }
-
-        // Exponent part (after 'e'/'E')
-        if got_exp {
-            int exp = 0;
-            bool exp_negative = false;
-            bool exp_has_digit = false;
-
-            if byte := r.read_byte() {
-                int c = byte as! int;
-                if c == 43 {
-                    // '+' — skip
-                } else if c == 45 {
-                    exp_negative = true;
-                } else if c >= 48 && c <= 57 {
-                    exp = c - 48;
-                    exp_has_digit = true;
-                } else {
-                    raise error(message: "expected exponent");
-                }
-            } else {
-                raise error(message: "expected exponent");
-            }
-
-            while true {
-                if byte := r.read_byte() {
-                    int c = byte as! int;
-                    if c >= 48 && c <= 57 {
-                        exp = exp * 10 + (c - 48);
-                        exp_has_digit = true;
-                    } else {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-
-            if !exp_has_digit { raise error(message: "expected exponent digit"); }
-            if exp_negative { exp = 0 - exp; }
-
-            // Apply 10^exp
-            if exp > 0 {
-                int i = 0;
-                while i < exp { result = result * 10.0; i = i + 1; }
-            } else if exp < 0 {
-                int i = 0;
-                int abs_exp = 0 - exp;
-                while i < abs_exp { result = result / 10.0; i = i + 1; }
-            }
+        if !has_digit {
+          raise error(message: "expected digit");
         }
-
+        if negative {
+          result = -result;
+        }
         return result;
+      }
     }
 
-    to_string() string `public => "{this}";
-    format(Writer ~w)! `public { w.write_string(this.to_string()); }
+    // Fractional part (after '.')
+    if !got_exp {
+      f64 frac = 0.0;
+      f64 place = 0.1;
+      while true {
+        if byte := r.read_byte() {
+          int c = byte as! int;
+          if c >= 48 && c <= 57 {
+            frac = frac + ((c - 48) as! f64) * place;
+            place = place * 0.1;
+            has_digit = true;
+          } else if (c == 101 || c == 69) && has_digit {
+            got_exp = true;
+            break;
+          } else {
+            break;
+          }
+        } else {
+          break;
+        }
+      }
+      if !has_digit {
+        raise error(message: "expected digit");
+      }
+      result = result + frac;
+      if negative {
+        result = -result;
+      }
+    }
+
+    // Exponent part (after 'e'/'E')
+    if got_exp {
+      int exp = 0;
+      bool exp_negative = false;
+      bool exp_has_digit = false;
+
+      if byte := r.read_byte() {
+        int c = byte as! int;
+        if c == 43 {
+          // '+' — skip
+        } else if c == 45 {
+          exp_negative = true;
+        } else if c >= 48 && c <= 57 {
+          exp = c - 48;
+          exp_has_digit = true;
+        } else {
+          raise error(message: "expected exponent");
+        }
+      } else {
+        raise error(message: "expected exponent");
+      }
+
+      while true {
+        if byte := r.read_byte() {
+          int c = byte as! int;
+          if c >= 48 && c <= 57 {
+            exp = exp * 10 + (c - 48);
+            exp_has_digit = true;
+          } else {
+            break;
+          }
+        } else {
+          break;
+        }
+      }
+
+      if !exp_has_digit {
+        raise error(message: "expected exponent digit");
+      }
+      if exp_negative {
+        exp = 0 - exp;
+      }
+
+      // Apply 10^exp
+      if exp > 0 {
+        int i = 0;
+        while i < exp {
+          result = result * 10.0;
+          i = i + 1;
+        }
+      } else if exp < 0 {
+        int i = 0;
+        int abs_exp = 0 - exp;
+        while i < abs_exp {
+          result = result / 10.0;
+          i = i + 1;
+        }
+      }
+    }
+
+    return result;
+  }
+
+  to_string() string `public => "{this}";
+  format(Writer ~w)! `public {
+    w.write_string(this.to_string());
+  }
 }

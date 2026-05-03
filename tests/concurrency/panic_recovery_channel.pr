@@ -1,18 +1,17 @@
 // Panic after channel operations: channel state should be consistent.
 // The value sent before the goroutine panics must still be receivable.
 // Recovered goroutine panics are silent — no stderr output.
-
 main() `test(expected: "42", exclude: "wasm32") {
-    ch := channel[int](capacity: 2);
+  ch := channel[int](capacity: 2);
 
-    go {
-        ch.send(42);
-        assert(false, "boom after send");
-    };
+  go {
+    ch.send(42);
+    assert(false, "boom after send");
+  };
 
-    // The value sent before the panic should still be receivable
-    r := <-ch;
-    if v := r {
-        print_int(v);
-    }
+  // The value sent before the panic should still be receivable
+  r := <-ch;
+  if v := r {
+    print_int(v);
+  }
 }

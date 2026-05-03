@@ -1,5 +1,4 @@
 // Select with default: no channel is ready, default case executes.
-
 main() `test(expected: "default") {
   ch1 := channel[int](capacity: 1);
   ch2 := channel[int](capacity: 1);
@@ -7,10 +6,10 @@ main() `test(expected: "default") {
   // Neither channel has data
   select {
     v := <-ch1:
-      print_int(1);
+    print_int(1);
     v := <-ch2:
-      print_int(2);
+    print_int(2);
     default:
-      println("default");
+    println("default");
   }
 }

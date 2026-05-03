@@ -1,23 +1,34 @@
 // Sequential goroutines: 3 goroutines execute in order via channels.
 // Each sends a value, main receives before spawning next.
-
 main() `test(expected: "6") {
   ch1 := channel[int](capacity: 1);
   ch2 := channel[int](capacity: 1);
   ch3 := channel[int](capacity: 1);
 
-  go { ch1.send(1); };
+  go {
+    ch1.send(1);
+  };
   r1 := <-ch1;
 
-  go { ch2.send(2); };
+  go {
+    ch2.send(2);
+  };
   r2 := <-ch2;
 
-  go { ch3.send(3); };
+  go {
+    ch3.send(3);
+  };
   r3 := <-ch3;
 
   int sum = 0;
-  if a := r1 { sum = sum + a; }
-  if b := r2 { sum = sum + b; }
-  if c := r3 { sum = sum + c; }
+  if a := r1 {
+    sum = sum + a;
+  }
+  if b := r2 {
+    sum = sum + b;
+  }
+  if c := r3 {
+    sum = sum + c;
+  }
   print_int(sum);
 }

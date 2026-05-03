@@ -1,34 +1,37 @@
 // Detailed scheduler stats: verify counters after various operations.
-
 main() `test(expected: "ok") {
-    // Record baseline
-    int c0 = goroutines_created();
-    int d0 = goroutines_completed();
+  // Record baseline
+  int c0 = goroutines_created();
+  int d0 = goroutines_completed();
 
-    // Spawn a single goroutine and wait for it
-    ch := channel[int](capacity: 1);
-    go { ch.send(42); };
-    <-ch;
+  // Spawn a single goroutine and wait for it
+  ch := channel[int](capacity: 1);
+  go {
+    ch.send(42);
+  };
+  <-ch;
 
-    int c1 = goroutines_created();
-    assert(c1 > c0, "created counter increased");
+  int c1 = goroutines_created();
+  assert(c1 > c0, "created counter increased");
 
-    // Spawn 10 more
-    ch2 := channel[int](capacity: 10);
-    for i in 0..10 {
-        go { ch2.send(1); };
-    }
-    for j in 0..10 {
-        <-ch2;
-    }
+  // Spawn 10 more
+  ch2 := channel[int](capacity: 10);
+  for i in 0..10 {
+    go {
+      ch2.send(1);
+    };
+  }
+  for j in 0..10 {
+    <-ch2;
+  }
 
-    int c2 = goroutines_created();
-    int d2 = goroutines_completed();
-    assert(c2 >= c1 + 10, "created at least 10 more");
-    assert(d2 > d0, "completed counter increased");
+  int c2 = goroutines_created();
+  int d2 = goroutines_completed();
+  assert(c2 >= c1 + 10, "created at least 10 more");
+  assert(d2 > d0, "completed counter increased");
 
-    // Context switches should be positive
-    assert(context_switches() > 0, "has context switches");
+  // Context switches should be positive
+  assert(context_switches() > 0, "has context switches");
 
-    println("ok");
+  println("ok");
 }

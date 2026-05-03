@@ -1,206 +1,206 @@
 // Advanced string tests: escape sequences, interpolation edge cases,
 // method combinations.
-
 // --- escape sequences ---
-
 test_escape_newline() `test {
-    string s = "a\nb";
-    assert(s.len == 3, "a\\nb has length 3");
+  string s = "a\nb";
+  assert(s.len == 3, "a\\nb has length 3");
 }
 
 test_escape_tab() `test {
-    string s = "a\tb";
-    assert(s.len == 3, "a\\tb has length 3");
+  string s = "a\tb";
+  assert(s.len == 3, "a\\tb has length 3");
 }
 
 test_escape_backslash() `test {
-    string s = "a\\b";
-    assert(s.len == 3, "a\\\\b has length 3");
+  string s = "a\\b";
+  assert(s.len == 3, "a\\\\b has length 3");
 }
 
 test_escape_quote() `test {
-    string s = "say \"hi\"";
-    assert(s.contains("hi"), "contains hi after escaped quotes");
+  string s = "say \"hi\"";
+  assert(s.contains("hi"), "contains hi after escaped quotes");
 }
 
 // --- string length ---
 
 test_string_length() `test {
-    assert("".len == 0, "empty string len = 0");
-    assert("a".len == 1, "single char len = 1");
-    assert("hello".len == 5, "hello len = 5");
-    assert("hello world".len == 11, "hello world len = 11");
+  assert("".len == 0, "empty string len = 0");
+  assert("a".len == 1, "single char len = 1");
+  assert("hello".len == 5, "hello len = 5");
+  assert("hello world".len == 11, "hello world len = 11");
 }
 
 // --- string equality ---
 
 test_string_equality() `test {
-    assert("abc" == "abc", "equal strings");
-    assert("abc" != "def", "different strings");
-    assert("" == "", "empty strings equal");
-    assert("a" != "A", "case sensitive");
+  assert("abc" == "abc", "equal strings");
+  assert("abc" != "def", "different strings");
+  assert("" == "", "empty strings equal");
+  assert("a" != "A", "case sensitive");
 }
 
 // --- string concatenation ---
 
 test_string_concat() `test {
-    string a = "hello";
-    string b = " ";
-    string c = "world";
-    assert(a + b + c == "hello world", "triple concat");
+  string a = "hello";
+  string b = " ";
+  string c = "world";
+  assert(a + b + c == "hello world", "triple concat");
 }
 
 test_string_concat_empty() `test {
-    assert("" + "hello" == "hello", "empty + hello");
-    assert("hello" + "" == "hello", "hello + empty");
-    assert("" + "" == "", "empty + empty");
+  assert("" + "hello" == "hello", "empty + hello");
+  assert("hello" + "" == "hello", "hello + empty");
+  assert("" + "" == "", "empty + empty");
 }
 
 // --- string indexing ---
 
 test_string_indexing() `test {
-    string s = "abcdef";
-    assert(s[0] == 'a', "index 0 = a");
-    assert(s[1] == 'b', "index 1 = b");
-    assert(s[5] == 'f', "index 5 = f");
+  string s = "abcdef";
+  assert(s[0] == 'a', "index 0 = a");
+  assert(s[1] == 'b', "index 1 = b");
+  assert(s[5] == 'f', "index 5 = f");
 }
 
 // --- string interpolation basic ---
 
 test_interp_int() `test {
-    int x = 42;
-    string s = "value: {x}";
-    assert(s == "value: 42", "int interpolation");
+  int x = 42;
+  string s = "value: {x}";
+  assert(s == "value: 42", "int interpolation");
 }
 
 test_interp_bool() `test {
-    bool b = true;
-    string s = "flag: {b}";
-    assert(s == "flag: true", "bool interpolation");
+  bool b = true;
+  string s = "flag: {b}";
+  assert(s == "flag: true", "bool interpolation");
 }
 
 test_interp_string() `test {
-    string name = "world";
-    string s = "hello {name}!";
-    assert(s == "hello world!", "string interpolation");
+  string name = "world";
+  string s = "hello {name}!";
+  assert(s == "hello world!", "string interpolation");
 }
 
 // --- interpolation with expressions ---
 
 test_interp_expr() `test {
-    int a = 3;
-    int b = 4;
-    string s = "{a} + {b} = {a + b}";
-    assert(s == "3 + 4 = 7", "expression interpolation");
+  int a = 3;
+  int b = 4;
+  string s = "{a} + {b} = {a + b}";
+  assert(s == "3 + 4 = 7", "expression interpolation");
 }
 
 // --- multiple interpolations ---
 
 test_interp_multiple() `test {
-    string first = "John";
-    string last = "Doe";
-    int age = 30;
-    string s = "{first} {last}, age {age}";
-    assert(s == "John Doe, age 30", "multiple interpolations");
+  string first = "John";
+  string last = "Doe";
+  int age = 30;
+  string s = "{first} {last}, age {age}";
+  assert(s == "John Doe, age 30", "multiple interpolations");
 }
 
 // --- string contains edge cases ---
 
 test_contains_empty() `test {
-    assert("hello".contains(""), "contains empty string");
-    assert("".contains("") == true, "empty contains empty");
+  assert("hello".contains(""), "contains empty string");
+  assert("".contains("") == true, "empty contains empty");
 }
 
 test_contains_full() `test {
-    assert("hello".contains("hello"), "contains full string");
+  assert("hello".contains("hello"), "contains full string");
 }
 
 test_contains_not_found() `test {
-    assert("hello".contains("xyz") == false, "does not contain xyz");
+  assert("hello".contains("xyz") == false, "does not contain xyz");
 }
 
 // --- starts_with / ends_with ---
 
 test_starts_with_full() `test {
-    assert("hello".starts_with("hello"), "starts_with full string");
-    assert("hello".starts_with(""), "starts_with empty");
-    assert("hello".starts_with("hx") == false, "no match");
+  assert("hello".starts_with("hello"), "starts_with full string");
+  assert("hello".starts_with(""), "starts_with empty");
+  assert("hello".starts_with("hx") == false, "no match");
 }
 
 test_ends_with_full() `test {
-    assert("hello".ends_with("hello"), "ends_with full string");
-    assert("hello".ends_with(""), "ends_with empty");
-    assert("hello".ends_with("lx") == false, "no match");
+  assert("hello".ends_with("hello"), "ends_with full string");
+  assert("hello".ends_with(""), "ends_with empty");
+  assert("hello".ends_with("lx") == false, "no match");
 }
 
 // --- trim ---
 
 test_trim_spaces() `test {
-    assert("  hi  ".trim() == "hi", "trim spaces");
-    assert("hi".trim() == "hi", "no trim needed");
-    assert("   ".trim() == "", "all spaces");
+  assert("  hi  ".trim() == "hi", "trim spaces");
+  assert("hi".trim() == "hi", "no trim needed");
+  assert("   ".trim() == "", "all spaces");
 }
 
 // --- split ---
 
 test_split_comma() `test {
-    string[] parts = "a,b,c,d".split(",");
-    assert(parts.len == 4, "4 parts");
-    assert(parts[0] == "a", "first = a");
-    assert(parts[3] == "d", "last = d");
+  string[] parts = "a,b,c,d".split(",");
+  assert(parts.len == 4, "4 parts");
+  assert(parts[0] == "a", "first = a");
+  assert(parts[3] == "d", "last = d");
 }
 
 test_split_space() `test {
-    string[] words = "hello world foo".split(" ");
-    assert(words.len == 3, "3 words");
-    assert(words[0] == "hello", "first word");
-    assert(words[2] == "foo", "last word");
+  string[] words = "hello world foo".split(" ");
+  assert(words.len == 3, "3 words");
+  assert(words[0] == "hello", "first word");
+  assert(words[2] == "foo", "last word");
 }
 
 // --- index_of ---
 
 test_index_of_found() `test {
-    string s = "hello world";
-    if idx := s.index_of("world") {
-        assert(idx == 6, "world starts at index 6");
-    } else {
-        assert(false, "should find world");
-    }
+  string s = "hello world";
+  if idx := s.index_of("world") {
+    assert(idx == 6, "world starts at index 6");
+  } else {
+    assert(false, "should find world");
+  }
 }
 
 test_index_of_not_found() `test {
-    string s = "hello";
-    bool found = false;
-    if idx := s.index_of("xyz") {
-        found = true;
-    }
-    assert(!found, "xyz not in hello");
+  string s = "hello";
+  bool found = false;
+  if idx := s.index_of("xyz") {
+    found = true;
+  }
+  assert(!found, "xyz not in hello");
 }
 
 test_index_of_beginning() `test {
-    if idx := "hello".index_of("hel") {
-        assert(idx == 0, "hel starts at 0");
-    } else {
-        assert(false, "should find hel");
-    }
+  if idx := "hello".index_of("hel") {
+    assert(idx == 0, "hel starts at 0");
+  } else {
+    assert(false, "should find hel");
+  }
 }
 
 // --- string building in loop ---
 
 test_string_building() `test {
-    string result = "";
-    for i in 0..5 {
-        if result.len > 0 { result = result + ","; }
-        result = result + "{i}";
+  string result = "";
+  for i in 0..5 {
+    if result.len > 0 {
+      result = result + ",";
     }
-    assert(result == "0,1,2,3,4", "built comma-separated string");
+    result = result + "{i}";
+  }
+  assert(result == "0,1,2,3,4", "built comma-separated string");
 }
 
 // --- char equality ---
 
 test_char_equality() `test {
-    char a = 'a';
-    char b = 'b';
-    assert(a == 'a', "char equality");
-    assert(a != b, "char inequality");
+  char a = 'a';
+  char b = 'b';
+  assert(a == 'a', "char equality");
+  assert(a != b, "char inequality");
 }

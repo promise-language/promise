@@ -6,16 +6,24 @@ _print_bool(bool x) `extern("promise_print_bool");
 _print_string(string s) `extern("promise_print_string");
 
 // Public API
-print_int(int x) `public { _print_int(x); }
-print_f64(f64 x) `public { _print_f64(x); }
-print_bool(bool x) `public { _print_bool(x); }
-println(string s) `public { _print_string(s); }
+print_int(int x) `public {
+  _print_int(x);
+}
+print_f64(f64 x) `public {
+  _print_f64(x);
+}
+print_bool(bool x) `public {
+  _print_bool(x);
+}
+println(string s) `public {
+  _print_string(s);
+}
 
 type Closer `structural `public `doc("Structural interface for resources that need cleanup. Implement `close(~this)!` to satisfy.") {
-    close(~this)! `abstract;
+  close(~this)! `abstract;
 }
 
 write_line(Writer ~w, string s)! `public `doc("Writes a string followed by the platform line separator to a Writer.") {
-    w.write_string(s);
-    w.write_string(Platform.line_separator);
+  w.write_string(s);
+  w.write_string(Platform.line_separator);
 }

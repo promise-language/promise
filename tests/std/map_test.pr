@@ -1,7 +1,9 @@
 // Test map[K, V] operations: insert, lookup, contains, remove, keys, values, iteration
 //
 test_literal_and_lookup() `test {
-  map[string, int] m = {"a": 1, "b": 2, "c": 3};
+  map[string, int] m = {
+    "a": 1, "b": 2, "c": 3
+  };
   assert(m.len == 3, "literal len 3");
   if val := m["a"] {
     assert(val == 1, "m[a] == 1");
@@ -29,7 +31,9 @@ test_insert() `test {
 }
 
 test_update() `test {
-  map[string, int] m = {"x": 10};
+  map[string, int] m = {
+    "x": 10
+  };
   m["x"] = 99;
   assert(m.len == 1, "update preserves len");
   if val := m["x"] {
@@ -38,13 +42,17 @@ test_update() `test {
 }
 
 test_contains() `test {
-  map[string, int] m = {"a": 1, "b": 2};
+  map[string, int] m = {
+    "a": 1, "b": 2
+  };
   assert(m.contains("a"), "contains a");
   assert(!m.contains("z"), "not contains z");
 }
 
 test_remove() `test {
-  map[string, int] m = {"a": 1, "b": 2, "c": 3};
+  map[string, int] m = {
+    "a": 1, "b": 2, "c": 3
+  };
   bool removed = m.remove("b");
   assert(removed, "remove b returns true");
   assert(m.len == 2, "after remove len 2");
@@ -55,7 +63,9 @@ test_remove() `test {
 }
 
 test_keys_values() `test {
-  map[string, int] m = {"x": 10};
+  map[string, int] m = {
+    "x": 10
+  };
   string[] keys = m.keys();
   assert(keys.len == 1, "keys len 1");
   assert(keys[0] == "x", "key is x");
@@ -73,7 +83,9 @@ test_is_empty() `test {
 }
 
 test_missing_key_returns_none() `test {
-  map[string, int] m = {"a": 1};
+  map[string, int] m = {
+    "a": 1
+  };
   bool found = false;
   if _ := m["missing"] {
     found = true;
@@ -92,7 +104,9 @@ test_int_keys() `test {
 }
 
 test_clear() `test {
-  map[string, int] m = {"a": 1, "b": 2, "c": 3};
+  map[string, int] m = {
+    "a": 1, "b": 2, "c": 3
+  };
   assert(m.len == 3, "before clear len 3");
   m.clear();
   assert(m.len == 0, "after clear len 0");
@@ -109,7 +123,9 @@ test_clear() `test {
 // --- for-in iteration ---
 
 test_for_in_kv() `test {
-  map[string, int] m = {"a": 1, "b": 2, "c": 3};
+  map[string, int] m = {
+    "a": 1, "b": 2, "c": 3
+  };
   int sum = 0;
   int count = 0;
   string[] seen_keys = [];
@@ -126,7 +142,9 @@ test_for_in_kv() `test {
 }
 
 test_for_in_single() `test {
-  map[string, int] m = {"x": 10, "y": 20};
+  map[string, int] m = {
+    "x": 10, "y": 20
+  };
   int sum = 0;
   for pair in m {
     (k, v) := pair;
@@ -145,7 +163,9 @@ test_for_in_empty() `test {
 }
 
 test_for_in_entry_name() `test {
-  map[string, int] m = {"a": 1, "b": 2};
+  map[string, int] m = {
+    "a": 1, "b": 2
+  };
   int sum = 0;
   for entry in m {
     (_, v) := entry;
@@ -157,7 +177,9 @@ test_for_in_entry_name() `test {
 // --- get_or ---
 
 test_get_or() `test {
-  map[string, int] m = {"a": 1, "b": 2};
+  map[string, int] m = {
+    "a": 1, "b": 2
+  };
   assert(m.get_or("a", 99) == 1, "get_or existing returns value");
   assert(m.get_or("z", 99) == 99, "get_or missing returns default");
 }
@@ -165,7 +187,9 @@ test_get_or() `test {
 // --- pop ---
 
 test_pop() `test {
-  map[string, int] m = {"a": 1, "b": 2};
+  map[string, int] m = {
+    "a": 1, "b": 2
+  };
   if val := m.pop("a") {
     assert(val == 1, "pop returns removed value");
   } else {
@@ -176,7 +200,9 @@ test_pop() `test {
 }
 
 test_pop_missing() `test {
-  map[string, int] m = {"a": 1};
+  map[string, int] m = {
+    "a": 1
+  };
   bool found = false;
   if _ := m.pop("z") {
     found = true;
@@ -188,14 +214,18 @@ test_pop_missing() `test {
 // --- update ---
 
 test_update_existing() `test {
-  map[string, int] m = {"a": 1, "b": 2};
+  map[string, int] m = {
+    "a": 1, "b": 2
+  };
   assert(m.update("a", 99), "update existing returns true");
   assert(m.get_or("a", 0) == 99, "update changes value");
   assert(m.len == 2, "update preserves len");
 }
 
 test_update_missing() `test {
-  map[string, int] m = {"a": 1};
+  map[string, int] m = {
+    "a": 1
+  };
   assert(!m.update("z", 99), "update missing returns false");
   assert(m.len == 1, "update missing preserves len");
   assert(!m.contains("z"), "update missing doesn't insert");
@@ -204,7 +234,9 @@ test_update_missing() `test {
 // --- entries ---
 
 test_entries() `test {
-  map[string, int] m = {"x": 10};
+  map[string, int] m = {
+    "x": 10
+  };
   (string, int)[] e = m.entries();
   assert(e.len == 1, "entries len 1");
   (k, v) := e[0];
@@ -215,8 +247,12 @@ test_entries() `test {
 // --- merge ---
 
 test_merge() `test {
-  map[string, int] m1 = {"a": 1, "b": 2};
-  map[string, int] m2 = {"b": 99, "c": 3};
+  map[string, int] m1 = {
+    "a": 1, "b": 2
+  };
+  map[string, int] m2 = {
+    "b": 99, "c": 3
+  };
   m1.merge(m2);
   assert(m1.len == 3, "merge len 3");
   assert(m1.get_or("a", 0) == 1, "merge preserves a");
@@ -227,7 +263,9 @@ test_merge() `test {
 // --- compound index assignment ---
 
 test_compound_index_assign() `test {
-  map[string, int] m = {"a": 10, "b": 20};
+  map[string, int] m = {
+    "a": 10, "b": 20
+  };
   m["a"] += 5;
   assert(m.get_or("a", 0) == 15, "+= on map element");
   m["b"] -= 3;
@@ -272,7 +310,9 @@ test_pop_creates_tombstone() `test {
 // --- entries with multiple entries ---
 
 test_entries_multiple() `test {
-  map[string, int] m = {"a": 1, "b": 2, "c": 3};
+  map[string, int] m = {
+    "a": 1, "b": 2, "c": 3
+  };
   (string, int)[] e = m.entries();
   assert(e.len == 3, "entries len 3");
   // Collect into map to verify order-independently
@@ -288,7 +328,9 @@ test_entries_multiple() `test {
 
 test_merge_into_empty() `test {
   map[string, int] m1 = {:};
-  map[string, int] m2 = {"x": 10, "y": 20};
+  map[string, int] m2 = {
+    "x": 10, "y": 20
+  };
   m1.merge(m2);
   assert(m1.len == 2, "merge into empty len 2");
   assert(m1.get_or("x", 0) == 10, "merged x");
@@ -298,7 +340,9 @@ test_merge_into_empty() `test {
 // --- for k, v with int keys ---
 
 test_for_in_kv_int_keys() `test {
-  map[int, string] m = {1: "one", 2: "two", 3: "three"};
+  map[int, string] m = {
+    1: "one", 2: "two", 3: "three"
+  };
   int key_sum = 0;
   string[] vals = [];
   for k, v in m {

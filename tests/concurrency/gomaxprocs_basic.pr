@@ -1,5 +1,4 @@
 // GOMAXPROCS: set_max_procs returns previous value and clamps to valid range.
-
 main() `test(expected: "ok") {
   // Query current value (n=0 returns current without changing)
   initial := set_max_procs(0);

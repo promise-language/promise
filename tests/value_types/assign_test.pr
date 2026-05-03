@@ -1,6 +1,6 @@
 type Point {
-    int x `value;
-    int y `value;
+  int x `value;
+  int y `value;
 }
 
 main() `test(expected: """5
@@ -9,20 +9,20 @@ main() `test(expected: """5
 4
 11
 4""") {
-    Point p = Point(x: 3, y: 4);
+  Point p = Point(x: 3, y: 4);
 
-    // Direct field assignment
-    p.x = 5;
-    print_int(p.x);
-    print_int(p.y);
+  // Direct field assignment
+  p.x = 5;
+  print_int(p.x);
+  print_int(p.y);
 
-    // Compound assignment
-    p.x += 1;
-    print_int(p.x);
-    print_int(p.y);
+  // Compound assignment
+  p.x += 1;
+  print_int(p.x);
+  print_int(p.y);
 
-    // Compound assignment with multiplication
-    p.x += 5;
-    print_int(p.x);
-    print_int(p.y);
+  // Compound assignment with multiplication
+  p.x += 5;
+  print_int(p.x);
+  print_int(p.y);
 }

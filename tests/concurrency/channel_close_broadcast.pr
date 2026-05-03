@@ -1,7 +1,6 @@
 // Close broadcast: closing a channel signals all waiting consumers.
 // 3 goroutines iterate over channel; close wakes them all.
 // Uses for-loop pattern to satisfy ownership checker for shared channel captures.
-
 main() `test(expected: "4") {
   ch := channel[int](capacity: 1);
   done := channel[int](capacity: 4);
@@ -10,7 +9,8 @@ main() `test(expected: "4") {
   for idx in 0..4 {
     go {
       if idx < 3 {
-        for val in ch { }
+        for val in ch {
+        }
         done.send(1);
       } else {
         ch.close();
@@ -22,7 +22,9 @@ main() `test(expected: "4") {
   int count = 0;
   for j in 0..4 {
     r := <-done;
-    if v := r { count = count + 1; }
+    if v := r {
+      count = count + 1;
+    }
   }
   print_int(count);
 }

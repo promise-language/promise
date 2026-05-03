@@ -1,6 +1,5 @@
 // Fan-out: many goroutines all send to a shared channel.
 // Tests scheduler with more goroutines than OS threads.
-
 main() `test(expected: "20") {
   ch := channel[int](capacity: 20);
   int n = 20;

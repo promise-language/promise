@@ -1,102 +1,107 @@
 // std/random.pr — Pseudorandom number generator (xoshiro256**)
-
 type Random `public {
-    uint _s0;
-    uint _s1;
-    uint _s2;
-    uint _s3;
+  uint _s0;
+  uint _s1;
+  uint _s2;
+  uint _s3;
 
-    new(~this, uint seed) {
-        // splitmix64 seed expansion to initialize all 4 state words
-        uint s = seed;
-        s = s + _sm_c1();
-        this._s0 = _sm_mix(s);
-        s = s + _sm_c1();
-        this._s1 = _sm_mix(s);
-        s = s + _sm_c1();
-        this._s2 = _sm_mix(s);
-        s = s + _sm_c1();
-        this._s3 = _sm_mix(s);
+  new(~this, uint seed) {
+    // splitmix64 seed expansion to initialize all 4 state words
+    uint s = seed;
+    s = s + _sm_c1();
+    this._s0 = _sm_mix(s);
+    s = s + _sm_c1();
+    this._s1 = _sm_mix(s);
+    s = s + _sm_c1();
+    this._s2 = _sm_mix(s);
+    s = s + _sm_c1();
+    this._s3 = _sm_mix(s);
+  }
+
+  // Core xoshiro256** generator. Returns a random uint.
+  next_uint(~this) uint {
+    uint s0 = this._s0;
+    uint s1 = this._s1;
+    uint s2 = this._s2;
+    uint s3 = this._s3;
+
+    uint result = _rotl(s1 * _u(5), _u(7)) * _u(9);
+    uint t = s1 << _u(17);
+
+    s2 = s2 ^ s0;
+    s3 = s3 ^ s1;
+    s1 = s1 ^ s2;
+    s0 = s0 ^ s3;
+    s2 = s2 ^ t;
+    s3 = _rotl(s3, _u(45));
+
+    this._s0 = s0;
+    this._s1 = s1;
+    this._s2 = s2;
+    this._s3 = s3;
+
+    return result;
+  }
+
+  // Random int (full range).
+  next_int(~this) int {
+    return this.next_uint() as! int;
+  }
+
+  // Random f64 in [0.0, 1.0).
+  next_f64(~this) f64 {
+    uint bits = this.next_uint() >> _u(11);
+    return (bits as! f64) * 1.1102230246251565e-16;
+  }
+
+  // Random int in [lo, hi).
+  next_int_range(~this, int lo, int hi) int {
+    int range = hi - lo;
+    if range <= 0 {
+      return lo;
     }
+    uint r = this.next_uint();
+    uint urange = range as! uint;
+    int offset = (r % urange) as! int;
+    return lo + offset;
+  }
 
-    // Core xoshiro256** generator. Returns a random uint.
-    next_uint(~this) uint {
-        uint s0 = this._s0;
-        uint s1 = this._s1;
-        uint s2 = this._s2;
-        uint s3 = this._s3;
-
-        uint result = _rotl(s1 * _u(5), _u(7)) * _u(9);
-        uint t = s1 << _u(17);
-
-        s2 = s2 ^ s0;
-        s3 = s3 ^ s1;
-        s1 = s1 ^ s2;
-        s0 = s0 ^ s3;
-        s2 = s2 ^ t;
-        s3 = _rotl(s3, _u(45));
-
-        this._s0 = s0;
-        this._s1 = s1;
-        this._s2 = s2;
-        this._s3 = s3;
-
-        return result;
-    }
-
-    // Random int (full range).
-    next_int(~this) int {
-        return this.next_uint() as! int;
-    }
-
-    // Random f64 in [0.0, 1.0).
-    next_f64(~this) f64 {
-        uint bits = this.next_uint() >> _u(11);
-        return (bits as! f64) * 1.1102230246251565e-16;
-    }
-
-    // Random int in [lo, hi).
-    next_int_range(~this, int lo, int hi) int {
-        int range = hi - lo;
-        if range <= 0 { return lo; }
-        uint r = this.next_uint();
-        uint urange = range as! uint;
-        int offset = (r % urange) as! int;
-        return lo + offset;
-    }
-
-    // Random bool.
-    next_bool(~this) bool {
-        uint bit = this.next_uint() >> _u(63);
-        return bit == _u(1);
-    }
+  // Random bool.
+  next_bool(~this) bool {
+    uint bit = this.next_uint() >> _u(63);
+    return bit == _u(1);
+  }
 }
 
 // --- Internal helpers ---
 
 // Construct uint from int literal.
-_u(int x) uint { return x as! uint; }
+_u(int x) uint {
+  return x as! uint;
+}
 
 // Construct 64-bit uint from two 32-bit halves.
 _u64(int hi, int lo) uint {
-    uint h = hi as! uint;
-    uint l = lo as! uint;
-    uint shift = 32 as! uint;
-    return (h << shift) | l;
+  uint h = hi as! uint;
+  uint l = lo as! uint;
+  uint shift = 32 as! uint;
+  return (h << shift) | l;
 }
 
 // Rotate left.
 _rotl(uint x, uint k) uint {
-    uint bits = 64 as! uint;
-    return (x << k) | (x >> (bits - k));
+  uint bits = 64 as! uint;
+  return (x << k) | (x >> (bits - k));
 }
 
 // splitmix64 constant: 0x9e3779b97f4a7c15
-_sm_c1() uint { return _u64(0x9e3779b9, 0x7f4a7c15); }
+_sm_c1() uint {
+  return _u64(0x9e3779b9, 0x7f4a7c15);
+}
 
 // splitmix64 mixing function.
 _sm_mix(uint z) uint {
-    uint z1 = (z ^ (z >> _u(30))) * _u64(0xbf58476d, 0x1ce4e5b9);
-    uint z2 = (z1 ^ (z1 >> _u(27))) * _u64(0x94d049bb, 0x133111eb);
-    return z2 ^ (z2 >> _u(31));
+  uint z1 = (z ^ (z >> _u(30))) * _u64(0xbf58476d, 0x1ce4e5b9);
+  uint z2 = (z1 ^ (z1 >> _u(27))) * _u64(0x94d049bb, 0x133111eb);
+  return z2 ^ (z2 >> _u(31));
 }

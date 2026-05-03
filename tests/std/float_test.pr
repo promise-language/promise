@@ -68,7 +68,9 @@ test_hash() `test {
 
 // --- f32 ---
 
-f32_double(f32 x) f32 { return x * 2.0; }
+f32_double(f32 x) f32 {
+  return x * 2.0;
+}
 
 test_f32_basic() `test {
   f32 a = 1.5;

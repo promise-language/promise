@@ -1,20 +1,21 @@
 // Goroutines capturing variables from enclosing scope.
-
 main() `test(expected: "100") {
-    ch := channel[int](capacity: 10);
-    int multiplier = 10;
+  ch := channel[int](capacity: 10);
+  int multiplier = 10;
 
-    for i in 0..10 {
-        go {
-            ch.send(multiplier);
-        };
-    }
+  for i in 0..10 {
+    go {
+      ch.send(multiplier);
+    };
+  }
 
-    int sum = 0;
-    for j in 0..10 {
-        r := <-ch;
-        if v := r { sum += v; }
+  int sum = 0;
+  for j in 0..10 {
+    r := <-ch;
+    if v := r {
+      sum += v;
     }
-    // 10 * 10 = 100
-    print_int(sum);
+  }
+  // 10 * 10 = 100
+  print_int(sum);
 }

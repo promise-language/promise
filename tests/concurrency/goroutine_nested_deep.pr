@@ -1,6 +1,5 @@
 // Nested goroutines: 3 levels deep.
 // Tests that deeply nested goroutine spawning works correctly.
-
 main() `test(expected: "42") {
   ch := channel[int](capacity: 1);
   go {
@@ -11,5 +10,7 @@ main() `test(expected: "42") {
     };
   };
   r := <-ch;
-  if v := r { print_int(v); }
+  if v := r {
+    print_int(v);
+  }
 }

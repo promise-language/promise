@@ -1,77 +1,87 @@
 // Tests for void function types: (T) -> void
 // Covers the grammar/sema fix enabling void in function type return position.
-
 type Executor {
-    (int) -> void action;
+  (int) -> void action;
 
-    run(int x) {
-        this.action(x);
-    }
+  run(int x) {
+    this.action(x);
+  }
 }
 
 // Helper: applies a void function and returns a marker to prove it ran
 apply_and_count((int) -> void fn, int x) int {
-    fn(x);
-    return 1;
+  fn(x);
+  return 1;
 }
 
 // --- Void function type as parameter ---
 test_void_fn_param() `test {
-    int ran = apply_and_count(|int x| { int _ = x + 1; }, 5);
-    assert(ran == 1, "void function ran successfully");
+  int ran = apply_and_count(|int x| {
+    int _ = x + 1;
+  }, 5);
+  assert(ran == 1, "void function ran successfully");
 }
 
 // --- Void function type field called through method ---
 test_void_fn_field() `test {
-    e := Executor(action: |int x| { int _ = x * 2; });
-    e.run(1);
-    e.run(2);
-    e.run(3);
-    // If we got here without panic, the void function field works
-    assert(true, "void function field calls succeeded");
+  e := Executor(action: |int x| {
+    int _ = x * 2;
+  });
+  e.run(1);
+  e.run(2);
+  e.run(3);
+  // If we got here without panic, the void function field works
+  assert(true, "void function field calls succeeded");
 }
 
 // --- Void function type variable ---
 test_void_fn_variable() `test {
-    (int) -> void noop = |int x| { };
-    noop(42);
-    assert(true, "void function variable call succeeded");
+  (int) -> void noop = |int x| {
+  };
+  noop(42);
+  assert(true, "void function variable call succeeded");
 }
 
 // --- Void function type with captured int ---
 test_void_fn_capture() `test {
-    int factor = 3;
-    e := Executor(action: move |int x| { int _ = x * factor; });
-    e.run(10);
-    assert(true, "void function field with capture succeeded");
+  int factor = 3;
+  e := Executor(action: move |int x| {
+    int _ = x * factor;
+  });
+  e.run(10);
+  assert(true, "void function field with capture succeeded");
 }
 
 // --- Multi-param void function type ---
 test_void_fn_multi_param() `test {
-    (int, int) -> void fn = |int a, int b| { int _ = a + b; };
-    fn(7, 8);
-    assert(true, "multi-param void function succeeded");
+  (int, int) -> void fn = |int a, int b| {
+    int _ = a + b;
+  };
+  fn(7, 8);
+  assert(true, "multi-param void function succeeded");
 }
 
 // --- Void lambda with block body ---
 test_void_lambda_block() `test {
-    int ran = apply_and_count(|int x| {
-        int doubled = x * 2;
-        int tripled = x * 3;
-        int _ = doubled + tripled;
-    }, 7);
-    assert(ran == 1, "void lambda with block body ran");
+  int ran = apply_and_count(|int x| {
+    int doubled = x * 2;
+    int tripled = x * 3;
+    int _ = doubled + tripled;
+  }, 7);
+  assert(ran == 1, "void lambda with block body ran");
 }
 
 // --- Higher-order: function returning void function type ---
 test_void_fn_return_type() `test {
-    (int) -> void printer = make_noop();
-    printer(42);
-    assert(true, "returned void function works");
+  (int) -> void printer = make_noop();
+  printer(42);
+  assert(true, "returned void function works");
 }
 
-make_noop() (int) -> void {
-    return |int x| { };
+make_noop()(int) -> void {
+  return |int x| {
+  };
 }
 
-main() {}
+main() {
+}

@@ -1,37 +1,40 @@
 // Stress test: 3-stage pipeline with high volume.
-
 main() `test(expected: "500") {
-    stage1 := channel[int](capacity: 50);
-    stage2 := channel[int](capacity: 50);
-    done := channel[int](capacity: 1);
+  stage1 := channel[int](capacity: 50);
+  stage2 := channel[int](capacity: 50);
+  done := channel[int](capacity: 1);
 
-    // Producer: send 500 items
-    go {
-        for i in 0..500 {
-            stage1.send(1);
-        }
-    };
+  // Producer: send 500 items
+  go {
+    for i in 0..500 {
+      stage1.send(1);
+    }
+  };
 
-    // Transformer: read from stage1, write to stage2
-    go {
-        for i in 0..500 {
-            r := <-stage1;
-            if v := r {
-                stage2.send(v);
-            }
-        }
-    };
+  // Transformer: read from stage1, write to stage2
+  go {
+    for i in 0..500 {
+      r := <-stage1;
+      if v := r {
+        stage2.send(v);
+      }
+    }
+  };
 
-    // Consumer: count items
-    go {
-        int count = 0;
-        for i in 0..500 {
-            r := <-stage2;
-            if v := r { count += v; }
-        }
-        done.send(count);
-    };
+  // Consumer: count items
+  go {
+    int count = 0;
+    for i in 0..500 {
+      r := <-stage2;
+      if v := r {
+        count += v;
+      }
+    }
+    done.send(count);
+  };
 
-    r := <-done;
-    if v := r { print_int(v); }
+  r := <-done;
+  if v := r {
+    print_int(v);
+  }
 }

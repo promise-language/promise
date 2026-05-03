@@ -1,142 +1,143 @@
 // Drop and use binding tests: resource cleanup, scope exit behavior.
-
 type Logger {
-    int id;
+  int id;
 
-    drop(~this) { }
+  drop(~this) {
+  }
 }
 
 type Connection {
-    int fd;
-    close() { }
+  int fd;
+  close() {
+  }
 }
 
 // --- basic drop on scope exit ---
 
 test_drop_scope_exit() `test {
-    l := Logger(id: 1);
-    int x = l.id;
-    assert(x == 1, "logger id is 1");
+  l := Logger(id: 1);
+  int x = l.id;
+  assert(x == 1, "logger id is 1");
 }
 
 // --- multiple drop bindings ---
 
 test_drop_multiple() `test {
-    l1 := Logger(id: 1);
-    l2 := Logger(id: 2);
-    l3 := Logger(id: 3);
-    assert(l1.id + l2.id + l3.id == 6, "sum of ids = 6");
+  l1 := Logger(id: 1);
+  l2 := Logger(id: 2);
+  l3 := Logger(id: 3);
+  assert(l1.id + l2.id + l3.id == 6, "sum of ids = 6");
 }
 
 // --- use binding: close on scope exit ---
 
 test_use_basic() `test {
-    use conn := Connection(fd: 42);
-    assert(conn.fd == 42, "connection fd = 42");
+  use conn := Connection(fd: 42);
+  assert(conn.fd == 42, "connection fd = 42");
 }
 
 // --- multiple use bindings ---
 
 test_use_multiple() `test {
-    use c1 := Connection(fd: 1);
-    use c2 := Connection(fd: 2);
-    assert(c1.fd + c2.fd == 3, "sum of fds = 3");
+  use c1 := Connection(fd: 1);
+  use c2 := Connection(fd: 2);
+  assert(c1.fd + c2.fd == 3, "sum of fds = 3");
 }
 
 // --- use in nested if block ---
 
 test_use_nested() `test {
-    use outer := Connection(fd: 10);
-    if true {
-        use inner := Connection(fd: 20);
-        assert(inner.fd == 20, "inner fd = 20");
-    }
-    assert(outer.fd == 10, "outer fd still accessible");
+  use outer := Connection(fd: 10);
+  if true {
+    use inner := Connection(fd: 20);
+    assert(inner.fd == 20, "inner fd = 20");
+  }
+  assert(outer.fd == 10, "outer fd still accessible");
 }
 
 // --- mixed use and drop ---
 
 test_mixed_use_drop() `test {
-    use c := Connection(fd: 1);
-    l := Logger(id: 2);
-    assert(c.fd + l.id == 3, "mixed bindings accessible");
+  use c := Connection(fd: 1);
+  l := Logger(id: 2);
+  assert(c.fd + l.id == 3, "mixed bindings accessible");
 }
 
 // --- drop in if branch ---
 
 test_drop_if_branch() `test {
-    bool flag = true;
-    if flag {
-        l := Logger(id: 99);
-        assert(l.id == 99, "logger in if branch");
-    }
+  bool flag = true;
+  if flag {
+    l := Logger(id: 99);
+    assert(l.id == 99, "logger in if branch");
+  }
 }
 
 // --- drop in loop ---
 
 test_drop_in_loop() `test {
-    for i in 0..5 {
-        l := Logger(id: i);
-        assert(l.id == i, "logger id matches loop var");
-    }
+  for i in 0..5 {
+    l := Logger(id: i);
+    assert(l.id == i, "logger id matches loop var");
+  }
 }
 
 // --- use in loop ---
 
 test_use_in_loop() `test {
-    for i in 0..5 {
-        use c := Connection(fd: i);
-        assert(c.fd == i, "connection fd matches loop var");
-    }
+  for i in 0..5 {
+    use c := Connection(fd: i);
+    assert(c.fd == i, "connection fd matches loop var");
+  }
 }
 
 // --- drop with early return ---
 
 return_with_drop() int {
-    l := Logger(id: 42);
-    return l.id;
+  l := Logger(id: 42);
+  return l.id;
 }
 
 test_drop_early_return() `test {
-    int r = return_with_drop();
-    assert(r == 42, "returned value before drop");
+  int r = return_with_drop();
+  assert(r == 42, "returned value before drop");
 }
 
 // --- use with early return ---
 
 return_with_use() int {
-    use c := Connection(fd: 77);
-    return c.fd;
+  use c := Connection(fd: 77);
+  return c.fd;
 }
 
 test_use_early_return() `test {
-    int r = return_with_use();
-    assert(r == 77, "returned value before close");
+  int r = return_with_use();
+  assert(r == 77, "returned value before close");
 }
 
 // --- deep nesting of drops in if ---
 
 test_deep_nesting_drops() `test {
-    l1 := Logger(id: 1);
+  l1 := Logger(id: 1);
+  if true {
+    l2 := Logger(id: 2);
     if true {
-        l2 := Logger(id: 2);
-        if true {
-            l3 := Logger(id: 3);
-            assert(l1.id + l2.id + l3.id == 6, "all accessible");
-        }
-        assert(l1.id + l2.id == 3, "l3 dropped, l1+l2 = 3");
+      l3 := Logger(id: 3);
+      assert(l1.id + l2.id + l3.id == 6, "all accessible");
     }
-    assert(l1.id == 1, "only l1 left");
+    assert(l1.id + l2.id == 3, "l3 dropped, l1+l2 = 3");
+  }
+  assert(l1.id == 1, "only l1 left");
 }
 
 // --- drop binding not triggered when moved ---
 
 consume_logger(Logger l) int {
-    return l.id;
+  return l.id;
 }
 
 test_drop_moved() `test {
-    l := Logger(id: 55);
-    int r = consume_logger(l);
-    assert(r == 55, "consumed logger id");
+  l := Logger(id: 55);
+  int r = consume_logger(l);
+  assert(r == 55, "consumed logger id");
 }

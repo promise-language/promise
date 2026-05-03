@@ -1,17 +1,24 @@
 // Tests for arrow syntax in error handlers: ? e => expr
 // The arrow form is syntactic sugar for ? e { expr; }
-
-type ParseError is error { int code; }
+type ParseError is error {
+  int code;
+}
 
 parse(int n) int! {
-    if n < 0 { raise ParseError(code: 1, message: "negative"); }
-    return n * 2;
+  if n < 0 {
+    raise ParseError(code: 1, message: "negative");
+  }
+  return n * 2;
 }
 
 get_label(int n) string! {
-    if n < 0 { raise error(message: "bad"); }
-    if n == 0 { return "zero"; }
-    return "other";
+  if n < 0 {
+    raise error(message: "bad");
+  }
+  if n == 0 {
+    return "zero";
+  }
+  return "other";
 }
 
 // ============================================================
@@ -19,23 +26,23 @@ get_label(int n) string! {
 // ============================================================
 
 test_arrow_basic() `test {
-    int v = parse(-1) ? e => 0;
-    assert(v == 0, "arrow basic recovery");
+  int v = parse(-1)? e => 0;
+  assert(v == 0, "arrow basic recovery");
 }
 
 test_arrow_success() `test {
-    int v = parse(5) ? e => 0;
-    assert(v == 10, "arrow success path untouched");
+  int v = parse(5)? e => 0;
+  assert(v == 10, "arrow success path untouched");
 }
 
 test_arrow_string() `test {
-    string s = get_label(-1) ? e => "fallback";
-    assert(s == "fallback", "arrow string recovery");
+  string s = get_label(-1)? e => "fallback";
+  assert(s == "fallback", "arrow string recovery");
 }
 
 test_arrow_string_success() `test {
-    string s = get_label(0) ? e => "fallback";
-    assert(s == "zero", "arrow string success");
+  string s = get_label(0)? e => "fallback";
+  assert(s == "zero", "arrow string success");
 }
 
 // ============================================================
@@ -43,14 +50,14 @@ test_arrow_string_success() `test {
 // ============================================================
 
 test_arrow_outer_scope() `test {
-    int base = 100;
-    int v = parse(-1) ? e => base + 1;
-    assert(v == 101, "arrow uses outer scope");
+  int base = 100;
+  int v = parse(-1)? e => base + 1;
+  assert(v == 101, "arrow uses outer scope");
 }
 
 test_arrow_complex_expr() `test {
-    int v = parse(-1) ? e => 3 * 7 + 1;
-    assert(v == 22, "arrow complex expression");
+  int v = parse(-1)? e => 3 * 7 + 1;
+  assert(v == 22, "arrow complex expression");
 }
 
 // ============================================================
@@ -58,13 +65,13 @@ test_arrow_complex_expr() `test {
 // ============================================================
 
 test_arrow_no_binding() `test {
-    int v = parse(-1) ? => 0;
-    assert(v == 0, "arrow without binding name");
+  int v = parse(-1)? => 0;
+  assert(v == 0, "arrow without binding name");
 }
 
 test_arrow_discard_binding() `test {
-    int v = parse(-1) ? _ => 0;
-    assert(v == 0, "arrow with _ binding");
+  int v = parse(-1)? _ => 0;
+  assert(v == 0, "arrow with _ binding");
 }
 
 // ============================================================
@@ -72,18 +79,18 @@ test_arrow_discard_binding() `test {
 // ============================================================
 
 relay_typed(int n) int! {
-    int v = parse(n) ? e is ParseError => e.code;
-    return v;
+  int v = parse(n)? e is ParseError => e.code;
+  return v;
 }
 
 test_arrow_typed_match() `test {
-    int v = relay_typed(-1)!;
-    assert(v == 1, "arrow typed handler match");
+  int v = relay_typed(-1)!;
+  assert(v == 1, "arrow typed handler match");
 }
 
 test_arrow_typed_success() `test {
-    int v = relay_typed(5)!;
-    assert(v == 10, "arrow typed handler success");
+  int v = relay_typed(5)!;
+  assert(v == 10, "arrow typed handler success");
 }
 
 // ============================================================
@@ -91,13 +98,13 @@ test_arrow_typed_success() `test {
 // ============================================================
 
 test_arrow_optional_error() `test {
-    x := parse(-1) ? e => println("handled");
-    assert("{x}" == "none", "arrow optional recovery on error");
+  x := parse(-1)? e => println("handled");
+  assert("{x}" == "none", "arrow optional recovery on error");
 }
 
 test_arrow_optional_success() `test {
-    x := parse(5) ? e => println("handled");
-    assert("{x}" == "10", "arrow optional recovery on success");
+  x := parse(5)? e => println("handled");
+  assert("{x}" == "10", "arrow optional recovery on success");
 }
 
 // ============================================================
@@ -105,22 +112,22 @@ test_arrow_optional_success() `test {
 // ============================================================
 
 double_parse(int n) int! {
-    int a = parse(n) ? e => 0;
-    int b = parse(n);  // auto-propagates
-    return a + b;
+  int a = parse(n)? e => 0;
+  int b = parse(n); // auto-propagates
+  return a + b;
 }
 
 test_arrow_with_auto_prop() `test {
-    int v = double_parse(5)!;
-    assert(v == 20, "arrow coexists with auto-propagation");
+  int v = double_parse(5)!;
+  assert(v == 20, "arrow coexists with auto-propagation");
 }
 
 test_arrow_recovers_auto_prop_fails() `test {
-    bool caught = false;
-    double_parse(-1) ? e {
-        caught = true;
-    };
-    assert(caught, "arrow recovers first, auto-prop raises second");
+  bool caught = false;
+  double_parse(-1)? e {
+    caught = true;
+  };
+  assert(caught, "arrow recovers first, auto-prop raises second");
 }
 
 // ============================================================
@@ -128,12 +135,12 @@ test_arrow_recovers_auto_prop_fails() `test {
 // ============================================================
 
 test_arrow_chain() `test {
-    int a = parse(-1) ? e => 0;
-    int b = parse(-2) ? e => 0;
-    int c = parse(3) ? e => 0;
-    assert(a == 0, "chain first");
-    assert(b == 0, "chain second");
-    assert(c == 6, "chain third");
+  int a = parse(-1)? e => 0;
+  int b = parse(-2)? e => 0;
+  int c = parse(3)? e => 0;
+  assert(a == 0, "chain first");
+  assert(b == 0, "chain second");
+  assert(c == 6, "chain third");
 }
 
 // ============================================================
@@ -141,37 +148,41 @@ test_arrow_chain() `test {
 // ============================================================
 
 type Sensor {
-    int _raw;
-    get value int! {
-        if this._raw < 0 { raise error(message: "negative"); }
-        return this._raw;
+  int _raw;
+  get value int! {
+    if this._raw < 0 {
+      raise error(message: "negative");
     }
+    return this._raw;
+  }
 }
 
 test_arrow_getter() `test {
-    Sensor s = Sensor(_raw: -1);
-    int v = s.value ? e => -1;
-    assert(v == -1, "arrow on failable getter error");
+  Sensor s = Sensor(_raw: -1);
+  int v = s.value? e => -1;
+  assert(v == -1, "arrow on failable getter error");
 }
 
 test_arrow_getter_success() `test {
-    Sensor s = Sensor(_raw: 42);
-    int v = s.value ? e => -1;
-    assert(v == 42, "arrow on failable getter success");
+  Sensor s = Sensor(_raw: 42);
+  int v = s.value? e => -1;
+  assert(v == 42, "arrow on failable getter success");
 }
 
 // ============================================================
 // Section 9: Arrow with function call recovery
 // ============================================================
 
-fallback() int { return 99; }
+fallback() int {
+  return 99;
+}
 
 test_arrow_call_recovery() `test {
-    int v = parse(-1) ? e => fallback();
-    assert(v == 99, "arrow recovery via function call");
+  int v = parse(-1)? e => fallback();
+  assert(v == 99, "arrow recovery via function call");
 }
 
 test_arrow_call_success() `test {
-    int v = parse(5) ? e => fallback();
-    assert(v == 10, "arrow call recovery not triggered on success");
+  int v = parse(5)? e => fallback();
+  assert(v == 10, "arrow call recovery not triggered on success");
 }

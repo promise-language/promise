@@ -1,74 +1,73 @@
 // std/set.pr — Set[T] implemented as a wrapper around Map[T, bool]
-
 type Set[T: Hashable + Equal] `public {
-    Map[T, bool] _map;
+  Map[T, bool] _map;
 
-    new(~this) {
-        this._map = Map[T, bool]();
+  new(~this) {
+    this._map = Map[T, bool]();
+  }
+
+  get len int => this._map.len;
+  get is_empty bool => this._map.is_empty;
+
+  add(T elem) {
+    this._map[elem] = true;
+  }
+
+  remove(T elem) bool {
+    return this._map.remove(elem);
+  }
+
+  contains(T elem) bool {
+    return this._map.contains(elem);
+  }
+
+  clear() {
+    this._map.clear();
+  }
+
+  to_vector() T[] {
+    return this._map.keys();
+  }
+
+  // Set operations
+
+  union(Set[T] other) Set[T] {
+    Set[T] result = Set[T]();
+    for elem in this.to_vector() {
+      result.add(elem);
     }
-
-    get len int => this._map.len;
-    get is_empty bool => this._map.is_empty;
-
-    add(T elem) {
-        this._map[elem] = true;
+    for elem in other.to_vector() {
+      result.add(elem);
     }
+    return result;
+  }
 
-    remove(T elem) bool {
-        return this._map.remove(elem);
+  intersect(Set[T] other) Set[T] {
+    Set[T] result = Set[T]();
+    for elem in this.to_vector() {
+      if other.contains(elem) {
+        result.add(elem);
+      }
     }
+    return result;
+  }
 
-    contains(T elem) bool {
-        return this._map.contains(elem);
+  difference(Set[T] other) Set[T] {
+    Set[T] result = Set[T]();
+    for elem in this.to_vector() {
+      if !other.contains(elem) {
+        result.add(elem);
+      }
     }
+    return result;
+  }
 
-    clear() {
-        this._map.clear();
+  is_subset(Set[T] other) bool {
+    for elem in this.to_vector() {
+      if !other.contains(elem) {
+        return false;
+      }
     }
-
-    to_vector() T[] {
-        return this._map.keys();
-    }
-
-    // Set operations
-
-    union(Set[T] other) Set[T] {
-        Set[T] result = Set[T]();
-        for elem in this.to_vector() {
-            result.add(elem);
-        }
-        for elem in other.to_vector() {
-            result.add(elem);
-        }
-        return result;
-    }
-
-    intersect(Set[T] other) Set[T] {
-        Set[T] result = Set[T]();
-        for elem in this.to_vector() {
-            if other.contains(elem) {
-                result.add(elem);
-            }
-        }
-        return result;
-    }
-
-    difference(Set[T] other) Set[T] {
-        Set[T] result = Set[T]();
-        for elem in this.to_vector() {
-            if !other.contains(elem) {
-                result.add(elem);
-            }
-        }
-        return result;
-    }
-
-    is_subset(Set[T] other) bool {
-        for elem in this.to_vector() {
-            if !other.contains(elem) {
-                return false;
-            }
-        }
-        return true;
-    }
+    return true;
+  }
 }

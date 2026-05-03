@@ -1,6 +1,5 @@
 // Multi-consumer: 1 producer sends 25 values, 5 consumers read and forward.
 // Tests concurrent reads from a shared channel.
-
 main() `test(expected: "25") {
   ch := channel[int](capacity: 25);
   result := channel[int](capacity: 25);
@@ -26,7 +25,9 @@ main() `test(expected: "25") {
   int sum = 0;
   for j in 0..25 {
     r := <-result;
-    if v := r { sum = sum + v; }
+    if v := r {
+      sum = sum + v;
+    }
   }
   print_int(sum);
 }

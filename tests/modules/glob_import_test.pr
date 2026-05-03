@@ -1,50 +1,50 @@
 use _ "./mathlib";
 
 test_glob_add() `test {
-    assert(add(10, 20) == 30, "add(10, 20) == 30");
+  assert(add(10, 20) == 30, "add(10, 20) == 30");
 }
 
 test_glob_square() `test {
-    assert(square(6) == 36, "square(6) == 36");
+  assert(square(6) == 36, "square(6) == 36");
 }
 
 test_glob_greet() `test {
-    assert(greet("globe") == "hello globe", "greet globe");
+  assert(greet("globe") == "hello globe", "greet globe");
 }
 
 test_glob_color() `test {
-    c := Color.Red;
-    assert(color_name(c) == "red", "glob color_name Red");
+  c := Color.Red;
+  assert(color_name(c) == "red", "glob color_name Red");
 }
 
 test_glob_type_construct() `test {
-    v := Vec2(x: 5, y: 10);
-    assert(v.x == 5, "glob Vec2.x == 5");
-    assert(v.y == 10, "glob Vec2.y == 10");
-    assert(v.sum() == 15, "glob Vec2.sum() == 15");
+  v := Vec2(x: 5, y: 10);
+  assert(v.x == 5, "glob Vec2.x == 5");
+  assert(v.y == 10, "glob Vec2.y == 10");
+  assert(v.sum() == 15, "glob Vec2.sum() == 15");
 }
 
 test_glob_enum_match() `test {
-    c := Color.Green;
-    string result = match c {
-        Color.Red => "r",
-        Color.Green => "g",
-        Color.Blue => "b",
-    };
-    assert(result == "g", "glob enum match Green");
+  c := Color.Green;
+  string result = match c {
+    Color.Red => "r",
+    Color.Green => "g",
+    Color.Blue => "b",
+  };
+  assert(result == "g", "glob enum match Green");
 }
 
 make_vec(int x, int y) Vec2 {
-    return Vec2(x: x, y: y);
+  return Vec2(x: x, y: y);
 }
 
 sum_doubled(int x, int y) int {
-    v := make_vec(x, y);
-    return v.sum() * 2;
+  v := make_vec(x, y);
+  return v.sum() * 2;
 }
 
 test_module_type_as_param_return() `test {
-    v := make_vec(3, 7);
-    assert(v.sum() == 10, "make_vec sum == 10");
-    assert(sum_doubled(3, 7) == 20, "sum_doubled == 20");
+  v := make_vec(3, 7);
+  assert(v.sum() == 10, "make_vec sum == 10");
+  assert(sum_doubled(3, 7) == 20, "sum_doubled == 20");
 }

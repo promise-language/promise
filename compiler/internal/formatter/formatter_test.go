@@ -301,6 +301,26 @@ func TestFormat(t *testing.T) {
 			expected: "x << 2\n",
 		},
 		{
+			name:     "bitwise AND spaced",
+			input:    "0b1100&0b1010",
+			expected: "0b1100 & 0b1010\n",
+		},
+		{
+			name:     "empty map literal stays inline",
+			input:    "map[string, int] m = {:};",
+			expected: "map[string, int] m = {:};\n",
+		},
+		{
+			name:     "map literal int keys has space after colon",
+			input:    `map[int, string] m = {1:"one", 2:"two"};`,
+			expected: "map[int, string] m = {\n  1: \"one\", 2: \"two\"\n};\n",
+		},
+		{
+			name:     "map literal single line preserved",
+			input:    `map[string, int] m = {"a": 1, "b": 2, "c": 3};`,
+			expected: "map[string, int] m = {\n  \"a\": 1, \"b\": 2, \"c\": 3\n};\n",
+		},
+		{
 			name:     "slice type",
 			input:    "int[] arr;",
 			expected: "int[] arr;\n",
@@ -496,9 +516,74 @@ func TestFormat(t *testing.T) {
 			expected: "// first\n// second\nint x = 1;\n",
 		},
 		{
+			name:     "operator method []= no space",
+			input:    "[]=(int index, T value) `native;",
+			expected: "[]=(int index, T value) `native;\n",
+		},
+		{
+			name:     "operator method [:]= no space",
+			input:    "[:]=(int start, int end, T[] values) {}",
+			expected: "[:]=(int start, int end, T[] values) {\n}\n",
+		},
+		{
+			name:     "negative number in range",
+			input:    "for i in -3..3 {\n}",
+			expected: "for i in -3..3 {\n}\n",
+		},
+		{
+			name:     "slice no space around colon",
+			input:    `"hello"[: 3]`,
+			expected: "\"hello\"[:3]\n",
+		},
+		{
+			name:     "slice with start and end no space",
+			input:    `"hello"[1: 2]`,
+			expected: "\"hello\"[1:2]\n",
+		},
+		{
+			name:     "slice with expression no space around colon",
+			input:    "p[i + 1:end]",
+			expected: "p[i + 1:end]\n",
+		},
+		{
+			name:     "slice with nested index no space around colon",
+			input:    "arr[m[key]:end]",
+			expected: "arr[m[key]:end]\n",
+		},
+		{
+			name:     "negative number after comma",
+			input:    "int[] v = [3, -1, 4];",
+			expected: "int[] v = [3, -1, 4];\n",
+		},
+		{
+			name:     "index assignment has space around =",
+			input:    `m["a"]=1;`,
+			expected: "m[\"a\"] = 1;\n",
+		},
+		{
+			name:     "index assignment with paren expr",
+			input:    "v[i]=(i + 1) * 10;",
+			expected: "v[i] = (i + 1) * 10;\n",
+		},
+		{
+			name:     "variadic param preserves space before ellipsis",
+			input:    "join(string base, string child, ...string rest) {}",
+			expected: "join(string base, string child, ...string rest) {\n}\n",
+		},
+		{
 			name:     "comment after open brace",
 			input:    "fn() {\n// body\nx();\n}",
 			expected: "fn() {\n  // body\n  x();\n}\n",
+		},
+		{
+			name:     "standalone comment after statement stays on own line",
+			input:    "int x = 1;\n// This is a comment\nint y = 2;",
+			expected: "int x = 1;\n// This is a comment\nint y = 2;\n",
+		},
+		{
+			name:     "trailing comment on same line stays trailing",
+			input:    "int x = 1; // trailing\nint y = 2;",
+			expected: "int x = 1; // trailing\nint y = 2;\n",
 		},
 		{
 			name:     "get accessor",

@@ -1,250 +1,300 @@
 // std/map.pr — Map[K, V] implemented as an open-addressing hash map
-
 enum Slot[K, V] `public {
-    Empty,
-    Tombstone,
-    Used(K key, V value),
+  Empty,
+  Tombstone,
+  Used(K key, V value),
 }
 
 type Map[K: Hashable + Equal, V] `public {
-    Slot[K, V][] _buckets;
-    int _count;
+  Slot[K, V][] _buckets;
+  int _count;
 
-    new(~this) {
-        this._buckets = [Slot.Empty];
-        for _ in 1..16 { this._buckets.push(Slot.Empty); }
-        this._count = 0;
+  new(~this) {
+    this._buckets = [Slot.Empty];
+    for _ in 1..16 {
+      this._buckets.push(Slot.Empty);
     }
+    this._count = 0;
+  }
 
-    get len int => this._count;
-    get is_empty bool => this._count == 0;
+  get len int => this._count;
+  get is_empty bool => this._count == 0;
 
-    [](K key) V? {
-        int cap = this._buckets.len;
-        int h = key.hash % cap;
-        if h < 0 { h = h + cap; }
-        for {
-            match this._buckets[h] {
-                Slot.Empty => { return none; },
-                Slot.Used(k, v) => {
-                    if k == key { return v; }
-                },
-                Slot.Tombstone => {},
-            }
-            h = (h + 1) % cap;
-        }
+  [](K key) V? {
+    int cap = this._buckets.len;
+    int h = key.hash % cap;
+    if h < 0 {
+      h = h + cap;
     }
-
-    []=(K key, V value) {
-        if this._count * 4 >= this._buckets.len * 3 {
-            this._rehash();
-        }
-        int cap = this._buckets.len;
-        int h = key.hash % cap;
-        if h < 0 { h = h + cap; }
-        for {
-            match this._buckets[h] {
-                Slot.Empty => {
-                    this._buckets[h] = Slot.Used(key: key, value: value);
-                    this._count = this._count + 1;
-                    return;
-                },
-                Slot.Used(k, _) => {
-                    if k == key {
-                        this._buckets[h] = Slot.Used(key: key, value: value);
-                        return;
-                    }
-                },
-                Slot.Tombstone => {
-                    this._buckets[h] = Slot.Used(key: key, value: value);
-                    this._count = this._count + 1;
-                    return;
-                },
-            }
-            h = (h + 1) % cap;
-        }
+    for {
+      match this._buckets[h] {
+        Slot.Empty => {
+          return none;
+        },
+        Slot.Used(k, v) => {
+          if k == key {
+            return v;
+          }
+        },
+        Slot.Tombstone => {
+        },
+      }
+      h = (h + 1) % cap;
     }
+  }
 
-    contains(K key) bool {
-        int cap = this._buckets.len;
-        int h = key.hash % cap;
-        if h < 0 { h = h + cap; }
-        for {
-            match this._buckets[h] {
-                Slot.Empty => { return false; },
-                Slot.Used(k, _) => {
-                    if k == key { return true; }
-                },
-                Slot.Tombstone => {},
-            }
-            h = (h + 1) % cap;
-        }
+  []=(K key, V value) {
+    if this._count * 4 >= this._buckets.len * 3 {
+      this._rehash();
     }
+    int cap = this._buckets.len;
+    int h = key.hash % cap;
+    if h < 0 {
+      h = h + cap;
+    }
+    for {
+      match this._buckets[h] {
+        Slot.Empty => {
+          this._buckets[h] = Slot.Used(key: key, value: value);
+          this._count = this._count + 1;
+          return;
+        },
+        Slot.Used(k, _) => {
+          if k == key {
+            this._buckets[h] = Slot.Used(key: key, value: value);
+            return;
+          }
+        },
+        Slot.Tombstone => {
+          this._buckets[h] = Slot.Used(key: key, value: value);
+          this._count = this._count + 1;
+          return;
+        },
+      }
+      h = (h + 1) % cap;
+    }
+  }
 
-    remove(K key) bool {
-        int cap = this._buckets.len;
-        int h = key.hash % cap;
-        if h < 0 { h = h + cap; }
-        for {
-            match this._buckets[h] {
-                Slot.Empty => { return false; },
-                Slot.Used(k, _) => {
-                    if k == key {
-                        this._buckets[h] = Slot.Tombstone;
-                        this._count = this._count - 1;
-                        return true;
-                    }
-                },
-                Slot.Tombstone => {},
-            }
-            h = (h + 1) % cap;
-        }
+  contains(K key) bool {
+    int cap = this._buckets.len;
+    int h = key.hash % cap;
+    if h < 0 {
+      h = h + cap;
     }
+    for {
+      match this._buckets[h] {
+        Slot.Empty => {
+          return false;
+        },
+        Slot.Used(k, _) => {
+          if k == key {
+            return true;
+          }
+        },
+        Slot.Tombstone => {
+        },
+      }
+      h = (h + 1) % cap;
+    }
+  }
 
-    keys() K[] {
-        K[] result = [];
-        for slot in this._buckets {
-            match slot {
-                Slot.Used(k, _) => result.push(k),
-                _ => {},
-            }
-        }
-        return result;
+  remove(K key) bool {
+    int cap = this._buckets.len;
+    int h = key.hash % cap;
+    if h < 0 {
+      h = h + cap;
     }
+    for {
+      match this._buckets[h] {
+        Slot.Empty => {
+          return false;
+        },
+        Slot.Used(k, _) => {
+          if k == key {
+            this._buckets[h] = Slot.Tombstone;
+            this._count = this._count - 1;
+            return true;
+          }
+        },
+        Slot.Tombstone => {
+        },
+      }
+      h = (h + 1) % cap;
+    }
+  }
 
-    values() V[] {
-        V[] result = [];
-        for slot in this._buckets {
-            match slot {
-                Slot.Used(_, v) => result.push(v),
-                _ => {},
-            }
-        }
-        return result;
+  keys() K[] {
+    K[] result = [];
+    for slot in this._buckets {
+      match slot {
+        Slot.Used(k, _) => result.push(k),
+        _ => {
+        },
+      }
     }
+    return result;
+  }
 
-    get_or(K key, V default_val) V {
-        int cap = this._buckets.len;
-        int h = key.hash % cap;
-        if h < 0 { h = h + cap; }
-        for {
-            match this._buckets[h] {
-                Slot.Empty => { return default_val; },
-                Slot.Used(k, v) => {
-                    if k == key { return v; }
-                },
-                Slot.Tombstone => {},
-            }
-            h = (h + 1) % cap;
-        }
+  values() V[] {
+    V[] result = [];
+    for slot in this._buckets {
+      match slot {
+        Slot.Used(_, v) => result.push(v),
+        _ => {
+        },
+      }
     }
+    return result;
+  }
 
-    pop(K key) V? {
-        int cap = this._buckets.len;
-        int h = key.hash % cap;
-        if h < 0 { h = h + cap; }
-        for {
-            match this._buckets[h] {
-                Slot.Empty => { return none; },
-                Slot.Used(k, v) => {
-                    if k == key {
-                        this._buckets[h] = Slot.Tombstone;
-                        this._count = this._count - 1;
-                        return v;
-                    }
-                },
-                Slot.Tombstone => {},
-            }
-            h = (h + 1) % cap;
-        }
+  get_or(K key, V default_val) V {
+    int cap = this._buckets.len;
+    int h = key.hash % cap;
+    if h < 0 {
+      h = h + cap;
     }
+    for {
+      match this._buckets[h] {
+        Slot.Empty => {
+          return default_val;
+        },
+        Slot.Used(k, v) => {
+          if k == key {
+            return v;
+          }
+        },
+        Slot.Tombstone => {
+        },
+      }
+      h = (h + 1) % cap;
+    }
+  }
 
-    update(K key, V value) bool {
-        int cap = this._buckets.len;
-        int h = key.hash % cap;
-        if h < 0 { h = h + cap; }
-        for {
-            match this._buckets[h] {
-                Slot.Empty => { return false; },
-                Slot.Used(k, _) => {
-                    if k == key {
-                        this._buckets[h] = Slot.Used(key: key, value: value);
-                        return true;
-                    }
-                },
-                Slot.Tombstone => {},
-            }
-            h = (h + 1) % cap;
-        }
+  pop(K key) V? {
+    int cap = this._buckets.len;
+    int h = key.hash % cap;
+    if h < 0 {
+      h = h + cap;
     }
+    for {
+      match this._buckets[h] {
+        Slot.Empty => {
+          return none;
+        },
+        Slot.Used(k, v) => {
+          if k == key {
+            this._buckets[h] = Slot.Tombstone;
+            this._count = this._count - 1;
+            return v;
+          }
+        },
+        Slot.Tombstone => {
+        },
+      }
+      h = (h + 1) % cap;
+    }
+  }
 
-    entries() (K, V)[] {
-        (K, V)[] result = [];
-        for slot in this._buckets {
-            match slot {
-                Slot.Used(k, v) => result.push((k, v)),
-                _ => {},
-            }
-        }
-        return result;
+  update(K key, V value) bool {
+    int cap = this._buckets.len;
+    int h = key.hash % cap;
+    if h < 0 {
+      h = h + cap;
     }
+    for {
+      match this._buckets[h] {
+        Slot.Empty => {
+          return false;
+        },
+        Slot.Used(k, _) => {
+          if k == key {
+            this._buckets[h] = Slot.Used(key: key, value: value);
+            return true;
+          }
+        },
+        Slot.Tombstone => {
+        },
+      }
+      h = (h + 1) % cap;
+    }
+  }
 
-    merge(Map[K, V] other) {
-        for slot in other._buckets {
-            match slot {
-                Slot.Used(k, v) => { this._set(k, v); },
-                _ => {},
-            }
-        }
+  entries()(K, V)[] {
+    (K, V)[] result = [];
+    for slot in this._buckets {
+      match slot {
+        Slot.Used(k, v) => result.push((k, v)),
+        _ => {
+        },
+      }
     }
+    return result;
+  }
 
-    clear() {
-        for i in 0..this._buckets.len {
-            this._buckets[i] = Slot.Empty;
-        }
-        this._count = 0;
+  merge(Map[K, V] other) {
+    for slot in other._buckets {
+      match slot {
+        Slot.Used(k, v) => {
+          this._set(k, v);
+        },
+        _ => {
+        },
+      }
     }
+  }
 
-    _rehash() {
-        Slot[K, V][] old = this._buckets;
-        int new_cap = old.len * 2;
-        this._buckets = [Slot.Empty];
-        for _ in 1..new_cap { this._buckets.push(Slot.Empty); }
-        this._count = 0;
-        for slot in old {
-            match slot {
-                Slot.Used(k, v) => {
-                    this._set(k, v);
-                },
-                _ => {},
-            }
-        }
+  clear() {
+    for i in 0..this._buckets.len {
+      this._buckets[i] = Slot.Empty;
     }
+    this._count = 0;
+  }
 
-    _set(K key, V value) {
-        int cap = this._buckets.len;
-        int h = key.hash % cap;
-        if h < 0 { h = h + cap; }
-        for {
-            match this._buckets[h] {
-                Slot.Empty => {
-                    this._buckets[h] = Slot.Used(key: key, value: value);
-                    this._count = this._count + 1;
-                    return;
-                },
-                Slot.Used(k, _) => {
-                    if k == key {
-                        this._buckets[h] = Slot.Used(key: key, value: value);
-                        return;
-                    }
-                },
-                Slot.Tombstone => {
-                    this._buckets[h] = Slot.Used(key: key, value: value);
-                    this._count = this._count + 1;
-                    return;
-                },
-            }
-            h = (h + 1) % cap;
-        }
+  _rehash() {
+    Slot[K, V][] old = this._buckets;
+    int new_cap = old.len * 2;
+    this._buckets = [Slot.Empty];
+    for _ in 1..new_cap {
+      this._buckets.push(Slot.Empty);
     }
+    this._count = 0;
+    for slot in old {
+      match slot {
+        Slot.Used(k, v) => {
+          this._set(k, v);
+        },
+        _ => {
+        },
+      }
+    }
+  }
+
+  _set(K key, V value) {
+    int cap = this._buckets.len;
+    int h = key.hash % cap;
+    if h < 0 {
+      h = h + cap;
+    }
+    for {
+      match this._buckets[h] {
+        Slot.Empty => {
+          this._buckets[h] = Slot.Used(key: key, value: value);
+          this._count = this._count + 1;
+          return;
+        },
+        Slot.Used(k, _) => {
+          if k == key {
+            this._buckets[h] = Slot.Used(key: key, value: value);
+            return;
+          }
+        },
+        Slot.Tombstone => {
+          this._buckets[h] = Slot.Used(key: key, value: value);
+          this._count = this._count + 1;
+          return;
+        },
+      }
+      h = (h + 1) % cap;
+    }
+  }
 }

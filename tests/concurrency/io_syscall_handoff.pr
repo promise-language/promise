@@ -1,73 +1,72 @@
 // Tests that file IO from goroutines works correctly with syscall handoff.
 // Phase 6a: enter_syscall/exit_syscall releases P during blocking PAL calls.
 // Uses main() form because `test annotation + goroutines is not yet supported.
-
 use io;
 
 main() `test(expected: """single ok
 concurrent ok
 interleaved ok""", exclude: "wasm32") {
-    // Test 1: Single goroutine file IO
-    channel[string] ch = channel[string](capacity: 1);
-    go {
-        io.File.write_content("/tmp/pr_syscall_t1", "hello from goroutine")!;
-        string data = io.File.read_content("/tmp/pr_syscall_t1")!;
-        ch.send(data);
-    };
-    r := <-ch;
-    if result := r {
-        assert(result == "hello from goroutine", "goroutine file IO");
-    }
-    io.File.remove("/tmp/pr_syscall_t1")!;
-    println("single ok");
+  // Test 1: Single goroutine file IO
+  channel[string] ch = channel[string](capacity: 1);
+  go {
+    io.File.write_content("/tmp/pr_syscall_t1", "hello from goroutine")!;
+    string data = io.File.read_content("/tmp/pr_syscall_t1")!;
+    ch.send(data);
+  };
+  r := <-ch;
+  if result := r {
+    assert(result == "hello from goroutine", "goroutine file IO");
+  }
+  io.File.remove("/tmp/pr_syscall_t1")!;
+  println("single ok");
 
-    // Test 2: Multiple goroutines doing file IO concurrently
-    channel[int] done = channel[int](capacity: 4);
-    go {
-        io.File.write_content("/tmp/pr_syscall_t2_0", "data_0")!;
-        string d = io.File.read_content("/tmp/pr_syscall_t2_0")!;
-        assert(d == "data_0", "concurrent 0");
-        io.File.remove("/tmp/pr_syscall_t2_0")!;
-        done.send(0);
-    };
-    go {
-        io.File.write_content("/tmp/pr_syscall_t2_1", "data_1")!;
-        string d = io.File.read_content("/tmp/pr_syscall_t2_1")!;
-        assert(d == "data_1", "concurrent 1");
-        io.File.remove("/tmp/pr_syscall_t2_1")!;
-        done.send(1);
-    };
-    go {
-        io.File.write_content("/tmp/pr_syscall_t2_2", "data_2")!;
-        string d = io.File.read_content("/tmp/pr_syscall_t2_2")!;
-        assert(d == "data_2", "concurrent 2");
-        io.File.remove("/tmp/pr_syscall_t2_2")!;
-        done.send(2);
-    };
-    go {
-        io.File.write_content("/tmp/pr_syscall_t2_3", "data_3")!;
-        string d = io.File.read_content("/tmp/pr_syscall_t2_3")!;
-        assert(d == "data_3", "concurrent 3");
-        io.File.remove("/tmp/pr_syscall_t2_3")!;
-        done.send(3);
-    };
-    for _ in 0..4 {
-        <-done;
-    }
-    println("concurrent ok");
+  // Test 2: Multiple goroutines doing file IO concurrently
+  channel[int] done = channel[int](capacity: 4);
+  go {
+    io.File.write_content("/tmp/pr_syscall_t2_0", "data_0")!;
+    string d = io.File.read_content("/tmp/pr_syscall_t2_0")!;
+    assert(d == "data_0", "concurrent 0");
+    io.File.remove("/tmp/pr_syscall_t2_0")!;
+    done.send(0);
+  };
+  go {
+    io.File.write_content("/tmp/pr_syscall_t2_1", "data_1")!;
+    string d = io.File.read_content("/tmp/pr_syscall_t2_1")!;
+    assert(d == "data_1", "concurrent 1");
+    io.File.remove("/tmp/pr_syscall_t2_1")!;
+    done.send(1);
+  };
+  go {
+    io.File.write_content("/tmp/pr_syscall_t2_2", "data_2")!;
+    string d = io.File.read_content("/tmp/pr_syscall_t2_2")!;
+    assert(d == "data_2", "concurrent 2");
+    io.File.remove("/tmp/pr_syscall_t2_2")!;
+    done.send(2);
+  };
+  go {
+    io.File.write_content("/tmp/pr_syscall_t2_3", "data_3")!;
+    string d = io.File.read_content("/tmp/pr_syscall_t2_3")!;
+    assert(d == "data_3", "concurrent 3");
+    io.File.remove("/tmp/pr_syscall_t2_3")!;
+    done.send(3);
+  };
+  for _ in 0..4 {
+    <-done;
+  }
+  println("concurrent ok");
 
-    // Test 3: Goroutine file IO interleaved with channel ops
-    channel[string] ch2 = channel[string](capacity: 1);
-    go {
-        io.File.write_content("/tmp/pr_syscall_t3", "ping")!;
-        ch2.send("wrote");
-    };
-    r2 := <-ch2;
-    if msg := r2 {
-        assert(msg == "wrote", "channel sync after write");
-    }
-    string data = io.File.read_content("/tmp/pr_syscall_t3")!;
-    assert(data == "ping", "read after channel sync");
-    io.File.remove("/tmp/pr_syscall_t3")!;
-    println("interleaved ok");
+  // Test 3: Goroutine file IO interleaved with channel ops
+  channel[string] ch2 = channel[string](capacity: 1);
+  go {
+    io.File.write_content("/tmp/pr_syscall_t3", "ping")!;
+    ch2.send("wrote");
+  };
+  r2 := <-ch2;
+  if msg := r2 {
+    assert(msg == "wrote", "channel sync after write");
+  }
+  string data = io.File.read_content("/tmp/pr_syscall_t3")!;
+  assert(data == "ping", "read after channel sync");
+  io.File.remove("/tmp/pr_syscall_t3")!;
+  println("interleaved ok");
 }

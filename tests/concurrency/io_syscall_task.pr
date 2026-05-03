@@ -1,54 +1,53 @@
 // Tests task-returning goroutines with file IO.
 // Phase 6a: verifies enter_syscall/exit_syscall works with task[T] await.
 // Uses main() form because `test annotation + goroutines is not yet supported.
-
 use io;
 
 _write_and_read_1() string {
-    io.File.write_content("/tmp/pr_sc_task1", "task data")!;
-    string data = io.File.read_content("/tmp/pr_sc_task1")!;
-    io.File.remove("/tmp/pr_sc_task1")!;
-    return data;
+  io.File.write_content("/tmp/pr_sc_task1", "task data")!;
+  string data = io.File.read_content("/tmp/pr_sc_task1")!;
+  io.File.remove("/tmp/pr_sc_task1")!;
+  return data;
 }
 
 _write_and_read_2a() string {
-    io.File.write_content("/tmp/pr_sc_task2a", "alpha")!;
-    string data = io.File.read_content("/tmp/pr_sc_task2a")!;
-    io.File.remove("/tmp/pr_sc_task2a")!;
-    return data;
+  io.File.write_content("/tmp/pr_sc_task2a", "alpha")!;
+  string data = io.File.read_content("/tmp/pr_sc_task2a")!;
+  io.File.remove("/tmp/pr_sc_task2a")!;
+  return data;
 }
 
 _write_and_read_2b() string {
-    io.File.write_content("/tmp/pr_sc_task2b", "beta")!;
-    string data = io.File.read_content("/tmp/pr_sc_task2b")!;
-    io.File.remove("/tmp/pr_sc_task2b")!;
-    return data;
+  io.File.write_content("/tmp/pr_sc_task2b", "beta")!;
+  string data = io.File.read_content("/tmp/pr_sc_task2b")!;
+  io.File.remove("/tmp/pr_sc_task2b")!;
+  return data;
 }
 
 _write_and_read_2c() string {
-    io.File.write_content("/tmp/pr_sc_task2c", "gamma")!;
-    string data = io.File.read_content("/tmp/pr_sc_task2c")!;
-    io.File.remove("/tmp/pr_sc_task2c")!;
-    return data;
+  io.File.write_content("/tmp/pr_sc_task2c", "gamma")!;
+  string data = io.File.read_content("/tmp/pr_sc_task2c")!;
+  io.File.remove("/tmp/pr_sc_task2c")!;
+  return data;
 }
 
 main() `test(expected: """task_io ok
 multi_task ok""", exclude: "wasm32") {
-    // Test 1: Single task doing file IO, await result
-    task[string] t = go _write_and_read_1();
-    string result = <-t;
-    assert(result == "task data", "task file IO");
-    println("task_io ok");
+  // Test 1: Single task doing file IO, await result
+  task[string] t = go _write_and_read_1();
+  string result = <-t;
+  assert(result == "task data", "task file IO");
+  println("task_io ok");
 
-    // Test 2: Multiple tasks doing IO, await all
-    task[string] t1 = go _write_and_read_2a();
-    task[string] t2 = go _write_and_read_2b();
-    task[string] t3 = go _write_and_read_2c();
-    string r1 = <-t1;
-    string r2 = <-t2;
-    string r3 = <-t3;
-    assert(r1 == "alpha", "task 1");
-    assert(r2 == "beta", "task 2");
-    assert(r3 == "gamma", "task 3");
-    println("multi_task ok");
+  // Test 2: Multiple tasks doing IO, await all
+  task[string] t1 = go _write_and_read_2a();
+  task[string] t2 = go _write_and_read_2b();
+  task[string] t3 = go _write_and_read_2c();
+  string r1 = <-t1;
+  string r2 = <-t2;
+  string r3 = <-t3;
+  assert(r1 == "alpha", "task 1");
+  assert(r2 == "beta", "task 2");
+  assert(r3 == "gamma", "task 3");
+  println("multi_task ok");
 }

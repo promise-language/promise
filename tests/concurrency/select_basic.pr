@@ -1,6 +1,5 @@
 // Basic select test: one channel is ready, the other is not.
 // The select should pick the ready case.
-
 main() `test(expected: "42") {
   ch1 := channel[int](capacity: 1);
   ch2 := channel[int](capacity: 1);
@@ -10,8 +9,10 @@ main() `test(expected: "42") {
 
   select {
     v := <-ch1:
-      if val := v { print_int(val); }
+    if val := v {
+      print_int(val);
+    }
     v := <-ch2:
-      print_int(0);
+    print_int(0);
   }
 }

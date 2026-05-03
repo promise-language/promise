@@ -1,242 +1,256 @@
 // Tests for Self type resolution, especially on generic types.
-
 // --- Self on non-generic types ---
-
 type Point {
-    int x;
-    int y;
+  int x;
+  int y;
 
-    origin() Self `factory {
-        return Self(x: 0, y: 0);
-    }
+  origin() Self `factory {
+    return Self(x: 0, y: 0);
+  }
 
-    offset(int dx, int dy) Self {
-        return Point(x: this.x + dx, y: this.y + dy);
-    }
+  offset(int dx, int dy) Self {
+    return Point(x: this.x + dx, y: this.y + dy);
+  }
 
-    eq(Self other) bool {
-        return this.x == other.x && this.y == other.y;
-    }
+  eq(Self other) bool {
+    return this.x == other.x && this.y == other.y;
+  }
 }
 
 test_self_factory_non_generic() `test {
-    p := Point.origin();
-    assert(p.x == 0, "origin x");
-    assert(p.y == 0, "origin y");
+  p := Point.origin();
+  assert(p.x == 0, "origin x");
+  assert(p.y == 0, "origin y");
 }
 
 test_self_return_non_generic() `test {
-    p := Point(x: 1, y: 2);
-    q := p.offset(10, 20);
-    assert(q.x == 11, "offset x");
-    assert(q.y == 22, "offset y");
+  p := Point(x: 1, y: 2);
+  q := p.offset(10, 20);
+  assert(q.x == 11, "offset x");
+  assert(q.y == 22, "offset y");
 }
 
 test_self_param_non_generic() `test {
-    a := Point(x: 1, y: 2);
-    b := Point(x: 1, y: 2);
-    c := Point(x: 3, y: 4);
-    assert(a.eq(b), "equal points");
-    assert(!a.eq(c), "unequal points");
+  a := Point(x: 1, y: 2);
+  b := Point(x: 1, y: 2);
+  c := Point(x: 3, y: 4);
+  assert(a.eq(b), "equal points");
+  assert(!a.eq(c), "unequal points");
 }
 
 // --- Self on generic types (the bug fix) ---
 
 type Box[T] {
-    T value;
-    new(~this, T v) { this.value = v; }
+  T value;
+  new(~this, T v) {
+    this.value = v;
+  }
 
-    wrap(T v) Self `factory {
-        return Self(v: v);
-    }
+  wrap(T v) Self `factory {
+    return Self(v: v);
+  }
 
-    rewrap(T v) Self {
-        return Self(v: v);
-    }
+  rewrap(T v) Self {
+    return Self(v: v);
+  }
 
-    same_as(Self other) bool {
-        return true;
-    }
+  same_as(Self other) bool {
+    return true;
+  }
 }
 
 test_self_factory_generic_int() `test {
-    b := Box[int].wrap(v: 42);
-    assert(b.value == 42, "box int value");
+  b := Box[int].wrap(v: 42);
+  assert(b.value == 42, "box int value");
 }
 
 test_self_factory_generic_string() `test {
-    b := Box[string].wrap(v: "hello");
-    assert(b.value == "hello", "box string value");
+  b := Box[string].wrap(v: "hello");
+  assert(b.value == "hello", "box string value");
 }
 
 test_self_method_return_generic() `test {
-    b := Box[int](v: 1);
-    c := b.rewrap(v: 99);
-    assert(c.value == 99, "rewrapped value");
+  b := Box[int](v: 1);
+  c := b.rewrap(v: 99);
+  assert(c.value == 99, "rewrapped value");
 }
 
 test_self_param_generic() `test {
-    a := Box[int](v: 1);
-    b := Box[int](v: 2);
-    assert(a.same_as(b), "same_as accepts Box[int]");
+  a := Box[int](v: 1);
+  b := Box[int](v: 2);
+  assert(a.same_as(b), "same_as accepts Box[int]");
 }
 
 test_self_factory_assigns_to_annotated_type() `test {
-    Box[int] b = Box[int].wrap(v: 10);
-    assert(b.value == 10, "annotated type");
+  Box[int] b = Box[int].wrap(v: 10);
+  assert(b.value == 10, "annotated type");
 }
 
 // --- Self on generic type with multiple type params ---
 
 type Pair[A, B] {
-    A first;
-    B second;
-    new(~this, A a, B b) { this.first = a; this.second = b; }
+  A first;
+  B second;
+  new(~this, A a, B b) {
+    this.first = a;
+    this.second = b;
+  }
 
-    make(A a, B b) Self `factory {
-        return Self(a: a, b: b);
-    }
+  make(A a, B b) Self `factory {
+    return Self(a: a, b: b);
+  }
 
-    with_first(A a) Self {
-        return Pair[A, B](a: a, b: this.second);
-    }
+  with_first(A a) Self {
+    return Pair[A, B](a: a, b: this.second);
+  }
 }
 
 test_self_factory_multi_param() `test {
-    p := Pair[int, string].make(a: 42, b: "x");
-    assert(p.first == 42, "pair first");
-    assert(p.second == "x", "pair second");
+  p := Pair[int, string].make(a: 42, b: "x");
+  assert(p.first == 42, "pair first");
+  assert(p.second == "x", "pair second");
 }
 
 test_self_method_multi_param() `test {
-    p := Pair[int, string](a: 1, b: "y");
-    q := p.with_first(99);
-    assert(q.first == 99, "new first");
-    assert(q.second == "y", "kept second");
+  p := Pair[int, string](a: 1, b: "y");
+  q := p.with_first(99);
+  assert(q.first == 99, "new first");
+  assert(q.second == "y", "kept second");
 }
 
 // --- Self on Vector via filled() (uses Self return type in std) ---
 
 test_vector_filled_uses_self() `test {
-    v := int[].filled(value: 7, count: 3);
-    assert(v.len == 3, "filled len");
-    assert(v[0] == 7, "filled val 0");
-    assert(v[2] == 7, "filled val 2");
+  v := int[].filled(value: 7, count: 3);
+  assert(v.len == 3, "filled len");
+  assert(v[0] == 7, "filled val 0");
+  assert(v[2] == 7, "filled val 2");
 }
 
 test_vector_filled_string_uses_self() `test {
-    v := string[].filled(value: "hi", count: 2);
-    assert(v.len == 2, "filled string len");
-    assert(v[0] == "hi", "filled string val");
+  v := string[].filled(value: "hi", count: 2);
+  assert(v.len == 2, "filled string len");
+  assert(v[0] == "hi", "filled string val");
 }
 
 // --- Self in chained operations ---
 
 type Counter[T] {
-    T value;
-    int count;
-    new(~this, T v) { this.value = v; this.count = 0; }
+  T value;
+  int count;
+  new(~this, T v) {
+    this.value = v;
+    this.count = 0;
+  }
 
-    create(T v) Self `factory {
-        return Self(v: v);
-    }
+  create(T v) Self `factory {
+    return Self(v: v);
+  }
 
-    inc() Self {
-        return Counter[T](v: this.value);
-    }
+  inc() Self {
+    return Counter[T](v: this.value);
+  }
 }
 
 test_self_chained() `test {
-    c := Counter[int].create(v: 5);
-    d := c.inc();
-    assert(d.value == 5, "chained value preserved");
+  c := Counter[int].create(v: 5);
+  d := c.inc();
+  assert(d.value == 5, "chained value preserved");
 }
 
 // --- Failable factory returning Self! on generic type ---
 
 type Validated[T] {
-    T value;
-    new(~this, T v) { this.value = v; }
+  T value;
+  new(~this, T v) {
+    this.value = v;
+  }
 
-    parse(T v) Self! `factory {
-        return Self(v: v);
-    }
+  parse(T v) Self! `factory {
+    return Self(v: v);
+  }
 }
 
 test_self_failable_factory_generic() `test {
-    v := Validated[int].parse(v: 42)!;
-    assert(v.value == 42, "failable factory ok");
+  v := Validated[int].parse(v: 42)!;
+  assert(v.value == 42, "failable factory ok");
 }
 
 test_self_failable_factory_generic_string() `test {
-    v := Validated[string].parse(v: "ok")!;
-    assert(v.value == "ok", "failable factory string");
+  v := Validated[string].parse(v: "ok")!;
+  assert(v.value == "ok", "failable factory string");
 }
 
 // --- Self? optional on generic type ---
 
 type MaybeBox[T] {
-    T value;
-    new(~this, T v) { this.value = v; }
+  T value;
+  new(~this, T v) {
+    this.value = v;
+  }
 
-    try_wrap(T v, bool succeed) Self? `factory {
-        if !succeed { return none; }
-        return Self(v: v);
+  try_wrap(T v, bool succeed) Self? `factory {
+    if !succeed {
+      return none;
     }
+    return Self(v: v);
+  }
 }
 
 test_self_optional_factory_some() `test {
-    r := MaybeBox[int].try_wrap(v: 10, succeed: true);
-    assert(r is present, "should be present");
+  r := MaybeBox[int].try_wrap(v: 10, succeed: true);
+  assert(r is present, "should be present");
 }
 
 test_self_optional_factory_none() `test {
-    r := MaybeBox[int].try_wrap(v: 10, succeed: false);
-    assert(r is absent, "should be absent");
+  r := MaybeBox[int].try_wrap(v: 10, succeed: false);
+  assert(r is absent, "should be absent");
 }
 
 // --- Self as local variable annotation in generic method ---
 
 type Holder[T] {
-    T value;
-    new(~this, T v) { this.value = v; }
+  T value;
+  new(~this, T v) {
+    this.value = v;
+  }
 
-    duplicate() Self {
-        Self copy = Holder[T](v: this.value);
-        return copy;
-    }
+  duplicate() Self {
+    Self copy = Holder[T](v: this.value);
+    return copy;
+  }
 }
 
 test_self_local_var_annotation() `test {
-    h := Holder[int](v: 77);
-    h2 := h.duplicate();
-    assert(h2.value == 77, "duplicated value");
+  h := Holder[int](v: 77);
+  h2 := h.duplicate();
+  assert(h2.value == 77, "duplicated value");
 }
 
 // --- Multiple instantiations of same Self factory in one program ---
 
 test_self_multiple_instantiations() `test {
-    a := Box[int].wrap(v: 1);
-    b := Box[string].wrap(v: "two");
-    c := Box[bool].wrap(v: true);
-    assert(a.value == 1, "int box");
-    assert(b.value == "two", "string box");
-    assert(c.value == true, "bool box");
+  a := Box[int].wrap(v: 1);
+  b := Box[string].wrap(v: "two");
+  c := Box[bool].wrap(v: true);
+  assert(a.value == 1, "int box");
+  assert(b.value == "two", "string box");
+  assert(c.value == true, "bool box");
 }
 
 // --- Self on generic with inherited value access ---
 
 test_self_factory_result_field_access() `test {
-    // Verify that the result of a Self-returning factory has proper
-    // field access (the type is fully instantiated, not raw Named)
-    b := Box[int].wrap(v: 100);
-    int x = b.value;      // should type-check as int, not T
-    assert(x == 100, "field access on factory result");
+  // Verify that the result of a Self-returning factory has proper
+  // field access (the type is fully instantiated, not raw Named)
+  b := Box[int].wrap(v: 100);
+  int x = b.value; // should type-check as int, not T
+  assert(x == 100, "field access on factory result");
 }
 
 test_self_method_result_field_access() `test {
-    b := Box[int](v: 50);
-    c := b.rewrap(v: 75);
-    int x = c.value;      // should type-check as int
-    assert(x == 75, "field access on method result");
+  b := Box[int](v: 50);
+  c := b.rewrap(v: 75);
+  int x = c.value; // should type-check as int
+  assert(x == 75, "field access on method result");
 }

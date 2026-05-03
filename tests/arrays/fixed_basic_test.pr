@@ -1,5 +1,4 @@
 // Fixed-size array basic operations
-
 main() `test(expected: """3
 1
 2
@@ -9,32 +8,32 @@ main() `test(expected: """3
 30
 22
 6""") {
-    // Literal + len
-    int[3] arr = [1, 2, 3];
-    println("{arr.len}");
+  // Literal + len
+  int[3] arr = [1, 2, 3];
+  println("{arr.len}");
 
-    // Index read
-    println("{arr[0]}");
-    println("{arr[1]}");
-    println("{arr[2]}");
+  // Index read
+  println("{arr[0]}");
+  println("{arr[1]}");
+  println("{arr[2]}");
 
-    // Index assign
-    arr[0] = 10;
-    arr[1] = 20;
-    arr[2] = 30;
-    println("{arr[0]}");
-    println("{arr[1]}");
-    println("{arr[2]}");
+  // Index assign
+  arr[0] = 10;
+  arr[1] = 20;
+  arr[2] = 30;
+  println("{arr[0]}");
+  println("{arr[1]}");
+  println("{arr[2]}");
 
-    // Compound assign
-    arr[0] += 12;
-    println("{arr[0]}");
+  // Compound assign
+  arr[0] += 12;
+  println("{arr[0]}");
 
-    // For-in
-    int[3] items = [1, 2, 3];
-    int sum = 0;
-    for x in items {
-        sum += x;
-    }
-    println("{sum}");
+  // For-in
+  int[3] items = [1, 2, 3];
+  int sum = 0;
+  for x in items {
+    sum += x;
+  }
+  println("{sum}");
 }

@@ -1,9 +1,10 @@
 // Task returning a string value via helper function.
-
-get_greeting() string { return "hello from task"; }
+get_greeting() string {
+  return "hello from task";
+}
 
 main() `test(expected: "hello from task") {
-    t := go get_greeting();
-    string result = <-t;
-    println(result);
+  t := go get_greeting();
+  string result = <-t;
+  println(result);
 }

@@ -1,83 +1,82 @@
 // Test sort module: sort[T: Ordered]
-
 test_sort_empty() `test {
-    int[] v = [];
-    v = sort[int](v);
-    assert(v.len == 0, "sort empty");
+  int[] v = [];
+  v = sort[int](v);
+  assert(v.len == 0, "sort empty");
 }
 
 test_sort_single() `test {
-    int[] v = [42];
-    v = sort[int](v);
-    assert(v[0] == 42, "sort single element");
+  int[] v = [42];
+  v = sort[int](v);
+  assert(v[0] == 42, "sort single element");
 }
 
 test_sort_sorted() `test {
-    int[] v = [1, 2, 3, 4, 5];
-    v = sort[int](v);
-    assert(v[0] == 1 && v[4] == 5, "sort already sorted");
+  int[] v = [1, 2, 3, 4, 5];
+  v = sort[int](v);
+  assert(v[0] == 1 && v[4] == 5, "sort already sorted");
 }
 
 test_sort_reversed() `test {
-    int[] v = [5, 4, 3, 2, 1];
-    v = sort[int](v);
-    assert(v[0] == 1, "reversed: first == 1");
-    assert(v[1] == 2, "reversed: second == 2");
-    assert(v[2] == 3, "reversed: third == 3");
-    assert(v[3] == 4, "reversed: fourth == 4");
-    assert(v[4] == 5, "reversed: fifth == 5");
+  int[] v = [5, 4, 3, 2, 1];
+  v = sort[int](v);
+  assert(v[0] == 1, "reversed: first == 1");
+  assert(v[1] == 2, "reversed: second == 2");
+  assert(v[2] == 3, "reversed: third == 3");
+  assert(v[3] == 4, "reversed: fourth == 4");
+  assert(v[4] == 5, "reversed: fifth == 5");
 }
 
 test_sort_duplicates() `test {
-    int[] v = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5];
-    v = sort[int](v);
-    assert(v[0] == 1, "duplicates: first == 1");
-    assert(v[1] == 1, "duplicates: second == 1");
-    assert(v[10] == 9, "duplicates: last == 9");
+  int[] v = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5];
+  v = sort[int](v);
+  assert(v[0] == 1, "duplicates: first == 1");
+  assert(v[1] == 1, "duplicates: second == 1");
+  assert(v[10] == 9, "duplicates: last == 9");
 }
 
 test_sort_negative() `test {
-    int[] v = [3, -1, 4, -1, 5, -9];
-    v = sort[int](v);
-    assert(v[0] == -9, "negative: first == -9");
-    assert(v[5] == 5, "negative: last == 5");
+  int[] v = [3, -1, 4, -1, 5, -9];
+  v = sort[int](v);
+  assert(v[0] == -9, "negative: first == -9");
+  assert(v[5] == 5, "negative: last == 5");
 }
 
 test_sort_large() `test {
-    int[] v = [];
-    int i = 100;
-    while i > 0 {
-        v.push(i);
-        i--;
-    }
-    v = sort[int](v);
-    assert(v[0] == 1, "large: first == 1");
-    assert(v[99] == 100, "large: last == 100");
-    // verify fully sorted
-    int j = 0;
-    while j < 99 {
-        assert(v[j] <= v[j + 1], "large: ordered");
-        j++;
-    }
+  int[] v = [];
+  int i = 100;
+  while i > 0 {
+    v.push(i);
+    i--;
+  }
+  v = sort[int](v);
+  assert(v[0] == 1, "large: first == 1");
+  assert(v[99] == 100, "large: last == 100");
+  // verify fully sorted
+  int j = 0;
+  while j < 99 {
+    assert(v[j] <= v[j + 1], "large: ordered");
+    j++;
+  }
 }
 
 test_sort_all_equal() `test {
-    int[] v = [7, 7, 7, 7, 7];
-    v = sort[int](v);
-    assert(v[0] == 7 && v[4] == 7, "all equal stays 7");
+  int[] v = [7, 7, 7, 7, 7];
+  v = sort[int](v);
+  assert(v[0] == 7 && v[4] == 7, "all equal stays 7");
 }
 
 test_sort_strings() `test {
-    string[] v = ["banana", "apple", "cherry", "date"];
-    v = sort[string](v);
-    assert(v[0] == "apple", "strings: first == apple");
-    assert(v[1] == "banana", "strings: second == banana");
-    assert(v[2] == "cherry", "strings: third == cherry");
-    assert(v[3] == "date", "strings: fourth == date");
+  string[] v = ["banana", "apple", "cherry", "date"];
+  v = sort[string](v);
+  assert(v[0] == "apple", "strings: first == apple");
+  assert(v[1] == "banana", "strings: second == banana");
+  assert(v[2] == "cherry", "strings: third == cherry");
+  assert(v[3] == "date", "strings: fourth == date");
 }
 
 test_sort_two_elements() `test {
-    int[] v = [2, 1];
-    v = sort[int](v);
-    assert(v[0] == 1 && v[1] == 2, "two elements sorted");
+  int[] v = [2, 1];
+  v = sort[int](v);
+  assert(v[0] == 1 && v[1] == 2, "two elements sorted");
 }

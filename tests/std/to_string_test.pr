@@ -1,113 +1,112 @@
 // Tests for to_string() on primitive types and string.from_bytes
-
 test_int_to_string() `test {
-    assert(42.to_string() == "42", "42");
-    assert((-17).to_string() == "-17", "-17");
-    assert(0.to_string() == "0", "0");
+  assert(42.to_string() == "42", "42");
+  assert((-17).to_string() == "-17", "-17");
+  assert(0.to_string() == "0", "0");
 }
 
 test_bool_to_string() `test {
-    assert(true.to_string() == "true", "true");
-    assert(false.to_string() == "false", "false");
+  assert(true.to_string() == "true", "true");
+  assert(false.to_string() == "false", "false");
 }
 
 test_string_to_string() `test {
-    assert("hello".to_string() == "hello", "string identity");
+  assert("hello".to_string() == "hello", "string identity");
 }
 
 test_from_bytes() `test {
-    u8[] bytes = "hello".bytes();
-    string s = string.from_bytes(bytes);
-    assert(s == "hello", "from_bytes hello");
+  u8[] bytes = "hello".bytes();
+  string s = string.from_bytes(bytes);
+  assert(s == "hello", "from_bytes hello");
 }
 
 test_from_bytes_empty() `test {
-    u8[] bytes = "".bytes();
-    string s = string.from_bytes(bytes);
-    assert(s == "", "from_bytes empty");
+  u8[] bytes = "".bytes();
+  string s = string.from_bytes(bytes);
+  assert(s == "", "from_bytes empty");
 }
 
 test_from_bytes_roundtrip() `test {
-    string original = "Hello, World! 123";
-    u8[] bytes = original.bytes();
-    string result = string.from_bytes(bytes);
-    assert(result == original, "roundtrip");
+  string original = "Hello, World! 123";
+  u8[] bytes = original.bytes();
+  string result = string.from_bytes(bytes);
+  assert(result == original, "roundtrip");
 }
 
 test_char_to_string() `test {
-    assert('A'.to_string() == "A", "char A");
-    assert('0'.to_string() == "0", "char 0");
+  assert('A'.to_string() == "A", "char A");
+  assert('0'.to_string() == "0", "char 0");
 }
 
 test_bytes_content() `test {
-    u8[] bytes = "AB".bytes();
-    assert(bytes.len == 2, "len 2");
-    assert((bytes[0] as! int) == 65, "A = 65");
-    assert((bytes[1] as! int) == 66, "B = 66");
+  u8[] bytes = "AB".bytes();
+  assert(bytes.len == 2, "len 2");
+  assert((bytes[0] as! int) == 65, "A = 65");
+  assert((bytes[1] as! int) == 66, "B = 66");
 }
 
 test_byte_at() `test {
-    string s = "hello";
-    u8 b = s.byte_at(0);
-    assert((b as! int) == 104, "h = 104");
-    u8 b2 = s.byte_at(4);
-    assert((b2 as! int) == 111, "o = 111");
+  string s = "hello";
+  u8 b = s.byte_at(0);
+  assert((b as! int) == 104, "h = 104");
+  u8 b2 = s.byte_at(4);
+  assert((b2 as! int) == 111, "o = 111");
 }
 
 test_uint_to_string() `test {
-    uint v = 42 as! uint;
-    assert(v.to_string() == "42", "uint 42");
-    uint zero = 0 as! uint;
-    assert(zero.to_string() == "0", "uint 0");
+  uint v = 42 as! uint;
+  assert(v.to_string() == "42", "uint 42");
+  uint zero = 0 as! uint;
+  assert(zero.to_string() == "0", "uint 0");
 }
 
 test_f64_to_string() `test {
-    assert(3.14.to_string() == "3.14", "f64 3.14");
-    assert(0.0.to_string() == "0", "f64 0.0");
-    assert((-1.5).to_string() == "-1.5", "f64 -1.5");
+  assert(3.14.to_string() == "3.14", "f64 3.14");
+  assert(0.0.to_string() == "0", "f64 0.0");
+  assert((-1.5).to_string() == "-1.5", "f64 -1.5");
 }
 
 test_i8_to_string() `test {
-    i8 v = 127 as! i8;
-    assert(v.to_string() == "127", "i8 127");
+  i8 v = 127 as! i8;
+  assert(v.to_string() == "127", "i8 127");
 }
 
 test_i16_to_string() `test {
-    i16 v = -1000 as! i16;
-    assert(v.to_string() == "-1000", "i16 -1000");
+  i16 v = -1000 as! i16;
+  assert(v.to_string() == "-1000", "i16 -1000");
 }
 
 test_i32_to_string() `test {
-    i32 v = 42 as! i32;
-    assert(v.to_string() == "42", "i32 42");
+  i32 v = 42 as! i32;
+  assert(v.to_string() == "42", "i32 42");
 }
 
 test_i64_to_string() `test {
-    i64 v = -99 as! i64;
-    assert(v.to_string() == "-99", "i64 -99");
+  i64 v = -99 as! i64;
+  assert(v.to_string() == "-99", "i64 -99");
 }
 
 test_u8_to_string() `test {
-    u8 v = 255 as! u8;
-    assert(v.to_string() == "255", "u8 255");
+  u8 v = 255 as! u8;
+  assert(v.to_string() == "255", "u8 255");
 }
 
 test_u16_to_string() `test {
-    u16 v = 1000 as! u16;
-    assert(v.to_string() == "1000", "u16 1000");
+  u16 v = 1000 as! u16;
+  assert(v.to_string() == "1000", "u16 1000");
 }
 
 test_u32_to_string() `test {
-    u32 v = 42 as! u32;
-    assert(v.to_string() == "42", "u32 42");
+  u32 v = 42 as! u32;
+  assert(v.to_string() == "42", "u32 42");
 }
 
 test_u64_to_string() `test {
-    u64 v = 99 as! u64;
-    assert(v.to_string() == "99", "u64 99");
+  u64 v = 99 as! u64;
+  assert(v.to_string() == "99", "u64 99");
 }
 
 test_f32_to_string() `test {
-    f32 v = 2.5 as! f32;
-    assert(v.to_string() == "2.5", "f32 2.5");
+  f32 v = 2.5 as! f32;
+  assert(v.to_string() == "2.5", "f32 2.5");
 }

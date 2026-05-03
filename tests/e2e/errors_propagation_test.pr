@@ -1,101 +1,111 @@
 // Tests for auto-propagation, typed handler rules, and failable result capture.
-
 // ============================================================
 // Section 1: Auto-propagation in failable functions
 // ============================================================
-
 parse_int(string s) int! {
-    if s == "42" { return 42; }
-    if s == "0" { return 0; }
-    raise error(message: "bad: " + s);
+  if s == "42" {
+    return 42;
+  }
+  if s == "0" {
+    return 0;
+  }
+  raise error(message: "bad: " + s);
 }
 
 void_fail() void! {
-    raise error(message: "void failed");
+  raise error(message: "void failed");
 }
 
 void_ok() void! {
-    // does not raise
+  // does not raise
 }
 
 // Naked failable call in failable function auto-propagates
 auto_prop_void() void! {
-    void_fail();
+  void_fail();
 }
 
 try_auto_prop_void() bool {
-    auto_prop_void() ? e { return true; };
-    return false;
+  auto_prop_void()? e {
+    return true;
+  };
+  return false;
 }
 
 test_auto_propagate_void() `test {
-    assert(try_auto_prop_void(), "void failable auto-propagates");
+  assert(try_auto_prop_void(), "void failable auto-propagates");
 }
 
 // Auto-propagation with non-void result (discarded)
 auto_prop_nonvoid() void! {
-    parse_int("bad");
+  parse_int("bad");
 }
 
 try_auto_prop_nonvoid() bool {
-    auto_prop_nonvoid() ? e { return true; };
-    return false;
+  auto_prop_nonvoid()? e {
+    return true;
+  };
+  return false;
 }
 
 test_auto_propagate_nonvoid() `test {
-    assert(try_auto_prop_nonvoid(), "non-void failable auto-propagates");
+  assert(try_auto_prop_nonvoid(), "non-void failable auto-propagates");
 }
 
 // Auto-propagation on success continues normally
 auto_prop_success() int! {
-    void_ok();
-    return 42;
+  void_ok();
+  return 42;
 }
 
 test_auto_propagate_success() `test {
-    int r = auto_prop_success()!;
-    assert(r == 42, "auto-propagate success continues");
+  int r = auto_prop_success()!;
+  assert(r == 42, "auto-propagate success continues");
 }
 
 // Multiple auto-propagation calls in sequence
 multi_auto_prop() void! {
-    void_ok();
-    void_ok();
-    void_ok();
+  void_ok();
+  void_ok();
+  void_ok();
 }
 
 test_multi_auto_propagate() `test {
-    multi_auto_prop()!;
+  multi_auto_prop()!;
 }
 
 // Auto-propagation preserves error message
 get_auto_prop_message() string {
-    auto_prop_void() ? e { return e.message; };
-    return "";
+  auto_prop_void()? e {
+    return e.message;
+  };
+  return "";
 }
 
 test_auto_propagate_preserves_message() `test {
-    string msg = get_auto_prop_message();
-    assert(msg == "void failed", "auto-propagated error preserves message");
+  string msg = get_auto_prop_message();
+  assert(msg == "void failed", "auto-propagated error preserves message");
 }
 
 // Auto-propagation in loop
 loop_auto_prop(int n) void! {
-    int i = 0;
-    while i < n {
-        void_ok();
-        i += 1;
-    }
-    void_fail();
+  int i = 0;
+  while i < n {
+    void_ok();
+    i += 1;
+  }
+  void_fail();
 }
 
 try_loop_auto_prop() bool {
-    loop_auto_prop(3) ? e { return true; };
-    return false;
+  loop_auto_prop(3)? e {
+    return true;
+  };
+  return false;
 }
 
 test_auto_propagate_in_loop() `test {
-    assert(try_loop_auto_prop(), "auto-propagate in loop works");
+  assert(try_loop_auto_prop(), "auto-propagate in loop works");
 }
 
 // ============================================================
@@ -103,62 +113,62 @@ test_auto_propagate_in_loop() `test {
 // ============================================================
 
 test_result_capture_success() `test {
-    (val, err) := parse_int("42");
-    assert(val == 42, "captured value is 42");
-    if err is present {
-        assert(false, "error should be absent on success");
-    }
+  (val, err) := parse_int("42");
+  assert(val == 42, "captured value is 42");
+  if err is present {
+    assert(false, "error should be absent on success");
+  }
 }
 
 test_result_capture_error() `test {
-    (val, err) := parse_int("bad");
-    // val is zero-initialized on error
-    assert(val == 0, "captured value is 0 on error");
-    if err is present {
-        assert(err.message == "bad: bad", "captured error message correct");
-    } else {
-        assert(false, "error should be present on failure");
-    }
+  (val, err) := parse_int("bad");
+  // val is zero-initialized on error
+  assert(val == 0, "captured value is 0 on error");
+  if err is present {
+    assert(err.message == "bad: bad", "captured error message correct");
+  } else {
+    assert(false, "error should be present on failure");
+  }
 }
 
 test_result_capture_discard_value() `test {
-    (_, err) := parse_int("bad");
-    if err is present {
-        assert(err.message == "bad: bad", "discarded value, captured error");
-    } else {
-        assert(false, "error should be present");
-    }
+  (_, err) := parse_int("bad");
+  if err is present {
+    assert(err.message == "bad: bad", "discarded value, captured error");
+  } else {
+    assert(false, "error should be present");
+  }
 }
 
 test_result_capture_discard_error() `test {
-    (val, _) := parse_int("42");
-    assert(val == 42, "captured value, discarded error");
+  (val, _) := parse_int("42");
+  assert(val == 42, "captured value, discarded error");
 }
 
 // Result capture with void failable
 test_void_result_capture_success() `test {
-    (_, err) := void_ok();
-    if err is present {
-        assert(false, "void ok should have no error");
-    }
+  (_, err) := void_ok();
+  if err is present {
+    assert(false, "void ok should have no error");
+  }
 }
 
 test_void_result_capture_error() `test {
-    (_, err) := void_fail();
-    if err is present {
-        assert(err.message == "void failed", "void error captured");
-    } else {
-        assert(false, "void fail should have error");
-    }
+  (_, err) := void_fail();
+  if err is present {
+    assert(err.message == "void failed", "void error captured");
+  } else {
+    assert(false, "void fail should have error");
+  }
 }
 
 // Result capture with custom error types
 type IoError is error {
-    int code;
+  int code;
 }
 
 fail_io() int! {
-    raise IoError(message: "disk full", code: 28);
+  raise IoError(message: "disk full", code: 28);
 }
 
 // ============================================================
@@ -166,75 +176,99 @@ fail_io() int! {
 // ============================================================
 
 type ParseError is error {
-    int line;
+  int line;
 }
 
 fail_parse() void! {
-    raise ParseError(message: "syntax error", line: 42);
+  raise ParseError(message: "syntax error", line: 42);
 }
 
 // else clause catches non-matching errors
 typed_handler_else_match() string {
-    fail_io() ? e is IoError { return "io:" + e.message; } else { return "other"; };
-    return "unreachable";
+  fail_io()? e is IoError {
+    return "io:" + e.message;
+  } else {
+    return "other";
+  };
+  return "unreachable";
 }
 
 test_typed_handler_else_match() `test {
-    string r = typed_handler_else_match();
-    assert(r == "io:disk full", "typed handler catches matching error");
+  string r = typed_handler_else_match();
+  assert(r == "io:disk full", "typed handler catches matching error");
 }
 
 typed_handler_else_nomatch() string {
-    fail_parse() ? e is IoError { return "io"; } else { return "other"; };
-    return "unreachable";
+  fail_parse()? e is IoError {
+    return "io";
+  } else {
+    return "other";
+  };
+  return "unreachable";
 }
 
 test_typed_handler_else_nomatch() `test {
-    string r = typed_handler_else_nomatch();
-    assert(r == "other", "else clause catches non-matching error");
+  string r = typed_handler_else_nomatch();
+  assert(r == "other", "else clause catches non-matching error");
 }
 
 // else with binding
 typed_handler_else_binding() string {
-    fail_parse() ? e is IoError { return "io"; } else e { return e.message; };
-    return "unreachable";
+  fail_parse()? e is IoError {
+    return "io";
+  } else e {
+    return e.message;
+  };
+  return "unreachable";
 }
 
 test_typed_handler_else_binding() `test {
-    string r = typed_handler_else_binding();
-    assert(r == "syntax error", "else binding gets error message");
+  string r = typed_handler_else_binding();
+  assert(r == "syntax error", "else binding gets error message");
 }
 
 // else as recovery value
 typed_handler_else_recovery() int {
-    int v = fail_io() ? e is ParseError { 99; } else { 0; };
-    return v;
+  int v = fail_io()? e is ParseError {
+    99;
+  } else {
+    0;
+  };
+  return v;
 }
 
 test_typed_handler_else_recovery() `test {
-    int r = typed_handler_else_recovery();
-    assert(r == 0, "else clause provides recovery value for non-matching");
+  int r = typed_handler_else_recovery();
+  assert(r == 0, "else clause provides recovery value for non-matching");
 }
 
 typed_handler_match_recovery() int {
-    int v = fail_io() ? e is IoError { e.code; } else { 0; };
-    return v;
+  int v = fail_io()? e is IoError {
+    e.code;
+  } else {
+    0;
+  };
+  return v;
 }
 
 test_typed_handler_match_recovery() `test {
-    int r = typed_handler_match_recovery();
-    assert(r == 28, "typed match provides recovery value");
+  int r = typed_handler_match_recovery();
+  assert(r == 28, "typed match provides recovery value");
 }
 
 // else in failable function (propagation still works too)
 typed_handler_else_in_failable() string! {
-    fail_parse() ? e is IoError { return "io"; } else e { return e.message; };
-    return "ok";
+  fail_parse()? e is IoError {
+    return "io";
+  } else e {
+    return e.message;
+  };
+  return "ok";
 }
 
 test_typed_handler_else_in_failable() `test {
-    string r = typed_handler_else_in_failable()!;
-    assert(r == "syntax error", "else in failable function works");
+  string r = typed_handler_else_in_failable()!;
+  assert(r == "syntax error", "else in failable function works");
 }
 
 // ============================================================
@@ -243,13 +277,15 @@ test_typed_handler_else_in_failable() `test {
 
 // ! suffix on matching error — should not panic
 typed_handler_bang_match() int {
-    fail_io() ? e is IoError { return e.code; }!;
-    return 0;
+  fail_io()? e is IoError {
+    return e.code;
+  }!;
+  return 0;
 }
 
 test_typed_handler_bang_match() `test {
-    int r = typed_handler_bang_match();
-    assert(r == 28, "bang typed handler catches matching error");
+  int r = typed_handler_bang_match();
+  assert(r == 28, "bang typed handler catches matching error");
 }
 
 // ============================================================
@@ -257,28 +293,32 @@ test_typed_handler_bang_match() `test {
 // ============================================================
 
 test_result_capture_custom_error() `test {
-    (val, err) := fail_io();
-    assert(val == 0, "value is zero on error");
-    if err is present {
-        assert(err.message == "disk full", "custom error message captured");
-    } else {
-        assert(false, "should have error");
-    }
+  (val, err) := fail_io();
+  assert(val == 0, "value is zero on error");
+  if err is present {
+    assert(err.message == "disk full", "custom error message captured");
+  } else {
+    assert(false, "should have error");
+  }
 }
 
 // Result capture in conditional flow
 test_result_capture_conditional() `test {
-    (val1, err1) := parse_int("42");
-    (val2, err2) := parse_int("bad");
+  (val1, err1) := parse_int("42");
+  (val2, err2) := parse_int("bad");
 
-    bool first_ok = true;
-    bool second_ok = true;
-    if err1 is present { first_ok = false; }
-    if err2 is absent { second_ok = false; }
+  bool first_ok = true;
+  bool second_ok = true;
+  if err1 is present {
+    first_ok = false;
+  }
+  if err2 is absent {
+    second_ok = false;
+  }
 
-    assert(first_ok, "first parse succeeded");
-    assert(second_ok, "second parse failed as expected");
-    assert(val1 == 42, "first value correct");
+  assert(first_ok, "first parse succeeded");
+  assert(second_ok, "second parse failed as expected");
+  assert(val1 == 42, "first value correct");
 }
 
 // ============================================================
@@ -286,25 +326,25 @@ test_result_capture_conditional() `test {
 // ============================================================
 
 bang_void()! {
-    raise error(message: "bang");
+  raise error(message: "bang");
 }
 
 bang_ok()! {
-    // does not raise
+  // does not raise
 }
 
 test_bang_shorthand_raise() `test {
-    bool caught = false;
-    bang_void() ? e {
-        caught = true;
-    };
-    assert(caught, "bang shorthand function raised");
+  bool caught = false;
+  bang_void()? e {
+    caught = true;
+  };
+  assert(caught, "bang shorthand function raised");
 }
 
 test_bang_shorthand_ok() `test {
-    bool caught = false;
-    bang_ok() ? e {
-        caught = true;
-    };
-    assert(!caught, "bang shorthand ok path");
+  bool caught = false;
+  bang_ok()? e {
+    caught = true;
+  };
+  assert(!caught, "bang shorthand ok path");
 }

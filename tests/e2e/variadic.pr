@@ -1,133 +1,145 @@
 // Test variadic parameters (...T).
-
 // --- Basic variadic function ---
-
 sum(...int nums) int {
-    int total = 0;
-    for n in nums { total += n; }
-    return total;
+  int total = 0;
+  for n in nums {
+    total += n;
+  }
+  return total;
 }
 
 // --- Variadic with fixed params ---
 
 join(string sep, ...string items) string {
-    if items.len == 0 { return ""; }
-    string result = items[0];
-    for i in 1..items.len {
-        result = result + sep + items[i];
-    }
-    return result;
+  if items.len == 0 {
+    return "";
+  }
+  string result = items[0];
+  for i in 1..items.len {
+    result = result + sep + items[i];
+  }
+  return result;
 }
 
 // --- Variadic on a method ---
 
 type Adder {
-    int base;
+  int base;
 
-    addAll(&this, ...int values) int {
-        int total = this.base;
-        for v in values { total += v; }
-        return total;
+  addAll(&this, ...int values) int {
+    int total = this.base;
+    for v in values {
+      total += v;
     }
+    return total;
+  }
 }
 
 // --- Tests ---
 
 testVariadicEmpty() `test {
-    assert(sum() == 0, "empty variadic should be 0");
+  assert(sum() == 0, "empty variadic should be 0");
 }
 
 testVariadicSingle() `test {
-    assert(sum(42) == 42, "single variadic arg");
+  assert(sum(42) == 42, "single variadic arg");
 }
 
 testVariadicMultiple() `test {
-    assert(sum(1, 2, 3) == 6, "multiple variadic args");
-    assert(sum(10, 20, 30, 40) == 100, "four variadic args");
+  assert(sum(1, 2, 3) == 6, "multiple variadic args");
+  assert(sum(10, 20, 30, 40) == 100, "four variadic args");
 }
 
 testVariadicPassVector() `test {
-    int[] v = [1, 2, 3, 4, 5];
-    assert(sum(v) == 15, "pass vector directly");
+  int[] v = [1, 2, 3, 4, 5];
+  assert(sum(v) == 15, "pass vector directly");
 }
 
 testVariadicWithFixedParams() `test {
-    assert(join(",") == "", "join empty");
-    assert(join(",", "a") == "a", "join single");
-    assert(join(", ", "a", "b", "c") == "a, b, c", "join multiple");
+  assert(join(",") == "", "join empty");
+  assert(join(",", "a") == "a", "join single");
+  assert(join(", ", "a", "b", "c") == "a, b, c", "join multiple");
 }
 
 testVariadicMethod() `test {
-    a := Adder(base: 10);
-    assert(a.addAll() == 10, "method empty variadic");
-    assert(a.addAll(1, 2, 3) == 16, "method variadic args");
+  a := Adder(base: 10);
+  assert(a.addAll() == 10, "method empty variadic");
+  assert(a.addAll(1, 2, 3) == 16, "method variadic args");
 }
 
 // --- Nested variadic calls ---
 
 doubleSum(...int nums) int {
-    return sum(nums) * 2;
+  return sum(nums) * 2;
 }
 
 testVariadicNested() `test {
-    assert(doubleSum(1, 2, 3) == 12, "nested variadic call");
-    assert(doubleSum() == 0, "nested empty variadic");
-    assert(doubleSum(5) == 10, "nested single variadic");
+  assert(doubleSum(1, 2, 3) == 12, "nested variadic call");
+  assert(doubleSum() == 0, "nested empty variadic");
+  assert(doubleSum(5) == 10, "nested single variadic");
 }
 
 // --- Computed vector pass-through ---
 
 makeNums() int[] {
-    return [10, 20, 30];
+  return[10, 20, 30];
 }
 
 testVariadicComputedPassThrough() `test {
-    assert(sum(makeNums()) == 60, "computed vector pass-through");
+  assert(sum(makeNums()) == 60, "computed vector pass-through");
 }
 
 // --- Failable variadic ---
 
 tryFirst(...int nums) int! {
-    if nums.len == 0 { raise error(message: "empty"); }
-    return nums[0];
+  if nums.len == 0 {
+    raise error(message: "empty");
+  }
+  return nums[0];
 }
 
 testVariadicFailable() `test {
-    assert(tryFirst(42)! == 42, "failable variadic single");
-    assert(tryFirst(1, 2, 3)! == 1, "failable variadic multiple");
+  assert(tryFirst(42)! == 42, "failable variadic single");
+  assert(tryFirst(1, 2, 3)! == 1, "failable variadic multiple");
 }
 
 tryFirstOrNeg1(...int nums) int {
-    int r = tryFirst(nums) ? e { return -1; };
-    return r;
+  int r = tryFirst(nums)? e {
+    return -1;
+  };
+  return r;
 }
 
 testVariadicFailableError() `test {
-    assert(tryFirstOrNeg1() == -1, "failable variadic should raise on empty");
-    assert(tryFirstOrNeg1(5) == 5, "failable variadic success");
+  assert(tryFirstOrNeg1() == -1, "failable variadic should raise on empty");
+  assert(tryFirstOrNeg1(5) == 5, "failable variadic success");
 }
 
 // --- Variadic with string operations ---
 
 wrap(string prefix, string suffix, ...string items) string {
-    if items.len == 0 { return prefix + suffix; }
-    string result = prefix;
-    for i in 0..items.len {
-        if i > 0 { result = result + ", "; }
-        result = result + items[i];
+  if items.len == 0 {
+    return prefix + suffix;
+  }
+  string result = prefix;
+  for i in 0..items.len {
+    if i > 0 {
+      result = result + ", ";
     }
-    result = result + suffix;
-    return result;
+    result = result + items[i];
+  }
+  result = result + suffix;
+  return result;
 }
 
 testVariadicStringOps() `test {
-    assert(wrap("[", "]") == "[]", "wrap empty");
-    assert(wrap("[", "]", "a") == "[a]", "wrap single");
-    assert(wrap("[", "]", "a", "b", "c") == "[a, b, c]", "wrap multiple");
+  assert(wrap("[", "]") == "[]", "wrap empty");
+  assert(wrap("[", "]", "a") == "[a]", "wrap single");
+  assert(wrap("[", "]", "a", "b", "c") == "[a, b, c]", "wrap multiple");
 }
 
 // --- Large variadic ---
 
 testVariadicMany() `test {
-    assert(sum(1,2,3,4,5,6,7,8,9,10) == 55, "ten variadic args");
+  assert(sum(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) == 55, "ten variadic args");
 }

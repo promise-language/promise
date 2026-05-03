@@ -1,155 +1,171 @@
 // Tests for calling function-typed fields on types.
 // Covers the codegen fix where this.field() was incorrectly dispatched as a method call.
-
 type Wrapper {
-    () -> int getter;
+  () -> int getter;
 
-    get_val() int {
-        return this.getter();
-    }
+  get_val() int {
+    return this.getter();
+  }
 }
 
 type Adder {
-    (int, int) -> int op;
+  (int, int) -> int op;
 
-    apply(int a, int b) int {
-        return this.op(a, b);
-    }
+  apply(int a, int b) int {
+    return this.op(a, b);
+  }
 }
 
 type OptionalSupplier {
-    () -> int? produce;
+  () -> int? produce;
 
-    next() int? {
-        return this.produce();
-    }
+  next() int? {
+    return this.produce();
+  }
 }
 
 type Transform {
-    (int) -> int forward;
-    (int) -> int backward;
+  (int) -> int forward;
+  (int) -> int backward;
 
-    round_trip(int x) int {
-        return this.backward(this.forward(x));
-    }
+  round_trip(int x) int {
+    return this.backward(this.forward(x));
+  }
 }
 
 type Predicate {
-    (int) -> bool test;
+  (int) -> bool test;
 
-    check(int x) bool {
-        return this.test(x);
-    }
+  check(int x) bool {
+    return this.test(x);
+  }
 }
 
 type StringProducer {
-    () -> string make;
+  () -> string make;
 
-    run() string {
-        return this.make();
-    }
+  run() string {
+    return this.make();
+  }
 }
 
 // --- Basic: zero-arg function field ---
 test_function_field_zero_arg() `test {
-    w := Wrapper(getter: || -> int { return 99; });
-    assert(w.get_val() == 99, "zero-arg function field returns 99");
+  w := Wrapper(getter: || -> int {
+    return 99;
+  });
+  assert(w.get_val() == 99, "zero-arg function field returns 99");
 }
 
 // --- Basic: multi-arg function field ---
 test_function_field_multi_arg() `test {
-    a := Adder(op: |int x, int y| -> x + y);
-    assert(a.apply(10, 20) == 30, "multi-arg function field adds");
-    assert(a.apply(0, 0) == 0, "multi-arg function field zero");
-    assert(a.apply(-5, 5) == 0, "multi-arg function field negative");
+  a := Adder(op: |int x, int y| -> x + y);
+  assert(a.apply(10, 20) == 30, "multi-arg function field adds");
+  assert(a.apply(0, 0) == 0, "multi-arg function field zero");
+  assert(a.apply(-5, 5) == 0, "multi-arg function field negative");
 }
 
 // --- Optional return: returns value ---
 test_function_field_optional_some() `test {
-    s := OptionalSupplier(produce: || -> int? { return 42; });
-    if v := s.next() {
-        assert(v == 42, "optional field returns 42");
-    } else {
-        assert(false, "should not be none");
-    }
+  s := OptionalSupplier(produce: || -> int? {
+    return 42;
+  });
+  if v := s.next() {
+    assert(v == 42, "optional field returns 42");
+  } else {
+    assert(false, "should not be none");
+  }
 }
 
 // --- Optional return: returns none ---
 test_function_field_optional_none() `test {
-    s := OptionalSupplier(produce: || -> int? { return none; });
-    if _ := s.next() {
-        assert(false, "should be none");
-    }
+  s := OptionalSupplier(produce: || -> int? {
+    return none;
+  });
+  if _ := s.next() {
+    assert(false, "should be none");
+  }
 }
 
 // --- Optional return via method wrapper ---
 test_function_field_optional_via_method() `test {
-    s := OptionalSupplier(produce: || -> int? { return 99; });
-    if v := s.next() {
-        assert(v == 99, "method wrapping field returns 99");
-    } else {
-        assert(false, "should not be none");
-    }
+  s := OptionalSupplier(produce: || -> int? {
+    return 99;
+  });
+  if v := s.next() {
+    assert(v == 99, "method wrapping field returns 99");
+  } else {
+    assert(false, "should not be none");
+  }
 }
 
 // --- Bool return function field ---
 test_function_field_bool_return() `test {
-    p := Predicate(test: |int x| -> x > 10);
-    assert(p.check(15) == true, "15 > 10 is true");
-    assert(p.check(5) == false, "5 > 10 is false");
-    assert(p.check(10) == false, "10 > 10 is false");
+  p := Predicate(test: |int x| -> x > 10);
+  assert(p.check(15) == true, "15 > 10 is true");
+  assert(p.check(5) == false, "5 > 10 is false");
+  assert(p.check(10) == false, "10 > 10 is false");
 }
 
 // --- String return function field ---
 test_function_field_string_return() `test {
-    sp := StringProducer(make: || -> string { return "hello"; });
-    assert(sp.run() == "hello", "string function field");
+  sp := StringProducer(make: || -> string {
+    return "hello";
+  });
+  assert(sp.run() == "hello", "string function field");
 }
 
 // --- Different function fields on same type ---
 test_multiple_function_fields() `test {
-    t := Transform(
-        forward: |int x| -> x * 2,
-        backward: |int x| -> x / 2
-    );
-    assert(t.round_trip(10) == 10, "round trip preserves 10");
-    assert(t.round_trip(7) == 7, "round trip preserves 7");
+  t := Transform(forward: |int x| -> x * 2,
+  backward: |int x| -> x / 2);
+  assert(t.round_trip(10) == 10, "round trip preserves 10");
+  assert(t.round_trip(7) == 7, "round trip preserves 7");
 }
 
 // --- Function field with captured closure ---
 test_function_field_with_capture() `test {
-    int factor = 3;
-    w := Wrapper(getter: move || -> int { return factor * 10; });
-    assert(w.get_val() == 30, "captured closure in field");
+  int factor = 3;
+  w := Wrapper(getter: move || -> int {
+    return factor * 10;
+  });
+  assert(w.get_val() == 30, "captured closure in field");
 }
 
 // --- Different closures in same type ---
 test_function_field_different_closures() `test {
-    w1 := Wrapper(getter: || -> int { return 42; });
-    w2 := Wrapper(getter: || -> int { return 100; });
-    assert(w1.get_val() == 42, "first wrapper 42");
-    assert(w2.get_val() == 100, "second wrapper 100");
+  w1 := Wrapper(getter: || -> int {
+    return 42;
+  });
+  w2 := Wrapper(getter: || -> int {
+    return 100;
+  });
+  assert(w1.get_val() == 42, "first wrapper 42");
+  assert(w2.get_val() == 100, "second wrapper 100");
 }
 
 // --- Function field called multiple times ---
 test_function_field_repeated_calls() `test {
-    a := Adder(op: |int x, int y| -> x * y);
-    assert(a.apply(6, 7) == 42, "6*7=42");
-    assert(a.apply(0, 100) == 0, "0*100=0");
-    assert(a.apply(1, 1) == 1, "1*1=1");
-    assert(a.apply(-2, 3) == -6, "-2*3=-6");
+  a := Adder(op: |int x, int y| -> x * y);
+  assert(a.apply(6, 7) == 42, "6*7=42");
+  assert(a.apply(0, 100) == 0, "0*100=0");
+  assert(a.apply(1, 1) == 1, "1*1=1");
+  assert(a.apply(-2, 3) == -6, "-2*3=-6");
 }
 
 // --- Function field with complex lambda body ---
 test_function_field_complex_lambda() `test {
-    a := Adder(op: |int x, int y| -> int {
-        int sum = x + y;
-        if sum < 0 { return 0; }
-        return sum;
-    });
-    assert(a.apply(5, 3) == 8, "positive sum");
-    assert(a.apply(-10, 5) == 0, "negative clamped to 0");
-    assert(a.apply(0, 0) == 0, "zero stays zero");
+  a := Adder(op: |int x, int y| -> int {
+    int sum = x + y;
+    if sum < 0 {
+      return 0;
+    }
+    return sum;
+  });
+  assert(a.apply(5, 3) == 8, "positive sum");
+  assert(a.apply(-10, 5) == 0, "negative clamped to 0");
+  assert(a.apply(0, 0) == 0, "zero stays zero");
 }
 
-main() {}
+main() {
+}

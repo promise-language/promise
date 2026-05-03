@@ -12,13 +12,12 @@ import (
 )
 
 func runFmt(args []string) {
-	var writeInPlace, check, showDiff bool
+	var check, showDiff bool
+	writeInPlace := true // default: write back to files
 	var files []string
 
 	for _, arg := range args {
 		switch arg {
-		case "-w":
-			writeInPlace = true
 		case "--check":
 			check = true
 		case "--diff":
@@ -26,6 +25,11 @@ func runFmt(args []string) {
 		default:
 			files = append(files, arg)
 		}
+	}
+
+	// --check and --diff are read-only modes
+	if check || showDiff {
+		writeInPlace = false
 	}
 
 	// No files: stdin → stdout

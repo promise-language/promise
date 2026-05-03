@@ -1,31 +1,38 @@
 // Tests for auto-propagation in assignments and error handler recovery validation.
-
 type IoError is error {
-    int code;
+  int code;
 }
 
 parse_int(string s) int! {
-    if s == "42" { return 42; }
-    if s == "0" { return 0; }
-    if s == "7" { return 7; }
-    raise error(message: "bad: " + s);
+  if s == "42" {
+    return 42;
+  }
+  if s == "0" {
+    return 0;
+  }
+  if s == "7" {
+    return 7;
+  }
+  raise error(message: "bad: " + s);
 }
 
 get_string(bool fail) string! {
-    if fail { raise error(message: "no string"); }
-    return "hello";
+  if fail {
+    raise error(message: "no string");
+  }
+  return "hello";
 }
 
 always_fail() int! {
-    raise IoError(code: 42, message: "always fails");
+  raise IoError(code: 42, message: "always fails");
 }
 
 void_fail() void! {
-    raise error(message: "void failed");
+  raise error(message: "void failed");
 }
 
 void_ok() void! {
-    // does not raise
+  // does not raise
 }
 
 // ============================================================
@@ -33,29 +40,29 @@ void_ok() void! {
 // ============================================================
 
 auto_prop_typed() int! {
-    int x = parse_int("42");
-    return x;
+  int x = parse_int("42");
+  return x;
 }
 
 test_auto_prop_typed_success() `test {
-    int r = auto_prop_typed()!;
-    assert(r == 42, "auto-prop typed var decl success");
+  int r = auto_prop_typed()!;
+  assert(r == 42, "auto-prop typed var decl success");
 }
 
 auto_prop_typed_fail() int! {
-    int x = parse_int("bad");
-    return x;
+  int x = parse_int("bad");
+  return x;
 }
 
 try_auto_prop_typed_fail() bool {
-    auto_prop_typed_fail() ? e {
-        return e.message == "bad: bad";
-    };
-    return false;
+  auto_prop_typed_fail()? e {
+    return e.message == "bad: bad";
+  };
+  return false;
 }
 
 test_auto_prop_typed_fail() `test {
-    assert(try_auto_prop_typed_fail(), "auto-prop typed var decl propagates error");
+  assert(try_auto_prop_typed_fail(), "auto-prop typed var decl propagates error");
 }
 
 // ============================================================
@@ -63,29 +70,29 @@ test_auto_prop_typed_fail() `test {
 // ============================================================
 
 auto_prop_inferred() int! {
-    x := parse_int("42");
-    return x;
+  x := parse_int("42");
+  return x;
 }
 
 test_auto_prop_inferred_success() `test {
-    int r = auto_prop_inferred()!;
-    assert(r == 42, "auto-prop inferred var decl success");
+  int r = auto_prop_inferred()!;
+  assert(r == 42, "auto-prop inferred var decl success");
 }
 
 auto_prop_inferred_fail() string! {
-    s := get_string(true);
-    return s;
+  s := get_string(true);
+  return s;
 }
 
 try_auto_prop_inferred_fail() bool {
-    auto_prop_inferred_fail() ? e {
-        return e.message == "no string";
-    };
-    return false;
+  auto_prop_inferred_fail()? e {
+    return e.message == "no string";
+  };
+  return false;
 }
 
 test_auto_prop_inferred_fail() `test {
-    assert(try_auto_prop_inferred_fail(), "auto-prop inferred var decl propagates error");
+  assert(try_auto_prop_inferred_fail(), "auto-prop inferred var decl propagates error");
 }
 
 // ============================================================
@@ -93,48 +100,52 @@ test_auto_prop_inferred_fail() `test {
 // ============================================================
 
 multi_auto_prop() int! {
-    int a = parse_int("42");
-    int b = parse_int("7");
-    return a + b;
+  int a = parse_int("42");
+  int b = parse_int("7");
+  return a + b;
 }
 
 test_multi_auto_prop_success() `test {
-    int r = multi_auto_prop()!;
-    assert(r == 49, "multiple auto-prop success: 42 + 7");
+  int r = multi_auto_prop()!;
+  assert(r == 49, "multiple auto-prop success: 42 + 7");
 }
 
 // First call fails — second should not execute
 multi_auto_prop_first_fails() int! {
-    int a = parse_int("bad");
-    int b = parse_int("42");
-    return a + b;
+  int a = parse_int("bad");
+  int b = parse_int("42");
+  return a + b;
 }
 
 try_multi_first_fails() string {
-    multi_auto_prop_first_fails() ? e { return e.message; };
-    return "";
+  multi_auto_prop_first_fails()? e {
+    return e.message;
+  };
+  return "";
 }
 
 test_multi_auto_prop_first_fails() `test {
-    string msg = try_multi_first_fails();
-    assert(msg == "bad: bad", "first auto-prop fails, propagates immediately");
+  string msg = try_multi_first_fails();
+  assert(msg == "bad: bad", "first auto-prop fails, propagates immediately");
 }
 
 // First call succeeds, second fails
 multi_auto_prop_second_fails() int! {
-    int a = parse_int("42");
-    int b = parse_int("bad");
-    return a + b;
+  int a = parse_int("42");
+  int b = parse_int("bad");
+  return a + b;
 }
 
 try_multi_second_fails() string {
-    multi_auto_prop_second_fails() ? e { return e.message; };
-    return "";
+  multi_auto_prop_second_fails()? e {
+    return e.message;
+  };
+  return "";
 }
 
 test_multi_auto_prop_second_fails() `test {
-    string msg = try_multi_second_fails();
-    assert(msg == "bad: bad", "second auto-prop fails, propagates");
+  string msg = try_multi_second_fails();
+  assert(msg == "bad: bad", "second auto-prop fails, propagates");
 }
 
 // ============================================================
@@ -142,27 +153,29 @@ test_multi_auto_prop_second_fails() `test {
 // ============================================================
 
 auto_prop_string() string! {
-    string s = get_string(false);
-    return s;
+  string s = get_string(false);
+  return s;
 }
 
 test_auto_prop_string_success() `test {
-    string r = auto_prop_string()!;
-    assert(r == "hello", "auto-prop string success");
+  string r = auto_prop_string()!;
+  assert(r == "hello", "auto-prop string success");
 }
 
 auto_prop_string_fail() string! {
-    string s = get_string(true);
-    return s;
+  string s = get_string(true);
+  return s;
 }
 
 try_auto_prop_string_fail() bool {
-    auto_prop_string_fail() ? e { return true; };
-    return false;
+  auto_prop_string_fail()? e {
+    return true;
+  };
+  return false;
 }
 
 test_auto_prop_string_fail() `test {
-    assert(try_auto_prop_string_fail(), "auto-prop string failure propagates");
+  assert(try_auto_prop_string_fail(), "auto-prop string failure propagates");
 }
 
 // ============================================================
@@ -170,16 +183,16 @@ test_auto_prop_string_fail() `test {
 // ============================================================
 
 auto_prop_custom_error() int! {
-    int x = always_fail();
-    return x;
+  int x = always_fail();
+  return x;
 }
 
 test_auto_prop_preserves_custom_error() `test {
-    auto_prop_custom_error() ? e {
-        assert(e.message == "always fails", "custom error message preserved");
-        return;
-    };
-    assert(false, "should have caught error");
+  auto_prop_custom_error()? e {
+    assert(e.message == "always fails", "custom error message preserved");
+    return;
+  };
+  assert(false, "should have caught error");
 }
 
 // ============================================================
@@ -187,16 +200,18 @@ test_auto_prop_preserves_custom_error() `test {
 // ============================================================
 
 mixed_handling() int! {
-    // Auto-propagate first call
-    int a = parse_int("42");
-    // Explicit handler on second call
-    int b = parse_int("bad") ? e { 100; };
-    return a + b;
+  // Auto-propagate first call
+  int a = parse_int("42");
+  // Explicit handler on second call
+  int b = parse_int("bad")? e {
+    100;
+  };
+  return a + b;
 }
 
 test_mixed_handling() `test {
-    int r = mixed_handling()!;
-    assert(r == 142, "auto-prop + explicit handler: 42 + 100");
+  int r = mixed_handling()!;
+  assert(r == 142, "auto-prop + explicit handler: 42 + 100");
 }
 
 // ============================================================
@@ -204,30 +219,30 @@ test_mixed_handling() `test {
 // ============================================================
 
 auto_prop_void_stmt() int! {
-    void_ok();
-    int x = parse_int("42");
-    return x;
+  void_ok();
+  int x = parse_int("42");
+  return x;
 }
 
 test_auto_prop_void_stmt_success() `test {
-    int r = auto_prop_void_stmt()!;
-    assert(r == 42, "void auto-prop as stmt then assignment");
+  int r = auto_prop_void_stmt()!;
+  assert(r == 42, "void auto-prop as stmt then assignment");
 }
 
 auto_prop_void_then_fail() int! {
-    void_fail();
-    return 99;
+  void_fail();
+  return 99;
 }
 
 try_auto_prop_void_fails() bool {
-    auto_prop_void_then_fail() ? e {
-        return e.message == "void failed";
-    };
-    return false;
+  auto_prop_void_then_fail()? e {
+    return e.message == "void failed";
+  };
+  return false;
 }
 
 test_auto_prop_void_then_fail() `test {
-    assert(try_auto_prop_void_fails(), "void auto-prop as stmt fails first");
+  assert(try_auto_prop_void_fails(), "void auto-prop as stmt fails first");
 }
 
 // ============================================================
@@ -235,19 +250,19 @@ test_auto_prop_void_then_fail() `test {
 // ============================================================
 
 test_handler_stmt_no_recovery() `test {
-    bool caught = false;
-    always_fail() ? e {
-        caught = true;
-    };
-    assert(caught, "handler as statement catches without recovery value");
+  bool caught = false;
+  always_fail()? e {
+    caught = true;
+  };
+  assert(caught, "handler as statement catches without recovery value");
 }
 
 test_handler_stmt_no_recovery_success() `test {
-    bool caught = false;
-    parse_int("42") ? e {
-        caught = true;
-    };
-    assert(!caught, "handler as statement — success path, handler not called");
+  bool caught = false;
+  parse_int("42")? e {
+    caught = true;
+  };
+  assert(!caught, "handler as statement — success path, handler not called");
 }
 
 // ============================================================
@@ -255,29 +270,39 @@ test_handler_stmt_no_recovery_success() `test {
 // ============================================================
 
 test_handler_recovery_int() `test {
-    int v = parse_int("bad") ? e { -1; };
-    assert(v == -1, "int recovery value on error");
+  int v = parse_int("bad")? e {
+    -1;
+  };
+  assert(v == -1, "int recovery value on error");
 }
 
 test_handler_recovery_int_success() `test {
-    int v = parse_int("42") ? e { -1; };
-    assert(v == 42, "int success value through handler");
+  int v = parse_int("42")? e {
+    -1;
+  };
+  assert(v == 42, "int success value through handler");
 }
 
 test_handler_recovery_string() `test {
-    string s = get_string(true) ? e { "fallback"; };
-    assert(s == "fallback", "string recovery value on error");
+  string s = get_string(true)? e {
+    "fallback";
+  };
+  assert(s == "fallback", "string recovery value on error");
 }
 
 test_handler_recovery_string_success() `test {
-    string s = get_string(false) ? e { "fallback"; };
-    assert(s == "hello", "string success value through handler");
+  string s = get_string(false)? e {
+    "fallback";
+  };
+  assert(s == "hello", "string success value through handler");
 }
 
 test_handler_recovery_expression() `test {
-    int base = 40;
-    int v = parse_int("bad") ? e { base + 2; };
-    assert(v == 42, "recovery expression using outer scope");
+  int base = 40;
+  int v = parse_int("bad")? e {
+    base + 2;
+  };
+  assert(v == 42, "recovery expression using outer scope");
 }
 
 // ============================================================
@@ -286,41 +311,55 @@ test_handler_recovery_expression() `test {
 
 // Inferred: x becomes int?
 test_optional_recovery_inferred_error() `test {
-    x := parse_int("bad") ? e { println("handled"); };
-    assert("{x}" == "none", "inferred optional recovery on error");
+  x := parse_int("bad")? e {
+    println("handled");
+  };
+  assert("{x}" == "none", "inferred optional recovery on error");
 }
 
 test_optional_recovery_inferred_success() `test {
-    x := parse_int("42") ? e { println("handled"); };
-    assert("{x}" == "42", "inferred optional recovery on success");
+  x := parse_int("42")? e {
+    println("handled");
+  };
+  assert("{x}" == "42", "inferred optional recovery on success");
 }
 
 // Typed: int? x
 test_optional_recovery_typed_error() `test {
-    int? x = parse_int("bad") ? e { println("handled"); };
-    assert("{x}" == "none", "typed optional recovery on error");
+  int? x = parse_int("bad")? e {
+    println("handled");
+  };
+  assert("{x}" == "none", "typed optional recovery on error");
 }
 
 test_optional_recovery_typed_success() `test {
-    int? x = parse_int("42") ? e { println("handled"); };
-    assert("{x}" == "42", "typed optional recovery on success");
+  int? x = parse_int("42")? e {
+    println("handled");
+  };
+  assert("{x}" == "42", "typed optional recovery on success");
 }
 
 // String type optional recovery
 test_optional_recovery_string_error() `test {
-    s := get_string(true) ? e { println("caught"); };
-    assert("{s}" == "none", "string optional recovery on error");
+  s := get_string(true)? e {
+    println("caught");
+  };
+  assert("{s}" == "none", "string optional recovery on error");
 }
 
 test_optional_recovery_string_success() `test {
-    s := get_string(false) ? e { println("caught"); };
-    assert("{s}" == "hello", "string optional recovery on success");
+  s := get_string(false)? e {
+    println("caught");
+  };
+  assert("{s}" == "hello", "string optional recovery on success");
 }
 
 // With explicit none; recovery value (still works as before)
 test_handler_recovery_optional_value() `test {
-    int? v = parse_int("42") ? e { none; };
-    assert("{v}" == "42", "optional success through handler");
+  int? v = parse_int("42")? e {
+    none;
+  };
+  assert("{v}" == "42", "optional success through handler");
 }
 
 // ============================================================
@@ -328,23 +367,27 @@ test_handler_recovery_optional_value() `test {
 // ============================================================
 
 try_diverge_return() int {
-    int v = parse_int("bad") ? e { return -1; };
-    return v;
+  int v = parse_int("bad")? e {
+    return -1;
+  };
+  return v;
 }
 
 test_handler_diverge_return() `test {
-    int r = try_diverge_return();
-    assert(r == -1, "handler diverges with return");
+  int r = try_diverge_return();
+  assert(r == -1, "handler diverges with return");
 }
 
 try_diverge_return_success() int {
-    int v = parse_int("42") ? e { return -1; };
-    return v;
+  int v = parse_int("42")? e {
+    return -1;
+  };
+  return v;
 }
 
 test_handler_diverge_return_success() `test {
-    int r = try_diverge_return_success();
-    assert(r == 42, "success path when handler would diverge");
+  int r = try_diverge_return_success();
+  assert(r == 42, "success path when handler would diverge");
 }
 
 // ============================================================
@@ -352,17 +395,19 @@ test_handler_diverge_return_success() `test {
 // ============================================================
 
 reraise_handler() int! {
-    int v = parse_int("bad") ? e { raise e; };
-    return v;
+  int v = parse_int("bad")? e {
+    raise e;
+  };
+  return v;
 }
 
 test_handler_reraise() `test {
-    bool caught = false;
-    reraise_handler() ? e {
-        caught = true;
-        assert(e.message == "bad: bad", "re-raised error preserves message");
-    };
-    assert(caught, "re-raised error was caught");
+  bool caught = false;
+  reraise_handler()? e {
+    caught = true;
+    assert(e.message == "bad: bad", "re-raised error preserves message");
+  };
+  assert(caught, "re-raised error was caught");
 }
 
 // ============================================================
@@ -370,24 +415,24 @@ test_handler_reraise() `test {
 // ============================================================
 
 sum_parsed(int n) int! {
-    int sum = 0;
-    int i = 0;
-    while i < n {
-        int v = parse_int("{i}");
-        sum = sum + v;
-        i += 1;
-    }
-    return sum;
+  int sum = 0;
+  int i = 0;
+  while i < n {
+    int v = parse_int("{i}");
+    sum = sum + v;
+    i += 1;
+  }
+  return sum;
 }
 
 test_auto_prop_in_loop_fails() `test {
-    // parse_int("0") returns 0, parse_int("1") fails (not "42", "0", or "7")
-    // So this fails at i=1
-    bool caught = false;
-    sum_parsed(3) ? e {
-        caught = true;
-    };
-    assert(caught, "auto-prop in loop fails on invalid input");
+  // parse_int("0") returns 0, parse_int("1") fails (not "42", "0", or "7")
+  // So this fails at i=1
+  bool caught = false;
+  sum_parsed(3)? e {
+    caught = true;
+  };
+  assert(caught, "auto-prop in loop fails on invalid input");
 }
 
 // ============================================================
@@ -395,38 +440,41 @@ test_auto_prop_in_loop_fails() `test {
 // ============================================================
 
 type Resource {
-    int id;
-    drop(~this) { }
+  int id;
+  drop(~this) {
+  }
 }
 
 make_resource(int id) Resource! {
-    if id < 0 { raise error(message: "bad id"); }
-    return Resource(id: id);
+  if id < 0 {
+    raise error(message: "bad id");
+  }
+  return Resource(id: id);
 }
 
 auto_prop_with_drop() int! {
-    Resource r = make_resource(1)!;
-    int v = parse_int("42");
-    return v;
+  Resource r = make_resource(1)!;
+  int v = parse_int("42");
+  return v;
 }
 
 test_auto_prop_with_drop_success() `test {
-    int r = auto_prop_with_drop()!;
-    assert(r == 42, "auto-prop works alongside droppable resources");
+  int r = auto_prop_with_drop()!;
+  assert(r == 42, "auto-prop works alongside droppable resources");
 }
 
 auto_prop_with_drop_fails() int! {
-    Resource r = make_resource(1)!;
-    int v = parse_int("bad");
-    return v;
+  Resource r = make_resource(1)!;
+  int v = parse_int("bad");
+  return v;
 }
 
 test_auto_prop_with_drop_fails() `test {
-    bool caught = false;
-    auto_prop_with_drop_fails() ? e {
-        caught = true;
-    };
-    assert(caught, "auto-prop fails with droppable in scope — cleanup runs");
+  bool caught = false;
+  auto_prop_with_drop_fails()? e {
+    caught = true;
+  };
+  assert(caught, "auto-prop fails with droppable in scope — cleanup runs");
 }
 
 // ============================================================
@@ -434,27 +482,27 @@ test_auto_prop_with_drop_fails() `test {
 // ============================================================
 
 inner() int! {
-    int x = parse_int("bad");
-    return x;
+  int x = parse_int("bad");
+  return x;
 }
 
 middle() int! {
-    int y = inner();
-    return y;
+  int y = inner();
+  return y;
 }
 
 outer() int! {
-    int z = middle();
-    return z;
+  int z = middle();
+  return z;
 }
 
 test_nested_auto_prop_chain() `test {
-    bool caught = false;
-    outer() ? e {
-        caught = true;
-        assert(e.message == "bad: bad", "error propagates through 3-level chain");
-    };
-    assert(caught, "3-level auto-prop chain catches error");
+  bool caught = false;
+  outer()? e {
+    caught = true;
+    assert(e.message == "bad: bad", "error propagates through 3-level chain");
+  };
+  assert(caught, "3-level auto-prop chain catches error");
 }
 
 // ============================================================
@@ -462,25 +510,31 @@ test_nested_auto_prop_chain() `test {
 // ============================================================
 
 type Point {
-    int x;
-    int y;
+  int x;
+  int y;
 }
 
 make_point(bool fail) Point! {
-    if fail { raise error(message: "no point"); }
-    return Point(x: 10, y: 20);
+  if fail {
+    raise error(message: "no point");
+  }
+  return Point(x: 10, y: 20);
 }
 
 test_handler_recovery_user_type() `test {
-    Point p = make_point(true) ? e { Point(x: 0, y: 0); };
-    assert(p.x == 0, "user type recovery x");
-    assert(p.y == 0, "user type recovery y");
+  Point p = make_point(true)? e {
+    Point(x: 0, y: 0);
+  };
+  assert(p.x == 0, "user type recovery x");
+  assert(p.y == 0, "user type recovery y");
 }
 
 test_handler_success_user_type() `test {
-    Point p = make_point(false) ? e { Point(x: 0, y: 0); };
-    assert(p.x == 10, "user type success x");
-    assert(p.y == 20, "user type success y");
+  Point p = make_point(false)? e {
+    Point(x: 0, y: 0);
+  };
+  assert(p.x == 10, "user type success x");
+  assert(p.y == 20, "user type success y");
 }
 
 // ============================================================
@@ -488,59 +542,87 @@ test_handler_success_user_type() `test {
 // ============================================================
 
 fail_with_io(bool use_io) int! {
-    if use_io {
-        raise IoError(code: 42, message: "io fail");
-    }
-    raise error(message: "generic fail");
+  if use_io {
+    raise IoError(code: 42, message: "io fail");
+  }
+  raise error(message: "generic fail");
 }
 
 // Typed handler matches IoError, else catches generic error
 test_typed_handler_else_match() `test {
-    int v = fail_with_io(true) ? e is IoError { e.code; } else e { -1; };
-    assert(v == 42, "typed handler matched IoError, got code");
+  int v = fail_with_io(true)? e is IoError {
+    e.code;
+  } else e {
+    -1;
+  };
+  assert(v == 42, "typed handler matched IoError, got code");
 }
 
 test_typed_handler_else_nomatch() `test {
-    int v = fail_with_io(false) ? e is IoError { e.code; } else e { -1; };
-    assert(v == -1, "typed handler didn't match, else caught");
+  int v = fail_with_io(false)? e is IoError {
+    e.code;
+  } else e {
+    -1;
+  };
+  assert(v == -1, "typed handler didn't match, else caught");
 }
 
-always_succeed() int! { return 99; }
+always_succeed() int! {
+  return 99;
+}
 
 test_typed_handler_else_success() `test {
-    int v = always_succeed() ? e is IoError { e.code; } else e { -1; };
-    assert(v == 99, "typed handler not triggered on success");
+  int v = always_succeed()? e is IoError {
+    e.code;
+  } else e {
+    -1;
+  };
+  assert(v == 99, "typed handler not triggered on success");
 }
 
 // Typed handler with divergence in else (return)
 try_typed_else_diverge(bool use_io) int {
-    int v = fail_with_io(use_io) ? e is IoError { e.code; } else e { return -99; };
-    return v;
+  int v = fail_with_io(use_io)? e is IoError {
+    e.code;
+  } else e {
+    return -99;
+  };
+  return v;
 }
 
 test_typed_handler_else_diverge() `test {
-    int r = try_typed_else_diverge(false);
-    assert(r == -99, "else clause diverges with return");
+  int r = try_typed_else_diverge(false);
+  assert(r == -99, "else clause diverges with return");
 }
 
 test_typed_handler_else_match_no_diverge() `test {
-    int r = try_typed_else_diverge(true);
-    assert(r == 42, "typed handler matches, else not reached");
+  int r = try_typed_else_diverge(true);
+  assert(r == 42, "typed handler matches, else not reached");
 }
 
 // Typed handler with else: non-recovering → optional
 test_typed_handler_else_optional_inferred() `test {
-    v := fail_with_io(true) ? e is IoError { e.code; } else e { println("else"); };
-    assert("{v}" == "42", "typed match produces some value");
+  v := fail_with_io(true)? e is IoError {
+    e.code;
+  } else e {
+    println("else");
+  };
+  assert("{v}" == "42", "typed match produces some value");
 }
 
 test_typed_handler_else_optional_nomatch() `test {
-    v := fail_with_io(false) ? e is IoError { e.code; } else e { println("else"); };
-    assert("{v}" == "none", "else non-recovery produces none");
+  v := fail_with_io(false)? e is IoError {
+    e.code;
+  } else e {
+    println("else");
+  };
+  assert("{v}" == "none", "else non-recovery produces none");
 }
 
 // Typed handler with ! (panic on non-match)
 test_typed_handler_bang_match() `test {
-    int v = fail_with_io(true) ? e is IoError { e.code; }!;
-    assert(v == 42, "typed handler with ! matched IoError");
+  int v = fail_with_io(true)? e is IoError {
+    e.code;
+  }!;
+  assert(v == 42, "typed handler with ! matched IoError");
 }

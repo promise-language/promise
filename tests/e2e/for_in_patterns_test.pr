@@ -1,146 +1,148 @@
 // For-in iteration tests: ranges, vectors, strings, with index.
-
 // --- exclusive range ---
-
 test_range_exclusive() `test {
-    int sum = 0;
-    for i in 0..5 {
-        sum += i;
-    }
-    assert(sum == 10, "0+1+2+3+4 = 10");
+  int sum = 0;
+  for i in 0..5 {
+    sum += i;
+  }
+  assert(sum == 10, "0+1+2+3+4 = 10");
 }
 
 // --- inclusive range ---
 
 test_range_inclusive() `test {
-    int sum = 0;
-    for i in 1..=10 {
-        sum += i;
-    }
-    assert(sum == 55, "1..=10 sum = 55");
+  int sum = 0;
+  for i in 1..=10 {
+    sum += i;
+  }
+  assert(sum == 55, "1..=10 sum = 55");
 }
 
 // --- range starting from non-zero ---
 
 test_range_offset() `test {
-    int[] collected = [];
-    for i in 5..8 {
-        collected.push(i);
-    }
-    assert(collected.len == 3, "3 elements");
-    assert(collected[0] == 5, "starts at 5");
-    assert(collected[2] == 7, "ends at 7");
+  int[] collected = [];
+  for i in 5..8 {
+    collected.push(i);
+  }
+  assert(collected.len == 3, "3 elements");
+  assert(collected[0] == 5, "starts at 5");
+  assert(collected[2] == 7, "ends at 7");
 }
 
 // --- empty range ---
 
 test_range_empty() `test {
-    int count = 0;
-    for i in 5..5 {
-        count++;
-    }
-    assert(count == 0, "empty range no iterations");
+  int count = 0;
+  for i in 5..5 {
+    count++;
+  }
+  assert(count == 0, "empty range no iterations");
 }
 
 // --- for-in over vector ---
 
 test_for_in_vector() `test {
-    string[] words = ["the", "quick", "brown", "fox"];
-    string joined = "";
-    for w in words {
-        if joined.len > 0 { joined = joined + " "; }
-        joined = joined + w;
+  string[] words = ["the", "quick", "brown", "fox"];
+  string joined = "";
+  for w in words {
+    if joined.len > 0 {
+      joined = joined + " ";
     }
-    assert(joined == "the quick brown fox", "joined words");
+    joined = joined + w;
+  }
+  assert(joined == "the quick brown fox", "joined words");
 }
 
 // --- for-in with index over vector ---
 
 test_for_in_index_vector() `test {
-    int[] nums = [10, 20, 30];
-    int sum_indices = 0;
-    int sum_values = 0;
-    for i, v in nums {
-        sum_indices += i;
-        sum_values += v;
-    }
-    assert(sum_indices == 3, "0+1+2 = 3");
-    assert(sum_values == 60, "10+20+30 = 60");
+  int[] nums = [10, 20, 30];
+  int sum_indices = 0;
+  int sum_values = 0;
+  for i, v in nums {
+    sum_indices += i;
+    sum_values += v;
+  }
+  assert(sum_indices == 3, "0+1+2 = 3");
+  assert(sum_values == 60, "10+20+30 = 60");
 }
 
 // --- for-in over string chars ---
 
 test_for_in_string() `test {
-    string s = "abcde";
-    int count = 0;
-    for ch in s {
-        count++;
-    }
-    assert(count == 5, "5 chars in abcde");
+  string s = "abcde";
+  int count = 0;
+  for ch in s {
+    count++;
+  }
+  assert(count == 5, "5 chars in abcde");
 }
 
 // --- for-in with index over string ---
 
 test_for_in_index_string() `test {
-    string s = "xyz";
-    int last_idx = -1;
-    for i, ch in s {
-        last_idx = i;
-    }
-    assert(last_idx == 2, "last index = 2");
+  string s = "xyz";
+  int last_idx = -1;
+  for i, ch in s {
+    last_idx = i;
+  }
+  assert(last_idx == 2, "last index = 2");
 }
 
 // --- nested for-in ---
 
 test_nested_for_in() `test {
-    int total = 0;
-    for i in 0..3 {
-        for j in 0..4 {
-            total++;
-        }
+  int total = 0;
+  for i in 0..3 {
+    for j in 0..4 {
+      total++;
     }
-    assert(total == 12, "3 * 4 = 12");
+  }
+  assert(total == 12, "3 * 4 = 12");
 }
 
 // --- for-in range collecting to vector ---
 
 test_range_to_vector() `test {
-    int[] squares = [];
-    for i in 1..=5 {
-        squares.push(i * i);
-    }
-    assert(squares.len == 5, "5 squares");
-    assert(squares[0] == 1, "1^2 = 1");
-    assert(squares[1] == 4, "2^2 = 4");
-    assert(squares[2] == 9, "3^2 = 9");
-    assert(squares[3] == 16, "4^2 = 16");
-    assert(squares[4] == 25, "5^2 = 25");
+  int[] squares = [];
+  for i in 1..=5 {
+    squares.push(i * i);
+  }
+  assert(squares.len == 5, "5 squares");
+  assert(squares[0] == 1, "1^2 = 1");
+  assert(squares[1] == 4, "2^2 = 4");
+  assert(squares[2] == 9, "3^2 = 9");
+  assert(squares[3] == 16, "4^2 = 16");
+  assert(squares[4] == 25, "5^2 = 25");
 }
 
 // --- for-in building map from vector ---
 
 test_for_in_build_map() `test {
-    string[] keys = ["a", "b", "c"];
-    map[string, int] m = {:};
-    for i, k in keys {
-        m[k] = i;
-    }
-    assert(m.len == 3, "3 entries");
-    assert(m.contains("a"), "has a");
-    assert(m.contains("b"), "has b");
-    assert(m.contains("c"), "has c");
+  string[] keys = ["a", "b", "c"];
+  map[string, int] m = {:};
+  for i, k in keys {
+    m[k] = i;
+  }
+  assert(m.len == 3, "3 entries");
+  assert(m.contains("a"), "has a");
+  assert(m.contains("b"), "has b");
+  assert(m.contains("c"), "has c");
 }
 
 // --- for-in with condition and continue ---
 
 test_for_in_filter() `test {
-    int[] nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-    int[] evens = [];
-    for n in nums {
-        if n % 2 != 0 { continue; }
-        evens.push(n);
+  int[] nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+  int[] evens = [];
+  for n in nums {
+    if n % 2 != 0 {
+      continue;
     }
-    assert(evens.len == 5, "5 even numbers");
-    assert(evens[0] == 2, "first even = 2");
-    assert(evens[4] == 10, "last even = 10");
+    evens.push(n);
+  }
+  assert(evens.len == 5, "5 even numbers");
+  assert(evens[0] == 2, "first even = 2");
+  assert(evens[4] == 10, "last even = 10");
 }

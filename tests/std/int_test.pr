@@ -135,25 +135,33 @@ test_bitwise_precedence() `test {
 
 test_range_exclusive() `test {
   int sum = 0;
-  for i in 1..5 { sum += i; }
+  for i in 1..5 {
+    sum += i;
+  }
   assert(sum == 10, "1..5 sum == 10");
 }
 
 test_range_inclusive() `test {
   int sum = 0;
-  for i in 1..=5 { sum += i; }
+  for i in 1..=5 {
+    sum += i;
+  }
   assert(sum == 15, "1..=5 sum == 15");
 }
 
 test_range_single_element() `test {
   int count = 0;
-  for _ in 0..1 { count++; }
+  for _ in 0..1 {
+    count++;
+  }
   assert(count == 1, "0..1 one iteration");
 }
 
 test_range_empty() `test {
   int count = 0;
-  for _ in 5..5 { count++; }
+  for _ in 5..5 {
+    count++;
+  }
   assert(count == 0, "5..5 zero iterations");
 }
 
@@ -161,6 +169,8 @@ test_range_variable_bounds() `test {
   int start = 3;
   int end = 6;
   int sum = 0;
-  for i in start..end { sum += i; }
+  for i in start..end {
+    sum += i;
+  }
   assert(sum == 12, "3..6 sum == 12");
 }

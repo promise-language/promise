@@ -1,442 +1,463 @@
 // Tests for generic inheritance: type Foo[T] is Bar[T].
-
 // --- Non-generic child of generic parent ---
-
 type Holder[T] {
-    T value;
+  T value;
 }
 
 type IntHolder is Holder[int] {
 }
 
 test_non_generic_child() `test {
-    h := IntHolder(value: 42);
-    assert(h.value == 42, "non-generic child field access");
+  h := IntHolder(value: 42);
+  assert(h.value == 42, "non-generic child field access");
 }
 
 // --- Generic child forwarding type params ---
 
 type Container[T] {
-    T item;
+  T item;
 
-    get() T {
-        return this.item;
-    }
+  get() T {
+    return this.item;
+  }
 }
 
 type Wrapper[T] is Container[T] {
-    string label;
+  string label;
 }
 
 test_forwarded_params() `test {
-    w := Wrapper[int](item: 99, label: "test");
-    assert(w.item == 99, "forwarded param field");
-    assert(w.get() == 99, "inherited method");
-    assert(w.label == "test", "own field");
+  w := Wrapper[int](item: 99, label: "test");
+  assert(w.item == 99, "forwarded param field");
+  assert(w.get() == 99, "inherited method");
+  assert(w.label == "test", "own field");
 }
 
 // --- Abstract parent with generic type param ---
 
 type Producer[T] {
-    produce() T `abstract;
+  produce() T `abstract;
 }
 
 type ConstProducer[T] is Producer[T] {
-    T value;
+  T value;
 
-    produce() T {
-        return this.value;
-    }
+  produce() T {
+    return this.value;
+  }
 }
 
 test_abstract_generic_parent() `test {
-    p := ConstProducer[int](value: 7);
-    assert(p.produce() == 7, "abstract generic parent");
+  p := ConstProducer[int](value: 7);
+  assert(p.produce() == 7, "abstract generic parent");
 }
 
 test_abstract_generic_string() `test {
-    p := ConstProducer[string](value: "hello");
-    assert(p.produce() == "hello", "abstract generic parent string");
+  p := ConstProducer[string](value: "hello");
+  assert(p.produce() == "hello", "abstract generic parent string");
 }
 
 // --- Partial type arg application ---
 
 type Pair[A, B] {
-    A first;
-    B second;
+  A first;
+  B second;
 }
 
 type StringPair[V] is Pair[string, V] {
 }
 
 test_partial_application() `test {
-    sp := StringPair[int](first: "age", second: 30);
-    assert(sp.first == "age", "partial app first");
-    assert(sp.second == 30, "partial app second");
+  sp := StringPair[int](first: "age", second: 30);
+  assert(sp.first == "age", "partial app first");
+  assert(sp.second == 30, "partial app second");
 }
 
 // --- Transitive generic inheritance (3-level chain) ---
 
 type Base[T] {
-    T data;
+  T data;
 
-    get_data() T {
-        return this.data;
-    }
+  get_data() T {
+    return this.data;
+  }
 }
 
 type Middle[T] is Base[T] {
-    string tag;
+  string tag;
 }
 
 type Leaf is Middle[int] {
 }
 
 test_transitive_field() `test {
-    leaf := Leaf(data: 100, tag: "leaf");
-    assert(leaf.data == 100, "transitive field access");
-    assert(leaf.tag == "leaf", "middle field access");
+  leaf := Leaf(data: 100, tag: "leaf");
+  assert(leaf.data == 100, "transitive field access");
+  assert(leaf.tag == "leaf", "middle field access");
 }
 
 test_transitive_method() `test {
-    leaf := Leaf(data: 55, tag: "x");
-    assert(leaf.get_data() == 55, "transitive inherited method");
+  leaf := Leaf(data: 55, tag: "x");
+  assert(leaf.get_data() == 55, "transitive inherited method");
 }
 
 // --- Generic child of generic parent of generic grandparent ---
 
 type GBase[T] {
-    T val;
-    fetch() T { return this.val; }
+  T val;
+  fetch() T {
+    return this.val;
+  }
 }
 
-type GMid[T] is GBase[T] {}
+type GMid[T] is GBase[T] {
+}
 
-type GLeaf[T] is GMid[T] {}
+type GLeaf[T] is GMid[T] {
+}
 
 test_transitive_generic() `test {
-    g := GLeaf[int](val: 77);
-    assert(g.val == 77, "transitive generic field");
-    assert(g.fetch() == 77, "transitive generic method");
+  g := GLeaf[int](val: 77);
+  assert(g.val == 77, "transitive generic field");
+  assert(g.fetch() == 77, "transitive generic method");
 }
 
 // --- Assignability through generic intermediary ---
 
 accept_base(Base[int] b) int {
-    return b.get_data();
+  return b.get_data();
 }
 
 test_transitive_assignability() `test {
-    leaf := Leaf(data: 33, tag: "t");
-    result := accept_base(leaf);
-    assert(result == 33, "transitive assignability");
+  leaf := Leaf(data: 33, tag: "t");
+  result := accept_base(leaf);
+  assert(result == 33, "transitive assignability");
 }
 
 // --- Multiple instantiations of same generic chain ---
 
 test_multiple_instantiations() `test {
-    gi := GLeaf[int](val: 10);
-    gs := GLeaf[string](val: "hi");
-    assert(gi.fetch() == 10, "multi inst int");
-    assert(gs.fetch() == "hi", "multi inst string");
+  gi := GLeaf[int](val: 10);
+  gs := GLeaf[string](val: "hi");
+  assert(gi.fetch() == 10, "multi inst int");
+  assert(gs.fetch() == "hi", "multi inst string");
 }
 
 // --- Instance to Instance assignability ---
 
 accept_container(Container[int] c) int {
-    return c.get();
+  return c.get();
 }
 
 test_instance_to_instance_assignability() `test {
-    w := Wrapper[int](item: 42, label: "w");
-    result := accept_container(w);
-    assert(result == 42, "instance to instance assignability");
+  w := Wrapper[int](item: 42, label: "w");
+  result := accept_container(w);
+  assert(result == 42, "instance to instance assignability");
 }
 
 // --- Partial application with inherited method ---
 
 type KVPair[K, V] {
-    K key;
-    V val;
+  K key;
+  V val;
 
-    get_key() K { return this.key; }
-    get_val() V { return this.val; }
+  get_key() K {
+    return this.key;
+  }
+  get_val() V {
+    return this.val;
+  }
 }
 
-type IntKV[V] is KVPair[int, V] {}
+type IntKV[V] is KVPair[int, V] {
+}
 
 test_partial_app_method() `test {
-    kv := IntKV[string](key: 1, val: "one");
-    assert(kv.get_key() == 1, "partial app inherited method key");
-    assert(kv.get_val() == "one", "partial app inherited method val");
+  kv := IntKV[string](key: 1, val: "one");
+  assert(kv.get_key() == 1, "partial app inherited method key");
+  assert(kv.get_val() == "one", "partial app inherited method val");
 }
 
 // --- Child overriding concrete parent method ---
 
 type Greeter[T] {
-    T name;
+  T name;
 
-    greet() string {
-        return "hello";
-    }
+  greet() string {
+    return "hello";
+  }
 }
 
 type FancyGreeter[T] is Greeter[T] {
-    greet() string {
-        return "greetings";
-    }
+  greet() string {
+    return "greetings";
+  }
 }
 
 test_concrete_override() `test {
-    g := FancyGreeter[int](name: 42);
-    assert(g.greet() == "greetings", "concrete override");
-    assert(g.name == 42, "override preserves fields");
+  g := FancyGreeter[int](name: 42);
+  assert(g.greet() == "greetings", "concrete override");
+  assert(g.name == 42, "override preserves fields");
 }
 
 // --- Generic child with own methods + inherited ---
 
 type Animal[T] {
-    T id;
-    get_id() T { return this.id; }
+  T id;
+  get_id() T {
+    return this.id;
+  }
 }
 
 type Dog[T] is Animal[T] {
-    string breed;
-    bark() string { return "woof"; }
+  string breed;
+  bark() string {
+    return "woof";
+  }
 }
 
 test_own_and_inherited_methods() `test {
-    d := Dog[int](id: 7, breed: "lab");
-    assert(d.get_id() == 7, "inherited method");
-    assert(d.bark() == "woof", "own method");
-    assert(d.breed == "lab", "own field");
+  d := Dog[int](id: 7, breed: "lab");
+  assert(d.get_id() == 7, "inherited method");
+  assert(d.bark() == "woof", "own method");
+  assert(d.breed == "lab", "own field");
 }
 
 // --- Non-generic child with own fields + inherited generic fields ---
 
 type Tagged[T] {
-    T payload;
+  T payload;
 }
 
 type NamedItem is Tagged[int] {
-    string name;
+  string name;
 }
 
 test_own_and_inherited_fields() `test {
-    item := NamedItem(payload: 99, name: "item");
-    assert(item.payload == 99, "inherited generic field");
-    assert(item.name == "item", "own field");
+  item := NamedItem(payload: 99, name: "item");
+  assert(item.payload == 99, "inherited generic field");
+  assert(item.name == "item", "own field");
 }
 
 // --- Assignability: child instance to parent instance ---
 
 type Transformer[T] {
-    transform(T input) T `abstract;
+  transform(T input) T `abstract;
 }
 
 type Doubler is Transformer[int] {
-    transform(int input) int {
-        return input * 2;
-    }
+  transform(int input) int {
+    return input * 2;
+  }
 }
 
 accept_transformer(Transformer[int] t) int {
-    return t.transform(5);
+  return t.transform(5);
 }
 
 test_assignability() `test {
-    d := Doubler();
-    result := accept_transformer(d);
-    assert(result == 10, "assignability child to parent");
+  d := Doubler();
+  result := accept_transformer(d);
+  assert(result == 10, "assignability child to parent");
 }
 
 // --- Assignability: non-generic child to generic parent instance ---
 
 accept_producer(Producer[int] p) int {
-    return p.produce();
+  return p.produce();
 }
 
 type IntProducer is Producer[int] {
-    produce() int { return 42; }
+  produce() int {
+    return 42;
+  }
 }
 
 test_non_generic_child_to_generic_parent() `test {
-    ip := IntProducer();
-    assert(accept_producer(ip) == 42, "non-generic child to generic parent");
+  ip := IntProducer();
+  assert(accept_producer(ip) == 42, "non-generic child to generic parent");
 }
 
 // --- Assignability: generic child instance to generic parent instance ---
 
 test_generic_child_to_parent_assignability() `test {
-    cp := ConstProducer[int](value: 5);
-    assert(accept_producer(cp) == 5, "generic child instance assignability");
+  cp := ConstProducer[int](value: 5);
+  assert(accept_producer(cp) == 5, "generic child instance assignability");
 
-    ip := IntProducer();
-    assert(accept_producer(ip) == 42, "non-generic child assignability");
+  ip := IntProducer();
+  assert(accept_producer(ip) == 42, "non-generic child assignability");
 }
 
 // --- Polymorphic dispatch: multiple children through same parent type ---
 
 type Negator is Transformer[int] {
-    transform(int input) int {
-        return 0 - input;
-    }
+  transform(int input) int {
+    return 0 - input;
+  }
 }
 
 type Tripler is Transformer[int] {
-    transform(int input) int {
-        return input * 3;
-    }
+  transform(int input) int {
+    return input * 3;
+  }
 }
 
 test_polymorphic_dispatch() `test {
-    Transformer[int] a = Doubler();
-    Transformer[int] b = Negator();
-    Transformer[int] c = Tripler();
-    assert(a.transform(4) == 8, "polymorphic doubler");
-    assert(b.transform(4) == -4, "polymorphic negator");
-    assert(c.transform(4) == 12, "polymorphic tripler");
+  Transformer[int] a = Doubler();
+  Transformer[int] b = Negator();
+  Transformer[int] c = Tripler();
+  assert(a.transform(4) == 8, "polymorphic doubler");
+  assert(b.transform(4) == -4, "polymorphic negator");
+  assert(c.transform(4) == 12, "polymorphic tripler");
 }
 
 // --- Virtual dispatch: multiple mono instantiations through parent ---
 
 type Adder[T] {
-    add(T a, T b) T `abstract;
+  add(T a, T b) T `abstract;
 }
 
 type IntAdder is Adder[int] {
-    add(int a, int b) int { return a + b; }
+  add(int a, int b) int {
+    return a + b;
+  }
 }
 
 type StrAdder is Adder[string] {
-    add(string a, string b) string { return a + b; }
+  add(string a, string b) string {
+    return a + b;
+  }
 }
 
 accept_int_adder(Adder[int] a) int {
-    return a.add(10, 20);
+  return a.add(10, 20);
 }
 
 accept_str_adder(Adder[string] a) string {
-    return a.add("foo", "bar");
+  return a.add("foo", "bar");
 }
 
 test_multi_instantiation_dispatch() `test {
-    assert(accept_int_adder(IntAdder()) == 30, "int adder dispatch");
-    assert(accept_str_adder(StrAdder()) == "foobar", "str adder dispatch");
+  assert(accept_int_adder(IntAdder()) == 30, "int adder dispatch");
+  assert(accept_str_adder(StrAdder()) == "foobar", "str adder dispatch");
 }
 
 // --- Virtual dispatch through 3-level abstract chain ---
 
 type Shape[T] {
-    area() T `abstract;
+  area() T `abstract;
 }
 
 type Polygon[T] is Shape[T] {
-    int sides;
+  int sides;
 }
 
 type Square is Polygon[int] {
-    int size;
-    area() int { return this.size * this.size; }
+  int size;
+  area() int {
+    return this.size * this.size;
+  }
 }
 
 type Circle is Polygon[f64] {
-    f64 radius;
-    area() f64 { return this.radius * this.radius * 3.14; }
+  f64 radius;
+  area() f64 {
+    return this.radius * this.radius * 3.14;
+  }
 }
 
 accept_int_shape(Shape[int] s) int {
-    return s.area();
+  return s.area();
 }
 
 test_deep_chain_virtual_dispatch() `test {
-    sq := Square(sides: 4, size: 5);
-    assert(accept_int_shape(sq) == 25, "deep chain virtual dispatch");
+  sq := Square(sides: 4, size: 5);
+  assert(accept_int_shape(sq) == 25, "deep chain virtual dispatch");
 }
 
 // --- is-check: non-generic child against parent origin ---
 
 test_is_check_non_generic_child() `test {
-    Producer[int] p = ConstProducer[int](value: 10);
-    assert(p is Producer, "mono instance is parent");
+  Producer[int] p = ConstProducer[int](value: 10);
+  assert(p is Producer, "mono instance is parent");
 }
 
 // --- is-check: non-generic child of generic parent ---
 
 test_is_check_nongeneric_child_of_generic_parent() `test {
-    Producer[int] p = IntProducer();
-    assert(p is IntProducer, "nongeneric child is concrete type");
-    assert(p is Producer, "nongeneric child is parent");
+  Producer[int] p = IntProducer();
+  assert(p is IntProducer, "nongeneric child is concrete type");
+  assert(p is Producer, "nongeneric child is parent");
 }
 
 // --- Virtual dispatch: override in mono child ---
 
 accept_greeter(Greeter[int] g) string {
-    return g.greet();
+  return g.greet();
 }
 
 test_override_virtual_dispatch() `test {
-    Greeter[int] plain = Greeter[int](name: 1);
-    Greeter[int] fancy = FancyGreeter[int](name: 2);
-    assert(accept_greeter(plain) == "hello", "parent dispatch");
-    assert(accept_greeter(fancy) == "greetings", "override dispatch");
+  Greeter[int] plain = Greeter[int](name: 1);
+  Greeter[int] fancy = FancyGreeter[int](name: 2);
+  assert(accept_greeter(plain) == "hello", "parent dispatch");
+  assert(accept_greeter(fancy) == "greetings", "override dispatch");
 }
 
 // --- Partial type arg application with virtual dispatch ---
 
 accept_kvpair(KVPair[int, string] kv) string {
-    return kv.get_val();
+  return kv.get_val();
 }
 
 test_partial_app_virtual_dispatch() `test {
-    kv := IntKV[string](key: 1, val: "one");
-    assert(accept_kvpair(kv) == "one", "partial app virtual dispatch");
+  kv := IntKV[string](key: 1, val: "one");
+  assert(accept_kvpair(kv) == "one", "partial app virtual dispatch");
 }
 
 // --- Virtual dispatch: generic child instance with own methods ---
 
 accept_animal(Animal[int] a) int {
-    return a.get_id();
+  return a.get_id();
 }
 
 test_inherited_method_virtual_dispatch() `test {
-    d := Dog[int](id: 9, breed: "pug");
-    assert(accept_animal(d) == 9, "child dispatched through parent");
+  d := Dog[int](id: 9, breed: "pug");
+  assert(accept_animal(d) == 9, "child dispatched through parent");
 }
 
 // --- Transitive virtual dispatch: GLeaf[T] → GBase[T] ---
 
 accept_gbase(GBase[int] g) int {
-    return g.fetch();
+  return g.fetch();
 }
 
 test_transitive_virtual_dispatch() `test {
-    g := GLeaf[int](val: 42);
-    assert(accept_gbase(g) == 42, "transitive generic virtual dispatch");
+  g := GLeaf[int](val: 42);
+  assert(accept_gbase(g) == 42, "transitive generic virtual dispatch");
 }
 
 // --- Multiple mono children of same generic parent, dispatched polymorphically ---
 
 type ConstTransformer is Transformer[int] {
-    int offset;
-    transform(int input) int {
-        return input + this.offset;
-    }
+  int offset;
+  transform(int input) int {
+    return input + this.offset;
+  }
 }
 
 test_mixed_child_polymorphic_dispatch() `test {
-    Transformer[int] a = Doubler();
-    Transformer[int] b = ConstTransformer(offset: 100);
-    assert(accept_transformer(a) == 10, "non-generic child dispatch");
-    assert(accept_transformer(b) == 105, "const child dispatch");
+  Transformer[int] a = Doubler();
+  Transformer[int] b = ConstTransformer(offset: 100);
+  assert(accept_transformer(a) == 10, "non-generic child dispatch");
+  assert(accept_transformer(b) == 105, "const child dispatch");
 }
 
 // --- Generic mono child dispatched alongside non-generic child ---
 
 test_mono_and_nongeneric_siblings() `test {
-    // ConstProducer[int] (mono) and IntProducer (non-generic) both implement Producer[int]
-    Producer[int] a = ConstProducer[int](value: 99);
-    Producer[int] b = IntProducer();
-    assert(a.produce() == 99, "mono sibling dispatch");
-    assert(b.produce() == 42, "non-generic sibling dispatch");
+  // ConstProducer[int] (mono) and IntProducer (non-generic) both implement Producer[int]
+  Producer[int] a = ConstProducer[int](value: 99);
+  Producer[int] b = IntProducer();
+  assert(a.produce() == 99, "mono sibling dispatch");
+  assert(b.produce() == 42, "non-generic sibling dispatch");
 }

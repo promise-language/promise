@@ -16,7 +16,7 @@ test_or() `test {
 
 test_not() `test {
   assert(!false, "!false");
-  assert(!!true, "!!true");
+  assert(!! true, "!!true");
   assert(!(!true), "!(!true)");
 }
 

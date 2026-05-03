@@ -1,25 +1,24 @@
 // Fixed-size arrays as function parameters and return values
-
 sum(int[3] arr) int {
-    int total = 0;
-    for x in arr {
-        total += x;
-    }
-    return total;
+  int total = 0;
+  for x in arr {
+    total += x;
+  }
+  return total;
 }
 
 make_arr() int[3] {
-    int[3] result = [10, 20, 30];
-    return result;
+  int[3] result = [10, 20, 30];
+  return result;
 }
 
 main() `test(expected: """6
 60
 3""") {
-    int[3] nums = [1, 2, 3];
-    println("{sum(nums)}");
+  int[3] nums = [1, 2, 3];
+  println("{sum(nums)}");
 
-    int[3] arr = make_arr();
-    println("{sum(arr)}");
-    println("{arr.len}");
+  int[3] arr = make_arr();
+  println("{sum(arr)}");
+  println("{arr.len}");
 }

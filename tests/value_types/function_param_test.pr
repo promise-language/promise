@@ -1,23 +1,23 @@
 type Point {
-    int x `value;
-    int y `value;
+  int x `value;
+  int y `value;
 }
 
 sum_point(Point p) int {
-    return p.x + p.y;
+  return p.x + p.y;
 }
 
 make_point(int a, int b) Point {
-    return Point(x: a, y: b);
+  return Point(x: a, y: b);
 }
 
 main() `test(expected: """15
 100
 200""") {
-    Point p = Point(x: 5, y: 10);
-    print_int(sum_point(p: p));
+  Point p = Point(x: 5, y: 10);
+  print_int(sum_point(p: p));
 
-    Point q = make_point(a: 100, b: 200);
-    print_int(q.x);
-    print_int(q.y);
+  Point q = make_point(a: 100, b: 200);
+  print_int(q.x);
+  print_int(q.y);
 }

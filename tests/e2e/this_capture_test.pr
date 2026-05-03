@@ -1,97 +1,97 @@
 // Tests for capturing 'this' in lambdas inside method bodies.
 // Covers the sema fix that enables lambdas to capture 'this' from enclosing method scope.
-
 type Counter {
-    int count;
+  int count;
 
-    make_getter() () -> int {
-        return move || -> int {
-            return this.count;
-        };
-    }
+  make_getter()() -> int {
+    return move || -> int {
+      return this.count;
+    };
+  }
 
-    make_adder(int n) () -> int {
-        return move || -> int {
-            return this.count + n;
-        };
-    }
+  make_adder(int n)() -> int {
+    return move || -> int {
+      return this.count + n;
+    };
+  }
 
-    make_predicate() (int) -> bool {
-        return move |int threshold| -> this.count > threshold;
-    }
+  make_predicate()(int) -> bool {
+    return move |int threshold| -> this.count > threshold;
+  }
 }
 
 type Pair {
-    int x;
-    int y;
+  int x;
+  int y;
 
-    make_sum_fn() () -> int {
-        return move || -> int {
-            return this.x + this.y;
-        };
-    }
+  make_sum_fn()() -> int {
+    return move || -> int {
+      return this.x + this.y;
+    };
+  }
 
-    make_formatter() () -> string {
-        return move || -> string {
-            return "(" + this.x.to_string() + ", " + this.y.to_string() + ")";
-        };
-    }
+  make_formatter()() -> string {
+    return move || -> string {
+      return "(" + this.x.to_string() + ", " + this.y.to_string() + ")";
+    };
+  }
 }
 
 // --- Basic this capture returns field value ---
 test_this_capture_basic() `test {
-    c := Counter(count: 42);
-    () -> int getter = c.make_getter();
-    assert(getter() == 42, "this capture returns count");
+  c := Counter(count: 42);
+  () -> int getter = c.make_getter();
+  assert(getter() == 42, "this capture returns count");
 }
 
 // --- This capture with additional captured variable ---
 test_this_capture_with_extra() `test {
-    c := Counter(count: 10);
-    () -> int add5 = c.make_adder(5);
-    assert(add5() == 15, "this + extra capture");
+  c := Counter(count: 10);
+  () -> int add5 = c.make_adder(5);
+  assert(add5() == 15, "this + extra capture");
 }
 
 // --- This capture in predicate ---
 test_this_capture_predicate() `test {
-    c := Counter(count: 20);
-    (int) -> bool pred = c.make_predicate();
-    assert(pred(10) == true, "20 > 10");
-    assert(pred(30) == false, "20 > 30 is false");
-    assert(pred(20) == false, "20 > 20 is false");
+  c := Counter(count: 20);
+  (int) -> bool pred = c.make_predicate();
+  assert(pred(10) == true, "20 > 10");
+  assert(pred(30) == false, "20 > 30 is false");
+  assert(pred(20) == false, "20 > 20 is false");
 }
 
 // --- This capture with multiple fields ---
 test_this_capture_multiple_fields() `test {
-    p := Pair(x: 3, y: 4);
-    () -> int sum_fn = p.make_sum_fn();
-    assert(sum_fn() == 7, "3 + 4 = 7");
+  p := Pair(x: 3, y: 4);
+  () -> int sum_fn = p.make_sum_fn();
+  assert(sum_fn() == 7, "3 + 4 = 7");
 }
 
 // --- This capture producing string ---
 test_this_capture_string() `test {
-    p := Pair(x: 10, y: 20);
-    () -> string fmt = p.make_formatter();
-    assert(fmt() == "(10, 20)", "formatted pair");
+  p := Pair(x: 10, y: 20);
+  () -> string fmt = p.make_formatter();
+  assert(fmt() == "(10, 20)", "formatted pair");
 }
 
 // --- Different instances produce different closures ---
 test_this_capture_different_instances() `test {
-    c1 := Counter(count: 100);
-    c2 := Counter(count: 200);
-    () -> int g1 = c1.make_getter();
-    () -> int g2 = c2.make_getter();
-    assert(g1() == 100, "first instance count");
-    assert(g2() == 200, "second instance count");
+  c1 := Counter(count: 100);
+  c2 := Counter(count: 200);
+  () -> int g1 = c1.make_getter();
+  () -> int g2 = c2.make_getter();
+  assert(g1() == 100, "first instance count");
+  assert(g2() == 200, "second instance count");
 }
 
 // --- Calling captured lambda multiple times ---
 test_this_capture_repeated_calls() `test {
-    c := Counter(count: 7);
-    () -> int getter = c.make_getter();
-    assert(getter() == 7, "first call");
-    assert(getter() == 7, "second call same result");
-    assert(getter() == 7, "third call same result");
+  c := Counter(count: 7);
+  () -> int getter = c.make_getter();
+  assert(getter() == 7, "first call");
+  assert(getter() == 7, "second call same result");
+  assert(getter() == 7, "third call same result");
 }
 
-main() {}
+main() {
+}

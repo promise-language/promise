@@ -8537,6 +8537,76 @@ func TestGoExprVoidFunction(t *testing.T) {
 	assertContains(t, ir, "call void @promise_sched_enqueue(")
 }
 
+// B0044: go extern_func() must generate a wrapper to handle sret ABI.
+func TestGoExprExternFunction(t *testing.T) {
+	ir := generateIR(t, `
+		get_data(int x) string `+"`"+`extern("test_get_data");
+		main() {
+			t := go get_data(42);
+			result := <-t;
+		}
+	`)
+	// Extern declared with sret pattern (void return, i8* sret first param)
+	assertContains(t, ir, "declare void @test_get_data(i8* %sret")
+	// Wrapper function generated for the go expression
+	assertContains(t, ir, ".go_extern_wrap.get_data.")
+	// Wrapper calls the extern with sret
+	assertContains(t, ir, "call void @test_get_data(i8*")
+	// Coroutine calls the wrapper (returns i8*, not void)
+	assertContains(t, ir, "call i8* @.go_extern_wrap.get_data.")
+	// G struct created and enqueued
+	assertContains(t, ir, "call i8* @promise_g_new(")
+	assertContains(t, ir, "call void @promise_sched_enqueue(")
+}
+
+func TestGoExprExternVoidFunction(t *testing.T) {
+	ir := generateIR(t, `
+		do_work(int x) `+"`"+`extern("test_do_work");
+		main() {
+			t := go do_work(42);
+			<-t;
+		}
+	`)
+	// Even void externs need the wrapper — extern int params expect i8*
+	// (pointer to value struct) but Promise internal representation is i64
+	assertContains(t, ir, ".go_extern_wrap.do_work.")
+	assertContains(t, ir, "call i8* @promise_g_new(")
+}
+
+// Container return types (Vector, Channel) use direct i8* return — no sret.
+func TestGoExprExternContainerReturn(t *testing.T) {
+	ir := generateIR(t, `
+		get_items() string[] `+"`"+`extern("test_get_items");
+		main() {
+			t := go get_items();
+			result := <-t;
+		}
+	`)
+	// Vector return: i8* directly (no sret)
+	assertContains(t, ir, "declare i8* @test_get_items()")
+	// Wrapper still generated (consistent handling of all externs)
+	assertContains(t, ir, ".go_extern_wrap.get_items.")
+	// Coroutine calls wrapper which returns i8*
+	assertContains(t, ir, "call i8* @.go_extern_wrap.get_items.")
+}
+
+// Extern with string param (i8* in both Promise and extern ABI) + multiple args.
+func TestGoExprExternMultipleArgs(t *testing.T) {
+	ir := generateIR(t, `
+		process(string name, int count) string `+"`"+`extern("test_process");
+		main() {
+			t := go process("hello", 5);
+			result := <-t;
+		}
+	`)
+	// Wrapper generated with both params
+	assertContains(t, ir, ".go_extern_wrap.process.")
+	// Extern uses sret for string return
+	assertContains(t, ir, "declare void @test_process(i8* %sret")
+	// Coroutine calls wrapper
+	assertContains(t, ir, "call i8* @.go_extern_wrap.process.")
+}
+
 func TestGoExprBlock(t *testing.T) {
 	ir := generateIR(t, `
 		main() {

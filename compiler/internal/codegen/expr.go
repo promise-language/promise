@@ -5060,17 +5060,26 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 	// 2. Evaluate arguments in caller scope
 	var argVals []value.Value
 	var argLLVMTypes []irtypes.Type
+	var argTypes []types.Type
 	for _, arg := range callExpr.Args {
 		v := c.genCallArgExpr(arg.Value)
 		argVals = append(argVals, v)
 		argLLVMTypes = append(argLLVMTypes, v.Type())
+		argTypes = append(argTypes, c.info.Types[arg.Value])
 		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 			c.clearDropFlag(ident.Name)
 		}
 	}
 
 	// 3. Resolve the target function
-	targetFn := c.resolveGoTarget(callExpr)
+	targetFn, ext := c.resolveGoTarget(callExpr)
+
+	// If target is an extern, generate a wrapper to handle sret/ABI coercion.
+	// Extern functions use void return + sret pointer for struct returns, which
+	// is incompatible with the coroutine body's direct call + store pattern.
+	if ext != nil {
+		targetFn = c.genGoExternWrapper(ext, argLLVMTypes, argTypes, resultLLVM, isVoid)
+	}
 
 	// 4. Create coroutine wrapper function
 	coroName := fmt.Sprintf(".goroutine.%d", c.goCounter)
@@ -5200,15 +5209,67 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 }
 
 // resolveGoTarget resolves the IR function for a call expression used in `go func()`.
-func (c *Compiler) resolveGoTarget(callExpr *ast.CallExpr) *ir.Func {
+// Returns the target function and, if it's an extern, the ExternFunc info.
+func (c *Compiler) resolveGoTarget(callExpr *ast.CallExpr) (*ir.Func, *ExternFunc) {
 	if ident, ok := callExpr.Callee.(*ast.IdentExpr); ok {
+		if ext, ok := c.externs[ident.Name]; ok {
+			return ext.IRFunc, ext
+		}
 		if fn, ok := c.funcs[ident.Name]; ok {
-			return fn
+			return fn, nil
 		}
 	}
 	// Method call or complex callee — wrap in a thunk
 	// For now, only support direct function calls
 	panic(fmt.Sprintf("codegen: go expression callee %T not yet supported", callExpr.Callee))
+}
+
+// genGoExternWrapper generates a thin wrapper function around an extern call
+// for use in go expressions. The wrapper takes Promise-internal argument types
+// and returns the Promise-internal result type, handling sret/ABI coercion
+// internally via genExternCall. This is needed because extern IR functions use
+// void return + sret pointer for struct returns, which is incompatible with
+// the coroutine body's direct call + store pattern (B0044).
+func (c *Compiler) genGoExternWrapper(ext *ExternFunc, argLLVMTypes []irtypes.Type, argTypes []types.Type, resultLLVM irtypes.Type, isVoid bool) *ir.Func {
+	wrapName := fmt.Sprintf(".go_extern_wrap.%s.%d", ext.PromiseName, c.goCounter)
+
+	var params []*ir.Param
+	for i, ty := range argLLVMTypes {
+		params = append(params, ir.NewParam(fmt.Sprintf("arg.%d", i), ty))
+	}
+
+	retType := irtypes.Type(irtypes.Void)
+	if !isVoid {
+		retType = resultLLVM
+	}
+	wrapFn := c.module.NewFunc(wrapName, retType, params...)
+
+	saved := c.saveState()
+	defer c.restoreState(saved)
+
+	c.fn = wrapFn
+	entry := wrapFn.NewBlock("entry")
+	c.block = entry
+	c.entryBlock = entry
+	c.locals = make(map[string]*ir.InstAlloca)
+	c.localNameCount = make(map[string]int)
+	c.dropFlags = make(map[string]*ir.InstAlloca)
+	c.dropBindings = make(map[string]scopeBinding)
+	c.scopeBindings = nil
+
+	var argVals []value.Value
+	for i := range ext.ParamTypes {
+		argVals = append(argVals, wrapFn.Params[i])
+	}
+
+	result := c.genExternCall(ext, argVals, argTypes)
+	if result != nil && !isVoid {
+		c.block.NewRet(result)
+	} else {
+		c.block.NewRet(nil)
+	}
+
+	return wrapFn
 }
 
 // collectBlockIdents walks an AST block and collects all IdentExpr names referenced.

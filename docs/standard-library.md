@@ -471,7 +471,7 @@ EmitWaitPid(module *ir.Module) *ir.Func     // i32 pid → i32 (exit code 0-255,
 // Windows/WASM: stubs returning -1
 ```
 
-`execute()` in `modules/os/os.pr` reads stdout and stderr concurrently using `go _read_pipe(stderr_fd)` while the main goroutine reads stdout. This prevents deadlock when a child writes >64KB to stderr.
+`execute()` in `modules/os/os.pr` reads stdout and stderr concurrently using `go _os_read_pipe(stderr_fd)` while the main goroutine reads stdout. This prevents deadlock when a child writes >64KB to stderr.
 
 ### 3.5 Math (No PAL Needed)
 

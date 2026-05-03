@@ -41,12 +41,6 @@ _os_read_pipe(int fd) string `extern("promise_os_read_pipe");
 // Waits for a child process to exit. Returns exit code or raises error.
 _os_wait_pid(int pid) int! `extern("promise_os_wait_pid");
 
-// Wrapper for _os_read_pipe — needed because `go` expressions cannot call
-// extern functions directly (B0044: sret ABI incompatibility in genGoCallExpr).
-_read_pipe(int fd) string {
-  return _os_read_pipe(fd);
-}
-
 // ── Error type ───────────────────────────────────────────────────────────────
 
 type OsError is error `public `doc("An operating system error.") {
@@ -101,8 +95,8 @@ execute(string program, ...string arguments) ProcessResult! `public `doc("Execut
   int stdout_fd = _os_spawn_stdout_fd();
   int stderr_fd = _os_spawn_stderr_fd();
 
-  task[string] stderr_task = go _read_pipe(stderr_fd);
-  string stdout = _read_pipe(stdout_fd);
+  task[string] stderr_task = go _os_read_pipe(stderr_fd);
+  string stdout = _os_read_pipe(stdout_fd);
   string stderr = <-stderr_task;
 
   int exit_code = _os_wait_pid(pid)!;

@@ -803,7 +803,7 @@ fine-grained PAL primitives: `pal_spawn` (fork+exec+pipe, returns pid + fd out-p
 `pal_read_pipe` (read fd to EOF into malloc'd buffer), and `pal_wait_pid` (waitpid with EINTR
 retry). The bridge layer uses TLS globals to cache spawn file descriptors between extern calls.
 The Promise-level `execute()` calls `_os_spawn`, retrieves fds, reads both pipes concurrently
-using goroutines (`go _read_pipe(stderr_fd)` for stderr, `_read_pipe(stdout_fd)` for stdout),
+using goroutines (`go _os_read_pipe(stderr_fd)` for stderr, `_os_read_pipe(stdout_fd)` for stdout),
 and waits for exit code. If the program is not found, the child `_exit(127)`.
 
 **PAL functions** (POSIX/Windows/WASM):
@@ -1025,12 +1025,12 @@ First real use of `` `target `` in production code. Platform constants consolida
     int pid = _os_spawn(program, arguments)!;
     int stdout_fd = _os_spawn_stdout_fd();
     int stderr_fd = _os_spawn_stderr_fd();
-    task[string] stderr_task = go _read_pipe(stderr_fd);
-    string stdout = _read_pipe(stdout_fd);
+    task[string] stderr_task = go _os_read_pipe(stderr_fd);
+    string stdout = _os_read_pipe(stdout_fd);
     string stderr = <-stderr_task;
     int exit_code = _os_wait_pid(pid)!;
     ```
-    The `_read_pipe` wrapper calls the `_os_read_pipe` extern (B0044: `go` cannot call externs directly). Each `pal_read_pipe` call releases the scheduler P via enter/exit_syscall, allowing both goroutines to run concurrently on separate Ms.
+    Each `pal_read_pipe` call releases the scheduler P via enter/exit_syscall, allowing both goroutines to run concurrently on separate Ms.
 20. **Signal handling** — `on_signal(Signal, () handler)`. PAL: POSIX `sigaction`; Windows `SetConsoleCtrlHandler`; WASM no-op.
 21. **Streaming subprocess** — `modules/process` (separate module). Piped stdin/stdout/stderr, async I/O integration with scheduler.
 

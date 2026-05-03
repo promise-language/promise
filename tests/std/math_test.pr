@@ -31,26 +31,38 @@ test_clamp() `test {
 // --- Constants ---
 
 test_pi() `test {
-    f64 pi = PI();
-    assert(pi > 3.14 && pi < 3.15, "PI ~ 3.14159");
+    f64 pi = f64.pi;
+    assert(pi > 3.14 && pi < 3.15, "f64.pi ~ 3.14159");
 }
 
 test_e() `test {
-    f64 e = E();
-    assert(e > 2.71 && e < 2.72, "E ~ 2.71828");
+    f64 e = f64.e;
+    assert(e > 2.71 && e < 2.72, "f64.e ~ 2.71828");
 }
 
 test_tau() `test {
-    f64 tau = TAU();
-    assert(tau > 6.28 && tau < 6.29, "TAU ~ 6.28318");
+    f64 tau = f64.tau;
+    assert(tau > 6.28 && tau < 6.29, "f64.tau ~ 6.28318");
+}
+
+test_f32_pi() `test {
+    assert(f32.pi > 3.14f32 && f32.pi < 3.15f32, "f32.pi ~ 3.14159");
+}
+
+test_f32_e() `test {
+    assert(f32.e > 2.71f32 && f32.e < 2.72f32, "f32.e ~ 2.71828");
+}
+
+test_f32_tau() `test {
+    assert(f32.tau > 6.28f32 && f32.tau < 6.29f32, "f32.tau ~ 6.28318");
 }
 
 test_max_int() `test {
-    assert(MAX_INT() > 0, "MAX_INT positive");
+    assert(int.max > 0, "int.max positive");
 }
 
 test_min_int() `test {
-    assert(MIN_INT() < 0, "MIN_INT negative");
+    assert(int.min < 0, "int.min negative");
 }
 
 // --- f64 math ---
@@ -82,7 +94,7 @@ test_pow() `test {
 test_exp_log() `test {
     f64 e = exp(1.0);
     assert(e > 2.71 && e < 2.72, "exp(1) ~ E");
-    f64 l = log(E());
+    f64 l = log(f64.e);
     assert(l > 0.99 && l < 1.01, "log(E) ~ 1");
 }
 

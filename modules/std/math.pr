@@ -23,14 +23,6 @@ clamp(int x, int lo, int hi) int `public {
     return x;
 }
 
-// --- Constants ---
-
-PI() f64 `public { return 3.14159265358979323846; }
-E() f64 `public { return 2.71828182845904523536; }
-TAU() f64 `public { return 6.28318530717958647692; }
-MAX_INT() int `public { return 9223372036854775807; }
-MIN_INT() int `public { return -9223372036854775807 - 1; }
-
 // --- f64 math via LLVM intrinsics ---
 
 _sqrt(f64 x) f64 `extern("promise_sqrt");

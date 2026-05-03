@@ -1,7 +1,7 @@
 // math module — pure math utilities that complement the built-in math functions.
 // Built-in std provides: min, max, abs, clamp, sqrt, sin, cos, tan, pow, exp,
 // log, log2, log10, floor, ceil, round, trunc, fabs, is_nan, is_inf, is_finite,
-// PI, E, TAU, MAX_INT, MIN_INT.
+// f64.pi, f64.e, f64.tau, int.max, int.min are global getters on their types.
 // This module adds higher-level helpers.
 
 lerp(f64 a, f64 b, f64 t) f64 `public `doc("Linear interpolation between `a` and `b` by factor `t` (0.0 to 1.0). Returns `a + (b - a) * t`.") {
@@ -13,11 +13,11 @@ map_range(f64 value, f64 in_lo, f64 in_hi, f64 out_lo, f64 out_hi) f64 `public `
 }
 
 deg_to_rad(f64 deg) f64 `public `doc("Converts degrees to radians.") {
-    return deg * PI() / 180.0;
+    return deg * f64.pi / 180.0;
 }
 
 rad_to_deg(f64 rad) f64 `public `doc("Converts radians to degrees.") {
-    return rad * 180.0 / PI();
+    return rad * 180.0 / f64.pi;
 }
 
 sign(int x) int `public `doc("Returns the sign of an integer: -1, 0, or 1.") {

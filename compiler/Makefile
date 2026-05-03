@@ -47,6 +47,7 @@ generate: $(ANTLR_JAR)
 TESTDATA_STD  := internal/testutil/testdata/std
 
 resources:
+	@mkdir -p $(RESOURCES)
 	@cp ../catalog.toml $(RESOURCES)/catalog.toml
 	@rm -rf $(RESOURCES)/modules
 	@mkdir -p $(RESOURCES)/modules

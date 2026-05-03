@@ -695,7 +695,7 @@ func TestExecWrapCode(t *testing.T) {
 			if !strings.HasSuffix(source, ";") && !strings.HasSuffix(source, "}") {
 				source += ";"
 			}
-			wrapped := "main() {\n" + source + "\n}"
+			wrapped := "main() ! {\n" + source + "\n}"
 			errs := parseString(wrapped)
 			if errs != 0 {
 				t.Errorf("wrapped code has parse errors: %s", wrapped)

@@ -57,7 +57,7 @@ promise test -stress 100 ...      # Stress test for 100 iterations
 promise test -stress 30s ...      # Stress test for 30 seconds
 promise check file.pr             # Type-check only
 promise ast file.pr               # Print the AST
-promise exec '<code>'             # Execute inline code
+promise exec '<code>'             # Execute inline code (failable main, ? works)
 echo '<code>' | promise           # Execute from stdin
 promise install                   # Install to ~/.promise/
 promise init                      # Create new promise.toml

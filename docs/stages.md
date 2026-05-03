@@ -712,7 +712,7 @@ Command-line interface. Core commands implemented; formatter planned.
 - **Per-test panic recovery** (non-WASM): setjmp/longjmp in test trampoline — a panicking test prints `FAIL` with panic context and continues to the next test, instead of killing the process. Uses separate TLS `@__promise_test_jmpbuf` (not the scheduler's `@__promise_panic_jmpbuf`) so normal program panics are unaffected. On WASM, panics still terminate (no longjmp support).
 - **Compact multi-file output**: `promise test <dir>` prints one line per file (`PASS (time) file.pr (N tests)` or `FAIL (time) file.pr (M/N failed)` with indented failure details). Single-file runs remain verbose (every test with timing). End-of-run `FAILED:` summary includes panic/error context for AI-agent tail-friendliness.
 - `promise ast <file.pr>` — print the AST
-- `promise exec <code>` — execute inline code (auto-wraps in `main()` if needed)
+- `promise exec <code>` — execute inline code (auto-wraps in failable `main() !` if needed, so `?` works without explicit error handling)
 - `promise install` — install compiler + std + runtime to `~/.promise/`
 - Bare pipe detection: `echo '<code>' | promise` auto-enters exec mode
 - Inline error formatting: source line + `^` caret marker, no temp filenames

@@ -36,6 +36,9 @@ fi
 echo "Formatting go..."
 (cd compiler && gofmt -w .)
 
+echo "Building compiler..."
+./build
+
 echo "Vetting go..."
 (cd compiler && go vet $(go list ./... | grep -v /internal/parser))
 

@@ -53,7 +53,7 @@ Commands:
   emit-ir   Print generated LLVM IR to stdout
   doc       Generate documentation (file.pr or module name)
   ast       Print the AST
-  exec      Execute inline Promise code
+  exec      Execute inline Promise code (auto-wraps in failable main)
   init      Initialize a new Promise project (creates promise.toml)
   pin       Pin a remote module to a specific commit
   catalog   Catalog operations (list)
@@ -4071,7 +4071,7 @@ func runExec(args []string) {
 		if !strings.HasSuffix(source, ";") && !strings.HasSuffix(source, "}") {
 			source += ";"
 		}
-		source = "main() {\n" + source + "\n}"
+		source = "main() ! {\n" + source + "\n}"
 		wrapped = true
 	}
 

@@ -1,0 +1,77 @@
+// Tests for map[K, Enum] where the enum is from a catalog module (cross-module).
+// Regression test for B0043: cross-module enum layouts must be available during
+// monomorphization of Map methods in the std module.
+use json;
+
+test_forin_cross_module_enum_map() `test {
+  map[string, json.JsonValue] m = {
+    "name": json.JsonValue.Str(value: "Alice"),
+    "age": json.JsonValue.Number(value: 30.0),
+    "nil": json.JsonValue.Null,
+  };
+  int count = 0;
+  for k, v in m {
+    count += 1;
+  }
+  assert(count == 3, "forin count");
+}
+
+test_lookup_cross_module_enum_map() `test {
+  map[string, json.JsonValue] m = {
+    "x": json.JsonValue.Str(value: "hello"),
+  };
+  json.JsonValue v = m["x"]!;
+  json.JsonEncoder enc = json.JsonEncoder();
+  json.encode_value(v, enc)!;
+  assert(enc.to_string() == "\"hello\"", "encoded str");
+}
+
+test_keys_values_cross_module() `test {
+  map[string, json.JsonValue] m = {
+    "a": json.JsonValue.Null,
+    "b": json.JsonValue.Str(value: "hi"),
+  };
+  string[] keys = m.keys();
+  json.JsonValue[] vals = m.values();
+  assert(keys.len == 2, "keys len");
+  assert(vals.len == 2, "vals len");
+}
+
+test_entries_cross_module() `test {
+  map[string, json.JsonValue] m = {
+    "x": json.JsonValue.Number(value: 42.0),
+  };
+  (string, json.JsonValue)[] ents = m.entries();
+  assert(ents.len == 1, "ents len");
+}
+
+test_forin_values_cross_module() `test {
+  map[string, json.JsonValue] m = {
+    "s": json.JsonValue.Str(value: "world"),
+  };
+  for k, v in m {
+    assert(k == "s", "key");
+    json.JsonEncoder enc = json.JsonEncoder();
+    json.encode_value(v, enc)!;
+    assert(enc.to_string() == "\"world\"", "value");
+  }
+}
+
+test_pop_cross_module() `test {
+  map[string, json.JsonValue] m = {
+    "a": json.JsonValue.Bool(value: true),
+  };
+  json.JsonValue? popped = m.pop("a");
+  assert(popped is present, "pop present");
+  assert(m.is_empty, "empty after pop");
+}
+
+test_get_or_cross_module() `test {
+  map[string, json.JsonValue] m = {
+    "a": json.JsonValue.Null,
+  };
+  json.JsonValue v = m.get_or("missing", json.JsonValue.Null);
+  json.JsonEncoder enc = json.JsonEncoder();
+  json.encode_value(v, enc)!;
+  assert(enc.to_string() == "null", "get_or default");
+}

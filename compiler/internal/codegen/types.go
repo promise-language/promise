@@ -415,7 +415,10 @@ func (c *Compiler) resolveType(typ types.Type) irtypes.Type {
 		if layout, ok := c.enumLayouts[enum]; ok {
 			return layout.EnumInternalType
 		}
-		return irtypes.I32
+		// Fallback: compute from definition. Handles cross-module enums whose
+		// layout hasn't been computed yet (e.g. JsonValue from json module used
+		// as Map value type during std module compilation).
+		return computeEnumInternalType(enum, nil, c.ptrSize(), c.enumLayouts, c.monoEnumLayouts)
 	}
 	// User-defined Named types → value struct { vtable, instance }
 	if n := extractNamed(typ); n != nil && classify(n) == CatUnknown {

@@ -458,6 +458,17 @@ func compile(file *ast.File, info *sema.Info, target string, cachedInstances map
 
 	// Compute enum layouts (before user types, so enum fields resolve correctly)
 	c.enumLayouts = make(map[*types.Enum]*TypeDeclLayout)
+	// Pre-compute enum layouts for all imported modules first, so cross-module
+	// enum types (e.g. JsonValue from json used as Map value in std) have their
+	// named LLVM struct types available during monomorphization.
+	if c.info.ModuleInfos != nil {
+		for _, modInfo := range c.info.ModuleInfos {
+			savedInfo := c.info
+			c.info = modInfo.SemaInfo
+			c.computeEnumLayouts(modInfo.File)
+			c.info = savedInfo
+		}
+	}
 	c.computeEnumLayouts(file)
 
 	// Compute user type layouts (after built-in and enum layouts are ready)
@@ -3888,6 +3899,9 @@ func (c *Compiler) computeEnumLayouts(file *ast.File) {
 		}
 		if len(enum.TypeParams()) > 0 {
 			continue
+		}
+		if _, exists := c.enumLayouts[enum]; exists {
+			continue // already computed (e.g., pre-pass in compileModules)
 		}
 		pending[ed.Name] = enum
 		names = append(names, ed.Name)

@@ -20,6 +20,12 @@ type f32 `native `public {
   get pi f32 `public `global => 3.14159265f32;
   get e f32 `public `global => 2.71828183f32;
   get tau f32 `public `global => 6.28318531f32;
+
+  parse(Reader ~r) f32! `factory `public {
+    f64 v = f64.parse(r);
+    return v as! f32;
+  }
+
   to_string() string `public => "{this}";
   format(Writer ~w)! `public {
     w.write_string(this.to_string());

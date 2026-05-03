@@ -264,3 +264,281 @@ test_vector_filled_empty() `test {
   int[] v = Vector[int].filled(0, 0);
   assert(v.len == 0, "empty filled");
 }
+
+// --- char.parse ---
+
+test_char_parse() `test {
+  char c = scan[char]("A")!;
+  assert(c == 'A', "parse A");
+}
+
+test_char_parse_digit() `test {
+  char c = scan[char]("7")!;
+  assert(c == '7', "parse 7");
+}
+
+test_char_parse_space() `test {
+  char c = scan[char](" ")!;
+  assert(c == ' ', "parse space");
+}
+
+_try_parse_char(string s) string {
+  Scanner r = Scanner(s: s);
+  char v = char.parse(r)? e {
+    return e.message;
+  };
+  return "ok";
+}
+
+test_char_parse_empty() `test {
+  string result = _try_parse_char("");
+  assert(result == "unexpected end of input", "empty input");
+}
+
+test_char_parse_from_scanner() `test {
+  Scanner r = Scanner(s: "AB");
+  char c1 = char.parse(r)!;
+  assert(c1 == 'A', "first char");
+  char c2 = char.parse(r)!;
+  assert(c2 == 'B', "second char");
+}
+
+// --- f32.parse ---
+
+test_f32_parse_integer() `test {
+  f32 v = scan[f32]("42")!;
+  assert(v == 42.0f32, "parse 42");
+}
+
+test_f32_parse_decimal() `test {
+  f32 v = scan[f32]("3.14")!;
+  assert(v > 3.13f32 && v < 3.15f32, "parse 3.14");
+}
+
+test_f32_parse_negative() `test {
+  f32 v = scan[f32]("-2.5")!;
+  assert(v == -2.5f32, "parse -2.5");
+}
+
+_try_parse_f32(string s) string {
+  Scanner r = Scanner(s: s);
+  f32 v = f32.parse(r)? e {
+    return e.message;
+  };
+  return "ok";
+}
+
+test_f32_parse_empty() `test {
+  string result = _try_parse_f32("");
+  assert(result == "unexpected end of input", "empty input");
+}
+
+test_f32_parse_non_numeric() `test {
+  string result = _try_parse_f32("abc");
+  assert(result == "expected digit", "non-numeric");
+}
+
+// --- i8.parse ---
+
+test_i8_parse() `test {
+  i8 v = scan[i8]("42")!;
+  assert(v == 42i8, "parse 42");
+}
+
+test_i8_parse_negative() `test {
+  i8 v = scan[i8]("-17")!;
+  assert(v == -17i8, "parse -17");
+}
+
+test_i8_parse_max() `test {
+  i8 v = scan[i8]("127")!;
+  assert(v == 127i8, "parse 127");
+}
+
+test_i8_parse_min() `test {
+  i8 v = scan[i8]("-128")!;
+  assert(v == -128i8, "parse -128");
+}
+
+_try_parse_i8(string s) string {
+  Scanner r = Scanner(s: s);
+  i8 v = i8.parse(r)? e {
+    return e.message;
+  };
+  return "ok";
+}
+
+test_i8_parse_overflow() `test {
+  string result = _try_parse_i8("128");
+  assert(result == "value out of i8 range", "overflow");
+}
+
+test_i8_parse_underflow() `test {
+  string result = _try_parse_i8("-129");
+  assert(result == "value out of i8 range", "underflow");
+}
+
+test_i8_parse_empty() `test {
+  string result = _try_parse_i8("");
+  assert(result == "unexpected end of input", "empty");
+}
+
+// --- i16.parse ---
+
+test_i16_parse() `test {
+  i16 v = scan[i16]("1234")!;
+  assert(v == 1234i16, "parse 1234");
+}
+
+test_i16_parse_negative() `test {
+  i16 v = scan[i16]("-5000")!;
+  assert(v == -5000i16, "parse -5000");
+}
+
+_try_parse_i16(string s) string {
+  Scanner r = Scanner(s: s);
+  i16 v = i16.parse(r)? e {
+    return e.message;
+  };
+  return "ok";
+}
+
+test_i16_parse_overflow() `test {
+  string result = _try_parse_i16("32768");
+  assert(result == "value out of i16 range", "overflow");
+}
+
+// --- i32.parse ---
+
+test_i32_parse() `test {
+  i32 v = scan[i32]("100000")!;
+  assert(v == 100000i32, "parse 100000");
+}
+
+test_i32_parse_negative() `test {
+  i32 v = scan[i32]("-100000")!;
+  assert(v == -100000i32, "parse -100000");
+}
+
+_try_parse_i32(string s) string {
+  Scanner r = Scanner(s: s);
+  i32 v = i32.parse(r)? e {
+    return e.message;
+  };
+  return "ok";
+}
+
+test_i32_parse_overflow() `test {
+  string result = _try_parse_i32("2147483648");
+  assert(result == "value out of i32 range", "overflow");
+}
+
+// --- i64.parse ---
+
+test_i64_parse() `test {
+  i64 v = scan[i64]("123456789")!;
+  assert(v == 123456789i64, "parse 123456789");
+}
+
+test_i64_parse_negative() `test {
+  i64 v = scan[i64]("-99")!;
+  assert(v == -99i64, "parse -99");
+}
+
+_try_parse_i64(string s) string {
+  Scanner r = Scanner(s: s);
+  i64 v = i64.parse(r)? e {
+    return e.message;
+  };
+  return "ok";
+}
+
+test_i64_parse_empty() `test {
+  string result = _try_parse_i64("");
+  assert(result == "unexpected end of input", "empty");
+}
+
+// --- u8.parse ---
+
+test_u8_parse() `test {
+  u8 v = scan[u8]("200")!;
+  assert(v == 200u8, "parse 200");
+}
+
+_try_parse_u8(string s) string {
+  Scanner r = Scanner(s: s);
+  u8 v = u8.parse(r)? e {
+    return e.message;
+  };
+  return "ok";
+}
+
+test_u8_parse_overflow() `test {
+  string result = _try_parse_u8("256");
+  assert(result == "value out of u8 range", "overflow");
+}
+
+test_u8_parse_empty() `test {
+  string result = _try_parse_u8("");
+  assert(result == "unexpected end of input", "empty");
+}
+
+// --- u16.parse ---
+
+test_u16_parse() `test {
+  u16 v = scan[u16]("50000")!;
+  assert(v == 50000u16, "parse 50000");
+}
+
+_try_parse_u16(string s) string {
+  Scanner r = Scanner(s: s);
+  u16 v = u16.parse(r)? e {
+    return e.message;
+  };
+  return "ok";
+}
+
+test_u16_parse_overflow() `test {
+  string result = _try_parse_u16("65536");
+  assert(result == "value out of u16 range", "overflow");
+}
+
+// --- u32.parse ---
+
+test_u32_parse() `test {
+  u32 v = scan[u32]("3000000000")!;
+  assert(v == 3000000000u32, "parse 3000000000");
+}
+
+_try_parse_u32(string s) string {
+  Scanner r = Scanner(s: s);
+  u32 v = u32.parse(r)? e {
+    return e.message;
+  };
+  return "ok";
+}
+
+test_u32_parse_overflow() `test {
+  string result = _try_parse_u32("4294967296");
+  assert(result == "value out of u32 range", "overflow");
+}
+
+// --- u64.parse ---
+
+test_u64_parse() `test {
+  u64 v = scan[u64]("123456789")!;
+  assert(v == 123456789u64, "parse 123456789");
+}
+
+_try_parse_u64(string s) string {
+  Scanner r = Scanner(s: s);
+  u64 v = u64.parse(r)? e {
+    return e.message;
+  };
+  return "ok";
+}
+
+test_u64_parse_empty() `test {
+  string result = _try_parse_u64("");
+  assert(result == "unexpected end of input", "empty");
+}

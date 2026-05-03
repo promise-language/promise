@@ -9,6 +9,15 @@ type char `native `public {
   .. (char end) Range[char] `native;
   ..= (char end) Range[char] `native;
   get hash int `native;
+
+  // TODO: decode UTF-8 sequences (currently reads a single byte, only correct for ASCII)
+  parse(Reader ~r) char! `factory `public {
+    if b := r.read_byte() {
+      return b as! char;
+    }
+    raise error(message: "unexpected end of input");
+  }
+
   to_string() string `public => "{this}";
   format(Writer ~w)! `public {
     w.write_string(this.to_string());

@@ -23,18 +23,18 @@ type uint `native `public {
   .. (uint end) Range[uint] `native;
   ..= (uint end) Range[uint] `native;
   get hash int `native;
-  get max uint `public `global => ~(0 as! uint);
-  get min uint `public `global => 0 as! uint;
+  get max uint `public `global => ~0u;
+  get min uint `public `global => 0u;
 
   parse(Reader ~r) uint! `factory `public {
-    uint result = 0 as! uint;
+    uint result = 0u;
     bool has_digit = false;
 
     while true {
       if byte := r.read_byte() {
         int c = byte as! int;
         if c >= 48 && c <= 57 {
-          result = result * (10 as! uint) + ((c - 48) as! uint);
+          result = result * 10u + ((c - 48) as! uint);
           has_digit = true;
         } else {
           break;
@@ -85,6 +85,15 @@ type u8 `native `public {
   get hash int `native;
   get max u8 `public `global => 255u8;
   get min u8 `public `global => 0u8;
+
+  parse(Reader ~r) u8! `factory `public {
+    uint v = uint.parse(r);
+    if v > 255u {
+      raise error(message: "value out of u8 range");
+    }
+    return v as! u8;
+  }
+
   to_string() string `public => "{this}";
   format(Writer ~w)! `public {
     w.write_string(this.to_string());
@@ -117,6 +126,15 @@ type u16 `native `public {
   get hash int `native;
   get max u16 `public `global => 65535u16;
   get min u16 `public `global => 0u16;
+
+  parse(Reader ~r) u16! `factory `public {
+    uint v = uint.parse(r);
+    if v > 65535u {
+      raise error(message: "value out of u16 range");
+    }
+    return v as! u16;
+  }
+
   to_string() string `public => "{this}";
   format(Writer ~w)! `public {
     w.write_string(this.to_string());
@@ -149,6 +167,15 @@ type u32 `native `public {
   get hash int `native;
   get max u32 `public `global => 4294967295u32;
   get min u32 `public `global => 0u32;
+
+  parse(Reader ~r) u32! `factory `public {
+    uint v = uint.parse(r);
+    if v > 4294967295u {
+      raise error(message: "value out of u32 range");
+    }
+    return v as! u32;
+  }
+
   to_string() string `public => "{this}";
   format(Writer ~w)! `public {
     w.write_string(this.to_string());
@@ -181,6 +208,12 @@ type u64 `native `public {
   get hash int `native;
   get max u64 `public `global => ~0u64;
   get min u64 `public `global => 0u64;
+
+  parse(Reader ~r) u64! `factory `public {
+    uint v = uint.parse(r);
+    return v as! u64;
+  }
+
   to_string() string `public => "{this}";
   format(Writer ~w)! `public {
     w.write_string(this.to_string());

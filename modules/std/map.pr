@@ -1,5 +1,5 @@
 // std/map.pr — Map[K, V] implemented as an open-addressing hash map
-enum Slot[K, V] `public {
+enum Slot[K, V] {
   Empty,
   Tombstone,
   Used(K key, V value),

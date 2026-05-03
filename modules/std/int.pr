@@ -94,6 +94,15 @@ type i8 `native `public {
   get hash int `native;
   get max i8 `public `global => 127i8;
   get min i8 `public `global => -128i8;
+
+  parse(Reader ~r) i8! `factory `public {
+    int v = int.parse(r);
+    if v < -128 || v > 127 {
+      raise error(message: "value out of i8 range");
+    }
+    return v as! i8;
+  }
+
   to_string() string `public => "{this}";
   format(Writer ~w)! `public {
     w.write_string(this.to_string());
@@ -126,6 +135,15 @@ type i16 `native `public {
   get hash int `native;
   get max i16 `public `global => 32767i16;
   get min i16 `public `global => -32768i16;
+
+  parse(Reader ~r) i16! `factory `public {
+    int v = int.parse(r);
+    if v < -32768 || v > 32767 {
+      raise error(message: "value out of i16 range");
+    }
+    return v as! i16;
+  }
+
   to_string() string `public => "{this}";
   format(Writer ~w)! `public {
     w.write_string(this.to_string());
@@ -158,6 +176,15 @@ type i32 `native `public {
   get hash int `native;
   get max i32 `public `global => 2147483647i32;
   get min i32 `public `global => -2147483648i32;
+
+  parse(Reader ~r) i32! `factory `public {
+    int v = int.parse(r);
+    if v < -2147483648 || v > 2147483647 {
+      raise error(message: "value out of i32 range");
+    }
+    return v as! i32;
+  }
+
   to_string() string `public => "{this}";
   format(Writer ~w)! `public {
     w.write_string(this.to_string());
@@ -190,6 +217,12 @@ type i64 `native `public {
   get hash int `native;
   get max i64 `public `global => 9223372036854775807i64;
   get min i64 `public `global => -9223372036854775807i64 - 1i64;
+
+  parse(Reader ~r) i64! `factory `public {
+    int v = int.parse(r);
+    return v as! i64;
+  }
+
   to_string() string `public => "{this}";
   format(Writer ~w)! `public {
     w.write_string(this.to_string());

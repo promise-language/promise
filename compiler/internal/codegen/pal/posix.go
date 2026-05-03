@@ -815,6 +815,261 @@ func (p *PosixPAL) EmitDirClose(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// EmitExecute defines @pal_execute using fork+execvp+pipe+read+waitpid.
+// Signature: @pal_execute(i8* program, i8** argv,
+//
+//	i8** out_stdout, i64* out_stdout_len, i8** out_stderr, i64* out_stderr_len) → i32
+//
+// Returns exit code (0-255) on success, -1 on error.
+// out_stdout/out_stderr are malloc'd buffers — caller must free.
+//
+// Known limitation: stdout and stderr are read sequentially (stdout first).
+// If the child writes more than the OS pipe buffer (~64KB) to stderr while
+// stdout has not been fully consumed, the child will block and deadlock.
+// A future version could use poll/select to read both pipes concurrently.
+func (p *PosixPAL) EmitExecute(module *ir.Module) *ir.Func {
+	palAlloc := lookupFunc(module, "pal_alloc")
+	palRealloc := lookupFunc(module, "pal_realloc")
+	readFn := lookupFunc(module, "read")
+	closeFn := lookupFunc(module, "close")
+
+	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
+	i32PtrType := irtypes.NewPointer(irtypes.I32)
+
+	// declare i32 @pipe(i32*) nounwind
+	pipeFn := module.NewFunc("pipe", irtypes.I32,
+		ir.NewParam("fds", i32PtrType))
+	pipeFn.FuncAttrs = append(pipeFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	// declare i32 @fork() nounwind
+	forkFn := module.NewFunc("fork", irtypes.I32)
+	forkFn.FuncAttrs = append(forkFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	// declare i32 @dup2(i32, i32) nounwind
+	dup2Fn := module.NewFunc("dup2", irtypes.I32,
+		ir.NewParam("oldfd", irtypes.I32),
+		ir.NewParam("newfd", irtypes.I32))
+	dup2Fn.FuncAttrs = append(dup2Fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	// declare i32 @execvp(i8*, i8**) nounwind
+	execvpFn := module.NewFunc("execvp", irtypes.I32,
+		ir.NewParam("file", irtypes.I8Ptr),
+		ir.NewParam("argv", i8PtrPtrType))
+	execvpFn.FuncAttrs = append(execvpFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	// declare i32 @waitpid(i32, i32*, i32) nounwind
+	waitpidFn := module.NewFunc("waitpid", irtypes.I32,
+		ir.NewParam("pid", irtypes.I32),
+		ir.NewParam("status", i32PtrType),
+		ir.NewParam("options", irtypes.I32))
+	waitpidFn.FuncAttrs = append(waitpidFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	// declare void @_exit(i32) noreturn nounwind
+	exitFn := module.NewFunc("_exit", irtypes.Void,
+		ir.NewParam("status", irtypes.I32))
+	exitFn.FuncAttrs = append(exitFn.FuncAttrs, enum.FuncAttrNoReturn, enum.FuncAttrNoUnwind)
+
+	// --- Helper: __pal_read_all(i32 fd, i8** out_buf, i64* out_len) ---
+	// Reads until EOF into a malloc'd buffer. Uses alloca for mutable state.
+	readAllFn := module.NewFunc("__pal_read_all", irtypes.Void,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("out_buf", irtypes.NewPointer(irtypes.I8Ptr)),
+		ir.NewParam("out_len", irtypes.NewPointer(irtypes.I64)))
+	readAllFn.FuncAttrs = append(readAllFn.FuncAttrs, enum.FuncAttrNoUnwind)
+	{
+		entry := readAllFn.NewBlock(".entry")
+		initCap := constant.NewInt(irtypes.I64, 4096)
+		buf := entry.NewCall(palAlloc, initCap)
+		capPtr := entry.NewAlloca(irtypes.I64)
+		entry.NewStore(initCap, capPtr)
+		bufPtr := entry.NewAlloca(irtypes.I8Ptr)
+		entry.NewStore(buf, bufPtr)
+		totalPtr := entry.NewAlloca(irtypes.I64)
+		entry.NewStore(constant.NewInt(irtypes.I64, 0), totalPtr)
+		loopBlk := readAllFn.NewBlock(".loop")
+		entry.NewBr(loopBlk)
+
+		// loop: read into remaining space
+		readOkBlk := readAllFn.NewBlock(".read_ok")
+		growBlk := readAllFn.NewBlock(".grow")
+		doneBlk := readAllFn.NewBlock(".done")
+
+		curCap := loopBlk.NewLoad(irtypes.I64, capPtr)
+		curBuf := loopBlk.NewLoad(irtypes.I8Ptr, bufPtr)
+		curTotal := loopBlk.NewLoad(irtypes.I64, totalPtr)
+		space := loopBlk.NewSub(curCap, curTotal)
+		readPtr := loopBlk.NewGetElementPtr(irtypes.I8, curBuf, curTotal)
+		n := loopBlk.NewCall(readFn, readAllFn.Params[0], readPtr, space)
+		isDone := loopBlk.NewICmp(enum.IPredSLE, n, constant.NewInt(irtypes.I64, 0))
+		loopBlk.NewCondBr(isDone, doneBlk, readOkBlk)
+
+		// read_ok: update total, check if buffer full
+		newTotal := readOkBlk.NewAdd(curTotal, n)
+		readOkBlk.NewStore(newTotal, totalPtr)
+		isFull := readOkBlk.NewICmp(enum.IPredEQ, newTotal, curCap)
+		readOkBlk.NewCondBr(isFull, growBlk, loopBlk)
+
+		// grow: double capacity, realloc
+		newCap := growBlk.NewMul(curCap, constant.NewInt(irtypes.I64, 2))
+		growBlk.NewStore(newCap, capPtr)
+		newBuf := growBlk.NewCall(palRealloc, curBuf, newCap)
+		growBlk.NewStore(newBuf, bufPtr)
+		growBlk.NewBr(loopBlk)
+
+		// done: store results
+		finalBuf := doneBlk.NewLoad(irtypes.I8Ptr, bufPtr)
+		finalTotal := doneBlk.NewLoad(irtypes.I64, totalPtr)
+		doneBlk.NewStore(finalBuf, readAllFn.Params[1])
+		doneBlk.NewStore(finalTotal, readAllFn.Params[2])
+		doneBlk.NewRet(nil)
+	}
+
+	// --- Main: pal_execute ---
+	fn := module.NewFunc("pal_execute", irtypes.I32,
+		ir.NewParam("program", irtypes.I8Ptr),
+		ir.NewParam("argv", i8PtrPtrType),
+		ir.NewParam("out_stdout", irtypes.NewPointer(irtypes.I8Ptr)),
+		ir.NewParam("out_stdout_len", irtypes.NewPointer(irtypes.I64)),
+		ir.NewParam("out_stderr", irtypes.NewPointer(irtypes.I8Ptr)),
+		ir.NewParam("out_stderr_len", irtypes.NewPointer(irtypes.I64)))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	zero32 := constant.NewInt(irtypes.I32, 0)
+	one32 := constant.NewInt(irtypes.I32, 1)
+	two32 := constant.NewInt(irtypes.I32, 2)
+
+	// Helper to store null/0 to all output pointers
+	storeErrorOutputs := func(blk *ir.Block) {
+		blk.NewStore(constant.NewNull(irtypes.I8Ptr), fn.Params[2])
+		blk.NewStore(constant.NewInt(irtypes.I64, 0), fn.Params[3])
+		blk.NewStore(constant.NewNull(irtypes.I8Ptr), fn.Params[4])
+		blk.NewStore(constant.NewInt(irtypes.I64, 0), fn.Params[5])
+	}
+
+	entry := fn.NewBlock(".entry")
+
+	// Allocate pipe fd arrays on stack: [2 x i32] for stdout and stderr
+	stdoutFds := entry.NewAlloca(irtypes.NewArray(2, irtypes.I32))
+	stderrFds := entry.NewAlloca(irtypes.NewArray(2, irtypes.I32))
+	stdoutFdsPtr := entry.NewBitCast(stdoutFds, i32PtrType)
+	stderrFdsPtr := entry.NewBitCast(stderrFds, i32PtrType)
+
+	// pipe(stdout_fds)
+	pipeRet1 := entry.NewCall(pipeFn, stdoutFdsPtr)
+	isPipeErr1 := entry.NewICmp(enum.IPredSLT, pipeRet1, zero32)
+	pipeOk1 := fn.NewBlock(".pipe_ok1")
+	pipe1ErrBlk := fn.NewBlock(".pipe1_err")
+	entry.NewCondBr(isPipeErr1, pipe1ErrBlk, pipeOk1)
+
+	// pipe1 error: no fds to close
+	storeErrorOutputs(pipe1ErrBlk)
+	pipe1ErrBlk.NewRet(constant.NewInt(irtypes.I32, -1))
+
+	// pipe(stderr_fds)
+	pipeRet2 := pipeOk1.NewCall(pipeFn, stderrFdsPtr)
+	isPipeErr2 := pipeOk1.NewICmp(enum.IPredSLT, pipeRet2, zero32)
+	pipeOk2 := fn.NewBlock(".pipe_ok2")
+	pipe2ErrBlk := fn.NewBlock(".pipe2_err")
+	pipeOk1.NewCondBr(isPipeErr2, pipe2ErrBlk, pipeOk2)
+
+	// pipe2 error: close stdout pipe fds
+	stdoutRdPtrErr := pipe2ErrBlk.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdoutFds, zero32, zero32)
+	stdoutWrPtrErr := pipe2ErrBlk.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdoutFds, zero32, one32)
+	pipe2ErrBlk.NewCall(closeFn, pipe2ErrBlk.NewLoad(irtypes.I32, stdoutRdPtrErr))
+	pipe2ErrBlk.NewCall(closeFn, pipe2ErrBlk.NewLoad(irtypes.I32, stdoutWrPtrErr))
+	storeErrorOutputs(pipe2ErrBlk)
+	pipe2ErrBlk.NewRet(constant.NewInt(irtypes.I32, -1))
+
+	// Load pipe fds: stdout_fds[0]=read, stdout_fds[1]=write
+	stdoutReadFdPtr := pipeOk2.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdoutFds, zero32, zero32)
+	stdoutWriteFdPtr := pipeOk2.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stdoutFds, zero32, one32)
+	stderrReadFdPtr := pipeOk2.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stderrFds, zero32, zero32)
+	stderrWriteFdPtr := pipeOk2.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), stderrFds, zero32, one32)
+	stdoutReadFd := pipeOk2.NewLoad(irtypes.I32, stdoutReadFdPtr)
+	stdoutWriteFd := pipeOk2.NewLoad(irtypes.I32, stdoutWriteFdPtr)
+	stderrReadFd := pipeOk2.NewLoad(irtypes.I32, stderrReadFdPtr)
+	stderrWriteFd := pipeOk2.NewLoad(irtypes.I32, stderrWriteFdPtr)
+
+	// fork()
+	pid := pipeOk2.NewCall(forkFn)
+	isChild := pipeOk2.NewICmp(enum.IPredEQ, pid, zero32)
+	childBlk := fn.NewBlock(".child")
+	checkForkErr := fn.NewBlock(".check_fork_err")
+	pipeOk2.NewCondBr(isChild, childBlk, checkForkErr)
+
+	isForkErr := checkForkErr.NewICmp(enum.IPredSLT, pid, zero32)
+	parentBlk := fn.NewBlock(".parent")
+	forkErrBlk := fn.NewBlock(".fork_err")
+	checkForkErr.NewCondBr(isForkErr, forkErrBlk, parentBlk)
+
+	// --- Child process ---
+	// Close read ends, dup2 write ends to stdout/stderr, close originals, execvp
+	childBlk.NewCall(closeFn, stdoutReadFd)
+	childBlk.NewCall(closeFn, stderrReadFd)
+	childBlk.NewCall(dup2Fn, stdoutWriteFd, one32) // stdout_write → fd 1
+	childBlk.NewCall(dup2Fn, stderrWriteFd, two32) // stderr_write → fd 2
+	childBlk.NewCall(closeFn, stdoutWriteFd)
+	childBlk.NewCall(closeFn, stderrWriteFd)
+	childBlk.NewCall(execvpFn, fn.Params[0], fn.Params[1])
+	// execvp only returns on error
+	childBlk.NewCall(exitFn, constant.NewInt(irtypes.I32, 127))
+	childBlk.NewUnreachable()
+
+	// --- Fork error: close all 4 pipe fds ---
+	forkErrBlk.NewCall(closeFn, stdoutReadFd)
+	forkErrBlk.NewCall(closeFn, stdoutWriteFd)
+	forkErrBlk.NewCall(closeFn, stderrReadFd)
+	forkErrBlk.NewCall(closeFn, stderrWriteFd)
+	storeErrorOutputs(forkErrBlk)
+	forkErrBlk.NewRet(constant.NewInt(irtypes.I32, -1))
+
+	// --- Parent process ---
+	// Close write ends
+	parentBlk.NewCall(closeFn, stdoutWriteFd)
+	parentBlk.NewCall(closeFn, stderrWriteFd)
+
+	// Read stdout and stderr via __pal_read_all
+	parentBlk.NewCall(readAllFn, stdoutReadFd, fn.Params[2], fn.Params[3])
+	parentBlk.NewCall(readAllFn, stderrReadFd, fn.Params[4], fn.Params[5])
+
+	// Close read ends
+	parentBlk.NewCall(closeFn, stdoutReadFd)
+	parentBlk.NewCall(closeFn, stderrReadFd)
+
+	// waitpid(pid, &status, 0) — retry on EINTR
+	statusPtr := parentBlk.NewAlloca(irtypes.I32)
+	parentBlk.NewStore(zero32, statusPtr)
+	errnoLocFn := p.getOrDeclareErrnoLocFn(module)
+
+	waitBlk := fn.NewBlock(".waitpid")
+	parentBlk.NewBr(waitBlk)
+
+	wpRet := waitBlk.NewCall(waitpidFn, pid, statusPtr, zero32)
+	wpFailed := waitBlk.NewICmp(enum.IPredSLT, wpRet, zero32)
+	waitOkBlk := fn.NewBlock(".waitpid_ok")
+	waitErrBlk := fn.NewBlock(".waitpid_err")
+	waitBlk.NewCondBr(wpFailed, waitErrBlk, waitOkBlk)
+
+	// waitpid error: retry if EINTR (errno == 4), else return -1
+	errnoPtr := waitErrBlk.NewCall(errnoLocFn)
+	errnoVal := waitErrBlk.NewLoad(irtypes.I32, errnoPtr)
+	isEINTR := waitErrBlk.NewICmp(enum.IPredEQ, errnoVal, constant.NewInt(irtypes.I32, 4))
+	waitFatalBlk := fn.NewBlock(".waitpid_fatal")
+	waitErrBlk.NewCondBr(isEINTR, waitBlk, waitFatalBlk)
+
+	// Fatal waitpid error — return -1 (stdout/stderr buffers already written)
+	waitFatalBlk.NewRet(constant.NewInt(irtypes.I32, -1))
+
+	// waitpid success: extract exit code
+	status := waitOkBlk.NewLoad(irtypes.I32, statusPtr)
+	// WEXITSTATUS(status) = (status >> 8) & 0xFF
+	shifted := waitOkBlk.NewLShr(status, constant.NewInt(irtypes.I32, 8))
+	exitCode := waitOkBlk.NewAnd(shifted, constant.NewInt(irtypes.I32, 0xFF))
+	waitOkBlk.NewRet(exitCode)
+
+	return fn
+}
+
 // EmitGetEnv declares libc @getenv and defines @pal_getenv.
 // Signature: @pal_getenv(i8* name) → i8* (value or null)
 // Returns a pointer to the environment value string, or null if not found.

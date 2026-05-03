@@ -46,7 +46,7 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 | Area | Description | Status | Design Doc |
 |------|-------------|--------|------------|
 | Runtime migration | Move C runtime to codegen LLVM IR / pure Promise | Done (Phases 1-4) | [runtime-architecture.md](runtime-architecture.md) |
-| Platform abstraction | PAL for macOS/Linux/Windows/WASM | Done (Phase 3). Windows W1 done (threading + linker). Phase D PAL done (12 sync file I/O functions). Phase E PAL: OS getenv/getcwd done. | [runtime-architecture.md](runtime-architecture.md), [windows-support.md](windows-support.md), [platform-modules.md](platform-modules.md) |
+| Platform abstraction | PAL for macOS/Linux/Windows/WASM | Done (Phase 3). Windows W1 done (threading + linker). Phase D PAL done (12 sync file I/O functions). Phase E PAL: OS getenv/getcwd/execute done. | [runtime-architecture.md](runtime-architecture.md), [windows-support.md](windows-support.md), [platform-modules.md](platform-modules.md) |
 | 1:1 Threading | `go`/`<-` with OS threads via PAL | Done (Phase 5a) | [runtime-architecture.md](runtime-architecture.md) |
 | Channels | `channel[T]` with buffered/unbuffered send/receive/for-in | Done (Phase 5b) | [runtime-architecture.md](runtime-architecture.md) |
 | M:N Scheduler | LLVM coroutines, GMP model, work stealing | Done (Phase 5c) | [runtime-architecture.md](runtime-architecture.md) |

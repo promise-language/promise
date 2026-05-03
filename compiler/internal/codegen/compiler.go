@@ -184,10 +184,17 @@ type Compiler struct {
 	palErrno        *ir.Func // @pal_errno() → i32
 	palGetEnv       *ir.Func // @pal_getenv(i8* name) → i8* (value or null)
 	palGetCwd       *ir.Func // @pal_getcwd(i8* buf, i64 len) → i8* (buf or null)
+	palExecute      *ir.Func // @pal_execute(i8* program, i8** argv, ...) → i32
 
 	// Command-line argument globals (populated from main's argc/argv)
 	argcGlobal *ir.Global // @__promise_argc (i32)
 	argvGlobal *ir.Global // @__promise_argv (i8**)
+
+	// Execute result TLS globals (cached between _os_execute and _os_execute_stdout/stderr)
+	execStdoutPtr *ir.Global // @__promise_exec_stdout_ptr (TLS, i8*)
+	execStdoutLen *ir.Global // @__promise_exec_stdout_len (TLS, i64)
+	execStderrPtr *ir.Global // @__promise_exec_stderr_ptr (TLS, i8*)
+	execStderrLen *ir.Global // @__promise_exec_stderr_len (TLS, i64)
 
 	// Scheduler globals (Phase 5c — M:N scheduler)
 	currentGGlobal     *ir.Global // @__promise_current_g (TLS, i8*)
@@ -967,10 +974,27 @@ func (c *Compiler) declareIntrinsics() {
 	c.palDirClose = p.EmitDirClose(c.module)
 	c.palGetEnv = p.EmitGetEnv(c.module)
 	c.palGetCwd = p.EmitGetCwd(c.module)
+	c.palExecute = p.EmitExecute(c.module)
 
 	// Command-line argument globals — populated from main's argc/argv
 	c.argcGlobal = c.module.NewGlobalDef("__promise_argc", constant.NewInt(irtypes.I32, 0))
 	c.argvGlobal = c.module.NewGlobalDef("__promise_argv", constant.NewNull(irtypes.NewPointer(irtypes.I8Ptr)))
+
+	// Execute result TLS globals — cached between _os_execute and _os_execute_stdout/stderr
+	c.execStdoutPtr = c.module.NewGlobal("__promise_exec_stdout_ptr", irtypes.I8Ptr)
+	c.execStdoutPtr.Init = constant.NewNull(irtypes.I8Ptr)
+	c.execStdoutLen = c.module.NewGlobal("__promise_exec_stdout_len", irtypes.I64)
+	c.execStdoutLen.Init = constant.NewInt(irtypes.I64, 0)
+	c.execStderrPtr = c.module.NewGlobal("__promise_exec_stderr_ptr", irtypes.I8Ptr)
+	c.execStderrPtr.Init = constant.NewNull(irtypes.I8Ptr)
+	c.execStderrLen = c.module.NewGlobal("__promise_exec_stderr_len", irtypes.I64)
+	c.execStderrLen.Init = constant.NewInt(irtypes.I64, 0)
+	if !c.isWasm {
+		c.execStdoutPtr.TLSModel = enum.TLSModelGeneric
+		c.execStdoutLen.TLSModel = enum.TLSModelGeneric
+		c.execStderrPtr.TLSModel = enum.TLSModelGeneric
+		c.execStderrLen.TLSModel = enum.TLSModelGeneric
+	}
 
 	// strlen — needed by definePanicBody to get C string length.
 	// May already be declared by PAL (e.g., Windows EmitDirOpen), so check first.

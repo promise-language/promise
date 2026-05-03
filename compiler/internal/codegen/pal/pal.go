@@ -86,6 +86,13 @@ type PAL interface {
 	// EmitGetCwd defines @pal_getcwd(i8* buf, i64 len) → i8* (buf or null)
 	EmitGetCwd(module *ir.Module) *ir.Func
 
+	// Process execution primitives
+	// EmitExecute defines @pal_execute(i8* program, i8** argv,
+	//   i8** out_stdout, i64* out_stdout_len, i8** out_stderr, i64* out_stderr_len) → i32
+	// Returns exit code (0-255) on success, -1 on error.
+	// out_stdout/out_stderr are malloc'd buffers — caller must free.
+	EmitExecute(module *ir.Module) *ir.Func
+
 	// Directory listing primitives (Phase D)
 	// EmitDirOpen defines @pal_dir_open(i8* path) → i8* (DIR*/handle or null)
 	EmitDirOpen(module *ir.Module) *ir.Func
@@ -483,6 +490,29 @@ func emitStubDirClose(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	entry.NewRet(nil)
+	return fn
+}
+
+// --- Stub process execution implementations (used by WASM and Windows PALs) ---
+
+// emitStubExecute returns -1 (no process execution support).
+// Sets out pointers to null/0.
+func emitStubExecute(module *ir.Module) *ir.Func {
+	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
+	fn := module.NewFunc("pal_execute", irtypes.I32,
+		ir.NewParam("program", irtypes.I8Ptr),
+		ir.NewParam("argv", i8PtrPtrType),
+		ir.NewParam("out_stdout", irtypes.NewPointer(irtypes.I8Ptr)),
+		ir.NewParam("out_stdout_len", irtypes.NewPointer(irtypes.I64)),
+		ir.NewParam("out_stderr", irtypes.NewPointer(irtypes.I8Ptr)),
+		ir.NewParam("out_stderr_len", irtypes.NewPointer(irtypes.I64)))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewStore(constant.NewNull(irtypes.I8Ptr), fn.Params[2])
+	entry.NewStore(constant.NewInt(irtypes.I64, 0), fn.Params[3])
+	entry.NewStore(constant.NewNull(irtypes.I8Ptr), fn.Params[4])
+	entry.NewStore(constant.NewInt(irtypes.I64, 0), fn.Params[5])
+	entry.NewRet(constant.NewInt(irtypes.I32, -1))
 	return fn
 }
 

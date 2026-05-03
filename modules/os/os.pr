@@ -16,10 +16,27 @@ _os_arguments() string[] `extern("promise_os_get_args");
 // Returns the path to the running executable (argv[0]).
 _os_executable_path() string `extern("promise_os_get_executable");
 
+// Executes a program, caches stdout/stderr in TLS, returns exit code or raises error.
+_os_execute(string program, string[] arguments) int! `extern("promise_os_execute");
+
+// Returns cached stdout from the last _os_execute call.
+_os_execute_stdout() string `extern("promise_os_execute_stdout");
+
+// Returns cached stderr from the last _os_execute call.
+_os_execute_stderr() string `extern("promise_os_execute_stderr");
+
 // ── Error type ───────────────────────────────────────────────────────────────
 
 type OsError is error `public `doc("An operating system error.") {
   int code;
+}
+
+// ── Result types ─────────────────────────────────────────────────────────────
+
+type ProcessResult `public `doc("The result of executing a subprocess. Contains the exit code and captured standard output and standard error.") {
+  int exit_code;
+  string standard_output;
+  string standard_error;
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -43,4 +60,11 @@ get arguments string[] `public `doc("Returns the command-line arguments passed t
 
 get executable_path string `public `doc("Returns the path to the running executable as provided by the operating system (argv[0]). Returns an empty string on platforms without command-line arguments.") {
   return _os_executable_path();
+}
+
+execute(string program, string[] arguments) ProcessResult! `public `doc("Executes a program with the given arguments and waits for it to complete. Returns a ProcessResult containing the exit code and captured standard output and standard error. Raises an error if the process could not be started. The program is searched using the system PATH. If the program is not found, the child process exits with code 127. Note: stdout and stderr are read sequentially; if the child writes more than ~64KB to stderr while stdout is not fully consumed, a deadlock may occur.") {
+  int exit_code = _os_execute(program, arguments)!;
+  string stdout = _os_execute_stdout();
+  string stderr = _os_execute_stderr();
+  return ProcessResult(exit_code: exit_code, standard_output: stdout, standard_error: stderr);
 }

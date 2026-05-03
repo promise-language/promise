@@ -692,8 +692,8 @@ to the browser event loop, and JS callbacks re-enqueue goroutines when IO comple
 
 ## 8. `modules/os` — Operating System Interface
 
-**Status**: Core implemented (`get_environment_variable`, `working_directory`, `exit_process`,
-`arguments`, `executable_path`). Remaining: `execute`, `set_environment_variable`,
+**Status**: Core + execute implemented (`get_environment_variable`, `working_directory`, `exit_process`,
+`arguments`, `executable_path`, `execute`). Remaining: `set_environment_variable`,
 `set_working_directory`, signal handling.
 
 Applying §6 principles: `arguments`, `executable_path`, and `working_directory` are module-level
@@ -731,17 +731,21 @@ get executable_path string `public
     `doc("Returns the path to the running executable as provided by the
           operating system (argv[0]).");
 
-// --- Planned: subprocess execution ---
+// --- Subprocess execution (implemented) ---
 
-type ProcessResult `public `doc("The result of a subprocess execution.") {
+type ProcessResult `public `doc("The result of executing a subprocess.
+      Contains the exit code and captured standard output and standard error.") {
     int exit_code;
-    string stdout;
-    string stderr;
+    string standard_output;
+    string standard_error;
 }
 
 execute(string program, string[] arguments) ProcessResult! `public
-    `doc("Runs a subprocess, waits for it to exit, and captures its output.
-          Raises an error if the process could not be started.");
+    `doc("Executes a program with the given arguments and waits for it to complete.
+          Returns a ProcessResult containing the exit code and captured standard
+          output and standard error. Raises an error if the process could not be
+          started. The program is searched using the system PATH. If the program
+          is not found, the child process exits with code 127.");
 
 // --- Planned: environment mutation ---
 
@@ -793,11 +797,23 @@ build the return values. `arguments` skips `argv[0]` (program name) and returns 
 as a `Vector[string]`. `executable_path` returns `argv[0]` as a string.
 On WASM, `_start` passes `argc=0, argv=null` — both getters return empty results.
 
+**`execute()` implementation**: Three-layer architecture — PAL (raw OS calls) → Bridge (type
+conversion in `os_bridges.go`) → Promise wrapper (constructs `ProcessResult`). Uses a three-extern
++ TLS caching pattern to avoid constructing user types in LLVM IR: `_os_execute(program, arguments)`
+calls `pal_execute` (POSIX: `fork` + `execvp` + `pipe` + `read` + `waitpid`), caches stdout/stderr
+buffers in TLS globals, and returns `int!`. The two helper externs `_os_execute_stdout()` and
+`_os_execute_stderr()` consume the cached TLS data and return `string`. The Promise-level
+`execute()` calls all three and constructs `ProcessResult` in pure Promise code. POSIX waitpid
+retries on EINTR. If the program is not found, the child `_exit(127)`. Known v1 limitation:
+stdout and stderr are read sequentially — deadlock possible if child writes >64KB to stderr
+while stdout is not fully consumed.
+
 **PAL functions** (POSIX/Windows/WASM):
 ```
 pal_getenv(i8* name) i8*               // pointer to value or null
 pal_getcwd(i8* buf, i64 len) i8*       // fills buf, returns pointer or null on error
-pal_exec_wait(i8** argv) {i32, i8*, i8*}  // captures stdout/stderr as strings (planned)
+pal_execute(i8* prog, i8** argv, i8** out_stdout, i64* out_stdout_len, i8** out_stderr, i64* out_stderr_len) i32
+                                           // fork+execvp+pipe+waitpid; returns exit code or -1
 ```
 
 ---
@@ -877,7 +893,7 @@ modules/
   math/           — lerp, map_range, deg_to_rad, sign_f64            (DONE)
   strings/        — join, spaces, reverse, ...                        (DONE)
   io/             — File, Dir, IoError, read_line, read_stdin          (DONE)
-  os/             — arguments, get_env, get_cwd, exit, execute, OsError (PLACEHOLDER)
+  os/             — arguments, get_env, get_cwd, exit, execute, OsError     (DONE)
   time/           — DateTime, unix_now, format/parse calendar ops     (PLACEHOLDER)
   http/           — HTTP server/client                                 (PLACEHOLDER)
 ```
@@ -985,7 +1001,7 @@ First real use of `` `target `` in production code. Platform constants consolida
 
 14. ~~**Args capture in `main` prologue**~~ — **Done.** `main(argc, argv)` stores to `@__promise_argc`/`@__promise_argv` globals. WASM `_start` passes 0/null.
 15. ~~**`modules/os` core**~~ — **Done.** `get_environment_variable` (string?), `get_working_directory` (string!), `exit_process`, `arguments` (string[]), `executable_path` (string). Failable and optional extern bridge infrastructure. PAL getenv/getcwd for POSIX/Windows/WASM. 11 tests (excluded on WASM).
-16. **`execute`** — synchronous subprocess execution via `posix_spawn`/`CreateProcess`. Returns `ProcessResult!` with exit code + captured stdout/stderr. PAL: POSIX `posix_spawn` + `waitpid` + pipe reads; Windows `CreateProcessW`; WASM stub returns error.
+16. ~~**`execute`**~~ — **Done.** Synchronous subprocess execution. Returns `ProcessResult!` with exit code + captured stdout/stderr. Three-extern + TLS caching pattern: `_os_execute` returns `int!` and caches stdout/stderr in TLS globals; `_os_execute_stdout`/`_os_execute_stderr` consume cached data. PAL: POSIX `fork` + `execvp` + `pipe` + `read` + `waitpid` (with EINTR retry); Windows/WASM stubs return -1. `ProcessResult` wrapper constructed in pure Promise. 23 tests (excluded on WASM). Known limitation: stdout/stderr read sequentially (deadlock possible if child writes >64KB to stderr while stdout not consumed).
 17. **`set_environment_variable(name, value?)`** — `string?` value: present sets, absent unsets. PAL: POSIX `setenv`/`unsetenv`; Windows `_putenv_s`/`_putenv`; WASM stub.
 18. **`set_working_directory`** — PAL: POSIX `chdir`; Windows `_chdir`; WASM stub returns error.
 19. **Signal handling** — `on_signal(Signal, () handler)`. PAL: POSIX `sigaction`; Windows `SetConsoleCtrlHandler`; WASM no-op.

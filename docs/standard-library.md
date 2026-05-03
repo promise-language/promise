@@ -52,11 +52,11 @@ The stdlib today (29 files, ~2,440 lines) provides:
 | `strings` | `modules/strings/strings.pr` | 65 | **Done** — `join`, `spaces`, `reverse`, `is_blank`, `repeat_join`. 10 tests. |
 | `math` | `modules/math/math.pr` | 67 | **Done** — `lerp`, `map_range`, `deg_to_rad`, `rad_to_deg`, `sign`, `sign_f64`, `is_even`, `is_odd`, `gcd`, `lcm`. 26 tests. |
 | `json` | `modules/json/json.pr` | ~600 | **Done** — `JsonEncoder` (is Encoder), `JsonDecoder` (is Decoder), `encode_string`, `decode_string`, `encode_string_pretty`. 61 tests. |
-| `os` | `modules/os/os.pr` | 4 | **Placeholder** — planned: args, env, exit, getenv, getcwd, hostname |
+| `os` | `modules/os/os.pr` | 4 | **Done** — get_environment_variable, get_working_directory, exit_process, arguments, executable_path, execute |
 | `time` | `modules/time/time.pr` | 4 | **Placeholder** — planned: extended time utilities beyond `std/time.pr` |
 | `http` | `modules/http/http.pr` | 4 | **Placeholder** — planned: get, post, Request, Response, Server, Handler |
 
-**What's missing**: OS access (args, env, cwd), process execution, networking, HTTP.
+**What's missing**: Networking, HTTP. OS access (args, env, cwd, execute) is done.
 
 ### Naming Conventions
 
@@ -454,11 +454,14 @@ EmitSleep(module *ir.Module) *ir.Func       // i64 nanoseconds → void
 
 Note: `promise_nanotime` already exists as a hardcoded function in `io.go:defineNanotimeFunc()` using `clock_gettime(CLOCK_MONOTONIC)`. This should be migrated to a proper PAL method for portability. `EmitWallClock` uses `CLOCK_REALTIME`. `EmitSleep` uses `nanosleep(2)`.
 
-### 3.4 Process Execution
+### 3.4 Process Execution — DONE
 
 ```go
-EmitProcessExec(module *ir.Module) *ir.Func // i8* path, i8** argv, i8** envp → i32 (pid or -1)
-EmitProcessWait(module *ir.Module) *ir.Func // i32 pid → i32 (exit code)
+EmitExecute(module *ir.Module) *ir.Func
+// i8* program, i8** argv, i8** out_stdout, i64* out_stdout_len,
+// i8** out_stderr, i64* out_stderr_len → i32 (exit code or -1)
+// POSIX: fork + execvp + pipe + read + waitpid (EINTR retry)
+// Windows/WASM: stub returning -1
 ```
 
 ### 3.5 Math (No PAL Needed)
@@ -495,12 +498,11 @@ EmitMemcpy(module *ir.Module) *ir.Func      // i8* dst, i8* src, i64 len → voi
 | Category | New Methods | POSIX Backing |
 |----------|-------------|---------------|
 | File I/O | 12 (done) | `open`, `read`, `write`, `close`, `seek`, `stat_size`, `remove`, `exists`, `mkdir`, `dir_remove`, `dir_exists`, `errno` |
-| OS | 2 | `getenv`, `getcwd` |
+| OS | 3 (done) | `getenv`, `getcwd`, `execute` (`fork`+`execvp`+`pipe`+`read`+`waitpid`) |
 | Time | 3 | `clock_gettime` (×2), `nanosleep` |
-| Process | 2 | `posix_spawn` or `fork`+`exec`, `waitpid` |
 | Math | 0 | LLVM intrinsics |
 | String | 1 | `memcpy` |
-| **Total** | **14** | |
+| **Total** | **15** | |
 
 ---
 
@@ -856,35 +858,29 @@ normalize(string path) string;
 - **Implementation**: Pure Promise string manipulation. Uses `/` as separator (POSIX-first; Windows support deferred).
 - **Test**: `modules/path/path_test.pr` (13 tests), `tests/catalog/path_test.pr`
 
-#### 4d. `modules/os/os.pr` — OS Interaction — PLACEHOLDER
-
-Currently a 4-line placeholder file. Planned API:
+#### 4d. `modules/os/os.pr` — OS Interaction — DONE
 
 ```promise
-// Environment
-get_env(string name) string?;
-get_cwd() string!;
+type OsError is error `public { int code; }
 
-// Command-line arguments (populated at program start)
-os_args() string[];
-
-// Process exit
-exit(int code);
-
-// Basic process execution
-type ProcessResult {
+type ProcessResult `public {
     int exit_code;
-    string stdout;
-    string stderr;
+    string standard_output;
+    string standard_error;
 }
 
-exec(string program, string[] args) ProcessResult!;
+get_environment_variable(string name) string?;
+get_working_directory() string!;
+exit_process(int code);
+arguments() string[];
+executable_path() string;
+execute(string program, string[] arguments) ProcessResult!;
 ```
 
 - **File**: `modules/os/os.pr` (separate `os` module, not part of `std`)
-- **Dependencies**: PAL OS (3.2), PAL process (3.4), Error type (Phase 0a)
-- **Native codegen**: `get_env` → PAL `EmitGetEnv`, `os_args` → global captured in main, `exec` → PAL `EmitProcessExec` + `EmitProcessWait`
-- **Blocks**: Requires PAL extensions 3.2 (OS/Environment) and 3.4 (Process Execution)
+- **Dependencies**: PAL OS (getenv, getcwd, exit, execute), argc/argv globals from main prologue
+- **Native codegen**: Extern bridge pattern in `os_bridges.go` — Promise declares `_os_func() T \`extern("promise_os_func");`, codegen provides LLVM IR body bridging Promise types ↔ PAL. `execute` uses three-extern + TLS caching pattern (see `platform-modules.md`).
+- **Test**: `modules/os/os_test.pr` (23 tests, excluded on WASM)
 
 #### 4e. Standard Input — DONE (merged into `modules/io/io.pr`)
 
@@ -1178,7 +1174,7 @@ bin/test.sh                            # rebuild + all tests pass (including new
 | 4a | `modules/std/io.pr` | Promise | No | 59 | **DONE** |
 | 4b | `modules/io/io.pr` | Promise + Native | 12 | 501 | **DONE** |
 | 4c | `modules/path/path.pr` | Promise | No | 192 | **DONE** |
-| 4d | `modules/os/os.pr` | Promise + Native | 2 | 4 | Placeholder |
+| 4d | `modules/os/os.pr` | Promise + Native | 2 | 69 | **DONE** |
 | 4e | (merged into 4b) | — | — | — | **DONE** |
 | — | `modules/std/platform.pr` | Promise | No | 33 | **DONE** |
 | 5a | `modules/json/json.pr` | Promise | No | ~300 | Future |
@@ -1186,5 +1182,5 @@ bin/test.sh                            # rebuild + all tests pass (including new
 | 5c | `modules/net/net.pr` | Promise + Native | 6+ | ~150 | Future |
 | 5d | `modules/http/http.pr` | Promise | No | ~200 | Future |
 | 5e | `modules/crypto/crypto.pr` | Promise | No | ~150 | Future |
-| | **Phases 0-4 (actual)** | | **12** | **~2,990** | **18/20 done** |
-| | **Total (all phases)** | | **18+** | **~4,190** | |
+| | **Phases 0-4 (actual)** | | **12** | **~3,055** | **19/20 done** |
+| | **Total (all phases)** | | **18+** | **~4,255** | |

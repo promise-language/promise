@@ -88,3 +88,146 @@ test_executable_path_is_stable() `test(exclude: "wasm32") {
   string exe2 = executable_path;
   assert(exe1 == exe2, "reading executable_path twice should return the same value");
 }
+
+// ── execute tests ────────────────────────────────────────────────────────────
+
+test_execute_echo() `test(exclude: "wasm32") {
+  ProcessResult result = execute("echo", ["hello"])!;
+  assert(result.exit_code == 0, "echo should exit with 0");
+  assert(result.standard_output.starts_with("hello"), "stdout should contain hello");
+}
+
+test_execute_exit_code() `test(exclude: "wasm32") {
+  ProcessResult result = execute("false", [])!;
+  assert(result.exit_code != 0, "false should exit with non-zero");
+}
+
+test_execute_true() `test(exclude: "wasm32") {
+  ProcessResult result = execute("true", [])!;
+  assert(result.exit_code == 0, "true should exit with 0");
+  assert(result.standard_output.len == 0, "true should produce no stdout");
+  assert(result.standard_error.len == 0, "true should produce no stderr");
+}
+
+test_execute_captures_stdout() `test(exclude: "wasm32") {
+  ProcessResult result = execute("printf", ["one two three"])!;
+  assert(result.standard_output == "one two three", "stdout should match printf output");
+}
+
+test_execute_captures_stderr() `test(exclude: "wasm32") {
+  // sh -c 'echo err >&2' writes to stderr
+  ProcessResult result = execute("sh", ["-c", "echo err >&2"])!;
+  assert(result.exit_code == 0, "sh should exit with 0");
+  assert(result.standard_error.starts_with("err"), "stderr should contain err");
+}
+
+test_execute_multiple_arguments() `test(exclude: "wasm32") {
+  ProcessResult result = execute("echo", ["a", "b", "c"])!;
+  assert(result.standard_output.starts_with("a b c"), "echo should join arguments with spaces");
+}
+
+test_execute_empty_arguments() `test(exclude: "wasm32") {
+  ProcessResult result = execute("echo", [])!;
+  assert(result.exit_code == 0, "echo with no args should succeed");
+}
+
+test_execute_process_result_fields() `test(exclude: "wasm32") {
+  ProcessResult result = execute("echo", ["test"])!;
+  // Verify all fields are accessible
+  int code = result.exit_code;
+  string out = result.standard_output;
+  string err = result.standard_error;
+  assert(code == 0, "exit code should be 0");
+  assert(out.len > 0, "stdout should be non-empty");
+}
+
+test_execute_nonexistent_program() `test(exclude: "wasm32") {
+  // A program that does not exist should still return a ProcessResult
+  // with exit code 127 (the execvp-failure convention).
+  ProcessResult result = execute("__promise_no_such_program__", [])!;
+  assert(result.exit_code == 127, "nonexistent program should exit with 127");
+}
+
+test_execute_arguments_with_spaces() `test(exclude: "wasm32") {
+  // Verify arguments containing spaces are passed through correctly
+  ProcessResult result = execute("printf", ["%s|%s", "hello world", "foo bar"])!;
+  assert(result.exit_code == 0, "printf should exit with 0");
+  assert(result.standard_output == "hello world|foo bar", "arguments with spaces should be preserved");
+}
+
+test_execute_specific_exit_code() `test(exclude: "wasm32") {
+  ProcessResult result = execute("sh", ["-c", "exit 42"])!;
+  assert(result.exit_code == 42, "should capture exact exit code 42");
+}
+
+test_execute_stdout_and_stderr_together() `test(exclude: "wasm32") {
+  // Command that writes to both stdout and stderr
+  ProcessResult result = execute("sh", ["-c", "echo out; echo err >&2"])!;
+  assert(result.exit_code == 0, "should exit with 0");
+  assert(result.standard_output.starts_with("out"), "stdout should contain out");
+  assert(result.standard_error.starts_with("err"), "stderr should contain err");
+}
+
+test_execute_multiline_stdout() `test(exclude: "wasm32") {
+  ProcessResult result = execute("printf", ["line1\nline2\nline3"])!;
+  assert(result.exit_code == 0, "printf should exit with 0");
+  assert(result.standard_output == "line1\nline2\nline3", "multiline output should be preserved");
+}
+
+test_execute_large_output() `test(exclude: "wasm32") {
+  // Generate >4096 bytes to exercise the realloc growth path in __pal_read_all.
+  // seq 1 1000 produces ~3893 bytes; seq 1 2000 produces ~8893 bytes.
+  ProcessResult result = execute("sh", ["-c", "seq 1 2000"])!;
+  assert(result.exit_code == 0, "seq should exit with 0");
+  assert(result.standard_output.len > 4096, "output should exceed initial 4096-byte buffer");
+  assert(result.standard_output.starts_with("1\n2\n3\n"), "output should start with first numbers");
+  assert(result.standard_output.ends_with("2000\n"), "output should end with last number");
+}
+
+test_execute_empty_string_arguments() `test(exclude: "wasm32") {
+  // Empty strings should be passed as distinct argv entries
+  ProcessResult result = execute("printf", ["%s|%s|%s", "", "mid", ""])!;
+  assert(result.exit_code == 0, "printf should exit with 0");
+  assert(result.standard_output == "|mid|", "empty string args should produce empty segments");
+}
+
+test_execute_special_characters() `test(exclude: "wasm32") {
+  // Tabs, quotes, and backslashes in arguments
+  ProcessResult result = execute("printf", ["%s", "tab\there \"quote\" back\\slash"])!;
+  assert(result.exit_code == 0, "printf should exit with 0");
+  assert(result.standard_output.contains("\t"), "tab should be preserved");
+  assert(result.standard_output.contains("\""), "quotes should be preserved");
+  assert(result.standard_output.contains("\\"), "backslash should be preserved");
+}
+
+test_execute_sequential_calls() `test(exclude: "wasm32") {
+  // Verify TLS globals are properly reset between sequential execute calls
+  ProcessResult r1 = execute("printf", ["first"])!;
+  assert(r1.standard_output == "first", "first call stdout should be 'first'");
+
+  ProcessResult r2 = execute("printf", ["second"])!;
+  assert(r2.standard_output == "second", "second call stdout should be 'second'");
+
+  ProcessResult r3 = execute("true", [])!;
+  assert(r3.standard_output.len == 0, "third call stdout should be empty");
+}
+
+test_execute_fail_with_stderr() `test(exclude: "wasm32") {
+  // Command that writes to stderr and exits non-zero
+  ProcessResult result = execute("sh", ["-c", "echo failure >&2; exit 1"])!;
+  assert(result.exit_code == 1, "should exit with 1");
+  assert(result.standard_error.starts_with("failure"), "stderr should contain failure message");
+}
+
+test_execute_exact_echo_output() `test(exclude: "wasm32") {
+  // echo appends a trailing newline — verify exact output
+  ProcessResult result = execute("echo", ["hello"])!;
+  assert(result.standard_output == "hello\n", "echo output should be exactly 'hello\\n'");
+}
+
+test_execute_many_arguments() `test(exclude: "wasm32") {
+  // Stress the argv construction with many arguments
+  ProcessResult result = execute("echo", ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"])!;
+  assert(result.exit_code == 0, "echo should exit with 0");
+  assert(result.standard_output.starts_with("a b c d e f g h i j"), "all 10 arguments should be passed");
+}

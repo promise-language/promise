@@ -5,6 +5,7 @@ import (
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
+	"github.com/llir/llvm/ir/value"
 
 	"djabi.dev/go/promise_lang/internal/types"
 )
@@ -36,6 +37,15 @@ func (c *Compiler) defineOSBodies() {
 	}
 	if fn, ok := irFuncByName["promise_os_get_executable"]; ok {
 		c.defineExecutableBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_os_execute"]; ok {
+		c.defineExecuteBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_os_execute_stdout"]; ok {
+		c.defineExecuteStdoutBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_os_execute_stderr"]; ok {
+		c.defineExecuteStderrBody(fn)
 	}
 }
 
@@ -209,6 +219,19 @@ func (c *Compiler) defineArgsBody(fn *ir.Func) {
 	doneBlk.NewRet(rawSlice)
 }
 
+// stringInstanceToCStr creates a null-terminated C string from a Promise string instance pointer.
+// Unlike stringToCStr which takes a value struct pointer, this takes the raw instance i8*.
+// Allocates via palAlloc — caller must free with palFree after use.
+func (c *Compiler) stringInstanceToCStr(block *ir.Block, instRaw value.Value) value.Value {
+	dataPtr, dataLen := c.extractStringDataLenFromInstance(block, instRaw)
+	allocSize := block.NewAdd(dataLen, constant.NewInt(irtypes.I64, 1))
+	cstr := block.NewCall(c.palAlloc, allocSize)
+	block.NewCall(c.funcs["llvm.memcpy"], cstr, dataPtr, dataLen, constant.False)
+	nullPos := block.NewGetElementPtr(irtypes.I8, cstr, dataLen)
+	block.NewStore(constant.NewInt(irtypes.I8, 0), nullPos)
+	return cstr
+}
+
 // defineExecutableBody: void @promise_os_get_executable(i8* sret)
 // Returns string from argv[0] (the program name / executable path).
 // Reads from __promise_argv global. Returns empty string if argv is null.
@@ -241,4 +264,203 @@ func (c *Compiler) defineExecutableBody(fn *ir.Func) {
 		constant.NewNull(irtypes.I8Ptr), constant.NewInt(irtypes.I64, 0))
 	c.storeStringResult(noArgv, sret, emptyStr)
 	noArgv.NewRet(nil)
+}
+
+// defineExecuteBody: void @promise_os_execute(i8* sret, i8* program, i8* arguments)
+// Converts program string and arguments vector to C argv, calls pal_execute,
+// caches stdout/stderr in TLS globals, returns int! (failable int).
+func (c *Compiler) defineExecuteBody(fn *ir.Func) {
+	zero32 := constant.NewInt(irtypes.I32, 0)
+	zero64 := constant.NewInt(irtypes.I64, 0)
+	one64 := constant.NewInt(irtypes.I64, 1)
+	ptrSize := constant.NewInt(irtypes.I64, int64(c.ptrSize()))
+	headerSize := constant.NewInt(irtypes.I64, vectorHeaderSize)
+	vectorHdrType := vectorHeaderType()
+	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
+
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+	programParam := fn.Params[1]
+	argsParam := fn.Params[2] // string[] vector pointer (i8*)
+
+	// Compute failable result type: {i1, intValueType, i8*} for int!
+	innerType := c.resolveType(types.TypInt)
+	resultType := computeResultType(innerType)
+
+	// Convert program string to C string
+	programCStr := c.stringToCStr(entry, programParam)
+
+	// Load vector length from header
+	hdrPtr := entry.NewBitCast(argsParam, irtypes.NewPointer(vectorHdrType))
+	lenField := entry.NewGetElementPtr(vectorHdrType, hdrPtr, zero32, zero32)
+	argsCount := entry.NewLoad(irtypes.I64, lenField)
+
+	// Allocate argv array: (1 + argsCount + 1) * ptrSize
+	// argv[0] = program, argv[1..N] = args, argv[N+1] = null
+	totalSlots := entry.NewAdd(argsCount, constant.NewInt(irtypes.I64, 2))
+	argvSize := entry.NewMul(totalSlots, ptrSize)
+	argvRaw := entry.NewCall(c.palAlloc, argvSize)
+	argv := entry.NewBitCast(argvRaw, i8PtrPtrType)
+
+	// argv[0] = program C string
+	argv0Ptr := entry.NewGetElementPtr(irtypes.I8Ptr, argv, zero64)
+	entry.NewStore(programCStr, argv0Ptr)
+
+	// Loop: convert each vector element to C string and store in argv
+	hasArgs := entry.NewICmp(enum.IPredSGT, argsCount, zero64)
+	loopHdr := fn.NewBlock(".argv_loop_hdr")
+	loopDone := fn.NewBlock(".argv_loop_done")
+	entry.NewCondBr(hasArgs, loopHdr, loopDone)
+
+	loopBody := fn.NewBlock(".argv_loop_body")
+	iPhi := loopHdr.NewPhi(ir.NewIncoming(zero64, entry))
+	cond := loopHdr.NewICmp(enum.IPredSLT, iPhi, argsCount)
+	loopHdr.NewCondBr(cond, loopBody, loopDone)
+
+	// Load string instance pointer from vector at offset headerSize + i * ptrSize
+	elemOff := loopBody.NewMul(iPhi, ptrSize)
+	elemOff2 := loopBody.NewAdd(headerSize, elemOff)
+	elemPtr := loopBody.NewGetElementPtr(irtypes.I8, argsParam, elemOff2)
+	elemPtrTyped := loopBody.NewBitCast(elemPtr, irtypes.NewPointer(irtypes.I8Ptr))
+	strInst := loopBody.NewLoad(irtypes.I8Ptr, elemPtrTyped)
+
+	// Convert string instance to C string
+	argCStr := c.stringInstanceToCStr(loopBody, strInst)
+
+	// Store at argv[i+1]
+	argIdx := loopBody.NewAdd(iPhi, one64)
+	argvSlotPtr := loopBody.NewGetElementPtr(irtypes.I8Ptr, argv, argIdx)
+	loopBody.NewStore(argCStr, argvSlotPtr)
+
+	iNext := loopBody.NewAdd(iPhi, one64)
+	iPhi.Incs = append(iPhi.Incs, ir.NewIncoming(iNext, loopBody))
+	loopBody.NewBr(loopHdr)
+
+	// Store null terminator at argv[argsCount + 1]
+	nullIdx := loopDone.NewAdd(argsCount, one64)
+	nullSlotPtr := loopDone.NewGetElementPtr(irtypes.I8Ptr, argv, nullIdx)
+	loopDone.NewStore(constant.NewNull(irtypes.I8Ptr), nullSlotPtr)
+
+	// Allocate output pointers on stack for pal_execute
+	outStdoutPtr := loopDone.NewAlloca(irtypes.I8Ptr)
+	outStdoutLen := loopDone.NewAlloca(irtypes.I64)
+	outStderrPtr := loopDone.NewAlloca(irtypes.I8Ptr)
+	outStderrLen := loopDone.NewAlloca(irtypes.I64)
+
+	// Call pal_execute
+	c.emitEnterSyscall(loopDone)
+	exitCode := loopDone.NewCall(c.palExecute, programCStr, argv,
+		outStdoutPtr, outStdoutLen, outStderrPtr, outStderrLen)
+	c.emitExitSyscall(loopDone)
+
+	// Cache stdout/stderr in TLS globals
+	stdoutBuf := loopDone.NewLoad(irtypes.I8Ptr, outStdoutPtr)
+	stdoutLen := loopDone.NewLoad(irtypes.I64, outStdoutLen)
+	stderrBuf := loopDone.NewLoad(irtypes.I8Ptr, outStderrPtr)
+	stderrLen := loopDone.NewLoad(irtypes.I64, outStderrLen)
+	loopDone.NewStore(stdoutBuf, c.execStdoutPtr)
+	loopDone.NewStore(stdoutLen, c.execStdoutLen)
+	loopDone.NewStore(stderrBuf, c.execStderrPtr)
+	loopDone.NewStore(stderrLen, c.execStderrLen)
+
+	// Free argv C strings: argv[1..argsCount] (not argv[0] which is programCStr)
+	hasFreeArgs := loopDone.NewICmp(enum.IPredSGT, argsCount, zero64)
+	freeLoopHdr := fn.NewBlock(".free_loop_hdr")
+	freeDone := fn.NewBlock(".free_done")
+	loopDone.NewCondBr(hasFreeArgs, freeLoopHdr, freeDone)
+
+	freeLoopBody := fn.NewBlock(".free_loop_body")
+	jPhi := freeLoopHdr.NewPhi(ir.NewIncoming(zero64, loopDone))
+	freeCond := freeLoopHdr.NewICmp(enum.IPredSLT, jPhi, argsCount)
+	freeLoopHdr.NewCondBr(freeCond, freeLoopBody, freeDone)
+
+	freeIdx := freeLoopBody.NewAdd(jPhi, one64)
+	freeSlotPtr := freeLoopBody.NewGetElementPtr(irtypes.I8Ptr, argv, freeIdx)
+	freeStr := freeLoopBody.NewLoad(irtypes.I8Ptr, freeSlotPtr)
+	freeLoopBody.NewCall(c.palFree, freeStr)
+	jNext := freeLoopBody.NewAdd(jPhi, one64)
+	jPhi.Incs = append(jPhi.Incs, ir.NewIncoming(jNext, freeLoopBody))
+	freeLoopBody.NewBr(freeLoopHdr)
+
+	// Free program C string and argv array
+	freeDone.NewCall(c.palFree, programCStr)
+	freeDone.NewCall(c.palFree, argvRaw)
+
+	// Check result: -1 means error
+	isErr := freeDone.NewICmp(enum.IPredSLT, exitCode, zero32)
+	successBlk := fn.NewBlock(".success")
+	errorBlk := fn.NewBlock(".error")
+	freeDone.NewCondBr(isErr, errorBlk, successBlk)
+
+	// Success: store raw i64 exit code as failable success (resolveType(int) = i64)
+	exitCodeI64 := successBlk.NewSExt(exitCode, irtypes.I64)
+	c.storeFailableSuccess(successBlk, sret, exitCodeI64, resultType)
+	successBlk.NewRet(nil)
+
+	// Error: construct error, store failable error
+	errInst := c.constructErrorFromGlobalStr(errorBlk, "failed to execute process")
+	c.storeFailableError(errorBlk, sret, errInst, resultType)
+	errorBlk.NewRet(nil)
+}
+
+// defineExecuteStdoutBody: void @promise_os_execute_stdout(i8* sret)
+// Returns cached stdout string from TLS globals, then clears the TLS cache.
+func (c *Compiler) defineExecuteStdoutBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	// Load cached stdout from TLS
+	buf := entry.NewLoad(irtypes.I8Ptr, c.execStdoutPtr)
+	bufLen := entry.NewLoad(irtypes.I64, c.execStdoutLen)
+
+	// Create Promise string from buffer
+	isNull := entry.NewICmp(enum.IPredEQ, buf, constant.NewNull(irtypes.I8Ptr))
+	hasData := fn.NewBlock(".has_data")
+	noData := fn.NewBlock(".no_data")
+	entry.NewCondBr(isNull, noData, hasData)
+
+	// has_data: create string from buffer, free buffer, clear TLS
+	str := hasData.NewCall(c.funcs["promise_string_new"], buf, bufLen)
+	hasData.NewCall(c.palFree, buf)
+	hasData.NewStore(constant.NewNull(irtypes.I8Ptr), c.execStdoutPtr)
+	hasData.NewStore(constant.NewInt(irtypes.I64, 0), c.execStdoutLen)
+	c.storeStringResult(hasData, sret, str)
+	hasData.NewRet(nil)
+
+	// no_data: return empty string
+	emptyStr := noData.NewCall(c.funcs["promise_string_new"],
+		constant.NewNull(irtypes.I8Ptr), constant.NewInt(irtypes.I64, 0))
+	c.storeStringResult(noData, sret, emptyStr)
+	noData.NewRet(nil)
+}
+
+// defineExecuteStderrBody: void @promise_os_execute_stderr(i8* sret)
+// Returns cached stderr string from TLS globals, then clears the TLS cache.
+func (c *Compiler) defineExecuteStderrBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	// Load cached stderr from TLS
+	buf := entry.NewLoad(irtypes.I8Ptr, c.execStderrPtr)
+	bufLen := entry.NewLoad(irtypes.I64, c.execStderrLen)
+
+	// Create Promise string from buffer
+	isNull := entry.NewICmp(enum.IPredEQ, buf, constant.NewNull(irtypes.I8Ptr))
+	hasData := fn.NewBlock(".has_data")
+	noData := fn.NewBlock(".no_data")
+	entry.NewCondBr(isNull, noData, hasData)
+
+	// has_data: create string from buffer, free buffer, clear TLS
+	str := hasData.NewCall(c.funcs["promise_string_new"], buf, bufLen)
+	hasData.NewCall(c.palFree, buf)
+	hasData.NewStore(constant.NewNull(irtypes.I8Ptr), c.execStderrPtr)
+	hasData.NewStore(constant.NewInt(irtypes.I64, 0), c.execStderrLen)
+	c.storeStringResult(hasData, sret, str)
+	hasData.NewRet(nil)
+
+	// no_data: return empty string
+	emptyStr := noData.NewCall(c.funcs["promise_string_new"],
+		constant.NewNull(irtypes.I8Ptr), constant.NewInt(irtypes.I64, 0))
+	c.storeStringResult(noData, sret, emptyStr)
+	noData.NewRet(nil)
 }

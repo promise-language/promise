@@ -947,6 +947,11 @@ func (p *WindowsPAL) EmitGetEnv(module *ir.Module) *ir.Func {
 	return fn
 }
 
+// EmitExecute returns -1 stub (not yet implemented on Windows).
+func (p *WindowsPAL) EmitExecute(module *ir.Module) *ir.Func {
+	return emitStubExecute(module)
+}
+
 // EmitGetCwd declares UCRT @_getcwd and defines @pal_getcwd.
 // Signature: @pal_getcwd(i8* buf, i64 len) → i8* (buf or null)
 func (p *WindowsPAL) EmitGetCwd(module *ir.Module) *ir.Func {

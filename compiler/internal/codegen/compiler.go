@@ -186,6 +186,7 @@ type Compiler struct {
 	// Scheduler globals (Phase 5c — M:N scheduler)
 	currentGGlobal     *ir.Global // @__promise_current_g (TLS, i8*)
 	currentPGlobal     *ir.Global // @__promise_current_p (TLS, i8*) — current P for local queue ops
+	currentMGlobal     *ir.Global // @__promise_current_m (TLS, i8*) — current M for syscall handoff
 	schedGlobal        *ir.Global // @__promise_sched (global Sched struct)
 	panicJmpBufGlobal  *ir.Global // @__promise_panic_jmpbuf (TLS, i8*) — setjmp buf for goroutine panic recovery
 	testJmpBufGlobal   *ir.Global // @__promise_test_jmpbuf (TLS, i8*) — setjmp buf for per-test panic recovery
@@ -911,6 +912,8 @@ func (c *Compiler) declareIntrinsics() {
 	c.defineLocalDequeueFunc()
 	c.defineStealWorkFunc()
 	c.defineSchedWakeMFunc()
+	c.defineEnterSyscallFunc()
+	c.defineExitSyscallFunc()
 	c.defineSchedFindRunnableFunc()
 	c.defineSchedEnqueueFunc()
 	c.defineGoroutineExitFunc()

@@ -819,9 +819,9 @@ Dependency fetching and resolution.
 
 ## What's Next
 
-The compiler pipeline (Stages 1-8q) is complete. Runtime is fully codegen-emitted LLVM IR — no C files remain. All major cross-cutting features are done: M:N scheduler (Phase 5c), WASM target (Phases 4b/5d/7a), yield generators, structural interfaces, operator dispatch, naming conventions, pure value types, documentation system (Phase 1), module system (Phase 3 done + identity redesign), stdlib expansion (math, sort, set, random catalog modules), Format/Parse infrastructure (Writer, Reader, Builder, Scanner, `to_string()`, `format(Writer ~w)!` on all primitives, `int/bool/uint/f64.parse`, `string.from_bytes`, `Vector.filled`), time measurement (Duration, Instant, sleep), extended I/O (Closer, write_line), and compile-time platform filtering (`` `target(cond) ``). String pad_left/pad_right methods. Strings module `join` uses variadic params.
+The compiler pipeline (Stages 1-8q) is complete. Runtime is fully codegen-emitted LLVM IR — no C files remain. All major cross-cutting features are done: M:N scheduler (Phase 5c), WASM target (Phases 4b/5d/7a), yield generators, structural interfaces, operator dispatch, naming conventions, pure value types, documentation system (Phase 1), module system (Phase 3 done + identity redesign), stdlib expansion (math, sort, set, random catalog modules), Format/Parse infrastructure (Writer, Reader, Builder, Scanner, `to_string()`, `format(Writer ~w)!` on all primitives, `int/bool/uint/f64.parse`, `string.from_bytes`, `Vector.filled`), time measurement (Duration, Instant, sleep), extended I/O (Closer, write_line), compile-time platform filtering (`` `target(cond) ``), and syscall handoff (Phase 6a — goroutines release P during blocking file IO). String pad_left/pad_right methods. Strings module `join` uses variadic params.
 
-Test suite: 1554 native pass, 1549 WASM pass (5 skipped).
+Test suite: 1801 native pass, 1776 WASM pass (25 skipped).
 
 ### Near-term: Compiler Infrastructure
 
@@ -845,11 +845,28 @@ Test suite: 1554 native pass, 1549 WASM pass (5 skipped).
 | Destructure is-patterns (`x is Dog(name)`) | Medium |
 | `yield*` delegate (forward all values from sub-iterator) | Medium |
 
+### Near-term: Runtime IO & Networking
+
+IO reactor work is phased to minimize risk and enable incremental progress. File IO is already functional (Phase D PAL + `modules/io`); these phases make it goroutine-safe and add networking.
+
+| Phase | Work | Design Doc | Priority |
+|-------|------|-----------|----------|
+| ~~**6a**~~ | ~~**Syscall handoff** — `enter_syscall`/`exit_syscall` in scheduler. Detaches P from M during blocking file IO so other goroutines can run. No reactor needed. Go-style `entersyscall`/`exitsyscall`.~~ | [runtime-architecture.md](runtime-architecture.md), [platform-modules.md](platform-modules.md) | ~~Done~~ |
+| **6b** | **Network reactor** — Global reactor (kqueue on macOS, epoll on Linux, IOCP on Windows). Single poller instance, thread-safe. Sysmon calls `reactor_poll(0)` every tick; idle Ms call `reactor_poll(block)`. Known reactor struct (not opaque `i8*`). | [runtime-architecture.md](runtime-architecture.md) | High |
+| **6c** | **`modules/net`** — TCP/UDP sockets, listeners, DNS. Goroutine-transparent via reactor (no function coloring). | [platform-modules.md](platform-modules.md), [standard-library.md](standard-library.md) | High |
+| **6d** | **io_uring** (Linux, optional) — Truly async file + network IO. Probe at init (`io_uring_setup` → ENOSYS = fallback to epoll). Optimization, not required. | — | Low |
+
+**Key design decisions:**
+- **File IO on POSIX**: epoll/kqueue cannot async regular files (always report "ready"). File IO uses syscall handoff (Phase 6a) — M blocks in kernel, P is released for other Gs. This is Go's model.
+- **Network IO**: Reactor-driven. Non-blocking fd + park goroutine + reactor wakes on readiness.
+- **Reactor handle**: Known LLVM struct type (not opaque `i8*`) to prevent codegen drift across touch points.
+- **WASM**: Single-threaded cooperative scheduler. IO is inherently non-blocking from the scheduler's perspective (only one G runs at a time). Syscall handoff is a no-op. Future: JS event loop integration for browser-based async IO (Phase 6b deferred for WASM).
+- **Global reactor**: One per process, no per-P reactors. Avoids fd registration migration during work stealing.
+
 ### Long-term: Runtime & Platform
 
 | Work | Design Doc | Priority |
 |------|-----------|----------|
-| IO reactor (kqueue/epoll/IOCP) — Phase 6 | [runtime-architecture.md](runtime-architecture.md) | Low |
 | Generic type RTTI | — | Low |
 | Value type structural interface coercion (stack boxing) | — | Low |
 | ~~Generic value types~~ | — | ~~Done~~ |
@@ -859,7 +876,7 @@ Test suite: 1554 native pass, 1549 WASM pass (5 skipped).
 
 ### WASM remaining work
 
-Tests: 1576 pass, 0 fail, 5 skip on `wasm32-wasi` (1581 native pass)
+Tests: 1776 pass, 0 fail, 25 skip on `wasm32-wasi` (1801 native pass)
 
 | Item | Skipped tests | Effort | Notes |
 |------|--------------|--------|-------|

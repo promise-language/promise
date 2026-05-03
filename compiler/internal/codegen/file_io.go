@@ -74,6 +74,20 @@ func (c *Compiler) defineFileIOBodies() {
 	}
 }
 
+// ── Syscall handoff helpers ──────────────────────────────────────────────────
+
+// emitEnterSyscall emits a call to promise_sched_enter_syscall before a blocking PAL call.
+// Releases P so other goroutines can run while this M blocks in the kernel.
+func (c *Compiler) emitEnterSyscall(block *ir.Block) {
+	block.NewCall(c.funcs["promise_sched_enter_syscall"])
+}
+
+// emitExitSyscall emits a call to promise_sched_exit_syscall after a blocking PAL call returns.
+// Reattaches P to this M so the goroutine can continue running.
+func (c *Compiler) emitExitSyscall(block *ir.Block) {
+	block.NewCall(c.funcs["promise_sched_exit_syscall"])
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 // extractRawInt extracts the raw i64 value from a Promise int value struct pointer.
@@ -154,7 +168,9 @@ func (c *Compiler) defineFileOpenBody(fn *ir.Func) {
 	modeI32 := entry.NewTrunc(modeRaw, irtypes.I32)
 
 	// Call PAL: i32 @pal_file_open(i8* path, i32 mode)
+	c.emitEnterSyscall(entry)
 	fd := entry.NewCall(c.palFileOpen, cstr, modeI32)
+	c.emitExitSyscall(entry)
 
 	// Free temporary C string
 	entry.NewCall(c.palFree, cstr)
@@ -175,7 +191,9 @@ func (c *Compiler) defineFileCloseBody(fn *ir.Func) {
 	fdI32 := entry.NewTrunc(fdRaw, irtypes.I32)
 
 	// Call PAL: i32 @pal_file_close(i32 fd)
+	c.emitEnterSyscall(entry)
 	rc := entry.NewCall(c.palFileClose, fdI32)
+	c.emitExitSyscall(entry)
 
 	rcI64 := entry.NewSExt(rc, irtypes.I64)
 	c.storeIntResult(entry, sret, rcI64)
@@ -196,7 +214,9 @@ func (c *Compiler) defineFileSeekBody(fn *ir.Func) {
 	whenceI32 := entry.NewTrunc(whenceRaw, irtypes.I32)
 
 	// Call PAL: i64 @pal_file_seek(i32 fd, i64 offset, i32 whence)
+	c.emitEnterSyscall(entry)
 	pos := entry.NewCall(c.palFileSeek, fdI32, offsetRaw, whenceI32)
+	c.emitExitSyscall(entry)
 
 	c.storeIntResult(entry, sret, pos)
 	entry.NewRet(nil)
@@ -218,7 +238,9 @@ func (c *Compiler) defineFileWriteStringBody(fn *ir.Func) {
 	dataPtr, dataLen := c.extractStringDataLen(entry, dataParam)
 
 	// Call PAL: i64 @pal_file_write(i32 fd, i8* buf, i64 len)
+	c.emitEnterSyscall(entry)
 	written := entry.NewCall(c.palFileWrite, fdI32, dataPtr, dataLen)
+	c.emitExitSyscall(entry)
 
 	c.storeIntResult(entry, sret, written)
 	entry.NewRet(nil)
@@ -264,7 +286,9 @@ func (c *Compiler) defineFileReadAllBody(fn *ir.Func) {
 
 	// Call PAL: i64 @pal_file_read(i32 fd, i8* buf, i64 len)
 	// Returns bytes read on success, -errno on failure
+	c.emitEnterSyscall(loopBlk)
 	n := loopBlk.NewCall(c.palFileRead, fdI32, readPtr, remaining)
+	c.emitExitSyscall(loopBlk)
 
 	// Check error (n < 0 means -errno)
 	isErr := loopBlk.NewICmp(enum.IPredSLT, n, constant.NewInt(irtypes.I64, 0))
@@ -342,7 +366,9 @@ func (c *Compiler) findErrnoLocationFn() *ir.Func {
 func (c *Compiler) defineFileStatSizeBody(fn *ir.Func) {
 	entry := fn.NewBlock(".entry")
 	cstr := c.stringToCStr(entry, fn.Params[1])
+	c.emitEnterSyscall(entry)
 	result := entry.NewCall(c.palFileStatSize, cstr)
+	c.emitExitSyscall(entry)
 	entry.NewCall(c.palFree, cstr)
 	c.storeIntResult(entry, fn.Params[0], result)
 	entry.NewRet(nil)
@@ -352,7 +378,9 @@ func (c *Compiler) defineFileStatSizeBody(fn *ir.Func) {
 func (c *Compiler) defineFileRemoveBody(fn *ir.Func) {
 	entry := fn.NewBlock(".entry")
 	cstr := c.stringToCStr(entry, fn.Params[1])
+	c.emitEnterSyscall(entry)
 	rc := entry.NewCall(c.palFileRemove, cstr)
+	c.emitExitSyscall(entry)
 	entry.NewCall(c.palFree, cstr)
 	rcI64 := entry.NewSExt(rc, irtypes.I64)
 	c.storeIntResult(entry, fn.Params[0], rcI64)
@@ -363,7 +391,9 @@ func (c *Compiler) defineFileRemoveBody(fn *ir.Func) {
 func (c *Compiler) defineFileExistsBody(fn *ir.Func) {
 	entry := fn.NewBlock(".entry")
 	cstr := c.stringToCStr(entry, fn.Params[1])
+	c.emitEnterSyscall(entry)
 	rc := entry.NewCall(c.palFileExists, cstr)
+	c.emitExitSyscall(entry)
 	entry.NewCall(c.palFree, cstr)
 	rcI64 := entry.NewSExt(rc, irtypes.I64)
 	c.storeIntResult(entry, fn.Params[0], rcI64)
@@ -374,7 +404,9 @@ func (c *Compiler) defineFileExistsBody(fn *ir.Func) {
 func (c *Compiler) defineFileMkdirBody(fn *ir.Func) {
 	entry := fn.NewBlock(".entry")
 	cstr := c.stringToCStr(entry, fn.Params[1])
+	c.emitEnterSyscall(entry)
 	rc := entry.NewCall(c.palFileMkdir, cstr)
+	c.emitExitSyscall(entry)
 	entry.NewCall(c.palFree, cstr)
 	rcI64 := entry.NewSExt(rc, irtypes.I64)
 	c.storeIntResult(entry, fn.Params[0], rcI64)
@@ -385,7 +417,9 @@ func (c *Compiler) defineFileMkdirBody(fn *ir.Func) {
 func (c *Compiler) defineDirRemoveBody(fn *ir.Func) {
 	entry := fn.NewBlock(".entry")
 	cstr := c.stringToCStr(entry, fn.Params[1])
+	c.emitEnterSyscall(entry)
 	rc := entry.NewCall(c.palDirRemove, cstr)
+	c.emitExitSyscall(entry)
 	entry.NewCall(c.palFree, cstr)
 	rcI64 := entry.NewSExt(rc, irtypes.I64)
 	c.storeIntResult(entry, fn.Params[0], rcI64)
@@ -396,7 +430,9 @@ func (c *Compiler) defineDirRemoveBody(fn *ir.Func) {
 func (c *Compiler) defineDirExistsBody(fn *ir.Func) {
 	entry := fn.NewBlock(".entry")
 	cstr := c.stringToCStr(entry, fn.Params[1])
+	c.emitEnterSyscall(entry)
 	rc := entry.NewCall(c.palDirExists, cstr)
+	c.emitExitSyscall(entry)
 	entry.NewCall(c.palFree, cstr)
 	rcI64 := entry.NewSExt(rc, irtypes.I64)
 	c.storeIntResult(entry, fn.Params[0], rcI64)

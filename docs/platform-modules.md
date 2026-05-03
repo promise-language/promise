@@ -654,17 +654,39 @@ pal_dir_close(i8* handle) void                        // closedir / FindClose+fr
 - `promise_io_dir_next_name` — cast int→ptr, `pal_dir_next_name`, `strlen`+`promise_string_new`.
 - `promise_io_dir_close_handle` — cast int→ptr, `pal_dir_close`.
 
-### Reactor PAL
+### Syscall Handoff PAL (Phase 6a)
+
+File IO on POSIX cannot be async via epoll/kqueue (regular files always report "ready").
+Instead, goroutines release their P before blocking syscalls so other Gs can run:
 
 ```
-pal_reactor_create() i8*                              // opaque reactor handle
-pal_reactor_register(i8* reactor, i32 fd, i32 events) i32  // 0 or -1
-pal_reactor_poll(i8* reactor, i8* events_buf, i32 max, i64 timeout_ns) i32  // count
-pal_reactor_deregister(i8* reactor, i32 fd) i32       // 0 or -1
+promise_sched_enter_syscall()   // detach P from M, clear P.current_g, wake idle M
+promise_sched_exit_syscall()    // reattach P to M, restore P.current_g
+```
+
+These are scheduler functions (not PAL), emitted in `codegen/sched.go`. They wrap every
+blocking PAL call in `file_io.go`. On WASM, both are no-ops (single-threaded).
+
+Requires `@__promise_current_m` TLS global so `exit_syscall` can find its M and reattach P.
+
+### Reactor PAL (Phase 6b)
+
+```
+// Reactor struct: known LLVM type (not opaque i8*) to prevent codegen drift.
+// Fields: platform fd (kqueue fd / epoll fd / IOCP handle), event buffer, count, lock.
+pal_reactor_create() %ReactorStruct*
+pal_reactor_register(%ReactorStruct* reactor, i32 fd, i32 events) i32  // 0 or -errno
+pal_reactor_poll(%ReactorStruct* reactor, %EventStruct* events_buf, i32 max, i64 timeout_ns) i32  // count or -errno
+pal_reactor_deregister(%ReactorStruct* reactor, i32 fd) i32  // 0 or -errno
 ```
 
 The reactor PAL abstracts over epoll/kqueue/IOCP. `timeout_ns = 0` is non-blocking (sysmon),
-`timeout_ns = -1` is blocking (idle M).
+`timeout_ns = -1` is blocking (idle M). Known struct types prevent silent breakage when
+the reactor evolves — all codegen sites see the same typed fields.
+
+**WASM**: Reactor is not applicable (single-threaded, cooperative scheduler). Future: JS
+event loop integration for browser-based async IO. The cooperative scheduler would yield
+to the browser event loop, and JS callbacks re-enqueue goroutines when IO completes.
 
 ---
 

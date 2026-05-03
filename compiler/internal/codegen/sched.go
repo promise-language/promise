@@ -195,6 +195,15 @@ func (c *Compiler) defineSchedulerGlobals() {
 	}
 	c.currentPGlobal = currentP
 
+	// @__promise_current_m = [thread_local] global i8* null
+	// Used by syscall handoff: exit_syscall needs M to reattach P.
+	currentM := c.module.NewGlobal("__promise_current_m", irtypes.I8Ptr)
+	currentM.Init = constant.NewNull(irtypes.I8Ptr)
+	if !c.isWasm {
+		currentM.TLSModel = enum.TLSModelGeneric
+	}
+	c.currentMGlobal = currentM
+
 	// @__promise_sched = global %Sched zeroinitializer
 	schedTy := schedStructType()
 	sched := c.module.NewGlobal("__promise_sched", schedTy)
@@ -557,6 +566,8 @@ func (c *Compiler) defineSchedLoopFunc() {
 	parkM := fn.NewBlock("park_m")
 	exitBlk := fn.NewBlock("exit")
 
+	// Set TLS current_m once (M is fixed for this thread's lifetime).
+	entry.NewStore(mParam, c.currentMGlobal)
 	entry.NewBr(loop)
 
 	// loop: find runnable G
@@ -1491,6 +1502,113 @@ func (c *Compiler) defineSchedWakeMFunc() {
 	wakeBlk.NewRet(nil)
 
 	c.funcs["promise_sched_wake_m"] = fn
+}
+
+// --- Syscall handoff (Phase 6a) ---
+
+// defineEnterSyscallFunc emits @promise_sched_enter_syscall() → void
+// Called before blocking PAL syscalls (file IO). Detaches P from the current
+// goroutine so other Ms can steal work from P's run queue. The M keeps its
+// P pointer (M.p unchanged) but P.current_g is cleared so sysmon won't try
+// to preempt. TLS current_p is cleared to signal "in syscall" state.
+//
+// On WASM this is a no-op (single-threaded, no M contention).
+func (c *Compiler) defineEnterSyscallFunc() {
+	fn := c.module.NewFunc("promise_sched_enter_syscall", irtypes.Void)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	entry := fn.NewBlock(".entry")
+
+	if c.isWasm {
+		// WASM: single-threaded, no handoff needed
+		entry.NewRet(nil)
+		c.funcs["promise_sched_enter_syscall"] = fn
+		return
+	}
+
+	pTy := processorStructType()
+
+	// Load TLS current_p — if null, we're not on a P (shouldn't happen in normal flow)
+	pRaw := entry.NewLoad(irtypes.I8Ptr, c.currentPGlobal)
+	isNull := entry.NewICmp(enum.IPredEQ, pRaw, constant.NewNull(irtypes.I8Ptr))
+
+	doHandoff := fn.NewBlock("do_handoff")
+	retBlk := fn.NewBlock("ret")
+	entry.NewCondBr(isNull, retBlk, doHandoff)
+
+	// Clear P.current_g — sysmon won't try to preempt this G
+	pPtr := doHandoff.NewBitCast(pRaw, irtypes.NewPointer(pTy))
+	curGField := doHandoff.NewGetElementPtr(pTy, pPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldCurrentG)))
+	doHandoff.NewStore(constant.NewNull(irtypes.I8Ptr), curGField)
+
+	// Clear TLS current_p — signals "in syscall" state
+	doHandoff.NewStore(constant.NewNull(irtypes.I8Ptr), c.currentPGlobal)
+
+	// Wake an idle M to steal work from this P's run queue
+	doHandoff.NewCall(c.funcs["promise_sched_wake_m"])
+
+	doHandoff.NewBr(retBlk)
+	retBlk.NewRet(nil)
+
+	c.funcs["promise_sched_enter_syscall"] = fn
+}
+
+// defineExitSyscallFunc emits @promise_sched_exit_syscall() → void
+// Called after blocking PAL syscalls return. Reattaches the P to the current
+// goroutine. The M still has its P (M.p was never cleared), so we just
+// restore P.current_g and TLS current_p.
+//
+// On WASM this is a no-op.
+func (c *Compiler) defineExitSyscallFunc() {
+	fn := c.module.NewFunc("promise_sched_exit_syscall", irtypes.Void)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	entry := fn.NewBlock(".entry")
+
+	if c.isWasm {
+		entry.NewRet(nil)
+		c.funcs["promise_sched_exit_syscall"] = fn
+		return
+	}
+
+	mTy := machineStructType()
+	pTy := processorStructType()
+
+	// Load TLS current_m to find our P (M.p was never cleared)
+	mRaw := entry.NewLoad(irtypes.I8Ptr, c.currentMGlobal)
+	mIsNull := entry.NewICmp(enum.IPredEQ, mRaw, constant.NewNull(irtypes.I8Ptr))
+
+	restoreBlk := fn.NewBlock("restore")
+	retBlk := fn.NewBlock("ret")
+	entry.NewCondBr(mIsNull, retBlk, restoreBlk)
+
+	// Get P from M.p
+	mPtr := restoreBlk.NewBitCast(mRaw, irtypes.NewPointer(mTy))
+	mPField := restoreBlk.NewGetElementPtr(mTy, mPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldP)))
+	pRaw := restoreBlk.NewLoad(irtypes.I8Ptr, mPField)
+
+	pIsNull := restoreBlk.NewICmp(enum.IPredEQ, pRaw, constant.NewNull(irtypes.I8Ptr))
+	doRestore := fn.NewBlock("do_restore")
+	restoreBlk.NewCondBr(pIsNull, retBlk, doRestore)
+
+	// Load TLS current_g
+	gRaw := doRestore.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
+
+	// Restore P.current_g = G
+	pPtr := doRestore.NewBitCast(pRaw, irtypes.NewPointer(pTy))
+	curGField := doRestore.NewGetElementPtr(pTy, pPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldCurrentG)))
+	doRestore.NewStore(gRaw, curGField)
+
+	// Restore TLS current_p = P
+	doRestore.NewStore(pRaw, c.currentPGlobal)
+
+	doRestore.NewBr(retBlk)
+	retBlk.NewRet(nil)
+
+	c.funcs["promise_sched_exit_syscall"] = fn
 }
 
 // defineGoroutineExitFunc emits @promise_goroutine_exit(i8* %g_raw) → void

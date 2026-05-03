@@ -10414,3 +10414,49 @@ func TestFailableGetterStringResult(t *testing.T) {
 	// Failable getter returning string should have result type in signature
 	assertContains(t, ir, "define { i1, i8*, i8* } @Foo.label(")
 }
+
+// --- Syscall Handoff Tests (Phase 6a) ---
+
+func TestSyscallHandoffFunctionsExist(t *testing.T) {
+	ir := generateIR(t, `
+		main() { }
+	`)
+	assertContains(t, ir, "define void @promise_sched_enter_syscall()")
+	assertContains(t, ir, "define void @promise_sched_exit_syscall()")
+}
+
+func TestSyscallHandoffCurrentMGlobal(t *testing.T) {
+	ir := generateIR(t, `
+		main() { }
+	`)
+	assertContains(t, ir, "@__promise_current_m")
+}
+
+func TestEnterSyscallClearsCurrentP(t *testing.T) {
+	// enter_syscall should clear TLS current_p and P.current_g
+	ir := generateIR(t, `
+		main() { }
+	`)
+	// The function loads current_p, clears P.current_g, clears current_p, calls wake_m
+	assertContains(t, ir, "promise_sched_enter_syscall")
+	assertContains(t, ir, "promise_sched_wake_m")
+}
+
+func TestExitSyscallRestoresP(t *testing.T) {
+	// exit_syscall should load current_m, get M.p, restore P.current_g and current_p
+	ir := generateIR(t, `
+		main() { }
+	`)
+	assertContains(t, ir, "promise_sched_exit_syscall")
+	assertContains(t, ir, "__promise_current_m")
+}
+
+func TestSchedLoopSetsCurrentM(t *testing.T) {
+	// sched_loop should store M param to TLS current_m
+	ir := generateIR(t, `
+		main() { }
+	`)
+	// sched_loop stores m to current_m
+	assertContains(t, ir, "__promise_current_m")
+	assertContains(t, ir, "promise_sched_loop")
+}

@@ -1,5 +1,5 @@
 // Tests for map[K, Enum] where the enum is from a catalog module (cross-module).
-// Regression test for B0043: cross-module enum layouts must be available during
+// Regression test for B0044: cross-module enum layouts must be available during
 // monomorphization of Map methods in the std module.
 use json;
 

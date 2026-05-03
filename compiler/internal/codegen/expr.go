@@ -5229,7 +5229,7 @@ func (c *Compiler) resolveGoTarget(callExpr *ast.CallExpr) (*ir.Func, *ExternFun
 // and returns the Promise-internal result type, handling sret/ABI coercion
 // internally via genExternCall. This is needed because extern IR functions use
 // void return + sret pointer for struct returns, which is incompatible with
-// the coroutine body's direct call + store pattern (B0044).
+// the coroutine body's direct call + store pattern (B0046).
 func (c *Compiler) genGoExternWrapper(ext *ExternFunc, argLLVMTypes []irtypes.Type, argTypes []types.Type, resultLLVM irtypes.Type, isVoid bool) *ir.Func {
 	wrapName := fmt.Sprintf(".go_extern_wrap.%s.%d", ext.PromiseName, c.goCounter)
 

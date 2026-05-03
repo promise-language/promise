@@ -8537,7 +8537,7 @@ func TestGoExprVoidFunction(t *testing.T) {
 	assertContains(t, ir, "call void @promise_sched_enqueue(")
 }
 
-// B0044: go extern_func() must generate a wrapper to handle sret ABI.
+// B0046: go extern_func() must generate a wrapper to handle sret ABI.
 func TestGoExprExternFunction(t *testing.T) {
 	ir := generateIR(t, `
 		get_data(int x) string `+"`"+`extern("test_get_data");

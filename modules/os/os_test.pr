@@ -196,7 +196,7 @@ test_execute_large_stderr() `test(exclude: "wasm32") {
 
 test_execute_large_stdout_and_stderr() `test(exclude: "wasm32") {
   // Write >64KB to BOTH streams simultaneously — the exact scenario that
-  // deadlocked before concurrent reads (B0027). The child writes to stdout
+  // deadlocked before concurrent reads (B0028). The child writes to stdout
   // and stderr in alternating chunks; if either pipe blocks because the
   // reader isn't draining it, the child stalls and the test hangs.
   ProcessResult result = execute("sh", "-c", "seq 1 10000; seq 1 10000 >&2")!;

@@ -282,7 +282,7 @@ The standard library (`modules/std/`, 29 files) is auto-imported via `use std as
 ## Important Files
 
 - `compiler/grammar/PromiseParser.g4` — grammar is the language spec
-- `docs/stages.md` — implementation roadmap with deferred bug tracker
+- `docs/stages.md` — implementation roadmap and architecture notes (bugs/tasks/deferred items are tracked in the `tracker` MCP server)
 - `docs/language-design.md` — full language design proposal (types, ownership, errors, generics, modules)
 - `docs/standard-library.md` — stdlib design: module inventory, PAL extensions, implementation phases, testing strategy
 - `compiler/internal/codegen/compiler.go` — codegen entry, type layouts, scope cleanup
@@ -306,7 +306,7 @@ The standard library (`modules/std/`, 29 files) is auto-imported via `use std as
 - **Test at every level**: Significant changes need both Go unit tests (`codegen_test.go`, `sema_test.go`) AND Promise-level e2e tests (`tests/` directory, run via `promise test`). Go tests verify IR shape; Promise tests verify runtime correctness.
 - **No hidden effects**: When designing language features, avoid implicit side effects, hidden control flow, or magic behaviors. Every effect should be visible at the call site. If a function can fail, it must be marked failable (`!`). If a value is consumed, it must be moved (`~`). If a variable is mutable, it must be declared so.
 - **Self-contained by default**: Design features so that programs are understandable in isolation. Avoid global state, implicit initialization, and ambient context. A reader (human or AI) should be able to read a `.pr` file top-to-bottom and know exactly what it does without consulting external docs or hidden configuration.
-- **NEVER work around language/compiler/test-infra issues.** When implementing standard library or catalog modules and you hit a language limitation, compiler bug, codegen issue, or test infrastructure problem — **stop and file a bug/TODO in `docs/stages.md`** with a unique ID (`BNNNN`/`TNNNN`). Do NOT hack around the issue in module code (e.g., restructuring code to avoid a parser bug, adding redundant casts to dodge a type-checker gap, duplicating logic because a feature is missing). The language and platform are designed to fully support module implementation — if something doesn't work, that's a real bug that needs a real fix. Let the user implement the compiler/infra fix; your job is to identify and document the blocker clearly.
+- **NEVER work around language/compiler/test-infra issues.** When implementing standard library or catalog modules and you hit a language limitation, compiler bug, codegen issue, or test infrastructure problem — **stop and file a bug in the `tracker` MCP server** (type: `bug`). Do NOT hack around the issue in module code (e.g., restructuring code to avoid a parser bug, adding redundant casts to dodge a type-checker gap, duplicating logic because a feature is missing). The language and platform are designed to fully support module implementation — if something doesn't work, that's a real bug that needs a real fix. Let the user implement the compiler/infra fix; your job is to identify and document the blocker clearly.
 
 ## Writing Promise Code
 
@@ -332,10 +332,20 @@ The standard library (`modules/std/`, 29 files) is auto-imported via `use std as
 
 - **Use full English words in APIs — never abbreviate.** All public names in the standard library and language APIs must use complete, unabbreviated words, even when abbreviations are industry-standard (e.g., `print_line` not `println`, `make_directory` not `mkdir`, `concatenate` not `concat`, `execute` not `exec`, `arguments` not `args`). This optimizes for AI-agent readability — an LLM can always predict the full word but must memorize each abbreviation.
 
+## Bug & Task Tracking
+
+**All bugs, tasks, and deferred items are managed via the `tracker` MCP server.** The tracker auto-assigns IDs by type: `B0001` for bugs, `T0001` for tasks, `D0001` for deferred items. These IDs are stable and can be referenced from code comments, commit messages, and conversations.
+
+- **Filing bugs:** Use `mcp__tracker__create` with `type: "bug"`. Include a clear title, description (what the bug is, any workaround), priority, and relevant tags (e.g., `codegen`, `parser`, `ownership`, `formatter`, `scheduler`).
+- **Filing tasks:** Use `type: "task"` for planned work items. Use `type: "deferred"` for items that are not yet scheduled.
+- **Querying:** Use `mcp__tracker__list` to filter by type, status, priority, or tag. Use `mcp__tracker__search` for free-text search.
+- **Updating:** Use `mcp__tracker__update` to change status (`open` → `in_progress` → `done`/`wontfix`), add notes, or update priority.
+- **Reference in code:** Use tracker IDs in code comments (e.g., `// B0030: workaround for optional user type in constructor`) and commit messages.
+- **`docs/stages.md`** remains the implementation roadmap and architecture reference. It may reference tracker IDs but is not the source of truth for bug/task status — the tracker is.
+
 ## Conventions
 
-- **Document workarounds immediately.** When you encounter a compiler bug, language limitation, or missing feature and work around it, add an entry to the "Parser / Codegen Bugs" or appropriate section in `docs/stages.md` right away. Each entry must include: what the bug is, what the workaround is, and the priority. Do not leave undocumented workarounds in the code — they will be forgotten and never fixed.
-- **Assign a unique ID to every bug and TODO.** Every open bug/gap/limitation in `docs/stages.md` must have a stable ID. Bugs use `BNNNN` (e.g., `B0030`), planned work items use `TNNNN` (e.g., `T0001`). IDs are sequential within their namespace, never reused, and never renumbered — even after resolution, the ID stays. This allows items to be referenced from code comments, commit messages, and conversations. When adding a new entry, use the next available number in the appropriate namespace.
+- **Document workarounds immediately.** When you encounter a compiler bug, language limitation, or missing feature, file it in the `tracker` MCP server right away (type: `bug`). Include: what the bug is, any workaround, and the priority. Do not leave undocumented workarounds in the code.
 - Compiler errors are accumulated (not fatal on first error) and printed together
 - `extractNamed(typ)` unwraps Instance/SharedRef/MutRef to get underlying `*types.Named`
 - `needsVtable(named)` returns true if type has children or is abstract → virtual dispatch

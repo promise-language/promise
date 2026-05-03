@@ -1,4 +1,4 @@
-// Tests for for-in iteration on map[K, Enum] — regression tests for B0043.
+// Tests for for-in iteration on map[K, Enum] — regression tests for B0044.
 // Also tests map-inside-enum-variant pattern needed by T0001.
 enum Color {
   Red, Green, Blue

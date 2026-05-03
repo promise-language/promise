@@ -1489,7 +1489,7 @@ func TestFileStatSizeWindows(t *testing.T) {
 	assertContains(t, out, "call i32 @_close(", "calls _close")
 }
 
-// B0026: EmitFileStatSize must work without prior EmitFileOpen/Close/Seek.
+// B0027: EmitFileStatSize must work without prior EmitFileOpen/Close/Seek.
 func TestFileStatSizeOrderIndependent(t *testing.T) {
 	t.Run("POSIX", func(t *testing.T) {
 		module := ir.NewModule()

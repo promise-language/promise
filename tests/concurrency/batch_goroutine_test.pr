@@ -1,5 +1,5 @@
 // Batch tests for goroutines — verifies that the scheduler is properly
-// initialized in the batch test harness (B0041 fix).
+// initialized in the batch test harness (B0042 fix).
 // Excluded on wasm32: cooperative scheduler cannot run goroutines from
 // non-coroutine batch test functions.
 get_int() int {

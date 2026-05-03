@@ -587,7 +587,7 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 
 	// Initialize the M:N scheduler so goroutines spawned by test functions
 	// get picked up by worker Ms. Without this, `go` blocks in batch tests
-	// enqueue Gs that never get scheduled → deadlock (B0041).
+	// enqueue Gs that never get scheduled → deadlock (B0042).
 	// WASM is excluded: cooperative scheduler can't run goroutines from
 	// non-coroutine batch test functions (no sched_coop_run call site).
 	if !c.isWasm {

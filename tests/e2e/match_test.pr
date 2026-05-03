@@ -201,3 +201,118 @@ test_nested_match() `test {
   };
   assert(r == "x=2,y=3", "nested match resolves correctly");
 }
+
+// --- B0001: match as expression in various positions ---
+
+return_match(int x) string {
+  return match x {
+    1 => "one",
+    2 => "two",
+    _ => "other",
+  };
+}
+
+test_return_match() `test {
+  assert(return_match(1) == "one", "return match 1");
+  assert(return_match(2) == "two", "return match 2");
+  assert(return_match(99) == "other", "return match wildcard");
+}
+
+test_match_in_variable_init() `test {
+  int x = 3;
+  string s = match x {
+    3 => "three",
+    _ => "?",
+  };
+  assert(s == "three", "match in variable init");
+}
+
+test_match_assigned_to_inferred_var() `test {
+  r := match 5 {
+    5 => "five",
+    _ => "other",
+  };
+  assert(r == "five", "match assigned to inferred var");
+}
+
+// --- B0002: block-body arms ---
+
+test_block_arms_as_statement() `test {
+  int x = 2;
+  int result = 0;
+  match x {
+    1 => {
+      result = 10;
+    },
+    2 => {
+      result = 20;
+    },
+    _ => {
+      result = -1;
+    },
+  }
+  assert(result == 20, "block arm sets result");
+}
+
+test_block_arms_all_variants() `test {
+  Direction d = Direction.East;
+  int result = 0;
+  match d {
+    Direction.North => {
+      result = 1;
+    },
+    Direction.South => {
+      result = 2;
+    },
+    Direction.East => {
+      result = 3;
+    },
+    Direction.West => {
+      result = 4;
+    },
+  }
+  assert(result == 3, "block arm enum East");
+}
+
+test_mixed_block_and_expr_arms() `test {
+  int x = 2;
+  string s = match x {
+    1 => "one",
+    2 => {
+      string tmp = "tw";
+      tmp = tmp + "o";
+      tmp;
+    },
+    _ => "other",
+  };
+  assert(s == "two", "mixed arms: block computes value");
+}
+
+test_block_arm_with_multiple_statements() `test {
+  int x = 1;
+  int sum = 0;
+  match x {
+    1 => {
+      sum += 10;
+      sum += 20;
+      sum += 30;
+    },
+    _ => {
+      sum = -1;
+    },
+  }
+  assert(sum == 60, "block arm executes multiple statements");
+}
+
+test_block_arm_enum_destructure() `test {
+  Expr e = Expr.Add(3, 4);
+  int result = match e {
+    Expr.Num(v) => v,
+    Expr.Add(l, r) => {
+      int sum = l + r;
+      sum * 2;
+    },
+    Expr.Neg(n) => -n,
+  };
+  assert(result == 14, "block arm with destructure: (3+4)*2");
+}

@@ -33,11 +33,15 @@ if [ "$LOCAL" = true ]; then
   mkdir -p "$TMPDIR"
 fi
 
-echo "Formatting..."
+echo "Formatting go..."
 (cd compiler && gofmt -w .)
 
-echo "Vetting..."
+echo "Vetting go..."
 (cd compiler && go vet $(go list ./... | grep -v /internal/parser))
+
+echo "Formatting promise..."
+find . -name '*.pr' -not -path './.git/*' -not -path './compiler/*' -not -path './.promise-home/*' | xargs ./bin/promise format
+echo ""
 
 bin/test.sh all "${TEST_ARGS[@]+"${TEST_ARGS[@]}"}"
 

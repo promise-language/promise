@@ -439,6 +439,9 @@ type PromiseParserListener interface {
 	// EnterFloatLiteralPattern is called when entering the floatLiteralPattern production.
 	EnterFloatLiteralPattern(c *FloatLiteralPatternContext)
 
+	// EnterCharLiteralPattern is called when entering the charLiteralPattern production.
+	EnterCharLiteralPattern(c *CharLiteralPatternContext)
+
 	// EnterTrueLiteralPattern is called when entering the trueLiteralPattern production.
 	EnterTrueLiteralPattern(c *TrueLiteralPatternContext)
 
@@ -900,6 +903,9 @@ type PromiseParserListener interface {
 
 	// ExitFloatLiteralPattern is called when exiting the floatLiteralPattern production.
 	ExitFloatLiteralPattern(c *FloatLiteralPatternContext)
+
+	// ExitCharLiteralPattern is called when exiting the charLiteralPattern production.
+	ExitCharLiteralPattern(c *CharLiteralPatternContext)
 
 	// ExitTrueLiteralPattern is called when exiting the trueLiteralPattern production.
 	ExitTrueLiteralPattern(c *TrueLiteralPatternContext)

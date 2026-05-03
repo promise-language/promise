@@ -75,36 +75,43 @@ type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies
     int i = 0;
     while i < s.len {
       char c = s[i];
-      if c == '"' {
-        this._buf.write_string("\\\"")? {
-        };
-      } else if c == '\\' {
-        this._buf.write_string("\\\\")? {
-        };
-      } else if c == '\n' {
-        this._buf.write_string("\\n")? {
-        };
-      } else if c == '\r' {
-        this._buf.write_string("\\r")? {
-        };
-      } else if c == '\t' {
-        this._buf.write_string("\\t")? {
-        };
-      } else {
-        int code = c as! int;
-        if code < 32 {
-          this._buf.write_string("\\u00")? {
+      match c {
+        '"' => {
+          this._buf.write_string("\\\"")? {
           };
-          int hi = code / 16;
-          int lo = code % 16;
-          this._buf.write_string(_hex_digit(hi))? {
+        },
+        '\\' => {
+          this._buf.write_string("\\\\")? {
           };
-          this._buf.write_string(_hex_digit(lo))? {
+        },
+        '\n' => {
+          this._buf.write_string("\\n")? {
           };
-        } else {
-          this._buf.write_string(c.to_string())? {
+        },
+        '\r' => {
+          this._buf.write_string("\\r")? {
           };
-        }
+        },
+        '\t' => {
+          this._buf.write_string("\\t")? {
+          };
+        },
+        _ => {
+          int code = c as! int;
+          if code < 32 {
+            this._buf.write_string("\\u00")? {
+            };
+            int hi = code / 16;
+            int lo = code % 16;
+            this._buf.write_string(_hex_digit(hi))? {
+            };
+            this._buf.write_string(_hex_digit(lo))? {
+            };
+          } else {
+            this._buf.write_string(c.to_string())? {
+            };
+          }
+        },
       }
       i = i + 1;
     }
@@ -311,62 +318,73 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
           raise DecodeError(message: "unterminated string escape", field: "", position: this._pos);
         }
         char esc = this._data[this._pos];
-        if esc == '"' {
-          buf.write_string("\"")? {
-          };
-          this._advance();
-        } else if esc == '\\' {
-          buf.write_string("\\")? {
-          };
-          this._advance();
-        } else if esc == '/' {
-          buf.write_string("/")? {
-          };
-          this._advance();
-        } else if esc == 'n' {
-          buf.write_string("\n")? {
-          };
-          this._advance();
-        } else if esc == 'r' {
-          buf.write_string("\r")? {
-          };
-          this._advance();
-        } else if esc == 't' {
-          buf.write_string("\t")? {
-          };
-          this._advance();
-        } else if esc == 'b' {
-          char bs = 8 as! char;
-          buf.write_string(bs.to_string())? {
-          };
-          this._advance();
-        } else if esc == 'f' {
-          char ff = 12 as! char;
-          buf.write_string(ff.to_string())? {
-          };
-          this._advance();
-        } else if esc == 'u' {
-          // \uXXXX — read 4 hex digits, emit as character
-          this._advance();
-          int code = 0;
-          int h = 0;
-          while h < 4 {
-            if this._pos >= this._data.len {
-              raise DecodeError(message: "unterminated \\u escape", field: "", position: this._pos);
-            }
-            int digit = _hex_value(this._data[this._pos]);
-            if digit < 0 {
-              raise DecodeError(message: "invalid hex digit in \\u escape", field: "", position: this._pos);
-            }
-            code = code * 16 + digit;
+        match esc {
+          '"' => {
+            buf.write_string("\"")? {
+            };
             this._advance();
-            h = h + 1;
-          }
-          char uc = code as! char;
-          buf.write_string(uc.to_string())? {
-          };
-        } else {
-          raise DecodeError(message: "unknown escape sequence in JSON string", field: "", position: this._pos);
+          },
+          '\\' => {
+            buf.write_string("\\")? {
+            };
+            this._advance();
+          },
+          '/' => {
+            buf.write_string("/")? {
+            };
+            this._advance();
+          },
+          'n' => {
+            buf.write_string("\n")? {
+            };
+            this._advance();
+          },
+          'r' => {
+            buf.write_string("\r")? {
+            };
+            this._advance();
+          },
+          't' => {
+            buf.write_string("\t")? {
+            };
+            this._advance();
+          },
+          'b' => {
+            char bs = 8 as! char;
+            buf.write_string(bs.to_string())? {
+            };
+            this._advance();
+          },
+          'f' => {
+            char ff = 12 as! char;
+            buf.write_string(ff.to_string())? {
+            };
+            this._advance();
+          },
+          'u' => {
+            // \uXXXX — read 4 hex digits, emit as character
+            this._advance();
+            int code = 0;
+            int h = 0;
+            while h < 4 {
+              if this._pos >= this._data.len {
+                raise DecodeError(message: "unterminated \\u escape", field: "", position: this._pos);
+              }
+              int digit = _hex_value(this._data[this._pos]);
+              if digit < 0 {
+                raise DecodeError(message: "invalid hex digit in \\u escape", field: "", position: this._pos);
+              }
+              code = code * 16 + digit;
+              this._advance();
+              h = h + 1;
+            }
+            char uc = code as! char;
+            buf.write_string(uc.to_string())? {
+            };
+          },
+          _ => {
+            raise DecodeError(message: "unknown escape sequence in JSON string", field: "", position: this._pos);
+          },
         }
       } else {
         buf.write_string(c.to_string())? {
@@ -557,6 +575,8 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
     if this._pos >= this._data.len {
       raise DecodeError(message: "unexpected end of input while skipping value", field: "", position: this._pos);
     }
+    // B0091: match here causes codegen IR type mismatch for failable calls
+    // in module compilation context. Using if/else chain until fixed.
     char c = this._data[this._pos];
     if c == '"' {
       this._read_string_value();
@@ -611,16 +631,12 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
       }
       raise DecodeError(message: "unterminated array", field: "", position: this._pos);
     } else if c == 't' {
-      // true
       this._pos = this._pos + 4;
     } else if c == 'f' {
-      // false
       this._pos = this._pos + 5;
     } else if c == 'n' {
-      // null
       this._pos = this._pos + 4;
     } else {
-      // number — read until non-number character
       this._read_number();
     }
   }

@@ -886,6 +886,12 @@ func (s *BasePromiseParserListener) EnterFloatLiteralPattern(ctx *FloatLiteralPa
 // ExitFloatLiteralPattern is called when production floatLiteralPattern is exited.
 func (s *BasePromiseParserListener) ExitFloatLiteralPattern(ctx *FloatLiteralPatternContext) {}
 
+// EnterCharLiteralPattern is called when production charLiteralPattern is entered.
+func (s *BasePromiseParserListener) EnterCharLiteralPattern(ctx *CharLiteralPatternContext) {}
+
+// ExitCharLiteralPattern is called when production charLiteralPattern is exited.
+func (s *BasePromiseParserListener) ExitCharLiteralPattern(ctx *CharLiteralPatternContext) {}
+
 // EnterTrueLiteralPattern is called when production trueLiteralPattern is entered.
 func (s *BasePromiseParserListener) EnterTrueLiteralPattern(ctx *TrueLiteralPatternContext) {}
 

@@ -66,6 +66,13 @@ func (b *Builder) VisitFloatLiteralPattern(ctx *parser.FloatLiteralPatternContex
 	}
 }
 
+func (b *Builder) VisitCharLiteralPattern(ctx *parser.CharLiteralPatternContext) interface{} {
+	return &LiteralMatchPattern{
+		nodeBase: b.baseFromContext(ctx),
+		Value:    &CharLit{nodeBase: b.baseFromContext(ctx), Raw: ctx.CHAR_LITERAL().GetText()},
+	}
+}
+
 func (b *Builder) VisitTrueLiteralPattern(ctx *parser.TrueLiteralPatternContext) interface{} {
 	return &LiteralMatchPattern{
 		nodeBase: b.baseFromContext(ctx),

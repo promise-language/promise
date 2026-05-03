@@ -583,6 +583,10 @@ func (v *BasePromiseParserVisitor) VisitFloatLiteralPattern(ctx *FloatLiteralPat
 	return v.VisitChildren(ctx)
 }
 
+func (v *BasePromiseParserVisitor) VisitCharLiteralPattern(ctx *CharLiteralPatternContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
 func (v *BasePromiseParserVisitor) VisitTrueLiteralPattern(ctx *TrueLiteralPatternContext) interface{} {
 	return v.VisitChildren(ctx)
 }

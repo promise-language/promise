@@ -543,6 +543,7 @@ matchPattern
     | IDENT                                                    # namePattern
     | INT_LITERAL                                              # intLiteralPattern
     | FLOAT_LITERAL                                            # floatLiteralPattern
+    | CHAR_LITERAL                                             # charLiteralPattern
     | TRUE                                                     # trueLiteralPattern
     | FALSE                                                    # falseLiteralPattern
     | NONE                                                     # noneLiteralPattern

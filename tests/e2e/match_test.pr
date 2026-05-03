@@ -1,5 +1,5 @@
-// Comprehensive match expression tests: literals, enums, wildcards,
-// name bindings, guards, nested matching.
+// Match expression tests: literals (int, string, char, bool), enums,
+// wildcards, name bindings, guards, nested, block arms, return match.
 enum Direction {
   North, South, East, West
 }
@@ -315,4 +315,122 @@ test_block_arm_enum_destructure() `test {
     Expr.Neg(n) => -n,
   };
   assert(result == 14, "block arm with destructure: (3+4)*2");
+}
+
+// --- match on char literals ---
+
+test_match_char_literal() `test {
+  char c = 'b';
+  string s = match c {
+    'a' => "alpha",
+    'b' => "bravo",
+    'c' => "charlie",
+    _ => "other",
+  };
+  assert(s == "bravo", "match char literal b");
+}
+
+test_match_char_escape() `test {
+  char c = '\n';
+  string s = match c {
+    '\n' => "newline",
+    '\t' => "tab",
+    '\\' => "backslash",
+    _ => "other",
+  };
+  assert(s == "newline", "match char escape newline");
+}
+
+test_match_char_wildcard() `test {
+  char c = 'z';
+  string s = match c {
+    'a' => "a",
+    _ => "not a",
+  };
+  assert(s == "not a", "match char wildcard");
+}
+
+// --- match on bool ---
+
+test_match_bool_true() `test {
+  bool b = true;
+  string s = match b {
+    true => "yes",
+    _ => "no",
+  };
+  assert(s == "yes", "match bool true");
+}
+
+test_match_bool_false() `test {
+  bool b = false;
+  string s = match b {
+    true => "yes",
+    false => "no",
+    _ => "?",
+  };
+  assert(s == "no", "match bool false");
+}
+
+// --- match with guards ---
+
+test_match_guard_positive() `test {
+  int x = 5;
+  string s = match x {
+    val if val > 0 => "positive",
+    val if val < 0 => "negative",
+    _ => "zero",
+  };
+  assert(s == "positive", "guard: 5 is positive");
+}
+
+test_match_guard_negative() `test {
+  int x = -3;
+  string s = match x {
+    val if val > 0 => "positive",
+    val if val < 0 => "negative",
+    _ => "zero",
+  };
+  assert(s == "negative", "guard: -3 is negative");
+}
+
+test_match_guard_zero() `test {
+  int x = 0;
+  string s = match x {
+    val if val > 0 => "positive",
+    val if val < 0 => "negative",
+    _ => "zero",
+  };
+  assert(s == "zero", "guard: 0 is zero");
+}
+
+test_match_guard_with_literal() `test {
+  int x = 42;
+  string s = match x {
+    0 => "zero",
+    val if val > 100 => "big",
+    _ => "small",
+  };
+  assert(s == "small", "guard: 42 is small");
+}
+
+// --- short destructure (without enum prefix) ---
+
+test_short_destructure() `test {
+  Expr e = Expr.Add(5, 3);
+  int val = match e {
+    Num(v) => v,
+    Add(l, r) => l + r,
+    Neg(n) => -n,
+  };
+  assert(val == 8, "short destructure Add(5,3)");
+}
+
+test_short_destructure_neg() `test {
+  Expr e = Expr.Neg(10);
+  int val = match e {
+    Num(v) => v,
+    Add(l, r) => l + r,
+    Neg(n) => -n,
+  };
+  assert(val == -10, "short destructure Neg(10)");
 }

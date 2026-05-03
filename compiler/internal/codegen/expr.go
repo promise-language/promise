@@ -3281,11 +3281,11 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 			c.block = nextBlock
 
 		case *ast.WildcardMatchPattern, *ast.NameMatchPattern:
-			// Default arm: always matches
-			armBlock := c.newBlock(fmt.Sprintf("match.arm%d", i))
-			c.block.NewBr(armBlock)
+			// Bind name pattern variable (needed before evaluating guard)
+			bindBlock := c.newBlock(fmt.Sprintf("match.bind%d", i))
+			c.block.NewBr(bindBlock)
+			c.block = bindBlock
 
-			c.block = armBlock
 			if np, ok := p.(*ast.NameMatchPattern); ok && np.Name != "_" {
 				lt := subject.Type()
 				alloca := c.createEntryAlloca(lt)
@@ -3294,21 +3294,46 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 				c.locals[np.Name] = alloca
 			}
 
-			var armVal value.Value
-			if arm.Body != nil {
-				armVal = c.genExpr(arm.Body)
-			} else if arm.Block != nil {
-				armVal = c.genBlockValue(arm.Block)
-			}
-			armEnd := c.block
-			if c.block.Term == nil {
-				c.block.NewBr(mergeBlock)
-			}
-			arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil})
+			// If there's a guard, evaluate it and conditionally branch
+			if arm.Guard != nil {
+				guardVal := c.genExpr(arm.Guard)
+				armBlock := c.newBlock(fmt.Sprintf("match.arm%d", i))
+				nextBlock := c.newBlock(fmt.Sprintf("match.next%d", i))
+				c.block.NewCondBr(guardVal, armBlock, nextBlock)
 
-			// After a wildcard/name pattern, no more arms need checking
-			c.block = mergeBlock
-			return buildMatchPhi(mergeBlock, arms)
+				c.block = armBlock
+				var armVal value.Value
+				if arm.Body != nil {
+					armVal = c.genExpr(arm.Body)
+				} else if arm.Block != nil {
+					armVal = c.genBlockValue(arm.Block)
+				}
+				armEnd := c.block
+				if c.block.Term == nil {
+					c.block.NewBr(mergeBlock)
+				}
+				arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil})
+
+				c.block = nextBlock
+				// Guard failed — continue to next arm (don't return early)
+			} else {
+				// No guard — unconditional default arm
+				var armVal value.Value
+				if arm.Body != nil {
+					armVal = c.genExpr(arm.Body)
+				} else if arm.Block != nil {
+					armVal = c.genBlockValue(arm.Block)
+				}
+				armEnd := c.block
+				if c.block.Term == nil {
+					c.block.NewBr(mergeBlock)
+				}
+				arms = append(arms, matchArmInfo{val: armVal, end: armEnd, hasV: armVal != nil})
+
+				// After an unguarded wildcard/name, no more arms need checking
+				c.block = mergeBlock
+				return buildMatchPhi(mergeBlock, arms)
+			}
 		}
 	}
 

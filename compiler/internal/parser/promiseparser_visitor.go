@@ -439,6 +439,9 @@ type PromiseParserVisitor interface {
 	// Visit a parse tree produced by PromiseParser#floatLiteralPattern.
 	VisitFloatLiteralPattern(ctx *FloatLiteralPatternContext) interface{}
 
+	// Visit a parse tree produced by PromiseParser#charLiteralPattern.
+	VisitCharLiteralPattern(ctx *CharLiteralPatternContext) interface{}
+
 	// Visit a parse tree produced by PromiseParser#trueLiteralPattern.
 	VisitTrueLiteralPattern(ctx *TrueLiteralPatternContext) interface{}
 

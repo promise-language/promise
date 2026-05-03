@@ -8,7 +8,7 @@ type int `native `public {
   == (int other) bool `native;
   != (int other) bool `native;
   < (int other) bool `native;
-  >(int other) bool `native;
+  > (int other) bool `native;
   <= (int other) bool `native;
   >= (int other) bool `native;
   -() int `native;
@@ -83,7 +83,7 @@ type i8 `native `public {
   == (i8 other) bool `native;
   != (i8 other) bool `native;
   < (i8 other) bool `native;
-  >(i8 other) bool `native;
+  > (i8 other) bool `native;
   <= (i8 other) bool `native;
   >= (i8 other) bool `native;
   -() i8 `native;
@@ -134,7 +134,7 @@ type i16 `native `public {
   == (i16 other) bool `native;
   != (i16 other) bool `native;
   < (i16 other) bool `native;
-  >(i16 other) bool `native;
+  > (i16 other) bool `native;
   <= (i16 other) bool `native;
   >= (i16 other) bool `native;
   -() i16 `native;
@@ -185,7 +185,7 @@ type i32 `native `public {
   == (i32 other) bool `native;
   != (i32 other) bool `native;
   < (i32 other) bool `native;
-  >(i32 other) bool `native;
+  > (i32 other) bool `native;
   <= (i32 other) bool `native;
   >= (i32 other) bool `native;
   -() i32 `native;
@@ -236,7 +236,7 @@ type i64 `native `public {
   == (i64 other) bool `native;
   != (i64 other) bool `native;
   < (i64 other) bool `native;
-  >(i64 other) bool `native;
+  > (i64 other) bool `native;
   <= (i64 other) bool `native;
   >= (i64 other) bool `native;
   -() i64 `native;

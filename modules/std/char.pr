@@ -3,7 +3,7 @@ type char `native `public {
   == (char other) bool `native;
   != (char other) bool `native;
   < (char other) bool `native;
-  >(char other) bool `native;
+  > (char other) bool `native;
   <= (char other) bool `native;
   >= (char other) bool `native;
   .. (char end) Range[char] `native;

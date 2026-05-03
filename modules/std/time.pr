@@ -28,7 +28,7 @@ type Duration `public `doc("A span of time measured in nanoseconds. Pure value t
   == (Duration other) bool => this.nanos == other.nanos;
   != (Duration other) bool => this.nanos != other.nanos;
   < (Duration other) bool => this.nanos < other.nanos;
-  >(Duration other) bool => this.nanos > other.nanos;
+  > (Duration other) bool => this.nanos > other.nanos;
   <= (Duration other) bool => this.nanos <= other.nanos;
   >= (Duration other) bool => this.nanos >= other.nanos;
 
@@ -86,7 +86,7 @@ type Instant `public `doc("A point in monotonic time. Use `now()` to capture the
   == (Instant other) bool => this.nanos == other.nanos;
   != (Instant other) bool => this.nanos != other.nanos;
   < (Instant other) bool => this.nanos < other.nanos;
-  >(Instant other) bool => this.nanos > other.nanos;
+  > (Instant other) bool => this.nanos > other.nanos;
   <= (Instant other) bool => this.nanos <= other.nanos;
   >= (Instant other) bool => this.nanos >= other.nanos;
 }

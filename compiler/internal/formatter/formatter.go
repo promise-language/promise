@@ -957,7 +957,7 @@ func (f *formatter) needsSpace(prev, cur token) bool {
 		if p == tkIdent {
 			return isControlKeyword(prev.text)
 		}
-		if p == tkRParen || p == tkRBracket || p == tkGT {
+		if p == tkRParen || p == tkRBracket {
 			return false
 		}
 		// Operator method names: []=( and [:]=( — no space before (

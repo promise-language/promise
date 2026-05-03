@@ -8,7 +8,7 @@ type string `native `public {
   == (string other) bool `native;
   != (string other) bool `native;
   < (string other) bool `native;
-  >(string other) bool `native;
+  > (string other) bool `native;
   <= (string other) bool `native;
   >= (string other) bool `native;
 

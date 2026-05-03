@@ -8,7 +8,7 @@ type uint `native `public {
   == (uint other) bool `native;
   != (uint other) bool `native;
   < (uint other) bool `native;
-  >(uint other) bool `native;
+  > (uint other) bool `native;
   <= (uint other) bool `native;
   >= (uint other) bool `native;
   -() uint `native;
@@ -74,7 +74,7 @@ type u8 `native `public {
   == (u8 other) bool `native;
   != (u8 other) bool `native;
   < (u8 other) bool `native;
-  >(u8 other) bool `native;
+  > (u8 other) bool `native;
   <= (u8 other) bool `native;
   >= (u8 other) bool `native;
   -() u8 `native;
@@ -125,7 +125,7 @@ type u16 `native `public {
   == (u16 other) bool `native;
   != (u16 other) bool `native;
   < (u16 other) bool `native;
-  >(u16 other) bool `native;
+  > (u16 other) bool `native;
   <= (u16 other) bool `native;
   >= (u16 other) bool `native;
   -() u16 `native;
@@ -176,7 +176,7 @@ type u32 `native `public {
   == (u32 other) bool `native;
   != (u32 other) bool `native;
   < (u32 other) bool `native;
-  >(u32 other) bool `native;
+  > (u32 other) bool `native;
   <= (u32 other) bool `native;
   >= (u32 other) bool `native;
   -() u32 `native;
@@ -227,7 +227,7 @@ type u64 `native `public {
   == (u64 other) bool `native;
   != (u64 other) bool `native;
   < (u64 other) bool `native;
-  >(u64 other) bool `native;
+  > (u64 other) bool `native;
   <= (u64 other) bool `native;
   >= (u64 other) bool `native;
   -() u64 `native;

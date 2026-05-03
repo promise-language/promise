@@ -8,7 +8,7 @@ type f32 `native `public {
   == (f32 other) bool `native;
   != (f32 other) bool `native;
   < (f32 other) bool `native;
-  >(f32 other) bool `native;
+  > (f32 other) bool `native;
   <= (f32 other) bool `native;
   >= (f32 other) bool `native;
   -() f32 `native;
@@ -48,7 +48,7 @@ type f64 `native `public {
   == (f64 other) bool `native;
   != (f64 other) bool `native;
   < (f64 other) bool `native;
-  >(f64 other) bool `native;
+  > (f64 other) bool `native;
   <= (f64 other) bool `native;
   >= (f64 other) bool `native;
   -() f64 `native;

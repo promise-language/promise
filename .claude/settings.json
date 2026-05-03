@@ -23,7 +23,7 @@
       "Bash(./build:*)",
       "Bash(bin/test.sh:*)",
       "Bash(bin/verify.sh:*)",
-      "Bash(bin/promise :*)",
+      "Bash(bin/promise:*)",
       "Read(~.promise/cache/llvm/darwin-arm64/**)",
       "Bash(otool -L ~/.promise/cache/llvm/darwin-arm64/lld)",
       "Bash(~/.promise/cache/llvm/darwin-arm64/lld --version)",
@@ -38,18 +38,18 @@
       "Bash(bin/promise test:*)",
       "Bash(promise format:*)",
       "Bash(xxd:*)",
-      "Bash(bin/promise fmt:*)",
-      "Bash(bin/promise emit-ir:*)",
       "Bash(PROMISE_CACHE_DEBUG=1 bin/promise test tests/std/test_sort.pr)",
       "Read(~/go/pkg/mod/github.com/llir/llvm@v0.3.6/ir/**)",
       "Bash(PROMISE_HOME=/tmp/nocache_$$ bin/promise test:*)",
       "Bash(for d:*)",
       "Bash(do echo:*)",
-      "Read(//Users/djabi/prog/promise_lang/**)"
+      "Read(~/prog/promise_lang/**)",
+      "Bash(brew --prefix llvm)",
+      "Bash(/opt/homebrew/opt/llvm/bin/opt:*)"
     ],
     "additionalDirectories": [
       "/tmp",
-      "~.promise"
+      "~/.promise"
     ]
   },
   "spinnerVerbs": {

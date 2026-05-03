@@ -1,12 +1,5 @@
 // json_test.pr — Tests for JSON encoding and decoding
-// Helper to build expected JSON strings without triggering interpolation.
-// Replaces | with { and ~ with } in the pattern.
-_json(string pattern) string {
-  return pattern.replace("|", _json_lbrace()).replace("~", "}");
-}
-
 // ── Encoder tests ───────────────────────────────────────────────────────────
-
 encode_int_test() `test {
   JsonEncoder enc = JsonEncoder();
   enc.encode_int(42)!;
@@ -66,7 +59,7 @@ encode_empty_object_test() `test {
   JsonEncoder enc = JsonEncoder();
   enc.begin_object(0)!;
   enc.end_object()!;
-  assert(enc.to_string() == _json("|~"), "encode empty object");
+  assert(enc.to_string() == "\{}", "encode empty object");
 }
 
 encode_object_test() `test {
@@ -77,7 +70,7 @@ encode_object_test() `test {
   enc.encode_key("age")!;
   enc.encode_int(30)!;
   enc.end_object()!;
-  assert(enc.to_string() == _json("|\"name\":\"Alice\",\"age\":30~"), "encode object");
+  assert(enc.to_string() == "\{\"name\":\"Alice\",\"age\":30}", "encode object");
 }
 
 encode_empty_array_test() `test {
@@ -106,7 +99,7 @@ encode_nested_test() `test {
   enc.encode_string("b")!;
   enc.end_array()!;
   enc.end_object()!;
-  assert(enc.to_string() == _json("|\"items\":[\"a\",\"b\"]~"), "encode nested");
+  assert(enc.to_string() == "\{\"items\":[\"a\",\"b\"]}", "encode nested");
 }
 
 // ── Decoder tests ───────────────────────────────────────────────────────────
@@ -174,7 +167,7 @@ decode_none_not_null_test() `test {
 }
 
 decode_object_test() `test {
-  JsonDecoder dec = JsonDecoder(data: _json("|\"name\":\"Alice\",\"age\":30~"));
+  JsonDecoder dec = JsonDecoder(data: "\{\"name\":\"Alice\",\"age\":30}");
   dec.begin_object()!;
   string name = "";
   int age = 0;
@@ -198,7 +191,7 @@ decode_object_test() `test {
 }
 
 decode_empty_object_test() `test {
-  JsonDecoder dec = JsonDecoder(data: _json("|~"));
+  JsonDecoder dec = JsonDecoder(data: "\{}");
   dec.begin_object()!;
   string? key = dec.next_key()!;
   assert(key is absent, "empty object has no keys");
@@ -242,7 +235,7 @@ decode_whitespace_test() `test {
 }
 
 skip_value_test() `test {
-  JsonDecoder dec = JsonDecoder(data: _json("|\"a\":1,\"b\":|\"nested\":true~,\"c\":3~"));
+  JsonDecoder dec = JsonDecoder(data: "\{\"a\":1,\"b\":\{\"nested\":true},\"c\":3}");
   dec.begin_object()!;
   int c_val = 0;
   for {
@@ -418,7 +411,7 @@ encode_object_with_null_test() `test {
   enc.encode_key("b")!;
   enc.encode_none()!;
   enc.end_object()!;
-  assert(enc.to_string() == _json("|\"a\":1,\"b\":null~"), "encode object with null");
+  assert(enc.to_string() == "\{\"a\":1,\"b\":null}", "encode object with null");
 }
 
 // ── Decoder edge cases ──────────────────────────────────────────────────────
@@ -448,7 +441,7 @@ decode_zero_test() `test {
 }
 
 decode_object_with_null_value_test() `test {
-  JsonDecoder dec = JsonDecoder(data: _json("|\"x\":null,\"y\":1~"));
+  JsonDecoder dec = JsonDecoder(data: "\{\"x\":null,\"y\":1}");
   dec.begin_object()!;
   bool x_is_null = false;
   int y_val = 0;
@@ -472,7 +465,7 @@ decode_object_with_null_value_test() `test {
 }
 
 skip_value_array_test() `test {
-  JsonDecoder dec = JsonDecoder(data: _json("|\"a\":[1,2,3],\"b\":99~"));
+  JsonDecoder dec = JsonDecoder(data: "\{\"a\":[1,2,3],\"b\":99}");
   dec.begin_object()!;
   int b_val = 0;
   for {
@@ -492,7 +485,7 @@ skip_value_array_test() `test {
 }
 
 skip_value_string_test() `test {
-  JsonDecoder dec = JsonDecoder(data: _json("|\"a\":\"hello\",\"b\":42~"));
+  JsonDecoder dec = JsonDecoder(data: "\{\"a\":\"hello\",\"b\":42}");
   dec.begin_object()!;
   int b_val = 0;
   for {
@@ -601,7 +594,7 @@ parse_value_empty_array_test() `test {
 }
 
 parse_value_object_test() `test {
-  string data = _json("|\"a\":1,\"b\":2~");
+  string data = "\{\"a\":1,\"b\":2}";
   JsonValue v = parse_value(data)!;
   match v {
     JsonValue.Object(keys, vals) => assert(keys.len == 2, "object keys"),
@@ -642,7 +635,7 @@ round_trip_value_test() `test {
 
 nested_value_test() `test {
   // Nested: object containing array
-  string data = _json("|\"items\":[1,2],\"ok\":true~");
+  string data = "\{\"items\":[1,2],\"ok\":true}";
   JsonValue v = parse_value(data)!;
   match v {
     JsonValue.Object(keys, vals) => {
@@ -704,7 +697,7 @@ parse_value_nested_arrays_test() `test {
 }
 
 parse_value_empty_object_test() `test {
-  JsonValue v = parse_value(_json("|~"))!;
+  JsonValue v = parse_value("\{}")!;
   match v {
     JsonValue.Object(keys, vals) => assert(keys.len == 0, "empty obj"),
     _ => assert(false, "expected object"),
@@ -735,7 +728,7 @@ format_value_object_test() `test {
 format_value_empty_object_test() `test {
   JsonValue obj = JsonValue.Object(string[](), JsonValue[]());
   string s = format_value(obj)!;
-  assert(s == _json("|~"), "format empty object");
+  assert(s == "\{}", "format empty object");
 }
 
 round_trip_object_test() `test {
@@ -753,7 +746,7 @@ round_trip_object_test() `test {
 
 deep_nesting_test() `test {
   // array inside object: {"data":[1,true,"x"]}
-  string data = _json("|\"data\":[1,true,\"x\"]~");
+  string data = "\{\"data\":[1,true,\"x\"]}";
   JsonValue v = parse_value(data)!;
   string s = format_value(v)!;
   JsonValue v2 = parse_value(s)!;

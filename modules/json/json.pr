@@ -156,7 +156,7 @@ type JsonEncoder is Encoder `public `doc("Encodes values as JSON text. Satisfies
 
   begin_object(~this, int field_count)! `public {
     this._write_comma();
-    this._buf.write_string(_json_lbrace())? {
+    this._buf.write_string("\{")? {
     };
     this._depth = this._depth + 1;
     this._stack.push(_JsonState.Empty);
@@ -813,12 +813,6 @@ _parse_json_object(JsonDecoder ~dec) JsonValue! {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
-
-_json_lbrace() string {
-  // Returns "{" without triggering string interpolation
-  char c = 123 as! char;
-  return c.to_string();
-}
 
 _hex_digit(int v) string {
   if v < 10 {

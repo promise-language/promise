@@ -357,7 +357,7 @@ func compileTargets(files []string, baseDir string, targetTriple string) (target
 
 // --- Run loop ---
 
-func runStress(files []string, count int, duration time.Duration, perRunTimeout time.Duration, targetTriple string) {
+func runStress(files []string, count int, duration time.Duration, perRunTimeout time.Duration, targetTriple string, outputFile string) {
 	if len(files) == 0 {
 		fmt.Println("no test files found")
 		return
@@ -565,10 +565,21 @@ func runStress(files []string, count int, duration time.Duration, perRunTimeout 
 	}
 
 report:
-	if !isTTY {
+	// Clear live progress before printing the final report.
+	if isTTY {
+		fmt.Print("\033[H\033[2J")
+	} else {
 		fmt.Println()
 	}
-	printStressReport(iteration, time.Since(start), allFiles, totalTests, targetTriple)
+	report := buildStressReport(iteration, time.Since(start), allFiles, totalTests, targetTriple)
+	fmt.Print(report)
+
+	// Write report to file if requested.
+	if outputFile != "" {
+		if err := os.WriteFile(outputFile, []byte(report), 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "error writing report: %v\n", err)
+		}
+	}
 
 	// Exit code: 1 if any flaky tests
 	for _, fs := range allFiles {
@@ -645,39 +656,60 @@ func printStressProgress(iteration int, elapsed time.Duration, files []*fileStat
 		iteration, elapsed.Seconds(), len(flaky), len(highVar), stableCount, totalTests)
 }
 
-func printStressReport(iterations int, elapsed time.Duration, files []*fileStats, totalTests int, targetTriple string) {
-	fmt.Printf("=== Stress Test Report ===\n")
+// buildStressReport generates the final stress test report as a string.
+func buildStressReport(iterations int, elapsed time.Duration, files []*fileStats, totalTests int, targetTriple string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "=== Stress Test Report ===\n")
 	ti := sema.ParseTargetInfo(targetTriple)
 	if ti.OS != "" && ti.Arch != "" {
-		fmt.Printf("Target: %s-%s\n", ti.OS, ti.Arch)
+		fmt.Fprintf(&b, "Target: %s-%s\n", ti.OS, ti.Arch)
 	} else if targetTriple != "" {
-		fmt.Printf("Target: %s\n", targetTriple)
+		fmt.Fprintf(&b, "Target: %s\n", targetTriple)
 	}
-	fmt.Printf("%d iterations over %.1fs\n\n", iterations, elapsed.Seconds())
+	if commit := gitCommitHash(); commit != "" {
+		fmt.Fprintf(&b, "Commit: %s\n", commit)
+	}
+	fmt.Fprintf(&b, "%d iterations over %.1fs\n\n", iterations, elapsed.Seconds())
 
 	flaky, highVar, stable := collectTestsByCategory(files)
 
 	if len(flaky) > 0 {
-		fmt.Printf("FLAKY (%d tests):\n", len(flaky))
-		printTestGroupDetailed(flaky)
-		fmt.Println()
+		fmt.Fprintf(&b, "FLAKY (%d tests):\n", len(flaky))
+		writeTestGroupDetailed(&b, flaky)
+		fmt.Fprintln(&b)
 	}
 
 	if len(highVar) > 0 {
-		fmt.Printf("HIGH VARIANCE (%d tests):\n", len(highVar))
-		printTestGroupDetailed(highVar)
-		fmt.Println()
+		fmt.Fprintf(&b, "HIGH VARIANCE (%d tests):\n", len(highVar))
+		writeTestGroupDetailed(&b, highVar)
+		fmt.Fprintln(&b)
 	}
 
 	if len(flaky) == 0 && len(highVar) == 0 {
-		fmt.Printf("ALL STABLE: %d tests, all 100%% pass rate with low variance\n", totalTests)
+		fmt.Fprintf(&b, "ALL STABLE: %d tests, all 100%% pass rate with low variance\n", totalTests)
 	} else {
 		stableFiles := map[string]bool{}
 		for _, st := range stable {
 			stableFiles[st.file] = true
 		}
-		fmt.Printf("STABLE: %d tests across %d files\n", len(stable), len(stableFiles))
+		fmt.Fprintf(&b, "STABLE: %d tests across %d files\n", len(stable), len(stableFiles))
 	}
+	return b.String()
+}
+
+// gitCommitHash returns the short git commit hash if the working tree is clean,
+// or "" if unavailable or there are uncommitted changes.
+func gitCommitHash() string {
+	// Check for uncommitted changes first.
+	status, err := exec.Command("git", "status", "--porcelain").Output()
+	if err != nil || len(strings.TrimSpace(string(status))) > 0 {
+		return ""
+	}
+	out, err := exec.Command("git", "rev-parse", "--short", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // printTestGroup prints tests grouped by file, with compact stats.
@@ -716,8 +748,8 @@ func printTestGroup(tests []*testStats, showCoV bool) {
 	}
 }
 
-// printTestGroupDetailed prints tests grouped by file, with full stats including min/max.
-func printTestGroupDetailed(tests []*testStats) {
+// writeTestGroupDetailed writes tests grouped by file, with full stats including min/max.
+func writeTestGroupDetailed(w *strings.Builder, tests []*testStats) {
 	type fileGroup struct {
 		file  string
 		tests []*testStats
@@ -734,20 +766,20 @@ func printTestGroupDetailed(tests []*testStats) {
 	}
 
 	for _, g := range groups {
-		fmt.Printf("  %s\n", g.file)
+		fmt.Fprintf(w, "  %s\n", g.file)
 		for _, st := range g.tests {
-			fmt.Printf("    %-30s %d/%d (%.1f%%)  avg: %s  σ: %s  min: %s  max: %s",
+			fmt.Fprintf(w, "    %-30s %d/%d (%.1f%%)  avg: %s  σ: %s  min: %s  max: %s",
 				st.name,
 				st.passes, st.total(), st.passRate()*100,
 				fmtDuration(st.mean()), fmtDuration(st.stddev()),
 				fmtDuration(st.minTime()), fmtDuration(st.maxTime()))
 			if st.isHighVariance() {
-				fmt.Printf("  CoV: %.2f", st.cov())
+				fmt.Fprintf(w, "  CoV: %.2f", st.cov())
 			}
 			if st.fails > 0 {
-				fmt.Printf("\n      %s", st.failSummary())
+				fmt.Fprintf(w, "\n      %s", st.failSummary())
 			}
-			fmt.Println()
+			fmt.Fprintln(w)
 		}
 	}
 }

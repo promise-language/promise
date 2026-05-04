@@ -79,6 +79,7 @@ Options (test):
   -parallel <N>         Run up to N tests in parallel (default: number of CPUs)
   -stress [N|duration]  Stress test mode: run repeatedly to find flaky tests
                         N = iteration count, duration = time limit, bare = until Ctrl+C
+  -output <file>        Write stress test report to file (in addition to stdout)
 
 Options (exec):
   -timeout <duration>   Execution timeout (default: 60s)
@@ -335,6 +336,7 @@ func runTest(args []string) {
 	var stressCount int              // 0 = unlimited
 	var stressDuration time.Duration // 0 = unlimited
 	var targetTriple string          // empty = host target
+	var outputFile string            // stress report output file
 	var remaining []string
 	for i := 0; i < len(args); i++ {
 		if args[i] == "-timeout" && i+1 < len(args) {
@@ -370,13 +372,16 @@ func runTest(args []string) {
 				}
 				// otherwise: bare -stress (unlimited), next arg is a target
 			}
+		} else if args[i] == "-output" && i+1 < len(args) {
+			outputFile = args[i+1]
+			i++
 		} else {
 			remaining = append(remaining, args[i])
 		}
 	}
 
 	if len(remaining) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: promise test [-timeout duration] [-parallel N] [-stress [N|duration]] <file.pr | dir | dir/...> ...")
+		fmt.Fprintln(os.Stderr, "usage: promise test [-timeout duration] [-parallel N] [-stress [N|duration]] [-output file] <file.pr | dir | dir/...> ...")
 		os.Exit(1)
 	}
 
@@ -408,7 +413,7 @@ func runTest(args []string) {
 	}
 
 	if stressMode {
-		runStress(allFiles, stressCount, stressDuration, timeout, targetTriple)
+		runStress(allFiles, stressCount, stressDuration, timeout, targetTriple, outputFile)
 		return
 	}
 

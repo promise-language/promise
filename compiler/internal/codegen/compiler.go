@@ -3826,7 +3826,7 @@ func (c *Compiler) defineModuleEnumMethods(file *ast.File, moduleName string) {
 
 			mangledName := mangleModuleMethodName(moduleName, ed.Name, md.Name, md.IsSetter)
 			fn, ok := c.funcs[mangledName]
-			if !ok {
+			if !ok || len(fn.Blocks) > 0 {
 				continue
 			}
 
@@ -3848,106 +3848,6 @@ func (c *Compiler) lookupEnumMethod(enum *types.Enum, md *ast.MethodDecl) *types
 		return enum.LookupGetter(md.Name)
 	}
 	return enum.LookupMethod(md.Name)
-}
-
-// declareModuleEnumMethods creates LLVM function stubs for enum methods in a module.
-// Mirrors declareModuleTypeMethods but for enum declarations.
-func (c *Compiler) declareModuleEnumMethods(file *ast.File, moduleName string) {
-	for _, decl := range file.Decls {
-		ed, ok := decl.(*ast.EnumDecl)
-		if !ok {
-			continue
-		}
-		if c.info.FilteredDecls[decl] {
-			continue
-		}
-		enum := c.lookupEnumType(ed.Name)
-		if enum == nil {
-			continue
-		}
-		if len(enum.TypeParams()) > 0 {
-			continue // generic — handled by monomorphization
-		}
-
-		for _, md := range ed.Methods {
-			if md.Body == nil {
-				continue
-			}
-			m := c.lookupEnumMethod(enum, md)
-			if m == nil || m.Sig() == nil {
-				continue
-			}
-
-			mangledName := mangleModuleMethodName(moduleName, ed.Name, md.Name, md.IsSetter)
-
-			var params []*ir.Param
-			if m.Sig().Recv() != nil {
-				params = append(params, ir.NewParam("this", irtypes.I8Ptr))
-			}
-			for _, p := range m.Sig().Params() {
-				params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
-			}
-
-			retType := irtypes.Type(irtypes.Void)
-			if m.Sig().Result() != nil {
-				retType = c.resolveType(m.Sig().Result())
-			}
-			if m.Sig().CanError() {
-				retType = computeResultType(retType)
-			}
-
-			fn := c.module.NewFunc(mangledName, retType, params...)
-			c.funcs[mangledName] = fn
-
-			// Track ownership for separate compilation
-			c.moduleOwnedFuncs[mangledName] = moduleName
-
-			// Also register the non-prefixed method name for dispatch within the module
-			plainName := mangleMethodName(ed.Name, md.Name, md.IsSetter)
-			if _, exists := c.funcs[plainName]; !exists {
-				c.funcs[plainName] = fn
-			}
-		}
-	}
-}
-
-// defineModuleEnumMethods generates enum method bodies for a module.
-// Mirrors defineModuleTypeMethods but for enum declarations.
-func (c *Compiler) defineModuleEnumMethods(file *ast.File, moduleName string) {
-	for _, decl := range file.Decls {
-		ed, ok := decl.(*ast.EnumDecl)
-		if !ok {
-			continue
-		}
-		if c.info.FilteredDecls[decl] {
-			continue
-		}
-		enum := c.lookupEnumType(ed.Name)
-		if enum == nil {
-			continue
-		}
-		if len(enum.TypeParams()) > 0 {
-			continue // generic — handled by monomorphization
-		}
-
-		for _, md := range ed.Methods {
-			if md.Body == nil {
-				continue
-			}
-			m := c.lookupEnumMethod(enum, md)
-			if m == nil || m.Sig() == nil {
-				continue
-			}
-
-			mangledName := mangleModuleMethodName(moduleName, ed.Name, md.Name, md.IsSetter)
-			fn, ok := c.funcs[mangledName]
-			if !ok || len(fn.Blocks) > 0 {
-				continue
-			}
-
-			c.defineMethodFunc(md, m, fn)
-		}
-	}
 }
 
 // typeGlobalName returns the IR global name for a type's typeinfo/vtable/rtti globals.

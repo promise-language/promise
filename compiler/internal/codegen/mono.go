@@ -393,11 +393,242 @@ func discoverInstances(t types.Type, result *[]*types.Instance, seen map[string]
 	}
 }
 
+// funcInstanceContainsTypeParam reports whether a FuncInstance's TypeArgs contain
+// any unresolved TypeParams. Such instances arise when a generic function body
+// calls another generic function using the outer function's type parameter:
+//
+//	wrap[T](T val) T { return identity[T](val); }
+//
+// Sema records FuncInstance{identity, [T]} where T is wrap's TypeParam.
+func funcInstanceContainsTypeParam(fi *sema.FuncInstance) bool {
+	for _, arg := range fi.TypeArgs {
+		if types.ContainsTypeParam(arg) {
+			return true
+		}
+	}
+	return false
+}
+
+// methodInstanceContainsTypeParam reports whether a MethodInstance's TypeArgs
+// or OwnerInst contain any unresolved TypeParams. Same pattern as funcInstance.
+func methodInstanceContainsTypeParam(mi *sema.MethodInstance) bool {
+	for _, arg := range mi.TypeArgs {
+		if types.ContainsTypeParam(arg) {
+			return true
+		}
+	}
+	if mi.OwnerInst != nil && types.ContainsTypeParam(mi.OwnerInst) {
+		return true
+	}
+	return false
+}
+
+// resolveUnresolvedFuncInstances applies a substitution map to unresolved FuncInstances
+// and adds any newly concrete instances to the result.
+func resolveUnresolvedFuncInstances(unresolved []*sema.FuncInstance, subst map[*types.TypeParam]types.Type, result *[]*sema.FuncInstance, seen map[string]bool) {
+	for _, fi := range unresolved {
+		// Substitute each TypeArg
+		resolvedArgs := make([]types.Type, len(fi.TypeArgs))
+		changed := false
+		for i, arg := range fi.TypeArgs {
+			resolved := types.Substitute(arg, subst)
+			resolvedArgs[i] = resolved
+			if resolved != arg {
+				changed = true
+			}
+		}
+		if !changed {
+			continue // substitution didn't change anything
+		}
+		// Check if all args are now concrete
+		hasTypeParam := false
+		for _, arg := range resolvedArgs {
+			if types.ContainsTypeParam(arg) {
+				hasTypeParam = true
+				break
+			}
+		}
+		if hasTypeParam {
+			continue // still has unresolved TypeParams
+		}
+
+		// Build the substituted signature
+		sig := fi.Func.Type().(*types.Signature)
+		fullSubst := types.BuildSubstMap(sig.TypeParams(), resolvedArgs)
+		monoSig := types.Substitute(sig, fullSubst).(*types.Signature)
+
+		resolved := &sema.FuncInstance{
+			Func:     fi.Func,
+			TypeArgs: resolvedArgs,
+			Sig:      monoSig,
+		}
+		key := monoFuncName(resolved)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		*result = append(*result, resolved)
+	}
+}
+
+// resolveUnresolvedMethodInstances applies a substitution map to unresolved MethodInstances
+// and adds any newly concrete instances to the result.
+func resolveUnresolvedMethodInstances(unresolved []*sema.MethodInstance, subst map[*types.TypeParam]types.Type, result *[]*sema.MethodInstance, seen map[string]bool) {
+	for _, mi := range unresolved {
+		// Substitute each TypeArg
+		resolvedArgs := make([]types.Type, len(mi.TypeArgs))
+		changed := false
+		for i, arg := range mi.TypeArgs {
+			resolved := types.Substitute(arg, subst)
+			resolvedArgs[i] = resolved
+			if resolved != arg {
+				changed = true
+			}
+		}
+
+		// Substitute OwnerInst if present
+		var resolvedOwnerInst *types.Instance
+		if mi.OwnerInst != nil {
+			resolved := types.Substitute(mi.OwnerInst, subst)
+			if resolved != mi.OwnerInst {
+				changed = true
+			}
+			if ri, ok := resolved.(*types.Instance); ok {
+				resolvedOwnerInst = ri
+			} else {
+				continue // couldn't resolve to an instance
+			}
+		}
+
+		if !changed {
+			continue
+		}
+
+		// Check if all args are now concrete
+		hasTypeParam := false
+		for _, arg := range resolvedArgs {
+			if types.ContainsTypeParam(arg) {
+				hasTypeParam = true
+				break
+			}
+		}
+		if hasTypeParam {
+			continue
+		}
+		if resolvedOwnerInst != nil && types.ContainsTypeParam(resolvedOwnerInst) {
+			continue
+		}
+
+		// Build the substituted signature
+		methodSubst := map[*types.TypeParam]types.Type{}
+		if resolvedOwnerInst != nil {
+			for k, v := range types.BuildSubstMap(mi.Owner.TypeParams(), resolvedOwnerInst.TypeArgs()) {
+				methodSubst[k] = v
+			}
+		}
+		for k, v := range types.BuildSubstMap(mi.Method.Sig().TypeParams(), resolvedArgs) {
+			methodSubst[k] = v
+		}
+		monoSig := types.Substitute(mi.Method.Sig(), methodSubst).(*types.Signature)
+
+		resolved := &sema.MethodInstance{
+			Owner:     mi.Owner,
+			OwnerInst: resolvedOwnerInst,
+			Method:    mi.Method,
+			TypeArgs:  resolvedArgs,
+			Sig:       monoSig,
+		}
+		key := monoMethodInstanceName(resolved)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		*result = append(*result, resolved)
+	}
+}
+
+// crossResolveFuncMethodInstances performs cross-resolution between FuncInstances and
+// MethodInstances. This handles cases where:
+//   - A generic function calls a generic method (FuncInstance subst resolves MethodInstance)
+//   - A generic method calls a generic function (MethodInstance subst resolves FuncInstance)
+//
+// Both collect functions already handle self-resolution (func→func, method→method) and
+// type-instance resolution. This function handles the cross-cutting cases.
+func crossResolveFuncMethodInstances(info *sema.Info, funcInstances *[]*sema.FuncInstance, methodInstances *[]*sema.MethodInstance) {
+	// Collect unresolved instances from sema info
+	var unresolvedFuncs []*sema.FuncInstance
+	for _, fi := range info.FuncInstances {
+		if funcInstanceContainsTypeParam(fi) {
+			unresolvedFuncs = append(unresolvedFuncs, fi)
+		}
+	}
+	var unresolvedMethods []*sema.MethodInstance
+	for _, mi := range info.MethodInstances {
+		if methodInstanceContainsTypeParam(mi) {
+			unresolvedMethods = append(unresolvedMethods, mi)
+		}
+	}
+
+	if len(unresolvedFuncs) == 0 && len(unresolvedMethods) == 0 {
+		return
+	}
+
+	// Build seen sets from already-collected concrete instances
+	funcSeen := make(map[string]bool, len(*funcInstances))
+	for _, fi := range *funcInstances {
+		funcSeen[monoFuncName(fi)] = true
+	}
+	methodSeen := make(map[string]bool, len(*methodInstances))
+	for _, mi := range *methodInstances {
+		methodSeen[monoMethodInstanceName(mi)] = true
+	}
+
+	// Cross-resolve using index-based iteration to process new discoveries.
+	funcIdx := 0
+	methodIdx := 0
+	for funcIdx < len(*funcInstances) || methodIdx < len(*methodInstances) {
+		// Use FuncInstance substitutions to resolve unresolved MethodInstances
+		for funcIdx < len(*funcInstances) {
+			fi := (*funcInstances)[funcIdx]
+			funcIdx++
+			sig := fi.Func.Type().(*types.Signature)
+			subst := types.BuildSubstMap(sig.TypeParams(), fi.TypeArgs)
+			if len(subst) > 0 {
+				resolveUnresolvedMethodInstances(unresolvedMethods, subst, methodInstances, methodSeen)
+				resolveUnresolvedFuncInstances(unresolvedFuncs, subst, funcInstances, funcSeen)
+			}
+		}
+		// Use MethodInstance substitutions to resolve unresolved FuncInstances
+		for methodIdx < len(*methodInstances) {
+			mi := (*methodInstances)[methodIdx]
+			methodIdx++
+			subst := buildMethodInstanceSubst(mi)
+			if len(subst) > 0 {
+				resolveUnresolvedFuncInstances(unresolvedFuncs, subst, funcInstances, funcSeen)
+				resolveUnresolvedMethodInstances(unresolvedMethods, subst, methodInstances, methodSeen)
+			}
+		}
+	}
+}
+
 // collectMonoFuncInstances deduplicates generic function instances by mangled name.
-func collectMonoFuncInstances(info *sema.Info) []*sema.FuncInstance {
+// Also resolves unresolved instances: when a generic function body calls another
+// generic function using the outer function's type parameter (e.g., identity[T]
+// inside wrap[T]), the inner FuncInstance has TypeParams that need to be resolved
+// via the outer function's concrete instantiation.
+//
+// typeInstances provides substitution maps from concrete type instances — needed
+// when a generic type's method body calls a generic function with the type's
+// type parameter (e.g., Iterator[T].filter() calling some_func[T]()).
+func collectMonoFuncInstances(info *sema.Info, typeInstances ...[]*types.Instance) []*sema.FuncInstance {
 	seen := map[string]bool{}
 	var result []*sema.FuncInstance
+	var unresolved []*sema.FuncInstance
 	for _, fi := range info.FuncInstances {
+		if funcInstanceContainsTypeParam(fi) {
+			unresolved = append(unresolved, fi)
+			continue
+		}
 		key := monoFuncName(fi)
 		if seen[key] {
 			continue
@@ -405,6 +636,42 @@ func collectMonoFuncInstances(info *sema.Info) []*sema.FuncInstance {
 		seen[key] = true
 		result = append(result, fi)
 	}
+
+	if len(unresolved) == 0 {
+		return result
+	}
+
+	// Resolve using type instance substitution maps (from generic type methods).
+	for _, instances := range typeInstances {
+		for _, inst := range instances {
+			switch origin := inst.Origin().(type) {
+			case *types.Named:
+				subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+				if len(subst) > 0 {
+					mergeParentSubst(origin, subst)
+					resolveUnresolvedFuncInstances(unresolved, subst, &result, seen)
+				}
+			case *types.Enum:
+				subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+				if len(subst) > 0 {
+					resolveUnresolvedFuncInstances(unresolved, subst, &result, seen)
+				}
+			}
+		}
+	}
+
+	// Transitively resolve: each concrete FuncInstance provides a substitution map
+	// that can resolve unresolved instances. New concrete instances may in turn
+	// resolve further unresolved instances (e.g., a[T] → b[T] → c[T] chain).
+	for i := 0; i < len(result); i++ {
+		fi := result[i]
+		sig := fi.Func.Type().(*types.Signature)
+		subst := types.BuildSubstMap(sig.TypeParams(), fi.TypeArgs)
+		if len(subst) > 0 {
+			resolveUnresolvedFuncInstances(unresolved, subst, &result, seen)
+		}
+	}
+
 	return result
 }
 
@@ -412,7 +679,7 @@ func collectMonoFuncInstances(info *sema.Info) []*sema.FuncInstance {
 // plus any extra instances from the caller (e.g. user file) that are instantiations
 // of methods on types declared in modFile. This handles cross-module generic method
 // calls like iter.map[int](...) in user code where Iterator[T].map is defined in std.
-func collectMonoMethodInstancesWithExtra(modSemaInfo *sema.Info, modFile *ast.File, extra []*sema.MethodInstance) []*sema.MethodInstance {
+func collectMonoMethodInstancesWithExtra(modSemaInfo *sema.Info, modFile *ast.File, extra []*sema.MethodInstance, typeInstances []*types.Instance) []*sema.MethodInstance {
 	// Build set of type names declared in modFile
 	modTypeNames := make(map[string]bool)
 	for _, decl := range modFile.Decls {
@@ -421,16 +688,21 @@ func collectMonoMethodInstancesWithExtra(modSemaInfo *sema.Info, modFile *ast.Fi
 		}
 	}
 
-	// Start with the module's own instances (deduped)
-	result := collectMonoMethodInstances(modSemaInfo)
+	// Start with the module's own instances (deduped + resolved)
+	result := collectMonoMethodInstances(modSemaInfo, typeInstances)
 	seen := make(map[string]bool, len(result))
 	for _, mi := range result {
 		seen[monoMethodInstanceName(mi)] = true
 	}
 
-	// Add extra instances whose owner type is declared in this module
+	// Add extra instances whose owner type is declared in this module.
+	// Skip unresolved instances (TypeParam in TypeArgs/OwnerInst) — these should
+	// have been resolved by the originating module's collectMonoMethodInstances call.
 	for _, mi := range extra {
 		if !modTypeNames[mi.Owner.Obj().Name()] {
+			continue
+		}
+		if methodInstanceContainsTypeParam(mi) {
 			continue
 		}
 		name := monoMethodInstanceName(mi)
@@ -447,7 +719,7 @@ func collectMonoMethodInstancesWithExtra(modSemaInfo *sema.Info, modFile *ast.Fi
 // plus any extra instances from the caller (e.g. user file) that are instantiations
 // of functions declared in modFile. This handles cross-module generic calls like
 // sort[int](...) in user code where sort is defined in the std module.
-func collectMonoFuncInstancesWithExtra(modSemaInfo *sema.Info, modFile *ast.File, extra []*sema.FuncInstance) []*sema.FuncInstance {
+func collectMonoFuncInstancesWithExtra(modSemaInfo *sema.Info, modFile *ast.File, extra []*sema.FuncInstance, typeInstances []*types.Instance) []*sema.FuncInstance {
 	// Build set of function names declared in modFile
 	modFuncNames := make(map[string]bool)
 	for _, decl := range modFile.Decls {
@@ -456,16 +728,21 @@ func collectMonoFuncInstancesWithExtra(modSemaInfo *sema.Info, modFile *ast.File
 		}
 	}
 
-	// Start with the module's own instances (deduped)
-	result := collectMonoFuncInstances(modSemaInfo)
+	// Start with the module's own instances (deduped + resolved)
+	result := collectMonoFuncInstances(modSemaInfo, typeInstances)
 	seen := make(map[string]bool, len(result))
 	for _, fi := range result {
 		seen[monoFuncName(fi)] = true
 	}
 
-	// Add extra instances whose function is declared in this module
+	// Add extra instances whose function is declared in this module.
+	// Skip unresolved instances (TypeParam in TypeArgs) — these should have been
+	// resolved by the originating context's collectMonoFuncInstances call.
 	for _, fi := range extra {
 		if !modFuncNames[fi.Func.Name()] {
+			continue
+		}
+		if funcInstanceContainsTypeParam(fi) {
 			continue
 		}
 		name := monoFuncName(fi)
@@ -1333,10 +1610,16 @@ func monoMethodInstanceName(mi *sema.MethodInstance) string {
 }
 
 // collectMonoMethodInstances deduplicates generic method instantiations.
-func collectMonoMethodInstances(info *sema.Info) []*sema.MethodInstance {
+// Also resolves unresolved instances (same pattern as collectMonoFuncInstances).
+func collectMonoMethodInstances(info *sema.Info, typeInstances ...[]*types.Instance) []*sema.MethodInstance {
 	seen := map[string]bool{}
 	var result []*sema.MethodInstance
+	var unresolved []*sema.MethodInstance
 	for _, mi := range info.MethodInstances {
+		if methodInstanceContainsTypeParam(mi) {
+			unresolved = append(unresolved, mi)
+			continue
+		}
 		key := monoMethodInstanceName(mi)
 		if seen[key] {
 			continue
@@ -1344,6 +1627,39 @@ func collectMonoMethodInstances(info *sema.Info) []*sema.MethodInstance {
 		seen[key] = true
 		result = append(result, mi)
 	}
+
+	if len(unresolved) == 0 {
+		return result
+	}
+
+	// Resolve using type instance substitution maps.
+	for _, instances := range typeInstances {
+		for _, inst := range instances {
+			switch origin := inst.Origin().(type) {
+			case *types.Named:
+				subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+				if len(subst) > 0 {
+					mergeParentSubst(origin, subst)
+					resolveUnresolvedMethodInstances(unresolved, subst, &result, seen)
+				}
+			case *types.Enum:
+				subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+				if len(subst) > 0 {
+					resolveUnresolvedMethodInstances(unresolved, subst, &result, seen)
+				}
+			}
+		}
+	}
+
+	// Transitively resolve using each concrete MethodInstance's substitution map.
+	for i := 0; i < len(result); i++ {
+		mi := result[i]
+		subst := buildMethodInstanceSubst(mi)
+		if len(subst) > 0 {
+			resolveUnresolvedMethodInstances(unresolved, subst, &result, seen)
+		}
+	}
+
 	return result
 }
 

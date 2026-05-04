@@ -2914,6 +2914,157 @@ func TestGenericFuncFailable(t *testing.T) {
 	assertContains(t, ir, "define { i1, i64, i8* } @\"tryIdentity[int]\"")
 }
 
+// B0099: Generic function calling another generic function with its own type param.
+func TestGenericFuncCallsGenericFunc(t *testing.T) {
+	ir := generateIR(t, `
+		identity[T](T val) T { return val; }
+		wrap[T](T val) T { return identity[T](val); }
+		main() {
+			int r = wrap[int](42);
+		}
+	`)
+	// Both wrap[int] and identity[int] must be monomorphized
+	assertContains(t, ir, "define i64 @\"wrap[int]\"")
+	assertContains(t, ir, "define i64 @\"identity[int]\"")
+}
+
+// B0099: Transitive chain of generic functions calling generic functions.
+func TestGenericFuncTransitiveChain(t *testing.T) {
+	ir := generateIR(t, `
+		inner[T](T val) T { return val; }
+		middle[T](T val) T { return inner[T](val); }
+		outer[T](T val) T { return middle[T](val); }
+		main() {
+			int r = outer[int](42);
+		}
+	`)
+	assertContains(t, ir, "define i64 @\"outer[int]\"")
+	assertContains(t, ir, "define i64 @\"middle[int]\"")
+	assertContains(t, ir, "define i64 @\"inner[int]\"")
+}
+
+// B0099: Multiple instantiations through generic-calls-generic.
+func TestGenericFuncCallsGenericMultipleInstances(t *testing.T) {
+	ir := generateIR(t, `
+		identity[T](T val) T { return val; }
+		wrap[T](T val) T { return identity[T](val); }
+		main() {
+			int a = wrap[int](42);
+			string b = wrap[string]("hi");
+		}
+	`)
+	assertContains(t, ir, "define i64 @\"wrap[int]\"")
+	assertContains(t, ir, "define i64 @\"identity[int]\"")
+	assertContains(t, ir, "define i8* @\"wrap[string]\"")
+	assertContains(t, ir, "define i8* @\"identity[string]\"")
+}
+
+// B0099: Generic function calling a generic method (cross-resolution).
+func TestGenericFuncCallsGenericMethod(t *testing.T) {
+	ir := generateIR(t, `
+		type Echo {
+			echo[T](T val) T { return val; }
+		}
+		invoke[T](Echo &e, T val) T {
+			return e.echo[T](val);
+		}
+		main() {
+			e := Echo();
+			int r = invoke[int](e, 42);
+		}
+	`)
+	assertContains(t, ir, "define i64 @\"invoke[int]\"")
+	assertContains(t, ir, "define i64 @\"Echo.echo[int]\"")
+}
+
+// B0099: MethodInstance self-resolution (generic method calls generic method).
+func TestGenericMethodCallsGenericMethod(t *testing.T) {
+	ir := generateIR(t, `
+		type Foo { echo[T](T val) T { return val; } }
+		type Bar { delegate[T](Foo &f, T val) T { return f.echo[T](val); } }
+		main() {
+			f := Foo();
+			b := Bar();
+			int r = b.delegate[int](f, 7);
+		}
+	`)
+	assertContains(t, ir, "define i64 @\"Bar.delegate[int]\"")
+	assertContains(t, ir, "define i64 @\"Foo.echo[int]\"")
+}
+
+// B0099: Type-instance resolution (generic type method calls generic free function).
+func TestGenericTypeMethodCallsFreeFunc(t *testing.T) {
+	ir := generateIR(t, `
+		identity[T](T val) T { return val; }
+		type Wrapper[T] {
+			T value;
+			wrapped(&this) T { return identity[T](this.value); }
+		}
+		main() {
+			w := Wrapper[int](value: 77);
+			int r = w.wrapped();
+		}
+	`)
+	assertContains(t, ir, "define i64 @\"identity[int]\"")
+	assertContains(t, ir, "define i64 @\"Wrapper[int].wrapped\"")
+}
+
+// B0099: Cross-resolution reverse (generic method calls generic free function).
+func TestGenericMethodCallsFreeFunc(t *testing.T) {
+	ir := generateIR(t, `
+		helper[T](T val) T { return val; }
+		type Proxy {
+			forward[T](T val) T { return helper[T](val); }
+		}
+		main() {
+			p := Proxy();
+			int r = p.forward[int](33);
+		}
+	`)
+	assertContains(t, ir, "define i64 @\"Proxy.forward[int]\"")
+	assertContains(t, ir, "define i64 @\"helper[int]\"")
+}
+
+// B0099: Type-instance resolution for MethodInstance (generic type method calls generic method).
+func TestGenericTypeMethodCallsGenericMethod(t *testing.T) {
+	ir := generateIR(t, `
+		type Echoer { echo[T](T val) T { return val; } }
+		type Wrapper[T] {
+			T value;
+			Echoer e;
+			echoed(&this) T { return this.e.echo[T](this.value); }
+		}
+		main() {
+			w := Wrapper[int](value: 55, e: Echoer());
+			int r = w.echoed();
+		}
+	`)
+	assertContains(t, ir, "define i64 @\"Wrapper[int].echoed\"")
+	assertContains(t, ir, "define i64 @\"Echoer.echo[int]\"")
+}
+
+// B0099: Cross-resolution both directions (method calls both func and method).
+func TestGenericMethodCallsBothFuncAndMethod(t *testing.T) {
+	ir := generateIR(t, `
+		helper[T](T val) T { return val; }
+		type Echoer { echo[T](T val) T { return val; } }
+		type Combiner {
+			run[T](Echoer &e, T val) T {
+				T a = helper[T](val);
+				return e.echo[T](a);
+			}
+		}
+		main() {
+			e := Echoer();
+			c := Combiner();
+			int r = c.run[int](e, 42);
+		}
+	`)
+	assertContains(t, ir, "define i64 @\"Combiner.run[int]\"")
+	assertContains(t, ir, "define i64 @\"helper[int]\"")
+	assertContains(t, ir, "define i64 @\"Echoer.echo[int]\"")
+}
+
 func TestGenericTypeAsParam(t *testing.T) {
 	ir := generateIR(t, `
 		type Box[T] { T value; }

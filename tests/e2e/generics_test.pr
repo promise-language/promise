@@ -151,3 +151,253 @@ test_generic_mutation() `test {
   // 0+1+2+3+4+5+6+7+8+9 = 45
   assert(b.get() == 45, "accumulated 45 via generic set/get");
 }
+
+// --- B0099: generic function calling another generic function ---
+
+wrap[T](T val) T {
+  return identity[T](val);
+}
+
+test_generic_calls_generic() `test {
+  int r = wrap[int](42);
+  assert(r == 42, "wrap[int](42) = 42");
+  string s = wrap[string]("hello");
+  assert(s == "hello", "wrap[string](hello) = hello");
+}
+
+// Transitive chain: outer → middle → inner
+inner[T](T val) T {
+  return val;
+}
+middle[T](T val) T {
+  return inner[T](val);
+}
+outer[T](T val) T {
+  return middle[T](val);
+}
+
+test_generic_transitive_chain() `test {
+  assert(outer[int](99) == 99, "outer[int](99) = 99");
+  assert(outer[string]("abc") == "abc", "outer[string](abc) = abc");
+}
+
+// Generic calling generic with multiple type params
+first_of[A, B](A a, B b) A {
+  return identity[A](a);
+}
+
+test_generic_multi_param_calls_generic() `test {
+  int r = first_of[int, string](7, "x");
+  assert(r == 7, "first_of returns first arg");
+}
+
+// Generic function calling a generic method
+type Echo {
+  echo[T](T val) T {
+    return val;
+  }
+}
+
+invoke_echo[T](Echo & e, T val) T {
+  return e.echo[T](val);
+}
+
+test_generic_func_calls_generic_method() `test {
+  e := Echo();
+  assert(invoke_echo[int](e, 42) == 42, "invoke_echo[int]");
+  assert(invoke_echo[string](e, "hi") == "hi", "invoke_echo[string]");
+}
+
+// --- Method self-resolution: generic method calls generic method ---
+
+type Foo {
+  echo_val[T](T val) T {
+    return val;
+  }
+}
+
+type Bar {
+  delegate[T](Foo & f, T val) T {
+    return f.echo_val[T](val);
+  }
+}
+
+test_method_calls_method() `test {
+  f := Foo();
+  b := Bar();
+  assert(b.delegate[int](f, 7) == 7, "delegate[int]");
+  assert(b.delegate[string](f, "x") == "x", "delegate[string]");
+}
+
+// Transitive method chain
+type Processor {
+  step1[T](T val) T {
+    return val;
+  }
+  step2[T](T val) T {
+    return this.step1[T](val);
+  }
+  step3[T](T val) T {
+    return this.step2[T](val);
+  }
+}
+
+test_method_transitive_chain() `test {
+  p := Processor();
+  assert(p.step3[int](99) == 99, "step3[int]");
+}
+
+// --- Type-instance resolution: generic type method calls generic free func ---
+
+id_func[T](T val) T {
+  return val;
+}
+
+type TypeWrapper[T] {
+  T value;
+  wrapped(&this) T {
+    return id_func[T](this.value);
+  }
+}
+
+test_type_instance_resolves_func() `test {
+  w := TypeWrapper[int](value: 77);
+  assert(w.wrapped() == 77, "TypeWrapper[int].wrapped");
+  ws := TypeWrapper[string](value: "hi");
+  assert(ws.wrapped() == "hi", "TypeWrapper[string].wrapped");
+}
+
+// --- Type-instance resolution: generic type method calls generic method ---
+
+type TypeMethodWrapper[T] {
+  T value;
+  Echo echoer;
+  echoed(&this) T {
+    return this.echoer.echo[T](this.value);
+  }
+}
+
+test_type_instance_resolves_method() `test {
+  w := TypeMethodWrapper[int](value: 55, echoer: Echo());
+  assert(w.echoed() == 55, "TypeMethodWrapper[int].echoed");
+}
+
+// --- Cross-resolution: generic method calls generic free function ---
+
+helper_func[T](T val) T {
+  return val;
+}
+
+type Proxy {
+  forward[T](T val) T {
+    return helper_func[T](val);
+  }
+}
+
+test_method_calls_func() `test {
+  p := Proxy();
+  assert(p.forward[int](33) == 33, "forward[int]");
+  assert(p.forward[string]("abc") == "abc", "forward[string]");
+}
+
+// Cross-resolution: method on generic type calls free func using method's R
+type Applier[T] {
+  T value;
+  apply[R]((T) -> R fn) R {
+    return helper_func[R](fn(this.value));
+  }
+}
+
+test_method_on_generic_type_calls_func_with_method_param() `test {
+  a := Applier[int](value: 42);
+  string s = a.apply[string](|int x| -> "{x}!");
+  assert(s == "42!", "apply[string]");
+}
+
+// --- Failable variant ---
+
+try_id[T](T val) T! {
+  return val;
+}
+try_wrap_id[T](T val) T! {
+  return try_id[T](val);
+}
+
+test_failable_generic_calls_generic() `test {
+  int r = try_wrap_id[int](42)!;
+  assert(r == 42, "failable wrap");
+}
+
+// --- Void variant ---
+
+noop_inner[T](T val) {
+}
+noop_outer[T](T val) {
+  noop_inner[T](val);
+}
+
+test_void_generic_calls_generic() `test {
+  noop_outer[int](1);
+  noop_outer[string]("x");
+}
+
+// --- Multi-param: inner uses second param ---
+
+second_of[A, B](A a, B b) B {
+  return identity[B](b);
+}
+
+test_inner_uses_second_type_param() `test {
+  string r = second_of[int, string](1, "hello");
+  assert(r == "hello", "second_of uses B");
+}
+
+// --- Multiple inner generic calls ---
+
+add1[T](int val) int {
+  return val + 1;
+}
+add2[T](int val) int {
+  return val + 2;
+}
+call_both[T](int val) int {
+  add1[T](val);
+  return add2[T](val);
+}
+
+test_multiple_inner_generic_calls() `test {
+  assert(call_both[int](40) == 42, "call_both");
+}
+
+// --- Cross-resolution: method calls both func and method ---
+
+type Combiner {
+  run[T](Echo & e, T val) T {
+    T a = helper_func[T](val);
+    return e.echo[T](a);
+  }
+}
+
+test_method_calls_both_func_and_method() `test {
+  e := Echo();
+  c := Combiner();
+  assert(c.run[int](e, 42) == 42, "run[int]");
+}
+
+// --- Inherited generic method calls generic function ---
+
+type Parent {
+  parent_invoke[T](T val) T {
+    return identity[T](val);
+  }
+}
+
+type Child is Parent {
+  int extra;
+}
+
+test_inherited_method_calls_generic_func() `test {
+  c := Child(extra: 10);
+  assert(c.parent_invoke[int](42) == 42, "inherited invoke[int]");
+  assert(c.parent_invoke[string]("hi") == "hi", "inherited invoke[string]");
+}

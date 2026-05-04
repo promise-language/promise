@@ -495,8 +495,9 @@ func compile(file *ast.File, info *sema.Info, target string, cachedInstances map
 	// Compute monomorphic layouts for all concrete generic instantiations
 	monoInstances := collectMonoInstances(info, c.spiralInstances)
 	c.computeMonoLayouts(monoInstances)
-	monoFuncInstances := collectMonoFuncInstances(info)
-	monoMethodInstances := collectMonoMethodInstances(info)
+	monoFuncInstances := collectMonoFuncInstances(info, monoInstances)
+	monoMethodInstances := collectMonoMethodInstances(info, monoInstances)
+	crossResolveFuncMethodInstances(info, &monoFuncInstances, &monoMethodInstances)
 
 	c.declareIntrinsics()
 	c.declareMathIntrinsics()
@@ -3065,8 +3066,8 @@ func (c *Compiler) compileModules() {
 	// functions (e.g. sort[int]) that were created by user code. We pass them to
 	// compileModule so they are processed under the correct module context.
 	mainMonoInstances := collectMonoInstances(c.info, c.spiralInstances)
-	mainMonoFuncInstances := collectMonoFuncInstances(c.info)
-	mainMonoMethodInstances := collectMonoMethodInstances(c.info)
+	mainMonoFuncInstances := collectMonoFuncInstances(c.info, mainMonoInstances)
+	mainMonoMethodInstances := collectMonoMethodInstances(c.info, mainMonoInstances)
 
 	// Also include instances from other modules — a catalog module (e.g., json)
 	// might create instances of std types (e.g., Map[string, JsonValue]) that the
@@ -3127,8 +3128,9 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo, extraInstances []*typ
 	//    module's sema info so method-body references (e.g. _FnIter[T]) resolve.
 	monoInstances := collectMonoInstancesWithExtra(modInfo, modFile, extraInstances, c.spiralInstances)
 	c.computeMonoLayouts(monoInstances)
-	monoFuncInstances := collectMonoFuncInstancesWithExtra(modInfo.SemaInfo, modFile, extraFuncInstances)
-	monoMethodInstances := collectMonoMethodInstancesWithExtra(modInfo.SemaInfo, modFile, extraMethodInstances)
+	monoFuncInstances := collectMonoFuncInstancesWithExtra(modInfo.SemaInfo, modFile, extraFuncInstances, monoInstances)
+	monoMethodInstances := collectMonoMethodInstancesWithExtra(modInfo.SemaInfo, modFile, extraMethodInstances, monoInstances)
+	crossResolveFuncMethodInstances(modInfo.SemaInfo, &monoFuncInstances, &monoMethodInstances)
 
 	// 4. Declare module externs
 	modExterns := collectExterns(modFile, modInfo.SemaInfo)

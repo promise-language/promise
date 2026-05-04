@@ -376,6 +376,11 @@ max[T: Ordered](T a, T b) T {
 // Call with explicit type args
 b := Box[int](value: 42);
 result := max[int](3, 7);
+
+// Generic functions can call other generic functions
+identity[T](T val) T { return val; }
+wrap[T](T val) T { return identity[T](val); }
+wrap[int](42);   // works: resolves both wrap[int] and identity[int]
 ```
 
 ## Collections (auto-imported from std)

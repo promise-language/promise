@@ -125,6 +125,15 @@ type PAL interface {
 	EmitDirNextName(module *ir.Module) *ir.Func
 	// EmitDirClose defines @pal_dir_close(i8* handle) → void
 	EmitDirClose(module *ir.Module) *ir.Func
+
+	// OS info primitives
+	// EmitGetEnviron defines @pal_get_environ() → i8** (pointer to environ global, null-terminated)
+	EmitGetEnviron(module *ir.Module) *ir.Func
+	// EmitGetUserInfo defines @pal_get_user_info(i8** out_name, i8** out_dir, i32* out_uid, i32* out_gid) → i32
+	// Calls getpwuid(getuid()). Returns 0 on success, -1 on error. out_name/out_dir point to static storage.
+	EmitGetUserInfo(module *ir.Module) *ir.Func
+	// EmitGetHostname defines @pal_get_hostname(i8* buf, i64 len) → i8* (buf on success, null on error)
+	EmitGetHostname(module *ir.Module) *ir.Func
 }
 
 // ForTarget returns a PAL implementation for the given LLVM target triple.
@@ -600,6 +609,47 @@ func emitStubKill(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	entry.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}
+
+// --- Stub OS info implementations ---
+
+// emitStubGetEnviron returns null (no environ support).
+func emitStubGetEnviron(module *ir.Module) *ir.Func {
+	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
+	fn := module.NewFunc("pal_get_environ", i8PtrPtrType)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewNull(i8PtrPtrType))
+	return fn
+}
+
+// emitStubGetUserInfo returns -1 (no user info support).
+func emitStubGetUserInfo(module *ir.Module) *ir.Func {
+	i32PtrType := irtypes.NewPointer(irtypes.I32)
+	fn := module.NewFunc("pal_get_user_info", irtypes.I32,
+		ir.NewParam("out_name", irtypes.NewPointer(irtypes.I8Ptr)),
+		ir.NewParam("out_dir", irtypes.NewPointer(irtypes.I8Ptr)),
+		ir.NewParam("out_uid", i32PtrType),
+		ir.NewParam("out_gid", i32PtrType))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewStore(constant.NewNull(irtypes.I8Ptr), fn.Params[0])
+	entry.NewStore(constant.NewNull(irtypes.I8Ptr), fn.Params[1])
+	entry.NewStore(constant.NewInt(irtypes.I32, -1), fn.Params[2])
+	entry.NewStore(constant.NewInt(irtypes.I32, -1), fn.Params[3])
+	entry.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}
+
+// emitStubGetHostname returns null (no hostname support).
+func emitStubGetHostname(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_get_hostname", irtypes.I8Ptr,
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewNull(irtypes.I8Ptr))
 	return fn
 }
 

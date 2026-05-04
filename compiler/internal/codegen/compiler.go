@@ -198,6 +198,9 @@ type Compiler struct {
 	palWaitPid        *ir.Func // @pal_wait_pid(i32 pid) → i32
 	palSpawnStreaming *ir.Func // @pal_spawn_streaming(..., i32* out_stdin_fd, i32* out_stdout_fd, i32* out_stderr_fd) → i32
 	palKill           *ir.Func // @pal_kill(i32 pid, i32 signal) → i32
+	palGetEnviron     *ir.Func // @pal_get_environ() → i8**
+	palGetUserInfo    *ir.Func // @pal_get_user_info(i8** out_name, i8** out_dir, i32* out_uid, i32* out_gid) → i32
+	palGetHostname    *ir.Func // @pal_get_hostname(i8* buf, i64 len) → i8*
 
 	// Command-line argument globals (populated from main's argc/argv)
 	argcGlobal *ir.Global // @__promise_argc (i32)
@@ -1023,6 +1026,9 @@ func (c *Compiler) declareIntrinsics() {
 	c.palWaitPid = p.EmitWaitPid(c.module)
 	c.palSpawnStreaming = p.EmitSpawnStreaming(c.module)
 	c.palKill = p.EmitKill(c.module)
+	c.palGetEnviron = p.EmitGetEnviron(c.module)
+	c.palGetUserInfo = p.EmitGetUserInfo(c.module)
+	c.palGetHostname = p.EmitGetHostname(c.module)
 
 	// Command-line argument globals — populated from main's argc/argv
 	c.argcGlobal = c.module.NewGlobalDef("__promise_argc", constant.NewInt(irtypes.I32, 0))

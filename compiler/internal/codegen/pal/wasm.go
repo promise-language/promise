@@ -190,7 +190,10 @@ func (p *WasmPAL) EmitWaitPid(module *ir.Module) *ir.Func     { return emitStubW
 func (p *WasmPAL) EmitSpawnStreaming(module *ir.Module) *ir.Func {
 	return emitStubSpawnStreaming(module)
 }
-func (p *WasmPAL) EmitKill(module *ir.Module) *ir.Func { return emitStubKill(module) }
+func (p *WasmPAL) EmitKill(module *ir.Module) *ir.Func        { return emitStubKill(module) }
+func (p *WasmPAL) EmitGetEnviron(module *ir.Module) *ir.Func  { return emitStubGetEnviron(module) }
+func (p *WasmPAL) EmitGetUserInfo(module *ir.Module) *ir.Func { return emitStubGetUserInfo(module) }
+func (p *WasmPAL) EmitGetHostname(module *ir.Module) *ir.Func { return emitStubGetHostname(module) }
 
 // WASM threading stubs — run synchronously. WASM has no threads (Phase 5d: cooperative scheduler).
 func (p *WasmPAL) EmitThreadCreate(module *ir.Module) *ir.Func  { return emitStubThreadCreate(module) }

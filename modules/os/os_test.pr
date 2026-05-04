@@ -744,3 +744,83 @@ test_process_output_structural_reader() `test(exclude: "wasm32") {
   assert(code == 0, "echo should exit with 0");
   assert(out.trim() == "from_reader", "should read via Reader interface");
 }
+
+// ── OS info tests ────────────────────────────────────────────────────────────
+
+test_environment_contains_path() `test(exclude: "wasm32") {
+  map[string, string] env = environment;
+  assert(env.contains("PATH"), "environment should contain PATH");
+  if path_value := env["PATH"] {
+    assert(path_value.len > 0, "PATH should be non-empty");
+  } else {
+    assert(false, "PATH should be present in environment map");
+  }
+}
+
+test_environment_contains_home() `test(exclude: "wasm32") {
+  map[string, string] env = environment;
+  assert(env.contains("HOME"), "environment should contain HOME");
+}
+
+test_environment_values_match_get() `test(exclude: "wasm32") {
+  // environment map values should match get_environment_variable
+  map[string, string] env = environment;
+  string? path = get_environment_variable("PATH");
+  if p := path {
+    if env_path := env["PATH"] {
+      assert(env_path == p, "environment[PATH] should match get_environment_variable(PATH)");
+    }
+  }
+}
+
+test_environment_has_entries() `test(exclude: "wasm32") {
+  map[string, string] env = environment;
+  assert(env.len > 0, "environment should have at least one entry");
+}
+
+test_user_name_nonempty() `test(exclude: "wasm32") {
+  string name = user_name;
+  assert(name.len > 0, "user_name should be non-empty");
+}
+
+test_user_identifier_nonnegative() `test(exclude: "wasm32") {
+  int uid = user_identifier;
+  assert(uid >= 0, "user_identifier should be non-negative");
+}
+
+test_group_identifier_nonnegative() `test(exclude: "wasm32") {
+  int gid = group_identifier;
+  assert(gid >= 0, "group_identifier should be non-negative");
+}
+
+test_home_directory_absolute() `test(exclude: "wasm32") {
+  string home = home_directory;
+  assert(home.len > 0, "home_directory should be non-empty");
+  assert(home.starts_with("/"), "home_directory should be an absolute path");
+}
+
+test_home_directory_matches_env() `test(exclude: "wasm32") {
+  string home = home_directory;
+  string? env_home = get_environment_variable("HOME");
+  if h := env_home {
+    assert(home == h, "home_directory should match $HOME");
+  }
+}
+
+test_hostname_nonempty() `test(exclude: "wasm32") {
+  string host = hostname;
+  assert(host.len > 0, "hostname should be non-empty");
+}
+
+test_hostname_no_newline() `test(exclude: "wasm32") {
+  string host = hostname;
+  assert(!host.contains("\n"), "hostname should not contain newline");
+}
+
+test_user_name_matches_env() `test(exclude: "wasm32") {
+  string name = user_name;
+  string? env_user = get_environment_variable("USER");
+  if u := env_user {
+    assert(name == u, "user_name should match $USER");
+  }
+}

@@ -1343,3 +1343,142 @@ func (p *PosixPAL) EmitGetCwd(module *ir.Module) *ir.Func {
 	entry.NewRet(result)
 	return fn
 }
+
+// EmitGetEnviron defines @pal_get_environ: returns pointer to the C environ global.
+// Signature: @pal_get_environ() → i8** (null-terminated array of "KEY=VALUE" strings)
+func (p *PosixPAL) EmitGetEnviron(module *ir.Module) *ir.Func {
+	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
+
+	// @environ = external global i8**
+	environGlobal := module.NewGlobal("environ", i8PtrPtrType)
+	environGlobal.Linkage = enum.LinkageExternal
+
+	fn := module.NewFunc("pal_get_environ", i8PtrPtrType)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	ptr := entry.NewLoad(i8PtrPtrType, environGlobal)
+	entry.NewRet(ptr)
+	return fn
+}
+
+// EmitGetUserInfo defines @pal_get_user_info using getuid+getpwuid.
+// Signature: @pal_get_user_info(i8** out_name, i8** out_dir, i32* out_uid, i32* out_gid) → i32
+// Returns 0 on success, -1 on error. out_name/out_dir point to static libc storage.
+func (p *PosixPAL) EmitGetUserInfo(module *ir.Module) *ir.Func {
+	i32PtrType := irtypes.NewPointer(irtypes.I32)
+
+	// declare i32 @getuid() nounwind
+	getuidFn := getOrDeclareFunc(module, "getuid", irtypes.I32)
+
+	// struct passwd layout differs between Linux and macOS.
+	// Linux:  { i8*, i8*, i32, i32, i8*, i8*, i8* }       — pw_dir at index 5
+	// macOS:  { i8*, i8*, i32, i32, i64, i8*, i8*, i8*, i8*, i64 } — pw_dir at index 7
+	var passwdType *irtypes.StructType
+	var dirIndex int
+	if p.isMacOS() {
+		passwdType = irtypes.NewStruct(
+			irtypes.I8Ptr, // 0: pw_name
+			irtypes.I8Ptr, // 1: pw_passwd
+			irtypes.I32,   // 2: pw_uid
+			irtypes.I32,   // 3: pw_gid
+			irtypes.I64,   // 4: pw_change
+			irtypes.I8Ptr, // 5: pw_class
+			irtypes.I8Ptr, // 6: pw_gecos
+			irtypes.I8Ptr, // 7: pw_dir
+			irtypes.I8Ptr, // 8: pw_shell
+			irtypes.I64,   // 9: pw_expire
+		)
+		dirIndex = 7
+	} else {
+		passwdType = irtypes.NewStruct(
+			irtypes.I8Ptr, // 0: pw_name
+			irtypes.I8Ptr, // 1: pw_passwd
+			irtypes.I32,   // 2: pw_uid
+			irtypes.I32,   // 3: pw_gid
+			irtypes.I8Ptr, // 4: pw_gecos
+			irtypes.I8Ptr, // 5: pw_dir
+			irtypes.I8Ptr, // 6: pw_shell
+		)
+		dirIndex = 5
+	}
+
+	passwdPtrType := irtypes.NewPointer(passwdType)
+
+	// declare %struct.passwd* @getpwuid(i32) nounwind
+	getpwuidFn := module.NewFunc("getpwuid", passwdPtrType,
+		ir.NewParam("uid", irtypes.I32))
+	getpwuidFn.FuncAttrs = append(getpwuidFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_get_user_info", irtypes.I32,
+		ir.NewParam("out_name", irtypes.NewPointer(irtypes.I8Ptr)),
+		ir.NewParam("out_dir", irtypes.NewPointer(irtypes.I8Ptr)),
+		ir.NewParam("out_uid", i32PtrType),
+		ir.NewParam("out_gid", i32PtrType))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	zero32 := constant.NewInt(irtypes.I32, 0)
+	negOne32 := constant.NewInt(irtypes.I32, -1)
+
+	entry := fn.NewBlock(".entry")
+	uid := entry.NewCall(getuidFn)
+	pw := entry.NewCall(getpwuidFn, uid)
+
+	isNull := entry.NewICmp(enum.IPredEQ, pw, constant.NewNull(passwdPtrType))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".error")
+	entry.NewCondBr(isNull, errBlk, okBlk)
+
+	// Error: store defaults and return -1
+	errBlk.NewStore(constant.NewNull(irtypes.I8Ptr), fn.Params[0])
+	errBlk.NewStore(constant.NewNull(irtypes.I8Ptr), fn.Params[1])
+	errBlk.NewStore(negOne32, fn.Params[2])
+	errBlk.NewStore(negOne32, fn.Params[3])
+	errBlk.NewRet(negOne32)
+
+	// OK: extract fields
+	namePtr := okBlk.NewGetElementPtr(passwdType, pw, zero32, constant.NewInt(irtypes.I32, 0))
+	name := okBlk.NewLoad(irtypes.I8Ptr, namePtr)
+	okBlk.NewStore(name, fn.Params[0])
+
+	dirPtr := okBlk.NewGetElementPtr(passwdType, pw, zero32, constant.NewInt(irtypes.I32, int64(dirIndex)))
+	dir := okBlk.NewLoad(irtypes.I8Ptr, dirPtr)
+	okBlk.NewStore(dir, fn.Params[1])
+
+	uidPtr := okBlk.NewGetElementPtr(passwdType, pw, zero32, constant.NewInt(irtypes.I32, 2))
+	uidVal := okBlk.NewLoad(irtypes.I32, uidPtr)
+	okBlk.NewStore(uidVal, fn.Params[2])
+
+	gidPtr := okBlk.NewGetElementPtr(passwdType, pw, zero32, constant.NewInt(irtypes.I32, 3))
+	gidVal := okBlk.NewLoad(irtypes.I32, gidPtr)
+	okBlk.NewStore(gidVal, fn.Params[3])
+
+	okBlk.NewRet(zero32)
+	return fn
+}
+
+// EmitGetHostname defines @pal_get_hostname using gethostname(2).
+// Signature: @pal_get_hostname(i8* buf, i64 len) → i8* (buf on success, null on error)
+func (p *PosixPAL) EmitGetHostname(module *ir.Module) *ir.Func {
+	// declare i32 @gethostname(i8*, i64) nounwind
+	// Note: POSIX says size_t (i64 on 64-bit), but some systems use int. i64 works.
+	gethostnameFn := module.NewFunc("gethostname", irtypes.I32,
+		ir.NewParam("name", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+	gethostnameFn.FuncAttrs = append(gethostnameFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	fn := module.NewFunc("pal_get_hostname", irtypes.I8Ptr,
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	entry := fn.NewBlock(".entry")
+	ret := entry.NewCall(gethostnameFn, fn.Params[0], fn.Params[1])
+	isErr := entry.NewICmp(enum.IPredSLT, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".error")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	errBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
+	okBlk.NewRet(fn.Params[0])
+	return fn
+}

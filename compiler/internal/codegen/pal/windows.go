@@ -1030,6 +1030,21 @@ func (p *WindowsPAL) EmitSpawnStreaming(module *ir.Module) *ir.Func {
 // EmitKill returns -1 stub (not yet implemented on Windows).
 func (p *WindowsPAL) EmitKill(module *ir.Module) *ir.Func { return emitStubKill(module) }
 
+// EmitGetEnviron stub (not yet implemented on Windows).
+func (p *WindowsPAL) EmitGetEnviron(module *ir.Module) *ir.Func {
+	return emitStubGetEnviron(module)
+}
+
+// EmitGetUserInfo stub (not yet implemented on Windows).
+func (p *WindowsPAL) EmitGetUserInfo(module *ir.Module) *ir.Func {
+	return emitStubGetUserInfo(module)
+}
+
+// EmitGetHostname stub (not yet implemented on Windows).
+func (p *WindowsPAL) EmitGetHostname(module *ir.Module) *ir.Func {
+	return emitStubGetHostname(module)
+}
+
 // EmitGetCwd declares UCRT @_getcwd and defines @pal_getcwd.
 // Signature: @pal_getcwd(i8* buf, i64 len) → i8* (buf or null)
 func (p *WindowsPAL) EmitGetCwd(module *ir.Module) *ir.Func {

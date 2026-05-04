@@ -62,6 +62,26 @@ _os_pipe_close(int fd) int `extern("promise_os_pipe_close");
 // Sends SIGKILL to a process. Returns 0 on success, -1 on error.
 _os_kill(int pid) int `extern("promise_os_kill");
 
+// ── OS info externs ──────────────────────────────────────────────────────────
+
+// Returns all environment variables as a string[] of "KEY=VALUE" entries.
+_os_get_environ() string[] `extern("promise_os_get_environ");
+
+// Returns the current user's login name from getpwuid(getuid()).
+_os_get_user_name() string `extern("promise_os_get_user_name");
+
+// Returns the current user's numeric uid.
+_os_get_user_id() int `extern("promise_os_get_user_id");
+
+// Returns the current user's numeric gid.
+_os_get_group_id() int `extern("promise_os_get_group_id");
+
+// Returns the current user's home directory from getpwuid(getuid()).
+_os_get_home_dir() string `extern("promise_os_get_home_dir");
+
+// Returns the system hostname.
+_os_get_hostname() string `extern("promise_os_get_hostname");
+
 // ── Error type ───────────────────────────────────────────────────────────────
 
 type OsError is error `public `doc("An operating system error.") {
@@ -308,4 +328,39 @@ execute(string program, ...string arguments) ProcessResult! `public `doc("Execut
 
   int exit_code = _os_wait_pid(pid)!;
   return ProcessResult(exit_code: exit_code, standard_output: stdout, standard_error: stderr);
+}
+
+// ── OS info getters ──────────────────────────────────────────────────────────
+
+get environment map[string, string] `public `doc("Returns all environment variables as a map from variable name to value. Each entry is parsed from the process environment.") {
+  map[string, string] result = map[string, string]();
+  string[] entries = _os_get_environ();
+  for entry in entries {
+    if idx := entry.index_of("=") {
+      string key = entry[0:idx];
+      string value = entry[idx + 1:];
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
+get user_name string `public `doc("Returns the login name of the current user. Returns an empty string if the user cannot be determined.") {
+  return _os_get_user_name();
+}
+
+get user_identifier int `public `doc("Returns the numeric user ID (uid) of the current process.") {
+  return _os_get_user_id();
+}
+
+get group_identifier int `public `doc("Returns the numeric group ID (gid) of the current process.") {
+  return _os_get_group_id();
+}
+
+get home_directory string `public `doc("Returns the home directory of the current user. Returns an empty string if the home directory cannot be determined.") {
+  return _os_get_home_dir();
+}
+
+get hostname string `public `doc("Returns the hostname of the machine. Returns an empty string if the hostname cannot be determined.") {
+  return _os_get_hostname();
 }

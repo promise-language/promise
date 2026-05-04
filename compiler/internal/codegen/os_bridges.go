@@ -80,6 +80,24 @@ func (c *Compiler) defineOSBodies() {
 	if fn, ok := irFuncByName["promise_os_kill"]; ok {
 		c.defineKillBody(fn)
 	}
+	if fn, ok := irFuncByName["promise_os_get_environ"]; ok {
+		c.defineGetEnvironBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_os_get_user_name"]; ok {
+		c.defineGetUserNameBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_os_get_user_id"]; ok {
+		c.defineGetUserIdBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_os_get_group_id"]; ok {
+		c.defineGetGroupIdBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_os_get_home_dir"]; ok {
+		c.defineGetHomeDirBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_os_get_hostname"]; ok {
+		c.defineGetHostnameBody(fn)
+	}
 }
 
 // defineGetEnvBody: void @promise_os_get_env(i8* sret, i8* name)
@@ -811,4 +829,226 @@ func (c *Compiler) defineKillBody(fn *ir.Func) {
 	rcI64 := entry.NewSExt(rc, irtypes.I64)
 	c.storeIntResult(entry, sret, rcI64)
 	entry.NewRet(nil)
+}
+
+// ── OS info bridges ──────────────────────────────────────────────────────────
+
+// defineGetEnvironBody: i8* @promise_os_get_environ()
+// Returns string[] built from the C environ global (null-terminated array of "KEY=VALUE" strings).
+func (c *Compiler) defineGetEnvironBody(fn *ir.Func) {
+	zero32 := constant.NewInt(irtypes.I32, 0)
+	zero64 := constant.NewInt(irtypes.I64, 0)
+	one64 := constant.NewInt(irtypes.I64, 1)
+	one32 := constant.NewInt(irtypes.I32, 1)
+	ptrSize := constant.NewInt(irtypes.I64, int64(c.ptrSize()))
+	headerSize := constant.NewInt(irtypes.I64, vectorHeaderSize)
+	vectorHdrType := vectorHeaderType()
+	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
+
+	entry := fn.NewBlock(".entry")
+
+	// Get environ pointer
+	environ := entry.NewCall(c.palGetEnviron)
+
+	// Check for null environ
+	isNull := entry.NewICmp(enum.IPredEQ, environ, constant.NewNull(i8PtrPtrType))
+	countHdr := fn.NewBlock(".count_hdr")
+	emptyBlk := fn.NewBlock(".empty")
+	entry.NewCondBr(isNull, emptyBlk, countHdr)
+
+	// Empty environ: return empty vector
+	emptyVec := emptyBlk.NewCall(c.palAlloc, headerSize)
+	emptyHdr := emptyBlk.NewBitCast(emptyVec, irtypes.NewPointer(vectorHdrType))
+	emptyLenField := emptyBlk.NewGetElementPtr(vectorHdrType, emptyHdr, zero32, zero32)
+	emptyBlk.NewStore(zero64, emptyLenField)
+	emptyCapField := emptyBlk.NewGetElementPtr(vectorHdrType, emptyHdr, zero32, one32)
+	emptyBlk.NewStore(zero64, emptyCapField)
+	emptyBlk.NewRet(emptyVec)
+
+	// Count loop: iterate until environ[i] == null
+	countBody := fn.NewBlock(".count_body")
+	countPhi := countHdr.NewPhi(ir.NewIncoming(zero64, entry))
+	elemPtr := countHdr.NewGetElementPtr(irtypes.I8Ptr, environ, countPhi)
+	elem := countHdr.NewLoad(irtypes.I8Ptr, elemPtr)
+	elemIsNull := countHdr.NewICmp(enum.IPredEQ, elem, constant.NewNull(irtypes.I8Ptr))
+	countDone := fn.NewBlock(".count_done")
+	countHdr.NewCondBr(elemIsNull, countDone, countBody)
+
+	countNext := countBody.NewAdd(countPhi, one64)
+	countPhi.Incs = append(countPhi.Incs, ir.NewIncoming(countNext, countBody))
+	countBody.NewBr(countHdr)
+
+	// Allocate vector: header + count * ptrSize
+	envCount := countDone.NewPhi(ir.NewIncoming(countPhi, countHdr))
+	dataSize := countDone.NewMul(envCount, ptrSize)
+	totalSize := countDone.NewAdd(headerSize, dataSize)
+	rawSlice := countDone.NewCall(c.palAlloc, totalSize)
+
+	// Store len and cap
+	hdrPtr := countDone.NewBitCast(rawSlice, irtypes.NewPointer(vectorHdrType))
+	lenField := countDone.NewGetElementPtr(vectorHdrType, hdrPtr, zero32, zero32)
+	countDone.NewStore(envCount, lenField)
+	capField := countDone.NewGetElementPtr(vectorHdrType, hdrPtr, zero32, one32)
+	countDone.NewStore(envCount, capField)
+
+	// Build loop: create strings from environ entries
+	hasEntries := countDone.NewICmp(enum.IPredSGT, envCount, zero64)
+	buildHdr := fn.NewBlock(".build_hdr")
+	doneBlk := fn.NewBlock(".done")
+	countDone.NewCondBr(hasEntries, buildHdr, doneBlk)
+
+	buildBody := fn.NewBlock(".build_body")
+	iPhi := buildHdr.NewPhi(ir.NewIncoming(zero64, countDone))
+	buildCond := buildHdr.NewICmp(enum.IPredSLT, iPhi, envCount)
+	buildHdr.NewCondBr(buildCond, buildBody, doneBlk)
+
+	strlenFn := c.funcs["strlen"]
+	envElemPtr := buildBody.NewGetElementPtr(irtypes.I8Ptr, environ, iPhi)
+	envCStr := buildBody.NewLoad(irtypes.I8Ptr, envElemPtr)
+	envLen := buildBody.NewCall(strlenFn, envCStr)
+	envStr := buildBody.NewCall(c.funcs["promise_string_new"], envCStr, envLen)
+
+	elemOff := buildBody.NewMul(iPhi, ptrSize)
+	elemOff2 := buildBody.NewAdd(headerSize, elemOff)
+	slotPtr := buildBody.NewGetElementPtr(irtypes.I8, rawSlice, elemOff2)
+	slotPtrTyped := buildBody.NewBitCast(slotPtr, irtypes.NewPointer(irtypes.I8Ptr))
+	buildBody.NewStore(envStr, slotPtrTyped)
+
+	iNext := buildBody.NewAdd(iPhi, one64)
+	iPhi.Incs = append(iPhi.Incs, ir.NewIncoming(iNext, buildBody))
+	buildBody.NewBr(buildHdr)
+
+	doneBlk.NewRet(rawSlice)
+}
+
+// defineGetUserNameBody: void @promise_os_get_user_name(i8* sret)
+// Calls pal_get_user_info, extracts name, returns as Promise string.
+func (c *Compiler) defineGetUserNameBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	outName := entry.NewAlloca(irtypes.I8Ptr)
+	outDir := entry.NewAlloca(irtypes.I8Ptr)
+	outUid := entry.NewAlloca(irtypes.I32)
+	outGid := entry.NewAlloca(irtypes.I32)
+
+	entry.NewCall(c.palGetUserInfo, outName, outDir, outUid, outGid)
+
+	namePtr := entry.NewLoad(irtypes.I8Ptr, outName)
+	isNull := entry.NewICmp(enum.IPredEQ, namePtr, constant.NewNull(irtypes.I8Ptr))
+	foundBlk := fn.NewBlock(".found")
+	emptyBlk := fn.NewBlock(".empty")
+	entry.NewCondBr(isNull, emptyBlk, foundBlk)
+
+	strlenFn := c.funcs["strlen"]
+	nameLen := foundBlk.NewCall(strlenFn, namePtr)
+	nameStr := foundBlk.NewCall(c.funcs["promise_string_new"], namePtr, nameLen)
+	c.storeStringResult(foundBlk, sret, nameStr)
+	foundBlk.NewRet(nil)
+
+	emptyStr := emptyBlk.NewCall(c.funcs["promise_string_new"],
+		constant.NewNull(irtypes.I8Ptr), constant.NewInt(irtypes.I64, 0))
+	c.storeStringResult(emptyBlk, sret, emptyStr)
+	emptyBlk.NewRet(nil)
+}
+
+// defineGetUserIdBody: void @promise_os_get_user_id(i8* sret)
+// Calls pal_get_user_info, extracts uid, returns as Promise int.
+// Uses ZExt (not SExt) because uid_t is unsigned.
+func (c *Compiler) defineGetUserIdBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	outName := entry.NewAlloca(irtypes.I8Ptr)
+	outDir := entry.NewAlloca(irtypes.I8Ptr)
+	outUid := entry.NewAlloca(irtypes.I32)
+	outGid := entry.NewAlloca(irtypes.I32)
+
+	entry.NewCall(c.palGetUserInfo, outName, outDir, outUid, outGid)
+
+	uid := entry.NewLoad(irtypes.I32, outUid)
+	uidI64 := entry.NewZExt(uid, irtypes.I64)
+	c.storeIntResult(entry, sret, uidI64)
+	entry.NewRet(nil)
+}
+
+// defineGetGroupIdBody: void @promise_os_get_group_id(i8* sret)
+// Calls pal_get_user_info, extracts gid, returns as Promise int.
+// Uses ZExt (not SExt) because gid_t is unsigned.
+func (c *Compiler) defineGetGroupIdBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	outName := entry.NewAlloca(irtypes.I8Ptr)
+	outDir := entry.NewAlloca(irtypes.I8Ptr)
+	outUid := entry.NewAlloca(irtypes.I32)
+	outGid := entry.NewAlloca(irtypes.I32)
+
+	entry.NewCall(c.palGetUserInfo, outName, outDir, outUid, outGid)
+
+	gid := entry.NewLoad(irtypes.I32, outGid)
+	gidI64 := entry.NewZExt(gid, irtypes.I64)
+	c.storeIntResult(entry, sret, gidI64)
+	entry.NewRet(nil)
+}
+
+// defineGetHomeDirBody: void @promise_os_get_home_dir(i8* sret)
+// Calls pal_get_user_info, extracts home directory, returns as Promise string.
+func (c *Compiler) defineGetHomeDirBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	outName := entry.NewAlloca(irtypes.I8Ptr)
+	outDir := entry.NewAlloca(irtypes.I8Ptr)
+	outUid := entry.NewAlloca(irtypes.I32)
+	outGid := entry.NewAlloca(irtypes.I32)
+
+	entry.NewCall(c.palGetUserInfo, outName, outDir, outUid, outGid)
+
+	dirPtr := entry.NewLoad(irtypes.I8Ptr, outDir)
+	isNull := entry.NewICmp(enum.IPredEQ, dirPtr, constant.NewNull(irtypes.I8Ptr))
+	foundBlk := fn.NewBlock(".found")
+	emptyBlk := fn.NewBlock(".empty")
+	entry.NewCondBr(isNull, emptyBlk, foundBlk)
+
+	strlenFn := c.funcs["strlen"]
+	dirLen := foundBlk.NewCall(strlenFn, dirPtr)
+	dirStr := foundBlk.NewCall(c.funcs["promise_string_new"], dirPtr, dirLen)
+	c.storeStringResult(foundBlk, sret, dirStr)
+	foundBlk.NewRet(nil)
+
+	emptyStr := emptyBlk.NewCall(c.funcs["promise_string_new"],
+		constant.NewNull(irtypes.I8Ptr), constant.NewInt(irtypes.I64, 0))
+	c.storeStringResult(emptyBlk, sret, emptyStr)
+	emptyBlk.NewRet(nil)
+}
+
+// defineGetHostnameBody: void @promise_os_get_hostname(i8* sret)
+// Allocates a 256-byte buffer, calls pal_get_hostname, returns as Promise string.
+func (c *Compiler) defineGetHostnameBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	bufSize := constant.NewInt(irtypes.I64, 256)
+	buf := entry.NewCall(c.palAlloc, bufSize)
+
+	result := entry.NewCall(c.palGetHostname, buf, bufSize)
+
+	isNull := entry.NewICmp(enum.IPredEQ, result, constant.NewNull(irtypes.I8Ptr))
+	successBlk := fn.NewBlock(".success")
+	errorBlk := fn.NewBlock(".error")
+	entry.NewCondBr(isNull, errorBlk, successBlk)
+
+	strlenFn := c.funcs["strlen"]
+	hostLen := successBlk.NewCall(strlenFn, result)
+	hostStr := successBlk.NewCall(c.funcs["promise_string_new"], result, hostLen)
+	successBlk.NewCall(c.palFree, buf)
+	c.storeStringResult(successBlk, sret, hostStr)
+	successBlk.NewRet(nil)
+
+	errorBlk.NewCall(c.palFree, buf)
+	emptyStr := errorBlk.NewCall(c.funcs["promise_string_new"],
+		constant.NewNull(irtypes.I8Ptr), constant.NewInt(irtypes.I64, 0))
+	c.storeStringResult(errorBlk, sret, emptyStr)
+	errorBlk.NewRet(nil)
 }

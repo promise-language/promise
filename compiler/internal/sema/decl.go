@@ -260,17 +260,31 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 
 	if isNative {
 		// Native type: only process fields and methods, skip inheritance.
-		// Skip already-registered fields/methods to avoid duplicates when the
-		// same global Named singleton is processed multiple times (e.g. across
-		// test runs in the same process).
-		for _, fd := range d.Fields {
-			if named.LookupField(fd.Name) == nil {
+		// When compiling std, reset members first to clear stale type references
+		// from a previous sema run in the same process (B0101). Without this,
+		// method signatures retain pointers to old Named objects (e.g. Writer)
+		// that no longer match the freshly-created structural interface types,
+		// causing structural matching to fail (Identical uses pointer comparison).
+		if c.compilingStd {
+			named.ResetMembers()
+			for _, fd := range d.Fields {
 				c.defineField(named, fd)
 			}
-		}
-		for _, md := range d.Methods {
-			if !c.nativeMethodExists(named, md) {
+			for _, md := range d.Methods {
 				c.defineMethod(named, md, d.Name, true)
+			}
+		} else {
+			// Non-std context (e.g. Go test helpers): skip already-registered
+			// fields/methods to avoid duplicates.
+			for _, fd := range d.Fields {
+				if named.LookupField(fd.Name) == nil {
+					c.defineField(named, fd)
+				}
+			}
+			for _, md := range d.Methods {
+				if !c.nativeMethodExists(named, md) {
+					c.defineMethod(named, md, d.Name, true)
+				}
 			}
 		}
 		// Mark HasNew for native types with a new() constructor

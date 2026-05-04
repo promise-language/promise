@@ -5819,6 +5819,12 @@ func checkWithRawStd(t *testing.T, stdSrc, userSrc string) (*Info, []error) {
 		t.Fatalf("std AST build errors: %v", errs)
 	}
 	stdInfo, stdErrs := CheckForStdModule(stdFile, HostTargetInfo())
+
+	// Invalidate cached std scope — CheckForStdModule reset native type
+	// members, so the cached scope's types are no longer consistent (B0101).
+	semaStdOnce = sync.Once{}
+	semaStdScope = nil
+
 	if len(stdErrs) > 0 {
 		return stdInfo, stdErrs
 	}
@@ -5847,11 +5853,205 @@ func TestValidateAllPresent(t *testing.T) {
 }
 
 // Note: testing validateBuiltins() for MISSING operators is not feasible in unit tests
-// because universe types (TypInt, TypBool, etc.) are global singletons whose methods
-// accumulate across test runs. Validation correctness is ensured by:
+// because universe types (TypInt, TypBool, etc.) are global singletons. CheckForStdModule
+// resets their members each run (B0101 fix), so an incomplete std would leave them in
+// a broken state. checkWithRawStd invalidates the cached scope, but testing partial stds
+// is fragile. Validation correctness is ensured by:
 // 1. TestValidateAllPresent verifying the full std passes
 // 2. E2E tests that compile with real std/ files
 // 3. The requireBinaryOp/requireUnaryOp/requireMethod/requireField helpers being trivial
+
+// --- B0101 regression: multiple CheckForStdModule calls must not corrupt types ---
+
+// freshStdSema parses and checks stdAll as the std module, returning the export scope.
+// Unlike getSemaStdScope(), this always runs fresh (no caching).
+func freshStdSema(t *testing.T) *types.Scope {
+	t.Helper()
+	input := antlr.NewInputStream(stdAll)
+	lexer := parser.NewPromiseLexer(input)
+	lexer.RemoveErrorListeners()
+	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+	p := parser.NewPromiseParser(stream)
+	p.RemoveErrorListeners()
+	tree := p.CompilationUnit()
+	stdFile, buildErrs := ast.Build("std.pr", tree)
+	if len(buildErrs) > 0 {
+		t.Fatalf("std AST build errors: %v", buildErrs)
+	}
+	stdInfo, stdErrs := CheckForStdModule(stdFile, HostTargetInfo())
+
+	// Invalidate cached std scope — same as checkWithRawStd (B0101).
+	semaStdOnce = sync.Once{}
+	semaStdScope = nil
+
+	if len(stdErrs) > 0 {
+		t.Fatalf("std sema errors: %v", stdErrs)
+	}
+	return ExportedScope(stdInfo, stdFile)
+}
+
+// checkWithFreshStd runs user code against a freshly-checked std scope.
+func checkWithFreshStd(t *testing.T, src string) (*Info, []error) {
+	t.Helper()
+	stdScope := freshStdSema(t)
+	input := antlr.NewInputStream(src)
+	lexer := parser.NewPromiseLexer(input)
+	lexer.RemoveErrorListeners()
+	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+	p := parser.NewPromiseParser(stream)
+	p.RemoveErrorListeners()
+	tree := p.CompilationUnit()
+	file, buildErrs := ast.Build("test.pr", tree)
+	if len(buildErrs) > 0 {
+		t.Fatalf("AST build errors: %v", buildErrs)
+	}
+	stdUse := &ast.UseDecl{Alias: "_", CatalogName: "std"}
+	file.Uses = append([]*ast.UseDecl{stdUse}, file.Uses...)
+	return CheckWithModules(file, map[string]*types.Scope{"std": stdScope})
+}
+
+func TestB0101_SecondSemaRunStructuralInterface(t *testing.T) {
+	// B0101: After two CheckForStdModule calls, native types must still satisfy
+	// structural interfaces. The second call creates fresh Format/Writer objects;
+	// native type methods must reference these new objects, not stale ones.
+
+	// First sema run — populates universe types.
+	freshStdSema(t)
+
+	// Second sema run — resets and repopulates. This is what stress mode does
+	// when compiling the second file.
+	_, errs := checkWithFreshStd(t, `
+		main() {
+			print_line(42);
+			print_line("hello");
+			print_line(true);
+			print_line(3.14);
+			print_line('x');
+		}
+	`)
+	if len(errs) > 0 {
+		t.Fatalf("B0101 regression: second sema run broke structural interfaces: %v", errs)
+	}
+}
+
+func TestB0101_ThreeSemaRunsStable(t *testing.T) {
+	// Verify stability across three consecutive sema runs — each should produce
+	// consistent types. This simulates stress mode compiling 3+ files.
+	for i := 0; i < 3; i++ {
+		_, errs := checkWithFreshStd(t, `
+			main() {
+				print_line(42);
+				print_line("hello");
+				print_line(true);
+			}
+		`)
+		if len(errs) > 0 {
+			t.Fatalf("B0101 regression: sema run %d broke structural interfaces: %v", i+1, errs)
+		}
+	}
+}
+
+func TestB0101_NativeMethodSignatureFreshness(t *testing.T) {
+	// After two CheckForStdModule calls, verify that native type methods
+	// have signatures identical to what the structural interface expects.
+	// This checks the actual condition used by AssignableTo/Implements:
+	// types.Identical on parameter types (which unwraps MutRef/SharedRef
+	// and compares inner Named types by pointer).
+
+	// Run 1: populate
+	freshStdSema(t)
+
+	// Run 2: reset + repopulate
+	stdScope := freshStdSema(t)
+
+	// Look up Format from the latest scope
+	formatObj := stdScope.Lookup("Format")
+	if formatObj == nil {
+		t.Fatal("Format not found in std scope")
+	}
+	formatNamed, ok := formatObj.(*types.TypeName).Type().(*types.Named)
+	if !ok {
+		t.Fatal("Format is not a Named type")
+	}
+	formatMethod := formatNamed.LookupMethod("format")
+	if formatMethod == nil {
+		t.Fatal("Format.format method not found")
+	}
+	formatWriterType := formatMethod.Sig().Params()[0].Type()
+
+	// Check that int.format has identical Writer param type
+	intFormat := types.TypInt.LookupMethod("format")
+	if intFormat == nil {
+		t.Fatal("int.format method not found after second sema run")
+	}
+	intWriterType := intFormat.Sig().Params()[0].Type()
+
+	if !types.Identical(formatWriterType, intWriterType) {
+		t.Errorf("B0101 regression: int.format param type %s not identical to Format.format param type %s",
+			intWriterType, formatWriterType)
+	}
+
+	// Same check for string.format
+	strFormat := types.TypString.LookupMethod("format")
+	if strFormat == nil {
+		t.Fatal("string.format method not found after second sema run")
+	}
+	strWriterType := strFormat.Sig().Params()[0].Type()
+
+	if !types.Identical(formatWriterType, strWriterType) {
+		t.Errorf("B0101 regression: string.format param type %s not identical to Format.format param type %s",
+			strWriterType, formatWriterType)
+	}
+
+	// Verify int actually satisfies Format structurally
+	if !types.Implements(types.TypInt, formatNamed) {
+		t.Error("B0101 regression: int does not implement Format after second sema run")
+	}
+	if !types.Implements(types.TypString, formatNamed) {
+		t.Error("B0101 regression: string does not implement Format after second sema run")
+	}
+}
+
+func TestB0101_NativeExportedAfterReset(t *testing.T) {
+	// Verify that the `public` annotation is preserved after ResetMembers.
+	freshStdSema(t)
+	freshStdSema(t)
+
+	if !types.TypInt.IsExported() {
+		t.Error("int lost `public after second sema run")
+	}
+	if !types.TypString.IsExported() {
+		t.Error("string lost `public after second sema run")
+	}
+	if !types.TypBool.IsExported() {
+		t.Error("bool lost `public after second sema run")
+	}
+}
+
+func TestB0101_CacheInvalidationAfterCheckWithRawStd(t *testing.T) {
+	// checkWithRawStd invalidates the cached scope. Subsequent getSemaStdScope()
+	// calls must re-compute and produce a consistent scope.
+
+	// Prime the cache.
+	getSemaStdScope()
+
+	// Run checkWithRawStd — this calls CheckForStdModule and invalidates cache.
+	_, errs := checkWithRawStd(t, stdAll, `main() {}`)
+	expectNoErrors(t, errs)
+
+	// The next getSemaStdScope() should re-compute from scratch.
+	// Then checkSource should work correctly with the new scope.
+	info, errs2 := checkSource(t, `
+		main() {
+			print_line(42);
+			print_line("hello");
+		}
+	`)
+	if len(errs2) > 0 {
+		t.Fatalf("scope cache invalidation failed — stale types after checkWithRawStd: %v", errs2)
+	}
+	_ = info
+}
 
 // --- Stage 8f: Arity-Aware Method Dedup Tests ---
 

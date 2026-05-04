@@ -21,6 +21,83 @@ if [ "$(uname -s)" = "Linux" ]; then
   make musl-crt --no-print-directory
 fi
 
+# Verify LLVM prerequisites are available and version-compatible.
+# Release builds embed LLVM tools from the system; dev builds find them at runtime.
+# Either way, we need a valid LLVM 22+ toolchain on the build machine.
+MIN_LLVM=22
+MAX_LLVM=25
+
+find_llvm_version() {
+  # Homebrew LLVM (macOS)
+  for prefix in /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin; do
+    if [ -x "$prefix/opt" ]; then
+      "$prefix/opt" --version 2>&1 | grep -oE 'LLVM version [0-9]+' | grep -oE '[0-9]+' || echo 0
+      return
+    fi
+  done
+  # Versioned on PATH (Linux)
+  for v in $(seq $MAX_LLVM -1 $MIN_LLVM); do
+    if command -v "opt-$v" >/dev/null 2>&1; then
+      echo "$v"
+      return
+    fi
+  done
+  # Unversioned on PATH
+  if command -v opt >/dev/null 2>&1; then
+    opt --version 2>&1 | grep -oE 'LLVM version [0-9]+' | grep -oE '[0-9]+' || echo 0
+    return
+  fi
+  echo 0
+}
+
+find_lld() {
+  # Homebrew paths (macOS)
+  for prefix in /opt/homebrew/opt/lld/bin /usr/local/opt/lld/bin /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin; do
+    if [ -x "$prefix/lld" ] || [ -x "$prefix/ld64.lld" ]; then
+      return 0
+    fi
+  done
+  # Versioned on PATH
+  for v in $(seq $MAX_LLVM -1 $MIN_LLVM); do
+    if command -v "lld-$v" >/dev/null 2>&1 || command -v "ld.lld-$v" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  # Unversioned on PATH
+  if command -v lld >/dev/null 2>&1 || command -v ld.lld >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+LLVM_VER=$(find_llvm_version)
+if [ "$LLVM_VER" -lt "$MIN_LLVM" ] 2>/dev/null || [ "$LLVM_VER" = "0" ]; then
+  echo "ERROR: LLVM $MIN_LLVM+ not found (found: ${LLVM_VER:-none})"
+  echo ""
+  echo "  Run bin/install-prereqs.sh to install prerequisites"
+  exit 1
+fi
+
+if ! find_lld; then
+  case "$(uname -s)" in
+    Darwin)
+      echo "ERROR: lld not found (required for macOS — Apple's system ld cannot process LLVM $LLVM_VER bitcode)"
+      echo ""
+      echo "  brew install lld"
+      ;;
+    Linux)
+      echo "ERROR: lld not found (ld.lld is required for linking)"
+      echo ""
+      echo "  sudo apt-get install lld-$LLVM_VER"
+      ;;
+    *)
+      echo "ERROR: lld not found"
+      ;;
+  esac
+  echo "  or run bin/install-prereqs.sh"
+  exit 1
+fi
+
 # Release build: bundle LLVM tools into the binary
 BUILD_TAGS=""
 if [ "${1:-}" = "--release" ]; then

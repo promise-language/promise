@@ -6,7 +6,7 @@ set -euo pipefail
 #
 # Prerequisites:
 #   Linux: LLVM 22+ (opt, llc, lld), musl-dev, Go 1.25+, Java 11+ (for ANTLR)
-#   macOS: Homebrew LLVM 22+ (opt, llc), Xcode CommandLineTools, Go 1.25+, Java 11+
+#   macOS: Homebrew LLVM 22+ (opt, llc) + LLD (ld64.lld), Xcode CommandLineTools, Go 1.25+, Java 11+
 #
 # Optional (for --target wasm32-wasi):
 #   wasmtime: WASI runtime for running/testing WASM binaries
@@ -210,6 +210,21 @@ install_macos() {
         echo "  LLVM (Homebrew): NOT FOUND"
     fi
 
+    # Check Homebrew LLD (ld64.lld — required for linking LLVM bitcode on macOS)
+    local brew_lld=""
+    for prefix in /opt/homebrew/opt/lld/bin /usr/local/opt/lld/bin /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin; do
+        if [ -x "$prefix/ld64.lld" ]; then
+            brew_lld="$prefix"
+            break
+        fi
+    done
+
+    if [ -n "$brew_lld" ]; then
+        echo "  LLD (Homebrew): $brew_lld/ld64.lld"
+    else
+        echo "  LLD (Homebrew): NOT FOUND"
+    fi
+
     # Check Xcode CLT
     if xcode-select -p &>/dev/null; then
         echo "  Xcode CLT: $(xcode-select -p)"
@@ -222,7 +237,7 @@ install_macos() {
     check_wasmtime || true
     echo ""
 
-    # Install Homebrew LLVM if needed
+    # Install or upgrade Homebrew LLVM if needed
     if [ -z "$brew_llvm" ]; then
         if ! has_cmd brew; then
             echo "ERROR: Homebrew not found. Install from https://brew.sh"
@@ -230,6 +245,19 @@ install_macos() {
         fi
         echo "Installing LLVM via Homebrew..."
         brew install llvm
+    elif [ "$ver" -lt "$MIN_LLVM" ] 2>/dev/null; then
+        echo "LLVM $ver is too old (need $MIN_LLVM+), upgrading..."
+        brew upgrade llvm
+    fi
+
+    # Install Homebrew LLD if needed (system ld can't process LLVM 22+ bitcode)
+    if [ -z "$brew_lld" ]; then
+        if ! has_cmd brew; then
+            echo "ERROR: Homebrew not found. Install from https://brew.sh"
+            return 1
+        fi
+        echo "Installing LLD via Homebrew..."
+        brew install lld
     fi
 
     # Install Xcode CLT if needed

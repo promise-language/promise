@@ -1988,8 +1988,14 @@ func findLLVMTool(name string) (string, error) {
 	}
 
 	envName := envMap[name]
-	return "", fmt.Errorf("%s not found\n  searched: sibling of promise binary, $%s, embedded cache, Homebrew LLVM, PATH (%s-{%d..%d}, %s)\n  install LLVM %d+ or set PROMISE_USE_CLANG=1 to use clang",
+	hint := fmt.Sprintf("%s not found\n  searched: sibling of promise binary, $%s, embedded cache, Homebrew LLVM, PATH (%s-{%d..%d}, %s)\n  install LLVM %d+",
 		name, envName, name, maxLLVMSearch, minLLVMMajor, name, minLLVMMajor)
+	if runtime.GOOS == "darwin" {
+		hint += " (brew install llvm lld)"
+	} else {
+		hint += " or set PROMISE_USE_CLANG=1 to use clang"
+	}
+	return "", fmt.Errorf("%s", hint)
 }
 
 // runLLVMCmd creates an exec.Cmd for an LLVM tool, setting the platform-appropriate
@@ -2060,7 +2066,11 @@ func checkLLVMToolVersion(toolPath string) {
 	if v < minLLVMMajor {
 		fmt.Fprintf(os.Stderr, "error: LLVM version %d is too old (minimum required: %d)\n", v, minLLVMMajor)
 		fmt.Fprintf(os.Stderr, "  tool path: %s\n", toolPath)
-		fmt.Fprintf(os.Stderr, "  install LLVM %d+ or set PROMISE_USE_CLANG=1 to use clang\n", minLLVMMajor)
+		if runtime.GOOS == "darwin" {
+			fmt.Fprintf(os.Stderr, "  install LLVM %d+ (brew install llvm lld)\n", minLLVMMajor)
+		} else {
+			fmt.Fprintf(os.Stderr, "  install LLVM %d+ or set PROMISE_USE_CLANG=1 to use clang\n", minLLVMMajor)
+		}
 		os.Exit(1)
 	}
 }
@@ -2295,8 +2305,11 @@ func parseDarwinTriple(target string) darwinTripleInfo {
 	return info
 }
 
-// findDarwinLinker returns the path to a Mach-O linker for macOS.
-// Tries ld64.lld first (for bundled release), then falls back to system ld.
+// findDarwinLinker returns the path to ld64.lld for macOS linking.
+// Apple's system ld bundles its own LLVM version which cannot read bitcode from
+// newer LLVM versions (e.g., system ld has LLVM 17 but opt produces LLVM 22 bitcode),
+// so we require ld64.lld (which is version-matched to the LLVM toolchain).
+// Release builds embed lld; dev builds need it installed (e.g., brew install lld).
 // Returns (path, isLLD, error).
 func findDarwinLinker() (string, bool, error) {
 	// 1. Try ld64.lld via standard LLVM tool discovery
@@ -2304,17 +2317,18 @@ func findDarwinLinker() (string, bool, error) {
 		return path, true, nil
 	}
 
-	// 2. Environment override for system ld
+	// 2. Environment override
 	if p := os.Getenv("PROMISE_LD"); p != "" {
 		return p, false, nil
 	}
 
-	// 3. System ld (always available on macOS with CommandLineTools)
-	if path, err := exec.LookPath("ld"); err == nil {
-		return path, false, nil
-	}
-
-	return "", false, fmt.Errorf("no Mach-O linker found\n  install Xcode CommandLineTools: xcode-select --install\n  or set PROMISE_USE_CLANG=1 to use clang")
+	hint := "ld64.lld not found (required for macOS linking)\n"
+	hint += "  Apple's system ld cannot process LLVM 22+ bitcode\n"
+	hint += "\n"
+	hint += "  fix: install lld to get a version-matched LLVM linker\n"
+	hint += "    brew install lld\n"
+	hint += "  or: run bin/install-prereqs.sh"
+	return "", false, fmt.Errorf("%s", hint)
 }
 
 // isDarwinTarget returns true if the target triple is macOS/Darwin.
@@ -2354,7 +2368,7 @@ func isTestExcluded(target string, excludes []string) bool {
 }
 
 // buildDarwinLinkArgs builds the linker argument list for macOS Mach-O linking.
-// Works with both ld64.lld and Apple's system ld.
+// Works with ld64.lld and PROMISE_LD override linkers.
 func buildDarwinLinkArgs(target, objFile, outputFile string) []string {
 	sdk, err := findMacOSSDK()
 	if err != nil {
@@ -2649,9 +2663,9 @@ func compileAndLinkLLVM(llFile, target, outputFile string) {
 	}
 }
 
-// linkDarwin runs ld64.lld or system ld for macOS Mach-O linking.
+// linkDarwin runs ld64.lld for macOS Mach-O linking.
 // Accepts LLVM bitcode (.bc) or native object (.o) as input.
-// ld64.lld: uses --lto-O1 for LTO. System ld: compiles bitcode to .o via llc first.
+// Uses --lto-O1 for LTO. The !isLLD path is only reachable via PROMISE_LD override.
 func linkDarwin(bcOrObjFile, target, outputFile string) {
 	linkerPath, isLLD, err := findDarwinLinker()
 	if err != nil {
@@ -2663,11 +2677,11 @@ func linkDarwin(bcOrObjFile, target, outputFile string) {
 	}
 
 	fileToLink := bcOrObjFile
-	// System ld cannot process LLVM bitcode — run llc to produce a native object first.
+	// PROMISE_LD override: non-LLD linker cannot process LLVM bitcode — run llc first.
 	if !isLLD && strings.HasSuffix(bcOrObjFile, ".bc") {
 		llcPath, lerr := findLLVMTool("llc")
 		if lerr != nil {
-			fmt.Fprintf(os.Stderr, "error: system ld requires native object but llc not found: %v\n", lerr)
+			fmt.Fprintf(os.Stderr, "error: PROMISE_LD linker requires native object but llc not found: %v\n", lerr)
 			os.Exit(1)
 		}
 		nativeObj, nerr := os.CreateTemp("", "promise-darwin-*.o")
@@ -2685,7 +2699,7 @@ func linkDarwin(bcOrObjFile, target, outputFile string) {
 		llcCmd := runLLVMCmd(llcPath, llcArgs...)
 		llcCmd.Stderr = os.Stderr
 		if err := llcCmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "error running llc for darwin system ld: %v\n", err)
+			fmt.Fprintf(os.Stderr, "error running llc for PROMISE_LD linker: %v\n", err)
 			os.Exit(1)
 		}
 		fileToLink = nativeObj.Name()

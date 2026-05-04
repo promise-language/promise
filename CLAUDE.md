@@ -118,6 +118,7 @@ An agent can read the last ~20 lines of output to identify all failures without 
 **Stress test output** — reports flaky tests, timing variance, and adaptive scheduling:
 ```
 === Stress Test Report ===
+Target: linux-x86_64
 50 iterations over 45.2s
 
 FLAKY (2 tests):

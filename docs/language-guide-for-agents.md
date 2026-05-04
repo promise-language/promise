@@ -735,6 +735,21 @@ main() {
 - Return type must be `string`, `u8[]`, or `EmbeddedFiles`
 - Absolute paths are a compile error
 
+## Annotations Quick Reference
+
+```promise
+type Foo `public { ... }          // exported from module
+type Bar `serializable { ... }    // auto-generates encode/decode
+type Pt { f64 x `value; }         // field in value struct (stack)
+string id `final;                 // immutable after construction
+speak() string `abstract;         // must be overridden by child
+zero() Self `factory { ... }      // static constructor, returns Self
+process() `test { ... }           // test function
+main() `test(expected: "hi") { }  // snapshot test (checks stdout)
+type Printable `structural { ... } // auto-satisfied by matching methods
+get name string `embed("f.txt");  // compile-time file embed
+```
+
 ## Common Mistakes
 
 1. **Using `!` to propagate** — `!` always panics. Use bare call for propagation in `!` functions.

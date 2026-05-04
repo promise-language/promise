@@ -16,6 +16,7 @@ import (
 
 	"djabi.dev/go/promise_lang/internal/codegen"
 	"djabi.dev/go/promise_lang/internal/module"
+	"djabi.dev/go/promise_lang/internal/sema"
 )
 
 // --- Stress test types ---
@@ -360,6 +361,11 @@ func runStress(files []string, count int, duration time.Duration, perRunTimeout 
 		return
 	}
 
+	// Resolve host triple so the report always shows the platform.
+	if targetTriple == "" {
+		targetTriple = codegen.HostTargetTriple()
+	}
+
 	// SIGINT handler — set up before compile so Ctrl+C during compile works
 	stopCh := make(chan os.Signal, 1)
 	signal.Notify(stopCh, os.Interrupt)
@@ -552,7 +558,7 @@ report:
 	if !isTTY {
 		fmt.Println()
 	}
-	printStressReport(iteration, time.Since(start), allFiles, totalTests)
+	printStressReport(iteration, time.Since(start), allFiles, totalTests, targetTriple)
 
 	// Exit code: 1 if any flaky tests
 	for _, fs := range allFiles {
@@ -629,8 +635,14 @@ func printStressProgress(iteration int, elapsed time.Duration, files []*fileStat
 		iteration, elapsed.Seconds(), len(flaky), len(highVar), stableCount, totalTests)
 }
 
-func printStressReport(iterations int, elapsed time.Duration, files []*fileStats, totalTests int) {
+func printStressReport(iterations int, elapsed time.Duration, files []*fileStats, totalTests int, targetTriple string) {
 	fmt.Printf("=== Stress Test Report ===\n")
+	ti := sema.ParseTargetInfo(targetTriple)
+	if ti.OS != "" && ti.Arch != "" {
+		fmt.Printf("Target: %s-%s\n", ti.OS, ti.Arch)
+	} else if targetTriple != "" {
+		fmt.Printf("Target: %s\n", targetTriple)
+	}
 	fmt.Printf("%d iterations over %.1fs\n\n", iterations, elapsed.Seconds())
 
 	flaky, highVar, stable := collectTestsByCategory(files)

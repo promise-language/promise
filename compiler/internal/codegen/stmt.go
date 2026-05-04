@@ -3324,7 +3324,7 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 	// Step 2: Sort channel pointers by address and lock all.
 	i8PtrTy := irtypes.I8Ptr
 	arrType := irtypes.NewArray(uint64(nCases), i8PtrTy)
-	chArr := c.block.NewAlloca(arrType)
+	chArr := c.createEntryAlloca(arrType)
 
 	for i, ci := range caseInfos {
 		ptr := c.block.NewGetElementPtr(arrType, chArr,
@@ -3495,7 +3495,7 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 	// Helper: generate send execution code for a case
 	execSend := func(ci selectCaseInfo, prefix string) {
 		argVal := c.genExpr(ci.sendValueExpr)
-		argAlloca := c.block.NewAlloca(ci.elemLLVM)
+		argAlloca := c.createEntryAlloca(ci.elemLLVM)
 		c.block.NewStore(argVal, argAlloca)
 		argAsI8 := c.block.NewBitCast(argAlloca, i8PtrTy)
 
@@ -3560,7 +3560,7 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 		head := c.block.NewLoad(irtypes.I64, headPtr)
 		offset := c.block.NewMul(head, constant.NewInt(irtypes.I64, ci.elemSize))
 		src := c.block.NewGetElementPtr(irtypes.I8, buf, offset)
-		rAlloca := c.block.NewAlloca(ci.elemLLVM)
+		rAlloca := c.createEntryAlloca(ci.elemLLVM)
 		rAsI8 := c.block.NewBitCast(rAlloca, i8PtrTy)
 		c.block.NewCall(c.funcs["llvm.memcpy"], rAsI8, src,
 			constant.NewInt(irtypes.I64, ci.elemSize), constant.False)

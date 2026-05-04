@@ -1979,9 +1979,9 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 	// write: memcpy value into buffer[tail * elem_size]
 	c.block = writeBlock
 
-	// Alloca value and store
+	// Alloca value and store (entry-block alloca to avoid stack growth in loops)
 	argVal := c.genCallArgExpr(e.Args[0].Value)
-	argAlloca := c.block.NewAlloca(elemLLVM)
+	argAlloca := c.createEntryAlloca(elemLLVM)
 	c.block.NewStore(argVal, argAlloca)
 	argAsI8 := c.block.NewBitCast(argAlloca, irtypes.I8Ptr)
 
@@ -5739,8 +5739,13 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 		c.locals[name] = alloca
 	}
 
-	// Initial suspend — wait to be scheduled
-	initResult := startBlk.NewCall(c.coroSuspend, constant.None, constant.False)
+	// Initial suspend — in a separate block so that createEntryAlloca can
+	// append allocas to startBlk BEFORE the suspend point. coro-split needs
+	// allocas to precede coro.suspend to properly spill them to the frame.
+	initSuspBlk := coroFn.NewBlock("coro.init.suspend")
+	startBlk.NewBr(initSuspBlk)
+
+	initResult := initSuspBlk.NewCall(c.coroSuspend, constant.None, constant.False)
 
 	suspendBlk := coroFn.NewBlock("coro.suspend")
 	bodyBlk := coroFn.NewBlock("body")
@@ -5749,7 +5754,7 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	// Instructions are added after the body is compiled.
 	doneBlk := coroFn.NewBlock("coro.done")
 
-	startBlk.NewSwitch(initResult, suspendBlk,
+	initSuspBlk.NewSwitch(initResult, suspendBlk,
 		ir.NewCase(constant.NewInt(irtypes.I8, 0), bodyBlk),
 		ir.NewCase(constant.NewInt(irtypes.I8, 1), cleanupBlk))
 
@@ -6122,8 +6127,8 @@ func (c *Compiler) genReceiveChannel(e *ast.UnaryExpr, inst *types.Instance) val
 	offset := c.block.NewMul(head, constant.NewInt(irtypes.I64, elemSize))
 	src := c.block.NewGetElementPtr(irtypes.I8, buf, offset)
 
-	// Read value via alloca + memcpy
-	resultAlloca := c.block.NewAlloca(elemLLVM)
+	// Read value via alloca + memcpy (entry-block alloca to avoid stack growth in loops)
+	resultAlloca := c.createEntryAlloca(elemLLVM)
 	resultAsI8 := c.block.NewBitCast(resultAlloca, irtypes.I8Ptr)
 	c.block.NewCall(c.funcs["llvm.memcpy"], resultAsI8, src,
 		constant.NewInt(irtypes.I64, elemSize), constant.False)

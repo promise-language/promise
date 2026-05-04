@@ -440,7 +440,7 @@ Architecture (GMP model):
 - **M (Machine)**: OS thread bound to a P. Pool is elastic — sysmon spawns extra Ms when all are blocked.
 - **Sched (Global)**: Singleton with global run queue, idle M list, P array, goroutine counter.
 
-LLVM coroutine pattern: `go` blocks compile as `presplitcoroutine` functions using `llvm.coro.*` intrinsics (id, alloc, begin, suspend, end, free, resume, destroy, done). Each coroutine has an initial suspend (wait to be scheduled) and a final suspend (keep frame alive so scheduler can check `coro.done()`). Clang runs with `-O1` to ensure CoroSplit lowering.
+LLVM coroutine pattern: `go` blocks compile as `presplitcoroutine` functions using `llvm.coro.*` intrinsics (id, alloc, begin, suspend, end, free, resume, destroy, done). Each coroutine has an initial suspend (in a separate `coro.init.suspend` block — allocas must precede it so `coro-split` can spill them to the coroutine frame) and a final suspend (keep frame alive so scheduler can check `coro.done()`). The `coro.start` block contains `coro.begin`, captured-parameter allocas, and any entry-block allocas from `createEntryAlloca`, then branches to `coro.init.suspend`. Opt runs with `-O1` to ensure CoroSplit lowering.
 
 Dual-mode channel operations: inside a coroutine body (`c.inCoroutine`), channel send/receive parks the goroutine on the channel's wait list and calls `coro.suspend`. Outside coroutine context (e.g. `main()` before scheduler wrapping or nested non-coroutine calls), the existing mutex+cond_wait blocking mode is used. Both modes coexist on the same channel.
 

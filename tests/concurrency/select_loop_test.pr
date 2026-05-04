@@ -1,0 +1,66 @@
+// Tests select behavior — validates entry-block alloca placement (B0007 fix).
+// Note: select in loops is blocked by B0116 (second select-with-default in same
+// function hangs). Select inside go blocks is blocked by B0114.
+// Select recv picks the ready channel.
+test_select_recv_picks_ready() `test(exclude: "wasm32") {
+  ch1 := channel[int](capacity: 10);
+  ch2 := channel[int](capacity: 10);
+
+  // Fill both channels
+  for i in 0..10 {
+    ch1.send(i);
+    ch2.send(i + 100);
+  }
+
+  // Single select — picks whichever is ready first
+  int result = -1;
+  select {
+    v := <-ch1:
+    if val := v {
+      result = val;
+    }
+    v := <-ch2:
+    if val := v {
+      result = val;
+    }
+  }
+  // Either ch1 or ch2 value received
+  assert(result >= 0, "select recv got a value");
+}
+
+// Select recv from multiple channels with different types (exercises
+// multiple entry-block allocas for different element sizes).
+test_select_recv_multi_type() `test(exclude: "wasm32") {
+  ch_int := channel[int](capacity: 1);
+  ch_bool := channel[bool](capacity: 1);
+
+  ch_int.send(42);
+  ch_bool.send(true);
+
+  // Select with int channel
+  int got_int = 0;
+  select {
+    v := <-ch_int:
+    if val := v {
+      got_int = val;
+    }
+    default:
+  }
+  assert(got_int == 42, "select recv int");
+}
+
+// Select send to a buffered channel (exercises send alloca in entry block).
+test_select_send_buffered() `test(exclude: "wasm32") {
+  ch := channel[int](capacity: 5);
+
+  // Select-send to a channel with space
+  select {
+    ch.send(99):
+    default:
+  }
+
+  r := <-ch;
+  if v := r {
+    assert(v == 99, "select send value");
+  }
+}

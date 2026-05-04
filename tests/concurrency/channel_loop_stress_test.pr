@@ -1,0 +1,153 @@
+// Stress tests for channel send/recv in tight loops within goroutines.
+// Validates that entry-block allocas are reused across iterations (B0007 fix).
+// Without the fix, each iteration would allocate stack space for the channel
+// memcpy temporary, causing stack overflow at high iteration counts.
+// High-iteration send/recv in goroutine — 10K iterations.
+test_channel_send_loop_10k() `test(exclude: "wasm32") {
+  ch := channel[int](capacity: 100);
+  done := channel[int](capacity: 1);
+
+  go {
+    for i in 0..10000 {
+      ch.send(1);
+    }
+  };
+
+  go {
+    int count = 0;
+    for i in 0..10000 {
+      r := <-ch;
+      if v := r {
+        count += v;
+      }
+    }
+    done.send(count);
+  };
+
+  r := <-done;
+  if v := r {
+    assert(v == 10000, "10K send/recv count");
+  }
+}
+
+// High-iteration with string type (larger element size for memcpy).
+test_channel_string_loop() `test(exclude: "wasm32") {
+  ch := channel[string](capacity: 50);
+  done := channel[int](capacity: 1);
+
+  go {
+    for i in 0..1000 {
+      ch.send("hello");
+    }
+  };
+
+  go {
+    int count = 0;
+    for i in 0..1000 {
+      r := <-ch;
+      if v := r {
+        count += 1;
+      }
+    }
+    done.send(count);
+  };
+
+  r := <-done;
+  if v := r {
+    assert(v == 1000, "1K string send/recv count");
+  }
+}
+
+// Bidirectional: goroutine sends and receives on different channels in same loop.
+test_channel_bidirectional_loop() `test(exclude: "wasm32") {
+  request := channel[int](capacity: 10);
+  response := channel[int](capacity: 10);
+  done := channel[int](capacity: 1);
+
+  // Worker: recv request, send response
+  go {
+    for i in 0..500 {
+      r := <-request;
+      if v := r {
+        response.send(v * 2);
+      }
+    }
+  };
+
+  // Client: send request, recv response, in same loop
+  go {
+    int total = 0;
+    for i in 0..500 {
+      request.send(i);
+      r := <-response;
+      if v := r {
+        total += v;
+      }
+    }
+    done.send(total);
+  };
+
+  r := <-done;
+  if v := r {
+    // total = sum of (i * 2) for i in 0..500 = 2 * (499 * 500 / 2) = 249500
+    assert(v == 249500, "bidirectional loop total");
+  }
+}
+
+// Multiple channels with different types in same goroutine loop.
+test_channel_multi_type_loop() `test(exclude: "wasm32") {
+  int_ch := channel[int](capacity: 50);
+  bool_ch := channel[bool](capacity: 50);
+  done := channel[int](capacity: 1);
+
+  go {
+    for i in 0..200 {
+      int_ch.send(i);
+      bool_ch.send(i % 2 == 0);
+    }
+  };
+
+  go {
+    int sum = 0;
+    int true_count = 0;
+    for i in 0..200 {
+      r1 := <-int_ch;
+      if v := r1 {
+        sum += v;
+      }
+      r2 := <-bool_ch;
+      if v := r2 {
+        if v {
+          true_count += 1;
+        }
+      }
+    }
+    done.send(sum + true_count);
+  };
+
+  r := <-done;
+  if v := r {
+    // sum = 199 * 200 / 2 = 19900, true_count = 100 (even numbers 0..199)
+    assert(v == 20000, "multi-type loop result");
+  }
+}
+
+// Main thread: tight send/recv loop (non-goroutine path).
+test_channel_main_thread_loop() `test(exclude: "wasm32") {
+  ch := channel[int](capacity: 1000);
+
+  // Fill in a loop
+  for i in 0..1000 {
+    ch.send(i);
+  }
+
+  // Drain in a loop
+  int sum = 0;
+  for i in 0..1000 {
+    r := <-ch;
+    if v := r {
+      sum += v;
+    }
+  }
+  assert(sum == 499500, "main thread loop sum");
+}

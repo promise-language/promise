@@ -1978,15 +1978,20 @@ func (c *Compiler) wrapMainWithScheduler() {
 		ir.NewIncoming(mem, allocBlk))
 	hdl := startBlk.NewCall(c.coroBegin, coroId, phiMem)
 
-	// Initial suspend — wait to be scheduled
-	initResult := startBlk.NewCall(c.coroSuspend, constant.None, constant.False)
+	// Initial suspend — in a separate block so that createEntryAlloca can
+	// append allocas to startBlk BEFORE the suspend point. coro-split needs
+	// allocas to precede coro.suspend to properly spill them to the frame.
+	initSuspBlk := coroFn.NewBlock("coro.init.suspend")
+	startBlk.NewBr(initSuspBlk)
+
+	initResult := initSuspBlk.NewCall(c.coroSuspend, constant.None, constant.False)
 
 	suspendBlk := coroFn.NewBlock("coro.suspend")
 	bodyBlk := coroFn.NewBlock("body")
 	cleanupBlk := coroFn.NewBlock("cleanup")
 	doneBlk := coroFn.NewBlock("coro.done")
 
-	startBlk.NewSwitch(initResult, suspendBlk,
+	initSuspBlk.NewSwitch(initResult, suspendBlk,
 		ir.NewCase(constant.NewInt(irtypes.I8, 0), bodyBlk),
 		ir.NewCase(constant.NewInt(irtypes.I8, 1), cleanupBlk))
 

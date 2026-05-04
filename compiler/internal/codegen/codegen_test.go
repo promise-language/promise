@@ -11625,6 +11625,115 @@ func TestCStrGlobalsArePrivate(t *testing.T) {
 	}
 }
 
+// extractFunc returns the IR text of a named function definition from full module IR.
+// Returns empty string if function not found.
+func extractFunc(ir, funcName string) string {
+	// Search for "define" lines containing the function name
+	needle := "@" + funcName + "("
+	searchFrom := 0
+	for searchFrom < len(ir) {
+		idx := strings.Index(ir[searchFrom:], needle)
+		if idx < 0 {
+			return ""
+		}
+		idx += searchFrom
+		// Walk back to find "define" on the same line
+		lineStart := strings.LastIndex(ir[:idx], "\n")
+		if lineStart < 0 {
+			lineStart = 0
+		}
+		line := ir[lineStart:idx]
+		if !strings.Contains(line, "define") {
+			// This is a call site, not a definition — skip
+			searchFrom = idx + len(needle)
+			continue
+		}
+		start := lineStart
+		if ir[start] == '\n' {
+			start++
+		}
+		// Walk forward to find the closing "}" at depth 0
+		rest := ir[start:]
+		depth := 0
+		for i, ch := range rest {
+			if ch == '{' {
+				depth++
+			} else if ch == '}' {
+				depth--
+				if depth == 0 {
+					return rest[:i+1]
+				}
+			}
+		}
+		return rest
+	}
+	return ""
+}
+
+// B0007: Verify that the goroutine coroutine has coro.init.suspend block
+// separating allocas in coro.start from the initial coro.suspend.
+func TestCoroutineInitSuspendBlock(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 1);
+			ch.send(42);
+		}
+	`)
+	// Main is wrapped in a goroutine coroutine
+	goFunc := extractFunc(ir, ".goroutine.main")
+	if goFunc == "" {
+		t.Fatal("expected .goroutine.main function in IR")
+	}
+	// coro.start should branch to coro.init.suspend (not contain coro.suspend directly)
+	assertContains(t, goFunc, "br label %coro.init.suspend")
+	// coro.init.suspend block should contain the initial coro.suspend
+	assertContains(t, goFunc, "coro.init.suspend:")
+	assertContains(t, goFunc, "call i8 @llvm.coro.suspend(")
+}
+
+// B0007: Verify that channel send alloca is in coro.start (entry block),
+// not in the send.write block.
+func TestChannelSendAllocaInEntryBlock(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 5);
+			ch.send(42);
+		}
+	`)
+	goFunc := extractFunc(ir, ".goroutine.main")
+	if goFunc == "" {
+		t.Fatal("expected .goroutine.main function in IR")
+	}
+
+	// The alloca for the send value should be in coro.start, before the br to coro.init.suspend
+	// Split on "coro.init.suspend:" to get coro.start content
+	parts := strings.SplitN(goFunc, "coro.init.suspend:", 2)
+	if len(parts) < 2 {
+		t.Fatal("expected coro.init.suspend block")
+	}
+	coroStart := parts[0]
+
+	// coro.start should contain an alloca for the send value (i64 for int)
+	if !strings.Contains(coroStart, "alloca i64") {
+		t.Errorf("expected alloca i64 in coro.start for channel send value\ncoro.start:\n%s", coroStart)
+	}
+
+	// The send.write block should NOT contain an alloca
+	sendWriteIdx := strings.Index(goFunc, "send.write")
+	if sendWriteIdx >= 0 {
+		// Get the send.write block content (up to next label or end)
+		sendWriteBlock := goFunc[sendWriteIdx:]
+		nextLabel := strings.Index(sendWriteBlock[1:], "\n")
+		if nextLabel > 0 {
+			// Check a reasonable window after send.write label
+			window := sendWriteBlock[:min(len(sendWriteBlock), 500)]
+			if strings.Contains(window, "= alloca ") {
+				t.Errorf("send.write block should not contain alloca (should be in entry block)\nblock:\n%s", window)
+			}
+		}
+	}
+}
+
 func TestModuleSplitStringConstantsPreserved(t *testing.T) {
 	// When SplitModuleIRs() splits the IR, string constants (private globals)
 	// must remain as definitions in the module IR, not be stripped to extern.
@@ -11876,4 +11985,79 @@ func TestIsDestructureAsExprCodegen(t *testing.T) {
 	assertNotContains(t, ir, "isdestr.then")
 	// But should still have the tag comparison
 	assertContains(t, ir, "icmp eq i32")
+}
+
+// B0007: Verify that channel recv alloca is in coro.start (entry block),
+// not in the chrecv.read block.
+func TestChannelRecvAllocaInEntryBlock(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 5);
+			ch.send(42);
+			val := <-ch;
+		}
+	`)
+	goFunc := extractFunc(ir, ".goroutine.main")
+	if goFunc == "" {
+		t.Fatal("expected .goroutine.main function in IR")
+	}
+
+	// The chrecv.read block should NOT contain an alloca
+	readIdx := strings.Index(goFunc, "chrecv.read")
+	if readIdx >= 0 {
+		readBlock := goFunc[readIdx:]
+		window := readBlock[:min(len(readBlock), 500)]
+		if strings.Contains(window, "= alloca ") {
+			t.Errorf("chrecv.read block should not contain alloca (should be in entry block)\nblock:\n%s", window)
+		}
+	}
+}
+
+// B0007: Verify that go-block coroutines also have the coro.init.suspend separation.
+func TestGoBlockCoroutineInitSuspend(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 1);
+			go {
+				ch.send(42);
+			};
+		}
+	`)
+	// Find the go-block goroutine function (not .goroutine.main)
+	goFunc := extractFunc(ir, ".goroutine.0")
+	if goFunc == "" {
+		t.Fatal("expected .goroutine.0 function in IR")
+	}
+	// Should have the separated init suspend block
+	assertContains(t, goFunc, "br label %coro.init.suspend")
+	assertContains(t, goFunc, "coro.init.suspend:")
+}
+
+// B0007: Verify select statement allocas are in entry block.
+func TestSelectAllocaInEntryBlock(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch1 := channel[int](capacity: 1);
+			ch2 := channel[int](capacity: 1);
+			ch1.send(10);
+			select {
+				v := <-ch1:
+				v := <-ch2:
+			}
+		}
+	`)
+	goFunc := extractFunc(ir, ".goroutine.main")
+	if goFunc == "" {
+		t.Fatal("expected .goroutine.main function in IR")
+	}
+
+	// coro.start should contain the channel array alloca ([2 x i8*])
+	parts := strings.SplitN(goFunc, "coro.init.suspend:", 2)
+	if len(parts) < 2 {
+		t.Fatal("expected coro.init.suspend block")
+	}
+	coroStart := parts[0]
+	if !strings.Contains(coroStart, "alloca [2 x i8*]") {
+		t.Errorf("expected alloca [2 x i8*] in coro.start for select channel array\ncoro.start:\n%s", coroStart)
+	}
 }

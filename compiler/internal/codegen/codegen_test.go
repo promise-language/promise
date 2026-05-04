@@ -420,8 +420,8 @@ func TestPrintNewlineEmission(t *testing.T) {
 		main() { print_s("hello"); }
 	`)
 	// Newline global constant (used by print_string body)
-	assertContains(t, ir, `@.str.newline = constant [1 x i8] c"\0A"`)
-	assertContains(t, ir, `@.str.panic_prefix = constant [7 x i8] c"panic: "`)
+	assertContains(t, ir, `@.str.newline = private constant [1 x i8] c"\0A"`)
+	assertContains(t, ir, `@.str.panic_prefix = private constant [7 x i8] c"panic: "`)
 }
 
 // --- Control flow tests ---
@@ -6084,16 +6084,16 @@ func TestTestPrintResultBody(t *testing.T) {
 	assertContains(t, ir, "br i1")    // conditional branch
 	assertContains(t, ir, "br label") // unconditional branches to merge
 	// PASS/FAIL prefix globals (now include opening paren)
-	assertContains(t, ir, `@.str.pass_prefix = constant [6 x i8] c"PASS ("`)
-	assertContains(t, ir, `@.str.fail_prefix = constant [6 x i8] c"FAIL ("`)
+	assertContains(t, ir, `@.str.pass_prefix = private constant [6 x i8] c"PASS ("`)
+	assertContains(t, ir, `@.str.fail_prefix = private constant [6 x i8] c"FAIL ("`)
 	// Prefix write: 6 bytes for "PASS (" or "FAIL ("
 	assertContains(t, ir, "call i64 @pal_write(i32 1,")
 	assertContains(t, ir, "i64 6)")
 	// Gets name length via strlen and writes name
 	assertContains(t, ir, "call i64 @strlen(i8* %name)")
 	// Time formatting: "s) " suffix, "\n" newline
-	assertContains(t, ir, `@.str.time_suffix = constant [3 x i8] c"s) "`)
-	assertContains(t, ir, `@.str.newline = constant [1 x i8] c"\0A"`)
+	assertContains(t, ir, `@.str.time_suffix = private constant [3 x i8] c"s) "`)
+	assertContains(t, ir, `@.str.newline = private constant [1 x i8] c"\0A"`)
 }
 
 func TestTestSummaryBody(t *testing.T) {
@@ -6117,9 +6117,9 @@ func TestTestSummaryBody(t *testing.T) {
 	// Function is defined (not just declared)
 	assertContains(t, ir, "define void @promise_test_summary(i32 %passed, i32 %failed, i32 %skipped)")
 	// String suffix globals
-	assertContains(t, ir, `@.str.passed_suffix = constant [9 x i8] c" passed, "`)
-	assertContains(t, ir, `@.str.failed_suffix = constant [7 x i8] c" failed"`)
-	assertContains(t, ir, `@.str.skipped_suffix = constant [8 x i8] c" skipped"`)
+	assertContains(t, ir, `@.str.passed_suffix = private constant [9 x i8] c" passed, "`)
+	assertContains(t, ir, `@.str.failed_suffix = private constant [7 x i8] c" failed"`)
+	assertContains(t, ir, `@.str.skipped_suffix = private constant [8 x i8] c" skipped"`)
 	// Converts i32 → i64 for int_to_string
 	assertContains(t, ir, "sext i32 %passed to i64")
 	assertContains(t, ir, "sext i32 %failed to i64")
@@ -11410,4 +11410,241 @@ func TestEnumGetterOnDataEnum(t *testing.T) {
 	`)
 	assertContains(t, ir, "define i1 @Shape.has_area(i8* %this)")
 	assertContains(t, ir, "call i1 @Shape.has_area(")
+}
+
+// --- B0005: String constant private linkage tests ---
+// All string constant globals must use LinkagePrivate so each split .bc file
+// (module, instance) contains its own copy and doesn't depend on main-IR string
+// numbering. This prevents stale cache entries from causing linker errors.
+
+// compileResultWithModule parses a module and user source, runs sema+codegen,
+// and returns the CompileResult (for SplitModuleIRs / InstanceIRs testing).
+func compileResultWithModule(t *testing.T, moduleName, modSrc, userSrc string) *CompileResult {
+	t.Helper()
+
+	modInfo, modScope := parseModuleSource(t, moduleName, modSrc)
+	stdModInfo, stdScope := getCodegenStdModInfo()
+
+	userInput := antlr.NewInputStream(userSrc)
+	userLexer := parser.NewPromiseLexer(userInput)
+	userLexer.RemoveErrorListeners()
+	userStream := antlr.NewCommonTokenStream(userLexer, antlr.TokenDefaultChannel)
+	userP := parser.NewPromiseParser(userStream)
+	userP.RemoveErrorListeners()
+	userTree := userP.CompilationUnit()
+	userFile, errs := ast.Build("test.pr", userTree)
+	if len(errs) > 0 {
+		t.Fatalf("user AST build errors: %v", errs)
+	}
+
+	stdUse := &ast.UseDecl{Alias: "_", CatalogName: "std"}
+	userFile.Uses = append([]*ast.UseDecl{stdUse}, userFile.Uses...)
+
+	modKey := "./" + moduleName
+	moduleScopes := map[string]*types.Scope{
+		"std":  stdScope,
+		modKey: modScope,
+	}
+	info, semaErrs := sema.CheckWithModules(userFile, moduleScopes)
+	if len(semaErrs) > 0 {
+		t.Fatalf("sema errors: %v", semaErrs)
+	}
+	info.ModuleInfos = map[string]*sema.ModuleInfo{
+		"std":  stdModInfo,
+		modKey: modInfo,
+	}
+	info.ModuleOrder = []string{"std", modKey}
+
+	return Compile(userFile, info, "")
+}
+
+func TestStringConstantsArePrivate(t *testing.T) {
+	// All string constants (@.str.*) must have "private" linkage in the IR.
+	ir := generateIR(t, `
+		main() {
+			print_line("hello");
+			assert(true, "ok");
+		}
+	`)
+	for _, line := range strings.Split(ir, "\n") {
+		// Match lines that define string constant globals (not references in function bodies)
+		if (strings.HasPrefix(line, "@.str.") || strings.HasPrefix(line, "@.cstr.")) &&
+			strings.Contains(line, " = ") && strings.Contains(line, "constant") {
+			if !strings.Contains(line, "private") {
+				t.Errorf("string constant must have private linkage: %s", line)
+			}
+		}
+	}
+}
+
+func TestCStrGlobalsArePrivate(t *testing.T) {
+	// C-string globals (.cstr.<hash>) used for panic messages and assert
+	// must have private linkage.
+	ir := generateIR(t, `
+		main() {
+			assert(1 == 1, "basic math");
+		}
+	`)
+	for _, line := range strings.Split(ir, "\n") {
+		if strings.HasPrefix(line, "@.cstr.") && strings.Contains(line, " = ") {
+			if !strings.Contains(line, "private") {
+				t.Errorf("cstr global must have private linkage: %s", line)
+			}
+		}
+	}
+}
+
+func TestModuleSplitStringConstantsPreserved(t *testing.T) {
+	// When SplitModuleIRs() splits the IR, string constants (private globals)
+	// must remain as definitions in the module IR, not be stripped to extern.
+	// This is the core B0005 fix: each .bc is self-contained for strings.
+	result := compileResultWithModule(t, "mymod",
+		`greet(string name) string `+"`public"+` { return "Hello, {name}!"; }`,
+		`
+		use mymod "./mymod";
+		main() { string s = mymod.greet("World"); }
+		`,
+	)
+	_, moduleIRs := result.SplitModuleIRs()
+
+	modIR, ok := moduleIRs["mymod"]
+	if !ok {
+		t.Fatal("expected 'mymod' in moduleIRs")
+	}
+
+	// Module IR must contain at least one string constant as a private definition.
+	foundPrivateStr := false
+	for _, line := range strings.Split(modIR, "\n") {
+		if strings.HasPrefix(line, "@.str.") && strings.Contains(line, "private constant") {
+			foundPrivateStr = true
+		}
+		// No string constant should be an extern declaration
+		if strings.HasPrefix(line, "@.str.") && !strings.Contains(line, "private") &&
+			strings.Contains(line, " = ") && strings.Contains(line, "constant") {
+			t.Errorf("module IR has non-private string constant: %s", line)
+		}
+	}
+	if !foundPrivateStr {
+		t.Error("module IR must contain at least one private string constant definition")
+	}
+}
+
+func TestInstanceIRStringConstantsPreserved(t *testing.T) {
+	// Instance .bc files must contain their own copy of string constants
+	// (as private definitions), not extern references to the main IR.
+	file, info := parseWithStd(t, `
+		type Wrapper[T] {
+			T value;
+			describe(this) string { return "wrapped"; }
+		}
+		main() {
+			w := Wrapper[int](value: 42);
+			string s = w.describe();
+		}
+	`)
+	result := Compile(file, info, "")
+	instIRs := result.InstanceIRs()
+
+	wrapIR, ok := instIRs["Wrapper[int]"]
+	if !ok {
+		t.Fatalf("expected Wrapper[int] in instance IRs, got: %v", mapKeys(instIRs))
+	}
+
+	// Instance IR must contain at least one private string constant.
+	foundPrivateStr := false
+	for _, line := range strings.Split(wrapIR, "\n") {
+		if strings.HasPrefix(line, "@.str.") && strings.Contains(line, "private constant") {
+			foundPrivateStr = true
+		}
+	}
+	if !foundPrivateStr {
+		t.Error("instance IR must contain at least one private string constant (from describe method)")
+	}
+
+	// No string constant should be an extern declaration in instance IR.
+	for _, line := range strings.Split(wrapIR, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if (strings.HasPrefix(trimmed, "@.str.") || strings.HasPrefix(trimmed, "@.cstr.")) &&
+			!strings.Contains(trimmed, "private") &&
+			strings.Contains(trimmed, " = external") {
+			t.Errorf("instance IR has extern string constant (should be private): %s", line)
+		}
+	}
+}
+
+func TestStripGlobalsPrivateVsNonPrivate(t *testing.T) {
+	// stripGlobals must preserve private globals (string constants)
+	// while converting non-private globals (vtables, RTTI) to extern.
+	ir := generateIR(t, `
+		type Animal {
+			string name;
+			speak() string { return "..."; }
+		}
+		main() {
+			a := Animal(name: "cat");
+			print_line(a.speak());
+		}
+	`)
+
+	// Private string constants must be defined (have content)
+	foundPrivateDef := false
+	foundNonPrivateGlobal := false
+	for _, line := range strings.Split(ir, "\n") {
+		if strings.HasPrefix(line, "@.str.") && strings.Contains(line, "private constant") {
+			foundPrivateDef = true
+		}
+		// Vtable/typeinfo globals are non-private
+		if strings.HasPrefix(line, "@promise_vtable_") && strings.Contains(line, " = ") {
+			foundNonPrivateGlobal = true
+			if strings.Contains(line, "private") {
+				t.Errorf("vtable global should NOT be private: %s", line)
+			}
+		}
+	}
+	if !foundPrivateDef {
+		t.Error("expected at least one private string constant definition")
+	}
+	if !foundNonPrivateGlobal {
+		t.Error("expected at least one non-private vtable global")
+	}
+}
+
+func TestModuleSplitNonPrivateGlobalsStripped(t *testing.T) {
+	// In module IR, non-private globals (vtables, RTTI) must be converted to
+	// extern declarations. Only private globals (strings) stay as definitions.
+	result := compileResultWithModule(t, "shapes",
+		`
+		type Shape `+"`public"+` {
+			string label;
+			info(this) string { return "shape: {this.label}"; }
+		}
+		`,
+		`
+		use shapes "./shapes";
+		main() {
+			s := shapes.Shape(label: "box");
+			print_line(s.info());
+		}
+		`,
+	)
+	_, moduleIRs := result.SplitModuleIRs()
+
+	modIR, ok := moduleIRs["shapes"]
+	if !ok {
+		t.Fatal("expected 'shapes' in moduleIRs")
+	}
+
+	// Vtable/typeinfo globals should be extern declarations in module IR
+	for _, line := range strings.Split(modIR, "\n") {
+		trimmed := strings.TrimSpace(line)
+		// Check vtable globals are NOT defined (they live in main IR)
+		if strings.HasPrefix(trimmed, "@promise_vtable_") &&
+			strings.Contains(trimmed, " = ") &&
+			!strings.Contains(trimmed, "external") {
+			// Allow if it's an extern declaration (no init = "external" or just "declare")
+			if strings.Contains(trimmed, "constant") || strings.Contains(trimmed, "global") {
+				t.Errorf("module IR should not define vtable global (should be extern): %s", trimmed)
+			}
+		}
+	}
 }

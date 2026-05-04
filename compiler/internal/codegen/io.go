@@ -25,10 +25,12 @@ func (c *Compiler) definePALBodies() {
 	nlData := constant.NewCharArrayFromString("\n")
 	c.newlineGlobal = c.module.NewGlobalDef(".str.newline", nlData)
 	c.newlineGlobal.Immutable = true
+	c.newlineGlobal.Linkage = enum.LinkagePrivate
 
 	panicData := constant.NewCharArrayFromString("panic: ")
 	c.panicPrefixGlobal = c.module.NewGlobalDef(".str.panic_prefix", panicData)
 	c.panicPrefixGlobal.Immutable = true
+	c.panicPrefixGlobal.Linkage = enum.LinkagePrivate
 
 	// Build a lookup by LLVM function name for declarations without bodies
 	irFuncByName := make(map[string]*ir.Func)
@@ -686,18 +688,22 @@ func (c *Compiler) defineTestPrintResultBody(fn *ir.Func) {
 	passData := constant.NewCharArrayFromString("PASS (")
 	passGlobal := c.module.NewGlobalDef(".str.pass_prefix", passData)
 	passGlobal.Immutable = true
+	passGlobal.Linkage = enum.LinkagePrivate
 
 	failData := constant.NewCharArrayFromString("FAIL (")
 	failGlobal := c.module.NewGlobalDef(".str.fail_prefix", failData)
 	failGlobal.Immutable = true
+	failGlobal.Linkage = enum.LinkagePrivate
 
 	dotData := constant.NewCharArrayFromString(".")
 	dotGlobal := c.module.NewGlobalDef(".str.dot", dotData)
 	dotGlobal.Immutable = true
+	dotGlobal.Linkage = enum.LinkagePrivate
 
 	timeSuffixData := constant.NewCharArrayFromString("s) ")
 	timeSuffixGlobal := c.module.NewGlobalDef(".str.time_suffix", timeSuffixData)
 	timeSuffixGlobal.Immutable = true
+	timeSuffixGlobal.Linkage = enum.LinkagePrivate
 
 	stdout := constant.NewInt(irtypes.I32, 1)
 	name := fn.Params[0]      // i8*
@@ -779,18 +785,22 @@ func (c *Compiler) defineTestSummaryBody(fn *ir.Func) {
 	passedSuffixData := constant.NewCharArrayFromString(" passed, ")
 	passedSuffixGlobal := c.module.NewGlobalDef(".str.passed_suffix", passedSuffixData)
 	passedSuffixGlobal.Immutable = true
+	passedSuffixGlobal.Linkage = enum.LinkagePrivate
 
 	failedSuffixData := constant.NewCharArrayFromString(" failed")
 	failedSuffixGlobal := c.module.NewGlobalDef(".str.failed_suffix", failedSuffixData)
 	failedSuffixGlobal.Immutable = true
+	failedSuffixGlobal.Linkage = enum.LinkagePrivate
 
 	skippedPrefixData := constant.NewCharArrayFromString(", ")
 	skippedPrefixGlobal := c.module.NewGlobalDef(".str.skipped_prefix", skippedPrefixData)
 	skippedPrefixGlobal.Immutable = true
+	skippedPrefixGlobal.Linkage = enum.LinkagePrivate
 
 	skippedSuffixData := constant.NewCharArrayFromString(" skipped")
 	skippedSuffixGlobal := c.module.NewGlobalDef(".str.skipped_suffix", skippedSuffixData)
 	skippedSuffixGlobal.Immutable = true
+	skippedSuffixGlobal.Linkage = enum.LinkagePrivate
 
 	stdout := constant.NewInt(irtypes.I32, 1)
 	passed := fn.Params[0]  // i32

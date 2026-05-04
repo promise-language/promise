@@ -646,6 +646,7 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 		panicIndentData := constant.NewCharArrayFromString("  panic: ")
 		panicIndentGlobal = c.module.NewGlobalDef(".str.panic_indent", panicIndentData)
 		panicIndentGlobal.Immutable = true
+		panicIndentGlobal.Linkage = enum.LinkagePrivate
 	}
 
 	for _, test := range tests {
@@ -676,6 +677,7 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 			constant.NewCharArrayFromString(nameStr+"\x00"),
 		)
 		nameGlobal.Immutable = true
+		nameGlobal.Linkage = enum.LinkagePrivate
 
 		// Bitcast test function to i8* for promise_test_run
 		fnPtr := entry.NewBitCast(testFn, irtypes.I8Ptr)
@@ -769,9 +771,11 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 	failedHeaderData := constant.NewCharArrayFromString("FAILED:\n")
 	failedHeaderGlobal := c.module.NewGlobalDef(".str.failed_header", failedHeaderData)
 	failedHeaderGlobal.Immutable = true
+	failedHeaderGlobal.Linkage = enum.LinkagePrivate
 	failedIndentData := constant.NewCharArrayFromString("  ")
 	failedIndentGlobal := c.module.NewGlobalDef(".str.failed_indent", failedIndentData)
 	failedIndentGlobal.Immutable = true
+	failedIndentGlobal.Linkage = enum.LinkagePrivate
 	stdout := constant.NewInt(irtypes.I32, 1)
 
 	hasFailures := entry.NewICmp(enum.IPredSGT, finalFailed, constant.NewInt(irtypes.I32, 0))
@@ -1106,6 +1110,7 @@ func (c *Compiler) defineStringNewFunc() {
 		fmt.Sprintf(".str.oom.%d", c.strCounter), oomMsg)
 	c.strCounter++
 	oomGlobal.Immutable = true
+	oomGlobal.Linkage = enum.LinkagePrivate
 
 	// entry: allocate and null-check
 	entry := fn.NewBlock(".entry")
@@ -1167,6 +1172,7 @@ func (c *Compiler) defineStringConcatFunc() {
 		fmt.Sprintf(".str.oom.%d", c.strCounter), oomMsg)
 	c.strCounter++
 	oomGlobal.Immutable = true
+	oomGlobal.Linkage = enum.LinkagePrivate
 
 	// entry: load lengths, compute total, allocate, null-check
 	entry := fn.NewBlock(".entry")
@@ -1652,6 +1658,7 @@ func (c *Compiler) defineStringSplitFunc() {
 		fmt.Sprintf(".str.oom.%d", c.strCounter), oomMsg)
 	c.strCounter++
 	oomGlobal.Immutable = true
+	oomGlobal.Linkage = enum.LinkagePrivate
 
 	// entry: load string fields, set up allocas
 	entry := fn.NewBlock(".entry")
@@ -2470,11 +2477,13 @@ func (c *Compiler) defineBoolToStringFunc() {
 	trueGlobal := c.module.NewGlobalDef(fmt.Sprintf(".str.bool.true.%d", c.strCounter), trueData)
 	c.strCounter++
 	trueGlobal.Immutable = true
+	trueGlobal.Linkage = enum.LinkagePrivate
 
 	falseData := constant.NewCharArrayFromString("false")
 	falseGlobal := c.module.NewGlobalDef(fmt.Sprintf(".str.bool.false.%d", c.strCounter), falseData)
 	c.strCounter++
 	falseGlobal.Immutable = true
+	falseGlobal.Linkage = enum.LinkagePrivate
 
 	entry := fn.NewBlock(".entry")
 	trueBlk := fn.NewBlock("true")
@@ -2519,6 +2528,7 @@ func (c *Compiler) defineIntToStringFunc() {
 	zeroGlobal := c.module.NewGlobalDef(fmt.Sprintf(".str.zero.%d", c.strCounter), zeroData)
 	c.strCounter++
 	zeroGlobal.Immutable = true
+	zeroGlobal.Linkage = enum.LinkagePrivate
 
 	// entry: allocas and zero check
 	entry := fn.NewBlock(".entry")
@@ -2617,6 +2627,7 @@ func (c *Compiler) defineUintToStringFunc() {
 	zeroGlobal := c.module.NewGlobalDef(fmt.Sprintf(".str.uzero.%d", c.strCounter), zeroData)
 	c.strCounter++
 	zeroGlobal.Immutable = true
+	zeroGlobal.Linkage = enum.LinkagePrivate
 
 	// entry: allocas and zero check
 	entry := fn.NewBlock(".entry")

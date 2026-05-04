@@ -2010,6 +2010,7 @@ func (c *Compiler) wrapMainWithScheduler() {
 		panicStr := constant.NewCharArrayFromString("unhandled error in main\x00")
 		panicGlobal := c.module.NewGlobalDef(".str.main_error", panicStr)
 		panicGlobal.Immutable = true
+		panicGlobal.Linkage = enum.LinkagePrivate
 		msgPtr := errBlk.NewGetElementPtr(panicGlobal.ContentType, panicGlobal,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 		errBlk.NewCall(c.funcs["promise_panic"], msgPtr)
@@ -2258,6 +2259,7 @@ func (c *Compiler) defineSchedCoopRunFunc() {
 	deadlockMsg := constant.NewCharArrayFromString("all goroutines are asleep - deadlock!\x00")
 	deadlockGlobal := c.module.NewGlobalDef(".str.deadlock", deadlockMsg)
 	deadlockGlobal.Immutable = true
+	deadlockGlobal.Linkage = enum.LinkagePrivate
 	deadlockPtr := deadlockBlk.NewGetElementPtr(deadlockGlobal.ContentType, deadlockGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	deadlockBlk.NewCall(c.funcs["promise_panic"], deadlockPtr)

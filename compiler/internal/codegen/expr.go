@@ -247,6 +247,7 @@ func (c *Compiler) makeRuntimeString(s string) value.Value {
 	}
 	global := c.module.NewGlobalDef(globalName, data)
 	global.Immutable = true
+	global.Linkage = enum.LinkagePrivate
 
 	ptr := c.block.NewGetElementPtr(global.ContentType, global,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
@@ -4307,6 +4308,7 @@ func (c *Compiler) getCStrGlobal(s string) *ir.Global {
 		globalName := fmt.Sprintf(".cstr.%x", fnv1aStr(s))
 		global = c.module.NewGlobalDef(globalName, data)
 		global.Immutable = true
+		global.Linkage = enum.LinkagePrivate
 		c.cstrGlobals[s] = global
 	}
 	return global

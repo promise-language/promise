@@ -125,10 +125,12 @@ type savedGlobal struct {
 }
 
 // stripGlobals converts non-private global definitions to external declarations.
-// Non-private globals (scheduler state, RTTI, vtables) are owned by the main module.
-// Private globals (string constants) are kept as-is: LTO handles them as separate
-// private copies per module — each module's functions reference their own copy,
-// and LTO renames them during merge to avoid symbol conflicts.
+// Non-private globals (scheduler state, RTTI, vtables) are owned by the main IR.
+// Private globals (string constants — all string globals use LinkagePrivate) are
+// kept as-is in each split IR: each module/instance .bc gets its own copy of the
+// string data it references. LTO deduplicates identical private globals during
+// link-time optimization. This makes each .bc self-contained for string constants,
+// preventing stale cache entries from referencing non-existent symbols (B0005).
 func stripGlobals(c *Compiler) map[*ir.Global]savedGlobal {
 	saved := make(map[*ir.Global]savedGlobal)
 	for _, g := range c.module.Globals {

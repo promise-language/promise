@@ -991,6 +991,7 @@ func (p *WindowsPAL) EmitUnsetEnv(module *ir.Module) *ir.Func {
 	entry := fn.NewBlock(".entry")
 	// Pass empty string as value to remove the variable
 	emptyStr := module.NewGlobalDef(".str.empty_env", constant.NewCharArrayFromString("\x00"))
+	emptyStr.Linkage = enum.LinkagePrivate
 	emptyPtr := entry.NewGetElementPtr(irtypes.NewArray(1, irtypes.I8), emptyStr, constant.NewInt(irtypes.I64, 0), constant.NewInt(irtypes.I64, 0))
 	result := entry.NewCall(putenvsFn, fn.Params[0], emptyPtr)
 	isErr := entry.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 0))

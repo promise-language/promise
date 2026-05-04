@@ -1433,8 +1433,11 @@ func buildInstCacheMetas(mainInfo *sema.Info, compilerHash, target string) map[s
 	if mainInfo == nil {
 		return nil
 	}
-	// Disabled in parallel test children: instance .bc files may reference
-	// main-IR string constants (@.str.N) whose numbering varies per program.
+	// Disabled in parallel test children: each child compiles a different
+	// subset of test files, producing instance .bc with different vtable slot
+	// contents. Keeping disabled as a conservative precaution.
+	// Note: string constants are now LinkagePrivate (B0005 fix), so the
+	// original @.str.N cross-reference issue is resolved.
 	if os.Getenv("PROMISE_NO_INSTANCE_CACHE") != "" {
 		return nil
 	}

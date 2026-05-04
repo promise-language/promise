@@ -990,6 +990,13 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 	// Generic function/method call: callee is IndexExpr (identity[int](42) or obj.method[int](42))
 	if idx, ok := e.Callee.(*ast.IndexExpr); ok {
 		if member, ok := idx.Target.(*ast.MemberExpr); ok {
+			// Check if this is a module-qualified generic function call (json.encode_string[Config](...))
+			// vs. an instance generic method call (box.transform[string](...))
+			if ident, ok := member.Target.(*ast.IdentExpr); ok {
+				if c.resolveModuleName(ident) != "" {
+					return c.genModuleGenericFuncCall(e, idx, member.Field)
+				}
+			}
 			return c.genGenericMethodCall(e, idx, member)
 		}
 		return c.genGenericFuncCall(e, idx)
@@ -1148,6 +1155,50 @@ func (c *Compiler) genGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr) value
 
 	// Coerce arguments when crossing type boundaries
 	if callee := c.lookupFunc(ident.Name); callee != nil {
+		if sig, ok := callee.Type().(*types.Signature); ok {
+			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params())
+		}
+	}
+
+	return c.block.NewCall(fn, argVals...)
+}
+
+// genModuleGenericFuncCall generates a call to a monomorphized generic function
+// that is qualified by a module name. Example: json.encode_string[Config](value)
+// The mono function is stored in c.funcs as "encode_string[Config]" (no module prefix).
+func (c *Compiler) genModuleGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr, funcName string) value.Value {
+	// Build mangled name: funcName[typeArg1, typeArg2, ...]
+	allTypeArgExprs := append([]ast.Expr{idx.Index}, idx.ExtraIndices...)
+	mangledName := funcName + "["
+	for i, argExpr := range allTypeArgExprs {
+		typeArgType := c.info.Types[argExpr]
+		if c.typeSubst != nil && typeArgType != nil {
+			typeArgType = types.Substitute(typeArgType, c.typeSubst)
+		}
+		if i > 0 {
+			mangledName += ", "
+		}
+		mangledName += typeArgStr(typeArgType)
+	}
+	mangledName += "]"
+
+	fn, ok := c.funcs[mangledName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undefined monomorphic module function %q", mangledName))
+	}
+
+	var argVals []value.Value
+	var argTypes []types.Type
+	for _, arg := range e.Args {
+		argVals = append(argVals, c.genCallArgExpr(arg.Value))
+		argTypes = append(argTypes, c.info.Types[arg.Value])
+		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		}
+	}
+
+	// Coerce arguments when crossing type boundaries
+	if callee := c.lookupFunc(funcName); callee != nil {
 		if sig, ok := callee.Type().(*types.Signature); ok {
 			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params())
 		}

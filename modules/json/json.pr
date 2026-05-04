@@ -676,31 +676,201 @@ enum JsonValue `public `doc("Tree-based JSON representation for dynamic/untyped 
   Str(string value),
   Array(JsonValue[] items),
   Object(map[string, JsonValue] fields),
+
+  // ── Type-check getters ──
+
+  get is_null bool `public `doc("Returns true if this value is Null.") {
+    match this {
+      JsonValue.Null => {
+        return true;
+      },
+      _ => {
+        return false;
+      },
+    }
+  }
+
+  get is_bool bool `public `doc("Returns true if this value is a Bool.") {
+    match this {
+      JsonValue.Bool(_) => {
+        return true;
+      },
+      _ => {
+        return false;
+      },
+    }
+  }
+
+  get is_number bool `public `doc("Returns true if this value is a Number.") {
+    match this {
+      JsonValue.Number(_) => {
+        return true;
+      },
+      _ => {
+        return false;
+      },
+    }
+  }
+
+  get is_string bool `public `doc("Returns true if this value is a Str.") {
+    match this {
+      JsonValue.Str(_) => {
+        return true;
+      },
+      _ => {
+        return false;
+      },
+    }
+  }
+
+  get is_array bool `public `doc("Returns true if this value is an Array.") {
+    match this {
+      JsonValue.Array(_) => {
+        return true;
+      },
+      _ => {
+        return false;
+      },
+    }
+  }
+
+  get is_object bool `public `doc("Returns true if this value is an Object.") {
+    match this {
+      JsonValue.Object(_) => {
+        return true;
+      },
+      _ => {
+        return false;
+      },
+    }
+  }
+
+  // ── Value extraction methods ──
+
+  as_bool(&this) bool? `public `doc("Returns the bool value if this is a Bool, or none otherwise.") {
+    match this {
+      JsonValue.Bool(b) => {
+        return b;
+      },
+      _ => {
+        return none;
+      },
+    }
+  }
+
+  as_number(&this) f64? `public `doc("Returns the f64 value if this is a Number, or none otherwise.") {
+    match this {
+      JsonValue.Number(n) => {
+        return n;
+      },
+      _ => {
+        return none;
+      },
+    }
+  }
+
+  as_string(&this) string? `public `doc("Returns the string value if this is a Str, or none otherwise.") {
+    match this {
+      JsonValue.Str(s) => {
+        return s;
+      },
+      _ => {
+        return none;
+      },
+    }
+  }
+
+  as_array(&this) JsonValue[]? `public `doc("Returns the items if this is an Array, or none otherwise.") {
+    match this {
+      JsonValue.Array(items) => {
+        return items;
+      },
+      _ => {
+        return none;
+      },
+    }
+  }
+
+  as_object(&this) map[string, JsonValue]? `public `doc("Returns the fields if this is an Object, or none otherwise.") {
+    match this {
+      JsonValue.Object(fields) => {
+        return fields;
+      },
+      _ => {
+        return none;
+      },
+    }
+  }
+
+  // ── Convenience access methods ──
+
+  get(&this, string key) JsonValue? `public `doc("Returns the value for a key if this is an Object, or none otherwise.") {
+    match this {
+      JsonValue.Object(fields) => {
+        return fields[key];
+      },
+      _ => {
+        return none;
+      },
+    }
+  }
+
+  at(&this, int index) JsonValue? `public `doc("Returns the value at an index if this is an Array, or none otherwise.") {
+    match this {
+      JsonValue.Array(items) => {
+        if index >= 0 && index < items.len {
+          return items[index];
+        }
+        return none;
+      },
+      _ => {
+        return none;
+      },
+    }
+  }
+
+  // ── Encoding/formatting methods ──
+
+  encode(&this, Encoder ~e)! `public `doc("Writes this JsonValue tree to an Encoder.") {
+    match this {
+      JsonValue.Null => e.encode_none(),
+      JsonValue.Bool(b) => e.encode_bool(b),
+      JsonValue.Number(n) => e.encode_f64(n),
+      JsonValue.Str(s) => e.encode_string(s),
+      JsonValue.Array(items) => {
+        e.begin_array(items.len);
+        for item in items {
+          item.encode(e);
+        }
+        e.end_array();
+      },
+      JsonValue.Object(fields) => {
+        e.begin_object(fields.len);
+        for key, val in fields {
+          e.encode_key(key);
+          val.encode(e);
+        }
+        e.end_object();
+      },
+    }
+  }
+
+  format(&this) string! `public `doc("Formats this JsonValue tree as a compact JSON string.") {
+    JsonEncoder enc = JsonEncoder();
+    this.encode(enc);
+    return enc.to_string();
+  }
+
+  format_pretty(&this, int indent = 2) string! `public `doc("Formats this JsonValue tree as a pretty-printed JSON string.") {
+    JsonEncoder enc = JsonEncoder(pretty: true, indent: indent);
+    this.encode(enc);
+    return enc.to_string();
+  }
 }
 
-// Encode a JsonValue tree to a JsonEncoder.
+// Encode a JsonValue tree to an Encoder. Delegates to JsonValue.encode().
 encode_value(JsonValue v, Encoder ~e)! `public `doc("Writes a JsonValue tree to an Encoder.") {
-  match v {
-    JsonValue.Null => e.encode_none(),
-    JsonValue.Bool(b) => e.encode_bool(b),
-    JsonValue.Number(n) => e.encode_f64(n),
-    JsonValue.Str(s) => e.encode_string(s),
-    JsonValue.Array(items) => {
-      e.begin_array(items.len);
-      for item in items {
-        encode_value(item, e);
-      }
-      e.end_array();
-    },
-    JsonValue.Object(fields) => {
-      e.begin_object(fields.len);
-      for key, val in fields {
-        e.encode_key(key);
-        encode_value(val, e);
-      }
-      e.end_object();
-    },
-  }
+  v.encode(e);
 }
 
 // Parse a JSON string into a JsonValue tree.
@@ -709,18 +879,14 @@ parse_value(string input) JsonValue! `public `doc("Parses a JSON string into a J
   return _parse_json_value(dec);
 }
 
-// Format a JsonValue tree as a JSON string.
+// Format a JsonValue tree as a JSON string. Delegates to JsonValue.format().
 format_value(JsonValue v) string! `public `doc("Formats a JsonValue tree as a JSON string.") {
-  JsonEncoder enc = JsonEncoder();
-  encode_value(v, enc);
-  return enc.to_string();
+  return v.format();
 }
 
-// Format a JsonValue tree as a pretty-printed JSON string.
+// Format a JsonValue tree as a pretty-printed JSON string. Delegates to JsonValue.format_pretty().
 format_value_pretty(JsonValue v, int indent = 2) string! `public `doc("Formats a JsonValue tree as a pretty-printed JSON string.") {
-  JsonEncoder enc = JsonEncoder(pretty: true, indent: indent);
-  encode_value(v, enc);
-  return enc.to_string();
+  return v.format_pretty(indent: indent);
 }
 
 // Internal: parse a single JSON value from a JsonDecoder, using internal methods.

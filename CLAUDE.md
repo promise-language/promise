@@ -256,7 +256,7 @@ The standard library (`modules/std/`, 29 files) is auto-imported via `use std as
 | Module | File | What it covers |
 |--------|------|---------------|
 | `io` | `modules/io/io.pr` | `File` (open/create/append, read/write bytes, read_line, write_line, read_all, seek), `BufferedReader`, `BufferedWriter`, `Dir`, `IoError`, `read_line()`, `read_stdin()` |
-| `json` | `modules/json/json.pr` | `JsonEncoder` (is Encoder), `JsonDecoder` (is Decoder), `encode_string`, `decode_string`, `encode_string_pretty` |
+| `json` | `modules/json/json.pr` | `JsonEncoder` (is Encoder), `JsonDecoder` (is Decoder), `encode_string[T]`, `decode_string[T]`, `encode_string_pretty[T]`, `JsonValue` enum (with `is_null`..`is_object`, `as_bool`..`as_object`, `get(key)`, `at(index)`, `encode`, `format`, `format_pretty`), `parse_value` |
 | `path` | `modules/path/path.pr` | `path_join`, `path_dir`, `path_base`, `path_ext`, `path_is_abs`, `path_normalize` |
 | `math` | `modules/math/math.pr` | Extended math functions |
 | `strings` | `modules/strings/strings.pr` | Extended string utilities |

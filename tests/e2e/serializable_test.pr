@@ -649,3 +649,120 @@ decode_with_key_test() `test {
   assert(u2.name == "Grace", "decode key: name via user_name");
   assert(u2.age == 28, "decode key: age");
 }
+
+// ── Module-qualified generic convenience functions (T0005) ──────────────────
+
+encode_string_point_test() `test {
+  string s = json.encode_string[Point](Point(x: 1, y: 2))!;
+  assert(s.contains("\"x\":1"), "encode_string point x");
+  assert(s.contains("\"y\":2"), "encode_string point y");
+}
+
+decode_string_point_test() `test {
+  string data = "\{\"x\":10,\"y\":20}";
+  Point p = json.decode_string[Point](data)!;
+  assert(p.x == 10, "decode_string point x");
+  assert(p.y == 20, "decode_string point y");
+}
+
+encode_decode_round_trip_test() `test {
+  MixedFields orig = MixedFields(label: "test", count: 42, score: 3.14, active: true);
+  string s = json.encode_string[MixedFields](orig)!;
+  MixedFields copy = json.decode_string[MixedFields](s)!;
+  assert(copy.label == "test", "round trip label");
+  assert(copy.count == 42, "round trip count");
+  assert(copy.score > 3.13 && copy.score < 3.15, "round trip score");
+  assert(copy.active == true, "round trip active");
+}
+
+encode_string_pretty_test() `test {
+  string s = json.encode_string_pretty[Point](Point(x: 1, y: 2))!;
+  assert(s.contains("\n"), "pretty has newlines");
+  assert(s.contains("  \"x\""), "pretty has indented key");
+}
+
+// Round-trip with optional fields
+encode_decode_optionals_test() `test {
+  // present optional
+  WithOptionals w1 = WithOptionals(name: "Alice", bio: "hi", level: 5);
+  string s1 = json.encode_string[WithOptionals](w1)!;
+  WithOptionals c1 = json.decode_string[WithOptionals](s1)!;
+  assert(c1.name == "Alice", "opt rt: name");
+  assert(c1.bio is present, "opt rt: bio present");
+  if b := c1.bio {
+    assert(b == "hi", "opt rt: bio value");
+  }
+  assert(c1.level is present, "opt rt: level present");
+
+  // absent optionals
+  WithOptionals w2 = WithOptionals(name: "Bob");
+  string s2 = json.encode_string[WithOptionals](w2)!;
+  WithOptionals c2 = json.decode_string[WithOptionals](s2)!;
+  assert(c2.name == "Bob", "opt rt absent: name");
+  assert(c2.bio is absent, "opt rt absent: bio");
+  assert(c2.level is absent, "opt rt absent: level");
+}
+
+// Round-trip with nested serializable type
+encode_decode_nested_test() `test {
+  Person p = Person(name: "Eve", age: 25, address: Address(street: "123 Main", city: "NYC"));
+  string s = json.encode_string[Person](p)!;
+  assert(s.contains("\"name\":\"Eve\""), "nested enc: name");
+  assert(s.contains("\"street\":\"123 Main\""), "nested enc: street");
+  Person p2 = json.decode_string[Person](s)!;
+  assert(p2.name == "Eve", "nested dec: name");
+  assert(p2.age == 25, "nested dec: age");
+  assert(p2.address.street == "123 Main", "nested dec: street");
+  assert(p2.address.city == "NYC", "nested dec: city");
+}
+
+// Round-trip with array fields
+encode_decode_array_field_test() `test {
+  TaggedItem item = TaggedItem(name: "widget", tags: ["red", "small"]);
+  string s = json.encode_string[TaggedItem](item)!;
+  assert(s.contains("\"tags\":[\"red\",\"small\"]"), "array field enc");
+  TaggedItem item2 = json.decode_string[TaggedItem](s)!;
+  assert(item2.name == "widget", "array field dec: name");
+  assert(item2.tags.len == 2, "array field dec: tags len");
+  assert(item2.tags[0] == "red", "array field dec: tag 0");
+  assert(item2.tags[1] == "small", "array field dec: tag 1");
+}
+
+// Round-trip with key remapping
+encode_decode_key_remap_test() `test {
+  User u = User(name: "Grace", age: 28, _internal: "x");
+  string s = json.encode_string[User](u)!;
+  assert(s.contains("\"user_name\":\"Grace\""), "key remap enc: user_name");
+  assert(!s.contains("\"name\""), "key remap enc: no bare name key");
+  User u2 = json.decode_string[User](s)!;
+  assert(u2.name == "Grace", "key remap dec: name");
+  assert(u2.age == 28, "key remap dec: age");
+}
+
+// Pretty encode round-trip (pretty output is valid JSON)
+encode_string_pretty_round_trip_test() `test {
+  Person p = Person(name: "Zoe", age: 30, address: Address(street: "456 Oak", city: "LA"));
+  string pretty = json.encode_string_pretty[Person](p)!;
+  assert(pretty.contains("\n"), "pretty rt: has newlines");
+  // Pretty output should be parseable back
+  Person p2 = json.decode_string[Person](pretty)!;
+  assert(p2.name == "Zoe", "pretty rt: name");
+  assert(p2.address.city == "LA", "pretty rt: city");
+}
+
+// Decode error: malformed JSON
+decode_string_error_test() `test {
+  (p, err) := json.decode_string[Point]("not json");
+  assert(err is present, "decode malformed: should error");
+}
+
+// Decode error: missing required field
+decode_string_missing_field_test() `test {
+  (p, err) := json.decode_string[Point]("\{\"x\":1}");
+  // y is required (int, no default) — should still decode with zero value
+  // since JSON decode fills missing fields with zero
+  if err is absent {
+    assert(p.x == 1, "missing field: x");
+    assert(p.y == 0, "missing field: y defaults to 0");
+  }
+}

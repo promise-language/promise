@@ -1662,6 +1662,24 @@ func (c *Checker) instantiateGenericFunc(e *ast.IndexExpr, sig *types.Signature)
 			})
 		}
 	case *ast.MemberExpr:
+		// Check if this is a module-qualified generic function call: mod.func[Arg]
+		if ident, ok := t.Target.(*ast.IdentExpr); ok {
+			if obj := c.info.Objects[ident]; obj != nil {
+				if mod, ok := obj.(*types.Module); ok && mod.Scope() != nil {
+					// Module-qualified generic function: mod.func[Arg]
+					if fnObj := mod.Scope().Lookup(t.Field); fnObj != nil {
+						if fn, ok := fnObj.(*types.Func); ok {
+							c.info.FuncInstances = append(c.info.FuncInstances, &FuncInstance{
+								Func:     fn,
+								TypeArgs: typeArgs,
+								Sig:      monoSig,
+							})
+							break
+						}
+					}
+				}
+			}
+		}
 		// Generic method instantiation: obj.method[Arg]
 		targetType := c.info.Types[t.Target]
 		if ref, ok := targetType.(*types.MutRef); ok {

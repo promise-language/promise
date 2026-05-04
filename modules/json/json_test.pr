@@ -1166,3 +1166,382 @@ format_value_number_negative_test() `test {
   string s = format_value(JsonValue.Number(-3.5))!;
   assert(s == "-3.5", "format negative float");
 }
+
+// ── JsonValue method tests ───────────────────────────────────────────────────
+
+// Type-check getters
+
+is_null_test() `test {
+  assert(JsonValue.Null.is_null, "null is_null");
+  assert(!JsonValue.Bool(true).is_null, "bool not is_null");
+  assert(!JsonValue.Number(1.0).is_null, "number not is_null");
+}
+
+is_bool_test() `test {
+  assert(JsonValue.Bool(true).is_bool, "bool is_bool");
+  assert(!JsonValue.Null.is_bool, "null not is_bool");
+  assert(!JsonValue.Str("x").is_bool, "str not is_bool");
+}
+
+is_number_test() `test {
+  assert(JsonValue.Number(42.0).is_number, "number is_number");
+  assert(!JsonValue.Null.is_number, "null not is_number");
+  assert(!JsonValue.Bool(false).is_number, "bool not is_number");
+}
+
+is_string_test() `test {
+  assert(JsonValue.Str("hello").is_string, "str is_string");
+  assert(!JsonValue.Null.is_string, "null not is_string");
+  assert(!JsonValue.Number(0.0).is_string, "number not is_string");
+}
+
+is_array_test() `test {
+  assert(JsonValue.Array(JsonValue[]()).is_array, "array is_array");
+  assert(!JsonValue.Null.is_array, "null not is_array");
+  assert(!JsonValue.Object(map[string, JsonValue]()).is_array, "object not is_array");
+}
+
+is_object_test() `test {
+  assert(JsonValue.Object(map[string, JsonValue]()).is_object, "object is_object");
+  assert(!JsonValue.Null.is_object, "null not is_object");
+  assert(!JsonValue.Array(JsonValue[]()).is_object, "array not is_object");
+}
+
+// Value extraction methods
+
+as_bool_test() `test {
+  bool? b = JsonValue.Bool(true).as_bool();
+  assert(b is present, "as_bool present");
+  assert(b! == true, "as_bool value");
+
+  bool? b2 = JsonValue.Null.as_bool();
+  assert(b2 is absent, "as_bool absent on null");
+}
+
+as_number_test() `test {
+  f64? n = JsonValue.Number(3.14).as_number();
+  assert(n is present, "as_number present");
+  assert(n! > 3.13 && n! < 3.15, "as_number value");
+
+  f64? n2 = JsonValue.Str("x").as_number();
+  assert(n2 is absent, "as_number absent on string");
+}
+
+as_string_test() `test {
+  string? s = JsonValue.Str("hello").as_string();
+  assert(s is present, "as_string present");
+  assert(s! == "hello", "as_string value");
+
+  string? s2 = JsonValue.Number(1.0).as_string();
+  assert(s2 is absent, "as_string absent on number");
+}
+
+as_array_test() `test {
+  JsonValue[] items = [JsonValue.Number(1.0), JsonValue.Number(2.0)];
+  JsonValue[]? arr = JsonValue.Array(items).as_array();
+  assert(arr is present, "as_array present");
+  assert(arr!.len == 2, "as_array len");
+
+  JsonValue[]? arr2 = JsonValue.Null.as_array();
+  assert(arr2 is absent, "as_array absent on null");
+}
+
+as_object_test() `test {
+  map[string, JsonValue] fields = {
+    "a": JsonValue.Number(1.0)
+  };
+  map[string, JsonValue]? obj = JsonValue.Object(fields).as_object();
+  assert(obj is present, "as_object present");
+  assert(obj!.len == 1, "as_object len");
+
+  map[string, JsonValue]? obj2 = JsonValue.Str("x").as_object();
+  assert(obj2 is absent, "as_object absent on string");
+}
+
+// Convenience access methods
+
+get_method_test() `test {
+  map[string, JsonValue] fields = {
+    "name": JsonValue.Str("Alice"),
+    "age": JsonValue.Number(30.0),
+  };
+  JsonValue obj = JsonValue.Object(fields);
+
+  JsonValue? name = obj.get("name");
+  assert(name is present, "get name present");
+  assert(name!.as_string()! == "Alice", "get name value");
+
+  JsonValue? missing = obj.get("missing");
+  assert(missing is absent, "get missing absent");
+
+  // get on non-object returns none
+  JsonValue? bad = JsonValue.Number(1.0).get("key");
+  assert(bad is absent, "get on number is none");
+}
+
+at_method_test() `test {
+  JsonValue[] items = [JsonValue.Str("a"), JsonValue.Str("b"), JsonValue.Str("c")];
+  JsonValue arr = JsonValue.Array(items);
+
+  JsonValue? first = arr.at(0);
+  assert(first is present, "at 0 present");
+  assert(first!.as_string()! == "a", "at 0 value");
+
+  JsonValue? last = arr.at(2);
+  assert(last is present, "at 2 present");
+  assert(last!.as_string()! == "c", "at 2 value");
+
+  JsonValue? oob = arr.at(3);
+  assert(oob is absent, "at 3 absent (out of bounds)");
+
+  JsonValue? neg = arr.at(-1);
+  assert(neg is absent, "at -1 absent (negative)");
+
+  // at on non-array returns none
+  JsonValue? bad = JsonValue.Null.at(0);
+  assert(bad is absent, "at on null is none");
+}
+
+// Encoding/formatting methods
+
+encode_method_test() `test {
+  JsonValue v = JsonValue.Array([JsonValue.Number(1.0), JsonValue.Bool(true)]);
+  JsonEncoder enc = JsonEncoder();
+  v.encode(enc)!;
+  assert(enc.to_string() == "[1,true]", "encode method");
+}
+
+format_method_test() `test {
+  JsonValue v = JsonValue.Str("hello");
+  string s = v.format()!;
+  assert(s == "\"hello\"", "format method");
+}
+
+format_method_object_test() `test {
+  map[string, JsonValue] fields = {
+    "x": JsonValue.Number(1.0)
+  };
+  JsonValue obj = JsonValue.Object(fields);
+  string s = obj.format()!;
+  assert(s.contains("\"x\":1"), "format object method");
+}
+
+format_pretty_method_test() `test {
+  map[string, JsonValue] fields = {
+    "key": JsonValue.Bool(true)
+  };
+  JsonValue obj = JsonValue.Object(fields);
+  string s = obj.format_pretty()!;
+  assert(s.contains("\n"), "format_pretty has newlines");
+  assert(s.contains("  \"key\""), "format_pretty has indented key");
+}
+
+format_pretty_custom_indent_test() `test {
+  map[string, JsonValue] fields = {
+    "a": JsonValue.Number(1.0)
+  };
+  JsonValue obj = JsonValue.Object(fields);
+  string s = obj.format_pretty(indent: 4)!;
+  assert(s.contains("    \"a\""), "format_pretty 4-space indent");
+}
+
+// Round-trip with methods
+
+round_trip_method_test() `test {
+  map[string, JsonValue] fields = {
+    "items": JsonValue.Array([JsonValue.Number(1.0), JsonValue.Number(2.0)]),
+    "ok": JsonValue.Bool(true),
+  };
+  JsonValue obj = JsonValue.Object(fields);
+  string s = obj.format()!;
+  JsonValue parsed = parse_value(s)!;
+  assert(parsed.is_object, "round trip is object");
+  assert(parsed.get("ok") is present, "round trip has ok");
+  assert(parsed.get("items") is present, "round trip has items");
+}
+
+// Chained method calls
+
+chained_access_test() `test {
+  // Build: {"user": {"name": "Alice", "scores": [10, 20]}}
+  map[string, JsonValue] user_fields = {
+    "name": JsonValue.Str("Alice"),
+    "scores": JsonValue.Array([JsonValue.Number(10.0), JsonValue.Number(20.0)]),
+  };
+  map[string, JsonValue] root_fields = {
+    "user": JsonValue.Object(user_fields),
+  };
+  JsonValue root = JsonValue.Object(root_fields);
+
+  // Access nested value: root.get("user").get("name")
+  JsonValue? user = root.get("user");
+  assert(user is present, "chained: has user");
+  JsonValue? name = user!.get("name");
+  assert(name is present, "chained: has name");
+  assert(name!.as_string()! == "Alice", "chained: name is Alice");
+
+  // Access nested array element
+  JsonValue? scores = user!.get("scores");
+  assert(scores is present, "chained: has scores");
+  JsonValue? first = scores!.at(0);
+  assert(first is present, "chained: has first score");
+  assert(first!.as_number()! == 10.0, "chained: first score is 10");
+}
+
+// ── Edge cases for value extraction ──────────────────────────────────────────
+
+as_bool_false_test() `test {
+  // Verify as_bool returns false (not just "present") for Bool(false)
+  bool? b = JsonValue.Bool(false).as_bool();
+  assert(b is present, "as_bool(false) present");
+  assert(b! == false, "as_bool(false) value is false");
+}
+
+as_number_edge_cases_test() `test {
+  // Zero
+  f64? z = JsonValue.Number(0.0).as_number();
+  assert(z is present, "as_number(0) present");
+  assert(z! == 0.0, "as_number(0) value");
+
+  // Negative
+  f64? neg = JsonValue.Number(-42.5).as_number();
+  assert(neg is present, "as_number(-42.5) present");
+  assert(neg! == -42.5, "as_number(-42.5) value");
+}
+
+as_string_empty_test() `test {
+  string? s = JsonValue.Str("").as_string();
+  assert(s is present, "as_string empty present");
+  assert(s! == "", "as_string empty value");
+}
+
+as_array_empty_test() `test {
+  JsonValue[]? arr = JsonValue.Array(JsonValue[]()).as_array();
+  assert(arr is present, "as_array empty present");
+  assert(arr!.len == 0, "as_array empty len");
+}
+
+as_object_empty_test() `test {
+  map[string, JsonValue]? obj = JsonValue.Object(map[string, JsonValue]()).as_object();
+  assert(obj is present, "as_object empty present");
+  assert(obj!.len == 0, "as_object empty len");
+}
+
+// ── Edge cases for get/at ────────────────────────────────────────────────────
+
+get_empty_object_test() `test {
+  JsonValue obj = JsonValue.Object(map[string, JsonValue]());
+  JsonValue? v = obj.get("anything");
+  assert(v is absent, "get on empty object is none");
+}
+
+at_empty_array_test() `test {
+  JsonValue arr = JsonValue.Array(JsonValue[]());
+  JsonValue? v = arr.at(0);
+  assert(v is absent, "at(0) on empty array is none");
+}
+
+// ── Encode method with all variant types ─────────────────────────────────────
+
+encode_method_null_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  JsonValue.Null.encode(enc)!;
+  assert(enc.to_string() == "null", "encode null");
+}
+
+encode_method_bool_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  JsonValue.Bool(false).encode(enc)!;
+  assert(enc.to_string() == "false", "encode false");
+}
+
+encode_method_number_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  JsonValue.Number(-3.14).encode(enc)!;
+  string s = enc.to_string();
+  assert(s.starts_with("-3.14"), "encode negative number");
+}
+
+encode_method_string_test() `test {
+  JsonEncoder enc = JsonEncoder();
+  JsonValue.Str("hello\nworld").encode(enc)!;
+  assert(enc.to_string() == "\"hello\\nworld\"", "encode string with escape");
+}
+
+encode_method_nested_test() `test {
+  // {"items":[null,true],"count":2}
+  map[string, JsonValue] fields = {
+    "items": JsonValue.Array([JsonValue.Null, JsonValue.Bool(true)]),
+    "count": JsonValue.Number(2.0),
+  };
+  JsonValue obj = JsonValue.Object(fields);
+  JsonEncoder enc = JsonEncoder();
+  obj.encode(enc)!;
+  string s = enc.to_string();
+  assert(s.contains("\"items\":[null,true]"), "encode nested array in object");
+  assert(s.contains("\"count\":2"), "encode nested number in object");
+}
+
+// ── format_pretty round-trip ─────────────────────────────────────────────────
+
+format_pretty_round_trip_test() `test {
+  map[string, JsonValue] fields = {
+    "name": JsonValue.Str("Alice"),
+    "scores": JsonValue.Array([JsonValue.Number(10.0), JsonValue.Number(20.0)]),
+  };
+  JsonValue obj = JsonValue.Object(fields);
+  string pretty = obj.format_pretty()!;
+  // Pretty output should still be valid JSON that parses back
+  JsonValue parsed = parse_value(pretty)!;
+  assert(parsed.is_object, "pretty rt: is object");
+  assert(parsed.get("name") is present, "pretty rt: has name");
+  assert(parsed.get("scores") is present, "pretty rt: has scores");
+  JsonValue? name = parsed.get("name");
+  assert(name!.as_string()! == "Alice", "pretty rt: name value");
+}
+
+// ── format for all variant types ─────────────────────────────────────────────
+
+format_method_all_variants_test() `test {
+  assert(JsonValue.Null.format()! == "null", "format null");
+  assert(JsonValue.Bool(true).format()! == "true", "format true");
+  assert(JsonValue.Bool(false).format()! == "false", "format false");
+  assert(JsonValue.Number(42.0).format()! == "42", "format number");
+  assert(JsonValue.Str("hi").format()! == "\"hi\"", "format string");
+  assert(JsonValue.Array(JsonValue[]()).format()! == "[]", "format empty array");
+  assert(JsonValue.Object(map[string, JsonValue]()).format()! == "\{}", "format empty object");
+}
+
+// ── Parsed values with methods ───────────────────────────────────────────────
+
+parsed_value_methods_test() `test {
+  // Verify methods work on values from parse_value, not just constructed values
+  string data = "\{\"name\":\"Bob\",\"age\":30,\"tags\":[\"a\",\"b\"],\"active\":true}";
+  JsonValue v = parse_value(data)!;
+  assert(v.is_object, "parsed: is_object");
+  assert(!v.is_array, "parsed: not is_array");
+
+  JsonValue? name = v.get("name");
+  assert(name is present, "parsed: has name");
+  assert(name!.is_string, "parsed: name is_string");
+  assert(name!.as_string()! == "Bob", "parsed: name value");
+
+  JsonValue? age = v.get("age");
+  assert(age is present, "parsed: has age");
+  assert(age!.is_number, "parsed: age is_number");
+  assert(age!.as_number()! == 30.0, "parsed: age value");
+
+  JsonValue? tags = v.get("tags");
+  assert(tags is present, "parsed: has tags");
+  assert(tags!.is_array, "parsed: tags is_array");
+  assert(tags!.at(0) is present, "parsed: tags[0] present");
+  assert(tags!.at(0)!.as_string()! == "a", "parsed: tags[0] value");
+  assert(tags!.at(1)!.as_string()! == "b", "parsed: tags[1] value");
+
+  JsonValue? active = v.get("active");
+  assert(active is present, "parsed: has active");
+  assert(active!.as_bool()! == true, "parsed: active value");
+
+  JsonValue? missing = v.get("nope");
+  assert(missing is absent, "parsed: missing key absent");
+}

@@ -51,7 +51,7 @@ The stdlib today (29 files, ~2,440 lines) provides:
 | `path` | `modules/path/path.pr` | 192 | **Done** — `join`, `file_name`, `parent`, `extension`, `is_absolute`, `normalize`. 13 tests. |
 | `strings` | `modules/strings/strings.pr` | 65 | **Done** — `join`, `spaces`, `reverse`, `is_blank`, `repeat_join`. 10 tests. |
 | `math` | `modules/math/math.pr` | 67 | **Done** — `lerp`, `map_range`, `deg_to_rad`, `rad_to_deg`, `sign`, `sign_f64`, `is_even`, `is_odd`, `gcd`, `lcm`. 26 tests. |
-| `json` | `modules/json/json.pr` | ~600 | **Done** — `JsonEncoder` (is Encoder), `JsonDecoder` (is Decoder), `encode_string`, `decode_string`, `encode_string_pretty`. 61 tests. |
+| `json` | `modules/json/json.pr` | ~900 | **Done** — `JsonEncoder` (is Encoder), `JsonDecoder` (is Decoder), generic `encode_string[T]`/`decode_string[T]`/`encode_string_pretty[T]`, `JsonValue` enum with methods (`is_null`..`is_object`, `as_bool`..`as_object`, `get(key)`, `at(index)`, `encode`, `format`, `format_pretty`), `parse_value`. 157 tests. |
 | `os` | `modules/os/os.pr` | 4 | **Done** — get_environment_variable, get_working_directory, exit_process, arguments, executable_path, execute, set_environment_variable, set_working_directory, Process/ProcessInput/ProcessOutput (streaming), environment (map), user_name, user_identifier, group_identifier, home_directory, hostname, process_identifier, Signal enum, setup_signal_handling, receive_signal |
 | `time` | `modules/time/time.pr` | 4 | **Placeholder** — planned: extended time utilities beyond `std/time.pr` |
 | `http` | `modules/http/http.pr` | 4 | **Placeholder** — planned: get, post, Request, Response, Server, Handler |

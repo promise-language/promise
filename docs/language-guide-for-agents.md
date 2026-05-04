@@ -543,13 +543,30 @@ main()! {
 use json;
 type Config `serializable { string name; int port; }
 main()! {
-  // Encode via JsonEncoder
+  // Convenience functions (recommended):
+  string s = json.encode_string[Config](Config(name: "app", port: 8080));
+  Config c = json.decode_string[Config](s);
+  // Pretty print:
+  string pretty = json.encode_string_pretty[Config](c);
+
+  // Manual encoder/decoder (for streaming or custom formatting):
   json.JsonEncoder enc = json.JsonEncoder();
   Config(name: "app", port: 8080).encode(enc)!;
-  string s = enc.to_string();
-  // Decode via JsonDecoder
-  json.JsonDecoder dec = json.JsonDecoder(data: s);
-  Config c = Config.decode(dec)!;
+  string s2 = enc.to_string();
+  json.JsonDecoder dec = json.JsonDecoder(data: s2);
+  Config c2 = Config.decode(dec)!;
+}
+
+// Dynamic JSON (JsonValue tree API)
+use json;
+main()! {
+  JsonValue v = json.parse_value("\{\"name\":\"Alice\",\"scores\":[10,20]}");
+  if v.is_object {
+    string? name = v.get("name")!.as_string();   // "Alice"
+    JsonValue? scores = v.get("scores");          // Array
+    f64? first = scores!.at(0)!.as_number();      // 10.0
+  }
+  string out = v.format();                        // compact JSON string
 }
 
 // Run a subprocess (variadic — inline args or pre-built string[])

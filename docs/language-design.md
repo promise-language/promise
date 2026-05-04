@@ -1855,6 +1855,7 @@ testAddition() `test {
 | `` `factory ``| methods        | Factory constructor with `` `variant `` placement; no `this`, returns `Self` or child (see Section 5.7) |
 | `` `doc ``   | any, parameters | AST-attached documentation (see Section 8.4)      |
 | `` `target(cond) ``| types, enums, functions | Compile-time platform filtering (see Section 8.5) |
+| `` `embed(path) ``| module-level getters | Compile-time resource embedding (see Section 8.6) |
 
 User-defined metas are available through the type system at compile time for meta-programming and code generation.
 
@@ -1926,6 +1927,67 @@ Conditions can be combined with `!` (not), `||` (or), and `&&` (and).
 - The `promise doc` command always shows all declarations regardless of target.
 
 This is Promise's only form of platform-specific variation. There are no preprocessor directives, `#ifdef` blocks, or build tags. Platform variants are explicit, structurally separate declarations — visible to the reader and verifiable by the type checker on the appropriate target.
+
+### 8.6 Resource Embedding (`` `embed ``)
+
+`` `embed(path) `` embeds file contents into the compiled binary at compile time. It applies to module-level getters — the compiler reads the file at compile time and generates the getter body. This enables self-contained binaries that bundle assets, templates, schemas, and other resources without runtime file dependencies.
+
+```promise
+// Embed a file as a UTF-8 string
+get schema string `embed("schema.sql");
+
+// Embed a file as raw bytes
+get icon u8[] `embed("icon.png");
+
+// Embed with compression — stored compressed in binary, decompressed on access
+get large_dataset string `embed("data.json", compress: true);
+
+// Embed a directory tree as a virtual read-only filesystem
+get assets EmbeddedFiles `embed("static/...");
+```
+
+The getter has no body — the `` `embed `` annotation tells the compiler to provide the implementation. At the call site, embedded resources are accessed like any other getter (no parentheses). Compressed embeds are transparently decompressed — the caller sees the original data:
+
+```promise
+main() {
+  print_line(schema);                          // prints the SQL file contents
+  print_line("icon bytes: {icon.len}");        // prints byte count
+  print_line(large_dataset);                   // decompressed transparently
+  print_line("has index: {assets.contains("index.html")}");
+}
+```
+
+**Supported return types:**
+
+| Type | Behavior |
+|------|----------|
+| `string` | File contents as UTF-8 string (compile error if not valid UTF-8) |
+| `u8[]` | Raw bytes as a byte array |
+| `EmbeddedFiles` | Virtual read-only filesystem for directory trees (see `modules/std/embed.pr`) |
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| (positional) | `string` | — | Path to the file or directory to embed |
+| `compress` | `bool` | `false` | Store compressed in binary, decompress transparently on access |
+
+When `compress: true`, the compiler gzip-compresses the data at compile time. The generated getter decompresses on first access and caches the result — subsequent reads return the cached value with no decompression overhead. This is useful for large text assets (SQL schemas, JSON datasets, HTML templates) where binary size matters more than first-access latency. For `EmbeddedFiles`, compression applies to the concatenated data blob — individual file reads decompress only the requested slice.
+
+**Path rules:**
+- Paths are relative to the source file containing the `` `embed `` annotation
+- `...` suffix means "embed recursively" (directory trees)
+- Absolute paths are a compile error
+- Relative paths may reference parent directories (e.g., `"../shared/config.toml"`) — no project-root restriction
+- The referenced file or directory must exist at compile time
+
+**Constraints:**
+- Only valid on module-level getters (not inside type bodies or functions)
+- Embedded getters must not have a body — the compiler generates it
+- Embedded file contents are part of the build cache key — if an embedded file changes, the binary is recompiled even if the `.pr` source hasn't changed
+- Catalog modules can embed resources (paths relative to the module's source directory)
+
+**Design rationale:** Resource embedding is critical for AI-agent workflows — an LLM can generate a single `.pr` file that compiles to a fully self-contained binary with all required assets. No runtime file dependencies, no deployment scripts, no asset pipelines. Using getters fits Promise's convention that side-effect-free parameterless access uses property syntax (see Section 9.3). The annotation follows the same backtick convention as other meta annotations, keeping the feature discoverable and consistent.
 
 ---
 

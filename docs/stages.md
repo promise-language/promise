@@ -59,6 +59,7 @@ Implementation stages for the Promise compiler pipeline. For language design, se
 | Yield generators | `stream[T]` functions with `yield`, LLVM presplit coroutines, `for-in` consumption | Done | — |
 | Structural interfaces | Relaxed matching (extra optional/default params, non-failable→failable, T→T?), adapter thunks, abstract factory methods with implicit Self, generic factory patterns (`T.parse(data)`) | Done | [language-design.md](language-design.md#structural-interface-satisfaction) |
 | Documentation system | `promise doc` command: extract `doc()` meta tags, emit markdown to stdout, `-signatures` compact mode, `-std` for stdlib reference | Phase 1 done (single-file doc, `-public`/`-all`/`-signatures`/`-o` flags, param/variant doc propagation, `DeclareAndDefine` early-exit sema) | [documentation-proposal.md](documentation-proposal.md) |
+| Resource embedding | `` `embed(path) `` annotation on module-level getters: compile-time file/directory embedding as `string`, `u8[]`, or `EmbeddedFiles` | Planned (T0012) | [language-design.md](language-design.md#86-resource-embedding-embed) |
 
 ---
 
@@ -428,7 +429,7 @@ Codegen for inherited field layouts, static method dispatch through inheritance 
 - **RTTI infrastructure**: Each non-generic Named type gets a unique i32 type ID. Type info globals (`@promise_typeinfo_TypeName`) store `{ i32 type_id, i32 num_parents, [N x i32] parent_ids }` with transitive parent IDs. Constructors store the type info pointer in the `_variant` slot (index 0) instead of null. Runtime function `promise_type_is(variant_ptr, expected_id)` checks type ID and parent IDs.
 - **is expressions**: `x is present` → `extractvalue` i1 flag from optional. `x is absent` → extract + xor negate. `c is Variant` → extract enum tag, `icmp eq`. `a is Dog` → load `_variant` pointer, call `promise_type_is`, convert i32→i1.
 - **as expressions**: `a as Dog` (safe) → RTTI check, branch to `cast.some` (wrap in Optional) or `cast.none` (zeroinitializer), phi merge. `a as! Dog` (force) → RTTI check, branch to `cast.ok` or `cast.panic` (calls `promise_panic`).
-- **Deferred**: Virtual dispatch (vtable — completed in Stage 8L), destructure is-patterns (`x is Dog(name)`), generic type RTTI, full type expressions in `is` patterns and typed error handlers. Both `if x is TYPE` and `? e is TYPE` currently only accept bare `IDENT`. Need to support `typeRef` (generics like `DataError[int]`, arrays like `int[]`, optionals like `Foo?`, module-qualified like `std.Error`). The `typeRef` grammar rule already supports these forms — requires updating `pattern` rule, `ErrorHandlerExpr` grammar, AST, sema type resolution, and codegen RTTI for monomorphized type IDs.
+- **Deferred**: Virtual dispatch (vtable — completed in Stage 8L), destructure is-patterns (`x is Dog(name)`), generic type RTTI, full type expressions in `is` patterns and typed error handlers. Both `if x is TYPE` and `? e is TYPE` currently only accept bare `IDENT`. Need to support `typeRef` (generics like `DataError[int]`, arrays like `u8[]`, optionals like `Foo?`, module-qualified like `std.Error`). The `typeRef` grammar rule already supports these forms — requires updating `pattern` rule, `ErrorHandlerExpr` grammar, AST, sema type resolution, and codegen RTTI for monomorphized type IDs.
 
 ## Stage 8j — Unify Compound Types with Named Types + Collection Methods (Done)
 
@@ -439,7 +440,7 @@ Promoted `slice[T]` and `map[K,V]` from structural placeholder types (`*types.Sl
 - Deleted `Slice` and `Map` structs from `types/container.go`
 - `NewSlice(elem)` and `NewMap(key, val)` now return `*Instance`
 - Added helper functions `IsSlice`, `AsSlice`, `IsMap`, `AsMap` for clean migration
-- `Instance.String()` overridden so `slice[int]` displays as `int[]`
+- `Instance.String()` overridden so `slice[int]` displays as `u8[]`
 - Deleted `case *Slice:` and `case *Map:` from `equal.go` and `subst.go`
 
 **Native Methods Registered in `builtins.go`:**

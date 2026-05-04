@@ -1042,6 +1042,38 @@ sha256_hex(u8[] data) string;
 
 - **Implementation**: Pure Promise (SHA-256 is ~100 lines of bit manipulation)
 
+#### 5f. `modules/std/embed.pr` — Resource Embedding Types
+
+Types supporting the `` `embed(path) `` compile-time annotation (see [language-design.md](language-design.md#86-resource-embedding-embed)). Single-file embeds use `string` or `u8[]` directly; directory tree embeds use `EmbeddedFiles`.
+
+```promise
+type EmbeddedFiles `doc("Virtual read-only filesystem for compile-time embedded directory trees.") {
+    EmbeddedFile[] _entries `final;
+    u8[] _data `final;
+
+    get files EmbeddedFile[] `doc("List all embedded entries.") => this._entries;
+
+    read(&this, string path) string!
+        `doc("Read an embedded file as a UTF-8 string. Raises if path not found.");
+
+    read_bytes(&this, string path) u8[]!
+        `doc("Read an embedded file as raw bytes. Raises if path not found.");
+
+    contains(&this, string path) bool
+        `doc("Check whether a path exists in the embedded tree.");
+}
+
+type EmbeddedFile `value `doc("Metadata for a single entry in an EmbeddedFiles tree.") {
+    string name `value `doc("File or directory name (leaf only, no path separators).");
+    string path `value `doc("Full relative path from the embed root.");
+    int size `value `doc("Size in bytes (0 for directories).");
+    bool is_directory `value `doc("True if this entry is a directory.");
+}
+```
+
+- **Dependencies**: None (pure std types, populated by the compiler at codegen time)
+- **Implementation**: `EmbeddedFiles` is constructed by the compiler — codegen reads files at compile time and emits global constant data. `read`/`read_bytes` index into the embedded data blob using offset/size metadata. No PAL needed.
+
 ---
 
 ## 5. Implementation Details
@@ -1232,5 +1264,6 @@ bin/test.sh                            # rebuild + all tests pass (including new
 | 5c | `modules/net/net.pr` | Promise + Native | 6+ | ~150 | Future |
 | 5d | `modules/http/http.pr` | Promise | No | ~200 | Future |
 | 5e | `modules/crypto/crypto.pr` | Promise | No | ~150 | Future |
+| 5f | `modules/std/embed.pr` | Promise | No | ~50 | Future (T0012) |
 | | **Phases 0-4 (actual)** | | **12** | **~3,055** | **19/20 done** |
-| | **Total (all phases)** | | **18+** | **~4,255** | |
+| | **Total (all phases)** | | **18+** | **~4,305** | |

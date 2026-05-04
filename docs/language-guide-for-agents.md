@@ -689,6 +689,37 @@ for k, v in m {
 }
 ```
 
+## Resource Embedding
+
+Embed files into the binary at compile time using the `` `embed `` annotation on module-level getters:
+
+```promise
+// Embed a text file as a string (must be valid UTF-8)
+get schema string `embed("schema.sql");
+
+// Embed a binary file as raw bytes
+get icon u8[] `embed("icon.png");
+
+// Compress in binary, decompress transparently on access
+get large_data string `embed("data.json", compress: true);
+
+// Embed a directory tree as a virtual filesystem
+get assets EmbeddedFiles `embed("static/...");
+
+main() {
+  print_line(schema);                          // getter access, no parens
+  print_line("icon bytes: {icon.len}");
+  print_line(large_data);                      // decompressed transparently
+  print_line("has index: {assets.contains("index.html")}");
+}
+```
+
+**Rules:**
+- Paths are relative to the source file
+- Only on module-level getters (not inside types or functions)
+- Return type must be `string`, `u8[]`, or `EmbeddedFiles`
+- Absolute paths are a compile error
+
 ## Common Mistakes
 
 1. **Using `!` to propagate** — `!` always panics. Use bare call for propagation in `!` functions.
@@ -699,5 +730,5 @@ for k, v in m {
 6. **Mutable methods** — use `~this` for methods that modify state. `&this` is read-only.
 7. **Missing `use`** — `std` is auto-imported, but `io`, `os`, `path`, `json` need explicit `use`.
 8. **Optional handler spacing** — Error handler: `expr ? e { ... }` (space before `?`). Optional handler: `expr? _ { ... }` (no space before `?`).
-9. **Fixed arrays vs vectors** — `int[3]` is a fixed-size array (value type, stack). `int[]` is a vector (heap, growable). Don't confuse them.
+9. **Fixed arrays vs vectors** — `int[3]` is a fixed-size array (value type, stack). `u8[]` is a vector (heap, growable). Don't confuse them.
 10. **Tuple destructuring** — Use `(a, b) := expr;` not `a, b := expr;`. Tuples need parentheses.

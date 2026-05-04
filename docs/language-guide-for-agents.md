@@ -438,6 +438,29 @@ fn := move |string name| -> string { return "{msg}, {name}"; };
 // msg is moved into closure, unavailable after
 ```
 
+## Tuples
+
+```promise
+// Tuple type and literal
+(int, string) pair = (42, "answer");
+
+// Destructuring
+(num, label) := pair;
+print_line("{num}: {label}");   // "42: answer"
+
+// As function return
+divide(int a, int b) (int, int) {
+  return (a / b, a % b);
+}
+(quotient, remainder) := divide(10, 3);
+
+// Capturing raw failable result (value, error) as tuple
+(content, err) := read_file("data.txt");
+if err is present {
+  print_line("Error: {err.message()}");
+}
+```
+
 ## Concurrency
 
 ```promise
@@ -463,6 +486,16 @@ go {
 };
 for v in ch {
   print_line("{v}");
+}
+
+// Select (multiplexes channel operations)
+select {
+  v := <-ch1:
+    print_line("from ch1: {v}");
+  v := <-ch2:
+    print_line("from ch2: {v}");
+  default:
+    print_line("no channel ready");
 }
 ```
 
@@ -530,6 +563,59 @@ fibonacci() stream[int] {
 for n in fibonacci() {
   if n > 1000 { break; }
   print_line("{n}");
+}
+```
+
+## Fixed-Size Arrays
+
+```promise
+// Declaration: Type[size]
+int[3] arr = [1, 2, 3];
+arr[0] = 10;                  // index assign
+arr.len;                      // getter, returns 3
+for v in arr { }              // iterate values
+for i, v in arr { }           // indexed iteration
+
+// As a field
+type Matrix {
+  f64[9] data;
+}
+```
+
+Fixed-size arrays are value types (stack-allocated, auto-copied). Distinct from `T[]` (heap-allocated vector).
+
+## Explicit Constructors
+
+```promise
+// new replaces the implicit constructor
+type Percentage {
+  int value `final;
+
+  new(int value) {
+    if value < 0 { this.value = 0; }
+    else if value > 100 { this.value = 100; }
+    else { this.value = value; }
+  }
+}
+Percentage(value: 120);   // clamped to 100
+
+// Failable new
+type Port {
+  int value `final;
+
+  new(int value)! {
+    if value < 1 || value > 65535 {
+      raise error(message: "invalid port");
+    }
+    this.value = value;
+  }
+}
+Port(value: 80)!;         // panics on invalid
+
+// raise — returns error from a ! function (not an exception)
+divide(f64 a, f64 b) f64! {
+  if b == 0.0 { raise error(message: "division by zero"); }
+  return a / b;
 }
 ```
 
@@ -607,3 +693,5 @@ for k, v in m {
 6. **Mutable methods** — use `~this` for methods that modify state. `&this` is read-only.
 7. **Missing `use`** — `std` is auto-imported, but `io`, `os`, `path`, `json` need explicit `use`.
 8. **Optional handler spacing** — Error handler: `expr ? e { ... }` (space before `?`). Optional handler: `expr? _ { ... }` (no space before `?`).
+9. **Fixed arrays vs vectors** — `int[3]` is a fixed-size array (value type, stack). `int[]` is a vector (heap, growable). Don't confuse them.
+10. **Tuple destructuring** — Use `(a, b) := expr;` not `a, b := expr;`. Tuples need parentheses.

@@ -6680,6 +6680,116 @@ func TestCatalogModuleGlobImport(t *testing.T) {
 	assertContains(t, ir, "call i64 @__mod_json_parse")
 }
 
+func TestChannelFieldInUserType(t *testing.T) {
+	// B0096: channel[T] fields in user types must use i8* layout,
+	// not {i8*, i8*} (value struct). These are native container types like Vector.
+	ir := generateIR(t, `
+		type IntChan {
+			channel[int] ch;
+			emit(~this, int v) { this.ch.send(v); }
+		}
+		main() {
+			ch := channel[int](capacity: 1);
+			s := IntChan(ch: ch);
+			s.emit(42);
+		}
+	`)
+	// Instance struct field must be i8* (opaque channel pointer), not {i8*, i8*}
+	assertContains(t, ir, "%promise_IntChan_i = type { %promise_IntChan_m*, i8* }")
+	// Channel send generates inline mutex lock IR
+	assertContains(t, ir, "call void @pal_mutex_lock(")
+}
+
+func TestTaskFieldInUserType(t *testing.T) {
+	// B0096: task[T] fields must use i8* layout in user types.
+	ir := generateIR(t, `
+		compute() int { return 42; }
+		type Holder { task[int] t; }
+		main() {
+			t := go compute();
+			h := Holder(t: t);
+		}
+	`)
+	// Instance struct field must be i8* (opaque task pointer), not {i8*, i8*}
+	assertContains(t, ir, "%promise_Holder_i = type { %promise_Holder_m*, i8* }")
+}
+
+func TestChannelFieldInModuleType(t *testing.T) {
+	// B0096: channel fields in module-defined types
+	ir := generateIRWithCatalogModule(t, "mymod",
+		`type Sender `+"`public"+` {
+			channel[int] _ch;
+			emit(~this, int v) `+"`public"+` { this._ch.send(v); }
+		}`,
+		`
+		use mymod;
+		main() {
+			ch := channel[int](capacity: 1);
+			s := mymod.Sender(_ch: ch);
+			s.emit(42);
+		}
+		`,
+	)
+	// Instance struct field must be i8* in module types too
+	assertContains(t, ir, "%promise_Sender_i = type { %promise_Sender_m*, i8* }")
+	assertContains(t, ir, "call void @pal_mutex_lock(")
+}
+
+func TestChannelFieldInEnumVariant(t *testing.T) {
+	// B0096: channel[T] in enum variant fields must use i8* layout.
+	// Send variant: channel[int] (i8*, 8 bytes) + int (i64, 8 bytes) = 16 bytes.
+	// Without fix: channel would be {i8*, i8*} (16 bytes) + i64 (8 bytes) = 24 bytes.
+	ir := generateIR(t, `
+		enum Action {
+			Send(channel[int] ch, int value),
+			Done,
+		}
+		main() {
+			ch := channel[int](capacity: 1);
+			a := Action.Send(ch: ch, value: 42);
+		}
+	`)
+	// Data area must be [16 x i8] (channel as i8*), not [24 x i8] (channel as {i8*,i8*})
+	assertContains(t, ir, "%promise_Action_enum = type { i32, [16 x i8] }")
+	assertNotContains(t, ir, "[24 x i8]")
+}
+
+func TestGenericTypeWithChannelFieldLayout(t *testing.T) {
+	// B0096: mono layout for generic type with channel[T] field.
+	ir := generateIR(t, `
+		type Wrapper[T] {
+			channel[T] ch;
+			T default_val;
+		}
+		main() {
+			ch := channel[int](capacity: 1);
+			w := Wrapper[int](ch: ch, default_val: 0);
+		}
+	`)
+	// Monomorphized instance struct: channel field is i8*, int field is i64
+	assertContains(t, ir, `%"promise_Wrapper[int]_i" = type { %"promise_Wrapper[int]_m"*, i8*, i64 }`)
+}
+
+func TestMultipleOpaqueFieldsLayout(t *testing.T) {
+	// B0096: multiple channel/task fields in one type.
+	ir := generateIR(t, `
+		compute() int { return 1; }
+		type Multi {
+			channel[int] ch1;
+			channel[string] ch2;
+			task[int] t;
+		}
+		main() {
+			c1 := channel[int](capacity: 1);
+			c2 := channel[string](capacity: 1);
+			tk := go compute();
+			m := Multi(ch1: c1, ch2: c2, t: tk);
+		}
+	`)
+	// All three fields must be i8*
+	assertContains(t, ir, "%promise_Multi_i = type { %promise_Multi_m*, i8*, i8*, i8* }")
+}
+
 // --- Operator Method Dispatch Tests ---
 
 func TestIncDecVariable(t *testing.T) {

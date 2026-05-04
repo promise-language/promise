@@ -149,7 +149,7 @@ func isPrimitiveScalar(n *types.Named) bool {
 	return cat != CatUnknown
 }
 
-// isOpaqueContainerType returns true for Vector and Channel types,
+// isOpaqueContainerType returns true for Vector, Channel, and Task types,
 // which are opaque i8* pointers without value struct layouts.
 // Unlike isContainerType, this excludes string (which has a value struct layout).
 func isOpaqueContainerType(typ types.Type) bool {
@@ -158,6 +158,9 @@ func isOpaqueContainerType(typ types.Type) bool {
 		return true
 	}
 	if _, ok := types.AsChannel(typ); ok || named == types.TypChannel {
+		return true
+	}
+	if named == types.TypTask {
 		return true
 	}
 	return false
@@ -235,8 +238,10 @@ func llvmTypeForEnumFieldFromPromise(typ types.Type, ptrSize int, enumLayouts ma
 		return lt
 	}
 	// User-defined Named types (not primitives, string, void) → value struct
+	// Native container/handle types (Vector, Channel, Task) are opaque i8* pointers.
 	if n := extractNamed(typ); n != nil && classify(n) == CatUnknown {
-		if n != types.TypString && n != types.TypVoid && n != types.TypNone && n != types.TypVector {
+		if n != types.TypString && n != types.TypVoid && n != types.TypNone &&
+			n != types.TypVector && n != types.TypChannel && n != types.TypTask {
 			return userValueType() // {i8*, i8*}
 		}
 	}
@@ -319,7 +324,7 @@ func instanceFieldLLVMType(typ types.Type, allLayouts map[*types.Named]*TypeDecl
 	}
 	if n := extractNamed(typ); n != nil && classify(n) == CatUnknown {
 		if n != types.TypString && n != types.TypVoid && n != types.TypNone &&
-			n != types.TypVector {
+			n != types.TypVector && n != types.TypChannel && n != types.TypTask {
 			// Value types have a wider value struct with embedded fields
 			if n.IsValueType() {
 				if layout, ok := allLayouts[n]; ok {

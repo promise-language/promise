@@ -1,0 +1,192 @@
+// B0096: channel[T] and task[T] fields in user-defined types.
+// These native container types must use i8* layout when stored as fields.
+// --- Basic channel field ---
+type IntChan {
+  channel[int] _ch;
+
+  emit(~this, int v) {
+    this._ch.send(v);
+  }
+
+  receive(~this) int? {
+    return <-this._ch;
+  }
+}
+
+test_channel_field_send_receive() `test(exclude: "wasm32") {
+  ch := channel[int](capacity: 1);
+  s := IntChan(_ch: ch);
+  s.emit(42);
+  if v := s.receive() {
+    assert(v == 42, "expected 42");
+  } else {
+    assert(false, "expected a value");
+  }
+}
+
+// --- Generic channel field (monomorphization) ---
+
+type GenericChan[T] {
+  channel[T] _ch;
+
+  new(~this, int capacity) {
+    this._ch = channel[T](capacity: capacity);
+  }
+
+  emit(~this, T value) {
+    this._ch.send(value);
+  }
+
+  receive(~this) T? {
+    return <-this._ch;
+  }
+}
+
+test_generic_channel_field() `test(exclude: "wasm32") {
+  p := GenericChan[int](capacity: 1);
+  p.emit(99);
+  if v := p.receive() {
+    assert(v == 99, "expected 99");
+  } else {
+    assert(false, "expected a value");
+  }
+}
+
+// --- Channel field alongside other fields (offset correctness) ---
+
+type MultiField {
+  string name;
+  channel[int] _ch;
+  int count;
+}
+
+test_channel_field_with_other_fields() `test(exclude: "wasm32") {
+  ch := channel[int](capacity: 1);
+  m := MultiField(name: "test", _ch: ch, count: 0);
+  m._ch.send(77);
+  if v := <-m._ch {
+    assert(v == 77, "expected 77");
+    assert(m.name == "test", "name preserved");
+    assert(m.count == 0, "count preserved");
+  } else {
+    assert(false, "expected a value");
+  }
+}
+
+// --- Channel with string element type ---
+
+test_channel_string_field() `test(exclude: "wasm32") {
+  ch := channel[string](capacity: 1);
+  ch.send("hello");
+  if v := <-ch {
+    assert(v == "hello", "expected hello");
+  } else {
+    assert(false, "expected a value");
+  }
+}
+
+type StringChanHolder {
+  channel[string] _ch;
+}
+
+test_channel_string_field_in_type() `test(exclude: "wasm32") {
+  ch := channel[string](capacity: 1);
+  h := StringChanHolder(_ch: ch);
+  h._ch.send("world");
+  if v := <-h._ch {
+    assert(v == "world", "expected world");
+  } else {
+    assert(false, "expected a value");
+  }
+}
+
+// --- Multiple channel/task fields ---
+
+compute_int() int {
+  return 7;
+}
+
+type MultiChan {
+  channel[int] _a;
+  channel[string] _b;
+  task[int] _t;
+}
+
+test_multiple_opaque_fields() `test(exclude: "wasm32") {
+  a := channel[int](capacity: 1);
+  b := channel[string](capacity: 1);
+  t := go compute_int();
+  m := MultiChan(_a: a, _b: b, _t: t);
+
+  m._a.send(10);
+  m._b.send("hi");
+  int task_result = <-m._t;
+
+  if va := <-m._a {
+    assert(va == 10, "expected 10");
+  } else {
+    assert(false, "expected int value");
+  }
+  if vb := <-m._b {
+    assert(vb == "hi", "expected hi");
+  } else {
+    assert(false, "expected string value");
+  }
+  assert(task_result == 7, "expected task result 7");
+}
+
+// --- Task field ---
+
+type TaskHolder {
+  task[int] _t;
+}
+
+test_task_field() `test(exclude: "wasm32") {
+  t := go compute_int();
+  h := TaskHolder(_t: t);
+  int result = <-h._t;
+  assert(result == 7, "expected 7");
+}
+
+// --- Task with non-primitive return type ---
+
+compute_string() string {
+  return "done";
+}
+
+type StringTaskHolder {
+  task[string] _t;
+}
+
+test_task_string_field() `test(exclude: "wasm32") {
+  t := go compute_string();
+  h := StringTaskHolder(_t: t);
+  string result = <-h._t;
+  assert(result == "done", "expected done");
+}
+
+// --- Enum variant with channel field ---
+
+enum Action {
+  Send(channel[int] ch, int value),
+  Receive(channel[int] ch),
+  Done,
+}
+
+test_enum_channel_field() `test(exclude: "wasm32") {
+  ch := channel[int](capacity: 1);
+  a := Action.Send(ch: ch, value: 42);
+  match a {
+    Action.Send(c, v) => {
+      c.send(v);
+      if r := <-c {
+        assert(r == 42, "expected 42 from enum channel");
+      } else {
+        assert(false, "expected value from enum channel");
+      }
+    },
+    _ => {
+      assert(false, "expected Send variant");
+    },
+  }
+}

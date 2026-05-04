@@ -1960,6 +1960,115 @@ func TestStackOverflowHandlerBody(t *testing.T) {
 	}
 }
 
+func TestLinuxSignalNoRedefinition(t *testing.T) {
+	// Regression: on Linux, EmitStackOverflowInit declares signal() via
+	// getOrDeclareFunc, then EmitSignalRegister also needs signal().
+	// Both must use getOrDeclareFunc to avoid "invalid redefinition".
+	p := &PosixPAL{target: "x86_64-unknown-linux-gnu"}
+	module := newModuleWithAlloc(p)
+	p.EmitWrite(module)
+	p.EmitStackOverflowInit(module)
+	p.EmitSignalInit(module)
+	p.EmitSignalRegister(module)
+	out := module.String()
+
+	// signal should be declared exactly once
+	count := strings.Count(out, "define i8* @signal(")
+	declCount := strings.Count(out, "declare i8* @signal(")
+	total := count + declCount
+	if total != 1 {
+		t.Errorf("expected exactly 1 signal declaration, got %d (define=%d, declare=%d)", total, count, declCount)
+	}
+	// Both pal_stack_overflow_init and pal_signal_register should exist
+	if !strings.Contains(out, "@pal_stack_overflow_init") {
+		t.Error("missing pal_stack_overflow_init")
+	}
+	if !strings.Contains(out, "@pal_signal_register") {
+		t.Error("missing pal_signal_register")
+	}
+}
+
+// --- Signal PAL Tests ---
+
+func TestEmitSignalInit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newModuleWithAlloc(tc.pal)
+			tc.pal.EmitWrite(module)
+			fn := tc.pal.EmitSignalInit(module)
+			if fn.Name() != "pal_signal_init" {
+				t.Errorf("expected pal_signal_init, got %s", fn.Name())
+			}
+		})
+	}
+}
+
+func TestEmitSignalInitPosix(t *testing.T) {
+	p := &PosixPAL{}
+	module := newModuleWithAlloc(p)
+	p.EmitWrite(module)
+	p.EmitSignalInit(module)
+	out := module.String()
+
+	// Should create a pipe for signal delivery
+	assertContains(t, out, "@pipe(", "declares pipe()")
+	// Should define the signal handler
+	assertContains(t, out, "define void @promise_signal_handler(i32 %signum)", "defines signal handler")
+	// Handler truncates signal number to i8 and writes to pipe
+	assertContains(t, out, "trunc i32 %signum to i8", "truncates signal to byte")
+	// Write fd stored in global
+	assertContains(t, out, "@__promise_signal_pipe_wr", "defines write fd global")
+	// pal_signal_init returns i32 (read fd)
+	assertContains(t, out, "define i32 @pal_signal_init()", "defines pal_signal_init")
+}
+
+func TestEmitSignalRegister(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newModuleWithAlloc(tc.pal)
+			tc.pal.EmitWrite(module)
+			tc.pal.EmitSignalInit(module)
+			fn := tc.pal.EmitSignalRegister(module)
+			if fn.Name() != "pal_signal_register" {
+				t.Errorf("expected pal_signal_register, got %s", fn.Name())
+			}
+		})
+	}
+}
+
+func TestEmitSignalRegisterPosix(t *testing.T) {
+	p := &PosixPAL{}
+	module := newModuleWithAlloc(p)
+	p.EmitWrite(module)
+	p.EmitSignalInit(module)
+	p.EmitSignalRegister(module)
+	out := module.String()
+
+	// Uses signal(2) to register the handler
+	assertContains(t, out, "@signal(", "declares signal()")
+	// pal_signal_register takes signum parameter
+	assertContains(t, out, "define i32 @pal_signal_register(i32 %signum)", "defines pal_signal_register")
+	// Checks SIG_ERR return (inttoptr -1)
+	assertContains(t, out, "inttoptr", "checks SIG_ERR via inttoptr")
+	// Returns 0 on success, -1 on error
+	assertContains(t, out, "ret i32 0", "returns 0 on success")
+	assertContains(t, out, "ret i32 -1", "returns -1 on error")
+}
+
 func TestStubStackOverflowIsNoop(t *testing.T) {
 	// Windows and WASM should emit no-op stubs
 	for _, tc := range []struct {
@@ -1987,4 +2096,544 @@ func TestStubStackOverflowIsNoop(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- Directory Listing PAL Tests ---
+
+func TestEmitDirOpen(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newModuleWithAlloc(tc.pal)
+			fn := tc.pal.EmitDirOpen(module)
+			if fn.Name() != "pal_dir_open" {
+				t.Errorf("expected pal_dir_open, got %s", fn.Name())
+			}
+			out := module.String()
+			assertContains(t, out, "define i8* @pal_dir_open(i8* %path)", "defines pal_dir_open")
+		})
+	}
+}
+
+func TestEmitDirOpenPosix(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{}
+	p.EmitDirOpen(module)
+	out := module.String()
+	assertContains(t, out, "@opendir(", "declares opendir()")
+	assertContains(t, out, "call i8* @opendir(i8* %path)", "calls opendir")
+}
+
+func TestEmitDirNextName(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix/Linux", &PosixPAL{target: "x86_64-unknown-linux-gnu"}},
+		{"Posix/macOS", &PosixPAL{target: "arm64-apple-darwin23.0.0"}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newModuleWithAlloc(tc.pal)
+			tc.pal.EmitErrno(module)
+			fn := tc.pal.EmitDirNextName(module)
+			if fn.Name() != "pal_dir_next_name" {
+				t.Errorf("expected pal_dir_next_name, got %s", fn.Name())
+			}
+			out := module.String()
+			assertContains(t, out, "define i8* @pal_dir_next_name(i8* %handle)", "defines pal_dir_next_name")
+		})
+	}
+}
+
+func TestEmitDirNextNamePosixOffsets(t *testing.T) {
+	// Linux and macOS have different d_name offsets in struct dirent
+	for _, tc := range []struct {
+		name   string
+		target string
+		offset string // d_name byte offset
+	}{
+		{"Linux", "x86_64-unknown-linux-gnu", "i64 19"},
+		{"macOS", "arm64-apple-darwin23.0.0", "i64 21"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &PosixPAL{target: tc.target}
+			module := newModuleWithAlloc(p)
+			p.EmitErrno(module)
+			p.EmitDirNextName(module)
+			out := module.String()
+			assertContains(t, out, "@readdir(", "declares readdir()")
+			// Clears errno before readdir
+			assertContains(t, out, "store i32 0,", "clears errno before readdir")
+			// GEP to d_name at platform-specific offset
+			assertContains(t, out, tc.offset, "uses correct d_name offset")
+		})
+	}
+}
+
+func TestEmitDirClose(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newModuleWithAlloc(tc.pal)
+			fn := tc.pal.EmitDirClose(module)
+			if fn.Name() != "pal_dir_close" {
+				t.Errorf("expected pal_dir_close, got %s", fn.Name())
+			}
+			out := module.String()
+			assertContains(t, out, "define void @pal_dir_close(i8* %handle)", "defines pal_dir_close")
+		})
+	}
+}
+
+func TestEmitDirClosePosix(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{}
+	p.EmitDirClose(module)
+	out := module.String()
+	assertContains(t, out, "@closedir(", "declares closedir()")
+	assertContains(t, out, "call i32 @closedir(i8* %handle)", "calls closedir")
+}
+
+// --- Environment Variable PAL Tests ---
+
+func TestEmitGetEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitGetEnv(module)
+			if fn.Name() != "pal_getenv" {
+				t.Errorf("expected pal_getenv, got %s", fn.Name())
+			}
+			out := module.String()
+			assertContains(t, out, "define i8* @pal_getenv(i8* %name)", "defines pal_getenv")
+		})
+	}
+}
+
+func TestEmitGetEnvPosix(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{}
+	p.EmitGetEnv(module)
+	out := module.String()
+	assertContains(t, out, "@getenv(", "declares getenv()")
+	assertContains(t, out, "call i8* @getenv(i8* %name)", "calls getenv")
+}
+
+func TestEmitSetEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitSetEnv(module)
+			if fn.Name() != "pal_setenv" {
+				t.Errorf("expected pal_setenv, got %s", fn.Name())
+			}
+			out := module.String()
+			assertContains(t, out, "define i32 @pal_setenv(i8* %name, i8* %value)", "defines pal_setenv")
+		})
+	}
+}
+
+func TestEmitSetEnvPosix(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{}
+	p.EmitSetEnv(module)
+	out := module.String()
+	assertContains(t, out, "@setenv(", "declares setenv()")
+	// overwrite=1 is passed
+	assertContains(t, out, "i32 1)", "passes overwrite=1")
+}
+
+func TestEmitUnsetEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitUnsetEnv(module)
+			if fn.Name() != "pal_unsetenv" {
+				t.Errorf("expected pal_unsetenv, got %s", fn.Name())
+			}
+			out := module.String()
+			assertContains(t, out, "define i32 @pal_unsetenv(i8* %name)", "defines pal_unsetenv")
+		})
+	}
+}
+
+func TestEmitUnsetEnvPosix(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{}
+	p.EmitUnsetEnv(module)
+	out := module.String()
+	assertContains(t, out, "@unsetenv(", "declares unsetenv()")
+}
+
+func TestEmitChdir(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitChdir(module)
+			if fn.Name() != "pal_chdir" {
+				t.Errorf("expected pal_chdir, got %s", fn.Name())
+			}
+			out := module.String()
+			assertContains(t, out, "define i32 @pal_chdir(i8* %path)", "defines pal_chdir")
+		})
+	}
+}
+
+func TestEmitGetCwd(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitGetCwd(module)
+			if fn.Name() != "pal_getcwd" {
+				t.Errorf("expected pal_getcwd, got %s", fn.Name())
+			}
+			out := module.String()
+			assertContains(t, out, "define i8* @pal_getcwd(i8* %buf, i64 %len)", "defines pal_getcwd")
+		})
+	}
+}
+
+// --- Process Execution PAL Tests ---
+
+func TestEmitSpawn(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newModuleWithAlloc(tc.pal)
+			// EmitSpawn on Posix needs close to be declared first
+			tc.pal.EmitFileClose(module)
+			fn := tc.pal.EmitSpawn(module)
+			if fn.Name() != "pal_spawn" {
+				t.Errorf("expected pal_spawn, got %s", fn.Name())
+			}
+		})
+	}
+}
+
+func TestEmitSpawnPosix(t *testing.T) {
+	p := &PosixPAL{}
+	module := newModuleWithAlloc(p)
+	p.EmitFileClose(module) // Provides @close
+	p.EmitSpawn(module)
+	out := module.String()
+
+	assertContains(t, out, "define i32 @pal_spawn(i8* %program, i8** %argv,", "defines pal_spawn")
+	assertContains(t, out, "@pipe(", "declares pipe()")
+	assertContains(t, out, "@fork(", "declares fork()")
+	assertContains(t, out, "@dup2(", "declares dup2()")
+	assertContains(t, out, "@execvp(", "declares execvp()")
+	assertContains(t, out, "@_exit(", "declares _exit()")
+}
+
+// newModuleForReadPipe creates a module with all dependencies for EmitReadPipe:
+// pal_alloc, pal_free, pal_realloc, read (via EmitFileRead), close (via EmitFileClose).
+func newModuleForReadPipe(pal PAL) *ir.Module {
+	module := newModuleWithAlloc(pal)
+	pal.EmitRealloc(module)
+	pal.EmitFileRead(module)
+	pal.EmitFileClose(module)
+	return module
+}
+
+func TestEmitReadPipe(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newModuleForReadPipe(tc.pal)
+			fn := tc.pal.EmitReadPipe(module)
+			if fn.Name() != "pal_read_pipe" {
+				t.Errorf("expected pal_read_pipe, got %s", fn.Name())
+			}
+		})
+	}
+}
+
+func TestEmitReadPipePosix(t *testing.T) {
+	p := &PosixPAL{}
+	module := newModuleForReadPipe(p)
+	p.EmitReadPipe(module)
+	out := module.String()
+
+	assertContains(t, out, "define void @pal_read_pipe(i32 %fd,", "defines pal_read_pipe")
+	// Initial 4096-byte allocation (rendered as hex u0x1000)
+	assertContains(t, out, "call i8* @pal_alloc(i64", "initial allocation")
+	// Doubles capacity when full
+	assertContains(t, out, "mul i64", "doubles capacity")
+	assertContains(t, out, "call i8* @pal_realloc(", "reallocs on growth")
+	// Closes fd when done
+	assertContains(t, out, "call i32 @close(", "closes fd when done")
+}
+
+func TestEmitWaitPid(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newModuleWithAlloc(tc.pal)
+			fn := tc.pal.EmitWaitPid(module)
+			if fn.Name() != "pal_wait_pid" {
+				t.Errorf("expected pal_wait_pid, got %s", fn.Name())
+			}
+			out := module.String()
+			assertContains(t, out, "define i32 @pal_wait_pid(i32 %pid)", "defines pal_wait_pid")
+		})
+	}
+}
+
+func TestEmitWaitPidPosix(t *testing.T) {
+	p := &PosixPAL{}
+	module := newModuleWithAlloc(p)
+	p.EmitWaitPid(module)
+	out := module.String()
+
+	assertContains(t, out, "@waitpid(", "declares waitpid()")
+	// EINTR retry loop
+	assertContains(t, out, "icmp eq i32", "checks for EINTR retry")
+}
+
+func TestEmitSpawnStreaming(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newModuleWithAlloc(tc.pal)
+			tc.pal.EmitFileClose(module)
+			fn := tc.pal.EmitSpawnStreaming(module)
+			if fn.Name() != "pal_spawn_streaming" {
+				t.Errorf("expected pal_spawn_streaming, got %s", fn.Name())
+			}
+		})
+	}
+}
+
+func TestEmitSpawnStreamingPosix(t *testing.T) {
+	p := &PosixPAL{}
+	module := newModuleWithAlloc(p)
+	p.EmitFileClose(module)
+	p.EmitSpawnStreaming(module)
+	out := module.String()
+
+	assertContains(t, out, "define i32 @pal_spawn_streaming(i8* %program, i8** %argv,", "defines pal_spawn_streaming")
+	// Three pipes: stdin, stdout, stderr
+	if strings.Count(out, "call i32 @pipe(") < 3 {
+		t.Error("expected at least 3 pipe() calls for stdin/stdout/stderr")
+	}
+	assertContains(t, out, "@fork(", "calls fork()")
+	assertContains(t, out, "@dup2(", "calls dup2()")
+	assertContains(t, out, "@execvp(", "calls execvp()")
+}
+
+func TestEmitKill(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitKill(module)
+			if fn.Name() != "pal_kill" {
+				t.Errorf("expected pal_kill, got %s", fn.Name())
+			}
+			out := module.String()
+			assertContains(t, out, "define i32 @pal_kill(i32 %pid, i32 %signal)", "defines pal_kill")
+		})
+	}
+}
+
+func TestEmitKillPosix(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{}
+	p.EmitKill(module)
+	out := module.String()
+	assertContains(t, out, "@kill(", "declares kill()")
+	assertContains(t, out, "call i32 @kill(i32 %pid, i32 %signal)", "calls kill()")
+}
+
+// --- OS Info PAL Tests ---
+
+func TestEmitGetEnviron(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitGetEnviron(module)
+			if fn.Name() != "pal_get_environ" {
+				t.Errorf("expected pal_get_environ, got %s", fn.Name())
+			}
+		})
+	}
+}
+
+func TestEmitGetEnvironPosix(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{}
+	p.EmitGetEnviron(module)
+	out := module.String()
+
+	assertContains(t, out, "define i8** @pal_get_environ()", "defines pal_get_environ")
+	// References the C environ global
+	assertContains(t, out, "@environ", "references environ global")
+	assertContains(t, out, "external", "environ is external")
+}
+
+func TestEmitGetUserInfo(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix/Linux", &PosixPAL{target: "x86_64-unknown-linux-gnu"}},
+		{"Posix/macOS", &PosixPAL{target: "arm64-apple-darwin23.0.0"}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitGetUserInfo(module)
+			if fn.Name() != "pal_get_user_info" {
+				t.Errorf("expected pal_get_user_info, got %s", fn.Name())
+			}
+		})
+	}
+}
+
+func TestEmitGetUserInfoPosixPasswdLayout(t *testing.T) {
+	// Linux and macOS have different struct passwd layouts
+	for _, tc := range []struct {
+		name     string
+		target   string
+		dirIndex string // pw_dir GEP index
+	}{
+		{"Linux", "x86_64-unknown-linux-gnu", "i32 5"},
+		{"macOS", "arm64-apple-darwin23.0.0", "i32 7"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &PosixPAL{target: tc.target}
+			module := ir.NewModule()
+			p.EmitGetUserInfo(module)
+			out := module.String()
+
+			assertContains(t, out, "@getuid(", "declares getuid()")
+			assertContains(t, out, "@getpwuid(", "declares getpwuid()")
+			assertContains(t, out, "define i32 @pal_get_user_info(", "defines pal_get_user_info")
+			// Checks for null return from getpwuid
+			assertContains(t, out, "icmp eq", "null-checks getpwuid result")
+			// Uses platform-specific pw_dir index
+			assertContains(t, out, tc.dirIndex, "uses correct pw_dir index")
+		})
+	}
+}
+
+func TestEmitGetHostname(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix", &PosixPAL{}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := ir.NewModule()
+			fn := tc.pal.EmitGetHostname(module)
+			if fn.Name() != "pal_get_hostname" {
+				t.Errorf("expected pal_get_hostname, got %s", fn.Name())
+			}
+			out := module.String()
+			assertContains(t, out, "define i8* @pal_get_hostname(i8* %buf, i64 %len)", "defines pal_get_hostname")
+		})
+	}
+}
+
+func TestEmitGetHostnamePosix(t *testing.T) {
+	module := ir.NewModule()
+	p := &PosixPAL{}
+	p.EmitGetHostname(module)
+	out := module.String()
+
+	assertContains(t, out, "@gethostname(", "declares gethostname()")
+	// Error check: returns null on failure
+	assertContains(t, out, "ret i8* null", "returns null on error")
+	// Success: returns buf
+	assertContains(t, out, "ret i8* %buf", "returns buf on success")
 }

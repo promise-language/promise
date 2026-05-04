@@ -1,7 +1,7 @@
 // Tests for enum types used as fields in user types, map values, and nested enums.
 // Regression tests for map[K, Enum] codegen panic in wrapOptional.
 enum Color {
-  Red, Green, Blue
+  Red, Green, Blue,
 }
 
 enum Shape {
@@ -54,15 +54,15 @@ test_map_fieldless_enum_all_values() `test {
   Color b = m["b"]!;
   match r {
     Color.Red => {
-    }, _ => assert(false, "expected Red")
+    }, _ => assert(false, "expected Red"),
   }
   match g {
     Color.Green => {
-    }, _ => assert(false, "expected Green")
+    }, _ => assert(false, "expected Green"),
   }
   match b {
     Color.Blue => {
-    }, _ => assert(false, "expected Blue")
+    }, _ => assert(false, "expected Blue"),
   }
 }
 
@@ -74,7 +74,7 @@ test_map_fieldless_enum_overwrite() `test {
   Color c = m["x"]!;
   match c {
     Color.Blue => {
-    }, _ => assert(false, "expected Blue after overwrite")
+    }, _ => assert(false, "expected Blue after overwrite"),
   }
 }
 
@@ -250,7 +250,7 @@ test_map_int_key_enum_value() `test {
   Color c = m[2]!;
   match c {
     Color.Green => {
-    }, _ => assert(false, "expected Green")
+    }, _ => assert(false, "expected Green"),
   }
 }
 
@@ -278,7 +278,7 @@ test_enum_containing_enum() `test {
     Outer.Wrapped(c) => {
       match c {
         Color.Blue => {
-        }, _ => assert(false, "expected Blue")
+        }, _ => assert(false, "expected Blue"),
       }
     },
     Outer.Plain => assert(false, "expected Wrapped"),
@@ -357,11 +357,11 @@ test_vector_of_fieldless_enum() `test {
   assert(colors.len == 3, "len");
   match colors[0] {
     Color.Red => {
-    }, _ => assert(false, "expected Red")
+    }, _ => assert(false, "expected Red"),
   }
   match colors[2] {
     Color.Blue => {
-    }, _ => assert(false, "expected Blue")
+    }, _ => assert(false, "expected Blue"),
   }
 }
 
@@ -387,7 +387,7 @@ test_map_enum_merge() `test {
   assert(m1.len == 3, "merged len");
   match m1["b"]! {
     Color.Green => {
-    }, _ => assert(false, "expected Green")
+    }, _ => assert(false, "expected Green"),
   }
 }
 
@@ -408,7 +408,7 @@ test_map_enum_update() `test {
   assert(!m.update("y", Color.Green), "update non-existing should fail");
   match m["x"]! {
     Color.Blue => {
-    }, _ => assert(false, "expected Blue")
+    }, _ => assert(false, "expected Blue"),
   }
 }
 
@@ -439,15 +439,15 @@ test_map_enum_rehash() `test {
   assert(m.len == 100, "len after filling");
   match m[0]! {
     Color.Red => {
-    }, _ => assert(false, "expected Red at 0")
+    }, _ => assert(false, "expected Red at 0"),
   }
   match m[1]! {
     Color.Green => {
-    }, _ => assert(false, "expected Green at 1")
+    }, _ => assert(false, "expected Green at 1"),
   }
   match m[2]! {
     Color.Blue => {
-    }, _ => assert(false, "expected Blue at 2")
+    }, _ => assert(false, "expected Blue at 2"),
   }
 }
 

@@ -256,6 +256,56 @@ func TestFormat(t *testing.T) {
 			expected: "use json;\nuse math;\n",
 		},
 		{
+			name:     "use declarations sorted",
+			input:    "use json;\nuse io;\nuse path;\n",
+			expected: "use io;\nuse json;\nuse path;\n",
+		},
+		{
+			name:     "use declarations already sorted",
+			input:    "use io;\nuse json;\n",
+			expected: "use io;\nuse json;\n",
+		},
+		{
+			name:     "use declarations with alias sorted",
+			input:    "use json as j;\nuse io;\n",
+			expected: "use io;\nuse json as j;\n",
+		},
+		{
+			name:     "use declarations with sourced import sorted",
+			input:    "use parser \"github.com/acme/parser\";\nuse io;\n",
+			expected: "use io;\nuse parser \"github.com/acme/parser\";\n",
+		},
+		{
+			name:     "use declarations blank line preserves groups",
+			input:    "use json;\nuse io;\n\nuse path;\nuse math;\n",
+			expected: "use io;\nuse json;\n\nuse math;\nuse path;\n",
+		},
+		{
+			name:     "use resource binding not sorted",
+			input:    "use conn := open();\n",
+			expected: "use conn := open();\n",
+		},
+		{
+			name:     "use declarations with trailing comment",
+			input:    "use json; // parsing\nuse io;\n",
+			expected: "use io;\nuse json; // parsing\n",
+		},
+		{
+			name:     "use with underscore alias sorted",
+			input:    "use std as _;\nuse io;\n",
+			expected: "use io;\nuse std as _;\n",
+		},
+		{
+			name:     "use sourced with underscore binding sorted",
+			input:    "use _ \"github.com/acme/lib\";\nuse parser \"github.com/acme/parser\";\n",
+			expected: "use _ \"github.com/acme/lib\";\nuse parser \"github.com/acme/parser\";\n",
+		},
+		{
+			name:     "use mixed forms sorted",
+			input:    "use json;\nuse _ \"github.com/init\";\nuse io;\nuse parser \"github.com/acme/parser\";\n",
+			expected: "use _ \"github.com/init\";\nuse io;\nuse json;\nuse parser \"github.com/acme/parser\";\n",
+		},
+		{
 			name:     "is expression",
 			input:    "if x is Dog {\n}",
 			expected: "if x is Dog {\n}\n",
@@ -691,6 +741,26 @@ func TestFormat(t *testing.T) {
 			expected: "string s = \"{fmt(\"{x}\")}\";\n",
 		},
 		{
+			name:     "raw string inside interpolation",
+			input:    "string s = \"{r\"path\\\\end\"}\";",
+			expected: "string s = \"{r\"path\\\\end\"}\";\n",
+		},
+		{
+			name:     "line comment with brace inside interpolation",
+			input:    "string s = \"{x // }\n+ y}\";",
+			expected: "string s = \"{x // }\n+ y}\";\n",
+		},
+		{
+			name:     "block comment with brace inside interpolation",
+			input:    "string s = \"{x /* } */ + y}\";",
+			expected: "string s = \"{x /* } */ + y}\";\n",
+		},
+		{
+			name:     "triple-quoted string inside interpolation",
+			input:    "string s = \"{\"\"\"hello\"\"\"}\";",
+			expected: "string s = \"{\"\"\"hello\"\"\"}\";\n",
+		},
+		{
 			name:     "multiple args without trailing newline",
 			input:    "foo(a, b, c)",
 			expected: "foo(a, b, c)\n",
@@ -704,6 +774,62 @@ func TestFormat(t *testing.T) {
 			name:     "underscore in match",
 			input:    "match x {\n_ => y,\n}",
 			expected: "match x {\n  _ => y,\n}\n",
+		},
+		// --- Trailing comma normalization ---
+		{
+			name:     "match adds trailing comma",
+			input:    "match x {\n1 => \"one\",\n2 => \"two\"\n}",
+			expected: "match x {\n  1 => \"one\",\n  2 => \"two\",\n}\n",
+		},
+		{
+			name:     "match trailing comma already present",
+			input:    "match x {\n1 => \"one\",\n}",
+			expected: "match x {\n  1 => \"one\",\n}\n",
+		},
+		{
+			name:     "match block arm adds trailing comma",
+			input:    "match x {\n1 => {\nfoo();\n}\n}",
+			expected: "match x {\n  1 => {\n    foo();\n  },\n}\n",
+		},
+		{
+			name:     "match block arm trailing comma already present",
+			input:    "match x {\n1 => {\nfoo();\n},\n}",
+			expected: "match x {\n  1 => {\n    foo();\n  },\n}\n",
+		},
+		{
+			name:     "enum adds trailing comma",
+			input:    "enum Color {\nRed,\nGreen,\nBlue\n}",
+			expected: "enum Color {\n  Red,\n  Green,\n  Blue,\n}\n",
+		},
+		{
+			name:     "enum trailing comma already present",
+			input:    "enum Color {\nRed,\nGreen,\n}",
+			expected: "enum Color {\n  Red,\n  Green,\n}\n",
+		},
+		{
+			name:     "enum with method no trailing comma after method",
+			input:    "enum Shape {\nCircle,\nPoint,\narea() int {\nreturn 0;\n}\n}",
+			expected: "enum Shape {\n  Circle,\n  Point,\n  area() int {\n    return 0;\n  }\n}\n",
+		},
+		{
+			name:     "empty match no trailing comma",
+			input:    "match x {\n}",
+			expected: "match x {\n}\n",
+		},
+		{
+			name:     "match trailing comma with comment before close",
+			input:    "match x {\n1 => \"one\"\n// comment\n}",
+			expected: "match x {\n  1 => \"one\", // comment\n}\n",
+		},
+		{
+			name:     "match trailing comma with trailing comment",
+			input:    "match x {\n1 => \"one\" // note\n}",
+			expected: "match x {\n  1 => \"one\", // note\n}\n",
+		},
+		{
+			name:     "nested match trailing comma",
+			input:    "match x {\n1 => match y {\n2 => \"inner\"\n}\n}",
+			expected: "match x {\n  1 => match y {\n    2 => \"inner\",\n  },\n}\n",
 		},
 		// --- Blank line preservation ---
 		{
@@ -865,6 +991,7 @@ func TestIdempotent(t *testing.T) {
 		"type Foo `native `public {\n  get len int `native;\n\n  push(T elem) `native;\n}\n",
 		"enum Color {\n  Red,\n  Green,\n  Blue,\n}\n",
 		"// comment\nuse json;\n\nmain() {\n  int x = 1; // value\n}\n",
+		"use io;\nuse json;\nuse path;\n",
 		"for i := 0; i < 10; i++ {\n  arr[i] = i * 2;\n}\n",
 		"return (a, b);\n",
 		"if !(a && b) {\n  x();\n}\n",
@@ -876,6 +1003,9 @@ func TestIdempotent(t *testing.T) {
 		"string s = \"{a}{b}\";\n",
 		"string s = \"{match c { 'x' => 1, _ => 0, }}\";\n",
 		"string s = \"{fmt(\"{x}\")}\";\n",
+		"string s = \"{x /* } */ + y}\";\n",
+		"string s = \"{\"\"\"hello\"\"\"}\";\n",
+		"string s = \"{r\"path\\\\end\"}\";\n",
 	}
 
 	for i, input := range inputs {

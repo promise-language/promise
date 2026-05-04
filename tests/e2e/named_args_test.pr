@@ -55,7 +55,7 @@ type Cat is Animal {
 }
 
 enum Color {
-  Red, Green, Blue
+  Red, Green, Blue,
 }
 
 enum Shape {

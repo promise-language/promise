@@ -1,7 +1,7 @@
 // Tests for for-in iteration on map[K, Enum] — regression tests for B0044.
 // Also tests map-inside-enum-variant pattern needed by T0001.
 enum Color {
-  Red, Green, Blue
+  Red, Green, Blue,
 }
 
 enum Shape {
@@ -91,7 +91,7 @@ test_values_fieldless_enum_content() `test {
   assert(vals.len == 1, "vals len");
   match vals[0] {
     Color.Red => {
-    }, _ => assert(false, "val content")
+    }, _ => assert(false, "val content"),
   }
 }
 
@@ -119,7 +119,7 @@ test_entries_fieldless_enum_content() `test {
   assert(k == "x", "entry key");
   match v {
     Color.Blue => {
-    }, _ => assert(false, "entry val")
+    }, _ => assert(false, "entry val"),
   }
 }
 

@@ -5,6 +5,7 @@
 package formatter
 
 import (
+	"sort"
 	"strings"
 	"unicode/utf8"
 )
@@ -12,7 +13,102 @@ import (
 // Format formats Promise source code into canonical form.
 func Format(src []byte) []byte {
 	tokens := tokenize(string(src))
+	tokens = sortUseImports(tokens)
 	return []byte(reformat(tokens))
+}
+
+// sortUseImports sorts consecutive use-import declarations alphabetically.
+// A use-import is `use name;`, `use name as alias;`, or `use alias "url";`.
+// Use-resource bindings (`use x := ...`) are left in place.
+// Blank lines and non-use tokens break the sorting group.
+func sortUseImports(tokens []token) []token {
+	type useDecl struct {
+		tokens  []token
+		sortKey string
+	}
+
+	result := make([]token, 0, len(tokens))
+	i := 0
+	for i < len(tokens) {
+		if !isUseImport(tokens, i) {
+			result = append(result, tokens[i])
+			i++
+			continue
+		}
+
+		// Collect consecutive use-import lines
+		var decls []useDecl
+		for i < len(tokens) && isUseImport(tokens, i) {
+			sortKey := ""
+			if i+1 < len(tokens) && tokens[i+1].kind == tkIdent {
+				sortKey = tokens[i+1].text
+			}
+			// Collect tokens from `use` to `;` (inclusive) + optional trailing comment
+			start := i
+			for i < len(tokens) && tokens[i].kind != tkSemi && tokens[i].kind != tkNewline {
+				i++
+			}
+			if i < len(tokens) && tokens[i].kind == tkSemi {
+				i++ // consume ;
+			}
+			// Include trailing line comment on the same line
+			if i < len(tokens) && tokens[i].kind == tkLineComment {
+				i++
+			}
+			decls = append(decls, useDecl{tokens: tokens[start:i], sortKey: sortKey})
+
+			// Skip newlines between use declarations
+			nlCount := 0
+			nlStart := i
+			for i < len(tokens) && tokens[i].kind == tkNewline {
+				nlCount++
+				i++
+			}
+			// Blank line (2+ newlines) or non-use-import: end group
+			if nlCount >= 2 || !isUseImport(tokens, i) {
+				i = nlStart // let the outer loop handle these newlines
+				break
+			}
+		}
+
+		// Sort by module name
+		sort.SliceStable(decls, func(a, b int) bool {
+			return decls[a].sortKey < decls[b].sortKey
+		})
+
+		// Emit sorted declarations with single newlines between them
+		for j, d := range decls {
+			result = append(result, d.tokens...)
+			if j < len(decls)-1 {
+				result = append(result, token{tkNewline, "\n"})
+			}
+		}
+	}
+	return result
+}
+
+// isUseImport checks if tokens[i] starts a use-import declaration.
+func isUseImport(tokens []token, i int) bool {
+	if i >= len(tokens) || tokens[i].kind != tkIdent || tokens[i].text != "use" {
+		return false
+	}
+	j := i + 1
+	if j >= len(tokens) || tokens[j].kind != tkIdent {
+		return false
+	}
+	j++
+	// Skip to next meaningful token
+	for j < len(tokens) && tokens[j].kind == tkNewline {
+		j++
+	}
+	if j >= len(tokens) {
+		return false
+	}
+	// := means resource binding, not import
+	if tokens[j].kind == tkWalrus {
+		return false
+	}
+	return true
 }
 
 // tokenKind classifies a token for formatting purposes.
@@ -198,24 +294,7 @@ func (l *lexer) next() token {
 	if ch == '"' {
 		start := l.pos
 		l.advance()
-		for l.pos < len(l.src) {
-			c := l.src[l.pos]
-			if c == '\\' {
-				l.pos += 2
-				continue
-			}
-			if c == '{' {
-				// String interpolation — skip over {expr} including nested strings
-				l.pos++
-				l.skipInterpolation()
-				continue
-			}
-			if c == '"' {
-				l.pos++
-				break
-			}
-			l.pos++
-		}
+		l.skipStringBody()
 		return token{tkString, l.src[start:l.pos]}
 	}
 
@@ -464,39 +543,59 @@ func (l *lexer) lexFloatSuffix() {
 }
 
 // skipInterpolation skips over a string interpolation expression.
-// Called after consuming the opening '{'. Handles nested braces, strings, and char literals.
+// Called after consuming the opening '{'. Handles nested braces, strings
+// (regular, raw, triple-quoted), char literals, and comments.
 func (l *lexer) skipInterpolation() {
 	depth := 1
 	for l.pos < len(l.src) && depth > 0 {
 		c := l.src[l.pos]
-		switch c {
-		case '{':
+		switch {
+		case c == '{':
 			depth++
 			l.pos++
-		case '}':
+		case c == '}':
 			depth--
 			l.pos++
-		case '"':
-			// Nested string literal — scan it, handling its own interpolation recursively
-			l.pos++
-			for l.pos < len(l.src) {
-				nc := l.src[l.pos]
-				if nc == '\\' {
+		case c == '/' && l.pos+1 < len(l.src) && l.src[l.pos+1] == '/':
+			// Line comment — skip to end of line (B0094)
+			l.pos += 2
+			for l.pos < len(l.src) && l.src[l.pos] != '\n' {
+				l.pos++
+			}
+		case c == '/' && l.pos+1 < len(l.src) && l.src[l.pos+1] == '*':
+			// Block comment — skip to */ (B0094)
+			l.pos += 2
+			for l.pos+1 < len(l.src) {
+				if l.src[l.pos] == '*' && l.src[l.pos+1] == '/' {
 					l.pos += 2
-					continue
-				}
-				if nc == '{' {
-					l.pos++
-					l.skipInterpolation()
-					continue
-				}
-				if nc == '"' {
-					l.pos++
 					break
 				}
 				l.pos++
 			}
-		case '\'':
+		case c == '"' && l.pos+2 < len(l.src) && l.src[l.pos+1] == '"' && l.src[l.pos+2] == '"':
+			// Triple-quoted string — no interpolation, scan to closing """ (B0095)
+			l.pos += 3
+			for l.pos+2 < len(l.src) {
+				if l.src[l.pos] == '"' && l.src[l.pos+1] == '"' && l.src[l.pos+2] == '"' {
+					l.pos += 3
+					break
+				}
+				l.pos++
+			}
+		case c == '"':
+			// Regular string literal — scan it, handling escapes and interpolation recursively
+			l.pos++
+			l.skipStringBody()
+		case c == 'r' && l.pos+1 < len(l.src) && l.src[l.pos+1] == '"':
+			// Raw string — no escapes, no interpolation, scan to closing " (B0093)
+			l.pos += 2
+			for l.pos < len(l.src) && l.src[l.pos] != '"' {
+				l.pos++
+			}
+			if l.pos < len(l.src) {
+				l.pos++ // consume closing "
+			}
+		case c == '\'':
 			// Char literal — scan past it
 			l.pos++
 			if l.pos < len(l.src) && l.src[l.pos] == '\\' {
@@ -511,6 +610,28 @@ func (l *lexer) skipInterpolation() {
 		default:
 			l.pos++
 		}
+	}
+}
+
+// skipStringBody scans the body of a regular string (after the opening ").
+// Handles escape sequences, {expr} interpolation (recursive), and closing ".
+func (l *lexer) skipStringBody() {
+	for l.pos < len(l.src) {
+		nc := l.src[l.pos]
+		if nc == '\\' {
+			l.pos += 2
+			continue
+		}
+		if nc == '{' {
+			l.pos++
+			l.skipInterpolation()
+			continue
+		}
+		if nc == '"' {
+			l.pos++
+			break
+		}
+		l.pos++
 	}
 }
 
@@ -529,6 +650,15 @@ func isHexDigitOrUnderscore(ch byte) bool {
 }
 
 // --- Reformatter ---
+
+// braceContext tracks what kind of block a { opened.
+type braceContext int
+
+const (
+	ctxBlock braceContext = iota // default: function body, if, for, etc.
+	ctxMatch                     // match { arms... }
+	ctxEnum                      // enum { variants... }
+)
 
 func reformat(tokens []token) string {
 	f := &formatter{tokens: tokens}
@@ -553,12 +683,15 @@ type formatter struct {
 	afterOpen      bool // just emitted { and newline (suppress blank line after open brace)
 
 	// Context tracking
-	forHeaderDepth       int   // >0 when inside for(...;...;...) header — suppress semi newlines
-	inLambdaPipes        bool  // inside |...| lambda parameter list
-	spacedAfterRBrace    bool  // true when } handler already emitted a space
-	inOperatorMethodName bool  // true after emitting ]= as part of operator method name
-	totalBracketDepth    int   // total [...] nesting depth
-	sliceBracketStack    []int // depths at which slice brackets were opened
+	forHeaderDepth       int            // >0 when inside for(...;...;...) header — suppress semi newlines
+	inLambdaPipes        bool           // inside |...| lambda parameter list
+	spacedAfterRBrace    bool           // true when } handler already emitted a space
+	inOperatorMethodName bool           // true after emitting ]= as part of operator method name
+	totalBracketDepth    int            // total [...] nesting depth
+	sliceBracketStack    []int          // depths at which slice brackets were opened
+	pendingBraceContext  braceContext   // context for the next { (set by match/enum keywords)
+	braceStack           []braceContext // stack of brace contexts for trailing comma normalization
+	lastContentPos       int            // output position after last non-comment content write
 }
 
 func (f *formatter) peek() token {
@@ -680,8 +813,27 @@ func (f *formatter) emitToken() {
 		f.out.WriteString(s)
 		f.lineHasContent = false
 
+		// Trailing comma normalization for match/enum (D0002)
+		ctx := ctxBlock
+		if n := len(f.braceStack); n > 0 {
+			ctx = f.braceStack[n-1]
+			f.braceStack = f.braceStack[:n-1]
+		}
+		if f.needsTrailingComma(ctx) {
+			// Insert comma after the last non-comment content, not at end of line.
+			// This handles trailing comments: "one" // comment → "one", // comment
+			out := f.out.String()
+			if f.lastContentPos > 0 && f.lastContentPos <= len(out) {
+				f.out.Reset()
+				f.out.WriteString(out[:f.lastContentPos])
+				f.write(",")
+				f.out.WriteString(out[f.lastContentPos:])
+			}
+		}
+
 		f.writeIndent()
 		f.write("}")
+		f.lastContentPos = f.out.Len()
 		f.lineHasContent = true
 		// Peek ahead: if next non-newline is `else`, `}`, semi, comma, etc., stay on same line
 		f.pendingNLs = 0
@@ -748,6 +900,8 @@ func (f *formatter) emitToken() {
 		f.lineHasContent = true
 		f.newline()
 		f.indent++
+		f.braceStack = append(f.braceStack, f.pendingBraceContext)
+		f.pendingBraceContext = ctxBlock
 		f.prevPrev = f.prev
 		f.prev = tok
 		f.prevEmit = tok
@@ -770,6 +924,22 @@ func (f *formatter) emitBlankLineIfNeeded() {
 	}
 }
 
+// needsTrailingComma returns true if a trailing comma should be inserted before }.
+func (f *formatter) needsTrailingComma(ctx braceContext) bool {
+	p := f.prev.kind
+	switch ctx {
+	case ctxMatch:
+		// Match arms are always comma-separated. Add comma unless already present,
+		// empty block, or semicolon (shouldn't appear, but be safe).
+		return p != tkComma && p != tkLBrace && p != tkSemi && p != 0
+	case ctxEnum:
+		// Enum variants are comma-separated, but methods end with } or ;.
+		// Don't add comma after method bodies (}) or method signatures (;).
+		return p != tkComma && p != tkLBrace && p != tkRBrace && p != tkSemi && p != 0
+	}
+	return false
+}
+
 func (f *formatter) emitRegular(tok token) {
 	if !f.lineHasContent {
 		// Starting a new line
@@ -784,11 +954,24 @@ func (f *formatter) emitRegular(tok token) {
 		}
 		f.write(tok.text)
 	}
+	f.lastContentPos = f.out.Len()
 	// Track operator method name []= / [:]=
 	if tok.kind == tkAssign && f.prev.kind == tkRBracket && (f.prevPrev.kind == tkLBracket || f.prevPrev.kind == tkColon) {
 		f.inOperatorMethodName = true
 	} else if f.inOperatorMethodName && tok.kind != tkAssign {
 		f.inOperatorMethodName = false
+	}
+
+	// Track brace context for trailing comma normalization (D0002)
+	if tok.kind == tkIdent {
+		switch tok.text {
+		case "match":
+			f.pendingBraceContext = ctxMatch
+		case "enum":
+			f.pendingBraceContext = ctxEnum
+		case "if", "for", "while", "else", "select", "go", "unsafe", "type":
+			f.pendingBraceContext = ctxBlock
+		}
 	}
 
 	f.prevPrev = f.prev

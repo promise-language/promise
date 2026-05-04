@@ -1,7 +1,7 @@
 // Advanced tests for enum types as fields: optional fields, alignment padding,
 // generic types, mixed-type variants, function round-trips, nesting depth.
 enum Color {
-  Red, Green, Blue
+  Red, Green, Blue,
 }
 
 enum Shape {
@@ -23,7 +23,7 @@ test_optional_enum_field_present() `test {
   if c := h.maybe {
     match c {
       Color.Red => {
-      }, _ => assert(false, "opt present")
+      }, _ => assert(false, "opt present"),
     }
   } else {
     assert(false, "opt should be present");
@@ -42,7 +42,7 @@ test_optional_enum_if_bind() `test {
   if color := c {
     match color {
       Color.Green => {
-      }, _ => assert(false, "if bind")
+      }, _ => assert(false, "if bind"),
     }
   } else {
     assert(false, "should be present");
@@ -54,7 +54,7 @@ test_optional_enum_elvis() `test {
   Color d = c ?: Color.Blue;
   match d {
     Color.Blue => {
-    }, _ => assert(false, "elvis")
+    }, _ => assert(false, "elvis"),
   }
 }
 
@@ -63,7 +63,7 @@ test_optional_enum_force_unwrap() `test {
   Color d = c!;
   match d {
     Color.Red => {
-    }, _ => assert(false, "force unwrap")
+    }, _ => assert(false, "force unwrap"),
   }
 }
 
@@ -84,7 +84,7 @@ test_optional_data_enum_elvis() `test {
   Shape d = s ?: Shape.Point;
   match d {
     Shape.Point => {
-    }, _ => assert(false, "opt data elvis")
+    }, _ => assert(false, "opt data elvis"),
   }
 }
 
@@ -199,7 +199,7 @@ test_alignment_mix_c() `test {
 // --- Multiple enum fields in one type ---
 
 enum Direction {
-  North, South, East, West
+  North, South, East, West,
 }
 
 type MultiEnum {
@@ -212,11 +212,11 @@ test_multiple_enum_fields() `test {
   MultiEnum me = MultiEnum(color: Color.Blue, dir: Direction.West, id: 42);
   match me.color {
     Color.Blue => {
-    }, _ => assert(false, "color")
+    }, _ => assert(false, "color"),
   }
   match me.dir {
     Direction.West => {
-    }, _ => assert(false, "dir")
+    }, _ => assert(false, "dir"),
   }
   assert(me.id == 42, "id");
 }
@@ -235,7 +235,7 @@ test_tagged_enum() `test {
       assert(txt == "hello", "text");
       match c {
         Color.Blue => {
-        }, _ => assert(false, "color")
+        }, _ => assert(false, "color"),
       }
     },
     Tagged.Blank => assert(false, "blank"),
@@ -251,7 +251,7 @@ test_tagged_in_map() `test {
       assert(txt == "world", "text");
       match c {
         Color.Green => {
-        }, _ => assert(false, "color")
+        }, _ => assert(false, "color"),
       }
     },
     Tagged.Blank => assert(false, "blank"),
@@ -268,7 +268,7 @@ test_generic_type_with_enum() `test {
   Box[Color] b = Box[Color](value: Color.Red);
   match b.value {
     Color.Red => {
-    }, _ => assert(false, "box")
+    }, _ => assert(false, "box"),
   }
 }
 
@@ -287,7 +287,7 @@ test_enum_in_tuple() `test {
   (c, n) := t;
   match c {
     Color.Blue => {
-    }, _ => assert(false, "tuple")
+    }, _ => assert(false, "tuple"),
   }
   assert(n == 42, "tuple int");
 }
@@ -295,10 +295,10 @@ test_enum_in_tuple() `test {
 // --- Three-level enum nesting as map value ---
 
 enum Inner {
-  Val(int n), Zero
+  Val(int n), Zero,
 }
 enum Middle {
-  Wrap(Inner inner, bool flag), Skip
+  Wrap(Inner inner, bool flag), Skip,
 }
 
 test_three_level_nesting_in_map() `test {
@@ -330,6 +330,6 @@ test_map_struct_with_enum_value() `test {
   Wrapper w = m["a"]!;
   match w.c {
     Color.Red => {
-    }, _ => assert(false, "struct map")
+    }, _ => assert(false, "struct map"),
   }
 }

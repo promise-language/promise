@@ -1,5 +1,5 @@
-use mathlib "./mathlib";
 use _ "./mathlib";
+use mathlib "./mathlib";
 
 type Box[T] {
   T value;

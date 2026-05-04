@@ -1,7 +1,7 @@
 // Match expression tests: literals (int, string, char, bool), enums,
 // wildcards, name bindings, guards, nested, block arms, return match.
 enum Direction {
-  North, South, East, West
+  North, South, East, West,
 }
 
 enum Expr {

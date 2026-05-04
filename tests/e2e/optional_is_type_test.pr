@@ -102,7 +102,7 @@ optional_value_type() `test {
 // --- Optional enum type name (not variant) ---
 
 enum Color {
-  Red, Green, Blue
+  Red, Green, Blue,
 }
 
 optional_enum_type() `test {

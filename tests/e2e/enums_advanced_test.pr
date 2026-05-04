@@ -1,7 +1,7 @@
 // Advanced enum tests: multi-variant matching, data enums with methods,
 // enum in collections, nested enum usage.
 enum Season {
-  Spring, Summer, Autumn, Winter
+  Spring, Summer, Autumn, Winter,
 }
 
 enum Result {

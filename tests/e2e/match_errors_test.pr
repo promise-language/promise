@@ -45,7 +45,7 @@ classify_code(int code) string! {
 }
 
 enum Status {
-  Ok, Warn, Err
+  Ok, Warn, Err,
 }
 
 status_for_code(int code) Status! {
@@ -232,7 +232,7 @@ test_match_raise_wildcard() `test {
 // ============================================================
 
 enum Op {
-  Add, Sub, Div
+  Add, Sub, Div,
 }
 
 compute(Op op, int a, int b) int! {

@@ -78,6 +78,14 @@ func (p *PosixPAL) EmitThreadCreate(module *ir.Module) *ir.Func {
 		ir.NewParam("stacksize", irtypes.I64))
 	pthreadAttrSetStackSize.FuncAttrs = append(pthreadAttrSetStackSize.FuncAttrs, enum.FuncAttrNoUnwind)
 
+	// declare i32 @pthread_attr_setguardsize(i8*, i64) nounwind
+	// Explicit guard page (B0010) — ensures a PROT_NONE page at the bottom
+	// of the thread stack. Hits SIGSEGV on stack overflow instead of silent corruption.
+	pthreadAttrSetGuardSize := module.NewFunc("pthread_attr_setguardsize", irtypes.I32,
+		ir.NewParam("attr", irtypes.I8Ptr),
+		ir.NewParam("guardsize", irtypes.I64))
+	pthreadAttrSetGuardSize.FuncAttrs = append(pthreadAttrSetGuardSize.FuncAttrs, enum.FuncAttrNoUnwind)
+
 	// declare i32 @pthread_attr_destroy(i8*) nounwind
 	pthreadAttrDestroy := module.NewFunc("pthread_attr_destroy", irtypes.I32,
 		ir.NewParam("attr", irtypes.I8Ptr))
@@ -107,6 +115,7 @@ func (p *PosixPAL) EmitThreadCreate(module *ir.Module) *ir.Func {
 	attr := entry.NewBitCast(attrBuf, irtypes.I8Ptr)
 	entry.NewCall(pthreadAttrInit, attr)
 	entry.NewCall(pthreadAttrSetStackSize, attr, constant.NewInt(irtypes.I64, 2*1024*1024))
+	entry.NewCall(pthreadAttrSetGuardSize, attr, constant.NewInt(irtypes.I64, 4096))
 
 	// Bitcast i8* fn to thread routine function pointer
 	fnPtr := entry.NewBitCast(fn.Params[0], threadFnPtrType())
@@ -854,9 +863,9 @@ func (p *PosixPAL) EmitSpawn(module *ir.Module) *ir.Func {
 	execvpFn.FuncAttrs = append(execvpFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// declare void @_exit(i32) noreturn nounwind
-	exitFn := module.NewFunc("_exit", irtypes.Void,
+	exitFn := getOrDeclareFunc(module, "_exit", irtypes.Void,
 		ir.NewParam("status", irtypes.I32))
-	exitFn.FuncAttrs = append(exitFn.FuncAttrs, enum.FuncAttrNoReturn, enum.FuncAttrNoUnwind)
+	addFuncAttr(exitFn, enum.FuncAttrNoReturn)
 
 	fn := module.NewFunc("pal_spawn", irtypes.I32,
 		ir.NewParam("program", irtypes.I8Ptr),
@@ -1088,6 +1097,7 @@ func (p *PosixPAL) EmitSpawnStreaming(module *ir.Module) *ir.Func {
 	dup2Fn := getOrDeclareFunc(module, "dup2", irtypes.I32, ir.NewParam("oldfd", irtypes.I32), ir.NewParam("newfd", irtypes.I32))
 	execvpFn := getOrDeclareFunc(module, "execvp", irtypes.I32, ir.NewParam("file", irtypes.I8Ptr), ir.NewParam("argv", i8PtrPtrType))
 	exitFn := getOrDeclareFunc(module, "_exit", irtypes.Void, ir.NewParam("status", irtypes.I32))
+	addFuncAttr(exitFn, enum.FuncAttrNoReturn)
 
 	fn := module.NewFunc("pal_spawn_streaming", irtypes.I32,
 		ir.NewParam("program", irtypes.I8Ptr),
@@ -1594,4 +1604,180 @@ func (p *PosixPAL) EmitSignalRegister(module *ir.Module) *ir.Func {
 	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
 
 	return fn
+}
+
+// EmitStackOverflowInit defines @pal_stack_overflow_init() → void
+// Registers a SIGSEGV handler (and SIGBUS on macOS) that prints
+// "fatal: stack overflow" to stderr and calls _exit(2).
+//
+// On macOS: uses sigaction(SA_ONSTACK) + sigaltstack for reliable delivery
+// even when the main stack is exhausted.
+// On Linux: uses signal() as best-effort (guard page still ensures clean
+// termination via SIGSEGV instead of silent corruption).
+func (p *PosixPAL) EmitStackOverflowInit(module *ir.Module) *ir.Func {
+	writeFn := getOrDeclareFunc(module, "write", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("count", irtypes.I64))
+
+	// declare void @_exit(i32) noreturn nounwind
+	exitFn := getOrDeclareFunc(module, "_exit", irtypes.Void,
+		ir.NewParam("status", irtypes.I32))
+	addFuncAttr(exitFn, enum.FuncAttrNoReturn)
+
+	// Error message: "fatal: stack overflow\n" (22 bytes)
+	msgStr := "fatal: stack overflow\n"
+	msgConst := constant.NewCharArrayFromString(msgStr)
+	msgGlobal := module.NewGlobal("__promise_stack_overflow_msg", msgConst.Typ)
+	msgGlobal.Init = msgConst
+	msgGlobal.Immutable = true
+
+	// Define @__promise_sigsegv_handler(i32 %sig)
+	// Async-signal-safe: only uses write(2) and _exit(2).
+	handlerFn := module.NewFunc("__promise_sigsegv_handler", irtypes.Void,
+		ir.NewParam("sig", irtypes.I32))
+	handlerFn.FuncAttrs = append(handlerFn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrNoReturn)
+	{
+		hEntry := handlerFn.NewBlock(".entry")
+		msgPtr := hEntry.NewBitCast(msgGlobal, irtypes.I8Ptr)
+		stderr := constant.NewInt(irtypes.I32, 2)
+		hEntry.NewCall(writeFn, stderr, msgPtr, constant.NewInt(irtypes.I64, int64(len(msgStr))))
+		hEntry.NewCall(exitFn, constant.NewInt(irtypes.I32, 2))
+		hEntry.NewUnreachable()
+	}
+
+	isDarwin := strings.Contains(p.target, "darwin") || strings.Contains(p.target, "macos")
+
+	// Define @pal_stack_overflow_init()
+	fn := module.NewFunc("pal_stack_overflow_init", irtypes.Void)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	if isDarwin {
+		// macOS: use sigaltstack + sigaction for reliable stack overflow detection.
+		// Struct layouts are stable (single libc: Apple's libSystem).
+		p.emitDarwinStackOverflowInit(module, entry, handlerFn)
+	} else {
+		// Linux: use signal() as best-effort. The guard page (set in
+		// EmitThreadCreate) still causes SIGSEGV on overflow, which terminates
+		// the process cleanly even if the handler can't run.
+		signalFn := getOrDeclareFunc(module, "signal", irtypes.I8Ptr,
+			ir.NewParam("sig", irtypes.I32),
+			ir.NewParam("handler", irtypes.I8Ptr))
+		handlerPtr := entry.NewBitCast(handlerFn, irtypes.I8Ptr)
+		entry.NewCall(signalFn, constant.NewInt(irtypes.I32, 11), handlerPtr) // SIGSEGV
+		entry.NewRet(nil)
+	}
+
+	return fn
+}
+
+// EmitStackOverflowThreadInit defines @pal_stack_overflow_thread_init() → void
+// On macOS: sets up a per-thread sigaltstack so the SIGSEGV/SIGBUS handler
+// can run on an alternate stack when the thread's main stack is exhausted.
+// On Linux: no-op (signal() handler is best-effort).
+func (p *PosixPAL) EmitStackOverflowThreadInit(module *ir.Module) *ir.Func {
+	isDarwin := strings.Contains(p.target, "darwin") || strings.Contains(p.target, "macos")
+	if !isDarwin {
+		return emitStubStackOverflowThreadInit(module)
+	}
+
+	palAlloc := lookupFunc(module, "pal_alloc")
+	sigaltstackFn := getOrDeclareFunc(module, "sigaltstack", irtypes.I32,
+		ir.NewParam("ss", irtypes.I8Ptr),
+		ir.NewParam("oss", irtypes.I8Ptr))
+
+	fn := module.NewFunc("pal_stack_overflow_thread_init", irtypes.Void)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	zero32 := constant.NewInt(irtypes.I32, 0)
+	const altStackSize = 65536
+	altStack := entry.NewCall(palAlloc, constant.NewInt(irtypes.I64, altStackSize))
+
+	// stack_t: {i8* ss_sp, i64 ss_size, i32 ss_flags} — macOS layout
+	stackTTy := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64, irtypes.I32)
+	ssAlloca := entry.NewAlloca(stackTTy)
+	ssSp := entry.NewGetElementPtr(stackTTy, ssAlloca, zero32, zero32)
+	entry.NewStore(altStack, ssSp)
+	ssSize := entry.NewGetElementPtr(stackTTy, ssAlloca, zero32, constant.NewInt(irtypes.I32, 1))
+	entry.NewStore(constant.NewInt(irtypes.I64, altStackSize), ssSize)
+	ssFlags := entry.NewGetElementPtr(stackTTy, ssAlloca, zero32, constant.NewInt(irtypes.I32, 2))
+	entry.NewStore(zero32, ssFlags)
+
+	ssPtr := entry.NewBitCast(ssAlloca, irtypes.I8Ptr)
+	entry.NewCall(sigaltstackFn, ssPtr, constant.NewNull(irtypes.I8Ptr))
+
+	entry.NewRet(nil)
+	return fn
+}
+
+// emitDarwinStackOverflowInit emits sigaltstack + sigaction setup for macOS.
+// macOS struct layouts:
+//
+//	stack_t:         {void* ss_sp, size_t ss_size, int ss_flags}  = 24 bytes
+//	struct sigaction: {void(*)(int) sa_handler, uint32_t sa_mask, int sa_flags} = 16 bytes
+//	SA_ONSTACK = 0x0001, SA_RESETHAND = 0x0004, SIGSEGV = 11, SIGBUS = 10
+func (p *PosixPAL) emitDarwinStackOverflowInit(
+	module *ir.Module, entry *ir.Block, handlerFn *ir.Func,
+) {
+	palAlloc := lookupFunc(module, "pal_alloc")
+
+	// declare i32 @sigaltstack(i8*, i8*) nounwind
+	sigaltstackFn := getOrDeclareFunc(module, "sigaltstack", irtypes.I32,
+		ir.NewParam("ss", irtypes.I8Ptr),
+		ir.NewParam("oss", irtypes.I8Ptr))
+
+	// declare i32 @sigaction(i32, i8*, i8*) nounwind
+	sigactionFn := getOrDeclareFunc(module, "sigaction", irtypes.I32,
+		ir.NewParam("sig", irtypes.I32),
+		ir.NewParam("act", irtypes.I8Ptr),
+		ir.NewParam("oact", irtypes.I8Ptr))
+
+	zero32 := constant.NewInt(irtypes.I32, 0)
+
+	// Allocate 65536 bytes for the alternate signal stack via malloc
+	const altStackSize = 65536
+	altStack := entry.NewCall(palAlloc, constant.NewInt(irtypes.I64, altStackSize))
+
+	// Build stack_t on the stack: {i8* ss_sp, i64 ss_size, i32 ss_flags}
+	// macOS layout: ss_sp(0), ss_size(8), ss_flags(16) — total 24 bytes
+	stackTTy := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64, irtypes.I32)
+	ssAlloca := entry.NewAlloca(stackTTy)
+	// ss_sp = altStack
+	ssSp := entry.NewGetElementPtr(stackTTy, ssAlloca, zero32, zero32)
+	entry.NewStore(altStack, ssSp)
+	// ss_size = 65536
+	ssSize := entry.NewGetElementPtr(stackTTy, ssAlloca, zero32, constant.NewInt(irtypes.I32, 1))
+	entry.NewStore(constant.NewInt(irtypes.I64, altStackSize), ssSize)
+	// ss_flags = 0
+	ssFlags := entry.NewGetElementPtr(stackTTy, ssAlloca, zero32, constant.NewInt(irtypes.I32, 2))
+	entry.NewStore(zero32, ssFlags)
+
+	ssPtr := entry.NewBitCast(ssAlloca, irtypes.I8Ptr)
+	entry.NewCall(sigaltstackFn, ssPtr, constant.NewNull(irtypes.I8Ptr))
+
+	// Build struct sigaction: {i8* sa_handler, i32 sa_mask, i32 sa_flags}
+	// macOS layout: sa_handler(0), sa_mask(8), sa_flags(12) — total 16 bytes
+	sigactTy := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I32, irtypes.I32)
+	actAlloca := entry.NewAlloca(sigactTy)
+	// sa_handler = handlerFn
+	handlerPtr := entry.NewBitCast(handlerFn, irtypes.I8Ptr)
+	saHandler := entry.NewGetElementPtr(sigactTy, actAlloca, zero32, zero32)
+	entry.NewStore(handlerPtr, saHandler)
+	// sa_mask = 0 (no signals blocked during handler)
+	saMask := entry.NewGetElementPtr(sigactTy, actAlloca, zero32, constant.NewInt(irtypes.I32, 1))
+	entry.NewStore(zero32, saMask)
+	// sa_flags = SA_ONSTACK(0x0001) | SA_RESETHAND(0x0004) = 0x0005
+	saFlags := entry.NewGetElementPtr(sigactTy, actAlloca, zero32, constant.NewInt(irtypes.I32, 2))
+	entry.NewStore(constant.NewInt(irtypes.I32, 0x0005), saFlags)
+
+	actPtr := entry.NewBitCast(actAlloca, irtypes.I8Ptr)
+
+	// sigaction(SIGSEGV=11, &act, NULL)
+	entry.NewCall(sigactionFn, constant.NewInt(irtypes.I32, 11), actPtr, constant.NewNull(irtypes.I8Ptr))
+	// sigaction(SIGBUS=10, &act, NULL)  — macOS uses SIGBUS for some stack overflows
+	entry.NewCall(sigactionFn, constant.NewInt(irtypes.I32, 10), actPtr, constant.NewNull(irtypes.I8Ptr))
+
+	entry.NewRet(nil)
 }

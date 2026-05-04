@@ -144,6 +144,16 @@ type PAL interface {
 	// Registers the signal handler for the given signal number.
 	// Returns 0 on success, -1 on error.
 	EmitSignalRegister(module *ir.Module) *ir.Func
+
+	// Stack overflow detection (B0010)
+	// EmitStackOverflowInit defines @pal_stack_overflow_init() → void
+	// Registers a SIGSEGV/SIGBUS handler that prints "fatal: stack overflow"
+	// and terminates cleanly. Called once at program startup.
+	EmitStackOverflowInit(module *ir.Module) *ir.Func
+	// EmitStackOverflowThreadInit defines @pal_stack_overflow_thread_init() → void
+	// Sets up a per-thread alternate signal stack via sigaltstack.
+	// Called at the start of each worker thread (sched_loop entry).
+	EmitStackOverflowThreadInit(module *ir.Module) *ir.Func
 }
 
 // ForTarget returns a PAL implementation for the given LLVM target triple.
@@ -179,6 +189,16 @@ func getOrDeclareFunc(module *ir.Module, name string, retType irtypes.Type, para
 	fn := module.NewFunc(name, retType, params...)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	return fn
+}
+
+// addFuncAttr appends attr to fn.FuncAttrs only if not already present.
+func addFuncAttr(fn *ir.Func, attr enum.FuncAttr) {
+	for _, a := range fn.FuncAttrs {
+		if a == attr {
+			return
+		}
+	}
+	fn.FuncAttrs = append(fn.FuncAttrs, attr)
 }
 
 // emitLibcAlloc declares libc @malloc and defines @pal_alloc as a wrapper.
@@ -660,6 +680,26 @@ func emitStubGetHostname(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	entry.NewRet(constant.NewNull(irtypes.I8Ptr))
+	return fn
+}
+
+// --- Stub stack overflow detection ---
+
+// emitStubStackOverflowInit is a no-op (platforms with built-in stack overflow handling).
+func emitStubStackOverflowInit(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_stack_overflow_init", irtypes.Void)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(nil)
+	return fn
+}
+
+// emitStubStackOverflowThreadInit is a no-op.
+func emitStubStackOverflowThreadInit(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_stack_overflow_thread_init", irtypes.Void)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(nil)
 	return fn
 }
 

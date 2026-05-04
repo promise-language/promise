@@ -199,6 +199,15 @@ func (p *WasmPAL) EmitSignalRegister(module *ir.Module) *ir.Func {
 	return emitStubSignalRegister(module)
 }
 
+// EmitStackOverflowInit stub — WASM has built-in stack overflow trapping.
+func (p *WasmPAL) EmitStackOverflowInit(module *ir.Module) *ir.Func {
+	return emitStubStackOverflowInit(module)
+}
+
+func (p *WasmPAL) EmitStackOverflowThreadInit(module *ir.Module) *ir.Func {
+	return emitStubStackOverflowThreadInit(module)
+}
+
 // WASM threading stubs — run synchronously. WASM has no threads (Phase 5d: cooperative scheduler).
 func (p *WasmPAL) EmitThreadCreate(module *ir.Module) *ir.Func  { return emitStubThreadCreate(module) }
 func (p *WasmPAL) EmitThreadJoin(module *ir.Module) *ir.Func    { return emitStubThreadJoin(module) }

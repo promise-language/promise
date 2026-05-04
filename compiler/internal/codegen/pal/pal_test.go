@@ -1779,3 +1779,212 @@ func TestPosixFileWriteReusesWriteDecl(t *testing.T) {
 		t.Errorf("expected 1 @write declaration, got %d", count)
 	}
 }
+
+// --- B0010: Stack overflow detection tests ---
+
+func TestPosixGuardPageInThreadCreate(t *testing.T) {
+	module := newModuleWithAlloc(&PosixPAL{})
+	(&PosixPAL{}).EmitThreadCreate(module)
+	out := module.String()
+
+	if !strings.Contains(out, "call i32 @pthread_attr_setguardsize(") {
+		t.Error("missing call to @pthread_attr_setguardsize")
+	}
+	// 4096 = 0x1000; LLVM may render as decimal or hex
+	if !strings.Contains(out, "i64 4096") && !strings.Contains(out, "i64 u0x1000") {
+		t.Error("missing 4096-byte guard page size constant")
+	}
+}
+
+func TestEmitStackOverflowInit(t *testing.T) {
+	pals := []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix/Linux", &PosixPAL{target: "x86_64-unknown-linux-gnu"}},
+		{"Posix/macOS", &PosixPAL{target: "arm64-apple-darwin23.0.0"}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	}
+	for _, tc := range pals {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newModuleWithAlloc(tc.pal)
+			tc.pal.EmitWrite(module)
+			fn := tc.pal.EmitStackOverflowInit(module)
+			out := module.String()
+
+			if fn.Name() != "pal_stack_overflow_init" {
+				t.Errorf("expected function name pal_stack_overflow_init, got %s", fn.Name())
+			}
+			if !strings.Contains(out, "define void @pal_stack_overflow_init()") {
+				t.Error("missing @pal_stack_overflow_init definition")
+			}
+		})
+	}
+}
+
+func TestEmitStackOverflowThreadInit(t *testing.T) {
+	pals := []struct {
+		name string
+		pal  PAL
+	}{
+		{"Posix/Linux", &PosixPAL{target: "x86_64-unknown-linux-gnu"}},
+		{"Posix/macOS", &PosixPAL{target: "arm64-apple-darwin23.0.0"}},
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	}
+	for _, tc := range pals {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newModuleWithAlloc(tc.pal)
+			fn := tc.pal.EmitStackOverflowThreadInit(module)
+			out := module.String()
+
+			if fn.Name() != "pal_stack_overflow_thread_init" {
+				t.Errorf("expected function name pal_stack_overflow_thread_init, got %s", fn.Name())
+			}
+			if !strings.Contains(out, "define void @pal_stack_overflow_thread_init()") {
+				t.Error("missing @pal_stack_overflow_thread_init definition")
+			}
+		})
+	}
+}
+
+func TestDarwinStackOverflowUseSigaction(t *testing.T) {
+	module := newModuleWithAlloc(&PosixPAL{target: "arm64-apple-darwin23.0.0"})
+	(&PosixPAL{target: "arm64-apple-darwin23.0.0"}).EmitWrite(module)
+	(&PosixPAL{target: "arm64-apple-darwin23.0.0"}).EmitStackOverflowInit(module)
+	out := module.String()
+
+	// macOS must use sigaction + sigaltstack, NOT signal()
+	if !strings.Contains(out, "call i32 @sigaction(") {
+		t.Error("macOS should use sigaction, not signal")
+	}
+	if !strings.Contains(out, "call i32 @sigaltstack(") {
+		t.Error("macOS should set up sigaltstack")
+	}
+	// SA_ONSTACK(0x0001) | SA_RESETHAND(0x0004) = 0x0005
+	if !strings.Contains(out, "i32 5") {
+		t.Error("missing SA_ONSTACK|SA_RESETHAND flags (0x0005)")
+	}
+	// Should register for both SIGSEGV(11) and SIGBUS(10)
+	if strings.Count(out, "call i32 @sigaction(i32 11,") < 1 {
+		t.Error("missing sigaction for SIGSEGV (signal 11)")
+	}
+	if strings.Count(out, "call i32 @sigaction(i32 10,") < 1 {
+		t.Error("missing sigaction for SIGBUS (signal 10)")
+	}
+	// Should NOT use signal() on macOS
+	if strings.Contains(out, "call i8* @signal(") {
+		t.Error("macOS should not use signal() — must use sigaction with SA_ONSTACK")
+	}
+}
+
+func TestDarwinThreadInitSetsSigaltstack(t *testing.T) {
+	p := &PosixPAL{target: "arm64-apple-darwin23.0.0"}
+	module := newModuleWithAlloc(p)
+	p.EmitStackOverflowThreadInit(module)
+	out := module.String()
+
+	if !strings.Contains(out, "call i32 @sigaltstack(") {
+		t.Error("macOS thread init should call sigaltstack")
+	}
+	// Allocate 65536 bytes for alternate stack
+	if !strings.Contains(out, "call i8* @pal_alloc(i64 65536)") {
+		t.Error("missing 64KB alternate stack allocation")
+	}
+}
+
+func TestLinuxStackOverflowUsesSignal(t *testing.T) {
+	module := newModuleWithAlloc(&PosixPAL{target: "x86_64-unknown-linux-gnu"})
+	(&PosixPAL{target: "x86_64-unknown-linux-gnu"}).EmitWrite(module)
+	(&PosixPAL{target: "x86_64-unknown-linux-gnu"}).EmitStackOverflowInit(module)
+	out := module.String()
+
+	// Linux uses signal() as best-effort (sigaction struct differs between glibc/musl)
+	if !strings.Contains(out, "call i8* @signal(i32 11,") {
+		t.Error("Linux should use signal() for SIGSEGV (signal 11)")
+	}
+	// Should NOT use sigaction on Linux
+	if strings.Contains(out, "call i32 @sigaction(") {
+		t.Error("Linux should not use sigaction (glibc/musl struct mismatch)")
+	}
+}
+
+func TestLinuxThreadInitIsNoop(t *testing.T) {
+	p := &PosixPAL{target: "x86_64-unknown-linux-gnu"}
+	module := newModuleWithAlloc(p)
+	p.EmitStackOverflowThreadInit(module)
+	out := module.String()
+
+	// Linux thread init should be a no-op (no sigaltstack setup)
+	if strings.Contains(out, "sigaltstack") {
+		t.Error("Linux thread init should not call sigaltstack")
+	}
+	// Should just be an empty function with ret void
+	body := out[strings.Index(out, "@pal_stack_overflow_thread_init"):]
+	if !strings.Contains(body, "ret void") {
+		t.Error("Linux thread init should be a simple ret void")
+	}
+}
+
+func TestStackOverflowHandlerBody(t *testing.T) {
+	module := newModuleWithAlloc(&PosixPAL{target: "arm64-apple-darwin23.0.0"})
+	(&PosixPAL{target: "arm64-apple-darwin23.0.0"}).EmitWrite(module)
+	(&PosixPAL{target: "arm64-apple-darwin23.0.0"}).EmitStackOverflowInit(module)
+	out := module.String()
+
+	// Handler function must exist with correct name
+	if !strings.Contains(out, "define void @__promise_sigsegv_handler(i32 %sig)") {
+		t.Error("missing @__promise_sigsegv_handler definition")
+	}
+	// Must have noreturn attribute (handler never returns)
+	handlerBody := out[strings.Index(out, "@__promise_sigsegv_handler"):]
+	if !strings.Contains(handlerBody, "noreturn") {
+		t.Error("handler should be noreturn")
+	}
+	// Must write to stderr (fd 2)
+	if !strings.Contains(handlerBody, "call i64 @write(i32 2,") {
+		t.Error("handler should write to stderr (fd 2)")
+	}
+	// Must call _exit(2), not exit(2)
+	if !strings.Contains(handlerBody, "call void @_exit(i32 2)") {
+		t.Error("handler should call _exit(2), not exit")
+	}
+	// Must end with unreachable (after noreturn _exit)
+	if !strings.Contains(handlerBody, "unreachable") {
+		t.Error("handler should end with unreachable")
+	}
+	// Error message global
+	if !strings.Contains(out, `@__promise_stack_overflow_msg = constant`) {
+		t.Error("missing error message global")
+	}
+}
+
+func TestStubStackOverflowIsNoop(t *testing.T) {
+	// Windows and WASM should emit no-op stubs
+	for _, tc := range []struct {
+		name string
+		pal  PAL
+	}{
+		{"Windows", &WindowsPAL{}},
+		{"Wasm", &WasmPAL{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newModuleWithAlloc(tc.pal)
+			tc.pal.EmitStackOverflowInit(module)
+			tc.pal.EmitStackOverflowThreadInit(module)
+			out := module.String()
+
+			// Both functions should be trivial (ret void, no signal handling)
+			if strings.Contains(out, "@signal(") || strings.Contains(out, "@sigaction(") {
+				t.Error("stub should not call signal/sigaction")
+			}
+			if strings.Contains(out, "@sigaltstack(") {
+				t.Error("stub should not call sigaltstack")
+			}
+			if strings.Contains(out, "__promise_sigsegv_handler") {
+				t.Error("stub should not define SIGSEGV handler")
+			}
+		})
+	}
+}

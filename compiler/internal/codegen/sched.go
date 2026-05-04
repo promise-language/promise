@@ -566,6 +566,9 @@ func (c *Compiler) defineSchedLoopFunc() {
 	parkM := fn.NewBlock("park_m")
 	exitBlk := fn.NewBlock("exit")
 
+	// Set up per-thread alternate signal stack for stack overflow detection (B0010)
+	entry.NewCall(c.palStackOverflowThreadInit)
+
 	// Set TLS current_m once (M is fixed for this thread's lifetime).
 	entry.NewStore(mParam, c.currentMGlobal)
 	entry.NewBr(loop)
@@ -1904,6 +1907,9 @@ func (c *Compiler) wrapMainWithScheduler() {
 	// Store argc/argv into globals for os.args() / os.executable()
 	entry.NewStore(mainFn.Params[0], c.argcGlobal)
 	entry.NewStore(mainFn.Params[1], c.argvGlobal)
+
+	// Register stack overflow signal handler before any threads are created (B0010)
+	entry.NewCall(c.palStackOverflowInit)
 
 	if c.isWasm {
 		// WASM: create @_start entry point that calls __promise_init_heap then @main

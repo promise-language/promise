@@ -173,36 +173,38 @@ type Compiler struct {
 	palNumCPUs *ir.Func // @pal_num_cpus() → i32
 
 	// PAL file I/O primitives (Phase D)
-	palFileOpen       *ir.Func // @pal_file_open(i8* path, i32 mode) → i32
-	palFileRead       *ir.Func // @pal_file_read(i32 fd, i8* buf, i64 len) → i64
-	palFileWrite      *ir.Func // @pal_file_write(i32 fd, i8* buf, i64 len) → i64
-	palFileClose      *ir.Func // @pal_file_close(i32 fd) → i32
-	palFileSeek       *ir.Func // @pal_file_seek(i32 fd, i64 offset, i32 whence) → i64
-	palFileStatSize   *ir.Func // @pal_file_stat_size(i8* path) → i64
-	palFileRemove     *ir.Func // @pal_file_remove(i8* path) → i32
-	palFileExists     *ir.Func // @pal_file_exists(i8* path) → i32
-	palFileMkdir      *ir.Func // @pal_file_mkdir(i8* path) → i32
-	palDirRemove      *ir.Func // @pal_dir_remove(i8* path) → i32
-	palDirExists      *ir.Func // @pal_dir_exists(i8* path) → i32
-	palDirOpen        *ir.Func // @pal_dir_open(i8* path) → i8*
-	palDirNextName    *ir.Func // @pal_dir_next_name(i8* handle) → i8*
-	palDirClose       *ir.Func // @pal_dir_close(i8* handle) → void
-	palErrno          *ir.Func // @pal_errno() → i32
-	palGetEnv         *ir.Func // @pal_getenv(i8* name) → i8* (value or null)
-	palGetCwd         *ir.Func // @pal_getcwd(i8* buf, i64 len) → i8* (buf or null)
-	palSetEnv         *ir.Func // @pal_setenv(i8* name, i8* value) → i32
-	palUnsetEnv       *ir.Func // @pal_unsetenv(i8* name) → i32
-	palChdir          *ir.Func // @pal_chdir(i8* path) → i32
-	palSpawn          *ir.Func // @pal_spawn(i8* program, i8** argv, i32* out_stdout_fd, i32* out_stderr_fd) → i32
-	palReadPipe       *ir.Func // @pal_read_pipe(i32 fd, i8** out_buf, i64* out_len) → void
-	palWaitPid        *ir.Func // @pal_wait_pid(i32 pid) → i32
-	palSpawnStreaming *ir.Func // @pal_spawn_streaming(..., i32* out_stdin_fd, i32* out_stdout_fd, i32* out_stderr_fd) → i32
-	palKill           *ir.Func // @pal_kill(i32 pid, i32 signal) → i32
-	palGetEnviron     *ir.Func // @pal_get_environ() → i8**
-	palGetUserInfo    *ir.Func // @pal_get_user_info(i8** out_name, i8** out_dir, i32* out_uid, i32* out_gid) → i32
-	palGetHostname    *ir.Func // @pal_get_hostname(i8* buf, i64 len) → i8*
-	palSignalInit     *ir.Func // @pal_signal_init() → i32 (rd_fd or -1)
-	palSignalRegister *ir.Func // @pal_signal_register(i32 signum) → i32
+	palFileOpen                *ir.Func // @pal_file_open(i8* path, i32 mode) → i32
+	palFileRead                *ir.Func // @pal_file_read(i32 fd, i8* buf, i64 len) → i64
+	palFileWrite               *ir.Func // @pal_file_write(i32 fd, i8* buf, i64 len) → i64
+	palFileClose               *ir.Func // @pal_file_close(i32 fd) → i32
+	palFileSeek                *ir.Func // @pal_file_seek(i32 fd, i64 offset, i32 whence) → i64
+	palFileStatSize            *ir.Func // @pal_file_stat_size(i8* path) → i64
+	palFileRemove              *ir.Func // @pal_file_remove(i8* path) → i32
+	palFileExists              *ir.Func // @pal_file_exists(i8* path) → i32
+	palFileMkdir               *ir.Func // @pal_file_mkdir(i8* path) → i32
+	palDirRemove               *ir.Func // @pal_dir_remove(i8* path) → i32
+	palDirExists               *ir.Func // @pal_dir_exists(i8* path) → i32
+	palDirOpen                 *ir.Func // @pal_dir_open(i8* path) → i8*
+	palDirNextName             *ir.Func // @pal_dir_next_name(i8* handle) → i8*
+	palDirClose                *ir.Func // @pal_dir_close(i8* handle) → void
+	palErrno                   *ir.Func // @pal_errno() → i32
+	palGetEnv                  *ir.Func // @pal_getenv(i8* name) → i8* (value or null)
+	palGetCwd                  *ir.Func // @pal_getcwd(i8* buf, i64 len) → i8* (buf or null)
+	palSetEnv                  *ir.Func // @pal_setenv(i8* name, i8* value) → i32
+	palUnsetEnv                *ir.Func // @pal_unsetenv(i8* name) → i32
+	palChdir                   *ir.Func // @pal_chdir(i8* path) → i32
+	palSpawn                   *ir.Func // @pal_spawn(i8* program, i8** argv, i32* out_stdout_fd, i32* out_stderr_fd) → i32
+	palReadPipe                *ir.Func // @pal_read_pipe(i32 fd, i8** out_buf, i64* out_len) → void
+	palWaitPid                 *ir.Func // @pal_wait_pid(i32 pid) → i32
+	palSpawnStreaming          *ir.Func // @pal_spawn_streaming(..., i32* out_stdin_fd, i32* out_stdout_fd, i32* out_stderr_fd) → i32
+	palKill                    *ir.Func // @pal_kill(i32 pid, i32 signal) → i32
+	palGetEnviron              *ir.Func // @pal_get_environ() → i8**
+	palGetUserInfo             *ir.Func // @pal_get_user_info(i8** out_name, i8** out_dir, i32* out_uid, i32* out_gid) → i32
+	palGetHostname             *ir.Func // @pal_get_hostname(i8* buf, i64 len) → i8*
+	palSignalInit              *ir.Func // @pal_signal_init() → i32 (rd_fd or -1)
+	palSignalRegister          *ir.Func // @pal_signal_register(i32 signum) → i32
+	palStackOverflowInit       *ir.Func // @pal_stack_overflow_init() → void
+	palStackOverflowThreadInit *ir.Func // @pal_stack_overflow_thread_init() → void
 
 	// Signal pipe globals (NOT TLS — shared across all threads)
 	signalPipeRdFd *ir.Global // @__promise_signal_pipe_rd (i32)
@@ -980,6 +982,15 @@ func (c *Compiler) declareIntrinsics() {
 		c.funcs["longjmp"] = longjmpFn
 	}
 
+	// PAL: emit write/exit early — needed by stack overflow handler below
+	c.palWrite = p.EmitWrite(c.module)
+	c.palExit = p.EmitExit(c.module)
+
+	// Stack overflow detection (B0010) — must be emitted before scheduler
+	// functions because defineSchedLoopFunc references palStackOverflowThreadInit.
+	c.palStackOverflowInit = p.EmitStackOverflowInit(c.module)
+	c.palStackOverflowThreadInit = p.EmitStackOverflowThreadInit(c.module)
+
 	// Scheduler globals and functions (Phase 5c)
 	c.defineSchedulerGlobals()
 	c.defineGNewFunc()
@@ -1009,10 +1020,6 @@ func (c *Compiler) declareIntrinsics() {
 	c.defineWaiterWakeOneFunc()
 	c.defineWaiterWakeAllFunc()
 	c.defineWaiterRemoveFunc()
-
-	// PAL: emit platform-specific IO/exit primitives
-	c.palWrite = p.EmitWrite(c.module)
-	c.palExit = p.EmitExit(c.module)
 
 	// PAL: emit file I/O primitives (Phase D)
 	c.palFileOpen = p.EmitFileOpen(c.module)

@@ -414,6 +414,27 @@ func TestPALWriteExitDefined(t *testing.T) {
 	assertContains(t, ir, "call void @exit(i32 %code)")
 }
 
+func TestStackOverflowHandler(t *testing.T) {
+	ir := generateIR(t, `
+		main() {}
+	`)
+	// B0010: Stack overflow detection — SIGSEGV handler is registered at startup
+	// Error message constant
+	assertContains(t, ir, `@__promise_stack_overflow_msg = constant [22 x i8]`)
+	// Handler function exists with correct attributes
+	assertContains(t, ir, "define void @__promise_sigsegv_handler(i32 %sig)")
+	// Handler writes to stderr (fd 2) and calls _exit(2)
+	assertContains(t, ir, "call void @_exit(i32 2)")
+	// Init function is defined and called from main
+	assertContains(t, ir, "define void @pal_stack_overflow_init()")
+	assertContains(t, ir, "call void @pal_stack_overflow_init()")
+	// Thread init is defined and called from sched_loop
+	assertContains(t, ir, "define void @pal_stack_overflow_thread_init()")
+	assertContains(t, ir, "call void @pal_stack_overflow_thread_init()")
+	// Guard page: pthread_attr_setguardsize in thread creation
+	assertContains(t, ir, "call i32 @pthread_attr_setguardsize(")
+}
+
 func TestPrintNewlineEmission(t *testing.T) {
 	ir := generateIR(t, `
 		print_s(string s) `+"`"+`extern("promise_print_string");

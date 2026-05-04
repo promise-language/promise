@@ -1056,6 +1056,16 @@ func (p *WindowsPAL) EmitSignalRegister(module *ir.Module) *ir.Func {
 	return emitStubSignalRegister(module)
 }
 
+// EmitStackOverflowInit stub — Windows CreateThread sets up guard pages by default
+// and provides its own stack overflow exception message.
+func (p *WindowsPAL) EmitStackOverflowInit(module *ir.Module) *ir.Func {
+	return emitStubStackOverflowInit(module)
+}
+
+func (p *WindowsPAL) EmitStackOverflowThreadInit(module *ir.Module) *ir.Func {
+	return emitStubStackOverflowThreadInit(module)
+}
+
 // EmitGetCwd declares UCRT @_getcwd and defines @pal_getcwd.
 // Signature: @pal_getcwd(i8* buf, i64 len) → i8* (buf or null)
 func (p *WindowsPAL) EmitGetCwd(module *ir.Module) *ir.Func {

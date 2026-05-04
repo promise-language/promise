@@ -4485,6 +4485,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	savedDropFlags := c.dropFlags
 	savedLoopScopeDepth := c.loopScopeDepth
 	savedWritebacks := c.lambdaWritebacks
+	savedGoExprFF2 := c.goExprFireAndForget
 
 	// Generate lambda body with fresh scope state
 	c.fn = fn
@@ -4578,6 +4579,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.dropFlags = savedDropFlags
 	c.loopScopeDepth = savedLoopScopeDepth
 	c.lambdaWritebacks = savedWritebacks
+	c.goExprFireAndForget = savedGoExprFF2
 
 	// Return fat pointer: {fn_ptr as i8*, env_ptr}
 	fnPtr := c.block.NewBitCast(fn, irtypes.I8Ptr)
@@ -5320,13 +5322,14 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 	handle := c.block.NewCall(coroFn, argVals...)
 	gRaw := c.block.NewCall(c.funcs["promise_g_new"], handle)
 
-	{
+	if !isVoid || !c.goExprFireAndForget {
 		gTy := goroutineStructType()
 		gPtr := c.block.NewBitCast(gRaw, irtypes.NewPointer(gTy))
 		rpField := c.block.NewGetElementPtr(gTy, gPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldResultPtr)))
 		if !isVoid {
-			// Allocate result buffer and store in G.result_ptr
+			// Task[T]: allocate result buffer and store in G.result_ptr.
+			// The coroutine body stores the result here; the receiver loads + frees it.
 			resultSize := constant.NewInt(irtypes.I64, int64(c.typeSize(resultLLVM)))
 			resultBuf := c.block.NewCall(c.palAlloc, resultSize)
 			c.block.NewStore(resultBuf, rpField)
@@ -5337,6 +5340,8 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 			c.block.NewStore(sentinel, rpField)
 		}
 	}
+	// Fire-and-forget void: result_ptr stays null (from promise_g_new),
+	// so goroutine_exit frees the G struct when the goroutine completes.
 
 	c.block.NewCall(c.funcs["promise_sched_enqueue"], gRaw)
 
@@ -5663,6 +5668,7 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	savedInCoroutine := c.inCoroutine
 	savedCoroCleanup := c.coroCleanupBlk
 	savedCoroSuspend := c.coroSuspendBlk
+	savedGoExprFF := c.goExprFireAndForget
 
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
@@ -5782,19 +5788,25 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	c.inCoroutine = savedInCoroutine
 	c.coroCleanupBlk = savedCoroCleanup
 	c.coroSuspendBlk = savedCoroSuspend
+	c.goExprFireAndForget = savedGoExprFF
 
 	// Caller: call coroutine ramp → get handle, create G, enqueue
 	handle := c.block.NewCall(coroFn, captureVals...)
 	gRaw := c.block.NewCall(c.funcs["promise_g_new"], handle)
 
-	// Set result_ptr to sentinel (0x1) so goroutine_exit knows this is a task
-	// and won't free G (caller frees via <-task)
-	gTy := goroutineStructType()
-	gPtr := c.block.NewBitCast(gRaw, irtypes.NewPointer(gTy))
-	rpField := c.block.NewGetElementPtr(gTy, gPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldResultPtr)))
-	sentinel := c.block.NewIntToPtr(constant.NewInt(c.ptrIntType(), 1), irtypes.I8Ptr)
-	c.block.NewStore(sentinel, rpField)
+	if !c.goExprFireAndForget {
+		// Task: set result_ptr to sentinel (0x1) so goroutine_exit knows
+		// the receiver will free G (via <-task). Without this, goroutine_exit
+		// would free the G and the receiver would access freed memory.
+		gTy := goroutineStructType()
+		gPtr := c.block.NewBitCast(gRaw, irtypes.NewPointer(gTy))
+		rpField := c.block.NewGetElementPtr(gTy, gPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldResultPtr)))
+		sentinel := c.block.NewIntToPtr(constant.NewInt(c.ptrIntType(), 1), irtypes.I8Ptr)
+		c.block.NewStore(sentinel, rpField)
+	}
+	// Fire-and-forget: result_ptr stays null (from promise_g_new),
+	// so goroutine_exit frees the G struct when the goroutine completes.
 
 	c.block.NewCall(c.funcs["promise_sched_enqueue"], gRaw)
 

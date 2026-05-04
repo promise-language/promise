@@ -217,16 +217,17 @@ type Compiler struct {
 	spawnStdinFd  *ir.Global // @__promise_spawn_stdin_fd (TLS, i32)
 
 	// Scheduler globals (Phase 5c — M:N scheduler)
-	currentGGlobal     *ir.Global // @__promise_current_g (TLS, i8*)
-	currentPGlobal     *ir.Global // @__promise_current_p (TLS, i8*) — current P for local queue ops
-	currentMGlobal     *ir.Global // @__promise_current_m (TLS, i8*) — current M for syscall handoff
-	schedGlobal        *ir.Global // @__promise_sched (global Sched struct)
-	panicJmpBufGlobal  *ir.Global // @__promise_panic_jmpbuf (TLS, i8*) — setjmp buf for goroutine panic recovery
-	testJmpBufGlobal   *ir.Global // @__promise_test_jmpbuf (TLS, i8*) — setjmp buf for per-test panic recovery
-	testPanicMsgGlobal *ir.Global // @__promise_test_panic_msg (non-TLS, i8*) — panic msg for test recovery
-	inCoroutine        bool       // true when compiling inside a go block coroutine body
-	coroCleanupBlk     *ir.Block  // coroutine cleanup block (destroy path: coro.free + free)
-	coroSuspendBlk     *ir.Block  // coroutine suspend block (suspend path: coro.end + ret)
+	currentGGlobal      *ir.Global // @__promise_current_g (TLS, i8*)
+	currentPGlobal      *ir.Global // @__promise_current_p (TLS, i8*) — current P for local queue ops
+	currentMGlobal      *ir.Global // @__promise_current_m (TLS, i8*) — current M for syscall handoff
+	schedGlobal         *ir.Global // @__promise_sched (global Sched struct)
+	panicJmpBufGlobal   *ir.Global // @__promise_panic_jmpbuf (TLS, i8*) — setjmp buf for goroutine panic recovery
+	testJmpBufGlobal    *ir.Global // @__promise_test_jmpbuf (TLS, i8*) — setjmp buf for per-test panic recovery
+	testPanicMsgGlobal  *ir.Global // @__promise_test_panic_msg (non-TLS, i8*) — panic msg for test recovery
+	inCoroutine         bool       // true when compiling inside a go block coroutine body
+	goExprFireAndForget bool       // true when go expr result is discarded (no <-task receiver)
+	coroCleanupBlk      *ir.Block  // coroutine cleanup block (destroy path: coro.free + free)
+	coroSuspendBlk      *ir.Block  // coroutine suspend block (suspend path: coro.end + ret)
 
 	// Main function AST — saved so wrapMainWithScheduler can compile it inline
 	mainDecl *ast.FuncDecl

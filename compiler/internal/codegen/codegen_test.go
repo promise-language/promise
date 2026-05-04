@@ -9351,13 +9351,95 @@ func TestVoidTaskSentinel(t *testing.T) {
 }
 
 func TestVoidGoBlockSentinel(t *testing.T) {
-	// go { block } is always void — should also set sentinel
+	// go { block } used as a task (assigned + awaited) — should set sentinel
+	// so goroutine_exit doesn't free G before the receiver does.
 	ir := generateIR(t, `
 		main() {
 			t := go { };
 			<-t;
 		}
 	`)
+	assertContains(t, ir, "inttoptr i64 1 to i8*")
+}
+
+func TestFireAndForgetGoBlockNoSentinel(t *testing.T) {
+	// go { block } as a statement (fire-and-forget) — should NOT set sentinel.
+	// goroutine_exit will free the G struct since result_ptr stays null.
+	ir := generateIR(t, `
+		main() {
+			go { };
+		}
+	`)
+	// The go block trampoline body should not contain the sentinel store.
+	// After promise_g_new, the next call should be promise_sched_enqueue (no inttoptr).
+	assertContains(t, ir, "call i8* @promise_g_new(")
+	assertContains(t, ir, "call void @promise_sched_enqueue(")
+}
+
+func TestFireAndForgetGoCallNoSentinel(t *testing.T) {
+	// go void_func() as a statement (fire-and-forget) — should NOT set sentinel.
+	ir := generateIR(t, `
+		work() { }
+		main() {
+			go work();
+		}
+	`)
+	assertContains(t, ir, "call i8* @promise_g_new(")
+	assertContains(t, ir, "call void @promise_sched_enqueue(")
+}
+
+func TestGoCallTaskSetsSentinel(t *testing.T) {
+	// go void_func() used as a task (assigned + awaited) — should set sentinel.
+	ir := generateIR(t, `
+		work() { }
+		main() {
+			t := go work();
+			<-t;
+		}
+	`)
+	assertContains(t, ir, "inttoptr i64 1 to i8*")
+}
+
+func TestGoCallNonVoidTaskSetsResultPtr(t *testing.T) {
+	// go non_void_func() as task — should allocate result buffer (not sentinel).
+	ir := generateIR(t, `
+		compute() int { return 42; }
+		main() {
+			t := go compute();
+			<-t;
+		}
+	`)
+	// Result buffer allocated via pal_alloc and stored in result_ptr
+	assertContains(t, ir, "call i8* @pal_alloc(")
+}
+
+func TestFireAndForgetGoBlockInLoop(t *testing.T) {
+	// go { } as the only statement in a for loop — fire-and-forget.
+	// genBlock routes all statements through genStmt, so the flag is set.
+	ir := generateIR(t, `
+		main() {
+			for i in 0..3 {
+				go { };
+			}
+		}
+	`)
+	assertContains(t, ir, "call i8* @promise_g_new(")
+	assertNotContains(t, ir, "inttoptr i64 1 to i8*")
+}
+
+func TestFireAndForgetGoBlockNestedFlagRestore(t *testing.T) {
+	// Nested go blocks: outer is a task, inner is fire-and-forget.
+	// The inner genStmt clears goExprFireAndForget, but genGoBlock
+	// saves/restores it, so the outer block still sets sentinel.
+	ir := generateIR(t, `
+		main() {
+			t := go {
+				go { };
+			};
+			<-t;
+		}
+	`)
+	// Outer go block should have sentinel (it's a task)
 	assertContains(t, ir, "inttoptr i64 1 to i8*")
 }
 

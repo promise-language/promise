@@ -73,11 +73,18 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 func (c *Compiler) genStmt(stmt ast.Stmt) {
 	switch s := stmt.(type) {
 	case *ast.ExprStmt:
+		// Mark fire-and-forget go expressions: when a go expression is used
+		// as a statement (result discarded), the G struct should be freed by
+		// goroutine_exit rather than waiting for a receiver that doesn't exist.
+		if _, ok := s.Expr.(*ast.GoExpr); ok {
+			c.goExprFireAndForget = true
+		}
 		if c.info.AutoPropagateExprs[s.Expr] {
 			c.genAutoPropagate(s.Expr)
 		} else {
 			c.genExpr(s.Expr)
 		}
+		c.goExprFireAndForget = false
 	case *ast.ReturnStmt:
 		c.genReturnStmt(s)
 	case *ast.TypedVarDecl:

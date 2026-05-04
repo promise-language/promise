@@ -1936,6 +1936,7 @@ func (c *Compiler) wrapMainWithScheduler() {
 	savedInCoroutine := c.inCoroutine
 	savedCoroCleanup := c.coroCleanupBlk
 	savedCoroSuspend := c.coroSuspendBlk
+	savedGoExprFF := c.goExprFireAndForget
 
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
@@ -2061,6 +2062,7 @@ func (c *Compiler) wrapMainWithScheduler() {
 	c.inCoroutine = savedInCoroutine
 	c.coroCleanupBlk = savedCoroCleanup
 	c.coroSuspendBlk = savedCoroSuspend
+	c.goExprFireAndForget = savedGoExprFF
 
 	// Back in @main: call the ramp, create G0, enqueue, run, shutdown
 	handle := entry.NewCall(coroFn)

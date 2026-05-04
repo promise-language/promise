@@ -470,10 +470,14 @@ if err is present {
 ## Concurrency
 
 ```promise
-// Fire-and-forget goroutine
+// Fire-and-forget goroutine (G struct freed automatically on completion)
 go { expensive_work(); };
 
-// Task with return value
+// go { } block as a task (assigned to variable, awaited with <-)
+t := go { expensive_work(); };
+<-t;                              // blocks until done, frees G
+
+// Task with return value (go + function call)
 t := go fetch_data(url);
 string result = <-t;           // blocks until done
 

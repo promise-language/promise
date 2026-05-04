@@ -291,7 +291,13 @@ for i := 0; i < 10; i += 1 { }  // C-style
 
 // While
 while condition { }
-while item := iter.next() { }  // unwrap binding
+while item := iter.next() { }  // unwrap binding (loop while non-none)
+
+// While-unwrap with re-borrowing: the condition's borrow expires before the body,
+// so the body can freely call methods on the same object.
+while key := decoder.next_key()! {
+  string val = decoder.read_string()!;  // re-borrows decoder — OK
+}
 
 // Match (must be exhaustive, commas between arms)
 match value {

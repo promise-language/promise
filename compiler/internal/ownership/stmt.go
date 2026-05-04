@@ -251,6 +251,11 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 	} else {
 		c.checkExpr(s.Cond)
 	}
+	// Expire call-scoped borrows from the condition/init expression so the
+	// then/else branches can re-borrow the same variables.
+	if c.borrows != nil {
+		c.borrows.ExpireCallScoped()
+	}
 
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
@@ -278,6 +283,11 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 
 func (c *Checker) checkWhileStmt(s *ast.WhileStmt) {
 	c.checkExpr(s.Cond)
+	// Expire call-scoped borrows from the condition so the loop body can
+	// re-borrow the same variables.
+	if c.borrows != nil {
+		c.borrows.ExpireCallScoped()
+	}
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
 	c.checkBlock(s.Body)
@@ -287,6 +297,11 @@ func (c *Checker) checkWhileStmt(s *ast.WhileStmt) {
 
 func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	c.checkExpr(s.Value)
+	// Expire call-scoped borrows from the condition expression so the loop
+	// body can re-borrow the same variables (B0004).
+	if c.borrows != nil {
+		c.borrows.ExpireCallScoped()
+	}
 	if s.Binding != "" && s.Binding != "_" {
 		c.state[s.Binding] = Owned
 	}
@@ -300,6 +315,11 @@ func (c *Checker) checkWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 func (c *Checker) checkForInStmt(s *ast.ForInStmt) {
 	c.checkExpr(s.Iterable)
 	c.tryMove(s.Iterable)
+	// Expire call-scoped borrows from the iterable expression so the loop
+	// body can re-borrow the same variables.
+	if c.borrows != nil {
+		c.borrows.ExpireCallScoped()
+	}
 	if s.Binding != "_" {
 		c.state[s.Binding] = Owned
 	}
@@ -321,11 +341,20 @@ func (c *Checker) checkClassicForStmt(s *ast.ClassicForStmt) {
 	if s.InitName != "" && s.InitName != "_" {
 		c.state[s.InitName] = Owned
 	}
+	// Expire call-scoped borrows from the init expression.
+	if c.borrows != nil {
+		c.borrows.ExpireCallScoped()
+	}
 
 	savedState := c.state.clone()
 	savedBorrows := c.borrows.Clone()
 	if s.Cond != nil {
 		c.checkExpr(s.Cond)
+	}
+	// Expire call-scoped borrows from the condition so the loop body can
+	// re-borrow the same variables.
+	if c.borrows != nil {
+		c.borrows.ExpireCallScoped()
 	}
 	c.checkBlock(s.Body)
 	if s.UpdateIncDec {

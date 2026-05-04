@@ -40,6 +40,80 @@ test_while_unwrap_partial() `test {
   assert(sum == 30, "remaining: 20 + 10 = 30");
 }
 
+// --- while-unwrap re-borrows in body (B0004) ---
+
+type KeyIter {
+  string[] keys;
+  int pos;
+
+  next_key(&this) string? {
+    if this.pos >= this.keys.len {
+      return none;
+    }
+    return this.keys[this.pos];
+  }
+
+  advance(~this) {
+    this.pos += 1;
+  }
+
+  current_pos(&this) int {
+    return this.pos;
+  }
+}
+
+test_while_unwrap_reborrow() `test {
+  KeyIter it = KeyIter(keys: ["a", "b", "c"], pos: 0);
+  string[] collected = [];
+  while key := it.next_key() {
+    // Body re-borrows `it` — this was the B0004 bug.
+    int p = it.current_pos();
+    collected.push(key);
+    it.advance();
+  }
+  assert(collected.len == 3, "collected 3 keys");
+  assert(collected[0] == "a", "first key");
+  assert(collected[1] == "b", "second key");
+  assert(collected[2] == "c", "third key");
+}
+
+// --- while-unwrap: condition shared-borrows, body mut-borrows (B0004 variant) ---
+
+test_while_unwrap_mut_reborrow() `test {
+  KeyIter it = KeyIter(keys: ["x", "y"], pos: 0);
+  int advances = 0;
+  while key := it.next_key() {
+    // Condition: shared borrow (&this). Body: mutable borrow (~this).
+    it.advance();
+    advances += 1;
+  }
+  assert(advances == 2, "advanced twice");
+}
+
+// --- if-unwrap re-borrows in body ---
+
+test_if_unwrap_reborrow() `test {
+  KeyIter it = KeyIter(keys: ["only"], pos: 0);
+  string result = "";
+  if key := it.next_key() {
+    int p = it.current_pos();
+    result = "{key}@{p}";
+  }
+  assert(result == "only@0", "if-unwrap reborrow");
+}
+
+// --- regular while condition re-borrow ---
+
+test_while_cond_reborrow() `test {
+  KeyIter it = KeyIter(keys: ["a", "b", "c"], pos: 0);
+  int count = 0;
+  while it.current_pos() < it.keys.len {
+    it.advance();
+    count += 1;
+  }
+  assert(count == 3, "while cond reborrow count");
+}
+
 // --- while-unwrap with string vector ---
 
 test_while_unwrap_strings() `test {

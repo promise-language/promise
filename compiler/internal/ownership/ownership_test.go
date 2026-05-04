@@ -1949,3 +1949,307 @@ func TestVariadicNestedCallOwnership(t *testing.T) {
 		}
 	`)
 }
+
+// === While-unwrap borrow conflict (B0004) ===
+
+func TestWhileUnwrapBodyCanReBorrow(t *testing.T) {
+	// B0004: while-unwrap condition borrows obj, body must be able to re-borrow it.
+	ownerOK(t, `
+		type Decoder {
+			int pos;
+			next_key(&this) string? { return none; }
+			decode_string(&this) string { return ""; }
+		}
+		test() {
+			Decoder dec = Decoder(pos: 0);
+			while key := dec.next_key() {
+				dec.decode_string();
+			}
+		}
+	`)
+}
+
+func TestWhileUnwrapBodyCanMutBorrow(t *testing.T) {
+	// B0004 variant: condition shared-borrows, body mut-borrows.
+	ownerOK(t, `
+		type Iter {
+			int pos;
+			peek(&this) int? { return none; }
+			advance(~this) { this.pos += 1; }
+		}
+		test() {
+			Iter it = Iter(pos: 0);
+			while val := it.peek() {
+				it.advance();
+			}
+		}
+	`)
+}
+
+func TestWhileCondBodyCanReBorrow(t *testing.T) {
+	// Same fix for regular while: condition borrows, body re-borrows.
+	ownerOK(t, `
+		type Stream {
+			int pos;
+			has_more(&this) bool { return false; }
+			read(&this) int { return 0; }
+		}
+		test() {
+			Stream s = Stream(pos: 0);
+			while s.has_more() {
+				s.read();
+			}
+		}
+	`)
+}
+
+func TestIfUnwrapBodyCanReBorrow(t *testing.T) {
+	// Same fix for if-unwrap: init expression borrows, body re-borrows.
+	ownerOK(t, `
+		type Parser {
+			int pos;
+			try_parse(&this) string? { return none; }
+			consume(&this) string { return ""; }
+		}
+		test() {
+			Parser p = Parser(pos: 0);
+			if val := p.try_parse() {
+				p.consume();
+			}
+		}
+	`)
+}
+
+func TestForInBodyCanReBorrow(t *testing.T) {
+	// for-in iterable expression borrows, body re-borrows.
+	ownerOK(t, `
+		type DataSource {
+			int[] items;
+			get_items(&this) int[] { return this.items; }
+			log(&this) {}
+		}
+		test() {
+			DataSource ds = DataSource(items: [1, 2, 3]);
+			for item in ds.get_items() {
+				ds.log();
+			}
+		}
+	`)
+}
+
+func TestClassicForCondBodyCanReBorrow(t *testing.T) {
+	// Classic for condition borrows, body re-borrows.
+	ownerOK(t, `
+		type Cursor {
+			int pos;
+			has_next(&this) bool { return this.pos < 10; }
+			read(&this) int { return this.pos; }
+		}
+		test() {
+			Cursor cur = Cursor(pos: 0);
+			for i := 0; cur.has_next(); i += 1 {
+				cur.read();
+				break;
+			}
+		}
+	`)
+}
+
+// --- Additional positive coverage ---
+
+func TestIfCondBodyCanReBorrow(t *testing.T) {
+	// Non-unwrap if: condition method call borrows, body re-borrows.
+	ownerOK(t, `
+		type Guard {
+			int level;
+			is_ready(&this) bool { return this.level > 0; }
+			activate(~this) { this.level = 0; }
+		}
+		test() {
+			Guard g = Guard(level: 1);
+			if g.is_ready() {
+				g.activate();
+			}
+		}
+	`)
+}
+
+func TestIfUnwrapElseCanReBorrow(t *testing.T) {
+	// If-unwrap: both then and else branches can re-borrow.
+	ownerOK(t, `
+		type Source {
+			int pos;
+			try_get(&this) string? { return none; }
+			fallback(&this) string { return ""; }
+			reset(~this) { this.pos = 0; }
+		}
+		test() {
+			Source s = Source(pos: 0);
+			if val := s.try_get() {
+				s.fallback();
+			} else {
+				s.reset();
+			}
+		}
+	`)
+}
+
+func TestWhileUnwrapBindingAndReBorrow(t *testing.T) {
+	// While-unwrap: body uses both the binding and re-borrows the object.
+	ownerOK(t, `
+		type Queue {
+			int count;
+			dequeue(&this) int? { return none; }
+			size(&this) int { return this.count; }
+		}
+		test() {
+			Queue q = Queue(count: 0);
+			int total = 0;
+			while item := q.dequeue() {
+				total += item;
+				int remaining = q.size();
+			}
+		}
+	`)
+}
+
+func TestCondMultipleCallsSameObject(t *testing.T) {
+	// Condition with multiple method calls on same object.
+	ownerOK(t, `
+		type Validator {
+			int x;
+			check_a(&this) bool { return true; }
+			check_b(&this) bool { return true; }
+			run(~this) {}
+		}
+		test() {
+			Validator v = Validator(x: 0);
+			if v.check_a() {
+				v.run();
+			}
+		}
+	`)
+}
+
+func TestClassicForInitBorrowDoesNotLeakToBody(t *testing.T) {
+	// Classic for: init expression borrows, body can still borrow.
+	ownerOK(t, `
+		type Config {
+			int max;
+			get_max(&this) int { return this.max; }
+			process(~this) {}
+		}
+		test() {
+			Config cfg = Config(max: 10);
+			for i := cfg.get_max(); i > 0; i -= 1 {
+				cfg.process();
+				break;
+			}
+		}
+	`)
+}
+
+// --- Negative tests: variable-scoped borrows must still be caught ---
+
+func TestStoredBorrowStillBlocksInWhileBody(t *testing.T) {
+	// A stored borrow from before the loop must still block conflicting
+	// borrows inside the loop body — only call-scoped borrows are expired.
+	errs := ownerErrs(t, `
+		getRef(string &s) string& { return s; }
+		mutate(string ~s) {}
+		test() {
+			string s = "hello";
+			string &r = getRef(s);
+			while true {
+				mutate(s);
+				break;
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "cannot borrow 's' as mutable")
+}
+
+func TestStoredBorrowStillBlocksInWhileUnwrapBody(t *testing.T) {
+	// Variable-scoped borrow persists into while-unwrap body.
+	errs := ownerErrs(t, `
+		getRef(string &s) string& { return s; }
+		consume(string s) {}
+		test() {
+			string s = "hello";
+			string &r = getRef(s);
+			int[] nums = [1];
+			while v := nums.pop() {
+				consume(s);
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
+}
+
+func TestStoredBorrowCreatedInLoopPersists(t *testing.T) {
+	// A stored borrow created in a while-unwrap body persists after the
+	// loop (conservative merge), blocking subsequent moves.
+	errs := ownerErrs(t, `
+		getRef(string &s) string& { return s; }
+		consume(string s) {}
+		test() {
+			string s = "hello";
+			string &r = "";
+			int[] nums = [1];
+			while v := nums.pop() {
+				r = getRef(s);
+			}
+			consume(s);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
+}
+
+func TestStoredBorrowStillBlocksInIfBody(t *testing.T) {
+	// Variable-scoped borrow persists into if body — only call-scoped expired.
+	errs := ownerErrs(t, `
+		getRef(string &s) string& { return s; }
+		mutate(string ~s) {}
+		test() {
+			string s = "hello";
+			string &r = getRef(s);
+			if true {
+				mutate(s);
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "cannot borrow 's' as mutable")
+}
+
+func TestStoredBorrowStillBlocksInForInBody(t *testing.T) {
+	// Variable-scoped borrow persists into for-in body.
+	errs := ownerErrs(t, `
+		getRef(string &s) string& { return s; }
+		consume(string s) {}
+		test() {
+			string s = "hello";
+			string &r = getRef(s);
+			int[] items = [1, 2];
+			for item in items {
+				consume(s);
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
+}
+
+func TestStoredBorrowStillBlocksInClassicForBody(t *testing.T) {
+	// Variable-scoped borrow persists into classic for body.
+	errs := ownerErrs(t, `
+		getRef(string &s) string& { return s; }
+		consume(string s) {}
+		test() {
+			string s = "hello";
+			string &r = getRef(s);
+			for i := 0; i < 1; i += 1 {
+				consume(s);
+			}
+		}
+	`)
+	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
+}

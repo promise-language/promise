@@ -1563,8 +1563,8 @@ func (p *PosixPAL) EmitSignalInit(module *ir.Module) *ir.Func {
 func (p *PosixPAL) EmitSignalRegister(module *ir.Module) *ir.Func {
 	// declare i8* @signal(i32, i8*) nounwind
 	// signal() takes a function pointer as i8* and returns previous handler as i8*
-	// Use getOrDeclareFunc to avoid redefinition when EmitStackOverflowInit
-	// has already declared signal() on Linux.
+	// Use getOrDeclareFunc to avoid duplicate declaration — EmitStackOverflowInit
+	// may have already declared @signal via the same helper. (B0121)
 	signalFn := getOrDeclareFunc(module, "signal", irtypes.I8Ptr,
 		ir.NewParam("sig", irtypes.I32),
 		ir.NewParam("handler", irtypes.I8Ptr))

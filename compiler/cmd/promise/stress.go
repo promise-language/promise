@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -32,13 +33,14 @@ type stressTarget struct {
 }
 
 type testStats struct {
-	name     string
-	file     string
-	passes   int
-	fails    int
-	timeouts int       // subset of fails caused by timeout
-	timings  []float64 // seconds per run (recorded for pass and non-timeout fail; excludes timeouts)
-	lastErr  string    // last failure reason (for debugging)
+	name         string
+	file         string
+	passes       int
+	fails        int
+	timeouts     int       // subset of fails caused by timeout
+	timings      []float64 // seconds per run (recorded for pass and non-timeout fail; excludes timeouts)
+	lastErr      string    // last failure reason (for debugging)
+	lastCrashCtx string    // detailed crash context: signal + stderr tail (for crash diagnosis)
 }
 
 func (s *testStats) total() int { return s.passes + s.fails }
@@ -446,7 +448,8 @@ func runStress(files []string, count int, duration time.Duration, perRunTimeout 
 				continue
 			}
 
-			// Run binary
+			// Run binary with separate stdout/stderr capture.
+			// Test PASS/FAIL lines go to stdout; panic/crash output goes to stderr.
 			runStart := time.Now()
 			ctx, cancel := context.WithTimeout(context.Background(), perRunTimeout)
 			var cmd *exec.Cmd
@@ -455,10 +458,15 @@ func runStress(files []string, count int, duration time.Duration, perRunTimeout 
 			} else {
 				cmd = exec.CommandContext(ctx, t.binary)
 			}
-			output, err := cmd.CombinedOutput()
+			var stdoutBuf, stderrBuf bytes.Buffer
+			cmd.Stdout = &stdoutBuf
+			cmd.Stderr = &stderrBuf
+			err := cmd.Run()
 			timedOut := ctx.Err() == context.DeadlineExceeded
 			cancel()
 			wallClock := time.Since(runStart).Seconds()
+			stdout := stdoutBuf.String()
+			stderr := stderrBuf.String()
 
 			// If SIGINT arrived during this run, the child was killed by the
 			// signal — don't record that as a real failure.
@@ -472,35 +480,43 @@ func runStress(files []string, count int, duration time.Duration, perRunTimeout 
 			fs.runs++
 
 			if t.isE2E {
-				// E2E: single test, compare output
+				// E2E: single test, compare combined stdout+stderr against expected.
+				// Combined output matches CombinedOutput behavior (panic messages on
+				// stderr are included). Non-zero exit code is NOT a failure if output
+				// matches — this handles panic tests where the expected output IS the
+				// panic message and the binary exits non-zero.
 				name := t.tests[0]
 				st := fs.stats[name]
-				actual := strings.TrimRight(string(output), "\n")
+				combined := strings.TrimRight(stdout+stderr, "\n")
 				if timedOut {
 					// Timeout counts as failure; don't add timeout duration to timings
 					// as it would inflate CoV (the timeout ceiling is not real variance).
 					st.fails++
 					st.timeouts++
 					st.lastErr = "timeout"
-				} else if err != nil {
-					// Binary crashed — extract signal/panic info.
-					st.fails++
-					st.lastErr = extractCrashReason(string(output), err)
-				} else if actual != t.expected {
-					st.timings = append(st.timings, wallClock)
-					st.fails++
-					st.lastErr = failReason(t.expected, actual)
-				} else {
+				} else if combined == t.expected {
+					// Output matches — pass regardless of exit code (handles panic tests)
 					st.timings = append(st.timings, wallClock)
 					st.passes++
+				} else if err != nil {
+					// Output doesn't match AND binary crashed — capture crash context
+					st.timings = append(st.timings, wallClock)
+					st.fails++
+					st.lastErr = extractCrashReason(stdout, stderr, err)
+					st.lastCrashCtx = buildCrashContext(stderr, err)
+				} else {
+					// Output doesn't match but binary exited cleanly — output mismatch
+					st.timings = append(st.timings, wallClock)
+					st.fails++
+					st.lastErr = failReason(t.expected, combined)
 				}
 			} else {
-				// Unit tests: parse per-test results.
+				// Unit tests: parse per-test results from stdout.
 				// On timeout, we still parse whatever output the binary produced
 				// before being killed — tests that completed get their real results.
 				// Only the test that was running at timeout is marked as timeout.
 				seen := make(map[string]bool, len(fs.testOrder))
-				for _, line := range strings.Split(string(output), "\n") {
+				for _, line := range strings.Split(stdout, "\n") {
 					m := resultRe.FindStringSubmatch(line)
 					if m == nil {
 						continue
@@ -538,12 +554,14 @@ func runStress(files []string, count int, duration time.Duration, perRunTimeout 
 				} else if err != nil {
 					// Binary crashed — find the first unseen test (the one running
 					// when the crash happened). Only count that test as failed.
-					crashMsg := extractCrashReason(string(output), err)
+					crashReason := extractCrashReason(stdout, stderr, err)
+					crashCtx := buildCrashContext(stderr, err)
 					for _, name := range fs.testOrder {
 						if !seen[name] {
 							st := fs.stats[name]
 							st.fails++
-							st.lastErr = crashMsg
+							st.lastErr = crashReason
+							st.lastCrashCtx = crashCtx
 							break
 						}
 					}
@@ -780,6 +798,12 @@ func writeTestGroupDetailed(w *strings.Builder, tests []*testStats) {
 				fmt.Fprintf(w, "\n      %s", st.failSummary())
 			}
 			fmt.Fprintln(w)
+			// Print crash context if available (signal, stderr tail)
+			if st.lastCrashCtx != "" {
+				for _, line := range strings.Split(st.lastCrashCtx, "\n") {
+					fmt.Fprintf(w, "      | %s\n", line)
+				}
+			}
 		}
 	}
 }
@@ -821,28 +845,140 @@ func failReason(expected, actual string) string {
 	return "output mismatch"
 }
 
-// extractCrashReason returns a short reason from crash/panic output and exit error.
-// It checks for panic messages in the output first, then falls back to signal info
-// from the exit error (e.g., "signal: segmentation fault").
-func extractCrashReason(output string, err error) string {
-	// Look for panic message in output
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "panic:") || strings.HasPrefix(line, "fatal error:") {
-			if len(line) > 100 {
-				line = line[:97] + "..."
+// extractCrashReason returns a short reason from crash/panic output.
+// Searches both stdout and stderr for panic messages, and extracts the
+// signal name if the process was killed by a signal.
+func extractCrashReason(stdout, stderr string, err error) string {
+	// Check if killed by signal (SIGSEGV, SIGABRT, etc.)
+	sig := extractSignal(err)
+
+	// Look for panic message in stderr first, then stdout
+	for _, src := range []string{stderr, stdout} {
+		for _, line := range strings.Split(src, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "panic:") || strings.HasPrefix(line, "fatal error:") {
+				if len(line) > 100 {
+					line = line[:97] + "..."
+				}
+				if sig != "" {
+					return fmt.Sprintf("%s (%s)", line, sig)
+				}
+				return line
 			}
-			return line
 		}
 	}
-	// Extract signal from exec.ExitError (SIGSEGV, SIGABRT, etc.)
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-			return "signal: " + status.Signal().String()
-		}
+
+	if sig != "" {
+		return sig
+	}
+
+	// Fall back to exit code (> 0 only; -1 means signal-killed which was handled above)
+	exitCode := extractExitCode(err)
+	if exitCode > 0 {
+		return fmt.Sprintf("exit code %d", exitCode)
 	}
 	return "crash"
+}
+
+// extractSignal returns the signal name (e.g. "SIGSEGV") if the process
+// was killed by a signal, or "" otherwise.
+func extractSignal(err error) string {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return ""
+	}
+	if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+		if ws.Signaled() {
+			return signalName(ws.Signal())
+		}
+	}
+	return ""
+}
+
+// signalName returns the standard signal constant name (e.g. "SIGSEGV")
+// for common crash signals. Falls back to the OS description for unknown signals.
+func signalName(sig syscall.Signal) string {
+	switch sig {
+	case syscall.SIGSEGV:
+		return "SIGSEGV"
+	case syscall.SIGABRT:
+		return "SIGABRT"
+	case syscall.SIGBUS:
+		return "SIGBUS"
+	case syscall.SIGFPE:
+		return "SIGFPE"
+	case syscall.SIGILL:
+		return "SIGILL"
+	case syscall.SIGKILL:
+		return "SIGKILL"
+	case syscall.SIGTRAP:
+		return "SIGTRAP"
+	default:
+		return fmt.Sprintf("signal %d (%s)", int(sig), sig.String())
+	}
+}
+
+// extractExitCode returns the process exit code, or -1 if unavailable.
+func extractExitCode(err error) int {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return -1
+}
+
+// buildCrashContext builds a detailed crash context string for diagnosis.
+// Includes the signal, exit code, and last N lines of stderr.
+func buildCrashContext(stderr string, err error) string {
+	var parts []string
+
+	// Signal info
+	if sig := extractSignal(err); sig != "" {
+		parts = append(parts, fmt.Sprintf("signal: %s", sig))
+	}
+
+	// Exit code
+	if code := extractExitCode(err); code > 0 {
+		parts = append(parts, fmt.Sprintf("exit code: %d", code))
+	}
+
+	// Last N lines of stderr (where panic messages and stack traces go)
+	if tail := lastNLines(stderr, 20); tail != "" {
+		parts = append(parts, "stderr:\n"+indent(tail, "  "))
+	}
+
+	if len(parts) == 0 {
+		return "crash (no context available)"
+	}
+	return strings.Join(parts, "\n")
+}
+
+// lastNLines returns the last n non-empty lines of s.
+func lastNLines(s string, n int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	// Filter empty lines
+	var nonEmpty []string
+	for _, l := range lines {
+		if strings.TrimSpace(l) != "" {
+			nonEmpty = append(nonEmpty, l)
+		}
+	}
+	if len(nonEmpty) == 0 {
+		return ""
+	}
+	if len(nonEmpty) > n {
+		nonEmpty = nonEmpty[len(nonEmpty)-n:]
+	}
+	return strings.Join(nonEmpty, "\n")
+}
+
+// indent prepends prefix to each line of s.
+func indent(s, prefix string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = prefix + l
+	}
+	return strings.Join(lines, "\n")
 }
 
 // failSummary returns a short string summarizing why a test is flaky.

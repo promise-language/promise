@@ -115,7 +115,7 @@ FAILED:                                        # summary with failure context
 ```
 An agent can read the last ~20 lines of output to identify all failures without re-running or grepping.
 
-**Stress test output** — reports flaky tests, timing variance, and adaptive scheduling:
+**Stress test output** — reports flaky tests, timing variance, and adaptive scheduling. Crash context (signal, stderr) is captured for diagnosis:
 ```
 === Stress Test Report ===
 Target: linux-x86_64
@@ -124,6 +124,11 @@ Target: linux-x86_64
 FLAKY (2 tests):
   concurrency/stress_unbuffered.pr
     test_channel_send              47/50 (94.0%)  avg: 23.1ms  σ: 15.2ms  min: 2.1ms  max: 89.3ms
+      1 fail  last: SIGSEGV
+      | signal: SIGSEGV
+      | stderr:
+      |   panic: stack overflow at 0x7fff...
+      |   goroutine 42 [running]:
 
 HIGH VARIANCE (1 test):
   concurrency/test_channel_basic.pr
@@ -131,7 +136,7 @@ HIGH VARIANCE (1 test):
 
 STABLE: 45 tests across 12 files
 ```
-Stress mode compiles once and re-runs binaries. Stable files are gradually suppressed (run every 2nd/4th/8th iteration). Exit code 1 if any test has failures.
+Stress mode compiles once and re-runs binaries. Stdout and stderr are captured separately — PASS/FAIL lines parsed from stdout, crash context (signal name, exit code, last 20 lines of stderr) from stderr. Stable files are gradually suppressed (run every 2nd/4th/8th iteration). Exit code 1 if any test has failures.
 
 ## Compiler Pipeline
 

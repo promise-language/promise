@@ -489,52 +489,56 @@ func runStress(files []string, count int, duration time.Duration, perRunTimeout 
 					st.passes++
 				}
 			} else {
-				// Unit tests: parse per-test results
-				if timedOut {
-					// Timeout counts as failure for all tests; don't add timing data.
-					for _, name := range fs.testOrder {
-						st := fs.stats[name]
+				// Unit tests: parse per-test results.
+				// On timeout, we still parse whatever output the binary produced
+				// before being killed — tests that completed get their real results.
+				// Only the test that was running at timeout is marked as timeout.
+				seen := make(map[string]bool, len(fs.testOrder))
+				for _, line := range strings.Split(string(output), "\n") {
+					m := resultRe.FindStringSubmatch(line)
+					if m == nil {
+						continue
+					}
+					status, timing, name := m[1], m[2], m[3]
+					st := fs.stats[name]
+					if st == nil {
+						st = &testStats{name: name, file: t.relPath}
+						fs.stats[name] = st
+						fs.testOrder = append(fs.testOrder, name)
+					}
+					seen[name] = true
+					if status == "PASS" {
+						st.passes++
+					} else {
 						st.fails++
-						st.timeouts++
-						st.lastErr = "timeout"
+						st.lastErr = "test failed"
 					}
-				} else {
-					seen := make(map[string]bool, len(fs.testOrder))
-					for _, line := range strings.Split(string(output), "\n") {
-						m := resultRe.FindStringSubmatch(line)
-						if m == nil {
-							continue
-						}
-						status, timing, name := m[1], m[2], m[3]
-						st := fs.stats[name]
-						if st == nil {
-							st = &testStats{name: name, file: t.relPath}
-							fs.stats[name] = st
-							fs.testOrder = append(fs.testOrder, name)
-						}
-						seen[name] = true
-						if status == "PASS" {
-							st.passes++
-						} else {
+					if v, e := strconv.ParseFloat(timing, 64); e == nil {
+						st.timings = append(st.timings, v)
+					}
+				}
+				if timedOut {
+					// Find the first unseen test — that's the one that was running
+					// when the timeout fired. Only attribute the timeout to it.
+					for _, name := range fs.testOrder {
+						if !seen[name] {
+							st := fs.stats[name]
 							st.fails++
-							st.lastErr = "test failed"
-						}
-						if v, e := strconv.ParseFloat(timing, 64); e == nil {
-							st.timings = append(st.timings, v)
+							st.timeouts++
+							st.lastErr = "timeout"
+							break
 						}
 					}
-					// If binary crashed, find the first unseen test (in declaration
-					// order) — that's the one that was running when the crash happened.
-					// Only count that test as failed; tests that never ran are skipped.
-					if err != nil {
-						crashMsg := extractCrashReason(string(output))
-						for _, name := range fs.testOrder {
-							if !seen[name] {
-								st := fs.stats[name]
-								st.fails++
-								st.lastErr = crashMsg
-								break
-							}
+				} else if err != nil {
+					// Binary crashed — find the first unseen test (the one running
+					// when the crash happened). Only count that test as failed.
+					crashMsg := extractCrashReason(string(output))
+					for _, name := range fs.testOrder {
+						if !seen[name] {
+							st := fs.stats[name]
+							st.fails++
+							st.lastErr = crashMsg
+							break
 						}
 					}
 				}

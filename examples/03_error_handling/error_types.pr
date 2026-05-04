@@ -1,0 +1,79 @@
+// Custom error types and typed handlers in Promise.
+//
+// Custom errors inherit from `error` with `is error`.
+// Typed handlers match specific error types, with optional else clause.
+type ValidationError is error {
+  string field;
+}
+
+type NotFoundError is error {
+  string key;
+}
+
+// Functions can raise different error types.
+lookup(string key) string! {
+  if key == "" {
+    raise ValidationError(field: "key", message: "key must not be empty");
+  }
+  if key == "name" {
+    return "Alice";
+  }
+  raise NotFoundError(key: key, message: "not found: {key}");
+}
+
+main() `test(expected: """--- Typed Handler ---
+found: Alice
+
+--- Catch Specific Type ---
+validation error on field: key
+
+--- Else Clause ---
+not found: age
+key: age
+
+--- Catch All ---
+generic error: not found: email""") {
+  // --- Typed Handler ---
+  print_line("--- Typed Handler ---");
+
+  string val = lookup("name")!;
+  print_line("found: {val}");
+
+  // --- Catch Specific Type ---
+  print_line("");
+  print_line("--- Catch Specific Type ---");
+
+  // Match only ValidationError — panic on anything else.
+  string r = lookup("")? e is ValidationError {
+    "validation error on field: {e.field}";
+  }!;
+  print_line(r);
+
+  // --- Else Clause ---
+  print_line("");
+  print_line("--- Else Clause ---");
+
+  // Match ValidationError specifically, catch everything else with `else`.
+  string r2 = lookup("age")? e is ValidationError {
+    "validation: {e.field}";
+  } else e {
+    "{e.message}";
+  };
+  print_line(r2);
+
+  // Access custom error fields via typed handler.
+  lookup("age")? e is NotFoundError {
+    print_line("key: {e.key}");
+  } else e {
+    print_line("other: {e.message}");
+  };
+
+  // --- Catch All ---
+  print_line("");
+  print_line("--- Catch All ---");
+
+  // Untyped handler catches any error.
+  lookup("email")? e {
+    print_line("generic error: {e.message}");
+  };
+}

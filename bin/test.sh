@@ -47,7 +47,7 @@ fi
 if [ "$SUITE" = "promise" ] || [ "$SUITE" = "all" ]; then
   echo ""
   echo "Running promise tests (host)..."
-  "$PROMISE" test -timeout 10 tests/... modules/... || exit 1
+  "$PROMISE" test -timeout 10 tests/... modules/... examples/... || exit 1
 
   if [ "$WASM" = true ]; then
     if ! command -v wasmtime &>/dev/null; then
@@ -56,7 +56,7 @@ if [ "$SUITE" = "promise" ] || [ "$SUITE" = "all" ]; then
     fi
     echo ""
     echo "Running promise tests (wasm32-wasi)..."
-    "$PROMISE" test -timeout 10 -target wasm32-wasi tests/... modules/... || exit 1
+    "$PROMISE" test -timeout 10 -target wasm32-wasi tests/... modules/... examples/... || exit 1
   fi
 fi
 

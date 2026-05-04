@@ -1,0 +1,105 @@
+// Generators in Promise.
+//
+// A generator function returns stream[T] and uses `yield` to produce values.
+// Generators are lazy — they compute values on demand as you iterate.
+// They work seamlessly with for-in loops.
+// Simple generator: yields numbers from 0 up to n.
+count_up(int n) stream[int] {
+  for i in 0..n {
+    yield i;
+  }
+}
+
+// Fibonacci sequence generator — infinite, use break to limit.
+fibonacci() stream[int] {
+  int a = 0;
+  int b = 1;
+  for {
+    yield a;
+    int temp = a;
+    a = b;
+    b = temp + b;
+  }
+}
+
+// Generator with filtering logic built in.
+even_numbers(int limit) stream[int] {
+  for i in 0..limit {
+    if i % 2 == 0 {
+      yield i;
+    }
+  }
+}
+
+// Helper to print an int vector.
+print_vec(int[] & v) {
+  print("[");
+  for i in 0..v.len {
+    if i > 0 {
+      print(", ");
+    }
+    print(v[i]);
+  }
+  print_line("]");
+}
+
+main() `test(expected: """--- Basic Generator ---
+sum 0..5: 10
+
+--- Fibonacci ---
+fib: [0, 1, 1, 2, 3, 5, 8, 13]
+
+--- Generator with Break ---
+first fib > 100: 144
+
+--- Filtered Generator ---
+evens < 10: [0, 2, 4, 6, 8]""") {
+  // --- Basic Generator ---
+  print_line("--- Basic Generator ---");
+
+  int sum = 0;
+  for x in count_up(5) {
+    sum += x;
+  }
+  print_line("sum 0..5: {sum}");
+
+  // --- Fibonacci ---
+  print_line("");
+  print_line("--- Fibonacci ---");
+
+  // Take first 8 fibonacci numbers.
+  int[] fibs = [];
+  int count = 0;
+  for n in fibonacci() {
+    if count >= 8 {
+      break;
+    }
+    fibs.push(n);
+    count += 1;
+  }
+  print("fib: ");
+  print_vec(fibs);
+
+  // --- Generator with Break ---
+  print_line("");
+  print_line("--- Generator with Break ---");
+
+  // Find first fibonacci number > 100.
+  for n in fibonacci() {
+    if n > 100 {
+      print_line("first fib > 100: {n}");
+      break;
+    }
+  }
+
+  // --- Filtered Generator ---
+  print_line("");
+  print_line("--- Filtered Generator ---");
+
+  int[] evens = [];
+  for x in even_numbers(10) {
+    evens.push(x);
+  }
+  print("evens < 10: ");
+  print_vec(evens);
+}

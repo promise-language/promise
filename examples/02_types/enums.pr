@@ -1,0 +1,84 @@
+// Enums in Promise: fieldless, with data, and match expressions.
+//
+// Enums define a fixed set of variants. Data enums carry payloads.
+// Match expressions destructure enum values with exhaustiveness checking.
+// Fieldless enum — simple set of named values.
+enum Color {
+  Red,
+  Green,
+  Blue,
+}
+
+// Data enum — each variant can carry different data.
+enum Shape {
+  Circle(f64 radius),
+  Rectangle(f64 width, f64 height),
+  Triangle(f64 base, f64 height),
+
+  // Methods can be defined on enums.
+  area(&this) f64 {
+    return match this {
+      Circle(r) => 3.14159 * r * r,
+      Rectangle(w, h) => w * h,
+      Triangle(b, h) => 0.5 * b * h,
+    };
+  }
+
+  describe(&this) string {
+    return match this {
+      Circle(r) => "circle with radius {r}",
+      Rectangle(w, h) => "rectangle {w}x{h}",
+      Triangle(b, h) => "triangle base={b} height={h}",
+    };
+  }
+}
+
+color_name(Color c) string {
+  return match c {
+    Color.Red => "red",
+    Color.Green => "green",
+    Color.Blue => "blue",
+  };
+}
+
+main() `test(expected: """--- Fieldless Enum ---
+red
+green
+blue
+
+--- Data Enum ---
+circle with radius 5
+area: 78.5398
+
+--- Match Expression ---
+rectangle 10x20, area: 200
+triangle base=6 height=8, area: 24""") {
+  // --- Fieldless Enum ---
+  print_line("--- Fieldless Enum ---");
+
+  // Create enum values with EnumName.Variant syntax.
+  print_line(color_name(Color.Red));
+  print_line(color_name(Color.Green));
+  print_line(color_name(Color.Blue));
+
+  // --- Data Enum ---
+  print_line("");
+  print_line("--- Data Enum ---");
+
+  // Data enums carry values in each variant.
+  Shape circle = Shape.Circle(5.0);
+  print_line(circle.describe());
+  f64 area = circle.area();
+  print_line("area: {area}");
+
+  // --- Match Expression ---
+  print_line("");
+  print_line("--- Match Expression ---");
+
+  // match is an expression — it returns a value.
+  Shape[] shapes = [Shape.Rectangle(10.0, 20.0), Shape.Triangle(6.0, 8.0)];
+  for shape in shapes {
+    f64 a = shape.area();
+    print_line("{shape.describe()}, area: {a}");
+  }
+}

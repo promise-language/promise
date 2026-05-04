@@ -1,0 +1,49 @@
+// Channels in Promise.
+//
+// Channels are typed conduits for goroutine communication.
+// - Unbuffered: channel[T]() — send blocks until receiver is ready
+// - Buffered: channel[T](capacity: N) — send blocks only when buffer is full
+// - close() signals no more values; receive returns none after close.
+main() `test(expected: """--- Buffered Channel ---
+received: 42
+received: 100
+
+--- Producer-Consumer ---
+sum: 45""") {
+  // --- Buffered Channel ---
+  print_line("--- Buffered Channel ---");
+
+  // Buffered channel: can hold values without a ready receiver.
+  ch := channel[int](capacity: 2);
+  ch.send(42);
+  ch.send(100);
+
+  r1 := <-ch;
+  if val := r1 {
+    print_line("received: {val}");
+  }
+  r2 := <-ch;
+  if val2 := r2 {
+    print_line("received: {val2}");
+  }
+
+  // --- Producer-Consumer ---
+  print_line("");
+  print_line("--- Producer-Consumer ---");
+
+  // Producer goroutine sends values, then closes the channel.
+  data := channel[int](capacity: 5);
+  go {
+    for i in 0..10 {
+      data.send(i);
+    }
+    data.close();
+  };
+
+  // Consumer reads until channel is closed (receive returns none).
+  int sum = 0;
+  for item in data {
+    sum += item;
+  }
+  print_line("sum: {sum}");
+}

@@ -1,0 +1,124 @@
+// Control flow in Promise: if/else, loops, match.
+main() `test(expected: """--- If/Else ---
+x is positive
+
+--- While Loop ---
+while sum (0..5): 10
+
+--- For Range ---
+exclusive sum (0..5): 10
+inclusive sum (0..=5): 15
+
+--- Classic For ---
+classic sum: 10
+
+--- For-In ---
+apple
+banana
+cherry
+
+--- Break and Continue ---
+first multiple of 7: 7
+odd sum (1..10): 25
+
+--- Match ---
+one
+five
+the answer""") {
+  // --- If/Else ---
+  print_line("--- If/Else ---");
+  x := 42;
+  if x > 0 {
+    print_line("x is positive");
+  } else if x == 0 {
+    print_line("x is zero");
+  } else {
+    print_line("x is negative");
+  }
+
+  // --- While Loop ---
+  print_line("");
+  print_line("--- While Loop ---");
+  int sum = 0;
+  int i = 0;
+  while i < 5 {
+    sum += i;
+    i += 1;
+  }
+  print_line("while sum (0..5): {sum}");
+
+  // --- For Range ---
+  print_line("");
+  print_line("--- For Range ---");
+
+  // 0..5 is exclusive (0, 1, 2, 3, 4). 0..=5 is inclusive (0, 1, 2, 3, 4, 5).
+  int ex_sum = 0;
+  for n in 0..5 {
+    ex_sum += n;
+  }
+  print_line("exclusive sum (0..5): {ex_sum}");
+
+  int in_sum = 0;
+  for n in 0..=5 {
+    in_sum += n;
+  }
+  print_line("inclusive sum (0..=5): {in_sum}");
+
+  // --- Classic For ---
+  print_line("");
+  print_line("--- Classic For ---");
+
+  // C-style for loop: init; condition; post
+  int classic = 0;
+  for j := 0; j < 5; j++ {
+    classic += j;
+  }
+  print_line("classic sum: {classic}");
+
+  // --- For-In ---
+  print_line("");
+  print_line("--- For-In ---");
+
+  // Iterate over a vector with for-in.
+  string[] fruits = ["apple", "banana", "cherry"];
+  for fruit in fruits {
+    print_line(fruit);
+  }
+
+  // --- Break and Continue ---
+  print_line("");
+  print_line("--- Break and Continue ---");
+
+  // break exits the loop early.
+  for n in 1..100 {
+    if n % 7 == 0 {
+      print_line("first multiple of 7: {n}");
+      break;
+    }
+  }
+
+  // continue skips to the next iteration.
+  int odd_sum = 0;
+  for n in 1..=10 {
+    if n % 2 == 0 {
+      continue;
+    }
+    odd_sum += n;
+  }
+  print_line("odd sum (1..10): {odd_sum}");
+
+  // --- Match ---
+  print_line("");
+  print_line("--- Match ---");
+
+  // match on a value — must be exhaustive (use _ for default).
+  for n in[1, 5, 42] {
+    string label = match n {
+      1 => "one",
+      5 => "five",
+      42 => "the answer",
+      _ => "other",
+    };
+    print_line(label);
+  }
+}

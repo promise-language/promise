@@ -1,0 +1,63 @@
+// Destructors (drop) and resource cleanup in Promise.
+//
+// Types with a drop(~this) method are automatically cleaned up when
+// they go out of scope. Drop runs in LIFO order (last created, first dropped).
+type Resource {
+  string name;
+
+  drop(~this) {
+    print_line("dropped: {this.name}");
+  }
+}
+
+// Demonstrate scope cleanup — resources are dropped at function exit.
+use_two_resources() {
+  a := Resource(name: "A");
+  print_line("created A");
+
+  b := Resource(name: "B");
+  print_line("created B");
+
+  print_line("using A and B");
+  // At function exit: B dropped first (LIFO), then A.
+}
+
+// Demonstrate nested scope cleanup.
+nested_resources() {
+  outer := Resource(name: "outer");
+  print_line("created outer");
+
+  inner_scope();
+
+  print_line("outer still alive");
+  // outer dropped here.
+}
+
+inner_scope() {
+  inner := Resource(name: "inner");
+  print_line("created inner");
+  // inner dropped at function exit.
+}
+
+main() `test(expected: """--- Scope Cleanup ---
+created A
+created B
+using A and B
+dropped: B
+dropped: A
+
+--- Nested Scopes ---
+created outer
+created inner
+dropped: inner
+outer still alive
+dropped: outer""") {
+  // --- Scope Cleanup ---
+  print_line("--- Scope Cleanup ---");
+  use_two_resources();
+
+  // --- Nested Scopes ---
+  print_line("");
+  print_line("--- Nested Scopes ---");
+  nested_resources();
+}

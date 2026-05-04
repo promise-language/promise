@@ -1,0 +1,71 @@
+// Maps (hash maps) in Promise.
+//
+// map[K, V] is an open-addressing hash map. Keys must be Hashable + Equal.
+// Literal syntax: {"key": value}. Subscript [] returns V? (optional).
+main() `test(expected: """--- Creation ---
+scores has 3 entries
+
+--- Access ---
+alice: 95
+missing: none
+
+--- Modify ---
+alice after update: 100
+has dave: true
+entries: 4
+
+--- Remove ---
+removed charlie: true
+entries: 3
+
+--- Iteration ---
+total score: 282""") {
+  // --- Creation ---
+  print_line("--- Creation ---");
+
+  map[string, int] scores = {
+    "alice": 95, "bob": 87, "charlie": 92
+  };
+  print_line("scores has {scores.len} entries");
+
+  // --- Access ---
+  print_line("");
+  print_line("--- Access ---");
+
+  // Subscript returns V? (optional) — absent keys give none.
+  int? alice_score = scores["alice"];
+  print_line("alice: {alice_score}");
+
+  int? missing = scores["nobody"];
+  print_line("missing: {missing}");
+
+  // --- Modify ---
+  print_line("");
+  print_line("--- Modify ---");
+
+  // Assign via subscript.
+  scores["alice"] = 100;
+  print_line("alice after update: {scores["alice"]}");
+
+  scores["dave"] = 95;
+  print_line("has dave: {scores.contains("dave")}");
+  print_line("entries: {scores.len}");
+
+  // --- Remove ---
+  print_line("");
+  print_line("--- Remove ---");
+
+  bool removed = scores.remove("charlie");
+  print_line("removed charlie: {removed}");
+  print_line("entries: {scores.len}");
+
+  // --- Iteration ---
+  print_line("");
+  print_line("--- Iteration ---");
+
+  int total = 0;
+  for key, value in scores {
+    total += value;
+  }
+  print_line("total score: {total}");
+}

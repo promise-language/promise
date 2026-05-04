@@ -1,0 +1,72 @@
+// Functions in Promise.
+//
+// Syntax: name(ParamType param_name, ...) ReturnType { body }
+//
+// - Return type comes after the parameter list (omit for void)
+// - Parameters are positional by default, but can be passed by name
+// - Parameters can have default values
+// A simple function with two parameters and a return type.
+add(int a, int b) int {
+  return a + b;
+}
+
+// A function that returns nothing (void).
+greet(string name) {
+  print_line("Hello, {name}!");
+}
+
+// Default parameter values — callers can omit them.
+connect(string host, int port = 8080) string {
+  return "{host}:{port}";
+}
+
+// Multiple return styles: early return for guard clauses.
+describe_number(int n) string {
+  if n < 0 {
+    return "negative";
+  }
+  if n == 0 {
+    return "zero";
+  }
+  return "positive";
+}
+
+main() `test(expected: """--- Basic Functions ---
+add(3, 4) = 7
+Hello, Promise!
+
+--- Default Parameters ---
+localhost:8080
+localhost:3000
+
+--- Named Parameters ---
+example.com:443
+
+--- Guard Clauses ---
+negative
+zero
+positive""") {
+  // --- Basic Functions ---
+  print_line("--- Basic Functions ---");
+  print_line("add(3, 4) = {add(3, 4)}");
+  greet("Promise");
+
+  // --- Default Parameters ---
+  print_line("");
+  print_line("--- Default Parameters ---");
+  print_line(connect("localhost")); // uses default port 8080
+  print_line(connect("localhost", 3000)); // overrides default
+
+  // --- Named Parameters ---
+  print_line("");
+  print_line("--- Named Parameters ---");
+  // You can pass arguments by name for clarity.
+  print_line(connect(host: "example.com", port: 443));
+
+  // --- Guard Clauses ---
+  print_line("");
+  print_line("--- Guard Clauses ---");
+  print_line(describe_number(-5));
+  print_line(describe_number(0));
+  print_line(describe_number(42));
+}

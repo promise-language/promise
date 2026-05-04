@@ -1,0 +1,39 @@
+// Tasks in Promise.
+//
+// `go` with a function call returns a task handle.
+// `<-task` blocks until the task completes and returns the result.
+compute_sum(int n) int {
+  int sum = 0;
+  for i in 0..=n {
+    sum += i;
+  }
+  return sum;
+}
+
+main() `test(expected: """--- Task Result ---
+sum 1..100: 5050
+
+--- Multiple Tasks ---
+task1: 55
+task2: 5050""") {
+  // --- Task Result ---
+  print_line("--- Task Result ---");
+
+  // Spawn a task and await its result.
+  t := go compute_sum(100);
+  int result = <-t;
+  print_line("sum 1..100: {result}");
+
+  // --- Multiple Tasks ---
+  print_line("");
+  print_line("--- Multiple Tasks ---");
+
+  // Run multiple tasks concurrently.
+  t1 := go compute_sum(10);
+  t2 := go compute_sum(100);
+
+  int r1 = <-t1;
+  int r2 = <-t2;
+  print_line("task1: {r1}");
+  print_line("task2: {r2}");
+}

@@ -285,6 +285,7 @@ The standard library (`modules/std/`, 29 files) is auto-imported via `use std as
 | `tests/arrays/` | Fixed-size arrays: basic, copy, field, loop, OOB, parameters | ~6 |
 | `tests/catalog/` | Catalog module integration tests | ~1 |
 | `modules/*/` | Catalog module internal tests (`*_test.pr`) | ~6 |
+| `examples/` | Runnable examples: basics, types, errors, ownership, collections, lambdas, concurrency, modules, patterns | 33 |
 
 ## Important Files
 
@@ -306,6 +307,8 @@ The standard library (`modules/std/`, 29 files) is auto-imported via `use std as
 - `compiler/internal/types/named.go` — Named type with fields, methods, generics, flags
 - `compiler/internal/formatter/formatter.go` — token-based source formatter (lexer + reformatter)
 - `compiler/cmd/promise/fmt.go` — `promise format` CLI wiring
+- `examples/` — 33 runnable examples (basics → concurrency → patterns), also verified as tests
+- `docs/language-guide-for-agents.md` — concise language reference for AI code generation
 
 ## Implementation Philosophy
 

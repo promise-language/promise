@@ -1,0 +1,42 @@
+// Select in Promise.
+//
+// select multiplexes across multiple channel operations.
+// When multiple channels are ready, one is chosen. If none are ready
+// and there's a default case, the default runs immediately.
+main() `test(expected: """--- Select Ready ---
+got: 42
+
+--- Select Default ---
+no channel ready""") {
+  // --- Select Ready ---
+  print_line("--- Select Ready ---");
+
+  ch1 := channel[int](capacity: 1);
+  ch2 := channel[int](capacity: 1);
+
+  // Only ch1 has a value — select picks the ready channel.
+  ch1.send(42);
+
+  select {
+    v := <-ch1:
+    if val := v {
+      print_line("got: {val}");
+    }
+    v := <-ch2:
+    print_line("got from ch2");
+  }
+
+  // --- Select Default ---
+  print_line("");
+  print_line("--- Select Default ---");
+
+  // No channel ready — default runs immediately (non-blocking).
+  ch3 := channel[int](capacity: 1);
+
+  select {
+    v := <-ch3:
+    print_line("got value");
+    default:
+    print_line("no channel ready");
+  }
+}

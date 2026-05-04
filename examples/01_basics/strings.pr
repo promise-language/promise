@@ -1,0 +1,97 @@
+// String operations in Promise.
+//
+// Strings are immutable UTF-8 sequences. The standard library provides
+// methods for searching, slicing, transforming, and building strings.
+main() `test(expected: """--- Concatenation ---
+hello world
+
+--- Interpolation ---
+Alice is 30 years old
+sum: 7
+
+--- Length and Indexing ---
+length: 5
+first char: h
+slice [1:4]: ell
+
+--- Search ---
+contains 'world': true
+starts_with 'hello': true
+ends_with 'world': true
+index_of 'lo': 3
+
+--- Transform ---
+upper: HELLO
+lower: hello
+repeat: ha ha ha
+replace: hi world
+trimmed: hello
+
+--- Split ---
+parts: hello, world, foo
+count of 'l' in hello: 2""") {
+  // --- Concatenation ---
+  print_line("--- Concatenation ---");
+
+  // The + operator concatenates strings.
+  a := "hello";
+  b := "world";
+  print_line(a + " " + b);
+
+  // --- Interpolation ---
+  print_line("");
+  print_line("--- Interpolation ---");
+
+  // {expression} inside a string evaluates and inserts the result.
+  name := "Alice";
+  age := 30;
+  print_line("{name} is {age} years old");
+
+  // Expressions are evaluated inside braces.
+  result := 3 + 4;
+  print_line("sum: {result}");
+
+  // --- Length and Indexing ---
+  print_line("");
+  print_line("--- Length and Indexing ---");
+
+  s := "hello";
+  print_line("length: {s.len}"); // .len is a getter (no parens)
+  print_line("first char: {s[0]}"); // index returns a character
+  print_line("slice [1:4]: {s[1:4]}"); // slice returns a substring
+
+  // --- Search ---
+  print_line("");
+  print_line("--- Search ---");
+
+  text := "hello world";
+  print_line("contains 'world': {text.contains("world")}");
+  print_line("starts_with 'hello': {text.starts_with("hello")}");
+  print_line("ends_with 'world': {text.ends_with("world")}");
+
+  // index_of returns int? (optional) — none if not found.
+  int? idx = text.index_of("lo");
+  print_line("index_of 'lo': {idx}");
+
+  // --- Transform ---
+  print_line("");
+  print_line("--- Transform ---");
+
+  print_line("upper: {s.to_upper()}");
+  print_line("lower: {"HELLO".to_lower()}");
+  print_line("repeat: {"ha ".repeat(3).trim()}");
+  print_line("replace: {text.replace("hello", "hi")}");
+
+  // trim() removes leading and trailing whitespace.
+  string padded = "  hello  ";
+  print_line("trimmed: {padded.trim()}");
+
+  // --- Split ---
+  print_line("");
+  print_line("--- Split ---");
+
+  csv := "hello,world,foo";
+  string[] parts = csv.split(",");
+  print_line("parts: {parts[0]}, {parts[1]}, {parts[2]}");
+  print_line("count of 'l' in hello: {s.count("l")}");
+}

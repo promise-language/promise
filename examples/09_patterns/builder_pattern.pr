@@ -1,0 +1,51 @@
+// Builder pattern in Promise.
+//
+// Use ~this methods to mutate an object step by step.
+// The builder accumulates configuration, then produces a result.
+type HttpRequest {
+  string method;
+  string url;
+  string body;
+  int timeout;
+
+  set_method(~this, string m) {
+    this.method = m;
+  }
+
+  set_url(~this, string u) {
+    this.url = u;
+  }
+
+  set_body(~this, string b) {
+    this.body = b;
+  }
+
+  set_timeout(~this, int t) {
+    this.timeout = t;
+  }
+
+  describe(&this) string {
+    return "{this.method} {this.url} (timeout={this.timeout}s, body={this.body})";
+  }
+}
+
+main() `test(expected: """--- Builder Pattern ---
+GET https://api.example.com/users (timeout=30s, body=)
+POST https://api.example.com/data (timeout=10s, body=name=Alice)""") {
+  // --- Builder Pattern ---
+  print_line("--- Builder Pattern ---");
+
+  // Build a GET request step by step.
+  req := HttpRequest(method: "", url: "", body: "", timeout: 30);
+  req.set_method("GET");
+  req.set_url("https://api.example.com/users");
+  print_line(req.describe());
+
+  // Build a POST request.
+  post := HttpRequest(method: "", url: "", body: "", timeout: 30);
+  post.set_method("POST");
+  post.set_url("https://api.example.com/data");
+  post.set_body("name=Alice");
+  post.set_timeout(10);
+  print_line(post.describe());
+}

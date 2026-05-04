@@ -1,0 +1,5 @@
+// The simplest Promise program.
+// print_line() writes a string to stdout followed by a newline.
+main() `test(expected: "Hello, world!") {
+  print_line("Hello, world!");
+}

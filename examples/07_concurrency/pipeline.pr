@@ -1,0 +1,47 @@
+// Concurrent pipeline in Promise.
+//
+// Goroutines + channels form natural data processing pipelines.
+// Each stage runs concurrently, connected by channels.
+// This is the capstone concurrency example.
+main() `test(expected: """--- Pipeline: generate -> square -> sum ---
+sum of squares 1..10: 385""") {
+  // --- Pipeline: generate -> square -> sum ---
+  print_line("--- Pipeline: generate -> square -> sum ---");
+
+  // Create channels connecting the stages.
+  ch1 := channel[int](capacity: 5);
+  ch2 := channel[int](capacity: 5);
+  result := channel[int](capacity: 1);
+
+  // Stage 1: Generate numbers 1..10.
+  go {
+    for i in 1..=10 {
+      ch1.send(i);
+    }
+    ch1.close();
+  };
+
+  // Stage 2: Square each number.
+  go {
+    for v in ch1 {
+      ch2.send(v * v);
+    }
+    ch2.close();
+  };
+
+  // Stage 3: Sum all values.
+  go {
+    int sum = 0;
+    for v in ch2 {
+      sum += v;
+    }
+    result.send(sum);
+  };
+
+  // Wait for the final result.
+  r := <-result;
+  if total := r {
+    // 1^2 + 2^2 + ... + 10^2 = 385
+    print_line("sum of squares 1..10: {total}");
+  }
+}

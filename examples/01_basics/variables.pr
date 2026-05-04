@@ -1,0 +1,75 @@
+// Variables and primitive types in Promise.
+//
+// Promise has two ways to declare variables:
+//   1. Typed:    int x = 42;
+//   2. Inferred: x := 42;     (type deduced from the right-hand side)
+//
+// Variables are mutable by default. All primitive types are copy types —
+// assigning one variable to another copies the value.
+main() `test(expected: """--- Typed Declarations ---
+integer: 42
+float: 3.14
+boolean: true
+character: A
+text: hello
+
+--- Type Inference ---
+inferred int: 100
+inferred string: world
+
+--- Mutability ---
+before: 1
+after: 2
+
+--- String Interpolation ---
+name is Alice and age is 30
+3 + 4 = 7""") {
+  // --- Typed Declarations ---
+  print_line("--- Typed Declarations ---");
+  int i = 42;
+  print_line("integer: {i}");
+
+  f64 f = 3.14;
+  print_line("float: {f}");
+
+  bool b = true;
+  print_line("boolean: {b}");
+
+  char c = 'A';
+  print_line("character: {c}");
+
+  string s = "hello";
+  print_line("text: {s}");
+
+  // --- Type Inference ---
+  print_line("");
+  print_line("--- Type Inference ---");
+
+  // The compiler infers the type from the right-hand side.
+  x := 100;
+  print_line("inferred int: {x}");
+
+  y := "world";
+  print_line("inferred string: {y}");
+
+  // --- Mutability ---
+  print_line("");
+  print_line("--- Mutability ---");
+
+  // Variables are mutable — you can reassign them.
+  int counter = 1;
+  print_line("before: {counter}");
+  counter = 2;
+  print_line("after: {counter}");
+
+  // --- String Interpolation ---
+  print_line("");
+  print_line("--- String Interpolation ---");
+
+  // Use {expression} inside strings to embed values.
+  name := "Alice";
+  age := 30;
+  print_line("name is {name} and age is {age}");
+  result := 3 + 4;
+  print_line("3 + 4 = {result}");
+}

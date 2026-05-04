@@ -1,0 +1,25 @@
+// OS interaction with the `os` module.
+//
+// `use os;` provides environment variables, process execution, and system info.
+use os;
+
+main() `test(expected: """--- Environment ---
+HOME is set: true
+
+--- Execute ---
+echo output: hello from promise""", exclude: "wasm32") {
+  // --- Environment ---
+  print_line("--- Environment ---");
+
+  // Check if an environment variable is set.
+  string? home = os.get_environment_variable("HOME");
+  print_line("HOME is set: {home is present}");
+
+  // --- Execute ---
+  print_line("");
+  print_line("--- Execute ---");
+
+  // Run a command and capture its output.
+  os.ProcessResult r = os.execute("echo", "hello from promise")!;
+  print_line("echo output: {r.standard_output.trim()}");
+}

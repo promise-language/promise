@@ -1,0 +1,75 @@
+// Iterators and combinator chains in Promise.
+//
+// Any type with a next() T? method works with for-in loops (duck-typed).
+// Vector's .iter() returns an Iterator with combinator methods:
+// filter, map, take, skip, fold, collect, chain, count, etc.
+// Combinators are lazy — they build pipelines that execute on demand.
+//
+// See tests/std/iter_test.pr for custom iterator examples (CountUp, Counter).
+main() `test(expected: """--- Filter ---
+even sum: 20
+
+--- Map ---
+doubled first: 2
+
+--- Fold ---
+product 1..5: 120
+
+--- Pipeline ---
+odd count: 3
+squares > 10 count: 4""") {
+  // --- Filter ---
+  print_line("--- Filter ---");
+
+  // filter: keep elements matching a predicate.
+  int[] nums = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+  int even_sum = 0;
+  for x in nums.iter().filter(|int x| -> bool {
+    return x % 2 == 0;
+  }) {
+    even_sum += x;
+  }
+  print_line("even sum: {even_sum}");
+
+  // --- Map ---
+  print_line("");
+  print_line("--- Map ---");
+
+  // map[R]: transform each element. Explicit type arg required.
+  int[] v = [1, 2, 3, 4, 5];
+  int[] doubled = v.iter().map[int](|int x| -> int {
+    return x * 2;
+  }).collect();
+  print_line("doubled first: {doubled[0]}");
+
+  // --- Fold ---
+  print_line("");
+  print_line("--- Fold ---");
+
+  // fold[R]: reduce a sequence to a single value.
+  int[] v2 = [1, 2, 3, 4, 5];
+  int product = v2.iter().fold[int](1, |int acc, int x| -> int {
+    return acc * x;
+  });
+  print_line("product 1..5: {product}");
+
+  // --- Pipeline ---
+  print_line("");
+  print_line("--- Pipeline ---");
+
+  // Combine multiple combinators in a chain.
+  int[] v3 = [1, 2, 3, 4, 5];
+  int odds = v3.iter().filter(|int x| -> bool {
+    return x % 2 == 1;
+  }).count();
+  print_line("odd count: {odds}");
+
+  // map + filter + count.
+  int[] v4 = [1, 2, 3, 4, 5, 6, 7];
+  int big_squares = v4.iter().map[int](|int x| -> int {
+    return x * x;
+  }).filter(|int x| -> bool {
+    return x > 10;
+  }).count();
+  print_line("squares > 10 count: {big_squares}");
+}

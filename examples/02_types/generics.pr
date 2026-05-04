@@ -1,0 +1,75 @@
+// Generics in Promise: parameterized types and functions.
+//
+// Generic type parameters use [T] syntax. They are monomorphized at
+// compile time — Box[int] and Box[string] become separate concrete types.
+// A generic container holding one value.
+type Box[T] {
+  T value;
+
+  get(&this) T {
+    return this.value;
+  }
+
+  set(~this, T val) {
+    this.value = val;
+  }
+}
+
+// A generic pair holding two values of the same type.
+type Pair[T] {
+  T first;
+  T second;
+}
+
+// Generic free function.
+identity[T](T x) T {
+  return x;
+}
+
+// Generic function calling another generic function.
+wrap[T](T val) T {
+  return identity[T](val);
+}
+
+main() `test(expected: """--- Generic Type ---
+Box[int]: 42
+Box[string]: hello
+after set: 100
+
+--- Multiple Type Params ---
+pair: (Alice, Bob)
+
+--- Generic Functions ---
+identity[int]: 42
+identity[string]: hello
+wrap[int]: 99""") {
+  // --- Generic Type ---
+  print_line("--- Generic Type ---");
+
+  // Instantiate with concrete type arguments.
+  bi := Box[int](value: 42);
+  print_line("Box[int]: {bi.get()}");
+
+  bs := Box[string](value: "hello");
+  print_line("Box[string]: {bs.get()}");
+
+  bi.set(100);
+  print_line("after set: {bi.get()}");
+
+  // --- Multiple Type Params ---
+  print_line("");
+  print_line("--- Multiple Type Params ---");
+
+  p := Pair[string](first: "Alice", second: "Bob");
+  print_line("pair: ({p.first}, {p.second})");
+
+  // --- Generic Functions ---
+  print_line("");
+  print_line("--- Generic Functions ---");
+
+  // Explicit type argument at the call site.
+  print_line("identity[int]: {identity[int](42)}");
+  print_line("identity[string]: {identity[string]("hello")}");
+  int wrapped = wrap[int](99);
+  print_line("wrap[int]: {wrapped}");
+}

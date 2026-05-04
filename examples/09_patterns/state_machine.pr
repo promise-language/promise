@@ -1,0 +1,44 @@
+// State machine pattern using enums in Promise.
+//
+// Model states as enum variants. Transition functions use match
+// for exhaustive, compiler-checked state transitions.
+enum Light {
+  Red,
+  Yellow,
+  Green,
+
+  // Transition to the next state.
+  next(&this) Light {
+    return match this {
+      Light.Red => Light.Green,
+      Light.Green => Light.Yellow,
+      Light.Yellow => Light.Red,
+    };
+  }
+
+  name(&this) string {
+    return match this {
+      Light.Red => "RED",
+      Light.Green => "GREEN",
+      Light.Yellow => "YELLOW",
+    };
+  }
+}
+
+main() `test(expected: """--- Traffic Light ---
+RED -> GREEN -> YELLOW -> RED -> GREEN""") {
+  // --- Traffic Light ---
+  print_line("--- Traffic Light ---");
+
+  // Cycle through traffic light states.
+  Light state = Light.Red;
+  print(state.name());
+
+  for _ in 0..4 {
+    Light next = state.next();
+    state = next;
+    print(" -> ");
+    print(state.name());
+  }
+  print_line("");
+}

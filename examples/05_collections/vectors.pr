@@ -1,0 +1,103 @@
+// Vectors (dynamic arrays) in Promise.
+//
+// T[] is the vector type. Vectors grow dynamically and are heap-allocated.
+// Literal syntax: [1, 2, 3]. Access via indexing [] and slicing [:].
+// Helper to print an int vector.
+print_vec(int[] & v) {
+  print("[");
+  for i in 0..v.len {
+    if i > 0 {
+      print(", ");
+    }
+    print(v[i]);
+  }
+  print_line("]");
+}
+
+main() `test(expected: """--- Creation ---
+nums: [1, 2, 3]
+length: 3
+
+--- Push and Pop ---
+after push: [1, 2, 3, 4, 5]
+popped: 5
+after pop: [1, 2, 3, 4]
+
+--- Indexing ---
+first: 1
+last: 4
+
+--- Slicing ---
+middle: [2, 3]
+
+--- Search ---
+contains 3: true
+contains 9: false
+
+--- Iteration ---
+sum: 10
+
+--- Filled ---
+zeros: [0, 0, 0, 0, 0]""") {
+  // --- Creation ---
+  print_line("--- Creation ---");
+
+  int[] nums = [1, 2, 3];
+  print("nums: ");
+  print_vec(nums);
+  print_line("length: {nums.len}");
+
+  // --- Push and Pop ---
+  print_line("");
+  print_line("--- Push and Pop ---");
+
+  nums.push(4);
+  nums.push(5);
+  print("after push: ");
+  print_vec(nums);
+
+  int? last = nums.pop();
+  print_line("popped: {last}");
+  print("after pop: ");
+  print_vec(nums);
+
+  // --- Indexing ---
+  print_line("");
+  print_line("--- Indexing ---");
+
+  print_line("first: {nums[0]}");
+  print_line("last: {nums[nums.len - 1]}");
+
+  // --- Slicing ---
+  print_line("");
+  print_line("--- Slicing ---");
+
+  int[] middle = nums[1:3];
+  print("middle: ");
+  print_vec(middle);
+
+  // --- Search ---
+  print_line("");
+  print_line("--- Search ---");
+
+  print_line("contains 3: {nums.contains(3)}");
+  print_line("contains 9: {nums.contains(9)}");
+
+  // --- Iteration ---
+  print_line("");
+  print_line("--- Iteration ---");
+
+  int sum = 0;
+  for n in nums {
+    sum += n;
+  }
+  print_line("sum: {sum}");
+
+  // --- Filled ---
+  print_line("");
+  print_line("--- Filled ---");
+
+  int[] zeros = int[].filled(0, count: 5);
+  print("zeros: ");
+  print_vec(zeros);
+}

@@ -1,0 +1,79 @@
+// Ownership and borrowing in Promise.
+//
+// Heap types (types with non-value fields) are moved by default.
+// Function signatures declare borrow mode: &param (shared) or ~param (mutable).
+// At the call site, just pass the variable — the compiler auto-borrows.
+// Copy types (primitives, value types) are always copied.
+type Document {
+  string title;
+  string content;
+}
+
+// Shared borrow — reads but does not consume.
+print_doc(Document & doc) {
+  print_line("  title: {doc.title}");
+  print_line("  content: {doc.content}");
+}
+
+// Mutable borrow — can modify the original.
+append_to_doc(Document ~doc, string text) {
+  doc.content = doc.content + text;
+}
+
+// Takes ownership — the caller can no longer use the value.
+archive(Document doc) string {
+  return "archived: {doc.title}";
+}
+
+main() `test(expected: """--- Shared Borrow ---
+  title: Report
+  content: Draft
+doc still usable after borrow
+
+--- Mutable Borrow ---
+after append: Draft - Final
+
+--- Copy Types ---
+original: 42
+copied: 100
+
+--- Move ---
+archived: Report""") {
+  // --- Shared Borrow ---
+  print_line("--- Shared Borrow ---");
+
+  doc := Document(title: "Report", content: "Draft");
+
+  // print_doc declares &doc (shared borrow). At the call site, just
+  // pass the variable — the compiler auto-borrows. No & needed here.
+  print_doc(doc);
+  print_line("doc still usable after borrow");
+
+  // --- Mutable Borrow ---
+  print_line("");
+  print_line("--- Mutable Borrow ---");
+
+  // append_to_doc declares ~doc (mutable borrow). Again, no ~ at call site.
+  append_to_doc(doc, " - Final");
+  print_line("after append: {doc.content}");
+
+  // --- Copy Types ---
+  print_line("");
+  print_line("--- Copy Types ---");
+
+  // Primitives are copy types — assignment copies the value.
+  int x = 42;
+  int y = x; // y is an independent copy
+  y = 100;
+  print_line("original: {x}");
+  print_line("copied: {y}");
+
+  // --- Move ---
+  print_line("");
+  print_line("--- Move ---");
+
+  // archive() takes ownership — doc is moved and can't be used after.
+  result := archive(doc);
+  print_line(result);
+  // doc is no longer valid here.
+}

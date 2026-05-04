@@ -1,0 +1,69 @@
+// Lambdas (closures) in Promise.
+//
+// Lambda syntax: |ParamType param| -> expression
+// Block body:    |ParamType param| -> ReturnType { ... }
+// Lambdas capture outer variables. Copy types auto-capture.
+// Non-copy types require `move` to transfer ownership into the closure.
+apply(int x, (int) -> int fn) int {
+  return fn(x);
+}
+
+main() `test(expected: """--- Expression Lambda ---
+doubled: 10
+
+--- Block Lambda ---
+(2+3)^2 = 25
+
+--- Capture ---
+offset 100: 142
+
+--- Higher-Order ---
+applied: 25
+
+--- Chaining ---
+add1 then double: 12""") {
+  // --- Expression Lambda ---
+  print_line("--- Expression Lambda ---");
+
+  // Single expression body — no braces, no return.
+  double := |int x| -> x * 2;
+  print_line("doubled: {double(5)}");
+
+  // --- Block Lambda ---
+  print_line("");
+  print_line("--- Block Lambda ---");
+
+  // Multi-statement body with explicit return type.
+  sum_squared := |int a, int b| -> int {
+    int sum = a + b;
+    return sum * sum;
+  };
+  print_line("(2+3)^2 = {sum_squared(2, 3)}");
+
+  // --- Capture ---
+  print_line("");
+  print_line("--- Capture ---");
+
+  // Lambdas capture outer variables (copy types auto-captured).
+  int offset = 100;
+  add_offset := |int x| -> x + offset;
+  print_line("offset 100: {add_offset(42)}");
+
+  // --- Higher-Order ---
+  print_line("");
+  print_line("--- Higher-Order ---");
+
+  // Pass a lambda to a function.
+  int r = apply(5, |int x| -> x * x);
+  print_line("applied: {r}");
+
+  // --- Chaining ---
+  print_line("");
+  print_line("--- Chaining ---");
+
+  // Chain lambdas by nesting calls.
+  add1 := |int x| -> x + 1;
+  double2 := |int x| -> x * 2;
+  int chained = double2(add1(5)); // (5+1)*2 = 12
+  print_line("add1 then double: {chained}");
+}

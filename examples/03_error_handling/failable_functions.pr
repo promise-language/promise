@@ -1,0 +1,85 @@
+// Failable functions and error handling in Promise.
+//
+// A function returning T! can either succeed with T or fail with an error.
+// In a failable function (main()!), bare calls auto-propagate errors.
+// Use ? for recovery, ! for panic (prototyping only).
+// Failable function: returns int on success, error on failure.
+parse_port(string s) int! {
+  if s == "80" {
+    return 80;
+  }
+  if s == "443" {
+    return 443;
+  }
+  if s == "8080" {
+    return 8080;
+  }
+  raise error(message: "invalid port: {s}");
+}
+
+// Failable void function — can fail but returns no value on success.
+validate(string input)! {
+  if input.len == 0 {
+    raise error(message: "input must not be empty");
+  }
+}
+
+// Failable function that calls another failable function.
+// Bare calls auto-propagate: if parse_port fails, connect fails too.
+connect(string host, string port_str) string! {
+  validate(host); // auto-propagates on empty host
+  int port = parse_port(port_str); // auto-propagates on invalid port
+  return "{host}:{port}";
+}
+
+main() `test(expected: """--- Success Path ---
+parsed port: 443
+
+--- Error Recovery ---
+port with fallback: 8080
+port from invalid: 9999
+
+--- Auto-Propagation ---
+connected: example.com:80
+
+--- Error Info ---
+caught: invalid port: abc""") {
+  // --- Success Path ---
+  print_line("--- Success Path ---");
+
+  // ! after a call panics on error (only for prototyping).
+  int port = parse_port("443")!;
+  print_line("parsed port: {port}");
+
+  // --- Error Recovery ---
+  print_line("");
+  print_line("--- Error Recovery ---");
+
+  // ? with a recovery value: if the call fails, use the fallback.
+  int safe_port = parse_port("8080")? e {
+    9999;
+  };
+  print_line("port with fallback: {safe_port}");
+
+  int fallback_port = parse_port("abc")? e {
+    9999;
+  };
+  print_line("port from invalid: {fallback_port}");
+
+  // --- Auto-Propagation ---
+  print_line("");
+  print_line("--- Auto-Propagation ---");
+
+  // connect() is failable and calls parse_port() bare — errors propagate.
+  string addr = connect("example.com", "80")!;
+  print_line("connected: {addr}");
+
+  // --- Error Info ---
+  print_line("");
+  print_line("--- Error Info ---");
+
+  // Access error details in the handler.
+  parse_port("abc")? e {
+    print_line("caught: {e.message}");
+  };
+}

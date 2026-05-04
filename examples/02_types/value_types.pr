@@ -1,0 +1,83 @@
+// Value types in Promise.
+//
+// When ALL fields of a type are marked `value`, the type becomes a
+// pure value type: data is embedded directly (no heap allocation),
+// and assignment copies the data. Value types are automatically `copy`.
+type Vec2 {
+  int x `value;
+  int y `value;
+
+  add(&this, Vec2 & other) Vec2 {
+    return Vec2(x: this.x + other.x, y: this.y + other.y);
+  }
+
+  to_string(&this) string {
+    return "({this.x}, {this.y})";
+  }
+}
+
+type Color {
+  int r `value;
+  int g `value;
+  int b `value;
+
+  to_string(&this) string {
+    return "rgb({this.r}, {this.g}, {this.b})";
+  }
+}
+
+main() `test(expected: """--- Value Type ---
+a: (1, 2)
+b: (1, 2)
+after modify b:
+  a: (1, 2)
+  b: (10, 2)
+
+--- Copy Semantics ---
+c1: rgb(255, 0, 0)
+c2: rgb(255, 0, 0)
+after modify c2:
+  c1: rgb(255, 0, 0)
+  c2: rgb(0, 0, 255)
+
+--- Arithmetic ---
+sum: (4, 6)""") {
+  // --- Value Type ---
+  print_line("--- Value Type ---");
+
+  // Value types are copied on assignment — no aliasing.
+  a := Vec2(x: 1, y: 2);
+  b := a; // copies the data
+  print_line("a: {a.to_string()}");
+  print_line("b: {b.to_string()}");
+
+  // Modifying b does not affect a.
+  b.x = 10;
+  print_line("after modify b:");
+  print_line("  a: {a.to_string()}");
+  print_line("  b: {b.to_string()}");
+
+  // --- Copy Semantics ---
+  print_line("");
+  print_line("--- Copy Semantics ---");
+
+  c1 := Color(r: 255, g: 0, b: 0);
+  c2 := c1; // independent copy
+  print_line("c1: {c1.to_string()}");
+  print_line("c2: {c2.to_string()}");
+
+  c2.r = 0;
+  c2.b = 255;
+  print_line("after modify c2:");
+  print_line("  c1: {c1.to_string()}");
+  print_line("  c2: {c2.to_string()}");
+
+  // --- Arithmetic ---
+  print_line("");
+  print_line("--- Arithmetic ---");
+
+  v1 := Vec2(x: 1, y: 2);
+  v2 := Vec2(x: 3, y: 4);
+  sum := v1.add(v2);
+  print_line("sum: {sum.to_string()}");
+}

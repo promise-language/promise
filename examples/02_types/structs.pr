@@ -1,0 +1,84 @@
+// Custom types in Promise: fields, constructors, methods.
+//
+// Types are declared with the `type` keyword. Fields are listed inside braces.
+// Methods receive `this` — use `&this` for read-only, `~this` for mutation.
+type Point {
+  f64 x;
+  f64 y;
+
+  // Read-only method — borrows this immutably.
+  distance_from_origin(&this) f64 {
+    return sqrt(this.x * this.x + this.y * this.y);
+  }
+
+  // Method that returns a new value (no mutation needed).
+  translate(&this, f64 dx, f64 dy) Point {
+    return Point(x: this.x + dx, y: this.y + dy);
+  }
+
+  to_string(&this) string {
+    return "({this.x}, {this.y})";
+  }
+}
+
+type Counter {
+  int value;
+
+  // Mutating method — borrows this mutably with ~.
+  increment(~this) {
+    this.value += 1;
+  }
+
+  reset(~this) {
+    this.value = 0;
+  }
+}
+
+main() `test(expected: """--- Construction ---
+origin: (0, 0)
+point: (3, 4)
+
+--- Methods ---
+distance: 5
+translated: (5, 7)
+
+--- Mutation ---
+counter: 0
+after 3 increments: 3
+after reset: 0""") {
+  // --- Construction ---
+  print_line("--- Construction ---");
+
+  // Named-parameter constructor — every field must be specified.
+  origin := Point(x: 0.0, y: 0.0);
+  print_line("origin: {origin.to_string()}");
+
+  p := Point(x: 3.0, y: 4.0);
+  print_line("point: {p.to_string()}");
+
+  // --- Methods ---
+  print_line("");
+  print_line("--- Methods ---");
+
+  // Read-only method (&this) — does not consume or mutate.
+  dist := p.distance_from_origin();
+  print_line("distance: {dist}");
+
+  // Returns a new Point, original is unchanged.
+  p2 := p.translate(2.0, 3.0);
+  print_line("translated: {p2.to_string()}");
+
+  // --- Mutation ---
+  print_line("");
+  print_line("--- Mutation ---");
+
+  // ~this methods mutate the receiver in place.
+  c := Counter(value: 0);
+  print_line("counter: {c.value}");
+  c.increment();
+  c.increment();
+  c.increment();
+  print_line("after 3 increments: {c.value}");
+  c.reset();
+  print_line("after reset: {c.value}");
+}

@@ -1,0 +1,46 @@
+// JSON serialization with the `json` module.
+//
+// Types marked `serializable auto-generate encode/decode methods.
+// Use json.encode_string[T] and json.decode_string[T] for conversion.
+use json;
+
+type Point `serializable {
+  int x;
+  int y;
+}
+
+type User `serializable {
+  string name;
+  int age;
+}
+
+main() `test(expected: """--- Encode ---
+point json: {"x":1,"y":2}
+user json: {"name":"Alice","age":30}
+
+--- Decode ---
+decoded point: (1, 2)
+decoded user: Alice, age 30""") {
+  // --- Encode ---
+  print_line("--- Encode ---");
+
+  // Encode a serializable type to a JSON string.
+  p := Point(x: 1, y: 2);
+  string point_json = json.encode_string[Point](p)!;
+  print_line("point json: {point_json}");
+
+  u := User(name: "Alice", age: 30);
+  string user_json = json.encode_string[User](u)!;
+  print_line("user json: {user_json}");
+
+  // --- Decode ---
+  print_line("");
+  print_line("--- Decode ---");
+
+  // Decode a JSON string back to a typed value.
+  Point p2 = json.decode_string[Point](point_json)!;
+  print_line("decoded point: ({p2.x}, {p2.y})");
+
+  User u2 = json.decode_string[User](user_json)!;
+  print_line("decoded user: {u2.name}, age {u2.age}");
+}

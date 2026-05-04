@@ -1,0 +1,67 @@
+// Sorting in Promise.
+//
+// sort() sorts a vector in-place. Works on any type that satisfies Ordered.
+// Usage: vec = sort(vec)
+// Helper to print an int vector.
+print_int_vec(int[] & v) {
+  print("[");
+  for i in 0..v.len {
+    if i > 0 {
+      print(", ");
+    }
+    print(v[i]);
+  }
+  print_line("]");
+}
+
+// Helper to print a string vector.
+print_str_vec(string[] & v) {
+  print("[");
+  for i in 0..v.len {
+    if i > 0 {
+      print(", ");
+    }
+    print(v[i]);
+  }
+  print_line("]");
+}
+
+main() `test(expected: """--- Sort Integers ---
+before: [5, 3, 8, 1, 9, 2]
+after:  [1, 2, 3, 5, 8, 9]
+
+--- Sort Strings ---
+before: [banana, apple, cherry, date]
+after:  [apple, banana, cherry, date]
+
+--- Already Sorted ---
+[1, 2, 3, 4, 5]""") {
+  // --- Sort Integers ---
+  print_line("--- Sort Integers ---");
+
+  int[] nums = [5, 3, 8, 1, 9, 2];
+  print("before: ");
+  print_int_vec(nums);
+  nums = sort[int](nums);
+  print("after:  ");
+  print_int_vec(nums);
+
+  // --- Sort Strings ---
+  print_line("");
+  print_line("--- Sort Strings ---");
+
+  string[] words = ["banana", "apple", "cherry", "date"];
+  print("before: ");
+  print_str_vec(words);
+  words = sort[string](words);
+  print("after:  ");
+  print_str_vec(words);
+
+  // --- Already Sorted ---
+  print_line("");
+  print_line("--- Already Sorted ---");
+
+  int[] sorted = [1, 2, 3, 4, 5];
+  sorted = sort[int](sorted);
+  print_int_vec(sorted);
+}

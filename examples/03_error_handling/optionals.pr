@@ -1,0 +1,76 @@
+// Optional types in Promise.
+//
+// T? represents a value that may be present or absent (none).
+// Use if-binding to safely unwrap, or ! to panic on none.
+find_user(string name) string? {
+  if name == "alice" {
+    return "Alice Smith";
+  }
+  if name == "bob" {
+    return "Bob Jones";
+  }
+  return none;
+}
+
+main() `test(expected: """--- Optional Values ---
+greeting is present: hello
+missing is absent
+
+--- If-Binding ---
+found: Alice Smith
+user not found
+
+--- Force Unwrap ---
+forced: Alice Smith
+
+--- Elvis Operator ---
+alice: Alice Smith
+unknown: Guest""") {
+  // --- Optional Values ---
+  print_line("--- Optional Values ---");
+
+  string? greeting = "hello"; // auto-wrapped to optional
+  string? missing = none; // explicitly absent
+
+  if greeting is present {
+    print_line("greeting is present: {greeting}");
+  }
+  if missing is absent {
+    print_line("missing is absent");
+  }
+
+  // --- If-Binding ---
+  print_line("");
+  print_line("--- If-Binding ---");
+
+  // if-binding unwraps the optional. The else branch handles none.
+  if user := find_user("alice") {
+    print_line("found: {user}"); // user is string, not string?
+  } else {
+    print_line("user not found");
+  }
+
+  if user := find_user("nobody") {
+    print_line("found: {user}");
+  } else {
+    print_line("user not found");
+  }
+
+  // --- Force Unwrap ---
+  print_line("");
+  print_line("--- Force Unwrap ---");
+
+  // ! panics if none — only use when you know the value is present.
+  string forced = find_user("alice")!;
+  print_line("forced: {forced}");
+
+  // --- Elvis Operator ---
+  print_line("");
+  print_line("--- Elvis Operator ---");
+
+  // ?: provides a default value when the optional is none.
+  string alice = find_user("alice") ?: "Guest";
+  string unknown = find_user("nobody") ?: "Guest";
+  print_line("alice: {alice}");
+  print_line("unknown: {unknown}");
+}

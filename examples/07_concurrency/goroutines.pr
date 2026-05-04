@@ -1,0 +1,30 @@
+// Goroutines in Promise.
+//
+// `go { ... }` spawns a lightweight goroutine on the M:N scheduler.
+// Goroutines are multiplexed across OS threads — you can spawn thousands.
+// Use channels to communicate between goroutines.
+main() `test(expected: """--- Fan-Out ---
+total: 4950""") {
+  // --- Fan-Out ---
+  print_line("--- Fan-Out ---");
+
+  // Spawn 100 goroutines, each sends its index through a channel.
+  ch := channel[int](capacity: 100);
+
+  for i in 0..100 {
+    go {
+      ch.send(i);
+    };
+  }
+
+  // Collect all results.
+  int total = 0;
+  for _ in 0..100 {
+    r := <-ch;
+    if v := r {
+      total += v;
+    }
+  }
+  // 0 + 1 + 2 + ... + 99 = 4950
+  print_line("total: {total}");
+}

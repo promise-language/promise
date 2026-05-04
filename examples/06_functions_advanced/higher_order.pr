@@ -1,0 +1,97 @@
+// Higher-order functions in Promise.
+//
+// Functions can be passed as values, stored in variables, and returned.
+// Function types use the syntax: (ParamTypes) -> ReturnType
+// Accept a function as a parameter.
+transform_all(int[] items, (int) -> int fn) int[] {
+  int[] result = [];
+  for x in items {
+    result.push(fn(x));
+  }
+  return result;
+}
+
+// Accept a predicate function.
+count_matching(int[] items, (int) -> bool predicate) int {
+  int count = 0;
+  for x in items {
+    if predicate(x) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+// A regular function that can be passed as a value.
+square(int x) int {
+  return x * x;
+}
+
+negate(int x) int {
+  return 0 - x;
+}
+
+// Helper to print an int vector.
+print_vec(int[] & v) {
+  print("[");
+  for i in 0..v.len {
+    if i > 0 {
+      print(", ");
+    }
+    print(v[i]);
+  }
+  print_line("]");
+}
+
+main() `test(expected: """--- Function as Parameter ---
+squared: [1, 4, 9, 16, 25]
+negated: [-1, -2, -3, -4, -5]
+
+--- Lambda as Parameter ---
+tripled: [3, 6, 9, 12, 15]
+
+--- Predicate ---
+even count: 2
+greater than 3: 2
+
+--- Function Variable ---
+op result: 9""") {
+  // --- Function as Parameter ---
+  print_line("--- Function as Parameter ---");
+
+  // transform_all takes ownership of the vector (no & or ~),
+  // so we pass a fresh literal each time.
+  int[] squared = transform_all([1, 2, 3, 4, 5], square);
+  print("squared: ");
+  print_vec(squared);
+
+  int[] negated = transform_all([1, 2, 3, 4, 5], negate);
+  print("negated: ");
+  print_vec(negated);
+
+  // --- Lambda as Parameter ---
+  print_line("");
+  print_line("--- Lambda as Parameter ---");
+
+  int[] tripled = transform_all([1, 2, 3, 4, 5], |int x| -> x * 3);
+  print("tripled: ");
+  print_vec(tripled);
+
+  // --- Predicate ---
+  print_line("");
+  print_line("--- Predicate ---");
+
+  int even_count = count_matching([1, 2, 3, 4, 5], |int x| -> x % 2 == 0);
+  print_line("even count: {even_count}");
+
+  int big = count_matching([1, 2, 3, 4, 5], |int x| -> x > 3);
+  print_line("greater than 3: {big}");
+
+  // --- Function Variable ---
+  print_line("");
+  print_line("--- Function Variable ---");
+
+  // Store a function in a typed variable.
+  (int) -> int op = square;
+  print_line("op result: {op(3)}");
+}

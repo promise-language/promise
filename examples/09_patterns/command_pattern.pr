@@ -1,0 +1,70 @@
+// Command dispatch pattern in Promise.
+//
+// Model commands as enum variants with data. Dispatch with match.
+// This is a common pattern for CLI tools and AI-agent-generated programs.
+enum Command {
+  Add(string item),
+  Remove(string item),
+  List,
+  Count,
+}
+
+main() `test(expected: """--- Command Dispatch ---
+(empty)
+added: apples
+added: bread
+added: milk
+  - apples
+  - bread
+  - milk
+count: 3
+removed: bread
+  - apples
+  - milk""") {
+  // --- Command Dispatch ---
+  print_line("--- Command Dispatch ---");
+
+  string[] items = [];
+
+  // Define a sequence of commands using our enum.
+  Command[] commands = [Command.List,
+  Command.Add("apples"),
+  Command.Add("bread"),
+  Command.Add("milk"),
+  Command.List,
+  Command.Count,
+  Command.Remove("bread"),
+  Command.List,
+  ];
+
+  // Dispatch each command using match.
+  for cmd in commands {
+    match cmd {
+      Command.Add(item) => {
+        items.push(item);
+        print_line("added: {item}");
+      },
+      Command.Remove(item) => {
+        for i in 0..items.len {
+          if items[i] == item {
+            items.remove(i);
+            print_line("removed: {item}");
+            break;
+          }
+        }
+      },
+      Command.List => {
+        if items.len == 0 {
+          print_line("(empty)");
+        } else {
+          for i in 0..items.len {
+            print_line("  - {items[i]}");
+          }
+        }
+      },
+      Command.Count => {
+        print_line("count: {items.len}");
+      },
+    }
+  }
+}

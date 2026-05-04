@@ -1,0 +1,95 @@
+// Inheritance and polymorphism in Promise.
+//
+// Types can inherit from other types with `is`. Children inherit fields
+// and methods. Abstract methods (no body) must be implemented by children.
+// Polymorphism works via virtual dispatch — call a method through a
+// parent-typed variable and the child's implementation runs.
+type Animal {
+  string name;
+
+  // Abstract method — children must implement this.
+  speak(&this) string `abstract;
+
+  // Concrete method — inherited by all children.
+  introduce(&this) string {
+    return "{this.name} says {this.speak()}";
+  }
+}
+
+type Dog is Animal {
+  speak(&this) string {
+    return "woof!";
+  }
+}
+
+type Cat is Animal {
+  int lives;
+
+  speak(&this) string {
+    return "meow!";
+  }
+}
+
+// Deep inheritance chain: GuideDog -> Dog -> Animal
+type GuideDog is Dog {
+  string owner;
+
+  // Override speak from Dog.
+  speak(&this) string {
+    return "woof! (guiding {this.owner})";
+  }
+}
+
+main() `test(expected: """--- Basic Inheritance ---
+Rex says woof!
+Luna says meow!
+
+--- Polymorphism ---
+Buddy says woof!
+Whiskers says meow!
+
+--- Deep Chain ---
+Lassie says woof! (guiding Alice)
+
+--- Type Check ---
+buddy is Dog: true
+buddy is Animal: true
+whiskers is Dog: false""") {
+  // --- Basic Inheritance ---
+  print_line("--- Basic Inheritance ---");
+
+  // Children inherit parent fields (name) and can override methods.
+  d := Dog(name: "Rex");
+  print_line(d.introduce());
+
+  c := Cat(name: "Luna", lives: 9);
+  print_line(c.introduce());
+
+  // --- Polymorphism ---
+  print_line("");
+  print_line("--- Polymorphism ---");
+
+  // Store child instances in parent-typed variables.
+  // Method calls dispatch to the child's implementation.
+  Animal buddy = Dog(name: "Buddy");
+  Animal whiskers = Cat(name: "Whiskers", lives: 7);
+  print_line(buddy.introduce());
+  print_line(whiskers.introduce());
+
+  // --- Deep Chain ---
+  print_line("");
+  print_line("--- Deep Chain ---");
+
+  // GuideDog -> Dog -> Animal: overrides propagate through the chain.
+  guide := GuideDog(name: "Lassie", owner: "Alice");
+  print_line(guide.introduce());
+
+  // --- Type Check ---
+  print_line("");
+  print_line("--- Type Check ---");
+
+  // The `is` operator checks runtime type.
+  print_line("buddy is Dog: {buddy is Dog}");
+  print_line("buddy is Animal: {buddy is Animal}");
+  print_line("whiskers is Dog: {whiskers is Dog}");
+}

@@ -1,0 +1,27 @@
+// Test blocking select in a loop. Verifies that SWN cleanup is correct
+// and the goroutine can do multiple sequential blocking selects without
+// corrupting waiter lists or leaking state.
+main() `test(expected: "1\n2\n3") {
+  ch := channel[int](capacity: 1);
+  done := channel[int](capacity: 1);
+
+  go {
+    ch.send(1);
+    ch.send(2);
+    ch.send(3);
+    done.send(0);
+  };
+
+  // Three sequential blocking selects on the same channel
+  for i in 0..3 {
+    select {
+      v := <-ch:
+      if val := v {
+        print_line(val);
+      }
+      v := <-done:
+      // Should not be selected — done only has data after all 3 sends
+      print_line("unexpected");
+    }
+  }
+}

@@ -2010,36 +2010,12 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 	newCount := c.block.NewAdd(countReload, constant.NewInt(irtypes.I64, 1))
 	c.block.NewStore(newCount, countPtr)
 
-	// Wake a waiting receiver: try goroutine waiter first, then cond_signal
+	// Wake a waiting receiver (handles both regular G and select SWN nodes)
 	recvHeadPtr := c.block.NewGetElementPtr(chanType, chPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersHead)))
 	recvTailPtr := c.block.NewGetElementPtr(chanType, chPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersTail)))
-	recvWaiter := c.block.NewCall(c.funcs["promise_waiter_dequeue"], recvHeadPtr, recvTailPtr)
-	hasRecvWaiter := c.block.NewICmp(enum.IPredNE, recvWaiter, constant.NewNull(irtypes.I8Ptr))
-
-	wakeRecvBlk := c.newBlock("send.wake.recv")
-	signalRecvBlk := c.newBlock("send.signal.recv")
-	afterSignalBlk := c.newBlock("send.after.signal")
-	c.block.NewCondBr(hasRecvWaiter, wakeRecvBlk, signalRecvBlk)
-
-	// Wake parked receiver goroutine
-	c.block = wakeRecvBlk
-	gTy := goroutineStructType()
-	gPtrTy := irtypes.NewPointer(gTy)
-	waiterTyped := c.block.NewBitCast(recvWaiter, gPtrTy)
-	waiterStatusPtr := c.block.NewGetElementPtr(gTy, waiterTyped,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldStatus)))
-	c.block.NewStore(constant.NewInt(irtypes.I8, gStatusRunnable), waiterStatusPtr)
-	c.block.NewCall(c.funcs["promise_sched_enqueue"], recvWaiter)
-	c.block.NewBr(afterSignalBlk)
-
-	// Fallback: signal cond var for thread-blocked receivers
-	c.block = signalRecvBlk
-	c.block.NewCall(c.palCondSignal, notEmpty)
-	c.block.NewBr(afterSignalBlk)
-
-	c.block = afterSignalBlk
+	c.block.NewCall(c.funcs["promise_waiter_wake_one"], recvHeadPtr, recvTailPtr, notEmpty)
 
 	// If unbuffered: wait until receiver picks up the value
 	unbufPtr := c.block.NewGetElementPtr(chanType, chPtr,
@@ -6133,36 +6109,12 @@ func (c *Compiler) genReceiveChannel(e *ast.UnaryExpr, inst *types.Instance) val
 	newCount := c.block.NewSub(countRead, constant.NewInt(irtypes.I64, 1))
 	c.block.NewStore(newCount, countPtr)
 
-	// Wake a waiting sender: try goroutine waiter first, then cond_signal
+	// Wake a waiting sender (handles both regular G and select SWN nodes)
 	sendHeadPtr := c.block.NewGetElementPtr(chanType, chPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersHead)))
 	sendTailPtr := c.block.NewGetElementPtr(chanType, chPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersTail)))
-	sendWaiter := c.block.NewCall(c.funcs["promise_waiter_dequeue"], sendHeadPtr, sendTailPtr)
-	hasSendWaiter := c.block.NewICmp(enum.IPredNE, sendWaiter, constant.NewNull(irtypes.I8Ptr))
-
-	wakeSendBlk := c.newBlock("chrecv.wake.send")
-	signalSendBlk := c.newBlock("chrecv.signal.send")
-	afterSignalBlk := c.newBlock("chrecv.after.signal")
-	c.block.NewCondBr(hasSendWaiter, wakeSendBlk, signalSendBlk)
-
-	// Wake parked sender goroutine
-	c.block = wakeSendBlk
-	gTy := goroutineStructType()
-	gPtrTy := irtypes.NewPointer(gTy)
-	senderTyped := c.block.NewBitCast(sendWaiter, gPtrTy)
-	senderStatusPtr := c.block.NewGetElementPtr(gTy, senderTyped,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldStatus)))
-	c.block.NewStore(constant.NewInt(irtypes.I8, gStatusRunnable), senderStatusPtr)
-	c.block.NewCall(c.funcs["promise_sched_enqueue"], sendWaiter)
-	c.block.NewBr(afterSignalBlk)
-
-	// Fallback: signal cond var for thread-blocked senders
-	c.block = signalSendBlk
-	c.block.NewCall(c.palCondSignal, notFull)
-	c.block.NewBr(afterSignalBlk)
-
-	c.block = afterSignalBlk
+	c.block.NewCall(c.funcs["promise_waiter_wake_one"], sendHeadPtr, sendTailPtr, notFull)
 
 	// Unlock
 	c.block.NewCall(c.palMutexUnlock, mtx)
@@ -6170,13 +6122,14 @@ func (c *Compiler) genReceiveChannel(e *ast.UnaryExpr, inst *types.Instance) val
 	// Build Some: { true, value }
 	someVal := c.block.NewInsertValue(constant.NewZeroInitializer(optType), constant.True, 0)
 	someVal2 := c.block.NewInsertValue(someVal, resultVal, 1)
+	someBlk := c.block // capture current block for phi predecessor
 	c.block.NewBr(doneBlock)
 
 	// done: phi to select none or some
 	c.block = doneBlock
 	phi := c.block.NewPhi(
 		&ir.Incoming{X: noneVal, Pred: noneBlock},
-		&ir.Incoming{X: someVal2, Pred: afterSignalBlk},
+		&ir.Incoming{X: someVal2, Pred: someBlk},
 	)
 
 	return phi

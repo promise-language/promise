@@ -1,0 +1,29 @@
+// Test blocking select with multiple channels where the goroutine parks
+// until a specific channel becomes ready. Verifies wake-once protocol (B0008).
+main() `test(expected: "42") {
+  ch1 := channel[int](capacity: 1);
+  ch2 := channel[int](capacity: 1);
+  ch3 := channel[int](capacity: 1);
+
+  // Send to ch2 from a goroutine — select should wake for ch2
+  go {
+    ch2.send(42);
+  };
+
+  // All three channels empty initially → select blocks
+  // When ch2 gets data, select should wake and pick case 2
+  select {
+    v := <-ch1:
+    if val := v {
+      print_line("ch1: {val}");
+    }
+    v := <-ch2:
+    if val := v {
+      print_line(val);
+    }
+    v := <-ch3:
+    if val := v {
+      print_line("ch3: {val}");
+    }
+  }
+}

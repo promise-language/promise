@@ -1,0 +1,23 @@
+// Test blocking select with mixed send and recv cases. SWNs are enqueued
+// on different waiter lists (send_waiters for the send case, recv_waiters
+// for the recv case). The recv case should win when data arrives on ch_recv.
+main() `test(expected: "received: 7") {
+  ch_send := channel[int](capacity: 1);
+  ch_send.send(99); // fill ch_send so send case blocks
+  ch_recv := channel[int](capacity: 1);
+
+  // Goroutine sends on ch_recv, waking the recv case
+  go {
+    ch_recv.send(7);
+  };
+
+  // Send case blocks (ch_send full), recv case blocks (ch_recv empty)
+  select {
+    ch_send.send(1):
+    print_line("sent");
+    v := <-ch_recv:
+    if val := v {
+      print_line("received: {val}");
+    }
+  }
+}

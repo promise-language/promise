@@ -197,10 +197,10 @@ Entry point: `cmd/promise/main.go` → `compileFrontend()` orchestrates parse �
 **M:N Scheduler** (`codegen/sched.go`): GMP model — G (goroutine/LLVM coroutine), P (processor with 256-slot ring buffer run queue), M (OS thread via `pal_thread_create` with explicit 2MB stack — musl defaults to 128KB). Key concurrency invariants:
 - **Park mutex protocol**: Goroutines store the channel/done mutex in `G.park_mutex` before `coro.suspend`. The scheduler unlocks it after `coro.resume` returns. This prevents enqueue-before-suspend races — the waker must acquire the same mutex, blocking until suspend completes.
 - **park_mutex = null means yield**: The scheduler re-enqueues the goroutine (cooperative preemption). park_mutex != null means park — the goroutine is on a waiter list and will be woken by another goroutine.
-- **Select blocking uses yield-and-retry**: Because select involves multiple channel mutexes but park_mutex can only hold one, blocking select yields (park_mutex=null) and retries the lock→try→unlock cycle until a case is ready. This avoids multi-mutex enqueue-before-suspend and double-wake races.
+- **Select blocking uses SelectWaiterNode (SWN) parking**: Each select case gets a stack-allocated SWN (G-layout-compatible at fields 0–4, field 1=0xFF sentinel). SWNs are enqueued on channel waiter lists; a per-select mutex (stored in each SWN and in G.park_mutex) provides wake-once semantics. `select_try_wake` CAS's `G.select_case` under the select mutex. Channel send/recv/close use `promise_waiter_wake_one` which handles both regular G and SWN nodes. On resume, the goroutine locks all channels, removes remaining SWNs, and dispatches on `G.select_case`.
 - **Park_m spurious wakeup protection**: `park_m` loops on `cond_wait` checking `M.spinning` flag (set by `wake_m` before signaling). Prevents spurious wakeups from corrupting the idle M stack.
 - **Work stealing lock order**: `steal_work` locks both thief and victim P's in address order (ptrtoint comparison) to prevent ABBA deadlock between concurrent stealers.
-- **Waiter lists**: Intrusive linked list via `G.wait_next`. Protected by channel mutex. `promise_waiter_enqueue/dequeue/remove/wake_all` helpers in sched.go.
+- **Waiter lists**: Intrusive linked list via `G.wait_next` (field 4). Protected by channel mutex. `promise_waiter_enqueue/dequeue/remove/wake_all/wake_one` helpers in sched.go. Lists can contain both regular G nodes and SelectWaiterNode (SWN) entries — `wake_one` and `wake_all` check field 1 (0xFF sentinel) to distinguish.
 - **Sysmon**: Background thread sets `G.preempt=1` every 10ms; yield checks at loop back-edges call `coro.suspend`.
 
 **Standard library**: 29 `.pr` files in `modules/std/` compiled as a regular embedded catalog module and auto-imported into every file via `use std as _`. Catalog modules (`modules/io/`, `modules/path/`, `modules/math/`, `modules/strings/`, `modules/os/`, `modules/time/`, `modules/http/`) are separate compilation units with their own `promise.toml`. Runtime is codegen-emitted LLVM IR (no C runtime). See `docs/standard-library.md` for the full module inventory, PAL extensions, and implementation phases.
@@ -266,13 +266,13 @@ The standard library (`modules/std/`, 29 files) is auto-imported via `use std as
 
 ## Test Suite
 
-~2476 test functions across ~212 `.pr` files, organized by category:
+~2563 test functions across ~215 `.pr` files, organized by category:
 
 | Directory | What it tests | Files |
 |-----------|--------------|-------|
 | `tests/e2e/` | Language features: inheritance, generics, errors, lambdas, match, enums (incl. enum methods, enum fields), casting, control flow | ~67 |
 | `tests/std/` | Standard library: all primitive types, containers, iterators, math, time, formatting, parsing | ~27 |
-| `tests/concurrency/` | M:N scheduler, channels, select, tasks, goroutines, panic recovery, stress tests, IO syscall handoff, batch test scheduler init | ~80 |
+| `tests/concurrency/` | M:N scheduler, channels, select, tasks, goroutines, panic recovery, stress tests, IO syscall handoff, batch test scheduler init | ~86 |
 | `tests/modules/` | Module system: imports, visibility, generics across modules, transitive deps, diamond deps | ~16 |
 | `tests/value_types/` | Pure value types: construction, copying, operators, methods, nested, optional | ~9 |
 | `tests/arrays/` | Fixed-size arrays: basic, copy, field, loop, OOB, parameters | ~6 |

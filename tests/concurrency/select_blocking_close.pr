@@ -1,0 +1,23 @@
+// Test blocking select woken by channel close (not send). When a channel
+// is closed, all select waiters on its recv_waiters should be woken via
+// waiter_wake_all, which handles SWN nodes via select_try_wake.
+main() `test(expected: "closed") {
+  ch1 := channel[int](capacity: 1);
+  ch2 := channel[int](capacity: 1);
+
+  // Close ch1 from a goroutine — the select should wake and pick case 1
+  go {
+    ch1.close();
+  };
+
+  // Both channels empty — select blocks until ch1 is closed
+  select {
+    v := <-ch1:
+    // Recv on closed channel returns none
+    if v is absent {
+      print_line("closed");
+    }
+    v := <-ch2:
+    print_line("unexpected");
+  }
+}

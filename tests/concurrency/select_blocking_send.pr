@@ -1,0 +1,20 @@
+// Test blocking select with a send case: ch is full, select blocks until
+// a receiver drains it. Verifies SWN parking on send_waiters (B0008).
+main() `test(expected: "done") {
+  ch := channel[int](capacity: 1);
+  ch.send(1); // fill the channel
+
+  // Goroutine receives, making room for the select send
+  go {
+    v := <-ch;
+  };
+
+  // ch is full — send case blocks until the goroutine drains it
+  dummy := channel[int](capacity: 1);
+  select {
+    ch.send(2):
+    print_line("done");
+    v := <-dummy:
+    print_line("unexpected");
+  }
+}

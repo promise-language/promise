@@ -2857,36 +2857,12 @@ func (c *Compiler) genForInChannel(s *ast.ForInStmt, chRaw value.Value, elemType
 	newCount := c.block.NewSub(countRead, constant.NewInt(irtypes.I64, 1))
 	c.block.NewStore(newCount, countPtr)
 
-	// Wake a waiting sender: try goroutine waiter first, then cond_signal
+	// Wake a waiting sender (handles both regular G and select SWN nodes)
 	sendHeadPtr := c.block.NewGetElementPtr(chanType, chPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersHead)))
 	sendTailPtr := c.block.NewGetElementPtr(chanType, chPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersTail)))
-	sendWaiter := c.block.NewCall(c.funcs["promise_waiter_dequeue"], sendHeadPtr, sendTailPtr)
-	hasSendWaiter := c.block.NewICmp(enum.IPredNE, sendWaiter, constant.NewNull(irtypes.I8Ptr))
-
-	wakeSendBlk := c.newBlock("forin_ch.wake.send")
-	signalSendBlk := c.newBlock("forin_ch.signal.send")
-	afterSignalBlk := c.newBlock("forin_ch.after.signal")
-	c.block.NewCondBr(hasSendWaiter, wakeSendBlk, signalSendBlk)
-
-	// Wake parked sender goroutine
-	c.block = wakeSendBlk
-	gTy := goroutineStructType()
-	gPtrTy := irtypes.NewPointer(gTy)
-	senderTyped := c.block.NewBitCast(sendWaiter, gPtrTy)
-	senderStatusPtr := c.block.NewGetElementPtr(gTy, senderTyped,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldStatus)))
-	c.block.NewStore(constant.NewInt(irtypes.I8, gStatusRunnable), senderStatusPtr)
-	c.block.NewCall(c.funcs["promise_sched_enqueue"], sendWaiter)
-	c.block.NewBr(afterSignalBlk)
-
-	// Fallback: signal cond var for thread-blocked senders
-	c.block = signalSendBlk
-	c.block.NewCall(c.palCondSignal, notFull)
-	c.block.NewBr(afterSignalBlk)
-
-	c.block = afterSignalBlk
+	c.block.NewCall(c.funcs["promise_waiter_wake_one"], sendHeadPtr, sendTailPtr, notFull)
 
 	// Unlock
 	c.block.NewCall(c.palMutexUnlock, mtx)
@@ -3356,35 +3332,15 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 		newCount := c.block.NewAdd(countVal, constant.NewInt(irtypes.I64, 1))
 		c.block.NewStore(newCount, countPtr)
 
-		// Wake a waiting receiver
+		// Wake a waiting receiver (handles both regular G and select SWN nodes)
 		recvHeadPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersHead)))
 		recvTailPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersTail)))
-		recvWaiter := c.block.NewCall(c.funcs["promise_waiter_dequeue"], recvHeadPtr, recvTailPtr)
-		hasRecvWaiter := c.block.NewICmp(enum.IPredNE, recvWaiter, constant.NewNull(i8PtrTy))
-		wakeBlk := c.newBlock(prefix + ".wake")
-		signalBlk := c.newBlock(prefix + ".signal")
-		afterBlk := c.newBlock(prefix + ".after")
-		c.block.NewCondBr(hasRecvWaiter, wakeBlk, signalBlk)
-
-		c.block = wakeBlk
-		gTy := goroutineStructType()
-		wTyped := c.block.NewBitCast(recvWaiter, irtypes.NewPointer(gTy))
-		wStatusPtr := c.block.NewGetElementPtr(gTy, wTyped,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldStatus)))
-		c.block.NewStore(constant.NewInt(irtypes.I8, gStatusRunnable), wStatusPtr)
-		c.block.NewCall(c.funcs["promise_sched_enqueue"], recvWaiter)
-		c.block.NewBr(afterBlk)
-
-		c.block = signalBlk
 		nePtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldNotEmpty)))
 		ne := c.block.NewLoad(i8PtrTy, nePtr)
-		c.block.NewCall(c.palCondSignal, ne)
-		c.block.NewBr(afterBlk)
-
-		c.block = afterBlk
+		c.block.NewCall(c.funcs["promise_waiter_wake_one"], recvHeadPtr, recvTailPtr, ne)
 	}
 
 	// Helper: generate recv execution code for a case
@@ -3430,43 +3386,25 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 		newCount := c.block.NewSub(countRead, constant.NewInt(irtypes.I64, 1))
 		c.block.NewStore(newCount, countPtr)
 
-		// Wake a waiting sender
+		// Wake a waiting sender (handles both regular G and select SWN nodes)
 		sendHeadPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersHead)))
 		sendTailPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersTail)))
-		sendWaiter := c.block.NewCall(c.funcs["promise_waiter_dequeue"], sendHeadPtr, sendTailPtr)
-		hasSendWaiter := c.block.NewICmp(enum.IPredNE, sendWaiter, constant.NewNull(i8PtrTy))
-		wakeBlk := c.newBlock(prefix + ".wsend")
-		signalBlk := c.newBlock(prefix + ".ssend")
-		afterBlk := c.newBlock(prefix + ".afterwk")
-		c.block.NewCondBr(hasSendWaiter, wakeBlk, signalBlk)
-
-		c.block = wakeBlk
-		gTy := goroutineStructType()
-		wTyped := c.block.NewBitCast(sendWaiter, irtypes.NewPointer(gTy))
-		wStatusPtr := c.block.NewGetElementPtr(gTy, wTyped,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldStatus)))
-		c.block.NewStore(constant.NewInt(irtypes.I8, gStatusRunnable), wStatusPtr)
-		c.block.NewCall(c.funcs["promise_sched_enqueue"], sendWaiter)
-		c.block.NewBr(afterBlk)
-
-		c.block = signalBlk
 		nfPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldNotFull)))
 		nf := c.block.NewLoad(i8PtrTy, nfPtr)
-		c.block.NewCall(c.palCondSignal, nf)
-		c.block.NewBr(afterBlk)
+		c.block.NewCall(c.funcs["promise_waiter_wake_one"], sendHeadPtr, sendTailPtr, nf)
 
-		c.block = afterBlk
 		someVal := c.block.NewInsertValue(constant.NewZeroInitializer(optType), constant.True, 0)
 		someVal2 := c.block.NewInsertValue(someVal, rVal, 1)
+		someBlk := c.block // capture for phi predecessor
 		c.block.NewBr(doneBlk)
 
 		c.block = doneBlk
 		recvPhi := c.block.NewPhi(
 			&ir.Incoming{X: noneVal, Pred: noneBlk},
-			&ir.Incoming{X: someVal2, Pred: afterBlk},
+			&ir.Incoming{X: someVal2, Pred: someBlk},
 		)
 
 		if ci.binding != "_" {
@@ -3526,35 +3464,205 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 		}
 	}
 
-	// Step 6: Blocking select (no default, coroutine mode) — yield-and-retry.
-	// Instead of parking on waiter lists (which has fundamental multi-mutex races:
-	// enqueue-before-suspend UB and double-wake from multiple channels), we use
-	// a simple polling approach: unlock all channels, yield (cooperative suspend),
-	// and on resume branch back to lockStartBlk to re-lock and re-try all cases.
-	// The goroutine cycles through the scheduler until a case becomes ready.
+	// Step 6: Blocking select (no default, coroutine mode) — waiter-list parking.
+	// Uses SelectWaiterNode (SWN) entries that are layout-compatible with G at
+	// fields 0-4, allowing them to coexist on channel waiter lists. A per-select
+	// mutex (select_mutex) prevents enqueue-before-suspend races and provides
+	// wake-once semantics via G.select_case CAS under the mutex.
+	//
+	// Protocol:
+	//   1. Create select_mutex, lock it
+	//   2. Set G.select_case = -1
+	//   3. Store select_mutex in G.park_mutex (BEFORE enqueue — prevents race
+	//      where a waker dequeues SWN and reads G.park_mutex before we set it)
+	//   4. For each case: alloca SWN, init, enqueue on channel's waiter list
+	//   5. Unlock all channel mutexes
+	//   6. coro.suspend → scheduler unlocks select_mutex (via park_mutex)
+	//   7. Channel wake code dequeues SWN, calls select_try_wake (wake-once)
+	//   8. On resume: lock all channels, remove remaining SWNs, dispatch on G.select_case
 	if s.Default == nil && c.inCoroutine {
 		c.block = afterTryBlk
 
-		// Unlock all channels before yielding
-		unlockAll()
-
-		// Set park_mutex = null → yield (scheduler re-enqueues after suspend)
-		currentG := c.block.NewLoad(i8PtrTy, c.currentGGlobal)
 		gTy := goroutineStructType()
+		swnTy := selectWaiterNodeType()
+		currentG := c.block.NewLoad(i8PtrTy, c.currentGGlobal)
 		gTyped := c.block.NewBitCast(currentG, irtypes.NewPointer(gTy))
+
+		// 1. Create select_mutex and lock it
+		selectMtx := c.block.NewCall(c.palMutexInit)
+		c.block.NewCall(c.palMutexLock, selectMtx)
+
+		// 2. Set G.select_case = -1 (unclaimed)
+		scField := c.block.NewGetElementPtr(gTy, gTyped,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldSelectCase)))
+		neg1 := constant.NewInt(irtypes.I32, 0xFFFFFFFF) // -1 as unsigned i32
+		c.block.NewStore(neg1, scField)
+
+		// 3. Store select_mutex in G.park_mutex BEFORE enqueueing SWNs.
+		// This ensures that any waker that dequeues an SWN will see a valid
+		// select_mutex in G.park_mutex (not null). The select_mutex is locked,
+		// so the waker blocks in select_try_wake until the scheduler unlocks it
+		// after coro.suspend — preventing the enqueue-before-suspend race.
 		pmField := c.block.NewGetElementPtr(gTy, gTyped,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldParkMutex)))
-		c.block.NewStore(constant.NewNull(i8PtrTy), pmField)
+		c.block.NewStore(selectMtx, pmField)
 
+		// 4. For each case: alloca SWN, init, enqueue on channel's waiter list
+		swnAllocas := make([]value.Value, nCases)
+		for i, ci := range caseInfos {
+			swn := c.block.NewAlloca(swnTy)
+			swnAllocas[i] = swn
+
+			// Initialize SWN fields. Fields 0,2,3 are padding (set to null).
+			// Field 4 (next) is set to null by select_waiter_enqueue.
+			for _, padIdx := range []int64{0, 2, 3} {
+				padF := c.block.NewGetElementPtr(swnTy, swn,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, padIdx))
+				c.block.NewStore(constant.NewNull(i8PtrTy), padF)
+			}
+			// field 1 (kind) = 0xFF sentinel
+			kindF := c.block.NewGetElementPtr(swnTy, swn,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+			c.block.NewStore(constant.NewInt(irtypes.I8, swnKindSentinel), kindF)
+			// field 5 (g) = currentG
+			gF := c.block.NewGetElementPtr(swnTy, swn,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(swnFieldG)))
+			c.block.NewStore(currentG, gF)
+			// field 6 (case_index) = i
+			ciF := c.block.NewGetElementPtr(swnTy, swn,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(swnFieldCaseIndex)))
+			c.block.NewStore(constant.NewInt(irtypes.I32, int64(i)), ciF)
+			// field 7 (select_mutex) = selectMtx
+			smF := c.block.NewGetElementPtr(swnTy, swn,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(swnFieldSelectMutex)))
+			c.block.NewStore(selectMtx, smF)
+
+			// Enqueue SWN on the appropriate channel waiter list
+			swnRaw := c.block.NewBitCast(swn, i8PtrTy)
+			if ci.isSend {
+				headPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersHead)))
+				tailPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersTail)))
+				c.block.NewCall(c.funcs["promise_select_waiter_enqueue"], headPtr, tailPtr, swnRaw)
+			} else {
+				headPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersHead)))
+				tailPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersTail)))
+				c.block.NewCall(c.funcs["promise_select_waiter_enqueue"], headPtr, tailPtr, swnRaw)
+			}
+		}
+
+		// 5. Unlock all channel mutexes
+		unlockAll()
+
+		// 6. coro.suspend — G.park_mutex already set (step 3), scheduler unlocks after suspend
 		suspResult := c.block.NewCall(c.coroSuspend, constant.None, constant.False)
 		resumeBlk := c.newBlock("select.resume")
 		c.block.NewSwitch(suspResult, c.coroSuspendBlk,
 			ir.NewCase(constant.NewInt(irtypes.I8, 0), resumeBlk),
 			ir.NewCase(constant.NewInt(irtypes.I8, 1), c.coroCleanupBlk))
 
-		// On resume: go back to lock-start to re-lock all channels and re-try
+		// 8. On resume: lock all channels, remove SWNs, dispatch on G.select_case
 		c.block = resumeBlk
-		c.block.NewBr(lockStartBlk)
+
+		// Re-lock all channels in sorted order (same code as lockStartBlk but inline)
+		for i := 0; i < nCases; i++ {
+			ptr := c.block.NewGetElementPtr(arrType, chArr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
+			chRawSorted := c.block.NewLoad(i8PtrTy, ptr)
+			chPtrSorted := c.block.NewBitCast(chRawSorted, irtypes.NewPointer(chanType))
+			mtxPtr := c.block.NewGetElementPtr(chanType, chPtrSorted,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldMutex)))
+			mtx := c.block.NewLoad(i8PtrTy, mtxPtr)
+
+			if i > 0 {
+				prevPtr := c.block.NewGetElementPtr(arrType, chArr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i-1)))
+				prevRaw := c.block.NewLoad(i8PtrTy, prevPtr)
+				isSame := c.block.NewICmp(enum.IPredEQ, chRawSorted, prevRaw)
+				lockBlk := c.newBlock(fmt.Sprintf("select.wake.lock.%d", i))
+				skipBlk := c.newBlock(fmt.Sprintf("select.wake.lock.skip.%d", i))
+				c.block.NewCondBr(isSame, skipBlk, lockBlk)
+				c.block = lockBlk
+				c.block.NewCall(c.palMutexLock, mtx)
+				c.block.NewBr(skipBlk)
+				c.block = skipBlk
+			} else {
+				c.block.NewCall(c.palMutexLock, mtx)
+			}
+		}
+
+		// Remove all SWNs from channel waiter lists (cleanup)
+		for i, ci := range caseInfos {
+			swnRaw := c.block.NewBitCast(swnAllocas[i], i8PtrTy)
+			if ci.isSend {
+				headPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersHead)))
+				tailPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersTail)))
+				c.block.NewCall(c.funcs["promise_waiter_remove"], headPtr, tailPtr, swnRaw)
+			} else {
+				headPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersHead)))
+				tailPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRecvWaitersTail)))
+				c.block.NewCall(c.funcs["promise_waiter_remove"], headPtr, tailPtr, swnRaw)
+			}
+		}
+
+		// Destroy select_mutex — no longer needed after SWN cleanup.
+		// All channel mutexes are held, so no concurrent select_try_wake can
+		// be in progress. The scheduler already unlocked it after suspend.
+		c.block.NewCall(c.palMutexDestroy, selectMtx)
+
+		// Read G.select_case to determine which case won
+		wonCase := c.block.NewLoad(irtypes.I32, scField)
+
+		// Generate wake-path case execution blocks
+		// Each block: execute the send/recv, unlock all, run body, branch to merge
+		wakeCaseBlks := make([]*ir.Block, nCases)
+		var switchCases []*ir.Case
+		for i := range nCases {
+			wakeCaseBlks[i] = c.newBlock(fmt.Sprintf("select.wake.case%d", i))
+			switchCases = append(switchCases, ir.NewCase(
+				constant.NewInt(irtypes.I32, int64(i)), wakeCaseBlks[i]))
+		}
+
+		// Default for switch: unreachable (select_case must be a valid index)
+		unreachableBlk := c.newBlock("select.wake.unreachable")
+		c.block.NewSwitch(wonCase, unreachableBlk, switchCases...)
+		unreachableBlk.NewUnreachable()
+
+		for i, ci := range caseInfos {
+			c.block = wakeCaseBlks[i]
+			savedScopeLen := len(c.scopeBindings)
+
+			prefix := fmt.Sprintf("select.wk%d", i)
+			if ci.isSend {
+				execSend(ci, prefix)
+			} else {
+				execRecv(ci, prefix)
+			}
+
+			unlockAll()
+
+			for _, stmt := range s.Cases[i].Body {
+				if c.block.Term != nil {
+					break
+				}
+				c.genStmt(stmt)
+			}
+			if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > savedScopeLen {
+				c.emitScopeCleanup(savedScopeLen)
+			}
+			c.scopeBindings = c.scopeBindings[:savedScopeLen]
+			if c.block != nil && c.block.Term == nil {
+				c.block.NewBr(mergeBlk)
+			}
+		}
+
 	}
 
 	c.block = mergeBlk

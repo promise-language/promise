@@ -9414,8 +9414,8 @@ func TestForInChannelCoroutineMode(t *testing.T) {
 }
 
 func TestChannelRecvWakesSenderGoroutine(t *testing.T) {
-	// After receiving, the code should try to wake a parked sender goroutine
-	// before falling back to cond_signal. This tests the dual-mode wake path.
+	// After receiving, the code should wake a parked sender goroutine via
+	// promise_waiter_wake_one (handles both regular G and select SWN nodes).
 	ir := generateIR(t, `
 		main() {
 			ch := channel[int](capacity: 1);
@@ -9423,25 +9423,74 @@ func TestChannelRecvWakesSenderGoroutine(t *testing.T) {
 			result := <-ch;
 		}
 	`)
-	// Receive wake path: dequeue from send_waiters, then fallback to cond_signal
-	assertContains(t, ir, "call i8* @promise_waiter_dequeue(")
-	assertContains(t, ir, "chrecv.wake.send")
-	assertContains(t, ir, "chrecv.signal.send")
+	assertContains(t, ir, "call void @promise_waiter_wake_one(")
 }
 
 func TestChannelSendWakesRecvGoroutine(t *testing.T) {
-	// After sending, the code should try to wake a parked receiver goroutine
-	// before falling back to cond_signal. This tests the dual-mode wake path.
+	// After sending, the code should wake a parked receiver goroutine via
+	// promise_waiter_wake_one (handles both regular G and select SWN nodes).
 	ir := generateIR(t, `
 		main() {
 			ch := channel[int](capacity: 1);
 			ch.send(42);
 		}
 	`)
-	// Send wake path: dequeue from recv_waiters, then fallback to cond_signal
-	assertContains(t, ir, "call i8* @promise_waiter_dequeue(")
-	assertContains(t, ir, "send.wake.recv")
-	assertContains(t, ir, "send.signal.recv")
+	assertContains(t, ir, "call void @promise_waiter_wake_one(")
+}
+
+func TestSelectBlockingEmitsSWNParking(t *testing.T) {
+	// A blocking select (no default) in coroutine mode should emit:
+	// - SelectWaiterNode allocas and initialization (kind sentinel 0xFF)
+	// - select_waiter_enqueue calls to park SWNs on channel waiter lists
+	// - select_try_wake definition (wake-once protocol)
+	// - waiter_wake_one definition (handles both G and SWN nodes)
+	// - waiter_remove calls for SWN cleanup after resume
+	ir := generateIR(t, `
+		main() {
+			ch1 := channel[int](capacity: 1);
+			ch2 := channel[int](capacity: 1);
+			go { ch1.send(1); };
+			select {
+				v := <-ch1:
+					print_line("ch1");
+				v := <-ch2:
+					print_line("ch2");
+			}
+		}
+	`)
+	// SWN infrastructure functions
+	assertContains(t, ir, "define void @promise_select_waiter_enqueue(")
+	assertContains(t, ir, "define i1 @promise_select_try_wake(")
+	assertContains(t, ir, "define void @promise_waiter_wake_one(")
+
+	// Blocking path: SWN kind sentinel (0xFF = 255) stored to field 1
+	assertContains(t, ir, "store i8 255,")
+
+	// SWN enqueue calls (one per case)
+	assertContains(t, ir, "call void @promise_select_waiter_enqueue(")
+
+	// SWN cleanup after resume
+	assertContains(t, ir, "call void @promise_waiter_remove(")
+
+	// Select mutex lifecycle
+	assertContains(t, ir, "call void @pal_mutex_destroy(")
+}
+
+func TestSelectNonBlockingNoSWN(t *testing.T) {
+	// A select with a default case should NOT emit SWN parking code.
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 1);
+			select {
+				v := <-ch:
+					print_line("got");
+				default:
+					print_line("default");
+			}
+		}
+	`)
+	assertNotContains(t, ir, "call void @promise_select_waiter_enqueue(")
+	assertContains(t, ir, "select.default")
 }
 
 func TestBuildMatchPhiMixedArms(t *testing.T) {

@@ -2369,7 +2369,8 @@ func (c *Compiler) defineWaiterDequeueFunc() {
 }
 
 // defineWaiterWakeAllFunc emits @promise_waiter_wake_all(i8** %head_ptr, i8** %tail_ptr) → void
-// Dequeues all Gs from the waiter list, sets each to runnable, and enqueues in scheduler.
+// Dequeues all nodes from the waiter list, waking each one.
+// Handles both regular G nodes (field 1 = 0-4) and SelectWaiterNodes (field 1 = 0xFF).
 // Caller must hold the channel mutex.
 func (c *Compiler) defineWaiterWakeAllFunc() {
 	i8PtrPtr := irtypes.NewPointer(irtypes.I8Ptr)
@@ -2382,7 +2383,9 @@ func (c *Compiler) defineWaiterWakeAllFunc() {
 
 	entry := fn.NewBlock(".entry")
 	loopBlk := fn.NewBlock("loop")
-	wakeBlk := fn.NewBlock("wake")
+	checkKindBlk := fn.NewBlock("check_kind")
+	regularWakeBlk := fn.NewBlock("regular_wake")
+	selectWakeBlk := fn.NewBlock("select_wake")
 	doneBlk := fn.NewBlock("done")
 
 	entry.NewBr(loopBlk)
@@ -2390,15 +2393,24 @@ func (c *Compiler) defineWaiterWakeAllFunc() {
 	// loop: dequeue head
 	g := loopBlk.NewCall(c.funcs["promise_waiter_dequeue"], headParam, tailParam)
 	isNull := loopBlk.NewICmp(enum.IPredEQ, g, constant.NewNull(irtypes.I8Ptr))
-	loopBlk.NewCondBr(isNull, doneBlk, wakeBlk)
+	loopBlk.NewCondBr(isNull, doneBlk, checkKindBlk)
 
-	// wake: set runnable, enqueue, loop
-	gTyped := wakeBlk.NewBitCast(g, gPtrTy)
-	statusPtr := wakeBlk.NewGetElementPtr(gTy, gTyped,
+	// check_kind: inspect field 1 (status/kind)
+	gTyped := checkKindBlk.NewBitCast(g, gPtrTy)
+	statusPtr := checkKindBlk.NewGetElementPtr(gTy, gTyped,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldStatus)))
-	wakeBlk.NewStore(constant.NewInt(irtypes.I8, gStatusRunnable), statusPtr)
-	wakeBlk.NewCall(c.funcs["promise_sched_enqueue"], g)
-	wakeBlk.NewBr(loopBlk)
+	kind := checkKindBlk.NewLoad(irtypes.I8, statusPtr)
+	isSWN := checkKindBlk.NewICmp(enum.IPredEQ, kind, constant.NewInt(irtypes.I8, swnKindSentinel))
+	checkKindBlk.NewCondBr(isSWN, selectWakeBlk, regularWakeBlk)
+
+	// regular_wake: set runnable, enqueue, loop
+	regularWakeBlk.NewStore(constant.NewInt(irtypes.I8, gStatusRunnable), statusPtr)
+	regularWakeBlk.NewCall(c.funcs["promise_sched_enqueue"], g)
+	regularWakeBlk.NewBr(loopBlk)
+
+	// select_wake: call select_try_wake (may fail if already woken), then loop
+	selectWakeBlk.NewCall(c.funcs["promise_select_try_wake"], g)
+	selectWakeBlk.NewBr(loopBlk)
 
 	doneBlk.NewRet(nil)
 
@@ -2487,4 +2499,223 @@ func (c *Compiler) defineWaiterRemoveFunc() {
 	doneBlk.NewRet(nil)
 
 	c.funcs["promise_waiter_remove"] = fn
+}
+
+// --- Select waiter support (B0008) ---
+//
+// SelectWaiterNode (SWN) is layout-compatible with G at fields 0–4 so that
+// the existing waiter_dequeue and waiter_remove functions work on mixed lists
+// of G and SWN nodes. Field 1 (i8, same position as G.status) is set to 0xFF
+// as a sentinel — valid G status values are 0–4, so after dequeue the caller
+// can distinguish SWN from G by checking field 1.
+//
+// Layout:
+//   0: i8*  (padding, aligns with G.coro_handle)
+//   1: i8   kind = 0xFF (sentinel, aligns with G.status)
+//   2: i8*  (padding, aligns with G.wait_data)
+//   3: i8*  (padding, aligns with G.sched_next)
+//   4: i8*  next (waiter list linking, aligns with G.wait_next)
+//   5: i8*  g (back-pointer to owning G)
+//   6: i32  case_index
+//   7: i8*  select_mutex (for wake-once protocol; stored here because
+//           the scheduler clears G.park_mutex after unlocking it)
+
+const swnKindSentinel = 0xFF
+
+// SWN field indices (fields 0–4 match G layout for waiter list compatibility).
+const (
+	swnFieldNext        = 4 // same offset as gFieldWaitNext
+	swnFieldG           = 5
+	swnFieldCaseIndex   = 6
+	swnFieldSelectMutex = 7
+)
+
+// selectWaiterNodeType returns the LLVM struct type for a SelectWaiterNode.
+func selectWaiterNodeType() *irtypes.StructType {
+	return irtypes.NewStruct(
+		irtypes.I8Ptr, // pad0 (aligns with G.coro_handle)
+		irtypes.I8,    // kind = 0xFF sentinel (aligns with G.status)
+		irtypes.I8Ptr, // pad2 (aligns with G.wait_data)
+		irtypes.I8Ptr, // pad3 (aligns with G.sched_next)
+		irtypes.I8Ptr, // next (waiter list linking, aligns with G.wait_next)
+		irtypes.I8Ptr, // g (back-pointer to owning G)
+		irtypes.I32,   // case_index
+		irtypes.I8Ptr, // select_mutex (for wake-once protocol)
+	)
+}
+
+// defineSelectWaiterEnqueueFunc emits @promise_select_waiter_enqueue(i8** %head, i8** %tail, i8* %swn).
+// Like waiter_enqueue but does NOT set field 1 (kind sentinel is pre-set by caller).
+// Uses field 4 (next) for linking — same offset as G.wait_next.
+func (c *Compiler) defineSelectWaiterEnqueueFunc() {
+	i8PtrPtr := irtypes.NewPointer(irtypes.I8Ptr)
+	headParam := ir.NewParam("head_ptr", i8PtrPtr)
+	tailParam := ir.NewParam("tail_ptr", i8PtrPtr)
+	swnParam := ir.NewParam("swn", irtypes.I8Ptr)
+	fn := c.module.NewFunc("promise_select_waiter_enqueue", irtypes.Void, headParam, tailParam, swnParam)
+
+	swnTy := selectWaiterNodeType()
+	swnPtrTy := irtypes.NewPointer(swnTy)
+
+	entry := fn.NewBlock(".entry")
+	setHeadBlk := fn.NewBlock("set_head")
+	linkTailBlk := fn.NewBlock("link_tail")
+
+	// SWN.next = null (field 4)
+	swnTyped := entry.NewBitCast(swnParam, swnPtrTy)
+	nextPtr := entry.NewGetElementPtr(swnTy, swnTyped,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(swnFieldNext)))
+	entry.NewStore(constant.NewNull(irtypes.I8Ptr), nextPtr)
+
+	// NOTE: we do NOT set field 1 (kind) — caller pre-sets to 0xFF
+
+	// current_tail = load *tail_ptr
+	currentTail := entry.NewLoad(irtypes.I8Ptr, tailParam)
+	isEmpty := entry.NewICmp(enum.IPredEQ, currentTail, constant.NewNull(irtypes.I8Ptr))
+	entry.NewCondBr(isEmpty, setHeadBlk, linkTailBlk)
+
+	// set_head: list was empty → head = tail = swn
+	setHeadBlk.NewStore(swnParam, headParam)
+	setHeadBlk.NewStore(swnParam, tailParam)
+	setHeadBlk.NewRet(nil)
+
+	// link_tail: tail.wait_next = swn, tail = swn
+	// The tail could be either a G or an SWN — both have field 4 (wait_next/next)
+	// at the same offset. We use G type for GEP since layout is compatible at field 4.
+	gTy := goroutineStructType()
+	gPtrTy := irtypes.NewPointer(gTy)
+	tailTyped := linkTailBlk.NewBitCast(currentTail, gPtrTy)
+	tailWaitNext := linkTailBlk.NewGetElementPtr(gTy, tailTyped,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldWaitNext)))
+	linkTailBlk.NewStore(swnParam, tailWaitNext)
+	linkTailBlk.NewStore(swnParam, tailParam)
+	linkTailBlk.NewRet(nil)
+
+	c.funcs["promise_select_waiter_enqueue"] = fn
+}
+
+// defineSelectTryWakeFunc emits @promise_select_try_wake(i8* %swn) → i1.
+// Implements the wake-once protocol for select waiters. Returns true if this
+// call successfully claimed the select (set G.select_case), false if another
+// waker already claimed it.
+//
+//  1. Read SWN.g, SWN.case_index, SWN.select_mutex
+//  2. Lock select_mutex
+//  3. If G.select_case != -1: already woken → unlock, return false
+//  4. Set G.select_case = case_index, mark runnable, enqueue G
+//  5. Unlock select_mutex, return true
+func (c *Compiler) defineSelectTryWakeFunc() {
+	swnParam := ir.NewParam("swn", irtypes.I8Ptr)
+	fn := c.module.NewFunc("promise_select_try_wake", irtypes.I1, swnParam)
+
+	swnTy := selectWaiterNodeType()
+	swnPtrTy := irtypes.NewPointer(swnTy)
+	gTy := goroutineStructType()
+	gPtrTy := irtypes.NewPointer(gTy)
+
+	entry := fn.NewBlock(".entry")
+	alreadyWokenBlk := fn.NewBlock("already_woken")
+	doWakeBlk := fn.NewBlock("do_wake")
+
+	// Read SWN.g (field 5), SWN.case_index (field 6), SWN.select_mutex (field 7)
+	swnTyped := entry.NewBitCast(swnParam, swnPtrTy)
+	gField := entry.NewGetElementPtr(swnTy, swnTyped,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(swnFieldG)))
+	gRaw := entry.NewLoad(irtypes.I8Ptr, gField)
+
+	caseField := entry.NewGetElementPtr(swnTy, swnTyped,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(swnFieldCaseIndex)))
+	caseIdx := entry.NewLoad(irtypes.I32, caseField)
+
+	// Read select_mutex from SWN (not from G.park_mutex, which the scheduler clears)
+	smField := entry.NewGetElementPtr(swnTy, swnTyped,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(swnFieldSelectMutex)))
+	selectMtx := entry.NewLoad(irtypes.I8Ptr, smField)
+
+	gTyped := entry.NewBitCast(gRaw, gPtrTy)
+
+	// Lock select_mutex
+	entry.NewCall(c.palMutexLock, selectMtx)
+
+	// Check G.select_case: if != -1 (0xFFFFFFFF as u32), already woken
+	scField := entry.NewGetElementPtr(gTy, gTyped,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldSelectCase)))
+	currentCase := entry.NewLoad(irtypes.I32, scField)
+	neg1 := constant.NewInt(irtypes.I32, 0xFFFFFFFF) // -1 as unsigned i32
+	isUnclaimed := entry.NewICmp(enum.IPredEQ, currentCase, neg1)
+	entry.NewCondBr(isUnclaimed, doWakeBlk, alreadyWokenBlk)
+
+	// already_woken: unlock and return false
+	alreadyWokenBlk.NewCall(c.palMutexUnlock, selectMtx)
+	alreadyWokenBlk.NewRet(constant.False)
+
+	// do_wake: claim the select, mark runnable, enqueue, return true
+	doWakeBlk.NewStore(caseIdx, scField)
+	statusPtr := doWakeBlk.NewGetElementPtr(gTy, gTyped,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldStatus)))
+	doWakeBlk.NewStore(constant.NewInt(irtypes.I8, gStatusRunnable), statusPtr)
+	doWakeBlk.NewCall(c.funcs["promise_sched_enqueue"], gRaw)
+	doWakeBlk.NewCall(c.palMutexUnlock, selectMtx)
+	doWakeBlk.NewRet(constant.True)
+
+	c.funcs["promise_select_try_wake"] = fn
+}
+
+// defineWaiterWakeOneFunc emits @promise_waiter_wake_one(i8** %head, i8** %tail, i8* %cond) → void.
+// Dequeues waiters from the list until one is successfully woken.
+// Handles both regular G nodes (field 1 = 0-4) and SelectWaiterNodes (field 1 = 0xFF).
+// For regular G: set status = runnable, enqueue.
+// For SWN: call select_try_wake; if it fails (goroutine already woken by another case),
+// dequeue the next waiter and retry. If list is exhausted, signal the cond var.
+func (c *Compiler) defineWaiterWakeOneFunc() {
+	i8PtrPtr := irtypes.NewPointer(irtypes.I8Ptr)
+	headParam := ir.NewParam("head_ptr", i8PtrPtr)
+	tailParam := ir.NewParam("tail_ptr", i8PtrPtr)
+	condParam := ir.NewParam("cond", irtypes.I8Ptr)
+	fn := c.module.NewFunc("promise_waiter_wake_one", irtypes.Void, headParam, tailParam, condParam)
+
+	gTy := goroutineStructType()
+	gPtrTy := irtypes.NewPointer(gTy)
+
+	entry := fn.NewBlock(".entry")
+	loopBlk := fn.NewBlock("loop")
+	checkKindBlk := fn.NewBlock("check_kind")
+	regularWakeBlk := fn.NewBlock("regular_wake")
+	selectWakeBlk := fn.NewBlock("select_wake")
+	signalBlk := fn.NewBlock("signal")
+	doneBlk := fn.NewBlock("done")
+
+	entry.NewBr(loopBlk)
+
+	// loop: dequeue a waiter
+	waiter := loopBlk.NewCall(c.funcs["promise_waiter_dequeue"], headParam, tailParam)
+	isNull := loopBlk.NewICmp(enum.IPredEQ, waiter, constant.NewNull(irtypes.I8Ptr))
+	loopBlk.NewCondBr(isNull, signalBlk, checkKindBlk)
+
+	// check_kind: inspect field 1 (status/kind)
+	waiterTyped := checkKindBlk.NewBitCast(waiter, gPtrTy)
+	statusPtr := checkKindBlk.NewGetElementPtr(gTy, waiterTyped,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldStatus)))
+	kind := checkKindBlk.NewLoad(irtypes.I8, statusPtr)
+	isSWN := checkKindBlk.NewICmp(enum.IPredEQ, kind, constant.NewInt(irtypes.I8, swnKindSentinel))
+	checkKindBlk.NewCondBr(isSWN, selectWakeBlk, regularWakeBlk)
+
+	// regular_wake: set status = runnable, enqueue, done
+	regularWakeBlk.NewStore(constant.NewInt(irtypes.I8, gStatusRunnable), statusPtr)
+	regularWakeBlk.NewCall(c.funcs["promise_sched_enqueue"], waiter)
+	regularWakeBlk.NewBr(doneBlk)
+
+	// select_wake: call try_wake, branch on its i1 return value.
+	// true = we claimed the select and woke G → done.
+	// false = another waker already claimed it → dequeue next waiter and retry.
+	woken := selectWakeBlk.NewCall(c.funcs["promise_select_try_wake"], waiter)
+	selectWakeBlk.NewCondBr(woken, doneBlk, loopBlk)
+
+	// signal: no waiter found (or all SWNs stale) → signal cond var
+	signalBlk.NewCall(c.palCondSignal, condParam)
+	signalBlk.NewBr(doneBlk)
+
+	doneBlk.NewRet(nil)
+
+	c.funcs["promise_waiter_wake_one"] = fn
 }

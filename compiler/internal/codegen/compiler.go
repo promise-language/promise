@@ -1003,6 +1003,9 @@ func (c *Compiler) declareIntrinsics() {
 	c.defineSchedShutdownFunc()
 	c.defineWaiterEnqueueFunc()
 	c.defineWaiterDequeueFunc()
+	c.defineSelectWaiterEnqueueFunc()
+	c.defineSelectTryWakeFunc()
+	c.defineWaiterWakeOneFunc()
 	c.defineWaiterWakeAllFunc()
 	c.defineWaiterRemoveFunc()
 

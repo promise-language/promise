@@ -1,0 +1,33 @@
+// Test that multiple sequential blocking selects on the same channel
+// correctly park and wake via SWN waiter lists, even when multiple
+// goroutines are racing to send data. Each send wakes the select,
+// which re-parks for the next iteration.
+main() `test(expected: "3") {
+  ch := channel[int](capacity: 1);
+  dummy := channel[int](capacity: 1);
+
+  // Three goroutines each send 1 — they race to deliver
+  go {
+    ch.send(1);
+  };
+  go {
+    ch.send(1);
+  };
+  go {
+    ch.send(1);
+  };
+
+  // Three sequential blocking selects — each parks until a send arrives
+  int total = 0;
+  for i in 0..3 {
+    select {
+      v := <-ch:
+      if val := v {
+        total += val;
+      }
+      v := <-dummy:
+      total += 0;
+    }
+  }
+  print_line(total);
+}

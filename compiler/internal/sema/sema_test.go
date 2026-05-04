@@ -10837,3 +10837,194 @@ func TestEnumGetterOnDataEnumOK(t *testing.T) {
 		test() { bool b = Shape.Circle(radius: 1.0).has_area; }
 	`)
 }
+
+// --- Destructure is-pattern tests ---
+
+func TestIsDestructureEnumVariant(t *testing.T) {
+	checkOK(t, `
+		enum Shape { Circle(f64 radius), Rect(f64 w, f64 h), Point }
+		test() {
+			Shape s = Shape.Circle(radius: 5.0);
+			if s is Circle(r) {
+				f64 x = r;
+			}
+		}
+	`)
+}
+
+func TestIsDestructureEnumMultiField(t *testing.T) {
+	checkOK(t, `
+		enum Shape { Circle(f64 radius), Rect(f64 w, f64 h), Point }
+		test() {
+			Shape s = Shape.Rect(w: 3.0, h: 4.0);
+			if s is Rect(w, h) {
+				f64 area = w * h;
+			}
+		}
+	`)
+}
+
+func TestIsDestructureEnumWrongFieldCount(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Shape { Circle(f64 radius), Rect(f64 w, f64 h), Point }
+		test() {
+			Shape s = Shape.Circle(radius: 5.0);
+			if s is Circle(r, extra) {}
+		}
+	`)
+	expectError(t, errs, "variant Circle has 1 fields, got 2 bindings")
+}
+
+func TestIsDestructureNamedType(t *testing.T) {
+	checkOK(t, `
+		type Animal { string name; speak(&this) string `+"`"+`abstract; }
+		type Dog is Animal { string breed; speak(&this) string { return "woof"; } }
+		test() {
+			Animal a = Dog(name: "Rex", breed: "Lab");
+			if a is Dog(name, breed) {
+				string n = name;
+				string b = breed;
+			}
+		}
+	`)
+}
+
+func TestIsDestructureNamedTypeWrongFieldCount(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo { int x; int y; }
+		test() {
+			Foo f = Foo(x: 1, y: 2);
+			if f is Foo(a) {}
+		}
+	`)
+	expectError(t, errs, "type Foo has 2 fields, got 1 bindings")
+}
+
+func TestIsDestructureUndefinedType(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			int x = 0;
+			if x is Bogus(a) {}
+		}
+	`)
+	expectError(t, errs, "undefined type: Bogus")
+}
+
+func TestIsDestructureBindingsAvailableInThenBlock(t *testing.T) {
+	// Bindings from destructure should be usable in the then block
+	checkOK(t, `
+		enum Option[T] { Some(T value), None }
+		test() {
+			Option[int] opt = Option[int].Some(value: 42);
+			if opt is Some(val) {
+				int x = val + 1;
+			}
+		}
+	`)
+}
+
+func TestIsDestructureBindingsNotAvailableOutside(t *testing.T) {
+	// Bindings should not leak outside the if body
+	errs := checkErrs(t, `
+		enum Option[T] { Some(T value), None }
+		test() {
+			Option[int] opt = Option[int].Some(value: 42);
+			if opt is Some(val) {}
+			int x = val;
+		}
+	`)
+	expectError(t, errs, "undefined: val")
+}
+
+func TestIsDestructureEnumTooFewBindings(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Shape { Rect(f64 w, f64 h) }
+		test() {
+			Shape s = Shape.Rect(w: 1.0, h: 2.0);
+			if s is Rect(w) {}
+		}
+	`)
+	expectError(t, errs, "variant Rect has 2 fields, got 1 bindings")
+}
+
+func TestIsDestructureFieldlessVariantWithBindings(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Shape { Circle(f64 r), Point }
+		test() {
+			Shape s = Shape.Point;
+			if s is Point(x) {}
+		}
+	`)
+	expectError(t, errs, "variant Point has 0 fields, got 1 bindings")
+}
+
+func TestIsDestructureVariantFromWrongEnum(t *testing.T) {
+	errs := checkErrs(t, `
+		enum A { X(int v) }
+		enum B { Y(int v) }
+		test() {
+			B b = B.Y(v: 1);
+			if b is X(v) {}
+		}
+	`)
+	expectError(t, errs, "undefined type: X")
+}
+
+func TestIsDestructureNonTypeIdentifier(t *testing.T) {
+	errs := checkErrs(t, `
+		my_func() int { return 1; }
+		test() {
+			int x = 0;
+			if x is my_func(a) {}
+		}
+	`)
+	expectError(t, errs, "my_func is not a type")
+}
+
+func TestIsDestructureGenericEnumSubstitution(t *testing.T) {
+	// Verify that binding types are correctly substituted for generic enums
+	checkOK(t, `
+		enum Result[T] { Ok(T value), Err(string message) }
+		test() {
+			Result[int] r = Result[int].Ok(value: 42);
+			if r is Ok(v) {
+				int x = v + 1;
+			}
+			Result[int] r2 = Result[int].Err(message: "fail");
+			if r2 is Err(msg) {
+				string s = msg;
+			}
+		}
+	`)
+}
+
+func TestIsDestructureVariantPriorityOverType(t *testing.T) {
+	// When a variant name collides with a type name, the variant should win
+	// when the subject is that enum.
+	checkOK(t, `
+		type Box { int x; }
+		enum Wrapper { Box(int v), None }
+		test() {
+			Wrapper w = Wrapper.Box(v: 42);
+			if w is Box(v) {
+				int x = v;
+			}
+		}
+	`)
+}
+
+func TestIsDestructureDeepInheritance(t *testing.T) {
+	checkOK(t, `
+		type A { string x; do_thing(&this) string `+"`"+`abstract; }
+		type B is A { string y; do_thing(&this) string { return "b"; } }
+		type C is B { string z; do_thing(&this) string { return "c"; } }
+		test() {
+			A a = C(x: "1", y: "2", z: "3");
+			if a is C(x, y, z) {
+				string s1 = x;
+				string s2 = y;
+				string s3 = z;
+			}
+		}
+	`)
+}

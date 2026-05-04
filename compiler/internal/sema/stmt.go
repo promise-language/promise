@@ -731,6 +731,17 @@ func (c *Checker) checkIfStmt(s *ast.IfStmt) {
 			}
 			c.checkBlock(s.Body)
 			c.closeScope()
+		} else if destructNarrow := c.detectIsDestructureNarrowing(s.Cond); destructNarrow != nil {
+			// Destructure is-pattern: insert bindings into then-scope
+			c.info.IsDestructureNarrowings[s] = destructNarrow
+			c.openScope(s.Body, "if-destructure")
+			for _, b := range destructNarrow.Bindings {
+				if b.VarName != "_" {
+					c.insert(types.NewVar(tpos(s.Pos()), b.VarName, b.Type))
+				}
+			}
+			c.checkBlock(s.Body)
+			c.closeScope()
 		} else {
 			if cond != nil && !types.Identical(cond, types.TypBool) {
 				// Suppress for bool? identifiers (ambiguity error already reported above)
@@ -786,6 +797,90 @@ func (c *Checker) detectOptionalNarrowing(cond ast.Expr, condType types.Type) *O
 	}
 
 	return nil
+}
+
+// detectIsDestructureNarrowing checks if an if-condition is a destructure is-pattern
+// (e.g., `if shape is Circle(r)` or `if animal is Dog(breed)`).
+// Returns the narrowing info if detected, nil otherwise.
+func (c *Checker) detectIsDestructureNarrowing(cond ast.Expr) *IsDestructureNarrowing {
+	isExpr, ok := cond.(*ast.IsExpr)
+	if !ok {
+		return nil
+	}
+	dp, ok := isExpr.Pattern.(*ast.DestructureIsPattern)
+	if !ok {
+		return nil
+	}
+
+	subjectType := c.info.Types[isExpr.Expr]
+	if subjectType == nil {
+		return nil
+	}
+
+	// Check if it's an enum variant of the subject type
+	var enum *types.Enum
+	var subst map[*types.TypeParam]types.Type
+	switch st := subjectType.Underlying().(type) {
+	case *types.Enum:
+		enum = st
+	case *types.Instance:
+		if e, ok := st.Origin().(*types.Enum); ok {
+			enum = e
+			subst = types.BuildSubstMap(e.TypeParams(), st.TypeArgs())
+		}
+	}
+
+	if enum != nil {
+		v := enum.LookupVariant(dp.TypeName)
+		if v != nil {
+			bindings := make([]IsDestructureBinding, 0, len(dp.Bindings))
+			for i, name := range dp.Bindings {
+				if i >= v.NumFields() {
+					break
+				}
+				ft := v.Fields()[i].Type()
+				if subst != nil {
+					ft = types.Substitute(ft, subst)
+				}
+				bindings = append(bindings, IsDestructureBinding{VarName: name, Type: ft})
+			}
+			return &IsDestructureNarrowing{
+				SubjectExpr: isExpr.Expr,
+				Bindings:    bindings,
+				IsEnum:      true,
+				VariantName: dp.TypeName,
+				TargetType:  subjectType,
+			}
+		}
+	}
+
+	// Named type destructure
+	obj := c.lookup(dp.TypeName)
+	if obj == nil {
+		return nil
+	}
+	tn, ok := obj.(*types.TypeName)
+	if !ok {
+		return nil
+	}
+	named, ok := tn.Type().(*types.Named)
+	if !ok {
+		return nil
+	}
+	allFields := named.AllFields()
+	bindings := make([]IsDestructureBinding, 0, len(dp.Bindings))
+	for i, name := range dp.Bindings {
+		if i >= len(allFields) {
+			break
+		}
+		bindings = append(bindings, IsDestructureBinding{VarName: name, Type: allFields[i].Type()})
+	}
+	return &IsDestructureNarrowing{
+		SubjectExpr: isExpr.Expr,
+		Bindings:    bindings,
+		IsEnum:      false,
+		TargetType:  named,
+	}
 }
 
 // preDetectIfNarrowing detects compound (!cc, a && b) and negated (is absent)

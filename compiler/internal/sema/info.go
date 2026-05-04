@@ -126,6 +126,10 @@ type Info struct {
 	// Used by codegen to unwrap optional variables in narrowed scopes.
 	OptionalNarrowings map[*ast.IfStmt]*OptionalNarrowing
 
+	// IsDestructureNarrowings maps if-statement nodes to destructure is-pattern info.
+	// Used by codegen to extract fields into bindings in the then-block.
+	IsDestructureNarrowings map[*ast.IfStmt]*IsDestructureNarrowing
+
 	// FailableExprs records expressions whose evaluation can produce an error
 	// (failable function/method calls, failable constructor calls). Used by
 	// error operators (?, !, ? handler) to validate their inner expression.
@@ -200,6 +204,23 @@ type OptionalNarrowing struct {
 	Vars       []NarrowedVar // one or more narrowed variables
 	Negated    bool          // if true, narrowing applies to else branch (!cc form)
 	PostNarrow bool          // if true, narrowing persists after the if (diverging then-body)
+}
+
+// IsDestructureBinding records a single binding from a destructure is-pattern.
+type IsDestructureBinding struct {
+	VarName string     // the binding variable name
+	Type    types.Type // the resolved type of the field being bound
+}
+
+// IsDestructureNarrowing records that an if-statement's condition is a destructure
+// is-pattern (e.g., `if shape is Circle(r)` or `if animal is Dog(breed)`).
+// Codegen uses this to extract fields into bindings in the then-block.
+type IsDestructureNarrowing struct {
+	SubjectExpr ast.Expr               // the expression being checked
+	Bindings    []IsDestructureBinding // binding variable names and types
+	IsEnum      bool                   // true if checking an enum variant
+	VariantName string                 // for enums: the variant name
+	TargetType  types.Type             // the target type (Named or Instance)
 }
 
 // recordType stores the resolved type for an expression.

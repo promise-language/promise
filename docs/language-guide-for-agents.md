@@ -310,6 +310,17 @@ match value {
 if animal is Dog { animal.breed; }   // narrowed
 Dog? dog = animal as Dog;            // safe cast (returns optional)
 Dog dog = animal as! Dog;            // forced cast (panics on failure)
+
+// Destructure is-patterns (enum variants and named types)
+if shape is Circle(r) {
+  print_line("radius: {r}");        // r is bound from Circle's field
+}
+if opt is Some(val) {
+  print_line("value: {val}");       // works with generic enums
+}
+if animal is Dog(name, breed) {
+  print_line("{name} is a {breed}");  // named type field extraction
+}
 ```
 
 ## Ownership & Borrowing

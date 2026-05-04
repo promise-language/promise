@@ -11779,3 +11779,101 @@ func TestModuleSplitNonPrivateGlobalsStripped(t *testing.T) {
 		}
 	}
 }
+
+func TestIsDestructureEnumCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		enum Shape { Circle(f64 radius), Point }
+		main() {
+			Shape s = Shape.Circle(radius: 5.0);
+			if s is Circle(r) {
+				print_line("{r}");
+			}
+		}
+	`)
+	// Should generate tag comparison for the enum variant check
+	assertContains(t, ir, "icmp eq i32")
+	// Should have the destructure blocks
+	assertContains(t, ir, "isdestr.then")
+	assertContains(t, ir, "isdestr.end")
+}
+
+func TestIsDestructureNamedTypeCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal { string name; speak(&this) string `+"`"+`abstract; }
+		type Dog is Animal { string breed; speak(&this) string { return "woof"; } }
+		main() {
+			Animal a = Dog(name: "Rex", breed: "Lab");
+			if a is Dog(n, b) {
+				print_line(n);
+			}
+		}
+	`)
+	// Should generate RTTI type check
+	assertContains(t, ir, "call i32 @promise_type_is(")
+	// Should have the destructure blocks
+	assertContains(t, ir, "isdestr.then")
+	assertContains(t, ir, "isdestr.end")
+}
+
+func TestIsDestructureElseCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		enum Opt { Some(int v), None }
+		main() {
+			Opt o = Opt.None;
+			if o is Some(v) {
+				print_line("{v}");
+			} else {
+				print_line("none");
+			}
+		}
+	`)
+	assertContains(t, ir, "isdestr.then")
+	assertContains(t, ir, "isdestr.else")
+	assertContains(t, ir, "isdestr.end")
+}
+
+func TestIsDestructureGenericEnumCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		enum Option[T] { Some(T value), None }
+		main() {
+			Option[int] opt = Option[int].Some(value: 42);
+			if opt is Some(val) {
+				print_line("{val}");
+			}
+		}
+	`)
+	// Should have the destructure blocks for the monomorphized enum
+	assertContains(t, ir, "isdestr.then")
+	assertContains(t, ir, "icmp eq i32")
+}
+
+func TestIsDestructureUnderscoreCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		enum Pair { V(int a, int b) }
+		main() {
+			Pair p = Pair.V(a: 1, b: 2);
+			if p is V(_, y) {
+				print_line("{y}");
+			}
+		}
+	`)
+	assertContains(t, ir, "isdestr.then")
+	// Should still produce the tag check
+	assertContains(t, ir, "icmp eq i32")
+}
+
+func TestIsDestructureAsExprCodegen(t *testing.T) {
+	// When used as a plain expression (not if condition), should just produce the bool check
+	ir := generateIR(t, `
+		enum Opt { Some(int v), None }
+		main() {
+			Opt o = Opt.Some(v: 42);
+			bool b = o is Some(x);
+			if b { print_line("yes"); }
+		}
+	`)
+	// Should NOT have isdestr blocks (handled by genIsDestructurePattern, not genIfDestructureIsStmt)
+	assertNotContains(t, ir, "isdestr.then")
+	// But should still have the tag comparison
+	assertContains(t, ir, "icmp eq i32")
+}

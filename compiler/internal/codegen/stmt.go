@@ -1275,6 +1275,12 @@ func (c *Compiler) genIfStmt(s *ast.IfStmt) {
 		return
 	}
 
+	// Check for destructure is-pattern narrowing
+	if destructNarrow := c.info.IsDestructureNarrowings[s]; destructNarrow != nil {
+		c.genIfDestructureIsStmt(s, destructNarrow)
+		return
+	}
+
 	cond := c.genExpr(s.Cond)
 
 	thenBlock := c.newBlock("if.then")
@@ -1490,6 +1496,184 @@ func (c *Compiler) genCompoundNarrowStmt(s *ast.IfStmt, narrow *sema.OptionalNar
 	}
 
 	c.block = mergeBlock
+}
+
+// genIfDestructureIsStmt handles if-statements with destructure is-patterns.
+// Generates a type/variant check, then extracts fields into bindings in the then-block.
+func (c *Compiler) genIfDestructureIsStmt(s *ast.IfStmt, narrow *sema.IsDestructureNarrowing) {
+	subject := c.genExpr(narrow.SubjectExpr)
+
+	var cond value.Value
+	if narrow.IsEnum {
+		// Enum variant check: compare tag
+		enumLayout := c.lookupEnumLayout(narrow.TargetType)
+		if enumLayout == nil {
+			panic(fmt.Sprintf("codegen: no enum layout for %s", narrow.TargetType))
+		}
+		var tag value.Value
+		if enumLayout.MaxVariantDataSize == 0 {
+			tag = subject // fieldless enum: value IS the tag
+		} else {
+			tag = c.block.NewExtractValue(subject, 0)
+		}
+		expectedTag := constant.NewInt(irtypes.I32, int64(enumLayout.VariantTag[narrow.VariantName]))
+		cond = c.block.NewICmp(enum.IPredEQ, tag, expectedTag)
+	} else {
+		// Named type check via RTTI
+		targetNamed := extractNamed(narrow.TargetType)
+		if targetNamed == nil {
+			panic(fmt.Sprintf("codegen: cannot extract Named from %s", narrow.TargetType))
+		}
+		targetID := c.assignTypeID(targetNamed)
+		instance := c.extractInstancePtr(subject)
+		variantPtr := c.loadVariantPtr(instance)
+		result := c.block.NewCall(c.funcs["promise_type_is"],
+			variantPtr, constant.NewInt(irtypes.I32, int64(targetID)))
+		cond = c.block.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 0))
+	}
+
+	thenBlock := c.newBlock("isdestr.then")
+	mergeBlock := c.newBlock("isdestr.end")
+
+	var elseBlock *ir.Block
+	if s.Else != nil {
+		elseBlock = c.newBlock("isdestr.else")
+		c.block.NewCondBr(cond, thenBlock, elseBlock)
+	} else {
+		c.block.NewCondBr(cond, thenBlock, mergeBlock)
+	}
+
+	// Then: extract fields and bind them
+	c.block = thenBlock
+
+	// Save previous locals that might be shadowed by bindings
+	type savedLocal struct {
+		name string
+		val  *ir.InstAlloca
+		had  bool
+	}
+	var saved []savedLocal
+	for _, b := range narrow.Bindings {
+		if b.VarName != "_" {
+			prev, had := c.locals[b.VarName]
+			saved = append(saved, savedLocal{b.VarName, prev, had})
+		}
+	}
+
+	if narrow.IsEnum {
+		c.bindIsDestructureEnum(subject, narrow)
+	} else {
+		c.bindIsDestructureNamed(subject, narrow)
+	}
+
+	c.genBlock(s.Body)
+
+	// Restore previous locals
+	for _, s := range saved {
+		if s.had {
+			c.locals[s.name] = s.val
+		} else {
+			delete(c.locals, s.name)
+		}
+	}
+
+	if c.block.Term == nil {
+		c.block.NewBr(mergeBlock)
+	}
+
+	// Else branch
+	if s.Else != nil {
+		c.block = elseBlock
+		c.genStmt(s.Else)
+		if c.block.Term == nil {
+			c.block.NewBr(mergeBlock)
+		}
+	}
+
+	c.block = mergeBlock
+}
+
+// bindIsDestructureEnum extracts enum variant data fields and binds them to local variables.
+func (c *Compiler) bindIsDestructureEnum(subject value.Value, narrow *sema.IsDestructureNarrowing) {
+	enumLayout := c.lookupEnumLayout(narrow.TargetType)
+	dataType := enumLayout.VariantDataTypes[narrow.VariantName]
+	if dataType == nil {
+		return
+	}
+
+	internalType := enumLayout.EnumInternalType.(*irtypes.StructType)
+	alloca := c.createEntryAlloca(internalType)
+	c.block.NewStore(subject, alloca)
+
+	dataPtr := c.block.NewGetElementPtr(internalType, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	typedDataPtr := c.block.NewBitCast(dataPtr, irtypes.NewPointer(dataType))
+
+	for i, b := range narrow.Bindings {
+		if b.VarName == "_" {
+			continue
+		}
+		if i >= len(dataType.Fields) {
+			break
+		}
+		fieldType := dataType.Fields[i]
+		fieldPtr := c.block.NewGetElementPtr(dataType, typedDataPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
+		val := c.block.NewLoad(fieldType, fieldPtr)
+
+		bindAlloca := c.createEntryAlloca(fieldType)
+		c.block.NewStore(val, bindAlloca)
+		c.locals[b.VarName] = bindAlloca
+	}
+}
+
+// bindIsDestructureNamed extracts named type fields and binds them to local variables.
+func (c *Compiler) bindIsDestructureNamed(subject value.Value, narrow *sema.IsDestructureNarrowing) {
+	targetNamed := extractNamed(narrow.TargetType)
+	layout := c.lookupTypeLayout(narrow.TargetType)
+	if layout == nil {
+		panic(fmt.Sprintf("codegen: no layout for type %s", narrow.TargetType))
+	}
+
+	instancePtr := c.extractInstancePtr(subject)
+
+	allFields := targetNamed.AllFields()
+	for i, b := range narrow.Bindings {
+		if b.VarName == "_" {
+			continue
+		}
+		if i >= len(allFields) {
+			break
+		}
+		field := allFields[i]
+
+		if layout.IsValueType {
+			// Value type: fields are in value struct
+			fieldIdx, ok := layout.ValueFieldIndex[field.Name()]
+			if !ok {
+				continue
+			}
+			// Extract field directly from the subject value struct
+			fieldVal := c.block.NewExtractValue(subject, uint64(fieldIdx))
+			bindAlloca := c.createEntryAlloca(fieldVal.Type())
+			c.block.NewStore(fieldVal, bindAlloca)
+			c.locals[b.VarName] = bindAlloca
+		} else {
+			// Heap type: fields in instance struct
+			fieldIdx, ok := layout.InstanceFieldIndex[field.Name()]
+			if !ok {
+				continue
+			}
+			typedPtr := c.block.NewBitCast(instancePtr, layout.InstancePtrType)
+			fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+			fieldVal := c.block.NewLoad(layout.Instance.Fields[fieldIdx].LLVMType, fieldPtr)
+
+			bindAlloca := c.createEntryAlloca(fieldVal.Type())
+			c.block.NewStore(fieldVal, bindAlloca)
+			c.locals[b.VarName] = bindAlloca
+		}
+	}
 }
 
 // genIfUnwrapStmt handles if-unwrap: if val := optExpr { } else { }

@@ -1,0 +1,476 @@
+// Tests for destructure is-patterns: `if expr is Type(bindings) { ... }`
+// Covers enum variant destructuring and named type destructuring.
+// =============================================================================
+// Part 1: Enum variant destructuring
+// =============================================================================
+enum Shape {
+  Circle(f64 radius),
+  Rectangle(f64 width, f64 height),
+  Point,
+}
+
+test_enum_circle() `test {
+  Shape s = Shape.Circle(radius: 5.0);
+  if s is Circle(r) {
+    assert(r == 5.0, "radius should be 5.0");
+  } else {
+    assert(false, "should match Circle");
+  }
+}
+
+test_enum_rectangle() `test {
+  Shape s = Shape.Rectangle(width: 3.0, height: 4.0);
+  if s is Rectangle(w, h) {
+    assert(w == 3.0, "width should be 3.0");
+    assert(h == 4.0, "height should be 4.0");
+  } else {
+    assert(false, "should match Rectangle");
+  }
+}
+
+test_enum_no_match() `test {
+  Shape s = Shape.Point;
+  if s is Circle(r) {
+    assert(false, "Point should not match Circle");
+  }
+}
+
+test_enum_underscore_binding() `test {
+  Shape s = Shape.Rectangle(width: 10.0, height: 20.0);
+  if s is Rectangle(_, h) {
+    assert(h == 20.0, "height should be 20.0");
+  } else {
+    assert(false, "should match Rectangle");
+  }
+}
+
+// =============================================================================
+// Part 2: Generic enum destructuring
+// =============================================================================
+
+enum Option[T] {
+  Some(T value),
+  None,
+}
+
+test_generic_enum_int() `test {
+  Option[int] opt = Option[int].Some(value: 42);
+  if opt is Some(val) {
+    assert(val == 42, "value should be 42");
+  } else {
+    assert(false, "should match Some");
+  }
+}
+
+test_generic_enum_string() `test {
+  Option[string] opt = Option[string].Some(value: "hello");
+  if opt is Some(s) {
+    assert(s == "hello", "value should be hello");
+  } else {
+    assert(false, "should match Some");
+  }
+}
+
+test_generic_enum_none_no_match() `test {
+  Option[int] opt = Option[int].None;
+  if opt is Some(val) {
+    assert(false, "None should not match Some");
+  }
+}
+
+enum Result[T] {
+  Ok(T value),
+  Err(string message),
+}
+
+test_generic_result_ok() `test {
+  Result[int] r = Result[int].Ok(value: 100);
+  if r is Ok(v) {
+    assert(v == 100, "value should be 100");
+  } else {
+    assert(false, "should match Ok");
+  }
+}
+
+test_generic_result_err() `test {
+  Result[int] r = Result[int].Err(message: "failed");
+  if r is Err(msg) {
+    assert(msg == "failed", "message should be 'failed'");
+  } else {
+    assert(false, "should match Err");
+  }
+}
+
+test_generic_result_no_match() `test {
+  Result[int] r = Result[int].Err(message: "oops");
+  if r is Ok(v) {
+    assert(false, "Err should not match Ok");
+  }
+}
+
+// =============================================================================
+// Part 3: Named type (inheritance) destructuring
+// =============================================================================
+
+type Animal {
+  string name;
+  speak(&this) string `abstract;
+}
+
+type Dog is Animal {
+  string breed;
+  speak(&this) string {
+    return "woof";
+  }
+}
+
+type Cat is Animal {
+  string color;
+  speak(&this) string {
+    return "meow";
+  }
+}
+
+test_named_match() `test {
+  Animal a = Dog(name: "Rex", breed: "Lab");
+  if a is Dog(name, breed) {
+    assert(name == "Rex", "name should be Rex");
+    assert(breed == "Lab", "breed should be Lab");
+  } else {
+    assert(false, "should match Dog");
+  }
+}
+
+test_named_no_match() `test {
+  Animal a = Cat(name: "Luna", color: "black");
+  if a is Dog(name, breed) {
+    assert(false, "Cat should not match Dog");
+  }
+}
+
+// =============================================================================
+// Part 4: As plain expression (no binding)
+// =============================================================================
+
+test_as_expression() `test {
+  Option[int] opt = Option[int].Some(value: 99);
+  bool is_some = opt is Some(v);
+  assert(is_some, "should be Some");
+}
+
+test_as_expression_false() `test {
+  Option[int] opt = Option[int].None;
+  bool is_some = opt is Some(v);
+  assert(!is_some, "should not be Some");
+}
+
+// =============================================================================
+// Part 5: Else branch works
+// =============================================================================
+
+test_else_branch() `test {
+  Shape s = Shape.Point;
+  string result = "none";
+  if s is Circle(r) {
+    result = "circle";
+  } else {
+    result = "not circle";
+  }
+  assert(result == "not circle", "should be not circle");
+}
+
+// =============================================================================
+// Part 6: Multi-field enum
+// =============================================================================
+
+enum Color {
+  Red, Green, Blue, Custom(int r, int g, int b),
+}
+
+test_multi_field() `test {
+  Color c = Color.Custom(r: 255, g: 128, b: 0);
+  if c is Custom(r, g, b) {
+    assert(r == 255, "r should be 255");
+    assert(g == 128, "g should be 128");
+    assert(b == 0, "b should be 0");
+  } else {
+    assert(false, "should match Custom");
+  }
+}
+
+// =============================================================================
+// Part 7: Binding does not clobber outer variables
+// =============================================================================
+
+test_binding_shadow_restore() `test {
+  int val = 100;
+  Option[int] opt = Option[int].Some(value: 42);
+  if opt is Some(val) {
+    assert(val == 42, "inside: binding should shadow outer");
+  }
+  assert(val == 100, "outside: outer var should be restored");
+}
+
+// =============================================================================
+// Part 8: Underscore variations
+// =============================================================================
+
+test_all_underscores() `test {
+  Shape s = Shape.Rectangle(width: 1.0, height: 2.0);
+  if s is Rectangle(_, _) {
+    assert(true, "should match Rect with all underscores");
+  } else {
+    assert(false, "should match");
+  }
+}
+
+test_trailing_underscore() `test {
+  Shape s = Shape.Rectangle(width: 7.0, height: 8.0);
+  if s is Rectangle(w, _) {
+    assert(w == 7.0, "w should be 7.0");
+  }
+}
+
+// =============================================================================
+// Part 9: Control flow interactions
+// =============================================================================
+
+check_opt(Option[int] o) int {
+  if o is Some(v) {
+    return v * 2;
+  }
+  return -1;
+}
+
+test_return_from_then_block() `test {
+  assert(check_opt(Option[int].Some(value: 21)) == 42, "should return 42");
+  assert(check_opt(Option[int].None) == -1, "should return -1");
+}
+
+test_break_in_loop() `test {
+  Option[int][] items = [Option[int].None, Option[int].Some(value: 42), Option[int].None];
+  int found = -1;
+  for item in items {
+    if item is Some(v) {
+      found = v;
+      break;
+    }
+  }
+  assert(found == 42, "found should be 42");
+}
+
+test_continue_in_loop() `test {
+  Option[int][] items = [Option[int].Some(value: 1), Option[int].None, Option[int].Some(value: 3)];
+  int total = 0;
+  for item in items {
+    if item is Some(v) {
+      total += v;
+      continue;
+    }
+  }
+  assert(total == 4, "total should be 4");
+}
+
+test_nested_destructure() `test {
+  Option[int] a = Option[int].Some(value: 10);
+  Result[int] b = Result[int].Ok(value: 20);
+  if a is Some(x) {
+    if b is Ok(y) {
+      assert(x == 10, "x should be 10");
+      assert(y == 20, "y should be 20");
+    }
+  }
+}
+
+test_sequential_on_same_var() `test {
+  Shape s = Shape.Circle(radius: 5.0);
+  string result = "none";
+  if s is Circle(r) {
+    result = "circle";
+  }
+  if s is Rectangle(w, h) {
+    result = "rect";
+  }
+  assert(result == "circle", "should be circle");
+}
+
+describe(Shape s) string {
+  if s is Circle(r) {
+    return "circle";
+  } else if s is Rectangle(w, h) {
+    return "rect";
+  } else {
+    return "other";
+  }
+}
+
+test_else_if_chain() `test {
+  assert(describe(Shape.Circle(radius: 1.0)) == "circle", "circle");
+  assert(describe(Shape.Rectangle(width: 1.0, height: 2.0)) == "rect", "rect");
+  assert(describe(Shape.Point) == "other", "other");
+}
+
+// =============================================================================
+// Part 10: Named type edge cases
+// =============================================================================
+
+type Simple {
+  int x;
+  int y;
+}
+
+test_named_no_inheritance() `test {
+  Simple s = Simple(x: 10, y: 20);
+  if s is Simple(a, b) {
+    assert(a == 10, "a should be 10");
+    assert(b == 20, "b should be 20");
+  }
+}
+
+type Base {
+  string a;
+  do_thing(&this) string `abstract;
+}
+type Middle is Base {
+  string b;
+  do_thing(&this) string {
+    return "mid";
+  }
+}
+type Leaf is Middle {
+  string c;
+  do_thing(&this) string {
+    return "leaf";
+  }
+}
+
+test_deep_inheritance_chain() `test {
+  Base x = Leaf(a: "aa", b: "bb", c: "cc");
+  if x is Leaf(a, b, c) {
+    assert(a == "aa", "a should be aa");
+    assert(b == "bb", "b should be bb");
+    assert(c == "cc", "c should be cc");
+  } else {
+    assert(false, "should match Leaf");
+  }
+}
+
+// =============================================================================
+// Part 11: Value type destructure
+// =============================================================================
+
+type Vec2 {
+  f64 x `value;
+  f64 y `value;
+}
+
+test_value_type_destructure() `test {
+  Vec2 v = Vec2(x: 3.0, y: 4.0);
+  if v is Vec2(x, y) {
+    assert(x == 3.0, "x should be 3.0");
+    assert(y == 4.0, "y should be 4.0");
+  }
+}
+
+// =============================================================================
+// Part 12: Enum with various field types
+// =============================================================================
+
+type Payload {
+  int id;
+}
+
+enum Message {
+  Data(Payload p),
+  Empty,
+}
+
+test_enum_user_type_field() `test {
+  Payload pl = Payload(id: 42);
+  Message m = Message.Data(p: pl);
+  if m is Data(extracted) {
+    assert(extracted.id == 42, "payload id should be 42");
+  } else {
+    assert(false, "should match Data");
+  }
+}
+
+enum Flag {
+  Set(bool on),
+  Unset,
+}
+
+test_enum_bool_field() `test {
+  Flag f = Flag.Set(on: true);
+  if f is Set(v) {
+    assert(v, "v should be true");
+  }
+}
+
+enum Wrapper {
+  Value(int x),
+}
+
+test_single_variant_enum() `test {
+  Wrapper w = Wrapper.Value(x: 99);
+  if w is Value(x) {
+    assert(x == 99, "x should be 99");
+  } else {
+    assert(false, "should always match single variant");
+  }
+}
+
+// =============================================================================
+// Part 13: Compute with destructured bindings
+// =============================================================================
+
+enum Pair {
+  V(int a, int b),
+}
+
+sum_pair(Pair p) int {
+  if p is V(a, b) {
+    return a + b;
+  }
+  return 0;
+}
+
+test_compute_return_value() `test {
+  assert(sum_pair(Pair.V(a: 3, b: 7)) == 10, "sum should be 10");
+}
+
+// =============================================================================
+// Part 14: Variant name collision with type name
+// =============================================================================
+
+type Box {
+  int x;
+}
+
+enum WrapperEnum {
+  Box(int v),
+  None,
+}
+
+test_variant_priority_over_type() `test {
+  WrapperEnum w = WrapperEnum.Box(v: 42);
+  if w is Box(v) {
+    assert(v == 42, "should destructure enum variant, not named type");
+  } else {
+    assert(false, "should match Box variant");
+  }
+}
+
+// =============================================================================
+// Part 15: Generic Result — Err has non-T field
+// =============================================================================
+
+test_result_err_string_field() `test {
+  Result[int] r = Result[int].Err(message: "whoops");
+  if r is Err(msg) {
+    // msg should be string (not int), verify string operations work
+    assert(msg.len == 6, "msg length should be 6");
+  } else {
+    assert(false, "should match Err");
+  }
+}

@@ -1877,12 +1877,59 @@ func (c *Checker) checkIsExpr(e *ast.IsExpr) types.Type {
 			}
 		}
 	case *ast.DestructureIsPattern:
-		obj := c.lookup(p.TypeName)
-		if obj == nil {
-			c.errorf(p.Pos(), "undefined type: %s", p.TypeName)
-		}
+		c.checkDestructureIsPattern(p, subjectType)
 	}
 	return types.TypBool
+}
+
+// checkDestructureIsPattern validates a destructure is-pattern (e.g., `x is Circle(r)`)
+// against the subject type. Works for enum variants and named types.
+func (c *Checker) checkDestructureIsPattern(p *ast.DestructureIsPattern, subjectType types.Type) {
+	if subjectType == nil {
+		return
+	}
+
+	// Check if it's an enum variant of the subject type
+	var enum *types.Enum
+	switch st := subjectType.Underlying().(type) {
+	case *types.Enum:
+		enum = st
+	case *types.Instance:
+		if e, ok := st.Origin().(*types.Enum); ok {
+			enum = e
+		}
+	}
+	if enum != nil {
+		if v := enum.LookupVariant(p.TypeName); v != nil {
+			if len(p.Bindings) != v.NumFields() {
+				c.errorf(p.Pos(), "variant %s has %d fields, got %d bindings",
+					p.TypeName, v.NumFields(), len(p.Bindings))
+			}
+			return
+		}
+	}
+
+	// Not an enum variant — look up as a named type
+	obj := c.lookup(p.TypeName)
+	if obj == nil {
+		c.errorf(p.Pos(), "undefined type: %s", p.TypeName)
+		return
+	}
+	tn, ok := obj.(*types.TypeName)
+	if !ok {
+		c.errorf(p.Pos(), "%s is not a type", p.TypeName)
+		return
+	}
+	named, ok := tn.Type().(*types.Named)
+	if !ok {
+		c.errorf(p.Pos(), "%s is not a struct type", p.TypeName)
+		return
+	}
+	allFields := named.AllFields()
+	if len(p.Bindings) != len(allFields) {
+		c.errorf(p.Pos(), "type %s has %d fields, got %d bindings",
+			p.TypeName, len(allFields), len(p.Bindings))
+	}
 }
 
 func (c *Checker) checkCastExpr(e *ast.CastExpr) types.Type {

@@ -429,7 +429,7 @@ Codegen for inherited field layouts, static method dispatch through inheritance 
 - **RTTI infrastructure**: Each non-generic Named type gets a unique i32 type ID. Type info globals (`@promise_typeinfo_TypeName`) store `{ i32 type_id, i32 num_parents, [N x i32] parent_ids }` with transitive parent IDs. Constructors store the type info pointer in the `_variant` slot (index 0) instead of null. Runtime function `promise_type_is(variant_ptr, expected_id)` checks type ID and parent IDs.
 - **is expressions**: `x is present` → `extractvalue` i1 flag from optional. `x is absent` → extract + xor negate. `c is Variant` → extract enum tag, `icmp eq`. `a is Dog` → load `_variant` pointer, call `promise_type_is`, convert i32→i1.
 - **as expressions**: `a as Dog` (safe) → RTTI check, branch to `cast.some` (wrap in Optional) or `cast.none` (zeroinitializer), phi merge. `a as! Dog` (force) → RTTI check, branch to `cast.ok` or `cast.panic` (calls `promise_panic`).
-- **Deferred**: Virtual dispatch (vtable — completed in Stage 8L), destructure is-patterns (`x is Dog(name)`), generic type RTTI, full type expressions in `is` patterns and typed error handlers. Both `if x is TYPE` and `? e is TYPE` currently only accept bare `IDENT`. Need to support `typeRef` (generics like `DataError[int]`, arrays like `u8[]`, optionals like `Foo?`, module-qualified like `std.Error`). The `typeRef` grammar rule already supports these forms — requires updating `pattern` rule, `ErrorHandlerExpr` grammar, AST, sema type resolution, and codegen RTTI for monomorphized type IDs.
+- **Deferred**: Virtual dispatch (vtable — completed in Stage 8L), ~~destructure is-patterns (`x is Dog(name)`)~~ (done — B0011), generic type RTTI, full type expressions in `is` patterns and typed error handlers. Both `if x is TYPE` and `? e is TYPE` currently only accept bare `IDENT`. Need to support `typeRef` (generics like `DataError[int]`, arrays like `u8[]`, optionals like `Foo?`, module-qualified like `std.Error`). The `typeRef` grammar rule already supports these forms — requires updating `pattern` rule, `ErrorHandlerExpr` grammar, AST, sema type resolution, and codegen RTTI for monomorphized type IDs.
 
 ## Stage 8j — Unify Compound Types with Named Types + Collection Methods (Done)
 
@@ -845,7 +845,7 @@ Test suite: 1840 native pass, 1776 WASM pass (25 skipped).
 | ~~Blocking select optimization (waiter-list parking instead of yield-and-retry polling)~~ — **Done** (B0008) | ~~Medium~~ Resolved |
 | Stack overflow detection (guard page + SIGSEGV handler) | Medium |
 | ~~Fixed-size arrays as stack-allocated `[N x T]`~~ | ~~Done~~ |
-| Destructure is-patterns (`x is Dog(name)`) | Medium |
+| ~~Destructure is-patterns (`x is Dog(name)`)~~ | ~~Done~~ |
 | `yield*` delegate (forward all values from sub-iterator) | Medium |
 
 ### Near-term: Runtime IO & Networking
@@ -999,7 +999,7 @@ Known gaps and improvements deferred from completed stages.
 | B0111 | Select inside `go` block fails to capture outer channel variables. Sema `checkLambdaCapture` doesn't traverse select case channel expressions. All existing tests keep `select` in main. Workaround: keep select in the main goroutine. | Sema | Medium |
 | ~~Console output API refactor~~ — **Done.** Deleted `print_int`/`print_f64`/`print_bool`/`println(string)` and their codegen bridges. Added `print(Format)` (no newline) and `print_line(Format)` (with newline) — both accept any type implementing the `Format` structural interface. Single `promise_print_string` extern (no newline); `print_line` appends `Platform.line_separator` to the Builder before the single syscall. Implemented primitive/string→structural interface boxing (`boxForStructuralView` in `rtti.go`): stack-allocates scalar values and creates `{vtable, instance}` fat pointers with adapter thunks for primitive receivers. Fixed `saveState`/`restoreState` to preserve `localNameCount` across adapter thunk emission. ~400 replacements across ~120 files. 10 Go codegen tests + 35 e2e tests. | Std | ~~Medium~~ Resolved |
 | ~~Fixed-size arrays as stack-allocated `[N x T]`~~ | ~~8g~~ | ~~Done~~ |
-| B0011 | Destructure is-patterns (`x is Dog(name)`) | 8k | Medium |
+| ~~B0011~~ | ~~Destructure is-patterns (`x is Dog(name)`)~~ — **Fixed.** Implemented for both enum variants (`if shape is Circle(r)`) and named types (`if animal is Dog(name, breed)`). Bindings are scoped to the then-block. Works with generic enums, deep inheritance, value types. 34 e2e tests, 15 sema tests, 7 codegen IR tests. | ~~8k~~ | ~~Done~~ |
 | B0012 | Generic type RTTI — partially resolved: mono type `is` checks work (origin ID in parent chain, view vtable cache keyed by mono name). Remaining: `is` patterns with full type expressions (`x is Box[int]`, `e is DataError[string]`) — currently only bare `IDENT` accepted. | 8k | Medium |
 | B0013 | Failable `close()` error propagation in `use` | 8m | Medium |
 | B0014 | Named enum fields in constructors | 8d | Low |

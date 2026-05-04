@@ -4776,7 +4776,7 @@ func (c *Compiler) genIsExpr(e *ast.IsExpr) value.Value {
 	case *ast.IdentIsPattern:
 		return c.genIsIdentPattern(e.Expr, p)
 	case *ast.DestructureIsPattern:
-		panic("codegen: destructure is-pattern not yet implemented")
+		return c.genIsDestructurePattern(e.Expr, p)
 	default:
 		panic(fmt.Sprintf("codegen: unhandled is-pattern type %T", e.Pattern))
 	}
@@ -4907,6 +4907,27 @@ func (c *Compiler) genIsNamedType(expr ast.Expr, typeName string) value.Value {
 	result := c.block.NewCall(c.funcs["promise_type_is"],
 		variantPtr, constant.NewInt(irtypes.I32, int64(targetID)))
 	return c.block.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 0))
+}
+
+// genIsDestructurePattern generates the bool check for a destructure is-pattern
+// (e.g., `x is Circle(r)`). When used inside an if-condition, the actual field
+// binding is handled by genIfDestructureIsStmt. Outside if-conditions, this just
+// returns the type/variant check result without binding any variables.
+func (c *Compiler) genIsDestructurePattern(expr ast.Expr, p *ast.DestructureIsPattern) value.Value {
+	exprType := c.info.Types[expr]
+	if c.typeSubst != nil {
+		exprType = types.Substitute(exprType, c.typeSubst)
+	}
+
+	// Enum variant check
+	if enumLayout := c.lookupEnumLayout(exprType); enumLayout != nil {
+		if _, ok := enumLayout.VariantTag[p.TypeName]; ok {
+			return c.genIsEnumVariant(expr, p.TypeName, enumLayout)
+		}
+	}
+
+	// Named type check via RTTI
+	return c.genIsNamedType(expr, p.TypeName)
 }
 
 // extractInstancePtr extracts the i8* instance pointer (field 1) from a user type value struct.

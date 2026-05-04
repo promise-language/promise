@@ -38,14 +38,30 @@ enum Color `public {
   Red,
   Green,
   Blue,
+
+  name(&this) string `public {
+    return match this {
+      Color.Red => "red",
+      Color.Green => "green",
+      Color.Blue => "blue",
+    };
+  }
+
+  is_primary(&this) bool `public {
+    return true;
+  }
+
+  get index int `public {
+    return match this {
+      Color.Red => 0,
+      Color.Green => 1,
+      Color.Blue => 2,
+    };
+  }
 }
 
 color_name(Color c) string `public {
-  return match c {
-    Color.Red => "red",
-    Color.Green => "green",
-    Color.Blue => "blue",
-  };
+  return c.name();
 }
 
 // --- Public generic type ---

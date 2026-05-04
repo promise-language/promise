@@ -10,3 +10,53 @@ test_enum_all_variants() `test {
   assert(mathlib.color_name(mathlib.Color.Green) == "green", "green");
   assert(mathlib.color_name(mathlib.Color.Blue) == "blue", "blue");
 }
+
+// ── Cross-module enum method calls ──────────────────────────────────────────
+
+test_enum_method_cross_module() `test {
+  c := mathlib.Color.Red;
+  assert(c.name() == "red", "Red.name()");
+}
+
+test_enum_method_all_variants() `test {
+  assert(mathlib.Color.Red.name() == "red", "Red.name()");
+  assert(mathlib.Color.Green.name() == "green", "Green.name()");
+  assert(mathlib.Color.Blue.name() == "blue", "Blue.name()");
+}
+
+test_enum_method_bool_return() `test {
+  assert(mathlib.Color.Red.is_primary(), "Red is primary");
+  assert(mathlib.Color.Green.is_primary(), "Green is primary");
+  assert(mathlib.Color.Blue.is_primary(), "Blue is primary");
+}
+
+test_enum_getter_cross_module() `test {
+  c := mathlib.Color.Green;
+  assert(c.index == 1, "Green.index == 1");
+}
+
+test_enum_getter_all_variants() `test {
+  assert(mathlib.Color.Red.index == 0, "Red.index");
+  assert(mathlib.Color.Green.index == 1, "Green.index");
+  assert(mathlib.Color.Blue.index == 2, "Blue.index");
+}
+
+test_enum_method_via_module_function() `test {
+  // color_name internally calls c.name() — tests module-internal enum method dispatch
+  assert(mathlib.color_name(mathlib.Color.Blue) == "blue", "color_name uses name()");
+}
+
+test_enum_method_result_as_arg() `test {
+  c := mathlib.Color.Green;
+  // Enum method result used as argument to another function
+  assert(c.name().len > 0, "name() returns non-empty string");
+}
+
+test_enum_method_in_condition() `test {
+  c := mathlib.Color.Red;
+  if c.is_primary() {
+    assert(true, "primary check passed");
+  } else {
+    assert(false, "should be primary");
+  }
+}

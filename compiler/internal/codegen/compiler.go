@@ -3673,10 +3673,12 @@ func (c *Compiler) declareEnumMethods(file *ast.File) {
 			}
 
 			retType := irtypes.Type(irtypes.Void)
-			if m.Sig().Result() != nil {
+			if c.info.GeneratorFuncs[md] != nil {
+				retType = generatorValueType()
+			} else if m.Sig().Result() != nil {
 				retType = c.resolveType(m.Sig().Result())
 			}
-			if m.Sig().CanError() {
+			if m.Sig().CanError() && c.info.GeneratorFuncs[md] == nil {
 				retType = computeResultType(retType)
 			}
 
@@ -3717,6 +3719,120 @@ func (c *Compiler) defineEnumMethods(file *ast.File) {
 			mangledName := mangleMethodName(ed.Name, md.Name, md.IsSetter)
 			fn, ok := c.funcs[mangledName]
 			if !ok {
+				continue
+			}
+
+			// Route generator methods to the generator codegen path
+			if elemType := c.info.GeneratorFuncs[md]; elemType != nil {
+				c.defineGeneratorMethod(md, m, fn, elemType, nil)
+				continue
+			}
+
+			c.defineMethodFunc(md, m, fn)
+		}
+	}
+}
+
+// declareModuleEnumMethods creates LLVM function stubs for enum methods in a module.
+// Uses module-prefixed IR names. Generic enums are skipped.
+func (c *Compiler) declareModuleEnumMethods(file *ast.File, moduleName string) {
+	for _, decl := range file.Decls {
+		ed, ok := decl.(*ast.EnumDecl)
+		if !ok {
+			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue
+		}
+		enum := c.lookupEnumType(ed.Name)
+		if enum == nil {
+			continue
+		}
+		if len(enum.TypeParams()) > 0 {
+			continue // generic — handled by monomorphization
+		}
+
+		for _, md := range ed.Methods {
+			if md.Body == nil {
+				continue
+			}
+			m := c.lookupEnumMethod(enum, md)
+			if m == nil || m.Sig() == nil {
+				continue
+			}
+
+			mangledName := mangleModuleMethodName(moduleName, ed.Name, md.Name, md.IsSetter)
+
+			var params []*ir.Param
+			if m.Sig().Recv() != nil {
+				params = append(params, ir.NewParam("this", irtypes.I8Ptr))
+			}
+			for _, p := range m.Sig().Params() {
+				params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
+			}
+
+			retType := irtypes.Type(irtypes.Void)
+			if c.info.GeneratorFuncs[md] != nil {
+				retType = generatorValueType()
+			} else if m.Sig().Result() != nil {
+				retType = c.resolveType(m.Sig().Result())
+			}
+			if m.Sig().CanError() && c.info.GeneratorFuncs[md] == nil {
+				retType = computeResultType(retType)
+			}
+
+			fn := c.module.NewFunc(mangledName, retType, params...)
+			c.funcs[mangledName] = fn
+
+			// Track ownership for separate compilation
+			c.moduleOwnedFuncs[mangledName] = moduleName
+
+			// Also register the non-prefixed method name for dispatch within the module
+			plainName := mangleMethodName(ed.Name, md.Name, md.IsSetter)
+			if _, exists := c.funcs[plainName]; !exists {
+				c.funcs[plainName] = fn
+			}
+		}
+	}
+}
+
+// defineModuleEnumMethods generates enum method bodies for a module.
+// Generic enums are skipped.
+func (c *Compiler) defineModuleEnumMethods(file *ast.File, moduleName string) {
+	for _, decl := range file.Decls {
+		ed, ok := decl.(*ast.EnumDecl)
+		if !ok {
+			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue
+		}
+		enum := c.lookupEnumType(ed.Name)
+		if enum == nil {
+			continue
+		}
+		if len(enum.TypeParams()) > 0 {
+			continue // generic — handled by monomorphization
+		}
+
+		for _, md := range ed.Methods {
+			if md.Body == nil {
+				continue
+			}
+			m := c.lookupEnumMethod(enum, md)
+			if m == nil || m.Sig() == nil {
+				continue
+			}
+
+			mangledName := mangleModuleMethodName(moduleName, ed.Name, md.Name, md.IsSetter)
+			fn, ok := c.funcs[mangledName]
+			if !ok {
+				continue
+			}
+
+			// Route generator methods to the generator codegen path
+			if elemType := c.info.GeneratorFuncs[md]; elemType != nil {
+				c.defineGeneratorMethod(md, m, fn, elemType, nil)
 				continue
 			}
 

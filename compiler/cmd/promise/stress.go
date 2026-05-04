@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"djabi.dev/go/promise_lang/internal/codegen"
@@ -480,6 +482,10 @@ func runStress(files []string, count int, duration time.Duration, perRunTimeout 
 					st.fails++
 					st.timeouts++
 					st.lastErr = "timeout"
+				} else if err != nil {
+					// Binary crashed — extract signal/panic info.
+					st.fails++
+					st.lastErr = extractCrashReason(string(output), err)
 				} else if actual != t.expected {
 					st.timings = append(st.timings, wallClock)
 					st.fails++
@@ -532,7 +538,7 @@ func runStress(files []string, count int, duration time.Duration, perRunTimeout 
 				} else if err != nil {
 					// Binary crashed — find the first unseen test (the one running
 					// when the crash happened). Only count that test as failed.
-					crashMsg := extractCrashReason(string(output))
+					crashMsg := extractCrashReason(string(output), err)
 					for _, name := range fs.testOrder {
 						if !seen[name] {
 							st := fs.stats[name]
@@ -783,9 +789,11 @@ func failReason(expected, actual string) string {
 	return "output mismatch"
 }
 
-// extractCrashReason returns a short reason from crash/panic output.
-func extractCrashReason(output string) string {
-	// Look for panic message
+// extractCrashReason returns a short reason from crash/panic output and exit error.
+// It checks for panic messages in the output first, then falls back to signal info
+// from the exit error (e.g., "signal: segmentation fault").
+func extractCrashReason(output string, err error) string {
+	// Look for panic message in output
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "panic:") || strings.HasPrefix(line, "fatal error:") {
@@ -793,6 +801,13 @@ func extractCrashReason(output string) string {
 				line = line[:97] + "..."
 			}
 			return line
+		}
+	}
+	// Extract signal from exec.ExitError (SIGSEGV, SIGABRT, etc.)
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+			return "signal: " + status.Signal().String()
 		}
 	}
 	return "crash"

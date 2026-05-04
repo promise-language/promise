@@ -210,7 +210,7 @@ func runDocModule(w io.Writer, name string, opts docOpts) {
 				}
 				allEnums = append(allEnums, enumEntry{d, enum, info})
 			case *ast.FuncDecl:
-				fn := lookupFunc(d.Name, fileScope)
+				fn := lookupFuncDecl(d, fileScope)
 				if fn == nil {
 					continue
 				}
@@ -291,7 +291,7 @@ func emitModuleFileDoc(w io.Writer, file *ast.File, info *sema.Info, opts docOpt
 			}
 			enumDecls = append(enumDecls, d)
 		case *ast.FuncDecl:
-			fn := lookupFunc(d.Name, fileScope)
+			fn := lookupFuncDecl(d, fileScope)
 			if fn == nil {
 				continue
 			}
@@ -342,7 +342,7 @@ func emitModuleFileDoc(w io.Writer, file *ast.File, info *sema.Info, opts docOpt
 		}
 		for _, d := range funcDecls {
 			fmt.Fprintln(w)
-			fn := lookupFunc(d.Name, fileScope)
+			fn := lookupFuncDecl(d, fileScope)
 			if fn == nil {
 				continue
 			}
@@ -655,7 +655,7 @@ func emitFunc(w io.Writer, d *ast.FuncDecl, fn *types.Func, info *sema.Info, opt
 	sig := fn.Type().(*types.Signature)
 
 	if opts.sigOnly {
-		fmt.Fprintf(w, "    %s\n", formatFuncSig(d.Name, sig, info))
+		fmt.Fprintf(w, "    %s\n", formatFuncSig(d.Name, sig, fn, info))
 		return
 	}
 
@@ -663,6 +663,9 @@ func emitFunc(w io.Writer, d *ast.FuncDecl, fn *types.Func, info *sema.Info, opt
 	heading := "### " + d.Name
 	if len(sig.TypeParams()) > 0 {
 		heading += formatTypeParams(sig.TypeParams())
+	}
+	if fn.IsGetter() {
+		heading += " (getter)"
 	}
 	if fn.Deprecated() != "" {
 		heading += " DEPRECATED"
@@ -679,10 +682,12 @@ func emitFunc(w io.Writer, d *ast.FuncDecl, fn *types.Func, info *sema.Info, opt
 	}
 
 	// Signature
-	fmt.Fprintf(w, "\n    %s\n", formatFuncSig(d.Name, sig, info))
+	fmt.Fprintf(w, "\n    %s\n", formatFuncSig(d.Name, sig, fn, info))
 
 	// Parameter docs
-	emitParamDocs(w, sig)
+	if !fn.IsGetter() {
+		emitParamDocs(w, sig)
+	}
 }
 
 // --- Formatting helpers ---
@@ -696,6 +701,9 @@ func formatMethodSig(m *types.Method, info *sema.Info) string {
 		if m.Sig().Result() != nil {
 			b.WriteByte(' ')
 			b.WriteString(typeString(m.Sig().Result()))
+		}
+		if m.Sig().CanError() {
+			b.WriteByte('!')
 		}
 		return b.String()
 	}
@@ -765,8 +773,25 @@ func formatMethodSig(m *types.Method, info *sema.Info) string {
 	return b.String()
 }
 
-func formatFuncSig(name string, sig *types.Signature, info *sema.Info) string {
+func formatFuncSig(name string, sig *types.Signature, fn *types.Func, info *sema.Info) string {
 	var b strings.Builder
+
+	if fn.IsGetter() {
+		b.WriteString("get ")
+		b.WriteString(name)
+		if sig.Result() != nil {
+			b.WriteByte(' ')
+			b.WriteString(typeString(sig.Result()))
+		}
+		if sig.CanError() {
+			b.WriteByte('!')
+		}
+		return b.String()
+	}
+
+	if fn.IsSetter() {
+		b.WriteString("set ")
+	}
 
 	b.WriteString(name)
 	if len(sig.TypeParams()) > 0 {
@@ -954,6 +979,15 @@ func lookupFunc(name string, scope *types.Scope) *types.Func {
 	}
 	fn, _ := obj.(*types.Func)
 	return fn
+}
+
+// lookupFuncDecl looks up a FuncDecl in the scope, handling the $set suffix for setters.
+func lookupFuncDecl(d *ast.FuncDecl, scope *types.Scope) *types.Func {
+	name := d.Name
+	if d.IsSetter {
+		name = d.Name + "$set"
+	}
+	return lookupFunc(name, scope)
 }
 
 // --- Utility helpers ---

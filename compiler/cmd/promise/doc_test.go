@@ -828,3 +828,251 @@ func TestDocSetterMethod(t *testing.T) {
 	assertContainsDoc(t, out, "get count int")
 	assertContainsDoc(t, out, "set count(")
 }
+
+// === Module-level getter ===
+
+func TestDocModuleLevelGetter(t *testing.T) {
+	out := docFromSource(t, `
+		get hostname string `+"`public `doc(\"Returns the hostname.\")"+` {
+			return "test";
+		}
+	`, docOpts{publicOnly: true})
+
+	// Should show getter syntax, not function syntax
+	assertContainsDoc(t, out, "get hostname string")
+	assertContainsDoc(t, out, "(getter)")
+	assertContainsDoc(t, out, "Returns the hostname.")
+	// Should NOT show function-call syntax
+	assertNotContainsDoc(t, out, "hostname()")
+}
+
+func TestDocModuleLevelGetterSignaturesMode(t *testing.T) {
+	out := docFromSource(t, `
+		get hostname string `+"`public `doc(\"Returns the hostname.\")"+` {
+			return "test";
+		}
+	`, docOpts{publicOnly: true, sigOnly: true})
+
+	// Compact mode should show getter syntax
+	assertContainsDoc(t, out, "get hostname string")
+	assertNotContainsDoc(t, out, "hostname()")
+}
+
+func TestDocModuleLevelGetterFailable(t *testing.T) {
+	out := docFromSource(t, `
+		get working_directory string! `+"`public"+` {
+			return "test";
+		}
+	`, docOpts{publicOnly: true})
+
+	// Should include ! for failable getter
+	assertContainsDoc(t, out, "get working_directory string!")
+	assertNotContainsDoc(t, out, "working_directory()")
+}
+
+func TestDocMethodGetterFailable(t *testing.T) {
+	out := docFromSource(t, `
+		type Conn `+"`public"+` {
+			int _fd;
+			get status string! `+"`public"+` {
+				return "ok";
+			}
+		}
+	`, docOpts{publicOnly: true})
+
+	// Should include ! for failable method getter
+	assertContainsDoc(t, out, "get status string!")
+}
+
+// === Field placement and final annotations ===
+
+func TestDocFieldValueAnnotation(t *testing.T) {
+	out := docFromSource(t, `
+		type Vec2 `+"`public"+` {
+			f64 x `+"`public `value"+`;
+			f64 y `+"`public `value"+`;
+		}
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "f64 x `value")
+	assertContainsDoc(t, out, "f64 y `value")
+}
+
+func TestDocFieldFinalAnnotation(t *testing.T) {
+	out := docFromSource(t, `
+		type Token `+"`public"+` {
+			string raw `+"`public `final"+`;
+			int line `+"`public `final"+`;
+		}
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "string raw `final")
+	assertContainsDoc(t, out, "int line `final")
+}
+
+func TestDocFieldValueAndFinal(t *testing.T) {
+	out := docFromSource(t, `
+		type Point `+"`public"+` {
+			f64 x `+"`public `value `final"+`;
+		}
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "f64 x `value `final")
+}
+
+// === Module-level setter ===
+
+func TestDocModuleLevelSetter(t *testing.T) {
+	out := docFromSource(t, `
+		set log_level(int level) `+"`public"+` {}
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "set log_level(int level)")
+	// Should NOT show without "set" prefix (check start of signature line)
+	assertNotContainsDoc(t, out, "    log_level(int level)")
+}
+
+func TestDocModuleLevelSetterSignaturesMode(t *testing.T) {
+	out := docFromSource(t, `
+		set log_level(int level) `+"`public"+` {}
+	`, docOpts{publicOnly: true, sigOnly: true})
+
+	assertContainsDoc(t, out, "set log_level(int level)")
+}
+
+// === Variadic parameters ===
+
+func TestDocFuncVariadicParam(t *testing.T) {
+	out := docFromSource(t, `
+		sum(...int nums) int `+"`public"+` {
+			int total = 0;
+			for n in nums { total += n; }
+			return total;
+		}
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "sum(...int nums) int")
+}
+
+func TestDocMethodVariadicParam(t *testing.T) {
+	out := docFromSource(t, `
+		type Logger `+"`public"+` {
+			log(~this, ...string messages) `+"`public"+` {}
+		}
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "log(~this, ...string messages)")
+}
+
+// === Abstract method tag in signature ===
+
+func TestDocAbstractMethodTag(t *testing.T) {
+	out := docFromSource(t, `
+		type Shape `+"`public"+` {
+			area() f64 `+"`public `abstract"+`;
+		}
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "area(this) f64 `abstract")
+}
+
+// === Multiple parents ===
+
+func TestDocMultipleParents(t *testing.T) {
+	out := docFromSource(t, `
+		type Named `+"`public"+` { string name `+"`public"+`; }
+		type Audible `+"`public"+` {
+			speak() string `+"`public `abstract"+`;
+		}
+		type Dog is Named, Audible `+"`public"+` {
+			speak() string `+"`public"+` { return "woof"; }
+		}
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "### Dog is Named, Audible")
+	assertContainsDoc(t, out, "type Dog is Named, Audible")
+}
+
+// === Void failable function ===
+
+func TestDocVoidFailableFunc(t *testing.T) {
+	out := docFromSource(t, `
+		validate(string input)! `+"`public"+` {
+			if input.is_empty { raise error(message: "empty"); }
+		}
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "validate(string input)!")
+}
+
+// === Float default in exprToString ===
+
+func TestDocFieldDefaultFloat(t *testing.T) {
+	out := docFromSource(t, `
+		type Config `+"`public"+` {
+			f64 rate `+"`public"+` = 0.5;
+		}
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "f64 rate = 0.5")
+}
+
+// === Copy type heading (non-enum) ===
+
+func TestDocCopyTypeHeading(t *testing.T) {
+	out := docFromSource(t, `
+		type Color `+"`public `copy"+` {
+			int r `+"`public"+`;
+			int g `+"`public"+`;
+			int b `+"`public"+`;
+		}
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "### Color `copy")
+	assertContainsDoc(t, out, "type Color `copy {")
+}
+
+// === Enum with getter method ===
+
+func TestDocEnumGetter(t *testing.T) {
+	out := docFromSource(t, `
+		enum Shape `+"`public"+` {
+			Circle(f64 radius),
+			Point,
+
+			get is_flat bool `+"`doc(\"True if the shape has no area.\")"+` {
+				match this {
+					Shape.Point => { return true; },
+					_ => { return false; },
+				}
+			}
+		}
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "get is_flat bool")
+	assertContainsDoc(t, out, "True if the shape has no area.")
+}
+
+// === Test function skipping ===
+
+func TestDocSkipsTestFunctions(t *testing.T) {
+	out := docFromSource(t, `
+		helper() int `+"`public"+` { return 1; }
+		test_add() `+"`test"+` { assert(1 + 1 == 2); }
+	`, docOpts{publicOnly: false})
+
+	assertContainsDoc(t, out, "### helper")
+	assertNotContainsDoc(t, out, "test_add")
+}
+
+// === Enum public filtering ===
+
+func TestDocEnumPublicFiltering(t *testing.T) {
+	out := docFromSource(t, `
+		enum PublicEnum `+"`public"+` { A, B }
+		enum PrivateEnum { X, Y }
+	`, docOpts{publicOnly: true})
+
+	assertContainsDoc(t, out, "### PublicEnum")
+	assertNotContainsDoc(t, out, "PrivateEnum")
+}

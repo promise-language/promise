@@ -1482,3 +1482,116 @@ func (p *PosixPAL) EmitGetHostname(module *ir.Module) *ir.Func {
 	okBlk.NewRet(fn.Params[0])
 	return fn
 }
+
+// EmitSignalInit defines @pal_signal_init: creates a pipe and defines the signal handler.
+// Signature: @pal_signal_init() → i32 (read fd on success, -1 on error)
+// The write fd is stored in @__promise_signal_pipe_wr for the signal handler to use.
+// Also defines @promise_signal_handler(i32) which writes the signal number byte to the pipe.
+func (p *PosixPAL) EmitSignalInit(module *ir.Module) *ir.Func {
+	i32PtrType := irtypes.NewPointer(irtypes.I32)
+	zero32 := constant.NewInt(irtypes.I32, 0)
+	one32 := constant.NewInt(irtypes.I32, 1)
+	negOne32 := constant.NewInt(irtypes.I32, -1)
+
+	pipeFn := getOrDeclareFunc(module, "pipe", irtypes.I32, ir.NewParam("fds", i32PtrType))
+	writeFn := getOrDeclareFunc(module, "write", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("count", irtypes.I64))
+
+	// Global to store the write fd (NOT TLS — shared across all threads for signal handler)
+	wrFdGlobal := module.NewGlobal("__promise_signal_pipe_wr", irtypes.I32)
+	wrFdGlobal.Init = negOne32
+
+	// Define the signal handler: void @promise_signal_handler(i32 %signum)
+	// Async-signal-safe: only uses write(2) and stack-local variables.
+	handlerFn := module.NewFunc("promise_signal_handler", irtypes.Void,
+		ir.NewParam("signum", irtypes.I32))
+	handlerFn.FuncAttrs = append(handlerFn.FuncAttrs, enum.FuncAttrNoUnwind)
+	{
+		hEntry := handlerFn.NewBlock(".entry")
+		// Truncate signum to i8 and store on stack
+		sigByte := hEntry.NewTrunc(handlerFn.Params[0], irtypes.I8)
+		buf := hEntry.NewAlloca(irtypes.I8)
+		hEntry.NewStore(sigByte, buf)
+		// Load write fd from global
+		wrFd := hEntry.NewLoad(irtypes.I32, wrFdGlobal)
+		// write(wr_fd, &byte, 1) — async-signal-safe
+		hEntry.NewCall(writeFn, wrFd, buf, constant.NewInt(irtypes.I64, 1))
+		hEntry.NewRet(nil)
+	}
+
+	// Define @pal_signal_init() → i32
+	fn := module.NewFunc("pal_signal_init", irtypes.I32)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	entry := fn.NewBlock(".entry")
+	// Create pipe
+	pipeFds := entry.NewAlloca(irtypes.NewArray(2, irtypes.I32))
+	pipeFdsPtr := entry.NewBitCast(pipeFds, i32PtrType)
+	pipeRet := entry.NewCall(pipeFn, pipeFdsPtr)
+	isPipeErr := entry.NewICmp(enum.IPredSLT, pipeRet, zero32)
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".error")
+	entry.NewCondBr(isPipeErr, errBlk, okBlk)
+
+	errBlk.NewRet(negOne32)
+
+	// Load fds, store write fd in global, return read fd
+	rdFdPtr := okBlk.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), pipeFds, zero32, zero32)
+	wrFdPtr := okBlk.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), pipeFds, zero32, one32)
+	rdFd := okBlk.NewLoad(irtypes.I32, rdFdPtr)
+	wrFd := okBlk.NewLoad(irtypes.I32, wrFdPtr)
+	okBlk.NewStore(wrFd, wrFdGlobal)
+	okBlk.NewRet(rdFd)
+
+	return fn
+}
+
+// EmitSignalRegister defines @pal_signal_register using signal(2).
+// Signature: @pal_signal_register(i32 signum) → i32 (0 on success, -1 on error)
+func (p *PosixPAL) EmitSignalRegister(module *ir.Module) *ir.Func {
+	// declare i8* @signal(i32, i8*) nounwind
+	// signal() takes a function pointer as i8* and returns previous handler as i8*
+	signalFn := module.NewFunc("signal", irtypes.I8Ptr,
+		ir.NewParam("sig", irtypes.I32),
+		ir.NewParam("handler", irtypes.I8Ptr))
+	signalFn.FuncAttrs = append(signalFn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	// Look up the handler function defined by EmitSignalInit
+	var handlerFn *ir.Func
+	for _, f := range module.Funcs {
+		if f.Name() == "promise_signal_handler" {
+			handlerFn = f
+			break
+		}
+	}
+
+	fn := module.NewFunc("pal_signal_register", irtypes.I32,
+		ir.NewParam("signum", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	entry := fn.NewBlock(".entry")
+
+	if handlerFn == nil {
+		// Handler not defined (shouldn't happen if EmitSignalInit was called first)
+		entry.NewRet(constant.NewInt(irtypes.I32, -1))
+		return fn
+	}
+
+	// signal(signum, &promise_signal_handler)
+	handlerPtr := entry.NewBitCast(handlerFn, irtypes.I8Ptr)
+	result := entry.NewCall(signalFn, fn.Params[0], handlerPtr)
+
+	// SIG_ERR is (void(*)(int))-1, which as i8* is -1 (all-ones pointer)
+	sigErr := constant.NewIntToPtr(constant.NewInt(irtypes.I64, -1), irtypes.I8Ptr)
+	isErr := entry.NewICmp(enum.IPredEQ, result, sigErr)
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".error")
+	entry.NewCondBr(isErr, errBlk, okBlk)
+
+	errBlk.NewRet(constant.NewInt(irtypes.I32, -1))
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+
+	return fn
+}

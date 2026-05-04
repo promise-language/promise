@@ -201,6 +201,11 @@ type Compiler struct {
 	palGetEnviron     *ir.Func // @pal_get_environ() → i8**
 	palGetUserInfo    *ir.Func // @pal_get_user_info(i8** out_name, i8** out_dir, i32* out_uid, i32* out_gid) → i32
 	palGetHostname    *ir.Func // @pal_get_hostname(i8* buf, i64 len) → i8*
+	palSignalInit     *ir.Func // @pal_signal_init() → i32 (rd_fd or -1)
+	palSignalRegister *ir.Func // @pal_signal_register(i32 signum) → i32
+
+	// Signal pipe globals (NOT TLS — shared across all threads)
+	signalPipeRdFd *ir.Global // @__promise_signal_pipe_rd (i32)
 
 	// Command-line argument globals (populated from main's argc/argv)
 	argcGlobal *ir.Global // @__promise_argc (i32)
@@ -1029,6 +1034,12 @@ func (c *Compiler) declareIntrinsics() {
 	c.palGetEnviron = p.EmitGetEnviron(c.module)
 	c.palGetUserInfo = p.EmitGetUserInfo(c.module)
 	c.palGetHostname = p.EmitGetHostname(c.module)
+	c.palSignalInit = p.EmitSignalInit(c.module)
+	c.palSignalRegister = p.EmitSignalRegister(c.module)
+
+	// Signal pipe read fd global (NOT TLS — dispatch goroutine reads from it)
+	c.signalPipeRdFd = c.module.NewGlobal("__promise_signal_pipe_rd", irtypes.I32)
+	c.signalPipeRdFd.Init = constant.NewInt(irtypes.I32, -1)
 
 	// Command-line argument globals — populated from main's argc/argv
 	c.argcGlobal = c.module.NewGlobalDef("__promise_argc", constant.NewInt(irtypes.I32, 0))

@@ -485,7 +485,7 @@ test_process_wait_twice() `test(exclude: "wasm32") {
 }
 
 _spawn_and_drop()! {
-  Process p = Process.spawn("true")!;
+  Process p = Process.spawn("true");
   // p goes out of scope here, drop should close fds and reap zombie
 }
 
@@ -655,8 +655,8 @@ test_process_empty_output() `test(exclude: "wasm32") {
 }
 
 _drop_process_input(Process ~p)! {
-  ProcessInput stdin = p.take_standard_input()!;
-  stdin.write_string("auto-close")!;
+  ProcessInput stdin = p.take_standard_input();
+  stdin.write_string("auto-close");
   // stdin goes out of scope without explicit close — drop should handle it
 }
 
@@ -823,4 +823,121 @@ test_user_name_matches_env() `test(exclude: "wasm32") {
   if u := env_user {
     assert(name == u, "user_name should match $USER");
   }
+}
+
+// ── Signal handling tests ────────────────────────────────────────────────────
+
+test_signal_enum_posix_numbers() `test(exclude: "wasm32") {
+  assert(Signal.Interrupt._to_posix_number() == 2, "Interrupt should be SIGINT (2)");
+  assert(Signal.Terminate._to_posix_number() == 15, "Terminate should be SIGTERM (15)");
+  assert(Signal.Hangup._to_posix_number() == 1, "Hangup should be SIGHUP (1)");
+}
+
+test_signal_from_posix_roundtrip() `test(exclude: "wasm32") {
+  if sig := _signal_from_posix(2) {
+    assert(sig._to_posix_number() == 2, "roundtrip should preserve signal number");
+  } else {
+    assert(false, "should recognize SIGINT (2)");
+  }
+  if sig := _signal_from_posix(15) {
+    assert(sig._to_posix_number() == 15, "roundtrip should preserve SIGTERM");
+  } else {
+    assert(false, "should recognize SIGTERM (15)");
+  }
+}
+
+test_signal_from_posix_unknown() `test(exclude: "wasm32") {
+  Signal? sig = _signal_from_posix(999);
+  assert(sig is absent, "unknown signal number should return none");
+}
+
+test_signal_receive_interrupt() `test(exclude: "wasm32") {
+  setup_signal_handling(Signal.Interrupt)!;
+  // Send SIGINT to self in a goroutine (so receive_signal can block)
+  int pid = process_identifier;
+  go _os_send_signal(pid, 2);
+  Signal received = receive_signal()!;
+  assert(received._to_posix_number() == 2, "should receive Signal.Interrupt");
+}
+
+test_signal_receive_terminate() `test(exclude: "wasm32") {
+  setup_signal_handling(Signal.Terminate)!;
+  int pid = process_identifier;
+  go _os_send_signal(pid, 15);
+  Signal received = receive_signal()!;
+  assert(received._to_posix_number() == 15, "should receive Signal.Terminate");
+}
+
+test_signal_receive_hangup() `test(exclude: "wasm32") {
+  setup_signal_handling(Signal.Hangup)!;
+  int pid = process_identifier;
+  go _os_send_signal(pid, 1);
+  Signal received = receive_signal()!;
+  assert(received._to_posix_number() == 1, "should receive Signal.Hangup");
+}
+
+test_signal_setup_multiple_signals() `test(exclude: "wasm32") {
+  // Register multiple signals in one call (variadic)
+  setup_signal_handling(Signal.Interrupt, Signal.Terminate)!;
+  int pid = process_identifier;
+  go _os_send_signal(pid, 15);
+  Signal received = receive_signal()!;
+  assert(received._to_posix_number() == 15, "should receive Signal.Terminate from multi-register");
+}
+
+test_signal_setup_idempotent() `test(exclude: "wasm32") {
+  // Calling setup twice should not fail (idempotent pipe init)
+  setup_signal_handling(Signal.Interrupt)!;
+  setup_signal_handling(Signal.Terminate)!;
+  int pid = process_identifier;
+  go _os_send_signal(pid, 2);
+  Signal received = receive_signal()!;
+  assert(received._to_posix_number() == 2, "should work after double setup");
+}
+
+test_process_identifier_positive() `test(exclude: "wasm32") {
+  int pid = process_identifier;
+  assert(pid > 0, "process_identifier should be positive");
+}
+
+test_process_identifier_stable() `test(exclude: "wasm32") {
+  int pid1 = process_identifier;
+  int pid2 = process_identifier;
+  assert(pid1 == pid2, "process_identifier should be stable across calls");
+}
+
+test_process_output_read_after_close() `test(exclude: "wasm32") {
+  Process p = Process.spawn("echo", "hi")!;
+  ProcessOutput stdout = p.take_standard_output()!;
+  stdout.close()!;
+  // Read on closed pipe should return 0 (EOF), not error
+  u8[] buf = u8[].filled(0u8, 64);
+  int n = stdout.read(buf)!;
+  assert(n == 0, "read after close should return 0 (EOF)");
+  p.wait()!;
+}
+
+_drop_process_output(Process ~p)! {
+  ProcessOutput stdout = p.take_standard_output();
+  // stdout goes out of scope without explicit close — drop should handle it
+}
+
+test_process_output_drop_auto_closes() `test(exclude: "wasm32") {
+  Process p = Process.spawn("echo", "dropped")!;
+  _drop_process_output(p)!;
+  // If drop didn't close the fd, this would leak. Just verify no hang.
+  p.wait()!;
+}
+
+test_environment_reflects_set() `test(exclude: "wasm32") {
+  // Set a variable, then verify it appears in the environment map
+  set_environment_variable("PROMISE_TEST_ENV_MAP", "from_map_test");
+  map[string, string] env = environment;
+  assert(env.contains("PROMISE_TEST_ENV_MAP"), "environment map should contain newly set variable");
+  if v := env["PROMISE_TEST_ENV_MAP"] {
+    assert(v == "from_map_test", "environment map value should match what was set");
+  }
+  // Clean up
+  string? absent;
+  set_environment_variable("PROMISE_TEST_ENV_MAP", absent);
 }

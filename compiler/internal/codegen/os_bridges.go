@@ -98,6 +98,21 @@ func (c *Compiler) defineOSBodies() {
 	if fn, ok := irFuncByName["promise_os_get_hostname"]; ok {
 		c.defineGetHostnameBody(fn)
 	}
+	if fn, ok := irFuncByName["promise_os_signal_init"]; ok {
+		c.defineSignalInitBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_os_signal_register"]; ok {
+		c.defineSignalRegisterBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_os_signal_read"]; ok {
+		c.defineSignalReadBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_os_send_signal"]; ok {
+		c.defineSendSignalBody(fn)
+	}
+	if fn, ok := irFuncByName["promise_os_get_pid"]; ok {
+		c.defineGetPidBody(fn)
+	}
 }
 
 // defineGetEnvBody: void @promise_os_get_env(i8* sret, i8* name)
@@ -1051,4 +1066,113 @@ func (c *Compiler) defineGetHostnameBody(fn *ir.Func) {
 		constant.NewNull(irtypes.I8Ptr), constant.NewInt(irtypes.I64, 0))
 	c.storeStringResult(errorBlk, sret, emptyStr)
 	errorBlk.NewRet(nil)
+}
+
+// ── Signal bridges ───────────────────────────────────────────────────────────
+
+// defineSignalInitBody: void @promise_os_signal_init(i8* sret)
+// Calls pal_signal_init(), stores rd_fd in global, returns rd_fd as Promise int.
+// Idempotent: if already initialized (rd_fd >= 0), returns existing rd_fd.
+func (c *Compiler) defineSignalInitBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	// Check if already initialized
+	existingRdFd := entry.NewLoad(irtypes.I32, c.signalPipeRdFd)
+	alreadyInit := entry.NewICmp(enum.IPredSGE, existingRdFd, constant.NewInt(irtypes.I32, 0))
+	initBlk := fn.NewBlock(".init")
+	doneBlk := fn.NewBlock(".done")
+	entry.NewCondBr(alreadyInit, doneBlk, initBlk)
+
+	// Already initialized: return existing rd_fd
+	existingI64 := doneBlk.NewSExt(existingRdFd, irtypes.I64)
+	c.storeIntResult(doneBlk, sret, existingI64)
+	doneBlk.NewRet(nil)
+
+	// Not initialized: call PAL
+	rdFd := initBlk.NewCall(c.palSignalInit)
+	initBlk.NewStore(rdFd, c.signalPipeRdFd)
+	rdFdI64 := initBlk.NewSExt(rdFd, irtypes.I64)
+	c.storeIntResult(initBlk, sret, rdFdI64)
+	initBlk.NewRet(nil)
+}
+
+// defineSignalRegisterBody: void @promise_os_signal_register(i8* sret, i8* signum)
+// Extracts signum, calls pal_signal_register, returns result as Promise int.
+func (c *Compiler) defineSignalRegisterBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	sigRaw := c.extractRawInt(entry, fn.Params[1])
+	sigI32 := entry.NewTrunc(sigRaw, irtypes.I32)
+
+	rc := entry.NewCall(c.palSignalRegister, sigI32)
+	rcI64 := entry.NewSExt(rc, irtypes.I64)
+	c.storeIntResult(entry, sret, rcI64)
+	entry.NewRet(nil)
+}
+
+// defineSignalReadBody: void @promise_os_signal_read(i8* sret, i8* ~buf)
+// Reads from the signal pipe rd_fd into buf, with enter/exit_syscall.
+// Returns bytes read as Promise int (0 = EOF/closed, negative = error).
+func (c *Compiler) defineSignalReadBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	// Load the signal pipe rd_fd from global
+	rdFd := entry.NewLoad(irtypes.I32, c.signalPipeRdFd)
+
+	// Extract buf data pointer and length
+	vecPtr := fn.Params[1]
+	dataPtr, dataLen := extractVectorDataLen(entry, vecPtr)
+
+	// Call pal_file_read with syscall handoff
+	c.emitEnterSyscall(entry)
+	n := entry.NewCall(c.palFileRead, rdFd, dataPtr, dataLen)
+	c.emitExitSyscall(entry)
+
+	c.storeIntResult(entry, sret, n)
+	entry.NewRet(nil)
+}
+
+// defineSendSignalBody: void @promise_os_send_signal(i8* sret, i8* pid, i8* signum)
+// Sends an arbitrary signal to a process. Returns 0 on success, -1 on error.
+func (c *Compiler) defineSendSignalBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	pidRaw := c.extractRawInt(entry, fn.Params[1])
+	pidI32 := entry.NewTrunc(pidRaw, irtypes.I32)
+
+	sigRaw := c.extractRawInt(entry, fn.Params[2])
+	sigI32 := entry.NewTrunc(sigRaw, irtypes.I32)
+
+	rc := entry.NewCall(c.palKill, pidI32, sigI32)
+	rcI64 := entry.NewSExt(rc, irtypes.I64)
+	c.storeIntResult(entry, sret, rcI64)
+	entry.NewRet(nil)
+}
+
+// defineGetPidBody: void @promise_os_get_pid(i8* sret)
+// Returns the current process ID via getpid().
+func (c *Compiler) defineGetPidBody(fn *ir.Func) {
+	entry := fn.NewBlock(".entry")
+	sret := fn.Params[0]
+
+	// declare i32 @getpid() — look up or declare
+	var getpidFn *ir.Func
+	for _, f := range c.module.Funcs {
+		if f.Name() == "getpid" {
+			getpidFn = f
+			break
+		}
+	}
+	if getpidFn == nil {
+		getpidFn = c.module.NewFunc("getpid", irtypes.I32)
+		getpidFn.FuncAttrs = append(getpidFn.FuncAttrs, enum.FuncAttrNoUnwind)
+	}
+	pid := entry.NewCall(getpidFn)
+	pidI64 := entry.NewSExt(pid, irtypes.I64)
+	c.storeIntResult(entry, sret, pidI64)
+	entry.NewRet(nil)
 }

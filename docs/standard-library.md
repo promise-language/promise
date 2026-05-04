@@ -52,11 +52,11 @@ The stdlib today (29 files, ~2,440 lines) provides:
 | `strings` | `modules/strings/strings.pr` | 65 | **Done** — `join`, `spaces`, `reverse`, `is_blank`, `repeat_join`. 10 tests. |
 | `math` | `modules/math/math.pr` | 67 | **Done** — `lerp`, `map_range`, `deg_to_rad`, `rad_to_deg`, `sign`, `sign_f64`, `is_even`, `is_odd`, `gcd`, `lcm`. 26 tests. |
 | `json` | `modules/json/json.pr` | ~600 | **Done** — `JsonEncoder` (is Encoder), `JsonDecoder` (is Decoder), `encode_string`, `decode_string`, `encode_string_pretty`. 61 tests. |
-| `os` | `modules/os/os.pr` | 4 | **Done** — get_environment_variable, get_working_directory, exit_process, arguments, executable_path, execute, set_environment_variable, set_working_directory, Process/ProcessInput/ProcessOutput (streaming), environment (map), user_name, user_identifier, group_identifier, home_directory, hostname |
+| `os` | `modules/os/os.pr` | 4 | **Done** — get_environment_variable, get_working_directory, exit_process, arguments, executable_path, execute, set_environment_variable, set_working_directory, Process/ProcessInput/ProcessOutput (streaming), environment (map), user_name, user_identifier, group_identifier, home_directory, hostname, process_identifier, Signal enum, setup_signal_handling, receive_signal |
 | `time` | `modules/time/time.pr` | 4 | **Placeholder** — planned: extended time utilities beyond `std/time.pr` |
 | `http` | `modules/http/http.pr` | 4 | **Placeholder** — planned: get, post, Request, Response, Server, Handler |
 
-**What's missing**: Networking, HTTP, signal handling. OS access (args, env, cwd, execute, set env, set cwd, streaming process execution, environment listing, user/group info, hostname) is done.
+**What's missing**: Networking, HTTP. OS access (args, env, cwd, execute, set env, set cwd, streaming process, env listing, user/group info, hostname, pid, signal handling) is done.
 
 ### Naming Conventions
 
@@ -412,7 +412,7 @@ x := s.next[int]()!;
 
 ## 3. PAL Extensions
 
-The PAL (Platform Abstraction Layer) isolates all OS interaction. Currently 45 methods covering memory (5), threads/sync (11), CPU count (1), file I/O (12), OS/environment (5), process execution (5: spawn, read_pipe, wait_pid, spawn_streaming, kill), OS info (3: get_environ, get_user_info, get_hostname), and directory listing (3). New methods needed:
+The PAL (Platform Abstraction Layer) isolates all OS interaction. Currently 47 methods covering memory (5), threads/sync (11), CPU count (1), file I/O (12), OS/environment (5), process execution (5: spawn, read_pipe, wait_pid, spawn_streaming, kill), OS info (3: get_environ, get_user_info, get_hostname), signal handling (2: signal_init, signal_register), and directory listing (3). New methods needed:
 
 ### 3.1 File I/O — Done
 
@@ -517,10 +517,11 @@ EmitMemcpy(module *ir.Module) *ir.Func      // i8* dst, i8* src, i64 len → voi
 | Process | 5 (done) | `spawn` (`fork`+`execvp`+`pipe`), `read_pipe` (read+close), `wait_pid` (`waitpid`), `spawn_streaming` (stdin+stdout+stderr pipes), `kill` (`kill(2)`) |
 | OS Info | 3 (done) | `get_environ` (environ global), `get_user_info` (`getpwuid`+`getuid`), `get_hostname` (`gethostname`) |
 | Dir Listing | 3 (done) | `dir_open` (`opendir`), `dir_next_name` (`readdir`), `dir_close` (`closedir`) |
+| Signal | 2 (done) | `signal_init` (pipe + handler), `signal_register` (`signal(2)`) |
 | Time | 3 | `clock_gettime` (×2), `nanosleep` |
 | Math | 0 | LLVM intrinsics |
 | String | 1 | `memcpy` |
-| **Total** | **30** (26 done) | |
+| **Total** | **32** (28 done) | |
 
 ---
 
@@ -918,12 +919,18 @@ get user_identifier int;              // uid
 get group_identifier int;             // gid
 get home_directory string;            // home dir (getpwuid)
 get hostname string;                  // machine hostname
+get process_identifier int;           // current pid
+
+// Signal handling
+enum Signal { Interrupt, Terminate, Hangup }
+setup_signal_handling(...Signal signals)!;  // register signals via pipe+handler
+receive_signal() Signal!;                   // block until signal arrives
 ```
 
 - **File**: `modules/os/os.pr` (separate `os` module, not part of `std`)
-- **Dependencies**: PAL OS (getenv, getcwd, exit, setenv, unsetenv, chdir, spawn, spawn_streaming, kill, get_environ, get_user_info, get_hostname), argc/argv globals from main prologue
-- **Native codegen**: Extern bridge pattern in `os_bridges.go` — Promise declares `_os_func() T \`extern("promise_os_func");`, codegen provides LLVM IR body bridging Promise types ↔ PAL. `execute` uses three-extern + TLS caching pattern. Streaming process uses six externs. OS info uses six externs: `get_environ` (builds string[] from C environ), `get_user_name`/`get_user_id`/`get_group_id`/`get_home_dir` (via `pal_get_user_info` with platform-specific struct passwd layout), `get_hostname` (via `pal_get_hostname`). The `environment` getter builds `map[string, string]` in pure Promise from the string[] of "KEY=VALUE" entries.
-- **Test**: `modules/os/os_test.pr` (90 tests, excluded on WASM)
+- **Dependencies**: PAL OS (getenv, getcwd, exit, setenv, unsetenv, chdir, spawn, spawn_streaming, kill, get_environ, get_user_info, get_hostname, signal_init, signal_register), argc/argv globals from main prologue
+- **Native codegen**: Extern bridge pattern in `os_bridges.go` — Promise declares `_os_func() T \`extern("promise_os_func");`, codegen provides LLVM IR body bridging Promise types ↔ PAL. `execute` uses three-extern + TLS caching pattern. Streaming process uses six externs. OS info uses six externs. Signal handling uses pipe-based async-signal-safe delivery: `pal_signal_init` creates pipe + defines handler, `pal_signal_register` calls `signal(2)`. The `environment` getter builds `map[string, string]` in pure Promise from the string[] of "KEY=VALUE" entries.
+- **Test**: `modules/os/os_test.pr` (103 tests, excluded on WASM)
 
 #### 4e. Standard Input — DONE (merged into `modules/io/io.pr`)
 
@@ -1217,7 +1224,7 @@ bin/test.sh                            # rebuild + all tests pass (including new
 | 4a | `modules/std/io.pr` | Promise | No | 59 | **DONE** |
 | 4b | `modules/io/io.pr` | Promise + Native | 12 | 501 | **DONE** |
 | 4c | `modules/path/path.pr` | Promise | No | 192 | **DONE** |
-| 4d | `modules/os/os.pr` | Promise + Native | 11 | 366 | **DONE** |
+| 4d | `modules/os/os.pr` | Promise + Native | 13 | 449 | **DONE** |
 | 4e | (merged into 4b) | — | — | — | **DONE** |
 | — | `modules/std/platform.pr` | Promise | No | 33 | **DONE** |
 | 5a | `modules/json/json.pr` | Promise | No | ~300 | Future |

@@ -134,6 +134,16 @@ type PAL interface {
 	EmitGetUserInfo(module *ir.Module) *ir.Func
 	// EmitGetHostname defines @pal_get_hostname(i8* buf, i64 len) → i8* (buf on success, null on error)
 	EmitGetHostname(module *ir.Module) *ir.Func
+
+	// Signal handling primitives
+	// EmitSignalInit defines @pal_signal_init() → i32
+	// Creates a pipe for signal delivery, defines signal handler function.
+	// Returns read fd on success, -1 on error. Write fd stored in global for handler.
+	EmitSignalInit(module *ir.Module) *ir.Func
+	// EmitSignalRegister defines @pal_signal_register(i32 signum) → i32
+	// Registers the signal handler for the given signal number.
+	// Returns 0 on success, -1 on error.
+	EmitSignalRegister(module *ir.Module) *ir.Func
 }
 
 // ForTarget returns a PAL implementation for the given LLVM target triple.
@@ -650,6 +660,27 @@ func emitStubGetHostname(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 	entry := fn.NewBlock(".entry")
 	entry.NewRet(constant.NewNull(irtypes.I8Ptr))
+	return fn
+}
+
+// --- Stub signal handling implementations ---
+
+// emitStubSignalInit returns -1 (no signal support).
+func emitStubSignalInit(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_signal_init", irtypes.I32)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -1))
+	return fn
+}
+
+// emitStubSignalRegister returns -1 (no signal support).
+func emitStubSignalRegister(module *ir.Module) *ir.Func {
+	fn := module.NewFunc("pal_signal_register", irtypes.I32,
+		ir.NewParam("signum", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+	entry.NewRet(constant.NewInt(irtypes.I32, -1))
 	return fn
 }
 

@@ -1045,6 +1045,16 @@ func (p *WindowsPAL) EmitGetHostname(module *ir.Module) *ir.Func {
 	return emitStubGetHostname(module)
 }
 
+// EmitSignalInit stub (not yet implemented on Windows).
+func (p *WindowsPAL) EmitSignalInit(module *ir.Module) *ir.Func {
+	return emitStubSignalInit(module)
+}
+
+// EmitSignalRegister stub (not yet implemented on Windows).
+func (p *WindowsPAL) EmitSignalRegister(module *ir.Module) *ir.Func {
+	return emitStubSignalRegister(module)
+}
+
 // EmitGetCwd declares UCRT @_getcwd and defines @pal_getcwd.
 // Signature: @pal_getcwd(i8* buf, i64 len) → i8* (buf or null)
 func (p *WindowsPAL) EmitGetCwd(module *ir.Module) *ir.Func {

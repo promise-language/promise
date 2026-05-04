@@ -260,7 +260,7 @@ The standard library (`modules/std/`, 29 files) is auto-imported via `use std as
 | `path` | `modules/path/path.pr` | `path_join`, `path_dir`, `path_base`, `path_ext`, `path_is_abs`, `path_normalize` |
 | `math` | `modules/math/math.pr` | Extended math functions |
 | `strings` | `modules/strings/strings.pr` | Extended string utilities |
-| `os` | `modules/os/os.pr` | OS interaction, environment, one-shot `execute`, streaming `Process`/`ProcessInput` (Writer)/`ProcessOutput` (Reader) |
+| `os` | `modules/os/os.pr` | OS interaction, environment, one-shot `execute`, streaming `Process`/`ProcessInput`/`ProcessOutput`, OS info (user/group/hostname/pid), signal handling (`Signal` enum, `setup_signal_handling`, `receive_signal`) |
 | `time` | `modules/time/time.pr` | Extended time utilities |
 | `http` | `modules/http/http.pr` | HTTP client (in progress) |
 
@@ -331,6 +331,8 @@ The standard library (`modules/std/`, 29 files) is auto-imported via `use std as
 - **Co-locate tests with source files.** Place `*_test.pr` files alongside the `.pr` files they test (not in a separate `tests/` tree). This makes tests easier to find and maintains context. The `tests/` directory is for cross-cutting integration and e2e tests that don't belong to a specific module or file.
 
 - **Use full English words in APIs — never abbreviate.** All public names in the standard library and language APIs must use complete, unabbreviated words, even when abbreviations are industry-standard (e.g., `print_line` not `println`, `make_directory` not `mkdir`, `concatenate` not `concat`, `execute` not `exec`, `arguments` not `args`). This optimizes for AI-agent readability — an LLM can always predict the full word but must memorize each abbreviation.
+
+- **Use getters for side-effect-free parameterless access.** Any public function or module-level function that takes no arguments and has no side effects should be a getter (`get name Type`), not a function (`name() Type`). Getters are accessed as properties without parentheses (e.g., `os.hostname`, `os.process_identifier`, `os.environment`). Only use a function when the operation has side effects (e.g., `receive_signal()` blocks on I/O) or takes parameters.
 
 ## Bug & Task Tracking
 

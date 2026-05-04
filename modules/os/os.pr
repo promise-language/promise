@@ -82,6 +82,23 @@ _os_get_home_dir() string `extern("promise_os_get_home_dir");
 // Returns the system hostname.
 _os_get_hostname() string `extern("promise_os_get_hostname");
 
+// ── Signal externs ───────────────────────────────────────────────────────────
+
+// Creates signal pipe and handler. Returns pipe read fd (or -1 on error).
+_os_signal_init() int `extern("promise_os_signal_init");
+
+// Registers signal handler for a POSIX signal number. Returns 0 on success.
+_os_signal_register(int signum) int `extern("promise_os_signal_register");
+
+// Reads from signal pipe into buf. Returns bytes read (blocking).
+_os_signal_read(u8[]~buf) int `extern("promise_os_signal_read");
+
+// Sends an arbitrary signal to a process. Returns 0 on success, -1 on error.
+_os_send_signal(int pid, int signum) int `extern("promise_os_send_signal");
+
+// Returns the current process ID.
+_os_get_pid() int `extern("promise_os_get_pid");
+
 // ── Error type ───────────────────────────────────────────────────────────────
 
 type OsError is error `public `doc("An operating system error.") {
@@ -161,7 +178,7 @@ type ProcessOutput `public `doc("Read end of a subprocess stdout or stderr pipe.
     Builder b = Builder();
     u8[] buf = u8[].filled(0u8, 4096);
     while true {
-      int n = this.read(buf)!;
+      int n = this.read(buf);
       if n == 0 {
         break;
       }
@@ -201,7 +218,7 @@ type Process `public `doc("A running subprocess with piped stdin, stdout, and st
   bool _waited;
 
   spawn(string program, ...string arguments) Self! `factory `public `doc("Spawns a subprocess with piped stdin, stdout, and stderr. The child process inherits the parent environment and working directory. The program is searched using the system PATH. Returns a Process handle for interacting with the child. Raises an error if the process cannot be started.") {
-    int pid = _os_spawn_streaming(program, arguments)!;
+    int pid = _os_spawn_streaming(program, arguments);
     int stdin_fd = _os_spawn_stdin_fd();
     int stdout_fd = _os_spawn_stdout_fd();
     int stderr_fd = _os_spawn_stderr_fd();
@@ -244,7 +261,7 @@ type Process `public `doc("A running subprocess with piped stdin, stdout, and st
       _os_pipe_close(this._stdin_fd);
       this._stdin_fd = -1;
     }
-    int code = _os_wait_pid(this._pid)!;
+    int code = _os_wait_pid(this._pid);
     this._exit_code = code;
     this._waited = true;
     return code;
@@ -318,7 +335,7 @@ set_working_directory(string path)! `public `doc("Changes the current working di
 }
 
 execute(string program, ...string arguments) ProcessResult! `public `doc("Executes a program with the given arguments and waits for it to complete. Returns a ProcessResult containing the exit code and captured standard output and standard error. Raises an error if the process could not be started. The program is searched using the system PATH. If the program is not found, the child process exits with code 127. Accepts arguments inline (execute(\"ls\", \"-la\", \"/tmp\")) or as a pre-built string[] (execute(\"ls\", args)). Stdout and stderr are read concurrently via goroutines, so large output on either stream will not deadlock.") {
-  int pid = _os_spawn(program, arguments)!;
+  int pid = _os_spawn(program, arguments);
   int stdout_fd = _os_spawn_stdout_fd();
   int stderr_fd = _os_spawn_stderr_fd();
 
@@ -326,7 +343,7 @@ execute(string program, ...string arguments) ProcessResult! `public `doc("Execut
   string stdout = _os_read_pipe(stdout_fd);
   string stderr = <-stderr_task;
 
-  int exit_code = _os_wait_pid(pid)!;
+  int exit_code = _os_wait_pid(pid);
   return ProcessResult(exit_code: exit_code, standard_output: stdout, standard_error: stderr);
 }
 
@@ -363,4 +380,70 @@ get home_directory string `public `doc("Returns the home directory of the curren
 
 get hostname string `public `doc("Returns the hostname of the machine. Returns an empty string if the hostname cannot be determined.") {
   return _os_get_hostname();
+}
+
+get process_identifier int `public `doc("Returns the process ID (pid) of the current process.") {
+  return _os_get_pid();
+}
+
+// ── Signal handling ──────────────────────────────────────────────────────────
+
+enum Signal `public `doc("A POSIX signal type. Use with setup_signal_handling() and receive_signal() to handle signals.") {
+  Interrupt `doc("SIGINT (2) — sent by Ctrl+C."),
+  Terminate `doc("SIGTERM (15) — default signal sent by kill command."),
+  Hangup `doc("SIGHUP (1) — sent when the terminal is closed."),
+
+  _to_posix_number(&this) int `doc("Returns the POSIX signal number for this signal.") {
+    match this {
+      Signal.Interrupt => {
+        return 2;
+      },
+      Signal.Terminate => {
+        return 15;
+      },
+      Signal.Hangup => {
+        return 1;
+      },
+    }
+  }
+}
+
+_signal_from_posix(int n) Signal? {
+  if n == 2 {
+    return Signal.Interrupt;
+  }
+  if n == 15 {
+    return Signal.Terminate;
+  }
+  if n == 1 {
+    return Signal.Hangup;
+  }
+  return none;
+}
+
+_ensure_signal_init()! {
+  int rd = _os_signal_init(); // idempotent — returns existing rd_fd if already initialized
+  if rd < 0 {
+    raise OsError(code: 1, message: "failed to initialize signal pipe");
+  }
+}
+
+setup_signal_handling(...Signal signals)! `public `doc("Sets up signal handling for the given signals. Creates an internal pipe and registers signal handlers on first call. Subsequent calls register additional signals. After calling this, use receive_signal() to block until a signal arrives.") {
+  _ensure_signal_init();
+  for sig in signals {
+    _os_signal_register(sig._to_posix_number());
+  }
+}
+
+receive_signal() Signal! `public `doc("Blocks until a registered signal arrives. Returns the Signal that was received. Raises an error if the signal pipe read fails or the signal number is unrecognized. Call setup_signal_handling() first to register which signals to listen for.") {
+  u8[] buf = u8[].filled(0u8, 1);
+  int n = _os_signal_read(buf);
+  if n <= 0 {
+    raise OsError(code: 1, message: "signal pipe read failed");
+  }
+  int signum = buf[0] as int;
+  if sig := _signal_from_posix(signum) {
+    return sig;
+  }
+  raise OsError(code: 1, message: "unrecognized signal number");
 }

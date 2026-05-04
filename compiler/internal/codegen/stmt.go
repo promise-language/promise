@@ -49,7 +49,14 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 		}
 		if i == n-1 {
 			if es, ok := stmt.(*ast.ExprStmt); ok {
-				result = c.genExpr(es.Expr)
+				if c.info.AutoPropagateExprs[es.Expr] {
+					// Failable call: auto-propagate error, discard success value.
+					// Block arms don't contribute typed results to match phis;
+					// only expression arms (arm.Body) produce match result values.
+					c.genAutoPropagate(es.Expr)
+				} else {
+					result = c.genExpr(es.Expr)
+				}
 				break
 			}
 		}

@@ -575,69 +575,75 @@ type JsonDecoder is Decoder `public `doc("Decodes values from a JSON string. Sat
     if this._pos >= this._data.len {
       raise DecodeError(message: "unexpected end of input while skipping value", field: "", position: this._pos);
     }
-    // B0091: match here causes codegen IR type mismatch for failable calls
-    // in module compilation context. Using if/else chain until fixed.
     char c = this._data[this._pos];
-    if c == '"' {
-      this._read_string_value();
-    } else if c == '{' {
-      this._advance();
-      this._skip_whitespace();
-      if this._pos < this._data.len && this._data[this._pos] == '}' {
+    match c {
+      '"' => {
+        this._read_string_value();
+      },
+      '{' => {
         this._advance();
-        return;
-      }
-      // Skip key-value pairs
-      bool first = true;
-      while this._pos < this._data.len {
         this._skip_whitespace();
-        if this._data[this._pos] == '}' {
+        if this._pos < this._data.len && this._data[this._pos] == '}' {
           this._advance();
           return;
         }
-        if !first {
-          if this._data[this._pos] == ',' {
+        // Skip key-value pairs
+        bool first = true;
+        while this._pos < this._data.len {
+          this._skip_whitespace();
+          if this._data[this._pos] == '}' {
             this._advance();
+            return;
           }
+          if !first {
+            if this._data[this._pos] == ',' {
+              this._advance();
+            }
+          }
+          first = false;
+          this._skip_whitespace();
+          this._read_string_value(); // key
+          this._expect(':');
+          this.skip_value(); // value (recursive)
         }
-        first = false;
-        this._skip_whitespace();
-        this._read_string_value(); // key
-        this._expect(':');
-        this.skip_value(); // value (recursive)
-      }
-      raise DecodeError(message: "unterminated object", field: "", position: this._pos);
-    } else if c == '[' {
-      this._advance();
-      this._skip_whitespace();
-      if this._pos < this._data.len && this._data[this._pos] == ']' {
+        raise DecodeError(message: "unterminated object", field: "", position: this._pos);
+      },
+      '[' => {
         this._advance();
-        return;
-      }
-      bool first = true;
-      while this._pos < this._data.len {
         this._skip_whitespace();
-        if this._data[this._pos] == ']' {
+        if this._pos < this._data.len && this._data[this._pos] == ']' {
           this._advance();
           return;
         }
-        if !first {
-          if this._data[this._pos] == ',' {
+        bool first = true;
+        while this._pos < this._data.len {
+          this._skip_whitespace();
+          if this._data[this._pos] == ']' {
             this._advance();
+            return;
           }
+          if !first {
+            if this._data[this._pos] == ',' {
+              this._advance();
+            }
+          }
+          first = false;
+          this.skip_value(); // element (recursive)
         }
-        first = false;
-        this.skip_value(); // element (recursive)
-      }
-      raise DecodeError(message: "unterminated array", field: "", position: this._pos);
-    } else if c == 't' {
-      this._pos = this._pos + 4;
-    } else if c == 'f' {
-      this._pos = this._pos + 5;
-    } else if c == 'n' {
-      this._pos = this._pos + 4;
-    } else {
-      this._read_number();
+        raise DecodeError(message: "unterminated array", field: "", position: this._pos);
+      },
+      't' => {
+        this._pos = this._pos + 4;
+      },
+      'f' => {
+        this._pos = this._pos + 5;
+      },
+      'n' => {
+        this._pos = this._pos + 4;
+      },
+      _ => {
+        this._read_number();
+      },
     }
   }
 }

@@ -194,7 +194,7 @@ func (l *lexer) next() token {
 		return token{tkString, l.src[start:l.pos]}
 	}
 
-	// Regular string
+	// Regular string (handles {expr} interpolation)
 	if ch == '"' {
 		start := l.pos
 		l.advance()
@@ -202,6 +202,12 @@ func (l *lexer) next() token {
 			c := l.src[l.pos]
 			if c == '\\' {
 				l.pos += 2
+				continue
+			}
+			if c == '{' {
+				// String interpolation — skip over {expr} including nested strings
+				l.pos++
+				l.skipInterpolation()
 				continue
 			}
 			if c == '"' {
@@ -454,6 +460,57 @@ func (l *lexer) lexFloatSuffix() {
 	rest := l.src[l.pos:]
 	if strings.HasPrefix(rest, "f64") || strings.HasPrefix(rest, "f32") {
 		l.pos += 3
+	}
+}
+
+// skipInterpolation skips over a string interpolation expression.
+// Called after consuming the opening '{'. Handles nested braces, strings, and char literals.
+func (l *lexer) skipInterpolation() {
+	depth := 1
+	for l.pos < len(l.src) && depth > 0 {
+		c := l.src[l.pos]
+		switch c {
+		case '{':
+			depth++
+			l.pos++
+		case '}':
+			depth--
+			l.pos++
+		case '"':
+			// Nested string literal — scan it, handling its own interpolation recursively
+			l.pos++
+			for l.pos < len(l.src) {
+				nc := l.src[l.pos]
+				if nc == '\\' {
+					l.pos += 2
+					continue
+				}
+				if nc == '{' {
+					l.pos++
+					l.skipInterpolation()
+					continue
+				}
+				if nc == '"' {
+					l.pos++
+					break
+				}
+				l.pos++
+			}
+		case '\'':
+			// Char literal — scan past it
+			l.pos++
+			if l.pos < len(l.src) && l.src[l.pos] == '\\' {
+				l.pos += 2
+			} else if l.pos < len(l.src) {
+				_, size := utf8.DecodeRuneInString(l.src[l.pos:])
+				l.pos += size
+			}
+			if l.pos < len(l.src) && l.src[l.pos] == '\'' {
+				l.pos++
+			}
+		default:
+			l.pos++
+		}
 	}
 }
 

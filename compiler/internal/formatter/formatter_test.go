@@ -626,6 +626,71 @@ func TestFormat(t *testing.T) {
 			expected: "string s = \"hello ${name}\";\n",
 		},
 		{
+			name:     "interpolation with nested string literal",
+			input:    "string s = \"{match x { 3 => \"three\", _ => \"other\", }}\";",
+			expected: "string s = \"{match x { 3 => \"three\", _ => \"other\", }}\";\n",
+		},
+		{
+			name:     "interpolation with simple expression",
+			input:    "print_line(\"{x + 1}\");",
+			expected: "print_line(\"{x + 1}\");\n",
+		},
+		{
+			name:     "interpolation with nested braces",
+			input:    "string s = \"{if x { \"yes\" } else { \"no\" }}\";",
+			expected: "string s = \"{if x { \"yes\" } else { \"no\" }}\";\n",
+		},
+		{
+			name:     "multiple interpolations in one string",
+			input:    "string s = \"{a} and {b}\";",
+			expected: "string s = \"{a} and {b}\";\n",
+		},
+		{
+			name:     "escaped brace not interpolation",
+			input:    "string s = \"\\{not interpolation}\";",
+			expected: "string s = \"\\{not interpolation}\";\n",
+		},
+		{
+			name:     "interpolation only string",
+			input:    "string s = \"{x}\";",
+			expected: "string s = \"{x}\";\n",
+		},
+		{
+			name:     "empty interpolation",
+			input:    "string s = \"{}\";",
+			expected: "string s = \"{}\";\n",
+		},
+		{
+			name:     "adjacent interpolations",
+			input:    "string s = \"{a}{b}\";",
+			expected: "string s = \"{a}{b}\";\n",
+		},
+		{
+			name:     "deeply nested braces in interpolation",
+			input:    "string s = \"{if a { if b { c } else { d } }}\";",
+			expected: "string s = \"{if a { if b { c } else { d } }}\";\n",
+		},
+		{
+			name:     "char literal inside interpolation",
+			input:    "string s = \"{match c { 'x' => 1, _ => 0, }}\";",
+			expected: "string s = \"{match c { 'x' => 1, _ => 0, }}\";\n",
+		},
+		{
+			name:     "escaped char literal inside interpolation",
+			input:    "string s = \"{match c { '\\n' => 1, _ => 0, }}\";",
+			expected: "string s = \"{match c { '\\n' => 1, _ => 0, }}\";\n",
+		},
+		{
+			name:     "escape inside nested string in interpolation",
+			input:    "string s = \"{get(\"key\\\"val\")}\";",
+			expected: "string s = \"{get(\"key\\\"val\")}\";\n",
+		},
+		{
+			name:     "recursive interpolation in nested string",
+			input:    "string s = \"{fmt(\"{x}\")}\";",
+			expected: "string s = \"{fmt(\"{x}\")}\";\n",
+		},
+		{
 			name:     "multiple args without trailing newline",
 			input:    "foo(a, b, c)",
 			expected: "foo(a, b, c)\n",
@@ -807,6 +872,10 @@ func TestIdempotent(t *testing.T) {
 		"assert('\\\\' == '\\\\', \"backslash\");\n",
 		"select {\n  ch.send(v):\n  x();\n  default:\n  y();\n}\n",
 		"match x {\n  1 => \"one\",\n  _ => \"other\",\n}\n",
+		"string s = \"{match x { 3 => \"three\", _ => \"other\", }}\";\n",
+		"string s = \"{a}{b}\";\n",
+		"string s = \"{match c { 'x' => 1, _ => 0, }}\";\n",
+		"string s = \"{fmt(\"{x}\")}\";\n",
 	}
 
 	for i, input := range inputs {

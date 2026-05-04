@@ -15,5 +15,7 @@ clear
 echo "Building compiler..."
 ./build
 
+STRESS_ARG="${1:-}"
+
 echo "Running continuous stress test (Ctrl+C to stop)..."
-exec "$PROMISE" test -timeout 5s -stress tests/... modules/...
+exec "$PROMISE" test -timeout 5s -stress $STRESS_ARG tests/... modules/...

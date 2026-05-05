@@ -318,6 +318,15 @@ func computeEnumInternalType(enum *types.Enum, subst map[*types.TypeParam]types.
 // Value types use their wider value struct (with embedded fields) instead of
 // the standard {i8*, i8*} layout.
 func instanceFieldLLVMType(typ types.Type, allLayouts map[*types.Named]*TypeDeclLayout, ptrSize int, enumLayouts map[*types.Enum]*TypeDeclLayout, monoEnumLayouts map[string]*TypeDeclLayout) irtypes.Type {
+	// Handle Optional types — recurse into inner type so Optional<UserType>
+	// gets {i1, {i8*, i8*}} instead of the incorrect {i1, i8*} from llvmType. (B0030)
+	if opt, ok := typ.(*types.Optional); ok {
+		inner := instanceFieldLLVMType(opt.Elem(), allLayouts, ptrSize, enumLayouts, monoEnumLayouts)
+		if _, isVoid := inner.(*irtypes.VoidType); isVoid {
+			return irtypes.I1
+		}
+		return irtypes.NewStruct(irtypes.I1, inner)
+	}
 	// Handle enum types — enums used as fields in user types
 	if lt := enumInternalTypeForField(typ, ptrSize, enumLayouts, monoEnumLayouts); lt != nil {
 		return lt

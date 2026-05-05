@@ -748,7 +748,19 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 		}
 	}
 
+	// Set targetType for Optional member/variable assignments so NoneLit
+	// produces the correct zero value (B0030)
+	if s.Op == ast.OpAssign {
+		targetType := c.info.Types[s.Target]
+		if c.typeSubst != nil {
+			targetType = types.Substitute(targetType, c.typeSubst)
+		}
+		if _, isOpt := targetType.(*types.Optional); isOpt {
+			c.targetType = targetType
+		}
+	}
 	val := c.genExpr(s.Value)
+	c.targetType = nil
 
 	// Auto-propagate failable call in assignment RHS.
 	if c.info.AutoPropagateExprs[s.Value] {

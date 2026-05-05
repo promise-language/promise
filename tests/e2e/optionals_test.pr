@@ -574,3 +574,60 @@ handler_user_type_present() `test {
   assert(q.x == 5, "handler keeps present user type x");
   assert(q.y == 6, "handler keeps present user type y");
 }
+
+// --- Optional user-defined type as struct field (B0030) ---
+
+type Location {
+  int x;
+  int y;
+}
+
+type Place {
+  string name;
+  Location? location;
+}
+
+optional_user_field_constructor_some() `test {
+  p := Place(name: "home", location: Location(x: 1, y: 2));
+  assert(p.name == "home", "name field");
+  loc := p.location!;
+  assert(loc.x == 1, "location x");
+  assert(loc.y == 2, "location y");
+}
+
+optional_user_field_constructor_none() `test {
+  p := Place(name: "unknown");
+  assert(p.name == "unknown", "name field");
+}
+
+optional_user_field_assign_some() `test {
+  p := Place(name: "a");
+  p.location = Location(x: 10, y: 20);
+  loc := p.location!;
+  assert(loc.x == 10, "assigned location x");
+  assert(loc.y == 20, "assigned location y");
+}
+
+optional_user_field_assign_none() `test {
+  p := Place(name: "a", location: Location(x: 1, y: 2));
+  p.location = none;
+}
+
+optional_user_field_explicit_none_in_constructor() `test {
+  p := Place(name: "nowhere", location: none);
+  assert(p.name == "nowhere", "name field");
+}
+
+// Nested optional user types
+type Container {
+  Place? inner;
+}
+
+optional_nested_user_field() `test {
+  c := Container(inner: Place(name: "nested", location: Location(x: 5, y: 6)));
+  p := c.inner!;
+  assert(p.name == "nested", "nested name");
+  loc := p.location!;
+  assert(loc.x == 5, "nested location x");
+  assert(loc.y == 6, "nested location y");
+}

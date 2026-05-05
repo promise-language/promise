@@ -1629,7 +1629,12 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 			if !ok {
 				panic(fmt.Sprintf("codegen: unknown field %s on type %s", arg.Name, typ))
 			}
+			// Set targetType for Optional fields so NoneLit produces the correct zero value (B0030)
+			if ft, isOpt := fieldTypeMap[arg.Name].(*types.Optional); isOpt {
+				c.targetType = ft
+			}
 			val := c.genCallArgExpr(arg.Value)
+			c.targetType = nil
 			val = maybeWrapOptional(val, arg.Value, arg.Name, fieldIdx)
 			fieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
@@ -1769,7 +1774,12 @@ func (c *Compiler) genValueTypeConstructor(e *ast.CallExpr, named *types.Named, 
 		if !ok {
 			panic(fmt.Sprintf("codegen: unknown field %s on type %s", arg.Name, typ))
 		}
+		// Set targetType for Optional fields so NoneLit produces the correct zero value (B0030)
+		if ft, isOpt := fieldTypeMap[arg.Name].(*types.Optional); isOpt {
+			c.targetType = ft
+		}
 		fieldVal := c.genCallArgExpr(arg.Value)
+		c.targetType = nil
 		fieldVal = maybeWrapOptional(fieldVal, arg.Value, arg.Name, fieldIdx)
 		val = c.block.NewInsertValue(val, fieldVal, uint64(fieldIdx))
 		if ident, ok := arg.Value.(*ast.IdentExpr); ok {

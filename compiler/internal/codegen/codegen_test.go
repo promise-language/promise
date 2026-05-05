@@ -6070,6 +6070,31 @@ func TestOptionalParamWrappingConstructor(t *testing.T) {
 	assertContains(t, ir, "{ i1, i64 }")
 }
 
+// B0030: Optional user-defined type in constructor should use {i1, {i8*, i8*}}
+func TestOptionalUserTypeFieldInConstructor(t *testing.T) {
+	ir := generateIR(t, `
+		type Coord { int x; int y; }
+		type Place { string name; Coord? location; }
+		main() {
+			Place p = Place(name: "home", location: Coord(x: 1, y: 2));
+		}
+	`)
+	// Optional user type field should be {i1, {i8*, i8*}} not {i1, i8*}
+	assertContains(t, ir, "{ i1, { i8*, i8* } }")
+}
+
+func TestOptionalUserTypeFieldNoneInConstructor(t *testing.T) {
+	ir := generateIR(t, `
+		type Coord { int x; int y; }
+		type Place { string name; Coord? location; }
+		main() {
+			Place p = Place(name: "test", location: none);
+		}
+	`)
+	// None for optional user type should produce zeroinitializer of {i1, {i8*, i8*}}
+	assertContains(t, ir, "{ i1, { i8*, i8* } } zeroinitializer")
+}
+
 func TestReturnCoercionSecondParent(t *testing.T) {
 	ir := generateIR(t, `
 		type Speakable {

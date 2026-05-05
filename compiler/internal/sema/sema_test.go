@@ -11120,3 +11120,78 @@ func TestGenericErrorHandlerNotError(t *testing.T) {
 	`)
 	expectError(t, errs, "does not inherit from error")
 }
+
+// ── Flatten annotation validation ──────────────────────────────────────────
+
+func TestFlattenBasic(t *testing.T) {
+	checkOK(t, `
+		type Inner `+"`"+`serializable { int x; int y; }
+		type Outer `+"`"+`serializable { string name; Inner data `+"`"+`flatten; }
+		test() { Outer o = Outer(name: "a", data: Inner(x: 1, y: 2)); }
+	`)
+}
+
+func TestFlattenOnNonNamedType(t *testing.T) {
+	errs := checkErrs(t, `
+		type Bad `+"`"+`serializable { string name; int value `+"`"+`flatten; }
+		test() {}
+	`)
+	expectError(t, errs, "`flatten field 'value' must have a named type")
+}
+
+func TestFlattenOnOptionalType(t *testing.T) {
+	errs := checkErrs(t, `
+		type Inner `+"`"+`serializable { int x; }
+		type Bad `+"`"+`serializable { Inner? opt `+"`"+`flatten; }
+		test() {}
+	`)
+	expectError(t, errs, "`flatten field 'opt' must have a named type")
+}
+
+func TestFlattenWithKey(t *testing.T) {
+	errs := checkErrs(t, `
+		type Inner `+"`"+`serializable { int x; }
+		type Bad `+"`"+`serializable { Inner data `+"`"+`flatten `+"`"+`key("d"); }
+		test() {}
+	`)
+	expectError(t, errs, "`flatten and `key cannot be combined")
+}
+
+func TestFlattenWithIncludeNone(t *testing.T) {
+	errs := checkErrs(t, `
+		type Inner `+"`"+`serializable { int x; }
+		type Bad `+"`"+`serializable { Inner data `+"`"+`flatten `+"`"+`include_none; }
+		test() {}
+	`)
+	expectError(t, errs, "`flatten and `include_none cannot be combined")
+}
+
+func TestFlattenWireNameCollision(t *testing.T) {
+	errs := checkErrs(t, `
+		type Inner `+"`"+`serializable { int name; }
+		type Bad `+"`"+`serializable { string name; Inner data `+"`"+`flatten; }
+		test() {}
+	`)
+	expectError(t, errs, "wire name 'name'")
+}
+
+func TestFlattenMultiple(t *testing.T) {
+	// Two flatten fields with non-overlapping wire names should work.
+	checkOK(t, `
+		type A `+"`"+`serializable { int x; }
+		type B `+"`"+`serializable { int y; }
+		type C `+"`"+`serializable { A a `+"`"+`flatten; B b `+"`"+`flatten; }
+		test() { C c = C(a: A(x: 1), b: B(y: 2)); }
+	`)
+}
+
+func TestFlattenMultipleCollision(t *testing.T) {
+	// Two flatten fields with overlapping wire names should error.
+	errs := checkErrs(t, `
+		type A `+"`"+`serializable { int x; }
+		type B `+"`"+`serializable { int x; }
+		type Bad `+"`"+`serializable { A a `+"`"+`flatten; B b `+"`"+`flatten; }
+		test() {}
+	`)
+	expectError(t, errs, "wire name 'x'")
+}

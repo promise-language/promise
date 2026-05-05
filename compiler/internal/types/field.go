@@ -13,6 +13,7 @@ type Field struct {
 	skip        bool   // `skip — excluded from serialization
 	includeNone bool   // `include_none — encode none as null instead of omitting
 	required    bool   // `required — error on missing key during decode
+	flatten     bool   // `flatten — inline nested fields into parent during encode/decode
 	keyName     string // `key("name") — wire name override for serialization
 	doc         string
 	deprecated  string
@@ -50,6 +51,8 @@ func (f *Field) IncludeNone() bool      { return f.includeNone }
 func (f *Field) SetIncludeNone(v bool)  { f.includeNone = v }
 func (f *Field) Required() bool         { return f.required }
 func (f *Field) SetRequired(v bool)     { f.required = v }
+func (f *Field) Flatten() bool          { return f.flatten }
+func (f *Field) SetFlatten(v bool)      { f.flatten = v }
 func (f *Field) KeyName() string        { return f.keyName }
 func (f *Field) SetKeyName(s string)    { f.keyName = s }
 

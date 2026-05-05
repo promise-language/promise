@@ -433,6 +433,9 @@ func (c *Checker) defineField(named *types.Named, fd *ast.FieldDecl) {
 	if c.hasAnnotation(fd.Annotations, "required") {
 		f.SetRequired(true)
 	}
+	if c.hasAnnotation(fd.Annotations, "flatten") {
+		f.SetFlatten(true)
+	}
 	if key := extractKey(fd.Annotations); key != "" {
 		f.SetKeyName(key)
 	}

@@ -24,6 +24,9 @@ func (c *Checker) processSerializableType(named *types.Named, d *ast.TypeDecl) {
 					c.errorf(fd.Pos(), "`include_none is only valid on optional (T?) fields")
 				}
 			}
+			if f.Flatten() {
+				c.validateFlattenField(f, fd, named)
+			}
 		}
 	}
 
@@ -72,6 +75,155 @@ func (c *Checker) processSerializableType(named *types.Named, d *ast.TypeDecl) {
 	}
 }
 
+// validateFlattenField checks that a `flatten field meets all requirements:
+// - Type must be a named type (not optional, vector, map, primitive)
+// - Cannot combine with `key, `include_none
+// - No wire name collisions with sibling fields
+func (c *Checker) validateFlattenField(f *types.Field, fd *ast.FieldDecl, parent *types.Named) {
+	// Cannot combine with other serialization annotations
+	if f.KeyName() != "" {
+		c.errorf(fd.Pos(), "`flatten and `key cannot be combined on field '%s'", f.Name())
+	}
+	if f.IncludeNone() {
+		c.errorf(fd.Pos(), "`flatten and `include_none cannot be combined on field '%s'", f.Name())
+	}
+
+	// Type must be a named type (not optional, vector, map)
+	inner := flattenedNamed(f.Type())
+	if inner == nil {
+		c.errorf(fd.Pos(), "`flatten field '%s' must have a named type, got %s", f.Name(), f.Type())
+		return
+	}
+
+	// Check for wire name collisions between flattened sub-fields and sibling fields
+	wireNames := map[string]string{} // wire name → source description
+	for _, sibling := range parent.Fields() {
+		if sibling.Skip() {
+			continue
+		}
+		if sibling == f {
+			continue // skip the flatten field itself
+		}
+		if sibling.Flatten() {
+			// Another flatten field — collect its sub-field wire names
+			if sibInner := flattenedNamed(sibling.Type()); sibInner != nil {
+				for _, sf := range sibInner.Fields() {
+					if sf.Skip() {
+						continue
+					}
+					wn := sf.Name()
+					if sf.KeyName() != "" {
+						wn = sf.KeyName()
+					}
+					wireNames[wn] = sibling.Name() + "." + sf.Name()
+				}
+			}
+		} else {
+			wn := sibling.Name()
+			if sibling.KeyName() != "" {
+				wn = sibling.KeyName()
+			}
+			wireNames[wn] = sibling.Name()
+		}
+	}
+	// Now check the current flatten field's sub-fields for collisions
+	for _, sf := range inner.Fields() {
+		if sf.Skip() {
+			continue
+		}
+		wn := sf.Name()
+		if sf.KeyName() != "" {
+			wn = sf.KeyName()
+		}
+		if other, exists := wireNames[wn]; exists {
+			c.errorf(fd.Pos(), "`flatten field '%s': wire name '%s' (from %s.%s) conflicts with %s",
+				f.Name(), wn, f.Name(), sf.Name(), other)
+		}
+	}
+}
+
+// flattenedNamed extracts the *types.Named from a type suitable for flattening.
+// Returns nil if the type cannot be flattened (optional, vector, map, primitive, etc.).
+// Only returns user-defined types that have fields — not primitives.
+func flattenedNamed(typ types.Type) *types.Named {
+	if named, ok := typ.(*types.Named); ok && named.NumFields() > 0 {
+		return named
+	}
+	return nil
+}
+
+// encodeFieldStmts generates the encode statements for a single field.
+// access is the expression to access the field value (e.g., this.name or this.data.name).
+// suffix is used to generate unique temporary variable names.
+func (c *Checker) encodeFieldStmts(access ast.Expr, f *types.Field, fieldType types.Type, wireName, suffix string) []ast.Stmt {
+	var stmts []ast.Stmt
+	_, isOptional := fieldType.(*types.Optional)
+
+	if isOptional && !f.IncludeNone() {
+		valName := "_enc_" + suffix
+		stmts = append(stmts, &ast.IfStmt{
+			Binding: valName,
+			Init:    access,
+			Body: &ast.Block{Stmts: []ast.Stmt{
+				makeExprStmt(callMember(ident("e"), "encode_key", strLit(wireName))),
+				makeExprStmt(callMember(ident(valName), "encode", ident("e"))),
+			}},
+		})
+	} else if isOptional && f.IncludeNone() {
+		valName := "_enc_" + suffix
+		stmts = append(stmts, makeExprStmt(callMember(ident("e"), "encode_key", strLit(wireName))))
+		stmts = append(stmts, &ast.IfStmt{
+			Binding: valName,
+			Init:    access,
+			Body: &ast.Block{Stmts: []ast.Stmt{
+				makeExprStmt(callMember(ident(valName), "encode", ident("e"))),
+			}},
+			Else: &ast.Block{Stmts: []ast.Stmt{
+				makeExprStmt(callMember(ident("e"), "encode_none")),
+			}},
+		})
+	} else if elemType := vectorElemType(fieldType); elemType != nil {
+		iterName := "_arr_" + suffix
+		stmts = append(stmts, makeExprStmt(callMember(ident("e"), "encode_key", strLit(wireName))))
+		stmts = append(stmts, makeExprStmt(callMember(ident("e"), "begin_array",
+			memberExpr(access, "len"))))
+		stmts = append(stmts, &ast.ForInStmt{
+			Binding:  iterName,
+			Iterable: access,
+			Body: &ast.Block{Stmts: []ast.Stmt{
+				makeExprStmt(callMember(ident(iterName), "encode", ident("e"))),
+			}},
+		})
+		stmts = append(stmts, makeExprStmt(callMember(ident("e"), "end_array")))
+	} else if keyType, valType := mapKeyValueTypes(fieldType); valType != nil {
+		_ = valType
+		mkName := "_mk_" + suffix
+		mvName := "_mv_" + suffix
+		var encodeKeyExpr ast.Expr
+		if keyType == types.TypString {
+			encodeKeyExpr = ident(mkName)
+		} else {
+			encodeKeyExpr = callMember(ident(mkName), "to_string")
+		}
+		stmts = append(stmts, makeExprStmt(callMember(ident("e"), "encode_key", strLit(wireName))))
+		stmts = append(stmts, makeExprStmt(callMember(ident("e"), "begin_object", intLit(0))))
+		stmts = append(stmts, &ast.ForInStmt{
+			Binding:  mvName,
+			Index:    mkName,
+			Iterable: access,
+			Body: &ast.Block{Stmts: []ast.Stmt{
+				makeExprStmt(callMember(ident("e"), "encode_key", encodeKeyExpr)),
+				makeExprStmt(callMember(ident(mvName), "encode", ident("e"))),
+			}},
+		})
+		stmts = append(stmts, makeExprStmt(callMember(ident("e"), "end_object")))
+	} else {
+		stmts = append(stmts, makeExprStmt(callMember(ident("e"), "encode_key", strLit(wireName))))
+		stmts = append(stmts, makeExprStmt(callMember(access, "encode", ident("e"))))
+	}
+	return stmts
+}
+
 // synthesizeEncodeMethod builds an AST MethodDecl for:
 //
 //	encode(Encoder ~e)! `public {
@@ -90,88 +242,34 @@ func (c *Checker) synthesizeEncodeMethod(named *types.Named, d *ast.TypeDecl) *a
 		if f.Skip() {
 			continue
 		}
+
+		if f.Flatten() {
+			// Inline the nested type's fields directly into the parent object.
+			inner := flattenedNamed(f.Type())
+			if inner == nil {
+				continue
+			}
+			for _, sf := range inner.Fields() {
+				if sf.Skip() {
+					continue
+				}
+				sfWireName := sf.Name()
+				if sf.KeyName() != "" {
+					sfWireName = sf.KeyName()
+				}
+				access := memberExpr(memberExpr(&ast.ThisExpr{}, f.Name()), sf.Name())
+				suffix := f.Name() + "_" + sf.Name()
+				stmts = append(stmts, c.encodeFieldStmts(access, sf, sf.Type(), sfWireName, suffix)...)
+			}
+			continue
+		}
+
 		wireName := f.Name()
 		if f.KeyName() != "" {
 			wireName = f.KeyName()
 		}
-
-		_, isOptional := f.Type().(*types.Optional)
-
-		if isOptional && !f.IncludeNone() {
-			// Omit when none (default). Use if-unwrap to encode only when present:
-			//   if _v := this.field { e.encode_key("key"); _v.encode(e); }
-			valName := "_enc_" + f.Name()
-			stmts = append(stmts, &ast.IfStmt{
-				Binding: valName,
-				Init:    memberExpr(&ast.ThisExpr{}, f.Name()),
-				Body: &ast.Block{Stmts: []ast.Stmt{
-					makeExprStmt(callMember(ident("e"), "encode_key", strLit(wireName))),
-					makeExprStmt(callMember(ident(valName), "encode", ident("e"))),
-				}},
-			})
-		} else if isOptional && f.IncludeNone() {
-			// Always encode — null when none, value when present.
-			valName := "_enc_" + f.Name()
-			stmts = append(stmts, makeExprStmt(callMember(ident("e"), "encode_key", strLit(wireName))))
-			stmts = append(stmts, &ast.IfStmt{
-				Binding: valName,
-				Init:    memberExpr(&ast.ThisExpr{}, f.Name()),
-				Body: &ast.Block{Stmts: []ast.Stmt{
-					makeExprStmt(callMember(ident(valName), "encode", ident("e"))),
-				}},
-				Else: &ast.Block{Stmts: []ast.Stmt{
-					makeExprStmt(callMember(ident("e"), "encode_none")),
-				}},
-			})
-		} else if elemType := vectorElemType(f.Type()); elemType != nil {
-			// Vector field: encode as JSON array.
-			//   e.encode_key("items");
-			//   e.begin_array(this.items.len);
-			//   for _item in this.items { _item.encode(e); }
-			//   e.end_array();
-			iterName := "_arr_" + f.Name()
-			stmts = append(stmts, makeExprStmt(callMember(ident("e"), "encode_key", strLit(wireName))))
-			stmts = append(stmts, makeExprStmt(callMember(ident("e"), "begin_array",
-				memberExpr(memberExpr(&ast.ThisExpr{}, f.Name()), "len"))))
-			stmts = append(stmts, &ast.ForInStmt{
-				Binding:  iterName,
-				Iterable: memberExpr(&ast.ThisExpr{}, f.Name()),
-				Body: &ast.Block{Stmts: []ast.Stmt{
-					makeExprStmt(callMember(ident(iterName), "encode", ident("e"))),
-				}},
-			})
-			stmts = append(stmts, makeExprStmt(callMember(ident("e"), "end_array")))
-		} else if keyType, valType := mapKeyValueTypes(f.Type()); valType != nil {
-			// Map[K, V] field: encode as JSON object.
-			// Keys are converted to string via to_string() (works for all Format types).
-			_ = valType // used below
-			mkName := "_mk_" + f.Name()
-			mvName := "_mv_" + f.Name()
-			// For string keys: e.encode_key(_mk) directly.
-			// For non-string keys: e.encode_key(_mk.to_string()).
-			var encodeKeyExpr ast.Expr
-			if keyType == types.TypString {
-				encodeKeyExpr = ident(mkName)
-			} else {
-				encodeKeyExpr = callMember(ident(mkName), "to_string")
-			}
-			stmts = append(stmts, makeExprStmt(callMember(ident("e"), "encode_key", strLit(wireName))))
-			stmts = append(stmts, makeExprStmt(callMember(ident("e"), "begin_object", intLit(0))))
-			stmts = append(stmts, &ast.ForInStmt{
-				Binding:  mvName,
-				Index:    mkName,
-				Iterable: memberExpr(&ast.ThisExpr{}, f.Name()),
-				Body: &ast.Block{Stmts: []ast.Stmt{
-					makeExprStmt(callMember(ident("e"), "encode_key", encodeKeyExpr)),
-					makeExprStmt(callMember(ident(mvName), "encode", ident("e"))),
-				}},
-			})
-			stmts = append(stmts, makeExprStmt(callMember(ident("e"), "end_object")))
-		} else {
-			// Required field: always encode.
-			stmts = append(stmts, makeExprStmt(callMember(ident("e"), "encode_key", strLit(wireName))))
-			stmts = append(stmts, makeExprStmt(callMember(memberExpr(&ast.ThisExpr{}, f.Name()), "encode", ident("e"))))
-		}
+		access := memberExpr(&ast.ThisExpr{}, f.Name())
+		stmts = append(stmts, c.encodeFieldStmts(access, f, f.Type(), wireName, f.Name())...)
 	}
 
 	stmts = append(stmts, makeExprStmt(callMember(ident("e"), "end_object")))
@@ -186,6 +284,14 @@ func (c *Checker) synthesizeEncodeMethod(named *types.Named, d *ast.TypeDecl) *a
 	}
 }
 
+// decodeField represents a field in the key-match chain during decode synthesis.
+// It may be a regular field or a sub-field of a flattened parent.
+type decodeField struct {
+	wireName  string
+	localName string
+	field     *types.Field // the actual field (for type info and annotations)
+}
+
 // synthesizeDecodeMethod builds an AST MethodDecl for the decode factory.
 func (c *Checker) synthesizeDecodeMethod(named *types.Named, d *ast.TypeDecl) *ast.MethodDecl {
 	var stmts []ast.Stmt
@@ -193,26 +299,50 @@ func (c *Checker) synthesizeDecodeMethod(named *types.Named, d *ast.TypeDecl) *a
 	// d.begin_object()
 	stmts = append(stmts, makeExprStmt(callMember(ident("d"), "begin_object")))
 
-	// Declare local variables for each non-skip field with zero/default values.
-	var serFields []*types.Field
+	// Declare local variables for each non-skip field.
+	// For flatten fields, declare locals for each sub-field instead.
+	var matchFields []decodeField
 	for _, f := range named.Fields() {
 		if f.Skip() {
 			continue
 		}
-		serFields = append(serFields, f)
+		if f.Flatten() {
+			inner := flattenedNamed(f.Type())
+			if inner == nil {
+				continue
+			}
+			for _, sf := range inner.Fields() {
+				if sf.Skip() {
+					continue
+				}
+				localName := "_ff_" + f.Name() + "_" + sf.Name()
+				stmts = append(stmts, c.makeFieldLocalDecl(localName, sf))
+				sfWireName := sf.Name()
+				if sf.KeyName() != "" {
+					sfWireName = sf.KeyName()
+				}
+				matchFields = append(matchFields, decodeField{
+					wireName:  sfWireName,
+					localName: localName,
+					field:     sf,
+				})
+			}
+			continue
+		}
 		localName := "_f_" + f.Name()
 		stmts = append(stmts, c.makeFieldLocalDecl(localName, f))
+		wireName := f.Name()
+		if f.KeyName() != "" {
+			wireName = f.KeyName()
+		}
+		matchFields = append(matchFields, decodeField{
+			wireName:  wireName,
+			localName: localName,
+			field:     f,
+		})
 	}
 
-	// Key matching loop:
-	//   for {
-	//     string? _k = d.next_key();
-	//     if _k is absent { break; }
-	//     string _key = _k ?: "";
-	//     if _key == "field1" { _f_field1 = d.decode_TYPE()?; }
-	//     else if ... { ... }
-	//     else { d.skip_value(); }
-	//   }
+	// Key matching loop
 	var loopStmts []ast.Stmt
 
 	loopStmts = append(loopStmts, &ast.TypedVarDecl{
@@ -230,8 +360,8 @@ func (c *Checker) synthesizeDecodeMethod(named *types.Named, d *ast.TypeDecl) *a
 		Value: &ast.BinaryExpr{Left: ident("_k"), Op: ast.BinElvis, Right: strLit("")},
 	})
 
-	if len(serFields) > 0 {
-		loopStmts = append(loopStmts, c.buildKeyMatchChain(serFields))
+	if len(matchFields) > 0 {
+		loopStmts = append(loopStmts, c.buildDecodeFieldMatchChain(matchFields))
 	}
 
 	stmts = append(stmts, &ast.InfiniteLoop{Body: &ast.Block{Stmts: loopStmts}})
@@ -240,7 +370,7 @@ func (c *Checker) synthesizeDecodeMethod(named *types.Named, d *ast.TypeDecl) *a
 	stmts = append(stmts, makeExprStmt(callMember(ident("d"), "end_object")))
 
 	// return Self(field1: _f_field1, ...);
-	// Skip fields get zero values. Fields stored as T? (user-defined types) use !  to unwrap.
+	// Skip fields get zero values. Flatten fields are constructed from sub-field locals.
 	var args []*ast.Arg
 	for _, f := range named.Fields() {
 		if f.Skip() {
@@ -251,9 +381,38 @@ func (c *Checker) synthesizeDecodeMethod(named *types.Named, d *ast.TypeDecl) *a
 			args = append(args, &ast.Arg{Name: f.Name(), Value: zv})
 			continue
 		}
+		if f.Flatten() {
+			// Construct the nested type from its sub-field locals.
+			inner := flattenedNamed(f.Type())
+			if inner == nil {
+				continue
+			}
+			var innerArgs []*ast.Arg
+			for _, sf := range inner.Fields() {
+				if sf.Skip() {
+					zv := c.zeroValueExpr(sf.Type())
+					if zv == nil {
+						zv = &ast.NoneLit{}
+					}
+					innerArgs = append(innerArgs, &ast.Arg{Name: sf.Name(), Value: zv})
+					continue
+				}
+				localName := "_ff_" + f.Name() + "_" + sf.Name()
+				localExpr := ident(localName)
+				if c.fieldNeedsUnwrap(sf) {
+					innerArgs = append(innerArgs, &ast.Arg{Name: sf.Name(), Value: &ast.ErrorUnwrapExpr{Expr: localExpr}})
+				} else {
+					innerArgs = append(innerArgs, &ast.Arg{Name: sf.Name(), Value: localExpr})
+				}
+			}
+			args = append(args, &ast.Arg{
+				Name:  f.Name(),
+				Value: &ast.CallExpr{Callee: ident(inner.Obj().Name()), Args: innerArgs},
+			})
+			continue
+		}
 		localExpr := ident("_f_" + f.Name())
 		if c.fieldNeedsUnwrap(f) {
-			// Local was declared as T? — unwrap with ! (panics if field was missing from JSON).
 			args = append(args, &ast.Arg{Name: f.Name(), Value: &ast.ErrorUnwrapExpr{Expr: localExpr}})
 		} else {
 			args = append(args, &ast.Arg{Name: f.Name(), Value: localExpr})
@@ -371,27 +530,24 @@ func mapKeyValueTypes(typ types.Type) (types.Type, types.Type) {
 	return nil, nil
 }
 
-// buildKeyMatchChain builds the if/else chain for matching decoded keys to fields.
-func (c *Checker) buildKeyMatchChain(fields []*types.Field) ast.Stmt {
+// buildDecodeFieldMatchChain builds the if/else chain for matching decoded keys
+// to fields. Supports both regular fields and flattened sub-fields via decodeField.
+func (c *Checker) buildDecodeFieldMatchChain(entries []decodeField) ast.Stmt {
 	// Build from last to first so else clauses chain correctly.
 	var tail ast.Stmt = &ast.Block{Stmts: []ast.Stmt{
 		makeExprStmt(callMember(ident("d"), "skip_value")),
 	}}
 
-	for i := len(fields) - 1; i >= 0; i-- {
-		f := fields[i]
-		wireName := f.Name()
-		if f.KeyName() != "" {
-			wireName = f.KeyName()
-		}
-		localName := "_f_" + f.Name()
+	for i := len(entries) - 1; i >= 0; i-- {
+		df := entries[i]
+		f := df.field
+		localName := df.localName
 
 		var bodyStmts []ast.Stmt
 		_, isOptional := f.Type().(*types.Optional)
 
 		if isOptional {
-			// Decode optional: check for null first, then decode inner type.
-			nullVar := "_null_" + f.Name()
+			nullVar := "_null_" + localName
 			bodyStmts = append(bodyStmts, &ast.InferredVarDecl{
 				Name: nullVar, Value: callMember(ident("d"), "decode_none"),
 			})
@@ -405,11 +561,7 @@ func (c *Checker) buildKeyMatchChain(fields []*types.Field) ast.Stmt {
 				}},
 			})
 		} else if elemType := vectorElemType(f.Type()); elemType != nil {
-			// Decode array field:
-			//   d.begin_array();
-			//   for { bool _more := d.has_next_element(); if !_more { break; } _f_items.push(...); }
-			//   d.end_array();
-			moreVar := "_more_" + f.Name()
+			moreVar := "_more_" + localName
 			bodyStmts = append(bodyStmts, makeExprStmt(callMember(ident("d"), "begin_array")))
 			bodyStmts = append(bodyStmts, &ast.InfiniteLoop{
 				Body: &ast.Block{Stmts: []ast.Stmt{
@@ -423,11 +575,8 @@ func (c *Checker) buildKeyMatchChain(fields []*types.Field) ast.Stmt {
 			})
 			bodyStmts = append(bodyStmts, makeExprStmt(callMember(ident("d"), "end_array")))
 		} else if keyType, valType := mapKeyValueTypes(f.Type()); valType != nil {
-			// Decode map[K, V] field:
-			// Keys come as strings from next_key(). For string keys, use directly.
-			// For non-string keys, parse via scan[K](key_string).
-			mkVar := "_dmk_" + f.Name()
-			parsedKeyVar := "_dpk_" + f.Name()
+			mkVar := "_dmk_" + localName
+			parsedKeyVar := "_dpk_" + localName
 
 			var loopStmts []ast.Stmt
 			loopStmts = append(loopStmts, &ast.TypedVarDecl{
@@ -439,13 +588,10 @@ func (c *Checker) buildKeyMatchChain(fields []*types.Field) ast.Stmt {
 				Body: &ast.Block{Stmts: []ast.Stmt{&ast.BreakStmt{}}},
 			})
 
-			// Key expression for map index: string keys use unwrapped key directly,
-			// non-string keys parse via scan[K](key!).
 			var indexExpr ast.Expr
 			if keyType == types.TypString {
 				indexExpr = &ast.ErrorUnwrapExpr{Expr: ident(mkVar)}
 			} else {
-				// Parse the string key: K _dpk = scan[K](_mk!)?;
 				keyTypeName := ""
 				if n, ok := keyType.(*types.Named); ok {
 					keyTypeName = n.Obj().Name()
@@ -473,7 +619,6 @@ func (c *Checker) buildKeyMatchChain(fields []*types.Field) ast.Stmt {
 			bodyStmts = append(bodyStmts, &ast.InfiniteLoop{Body: &ast.Block{Stmts: loopStmts}})
 			bodyStmts = append(bodyStmts, makeExprStmt(callMember(ident("d"), "end_object")))
 		} else {
-			// Decode required field with error propagation.
 			bodyStmts = append(bodyStmts, &ast.AssignStmt{
 				Target: ident(localName), Op: ast.OpAssign,
 				Value: propagate(c.makeDecodeCall(f.Type())),
@@ -481,7 +626,7 @@ func (c *Checker) buildKeyMatchChain(fields []*types.Field) ast.Stmt {
 		}
 
 		tail = &ast.IfStmt{
-			Cond: &ast.BinaryExpr{Left: ident("_key"), Op: ast.BinEq, Right: strLit(wireName)},
+			Cond: &ast.BinaryExpr{Left: ident("_key"), Op: ast.BinEq, Right: strLit(df.wireName)},
 			Body: &ast.Block{Stmts: bodyStmts},
 			Else: tail,
 		}

@@ -750,6 +750,192 @@ encode_string_pretty_round_trip_test() `test {
   assert(p2.address.city == "LA", "pretty rt: city");
 }
 
+// ── Flatten field annotation ─────────────────────────────────────────────────
+
+type Metadata `serializable {
+  string author;
+  int version;
+}
+
+type FlatDoc `serializable {
+  string title;
+  Metadata meta `flatten;
+}
+
+type Coords `serializable {
+  f64 lat;
+  f64 lon;
+}
+
+type Location `serializable {
+  string name;
+  Coords position `flatten;
+  string? description;
+}
+
+type WithOptionalFields `serializable {
+  string label;
+  WithOptionals inner `flatten;
+}
+
+type KeyedInner `serializable {
+  string first_name `key("firstName");
+  string last_name `key("lastName");
+}
+
+type FlatKeyed `serializable {
+  int id;
+  KeyedInner details `flatten;
+}
+
+type SkipInner `serializable {
+  string visible;
+  string hidden `skip;
+}
+
+type FlatWithSkip `serializable {
+  int code;
+  SkipInner info `flatten;
+}
+
+flatten_encode_test() `test {
+  FlatDoc doc = FlatDoc(title: "Hello", meta: Metadata(author: "Alice", version: 2));
+  string s = json.encode_string[FlatDoc](doc)!;
+  assert(s.contains("\"title\":\"Hello\""), "flatten enc: title");
+  assert(s.contains("\"author\":\"Alice\""), "flatten enc: author inlined");
+  assert(s.contains("\"version\":2"), "flatten enc: version inlined");
+  assert(!s.contains("\"meta\""), "flatten enc: no wrapper key");
+}
+
+flatten_decode_test() `test {
+  // Decode from flat JSON — keys are at the top level
+  string data = "\{\"title\":\"Doc\",\"author\":\"Bob\",\"version\":3}";
+  FlatDoc doc = json.decode_string[FlatDoc](data)!;
+  assert(doc.title == "Doc", "flatten dec: title");
+  assert(doc.meta.author == "Bob", "flatten dec: author");
+  assert(doc.meta.version == 3, "flatten dec: version");
+}
+
+flatten_round_trip_test() `test {
+  FlatDoc doc1 = FlatDoc(title: "RT", meta: Metadata(author: "Carol", version: 1));
+  string s = json.encode_string[FlatDoc](doc1)!;
+  FlatDoc doc2 = json.decode_string[FlatDoc](s)!;
+  assert(doc2.title == "RT", "flatten rt: title");
+  assert(doc2.meta.author == "Carol", "flatten rt: author");
+  assert(doc2.meta.version == 1, "flatten rt: version");
+}
+
+flatten_with_optional_sibling_test() `test {
+  Location loc1 = Location(name: "Park", position: Coords(lat: 37.7749, lon: -122.4194), description: "Nice park");
+  string s = json.encode_string[Location](loc1)!;
+  assert(s.contains("\"name\":\"Park\""), "flatten opt: name");
+  assert(s.contains("\"lat\":"), "flatten opt: lat inlined");
+  assert(s.contains("\"lon\":"), "flatten opt: lon inlined");
+  assert(s.contains("\"description\":\"Nice park\""), "flatten opt: description");
+  assert(!s.contains("\"position\""), "flatten opt: no wrapper key");
+
+  Location loc2 = json.decode_string[Location](s)!;
+  assert(loc2.name == "Park", "flatten opt dec: name");
+  assert(loc2.position.lat > 37.77, "flatten opt dec: lat");
+  assert(loc2.description is present, "flatten opt dec: description present");
+}
+
+flatten_with_optional_subfields_test() `test {
+  // Inner type has optional fields
+  WithOptionalFields w1 = WithOptionalFields(label: "test", inner: WithOptionals(name: "Alice", bio: "hi", level: 5));
+  string s = json.encode_string[WithOptionalFields](w1)!;
+  assert(s.contains("\"label\":\"test\""), "flatten opt sub: label");
+  assert(s.contains("\"name\":\"Alice\""), "flatten opt sub: name inlined");
+  assert(s.contains("\"bio\":\"hi\""), "flatten opt sub: bio inlined");
+  assert(s.contains("\"level\":5"), "flatten opt sub: level inlined");
+
+  WithOptionalFields w2 = json.decode_string[WithOptionalFields](s)!;
+  assert(w2.label == "test", "flatten opt sub dec: label");
+  assert(w2.inner.name == "Alice", "flatten opt sub dec: name");
+  assert(w2.inner.bio is present, "flatten opt sub dec: bio present");
+  assert(w2.inner.level is present, "flatten opt sub dec: level present");
+}
+
+flatten_with_absent_optional_subfields_test() `test {
+  // Inner optional fields absent — should omit from JSON
+  WithOptionalFields w1 = WithOptionalFields(label: "minimal", inner: WithOptionals(name: "Bob"));
+  string s = json.encode_string[WithOptionalFields](w1)!;
+  assert(!s.contains("\"bio\""), "flatten absent: bio omitted");
+  assert(!s.contains("\"level\""), "flatten absent: level omitted");
+
+  WithOptionalFields w2 = json.decode_string[WithOptionalFields](s)!;
+  assert(w2.inner.name == "Bob", "flatten absent dec: name");
+  assert(w2.inner.bio is absent, "flatten absent dec: bio absent");
+  assert(w2.inner.level is absent, "flatten absent dec: level absent");
+}
+
+flatten_with_key_annotation_test() `test {
+  FlatKeyed fk1 = FlatKeyed(id: 42, details: KeyedInner(first_name: "John", last_name: "Doe"));
+  string s = json.encode_string[FlatKeyed](fk1)!;
+  assert(s.contains("\"id\":42"), "flatten key: id");
+  assert(s.contains("\"firstName\":\"John\""), "flatten key: firstName (remapped)");
+  assert(s.contains("\"lastName\":\"Doe\""), "flatten key: lastName (remapped)");
+  assert(!s.contains("\"first_name\""), "flatten key: no raw name");
+  assert(!s.contains("\"details\""), "flatten key: no wrapper");
+
+  FlatKeyed fk2 = json.decode_string[FlatKeyed](s)!;
+  assert(fk2.id == 42, "flatten key dec: id");
+  assert(fk2.details.first_name == "John", "flatten key dec: first_name");
+  assert(fk2.details.last_name == "Doe", "flatten key dec: last_name");
+}
+
+flatten_with_skip_subfield_test() `test {
+  FlatWithSkip fw1 = FlatWithSkip(code: 200, info: SkipInner(visible: "ok", hidden: "secret"));
+  string s = json.encode_string[FlatWithSkip](fw1)!;
+  assert(s.contains("\"code\":200"), "flatten skip: code");
+  assert(s.contains("\"visible\":\"ok\""), "flatten skip: visible inlined");
+  assert(!s.contains("\"hidden\""), "flatten skip: hidden skipped");
+  assert(!s.contains("\"secret\""), "flatten skip: hidden value absent");
+  assert(!s.contains("\"info\""), "flatten skip: no wrapper");
+
+  FlatWithSkip fw2 = json.decode_string[FlatWithSkip](s)!;
+  assert(fw2.code == 200, "flatten skip dec: code");
+  assert(fw2.info.visible == "ok", "flatten skip dec: visible");
+  assert(fw2.info.hidden == "", "flatten skip dec: hidden default");
+}
+
+type Dimensions `serializable {
+  int width;
+  int height;
+}
+
+type Style `serializable {
+  string color;
+  bool bold;
+}
+
+type MultiFlat `serializable {
+  string name;
+  Dimensions size `flatten;
+  Style style `flatten;
+}
+
+flatten_multiple_test() `test {
+  MultiFlat mf1 = MultiFlat(name: "box",
+  size: Dimensions(width: 100, height: 50),
+  style: Style(color: "red", bold: true));
+  string s = json.encode_string[MultiFlat](mf1)!;
+  assert(s.contains("\"name\":\"box\""), "multi flatten: name");
+  assert(s.contains("\"width\":100"), "multi flatten: width inlined");
+  assert(s.contains("\"height\":50"), "multi flatten: height inlined");
+  assert(s.contains("\"color\":\"red\""), "multi flatten: color inlined");
+  assert(s.contains("\"bold\":true"), "multi flatten: bold inlined");
+  assert(!s.contains("\"size\""), "multi flatten: no size wrapper");
+  assert(!s.contains("\"style\""), "multi flatten: no style wrapper");
+
+  MultiFlat mf2 = json.decode_string[MultiFlat](s)!;
+  assert(mf2.name == "box", "multi flatten dec: name");
+  assert(mf2.size.width == 100, "multi flatten dec: width");
+  assert(mf2.size.height == 50, "multi flatten dec: height");
+  assert(mf2.style.color == "red", "multi flatten dec: color");
+  assert(mf2.style.bold == true, "multi flatten dec: bold");
+}
+
 // Decode error: malformed JSON
 decode_string_error_test() `test {
   (p, err) := json.decode_string[Point]("not json");

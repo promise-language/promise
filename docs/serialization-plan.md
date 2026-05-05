@@ -743,7 +743,7 @@ type DecodeError is error `public {
 1. ~~Nested user-type decode~~ — **Done.** Uses `T?` local + `!` unwrap. 3 tests (encode, decode, round-trip).
 2. ~~Container field serialization (`T[]`, `map[K, V]`)~~ — **Done.** Inline codegen. Non-string map keys use `to_string()`/`scan[K]()`. Added `has_next_element` to Decoder interface. 9 tests.
 3. ~~Enum `` `serializable `` codegen~~ — **Done.** Tag-based for data enums, string for simple enums. 52 tests.
-4. `` `flatten `` support
+4. ~~`` `flatten `` support~~ — **Done.** Inlines nested type fields into parent during encode/decode. Validates type, annotation conflicts, and wire name collisions. 9 e2e tests + 8 sema tests.
 5. ~~`` `serializable(tag: "kind") `` parameter~~ — **Done.** Custom discriminator field name (default `"type"`). 7 tests.
 6. Nested generic serialization (`Wrapper[User]`, `map[string, User[]]`)
 7. ~~Generic type parameter validation~~ — **Done.** Explicit constraints required (`T: Encodable + Decodable`). Clear error for unconstrained params. Skip fields exempt. 7 tests (int, string, bool, f64, user type, round-trip, skip).
@@ -878,5 +878,5 @@ Format/Parse is for **human-readable text** (stdout, logs, debug display). Encod
 | AST synthesis for encode/decode | `sema/serialize.go` | 3 | **Done** — primitives, optionals, nested, containers |
 | Nested user-type decode | `sema/serialize.go` | 4 | **Done** — `T?` local + `!` unwrap |
 | Enum serialization | `sema/serialize.go` | 4 | Planned |
-| `` `flatten `` support | `sema/serialize.go` | 4 | Planned |
+| `` `flatten `` support | `sema/serialize.go` | 4 | **Done** |
 | TOML/YAML/MsgPack modules | `modules/toml/`, etc. | 5 | Planned |

@@ -532,7 +532,7 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 	// Module test dispatch: compile all module sources + tests together,
 	// with build cache support.
 	if modDir := isModuleTestFile(filename); modDir != "" {
-		runModuleTestFile(modDir, cfg, start, targetTriple)
+		runModuleTestFile(modDir, cfg, start, targetTriple, coverageMode)
 		return
 	}
 
@@ -649,10 +649,29 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 // runModuleTestFile compiles and runs a module's test suite. All module source
 // files (including all *_test.pr) are compiled together as a single unit.
 // Test binaries are cached in the build cache for fast re-runs.
-func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, targetTriple string) {
+func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, targetTriple string, coverageMode bool) {
 	target := targetTriple
 	if target == "" {
 		target = codegen.HostTargetTriple()
+	}
+
+	// Coverage mode: skip cache, compile with coverage instrumentation.
+	if coverageMode {
+		file, info := compileModuleTestFrontend(modDir, targetTriple)
+		if len(info.Tests) == 0 {
+			fmt.Println("no tests found")
+			return
+		}
+		testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
+		binaryPath, regions := compileTestBinaryWithCoverage(file, info, targetTriple, modDir, testTimeouts)
+		defer os.Remove(binaryPath)
+		var totalNs int64
+		for _, ns := range testTimeouts {
+			totalNs += ns
+		}
+		processTimeout := time.Duration(totalNs) + 30*time.Second
+		runTestBinaryWithCoverage(binaryPath, processTimeout, start, targetTriple, regions)
+		return
 	}
 
 	// Check build cache for a cached test binary.

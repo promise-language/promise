@@ -569,6 +569,12 @@ func (c *Compiler) defineSchedLoopFunc() {
 	// Set up per-thread alternate signal stack for stack overflow detection (B0010)
 	entry.NewCall(c.palStackOverflowThreadInit)
 
+	// Alloca for setjmp jmp_buf must be in the entry block so LLVM treats it
+	// as a static alloca. A dynamic alloca in the run_g block would leak 256
+	// bytes per goroutine resume (never freed until function return).
+	jmpBufType := irtypes.NewArray(256, irtypes.I8)
+	jmpBufAlloca := entry.NewAlloca(jmpBufType)
+
 	// Set TLS current_m once (M is fixed for this thread's lifetime).
 	entry.NewStore(mParam, c.currentMGlobal)
 	entry.NewBr(loop)
@@ -632,9 +638,7 @@ func (c *Compiler) defineSchedLoopFunc() {
 	coroHandle := runG.NewLoad(irtypes.I8Ptr, handleField)
 
 	// Set up setjmp for panic recovery before coro.resume.
-	// Allocate 256-byte jmp_buf on stack and store in TLS global.
-	jmpBufType := irtypes.NewArray(256, irtypes.I8)
-	jmpBufAlloca := runG.NewAlloca(jmpBufType)
+	// jmpBufAlloca is in the entry block (static alloca, reused each iteration).
 	jmpBufPtr := runG.NewBitCast(jmpBufAlloca, irtypes.I8Ptr)
 	runG.NewStore(jmpBufPtr, c.panicJmpBufGlobal)
 
@@ -1432,11 +1436,25 @@ func (c *Compiler) defineSchedParkMFunc() {
 	doWait.NewCall(c.palCondWait, parkCond, parkMtx)
 	doWait.NewBr(waitLoop)
 
-	// done: unlock park_mutex, restore M.p
+	// done: unlock park_mutex, conditionally restore M.p
 	doneBlk.NewCall(c.palMutexUnlock, parkMtx)
-	doneBlk.NewStore(savedP, mPField)
 
-	doneBlk.NewRet(nil)
+	// Only restore M.p if we were deliberately woken by wake_m (spinning=1).
+	// When woken by shutdown (spinning=0), this M is still on the idle stack
+	// and M.p holds the idle-list next pointer. Restoring M.p would corrupt
+	// the idle stack, causing concurrent wake_m callers to read garbage →
+	// SIGSEGV. The sched_loop checks shutdown before reading M.p, so leaving
+	// it as the idle-list link is safe.
+	spinAtExit := doneBlk.NewLoad(irtypes.I8, spinField)
+	wasWoken := doneBlk.NewICmp(enum.IPredNE, spinAtExit, constant.NewInt(irtypes.I8, 0))
+	restoreBlk := fn.NewBlock("restore_p")
+	skipRestoreBlk := fn.NewBlock("skip_restore_p")
+	doneBlk.NewCondBr(wasWoken, restoreBlk, skipRestoreBlk)
+
+	restoreBlk.NewStore(savedP, mPField)
+	restoreBlk.NewRet(nil)
+
+	skipRestoreBlk.NewRet(nil)
 
 	c.funcs["promise_sched_park_m"] = fn
 }
@@ -1781,10 +1799,12 @@ func (c *Compiler) defineSchedShutdownFunc() {
 	entry.NewStore(constant.NewInt(irtypes.I8, 1), shutdownField)
 
 	// Signal ALL Ms via their Ps (not just idle list).
-	// Hold each M's park_mutex when signaling to prevent lost-signal race.
-	numPField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldNumP)))
-	numP := entry.NewLoad(irtypes.I32, numPField)
+	// Use max_p (not num_p) so that Ms on disabled Ps (after set_max_procs
+	// reduced num_p) are still signaled and joined. Otherwise they get
+	// killed mid-execution during process exit → SIGSEGV.
+	maxPField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldMaxP)))
+	maxP := entry.NewLoad(irtypes.I32, maxPField)
 
 	psField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldPs)))
@@ -1802,7 +1822,7 @@ func (c *Compiler) defineSchedShutdownFunc() {
 	entry.NewBr(signalLoop)
 
 	iVal := signalLoop.NewLoad(irtypes.I32, iAlloca)
-	signalCond := signalLoop.NewICmp(enum.IPredSLT, iVal, numP)
+	signalCond := signalLoop.NewICmp(enum.IPredSLT, iVal, maxP)
 	signalLoop.NewCondBr(signalCond, signalBody, joinPhase)
 
 	// Get P[i].m, lock park_mutex, signal park_cond, unlock
@@ -1840,7 +1860,7 @@ func (c *Compiler) defineSchedShutdownFunc() {
 	joinPhase.NewBr(joinLoop)
 
 	jVal := joinLoop.NewLoad(irtypes.I32, iAlloca)
-	joinCond := joinLoop.NewICmp(enum.IPredSLT, jVal, numP)
+	joinCond := joinLoop.NewICmp(enum.IPredSLT, jVal, maxP)
 	joinLoop.NewCondBr(joinCond, joinBody, doneBlk)
 
 	jVal2 := joinBody.NewLoad(irtypes.I32, iAlloca)
@@ -1859,15 +1879,11 @@ func (c *Compiler) defineSchedShutdownFunc() {
 	joinBody.NewStore(jNextI, iAlloca)
 	joinBody.NewBr(joinLoop)
 
-	// done: cleanup scheduler resources
-	doneBlk.NewCall(c.palFree, psRaw)
-
-	// Destroy done_lock
-	doneLockField := doneBlk.NewGetElementPtr(schedTy, c.schedGlobal,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldDoneLock)))
-	doneLockVal := doneBlk.NewLoad(irtypes.I8Ptr, doneLockField)
-	doneBlk.NewCall(c.palMutexDestroy, doneLockVal)
-
+	// Done. Do NOT free the P array or destroy mutexes here — the sysmon
+	// thread is still running (it exits within 10ms after checking shutdown)
+	// and accesses sched.ps. Freeing the P array would race with sysmon's
+	// scan loop → SIGSEGV. The process is about to exit anyway; the OS
+	// reclaims all resources.
 	doneBlk.NewRet(nil)
 
 	c.funcs["promise_sched_shutdown"] = fn

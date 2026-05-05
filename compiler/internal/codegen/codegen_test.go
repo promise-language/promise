@@ -126,6 +126,28 @@ func assertNotContains(t *testing.T, ir, substr string) {
 	}
 }
 
+// extractFunction returns the IR text for a named function (from "define" to the closing "}").
+func extractFunction(ir, name string) string {
+	// Find "define ... @name("
+	marker := "@" + name + "("
+	start := strings.Index(ir, marker)
+	if start < 0 {
+		return ""
+	}
+	// Walk back to "define"
+	lineStart := strings.LastIndex(ir[:start], "define")
+	if lineStart < 0 {
+		return ""
+	}
+	// Find closing "}\n" — LLVM IR functions end with "}\n" at column 0
+	rest := ir[lineStart:]
+	end := strings.Index(rest, "\n}\n")
+	if end < 0 {
+		return rest
+	}
+	return rest[:end+2]
+}
+
 // --- Literal tests ---
 
 func TestIntLiteral(t *testing.T) {
@@ -11345,6 +11367,56 @@ func TestSchedLoopSetsCurrentM(t *testing.T) {
 	// sched_loop stores m to current_m
 	assertContains(t, ir, "__promise_current_m")
 	assertContains(t, ir, "promise_sched_loop")
+}
+
+func TestSchedLoopJmpBufInEntryBlock(t *testing.T) {
+	// B0120: jmpBuf alloca must be in the entry block (static alloca),
+	// not in the run_g block where it would leak 256 bytes per resume.
+	ir := generateIR(t, `
+		main() { }
+	`)
+	// The alloca [256 x i8] must appear in the entry block of sched_loop,
+	// before the first branch instruction (br label %loop).
+	fn := extractFunction(ir, "promise_sched_loop")
+	entryEnd := strings.Index(fn, "br label %loop")
+	if entryEnd < 0 {
+		t.Fatal("missing 'br label %loop' in sched_loop")
+	}
+	entryBlock := fn[:entryEnd]
+	if !strings.Contains(entryBlock, "alloca [256 x i8]") {
+		t.Error("jmpBuf alloca [256 x i8] must be in the entry block of sched_loop, not in run_g")
+	}
+}
+
+func TestParkMConditionalRestore(t *testing.T) {
+	// B0120: park_m must only restore M.p when deliberately woken (spinning=1).
+	// When woken by shutdown (spinning=0), M is still on the idle stack and
+	// restoring M.p would corrupt the idle-list next pointer chain.
+	ir := generateIR(t, `
+		main() { }
+	`)
+	fn := extractFunction(ir, "promise_sched_park_m")
+	// Must have conditional blocks for restore vs skip
+	assertContains(t, fn, "restore_p")
+	assertContains(t, fn, "skip_restore_p")
+}
+
+func TestSchedShutdownUsesMaxP(t *testing.T) {
+	// B0120: shutdown must signal/join ALL Ms using max_p (field 14),
+	// not num_p (field 5). After set_max_procs reduces num_p, Ms on
+	// disabled Ps would not be signaled/joined, causing SIGSEGV on exit.
+	ir := generateIR(t, `
+		main() { }
+	`)
+	fn := extractFunction(ir, "promise_sched_shutdown")
+	// The sched struct GEP that loads the loop bound must reference
+	// field index 14 (max_p). The GEP accesses @__promise_sched, and
+	// the second field index is the one that selects num_p vs max_p.
+	// Check that the GEP for the loop bound uses field 14.
+	assertContains(t, fn, "@__promise_sched, i32 0, i32 14")
+	// Ensure there is no GEP accessing num_p (field 5) in shutdown —
+	// the only sched fields accessed should be shutdown (9), max_p (14), and ps (4).
+	assertNotContains(t, fn, "@__promise_sched, i32 0, i32 5")
 }
 
 // --- OS bridge tests ---

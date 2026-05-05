@@ -1,0 +1,20 @@
+// Panic recovery works correctly after set_max_procs (B0120).
+// Verifies that the jmpBuf (in sched_loop entry block) works when
+// the P count has been changed. Must be a snapshot test because
+// goroutine panics are not recovered correctly in batch mode (B0130).
+main() `test(expected: "42", exclude: "wasm32") {
+  set_max_procs(1);
+
+  ch := channel[int](capacity: 2);
+
+  // Goroutine sends value then panics — value should survive
+  go {
+    ch.send(42);
+    assert(false, "deliberate panic after send");
+  };
+
+  r := <-ch;
+  if v := r {
+    print_line(v);
+  }
+}

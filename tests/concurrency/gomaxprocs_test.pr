@@ -1,0 +1,111 @@
+// Batch tests for set_max_procs edge cases (B0120 coverage gaps).
+// Excluded on wasm32: cooperative scheduler cannot run goroutines from
+// batch test functions (no M threads).
+// Increase parallelism after decrease: set_max_procs(1) then set_max_procs(initial).
+// Verifies that Ms on re-enabled Ps can pick up work.
+test_increase_after_decrease() `test(exclude: "wasm32") {
+  initial := set_max_procs(0);
+  set_max_procs(1);
+
+  ch := channel[int](capacity: 10);
+  for a in 0..5 {
+    go {
+      ch.send(1);
+    };
+  }
+
+  // Increase back to original
+  set_max_procs(initial);
+
+  // Spawn more work that can now run on re-enabled Ps
+  for b in 0..5 {
+    go {
+      ch.send(1);
+    };
+  }
+
+  int total = 0;
+  for c in 0..10 {
+    r := <-ch;
+    if v := r {
+      total += v;
+    }
+  }
+  assert(total == 10, "all 10 goroutines should complete after increasing procs");
+}
+
+// Multiple consecutive set_max_procs calls cycling up and down.
+test_multiple_changes() `test(exclude: "wasm32") {
+  initial := set_max_procs(0);
+
+  ch := channel[int](capacity: 20);
+
+  set_max_procs(1);
+  for a in 0..5 {
+    go {
+      ch.send(1);
+    };
+  }
+
+  set_max_procs(2);
+  for b in 0..5 {
+    go {
+      ch.send(1);
+    };
+  }
+
+  set_max_procs(1);
+  for c in 0..5 {
+    go {
+      ch.send(1);
+    };
+  }
+
+  set_max_procs(initial);
+  for d in 0..5 {
+    go {
+      ch.send(1);
+    };
+  }
+
+  int total = 0;
+  for e in 0..20 {
+    r := <-ch;
+    if v := r {
+      total += v;
+    }
+  }
+  assert(total == 20, "all 20 goroutines should complete after cycling procs");
+}
+
+// NOTE: Panic recovery + set_max_procs is tested in gomaxprocs_panic.pr
+// as a snapshot test. Goroutine panics don't work correctly in batch
+// test mode (B0130).
+
+// set_max_procs called from within a goroutine (not main).
+test_set_max_procs_from_goroutine() `test(exclude: "wasm32") {
+  ch := channel[int](capacity: 10);
+  done := channel[int](capacity: 1);
+
+  go {
+    set_max_procs(1);
+    for a in 0..10 {
+      go {
+        ch.send(1);
+      };
+    }
+    int total = 0;
+    for b in 0..10 {
+      r := <-ch;
+      if v := r {
+        total += v;
+      }
+    }
+    done.send(total);
+  };
+
+  r := <-done;
+  if v := r {
+    assert(v == 10, "goroutine calling set_max_procs should work");
+  }
+}

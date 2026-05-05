@@ -464,6 +464,11 @@ func (c *Compiler) defineNanotimeFunc() *ir.Func {
 		return fn
 	}
 
+	if c.isWindows {
+		c.buildWindowsNanotimeBody(entry)
+		return fn
+	}
+
 	timespecType := irtypes.NewStruct(irtypes.I64, irtypes.I64)
 	clockGettime := c.getOrDeclareFunc("clock_gettime", irtypes.I32,
 		ir.NewParam("clk_id", irtypes.I32),
@@ -499,15 +504,43 @@ func (c *Compiler) buildNanotimeExternBody(fn *ir.Func) {
 	valType := intLayout.Value.LLVMType
 	entry := fn.NewBlock(".entry")
 
-	if c.isWasm {
-		sretPtr := entry.NewBitCast(fn.Params[0], irtypes.NewPointer(valType))
+	packNanosToSret := func(blk *ir.Block, nanos value.Value) {
+		sretPtr := blk.NewBitCast(fn.Params[0], irtypes.NewPointer(valType))
 		var agg value.Value = constant.NewUndef(valType)
-		agg = entry.NewInsertValue(agg, constant.NewNull(irtypes.I8Ptr), 0)
+		agg = blk.NewInsertValue(agg, constant.NewNull(irtypes.I8Ptr), 0)
 		instancePtrType := intLayout.Value.Fields[1].LLVMType.(*irtypes.PointerType)
-		agg = entry.NewInsertValue(agg, constant.NewNull(instancePtrType), 1)
-		agg = entry.NewInsertValue(agg, constant.NewInt(irtypes.I64, 0), 2)
-		entry.NewStore(agg, sretPtr)
-		entry.NewRet(nil)
+		agg = blk.NewInsertValue(agg, constant.NewNull(instancePtrType), 1)
+		agg = blk.NewInsertValue(agg, nanos, 2)
+		blk.NewStore(agg, sretPtr)
+		blk.NewRet(nil)
+	}
+
+	if c.isWasm {
+		packNanosToSret(entry, constant.NewInt(irtypes.I64, 0))
+		return
+	}
+
+	if c.isWindows {
+		// Use QueryPerformanceCounter/Frequency
+		qpc := c.getOrDeclareFunc("QueryPerformanceCounter", irtypes.I32,
+			ir.NewParam("lpPerformanceCount", irtypes.NewPointer(irtypes.I64)))
+		qpf := c.getOrDeclareFunc("QueryPerformanceFrequency", irtypes.I32,
+			ir.NewParam("lpFrequency", irtypes.NewPointer(irtypes.I64)))
+		counterPtr := entry.NewAlloca(irtypes.I64)
+		freqPtr := entry.NewAlloca(irtypes.I64)
+		entry.NewCall(qpc, counterPtr)
+		entry.NewCall(qpf, freqPtr)
+		counter := entry.NewLoad(irtypes.I64, counterPtr)
+		freq := entry.NewLoad(irtypes.I64, freqPtr)
+		// Two-step to avoid i64 overflow (counter * 1e9 overflows after ~106 days at 10MHz).
+		billion := constant.NewInt(irtypes.I64, 1_000_000_000)
+		wholeSec := entry.NewSDiv(counter, freq)
+		wholeNanos := entry.NewMul(wholeSec, billion)
+		remainder := entry.NewSRem(counter, freq)
+		remScaled := entry.NewMul(remainder, billion)
+		remNanos := entry.NewSDiv(remScaled, freq)
+		nanos := entry.NewAdd(wholeNanos, remNanos)
+		packNanosToSret(entry, nanos)
 		return
 	}
 
@@ -535,16 +568,7 @@ func (c *Compiler) buildNanotimeExternBody(fn *ir.Func) {
 	billion := constant.NewInt(irtypes.I64, 1_000_000_000)
 	secNanos := entry.NewMul(sec, billion)
 	totalNanos := entry.NewAdd(secNanos, nsec)
-
-	// Pack into int value struct {vtable, instance_ptr, raw_i64} and store to sret
-	sretPtr := entry.NewBitCast(fn.Params[0], irtypes.NewPointer(valType))
-	var agg value.Value = constant.NewUndef(valType)
-	agg = entry.NewInsertValue(agg, constant.NewNull(irtypes.I8Ptr), 0)
-	instancePtrType := intLayout.Value.Fields[1].LLVMType.(*irtypes.PointerType)
-	agg = entry.NewInsertValue(agg, constant.NewNull(instancePtrType), 1)
-	agg = entry.NewInsertValue(agg, totalNanos, 2)
-	entry.NewStore(agg, sretPtr)
-	entry.NewRet(nil)
+	packNanosToSret(entry, totalNanos)
 }
 
 // buildSleepNanosExternBody adds a body to extern promise_sleep_nanos(i8* %ns).
@@ -564,6 +588,11 @@ func (c *Compiler) buildSleepNanosExternBody(fn *ir.Func) {
 	rawPtr := entry.NewGetElementPtr(valType, valPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
 	ns := entry.NewLoad(irtypes.I64, rawPtr)
+
+	if c.isWindows {
+		c.buildWindowsSleepNanosBody(entry, ns)
+		return
+	}
 
 	timespecType := irtypes.NewStruct(irtypes.I64, irtypes.I64)
 	nanosleepFn := c.getOrDeclareFunc("nanosleep", irtypes.I32,
@@ -711,13 +740,15 @@ func (c *Compiler) defineTestTrampoline() *ir.Func {
 	// Allocate 256-byte jmp_buf on stack (same as sched.go panic recovery)
 	jmpBufType := irtypes.NewArray(256, irtypes.I8)
 	jmpBufAlloca := entry.NewAlloca(jmpBufType)
+	// 16-byte align: required on MSVC x64 (_JUMP_BUFFER stores XMM regs), harmless elsewhere.
+	jmpBufAlloca.Align = 16
 	jmpBufPtr := entry.NewBitCast(jmpBufAlloca, irtypes.I8Ptr)
 
 	// Store jmp_buf pointer in dedicated test TLS so promise_panic can find it
 	entry.NewStore(jmpBufPtr, c.testJmpBufGlobal)
 
 	// setjmp returns 0 on initial call, non-zero on longjmp return
-	setjmpResult := entry.NewCall(c.funcs["setjmp"], jmpBufPtr)
+	setjmpResult := c.callSetjmp(entry, jmpBufPtr)
 	isPanicReturn := entry.NewICmp(enum.IPredNE, setjmpResult, constant.NewInt(irtypes.I32, 0))
 
 	normalBlk := trampoline.NewBlock("normal")

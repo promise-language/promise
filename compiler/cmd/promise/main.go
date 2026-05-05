@@ -301,7 +301,8 @@ func runRun(args []string) {
 	}
 
 	// Build to a temp file
-	tmpOutput, err := os.CreateTemp("", "promise-run-*")
+	ext := binaryExtension(codegen.HostTargetTriple())
+	tmpOutput, err := os.CreateTemp("", "promise-run-*"+ext)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
 		os.Exit(1)
@@ -4686,10 +4687,7 @@ func runExec(args []string) {
 	result := codegen.CompileWithCache(file, info, target, lookupCachedInstances(info, target))
 
 	// Compile and link to temp binary
-	ext := ""
-	if isWasmTarget(target) {
-		ext = ".wasm"
-	}
+	ext := binaryExtension(target)
 	tmpOutput, err := os.CreateTemp("", "promise-exec-*"+ext)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)

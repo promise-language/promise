@@ -97,19 +97,23 @@ func winThreadFnType() *irtypes.PointerType {
 	return irtypes.NewPointer(irtypes.NewFunc(irtypes.I32, irtypes.I8Ptr))
 }
 
-// EmitThreadCreate declares CreateThread and defines @pal_thread_create.
-// Emits a trampoline that adapts PAL's i8*(i8*) signature to Win32's i32(i8*).
+// EmitThreadCreate declares _beginthreadex and defines @pal_thread_create.
+// Uses _beginthreadex (not CreateThread) so the CRT per-thread data is initialized,
+// which is required for __intrinsic_setjmp/longjmp to work on worker threads.
+// Emits a trampoline that adapts PAL's i8*(i8*) signature to CRT's i32(i8*).
 // Creates thread with explicit 2MB stack size (matching POSIX PAL).
 func (p *WindowsPAL) EmitThreadCreate(module *ir.Module) *ir.Func {
-	// declare i8* @CreateThread(i8*, i64, i32(i8*)*, i8*, i32, i32*)
-	createThread := module.NewFunc("CreateThread", irtypes.I8Ptr,
-		ir.NewParam("lpThreadAttributes", irtypes.I8Ptr),
-		ir.NewParam("dwStackSize", irtypes.I64),
-		ir.NewParam("lpStartAddress", winThreadFnType()),
-		ir.NewParam("lpParameter", irtypes.I8Ptr),
-		ir.NewParam("dwCreationFlags", irtypes.I32),
-		ir.NewParam("lpThreadId", irtypes.NewPointer(irtypes.I32)))
-	createThread.FuncAttrs = append(createThread.FuncAttrs, enum.FuncAttrNoUnwind)
+	// declare i8* @_beginthreadex(i8*, i32, i32(i8*)*, i8*, i32, i32*)
+	// Returns uintptr_t (handle) — modeled as i8* for consistency.
+	// stack_size is unsigned (i32), not SIZE_T (i64) like CreateThread.
+	beginThread := module.NewFunc("_beginthreadex", irtypes.I8Ptr,
+		ir.NewParam("security", irtypes.I8Ptr),
+		ir.NewParam("stack_size", irtypes.I32),
+		ir.NewParam("start_address", winThreadFnType()),
+		ir.NewParam("arglist", irtypes.I8Ptr),
+		ir.NewParam("initflag", irtypes.I32),
+		ir.NewParam("thrdaddr", irtypes.NewPointer(irtypes.I32)))
+	beginThread.FuncAttrs = append(beginThread.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// Emit trampoline: @__pal_thread_trampoline(i8* %arg) → i32
 	// The arg is a 2-pointer struct: {fn_ptr, real_arg}.
@@ -175,14 +179,14 @@ func (p *WindowsPAL) EmitThreadCreate(module *ir.Module) *ir.Func {
 		constant.NewInt(irtypes.I32, 1))
 	entry.NewStore(fn.Params[1], argField)
 
-	// CreateThread(NULL, 2MB, trampoline, packed, 0, NULL)
-	handle := entry.NewCall(createThread,
-		constant.NewNull(irtypes.I8Ptr),           // lpThreadAttributes
-		constant.NewInt(irtypes.I64, 2*1024*1024), // dwStackSize (2MB)
-		trampoline,                      // lpStartAddress
-		packed,                          // lpParameter
-		constant.NewInt(irtypes.I32, 0), // dwCreationFlags (run immediately)
-		constant.NewNull(irtypes.NewPointer(irtypes.I32))) // lpThreadId (don't need)
+	// _beginthreadex(NULL, 2MB, trampoline, packed, 0, NULL)
+	handle := entry.NewCall(beginThread,
+		constant.NewNull(irtypes.I8Ptr),              // security
+		constant.NewInt(irtypes.I32, 2*1024*1024),    // stack_size (2MB)
+		trampoline,                                    // start_address
+		packed,                                        // arglist
+		constant.NewInt(irtypes.I32, 0),               // initflag (run immediately)
+		constant.NewNull(irtypes.NewPointer(irtypes.I32))) // thrdaddr (don't need)
 	entry.NewRet(handle)
 	return fn
 }

@@ -590,6 +590,8 @@ func (c *Compiler) defineSchedLoopFunc() {
 	// bytes per goroutine resume (never freed until function return).
 	jmpBufType := irtypes.NewArray(256, irtypes.I8)
 	jmpBufAlloca := entry.NewAlloca(jmpBufType)
+	// 16-byte align: required on MSVC x64 (_JUMP_BUFFER stores XMM regs), harmless elsewhere.
+	jmpBufAlloca.Align = 16
 
 	// Set TLS current_m once (M is fixed for this thread's lifetime).
 	entry.NewStore(mParam, c.currentMGlobal)
@@ -658,7 +660,7 @@ func (c *Compiler) defineSchedLoopFunc() {
 	jmpBufPtr := runG.NewBitCast(jmpBufAlloca, irtypes.I8Ptr)
 	runG.NewStore(jmpBufPtr, c.panicJmpBufGlobal)
 
-	setjmpResult := runG.NewCall(c.funcs["setjmp"], jmpBufPtr)
+	setjmpResult := c.callSetjmp(runG, jmpBufPtr)
 	isPanicReturn := runG.NewICmp(enum.IPredNE, setjmpResult, constant.NewInt(irtypes.I32, 0))
 	normalResumeBlk := fn.NewBlock("normal_resume")
 	panicRecoveryBlk := fn.NewBlock("panic_recovery")

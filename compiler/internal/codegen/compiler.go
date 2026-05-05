@@ -261,8 +261,10 @@ type Compiler struct {
 	genDestroy *ir.Func // @__promise_gen_destroy(i8*) → void [noinline]
 
 	// Target triple and platform flags
-	target string // LLVM target triple
-	isWasm bool   // true if targeting wasm32
+	target      string // LLVM target triple
+	isWasm      bool   // true if targeting wasm32
+	isWindows   bool   // true if targeting windows-msvc
+	nextDebugID int    // counter for emitDebugPrint global names
 
 	// Global constants for print/panic functions
 	newlineGlobal     *ir.Global // "\n" (1 byte)
@@ -463,7 +465,8 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 		info:     info,
 		rootInfo: info,
 		target:   target,
-		isWasm:   strings.Contains(target, "wasm"),
+		isWasm:    strings.Contains(target, "wasm"),
+		isWindows: strings.Contains(target, "windows"),
 		funcs:    make(map[string]*ir.Func),
 
 		monoLayouts:         make(map[string]*TypeDeclLayout),
@@ -930,9 +933,12 @@ func (c *Compiler) declareIntrinsics() {
 	c.palCondBroadcast = p.EmitCondBroadcast(c.module)
 	c.palCondDestroy = p.EmitCondDestroy(c.module)
 
-	// usleep — POSIX function for brief polling delays in thread-blocking mode
+	// usleep — brief polling delays in thread-blocking mode
+	// On WASM: stub. On Windows: Win32 Sleep(ms). On POSIX: usleep(us).
 	if c.isWasm {
 		c.palUsleep = c.defineWasmUsleep()
+	} else if c.isWindows {
+		c.palUsleep = c.defineWindowsUsleep()
 	} else {
 		c.palUsleep = c.module.NewFunc("usleep", irtypes.I32, ir.NewParam("usec", irtypes.I32))
 		c.palUsleep.FuncAttrs = append(c.palUsleep.FuncAttrs, enum.FuncAttrNoUnwind)
@@ -1023,9 +1029,32 @@ func (c *Compiler) declareIntrinsics() {
 	// setjmp/longjmp — used for goroutine-level panic recovery.
 	// On WASM: stubs (panic always exits, no longjmp recovery).
 	// On POSIX: _setjmp/_longjmp don't save/restore signal masks (faster).
+	// On Windows MSVC: _setjmp exists but _longjmp does not — use longjmp.
 	if c.isWasm {
 		c.funcs["setjmp"] = c.defineWasmSetjmp()
 		c.funcs["longjmp"] = c.defineWasmLongjmp()
+	} else if c.isWindows {
+		// MSVC x64: use __intrinsic_setjmp(i8* env, i8* frame) returns_twice.
+		// _setjmp is a CRT macro that calls __intrinsic_setjmp — must call directly.
+		// Call sites must pass @llvm.frameaddress(i32 0) as the second arg.
+		setjmpFn := c.module.NewFunc("__intrinsic_setjmp", irtypes.I32,
+			ir.NewParam("env", irtypes.I8Ptr),
+			ir.NewParam("frame", irtypes.I8Ptr))
+		setjmpFn.FuncAttrs = append(setjmpFn.FuncAttrs,
+			enum.FuncAttrNoUnwind, enum.FuncAttrReturnsTwice)
+		c.funcs["setjmp"] = setjmpFn
+
+		// Declare @llvm.frameaddress for use at call sites
+		frameAddr := c.module.NewFunc("llvm.frameaddress.p0i8", irtypes.I8Ptr,
+			ir.NewParam("level", irtypes.I32))
+		frameAddr.FuncAttrs = append(frameAddr.FuncAttrs, enum.FuncAttrNoUnwind)
+		c.funcs["llvm.frameaddress"] = frameAddr
+
+		longjmpFn := c.module.NewFunc("longjmp", irtypes.Void,
+			ir.NewParam("env", irtypes.I8Ptr),
+			ir.NewParam("val", irtypes.I32))
+		longjmpFn.FuncAttrs = append(longjmpFn.FuncAttrs, enum.FuncAttrNoReturn, enum.FuncAttrNoUnwind)
+		c.funcs["longjmp"] = longjmpFn
 	} else {
 		setjmpFn := c.module.NewFunc("_setjmp", irtypes.I32,
 			ir.NewParam("env", irtypes.I8Ptr))

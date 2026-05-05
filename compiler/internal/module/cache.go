@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"djabi.dev/go/promise_lang/internal/types"
@@ -763,7 +762,7 @@ func LoadTestBinaryMeta(cacheDir, cacheKey string) *CacheMeta {
 // holders to finish before clearing the cache.
 // Returns an unlock function (call via defer). No-op if locking fails.
 func LockBuildDirShared() func() {
-	return lockBuildDir(syscall.LOCK_SH, "Waiting for cache clean to finish...\n")
+	return lockBuildDir(false, "Waiting for cache clean to finish...\n")
 }
 
 // LockBuildDirExclusive acquires an exclusive flock on the build cache directory.
@@ -771,30 +770,5 @@ func LockBuildDirShared() func() {
 // accessing the cache while it is being cleared.
 // Returns an unlock function (call via defer). No-op if locking fails.
 func LockBuildDirExclusive() func() {
-	return lockBuildDir(syscall.LOCK_EX, "Waiting for concurrent build to finish...\n")
-}
-
-func lockBuildDir(mode int, waitMsg string) func() {
-	dir, err := BuildCacheDir()
-	if err != nil {
-		return func() {}
-	}
-	lockPath := filepath.Join(dir, ".lock")
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
-	if err != nil {
-		return func() {}
-	}
-	// Try non-blocking first to detect contention.
-	err = syscall.Flock(int(f.Fd()), mode|syscall.LOCK_NB)
-	if err != nil {
-		fmt.Fprint(os.Stderr, waitMsg)
-		if err := syscall.Flock(int(f.Fd()), mode); err != nil {
-			f.Close()
-			return func() {}
-		}
-	}
-	return func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		f.Close()
-	}
+	return lockBuildDir(true, "Waiting for concurrent build to finish...\n")
 }

@@ -10,6 +10,7 @@ compiler/internal/parser/*.tokens
 
 # Compiler: binary + hash sidecar
 bin/promise
+bin/promise.exe
 bin/.promise.hash
 compiler/grammar/.antlr/PromiseLexer.interp
 compiler/grammar/.antlr/PromiseLexer.java

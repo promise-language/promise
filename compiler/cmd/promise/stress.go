@@ -224,7 +224,7 @@ func compileTargets(files []string, baseDir string, targetTriple string, cfg tes
 		}
 
 		// Non-module test: check cache first.
-		cacheKey, cacheable := computeTestFileCacheKey(f, target)
+		cacheKey, cacheable := computeTestFileCacheKey(f, target, cfg)
 		var cacheDir string
 		if cacheable {
 			cacheDir, _ = module.BuildCacheDir()

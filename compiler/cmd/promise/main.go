@@ -335,6 +335,15 @@ type testTimeoutConfig struct {
 	max            time.Duration // -timeout-max (0 = no maximum)
 }
 
+// cacheString returns a stable string representation of the timeout config
+// for inclusion in cache keys. Per-test timeouts are baked into test binaries
+// at compile time, so the cache key must change when timeout config changes.
+func (c testTimeoutConfig) cacheString() string {
+	return fmt.Sprintf("timeout:%d,scale:%.10g,min:%d,max:%d",
+		c.defaultTimeout.Nanoseconds(), c.scale,
+		c.min.Nanoseconds(), c.max.Nanoseconds())
+}
+
 // computeTestTimeouts computes the final per-test timeout in nanoseconds for each test.
 // Resolution: final = clamp((annotation ?: default) × scale, min, max)
 func computeTestTimeouts(tests []*types.Func, info *sema.Info, cfg testTimeoutConfig) map[string]int64 {
@@ -557,7 +566,7 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, co
 		return
 	}
 
-	cacheKey, cacheable := computeTestFileCacheKey(filename, target)
+	cacheKey, cacheable := computeTestFileCacheKey(filename, target, cfg)
 	var cacheDir string
 	if cacheable {
 		cacheDir, _ = module.BuildCacheDir()
@@ -657,7 +666,12 @@ func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, ta
 		os.Exit(1)
 	}
 	compilerHash := module.CompilerHash()
-	cacheKey := module.BuildCacheKey(implHash, compilerHash, target, nil)
+	// Include timeout config in the cache key since per-test timeouts are
+	// baked into the test binary at compile time (B0132).
+	th := fnv.New128a()
+	fmt.Fprintf(th, "%s\n%s", implHash, cfg.cacheString())
+	implHashWithTimeout := hex.EncodeToString(th.Sum(nil))
+	cacheKey := module.BuildCacheKey(implHashWithTimeout, compilerHash, target, nil)
 	cacheDir, _ := module.BuildCacheDir()
 
 	if cacheDir != "" {
@@ -3666,8 +3680,8 @@ func cachedStdHash() string {
 // computeTestFileCacheKey computes a cache key for a non-module test file.
 // Returns the key and true if cacheable, or ("", false) if not.
 // The key covers: source content, compiler binary, std library, target triple,
-// and any local module dependencies (from sourced use declarations).
-func computeTestFileCacheKey(filename, target string) (string, bool) {
+// timeout configuration (B0132), and any local module dependencies (from sourced use declarations).
+func computeTestFileCacheKey(filename, target string, cfg testTimeoutConfig) (string, bool) {
 	content, err := os.ReadFile(filename)
 	if err != nil {
 		return "", false
@@ -3687,6 +3701,7 @@ func computeTestFileCacheKey(filename, target string) (string, bool) {
 	fmt.Fprintf(h, "compiler:%s\n", compilerHash)
 	fmt.Fprintf(h, "std:%s\n", sHash)
 	fmt.Fprintf(h, "target:%s\n", target)
+	fmt.Fprintf(h, "%s\n", cfg.cacheString())
 
 	abs, _ := filepath.Abs(filename)
 	dir := filepath.Dir(abs)

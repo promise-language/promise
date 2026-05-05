@@ -419,7 +419,7 @@ expression
     | expression LBRACKET expression (COMMA expression)* RBRACKET  # indexExpr
     | expression LBRACKET expression? COLON expression? RBRACKET  # sliceExpr
     | expression LBRACKET RBRACKET                               # sliceTypeExpr
-    | expression QUESTION bindingName? (IS IDENT)? (block (ELSE bindingName? block | BANG)? | FAT_ARROW expression)  # errorHandlerExpr
+    | expression QUESTION bindingName? (IS IDENT typeArgs?)? (block (ELSE bindingName? block | BANG)? | FAT_ARROW expression)  # errorHandlerExpr
     | expression QUESTION                                      # errorPropagateExpr
     | expression BANG                                          # errorUnwrapExpr
 
@@ -553,8 +553,8 @@ matchPattern
 
 // Pattern for 'is' expressions
 pattern
-    : IDENT LPAREN patternFields RPAREN                        # destructureIsPattern
-    | IDENT                                                    # identIsPattern
+    : IDENT typeArgs? LPAREN patternFields RPAREN              # destructureIsPattern
+    | IDENT typeArgs?                                          # identIsPattern
     ;
 
 patternFields

@@ -267,6 +267,12 @@ func (b *Builder) VisitErrorHandlerExpr(ctx *parser.ErrorHandlerExprContext) int
 	}
 	if ctx.IS() != nil {
 		node.TypeName = ctx.IDENT().GetText()
+		if ta := ctx.TypeArgs(); ta != nil {
+			tac := ta.(*parser.TypeArgsContext)
+			for _, tr := range tac.AllTypeRef() {
+				node.TypeArgs = append(node.TypeArgs, b.visitTypeRef(tr))
+			}
+		}
 	}
 	if ctx.FAT_ARROW() != nil {
 		// Arrow form: ? e => expr — wrap in synthetic block with ExprStmt

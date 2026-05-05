@@ -112,6 +112,12 @@ func (b *Builder) VisitDestructureIsPattern(ctx *parser.DestructureIsPatternCont
 		nodeBase: b.baseFromContext(ctx),
 		TypeName: ctx.IDENT().GetText(),
 	}
+	if ta := ctx.TypeArgs(); ta != nil {
+		tac := ta.(*parser.TypeArgsContext)
+		for _, tr := range tac.AllTypeRef() {
+			node.TypeArgs = append(node.TypeArgs, b.visitTypeRef(tr))
+		}
+	}
 	if pf := ctx.PatternFields(); pf != nil {
 		node.Bindings = b.visitPatternFields(pf)
 	}
@@ -119,10 +125,17 @@ func (b *Builder) VisitDestructureIsPattern(ctx *parser.DestructureIsPatternCont
 }
 
 func (b *Builder) VisitIdentIsPattern(ctx *parser.IdentIsPatternContext) interface{} {
-	return &IdentIsPattern{
+	node := &IdentIsPattern{
 		nodeBase: b.baseFromContext(ctx),
 		Name:     ctx.IDENT().GetText(),
 	}
+	if ta := ctx.TypeArgs(); ta != nil {
+		tac := ta.(*parser.TypeArgsContext)
+		for _, tr := range tac.AllTypeRef() {
+			node.TypeArgs = append(node.TypeArgs, b.visitTypeRef(tr))
+		}
+	}
+	return node
 }
 
 func (b *Builder) visitPatternFields(ctx parser.IPatternFieldsContext) []string {

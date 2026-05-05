@@ -125,8 +125,9 @@ func (*ErrorUnwrapExpr) exprTag() {}
 type ErrorHandlerExpr struct {
 	nodeBase
 	Expr           Expr
-	Binding        string // "" if no binding, "_" for discard
-	TypeName       string // "" if untyped handler; type name for typed handler (e.g. "IoError")
+	Binding        string    // "" if no binding, "_" for discard
+	TypeName       string    // "" if untyped handler; type name for typed handler (e.g. "IoError")
+	TypeArgs       []TypeRef // non-nil for generic typed handlers (e.g. DataError[string])
 	Body           *Block
 	ElseBinding    string // "" if no else binding; set when `else binding { }` present
 	ElseBody       *Block // non-nil when else clause present

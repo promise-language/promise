@@ -11050,3 +11050,73 @@ func TestIsDestructureDeepInheritance(t *testing.T) {
 		}
 	`)
 }
+
+// --- Generic is-pattern tests (B0012) ---
+
+func TestIsGenericType(t *testing.T) {
+	checkOK(t, `
+		type Box[T] { T value; }
+		type LabeledBox[T] is Box[T] { string label; }
+		test() {
+			Box[int] b = LabeledBox[int](value: 42, label: "answer");
+			bool x = b is LabeledBox[int];
+		}
+	`)
+}
+
+func TestIsGenericTypeBaseCheck(t *testing.T) {
+	checkOK(t, `
+		type Box[T] { T value; }
+		type LabeledBox[T] is Box[T] { string label; }
+		test() {
+			Box[int] b = LabeledBox[int](value: 42, label: "answer");
+			bool x = b is Box[int];
+		}
+	`)
+}
+
+func TestIsGenericTypeUndefined(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			int x = 1;
+			bool b = x is NoSuchType[int];
+		}
+	`)
+	expectError(t, errs, "undefined type")
+}
+
+func TestIsGenericTypeWrongArity(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box[T] { T value; }
+		test() {
+			Box[int] b = Box[int](value: 42);
+			bool x = b is Box[int, string];
+		}
+	`)
+	expectError(t, errs, "expects 1 type arguments, got 2")
+}
+
+func TestGenericErrorHandler(t *testing.T) {
+	checkOK(t, `
+		type AppError[T] is error { T detail; }
+		make_error() AppError[int]! {
+			raise AppError[int](message: "err", detail: 42);
+		}
+		test() {
+			make_error() ? e is AppError[int] {
+			}!;
+		}
+	`)
+}
+
+func TestGenericErrorHandlerNotError(t *testing.T) {
+	errs := checkErrs(t, `
+		type Box[T] { T value; }
+		make_error() error! { raise error(message: "err"); }
+		test() {
+			make_error() ? e is Box[int] {
+			}!;
+		}
+	`)
+	expectError(t, errs, "does not inherit from error")
+}

@@ -12187,3 +12187,63 @@ func TestSelectAllocaInEntryBlock(t *testing.T) {
 		t.Errorf("expected alloca [2 x i8*] in coro.start for select channel array\ncoro.start:\n%s", coroStart)
 	}
 }
+
+// --- Generic is-pattern tests (B0012) ---
+
+func TestIsGenericType(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] { T value; }
+		type LabeledBox[T] is Box[T] { string label; }
+		main() {
+			Box[int] b = LabeledBox[int](value: 42, label: "x");
+			bool x = b is LabeledBox[int];
+		}
+	`)
+	// Should generate mono typeinfo for the generic instance
+	assertContains(t, ir, "promise_typeinfo_LabeledBox")
+	assertContains(t, ir, "call i32 @promise_type_is")
+}
+
+func TestIsGenericTypeBaseClass(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] { T value; }
+		type LabeledBox[T] is Box[T] { string label; }
+		main() {
+			Box[int] b = LabeledBox[int](value: 42, label: "x");
+			bool x = b is Box[int];
+		}
+	`)
+	// Should have mono typeinfo for both instances
+	assertContains(t, ir, "promise_typeinfo_Box")
+	assertContains(t, ir, "promise_typeinfo_LabeledBox")
+}
+
+func TestIsGenericTypeOptional(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] { T value; }
+		type LabeledBox[T] is Box[T] { string label; }
+		main() {
+			Box[int] lb = LabeledBox[int](value: 42, label: "x");
+			Box[int]? opt = lb;
+			bool x = opt is LabeledBox[int];
+		}
+	`)
+	// Optional generic is-check: should branch on presence then RTTI
+	assertContains(t, ir, "call i32 @promise_type_is")
+	assertContains(t, ir, "phi i1")
+}
+
+func TestIsGenericErrorHandler(t *testing.T) {
+	ir := generateIR(t, `
+		type AppError[T] is error { T detail; }
+		do_thing() AppError[int]! {
+			raise AppError[int](message: "err", detail: 42);
+		}
+		main() {
+			do_thing() ? e is AppError[int] {
+			}!;
+		}
+	`)
+	assertContains(t, ir, "call i32 @promise_type_is")
+	assertContains(t, ir, "promise_typeinfo_AppError")
+}

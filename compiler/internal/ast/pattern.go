@@ -60,19 +60,21 @@ type WildcardMatchPattern struct {
 
 func (*WildcardMatchPattern) matchPatternTag() {}
 
-// DestructureIsPattern: Type(a, b, c) — used with `is` operator.
+// DestructureIsPattern: Type(a, b, c) or Type[int](a, b, c) — used with `is` operator.
 type DestructureIsPattern struct {
 	nodeBase
 	TypeName string
+	TypeArgs []TypeRef
 	Bindings []string
 }
 
 func (*DestructureIsPattern) isPatternTag() {}
 
-// IdentIsPattern: TypeName — used with `is` operator.
+// IdentIsPattern: TypeName or TypeName[int] — used with `is` operator.
 type IdentIsPattern struct {
 	nodeBase
-	Name string
+	Name     string
+	TypeArgs []TypeRef
 }
 
 func (*IdentIsPattern) isPatternTag() {}

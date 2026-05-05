@@ -25,6 +25,26 @@ func (c *Compiler) assignTypeID(named *types.Named) int32 {
 	return id
 }
 
+// resolveTypeID returns the RTTI type ID for a types.Type that may be either
+// a *types.Named (non-generic) or *types.Instance (generic instantiation).
+// Returns the type ID and true if resolved, 0 and false otherwise.
+func (c *Compiler) resolveTypeID(typ types.Type) (int32, bool) {
+	switch t := typ.(type) {
+	case *types.Named:
+		return c.assignTypeID(t), true
+	case *types.Instance:
+		name := monoName(t)
+		if id, ok := c.monoTypeIDs[name]; ok {
+			return id, true
+		}
+		// Fall back: origin Named type (allows matching `x is Box` even for Box[int])
+		if named, ok := t.Origin().(*types.Named); ok {
+			return c.assignTypeID(named), true
+		}
+	}
+	return 0, false
+}
+
 // collectAllParentIDs recursively collects all ancestor type IDs (transitive).
 // Returns a deduplicated slice.
 func (c *Compiler) collectAllParentIDs(named *types.Named) []int32 {
@@ -43,6 +63,39 @@ func (c *Compiler) collectAllParentIDs(named *types.Named) []int32 {
 		}
 	}
 	return unique
+}
+
+// collectMonoParentIDs recursively collects mono parent type IDs for a generic
+// instance. For LabeledContainer[int] is Container[T], substitutes T→int to get
+// Container[int] and includes its mono type ID. Recurses into grandparents.
+func (c *Compiler) collectMonoParentIDs(named *types.Named, subst map[*types.TypeParam]types.Type, ids *[]int32) {
+	for _, pr := range named.Parents() {
+		if len(pr.TypeArgs) == 0 || len(pr.Named.TypeParams()) == 0 {
+			continue
+		}
+		// Substitute type args: Container[T] with T→int → Container[int]
+		concreteArgs := make([]types.Type, len(pr.TypeArgs))
+		allConcrete := true
+		for i, ta := range pr.TypeArgs {
+			concreteArgs[i] = types.Substitute(ta, subst)
+			if types.ContainsTypeParam(concreteArgs[i]) {
+				allConcrete = false
+			}
+		}
+		if !allConcrete {
+			continue
+		}
+		parentInst := types.NewInstance(pr.Named, concreteArgs)
+		parentMono := monoName(parentInst)
+		if id, ok := c.monoTypeIDs[parentMono]; ok {
+			*ids = append(*ids, id)
+		}
+		// Recurse into grandparents with a combined substitution
+		parentSubst := types.BuildSubstMap(pr.Named.TypeParams(), concreteArgs)
+		if parentSubst != nil {
+			c.collectMonoParentIDs(pr.Named, parentSubst, ids)
+		}
+	}
 }
 
 // emitTypeInfo creates a global type info constant for a Named type.
@@ -253,7 +306,26 @@ func (c *Compiler) emitMonoVtableGlobals(instances []*types.Instance) {
 
 // emitMonoTypeInfoGlobals creates type info globals for monomorphic type instances.
 // Each mono instance gets its own typeinfo with a unique type ID and parent IDs.
+// Uses two passes: first assigns all type IDs (so parent lookups succeed regardless
+// of instance ordering), then emits the typeinfo globals.
 func (c *Compiler) emitMonoTypeInfoGlobals(instances []*types.Instance) {
+	// Pass 1: assign type IDs for all mono instances
+	for _, inst := range instances {
+		named, ok := inst.Origin().(*types.Named)
+		if !ok || len(named.TypeParams()) == 0 {
+			continue
+		}
+		name := monoName(inst)
+		if _, exists := c.monoTypeInfoGlobals[name]; exists {
+			continue
+		}
+		if _, exists := c.monoTypeIDs[name]; !exists {
+			c.monoTypeIDs[name] = c.nextTypeID
+			c.nextTypeID++
+		}
+	}
+
+	// Pass 2: emit typeinfo globals using the pre-assigned IDs
 	for _, inst := range instances {
 		named, ok := inst.Origin().(*types.Named)
 		if !ok || len(named.TypeParams()) == 0 {
@@ -264,18 +336,21 @@ func (c *Compiler) emitMonoTypeInfoGlobals(instances []*types.Instance) {
 			continue
 		}
 
-		// Assign a unique type ID for this mono instance
-		typeID := c.nextTypeID
-		c.nextTypeID++
+		typeID := c.monoTypeIDs[name]
 
-		// Collect parent IDs (using origin Named types, same as non-mono).
-		// Include the origin Named type's own ID so that `x is OriginName`
-		// matches when x holds a mono instance (e.g., `b is LabeledBox`
-		// where b holds LabeledBox[int]).
+		// Collect parent IDs. Include both origin Named IDs (for bare `x is Container`)
+		// and mono instance IDs (for generic `x is Container[int]`).
 		parentIDs := c.collectAllParentIDs(named)
 		originID := c.assignTypeID(named)
 		// Prepend origin ID (dedup handled below)
 		parentIDs = append([]int32{originID}, parentIDs...)
+
+		// Add mono parent type IDs: for LabeledContainer[int] is Container[T],
+		// substitute T→int to get Container[int], then include its mono type ID.
+		subst := types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
+		if subst != nil {
+			c.collectMonoParentIDs(named, subst, &parentIDs)
+		}
 		// Deduplicate in case origin ID was already in parent chain
 		seen := make(map[int32]bool)
 		var deduped []int32

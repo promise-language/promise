@@ -1,0 +1,39 @@
+// Tests for generic error types in error handlers (B0012).
+type AppError[T] is error {
+  T detail;
+}
+
+make_int_error() AppError[int]! {
+  raise AppError[int](message: "int error", detail: 42);
+}
+
+make_string_error() AppError[string]! {
+  raise AppError[string](message: "string error", detail: "oops");
+}
+
+test_generic_error_handler_match() `test {
+  bool caught = false;
+  make_int_error()? e is AppError[int] {
+    caught = true;
+    assert(e.detail == 42, "error detail matches");
+  }!;
+  assert(caught, "error handler caught AppError[int]");
+}
+
+test_generic_error_handler_string() `test {
+  bool caught = false;
+  make_string_error()? e is AppError[string] {
+    caught = true;
+    assert(e.detail == "oops", "error detail matches");
+  }!;
+  assert(caught, "error handler caught AppError[string]");
+}
+
+test_generic_error_handler_bare_type() `test {
+  // Bare type name (no type args) should also match generic instances
+  bool caught = false;
+  make_int_error()? e is AppError {
+    caught = true;
+  }!;
+  assert(caught, "bare AppError matches AppError[int]");
+}

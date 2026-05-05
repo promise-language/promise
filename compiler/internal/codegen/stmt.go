@@ -1519,12 +1519,15 @@ func (c *Compiler) genIfDestructureIsStmt(s *ast.IfStmt, narrow *sema.IsDestruct
 		expectedTag := constant.NewInt(irtypes.I32, int64(enumLayout.VariantTag[narrow.VariantName]))
 		cond = c.block.NewICmp(enum.IPredEQ, tag, expectedTag)
 	} else {
-		// Named type check via RTTI
-		targetNamed := extractNamed(narrow.TargetType)
-		if targetNamed == nil {
-			panic(fmt.Sprintf("codegen: cannot extract Named from %s", narrow.TargetType))
+		// Named/Instance type check via RTTI
+		targetID, ok := c.resolveTypeID(narrow.TargetType)
+		if !ok {
+			targetNamed := extractNamed(narrow.TargetType)
+			if targetNamed == nil {
+				panic(fmt.Sprintf("codegen: cannot extract Named from %s", narrow.TargetType))
+			}
+			targetID = c.assignTypeID(targetNamed)
 		}
-		targetID := c.assignTypeID(targetNamed)
 		instance := c.extractInstancePtr(subject)
 		variantPtr := c.loadVariantPtr(instance)
 		result := c.block.NewCall(c.funcs["promise_type_is"],

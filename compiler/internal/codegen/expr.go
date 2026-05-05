@@ -3579,11 +3579,22 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 
 	// For typed handlers, perform RTTI check before entering the handler body
 	if e.TypeName != "" {
-		targetNamed := c.lookupNamedType(e.TypeName)
-		if targetNamed == nil {
-			panic(fmt.Sprintf("codegen: undefined type %s in error handler", e.TypeName))
+		var targetID int32
+		if resolved := c.info.ErrorHandlerTypes[e]; resolved != nil {
+			// Generic typed handler (e.g., DataError[string])
+			var ok bool
+			targetID, ok = c.resolveTypeID(resolved)
+			if !ok {
+				panic(fmt.Sprintf("codegen: cannot resolve type ID for %s in error handler", e.TypeName))
+			}
+		} else {
+			// Non-generic typed handler
+			targetNamed := c.lookupNamedType(e.TypeName)
+			if targetNamed == nil {
+				panic(fmt.Sprintf("codegen: undefined type %s in error handler", e.TypeName))
+			}
+			targetID = c.assignTypeID(targetNamed)
 		}
-		targetID := c.assignTypeID(targetNamed)
 
 		variantPtr := c.loadVariantPtr(errVal)
 		rttiResult := c.block.NewCall(c.funcs["promise_type_is"],
@@ -4800,12 +4811,21 @@ func (c *Compiler) genIsIdentPattern(expr ast.Expr, p *ast.IdentIsPattern) value
 		exprType = types.Substitute(exprType, c.typeSubst)
 	}
 	if opt, ok := exprType.(*types.Optional); ok {
+		// Generic pattern with resolved type
+		if resolved := c.info.IsPatternTypes[p]; resolved != nil {
+			return c.genIsOptionalTypeResolved(expr, resolved, opt)
+		}
 		return c.genIsOptionalType(expr, p.Name, opt)
 	}
 
 	// Check if the subject is an enum type — use tag comparison
 	if enumLayout := c.lookupEnumLayout(exprType); enumLayout != nil {
 		return c.genIsEnumVariant(expr, p.Name, enumLayout)
+	}
+
+	// Generic pattern with resolved type — use type ID directly
+	if resolved := c.info.IsPatternTypes[p]; resolved != nil {
+		return c.genIsResolvedType(expr, resolved)
 	}
 
 	// Named type check via RTTI
@@ -4909,6 +4929,75 @@ func (c *Compiler) genIsNamedType(expr ast.Expr, typeName string) value.Value {
 	return c.block.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 0))
 }
 
+// genIsResolvedType generates an RTTI type check for a sema-resolved type
+// (supports both *types.Named and *types.Instance from generic is-patterns).
+func (c *Compiler) genIsResolvedType(expr ast.Expr, resolved types.Type) value.Value {
+	subject := c.genExpr(expr)
+
+	targetID, ok := c.resolveTypeID(resolved)
+	if !ok {
+		panic(fmt.Sprintf("codegen: cannot resolve type ID for %s in is-expression", resolved))
+	}
+
+	var instance value.Value
+	if _, isThis := expr.(*ast.ThisExpr); isThis {
+		instance = c.extractInstancePtrForThis(subject)
+	} else {
+		instance = c.extractInstancePtr(subject)
+	}
+	variantPtr := c.loadVariantPtr(instance)
+
+	result := c.block.NewCall(c.funcs["promise_type_is"],
+		variantPtr, constant.NewInt(irtypes.I32, int64(targetID)))
+	return c.block.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 0))
+}
+
+// genIsOptionalTypeResolved generates code for `optExpr is Type[args]` where optExpr
+// has type T? and the target type is a sema-resolved generic instance.
+func (c *Compiler) genIsOptionalTypeResolved(expr ast.Expr, resolved types.Type, opt *types.Optional) value.Value {
+	optVal := c.genExpr(expr)
+	flag := c.block.NewExtractValue(optVal, 0)
+
+	elem := opt.Elem()
+	if c.lookupEnumLayout(elem) != nil {
+		return flag
+	}
+	named := extractNamed(elem)
+	if named != nil && (isPrimitiveScalar(named) || named == types.TypString) {
+		return flag
+	}
+
+	targetID, ok := c.resolveTypeID(resolved)
+	if !ok {
+		panic(fmt.Sprintf("codegen: cannot resolve type ID for %s in is-expression", resolved))
+	}
+
+	fn := c.block.Parent
+	thenBlock := fn.NewBlock("")
+	elseBlock := fn.NewBlock("")
+	mergeBlock := fn.NewBlock("")
+
+	c.block.NewCondBr(flag, thenBlock, elseBlock)
+
+	c.block = thenBlock
+	inner := c.block.NewExtractValue(optVal, 1)
+	instance := c.extractInstancePtr(inner)
+	variantPtr := c.loadVariantPtr(instance)
+	rttiResult := c.block.NewCall(c.funcs["promise_type_is"],
+		variantPtr, constant.NewInt(irtypes.I32, int64(targetID)))
+	rttiCheck := c.block.NewICmp(enum.IPredNE, rttiResult, constant.NewInt(irtypes.I32, 0))
+	c.block.NewBr(mergeBlock)
+	thenExit := c.block
+
+	c.block = elseBlock
+	c.block.NewBr(mergeBlock)
+	elseExit := c.block
+
+	c.block = mergeBlock
+	phi := c.block.NewPhi(ir.NewIncoming(rttiCheck, thenExit), ir.NewIncoming(constant.NewInt(irtypes.I1, 0), elseExit))
+	return phi
+}
+
 // genIsDestructurePattern generates the bool check for a destructure is-pattern
 // (e.g., `x is Circle(r)`). When used inside an if-condition, the actual field
 // binding is handled by genIfDestructureIsStmt. Outside if-conditions, this just
@@ -4924,6 +5013,11 @@ func (c *Compiler) genIsDestructurePattern(expr ast.Expr, p *ast.DestructureIsPa
 		if _, ok := enumLayout.VariantTag[p.TypeName]; ok {
 			return c.genIsEnumVariant(expr, p.TypeName, enumLayout)
 		}
+	}
+
+	// Generic type with resolved type — use type ID directly
+	if resolved := c.info.IsPatternTypes[p]; resolved != nil {
+		return c.genIsResolvedType(expr, resolved)
 	}
 
 	// Named type check via RTTI

@@ -190,6 +190,15 @@ type Info struct {
 	// imported symbols — a module should only export its own declarations.
 	GlobImportedObjs map[types.Object]bool
 
+	// IsPatternTypes maps is-pattern nodes to their resolved types when the
+	// pattern includes type arguments (e.g., `x is Box[int]`). For non-generic
+	// patterns, the entry is absent and codegen falls back to name-based lookup.
+	IsPatternTypes map[ast.IsPattern]types.Type
+
+	// ErrorHandlerTypes maps error handler expressions to their resolved type
+	// when the handler includes type arguments (e.g., `? e is DataError[string]`).
+	ErrorHandlerTypes map[*ast.ErrorHandlerExpr]types.Type
+
 	// DeclHashes maps each declared TypeName to the hash of its AST declaration
 	// (TypeDecl or EnumDecl). The hash covers all fields, methods, variants, and
 	// annotations — everything that affects the generated IR for a generic instance.

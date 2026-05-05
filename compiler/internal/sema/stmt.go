@@ -854,6 +854,30 @@ func (c *Checker) detectIsDestructureNarrowing(cond ast.Expr) *IsDestructureNarr
 		}
 	}
 
+	// Generic type destructure: use resolved type from IsPatternTypes
+	if resolved, ok := c.info.IsPatternTypes[dp]; ok {
+		if inst, ok := resolved.(*types.Instance); ok {
+			if named, ok := inst.Origin().(*types.Named); ok {
+				instSubst := types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
+				allFields := named.AllFields()
+				bindings := make([]IsDestructureBinding, 0, len(dp.Bindings))
+				for i, name := range dp.Bindings {
+					if i >= len(allFields) {
+						break
+					}
+					ft := types.Substitute(allFields[i].Type(), instSubst)
+					bindings = append(bindings, IsDestructureBinding{VarName: name, Type: ft})
+				}
+				return &IsDestructureNarrowing{
+					SubjectExpr: isExpr.Expr,
+					Bindings:    bindings,
+					IsEnum:      false,
+					TargetType:  resolved,
+				}
+			}
+		}
+	}
+
 	// Named type destructure
 	obj := c.lookup(dp.TypeName)
 	if obj == nil {

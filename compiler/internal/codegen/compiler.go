@@ -47,6 +47,7 @@ type Compiler struct {
 	monoEnumLayouts     map[string]*TypeDeclLayout      // mono name → layout (enums)
 	monoVtableGlobals   map[string]*ir.Global           // mono name → vtable global
 	monoTypeInfoGlobals map[string]*ir.Global           // mono name → typeinfo global
+	monoTypeIDs         map[string]int32                // mono name → type ID (for generic is-checks)
 	monoValueTypeRTTI   map[string]*ir.Global           // mono name → value type RTTI instance
 	typeSubst           map[*types.TypeParam]types.Type // nil outside mono codegen
 	monoCtx             *monoContext                    // nil outside mono method codegen
@@ -445,6 +446,7 @@ func compile(file *ast.File, info *sema.Info, target string, cachedInstances map
 		monoEnumLayouts:     make(map[string]*TypeDeclLayout),
 		monoVtableGlobals:   make(map[string]*ir.Global),
 		monoTypeInfoGlobals: make(map[string]*ir.Global),
+		monoTypeIDs:         make(map[string]int32),
 		monoValueTypeRTTI:   make(map[string]*ir.Global),
 
 		typeIDs:            make(map[*types.Named]int32),

@@ -1851,6 +1851,18 @@ func (c *Checker) checkIsExpr(e *ast.IsExpr) types.Type {
 	case *ast.IdentIsPattern:
 		// "present" and "absent" are contextual keywords for optional checking
 		if p.Name == "present" || p.Name == "absent" {
+			if len(p.TypeArgs) > 0 {
+				c.errorf(p.Pos(), "'%s' does not take type arguments", p.Name)
+			}
+			break
+		}
+		// Generic type pattern: resolve via typeRef
+		if len(p.TypeArgs) > 0 {
+			ref := &ast.NamedTypeRef{Name: p.Name, TypeArgs: p.TypeArgs}
+			resolved := c.resolveType(ref)
+			if resolved != nil {
+				c.info.IsPatternTypes[p] = resolved
+			}
 			break
 		}
 		obj := c.lookup(p.Name)
@@ -1889,24 +1901,47 @@ func (c *Checker) checkDestructureIsPattern(p *ast.DestructureIsPattern, subject
 		return
 	}
 
-	// Check if it's an enum variant of the subject type
-	var enum *types.Enum
-	switch st := subjectType.Underlying().(type) {
-	case *types.Enum:
-		enum = st
-	case *types.Instance:
-		if e, ok := st.Origin().(*types.Enum); ok {
-			enum = e
+	// Check if it's an enum variant of the subject type (enum variants never have type args)
+	if len(p.TypeArgs) == 0 {
+		var enum *types.Enum
+		switch st := subjectType.Underlying().(type) {
+		case *types.Enum:
+			enum = st
+		case *types.Instance:
+			if e, ok := st.Origin().(*types.Enum); ok {
+				enum = e
+			}
+		}
+		if enum != nil {
+			if v := enum.LookupVariant(p.TypeName); v != nil {
+				if len(p.Bindings) != v.NumFields() {
+					c.errorf(p.Pos(), "variant %s has %d fields, got %d bindings",
+						p.TypeName, v.NumFields(), len(p.Bindings))
+				}
+				return
+			}
 		}
 	}
-	if enum != nil {
-		if v := enum.LookupVariant(p.TypeName); v != nil {
-			if len(p.Bindings) != v.NumFields() {
-				c.errorf(p.Pos(), "variant %s has %d fields, got %d bindings",
-					p.TypeName, v.NumFields(), len(p.Bindings))
-			}
+
+	// Generic type destructure: resolve via typeRef
+	if len(p.TypeArgs) > 0 {
+		ref := &ast.NamedTypeRef{Name: p.TypeName, TypeArgs: p.TypeArgs}
+		resolved := c.resolveType(ref)
+		if resolved == nil {
 			return
 		}
+		c.info.IsPatternTypes[p] = resolved
+		// Validate field count against the resolved type
+		if inst, ok := resolved.(*types.Instance); ok {
+			if named, ok := inst.Origin().(*types.Named); ok {
+				allFields := named.AllFields()
+				if len(p.Bindings) != len(allFields) {
+					c.errorf(p.Pos(), "type %s has %d fields, got %d bindings",
+						p.TypeName, len(allFields), len(p.Bindings))
+				}
+			}
+		}
+		return
 	}
 
 	// Not an enum variant — look up as a named type
@@ -2011,21 +2046,43 @@ func (c *Checker) checkErrorHandlerExpr(e *ast.ErrorHandlerExpr) types.Type {
 		if !isExhaustive && (c.curFunc == nil || !c.curFunc.CanError()) {
 			c.errorf(e.Pos(), "typed error handler in non-failable function; add 'else { }', '!' suffix, or make function failable")
 		}
-		obj := c.lookup(e.TypeName)
-		if obj == nil {
-			c.errorf(e.Pos(), "undefined type: %s", e.TypeName)
-		} else if tn, ok := obj.(*types.TypeName); ok && tn.Type() != nil {
-			if named, ok := tn.Type().(*types.Named); ok {
-				if !named.InheritsFrom(types.TypError) {
-					c.errorf(e.Pos(), "%s does not inherit from error", e.TypeName)
+		// Generic typed handler: resolve via typeRef (e.g., DataError[string])
+		if len(e.TypeArgs) > 0 {
+			ref := &ast.NamedTypeRef{Name: e.TypeName, TypeArgs: e.TypeArgs}
+			resolved := c.resolveType(ref)
+			if resolved != nil {
+				c.info.ErrorHandlerTypes[e] = resolved
+				// Validate the resolved type inherits from error
+				switch rt := resolved.(type) {
+				case *types.Instance:
+					if named, ok := rt.Origin().(*types.Named); ok {
+						if !named.InheritsFrom(types.TypError) {
+							c.errorf(e.Pos(), "%s does not inherit from error", e.TypeName)
+						} else {
+							bindingType = resolved
+						}
+					}
+				default:
+					c.errorf(e.Pos(), "%s is not a type", e.TypeName)
+				}
+			}
+		} else {
+			obj := c.lookup(e.TypeName)
+			if obj == nil {
+				c.errorf(e.Pos(), "undefined type: %s", e.TypeName)
+			} else if tn, ok := obj.(*types.TypeName); ok && tn.Type() != nil {
+				if named, ok := tn.Type().(*types.Named); ok {
+					if !named.InheritsFrom(types.TypError) {
+						c.errorf(e.Pos(), "%s does not inherit from error", e.TypeName)
+					} else {
+						bindingType = named
+					}
 				} else {
-					bindingType = named
+					c.errorf(e.Pos(), "%s is not a type", e.TypeName)
 				}
 			} else {
 				c.errorf(e.Pos(), "%s is not a type", e.TypeName)
 			}
-		} else {
-			c.errorf(e.Pos(), "%s is not a type", e.TypeName)
 		}
 	}
 

@@ -317,7 +317,7 @@ func (b *Builder) VisitSelectCase(ctx *parser.SelectCaseContext) interface{} {
 }
 
 func (b *Builder) VisitSelectDefault(ctx *parser.SelectDefaultContext) interface{} {
-	var stmts []Stmt
+	stmts := []Stmt{}
 	for _, s := range ctx.AllStatement() {
 		if stmt := b.visitStmt(s); stmt != nil {
 			stmts = append(stmts, stmt)

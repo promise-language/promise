@@ -9739,6 +9739,37 @@ func TestSelectNonBlockingNoSWN(t *testing.T) {
 	assertContains(t, ir, "select.default")
 }
 
+func TestSelectEmptyDefaultNotBlocking(t *testing.T) {
+	// B0116: An empty default body (no statements) must still be treated as
+	// a non-blocking select. Previously, the nil []Stmt was indistinguishable
+	// from "no default clause", causing the select to block.
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 1);
+			select {
+				v := <-ch:
+				default:
+			}
+		}
+	`)
+	assertNotContains(t, ir, "call void @promise_select_waiter_enqueue(")
+	assertContains(t, ir, "select.default")
+}
+
+func TestSelectEmptyDefaultTwiceNotBlocking(t *testing.T) {
+	// B0116: Two consecutive selects with empty default must both be non-blocking.
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 1);
+			select { v := <-ch: default: }
+			select { v := <-ch: default: }
+		}
+	`)
+	assertNotContains(t, ir, "call void @promise_select_waiter_enqueue(")
+	// Both selects should have default blocks
+	assertContains(t, ir, "select.default")
+}
+
 func TestBuildMatchPhiMixedArms(t *testing.T) {
 	// Match expression where some arms produce values and at least one arm
 	// has an early return. buildMatchPhi must handle missing predecessors

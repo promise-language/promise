@@ -3971,6 +3971,33 @@ func TestStringInterpolationMultiple(t *testing.T) {
 	}
 }
 
+func TestStringInterpolationTypeParam(t *testing.T) {
+	ir := generateIR(t, `
+		type Wrapper[T] {
+			T val;
+			to_string() string => "[{this.val}]";
+		}
+		main() {
+			Wrapper[int] w = Wrapper[int](val: 42);
+			string s = w.to_string();
+		}
+	`)
+	// The mono'd Wrapper[int].to_string should call promise_int_to_string
+	assertContains(t, ir, "promise_int_to_string")
+}
+
+func TestStringInterpolationTuple(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			(int, bool) t = (1, true);
+			string s = "{t}";
+		}
+	`)
+	// Tuple formatting should produce calls to int_to_string and bool_to_string
+	assertContains(t, ir, "promise_int_to_string")
+	assertContains(t, ir, "promise_bool_to_string")
+}
+
 // --- Part E: Unsafe blocks ---
 
 func TestUnsafeBlock(t *testing.T) {

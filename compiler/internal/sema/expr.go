@@ -2638,6 +2638,7 @@ func isObjectExported(obj types.Object) bool {
 // validateInterpolationType checks that a type used in string interpolation
 // can be converted to a string. Primitives are handled by built-in codegen;
 // user types must implement the Format structural interface (have a format method).
+// TypeParams are allowed unconditionally — validation deferred to monomorphization.
 func (c *Checker) validateInterpolationType(typ types.Type, node ast.Expr) {
 	if typ == nil {
 		return
@@ -2650,6 +2651,15 @@ func (c *Checker) validateInterpolationType(typ types.Type, node ast.Expr) {
 		} else {
 			break
 		}
+	}
+	// TypeParam: allow unconditionally — at monomorphization time the concrete
+	// type will be substituted, and codegen will validate it has format().
+	if _, ok := inner.(*types.TypeParam); ok {
+		return
+	}
+	// Tuple: allow — codegen formats each element individually.
+	if _, ok := inner.(*types.Tuple); ok {
+		return
 	}
 	named := semaExtractNamed(inner)
 	if named == nil {

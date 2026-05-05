@@ -748,6 +748,14 @@ func (c *Compiler) coerceToView(val value.Value, fromType, toType types.Type) va
 		return c.boxForStructuralView(val, fromNamed, toNamed, fromType)
 	}
 
+	// Opaque container types (Vector, Channel, Task) are user types with i8*
+	// representation (no value struct). Box them like primitives/string when
+	// targeting a structural interface they actually implement.
+	if isOpaqueContainerType(fromType) && toNamed.IsStructural() &&
+		fromNamed != toNamed && types.Implements(fromNamed, toNamed) {
+		return c.boxForStructuralView(val, fromNamed, toNamed, fromType)
+	}
+
 	if !c.isUserValueType(fromType) || !c.isUserValueType(toType) {
 		return val
 	}

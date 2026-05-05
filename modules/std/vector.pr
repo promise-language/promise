@@ -63,6 +63,25 @@ type Vector[T] `native `public {
 
   get is_empty bool => this.len == 0;
 
+  format(Writer ~w)! `public `doc("Writes a human-readable representation like [1, 2, 3] to the writer.") {
+    w.write_string("[");
+    int i = 0;
+    while i < this.len {
+      if i > 0 {
+        w.write_string(", ");
+      }
+      w.write_string("{this[i]}");
+      i = i + 1;
+    }
+    w.write_string("]");
+  }
+
+  to_string() string `public `doc("Returns a human-readable string representation like [1, 2, 3].") {
+    Builder b = Builder();
+    this.format(b)!;
+    return b.to_string();
+  }
+
   iter() Iterator[T] `public `doc("Returns a lazy iterator over the elements.") {
     int i = 0;
     int n = this.len;

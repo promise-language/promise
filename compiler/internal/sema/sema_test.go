@@ -10290,6 +10290,22 @@ func TestStringInterpPrimitivesStillWork(t *testing.T) {
 	`)
 }
 
+func TestStringInterpTypeParamAllowed(t *testing.T) {
+	checkOK(t, `
+		type Box[T] {
+			T val;
+			to_string() string => "{this.val}";
+		}
+		test() { Box[int] b = Box[int](val: 1); }
+	`)
+}
+
+func TestStringInterpTupleAllowed(t *testing.T) {
+	checkOK(t, `
+		test() { (int, string) t = (1, "hi"); string s = "{t}"; }
+	`)
+}
+
 // --- `target(cond) filtering tests ---
 
 // checkSourceWithTarget parses src as user code and checks with a specific target.

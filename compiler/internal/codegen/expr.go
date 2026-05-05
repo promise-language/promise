@@ -257,8 +257,38 @@ func (c *Compiler) makeRuntimeString(s string) value.Value {
 		ptr, constant.NewInt(irtypes.I64, int64(len(s))))
 }
 
+// convertTupleToString formats a tuple value as "(elem0, elem1, ...)".
+func (c *Compiler) convertTupleToString(val value.Value, tup *types.Tuple) value.Value {
+	elems := tup.Elems()
+	parts := make([]value.Value, 0, len(elems)*2+2)
+	parts = append(parts, c.makeRuntimeString("("))
+	for i, elemType := range elems {
+		if i > 0 {
+			parts = append(parts, c.makeRuntimeString(", "))
+		}
+		elemVal := c.block.NewExtractValue(val, uint64(i))
+		parts = append(parts, c.convertToString(elemVal, elemType))
+	}
+	parts = append(parts, c.makeRuntimeString(")"))
+	// Concatenate all parts
+	result := parts[0]
+	for _, part := range parts[1:] {
+		result = c.block.NewCall(c.funcs["promise_string_concat"], result, part)
+	}
+	return result
+}
+
 // convertToString converts a value to a string (i8*) for interpolation.
 func (c *Compiler) convertToString(val value.Value, typ types.Type) value.Value {
+	// Handle TypeParam: substitute to concrete type in monomorphic context.
+	if tp, ok := typ.(*types.TypeParam); ok {
+		if c.typeSubst != nil {
+			if concrete := c.typeSubst[tp]; concrete != nil {
+				return c.convertToString(val, concrete)
+			}
+		}
+		panic(fmt.Sprintf("codegen: unresolved TypeParam %s in string interpolation", typ))
+	}
 	// Handle optional types: print inner value if present, "none" if absent.
 	if opt, ok := typ.(*types.Optional); ok {
 		flag := c.block.NewExtractValue(val, 0)
@@ -283,9 +313,15 @@ func (c *Compiler) convertToString(val value.Value, typ types.Type) value.Value 
 		return phi
 	}
 
+	// Handle tuple types: format as (elem0, elem1, ...)
+	if tup, ok := typ.(*types.Tuple); ok {
+		return c.convertTupleToString(val, tup)
+	}
+
 	named := extractNamed(typ)
 	if named == nil {
-		panic(fmt.Sprintf("codegen: cannot convert %s to string for interpolation", typ))
+		// Unknown type — produce type name as fallback
+		return c.makeRuntimeString("<" + typ.String() + ">")
 	}
 	switch named {
 	case types.TypString:
@@ -319,7 +355,10 @@ func (c *Compiler) convertToString(val value.Value, typ types.Type) value.Value 
 	default:
 		// User-defined type: call format(Writer ~w)! via Builder
 		if named.LookupMethod("format") == nil {
-			panic(fmt.Sprintf("codegen: type %s has no format method for interpolation", typ))
+			// No format method — produce type name as fallback.
+			// This can happen when mono generates Vector[T].format() for a T
+			// that doesn't implement Format (e.g., internal types, tuples).
+			return c.makeRuntimeString("<" + named.Obj().Name() + ">")
 		}
 		return c.callFormatToString(val, typ, named)
 	}

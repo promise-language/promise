@@ -250,6 +250,33 @@ type Map[K: Hashable + Equal, V] `public {
     this._count = 0;
   }
 
+  format(Writer ~w)! `public `doc("Writes a human-readable representation to the writer.") {
+    w.write_string("\{");
+    bool first = true;
+    int i = 0;
+    while i < this._buckets.len {
+      match this._buckets[i] {
+        Slot.Used(k, v) => {
+          if !first {
+            w.write_string(", ");
+          }
+          w.write_string("{k}: {v}");
+          first = false;
+        },
+        _ => {
+        },
+      }
+      i = i + 1;
+    }
+    w.write_string("}");
+  }
+
+  to_string() string `public `doc("Returns a human-readable string representation.") {
+    Builder b = Builder();
+    this.format(b)!;
+    return b.to_string();
+  }
+
   _rehash() {
     Slot[K, V][] old = this._buckets;
     int new_cap = old.len * 2;

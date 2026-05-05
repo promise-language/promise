@@ -383,6 +383,12 @@ func Implements(x Type, iface *Named) bool {
 			}
 		}
 		return true
+	case *Instance:
+		// For Instance types (e.g., Vector[int]), check the origin Named type.
+		if n, ok := xt.Origin().(*Named); ok {
+			return Implements(n, iface)
+		}
+		return false
 	default:
 		return false
 	}

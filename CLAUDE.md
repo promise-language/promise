@@ -255,7 +255,7 @@ The standard library (`modules/std/`, 29 files) is auto-imported via `use std as
 |----------|-------|---------------|
 | Primitives | `int.pr`, `uint.pr`, `float.pr`, `bool.pr`, `char.pr` | Arithmetic, comparison, bitwise, hash, `to_string()`, `format()`, `parse()`, `encode(Encoder)`, `decode(Decoder)` for all numeric/bool/char/string types |
 | Strings | `string.pr` | Concatenation, comparison, `contains`, `starts_with`, `ends_with`, `index_of`, `trim`, `split`, `[]`, `[:]`, `bytes()`, `byte_at()`, `from_bytes()`, `to_upper`, `to_lower`, `repeat`, `replace`, `count`, `chars` |
-| Containers | `vector.pr`, `map.pr`, `set.pr` | `Vector[T]`/`T[]` (push/pop/remove/contains/slice/`filled`), `Map[K,V]`/`map[K,V]` (open-addressing, rehash), `Set[T]` |
+| Containers | `vector.pr`, `map.pr`, `set.pr` | `Vector[T]`/`T[]` (push/pop/remove/contains/slice/`filled`/`format`/`to_string`), `Map[K,V]`/`map[K,V]` (open-addressing, rehash, `format`/`to_string`), `Set[T]` (`format`/`to_string`) |
 | Format/Parse | `format.pr`, `builder.pr`, `parse.pr` | `Writer`/`Format` structural interfaces, `Builder` (string building, satisfies `Writer`), `Reader`/`Parse` structural interfaces, `Scanner`, `scan[T]()` |
 | I/O (std) | `io.pr` | `Reader`/`Writer`/`Closer` structural interfaces, `println`, `print_int`, `print_f64`, `print_bool` |
 | Iterators | `iter.pr` | `Iterator[T]` structural interface with 20 default combinator methods, `Stream[T]`, `_FnIter[T]`, `Generator[T]`, duck-typed for-in |

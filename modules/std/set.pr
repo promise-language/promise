@@ -21,6 +21,26 @@ type Set[T: Hashable + Equal] `public {
     return this._map.contains(elem);
   }
 
+  format(Writer ~w)! `public `doc("Writes a human-readable representation to the writer.") {
+    w.write_string("\{");
+    T[] items = this._map.keys();
+    int i = 0;
+    while i < items.len {
+      if i > 0 {
+        w.write_string(", ");
+      }
+      w.write_string("{items[i]}");
+      i = i + 1;
+    }
+    w.write_string("}");
+  }
+
+  to_string() string `public `doc("Returns a human-readable string representation.") {
+    Builder b = Builder();
+    this.format(b)!;
+    return b.to_string();
+  }
+
   clear() {
     this._map.clear();
   }

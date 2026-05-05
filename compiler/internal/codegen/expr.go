@@ -3588,6 +3588,18 @@ func (c *Compiler) genIfExpr(e *ast.IfExpr) value.Value {
 
 	c.block = mergeBlock
 
+	// Filter void-typed values — they cannot participate in phi nodes.
+	if thenVal != nil {
+		if _, isVoid := thenVal.Type().(*irtypes.VoidType); isVoid {
+			thenVal = nil
+		}
+	}
+	if elseVal != nil {
+		if _, isVoid := elseVal.Type().(*irtypes.VoidType); isVoid {
+			elseVal = nil
+		}
+	}
+
 	// If both branches produce values, create a phi node
 	if thenVal != nil && elseVal != nil {
 		phi := mergeBlock.NewPhi(

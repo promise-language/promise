@@ -11624,6 +11624,44 @@ func TestMatchBlockIfElseIfChain(t *testing.T) {
 	assertContains(t, ir, "if.end")
 }
 
+// B0135: if/else where both branches are void must not produce a phi void node.
+func TestIfElseVoidBranchesNoPhi(t *testing.T) {
+	ir := generateIR(t, `
+		test(int n) {
+			if n > 0 {
+				print_line("pos");
+			} else {
+				print_line("neg");
+			}
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "if.then")
+	assertContains(t, ir, "if.else")
+	assertNotContains(t, ir, "phi void")
+}
+
+// B0135: if/else void inside a match block body must not produce phi void.
+func TestMatchBlockIfElseVoidNoPhi(t *testing.T) {
+	ir := generateIR(t, `
+		test(int n) {
+			match n {
+				1 => {
+					if n > 0 {
+						print_line("a");
+					} else {
+						print_line("b");
+					}
+				},
+				_ => { print_line("c"); },
+			};
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "if.then")
+	assertNotContains(t, ir, "phi void")
+}
+
 func TestOptionalRecoveryCodegen(t *testing.T) {
 	// Optional recovery: non-recovering handler wraps result as T?
 	ir := generateIR(t, `

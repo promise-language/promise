@@ -1461,6 +1461,18 @@ func (c *Compiler) genIfStmtValue(s *ast.IfStmt) value.Value {
 
 	c.block = mergeBlock
 
+	// Filter void-typed values — they cannot participate in phi nodes.
+	if thenVal != nil {
+		if _, isVoid := thenVal.Type().(*irtypes.VoidType); isVoid {
+			thenVal = nil
+		}
+	}
+	if elseVal != nil {
+		if _, isVoid := elseVal.Type().(*irtypes.VoidType); isVoid {
+			elseVal = nil
+		}
+	}
+
 	// Build phi from branches that reach mergeBlock with values.
 	// One branch may return/diverge, leaving only the other to contribute.
 	var incomings []*ir.Incoming

@@ -84,8 +84,12 @@ bin/promise test -stress 30s tests/concurrency/...       # run for 30 seconds
 bin/promise test -timeout 10s -stress 50 tests/...       # per-run timeout + stress
 
 # Coverage (T0030)
-bin/promise test -coverage file.pr                       # run tests with coverage report
-bin/promise test -coverage -timeout 30s file.pr          # coverage with custom timeout
+bin/promise test -coverage file.pr                       # single-file coverage report
+bin/promise test -coverage tests/e2e/...                 # multi-file coverage (aggregated)
+bin/promise test -coverage tests/... modules/...         # coverage across multiple targets
+bin/coverage.sh                                          # Go + Promise coverage for all
+bin/coverage.sh go ./internal/codegen/                   # Go coverage for a specific package
+bin/coverage.sh promise tests/std/                       # Promise coverage for a directory
 
 # Cache diagnostics
 PROMISE_CACHE_DEBUG=1 bin/promise test tests/...         # show cache HIT/MISS/SKIP on stderr

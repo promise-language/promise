@@ -517,11 +517,7 @@ func runTest(args []string) {
 	if len(allFiles) == 1 {
 		runTestFile(allFiles[0], cfg, targetTriple, coverageMode)
 	} else {
-		if coverageMode {
-			fmt.Fprintln(os.Stderr, "error: -coverage is only supported for single file tests")
-			os.Exit(1)
-		}
-		runTestFiles(allFiles, cfg, targetTriple, parallel)
+		runTestFiles(allFiles, cfg, targetTriple, parallel, coverageMode)
 	}
 }
 
@@ -1120,7 +1116,7 @@ func firstLines(s string, n int) string {
 // runTestFiles runs tests from a list of .pr files, printing per-file results
 // and a combined summary at the end. Tests are compiled and run concurrently
 // up to the parallel limit. Results are printed in file order.
-func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, parallel int) {
+func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, parallel int, coverageMode bool) {
 	unlock := module.LockBuildDirShared()
 	defer unlock()
 
@@ -1223,6 +1219,9 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 			if targetTriple != "" {
 				testArgs = append(testArgs, "--target", targetTriple)
 			}
+			if coverageMode {
+				testArgs = append(testArgs, "-coverage")
+			}
 			testArgs = append(testArgs, r.file)
 			cmd := exec.CommandContext(ctx, selfExe, testArgs...)
 			cmd.Env = append(os.Environ(), "PROMISE_NO_INSTANCE_CACHE=1")
@@ -1255,9 +1254,44 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	failedFiles := 0
 	var failures []failureInfo
 
+	// Coverage aggregation: collect per-file stats from subprocess formatted output.
+	// Each subprocess prints "total: X% (Y/Z blocks)" which we parse.
+	type fileCoverage struct {
+		file    string
+		covered int
+		total   int
+	}
+	var covFiles []fileCoverage
+	covTotalRe := regexp.MustCompile(`^total: [\d.]+% \((\d+)/(\d+) blocks\)`)
+
 	for i := range results {
 		<-results[i].done
 		r := &results[i]
+
+		// Extract coverage summary from subprocess output and strip coverage lines
+		if coverageMode {
+			var cleanLines []string
+			inCovSection := false
+			for _, line := range strings.Split(r.output, "\n") {
+				if line == "=== Coverage ===" {
+					inCovSection = true
+					continue
+				}
+				if inCovSection {
+					if m := covTotalRe.FindStringSubmatch(line); m != nil {
+						covFiles = append(covFiles, fileCoverage{
+							file:    r.file,
+							covered: atoi(m[1]),
+							total:   atoi(m[2]),
+						})
+					}
+					continue // skip all coverage lines
+				}
+				cleanLines = append(cleanLines, line)
+			}
+			r.output = strings.Join(cleanLines, "\n")
+		}
+
 		// Skip files with no tests or excluded for this target
 		last := lastLine(r.output)
 		if !r.timedOut && (last == "no tests found" || strings.HasPrefix(last, "SKIP")) {
@@ -1399,6 +1433,32 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				fmt.Printf("    %s\n", f.context)
 			}
 		}
+	}
+
+	// Print aggregated coverage report for multi-file coverage mode
+	if coverageMode && len(covFiles) > 0 {
+		fmt.Println()
+		fmt.Println("=== Coverage ===")
+		totalCovered := 0
+		totalBlocks := 0
+		for _, cf := range covFiles {
+			totalCovered += cf.covered
+			totalBlocks += cf.total
+			pct := 0.0
+			if cf.total > 0 {
+				pct = float64(cf.covered) / float64(cf.total) * 100
+			}
+			relPath, relErr := filepath.Rel(baseDir, cf.file)
+			if relErr != nil {
+				relPath = cf.file
+			}
+			fmt.Printf("  %-50s %.1f%%\t(%d/%d blocks)\n", relPath, pct, cf.covered, cf.total)
+		}
+		totalPct := 0.0
+		if totalBlocks > 0 {
+			totalPct = float64(totalCovered) / float64(totalBlocks) * 100
+		}
+		fmt.Printf("\ntotal: %.1f%% (%d/%d blocks)\n", totalPct, totalCovered, totalBlocks)
 	}
 
 	if totalFailed > 0 || failedFiles > 0 {

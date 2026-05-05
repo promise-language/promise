@@ -291,7 +291,7 @@ Enum type codegen: tagged unions, fieldless enums, variant constructors, pattern
 - **Pattern matching**: `match` on enum generates LLVM `switch` on tag. Each arm branches to a dedicated basic block. Wildcard/name patterns use the default target.
 - **Destructure bindings**: `Some(v) =>` extracts the data area, bitcasts to variant struct, loads fields into local allocas. Supports `EnumDestructureMatchPattern`, `ShortDestructureMatchPattern`, and `NameMatchPattern` (binding the whole subject).
 - **Enum layout** (`layout.go`): `computeEnumLayout` computes tag map, per-variant data struct types, max data size. Four-struct ABI model maintained (type/variant/instance/value structs) for future extern compatibility.
-- **Enum methods**: Methods and getters declared inside `enum { ... }` body after variants. Receiver is `i8*` pointer to enum value alloca. `match this` inside enum methods bitcasts and loads the enum value (i32 for fieldless, struct for data enums). Sema uses `Enum.LookupMethod`/`LookupGetter`/`LookupAnyMethod` (mirrors Named type pattern). Codegen: `declareEnumMethods`/`defineEnumMethods` in compiler.go, `genEnumMethodCall`/`genEnumGetterAccess` in expr.go. Non-generic only (generic enum methods deferred to monomorphization support).
+- **Enum methods**: Methods and getters declared inside `enum { ... }` body after variants. Receiver is `i8*` pointer to enum value alloca. `match this` inside enum methods bitcasts and loads the enum value (i32 for fieldless, struct for data enums). Sema uses `Enum.LookupMethod`/`LookupGetter`/`LookupAnyMethod` (mirrors Named type pattern). Codegen: `declareEnumMethods`/`defineEnumMethods` in compiler.go (non-generic), `declareMonoEnumMethods`/`defineMonoEnumMethods` in mono.go (generic), `genEnumMethodCall`/`genEnumGetterAccess` in expr.go. Both non-generic and generic enum methods are supported; generic methods use the same monomorphization pipeline as generic Named type methods (B0016).
 - **Scope**: Fieldless enums, data enums with positional fields, variant values, variant constructors, match with switch, destructure bindings, wildcard/name patterns, enum methods and getters.
 - **Deferred**: Named enum fields in constructors, extern ABI pack/unpack for enums.
 
@@ -1004,7 +1004,7 @@ Known gaps and improvements deferred from completed stages.
 | B0013 | Failable `close()` error propagation in `use` | 8m | Medium |
 | B0014 | Named enum fields in constructors | 8d | Low |
 | ~~B0015~~ | ~~Enum methods~~ | ~~8d~~ | ~~Done~~ |
-| B0016 | Generic enum methods (monomorphization) | 8d | Low |
+| ~~B0016~~ | ~~Generic enum methods (monomorphization)~~ — **Fixed.** Added `declareMonoEnumMethods`/`defineMonoEnumMethods` in mono.go and wired into both main and module compilation paths. Fixed `genEnumMethodCall`/`genEnumGetterAccess` to use `monoCtx.name` when resolving method names inside mono enum method bodies. | ~~8d~~ | ~~Done~~ |
 | B0017 | Extern ABI pack/unpack for enums | 8d | Low |
 | B0018 | Failable extern functions (C ABI for errors) | 8e | Low |
 | B0019 | Type argument inference (explicit type args only currently) | 8f | Low |

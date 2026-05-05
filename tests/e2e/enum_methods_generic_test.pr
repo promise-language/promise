@@ -1,0 +1,321 @@
+// Tests for generic enum methods (monomorphization).
+// Covers: getters, regular methods, data variant access, match inside methods,
+// methods with parameters, failable methods, multiple instantiations.
+// --- Basic generic enum with getter ---
+enum Wrapper[T] {
+  Some(T value),
+  Empty,
+
+  get is_some bool {
+    match this {
+      Some(_) => {
+        return true;
+      },
+      Empty => {
+        return false;
+      },
+    }
+  }
+
+  get is_empty bool => !this.is_some;
+}
+
+test_generic_enum_getter() `test {
+  Wrapper[int] s = Wrapper[int].Some(value: 42);
+  assert(s.is_some == true, "Some is some");
+  assert(s.is_empty == false, "Some not empty");
+
+  Wrapper[int] e = Wrapper[int].Empty;
+  assert(e.is_some == false, "Empty not some");
+  assert(e.is_empty == true, "Empty is empty");
+}
+
+test_generic_enum_getter_string() `test {
+  Wrapper[string] s = Wrapper[string].Some(value: "hello");
+  assert(s.is_some == true, "string Some is some");
+
+  Wrapper[string] e = Wrapper[string].Empty;
+  assert(e.is_empty == true, "string Empty is empty");
+}
+
+// --- Generic enum with regular method ---
+
+enum Either[A, B] {
+  Left(A left),
+  Right(B right),
+
+  is_left(&this) bool {
+    match this {
+      Left(_) => {
+        return true;
+      },
+      Right(_) => {
+        return false;
+      },
+    }
+  }
+
+  is_right(&this) bool => !this.is_left();
+}
+
+test_generic_enum_method() `test {
+  Either[int, string] l = Either[int, string].Left(left: 42);
+  assert(l.is_left() == true, "Left is left");
+  assert(l.is_right() == false, "Left not right");
+
+  Either[int, string] r = Either[int, string].Right(right: "hello");
+  assert(r.is_left() == false, "Right not left");
+  assert(r.is_right() == true, "Right is right");
+}
+
+// --- Generic enum method that returns the type parameter ---
+
+enum Box[T] {
+  Full(T item),
+  Vacant,
+
+  unwrap_or(&this, T fallback) T {
+    match this {
+      Full(v) => {
+        return v;
+      },
+      Vacant => {
+        return fallback;
+      },
+    }
+  }
+}
+
+test_generic_enum_unwrap_or() `test {
+  Box[int] full = Box[int].Full(item: 99);
+  assert(full.unwrap_or(0) == 99, "Full unwraps to item");
+
+  Box[int] empty = Box[int].Vacant;
+  assert(empty.unwrap_or(0) == 0, "Vacant uses fallback");
+}
+
+test_generic_enum_unwrap_or_string() `test {
+  Box[string] full = Box[string].Full(item: "data");
+  assert(full.unwrap_or("default") == "data", "Full unwraps string");
+
+  Box[string] empty = Box[string].Vacant;
+  assert(empty.unwrap_or("default") == "default", "Vacant uses string fallback");
+}
+
+// --- Failable generic enum method ---
+
+enum SafeBox[T] {
+  Present(T value),
+  Missing,
+
+  get_value(&this) T! {
+    match this {
+      Present(v) => {
+        return v;
+      },
+      Missing => {
+        raise error(message: "no value");
+      },
+    }
+  }
+}
+
+test_failable_generic_enum() `test {
+  SafeBox[int] p = SafeBox[int].Present(value: 42);
+  int val = p.get_value()!;
+  assert(val == 42, "Present returns value");
+
+  SafeBox[int] m = SafeBox[int].Missing;
+  int result = m.get_value()? e {
+    -1;
+  };
+  assert(result == -1, "Missing uses fallback");
+}
+
+// --- Fieldless generic enum (generic in variant fields only) ---
+
+enum Trio[T] {
+  First(T a),
+  Second(T b),
+  Third(T c),
+
+  tag_name(&this) string {
+    match this {
+      First(_) => {
+        return "first";
+      },
+      Second(_) => {
+        return "second";
+      },
+      Third(_) => {
+        return "third";
+      },
+    }
+  }
+}
+
+test_trio_tag_name() `test {
+  assert(Trio[int].First(a: 1).tag_name() == "first", "First tag");
+  assert(Trio[int].Second(b: 2).tag_name() == "second", "Second tag");
+  assert(Trio[int].Third(c: 3).tag_name() == "third", "Third tag");
+}
+
+// --- Multiple methods on same generic enum ---
+
+enum Pair[A, B] {
+  Both(A first, B second),
+  OnlyFirst(A first),
+  OnlySecond(B second),
+  Neither,
+
+  has_first(&this) bool {
+    match this {
+      Both(_, _) => {
+        return true;
+      },
+      OnlyFirst(_) => {
+        return true;
+      },
+      _ => {
+        return false;
+      },
+    }
+  }
+
+  has_second(&this) bool {
+    match this {
+      Both(_, _) => {
+        return true;
+      },
+      OnlySecond(_) => {
+        return true;
+      },
+      _ => {
+        return false;
+      },
+    }
+  }
+
+  has_both(&this) bool => this.has_first() && this.has_second();
+}
+
+test_pair_methods() `test {
+  Pair[int, string] both = Pair[int, string].Both(first: 1, second: "a");
+  assert(both.has_first() == true, "Both has first");
+  assert(both.has_second() == true, "Both has second");
+  assert(both.has_both() == true, "Both has both");
+
+  Pair[int, string] f = Pair[int, string].OnlyFirst(first: 1);
+  assert(f.has_first() == true, "OnlyFirst has first");
+  assert(f.has_second() == false, "OnlyFirst no second");
+  assert(f.has_both() == false, "OnlyFirst not both");
+
+  Pair[int, string] n = Pair[int, string].Neither;
+  assert(n.has_first() == false, "Neither no first");
+  assert(n.has_second() == false, "Neither no second");
+}
+
+// --- Generic enum method with default parameter ---
+
+enum Tagged[T] {
+  Value(T data),
+  Nil,
+
+  describe(&this, string prefix = "tag") string {
+    match this {
+      Value(_) => {
+        return "{prefix}: value";
+      },
+      Nil => {
+        return "{prefix}: nil";
+      },
+    }
+  }
+}
+
+test_generic_enum_default_param() `test {
+  Tagged[int] v = Tagged[int].Value(data: 10);
+  assert(v.describe() == "tag: value", "default prefix");
+  assert(v.describe(prefix: "item") == "item: value", "custom prefix");
+
+  Tagged[int] n = Tagged[int].Nil;
+  assert(n.describe() == "tag: nil", "nil default prefix");
+}
+
+// --- Method calling another method (within generic enum) ---
+
+enum Status[T] {
+  Ok(T data),
+  Err(string message),
+
+  get is_ok bool {
+    match this {
+      Ok(_) => {
+        return true;
+      },
+      Err(_) => {
+        return false;
+      },
+    }
+  }
+
+  get is_err bool => !this.is_ok;
+
+  error_message(&this) string {
+    match this {
+      Ok(_) => {
+        return "";
+      },
+      Err(msg) => {
+        return msg;
+      },
+    }
+  }
+
+  summary(&this) string {
+    if this.is_ok {
+      return "ok";
+    }
+    return "error: {this.error_message()}";
+  }
+}
+
+test_generic_enum_method_calls_method() `test {
+  Status[int] ok = Status[int].Ok(data: 42);
+  assert(ok.is_ok == true, "Ok is ok");
+  assert(ok.is_err == false, "Ok not err");
+  assert(ok.summary() == "ok", "Ok summary");
+
+  Status[int] err = Status[int].Err(message: "boom");
+  assert(err.is_ok == false, "Err not ok");
+  assert(err.is_err == true, "Err is err");
+  assert(err.error_message() == "boom", "Err message");
+  assert(err.summary() == "error: boom", "Err summary");
+}
+
+// --- Expression body methods ---
+
+enum Flag[T] {
+  On(T data),
+  Off,
+
+  is_on(&this) bool {
+    match this {
+      On(_) => {
+        return true;
+      },
+      Off => {
+        return false;
+      },
+    }
+  }
+
+  is_off(&this) bool => !this.is_on();
+}
+
+test_generic_enum_expression_body() `test {
+  assert(Flag[int].On(data: 1).is_on() == true, "On is on");
+  assert(Flag[int].On(data: 1).is_off() == false, "On not off");
+  assert(Flag[int].Off.is_on() == false, "Off not on");
+  assert(Flag[int].Off.is_off() == true, "Off is off");
+}

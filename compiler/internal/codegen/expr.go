@@ -2380,6 +2380,12 @@ func (c *Compiler) genEnumGetterAccess(e *ast.MemberExpr, targetType types.Type,
 	case *types.Enum:
 		enum = t
 		enumName = t.Obj().Name()
+		// Inside mono method body, this is the origin enum — use mono name
+		if c.monoCtx != nil {
+			if origin, ok := c.monoCtx.origin.(*types.Enum); ok && t == origin {
+				enumName = c.monoCtx.name
+			}
+		}
 	case *types.Instance:
 		if en, ok := t.Origin().(*types.Enum); ok {
 			enum = en
@@ -2426,6 +2432,12 @@ func (c *Compiler) genEnumMethodCall(e *ast.CallExpr, member *ast.MemberExpr, ta
 	case *types.Enum:
 		enum = t
 		enumName = t.Obj().Name()
+		// Inside mono method body, this is the origin enum — use mono name
+		if c.monoCtx != nil {
+			if origin, ok := c.monoCtx.origin.(*types.Enum); ok && t == origin {
+				enumName = c.monoCtx.name
+			}
+		}
 	case *types.Instance:
 		if en, ok := t.Origin().(*types.Enum); ok {
 			enum = en

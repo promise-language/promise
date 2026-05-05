@@ -2857,6 +2857,129 @@ func TestGenericEnumFieldless(t *testing.T) {
 	assertContains(t, ir, "i32 0")
 }
 
+// TestGenericEnumMethodGetter verifies that a getter method on a generic enum
+// is correctly monomorphized: the function is declared with the mono-qualified name.
+func TestGenericEnumMethodGetter(t *testing.T) {
+	ir := generateIR(t, `
+		enum Wrapper[T] {
+			Some(T value),
+			Empty,
+
+			get is_some bool {
+				match this {
+					Some(_) => {
+						return true;
+					},
+					Empty => {
+						return false;
+					},
+				}
+			}
+		}
+		main() {
+			w := Wrapper[int].Some(value: 42);
+			b := w.is_some;
+		}
+	`)
+	// Mono method declared with instance-qualified name
+	assertContains(t, ir, `"Wrapper[int].is_some"`)
+	// Enum layout exists
+	assertContains(t, ir, "Wrapper[int]_v")
+}
+
+// TestGenericEnumMethodRegular verifies that a regular (non-getter) method on a
+// generic enum is monomorphized correctly.
+func TestGenericEnumMethodRegular(t *testing.T) {
+	ir := generateIR(t, `
+		enum Box[T] {
+			Full(T item),
+			Vacant,
+
+			unwrap_or(&this, T fallback) T {
+				match this {
+					Full(v) => {
+						return v;
+					},
+					Vacant => {
+						return fallback;
+					},
+				}
+			}
+		}
+		main() {
+			b := Box[int].Full(item: 99);
+			x := b.unwrap_or(0);
+		}
+	`)
+	assertContains(t, ir, `"Box[int].unwrap_or"`)
+}
+
+// TestGenericEnumMethodCallsMethod verifies that a mono enum method body
+// can call another method on the same enum via this.
+func TestGenericEnumMethodCallsMethod(t *testing.T) {
+	ir := generateIR(t, `
+		enum Status[T] {
+			Ok(T data),
+			Err(string msg),
+
+			get is_ok bool {
+				match this {
+					Ok(_) => {
+						return true;
+					},
+					Err(_) => {
+						return false;
+					},
+				}
+			}
+
+			get is_err bool {
+				return !this.is_ok;
+			}
+		}
+		main() {
+			s := Status[int].Ok(data: 42);
+			b := s.is_err;
+		}
+	`)
+	// Both methods should be declared
+	assertContains(t, ir, `"Status[int].is_ok"`)
+	assertContains(t, ir, `"Status[int].is_err"`)
+	// is_err calls is_ok
+	assertContains(t, ir, `call i1 @"Status[int].is_ok"`)
+}
+
+// TestGenericEnumMultipleInstantiations verifies that methods are monomorphized
+// separately for each type argument.
+func TestGenericEnumMultipleInstantiations(t *testing.T) {
+	ir := generateIR(t, `
+		enum Opt[T] {
+			Some(T value),
+			None,
+
+			get has_value bool {
+				match this {
+					Some(_) => {
+						return true;
+					},
+					None => {
+						return false;
+					},
+				}
+			}
+		}
+		main() {
+			a := Opt[int].Some(value: 1);
+			b := Opt[string].None;
+			x := a.has_value;
+			y := b.has_value;
+		}
+	`)
+	// Both instantiations get their own method
+	assertContains(t, ir, `"Opt[int].has_value"`)
+	assertContains(t, ir, `"Opt[string].has_value"`)
+}
+
 func TestGenericConstructorZeroInit(t *testing.T) {
 	ir := generateIR(t, `
 		type Box[T] { T value; }

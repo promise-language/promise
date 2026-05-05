@@ -523,6 +523,7 @@ func compile(file *ast.File, info *sema.Info, target string, cachedInstances map
 	c.declareTypeMethods(file)
 	c.declareEnumMethods(file)
 	c.declareMonoMethods(file, monoInstances)
+	c.declareMonoEnumMethods(file, monoInstances)
 	c.declareMonoSynthesizedDefaults(file, monoInstances) // structural parent defaults
 
 	// Compute vtable info and emit vtable globals (after method stubs are declared)
@@ -556,6 +557,7 @@ func compile(file *ast.File, info *sema.Info, target string, cachedInstances map
 	c.defineTypeMethods(file)
 	c.defineEnumMethods(file)
 	c.defineMonoMethods(file, monoInstances)
+	c.defineMonoEnumMethods(file, monoInstances)
 	c.defineMonoSynthesizedDefaults(file, monoInstances) // structural parent defaults
 	c.defineFuncs(file)
 	c.defineMonoFuncs(file, monoFuncInstances)
@@ -3190,6 +3192,7 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo, extraInstances []*typ
 	c.declareModuleTypeMethods(modFile, irName)
 	c.declareModuleEnumMethods(modFile, irName)
 	c.declareMonoMethods(modFile, monoInstances)
+	c.declareMonoEnumMethods(modFile, monoInstances)
 	c.declareMonoSynthesizedDefaults(modFile, monoInstances)
 
 	// 6. Compute vtable info and emit for module types
@@ -3209,6 +3212,7 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo, extraInstances []*typ
 	c.defineModuleTypeMethods(modFile, irName)
 	c.defineModuleEnumMethods(modFile, irName)
 	c.defineMonoMethods(modFile, monoInstances)
+	c.defineMonoEnumMethods(modFile, monoInstances)
 	c.defineMonoSynthesizedDefaults(modFile, monoInstances)
 
 	// 9. Define module function bodies

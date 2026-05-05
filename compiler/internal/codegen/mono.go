@@ -1587,6 +1587,143 @@ func (c *Compiler) findFuncDecl(file *ast.File, name string) *ast.FuncDecl {
 	return nil
 }
 
+// findEnumDecl finds an EnumDecl AST node by name.
+func (c *Compiler) findEnumDecl(file *ast.File, name string) *ast.EnumDecl {
+	for _, decl := range file.Decls {
+		if ed, ok := decl.(*ast.EnumDecl); ok && ed.Name == name {
+			return ed
+		}
+	}
+	return nil
+}
+
+// declareMonoEnumMethods declares LLVM functions for methods on monomorphic enum instances.
+func (c *Compiler) declareMonoEnumMethods(file *ast.File, instances []*types.Instance) {
+	for _, inst := range instances {
+		enum, ok := inst.Origin().(*types.Enum)
+		if !ok || len(enum.TypeParams()) == 0 {
+			continue
+		}
+		name := monoName(inst)
+		subst := types.BuildSubstMap(enum.TypeParams(), inst.TypeArgs())
+
+		ed := c.findEnumDecl(file, enum.Obj().Name())
+		if ed == nil {
+			continue
+		}
+		// Verify the found decl matches the mono origin
+		if foundEnum := c.lookupEnumType(ed.Name); foundEnum != nil && foundEnum != enum {
+			continue
+		}
+
+		for _, md := range ed.Methods {
+			if md.Body == nil {
+				continue
+			}
+			if len(md.TypeParams) > 0 {
+				continue // generic method — handled by mono method instances
+			}
+			m := c.lookupEnumMethod(enum, md)
+			if m == nil || m.Sig() == nil {
+				continue
+			}
+
+			mangledName := mangleMethodName(name, md.Name, md.IsSetter)
+			if _, exists := c.funcs[mangledName]; exists {
+				continue
+			}
+
+			var params []*ir.Param
+			if m.Sig().Recv() != nil {
+				params = append(params, ir.NewParam("this", irtypes.I8Ptr))
+			}
+
+			c.typeSubst = subst
+			for _, p := range m.Sig().Params() {
+				params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
+			}
+
+			retType := irtypes.Type(irtypes.Void)
+			if c.info.GeneratorFuncs[md] != nil {
+				retType = generatorValueType()
+			} else if m.Sig().Result() != nil {
+				retType = c.resolveType(m.Sig().Result())
+			}
+			c.typeSubst = nil
+
+			if m.Sig().CanError() && c.info.GeneratorFuncs[md] == nil {
+				retType = computeResultType(retType)
+			}
+
+			fn := c.module.NewFunc(mangledName, retType, params...)
+			c.funcs[mangledName] = fn
+			if c.compilingModule != "" {
+				c.moduleOwnedFuncs[mangledName] = c.compilingModule
+			}
+		}
+	}
+}
+
+// defineMonoEnumMethods generates method bodies for monomorphic enum instances.
+func (c *Compiler) defineMonoEnumMethods(file *ast.File, instances []*types.Instance) {
+	for _, inst := range instances {
+		enum, ok := inst.Origin().(*types.Enum)
+		if !ok || len(enum.TypeParams()) == 0 {
+			continue
+		}
+		name := monoName(inst)
+		subst := types.BuildSubstMap(enum.TypeParams(), inst.TypeArgs())
+
+		ed := c.findEnumDecl(file, enum.Obj().Name())
+		if ed == nil {
+			continue
+		}
+		// Verify the found decl matches the mono origin
+		if foundEnum := c.lookupEnumType(ed.Name); foundEnum != nil && foundEnum != enum {
+			continue
+		}
+
+		for _, md := range ed.Methods {
+			if md.Body == nil {
+				continue
+			}
+			if len(md.TypeParams) > 0 {
+				continue // generic method — handled by mono method instances
+			}
+			m := c.lookupEnumMethod(enum, md)
+			if m == nil || m.Sig() == nil {
+				continue
+			}
+
+			mangledName := mangleMethodName(name, md.Name, md.IsSetter)
+			fn, ok := c.funcs[mangledName]
+			if !ok {
+				continue
+			}
+			// Tag as instance-owned (before body check, so SplitInstanceIRs can find it)
+			c.instanceOwnedFuncs[mangledName] = name
+			if len(fn.Blocks) > 0 {
+				continue // already defined
+			}
+			// Skip body generation for cached instances
+			if c.cachedInstances[name] {
+				continue
+			}
+
+			c.typeSubst = subst
+			c.monoCtx = &monoContext{inst: inst, origin: enum, name: name}
+			func() {
+				defer func() { c.typeSubst = nil; c.monoCtx = nil }()
+				if elemType := c.info.GeneratorFuncs[md]; elemType != nil {
+					c.defineGeneratorMethod(md, m, fn, elemType, nil)
+				} else {
+					c.defineMethodFunc(md, m, fn)
+				}
+			}()
+		}
+	}
+}
+
 // monoMethodInstanceName generates a unique mangled name for a generic method instantiation.
 // Example: Box.transform[string]     → "Box.transform[string]"
 // Example: Box[int].transform[string] → "Box[int].transform[string]"

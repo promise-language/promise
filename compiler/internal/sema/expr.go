@@ -761,6 +761,19 @@ func (c *Checker) checkConstructorCall(e *ast.CallExpr, named *types.Named) type
 		return named
 	}
 
+	// Type argument inference for generic type constructors: Box(value: 42) → Box[int].
+	if len(named.TypeParams()) > 0 && !named.HasNew() {
+		inst := c.inferConstructorCall(e, named)
+		if inst != nil {
+			return c.checkInstanceConstructorCall(e, inst)
+		}
+		// Inference failed — error already reported.
+		for _, arg := range e.Args {
+			c.checkExpr(arg.Value)
+		}
+		return nil
+	}
+
 	// Build substitution map for inherited fields from generic parents
 	subst := c.buildParentSubstMap(named)
 
@@ -1000,6 +1013,21 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) types.Type {
 		callDesc = "function '" + ident.Name + "'"
 	} else if mem, ok := e.Callee.(*ast.MemberExpr); ok {
 		callDesc = "method '" + mem.Field + "'"
+	}
+
+	// Type argument inference: if the signature has type params, try to infer
+	// type arguments from the call arguments before proceeding.
+	if len(sig.TypeParams()) > 0 {
+		inferred := c.inferAndInstantiateCall(e, sig)
+		if inferred == nil {
+			// Inference failed — error already reported. Still check args
+			// so downstream doesn't see unchecked expressions.
+			for _, arg := range e.Args {
+				c.checkExpr(arg.Value)
+			}
+			return nil
+		}
+		sig = inferred
 	}
 
 	c.resolveCallArgs(e, sig.Params(), callDesc, nil)

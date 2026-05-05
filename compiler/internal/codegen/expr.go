@@ -14,6 +14,7 @@ import (
 	"github.com/llir/llvm/ir/value"
 
 	"djabi.dev/go/promise_lang/internal/ast"
+	"djabi.dev/go/promise_lang/internal/sema"
 	"djabi.dev/go/promise_lang/internal/types"
 )
 
@@ -1003,6 +1004,11 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 		return c.genGenericFuncCall(e, idx)
 	}
 
+	// Inferred generic function call: sema recorded the inferred type args.
+	if inferred, ok := c.info.InferredTypeArgs[e]; ok {
+		return c.genInferredGenericCall(e, inferred)
+	}
+
 	// Evaluate arguments
 	var argVals []value.Value
 	var argTypes []types.Type
@@ -1156,6 +1162,47 @@ func (c *Compiler) genGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr) value
 
 	// Coerce arguments when crossing type boundaries
 	if callee := c.lookupFunc(ident.Name); callee != nil {
+		if sig, ok := callee.Type().(*types.Signature); ok {
+			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params())
+		}
+	}
+
+	return c.block.NewCall(fn, argVals...)
+}
+
+// genInferredGenericCall generates a call to a monomorphic generic function
+// where the type arguments were inferred by sema (not explicit in the AST).
+func (c *Compiler) genInferredGenericCall(e *ast.CallExpr, inferred *sema.InferredCall) value.Value {
+	// Build mangled name from inferred type args.
+	mangledName := inferred.FuncName + "["
+	for i, ta := range inferred.TypeArgs {
+		if c.typeSubst != nil {
+			ta = types.Substitute(ta, c.typeSubst)
+		}
+		if i > 0 {
+			mangledName += ", "
+		}
+		mangledName += typeArgStr(ta)
+	}
+	mangledName += "]"
+
+	fn, ok := c.funcs[mangledName]
+	if !ok {
+		panic(fmt.Sprintf("codegen: undefined inferred monomorphic function %q", mangledName))
+	}
+
+	var argVals []value.Value
+	var argTypes []types.Type
+	for _, arg := range e.Args {
+		argVals = append(argVals, c.genCallArgExpr(arg.Value))
+		argTypes = append(argTypes, c.info.Types[arg.Value])
+		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		}
+	}
+
+	// Coerce arguments when crossing type boundaries.
+	if callee := c.lookupFunc(inferred.FuncName); callee != nil {
 		if sig, ok := callee.Type().(*types.Signature); ok {
 			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params())
 		}

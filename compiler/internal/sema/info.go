@@ -12,6 +12,13 @@ type FuncInstance struct {
 	Sig      *types.Signature // substituted signature (no TypeParams)
 }
 
+// InferredCall records the inferred type arguments for a generic call expression.
+// Used by codegen to build monomorphized function names.
+type InferredCall struct {
+	TypeArgs []types.Type // inferred concrete type arguments
+	FuncName string       // function/method name (for mangling)
+}
+
 // MethodInstance records a concrete instantiation of a generic method.
 type MethodInstance struct {
 	Owner     *types.Named     // origin type owning the method
@@ -87,6 +94,11 @@ type Info struct {
 
 	// MethodInstances records all concrete generic method instantiations for later monomorphization.
 	MethodInstances []*MethodInstance
+
+	// InferredTypeArgs maps call expressions with inferred type arguments to the
+	// concrete type args. Used by codegen to build monomorphized function names
+	// for calls where type arguments were inferred (not explicit in the AST).
+	InferredTypeArgs map[*ast.CallExpr]*InferredCall
 
 	// FilteredDecls records top-level declarations that were excluded by a `target(cond)
 	// annotation whose condition did not match the build target.

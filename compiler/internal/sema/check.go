@@ -94,6 +94,7 @@ func CheckWithTarget(file *ast.File, moduleScopes map[string]*types.Scope, targe
 			GeneratorFuncs:           make(map[ast.Node]types.Type),
 			FilteredDecls:            make(map[ast.Decl]bool),
 			DeclHashes:               make(map[*types.TypeName]string),
+			InferredTypeArgs:         make(map[*ast.CallExpr]*InferredCall),
 		},
 	}
 
@@ -149,6 +150,7 @@ func CheckForStdModule(file *ast.File, target TargetInfo) (*Info, []error) {
 			GeneratorFuncs:           make(map[ast.Node]types.Type),
 			FilteredDecls:            make(map[ast.Decl]bool),
 			DeclHashes:               make(map[*types.TypeName]string),
+			InferredTypeArgs:         make(map[*ast.CallExpr]*InferredCall),
 		},
 	}
 
@@ -214,6 +216,7 @@ func DeclareAndDefineWithTarget(file *ast.File, moduleScopes map[string]*types.S
 			GeneratorFuncs:           make(map[ast.Node]types.Type),
 			FilteredDecls:            make(map[ast.Decl]bool),
 			DeclHashes:               make(map[*types.TypeName]string),
+			InferredTypeArgs:         make(map[*ast.CallExpr]*InferredCall),
 		},
 	}
 

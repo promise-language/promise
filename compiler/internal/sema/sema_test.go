@@ -11247,3 +11247,154 @@ func TestMatchExpressionPatternRequiresWildcard(t *testing.T) {
 	`)
 	expectError(t, errs, "must include a wildcard")
 }
+
+// --- Type Argument Inference Tests ---
+
+func TestInferGenericFuncFromIntArg(t *testing.T) {
+	checkOK(t, `
+		identity[T](T x) T { return x; }
+		test() {
+			int v = identity(42);
+		}
+	`)
+}
+
+func TestInferGenericFuncFromStringArg(t *testing.T) {
+	checkOK(t, `
+		identity[T](T x) T { return x; }
+		test() {
+			string v = identity("hello");
+		}
+	`)
+}
+
+func TestInferGenericFuncFromVariable(t *testing.T) {
+	checkOK(t, `
+		identity[T](T x) T { return x; }
+		test() {
+			int a = 42;
+			int v = identity(a);
+		}
+	`)
+}
+
+func TestInferGenericFuncMultipleParams(t *testing.T) {
+	checkOK(t, `
+		first[T](T a, T b) T { return a; }
+		test() {
+			int v = first(1, 2);
+		}
+	`)
+}
+
+func TestInferGenericFuncTwoTypeParams(t *testing.T) {
+	checkOK(t, `
+		pair[A, B](A a, B b) A { return a; }
+		test() {
+			int v = pair(1, "hello");
+		}
+	`)
+}
+
+func TestInferGenericFuncConflictingArgs(t *testing.T) {
+	errs := checkErrs(t, `
+		identity[T](T a, T b) T { return a; }
+		test() {
+			identity(1, "hello");
+		}
+	`)
+	expectError(t, errs, "cannot infer type arguments")
+}
+
+func TestInferGenericFuncNotEnoughInfo(t *testing.T) {
+	errs := checkErrs(t, `
+		make_default[T]() T! { raise error("no"); }
+		test() {
+			make_default();
+		}
+	`)
+	expectError(t, errs, "cannot infer type arguments")
+}
+
+func TestInferConstructorFromFieldArg(t *testing.T) {
+	checkOK(t, `
+		type Box[T] { T value; }
+		test() {
+			b := Box(value: 42);
+		}
+	`)
+}
+
+func TestInferConstructorMultipleFields(t *testing.T) {
+	checkOK(t, `
+		type Pair[A, B] { A first; B second; }
+		test() {
+			p := Pair(first: 1, second: "hi");
+		}
+	`)
+}
+
+func TestInferGenericFuncWithVectorArg(t *testing.T) {
+	checkOK(t, `
+		first_element[T](T[] items) T {
+			return items[0];
+		}
+		test() {
+			int[] arr = [1, 2, 3];
+			int v = first_element(arr);
+		}
+	`)
+}
+
+func TestInferGenericFuncLambdaRequiresExplicitTypeArgs(t *testing.T) {
+	// Lambda args can't be peeked for type inference, so type params that
+	// can only be inferred from lambdas require explicit type args.
+	errs := checkErrs(t, `
+		apply[T, R](T x, (T) -> R f) R {
+			return f(x);
+		}
+		test() {
+			apply(42, |int x| -> x.to_string());
+		}
+	`)
+	expectError(t, errs, "cannot infer type arguments")
+}
+
+func TestInferGenericFuncExplicitStillWorks(t *testing.T) {
+	// Explicit type args should still work as before.
+	checkOK(t, `
+		identity[T](T x) T { return x; }
+		test() {
+			int v = identity[int](42);
+		}
+	`)
+}
+
+func TestInferGenericFuncNamedArgs(t *testing.T) {
+	checkOK(t, `
+		wrap[T](T value) T { return value; }
+		test() {
+			int v = wrap(value: 42);
+		}
+	`)
+}
+
+func TestInferConstructorPositionalArg(t *testing.T) {
+	checkOK(t, `
+		type Box[T] { T value; }
+		test() {
+			b := Box(42);
+		}
+	`)
+}
+
+func TestInferConstructorMissingArgs(t *testing.T) {
+	// Can't infer type args if no constructor args are provided.
+	errs := checkErrs(t, `
+		type Box[T] { T value; }
+		test() {
+			Box();
+		}
+	`)
+	expectError(t, errs, "cannot infer type arguments")
+}

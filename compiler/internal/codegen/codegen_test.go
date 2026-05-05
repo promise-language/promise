@@ -12509,3 +12509,51 @@ func TestMatchExpressionPattern(t *testing.T) {
 	// The modulo operation should appear in the IR
 	assertContains(t, ir, "srem")
 }
+
+// --- Type Argument Inference Codegen Tests ---
+
+func TestInferGenericFuncCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		identity[T](T x) T { return x; }
+		main() {
+			int v = identity(42);
+		}
+	`)
+	// Monomorphized function should be generated for int
+	assertContains(t, ir, "define i64 @\"identity[int]\"")
+}
+
+func TestInferGenericFuncTwoTypeParamsCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		first[A, B](A a, B b) A { return a; }
+		main() {
+			int v = first(1, "hello");
+		}
+	`)
+	assertContains(t, ir, "@\"first[int, string]\"")
+}
+
+func TestInferConstructorCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] { T value; }
+		main() {
+			b := Box(value: 42);
+			int v = b.value;
+		}
+	`)
+	// Should produce Box[int] instance struct
+	assertContains(t, ir, "Box[int]_i")
+}
+
+func TestInferGenericFuncWithVectorParamCodegen(t *testing.T) {
+	ir := generateIR(t, `
+		first_elem[T](T[] items) T {
+			return items[0];
+		}
+		main() {
+			int[] arr = [1, 2, 3];
+			int v = first_elem(arr);
+		}
+	`)
+	assertContains(t, ir, "@\"first_elem[int]\"")
+}

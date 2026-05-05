@@ -248,7 +248,8 @@ test_match_var_reuse() `test {
 type ScopedResource {
   int id;
 
-  drop(~this) {}
+  drop(~this) {
+  }
 }
 
 test_for_owned_var_reuse() `test {

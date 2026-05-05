@@ -131,3 +131,146 @@ test_classic_for_scope() `test {
   }
   assert(sum == 100, "0+10+20+30+40 = 100");
 }
+
+// --- reuse for-in loop variable name across loops ---
+
+test_for_in_var_reuse() `test {
+  int sum1 = 0;
+  for i in 0..3 {
+    sum1 += i;
+  }
+  int sum2 = 0;
+  for i in 10..13 {
+    sum2 += i;
+  }
+  assert(sum1 == 3, "0+1+2 = 3");
+  assert(sum2 == 33, "10+11+12 = 33");
+}
+
+// --- reuse for-in loop variable with different types ---
+
+test_for_in_var_reuse_different_types() `test {
+  int total = 0;
+  string[] items = ["a", "bb", "ccc"];
+  for item in items {
+    total += 1;
+  }
+  int[] nums = [10, 20, 30];
+  for item in nums {
+    total += item;
+  }
+  assert(total == 63, "3 + 10+20+30 = 63");
+}
+
+// --- reuse classic for loop variable ---
+
+test_classic_for_var_reuse() `test {
+  int sum1 = 0;
+  for i := 0; i < 3; i++ {
+    sum1 += i;
+  }
+  int sum2 = 0;
+  for i := 10; i < 13; i++ {
+    sum2 += i;
+  }
+  assert(sum1 == 3, "0+1+2 = 3");
+  assert(sum2 == 33, "10+11+12 = 33");
+}
+
+// --- reuse while loop body variable ---
+
+test_while_var_reuse() `test {
+  int n = 3;
+  while n > 0 {
+    int x = n * 10;
+    assert(x > 0, "x positive in first while");
+    n--;
+  }
+  int m = 3;
+  while m > 0 {
+    int x = m * 100;
+    assert(x > 0, "x positive in second while");
+    m--;
+  }
+}
+
+// --- reuse nested for loop variables ---
+
+test_nested_for_var_reuse() `test {
+  int sum = 0;
+  for i in 0..3 {
+    for j in 0..3 {
+      sum += 1;
+    }
+  }
+  int sum2 = 0;
+  for i in 0..2 {
+    for j in 0..2 {
+      sum2 += 1;
+    }
+  }
+  assert(sum == 9, "3*3 = 9");
+  assert(sum2 == 4, "2*2 = 4");
+}
+
+// --- reuse if block variable ---
+
+test_if_var_reuse() `test {
+  int x = 1;
+  if x == 1 {
+    int y = 10;
+    assert(y == 10, "y == 10 in first if");
+  }
+  if x == 1 {
+    int y = 20;
+    assert(y == 20, "y == 20 in second if");
+  }
+}
+
+// --- reuse match block variable ---
+
+test_match_var_reuse() `test {
+  int val = 1;
+  string r1 = match val {
+    1 => "one",
+    _ => "other",
+  };
+  string r2 = match val {
+    1 => "uno",
+    _ => "otro",
+  };
+  assert(r1 == "one", "first match");
+  assert(r2 == "uno", "second match");
+}
+
+// --- owned type variable reuse across for loops ---
+
+type ScopedResource {
+  int id;
+
+  drop(~this) {}
+}
+
+test_for_owned_var_reuse() `test {
+  for i in 0..3 {
+    r := ScopedResource(id: i);
+    assert(r.id == i, "owned var in first loop");
+  }
+  for i in 0..3 {
+    r := ScopedResource(id: i + 10);
+    assert(r.id == i + 10, "owned var in second loop");
+  }
+}
+
+// --- owned type variable reuse across if blocks ---
+
+test_if_owned_var_reuse() `test {
+  if true {
+    r := ScopedResource(id: 1);
+    assert(r.id == 1, "owned var in first if");
+  }
+  if true {
+    r := ScopedResource(id: 2);
+    assert(r.id == 2, "owned var in second if");
+  }
+}

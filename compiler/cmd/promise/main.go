@@ -543,6 +543,11 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string) {
 				fmt.Fprintf(os.Stderr, "[cache HIT] %s key=%s\n", filepath.Base(filename), cacheKey[:16])
 			}
 			meta := module.LoadTestBinaryMeta(cacheDir, cacheKey)
+			// Scale process timeout by test count so batch files with many
+			// tests don't hit the backstop during normal execution.
+			if meta != nil && len(meta.Tests) > 1 {
+				timeout = cfg.defaultTimeout*time.Duration(len(meta.Tests)) + 30*time.Second
+			}
 			if meta != nil && meta.E2E {
 				executeE2EBinary(cachedBin, meta.ExpectedOutput, meta.ExcludeTargets,
 					filename, timeout, start, targetTriple)
@@ -945,7 +950,15 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 
 			r := &results[idx]
 			fileStart := time.Now()
-			ctx, cancel := context.WithTimeout(context.Background(), cfg.defaultTimeout)
+			// The subprocess handles per-test timeouts internally.
+			// The parent context is a generous backstop that must account
+			// for compilation time (which can exceed the per-test timeout
+			// under parallel load or cross-compilation to WASM).
+			parentTimeout := cfg.defaultTimeout * 10
+			if parentTimeout < 2*time.Minute {
+				parentTimeout = 2 * time.Minute
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), parentTimeout)
 			defer cancel()
 			testArgs := []string{"test", "-timeout", fmt.Sprintf("%gs", cfg.defaultTimeout.Seconds())}
 			if cfg.scale != 1.0 {

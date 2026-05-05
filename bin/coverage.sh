@@ -35,22 +35,27 @@ run_go_coverage() {
   local pkg="${1:-./...}"
   echo "=== Go Coverage: $pkg ==="
   echo ""
-  local covfile
+  local covfile funcfile
   covfile=$(mktemp /tmp/promise_cov_XXXXXX.out)
+  funcfile=$(mktemp /tmp/promise_func_XXXXXX.txt)
   # Run from compiler/ where go.mod lives
   (cd compiler && go test "$pkg" -coverprofile="$covfile" -count=1) || true
   echo ""
   if [ -s "$covfile" ]; then
-    (cd compiler && go tool cover -func="$covfile") | tail -1
+    # Capture full output once to avoid running go tool cover twice
+    (cd compiler && go tool cover -func="$covfile") > "$funcfile" 2>&1 || true
+    tail -1 "$funcfile"
     echo ""
     echo "Functions below 70% coverage:"
-    (cd compiler && go tool cover -func="$covfile") | awk -F'\t' '
+    awk -F'\t' '
       NR > 0 && $NF != "100.0%" {
         pct = $NF + 0
-        if (pct < 70 && pct >= 0 && $NF != "") print $0
+        if (pct < 70 && pct >= 0 && $NF != "") { print $0; count++ }
+        if (count >= 30) exit
       }
-    ' | head -30
+    ' "$funcfile"
     echo ""
+    rm -f "$funcfile"
   fi
   rm -f "$covfile"
 }

@@ -14,3 +14,15 @@ test_alias_enum() `test {
   c := m.Color.Blue;
   assert(m.color_name(c) == "blue", "m.Color.Blue name");
 }
+
+// --- Aliased module generic function calls (B0100) ---
+
+test_alias_generic_explicit() `test {
+  int r = m.identity[int](7);
+  assert(r == 7, "aliased explicit generic");
+}
+
+test_alias_generic_inferred() `test {
+  int r = m.identity(7);
+  assert(r == 7, "aliased inferred generic");
+}

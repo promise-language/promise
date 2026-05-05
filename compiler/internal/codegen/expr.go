@@ -947,6 +947,10 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 					// Module-qualified enum — fall through to enum dispatch below
 				default:
 					// Module-qualified function call: mod.func(args)
+					// Module-qualified generic call with inferred type args: mod.func(args)
+					if inferred, ok := c.info.InferredTypeArgs[e]; ok {
+						return c.genInferredGenericCall(e, inferred)
+					}
 					return c.genModuleCall(e, modName, member.Field)
 				}
 			}

@@ -89,6 +89,21 @@ type Resource `public {
   }
 }
 
+// --- Public generic functions ---
+
+identity[T](T x) T `public {
+  return x;
+}
+
+wrap[T](T x) T[] `public {
+  T[] result = [x];
+  return result;
+}
+
+safe_identity[T](T x) T! `public {
+  return x;
+}
+
 // --- Private function (not exported) ---
 
 _internal_helper() int {

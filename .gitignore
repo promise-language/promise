@@ -27,3 +27,4 @@ compiler/grammar/.antlr/PromiseParser.tokens
 
 # Build cache
 **/.DS_Store
+.claude/settings.local.json

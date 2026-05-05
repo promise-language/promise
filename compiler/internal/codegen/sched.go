@@ -135,6 +135,7 @@ const (
 	schedFieldGsCompleted      = 16 // i64  total goroutines completed
 	schedFieldContextSwitches  = 17 // i64  total context switches
 	schedFieldSteals           = 18 // i64  total work steals
+	schedFieldSysmonHandle     = 19 // i8*  sysmon thread handle (for joining at shutdown)
 )
 
 // schedStructType returns the LLVM struct type for the global scheduler.
@@ -159,6 +160,7 @@ func schedStructType() *irtypes.StructType {
 		irtypes.I64,   // gs_completed
 		irtypes.I64,   // context_switches
 		irtypes.I64,   // steals
+		irtypes.I8Ptr, // sysmon_handle
 	)
 }
 
@@ -545,7 +547,12 @@ func (c *Compiler) defineSchedInitFunc() {
 		// Start sysmon thread (sets G.preempt on running Gs periodically)
 		sysmonFn := c.funcs["promise_sysmon"]
 		sysmonFnPtr := loopEnd.NewBitCast(sysmonFn, irtypes.I8Ptr)
-		loopEnd.NewCall(c.palThreadCreate, sysmonFnPtr, constant.NewNull(irtypes.I8Ptr))
+		sysmonHandle := loopEnd.NewCall(c.palThreadCreate, sysmonFnPtr, constant.NewNull(irtypes.I8Ptr))
+
+		// Store sysmon thread handle for joining at shutdown
+		sysmonField := loopEnd.NewGetElementPtr(schedTy, c.schedGlobal,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldSysmonHandle)))
+		loopEnd.NewStore(sysmonHandle, sysmonField)
 
 		// Done
 		loopEnd.NewRet(nil)
@@ -1888,12 +1895,90 @@ func (c *Compiler) defineSchedShutdownFunc() {
 	joinBody.NewStore(jNextI, iAlloca)
 	joinBody.NewBr(joinLoop)
 
-	// Done. Do NOT free the P array or destroy mutexes here — the sysmon
-	// thread is still running (it exits within 10ms after checking shutdown)
-	// and accesses sched.ps. Freeing the P array would race with sysmon's
-	// scan loop → SIGSEGV. The process is about to exit anyway; the OS
-	// reclaims all resources.
-	doneBlk.NewRet(nil)
+	// Join sysmon thread — it checks the shutdown flag every 10ms and exits
+	sysmonField := doneBlk.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldSysmonHandle)))
+	sysmonHandle := doneBlk.NewLoad(irtypes.I8Ptr, sysmonField)
+	doneBlk.NewCall(c.palThreadJoin, sysmonHandle)
+
+	// Sysmon is now joined — safe to destroy per-M resources and free P array
+	cleanupLoop := fn.NewBlock("cleanup_loop")
+	cleanupBody := fn.NewBlock("cleanup_body")
+	freeBlk := fn.NewBlock("free_ps")
+
+	doneBlk.NewStore(constant.NewInt(irtypes.I32, 0), iAlloca)
+	doneBlk.NewBr(cleanupLoop)
+
+	cVal := cleanupLoop.NewLoad(irtypes.I32, iAlloca)
+	cleanupCond := cleanupLoop.NewICmp(enum.IPredSLT, cVal, maxP)
+	cleanupLoop.NewCondBr(cleanupCond, cleanupBody, freeBlk)
+
+	// Destroy P's lock, M's park_mutex/park_cond, and free M
+	cVal2 := cleanupBody.NewLoad(irtypes.I32, iAlloca)
+	c64Val := cleanupBody.NewZExt(cVal2, irtypes.I64)
+	cpPtr := cleanupBody.NewGetElementPtr(pTy, psTyped, c64Val)
+
+	// Destroy P.lock
+	cpLockField := cleanupBody.NewGetElementPtr(pTy, cpPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldLock)))
+	cpLock := cleanupBody.NewLoad(irtypes.I8Ptr, cpLockField)
+	cleanupBody.NewCall(c.palMutexDestroy, cpLock)
+
+	// Get M from P
+	cmField := cleanupBody.NewGetElementPtr(pTy, cpPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldM)))
+	cmRaw := cleanupBody.NewLoad(irtypes.I8Ptr, cmField)
+	cmPtr := cleanupBody.NewBitCast(cmRaw, irtypes.NewPointer(mTy))
+
+	// Destroy M.park_mutex
+	cmParkMtxField := cleanupBody.NewGetElementPtr(mTy, cmPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldParkMutex)))
+	cmParkMtx := cleanupBody.NewLoad(irtypes.I8Ptr, cmParkMtxField)
+	cleanupBody.NewCall(c.palMutexDestroy, cmParkMtx)
+
+	// Destroy M.park_cond
+	cmParkCondField := cleanupBody.NewGetElementPtr(mTy, cmPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(mFieldParkCond)))
+	cmParkCond := cleanupBody.NewLoad(irtypes.I8Ptr, cmParkCondField)
+	cleanupBody.NewCall(c.palCondDestroy, cmParkCond)
+
+	// Free M
+	cleanupBody.NewCall(c.palFree, cmRaw)
+
+	cNextI := cleanupBody.NewAdd(cVal2, constant.NewInt(irtypes.I32, 1))
+	cleanupBody.NewStore(cNextI, iAlloca)
+	cleanupBody.NewBr(cleanupLoop)
+
+	// Destroy scheduler mutexes and conds
+	glLockField := freeBlk.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGlobalLock)))
+	glLock := freeBlk.NewLoad(irtypes.I8Ptr, glLockField)
+	freeBlk.NewCall(c.palMutexDestroy, glLock)
+
+	imLockField := freeBlk.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldIdleMLock)))
+	imLock := freeBlk.NewLoad(irtypes.I8Ptr, imLockField)
+	freeBlk.NewCall(c.palMutexDestroy, imLock)
+
+	mdMutexField := freeBlk.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldMainDoneMutex)))
+	mdMutex := freeBlk.NewLoad(irtypes.I8Ptr, mdMutexField)
+	freeBlk.NewCall(c.palMutexDestroy, mdMutex)
+
+	mdCondField := freeBlk.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldMainDoneCond)))
+	mdCond := freeBlk.NewLoad(irtypes.I8Ptr, mdCondField)
+	freeBlk.NewCall(c.palCondDestroy, mdCond)
+
+	doneLockField := freeBlk.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldDoneLock)))
+	doneLock := freeBlk.NewLoad(irtypes.I8Ptr, doneLockField)
+	freeBlk.NewCall(c.palMutexDestroy, doneLock)
+
+	// Free P array (each P contains its M inline via pointer)
+	freeBlk.NewCall(c.palFree, psRaw)
+
+	freeBlk.NewRet(nil)
 
 	c.funcs["promise_sched_shutdown"] = fn
 }

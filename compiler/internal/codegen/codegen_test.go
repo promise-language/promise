@@ -12751,3 +12751,245 @@ func TestEmbedEmptyFile(t *testing.T) {
 	assertContains(t, ir, "@empty()")
 	assertContains(t, ir, "@promise_string_new")
 }
+
+// --- Coverage instrumentation tests (T0030) ---
+
+// generateIRWithCoverage compiles with coverage enabled and returns the IR.
+func generateIRWithCoverage(t *testing.T, src string) (string, []CoverageRegion) {
+	t.Helper()
+	file, info := parseWithStd(t, src)
+	result := CompileWithOptions(file, info, "", &CompileOptions{CoverageEnabled: true})
+	return result.Module.String(), result.CoverageRegions
+}
+
+func TestCoverageFunctionEntry(t *testing.T) {
+	ir, regions := generateIRWithCoverage(t, `
+		foo() int { return 42; }
+		bar() int { return 7; }
+		main() {}
+	`)
+	// Should have coverage globals for foo and bar (not main)
+	assertContains(t, ir, "@__promise_cov_0")
+	assertContains(t, ir, "@__promise_cov_1")
+
+	// Should have 2 function regions
+	funcCount := 0
+	for _, r := range regions {
+		if r.Kind == "function" {
+			funcCount++
+		}
+	}
+	if funcCount != 2 {
+		t.Errorf("expected 2 function coverage regions, got %d (regions: %+v)", funcCount, regions)
+	}
+}
+
+func TestCoverageSkipsTestFunctions(t *testing.T) {
+	_, regions := generateIRWithCoverage(t, `
+		foo() int { return 42; }
+		test_foo() `+"`test"+` {
+			int x = foo();
+		}
+		main() {}
+	`)
+	// Only foo should be instrumented, not test_foo or main
+	for _, r := range regions {
+		if r.FuncName == "test_foo" {
+			t.Errorf("test function should not be instrumented: %+v", r)
+		}
+		if r.FuncName == "main" {
+			t.Errorf("main should not be instrumented: %+v", r)
+		}
+	}
+	funcCount := 0
+	for _, r := range regions {
+		if r.Kind == "function" {
+			funcCount++
+		}
+	}
+	if funcCount != 1 {
+		t.Errorf("expected 1 function region (foo), got %d", funcCount)
+	}
+}
+
+func TestCoverageIfBranches(t *testing.T) {
+	ir, regions := generateIRWithCoverage(t, `
+		classify(int x) string {
+			if x > 0 {
+				return "positive";
+			} else {
+				return "negative";
+			}
+		}
+		main() {}
+	`)
+	// Should have coverage counter increments in IR
+	assertContains(t, ir, "@__promise_cov_0")
+	assertContains(t, ir, "@__promise_cov_1") // if.then
+	assertContains(t, ir, "@__promise_cov_2") // if.else
+
+	thenCount := 0
+	elseCount := 0
+	for _, r := range regions {
+		if r.Kind == "if.then" {
+			thenCount++
+		}
+		if r.Kind == "if.else" {
+			elseCount++
+		}
+	}
+	if thenCount != 1 {
+		t.Errorf("expected 1 if.then region, got %d", thenCount)
+	}
+	if elseCount != 1 {
+		t.Errorf("expected 1 if.else region, got %d", elseCount)
+	}
+}
+
+func TestCoverageWhileLoop(t *testing.T) {
+	_, regions := generateIRWithCoverage(t, `
+		count(int n) int {
+			int i = 0;
+			while i < n {
+				i++;
+			}
+			return i;
+		}
+		main() {}
+	`)
+	whileCount := 0
+	for _, r := range regions {
+		if r.Kind == "while.body" {
+			whileCount++
+		}
+	}
+	if whileCount != 1 {
+		t.Errorf("expected 1 while.body region, got %d", whileCount)
+	}
+}
+
+func TestCoverageDisabledByDefault(t *testing.T) {
+	ir := generateIR(t, `
+		foo() int { return 42; }
+		main() {}
+	`)
+	if strings.Contains(ir, "__promise_cov_") {
+		t.Error("coverage globals should not be emitted when coverage is disabled")
+	}
+}
+
+func TestCoverageMethodEntry(t *testing.T) {
+	_, regions := generateIRWithCoverage(t, `
+		type Counter {
+			int value;
+			increment(~this) {
+				this.value++;
+			}
+			get_value(this) int {
+				return this.value;
+			}
+		}
+		main() {}
+	`)
+	methodCount := 0
+	for _, r := range regions {
+		if r.Kind == "method" {
+			methodCount++
+		}
+	}
+	if methodCount < 2 {
+		t.Errorf("expected at least 2 method coverage regions, got %d", methodCount)
+	}
+}
+
+func TestCoverageTestMainEmitsMarkers(t *testing.T) {
+	file, info := parseWithStd(t, `
+		foo() int { return 42; }
+		test_foo() `+"`test"+` {
+			int x = foo();
+		}
+	`)
+	result := CompileWithOptions(file, info, "", &CompileOptions{CoverageEnabled: true})
+	result.GenerateTestMain(info.Tests, nil)
+	ir := result.Module.String()
+
+	// GenerateTestMain should emit coverage output markers
+	assertContains(t, ir, "===PROMISE_COV===")
+	assertContains(t, ir, "===END_COV===")
+	// Should contain the coverage counter global
+	assertContains(t, ir, "@__promise_cov_0")
+	// Should have exactly 1 coverage region (foo, not test_foo)
+	if len(result.CoverageRegions) != 1 {
+		t.Errorf("expected 1 coverage region, got %d: %+v", len(result.CoverageRegions), result.CoverageRegions)
+	}
+}
+
+func TestCoverageClassicForLoop(t *testing.T) {
+	_, regions := generateIRWithCoverage(t, `
+		sum(int n) int {
+			int total = 0;
+			for int i = 0; i < n; i++ {
+				total += i;
+			}
+			return total;
+		}
+		main() {}
+	`)
+	forCount := 0
+	for _, r := range regions {
+		if r.Kind == "for.body" {
+			forCount++
+		}
+	}
+	if forCount != 1 {
+		t.Errorf("expected 1 for.body region, got %d", forCount)
+	}
+}
+
+func TestCoverageInfiniteLoop(t *testing.T) {
+	_, regions := generateIRWithCoverage(t, `
+		run() int {
+			int i = 0;
+			for {
+				i++;
+				if i >= 5 {
+					break;
+				}
+			}
+			return i;
+		}
+		main() {}
+	`)
+	loopCount := 0
+	for _, r := range regions {
+		if r.Kind == "loop.body" {
+			loopCount++
+		}
+	}
+	if loopCount != 1 {
+		t.Errorf("expected 1 loop.body region, got %d", loopCount)
+	}
+}
+
+func TestCoverageEnumMatchArms(t *testing.T) {
+	_, regions := generateIRWithCoverage(t, `
+		enum Color { Red, Green, Blue }
+		name(Color c) string {
+			return match c {
+				Color.Red => "red",
+				Color.Green => "green",
+				Color.Blue => "blue",
+			};
+		}
+		main() {}
+	`)
+	armCount := 0
+	for _, r := range regions {
+		if r.Kind == "match.arm" {
+			armCount++
+		}
+	}
+	if armCount != 3 {
+		t.Errorf("expected 3 match.arm regions, got %d", armCount)
+	}
+}

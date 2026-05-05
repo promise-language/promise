@@ -1395,6 +1395,12 @@ func (c *Compiler) genIfStmt(s *ast.IfStmt) {
 
 	// Then branch
 	c.block = thenBlock
+	if c.shouldInstrument() {
+		pos := s.Body.Pos()
+		end := s.Body.End()
+		idx := c.addCoverageRegion(pos.File, pos.Line, end.Line, c.currentCoverageFuncName(), "if.then")
+		c.emitCoverageIncrement(idx)
+	}
 	c.genBlock(s.Body)
 	if c.block.Term == nil {
 		c.block.NewBr(mergeBlock)
@@ -1403,6 +1409,12 @@ func (c *Compiler) genIfStmt(s *ast.IfStmt) {
 	// Else branch
 	if s.Else != nil {
 		c.block = elseBlock
+		if c.shouldInstrument() {
+			pos := s.Else.Pos()
+			end := s.Else.End()
+			idx := c.addCoverageRegion(pos.File, pos.Line, end.Line, c.currentCoverageFuncName(), "if.else")
+			c.emitCoverageIncrement(idx)
+		}
 		c.genStmt(s.Else)
 		if c.block.Term == nil {
 			c.block.NewBr(mergeBlock)
@@ -1956,6 +1968,12 @@ func (c *Compiler) genWhileStmt(s *ast.WhileStmt) {
 	c.loopScopeDepth = len(c.scopeBindings)
 
 	c.block = bodyBlock
+	if c.shouldInstrument() {
+		pos := s.Body.Pos()
+		end := s.Body.End()
+		idx := c.addCoverageRegion(pos.File, pos.Line, end.Line, c.currentCoverageFuncName(), "while.body")
+		c.emitCoverageIncrement(idx)
+	}
 	c.genBlock(s.Body)
 	if c.block.Term == nil {
 		c.block.NewBr(headerBlock)
@@ -2369,6 +2387,12 @@ func (c *Compiler) genClassicForStmt(s *ast.ClassicForStmt) {
 	c.loopScopeDepth = len(c.scopeBindings)
 
 	c.block = bodyBlock
+	if c.shouldInstrument() {
+		pos := s.Body.Pos()
+		end := s.Body.End()
+		idx := c.addCoverageRegion(pos.File, pos.Line, end.Line, c.currentCoverageFuncName(), "for.body")
+		c.emitCoverageIncrement(idx)
+	}
 	c.genBlock(s.Body)
 	if c.block.Term == nil {
 		c.block.NewBr(updateBlock)
@@ -2424,6 +2448,12 @@ func (c *Compiler) genInfiniteLoop(s *ast.InfiniteLoop) {
 	c.loopScopeDepth = len(c.scopeBindings)
 
 	c.block = bodyBlock
+	if c.shouldInstrument() {
+		pos := s.Body.Pos()
+		end := s.Body.End()
+		idx := c.addCoverageRegion(pos.File, pos.Line, end.Line, c.currentCoverageFuncName(), "loop.body")
+		c.emitCoverageIncrement(idx)
+	}
 	c.genBlock(s.Body)
 	if c.block != nil && c.block.Term == nil {
 		c.emitYieldCheck()

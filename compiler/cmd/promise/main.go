@@ -389,6 +389,7 @@ func runTest(args []string) {
 	var stressDuration time.Duration // 0 = unlimited
 	var targetTriple string          // empty = host target
 	var outputFile string            // stress report output file
+	var coverageMode bool            // T0030: coverage instrumentation
 	var remaining []string
 	for i := 0; i < len(args); i++ {
 		if args[i] == "-timeout" && i+1 < len(args) {
@@ -451,13 +452,15 @@ func runTest(args []string) {
 		} else if args[i] == "-output" && i+1 < len(args) {
 			outputFile = args[i+1]
 			i++
+		} else if args[i] == "-coverage" {
+			coverageMode = true
 		} else {
 			remaining = append(remaining, args[i])
 		}
 	}
 
 	if len(remaining) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: promise test [-timeout duration] [-timeout-scale N] [-timeout-min duration] [-timeout-max duration] [-parallel N] [-stress [N|duration]] [-output file] <file.pr | dir | dir/...> ...")
+		fmt.Fprintln(os.Stderr, "usage: promise test [-timeout duration] [-timeout-scale N] [-timeout-min duration] [-timeout-max duration] [-parallel N] [-stress [N|duration]] [-output file] [-coverage] <file.pr | dir | dir/...> ...")
 		os.Exit(1)
 	}
 
@@ -503,15 +506,19 @@ func runTest(args []string) {
 	// Single file: use simple runner (no directory summary).
 	// Multiple files: combined summary at the end.
 	if len(allFiles) == 1 {
-		runTestFile(allFiles[0], cfg, targetTriple)
+		runTestFile(allFiles[0], cfg, targetTriple, coverageMode)
 	} else {
+		if coverageMode {
+			fmt.Fprintln(os.Stderr, "error: -coverage is only supported for single file tests")
+			os.Exit(1)
+		}
 		runTestFiles(allFiles, cfg, targetTriple, parallel)
 	}
 }
 
 // runTestFile runs test functions from a single .pr file.
 // targetTriple overrides the compilation target (empty = host).
-func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string) {
+func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string, coverageMode bool) {
 	start := time.Now()
 	// For cache-hit paths where we can't compute per-test timeouts,
 	// use the CLI default as the process-level timeout.
@@ -528,6 +535,26 @@ func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string) {
 	target := targetTriple
 	if target == "" {
 		target = codegen.HostTargetTriple()
+	}
+
+	// Coverage mode: skip cache (instrumented IR differs), compile with coverage,
+	// and parse coverage data from output (T0030).
+	if coverageMode {
+		file, info := compileFrontendForTarget(filename, targetTriple)
+		if len(info.Tests) == 0 {
+			fmt.Println("no tests found")
+			return
+		}
+		testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
+		binaryPath, regions := compileTestBinaryWithCoverage(file, info, targetTriple, filename, testTimeouts)
+		defer os.Remove(binaryPath)
+		var totalNs int64
+		for _, ns := range testTimeouts {
+			totalNs += ns
+		}
+		processTimeout := time.Duration(totalNs) + 30*time.Second
+		runTestBinaryWithCoverage(binaryPath, processTimeout, start, targetTriple, regions)
+		return
 	}
 
 	cacheKey, cacheable := computeTestFileCacheKey(filename, target)
@@ -742,6 +769,215 @@ func runTestBinary(binaryPath string, timeout time.Duration, start time.Time, ta
 		fmt.Fprintf(os.Stderr, "error running tests: %v\n", runErr)
 		os.Exit(1)
 	}
+}
+
+// compileTestBinaryWithCoverage compiles a test binary with coverage instrumentation enabled.
+// Returns the binary path and the coverage region metadata for report formatting.
+func compileTestBinaryWithCoverage(file *ast.File, info *sema.Info, targetTriple, sourceFile string, testTimeouts map[string]int64) (string, []codegen.CoverageRegion) {
+	target := targetTriple
+	if target == "" {
+		target = codegen.HostTargetTriple()
+	}
+	result := codegen.CompileWithOptions(file, info, target, &codegen.CompileOptions{
+		CachedInstances: lookupCachedInstances(info, target),
+		CoverageEnabled: true,
+	})
+	result.GenerateTestMain(info.Tests, testTimeouts)
+
+	ext := binaryExtension(target)
+	tmpOutput, err := os.CreateTemp("", "promise-test-cov-*"+ext)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error creating temp file: %v\n", err)
+		os.Exit(1)
+	}
+	tmpOutput.Close()
+	compileAndLink(result, tmpOutput.Name(), target, sourceFile)
+	return tmpOutput.Name(), result.CoverageRegions
+}
+
+// runTestBinaryWithCoverage executes an instrumented test binary, prints test
+// results, extracts coverage counter data, and formats a coverage report.
+func runTestBinaryWithCoverage(binaryPath string, timeout time.Duration, start time.Time, targetTriple string, regions []codegen.CoverageRegion) {
+	target := targetTriple
+	if target == "" {
+		target = codegen.HostTargetTriple()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	var cmd *exec.Cmd
+	if isWasmTarget(target) {
+		cmd = exec.CommandContext(ctx, "wasmtime", binaryPath)
+	} else {
+		cmd = exec.CommandContext(ctx, binaryPath)
+	}
+	output, runErr := cmd.CombinedOutput()
+	elapsed := time.Since(start)
+
+	if ctx.Err() == context.DeadlineExceeded {
+		printTestOutput(string(output))
+		fmt.Fprintf(os.Stderr, "TIMEOUT: tests exceeded %s timeout\n", timeout)
+		os.Exit(1)
+	}
+
+	// Split output into test output and coverage data
+	fullOutput := string(output)
+	testOutput, counters := extractCoverageData(fullOutput)
+
+	// Print test output (same formatting as runTestBinary)
+	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?`)
+	for _, line := range strings.Split(strings.TrimSpace(testOutput), "\n") {
+		if line == "" {
+			continue
+		}
+		if m := summaryRe.FindStringSubmatch(line); m != nil {
+			fmt.Println()
+			if m[3] != "" {
+				fmt.Printf("%s passed, %s failed, %s skipped (%.3fs)\n", m[1], m[2], m[3], elapsed.Seconds())
+			} else {
+				fmt.Printf("%s passed, %s failed (%.3fs)\n", m[1], m[2], elapsed.Seconds())
+			}
+		} else {
+			fmt.Println(line)
+		}
+	}
+
+	// Print coverage report
+	if len(regions) > 0 && len(counters) == len(regions) {
+		printCoverageReport(regions, counters)
+	}
+
+	if runErr != nil {
+		if exitErr, ok := runErr.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		}
+		fmt.Fprintf(os.Stderr, "error running tests: %v\n", runErr)
+		os.Exit(1)
+	}
+}
+
+// extractCoverageData splits binary output into test output and coverage counter values.
+// Coverage data is delimited by ===PROMISE_COV=== and ===END_COV=== markers.
+func extractCoverageData(output string) (testOutput string, counters []int64) {
+	startMarker := "===PROMISE_COV===\n"
+	endMarker := "===END_COV===\n"
+
+	startIdx := strings.Index(output, startMarker)
+	if startIdx < 0 {
+		return output, nil
+	}
+
+	testOutput = output[:startIdx]
+	covSection := output[startIdx+len(startMarker):]
+
+	endIdx := strings.Index(covSection, endMarker)
+	if endIdx < 0 {
+		return testOutput, nil
+	}
+	covSection = covSection[:endIdx]
+
+	for _, line := range strings.Split(strings.TrimSpace(covSection), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		val, err := strconv.ParseInt(line, 10, 64)
+		if err != nil {
+			continue
+		}
+		counters = append(counters, val)
+	}
+	return testOutput, counters
+}
+
+// printCoverageReport formats and prints a coverage summary from regions and counters.
+func printCoverageReport(regions []codegen.CoverageRegion, counters []int64) {
+	fmt.Println()
+	fmt.Println("=== Coverage ===")
+
+	// Group regions by file
+	type fileStats struct {
+		total   int
+		covered int
+	}
+	fileMap := make(map[string]*fileStats)
+	var fileOrder []string
+
+	// Also collect per-function stats
+	type funcStats struct {
+		total   int
+		covered int
+	}
+	funcMap := make(map[string]*funcStats)
+	var funcOrder []string
+
+	totalRegions := 0
+	coveredRegions := 0
+
+	for i, region := range regions {
+		count := counters[i]
+		totalRegions++
+		if count > 0 {
+			coveredRegions++
+		}
+
+		// File stats
+		fs, ok := fileMap[region.File]
+		if !ok {
+			fs = &fileStats{}
+			fileMap[region.File] = fs
+			fileOrder = append(fileOrder, region.File)
+		}
+		fs.total++
+		if count > 0 {
+			fs.covered++
+		}
+
+		// Function stats (only for function/method entries)
+		if region.Kind == "function" || region.Kind == "method" {
+			key := region.FuncName
+			fns, ok := funcMap[key]
+			if !ok {
+				fns = &funcStats{}
+				funcMap[key] = fns
+				funcOrder = append(funcOrder, key)
+			}
+			fns.total++
+			if count > 0 {
+				fns.covered++
+			}
+		}
+	}
+
+	// Print per-file summary
+	for _, file := range fileOrder {
+		fs := fileMap[file]
+		pct := 0.0
+		if fs.total > 0 {
+			pct = float64(fs.covered) / float64(fs.total) * 100
+		}
+		fmt.Printf("  %-40s %.1f%%\t(%d/%d blocks)\n", file, pct, fs.covered, fs.total)
+	}
+
+	// Print per-function detail
+	if len(funcOrder) > 0 {
+		fmt.Println()
+		for _, name := range funcOrder {
+			fns := funcMap[name]
+			hit := "covered"
+			if fns.covered == 0 {
+				hit = "not covered"
+			}
+			fmt.Printf("  %-40s %s\n", name, hit)
+		}
+	}
+
+	// Print total
+	totalPct := 0.0
+	if totalRegions > 0 {
+		totalPct = float64(coveredRegions) / float64(totalRegions) * 100
+	}
+	fmt.Printf("\ntotal: %.1f%% (%d/%d blocks)\n", totalPct, coveredRegions, totalRegions)
 }
 
 // runE2ETest compiles and runs a .pr file with `test(expected="..."), comparing output.

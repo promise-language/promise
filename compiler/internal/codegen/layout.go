@@ -84,11 +84,12 @@ type ExternFunc struct {
 
 // CompileResult bundles the output of compilation for downstream consumers.
 type CompileResult struct {
-	Module      *ir.Module
-	Layouts     map[*types.Named]*TypeDeclLayout
-	EnumLayouts map[*types.Enum]*TypeDeclLayout
-	Externs     []*ExternFunc
-	compiler    *Compiler // internal reference for GenerateTestMain
+	Module          *ir.Module
+	Layouts         map[*types.Named]*TypeDeclLayout
+	EnumLayouts     map[*types.Enum]*TypeDeclLayout
+	Externs         []*ExternFunc
+	CoverageRegions []CoverageRegion // coverage region metadata (populated when coverage is enabled)
+	compiler        *Compiler        // internal reference for GenerateTestMain
 }
 
 // SemaInfo returns the main sema.Info used for this compilation.

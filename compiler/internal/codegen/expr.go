@@ -3275,6 +3275,19 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *typ
 
 		// Generate arm body
 		c.block = armBlock
+		if c.shouldInstrument() {
+			pos := arm.Pattern.Pos()
+			var endPos int
+			if arm.Block != nil {
+				endPos = arm.Block.End().Line
+			} else if arm.Body != nil {
+				endPos = arm.Body.End().Line
+			} else {
+				endPos = pos.Line
+			}
+			idx := c.addCoverageRegion(pos.File, pos.Line, endPos, c.currentCoverageFuncName(), "match.arm")
+			c.emitCoverageIncrement(idx)
+		}
 		c.bindMatchPattern(arm.Pattern, subject, enum, layout)
 
 		var armVal value.Value

@@ -83,6 +83,10 @@ bin/promise test -stress 100 tests/concurrency/...       # run 100 iterations
 bin/promise test -stress 30s tests/concurrency/...       # run for 30 seconds
 bin/promise test -timeout 10s -stress 50 tests/...       # per-run timeout + stress
 
+# Coverage (T0030)
+bin/promise test -coverage file.pr                       # run tests with coverage report
+bin/promise test -coverage -timeout 30s file.pr          # coverage with custom timeout
+
 # Cache diagnostics
 PROMISE_CACHE_DEBUG=1 bin/promise test tests/...         # show cache HIT/MISS/SKIP on stderr
 ```

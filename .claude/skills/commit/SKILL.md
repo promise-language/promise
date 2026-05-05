@@ -7,10 +7,8 @@ Verify, commit, sync with remote, and push the current changes.
 
 ## Steps
 
-1. **Update docs and tracker.**
+1. **Update docs.**
    - If the changes affect documented behavior, update relevant docs (`docs/`, CLAUDE.md, module `doc` annotations).
-   - Update any related tracker entries (`mcp__tracker__update`) — mark bugs as done, add notes, etc.
-   - If you noticed any issues during the session that haven't been filed, file them now with `mcp__tracker__create`.
 
 2. **Pre-commit verification.**
    - Run `bin/verify.sh --local --wasm` from the repo root.
@@ -29,6 +27,10 @@ Verify, commit, sync with remote, and push the current changes.
    - Run `bin/verify.sh --local --wasm` again to confirm nothing broke during rebase.
    - If it fails, fix and re-run.
 
-6. **Push.**
+6. **Update tracker.**
+   - Update any related tracker entries (`mcp__tracker__update`) — mark bugs as done, add notes describing what was done.
+   - If you noticed any issues during the session that haven't been filed, file them now with `mcp__tracker__create`.
+
+7. **Push.**
    - `git push` (or `git push -u origin <branch>` if on a new branch).
    - Never force-push to master without explicit approval.

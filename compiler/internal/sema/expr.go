@@ -2183,6 +2183,9 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr) types.Type {
 			armType = c.checkExpr(arm.Body)
 		} else if arm.Block != nil {
 			c.checkBlock(arm.Block)
+			// B0126: extract block result type from the last expression
+			// statement, so match expressions with block arms are correctly typed.
+			armType = c.blockValueType(arm.Block)
 		}
 
 		c.closeScope()
@@ -2196,6 +2199,24 @@ func (c *Checker) checkMatchExpr(e *ast.MatchExpr) types.Type {
 	c.checkMatchExhaustiveness(e, subjectType)
 
 	return resultType
+}
+
+// blockValueType returns the type of a block's result value — the type of the
+// last expression statement. Returns nil if the block doesn't end with an
+// expression. Handles IfStmt as the last statement by recursing into its
+// then body.
+func (c *Checker) blockValueType(block *ast.Block) types.Type {
+	if block == nil || len(block.Stmts) == 0 {
+		return nil
+	}
+	last := block.Stmts[len(block.Stmts)-1]
+	if es, ok := last.(*ast.ExprStmt); ok {
+		return c.info.Types[es.Expr]
+	}
+	if ifS, ok := last.(*ast.IfStmt); ok && ifS.Else != nil {
+		return c.blockValueType(ifS.Body)
+	}
+	return nil
 }
 
 func (c *Checker) checkMatchPattern(pat ast.MatchPattern, subjectType types.Type) {

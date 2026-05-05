@@ -60,6 +60,14 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 				}
 				break
 			}
+			// B0126: Handle if/else as the last statement in a block that
+			// produces a value. The parser emits IfStmt (not IfExpr) in
+			// statement position, but we need to capture the value from
+			// both branches when the block is used as an expression.
+			if ifS, ok := stmt.(*ast.IfStmt); ok {
+				result = c.genIfStmtValue(ifS)
+				break
+			}
 		}
 		c.genStmt(stmt)
 	}
@@ -1402,6 +1410,75 @@ func (c *Compiler) genIfStmt(s *ast.IfStmt) {
 	}
 
 	c.block = mergeBlock
+}
+
+// genIfStmtValue generates an if/else statement in value-producing position
+// (e.g., as the last statement in a block body of a match arm). Returns the
+// phi of both branch values, or nil if the if/else cannot produce a value
+// (no else, if-unwrap, optional narrowing, etc.). B0126.
+func (c *Compiler) genIfStmtValue(s *ast.IfStmt) value.Value {
+	// Only handle simple if/else — not if-unwrap, narrowing, or if without else.
+	if s.Binding != "" || s.Else == nil {
+		c.genIfStmt(s)
+		return nil
+	}
+	if c.info.OptionalNarrowings[s] != nil || c.info.IsDestructureNarrowings[s] != nil {
+		c.genIfStmt(s)
+		return nil
+	}
+
+	cond := c.genExpr(s.Cond)
+
+	thenBlock := c.newBlock("if.then")
+	elseBlock := c.newBlock("if.else")
+	mergeBlock := c.newBlock("if.end")
+
+	c.block.NewCondBr(cond, thenBlock, elseBlock)
+
+	// Then branch — capture value
+	c.block = thenBlock
+	thenVal := c.genBlockValue(s.Body)
+	thenEnd := c.block
+	if c.block.Term == nil {
+		c.block.NewBr(mergeBlock)
+	}
+
+	// Else branch — capture value
+	c.block = elseBlock
+	var elseVal value.Value
+	switch e := s.Else.(type) {
+	case *ast.Block:
+		elseVal = c.genBlockValue(e)
+	case *ast.IfStmt:
+		elseVal = c.genIfStmtValue(e)
+	default:
+		c.genStmt(s.Else)
+	}
+	elseEnd := c.block
+	if c.block.Term == nil {
+		c.block.NewBr(mergeBlock)
+	}
+
+	c.block = mergeBlock
+
+	// Build phi from branches that reach mergeBlock with values.
+	// One branch may return/diverge, leaving only the other to contribute.
+	var incomings []*ir.Incoming
+	if thenVal != nil {
+		if br, ok := thenEnd.Term.(*ir.TermBr); ok && br.Target == mergeBlock {
+			incomings = append(incomings, &ir.Incoming{X: thenVal, Pred: thenEnd})
+		}
+	}
+	if elseVal != nil {
+		if br, ok := elseEnd.Term.(*ir.TermBr); ok && br.Target == mergeBlock {
+			incomings = append(incomings, &ir.Incoming{X: elseVal, Pred: elseEnd})
+		}
+	}
+	if len(incomings) > 0 {
+		return mergeBlock.NewPhi(incomings...)
+	}
+
+	return nil
 }
 
 // genIfNarrowStmt handles if-statements that narrow optional variables.

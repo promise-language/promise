@@ -11577,6 +11577,53 @@ func TestMatchAllVoidArms(t *testing.T) {
 	assertContains(t, ir, "match.end")
 }
 
+// B0126: match with block body containing if/else as expression.
+// genBlockValue must capture the if/else result via genIfStmtValue.
+func TestMatchBlockIfElseExpr(t *testing.T) {
+	ir := generateIR(t, `
+		classify(int n) string {
+			return match n {
+				3 => "small",
+				_ => {
+					if n < 100 {
+						"medium";
+					} else {
+						"large";
+					}
+				},
+			};
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "phi")
+	assertContains(t, ir, "match.end")
+	assertContains(t, ir, "if.then")
+	assertContains(t, ir, "if.end")
+}
+
+// B0126: single wildcard arm with block body containing if/else-if chain.
+func TestMatchBlockIfElseIfChain(t *testing.T) {
+	ir := generateIR(t, `
+		classify(int n) string {
+			return match n {
+				_ => {
+					if n < 10 {
+						"tiny";
+					} else if n < 100 {
+						"small";
+					} else {
+						"big";
+					}
+				},
+			};
+		}
+		main() { }
+	`)
+	assertContains(t, ir, "phi")
+	assertContains(t, ir, "if.then")
+	assertContains(t, ir, "if.end")
+}
+
 func TestOptionalRecoveryCodegen(t *testing.T) {
 	// Optional recovery: non-recovering handler wraps result as T?
 	ir := generateIR(t, `

@@ -524,3 +524,85 @@ test_match_true_with_block_arm() `test {
     },
   };
 }
+
+// --- B0126: match block body with if/else as expression ---
+
+test_match_block_if_else() `test {
+  int n = 50;
+  string label = match n {
+    3 => "small",
+    _ => {
+      if n < 100 {
+        "medium";
+      } else {
+        "large";
+      }
+    },
+  };
+  assert(label == "medium", "block if/else then branch");
+}
+
+test_match_block_if_else_other_branch() `test {
+  int n = 200;
+  string label = match n {
+    3 => "small",
+    _ => {
+      if n < 100 {
+        "medium";
+      } else {
+        "large";
+      }
+    },
+  };
+  assert(label == "large", "block if/else else branch");
+}
+
+test_match_block_if_elseif_else() `test {
+  int n = 500;
+  string label = match n {
+    _ => {
+      if n < 10 {
+        "tiny";
+      } else if n < 100 {
+        "small";
+      } else if n < 1000 {
+        "medium";
+      } else {
+        "large";
+      }
+    },
+  };
+  assert(label == "medium", "block else-if chain");
+}
+
+test_match_block_if_else_int() `test {
+  int x = 7;
+  int result = match x {
+    0 => 0,
+    _ => {
+      if x > 5 {
+        x * 2;
+      } else {
+        x + 1;
+      }
+    },
+  };
+  assert(result == 14, "block if/else producing int");
+}
+
+test_enum_match_block_if_else() `test {
+  Direction d = Direction.South;
+  string label = match d {
+    Direction.North => "north",
+    Direction.South => {
+      int flag = 1;
+      if flag == 1 {
+        "south-one";
+      } else {
+        "south-other";
+      }
+    },
+    _ => "other",
+  };
+  assert(label == "south-one", "enum match block if/else");
+}

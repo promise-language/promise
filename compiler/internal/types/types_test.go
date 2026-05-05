@@ -797,7 +797,7 @@ func TestUniverse(t *testing.T) {
 		"uint", "u8", "u16", "u32", "u64",
 		"f32", "f64",
 		"bool", "char", "string",
-		"void", "none", "error",
+		"void", "none",
 	}
 
 	for _, name := range builtins {
@@ -832,7 +832,10 @@ func TestUniverse(t *testing.T) {
 		assertEqual(t, TypF64.String(), "f64")
 		assertEqual(t, TypVoid.String(), "void")
 		assertEqual(t, TypNone.String(), "none")
-		assertEqual(t, TypError.String(), "error")
+		// TypError is nil at init — populated by sema from std module
+		if TypError != nil {
+			t.Errorf("TypError should be nil at init, got %v", TypError)
+		}
 	})
 
 	t.Run("no_basic_type", func(t *testing.T) {

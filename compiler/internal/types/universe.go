@@ -3,8 +3,8 @@ package types
 // Universe is the outermost scope containing all built-in types.
 var Universe *Scope
 
-// Predeclared Named types for built-in primitives.
-// These are empty stubs — sema populates them with fields/methods from stdlib.
+// Predeclared Named types for built-in primitives (native types).
+// These are empty stubs in the Universe scope — sema populates them with fields/methods from stdlib.
 var (
 	TypInt    *Named
 	TypI8     *Named
@@ -23,16 +23,23 @@ var (
 	TypString *Named
 	TypVoid   *Named
 	TypNone   *Named
-	TypError  *Named
 
-	// Generic stdlib types (PascalCase canonical; lowercase sugar aliases in universe)
+	// Generic native types (in Universe scope)
 	TypTask    *Named // Task[T] — concurrency handle from go expressions
 	TypChannel *Named // Channel[T] — channel type
-	TypIter    *Named // Iterator[T] — synchronous iterator interface
-	TypStream  *Named // Stream[T] — asynchronous iterator interface
 	TypVector  *Named // Vector[T] — dynamic array
-	TypMap     *Named // Map[K, V] — map container type
-	TypRange   *Named // Range[T] — generic range from .. and ..= operators
+)
+
+// Non-native stdlib types — NOT in the Universe scope. These are regular types
+// declared by the std module. The global pointers are populated by sema's
+// populateUniverseTypes() hook after std's declare pass, providing identity
+// for compiler features (error handling, for-in, range operators, map sugar).
+var (
+	TypError  *Named // error — base error type for failable functions
+	TypIter   *Named // Iterator[T] — synchronous iterator interface
+	TypStream *Named // Stream[T] — asynchronous iterator interface
+	TypMap    *Named // Map[K, V] — map container type
+	TypRange  *Named // Range[T] — generic range from .. and ..= operators
 )
 
 func init() {
@@ -74,27 +81,22 @@ func init() {
 	TypString = defNamed("string")
 	TypVoid = defNamed("void")
 	TypNone = defNamed("none")
-	TypError = defNamed("error")
 
-	// Generic stdlib types — PascalCase canonical names
+	// Generic native types
 	TypTask = defGeneric("Task", "T")
 	TypChannel = defGeneric("Channel", "T")
-	TypIter = defGeneric("Iterator", "T")
-	TypStream = defGeneric("Stream", "T")
 	TypVector = defGeneric("Vector", "T")
-	TypMap = defGeneric("Map", "K", "V")
 
-	TypRange = defGeneric("Range", "T")
-
-	// Lowercase sugar aliases — same singletons, accessible by old names
+	// Lowercase sugar aliases for native generic types
 	defAlias := func(alias string, target *Named) {
 		tn := NewTypeName(Pos{}, alias, target.Obj().Type())
 		Universe.Insert(tn)
 	}
 	defAlias("task", TypTask)
 	defAlias("channel", TypChannel)
-	defAlias("iter", TypIter)
-	defAlias("stream", TypStream)
-	defAlias("map", TypMap)
-	// Note: no lowercase 'range' alias — Range is generic, requires type arg
+
+	// Non-native types (error, Map, Range, Iterator, Stream) and their aliases
+	// (map, iter, stream) are NOT registered here. They are regular types declared
+	// by the std module and populated via sema.populateUniverseTypes() after
+	// std's declare pass.
 }

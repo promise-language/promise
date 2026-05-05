@@ -44,7 +44,7 @@ func getSemaStdScope() *types.Scope {
 		if len(buildErrs) > 0 {
 			panic("std AST build errors: " + buildErrs[0].Error())
 		}
-		stdInfo, _ := CheckForStdModule(stdFile, HostTargetInfo())
+		stdInfo, _ := CheckWithTarget(stdFile, nil, HostTargetInfo())
 		semaStdScope = ExportedScope(stdInfo, stdFile)
 	})
 	return semaStdScope
@@ -5825,7 +5825,7 @@ func TestNativeTypeMissingReturnDetected(t *testing.T) {
 
 // --- Stage 8f: Builtin Validation Tests ---
 
-// checkWithRawStd parses stdSrc as the std module using CheckForStdModule,
+// checkWithRawStd parses stdSrc as the std module using CheckWithTarget,
 // and userSrc as user code. Used for testing validateBuiltins() error detection.
 func checkWithRawStd(t *testing.T, stdSrc, userSrc string) (*Info, []error) {
 	t.Helper()
@@ -5840,9 +5840,9 @@ func checkWithRawStd(t *testing.T, stdSrc, userSrc string) (*Info, []error) {
 	if len(errs) > 0 {
 		t.Fatalf("std AST build errors: %v", errs)
 	}
-	stdInfo, stdErrs := CheckForStdModule(stdFile, HostTargetInfo())
+	stdInfo, stdErrs := CheckWithTarget(stdFile, nil, HostTargetInfo())
 
-	// Invalidate cached std scope — CheckForStdModule reset native type
+	// Invalidate cached std scope — CheckWithTarget reset native type
 	// members, so the cached scope's types are no longer consistent (B0101).
 	semaStdOnce = sync.Once{}
 	semaStdScope = nil
@@ -5875,7 +5875,7 @@ func TestValidateAllPresent(t *testing.T) {
 }
 
 // Note: testing validateBuiltins() for MISSING operators is not feasible in unit tests
-// because universe types (TypInt, TypBool, etc.) are global singletons. CheckForStdModule
+// because universe types (TypInt, TypBool, etc.) are global singletons. CheckWithTarget
 // resets their members each run (B0101 fix), so an incomplete std would leave them in
 // a broken state. checkWithRawStd invalidates the cached scope, but testing partial stds
 // is fragile. Validation correctness is ensured by:
@@ -5883,7 +5883,7 @@ func TestValidateAllPresent(t *testing.T) {
 // 2. E2E tests that compile with real std/ files
 // 3. The requireBinaryOp/requireUnaryOp/requireMethod/requireField helpers being trivial
 
-// --- B0101 regression: multiple CheckForStdModule calls must not corrupt types ---
+// --- B0101 regression: multiple CheckWithTarget calls must not corrupt types ---
 
 // freshStdSema parses and checks stdAll as the std module, returning the export scope.
 // Unlike getSemaStdScope(), this always runs fresh (no caching).
@@ -5900,7 +5900,7 @@ func freshStdSema(t *testing.T) *types.Scope {
 	if len(buildErrs) > 0 {
 		t.Fatalf("std AST build errors: %v", buildErrs)
 	}
-	stdInfo, stdErrs := CheckForStdModule(stdFile, HostTargetInfo())
+	stdInfo, stdErrs := CheckWithTarget(stdFile, nil, HostTargetInfo())
 
 	// Invalidate cached std scope — same as checkWithRawStd (B0101).
 	semaStdOnce = sync.Once{}
@@ -5933,7 +5933,7 @@ func checkWithFreshStd(t *testing.T, src string) (*Info, []error) {
 }
 
 func TestB0101_SecondSemaRunStructuralInterface(t *testing.T) {
-	// B0101: After two CheckForStdModule calls, native types must still satisfy
+	// B0101: After two CheckWithTarget calls, native types must still satisfy
 	// structural interfaces. The second call creates fresh Format/Writer objects;
 	// native type methods must reference these new objects, not stale ones.
 
@@ -5974,7 +5974,7 @@ func TestB0101_ThreeSemaRunsStable(t *testing.T) {
 }
 
 func TestB0101_NativeMethodSignatureFreshness(t *testing.T) {
-	// After two CheckForStdModule calls, verify that native type methods
+	// After two CheckWithTarget calls, verify that native type methods
 	// have signatures identical to what the structural interface expects.
 	// This checks the actual condition used by AssignableTo/Implements:
 	// types.Identical on parameter types (which unwraps MutRef/SharedRef
@@ -6057,7 +6057,7 @@ func TestB0101_CacheInvalidationAfterCheckWithRawStd(t *testing.T) {
 	// Prime the cache.
 	getSemaStdScope()
 
-	// Run checkWithRawStd — this calls CheckForStdModule and invalidates cache.
+	// Run checkWithRawStd — this calls CheckWithTarget and invalidates cache.
 	_, errs := checkWithRawStd(t, stdAll, `main() {}`)
 	expectNoErrors(t, errs)
 

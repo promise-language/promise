@@ -3822,14 +3822,9 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 	}
 
 	// Run sema on the module with its dependency scopes.
-	// The std module itself uses CheckForStdModule so universe-type singletons are reused correctly.
 	var semaInfo *sema.Info
 	var errs []error
-	if modCfg.Name == "std" {
-		semaInfo, errs = sema.CheckForStdModule(merged, ml.target)
-	} else {
-		semaInfo, errs = sema.CheckWithTarget(merged, depScopes, ml.target)
-	}
+	semaInfo, errs = sema.CheckWithTarget(merged, depScopes, ml.target)
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("errors in module '%s': %v", modPath, errs[0])
 	}

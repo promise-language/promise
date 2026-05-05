@@ -7,32 +7,32 @@ import (
 
 // Checker performs semantic analysis on a parsed AST file.
 type Checker struct {
-	file              *ast.File
-	info              *Info
-	errors            []error
-	compilingStd      bool                    // true when compiling the std module itself
-	globScope         *types.Scope            // glob-import scope (child of Universe, parent of fileScope)
-	fileScope         *types.Scope            // file-level scope (child of globScope, holds user declarations)
-	scope             *types.Scope            // current scope during traversal
-	curFunc           *types.Signature        // current function being checked (for return/raise)
-	curType           *types.Named            // current type being defined/checked (for Self resolution)
-	inNewBody         bool                    // true when checking a new() constructor body
-	inFactoryBody     bool                    // true when checking a `factory method body
-	factoryLocals     map[string]bool         // variables initialized from constructor calls in factory body
-	inLoop            int                     // nesting depth of loop constructs
-	lambdaDepth       int                     // nesting depth of lambdas (0 = not in lambda)
-	lambdaCaptures    map[string]*CapturedVar // current lambda's captured vars (by name)
-	lambdaScope       *types.Scope            // scope at lambda definition site (capture boundary)
-	lambdaMove        bool                    // true if current lambda uses `move` keyword
-	typeHint          types.Type              // expected type for numeric literal adaptation (propagated through arithmetic)
-	inUnaryNeg        bool                    // true when checking operand of unary negation (for signed suffix range check)
-	inGenerator       bool                    // true when checking a generator function body
-	generatorElemType types.Type              // T from stream[T] or Iterator[T] return type
-	yieldFound        bool                    // true if at least one yield seen in current generator func
-	modules           []*types.Module         // all modules from use declarations
-	moduleScopes      map[string]*types.Scope // pre-loaded module scopes (catalog name or path → scope)
-	target            TargetInfo              // compile target for `target(cond)` filtering (zero = no filtering)
-	pendingNarrowings []NarrowedVar           // post-divergence narrowings to apply before next statement
+	file               *ast.File
+	info               *Info
+	errors             []error
+	isUniverseProvider bool                    // auto-detected: true when this file provides universe type implementations (std module)
+	globScope          *types.Scope            // glob-import scope (child of Universe, parent of fileScope)
+	fileScope          *types.Scope            // file-level scope (child of globScope, holds user declarations)
+	scope              *types.Scope            // current scope during traversal
+	curFunc            *types.Signature        // current function being checked (for return/raise)
+	curType            *types.Named            // current type being defined/checked (for Self resolution)
+	inNewBody          bool                    // true when checking a new() constructor body
+	inFactoryBody      bool                    // true when checking a `factory method body
+	factoryLocals      map[string]bool         // variables initialized from constructor calls in factory body
+	inLoop             int                     // nesting depth of loop constructs
+	lambdaDepth        int                     // nesting depth of lambdas (0 = not in lambda)
+	lambdaCaptures     map[string]*CapturedVar // current lambda's captured vars (by name)
+	lambdaScope        *types.Scope            // scope at lambda definition site (capture boundary)
+	lambdaMove         bool                    // true if current lambda uses `move` keyword
+	typeHint           types.Type              // expected type for numeric literal adaptation (propagated through arithmetic)
+	inUnaryNeg         bool                    // true when checking operand of unary negation (for signed suffix range check)
+	inGenerator        bool                    // true when checking a generator function body
+	generatorElemType  types.Type              // T from stream[T] or Iterator[T] return type
+	yieldFound         bool                    // true if at least one yield seen in current generator func
+	modules            []*types.Module         // all modules from use declarations
+	moduleScopes       map[string]*types.Scope // pre-loaded module scopes (catalog name or path → scope)
+	target             TargetInfo              // compile target for `target(cond)` filtering (zero = no filtering)
+	pendingNarrowings  []NarrowedVar           // post-divergence narrowings to apply before next statement
 }
 
 // selfType returns the current type as Self would resolve:
@@ -112,60 +112,7 @@ func CheckWithTarget(file *ast.File, moduleScopes map[string]*types.Scope, targe
 	c.info.ScopeOrder = append(c.info.ScopeOrder, c.globScope)
 
 	c.declare(file)              // Pass 1: collect all declarations
-	c.define(file)               // Pass 2: resolve types, populate type structures
-	c.validateConstructors(file) // Validate: constructor inheritance (after all types defined)
-	c.validateBuiltins()         // Validate: .pr files declare all required operators/methods/fields
-	c.check(file)                // Pass 3: type-check function/method bodies
-	c.checkMissingReturn(file)   // Pass 4: verify non-void functions return
-
-	return c.info, c.errors
-}
-
-// CheckForStdModule performs semantic analysis on the std module itself.
-// It sets compilingStd=true so that universe-type singletons are reused correctly.
-func CheckForStdModule(file *ast.File, target TargetInfo) (*Info, []error) {
-	c := &Checker{
-		compilingStd: true,
-		moduleScopes: nil,
-		target:       target,
-		file:         file,
-		info: &Info{
-			Types:                    make(map[ast.Expr]types.Type),
-			Objects:                  make(map[*ast.IdentExpr]types.Object),
-			Scopes:                   make(map[ast.Node]*types.Scope),
-			FieldDefaults:            make(map[*types.Field]ast.Expr),
-			ParamDefaults:            make(map[*types.Param]ast.Expr),
-			LambdaCaptures:           make(map[*ast.LambdaExpr][]*CapturedVar),
-			OptionalNarrowings:       make(map[*ast.IfStmt]*OptionalNarrowing),
-			IsDestructureNarrowings:  make(map[*ast.IfStmt]*IsDestructureNarrowing),
-			IsPatternTypes:           make(map[ast.IsPattern]types.Type),
-			ErrorHandlerTypes:        make(map[*ast.ErrorHandlerExpr]types.Type),
-			FailableExprs:            make(map[ast.Expr]bool),
-			AutoPropagateExprs:       make(map[ast.Expr]bool),
-			OptionalRecoveryHandlers: make(map[ast.Expr]bool),
-			OptionalUnwraps:          make(map[ast.Expr]bool),
-			OptionalHandlers:         make(map[ast.Expr]bool),
-			FailableDestructures:     make(map[*ast.DestructureVarDecl]bool),
-			ForInKinds:               make(map[*ast.ForInStmt]ForInKind),
-			GeneratorFuncs:           make(map[ast.Node]types.Type),
-			FilteredDecls:            make(map[ast.Decl]bool),
-			DeclHashes:               make(map[*types.TypeName]string),
-			InferredTypeArgs:         make(map[*ast.CallExpr]*InferredCall),
-		},
-	}
-
-	c.globScope = types.NewScope(
-		types.Universe, tpos(file.Pos()), tpos(file.End()), "glob",
-	)
-	c.fileScope = types.NewScope(
-		c.globScope, tpos(file.Pos()), tpos(file.End()), "file",
-	)
-	c.scope = c.fileScope
-	c.info.Scopes[file] = c.fileScope
-	c.info.ScopeOrder = append(c.info.ScopeOrder, c.fileScope)
-	c.info.ScopeOrder = append(c.info.ScopeOrder, c.globScope)
-
-	c.declare(file)              // Pass 1: collect all declarations
+	c.populateUniverseTypes()    // Populate non-native universe type pointers (TypError, TypMap, etc.)
 	c.define(file)               // Pass 2: resolve types, populate type structures
 	c.validateConstructors(file) // Validate: constructor inheritance (after all types defined)
 	c.validateBuiltins()         // Validate: .pr files declare all required operators/methods/fields
@@ -232,6 +179,7 @@ func DeclareAndDefineWithTarget(file *ast.File, moduleScopes map[string]*types.S
 	c.info.ScopeOrder = append(c.info.ScopeOrder, c.globScope)
 
 	c.declare(file)              // Pass 1: collect all declarations
+	c.populateUniverseTypes()    // Populate non-native universe type pointers (TypError, TypMap, etc.)
 	c.define(file)               // Pass 2: resolve types, populate type structures
 	c.validateConstructors(file) // Validate: constructor inheritance
 
@@ -665,4 +613,75 @@ func (c *Checker) blockAlwaysExits(block *ast.Block) bool {
 		return false
 	}
 	return c.stmtAlwaysExits(block.Stmts[len(block.Stmts)-1])
+}
+
+// populateUniverseTypes sets non-native universe type pointers (TypError, TypMap,
+// TypRange, TypIter, TypStream) from the current scope. Called after Pass 1 (declare)
+// so Named objects exist. When compiling the std module, the types are found in the
+// file scope (declared by std itself). For non-std compilations, they are found in
+// the glob scope (imported from std via `use std as _`).
+//
+// Also installs sugar aliases (map, iter, stream) into the Universe scope and
+// auto-detects whether this compilation is the universe provider (std module)
+// for native type ResetMembers behavior.
+func (c *Checker) populateUniverseTypes() {
+	// Check if this file declares the non-native universe types (i.e., this is
+	// the std module). We look in the file scope specifically — if found there,
+	// the type was declared in THIS file, not inherited from a parent scope.
+	isStd := c.fileScope.Lookup("error") != nil
+
+	populate := func(name string, target **types.Named) {
+		var obj types.Object
+		if isStd {
+			// Std module: use the freshly-declared type from this file.
+			// Must update even if *target is already set (B0101: second sema
+			// run creates new Named objects that replace stale ones).
+			obj = c.fileScope.Lookup(name)
+		} else if *target != nil {
+			return // already populated from a prior std compilation
+		} else {
+			// Non-std: look up from full scope chain (glob scope from std import).
+			obj, _ = c.scope.LookupParent(name)
+		}
+		if obj == nil {
+			return
+		}
+		tn, ok := obj.(*types.TypeName)
+		if !ok {
+			return
+		}
+		n, ok := tn.Type().(*types.Named)
+		if !ok {
+			return
+		}
+		*target = n
+	}
+
+	populate("error", &types.TypError)
+	populate("Map", &types.TypMap)
+	populate("Range", &types.TypRange)
+	populate("Iterator", &types.TypIter)
+	populate("Stream", &types.TypStream)
+
+	if isStd {
+		c.isUniverseProvider = true
+	}
+
+	// Install or update sugar aliases in Universe scope.
+	installAlias := func(alias string, target *types.Named) {
+		if target == nil {
+			return
+		}
+		newType := target.Obj().Type()
+		if existing := types.Universe.Lookup(alias); existing != nil {
+			// Update existing alias to point to the (possibly new) target.
+			existing.(*types.TypeName).SetType(newType)
+		} else {
+			tn := types.NewTypeName(types.Pos{}, alias, newType)
+			types.Universe.Insert(tn)
+		}
+	}
+	installAlias("map", types.TypMap)
+	installAlias("iter", types.TypIter)
+	installAlias("stream", types.TypStream)
 }

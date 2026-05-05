@@ -120,17 +120,6 @@ func (c *Checker) declareType(d *ast.TypeDecl) {
 		return
 	}
 
-	// Non-native std type redeclaring a universe type (e.g., map[K,V], error):
-	// reuse the universe Named singleton so that identity checks (TypMap,
-	// TypError, etc.) continue to work. The define pass will add fields,
-	// methods, and type-param constraints from the source declaration.
-	if c.compilingStd {
-		if obj := types.Universe.Lookup(d.Name); obj != nil {
-			c.scope.Insert(obj)
-			return
-		}
-	}
-
 	if !c.matchesTarget(d.Annotations) {
 		c.info.FilteredDecls[d] = true
 		return
@@ -262,12 +251,9 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 
 	if isNative {
 		// Native type: only process fields and methods, skip inheritance.
-		// When compiling std, reset members first to clear stale type references
-		// from a previous sema run in the same process (B0101). Without this,
-		// method signatures retain pointers to old Named objects (e.g. Writer)
-		// that no longer match the freshly-created structural interface types,
-		// causing structural matching to fail (Identical uses pointer comparison).
-		if c.compilingStd {
+		if c.isUniverseProvider {
+			// Universe provider (std module): reset members to clear stale type
+			// references from a previous sema run in the same process (B0101).
 			named.ResetMembers()
 			for _, fd := range d.Fields {
 				c.defineField(named, fd)
@@ -298,13 +284,6 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 			named.SetExported(true)
 		}
 		return
-	}
-
-	// For universe type singletons being redeclared from source (e.g., map),
-	// reset accumulated fields/methods from previous sema runs to avoid duplicates
-	// and stale type references (e.g., a Slot enum pointer from a prior test run).
-	if c.compilingStd && types.Universe.Lookup(d.Name) != nil {
-		named.ResetMembers()
 	}
 
 	// Resolve parent types (is clauses)

@@ -90,6 +90,9 @@ func (c *Checker) requireUnaryOp(typeName string, named *types.Named, op string)
 
 // requireMethod checks that a Named type has a method with the given name.
 func (c *Checker) requireMethod(typeName string, named *types.Named, methodName string) {
+	if named == nil {
+		return // non-native universe type not yet populated (e.g., no std import)
+	}
 	if named.LookupMethod(methodName) == nil {
 		c.errorf(ast.Pos{}, "builtin type %s missing required method %s", typeName, methodName)
 	}
@@ -97,6 +100,9 @@ func (c *Checker) requireMethod(typeName string, named *types.Named, methodName 
 
 // requireField checks that a Named type has a field with the given name.
 func (c *Checker) requireField(typeName string, named *types.Named, fieldName string) {
+	if named == nil {
+		return // non-native universe type not yet populated (e.g., no std import)
+	}
 	if named.LookupField(fieldName) == nil {
 		c.errorf(ast.Pos{}, "builtin type %s missing required field %s", typeName, fieldName)
 	}

@@ -43,7 +43,7 @@ func getCodegenStdModInfo() (*sema.ModuleInfo, *types.Scope) {
 		if len(buildErrs) > 0 {
 			panic("std AST build errors: " + buildErrs[0].Error())
 		}
-		stdInfo, _ := sema.CheckForStdModule(stdFile, sema.HostTargetInfo())
+		stdInfo, _ := sema.CheckWithTarget(stdFile, nil, sema.HostTargetInfo())
 		codegenStdScope = sema.ExportedScope(stdInfo, stdFile)
 		codegenStdModInfo = &sema.ModuleInfo{
 			Name:           "std",

@@ -32,8 +32,11 @@ prefix needed). This is how Python's builtins work; it is how Rust's prelude wor
 - Every parsed file gets an auto-injected `UseDecl{CatalogName: "std", Alias: "_"}` so std
   symbols appear in scope without any `use` statement
 - `mergeGlobImport` in `sema/decl.go` flattens all public std exports into `fileScope`
-- `CheckForStdModule` in `sema/check.go` compiles std itself with `compilingStd=true`
-  (prevents std from trying to import itself)
+- Std compiles through the normal `CheckWithTarget` path — no special entry point.
+  Non-native types (error, Map, Range, Iterator, Stream) are regular module types;
+  `populateUniverseTypes()` in `sema/check.go` sets global identity pointers after
+  std's declare pass so compiler features (error handling, for-in, map sugar) can
+  identify them.
 - No `IsStd` flag on AST nodes, no `stdScope` parent chain, no `mergeStdDecls` — std is
   compiled once via the normal module pipeline and cached in the build cache
 

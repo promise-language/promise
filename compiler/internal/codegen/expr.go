@@ -127,7 +127,13 @@ func (c *Compiler) genFloatLit(e *ast.FloatLit) value.Value {
 		floatType = irtypes.Double
 	}
 	raw := strings.ReplaceAll(e.Raw, "_", "")
-	val, _ := strconv.ParseFloat(raw, 64)
+	// Parse with the target precision so round-to-nearest-even is correct.
+	// ParseFloat(s, 32) returns a float64 holding the correctly-rounded float32 value.
+	bitSize := 64
+	if floatType == irtypes.Float {
+		bitSize = 32
+	}
+	val, _ := strconv.ParseFloat(raw, bitSize)
 	return constant.NewFloat(floatType, val)
 }
 

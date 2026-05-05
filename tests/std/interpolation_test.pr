@@ -326,10 +326,8 @@ test_f64_pow10_neg_sci() `test {
 // --- f64 edge cases: f32 (fpext path) ---
 
 test_f32_interpolation() `test {
-  // f32 3.14 produces "3.1399999" due to B0139 (f32 literal rounding bug:
-  // 3.14f32 rounds to the wrong ULP). Once B0139 is fixed, this should be "3.14".
   f32 x = 3.14;
-  assert("{x}" == "3.1399999", "f32 3.14 (B0139)");
+  assert("{x}" == "3.14", "f32 3.14");
 }
 
 test_f32_integer() `test {

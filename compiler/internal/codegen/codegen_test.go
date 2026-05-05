@@ -10833,6 +10833,18 @@ func TestNumericSuffixF32IR(t *testing.T) {
 	assertContains(t, ir, "store float")
 }
 
+func TestF32LiteralRounding(t *testing.T) {
+	// 3.14 as f32 should be 0x4048F5C3 (3.14000010...), not 0x4048F5C2 (3.13999962...)
+	// The f64 hex encoding of f32 0x4048F5C3 is 0x40091EB860000000
+	ir := generateIR(t, `
+		main() {
+			f32 x = 3.14f32;
+		}
+	`)
+	assertContains(t, ir, "float 0x40091EB860000000")
+	assertNotContains(t, ir, "float 0x40091EB840000000")
+}
+
 func TestNumericSuffixI64IR(t *testing.T) {
 	ir := generateIR(t, `
 		main() {

@@ -12694,3 +12694,60 @@ func TestInferGenericFuncWithVectorParamCodegen(t *testing.T) {
 	`)
 	assertContains(t, ir, "@\"first_elem[int]\"")
 }
+
+// --- Embed getter tests ---
+
+func TestEmbedStringGetter(t *testing.T) {
+	file, info := parseWithStd(t, `
+		get schema string `+"`embed(\"schema.sql\")"+`;
+		main() {
+			string s = schema;
+		}
+	`)
+	// Manually populate embed data (normally done by ResolveEmbeds)
+	for fd, embed := range info.Embeds {
+		_ = fd
+		embed.Data = []byte("CREATE TABLE foo;")
+	}
+	result := Compile(file, info, "")
+	ir := result.Module.String()
+	assertContains(t, ir, "@schema()")
+	assertContains(t, ir, "CREATE TABLE foo;")
+	assertContains(t, ir, "@promise_string_new")
+}
+
+func TestEmbedBytesGetter(t *testing.T) {
+	file, info := parseWithStd(t, `
+		get data u8[] `+"`embed(\"data.bin\")"+`;
+		main() {
+			u8[] d = data;
+		}
+	`)
+	// Manually populate embed data
+	for fd, embed := range info.Embeds {
+		_ = fd
+		embed.Data = []byte{0xDE, 0xAD, 0xBE, 0xEF}
+	}
+	result := Compile(file, info, "")
+	ir := result.Module.String()
+	assertContains(t, ir, "define i8* @data()")
+	assertContains(t, ir, "@pal_alloc")
+	assertContains(t, ir, "@llvm.memcpy")
+}
+
+func TestEmbedEmptyFile(t *testing.T) {
+	file, info := parseWithStd(t, `
+		get empty string `+"`embed(\"empty.txt\")"+`;
+		main() {
+			string s = empty;
+		}
+	`)
+	for fd, embed := range info.Embeds {
+		_ = fd
+		embed.Data = []byte{}
+	}
+	result := Compile(file, info, "")
+	ir := result.Module.String()
+	assertContains(t, ir, "@empty()")
+	assertContains(t, ir, "@promise_string_new")
+}

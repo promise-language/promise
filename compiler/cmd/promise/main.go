@@ -3392,6 +3392,14 @@ func compileFrontendForTarget(filename, triple string) (*ast.File, *sema.Info) {
 		os.Exit(1)
 	}
 
+	// Resolve embed annotations: read files, validate contents
+	absFilename, _ := filepath.Abs(filename)
+	embedErrs := sema.ResolveEmbeds(info, filepath.Dir(absFilename))
+	if len(embedErrs) > 0 {
+		printFileErrors(filename, embedErrs)
+		os.Exit(1)
+	}
+
 	ownerErrs := ownership.Check(file, info)
 	if len(ownerErrs) > 0 {
 		printFileErrors(filename, ownerErrs)
@@ -3561,6 +3569,14 @@ func compileModuleTestFrontend(modDir, triple string) (*ast.File, *sema.Info) {
 	}
 	if len(errs) > 0 {
 		printFileErrors(modDir, errs)
+		os.Exit(1)
+	}
+
+	// Resolve embed annotations for module test files
+	absModDir, _ := filepath.Abs(modDir)
+	embedErrs := sema.ResolveEmbeds(info, absModDir)
+	if len(embedErrs) > 0 {
+		printFileErrors(modDir, embedErrs)
 		os.Exit(1)
 	}
 

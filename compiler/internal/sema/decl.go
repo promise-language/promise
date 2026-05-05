@@ -1,6 +1,7 @@
 package sema
 
 import (
+	"path/filepath"
 	"time"
 
 	"djabi.dev/go/promise_lang/internal/ast"
@@ -894,6 +895,59 @@ func (c *Checker) defineFunc(d *ast.FuncDecl) {
 			}
 		}
 	}
+
+	// Handle `embed annotation on getters
+	if embedPath, hasEmbed := extractEmbedPath(d.Annotations); hasEmbed {
+		if !d.IsGetter {
+			c.errorf(d.Pos(), "`embed can only be applied to module-level getters")
+		} else if d.Body != nil {
+			c.errorf(d.Pos(), "`embed getter '%s' must not have a body", d.Name)
+		} else if embedPath == "" {
+			c.errorf(d.Pos(), "`embed annotation requires a file path: `embed(\"path/to/file\")")
+		} else if filepath.IsAbs(embedPath) {
+			c.errorf(d.Pos(), "`embed path must be relative, got absolute path %q", embedPath)
+		} else if sig != nil && sig.CanError() {
+			c.errorf(d.Pos(), "`embed getter '%s' must not be failable (embedded data cannot fail)", d.Name)
+		} else if sig != nil {
+			// Determine embed kind from return type
+			retType := sig.Result()
+			var kind EmbedKind
+			valid := true
+			switch {
+			case types.Identical(retType, types.TypString):
+				kind = EmbedString
+			case isU8Vector(retType):
+				kind = EmbedBytes
+			default:
+				c.errorf(d.Pos(), "`embed getter '%s' must return string or u8[], got %s", d.Name, retType)
+				valid = false
+			}
+			if valid {
+				if c.info.Embeds == nil {
+					c.info.Embeds = make(map[*ast.FuncDecl]*EmbedInfo)
+				}
+				c.info.Embeds[d] = &EmbedInfo{
+					Path:     embedPath,
+					Kind:     kind,
+					Compress: extractEmbedCompress(d.Annotations),
+				}
+			}
+		}
+	}
+}
+
+// isU8Vector returns true if typ is Vector[u8] (i.e., u8[]).
+func isU8Vector(typ types.Type) bool {
+	inst, ok := typ.(*types.Instance)
+	if !ok {
+		return false
+	}
+	named := inst.Origin()
+	if named != types.TypVector {
+		return false
+	}
+	args := inst.TypeArgs()
+	return len(args) == 1 && types.Identical(args[0], types.TypU8)
 }
 
 func (c *Checker) resolveFuncSignature(d *ast.FuncDecl) *types.Signature {

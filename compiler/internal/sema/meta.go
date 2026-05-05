@@ -71,6 +71,7 @@ var builtinMetas = map[string][]MetaTarget{
 	"unsafe":       {TargetFunc, TargetMethod},
 	"final":        {TargetField},
 	"factory":      {TargetMethod},
+	"embed":        {TargetFunc},
 }
 
 // validateMetas checks that all meta annotations on a declaration are valid:
@@ -297,6 +298,44 @@ func extractTestExclude(annotations []*ast.MetaAnnotation) []string {
 		}
 	}
 	return nil
+}
+
+// extractEmbedPath extracts the file path from a `embed("path") annotation.
+// Returns the path string and true if the annotation is present.
+func extractEmbedPath(annotations []*ast.MetaAnnotation) (string, bool) {
+	for _, ann := range annotations {
+		if ann.Name != "embed" {
+			continue
+		}
+		if len(ann.Params) > 0 {
+			// First positional parameter is the file path
+			for _, p := range ann.Params {
+				if p.Name == "" {
+					return evalStringLit(p.Value), true
+				}
+			}
+		}
+		return "", true // `embed with no path — will be caught as an error
+	}
+	return "", false
+}
+
+// extractEmbedCompress returns true if the `embed annotation has compress: true.
+func extractEmbedCompress(annotations []*ast.MetaAnnotation) bool {
+	for _, ann := range annotations {
+		if ann.Name != "embed" {
+			continue
+		}
+		for _, p := range ann.Params {
+			if p.Name == "compress" {
+				// Check for boolean true literal
+				if bl, ok := p.Value.(*ast.BoolLit); ok && bl.Value {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // checkDeprecatedObj emits a warning if the resolved object refers to a deprecated entity.

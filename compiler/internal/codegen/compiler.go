@@ -2863,7 +2863,8 @@ func (c *Compiler) declareFuncs(file *ast.File) {
 		if c.info.FilteredDecls[decl] {
 			continue // excluded by `target(cond) annotation for this build target
 		}
-		if fd.Body == nil {
+		isEmbed := c.info.Embeds[fd] != nil
+		if fd.Body == nil && !isEmbed {
 			continue // extern — already handled by declareExterns
 		}
 		if len(fd.TypeParams) > 0 {
@@ -2925,6 +2926,14 @@ func (c *Compiler) defineFuncs(file *ast.File) {
 		}
 		if c.info.FilteredDecls[decl] {
 			continue // excluded by `target(cond) annotation for this build target
+		}
+		// Handle embed getters — body is nil but we generate it from embedded data
+		if embedInfo := c.info.Embeds[fd]; embedInfo != nil {
+			fn := c.funcs[fd.Name]
+			if fn != nil {
+				c.defineEmbedGetter(fd, fn, embedInfo)
+			}
+			continue
 		}
 		if fd.Body == nil {
 			continue // native function — no body to generate

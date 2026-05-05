@@ -1,0 +1,25 @@
+get binary_data u8[] `embed("data.bin");
+
+test_embed_bytes_length() `test {
+  u8[] data = binary_data;
+  assert(data.len == 8, "binary data should be 8 bytes");
+}
+
+test_embed_bytes_content() `test {
+  u8[] data = binary_data;
+  assert(data[0] == 222, "byte 0 should be 0xDE");
+  assert(data[1] == 173, "byte 1 should be 0xAD");
+  assert(data[2] == 190, "byte 2 should be 0xBE");
+  assert(data[3] == 239, "byte 3 should be 0xEF");
+  assert(data[4] == 0, "byte 4 should be 0");
+  assert(data[5] == 1, "byte 5 should be 1");
+  assert(data[6] == 2, "byte 6 should be 2");
+  assert(data[7] == 3, "byte 7 should be 3");
+}
+
+test_embed_bytes_independent_copies() `test {
+  u8[] a = binary_data;
+  u8[] b = binary_data;
+  assert(a.len == b.len, "both copies should have same length");
+  assert(a[0] == b[0], "both copies should have same content");
+}

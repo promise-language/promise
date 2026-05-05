@@ -1,6 +1,8 @@
 package sema
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -11413,4 +11415,199 @@ func TestInferConstructorMissingArgs(t *testing.T) {
 		}
 	`)
 	expectError(t, errs, "cannot infer type arguments")
+}
+
+// === Embed annotation tests ===
+
+func TestEmbedOnGetterStringAccepted(t *testing.T) {
+	info := checkOK(t, `
+		get schema string `+"`embed(\"schema.sql\")"+`;
+	`)
+	if len(info.Embeds) != 1 {
+		t.Fatalf("expected 1 embed entry, got %d", len(info.Embeds))
+	}
+	for _, embed := range info.Embeds {
+		if embed.Path != "schema.sql" {
+			t.Errorf("expected path 'schema.sql', got %q", embed.Path)
+		}
+		if embed.Kind != EmbedString {
+			t.Errorf("expected EmbedString, got %d", embed.Kind)
+		}
+	}
+}
+
+func TestEmbedOnGetterBytesAccepted(t *testing.T) {
+	info := checkOK(t, `
+		get icon u8[] `+"`embed(\"icon.png\")"+`;
+	`)
+	if len(info.Embeds) != 1 {
+		t.Fatalf("expected 1 embed entry, got %d", len(info.Embeds))
+	}
+	for _, embed := range info.Embeds {
+		if embed.Kind != EmbedBytes {
+			t.Errorf("expected EmbedBytes, got %d", embed.Kind)
+		}
+	}
+}
+
+func TestEmbedOnNonGetterRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		foo() `+"`embed(\"data.txt\")"+` {}
+	`)
+	expectError(t, errs, "can only be applied to module-level getters")
+}
+
+func TestEmbedWithBodyRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		get schema string `+"`embed(\"schema.sql\")"+` { return ""; }
+	`)
+	expectError(t, errs, "must not have a body")
+}
+
+func TestEmbedNoPathRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		get schema string `+"`embed"+`;
+	`)
+	expectError(t, errs, "requires a file path")
+}
+
+func TestEmbedAbsolutePathRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		get schema string `+"`embed(\"/etc/passwd\")"+`;
+	`)
+	expectError(t, errs, "must be relative")
+}
+
+func TestEmbedWrongReturnTypeRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		get count int `+"`embed(\"data.txt\")"+`;
+	`)
+	expectError(t, errs, "must return string or u8[]")
+}
+
+func TestEmbedFailableRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		get schema string! `+"`embed(\"schema.sql\")"+`;
+	`)
+	expectError(t, errs, "must not be failable")
+}
+
+func TestEmbedCompressParam(t *testing.T) {
+	info := checkOK(t, `
+		get data string `+"`embed(\"data.txt\", compress: true)"+`;
+	`)
+	if len(info.Embeds) != 1 {
+		t.Fatalf("expected 1 embed entry, got %d", len(info.Embeds))
+	}
+	for _, embed := range info.Embeds {
+		if !embed.Compress {
+			t.Error("expected Compress=true")
+		}
+	}
+}
+
+func TestEmbedCompressFalse(t *testing.T) {
+	info := checkOK(t, `
+		get data string `+"`embed(\"data.txt\", compress: false)"+`;
+	`)
+	for _, embed := range info.Embeds {
+		if embed.Compress {
+			t.Error("expected Compress=false")
+		}
+	}
+}
+
+func TestEmbedOnWrongNamedTypeRejected(t *testing.T) {
+	// Ensure a non-Vector named type is rejected
+	errs := checkErrs(t, `
+		type Foo { int x; }
+		get data Foo `+"`embed(\"data.txt\")"+`;
+	`)
+	expectError(t, errs, "must return string or u8[]")
+}
+
+func TestResolveEmbedsFileNotFound(t *testing.T) {
+	info := checkOK(t, `
+		get data string `+"`embed(\"nonexistent.txt\")"+`;
+	`)
+	errs := ResolveEmbeds(info, "/tmp/promise_test_no_such_dir")
+	if len(errs) == 0 {
+		t.Fatal("expected error for missing file")
+	}
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e.Error(), "cannot read embedded file") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'cannot read' error, got %v", errs)
+	}
+}
+
+func TestResolveEmbedsInvalidUTF8(t *testing.T) {
+	// Create temp dir with invalid UTF-8 file
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "bad.bin"), []byte{0xFF, 0xFE, 0x80}, 0644)
+
+	info := checkOK(t, `
+		get data string `+"`embed(\"bad.bin\")"+`;
+	`)
+	errs := ResolveEmbeds(info, dir)
+	if len(errs) == 0 {
+		t.Fatal("expected error for invalid UTF-8")
+	}
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e.Error(), "not valid UTF-8") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected UTF-8 error, got %v", errs)
+	}
+}
+
+func TestResolveEmbedsSuccess(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("hello world"), 0644)
+
+	info := checkOK(t, `
+		get greeting string `+"`embed(\"hello.txt\")"+`;
+	`)
+	errs := ResolveEmbeds(info, dir)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	for _, embed := range info.Embeds {
+		if string(embed.Data) != "hello world" {
+			t.Errorf("expected 'hello world', got %q", string(embed.Data))
+		}
+	}
+}
+
+func TestResolveEmbedsBytesAllowsNonUTF8(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "bin.dat"), []byte{0xFF, 0xFE, 0x80}, 0644)
+
+	info := checkOK(t, `
+		get data u8[] `+"`embed(\"bin.dat\")"+`;
+	`)
+	errs := ResolveEmbeds(info, dir)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	for _, embed := range info.Embeds {
+		if len(embed.Data) != 3 {
+			t.Errorf("expected 3 bytes, got %d", len(embed.Data))
+		}
+	}
+}
+
+func TestResolveEmbedsNilMap(t *testing.T) {
+	info := &Info{}
+	errs := ResolveEmbeds(info, "/tmp")
+	if len(errs) != 0 {
+		t.Errorf("expected no errors for empty embeds, got %v", errs)
+	}
 }

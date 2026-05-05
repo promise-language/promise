@@ -217,6 +217,27 @@ type Info struct {
 	// Used to key per-instance .bc cache entries so that changes to unrelated
 	// declarations in the same file do not invalidate cached instances.
 	DeclHashes map[*types.TypeName]string
+
+	// Embeds maps module-level getter declarations with `embed annotations
+	// to their embed metadata. Codegen uses this to generate getter bodies
+	// that return the embedded file contents.
+	Embeds map[*ast.FuncDecl]*EmbedInfo
+}
+
+// EmbedKind indicates the target type for an `embed annotation.
+type EmbedKind int
+
+const (
+	EmbedString EmbedKind = iota // embed as string
+	EmbedBytes                   // embed as u8[]
+)
+
+// EmbedInfo records metadata for a module-level getter with an `embed annotation.
+type EmbedInfo struct {
+	Path     string    // raw relative path from the annotation
+	Kind     EmbedKind // target type (string or u8[])
+	Compress bool      // `embed("path", compress: true)
+	Data     []byte    // populated after sema by ResolveEmbeds
 }
 
 // NarrowedVar records a single variable narrowing (T? → T).

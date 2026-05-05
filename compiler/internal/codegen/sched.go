@@ -239,6 +239,15 @@ func (c *Compiler) defineSchedulerGlobals() {
 	testPanicMsg := c.module.NewGlobal("__promise_test_panic_msg", irtypes.I8Ptr)
 	testPanicMsg.Init = constant.NewNull(irtypes.I8Ptr)
 	c.testPanicMsgGlobal = testPanicMsg
+
+	// @__promise_test_done = global i32 0 (non-TLS)
+	// Set atomically to 1 by the test trampoline when the test completes
+	// (both normal return and panic recovery). The main thread polls this
+	// with usleep to enforce per-test timeouts. Non-TLS because the main
+	// thread reads it after the test thread sets it (tests run sequentially).
+	testDone := c.module.NewGlobal("__promise_test_done", irtypes.I32)
+	testDone.Init = constant.NewInt(irtypes.I32, 0)
+	c.testDoneGlobal = testDone
 }
 
 // defineGNewFunc emits @promise_g_new(i8* %coro_handle) → i8*

@@ -327,11 +327,63 @@ func runRun(args []string) {
 	}
 }
 
+// testTimeoutConfig holds CLI timeout configuration for per-test timeout computation.
+type testTimeoutConfig struct {
+	defaultTimeout time.Duration // -timeout (default 60s)
+	scale          float64       // -timeout-scale (default 1.0)
+	min            time.Duration // -timeout-min (0 = no minimum)
+	max            time.Duration // -timeout-max (0 = no maximum)
+}
+
+// computeTestTimeouts computes the final per-test timeout in nanoseconds for each test.
+// Resolution: final = clamp((annotation ?: default) × scale, min, max)
+func computeTestTimeouts(tests []*types.Func, info *sema.Info, cfg testTimeoutConfig) map[string]int64 {
+	result := make(map[string]int64, len(tests))
+	for _, t := range tests {
+		base := cfg.defaultTimeout
+		if raw, ok := info.TestTimeouts[t.Name()]; ok {
+			if d, err := time.ParseDuration(raw); err == nil {
+				base = d
+			}
+		}
+		final := time.Duration(float64(base) * cfg.scale)
+		if cfg.min > 0 && final < cfg.min {
+			final = cfg.min
+		}
+		if cfg.max > 0 && final > cfg.max {
+			final = cfg.max
+		}
+		result[t.Name()] = final.Nanoseconds()
+	}
+	return result
+}
+
+// computeE2ETimeout computes the timeout for an e2e test based on annotation and config.
+func computeE2ETimeout(info *sema.Info, cfg testTimeoutConfig) time.Duration {
+	base := cfg.defaultTimeout
+	if raw, ok := info.TestTimeouts["main"]; ok {
+		if d, err := time.ParseDuration(raw); err == nil {
+			base = d
+		}
+	}
+	final := time.Duration(float64(base) * cfg.scale)
+	if cfg.min > 0 && final < cfg.min {
+		final = cfg.min
+	}
+	if cfg.max > 0 && final > cfg.max {
+		final = cfg.max
+	}
+	return final
+}
+
 // runTest discovers and runs `test annotated functions.
 // Accepts a single file, a directory (non-recursive), or dir/... (recursive).
 func runTest(args []string) {
 	timeout := 60 * time.Second
 	parallel := runtime.NumCPU()
+	timeoutScale := 1.0
+	var timeoutMin time.Duration // 0 = no minimum
+	var timeoutMax time.Duration // 0 = no maximum
 	var stressMode bool
 	var stressCount int              // 0 = unlimited
 	var stressDuration time.Duration // 0 = unlimited
@@ -346,6 +398,30 @@ func runTest(args []string) {
 				os.Exit(1)
 			}
 			timeout = d
+			i++
+		} else if args[i] == "-timeout-scale" && i+1 < len(args) {
+			f, err := strconv.ParseFloat(args[i+1], 64)
+			if err != nil || f <= 0 {
+				fmt.Fprintln(os.Stderr, "error: -timeout-scale requires a positive number")
+				os.Exit(1)
+			}
+			timeoutScale = f
+			i++
+		} else if args[i] == "-timeout-min" && i+1 < len(args) {
+			d, err := parseTimeoutArg(args[i+1])
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			timeoutMin = d
+			i++
+		} else if args[i] == "-timeout-max" && i+1 < len(args) {
+			d, err := parseTimeoutArg(args[i+1])
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			timeoutMax = d
 			i++
 		} else if args[i] == "-parallel" && i+1 < len(args) {
 			n, err := strconv.Atoi(args[i+1])
@@ -381,7 +457,7 @@ func runTest(args []string) {
 	}
 
 	if len(remaining) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: promise test [-timeout duration] [-parallel N] [-stress [N|duration]] [-output file] <file.pr | dir | dir/...> ...")
+		fmt.Fprintln(os.Stderr, "usage: promise test [-timeout duration] [-timeout-scale N] [-timeout-min duration] [-timeout-max duration] [-parallel N] [-stress [N|duration]] [-output file] <file.pr | dir | dir/...> ...")
 		os.Exit(1)
 	}
 
@@ -412,6 +488,13 @@ func runTest(args []string) {
 		}
 	}
 
+	cfg := testTimeoutConfig{
+		defaultTimeout: timeout,
+		scale:          timeoutScale,
+		min:            timeoutMin,
+		max:            timeoutMax,
+	}
+
 	if stressMode {
 		runStress(allFiles, stressCount, stressDuration, timeout, targetTriple, outputFile)
 		return
@@ -420,21 +503,24 @@ func runTest(args []string) {
 	// Single file: use simple runner (no directory summary).
 	// Multiple files: combined summary at the end.
 	if len(allFiles) == 1 {
-		runTestFile(allFiles[0], timeout, targetTriple)
+		runTestFile(allFiles[0], cfg, targetTriple)
 	} else {
-		runTestFiles(allFiles, timeout, targetTriple, parallel)
+		runTestFiles(allFiles, cfg, targetTriple, parallel)
 	}
 }
 
 // runTestFile runs test functions from a single .pr file.
 // targetTriple overrides the compilation target (empty = host).
-func runTestFile(filename string, timeout time.Duration, targetTriple string) {
+func runTestFile(filename string, cfg testTimeoutConfig, targetTriple string) {
 	start := time.Now()
+	// For cache-hit paths where we can't compute per-test timeouts,
+	// use the CLI default as the process-level timeout.
+	timeout := cfg.defaultTimeout
 
 	// Module test dispatch: compile all module sources + tests together,
 	// with build cache support.
 	if modDir := isModuleTestFile(filename); modDir != "" {
-		runModuleTestFile(modDir, timeout, start, targetTriple)
+		runModuleTestFile(modDir, cfg, start, targetTriple)
 		return
 	}
 
@@ -479,7 +565,8 @@ func runTestFile(filename string, timeout time.Duration, targetTriple string) {
 	file, info := compileFrontendForTarget(filename, targetTriple)
 
 	if info.HasExpectOutput {
-		runE2ETest(file, info, filename, timeout, start, targetTriple, cacheDir, cacheKey)
+		e2eTimeout := computeE2ETimeout(info, cfg)
+		runE2ETest(file, info, filename, e2eTimeout, start, targetTriple, cacheDir, cacheKey)
 		return
 	}
 
@@ -488,7 +575,8 @@ func runTestFile(filename string, timeout time.Duration, targetTriple string) {
 		return
 	}
 
-	binaryPath := compileTestBinary(file, info, targetTriple, filename)
+	testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
+	binaryPath := compileTestBinary(file, info, targetTriple, filename, testTimeouts)
 
 	// Save to cache.
 	if cacheDir != "" {
@@ -511,13 +599,20 @@ func runTestFile(filename string, timeout time.Duration, targetTriple string) {
 	}
 
 	defer os.Remove(binaryPath)
-	runTestBinary(binaryPath, timeout, start, targetTriple)
+	// Process-level timeout: sum of all per-test timeouts + 30s buffer.
+	// Per-test timeouts are enforced in-binary; this is just a backstop.
+	var totalNs int64
+	for _, ns := range testTimeouts {
+		totalNs += ns
+	}
+	processTimeout := time.Duration(totalNs) + 30*time.Second
+	runTestBinary(binaryPath, processTimeout, start, targetTriple)
 }
 
 // runModuleTestFile compiles and runs a module's test suite. All module source
 // files (including all *_test.pr) are compiled together as a single unit.
 // Test binaries are cached in the build cache for fast re-runs.
-func runModuleTestFile(modDir string, timeout time.Duration, start time.Time, targetTriple string) {
+func runModuleTestFile(modDir string, cfg testTimeoutConfig, start time.Time, targetTriple string) {
 	target := targetTriple
 	if target == "" {
 		target = codegen.HostTargetTriple()
@@ -535,7 +630,7 @@ func runModuleTestFile(modDir string, timeout time.Duration, start time.Time, ta
 
 	if cacheDir != "" {
 		if cachedBin := module.LookupTestBinaryCache(cacheDir, cacheKey); cachedBin != "" {
-			runTestBinary(cachedBin, timeout, start, targetTriple)
+			runTestBinary(cachedBin, cfg.defaultTimeout, start, targetTriple)
 			return
 		}
 	}
@@ -548,7 +643,8 @@ func runModuleTestFile(modDir string, timeout time.Duration, start time.Time, ta
 		return
 	}
 
-	binaryPath := compileTestBinary(file, info, targetTriple, modDir)
+	testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
+	binaryPath := compileTestBinary(file, info, targetTriple, modDir, testTimeouts)
 
 	// Save compiled binary to cache.
 	if cacheDir != "" {
@@ -556,17 +652,24 @@ func runModuleTestFile(modDir string, timeout time.Duration, start time.Time, ta
 	}
 
 	defer os.Remove(binaryPath)
-	runTestBinary(binaryPath, timeout, start, targetTriple)
+	// Process-level timeout: sum of per-test timeouts + 30s buffer.
+	var totalNs int64
+	for _, ns := range testTimeouts {
+		totalNs += ns
+	}
+	processTimeout := time.Duration(totalNs) + 30*time.Second
+	runTestBinary(binaryPath, processTimeout, start, targetTriple)
 }
 
 // compileTestBinary runs codegen + link for a test file and returns the binary path.
-func compileTestBinary(file *ast.File, info *sema.Info, targetTriple, sourceFile string) string {
+// testTimeouts maps test function names to their computed timeout in nanoseconds.
+func compileTestBinary(file *ast.File, info *sema.Info, targetTriple, sourceFile string, testTimeouts map[string]int64) string {
 	target := targetTriple
 	if target == "" {
 		target = codegen.HostTargetTriple()
 	}
 	result := codegen.CompileWithCache(file, info, target, lookupCachedInstances(info, target))
-	result.GenerateTestMain(info.Tests)
+	result.GenerateTestMain(info.Tests, testTimeouts)
 
 	ext := binaryExtension(target)
 	tmpOutput, err := os.CreateTemp("", "promise-test-*"+ext)
@@ -620,7 +723,7 @@ func runTestBinary(binaryPath string, timeout time.Duration, start time.Time, ta
 			} else {
 				fmt.Printf("%s passed, %s failed (%.3fs)%s\n", m[1], m[2], elapsed.Seconds(), targetSuffix)
 			}
-		} else if targetSuffix != "" && (strings.HasPrefix(line, "PASS ") || strings.HasPrefix(line, "FAIL ")) {
+		} else if targetSuffix != "" && (strings.HasPrefix(line, "PASS ") || strings.HasPrefix(line, "FAIL ") || strings.HasPrefix(line, "TIMEOUT ")) {
 			fmt.Printf("%s%s\n", line, targetSuffix)
 		} else {
 			fmt.Println(line)
@@ -762,7 +865,7 @@ func firstLines(s string, n int) string {
 // runTestFiles runs tests from a list of .pr files, printing per-file results
 // and a combined summary at the end. Tests are compiled and run concurrently
 // up to the parallel limit. Results are printed in file order.
-func runTestFiles(files []string, timeout time.Duration, targetTriple string, parallel int) {
+func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, parallel int) {
 	unlock := module.LockBuildDirShared()
 	defer unlock()
 
@@ -842,9 +945,18 @@ func runTestFiles(files []string, timeout time.Duration, targetTriple string, pa
 
 			r := &results[idx]
 			fileStart := time.Now()
-			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			ctx, cancel := context.WithTimeout(context.Background(), cfg.defaultTimeout)
 			defer cancel()
-			testArgs := []string{"test", "-timeout", fmt.Sprintf("%gs", timeout.Seconds())}
+			testArgs := []string{"test", "-timeout", fmt.Sprintf("%gs", cfg.defaultTimeout.Seconds())}
+			if cfg.scale != 1.0 {
+				testArgs = append(testArgs, "-timeout-scale", fmt.Sprintf("%g", cfg.scale))
+			}
+			if cfg.min > 0 {
+				testArgs = append(testArgs, "-timeout-min", cfg.min.String())
+			}
+			if cfg.max > 0 {
+				testArgs = append(testArgs, "-timeout-max", cfg.max.String())
+			}
 			if targetTriple != "" {
 				testArgs = append(testArgs, "--target", targetTriple)
 			}
@@ -864,7 +976,7 @@ func runTestFiles(files []string, timeout time.Duration, targetTriple string, pa
 
 	// Print results in file order, streaming as each slot completes.
 	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?`)
-	failLineRe := regexp.MustCompile(`^FAIL \([\d.]+s\)(?: (.+))?$`)
+	failLineRe := regexp.MustCompile(`^(?:FAIL|TIMEOUT) \([\d.]+s\)(?: (.+))?$`)
 	passLineRe := regexp.MustCompile(`^PASS \([\d.]+s\)`)
 	panicContextRe := regexp.MustCompile(`^  (panic:|expected:|actual:|exit:)`)
 

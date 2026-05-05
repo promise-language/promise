@@ -110,6 +110,11 @@ type Info struct {
 	// Parsed from `test(exclude: "wasm32") annotations on individual test functions.
 	TestExcludes map[string][]string
 
+	// TestTimeouts maps test function names to their timeout duration strings.
+	// Parsed from `test(timeout: "5s") annotations on individual test functions.
+	// Values are Go-style duration strings (e.g., "500ms", "2s", "1m").
+	TestTimeouts map[string]string
+
 	// FieldDefaults maps fields with default values to their AST default expressions.
 	// Used by codegen to evaluate defaults for omitted constructor arguments.
 	FieldDefaults map[*types.Field]ast.Expr

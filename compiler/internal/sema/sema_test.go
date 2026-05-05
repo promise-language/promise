@@ -5740,6 +5740,28 @@ func TestTestFuncGenericFails(t *testing.T) {
 	expectError(t, errs, "must not be generic")
 }
 
+func TestTestFuncTimeoutValid(t *testing.T) {
+	info, _ := checkSource(t, `myTest() `+"`test(timeout: \"5s\")"+` {}`)
+	if len(info.TestTimeouts) != 1 {
+		t.Fatalf("expected 1 test timeout, got %d", len(info.TestTimeouts))
+	}
+	if info.TestTimeouts["myTest"] != "5s" {
+		t.Fatalf("expected timeout '5s', got %q", info.TestTimeouts["myTest"])
+	}
+}
+
+func TestTestFuncTimeoutInvalid(t *testing.T) {
+	errs := checkErrs(t, `myTest() `+"`test(timeout: \"not_valid\")"+` {}`)
+	expectError(t, errs, "invalid timeout duration")
+}
+
+func TestTestFuncTimeoutOnExpectedTest(t *testing.T) {
+	info, _ := checkSource(t, `main() `+"`test(expected: \"hello\", timeout: \"2s\")"+` { print_line("hello"); }`)
+	if info.TestTimeouts["main"] != "2s" {
+		t.Fatalf("expected timeout '2s', got %q", info.TestTimeouts["main"])
+	}
+}
+
 func TestStdFuncMissingReturnDetected(t *testing.T) {
 	// Function with missing return should be caught by checkMissingReturn
 	_, errs := checkSourceWithStd(t,

@@ -202,7 +202,7 @@ func compileTargets(files []string, baseDir string, targetTriple string) (target
 			}
 			tmp.Close()
 			result := codegen.Compile(file, info, target)
-			result.GenerateTestMain(info.Tests)
+			result.GenerateTestMain(info.Tests, nil)
 			compileAndLink(result, tmp.Name(), target, f)
 			tempFiles = append(tempFiles, tmp.Name())
 			var testNames []string
@@ -305,7 +305,7 @@ func compileTargets(files []string, baseDir string, targetTriple string) (target
 			})
 		} else if len(info.Tests) > 0 {
 			result := codegen.Compile(file, info, target)
-			result.GenerateTestMain(info.Tests)
+			result.GenerateTestMain(info.Tests, nil)
 			compileAndLink(result, tmp.Name(), target, f)
 			tempFiles = append(tempFiles, tmp.Name())
 

@@ -226,6 +226,7 @@ type Compiler struct {
 	panicJmpBufGlobal   *ir.Global // @__promise_panic_jmpbuf (TLS, i8*) — setjmp buf for goroutine panic recovery
 	testJmpBufGlobal    *ir.Global // @__promise_test_jmpbuf (TLS, i8*) — setjmp buf for per-test panic recovery
 	testPanicMsgGlobal  *ir.Global // @__promise_test_panic_msg (non-TLS, i8*) — panic msg for test recovery
+	testDoneGlobal      *ir.Global // @__promise_test_done (non-TLS, i32) — set to 1 by trampoline on completion
 	inCoroutine         bool       // true when compiling inside a go block coroutine body
 	goExprFireAndForget bool       // true when go expr result is discarded (no <-task receiver)
 	coroCleanupBlk      *ir.Block  // coroutine cleanup block (destroy path: coro.free + free)
@@ -566,7 +567,9 @@ func compile(file *ast.File, info *sema.Info, target string, cachedInstances map
 // each test function via a codegen-emitted thread-based runner.
 // On non-WASM targets, per-test panic recovery allows subsequent tests to run
 // after a panic. The panic message is printed indented under the FAIL line.
-func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
+// testTimeouts maps test function names to their computed timeout in nanoseconds.
+// A timeout of 0 means no per-test timeout enforcement.
+func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[string]int64) {
 	c := r.compiler
 
 	testRunFn := c.defineTestRunFunc()
@@ -685,11 +688,18 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 		// Bitcast test function to i8* for promise_test_run
 		fnPtr := entry.NewBitCast(testFn, irtypes.I8Ptr)
 
+		// Look up per-test timeout (0 = no per-test timeout)
+		var timeoutNs int64
+		if testTimeouts != nil {
+			timeoutNs = testTimeouts[nameStr]
+		}
+		timeoutConst := constant.NewInt(irtypes.I64, timeoutNs)
+
 		// Time the test: t0 = nanotime()
 		t0 := entry.NewCall(nanotimeFn)
 
-		// Call promise_test_run(fn) -> i32 (0=pass, 1=fail)
-		result := entry.NewCall(testRunFn, fnPtr)
+		// Call promise_test_run(fn, timeout_ns) -> i32 (0=pass, 1=fail, 2=timeout)
+		result := entry.NewCall(testRunFn, fnPtr, timeoutConst)
 
 		// t1 = nanotime(); elapsed = t1 - t0
 		t1 := entry.NewCall(nanotimeFn)
@@ -725,13 +735,21 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func) {
 		isFail := entry.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 0))
 		entry.NewCondBr(isFail, failStoreBlock, skipStoreBlock)
 
-		// Print panic message if one was captured (non-WASM only)
+		// Print panic message if one was captured (non-WASM only).
+		// Skip for timeout (result==2) — the test thread is still running,
+		// so reading @__promise_test_panic_msg would be a data race.
 		if !c.isWasm {
-			panicMsg := failStoreBlock.NewLoad(irtypes.I8Ptr, c.testPanicMsgGlobal)
-			hasPanicMsg := failStoreBlock.NewICmp(enum.IPredNE, panicMsg, constant.NewNull(irtypes.I8Ptr))
-			printPanicBlk := mainFn.NewBlock(fmt.Sprintf("print_panic_%s", nameStr))
 			afterPanicBlk := mainFn.NewBlock(fmt.Sprintf("after_panic_%s", nameStr))
-			failStoreBlock.NewCondBr(hasPanicMsg, printPanicBlk, afterPanicBlk)
+
+			// Check: result == 2 means timeout → skip panic msg read
+			isTimeout := failStoreBlock.NewICmp(enum.IPredEQ, result, constant.NewInt(irtypes.I32, 2))
+			checkPanicBlk := mainFn.NewBlock(fmt.Sprintf("check_panic_%s", nameStr))
+			failStoreBlock.NewCondBr(isTimeout, afterPanicBlk, checkPanicBlk)
+
+			panicMsg := checkPanicBlk.NewLoad(irtypes.I8Ptr, c.testPanicMsgGlobal)
+			hasPanicMsg := checkPanicBlk.NewICmp(enum.IPredNE, panicMsg, constant.NewNull(irtypes.I8Ptr))
+			printPanicBlk := mainFn.NewBlock(fmt.Sprintf("print_panic_%s", nameStr))
+			checkPanicBlk.NewCondBr(hasPanicMsg, printPanicBlk, afterPanicBlk)
 
 			// Print "  panic: <msg>\n" to stdout
 			stdout := constant.NewInt(irtypes.I32, 1)

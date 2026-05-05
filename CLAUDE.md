@@ -64,12 +64,18 @@ go tool cover -func=/tmp/cov.out
 Promise test commands (use `bin/promise` from repo root):
 
 ```bash
-bin/promise test file.pr                       # default 60s timeout
-bin/promise test -timeout 30s file.pr          # custom timeout (Go duration or seconds)
+bin/promise test file.pr                       # default 60s per-test timeout
+bin/promise test -timeout 30s file.pr          # custom per-test timeout (Go duration or seconds)
 bin/promise test -parallel 4 tests/...         # run up to 4 tests in parallel (default: NumCPU)
 bin/promise exec -timeout 10s 'print_line("hi")'  # exec with timeout (failable main, ? works)
 bin/promise emit-ir file.pr                    # print LLVM IR to stdout
 bin/promise emit-ir file.pr > out.ll           # save IR to file
+
+# Per-test timeout control (T0023)
+bin/promise test -timeout-scale 2.0 tests/...            # double all timeouts (slow CI)
+bin/promise test -timeout-scale 0.5 tests/...            # halve all timeouts
+bin/promise test -timeout-max 5s tests/...               # clamp all timeouts to 5s max
+bin/promise test -timeout-min 1s -timeout-max 10s tests/...  # min/max clamps
 
 # Stress testing (flaky test detection)
 bin/promise test -stress tests/...                       # run until Ctrl+C
@@ -89,11 +95,13 @@ PASS (0.001s) test_add
 PASS (0.002s) test_sub
 FAIL (0.003s) test_broken
   panic: assertion failed: expected 3, got 4   # panic context shown under FAIL
-PASS (0.001s) test_other                       # subsequent tests still run after panic
+TIMEOUT (0.100s) test_stuck                    # per-test timeout exceeded (T0023)
+PASS (0.001s) test_other                       # subsequent tests still run after panic/timeout
 
-3 passed, 1 failed (0.423s)
+3 passed, 2 failed (0.423s)
 FAILED:
   test_broken
+  test_stuck
 ```
 
 Multi-file output (compact — one line per file):
@@ -338,6 +346,8 @@ The standard library (`modules/std/`, 29 files) is auto-imported via `use std as
     }
     ```
   The cost of running tests is dominated by how many binaries are compiled — test execution itself is practically instant. Batch tests minimize binary count.
+
+  Both styles support a `timeout` annotation parameter for per-test timeout control: `` `test(timeout: "5s") `` or `` `test(expected: "...", timeout: "2s") ``. Duration uses Go syntax (`500ms`, `2s`, `1m`). Tests without a timeout annotation use the CLI `-timeout` default (60s). The CLI also supports `-timeout-scale`, `-timeout-min`, `-timeout-max` to modify all timeouts uniformly.
 
 - **Co-locate tests with source files.** Place `*_test.pr` files alongside the `.pr` files they test (not in a separate `tests/` tree). This makes tests easier to find and maintains context. The `tests/` directory is for cross-cutting integration and e2e tests that don't belong to a specific module or file.
 

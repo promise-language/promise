@@ -240,6 +240,22 @@ func extractTestExpected(annotations []*ast.MetaAnnotation) (string, bool) {
 	return "", false
 }
 
+// extractTestTimeout extracts the timeout duration from a `test(timeout: "5s") annotation.
+// Returns the raw duration string and true if the annotation has a timeout parameter.
+func extractTestTimeout(annotations []*ast.MetaAnnotation) (string, bool) {
+	for _, ann := range annotations {
+		if ann.Name != "test" {
+			continue
+		}
+		for _, p := range ann.Params {
+			if p.Name == "timeout" {
+				return evalStringLit(p.Value), true
+			}
+		}
+	}
+	return "", false
+}
+
 // extractTestExclude extracts the exclude targets from a `test(exclude: "wasm32") annotation.
 // The value is split by comma into a list of target substrings.
 func extractTestExclude(annotations []*ast.MetaAnnotation) []string {

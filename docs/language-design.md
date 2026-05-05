@@ -137,12 +137,26 @@ main() `test(expected: "42") {
 }
 ```
 
+**Per-test timeout** — individual tests can declare their own timeout using the `timeout` annotation parameter. The value is a Go-style duration string (`500ms`, `2s`, `1m`). Tests without a timeout annotation use the CLI `-timeout` default (60s). The CLI also provides `-timeout-scale` (multiplier), `-timeout-min`, and `-timeout-max` (clamps). Final timeout: `clamp((annotation ?: default) × scale, min, max)`.
+
+```promise
+test_channel_send() `test(timeout: "5s") {
+  // times out after 5s instead of the default 60s
+}
+
+main() `test(expected: "hello", timeout: "2s") {
+  print_line("hello");
+}
+```
+
 **Directory scanning** runs all `.pr` files in a directory, with Go-style `...` for recursion:
 
 ```sh
 promise test tests/               # non-recursive
 promise test tests/...            # recursive (all subdirectories)
-promise test -timeout 30s tests/  # custom per-test timeout
+promise test -timeout 30s tests/  # custom per-test default timeout
+promise test -timeout-scale 2.0 tests/...   # double all timeouts (slow CI)
+promise test -timeout-max 5s tests/...      # clamp all timeouts to 5s
 ```
 
 **Stress testing** detects flaky tests via repeated execution:

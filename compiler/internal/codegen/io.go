@@ -449,9 +449,14 @@ func (c *Compiler) defineSchedStatGetterBody(fn *ir.Func, field int) {
 // defineNanotimeFunc defines .promise_nanotime_raw() → i64 for the test runner.
 // Returns raw i64 nanoseconds (not Promise int value struct).
 // Uses a dot-prefixed name to avoid collision with the extern promise_nanotime.
+// Idempotent: returns the cached function if already defined.
 func (c *Compiler) defineNanotimeFunc() *ir.Func {
+	if fn, ok := c.funcs[".promise_nanotime_raw"]; ok {
+		return fn
+	}
 	fn := c.module.NewFunc(".promise_nanotime_raw", irtypes.I64)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	c.funcs[".promise_nanotime_raw"] = fn
 	entry := fn.NewBlock(".entry")
 
 	if c.isWasm {
@@ -594,39 +599,89 @@ func (c *Compiler) getOrDeclareFunc(name string, retType irtypes.Type, params ..
 	return fn
 }
 
-// defineTestRunFunc defines a codegen-emitted promise_test_run(i8* %fn) → i32.
+// defineTestRunFunc defines a codegen-emitted promise_test_run(i8* %fn, i64 %timeout_ns) → i32.
 // Runs each test in a thread via PAL. On non-WASM targets, the trampoline uses
 // setjmp/longjmp for per-test panic recovery — a panicking test returns 1 (fail)
 // instead of killing the process, allowing subsequent tests to run.
-// On WASM: panics still terminate the process (no longjmp support).
+// When timeout_ns > 0, the main thread polls @__promise_test_done with usleep(1ms)
+// instead of blocking on pal_thread_join. If the test doesn't complete within
+// timeout_ns nanoseconds, returns 2 (timeout) without joining.
+// On WASM: panics still terminate the process (no longjmp support), no timeout.
 func (c *Compiler) defineTestRunFunc() *ir.Func {
 	fn := c.module.NewFunc("promise_test_run", irtypes.I32,
-		ir.NewParam("fn", irtypes.I8Ptr))
+		ir.NewParam("fn", irtypes.I8Ptr),
+		ir.NewParam("timeout_ns", irtypes.I64))
 	entry := fn.NewBlock(".entry")
 
 	trampoline := c.defineTestTrampoline()
 	trampolinePtr := entry.NewBitCast(trampoline, irtypes.I8Ptr)
 
+	// Reset done flag before spawning the test thread
+	entry.NewStore(constant.NewInt(irtypes.I32, 0), c.testDoneGlobal)
+
 	// Spawn thread: pass the test function pointer as the arg
 	handle := entry.NewCall(c.palThreadCreate, trampolinePtr, fn.Params[0])
 
-	// Join thread (waits for completion)
-	entry.NewCall(c.palThreadJoin, handle)
-
 	if c.isWasm {
-		// WASM: no recovery — if we get here, the test passed
+		// WASM: no timeout, no recovery — just join and return 0
+		entry.NewCall(c.palThreadJoin, handle)
 		entry.NewRet(constant.NewInt(irtypes.I32, 0))
-	} else {
-		// Check @__promise_test_panic_msg: non-null means test panicked
-		panicMsg := entry.NewLoad(irtypes.I8Ptr, c.testPanicMsgGlobal)
-		hasPanic := entry.NewICmp(enum.IPredNE, panicMsg, constant.NewNull(irtypes.I8Ptr))
-		failBlk := fn.NewBlock("test_failed")
-		passBlk := fn.NewBlock("test_passed")
-		entry.NewCondBr(hasPanic, failBlk, passBlk)
-
-		failBlk.NewRet(constant.NewInt(irtypes.I32, 1))
-		passBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+		return fn
 	}
+
+	// Check if timeout is enabled (timeout_ns > 0)
+	nanotimeFn := c.defineNanotimeFunc()
+	hasTimeout := entry.NewICmp(enum.IPredSGT, fn.Params[1], constant.NewInt(irtypes.I64, 0))
+	pollBlk := fn.NewBlock("poll_start")
+	noTimeoutBlk := fn.NewBlock("no_timeout")
+	entry.NewCondBr(hasTimeout, pollBlk, noTimeoutBlk)
+
+	// No-timeout path: just join and check result
+	noTimeoutBlk.NewCall(c.palThreadJoin, handle)
+	checkResultBlk := fn.NewBlock("check_result")
+	noTimeoutBlk.NewBr(checkResultBlk)
+
+	// Timeout path: compute deadline, poll done flag with usleep
+	deadline := pollBlk.NewAdd(pollBlk.NewCall(nanotimeFn), fn.Params[1])
+
+	pollLoopBlk := fn.NewBlock("poll_loop")
+	pollBlk.NewBr(pollLoopBlk)
+
+	// Poll loop: check done flag → check deadline → sleep → loop
+	done := pollLoopBlk.NewLoad(irtypes.I32, c.testDoneGlobal)
+	isDone := pollLoopBlk.NewICmp(enum.IPredEQ, done, constant.NewInt(irtypes.I32, 1))
+	joinDoneBlk := fn.NewBlock("join_done")
+	checkDeadlineBlk := fn.NewBlock("check_deadline")
+	pollLoopBlk.NewCondBr(isDone, joinDoneBlk, checkDeadlineBlk)
+
+	// Test completed: join thread (near-instant) and check result
+	joinDoneBlk.NewCall(c.palThreadJoin, handle)
+	joinDoneBlk.NewBr(checkResultBlk)
+
+	// Check deadline
+	now := checkDeadlineBlk.NewCall(nanotimeFn)
+	pastDeadline := checkDeadlineBlk.NewICmp(enum.IPredSGT, now, deadline)
+	timedOutBlk := fn.NewBlock("timed_out")
+	sleepBlk := fn.NewBlock("poll_sleep")
+	checkDeadlineBlk.NewCondBr(pastDeadline, timedOutBlk, sleepBlk)
+
+	// Sleep 1ms and loop back
+	sleepBlk.NewCall(c.palUsleep, constant.NewInt(irtypes.I32, 1000))
+	sleepBlk.NewBr(pollLoopBlk)
+
+	// Timed out: don't join (thread still running), return 2
+	timedOutBlk.NewRet(constant.NewInt(irtypes.I32, 2))
+
+	// Check result: inspect panic message
+	panicMsg := checkResultBlk.NewLoad(irtypes.I8Ptr, c.testPanicMsgGlobal)
+	hasPanic := checkResultBlk.NewICmp(enum.IPredNE, panicMsg, constant.NewNull(irtypes.I8Ptr))
+	failBlk := fn.NewBlock("test_failed")
+	passBlk := fn.NewBlock("test_passed")
+	checkResultBlk.NewCondBr(hasPanic, failBlk, passBlk)
+
+	failBlk.NewRet(constant.NewInt(irtypes.I32, 1))
+	passBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+
 	return fn
 }
 
@@ -648,6 +703,7 @@ func (c *Compiler) defineTestTrampoline() *ir.Func {
 		voidFnPtrType := irtypes.NewPointer(irtypes.NewFunc(irtypes.Void))
 		typedFn := entry.NewBitCast(trampoline.Params[0], voidFnPtrType)
 		entry.NewCall(typedFn)
+		entry.NewStore(constant.NewInt(irtypes.I32, 1), c.testDoneGlobal) // signal done
 		entry.NewRet(constant.NewNull(irtypes.I8Ptr))
 		return trampoline
 	}
@@ -668,7 +724,8 @@ func (c *Compiler) defineTestTrampoline() *ir.Func {
 	panicBlk := trampoline.NewBlock("panic_recovered")
 	entry.NewCondBr(isPanicReturn, panicBlk, normalBlk)
 
-	// Normal path: read SP, call test function, read SP again, check for drift
+	// Normal path: read SP, call test function, read SP again, check for drift.
+	// Signal done flag before returning (for per-test timeout polling).
 	voidFnPtrType := irtypes.NewPointer(irtypes.NewFunc(irtypes.Void))
 	typedFn := normalBlk.NewBitCast(trampoline.Params[0], voidFnPtrType)
 
@@ -683,7 +740,8 @@ func (c *Compiler) defineTestTrampoline() *ir.Func {
 		stackCreepBlk := trampoline.NewBlock("stack_creep")
 		normalBlk.NewCondBr(spMatch, stackOkBlk, stackCreepBlk)
 
-		// Stack creep detected: store diagnostic message, return failure
+		// Stack creep detected: signal done, store diagnostic message, return failure
+		stackCreepBlk.NewStore(constant.NewInt(irtypes.I32, 1), c.testDoneGlobal) // signal done
 		creepMsgData := constant.NewCharArrayFromString("stack creep detected\x00")
 		creepMsgGlobal := c.module.NewGlobalDef(".str.stack_creep_msg", creepMsgData)
 		creepMsgGlobal.Immutable = true
@@ -695,16 +753,19 @@ func (c *Compiler) defineTestTrampoline() *ir.Func {
 		creepFail := stackCreepBlk.NewIntToPtr(constant.NewInt(irtypes.I64, 1), irtypes.I8Ptr)
 		stackCreepBlk.NewRet(creepFail)
 
-		// Stack OK: clear jmpbuf, return null (pass)
+		// Stack OK: signal done, clear jmpbuf, return null (pass)
+		stackOkBlk.NewStore(constant.NewInt(irtypes.I32, 1), c.testDoneGlobal) // signal done
 		stackOkBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.testJmpBufGlobal)
 		stackOkBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
 	} else {
-		// SP check not available for this target: proceed without check
+		// SP check not available for this target: signal done, proceed without check
+		normalBlk.NewStore(constant.NewInt(irtypes.I32, 1), c.testDoneGlobal) // signal done
 		normalBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.testJmpBufGlobal)
 		normalBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
 	}
 
-	// Panic recovery path: clear jmpbuf, return non-null (fail indicator)
+	// Panic recovery path: signal done, clear jmpbuf, return non-null (fail indicator)
+	panicBlk.NewStore(constant.NewInt(irtypes.I32, 1), c.testDoneGlobal) // signal done
 	panicBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.testJmpBufGlobal)
 	failIndicator := panicBlk.NewIntToPtr(constant.NewInt(irtypes.I64, 1), irtypes.I8Ptr)
 	panicBlk.NewRet(failIndicator)
@@ -737,8 +798,9 @@ func (c *Compiler) emitReadStackPointer(block *ir.Block) value.Value {
 }
 
 // defineTestPrintResultBody adds a function body to promise_test_print_result.
-// Params: (i8* %name, i32 %failed, i64 %elapsed_ns)
-// Writes "PASS (X.XXXs) <name>\n" or "FAIL (X.XXXs) <name>\n" to stdout.
+// Params: (i8* %name, i32 %result, i64 %elapsed_ns)
+// result: 0=pass, 1=fail, 2=timeout
+// Writes "PASS (X.XXXs) <name>\n", "FAIL (X.XXXs) <name>\n", or "TIMEOUT (X.XXXs) <name>\n".
 func (c *Compiler) defineTestPrintResultBody(fn *ir.Func) {
 	// Global constants for prefix/suffix strings
 	passData := constant.NewCharArrayFromString("PASS (")
@@ -751,6 +813,11 @@ func (c *Compiler) defineTestPrintResultBody(fn *ir.Func) {
 	failGlobal.Immutable = true
 	failGlobal.Linkage = enum.LinkagePrivate
 
+	timeoutData := constant.NewCharArrayFromString("TIMEOUT (")
+	timeoutGlobal := c.module.NewGlobalDef(".str.timeout_prefix", timeoutData)
+	timeoutGlobal.Immutable = true
+	timeoutGlobal.Linkage = enum.LinkagePrivate
+
 	dotData := constant.NewCharArrayFromString(".")
 	dotGlobal := c.module.NewGlobalDef(".str.dot", dotData)
 	dotGlobal.Immutable = true
@@ -762,30 +829,41 @@ func (c *Compiler) defineTestPrintResultBody(fn *ir.Func) {
 	timeSuffixGlobal.Linkage = enum.LinkagePrivate
 
 	stdout := constant.NewInt(irtypes.I32, 1)
-	name := fn.Params[0]      // i8*
-	failed := fn.Params[1]    // i32
-	elapsedNs := fn.Params[2] // i64
+	name := fn.Params[0]       // i8*
+	resultCode := fn.Params[1] // i32 (0=pass, 1=fail, 2=timeout)
+	elapsedNs := fn.Params[2]  // i64
 
-	// Branch on failed != 0
+	// Branch: 0 = pass, 2 = timeout, else = fail
 	entry := fn.NewBlock(".entry")
-	thenBlock := fn.NewBlock("fail")
-	elseBlock := fn.NewBlock("pass")
+	failBlock := fn.NewBlock("fail")
+	passBlock := fn.NewBlock("pass")
+	timeoutBlock := fn.NewBlock("timeout")
 	mergeBlock := fn.NewBlock("merge")
 
-	isFailed := entry.NewICmp(enum.IPredNE, failed, constant.NewInt(irtypes.I32, 0))
-	entry.NewCondBr(isFailed, thenBlock, elseBlock)
+	isPass := entry.NewICmp(enum.IPredEQ, resultCode, constant.NewInt(irtypes.I32, 0))
+	notPassBlock := fn.NewBlock("not_pass")
+	entry.NewCondBr(isPass, passBlock, notPassBlock)
+
+	isTimeout := notPassBlock.NewICmp(enum.IPredEQ, resultCode, constant.NewInt(irtypes.I32, 2))
+	notPassBlock.NewCondBr(isTimeout, timeoutBlock, failBlock)
 
 	// "FAIL (" branch
-	failPtr := thenBlock.NewGetElementPtr(failGlobal.ContentType, failGlobal,
+	failPtr := failBlock.NewGetElementPtr(failGlobal.ContentType, failGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	thenBlock.NewCall(c.palWrite, stdout, failPtr, constant.NewInt(irtypes.I64, 6))
-	thenBlock.NewBr(mergeBlock)
+	failBlock.NewCall(c.palWrite, stdout, failPtr, constant.NewInt(irtypes.I64, 6))
+	failBlock.NewBr(mergeBlock)
+
+	// "TIMEOUT (" branch
+	timeoutPtr := timeoutBlock.NewGetElementPtr(timeoutGlobal.ContentType, timeoutGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	timeoutBlock.NewCall(c.palWrite, stdout, timeoutPtr, constant.NewInt(irtypes.I64, 9))
+	timeoutBlock.NewBr(mergeBlock)
 
 	// "PASS (" branch
-	passPtr := elseBlock.NewGetElementPtr(passGlobal.ContentType, passGlobal,
+	passPtr := passBlock.NewGetElementPtr(passGlobal.ContentType, passGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	elseBlock.NewCall(c.palWrite, stdout, passPtr, constant.NewInt(irtypes.I64, 6))
-	elseBlock.NewBr(mergeBlock)
+	passBlock.NewCall(c.palWrite, stdout, passPtr, constant.NewInt(irtypes.I64, 6))
+	passBlock.NewBr(mergeBlock)
 
 	// Compute seconds and fractional milliseconds from elapsed_ns
 	// elapsed_ms = elapsed_ns / 1_000_000

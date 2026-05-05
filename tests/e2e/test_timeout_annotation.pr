@@ -1,0 +1,19 @@
+// Tests for per-test timeout annotations (T0023).
+// Test that passes quickly within its generous timeout
+test_fast_with_timeout() `test(timeout: "5s") {
+  assert(1 + 1 == 2, "basic math");
+}
+
+// Test without timeout annotation (uses CLI default)
+test_no_timeout_annotation() `test {
+  assert(true, "always passes");
+}
+
+// Test with sub-second timeout that should pass easily
+test_short_timeout() `test(timeout: "500ms") {
+  int x = 0;
+  for i in 0..100 {
+    x += i;
+  }
+  assert(x == 4950, "sum 0..99");
+}

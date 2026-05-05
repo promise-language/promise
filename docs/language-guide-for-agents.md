@@ -559,6 +559,16 @@ test_hello() `test(expected: "hello") {
   print_line("hello");
 }
 
+// Per-test timeout (Go duration syntax: "500ms", "2s", "1m")
+test_channel_send() `test(timeout: "5s") {
+  // times out after 5s instead of the default 60s
+}
+
+// Snapshot test with timeout
+main() `test(expected: "hello", timeout: "2s") {
+  print_line("hello");
+}
+
 // Exclude from platforms
 test_file_io() `test(exclude: "wasm32") {
   // ...
@@ -566,6 +576,18 @@ test_file_io() `test(exclude: "wasm32") {
 ```
 
 Run tests: `promise test file.pr` or `promise test tests/...` (recursive).
+
+**Timeout control:**
+```sh
+promise test -timeout 30s tests/...                  # per-test default (applies to unannotated tests)
+promise test -timeout-scale 2.0 tests/...            # double all timeouts (slow CI)
+promise test -timeout-scale 0.5 tests/...            # halve all timeouts (detect sluggish tests)
+promise test -timeout-max 5s tests/...               # clamp all timeouts to 5s max
+promise test -timeout-min 1s tests/...               # minimum 1s per test
+promise test -timeout-min 500ms -timeout-max 10s -timeout-scale 1.5 tests/...
+```
+
+Resolution: `final_timeout = clamp((annotation ?: default) × scale, min, max)`
 
 ## Generators
 
@@ -745,6 +767,7 @@ string id `final;                 // immutable after construction
 speak() string `abstract;         // must be overridden by child
 zero() Self `factory { ... }      // static constructor, returns Self
 process() `test { ... }           // test function
+process() `test(timeout: "5s") { ... }  // test with per-test timeout
 main() `test(expected: "hi") { }  // snapshot test (checks stdout)
 type Printable `structural { ... } // auto-satisfied by matching methods
 get name string `embed("f.txt");  // compile-time file embed

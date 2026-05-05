@@ -6040,12 +6040,12 @@ func TestGenerateTestMainNoExistingMain(t *testing.T) {
 		file, _ := ast.Build("test.pr", tree)
 		return file
 	}())
-	result.GenerateTestMain(info.Tests)
+	result.GenerateTestMain(info.Tests, nil)
 	ir := result.Module.String()
 	assertContains(t, ir, "define i32 @main")
 	assertContains(t, ir, "call i32 @promise_test_run")
 	// promise_test_run is now codegen-defined (not a C extern)
-	assertContains(t, ir, "define i32 @promise_test_run(i8* %fn)")
+	assertContains(t, ir, "define i32 @promise_test_run(i8* %fn, i64 %timeout_ns)")
 	// Thread-based: spawns a thread via PAL, joins it
 	assertContains(t, ir, "call i8* @pal_thread_create")
 	assertContains(t, ir, "call void @pal_thread_join")
@@ -6070,7 +6070,7 @@ func TestGenerateTestMainReplacesExistingMain(t *testing.T) {
 		file, _ := ast.Build("test.pr", tree)
 		return file
 	}())
-	result.GenerateTestMain(info.Tests)
+	result.GenerateTestMain(info.Tests, nil)
 	ir := result.Module.String()
 	// Should still have main but with test runner content
 	assertContains(t, ir, "define i32 @main")
@@ -6094,7 +6094,7 @@ func TestGenerateTestMainStoresArgcArgv(t *testing.T) {
 		file, _ := ast.Build("test.pr", tree)
 		return file
 	}())
-	result.GenerateTestMain(info.Tests)
+	result.GenerateTestMain(info.Tests, nil)
 	ir := result.Module.String()
 	// Test main receives argc/argv and stores to globals
 	assertContains(t, ir, "define i32 @main(i32 %argc, i8** %argv)")
@@ -6117,21 +6117,23 @@ func TestTestPrintResultBody(t *testing.T) {
 		file, _ := ast.Build("test.pr", tree)
 		return file
 	}())
-	result.GenerateTestMain(info.Tests)
+	result.GenerateTestMain(info.Tests, nil)
 	ir := result.Module.String()
 
 	// Function is defined (not just declared)
 	assertContains(t, ir, "define void @promise_test_print_result(i8* %name, i32 %failed, i64 %elapsed_ns)")
-	// Branching on failed flag with conditional branch to fail/pass blocks
-	assertContains(t, ir, "icmp ne i32 %failed, 0")
-	assertContains(t, ir, "br i1")    // conditional branch
-	assertContains(t, ir, "br label") // unconditional branches to merge
-	// PASS/FAIL prefix globals (now include opening paren)
+	// 3-way branching: 0=pass, 2=timeout, else=fail
+	assertContains(t, ir, "icmp eq i32 %failed, 0") // pass check
+	assertContains(t, ir, "icmp eq i32 %failed, 2") // timeout check
+	assertContains(t, ir, "br i1")                  // conditional branches
+	assertContains(t, ir, "br label")               // unconditional branches to merge
+	// PASS/FAIL/TIMEOUT prefix globals
 	assertContains(t, ir, `@.str.pass_prefix = private constant [6 x i8] c"PASS ("`)
 	assertContains(t, ir, `@.str.fail_prefix = private constant [6 x i8] c"FAIL ("`)
-	// Prefix write: 6 bytes for "PASS (" or "FAIL ("
+	assertContains(t, ir, `@.str.timeout_prefix = private constant [9 x i8] c"TIMEOUT ("`)
+	// Prefix writes
 	assertContains(t, ir, "call i64 @pal_write(i32 1,")
-	assertContains(t, ir, "i64 6)")
+	assertContains(t, ir, "i64 6)") // PASS/FAIL prefix length
 	// Gets name length via strlen and writes name
 	assertContains(t, ir, "call i64 @strlen(i8* %name)")
 	// Time formatting: "s) " suffix, "\n" newline
@@ -6154,7 +6156,7 @@ func TestTestSummaryBody(t *testing.T) {
 		file, _ := ast.Build("test.pr", tree)
 		return file
 	}())
-	result.GenerateTestMain(info.Tests)
+	result.GenerateTestMain(info.Tests, nil)
 	ir := result.Module.String()
 
 	// Function is defined (not just declared)
@@ -6202,7 +6204,7 @@ func TestTestTrampolineStackCreepDetection(t *testing.T) {
 		file, _ := ast.Build("test.pr", tree)
 		return file
 	}())
-	result.GenerateTestMain(info.Tests)
+	result.GenerateTestMain(info.Tests, nil)
 	ir := result.Module.String()
 
 	// Trampoline should contain inline asm to read SP (sideeffect prevents reordering)

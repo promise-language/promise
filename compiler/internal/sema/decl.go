@@ -1,6 +1,8 @@
 package sema
 
 import (
+	"time"
+
 	"djabi.dev/go/promise_lang/internal/ast"
 	"djabi.dev/go/promise_lang/internal/types"
 )
@@ -861,6 +863,18 @@ func (c *Checker) defineFunc(d *ast.FuncDecl) {
 		fn.SetExported(true)
 	}
 	if c.hasAnnotation(d.Annotations, "test") {
+		// Extract and validate timeout annotation if present
+		if timeoutStr, hasTimeout := extractTestTimeout(d.Annotations); hasTimeout {
+			if _, err := time.ParseDuration(timeoutStr); err != nil {
+				c.errorf(d.Pos(), "invalid timeout duration %q: %v", timeoutStr, err)
+			} else {
+				if c.info.TestTimeouts == nil {
+					c.info.TestTimeouts = make(map[string]string)
+				}
+				c.info.TestTimeouts[d.Name] = timeoutStr
+			}
+		}
+
 		if expected, ok := extractTestExpected(d.Annotations); ok {
 			// `test(expected="...") — e2e output test on main()
 			if d.Name != "main" {

@@ -13,7 +13,7 @@ Run stress tests to detect flaky tests, then reconcile results against the bug t
 
 ### 1. Run stress tests
 
-- Execute `bin/stress.sh $ARGUMENTS` (or `bin/stress.sh 1000` if no arguments given).
+- Execute `TERM=xterm bin/stress.sh $ARGUMENTS` (or `TERM=xterm bin/stress.sh 1000` if no arguments given).
 - This builds the compiler, then runs `bin/promise test -timeout 15s -stress <N> tests/... modules/...`.
 - Let it run to completion. The output ends with a structured report.
 

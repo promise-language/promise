@@ -601,10 +601,20 @@ func isSimpleEnum(enum *types.Enum) bool {
 
 // processSerializableEnum handles `serializable on an enum declaration.
 // Simple enums (no data variants) encode as strings.
-// Data enums use tagged object format: {"type":"Variant",...fields...}.
-// Decoder requires the "type" discriminator as the first key (discriminator-first constraint).
+// Data enums use tagged object format: {"<tag>":"Variant",...fields...}.
+// The discriminator key defaults to "type" but can be customized via `serializable(tag: "kind").
+// Decoder requires the discriminator as the first key (discriminator-first constraint).
 func (c *Checker) processSerializableEnum(enum *types.Enum, d *ast.EnumDecl) {
 	enum.SetSerializable(true)
+
+	// Extract custom discriminator tag name (default "type").
+	if tag := extractSerializableTag(d.Annotations); tag != "" {
+		enum.SetSerializeTag(tag)
+	}
+	tagName := enum.SerializeTag()
+	if tagName == "" {
+		tagName = "type"
+	}
 
 	// Synthesize encode method if not user-defined.
 	if lookupOwnEnumMethod(enum, "encode") == nil {
@@ -612,7 +622,7 @@ func (c *Checker) processSerializableEnum(enum *types.Enum, d *ast.EnumDecl) {
 		if isSimpleEnum(enum) {
 			md = c.synthesizeEnumEncodeMethod(enum, d)
 		} else {
-			md = c.synthesizeDataEnumEncodeMethod(enum, d)
+			md = c.synthesizeDataEnumEncodeMethod(enum, d, tagName)
 		}
 		d.Methods = append(d.Methods, md)
 		c.defineEnumMethod(enum, md, d.Name)
@@ -624,7 +634,7 @@ func (c *Checker) processSerializableEnum(enum *types.Enum, d *ast.EnumDecl) {
 		if isSimpleEnum(enum) {
 			md = c.synthesizeEnumDecodeMethod(enum, d)
 		} else {
-			md = c.synthesizeDataEnumDecodeMethod(enum, d)
+			md = c.synthesizeDataEnumDecodeMethod(enum, d, tagName)
 		}
 		d.Methods = append(d.Methods, md)
 		c.defineEnumMethod(enum, md, d.Name)
@@ -754,24 +764,26 @@ func (c *Checker) synthesizeEnumDecodeMethod(enum *types.Enum, d *ast.EnumDecl) 
 //	encode(Encoder ~e)! `public {
 //	  match this {
 //	    Enum.Variant1(f1, f2) => {
-//	      e.begin_object(0); e.encode_key("type"); e.encode_string("Variant1");
+//	      e.begin_object(0); e.encode_key("<tag>"); e.encode_string("Variant1");
 //	      e.encode_key("f1"); f1.encode(e); e.encode_key("f2"); f2.encode(e);
 //	      e.end_object();
 //	    },
 //	    Enum.Fieldless => {
-//	      e.begin_object(0); e.encode_key("type"); e.encode_string("Fieldless");
+//	      e.begin_object(0); e.encode_key("<tag>"); e.encode_string("Fieldless");
 //	      e.end_object();
 //	    },
 //	  }
 //	}
-func (c *Checker) synthesizeDataEnumEncodeMethod(enum *types.Enum, d *ast.EnumDecl) *ast.MethodDecl {
+//
+// tagName is the discriminator key (default "type", customizable via `serializable(tag: "...")`).
+func (c *Checker) synthesizeDataEnumEncodeMethod(enum *types.Enum, d *ast.EnumDecl, tagName string) *ast.MethodDecl {
 	enumName := d.Name
 
 	var arms []*ast.MatchArm
 	for _, v := range enum.Variants() {
 		var stmts []ast.Stmt
 		stmts = append(stmts, makeExprStmt(callMember(ident("e"), "begin_object", intLit(0))))
-		stmts = append(stmts, makeExprStmt(callMember(ident("e"), "encode_key", strLit("type"))))
+		stmts = append(stmts, makeExprStmt(callMember(ident("e"), "encode_key", strLit(tagName))))
 		stmts = append(stmts, makeExprStmt(callMember(ident("e"), "encode_string", strLit(v.Name()))))
 
 		if v.NumFields() > 0 {
@@ -822,7 +834,7 @@ func (c *Checker) synthesizeDataEnumEncodeMethod(enum *types.Enum, d *ast.EnumDe
 }
 
 // synthesizeDataEnumDecodeMethod builds a tagged-object decoder.
-// The "type" discriminator key MUST appear first in the JSON object.
+// The discriminator key (tagName, default "type") MUST appear first in the JSON object.
 //
 //	decode(Decoder ~d) EnumName! `factory `public {
 //	  d.begin_object()?;
@@ -838,7 +850,7 @@ func (c *Checker) synthesizeDataEnumEncodeMethod(enum *types.Enum, d *ast.EnumDe
 //	  } else if ...
 //	  else { raise DecodeError(...); }
 //	}
-func (c *Checker) synthesizeDataEnumDecodeMethod(enum *types.Enum, d *ast.EnumDecl) *ast.MethodDecl {
+func (c *Checker) synthesizeDataEnumDecodeMethod(enum *types.Enum, d *ast.EnumDecl, tagName string) *ast.MethodDecl {
 	enumName := d.Name
 	var stmts []ast.Stmt
 
@@ -856,16 +868,16 @@ func (c *Checker) synthesizeDataEnumDecodeMethod(enum *types.Enum, d *ast.EnumDe
 	stmts = append(stmts, &ast.IfStmt{
 		Cond: &ast.IsExpr{Expr: ident("_dk"), Pattern: &ast.IdentIsPattern{Name: "absent"}},
 		Body: &ast.Block{Stmts: []ast.Stmt{
-			&ast.RaiseStmt{Value: c.makeDecodeError("expected 'type' discriminator key in enum object")},
+			&ast.RaiseStmt{Value: c.makeDecodeError(fmt.Sprintf("expected '%s' discriminator key in enum object", tagName))},
 		}},
 	})
 
-	// if _dk != "type" { raise DecodeError(...); }
+	// if _dk != "<tag>" { raise DecodeError(...); }
 	// _dk is narrowed to string after the absent check above.
 	stmts = append(stmts, &ast.IfStmt{
-		Cond: &ast.BinaryExpr{Left: ident("_dk"), Op: ast.BinNeq, Right: strLit("type")},
+		Cond: &ast.BinaryExpr{Left: ident("_dk"), Op: ast.BinNeq, Right: strLit(tagName)},
 		Body: &ast.Block{Stmts: []ast.Stmt{
-			&ast.RaiseStmt{Value: c.makeDecodeError("first key in serializable enum must be 'type' (discriminator-first constraint)")},
+			&ast.RaiseStmt{Value: c.makeDecodeError(fmt.Sprintf("first key in serializable enum must be '%s' (discriminator-first constraint)", tagName))},
 		}},
 	})
 

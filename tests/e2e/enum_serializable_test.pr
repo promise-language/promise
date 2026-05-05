@@ -566,3 +566,67 @@ data_enum_string_escapes_decode_test() `test {
   m.encode(enc)!;
   assert(enc.to_string().contains("\\t"), "string escapes decode: tab preserved");
 }
+
+// ── Custom discriminator tag ────────────────────────────────────────────────
+
+enum InputEvent `serializable(tag: "kind") {
+  Click(int x, int y),
+  KeyPress(string key),
+  Scroll,
+}
+
+custom_tag_encode_test() `test {
+  json.JsonEncoder enc = json.JsonEncoder();
+  InputEvent.Click(10, 20).encode(enc)!;
+  assert(enc.to_string() == "\{\"kind\":\"Click\",\"x\":10,\"y\":20}", "custom tag encode Click");
+}
+
+custom_tag_encode_fieldless_test() `test {
+  json.JsonEncoder enc = json.JsonEncoder();
+  InputEvent.Scroll.encode(enc)!;
+  assert(enc.to_string() == "\{\"kind\":\"Scroll\"}", "custom tag encode Scroll");
+}
+
+custom_tag_decode_test() `test {
+  json.JsonDecoder dec = json.JsonDecoder(data: "\{\"kind\":\"KeyPress\",\"key\":\"Enter\"}");
+  InputEvent ev = InputEvent.decode(dec)!;
+  json.JsonEncoder enc = json.JsonEncoder();
+  ev.encode(enc)!;
+  assert(enc.to_string() == "\{\"kind\":\"KeyPress\",\"key\":\"Enter\"}", "custom tag decode KeyPress");
+}
+
+custom_tag_decode_fieldless_test() `test {
+  json.JsonDecoder dec = json.JsonDecoder(data: "\{\"kind\":\"Scroll\"}");
+  InputEvent ev = InputEvent.decode(dec)!;
+  json.JsonEncoder enc = json.JsonEncoder();
+  ev.encode(enc)!;
+  assert(enc.to_string() == "\{\"kind\":\"Scroll\"}", "custom tag decode Scroll");
+}
+
+custom_tag_roundtrip_test() `test {
+  InputEvent[] events = [InputEvent.Click(1, 2), InputEvent.KeyPress("a"), InputEvent.Scroll];
+  int i = 0;
+  for ev in events {
+    json.JsonEncoder enc = json.JsonEncoder();
+    ev.encode(enc)!;
+    json.JsonDecoder dec = json.JsonDecoder(data: enc.to_string());
+    InputEvent decoded = InputEvent.decode(dec)!;
+    json.JsonEncoder enc2 = json.JsonEncoder();
+    decoded.encode(enc2)!;
+    assert(enc.to_string() == enc2.to_string(), "custom tag roundtrip " + i.to_string());
+    i = i + 1;
+  }
+}
+
+custom_tag_wrong_discriminator_test() `test {
+  // Using "type" instead of "kind" should fail
+  json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"Click\",\"x\":1,\"y\":2}");
+  (v, err) := InputEvent.decode(dec);
+  assert(err is present, "wrong discriminator key error");
+}
+
+custom_tag_missing_discriminator_test() `test {
+  json.JsonDecoder dec = json.JsonDecoder(data: "\{}");
+  (v, err) := InputEvent.decode(dec);
+  assert(err is present, "missing discriminator key error");
+}

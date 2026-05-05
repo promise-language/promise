@@ -224,6 +224,22 @@ func extractKey(annotations []*ast.MetaAnnotation) string {
 	return ""
 }
 
+// extractSerializableTag extracts the tag parameter from a `serializable(tag: "kind") annotation.
+// Returns the custom discriminator key name, or "" if not specified (default "type").
+func extractSerializableTag(annotations []*ast.MetaAnnotation) string {
+	for _, ann := range annotations {
+		if ann.Name != "serializable" {
+			continue
+		}
+		for _, p := range ann.Params {
+			if p.Name == "tag" {
+				return evalStringLit(p.Value)
+			}
+		}
+	}
+	return ""
+}
+
 // extractTestExpected extracts the expected output from a `test(expected="...") annotation.
 // Returns the evaluated string and true if the annotation has an expected parameter.
 func extractTestExpected(annotations []*ast.MetaAnnotation) (string, bool) {

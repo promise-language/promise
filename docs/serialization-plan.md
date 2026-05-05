@@ -742,9 +742,9 @@ type DecodeError is error `public {
 
 1. ~~Nested user-type decode~~ — **Done.** Uses `T?` local + `!` unwrap. 3 tests (encode, decode, round-trip).
 2. ~~Container field serialization (`T[]`, `map[K, V]`)~~ — **Done.** Inline codegen. Non-string map keys use `to_string()`/`scan[K]()`. Added `has_next_element` to Decoder interface. 9 tests.
-3. Enum `` `serializable `` codegen (tag-based for data enums, string for simple enums)
+3. ~~Enum `` `serializable `` codegen~~ — **Done.** Tag-based for data enums, string for simple enums. 52 tests.
 4. `` `flatten `` support
-5. `` `serializable(tag: "kind") `` parameter for custom discriminator field names
+5. ~~`` `serializable(tag: "kind") `` parameter~~ — **Done.** Custom discriminator field name (default `"type"`). 7 tests.
 6. Nested generic serialization (`Wrapper[User]`, `map[string, User[]]`)
 7. ~~Generic type parameter validation~~ — **Done.** Explicit constraints required (`T: Encodable + Decodable`). Clear error for unconstrained params. Skip fields exempt. 7 tests (int, string, bool, f64, user type, round-trip, skip).
 8. Tests: nested round-trip, container round-trip, enum round-trip, flatten, custom tags

@@ -44,6 +44,7 @@ type Enum struct {
 	methods        []*Method
 	isCopy         bool   // `copy meta — bitwise copy on assignment
 	isSerializable bool   // `serializable meta — auto-generate encode/decode
+	serializeTag   string // `serializable(tag: "kind") — custom discriminator key (default "type")
 	exported       bool   // `public meta — visible to other modules
 	doc            string // `doc meta — documentation string
 	deprecated     string // `deprecated meta — empty means not deprecated
@@ -65,6 +66,8 @@ func (e *Enum) IsCopy() bool             { return e.isCopy }
 func (e *Enum) SetCopy(v bool)           { e.isCopy = v }
 func (e *Enum) IsSerializable() bool     { return e.isSerializable }
 func (e *Enum) SetSerializable(v bool)   { e.isSerializable = v }
+func (e *Enum) SerializeTag() string     { return e.serializeTag }
+func (e *Enum) SetSerializeTag(s string) { e.serializeTag = s }
 func (e *Enum) IsExported() bool         { return e.exported }
 func (e *Enum) SetExported(v bool)       { e.exported = v }
 func (e *Enum) Doc() string              { return e.doc }

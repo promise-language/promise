@@ -35,20 +35,24 @@ run_go_coverage() {
   local pkg="${1:-./...}"
   echo "=== Go Coverage: $pkg ==="
   echo ""
-  (cd compiler && go test "$pkg" -coverprofile=/tmp/promise_cov.out -count=1) || true
+  local covfile
+  covfile=$(mktemp /tmp/promise_cov_XXXXXX.out)
+  # Run from compiler/ where go.mod lives
+  (cd compiler && go test "$pkg" -coverprofile="$covfile" -count=1) || true
   echo ""
-  go tool cover -func=/tmp/promise_cov.out | tail -1
-  echo ""
-  # Show functions below 70%
-  echo "Functions below 70% coverage:"
-  go tool cover -func=/tmp/promise_cov.out | awk -F'\t' '
-    NR > 0 && $NF != "100.0%" {
-      pct = $NF + 0
-      if (pct < 70 && pct >= 0 && $NF != "") print $0
-    }
-  ' | head -30
-  echo ""
-  rm -f /tmp/promise_cov.out
+  if [ -s "$covfile" ]; then
+    (cd compiler && go tool cover -func="$covfile") | tail -1
+    echo ""
+    echo "Functions below 70% coverage:"
+    (cd compiler && go tool cover -func="$covfile") | awk -F'\t' '
+      NR > 0 && $NF != "100.0%" {
+        pct = $NF + 0
+        if (pct < 70 && pct >= 0 && $NF != "") print $0
+      }
+    ' | head -30
+    echo ""
+  fi
+  rm -f "$covfile"
 }
 
 # --- Promise coverage ---
@@ -56,7 +60,7 @@ run_promise_coverage() {
   local target="$1"
   echo "=== Promise Coverage: $target ==="
   echo ""
-  "$PROMISE" test -coverage -timeout 30 "$target" 2>&1
+  "$PROMISE" test -coverage -timeout 30 "$target" 2>&1 || true
 }
 
 # Determine Go packages and Promise targets from arguments or recent changes.

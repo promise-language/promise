@@ -310,17 +310,25 @@ const (
 
 // scopeBinding tracks a variable that needs cleanup at scope exit.
 type scopeBinding struct {
-	kind      scopeBindingKind
-	alloca    *ir.InstAlloca
-	closeFunc *ir.Func       // direct dispatch for close() (nil if virtual)
-	dropFunc  *ir.Func       // direct dispatch for drop() (nil if virtual)
-	named     *types.Named   // for virtual dispatch
-	valType   types.Type     // original Promise type
-	dropFlag  *ir.InstAlloca // i1: true=should drop (nil for close bindings)
-	varName   string         // variable name (for drop flag lookup)
+	kind            scopeBindingKind
+	alloca          *ir.InstAlloca
+	closeFunc       *ir.Func       // direct dispatch for close() (nil if virtual)
+	closeIsFailable bool           // true if close() method returns error
+	dropFunc        *ir.Func       // direct dispatch for drop() (nil if virtual)
+	named           *types.Named   // for virtual dispatch
+	valType         types.Type     // original Promise type
+	dropFlag        *ir.InstAlloca // i1: true=should drop (nil for close bindings)
+	varName         string         // variable name (for drop flag lookup)
 	// Generator cleanup
 	generatorHandle *ir.InstAlloca // coro handle alloca (for destroy)
 	generatorSlot   *ir.InstAlloca // yield slot alloca (for free)
+}
+
+// closeErrCapture holds entry-block allocas used to capture the first failable
+// close() error during scope cleanup. Used only when c.canError && !errorInFlight.
+type closeErrCapture struct {
+	flag *ir.InstAlloca // i1: true if a close error was captured
+	val  *ir.InstAlloca // i8*: the captured error value
 }
 
 // viewVtableKey identifies a view-specific vtable for a (concrete, view) pair.

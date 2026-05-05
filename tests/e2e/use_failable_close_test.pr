@@ -1,0 +1,143 @@
+// Failable close() error propagation in use bindings (B0013).
+type CloseError is error {
+  int code;
+}
+
+// A resource whose close() always succeeds.
+type OkResource {
+  int id;
+
+  close(~this) void! {
+    // success — no error
+  }
+}
+
+// A resource whose close() always fails.
+type FailResource {
+  int id;
+
+  close(~this) void! {
+    raise CloseError(message: "close failed", code: 42);
+  }
+}
+
+// --- Normal exit: failable close error propagates ---
+
+close_propagates() int! {
+  use r := FailResource(id: 1);
+  return r.id;
+}
+
+test_close_error_propagates() `test {
+  int result = close_propagates()? e {
+    assert(e.message == "close failed", "close error message matches");
+    return;
+  };
+  assert(false, "should not reach here — close should have failed");
+}
+
+// --- Normal exit: successful close does not interfere ---
+
+close_ok() int! {
+  use r := OkResource(id: 42);
+  return r.id;
+}
+
+test_close_ok_returns_value() `test {
+  int result = close_ok()!;
+  assert(result == 42, "successful close returns normal value");
+}
+
+// --- Raise path: close error suppressed, original error preserved ---
+
+raise_with_failable_close() int! {
+  use r := FailResource(id: 1);
+  raise CloseError(message: "body error", code: 99);
+}
+
+test_raise_suppresses_close_error() `test {
+  int result = raise_with_failable_close()? e {
+    assert(e.message == "body error", "original raise error preserved, not close error");
+    return;
+  };
+  assert(false, "should not reach here");
+}
+
+// --- Error propagation path: close error suppressed ---
+
+inner_fail() void! {
+  raise CloseError(message: "inner error", code: 77);
+}
+
+propagate_with_failable_close() void! {
+  use r := FailResource(id: 1);
+  inner_fail()?;
+}
+
+test_propagate_suppresses_close_error() `test {
+  propagate_with_failable_close()? e {
+    assert(e.message == "inner error", "propagated error preserved, not close error");
+    return;
+  };
+  assert(false, "should not reach here");
+}
+
+// --- Non-failable function: close error suppressed ---
+
+non_failable_with_failable_close() int {
+  use r := FailResource(id: 99);
+  return r.id;
+}
+
+test_non_failable_suppresses_close() `test {
+  int result = non_failable_with_failable_close();
+  assert(result == 99, "non-failable function ignores close error");
+}
+
+// --- Multiple use bindings: first close error wins ---
+
+multiple_failable_close() void! {
+  use a := FailResource(id: 1);
+  use b := FailResource(id: 2);
+  // Normal exit — both close() called in reverse order (b then a).
+  // b.close() fails first; a.close() also fails but that error is suppressed.
+}
+
+test_multiple_close_first_error_wins() `test {
+  multiple_failable_close()? e {
+    assert(e.message == "close failed", "first close error captured");
+    return;
+  };
+  assert(false, "should have gotten close error");
+}
+
+// --- Block scope: close error propagates from nested block ---
+
+close_error_in_block() void! {
+  if true {
+    use r := FailResource(id: 1);
+    // r.close() called at block exit, error propagates
+  }
+}
+
+test_close_error_in_nested_block() `test {
+  close_error_in_block()? e {
+    assert(e.message == "close failed", "close error propagates from nested block");
+    return;
+  };
+  assert(false, "should have gotten close error");
+}
+
+// --- Void failable function: close error propagates ---
+
+void_failable_close() void! {
+  use r := FailResource(id: 1);
+}
+
+test_void_failable_close() `test {
+  void_failable_close()? e {
+    assert(e.message == "close failed", "void failable propagates close error");
+    return;
+  };
+  assert(false, "should have gotten close error");
+}

@@ -3500,7 +3500,7 @@ func (c *Compiler) genErrorPropagateExpr(e *ast.ErrorPropagateExpr) value.Value 
 	// Error path: cleanup scope bindings, extract error, wrap in caller's result type, early return
 	c.block = propagateBlock
 	if len(c.scopeBindings) > 0 {
-		c.emitScopeCleanup(0)
+		c.emitScopeCleanup(0, true) // error in flight — suppress close errors
 	}
 	errVal := c.block.NewExtractValue(result, resultErrIdx(calleeResultType))
 	callerResultType := c.currentResultType()
@@ -3628,7 +3628,7 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 			c.block.NewUnreachable()
 		} else if c.canError {
 			if len(c.scopeBindings) > 0 {
-				c.emitScopeCleanup(0)
+				c.emitScopeCleanup(0, true) // error in flight — suppress close errors
 			}
 			callerResultType := c.currentResultType()
 			c.block.NewRet(c.wrapError(errVal, callerResultType))
@@ -4559,7 +4559,8 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 		if val != nil && c.block.Term == nil {
 			// Clean up capture bindings before returning
 			if len(c.scopeBindings) > 0 {
-				c.emitScopeCleanup(0)
+				cap := c.emitScopeCleanup(0, false)
+				c.emitCloseErrCheck(cap)
 			}
 			c.block.NewRet(val)
 		}
@@ -4569,7 +4570,8 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	if c.block != nil && c.block.Term == nil {
 		c.emitLambdaWritebacks()
 		if len(c.scopeBindings) > 0 {
-			c.emitScopeCleanup(0)
+			cap := c.emitScopeCleanup(0, false)
+			c.emitCloseErrCheck(cap)
 		}
 		if _, ok := fn.Sig.RetType.(*irtypes.VoidType); ok {
 			c.block.NewRet(nil)

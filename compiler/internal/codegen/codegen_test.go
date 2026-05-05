@@ -7190,6 +7190,94 @@ func TestUseVarDeclInNestedBlock(t *testing.T) {
 	}
 }
 
+// --- Failable close() error propagation (B0013) ---
+
+func TestUseFailableCloseErrorCapture(t *testing.T) {
+	ir := generateIR(t, `
+		type FRes {
+			int id;
+			close(~this)! { }
+		}
+		process()! {
+			use r := FRes(id: 1);
+			int x = r.id;
+		}
+	`)
+	// Failable close should generate a result-type call (not void)
+	assertContains(t, ir, "call { i1, i8* } @FRes.close")
+	// Should have close error check and propagation blocks
+	assertContains(t, ir, "close.err.flag")
+	assertContains(t, ir, "close.err.ret")
+}
+
+func TestUseNonFailableCloseNoCapture(t *testing.T) {
+	ir := generateIR(t, `
+		type NRes {
+			int id;
+			close(~this) { }
+		}
+		process()! {
+			use r := NRes(id: 1);
+			int x = r.id;
+		}
+	`)
+	// Non-failable close should remain a void call — no error capture
+	assertContains(t, ir, "call void @NRes.close")
+	assertNotContains(t, ir, "close.err.flag")
+}
+
+func TestUseFailableCloseSuppressedOnRaise(t *testing.T) {
+	ir := generateIR(t, `
+		type EBase is error { string message; }
+		type FRes2 {
+			int id;
+			close(~this)! { }
+		}
+		process()! {
+			use r := FRes2(id: 1);
+			raise EBase(message: "fail");
+		}
+	`)
+	// Raise path should suppress close errors (no close.err.flag on that path)
+	// The close call is still emitted but result discarded
+	assertContains(t, ir, "call { i1, i8* } @FRes2.close")
+}
+
+func TestUseFailableCloseInNonFailableFunc(t *testing.T) {
+	ir := generateIR(t, `
+		type FRes3 {
+			int id;
+			close(~this)! { }
+		}
+		process() {
+			use r := FRes3(id: 1);
+			int x = r.id;
+		}
+	`)
+	// Non-failable function: close errors suppressed, no capture allocas
+	assertNotContains(t, ir, "close.err.flag")
+}
+
+func TestUseFailableCloseVirtualDispatchCapture(t *testing.T) {
+	ir := generateIR(t, `
+		type Conn {
+			int fd;
+			close()! { }
+		}
+		type TcpConn is Conn {
+			close()! { }
+		}
+		process()! {
+			use c := Conn(fd: 3);
+			int x = c.fd;
+		}
+	`)
+	// Virtual dispatch + failable function: close error should be captured
+	assertContains(t, ir, "@promise_vtable_Conn")
+	assertContains(t, ir, "close.err.flag")
+	assertContains(t, ir, "close.err.ret")
+}
+
 // --- Getter/Setter same name regression ---
 
 func TestGetterSetterSameNameCodegen(t *testing.T) {

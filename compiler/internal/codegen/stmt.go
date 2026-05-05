@@ -28,7 +28,8 @@ func (c *Compiler) genBlock(block *ast.Block) {
 	}
 	// Emit cleanup calls for scope bindings added in this block (fall-through exit)
 	if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > savedScopeLen {
-		c.emitScopeCleanup(savedScopeLen)
+		cap := c.emitScopeCleanup(savedScopeLen, false)
+		c.emitCloseErrCheck(cap)
 	}
 	c.scopeBindings = c.scopeBindings[:savedScopeLen]
 }
@@ -63,7 +64,8 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 		c.genStmt(stmt)
 	}
 	if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > savedScopeLen {
-		c.emitScopeCleanup(savedScopeLen)
+		cap := c.emitScopeCleanup(savedScopeLen, false)
+		c.emitCloseErrCheck(cap)
 	}
 	c.scopeBindings = c.scopeBindings[:savedScopeLen]
 	return result
@@ -144,7 +146,7 @@ func (c *Compiler) genAutoPropagate(expr ast.Expr) {
 	// Error path: cleanup scope bindings, extract error, wrap in caller's result type, early return
 	c.block = propagateBlock
 	if len(c.scopeBindings) > 0 {
-		c.emitScopeCleanup(0)
+		c.emitScopeCleanup(0, true) // error in flight — suppress close errors
 	}
 	errVal := c.block.NewExtractValue(result, resultErrIdx(calleeResultType))
 	callerResultType := c.currentResultType()
@@ -169,7 +171,7 @@ func (c *Compiler) genAutoPropagateValue(result value.Value) value.Value {
 	// Error path: cleanup scope bindings, extract error, wrap in caller's result type, early return
 	c.block = propagateBlock
 	if len(c.scopeBindings) > 0 {
-		c.emitScopeCleanup(0)
+		c.emitScopeCleanup(0, true) // error in flight — suppress close errors
 	}
 	errVal := c.block.NewExtractValue(result, resultErrIdx(calleeResultType))
 	callerResultType := c.currentResultType()
@@ -439,14 +441,19 @@ func (c *Compiler) genUseVarDecl(s *ast.UseVarDecl) {
 
 	// Track for scope-exit close() insertion
 	named := extractNamed(typ)
+	var closeMethod *types.Method
+	if named != nil {
+		closeMethod = named.LookupMethod("close")
+	}
 	binding := scopeBinding{
-		kind:    bindingClose,
-		alloca:  alloca,
-		named:   named,
-		valType: typ,
+		kind:            bindingClose,
+		alloca:          alloca,
+		named:           named,
+		valType:         typ,
+		closeIsFailable: closeMethod != nil && closeMethod.Sig().CanError(),
 	}
 	// Resolve close function for direct dispatch
-	if named != nil && (!c.needsVtable(named) || named.LookupMethod("close").IsNative()) {
+	if named != nil && closeMethod != nil && (!c.needsVtable(named) || closeMethod.IsNative()) {
 		ownerName := c.resolveMethodOwner(named, "close")
 		mangledName := mangleMethodName(ownerName, "close", false)
 		if fn, ok := c.funcs[mangledName]; ok {
@@ -505,12 +512,36 @@ func (c *Compiler) clearDropFlag(name string) {
 // emitScopeCleanup emits cleanup calls for all scope bindings from fromIdx onwards,
 // in reverse order (LIFO). Close bindings call close(), drop bindings check the
 // drop flag and conditionally call drop().
-func (c *Compiler) emitScopeCleanup(fromIdx int) {
+//
+// errorInFlight indicates the scope is exiting due to a raise or error propagation.
+// When true, failable close() errors are suppressed. When false and the enclosing
+// function is failable, the first close() error is captured and returned.
+func (c *Compiler) emitScopeCleanup(fromIdx int, errorInFlight bool) *closeErrCapture {
+	// Check if we need error capture: failable function, normal path, and at least
+	// one failable close binding in the range.
+	var cap *closeErrCapture
+	if c.canError && !errorInFlight {
+		for i := len(c.scopeBindings) - 1; i >= fromIdx; i-- {
+			b := c.scopeBindings[i]
+			if b.kind == bindingClose && b.closeIsFailable {
+				cap = &closeErrCapture{
+					flag: c.createEntryAlloca(irtypes.I1),
+					val:  c.createEntryAlloca(irtypes.I8Ptr),
+				}
+				cap.flag.SetName(c.uniqueLocalName("close.err.flag"))
+				cap.val.SetName(c.uniqueLocalName("close.err.val"))
+				c.block.NewStore(constant.NewInt(irtypes.I1, 0), cap.flag)
+				c.block.NewStore(constant.NewNull(irtypes.I8Ptr), cap.val)
+				break
+			}
+		}
+	}
+
 	for i := len(c.scopeBindings) - 1; i >= fromIdx; i-- {
 		b := c.scopeBindings[i]
 		switch b.kind {
 		case bindingClose:
-			c.emitCloseCall(b)
+			c.emitCloseCall(b, cap)
 		case bindingDrop:
 			c.emitDropCall(b)
 		case bindingFreeEnv:
@@ -519,16 +550,19 @@ func (c *Compiler) emitScopeCleanup(fromIdx int) {
 			c.emitGeneratorCleanup(b)
 		}
 	}
+	return cap
 }
 
 // emitCloseCall emits a close() call for a use-bound variable (direct or virtual dispatch).
-func (c *Compiler) emitCloseCall(b scopeBinding) {
+// If cap is non-nil and close() is failable, the first error is captured into cap's allocas.
+func (c *Compiler) emitCloseCall(b scopeBinding, cap *closeErrCapture) {
 	val := c.block.NewLoad(b.alloca.ElemType, b.alloca)
 
+	var result value.Value
 	if b.closeFunc != nil {
 		// Direct dispatch — extract instance pointer and call
 		instance := c.extractInstancePtr(val)
-		c.block.NewCall(b.closeFunc, instance)
+		result = c.block.NewCall(b.closeFunc, instance)
 	} else if b.named != nil {
 		// Virtual dispatch through vtable
 		vtableRaw := c.extractVtablePtr(val)
@@ -550,8 +584,51 @@ func (c *Compiler) emitCloseCall(b scopeBinding) {
 		}
 		funcType := irtypes.NewFunc(retType, irtypes.I8Ptr)
 		fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))
-		c.block.NewCall(fnTyped, instance)
+		result = c.block.NewCall(fnTyped, instance)
 	}
+
+	// Capture failable close() error: store the first error into cap's allocas.
+	if cap != nil && b.closeIsFailable && result != nil {
+		resultType := result.Type().(*irtypes.StructType)
+		tag := c.block.NewExtractValue(result, 0)
+
+		errBlock := c.newBlock("close.err")
+		contBlock := c.newBlock("close.cont")
+		c.block.NewCondBr(tag, errBlock, contBlock)
+
+		// Error path: save only if no prior close error was captured
+		c.block = errBlock
+		hasErr := c.block.NewLoad(irtypes.I1, cap.flag)
+		saveBlock := c.newBlock("close.save")
+		c.block.NewCondBr(hasErr, contBlock, saveBlock)
+
+		c.block = saveBlock
+		c.block.NewStore(constant.NewInt(irtypes.I1, 1), cap.flag)
+		errVal := c.block.NewExtractValue(result, resultErrIdx(resultType))
+		c.block.NewStore(errVal, cap.val)
+		c.block.NewBr(contBlock)
+
+		c.block = contBlock
+	}
+}
+
+// emitCloseErrCheck checks a captured close error and, if set, returns it from
+// the current failable function. Otherwise, continues in a new block.
+func (c *Compiler) emitCloseErrCheck(cap *closeErrCapture) {
+	if cap == nil {
+		return
+	}
+	flag := c.block.NewLoad(irtypes.I1, cap.flag)
+	errRetBlock := c.newBlock("close.err.ret")
+	contBlock := c.newBlock("close.ok.cont")
+	c.block.NewCondBr(flag, errRetBlock, contBlock)
+
+	c.block = errRetBlock
+	errVal := c.block.NewLoad(irtypes.I8Ptr, cap.val)
+	resultType := c.currentResultType()
+	c.block.NewRet(c.wrapError(errVal, resultType))
+
+	c.block = contBlock
 }
 
 // emitDropCall emits a conditional drop() call for a droppable variable.
@@ -1158,7 +1235,7 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	// Generator return: bare return means "stop producing values"
 	if c.inGenerator {
 		if len(c.scopeBindings) > 0 {
-			c.emitScopeCleanup(0)
+			c.emitScopeCleanup(0, false) // generators have canError=false, so no capture
 		}
 		// Branch to the single final suspend block
 		c.block.NewBr(c.generatorFinalSuspend)
@@ -1176,9 +1253,11 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		}
 	}
 	// Emit cleanup for all active scope bindings before returning
+	var closeCap *closeErrCapture
 	if len(c.scopeBindings) > 0 {
-		c.emitScopeCleanup(0)
+		closeCap = c.emitScopeCleanup(0, false)
 	}
+	c.emitCloseErrCheck(closeCap)
 
 	// Set targetType so NoneLit can resolve to the correct Optional struct
 	retType := c.currentRetType
@@ -1248,7 +1327,7 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 func (c *Compiler) genRaiseStmt(s *ast.RaiseStmt) {
 	// Emit close() for all active use bindings before raising
 	if len(c.scopeBindings) > 0 {
-		c.emitScopeCleanup(0)
+		c.emitScopeCleanup(0, true) // error in flight — suppress close errors
 	}
 
 	errVal := c.genExpr(s.Value)
@@ -2312,7 +2391,8 @@ func (c *Compiler) genBreakStmt() {
 	if c.breakTarget != nil {
 		// Close use bindings added within the loop body
 		if len(c.scopeBindings) > c.loopScopeDepth {
-			c.emitScopeCleanup(c.loopScopeDepth)
+			cap := c.emitScopeCleanup(c.loopScopeDepth, false)
+			c.emitCloseErrCheck(cap)
 		}
 		c.block.NewBr(c.breakTarget)
 	}
@@ -2322,7 +2402,8 @@ func (c *Compiler) genContinueStmt() {
 	if c.continueTarget != nil {
 		// Close use bindings added within the loop body
 		if len(c.scopeBindings) > c.loopScopeDepth {
-			c.emitScopeCleanup(c.loopScopeDepth)
+			cap := c.emitScopeCleanup(c.loopScopeDepth, false)
+			c.emitCloseErrCheck(cap)
 		}
 		c.block.NewBr(c.continueTarget)
 	}
@@ -3630,7 +3711,8 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 			c.genStmt(stmt)
 		}
 		if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > savedScopeLen {
-			c.emitScopeCleanup(savedScopeLen)
+			cap := c.emitScopeCleanup(savedScopeLen, false)
+			c.emitCloseErrCheck(cap)
 		}
 		c.scopeBindings = c.scopeBindings[:savedScopeLen]
 		if c.block != nil && c.block.Term == nil {
@@ -3650,7 +3732,8 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 			c.genStmt(stmt)
 		}
 		if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > savedScopeLen {
-			c.emitScopeCleanup(savedScopeLen)
+			cap := c.emitScopeCleanup(savedScopeLen, false)
+			c.emitCloseErrCheck(cap)
 		}
 		c.scopeBindings = c.scopeBindings[:savedScopeLen]
 		if c.block != nil && c.block.Term == nil {
@@ -3849,7 +3932,8 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 				c.genStmt(stmt)
 			}
 			if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > savedScopeLen {
-				c.emitScopeCleanup(savedScopeLen)
+				cap := c.emitScopeCleanup(savedScopeLen, false)
+				c.emitCloseErrCheck(cap)
 			}
 			c.scopeBindings = c.scopeBindings[:savedScopeLen]
 			if c.block != nil && c.block.Term == nil {

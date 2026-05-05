@@ -163,7 +163,7 @@ func (f *fileStats) recalcInterval() {
 
 // --- Compile phase ---
 
-func compileTargets(files []string, baseDir string, targetTriple string) (targets []stressTarget, cleanup func()) {
+func compileTargets(files []string, baseDir string, targetTriple string, cfg testTimeoutConfig) (targets []stressTarget, cleanup func()) {
 	unlock := module.LockBuildDirShared()
 	defer unlock()
 
@@ -202,7 +202,8 @@ func compileTargets(files []string, baseDir string, targetTriple string) (target
 			}
 			tmp.Close()
 			result := codegen.Compile(file, info, target)
-			result.GenerateTestMain(info.Tests, nil)
+			testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
+			result.GenerateTestMain(info.Tests, testTimeouts)
 			compileAndLink(result, tmp.Name(), target, f)
 			tempFiles = append(tempFiles, tmp.Name())
 			var testNames []string
@@ -305,7 +306,8 @@ func compileTargets(files []string, baseDir string, targetTriple string) (target
 			})
 		} else if len(info.Tests) > 0 {
 			result := codegen.Compile(file, info, target)
-			result.GenerateTestMain(info.Tests, nil)
+			testTimeouts := computeTestTimeouts(info.Tests, info, cfg)
+			result.GenerateTestMain(info.Tests, testTimeouts)
 			compileAndLink(result, tmp.Name(), target, f)
 			tempFiles = append(tempFiles, tmp.Name())
 
@@ -359,7 +361,7 @@ func compileTargets(files []string, baseDir string, targetTriple string) (target
 
 // --- Run loop ---
 
-func runStress(files []string, count int, duration time.Duration, perRunTimeout time.Duration, targetTriple string, outputFile string) {
+func runStress(files []string, count int, duration time.Duration, cfg testTimeoutConfig, targetTriple string, outputFile string) {
 	if len(files) == 0 {
 		fmt.Println("no test files found")
 		return
@@ -380,7 +382,7 @@ func runStress(files []string, count int, duration time.Duration, perRunTimeout 
 
 	// Compile all targets (exits on compile error)
 	fmt.Fprintf(os.Stderr, "Compiling %d file(s)...\n", len(files))
-	targets, cleanup := compileTargets(files, baseDir, targetTriple)
+	targets, cleanup := compileTargets(files, baseDir, targetTriple, cfg)
 	defer cleanup()
 
 	if len(targets) == 0 {
@@ -415,7 +417,7 @@ func runStress(files []string, count int, duration time.Duration, perRunTimeout 
 		isTTY = fi.Mode()&os.ModeCharDevice != 0
 	}
 
-	resultRe := regexp.MustCompile(`^(PASS|FAIL) \((\d+\.\d+)s\) (.+)$`)
+	resultRe := regexp.MustCompile(`^(PASS|FAIL|TIMEOUT) \((\d+\.\d+)s\) (.+)$`)
 	start := time.Now()
 	iteration := 0
 	lastProgress := time.Time{}
@@ -451,7 +453,7 @@ func runStress(files []string, count int, duration time.Duration, perRunTimeout 
 			// Run binary with separate stdout/stderr capture.
 			// Test PASS/FAIL lines go to stdout; panic/crash output goes to stderr.
 			runStart := time.Now()
-			ctx, cancel := context.WithTimeout(context.Background(), perRunTimeout)
+			ctx, cancel := context.WithTimeout(context.Background(), cfg.defaultTimeout)
 			var cmd *exec.Cmd
 			if isWasmTarget(targetTriple) {
 				cmd = exec.CommandContext(ctx, "wasmtime", t.binary)
@@ -529,14 +531,22 @@ func runStress(files []string, count int, duration time.Duration, perRunTimeout 
 						fs.testOrder = append(fs.testOrder, name)
 					}
 					seen[name] = true
-					if status == "PASS" {
+					switch status {
+					case "PASS":
 						st.passes++
-					} else {
+						if v, e := strconv.ParseFloat(timing, 64); e == nil {
+							st.timings = append(st.timings, v)
+						}
+					case "TIMEOUT":
+						st.fails++
+						st.timeouts++
+						st.lastErr = "timeout"
+					default: // FAIL
 						st.fails++
 						st.lastErr = "test failed"
-					}
-					if v, e := strconv.ParseFloat(timing, 64); e == nil {
-						st.timings = append(st.timings, v)
+						if v, e := strconv.ParseFloat(timing, 64); e == nil {
+							st.timings = append(st.timings, v)
+						}
 					}
 				}
 				if timedOut {

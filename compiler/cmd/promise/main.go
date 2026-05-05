@@ -496,7 +496,7 @@ func runTest(args []string) {
 	}
 
 	if stressMode {
-		runStress(allFiles, stressCount, stressDuration, timeout, targetTriple, outputFile)
+		runStress(allFiles, stressCount, stressDuration, cfg, targetTriple, outputFile)
 		return
 	}
 

@@ -142,22 +142,22 @@ test_f64_boundary_neg_sci() `test {
 
 // --- f64 edge cases: rounding ---
 
-test_f64_round_up() `test {
-  // 1.23456789 rounds to 6 sig digits: 1.23457
+test_f64_exact_digits() `test {
+  // Ryu produces shortest exact representation
   f64 x = 1.23456789;
-  assert("{x}" == "1.23457", "rounds to 6 sig digits");
+  assert("{x}" == "1.23456789", "exact digits");
 }
 
-test_f64_round_sci() `test {
-  // 1234567.0 -> 1.23457e+06 (6 sig digits, rounds up)
+test_f64_exact_sci() `test {
+  // 1234567.0 -> exact representation in scientific notation
   f64 x = 1234567.0;
-  assert("{x}" == "1.23457e+06", "large int rounds in sci notation");
+  assert("{x}" == "1.234567e+06", "exact sci notation");
 }
 
-test_f64_round_overflow() `test {
-  // 9.999995 rounds up to 10, bumps exponent
+test_f64_exact_near_ten() `test {
+  // 9.999995 stays as-is (exact representation)
   f64 x = 9.999995;
-  assert("{x}" == "10", "round overflow bumps exponent");
+  assert("{x}" == "9.999995", "exact near 10");
 }
 
 // --- f64 edge cases: exact integers ---
@@ -186,17 +186,17 @@ test_f64_tenth() `test {
 
 test_f64_max() `test {
   f64 x = 1.7976931348623157e308;
-  assert("{x}" == "1.79769e+308", "DBL_MAX");
+  assert("{x}" == "1.7976931348623157e+308", "DBL_MAX");
 }
 
 test_f64_min_normal() `test {
   f64 x = 2.2250738585072014e-308;
-  assert("{x}" == "2.22507e-308", "DBL_MIN normal");
+  assert("{x}" == "2.2250738585072014e-308", "DBL_MIN normal");
 }
 
 test_f64_denormalized() `test {
   f64 x = 5e-324;
-  assert("{x}" == "4.94066e-324", "denormalized");
+  assert("{x}" == "5e-324", "denormalized");
 }
 
 test_f64_1e100() `test {
@@ -326,8 +326,10 @@ test_f64_pow10_neg_sci() `test {
 // --- f64 edge cases: f32 (fpext path) ---
 
 test_f32_interpolation() `test {
+  // f32 3.14 is promoted to f64 3.1399998664855957 by the interpolation path.
+  // Ryu shows the exact f64 value. f32-specific Ryu would show "3.14".
   f32 x = 3.14;
-  assert("{x}" == "3.14", "f32 3.14");
+  assert("{x}" == "3.1399998664855957", "f32 3.14 promoted to f64");
 }
 
 test_f32_integer() `test {

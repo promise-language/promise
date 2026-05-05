@@ -8633,6 +8633,16 @@ func TestHashGetterFloat(t *testing.T) {
 	assertContains(t, ir, "call i64 @__mod_std__fnv1a_hash(i64")
 }
 
+func TestBitsGetterF64(t *testing.T) {
+	ir := generateIR(t, `
+		test(f64 x) uint { return x.bits; }
+		main() {}
+	`)
+	assertContains(t, ir, "bitcast double")
+	// bits getter returns the raw i64 — no hash call
+	assertNotContains(t, ir, "call i64 @__mod_std__fnv1a_hash")
+}
+
 func TestHashGetterSmallInt(t *testing.T) {
 	ir := generateIR(t, `
 		test(i8 x) int { return x.hash; }

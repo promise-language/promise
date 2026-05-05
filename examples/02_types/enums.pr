@@ -48,7 +48,7 @@ blue
 
 --- Data Enum ---
 circle with radius 5
-area: 78.5398
+area: 78.53975
 
 --- Match Expression ---
 rectangle 10x20, area: 200

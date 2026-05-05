@@ -1108,6 +1108,12 @@ func (c *Compiler) declareIntrinsics() {
 	c.palSignalInit = p.EmitSignalInit(c.module)
 	c.palSignalRegister = p.EmitSignalRegister(c.module)
 
+	// WASM: emit __multi3 (128-bit multiply) — LLVM may lower 64-bit multiply
+	// chains into __multi3 calls, which wasm32 doesn't natively provide.
+	if c.isWasm {
+		c.emitMulti3()
+	}
+
 	// Signal pipe read fd global (NOT TLS — dispatch goroutine reads from it)
 	c.signalPipeRdFd = c.module.NewGlobal("__promise_signal_pipe_rd", irtypes.I32)
 	c.signalPipeRdFd.Init = constant.NewInt(irtypes.I32, -1)
@@ -1151,6 +1157,81 @@ func (c *Compiler) declareIntrinsics() {
 		c.funcs["strlen"] = strlenFn
 	}
 
+}
+
+// emitMulti3 emits __multi3 for WASM — 128-bit integer multiply using 64-bit ops.
+// LLVM may lower 64-bit multiply optimizations into __multi3 calls on wasm32.
+// Signature: __multi3(i128 %a, i128 %b) -> i128
+// Implementation: split into 64-bit halves, compute lower product via 32-bit
+// decomposition (to avoid recursive __multi3 calls), add cross products.
+func (c *Compiler) emitMulti3() {
+	i128 := irtypes.I128
+	fn := c.module.NewFunc("__multi3", i128,
+		ir.NewParam("a", i128),
+		ir.NewParam("b", i128))
+
+	entry := fn.NewBlock(".entry")
+	mask32 := constant.NewInt(irtypes.I64, 0xFFFFFFFF)
+
+	// Split a into lo/hi (i64)
+	aLo := entry.NewTrunc(fn.Params[0], irtypes.I64)
+	aShr := entry.NewLShr(fn.Params[0], constant.NewInt(i128, 64))
+	aHi := entry.NewTrunc(aShr, irtypes.I64)
+
+	// Split b into lo/hi (i64)
+	bLo := entry.NewTrunc(fn.Params[1], irtypes.I64)
+	bShr := entry.NewLShr(fn.Params[1], constant.NewInt(i128, 64))
+	bHi := entry.NewTrunc(bShr, irtypes.I64)
+
+	// Compute aLo * bLo as 128 bits using 32-bit decomposition (no i128 mul!)
+	// Split aLo = (a1 << 32) | a0, bLo = (b1 << 32) | b0
+	a0 := entry.NewAnd(aLo, mask32)
+	a1 := entry.NewLShr(aLo, constant.NewInt(irtypes.I64, 32))
+	b0 := entry.NewAnd(bLo, mask32)
+	b1 := entry.NewLShr(bLo, constant.NewInt(irtypes.I64, 32))
+
+	// Four 32x32 -> 64 bit products (all fit in i64)
+	p00 := entry.NewMul(a0, b0)
+	p01 := entry.NewMul(a0, b1)
+	p10 := entry.NewMul(a1, b0)
+	p11 := entry.NewMul(a1, b1)
+
+	// Combine into 128-bit result: loLo (bits 0-63), carry (bits 64-127)
+	// mid = (p00 >> 32) + (p01 & mask) + (p10 & mask)
+	p00hi := entry.NewLShr(p00, constant.NewInt(irtypes.I64, 32))
+	p01lo := entry.NewAnd(p01, mask32)
+	p10lo := entry.NewAnd(p10, mask32)
+	mid := entry.NewAdd(p00hi, p01lo)
+	mid = entry.NewAdd(mid, p10lo)
+
+	// resultLo = ((mid & mask) << 32) | (p00 & mask)
+	midLo := entry.NewAnd(mid, mask32)
+	midLoShifted := entry.NewShl(midLo, constant.NewInt(irtypes.I64, 32))
+	p00lo := entry.NewAnd(p00, mask32)
+	resultLo := entry.NewOr(midLoShifted, p00lo)
+
+	// carry = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32)
+	p01hi := entry.NewLShr(p01, constant.NewInt(irtypes.I64, 32))
+	p10hi := entry.NewLShr(p10, constant.NewInt(irtypes.I64, 32))
+	midHi := entry.NewLShr(mid, constant.NewInt(irtypes.I64, 32))
+	carry := entry.NewAdd(p11, p01hi)
+	carry2 := entry.NewAdd(carry, p10hi)
+	carry3 := entry.NewAdd(carry2, midHi)
+
+	// resultHi = carry + aLo*bHi + aHi*bLo (i64 mul, lower 64 bits only)
+	cross1 := entry.NewMul(aLo, bHi)
+	cross2 := entry.NewMul(aHi, bLo)
+	rh1 := entry.NewAdd(carry3, cross1)
+	resultHi := entry.NewAdd(rh1, cross2)
+
+	// Combine into i128: (resultHi << 64) | resultLo
+	// Using i128 zext + shl + or (no multiply, so no __multi3 recursion)
+	resultLoWide := entry.NewZExt(resultLo, i128)
+	resultHiWide := entry.NewZExt(resultHi, i128)
+	hiShifted := entry.NewShl(resultHiWide, constant.NewInt(i128, 64))
+	result := entry.NewOr(hiShifted, resultLoWide)
+
+	entry.NewRet(result)
 }
 
 // defineStringNewFunc emits an LLVM IR function that allocates and initializes

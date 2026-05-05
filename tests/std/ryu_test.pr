@@ -1,0 +1,132 @@
+// Test Ryu float-to-string conversion
+test_zero() `test {
+  assert(0.0.to_string() == "0", "0.0 -> {0.0.to_string()}");
+  assert((-0.0).to_string() == "-0", "-0.0 -> {(-0.0).to_string()}");
+}
+
+test_special_values() `test {
+  f64 nan = 0.0 / 0.0;
+  f64 inf = 1.0 / 0.0;
+  f64 neg_inf = -1.0 / 0.0;
+  assert(nan.to_string() == "nan", "nan -> {nan.to_string()}");
+  assert(inf.to_string() == "inf", "inf -> {inf.to_string()}");
+  assert(neg_inf.to_string() == "-inf", "-inf -> {neg_inf.to_string()}");
+}
+
+test_small_integers() `test {
+  assert(1.0.to_string() == "1", "1.0 -> {1.0.to_string()}");
+  assert(2.0.to_string() == "2", "2.0 -> {2.0.to_string()}");
+  assert((-1.0).to_string() == "-1", "-1.0 -> {(-1.0).to_string()}");
+  assert(10.0.to_string() == "10", "10.0 -> {10.0.to_string()}");
+  assert(100.0.to_string() == "100", "100.0 -> {100.0.to_string()}");
+  assert(1000.0.to_string() == "1000", "1000.0 -> {1000.0.to_string()}");
+}
+
+test_basic_fractions() `test {
+  assert(0.5.to_string() == "0.5", "0.5 -> {0.5.to_string()}");
+  assert(0.25.to_string() == "0.25", "0.25 -> {0.25.to_string()}");
+  assert(0.125.to_string() == "0.125", "0.125 -> {0.125.to_string()}");
+  assert(0.1.to_string() == "0.1", "0.1 -> {0.1.to_string()}");
+  assert(0.01.to_string() == "0.01", "0.01 -> {0.01.to_string()}");
+  assert(0.001.to_string() == "0.001", "0.001 -> {0.001.to_string()}");
+}
+
+test_common_values() `test {
+  assert(3.14.to_string() == "3.14", "3.14 -> {3.14.to_string()}");
+  assert(2.718.to_string() == "2.718", "2.718 -> {2.718.to_string()}");
+  assert(1.5.to_string() == "1.5", "1.5 -> {1.5.to_string()}");
+  assert(99.99.to_string() == "99.99", "99.99 -> {99.99.to_string()}");
+}
+
+test_negative_values() `test {
+  assert((-0.1).to_string() == "-0.1", "-0.1 -> {(-0.1).to_string()}");
+  assert((-3.14).to_string() == "-3.14", "-3.14 -> {(-3.14).to_string()}");
+  assert((-100.0).to_string() == "-100", "-100.0 -> {(-100.0).to_string()}");
+}
+
+test_powers_of_two() `test {
+  assert(0.5.to_string() == "0.5", "2^-1");
+  assert(0.25.to_string() == "0.25", "2^-2");
+  assert(0.125.to_string() == "0.125", "2^-3");
+  assert(2.0.to_string() == "2", "2^1");
+  assert(4.0.to_string() == "4", "2^2");
+  assert(8.0.to_string() == "8", "2^3");
+  assert(16.0.to_string() == "16", "2^4");
+  assert(256.0.to_string() == "256", "2^8");
+  assert(1024.0.to_string() == "1024", "2^10");
+}
+
+test_large_values() `test {
+  assert(1e10.to_string() == "1e+10", "1e10 -> {1e10.to_string()}");
+  assert(1e15.to_string() == "1e+15", "1e15 -> {1e15.to_string()}");
+}
+
+test_small_values() `test {
+  assert(1e-7.to_string() == "1e-07", "1e-7 -> {1e-7.to_string()}");
+  assert(1e-10.to_string() == "1e-10", "1e-10 -> {1e-10.to_string()}");
+}
+
+test_bits_getter() `test {
+  assert(0.0.bits == 0u, "0.0 bits");
+  assert(1.0.bits == 4607182418800017408u, "1.0 bits");
+  assert((-0.0).bits == 9223372036854775808u, "-0.0 bits");
+}
+
+test_string_interpolation() `test {
+  f64 x = 3.14;
+  assert("{x}" == "3.14", "interpolation: {x}");
+  f64 y = 0.1;
+  assert("{y}" == "0.1", "interpolation: {y}");
+}
+
+test_extreme_values() `test {
+  // DBL_MAX
+  assert(1.7976931348623157e308.to_string() == "1.7976931348623157e+308", "DBL_MAX: {1.7976931348623157e308.to_string()}");
+  // DBL_MIN (smallest normal)
+  assert(2.2250738585072014e-308.to_string() == "2.2250738585072014e-308", "DBL_MIN: {2.2250738585072014e-308.to_string()}");
+  // Smallest denormalized
+  assert(5e-324.to_string() == "5e-324", "smallest denorm: {5e-324.to_string()}");
+}
+
+test_scientific_notation_format() `test {
+  // 2-digit exponent
+  assert(1e6.to_string() == "1e+06", "1e6: {1e6.to_string()}");
+  assert(1e-5.to_string() == "1e-05", "1e-5: {1e-5.to_string()}");
+  // 3-digit exponent
+  assert(1e100.to_string() == "1e+100", "1e100: {1e100.to_string()}");
+  assert(1e-100.to_string() == "1e-100", "1e-100: {1e-100.to_string()}");
+  // Large negative exponent
+  assert(1e-200.to_string() == "1e-200", "1e-200: {1e-200.to_string()}");
+}
+
+test_fixed_notation_boundaries() `test {
+  // sci_exp = 5 → fixed (boundary)
+  assert(100000.0.to_string() == "100000", "1e5 fixed: {100000.0.to_string()}");
+  // sci_exp = 6 → scientific
+  assert(1000000.0.to_string() == "1e+06", "1e6 sci: {1000000.0.to_string()}");
+  // sci_exp = -4 → fixed (boundary)
+  assert(0.0001.to_string() == "0.0001", "1e-4 fixed: {0.0001.to_string()}");
+  // sci_exp = -5 → scientific
+  assert(0.00001.to_string() == "1e-05", "1e-5 sci: {0.00001.to_string()}");
+}
+
+test_e2_positive_path() `test {
+  // Large integers exercise the e2 >= 0 code path (inverse pow5 table)
+  assert(12345.0.to_string() == "12345", "12345: {12345.0.to_string()}");
+  assert(999999.0.to_string() == "999999", "999999: {999999.0.to_string()}");
+  assert(1.234567e6.to_string() == "1.234567e+06", "1.234567e6: {1.234567e6.to_string()}");
+}
+
+test_trailing_zeros() `test {
+  // Values with trailing zeros in fixed notation
+  assert(10.0.to_string() == "10", "10: {10.0.to_string()}");
+  assert(1000.0.to_string() == "1000", "1000: {1000.0.to_string()}");
+  // Scientific with no fractional part
+  assert(1e10.to_string() == "1e+10", "1e10: {1e10.to_string()}");
+}
+
+test_near_one() `test {
+  assert(1.00001.to_string() == "1.00001", "just above 1: {1.00001.to_string()}");
+  assert(0.999999.to_string() == "0.999999", "just below 1: {0.999999.to_string()}");
+  assert(9.999995.to_string() == "9.999995", "near 10: {9.999995.to_string()}");
+}

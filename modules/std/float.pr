@@ -55,6 +55,7 @@ type f64 `native `public {
   ++ () f64 `native;
   -- () f64 `native;
   get hash int `native;
+  get bits uint `native `public `doc("Returns the IEEE 754 bit representation of this f64 as a uint.");
   get max f64 `public `global => 1.7976931348623157e+308;
   get min f64 `public `global => -1.7976931348623157e+308;
   get pi f64 `public `global => 3.14159265358979323846;

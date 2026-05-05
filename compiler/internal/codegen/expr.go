@@ -1859,6 +1859,15 @@ func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 		}
 	}
 
+	// Native bits getter: f64.bits returns IEEE 754 bit pattern as uint
+	if e.Field == "bits" {
+		named := extractNamed(targetType)
+		if named == types.TypF64 {
+			target := c.genExpr(e.Target)
+			return c.block.NewBitCast(target, irtypes.I64)
+		}
+	}
+
 	// Enum variant access: Color.Red or Option[int].None
 	// Check variant first; if the field is not a variant, check for enum getters.
 	if enumLayout := c.lookupEnumLayout(targetType); enumLayout != nil {

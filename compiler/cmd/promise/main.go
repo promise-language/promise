@@ -3452,12 +3452,37 @@ func computeTestFileCacheKey(filename, target string) (string, bool) {
 	fmt.Fprintf(h, "std:%s\n", sHash)
 	fmt.Fprintf(h, "target:%s\n", target)
 
+	abs, _ := filepath.Abs(filename)
+	dir := filepath.Dir(abs)
+
+	// Hash embedded file contents — if any `embed("path") annotation references
+	// an external file, its content must be part of the cache key so that changes
+	// to embedded files invalidate the cache even when the .pr source is unchanged.
+	embedRe := regexp.MustCompile("`embed\\(\"([^\"]+)\"")
+	embedMatches := embedRe.FindAllSubmatch(content, -1)
+	if len(embedMatches) > 0 {
+		var embedHashes []string
+		for _, m := range embedMatches {
+			embedPath := string(m[1])
+			absEmbed := filepath.Join(dir, embedPath)
+			embedContent, err := os.ReadFile(absEmbed)
+			if err != nil {
+				return "", false // embedded file not readable — don't cache
+			}
+			eh := fnv.New128a()
+			eh.Write(embedContent)
+			embedHashes = append(embedHashes, embedPath+":"+hex.EncodeToString(eh.Sum(nil)))
+		}
+		sort.Strings(embedHashes)
+		for _, eh := range embedHashes {
+			fmt.Fprintf(h, "embed:%s\n", eh)
+		}
+	}
+
 	// Hash local module dependencies from sourced use declarations.
 	useRe := regexp.MustCompile(`use\s+[\w_]+\s+"([^"]+)"`)
 	matches := useRe.FindAllSubmatch(content, -1)
 	if len(matches) > 0 {
-		abs, _ := filepath.Abs(filename)
-		dir := filepath.Dir(abs)
 		var modHashes []string
 		for _, m := range matches {
 			path := string(m[1])

@@ -6185,6 +6185,37 @@ func TestTestSummaryBody(t *testing.T) {
 	assertContains(t, ir, "to %promise_string_i*")
 }
 
+func TestTestTrampolineStackCreepDetection(t *testing.T) {
+	// The test trampoline should read the stack pointer before and after the test
+	// function call, and fail the test if the SP has changed (stack creep).
+	result := compileResult(t, `
+		myTest() `+"`test"+` { }
+	`)
+	info, _ := sema.Check(func() *ast.File {
+		input := antlr.NewInputStream(`myTest() ` + "`test" + ` { }`)
+		lexer := parser.NewPromiseLexer(input)
+		lexer.RemoveErrorListeners()
+		stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+		p := parser.NewPromiseParser(stream)
+		p.RemoveErrorListeners()
+		tree := p.CompilationUnit()
+		file, _ := ast.Build("test.pr", tree)
+		return file
+	}())
+	result.GenerateTestMain(info.Tests)
+	ir := result.Module.String()
+
+	// Trampoline should contain inline asm to read SP (sideeffect prevents reordering)
+	assertContains(t, ir, "asm sideeffect")
+	// Should have stack_creep and stack_ok blocks
+	assertContains(t, ir, "stack_creep:")
+	assertContains(t, ir, "stack_ok:")
+	// Stack creep message global
+	assertContains(t, ir, "stack creep detected")
+	// The SP comparison drives a conditional branch
+	assertContains(t, ir, "icmp eq i64")
+}
+
 func TestHostTargetTriple(t *testing.T) {
 	triple := HostTargetTriple()
 	if triple == "" {

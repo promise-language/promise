@@ -635,6 +635,9 @@ func (c *Compiler) defineTestRunFunc() *ir.Func {
 // On non-WASM: uses setjmp/longjmp for panic recovery. The trampoline stores a
 // jmp_buf in the TLS @__promise_test_jmpbuf so promise_panic can longjmp back
 // instead of exiting. On panic, returns non-null to indicate failure.
+// After the test function returns normally, verifies that the stack pointer has
+// not drifted (stack creep detection). If it has, stores a diagnostic message
+// in @__promise_test_panic_msg and returns non-null to fail the test.
 func (c *Compiler) defineTestTrampoline() *ir.Func {
 	trampoline := c.module.NewFunc(".test_trampoline", irtypes.I8Ptr,
 		ir.NewParam("fn_ptr", irtypes.I8Ptr))
@@ -665,12 +668,41 @@ func (c *Compiler) defineTestTrampoline() *ir.Func {
 	panicBlk := trampoline.NewBlock("panic_recovered")
 	entry.NewCondBr(isPanicReturn, panicBlk, normalBlk)
 
-	// Normal path: call the test function, clear jmpbuf, return null (pass)
+	// Normal path: read SP, call test function, read SP again, check for drift
 	voidFnPtrType := irtypes.NewPointer(irtypes.NewFunc(irtypes.Void))
 	typedFn := normalBlk.NewBitCast(trampoline.Params[0], voidFnPtrType)
+
+	spBefore := c.emitReadStackPointer(normalBlk)
 	normalBlk.NewCall(typedFn)
-	normalBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.testJmpBufGlobal)
-	normalBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
+	spAfter := c.emitReadStackPointer(normalBlk)
+
+	if spBefore != nil && spAfter != nil {
+		// Compare stack pointers — any difference indicates stack creep
+		spMatch := normalBlk.NewICmp(enum.IPredEQ, spBefore, spAfter)
+		stackOkBlk := trampoline.NewBlock("stack_ok")
+		stackCreepBlk := trampoline.NewBlock("stack_creep")
+		normalBlk.NewCondBr(spMatch, stackOkBlk, stackCreepBlk)
+
+		// Stack creep detected: store diagnostic message, return failure
+		creepMsgData := constant.NewCharArrayFromString("stack creep detected\x00")
+		creepMsgGlobal := c.module.NewGlobalDef(".str.stack_creep_msg", creepMsgData)
+		creepMsgGlobal.Immutable = true
+		creepMsgGlobal.Linkage = enum.LinkagePrivate
+		creepMsgPtr := stackCreepBlk.NewGetElementPtr(creepMsgGlobal.ContentType, creepMsgGlobal,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		stackCreepBlk.NewStore(creepMsgPtr, c.testPanicMsgGlobal)
+		stackCreepBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.testJmpBufGlobal)
+		creepFail := stackCreepBlk.NewIntToPtr(constant.NewInt(irtypes.I64, 1), irtypes.I8Ptr)
+		stackCreepBlk.NewRet(creepFail)
+
+		// Stack OK: clear jmpbuf, return null (pass)
+		stackOkBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.testJmpBufGlobal)
+		stackOkBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
+	} else {
+		// SP check not available for this target: proceed without check
+		normalBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.testJmpBufGlobal)
+		normalBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
+	}
 
 	// Panic recovery path: clear jmpbuf, return non-null (fail indicator)
 	panicBlk.NewStore(constant.NewNull(irtypes.I8Ptr), c.testJmpBufGlobal)
@@ -678,6 +710,30 @@ func (c *Compiler) defineTestTrampoline() *ir.Func {
 	panicBlk.NewRet(failIndicator)
 
 	return trampoline
+}
+
+// emitReadStackPointer emits inline assembly to read the current stack pointer.
+// Returns the SP as an i64 value, or nil if the target architecture is not
+// supported (e.g. WASM). Uses sideeffect to prevent LLVM from reordering or
+// folding the reads across the test function call.
+func (c *Compiler) emitReadStackPointer(block *ir.Block) value.Value {
+	if c.isWasm {
+		return nil
+	}
+
+	var asmStr string
+	if strings.Contains(c.target, "x86_64") {
+		asmStr = "movq %rsp, $0"
+	} else if strings.Contains(c.target, "aarch64") || strings.Contains(c.target, "arm64") {
+		asmStr = "mov $0, sp"
+	} else {
+		return nil
+	}
+
+	funcType := irtypes.NewFunc(irtypes.I64)
+	inlineAsm := ir.NewInlineAsm(irtypes.NewPointer(funcType), asmStr, "=r")
+	inlineAsm.SideEffect = true
+	return block.NewCall(inlineAsm)
 }
 
 // defineTestPrintResultBody adds a function body to promise_test_print_result.

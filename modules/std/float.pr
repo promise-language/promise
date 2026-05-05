@@ -15,6 +15,7 @@ type f32 `native `public {
   ++ () f32 `native;
   -- () f32 `native;
   get hash int `native;
+  get bits u32 `native `public `doc("Returns the IEEE 754 bit representation of this f32 as a u32.");
   get max f32 `public `global => 3.4028235e+38f32;
   get min f32 `public `global => -3.4028235e+38f32;
   get pi f32 `public `global => 3.14159265f32;

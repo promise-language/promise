@@ -10,3 +10,9 @@ type Format `structural `public `doc("Structural interface for types that can fo
 _f64_to_str(f64 x) string {
   return _ryu_f64(x.bits);
 }
+
+// _f32_to_str converts an f32 to its shortest exact string representation.
+// Uses f32-specific Ryu for correct shortest output (not promoted to f64).
+_f32_to_str(f32 x) string {
+  return _ryu_f32(x.bits);
+}

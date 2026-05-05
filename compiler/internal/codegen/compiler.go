@@ -572,6 +572,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	c.definePALBodies()
 	c.defineMathBodies()
 	c.defineF64ToStringBridge() // bridge promise_f64_to_string → Promise _f64_to_str
+	c.defineF32ToStringBridge() // bridge promise_f32_to_string → Promise _f32_to_str
 	c.defineFileIOBodies()      // bridge io module externs → PAL file I/O functions
 	c.defineOSBodies()          // bridge os module externs → PAL OS functions
 
@@ -998,6 +999,7 @@ func (c *Compiler) declareIntrinsics() {
 	c.defineIntToStringFunc()
 	c.defineUintToStringFunc()
 	c.declareF64ToStringFunc() // stub — body bridged to Promise _f64_to_str after declareFuncs
+	c.declareF32ToStringFunc() // stub — body bridged to Promise _f32_to_str after declareFuncs
 	c.defineCharToStringFunc()
 
 	// String next_char UTF-8 decoder (codegen-emitted LLVM IR, replaces C runtime)
@@ -2838,6 +2840,25 @@ func (c *Compiler) defineF64ToStringBridge() {
 	fn := c.funcs["promise_f64_to_string"]
 	entry := fn.NewBlock(".entry")
 	stdFn := c.funcs["_f64_to_str"]
+	result := entry.NewCall(stdFn, fn.Params[0])
+	entry.NewRet(result)
+}
+
+// declareF32ToStringFunc declares promise_f32_to_string as a stub (no body).
+// The body is added later by defineF32ToStringBridge, which forwards to the
+// Promise-defined _f32_to_str function in std/format.pr.
+func (c *Compiler) declareF32ToStringFunc() {
+	xParam := ir.NewParam("x", irtypes.Float)
+	fn := c.module.NewFunc("promise_f32_to_string", irtypes.I8Ptr, xParam)
+	c.funcs["promise_f32_to_string"] = fn
+}
+
+// defineF32ToStringBridge adds a body to promise_f32_to_string that calls
+// the Promise-defined _f32_to_str function. Must be called after declareFuncs.
+func (c *Compiler) defineF32ToStringBridge() {
+	fn := c.funcs["promise_f32_to_string"]
+	entry := fn.NewBlock(".entry")
+	stdFn := c.funcs["_f32_to_str"]
 	result := entry.NewCall(stdFn, fn.Params[0])
 	entry.NewRet(result)
 }

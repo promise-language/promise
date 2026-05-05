@@ -345,8 +345,7 @@ func (c *Compiler) convertToString(val value.Value, typ types.Type) value.Value 
 	case types.TypF64:
 		return c.block.NewCall(c.funcs["promise_f64_to_string"], val)
 	case types.TypF32:
-		ext := c.block.NewFPExt(val, irtypes.Double)
-		return c.block.NewCall(c.funcs["promise_f64_to_string"], ext)
+		return c.block.NewCall(c.funcs["promise_f32_to_string"], val)
 	case types.TypBool:
 		i8Val := c.block.NewZExt(val, irtypes.I8)
 		return c.block.NewCall(c.funcs["promise_bool_to_string"], i8Val)
@@ -1859,12 +1858,16 @@ func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 		}
 	}
 
-	// Native bits getter: f64.bits returns IEEE 754 bit pattern as uint
+	// Native bits getter: f64.bits/f32.bits returns IEEE 754 bit pattern
 	if e.Field == "bits" {
 		named := extractNamed(targetType)
 		if named == types.TypF64 {
 			target := c.genExpr(e.Target)
 			return c.block.NewBitCast(target, irtypes.I64)
+		}
+		if named == types.TypF32 {
+			target := c.genExpr(e.Target)
+			return c.block.NewBitCast(target, irtypes.I32)
 		}
 	}
 

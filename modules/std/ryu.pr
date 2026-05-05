@@ -1584,16 +1584,12 @@ _ryu_f64(uint bits) string {
   int olength = _ryu_decimal_length(out);
   e10 = e10 + removed;
 
-  string prefix = "";
-  if sign != 0u {
-    prefix = "-";
-  }
-
-  return prefix + _ryu_format_decimal(out, olength, e10);
+  bool negative = sign != 0u;
+  return _ryu_format_decimal(out, olength, e10, negative);
 }
 
 // Format decimal digits with exponent into string using Builder.
-_ryu_format_decimal(uint output, int olength, int exp) string {
+_ryu_format_decimal(uint output, int olength, int exp, bool negative) string {
   // The decimal representation is: output × 10^exp
   // dot_pos = exp + olength = position of decimal point from the left
   int dot_pos = exp + olength;
@@ -1611,6 +1607,9 @@ _ryu_format_decimal(uint output, int olength, int exp) string {
   }
 
   Builder b = Builder(capacity: olength + 8);
+  if negative {
+    b.buf.push(45u8);
+  }
 
   // sci_exp is the exponent in scientific notation (d.ddd × 10^sci_exp)
   int sci_exp = dot_pos - 1;
@@ -1697,4 +1696,306 @@ _ryu_format_decimal(uint output, int olength, int exp) string {
   }
 
   return b.to_string();
+}
+
+// f32 Ryu lookup tables
+// FLOAT_POW5_SPLIT: 5^q normalized to 64 bits, q=0..46
+_ryu_f32_pow5() uint[] {
+  return[1152921504606846976u,
+  1441151880758558720u,
+  1801439850948198400u,
+  2251799813685248000u,
+  1407374883553280000u,
+  1759218604441600000u,
+  2199023255552000000u,
+  1374389534720000000u,
+  1717986918400000000u,
+  2147483648000000000u,
+  1342177280000000000u,
+  1677721600000000000u,
+  2097152000000000000u,
+  1310720000000000000u,
+  1638400000000000000u,
+  2048000000000000000u,
+  1280000000000000000u,
+  1600000000000000000u,
+  2000000000000000000u,
+  1250000000000000000u,
+  1562500000000000000u,
+  1953125000000000000u,
+  1220703125000000000u,
+  1525878906250000000u,
+  1907348632812500000u,
+  1192092895507812500u,
+  1490116119384765625u,
+  1862645149230957031u,
+  1164153218269348144u,
+  1455191522836685180u,
+  1818989403545856475u,
+  2273736754432320594u,
+  1421085471520200371u,
+  1776356839400250464u,
+  2220446049250313080u,
+  1387778780781445675u,
+  1734723475976807094u,
+  2168404344971008868u,
+  1355252715606880542u,
+  1694065894508600678u,
+  2117582368135750847u,
+  1323488980084844279u,
+  1654361225106055349u,
+  2067951531382569187u,
+  1292469707114105741u,
+  1615587133892632177u,
+  2019483917365790221u];
+}
+
+// FLOAT_POW5_INV_SPLIT: floor(2^(bitLen(5^q)+60) / 5^q) + 1, q=0..30
+_ryu_f32_pow5_inv() uint[] {
+  return[2305843009213693953u,
+  1844674407370955162u,
+  1475739525896764130u,
+  1180591620717411304u,
+  1888946593147858086u,
+  1511157274518286469u,
+  1208925819614629175u,
+  1934281311383406680u,
+  1547425049106725344u,
+  1237940039285380275u,
+  1980704062856608440u,
+  1584563250285286752u,
+  1267650600228229402u,
+  2028240960365167043u,
+  1622592768292133634u,
+  1298074214633706908u,
+  2076918743413931052u,
+  1661534994731144842u,
+  1329227995784915873u,
+  2126764793255865397u,
+  1701411834604692318u,
+  1361129467683753854u,
+  2177807148294006167u,
+  1742245718635204933u,
+  1393796574908163947u,
+  2230074519853062315u,
+  1784059615882449852u,
+  1427247692705959882u,
+  2283596308329535810u,
+  1826877046663628648u,
+  1461501637330902919u];
+}
+
+// Main Ryu algorithm for f32.
+// Returns the shortest decimal string that round-trips exactly to f32.
+_ryu_f32(u32 bits) string {
+  // Decompose IEEE 754 single-precision float
+  uint sign = (bits >> 31u32) as! uint;
+  uint ie = ((bits >> 23u32) & 255u32) as! uint;
+  uint im = (bits & 8388607u32) as! uint;
+
+  // Special cases
+  if ie == 255u {
+    if im != 0u {
+      return "nan";
+    }
+    if sign != 0u {
+      return "-inf";
+    }
+    return "inf";
+  }
+
+  if ie == 0u && im == 0u {
+    if sign != 0u {
+      return "-0";
+    }
+    return "0";
+  }
+
+  int e2 = 0;
+  uint m2 = 0u;
+  if ie == 0u {
+    e2 = 1 - 127 - 23;
+    m2 = im;
+  } else {
+    e2 = (ie as! int) - 127 - 23;
+    m2 = im | 8388608u;
+  }
+
+  bool even = (m2 & 1u) == 0u;
+  bool accept_bounds = even;
+
+  uint mv = m2 << 2u;
+  uint mp = mv + 2u;
+  uint mm_shift = 1u;
+  if im == 0u && ie > 1u {
+    mm_shift = 0u;
+  }
+  uint mm = mv - 1u - mm_shift;
+
+  e2 = e2 - 2;
+
+  uint vr = 0u;
+  uint vp = 0u;
+  uint vm = 0u;
+  int e10 = 0;
+  bool vm_is_trailing_zeros = false;
+  bool vr_is_trailing_zeros = false;
+
+  if e2 >= 0 {
+    int q = _ryu_log10pow2(e2);
+    if e2 > 3 {
+      q = q - 1;
+    }
+    e10 = q;
+    int k = 61 + _ryu_pow5bits(q) - 1;
+    int i = 0 - e2 + q + k;
+
+    uint[] inv = _ryu_f32_pow5_inv();
+    uint mul = inv[q];
+    vr = _ryu_f32_mul_shift(mv, mul, i);
+    vp = _ryu_f32_mul_shift(mp, mul, i);
+    vm = _ryu_f32_mul_shift(mm, mul, i);
+
+    if q <= 9 {
+      if mv % 5u == 0u {
+        vr_is_trailing_zeros = _ryu_multiple_of_pow5(mv, q);
+      } else if accept_bounds {
+        vm_is_trailing_zeros = _ryu_multiple_of_pow5(mm, q);
+      } else {
+        if _ryu_multiple_of_pow5(mp, q) {
+          vp = vp - 1u;
+        }
+      }
+    }
+  } else {
+    int neg_e2 = 0 - e2;
+    int q = _ryu_log10pow5(neg_e2);
+    if neg_e2 > 1 {
+      q = q - 1;
+    }
+    e10 = q + e2;
+    int i = 0 - e2 - q;
+    int k = _ryu_pow5bits(i) - 61;
+    int j = q - k;
+
+    uint[] pow = _ryu_f32_pow5();
+    uint mul = pow[i];
+    vr = _ryu_f32_mul_shift(mv, mul, j);
+    vp = _ryu_f32_mul_shift(mp, mul, j);
+    vm = _ryu_f32_mul_shift(mm, mul, j);
+
+    if q <= 1 {
+      vr_is_trailing_zeros = true;
+      if accept_bounds {
+        vm_is_trailing_zeros = (mm_shift == 1u);
+      } else {
+        vp = vp - 1u;
+      }
+    } else if q < 31 {
+      vr_is_trailing_zeros = _ryu_multiple_of_pow2(mv, q - 1);
+    }
+  }
+
+  // Step 4: Find shortest decimal representation
+  int removed = 0;
+  uint last_removed_digit = 0u;
+  uint out = 0u;
+
+  if vm_is_trailing_zeros || vr_is_trailing_zeros {
+    while true {
+      uint vp_div10 = vp / 10u;
+      uint vm_div10 = vm / 10u;
+      if vp_div10 <= vm_div10 {
+        break;
+      }
+      uint vm_mod10 = vm % 10u;
+      uint vr_div10 = vr / 10u;
+      uint vr_mod10 = vr % 10u;
+      vm_is_trailing_zeros = vm_is_trailing_zeros && (vm_mod10 == 0u);
+      vr_is_trailing_zeros = vr_is_trailing_zeros && (last_removed_digit == 0u);
+      last_removed_digit = vr_mod10;
+      vr = vr_div10;
+      vp = vp_div10;
+      vm = vm_div10;
+      removed = removed + 1;
+    }
+
+    if vm_is_trailing_zeros {
+      while true {
+        uint vm_div10 = vm / 10u;
+        uint vm_mod10 = vm % 10u;
+        if vm_mod10 != 0u {
+          break;
+        }
+        uint vr_div10 = vr / 10u;
+        uint vr_mod10 = vr % 10u;
+        vr_is_trailing_zeros = vr_is_trailing_zeros && (last_removed_digit == 0u);
+        last_removed_digit = vr_mod10;
+        vr = vr_div10;
+        vp = vp / 10u;
+        vm = vm_div10;
+        removed = removed + 1;
+      }
+    }
+
+    if vr_is_trailing_zeros && (last_removed_digit == 5u) && (vr % 2u == 0u) {
+      last_removed_digit = 4u;
+    }
+    out = vr;
+    if (vr == vm && (!accept_bounds || !vm_is_trailing_zeros)) || last_removed_digit >= 5u {
+      out = out + 1u;
+    }
+  } else {
+    bool round_up = false;
+    uint vp_div100 = vp / 100u;
+    uint vm_div100 = vm / 100u;
+    if vp_div100 > vm_div100 {
+      uint vr_mod100 = vr % 100u;
+      round_up = vr_mod100 >= 50u;
+      vr = vr / 100u;
+      vp = vp_div100;
+      vm = vm_div100;
+      removed = removed + 2;
+    }
+
+    while true {
+      uint vp_div10 = vp / 10u;
+      uint vm_div10 = vm / 10u;
+      if vp_div10 <= vm_div10 {
+        break;
+      }
+      uint vr_mod10 = vr % 10u;
+      round_up = vr_mod10 >= 5u;
+      vr = vr / 10u;
+      vp = vp_div10;
+      vm = vm_div10;
+      removed = removed + 1;
+    }
+
+    out = vr;
+    if vr == vm || round_up {
+      out = out + 1u;
+    }
+  }
+
+  int olength = _ryu_decimal_length(out);
+  e10 = e10 + removed;
+
+  bool negative = sign != 0u;
+  return _ryu_format_decimal(out, olength, e10, negative);
+}
+
+// f32 multiply-shift: (m * mul) >> shift, all 64-bit
+_ryu_f32_mul_shift(uint m, uint mul, int shift) uint {
+  uint hi = _ryu_mul_hi(m, mul);
+  uint lo = m * mul;
+
+  int s = shift - 32;
+  if s >= 32 {
+    uint sr = (s - 32) as! uint;
+    return hi >> sr;
+  }
+  uint sl = (32 - s) as! uint;
+  uint sr = (32 + s) as! uint;
+  return (hi << sl) | (lo >> sr);
 }

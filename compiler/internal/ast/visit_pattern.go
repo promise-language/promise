@@ -105,6 +105,13 @@ func (b *Builder) VisitWildcardPattern(ctx *parser.WildcardPatternContext) inter
 	return &WildcardMatchPattern{nodeBase: b.baseFromContext(ctx)}
 }
 
+func (b *Builder) VisitExpressionPattern(ctx *parser.ExpressionPatternContext) interface{} {
+	return &ExpressionMatchPattern{
+		nodeBase: b.baseFromContext(ctx),
+		Expr:     b.visitExpr(ctx.Expression()),
+	}
+}
+
 // Is-patterns (for `is` expressions)
 
 func (b *Builder) VisitDestructureIsPattern(ctx *parser.DestructureIsPatternContext) interface{} {

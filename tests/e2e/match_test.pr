@@ -434,3 +434,93 @@ test_short_destructure_neg() `test {
   };
   assert(val == -10, "short destructure Neg(10)");
 }
+
+// --- match true with expression patterns (B0123) ---
+
+test_match_true_fizzbuzz() `test {
+  int n = 15;
+  string result = match true {
+    n % 15 == 0 => "fizzbuzz",
+    n % 3 == 0 => "fizz",
+    n % 5 == 0 => "buzz",
+    _ => n.to_string(),
+  };
+  assert(result == "fizzbuzz", "match true: 15 is fizzbuzz");
+}
+
+test_match_true_fizz() `test {
+  int n = 9;
+  string result = match true {
+    n % 15 == 0 => "fizzbuzz",
+    n % 3 == 0 => "fizz",
+    n % 5 == 0 => "buzz",
+    _ => n.to_string(),
+  };
+  assert(result == "fizz", "match true: 9 is fizz");
+}
+
+test_match_true_buzz() `test {
+  int n = 10;
+  string result = match true {
+    n % 15 == 0 => "fizzbuzz",
+    n % 3 == 0 => "fizz",
+    n % 5 == 0 => "buzz",
+    _ => n.to_string(),
+  };
+  assert(result == "buzz", "match true: 10 is buzz");
+}
+
+test_match_true_default() `test {
+  int n = 7;
+  string result = match true {
+    n % 15 == 0 => "fizzbuzz",
+    n % 3 == 0 => "fizz",
+    n % 5 == 0 => "buzz",
+    _ => n.to_string(),
+  };
+  assert(result == "7", "match true: 7 falls through to default");
+}
+
+test_match_expression_pattern_int() `test {
+  int x = 42;
+  string result = match x {
+    6 * 7 => "forty-two",
+    5 + 5 => "ten",
+    _ => "other",
+  };
+  assert(result == "forty-two", "match int expr: 6*7 == 42");
+}
+
+test_match_expression_pattern_string() `test {
+  string s = "hello";
+  string result = match s {
+    "he" + "llo" => "matched",
+    _ => "nope",
+  };
+  assert(result == "matched", "match string expr: concatenation");
+}
+
+test_match_expression_pattern_with_variables() `test {
+  int threshold = 10;
+  int x = 10;
+  string result = match x {
+    threshold => "at threshold",
+    _ => "other",
+  };
+  assert(result == "at threshold", "match expr with variable");
+}
+
+test_match_true_with_block_arm() `test {
+  int n = 3;
+  match true {
+    n > 10 => {
+      assert(false, "should not reach big");
+    },
+    n > 0 => {
+      assert(true, "match true with block arm: positive");
+    },
+    _ => {
+      assert(false, "should not reach non-positive");
+    },
+  };
+}

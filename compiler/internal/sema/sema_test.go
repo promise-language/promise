@@ -11195,3 +11195,55 @@ func TestFlattenMultipleCollision(t *testing.T) {
 	`)
 	expectError(t, errs, "wire name 'x'")
 }
+
+// --- Match expression pattern tests (B0123) ---
+
+func TestMatchExpressionPatternOK(t *testing.T) {
+	checkOK(t, `
+		test() {
+			int n = 15;
+			s := match true {
+				n % 15 == 0 => "fizzbuzz",
+				n % 3 == 0 => "fizz",
+				_ => "other",
+			};
+		}
+	`)
+}
+
+func TestMatchExpressionPatternIntSubject(t *testing.T) {
+	checkOK(t, `
+		test() {
+			int x = 42;
+			s := match x {
+				6 * 7 => "forty-two",
+				_ => "other",
+			};
+		}
+	`)
+}
+
+func TestMatchExpressionPatternTypeMismatch(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			int x = 42;
+			s := match x {
+				"hello" + "world" => "bad",
+				_ => "other",
+			};
+		}
+	`)
+	expectError(t, errs, "does not match subject type")
+}
+
+func TestMatchExpressionPatternRequiresWildcard(t *testing.T) {
+	errs := checkErrs(t, `
+		test() {
+			int n = 15;
+			s := match true {
+				n > 0 => "positive",
+			};
+		}
+	`)
+	expectError(t, errs, "must include a wildcard")
+}

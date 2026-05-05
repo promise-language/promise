@@ -3672,6 +3672,7 @@ matchPattern
     | IDENT '.' IDENT                        // enum variant: Color.Red
     | IDENT '.' IDENT '(' patternFields ')'  // enum destructure: Color.Custom(r, g, b)
     | IDENT IDENT?                           // type pattern with optional binding: Dog d
+    | expression                             // expression pattern: n % 15 == 0
     ;
 
 pattern

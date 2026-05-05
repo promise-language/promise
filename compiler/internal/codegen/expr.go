@@ -3283,17 +3283,23 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 
 	for i, arm := range e.Arms {
 		switch p := arm.Pattern.(type) {
-		case *ast.LiteralMatchPattern:
-			lit := c.genExpr(p.Value)
+		case *ast.LiteralMatchPattern, *ast.ExpressionMatchPattern:
+			var patternVal value.Value
+			switch pp := p.(type) {
+			case *ast.LiteralMatchPattern:
+				patternVal = c.genExpr(pp.Value)
+			case *ast.ExpressionMatchPattern:
+				patternVal = c.genExpr(pp.Expr)
+			}
 
 			var cond value.Value
 			if named != nil {
 				method := named.LookupMethod("==")
 				if method != nil && method.IsNative() {
 					if named == types.TypString {
-						cond = c.genStringOp("==", subject, lit)
+						cond = c.genStringOp("==", subject, patternVal)
 					} else {
-						cond = c.emitNativeOp(named, "==", subject, lit)
+						cond = c.emitNativeOp(named, "==", subject, patternVal)
 					}
 				}
 			}

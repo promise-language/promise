@@ -430,6 +430,8 @@ func (c *Checker) registerPatternBindings(pat ast.MatchPattern) {
 		if p.Binding != "_" {
 			c.state[p.Binding] = Owned
 		}
+	case *ast.ExpressionMatchPattern:
+		c.checkExpr(p.Expr)
 	}
 }
 

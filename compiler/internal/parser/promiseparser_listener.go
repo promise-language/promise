@@ -457,6 +457,9 @@ type PromiseParserListener interface {
 	// EnterWildcardPattern is called when entering the wildcardPattern production.
 	EnterWildcardPattern(c *WildcardPatternContext)
 
+	// EnterExpressionPattern is called when entering the expressionPattern production.
+	EnterExpressionPattern(c *ExpressionPatternContext)
+
 	// EnterDestructureIsPattern is called when entering the destructureIsPattern production.
 	EnterDestructureIsPattern(c *DestructureIsPatternContext)
 
@@ -921,6 +924,9 @@ type PromiseParserListener interface {
 
 	// ExitWildcardPattern is called when exiting the wildcardPattern production.
 	ExitWildcardPattern(c *WildcardPatternContext)
+
+	// ExitExpressionPattern is called when exiting the expressionPattern production.
+	ExitExpressionPattern(c *ExpressionPatternContext)
 
 	// ExitDestructureIsPattern is called when exiting the destructureIsPattern production.
 	ExitDestructureIsPattern(c *DestructureIsPatternContext)

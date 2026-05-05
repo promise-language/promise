@@ -549,6 +549,7 @@ matchPattern
     | NONE                                                     # noneLiteralPattern
     | stringLiteral                                            # stringLiteralPattern
     | UNDERSCORE                                               # wildcardPattern
+    | expression                                               # expressionPattern
     ;
 
 // Pattern for 'is' expressions

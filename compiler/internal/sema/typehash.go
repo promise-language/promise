@@ -674,6 +674,9 @@ func hMatchPattern(h hash.Hash, p ast.MatchPattern) {
 		hExpr(h, pat.Value)
 	case *ast.WildcardMatchPattern:
 		wb(h, 7)
+	case *ast.ExpressionMatchPattern:
+		wb(h, 8)
+		hExpr(h, pat.Expr)
 	default:
 		panic(fmt.Sprintf("typehash: unhandled MatchPattern %T", p))
 	}

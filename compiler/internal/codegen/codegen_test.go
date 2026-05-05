@@ -12489,3 +12489,23 @@ func TestIsGenericErrorHandler(t *testing.T) {
 	assertContains(t, ir, "call i32 @promise_type_is")
 	assertContains(t, ir, "promise_typeinfo_AppError")
 }
+
+func TestMatchExpressionPattern(t *testing.T) {
+	ir := generateIR(t, `
+		test() int {
+			int n = 15;
+			return match true {
+				n % 15 == 0 => 1,
+				n % 3 == 0 => 2,
+				_ => 0,
+			};
+		}
+		main() { }
+	`)
+	// Expression patterns compile to comparisons like literal patterns
+	assertContains(t, ir, "icmp eq")
+	assertContains(t, ir, "match.arm")
+	assertContains(t, ir, "match.next")
+	// The modulo operation should appear in the IR
+	assertContains(t, ir, "srem")
+}

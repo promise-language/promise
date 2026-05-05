@@ -922,6 +922,12 @@ func (s *BasePromiseParserListener) EnterWildcardPattern(ctx *WildcardPatternCon
 // ExitWildcardPattern is called when production wildcardPattern is exited.
 func (s *BasePromiseParserListener) ExitWildcardPattern(ctx *WildcardPatternContext) {}
 
+// EnterExpressionPattern is called when production expressionPattern is entered.
+func (s *BasePromiseParserListener) EnterExpressionPattern(ctx *ExpressionPatternContext) {}
+
+// ExitExpressionPattern is called when production expressionPattern is exited.
+func (s *BasePromiseParserListener) ExitExpressionPattern(ctx *ExpressionPatternContext) {}
+
 // EnterDestructureIsPattern is called when production destructureIsPattern is entered.
 func (s *BasePromiseParserListener) EnterDestructureIsPattern(ctx *DestructureIsPatternContext) {}
 

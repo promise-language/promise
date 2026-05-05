@@ -60,6 +60,15 @@ type WildcardMatchPattern struct {
 
 func (*WildcardMatchPattern) matchPatternTag() {}
 
+// ExpressionMatchPattern: arbitrary expression used as a match arm condition.
+// Used for `match true { expr => body }` style multi-way dispatch.
+type ExpressionMatchPattern struct {
+	nodeBase
+	Expr Expr
+}
+
+func (*ExpressionMatchPattern) matchPatternTag() {}
+
 // DestructureIsPattern: Type(a, b, c) or Type[int](a, b, c) — used with `is` operator.
 type DestructureIsPattern struct {
 	nodeBase

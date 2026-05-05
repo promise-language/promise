@@ -306,6 +306,14 @@ match value {
   _ => print_line("other"),
 }
 
+// Match with expression patterns (multi-way conditional dispatch)
+match true {
+  n % 15 == 0 => "fizzbuzz",
+  n % 3 == 0 => "fizz",
+  n % 5 == 0 => "buzz",
+  _ => n.to_string(),
+}
+
 // Type checks and casts
 if animal is Dog { animal.breed; }   // narrowed
 Dog? dog = animal as Dog;            // safe cast (returns optional)

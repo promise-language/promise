@@ -2263,6 +2263,12 @@ func (c *Checker) checkMatchPattern(pat ast.MatchPattern, subjectType types.Type
 
 	case *ast.WildcardMatchPattern:
 		// Always valid
+
+	case *ast.ExpressionMatchPattern:
+		exprType := c.checkExpr(p.Expr)
+		if exprType != nil && subjectType != nil && !types.Identical(exprType, subjectType) {
+			c.errorf(p.Pos(), "match expression pattern type %s does not match subject type %s", exprType, subjectType)
+		}
 	}
 }
 

@@ -607,6 +607,10 @@ func (v *BasePromiseParserVisitor) VisitWildcardPattern(ctx *WildcardPatternCont
 	return v.VisitChildren(ctx)
 }
 
+func (v *BasePromiseParserVisitor) VisitExpressionPattern(ctx *ExpressionPatternContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
 func (v *BasePromiseParserVisitor) VisitDestructureIsPattern(ctx *DestructureIsPatternContext) interface{} {
 	return v.VisitChildren(ctx)
 }

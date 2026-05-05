@@ -457,6 +457,9 @@ type PromiseParserVisitor interface {
 	// Visit a parse tree produced by PromiseParser#wildcardPattern.
 	VisitWildcardPattern(ctx *WildcardPatternContext) interface{}
 
+	// Visit a parse tree produced by PromiseParser#expressionPattern.
+	VisitExpressionPattern(ctx *ExpressionPatternContext) interface{}
+
 	// Visit a parse tree produced by PromiseParser#destructureIsPattern.
 	VisitDestructureIsPattern(ctx *DestructureIsPatternContext) interface{}
 

@@ -50,7 +50,9 @@
       "mcp__tracker__create",
       "mcp__tracker__update",
       "mcp__tracker__get",
-      "mcp__tracker__search"
+      "mcp__tracker__search",
+      "Bash(bin/stress.sh 1000)",
+      "Bash(export TERM=dumb)"
     ],
     "deny": [
       "Read(.tracker/**)",

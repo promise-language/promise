@@ -5473,7 +5473,15 @@ func (c *Compiler) genGoExpr(e *ast.GoExpr) value.Value {
 }
 
 // genGoCallExpr handles `go func(args...)` — the common case.
+// For non-IdentExpr callees (method calls, module calls, etc.), delegates to
+// genGoCallExprViaBlock which uses the full codegen context inside the coroutine body.
 func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
+	// Complex callees (method calls, module calls, generic calls, etc.)
+	// need the full codegen context — use block-style coroutine (B0113).
+	if _, ok := callExpr.Callee.(*ast.IdentExpr); !ok {
+		return c.genGoCallExprViaBlock(callExpr)
+	}
+
 	// 1. Resolve result type T from sema
 	callResultType := c.info.Types[callExpr]
 	isVoid := (callResultType == nil || callResultType == types.TypVoid)
@@ -5660,6 +5668,219 @@ func (c *Compiler) resolveGoTarget(callExpr *ast.CallExpr) (*ir.Func, *ExternFun
 	// Method call or complex callee — wrap in a thunk
 	// For now, only support direct function calls
 	panic(fmt.Sprintf("codegen: go expression callee %T not yet supported", callExpr.Callee))
+}
+
+// genGoCallExprViaBlock handles `go expr()` where the callee is not a simple
+// function name — method calls (obj.method()), module-qualified calls (mod.func()),
+// generic calls with explicit type args (identity[int]()), etc. (B0113)
+//
+// Uses the genGoBlock pattern: captures outer locals, creates a coroutine with
+// full codegen context, and generates the call via genExpr inside the body.
+// Unlike genGoBlock, supports non-void results for Task[T].
+func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
+	// 1. Determine result type
+	callResultType := c.info.Types[callExpr]
+	isVoid := (callResultType == nil || callResultType == types.TypVoid)
+	var resultLLVM irtypes.Type = irtypes.Void
+	if !isVoid {
+		resultLLVM = c.resolveType(callResultType)
+	}
+
+	// 2. Collect outer variables referenced in the call expression.
+	// Wrap call in a synthetic block so we can reuse collectBlockIdents.
+	syntheticBlock := &ast.Block{
+		Stmts: []ast.Stmt{&ast.ExprStmt{Expr: callExpr}},
+	}
+	captureNames := collectBlockIdents(syntheticBlock, c.locals)
+
+	// 3. Load captured values in caller scope
+	var captureVals []value.Value
+	var captureLLVMTypes []irtypes.Type
+	for _, name := range captureNames {
+		alloca := c.locals[name]
+		elemType := alloca.ElemType
+		val := c.block.NewLoad(elemType, alloca)
+		captureVals = append(captureVals, val)
+		captureLLVMTypes = append(captureLLVMTypes, elemType)
+	}
+
+	// 4. Create coroutine function with captured values as parameters
+	coroName := fmt.Sprintf(".goroutine.%d", c.goCounter)
+	c.goCounter++
+	var coroParams []*ir.Param
+	for i, name := range captureNames {
+		coroParams = append(coroParams, ir.NewParam(name+".cap", captureLLVMTypes[i]))
+	}
+	coroFn := c.module.NewFunc(coroName, irtypes.I8Ptr, coroParams...)
+	coroFn.FuncAttrs = append(coroFn.FuncAttrs, rawFuncAttr("presplitcoroutine"))
+
+	// 5. Save and switch context
+	savedFn := c.fn
+	savedBlock := c.block
+	savedEntryBlock := c.entryBlock
+	savedLocals := c.locals
+	savedCanError := c.canError
+	savedRetType := c.currentRetType
+	savedBlockCounter := c.blockCounter
+	savedScopeBindings := c.scopeBindings
+	savedDropFlags := c.dropFlags
+	savedLoopScopeDepth := c.loopScopeDepth
+	savedInCoroutine := c.inCoroutine
+	savedCoroCleanup := c.coroCleanupBlk
+	savedCoroSuspend := c.coroSuspendBlk
+	savedGoExprFF := c.goExprFireAndForget
+
+	c.fn = coroFn
+	c.locals = make(map[string]*ir.InstAlloca)
+	c.localNameCount = make(map[string]int)
+	c.blockCounter = 0
+	c.canError = false
+	c.currentRetType = types.TypVoid
+	c.scopeBindings = nil
+	c.dropFlags = make(map[string]*ir.InstAlloca)
+	c.dropBindings = make(map[string]scopeBinding)
+	c.loopScopeDepth = 0
+	c.inCoroutine = true
+
+	// 6. Coroutine preamble
+	entry := coroFn.NewBlock(".entry")
+	c.block = entry
+
+	coroId := entry.NewCall(c.coroId,
+		constant.NewInt(irtypes.I32, 0),
+		constant.NewNull(irtypes.I8Ptr),
+		constant.NewNull(irtypes.I8Ptr),
+		constant.NewNull(irtypes.I8Ptr))
+
+	need := entry.NewCall(c.coroAlloc, coroId)
+	allocBlk := coroFn.NewBlock("coro.alloc")
+	startBlk := coroFn.NewBlock("coro.start")
+	entry.NewCondBr(need, allocBlk, startBlk)
+
+	coroSizeVal := allocBlk.NewCall(c.coroSize)
+	var coroSizeArg value.Value = coroSizeVal
+	if c.isWasm {
+		coroSizeArg = allocBlk.NewZExt(coroSizeVal, irtypes.I64)
+	}
+	mem := allocBlk.NewCall(c.palAlloc, coroSizeArg)
+	allocBlk.NewBr(startBlk)
+
+	phiMem := startBlk.NewPhi(
+		ir.NewIncoming(constant.NewNull(irtypes.I8Ptr), entry),
+		ir.NewIncoming(mem, allocBlk))
+	hdl := startBlk.NewCall(c.coroBegin, coroId, phiMem)
+
+	// Store captured params into allocas (after coro.begin → part of frame)
+	for i, name := range captureNames {
+		alloca := startBlk.NewAlloca(captureLLVMTypes[i])
+		alloca.SetName(c.uniqueLocalName(name + ".addr"))
+		startBlk.NewStore(coroFn.Params[i], alloca)
+		c.locals[name] = alloca
+	}
+
+	// Initial suspend
+	initSuspBlk := coroFn.NewBlock("coro.init.suspend")
+	startBlk.NewBr(initSuspBlk)
+
+	initResult := initSuspBlk.NewCall(c.coroSuspend, constant.None, constant.False)
+
+	suspendBlk := coroFn.NewBlock("coro.suspend")
+	bodyBlk := coroFn.NewBlock("body")
+	cleanupBlk := coroFn.NewBlock("cleanup")
+	doneBlk := coroFn.NewBlock("coro.done")
+
+	initSuspBlk.NewSwitch(initResult, suspendBlk,
+		ir.NewCase(constant.NewInt(irtypes.I8, 0), bodyBlk),
+		ir.NewCase(constant.NewInt(irtypes.I8, 1), cleanupBlk))
+
+	suspendBlk.NewRet(hdl)
+
+	c.coroCleanupBlk = cleanupBlk
+	c.coroSuspendBlk = doneBlk
+
+	// 7. Body: generate the call expression and optionally store result
+	c.block = bodyBlk
+	c.entryBlock = startBlk
+
+	result := c.genExpr(callExpr)
+
+	if !isVoid && result != nil {
+		// Store result via G.result_ptr (set by caller before enqueue)
+		gTy := goroutineStructType()
+		currentG := c.block.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
+		gPtr := c.block.NewBitCast(currentG, irtypes.NewPointer(gTy))
+		rpField := c.block.NewGetElementPtr(gTy, gPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldResultPtr)))
+		rpVal := c.block.NewLoad(irtypes.I8Ptr, rpField)
+		typedRP := c.block.NewBitCast(rpVal, irtypes.NewPointer(resultLLVM))
+		c.block.NewStore(result, typedRP)
+	}
+
+	// Final suspend
+	finalSuspBlk := coroFn.NewBlock("final.suspend")
+	if c.block != nil && c.block.Term == nil {
+		c.block.NewBr(finalSuspBlk)
+	}
+
+	// Cleanup: free coroutine memory (only reached via destroy path)
+	coroMem := cleanupBlk.NewCall(c.coroFree, coroId, hdl)
+	needFree := cleanupBlk.NewICmp(enum.IPredNE, coroMem, constant.NewNull(irtypes.I8Ptr))
+	freeBlk := coroFn.NewBlock("coro.free")
+	cleanupBlk.NewCondBr(needFree, freeBlk, doneBlk)
+
+	freeBlk.NewCall(c.palFree, coroMem)
+	freeBlk.NewBr(doneBlk)
+
+	// Done: single coro.end
+	doneBlk.NewCall(c.coroEnd, hdl, constant.False, constant.None)
+	doneBlk.NewRet(hdl)
+
+	// Final suspend switch
+	finalResult := finalSuspBlk.NewCall(c.coroSuspend, constant.None, constant.True)
+	finalSuspBlk.NewSwitch(finalResult, doneBlk,
+		ir.NewCase(constant.NewInt(irtypes.I8, 0), doneBlk),
+		ir.NewCase(constant.NewInt(irtypes.I8, 1), cleanupBlk))
+
+	// 8. Restore context
+	c.fn = savedFn
+	c.block = savedBlock
+	c.entryBlock = savedEntryBlock
+	c.locals = savedLocals
+	c.canError = savedCanError
+	c.currentRetType = savedRetType
+	c.blockCounter = savedBlockCounter
+	c.scopeBindings = savedScopeBindings
+	c.dropFlags = savedDropFlags
+	c.loopScopeDepth = savedLoopScopeDepth
+	c.inCoroutine = savedInCoroutine
+	c.coroCleanupBlk = savedCoroCleanup
+	c.coroSuspendBlk = savedCoroSuspend
+	c.goExprFireAndForget = savedGoExprFF
+
+	// 9. Caller: call coroutine ramp → get handle, create G, enqueue
+	handle := c.block.NewCall(coroFn, captureVals...)
+	gRaw := c.block.NewCall(c.funcs["promise_g_new"], handle)
+
+	if !isVoid || !c.goExprFireAndForget {
+		gTy := goroutineStructType()
+		gPtr := c.block.NewBitCast(gRaw, irtypes.NewPointer(gTy))
+		rpField := c.block.NewGetElementPtr(gTy, gPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldResultPtr)))
+		if !isVoid {
+			// Task[T]: allocate result buffer and store in G.result_ptr
+			resultSize := constant.NewInt(irtypes.I64, int64(c.typeSize(resultLLVM)))
+			resultBuf := c.block.NewCall(c.palAlloc, resultSize)
+			c.block.NewStore(resultBuf, rpField)
+		} else {
+			// Void task: set result_ptr to sentinel (0x1)
+			sentinel := c.block.NewIntToPtr(constant.NewInt(c.ptrIntType(), 1), irtypes.I8Ptr)
+			c.block.NewStore(sentinel, rpField)
+		}
+	}
+
+	c.block.NewCall(c.funcs["promise_sched_enqueue"], gRaw)
+
+	return gRaw
 }
 
 // genGoExternWrapper generates a thin wrapper function around an extern call

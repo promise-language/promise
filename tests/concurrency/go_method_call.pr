@@ -1,0 +1,62 @@
+// B0113: go method_call() — spawn method calls as goroutines.
+// Tests that `go obj.method()` works for both fire-and-forget and task patterns.
+type Counter {
+  int value;
+
+  get_value(this) int {
+    return this.value;
+  }
+
+  add(this, int n) int {
+    return this.value + n;
+  }
+
+  run(this) {
+    // void method — fire-and-forget test
+  }
+}
+
+// Method call returning a value via task
+test_go_method_call_with_result() `test(exclude: "wasm32") {
+  c := Counter(value: 42);
+  t := go c.get_value();
+  result := <-t;
+  assert(result == 42, "method call result");
+}
+
+// Method call with arguments returning a value via task
+test_go_method_call_with_args() `test(exclude: "wasm32") {
+  c := Counter(value: 10);
+  t := go c.add(32);
+  result := <-t;
+  assert(result == 42, "method call with args");
+}
+
+// Fire-and-forget method call (void, result discarded)
+test_go_method_call_fire_and_forget() `test(exclude: "wasm32") {
+  c := Counter(value: 1);
+  go c.run();
+  // Just verify it doesn't panic — the goroutine runs and exits
+  sleep(Duration.from_millis(50));
+}
+
+// Void method call as task (awaited but no value)
+test_go_method_call_void_task() `test(exclude: "wasm32") {
+  c := Counter(value: 1);
+  t := go c.run();
+  <-t;
+}
+
+// Multiple concurrent method calls on different objects
+test_go_method_call_multiple() `test(exclude: "wasm32") {
+  a := Counter(value: 10);
+  b := Counter(value: 20);
+  c := Counter(value: 30);
+  t1 := go a.get_value();
+  t2 := go b.get_value();
+  t3 := go c.get_value();
+  r1 := <-t1;
+  r2 := <-t2;
+  r3 := <-t3;
+  assert(r1 + r2 + r3 == 60, "concurrent method calls");
+}

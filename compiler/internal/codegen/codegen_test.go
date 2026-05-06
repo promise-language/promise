@@ -9327,6 +9327,48 @@ func TestGoExprBlock(t *testing.T) {
 	assertContains(t, ir, "call void @promise_sched_enqueue(")
 }
 
+// B0113: go method_call() should work — not just direct function calls.
+func TestGoExprMethodCall(t *testing.T) {
+	ir := generateIR(t, `
+		type Counter {
+			int value;
+			get_value(this) int { return this.value; }
+		}
+		main() {
+			c := Counter(value: 42);
+			t := go c.get_value();
+			result := <-t;
+		}
+	`)
+	// Coroutine generated with capture of outer local 'c'
+	assertContains(t, ir, ".goroutine.")
+	assertContains(t, ir, "presplitcoroutine")
+	// Method call generated inside coroutine body
+	assertContains(t, ir, "Counter.get_value")
+	// G struct created and enqueued
+	assertContains(t, ir, "call i8* @promise_g_new(")
+	assertContains(t, ir, "call void @promise_sched_enqueue(")
+}
+
+// B0113: go method_call() fire-and-forget (void method, result discarded).
+func TestGoExprMethodCallFireAndForget(t *testing.T) {
+	ir := generateIR(t, `
+		type Worker {
+			int id;
+			run(this) { }
+		}
+		main() {
+			w := Worker(id: 1);
+			go w.run();
+		}
+	`)
+	assertContains(t, ir, ".goroutine.")
+	assertContains(t, ir, "presplitcoroutine")
+	assertContains(t, ir, "Worker.run")
+	assertContains(t, ir, "call i8* @promise_g_new(")
+	assertContains(t, ir, "call void @promise_sched_enqueue(")
+}
+
 func TestReceiveExprWaitLoop(t *testing.T) {
 	ir := generateIR(t, `
 		compute() int { return 1; }

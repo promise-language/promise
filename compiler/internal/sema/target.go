@@ -33,6 +33,7 @@ func HostTargetInfo() TargetInfo {
 type TargetInfo struct {
 	OS   string // "linux", "macos", "windows", "wasm", or ""
 	Arch string // "x86_64", "aarch64", "wasm32", or ""
+	Env  string // "wasi", "web", or "" (empty for native targets)
 }
 
 // ParseTargetInfo derives TargetInfo from an LLVM target triple.
@@ -44,7 +45,8 @@ type TargetInfo struct {
 //	x86_64-pc-windows-msvc     → OS=windows, Arch=x86_64
 //	x86_64-apple-macosx14.0.0  → OS=macos,   Arch=x86_64
 //	aarch64-apple-macosx14.0.0 → OS=macos,   Arch=aarch64
-//	wasm32-wasi                → OS=wasm,    Arch=wasm32
+//	wasm32-wasi                → OS=wasm,    Arch=wasm32, Env=wasi
+//	wasm32-web                 → OS=wasm,    Arch=wasm32, Env=web
 func ParseTargetInfo(triple string) TargetInfo {
 	if triple == "" {
 		return TargetInfo{}
@@ -73,6 +75,16 @@ func ParseTargetInfo(triple string) TargetInfo {
 			ti.Arch = "aarch64"
 		case "wasm32":
 			ti.Arch = "wasm32"
+		}
+	}
+
+	// Determine Env for WASM sub-targets.
+	if ti.OS == "wasm" {
+		switch {
+		case strings.Contains(triple, "web"):
+			ti.Env = "web"
+		case strings.Contains(triple, "wasi"):
+			ti.Env = "wasi"
 		}
 	}
 
@@ -130,7 +142,9 @@ func (c *Checker) evalTargetExpr(expr ast.Expr) bool {
 //	windows       — OS is Windows (x86_64-pc-windows-msvc)
 //	linux         — OS is Linux (any Linux triple)
 //	macos         — OS is macOS/Darwin
-//	wasm          — OS is WASM (wasm32-wasi)
+//	wasm          — OS is WASM (either wasm32-wasi or wasm32-web)
+//	wasi          — Env is WASI (wasm32-wasi)
+//	web           — Env is web (wasm32-web)
 //	posix         — OS is linux or macos (convenience alias for linux || macos)
 //	x86_64        — Arch is x86-64
 //	aarch64, arm64 — Arch is AArch64/ARM64 (arm64 is accepted as an alias)
@@ -146,6 +160,10 @@ func (c *Checker) matchTargetIdent(name string) bool {
 		return c.target.OS == "macos"
 	case "wasm":
 		return c.target.OS == "wasm"
+	case "wasi":
+		return c.target.Env == "wasi"
+	case "web":
+		return c.target.Env == "web"
 	case "posix":
 		return c.target.OS == "linux" || c.target.OS == "macos"
 	case "x86_64":

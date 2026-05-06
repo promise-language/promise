@@ -609,6 +609,57 @@ func TestExternDefaultCName(t *testing.T) {
 	assertContains(t, ir, "declare void @promise_do_thing(i8*")
 }
 
+// generateIRForTarget runs parse → sema → codegen with a specific target triple.
+func generateIRForTarget(t *testing.T, src, target string) string {
+	t.Helper()
+	input := antlr.NewInputStream(src)
+	lexer := parser.NewPromiseLexer(input)
+	lexer.RemoveErrorListeners()
+	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+	p := parser.NewPromiseParser(stream)
+	p.RemoveErrorListeners()
+	tree := p.CompilationUnit()
+	file, errs := ast.Build("test.pr", tree)
+	if len(errs) > 0 {
+		t.Fatalf("AST build errors: %v", errs)
+	}
+
+	stdModInfo, stdScope := getCodegenStdModInfo()
+	stdUse := &ast.UseDecl{Alias: "_", CatalogName: "std"}
+	file.Uses = append([]*ast.UseDecl{stdUse}, file.Uses...)
+
+	ti := sema.ParseTargetInfo(target)
+	info, semaErrs := sema.CheckWithTarget(file, map[string]*types.Scope{"std": stdScope}, ti)
+	if len(semaErrs) > 0 {
+		t.Fatalf("sema errors: %v", semaErrs)
+	}
+	info.ModuleInfos = map[string]*sema.ModuleInfo{"std": stdModInfo}
+	info.ModuleOrder = []string{"std"}
+	result := Compile(file, info, target)
+	return result.Module.String()
+}
+
+// --- wasm_import codegen tests (T0035) ---
+
+func TestWasmImportAttributes(t *testing.T) {
+	ir := generateIRForTarget(t, `
+		_fd_write(int fd) int `+"`extern(\"fd_write\") `wasm_import(\"wasi_snapshot_preview1\", \"fd_write\") `target(wasm)"+`;
+		main() {}
+	`, "wasm32-wasi")
+	assertContains(t, ir, `"wasm-import-module"="wasi_snapshot_preview1"`)
+	assertContains(t, ir, `"wasm-import-name"="fd_write"`)
+}
+
+func TestWasmImportIgnoredOnNative(t *testing.T) {
+	// On native target, wasm_import annotations should not produce IR attributes.
+	// The function itself is filtered out by `target(wasm), so it won't appear at all.
+	ir := generateIR(t, `
+		_fd_write(int fd) int `+"`extern(\"fd_write\") `wasm_import(\"wasi_snapshot_preview1\", \"fd_write\") `target(wasm)"+`;
+		main() {}
+	`)
+	assertNotContains(t, ir, "wasm-import-module")
+}
+
 func TestExternMultipleParams(t *testing.T) {
 	ir := generateIR(t, `
 		add_ext(int a, int b) `+"`"+`extern("test_add");

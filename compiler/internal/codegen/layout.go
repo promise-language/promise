@@ -72,14 +72,16 @@ type FieldLayout struct {
 
 // ExternFunc captures an extern function declaration for codegen and header gen.
 type ExternFunc struct {
-	PromiseName string           // Promise function name
-	CName       string           // C symbol name
-	Sig         *types.Signature // type system signature
-	IRFunc      *ir.Func         // LLVM IR function declaration
-	ParamTypes  []types.Type     // Promise types of each parameter
-	ResultType  types.Type       // Promise return type (nil for void)
-	HasSret     bool             // true if return uses sret pointer (large struct return)
-	IsFailable  bool             // true if the extern is failable (returns T!)
+	PromiseName    string           // Promise function name
+	CName          string           // C symbol name
+	Sig            *types.Signature // type system signature
+	IRFunc         *ir.Func         // LLVM IR function declaration
+	ParamTypes     []types.Type     // Promise types of each parameter
+	ResultType     types.Type       // Promise return type (nil for void)
+	HasSret        bool             // true if return uses sret pointer (large struct return)
+	IsFailable     bool             // true if the extern is failable (returns T!)
+	WasmImportMod  string           // WASM import module name (from `wasm_import annotation)
+	WasmImportName string           // WASM import name (from `wasm_import annotation)
 }
 
 // CompileResult bundles the output of compilation for downstream consumers.
@@ -593,13 +595,17 @@ func collectExterns(file *ast.File, info *sema.Info) []*ExternFunc {
 			paramTypes[i] = p.Type()
 		}
 
+		wasmMod, wasmName := sema.ExtractWasmImport(fd.Annotations)
+
 		externs = append(externs, &ExternFunc{
-			PromiseName: fd.Name,
-			CName:       cName,
-			Sig:         sig,
-			ParamTypes:  paramTypes,
-			ResultType:  sig.Result(),
-			IsFailable:  sig.CanError(),
+			PromiseName:    fd.Name,
+			CName:          cName,
+			Sig:            sig,
+			ParamTypes:     paramTypes,
+			ResultType:     sig.Result(),
+			IsFailable:     sig.CanError(),
+			WasmImportMod:  wasmMod,
+			WasmImportName: wasmName,
 		})
 	}
 	return externs

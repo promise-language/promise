@@ -10646,6 +10646,124 @@ func TestTargetFilterArm64Alias(t *testing.T) {
 	}
 }
 
+// --- WASM sub-target tests (T0035) ---
+
+func TestParseTargetInfoWasmEnv(t *testing.T) {
+	ti := ParseTargetInfo("wasm32-wasi")
+	if ti.OS != "wasm" || ti.Arch != "wasm32" || ti.Env != "wasi" {
+		t.Errorf("wasm32-wasi: got OS=%q Arch=%q Env=%q", ti.OS, ti.Arch, ti.Env)
+	}
+
+	ti = ParseTargetInfo("wasm32-web")
+	if ti.OS != "wasm" || ti.Arch != "wasm32" || ti.Env != "web" {
+		t.Errorf("wasm32-web: got OS=%q Arch=%q Env=%q", ti.OS, ti.Arch, ti.Env)
+	}
+
+	// Native targets should have empty Env
+	ti = ParseTargetInfo("x86_64-unknown-linux-musl")
+	if ti.Env != "" {
+		t.Errorf("linux: expected empty Env, got %q", ti.Env)
+	}
+}
+
+func TestTargetFilterWasi(t *testing.T) {
+	src := `
+		wasi_only() string ` + "`target(wasi)" + ` { return "wasi"; }
+		main() { wasi_only(); }
+	`
+	// On wasm32-wasi: function is available
+	_, errs := checkSourceWithTarget(t, src, "wasm32-wasi")
+	if len(errs) != 0 {
+		t.Fatalf("wasi target: unexpected errors: %v", errs)
+	}
+	// On wasm32-web: function is absent
+	_, errs = checkSourceWithTarget(t, src, "wasm32-web")
+	if len(errs) == 0 {
+		t.Error("web target: expected error calling wasi-only function, got none")
+	}
+}
+
+func TestTargetFilterWeb(t *testing.T) {
+	src := `
+		web_only() string ` + "`target(web)" + ` { return "web"; }
+		main() { web_only(); }
+	`
+	// On wasm32-web: function is available
+	_, errs := checkSourceWithTarget(t, src, "wasm32-web")
+	if len(errs) != 0 {
+		t.Fatalf("web target: unexpected errors: %v", errs)
+	}
+	// On wasm32-wasi: function is absent
+	_, errs = checkSourceWithTarget(t, src, "wasm32-wasi")
+	if len(errs) == 0 {
+		t.Error("wasi target: expected error calling web-only function, got none")
+	}
+}
+
+func TestWasmImportValid(t *testing.T) {
+	// Valid: extern with wasm_import and target(wasm)
+	src := `
+		_fd_write(int fd) int ` + "`extern(\"fd_write\") `wasm_import(\"wasi_snapshot_preview1\", \"fd_write\") `target(wasm)" + `;
+		main() {}
+	`
+	_, errs := checkSourceWithTarget(t, src, "wasm32-wasi")
+	for _, e := range errs {
+		t.Errorf("unexpected error: %v", e)
+	}
+}
+
+func TestWasmImportRequiresExtern(t *testing.T) {
+	src := `
+		_fd_write(int fd) int ` + "`wasm_import(\"wasi\", \"fd_write\") `target(wasm)" + ` { return 0; }
+		main() {}
+	`
+	_, errs := checkSourceWithTarget(t, src, "wasm32-wasi")
+	expectError(t, errs, "can only be applied to extern functions")
+}
+
+func TestWasmImportRequiresTwoParams(t *testing.T) {
+	src := `
+		_fd_write(int fd) int ` + "`extern(\"fd_write\") `wasm_import(\"wasi\") `target(wasm)" + `;
+		main() {}
+	`
+	_, errs := checkSourceWithTarget(t, src, "wasm32-wasi")
+	expectError(t, errs, "requires exactly 2 parameters")
+}
+
+func TestWasmImportWarnsWithoutWasmTarget(t *testing.T) {
+	// Should produce a warning about missing `target(wasm)
+	src := `
+		_fd_write(int fd) int ` + "`extern(\"fd_write\") `wasm_import(\"wasi\", \"fd_write\")" + `;
+		main() {}
+	`
+	_, errs := checkSourceWithTarget(t, src, "wasm32-wasi")
+	expectError(t, errs, "will be ignored on non-WASM targets")
+}
+
+func TestWasmImportWithCompoundTarget(t *testing.T) {
+	// wasm_import with `target(wasi || web) should not warn — compound expr mentions wasm sub-targets
+	src := `
+		_fd_write(int fd) int ` + "`extern(\"fd_write\") `wasm_import(\"wasi\", \"fd_write\") `target(wasi || web)" + `;
+		main() {}
+	`
+	_, errs := checkSourceWithTarget(t, src, "wasm32-wasi")
+	for _, e := range errs {
+		if strings.Contains(e.Error(), "will be ignored") {
+			t.Errorf("unexpected warning: %v", e)
+		}
+	}
+}
+
+func TestWasmImportOnNonExternBody(t *testing.T) {
+	// wasm_import on a function with a body (not extern)
+	src := `
+		_fd_write(int fd) int ` + "`extern(\"fd_write\") `wasm_import(\"wasi\", \"fd_write\") `target(wasm)" + ` { return 0; }
+		main() {}
+	`
+	_, errs := checkSourceWithTarget(t, src, "wasm32-wasi")
+	expectError(t, errs, "can only be applied to extern functions")
+}
+
 // --- Failable getters ---
 
 func TestFailableGetterOK(t *testing.T) {

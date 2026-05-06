@@ -1951,7 +1951,7 @@ func compileAndLinkSeparate(result *codegen.CompileResult, outputFile, target, s
 	if isDarwinTarget(target) {
 		linkDarwinMulti(objFiles, target, outputFile)
 	} else if isWasmTarget(target) {
-		linkWasmMulti(objFiles, outputFile)
+		linkWasmMulti(objFiles, target, outputFile)
 	} else if isWindowsTarget(target) {
 		linkWindowsMulti(objFiles, target, outputFile)
 	} else {
@@ -3185,7 +3185,7 @@ func compileAndLinkLLVM(llFile, target, outputFile string) {
 	if isDarwinTarget(target) {
 		linkDarwin(bcFile.Name(), target, outputFile)
 	} else if isWasmTarget(target) {
-		linkWasm(bcFile.Name(), outputFile)
+		linkWasm(bcFile.Name(), target, outputFile)
 	} else {
 		linkLinux(bcFile.Name(), target, outputFile)
 	}
@@ -3253,8 +3253,8 @@ func linkDarwin(bcOrObjFile, target, outputFile string) {
 }
 
 // linkWasm runs wasm-ld for WebAssembly linking (single .o file).
-func linkWasm(objFile, outputFile string) {
-	linkWasmMulti([]string{objFile}, outputFile)
+func linkWasm(objFile, target, outputFile string) {
+	linkWasmMulti([]string{objFile}, target, outputFile)
 }
 
 // ensureWasmAllocObj extracts the embedded WASM allocator object to cache.
@@ -3288,7 +3288,7 @@ func ensureWasmAllocObj() (string, error) {
 }
 
 // linkWasmMulti links multiple .o files for WebAssembly.
-func linkWasmMulti(objFiles []string, outputFile string) {
+func linkWasmMulti(objFiles []string, target, outputFile string) {
 	lldPath, err := findLLVMTool("wasm-ld")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -3296,7 +3296,7 @@ func linkWasmMulti(objFiles []string, outputFile string) {
 	}
 	checkLLVMToolVersion(lldPath)
 
-	linkArgs := buildWasmLinkArgs(objFiles, outputFile)
+	linkArgs := buildWasmLinkArgs(objFiles, target, outputFile)
 	linkCmd := runLLVMCmd(lldPath, linkArgs...)
 	linkCmd.Stderr = os.Stderr
 	if err := linkCmd.Run(); err != nil {
@@ -3305,20 +3305,26 @@ func linkWasmMulti(objFiles []string, outputFile string) {
 	}
 }
 
-// buildWasmLinkArgs builds the wasm-ld argument list for WASI linking.
+// buildWasmLinkArgs builds the wasm-ld argument list for WASM linking.
 // Links user code with the embedded free-list allocator (wasm_alloc.o).
-func buildWasmLinkArgs(objFiles []string, outputFile string) []string {
+// For wasm32-web: exports _initialize and memory instead of _start.
+func buildWasmLinkArgs(objFiles []string, target, outputFile string) []string {
 	allocObj, err := ensureWasmAllocObj()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+	isWeb := strings.Contains(target, "web")
 	args := []string{
 		"--lto-O2", // O2 needed to fold math intrinsics (e.g. sin(0.0)) across module boundaries
 		"--no-entry",
-		"--export=_start",
-		"--allow-undefined", // WASI imports (fd_write, proc_exit) resolved at runtime
+		"--allow-undefined", // WASI/JS imports resolved at runtime
 		"-o", outputFile,
+	}
+	if isWeb {
+		args = append(args, "--export=_initialize", "--export-memory")
+	} else {
+		args = append(args, "--export=_start")
 	}
 	args = append(args, objFiles...)
 	args = append(args, allocObj)

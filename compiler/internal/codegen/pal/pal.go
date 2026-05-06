@@ -161,6 +161,8 @@ func ForTarget(triple string) PAL {
 	switch {
 	case strings.Contains(triple, "windows"):
 		return &WindowsPAL{}
+	case strings.Contains(triple, "wasm") && strings.Contains(triple, "web"):
+		return &WasmWebPAL{}
 	case strings.Contains(triple, "wasm"):
 		return &WasmPAL{}
 	default:

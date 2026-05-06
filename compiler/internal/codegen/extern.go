@@ -79,6 +79,14 @@ func (c *Compiler) declareExterns(externs []*ExternFunc, layouts map[*types.Name
 			retType = irtypes.I8Ptr
 		}
 		fn := c.module.NewFunc(ext.CName, retType, params...)
+
+		// Emit WASM import attributes when targeting WASM
+		if c.isWasm && ext.WasmImportMod != "" {
+			fn.FuncAttrs = append(fn.FuncAttrs,
+				ir.AttrPair{Key: "wasm-import-module", Value: ext.WasmImportMod},
+				ir.AttrPair{Key: "wasm-import-name", Value: ext.WasmImportName})
+		}
+
 		ext.IRFunc = fn
 		ext.HasSret = hasSret
 		c.funcs[ext.PromiseName] = fn

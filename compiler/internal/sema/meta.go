@@ -72,6 +72,7 @@ var builtinMetas = map[string][]MetaTarget{
 	"final":        {TargetField},
 	"factory":      {TargetMethod},
 	"embed":        {TargetFunc},
+	"wasm_import":  {TargetFunc},
 }
 
 // validateMetas checks that all meta annotations on a declaration are valid:
@@ -349,6 +350,90 @@ func extractEmbedCompress(annotations []*ast.MetaAnnotation) bool {
 		}
 	}
 	return false
+}
+
+// validateWasmImport checks that `wasm_import is used correctly on a function declaration.
+// Rules: must be on an extern function (no body), must have exactly 2 string parameters
+// (module name and import name). Warns if used without `target(wasm).
+func (c *Checker) validateWasmImport(d *ast.FuncDecl) {
+	var ann *ast.MetaAnnotation
+	for _, a := range d.Annotations {
+		if a.Name == "wasm_import" {
+			ann = a
+			break
+		}
+	}
+	if ann == nil {
+		return
+	}
+
+	// Must be on an extern function (no body)
+	if d.Body != nil {
+		c.errorf(ann.Pos(), "`wasm_import can only be applied to extern functions")
+		return
+	}
+
+	// Must also have `extern
+	if !c.hasAnnotation(d.Annotations, "extern") {
+		c.errorf(ann.Pos(), "`wasm_import requires `extern annotation")
+		return
+	}
+
+	// Must have exactly 2 positional string parameters
+	if len(ann.Params) != 2 {
+		c.errorf(ann.Pos(), "`wasm_import requires exactly 2 parameters: module name and import name")
+		return
+	}
+	for i, p := range ann.Params {
+		if _, ok := p.Value.(*ast.StringLit); !ok {
+			label := "module name"
+			if i == 1 {
+				label = "import name"
+			}
+			c.errorf(p.Pos(), "`wasm_import %s must be a string literal", label)
+		}
+	}
+
+	// Warn if no `target(wasm) — annotation will be ignored on non-WASM targets
+	hasWasmTarget := false
+	for _, a := range d.Annotations {
+		if a.Name == "target" && len(a.Params) > 0 {
+			hasWasmTarget = c.exprMentionsWasm(a.Params[0].Value)
+			break
+		}
+	}
+	if !hasWasmTarget {
+		c.warnf(ann.Pos(), "`wasm_import without `target(wasm) will be ignored on non-WASM targets")
+	}
+}
+
+// exprMentionsWasm returns true if a target condition expression references "wasm", "wasi", or "web".
+func (c *Checker) exprMentionsWasm(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		return e.Name == "wasm" || e.Name == "wasi" || e.Name == "web"
+	case *ast.UnaryExpr:
+		return c.exprMentionsWasm(e.Operand)
+	case *ast.BinaryExpr:
+		return c.exprMentionsWasm(e.Left) || c.exprMentionsWasm(e.Right)
+	}
+	return false
+}
+
+// ExtractWasmImport extracts the module and import name from a `wasm_import annotation.
+// Returns ("", "") if the annotation is not present.
+func ExtractWasmImport(annotations []*ast.MetaAnnotation) (string, string) {
+	for _, ann := range annotations {
+		if ann.Name != "wasm_import" {
+			continue
+		}
+		if len(ann.Params) >= 2 {
+			mod := evalStringLit(ann.Params[0].Value)
+			name := evalStringLit(ann.Params[1].Value)
+			return mod, name
+		}
+	}
+	return "", ""
 }
 
 // checkDeprecatedObj emits a warning if the resolved object refers to a deprecated entity.

@@ -918,6 +918,9 @@ func (c *Checker) defineFunc(d *ast.FuncDecl) {
 		}
 	}
 
+	// Validate `wasm_import annotation
+	c.validateWasmImport(d)
+
 	// Handle `embed annotation on getters
 	if embedPath, hasEmbed := extractEmbedPath(d.Annotations); hasEmbed {
 		if !d.IsGetter {

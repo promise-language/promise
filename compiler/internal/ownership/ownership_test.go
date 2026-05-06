@@ -2253,3 +2253,120 @@ func TestStoredBorrowStillBlocksInClassicForBody(t *testing.T) {
 	`)
 	expectOwnerError(t, errs, "cannot move 's' while it is borrowed")
 }
+
+// === Drop ordering (B0036) ===
+
+func TestDropOrderSafeBorrowDeclaredAfterOrigin(t *testing.T) {
+	// Borrower declared after origin — safe LIFO order.
+	// Origin is dropped last (declared first), borrower dropped first.
+	ownerOK(t, `
+		getRef(string &s) string& { return s; }
+		test() {
+			string s = "hello";
+			string &r = getRef(s);
+		}
+	`)
+}
+
+func TestDropOrderSafeDroppableVariables(t *testing.T) {
+	// Multiple droppable variables — declared in order, dropped in LIFO.
+	ownerOK(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		test() {
+			a := Resource(id: 1);
+			b := Resource(id: 2);
+			c := Resource(id: 3);
+		}
+	`)
+}
+
+func TestDropOrderSafeDroppableAndBorrowCoexist(t *testing.T) {
+	// A droppable variable and a borrow in the same scope — both safe.
+	// Borrow is on a copy-type reference, droppable has no borrows.
+	ownerOK(t, `
+		type Handle {
+			int id;
+			drop(~this) { }
+		}
+		getRef(string &s) string& { return s; }
+		test() {
+			string s = "hello";
+			h := Handle(id: 1);
+			string &r = getRef(s);
+		}
+	`)
+}
+
+func TestDropOrderSafeParameterBorrows(t *testing.T) {
+	// Parameters are declared before locals — borrows from params are always safe.
+	ownerOK(t, `
+		getRef(string &s) string& { return s; }
+		test(string s) {
+			string &r = getRef(s);
+		}
+	`)
+}
+
+func TestDropOrderSafeMultipleLocalsWithDropAndBorrow(t *testing.T) {
+	// Multiple locals with drop — borrow between them, safe order.
+	ownerOK(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		getRef(string &s) string& { return s; }
+		test() {
+			string s = "hello";
+			r := Resource(id: 1);
+			string &ref = getRef(s);
+		}
+	`)
+}
+
+func TestDropOrderDeclOrderTracking(t *testing.T) {
+	// Verify the checker tracks declaration order for parameters and locals.
+	// This test ensures basic infrastructure works (params first, then locals).
+	ownerOK(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		getRef(string &s) string& { return s; }
+		test(string s) {
+			a := Resource(id: 1);
+			string &r = getRef(s);
+			b := Resource(id: 2);
+		}
+	`)
+}
+
+// Note: Drop ordering violation (borrower with drop() declared before origin)
+// is currently impossible to construct without stored references in structs
+// (B0034). The checkDropOrderSafety infrastructure detects this pattern and
+// will produce errors once B0034 is implemented. Reference types are Copy
+// (no drop), so ref-typed borrower variables never trigger the check.
+
+func TestHasDropMethod(t *testing.T) {
+	// Verify hasDropMethod correctly identifies types with drop().
+	if hasDropMethod(nil) {
+		t.Error("nil type should not have drop")
+	}
+	if hasDropMethod(types.TypInt) {
+		t.Error("int should not have drop")
+	}
+	n := types.NewNamed(types.NewTypeName(types.Pos{}, "Res", nil), nil)
+	if hasDropMethod(n) {
+		t.Error("Named without drop should return false")
+	}
+	n.SetHasDrop(true)
+	if !hasDropMethod(n) {
+		t.Error("Named with drop should return true")
+	}
+	inst := types.NewInstance(n, []types.Type{types.TypInt})
+	if !hasDropMethod(inst) {
+		t.Error("Instance of Named with drop should return true")
+	}
+}

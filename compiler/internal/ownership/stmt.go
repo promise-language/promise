@@ -43,6 +43,9 @@ func (c *Checker) checkStmt(stmt ast.Stmt) {
 		if s.Name != "_" {
 			c.state[s.Name] = Owned
 			c.pinned[s.Name] = true
+			if typ := c.info.Types[s.Value]; typ != nil {
+				c.trackDeclOrder(s.Name, typ)
+			}
 		}
 
 	case *ast.AssignStmt:
@@ -107,6 +110,9 @@ func (c *Checker) checkTypedVarDecl(s *ast.TypedVarDecl) {
 	if s.Name != "_" {
 		c.state[s.Name] = Owned
 		c.promoteCallBorrows(s.Name, s.Value)
+		if typ := c.info.Types[s.Value]; typ != nil {
+			c.trackDeclOrder(s.Name, typ)
+		}
 	}
 	// Raw pointer types are only allowed inside unsafe blocks.
 	if c.inUnsafe == 0 && isPointerTypeRef(s.Type) {
@@ -126,6 +132,9 @@ func (c *Checker) checkInferredVarDecl(s *ast.InferredVarDecl) {
 	if s.Name != "_" {
 		c.state[s.Name] = Owned
 		c.promoteCallBorrows(s.Name, s.Value)
+		if typ := c.info.Types[s.Value]; typ != nil {
+			c.trackDeclOrder(s.Name, typ)
+		}
 	}
 }
 

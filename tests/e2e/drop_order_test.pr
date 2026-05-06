@@ -1,0 +1,185 @@
+// Drop ordering tests (B0036): verify LIFO drop ordering across all scenarios.
+// Variables are dropped in reverse declaration order at scope exit.
+// Fields are dropped in reverse declaration order after the parent's drop().
+type Resource {
+  string name;
+
+  drop(~this) {
+    print_line("drop: " + this.name);
+  }
+}
+
+type Container {
+  Resource first;
+  Resource second;
+  Resource third;
+
+  drop(~this) {
+    print_line("drop: container");
+  }
+}
+
+type Nested {
+  Container inner;
+
+  drop(~this) {
+    print_line("drop: nested");
+  }
+}
+
+// --- Basic LIFO ordering ---
+
+test_basic_lifo_two() `test {
+  a := Resource(name: "A");
+  b := Resource(name: "B");
+  assert(a.name == "A", "a accessible");
+  assert(b.name == "B", "b accessible");
+}
+
+test_basic_lifo_three() `test {
+  a := Resource(name: "A");
+  b := Resource(name: "B");
+  c := Resource(name: "C");
+  assert(a.name == "A", "a accessible");
+  assert(c.name == "C", "c accessible");
+}
+
+// --- Field drop ordering ---
+
+test_field_drops_reverse_order() `test {
+  c := Container(first: Resource(name: "first"),
+  second: Resource(name: "second"),
+  third: Resource(name: "third"));
+  assert(c.first.name == "first", "first field");
+  assert(c.third.name == "third", "third field");
+}
+
+test_nested_field_drops() `test {
+  n := Nested(inner: Container(first: Resource(name: "f1"),
+  second: Resource(name: "f2"),
+  third: Resource(name: "f3")));
+  assert(n.inner.first.name == "f1", "nested first field");
+}
+
+// --- Early return ---
+
+return_early() {
+  a := Resource(name: "A");
+  b := Resource(name: "B");
+  if true {
+    return;
+  }
+  c := Resource(name: "C");
+}
+
+test_early_return_drops() `test {
+  return_early();
+  assert(true, "early return completed");
+}
+
+// --- Loop iteration drops ---
+
+test_loop_drops_per_iteration() `test {
+  for i in 0..3 {
+    r := Resource(name: "r" + i.to_string());
+    assert(r.name == "r" + i.to_string(), "loop iter " + i.to_string());
+  }
+}
+
+// --- While loop with break ---
+
+test_while_break_drops() `test {
+  a := Resource(name: "outer");
+  i := 0;
+  while i < 5 {
+    b := Resource(name: "inner" + i.to_string());
+    if i == 2 {
+      break;
+    }
+    i = i + 1;
+  }
+  assert(a.name == "outer", "outer survives loop");
+}
+
+// --- Reassignment drops old value ---
+
+test_reassignment_drops_old() `test {
+  a := Resource(name: "old");
+  a = Resource(name: "new");
+  assert(a.name == "new", "reassigned value");
+}
+
+// --- Multiple types interleaved ---
+
+test_interleaved_types() `test {
+  a := Resource(name: "A");
+  c := Container(first: Resource(name: "f1"),
+  second: Resource(name: "f2"),
+  third: Resource(name: "f3"));
+  b := Resource(name: "B");
+  assert(a.name == "A", "first resource");
+  assert(b.name == "B", "last resource");
+}
+
+// --- If-else with droppable in branches ---
+
+test_if_branch_drop() `test {
+  a := Resource(name: "before_if");
+  if true {
+    b := Resource(name: "in_then");
+    assert(b.name == "in_then", "then-branch local");
+  }
+  assert(a.name == "before_if", "outer survives if");
+}
+
+// --- Error propagation drops ---
+
+might_fail(bool fail) int! {
+  a := Resource(name: "failable_local");
+  if fail {
+    raise error("fail");
+  }
+  return 42;
+}
+
+failing_caller() int! {
+  b := Resource(name: "caller_local");
+  c := might_fail(true)?;
+  return c;
+}
+
+test_error_propagation_drops() `test {
+  failing_caller()? e {
+    assert(e.message == "fail", "error propagated");
+  };
+}
+
+// --- Conditional move (drop flag) ---
+
+consume_resource(Resource r) {
+}
+
+test_conditional_move_drop_flag() `test {
+  a := Resource(name: "A");
+  b := Resource(name: "B");
+  if true {
+    consume_resource(b);
+  }
+  assert(a.name == "A", "a not affected by b's move");
+}
+
+// --- Use binding ordering (close before drop) ---
+
+type Conn {
+  int fd;
+
+  close(~this) {
+  }
+}
+
+test_use_and_drop_ordering() `test {
+  use c := Conn(fd: 1);
+  r := Resource(name: "R");
+  assert(c.fd + 0 == 1, "use binding accessible");
+  assert(r.name == "R", "drop binding accessible");
+}

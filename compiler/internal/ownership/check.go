@@ -17,6 +17,14 @@ type Checker struct {
 	curSig   *types.Signature // current function signature (for return checks)
 	inUnsafe int
 	pinned   map[string]bool // use-bound variables that cannot be moved
+
+	// Drop ordering: tracks declaration order for LIFO drop-order validation.
+	// Variables are dropped in reverse declaration order at scope exit.
+	// If a borrower is declared before its origin, the origin is dropped first
+	// (LIFO), creating a dangling borrow during the borrower's remaining lifetime.
+	declOrder map[string]int        // variable name → declaration order (0-based)
+	nextOrder int                   // next declaration order to assign
+	varTypes  map[string]types.Type // variable name → type (for drop check)
 }
 
 // Check performs ownership analysis on the given file using sema results.
@@ -65,27 +73,38 @@ func (c *Checker) checkFuncDecl(d *ast.FuncDecl) {
 	savedParams := c.params
 	savedSig := c.curSig
 	savedPinned := c.pinned
+	savedDeclOrder := c.declOrder
+	savedNextOrder := c.nextOrder
+	savedVarTypes := c.varTypes
 
 	c.state = make(StateMap)
 	c.borrows = NewBorrowSet()
 	c.params = make(map[string]bool)
 	c.curSig = sig
 	c.pinned = make(map[string]bool)
+	c.declOrder = make(map[string]int)
+	c.nextOrder = 0
+	c.varTypes = make(map[string]types.Type)
 
 	for _, p := range sig.Params() {
 		if p.Name() != "" && p.Name() != "_" {
 			c.state[p.Name()] = Owned
 			c.params[p.Name()] = true
+			c.trackDeclOrder(p.Name(), p.Type())
 		}
 	}
 
 	c.checkBlock(d.Body)
+	c.checkDropOrderSafety()
 
 	c.state = savedState
 	c.borrows = savedBorrows
 	c.params = savedParams
 	c.pinned = savedPinned
 	c.curSig = savedSig
+	c.declOrder = savedDeclOrder
+	c.nextOrder = savedNextOrder
+	c.varTypes = savedVarTypes
 }
 
 func (c *Checker) checkTypeDecl(d *ast.TypeDecl) {
@@ -158,31 +177,45 @@ func (c *Checker) checkMethodBody(md *ast.MethodDecl, m *types.Method) {
 	savedParams := c.params
 	savedSig := c.curSig
 	savedPinned := c.pinned
+	savedDeclOrder := c.declOrder
+	savedNextOrder := c.nextOrder
+	savedVarTypes := c.varTypes
 
 	c.state = make(StateMap)
 	c.borrows = NewBorrowSet()
 	c.params = make(map[string]bool)
 	c.curSig = m.Sig()
 	c.pinned = make(map[string]bool)
+	c.declOrder = make(map[string]int)
+	c.nextOrder = 0
+	c.varTypes = make(map[string]types.Type)
 
 	if m.Sig().Recv() != nil {
 		c.state["this"] = Owned
 		c.params["this"] = true
+		if m.Sig().Recv().Type() != nil {
+			c.trackDeclOrder("this", m.Sig().Recv().Type())
+		}
 	}
 	for _, p := range m.Sig().Params() {
 		if p.Name() != "" && p.Name() != "_" {
 			c.state[p.Name()] = Owned
 			c.params[p.Name()] = true
+			c.trackDeclOrder(p.Name(), p.Type())
 		}
 	}
 
 	c.checkBlock(md.Body)
+	c.checkDropOrderSafety()
 
 	c.state = savedState
 	c.borrows = savedBorrows
 	c.params = savedParams
 	c.curSig = savedSig
 	c.pinned = savedPinned
+	c.declOrder = savedDeclOrder
+	c.nextOrder = savedNextOrder
+	c.varTypes = savedVarTypes
 }
 
 // lookupFileScope finds an object in the file-level scope.

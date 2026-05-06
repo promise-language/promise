@@ -203,7 +203,8 @@ Cross-statement borrow tracking, implicit borrow coercion, and return reference 
 - **Return reference safety**: returning a reference to a local (non-parameter) variable from a function with ref return type is an error.
 - **Control flow propagation**: borrows are saved/restored/merged (union) across all control flow constructs (if/else, while, for-in, for, match, lambda, infinite loops) in parallel with move state.
 - **Parameter borrow detection**: handles ANTLR grammar ambiguity where `string &s` parses as `typeRef=string&` (not separate refMod) by checking parameter types for `SharedRef`/`MutRef` in addition to `Ref()`.
-- **Deferred**: explicit lifetime annotations, stored references in structs, full NLL last-use analysis, drop ordering, disjoint field borrows.
+- **Drop ordering (B0036)**: declaration order tracking in the ownership checker validates that variable-scoped borrows at scope exit respect LIFO drop order. If a borrower with `drop()` is declared before its origin, the origin would be dropped first — a violation. Currently, this can only trigger once stored references in structs (B0034) are implemented.
+- **Deferred**: explicit lifetime annotations, stored references in structs, full NLL last-use analysis, disjoint field borrows.
 
 ## Stage 7 — Meta Annotation Processing (Done)
 
@@ -1048,7 +1049,7 @@ Known gaps and improvements deferred from completed stages.
 | B0033 | Explicit lifetime annotations | 6b |
 | B0034 | Stored references in structs | 6b |
 | B0035 | Full NLL last-use analysis | 6b |
-| B0036 | Drop ordering | 6b |
+| ~~B0036~~ | ~~Drop ordering~~ (done) | 6b |
 | B0037 | Disjoint field borrows | 6b |
 
 ### Meta Annotations

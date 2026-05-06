@@ -9180,6 +9180,39 @@ func TestDropSynthesizedNotNeeded(t *testing.T) {
 	assertContains(t, ir, "call void @pal_free")
 }
 
+// B0164: bindingFree emits pal_free on non-droppable heap types with multiple fields
+func TestBindingFreeMultipleFields(t *testing.T) {
+	ir := generateIR(t, `
+		type Config {
+			int port;
+			bool verbose;
+		}
+		main() {
+			c := Config(port: 8080, verbose: true);
+			int p = c.port;
+		}
+	`)
+	assertContains(t, ir, "c.dropflag")
+	assertContains(t, ir, "call void @pal_free")
+	assertNotContains(t, ir, "Config.drop")
+}
+
+// B0164: bindingFree works on reassignment — frees old value before storing new
+func TestBindingFreeReassignment(t *testing.T) {
+	ir := generateIR(t, `
+		type Pair { int x; int y; }
+		test() {
+			p := Pair(x: 1, y: 2);
+			p = Pair(x: 3, y: 4);
+		}
+		main() {}
+	`)
+	assertContains(t, ir, "p.dropflag")
+	// Should have two pal_alloc (one per constructor) and free.call blocks
+	assertContains(t, ir, "free.call")
+	assertContains(t, ir, "call void @pal_free")
+}
+
 // B0158: Synthesized drop coexists with explicit drop (explicit takes precedence)
 func TestDropExplicitTakesPrecedence(t *testing.T) {
 	ir := generateIR(t, `

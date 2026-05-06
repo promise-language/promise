@@ -921,8 +921,8 @@ func (c *Compiler) defineTestPrintResultBody(fn *ir.Func) {
 	mergeBlock.NewRet(nil)
 }
 
-// defineTestSummaryBody adds a function body to promise_test_summary(i32 %passed, i32 %failed, i32 %skipped).
-// Writes "<passed> passed, <failed> failed[, <skipped> skipped]\n" to stdout via pal_write.
+// defineTestSummaryBody adds a function body to promise_test_summary(i32 %passed, i32 %failed, i32 %skipped, i32 %leaked).
+// Writes "<passed> passed, <failed> failed[, <skipped> skipped][, <leaked> leaked]\n" to stdout via pal_write.
 func (c *Compiler) defineTestSummaryBody(fn *ir.Func) {
 	// Global constants
 	passedSuffixData := constant.NewCharArrayFromString(" passed, ")
@@ -935,20 +935,26 @@ func (c *Compiler) defineTestSummaryBody(fn *ir.Func) {
 	failedSuffixGlobal.Immutable = true
 	failedSuffixGlobal.Linkage = enum.LinkagePrivate
 
-	skippedPrefixData := constant.NewCharArrayFromString(", ")
-	skippedPrefixGlobal := c.module.NewGlobalDef(".str.skipped_prefix", skippedPrefixData)
-	skippedPrefixGlobal.Immutable = true
-	skippedPrefixGlobal.Linkage = enum.LinkagePrivate
+	commaPrefixData := constant.NewCharArrayFromString(", ")
+	commaPrefixGlobal := c.module.NewGlobalDef(".str.comma_prefix", commaPrefixData)
+	commaPrefixGlobal.Immutable = true
+	commaPrefixGlobal.Linkage = enum.LinkagePrivate
 
 	skippedSuffixData := constant.NewCharArrayFromString(" skipped")
 	skippedSuffixGlobal := c.module.NewGlobalDef(".str.skipped_suffix", skippedSuffixData)
 	skippedSuffixGlobal.Immutable = true
 	skippedSuffixGlobal.Linkage = enum.LinkagePrivate
 
+	leakedSuffixData := constant.NewCharArrayFromString(" leaked")
+	leakedSuffixGlobal := c.module.NewGlobalDef(".str.leaked_suffix", leakedSuffixData)
+	leakedSuffixGlobal.Immutable = true
+	leakedSuffixGlobal.Linkage = enum.LinkagePrivate
+
 	stdout := constant.NewInt(irtypes.I32, 1)
 	passed := fn.Params[0]  // i32
 	failed := fn.Params[1]  // i32
 	skipped := fn.Params[2] // i32
+	leaked := fn.Params[3]  // i32
 
 	entry := fn.NewBlock(".entry")
 
@@ -982,28 +988,67 @@ func (c *Compiler) defineTestSummaryBody(fn *ir.Func) {
 	afterSkipBlock := fn.NewBlock("after_skipped")
 	entry.NewCondBr(hasSkipped, printSkipBlock, afterSkipBlock)
 
-	// Write ", "
-	sPrefixPtr := printSkipBlock.NewGetElementPtr(skippedPrefixGlobal.ContentType, skippedPrefixGlobal,
+	// Write ", <skipped> skipped"
+	commaPtr := printSkipBlock.NewGetElementPtr(commaPrefixGlobal.ContentType, commaPrefixGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	printSkipBlock.NewCall(c.palWrite, stdout, sPrefixPtr, constant.NewInt(irtypes.I64, 2))
-
-	// Convert skipped count to string
+	printSkipBlock.NewCall(c.palWrite, stdout, commaPtr, constant.NewInt(irtypes.I64, 2))
 	skippedI64 := printSkipBlock.NewSExt(skipped, irtypes.I64)
 	skippedStr := printSkipBlock.NewCall(c.funcs["promise_int_to_string"], skippedI64)
 	skippedDataPtr, skippedDataLen := c.extractStringDataLenFromInstance(printSkipBlock, skippedStr)
 	printSkipBlock.NewCall(c.palWrite, stdout, skippedDataPtr, skippedDataLen)
 	printSkipBlock.NewCall(c.palFree, skippedStr)
-
-	// Write " skipped"
 	sSuffixPtr := printSkipBlock.NewGetElementPtr(skippedSuffixGlobal.ContentType, skippedSuffixGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	printSkipBlock.NewCall(c.palWrite, stdout, sSuffixPtr, constant.NewInt(irtypes.I64, 8))
 	printSkipBlock.NewBr(afterSkipBlock)
 
-	// Write "\n"
-	nlPtr := afterSkipBlock.NewGetElementPtr(c.newlineGlobal.ContentType, c.newlineGlobal,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	afterSkipBlock.NewCall(c.palWrite, stdout, nlPtr, constant.NewInt(irtypes.I64, 1))
+	// Conditionally write ", <leaked> leaked" if leaked > 0 (T0020)
+	hasLeaked := afterSkipBlock.NewICmp(enum.IPredSGT, leaked, constant.NewInt(irtypes.I32, 0))
+	printLeakBlock := fn.NewBlock("print_leaked")
+	afterLeakBlock := fn.NewBlock("after_leaked")
+	afterSkipBlock.NewCondBr(hasLeaked, printLeakBlock, afterLeakBlock)
 
-	afterSkipBlock.NewRet(nil)
+	// Write ", <leaked> leaked"
+	commaPtr2 := printLeakBlock.NewGetElementPtr(commaPrefixGlobal.ContentType, commaPrefixGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	printLeakBlock.NewCall(c.palWrite, stdout, commaPtr2, constant.NewInt(irtypes.I64, 2))
+	leakedI64 := printLeakBlock.NewSExt(leaked, irtypes.I64)
+	leakedStr := printLeakBlock.NewCall(c.funcs["promise_int_to_string"], leakedI64)
+	leakedDataPtr, leakedDataLen := c.extractStringDataLenFromInstance(printLeakBlock, leakedStr)
+	printLeakBlock.NewCall(c.palWrite, stdout, leakedDataPtr, leakedDataLen)
+	printLeakBlock.NewCall(c.palFree, leakedStr)
+	lSuffixPtr := printLeakBlock.NewGetElementPtr(leakedSuffixGlobal.ContentType, leakedSuffixGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	printLeakBlock.NewCall(c.palWrite, stdout, lSuffixPtr, constant.NewInt(irtypes.I64, 7))
+	printLeakBlock.NewBr(afterLeakBlock)
+
+	// Write "\n"
+	nlPtr := afterLeakBlock.NewGetElementPtr(c.newlineGlobal.ContentType, c.newlineGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	afterLeakBlock.NewCall(c.palWrite, stdout, nlPtr, constant.NewInt(irtypes.I64, 1))
+
+	afterLeakBlock.NewRet(nil)
+}
+
+// emitLeakMessage writes "  leak: <N> allocations not freed\n" to stdout (T0020).
+// The block is NOT terminated — caller must add a terminator after this call.
+// leakPrefixGlobal and leakSuffixGlobal must be pre-created module globals.
+func (c *Compiler) emitLeakMessage(blk *ir.Block, delta value.Value, leakPrefixGlobal, leakSuffixGlobal *ir.Global) {
+	stdout := constant.NewInt(irtypes.I32, 1)
+
+	// Write "  leak: "
+	prefixPtr := blk.NewGetElementPtr(leakPrefixGlobal.ContentType, leakPrefixGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	blk.NewCall(c.palWrite, stdout, prefixPtr, constant.NewInt(irtypes.I64, 8))
+
+	// Write delta as string
+	deltaStr := blk.NewCall(c.funcs["promise_int_to_string"], delta)
+	deltaDataPtr, deltaDataLen := c.extractStringDataLenFromInstance(blk, deltaStr)
+	blk.NewCall(c.palWrite, stdout, deltaDataPtr, deltaDataLen)
+	blk.NewCall(c.palFree, deltaStr)
+
+	// Write " allocations not freed\n" (23 bytes)
+	suffixPtr := blk.NewGetElementPtr(leakSuffixGlobal.ContentType, leakSuffixGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	blk.NewCall(c.palWrite, stdout, suffixPtr, constant.NewInt(irtypes.I64, 23))
 }

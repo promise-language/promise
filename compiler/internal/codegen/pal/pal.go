@@ -203,8 +203,22 @@ func addFuncAttr(fn *ir.Func, attr enum.FuncAttr) {
 	fn.FuncAttrs = append(fn.FuncAttrs, attr)
 }
 
+// getOrCreateAllocCountGlobal returns the @__promise_alloc_count global,
+// creating it if it doesn't exist. Used by alloc/free tracking (T0020).
+func getOrCreateAllocCountGlobal(module *ir.Module) *ir.Global {
+	for _, g := range module.Globals {
+		if g.Name() == "__promise_alloc_count" {
+			return g
+		}
+	}
+	g := module.NewGlobal("__promise_alloc_count", irtypes.I64)
+	g.Init = constant.NewInt(irtypes.I64, 0)
+	return g
+}
+
 // emitLibcAlloc declares libc @malloc and defines @pal_alloc as a wrapper.
 // Shared by all PALs that use libc for allocation.
+// Includes allocation count tracking for leak detection (T0020).
 func emitLibcAlloc(module *ir.Module) *ir.Func {
 	// declare noalias i8* @malloc(i64 noundef) nounwind willreturn
 	mallocSize := ir.NewParam("size", irtypes.I64)
@@ -213,6 +227,8 @@ func emitLibcAlloc(module *ir.Module) *ir.Func {
 	mallocFn.ReturnAttrs = append(mallocFn.ReturnAttrs, enum.ReturnAttrNoAlias)
 	addFuncAttr(mallocFn, enum.FuncAttrWillReturn)
 
+	allocCount := getOrCreateAllocCountGlobal(module)
+
 	// define noalias i8* @pal_alloc(i64 %size) nounwind willreturn
 	fn := module.NewFunc("pal_alloc", irtypes.I8Ptr,
 		ir.NewParam("size", irtypes.I64))
@@ -220,12 +236,23 @@ func emitLibcAlloc(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
 	entry := fn.NewBlock(".entry")
 	ret := entry.NewCall(mallocFn, fn.Params[0])
-	entry.NewRet(ret)
+
+	// Track: if malloc returned non-null, atomically increment alloc count
+	nonnull := entry.NewICmp(enum.IPredNE, ret, constant.NewNull(irtypes.I8Ptr))
+	trackBlk := fn.NewBlock(".track")
+	doneBlk := fn.NewBlock(".done")
+	entry.NewCondBr(nonnull, trackBlk, doneBlk)
+
+	trackBlk.NewAtomicRMW(enum.AtomicOpAdd, allocCount, constant.NewInt(irtypes.I64, 1), enum.AtomicOrderingMonotonic)
+	trackBlk.NewBr(doneBlk)
+
+	doneBlk.NewRet(ret)
 
 	return fn
 }
 
 // emitLibcFree declares libc @free and defines @pal_free as a wrapper.
+// Includes allocation count tracking for leak detection (T0020).
 func emitLibcFree(module *ir.Module) *ir.Func {
 	// declare void @free(i8* nocapture noundef) nounwind willreturn
 	freePtr := ir.NewParam("ptr", irtypes.I8Ptr)
@@ -233,13 +260,25 @@ func emitLibcFree(module *ir.Module) *ir.Func {
 	freeFn := getOrDeclareFunc(module, "free", irtypes.Void, freePtr)
 	addFuncAttr(freeFn, enum.FuncAttrWillReturn)
 
+	allocCount := getOrCreateAllocCountGlobal(module)
+
 	// define void @pal_free(i8* %ptr) nounwind willreturn
 	fn := module.NewFunc("pal_free", irtypes.Void,
 		ir.NewParam("ptr", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
 	entry := fn.NewBlock(".entry")
-	entry.NewCall(freeFn, fn.Params[0])
-	entry.NewRet(nil)
+
+	// Track: if ptr is non-null, atomically decrement alloc count and free
+	nonnull := entry.NewICmp(enum.IPredNE, fn.Params[0], constant.NewNull(irtypes.I8Ptr))
+	trackBlk := fn.NewBlock(".track")
+	doneBlk := fn.NewBlock(".done")
+	entry.NewCondBr(nonnull, trackBlk, doneBlk)
+
+	trackBlk.NewAtomicRMW(enum.AtomicOpSub, allocCount, constant.NewInt(irtypes.I64, 1), enum.AtomicOrderingMonotonic)
+	trackBlk.NewCall(freeFn, fn.Params[0])
+	trackBlk.NewBr(doneBlk)
+
+	doneBlk.NewRet(nil)
 
 	return fn
 }

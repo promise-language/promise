@@ -640,6 +640,7 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 		ir.NewParam("passed", irtypes.I32),
 		ir.NewParam("failed", irtypes.I32),
 		ir.NewParam("skipped", irtypes.I32),
+		ir.NewParam("leaked", irtypes.I32),
 	)
 
 	// Add codegen bodies (replaces C printf implementations)
@@ -693,6 +694,31 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	failedAlloca := entry.NewAlloca(irtypes.I32)
 	entry.NewStore(constant.NewInt(irtypes.I32, 0), passedAlloca)
 	entry.NewStore(constant.NewInt(irtypes.I32, 0), failedAlloca)
+
+	// Leak detection: look up alloc count global (T0020)
+	var allocCountGlobal *ir.Global
+	for _, g := range c.module.Globals {
+		if g.Name() == "__promise_alloc_count" {
+			allocCountGlobal = g
+			break
+		}
+	}
+	leakedCountAlloca := entry.NewAlloca(irtypes.I32)
+	entry.NewStore(constant.NewInt(irtypes.I32, 0), leakedCountAlloca)
+
+	// Leak message string constants (created once, used per-test) (T0020)
+	var leakPrefixGlobal, leakSuffixGlobal *ir.Global
+	if allocCountGlobal != nil {
+		leakPrefixData := constant.NewCharArrayFromString("  leak: ")
+		leakPrefixGlobal = c.module.NewGlobalDef(".str.leak_prefix", leakPrefixData)
+		leakPrefixGlobal.Immutable = true
+		leakPrefixGlobal.Linkage = enum.LinkagePrivate
+
+		leakSuffixData := constant.NewCharArrayFromString(" allocations not freed\n")
+		leakSuffixGlobal = c.module.NewGlobalDef(".str.leak_suffix", leakSuffixData)
+		leakSuffixGlobal.Immutable = true
+		leakSuffixGlobal.Linkage = enum.LinkagePrivate
+	}
 
 	// Count tests excluded for this target
 	skippedCount := 0
@@ -762,6 +788,16 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 			timeoutNs = testTimeouts[nameStr]
 		}
 		timeoutConst := constant.NewInt(irtypes.I64, timeoutNs)
+
+		// Snapshot alloc count before test for leak detection (T0020)
+		var allocSnapshot value.Value
+		if allocCountGlobal != nil {
+			if c.isWasm {
+				allocSnapshot = entry.NewLoad(irtypes.I64, allocCountGlobal)
+			} else {
+				allocSnapshot = entry.NewAtomicRMW(enum.AtomicOpAdd, allocCountGlobal, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingMonotonic)
+			}
+		}
 
 		// Time the test: t0 = nanotime()
 		t0 := entry.NewCall(nanotimeFn)
@@ -847,6 +883,43 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 		)
 		failStoreBlock.NewBr(skipStoreBlock)
 
+		// Leak detection: check alloc count delta after test (T0020)
+		// Skip for timed-out tests (thread still running → racy read)
+		if allocCountGlobal != nil {
+			leakCheckBlk := mainFn.NewBlock(fmt.Sprintf("leak_check_%s", nameStr))
+			afterLeakBlk := mainFn.NewBlock(fmt.Sprintf("after_leak_%s", nameStr))
+
+			// Only check leaks if test didn't timeout (result != 2)
+			isNotTimeout := skipStoreBlock.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 2))
+			skipStoreBlock.NewCondBr(isNotTimeout, leakCheckBlk, afterLeakBlk)
+
+			// Read current alloc count
+			var currentAlloc value.Value
+			if c.isWasm {
+				currentAlloc = leakCheckBlk.NewLoad(irtypes.I64, allocCountGlobal)
+			} else {
+				currentAlloc = leakCheckBlk.NewAtomicRMW(enum.AtomicOpAdd, allocCountGlobal, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingMonotonic)
+			}
+			delta := leakCheckBlk.NewSub(currentAlloc, allocSnapshot)
+			hasLeak := leakCheckBlk.NewICmp(enum.IPredSGT, delta, constant.NewInt(irtypes.I64, 0))
+
+			printLeakBlk := mainFn.NewBlock(fmt.Sprintf("print_leak_%s", nameStr))
+			leakCheckBlk.NewCondBr(hasLeak, printLeakBlk, afterLeakBlk)
+
+			// Print "  leak: <N> allocations not freed\n"
+			c.emitLeakMessage(printLeakBlk, delta, leakPrefixGlobal, leakSuffixGlobal)
+
+			// Increment leaked counter
+			curLeaked := printLeakBlk.NewLoad(irtypes.I32, leakedCountAlloca)
+			printLeakBlk.NewStore(
+				printLeakBlk.NewAdd(curLeaked, constant.NewInt(irtypes.I32, 1)),
+				leakedCountAlloca,
+			)
+			printLeakBlk.NewBr(afterLeakBlk)
+
+			skipStoreBlock = afterLeakBlk
+		}
+
 		// Continue from skipStoreBlock for the next test
 		entry = skipStoreBlock
 	}
@@ -854,7 +927,8 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	// Print summary
 	finalPassed := entry.NewLoad(irtypes.I32, passedAlloca)
 	finalFailed := entry.NewLoad(irtypes.I32, failedAlloca)
-	entry.NewCall(testSummaryFn, finalPassed, finalFailed, constant.NewInt(irtypes.I32, int64(skippedCount)))
+	finalLeaked := entry.NewLoad(irtypes.I32, leakedCountAlloca)
+	entry.NewCall(testSummaryFn, finalPassed, finalFailed, constant.NewInt(irtypes.I32, int64(skippedCount)), finalLeaked)
 
 	// Print FAILED: list if any failures
 	failedHeaderData := constant.NewCharArrayFromString("FAILED:\n")

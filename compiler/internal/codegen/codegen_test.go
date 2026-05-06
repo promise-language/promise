@@ -6525,19 +6525,20 @@ func TestTestSummaryBody(t *testing.T) {
 	result.GenerateTestMain(info.Tests, nil)
 	ir := result.Module.String()
 
-	// Function is defined (not just declared)
-	assertContains(t, ir, "define void @promise_test_summary(i32 %passed, i32 %failed, i32 %skipped)")
+	// Function is defined (not just declared) — includes leaked param (T0020)
+	assertContains(t, ir, "define void @promise_test_summary(i32 %passed, i32 %failed, i32 %skipped, i32 %leaked)")
 	// String suffix globals
 	assertContains(t, ir, `@.str.passed_suffix = private constant [9 x i8] c" passed, "`)
 	assertContains(t, ir, `@.str.failed_suffix = private constant [7 x i8] c" failed"`)
 	assertContains(t, ir, `@.str.skipped_suffix = private constant [8 x i8] c" skipped"`)
+	assertContains(t, ir, `@.str.leaked_suffix = private constant [7 x i8] c" leaked"`)
 	// Converts i32 → i64 for int_to_string
 	assertContains(t, ir, "sext i32 %passed to i64")
 	assertContains(t, ir, "sext i32 %failed to i64")
 	// Calls int_to_string and frees temp strings
 	assertContains(t, ir, "call i8* @promise_int_to_string(i64")
 	assertContains(t, ir, "call void @pal_free(i8*")
-	// At least 2 free() calls for passed+failed (skipped is conditional)
+	// At least 2 free() calls for passed+failed (skipped/leaked are conditional)
 	if strings.Count(ir, "call void @pal_free(i8*") < 2 {
 		t.Error("expected at least 2 free() calls in promise_test_summary (one per int_to_string result)")
 	}
@@ -6548,9 +6549,56 @@ func TestTestSummaryBody(t *testing.T) {
 	assertContains(t, ir, "i64 7)")
 	// Conditional skipped output: icmp sgt for skipped > 0
 	assertContains(t, ir, "icmp sgt i32 %skipped, 0")
+	// Conditional leaked output: icmp sgt for leaked > 0 (T0020)
+	assertContains(t, ir, "icmp sgt i32 %leaked, 0")
 	// String instance extraction (bitcast for extractStringDataLenFromInstance)
 	assertContains(t, ir, "bitcast i8* %")
 	assertContains(t, ir, "to %promise_string_i*")
+}
+
+// T0020: Leak detection emits alloc count tracking in pal_alloc/pal_free
+// and per-test leak checks in the test main.
+func TestLeakDetectionAllocTracking(t *testing.T) {
+	result := compileResult(t, `
+		myTest() `+"`test"+` { }
+	`)
+	ir := result.Module.String()
+
+	// pal_alloc should track allocations via __promise_alloc_count
+	assertContains(t, ir, "@__promise_alloc_count = global i64 0")
+	// pal_alloc atomically increments on successful malloc
+	assertContains(t, ir, "atomicrmw add i64* @__promise_alloc_count, i64 1 monotonic")
+	// pal_free atomically decrements on non-null free
+	assertContains(t, ir, "atomicrmw sub i64* @__promise_alloc_count, i64 1 monotonic")
+}
+
+// T0020: Leak detection in test main snapshots alloc count before/after each test.
+func TestLeakDetectionInTestMain(t *testing.T) {
+	result := compileResult(t, `
+		myTest() `+"`test"+` { }
+	`)
+	info, _ := sema.Check(func() *ast.File {
+		input := antlr.NewInputStream(`myTest() ` + "`test" + ` { }`)
+		lexer := parser.NewPromiseLexer(input)
+		lexer.RemoveErrorListeners()
+		stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+		p := parser.NewPromiseParser(stream)
+		p.RemoveErrorListeners()
+		tree := p.CompilationUnit()
+		file, _ := ast.Build("test.pr", tree)
+		return file
+	}())
+	result.GenerateTestMain(info.Tests, nil)
+	ir := result.Module.String()
+
+	// Leak check blocks: snapshot before test, check delta after
+	assertContains(t, ir, "leak_check_myTest")
+	assertContains(t, ir, "print_leak_myTest")
+	// Leak message string constants
+	assertContains(t, ir, `c"  leak: "`)
+	assertContains(t, ir, `c" allocations not freed\0A"`)
+	// Leaked counter in summary call
+	assertContains(t, ir, "call void @promise_test_summary(i32")
 }
 
 func TestTestTrampolineStackCreepDetection(t *testing.T) {

@@ -374,6 +374,56 @@ func TestEmitFree(t *testing.T) {
 	})
 }
 
+// T0020: pal_alloc and pal_free track allocations via __promise_alloc_count.
+func TestAllocTracking(t *testing.T) {
+	// Posix/Windows: atomic tracking
+	t.Run("Posix", func(t *testing.T) {
+		module := ir.NewModule()
+		p := &PosixPAL{}
+		p.EmitAlloc(module)
+		p.EmitFree(module)
+		out := module.String()
+
+		// Global alloc counter
+		if !strings.Contains(out, "@__promise_alloc_count = global i64 0") {
+			t.Error("missing @__promise_alloc_count global")
+		}
+		// pal_alloc atomically increments on non-null malloc
+		if !strings.Contains(out, "atomicrmw add i64* @__promise_alloc_count") {
+			t.Error("pal_alloc should atomically increment alloc count")
+		}
+		// pal_free atomically decrements on non-null ptr
+		if !strings.Contains(out, "atomicrmw sub i64* @__promise_alloc_count") {
+			t.Error("pal_free should atomically decrement alloc count")
+		}
+	})
+
+	// WASM: non-atomic tracking (single-threaded)
+	t.Run("Wasm", func(t *testing.T) {
+		module := ir.NewModule()
+		p := &WasmPAL{}
+		p.EmitAlloc(module)
+		p.EmitFree(module)
+		out := module.String()
+
+		// Global alloc counter (shared with posix)
+		if !strings.Contains(out, "@__promise_alloc_count = global i64 0") {
+			t.Error("missing @__promise_alloc_count global")
+		}
+		// WASM uses non-atomic load/add/store instead of atomicrmw
+		if strings.Contains(out, "atomicrmw") {
+			t.Error("WASM should NOT use atomicrmw (single-threaded)")
+		}
+		// But should still increment/decrement the counter
+		if !strings.Contains(out, "add i64") {
+			t.Error("WASM pal_alloc should increment alloc count")
+		}
+		if !strings.Contains(out, "sub i64") {
+			t.Error("WASM pal_free should decrement alloc count")
+		}
+	})
+}
+
 func TestEmitRealloc(t *testing.T) {
 	// Posix and Windows use libc realloc wrapper
 	libcPals := []struct {

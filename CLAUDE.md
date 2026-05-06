@@ -108,12 +108,13 @@ Single-file output (verbose — shows every test with timing):
 ```
 PASS (0.001s) test_add
 PASS (0.002s) test_sub
+  leak: 1 allocations not freed                # leak detection (T0020)
 FAIL (0.003s) test_broken
   panic: assertion failed: expected 3, got 4   # panic context shown under FAIL
 TIMEOUT (0.100s) test_stuck                    # per-test timeout exceeded (T0023)
 PASS (0.001s) test_other                       # subsequent tests still run after panic/timeout
 
-3 passed, 2 failed (0.423s)
+3 passed, 2 failed, 1 leaked (0.423s)
 FAILED:
   test_broken
   test_stuck
@@ -129,7 +130,7 @@ FAIL (0.005s) e2e/strings.pr (1/3 failed)     # failing file with ratio
 FAIL (0.000s) broken.pr (compilation error)    # compilation failure
   broken.pr:5:3: type Foo has no field 'bar'   # error context
 
-568 passed, 2 failed (117 files, 30.810s)
+568 passed, 2 failed, 3 leaked (117 files, 30.810s)
 FAILED:                                        # summary with failure context
   e2e/strings.pr: test_split
     panic: assertion failed

@@ -819,18 +819,21 @@ func runTestBinary(binaryPath string, timeout time.Duration, start time.Time, ta
 	if targetTriple != "" && targetTriple != codegen.HostTargetTriple() {
 		targetSuffix = fmt.Sprintf(" [%s]", targetTriple)
 	}
-	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?`)
+	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?`)
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 		if line == "" {
 			continue
 		}
 		if m := summaryRe.FindStringSubmatch(line); m != nil {
 			fmt.Println() // empty line before summary
+			summary := fmt.Sprintf("%s passed, %s failed", m[1], m[2])
 			if m[3] != "" {
-				fmt.Printf("%s passed, %s failed, %s skipped (%.3fs)%s\n", m[1], m[2], m[3], elapsed.Seconds(), targetSuffix)
-			} else {
-				fmt.Printf("%s passed, %s failed (%.3fs)%s\n", m[1], m[2], elapsed.Seconds(), targetSuffix)
+				summary += fmt.Sprintf(", %s skipped", m[3])
 			}
+			if len(m) > 4 && m[4] != "" {
+				summary += fmt.Sprintf(", %s leaked", m[4])
+			}
+			fmt.Printf("%s (%.3fs)%s\n", summary, elapsed.Seconds(), targetSuffix)
 		} else if targetSuffix != "" && (strings.HasPrefix(line, "PASS ") || strings.HasPrefix(line, "FAIL ") || strings.HasPrefix(line, "TIMEOUT ")) {
 			fmt.Printf("%s%s\n", line, targetSuffix)
 		} else {
@@ -901,18 +904,21 @@ func runTestBinaryWithCoverage(binaryPath string, timeout time.Duration, start t
 	testOutput, counters := extractCoverageData(fullOutput)
 
 	// Print test output (same formatting as runTestBinary)
-	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?`)
+	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?`)
 	for _, line := range strings.Split(strings.TrimSpace(testOutput), "\n") {
 		if line == "" {
 			continue
 		}
 		if m := summaryRe.FindStringSubmatch(line); m != nil {
 			fmt.Println()
+			summary := fmt.Sprintf("%s passed, %s failed", m[1], m[2])
 			if m[3] != "" {
-				fmt.Printf("%s passed, %s failed, %s skipped (%.3fs)\n", m[1], m[2], m[3], elapsed.Seconds())
-			} else {
-				fmt.Printf("%s passed, %s failed (%.3fs)\n", m[1], m[2], elapsed.Seconds())
+				summary += fmt.Sprintf(", %s skipped", m[3])
 			}
+			if len(m) > 4 && m[4] != "" {
+				summary += fmt.Sprintf(", %s leaked", m[4])
+			}
+			fmt.Printf("%s (%.3fs)\n", summary, elapsed.Seconds())
 		} else {
 			fmt.Println(line)
 		}
@@ -1302,7 +1308,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	}
 
 	// Print results in file order, streaming as each slot completes.
-	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?`)
+	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?`)
 	failLineRe := regexp.MustCompile(`^(?:FAIL|TIMEOUT) \([\d.]+s\)(?: (.+))?$`)
 	passLineRe := regexp.MustCompile(`^PASS \([\d.]+s\)`)
 	panicContextRe := regexp.MustCompile(`^  (panic:|expected:|actual:|exit:)`)
@@ -1315,6 +1321,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	totalPassed := 0
 	totalFailed := 0
 	totalSkipped := 0
+	totalLeaked := 0
 	totalFiles := 0
 	failedFiles := 0
 	var failures []failureInfo
@@ -1423,6 +1430,9 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 					if m[3] != "" {
 						totalSkipped += atoi(m[3])
 					}
+					if len(m) > 4 && m[4] != "" {
+						totalLeaked += atoi(m[4])
+					}
 				} else {
 					totalPassed += filePassed
 				}
@@ -1441,6 +1451,9 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				totalFailed += atoi(m[2])
 				if m[3] != "" {
 					totalSkipped += atoi(m[3])
+				}
+				if len(m) > 4 && m[4] != "" {
+					totalLeaked += atoi(m[4])
 				}
 			} else if fileFailed > 0 || filePassed > 0 {
 				totalPassed += filePassed
@@ -1491,6 +1504,9 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 			if m[3] != "" {
 				totalSkipped += atoi(m[3])
 			}
+			if len(m) > 4 && m[4] != "" {
+				totalLeaked += atoi(m[4])
+			}
 		}
 
 		totalTests := filePassed + fileFailed
@@ -1509,11 +1525,14 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	// Print grand summary
 	fmt.Println()
 	totalElapsed := time.Since(totalStart)
+	summary := fmt.Sprintf("%d passed, %d failed", totalPassed, totalFailed)
 	if totalSkipped > 0 {
-		fmt.Printf("%d passed, %d failed, %d skipped (%d files, %.3fs)%s\n", totalPassed, totalFailed, totalSkipped, totalFiles, totalElapsed.Seconds(), targetSuffix)
-	} else {
-		fmt.Printf("%d passed, %d failed (%d files, %.3fs)%s\n", totalPassed, totalFailed, totalFiles, totalElapsed.Seconds(), targetSuffix)
+		summary += fmt.Sprintf(", %d skipped", totalSkipped)
 	}
+	if totalLeaked > 0 {
+		summary += fmt.Sprintf(", %d leaked", totalLeaked)
+	}
+	fmt.Printf("%s (%d files, %.3fs)%s\n", summary, totalFiles, totalElapsed.Seconds(), targetSuffix)
 
 	if len(failures) > 0 {
 		fmt.Printf("\nFAILED:\n")

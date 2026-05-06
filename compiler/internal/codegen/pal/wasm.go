@@ -93,6 +93,7 @@ func (p *WasmPAL) EmitExit(module *ir.Module) *ir.Func {
 
 // EmitAlloc declares extern @malloc and defines @pal_alloc as a wrapper.
 // Signature: @pal_alloc(i64 %size) → i8*
+// Includes allocation count tracking for leak detection (T0020).
 func (p *WasmPAL) EmitAlloc(module *ir.Module) *ir.Func {
 	// declare noalias i8* @malloc(i32 noundef) nounwind
 	mallocSize := ir.NewParam("size", irtypes.I32)
@@ -100,6 +101,8 @@ func (p *WasmPAL) EmitAlloc(module *ir.Module) *ir.Func {
 	mallocFn := getOrDeclareFunc(module, "malloc", irtypes.I8Ptr, mallocSize)
 	mallocFn.ReturnAttrs = append(mallocFn.ReturnAttrs, enum.ReturnAttrNoAlias)
 	addFuncAttr(mallocFn, enum.FuncAttrWillReturn)
+
+	allocCount := getOrCreateAllocCountGlobal(module)
 
 	// define noalias i8* @pal_alloc(i64 %size) nounwind
 	fn := module.NewFunc("pal_alloc", irtypes.I8Ptr,
@@ -111,12 +114,24 @@ func (p *WasmPAL) EmitAlloc(module *ir.Module) *ir.Func {
 	// Truncate i64 to i32 (wasm32 address space)
 	size32 := entry.NewTrunc(fn.Params[0], irtypes.I32)
 	ret := entry.NewCall(mallocFn, size32)
-	entry.NewRet(ret)
+
+	// Track: if malloc returned non-null, increment alloc count (non-atomic, WASM is single-threaded)
+	nonnull := entry.NewICmp(enum.IPredNE, ret, constant.NewNull(irtypes.I8Ptr))
+	trackBlk := fn.NewBlock(".track")
+	doneBlk := fn.NewBlock(".done")
+	entry.NewCondBr(nonnull, trackBlk, doneBlk)
+
+	old := trackBlk.NewLoad(irtypes.I64, allocCount)
+	trackBlk.NewStore(trackBlk.NewAdd(old, constant.NewInt(irtypes.I64, 1)), allocCount)
+	trackBlk.NewBr(doneBlk)
+
+	doneBlk.NewRet(ret)
 
 	return fn
 }
 
 // EmitFree declares extern @free and defines @pal_free as a wrapper.
+// Includes allocation count tracking for leak detection (T0020).
 func (p *WasmPAL) EmitFree(module *ir.Module) *ir.Func {
 	// declare void @free(i8* nocapture noundef) nounwind
 	freePtr := ir.NewParam("ptr", irtypes.I8Ptr)
@@ -124,13 +139,26 @@ func (p *WasmPAL) EmitFree(module *ir.Module) *ir.Func {
 	freeFn := getOrDeclareFunc(module, "free", irtypes.Void, freePtr)
 	addFuncAttr(freeFn, enum.FuncAttrWillReturn)
 
+	allocCount := getOrCreateAllocCountGlobal(module)
+
 	// define void @pal_free(i8* %ptr) nounwind willreturn
 	fn := module.NewFunc("pal_free", irtypes.Void,
 		ir.NewParam("ptr", irtypes.I8Ptr))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
 	entry := fn.NewBlock(".entry")
-	entry.NewCall(freeFn, fn.Params[0])
-	entry.NewRet(nil)
+
+	// Track: if ptr is non-null, decrement alloc count and free (non-atomic, WASM is single-threaded)
+	nonnull := entry.NewICmp(enum.IPredNE, fn.Params[0], constant.NewNull(irtypes.I8Ptr))
+	trackBlk := fn.NewBlock(".track")
+	doneBlk := fn.NewBlock(".done")
+	entry.NewCondBr(nonnull, trackBlk, doneBlk)
+
+	old := trackBlk.NewLoad(irtypes.I64, allocCount)
+	trackBlk.NewStore(trackBlk.NewSub(old, constant.NewInt(irtypes.I64, 1)), allocCount)
+	trackBlk.NewCall(freeFn, fn.Params[0])
+	trackBlk.NewBr(doneBlk)
+
+	doneBlk.NewRet(nil)
 
 	return fn
 }

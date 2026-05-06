@@ -2317,14 +2317,12 @@ func (c *Compiler) genChannelClose(chRaw value.Value, chPtr value.Value, chanTyp
 	return nil
 }
 
-// genVectorLen loads the length from a vector/array header.
+// genVectorLen loads the length from a vector/array header (masking off bit 63 static flag).
 func (c *Compiler) genVectorLen(e *ast.MemberExpr) value.Value {
 	slicePtr := c.genExpr(e.Target)
 	headerType := vectorHeaderType()
 	headerPtr := c.block.NewBitCast(slicePtr, irtypes.NewPointer(headerType))
-	lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	return c.block.NewLoad(irtypes.I64, lenPtr)
+	return loadVectorLen(c.block, headerPtr)
 }
 
 // genMapLen returns the length of a map via the runtime.
@@ -2921,22 +2919,29 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		if ident, ok := e.Args[0].Value.(*ast.IdentExpr); ok {
 			c.clearDropFlag(ident.Name)
 		}
+		// COW: if static (.rodata), copy to heap first (T0062)
+		cowSlice := c.block.NewCall(c.funcs["promise_vector_cow"],
+			slicePtr, constant.NewInt(irtypes.I64, elemSize))
 		argAlloca := c.createEntryAlloca(elemLLVM)
 		// Zero-initialize before store to clear padding bytes for memcmp correctness
 		c.block.NewStore(constant.NewZeroInitializer(elemLLVM), argAlloca)
 		c.block.NewStore(argVal, argAlloca)
 		argPtr := c.block.NewBitCast(argAlloca, irtypes.I8Ptr)
 		newSlice := c.block.NewCall(c.funcs["promise_vector_push"],
-			slicePtr, argPtr, constant.NewInt(irtypes.I64, elemSize))
+			cowSlice, argPtr, constant.NewInt(irtypes.I64, elemSize))
 		// Store the (possibly reallocated) pointer back
 		c.storeBackSlicePtr(member.Target, newSlice)
 		return newSlice
 
 	case "pop":
+		// COW: if static (.rodata), copy to heap first (T0062)
+		cowSlice := c.block.NewCall(c.funcs["promise_vector_cow"],
+			slicePtr, constant.NewInt(irtypes.I64, elemSize))
+		c.storeBackSlicePtr(member.Target, cowSlice)
 		outAlloca := c.createEntryAlloca(elemLLVM)
 		outPtr := c.block.NewBitCast(outAlloca, irtypes.I8Ptr)
 		found := c.block.NewCall(c.funcs["promise_vector_pop"],
-			slicePtr, outPtr, constant.NewInt(irtypes.I64, elemSize))
+			cowSlice, outPtr, constant.NewInt(irtypes.I64, elemSize))
 		// Build Optional: {i1, T}
 		optType := irtypes.NewStruct(irtypes.I1, elemLLVM)
 		isFound := c.block.NewTrunc(found, irtypes.I1)
@@ -2980,8 +2985,12 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 
 	case "remove":
 		idx := c.genCallArgExpr(e.Args[0].Value)
+		// COW: if static (.rodata), copy to heap first (T0062)
+		cowSlice := c.block.NewCall(c.funcs["promise_vector_cow"],
+			slicePtr, constant.NewInt(irtypes.I64, elemSize))
+		c.storeBackSlicePtr(member.Target, cowSlice)
 		c.block.NewCall(c.funcs["promise_vector_remove"],
-			slicePtr, idx, constant.NewInt(irtypes.I64, elemSize))
+			cowSlice, idx, constant.NewInt(irtypes.I64, elemSize))
 		return nil
 
 	default:
@@ -4166,6 +4175,27 @@ func vectorHeaderType() *irtypes.StructType {
 	return irtypes.NewStruct(irtypes.I64, irtypes.I64)
 }
 
+// vectorLenMask is 0x7FFFFFFFFFFFFFFF — masks off the static flag (bit 63).
+var vectorLenMask = constant.NewInt(irtypes.I64, 0x7FFFFFFFFFFFFFFF)
+
+// loadVectorLen loads the vector length from the header with bit 63 masked off.
+// Bit 63 is the static flag (set for .rodata vectors, clear for heap vectors).
+func loadVectorLen(b *ir.Block, headerPtr value.Value) value.Value {
+	headerType := vectorHeaderType()
+	lenPtr := b.NewGetElementPtr(headerType, headerPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	raw := b.NewLoad(irtypes.I64, lenPtr)
+	return b.NewAnd(raw, vectorLenMask)
+}
+
+// loadVectorLenRaw loads the raw vector length from the header with bit 63 intact.
+func loadVectorLenRaw(b *ir.Block, headerPtr value.Value) value.Value {
+	headerType := vectorHeaderType()
+	lenPtr := b.NewGetElementPtr(headerType, headerPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	return b.NewLoad(irtypes.I64, lenPtr)
+}
+
 func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 	typ := c.info.Types[e]
 	if c.typeSubst != nil {
@@ -4182,6 +4212,12 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 		panic(fmt.Sprintf("codegen: array literal type is %T, want Vector instance or Array", typ))
 	}
 	elemLLVM := c.resolveType(elem)
+
+	// Try static .rodata path: all elements must be compile-time constants
+	if consts := c.tryConstantElements(e.Elements, elem, elemLLVM); consts != nil {
+		return c.genStaticVectorLit(int64(len(e.Elements)), elemLLVM, consts)
+	}
+
 	elemSize := int64(c.typeSize(elemLLVM))
 	n := int64(len(e.Elements))
 
@@ -4216,6 +4252,141 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 	}
 
 	return rawPtr // i8*
+}
+
+// tryConstantElements checks if all array literal elements are compile-time constants
+// (int, float, bool, char literals). Returns a slice of LLVM constants or nil if any
+// element is non-constant.
+func (c *Compiler) tryConstantElements(elements []ast.Expr, elemType types.Type, elemLLVM irtypes.Type) []constant.Constant {
+	if len(elements) == 0 {
+		return []constant.Constant{} // empty static vector
+	}
+	consts := make([]constant.Constant, 0, len(elements))
+	for _, expr := range elements {
+		cv := c.tryConstantExpr(expr, elemType, elemLLVM)
+		if cv == nil {
+			return nil
+		}
+		consts = append(consts, cv)
+	}
+	return consts
+}
+
+// tryConstantExpr attempts to evaluate an expression as a compile-time constant.
+// Returns nil if the expression is not a constant literal.
+func (c *Compiler) tryConstantExpr(expr ast.Expr, elemType types.Type, elemLLVM irtypes.Type) constant.Constant {
+	switch e := expr.(type) {
+	case *ast.IntLit:
+		intType, ok := elemLLVM.(*irtypes.IntType)
+		if !ok {
+			intType = irtypes.I64
+		}
+		raw := strings.ReplaceAll(e.Raw, "_", "")
+		val, err := strconv.ParseInt(raw, 0, 64)
+		if err != nil {
+			uval, _ := strconv.ParseUint(raw, 0, 64)
+			return constant.NewInt(intType, int64(uval))
+		}
+		return constant.NewInt(intType, val)
+	case *ast.FloatLit:
+		floatType, ok := elemLLVM.(*irtypes.FloatType)
+		if !ok {
+			floatType = irtypes.Double
+		}
+		raw := strings.ReplaceAll(e.Raw, "_", "")
+		bitSize := 64
+		if floatType == irtypes.Float {
+			bitSize = 32
+		}
+		val, _ := strconv.ParseFloat(raw, bitSize)
+		return constant.NewFloat(floatType, val)
+	case *ast.BoolLit:
+		if e.Value {
+			return constant.NewInt(irtypes.I1, 1)
+		}
+		return constant.NewInt(irtypes.I1, 0)
+	case *ast.CharLit:
+		raw := e.Raw
+		inner := raw[1 : len(raw)-1]
+		var cp int32
+		if len(inner) > 1 && inner[0] == '\\' {
+			switch inner[1] {
+			case 'n':
+				cp = '\n'
+			case 'r':
+				cp = '\r'
+			case 't':
+				cp = '\t'
+			case 'b':
+				cp = '\b'
+			case '\\':
+				cp = '\\'
+			case '\'':
+				cp = '\''
+			case '0':
+				cp = 0
+			default:
+				cp = int32(inner[1])
+			}
+		} else {
+			r, _ := utf8.DecodeRuneInString(inner)
+			cp = int32(r)
+		}
+		return constant.NewInt(irtypes.I32, int64(cp))
+	case *ast.UnaryExpr:
+		// Handle negative literals: -42, -3.14
+		if e.Op == ast.UnaryNeg {
+			inner := c.tryConstantExpr(e.Operand, elemType, elemLLVM)
+			if inner == nil {
+				return nil
+			}
+			switch v := inner.(type) {
+			case *constant.Int:
+				return constant.NewInt(v.Typ, -v.X.Int64())
+			case *constant.Float:
+				neg, _ := v.X.Float64()
+				return constant.NewFloat(v.Typ, -neg)
+			}
+		}
+		return nil
+	}
+	return nil
+}
+
+// genStaticVectorLit emits a static .rodata global for a vector literal with all-constant elements.
+// Vector layout: {i64 len|bit63, i64 cap, [N x elemType] data}
+// Returns i8* pointer to the global.
+func (c *Compiler) genStaticVectorLit(n int64, elemLLVM irtypes.Type, consts []constant.Constant) value.Value {
+	arrType := irtypes.NewArray(uint64(n), elemLLVM)
+
+	// Build the global struct type: {i64, i64, [N x T]}
+	globalType := irtypes.NewStruct(irtypes.I64, irtypes.I64, arrType)
+
+	// Length with static flag (bit 63) set
+	staticLen := n | math.MinInt64
+
+	// Build array constant
+	arrConst := constant.NewArray(arrType, consts...)
+
+	init := constant.NewStruct(globalType,
+		constant.NewInt(irtypes.I64, staticLen), // len | bit63
+		constant.NewInt(irtypes.I64, n),         // cap
+		arrConst,                                // data
+	)
+
+	var globalName string
+	if c.compilingModule != "" {
+		globalName = fmt.Sprintf(".arr.__mod_%s.%d", c.compilingModule, c.moduleArrCounter)
+		c.moduleArrCounter++
+	} else {
+		globalName = fmt.Sprintf(".arr.%d", c.arrCounter)
+		c.arrCounter++
+	}
+	global := c.module.NewGlobalDef(globalName, init)
+	global.Immutable = true
+	global.Linkage = enum.LinkagePrivate
+
+	return c.block.NewBitCast(global, irtypes.I8Ptr)
 }
 
 // genFixedArrayLit generates a stack-allocated fixed-size array literal.
@@ -4505,12 +4676,10 @@ func (c *Compiler) genVectorIndex(e *ast.IndexExpr, elemType types.Type) value.V
 	idx := c.genExpr(e.Index)
 	elemLLVM := c.resolveType(elemType)
 
-	// Bounds check: load len, compare index
+	// Bounds check: load len (masked), compare index
 	headerType := vectorHeaderType()
 	headerPtr := c.block.NewBitCast(slicePtr, irtypes.NewPointer(headerType))
-	lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	length := c.block.NewLoad(irtypes.I64, lenPtr)
+	length := loadVectorLen(c.block, headerPtr)
 
 	inBounds := c.block.NewICmp(enum.IPredULT, idx, length)
 	okBlock := c.newBlock("index.ok")

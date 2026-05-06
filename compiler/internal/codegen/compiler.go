@@ -98,6 +98,12 @@ type Compiler struct {
 	// module string constant names are stable (independent of main code's strCounter).
 	moduleStrCounter int
 
+	// Array literal counter for unique global names (.rodata static vectors)
+	arrCounter int
+
+	// Per-module array literal counter for stable names within module compilations.
+	moduleArrCounter int
+
 	// Cache for C-string globals (null-terminated, used for panic messages etc.).
 	// Keyed by content, returns the ir.Global. This deduplicates strings like
 	// "out of memory" and "string index out of bounds" so they have stable names
@@ -1169,6 +1175,7 @@ func (c *Compiler) declareIntrinsics() {
 	c.defineVectorRemoveFunc()
 	c.defineVectorDropFunc()
 	c.defineChannelDropFunc() // B0163: channel scope-exit drop
+	c.defineVectorCOWFunc()
 
 	// String trim/split/case/repeat (codegen-emitted LLVM IR)
 	c.defineStringTrimFunc()
@@ -2595,12 +2602,10 @@ func (c *Compiler) defineVectorPushFunc() {
 	four64 := constant.NewInt(irtypes.I64, 4)
 	headerSizeConst := constant.NewInt(irtypes.I64, int64(vectorHeaderSize))
 
-	// Entry: load len and cap, check if growth needed
+	// Entry: load len (masked) and cap, check if growth needed
 	entry := fn.NewBlock(".entry")
 	hdrPtr := entry.NewBitCast(sliceParam, irtypes.NewPointer(headerType))
-	lenPtr := entry.NewGetElementPtr(headerType, hdrPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	vecLen := entry.NewLoad(irtypes.I64, lenPtr)
+	vecLen := loadVectorLen(entry, hdrPtr)
 	capPtr := entry.NewGetElementPtr(headerType, hdrPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 	vecCap := entry.NewLoad(irtypes.I64, capPtr)
@@ -2677,12 +2682,12 @@ func (c *Compiler) defineVectorPopFunc() {
 	one64 := constant.NewInt(irtypes.I64, 1)
 	headerSizeConst := constant.NewInt(irtypes.I64, int64(vectorHeaderSize))
 
-	// Entry: load len, check if empty
+	// Entry: load len (masked), check if empty
 	entry := fn.NewBlock(".entry")
 	hdrPtr := entry.NewBitCast(sliceParam, irtypes.NewPointer(headerType))
+	vecLen := loadVectorLen(entry, hdrPtr)
 	lenPtr := entry.NewGetElementPtr(headerType, hdrPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	vecLen := entry.NewLoad(irtypes.I64, lenPtr)
 	isEmpty := entry.NewICmp(enum.IPredEQ, vecLen, zero64)
 
 	emptyBlk := fn.NewBlock("empty")
@@ -2725,12 +2730,10 @@ func (c *Compiler) defineVectorContainsFunc() {
 	notFoundVal := constant.NewInt(irtypes.I8, 0)
 	headerSizeConst := constant.NewInt(irtypes.I64, int64(vectorHeaderSize))
 
-	// Entry: load len from header, init loop counter
+	// Entry: load len (masked) from header, init loop counter
 	entry := fn.NewBlock(".entry")
 	hdrPtr := entry.NewBitCast(sliceParam, irtypes.NewPointer(headerType))
-	lenPtr := entry.NewGetElementPtr(headerType, hdrPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	vecLen := entry.NewLoad(irtypes.I64, lenPtr)
+	vecLen := loadVectorLen(entry, hdrPtr)
 	iAlloca := entry.NewAlloca(irtypes.I64)
 	entry.NewStore(zero64, iAlloca)
 
@@ -2799,12 +2802,12 @@ func (c *Compiler) defineVectorRemoveFunc() {
 	one64 := constant.NewInt(irtypes.I64, 1)
 	headerSizeConst := constant.NewInt(irtypes.I64, int64(vectorHeaderSize))
 
-	// Entry: load len, bounds check
+	// Entry: load len (masked), bounds check
 	entry := fn.NewBlock(".entry")
 	hdrPtr := entry.NewBitCast(sliceParam, irtypes.NewPointer(headerType))
+	vecLen := loadVectorLen(entry, hdrPtr)
 	lenPtr := entry.NewGetElementPtr(headerType, hdrPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	vecLen := entry.NewLoad(irtypes.I64, lenPtr)
 
 	isNeg := entry.NewICmp(enum.IPredSLT, indexParam, zero64)
 	isOver := entry.NewICmp(enum.IPredSGE, indexParam, vecLen)
@@ -2851,7 +2854,8 @@ func (c *Compiler) defineVectorRemoveFunc() {
 
 // defineVectorDropFunc emits an LLVM IR function that frees a vector's heap buffer.
 // Vector layout: {i64 len, i64 cap, [data...]} — a single allocation via pal_alloc.
-// Drop just needs to null-check and free the raw i8* pointer.
+// Drop null-checks, then checks bit 63 of len (static flag) — static .rodata vectors
+// must not be freed.
 func (c *Compiler) defineVectorDropFunc() {
 	thisParam := ir.NewParam("this", irtypes.I8Ptr)
 	fn := c.module.NewFunc("Vector.drop", irtypes.Void, thisParam)
@@ -2860,9 +2864,18 @@ func (c *Compiler) defineVectorDropFunc() {
 
 	// Null-check: zero-initialized values (from error handler fallthrough) may be null
 	isNull := entry.NewICmp(enum.IPredEQ, thisParam, constant.NewNull(irtypes.I8Ptr))
-	freeBlk := fn.NewBlock("free")
+	checkStatic := fn.NewBlock("check_static")
 	doneBlk := fn.NewBlock("done")
-	entry.NewCondBr(isNull, doneBlk, freeBlk)
+	entry.NewCondBr(isNull, doneBlk, checkStatic)
+
+	// Check bit 63 of len: if set, this is a static .rodata vector — don't free
+	headerType := vectorHeaderType()
+	hdrPtr := checkStatic.NewBitCast(thisParam, irtypes.NewPointer(headerType))
+	rawLen := loadVectorLenRaw(checkStatic, hdrPtr)
+	bit63 := checkStatic.NewAnd(rawLen, constant.NewInt(irtypes.I64, math.MinInt64))
+	isStatic := checkStatic.NewICmp(enum.IPredNE, bit63, constant.NewInt(irtypes.I64, 0))
+	freeBlk := fn.NewBlock("free")
+	checkStatic.NewCondBr(isStatic, doneBlk, freeBlk)
 
 	freeBlk.NewCall(c.palFree, thisParam)
 	freeBlk.NewBr(doneBlk)
@@ -2930,6 +2943,69 @@ func (c *Compiler) defineChannelDropFunc() {
 	doneBlk.NewRet(nil)
 
 	c.funcs["Channel.drop"] = fn
+}
+
+// defineVectorCOWFunc emits promise_vector_cow(i8* slice, i64 elem_size) -> i8*.
+// If the vector is static (.rodata, bit 63 of len set), allocates a heap copy
+// with the static flag cleared. Otherwise returns the same pointer.
+func (c *Compiler) defineVectorCOWFunc() {
+	sliceParam := ir.NewParam("slice", irtypes.I8Ptr)
+	elemSizeParam := ir.NewParam("elem_size", irtypes.I64)
+	fn := c.module.NewFunc("promise_vector_cow", irtypes.I8Ptr,
+		sliceParam, elemSizeParam)
+
+	headerType := vectorHeaderType()
+	headerSizeConst := constant.NewInt(irtypes.I64, int64(vectorHeaderSize))
+
+	entry := fn.NewBlock(".entry")
+	hdrPtr := entry.NewBitCast(sliceParam, irtypes.NewPointer(headerType))
+	rawLen := loadVectorLenRaw(entry, hdrPtr)
+	bit63 := entry.NewAnd(rawLen, constant.NewInt(irtypes.I64, math.MinInt64))
+	isStatic := entry.NewICmp(enum.IPredNE, bit63, constant.NewInt(irtypes.I64, 0))
+
+	copyBlk := fn.NewBlock("cow_copy")
+	doneBlk := fn.NewBlock("done")
+	entry.NewCondBr(isStatic, copyBlk, doneBlk)
+
+	// COW copy: allocate heap buffer, memcpy data, set len (no bit 63) and cap
+	realLen := copyBlk.NewAnd(rawLen, vectorLenMask)
+	dataSize := copyBlk.NewMul(realLen, elemSizeParam)
+	allocSize := copyBlk.NewAdd(headerSizeConst, dataSize)
+	newPtr := copyBlk.NewCall(c.palAlloc, allocSize)
+	isNull := copyBlk.NewICmp(enum.IPredEQ, newPtr, constant.NewNull(irtypes.I8Ptr))
+
+	oomBlk := fn.NewBlock("oom")
+	initBlk := fn.NewBlock("init")
+	copyBlk.NewCondBr(isNull, oomBlk, initBlk)
+
+	panicGlobal := c.getCStrGlobal("out of memory")
+	msgPtr := oomBlk.NewGetElementPtr(panicGlobal.ContentType, panicGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	oomBlk.NewCall(c.funcs["promise_panic"], msgPtr)
+	oomBlk.NewUnreachable()
+
+	// Store len (without static flag) and cap, then memcpy data
+	newHdrPtr := initBlk.NewBitCast(newPtr, irtypes.NewPointer(headerType))
+	newLenPtr := initBlk.NewGetElementPtr(headerType, newHdrPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	initBlk.NewStore(realLen, newLenPtr)
+	newCapPtr := initBlk.NewGetElementPtr(headerType, newHdrPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	initBlk.NewStore(realLen, newCapPtr)
+
+	// memcpy element data
+	srcData := initBlk.NewGetElementPtr(irtypes.I8, sliceParam, headerSizeConst)
+	dstData := initBlk.NewGetElementPtr(irtypes.I8, newPtr, headerSizeConst)
+	initBlk.NewCall(c.funcs["llvm.memcpy"], dstData, srcData, dataSize, constant.False)
+	initBlk.NewBr(doneBlk)
+
+	// Merge: phi between original (heap) and new (cow'd) pointer
+	result := doneBlk.NewPhi(
+		&ir.Incoming{X: sliceParam, Pred: entry},
+		&ir.Incoming{X: newPtr, Pred: initBlk})
+	doneBlk.NewRet(result)
+
+	c.funcs["promise_vector_cow"] = fn
 }
 
 // defineBoolToStringFunc emits an LLVM IR function that converts a boolean (i8)
@@ -3647,9 +3723,10 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo, extraInstances []*typ
 	c.info = modInfo.SemaInfo
 	c.file = modInfo.File
 	c.compilingModule = irName
-	// Reset per-module string counter so module string constant names are stable
-	// (independent of how many string constants main code has emitted so far).
+	// Reset per-module counters so module constant names are stable
+	// (independent of how many constants main code has emitted so far).
 	c.moduleStrCounter = 0
+	c.moduleArrCounter = 0
 
 	modFile := modInfo.File
 

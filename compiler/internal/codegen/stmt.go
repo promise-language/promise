@@ -1414,12 +1414,16 @@ func (c *Compiler) genIncDecTarget(target ast.Expr, isInc bool) {
 			slicePtr := c.genExpr(t.Target)
 			idx := c.genExpr(t.Index)
 			elemLLVM := c.resolveType(elem)
+			elemSize := int64(c.typeSize(elemLLVM))
+
+			// COW: if static (.rodata), copy to heap first (T0062)
+			cowSlice := c.block.NewCall(c.funcs["promise_vector_cow"],
+				slicePtr, constant.NewInt(irtypes.I64, elemSize))
+			c.storeBackSlicePtr(t.Target, cowSlice)
 
 			headerType := vectorHeaderType()
-			headerPtr := c.block.NewBitCast(slicePtr, irtypes.NewPointer(headerType))
-			lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-			length := c.block.NewLoad(irtypes.I64, lenPtr)
+			headerPtr := c.block.NewBitCast(cowSlice, irtypes.NewPointer(headerType))
+			length := loadVectorLen(c.block, headerPtr)
 			inBounds := c.block.NewICmp(enum.IPredULT, idx, length)
 			okBlock := c.newBlock("incdec.index.ok")
 			panicBlock := c.newBlock("incdec.index.oob")
@@ -1431,7 +1435,7 @@ func (c *Compiler) genIncDecTarget(target ast.Expr, isInc bool) {
 			c.block.NewUnreachable()
 
 			c.block = okBlock
-			dataBase := c.block.NewGetElementPtr(irtypes.I8, slicePtr,
+			dataBase := c.block.NewGetElementPtr(irtypes.I8, cowSlice,
 				constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
 			dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
 			elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, idx)
@@ -2986,13 +2990,17 @@ func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Ty
 	slicePtr := c.genExpr(target.Target)
 	idx := c.genExpr(target.Index)
 	elemLLVM := c.resolveType(elemType)
+	elemSize := int64(c.typeSize(elemLLVM))
 
-	// Bounds check
+	// COW: if static (.rodata), copy to heap first (T0062)
+	cowSlice := c.block.NewCall(c.funcs["promise_vector_cow"],
+		slicePtr, constant.NewInt(irtypes.I64, elemSize))
+	c.storeBackSlicePtr(target.Target, cowSlice)
+
+	// Bounds check (masked len)
 	headerType := vectorHeaderType()
-	headerPtr := c.block.NewBitCast(slicePtr, irtypes.NewPointer(headerType))
-	lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	length := c.block.NewLoad(irtypes.I64, lenPtr)
+	headerPtr := c.block.NewBitCast(cowSlice, irtypes.NewPointer(headerType))
+	length := loadVectorLen(c.block, headerPtr)
 
 	inBounds := c.block.NewICmp(enum.IPredULT, idx, length)
 	okBlock := c.newBlock("indexassign.ok")
@@ -3005,7 +3013,7 @@ func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Ty
 	c.block.NewUnreachable()
 
 	c.block = okBlock
-	dataBase := c.block.NewGetElementPtr(irtypes.I8, slicePtr,
+	dataBase := c.block.NewGetElementPtr(irtypes.I8, cowSlice,
 		constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
 	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
 	elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, idx)
@@ -3057,7 +3065,13 @@ func (c *Compiler) genCompoundIndexAssign(target *ast.IndexExpr, op ast.AssignOp
 					if c.info.AutoPropagateExprs[valueExpr] {
 						val = c.genAutoPropagateValue(val)
 					}
-					c.genVectorCompoundAssign(slicePtr, idx, elem, op, val)
+					// COW: if static (.rodata), copy to heap first (T0062)
+					elemLLVM := c.resolveType(elem)
+					elemSize := int64(c.typeSize(elemLLVM))
+					cowSlice := c.block.NewCall(c.funcs["promise_vector_cow"],
+						slicePtr, constant.NewInt(irtypes.I64, elemSize))
+					c.storeBackSlicePtr(target.Target, cowSlice)
+					c.genVectorCompoundAssign(cowSlice, idx, elem, op, val)
 					return
 				}
 			} else {
@@ -3127,9 +3141,7 @@ func (c *Compiler) genVectorCompoundAssign(slicePtr, idx value.Value, elemType t
 
 	headerType := vectorHeaderType()
 	headerPtr := c.block.NewBitCast(slicePtr, irtypes.NewPointer(headerType))
-	lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	length := c.block.NewLoad(irtypes.I64, lenPtr)
+	length := loadVectorLen(c.block, headerPtr)
 
 	inBounds := c.block.NewICmp(enum.IPredULT, idx, length)
 	okBlock := c.newBlock("slicecomp.ok")
@@ -3188,6 +3200,17 @@ func (c *Compiler) genSliceAssign(target *ast.SliceExpr, val value.Value) {
 		instancePtr = targetVal
 	} else {
 		instancePtr = c.extractInstancePtr(targetVal)
+	}
+
+	// COW: if vector is static (.rodata), copy to heap first (T0062).
+	// Must be done at the call site because [:]=  modifies this in-place
+	// and the method's COW on individual element writes won't propagate back.
+	if vecElem, isVec := types.AsVector(targetType); isVec {
+		elemLLVM := c.resolveType(vecElem)
+		elemSize := int64(c.typeSize(elemLLVM))
+		instancePtr = c.block.NewCall(c.funcs["promise_vector_cow"],
+			instancePtr, constant.NewInt(irtypes.I64, elemSize))
+		c.storeBackSlicePtr(target.Target, instancePtr)
 	}
 
 	c.block.NewCall(fn, instancePtr, low, high, val)
@@ -3306,12 +3329,10 @@ func (c *Compiler) uniqueLocalName(name string) string {
 func (c *Compiler) genForInVector(s *ast.ForInStmt, slicePtr value.Value, elemType types.Type) {
 	elemLLVM := c.resolveType(elemType)
 
-	// Load length from header
+	// Load length from header (masked)
 	headerType := vectorHeaderType()
 	headerPtr := c.block.NewBitCast(slicePtr, irtypes.NewPointer(headerType))
-	lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	length := c.block.NewLoad(irtypes.I64, lenPtr)
+	length := loadVectorLen(c.block, headerPtr)
 
 	// Counter alloca
 	counterAlloca := c.block.NewAlloca(irtypes.I64)
@@ -3664,9 +3685,7 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapVal value.Value, keyType, va
 	// Get length from keys vector
 	headerType := vectorHeaderType()
 	headerPtr := c.block.NewBitCast(keysVec, irtypes.NewPointer(headerType))
-	lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	length := c.block.NewLoad(irtypes.I64, lenPtr)
+	length := loadVectorLen(c.block, headerPtr)
 
 	// Counter alloca
 	counterAlloca := c.block.NewAlloca(irtypes.I64)

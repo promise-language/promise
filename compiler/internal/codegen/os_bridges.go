@@ -356,10 +356,9 @@ func (c *Compiler) defineSpawnBody(fn *ir.Func) {
 	// Convert program string to C string
 	programCStr := c.stringToCStr(entry, programParam)
 
-	// Load vector length from header
+	// Load vector length from header (masked — bit 63 is static flag)
 	hdrPtr := entry.NewBitCast(argsParam, irtypes.NewPointer(vectorHdrType))
-	lenField := entry.NewGetElementPtr(vectorHdrType, hdrPtr, zero32, zero32)
-	argsCount := entry.NewLoad(irtypes.I64, lenField)
+	argsCount := loadVectorLen(entry, hdrPtr)
 
 	// Allocate argv array: (1 + argsCount + 1) * ptrSize
 	totalSlots := entry.NewAdd(argsCount, constant.NewInt(irtypes.I64, 2))
@@ -652,10 +651,9 @@ func (c *Compiler) defineSpawnStreamingBody(fn *ir.Func) {
 	// Convert program string to C string
 	programCStr := c.stringToCStr(entry, programParam)
 
-	// Load vector length from header
+	// Load vector length from header (masked — bit 63 is static flag)
 	hdrPtr := entry.NewBitCast(argsParam, irtypes.NewPointer(vectorHdrType))
-	lenField := entry.NewGetElementPtr(vectorHdrType, hdrPtr, zero32, zero32)
-	argsCount := entry.NewLoad(irtypes.I64, lenField)
+	argsCount := loadVectorLen(entry, hdrPtr)
 
 	// Allocate argv array: (1 + argsCount + 1) * ptrSize
 	totalSlots := entry.NewAdd(argsCount, constant.NewInt(irtypes.I64, 2))

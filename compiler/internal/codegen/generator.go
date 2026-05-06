@@ -607,9 +607,7 @@ func (c *Compiler) genYieldDelegateVector(vecPtr value.Value, elemType types.Typ
 
 	headerType := vectorHeaderType()
 	headerPtr := c.block.NewBitCast(vecPtr, irtypes.NewPointer(headerType))
-	lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	length := c.block.NewLoad(irtypes.I64, lenPtr)
+	length := loadVectorLen(c.block, headerPtr)
 
 	counterAlloca := c.block.NewAlloca(irtypes.I64)
 	c.block.NewStore(constant.NewInt(irtypes.I64, 0), counterAlloca)

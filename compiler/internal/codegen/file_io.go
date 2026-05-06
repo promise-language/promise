@@ -716,9 +716,7 @@ func (c *Compiler) defineDirCloseHandleBody(fn *ir.Func) {
 func extractVectorDataLen(block *ir.Block, vecPtr value.Value) (dataPtr value.Value, dataLen value.Value) {
 	headerType := vectorHeaderType() // {i64, i64}
 	headerPtr := block.NewBitCast(vecPtr, irtypes.NewPointer(headerType))
-	lenPtr := block.NewGetElementPtr(headerType, headerPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	dataLen = block.NewLoad(irtypes.I64, lenPtr)
+	dataLen = loadVectorLen(block, headerPtr)
 	dataPtr = block.NewGetElementPtr(irtypes.I8, vecPtr,
 		constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
 	return

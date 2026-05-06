@@ -1,0 +1,154 @@
+// Tests for static .rodata vector literals (T0062).
+// Vectors with all compile-time constant elements are stored in .rodata
+// instead of heap-allocating. Mutation triggers copy-on-write.
+test_static_int_vector() `test {
+  int[] v = [1, 2, 3];
+  assert(v.len == 3, "len");
+  assert(v[0] == 1, "v[0]");
+  assert(v[1] == 2, "v[1]");
+  assert(v[2] == 3, "v[2]");
+}
+
+test_static_float_vector() `test {
+  f64[] v = [1.5, 2.5, 3.5];
+  assert(v.len == 3, "len");
+  assert(v[0] == 1.5, "v[0]");
+  assert(v[1] == 2.5, "v[1]");
+  assert(v[2] == 3.5, "v[2]");
+}
+
+test_static_bool_vector() `test {
+  bool[] v = [true, false, true];
+  assert(v.len == 3, "len");
+  assert(v[0] == true, "v[0]");
+  assert(v[1] == false, "v[1]");
+  assert(v[2] == true, "v[2]");
+}
+
+test_static_char_vector() `test {
+  char[] v = ['a', 'b', 'c'];
+  assert(v.len == 3, "len");
+  assert(v[0] == 'a', "v[0]");
+  assert(v[1] == 'b', "v[1]");
+  assert(v[2] == 'c', "v[2]");
+}
+
+test_static_negative_int_vector() `test {
+  int[] v = [-1, -2, 0, 3];
+  assert(v.len == 4, "len");
+  assert(v[0] == -1, "v[0]");
+  assert(v[1] == -2, "v[1]");
+  assert(v[2] == 0, "v[2]");
+  assert(v[3] == 3, "v[3]");
+}
+
+test_static_empty_vector() `test {
+  int[] v = [];
+  assert(v.len == 0, "empty len");
+  v.push(42);
+  assert(v.len == 1, "push len");
+  assert(v[0] == 42, "v[0]");
+}
+
+test_cow_push() `test {
+  int[] v = [10, 20, 30];
+  v.push(40);
+  assert(v.len == 4, "len");
+  assert(v[0] == 10, "v[0]");
+  assert(v[3] == 40, "v[3]");
+}
+
+test_cow_pop() `test {
+  int[] v = [10, 20, 30];
+  if p := v.pop() {
+    assert(p == 30, "popped");
+  }
+  assert(v.len == 2, "len");
+  assert(v[0] == 10, "v[0]");
+  assert(v[1] == 20, "v[1]");
+}
+
+test_cow_remove() `test {
+  int[] v = [10, 20, 30];
+  v.remove(1);
+  assert(v.len == 2, "len");
+  assert(v[0] == 10, "v[0]");
+  assert(v[1] == 30, "v[1]");
+}
+
+test_cow_index_assign() `test {
+  int[] v = [1, 2, 3];
+  v[0] = 99;
+  assert(v[0] == 99, "v[0]");
+  assert(v[1] == 2, "v[1]");
+  assert(v[2] == 3, "v[2]");
+}
+
+test_cow_compound_assign() `test {
+  int[] v = [10, 20, 30];
+  v[1] = v[1] + 5;
+  assert(v[1] == 25, "v[1]");
+}
+
+test_static_for_in() `test {
+  int[] v = [1, 2, 3, 4, 5];
+  int sum = 0;
+  for x in v {
+    sum = sum + x;
+  }
+  assert(sum == 15, "sum");
+}
+
+test_static_for_in_with_index() `test {
+  int[] v = [10, 20, 30];
+  int index_sum = 0;
+  int val_sum = 0;
+  for i, x in v {
+    index_sum = index_sum + i;
+    val_sum = val_sum + x;
+  }
+  assert(index_sum == 3, "index_sum");
+  assert(val_sum == 60, "val_sum");
+}
+
+test_static_contains() `test {
+  int[] v = [10, 20, 30];
+  assert(v.contains(20), "contains 20");
+  assert(!v.contains(99), "not contains 99");
+}
+
+test_cow_multiple_pushes() `test {
+  int[] v = [1];
+  v.push(2);
+  v.push(3);
+  v.push(4);
+  v.push(5);
+  assert(v.len == 5, "len");
+  assert(v[4] == 5, "v[4]");
+}
+
+test_static_i32_vector() `test {
+  i32[] v = [1i32, 2i32, 3i32];
+  assert(v.len == 3, "len");
+  assert(v[0] == 1i32, "v[0]");
+  assert(v[2] == 3i32, "v[2]");
+}
+
+test_non_constant_elements() `test {
+  int x = 42;
+  int[] v = [x, x + 1];
+  assert(v.len == 2, "len");
+  assert(v[0] == 42, "v[0]");
+  assert(v[1] == 43, "v[1]");
+  v.push(44);
+  assert(v.len == 3, "push len");
+}
+
+test_static_slice() `test {
+  int[] v = [10, 20, 30, 40, 50];
+  int[] s = v[1:4];
+  assert(s.len == 3, "slice len");
+  assert(s[0] == 20, "s[0]");
+  assert(s[1] == 30, "s[1]");
+  assert(s[2] == 40, "s[2]");
+}

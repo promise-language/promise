@@ -3596,13 +3596,29 @@ func TestOptionalVariable(t *testing.T) {
 
 func TestArrayLiteral(t *testing.T) {
 	ir := generateIR(t, `main() { x := [1, 2, 3]; }`)
-	// Should call malloc for heap allocation
+	// T0062: all-constant vector literals use static .rodata globals
+	assertContains(t, ir, "@.arr.0 = private constant")
+	assertContains(t, ir, "[3 x i64] [i64 1, i64 2, i64 3]")
+}
+
+func TestArrayLiteralNonConstant(t *testing.T) {
+	ir := generateIR(t, `main() { int x = 1; int[] v = [x, x + 1]; }`)
+	// Non-constant elements should heap-allocate
 	assertContains(t, ir, "call i8* @pal_alloc(i64")
-	// Should store len and cap
-	assertContains(t, ir, "store i64 3")
-	// Should store elements
-	assertContains(t, ir, "store i64 1")
-	assertContains(t, ir, "store i64 2")
+}
+
+func TestStaticVectorDrop(t *testing.T) {
+	ir := generateIR(t, `main() { x := [1, 2, 3]; }`)
+	// Drop function should check bit 63 before freeing
+	assertContains(t, ir, "define void @Vector.drop(")
+	assertContains(t, ir, "check_static")
+}
+
+func TestStaticVectorCOW(t *testing.T) {
+	ir := generateIR(t, `main() { x := [1, 2, 3]; x.push(4); }`)
+	// Should call promise_vector_cow before push
+	assertContains(t, ir, "call i8* @promise_vector_cow(")
+	assertContains(t, ir, "call i8* @promise_vector_push(")
 }
 
 func TestArrayIndex(t *testing.T) {

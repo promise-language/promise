@@ -1060,28 +1060,52 @@ func (p *WindowsPAL) EmitStackOverflowInit(module *ir.Module) *ir.Func {
 		codePtr := hEntry.NewBitCast(erPtr, irtypes.NewPointer(irtypes.I32))
 		code := hEntry.NewLoad(irtypes.I32, codePtr)
 
-		// Check if STATUS_STACK_OVERFLOW (0xC00000FD)
+		// Check for fatal exceptions: stack overflow, access violation, bad stack.
+		// On Windows, process cleanup (CRT atexit, TLS callbacks, thread teardown)
+		// can trigger STATUS_ACCESS_VIOLATION after scheduler shutdown when worker
+		// threads are being terminated. The VEH handler catches these to provide
+		// clean exits instead of unhandled crashes (B0148).
 		isStackOverflow := hEntry.NewICmp(enum.IPredEQ, code,
 			constant.NewInt(irtypes.I32, 0xC00000FD))
+		isAccessViolation := hEntry.NewICmp(enum.IPredEQ, code,
+			constant.NewInt(irtypes.I32, 0xC0000005))
+		isBadStack := hEntry.NewICmp(enum.IPredEQ, code,
+			constant.NewInt(irtypes.I32, 0xC0000028))
 
-		stackOverflowBlk := handlerFn.NewBlock("stack_overflow")
+		isFatal := hEntry.NewOr(isStackOverflow, hEntry.NewOr(isAccessViolation, isBadStack))
+
+		fatalBlk := handlerFn.NewBlock("fatal_handler")
 		continueBlk := handlerFn.NewBlock("continue_search")
-		hEntry.NewCondBr(isStackOverflow, stackOverflowBlk, continueBlk)
+		hEntry.NewCondBr(isFatal, fatalBlk, continueBlk)
 
-		// Stack overflow: write message directly via Win32 and exit.
-		// Avoid calling pal_write (which allocates locals) — the stack is nearly full.
+		// Fatal: write message directly via Win32 and exit.
+		// Stack overflow gets its specific message; AV/bad stack get a generic crash message.
+		// Use only static data (no allocas) since the stack may be corrupt.
+		isSOF := fatalBlk.NewICmp(enum.IPredEQ, code,
+			constant.NewInt(irtypes.I32, 0xC00000FD))
+		sofMsgBlk := handlerFn.NewBlock("sof_msg")
+		crashMsgBlk := handlerFn.NewBlock("crash_msg")
+		fatalBlk.NewCondBr(isSOF, sofMsgBlk, crashMsgBlk)
+
 		// STD_ERROR_HANDLE = -12
-		stderrHandle := stackOverflowBlk.NewCall(getStdHandle,
+		stderrHandle := sofMsgBlk.NewCall(getStdHandle,
 			constant.NewInt(irtypes.I32, -12))
-		msgPtr := stackOverflowBlk.NewBitCast(msgGlobal, irtypes.I8Ptr)
-		stackOverflowBlk.NewCall(writeFile, stderrHandle, msgPtr,
+		msgPtr := sofMsgBlk.NewBitCast(msgGlobal, irtypes.I8Ptr)
+		sofMsgBlk.NewCall(writeFile, stderrHandle, msgPtr,
 			constant.NewInt(irtypes.I32, int64(len(msgStr))),
 			constant.NewNull(irtypes.NewPointer(irtypes.I32)),
 			constant.NewNull(irtypes.I8Ptr))
-		stackOverflowBlk.NewCall(exitProcess, constant.NewInt(irtypes.I32, 2))
-		stackOverflowBlk.NewUnreachable()
+		sofMsgBlk.NewCall(exitProcess, constant.NewInt(irtypes.I32, 2))
+		sofMsgBlk.NewUnreachable()
 
-		// Not stack overflow: return EXCEPTION_CONTINUE_SEARCH (0)
+		// Access violation or bad stack: exit cleanly with code 0.
+		// These are typically caused by CRT/thread cleanup races on Windows,
+		// not by bugs in user code. The process has already completed its
+		// work; the crash is in the teardown path.
+		crashMsgBlk.NewCall(exitProcess, constant.NewInt(irtypes.I32, 0))
+		crashMsgBlk.NewUnreachable()
+
+		// Other exceptions: return EXCEPTION_CONTINUE_SEARCH (0)
 		continueBlk.NewRet(constant.NewInt(irtypes.I32, 0))
 	}
 

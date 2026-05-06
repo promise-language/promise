@@ -2200,7 +2200,15 @@ func (c *Compiler) wrapMainWithScheduler() {
 		entry.NewCall(c.funcs["promise_sched_run_until_main"], g0)
 		entry.NewCall(c.funcs["promise_sched_shutdown"])
 	}
-	entry.NewRet(constant.NewInt(irtypes.I32, 0))
+
+	// On Windows, call ExitProcess(0) to avoid CRT cleanup crashes during
+	// thread teardown (STATUS_ACCESS_VIOLATION in TLS callbacks). B0148.
+	if c.isWindows && !c.isWasm {
+		entry.NewCall(c.palExit, constant.NewInt(irtypes.I32, 0))
+		entry.NewUnreachable()
+	} else {
+		entry.NewRet(constant.NewInt(irtypes.I32, 0))
+	}
 }
 
 // defineSchedRunUntilMainFunc emits @promise_sched_run_until_main(i8* %g0) → void

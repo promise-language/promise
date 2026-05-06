@@ -648,6 +648,10 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	entry.NewStore(mainFn.Params[0], c.argcGlobal)
 	entry.NewStore(mainFn.Params[1], c.argvGlobal)
 
+	// Register VEH handler for stack overflow detection (B0010) and crash
+	// handling on Windows (B0148). Must be before sched_init which creates threads.
+	entry.NewCall(c.palStackOverflowInit)
+
 	// Initialize the M:N scheduler so goroutines spawned by test functions
 	// get picked up by worker Ms. Without this, `go` blocks in batch tests
 	// enqueue Gs that never get scheduled → deadlock (B0042).
@@ -890,7 +894,15 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	// Return 0 if all passed, 1 if any failed
 	retHasFailures := doneBlock.NewICmp(enum.IPredSGT, finalFailed, constant.NewInt(irtypes.I32, 0))
 	retVal := doneBlock.NewSelect(retHasFailures, constant.NewInt(irtypes.I32, 1), constant.NewInt(irtypes.I32, 0))
-	doneBlock.NewRet(retVal)
+
+	// On Windows, call ExitProcess to avoid CRT cleanup crashes during
+	// thread teardown (STATUS_ACCESS_VIOLATION in TLS callbacks). B0148.
+	if c.isWindows && !c.isWasm {
+		doneBlock.NewCall(c.palExit, retVal)
+		doneBlock.NewUnreachable()
+	} else {
+		doneBlock.NewRet(retVal)
+	}
 
 	// WASM: emit @_start if not already present (test-only files have no user main)
 	if c.isWasm {

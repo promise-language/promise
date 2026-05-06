@@ -1,7 +1,8 @@
 use path;
 
 test_join_basic() `test {
-  assert(path.join("foo", "bar") == "foo/bar", "join basic");
+  string s = Platform.path_separator;
+  assert(path.join("foo", "bar") == "foo" + s + "bar", "join basic");
 }
 
 test_join_trailing_slash() `test {
@@ -17,11 +18,13 @@ test_join_empty_child() `test {
 }
 
 test_join_three() `test {
-  assert(path.join("home", "user", "docs") == "home/user/docs", "join three segments");
+  string s = Platform.path_separator;
+  assert(path.join("home", "user", "docs") == "home" + s + "user" + s + "docs", "join three segments");
 }
 
 test_join_four() `test {
-  assert(path.join("/", "usr", "local", "bin") == "/usr/local/bin", "join four segments");
+  string s = Platform.path_separator;
+  assert(path.join("/", "usr", "local", "bin") == "/usr" + s + "local" + s + "bin", "join four segments");
 }
 
 test_file_name() `test {
@@ -34,6 +37,11 @@ test_file_name_trailing_slash() `test {
 
 test_parent() `test {
   assert(path.parent("/usr/local/bin") == "/usr/local", "parent");
+}
+
+test_parent_root_file() `test {
+  string s = Platform.path_separator;
+  assert(path.parent("/file.txt") == s, "parent root file");
 }
 
 test_parent_bare() `test {
@@ -67,9 +75,10 @@ test_is_relative() `test {
 }
 
 test_split_absolute() `test {
+  string s = Platform.path_separator;
   string[] parts = path.split("/usr/local/bin");
   assert(parts.len == 4, "split abs len");
-  assert(parts[0] == "/", "split root");
+  assert(parts[0] == s, "split root");
   assert(parts[1] == "usr", "split usr");
   assert(parts[2] == "local", "split local");
   assert(parts[3] == "bin", "split bin");
@@ -88,15 +97,18 @@ test_split_empty() `test {
 }
 
 test_normalize_dotdot() `test {
-  assert(path.normalize("/a/b/../c") == "/a/c", "normalize dotdot");
+  string s = Platform.path_separator;
+  assert(path.normalize("/a/b/../c") == s + "a" + s + "c", "normalize dotdot");
 }
 
 test_normalize_dot() `test {
-  assert(path.normalize("./a/./b") == "a/b", "normalize dot");
+  string s = Platform.path_separator;
+  assert(path.normalize("./a/./b") == "a" + s + "b", "normalize dot");
 }
 
 test_normalize_redundant() `test {
-  assert(path.normalize("a//b///c") == "a/b/c", "normalize redundant separators");
+  string s = Platform.path_separator;
+  assert(path.normalize("a//b///c") == "a" + s + "b" + s + "c", "normalize redundant separators");
 }
 
 test_normalize_empty() `test {
@@ -104,51 +116,58 @@ test_normalize_empty() `test {
 }
 
 test_normalize_root() `test {
-  assert(path.normalize("/") == "/", "normalize root");
+  string s = Platform.path_separator;
+  assert(path.normalize("/") == s, "normalize root");
 }
 
 // --- Security-critical: normalize traversal clamping ---
 
 test_normalize_abs_traversal_clamped() `test {
+  string s = Platform.path_separator;
   // Absolute paths must never escape root
-  assert(path.normalize("/..") == "/", "abs root dotdot");
-  assert(path.normalize("/../../../etc/passwd") == "/etc/passwd", "abs traversal clamped");
-  assert(path.normalize("/a/b/../../../../etc/passwd") == "/etc/passwd", "abs deep traversal clamped");
-  assert(path.normalize("/home/../../../etc/shadow") == "/etc/shadow", "abs escape attempt");
+  assert(path.normalize("/..") == s, "abs root dotdot");
+  assert(path.normalize("/../../../etc/passwd") == s + "etc" + s + "passwd", "abs traversal clamped");
+  assert(path.normalize("/a/b/../../../../etc/passwd") == s + "etc" + s + "passwd", "abs deep traversal clamped");
+  assert(path.normalize("/home/../../../etc/shadow") == s + "etc" + s + "shadow", "abs escape attempt");
 }
 
 test_normalize_rel_traversal_preserved() `test {
+  string s = Platform.path_separator;
   // Relative paths preserve leading ".." — caller must validate
-  assert(path.normalize("../../etc/passwd") == "../../etc/passwd", "rel traversal preserved");
-  assert(path.normalize("../../../a/b") == "../../../a/b", "rel deep traversal");
-  assert(path.normalize("a/b/c/../../../../d") == "../d", "rel overshoot");
+  assert(path.normalize("../../etc/passwd") == ".." + s + ".." + s + "etc" + s + "passwd", "rel traversal preserved");
+  assert(path.normalize("../../../a/b") == ".." + s + ".." + s + ".." + s + "a" + s + "b", "rel deep traversal");
+  assert(path.normalize("a/b/c/../../../../d") == ".." + s + "d", "rel overshoot");
 }
 
 test_normalize_mixed_dots() `test {
-  assert(path.normalize("a/./b/../c/./d/../e") == "a/c/e", "mixed dots");
+  string s = Platform.path_separator;
+  assert(path.normalize("a/./b/../c/./d/../e") == "a" + s + "c" + s + "e", "mixed dots");
   assert(path.normalize("./././.") == ".", "only dots");
-  assert(path.normalize("../../..") == "../../..", "only dotdots");
+  assert(path.normalize("../../..") == ".." + s + ".." + s + "..", "only dotdots");
   assert(path.normalize("a/b/../../c/../d") == "d", "consecutive dotdots");
 }
 
 test_normalize_trailing() `test {
-  assert(path.normalize("a/b/.") == "a/b", "trailing dot");
+  string s = Platform.path_separator;
+  assert(path.normalize("a/b/.") == "a" + s + "b", "trailing dot");
   assert(path.normalize("a/b/..") == "a", "trailing dotdot");
-  assert(path.normalize("a/b/c/") == "a/b/c", "trailing sep");
-  assert(path.normalize("///a///b///") == "/a/b", "heavy redundant seps");
+  assert(path.normalize("a/b/c/") == "a" + s + "b" + s + "c", "trailing sep");
+  assert(path.normalize("///a///b///") == s + "a" + s + "b", "heavy redundant seps");
 }
 
 test_normalize_dot_prefixed_names() `test {
+  string s = Platform.path_separator;
   // Dot-prefixed filenames must NOT be treated as "." or ".."
-  assert(path.normalize("/home/.hidden/file") == "/home/.hidden/file", "dot-prefix not dot");
-  assert(path.normalize("/home/..config/file") == "/home/..config/file", "dotdot-prefix not dotdot");
+  assert(path.normalize("/home/.hidden/file") == s + "home" + s + ".hidden" + s + "file", "dot-prefix not dot");
+  assert(path.normalize("/home/..config/file") == s + "home" + s + "..config" + s + "file", "dotdot-prefix not dotdot");
   assert(path.normalize(".hidden") == ".hidden", "bare dot-prefix");
   assert(path.normalize("..hidden") == "..hidden", "bare dotdot-prefix");
 }
 
 test_normalize_idempotent() `test {
-  assert(path.normalize(path.normalize("/a/b/../c")) == "/a/c", "idempotent abs");
-  assert(path.normalize(path.normalize("../../a")) == "../../a", "idempotent rel");
+  string s = Platform.path_separator;
+  assert(path.normalize(path.normalize("/a/b/../c")) == s + "a" + s + "c", "idempotent abs");
+  assert(path.normalize(path.normalize("../../a")) == ".." + s + ".." + s + "a", "idempotent rel");
 }
 
 // --- Additional edge cases ---
@@ -158,8 +177,9 @@ test_join_both_empty() `test {
 }
 
 test_join_dotdot_child() `test {
-  assert(path.join("a", "..") == "a/..", "join dotdot child");
-  assert(path.join("a", ".") == "a/.", "join dot child");
+  string s = Platform.path_separator;
+  assert(path.join("a", "..") == "a" + s + "..", "join dotdot child");
+  assert(path.join("a", ".") == "a" + s + ".", "join dot child");
 }
 
 test_file_name_edge_cases() `test {
@@ -170,7 +190,8 @@ test_file_name_edge_cases() `test {
 }
 
 test_parent_edge_cases() `test {
-  assert(path.parent("/") == "/", "parent root");
+  string s = Platform.path_separator;
+  assert(path.parent("/") == s, "parent root");
   assert(path.parent(".") == ".", "parent dot");
   assert(path.parent("..") == ".", "parent dotdot");
   assert(path.parent("/home/user/") == "/home", "parent trailing slash");
@@ -203,8 +224,10 @@ test_split_edge_cases() `test {
   assert(r2.len == 2, "split trailing sep len");
 
   // Dot-prefixed names preserved
+  string s = Platform.path_separator;
   string[] r3 = path.split("/home/.hidden");
   assert(r3.len == 3, "split hidden len");
+  assert(r3[0] == s, "split hidden root");
   assert(r3[2] == ".hidden", "split hidden name");
 }
 

@@ -127,8 +127,7 @@ Write-Step "Running Promise tests..."
 #
 # Excluded from verify (not yet annotated — need module-level fixes):
 #   modules/os/... — uses getpid (POSIX, not available on Windows)
-#   modules/path/... — path_join returns "/" separator on Windows (B0146)
-#   tests/catalog/... — same path_join issue
+#   tests/catalog/... — excluded to avoid double-counting (covered by modules/path/...)
 #   modules/io/... — flaky in parallel mode on Windows (0/22 fail but file marked FAIL)
 
 & $Promise test -timeout 10 `
@@ -140,6 +139,7 @@ Write-Step "Running Promise tests..."
     tests/modules/... `
     modules/json/... `
     modules/math/... `
+    modules/path/... `
     modules/strings/... `
     examples/...
 if ($LASTEXITCODE -ne 0) {

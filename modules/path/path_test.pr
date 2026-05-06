@@ -1,17 +1,19 @@
 // Test the path module (compiled as part of the module).
+// Tests use Platform.path_separator (s) so they pass on both POSIX and Windows.
 join_test() `test {
-  assert(join("/home", "user") == "/home/user", "join basic");
+  string s = Platform.path_separator;
+  assert(join("/home", "user") == "/home" + s + "user", "join basic");
   assert(join("/home/", "user") == "/home/user", "join trailing slash");
   assert(join("", "file") == "file", "join empty base");
   assert(join("/home", "") == "/home", "join empty child");
   assert(join("", "") == "", "join both empty");
-  assert(join("/home", "user", "file.txt") == "/home/user/file.txt", "join three");
-  assert(join("/", "a", "b", "c") == "/a/b/c", "join four");
-  assert(join("a", "b", "c", "d", "e") == "a/b/c/d/e", "join five");
+  assert(join("/home", "user", "file.txt") == "/home" + s + "user" + s + "file.txt", "join three");
+  assert(join("/", "a", "b", "c") == "/a" + s + "b" + s + "c", "join four");
+  assert(join("a", "b", "c", "d", "e") == "a" + s + "b" + s + "c" + s + "d" + s + "e", "join five");
   // join does NOT collapse absolute children — it is a pure concatenation
-  assert(join("/home", "/etc") == "/home//etc", "join absolute child");
-  assert(join("a", "..") == "a/..", "join dotdot child");
-  assert(join("a", ".") == "a/.", "join dot child");
+  assert(join("/home", "/etc") == "/home" + s + "/etc", "join absolute child");
+  assert(join("a", "..") == "a" + s + "..", "join dotdot child");
+  assert(join("a", ".") == "a" + s + ".", "join dot child");
 }
 
 file_name_test() `test {
@@ -31,13 +33,14 @@ file_name_test() `test {
 }
 
 parent_test() `test {
+  string s = Platform.path_separator;
   assert(parent("/home/user/file.txt") == "/home/user", "parent basic");
   assert(parent("file.txt") == ".", "parent no dir");
-  assert(parent("/file.txt") == "/", "parent root file");
+  assert(parent("/file.txt") == s, "parent root file");
   assert(parent("") == ".", "parent empty");
-  assert(parent("/") == "/", "parent root");
+  assert(parent("/") == s, "parent root");
   assert(parent("/home/user/") == "/home", "parent trailing slash");
-  assert(parent("/a") == "/", "parent root child");
+  assert(parent("/a") == s, "parent root child");
   assert(parent(".") == ".", "parent dot");
   assert(parent("..") == ".", "parent dotdot");
   assert(parent("a/b/c/d") == "a/b/c", "parent deep");
@@ -90,9 +93,11 @@ is_relative_test() `test {
 }
 
 split_test() `test {
+  string s = Platform.path_separator;
+
   string[] r1 = split("/home/user/file.txt");
   assert(r1.len == 4, "split abs len");
-  assert(r1[0] == "/", "split abs root");
+  assert(r1[0] == s, "split abs root");
   assert(r1[1] == "home", "split abs 1");
   assert(r1[2] == "user", "split abs 2");
   assert(r1[3] == "file.txt", "split abs 3");
@@ -107,7 +112,7 @@ split_test() `test {
 
   string[] r4 = split("/");
   assert(r4.len == 1, "split root len");
-  assert(r4[0] == "/", "split root");
+  assert(r4[0] == s, "split root");
 
   // Single component (no separator)
   string[] r5 = split("file.txt");
@@ -130,7 +135,7 @@ split_test() `test {
   // Multiple leading separators
   string[] r8 = split("///a/b");
   assert(r8.len == 3, "split multi root len");
-  assert(r8[0] == "/", "split multi root");
+  assert(r8[0] == s, "split multi root");
   assert(r8[1] == "a", "split multi root 1");
   assert(r8[2] == "b", "split multi root 2");
 
@@ -145,60 +150,64 @@ split_test() `test {
   // Dot-prefixed names are NOT dots
   string[] r10 = split("/home/.hidden/.config");
   assert(r10.len == 4, "split hidden len");
-  assert(r10[0] == "/", "split hidden root");
+  assert(r10[0] == s, "split hidden root");
   assert(r10[1] == "home", "split hidden 1");
   assert(r10[2] == ".hidden", "split hidden 2");
   assert(r10[3] == ".config", "split hidden 3");
 }
 
 normalize_test() `test {
-  assert(normalize("/home/user/../user/./file.txt") == "/home/user/file.txt", "norm dotdot");
-  assert(normalize("./a/b/../c") == "a/c", "norm relative");
-  assert(normalize("/a/b/c/../../d") == "/a/d", "norm multi dotdot");
+  string s = Platform.path_separator;
+  // Helper: build expected paths with platform separator
+  // normalize() always outputs Platform.path_separator between components.
+
+  assert(normalize("/home/user/../user/./file.txt") == s + "home" + s + "user" + s + "file.txt", "norm dotdot");
+  assert(normalize("./a/b/../c") == "a" + s + "c", "norm relative");
+  assert(normalize("/a/b/c/../../d") == s + "a" + s + "d", "norm multi dotdot");
   assert(normalize("") == ".", "norm empty");
   assert(normalize(".") == ".", "norm dot");
-  assert(normalize("/") == "/", "norm root");
-  assert(normalize("a/b/c") == "a/b/c", "norm no change");
-  assert(normalize("../a/b") == "../a/b", "norm leading dotdot");
-  assert(normalize("a/../../b") == "../b", "norm past root rel");
-  assert(normalize("/a/../../b") == "/b", "norm past root abs");
-  assert(normalize("a//b///c") == "a/b/c", "norm redundant seps");
+  assert(normalize("/") == s, "norm root");
+  assert(normalize("a/b/c") == "a" + s + "b" + s + "c", "norm no change");
+  assert(normalize("../a/b") == ".." + s + "a" + s + "b", "norm leading dotdot");
+  assert(normalize("a/../../b") == ".." + s + "b", "norm past root rel");
+  assert(normalize("/a/../../b") == s + "b", "norm past root abs");
+  assert(normalize("a//b///c") == "a" + s + "b" + s + "c", "norm redundant seps");
 
   // --- Security-critical: path traversal clamping ---
 
   // Absolute paths MUST clamp at root — cannot escape "/"
-  assert(normalize("/..") == "/", "norm abs root dotdot");
-  assert(normalize("/../../../etc/passwd") == "/etc/passwd", "norm abs traversal clamped");
-  assert(normalize("/a/b/../../../../etc/passwd") == "/etc/passwd", "norm abs deep traversal clamped");
-  assert(normalize("/home/../../../etc/shadow") == "/etc/shadow", "norm abs escape attempt");
+  assert(normalize("/..") == s, "norm abs root dotdot");
+  assert(normalize("/../../../etc/passwd") == s + "etc" + s + "passwd", "norm abs traversal clamped");
+  assert(normalize("/a/b/../../../../etc/passwd") == s + "etc" + s + "passwd", "norm abs deep traversal clamped");
+  assert(normalize("/home/../../../etc/shadow") == s + "etc" + s + "shadow", "norm abs escape attempt");
 
   // Relative paths preserve leading ".." (caller must validate)
-  assert(normalize("../../etc/passwd") == "../../etc/passwd", "norm rel traversal preserved");
-  assert(normalize("../../../a/b") == "../../../a/b", "norm rel deep traversal");
-  assert(normalize("a/b/c/../../../../d") == "../d", "norm rel overshoot");
+  assert(normalize("../../etc/passwd") == ".." + s + ".." + s + "etc" + s + "passwd", "norm rel traversal preserved");
+  assert(normalize("../../../a/b") == ".." + s + ".." + s + ".." + s + "a" + s + "b", "norm rel deep traversal");
+  assert(normalize("a/b/c/../../../../d") == ".." + s + "d", "norm rel overshoot");
 
   // --- Consecutive and mixed dots ---
-  assert(normalize("a/./b/../c/./d/../e") == "a/c/e", "norm mixed dots");
+  assert(normalize("a/./b/../c/./d/../e") == "a" + s + "c" + s + "e", "norm mixed dots");
   assert(normalize("./././.") == ".", "norm only dots");
-  assert(normalize("../../..") == "../../..", "norm only dotdots");
+  assert(normalize("../../..") == ".." + s + ".." + s + "..", "norm only dotdots");
   assert(normalize("a/b/../../c/../d") == "d", "norm consecutive dotdots");
 
   // --- Trailing dots ---
-  assert(normalize("a/b/.") == "a/b", "norm trailing dot");
+  assert(normalize("a/b/.") == "a" + s + "b", "norm trailing dot");
   assert(normalize("a/b/..") == "a", "norm trailing dotdot");
-  assert(normalize("a/b/c/..") == "a/b", "norm trailing dotdot deep");
+  assert(normalize("a/b/c/..") == "a" + s + "b", "norm trailing dotdot deep");
 
   // --- Dot-prefixed names are NOT special (security: .hidden != .) ---
-  assert(normalize("/home/.hidden/file") == "/home/.hidden/file", "norm dot-prefix not dot");
-  assert(normalize("/home/..config/file") == "/home/..config/file", "norm dotdot-prefix not dotdot");
+  assert(normalize("/home/.hidden/file") == s + "home" + s + ".hidden" + s + "file", "norm dot-prefix not dot");
+  assert(normalize("/home/..config/file") == s + "home" + s + "..config" + s + "file", "norm dotdot-prefix not dotdot");
   assert(normalize(".hidden") == ".hidden", "norm bare dot-prefix");
   assert(normalize("..hidden") == "..hidden", "norm bare dotdot-prefix");
 
   // --- Redundant separators in various positions ---
-  assert(normalize("///a///b///") == "/a/b", "norm heavy redundant seps");
-  assert(normalize("a/b/c/") == "a/b/c", "norm trailing sep");
+  assert(normalize("///a///b///") == s + "a" + s + "b", "norm heavy redundant seps");
+  assert(normalize("a/b/c/") == "a" + s + "b" + s + "c", "norm trailing sep");
 
   // --- Roundtrip: normalize idempotent ---
-  assert(normalize(normalize("/a/b/../c")) == "/a/c", "norm idempotent");
-  assert(normalize(normalize("../../a")) == "../../a", "norm idempotent rel");
+  assert(normalize(normalize("/a/b/../c")) == s + "a" + s + "c", "norm idempotent");
+  assert(normalize(normalize("../../a")) == ".." + s + ".." + s + "a", "norm idempotent rel");
 }

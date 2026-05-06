@@ -2182,6 +2182,8 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 	if ident, ok := e.Args[0].Value.(*ast.IdentExpr); ok {
 		c.clearDropFlag(ident.Name)
 	}
+	// B0170: claim string temp — ownership transfers to channel buffer
+	c.claimStringTemp(argVal)
 	argAlloca := c.createEntryAlloca(elemLLVM)
 	c.block.NewStore(argVal, argAlloca)
 	argAsI8 := c.block.NewBitCast(argAlloca, irtypes.I8Ptr)
@@ -2964,6 +2966,8 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		if ident, ok := e.Args[0].Value.(*ast.IdentExpr); ok {
 			c.clearDropFlag(ident.Name)
 		}
+		// B0170: claim string temp — ownership transfers to vector
+		c.claimStringTemp(argVal)
 		// COW: if static (.rodata), copy to heap first (T0062)
 		cowSlice := c.block.NewCall(c.funcs["promise_vector_cow"],
 			slicePtr, constant.NewInt(irtypes.I64, elemSize))

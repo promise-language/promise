@@ -9329,6 +9329,19 @@ func TestStringConcatTempInConstructor(t *testing.T) {
 	assertContains(t, ir, "call i8* @promise_string_concat")
 }
 
+// B0170: String temp pushed into vector is claimed (no double-free at stmt end)
+func TestStringTempClaimedOnVectorPush(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string[] v = string[]();
+			v.push("a" + "b");
+		}
+	`)
+	// Concat result should be tracked then claimed by push.
+	assertContains(t, ir, "call i8* @promise_string_concat")
+	assertContains(t, ir, "call i8* @promise_vector_push")
+}
+
 // T0082: Structural views are tested at the Promise level (e2e/structural_view_test.pr)
 // because structural interface coercion requires the full std library.
 // The fix: genTypedVarDecl skips clearDropFlag when LHS is a structural interface.

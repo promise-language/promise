@@ -13,8 +13,11 @@ const (
 
 // Borrow represents an active borrow of a variable.
 type Borrow struct {
-	// Origin is the name of the variable being borrowed.
+	// Origin is the name of the root variable being borrowed.
 	Origin string
+	// FieldPath tracks the chain of field accesses from the origin.
+	// nil means the whole variable; ["x"] means origin.x; ["x","inner"] means origin.x.inner.
+	FieldPath []string
 	// Kind is the borrow kind (shared or mutable).
 	Kind BorrowKind
 	// Borrower is the variable name holding the reference.
@@ -63,19 +66,6 @@ func (bs *BorrowSet) HasAnyBorrow(name string) bool {
 	}
 	for _, b := range bs.borrows {
 		if b.Origin == name {
-			return true
-		}
-	}
-	return false
-}
-
-// HasMutBorrow returns true if the given variable has an active mutable borrow.
-func (bs *BorrowSet) HasMutBorrow(name string) bool {
-	if bs == nil {
-		return false
-	}
-	for _, b := range bs.borrows {
-		if b.Origin == name && b.Kind == BorrowMut {
 			return true
 		}
 	}
@@ -146,12 +136,67 @@ func MergeBorrowSets(a, b *BorrowSet) *BorrowSet {
 	return result
 }
 
-// containsBorrow checks if a borrow with the same origin, kind, and borrower exists.
+// containsBorrow checks if a borrow with the same origin, field path, kind, and borrower exists.
 func (bs *BorrowSet) containsBorrow(b *Borrow) bool {
 	for _, existing := range bs.borrows {
-		if existing.Origin == b.Origin && existing.Kind == b.Kind && existing.Borrower == b.Borrower {
+		if existing.Origin == b.Origin && existing.Kind == b.Kind && existing.Borrower == b.Borrower && fieldPathsEqual(existing.FieldPath, b.FieldPath) {
 			return true
 		}
 	}
 	return false
+}
+
+// HasOverlappingBorrow returns true if the given variable+path has any active
+// borrow that overlaps (same path, parent/child, or whole-variable).
+func (bs *BorrowSet) HasOverlappingBorrow(name string, path []string) bool {
+	if bs == nil {
+		return false
+	}
+	for _, b := range bs.borrows {
+		if b.Origin == name && pathsOverlap(b.FieldPath, path) {
+			return true
+		}
+	}
+	return false
+}
+
+// HasOverlappingMutBorrow returns true if the given variable+path has an active
+// mutable borrow that overlaps.
+func (bs *BorrowSet) HasOverlappingMutBorrow(name string, path []string) bool {
+	if bs == nil {
+		return false
+	}
+	for _, b := range bs.borrows {
+		if b.Origin == name && b.Kind == BorrowMut && pathsOverlap(b.FieldPath, path) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathsOverlap returns true if two field paths overlap. Overlap means one is a
+// prefix of the other (parent/child) or they are equal. Two paths that diverge
+// at the same level are disjoint (sibling fields).
+// A nil path means the whole variable and overlaps with everything.
+func pathsOverlap(a, b []string) bool {
+	minLen := min(len(a), len(b))
+	for i := range minLen {
+		if a[i] != b[i] {
+			return false // disjoint siblings
+		}
+	}
+	return true // equal or one is a prefix of the other
+}
+
+// fieldPathsEqual returns true if two field paths are identical.
+func fieldPathsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

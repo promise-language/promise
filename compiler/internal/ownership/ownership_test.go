@@ -2413,3 +2413,182 @@ func TestSelectCaseSendBorrowDoesNotLeakIntoBody(t *testing.T) {
 		}
 	`)
 }
+
+// === Disjoint field borrows (B0037) ===
+
+func TestDisjointFieldBorrowsSharedOK(t *testing.T) {
+	// Borrowing disjoint fields as shared should not conflict.
+	ownerOK(t, `
+		type Pair { string a; string b; }
+		read(string &s) {}
+		test() {
+			p := Pair(a: "x", b: "y");
+			read(p.a);
+			read(p.b);
+		}
+	`)
+}
+
+func TestDisjointFieldBorrowsMutOK(t *testing.T) {
+	// Passing disjoint fields as mutable borrows should not conflict.
+	ownerOK(t, `
+		type Pair { string a; string b; }
+		mutate(string ~s) {}
+		test() {
+			p := Pair(a: "x", b: "y");
+			mutate(p.a);
+			mutate(p.b);
+		}
+	`)
+}
+
+func TestDisjointFieldBorrowsMixedOK(t *testing.T) {
+	// Shared borrow of one field and mutable borrow of a different field — OK.
+	ownerOK(t, `
+		type Pair { string a; string b; }
+		read(string &s) {}
+		mutate(string ~s) {}
+		test() {
+			p := Pair(a: "x", b: "y");
+			read(p.a);
+			mutate(p.b);
+		}
+	`)
+}
+
+func TestSameFieldStoredMutConflict(t *testing.T) {
+	// Stored mutable borrow of a field blocks a second mutable borrow of the same field.
+	errs := ownerErrs(t, `
+		type Foo { string x; }
+		getMut(string ~s) string~ { return s; }
+		mutate(string ~s) {}
+		test() {
+			f := Foo(x: "hi");
+			string ~r = getMut(f.x);
+			mutate(f.x);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot borrow 'f.x' as mutable")
+}
+
+func TestSameFieldStoredSharedThenMutConflict(t *testing.T) {
+	// Stored shared borrow of a field blocks a mutable borrow of the same field.
+	errs := ownerErrs(t, `
+		type Foo { string x; }
+		getRef(string &s) string& { return s; }
+		mutate(string ~s) {}
+		test() {
+			f := Foo(x: "hi");
+			string &r = getRef(f.x);
+			mutate(f.x);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot borrow 'f.x' as mutable")
+}
+
+func TestWholeVariableStoredVsFieldConflict(t *testing.T) {
+	// Stored whole-variable borrow conflicts with field mutable borrow.
+	errs := ownerErrs(t, `
+		type Foo { string x; string y; }
+		getRef(Foo &f) Foo& { return f; }
+		mutate(string ~s) {}
+		test() {
+			f := Foo(x: "a", y: "b");
+			Foo &r = getRef(f);
+			mutate(f.x);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot borrow 'f.x' as mutable")
+}
+
+func TestFieldStoredVsWholeVariableMutConflict(t *testing.T) {
+	// Stored field borrow then whole-variable mutable borrow — conflict.
+	errs := ownerErrs(t, `
+		type Foo { string x; string y; }
+		getRef(string &s) string& { return s; }
+		mutate_whole(Foo ~f) {}
+		test() {
+			f := Foo(x: "a", y: "b");
+			string &r = getRef(f.x);
+			mutate_whole(f);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot borrow 'f' as mutable")
+}
+
+func TestDisjointFieldsInSameCallOK(t *testing.T) {
+	// Passing disjoint fields as borrow params in a single call — OK.
+	ownerOK(t, `
+		type Pair { string a; string b; }
+		both(string &x, string &y) {}
+		test() {
+			p := Pair(a: "x", b: "y");
+			both(p.a, p.b);
+		}
+	`)
+}
+
+func TestSameFieldInSameCallConflict(t *testing.T) {
+	// Same field as mutable + shared in one call — conflict.
+	errs := ownerErrs(t, `
+		type Foo { string x; }
+		mixed(string ~a, string &b) {}
+		test() {
+			f := Foo(x: "hi");
+			mixed(f.x, f.x);
+		}
+	`)
+	expectOwnerError(t, errs, "cannot borrow 'f.x' as mutable because it is also borrowed as shared in the same call")
+}
+
+func TestDisjointFieldsInSameCallMutOK(t *testing.T) {
+	// Disjoint fields as mutable params in a single call — OK.
+	ownerOK(t, `
+		type Pair { string a; string b; }
+		swap(string ~x, string ~y) {}
+		test() {
+			p := Pair(a: "x", b: "y");
+			swap(p.a, p.b);
+		}
+	`)
+}
+
+func TestReceiverBorrowDisjointFieldOK(t *testing.T) {
+	// Method call on receiver (borrows receiver) + separate field borrow — OK if disjoint.
+	// NOTE: receiver borrows the whole object, so a field borrow of the same object conflicts.
+	// But method call on a sub-object's field is disjoint from another field.
+	ownerOK(t, `
+		type Inner { int v; get_v(&this) int { return this.v; } }
+		type Outer { Inner a; Inner b; }
+		test() {
+			o := Outer(a: Inner(v: 1), b: Inner(v: 2));
+			int x = o.a.get_v();
+			int y = o.b.get_v();
+		}
+	`)
+}
+
+// === pathsOverlap unit tests ===
+
+func TestPathsOverlap(t *testing.T) {
+	tests := []struct {
+		a, b   []string
+		expect bool
+	}{
+		{nil, nil, true},                                // whole vs whole
+		{nil, []string{"x"}, true},                      // whole vs field
+		{[]string{"x"}, nil, true},                      // field vs whole
+		{[]string{"x"}, []string{"x"}, true},            // same field
+		{[]string{"x"}, []string{"y"}, false},           // disjoint siblings
+		{[]string{"x"}, []string{"x", "a"}, true},       // parent/child
+		{[]string{"x", "a"}, []string{"x"}, true},       // child/parent
+		{[]string{"x", "a"}, []string{"x", "b"}, false}, // disjoint nested
+		{[]string{"x", "a"}, []string{"y", "a"}, false}, // different roots
+	}
+	for _, tt := range tests {
+		got := pathsOverlap(tt.a, tt.b)
+		if got != tt.expect {
+			t.Errorf("pathsOverlap(%v, %v) = %v, want %v", tt.a, tt.b, got, tt.expect)
+		}
+	}
+}

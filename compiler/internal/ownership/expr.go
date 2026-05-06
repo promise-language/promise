@@ -230,37 +230,87 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 	}
 }
 
+// extractBorrowTarget walks an expression to extract the root variable name
+// and field path for borrow tracking. Returns ("", nil, false) if the
+// expression is not a trackable borrow target (e.g., a function call result).
+func extractBorrowTarget(expr ast.Expr) (name string, path []string, ok bool) {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		return e.Name, nil, true
+	case *ast.MemberExpr:
+		name, path, ok = extractBorrowTarget(e.Target)
+		if ok {
+			path = append(path, e.Field)
+		}
+		return
+	}
+	return "", nil, false
+}
+
+// borrowTargetLabel formats a borrow target as "name" or "name.field1.field2" for error messages.
+func borrowTargetLabel(name string, path []string) string {
+	if len(path) == 0 {
+		return name
+	}
+	// Pre-compute total length to avoid repeated allocations.
+	n := len(name)
+	for _, f := range path {
+		n += 1 + len(f)
+	}
+	buf := make([]byte, 0, n)
+	buf = append(buf, name...)
+	for _, f := range path {
+		buf = append(buf, '.')
+		buf = append(buf, f...)
+	}
+	return string(buf)
+}
+
 // createBorrowWithKind checks for borrow conflicts with existing borrows and registers a new borrow.
+// Supports both simple variable references (IdentExpr) and field access chains (MemberExpr).
 func (c *Checker) createBorrowWithKind(expr ast.Expr, kind BorrowKind, pos ast.Pos) {
-	ident, ok := expr.(*ast.IdentExpr)
+	name, path, ok := extractBorrowTarget(expr)
 	if !ok {
 		return
 	}
-	name := ident.Name
 	if c.borrows == nil {
 		return
 	}
-	// Copy types don't need borrow tracking
-	if obj := c.info.Objects[ident]; obj != nil {
-		if v, ok := obj.(*types.Var); ok && isCopyType(v.Type()) {
-			return
+	// Copy types don't need borrow tracking — check the root variable.
+	// Walk to the root IdentExpr (for both simple idents and member chains).
+	rootExpr := expr
+	for {
+		if me, isME := rootExpr.(*ast.MemberExpr); isME {
+			rootExpr = me.Target
+		} else {
+			break
+		}
+	}
+	if ident, isIdent := rootExpr.(*ast.IdentExpr); isIdent {
+		if obj := c.info.Objects[ident]; obj != nil {
+			if v, isVar := obj.(*types.Var); isVar && isCopyType(v.Type()) {
+				return
+			}
 		}
 	}
 
-	// Check against existing borrows
-	if kind == BorrowMut && c.borrows.HasAnyBorrow(name) {
-		c.errorf(pos, "cannot borrow '%s' as mutable — it is already borrowed", name)
+	label := borrowTargetLabel(name, path)
+
+	// Check against existing borrows using path-aware overlap
+	if kind == BorrowMut && c.borrows.HasOverlappingBorrow(name, path) {
+		c.errorf(pos, "cannot borrow '%s' as mutable — it is already borrowed", label)
 		return
 	}
-	if kind == BorrowShared && c.borrows.HasMutBorrow(name) {
-		c.errorf(pos, "cannot borrow '%s' as shared — it is mutably borrowed", name)
+	if kind == BorrowShared && c.borrows.HasOverlappingMutBorrow(name, path) {
+		c.errorf(pos, "cannot borrow '%s' as shared — it is mutably borrowed", label)
 		return
 	}
 
-	c.borrows.Add(&Borrow{Origin: name, Kind: kind, Pos: pos})
+	c.borrows.Add(&Borrow{Origin: name, FieldPath: path, Kind: kind, Pos: pos})
 }
 
 // checkReceiverBorrow creates a borrow for method calls with &this or ~this receivers.
+// For nested member expressions like f.sub.method(), the borrow is on f with path ["sub"].
 func (c *Checker) checkReceiverBorrow(callee ast.Expr, sig *types.Signature, pos ast.Pos) {
 	if sig.Recv() == nil {
 		return
@@ -274,11 +324,9 @@ func (c *Checker) checkReceiverBorrow(callee ast.Expr, sig *types.Signature, pos
 	if !ok {
 		return
 	}
-	ident, ok := member.Target.(*ast.IdentExpr)
-	if !ok {
-		return
-	}
-	c.createBorrowWithKind(ident, recvKind, pos)
+	// member.Target is the receiver expression (the object the method is called on).
+	// Pass it directly to createBorrowWithKind which handles both IdentExpr and MemberExpr.
+	c.createBorrowWithKind(member.Target, recvKind, pos)
 }
 
 // calleeSignature extracts the Signature from a callee expression's type.
@@ -295,12 +343,14 @@ func (c *Checker) calleeSignature(callee ast.Expr) *types.Signature {
 
 type borrowEntry struct {
 	name string
+	path []string
 	kind BorrowKind
 }
 
 // checkBorrowConflicts detects conflicting borrows at a single call site.
 // Multiple shared borrows of the same variable are OK.
-// A mutable borrow combined with any other borrow of the same variable is an error.
+// A mutable borrow combined with any overlapping borrow of the same variable is an error.
+// Disjoint field borrows (e.g., f.x and f.y) do not conflict.
 func (c *Checker) checkBorrowConflicts(e *ast.CallExpr, sig *types.Signature) {
 	params := sig.Params()
 	var borrows []borrowEntry
@@ -313,11 +363,11 @@ func (c *Checker) checkBorrowConflicts(e *ast.CallExpr, sig *types.Signature) {
 		if kind == BorrowNone {
 			continue
 		}
-		ident, ok := arg.Value.(*ast.IdentExpr)
+		name, path, ok := extractBorrowTarget(arg.Value)
 		if !ok {
 			continue
 		}
-		borrows = append(borrows, borrowEntry{name: ident.Name, kind: kind})
+		borrows = append(borrows, borrowEntry{name: name, path: path, kind: kind})
 	}
 
 	for i := 0; i < len(borrows); i++ {
@@ -325,13 +375,17 @@ func (c *Checker) checkBorrowConflicts(e *ast.CallExpr, sig *types.Signature) {
 			if borrows[i].name != borrows[j].name {
 				continue
 			}
+			if !pathsOverlap(borrows[i].path, borrows[j].path) {
+				continue // disjoint field borrows — no conflict
+			}
 			if borrows[i].kind == BorrowMut || borrows[j].kind == BorrowMut {
 				other := borrows[i].kind
 				if borrows[i].kind == BorrowMut {
 					other = borrows[j].kind
 				}
+				label := borrowTargetLabel(borrows[i].name, borrows[i].path)
 				c.errorf(e.Pos(), "cannot borrow '%s' as mutable because it is also borrowed as %s in the same call",
-					borrows[i].name, borrowKindLabel(other))
+					label, borrowKindLabel(other))
 				return
 			}
 		}

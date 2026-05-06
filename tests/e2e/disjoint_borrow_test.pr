@@ -1,0 +1,53 @@
+// Tests for disjoint field borrows (B0037).
+// Verifies that borrowing disjoint fields of the same struct does not conflict.
+type Pair {
+  string a;
+  string b;
+}
+
+type Point {
+  int x `value;
+  int y `value;
+}
+
+type Counter {
+  int value `value;
+  get_value(&this) int {
+    return this.value;
+  }
+}
+
+type TwoCounters {
+  Counter left;
+  Counter right;
+}
+
+// --- Helper functions ---
+
+get_ref(string & s) string & {
+  return s;
+}
+
+// --- Tests ---
+
+disjoint_shared_borrows() `test {
+  p := Pair(a: "hello", b: "world");
+  string & ra = get_ref(p.a);
+  string & rb = get_ref(p.b);
+  assert(true, "disjoint shared borrows compiled and ran");
+}
+
+disjoint_value_type_borrows() `test {
+  p := Point(x: 10, y: 20);
+  int sum = p.x + p.y;
+  assert(sum == 30, "disjoint value type field access");
+}
+
+method_on_different_sub_objects() `test {
+  tc := TwoCounters(left: Counter(value: 1), right: Counter(value: 2));
+  int l = tc.left.get_value();
+  int r = tc.right.get_value();
+  assert(l == 1, "left counter");
+  assert(r == 2, "right counter");
+  assert(l + r == 3, "sum of counters");
+}

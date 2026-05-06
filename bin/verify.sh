@@ -39,15 +39,19 @@ VERIFY_START=$SECONDS
 echo "Formatting go..."
 (cd compiler && gofmt -w .)
 
+# Format .pr files before building so that embedded resources include formatted source.
+# Requires an existing bin/promise binary (from a prior build); first build bootstraps without formatting.
+if [ -x "$PROMISE" ]; then
+  echo "Formatting promise..."
+  find . -name '*.pr' -not -path './.git/*' -not -path './compiler/*' -not -path './.promise-home/*' | xargs "$PROMISE" format
+  echo ""
+fi
+
 echo "Building compiler..."
 ./build
 
 echo "Vetting go..."
 (cd compiler && go vet $(go list ./... | grep -v /internal/parser))
-
-echo "Formatting promise..."
-find . -name '*.pr' -not -path './.git/*' -not -path './compiler/*' -not -path './.promise-home/*' | xargs ./bin/promise format
-echo ""
 
 if [ "$CLEAN" = true ]; then
   echo "Clearing go test cache..."

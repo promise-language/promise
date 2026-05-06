@@ -41,7 +41,7 @@ Implement the task or fix the bug described in $ARGUMENTS. If $ARGUMENTS referen
 
 7. **Verify.**
    - Run the specific new tests first to confirm they pass.
-   - Then run `bin/verify.sh --local --wasm` to confirm nothing else broke.
+   - Then run `bin/verify.sh --local --wasm` (Linux/macOS) or `powershell -ExecutionPolicy Bypass -File bin\verify.ps1 -Local` (Windows) to confirm nothing else broke.
    - If verify fails, fix the issues and re-run until green.
 
 8. **Chain to /review, /coverage, /commit.**

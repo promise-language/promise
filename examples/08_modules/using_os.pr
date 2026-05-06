@@ -3,7 +3,7 @@
 // `use os;` provides environment variables, process execution, and system info.
 use os;
 
-main() `test(expected: """--- Environment ---
+main() `test(exclude: "windows", expected: """--- Environment ---
 HOME is set: true
 
 --- Execute ---

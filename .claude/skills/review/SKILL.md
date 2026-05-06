@@ -21,7 +21,7 @@ Review the most recent changes in this project. If $ARGUMENTS is provided, treat
    - Every behavioral change needs a test. Prefer batch tests (`` `test ``) over snapshot tests.
    - For Go changes: check that `codegen_test.go`, `sema_test.go`, or `ownership_test.go` cover the change.
    - For Promise changes: check for corresponding `*_test.pr` files.
-   - Run `bin/verify.sh --local --wasm` to confirm everything passes.
+   - Run `bin/verify.sh --local --wasm` (Linux/macOS) or `powershell -ExecutionPolicy Bypass -File bin\verify.ps1 -Local` (Windows) to confirm everything passes.
 
 4. **Check conventions.**
    - Public Promise APIs: full English words (never abbreviated), getters for side-effect-free parameterless access, `` `doc `` annotations on `` `public `` declarations.

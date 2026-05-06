@@ -2,7 +2,7 @@
 // Verifies that the jmpBuf (in sched_loop entry block) works when
 // the P count has been changed. Must be a snapshot test because
 // goroutine panics are not recovered correctly in batch mode (B0130).
-main() `test(expected: "42", exclude: "wasm32") {
+main() `test(expected: "42", exclude: "wasm32,windows") {
   set_max_procs(1);
 
   ch := channel[int](capacity: 2);

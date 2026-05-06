@@ -1052,8 +1052,10 @@ func executeE2EBinary(binaryPath, expected string, excludeTargets []string,
 	}
 
 	// Compare output — non-zero exit code is NOT a failure (handles panic tests)
-	actual := strings.TrimRight(string(output), "\n")
-	expectedTrimmed := strings.TrimRight(expected, "\n")
+	// Strip \r for Windows — Platform.line_separator is \r\n, and source files may
+	// have \r\n from git autocrlf, so normalize both sides to \n-only.
+	actual := strings.TrimRight(strings.ReplaceAll(string(output), "\r", ""), "\n")
+	expectedTrimmed := strings.TrimRight(strings.ReplaceAll(expected, "\r", ""), "\n")
 
 	if actual == expectedTrimmed {
 		fmt.Printf("PASS (%.3fs)%s\n", elapsed.Seconds(), targetSuffix)

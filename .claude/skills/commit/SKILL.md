@@ -11,7 +11,7 @@ Verify, commit, sync with remote, and push the current changes.
    - If the changes affect documented behavior, update relevant docs (`docs/`, CLAUDE.md, module `doc` annotations).
 
 2. **Pre-commit verification.**
-   - Run `bin/verify.sh --local --wasm` from the repo root.
+   - Run `bin/verify.sh --local --wasm` (Linux/macOS) or `powershell -ExecutionPolicy Bypass -File bin\verify.ps1 -Local` (Windows) from the repo root.
    - If it fails, fix the issues and re-run until it passes. Do not proceed until green.
 
 3. **Commit.**
@@ -24,7 +24,7 @@ Verify, commit, sync with remote, and push the current changes.
    - If there are conflicts, resolve them carefully and continue the rebase.
 
 5. **Post-rebase verification.**
-   - Run `bin/verify.sh --local --wasm` again to confirm nothing broke during rebase.
+   - Run `bin/verify.sh --local --wasm` (Linux/macOS) or `powershell -ExecutionPolicy Bypass -File bin\verify.ps1 -Local` (Windows) again to confirm nothing broke during rebase.
    - If it fails, fix and re-run.
 
 6. **Update tracker.**

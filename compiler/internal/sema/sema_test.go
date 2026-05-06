@@ -3317,6 +3317,54 @@ func TestIsTypeName(t *testing.T) {
 	`)
 }
 
+// B0115: `is` type check on primitive subject should be rejected
+func TestIsPrimitiveSubjectRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo { int x; }
+		test() {
+			int x = 42;
+			if x is Foo {}
+		}
+	`)
+	expectError(t, errs, "cannot use 'is' type check on primitive type int")
+}
+
+func TestIsPrimitiveSubjectDestructureRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		type Foo { int x; }
+		test() {
+			int x = 42;
+			if x is Foo(a) {}
+		}
+	`)
+	expectError(t, errs, "cannot use 'is' type check on primitive type int")
+}
+
+func TestIsPrimitiveSubjectAllTypes(t *testing.T) {
+	// All primitive types should be rejected
+	for _, prim := range []string{"int", "f64", "bool", "string", "char", "i8", "i16", "i32", "i64", "uint", "u8", "u16", "u32", "u64", "f32"} {
+		t.Run(prim, func(t *testing.T) {
+			errs := checkErrs(t, `
+				type Foo { int x; }
+				test() {
+					`+prim+` x = x;
+					if x is Foo {}
+				}
+			`)
+			expectError(t, errs, "cannot use 'is' type check on primitive type "+prim)
+		})
+	}
+}
+
+func TestIsPresentOnOptionalPrimitiveStillAllowed(t *testing.T) {
+	checkOK(t, `
+		test() {
+			int? x = 42;
+			if x is present {}
+		}
+	`)
+}
+
 // --- Map Literal Tests ---
 
 func TestMapLiteral(t *testing.T) {
@@ -10942,9 +10990,10 @@ func TestIsDestructureNamedTypeWrongFieldCount(t *testing.T) {
 
 func TestIsDestructureUndefinedType(t *testing.T) {
 	errs := checkErrs(t, `
+		type Foo { int x; }
 		test() {
-			int x = 0;
-			if x is Bogus(a) {}
+			Foo f = Foo(x: 0);
+			if f is Bogus(a) {}
 		}
 	`)
 	expectError(t, errs, "undefined type: Bogus")
@@ -11012,10 +11061,11 @@ func TestIsDestructureVariantFromWrongEnum(t *testing.T) {
 
 func TestIsDestructureNonTypeIdentifier(t *testing.T) {
 	errs := checkErrs(t, `
+		type Foo { int x; }
 		my_func() int { return 1; }
 		test() {
-			int x = 0;
-			if x is my_func(a) {}
+			Foo f = Foo(x: 0);
+			if f is my_func(a) {}
 		}
 	`)
 	expectError(t, errs, "my_func is not a type")
@@ -11095,9 +11145,10 @@ func TestIsGenericTypeBaseCheck(t *testing.T) {
 
 func TestIsGenericTypeUndefined(t *testing.T) {
 	errs := checkErrs(t, `
+		type Foo { int x; }
 		test() {
-			int x = 1;
-			bool b = x is NoSuchType[int];
+			Foo f = Foo(x: 1);
+			bool b = f is NoSuchType[int];
 		}
 	`)
 	expectError(t, errs, "undefined type")

@@ -1884,6 +1884,13 @@ func (c *Checker) checkIsExpr(e *ast.IsExpr) types.Type {
 			}
 			break
 		}
+		// B0115: reject `is` type checks on primitive subjects (no RTTI)
+		if subjectType != nil {
+			if named, ok := subjectType.(*types.Named); ok && isPrimitiveOrString(named) {
+				c.errorf(e.Pos(), "cannot use 'is' type check on primitive type %s", named.Obj().Name())
+				break
+			}
+		}
 		// Generic type pattern: resolve via typeRef
 		if len(p.TypeArgs) > 0 {
 			ref := &ast.NamedTypeRef{Name: p.Name, TypeArgs: p.TypeArgs}
@@ -1917,6 +1924,13 @@ func (c *Checker) checkIsExpr(e *ast.IsExpr) types.Type {
 			}
 		}
 	case *ast.DestructureIsPattern:
+		// B0115: reject `is` type checks on primitive subjects (no RTTI)
+		if subjectType != nil {
+			if named, ok := subjectType.(*types.Named); ok && isPrimitiveOrString(named) {
+				c.errorf(e.Pos(), "cannot use 'is' type check on primitive type %s", named.Obj().Name())
+				break
+			}
+		}
 		c.checkDestructureIsPattern(p, subjectType)
 	}
 	return types.TypBool

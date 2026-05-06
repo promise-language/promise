@@ -268,13 +268,16 @@ func TestResolveOptionalType(t *testing.T) {
 	`)
 }
 
+// B0034: stored references in struct fields are rejected
 func TestResolveRefTypes(t *testing.T) {
-	checkOK(t, `
+	errs := checkErrs(t, `
 		type View {
 			string& data;
 			int~ counter;
 		}
 	`)
+	expectError(t, errs, "reference type string& cannot be used as a field type")
+	expectError(t, errs, "reference type int~ cannot be used as a field type")
 }
 
 func TestResolveTupleType(t *testing.T) {
@@ -6859,25 +6862,59 @@ func TestDropMethodAbstract(t *testing.T) {
 	expectError(t, errs, "must not be abstract")
 }
 
-// isCopyField with SharedRef — should be copy
+// B0034: reference fields are rejected (previously tested as copy-compatible)
 func TestCopyTypeWithRefField(t *testing.T) {
-	// int& is copy since it's just a pointer (postfix & for shared ref)
-	checkOK(t, `
+	errs := checkErrs(t, `
 		type Wrapper `+"`"+`copy {
 			int& val;
 		}
 		main() {}
 	`)
+	expectError(t, errs, "reference type int& cannot be used as a field type")
 }
 
-// isCopyField with MutRef — should be copy
+// B0034: reference fields are rejected (previously tested as copy-compatible)
 func TestCopyTypeWithMutRefField(t *testing.T) {
-	checkOK(t, `
+	errs := checkErrs(t, `
 		type MutWrapper `+"`"+`copy {
 			int~ val;
 		}
 		main() {}
 	`)
+	expectError(t, errs, "reference type int~ cannot be used as a field type")
+}
+
+// B0034: reference parameters (borrows) are still valid
+func TestRefParamsStillAllowed(t *testing.T) {
+	checkOK(t, `
+		read(string& s) int { return s.len; }
+		mutate(int~ x) { x = 42; }
+		main() {}
+	`)
+}
+
+// B0034: reference fields are rejected in enum variants too
+func TestEnumVariantWithRefField(t *testing.T) {
+	errs := checkErrs(t, `
+		enum Container {
+			Borrowed(string& data),
+			MutBorrowed(int~ val),
+		}
+		main() {}
+	`)
+	expectError(t, errs, "reference type string& cannot be used as a field type")
+	expectError(t, errs, "reference type int~ cannot be used as a field type")
+}
+
+// B0034: optional-wrapped references are also rejected
+func TestOptionalRefFieldRejected(t *testing.T) {
+	errs := checkErrs(t, `
+		type Holder {
+			string&? data;
+		}
+		main() {}
+	`)
+	expectError(t, errs, "cannot be used as a field type")
 }
 
 // isCopyField with Named non-copy field — should error

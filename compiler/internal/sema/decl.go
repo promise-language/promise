@@ -384,9 +384,27 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 
 }
 
+// containsRef reports whether typ is or contains a SharedRef or MutRef.
+// B0034: catches both direct references (string&) and wrapped forms (string&?).
+func containsRef(typ types.Type) bool {
+	switch t := typ.(type) {
+	case *types.SharedRef, *types.MutRef:
+		return true
+	case *types.Optional:
+		return containsRef(t.Elem())
+	default:
+		return false
+	}
+}
+
 func (c *Checker) defineField(named *types.Named, fd *ast.FieldDecl) {
 	typ := c.resolveType(fd.Type)
 	if typ == nil {
+		return
+	}
+	// B0034: reject reference-typed fields until lifetime tracking is implemented
+	if containsRef(typ) {
+		c.errorf(fd.Pos(), "reference type %s cannot be used as a field type (stored references are not yet supported)", typ)
 		return
 	}
 	placement := c.resolvePlacement(fd.Annotations)
@@ -646,6 +664,10 @@ func (c *Checker) defineEnum(d *ast.EnumDecl) {
 			ft := c.resolveType(f.Type)
 			if ft == nil {
 				ft = types.TypVoid // fallback to avoid nil
+			}
+			// B0034: reject reference-typed variant fields
+			if containsRef(ft) {
+				c.errorf(f.Pos(), "reference type %s cannot be used as a field type (stored references are not yet supported)", ft)
 			}
 			fields[i] = types.NewVarField(f.Name, ft)
 		}

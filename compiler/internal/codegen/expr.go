@@ -1031,9 +1031,6 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 					var argVals []value.Value
 					for _, arg := range e.Args {
 						argVals = append(argVals, c.genCallArgExpr(arg.Value))
-						if ident, ok := arg.Value.(*ast.IdentExpr); ok {
-							c.clearDropFlag(ident.Name)
-						}
 					}
 					return c.genIndirectCall(closure, sig, argVals)
 				}
@@ -1114,9 +1111,6 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 		for _, arg := range e.Args {
 			argVals = append(argVals, c.genCallArgExpr(arg.Value))
 			argTypes = append(argTypes, c.info.Types[arg.Value])
-			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
-				c.clearDropFlag(ident.Name)
-			}
 		}
 	}
 
@@ -1196,9 +1190,6 @@ func (c *Compiler) genModuleCall(e *ast.CallExpr, moduleName, funcName string) v
 		for _, arg := range e.Args {
 			argVals = append(argVals, c.genCallArgExpr(arg.Value))
 			argTypes = append(argTypes, c.info.Types[arg.Value])
-			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
-				c.clearDropFlag(ident.Name)
-			}
 		}
 	}
 
@@ -1263,10 +1254,6 @@ func (c *Compiler) genGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr) value
 	for _, arg := range e.Args {
 		argVals = append(argVals, c.genCallArgExpr(arg.Value))
 		argTypes = append(argTypes, c.info.Types[arg.Value])
-		// Clear drop flag: argument is moved into the callee
-		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
-			c.clearDropFlag(ident.Name)
-		}
 	}
 
 	// Coerce arguments when crossing type boundaries
@@ -1305,9 +1292,6 @@ func (c *Compiler) genInferredGenericCall(e *ast.CallExpr, inferred *sema.Inferr
 	for _, arg := range e.Args {
 		argVals = append(argVals, c.genCallArgExpr(arg.Value))
 		argTypes = append(argTypes, c.info.Types[arg.Value])
-		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
-			c.clearDropFlag(ident.Name)
-		}
 	}
 
 	// Coerce arguments when crossing type boundaries.
@@ -1349,9 +1333,6 @@ func (c *Compiler) genModuleGenericFuncCall(e *ast.CallExpr, idx *ast.IndexExpr,
 	for _, arg := range e.Args {
 		argVals = append(argVals, c.genCallArgExpr(arg.Value))
 		argTypes = append(argTypes, c.info.Types[arg.Value])
-		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
-			c.clearDropFlag(ident.Name)
-		}
 	}
 
 	// Coerce arguments when crossing type boundaries
@@ -3086,10 +3067,6 @@ func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param)
 		}
 		argVals = append(argVals, c.genCallArgExpr(arg.Value))
 		argTypes = append(argTypes, c.info.Types[arg.Value])
-		// Clear drop flag: argument is moved into the callee
-		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
-			c.clearDropFlag(ident.Name)
-		}
 	}
 	return argVals, argTypes
 }
@@ -5635,9 +5612,6 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 		argVals = append(argVals, v)
 		argLLVMTypes = append(argLLVMTypes, v.Type())
 		argTypes = append(argTypes, c.info.Types[arg.Value])
-		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
-			c.clearDropFlag(ident.Name)
-		}
 	}
 
 	// 3. Resolve the target function

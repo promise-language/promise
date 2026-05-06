@@ -1015,7 +1015,24 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				if ident, ok := s.Value.(*ast.IdentExpr); ok && ident.Name == target.Name {
 					return
 				}
-				c.emitDropCall(binding)
+				// For string/vector types (i8* pointers), the new value might alias the
+				// old (e.g., v = sort(v) returns the same pointer). Compare old/new at
+				// runtime and only drop if they differ (T0068).
+				if binding.kind == bindingDropString {
+					oldVal := c.block.NewLoad(binding.alloca.ElemType, binding.alloca)
+					diffBlk := c.newBlock("reassign.diff")
+					mergeBlk := c.newBlock("reassign.merge")
+					isSame := c.block.NewICmp(enum.IPredEQ, oldVal, val)
+					c.block.NewCondBr(isSame, mergeBlk, diffBlk)
+					c.block = diffBlk
+					c.emitStringDropCall(binding)
+					if c.block.Term == nil {
+						c.block.NewBr(mergeBlk)
+					}
+					c.block = mergeBlk
+				} else {
+					c.emitDropCall(binding)
+				}
 				// Reset drop flag: new value is now owned
 				c.block.NewStore(constant.NewInt(irtypes.I1, 1), binding.dropFlag)
 			}

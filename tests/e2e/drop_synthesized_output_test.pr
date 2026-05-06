@@ -1,5 +1,6 @@
-// B0158: Verify synthesized drop infrastructure exists (drop is registered but
-// body is a no-op until ownership tracking enables safe field cleanup — B0160).
+// B0158: Verify synthesized drop calls emitFieldDrops on droppable fields.
+// Outer has no explicit drop() but contains Inner which does — synthesized
+// drop cascades: Outer.drop → Inner.drop (prints) → pal_free(Inner) → pal_free(Outer).
 type Inner {
   string name;
 
@@ -12,7 +13,7 @@ type Outer {
   Inner inner;
 }
 
-main() `test(expected: "value: world") {
+main() `test(expected: "value: world\ndrop: world") {
   o := Outer(inner: Inner(name: "world"));
   print_line("value: " + o.inner.name);
 }

@@ -4639,17 +4639,27 @@ func (c *Compiler) defineSynthesizedModuleDrops(file *ast.File, moduleName strin
 
 // defineSynthesizedDropBody generates the body for a synthesized drop function.
 // It drops all droppable fields in reverse order and frees the instance.
+// B0160: was a no-op pending T0064 (container ownership tracking). Now enabled
+// since drop flags + clearDropFlag at move sites prevent double-free of aliased values.
 func (c *Compiler) defineSynthesizedDropBody(fn *ir.Func, named *types.Named) {
-	// NOTE: The synthesized drop body is intentionally a no-op for now (B0160).
-	// emitFieldDrops would call Vector.drop on container-typed fields, but
-	// container types don't yet have ownership tracking (T0064). Without move
-	// tracking, containers passed by value create aliases — freeing the field's
-	// buffer here causes use-after-free. Similarly, pal_free on the instance is
-	// unsafe without ownership tracking (B0159).
-	// The type still has HasDrop() for cascade propagation — when ownership
-	// tracking is ready, the body will be enabled to call emitFieldDrops + pal_free.
 	entry := fn.NewBlock(".entry")
-	entry.NewRet(nil)
+	c.block = entry
+
+	// Set up method context for emitFieldDrops (needs locals["this"])
+	savedLocals := c.locals
+	c.locals = make(map[string]*ir.InstAlloca)
+	thisAlloca := entry.NewAlloca(irtypes.I8Ptr)
+	entry.NewStore(fn.Params[0], thisAlloca)
+	c.locals["this"] = thisAlloca
+
+	// Drop all droppable fields in reverse declaration order
+	c.emitFieldDrops(named)
+
+	// Free the instance struct itself
+	c.block.NewCall(c.palFree, fn.Params[0])
+
+	c.block.NewRet(nil)
+	c.locals = savedLocals
 }
 
 // lookupNamedType finds a Named type in sema info by name.

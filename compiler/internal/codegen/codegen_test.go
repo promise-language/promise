@@ -8955,9 +8955,11 @@ func TestDropSynthesizedBasic(t *testing.T) {
 			o := Outer(inner: Inner(id: 1));
 		}
 	`)
-	// Outer gets a synthesized drop (no-op body for now, B0160)
+	// Outer gets a synthesized drop that calls Inner.drop on its field + pal_free
 	assertContains(t, ir, "call void @Outer.drop")
 	assertContains(t, ir, "o.dropflag")
+	assertContains(t, ir, "call void @Inner.drop") // emitFieldDrops cascades
+	assertContains(t, ir, "call void @pal_free(")  // frees Outer instance
 }
 
 // B0158: Cascading synthesized drop — Outer contains Middle contains Inner

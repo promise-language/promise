@@ -378,7 +378,7 @@ type NumberStream {
   }
 }
 
-test_custom_stream_for_in() `test(allow_leaks: true) {
+test_custom_stream_for_in() `test {
   s := NumberStream(start: 10, count: 3);
   int sum = 0;
   for x in s {
@@ -387,7 +387,7 @@ test_custom_stream_for_in() `test(allow_leaks: true) {
   assert(sum == 33, "10+11+12=33");
 }
 
-test_custom_stream_empty() `test(allow_leaks: true) {
+test_custom_stream_empty() `test {
   s := NumberStream(start: 0, count: 0);
   int count = 0;
   for _ in s {
@@ -396,7 +396,7 @@ test_custom_stream_empty() `test(allow_leaks: true) {
   assert(count == 0, "empty stream yields nothing");
 }
 
-test_custom_stream_with_index() `test(allow_leaks: true) {
+test_custom_stream_with_index() `test {
   s := NumberStream(start: 100, count: 3);
   int last_idx = -1;
   int last_val = -1;
@@ -408,7 +408,7 @@ test_custom_stream_with_index() `test(allow_leaks: true) {
   assert(last_val == 102, "last val=102");
 }
 
-test_custom_stream_break() `test(allow_leaks: true) {
+test_custom_stream_break() `test {
   s := NumberStream(start: 0, count: 100);
   int sum = 0;
   for x in s {
@@ -420,7 +420,7 @@ test_custom_stream_break() `test(allow_leaks: true) {
   assert(sum == 3, "stream break: 0+1+2=3");
 }
 
-test_custom_stream_continue() `test(allow_leaks: true) {
+test_custom_stream_continue() `test {
   s := NumberStream(start: 0, count: 6);
   int sum = 0;
   for x in s {
@@ -877,7 +877,7 @@ test_vector_iter_every() `test(allow_leaks: true) {
   }), "not all even");
 }
 
-test_vector_iter_find() `test(allow_leaks: true) {
+test_vector_iter_find() `test {
   int[] v = [10, 20, 30, 40];
   if val := v.iter().find(|int x| -> bool {
     return x > 25;
@@ -888,7 +888,7 @@ test_vector_iter_find() `test(allow_leaks: true) {
   }
 }
 
-test_vector_iter_reduce() `test(allow_leaks: true) {
+test_vector_iter_reduce() `test {
   int[] v = [3, 1, 4, 1, 5];
   if val := v.iter().reduce(|int a, int b| -> int {
     if a > b {
@@ -902,7 +902,7 @@ test_vector_iter_reduce() `test(allow_leaks: true) {
   }
 }
 
-test_vector_iter_last() `test(allow_leaks: true) {
+test_vector_iter_last() `test {
   int[] v = [10, 20, 30];
   if val := v.iter().last() {
     assert(val == 30, "last=30");
@@ -911,7 +911,7 @@ test_vector_iter_last() `test(allow_leaks: true) {
   }
 }
 
-test_vector_iter_first() `test(allow_leaks: true) {
+test_vector_iter_first() `test {
   int[] v = [10, 20, 30];
   if val := v.iter().first() {
     assert(val == 10, "first=10");
@@ -1035,7 +1035,7 @@ test_fniter_inherits_combinators() `test(allow_leaks: true) {
   assert(found, "_FnIter has inherited .any()");
 }
 
-test_fniter_chain_find() `test(allow_leaks: true) {
+test_fniter_chain_find() `test {
   a := Counter(current: 0, limit: 5);
   b := Counter(current: 100, limit: 105);
   // chain returns _FnIter — test find on it
@@ -1048,7 +1048,7 @@ test_fniter_chain_find() `test(allow_leaks: true) {
   }
 }
 
-test_fniter_reduce() `test(allow_leaks: true) {
+test_fniter_reduce() `test {
   c := Counter(current: 1, limit: 6);
   // filter returns _FnIter, then reduce on it
   if val := c.filter(|int x| -> bool {

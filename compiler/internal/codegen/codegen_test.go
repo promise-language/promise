@@ -14370,3 +14370,51 @@ func TestGenericTypeInGenericFuncBody(t *testing.T) {
 	`)
 	assertContains(t, ir, "Wrapper[int]")
 }
+
+// B0173: If-unwrap should clean up iterator temps at the merge block,
+// not only in the else branch.
+func TestIterCleanupIfUnwrapMergeBlock(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[] v = [10, 20, 30, 40];
+			if val := v.iter().find(|int x| -> bool { return x > 25; }) {
+				int y = val;
+			}
+		}
+	`)
+	// __promise_iter_cleanup must appear AFTER the ifunwrap.end merge label,
+	// not inside a branch. Both then and else paths should reach the cleanup.
+	assertContains(t, ir, "__promise_iter_cleanup")
+	assertContains(t, ir, "ifunwrap.end")
+}
+
+// B0173: Stream for-in should free the iterator instance after the loop.
+func TestStreamForInIterCleanup(t *testing.T) {
+	ir := generateIR(t, `
+		type NumberIter is Iterator[int] {
+			int i;
+			int n;
+			next() int? {
+				if this.i >= this.n { return none; }
+				int val = this.i;
+				this.i = this.i + 1;
+				return val;
+			}
+		}
+		type NumberStream {
+			int start;
+			int count;
+			iter() NumberIter {
+				return NumberIter(i: this.start, n: this.count);
+			}
+		}
+		main() {
+			s := NumberStream(start: 0, count: 3);
+			for x in s {
+				int y = x;
+			}
+		}
+	`)
+	// The iterator instance from .iter() should be freed at loop exit.
+	assertContains(t, ir, "call void @pal_free")
+}

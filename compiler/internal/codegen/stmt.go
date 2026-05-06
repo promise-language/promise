@@ -2134,6 +2134,13 @@ func (c *Compiler) genIfStmt(s *ast.IfStmt) {
 		c.block.NewCondBr(cond, thenBlock, mergeBlock)
 	}
 
+	// B0173: Save heap temps from the condition expression so branches don't
+	// prematurely clean them. Cleanup runs once in the merge block.
+	savedHeapTemps := c.heapTemps
+	savedHeapTempMap := c.heapTempMap
+	c.heapTemps = nil
+	c.heapTempMap = make(map[value.Value]int)
+
 	// Then branch
 	c.block = thenBlock
 	if c.shouldInstrument() {
@@ -2163,6 +2170,11 @@ func (c *Compiler) genIfStmt(s *ast.IfStmt) {
 	}
 
 	c.block = mergeBlock
+
+	// B0173: Restore heap temps and clean up in the merge block.
+	c.heapTemps = savedHeapTemps
+	c.heapTempMap = savedHeapTempMap
+	c.cleanupHeapTemps()
 }
 
 // genIfStmtValue generates an if/else statement in value-producing position
@@ -2680,6 +2692,13 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 		c.block.NewCondBr(flag, thenBlock, mergeBlock)
 	}
 
+	// B0173: Save heap temps from the init expression so branches don't
+	// prematurely clean them. Cleanup runs once in the merge block.
+	savedHeapTemps := c.heapTemps
+	savedHeapTempMap := c.heapTempMap
+	c.heapTemps = nil
+	c.heapTempMap = make(map[value.Value]int)
+
 	// Then: unwrap value, bind to local (scoped to then-block only)
 	c.block = thenBlock
 	innerVal := c.block.NewExtractValue(optVal, 1)
@@ -2712,6 +2731,12 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 	}
 
 	c.block = mergeBlock
+
+	// B0173: Restore heap temps and clean up in the merge block so both
+	// then and else paths reach the cleanup (via their branches to mergeBlock).
+	c.heapTemps = savedHeapTemps
+	c.heapTempMap = savedHeapTempMap
+	c.cleanupHeapTemps()
 }
 
 // --- While loop ---
@@ -2990,6 +3015,26 @@ func (c *Compiler) genForInCustomStream(s *ast.ForInStmt, streamVal value.Value,
 
 	// Delegate to genForInCustomIter with the iterator value
 	c.genForInCustomIter(s, iterResult, iterRetType)
+
+	// B0173: Clean up the iterator instance after the loop. The .iter() call
+	// allocates a heap instance that is not tracked by statement-level cleanup
+	// (synthetic call, no AST node for maybeTrackIterTemp).
+	if c.block != nil && c.block.Term == nil {
+		iterNamed := extractNamed(iterRetType)
+		if iterNamed != nil && !iterNamed.IsValueType() {
+			if _, ok := iterResult.Type().(*irtypes.StructType); ok {
+				instancePtr := c.block.NewExtractValue(iterResult, 1)
+				if iterNamed.IsStructural() && c.iterCleanup != nil {
+					// Structural interface (e.g., Iterator[T]): use __promise_iter_cleanup
+					// which handles _FnIter layout (frees env + instance).
+					c.block.NewCall(c.iterCleanup, instancePtr)
+				} else {
+					// Concrete type (e.g., NumberIter): free the instance allocation.
+					c.block.NewCall(c.palFree, instancePtr)
+				}
+			}
+		}
+	}
 }
 
 // emitIterNext emits a call to a method on a value, using virtual dispatch

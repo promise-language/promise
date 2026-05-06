@@ -9834,6 +9834,23 @@ func TestGoroutineExitSkipsFreeForTask(t *testing.T) {
 	assertContains(t, ir, "do_free:")
 }
 
+func TestFireAndForgetNonVoidNoResultBuffer(t *testing.T) {
+	// B0109: go non_void_func() as fire-and-forget (result discarded) should NOT
+	// allocate a result buffer. result_ptr stays null so goroutine_exit frees G.
+	ir := generateIR(t, `
+		compute() int { return 42; }
+		main() {
+			go compute();
+		}
+	`)
+	// The coroutine body should null-check result_ptr before storing
+	assertContains(t, ir, "store_result:")
+	assertContains(t, ir, "after_store:")
+	// Main function should go directly from promise_g_new to promise_sched_enqueue
+	// without storing to result_ptr field (no inttoptr sentinel, no pal_alloc between them)
+	assertNotContains(t, ir, "inttoptr i64 1 to i8*")
+}
+
 func TestChannelSendCoroutineRendezvous(t *testing.T) {
 	// Unbuffered channel send inside a go block uses coroutine-mode rendezvous:
 	// after writing the value, the sender parks and suspends waiting for the

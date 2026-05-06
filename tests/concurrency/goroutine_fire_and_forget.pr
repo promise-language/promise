@@ -119,3 +119,42 @@ test_fire_and_forget_many_go_calls() `test(exclude: "wasm32") {
   sleep(Duration.from_millis(100));
   assert(true, "100 fire-and-forget go calls completed");
 }
+
+// B0109: Non-void fire-and-forget go func() should not leak G or result buffer.
+compute() int {
+  return 42;
+}
+
+get_string() string {
+  return "hello";
+}
+
+test_fire_and_forget_non_void() `test(exclude: "wasm32") {
+  // go non_void_func() as fire-and-forget — result discarded, G must be freed
+  go compute();
+  sleep(Duration.from_millis(50));
+  assert(true, "fire-and-forget non-void go call completed without crash");
+}
+
+test_fire_and_forget_non_void_many() `test(exclude: "wasm32") {
+  // Many fire-and-forget non-void go calls — verifies no accumulating leaks
+  for i in 0..100 {
+    go compute();
+  }
+  sleep(Duration.from_millis(100));
+  assert(true, "100 fire-and-forget non-void go calls completed");
+}
+
+test_fire_and_forget_non_void_string() `test(exclude: "wasm32") {
+  // Fire-and-forget with string return type
+  go get_string();
+  sleep(Duration.from_millis(50));
+  assert(true, "fire-and-forget non-void string go call completed");
+}
+
+test_non_void_task_still_works() `test(exclude: "wasm32") {
+  // go non_void_func() as task (result received) should still work
+  t := go compute();
+  int result = <-t;
+  assert(result == 42, "non-void task returned correct result");
+}

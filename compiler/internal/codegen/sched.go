@@ -2055,6 +2055,7 @@ func (c *Compiler) wrapMainWithScheduler() {
 	savedCoroCleanup := c.coroCleanupBlk
 	savedCoroSuspend := c.coroSuspendBlk
 	savedGoExprFF := c.goExprFireAndForget
+	c.goExprFireAndForget = false // reset for inner statements (B0109)
 
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)

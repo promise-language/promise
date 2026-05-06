@@ -4667,6 +4667,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	savedLoopScopeDepth := c.loopScopeDepth
 	savedWritebacks := c.lambdaWritebacks
 	savedGoExprFF2 := c.goExprFireAndForget
+	c.goExprFireAndForget = false // reset for inner statements (B0109)
 
 	// Generate lambda body with fresh scope state
 	c.fn = fn
@@ -5566,15 +5567,24 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 
 	if !isVoid {
 		result := bodyBlk.NewCall(targetFn, callArgs...)
-		// Store result via G.result_ptr (set by caller before enqueue)
+		// Store result via G.result_ptr (set by caller before enqueue).
+		// For fire-and-forget non-void, result_ptr is null — skip store (B0109).
 		gTy := goroutineStructType()
 		currentG := bodyBlk.NewLoad(irtypes.I8Ptr, c.currentGGlobal)
 		gPtr := bodyBlk.NewBitCast(currentG, irtypes.NewPointer(gTy))
 		rpField := bodyBlk.NewGetElementPtr(gTy, gPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldResultPtr)))
 		rpVal := bodyBlk.NewLoad(irtypes.I8Ptr, rpField)
-		typedRP := bodyBlk.NewBitCast(rpVal, irtypes.NewPointer(resultLLVM))
-		bodyBlk.NewStore(result, typedRP)
+		rpNotNull := bodyBlk.NewICmp(enum.IPredNE, rpVal, constant.NewNull(irtypes.I8Ptr))
+		storeResultBlk := coroFn.NewBlock("store_result")
+		afterStoreBlk := coroFn.NewBlock("after_store")
+		bodyBlk.NewCondBr(rpNotNull, storeResultBlk, afterStoreBlk)
+
+		typedRP := storeResultBlk.NewBitCast(rpVal, irtypes.NewPointer(resultLLVM))
+		storeResultBlk.NewStore(result, typedRP)
+		storeResultBlk.NewBr(afterStoreBlk)
+
+		bodyBlk = afterStoreBlk
 	} else {
 		bodyBlk.NewCall(targetFn, callArgs...)
 	}
@@ -5609,7 +5619,7 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 	handle := c.block.NewCall(coroFn, argVals...)
 	gRaw := c.block.NewCall(c.funcs["promise_g_new"], handle)
 
-	if !isVoid || !c.goExprFireAndForget {
+	if !c.goExprFireAndForget {
 		gTy := goroutineStructType()
 		gPtr := c.block.NewBitCast(gRaw, irtypes.NewPointer(gTy))
 		rpField := c.block.NewGetElementPtr(gTy, gPtr,
@@ -5627,8 +5637,9 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 			c.block.NewStore(sentinel, rpField)
 		}
 	}
-	// Fire-and-forget void: result_ptr stays null (from promise_g_new),
-	// so goroutine_exit frees the G struct when the goroutine completes.
+	// Fire-and-forget (void or non-void): result_ptr stays null (from
+	// promise_g_new), so goroutine_exit frees the G struct. The coro body
+	// null-checks result_ptr before storing (B0109).
 
 	c.block.NewCall(c.funcs["promise_sched_enqueue"], gRaw)
 
@@ -5956,6 +5967,7 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	savedCoroCleanup := c.coroCleanupBlk
 	savedCoroSuspend := c.coroSuspendBlk
 	savedGoExprFF := c.goExprFireAndForget
+	c.goExprFireAndForget = false // reset for inner statements (B0109)
 
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)

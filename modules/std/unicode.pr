@@ -1,0 +1,392 @@
+// std/unicode.pr — Unicode normalization (NFC, NFD).
+// Uses sorted sparse tables from generated unicode_*.pr files.
+// Hangul syllables are handled algorithmically.
+// NFKC/NFKD deferred to a follow-up (D0004).
+// Hangul constants — private functions (not getters) for WASM compatibility.
+_hangul_sbase() int {
+  return 44032;
+}
+_hangul_lbase() int {
+  return 4352;
+}
+_hangul_vbase() int {
+  return 4449;
+}
+_hangul_tbase() int {
+  return 4519;
+}
+_hangul_lcount() int {
+  return 19;
+}
+_hangul_vcount() int {
+  return 21;
+}
+_hangul_tcount() int {
+  return 28;
+}
+_hangul_ncount() int {
+  return 588;
+}
+_hangul_scount() int {
+  return 11172;
+}
+
+// --- Public API ---
+
+normalize_nfc(string value) string `public `doc("Returns the NFC (Canonical Decomposition, then Canonical Composition) form of the string.") {
+  if value.len == 0 {
+    return "";
+  }
+  // Fast path: pure ASCII is already NFC
+  if _is_ascii(value) {
+    return value;
+  }
+  // Load tables
+  i32[] ccc_cp = _ccc_codepoints();
+  i32[] ccc_val = _ccc_values();
+  i32[] decomp_cp = _canon_decomp_codepoints();
+  i32[] decomp_off = _canon_decomp_offsets();
+  i32[] decomp_data = _canon_decomp_data();
+  i32[] comp_f = _comp_first();
+  i32[] comp_s = _comp_second();
+  i32[] comp_r = _comp_result();
+  // Decompose to NFD
+  int[] cps = _decompose_string(value, ccc_cp, ccc_val, decomp_cp, decomp_off, decomp_data);
+  // Compose to NFC
+  int[] composed = _compose(cps, ccc_cp, ccc_val, comp_f, comp_s, comp_r);
+  return _encode_codepoints(composed);
+}
+
+normalize_nfd(string value) string `public `doc("Returns the NFD (Canonical Decomposition) form of the string.") {
+  if value.len == 0 {
+    return "";
+  }
+  if _is_ascii(value) {
+    return value;
+  }
+  i32[] ccc_cp = _ccc_codepoints();
+  i32[] ccc_val = _ccc_values();
+  i32[] decomp_cp = _canon_decomp_codepoints();
+  i32[] decomp_off = _canon_decomp_offsets();
+  i32[] decomp_data = _canon_decomp_data();
+  int[] cps = _decompose_string(value, ccc_cp, ccc_val, decomp_cp, decomp_off, decomp_data);
+  return _encode_codepoints(cps);
+}
+
+is_nfc(string value) bool `public `doc("Returns true if the string is in NFC form. Pure ASCII strings are always NFC.") {
+  if _is_ascii(value) {
+    return true;
+  }
+  // Quick check using QC tables and byte-level UTF-8 decoding
+  i32[] no_start = _nfc_qc_no_start();
+  i32[] no_end = _nfc_qc_no_end();
+  i32[] maybe_start = _nfc_qc_maybe_start();
+  i32[] maybe_end = _nfc_qc_maybe_end();
+  i32[] ccc_cp = _ccc_codepoints();
+  i32[] ccc_val = _ccc_values();
+  int last_ccc = 0;
+  bool maybe = false;
+  int pos = 0;
+  while pos < value.len {
+    int cp = _decode_one(value, pos);
+    pos = pos + _utf8_len(value.byte_at(pos));
+    int cc = _lookup_ccc(cp, ccc_cp, ccc_val);
+    if cc != 0 && last_ccc > cc {
+      return false;
+    }
+    if _in_ranges(no_start, no_end, cp as! i32) {
+      return false;
+    }
+    if _in_ranges(maybe_start, maybe_end, cp as! i32) {
+      maybe = true;
+    }
+    last_ccc = cc;
+  }
+  if maybe {
+    string original = "{value}";
+    return normalize_nfc(value) == original;
+  }
+  return true;
+}
+
+is_nfd(string value) bool `public `doc("Returns true if the string is in NFD form. Pure ASCII strings are always NFD.") {
+  if _is_ascii(value) {
+    return true;
+  }
+  i32[] no_start = _nfd_qc_no_start();
+  i32[] no_end = _nfd_qc_no_end();
+  i32[] ccc_cp = _ccc_codepoints();
+  i32[] ccc_val = _ccc_values();
+  int last_ccc = 0;
+  int pos = 0;
+  while pos < value.len {
+    int cp = _decode_one(value, pos);
+    pos = pos + _utf8_len(value.byte_at(pos));
+    int cc = _lookup_ccc(cp, ccc_cp, ccc_val);
+    if cc != 0 && last_ccc > cc {
+      return false;
+    }
+    if _in_ranges(no_start, no_end, cp as! i32) {
+      return false;
+    }
+    last_ccc = cc;
+  }
+  return true;
+}
+
+// --- Internal: UTF-8 encoding ---
+
+_is_ascii(string & s) bool {
+  int i = 0;
+  while i < s.len {
+    if s.byte_at(i) > 127u8 {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+_encode_codepoints(int[] cps) string {
+  u8[] buf = Vector[u8](capacity: cps.len * 2);
+  int i = 0;
+  while i < cps.len {
+    _encode_utf8(buf, cps[i]);
+    i = i + 1;
+  }
+  return string.from_bytes(buf);
+}
+
+_encode_utf8(u8[]~buf, int cp) {
+  if cp < 128 {
+    buf.push(cp as! u8);
+  } else if cp < 2048 {
+    buf.push((192 | (cp >> 6)) as! u8);
+    buf.push((128 | (cp & 63)) as! u8);
+  } else if cp < 65536 {
+    buf.push((224 | (cp >> 12)) as! u8);
+    buf.push((128 | ((cp >> 6) & 63)) as! u8);
+    buf.push((128 | (cp & 63)) as! u8);
+  } else {
+    buf.push((240 | (cp >> 18)) as! u8);
+    buf.push((128 | ((cp >> 12) & 63)) as! u8);
+    buf.push((128 | ((cp >> 6) & 63)) as! u8);
+    buf.push((128 | (cp & 63)) as! u8);
+  }
+}
+
+// Decode one UTF-8 codepoint from string at byte position pos.
+_decode_one(string & s, int pos) int {
+  int b0 = s.byte_at(pos) as! int;
+  if b0 < 128 {
+    return b0;
+  } else if b0 < 224 {
+    return ((b0 & 31) << 6) | (s.byte_at(pos + 1) as! int & 63);
+  } else if b0 < 240 {
+    return ((b0 & 15) << 12) | ((s.byte_at(pos + 1) as! int & 63) << 6) | (s.byte_at(pos + 2) as! int & 63);
+  } else {
+    return ((b0 & 7) << 18) | ((s.byte_at(pos + 1) as! int & 63) << 12) | ((s.byte_at(pos + 2) as! int & 63) << 6) | (s.byte_at(pos + 3) as! int & 63);
+  }
+}
+
+// Return the byte length of a UTF-8 sequence given its first byte.
+_utf8_len(u8 first_byte) int {
+  int b = first_byte as! int;
+  if b < 128 {
+    return 1;
+  }
+  if b < 224 {
+    return 2;
+  }
+  if b < 240 {
+    return 3;
+  }
+  return 4;
+}
+
+// --- Internal: Binary search ---
+
+_binary_search_i32(i32[] sorted, i32 target) int {
+  int lo = 0;
+  int hi = sorted.len - 1;
+  while lo <= hi {
+    int mid = lo + (hi - lo) / 2;
+    if sorted[mid] < target {
+      lo = mid + 1;
+    } else if sorted[mid] > target {
+      hi = mid - 1;
+    } else {
+      return mid;
+    }
+  }
+  return -1;
+}
+
+// Returns true if cp falls within any [start, end] range.
+_in_ranges(i32[] starts, i32[] ends, i32 cp) bool {
+  int lo = 0;
+  int hi = starts.len - 1;
+  int result = -1;
+  while lo <= hi {
+    int mid = lo + (hi - lo) / 2;
+    if starts[mid] <= cp {
+      result = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  if result < 0 {
+    return false;
+  }
+  return cp <= ends[result];
+}
+
+// --- Internal: CCC lookup ---
+
+_lookup_ccc(int cp, i32[] ccc_cp, i32[] ccc_val) int {
+  int idx = _binary_search_i32(ccc_cp, cp as! i32);
+  if idx < 0 {
+    return 0;
+  }
+  return ccc_val[idx] as! int;
+}
+
+_lookup_ccc_i32(i32 cp, i32[] ccc_cp, i32[] ccc_val) int {
+  int idx = _binary_search_i32(ccc_cp, cp);
+  if idx < 0 {
+    return 0;
+  }
+  return ccc_val[idx] as! int;
+}
+
+// --- Internal: Decomposition ---
+
+_decompose_string(string s, i32[] ccc_cp, i32[] ccc_val, i32[] decomp_cp, i32[] decomp_off, i32[] decomp_data) int[] {
+  int[] result = Vector[int](capacity: s.len);
+  for c in s {
+    _full_decompose(c as! int, decomp_cp, decomp_off, decomp_data, result);
+  }
+  _canonical_order(result, ccc_cp, ccc_val);
+  return result;
+}
+
+// Recursively decompose a codepoint, appending results to output.
+_full_decompose(int cp, i32[] decomp_cp, i32[] decomp_off, i32[] decomp_data, int[]~output) {
+  // Hangul syllable decomposition (algorithmic)
+  if cp >= _hangul_sbase() && cp < _hangul_sbase() + _hangul_scount() {
+    int s_index = cp - _hangul_sbase();
+    int l_index = s_index / _hangul_ncount();
+    int v_index = (s_index % _hangul_ncount()) / _hangul_tcount();
+    int t_index = s_index % _hangul_tcount();
+    output.push(_hangul_lbase() + l_index);
+    output.push(_hangul_vbase() + v_index);
+    if t_index > 0 {
+      output.push(_hangul_tbase() + t_index);
+    }
+  } else {
+    // Table lookup
+    int idx = _binary_search_i32(decomp_cp, cp as! i32);
+    if idx >= 0 {
+      int start = decomp_off[idx] as! int;
+      int end = decomp_off[idx + 1] as! int;
+      int i = start;
+      while i < end {
+        _full_decompose(decomp_data[i] as! int, decomp_cp, decomp_off, decomp_data, output);
+        i = i + 1;
+      }
+    } else {
+      output.push(cp);
+    }
+  }
+}
+
+// Canonical Ordering Algorithm: bubble-sort combining marks by CCC.
+_canonical_order(int[]~cps, i32[] ccc_cp, i32[] ccc_val) {
+  int i = 1;
+  while i < cps.len {
+    int cc_prev = _lookup_ccc(cps[i - 1], ccc_cp, ccc_val);
+    int cc_curr = _lookup_ccc(cps[i], ccc_cp, ccc_val);
+    if cc_curr > 0 && cc_prev > cc_curr {
+      int temp = cps[i - 1];
+      cps[i - 1] = cps[i];
+      cps[i] = temp;
+      if i > 1 {
+        i = i - 1;
+      }
+    } else {
+      i = i + 1;
+    }
+  }
+}
+
+// --- Internal: Composition ---
+
+_compose(int[] nfd, i32[] ccc_cp, i32[] ccc_val, i32[] comp_f, i32[] comp_s, i32[] comp_r) int[] {
+  if nfd.len == 0 {
+    return nfd;
+  }
+  int[] result = Vector[int](capacity: nfd.len);
+  result.push(nfd[0]);
+  int starter_idx = -1;
+  if _lookup_ccc(nfd[0], ccc_cp, ccc_val) == 0 {
+    starter_idx = 0;
+  }
+  int last_cc = 0;
+  int i = 1;
+  while i < nfd.len {
+    int cp = nfd[i];
+    int cc = _lookup_ccc(cp, ccc_cp, ccc_val);
+    if starter_idx >= 0 && (last_cc < cc || last_cc == 0) {
+      int composed = _lookup_composition(result[starter_idx], cp, comp_f, comp_s, comp_r);
+      if composed >= 0 {
+        result[starter_idx] = composed;
+        i = i + 1;
+        continue;
+      }
+    }
+    if cc == 0 {
+      starter_idx = result.len;
+      last_cc = 0;
+    } else {
+      last_cc = cc;
+    }
+    result.push(cp);
+    i = i + 1;
+  }
+  return result;
+}
+
+// Look up a canonical composition: first + second → composed codepoint, or -1.
+_lookup_composition(int first, int second, i32[] comp_f, i32[] comp_s, i32[] comp_r) int {
+  // Hangul L + V → LV
+  if first >= _hangul_lbase() && first < _hangul_lbase() + _hangul_lcount() {
+    if second >= _hangul_vbase() && second < _hangul_vbase() + _hangul_vcount() {
+      return _hangul_sbase() + (first - _hangul_lbase()) * _hangul_ncount() + (second - _hangul_vbase()) * _hangul_tcount();
+    }
+  }
+  // Hangul LV + T → LVT
+  if first >= _hangul_sbase() && first < _hangul_sbase() + _hangul_scount() {
+    if (first - _hangul_sbase()) % _hangul_tcount() == 0 {
+      if second > _hangul_tbase() && second < _hangul_tbase() + _hangul_tcount() {
+        return first + (second - _hangul_tbase());
+      }
+    }
+  }
+  // Table lookup: binary search on (first, second) pair
+  int lo = 0;
+  int hi = comp_f.len - 1;
+  i32 f = first as! i32;
+  i32 s = second as! i32;
+  while lo <= hi {
+    int mid = lo + (hi - lo) / 2;
+    if comp_f[mid] < f || (comp_f[mid] == f && comp_s[mid] < s) {
+      lo = mid + 1;
+    } else if comp_f[mid] > f || (comp_f[mid] == f && comp_s[mid] > s) {
+      hi = mid - 1;
+    } else {
+      return comp_r[mid] as! int;
+    }
+  }
+  return -1;
+}

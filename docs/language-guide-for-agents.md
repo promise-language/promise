@@ -543,12 +543,12 @@ use json as j;
 // Usage
 string content = io.File.read_content("data.txt")!;    // panic on error
 string dir = path.parent("/usr/local/bin");
-os.set_environment_variable("KEY", "value");
+os.set_env_var("KEY", "value");
 
 // Available modules:
 // io      — File, Dir, BufferedReader/Writer, read_line (stdin)
 // path    — join, parent, file_name, extension, stem, normalize
-// os      — env vars, working_directory, execute (variadic), exit_process
+// os      — env vars, working_dir, execute (variadic), exit_process
 // json    — encode_string, decode_string (generic, via Encodable/Decodable)
 // math    — lerp, map_range, gcd, lcm, sign, is_even, is_odd
 // strings — join, spaces, reverse, is_blank, repeat_join

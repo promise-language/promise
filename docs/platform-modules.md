@@ -92,7 +92,7 @@ in scope. Fewer choices = lower probability of picking the wrong one = more corr
 | `Duration`, `Instant` | **`std/`** | Timing is universal; pure value type; zero API noise |
 | `File`, `BufReader` | **`modules/io`** | Not needed by compute-only programs; `use io;` is a meaningful signal |
 | `read_line`, `read_stdin` | **`modules/io`** | Same PAL path as File; co-locates all stdin/file I/O |
-| `get_env`, `arguments`, `execute` | **`modules/os`** | Process model — irrelevant to library code and pure computation |
+| `get_env`, `args`, `execute` | **`modules/os`** | Process model — irrelevant to library code and pure computation |
 | `path.join`, `path.file_name` | **`modules/path`** | Not every program works with paths |
 | Higher-level time ops | **`modules/time`** | Calendar/TZ/formatting builds on std; not universally needed |
 
@@ -198,7 +198,7 @@ Concrete inventory across std and modules:
 | `File` type | `!wasm` only (no filesystem on WASM) | `modules/io/io.pr` — 4 factory constructors, handle methods, one-shot helpers |
 | `read_line/read_stdin` | `!wasm` only | `modules/io/io.pr` — free functions, `read_line` returns `string?!` (optional+failable) |
 | `exec(...)` | `!wasm` only (no subprocess on WASM) | (not yet implemented) |
-| `arguments` (getter) | different impl on WASM | `modules/os/os.pr` — returns `string[]` from argc/argv globals |
+| `args` (getter) | different impl on WASM | `modules/os/os.pr` — returns `string[]` from argc/argv globals |
 | `get_env(string)` | `!wasm` (WASM env access varies) | (not yet implemented) |
 
 That's ~18 `\`target` annotation uses across std+modules. This replaces an equal number of
@@ -383,7 +383,7 @@ Platform.path_separator     // global getter — no () — cleaner, reads like a
 **Where this applies today**:
 - `Platform.path_separator`, `Platform.line_separator` — compile-time constants, clearly properties
   (implemented as `` `global `` getters on the `Platform` type)
-- `arguments` — set once at startup, effectively readonly after that
+- `args` — set once at startup, effectively readonly after that
 
 **Implementation state**:
 - Type-level getters: fully implemented. `get name type { ... }` inside a type body.
@@ -394,9 +394,9 @@ Platform.path_separator     // global getter — no () — cleaner, reads like a
   zero-arg functions and setters as one-arg void functions (with `$set` suffix). Codegen emits
   calls on property access and assignment.
 
-`os.arguments`, `os.executable_path`, and `os.working_directory` are now module-level getters.
-Failable getters like `working_directory` use `!` unwrap at the call site (`os.working_directory!`).
-`get_environment_variable(name)` remains a function because it takes a parameter.
+`os.args`, `os.executable_path`, and `os.working_dir` are now module-level getters.
+Failable getters like `working_dir` use `!` unwrap at the call site (`os.working_dir!`).
+`get_env_var(name)` remains a function because it takes a parameter.
 
 ---
 
@@ -695,13 +695,13 @@ to the browser event loop, and JS callbacks re-enqueue goroutines when IO comple
 
 ## 8. `modules/os` — Operating System Interface
 
-**Status**: Full OS interface implemented (`get_environment_variable`, `working_directory`, `exit_process`,
-`arguments`, `executable_path`, `execute`, `set_environment_variable`, `set_working_directory`).
+**Status**: Full OS interface implemented (`get_env_var`, `working_dir`, `exit_process`,
+`args`, `executable_path`, `execute`, `set_env_var`, `set_working_dir`).
 Remaining: signal handling.
 
-Applying §6 principles: `arguments`, `executable_path`, and `working_directory` are module-level
-getters (accessed as `os.arguments`, `os.executable_path`, `os.working_directory!`). `exit_process`
-and `execute` stay as functions (they perform actions). `get_environment_variable` stays as a function
+Applying §6 principles: `args`, `executable_path`, and `working_dir` are module-level
+getters (accessed as `os.args`, `os.executable_path`, `os.working_dir!`). `exit_process`
+and `execute` stay as functions (they perform actions). `get_env_var` stays as a function
 because it takes a parameter.
 
 Note: `exit_process` instead of `exit` because the bare name collides with libc's `@exit` symbol
@@ -713,12 +713,12 @@ type OsError is error `public `doc("An operating system error.") {
     int code;
 }
 
-get_environment_variable(string name) string? `public
+get_env_var(string name) string? `public
     `doc("Returns the value of the named environment variable.
           Returns none if the variable is not defined.
           An empty string is returned when the variable is set but empty.");
 
-get working_directory string! `public
+get working_dir string! `public
     `doc("Returns the absolute path of the current working directory.
           Raises an error if the OS call fails.");
 
@@ -726,7 +726,7 @@ exit_process(int code) `public
     `doc("Terminates the process immediately with the given exit code.
           Does not return. Does not run destructors or cleanup.");
 
-get arguments string[] `public
+get args string[] `public
     `doc("Returns the command-line arguments passed to the program,
           excluding the executable path.");
 
@@ -743,7 +743,7 @@ type ProcessResult `public `doc("The result of executing a subprocess.
     string standard_error;
 }
 
-execute(string program, ...string arguments) ProcessResult! `public
+execute(string program, ...string args) ProcessResult! `public
     `doc("Executes a program with the given arguments and waits for it to complete.
           Accepts arguments inline or as a pre-built string[].
           Returns a ProcessResult containing the exit code and captured standard
@@ -753,13 +753,13 @@ execute(string program, ...string arguments) ProcessResult! `public
 
 // --- Environment mutation (implemented) ---
 
-set_environment_variable(string name, string? value) `public
+set_env_var(string name, string? value) `public
     `doc("Sets or removes the named environment variable.
           When value is present, sets the variable. When absent, removes it.");
 
 // --- Working directory mutation (implemented) ---
 
-set_working_directory(string path) ! `public
+set_working_dir(string path) ! `public
     `doc("Changes the current working directory to the given path.
           Raises an error if the path does not exist or is not a directory.");
 
@@ -787,16 +787,16 @@ infrastructure patterns were introduced:
 
 - **Failable extern bridges** (`failable_bridge.go`): Bridge writes `{i1, T, i8*}` result
   struct matching regular failable functions. `genExternCall` loads the result directly.
-  Used by `get_working_directory`.
+  Used by `get_working_dir`.
 - **Optional extern bridges**: Bridge writes `{i1, T}` optional struct. `genExternCall`
-  detects `*types.Optional` return types and loads directly. Used by `get_environment_variable`.
+  detects `*types.Optional` return types and loads directly. Used by `get_env_var`.
 - **Error construction** (`constructErrorFromCStr`/`constructErrorFromGlobalStr`): Allocates
   error instances with RTTI and message fields in LLVM IR, for use in bridge error paths.
 
-**`arguments`/`executable_path` implementation**: The C `main(argc, argv)` stores both values into
+**`args`/`executable_path` implementation**: The C `main(argc, argv)` stores both values into
 globals (`@__promise_argc`, `@__promise_argv`) at the start of the entry point, before scheduler
 init. The bridge functions (`defineArgsBody`, `defineExecutableBody`) read these globals and
-build the return values. `arguments` skips `argv[0]` (program name) and returns `argv[1..argc-1]`
+build the return values. `args` skips `argv[0]` (program name) and returns `argv[1..argc-1]`
 as a `Vector[string]`. `executable_path` returns `argv[0]` as a string.
 On WASM, `_start` passes `argc=0, argv=null` — both getters return empty results.
 
@@ -897,7 +897,7 @@ modules/
   math/           — lerp, map_range, deg_to_rad, sign_f64            (DONE)
   strings/        — join, spaces, reverse, ...                        (DONE)
   io/             — File, Dir, IoError, read_line, read_stdin          (DONE)
-  os/             — arguments, get_env, get_cwd, exit, execute, OsError     (DONE)
+  os/             — args, get_env, get_cwd, exit, execute, OsError     (DONE)
   time/           — DateTime, unix_now, format/parse calendar ops     (PLACEHOLDER)
   http/           — HTTP server/client                                 (PLACEHOLDER)
 ```
@@ -924,9 +924,9 @@ Both carry an `int code` and a `message()`. One shared `SysError is error` type 
 distinguishable; programs that handle errors from both can use the base `error` type for shared
 handling.
 
-**Q3: `arguments()` includes program name or not?**
+**Q3: `args()` includes program name or not?**
 Go: `os.Args[0]` is the program name. Rust: `std::env::args().next()` is the program name.
-**Decision**: exclude it — `arguments()` returns `argv[1..]`. Use `executable_path()` for `argv[0]`.
+**Decision**: exclude it — `args()` returns `argv[1..]`. Use `executable_path()` for `argv[0]`.
 
 **Q4: `execute` API — blocking only for now?**
 The current `ProcessResult` design is synchronous (blocks until the subprocess exits, captures all
@@ -1004,10 +1004,10 @@ First real use of `` `target `` in production code. Platform constants consolida
 ### Phase E — OS and process
 
 14. ~~**Args capture in `main` prologue**~~ — **Done.** `main(argc, argv)` stores to `@__promise_argc`/`@__promise_argv` globals. WASM `_start` passes 0/null.
-15. ~~**`modules/os` core**~~ — **Done.** `get_environment_variable` (string?), `get_working_directory` (string!), `exit_process`, `arguments` (string[]), `executable_path` (string). Failable and optional extern bridge infrastructure. PAL getenv/getcwd for POSIX/Windows/WASM. 11 tests (excluded on WASM).
+15. ~~**`modules/os` core**~~ — **Done.** `get_env_var` (string?), `get_working_dir` (string!), `exit_process`, `args` (string[]), `executable_path` (string). Failable and optional extern bridge infrastructure. PAL getenv/getcwd for POSIX/Windows/WASM. 11 tests (excluded on WASM).
 16. ~~**`execute`**~~ — **Done.** Synchronous subprocess execution with variadic arguments (`...string`). Returns `ProcessResult!` with exit code + captured stdout/stderr. Decomposed PAL: `pal_spawn` (fork+exec+pipe, returns pid), `pal_read_pipe` (read fd to EOF), `pal_wait_pid` (EINTR retry). TLS caching for spawn fds. Windows/WASM stubs return -1. `ProcessResult` wrapper constructed in pure Promise. Concurrent pipe reads via goroutines eliminate the 64KB deadlock. Accepts inline args (`execute("ls", "-la")`) or pre-built `string[]` (`execute("sh", args)`). 50 tests (excluded on WASM).
-17. ~~**`set_environment_variable(name, value?)`**~~ — **Done.** `string?` value: present sets, absent unsets. Two-extern pattern: `_os_set_env(name, value)` and `_os_unset_env(name)`, dispatched in pure Promise via optional unwrap. PAL: POSIX `setenv`/`unsetenv`; Windows `_putenv_s`/empty-string unset; WASM stub. 5 tests (excluded on WASM).
-18. ~~**`set_working_directory`**~~ — **Done.** PAL: POSIX `chdir`; Windows `_chdir`; WASM stub returns error. Failable `int!` extern bridge (`_os_set_working_directory`), auto-propagation in void failable Promise wrapper. 3 tests (excluded on WASM).
+17. ~~**`set_env_var(name, value?)`**~~ — **Done.** `string?` value: present sets, absent unsets. Two-extern pattern: `_os_set_env(name, value)` and `_os_unset_env(name)`, dispatched in pure Promise via optional unwrap. PAL: POSIX `setenv`/`unsetenv`; Windows `_putenv_s`/empty-string unset; WASM stub. 5 tests (excluded on WASM).
+18. ~~**`set_working_dir`**~~ — **Done.** PAL: POSIX `chdir`; Windows `_chdir`; WASM stub returns error. Failable `int!` extern bridge (`_os_set_working_dir`), auto-propagation in void failable Promise wrapper. 3 tests (excluded on WASM).
 19. ~~**Concurrent stdout/stderr read in `execute`**~~ — **Done.** Decomposed monolithic `pal_execute` into fine-grained PAL primitives (`pal_spawn`, `pal_read_pipe`, `pal_wait_pid`). Concurrent reads use Promise goroutines — stderr is read in a background goroutine while stdout is read in the current goroutine.
 
     **Architecture — PAL decomposition + goroutine concurrency:**
@@ -1025,7 +1025,7 @@ First real use of `` `target `` in production code. Platform constants consolida
 
     *Promise layer* (os.pr): `execute()` uses goroutines for concurrent pipe reads:
     ```
-    int pid = _os_spawn(program, arguments)!;
+    int pid = _os_spawn(program, args)!;
     int stdout_fd = _os_spawn_stdout_fd();
     int stderr_fd = _os_spawn_stderr_fd();
     task[string] stderr_task = go _os_read_pipe(stderr_fd);

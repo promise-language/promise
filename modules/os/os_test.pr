@@ -1,24 +1,24 @@
-// Tests for os module: environment variables, working directory, exit, arguments, executable_path, execute.
-test_get_environment_variable_path() `test(exclude: "wasm32") {
-  string? path = get_environment_variable("PATH");
+// Tests for os module: env vars, working dir, exit, args, executable_path, execute.
+test_get_env_var_path() `test(exclude: "wasm32") {
+  string? path = get_env_var("PATH");
   assert(path is present, "PATH should be present");
 }
 
-test_get_environment_variable_home() `test(exclude: "wasm32") {
-  string? home = get_environment_variable("HOME");
+test_get_env_var_home() `test(exclude: "wasm32") {
+  string? home = get_env_var("HOME");
   assert(home is present, "HOME should be present");
   if h := home {
     assert(h.len > 0, "HOME should be non-empty");
   }
 }
 
-test_get_environment_variable_absent() `test(exclude: "wasm32") {
-  string? val = get_environment_variable("PROMISE_NONEXISTENT_VAR_12345");
+test_get_env_var_absent() `test(exclude: "wasm32") {
+  string? val = get_env_var("PROMISE_NONEXISTENT_VAR_12345");
   assert(val is absent, "absent variable returns none");
 }
 
-test_get_environment_variable_unwrap() `test(exclude: "wasm32") {
-  string? path = get_environment_variable("PATH");
+test_get_env_var_unwrap() `test(exclude: "wasm32") {
+  string? path = get_env_var("PATH");
   if p := path {
     assert(p.len > 0, "PATH value should be non-empty");
   } else {
@@ -26,13 +26,13 @@ test_get_environment_variable_unwrap() `test(exclude: "wasm32") {
   }
 }
 
-test_get_environment_variable_empty_value() `test(exclude: "wasm32") {
+test_get_env_var_empty_value() `test(exclude: "wasm32") {
   // PROMISE_EMPTY_TEST_VAR is set to "" by the test harness setup below.
   // We can't set env vars from Promise yet, so test using a var that is
   // commonly empty or use PATH which is guaranteed present and non-empty.
   // Instead, verify the "present but value could be anything" path:
   // HOME is always present; if we had set-env we'd test empty specifically.
-  string? home = get_environment_variable("HOME");
+  string? home = get_env_var("HOME");
   if h := home {
     // Verify we can compare the value (exercises the string inside optional)
     assert(h == h, "unwrapped env var should equal itself");
@@ -41,35 +41,35 @@ test_get_environment_variable_empty_value() `test(exclude: "wasm32") {
   }
 }
 
-test_working_directory_is_stable() `test(exclude: "wasm32") {
-  string cwd1 = working_directory!;
-  string cwd2 = working_directory!;
-  assert(cwd1 == cwd2, "reading working_directory twice should return the same value");
+test_working_dir_is_stable() `test(exclude: "wasm32") {
+  string cwd1 = working_dir!;
+  string cwd2 = working_dir!;
+  assert(cwd1 == cwd2, "reading working_dir twice should return the same value");
 }
 
-test_working_directory_nonempty() `test(exclude: "wasm32") {
-  string cwd = working_directory!;
+test_working_dir_nonempty() `test(exclude: "wasm32") {
+  string cwd = working_dir!;
   assert(cwd.len > 0, "working directory should be non-empty");
 }
 
-test_working_directory_absolute() `test(exclude: "wasm32") {
-  string cwd = working_directory!;
+test_working_dir_absolute() `test(exclude: "wasm32") {
+  string cwd = working_dir!;
   assert(cwd.starts_with("/"), "working directory should be absolute path");
 }
 
-test_arguments_returns_empty_in_test_runner() `test(exclude: "wasm32") {
-  string[] a = arguments;
-  // Test runner passes no user arguments, so arguments should be empty
-  assert(a.len == 0, "arguments should be empty in test runner");
+test_args_returns_empty_in_test_runner() `test(exclude: "wasm32") {
+  string[] a = args;
+  // Test runner passes no user args, so args should be empty
+  assert(a.len == 0, "args should be empty in test runner");
 }
 
-test_arguments_is_iterable() `test(exclude: "wasm32") {
-  string[] a = arguments;
+test_args_is_iterable() `test(exclude: "wasm32") {
+  string[] a = args;
   int count = 0;
   for _ in a {
     count = count + 1;
   }
-  assert(count == 0, "iterating empty arguments should produce zero elements");
+  assert(count == 0, "iterating empty args should produce zero elements");
 }
 
 test_executable_path_returns_string() `test(exclude: "wasm32") {
@@ -121,12 +121,12 @@ test_execute_captures_stderr() `test(exclude: "wasm32") {
   assert(result.standard_error.starts_with("err"), "stderr should contain err");
 }
 
-test_execute_multiple_arguments() `test(exclude: "wasm32") {
+test_execute_multiple_args() `test(exclude: "wasm32") {
   ProcessResult result = execute("echo", ["a", "b", "c"])!;
   assert(result.standard_output.starts_with("a b c"), "echo should join arguments with spaces");
 }
 
-test_execute_empty_arguments() `test(exclude: "wasm32") {
+test_execute_empty_args() `test(exclude: "wasm32") {
   ProcessResult result = execute("echo", [])!;
   assert(result.exit_code == 0, "echo with no args should succeed");
 }
@@ -148,7 +148,7 @@ test_execute_nonexistent_program() `test(exclude: "wasm32") {
   assert(result.exit_code == 127, "nonexistent program should exit with 127");
 }
 
-test_execute_arguments_with_spaces() `test(exclude: "wasm32") {
+test_execute_args_with_spaces() `test(exclude: "wasm32") {
   // Verify arguments containing spaces are passed through correctly
   ProcessResult result = execute("printf", ["%s|%s", "hello world", "foo bar"])!;
   assert(result.exit_code == 0, "printf should exit with 0");
@@ -217,7 +217,7 @@ test_execute_only_stderr() `test(exclude: "wasm32") {
   assert(result.standard_error.starts_with("error_only"), "stderr should have content");
 }
 
-test_execute_empty_string_arguments() `test(exclude: "wasm32") {
+test_execute_empty_string_args() `test(exclude: "wasm32") {
   // Empty strings should be passed as distinct argv entries
   ProcessResult result = execute("printf", ["%s|%s|%s", "", "mid", ""])!;
   assert(result.exit_code == 0, "printf should exit with 0");
@@ -258,7 +258,7 @@ test_execute_exact_echo_output() `test(exclude: "wasm32") {
   assert(result.standard_output == "hello\n", "echo output should be exactly 'hello\\n'");
 }
 
-test_execute_many_arguments() `test(exclude: "wasm32") {
+test_execute_many_args() `test(exclude: "wasm32") {
   // Stress the argv construction with many arguments
   ProcessResult result = execute("echo", ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"])!;
   assert(result.exit_code == 0, "echo should exit with 0");
@@ -298,42 +298,42 @@ test_execute_variadic_single_arg() `test(exclude: "wasm32") {
 
 test_execute_inherits_env() `test(exclude: "wasm32") {
   // Child process should see environment variables set by parent
-  set_environment_variable("PROMISE_TEST_EXEC_ENV", "inherited_value");
+  set_env_var("PROMISE_TEST_EXEC_ENV", "inherited_value");
   ProcessResult result = execute("sh", "-c", "echo $PROMISE_TEST_EXEC_ENV")!;
   assert(result.exit_code == 0, "sh should exit with 0");
   assert(result.standard_output.starts_with("inherited_value"), "child should inherit env var");
   // Clean up
   string? absent;
-  set_environment_variable("PROMISE_TEST_EXEC_ENV", absent);
+  set_env_var("PROMISE_TEST_EXEC_ENV", absent);
 }
 
 test_execute_inherits_cwd() `test(exclude: "wasm32") {
   // Child process should run in the parent's current working directory
-  string original = working_directory!;
-  set_working_directory("/usr")!;
+  string original = working_dir!;
+  set_working_dir("/usr")!;
   ProcessResult result = execute("sh", "-c", "pwd")!;
   assert(result.exit_code == 0, "sh should exit with 0");
   assert(result.standard_output.starts_with("/usr"), "child should inherit working directory");
-  set_working_directory(original)!;
+  set_working_dir(original)!;
 }
 
-// ── set_environment_variable tests ──────────────────────────────────────────
+// ── set_env_var tests ──────────────────────────────────────────
 
-test_set_environment_variable_new() `test(exclude: "wasm32") {
+test_set_env_var_new() `test(exclude: "wasm32") {
   // Set a new variable and read it back
-  set_environment_variable("PROMISE_TEST_SET_ENV_1", "hello");
-  string? val = get_environment_variable("PROMISE_TEST_SET_ENV_1");
+  set_env_var("PROMISE_TEST_SET_ENV_1", "hello");
+  string? val = get_env_var("PROMISE_TEST_SET_ENV_1");
   assert(val is present, "newly set variable should be present");
   if v := val {
     assert(v == "hello", "variable should have the value we set");
   }
 }
 
-test_set_environment_variable_overwrite() `test(exclude: "wasm32") {
+test_set_env_var_overwrite() `test(exclude: "wasm32") {
   // Set, then overwrite with a different value
-  set_environment_variable("PROMISE_TEST_SET_ENV_2", "first");
-  set_environment_variable("PROMISE_TEST_SET_ENV_2", "second");
-  string? val = get_environment_variable("PROMISE_TEST_SET_ENV_2");
+  set_env_var("PROMISE_TEST_SET_ENV_2", "first");
+  set_env_var("PROMISE_TEST_SET_ENV_2", "second");
+  string? val = get_env_var("PROMISE_TEST_SET_ENV_2");
   if v := val {
     assert(v == "second", "overwritten variable should have the new value");
   } else {
@@ -341,70 +341,70 @@ test_set_environment_variable_overwrite() `test(exclude: "wasm32") {
   }
 }
 
-test_set_environment_variable_empty() `test(exclude: "wasm32") {
+test_set_env_var_empty() `test(exclude: "wasm32") {
   // Set to empty string — should be present but empty
-  set_environment_variable("PROMISE_TEST_SET_ENV_3", "");
-  string? val = get_environment_variable("PROMISE_TEST_SET_ENV_3");
+  set_env_var("PROMISE_TEST_SET_ENV_3", "");
+  string? val = get_env_var("PROMISE_TEST_SET_ENV_3");
   assert(val is present, "variable set to empty should be present");
   if v := val {
     assert(v.len == 0, "variable set to empty should have zero length");
   }
 }
 
-test_set_environment_variable_unset() `test(exclude: "wasm32") {
+test_set_env_var_unset() `test(exclude: "wasm32") {
   // Set a variable then unset it
-  set_environment_variable("PROMISE_TEST_SET_ENV_4", "temp");
-  string? val1 = get_environment_variable("PROMISE_TEST_SET_ENV_4");
+  set_env_var("PROMISE_TEST_SET_ENV_4", "temp");
+  string? val1 = get_env_var("PROMISE_TEST_SET_ENV_4");
   assert(val1 is present, "variable should be present after set");
 
   // Unset by passing absent
   string? absent;
-  set_environment_variable("PROMISE_TEST_SET_ENV_4", absent);
-  string? val2 = get_environment_variable("PROMISE_TEST_SET_ENV_4");
+  set_env_var("PROMISE_TEST_SET_ENV_4", absent);
+  string? val2 = get_env_var("PROMISE_TEST_SET_ENV_4");
   assert(val2 is absent, "variable should be absent after unset");
 }
 
-test_set_environment_variable_unset_nonexistent() `test(exclude: "wasm32") {
+test_set_env_var_unset_nonexistent() `test(exclude: "wasm32") {
   // Unsetting a variable that doesn't exist should not error
   string? absent;
-  set_environment_variable("PROMISE_NONEXISTENT_UNSET_TEST", absent);
-  string? val = get_environment_variable("PROMISE_NONEXISTENT_UNSET_TEST");
+  set_env_var("PROMISE_NONEXISTENT_UNSET_TEST", absent);
+  string? val = get_env_var("PROMISE_NONEXISTENT_UNSET_TEST");
   assert(val is absent, "nonexistent variable should remain absent");
 }
 
-// ── set_working_directory tests ─────────────────────────────────────────────
+// ── set_working_dir tests ─────────────────────────────────────────────
 
-test_set_working_directory() `test(exclude: "wasm32") {
+test_set_working_dir() `test(exclude: "wasm32") {
   // Save original, change to /usr, verify, restore
   // (avoid /tmp which is a symlink to /private/tmp on macOS)
-  string original = working_directory!;
-  string original2 = working_directory!;
-  set_working_directory("/usr")!;
-  string cwd = working_directory!;
+  string original = working_dir!;
+  string original2 = working_dir!;
+  set_working_dir("/usr")!;
+  string cwd = working_dir!;
   assert(cwd == "/usr", "working directory should be /usr after set");
   // Restore
-  set_working_directory(original)!;
-  string restored = working_directory!;
+  set_working_dir(original)!;
+  string restored = working_dir!;
   assert(restored == original2, "working directory should be restored");
 }
 
-test_set_working_directory_nonexistent() `test(exclude: "wasm32") {
+test_set_working_dir_nonexistent() `test(exclude: "wasm32") {
   // Changing to a nonexistent path should raise an error
   bool got_error = false;
-  set_working_directory("/promise_nonexistent_path_12345")? e {
+  set_working_dir("/promise_nonexistent_path_12345")? e {
     got_error = true;
   };
-  assert(got_error, "set_working_directory to nonexistent path should raise error");
+  assert(got_error, "set_working_dir to nonexistent path should raise error");
 }
 
-test_set_working_directory_preserves_env() `test(exclude: "wasm32") {
+test_set_working_dir_preserves_env() `test(exclude: "wasm32") {
   // Verify that changing cwd doesn't affect environment variables
-  set_environment_variable("PROMISE_TEST_CWD_ENV", "keep");
-  string original = working_directory!;
-  set_working_directory("/tmp")!;
-  string? val = get_environment_variable("PROMISE_TEST_CWD_ENV");
+  set_env_var("PROMISE_TEST_CWD_ENV", "keep");
+  string original = working_dir!;
+  set_working_dir("/tmp")!;
+  string? val = get_env_var("PROMISE_TEST_CWD_ENV");
   assert(val is present, "env var should survive cwd change");
-  set_working_directory(original)!;
+  set_working_dir(original)!;
 }
 
 // ── Streaming Process tests ──────────────────────────────────────────────────
@@ -461,9 +461,9 @@ test_process_stderr() `test(exclude: "wasm32") {
   assert(err.trim() == "err", "stderr should contain err");
 }
 
-test_process_identifier() `test(exclude: "wasm32") {
+test_process_id() `test(exclude: "wasm32") {
   Process p = Process.spawn("true")!;
-  assert(p.identifier > 0, "pid should be positive");
+  assert(p.id > 0, "pid should be positive");
   p.wait()!;
 }
 
@@ -747,35 +747,35 @@ test_process_output_structural_reader() `test(exclude: "wasm32") {
 
 // ── OS info tests ────────────────────────────────────────────────────────────
 
-test_environment_contains_path() `test(exclude: "wasm32") {
-  map[string, string] env = environment;
-  assert(env.contains("PATH"), "environment should contain PATH");
-  if path_value := env["PATH"] {
+test_env_contains_path() `test(exclude: "wasm32") {
+  map[string, string] e = env;
+  assert(e.contains("PATH"), "env should contain PATH");
+  if path_value := e["PATH"] {
     assert(path_value.len > 0, "PATH should be non-empty");
   } else {
-    assert(false, "PATH should be present in environment map");
+    assert(false, "PATH should be present in env map");
   }
 }
 
-test_environment_contains_home() `test(exclude: "wasm32") {
-  map[string, string] env = environment;
-  assert(env.contains("HOME"), "environment should contain HOME");
+test_env_contains_home() `test(exclude: "wasm32") {
+  map[string, string] e = env;
+  assert(e.contains("HOME"), "env should contain HOME");
 }
 
-test_environment_values_match_get() `test(exclude: "wasm32") {
-  // environment map values should match get_environment_variable
-  map[string, string] env = environment;
-  string? path = get_environment_variable("PATH");
+test_env_values_match_get() `test(exclude: "wasm32") {
+  // env map values should match get_env_var
+  map[string, string] e = env;
+  string? path = get_env_var("PATH");
   if p := path {
-    if env_path := env["PATH"] {
-      assert(env_path == p, "environment[PATH] should match get_environment_variable(PATH)");
+    if env_path := e["PATH"] {
+      assert(env_path == p, "env[PATH] should match get_env_var(PATH)");
     }
   }
 }
 
-test_environment_has_entries() `test(exclude: "wasm32") {
-  map[string, string] env = environment;
-  assert(env.len > 0, "environment should have at least one entry");
+test_env_has_entries() `test(exclude: "wasm32") {
+  map[string, string] e = env;
+  assert(e.len > 0, "env should have at least one entry");
 }
 
 test_user_name_nonempty() `test(exclude: "wasm32") {
@@ -783,27 +783,27 @@ test_user_name_nonempty() `test(exclude: "wasm32") {
   assert(name.len > 0, "user_name should be non-empty");
 }
 
-test_user_identifier_nonnegative() `test(exclude: "wasm32") {
-  int uid = user_identifier;
-  assert(uid >= 0, "user_identifier should be non-negative");
+test_user_id_nonnegative() `test(exclude: "wasm32") {
+  int uid = user_id;
+  assert(uid >= 0, "user_id should be non-negative");
 }
 
-test_group_identifier_nonnegative() `test(exclude: "wasm32") {
-  int gid = group_identifier;
-  assert(gid >= 0, "group_identifier should be non-negative");
+test_group_id_nonnegative() `test(exclude: "wasm32") {
+  int gid = group_id;
+  assert(gid >= 0, "group_id should be non-negative");
 }
 
-test_home_directory_absolute() `test(exclude: "wasm32") {
-  string home = home_directory;
-  assert(home.len > 0, "home_directory should be non-empty");
-  assert(home.starts_with("/"), "home_directory should be an absolute path");
+test_home_dir_absolute() `test(exclude: "wasm32") {
+  string home = home_dir;
+  assert(home.len > 0, "home_dir should be non-empty");
+  assert(home.starts_with("/"), "home_dir should be an absolute path");
 }
 
-test_home_directory_matches_env() `test(exclude: "wasm32") {
-  string home = home_directory;
-  string? env_home = get_environment_variable("HOME");
+test_home_dir_matches_env() `test(exclude: "wasm32") {
+  string home = home_dir;
+  string? env_home = get_env_var("HOME");
   if h := env_home {
-    assert(home == h, "home_directory should match $HOME");
+    assert(home == h, "home_dir should match $HOME");
   }
 }
 
@@ -819,7 +819,7 @@ test_hostname_no_newline() `test(exclude: "wasm32") {
 
 test_user_name_matches_env() `test(exclude: "wasm32") {
   string name = user_name;
-  string? env_user = get_environment_variable("USER");
+  string? env_user = get_env_var("USER");
   if u := env_user {
     assert(name == u, "user_name should match $USER");
   }
@@ -854,7 +854,7 @@ test_signal_from_posix_unknown() `test(exclude: "wasm32") {
 test_signal_receive_interrupt() `test(exclude: "wasm32") {
   setup_signal_handling(Signal.Interrupt)!;
   // Send SIGINT to self in a goroutine (so receive_signal can block)
-  int pid = process_identifier;
+  int pid = process_id;
   go _os_send_signal(pid, 2);
   Signal received = receive_signal()!;
   assert(received._to_posix_number() == 2, "should receive Signal.Interrupt");
@@ -862,7 +862,7 @@ test_signal_receive_interrupt() `test(exclude: "wasm32") {
 
 test_signal_receive_terminate() `test(exclude: "wasm32") {
   setup_signal_handling(Signal.Terminate)!;
-  int pid = process_identifier;
+  int pid = process_id;
   go _os_send_signal(pid, 15);
   Signal received = receive_signal()!;
   assert(received._to_posix_number() == 15, "should receive Signal.Terminate");
@@ -870,7 +870,7 @@ test_signal_receive_terminate() `test(exclude: "wasm32") {
 
 test_signal_receive_hangup() `test(exclude: "wasm32") {
   setup_signal_handling(Signal.Hangup)!;
-  int pid = process_identifier;
+  int pid = process_id;
   go _os_send_signal(pid, 1);
   Signal received = receive_signal()!;
   assert(received._to_posix_number() == 1, "should receive Signal.Hangup");
@@ -879,7 +879,7 @@ test_signal_receive_hangup() `test(exclude: "wasm32") {
 test_signal_setup_multiple_signals() `test(exclude: "wasm32") {
   // Register multiple signals in one call (variadic)
   setup_signal_handling(Signal.Interrupt, Signal.Terminate)!;
-  int pid = process_identifier;
+  int pid = process_id;
   go _os_send_signal(pid, 15);
   Signal received = receive_signal()!;
   assert(received._to_posix_number() == 15, "should receive Signal.Terminate from multi-register");
@@ -889,21 +889,21 @@ test_signal_setup_idempotent() `test(exclude: "wasm32") {
   // Calling setup twice should not fail (idempotent pipe init)
   setup_signal_handling(Signal.Interrupt)!;
   setup_signal_handling(Signal.Terminate)!;
-  int pid = process_identifier;
+  int pid = process_id;
   go _os_send_signal(pid, 2);
   Signal received = receive_signal()!;
   assert(received._to_posix_number() == 2, "should work after double setup");
 }
 
-test_process_identifier_positive() `test(exclude: "wasm32") {
-  int pid = process_identifier;
-  assert(pid > 0, "process_identifier should be positive");
+test_process_id_positive() `test(exclude: "wasm32") {
+  int pid = process_id;
+  assert(pid > 0, "process_id should be positive");
 }
 
-test_process_identifier_stable() `test(exclude: "wasm32") {
-  int pid1 = process_identifier;
-  int pid2 = process_identifier;
-  assert(pid1 == pid2, "process_identifier should be stable across calls");
+test_process_id_stable() `test(exclude: "wasm32") {
+  int pid1 = process_id;
+  int pid2 = process_id;
+  assert(pid1 == pid2, "process_id should be stable across calls");
 }
 
 test_process_output_read_after_close() `test(exclude: "wasm32") {
@@ -929,15 +929,15 @@ test_process_output_drop_auto_closes() `test(exclude: "wasm32") {
   p.wait()!;
 }
 
-test_environment_reflects_set() `test(exclude: "wasm32") {
-  // Set a variable, then verify it appears in the environment map
-  set_environment_variable("PROMISE_TEST_ENV_MAP", "from_map_test");
-  map[string, string] env = environment;
-  assert(env.contains("PROMISE_TEST_ENV_MAP"), "environment map should contain newly set variable");
-  if v := env["PROMISE_TEST_ENV_MAP"] {
-    assert(v == "from_map_test", "environment map value should match what was set");
+test_env_reflects_set() `test(exclude: "wasm32") {
+  // Set a variable, then verify it appears in the env map
+  set_env_var("PROMISE_TEST_ENV_MAP", "from_map_test");
+  map[string, string] e = env;
+  assert(e.contains("PROMISE_TEST_ENV_MAP"), "env map should contain newly set variable");
+  if v := e["PROMISE_TEST_ENV_MAP"] {
+    assert(v == "from_map_test", "env map value should match what was set");
   }
   // Clean up
   string? absent;
-  set_environment_variable("PROMISE_TEST_ENV_MAP", absent);
+  set_env_var("PROMISE_TEST_ENV_MAP", absent);
 }

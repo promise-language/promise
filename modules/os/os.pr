@@ -2,16 +2,16 @@
 // Requires: use os;
 // ── Extern PAL wrappers (codegen provides LLVM IR bodies) ────────────────────
 // Returns the value as string? — present if set, none if not defined.
-_os_get_environment_variable(string name) string? `extern("promise_os_get_env");
+_os_get_env_var(string name) string? `extern("promise_os_get_env");
 
 // Returns cwd path on success, raises error on failure (failable extern).
-_os_get_working_directory() string! `extern("promise_os_get_cwd");
+_os_get_working_dir() string! `extern("promise_os_get_cwd");
 
 // Terminates the process immediately.
 _os_exit(int code) `extern("promise_os_exit");
 
 // Returns command-line arguments excluding the program name.
-_os_arguments() string[] `extern("promise_os_get_args");
+_os_args() string[] `extern("promise_os_get_args");
 
 // Returns the path to the running executable (argv[0]).
 _os_executable_path() string `extern("promise_os_get_executable");
@@ -23,11 +23,11 @@ _os_set_env(string name, string value) `extern("promise_os_set_env");
 _os_unset_env(string name) `extern("promise_os_unset_env");
 
 // Changes the current working directory. Returns 0 on success.
-_os_set_working_directory(string path) int! `extern("promise_os_set_cwd");
+_os_set_working_dir(string path) int! `extern("promise_os_set_cwd");
 
 // Spawns a child process with piped stdout/stderr. Returns pid or raises error.
 // Caches stdout/stderr read fds in TLS — retrieve with _os_spawn_stdout_fd/_os_spawn_stderr_fd.
-_os_spawn(string program, string[] arguments) int! `extern("promise_os_spawn");
+_os_spawn(string program, string[] args) int! `extern("promise_os_spawn");
 
 // Returns cached stdout pipe read fd from the last _os_spawn call.
 _os_spawn_stdout_fd() int `extern("promise_os_spawn_stdout_fd");
@@ -45,7 +45,7 @@ _os_wait_pid(int pid) int! `extern("promise_os_wait_pid");
 
 // Spawns a child process with piped stdin/stdout/stderr. Returns pid or raises error.
 // Caches all 3 pipe fds in TLS — retrieve with _os_spawn_stdin_fd/_os_spawn_stdout_fd/_os_spawn_stderr_fd.
-_os_spawn_streaming(string program, string[] arguments) int! `extern("promise_os_spawn_streaming");
+_os_spawn_streaming(string program, string[] args) int! `extern("promise_os_spawn_streaming");
 
 // Returns cached stdin pipe write fd from the last _os_spawn_streaming call.
 _os_spawn_stdin_fd() int `extern("promise_os_spawn_stdin_fd");
@@ -217,8 +217,8 @@ type Process `public `doc("A running subprocess with piped stdin, stdout, and st
   int _exit_code;
   bool _waited;
 
-  spawn(string program, ...string arguments) Self! `factory `public `doc("Spawns a subprocess with piped stdin, stdout, and stderr. The child process inherits the parent environment and working directory. The program is searched using the system PATH. Returns a Process handle for interacting with the child. Raises an error if the process cannot be started.") {
-    int pid = _os_spawn_streaming(program, arguments);
+  spawn(string program, ...string args) Self! `factory `public `doc("Spawns a subprocess with piped stdin, stdout, and stderr. The child process inherits the parent environment and working directory. The program is searched using the system PATH. Returns a Process handle for interacting with the child. Raises an error if the process cannot be started.") {
+    int pid = _os_spawn_streaming(program, args);
     int stdin_fd = _os_spawn_stdin_fd();
     int stdout_fd = _os_spawn_stdout_fd();
     int stderr_fd = _os_spawn_stderr_fd();
@@ -274,7 +274,7 @@ type Process `public `doc("A running subprocess with piped stdin, stdout, and st
     }
   }
 
-  get identifier int `public `doc("Returns the operating system process ID of the child process.") => this._pid;
+  get id int `public `doc("Returns the operating system process ID of the child process.") => this._pid;
 
   drop(~this) {
     // Close any remaining pipe fds
@@ -301,28 +301,28 @@ type Process `public `doc("A running subprocess with piped stdin, stdout, and st
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
-get_environment_variable(string name) string? `public `doc("Returns the value of the named environment variable. Returns none if the variable is not defined. An empty string is returned when the variable is set but empty.") {
-  return _os_get_environment_variable(name);
+get_env_var(string name) string? `public `doc("Returns the value of the named environment variable. Returns none if the variable is not defined. An empty string is returned when the variable is set but empty.") {
+  return _os_get_env_var(name);
 }
 
-// Module-level getter: accessed as os.working_directory (no parentheses).
-get working_directory string! `public `doc("Returns the absolute path of the current working directory. Raises an error if the OS call fails.") {
-  return _os_get_working_directory();
+// Module-level getter: accessed as os.working_dir (no parentheses).
+get working_dir string! `public `doc("Returns the absolute path of the current working directory. Raises an error if the OS call fails.") {
+  return _os_get_working_dir();
 }
 
 exit_process(int code) `public `doc("Terminates the process immediately with the given exit code. Does not return. Does not run destructors or cleanup.") {
   _os_exit(code);
 }
 
-get arguments string[] `public `doc("Returns the command-line arguments passed to the program, excluding the executable path. Returns an empty list if no arguments were provided.") {
-  return _os_arguments();
+get args string[] `public `doc("Returns the command-line arguments passed to the program, excluding the executable path. Returns an empty list if no arguments were provided.") {
+  return _os_args();
 }
 
 get executable_path string `public `doc("Returns the path to the running executable as provided by the operating system (argv[0]). Returns an empty string on platforms without command-line arguments.") {
   return _os_executable_path();
 }
 
-set_environment_variable(string name, string? value) `public `doc("Sets or removes the named environment variable. When value is present, the variable is set to that value (creating it if needed, overwriting if it exists). When value is absent, the variable is removed from the environment.") {
+set_env_var(string name, string? value) `public `doc("Sets or removes the named environment variable. When value is present, the variable is set to that value (creating it if needed, overwriting if it exists). When value is absent, the variable is removed from the environment.") {
   if v := value {
     _os_set_env(name, v);
   } else {
@@ -330,12 +330,12 @@ set_environment_variable(string name, string? value) `public `doc("Sets or remov
   }
 }
 
-set_working_directory(string path)! `public `doc("Changes the current working directory to the given path. Raises an error if the path does not exist or is not a directory.") {
-  _os_set_working_directory(path);
+set_working_dir(string path)! `public `doc("Changes the current working directory to the given path. Raises an error if the path does not exist or is not a directory.") {
+  _os_set_working_dir(path);
 }
 
-execute(string program, ...string arguments) ProcessResult! `public `doc("Executes a program with the given arguments and waits for it to complete. Returns a ProcessResult containing the exit code and captured standard output and standard error. Raises an error if the process could not be started. The program is searched using the system PATH. If the program is not found, the child process exits with code 127. Accepts arguments inline (execute(\"ls\", \"-la\", \"/tmp\")) or as a pre-built string[] (execute(\"ls\", args)). Stdout and stderr are read concurrently via goroutines, so large output on either stream will not deadlock.") {
-  int pid = _os_spawn(program, arguments);
+execute(string program, ...string args) ProcessResult! `public `doc("Executes a program with the given arguments and waits for it to complete. Returns a ProcessResult containing the exit code and captured standard output and standard error. Raises an error if the process could not be started. The program is searched using the system PATH. If the program is not found, the child process exits with code 127. Accepts arguments inline (execute(\"ls\", \"-la\", \"/tmp\")) or as a pre-built string[] (execute(\"ls\", args)). Stdout and stderr are read concurrently via goroutines, so large output on either stream will not deadlock.") {
+  int pid = _os_spawn(program, args);
   int stdout_fd = _os_spawn_stdout_fd();
   int stderr_fd = _os_spawn_stderr_fd();
 
@@ -349,7 +349,7 @@ execute(string program, ...string arguments) ProcessResult! `public `doc("Execut
 
 // ── OS info getters ──────────────────────────────────────────────────────────
 
-get environment map[string, string] `public `doc("Returns all environment variables as a map from variable name to value. Each entry is parsed from the process environment.") {
+get env map[string, string] `public `doc("Returns all environment variables as a map from variable name to value. Each entry is parsed from the process environment.") {
   map[string, string] result = map[string, string]();
   string[] entries = _os_get_environ();
   for entry in entries {
@@ -366,15 +366,15 @@ get user_name string `public `doc("Returns the login name of the current user. R
   return _os_get_user_name();
 }
 
-get user_identifier int `public `doc("Returns the numeric user ID (uid) of the current process.") {
+get user_id int `public `doc("Returns the numeric user ID (uid) of the current process.") {
   return _os_get_user_id();
 }
 
-get group_identifier int `public `doc("Returns the numeric group ID (gid) of the current process.") {
+get group_id int `public `doc("Returns the numeric group ID (gid) of the current process.") {
   return _os_get_group_id();
 }
 
-get home_directory string `public `doc("Returns the home directory of the current user. Returns an empty string if the home directory cannot be determined.") {
+get home_dir string `public `doc("Returns the home directory of the current user. Returns an empty string if the home directory cannot be determined.") {
   return _os_get_home_dir();
 }
 
@@ -382,7 +382,7 @@ get hostname string `public `doc("Returns the hostname of the machine. Returns a
   return _os_get_hostname();
 }
 
-get process_identifier int `public `doc("Returns the process ID (pid) of the current process.") {
+get process_id int `public `doc("Returns the process ID (pid) of the current process.") {
   return _os_get_pid();
 }
 

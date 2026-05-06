@@ -860,14 +860,14 @@ func TestDocModuleLevelGetterSignaturesMode(t *testing.T) {
 
 func TestDocModuleLevelGetterFailable(t *testing.T) {
 	out := docFromSource(t, `
-		get working_directory string! `+"`public"+` {
+		get working_dir string! `+"`public"+` {
 			return "test";
 		}
 	`, docOpts{publicOnly: true})
 
 	// Should include ! for failable getter
-	assertContainsDoc(t, out, "get working_directory string!")
-	assertNotContainsDoc(t, out, "working_directory()")
+	assertContainsDoc(t, out, "get working_dir string!")
+	assertNotContainsDoc(t, out, "working_dir()")
 }
 
 func TestDocMethodGetterFailable(t *testing.T) {

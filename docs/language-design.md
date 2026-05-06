@@ -2102,7 +2102,7 @@ m := Wrapper[string].defaultCount();
 
 ### 9.3 Module-Level Getters and Setters
 
-Functions like `os.get_working_directory()` and `os.set_working_directory("/tmp")` are computed properties of the environment. The call-site parentheses are noise, and the `get_`/`set_` prefixes are boilerplate. Module-level getters and setters extend the same property syntax already used on types (see Section 5.2.1) to file and module scope.
+Functions like `os.get_working_dir()` and `os.set_working_dir("/tmp")` are computed properties of the environment. The call-site parentheses are noise, and the `get_`/`set_` prefixes are boilerplate. Module-level getters and setters extend the same property syntax already used on types (see Section 5.2.1) to file and module scope.
 
 #### Getter Declaration
 
@@ -2110,12 +2110,12 @@ A module-level getter is declared at the top level of a `.pr` file using the `ge
 
 ```promise
 // os.pr — inside the os module
-get arguments string[] `public `doc("Returns the command-line arguments.") {
-  return _os_get_arguments();
+get args string[] `public `doc("Returns the command-line arguments.") {
+  return _os_get_args();
 }
 
-get working_directory string! `public `doc("Returns the current working directory.") {
-  return _os_get_working_directory();
+get working_dir string! `public `doc("Returns the current working directory.") {
+  return _os_get_working_dir();
 }
 ```
 
@@ -2127,8 +2127,8 @@ A module-level setter uses the `set` keyword with a single parameter:
 
 ```promise
 // os.pr
-set working_directory(string path) `public `doc("Changes the current working directory.") {
-  _os_set_working_directory(path);
+set working_dir(string path) `public `doc("Changes the current working directory.") {
+  _os_set_working_dir(path);
 }
 ```
 
@@ -2142,11 +2142,11 @@ At the call site, getters are accessed with dot syntax (no parentheses) and sett
 use os;
 
 // Getter — reads like a property
-string[] args = os.arguments;
-string cwd = os.working_directory!;
+string[] args = os.args;
+string cwd = os.working_dir!;
 
 // Setter — writes like assignment
-os.working_directory = "/tmp";
+os.working_dir = "/tmp";
 
 // Compound assignment — desugars to getter + operator + setter
 // os.some_counter += 1  →  os.set_some_counter(os.some_counter + 1)
@@ -2158,9 +2158,9 @@ This is identical to how type-level field access works: `animal.name` calls a vt
 
 Getters and setters are independent declarations — they do not need to be paired:
 
-- **Getter only** → read-only property (e.g., `os.arguments`). Attempting to assign is a compile error.
+- **Getter only** → read-only property (e.g., `os.args`). Attempting to assign is a compile error.
 - **Setter only** → write-only property. Useful for fire-and-forget configuration.
-- **Both** → read-write property (e.g., `os.working_directory`).
+- **Both** → read-write property (e.g., `os.working_dir`).
 
 #### Visibility
 
@@ -2187,6 +2187,40 @@ Module-level getters and setters (Section 9.3) provide property syntax for compu
 #### No Module Initializers
 
 There are no module-level initializer blocks, `init()` functions, or static constructors. No code runs automatically when a module is imported — code only executes when something explicitly calls it. This eliminates an entire class of ordering bugs (module A's initializer depends on module B's initializer having already run) and makes the program's startup behavior fully predictable from `main()`.
+
+### 9.3a Naming Conventions
+
+#### Full English Words with Approved Exceptions
+
+All public names in the standard library and language APIs must use complete, unabbreviated words — **unless** an approved abbreviation is defined in the dictionary below. This optimizes for AI-agent readability — an LLM can always predict the full word but must memorize each abbreviation. When an abbreviation is approved, it means the short form is so universally recognized that it is *more* readable than the full word.
+
+Examples of the full-word rule: `print_line` not `println`, `make_directory` not `mkdir`, `execute` not `exec`.
+
+#### Approved Abbreviation Dictionary
+
+The following abbreviations are **universally preferred exceptions** to the full-word rule — all identifiers must use the abbreviated form, never the full word. No exceptions.
+
+| Abbreviation | Full word |
+|---|---|
+| `abs` | `absolute` |
+| `arg` | `argument` |
+| `config` | `configuration` |
+| `dest` | `destination` |
+| `dir` | `directory` |
+| `env` | `environment` |
+| `func` | `function` |
+| `id` | `identifier` |
+| `info` | `information` |
+| `init` | `initialize` |
+| `len` | `length` |
+| `max` | `maximum` |
+| `min` | `minimum` |
+| `prev` | `previous` |
+| `src` | `source` |
+
+These abbreviations are so universally recognized that the abbreviated form is more readable than the full word. When a mapping is defined here, the abbreviation is the canonical form — code review should flag uses of the full word.
+
+Human-readable prose (doc strings, error messages, comments) is not subject to this rule — only identifiers (type names, field names, function/method names, parameter names, getter/setter names).
 
 ### 9.4 Named Arguments, Defaults & Optional Parameters
 

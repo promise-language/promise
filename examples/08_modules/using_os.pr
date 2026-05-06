@@ -11,8 +11,8 @@ echo output: hello from promise""", exclude: "wasm32") {
   // --- Environment ---
   print_line("--- Environment ---");
 
-  // Check if an environment variable is set.
-  string? home = os.get_environment_variable("HOME");
+  // Check if an env var is set.
+  string? home = os.get_env_var("HOME");
   print_line("HOME is set: {home is present}");
 
   // --- Execute ---

@@ -52,7 +52,7 @@ The stdlib today (29 files, ~2,440 lines) provides:
 | `strings` | `modules/strings/strings.pr` | 65 | **Done** — `join`, `spaces`, `reverse`, `is_blank`, `repeat_join`. 10 tests. |
 | `math` | `modules/math/math.pr` | 67 | **Done** — `lerp`, `map_range`, `deg_to_rad`, `rad_to_deg`, `sign`, `sign_f64`, `is_even`, `is_odd`, `gcd`, `lcm`. 26 tests. |
 | `json` | `modules/json/json.pr` | ~900 | **Done** — `JsonEncoder` (is Encoder), `JsonDecoder` (is Decoder), generic `encode_string[T]`/`decode_string[T]`/`encode_string_pretty[T]`, `JsonValue` enum with methods (`is_null`..`is_object`, `as_bool`..`as_object`, `get(key)`, `at(index)`, `encode`, `format`, `format_pretty`), `parse_value`. 157 tests. |
-| `os` | `modules/os/os.pr` | 4 | **Done** — get_environment_variable, get_working_directory, exit_process, arguments, executable_path, execute, set_environment_variable, set_working_directory, Process/ProcessInput/ProcessOutput (streaming), environment (map), user_name, user_identifier, group_identifier, home_directory, hostname, process_identifier, Signal enum, setup_signal_handling, receive_signal |
+| `os` | `modules/os/os.pr` | 4 | **Done** — get_env_var, working_dir, exit_process, args, executable_path, execute, set_env_var, set_working_dir, Process/ProcessInput/ProcessOutput (streaming), env (map), user_name, user_id, group_id, home_dir, hostname, process_id, Signal enum, setup_signal_handling, receive_signal |
 | `time` | `modules/time/time.pr` | 4 | **Placeholder** — planned: extended time utilities beyond `std/time.pr` |
 | `http` | `modules/http/http.pr` | 4 | **Placeholder** — planned: get, post, Request, Response, Server, Handler |
 
@@ -309,7 +309,7 @@ Because Scanner satisfies `Reader`, `next[T: Parse]()` simply calls `T.parse(~th
 ```promise
 // Parse a full string as T (wraps in a Scanner internally)
 scan[T: Parse](string s) T! {
-    mut r := Scanner(source: s);
+    mut r := Scanner(s: s);
     return T.parse(~r);
 }
 
@@ -363,7 +363,7 @@ Note how Point's parser composes with int's parser — each reads what it needs 
 **Multiple values from one source**:
 
 ```promise
-mut s := Scanner(source: "42 3.14 true");
+mut s := Scanner(s: "42 3.14 true");
 x := s.next[int]()!;        // reads "42", stops at space
 s.skip_whitespace();
 y := s.next[f64]()!;        // reads "3.14", stops at space
@@ -447,7 +447,7 @@ EmitUnsetEnv(module *ir.Module) *ir.Func    // i8* name → i32 (0 or -1)
 EmitChdir(module *ir.Module) *ir.Func       // i8* path → i32 (0 or -1)
 ```
 
-Command-line arguments: captured in `main()` prologue from `argc`/`argv` and stored in a global `string[]`. Exposed via `os.arguments` (module-level getter).
+Command-line arguments: captured in `main()` prologue from `argc`/`argv` and stored in a global `string[]`. Exposed via `os.args` (module-level getter).
 
 ### 3.3 Time
 
@@ -889,14 +889,14 @@ type ProcessResult `public {
 }
 
 // One-shot execution
-get_environment_variable(string name) string?;
-get_working_directory() string!;
+get_env_var(string name) string?;
+get working_dir string!;
 exit_process(int code);
-arguments() string[];
+get args string[];
 executable_path() string;
 execute(string program, ...string arguments) ProcessResult!;
-set_environment_variable(string name, string? value);
-set_working_directory(string path) !;
+set_env_var(string name, string? value);
+set_working_dir(string path) !;
 
 // Streaming process execution
 type ProcessInput `public { ... }   // satisfies Writer: write, write_string, write_line, close, drop
@@ -908,18 +908,18 @@ type Process `public {
     take_standard_error(~this) ProcessOutput!;
     wait(~this) int!;              // closes stdin, returns exit code (cached)
     kill(~this)!;                  // SIGKILL
-    get identifier int;            // pid
+    get id int;                    // pid
     drop(~this);                   // close fds + reap zombie
 }
 
 // OS info getters
-get environment map[string, string];  // all env vars as map
+get env map[string, string];          // all env vars as map
 get user_name string;                 // login name (getpwuid)
-get user_identifier int;              // uid
-get group_identifier int;             // gid
-get home_directory string;            // home dir (getpwuid)
+get user_id int;                      // uid
+get group_id int;                     // gid
+get home_dir string;                  // home dir (getpwuid)
 get hostname string;                  // machine hostname
-get process_identifier int;           // current pid
+get process_id int;                   // current pid
 
 // Signal handling
 enum Signal { Interrupt, Terminate, Hangup }
@@ -929,7 +929,7 @@ receive_signal() Signal!;                   // block until signal arrives
 
 - **File**: `modules/os/os.pr` (separate `os` module, not part of `std`)
 - **Dependencies**: PAL OS (getenv, getcwd, exit, setenv, unsetenv, chdir, spawn, spawn_streaming, kill, get_environ, get_user_info, get_hostname, signal_init, signal_register), argc/argv globals from main prologue
-- **Native codegen**: Extern bridge pattern in `os_bridges.go` — Promise declares `_os_func() T \`extern("promise_os_func");`, codegen provides LLVM IR body bridging Promise types ↔ PAL. `execute` uses three-extern + TLS caching pattern. Streaming process uses six externs. OS info uses six externs. Signal handling uses pipe-based async-signal-safe delivery: `pal_signal_init` creates pipe + defines handler, `pal_signal_register` calls `signal(2)`. The `environment` getter builds `map[string, string]` in pure Promise from the string[] of "KEY=VALUE" entries.
+- **Native codegen**: Extern bridge pattern in `os_bridges.go` — Promise declares `_os_func() T \`extern("promise_os_func");`, codegen provides LLVM IR body bridging Promise types ↔ PAL. `execute` uses three-extern + TLS caching pattern. Streaming process uses six externs. OS info uses six externs. Signal handling uses pipe-based async-signal-safe delivery: `pal_signal_init` creates pipe + defines handler, `pal_signal_register` calls `signal(2)`. The `env` getter builds `map[string, string]` in pure Promise from the string[] of "KEY=VALUE" entries.
 - **Test**: `modules/os/os_test.pr` (103 tests, excluded on WASM)
 
 #### 4e. Standard Input — DONE (merged into `modules/io/io.pr`)

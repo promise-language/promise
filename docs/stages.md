@@ -1215,7 +1215,7 @@ All non-module test files (`tests/...`) — both unit tests (`` `test ``) and E2
 |------|
 | ~~String slicing~~ — **Done.** `string[:]` operator implemented in `modules/std/string.pr` and codegen. Tested in `tests/std/test_string.pr` (7 slice tests). |
 | Unicode normalization |
-| **Module-level getters and setters** (Done) — `get name Type` and `set name(Type param)` declarations at file/module level. Enables `os.arguments` instead of `os.arguments()` and `os.working_directory = "/tmp"` instead of `os.set_working_directory("/tmp")`. |
+| **Module-level getters and setters** (Done) — `get name Type` and `set name(Type param)` declarations at file/module level. Enables `os.args` instead of `os.args()` and `os.working_dir = "/tmp"` instead of `os.set_working_dir("/tmp")`. |
 
 ### Module-Level Getters and Setters (Done)
 
@@ -1223,15 +1223,15 @@ Implemented. Module-level `get name Type { ... }` and `set name(Type param) { ..
 
 ```promise
 use os;
-string[] args = os.arguments;            // getter: no ()
-string cwd = os.working_directory!;      // failable getter with ! unwrap
+string[] args = os.args;                 // getter: no ()
+string cwd = os.working_dir!;           // failable getter with ! unwrap
 ```
 
 **Converted to getters:**
-- `os.arguments` — command-line arguments (`string[]`, getter only)
+- `os.args` — command-line arguments (`string[]`, getter only)
 - `os.executable_path` — path to running executable (`string`, getter only)
-- `os.working_directory` — current working directory (`string!`, getter only — setter planned)
+- `os.working_dir` — current working directory (`string!`, getter only — setter planned)
 
 **Remaining as functions:**
-- `os.get_environment_variable(name)` — takes a parameter, cannot be a getter
+- `os.get_env_var(name)` — takes a parameter, cannot be a getter
 - `os.exit_process(code)` — performs an action, function syntax is correct

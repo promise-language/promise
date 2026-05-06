@@ -5,18 +5,18 @@ type Parse `structural `public `doc("Structural interface for types that can par
 }
 
 type Scanner `public `doc("Wraps a string for byte-by-byte reading. Satisfies Reader.") {
-  string source;
+  string src;
   int pos;
 
   new(~this, string s) {
-    this.source = s;
+    this.src = s;
     this.pos = 0;
   }
 
-  read(~this, u8[]~buf) int `doc("Reads bytes from the source string into buf. Satisfies Reader.") {
+  read(~this, u8[]~buf) int `doc("Reads bytes from the src string into buf. Satisfies Reader.") {
     int count = 0;
-    while this.pos < this.source.len && count < buf.len {
-      buf[count] = this.source.byte_at(this.pos);
+    while this.pos < this.src.len && count < buf.len {
+      buf[count] = this.src.byte_at(this.pos);
       this.pos = this.pos + 1;
       count = count + 1;
     }
@@ -24,17 +24,17 @@ type Scanner `public `doc("Wraps a string for byte-by-byte reading. Satisfies Re
   }
 
   read_byte(~this) u8? `doc("Reads a single byte directly. Returns absent at EOF.") {
-    if this.pos >= this.source.len {
+    if this.pos >= this.src.len {
       return none;
     }
-    u8 b = this.source.byte_at(this.pos);
+    u8 b = this.src.byte_at(this.pos);
     this.pos = this.pos + 1;
     return b;
   }
 
-  rest() string `public `doc("Returns the unread portion of the source string.") => this.source[this.pos:];
-  get has_next bool `public `doc("True if there are more bytes to read.") => this.pos < this.source.len;
-  get position int `public `doc("Current byte offset in the source string.") => this.pos;
+  rest() string `public `doc("Returns the unread portion of the src string.") => this.src[this.pos:];
+  get has_next bool `public `doc("True if there are more bytes to read.") => this.pos < this.src.len;
+  get position int `public `doc("Current byte offset in the src string.") => this.pos;
 }
 
 scan[T: Parse](string s) T! `public `doc("Parses a value of type T from a string.") {

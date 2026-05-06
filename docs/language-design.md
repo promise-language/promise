@@ -2794,7 +2794,7 @@ for n in fibonacci() {
 }
 ```
 
-**`yield*` delegates to another stream** (planned — not yet implemented), yielding all of its elements inline:
+**`yield*` delegates to another iterable** (stream, range, array, vector, string, or iterator), yielding all of its elements inline:
 
 ```promise
 oneThenTwo() stream[int] {

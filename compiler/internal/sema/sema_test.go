@@ -7992,6 +7992,80 @@ func TestGeneratorMethodBasic(t *testing.T) {
 	`)
 }
 
+// --- yield* delegate tests ---
+
+func TestYieldDelegateStream(t *testing.T) {
+	checkOK(t, `
+		inner() stream[int] { yield 1; }
+		outer() stream[int] { yield* inner(); }
+		main() {}
+	`)
+}
+
+func TestYieldDelegateRange(t *testing.T) {
+	checkOK(t, `
+		gen() stream[int] { yield* 1..=3; }
+		main() {}
+	`)
+}
+
+func TestYieldDelegateArray(t *testing.T) {
+	checkOK(t, `
+		gen() stream[int] {
+			int[3] arr = [1, 2, 3];
+			yield* arr;
+		}
+		main() {}
+	`)
+}
+
+func TestYieldDelegateVector(t *testing.T) {
+	checkOK(t, `
+		gen(int[] v) stream[int] { yield* v; }
+		main() {}
+	`)
+}
+
+func TestYieldDelegateString(t *testing.T) {
+	checkOK(t, `
+		gen(string s) stream[char] { yield* s; }
+		main() {}
+	`)
+}
+
+func TestYieldDelegateTypeMismatch(t *testing.T) {
+	errs := checkErrs(t, `
+		inner() stream[string] { yield "a"; }
+		outer() stream[int] { yield* inner(); }
+		main() {}
+	`)
+	expectError(t, errs, "does not match generator element type")
+}
+
+func TestYieldDelegateNonIterable(t *testing.T) {
+	errs := checkErrs(t, `
+		gen() stream[int] { yield* 42; }
+		main() {}
+	`)
+	expectError(t, errs, "yield* requires an iterable type")
+}
+
+func TestYieldDelegateOutsideGenerator(t *testing.T) {
+	errs := checkErrs(t, `
+		foo() { yield* 1..=3; }
+		main() {}
+	`)
+	expectError(t, errs, "yield* outside of generator function")
+}
+
+func TestYieldDelegateCountsAsYield(t *testing.T) {
+	// yield* should satisfy the "must contain yield" requirement
+	checkOK(t, `
+		gen() stream[int] { yield* 1..=3; }
+		main() {}
+	`)
+}
+
 // --- Module System Tests ---
 
 // checkWithModules parses user source with pre-loaded module scopes.

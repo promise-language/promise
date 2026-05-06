@@ -201,5 +201,152 @@ countdown(int n) stream[int] {
   }
 }
 
+// --- yield* delegate tests ---
+
+// yield* from sub-generator (stream)
+combined() stream[int] {
+  yield * count_to(3);
+  yield * count_to(3);
+}
+
+test_yield_delegate_stream() `test {
+  int sum = 0;
+  int count = 0;
+  for x in combined() {
+    sum += x;
+    count++;
+  }
+  assert(count == 6, "combined should yield 6 values");
+  assert(sum == 6, "combined sum should be 0+1+2+0+1+2=6");
+}
+
+// yield* from range
+range_delegate() stream[int] {
+  yield * 1..=3;
+  yield * 7..=9;
+}
+
+test_yield_delegate_range() `test {
+  int sum = 0;
+  int count = 0;
+  for x in range_delegate() {
+    sum += x;
+    count++;
+  }
+  assert(count == 6, "range_delegate should yield 6 values");
+  assert(sum == 30, "range_delegate sum should be 1+2+3+7+8+9=30");
+}
+
+// yield* from array
+array_delegate() stream[int] {
+  int[3] arr = [10, 20, 30];
+  yield * arr;
+}
+
+test_yield_delegate_array() `test {
+  int sum = 0;
+  int count = 0;
+  for x in array_delegate() {
+    sum += x;
+    count++;
+  }
+  assert(count == 3, "array delegate should yield 3 values");
+  assert(sum == 60, "array delegate sum should be 10+20+30=60");
+}
+
+// yield* from vector
+vector_delegate(int[] items) stream[int] {
+  yield * items;
+}
+
+test_yield_delegate_vector() `test {
+  int[] v = [1, 2, 3, 4, 5];
+  int sum = 0;
+  for x in vector_delegate(v) {
+    sum += x;
+  }
+  assert(sum == 15, "vector delegate sum should be 15");
+}
+
+// yield* from string (yields chars)
+char_delegate(string s) stream[char] {
+  yield * s;
+}
+
+test_yield_delegate_string() `test {
+  int count = 0;
+  for ch in char_delegate("abc") {
+    count++;
+  }
+  assert(count == 3, "string delegate should yield 3 chars");
+}
+
+// yield* mixed with regular yield
+mixed_yields() stream[int] {
+  yield 0;
+  yield * 1..=3;
+  yield 100;
+  yield * count_to(2);
+}
+
+test_yield_delegate_mixed() `test {
+  int sum = 0;
+  int count = 0;
+  for x in mixed_yields() {
+    sum += x;
+    count++;
+  }
+  // Expected: 0, 1, 2, 3, 100, 0, 1
+  assert(count == 7, "mixed yields should produce 7 values");
+  assert(sum == 107, "mixed yields sum should be 0+1+2+3+100+0+1=107");
+}
+
+// yield* with early break from consumer
+test_yield_delegate_early_break() `test {
+  int count = 0;
+  for x in range_delegate() {
+    if x >= 8 {
+      break;
+    }
+    count++;
+  }
+  // 1, 2, 3, 7 → 4 values before 8
+  assert(count == 4, "early break should stop at 4 values");
+}
+
+// yield* recursive (countdown using yield*)
+countdown_delegate(int n) stream[int] {
+  if n <= 0 {
+    return;
+  }
+  yield n;
+  yield * countdown_delegate(n - 1);
+}
+
+test_yield_delegate_recursive() `test {
+  int sum = 0;
+  for x in countdown_delegate(5) {
+    sum += x;
+  }
+  assert(sum == 15, "recursive yield* countdown should sum to 15");
+}
+
+// yield* from empty generator
+empty_delegate() stream[int] {
+  yield * empty();
+  yield 42;
+}
+
+test_yield_delegate_empty_subgen() `test {
+  int sum = 0;
+  int count = 0;
+  for x in empty_delegate() {
+    sum += x;
+    count++;
+  }
+  assert(count == 1, "empty delegate + yield should produce 1 value");
+  assert(sum == 42, "empty delegate + yield should produce 42");
+}
+
 main() {
 }

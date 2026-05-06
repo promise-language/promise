@@ -131,6 +131,8 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 		c.genSelectStmt(s)
 	case *ast.YieldStmt:
 		c.genYieldStmt(s)
+	case *ast.YieldDelegateStmt:
+		c.genYieldDelegateStmt(s)
 	case *ast.Block:
 		c.genBlock(s)
 	default:

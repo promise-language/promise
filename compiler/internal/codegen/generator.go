@@ -270,23 +270,7 @@ func (c *Compiler) buildGeneratorCoroutine(sig *types.Signature, fn *ir.Func, bo
 // Stores the yielded value into the yield slot, then suspends.
 func (c *Compiler) genYieldStmt(s *ast.YieldStmt) {
 	val := c.genExpr(s.Value)
-	elemType := val.Type()
-
-	// Load yield slot from alloca (preserved across suspends)
-	slotPtr := c.block.NewLoad(irtypes.I8Ptr, c.generatorYieldSlot.(*ir.InstAlloca))
-
-	// Store value to yield slot: bitcast i8* → T*, then store
-	typedSlot := c.block.NewBitCast(slotPtr, irtypes.NewPointer(elemType))
-	c.block.NewStore(val, typedSlot)
-
-	// Suspend: coro.suspend(none, false) → switch(0=resume, 1=cleanup)
-	suspResult := c.block.NewCall(c.coroSuspend, constant.None, constant.False)
-	resumeBlk := c.newBlock("yield.resume")
-	c.block.NewSwitch(suspResult, c.generatorSuspend,
-		ir.NewCase(constant.NewInt(irtypes.I8, 0), resumeBlk),
-		ir.NewCase(constant.NewInt(irtypes.I8, 1), c.generatorCleanup))
-
-	c.block = resumeBlk
+	c.emitYieldValue(val)
 }
 
 // genForInGenerator generates a for-in loop over a generator value {handle, slot}.
@@ -416,4 +400,322 @@ func (c *Compiler) emitGeneratorCleanup(b scopeBinding) {
 	c.block.NewBr(skipBlk)
 
 	c.block = skipBlk
+}
+
+// emitYieldValue stores a value into the generator's yield slot and suspends.
+// On resume, execution continues in a new block (set as c.block).
+func (c *Compiler) emitYieldValue(val value.Value) {
+	slotPtr := c.block.NewLoad(irtypes.I8Ptr, c.generatorYieldSlot.(*ir.InstAlloca))
+	typedSlot := c.block.NewBitCast(slotPtr, irtypes.NewPointer(val.Type()))
+	c.block.NewStore(val, typedSlot)
+
+	suspResult := c.block.NewCall(c.coroSuspend, constant.None, constant.False)
+	resumeBlk := c.newBlock("yield.resume")
+	c.block.NewSwitch(suspResult, c.generatorSuspend,
+		ir.NewCase(constant.NewInt(irtypes.I8, 0), resumeBlk),
+		ir.NewCase(constant.NewInt(irtypes.I8, 1), c.generatorCleanup))
+	c.block = resumeBlk
+}
+
+// genYieldDelegateStmt generates code for a yield* statement inside a generator.
+// Iterates over the delegate expression and yields each element to the consumer.
+func (c *Compiler) genYieldDelegateStmt(s *ast.YieldDelegateStmt) {
+	iterableType := c.info.Types[s.Value]
+	if c.typeSubst != nil {
+		iterableType = types.Substitute(iterableType, c.typeSubst)
+	}
+
+	if elem, ok := types.AsStream(iterableType); ok {
+		genVal := c.genExpr(s.Value)
+		c.genYieldDelegateGenerator(genVal, elem)
+	} else if arr, ok := iterableType.(*types.Array); ok {
+		c.genYieldDelegateArray(s.Value, arr)
+	} else if elem, ok := types.AsVector(iterableType); ok {
+		vecPtr := c.genExpr(s.Value)
+		c.genYieldDelegateVector(vecPtr, elem)
+	} else if elem, ok := types.AsRange(iterableType); ok {
+		c.genYieldDelegateRange(s.Value, elem, iterableType)
+	} else if types.Identical(extractNamed(iterableType), types.TypString) {
+		strPtr := c.genExpr(s.Value)
+		c.genYieldDelegateString(strPtr)
+	} else if elem, ok := types.AsIterator(iterableType); ok {
+		iterVal := c.genExpr(s.Value)
+		c.genYieldDelegateIterator(iterVal, elem, iterableType)
+	} else {
+		panic(fmt.Sprintf("codegen: unsupported yield* iterable type %s", iterableType))
+	}
+}
+
+// genYieldDelegateGenerator yields all values from a sub-generator (stream[T]).
+func (c *Compiler) genYieldDelegateGenerator(genVal value.Value, elemType types.Type) {
+	elemLLVM := c.resolveType(elemType)
+
+	handle := c.block.NewExtractValue(genVal, 0)
+	yieldSlot := c.block.NewExtractValue(genVal, 1)
+
+	handleAlloca := c.block.NewAlloca(irtypes.I8Ptr)
+	handleAlloca.SetName(c.uniqueLocalName("yieldstar.handle"))
+	c.block.NewStore(handle, handleAlloca)
+
+	slotAlloca := c.block.NewAlloca(irtypes.I8Ptr)
+	slotAlloca.SetName(c.uniqueLocalName("yieldstar.slot"))
+	c.block.NewStore(yieldSlot, slotAlloca)
+
+	// Register sub-generator for cleanup if our generator is destroyed mid-yield*
+	c.scopeBindings = append(c.scopeBindings, scopeBinding{
+		kind:            bindingGenerator,
+		generatorHandle: handleAlloca,
+		generatorSlot:   slotAlloca,
+	})
+
+	// Initial resume: start the sub-generator body
+	c.block.NewCall(c.genResume, handle)
+
+	checkBlk := c.newBlock("yieldstar.check")
+	yieldBlk := c.newBlock("yieldstar.yield")
+	exitBlk := c.newBlock("yieldstar.exit")
+
+	c.block.NewBr(checkBlk)
+
+	// Check: is sub-generator done?
+	c.block = checkBlk
+	curHandle := c.block.NewLoad(irtypes.I8Ptr, handleAlloca)
+	done := c.block.NewCall(c.genDone, curHandle)
+	c.block.NewCondBr(done, exitBlk, yieldBlk)
+
+	// Yield: load from sub-generator slot, yield to our consumer
+	c.block = yieldBlk
+	curSlot := c.block.NewLoad(irtypes.I8Ptr, slotAlloca)
+	typedSlot := c.block.NewBitCast(curSlot, irtypes.NewPointer(elemLLVM))
+	elem := c.block.NewLoad(elemLLVM, typedSlot)
+	c.emitYieldValue(elem)
+
+	// After resume: resume sub-generator for next value
+	rHandle := c.block.NewLoad(irtypes.I8Ptr, handleAlloca)
+	c.block.NewCall(c.genResume, rHandle)
+	c.block.NewBr(checkBlk)
+
+	// Exit: destroy sub-generator + free slot
+	c.block = exitBlk
+	exitHandle := c.block.NewLoad(irtypes.I8Ptr, handleAlloca)
+	c.block.NewCall(c.genDestroy, exitHandle)
+	exitSlot := c.block.NewLoad(irtypes.I8Ptr, slotAlloca)
+	c.block.NewCall(c.palFree, exitSlot)
+	c.block.NewStore(constant.NewNull(irtypes.I8Ptr), handleAlloca)
+
+	// Remove scope binding (cleaned up inline)
+	c.scopeBindings = c.scopeBindings[:len(c.scopeBindings)-1]
+}
+
+// genYieldDelegateRange yields all values from a Range.
+func (c *Compiler) genYieldDelegateRange(expr ast.Expr, elemType types.Type, iterableType types.Type) {
+	rangeVal := c.genExpr(expr)
+
+	layout := c.lookupTypeLayout(iterableType)
+	if layout == nil {
+		panic(fmt.Sprintf("codegen: no layout for range type %s", iterableType))
+	}
+
+	start := c.block.NewExtractValue(rangeVal, uint64(layout.ValueFieldIndex["start"]))
+	end := c.block.NewExtractValue(rangeVal, uint64(layout.ValueFieldIndex["end"]))
+	inclusive := c.block.NewExtractValue(rangeVal, uint64(layout.ValueFieldIndex["inclusive"]))
+
+	elemLLVM := c.resolveType(elemType)
+	ltPred := enum.IPredSLT
+	named := extractNamed(elemType)
+	if named != nil && classify(named) == CatUnsignedInt {
+		ltPred = enum.IPredULT
+	}
+
+	counterAlloca := c.block.NewAlloca(elemLLVM)
+	c.block.NewStore(start, counterAlloca)
+
+	headerBlk := c.newBlock("yieldstar.range.header")
+	yieldBlk := c.newBlock("yieldstar.range.yield")
+	updateBlk := c.newBlock("yieldstar.range.update")
+	exitBlk := c.newBlock("yieldstar.range.exit")
+
+	c.block.NewBr(headerBlk)
+
+	// Header: counter < end || (counter == end && inclusive)
+	c.block = headerBlk
+	counter := c.block.NewLoad(elemLLVM, counterAlloca)
+	ltCond := c.block.NewICmp(ltPred, counter, end)
+	eqCond := c.block.NewICmp(enum.IPredEQ, counter, end)
+	inclAndEq := c.block.NewAnd(inclusive, eqCond)
+	cond := c.block.NewOr(ltCond, inclAndEq)
+	c.block.NewCondBr(cond, yieldBlk, exitBlk)
+
+	// Yield each element
+	c.block = yieldBlk
+	c.emitYieldValue(counter)
+	c.block.NewBr(updateBlk)
+
+	// Update: increment counter
+	c.block = updateBlk
+	cur := c.block.NewLoad(elemLLVM, counterAlloca)
+	one := constant.NewInt(elemLLVM.(*irtypes.IntType), 1)
+	next := c.block.NewAdd(cur, one)
+	c.block.NewStore(next, counterAlloca)
+	c.block.NewBr(headerBlk)
+
+	c.block = exitBlk
+}
+
+// genYieldDelegateArray yields all elements from a fixed-size array.
+func (c *Compiler) genYieldDelegateArray(expr ast.Expr, arr *types.Array) {
+	basePtr := c.genArrayBasePtr(expr, arr)
+	elemLLVM := c.resolveType(arr.Elem())
+	arrType := irtypes.NewArray(uint64(arr.Size()), elemLLVM)
+	length := constant.NewInt(irtypes.I64, arr.Size())
+
+	counterAlloca := c.block.NewAlloca(irtypes.I64)
+	c.block.NewStore(constant.NewInt(irtypes.I64, 0), counterAlloca)
+
+	headerBlk := c.newBlock("yieldstar.arr.header")
+	yieldBlk := c.newBlock("yieldstar.arr.yield")
+	updateBlk := c.newBlock("yieldstar.arr.update")
+	exitBlk := c.newBlock("yieldstar.arr.exit")
+
+	c.block.NewBr(headerBlk)
+
+	c.block = headerBlk
+	counter := c.block.NewLoad(irtypes.I64, counterAlloca)
+	cond := c.block.NewICmp(enum.IPredULT, counter, length)
+	c.block.NewCondBr(cond, yieldBlk, exitBlk)
+
+	c.block = yieldBlk
+	curCounter := c.block.NewLoad(irtypes.I64, counterAlloca)
+	elemPtr := c.block.NewGetElementPtr(arrType, basePtr,
+		constant.NewInt(irtypes.I32, 0), curCounter)
+	elem := c.block.NewLoad(elemLLVM, elemPtr)
+	c.emitYieldValue(elem)
+	c.block.NewBr(updateBlk)
+
+	c.block = updateBlk
+	cur := c.block.NewLoad(irtypes.I64, counterAlloca)
+	next := c.block.NewAdd(cur, constant.NewInt(irtypes.I64, 1))
+	c.block.NewStore(next, counterAlloca)
+	c.block.NewBr(headerBlk)
+
+	c.block = exitBlk
+}
+
+// genYieldDelegateVector yields all elements from a Vector.
+func (c *Compiler) genYieldDelegateVector(vecPtr value.Value, elemType types.Type) {
+	elemLLVM := c.resolveType(elemType)
+
+	headerType := vectorHeaderType()
+	headerPtr := c.block.NewBitCast(vecPtr, irtypes.NewPointer(headerType))
+	lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	length := c.block.NewLoad(irtypes.I64, lenPtr)
+
+	counterAlloca := c.block.NewAlloca(irtypes.I64)
+	c.block.NewStore(constant.NewInt(irtypes.I64, 0), counterAlloca)
+
+	headerBlk := c.newBlock("yieldstar.vec.header")
+	yieldBlk := c.newBlock("yieldstar.vec.yield")
+	updateBlk := c.newBlock("yieldstar.vec.update")
+	exitBlk := c.newBlock("yieldstar.vec.exit")
+
+	c.block.NewBr(headerBlk)
+
+	c.block = headerBlk
+	counter := c.block.NewLoad(irtypes.I64, counterAlloca)
+	cond := c.block.NewICmp(enum.IPredULT, counter, length)
+	c.block.NewCondBr(cond, yieldBlk, exitBlk)
+
+	c.block = yieldBlk
+	curCounter := c.block.NewLoad(irtypes.I64, counterAlloca)
+	dataBase := c.block.NewGetElementPtr(irtypes.I8, vecPtr,
+		constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
+	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
+	elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, curCounter)
+	elem := c.block.NewLoad(elemLLVM, elemPtr)
+	c.emitYieldValue(elem)
+	c.block.NewBr(updateBlk)
+
+	c.block = updateBlk
+	cur := c.block.NewLoad(irtypes.I64, counterAlloca)
+	next := c.block.NewAdd(cur, constant.NewInt(irtypes.I64, 1))
+	c.block.NewStore(next, counterAlloca)
+	c.block.NewBr(headerBlk)
+
+	c.block = exitBlk
+}
+
+// genYieldDelegateString yields all chars from a string.
+func (c *Compiler) genYieldDelegateString(strPtr value.Value) {
+	posAlloca := c.block.NewAlloca(irtypes.I64)
+	c.block.NewStore(constant.NewInt(irtypes.I64, 0), posAlloca)
+
+	headerBlk := c.newBlock("yieldstar.str.header")
+	yieldBlk := c.newBlock("yieldstar.str.yield")
+	exitBlk := c.newBlock("yieldstar.str.exit")
+
+	c.block.NewBr(headerBlk)
+
+	c.block = headerBlk
+	cp := c.block.NewCall(c.funcs["promise_string_next_char"], strPtr, posAlloca)
+	done := c.block.NewICmp(enum.IPredEQ, cp, constant.NewInt(irtypes.I32, -1))
+	c.block.NewCondBr(done, exitBlk, yieldBlk)
+
+	c.block = yieldBlk
+	c.emitYieldValue(cp)
+	c.block.NewBr(headerBlk)
+
+	c.block = exitBlk
+}
+
+// genYieldDelegateIterator yields all values from an Iterator[T] (structural interface with next() T?).
+func (c *Compiler) genYieldDelegateIterator(iterVal value.Value, _ types.Type, iterType types.Type) {
+	named := extractNamed(iterType)
+	if named == nil {
+		panic(fmt.Sprintf("codegen: genYieldDelegateIterator on non-named type %s", iterType))
+	}
+	nextMethod := named.LookupMethod("next")
+	if nextMethod == nil {
+		panic(fmt.Sprintf("codegen: type %s has no next() method", named))
+	}
+
+	// Resolve optional return type
+	retType := nextMethod.Sig().Result()
+	if inst, ok := iterType.(*types.Instance); ok {
+		if origin, ok := inst.Origin().(*types.Named); ok && len(origin.TypeParams()) > 0 {
+			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+			retType = types.Substitute(retType, subst)
+		}
+	}
+	if c.typeSubst != nil {
+		retType = types.Substitute(retType, c.typeSubst)
+	}
+	optLLVM := c.resolveType(retType)
+
+	// Store iterator in alloca for repeated next() calls
+	iterAlloca := c.createEntryAlloca(iterVal.Type())
+	iterAlloca.SetName(c.uniqueLocalName("yieldstar.iter"))
+	c.block.NewStore(iterVal, iterAlloca)
+
+	headerBlk := c.newBlock("yieldstar.iter.header")
+	yieldBlk := c.newBlock("yieldstar.iter.yield")
+	exitBlk := c.newBlock("yieldstar.iter.exit")
+
+	c.block.NewBr(headerBlk)
+
+	// Header: call next(), check optional tag
+	c.block = headerBlk
+	curIter := c.block.NewLoad(iterVal.Type(), iterAlloca)
+	nextResult := c.emitIterNext(curIter, iterType, named, nextMethod, optLLVM)
+	tag := c.block.NewExtractValue(nextResult, 0)
+	isNone := c.block.NewICmp(enum.IPredEQ, tag, constant.NewInt(irtypes.I1, 0))
+	c.block.NewCondBr(isNone, exitBlk, yieldBlk)
+
+	// Yield: extract value from optional, yield it
+	c.block = yieldBlk
+	val := c.block.NewExtractValue(nextResult, 1)
+	c.emitYieldValue(val)
+	c.block.NewBr(headerBlk)
+
+	c.block = exitBlk
 }

@@ -10684,6 +10684,88 @@ func TestGeneratorFactoryReturnsStruct(t *testing.T) {
 	assertContains(t, ir, "@pal_alloc")
 }
 
+func TestYieldDelegateStream(t *testing.T) {
+	ir := generateIR(t, `
+		inner() stream[int] {
+			yield 1;
+		}
+		outer() stream[int] {
+			yield* inner();
+		}
+		main() {}
+	`)
+	// yield* over a stream should produce sub-generator resume/done/destroy
+	assertContains(t, ir, "yieldstar.check")
+	assertContains(t, ir, "yieldstar.yield")
+	assertContains(t, ir, "yieldstar.exit")
+	// Two generator coroutines: inner and outer
+	assertContains(t, ir, ".generator.0")
+	assertContains(t, ir, ".generator.1")
+}
+
+func TestYieldDelegateRange(t *testing.T) {
+	ir := generateIR(t, `
+		nums() stream[int] {
+			yield* 1..=3;
+		}
+		main() {}
+	`)
+	assertContains(t, ir, "yieldstar.range.header")
+	assertContains(t, ir, "yieldstar.range.yield")
+	assertContains(t, ir, "@llvm.coro.suspend")
+}
+
+func TestYieldDelegateArray(t *testing.T) {
+	ir := generateIR(t, `
+		nums() stream[int] {
+			int[3] arr = [1, 2, 3];
+			yield* arr;
+		}
+		main() {}
+	`)
+	assertContains(t, ir, "yieldstar.arr.header")
+	assertContains(t, ir, "yieldstar.arr.yield")
+}
+
+func TestYieldDelegateMixed(t *testing.T) {
+	ir := generateIR(t, `
+		inner() stream[int] { yield 1; }
+		outer() stream[int] {
+			yield 0;
+			yield* inner();
+			yield* 5..=6;
+		}
+		main() {}
+	`)
+	// Should have both yield.resume (from regular yield) and yieldstar blocks
+	assertContains(t, ir, "yield.resume")
+	assertContains(t, ir, "yieldstar.check")
+	assertContains(t, ir, "yieldstar.range.header")
+}
+
+func TestYieldDelegateVector(t *testing.T) {
+	ir := generateIR(t, `
+		gen(int[] v) stream[int] {
+			yield* v;
+		}
+		main() {}
+	`)
+	assertContains(t, ir, "yieldstar.vec.header")
+	assertContains(t, ir, "yieldstar.vec.yield")
+}
+
+func TestYieldDelegateString(t *testing.T) {
+	ir := generateIR(t, `
+		gen(string s) stream[char] {
+			yield* s;
+		}
+		main() {}
+	`)
+	assertContains(t, ir, "yieldstar.str.header")
+	assertContains(t, ir, "yieldstar.str.yield")
+	assertContains(t, ir, "promise_string_next_char")
+}
+
 func TestMultiParamGenericType(t *testing.T) {
 	ir := generateIR(t, `
 		type Pair[A, B] {

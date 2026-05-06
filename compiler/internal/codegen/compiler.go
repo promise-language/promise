@@ -3518,6 +3518,8 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 	c.tempTrackingEnabled = c.compilingModule == ""
 	c.mutRefPtrs = nil
 	c.mutRefTypes = nil
+	c.scopeBindings = nil // T0085: reset scope bindings for each new function
+	c.loopScopeDepth = 0
 	c.blockCounter = 0
 
 	entry := fn.NewBlock(".entry")

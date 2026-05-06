@@ -2185,7 +2185,13 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 	shouldWait := c.block.NewAnd(rvHasItems, isOpen)
 
 	rendezvousWaitBlock := c.newBlock("send.rv.wait")
-	c.block.NewCondBr(shouldWait, rendezvousWaitBlock, doneBlock)
+	// When rendezvous exits (count==0 or closed), wake the next sender from
+	// send_waiters so it can write to the now-empty buffer. Without this,
+	// a second sender parked on send_waiters would stay stranded — nobody
+	// else calls wake_one(sendWaiters) until a recv succeeds, but recv can't
+	// succeed because no sender writes. (B0156)
+	rendezvousExitBlock := c.newBlock("send.rv.exit")
+	c.block.NewCondBr(shouldWait, rendezvousWaitBlock, rendezvousExitBlock)
 
 	if c.inCoroutine {
 		// Goroutine mode rendezvous: park + suspend
@@ -2218,6 +2224,18 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 		c.block.NewCall(c.palCondWait, notFull, mtx)
 		c.block.NewBr(rendezvousCheckBlock)
 	}
+
+	// rendezvous exit: wake next sender from send_waiters (B0156), then done
+	c.block = rendezvousExitBlock
+	rvExitSendHead := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersHead)))
+	rvExitSendTail := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldSendWaitersTail)))
+	rvExitNfPtr := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldNotFull)))
+	rvExitNf := c.block.NewLoad(irtypes.I8Ptr, rvExitNfPtr)
+	c.block.NewCall(c.funcs["promise_waiter_wake_one"], rvExitSendHead, rvExitSendTail, rvExitNf)
+	c.block.NewBr(doneBlock)
 
 	// done: unlock
 	c.block = doneBlock

@@ -101,6 +101,86 @@ test_fire_and_forget() `test(exclude: "wasm32") {
   assert(true, "fire-and-forget did not crash");
 }
 
+// --- Unbuffered channel: multiple senders (B0156 fix) ---
+// When a sender exits the rendezvous wait, it must wake the next sender
+// from send_waiters so it can write to the now-empty buffer.
+
+test_unbuffered_two_senders() `test(exclude: "wasm32") {
+  ch := channel[int]();
+  go {
+    ch.send(1);
+  };
+  go {
+    ch.send(2);
+  };
+  int v1 = (<-ch)!;
+  int v2 = (<-ch)!;
+  assert(v1 + v2 == 3, "unbuffered two senders sum");
+}
+
+test_unbuffered_three_senders() `test(exclude: "wasm32") {
+  ch := channel[int]();
+  go {
+    ch.send(10);
+  };
+  go {
+    ch.send(20);
+  };
+  go {
+    ch.send(30);
+  };
+  int sum = 0;
+  for i in 0..3 {
+    sum = sum + (<-ch)!;
+  }
+  assert(sum == 60, "unbuffered three senders sum");
+}
+
+// --- Select with unbuffered channels (B0156) ---
+
+test_select_unbuffered_recv() `test(exclude: "wasm32") {
+  ch := channel[int]();
+  go {
+    ch.send(42);
+  };
+  select {
+    v := <-ch:
+      assert(v! == 42, "select unbuffered recv");
+  }
+}
+
+test_select_unbuffered_multi_recv() `test(exclude: "wasm32") {
+  ch := channel[int]();
+  go {
+    ch.send(1);
+  };
+  go {
+    ch.send(2);
+  };
+  int sum = 0;
+  for i in 0..2 {
+    select {
+      v := <-ch:
+        sum = sum + v!;
+    }
+  }
+  assert(sum == 3, "select unbuffered multi recv");
+}
+
+test_select_unbuffered_send() `test(exclude: "wasm32") {
+  ch := channel[int]();
+  done := channel[int](capacity: 1);
+  go {
+    int v = (<-ch)!;
+    done.send(v);
+  };
+  select {
+    ch.send(99):
+      int result = (<-done)!;
+      assert(result == 99, "select unbuffered send");
+  }
+}
+
 // --- Select with default (non-blocking) ---
 
 test_select_default() `test(exclude: "wasm32") {

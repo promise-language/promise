@@ -10079,6 +10079,29 @@ func TestChannelSendCoroutineRendezvous(t *testing.T) {
 	assertContains(t, ir, "call void @promise_waiter_enqueue(")
 }
 
+func TestChannelSendRendezvousExitWakesNextSender(t *testing.T) {
+	// B0156: When a sender exits the unbuffered rendezvous wait, it must
+	// wake the next sender from send_waiters via promise_waiter_wake_one.
+	// Without this, a second sender parked on send_waiters would deadlock.
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int]();
+			go {
+				ch.send(42);
+			};
+			result := <-ch;
+		}
+	`)
+	// The rendezvous exit block should call wake_one to propagate to next sender
+	assertContains(t, ir, "send.rv.exit")
+	// Count wake_one calls: there should be at least 2 in the coroutine send path
+	// (one after writing to wake recv, one in rv.exit to wake next sender)
+	count := strings.Count(ir, "call void @promise_waiter_wake_one(")
+	if count < 2 {
+		t.Errorf("expected at least 2 promise_waiter_wake_one calls in send path, got %d", count)
+	}
+}
+
 func TestForInChannelCoroutineMode(t *testing.T) {
 	// for-in channel inside a go block uses coroutine-mode park+suspend
 	ir := generateIR(t, `

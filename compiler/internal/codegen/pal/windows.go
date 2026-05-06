@@ -1706,6 +1706,7 @@ func (p *WindowsPAL) EmitSpawnStreaming(module *ir.Module) *ir.Func {
 //   - SIGINT (2) → GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)
 //   - SIGTERM (15) → GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0)
 //   - Other signals → return -1 (unsupported)
+//
 // For other PIDs: TerminateProcess (treats pid as packed HANDLE).
 // Returns 0 on success, -1 on error.
 func (p *WindowsPAL) EmitKill(module *ir.Module) *ir.Func {

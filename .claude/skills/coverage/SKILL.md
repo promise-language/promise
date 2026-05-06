@@ -33,13 +33,18 @@ Before starting, update your tracker status: call `mcp__tracker__heartbeat` with
    - List untested or under-tested functionality: missing edge cases, error paths, boundary conditions.
    - Cross-reference with `bin/promise test -coverage` output to identify uncovered functions/branches.
 
-5. **Write missing tests.**
+5. **Audit resource invariants** (not just code path coverage).
+   - For every type in the scoped code: if it heap-allocates (native, contains `pal_alloc`, or has droppable fields), verify there's a test that confirms cleanup happens. If no test exists and no drop path exists, file a **critical** bug for the leak.
+   - For concurrency code: verify there's a stress test. If missing, file a task.
+   - Coverage percentages can be misleading — 100% line coverage doesn't mean resources are properly managed. Think about *what invariants* are tested, not just *which lines* are hit.
+
+6. **Write missing tests.**
    - **Go tests**: Follow existing patterns — `generateIR()` + `assertContains` for codegen, `checkErrs()` + `expectError` for sema, `ownerOK()` / `ownerErrs()` for ownership.
    - **Promise tests**: Use batch tests (`` `test `` annotation with `assert()`) unless testing exact output. Co-locate `*_test.pr` files with source files for modules; use `tests/` for cross-cutting e2e tests.
    - Prioritize: error paths, edge cases, and recently changed code over happy-path coverage that already exists.
 
-6. **Verify.** Run the new tests to confirm they pass. For Go: `go test ./<package>/ -run <TestName> -v -count=1`. For Promise: `bin/promise test <file>`.
+7. **Verify.** Run the new tests to confirm they pass. For Go: `go test ./<package>/ -run <TestName> -v -count=1`. For Promise: `bin/promise test <file>`.
 
-7. **File bugs.** If you discover untestable code (missing language features, compiler bugs, test infra limitations), file with `mcp__tracker__create` rather than working around the issue.
+8. **File bugs.** If you discover untestable code (missing language features, compiler bugs, test infra limitations), file with `mcp__tracker__create` rather than working around the issue.
 
-8. **Report.** Summarize: coverage before/after (for Go and Promise), what tests were added, and any bugs filed.
+9. **Report.** Summarize: coverage before/after (for Go and Promise), what tests were added, and any bugs filed.

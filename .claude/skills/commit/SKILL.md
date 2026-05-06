@@ -37,7 +37,12 @@ Before starting, update your tracker status: call `mcp__tracker__heartbeat` with
 7. **Update tracker.**
    - Update any related tracker entries (`mcp__tracker__update`) — mark bugs as done, add notes describing what was done.
    Include the same content as in the "summary" you provide when the task is done.
-   - If you noticed any issues during the session that haven't been filed, file them now with `mcp__tracker__create`.
+   - **File any issues discovered during this session.** Specifically check for:
+     - Memory leaks: types without drop, allocations without free paths
+     - Concurrency bugs: races, deadlocks, missing synchronization
+     - Performance issues: unnecessary allocations, algorithmic complexity problems
+     - Missing tests for critical invariants (cleanup, thread safety, error recovery)
+   - Use `mcp__tracker__create` with priority **critical** for memory/concurrency issues, **high** for performance, **medium** for missing tests.
 
 8. **Push.**
    - `git push` (or `git push -u origin <branch>` if on a new branch).

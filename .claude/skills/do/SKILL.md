@@ -38,6 +38,12 @@ Implement the task or fix the bug described in $ARGUMENTS. If $ARGUMENTS referen
    - For compiler changes: update both the implementation and any affected LLVM IR patterns.
    - For Promise/stdlib changes: run `./build` to re-embed updated modules.
    - Never work around compiler/language bugs — if you hit a limitation, file it with `mcp__tracker__create` and stop.
+   - **Proactively check for critical systemic issues** in code you touch or read during implementation. These are silent bugs that won't show up as test failures:
+     - **Memory leaks**: Does every heap-allocating type (`native` types using `pal_alloc`, types with pointer fields) have a `drop()` method or get auto-synthesized drop? Are all allocations reachable by the cleanup path?
+     - **Missing cleanup**: Are `use` bindings properly closed? Are scope bindings registered for all droppable values?
+     - **Concurrency bugs**: Lock ordering violations, missing mutex protection, park/wake races, channel close races.
+     - **Resource waste**: Unnecessary allocations in hot paths, O(n) operations that should be O(1), repeated work that could be cached.
+   - If you spot any of these, file immediately with `mcp__tracker__create` at **critical** priority — don't wait until the end of the task. These bugs compound silently.
 
 7. **Write tests.**
    - Every behavioral change needs tests. Write them alongside the implementation, not as an afterthought.

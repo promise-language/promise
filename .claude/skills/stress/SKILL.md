@@ -26,6 +26,14 @@ Read the stress test output and extract:
 - **HIGH VARIANCE tests**: test name, file, CoV, timing stats.
 - **STABLE count**: total stable tests and files.
 
+### 2b. Check for resource leaks
+
+- If the stress test ran long enough (>100 iterations or >60s), check for signs of resource leaks:
+  - Monotonically increasing memory usage across iterations (if measurable from output)
+  - Increasing test times in later iterations (may indicate accumulating leaked state)
+  - OOM kills or system resource exhaustion
+- If leak indicators are present, file a **critical** bug with tag `memory-leak` describing the observed behavior and which tests were running.
+
 ### 3. Fetch existing flaky bugs from tracker
 
 - Call `mcp__tracker__list` with `type: "bug"`, `tag: "flaky"` to get all known flaky bugs.

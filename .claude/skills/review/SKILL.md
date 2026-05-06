@@ -20,6 +20,12 @@ Before starting, update your tracker status: call `mcp__tracker__heartbeat` with
    - For codegen changes: verify LLVM IR shape (correct types, no dangling references, proper null checks).
    - For sema changes: verify all 4 passes (Declare, Define, Check, Verify) are consistent.
    - For scheduler changes: verify park mutex protocol, lock ordering, and shutdown invariants.
+   - **Critical systemic checks** (these are silent — no test will catch them):
+     - **Memory management**: Every type that heap-allocates (native types, types with `pal_alloc`/`malloc`) must have a `drop()` path. Check: does the type have `drop(~this)`? If it has fields with droppable types, does the compiler auto-synthesize drop? If not, file a bug.
+     - **Concurrency safety**: Shared mutable state must be mutex-protected. Channel operations must follow the park mutex protocol. Lock acquisition must follow address-ordered lock discipline. Shutdown must join all threads.
+     - **Resource lifecycle**: Every `pal_alloc` must have a corresponding `pal_free` path. Every opened file/socket must be closeable. Every spawned goroutine must be reachable by shutdown.
+     - **Performance traps**: Allocations inside loops that could be hoisted. Quadratic algorithms on collections. Redundant copies of large data.
+   - These issues are **critical priority** bugs. File them immediately — don't defer.
 
 3. **Check tests.**
    - Every behavioral change needs a test. Prefer batch tests (`` `test ``) over snapshot tests.

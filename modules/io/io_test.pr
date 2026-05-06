@@ -13,7 +13,7 @@ strerror_unknown_code() `test(allow_leaks: true) {
   assert(msg == "I/O error (errno 9999)", "unknown errno fallback");
 }
 
-make_io_error_test() `test(allow_leaks: true) {
+make_io_error_test() `test {
   IoError e = _make_io_error(-2);
   assert(e.code == 2, "io error code from -errno");
   assert(e.message == "no such file or directory", "io error message");
@@ -127,7 +127,7 @@ file_empty_test() `test(exclude: "wasm32") {
 
 // ── Error: open nonexistent ──────────────────────────────────────────────────
 
-file_open_nonexistent() `test(allow_leaks: true, exclude: "wasm32") {
+file_open_nonexistent() `test(exclude: "wasm32") {
   bool caught = false;
   File.open("/tmp/pr_iot_noexist_xyz")? e {
     caught = true;
@@ -135,7 +135,7 @@ file_open_nonexistent() `test(allow_leaks: true, exclude: "wasm32") {
   assert(caught, "opening nonexistent file raises error");
 }
 
-file_read_content_nonexistent() `test(allow_leaks: true, exclude: "wasm32") {
+file_read_content_nonexistent() `test(exclude: "wasm32") {
   bool caught = false;
   File.read_content("/tmp/pr_iot_noexist_abc")? e {
     caught = true;
@@ -145,7 +145,7 @@ file_read_content_nonexistent() `test(allow_leaks: true, exclude: "wasm32") {
 
 // ── Error: remove nonexistent ────────────────────────────────────────────────
 
-file_remove_nonexistent() `test(allow_leaks: true, exclude: "wasm32") {
+file_remove_nonexistent() `test(exclude: "wasm32") {
   bool caught = false;
   File.remove("/tmp/pr_iot_rm_nofile")? e {
     caught = true;
@@ -155,7 +155,7 @@ file_remove_nonexistent() `test(allow_leaks: true, exclude: "wasm32") {
 
 // ── Error: double close ──────────────────────────────────────────────────────
 
-file_double_close() `test(allow_leaks: true, exclude: "wasm32") {
+file_double_close() `test(exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_dblc")!;
   f.close()!;
   bool caught = false;
@@ -271,7 +271,7 @@ dir_list_empty() `test(exclude: "wasm32") {
   Dir.remove("/tmp/pr_iot_list_e")!;
 }
 
-dir_list_nonexistent() `test(allow_leaks: true, exclude: "wasm32") {
+dir_list_nonexistent() `test(exclude: "wasm32") {
   bool caught = false;
   Dir.list("/tmp/pr_iot_list_noexist")? e {
     caught = true;
@@ -395,7 +395,7 @@ read_line_single_no_newline() `test(allow_leaks: true, exclude: "wasm32") {
 
 // ── Edge cases: opening directories ──────────────────────────────────────────
 
-file_open_directory() `test(allow_leaks: true, exclude: "wasm32") {
+file_open_directory() `test(exclude: "wasm32") {
   // Opening a directory as a file should raise an error (EISDIR)
   bool caught = false;
   File.open("/")? e {
@@ -404,7 +404,7 @@ file_open_directory() `test(allow_leaks: true, exclude: "wasm32") {
   assert(caught, "opening / as file raises error");
 }
 
-file_create_on_directory_path() `test(allow_leaks: true, exclude: "wasm32") {
+file_create_on_directory_path() `test(exclude: "wasm32") {
   // File.create on an existing directory path should fail
   if !Dir.exists("/tmp/pr_iot_cdir") {
     Dir.make("/tmp/pr_iot_cdir")!;
@@ -440,7 +440,7 @@ dir_exists_nonexistent() `test(exclude: "wasm32") {
 
 // ── Edge cases: write to readonly, read after close ──────────────────────────
 
-file_write_readonly() `test(allow_leaks: true, exclude: "wasm32") {
+file_write_readonly() `test(exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_wro", "data")!;
   File f = File.open("/tmp/pr_iot_wro", readonly: true)!;
   bool caught = false;
@@ -452,7 +452,7 @@ file_write_readonly() `test(allow_leaks: true, exclude: "wasm32") {
   File.remove("/tmp/pr_iot_wro")!;
 }
 
-file_read_after_close() `test(allow_leaks: true, exclude: "wasm32") {
+file_read_after_close() `test(exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_rac", "data")!;
   File f = File.open("/tmp/pr_iot_rac")!;
   f.close()!;
@@ -464,7 +464,7 @@ file_read_after_close() `test(allow_leaks: true, exclude: "wasm32") {
   File.remove("/tmp/pr_iot_rac")!;
 }
 
-file_write_after_close() `test(allow_leaks: true, exclude: "wasm32") {
+file_write_after_close() `test(exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_wac")!;
   f.close()!;
   bool caught = false;
@@ -475,7 +475,7 @@ file_write_after_close() `test(allow_leaks: true, exclude: "wasm32") {
   File.remove("/tmp/pr_iot_wac")!;
 }
 
-file_seek_after_close() `test(allow_leaks: true, exclude: "wasm32") {
+file_seek_after_close() `test(exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_sac", "data")!;
   File f = File.open("/tmp/pr_iot_sac")!;
   f.close()!;
@@ -487,7 +487,7 @@ file_seek_after_close() `test(allow_leaks: true, exclude: "wasm32") {
   File.remove("/tmp/pr_iot_sac")!;
 }
 
-file_position_after_close() `test(allow_leaks: true, exclude: "wasm32") {
+file_position_after_close() `test(exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_pac", "data")!;
   File f = File.open("/tmp/pr_iot_pac")!;
   f.close()!;
@@ -502,7 +502,7 @@ file_position_after_close() `test(allow_leaks: true, exclude: "wasm32") {
 
 // ── Edge cases: File.remove / Dir.remove wrong type ──────────────────────────
 
-file_remove_directory() `test(allow_leaks: true, exclude: "wasm32") {
+file_remove_directory() `test(exclude: "wasm32") {
   // File.remove on a directory should fail (use Dir.remove for directories)
   if !Dir.exists("/tmp/pr_iot_frd") {
     Dir.make("/tmp/pr_iot_frd")!;
@@ -515,7 +515,7 @@ file_remove_directory() `test(allow_leaks: true, exclude: "wasm32") {
   Dir.remove("/tmp/pr_iot_frd")!;
 }
 
-dir_remove_file() `test(allow_leaks: true, exclude: "wasm32") {
+dir_remove_file() `test(exclude: "wasm32") {
   // Dir.remove on a file should fail
   File.write_content("/tmp/pr_iot_drf", "x")!;
   bool caught = false;
@@ -540,7 +540,7 @@ dir_remove_nonempty() `test(allow_leaks: true, exclude: "wasm32") {
 
 // ── Edge cases: Dir.make duplicate ───────────────────────────────────────────
 
-dir_make_duplicate() `test(allow_leaks: true, exclude: "wasm32") {
+dir_make_duplicate() `test(exclude: "wasm32") {
   if !Dir.exists("/tmp/pr_iot_ddup") {
     Dir.make("/tmp/pr_iot_ddup")!;
   }
@@ -584,7 +584,7 @@ dir_make_all_empty_string() `test(exclude: "wasm32") {
 
 // ── Edge cases: Dir.list on a file ───────────────────────────────────────────
 
-dir_list_on_file() `test(allow_leaks: true, exclude: "wasm32") {
+dir_list_on_file() `test(exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_dlf", "x")!;
   bool caught = false;
   Dir.list("/tmp/pr_iot_dlf")? e {
@@ -626,7 +626,7 @@ dir_list_mixed() `test(allow_leaks: true, exclude: "wasm32") {
 
 // ── Edge cases: File.size ────────────────────────────────────────────────────
 
-file_size_nonexistent() `test(allow_leaks: true, exclude: "wasm32") {
+file_size_nonexistent() `test(exclude: "wasm32") {
   bool caught = false;
   File.size("/tmp/pr_iot_szne")? e {
     caught = true;
@@ -655,14 +655,14 @@ file_binary_content() `test(allow_leaks: true, exclude: "wasm32") {
 
 // ── Edge cases: IoError fields ───────────────────────────────────────────────
 
-io_error_has_code() `test(allow_leaks: true, exclude: "wasm32") {
+io_error_has_code() `test(exclude: "wasm32") {
   // Verify IoError message for ENOENT
   File.open("/tmp/pr_iot_never_exists_xyz")? e {
     assert(e.message == "no such file or directory", "IoError message for nonexistent file");
   };
 }
 
-io_error_open_root() `test(allow_leaks: true, exclude: "wasm32") {
+io_error_open_root() `test(exclude: "wasm32") {
   // Opening "/" as a read-write file should fail.
   // The exact errno differs by platform (EISDIR on Linux, EACCES on macOS),
   // but it must produce an error.
@@ -732,7 +732,7 @@ file_read_eof() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_reof")!;
 }
 
-file_read_after_close_bytes() `test(allow_leaks: true, exclude: "wasm32") {
+file_read_after_close_bytes() `test(exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_racb")!;
   f.close()!;
   bool caught = false;
@@ -744,7 +744,7 @@ file_read_after_close_bytes() `test(allow_leaks: true, exclude: "wasm32") {
   File.remove("/tmp/pr_iot_racb")!;
 }
 
-file_write_after_close_bytes() `test(allow_leaks: true, exclude: "wasm32") {
+file_write_after_close_bytes() `test(exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_wacb")!;
   f.close()!;
   bool caught = false;

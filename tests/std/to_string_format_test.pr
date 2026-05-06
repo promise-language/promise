@@ -33,14 +33,14 @@ test_int_negative_hex() `test {
   assert((-255).to_string(base: 16, prefix: true) == "-0xff", "-255 hex prefix");
 }
 
-test_int_width() `test(allow_leaks: true) {
+test_int_width() `test {
   assert(42.to_string(width: 6) == "    42", "42 width 6 space");
   assert(42.to_string(width: 6, fill: '0') == "000042", "42 width 6 zero");
   assert(42.to_string(width: 2) == "42", "42 width 2 exact");
   assert(42.to_string(width: 1) == "42", "42 width 1 overflow");
 }
 
-test_int_width_hex() `test(allow_leaks: true) {
+test_int_width_hex() `test {
   assert(42.to_string(base: 16, width: 4, fill: '0') == "002a", "42 hex width 4");
   assert(42.to_string(base: 16, prefix: true, width: 6, fill: '0') == "0x002a", "42 hex prefix width 6");
 }
@@ -65,7 +65,7 @@ test_u8_hex() `test {
   assert(v.to_string(base: 16, prefix: true) == "0xab", "u8 hex prefix");
 }
 
-test_uint_width() `test(allow_leaks: true) {
+test_uint_width() `test {
   uint v = 42u;
   assert(v.to_string(width: 6, fill: '0') == "000042", "uint width zero");
 }
@@ -198,11 +198,11 @@ test_int_base36() `test {
   assert(36.to_string(base: 36) == "10", "36 base36");
 }
 
-test_int_negative_width_zero_fill() `test(allow_leaks: true) {
+test_int_negative_width_zero_fill() `test {
   assert((-42).to_string(width: 6, fill: '0') == "-00042", "-42 width 6 zero fill");
 }
 
-test_int_negative_hex_width_zero_fill() `test(allow_leaks: true) {
+test_int_negative_hex_width_zero_fill() `test {
   assert((-255).to_string(base: 16, prefix: true, width: 8, fill: '0') == "-0x000ff", "neg hex prefix width zero");
 }
 
@@ -226,7 +226,7 @@ test_f64_one_precision() `test {
   assert(x.to_string(precision: 3) == "1.000", "1.0 prec 3");
 }
 
-test_int_space_width() `test(allow_leaks: true) {
+test_int_space_width() `test {
   assert(7.to_string(width: 3) == "  7", "7 width 3 space");
 }
 

@@ -541,7 +541,7 @@ test_process_close_stdin_eof() `test(allow_leaks: true, exclude: "wasm32") {
   assert(out.trim() == "3", "wc should count 3 lines, got: " + out.trim());
 }
 
-test_process_take_already_taken() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_take_already_taken() `test(exclude: "wasm32") {
   Process p = Process.spawn("true")!;
   ProcessOutput stdout = p.take_standard_output()!;
 
@@ -586,7 +586,7 @@ test_process_close_stdout_twice() `test(allow_leaks: true, exclude: "wasm32") {
   p.wait()!;
 }
 
-test_process_write_after_close() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_write_after_close() `test(exclude: "wasm32") {
   Process p = Process.spawn("cat")!;
   ProcessInput stdin = p.take_standard_input()!;
   stdin.close()!;
@@ -599,7 +599,7 @@ test_process_write_after_close() `test(allow_leaks: true, exclude: "wasm32") {
   p.wait()!;
 }
 
-test_process_take_stdin_twice() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_take_stdin_twice() `test(exclude: "wasm32") {
   Process p = Process.spawn("cat")!;
   ProcessInput stdin = p.take_standard_input()!;
   stdin.close()!;
@@ -612,7 +612,7 @@ test_process_take_stdin_twice() `test(allow_leaks: true, exclude: "wasm32") {
   p.wait()!;
 }
 
-test_process_take_stderr_twice() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_take_stderr_twice() `test(exclude: "wasm32") {
   Process p = Process.spawn("true")!;
   ProcessOutput stderr = p.take_standard_error()!;
 

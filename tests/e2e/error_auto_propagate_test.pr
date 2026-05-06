@@ -340,7 +340,7 @@ test_optional_recovery_typed_success() `test {
 }
 
 // String type optional recovery
-test_optional_recovery_string_error() `test(allow_leaks: true) {
+test_optional_recovery_string_error() `test {
   s := get_string(true)? e {
     print_line("caught");
   };
@@ -610,7 +610,7 @@ test_typed_handler_else_optional_inferred() `test {
   assert("{v}" == "42", "typed match produces some value");
 }
 
-test_typed_handler_else_optional_nomatch() `test(allow_leaks: true) {
+test_typed_handler_else_optional_nomatch() `test {
   v := fail_with_io(false)? e is IoError {
     e.code;
   } else e {

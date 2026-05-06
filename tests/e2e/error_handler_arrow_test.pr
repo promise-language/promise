@@ -97,7 +97,7 @@ test_arrow_typed_success() `test {
 // Section 5: Arrow optional recovery (non-recovering)
 // ============================================================
 
-test_arrow_optional_error() `test(allow_leaks: true) {
+test_arrow_optional_error() `test {
   x := parse(-1)? e => print_line("handled");
   assert("{x}" == "none", "arrow optional recovery on error");
 }

@@ -120,7 +120,7 @@ enum SafeBox[T] {
   }
 }
 
-test_failable_generic_enum() `test(allow_leaks: true) {
+test_failable_generic_enum() `test {
   SafeBox[int] p = SafeBox[int].Present(value: 42);
   int val = p.get_value()!;
   assert(val == 42, "Present returns value");

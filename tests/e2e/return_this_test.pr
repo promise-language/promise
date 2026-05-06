@@ -44,7 +44,7 @@ test_custom_iter() `test {
 }
 
 // Custom iter() combined with vector iter() in same function (original B0122 trigger)
-test_custom_and_vector_iter() `test(allow_leaks: true) {
+test_custom_and_vector_iter() `test {
   c := Counter(count: 0, max_val: 3);
   sum := 0;
   for n in c.iter() {

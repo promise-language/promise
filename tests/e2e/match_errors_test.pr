@@ -313,7 +313,7 @@ test_match_result_success() `test {
   assert(s == "one", "success through handler");
 }
 
-test_match_result_optional_error() `test(allow_leaks: true) {
+test_match_result_optional_error() `test {
   r := get_value(99)? e {
     print_line("caught");
   };

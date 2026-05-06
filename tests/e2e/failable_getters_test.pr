@@ -187,7 +187,7 @@ test_getter_auto_prop_string_fail() `test {
 // Section 5: Optional recovery (non-recovering handler)
 // ============================================================
 
-test_getter_optional_inferred_error() `test(allow_leaks: true) {
+test_getter_optional_inferred_error() `test {
   Sensor s = Sensor(_raw: -1);
   x := s.value? e {
     print_line("handled");
@@ -203,7 +203,7 @@ test_getter_optional_inferred_success() `test {
   assert("{x}" == "42", "inferred optional recovery on getter success");
 }
 
-test_getter_optional_typed_error() `test(allow_leaks: true) {
+test_getter_optional_typed_error() `test {
   Sensor s = Sensor(_raw: -1);
   int? x = s.value? e {
     print_line("handled");
@@ -315,7 +315,7 @@ test_getter_typed_else_success() `test {
   assert(v == 5, "typed handler not triggered on getter success");
 }
 
-test_getter_typed_else_optional() `test(allow_leaks: true) {
+test_getter_typed_else_optional() `test {
   Config c = Config(_mode: -2);
   v := c.mode? e is ConfigError {
     -99;

@@ -29,14 +29,14 @@ type Nested {
 
 // --- Basic LIFO ordering ---
 
-test_basic_lifo_two() `test(allow_leaks: true) {
+test_basic_lifo_two() `test {
   a := Resource(name: "A");
   b := Resource(name: "B");
   assert(a.name == "A", "a accessible");
   assert(b.name == "B", "b accessible");
 }
 
-test_basic_lifo_three() `test(allow_leaks: true) {
+test_basic_lifo_three() `test {
   a := Resource(name: "A");
   b := Resource(name: "B");
   c := Resource(name: "C");
@@ -72,7 +72,7 @@ return_early() {
   c := Resource(name: "C");
 }
 
-test_early_return_drops() `test(allow_leaks: true) {
+test_early_return_drops() `test {
   return_early();
   assert(true, "early return completed");
 }
@@ -103,7 +103,7 @@ test_while_break_drops() `test(allow_leaks: true) {
 
 // --- Reassignment drops old value ---
 
-test_reassignment_drops_old() `test(allow_leaks: true) {
+test_reassignment_drops_old() `test {
   a := Resource(name: "old");
   a = Resource(name: "new");
   assert(a.name == "new", "reassigned value");
@@ -123,7 +123,7 @@ test_interleaved_types() `test(allow_leaks: true) {
 
 // --- If-else with droppable in branches ---
 
-test_if_branch_drop() `test(allow_leaks: true) {
+test_if_branch_drop() `test {
   a := Resource(name: "before_if");
   if true {
     b := Resource(name: "in_then");
@@ -148,7 +148,7 @@ failing_caller() int! {
   return c;
 }
 
-test_error_propagation_drops() `test(allow_leaks: true) {
+test_error_propagation_drops() `test {
   failing_caller()? e {
     assert(e.message == "fail", "error propagated");
   };
@@ -159,7 +159,7 @@ test_error_propagation_drops() `test(allow_leaks: true) {
 consume_resource(Resource r) {
 }
 
-test_conditional_move_drop_flag() `test(allow_leaks: true) {
+test_conditional_move_drop_flag() `test {
   a := Resource(name: "A");
   b := Resource(name: "B");
   if true {

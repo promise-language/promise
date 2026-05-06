@@ -409,7 +409,7 @@ enum Source {
   }
 }
 
-test_failable_enum_method_handler() `test(allow_leaks: true) {
+test_failable_enum_method_handler() `test {
   result := Source.Valid.load()? e {
     "fallback";
   };

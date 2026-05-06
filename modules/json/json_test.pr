@@ -18,7 +18,7 @@ encode_uint_test() `test(allow_leaks: true) {
   assert(enc.to_string() == "100", "encode uint");
 }
 
-encode_f64_test() `test(allow_leaks: true) {
+encode_f64_test() `test {
   JsonEncoder enc = JsonEncoder();
   enc.encode_f64(3.14)!;
   string s = enc.to_string();
@@ -140,13 +140,13 @@ decode_bool_false_test() `test(allow_leaks: true) {
   assert(v == false, "decode false");
 }
 
-decode_string_test() `test(allow_leaks: true) {
+decode_string_test() `test {
   JsonDecoder dec = JsonDecoder(data: "\"hello\"");
   string v = dec.decode_string()!;
   assert(v == "hello", "decode string");
 }
 
-decode_string_escapes_test() `test(allow_leaks: true) {
+decode_string_escapes_test() `test {
   JsonDecoder dec = JsonDecoder(data: "\"a\\\"b\\\\c\\nd\"");
   string v = dec.decode_string()!;
   assert(v == "a\"b\\c\nd", "decode string escapes");
@@ -270,7 +270,7 @@ round_trip_bool_test() `test(allow_leaks: true) {
   assert(v == true, "round trip bool decode");
 }
 
-round_trip_string_test() `test(allow_leaks: true) {
+round_trip_string_test() `test {
   string s = encode_string[string]("hello world")!;
   assert(s == "\"hello world\"", "round trip string encode");
   string v = decode_string[string](s)!;
@@ -506,7 +506,7 @@ skip_value_string_test() `test(allow_leaks: true) {
 
 // ── Pretty printing ─────────────────────────────────────────────────────────
 
-encode_pretty_object_test() `test(allow_leaks: true) {
+encode_pretty_object_test() `test {
   JsonEncoder enc = JsonEncoder(pretty: true, indent: 2);
   enc.begin_object(1)!;
   enc.encode_key("x")!;
@@ -612,7 +612,7 @@ format_value_bool_test() `test {
   assert(s == "true", "format true");
 }
 
-format_value_string_test() `test(allow_leaks: true) {
+format_value_string_test() `test {
   string s = format_value(JsonValue.Str("hello"))!;
   assert(s == "\"hello\"", "format string");
 }
@@ -709,7 +709,7 @@ format_value_false_test() `test {
   assert(s == "false", "format false");
 }
 
-format_value_number_test() `test(allow_leaks: true) {
+format_value_number_test() `test {
   string s = format_value(JsonValue.Number(42.0))!;
   assert(s == "42", "format number");
 }
@@ -893,32 +893,32 @@ encode_string_control_char_test() `test(allow_leaks: true) {
   assert(enc.to_string() == "\"\\u0000\"", "encode control char");
 }
 
-decode_string_tab_test() `test(allow_leaks: true) {
+decode_string_tab_test() `test {
   JsonDecoder dec = JsonDecoder(data: "\"a\\tb\"");
   string v = dec.decode_string()!;
   assert(v == "a\tb", "decode tab");
 }
 
-decode_string_cr_test() `test(allow_leaks: true) {
+decode_string_cr_test() `test {
   JsonDecoder dec = JsonDecoder(data: "\"a\\rb\"");
   string v = dec.decode_string()!;
   assert(v == "a\rb", "decode cr");
 }
 
-decode_string_slash_test() `test(allow_leaks: true) {
+decode_string_slash_test() `test {
   JsonDecoder dec = JsonDecoder(data: "\"a\\/b\"");
   string v = dec.decode_string()!;
   assert(v == "a/b", "decode escaped slash");
 }
 
-decode_string_unicode_escape_test() `test(allow_leaks: true) {
+decode_string_unicode_escape_test() `test {
   // \u0041 = 'A'
   JsonDecoder dec = JsonDecoder(data: "\"\\u0041\"");
   string v = dec.decode_string()!;
   assert(v == "A", "decode unicode escape");
 }
 
-decode_string_backspace_formfeed_test() `test(allow_leaks: true) {
+decode_string_backspace_formfeed_test() `test {
   JsonDecoder dec = JsonDecoder(data: "\"\\b\\f\"");
   string v = dec.decode_string()!;
   assert(v.len == 2, "decode backspace+formfeed length");
@@ -926,7 +926,7 @@ decode_string_backspace_formfeed_test() `test(allow_leaks: true) {
 
 // ── Pretty printing coverage ────────────────────────────────────────────────
 
-encode_pretty_array_test() `test(allow_leaks: true) {
+encode_pretty_array_test() `test {
   JsonEncoder enc = JsonEncoder(pretty: true, indent: 2);
   enc.begin_array(2)!;
   enc.encode_int(1)!;
@@ -937,7 +937,7 @@ encode_pretty_array_test() `test(allow_leaks: true) {
   assert(result.contains("  1"), "pretty array has indented element");
 }
 
-encode_pretty_nested_test() `test(allow_leaks: true) {
+encode_pretty_nested_test() `test {
   JsonEncoder enc = JsonEncoder(pretty: true, indent: 2);
   enc.begin_object(1)!;
   enc.encode_key("items")!;
@@ -1311,7 +1311,7 @@ encode_method_test() `test(allow_leaks: true) {
   assert(enc.to_string() == "[1,true]", "encode method");
 }
 
-format_method_test() `test(allow_leaks: true) {
+format_method_test() `test {
   JsonValue v = JsonValue.Str("hello");
   string s = v.format()!;
   assert(s == "\"hello\"", "format method");

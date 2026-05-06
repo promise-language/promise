@@ -266,7 +266,7 @@ test_heap_user_showable_assign_then_pass() `test {
   assert(display(s) == "meow", "heap user showable assign then pass");
 }
 
-test_heap_user_format_var() `test(allow_leaks: true) {
+test_heap_user_format_var() `test {
   Animal a = Animal(sound: "quack");
   Format f = a;
   Builder b = Builder();
@@ -326,7 +326,7 @@ test_value_type_showable_assign_then_pass() `test(allow_leaks: true) {
   assert(display(s) == "(7,8)", "value type showable assign then pass");
 }
 
-test_value_type_format_var() `test(allow_leaks: true) {
+test_value_type_format_var() `test {
   Color c = Color(r: 10, g: 20, b: 30);
   Format f = c;
   Builder b = Builder();
@@ -340,7 +340,7 @@ test_value_type_format_param() `test(allow_leaks: true) {
   assert(format_to_string(c) == "rgb(255,128,0)", "value type format param");
 }
 
-test_value_type_interpolation() `test(allow_leaks: true) {
+test_value_type_interpolation() `test {
   Color c = Color(r: 1, g: 2, b: 3);
   string s = "{c}";
   assert(s == "rgb(1,2,3)", "value type interpolation");

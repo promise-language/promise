@@ -7,12 +7,12 @@ type Pt {
   }
 }
 
-test_user_type_basic() `test(allow_leaks: true) {
+test_user_type_basic() `test {
   Pt p = Pt(x: 3, y: 4);
   assert("{p}" == "(3, 4)", "user type format interp");
 }
 
-test_user_type_mixed() `test(allow_leaks: true) {
+test_user_type_mixed() `test {
   Pt p = Pt(x: 1, y: 2);
   assert("point: {p}" == "point: (1, 2)", "mixed text + user type");
 }
@@ -27,7 +27,7 @@ test_optional_user_type_none() `test {
   assert("{p}" == "none", "optional user type none");
 }
 
-test_multiple_user_types() `test(allow_leaks: true) {
+test_multiple_user_types() `test {
   Pt a = Pt(x: 1, y: 2);
   Pt b = Pt(x: 3, y: 4);
   assert("{a} -> {b}" == "(1, 2) -> (3, 4)", "multiple user types");
@@ -49,7 +49,7 @@ test_multi_write_format() `test {
   assert("{n}" == "John Doe", "format with multiple writes");
 }
 
-test_user_type_in_print_line() `test(allow_leaks: true) {
+test_user_type_in_print_line() `test {
   Pt p = Pt(x: 10, y: 20);
   string s = "coords: {p}";
   assert(s == "coords: (10, 20)", "user type in variable");
@@ -69,12 +69,12 @@ type Circle is Shape {
   }
 }
 
-test_polymorphic_interp() `test(allow_leaks: true) {
+test_polymorphic_interp() `test {
   Shape s = Circle(radius: 5);
   assert("{s}" == "circle(5)", "polymorphic format dispatch");
 }
 
-test_direct_child_interp() `test(allow_leaks: true) {
+test_direct_child_interp() `test {
   Circle c = Circle(radius: 3);
   assert("{c}" == "circle(3)", "direct child type interp");
 }
@@ -88,7 +88,7 @@ type Pair {
   }
 }
 
-test_nested_interp_in_format() `test(allow_leaks: true) {
+test_nested_interp_in_format() `test {
   Pair p = Pair(a: 10, b: 20);
   assert("{p}" == "10:20", "nested interpolation in format");
 }
@@ -120,12 +120,12 @@ type Color `public {
   }
 }
 
-test_value_type_interp() `test(allow_leaks: true) {
+test_value_type_interp() `test {
   Color c = Color(r: 255, g: 128, b: 0);
   assert("{c}" == "rgb(255,128,0)", "pure value type interpolation");
 }
 
-test_value_type_optional_some() `test(allow_leaks: true) {
+test_value_type_optional_some() `test {
   Color? c = Color(r: 0, g: 0, b: 0);
   assert("{c}" == "rgb(0,0,0)", "optional value type some");
 }
@@ -135,13 +135,13 @@ test_value_type_optional_none() `test {
   assert("{c}" == "none", "optional value type none");
 }
 
-test_value_type_mixed() `test(allow_leaks: true) {
+test_value_type_mixed() `test {
   Color c = Color(r: 10, g: 20, b: 30);
   assert("color: {c}" == "color: rgb(10,20,30)", "value type mixed with text");
 }
 
 // User type mixed with primitives
-test_mixed_primitives_and_user() `test(allow_leaks: true) {
+test_mixed_primitives_and_user() `test {
   Pt p = Pt(x: 1, y: 2);
   int n = 42;
   bool b = true;
@@ -208,7 +208,7 @@ test_base_level_vtable() `test {
 }
 
 // User type in loop (repeated Builder allocation)
-test_user_type_in_loop() `test(allow_leaks: true) {
+test_user_type_in_loop() `test {
   string result = "";
   int i = 0;
   while i < 5 {
@@ -245,14 +245,14 @@ test_special_chars_empty() `test {
 }
 
 // User type adjacent to other user types (no text between)
-test_adjacent_user_types() `test(allow_leaks: true) {
+test_adjacent_user_types() `test {
   Pt a = Pt(x: 1, y: 2);
   Pt b = Pt(x: 3, y: 4);
   assert("{a}{b}" == "(1, 2)(3, 4)", "adjacent user types no separator");
 }
 
 // Multiple different user types in one string
-test_mixed_user_types() `test(allow_leaks: true) {
+test_mixed_user_types() `test {
   Pt p = Pt(x: 1, y: 2);
   Name n = Name(first: "Alice", last: "Smith");
   Color c = Color(r: 255, g: 0, b: 0);
@@ -260,7 +260,7 @@ test_mixed_user_types() `test(allow_leaks: true) {
 }
 
 // User type interpolation result assigned to variable and reused
-test_interp_result_reuse() `test(allow_leaks: true) {
+test_interp_result_reuse() `test {
   Pt p = Pt(x: 10, y: 20);
   string s1 = "first: {p}";
   string s2 = "second: {p}";

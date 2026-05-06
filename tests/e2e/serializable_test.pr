@@ -116,7 +116,7 @@ type CustomEncode `serializable {
 
 // ── Basic encode/decode ─────────────────────────────────────────────────────
 
-encode_point_test() `test(allow_leaks: true) {
+encode_point_test() `test {
   Point p = Point(x: 3, y: 4);
   json.JsonEncoder enc = json.JsonEncoder();
   p.encode(enc)!;
@@ -147,7 +147,7 @@ round_trip_point_test() `test(allow_leaks: true) {
 
 // ── Mixed field types ───────────────────────────────────────────────────────
 
-mixed_fields_encode_test() `test(allow_leaks: true) {
+mixed_fields_encode_test() `test {
   MixedFields m = MixedFields(label: "test", count: 5, score: 3.14, active: true);
   json.JsonEncoder enc = json.JsonEncoder();
   m.encode(enc)!;
@@ -172,7 +172,7 @@ mixed_fields_round_trip_test() `test(allow_leaks: true) {
 
 // ── Nested serializable types ────────────────────────────────────────────────
 
-nested_encode_test() `test(allow_leaks: true) {
+nested_encode_test() `test {
   Person p = Person(name: "Alice", age: 30, address: Address(street: "123 Main", city: "NYC"));
   json.JsonEncoder enc = json.JsonEncoder();
   p.encode(enc)!;
@@ -245,7 +245,7 @@ multiple_nested_fields_test() `test(allow_leaks: true) {
 
 // ── Array fields (T[]) ──────────────────────────────────────────────────────
 
-array_encode_test() `test(allow_leaks: true) {
+array_encode_test() `test {
   TaggedItem item = TaggedItem(name: "bolt", tags: ["metal", "small", "round"]);
   json.JsonEncoder enc = json.JsonEncoder();
   item.encode(enc)!;
@@ -411,7 +411,7 @@ mixed_array_and_map_test() `test(allow_leaks: true) {
 
 // ── Generic serializable types ──────────────────────────────────────────────
 
-generic_wrapper_int_test() `test(allow_leaks: true) {
+generic_wrapper_int_test() `test {
   GoodWrapper[int] w = GoodWrapper[int](value: 42, label: "answer");
   json.JsonEncoder enc = json.JsonEncoder();
   w.encode(enc)!;
@@ -420,7 +420,7 @@ generic_wrapper_int_test() `test(allow_leaks: true) {
   assert(s.contains("\"label\":\"answer\""), "generic int: label");
 }
 
-generic_wrapper_string_test() `test(allow_leaks: true) {
+generic_wrapper_string_test() `test {
   GoodWrapper[string] w = GoodWrapper[string](value: "hello", label: "greet");
   json.JsonEncoder enc = json.JsonEncoder();
   w.encode(enc)!;
@@ -438,7 +438,7 @@ generic_wrapper_round_trip_test() `test(allow_leaks: true) {
   assert(w2.label == "test", "generic rt: label");
 }
 
-skip_wrapper_test() `test(allow_leaks: true) {
+skip_wrapper_test() `test {
   SkipWrapper[int] w = SkipWrapper[int](value: 42, label: "test");
   json.JsonEncoder enc = json.JsonEncoder();
   w.encode(enc)!;
@@ -478,7 +478,7 @@ generic_wrapper_f64_test() `test(allow_leaks: true) {
 
 // ── Field annotations ───────────────────────────────────────────────────────
 
-key_annotation_test() `test(allow_leaks: true) {
+key_annotation_test() `test {
   User u = User(name: "Alice", age: 30, _internal: "secret");
   json.JsonEncoder enc = json.JsonEncoder();
   u.encode(enc)!;
@@ -487,7 +487,7 @@ key_annotation_test() `test(allow_leaks: true) {
   assert(!s.contains("\"name\":"), "key: no raw name");
 }
 
-skip_annotation_test() `test(allow_leaks: true) {
+skip_annotation_test() `test {
   User u = User(name: "Bob", age: 25, _internal: "hidden");
   json.JsonEncoder enc = json.JsonEncoder();
   u.encode(enc)!;
@@ -496,7 +496,7 @@ skip_annotation_test() `test(allow_leaks: true) {
   assert(!s.contains("hidden"), "skip: no hidden value");
 }
 
-optional_omit_none_test() `test(allow_leaks: true) {
+optional_omit_none_test() `test {
   User u = User(name: "Carol", age: 28, _internal: "x");
   json.JsonEncoder enc = json.JsonEncoder();
   u.encode(enc)!;
@@ -504,7 +504,7 @@ optional_omit_none_test() `test(allow_leaks: true) {
   assert(!s.contains("email"), "optional none: email omitted");
 }
 
-optional_present_test() `test(allow_leaks: true) {
+optional_present_test() `test {
   User u = User(name: "Dave", age: 35, email: "d@test.com", _internal: "x");
   json.JsonEncoder enc = json.JsonEncoder();
   u.encode(enc)!;
@@ -512,7 +512,7 @@ optional_present_test() `test(allow_leaks: true) {
   assert(s.contains("\"email\":\"d@test.com\""), "optional present: email included");
 }
 
-include_none_test() `test(allow_leaks: true) {
+include_none_test() `test {
   WithIncludeNone w = WithIncludeNone(name: "test");
   json.JsonEncoder enc = json.JsonEncoder();
   w.encode(enc)!;
@@ -520,7 +520,7 @@ include_none_test() `test(allow_leaks: true) {
   assert(s.contains("\"tag\":null"), "include_none: tag is null");
 }
 
-include_none_present_test() `test(allow_leaks: true) {
+include_none_present_test() `test {
   WithIncludeNone w = WithIncludeNone(name: "test", tag: "hello");
   json.JsonEncoder enc = json.JsonEncoder();
   w.encode(enc)!;
@@ -530,7 +530,7 @@ include_none_present_test() `test(allow_leaks: true) {
 
 // ── Multiple optional fields ────────────────────────────────────────────────
 
-multiple_optionals_none_test() `test(allow_leaks: true) {
+multiple_optionals_none_test() `test {
   WithOptionals w = WithOptionals(name: "test");
   json.JsonEncoder enc = json.JsonEncoder();
   w.encode(enc)!;
@@ -539,7 +539,7 @@ multiple_optionals_none_test() `test(allow_leaks: true) {
   assert(!s.contains("level"), "multi opt: level omitted");
 }
 
-multiple_optionals_some_test() `test(allow_leaks: true) {
+multiple_optionals_some_test() `test {
   WithOptionals w = WithOptionals(name: "test", bio: "hello", level: 5);
   json.JsonEncoder enc = json.JsonEncoder();
   w.encode(enc)!;
@@ -629,7 +629,7 @@ large_values_test() `test(allow_leaks: true) {
 
 // ── Custom encode override ──────────────────────────────────────────────────
 
-custom_encode_test() `test(allow_leaks: true) {
+custom_encode_test() `test {
   CustomEncode c = CustomEncode(value: 42);
   json.JsonEncoder enc = json.JsonEncoder();
   c.encode(enc)!;
@@ -798,7 +798,7 @@ type FlatWithSkip `serializable {
   SkipInner info `flatten;
 }
 
-flatten_encode_test() `test(allow_leaks: true) {
+flatten_encode_test() `test {
   FlatDoc doc = FlatDoc(title: "Hello", meta: Metadata(author: "Alice", version: 2));
   string s = json.encode_string[FlatDoc](doc)!;
   assert(s.contains("\"title\":\"Hello\""), "flatten enc: title");

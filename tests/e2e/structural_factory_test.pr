@@ -50,7 +50,7 @@ test_failable_factory_success() `test {
   assert(s.n == 42, "failable factory success");
 }
 
-test_failable_factory_error() `test(allow_leaks: true) {
+test_failable_factory_error() `test {
   bool caught = false;
   Strict.tryParse("bad")? e {
     caught = true;
@@ -69,7 +69,7 @@ test_generic_failable_factory() `test {
   assert(s.n == 42, "generic failable factory");
 }
 
-test_generic_failable_factory_error() `test(allow_leaks: true) {
+test_generic_failable_factory_error() `test {
   bool caught = false;
   tryLoad[Strict]("bad")? e {
     caught = true;

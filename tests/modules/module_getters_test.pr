@@ -25,7 +25,7 @@ test_failable_getter_success() `test {
 }
 
 // Test failable getter that raises (error handling with ? handler).
-test_failable_getter_raises() `test(allow_leaks: true) {
+test_failable_getter_raises() `test {
   string result = propmod.risky_value? e {
     "recovered";
   };
@@ -38,7 +38,7 @@ _check_risky() string! {
   return val;
 }
 
-test_failable_getter_propagation() `test(allow_leaks: true) {
+test_failable_getter_propagation() `test {
   string result = _check_risky()? e {
     "propagated";
   };

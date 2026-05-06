@@ -856,7 +856,7 @@ flatten_with_optional_subfields_test() `test(allow_leaks: true) {
   assert(w2.inner.level is present, "flatten opt sub dec: level present");
 }
 
-flatten_with_absent_optional_subfields_test() `test(allow_leaks: true) {
+flatten_with_absent_optional_subfields_test() `test {
   // Inner optional fields absent — should omit from JSON
   WithOptionalFields w1 = WithOptionalFields(label: "minimal", inner: WithOptionals(name: "Bob"));
   string s = json.encode_string[WithOptionalFields](w1)!;

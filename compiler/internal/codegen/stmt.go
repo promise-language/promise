@@ -61,6 +61,25 @@ func isDroppableContainerOrString(typ types.Type) bool {
 	return false
 }
 
+// isStringFieldDup returns true if the expression is a MemberExpr accessing a
+// string field from a type with HasDrop(). In that case, genFieldAccess dups the
+// string (T0095), so the result is an owned copy, not a borrow.
+func (c *Compiler) isStringFieldDup(expr ast.Expr, dropType types.Type) bool {
+	member, ok := expr.(*ast.MemberExpr)
+	if !ok {
+		return false
+	}
+	if extractNamed(dropType) != types.TypString {
+		return false
+	}
+	targetType := c.info.Types[member.Target]
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+	ownerNamed := extractNamed(targetType)
+	return ownerNamed != nil && ownerNamed.HasDrop()
+}
+
 // isStringBorrowExpr returns true if the expression borrows an existing value
 // (e.g., container element access, field access) rather than creating a new one.
 // Borrowed values should not be freed by the borrower — the owner retains responsibility.
@@ -70,7 +89,10 @@ func isStringBorrowExpr(expr ast.Expr) bool {
 	case *ast.IndexExpr:
 		return true // vector[i], map[key] — borrows from container
 	case *ast.MemberExpr:
-		return true // obj.field — borrows from struct
+		// T0095: String fields from droppable types are duped in genFieldAccess,
+		// so the result is an owned copy, not a borrow. The caller handles the
+		// distinction based on type info — MemberExpr alone cannot determine this.
+		return true
 	case *ast.IdentExpr:
 		return true // variable reference — handled by clearDropFlag on RHS
 	default:
@@ -101,13 +123,26 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 					// only expression arms (arm.Body) produce match result values.
 					c.genAutoPropagate(es.Expr)
 				} else {
+					// T0095: Signal genFieldAccess to dup string fields for block results.
+					exprType := c.info.Types[es.Expr]
+					if c.typeSubst != nil && exprType != nil {
+						exprType = types.Substitute(exprType, c.typeSubst)
+					}
+					if extractNamed(exprType) == types.TypString {
+						c.dupStringFieldAccess = true
+					}
 					result = c.genExpr(es.Expr)
+					c.dupStringFieldAccess = false
 					// Clear drop flag for ident block result — the value is being
 					// moved out of the block scope. Without this, scope cleanup would
 					// free the string while the outer scope still holds the pointer.
 					if ident, ok := es.Expr.(*ast.IdentExpr); ok {
 						c.clearDropFlag(ident.Name)
 					}
+					// T0095: Claim string dup temps from block result expressions.
+					// Without this, a dup from e.g. `e.message` would be freed at
+					// statement end while the caller still holds the pointer.
+					c.claimStringTemp(result)
 				}
 				break
 			}
@@ -311,7 +346,18 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	if declType != nil {
 		c.targetType = declType
 	}
+	// T0095: Signal genFieldAccess to dup string fields from droppable types.
+	// The variable will own the copy; without dup, both the var's drop and the
+	// type's synthesized drop would free the same allocation.
+	resolvedExprType := exprType
+	if c.typeSubst != nil && resolvedExprType != nil {
+		resolvedExprType = types.Substitute(resolvedExprType, c.typeSubst)
+	}
+	if extractNamed(resolvedExprType) == types.TypString {
+		c.dupStringFieldAccess = true
+	}
 	val := c.genExpr(s.Value)
+	c.dupStringFieldAccess = false
 	c.targetType = nil
 
 	// Auto-propagate failable call in assignment: check tag, propagate error, extract ok value.
@@ -374,8 +420,12 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	}
 	c.maybeRegisterDrop(s.Name, alloca, dropType)
 	// Clear drop flag when RHS is a borrow (container element, field access).
+	// T0095: Skip for string MemberExpr on droppable types — genFieldAccess
+	// dups the string, so the variable owns the copy (not a borrow).
 	if isDroppableContainerOrString(dropType) && isStringBorrowExpr(s.Value) {
-		c.clearDropFlag(s.Name)
+		if !c.isStringFieldDup(s.Value, dropType) {
+			c.clearDropFlag(s.Name)
+		}
 	}
 	c.maybeRegisterEnvFree(s.Name, alloca, dropType)
 }
@@ -388,7 +438,12 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	lt := c.resolveType(typ)
 	alloca := c.block.NewAlloca(lt)
 	alloca.SetName(c.uniqueLocalName(s.Name))
+	// T0095: Signal genFieldAccess to dup string fields from droppable types.
+	if extractNamed(typ) == types.TypString {
+		c.dupStringFieldAccess = true
+	}
 	val := c.genExpr(s.Value)
+	c.dupStringFieldAccess = false
 
 	// Auto-propagate failable call in assignment: check tag, propagate error, extract ok value.
 	if c.info.AutoPropagateExprs[s.Value] {
@@ -414,8 +469,12 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	c.maybeRegisterDrop(s.Name, alloca, typ)
 	// Clear drop flag when RHS is a borrow (container element, field access).
 	// The container/struct still owns the value — freeing it here would cause use-after-free.
+	// T0095: Skip for string MemberExpr on droppable types — genFieldAccess
+	// dups the string, so the variable owns the copy (not a borrow).
 	if isDroppableContainerOrString(typ) && isStringBorrowExpr(s.Value) {
-		c.clearDropFlag(s.Name)
+		if !c.isStringFieldDup(s.Value, typ) {
+			c.clearDropFlag(s.Name)
+		}
 	}
 	c.maybeRegisterEnvFree(s.Name, alloca, typ)
 }
@@ -1571,6 +1630,37 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				}
 			}
 		}
+		// T0095: Dup string values stored in fields of droppable types when the
+		// source is a borrowed variable (no drop flag). This handles custom new()
+		// methods like `this.src = s` where s is a non-~ parameter.
+		if s.Op == ast.OpAssign {
+			memberType := c.info.Types[target]
+			if c.typeSubst != nil {
+				memberType = types.Substitute(memberType, c.typeSubst)
+			}
+			ownerType := c.info.Types[target.Target]
+			if c.typeSubst != nil {
+				ownerType = types.Substitute(ownerType, c.typeSubst)
+			}
+			ownerNamed := extractNamed(ownerType)
+			if extractNamed(memberType) == types.TypString && ownerNamed != nil && ownerNamed.HasDrop() && !isErrorType(ownerNamed) {
+				if ident, ok := s.Value.(*ast.IdentExpr); ok {
+					if _, hasFlag := c.dropFlags[ident.Name]; hasFlag {
+						// Has drop flag: move ownership
+						c.genMemberAssign(target, s.Op, val)
+						c.clearDropFlag(ident.Name)
+					} else {
+						// No drop flag: dup for exclusive ownership
+						c.genMemberAssign(target, s.Op, c.dupString(val))
+					}
+				} else {
+					// Expression result: store directly, claim temp
+					c.genMemberAssign(target, s.Op, val)
+					c.claimStringTemp(val)
+				}
+				break
+			}
+		}
 		c.genMemberAssign(target, s.Op, val)
 		// Clear drop flag on RHS if it's being moved via simple assign
 		if s.Op == ast.OpAssign {
@@ -1993,7 +2083,14 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	var val value.Value
 	if s.Value != nil {
 		c.targetType = retType
+		// T0095: Signal genFieldAccess to dup string fields for return values.
+		// Scope cleanup after the return may drop the containing type, freeing the
+		// field — the caller needs an independent copy.
+		if extractNamed(retType) == types.TypString {
+			c.dupStringFieldAccess = true
+		}
 		val = c.genExpr(s.Value)
+		c.dupStringFieldAccess = false
 		c.targetType = nil
 		val = c.wrapThisReturnValue(val, s.Value, retType)
 	}

@@ -97,7 +97,7 @@ to_string_temp_in_assert() `test {
 type StringHolder {
   string value;
 }
-string_concat_in_constructor() `test(allow_leaks: true) {
+string_concat_in_constructor() `test {
   h := StringHolder(value: "hello " + "world");
   assert(h.value == "hello world", "constructor concat");
 }

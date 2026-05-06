@@ -79,7 +79,7 @@ test_early_return_drops() `test {
 
 // --- Loop iteration drops ---
 
-test_loop_drops_per_iteration() `test(allow_leaks: true) {
+test_loop_drops_per_iteration() `test {
   for i in 0..3 {
     r := Resource(name: "r" + i.to_string());
     assert(r.name == "r" + i.to_string(), "loop iter " + i.to_string());
@@ -88,7 +88,7 @@ test_loop_drops_per_iteration() `test(allow_leaks: true) {
 
 // --- While loop with break ---
 
-test_while_break_drops() `test(allow_leaks: true) {
+test_while_break_drops() `test {
   a := Resource(name: "outer");
   i := 0;
   while i < 5 {

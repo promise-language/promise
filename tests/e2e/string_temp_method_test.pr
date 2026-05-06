@@ -29,7 +29,7 @@ type EscapeBuilder {
 }
 
 // Basic: single char through default arm
-escape_single_char_test() `test(allow_leaks: true) {
+escape_single_char_test() `test {
   EscapeBuilder b = EscapeBuilder(result: "");
   b.escape("a");
   assert(b.result == "a", "single char");
@@ -43,7 +43,7 @@ escape_two_default_test() `test(allow_leaks: true) {
 }
 
 // Quote only — non-default arm
-escape_quote_only_test() `test(allow_leaks: true) {
+escape_quote_only_test() `test {
   EscapeBuilder b = EscapeBuilder(result: "");
   b.escape("\"");
   assert(b.result == "\\\"", "quote only");

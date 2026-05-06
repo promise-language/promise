@@ -13,7 +13,7 @@ type IntChan {
   }
 }
 
-test_channel_field_send_receive() `test(allow_leaks: true, exclude: "wasm32") {
+test_channel_field_send_receive() `test(exclude: "wasm32") {
   ch := channel[int](capacity: 1);
   s := IntChan(_ch: ch);
   s.emit(42);
@@ -42,7 +42,7 @@ type GenericChan[T] {
   }
 }
 
-test_generic_channel_field() `test(allow_leaks: true, exclude: "wasm32") {
+test_generic_channel_field() `test(exclude: "wasm32") {
   p := GenericChan[int](capacity: 1);
   p.emit(99);
   if v := p.receive() {
@@ -60,7 +60,7 @@ type MultiField {
   int count;
 }
 
-test_channel_field_with_other_fields() `test(allow_leaks: true, exclude: "wasm32") {
+test_channel_field_with_other_fields() `test(exclude: "wasm32") {
   ch := channel[int](capacity: 1);
   m := MultiField(name: "test", _ch: ch, count: 0);
   m._ch.send(77);
@@ -89,7 +89,7 @@ type StringChanHolder {
   channel[string] _ch;
 }
 
-test_channel_string_field_in_type() `test(allow_leaks: true, exclude: "wasm32") {
+test_channel_string_field_in_type() `test(exclude: "wasm32") {
   ch := channel[string](capacity: 1);
   h := StringChanHolder(_ch: ch);
   h._ch.send("world");
@@ -112,7 +112,7 @@ type MultiChan {
   task[int] _t;
 }
 
-test_multiple_opaque_fields() `test(allow_leaks: true, exclude: "wasm32") {
+test_multiple_opaque_fields() `test(exclude: "wasm32") {
   a := channel[int](capacity: 1);
   b := channel[string](capacity: 1);
   t := go compute_int();

@@ -72,7 +72,7 @@ encode_task_with_enum_test() `test {
   assert(s.contains("\"priority\":\"High\""), "task priority");
 }
 
-decode_task_with_enum_test() `test(allow_leaks: true) {
+decode_task_with_enum_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"name\":\"Deploy\",\"priority\":\"Low\"}");
   Task t = Task.decode(dec)!;
   assert(t.name == "Deploy", "decoded name");
@@ -191,7 +191,7 @@ optional_enum_decode_null_test() `test(allow_leaks: true) {
   assert(c.level is absent, "opt enum decode null: level absent");
 }
 
-optional_enum_decode_missing_test() `test(allow_leaks: true) {
+optional_enum_decode_missing_test() `test {
   // Key not present at all — should default to none
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"name\":\"test\"}");
   Config c = Config.decode(dec)!;
@@ -232,7 +232,7 @@ multiple_enum_fields_encode_test() `test {
   assert(s.contains("\"title\":\"Launch\""), "multi enum: title");
 }
 
-multiple_enum_fields_decode_test() `test(allow_leaks: true) {
+multiple_enum_fields_decode_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"title\":\"Test\",\"color\":\"Red\",\"priority\":\"Low\"}");
   Event e = Event.decode(dec)!;
   assert(e.title == "Test", "multi enum decode: title");

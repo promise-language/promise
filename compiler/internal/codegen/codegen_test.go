@@ -9183,6 +9183,55 @@ func TestDropSynthesizedNotNeeded(t *testing.T) {
 	assertContains(t, ir, "call void @pal_free")
 }
 
+// T0095: Synthesized drop drops string fields via promise_string_drop
+func TestDropSynthesizedStringField(t *testing.T) {
+	ir := generateIR(t, `
+		type Holder {
+			string name;
+		}
+		main() {
+			h := Holder(name: "hello");
+		}
+	`)
+	// Synthesized drop should call promise_string_drop on the string field
+	assertContains(t, ir, "define void @Holder.drop")
+	assertContains(t, ir, "call void @promise_string_drop(")
+	assertContains(t, ir, "call void @pal_free(")
+}
+
+// T0095: String field access on droppable type creates a dup (via promise_string_new)
+func TestStringFieldAccessDup(t *testing.T) {
+	ir := generateIR(t, `
+		type Named {
+			string name;
+		}
+		test() {
+			n := Named(name: "world");
+			string x = n.name;
+		}
+	`)
+	// Reading n.name should dup the string to prevent double-free
+	assertContains(t, ir, "call i8* @promise_string_new(")
+}
+
+// T0095: Constructor with borrowed string param (no drop flag) dups the string
+func TestConstructorDupBorrowedString(t *testing.T) {
+	ir := generateIR(t, `
+		type Wrapper {
+			string data;
+		}
+		wrap(string s) Wrapper {
+			return Wrapper(data: s);
+		}
+		main() { }
+	`)
+	// Inside wrap(), s has no drop flag (non-~ param), so constructor should dup
+	assertContains(t, ir, "define { i8*, i8* } @wrap(i8* %s)")
+	// The wrap function body should contain a dup call (promise_string_new)
+	// because s is a borrowed param without a drop flag
+	assertContains(t, ir, "call i8* @promise_string_new(")
+}
+
 // B0164: bindingFree emits pal_free on non-droppable heap types with multiple fields
 func TestBindingFreeMultipleFields(t *testing.T) {
 	ir := generateIR(t, `

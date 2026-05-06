@@ -1,0 +1,95 @@
+// T0095: Drop string fields in synthesized type drops.
+// Types with string fields now free those fields when the type is dropped.
+// String values are duped when read from fields or stored from borrowed params,
+// preventing double-free between the type's drop and the caller's drop.
+type Named {
+  string name;
+  int id;
+}
+
+// Basic: string field in type is freed by synthesized drop — no leak
+test_string_field_drop_basic() `test {
+  Named n = Named(name: "hello" + " world", id: 1);
+  assert(n.id == 1, "id");
+  assert(n.name == "hello world", "name");
+}
+
+// String literal field: literal flag prevents freeing .rodata — safe
+test_string_field_literal() `test {
+  Named n = Named(name: "literal", id: 2);
+  assert(n.name == "literal", "literal field");
+}
+
+// Read string field into local variable: dup prevents double-free
+test_string_field_read_to_var() `test {
+  Named n = Named(name: "read" + " me", id: 3);
+  string x = n.name;
+  assert(x == "read me", "read to var");
+  assert(n.name == "read me", "original preserved");
+}
+
+// Cross-function: function stores borrowed param in type — dup prevents double-free
+type Wrapper {
+  string data;
+}
+
+wrap(string s) Wrapper {
+  return Wrapper(data: s);
+}
+
+test_cross_function_string_field() `test {
+  string data = "cross" + " func";
+  Wrapper w = wrap(data);
+  assert(w.data == "cross func", "wrapped data");
+}
+
+// Return string field from method: dup creates independent copy
+type Container {
+  string value;
+
+  get_value() string {
+    return this.value;
+  }
+}
+
+test_return_string_field() `test {
+  Container c = Container(value: "return" + " value");
+  string v = c.get_value();
+  assert(v == "return value", "returned field");
+}
+
+// Multiple string fields: both freed
+type TwoStrings {
+  string first;
+  string second;
+}
+
+test_multiple_string_fields() `test {
+  TwoStrings t = TwoStrings(first: "aaa" + "bbb", second: "ccc" + "ddd");
+  assert(t.first == "aaabbb", "first");
+  assert(t.second == "cccddd", "second");
+}
+
+// String field with inheritance
+type Base {
+  string label;
+  drop(~this) {
+  }
+}
+
+type Child is Base {
+  int id;
+}
+
+test_inherited_string_field() `test {
+  Child c = Child(label: "child" + " label", id: 42);
+  assert(c.label == "child label", "inherited label");
+  assert(c.id == 42, "child id");
+}
+
+// String field used in expression (temporary use — no leak)
+test_string_field_temp_use() `test {
+  Named n = Named(name: "temp" + " use", id: 4);
+  assert(n.name.len == 8, "temp use len");
+  assert(n.name.starts_with("temp"), "starts with");
+}

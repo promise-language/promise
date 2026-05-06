@@ -158,9 +158,10 @@ type Compiler struct {
 	// T0073: Statement-level temporary tracking for heap-allocated strings.
 	// Tracks string temporaries from subexpressions (e.g., `42.to_string()` in
 	// `assert(42.to_string() == "42")`) and drops them at statement end.
-	stmtTemps           []stmtTemp
-	stmtTempMap         map[value.Value]int // SSA value → index in stmtTemps (-1 = claimed)
-	tempTrackingEnabled bool                // T0084: true in free functions + user method bodies
+	stmtTemps            []stmtTemp
+	stmtTempMap          map[value.Value]int // SSA value → index in stmtTemps (-1 = claimed)
+	tempTrackingEnabled  bool                // T0084: true in free functions + user method bodies
+	dupStringFieldAccess bool                // T0095: when true, genFieldAccess dups string fields from droppable types
 
 	// T0088: Statement-level tracking for heap-allocated droppable instances.
 	// Tracks constructor results (e.g., _FnIter[T]) in iterator chains and drops
@@ -1567,6 +1568,36 @@ func loadStringLenRaw(b *ir.Block, typedPtr value.Value, instType irtypes.Type) 
 func loadStringLen(b *ir.Block, typedPtr value.Value, instType irtypes.Type) value.Value {
 	raw := loadStringLenRaw(b, typedPtr, instType)
 	return b.NewAnd(raw, stringLenMask)
+}
+
+// dupString duplicates a string instance (i8* → i8*) by loading its length and data,
+// then calling promise_string_new to create a fresh heap copy. Used to prevent
+// double-free when a string field is read from a type with synthesized drop (T0095).
+// Null-safe: returns null for null input (zero-initialized fields from error paths).
+// The caller owns the returned copy independently from the original.
+func (c *Compiler) dupString(ptr value.Value) value.Value {
+	// Null check: string fields may be null (error handler fallthrough, optional fields).
+	entryBlock := c.block
+	nullCheck := c.block.NewICmp(enum.IPredEQ, ptr, constant.NewNull(irtypes.I8Ptr))
+	dupBlock := c.newBlock("strdup.copy")
+	mergeBlock := c.newBlock("strdup.merge")
+	entryBlock.NewCondBr(nullCheck, mergeBlock, dupBlock)
+
+	c.block = dupBlock
+	instType := strInstanceType()
+	typedPtr := c.block.NewBitCast(ptr, irtypes.NewPointer(instType))
+	strLen := loadStringLen(c.block, typedPtr, instType)
+	dataPtr := c.block.NewGetElementPtr(instType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
+		constant.NewInt(irtypes.I32, 0))
+	newPtr := c.block.NewCall(c.funcs["promise_string_new"], dataPtr, strLen)
+	dupBlock.NewBr(mergeBlock)
+
+	c.block = mergeBlock
+	return c.block.NewPhi(
+		ir.NewIncoming(constant.NewNull(irtypes.I8Ptr), entryBlock),
+		ir.NewIncoming(newPtr, dupBlock),
+	)
 }
 
 // defineStringDropFunc emits an LLVM IR function that conditionally frees a
@@ -4810,11 +4841,16 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 	thisPtr := c.block.NewLoad(thisAlloca.ElemType, thisAlloca)
 	typedPtr := c.block.NewBitCast(thisPtr, layout.InstancePtrType)
 
+	// T0095: Skip string field drops for error types — error handling has its own
+	// lifecycle management (registerErrorDrop/emitScopeCleanup) and the interaction
+	// with synthesized string field drops causes double-frees. Filed as separate issue.
+	skipStringFieldDrop := isErrorType(named)
+
 	fields := named.AllFields()
 	for i := len(fields) - 1; i >= 0; i-- {
 		f := fields[i]
 		fieldNamed := extractNamed(f.Type())
-		if fieldNamed == nil || (!fieldNamed.HasDrop() && fieldNamed != types.TypChannel) {
+		if fieldNamed == nil || (!fieldNamed.HasDrop() && fieldNamed != types.TypChannel && fieldNamed != types.TypString) {
 			continue
 		}
 
@@ -4823,7 +4859,7 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 			continue
 		}
 
-		// Load the field value. Container types (Vector, Channel) are stored as
+		// Load the field value. Container types (Vector, Channel, String) are stored as
 		// raw i8* pointers, not value structs — use the loaded value directly.
 		fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
@@ -4833,6 +4869,18 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 			fieldInstance = fieldVal
 		} else {
 			fieldInstance = c.extractInstancePtr(fieldVal)
+		}
+
+		// String fields: call promise_string_drop directly (T0095).
+		// promise_string_drop has internal null check + literal flag check.
+		// Skip for error types — error lifecycle is managed separately.
+		if fieldNamed == types.TypString {
+			if !skipStringFieldDrop {
+				if dropFn, ok := c.funcs["promise_string_drop"]; ok {
+					c.block.NewCall(dropFn, fieldInstance)
+				}
+			}
+			continue
 		}
 
 		// Resolve and call field type's drop() method

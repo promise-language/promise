@@ -101,12 +101,12 @@ test_execute_echo() `test(allow_leaks: true, exclude: "wasm32") {
   assert(result.standard_output.starts_with("hello"), "stdout should contain hello");
 }
 
-test_execute_exit_code() `test(allow_leaks: true, exclude: "wasm32") {
+test_execute_exit_code() `test(exclude: "wasm32") {
   ProcessResult result = execute("false", [])!;
   assert(result.exit_code != 0, "false should exit with non-zero");
 }
 
-test_execute_true() `test(allow_leaks: true, exclude: "wasm32") {
+test_execute_true() `test(exclude: "wasm32") {
   ProcessResult result = execute("true", [])!;
   assert(result.exit_code == 0, "true should exit with 0");
   assert(result.standard_output.len == 0, "true should produce no stdout");
@@ -130,7 +130,7 @@ test_execute_multiple_args() `test(allow_leaks: true, exclude: "wasm32") {
   assert(result.standard_output.starts_with("a b c"), "echo should join arguments with spaces");
 }
 
-test_execute_empty_args() `test(allow_leaks: true, exclude: "wasm32") {
+test_execute_empty_args() `test(exclude: "wasm32") {
   ProcessResult result = execute("echo", [])!;
   assert(result.exit_code == 0, "echo with no args should succeed");
 }
@@ -145,7 +145,7 @@ test_execute_process_result_fields() `test(allow_leaks: true, exclude: "wasm32")
   assert(out.len > 0, "stdout should be non-empty");
 }
 
-test_execute_nonexistent_program() `test(allow_leaks: true, exclude: "wasm32") `target(!windows) {
+test_execute_nonexistent_program() `test(exclude: "wasm32") `target(!windows) {
   // On POSIX, a nonexistent program still returns a ProcessResult
   // with exit code 127 (the execvp-failure convention).
   ProcessResult result = execute("__promise_no_such_program__", [])!;
@@ -292,7 +292,7 @@ test_execute_variadic_inline() `test(allow_leaks: true, exclude: "wasm32") {
   assert(result.standard_output.starts_with("hello world"), "variadic inline args should work");
 }
 
-test_execute_variadic_array_passthrough() `test(allow_leaks: true, exclude: "wasm32") {
+test_execute_variadic_array_passthrough() `test(exclude: "wasm32") {
   // Pass a pre-built string[] to variadic parameter
   string[] args = ["-c", "echo from_array"];
   ProcessResult result = execute("sh", args)!;
@@ -300,7 +300,7 @@ test_execute_variadic_array_passthrough() `test(allow_leaks: true, exclude: "was
   assert(result.standard_output.starts_with("from_array"), "array passthrough should work");
 }
 
-test_execute_variadic_no_args() `test(allow_leaks: true, exclude: "wasm32") {
+test_execute_variadic_no_args() `test(exclude: "wasm32") {
   // No arguments at all (variadic receives empty array)
   ProcessResult result = execute("true")!;
   assert(result.exit_code == 0, "true with no variadic args should succeed");

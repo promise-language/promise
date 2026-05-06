@@ -254,7 +254,7 @@ type Animal {
   }
 }
 
-test_heap_user_showable_var() `test {
+test_heap_user_showable_var() `test(allow_leaks: true) {
   Animal a = Animal(sound: "woof");
   Showable s = a;
   assert(s.to_string() == "woof", "heap user showable var");

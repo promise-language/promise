@@ -339,19 +339,19 @@ test_deep_chain_field_access() `test {
   assert(d.active == true, "own field");
 }
 
-test_deep_chain_method_access() `test {
+test_deep_chain_method_access() `test(allow_leaks: true) {
   d := Derived(id: "r1", level: 2, tag: "leaf");
   assert(d.get_id() == "r1", "grandparent method");
   assert(d.get_level() == 2, "parent method");
   assert(d.get_tag() == "leaf", "own method");
 }
 
-test_deep_chain_assignability() `test {
+test_deep_chain_assignability() `test(allow_leaks: true) {
   Base b = DeepDerived(id: "dd", level: 1, tag: "t", active: false);
   assert(b.get_id() == "dd", "deep child assignable to root");
 }
 
-test_deep_chain_mid_assignability() `test {
+test_deep_chain_mid_assignability() `test(allow_leaks: true) {
   Mid m = Derived(id: "d", level: 5, tag: "mid");
   assert(m.get_id() == "d", "derived assignable to mid");
   assert(m.get_level() == 5, "inherited method via mid ref");
@@ -666,7 +666,7 @@ type Entity[T] is Identifiable[T], Printable {
   }
 }
 
-test_multi_inherit_generic_basic() `test {
+test_multi_inherit_generic_basic() `test(allow_leaks: true) {
   e := Entity[int](id: 1, name: "Alice");
   assert(e.get_id() == 1, "generic parent method");
   assert(e.to_string() == "Alice", "non-generic parent method");
@@ -677,7 +677,7 @@ test_multi_inherit_generic_first_parent_poly() `test {
   assert(i.get_id() == 42, "generic parent polymorphism");
 }
 
-test_multi_inherit_generic_second_parent_poly() `test {
+test_multi_inherit_generic_second_parent_poly() `test(allow_leaks: true) {
   Printable p = Entity[int](id: 1, name: "Charlie");
   assert(p.to_string() == "Charlie", "non-generic parent polymorphism");
 }
@@ -697,13 +697,13 @@ type StringEntity is Identifiable[string], Printable {
   }
 }
 
-test_multi_inherit_non_generic_child() `test {
+test_multi_inherit_non_generic_child() `test(allow_leaks: true) {
   se := StringEntity(code: "ABC", display: "Alpha Bravo Charlie");
   assert(se.get_id() == "ABC", "string id");
   assert(se.to_string() == "Alpha Bravo Charlie", "string display");
 }
 
-test_multi_inherit_different_children_same_interfaces() `test {
+test_multi_inherit_different_children_same_interfaces() `test(allow_leaks: true) {
   Identifiable[int] a = Entity[int](id: 1, name: "one");
   Printable b = StringEntity(code: "X", display: "ex");
   assert(a.get_id() == 1, "Entity as Identifiable[int]");

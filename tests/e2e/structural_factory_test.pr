@@ -115,7 +115,7 @@ type Other {
   }
 }
 
-test_multiple_types_same_interface() `test(allow_leaks: true) {
+test_multiple_types_same_interface() `test {
   My m = load[My]("a");
   Other o = load[Other]("b");
   assert(m.value == "a", "first type through generic");

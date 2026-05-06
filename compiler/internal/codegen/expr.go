@@ -1751,13 +1751,41 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 			val = maybeWrapOptional(val, arg.Value, arg.Name, fieldIdx)
 			fieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
-			c.block.NewStore(val, fieldPtr)
-			// Clear drop flag: field value is moved into the constructor
-			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
-				c.clearDropFlag(ident.Name)
+
+			// T0095: String fields in types with synthesized drops require ownership.
+			// If the source is a variable without a drop flag (e.g., a function
+			// parameter without ~), dup the string so the type owns an independent
+			// copy. This prevents double-free when both the caller's variable and
+			// the type's synthesized drop try to free the same allocation.
+			fType := fieldTypeMap[arg.Name]
+			if c.typeSubst != nil {
+				fType = types.Substitute(fType, c.typeSubst)
 			}
-			// B0168: Claim string temp — ownership transferred to constructor field.
-			c.claimStringTemp(val)
+			isStringField := extractNamed(fType) == types.TypString && !isErrorType(named)
+			if isStringField {
+				if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+					if _, hasFlag := c.dropFlags[ident.Name]; hasFlag {
+						// Has drop flag: move ownership (existing behavior)
+						c.block.NewStore(val, fieldPtr)
+						c.clearDropFlag(ident.Name)
+					} else {
+						// No drop flag (function param without ~): dup for exclusive ownership
+						c.block.NewStore(c.dupString(val), fieldPtr)
+					}
+				} else {
+					// Expression result: claim temp, store directly
+					c.block.NewStore(val, fieldPtr)
+					c.claimStringTemp(val)
+				}
+			} else {
+				c.block.NewStore(val, fieldPtr)
+				// Clear drop flag: field value is moved into the constructor
+				if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+					c.clearDropFlag(ident.Name)
+				}
+				// B0168: Claim string temp — ownership transferred to constructor field.
+				c.claimStringTemp(val)
+			}
 		}
 
 		// Initialize omitted fields: evaluate default expression if present, otherwise zero-init.
@@ -2503,7 +2531,28 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
 
 	// Use layout field type (not llvmType(field.Type()) which fails for TypeParams)
-	return c.block.NewLoad(layout.Instance.Fields[fieldIdx].LLVMType, fieldPtr)
+	val := c.block.NewLoad(layout.Instance.Fields[fieldIdx].LLVMType, fieldPtr)
+
+	// T0095: Dup string fields from types with drop to prevent double-free.
+	// Only dup when the caller needs ownership (VarDecl, block result, etc.),
+	// signaled by c.dupStringFieldAccess. Temporary uses (comparisons, function
+	// args) don't dup — the type is alive during the expression evaluation.
+	// Skip error types — their lifecycle is managed by error handling machinery.
+	if c.dupStringFieldAccess && c.tempTrackingEnabled {
+		fType := field.Type()
+		if c.typeSubst != nil {
+			fType = types.Substitute(fType, c.typeSubst)
+		}
+		ownerNamed := extractNamed(typ)
+		if extractNamed(fType) == types.TypString && ownerNamed != nil && ownerNamed.HasDrop() && !isErrorType(ownerNamed) {
+			c.dupStringFieldAccess = false // consume the flag
+			dup := c.dupString(val)
+			c.trackStringTemp(dup)
+			return dup
+		}
+	}
+
+	return val
 }
 
 // --- ThisExpr ---

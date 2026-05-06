@@ -10211,6 +10211,28 @@ func TestSelectEmptyDefaultTwiceNotBlocking(t *testing.T) {
 	assertContains(t, ir, "select.default")
 }
 
+func TestSelectBlockingPollInNonCoroutine(t *testing.T) {
+	// B0045: A blocking select (no default) in non-coroutine context should
+	// emit a poll-retry loop that unlocks, sleeps, re-locks, and retries
+	// instead of falling through to merge (which silently skips all cases).
+	ir := generateIR(t, `
+		foo() {
+			ch := channel[int](capacity: 1);
+			select {
+				v := <-ch:
+			}
+		}
+		main() { foo(); }
+	`)
+	// Poll block should exist (not SWN parking — that's for coroutines)
+	assertContains(t, ir, "select.poll")
+	assertNotContains(t, ir, "select.park")
+	// Should call usleep in the poll loop
+	assertContains(t, ir, "call i32 @usleep(i32 100)")
+	// Should branch back to lock.start for retry
+	assertContains(t, ir, "br label %select.lock.start")
+}
+
 func TestBuildMatchPhiMixedArms(t *testing.T) {
 	// Match expression where some arms produce values and at least one arm
 	// has an early return. buildMatchPhi must handle missing predecessors

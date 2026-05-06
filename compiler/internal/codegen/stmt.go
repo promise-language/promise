@@ -3713,6 +3713,9 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 		afterTryBlk = defaultBlk
 	} else if c.inCoroutine {
 		afterTryBlk = c.newBlock("select.park")
+	} else if !c.isWasm {
+		// Non-coroutine context (e.g., batch tests): poll-retry fallback (B0045)
+		afterTryBlk = c.newBlock("select.poll")
 	} else {
 		afterTryBlk = mergeBlk
 	}
@@ -4161,6 +4164,17 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 			}
 		}
 
+	}
+
+	// Thread-blocking poll fallback for non-coroutine context (B0045).
+	// When no case is immediately ready and we can't park (not a coroutine),
+	// unlock all channels, yield to let goroutines make progress, then
+	// re-lock and retry the try-check chain.
+	if s.Default == nil && !c.inCoroutine && !c.isWasm {
+		c.block = afterTryBlk
+		unlockAll()
+		c.block.NewCall(c.palUsleep, constant.NewInt(irtypes.I32, 100))
+		c.block.NewBr(lockStartBlk)
 	}
 
 	c.block = mergeBlk

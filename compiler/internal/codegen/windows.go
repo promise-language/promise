@@ -41,9 +41,8 @@ func (c *Compiler) callSetjmp(blk *ir.Block, envPtr value.Value) *ir.InstCall {
 // usleep takes microseconds; Sleep takes milliseconds. Minimum 1ms to avoid busy-spin.
 func (c *Compiler) defineWindowsUsleep() *ir.Func {
 	// declare void @Sleep(i32 %dwMilliseconds) nounwind
-	sleepFn := c.module.NewFunc("Sleep", irtypes.Void,
+	sleepFn := c.getOrDeclareFunc("Sleep", irtypes.Void,
 		ir.NewParam("dwMilliseconds", irtypes.I32))
-	sleepFn.FuncAttrs = append(sleepFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := c.module.NewFunc("usleep", irtypes.I32, ir.NewParam("usec", irtypes.I32))
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
@@ -59,37 +58,40 @@ func (c *Compiler) defineWindowsUsleep() *ir.Func {
 	return fn
 }
 
-// buildNanotimeBody emits the body of promise_nanotime for Windows using
-// QueryPerformanceCounter and QueryPerformanceFrequency.
-// Returns monotonic nanoseconds as i64.
-func (c *Compiler) buildWindowsNanotimeBody(entry *ir.Block) *ir.Block {
-	// declare i32 @QueryPerformanceCounter(i64*) nounwind
+// emitWindowsQPCNanos emits QPC/QPF calls and returns the monotonic nanosecond value.
+// Does NOT emit a terminator — caller must use the returned value and terminate the block.
+// Used by both defineNanotimeFunc (ret i64) and buildNanotimeExternBody (pack to sret).
+func (c *Compiler) emitWindowsQPCNanos(blk *ir.Block) value.Value {
 	qpc := c.getOrDeclareFunc("QueryPerformanceCounter", irtypes.I32,
 		ir.NewParam("lpPerformanceCount", irtypes.NewPointer(irtypes.I64)))
-	// declare i32 @QueryPerformanceFrequency(i64*) nounwind
 	qpf := c.getOrDeclareFunc("QueryPerformanceFrequency", irtypes.I32,
 		ir.NewParam("lpFrequency", irtypes.NewPointer(irtypes.I64)))
 
-	counterPtr := entry.NewAlloca(irtypes.I64)
-	freqPtr := entry.NewAlloca(irtypes.I64)
+	counterPtr := blk.NewAlloca(irtypes.I64)
+	freqPtr := blk.NewAlloca(irtypes.I64)
 
-	entry.NewCall(qpc, counterPtr)
-	entry.NewCall(qpf, freqPtr)
+	blk.NewCall(qpc, counterPtr)
+	blk.NewCall(qpf, freqPtr)
 
-	counter := entry.NewLoad(irtypes.I64, counterPtr)
-	freq := entry.NewLoad(irtypes.I64, freqPtr)
+	counter := blk.NewLoad(irtypes.I64, counterPtr)
+	freq := blk.NewLoad(irtypes.I64, freqPtr)
 
 	// nanos = (counter / freq) * 1e9 + ((counter % freq) * 1e9) / freq
 	// Two-step to avoid i64 overflow (counter * 1e9 overflows after ~106 days at 10MHz).
 	billion := constant.NewInt(irtypes.I64, 1_000_000_000)
-	wholeSec := entry.NewSDiv(counter, freq)
-	wholeNanos := entry.NewMul(wholeSec, billion)
-	remainder := entry.NewSRem(counter, freq)
-	remScaled := entry.NewMul(remainder, billion)
-	remNanos := entry.NewSDiv(remScaled, freq)
-	nanos := entry.NewAdd(wholeNanos, remNanos)
+	wholeSec := blk.NewSDiv(counter, freq)
+	wholeNanos := blk.NewMul(wholeSec, billion)
+	remainder := blk.NewSRem(counter, freq)
+	remScaled := blk.NewMul(remainder, billion)
+	remNanos := blk.NewSDiv(remScaled, freq)
+	return blk.NewAdd(wholeNanos, remNanos)
+}
+
+// buildWindowsNanotimeBody emits the body of promise_nanotime for Windows.
+// Returns monotonic nanoseconds as i64 via QPC/QPF.
+func (c *Compiler) buildWindowsNanotimeBody(entry *ir.Block) {
+	nanos := c.emitWindowsQPCNanos(entry)
 	entry.NewRet(nanos)
-	return entry
 }
 
 // buildWindowsSleepNanosBody emits the body of promise_sleep_nanos for Windows.

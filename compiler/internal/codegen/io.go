@@ -521,25 +521,7 @@ func (c *Compiler) buildNanotimeExternBody(fn *ir.Func) {
 	}
 
 	if c.isWindows {
-		// Use QueryPerformanceCounter/Frequency
-		qpc := c.getOrDeclareFunc("QueryPerformanceCounter", irtypes.I32,
-			ir.NewParam("lpPerformanceCount", irtypes.NewPointer(irtypes.I64)))
-		qpf := c.getOrDeclareFunc("QueryPerformanceFrequency", irtypes.I32,
-			ir.NewParam("lpFrequency", irtypes.NewPointer(irtypes.I64)))
-		counterPtr := entry.NewAlloca(irtypes.I64)
-		freqPtr := entry.NewAlloca(irtypes.I64)
-		entry.NewCall(qpc, counterPtr)
-		entry.NewCall(qpf, freqPtr)
-		counter := entry.NewLoad(irtypes.I64, counterPtr)
-		freq := entry.NewLoad(irtypes.I64, freqPtr)
-		// Two-step to avoid i64 overflow (counter * 1e9 overflows after ~106 days at 10MHz).
-		billion := constant.NewInt(irtypes.I64, 1_000_000_000)
-		wholeSec := entry.NewSDiv(counter, freq)
-		wholeNanos := entry.NewMul(wholeSec, billion)
-		remainder := entry.NewSRem(counter, freq)
-		remScaled := entry.NewMul(remainder, billion)
-		remNanos := entry.NewSDiv(remScaled, freq)
-		nanos := entry.NewAdd(wholeNanos, remNanos)
+		nanos := c.emitWindowsQPCNanos(entry)
 		packNanosToSret(entry, nanos)
 		return
 	}

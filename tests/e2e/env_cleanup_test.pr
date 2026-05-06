@@ -1,0 +1,78 @@
+// T0100: Tests for closure env cleanup when lambda is passed directly
+// as a function argument (not stored in a variable).
+// Helper: takes an int and a closure, calls the closure.
+apply(int x, (int) -> int fn) int {
+  return fn(x);
+}
+
+// Helper: takes a closure, calls it twice and sums.
+apply_twice(int x, (int) -> int fn) int {
+  return fn(x) + fn(x);
+}
+
+// Helper: takes two closures, applies both.
+apply_both(int x, (int) -> int f, (int) -> int g) int {
+  return f(x) + g(x);
+}
+
+// Helper: takes a closure, does nothing with it (just discards).
+discard_closure((int) -> int fn) {
+  // intentionally unused
+}
+
+// Basic: lambda with capture passed directly as argument.
+test_env_cleanup_basic() `test {
+  int captured = 42;
+  int result = apply(5, |int x| -> x + captured);
+  assert(result == 47, "5 + 42 = 47");
+}
+
+// Multiple calls: each creates a fresh env that should be freed.
+test_env_cleanup_multiple_calls() `test {
+  int a = 10;
+  int r1 = apply(1, |int x| -> x + a);
+  int r2 = apply(2, |int x| -> x + a);
+  int r3 = apply(3, |int x| -> x + a);
+  assert(r1 == 11, "1 + 10 = 11");
+  assert(r2 == 12, "2 + 10 = 12");
+  assert(r3 == 13, "3 + 10 = 13");
+}
+
+// Lambda called multiple times (env reused within call, freed after).
+test_env_cleanup_multi_call() `test {
+  int factor = 3;
+  int result = apply_twice(5, |int x| -> x * factor);
+  assert(result == 30, "5*3 + 5*3 = 30");
+}
+
+// Two closures with captures in same call.
+test_env_cleanup_two_closures() `test {
+  int a = 10;
+  int b = 20;
+  int result = apply_both(5, |int x| -> x + a, |int x| -> x + b);
+  assert(result == 40, "(5+10) + (5+20) = 40");
+}
+
+// Closure with multiple captures.
+test_env_cleanup_multi_capture() `test {
+  int a = 1;
+  int b = 2;
+  int c = 3;
+  int result = apply(10, |int x| -> x + a + b + c);
+  assert(result == 16, "10 + 1 + 2 + 3 = 16");
+}
+
+// Closure passed to function that discards it (env should still be freed).
+test_env_cleanup_discarded() `test {
+  int val = 99;
+  discard_closure(|int x| -> x + val);
+  // Should not leak — env freed at statement end
+}
+
+// Lambda stored in variable (NOT env temp — uses scope binding).
+test_env_stored_in_variable() `test {
+  int captured = 5;
+  f := |int x| -> x + captured;
+  int result = f(10);
+  assert(result == 15, "10 + 5 = 15");
+}

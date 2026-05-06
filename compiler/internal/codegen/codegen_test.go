@@ -3921,6 +3921,42 @@ func TestLambdaEnvFreeNullCheck(t *testing.T) {
 	assertContains(t, ir, "env.skip")
 }
 
+// T0100: Lambda with captures passed directly as function argument — env
+// should be freed at statement end via the env temp tracking mechanism.
+func TestLambdaEnvTempCleanup(t *testing.T) {
+	ir := generateIR(t, `
+		apply(int x, (int) -> int fn) int { return fn(x); }
+		do_it() {
+			int captured = 42;
+			int result = apply(5, |int x| -> x + captured);
+		}
+		main() { do_it(); }
+	`)
+	// The lambda has a capture (captured) so env is allocated.
+	// Since the lambda is passed directly as a function argument (not stored
+	// in a variable), env temp tracking should free it at statement end.
+	assertContains(t, ir, "env.tmp.drop")
+	assertContains(t, ir, "env.tmp.exec")
+	assertContains(t, ir, "call void @pal_free")
+}
+
+// T0100: Lambda stored in a variable — env temp is claimed (drop flag cleared
+// at runtime), so env.tmp.drop exists in IR but the runtime flag check prevents
+// the actual free. The scope binding (env.free) handles cleanup instead.
+func TestLambdaEnvTempClaimedForVariable(t *testing.T) {
+	ir := generateIR(t, `
+		do_it() {
+			int x = 10;
+			f := |int y| -> x + y;
+		}
+		main() { do_it(); }
+	`)
+	// Lambda stored in a variable: env freed via scope binding (env.free).
+	// The env temp is claimed (env.claim blocks emitted to clear drop flag).
+	assertContains(t, ir, "env.free")
+	assertContains(t, ir, "env.claim")
+}
+
 func TestNamedFuncRefThunk(t *testing.T) {
 	ir := generateIR(t, `
 		add(int x) int { return x + 1; }

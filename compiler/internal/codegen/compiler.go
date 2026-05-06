@@ -169,6 +169,12 @@ type Compiler struct {
 	heapTemps   []heapTemp
 	heapTempMap map[value.Value]int // instance i8* → index in heapTemps (-1 = claimed)
 
+	// T0100: Statement-level tracking for closure env pointers.
+	// Tracks env structs from lambda expressions passed directly as function
+	// arguments (not stored in variables). Unclaimed envs are freed at statement end.
+	envTemps   []envTemp
+	envTempMap map[value.Value]int // env i8* → index in envTemps (-1 = claimed)
+
 	// PAL (Platform Abstraction Layer) function references
 	palWrite   *ir.Func // @pal_write(i32 fd, i8* buf, i64 len) → i64
 	palExit    *ir.Func // @pal_exit(i32 code) → void [noreturn]
@@ -379,6 +385,14 @@ type heapTemp struct {
 	dropFunc *ir.Func       // concrete drop function to call
 }
 
+// envTemp tracks a heap-allocated closure env pointer from a lambda expression (T0100).
+// When the lambda is stored in a named variable, the env temp is "claimed" (the
+// variable's scope binding handles freeing). Unclaimed envs are freed at statement end.
+type envTemp struct {
+	alloca   *ir.InstAlloca // entry-block i8* alloca (env pointer)
+	dropFlag *ir.InstAlloca // entry-block i1, initialized to false
+}
+
 // closeErrCapture holds entry-block allocas used to capture the first failable
 // close() error during scope cleanup. Used only when c.canError && !errorInFlight.
 type closeErrCapture struct {
@@ -535,6 +549,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 		dropBindings:       make(map[string]scopeBinding),
 		stmtTempMap:        make(map[value.Value]int),
 		heapTempMap:        make(map[value.Value]int),
+		envTempMap:         make(map[value.Value]int),
 		thunks:             make(map[string]*ir.Func),
 		file:               file,
 		moduleFuncs:        make(map[string]*ir.Func),
@@ -3632,6 +3647,8 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 	c.stmtTempMap = make(map[value.Value]int) // T0073
 	c.heapTemps = nil                         // T0088
 	c.heapTempMap = make(map[value.Value]int) // T0088
+	c.envTemps = nil                          // T0100
+	c.envTempMap = make(map[value.Value]int)  // T0100
 	// T0084: Enable temp tracking for all free functions (user and module).
 	// Previously limited to user code only (T0073); now extended to module code
 	// so that statement-level string temps in module methods (e.g., this.to_string()
@@ -4090,6 +4107,8 @@ func (c *Compiler) defineModuleFuncs(file *ast.File, moduleName string) {
 		c.dropBindings = make(map[string]scopeBinding)
 		c.stmtTemps = nil                         // T0073
 		c.stmtTempMap = make(map[value.Value]int) // T0073
+		c.envTemps = nil                          // T0100
+		c.envTempMap = make(map[value.Value]int)  // T0100
 		c.tempTrackingEnabled = true              // T0084: enable in methods too
 		c.mutRefPtrs = nil
 		c.mutRefTypes = nil
@@ -4249,6 +4268,8 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 			c.dropBindings = make(map[string]scopeBinding)
 			c.stmtTemps = nil                         // T0073
 			c.stmtTempMap = make(map[value.Value]int) // T0073
+			c.envTemps = nil                          // T0100
+			c.envTempMap = make(map[value.Value]int)  // T0100
 			// B0172: Enable temp tracking for module type methods.
 			c.tempTrackingEnabled = true
 			c.scopeBindings = nil
@@ -4731,6 +4752,8 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 	c.stmtTempMap = make(map[value.Value]int) // T0073
 	c.heapTemps = nil                         // T0088
 	c.heapTempMap = make(map[value.Value]int) // T0088
+	c.envTemps = nil                          // T0100
+	c.envTempMap = make(map[value.Value]int)  // T0100
 	// B0172: Enable temp tracking for method bodies.
 	c.tempTrackingEnabled = true
 	c.mutRefPtrs = nil
@@ -5689,6 +5712,8 @@ type compilerState struct {
 	stmtTempMap         map[value.Value]int
 	heapTemps           []heapTemp
 	heapTempMap         map[value.Value]int
+	envTemps            []envTemp
+	envTempMap          map[value.Value]int
 	tempTrackingEnabled bool
 }
 
@@ -5716,6 +5741,8 @@ func (c *Compiler) saveState() compilerState {
 		stmtTempMap:         c.stmtTempMap,
 		heapTemps:           c.heapTemps,
 		heapTempMap:         c.heapTempMap,
+		envTemps:            c.envTemps,
+		envTempMap:          c.envTempMap,
 		tempTrackingEnabled: c.tempTrackingEnabled,
 	}
 }
@@ -5732,6 +5759,8 @@ func (c *Compiler) restoreState(s compilerState) {
 	c.stmtTempMap = s.stmtTempMap
 	c.heapTemps = s.heapTemps
 	c.heapTempMap = s.heapTempMap
+	c.envTemps = s.envTemps
+	c.envTempMap = s.envTempMap
 	c.tempTrackingEnabled = s.tempTrackingEnabled
 	c.blockCounter = s.blockCounter
 	c.canError = s.canError

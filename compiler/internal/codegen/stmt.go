@@ -229,6 +229,7 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 	if c.block != nil && c.block.Term == nil {
 		c.cleanupStmtTemps()
 		c.cleanupHeapTemps()
+		c.cleanupEnvTemps() // T0100
 	}
 }
 
@@ -417,6 +418,8 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	}
 	// T0088: Claim heap temp — ownership transferred to this variable.
 	c.claimHeapTemp(val)
+	// T0100: Claim env temp — the variable's scope binding handles env free.
+	c.claimEnvTemp(val)
 
 	c.block.NewStore(val, alloca)
 	c.locals[s.Name] = alloca
@@ -471,6 +474,8 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	// Without this, iterator chain results (e.g., c.take(3)) assigned via
 	// auto-typed declarations are freed at statement end, causing use-after-free.
 	c.claimHeapTemp(val)
+	// T0100: Claim env temp — the variable's scope binding handles env free.
+	c.claimEnvTemp(val)
 
 	c.block.NewStore(val, alloca)
 	c.locals[s.Name] = alloca
@@ -1501,6 +1506,126 @@ func (c *Compiler) cleanupHeapTemps() {
 	c.heapTempMap = make(map[value.Value]int)
 }
 
+// trackEnvTemp registers a heap-allocated closure env pointer for cleanup at
+// statement end (T0100). Called from genLambdaExpr when the lambda has captures.
+// If the lambda is later stored in a variable, claimEnvTemp prevents double-free.
+func (c *Compiler) trackEnvTemp(envPtr value.Value) {
+	if envPtr == nil || c.block == nil || c.block.Term != nil {
+		return
+	}
+	if c.entryBlock == nil || !c.tempTrackingEnabled {
+		return
+	}
+	if envPtr.Type() != irtypes.I8Ptr {
+		return
+	}
+	if _, ok := c.envTempMap[envPtr]; ok {
+		return
+	}
+
+	alloca := c.createEntryAlloca(irtypes.I8Ptr)
+	dropFlag := c.createEntryAlloca(irtypes.I1)
+	c.entryBlock.NewStore(constant.NewNull(irtypes.I8Ptr), alloca)
+	c.entryBlock.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
+
+	c.block.NewStore(envPtr, alloca)
+	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+
+	idx := len(c.envTemps)
+	c.envTemps = append(c.envTemps, envTemp{alloca: alloca, dropFlag: dropFlag})
+	c.envTempMap[envPtr] = idx
+}
+
+// claimEnvTemp marks a tracked env temp as consumed (ownership transferred
+// to a variable's scope binding via maybeRegisterEnvFree). Accepts either a
+// raw i8* env pointer (direct SSA match) or a closure fat pointer {i8*, i8*}
+// (extracts field 1 and compares at runtime).
+func (c *Compiler) claimEnvTemp(val value.Value) {
+	if val == nil || len(c.envTemps) == 0 {
+		return
+	}
+	if c.block == nil || c.block.Term != nil {
+		return
+	}
+	// Try direct SSA match (rare — usually the env ptr is embedded in a fat pointer)
+	if idx, ok := c.envTempMap[val]; ok && idx >= 0 {
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.envTemps[idx].dropFlag)
+		c.envTempMap[val] = -1
+		return
+	}
+	// For closure fat pointers {i8*, i8*}: extract env (field 1) and compare at runtime
+	if st, ok := val.Type().(*irtypes.StructType); ok && len(st.Fields) == 2 {
+		envPtr := c.block.NewExtractValue(val, 1)
+		if envPtr.Type() != irtypes.I8Ptr {
+			return
+		}
+		for _, temp := range c.envTemps {
+			tracked := c.block.NewLoad(irtypes.I8Ptr, temp.alloca)
+			isSame := c.block.NewICmp(enum.IPredEQ, envPtr, tracked)
+			claimBlk := c.newBlock("env.claim")
+			skipBlk := c.newBlock("env.claim.skip")
+			c.block.NewCondBr(isSame, claimBlk, skipBlk)
+			claimBlk.NewStore(constant.NewInt(irtypes.I1, 0), temp.dropFlag)
+			claimBlk.NewBr(skipBlk)
+			c.block = skipBlk
+		}
+	}
+}
+
+// claimAllEnvTemps claims all active (unclaimed) env temps. Called when
+// maybeTrackIterTemp registers a heap temp — the callee stored our closure env
+// in the returned instance (e.g., _FnIter), so its cleanup handles the env.
+func (c *Compiler) claimAllEnvTemps() {
+	if c.block == nil || c.block.Term != nil {
+		return
+	}
+	for key, idx := range c.envTempMap {
+		if idx >= 0 {
+			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.envTemps[idx].dropFlag)
+			c.envTempMap[key] = -1
+		}
+	}
+}
+
+// cleanupEnvTemps frees all unclaimed closure env temps at statement end (T0100).
+// For each temp: check flag → null-check ptr → call pal_free.
+func (c *Compiler) cleanupEnvTemps() {
+	if len(c.envTemps) == 0 {
+		return
+	}
+	if c.block == nil || c.block.Term != nil {
+		c.envTemps = c.envTemps[:0]
+		c.envTempMap = make(map[value.Value]int)
+		return
+	}
+
+	for _, temp := range c.envTemps {
+		flag := c.block.NewLoad(irtypes.I1, temp.dropFlag)
+		dropBlock := c.newBlock("env.tmp.drop")
+		skipBlock := c.newBlock("env.tmp.skip")
+		c.block.NewCondBr(flag, dropBlock, skipBlock)
+
+		c.block = dropBlock
+		ptr := c.block.NewLoad(irtypes.I8Ptr, temp.alloca)
+		isNull := c.block.NewICmp(enum.IPredEQ, ptr, constant.NewNull(irtypes.I8Ptr))
+		execBlock := c.newBlock("env.tmp.exec")
+		doneBlock := c.newBlock("env.tmp.done")
+		c.block.NewCondBr(isNull, doneBlock, execBlock)
+
+		c.block = execBlock
+		c.block.NewCall(c.palFree, ptr)
+		c.block.NewBr(doneBlock)
+
+		c.block = doneBlock
+		c.block.NewBr(skipBlock)
+
+		c.block = skipBlock
+	}
+
+	c.envTemps = c.envTemps[:0]
+	c.envTempMap = make(map[value.Value]int)
+}
+
 // maybeTrackIterTemp tracks the instance pointer from a method call result
 // when the result type is a structural interface (T0088). At statement end,
 // unclaimed temps are cleaned up using __promise_iter_cleanup which frees
@@ -2400,12 +2525,16 @@ func (c *Compiler) genIfStmt(s *ast.IfStmt) {
 		c.block.NewCondBr(cond, thenBlock, mergeBlock)
 	}
 
-	// B0173: Save heap temps from the condition expression so branches don't
+	// B0173: Save heap/env temps from the condition expression so branches don't
 	// prematurely clean them. Cleanup runs once in the merge block.
 	savedHeapTemps := c.heapTemps
 	savedHeapTempMap := c.heapTempMap
 	c.heapTemps = nil
 	c.heapTempMap = make(map[value.Value]int)
+	savedEnvTempsIf := c.envTemps     // T0100
+	savedEnvTempMapIf := c.envTempMap // T0100
+	c.envTemps = nil
+	c.envTempMap = make(map[value.Value]int)
 
 	// Then branch
 	c.block = thenBlock
@@ -2437,10 +2566,13 @@ func (c *Compiler) genIfStmt(s *ast.IfStmt) {
 
 	c.block = mergeBlock
 
-	// B0173: Restore heap temps and clean up in the merge block.
+	// B0173: Restore heap/env temps and clean up in the merge block.
 	c.heapTemps = savedHeapTemps
 	c.heapTempMap = savedHeapTempMap
 	c.cleanupHeapTemps()
+	c.envTemps = savedEnvTempsIf     // T0100
+	c.envTempMap = savedEnvTempMapIf // T0100
+	c.cleanupEnvTemps()
 }
 
 // genIfStmtValue generates an if/else statement in value-producing position
@@ -2958,12 +3090,16 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 		c.block.NewCondBr(flag, thenBlock, mergeBlock)
 	}
 
-	// B0173: Save heap temps from the init expression so branches don't
+	// B0173: Save heap/env temps from the init expression so branches don't
 	// prematurely clean them. Cleanup runs once in the merge block.
 	savedHeapTemps := c.heapTemps
 	savedHeapTempMap := c.heapTempMap
 	c.heapTemps = nil
 	c.heapTempMap = make(map[value.Value]int)
+	savedEnvTempsUW := c.envTemps     // T0100
+	savedEnvTempMapUW := c.envTempMap // T0100
+	c.envTemps = nil
+	c.envTempMap = make(map[value.Value]int)
 
 	// Then: unwrap value, bind to local (scoped to then-block only)
 	c.block = thenBlock
@@ -2998,11 +3134,14 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 
 	c.block = mergeBlock
 
-	// B0173: Restore heap temps and clean up in the merge block so both
+	// B0173: Restore heap/env temps and clean up in the merge block so both
 	// then and else paths reach the cleanup (via their branches to mergeBlock).
 	c.heapTemps = savedHeapTemps
 	c.heapTempMap = savedHeapTempMap
 	c.cleanupHeapTemps()
+	c.envTemps = savedEnvTempsUW     // T0100
+	c.envTempMap = savedEnvTempMapUW // T0100
+	c.cleanupEnvTemps()
 }
 
 // --- While loop ---

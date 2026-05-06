@@ -2068,7 +2068,11 @@ func (c *Compiler) wrapMainWithScheduler() {
 	c.dropBindings = make(map[string]scopeBinding)
 	c.stmtTemps = nil                         // T0073
 	c.stmtTempMap = make(map[value.Value]int) // T0073
-	c.tempTrackingEnabled = false             // T0073
+	c.heapTemps = nil                         // T0088
+	c.heapTempMap = make(map[value.Value]int) // T0088
+	c.envTemps = nil                          // T0100
+	c.envTempMap = make(map[value.Value]int)  // T0100
+	c.tempTrackingEnabled = true              // T0100: enable temp tracking in main goroutine
 	c.loopScopeDepth = 0
 	c.inCoroutine = true
 

@@ -1076,8 +1076,15 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 				}
 			}
 		}
+		heapBefore := len(c.heapTemps) // T0100
 		result := c.genMethodCall(e, member)
 		c.maybeTrackIterTemp(e, result)
+		// T0100: If the call returned a structural interface (tracked as heap temp),
+		// the callee likely stored our closure envs in the returned instance (e.g.,
+		// _FnIter). Claim env temps to prevent double-free with __promise_iter_cleanup.
+		if len(c.heapTemps) > heapBefore {
+			c.claimAllEnvTemps()
+		}
 		return result
 	}
 
@@ -1115,8 +1122,12 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 					return c.genModuleGenericFuncCall(e, idx, member.Field)
 				}
 			}
+			heapBefore2 := len(c.heapTemps) // T0100
 			result := c.genGenericMethodCall(e, idx, member)
 			c.maybeTrackIterTemp(e, result)
+			if len(c.heapTemps) > heapBefore2 {
+				c.claimAllEnvTemps()
+			}
 			return result
 		}
 		return c.genGenericFuncCall(e, idx)
@@ -1124,8 +1135,12 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 
 	// Inferred generic function call: sema recorded the inferred type args.
 	if inferred, ok := c.info.InferredTypeArgs[e]; ok {
+		heapBefore3 := len(c.heapTemps) // T0100
 		result := c.genInferredGenericCall(e, inferred)
 		c.maybeTrackIterTemp(e, result)
+		if len(c.heapTemps) > heapBefore3 {
+			c.claimAllEnvTemps()
+		}
 		return result
 	}
 
@@ -1653,6 +1668,7 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				c.clearDropFlag(ident.Name)
 			}
 			c.claimStringTemp(v) // B0168: ownership transferred to new() args
+			c.claimEnvTemp(v)    // T0100: claim env temp for closure args
 		}
 		newMethod := named.LookupMethod("new")
 		if newMethod != nil {
@@ -1785,6 +1801,8 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				}
 				// B0168: Claim string temp — ownership transferred to constructor field.
 				c.claimStringTemp(val)
+				// T0100: Claim env temp — closure env is now owned by the struct field.
+				c.claimEnvTemp(val)
 			}
 		}
 
@@ -5110,6 +5128,8 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	savedStmtTempMap := c.stmtTempMap          // T0073
 	savedHeapTemps := c.heapTemps              // T0088
 	savedHeapTempMap := c.heapTempMap          // T0088
+	savedEnvTemps := c.envTemps                // T0100
+	savedEnvTempMap := c.envTempMap            // T0100
 	savedTempTracking := c.tempTrackingEnabled // T0073
 	c.goExprFireAndForget = false              // reset for inner statements (B0109)
 
@@ -5127,6 +5147,8 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.stmtTempMap = make(map[value.Value]int) // T0073
 	c.heapTemps = nil                         // T0088
 	c.heapTempMap = make(map[value.Value]int) // T0088
+	c.envTemps = nil                          // T0100
+	c.envTempMap = make(map[value.Value]int)  // T0100
 	c.tempTrackingEnabled = false             // T0073
 	c.loopScopeDepth = 0
 	c.lambdaWritebacks = nil
@@ -5222,7 +5244,16 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.stmtTempMap = savedStmtTempMap          // T0073
 	c.heapTemps = savedHeapTemps              // T0088
 	c.heapTempMap = savedHeapTempMap          // T0088
+	c.envTemps = savedEnvTemps                // T0100
+	c.envTempMap = savedEnvTempMap            // T0100
 	c.tempTrackingEnabled = savedTempTracking // T0073
+
+	// T0100: Track env temp for non-variable lambdas. If this lambda is
+	// assigned to a variable, maybeRegisterEnvFree handles cleanup and the
+	// env temp will be claimed. Otherwise, unclaimed envs are freed at statement end.
+	if len(captures) > 0 {
+		c.trackEnvTemp(envPtr)
+	}
 
 	// Return fat pointer: {fn_ptr as i8*, env_ptr}
 	fnPtr := c.block.NewBitCast(fn, irtypes.I8Ptr)

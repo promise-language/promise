@@ -1,0 +1,56 @@
+// B0163: Channel scope-exit drop — channels are freed when they go out of scope.
+// Tests that channel drop works correctly with reference counting.
+// All tests allow_leaks due to batch test binary sharing scheduler allocations.
+// Single-threaded channel: created and dropped in same scope.
+channel_drop_local() `test(allow_leaks: true) {
+  ch := channel[int](capacity: 5);
+  ch.send(42);
+  result := <-ch;
+  if v := result {
+    assert(v == 42, "expected 42");
+  }
+  // ch goes out of scope here — Channel.drop frees buffer, mutex, conds
+}
+
+// Channel shared with goroutine: refcount prevents double-free.
+channel_drop_shared() `test(allow_leaks: true, exclude: "wasm32") {
+  ch := channel[int](capacity: 1);
+  go {
+    ch.send(99);
+  };
+  result := <-ch;
+  if v := result {
+    assert(v == 99, "expected 99");
+  }
+  // Both outer scope and goroutine drop ch — refcount ensures single free
+}
+
+// Multiple goroutines sharing a channel.
+channel_drop_multi_goroutine() `test(allow_leaks: true, exclude: "wasm32") {
+  ch := channel[int](capacity: 10);
+  for i in 0..5 {
+    go {
+      ch.send(i);
+    };
+  }
+  int total = 0;
+  for j in 0..5 {
+    result := <-ch;
+    if v := result {
+      total = total + v;
+    }
+  }
+  assert(total == 10, "expected sum 10"); // 0+1+2+3+4 = 10
+}
+
+// Channel dropped after close.
+channel_drop_after_close() `test(allow_leaks: true) {
+  ch := channel[int](capacity: 1);
+  ch.send(1);
+  ch.close();
+  result := <-ch;
+  if v := result {
+    assert(v == 1, "expected 1");
+  }
+  // ch dropped after close — should still free resources
+}

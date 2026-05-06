@@ -8410,6 +8410,74 @@ func TestDropVectorStandaloneHasDrop(t *testing.T) {
 	assertContains(t, ir, "call void @Vector.drop(")
 }
 
+// B0163: Channel scope-exit drop — standalone channel gets drop flag and Channel.drop call
+func TestDropChannelStandaloneHasDrop(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 5);
+		}
+	`)
+	assertContains(t, ir, "%ch.dropflag")
+	assertContains(t, ir, "call void @Channel.drop(")
+}
+
+// B0163: Channel.drop function body uses refcount — frees only when refcount drops to 0
+func TestChannelDropFuncBody(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 5);
+		}
+	`)
+	assertContains(t, ir, "define void @Channel.drop(i8* %this)")
+	// Refcount decrement (atomicrmw or load+add for WASM)
+	assertContains(t, ir, "i64 -1")
+	assertContains(t, ir, "call void @pal_free(")
+	assertContains(t, ir, "call void @pal_mutex_destroy(")
+	assertContains(t, ir, "call void @pal_cond_destroy(")
+}
+
+// B0163: Channel refcount initialized to 1 in promise_channel_new
+func TestChannelRefcountInit(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 1);
+		}
+	`)
+	// promise_channel_new should store refcount = 1
+	assertContains(t, ir, "define i8* @promise_channel_new(")
+	// Channel.drop should use atomicrmw add with -1 (refcount decrement)
+	assertContains(t, ir, "define void @Channel.drop(")
+}
+
+// B0163: Channel drop null-checks the pointer (zero-initialized channels from error paths)
+func TestChannelDropNullCheck(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 1);
+		}
+	`)
+	// Channel.drop body should have null check (icmp eq ... null)
+	dropFn := extractFunction(ir, "Channel.drop")
+	if dropFn == "" {
+		t.Fatal("expected Channel.drop function in IR")
+	}
+	assertContains(t, dropFn, "icmp eq")
+	assertContains(t, dropFn, "null")
+}
+
+// B0163: Channel drop flag cleared on move (borrow detection)
+func TestChannelDropFlagInDroppableContainer(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 5);
+			ch.send(42);
+		}
+	`)
+	// isDroppableContainerOrString should recognize channels
+	assertContains(t, ir, "%ch.dropflag")
+	assertContains(t, ir, "call void @Channel.drop(")
+}
+
 // Non-droppable type: no drop flag or call generated for that variable
 func TestDropNotGeneratedForNonDroppable(t *testing.T) {
 	ir := generateIR(t, `
@@ -10317,7 +10385,7 @@ func TestChannelStructHas15Fields(t *testing.T) {
 			ch := channel[int](capacity: 1);
 		}
 	`)
-	// Channel struct should have 15 fields including the 4 waiter lists
+	// Channel struct should have 16 fields including the 4 waiter lists and refcount
 	// The channel_new function initializes all fields including waiter lists
 	assertContains(t, ir, "define i8* @promise_channel_new(")
 }

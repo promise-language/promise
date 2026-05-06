@@ -34,14 +34,17 @@ func (c *Compiler) genBlock(block *ast.Block) {
 	c.scopeBindings = c.scopeBindings[:savedScopeLen]
 }
 
-// isDroppableContainerOrString returns true if the type is a string or vector
-// (types that use the i8*-alloca drop mechanism in maybeRegisterDrop).
+// isDroppableContainerOrString returns true if the type is a string, vector,
+// or channel (types that use the i8*-alloca drop mechanism in maybeRegisterDrop).
 func isDroppableContainerOrString(typ types.Type) bool {
 	named := extractNamed(typ)
 	if named == types.TypString {
 		return true
 	}
 	if _, ok := types.AsVector(typ); ok || named == types.TypVector {
+		return true
+	}
+	if _, ok := types.AsChannel(typ); ok || named == types.TypChannel {
 		return true
 	}
 	return false
@@ -592,8 +595,32 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 		return
 	}
 
-	// NOTE: Channel scope-exit drop is not yet enabled.
-	// Channel cleanup requires reference counting or explicit close semantics.
+	// Channel drop (B0163): same i8* alloca + void(i8*) drop pattern as string/vector.
+	// Channel.drop frees the ring buffer, mutex, cond vars, and the struct itself.
+	// Drop flag semantics handle moves: cleared when channel is passed to go blocks
+	// or functions, so only the last owner frees.
+	if _, ok := types.AsChannel(typ); ok || named == types.TypChannel {
+		dropFlag := c.createEntryAlloca(irtypes.I1)
+		dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
+		c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+		c.dropFlags[varName] = dropFlag
+
+		dropFunc := c.funcs["Channel.drop"]
+		binding := scopeBinding{
+			kind:     bindingDropString, // reuse: same i8* alloca + void(i8*) drop pattern
+			alloca:   alloca,
+			named:    named,
+			valType:  typ,
+			dropFlag: dropFlag,
+			dropFunc: dropFunc,
+			varName:  varName,
+		}
+		c.scopeBindings = append(c.scopeBindings, binding)
+		c.dropBindings[varName] = binding
+		return
+	}
+
+	// Remaining container types without drop support skip.
 	if isContainerType(typ) {
 		return
 	}

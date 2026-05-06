@@ -5614,6 +5614,21 @@ func (c *Compiler) genGoCallExpr(callExpr *ast.CallExpr) value.Value {
 		argTypes = append(argTypes, c.info.Types[arg.Value])
 	}
 
+	// B0163: Increment refcount for channel arguments passed to go calls.
+	chanTypeDC := channelStructType()
+	for i, arg := range callExpr.Args {
+		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+			if binding, ok := c.dropBindings[ident.Name]; ok {
+				if _, isCh := types.AsChannel(binding.valType); isCh || binding.named == types.TypChannel {
+					chPtr := c.block.NewBitCast(argVals[i], irtypes.NewPointer(chanTypeDC))
+					rcField := c.block.NewGetElementPtr(chanTypeDC, chPtr,
+						constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRefcount)))
+					c.emitAtomicAdd(c.block, rcField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
+				}
+			}
+		}
+	}
+
 	// 3. Resolve the target function
 	targetFn, ext := c.resolveGoTarget(callExpr)
 
@@ -5814,6 +5829,21 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 		captureLLVMTypes = append(captureLLVMTypes, elemType)
 	}
 
+	// B0163: Increment refcount for captured channel variables and collect their types.
+	chanTypeVB := channelStructType()
+	capturedChanTypesVB := make(map[string]types.Type)
+	for i, name := range captureNames {
+		if binding, ok := c.dropBindings[name]; ok {
+			if _, isCh := types.AsChannel(binding.valType); isCh || binding.named == types.TypChannel {
+				chPtr := c.block.NewBitCast(captureVals[i], irtypes.NewPointer(chanTypeVB))
+				rcField := c.block.NewGetElementPtr(chanTypeVB, chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRefcount)))
+				c.emitAtomicAdd(c.block, rcField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
+				capturedChanTypesVB[name] = binding.valType
+			}
+		}
+	}
+
 	// 4. Create coroutine function with captured values as parameters
 	coroName := fmt.Sprintf(".goroutine.%d", c.goCounter)
 	c.goCounter++
@@ -5888,6 +5918,16 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 		c.locals[name] = alloca
 	}
 
+	// B0163: Register drop bindings for captured channel variables inside the goroutine.
+	c.entryBlock = startBlk
+	c.block = startBlk
+	for _, name := range captureNames {
+		if chanValType, ok := capturedChanTypesVB[name]; ok {
+			alloca := c.locals[name]
+			c.maybeRegisterDrop(name, alloca, chanValType)
+		}
+	}
+
 	// Initial suspend
 	initSuspBlk := coroFn.NewBlock("coro.init.suspend")
 	startBlk.NewBr(initSuspBlk)
@@ -5924,6 +5964,11 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 		rpVal := c.block.NewLoad(irtypes.I8Ptr, rpField)
 		typedRP := c.block.NewBitCast(rpVal, irtypes.NewPointer(resultLLVM))
 		c.block.NewStore(result, typedRP)
+	}
+
+	// B0163: Emit cleanup for captured channel drop bindings.
+	if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > 0 {
+		c.emitScopeCleanup(0, false)
 	}
 
 	// Final suspend
@@ -6284,6 +6329,23 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 		captureLLVMTypes = append(captureLLVMTypes, elemType)
 	}
 
+	// B0163: Increment refcount for captured channel variables and collect their types.
+	// The goroutine shares the channel pointer with the outer scope,
+	// so both need to call Channel.drop — refcounting prevents double-free.
+	chanTypeGB := channelStructType()
+	capturedChanTypes := make(map[string]types.Type) // name → sema type for channels
+	for i, name := range captureNames {
+		if binding, ok := c.dropBindings[name]; ok {
+			if _, isCh := types.AsChannel(binding.valType); isCh || binding.named == types.TypChannel {
+				chPtr := c.block.NewBitCast(captureVals[i], irtypes.NewPointer(chanTypeGB))
+				rcField := c.block.NewGetElementPtr(chanTypeGB, chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRefcount)))
+				c.emitAtomicAdd(c.block, rcField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
+				capturedChanTypes[name] = binding.valType
+			}
+		}
+	}
+
 	// Create coroutine function with captured values as parameters
 	coroName := fmt.Sprintf(".goroutine.%d", c.goCounter)
 	c.goCounter++
@@ -6359,6 +6421,18 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 		c.locals[name] = alloca
 	}
 
+	// B0163: Register drop bindings for captured channel variables inside the goroutine.
+	// This ensures Channel.drop is called when the goroutine finishes, decrementing the refcount.
+	// Set both entryBlock and block to startBlk so allocas and stores land in the right place.
+	c.entryBlock = startBlk
+	c.block = startBlk
+	for _, name := range captureNames {
+		if chanValType, ok := capturedChanTypes[name]; ok {
+			alloca := c.locals[name]
+			c.maybeRegisterDrop(name, alloca, chanValType)
+		}
+	}
+
 	// Initial suspend — in a separate block so that createEntryAlloca can
 	// append allocas to startBlk BEFORE the suspend point. coro-split needs
 	// allocas to precede coro.suspend to properly spill them to the frame.
@@ -6392,6 +6466,13 @@ func (c *Compiler) genGoBlock(block *ast.Block) value.Value {
 	c.block = bodyBlk
 	c.entryBlock = startBlk // allocas go in startBlk (after coro.begin) to be part of coroutine frame
 	c.genBlock(block)
+
+	// B0163: Emit cleanup for captured channel drop bindings registered before genBlock.
+	// genBlock only cleans up bindings added within its scope, so we must handle
+	// pre-block bindings (captured channels) here before the final suspend.
+	if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > 0 {
+		c.emitScopeCleanup(0, false)
+	}
 
 	// Final suspend: yield back to scheduler so it can see coro.done()=true
 	// before destroying the coroutine frame.

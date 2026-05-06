@@ -1168,6 +1168,7 @@ func (c *Compiler) declareIntrinsics() {
 	c.defineVectorContainsFunc()
 	c.defineVectorRemoveFunc()
 	c.defineVectorDropFunc()
+	c.defineChannelDropFunc() // B0163: channel scope-exit drop
 
 	// String trim/split/case/repeat (codegen-emitted LLVM IR)
 	c.defineStringTrimFunc()
@@ -2869,6 +2870,66 @@ func (c *Compiler) defineVectorDropFunc() {
 	doneBlk.NewRet(nil)
 
 	c.funcs["Vector.drop"] = fn
+}
+
+// defineChannelDropFunc emits @Channel.drop(i8* %this) → void.
+// Atomically decrements the channel's reference count. When refcount reaches 0,
+// frees the ring buffer, mutex, 2 cond vars, and the channel struct itself.
+// B0163: Channel scope-exit drop with reference counting.
+func (c *Compiler) defineChannelDropFunc() {
+	thisParam := ir.NewParam("this", irtypes.I8Ptr)
+	fn := c.module.NewFunc("Channel.drop", irtypes.Void, thisParam)
+
+	chanType := channelStructType()
+
+	entry := fn.NewBlock(".entry")
+
+	// Null-check: zero-initialized values (from error handler fallthrough) may be null
+	isNull := entry.NewICmp(enum.IPredEQ, thisParam, constant.NewNull(irtypes.I8Ptr))
+	decrcBlk := fn.NewBlock("decrc")
+	doneBlk := fn.NewBlock("done")
+	entry.NewCondBr(isNull, doneBlk, decrcBlk)
+
+	// Atomically decrement refcount. Only free when old value was 1 (drops to 0).
+	chPtr := decrcBlk.NewBitCast(thisParam, irtypes.NewPointer(chanType))
+	rcField := decrcBlk.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRefcount)))
+	oldRC := c.emitAtomicAdd(decrcBlk, rcField, constant.NewInt(irtypes.I64, -1), irtypes.I64)
+	wasOne := decrcBlk.NewICmp(enum.IPredEQ, oldRC, constant.NewInt(irtypes.I64, 1))
+	freeBlk := fn.NewBlock("free")
+	decrcBlk.NewCondBr(wasOne, freeBlk, doneBlk)
+
+	// Free ring buffer (field 0: i8*)
+	bufField := freeBlk.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldBuffer)))
+	bufPtr := freeBlk.NewLoad(irtypes.I8Ptr, bufField)
+	freeBlk.NewCall(c.palFree, bufPtr)
+
+	// Destroy mutex (field 8: i8*)
+	mtxField := freeBlk.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldMutex)))
+	mtxPtr := freeBlk.NewLoad(irtypes.I8Ptr, mtxField)
+	freeBlk.NewCall(c.palMutexDestroy, mtxPtr)
+
+	// Destroy not_empty cond var (field 9: i8*)
+	neField := freeBlk.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldNotEmpty)))
+	nePtr := freeBlk.NewLoad(irtypes.I8Ptr, neField)
+	freeBlk.NewCall(c.palCondDestroy, nePtr)
+
+	// Destroy not_full cond var (field 10: i8*)
+	nfField := freeBlk.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldNotFull)))
+	nfPtr := freeBlk.NewLoad(irtypes.I8Ptr, nfField)
+	freeBlk.NewCall(c.palCondDestroy, nfPtr)
+
+	// Free the channel struct itself
+	freeBlk.NewCall(c.palFree, thisParam)
+	freeBlk.NewBr(doneBlk)
+
+	doneBlk.NewRet(nil)
+
+	c.funcs["Channel.drop"] = fn
 }
 
 // defineBoolToStringFunc emits an LLVM IR function that converts a boolean (i8)
@@ -5286,10 +5347,13 @@ const (
 	chanFieldSendWaitersTail = 12 // i8*  tail of parked sender Gs
 	chanFieldRecvWaitersHead = 13 // i8*  head of parked receiver Gs
 	chanFieldRecvWaitersTail = 14 // i8*  tail of parked receiver Gs
+
+	// Reference count for shared channels (B0163)
+	chanFieldRefcount = 15 // i64  atomic reference count (starts at 1)
 )
 
 // channelStructType returns the LLVM struct type for a channel.
-// Layout: { i8*, i64, i64, i64, i64, i64, i8, i8, i8*, i8*, i8*, i8*, i8*, i8*, i8* } — 15 fields
+// Layout: { i8*, i64, i64, i64, i64, i64, i8, i8, i8*, i8*, i8*, i8*, i8*, i8*, i8*, i64 } — 16 fields
 func channelStructType() *irtypes.StructType {
 	return irtypes.NewStruct(
 		irtypes.I8Ptr, // buffer
@@ -5307,6 +5371,7 @@ func channelStructType() *irtypes.StructType {
 		irtypes.I8Ptr, // send_waiters_tail
 		irtypes.I8Ptr, // recv_waiters_head
 		irtypes.I8Ptr, // recv_waiters_tail
+		irtypes.I64,   // refcount (B0163: atomic reference count)
 	)
 }
 
@@ -5401,6 +5466,11 @@ func (c *Compiler) defineChannelNewFunc() {
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(idx)))
 		entry.NewStore(nullPtr, field)
 	}
+
+	// Init refcount to 1 (B0163: reference counting for shared channels)
+	rcField := entry.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRefcount)))
+	entry.NewStore(constant.NewInt(irtypes.I64, 1), rcField)
 
 	entry.NewRet(rawPtr)
 

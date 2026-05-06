@@ -39,7 +39,7 @@ func TestShimEnvReplacesExisting(t *testing.T) {
 }
 
 func TestShimExcludedCommands(t *testing.T) {
-	for _, cmd := range []string{"install", "sync", "epochs", "use", "init"} {
+	for _, cmd := range []string{"install", "sync", "epochs", "use", "init", "remove"} {
 		if !shimExcludedCommands[cmd] {
 			t.Errorf("expected %q to be excluded from shim dispatch", cmd)
 		}

@@ -18,6 +18,7 @@ var shimExcludedCommands = map[string]bool{
 	"epochs":  true,
 	"use":     true,
 	"init":    true,
+	"remove":  true,
 }
 
 // shimDispatch checks whether the current binary should delegate execution to

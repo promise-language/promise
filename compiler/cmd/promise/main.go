@@ -177,6 +177,8 @@ func main() {
 		runEpochs()
 	case "use":
 		runUse(os.Args[2:])
+	case "remove":
+		runRemove(os.Args[2:])
 	default:
 		// Try treating as a filename for backwards compatibility
 		if strings.HasSuffix(cmd, ".pr") {
@@ -5000,13 +5002,22 @@ func runCatalogList() {
 // runClean removes the build cache and optionally the global module cache.
 func runClean(args []string) {
 	global := false
+	epochs := false
 	for _, a := range args {
-		if a == "--global" {
+		switch a {
+		case "--global":
 			global = true
-		} else {
-			fmt.Fprintf(os.Stderr, "usage: promise clean [--global]\n")
+		case "--epochs":
+			epochs = true
+		default:
+			fmt.Fprintf(os.Stderr, "usage: promise clean [--global] [--epochs]\n")
 			os.Exit(1)
 		}
+	}
+
+	// --epochs is an alias for `promise remove --all-except-active`.
+	if epochs {
+		runRemove([]string{"--all-except-active"})
 	}
 
 	// Serialize with concurrent test/build operations.
@@ -5263,6 +5274,7 @@ func runEpochs() {
 
 	active, _ := module.ActiveEpoch()
 
+	var totalSize, totalCache int64
 	for _, ep := range epochs {
 		marker := " "
 		suffix := ""
@@ -5276,8 +5288,21 @@ func runEpochs() {
 			continue
 		}
 		size := dirSize(epochDir)
-		fmt.Printf("%s %-12s %s%s\n", marker, ep, formatSize(size), suffix)
+		cacheSize := dirSize(filepath.Join(epochDir, "cache"))
+		totalSize += size
+		totalCache += cacheSize
+		if cacheSize > 0 {
+			fmt.Printf("%s %-12s %-8s (%s cache)%s\n", marker, ep, formatSize(size), formatSize(cacheSize), suffix)
+		} else {
+			fmt.Printf("%s %-12s %s%s\n", marker, ep, formatSize(size), suffix)
+		}
 	}
+
+	fmt.Printf("\n%d epoch(s), %s", len(epochs), formatSize(totalSize))
+	if totalCache > 0 {
+		fmt.Printf(" (%s cache)", formatSize(totalCache))
+	}
+	fmt.Println()
 }
 
 // runUse sets the active epoch to the given argument.
@@ -5308,6 +5333,74 @@ func runUse(args []string) {
 		os.Exit(1)
 	}
 	fmt.Printf("Active epoch set to %s\n", epoch)
+}
+
+// runRemove removes one or more installed epochs.
+func runRemove(args []string) {
+	force := false
+	allExceptActive := false
+	var targets []string
+	for _, arg := range args {
+		switch arg {
+		case "--force":
+			force = true
+		case "--all-except-active":
+			allExceptActive = true
+		default:
+			if strings.HasPrefix(arg, "-") {
+				fmt.Fprintf(os.Stderr, "unknown flag: %s\nusage: promise remove <epoch> [--force]\n       promise remove --all-except-active\n", arg)
+				os.Exit(1)
+			}
+			targets = append(targets, arg)
+		}
+	}
+
+	if !allExceptActive && len(targets) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: promise remove <epoch> [--force]\n       promise remove --all-except-active")
+		os.Exit(1)
+	}
+
+	active, _ := module.ActiveEpoch()
+
+	if allExceptActive {
+		epochs, err := module.InstalledEpochs()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error listing epochs: %v\n", err)
+			os.Exit(1)
+		}
+		for _, ep := range epochs {
+			if ep == active {
+				continue
+			}
+			targets = append(targets, ep)
+		}
+		if len(targets) == 0 {
+			fmt.Println("No non-active epochs to remove.")
+			return
+		}
+	}
+
+	for _, epoch := range targets {
+		if epoch == active && !force {
+			fmt.Fprintf(os.Stderr, "error: %q is the active epoch. Use --force to remove it.\n", epoch)
+			os.Exit(1)
+		}
+		epochDir, err := module.EpochDir(epoch)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		if _, err := os.Stat(epochDir); os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "epoch %q is not installed.\n", epoch)
+			os.Exit(1)
+		}
+		size := dirSize(epochDir)
+		if err := os.RemoveAll(epochDir); err != nil {
+			fmt.Fprintf(os.Stderr, "error removing %s: %v\n", epochDir, err)
+			os.Exit(1)
+		}
+		fmt.Printf("Removed epoch %s (%s)\n", epoch, formatSize(size))
+	}
 }
 
 // dirSize computes the total size of all files under a directory.

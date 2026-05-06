@@ -144,3 +144,49 @@ func TestInstalledEpochs(t *testing.T) {
 		t.Fatalf("unexpected order: %v", epochs)
 	}
 }
+
+func TestEpochDirRemoval(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmp)
+
+	// Create an epoch directory with some files.
+	epochDir, _ := EpochDir("2026.2")
+	os.MkdirAll(filepath.Join(epochDir, "bin"), 0755)
+	os.MkdirAll(filepath.Join(epochDir, "cache", "build"), 0755)
+	os.WriteFile(filepath.Join(epochDir, "bin", "promise"), []byte("binary"), 0755)
+	os.WriteFile(filepath.Join(epochDir, "cache", "build", "key.o"), []byte("obj"), 0644)
+
+	// Verify it exists.
+	epochs, _ := InstalledEpochs()
+	if len(epochs) != 1 || epochs[0] != "2026.2" {
+		t.Fatalf("expected [2026.2], got %v", epochs)
+	}
+
+	// Remove it via os.RemoveAll (same as runRemove does).
+	if err := os.RemoveAll(epochDir); err != nil {
+		t.Fatalf("RemoveAll failed: %v", err)
+	}
+
+	// Verify it's gone.
+	epochs, _ = InstalledEpochs()
+	if len(epochs) != 0 {
+		t.Fatalf("expected empty, got %v", epochs)
+	}
+}
+
+func TestActiveEpochDevName(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PROMISE_HOME", tmp)
+
+	// "dev" is a valid epoch name, not a path.
+	if err := WriteActiveEpoch("dev"); err != nil {
+		t.Fatal(err)
+	}
+	epoch, err := ActiveEpoch()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if epoch != "dev" {
+		t.Fatalf("expected dev, got %s", epoch)
+	}
+}

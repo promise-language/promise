@@ -1700,14 +1700,27 @@ func (p *WindowsPAL) EmitSpawnStreaming(module *ir.Module) *ir.Func {
 	return fn
 }
 
-// EmitKill defines @pal_kill on Windows using TerminateProcess.
+// EmitKill defines @pal_kill on Windows.
 // Signature: @pal_kill(i32 pid, i32 signal) → i32
-// Signal is ignored on Windows; TerminateProcess always terminates.
+// For self-signaling (pid == GetCurrentProcessId()):
+//   - SIGINT (2) → GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)
+//   - SIGTERM (15) → GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0)
+//   - Other signals → return -1 (unsupported)
+// For other PIDs: TerminateProcess (treats pid as packed HANDLE).
 // Returns 0 on success, -1 on error.
 func (p *WindowsPAL) EmitKill(module *ir.Module) *ir.Func {
+	zero32 := constant.NewInt(irtypes.I32, 0)
+	negOne32 := constant.NewInt(irtypes.I32, -1)
+
 	terminateProcess := getOrDeclareFunc(module, "TerminateProcess", irtypes.I32,
 		ir.NewParam("hProcess", irtypes.I8Ptr),
 		ir.NewParam("uExitCode", irtypes.I32))
+
+	getCurrentProcessId := getOrDeclareFunc(module, "GetCurrentProcessId", irtypes.I32)
+
+	generateCtrlEvent := getOrDeclareFunc(module, "GenerateConsoleCtrlEvent", irtypes.I32,
+		ir.NewParam("dwCtrlEvent", irtypes.I32),
+		ir.NewParam("dwProcessGroupId", irtypes.I32))
 
 	fn := module.NewFunc("pal_kill", irtypes.I32,
 		ir.NewParam("pid", irtypes.I32),
@@ -1715,18 +1728,56 @@ func (p *WindowsPAL) EmitKill(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	entry := fn.NewBlock(".entry")
-	handle := winI32ToHandle(entry, fn.Params[0])
+	pid := fn.Params[0]
+	signal := fn.Params[1]
 
-	// TerminateProcess(handle, 1) — use exit code 1
-	ret := entry.NewCall(terminateProcess, handle, constant.NewInt(irtypes.I32, 1))
-	// Returns nonzero on success, 0 on failure
-	isFailed := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, 0))
-	okBlk := fn.NewBlock(".ok")
+	// Check if self-signaling: pid == GetCurrentProcessId()
+	currentPid := entry.NewCall(getCurrentProcessId)
+	isSelf := entry.NewICmp(enum.IPredEQ, pid, currentPid)
+	selfBlk := fn.NewBlock(".self")
+	otherBlk := fn.NewBlock(".other")
+	entry.NewCondBr(isSelf, selfBlk, otherBlk)
+
+	// Self-signaling: map POSIX signal to console ctrl event
+	// Check SIGINT (2) → CTRL_C_EVENT (0)
+	isInt := selfBlk.NewICmp(enum.IPredEQ, signal, constant.NewInt(irtypes.I32, 2))
+	ctrlCBlk := fn.NewBlock(".ctrl_c")
+	checkTermBlk := fn.NewBlock(".check_term")
+	selfBlk.NewCondBr(isInt, ctrlCBlk, checkTermBlk)
+
+	// GenerateConsoleCtrlEvent(CTRL_C_EVENT=0, 0)
+	ctrlCRet := ctrlCBlk.NewCall(generateCtrlEvent, zero32, zero32)
+	ctrlCFailed := ctrlCBlk.NewICmp(enum.IPredEQ, ctrlCRet, zero32)
+	ctrlCOk := fn.NewBlock(".ctrl_c_ok")
 	errBlk := fn.NewBlock(".err")
-	entry.NewCondBr(isFailed, errBlk, okBlk)
+	ctrlCBlk.NewCondBr(ctrlCFailed, errBlk, ctrlCOk)
+	ctrlCOk.NewRet(zero32)
 
-	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
-	errBlk.NewRet(constant.NewInt(irtypes.I32, -1))
+	// Check SIGTERM (15) → CTRL_BREAK_EVENT (1)
+	isTerm := checkTermBlk.NewICmp(enum.IPredEQ, signal, constant.NewInt(irtypes.I32, 15))
+	ctrlBreakBlk := fn.NewBlock(".ctrl_break")
+	unsupportedBlk := fn.NewBlock(".unsupported")
+	checkTermBlk.NewCondBr(isTerm, ctrlBreakBlk, unsupportedBlk)
+
+	// GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT=1, 0)
+	ctrlBreakRet := ctrlBreakBlk.NewCall(generateCtrlEvent, constant.NewInt(irtypes.I32, 1), zero32)
+	ctrlBreakFailed := ctrlBreakBlk.NewICmp(enum.IPredEQ, ctrlBreakRet, zero32)
+	ctrlBreakOk := fn.NewBlock(".ctrl_break_ok")
+	ctrlBreakBlk.NewCondBr(ctrlBreakFailed, errBlk, ctrlBreakOk)
+	ctrlBreakOk.NewRet(zero32)
+
+	// Unsupported signal for self
+	unsupportedBlk.NewRet(negOne32)
+
+	// Non-self: TerminateProcess (pid is a packed HANDLE)
+	handle := winI32ToHandle(otherBlk, pid)
+	tpRet := otherBlk.NewCall(terminateProcess, handle, constant.NewInt(irtypes.I32, 1))
+	tpFailed := otherBlk.NewICmp(enum.IPredEQ, tpRet, zero32)
+	okBlk := fn.NewBlock(".ok")
+	otherBlk.NewCondBr(tpFailed, errBlk, okBlk)
+
+	okBlk.NewRet(zero32)
+	errBlk.NewRet(negOne32)
 
 	return fn
 }

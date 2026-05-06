@@ -2775,8 +2775,18 @@ func TestEmitKillWindows(t *testing.T) {
 	out := module.String()
 
 	assertContains(t, out, "define i32 @pal_kill(i32 %pid, i32 %signal)", "defines pal_kill")
+	// Self-signaling via GenerateConsoleCtrlEvent
+	assertContains(t, out, "@GetCurrentProcessId()", "declares GetCurrentProcessId")
+	assertContains(t, out, "@GenerateConsoleCtrlEvent(", "declares GenerateConsoleCtrlEvent")
+	// Checks for SIGINT (2) and SIGTERM (15)
+	if !strings.Contains(out, "icmp eq i32 %signal, 2") {
+		t.Error("should check for SIGINT (signal 2)")
+	}
+	if !strings.Contains(out, "icmp eq i32 %signal, 15") {
+		t.Error("should check for SIGTERM (signal 15)")
+	}
+	// Non-self: TerminateProcess fallback
 	assertContains(t, out, "@TerminateProcess(", "declares TerminateProcess")
-	// Handle unpacking
 	assertContains(t, out, "sext i32 %pid to i64", "sign-extends pid to i64")
 	assertContains(t, out, "inttoptr i64", "converts i64 to handle")
 }

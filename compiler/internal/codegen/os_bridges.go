@@ -1154,21 +1154,25 @@ func (c *Compiler) defineSendSignalBody(fn *ir.Func) {
 }
 
 // defineGetPidBody: void @promise_os_get_pid(i8* sret)
-// Returns the current process ID via getpid().
+// Returns the current process ID via getpid() (POSIX) or GetCurrentProcessId() (Windows).
 func (c *Compiler) defineGetPidBody(fn *ir.Func) {
 	entry := fn.NewBlock(".entry")
 	sret := fn.Params[0]
 
-	// declare i32 @getpid() — look up or declare
+	// Windows uses GetCurrentProcessId (kernel32), POSIX uses getpid
+	funcName := "getpid"
+	if c.isWindows {
+		funcName = "GetCurrentProcessId"
+	}
 	var getpidFn *ir.Func
 	for _, f := range c.module.Funcs {
-		if f.Name() == "getpid" {
+		if f.Name() == funcName {
 			getpidFn = f
 			break
 		}
 	}
 	if getpidFn == nil {
-		getpidFn = c.module.NewFunc("getpid", irtypes.I32)
+		getpidFn = c.module.NewFunc(funcName, irtypes.I32)
 		getpidFn.FuncAttrs = append(getpidFn.FuncAttrs, enum.FuncAttrNoUnwind)
 	}
 	pid := entry.NewCall(getpidFn)

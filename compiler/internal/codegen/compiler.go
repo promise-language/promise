@@ -4125,9 +4125,8 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 			c.dropBindings = make(map[string]scopeBinding)
 			c.stmtTemps = nil                         // T0073
 			c.stmtTempMap = make(map[value.Value]int) // T0073
-			// T0084: Keep disabled for module type methods until claim mechanism
-			// covers all string ownership transfer sites (B0167 follow-up).
-			c.tempTrackingEnabled = false
+			// B0172: Enable temp tracking for module type methods.
+			c.tempTrackingEnabled = true
 			c.scopeBindings = nil
 			c.canError = m.Sig().CanError()
 			c.currentRetType = m.Sig().Result()
@@ -4606,10 +4605,8 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 	c.dropBindings = make(map[string]scopeBinding)
 	c.stmtTemps = nil                         // T0073
 	c.stmtTempMap = make(map[value.Value]int) // T0073
-	// T0084: Keep disabled for method bodies until claim mechanism covers all
-	// string ownership transfer sites (e.g., strings passed through error handlers,
-	// match arms, closure captures). Enabling causes use-after-free in json tests.
-	c.tempTrackingEnabled = false
+	// B0172: Enable temp tracking for method bodies.
+	c.tempTrackingEnabled = true
 	c.mutRefPtrs = nil
 	c.mutRefTypes = nil
 	c.scopeBindings = nil

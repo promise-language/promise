@@ -1,0 +1,82 @@
+// B0172: String temp tracking in method bodies — verifies no use-after-free
+// when temps flow through match arms in loops.
+type EscapeBuilder {
+  string result;
+
+  add(~this, string s) {
+    this.result = this.result + s;
+  }
+
+  // Method with match inside loop — the pattern that caused double-free
+  escape(~this, string s) {
+    int i = 0;
+    while i < s.len {
+      char c = s[i];
+      match c {
+        '"' => {
+          this.add("\\\"");
+        },
+        '\\' => {
+          this.add("\\\\");
+        },
+        _ => {
+          this.add(c.to_string());
+        },
+      }
+      i = i + 1;
+    }
+  }
+}
+
+// Basic: single char through default arm
+escape_single_char_test() `test(allow_leaks: true) {
+  EscapeBuilder b = EscapeBuilder(result: "");
+  b.escape("a");
+  assert(b.result == "a", "single char");
+}
+
+// Two chars, both through default arm
+escape_two_default_test() `test(allow_leaks: true) {
+  EscapeBuilder b = EscapeBuilder(result: "");
+  b.escape("ab");
+  assert(b.result == "ab", "two default");
+}
+
+// Quote only — non-default arm
+escape_quote_only_test() `test(allow_leaks: true) {
+  EscapeBuilder b = EscapeBuilder(result: "");
+  b.escape("\"");
+  assert(b.result == "\\\"", "quote only");
+}
+
+// Mixed: default then non-default — the failing pattern before B0172 fix
+escape_mixed_test() `test(allow_leaks: true) {
+  EscapeBuilder b = EscapeBuilder(result: "");
+  b.escape("a\"b");
+  assert(b.result == "a\\\"b", "mixed a-quote-b");
+}
+
+// Reverse: non-default then default
+escape_reverse_test() `test(allow_leaks: true) {
+  EscapeBuilder b = EscapeBuilder(result: "");
+  b.escape("\"a");
+  assert(b.result == "\\\"a", "reverse quote-a");
+}
+
+// Multiple escape chars
+escape_multiple_test() `test(allow_leaks: true) {
+  EscapeBuilder b = EscapeBuilder(result: "");
+  b.escape("a\"b\\c");
+  assert(b.result == "a\\\"b\\\\c", "multiple escapes");
+}
+
+// Method body to_string temp — no match, just loop
+loop_to_string_test() `test(allow_leaks: true) {
+  EscapeBuilder b = EscapeBuilder(result: "");
+  int i = 0;
+  while i < 3 {
+    b.add(i.to_string());
+    i = i + 1;
+  }
+  assert(b.result == "012", "loop to_string");
+}

@@ -9286,6 +9286,45 @@ func TestStringTempInMatchArm(t *testing.T) {
 	assertContains(t, ir, "r.dropflag")
 }
 
+// B0172: Temp flag reset after drop — prevents double-free in loops with match arms
+func TestStringTempFlagResetInLoop(t *testing.T) {
+	ir := generateIR(t, `
+		type Builder {
+			string result;
+			add(~this, string s) { this.result = this.result + s; }
+			process(~this, string s) {
+				int i = 0;
+				while i < s.len {
+					char c = s[i];
+					match c {
+						'_' => { this.add("-"); },
+						_ => { this.add(c.to_string()); },
+					}
+					i = i + 1;
+				}
+			}
+		}
+		main() {}
+	`)
+	// The cleanup code must reset the drop flag to 0 after dropping to prevent
+	// double-free when a different match arm executes on the next loop iteration.
+	assertContains(t, ir, "tmp.drop")
+	assertContains(t, ir, "store i1 false")
+}
+
+// B0172: Temp tracking enabled in defineMethodFunc
+func TestStringTempTrackingInMethodBody(t *testing.T) {
+	ir := generateIR(t, `
+		type Fmt {
+			format(this) string { return this.to_string(); }
+			to_string(this) string { return "fmt"; }
+		}
+		main() {}
+	`)
+	// Method bodies should have temp tracking enabled
+	assertContains(t, ir, "tmp.drop")
+}
+
 // B0168: String concat temp is tracked and dropped at statement end
 func TestStringConcatTempDrop(t *testing.T) {
 	ir := generateIR(t, `

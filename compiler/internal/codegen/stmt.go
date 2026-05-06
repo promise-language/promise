@@ -1123,6 +1123,10 @@ func (c *Compiler) cleanupStmtTemps() {
 		c.block.NewBr(doneBlock)
 
 		c.block = doneBlock
+		// B0172: Reset drop flag after dropping. Without this, in a loop where
+		// a different match arm is taken on the next iteration, the stale flag=1
+		// causes a double-free on the already-freed pointer.
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), temp.dropFlag)
 		c.block.NewBr(skipBlock)
 
 		c.block = skipBlock

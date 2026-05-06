@@ -20,6 +20,15 @@ func (c *Compiler) genBlock(block *ast.Block) {
 		return
 	}
 	savedScopeLen := len(c.scopeBindings)
+
+	// T0088: Save heapTemps so statement-level cleanup inside this block
+	// doesn't free temps from the enclosing scope (e.g., iterator instances
+	// in a for-in loop that are still alive during the loop body).
+	savedHeapTemps := c.heapTemps
+	savedHeapTempMap := c.heapTempMap
+	c.heapTemps = nil
+	c.heapTempMap = make(map[value.Value]int)
+
 	for _, stmt := range block.Stmts {
 		if c.block == nil || c.block.Term != nil {
 			break // block already terminated (return, break, etc.)
@@ -32,6 +41,8 @@ func (c *Compiler) genBlock(block *ast.Block) {
 		c.emitCloseErrCheck(cap)
 	}
 	c.scopeBindings = c.scopeBindings[:savedScopeLen]
+	c.heapTemps = savedHeapTemps
+	c.heapTempMap = savedHeapTempMap
 }
 
 // isDroppableContainerOrString returns true if the type is a string or vector
@@ -179,8 +190,10 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 		panic(fmt.Sprintf("codegen: unhandled statement type %T", stmt))
 	}
 	// T0073: Drop any unclaimed string temps from this statement.
+	// T0088: Drop any unclaimed heap instance temps (e.g., _FnIter in iterator chains).
 	if c.block != nil && c.block.Term == nil {
 		c.cleanupStmtTemps()
+		c.cleanupHeapTemps()
 	}
 }
 
@@ -349,6 +362,8 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	if exprType != nil && extractNamed(exprType) == types.TypString {
 		c.claimStringTemp(val)
 	}
+	// T0088: Claim heap temp — ownership transferred to this variable.
+	c.claimHeapTemp(val)
 
 	c.block.NewStore(val, alloca)
 	c.locals[s.Name] = alloca
@@ -1134,6 +1149,146 @@ func (c *Compiler) cleanupStmtTemps() {
 
 	c.stmtTemps = c.stmtTemps[:0]
 	c.stmtTempMap = make(map[value.Value]int)
+}
+
+// trackHeapTemp registers a heap-allocated droppable instance for cleanup at
+// statement end (T0088). The instance pointer and drop function are stored so
+// unclaimed temps can be dropped at statement end.
+func (c *Compiler) trackHeapTemp(instancePtr value.Value, dropFunc *ir.Func) {
+	if instancePtr == nil || dropFunc == nil || c.block == nil || c.block.Term != nil {
+		return
+	}
+	if c.entryBlock == nil || !c.tempTrackingEnabled {
+		return
+	}
+	if instancePtr.Type() != irtypes.I8Ptr {
+		return
+	}
+	if _, ok := c.heapTempMap[instancePtr]; ok {
+		return // already tracked
+	}
+
+	alloca := c.createEntryAlloca(irtypes.I8Ptr)
+	dropFlag := c.createEntryAlloca(irtypes.I1)
+
+	c.entryBlock.NewStore(constant.NewNull(irtypes.I8Ptr), alloca)
+	c.entryBlock.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
+
+	c.block.NewStore(instancePtr, alloca)
+	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+
+	idx := len(c.heapTemps)
+	c.heapTemps = append(c.heapTemps, heapTemp{alloca: alloca, dropFlag: dropFlag, dropFunc: dropFunc})
+	c.heapTempMap[instancePtr] = idx
+}
+
+// claimHeapTemp marks a tracked heap instance as consumed (ownership transferred
+// to a variable). Clears the drop flag so the temp won't be dropped at statement end.
+// Accepts either an i8* instance pointer or a value struct — extracts field 1
+// (the instance pointer) at the LLVM level if needed.
+func (c *Compiler) claimHeapTemp(val value.Value) {
+	if val == nil || len(c.heapTemps) == 0 {
+		return
+	}
+	if c.block == nil || c.block.Term != nil {
+		return
+	}
+	// Try direct match (i8* instance pointer)
+	if idx, ok := c.heapTempMap[val]; ok && idx >= 0 {
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.heapTemps[idx].dropFlag)
+		c.heapTempMap[val] = -1
+		return
+	}
+	// For value structs ({vtable, instance}): extract field 1 and do a runtime
+	// comparison against each tracked temp. This handles method call results
+	// where maybeTrackIterTemp tracked the extractvalue but the caller has the
+	// full value struct (different SSA value, same runtime pointer).
+	if _, ok := val.Type().(*irtypes.StructType); ok {
+		instPtr := c.block.NewExtractValue(val, 1)
+		if instPtr.Type() != irtypes.I8Ptr {
+			return
+		}
+		for _, temp := range c.heapTemps {
+			tracked := c.block.NewLoad(irtypes.I8Ptr, temp.alloca)
+			isSame := c.block.NewICmp(enum.IPredEQ, instPtr, tracked)
+			claimBlk := c.newBlock("heap.claim")
+			skipBlk := c.newBlock("heap.claim.skip")
+			c.block.NewCondBr(isSame, claimBlk, skipBlk)
+			claimBlk.NewStore(constant.NewInt(irtypes.I1, 0), temp.dropFlag)
+			claimBlk.NewBr(skipBlk)
+			c.block = skipBlk
+		}
+	}
+}
+
+// cleanupHeapTemps drops all unclaimed heap instance temps at statement end (T0088).
+// For each temp: check flag → null-check ptr → call drop(ptr).
+func (c *Compiler) cleanupHeapTemps() {
+	if len(c.heapTemps) == 0 {
+		return
+	}
+	if c.block == nil || c.block.Term != nil {
+		c.heapTemps = c.heapTemps[:0]
+		c.heapTempMap = make(map[value.Value]int)
+		return
+	}
+
+	for _, temp := range c.heapTemps {
+		flag := c.block.NewLoad(irtypes.I1, temp.dropFlag)
+		dropBlock := c.newBlock("heap.drop")
+		skipBlock := c.newBlock("heap.skip")
+		c.block.NewCondBr(flag, dropBlock, skipBlock)
+
+		c.block = dropBlock
+		ptr := c.block.NewLoad(irtypes.I8Ptr, temp.alloca)
+		isNull := c.block.NewICmp(enum.IPredEQ, ptr, constant.NewNull(irtypes.I8Ptr))
+		execBlock := c.newBlock("heap.exec")
+		doneBlock := c.newBlock("heap.done")
+		c.block.NewCondBr(isNull, doneBlock, execBlock)
+
+		c.block = execBlock
+		c.block.NewCall(temp.dropFunc, ptr)
+		c.block.NewBr(doneBlock)
+
+		c.block = doneBlock
+		c.block.NewBr(skipBlock)
+
+		c.block = skipBlock
+	}
+
+	c.heapTemps = c.heapTemps[:0]
+	c.heapTempMap = make(map[value.Value]int)
+}
+
+// maybeTrackIterTemp tracks the instance pointer from a method call result
+// when the result type is a structural interface (T0088). At statement end,
+// unclaimed temps are cleaned up using __promise_iter_cleanup which frees
+// both the closure env and the instance.
+func (c *Compiler) maybeTrackIterTemp(e *ast.CallExpr, result value.Value) {
+	if result == nil || c.block == nil || c.block.Term != nil {
+		return
+	}
+	if !c.tempTrackingEnabled || c.iterCleanup == nil {
+		return
+	}
+	// Check if the result type is a structural interface (e.g., Iterator[T])
+	resultType := c.info.Types[e]
+	if c.typeSubst != nil {
+		resultType = types.Substitute(resultType, c.typeSubst)
+	}
+	if c.selfSubst != nil {
+		resultType = types.SubstituteSelf(resultType, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+	resultNamed := extractNamed(resultType)
+	if resultNamed == nil || !resultNamed.IsStructural() {
+		return
+	}
+	// The result is a value struct {i8* vtable, i8* instance}. Extract instance ptr.
+	if _, ok := result.Type().(*irtypes.StructType); !ok {
+		return
+	}
+	instancePtr := c.block.NewExtractValue(result, 1)
+	c.trackHeapTemp(instancePtr, c.iterCleanup)
 }
 
 // isTrackedStringCall returns true if the call expression is a known-safe site
@@ -2642,6 +2797,12 @@ func (c *Compiler) genForInStmt(s *ast.ForInStmt) {
 		c.genForInChannel(s, chPtr, elem)
 	} else if elem, ok := types.AsStream(iterableType); ok {
 		genVal := c.genExpr(s.Iterable)
+		// T0088: Generators have their own cleanup (bindingGenerator). Clear all
+		// pending heap temps to prevent __promise_iter_cleanup from running on
+		// generator instances (which have a different layout than _FnIter).
+		for i := range c.heapTemps {
+			c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.heapTemps[i].dropFlag)
+		}
 		c.genForInGenerator(s, genVal, elem)
 	} else if elem, ok := types.AsRange(iterableType); ok {
 		c.genForInRange(s, elem)

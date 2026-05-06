@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/llir/llvm/ir"
+	"github.com/llir/llvm/ir/constant"
+	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 
 	"djabi.dev/go/promise_lang/internal/ast"
@@ -1220,7 +1222,12 @@ func (c *Compiler) declareMonoMethods(file *ast.File, instances []*types.Instanc
 
 		for _, md := range td.Methods {
 			if md.Body == nil {
-				continue
+				// Native drop methods need LLVM stubs for scope cleanup dispatch (T0088).
+				// Other native methods (next, push, etc.) are handled inline at call sites.
+				m2 := c.lookupAnyMethod(named, md.Name, md.IsGetter, md.IsSetter)
+				if m2 == nil || !m2.IsNative() || md.Name != "drop" {
+					continue
+				}
 			}
 			if len(md.TypeParams) > 0 {
 				continue // generic method — handled by mono method instances
@@ -1292,8 +1299,15 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 		}
 
 		for _, md := range td.Methods {
+			isNativeDrop := false
 			if md.Body == nil {
-				continue
+				// Native drop methods get synthesized bodies (T0088).
+				m2 := c.lookupAnyMethod(named, md.Name, md.IsGetter, md.IsSetter)
+				if m2 != nil && m2.IsNative() && md.Name == "drop" {
+					isNativeDrop = true
+				} else {
+					continue
+				}
 			}
 			if len(md.TypeParams) > 0 {
 				continue // generic method — handled by mono method instances
@@ -1318,6 +1332,12 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 				continue
 			}
 
+			// Native drop: synthesize body that frees closure env + instance (T0088).
+			if isNativeDrop {
+				c.defineFnIterDrop(fn, inst)
+				continue
+			}
+
 			c.typeSubst = subst
 			c.monoCtx = &monoContext{inst: inst, origin: named, name: name}
 			func() {
@@ -1330,6 +1350,64 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 			}()
 		}
 	}
+}
+
+// defineFnIterDrop synthesizes the body for _FnIter[T].drop (T0088).
+// The drop method frees the closure env of the _next field, then frees the instance.
+//
+//	define void @_FnIter__int.drop(i8* %this) {
+//	    %inst = bitcast i8* %this to %Instance*
+//	    %next_ptr = getelementptr %Instance, %inst, 0, 1  ; _next field
+//	    %next = load {i8*, i8*}, %next_ptr
+//	    %env = extractvalue {i8*, i8*} %next, 1
+//	    if %env != null: call @pal_free(%env)
+//	    call @pal_free(%this)
+//	    ret void
+//	}
+func (c *Compiler) defineFnIterDrop(fn *ir.Func, inst *types.Instance) {
+	layout := c.lookupTypeLayout(inst)
+	if layout == nil {
+		return
+	}
+	instStructType := layout.Instance.LLVMType
+	instPtrType := layout.InstancePtrType
+
+	entry := fn.NewBlock(".entry")
+	thisParam := fn.Params[0] // i8*
+
+	// Cast this to typed instance pointer
+	typedThis := entry.NewBitCast(thisParam, instPtrType)
+
+	// Find the _next field index (should be field 1, after _variant)
+	nextIdx, ok2 := layout.InstanceFieldIndex["_next"]
+	if !ok2 {
+		// Fallback: just free the instance
+		entry.NewCall(c.palFree, thisParam)
+		entry.NewRet(nil)
+		return
+	}
+
+	// Load the _next field (closure: {i8*, i8*})
+	nextPtr := entry.NewGetElementPtr(instStructType, typedThis,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(nextIdx)))
+	nextVal := entry.NewLoad(closureType(), nextPtr)
+
+	// Extract env pointer (field 1 of the fat pointer)
+	envPtr := entry.NewExtractValue(nextVal, 1)
+
+	// Free env if non-null
+	isNull := entry.NewICmp(enum.IPredEQ, envPtr, constant.NewNull(irtypes.I8Ptr))
+	freeEnvBlock := fn.NewBlock("free.env")
+	freeInstBlock := fn.NewBlock("free.inst")
+
+	entry.NewCondBr(isNull, freeInstBlock, freeEnvBlock)
+
+	freeEnvBlock.NewCall(c.palFree, envPtr)
+	freeEnvBlock.NewBr(freeInstBlock)
+
+	// Free the instance itself
+	freeInstBlock.NewCall(c.palFree, thisParam)
+	freeInstBlock.NewRet(nil)
 }
 
 // declareSynthesizedMonoDrops declares drop function stubs for monomorphized

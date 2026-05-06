@@ -162,6 +162,12 @@ type Compiler struct {
 	stmtTempMap         map[value.Value]int // SSA value → index in stmtTemps (-1 = claimed)
 	tempTrackingEnabled bool                // T0084: true in free functions + user method bodies
 
+	// T0088: Statement-level tracking for heap-allocated droppable instances.
+	// Tracks constructor results (e.g., _FnIter[T]) in iterator chains and drops
+	// unclaimed instances at statement end to prevent memory leaks.
+	heapTemps   []heapTemp
+	heapTempMap map[value.Value]int // instance i8* → index in heapTemps (-1 = claimed)
+
 	// PAL (Platform Abstraction Layer) function references
 	palWrite   *ir.Func // @pal_write(i32 fd, i8* buf, i64 len) → i64
 	palExit    *ir.Func // @pal_exit(i32 code) → void [noreturn]
@@ -276,9 +282,10 @@ type Compiler struct {
 	// noinline wrappers around coro.resume/done/destroy — used by generator consumers
 	// to hide the pattern from LLVM's coro-elide pass (which incorrectly stack-allocates
 	// generator frames when it sees ramp+resume+done+destroy in the same function).
-	genResume  *ir.Func // @__promise_gen_resume(i8*) → void [noinline]
-	genDone    *ir.Func // @__promise_gen_done(i8*) → i1 [noinline]
-	genDestroy *ir.Func // @__promise_gen_destroy(i8*) → void [noinline]
+	genResume   *ir.Func // @__promise_gen_resume(i8*) → void [noinline]
+	genDone     *ir.Func // @__promise_gen_done(i8*) → i1 [noinline]
+	genDestroy  *ir.Func // @__promise_gen_destroy(i8*) → void [noinline]
+	iterCleanup *ir.Func // @__promise_iter_cleanup(i8*) → void (T0088: free env + instance)
 
 	// Target triple and platform flags
 	target      string // LLVM target triple
@@ -359,6 +366,15 @@ type scopeBinding struct {
 type stmtTemp struct {
 	alloca   *ir.InstAlloca // entry-block i8* alloca, initialized to null
 	dropFlag *ir.InstAlloca // entry-block i1, initialized to false
+}
+
+// heapTemp tracks a heap-allocated droppable instance from a constructor call (T0088).
+// When the constructor result is stored in a named variable, the temp is "claimed"
+// and not freed at statement end. Unclaimed temps are dropped at statement end.
+type heapTemp struct {
+	alloca   *ir.InstAlloca // entry-block i8* alloca (instance pointer)
+	dropFlag *ir.InstAlloca // entry-block i1, initialized to false
+	dropFunc *ir.Func       // concrete drop function to call
 }
 
 // closeErrCapture holds entry-block allocas used to capture the first failable
@@ -516,6 +532,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 		dropFlags:          make(map[string]*ir.InstAlloca),
 		dropBindings:       make(map[string]scopeBinding),
 		stmtTempMap:        make(map[value.Value]int),
+		heapTempMap:        make(map[value.Value]int),
 		thunks:             make(map[string]*ir.Func),
 		file:               file,
 		moduleFuncs:        make(map[string]*ir.Func),
@@ -3512,6 +3529,8 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 	c.dropBindings = make(map[string]scopeBinding)
 	c.stmtTemps = nil                         // T0073
 	c.stmtTempMap = make(map[value.Value]int) // T0073
+	c.heapTemps = nil                         // T0088
+	c.heapTempMap = make(map[value.Value]int) // T0088
 	// T0084: Enable temp tracking for all free functions (user and module).
 	// Previously limited to user code only (T0073); now extended to module code
 	// so that statement-level string temps in module methods (e.g., this.to_string()
@@ -4605,6 +4624,8 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 	c.dropBindings = make(map[string]scopeBinding)
 	c.stmtTemps = nil                         // T0073
 	c.stmtTempMap = make(map[value.Value]int) // T0073
+	c.heapTemps = nil                         // T0088
+	c.heapTempMap = make(map[value.Value]int) // T0088
 	// B0172: Enable temp tracking for method bodies.
 	c.tempTrackingEnabled = true
 	c.mutRefPtrs = nil
@@ -5245,6 +5266,8 @@ type compilerState struct {
 	lambdaWritebacks    []lambdaWriteback
 	stmtTemps           []stmtTemp
 	stmtTempMap         map[value.Value]int
+	heapTemps           []heapTemp
+	heapTempMap         map[value.Value]int
 	tempTrackingEnabled bool
 }
 
@@ -5270,6 +5293,8 @@ func (c *Compiler) saveState() compilerState {
 		lambdaWritebacks:    c.lambdaWritebacks,
 		stmtTemps:           c.stmtTemps,
 		stmtTempMap:         c.stmtTempMap,
+		heapTemps:           c.heapTemps,
+		heapTempMap:         c.heapTempMap,
 		tempTrackingEnabled: c.tempTrackingEnabled,
 	}
 }
@@ -5284,6 +5309,8 @@ func (c *Compiler) restoreState(s compilerState) {
 	c.dropBindings = s.dropBindings
 	c.stmtTemps = s.stmtTemps
 	c.stmtTempMap = s.stmtTempMap
+	c.heapTemps = s.heapTemps
+	c.heapTempMap = s.heapTempMap
 	c.tempTrackingEnabled = s.tempTrackingEnabled
 	c.blockCounter = s.blockCounter
 	c.canError = s.canError
@@ -5709,5 +5736,28 @@ func (c *Compiler) declareCoroIntrinsics() {
 		b := c.genDestroy.NewBlock(".entry")
 		b.NewCall(c.coroDestroy, c.genDestroy.Params[0])
 		b.NewRet(nil)
+	}
+
+	// T0088: Generic cleanup for _FnIter instances — frees closure env + instance.
+	// _FnIter layout: { i8* variant, { i8* fn_ptr, i8* env_ptr } _next }
+	// = { i8*, i8*, i8* } at the raw pointer level.
+	// The env_ptr is at offset 2 * ptr_size in the instance struct.
+	c.iterCleanup = c.module.NewFunc("__promise_iter_cleanup", irtypes.Void,
+		ir.NewParam("inst", irtypes.I8Ptr))
+	{
+		ptrArrayType := irtypes.NewArray(3, irtypes.I8Ptr)
+		entry := c.iterCleanup.NewBlock(".entry")
+		typedPtr := entry.NewBitCast(c.iterCleanup.Params[0], irtypes.NewPointer(ptrArrayType))
+		envField := entry.NewGetElementPtr(ptrArrayType, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+		envPtr := entry.NewLoad(irtypes.I8Ptr, envField)
+		isNull := entry.NewICmp(enum.IPredEQ, envPtr, constant.NewNull(irtypes.I8Ptr))
+		freeEnvBlk := c.iterCleanup.NewBlock("free.env")
+		freeInstBlk := c.iterCleanup.NewBlock("free.inst")
+		entry.NewCondBr(isNull, freeInstBlk, freeEnvBlk)
+		freeEnvBlk.NewCall(c.palFree, envPtr)
+		freeEnvBlk.NewBr(freeInstBlk)
+		freeInstBlk.NewCall(c.palFree, c.iterCleanup.Params[0])
+		freeInstBlk.NewRet(nil)
 	}
 }

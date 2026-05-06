@@ -1076,7 +1076,9 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 				}
 			}
 		}
-		return c.genMethodCall(e, member)
+		result := c.genMethodCall(e, member)
+		c.maybeTrackIterTemp(e, result)
+		return result
 	}
 
 	// Constructor call: callee resolves to a Named type or Instance
@@ -1113,14 +1115,18 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 					return c.genModuleGenericFuncCall(e, idx, member.Field)
 				}
 			}
-			return c.genGenericMethodCall(e, idx, member)
+			result := c.genGenericMethodCall(e, idx, member)
+			c.maybeTrackIterTemp(e, result)
+			return result
 		}
 		return c.genGenericFuncCall(e, idx)
 	}
 
 	// Inferred generic function call: sema recorded the inferred type args.
 	if inferred, ok := c.info.InferredTypeArgs[e]; ok {
-		return c.genInferredGenericCall(e, inferred)
+		result := c.genInferredGenericCall(e, inferred)
+		c.maybeTrackIterTemp(e, result)
+		return result
 	}
 
 	// Resolve callee first to detect MutRef params (B0149)
@@ -1761,6 +1767,7 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 	var valStruct value.Value = constant.NewUndef(userValueType())
 	valStruct = c.block.NewInsertValue(valStruct, vtablePtr, 0)
 	valStruct = c.block.NewInsertValue(valStruct, rawPtr, 1)
+
 	return valStruct
 }
 
@@ -5007,6 +5014,8 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	savedGoExprFF2 := c.goExprFireAndForget
 	savedStmtTemps := c.stmtTemps              // T0073
 	savedStmtTempMap := c.stmtTempMap          // T0073
+	savedHeapTemps := c.heapTemps              // T0088
+	savedHeapTempMap := c.heapTempMap          // T0088
 	savedTempTracking := c.tempTrackingEnabled // T0073
 	c.goExprFireAndForget = false              // reset for inner statements (B0109)
 
@@ -5022,6 +5031,8 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.dropBindings = make(map[string]scopeBinding)
 	c.stmtTemps = nil                         // T0073
 	c.stmtTempMap = make(map[value.Value]int) // T0073
+	c.heapTemps = nil                         // T0088
+	c.heapTempMap = make(map[value.Value]int) // T0088
 	c.tempTrackingEnabled = false             // T0073
 	c.loopScopeDepth = 0
 	c.lambdaWritebacks = nil
@@ -5115,6 +5126,8 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.goExprFireAndForget = savedGoExprFF2
 	c.stmtTemps = savedStmtTemps              // T0073
 	c.stmtTempMap = savedStmtTempMap          // T0073
+	c.heapTemps = savedHeapTemps              // T0088
+	c.heapTempMap = savedHeapTempMap          // T0088
 	c.tempTrackingEnabled = savedTempTracking // T0073
 
 	// Return fat pointer: {fn_ptr as i8*, env_ptr}

@@ -241,6 +241,8 @@ type _FnIter[T] is Iterator[T] `doc("Closure-based iterator wrapper.") {
   next() T? {
     return this._next();
   }
+
+  drop(~this) `native;
 }
 
 // Wraps a generator coroutine. Gets combinator methods via `is Iterator[T]`.

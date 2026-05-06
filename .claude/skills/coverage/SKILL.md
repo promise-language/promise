@@ -5,6 +5,10 @@ description: Analyze test coverage for a Go package or Promise module, identify 
 
 Analyze test coverage and fill gaps. If $ARGUMENTS is provided, treat it as a Go package path (e.g., `./internal/codegen/`), a Promise test directory (e.g., `tests/e2e/`), or a specific source file to focus on.
 
+## Session name
+
+Before starting, update the session name to reflect the current phase. Replace the phase prefix (e.g., `REVIEW`) with `COV`, keeping the rest of the name: `/rename COV <ID> <short-title>`. If the session has no name yet, skip this.
+
 ## Steps
 
 1. **Identify scope.** If arguments were given, use them. Otherwise, check `git diff HEAD~1 --name-only` to focus on recently changed code.

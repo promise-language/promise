@@ -5,6 +5,10 @@ description: Meticulous code review of recent changes. Checks correctness, tests
 
 Review the most recent changes in this project. If $ARGUMENTS is provided, treat it as a file path, directory, commit range, or PR number to scope the review.
 
+## Session name
+
+Before starting, update the session name to reflect the current phase. Replace the phase prefix (e.g., `IMPL`) with `REVIEW`, keeping the rest of the name: `/rename REVIEW <ID> <short-title>`. If the session has no name yet, skip this.
+
 ## Steps
 
 1. **Identify what to review.** If arguments were given, use them. Otherwise, run `git diff HEAD~1` and `git diff --cached` to find recent changes. Read every changed file in full to understand context.

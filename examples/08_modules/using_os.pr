@@ -3,11 +3,11 @@
 // `use os;` provides environment variables, process execution, and system info.
 use os;
 
-main() `test(exclude: "windows", expected: """--- Environment ---
+main() `test(exclude: "windows, wasm32", expected: """--- Environment ---
 HOME is set: true
 
 --- Execute ---
-echo output: hello from promise""", exclude: "wasm32") {
+echo output: hello from promise""") {
   // --- Environment ---
   print_line("--- Environment ---");
 

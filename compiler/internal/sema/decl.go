@@ -418,8 +418,12 @@ func (c *Checker) propagateDrops(file *ast.File) {
 			if !ok {
 				continue
 			}
-			// Skip types that already have drop, are copy, or are value types
+			// Skip types that already have drop, are copy, value types, or error types.
+			// Error types have special lifecycle (raised/caught/propagated) — B0167.
 			if named.HasDrop() || named.IsCopy() || named.IsValueType() {
+				continue
+			}
+			if types.TypError != nil && (named == types.TypError || named.InheritsFrom(types.TypError)) {
 				continue
 			}
 			// Check all fields (including inherited) for droppable types
@@ -436,15 +440,25 @@ func (c *Checker) propagateDrops(file *ast.File) {
 }
 
 // fieldTypeHasDrop returns true if the type (possibly wrapped in Instance/SharedRef/MutRef)
-// resolves to a Named type with HasDrop().
-// NOTE: string/vector fields are NOT yet recognized here — they have codegen-managed drop
-// but not HasDrop() on the Named type. See B0167 for the planned extension.
+// resolves to a Named type with HasDrop(), or is a string/vector type. B0167.
+// String/vector types don't have HasDrop() on the Named type, but their presence
+// triggers synthesized drop for the containing type. The synthesized drop body
+// does NOT free string/vector fields (emitFieldDrops skips them since they lack
+// HasDrop) — it only pal_free's the instance and drops Named droppable fields.
+// This enables cascading: types containing types with string fields get proper
+// instance struct cleanup via the synthesized drop chain.
 func fieldTypeHasDrop(typ types.Type) bool {
 	switch t := typ.(type) {
 	case *types.Named:
+		if t == types.TypString || t == types.TypVector {
+			return true
+		}
 		return t.HasDrop()
 	case *types.Instance:
 		if n, ok := t.Origin().(*types.Named); ok {
+			if n == types.TypVector {
+				return true
+			}
 			return n.HasDrop()
 		}
 	}

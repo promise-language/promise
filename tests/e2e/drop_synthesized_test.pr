@@ -63,3 +63,42 @@ test_synth_drop_cascading_construct() `test(allow_leaks: true) {
   assert(t.mid.inner.name == "deep", "cascading field access");
   assert(t.mid.extra == 99, "cascading extra field");
 }
+
+// --- B0167: Types with string/vector fields get synthesized drops ---
+// The synthesized drop does NOT free string/vector fields (avoiding double-free),
+// but it does pal_free the instance and cascades to nested droppable types.
+
+type StringHolder {
+  string label;
+  int id;
+}
+
+type StringOuter {
+  StringHolder holder;
+  int tag;
+}
+
+type VecHolder {
+  int[] items;
+  int tag;
+}
+
+test_string_field_synth_drop() `test {
+  StringHolder h = StringHolder(label: "test", id: 1);
+  assert(h.label == "test", "B0167: string field");
+  assert(h.id == 1, "B0167: int field");
+}
+
+test_string_field_cascade() `test {
+  StringOuter o = StringOuter(holder: StringHolder(label: "cascade", id: 2), tag: 42);
+  assert(o.holder.label == "cascade", "B0167: cascading string field");
+  assert(o.tag == 42, "B0167: outer tag");
+}
+
+test_vector_field_synth_drop() `test {
+  int[] v = int[]();
+  v.push(10);
+  v.push(20);
+  VecHolder h = VecHolder(items: v, tag: 99);
+  assert(h.tag == 99, "B0167: vector field type");
+}

@@ -9302,6 +9302,48 @@ func TestStringConcatTempInConstructor(t *testing.T) {
 	assertContains(t, ir, "call i8* @promise_string_concat")
 }
 
+// B0167: Type with string field gets synthesized drop (cascading instance cleanup)
+func TestSynthDropStringFieldCascade(t *testing.T) {
+	ir := generateIR(t, `
+		type Inner { string name; }
+		type Outer { Inner inner; int x; }
+		main() {
+			o := Outer(inner: Inner(name: "hi"), x: 1);
+		}
+	`)
+	// Both types get synthesized drops
+	assertContains(t, ir, "define void @Inner.drop")
+	assertContains(t, ir, "define void @Outer.drop")
+	// Outer.drop calls Inner.drop (cascading) + pal_free
+	assertContains(t, ir, "call void @Inner.drop")
+	assertContains(t, ir, "call void @pal_free")
+	// String fields are NOT freed by the synthesized drop (no promise_string_drop in drop body)
+}
+
+// B0167: Type with vector field gets synthesized drop
+func TestSynthDropVectorField(t *testing.T) {
+	ir := generateIR(t, `
+		type Container { int[] items; }
+		main() {
+			int[] v = int[]();
+			c := Container(items: v);
+		}
+	`)
+	assertContains(t, ir, "define void @Container.drop")
+	assertContains(t, ir, "call void @pal_free")
+}
+
+// B0167: Error types are excluded from synthesized drop propagation
+func TestSynthDropExcludesErrorTypes(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			error e = error(message: "fail");
+		}
+	`)
+	// error should NOT get a synthesized drop (special lifecycle)
+	assertNotContains(t, ir, "define void @error.drop")
+}
+
 // B0158: Synthesized drop coexists with explicit drop (explicit takes precedence)
 func TestDropExplicitTakesPrecedence(t *testing.T) {
 	ir := generateIR(t, `

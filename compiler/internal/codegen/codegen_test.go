@@ -9440,6 +9440,24 @@ func TestSynthDropVectorField(t *testing.T) {
 	assertContains(t, ir, "call void @pal_free")
 }
 
+// B0177: Type with channel field gets synthesized drop
+func TestSynthDropChannelField(t *testing.T) {
+	ir := generateIR(t, `
+		type WithChan { channel[int] ch; }
+		main() {
+			channel[int] ch = channel[int]();
+			w := WithChan(ch: ch);
+		}
+	`)
+	assertContains(t, ir, "define void @WithChan.drop")
+	// Synthesized drop should call Channel.drop on the channel field
+	withChanDrop := extractFunction(ir, "WithChan.drop")
+	if withChanDrop == "" {
+		t.Fatal("expected WithChan.drop function in IR")
+	}
+	assertContains(t, withChanDrop, "call void @Channel.drop(")
+}
+
 // T0091: Error types get synthesized drop (frees message string field + instance)
 func TestSynthDropIncludesErrorTypes(t *testing.T) {
 	ir := generateIR(t, `

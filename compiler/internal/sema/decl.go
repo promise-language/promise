@@ -446,13 +446,13 @@ func (c *Checker) propagateDrops(file *ast.File) {
 func fieldTypeHasDrop(typ types.Type) bool {
 	switch t := typ.(type) {
 	case *types.Named:
-		if t == types.TypString || t == types.TypVector {
+		if t == types.TypString || t == types.TypVector || t == types.TypChannel {
 			return true
 		}
 		return t.HasDrop()
 	case *types.Instance:
 		if n, ok := t.Origin().(*types.Named); ok {
-			if n == types.TypVector {
+			if n == types.TypVector || n == types.TypChannel {
 				return true
 			}
 			return n.HasDrop()

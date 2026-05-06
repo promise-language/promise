@@ -43,6 +43,42 @@ channel_drop_multi_goroutine() `test(exclude: "wasm32") {
   assert(total == 10, "expected sum 10"); // 0+1+2+3+4 = 10
 }
 
+// B0177: Channel field in a type gets dropped when the type is dropped.
+type WithChan {
+  channel[int] ch;
+}
+
+channel_drop_field() `test {
+  ch := channel[int](capacity: 1);
+  ch.send(7);
+  w := WithChan(ch: ch);
+  result := <-w.ch;
+  if v := result {
+    assert(v == 7, "expected 7");
+  }
+  // w goes out of scope — synthesized WithChan.drop calls Channel.drop on ch field
+}
+
+// B0177: Nested type with channel field gets cascading drop.
+type Inner {
+  channel[int] ch;
+}
+type Outer {
+  Inner inner;
+  int x;
+}
+
+channel_drop_nested_field() `test {
+  ch := channel[int](capacity: 1);
+  ch.send(42);
+  o := Outer(inner: Inner(ch: ch), x: 1);
+  result := <-o.inner.ch;
+  if v := result {
+    assert(v == 42, "expected 42");
+  }
+  // o dropped → Outer.drop calls Inner.drop → Inner.drop calls Channel.drop
+}
+
 // Channel dropped after close.
 channel_drop_after_close() `test {
   ch := channel[int](capacity: 1);

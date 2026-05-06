@@ -4814,7 +4814,7 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 	for i := len(fields) - 1; i >= 0; i-- {
 		f := fields[i]
 		fieldNamed := extractNamed(f.Type())
-		if fieldNamed == nil || !fieldNamed.HasDrop() {
+		if fieldNamed == nil || (!fieldNamed.HasDrop() && fieldNamed != types.TypChannel) {
 			continue
 		}
 

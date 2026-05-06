@@ -583,7 +583,7 @@ func (c *Compiler) emitViewMethodAdapter(
 		params = append(params, ir.NewParam("this", irtypes.I8Ptr))
 	}
 	for i, p := range ifaceSig.Params() {
-		params = append(params, ir.NewParam(fmt.Sprintf("p%d", i), c.resolveType(p.Type())))
+		params = append(params, ir.NewParam(fmt.Sprintf("p%d", i), c.resolveParamType(p)))
 	}
 
 	ifaceRetType := irtypes.Type(irtypes.Void)

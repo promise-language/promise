@@ -461,11 +461,17 @@ func (c *Compiler) callFormatToString(val value.Value, typ types.Type, named *ty
 
 // callFormatMethod dispatches the format(Writer ~w)! call on the user type,
 // using virtual dispatch when the type has children, direct dispatch otherwise.
+// The writer is a MutRef param — passed as a pointer (B0149).
 func (c *Compiler) callFormatMethod(receiver, writerVal, originalVal value.Value,
 	named *types.Named, typ types.Type) value.Value {
 
 	// Failable void result type: {i1, i8*}
 	resultType := irtypes.NewStruct(irtypes.I1, irtypes.I8Ptr)
+
+	// Store writerVal in a temp alloca and pass the pointer (MutRef, B0149)
+	writerAlloca := c.createEntryAlloca(userValueType())
+	c.block.NewStore(writerVal, writerAlloca)
+	writerPtrType := irtypes.NewPointer(userValueType())
 
 	if c.needsVtable(named) {
 		// Virtual dispatch through vtable
@@ -492,9 +498,9 @@ func (c *Compiler) callFormatMethod(receiver, writerVal, originalVal value.Value
 		fnSlotPtr := c.block.NewGetElementPtr(irtypes.I8Ptr, vtablePtr,
 			constant.NewInt(irtypes.I32, int64(slotIndex)))
 		fnRaw := c.block.NewLoad(irtypes.I8Ptr, fnSlotPtr)
-		fnType := irtypes.NewFunc(resultType, irtypes.I8Ptr, userValueType())
+		fnType := irtypes.NewFunc(resultType, irtypes.I8Ptr, writerPtrType)
 		fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(fnType))
-		return c.block.NewCall(fnTyped, receiver, writerVal)
+		return c.block.NewCall(fnTyped, receiver, writerAlloca)
 	}
 
 	// Direct dispatch
@@ -503,7 +509,7 @@ func (c *Compiler) callFormatMethod(receiver, writerVal, originalVal value.Value
 	if !ok {
 		panic(fmt.Sprintf("codegen: undeclared method %s for interpolation", mangledName))
 	}
-	return c.block.NewCall(fn, receiver, writerVal)
+	return c.block.NewCall(fn, receiver, writerAlloca)
 }
 
 // getInterpBuilderWriterVtable returns the Writer vtable global for Builder,
@@ -591,6 +597,10 @@ func resolveEscape(seq string) string {
 // --- Identifiers ---
 
 func (c *Compiler) genIdentExpr(e *ast.IdentExpr) value.Value {
+	// MutRef param: load through the caller's pointer (B0149)
+	if ptr, ok := c.mutRefPtrs[e.Name]; ok {
+		return c.block.NewLoad(c.mutRefTypes[e.Name], ptr)
+	}
 	// Local variable: load from alloca (checked first to shadow module-level names)
 	if alloca, ok := c.locals[e.Name]; ok {
 		return c.block.NewLoad(alloca.ElemType, alloca)
@@ -1059,22 +1069,38 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 		return c.genInferredGenericCall(e, inferred)
 	}
 
-	// Evaluate arguments
-	var argVals []value.Value
-	var argTypes []types.Type
-	for _, arg := range e.Args {
-		argVals = append(argVals, c.genCallArgExpr(arg.Value))
-		argTypes = append(argTypes, c.info.Types[arg.Value])
-		// Clear drop flag: argument is moved into the callee
-		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
-			c.clearDropFlag(ident.Name)
-		}
-	}
-
-	// Resolve callee
+	// Resolve callee first to detect MutRef params (B0149)
 	ident, ok := e.Callee.(*ast.IdentExpr)
 	if !ok {
 		panic(fmt.Sprintf("codegen: unsupported callee type %T", e.Callee))
+	}
+
+	// Look up callee signature for MutRef param detection.
+	// Extern functions use C ABI — skip MutRef pointer-passing for them.
+	var calleeSig *types.Signature
+	isExtern := false
+	if _, ok := c.externs[ident.Name]; ok {
+		isExtern = true
+	}
+	if !isExtern {
+		if callee := c.lookupFunc(ident.Name); callee != nil {
+			calleeSig, _ = callee.Type().(*types.Signature)
+		}
+	}
+
+	// Evaluate arguments — pass address for MutRef params (B0149)
+	var argVals []value.Value
+	var argTypes []types.Type
+	if calleeSig != nil {
+		argVals, argTypes = c.genCallArgsWithMutRef(e.Args, calleeSig.Params())
+	} else {
+		for _, arg := range e.Args {
+			argVals = append(argVals, c.genCallArgExpr(arg.Value))
+			argTypes = append(argTypes, c.info.Types[arg.Value])
+			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+				c.clearDropFlag(ident.Name)
+			}
+		}
 	}
 
 	// Lambda call: callee is a local variable holding a fat pointer {i8*, i8*}
@@ -1087,8 +1113,8 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 	}
 
 	// Extern function — pack args into value structs, call, unpack return
-	if ext, ok := c.externs[ident.Name]; ok {
-		return c.genExternCall(ext, argVals, argTypes)
+	if isExtern {
+		return c.genExternCall(c.externs[ident.Name], argVals, argTypes)
 	}
 
 	// Regular function call
@@ -1098,10 +1124,8 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 	}
 
 	// Coerce arguments when crossing type boundaries
-	if callee := c.lookupFunc(ident.Name); callee != nil {
-		if sig, ok := callee.Type().(*types.Signature); ok {
-			argVals = c.coerceCallArgs(argVals, argTypes, sig.Params())
-		}
+	if calleeSig != nil {
+		argVals = c.coerceCallArgs(argVals, argTypes, calleeSig.Params())
 	}
 
 	return c.block.NewCall(fn, argVals...)
@@ -1132,18 +1156,36 @@ func (c *Compiler) resolveModuleName(ident *ast.IdentExpr) string {
 
 // genModuleCall handles mod.func() calls — resolves func in the module's IR functions.
 func (c *Compiler) genModuleCall(e *ast.CallExpr, moduleName, funcName string) value.Value {
+	// Check if the callee is an extern (C ABI — skip MutRef pointer-passing)
+	key := moduleName + "." + funcName
+	isExtern := false
+	if _, ok := c.moduleExterns[key]; ok {
+		isExtern = true
+	}
+
+	// Look up callee signature for MutRef param detection (B0149)
+	var calleeSig *types.Signature
+	if !isExtern {
+		if sig, ok := c.info.Types[e.Callee].(*types.Signature); ok {
+			calleeSig = sig
+		}
+	}
+
 	var argVals []value.Value
 	var argTypes []types.Type
-	for _, arg := range e.Args {
-		argVals = append(argVals, c.genCallArgExpr(arg.Value))
-		argTypes = append(argTypes, c.info.Types[arg.Value])
-		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
-			c.clearDropFlag(ident.Name)
+	if calleeSig != nil {
+		argVals, argTypes = c.genCallArgsWithMutRef(e.Args, calleeSig.Params())
+	} else {
+		for _, arg := range e.Args {
+			argVals = append(argVals, c.genCallArgExpr(arg.Value))
+			argTypes = append(argTypes, c.info.Types[arg.Value])
+			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+				c.clearDropFlag(ident.Name)
+			}
 		}
 	}
 
 	// Try module extern first
-	key := moduleName + "." + funcName
 	if ext, ok := c.moduleExterns[key]; ok {
 		return c.genExternCall(ext, argVals, argTypes)
 	}
@@ -1155,8 +1197,8 @@ func (c *Compiler) genModuleCall(e *ast.CallExpr, moduleName, funcName string) v
 	}
 
 	// Coerce arguments using the callee's signature from sema
-	if sig, ok := c.info.Types[e.Callee].(*types.Signature); ok {
-		argVals = c.coerceCallArgs(argVals, argTypes, sig.Params())
+	if calleeSig != nil {
+		argVals = c.coerceCallArgs(argVals, argTypes, calleeSig.Params())
 	}
 
 	return c.block.NewCall(fn, argVals...)
@@ -1370,15 +1412,7 @@ func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, idx *ast.IndexExpr, mem
 	}
 
 	// Generate arguments
-	var argVals []value.Value
-	var argTypes []types.Type
-	for _, arg := range e.Args {
-		argVals = append(argVals, c.genCallArgExpr(arg.Value))
-		argTypes = append(argTypes, c.info.Types[arg.Value])
-		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
-			c.clearDropFlag(ident.Name)
-		}
-	}
+	argVals, argTypes := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params())
 	args = append(args, argVals...)
 
@@ -2475,16 +2509,7 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 			args = append(args, c.extractInstancePtr(target))
 		}
 	}
-	var argVals []value.Value
-	var argTypes []types.Type
-	for _, arg := range e.Args {
-		argVals = append(argVals, c.genCallArgExpr(arg.Value))
-		argTypes = append(argTypes, c.info.Types[arg.Value])
-		// Clear drop flag: argument is moved into the callee
-		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
-			c.clearDropFlag(ident.Name)
-		}
-	}
+	argVals, argTypes := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params())
 	args = append(args, argVals...)
 
@@ -2598,15 +2623,7 @@ func (c *Compiler) genEnumMethodCall(e *ast.CallExpr, member *ast.MemberExpr, ta
 			args = append(args, ptr)
 		}
 	}
-	var argVals []value.Value
-	var argTypes []types.Type
-	for _, arg := range e.Args {
-		argVals = append(argVals, c.genExpr(arg.Value))
-		argTypes = append(argTypes, c.info.Types[arg.Value])
-		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
-			c.clearDropFlag(ident.Name)
-		}
-	}
+	argVals, argTypes := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params())
 	args = append(args, argVals...)
 
@@ -2784,7 +2801,12 @@ func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 		paramTypes = append(paramTypes, irtypes.I8Ptr)
 	}
 	for _, p := range method.Sig().Params() {
-		paramTypes = append(paramTypes, resolveVtableType(p.Type()))
+		pt := resolveVtableType(p.Type())
+		// MutRef params are passed as pointers (B0149)
+		if _, isMutRef := p.Type().(*types.MutRef); isMutRef {
+			pt = irtypes.NewPointer(pt)
+		}
+		paramTypes = append(paramTypes, pt)
 	}
 	funcType := irtypes.NewFunc(retType, paramTypes...)
 	fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))
@@ -2794,16 +2816,7 @@ func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 	if method.Sig().Recv() != nil {
 		args = append(args, instance)
 	}
-	var argVals []value.Value
-	var argTypes []types.Type
-	for _, arg := range e.Args {
-		argVals = append(argVals, c.genCallArgExpr(arg.Value))
-		argTypes = append(argTypes, c.info.Types[arg.Value])
-		// Clear drop flag: argument is moved into the callee
-		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
-			c.clearDropFlag(ident.Name)
-		}
-	}
+	argVals, argTypes := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params())
 	args = append(args, argVals...)
 	return c.block.NewCall(fnTyped, args...)
@@ -2957,7 +2970,10 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 func (c *Compiler) storeBackSlicePtr(target ast.Expr, newPtr value.Value) {
 	switch t := target.(type) {
 	case *ast.IdentExpr:
-		if alloca, ok := c.locals[t.Name]; ok {
+		if ptr, ok := c.mutRefPtrs[t.Name]; ok {
+			// MutRef param: store through the caller's pointer (B0149)
+			c.block.NewStore(newPtr, ptr)
+		} else if alloca, ok := c.locals[t.Name]; ok {
 			c.block.NewStore(newPtr, alloca)
 		}
 	case *ast.MemberExpr:
@@ -2966,6 +2982,73 @@ func (c *Compiler) storeBackSlicePtr(target ast.Expr, newPtr value.Value) {
 	case *ast.IndexExpr:
 		panic("codegen: push on nested slice (e.g. slices[i].push) not yet supported")
 	}
+}
+
+// genMutRefArg returns a pointer to the caller's storage for a MutRef argument (B0149).
+// This is used at call sites to pass the address of a variable (or forward a
+// MutRef param pointer) instead of loading and passing the value.
+func (c *Compiler) genMutRefArg(expr ast.Expr) value.Value {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		// If the variable is itself a MutRef param, forward its pointer
+		if ptr, ok := c.mutRefPtrs[e.Name]; ok {
+			return ptr
+		}
+		// Otherwise, pass the alloca address (pointer to local variable)
+		if alloca, ok := c.locals[e.Name]; ok {
+			return alloca
+		}
+		panic(fmt.Sprintf("codegen: MutRef argument %q not found in locals", e.Name))
+	case *ast.MemberExpr:
+		// Field access: pass field pointer
+		return c.genFieldPtr(e)
+	default:
+		// Fallback: evaluate normally and store to a temp alloca
+		val := c.genCallArgExpr(expr)
+		tmp := c.createEntryAlloca(val.Type())
+		c.block.NewStore(val, tmp)
+		return tmp
+	}
+}
+
+// genCallArgsWithMutRef evaluates call arguments with MutRef-awareness (B0149).
+// For MutRef params, passes the address of the caller's storage instead of the value.
+// When the arg needs no coercion and is a simple lvalue, passes the alloca directly.
+// Otherwise, evaluates the value, stores in a temp alloca, and passes the temp.
+func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param) ([]value.Value, []types.Type) {
+	var argVals []value.Value
+	var argTypes []types.Type
+	for i, arg := range args {
+		if i < len(params) {
+			if _, isMutRef := params[i].Type().(*types.MutRef); isMutRef {
+				argType := c.info.Types[arg.Value]
+				paramInner := params[i].Type().(*types.MutRef).Elem()
+				// Check if the arg type matches the param inner type exactly
+				// (no view coercion needed). If so, pass the alloca directly.
+				if types.Identical(argType, paramInner) || types.Identical(argType, params[i].Type()) {
+					argVals = append(argVals, c.genMutRefArg(arg.Value))
+				} else {
+					// Coercion needed (e.g., Builder → Writer view).
+					// Evaluate normally, coerce, store in temp alloca, pass temp.
+					val := c.genCallArgExpr(arg.Value)
+					val = c.coerceToView(val, argType, params[i].Type())
+					innerType := c.resolveType(params[i].Type())
+					tmp := c.createEntryAlloca(innerType)
+					c.block.NewStore(val, tmp)
+					argVals = append(argVals, tmp)
+				}
+				argTypes = append(argTypes, c.info.Types[arg.Value])
+				continue
+			}
+		}
+		argVals = append(argVals, c.genCallArgExpr(arg.Value))
+		argTypes = append(argTypes, c.info.Types[arg.Value])
+		// Clear drop flag: argument is moved into the callee
+		if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		}
+	}
+	return argVals, argTypes
 }
 
 // genFieldPtr computes a pointer to a field on a user type instance.

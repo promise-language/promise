@@ -136,6 +136,12 @@ type Compiler struct {
 	scopeBindings  []scopeBinding
 	loopScopeDepth int // scopeBindings depth at loop entry (for break/continue cleanup)
 
+	// MutRef parameter pointers: maps param name to the pointer passed by the caller.
+	// MutRef params are passed as pointers to the caller's alloca, enabling
+	// write-back semantics (e.g., vector push with reallocation).
+	mutRefPtrs  map[string]value.Value
+	mutRefTypes map[string]irtypes.Type // inner LLVM type for load instructions
+
 	// Drop flag tracking: maps variable name to its drop flag alloca (i1)
 	dropFlags map[string]*ir.InstAlloca
 
@@ -3085,7 +3091,7 @@ func (c *Compiler) declareFuncs(file *ast.File) {
 
 		var params []*ir.Param
 		for _, p := range sig.Params() {
-			params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
+			params = append(params, ir.NewParam(p.Name(), c.resolveParamType(p)))
 		}
 
 		// C ABI requires main to return i32 and receive argc/argv
@@ -3158,6 +3164,8 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 	c.localNameCount = make(map[string]int)
 	c.dropFlags = make(map[string]*ir.InstAlloca)
 	c.dropBindings = make(map[string]scopeBinding)
+	c.mutRefPtrs = nil
+	c.mutRefTypes = nil
 	c.blockCounter = 0
 
 	entry := fn.NewBlock(".entry")
@@ -3180,10 +3188,23 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 		if p.Name() == "" || p.Name() == "_" {
 			continue
 		}
-		alloca := entry.NewAlloca(c.resolveType(p.Type()))
-		alloca.SetName(c.uniqueLocalName(p.Name() + ".addr"))
-		entry.NewStore(fn.Params[i], alloca)
-		c.locals[p.Name()] = alloca
+		if _, isMutRef := p.Type().(*types.MutRef); isMutRef {
+			// MutRef param: caller passes a pointer to its alloca.
+			// The param value IS a pointer to the caller's storage —
+			// reads load through it, writes store through it.
+			innerType := c.resolveType(p.Type())
+			if c.mutRefPtrs == nil {
+				c.mutRefPtrs = make(map[string]value.Value)
+				c.mutRefTypes = make(map[string]irtypes.Type)
+			}
+			c.mutRefPtrs[p.Name()] = fn.Params[i]
+			c.mutRefTypes[p.Name()] = innerType
+		} else {
+			alloca := entry.NewAlloca(c.resolveType(p.Type()))
+			alloca.SetName(c.uniqueLocalName(p.Name() + ".addr"))
+			entry.NewStore(fn.Params[i], alloca)
+			c.locals[p.Name()] = alloca
+		}
 	}
 
 	// Coverage: instrument function entry (skip test functions and main)
@@ -3495,7 +3516,7 @@ func (c *Compiler) declareModuleFuncs(file *ast.File, moduleName string) {
 
 		var params []*ir.Param
 		for _, p := range sig.Params() {
-			params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
+			params = append(params, ir.NewParam(p.Name(), c.resolveParamType(p)))
 		}
 
 		irName := mangleModuleFuncName(moduleName, scopeName)
@@ -3569,6 +3590,8 @@ func (c *Compiler) defineModuleFuncs(file *ast.File, moduleName string) {
 		c.localNameCount = make(map[string]int)
 		c.dropFlags = make(map[string]*ir.InstAlloca)
 		c.dropBindings = make(map[string]scopeBinding)
+		c.mutRefPtrs = nil
+		c.mutRefTypes = nil
 		c.scopeBindings = nil
 		c.canError = sig.CanError()
 		c.currentRetType = sig.Result()
@@ -3576,9 +3599,21 @@ func (c *Compiler) defineModuleFuncs(file *ast.File, moduleName string) {
 
 		// Bind parameters to local allocas
 		for i, p := range fn.Params {
-			alloca := c.entryBlock.NewAlloca(p.Typ)
-			c.entryBlock.NewStore(p, alloca)
-			c.locals[sig.Params()[i].Name()] = alloca
+			sp := sig.Params()[i]
+			if _, isMutRef := sp.Type().(*types.MutRef); isMutRef {
+				// MutRef param: the LLVM param is a pointer to the caller's storage (B0149)
+				innerType := c.resolveType(sp.Type())
+				if c.mutRefPtrs == nil {
+					c.mutRefPtrs = make(map[string]value.Value)
+					c.mutRefTypes = make(map[string]irtypes.Type)
+				}
+				c.mutRefPtrs[sp.Name()] = p
+				c.mutRefTypes[sp.Name()] = innerType
+			} else {
+				alloca := c.entryBlock.NewAlloca(p.Typ)
+				c.entryBlock.NewStore(p, alloca)
+				c.locals[sp.Name()] = alloca
+			}
 		}
 
 		c.genBlock(fd.Body)
@@ -3634,7 +3669,7 @@ func (c *Compiler) declareModuleTypeMethods(file *ast.File, moduleName string) {
 				params = append(params, ir.NewParam("this", receiverType))
 			}
 			for _, p := range m.Sig().Params() {
-				params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
+				params = append(params, ir.NewParam(p.Name(), c.resolveParamType(p)))
 			}
 
 			retType := irtypes.Type(irtypes.Void)
@@ -3717,6 +3752,8 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 			c.blockCounter = 0
 
 			// Bind 'this' and parameters
+			c.mutRefPtrs = nil
+			c.mutRefTypes = nil
 			paramIdx := 0
 			if m.Sig().Recv() != nil {
 				receiverType := irtypes.Type(irtypes.I8Ptr)
@@ -3729,9 +3766,20 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 				paramIdx = 1
 			}
 			for i, p := range m.Sig().Params() {
-				alloca := c.entryBlock.NewAlloca(fn.Params[paramIdx+i].Typ)
-				c.entryBlock.NewStore(fn.Params[paramIdx+i], alloca)
-				c.locals[p.Name()] = alloca
+				if _, isMutRef := p.Type().(*types.MutRef); isMutRef {
+					// MutRef param: the LLVM param is a pointer to the caller's storage (B0149)
+					innerType := c.resolveType(p.Type())
+					if c.mutRefPtrs == nil {
+						c.mutRefPtrs = make(map[string]value.Value)
+						c.mutRefTypes = make(map[string]irtypes.Type)
+					}
+					c.mutRefPtrs[p.Name()] = fn.Params[paramIdx+i]
+					c.mutRefTypes[p.Name()] = innerType
+				} else {
+					alloca := c.entryBlock.NewAlloca(fn.Params[paramIdx+i].Typ)
+					c.entryBlock.NewStore(fn.Params[paramIdx+i], alloca)
+					c.locals[p.Name()] = alloca
+				}
 			}
 
 			c.genBlock(md.Body)
@@ -3854,7 +3902,7 @@ func (c *Compiler) declareTypeMethods(file *ast.File) {
 				params = append(params, ir.NewParam("this", receiverType))
 			}
 			for _, p := range m.Sig().Params() {
-				params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
+				params = append(params, ir.NewParam(p.Name(), c.resolveParamType(p)))
 			}
 
 			retType := irtypes.Type(irtypes.Void)
@@ -3954,7 +4002,7 @@ func (c *Compiler) declareEnumMethods(file *ast.File) {
 				params = append(params, ir.NewParam("this", irtypes.I8Ptr))
 			}
 			for _, p := range m.Sig().Params() {
-				params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
+				params = append(params, ir.NewParam(p.Name(), c.resolveParamType(p)))
 			}
 
 			retType := irtypes.Type(irtypes.Void)
@@ -4053,7 +4101,7 @@ func (c *Compiler) declareModuleEnumMethods(file *ast.File, moduleName string) {
 				params = append(params, ir.NewParam("this", irtypes.I8Ptr))
 			}
 			for _, p := range m.Sig().Params() {
-				params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
+				params = append(params, ir.NewParam(p.Name(), c.resolveParamType(p)))
 			}
 
 			retType := irtypes.Type(irtypes.Void)
@@ -4174,6 +4222,8 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 	c.localNameCount = make(map[string]int)
 	c.dropFlags = make(map[string]*ir.InstAlloca)
 	c.dropBindings = make(map[string]scopeBinding)
+	c.mutRefPtrs = nil
+	c.mutRefTypes = nil
 	c.scopeBindings = nil
 	c.loopScopeDepth = 0
 	c.blockCounter = 0
@@ -4207,11 +4257,22 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 			paramIdx++
 			continue
 		}
-		lt := c.resolveType(p.Type())
-		alloca := entry.NewAlloca(lt)
-		alloca.SetName(c.uniqueLocalName(p.Name() + ".addr"))
-		entry.NewStore(fn.Params[paramIdx], alloca)
-		c.locals[p.Name()] = alloca
+		if _, isMutRef := p.Type().(*types.MutRef); isMutRef {
+			// MutRef param: caller passes a pointer to its alloca (B0149)
+			innerType := c.resolveType(p.Type())
+			if c.mutRefPtrs == nil {
+				c.mutRefPtrs = make(map[string]value.Value)
+				c.mutRefTypes = make(map[string]irtypes.Type)
+			}
+			c.mutRefPtrs[p.Name()] = fn.Params[paramIdx]
+			c.mutRefTypes[p.Name()] = innerType
+		} else {
+			lt := c.resolveType(p.Type())
+			alloca := entry.NewAlloca(lt)
+			alloca.SetName(c.uniqueLocalName(p.Name() + ".addr"))
+			entry.NewStore(fn.Params[paramIdx], alloca)
+			c.locals[p.Name()] = alloca
+		}
 		paramIdx++
 	}
 
@@ -4774,7 +4835,7 @@ func (c *Compiler) synthesizeDefaultMethods(concrete, iface *types.Named) {
 			params = append(params, ir.NewParam("this", irtypes.I8Ptr))
 		}
 		for _, p := range sig.Params() {
-			params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
+			params = append(params, ir.NewParam(p.Name(), c.resolveParamType(p)))
 		}
 
 		retType := irtypes.Type(irtypes.Void)

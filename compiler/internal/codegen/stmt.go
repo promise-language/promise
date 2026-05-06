@@ -797,6 +797,21 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				return
 			}
 		}
+		// MutRef param: store through the caller's pointer (B0149)
+		if ptr, ok := c.mutRefPtrs[target.Name]; ok {
+			if s.Op == ast.OpAssign {
+				c.block.NewStore(val, ptr)
+				if ident, ok := s.Value.(*ast.IdentExpr); ok {
+					c.clearDropFlag(ident.Name)
+				}
+				return
+			}
+			// Compound assignment on MutRef param
+			current := c.block.NewLoad(c.mutRefTypes[target.Name], ptr)
+			result := c.genCompoundOp(s.Op, current, val)
+			c.block.NewStore(result, ptr)
+			return
+		}
 		alloca, ok := c.locals[target.Name]
 		if !ok {
 			panic(fmt.Sprintf("codegen: undefined variable %q in assignment", target.Name))

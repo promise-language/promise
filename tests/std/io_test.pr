@@ -179,3 +179,76 @@ test_mutref_vector_index_read() `test {
   _fill_buf(buf);
   assert(_check_buf(buf), "read through ~buf matches");
 }
+
+// --- B0149: MutRef vector push with reallocation ---
+
+_push_one(int[]~output) {
+  output.push(42);
+}
+
+_push_three(int[]~output) {
+  output.push(1);
+  output.push(2);
+  output.push(3);
+}
+
+_conditional_push(int cp, int[]~output) {
+  if cp >= 100 {
+    output.push(1);
+    output.push(2);
+    int t = cp % 28;
+    if t > 0 {
+      output.push(3);
+    }
+  } else {
+    output.push(cp);
+  }
+}
+
+_nested_push(int[]~output) {
+  // Calls another function with the same MutRef param (forwarding)
+  _push_one(output);
+  _push_one(output);
+}
+
+test_mutref_push_empty_vector() `test `doc("B0149: push through MutRef on empty vector (triggers realloc)") {
+  int[] result = [];
+  _push_one(result);
+  assert(result.len == 1, "expected 1, got " + result.len.to_string());
+  assert(result[0] == 42, "expected 42");
+}
+
+test_mutref_push_with_capacity() `test `doc("B0149: push through MutRef with pre-allocated capacity") {
+  int[] result = Vector[int](capacity: 10);
+  _push_three(result);
+  assert(result.len == 3, "expected 3, got " + result.len.to_string());
+  assert(result[0] == 1, "r[0]");
+  assert(result[1] == 2, "r[1]");
+  assert(result[2] == 3, "r[2]");
+}
+
+test_mutref_push_multiple_reallocs() `test `doc("B0149: multiple pushes through MutRef on empty vector") {
+  int[] result = [];
+  _push_three(result);
+  assert(result.len == 3, "expected 3, got " + result.len.to_string());
+  assert(result[0] == 1, "r[0]");
+  assert(result[1] == 2, "r[1]");
+  assert(result[2] == 3, "r[2]");
+}
+
+test_mutref_conditional_push() `test `doc("B0149: conditional push through MutRef (original bug pattern)") {
+  int[] result = [];
+  _conditional_push(101, result);
+  assert(result.len == 3, "expected 3, got " + result.len.to_string());
+  assert(result[0] == 1, "r[0]");
+  assert(result[1] == 2, "r[1]");
+  assert(result[2] == 3, "r[2]");
+}
+
+test_mutref_nested_push() `test `doc("B0149: nested MutRef forwarding with push") {
+  int[] result = [];
+  _nested_push(result);
+  assert(result.len == 2, "expected 2, got " + result.len.to_string());
+  assert(result[0] == 42, "r[0]");
+  assert(result[1] == 42, "r[1]");
+}

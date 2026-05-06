@@ -476,6 +476,16 @@ func isVoidResult(resultType *irtypes.StructType) bool {
 	return len(resultType.Fields) == 2
 }
 
+// resolveParamType resolves a function parameter's LLVM type.
+// MutRef params use pointer-to-inner-type so the callee can write back (B0149).
+func (c *Compiler) resolveParamType(p *types.Param) irtypes.Type {
+	paramType := c.resolveType(p.Type())
+	if _, isMutRef := p.Type().(*types.MutRef); isMutRef {
+		paramType = irtypes.NewPointer(paramType)
+	}
+	return paramType
+}
+
 // resultErrIdx returns the index of the error pointer field in a result struct.
 // Void: { i1, i8* } → index 1. Non-void: { i1, T, i8* } → index 2.
 func resultErrIdx(resultType *irtypes.StructType) uint64 {

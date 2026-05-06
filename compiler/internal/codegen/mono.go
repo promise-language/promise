@@ -1243,7 +1243,7 @@ func (c *Compiler) declareMonoMethods(file *ast.File, instances []*types.Instanc
 			// Substitute param types
 			c.typeSubst = subst
 			for _, p := range m.Sig().Params() {
-				params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
+				params = append(params, ir.NewParam(p.Name(), c.resolveParamType(p)))
 			}
 
 			retType := irtypes.Type(irtypes.Void)
@@ -1387,7 +1387,7 @@ func (c *Compiler) declareStructuralDefaultStubs(file *ast.File, mName string, c
 		}
 		c.typeSubst = subst
 		for _, p := range sig.Params() {
-			params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
+			params = append(params, ir.NewParam(p.Name(), c.resolveParamType(p)))
 		}
 		retType := irtypes.Type(irtypes.Void)
 		if sig.Result() != nil {
@@ -1515,7 +1515,7 @@ func (c *Compiler) declareMonoFuncs(file *ast.File, funcInsts []*sema.FuncInstan
 
 		var params []*ir.Param
 		for _, p := range sig.Params() {
-			params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
+			params = append(params, ir.NewParam(p.Name(), c.resolveParamType(p)))
 		}
 		c.typeSubst = nil
 
@@ -1728,7 +1728,7 @@ func (c *Compiler) declareMonoEnumMethods(file *ast.File, instances []*types.Ins
 
 			c.typeSubst = subst
 			for _, p := range m.Sig().Params() {
-				params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
+				params = append(params, ir.NewParam(p.Name(), c.resolveParamType(p)))
 			}
 
 			retType := irtypes.Type(irtypes.Void)
@@ -1940,7 +1940,7 @@ func (c *Compiler) declareMonoMethodInstances(file *ast.File, methodInsts []*sem
 
 		c.typeSubst = subst
 		for _, p := range mi.Method.Sig().Params() {
-			params = append(params, ir.NewParam(p.Name(), c.resolveType(p.Type())))
+			params = append(params, ir.NewParam(p.Name(), c.resolveParamType(p)))
 		}
 		retType := irtypes.Type(irtypes.Void)
 		if mi.Method.Sig().Result() != nil {

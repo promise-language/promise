@@ -1249,32 +1249,22 @@ func (c *Compiler) defineSchedFindRunnableFunc() {
 	// Alloca for steal loop counter (must be in entry block)
 	iAlloca := entry.NewAlloca(irtypes.I32)
 
-	// --- Step 1: Try local P queue (always, even for disabled Ps) ---
-	// A disabled P may still have work from before num_p was reduced.
+	// --- Step 1: Try local P queue ---
+	// Always check local queue first, even for disabled Ps — a disabled P may
+	// still have work from before num_p was reduced.
 	localG := entry.NewCall(c.funcs["promise_local_dequeue"], pParam)
 	localNull := entry.NewICmp(enum.IPredEQ, localG, constant.NewNull(irtypes.I8Ptr))
 	localFound := fn.NewBlock("local_found")
-	checkDisabled := fn.NewBlock("check_disabled")
-	entry.NewCondBr(localNull, checkDisabled, localFound)
+	entry.NewCondBr(localNull, tryGlobal, localFound)
 
 	localFound.NewRet(localG)
 
-	// --- Step 1b: Check if this P is disabled (P.id >= sched.num_p) ---
-	// If disabled, skip global queue and work stealing — cascade-wake and return null.
-	pPtrCheck := checkDisabled.NewBitCast(pParam, irtypes.NewPointer(pTy))
-	pIdField := checkDisabled.NewGetElementPtr(pTy, pPtrCheck,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(pFieldID)))
-	pId := checkDisabled.NewLoad(irtypes.I32, pIdField)
-	numPFieldCheck := checkDisabled.NewGetElementPtr(schedTy, c.schedGlobal,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldNumP)))
-	numPCheck := checkDisabled.NewLoad(irtypes.I32, numPFieldCheck)
-	isDisabled := checkDisabled.NewICmp(enum.IPredSGE, pId, numPCheck)
-	disabledBlk := fn.NewBlock("disabled")
-	checkDisabled.NewCondBr(isDisabled, disabledBlk, tryGlobal)
-
-	// Cascade-wake: try to wake another M so an active one can pick up work
-	disabledBlk.NewCall(c.funcs["promise_sched_wake_m"])
-	disabledBlk.NewRet(constant.NewNull(irtypes.I8Ptr))
+	// NOTE: Disabled Ps (P.id >= num_p) are NOT short-circuited. They fall
+	// through to the global queue and work-stealing phases, helping process
+	// any available work before parking. A previous design used cascade-wake
+	// (calling wake_m from a disabled M), but this could cycle between two
+	// disabled Ms on the LIFO idle stack without ever reaching an active M,
+	// causing goroutines to stall on Linux (B0136).
 
 	// --- Step 2: Try global queue ---
 	glLockField := tryGlobal.NewGetElementPtr(schedTy, c.schedGlobal,

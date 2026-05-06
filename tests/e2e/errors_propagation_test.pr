@@ -58,7 +58,7 @@ auto_prop_success() int! {
   return 42;
 }
 
-test_auto_propagate_success() `test(allow_leaks: true) {
+test_auto_propagate_success() `test {
   int r = auto_prop_success()!;
   assert(r == 42, "auto-propagate success continues");
 }
@@ -70,7 +70,7 @@ multi_auto_prop() void! {
   void_ok();
 }
 
-test_multi_auto_propagate() `test(allow_leaks: true) {
+test_multi_auto_propagate() `test {
   multi_auto_prop()!;
 }
 
@@ -112,7 +112,7 @@ test_auto_propagate_in_loop() `test(allow_leaks: true) {
 // Section 2: Failable result capture (val, err) := failable()
 // ============================================================
 
-test_result_capture_success() `test(allow_leaks: true) {
+test_result_capture_success() `test {
   (val, err) := parse_int("42");
   assert(val == 42, "captured value is 42");
   if err is present {
@@ -140,13 +140,13 @@ test_result_capture_discard_value() `test(allow_leaks: true) {
   }
 }
 
-test_result_capture_discard_error() `test(allow_leaks: true) {
+test_result_capture_discard_error() `test {
   (val, _) := parse_int("42");
   assert(val == 42, "captured value, discarded error");
 }
 
 // Result capture with void failable
-test_void_result_capture_success() `test(allow_leaks: true) {
+test_void_result_capture_success() `test {
   (_, err) := void_ok();
   if err is present {
     assert(false, "void ok should have no error");
@@ -341,7 +341,7 @@ test_bang_shorthand_raise() `test(allow_leaks: true) {
   assert(caught, "bang shorthand function raised");
 }
 
-test_bang_shorthand_ok() `test(allow_leaks: true) {
+test_bang_shorthand_ok() `test {
   bool caught = false;
   bang_ok()? e {
     caught = true;

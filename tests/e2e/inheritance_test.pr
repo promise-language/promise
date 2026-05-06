@@ -890,20 +890,20 @@ type VecCollection[T] is Collection[T] {
   }
 }
 
-test_generic_default_method() `test(allow_leaks: true) {
+test_generic_default_method() `test {
   VecCollection[int] v = VecCollection[int](items: [1, 2, 3]);
   assert(v.size() == 3, "abstract method implemented");
   assert(!v.is_empty(), "default method uses abstract impl");
 }
 
-test_generic_default_method_empty() `test(allow_leaks: true) {
+test_generic_default_method_empty() `test {
   int[] empty = [];
   VecCollection[int] v = VecCollection[int](items: empty);
   assert(v.size() == 0, "size is 0");
   assert(v.is_empty(), "default is_empty returns true");
 }
 
-test_generic_default_polymorphic() `test(allow_leaks: true) {
+test_generic_default_polymorphic() `test {
   Collection[int] c = VecCollection[int](items: [10, 20]);
   assert(c.size() == 2, "polymorphic abstract method");
   assert(!c.is_empty(), "polymorphic default method");
@@ -1209,19 +1209,19 @@ type DropNet is DropResource {
   }
 }
 
-test_drop_inherited_from_parent() `test(allow_leaks: true) {
+test_drop_inherited_from_parent() `test {
   f := DropFile(id: 1, path: "/tmp/a");
   assert(f.id == 1, "inherits parent drop — field access");
   assert(f.path == "/tmp/a", "own field with inherited drop");
 }
 
-test_drop_overridden_in_child() `test(allow_leaks: true) {
+test_drop_overridden_in_child() `test {
   n := DropNet(id: 2, host: "localhost");
   assert(n.id == 2, "overridden drop — field access");
   assert(n.host == "localhost", "own field with overridden drop");
 }
 
-test_drop_polymorphic_ref() `test(allow_leaks: true) {
+test_drop_polymorphic_ref() `test {
   DropResource r1 = DropFile(id: 3, path: "/b");
   assert(r1.id == 3, "polymorphic ref with inherited drop");
   DropResource r2 = DropNet(id: 4, host: "x");
@@ -1229,7 +1229,7 @@ test_drop_polymorphic_ref() `test(allow_leaks: true) {
 }
 
 // Drop in a loop to test cleanup
-test_drop_in_loop_inherited() `test(allow_leaks: true) {
+test_drop_in_loop_inherited() `test {
   for i in 0..5 {
     f := DropFile(id: i, path: "/loop");
     assert(f.id == i, "drop cleanup in loop iteration");

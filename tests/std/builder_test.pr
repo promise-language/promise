@@ -12,7 +12,7 @@ test_empty() `test(allow_leaks: true) {
   assert(b.to_string() == "", "empty builder");
 }
 
-test_len() `test(allow_leaks: true) {
+test_len() `test {
   Builder b = Builder();
   assert(b.len == 0, "initial len 0");
   b.write_string("hello")!;
@@ -59,7 +59,7 @@ test_clear_then_reuse() `test(allow_leaks: true) {
   assert(b.to_string() == "second", "reuse after clear");
 }
 
-test_write_returns_count() `test(allow_leaks: true) {
+test_write_returns_count() `test {
   Builder b = Builder();
   int n = b.write_string("hello")!;
   assert(n == 5, "write_string returns 5");

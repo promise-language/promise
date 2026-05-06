@@ -66,7 +66,7 @@ test_small_values() `test(allow_leaks: true) {
   assert(1e-10.to_string() == "1e-10", "1e-10 -> {1e-10.to_string()}");
 }
 
-test_bits_getter() `test(allow_leaks: true) {
+test_bits_getter() `test {
   assert(0.0.bits == 0u, "0.0 bits");
   assert(1.0.bits == 4607182418800017408u, "1.0 bits");
   assert((-0.0).bits == 9223372036854775808u, "-0.0 bits");

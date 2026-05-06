@@ -50,7 +50,7 @@ testVariadicMultiple() `test(allow_leaks: true) {
   assert(sum(10, 20, 30, 40) == 100, "four variadic args");
 }
 
-testVariadicPassVector() `test(allow_leaks: true) {
+testVariadicPassVector() `test {
   int[] v = [1, 2, 3, 4, 5];
   assert(sum(v) == 15, "pass vector directly");
 }

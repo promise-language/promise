@@ -83,7 +83,7 @@ test_forin_int_key_enum_map() `test(allow_leaks: true) {
 
 // --- keys(), values() with content verification ---
 
-test_values_fieldless_enum_content() `test(allow_leaks: true) {
+test_values_fieldless_enum_content() `test {
   map[string, Color] m = {
     "a": Color.Red
   };
@@ -95,7 +95,7 @@ test_values_fieldless_enum_content() `test(allow_leaks: true) {
   }
 }
 
-test_values_data_enum_content() `test(allow_leaks: true) {
+test_values_data_enum_content() `test {
   map[string, Shape] m = {
     "c": Shape.Circle(radius: 7.0)
   };
@@ -109,7 +109,7 @@ test_values_data_enum_content() `test(allow_leaks: true) {
 
 // --- entries() with content verification ---
 
-test_entries_fieldless_enum_content() `test(allow_leaks: true) {
+test_entries_fieldless_enum_content() `test {
   map[string, Color] m = {
     "x": Color.Blue
   };
@@ -123,7 +123,7 @@ test_entries_fieldless_enum_content() `test(allow_leaks: true) {
   }
 }
 
-test_entries_data_enum_content() `test(allow_leaks: true) {
+test_entries_data_enum_content() `test {
   map[string, Shape] m = {
     "s": Shape.Rect(w: 4.0, h: 5.0)
   };

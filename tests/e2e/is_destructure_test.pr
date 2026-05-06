@@ -9,6 +9,7 @@ enum Shape {
   Point,
 }
 
+// flaky leak — sometimes leaks depending on timing
 test_enum_circle() `test(allow_leaks: true) {
   Shape s = Shape.Circle(radius: 5.0);
   if s is Circle(r) {
@@ -18,7 +19,7 @@ test_enum_circle() `test(allow_leaks: true) {
   }
 }
 
-test_enum_rectangle() `test(allow_leaks: true) {
+test_enum_rectangle() `test {
   Shape s = Shape.Rectangle(width: 3.0, height: 4.0);
   if s is Rectangle(w, h) {
     assert(w == 3.0, "width should be 3.0");
@@ -28,14 +29,14 @@ test_enum_rectangle() `test(allow_leaks: true) {
   }
 }
 
-test_enum_no_match() `test(allow_leaks: true) {
+test_enum_no_match() `test {
   Shape s = Shape.Point;
   if s is Circle(r) {
     assert(false, "Point should not match Circle");
   }
 }
 
-test_enum_underscore_binding() `test(allow_leaks: true) {
+test_enum_underscore_binding() `test {
   Shape s = Shape.Rectangle(width: 10.0, height: 20.0);
   if s is Rectangle(_, h) {
     assert(h == 20.0, "height should be 20.0");
@@ -53,7 +54,7 @@ enum Option[T] {
   None,
 }
 
-test_generic_enum_int() `test(allow_leaks: true) {
+test_generic_enum_int() `test {
   Option[int] opt = Option[int].Some(value: 42);
   if opt is Some(val) {
     assert(val == 42, "value should be 42");
@@ -62,7 +63,7 @@ test_generic_enum_int() `test(allow_leaks: true) {
   }
 }
 
-test_generic_enum_string() `test(allow_leaks: true) {
+test_generic_enum_string() `test {
   Option[string] opt = Option[string].Some(value: "hello");
   if opt is Some(s) {
     assert(s == "hello", "value should be hello");
@@ -71,7 +72,7 @@ test_generic_enum_string() `test(allow_leaks: true) {
   }
 }
 
-test_generic_enum_none_no_match() `test(allow_leaks: true) {
+test_generic_enum_none_no_match() `test {
   Option[int] opt = Option[int].None;
   if opt is Some(val) {
     assert(false, "None should not match Some");
@@ -83,7 +84,7 @@ enum Result[T] {
   Err(string message),
 }
 
-test_generic_result_ok() `test(allow_leaks: true) {
+test_generic_result_ok() `test {
   Result[int] r = Result[int].Ok(value: 100);
   if r is Ok(v) {
     assert(v == 100, "value should be 100");
@@ -92,7 +93,7 @@ test_generic_result_ok() `test(allow_leaks: true) {
   }
 }
 
-test_generic_result_err() `test(allow_leaks: true) {
+test_generic_result_err() `test {
   Result[int] r = Result[int].Err(message: "failed");
   if r is Err(msg) {
     assert(msg == "failed", "message should be 'failed'");
@@ -101,7 +102,7 @@ test_generic_result_err() `test(allow_leaks: true) {
   }
 }
 
-test_generic_result_no_match() `test(allow_leaks: true) {
+test_generic_result_no_match() `test {
   Result[int] r = Result[int].Err(message: "oops");
   if r is Ok(v) {
     assert(false, "Err should not match Ok");
@@ -152,13 +153,13 @@ test_named_no_match() `test(allow_leaks: true) {
 // Part 4: As plain expression (no binding)
 // =============================================================================
 
-test_as_expression() `test(allow_leaks: true) {
+test_as_expression() `test {
   Option[int] opt = Option[int].Some(value: 99);
   bool is_some = opt is Some(v);
   assert(is_some, "should be Some");
 }
 
-test_as_expression_false() `test(allow_leaks: true) {
+test_as_expression_false() `test {
   Option[int] opt = Option[int].None;
   bool is_some = opt is Some(v);
   assert(!is_some, "should not be Some");
@@ -168,7 +169,7 @@ test_as_expression_false() `test(allow_leaks: true) {
 // Part 5: Else branch works
 // =============================================================================
 
-test_else_branch() `test(allow_leaks: true) {
+test_else_branch() `test {
   Shape s = Shape.Point;
   string result = "none";
   if s is Circle(r) {
@@ -187,7 +188,7 @@ enum Color {
   Red, Green, Blue, Custom(int r, int g, int b),
 }
 
-test_multi_field() `test(allow_leaks: true) {
+test_multi_field() `test {
   Color c = Color.Custom(r: 255, g: 128, b: 0);
   if c is Custom(r, g, b) {
     assert(r == 255, "r should be 255");
@@ -202,7 +203,7 @@ test_multi_field() `test(allow_leaks: true) {
 // Part 7: Binding does not clobber outer variables
 // =============================================================================
 
-test_binding_shadow_restore() `test(allow_leaks: true) {
+test_binding_shadow_restore() `test {
   int val = 100;
   Option[int] opt = Option[int].Some(value: 42);
   if opt is Some(val) {
@@ -215,7 +216,7 @@ test_binding_shadow_restore() `test(allow_leaks: true) {
 // Part 8: Underscore variations
 // =============================================================================
 
-test_all_underscores() `test(allow_leaks: true) {
+test_all_underscores() `test {
   Shape s = Shape.Rectangle(width: 1.0, height: 2.0);
   if s is Rectangle(_, _) {
     assert(true, "should match Rect with all underscores");
@@ -224,7 +225,7 @@ test_all_underscores() `test(allow_leaks: true) {
   }
 }
 
-test_trailing_underscore() `test(allow_leaks: true) {
+test_trailing_underscore() `test {
   Shape s = Shape.Rectangle(width: 7.0, height: 8.0);
   if s is Rectangle(w, _) {
     assert(w == 7.0, "w should be 7.0");
@@ -242,12 +243,12 @@ check_opt(Option[int] o) int {
   return -1;
 }
 
-test_return_from_then_block() `test(allow_leaks: true) {
+test_return_from_then_block() `test {
   assert(check_opt(Option[int].Some(value: 21)) == 42, "should return 42");
   assert(check_opt(Option[int].None) == -1, "should return -1");
 }
 
-test_break_in_loop() `test(allow_leaks: true) {
+test_break_in_loop() `test {
   Option[int][] items = [Option[int].None, Option[int].Some(value: 42), Option[int].None];
   int found = -1;
   for item in items {
@@ -259,7 +260,7 @@ test_break_in_loop() `test(allow_leaks: true) {
   assert(found == 42, "found should be 42");
 }
 
-test_continue_in_loop() `test(allow_leaks: true) {
+test_continue_in_loop() `test {
   Option[int][] items = [Option[int].Some(value: 1), Option[int].None, Option[int].Some(value: 3)];
   int total = 0;
   for item in items {
@@ -271,7 +272,7 @@ test_continue_in_loop() `test(allow_leaks: true) {
   assert(total == 4, "total should be 4");
 }
 
-test_nested_destructure() `test(allow_leaks: true) {
+test_nested_destructure() `test {
   Option[int] a = Option[int].Some(value: 10);
   Result[int] b = Result[int].Ok(value: 20);
   if a is Some(x) {
@@ -282,7 +283,7 @@ test_nested_destructure() `test(allow_leaks: true) {
   }
 }
 
-test_sequential_on_same_var() `test(allow_leaks: true) {
+test_sequential_on_same_var() `test {
   Shape s = Shape.Circle(radius: 5.0);
   string result = "none";
   if s is Circle(r) {
@@ -304,7 +305,7 @@ describe(Shape s) string {
   }
 }
 
-test_else_if_chain() `test(allow_leaks: true) {
+test_else_if_chain() `test {
   assert(describe(Shape.Circle(radius: 1.0)) == "circle", "circle");
   assert(describe(Shape.Rectangle(width: 1.0, height: 2.0)) == "rect", "rect");
   assert(describe(Shape.Point) == "other", "other");
@@ -364,7 +365,7 @@ type Vec2 {
   f64 y `value;
 }
 
-test_value_type_destructure() `test(allow_leaks: true) {
+test_value_type_destructure() `test {
   Vec2 v = Vec2(x: 3.0, y: 4.0);
   if v is Vec2(x, y) {
     assert(x == 3.0, "x should be 3.0");
@@ -400,7 +401,7 @@ enum Flag {
   Unset,
 }
 
-test_enum_bool_field() `test(allow_leaks: true) {
+test_enum_bool_field() `test {
   Flag f = Flag.Set(on: true);
   if f is Set(v) {
     assert(v, "v should be true");
@@ -411,7 +412,7 @@ enum Wrapper {
   Value(int x),
 }
 
-test_single_variant_enum() `test(allow_leaks: true) {
+test_single_variant_enum() `test {
   Wrapper w = Wrapper.Value(x: 99);
   if w is Value(x) {
     assert(x == 99, "x should be 99");
@@ -435,7 +436,7 @@ sum_pair(Pair p) int {
   return 0;
 }
 
-test_compute_return_value() `test(allow_leaks: true) {
+test_compute_return_value() `test {
   assert(sum_pair(Pair.V(a: 3, b: 7)) == 10, "sum should be 10");
 }
 
@@ -452,7 +453,7 @@ enum WrapperEnum {
   None,
 }
 
-test_variant_priority_over_type() `test(allow_leaks: true) {
+test_variant_priority_over_type() `test {
   WrapperEnum w = WrapperEnum.Box(v: 42);
   if w is Box(v) {
     assert(v == 42, "should destructure enum variant, not named type");
@@ -465,7 +466,7 @@ test_variant_priority_over_type() `test(allow_leaks: true) {
 // Part 15: Generic Result — Err has non-T field
 // =============================================================================
 
-test_result_err_string_field() `test(allow_leaks: true) {
+test_result_err_string_field() `test {
   Result[int] r = Result[int].Err(message: "whoops");
   if r is Err(msg) {
     // msg should be string (not int), verify string operations work

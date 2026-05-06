@@ -79,7 +79,7 @@ test_f64_precision() `test(allow_leaks: true) {
   assert(pi.to_string(precision: 0) == "3", "pi prec 0");
 }
 
-test_f64_precision_rounding() `test(allow_leaks: true) {
+test_f64_precision_rounding() `test {
   f64 x = 2.555;
   // 2.555 in f64 is actually slightly less than 2.555, so rounds down to 2.55
   // But the naive algorithm may round up — just test it gives a reasonable result
@@ -104,7 +104,7 @@ test_f64_negative_precision() `test(allow_leaks: true) {
   assert(x.to_string(precision: 2) == "-3.14", "neg prec 2");
 }
 
-test_f64_scientific() `test(allow_leaks: true) {
+test_f64_scientific() `test {
   f64 x = 3.14159265;
   string s = x.to_string(scientific: true);
   assert(s.contains("e+"), "sci has e+");
@@ -143,7 +143,7 @@ test_f64_default_unchanged() `test(allow_leaks: true) {
 
 // === f32 formatting ===
 
-test_f32_precision() `test(allow_leaks: true) {
+test_f32_precision() `test {
   f32 v = 3.14f32;
   string result = v.to_string(precision: 1);
   assert(result == "3.1", "f32 prec 1");

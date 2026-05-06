@@ -954,7 +954,7 @@ count_gen(int n) stream[int] {
   }
 }
 
-test_generator_still_works() `test(allow_leaks: true) {
+test_generator_still_works() `test {
   int sum = 0;
   for x in count_gen(5) {
     sum = sum + x;
@@ -962,7 +962,7 @@ test_generator_still_works() `test(allow_leaks: true) {
   assert(sum == 10, "generator: 0+1+2+3+4=10");
 }
 
-test_generator_empty() `test(allow_leaks: true) {
+test_generator_empty() `test {
   int count = 0;
   for _ in count_gen(0) {
     count = count + 1;
@@ -970,7 +970,7 @@ test_generator_empty() `test(allow_leaks: true) {
   assert(count == 0, "empty generator yields nothing");
 }
 
-test_generator_with_index() `test(allow_leaks: true) {
+test_generator_with_index() `test {
   int last_idx = -1;
   int last_val = -1;
   for i, x in count_gen(3) {
@@ -981,7 +981,7 @@ test_generator_with_index() `test(allow_leaks: true) {
   assert(last_val == 2, "gen last val=2");
 }
 
-test_generator_break() `test(allow_leaks: true) {
+test_generator_break() `test {
   int sum = 0;
   for x in count_gen(100) {
     if x >= 5 {
@@ -992,7 +992,7 @@ test_generator_break() `test(allow_leaks: true) {
   assert(sum == 10, "gen break: 0+1+2+3+4=10");
 }
 
-test_generator_continue() `test(allow_leaks: true) {
+test_generator_continue() `test {
   int sum = 0;
   for x in count_gen(6) {
     if x % 2 == 0 {

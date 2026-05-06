@@ -22,7 +22,7 @@ test_optional_user_type_some() `test(allow_leaks: true) {
   assert("{p}" == "(5, 6)", "optional user type some");
 }
 
-test_optional_user_type_none() `test(allow_leaks: true) {
+test_optional_user_type_none() `test {
   Pt? p = none;
   assert("{p}" == "none", "optional user type none");
 }
@@ -130,7 +130,7 @@ test_value_type_optional_some() `test(allow_leaks: true) {
   assert("{c}" == "rgb(0,0,0)", "optional value type some");
 }
 
-test_value_type_optional_none() `test(allow_leaks: true) {
+test_value_type_optional_none() `test {
   Color? c = none;
   assert("{c}" == "none", "optional value type none");
 }

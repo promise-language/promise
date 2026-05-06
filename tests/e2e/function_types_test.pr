@@ -2,6 +2,7 @@
 // Covers grammar fixes: funcTypeReturn rule, zero-arg function types,
 // suffix operators on return position.
 // --- Zero-arg function type returning int ---
+// flaky leak — sometimes leaks depending on timing
 test_zero_arg_fn_type() `test(allow_leaks: true) {
   () -> int getter = || -> int {
     return 42;
@@ -10,7 +11,7 @@ test_zero_arg_fn_type() `test(allow_leaks: true) {
 }
 
 // --- Zero-arg function type returning optional ---
-test_fn_type_return_optional() `test(allow_leaks: true) {
+test_fn_type_return_optional() `test {
   () -> int? maybe = || -> int? {
     return 99;
   };
@@ -22,7 +23,7 @@ test_fn_type_return_optional() `test(allow_leaks: true) {
 }
 
 // --- Function type returning optional none ---
-test_fn_type_return_optional_none() `test(allow_leaks: true) {
+test_fn_type_return_optional_none() `test {
   () -> int? empty = || -> int? {
     return none;
   };
@@ -32,7 +33,7 @@ test_fn_type_return_optional_none() `test(allow_leaks: true) {
 }
 
 // --- Function type returning vector ---
-test_fn_type_return_vector() `test(allow_leaks: true) {
+test_fn_type_return_vector() `test {
   () -> int[] maker = || -> int[] {
     return[1, 2, 3];
   };
@@ -43,21 +44,21 @@ test_fn_type_return_vector() `test(allow_leaks: true) {
 }
 
 // --- Single-param function type ---
-test_single_param_fn_type() `test(allow_leaks: true) {
+test_single_param_fn_type() `test {
   (int) -> int doubler = |int x| -> x * 2;
   assert(doubler(5) == 10, "5*2=10");
   assert(doubler(0) == 0, "0*2=0");
 }
 
 // --- Multi-param function type ---
-test_multi_param_fn_type() `test(allow_leaks: true) {
+test_multi_param_fn_type() `test {
   (int, int) -> int adder = |int a, int b| -> a + b;
   assert(adder(3, 4) == 7, "3+4=7");
   assert(adder(-1, 1) == 0, "-1+1=0");
 }
 
 // --- Function type returning bool ---
-test_fn_type_return_bool() `test(allow_leaks: true) {
+test_fn_type_return_bool() `test {
   (int) -> bool is_positive = |int x| -> x > 0;
   assert(is_positive(5) == true, "5 is positive");
   assert(is_positive(-1) == false, "-1 not positive");
@@ -72,7 +73,7 @@ test_fn_type_return_string() `test(allow_leaks: true) {
 }
 
 // --- Higher-order: function taking function param ---
-test_fn_taking_fn_param() `test(allow_leaks: true) {
+test_fn_taking_fn_param() `test {
   int result = apply_fn(|int x| -> x + 10, 5);
   assert(result == 15, "5+10=15");
 }
@@ -82,7 +83,7 @@ apply_fn((int) -> int f, int x) int {
 }
 
 // --- Higher-order: function returning function ---
-test_fn_returning_fn() `test(allow_leaks: true) {
+test_fn_returning_fn() `test {
   (int) -> int add5 = make_adder(5);
   assert(add5(10) == 15, "10+5=15");
   assert(add5(0) == 5, "0+5=5");
@@ -95,7 +96,7 @@ make_adder(int n)(int) -> int {
 }
 
 // --- Apply twice: function type used in composition ---
-test_apply_twice() `test(allow_leaks: true) {
+test_apply_twice() `test {
   int result = apply_twice(|int x| -> x * 2, 3);
   assert(result == 12, "(3*2)*2=12");
 }
@@ -105,7 +106,7 @@ apply_twice((int) -> int f, int x) int {
 }
 
 // --- Function type stored and called later ---
-test_fn_stored_in_variable() `test(allow_leaks: true) {
+test_fn_stored_in_variable() `test {
   (int) -> int fn = |int x| -> x * x;
   int a = fn(3);
   int b = fn(4);
@@ -116,7 +117,7 @@ test_fn_stored_in_variable() `test(allow_leaks: true) {
 }
 
 // --- Function type with captured values ---
-test_fn_with_capture() `test(allow_leaks: true) {
+test_fn_with_capture() `test {
   int base = 100;
   (int) -> int offset = move |int x| -> base + x;
   assert(offset(1) == 101, "100+1=101");

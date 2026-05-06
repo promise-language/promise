@@ -602,12 +602,12 @@ parse_value_object_test() `test(allow_leaks: true) {
   }
 }
 
-format_value_null_test() `test(allow_leaks: true) {
+format_value_null_test() `test {
   string s = format_value(JsonValue.Null)!;
   assert(s == "null", "format null");
 }
 
-format_value_bool_test() `test(allow_leaks: true) {
+format_value_bool_test() `test {
   string s = format_value(JsonValue.Bool(true))!;
   assert(s == "true", "format true");
 }
@@ -704,7 +704,7 @@ parse_value_empty_object_test() `test(allow_leaks: true) {
   }
 }
 
-format_value_false_test() `test(allow_leaks: true) {
+format_value_false_test() `test {
   string s = format_value(JsonValue.Bool(false))!;
   assert(s == "false", "format false");
 }
@@ -960,7 +960,7 @@ format_value_pretty_test() `test(allow_leaks: true) {
   assert(s.contains("  \"key\""), "format_value_pretty has indented key");
 }
 
-encode_pretty_empty_object_test() `test(allow_leaks: true) {
+encode_pretty_empty_object_test() `test {
   JsonEncoder enc = JsonEncoder(pretty: true);
   enc.begin_object(0)!;
   enc.end_object()!;
@@ -970,7 +970,7 @@ encode_pretty_empty_object_test() `test(allow_leaks: true) {
   assert(!s.contains("  "), "pretty empty object no indented content");
 }
 
-encode_pretty_empty_array_test() `test(allow_leaks: true) {
+encode_pretty_empty_array_test() `test {
   JsonEncoder enc = JsonEncoder(pretty: true);
   enc.begin_array(0)!;
   enc.end_array()!;
@@ -1171,25 +1171,25 @@ format_value_number_negative_test() `test(allow_leaks: true) {
 
 // Type-check getters
 
-is_null_test() `test(allow_leaks: true) {
+is_null_test() `test {
   assert(JsonValue.Null.is_null, "null is_null");
   assert(!JsonValue.Bool(true).is_null, "bool not is_null");
   assert(!JsonValue.Number(1.0).is_null, "number not is_null");
 }
 
-is_bool_test() `test(allow_leaks: true) {
+is_bool_test() `test {
   assert(JsonValue.Bool(true).is_bool, "bool is_bool");
   assert(!JsonValue.Null.is_bool, "null not is_bool");
   assert(!JsonValue.Str("x").is_bool, "str not is_bool");
 }
 
-is_number_test() `test(allow_leaks: true) {
+is_number_test() `test {
   assert(JsonValue.Number(42.0).is_number, "number is_number");
   assert(!JsonValue.Null.is_number, "null not is_number");
   assert(!JsonValue.Bool(false).is_number, "bool not is_number");
 }
 
-is_string_test() `test(allow_leaks: true) {
+is_string_test() `test {
   assert(JsonValue.Str("hello").is_string, "str is_string");
   assert(!JsonValue.Null.is_string, "null not is_string");
   assert(!JsonValue.Number(0.0).is_string, "number not is_string");
@@ -1209,7 +1209,7 @@ is_object_test() `test(allow_leaks: true) {
 
 // Value extraction methods
 
-as_bool_test() `test(allow_leaks: true) {
+as_bool_test() `test {
   bool? b = JsonValue.Bool(true).as_bool();
   assert(b is present, "as_bool present");
   assert(b! == true, "as_bool value");
@@ -1218,7 +1218,7 @@ as_bool_test() `test(allow_leaks: true) {
   assert(b2 is absent, "as_bool absent on null");
 }
 
-as_number_test() `test(allow_leaks: true) {
+as_number_test() `test {
   f64? n = JsonValue.Number(3.14).as_number();
   assert(n is present, "as_number present");
   assert(n! > 3.13 && n! < 3.15, "as_number value");
@@ -1227,7 +1227,7 @@ as_number_test() `test(allow_leaks: true) {
   assert(n2 is absent, "as_number absent on string");
 }
 
-as_string_test() `test(allow_leaks: true) {
+as_string_test() `test {
   string? s = JsonValue.Str("hello").as_string();
   assert(s is present, "as_string present");
   assert(s! == "hello", "as_string value");
@@ -1390,14 +1390,14 @@ chained_access_test() `test(allow_leaks: true) {
 
 // ── Edge cases for value extraction ──────────────────────────────────────────
 
-as_bool_false_test() `test(allow_leaks: true) {
+as_bool_false_test() `test {
   // Verify as_bool returns false (not just "present") for Bool(false)
   bool? b = JsonValue.Bool(false).as_bool();
   assert(b is present, "as_bool(false) present");
   assert(b! == false, "as_bool(false) value is false");
 }
 
-as_number_edge_cases_test() `test(allow_leaks: true) {
+as_number_edge_cases_test() `test {
   // Zero
   f64? z = JsonValue.Number(0.0).as_number();
   assert(z is present, "as_number(0) present");
@@ -1409,7 +1409,7 @@ as_number_edge_cases_test() `test(allow_leaks: true) {
   assert(neg! == -42.5, "as_number(-42.5) value");
 }
 
-as_string_empty_test() `test(allow_leaks: true) {
+as_string_empty_test() `test {
   string? s = JsonValue.Str("").as_string();
   assert(s is present, "as_string empty present");
   assert(s! == "", "as_string empty value");

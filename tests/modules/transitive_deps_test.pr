@@ -24,7 +24,7 @@ test_geometry_clamped_uses_utils() `test(allow_leaks: true) {
   assert(c.y == 0, "clamped y to 0");
 }
 
-test_direct_utils_access() `test(allow_leaks: true) {
+test_direct_utils_access() `test {
   // We also import utils directly — should reuse the same loaded module
   assert(utils.abs(0 - 42) == 42, "direct utils.abs works");
   assert(utils.clamp(5, 0, 3) == 3, "direct utils.clamp works");

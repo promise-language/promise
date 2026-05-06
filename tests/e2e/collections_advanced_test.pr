@@ -1,5 +1,6 @@
 // Advanced collection tests: vectors, maps, nested operations, edge cases.
 // --- vector: push many ---
+// flaky leak — sometimes leaks depending on timing
 test_vector_push_many() `test(allow_leaks: true) {
   int[] v = [];
   for i in 0..100 {
@@ -12,7 +13,7 @@ test_vector_push_many() `test(allow_leaks: true) {
 
 // --- vector: pop until empty ---
 
-test_vector_pop_all() `test(allow_leaks: true) {
+test_vector_pop_all() `test {
   int[] v = [1, 2, 3, 4, 5];
   int sum = 0;
   while v.len > 0 {
@@ -26,7 +27,7 @@ test_vector_pop_all() `test(allow_leaks: true) {
 
 // --- vector: contains after modifications ---
 
-test_vector_contains_dynamic() `test(allow_leaks: true) {
+test_vector_contains_dynamic() `test {
   int[] v = [10, 20, 30];
   assert(v.contains(20), "contains 20");
   v.remove(1);
@@ -37,7 +38,7 @@ test_vector_contains_dynamic() `test(allow_leaks: true) {
 
 // --- vector: remove from front ---
 
-test_vector_remove_front() `test(allow_leaks: true) {
+test_vector_remove_front() `test {
   string[] v = ["a", "b", "c", "d"];
   v.remove(0);
   assert(v.len == 3, "3 after remove front");
@@ -46,7 +47,7 @@ test_vector_remove_front() `test(allow_leaks: true) {
 
 // --- vector: remove from back ---
 
-test_vector_remove_back() `test(allow_leaks: true) {
+test_vector_remove_back() `test {
   string[] v = ["a", "b", "c", "d"];
   v.remove(3);
   assert(v.len == 3, "3 after remove back");
@@ -55,7 +56,7 @@ test_vector_remove_back() `test(allow_leaks: true) {
 
 // --- vector: index assignment ---
 
-test_vector_index_assign() `test(allow_leaks: true) {
+test_vector_index_assign() `test {
   int[] v = [1, 2, 3];
   v[0] = 10;
   v[1] = 20;
@@ -67,7 +68,7 @@ test_vector_index_assign() `test(allow_leaks: true) {
 
 // --- vector of strings ---
 
-test_vector_strings() `test(allow_leaks: true) {
+test_vector_strings() `test {
   string[] words = [];
   words.push("hello");
   words.push("world");
@@ -79,7 +80,7 @@ test_vector_strings() `test(allow_leaks: true) {
 
 // --- vector: for-in iteration ---
 
-test_vector_iteration() `test(allow_leaks: true) {
+test_vector_iteration() `test {
   int[] nums = [10, 20, 30, 40, 50];
   int sum = 0;
   for n in nums {
@@ -101,7 +102,7 @@ test_vector_index_iteration() `test(allow_leaks: true) {
 
 // --- map: basic operations ---
 
-test_map_basic() `test(allow_leaks: true) {
+test_map_basic() `test {
   map[string, int] m = {
     "one": 1, "two": 2, "three": 3
   };
@@ -113,7 +114,7 @@ test_map_basic() `test(allow_leaks: true) {
 
 // --- map: insert and update ---
 
-test_map_insert_update() `test(allow_leaks: true) {
+test_map_insert_update() `test {
   map[string, int] m = {:};
   m["a"] = 1;
   m["b"] = 2;
@@ -127,7 +128,7 @@ test_map_insert_update() `test(allow_leaks: true) {
 
 // --- map: remove ---
 
-test_map_remove_all() `test(allow_leaks: true) {
+test_map_remove_all() `test {
   map[string, int] m = {
     "x": 1, "y": 2, "z": 3
   };
@@ -139,7 +140,7 @@ test_map_remove_all() `test(allow_leaks: true) {
 
 // --- map: keys and values ---
 
-test_map_keys_values() `test(allow_leaks: true) {
+test_map_keys_values() `test {
   map[string, int] m = {
     "a": 10
   };
@@ -153,7 +154,7 @@ test_map_keys_values() `test(allow_leaks: true) {
 
 // --- map: int keys ---
 
-test_map_int_keys() `test(allow_leaks: true) {
+test_map_int_keys() `test {
   map[int, string] m = {
     1: "one", 2: "two", 3: "three"
   };
@@ -188,7 +189,7 @@ test_map_large() `test(allow_leaks: true) {
 
 // --- map: iteration with for-in ---
 
-test_map_values_sum() `test(allow_leaks: true) {
+test_map_values_sum() `test {
   map[string, int] m = {
     "a": 1, "b": 2, "c": 3
   };
@@ -202,14 +203,14 @@ test_map_values_sum() `test(allow_leaks: true) {
 
 // --- empty collection edge cases ---
 
-test_empty_vector() `test(allow_leaks: true) {
+test_empty_vector() `test {
   int[] v = [];
   assert(v.len == 0, "empty vector len = 0");
   assert(v.is_empty, "empty vector is_empty");
   assert(!v.contains(1), "empty does not contain 1");
 }
 
-test_empty_map() `test(allow_leaks: true) {
+test_empty_map() `test {
   map[string, int] m = {:};
   assert(m.len == 0, "empty map len = 0");
   assert(m.is_empty, "empty map is_empty");
@@ -218,7 +219,7 @@ test_empty_map() `test(allow_leaks: true) {
 
 // --- vector: compound index assignment ---
 
-test_compound_index_assign() `test(allow_leaks: true) {
+test_compound_index_assign() `test {
   int[] v = [10, 20, 30];
   v[0] += 5;
   v[1] -= 5;
@@ -230,7 +231,7 @@ test_compound_index_assign() `test(allow_leaks: true) {
 
 // --- mixed types in map values ---
 
-test_map_bool_values() `test(allow_leaks: true) {
+test_map_bool_values() `test {
   map[string, bool] flags = {
     "debug": true, "verbose": false, "trace": true
   };

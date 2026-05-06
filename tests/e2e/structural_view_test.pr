@@ -36,11 +36,11 @@ test_f64_to_structural() `test(allow_leaks: true) {
   assert(display(3.14) == "3.14", "f64 to Showable");
 }
 
-test_string_to_structural() `test(allow_leaks: true) {
+test_string_to_structural() `test {
   assert(display("hello") == "hello", "string to Showable");
 }
 
-test_empty_string_to_structural() `test(allow_leaks: true) {
+test_empty_string_to_structural() `test {
   assert(display("") == "", "empty string to Showable");
 }
 
@@ -65,7 +65,7 @@ test_f64_var_to_structural() `test(allow_leaks: true) {
   assert(display(pi) == "3.14", "f64 variable to Showable");
 }
 
-test_string_var_to_structural() `test(allow_leaks: true) {
+test_string_var_to_structural() `test {
   string s = "world";
   assert(display(s) == "world", "string variable to Showable");
 }
@@ -211,7 +211,7 @@ run_logger(Logger ~l) {
   l.log("world")!;
 }
 
-test_user_type_void_failable_structural() `test(allow_leaks: true) {
+test_user_type_void_failable_structural() `test {
   LogSink sink = LogSink(entries: []);
   run_logger(sink);
   assert(sink.entries.len == 2, "logger received 2 messages");

@@ -166,7 +166,7 @@ _check_buf(u8[]~buf) bool {
   return buf[0] == 65u8 && buf[1] == 66u8 && buf[2] == 67u8;
 }
 
-test_mutref_vector_index_write() `test(allow_leaks: true) {
+test_mutref_vector_index_write() `test {
   u8[] buf = Vector[u8].filled(0u8, 3);
   _fill_buf(buf);
   assert(buf[0] == 65u8, "A");
@@ -174,7 +174,7 @@ test_mutref_vector_index_write() `test(allow_leaks: true) {
   assert(buf[2] == 67u8, "C");
 }
 
-test_mutref_vector_index_read() `test(allow_leaks: true) {
+test_mutref_vector_index_read() `test {
   u8[] buf = Vector[u8].filled(0u8, 3);
   _fill_buf(buf);
   assert(_check_buf(buf), "read through ~buf matches");

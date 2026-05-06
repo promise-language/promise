@@ -83,49 +83,50 @@ pair_sum(int first, int second) int {
 
 // === Function tests ===
 
+// flaky leak — sometimes leaks depending on timing
 test_func_all_positional() `test(allow_leaks: true) {
   assert(add(1, 2, 3) == 6, "add(1,2,3)");
   assert(add(0, 0, 0) == 0, "add(0,0,0)");
   assert(add(100, 200, 300) == 600, "add(100,200,300)");
 }
 
-test_func_all_named() `test(allow_leaks: true) {
+test_func_all_named() `test {
   assert(add(a: 1, b: 2, c: 3) == 6, "in-order named");
   assert(add(c: 3, b: 2, a: 1) == 6, "reverse named");
   assert(add(b: 20, a: 10, c: 30) == 60, "mixed order named");
 }
 
-test_func_positional_then_named() `test(allow_leaks: true) {
+test_func_positional_then_named() `test {
   assert(add(1, b: 2, c: 3) == 6, "1 pos + 2 named");
   assert(add(1, 2, c: 3) == 6, "2 pos + 1 named");
   assert(add(100, c: 300, b: 200) == 600, "pos + reordered named");
 }
 
-test_func_defaults_omit() `test(allow_leaks: true) {
+test_func_defaults_omit() `test {
   assert(compute(1) == 111, "omit y and z");
   assert(compute(1, 2) == 103, "omit z only");
   assert(compute(1, 2, 3) == 6, "all provided positional");
 }
 
-test_func_defaults_named() `test(allow_leaks: true) {
+test_func_defaults_named() `test {
   assert(compute(x: 1) == 111, "x named, y/z default");
   assert(compute(x: 1, z: 50) == 61, "override z, keep y default");
   assert(compute(z: 1000, x: 1, y: 2) == 1003, "all named reordered");
   assert(compute(x: 5, y: 5) == 110, "override y, keep z default");
 }
 
-test_func_defaults_mixed() `test(allow_leaks: true) {
+test_func_defaults_mixed() `test {
   assert(compute(1, z: 50) == 61, "pos x + named z");
   assert(compute(1, 20, z: 300) == 321, "pos x,y + named z");
   assert(compute(1, y: 20) == 121, "pos x + named y, z default");
 }
 
-test_func_single_arg() `test(allow_leaks: true) {
+test_func_single_arg() `test {
   assert(identity(42) == 42, "positional");
   assert(identity(val: 42) == 42, "named");
 }
 
-test_func_two_args() `test(allow_leaks: true) {
+test_func_two_args() `test {
   assert(pair_sum(3, 7) == 10, "positional");
   assert(pair_sum(first: 3, second: 7) == 10, "named in-order");
   assert(pair_sum(second: 7, first: 3) == 10, "named reversed");
@@ -314,7 +315,7 @@ test_inheritance_default_override() `test(allow_leaks: true) {
 
 // === Enum variant tests ===
 
-test_enum_variant_positional() `test(allow_leaks: true) {
+test_enum_variant_positional() `test {
   Shape s = Shape.Rect(10.0, 20.0);
   f64 w = match s {
     Shape.Rect(w, h) => w, Shape.Circle(r) => 0.0,
@@ -326,7 +327,7 @@ test_enum_variant_positional() `test(allow_leaks: true) {
   assert(h == 20.0, "h");
 }
 
-test_enum_variant_named_reordered() `test(allow_leaks: true) {
+test_enum_variant_named_reordered() `test {
   Shape s = Shape.Rect(h: 30.0, w: 15.0);
   f64 w = match s {
     Shape.Rect(w, h) => w, Shape.Circle(r) => 0.0,
@@ -338,7 +339,7 @@ test_enum_variant_named_reordered() `test(allow_leaks: true) {
   assert(h == 30.0, "h reordered");
 }
 
-test_enum_variant_single_named() `test(allow_leaks: true) {
+test_enum_variant_single_named() `test {
   Shape s = Shape.Circle(radius: 3.14);
   f64 r = match s {
     Shape.Circle(r) => r, Shape.Rect(w, h) => 0.0,
@@ -346,7 +347,7 @@ test_enum_variant_single_named() `test(allow_leaks: true) {
   assert(r == 3.14, "radius");
 }
 
-test_enum_variant_single_positional() `test(allow_leaks: true) {
+test_enum_variant_single_positional() `test {
   Shape s = Shape.Circle(2.72);
   f64 r = match s {
     Shape.Circle(r) => r, Shape.Rect(w, h) => 0.0,
@@ -354,7 +355,7 @@ test_enum_variant_single_positional() `test(allow_leaks: true) {
   assert(r == 2.72, "radius positional");
 }
 
-test_enum_variant_mixed() `test(allow_leaks: true) {
+test_enum_variant_mixed() `test {
   Shape s = Shape.Rect(5.0, h: 25.0);
   f64 w = match s {
     Shape.Rect(w, h) => w, Shape.Circle(r) => 0.0,
@@ -368,7 +369,7 @@ test_enum_variant_mixed() `test(allow_leaks: true) {
 
 // === Nested/chained call tests ===
 
-test_nested_named_args() `test(allow_leaks: true) {
+test_nested_named_args() `test {
   // Named args in nested function calls
   int result = add(a: identity(val: 10), b: identity(val: 20), c: identity(val: 30));
   assert(result == 60, "nested named");
@@ -399,13 +400,13 @@ annotated_default(int x `doc("value"), int y `doc("multiplier") = 10) int {
   return x * y;
 }
 
-test_param_annotation_function() `test(allow_leaks: true) {
+test_param_annotation_function() `test {
   assert(annotated_add(3, 7) == 10, "positional");
   assert(annotated_add(a: 3, b: 7) == 10, "named");
   assert(annotated_add(b: 7, a: 3) == 10, "reordered");
 }
 
-test_param_annotation_with_default() `test(allow_leaks: true) {
+test_param_annotation_with_default() `test {
   assert(annotated_default(5) == 50, "default y");
   assert(annotated_default(5, y: 3) == 15, "named y");
   assert(annotated_default(x: 5) == 50, "named x, default y");

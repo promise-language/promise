@@ -20,6 +20,7 @@ enum Wrapper[T] {
   get is_empty bool => !this.is_some;
 }
 
+// flaky leak — sometimes leaks depending on timing
 test_generic_enum_getter() `test(allow_leaks: true) {
   Wrapper[int] s = Wrapper[int].Some(value: 42);
   assert(s.is_some == true, "Some is some");
@@ -30,7 +31,7 @@ test_generic_enum_getter() `test(allow_leaks: true) {
   assert(e.is_empty == true, "Empty is empty");
 }
 
-test_generic_enum_getter_string() `test(allow_leaks: true) {
+test_generic_enum_getter_string() `test {
   Wrapper[string] s = Wrapper[string].Some(value: "hello");
   assert(s.is_some == true, "string Some is some");
 
@@ -58,7 +59,7 @@ enum Either[A, B] {
   is_right(&this) bool => !this.is_left();
 }
 
-test_generic_enum_method() `test(allow_leaks: true) {
+test_generic_enum_method() `test {
   Either[int, string] l = Either[int, string].Left(left: 42);
   assert(l.is_left() == true, "Left is left");
   assert(l.is_right() == false, "Left not right");
@@ -86,7 +87,7 @@ enum Box[T] {
   }
 }
 
-test_generic_enum_unwrap_or() `test(allow_leaks: true) {
+test_generic_enum_unwrap_or() `test {
   Box[int] full = Box[int].Full(item: 99);
   assert(full.unwrap_or(0) == 99, "Full unwraps to item");
 
@@ -94,7 +95,7 @@ test_generic_enum_unwrap_or() `test(allow_leaks: true) {
   assert(empty.unwrap_or(0) == 0, "Vacant uses fallback");
 }
 
-test_generic_enum_unwrap_or_string() `test(allow_leaks: true) {
+test_generic_enum_unwrap_or_string() `test {
   Box[string] full = Box[string].Full(item: "data");
   assert(full.unwrap_or("default") == "data", "Full unwraps string");
 
@@ -154,7 +155,7 @@ enum Trio[T] {
   }
 }
 
-test_trio_tag_name() `test(allow_leaks: true) {
+test_trio_tag_name() `test {
   assert(Trio[int].First(a: 1).tag_name() == "first", "First tag");
   assert(Trio[int].Second(b: 2).tag_name() == "second", "Second tag");
   assert(Trio[int].Third(c: 3).tag_name() == "third", "Third tag");
@@ -199,7 +200,7 @@ enum Pair[A, B] {
   has_both(&this) bool => this.has_first() && this.has_second();
 }
 
-test_pair_methods() `test(allow_leaks: true) {
+test_pair_methods() `test {
   Pair[int, string] both = Pair[int, string].Both(first: 1, second: "a");
   assert(both.has_first() == true, "Both has first");
   assert(both.has_second() == true, "Both has second");
@@ -313,7 +314,7 @@ enum Flag[T] {
   is_off(&this) bool => !this.is_on();
 }
 
-test_generic_enum_expression_body() `test(allow_leaks: true) {
+test_generic_enum_expression_body() `test {
   assert(Flag[int].On(data: 1).is_on() == true, "On is on");
   assert(Flag[int].On(data: 1).is_off() == false, "On not off");
   assert(Flag[int].Off.is_on() == false, "Off not on");
@@ -342,7 +343,7 @@ enum Holder[T] {
   }
 }
 
-test_generic_enum_calls_generic_free_func() `test(allow_leaks: true) {
+test_generic_enum_calls_generic_free_func() `test {
   Holder[int] full = Holder[int].Val(value: 42);
   assert(full.unwrap_or(0) == 42, "Val unwraps via identity");
 
@@ -350,7 +351,7 @@ test_generic_enum_calls_generic_free_func() `test(allow_leaks: true) {
   assert(empty.unwrap_or(99) == 99, "Empty uses fallback via identity");
 }
 
-test_generic_enum_calls_generic_free_func_string() `test(allow_leaks: true) {
+test_generic_enum_calls_generic_free_func_string() `test {
   Holder[string] full = Holder[string].Val(value: "hello");
   assert(full.unwrap_or("default") == "hello", "string Val unwraps via identity");
 

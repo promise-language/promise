@@ -28,27 +28,27 @@ reverse_basic() `test(allow_leaks: true) {
   assert(reverse("hello") == "olleh", "reverse basic");
 }
 
-reverse_empty() `test(allow_leaks: true) {
+reverse_empty() `test {
   assert(reverse("") == "", "reverse empty");
 }
 
-reverse_single() `test(allow_leaks: true) {
+reverse_single() `test {
   assert(reverse("x") == "x", "reverse single");
 }
 
-is_blank_spaces() `test(allow_leaks: true) {
+is_blank_spaces() `test {
   assert(is_blank("   "), "blank spaces");
 }
 
-is_blank_empty() `test(allow_leaks: true) {
+is_blank_empty() `test {
   assert(is_blank(""), "blank empty");
 }
 
-is_blank_tabs_newlines() `test(allow_leaks: true) {
+is_blank_tabs_newlines() `test {
   assert(is_blank("\t\n\r "), "blank tabs newlines");
 }
 
-is_blank_false() `test(allow_leaks: true) {
+is_blank_false() `test {
   assert(!is_blank("hi"), "not blank hi");
   assert(!is_blank(" x "), "not blank x");
 }

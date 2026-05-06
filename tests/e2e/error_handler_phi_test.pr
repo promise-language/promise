@@ -14,7 +14,7 @@ test_handler_int_recovery() `test(allow_leaks: true) {
   assert(v == 42, "int handler recovery");
 }
 
-test_handler_int_success() `test(allow_leaks: true) {
+test_handler_int_success() `test {
   int v = parse("1")? e {
     42;
   };
@@ -36,7 +36,7 @@ get_ok_name() string! {
   return "Alice";
 }
 
-test_handler_string_success() `test(allow_leaks: true) {
+test_handler_string_success() `test {
   string s = get_ok_name()? e {
     "anonymous";
   };
@@ -137,7 +137,7 @@ get_flag_ok() bool! {
   return true;
 }
 
-test_handler_bool_success() `test(allow_leaks: true) {
+test_handler_bool_success() `test {
   bool v = get_flag_ok()? e {
     false;
   };

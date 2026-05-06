@@ -39,12 +39,12 @@ test_parent() `test(allow_leaks: true) {
   assert(path.parent("/usr/local/bin") == "/usr/local", "parent");
 }
 
-test_parent_root_file() `test(allow_leaks: true) {
+test_parent_root_file() `test {
   string s = Platform.path_separator;
   assert(path.parent("/file.txt") == s, "parent root file");
 }
 
-test_parent_bare() `test(allow_leaks: true) {
+test_parent_bare() `test {
   assert(path.parent("file.txt") == ".", "parent bare filename");
 }
 
@@ -52,7 +52,7 @@ test_extension() `test(allow_leaks: true) {
   assert(path.extension("file.txt") == ".txt", "extension");
 }
 
-test_extension_none() `test(allow_leaks: true) {
+test_extension_none() `test {
   assert(path.extension("Makefile") == "", "extension none");
 }
 
@@ -64,12 +64,12 @@ test_stem_multi_dot() `test(allow_leaks: true) {
   assert(path.stem("archive.tar.gz") == "archive.tar", "stem multi dot");
 }
 
-test_is_absolute() `test(allow_leaks: true) {
+test_is_absolute() `test {
   assert(path.is_absolute("/usr/bin"), "is_absolute /usr/bin");
   assert(!path.is_absolute("relative/path"), "not absolute relative");
 }
 
-test_is_relative() `test(allow_leaks: true) {
+test_is_relative() `test {
   assert(path.is_relative("relative/path"), "is_relative relative");
   assert(!path.is_relative("/absolute"), "not relative /absolute");
 }
@@ -111,11 +111,11 @@ test_normalize_redundant() `test(allow_leaks: true) {
   assert(path.normalize("a//b///c") == "a" + s + "b" + s + "c", "normalize redundant separators");
 }
 
-test_normalize_empty() `test(allow_leaks: true) {
+test_normalize_empty() `test {
   assert(path.normalize("") == ".", "normalize empty");
 }
 
-test_normalize_root() `test(allow_leaks: true) {
+test_normalize_root() `test {
   string s = Platform.path_separator;
   assert(path.normalize("/") == s, "normalize root");
 }
@@ -231,7 +231,7 @@ test_split_edge_cases() `test(allow_leaks: true) {
   assert(r3[2] == ".hidden", "split hidden name");
 }
 
-test_path_separator() `test(allow_leaks: true) {
+test_path_separator() `test {
   // Platform.path_separator is used by join()
   string sep = Platform.path_separator;
   assert(sep == "/" || sep == "\\", "path separator valid");

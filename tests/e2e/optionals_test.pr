@@ -189,7 +189,7 @@ is_present_type() `test(allow_leaks: true) {
 
 // --- Narrowing with else ---
 
-narrowing_with_else() `test(allow_leaks: true) {
+narrowing_with_else() `test {
   string? cc = none;
   bool entered_else = false;
   if cc {

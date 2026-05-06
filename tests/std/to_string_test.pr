@@ -10,7 +10,7 @@ test_bool_to_string() `test(allow_leaks: true) {
   assert(false.to_string() == "false", "false");
 }
 
-test_string_to_string() `test(allow_leaks: true) {
+test_string_to_string() `test {
   assert("hello".to_string() == "hello", "string identity");
 }
 
@@ -38,14 +38,14 @@ test_char_to_string() `test(allow_leaks: true) {
   assert('0'.to_string() == "0", "char 0");
 }
 
-test_bytes_content() `test(allow_leaks: true) {
+test_bytes_content() `test {
   u8[] bytes = "AB".bytes();
   assert(bytes.len == 2, "len 2");
   assert((bytes[0] as! int) == 65, "A = 65");
   assert((bytes[1] as! int) == 66, "B = 66");
 }
 
-test_byte_at() `test(allow_leaks: true) {
+test_byte_at() `test {
   string s = "hello";
   u8 b = s.byte_at(0);
   assert((b as! int) == 104, "h = 104");

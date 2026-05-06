@@ -10,7 +10,7 @@ test_local_generic_with_module() `test(allow_leaks: true) {
   assert(b.value == 9, "Box wrapping module square");
 }
 
-test_module_func_in_generic_context() `test(allow_leaks: true) {
+test_module_func_in_generic_context() `test {
   int[] items = [add(1, 2), add(3, 4), square(5)];
   assert(items[0] == 3, "items[0] == add(1,2)");
   assert(items[1] == 7, "items[1] == add(3,4)");

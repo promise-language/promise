@@ -146,7 +146,7 @@ type Stack {
   }
 }
 
-test_stack() `test(allow_leaks: true) {
+test_stack() `test {
   int[] empty = [];
   s := Stack(items: empty);
   assert(s.is_empty(), "new stack is empty");

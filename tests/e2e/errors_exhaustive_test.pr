@@ -386,7 +386,7 @@ test_void_failable_handler_on_error() `test(allow_leaks: true) {
   assert(caught, "void failable handler triggered on error");
 }
 
-test_void_failable_handler_on_success() `test(allow_leaks: true) {
+test_void_failable_handler_on_success() `test {
   bool caught = false;
   void_success()? e {
     caught = true;
@@ -519,7 +519,7 @@ test_conditional_fail_true() `test(allow_leaks: true) {
   assert(catch_conditional(), "conditional fail triggers handler");
 }
 
-test_conditional_fail_false() `test(allow_leaks: true) {
+test_conditional_fail_false() `test {
   int v = conditional_fail(false)!;
   assert(v == 42, "conditional no-fail returns value");
 }

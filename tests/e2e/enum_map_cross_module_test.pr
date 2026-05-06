@@ -26,7 +26,7 @@ test_lookup_cross_module_enum_map() `test(allow_leaks: true) {
   assert(enc.to_string() == "\"hello\"", "encoded str");
 }
 
-test_keys_values_cross_module() `test(allow_leaks: true) {
+test_keys_values_cross_module() `test {
   map[string, json.JsonValue] m = {
     "a": json.JsonValue.Null,
     "b": json.JsonValue.Str(value: "hi"),
@@ -37,7 +37,7 @@ test_keys_values_cross_module() `test(allow_leaks: true) {
   assert(vals.len == 2, "vals len");
 }
 
-test_entries_cross_module() `test(allow_leaks: true) {
+test_entries_cross_module() `test {
   map[string, json.JsonValue] m = {
     "x": json.JsonValue.Number(value: 42.0),
   };
@@ -57,7 +57,7 @@ test_forin_values_cross_module() `test(allow_leaks: true) {
   }
 }
 
-test_pop_cross_module() `test(allow_leaks: true) {
+test_pop_cross_module() `test {
   map[string, json.JsonValue] m = {
     "a": json.JsonValue.Bool(value: true),
   };

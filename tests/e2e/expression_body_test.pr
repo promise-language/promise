@@ -17,12 +17,12 @@ test_expression_body_with_return_type() `test(allow_leaks: true) {
   assert(greet("world") == "hello world", "greet");
 }
 
-test_expression_body_generic() `test(allow_leaks: true) {
+test_expression_body_generic() `test {
   assert(identity(42) == 42, "identity int");
   assert(identity("hi") == "hi", "identity string");
 }
 
-test_expression_body_with_annotation() `test(allow_leaks: true) {
+test_expression_body_with_annotation() `test {
   assert(negate(5) == -5, "negate");
 }
 

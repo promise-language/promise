@@ -37,7 +37,7 @@ disjoint_shared_borrows() `test(allow_leaks: true) {
   assert(true, "disjoint shared borrows compiled and ran");
 }
 
-disjoint_value_type_borrows() `test(allow_leaks: true) {
+disjoint_value_type_borrows() `test {
   p := Point(x: 10, y: 20);
   int sum = p.x + p.y;
   assert(sum == 30, "disjoint value type field access");

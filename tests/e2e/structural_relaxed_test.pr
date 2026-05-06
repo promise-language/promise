@@ -157,7 +157,7 @@ test_standalone_optional_param_with_value() `test(allow_leaks: true) {
   assert(greet("alice") == "hello alice", "standalone fn: optional param with value");
 }
 
-test_standalone_optional_param_omitted() `test(allow_leaks: true) {
+test_standalone_optional_param_omitted() `test {
   assert(greet() == "hello world", "standalone fn: optional param omitted");
 }
 

@@ -37,7 +37,7 @@ test_optional_enum_field_absent() `test(allow_leaks: true) {
 
 // --- Optional enum standalone ---
 
-test_optional_enum_if_bind() `test(allow_leaks: true) {
+test_optional_enum_if_bind() `test {
   Color? c = Color.Green;
   if color := c {
     match color {
@@ -49,7 +49,7 @@ test_optional_enum_if_bind() `test(allow_leaks: true) {
   }
 }
 
-test_optional_enum_elvis() `test(allow_leaks: true) {
+test_optional_enum_elvis() `test {
   Color? c = none;
   Color d = c ?: Color.Blue;
   match d {
@@ -58,7 +58,7 @@ test_optional_enum_elvis() `test(allow_leaks: true) {
   }
 }
 
-test_optional_enum_force_unwrap() `test(allow_leaks: true) {
+test_optional_enum_force_unwrap() `test {
   Color? c = Color.Red;
   Color d = c!;
   match d {
@@ -67,7 +67,7 @@ test_optional_enum_force_unwrap() `test(allow_leaks: true) {
   }
 }
 
-test_optional_data_enum() `test(allow_leaks: true) {
+test_optional_data_enum() `test {
   Shape? s = Shape.Circle(radius: 4.0);
   if shape := s {
     match shape {
@@ -79,7 +79,7 @@ test_optional_data_enum() `test(allow_leaks: true) {
   }
 }
 
-test_optional_data_enum_elvis() `test(allow_leaks: true) {
+test_optional_data_enum_elvis() `test {
   Shape? s = none;
   Shape d = s ?: Shape.Point;
   match d {
@@ -112,11 +112,11 @@ get_no_shape() Shape? {
   return none;
 }
 
-test_enum_function_roundtrip() `test(allow_leaks: true) {
+test_enum_function_roundtrip() `test {
   assert(take_color(get_color()), "roundtrip");
 }
 
-test_data_enum_optional_return() `test(allow_leaks: true) {
+test_data_enum_optional_return() `test {
   if shape := get_shape_opt() {
     match shape {
       Shape.Circle(r) => assert(r == 2.0, "opt return"),
@@ -135,7 +135,7 @@ enum Aligned {
   Empty,
 }
 
-test_alignment_padding() `test(allow_leaks: true) {
+test_alignment_padding() `test {
   Aligned a = Aligned.Data(flag: true, value: 12345);
   match a {
     Aligned.Data(f, v) => {
@@ -146,7 +146,7 @@ test_alignment_padding() `test(allow_leaks: true) {
   }
 }
 
-test_alignment_in_map() `test(allow_leaks: true) {
+test_alignment_in_map() `test {
   map[string, Aligned] m = {
     "x": Aligned.Data(flag: false, value: 99)
   };
@@ -165,7 +165,7 @@ enum AlignMix {
   C(char c, f64 d),
 }
 
-test_alignment_mix_a() `test(allow_leaks: true) {
+test_alignment_mix_a() `test {
   match AlignMix.A(a: true, b: 3.14) {
     AlignMix.A(a, b) => {
       assert(a == true, "a");
@@ -175,7 +175,7 @@ test_alignment_mix_a() `test(allow_leaks: true) {
   }
 }
 
-test_alignment_mix_b() `test(allow_leaks: true) {
+test_alignment_mix_b() `test {
   match AlignMix.B(x: 42i8, y: 100, z: false) {
     AlignMix.B(x, y, z) => {
       assert(x == 42i8, "x");
@@ -186,7 +186,7 @@ test_alignment_mix_b() `test(allow_leaks: true) {
   }
 }
 
-test_alignment_mix_c() `test(allow_leaks: true) {
+test_alignment_mix_c() `test {
   match AlignMix.C(c: 'X', d: 2.718) {
     AlignMix.C(c, d) => {
       assert(c == 'X', "c");
@@ -228,7 +228,7 @@ enum Tagged {
   Blank,
 }
 
-test_tagged_enum() `test(allow_leaks: true) {
+test_tagged_enum() `test {
   Tagged t = Tagged.Label(text: "hello", c: Color.Blue);
   match t {
     Tagged.Label(txt, c) => {
@@ -242,7 +242,7 @@ test_tagged_enum() `test(allow_leaks: true) {
   }
 }
 
-test_tagged_in_map() `test(allow_leaks: true) {
+test_tagged_in_map() `test {
   map[string, Tagged] m = {
     "x": Tagged.Label(text: "world", c: Color.Green)
   };
@@ -282,7 +282,7 @@ test_generic_type_with_data_enum() `test(allow_leaks: true) {
 
 // --- Enum in tuple ---
 
-test_enum_in_tuple() `test(allow_leaks: true) {
+test_enum_in_tuple() `test {
   (Color, int) t = (Color.Blue, 42);
   (c, n) := t;
   match c {
@@ -301,7 +301,7 @@ enum Middle {
   Wrap(Inner inner, bool flag), Skip,
 }
 
-test_three_level_nesting_in_map() `test(allow_leaks: true) {
+test_three_level_nesting_in_map() `test {
   map[string, Middle] m = {
     "a": Middle.Wrap(inner: Inner.Val(n: 77), flag: true),
   };

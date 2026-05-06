@@ -73,7 +73,7 @@ stem_test() `test(allow_leaks: true) {
   assert(stem("..") == ".", "stem double dot");
 }
 
-is_absolute_test() `test(allow_leaks: true) {
+is_absolute_test() `test {
   assert(is_absolute("/home"), "abs /home");
   assert(is_absolute("/"), "abs root");
   assert(!is_absolute("home"), "rel home");
@@ -83,7 +83,7 @@ is_absolute_test() `test(allow_leaks: true) {
   assert(!is_absolute("./a"), "dot-slash not abs");
 }
 
-is_relative_test() `test(allow_leaks: true) {
+is_relative_test() `test {
   assert(is_relative("home/user"), "rel basic");
   assert(is_relative("."), "dot is rel");
   assert(is_relative(".."), "dotdot is rel");

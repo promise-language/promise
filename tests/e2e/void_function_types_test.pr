@@ -15,6 +15,7 @@ apply_and_count((int) -> void fn, int x) int {
 }
 
 // --- Void function type as parameter ---
+// flaky leak — sometimes leaks depending on timing
 test_void_fn_param() `test(allow_leaks: true) {
   int ran = apply_and_count(|int x| {
     int _ = x + 1;
@@ -35,7 +36,7 @@ test_void_fn_field() `test(allow_leaks: true) {
 }
 
 // --- Void function type variable ---
-test_void_fn_variable() `test(allow_leaks: true) {
+test_void_fn_variable() `test {
   (int) -> void noop = |int x| {
   };
   noop(42);
@@ -53,7 +54,7 @@ test_void_fn_capture() `test(allow_leaks: true) {
 }
 
 // --- Multi-param void function type ---
-test_void_fn_multi_param() `test(allow_leaks: true) {
+test_void_fn_multi_param() `test {
   (int, int) -> void fn = |int a, int b| {
     int _ = a + b;
   };
@@ -62,7 +63,7 @@ test_void_fn_multi_param() `test(allow_leaks: true) {
 }
 
 // --- Void lambda with block body ---
-test_void_lambda_block() `test(allow_leaks: true) {
+test_void_lambda_block() `test {
   int ran = apply_and_count(|int x| {
     int doubled = x * 2;
     int tripled = x * 3;
@@ -72,7 +73,7 @@ test_void_lambda_block() `test(allow_leaks: true) {
 }
 
 // --- Higher-order: function returning void function type ---
-test_void_fn_return_type() `test(allow_leaks: true) {
+test_void_fn_return_type() `test {
   (int) -> void printer = make_noop();
   printer(42);
   assert(true, "returned void function works");

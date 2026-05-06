@@ -250,7 +250,7 @@ test_f64_parse_negative_zero() `test(allow_leaks: true) {
   assert(v == 0.0, "parse -0.0");
 }
 
-test_vector_filled() `test(allow_leaks: true) {
+test_vector_filled() `test {
   int[] v = Vector[int].filled(7, 5);
   assert(v.len == 5, "len 5");
   int i = 0;
@@ -260,7 +260,7 @@ test_vector_filled() `test(allow_leaks: true) {
   }
 }
 
-test_vector_filled_empty() `test(allow_leaks: true) {
+test_vector_filled_empty() `test {
   int[] v = Vector[int].filled(0, 0);
   assert(v.len == 0, "empty filled");
 }

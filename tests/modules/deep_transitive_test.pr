@@ -22,7 +22,7 @@ test_canvas_center() `test(allow_leaks: true) {
   assert(mid.y == 100, "center y = 100");
 }
 
-test_deep_chain_direct_utils() `test(allow_leaks: true) {
+test_deep_chain_direct_utils() `test {
   // We can also import the leaf module directly — should reuse the same loaded module.
   assert(utils.abs(0 - 99) == 99, "direct utils.abs still works in deep chain");
 }

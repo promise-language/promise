@@ -57,7 +57,7 @@ test_maybe_wrap_some() `test(allow_leaks: true) {
   }
 }
 
-test_maybe_wrap_none() `test(allow_leaks: true) {
+test_maybe_wrap_none() `test {
   r := maybe_wrap[int](42, false);
   assert(r is absent, "expected none");
 }

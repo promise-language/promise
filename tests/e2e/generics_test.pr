@@ -41,7 +41,7 @@ enum Maybe[T] {
   Nothing,
 }
 
-test_maybe_just() `test(allow_leaks: true) {
+test_maybe_just() `test {
   Maybe[int] m = Maybe[int].Just(42);
   int val = match m {
     Just(v) => v,
@@ -50,7 +50,7 @@ test_maybe_just() `test(allow_leaks: true) {
   assert(val == 42, "Just(42) extracts 42");
 }
 
-test_maybe_nothing() `test(allow_leaks: true) {
+test_maybe_nothing() `test {
   Maybe[int] m = Maybe[int].Nothing;
   int val = match m {
     Just(v) => v,
@@ -59,7 +59,7 @@ test_maybe_nothing() `test(allow_leaks: true) {
   assert(val == -1, "Nothing gives -1");
 }
 
-test_maybe_string() `test(allow_leaks: true) {
+test_maybe_string() `test {
   Maybe[string] m = Maybe[string].Just("hello");
   string val = match m {
     Just(v) => v,
@@ -74,12 +74,12 @@ identity[T](T x) T {
   return x;
 }
 
-test_identity_int() `test(allow_leaks: true) {
+test_identity_int() `test {
   int r = identity[int](42);
   assert(r == 42, "identity[int](42) = 42");
 }
 
-test_identity_string() `test(allow_leaks: true) {
+test_identity_string() `test {
   string r = identity[string]("hi");
   assert(r == "hi", "identity[string](hi) = hi");
 }
@@ -105,7 +105,7 @@ type Container[T] {
   }
 }
 
-test_container_int() `test(allow_leaks: true) {
+test_container_int() `test {
   int[] empty_ints = [];
   c := Container[int](items: empty_ints);
   assert(c.count() == 0, "empty container");
@@ -119,7 +119,7 @@ test_container_int() `test(allow_leaks: true) {
   }
 }
 
-test_container_string() `test(allow_leaks: true) {
+test_container_string() `test {
   c := Container[string](items: ["hello"]);
   assert(c.count() == 1, "1 item");
   c.add("world");
@@ -158,7 +158,7 @@ wrap[T](T val) T {
   return identity[T](val);
 }
 
-test_generic_calls_generic() `test(allow_leaks: true) {
+test_generic_calls_generic() `test {
   int r = wrap[int](42);
   assert(r == 42, "wrap[int](42) = 42");
   string s = wrap[string]("hello");
@@ -176,7 +176,7 @@ outer[T](T val) T {
   return middle[T](val);
 }
 
-test_generic_transitive_chain() `test(allow_leaks: true) {
+test_generic_transitive_chain() `test {
   assert(outer[int](99) == 99, "outer[int](99) = 99");
   assert(outer[string]("abc") == "abc", "outer[string](abc) = abc");
 }
@@ -186,7 +186,7 @@ first_of[A, B](A a, B b) A {
   return identity[A](a);
 }
 
-test_generic_multi_param_calls_generic() `test(allow_leaks: true) {
+test_generic_multi_param_calls_generic() `test {
   int r = first_of[int, string](7, "x");
   assert(r == 7, "first_of returns first arg");
 }
@@ -323,7 +323,7 @@ try_wrap_id[T](T val) T! {
   return try_id[T](val);
 }
 
-test_failable_generic_calls_generic() `test(allow_leaks: true) {
+test_failable_generic_calls_generic() `test {
   int r = try_wrap_id[int](42)!;
   assert(r == 42, "failable wrap");
 }
@@ -336,7 +336,7 @@ noop_outer[T](T val) {
   noop_inner[T](val);
 }
 
-test_void_generic_calls_generic() `test(allow_leaks: true) {
+test_void_generic_calls_generic() `test {
   noop_outer[int](1);
   noop_outer[string]("x");
 }
@@ -347,7 +347,7 @@ second_of[A, B](A a, B b) B {
   return identity[B](b);
 }
 
-test_inner_uses_second_type_param() `test(allow_leaks: true) {
+test_inner_uses_second_type_param() `test {
   string r = second_of[int, string](1, "hello");
   assert(r == "hello", "second_of uses B");
 }
@@ -365,7 +365,7 @@ call_both[T](int val) int {
   return add2[T](val);
 }
 
-test_multiple_inner_generic_calls() `test(allow_leaks: true) {
+test_multiple_inner_generic_calls() `test {
   assert(call_both[int](40) == 42, "call_both");
 }
 

@@ -43,19 +43,19 @@ type Point {
   }
 }
 
-test_global_value_type() `test(allow_leaks: true) {
+test_global_value_type() `test {
   p := Point.origin();
   assert(p.x == 0, "origin x");
   assert(p.y == 0, "origin y");
 }
 
-test_global_from_xy() `test(allow_leaks: true) {
+test_global_from_xy() `test {
   p := Point.fromXY(3, 4);
   assert(p.x == 3, "fromXY x");
   assert(p.y == 4, "fromXY y");
 }
 
-test_global_static_util() `test(allow_leaks: true) {
+test_global_static_util() `test {
   a := Point.fromXY(0, 0);
   b := Point.fromXY(3, 4);
   d := Point.distance(a, b);
@@ -72,12 +72,12 @@ type Wrapper[T] {
   }
 }
 
-test_mono_basic() `test(allow_leaks: true) {
+test_mono_basic() `test {
   n := Wrapper[int].defaultInt();
   assert(n == 0, "mono defaultInt");
 }
 
-test_mono_different_instantiations() `test(allow_leaks: true) {
+test_mono_different_instantiations() `test {
   a := Wrapper[int].defaultInt();
   b := Wrapper[string].defaultInt();
   assert(a == 0, "mono int instantiation");

@@ -30,7 +30,7 @@ test_f64_integer() `test(allow_leaks: true) {
   assert("{x}" == "42", "f64 42.0 -> 42");
 }
 
-test_f64_zero() `test(allow_leaks: true) {
+test_f64_zero() `test {
   f64 x = 0.0;
   assert("{x}" == "0", "f64 0.0 -> 0");
 }
@@ -71,7 +71,7 @@ test_f64_negative() `test(allow_leaks: true) {
   assert("{x}" == "-3.14", "f64 -3.14");
 }
 
-test_char_special() `test(allow_leaks: true) {
+test_char_special() `test {
   char c = '\n';
   string s = "{c}";
   assert(s.len == 1, "newline char is 1 byte");
@@ -352,7 +352,7 @@ test_mixed_interpolation() `test(allow_leaks: true) {
 }
 
 // Escaped braces — \{ produces a literal { without triggering interpolation
-test_escaped_brace() `test(allow_leaks: true) {
+test_escaped_brace() `test {
   string s = "literal \{a} here";
   assert(s == "literal \{a} here", "escaped brace not interpolated");
 }
@@ -363,12 +363,12 @@ test_escaped_brace_mixed() `test(allow_leaks: true) {
   assert(s == "\{x} is not 42", "escaped vs real interpolation");
 }
 
-test_escaped_brace_at_start() `test(allow_leaks: true) {
+test_escaped_brace_at_start() `test {
   string s = "\{start}";
   assert(s == "\{start}", "escaped brace at string start");
 }
 
-test_multiple_escaped_braces() `test(allow_leaks: true) {
+test_multiple_escaped_braces() `test {
   string s = "\{a} and \{b}";
   assert(s == "\{a} and \{b}", "multiple escaped braces");
 }
@@ -380,19 +380,19 @@ test_escaped_adjacent_to_real() `test(allow_leaks: true) {
 }
 
 // Verify \{ produces actual { character (char code 123)
-test_escaped_brace_char_value() `test(allow_leaks: true) {
+test_escaped_brace_char_value() `test {
   string s = "\{";
   assert(s.len == 1, "escaped brace is 1 byte");
   assert(s.byte_at(0) == 123, "escaped brace is char code 123");
 }
 
-test_escaped_brace_len_in_context() `test(allow_leaks: true) {
+test_escaped_brace_len_in_context() `test {
   string s = "a\{b";
   assert(s.len == 3, "a + brace + b = 3 bytes");
 }
 
 // Verify \{ does NOT interpolate — variable name stays literal
-test_escaped_brace_no_interpolation() `test(allow_leaks: true) {
+test_escaped_brace_no_interpolation() `test {
   int x = 999;
   string s = "\{x}";
   assert(s.len == 3, "escaped brace: 3 chars, not interpolated");
@@ -401,14 +401,14 @@ test_escaped_brace_no_interpolation() `test(allow_leaks: true) {
 }
 
 // \{ at end of string (no text after)
-test_escaped_brace_at_end() `test(allow_leaks: true) {
+test_escaped_brace_at_end() `test {
   string s = "end\{";
   assert(s.len == 4, "end + brace = 4 bytes");
   assert(s.byte_at(3) == 123, "last byte is open brace");
 }
 
 // \{ only, no other text
-test_escaped_brace_only() `test(allow_leaks: true) {
+test_escaped_brace_only() `test {
   string s = "\{";
   assert(s == "\{", "escaped brace only");
   assert(s.len == 1, "single char");
@@ -433,14 +433,14 @@ test_interp_then_escaped_brace() `test(allow_leaks: true) {
 // --- Escaped closing brace \} (B0124) ---
 
 // \} produces a literal } character
-test_escaped_close_brace() `test(allow_leaks: true) {
+test_escaped_close_brace() `test {
   string s = "\}";
   assert(s.len == 1, "escaped close brace is 1 byte");
   assert(s.byte_at(0) == 125, "escaped close brace is char code 125");
 }
 
 // \{ and \} together produce literal {…}
-test_escaped_both_braces() `test(allow_leaks: true) {
+test_escaped_both_braces() `test {
   string s = "\{name\}";
   assert(s == "\{name\}", "escaped both braces");
   assert(s.len == 6, "6 bytes total");
@@ -455,14 +455,14 @@ test_escaped_close_brace_with_interp() `test(allow_leaks: true) {
 }
 
 // \} at start of string
-test_escaped_close_brace_at_start() `test(allow_leaks: true) {
+test_escaped_close_brace_at_start() `test {
   string s = "\}rest";
   assert(s.len == 5, "} + rest = 5 bytes");
   assert(s.byte_at(0) == 125, "first byte is close brace");
 }
 
 // Multiple \} in a string
-test_multiple_escaped_close_braces() `test(allow_leaks: true) {
+test_multiple_escaped_close_braces() `test {
   string s = "\}\}";
   assert(s.len == 2, "two escaped close braces");
   assert(s.byte_at(0) == 125, "first is }");
@@ -533,7 +533,7 @@ test_optional_int_some() `test(allow_leaks: true) {
   assert("{x}" == "42", "optional int some");
 }
 
-test_optional_int_none() `test(allow_leaks: true) {
+test_optional_int_none() `test {
   int? x = none;
   assert("{x}" == "none", "optional int none");
 }
@@ -543,7 +543,7 @@ test_optional_bool_some() `test(allow_leaks: true) {
   assert("{b}" == "true", "optional bool some");
 }
 
-test_optional_bool_none() `test(allow_leaks: true) {
+test_optional_bool_none() `test {
   bool? b = none;
   assert("{b}" == "none", "optional bool none");
 }
@@ -553,17 +553,17 @@ test_optional_f64_some() `test(allow_leaks: true) {
   assert("{x}" == "3.14", "optional f64 some");
 }
 
-test_optional_f64_none() `test(allow_leaks: true) {
+test_optional_f64_none() `test {
   f64? x = none;
   assert("{x}" == "none", "optional f64 none");
 }
 
-test_optional_string_some() `test(allow_leaks: true) {
+test_optional_string_some() `test {
   string? s = "hi";
   assert("{s}" == "hi", "optional string some");
 }
 
-test_optional_string_none() `test(allow_leaks: true) {
+test_optional_string_none() `test {
   string? s = none;
   assert("{s}" == "none", "optional string none");
 }
@@ -573,7 +573,7 @@ test_optional_char_some() `test(allow_leaks: true) {
   assert("{c}" == "A", "optional char some");
 }
 
-test_optional_char_none() `test(allow_leaks: true) {
+test_optional_char_none() `test {
   char? c = none;
   assert("{c}" == "none", "optional char none");
 }
@@ -584,7 +584,7 @@ test_optional_u8_some() `test(allow_leaks: true) {
   assert("{x}" == "255", "optional u8 some");
 }
 
-test_optional_u8_none() `test(allow_leaks: true) {
+test_optional_u8_none() `test {
   u8? x = none;
   assert("{x}" == "none", "optional u8 none");
 }
@@ -595,7 +595,7 @@ test_optional_i32_some() `test(allow_leaks: true) {
   assert("{x}" == "-100", "optional i32 some");
 }
 
-test_optional_i32_none() `test(allow_leaks: true) {
+test_optional_i32_none() `test {
   i32? x = none;
   assert("{x}" == "none", "optional i32 none");
 }
@@ -697,17 +697,17 @@ test_interp_in_middle() `test(allow_leaks: true) {
 
 // --- Empty and edge cases ---
 
-test_empty_string_no_interp() `test(allow_leaks: true) {
+test_empty_string_no_interp() `test {
   string s = "";
   assert(s == "", "empty string no interp");
 }
 
-test_string_var_interp() `test(allow_leaks: true) {
+test_string_var_interp() `test {
   string name = "world";
   assert("{name}" == "world", "string var in interp");
 }
 
-test_empty_string_var_interp() `test(allow_leaks: true) {
+test_empty_string_var_interp() `test {
   string s = "";
   assert("{s}" == "", "empty string var in interp");
 }

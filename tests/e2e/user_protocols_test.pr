@@ -246,7 +246,7 @@ test_sort_user_type_single() `test(allow_leaks: true) {
   assert(tasks[0].level == 42, "single element unchanged");
 }
 
-test_sort_user_type_empty() `test(allow_leaks: true) {
+test_sort_user_type_empty() `test {
   Priority[] tasks = [];
   tasks = sort[Priority](tasks);
   assert(tasks.len == 0, "empty sort stays empty");

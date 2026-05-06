@@ -1,5 +1,6 @@
 use vis "./visibility";
 
+// flaky leak — sometimes leaks depending on timing
 test_public_value() `test(allow_leaks: true) {
   assert(vis.public_value() == 42, "public_value() == 42");
 }

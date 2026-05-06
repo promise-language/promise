@@ -12,7 +12,7 @@ test_get_env_var_home() `test(allow_leaks: true, exclude: "wasm32") {
   }
 }
 
-test_get_env_var_absent() `test(allow_leaks: true, exclude: "wasm32") {
+test_get_env_var_absent() `test(exclude: "wasm32") {
   string? val = get_env_var("PROMISE_NONEXISTENT_VAR_12345");
   assert(val is absent, "absent variable returns none");
 }
@@ -41,18 +41,18 @@ test_get_env_var_empty_value() `test(allow_leaks: true, exclude: "wasm32") {
   }
 }
 
-test_working_dir_is_stable() `test(allow_leaks: true, exclude: "wasm32") {
+test_working_dir_is_stable() `test(exclude: "wasm32") {
   string cwd1 = working_dir!;
   string cwd2 = working_dir!;
   assert(cwd1 == cwd2, "reading working_dir twice should return the same value");
 }
 
-test_working_dir_nonempty() `test(allow_leaks: true, exclude: "wasm32") {
+test_working_dir_nonempty() `test(exclude: "wasm32") {
   string cwd = working_dir!;
   assert(cwd.len > 0, "working directory should be non-empty");
 }
 
-test_working_dir_absolute() `test(allow_leaks: true, exclude: "wasm32") {
+test_working_dir_absolute() `test(exclude: "wasm32") {
   string cwd = working_dir!;
   // On POSIX: starts with "/". On Windows: drive letter like "C:\".
   bool is_abs = cwd.starts_with("/") || (cwd.len >= 3 && cwd[1] == ':');
@@ -382,7 +382,7 @@ test_set_env_var_unset() `test(allow_leaks: true, exclude: "wasm32") {
   assert(val2 is absent, "variable should be absent after unset");
 }
 
-test_set_env_var_unset_nonexistent() `test(allow_leaks: true, exclude: "wasm32") {
+test_set_env_var_unset_nonexistent() `test(exclude: "wasm32") {
   // Unsetting a variable that doesn't exist should not error
   string? absent;
   set_env_var("PROMISE_NONEXISTENT_UNSET_TEST", absent);
@@ -392,7 +392,7 @@ test_set_env_var_unset_nonexistent() `test(allow_leaks: true, exclude: "wasm32")
 
 // ── set_working_dir tests ─────────────────────────────────────────────
 
-test_set_working_dir() `test(allow_leaks: true, exclude: "wasm32") {
+test_set_working_dir() `test(exclude: "wasm32") {
   // Save original, change to /usr, verify, restore
   // (avoid /tmp which is a symlink to /private/tmp on macOS)
   string original = working_dir!;
@@ -801,12 +801,12 @@ test_user_name_nonempty() `test(allow_leaks: true, exclude: "wasm32") {
   assert(name.len > 0, "user_name should be non-empty");
 }
 
-test_user_id_nonnegative() `test(allow_leaks: true, exclude: "wasm32") {
+test_user_id_nonnegative() `test(exclude: "wasm32") {
   int uid = user_id;
   assert(uid >= 0, "user_id should be non-negative");
 }
 
-test_group_id_nonnegative() `test(allow_leaks: true, exclude: "wasm32") {
+test_group_id_nonnegative() `test(exclude: "wasm32") {
   int gid = group_id;
   assert(gid >= 0, "group_id should be non-negative");
 }
@@ -845,13 +845,13 @@ test_user_name_matches_env() `test(allow_leaks: true, exclude: "wasm32") {
 
 // ── Signal handling tests ────────────────────────────────────────────────────
 
-test_signal_enum_posix_numbers() `test(allow_leaks: true, exclude: "wasm32") {
+test_signal_enum_posix_numbers() `test(exclude: "wasm32") {
   assert(Signal.Interrupt._to_posix_number() == 2, "Interrupt should be SIGINT (2)");
   assert(Signal.Terminate._to_posix_number() == 15, "Terminate should be SIGTERM (15)");
   assert(Signal.Hangup._to_posix_number() == 1, "Hangup should be SIGHUP (1)");
 }
 
-test_signal_from_posix_roundtrip() `test(allow_leaks: true, exclude: "wasm32") {
+test_signal_from_posix_roundtrip() `test(exclude: "wasm32") {
   if sig := _signal_from_posix(2) {
     assert(sig._to_posix_number() == 2, "roundtrip should preserve signal number");
   } else {
@@ -864,7 +864,7 @@ test_signal_from_posix_roundtrip() `test(allow_leaks: true, exclude: "wasm32") {
   }
 }
 
-test_signal_from_posix_unknown() `test(allow_leaks: true, exclude: "wasm32") {
+test_signal_from_posix_unknown() `test(exclude: "wasm32") {
   Signal? sig = _signal_from_posix(999);
   assert(sig is absent, "unknown signal number should return none");
 }
@@ -913,12 +913,12 @@ test_signal_setup_idempotent() `test(allow_leaks: true, exclude: "wasm32") {
   assert(received._to_posix_number() == 2, "should work after double setup");
 }
 
-test_process_id_positive() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_id_positive() `test(exclude: "wasm32") {
   int pid = process_id;
   assert(pid > 0, "process_id should be positive");
 }
 
-test_process_id_stable() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_id_stable() `test(exclude: "wasm32") {
   int pid1 = process_id;
   int pid2 = process_id;
   assert(pid1 == pid2, "process_id should be stable across calls");

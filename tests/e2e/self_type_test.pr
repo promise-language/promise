@@ -120,14 +120,14 @@ test_self_method_multi_param() `test(allow_leaks: true) {
 
 // --- Self on Vector via filled() (uses Self return type in std) ---
 
-test_vector_filled_uses_self() `test(allow_leaks: true) {
+test_vector_filled_uses_self() `test {
   v := int[].filled(value: 7, count: 3);
   assert(v.len == 3, "filled len");
   assert(v[0] == 7, "filled val 0");
   assert(v[2] == 7, "filled val 2");
 }
 
-test_vector_filled_string_uses_self() `test(allow_leaks: true) {
+test_vector_filled_string_uses_self() `test {
   v := string[].filled(value: "hi", count: 2);
   assert(v.len == 2, "filled string len");
   assert(v[0] == "hi", "filled string val");
@@ -202,7 +202,7 @@ test_self_optional_factory_some() `test(allow_leaks: true) {
   assert(r is present, "should be present");
 }
 
-test_self_optional_factory_none() `test(allow_leaks: true) {
+test_self_optional_factory_none() `test {
   r := MaybeBox[int].try_wrap(v: 10, succeed: false);
   assert(r is absent, "should be absent");
 }

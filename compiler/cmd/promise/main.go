@@ -1317,7 +1317,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?(?:, (\d+) ignored)?`)
 	failLineRe := regexp.MustCompile(`^(?:FAIL|TIMEOUT) \([\d.]+s\)(?: (.+))?$`)
 	passLineRe := regexp.MustCompile(`^PASS \([\d.]+s\)`)
-	panicContextRe := regexp.MustCompile(`^  (panic:|expected:|actual:|exit:)`)
+	panicContextRe := regexp.MustCompile(`^  (panic:|expected:|actual:|exit:|leak:|warning:|fatal:|signal:)`)
 
 	type failureInfo struct {
 		name    string
@@ -1456,6 +1456,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 			}
 			failedFiles++
 
+			fileLeaked := 0
 			if m := summaryRe.FindStringSubmatch(lastLine(r.output)); m != nil {
 				totalPassed += atoi(m[1])
 				totalFailed += atoi(m[2])
@@ -1464,6 +1465,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				}
 				if len(m) > 4 && m[4] != "" {
 					totalLeaked += atoi(m[4])
+					fileLeaked = atoi(m[4])
 				}
 				if len(m) > 5 && m[5] != "" {
 					totalIgnored += atoi(m[5])
@@ -1487,7 +1489,9 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 			}
 
 			totalTests := filePassed + fileFailed
-			if totalTests > 0 {
+			if fileFailed == 0 && fileLeaked > 0 {
+				fmt.Printf("FAIL (%.3fs) %s (%d leaked)%s\n", r.elapsed.Seconds(), relPath, fileLeaked, targetSuffix)
+			} else if totalTests > 0 {
 				fmt.Printf("FAIL (%.3fs) %s (%d/%d failed)%s\n", r.elapsed.Seconds(), relPath, fileFailed, totalTests, targetSuffix)
 			} else {
 				fmt.Printf("FAIL (%.3fs) %s%s\n", r.elapsed.Seconds(), relPath, targetSuffix)
@@ -1505,7 +1509,22 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				failures = append(failures, failureInfo{name: relPath + ": " + testName, context: panicCtx})
 			}
 			if len(failDetails) == 0 {
-				failures = append(failures, failureInfo{name: relPath})
+				// No individual test failures — extract context from output
+				// (e.g., leak-only failures, runtime crashes)
+				var errCtx string
+				for _, line := range lines {
+					trimmed := strings.TrimSpace(line)
+					if trimmed == "" || summaryRe.MatchString(line) || passLineRe.MatchString(line) || failLineRe.MatchString(line) {
+						continue
+					}
+					errCtx = trimmed
+					fmt.Printf("  %s\n", trimmed)
+					break
+				}
+				if errCtx == "" && r.cmdErr != nil {
+					errCtx = r.cmdErr.Error()
+				}
+				failures = append(failures, failureInfo{name: relPath, context: errCtx})
 			}
 			continue
 		}
@@ -1558,7 +1577,9 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 		for _, f := range failures {
 			fmt.Printf("  %s\n", f.name)
 			if f.context != "" {
-				fmt.Printf("    %s\n", f.context)
+				for _, cl := range strings.Split(f.context, "\n") {
+					fmt.Printf("    %s\n", cl)
+				}
 			}
 		}
 	}

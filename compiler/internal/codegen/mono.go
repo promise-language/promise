@@ -929,7 +929,7 @@ func computeMonoUserTypeLayout(module *ir.Module, named *types.Named, name strin
 }
 
 // computeMonoValueTypeLayout computes a TypeDeclLayout for a monomorphic value type instance.
-// Value types embed fields directly in the value struct: { i8* _vtable, T_i* _rtti, field1, field2, ... }.
+// Value types embed fields directly in the value struct: { i8* _vtable, field1, field2, ... }.
 func computeMonoValueTypeLayout(module *ir.Module, named *types.Named, name string, subst map[*types.TypeParam]types.Type, allLayouts map[*types.Named]*TypeDeclLayout, ptrSize int, enumLayouts map[*types.Enum]*TypeDeclLayout, monoEnumLayouts map[string]*TypeDeclLayout) *TypeDeclLayout {
 	// Type struct: empty {}
 	typeStruct := irtypes.NewStruct()
@@ -952,11 +952,11 @@ func computeMonoValueTypeLayout(module *ir.Module, named *types.Named, name stri
 
 	instancePtr := irtypes.NewPointer(instanceStruct)
 
-	// Value struct: { i8* _vtable, promise_T_i* _rtti, field1, field2, ... }
-	valueLLVMFields := []irtypes.Type{irtypes.I8Ptr, instancePtr}
+	// Value struct: { i8* _vtable, field1, field2, ... }
+	// RTTI is accessed via the compile-time-known global, not stored in the value struct.
+	valueLLVMFields := []irtypes.Type{irtypes.I8Ptr}
 	valueFieldLayouts := []FieldLayout{
 		{Name: "_vtable", CType: "void*", LLVMType: irtypes.I8Ptr, IsInternal: true},
-		{Name: "_rtti", CType: "promise_" + name + "_i*", LLVMType: instancePtr, IsInternal: true},
 	}
 	fieldIndex := map[string]int{}
 

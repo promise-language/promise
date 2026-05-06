@@ -1789,7 +1789,12 @@ func (c *Compiler) genIfDestructureIsStmt(s *ast.IfStmt, narrow *sema.IsDestruct
 			}
 			targetID = c.assignTypeID(targetNamed)
 		}
-		instance := c.extractInstancePtr(subject)
+		// For value types, use the compile-time-known RTTI global (no field in value struct).
+		subjectType := c.info.Types[narrow.SubjectExpr]
+		if c.typeSubst != nil {
+			subjectType = types.Substitute(subjectType, c.typeSubst)
+		}
+		instance := c.instancePtrForRTTI(subject, subjectType)
 		variantPtr := c.loadVariantPtr(instance)
 		result := c.block.NewCall(c.funcs["promise_type_is"],
 			variantPtr, constant.NewInt(irtypes.I32, int64(targetID)))
@@ -1909,7 +1914,12 @@ func (c *Compiler) bindIsDestructureNamed(subject value.Value, narrow *sema.IsDe
 		panic(fmt.Sprintf("codegen: no layout for type %s", targetType))
 	}
 
-	instancePtr := c.extractInstancePtr(subject)
+	// For heap types, extract instance pointer once before the loop.
+	// Value types don't use instance pointers — fields are in the value struct.
+	var instancePtr value.Value
+	if !layout.IsValueType {
+		instancePtr = c.extractInstancePtr(subject)
+	}
 
 	allFields := targetNamed.AllFields()
 	for i, b := range narrow.Bindings {

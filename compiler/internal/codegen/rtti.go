@@ -208,8 +208,8 @@ func (c *Compiler) emitTypeInfoGlobals(file *ast.File) {
 		tiGlobal := c.emitTypeInfo(named)
 		c.typeInfoGlobals[named] = tiGlobal
 
-		// For value types: emit a global RTTI instance { variant_ptr } that the
-		// value struct stores in field 1. loadVariantPtr loads from this to get RTTI.
+		// For value types: emit a global RTTI instance { variant_ptr } used for
+		// RTTI queries. Accessed via lookupValueTypeRTTI (not stored in value struct).
 		if named.IsValueType() {
 			layout := c.layouts[named]
 			if layout != nil {
@@ -831,7 +831,7 @@ func (c *Compiler) boxForStructuralView(val value.Value, fromNamed, toNamed *typ
 }
 
 // boxValueTypeForStructuralView boxes a pure value type into a structural interface
-// view ({i8*, i8*}). Value types have wider value structs (e.g., {vtable, rtti, x, y})
+// view ({i8*, i8*}). Value types have wider value structs (e.g., {vtable, x, y})
 // that don't fit in the standard {i8*, i8*} layout. The fix: stack-allocate the value
 // struct, store it, and create a view with {structural_vtable, &alloca_as_i8*}.
 func (c *Compiler) boxValueTypeForStructuralView(val value.Value, fromNamed, toNamed *types.Named, fromType types.Type) value.Value {

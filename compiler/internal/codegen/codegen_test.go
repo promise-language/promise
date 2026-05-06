@@ -10861,8 +10861,8 @@ func TestValueTypeNoMalloc(t *testing.T) {
 			p := Point(x: 1, y: 2);
 		}
 	`)
-	// Value struct layout: {i8*, promise_Point_i*, i64, i64}
-	assertContains(t, ir, "%promise_Point_v = type { i8*, %promise_Point_i*, i64, i64 }")
+	// Value struct layout: {i8*, i64, i64} (no RTTI pointer — accessed via global)
+	assertContains(t, ir, "%promise_Point_v = type { i8*, i64, i64 }")
 	// Instance struct is RTTI-only: {promise_Point_m*}
 	assertContains(t, ir, "%promise_Point_i = type { %promise_Point_m* }")
 	// Should use insertvalue to build the value struct
@@ -10879,9 +10879,9 @@ func TestValueTypeInsertValue(t *testing.T) {
 			p := Point(x: 10, y: 20);
 		}
 	`)
-	// Value struct has vtable + rtti + fields
+	// Value struct has vtable + fields (no rtti pointer)
 	assertContains(t, ir, "insertvalue")
-	// Should have the RTTI global
+	// Should have the RTTI global (used for is-checks, not stored in value struct)
 	assertContains(t, ir, "@promise_rtti_Point")
 }
 
@@ -10998,6 +10998,47 @@ func TestValueTypeOptional(t *testing.T) {
 	`)
 	// Optional wraps the full value struct: { i1, %promise_Point_v }
 	assertContains(t, ir, "{ i1, %promise_Point_v }")
+}
+
+func TestValueTypeIsCheckUsesRTTIGlobal(t *testing.T) {
+	ir := generateIR(t, `
+		type Vec2 {
+			f64 x `+"`value"+`;
+			f64 y `+"`value"+`;
+		}
+		check(Vec2 v) bool { return v is Vec2; }
+		main() {
+			Vec2 v = Vec2(x: 1.0, y: 2.0);
+			check(v);
+		}
+	`)
+	// Value struct should NOT contain an RTTI pointer field
+	assertContains(t, ir, "%promise_Vec2_v = type { i8*, double, double }")
+	// RTTI global should still exist (used for is-checks)
+	assertContains(t, ir, "@promise_rtti_Vec2")
+	// is-check should use the RTTI global, not extract field 1 from value struct.
+	// The bitcast of the RTTI global to i8* is the indicator.
+	assertContains(t, ir, "bitcast %promise_Vec2_i* @promise_rtti_Vec2 to i8*")
+}
+
+func TestValueTypeDestructureIsPattern(t *testing.T) {
+	ir := generateIR(t, `
+		type Point {
+			int x `+"`value"+`;
+			int y `+"`value"+`;
+		}
+		check(Point p) int {
+			if p is Point(px, py) { return px + py; }
+			return 0;
+		}
+		main() {
+			check(Point(x: 3, y: 4));
+		}
+	`)
+	// Should use RTTI global for the is-check
+	assertContains(t, ir, "bitcast %promise_Point_i* @promise_rtti_Point to i8*")
+	// Field extraction uses extractvalue on the value struct (fields at index 1, 2)
+	assertContains(t, ir, "extractvalue %promise_Point_v")
 }
 
 // --- Variadic Parameter Tests ---
@@ -11499,7 +11540,7 @@ func TestGenericValueTypeLayout(t *testing.T) {
 	`)
 	// Mono type names should appear
 	assertContains(t, ir, "Pair[int]")
-	// Value struct has embedded fields (3 fields: _vtable, _rtti, first, second)
+	// Value struct has embedded fields (vtable + first + second)
 	// The _v struct is named promise_Pair[int]_v
 	assertContains(t, ir, "promise_Pair[int]_v")
 	// Instance struct is RTTI-only (no user fields) — just the _variant pointer

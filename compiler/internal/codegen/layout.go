@@ -43,7 +43,7 @@ type TypeDeclLayout struct {
 
 	// Value-type-specific fields
 	IsValueType     bool           // true if all fields are value-placed (no heap alloc)
-	ValueFieldIndex map[string]int // field name → index in value struct (starts at 2)
+	ValueFieldIndex map[string]int // field name → index in value struct (starts at 1)
 
 	// Enum-specific fields
 	EnumInternalType   irtypes.Type                   // i32 (fieldless) or { i32, [N x i8] } (data enum)
@@ -420,7 +420,7 @@ func mergeParentFieldSubst(named *types.Named, subst map[*types.TypeParam]types.
 }
 
 // computeValueTypeLayout creates a TypeDeclLayout for a pure value type (all fields `value).
-// Data lives in the value struct: { i8* _vtable, T_i* _rtti, field1, field2, ... }.
+// Data lives in the value struct: { i8* _vtable, field1, field2, ... }.
 // Instance struct is RTTI-only (no user fields), allocated as a global singleton.
 func computeValueTypeLayout(module *ir.Module, named *types.Named, allLayouts map[*types.Named]*TypeDeclLayout, ptrSize int, enumLayouts map[*types.Enum]*TypeDeclLayout) *TypeDeclLayout {
 	name := named.Obj().Name()
@@ -446,11 +446,11 @@ func computeValueTypeLayout(module *ir.Module, named *types.Named, allLayouts ma
 
 	instancePtr := irtypes.NewPointer(instanceStruct)
 
-	// Value struct: { i8* _vtable, promise_T_i* _rtti, field1, field2, ... }
-	valueLLVMFields := []irtypes.Type{irtypes.I8Ptr, instancePtr}
+	// Value struct: { i8* _vtable, field1, field2, ... }
+	// RTTI is accessed via the compile-time-known global, not stored in the value struct.
+	valueLLVMFields := []irtypes.Type{irtypes.I8Ptr}
 	valueFieldLayouts := []FieldLayout{
 		{Name: "_vtable", CType: "void*", LLVMType: irtypes.I8Ptr, IsInternal: true},
-		{Name: "_rtti", CType: "promise_" + name + "_i*", LLVMType: instancePtr, IsInternal: true},
 	}
 	fieldIndex := map[string]int{}
 

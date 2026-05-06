@@ -912,7 +912,7 @@ func (c *Compiler) genShortCircuitOr(e *ast.BinaryExpr) value.Value {
 // --- range construction ---
 
 // genRange constructs a Range[T] value type struct via insertvalue chain.
-// Layout: { i8* _vtable, T_i* _rtti, T start, T end, i1 inclusive }
+// Layout: { i8* _vtable, T start, T end, i1 inclusive }
 func (c *Compiler) genRange(e *ast.BinaryExpr) value.Value {
 	start := c.genExpr(e.Left)
 	end := c.genExpr(e.Right)
@@ -934,11 +934,10 @@ func (c *Compiler) genRange(e *ast.BinaryExpr) value.Value {
 
 	// Build value struct via insertvalue
 	var val value.Value = constant.NewUndef(valueStructType)
-	val = c.block.NewInsertValue(val, constant.NewNull(irtypes.I8Ptr), 0)                                          // vtable = null
-	val = c.block.NewInsertValue(val, constant.NewNull(layout.Value.Fields[1].LLVMType.(*irtypes.PointerType)), 1) // rtti = null
-	val = c.block.NewInsertValue(val, start, uint64(layout.ValueFieldIndex["start"]))                              // start
-	val = c.block.NewInsertValue(val, end, uint64(layout.ValueFieldIndex["end"]))                                  // end
-	val = c.block.NewInsertValue(val, inclusive, uint64(layout.ValueFieldIndex["inclusive"]))                      // inclusive
+	val = c.block.NewInsertValue(val, constant.NewNull(irtypes.I8Ptr), 0)                     // vtable = null
+	val = c.block.NewInsertValue(val, start, uint64(layout.ValueFieldIndex["start"]))         // start
+	val = c.block.NewInsertValue(val, end, uint64(layout.ValueFieldIndex["end"]))             // end
+	val = c.block.NewInsertValue(val, inclusive, uint64(layout.ValueFieldIndex["inclusive"])) // inclusive
 	return val
 }
 
@@ -1722,7 +1721,7 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 }
 
 // genValueTypeConstructor builds a value type by insertvalue chain — no heap allocation.
-// Value struct layout: { i8* _vtable, T_i* _rtti, field1, field2, ... }
+// Value struct layout: { i8* _vtable, field1, field2, ... }
 func (c *Compiler) genValueTypeConstructor(e *ast.CallExpr, named *types.Named, layout *TypeDeclLayout, typ types.Type) value.Value {
 	valueStructType := layout.Value.LLVMType
 
@@ -1734,14 +1733,6 @@ func (c *Compiler) genValueTypeConstructor(e *ast.CallExpr, named *types.Named, 
 		val = c.block.NewInsertValue(val, constant.NewBitCast(vtGlobal, irtypes.I8Ptr), 0)
 	} else {
 		val = c.block.NewInsertValue(val, constant.NewNull(irtypes.I8Ptr), 0)
-	}
-
-	// Field 1: RTTI pointer (global instance singleton)
-	if rttiGlobal := c.lookupValueTypeRTTI(typ); rttiGlobal != nil {
-		rttiPtr := c.block.NewBitCast(rttiGlobal, layout.Value.Fields[1].LLVMType)
-		val = c.block.NewInsertValue(val, rttiPtr, 1)
-	} else {
-		val = c.block.NewInsertValue(val, constant.NewNull(layout.Value.Fields[1].LLVMType.(*irtypes.PointerType)), 1)
 	}
 
 	// If the type has an explicit new() constructor, alloca + store + call new() + load
@@ -5126,7 +5117,7 @@ func (c *Compiler) genIsOptionalType(expr ast.Expr, typeName string, opt *types.
 	// Then: extract inner value and do RTTI check
 	c.block = thenBlock
 	inner := c.block.NewExtractValue(optVal, 1)
-	instance := c.extractInstancePtr(inner)
+	instance := c.instancePtrForRTTI(inner, elem)
 	variantPtr := c.loadVariantPtr(instance)
 	result := c.block.NewCall(c.funcs["promise_type_is"],
 		variantPtr, constant.NewInt(irtypes.I32, int64(targetID)))
@@ -5171,13 +5162,17 @@ func (c *Compiler) genIsNamedType(expr ast.Expr, typeName string) value.Value {
 	}
 	targetID := c.assignTypeID(targetNamed)
 
-	// Extract instance pointer — `this` is already i8*, others are value structs.
-	// For value type `this`, extract the RTTI instance pointer (field 1) first.
+	// Extract instance pointer for RTTI query.
+	// For value types, use the compile-time-known RTTI global (no field in value struct).
+	exprType := c.info.Types[expr]
+	if c.typeSubst != nil {
+		exprType = types.Substitute(exprType, c.typeSubst)
+	}
 	var instance value.Value
 	if _, isThis := expr.(*ast.ThisExpr); isThis {
 		instance = c.extractInstancePtrForThis(subject)
 	} else {
-		instance = c.extractInstancePtr(subject)
+		instance = c.instancePtrForRTTI(subject, exprType)
 	}
 	variantPtr := c.loadVariantPtr(instance)
 
@@ -5197,11 +5192,15 @@ func (c *Compiler) genIsResolvedType(expr ast.Expr, resolved types.Type) value.V
 		panic(fmt.Sprintf("codegen: cannot resolve type ID for %s in is-expression", resolved))
 	}
 
+	exprType := c.info.Types[expr]
+	if c.typeSubst != nil {
+		exprType = types.Substitute(exprType, c.typeSubst)
+	}
 	var instance value.Value
 	if _, isThis := expr.(*ast.ThisExpr); isThis {
 		instance = c.extractInstancePtrForThis(subject)
 	} else {
-		instance = c.extractInstancePtr(subject)
+		instance = c.instancePtrForRTTI(subject, exprType)
 	}
 	variantPtr := c.loadVariantPtr(instance)
 
@@ -5239,7 +5238,7 @@ func (c *Compiler) genIsOptionalTypeResolved(expr ast.Expr, resolved types.Type,
 
 	c.block = thenBlock
 	inner := c.block.NewExtractValue(optVal, 1)
-	instance := c.extractInstancePtr(inner)
+	instance := c.instancePtrForRTTI(inner, elem)
 	variantPtr := c.loadVariantPtr(instance)
 	rttiResult := c.block.NewCall(c.funcs["promise_type_is"],
 		variantPtr, constant.NewInt(irtypes.I32, int64(targetID)))
@@ -5306,19 +5305,28 @@ func (c *Compiler) valueTypeReceiverPtr(val value.Value, typ types.Type) value.V
 
 // extractInstancePtrForThis extracts the instance/RTTI pointer from a `this` value.
 // For regular types, `this` (i8*) IS the instance pointer.
-// For value types, `this` (i8*) points to the value struct — field 1 is the RTTI instance pointer.
+// For value types, the RTTI pointer is not stored in the value struct — use the
+// compile-time-known RTTI global directly.
 func (c *Compiler) extractInstancePtrForThis(thisVal value.Value) value.Value {
 	if c.currentNamed != nil && c.currentNamed.IsValueType() {
-		layout := c.lookupTypeLayout(c.currentNamed)
-		if layout != nil {
-			valuePtrType := irtypes.NewPointer(layout.Value.LLVMType)
-			typedPtr := c.block.NewBitCast(thisVal, valuePtrType)
-			rttiFieldPtr := c.block.NewGetElementPtr(layout.Value.LLVMType, typedPtr,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-			return c.block.NewLoad(layout.Value.Fields[1].LLVMType, rttiFieldPtr)
+		if rttiGlobal := c.lookupValueTypeRTTI(c.currentNamed); rttiGlobal != nil {
+			return c.block.NewBitCast(rttiGlobal, irtypes.I8Ptr)
 		}
 	}
 	return thisVal
+}
+
+// instancePtrForRTTI returns the instance pointer for RTTI queries (is-checks, casts).
+// For regular types, field 1 of the value struct is the instance pointer.
+// For value types, the RTTI pointer is not in the value struct — use the compile-time-known global.
+func (c *Compiler) instancePtrForRTTI(val value.Value, typ types.Type) value.Value {
+	named := extractNamed(typ)
+	if named != nil && named.IsValueType() {
+		if rttiGlobal := c.lookupValueTypeRTTI(typ); rttiGlobal != nil {
+			return c.block.NewBitCast(rttiGlobal, irtypes.I8Ptr)
+		}
+	}
+	return c.extractInstancePtr(val)
 }
 
 // loadVariantPtr loads the _variant pointer (RTTI info) from a user type instance.
@@ -5365,13 +5373,16 @@ func (c *Compiler) genCastExpr(e *ast.CastExpr) value.Value {
 
 	targetID := c.assignTypeID(targetNamed)
 
-	// Extract instance pointer — `this` is already i8*, others are value structs.
-	// For value type `this`, extract the RTTI instance pointer (field 1) first.
+	// Extract instance pointer for RTTI query.
+	// For value types, use the compile-time-known RTTI global (no field in value struct).
+	if c.typeSubst != nil {
+		srcType = types.Substitute(srcType, c.typeSubst)
+	}
 	var instance value.Value
 	if _, isThis := e.Expr.(*ast.ThisExpr); isThis {
 		instance = c.extractInstancePtrForThis(subject)
 	} else {
-		instance = c.extractInstancePtr(subject)
+		instance = c.instancePtrForRTTI(subject, srcType)
 	}
 	variantPtr := c.loadVariantPtr(instance)
 

@@ -2,7 +2,6 @@
 // Covers grammar fixes: funcTypeReturn rule, zero-arg function types,
 // suffix operators on return position.
 // --- Zero-arg function type returning int ---
-// flaky leak — sometimes leaks depending on timing
 test_zero_arg_fn_type() `test {
   () -> int getter = || -> int {
     return 42;

@@ -20,7 +20,6 @@ enum Wrapper[T] {
   get is_empty bool => !this.is_some;
 }
 
-// flaky leak — sometimes leaks depending on timing
 test_generic_enum_getter() `test {
   Wrapper[int] s = Wrapper[int].Some(value: 42);
   assert(s.is_some == true, "Some is some");

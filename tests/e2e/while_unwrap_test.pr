@@ -1,6 +1,5 @@
 // While-unwrap tests: loop while optional has value.
 // --- basic while-unwrap with pop ---
-// flaky leak — sometimes leaks depending on timing
 test_while_pop() `test {
   int[] items = [1, 2, 3, 4, 5];
   int sum = 0;

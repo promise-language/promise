@@ -9,7 +9,6 @@ enum Shape {
   Point,
 }
 
-// flaky leak — sometimes leaks depending on timing
 test_enum_circle() `test {
   Shape s = Shape.Circle(radius: 5.0);
   if s is Circle(r) {
@@ -132,7 +131,7 @@ type Cat is Animal {
   }
 }
 
-test_named_match() `test(allow_leaks: true) {
+test_named_match() `test {
   Animal a = Dog(name: "Rex", breed: "Lab");
   if a is Dog(name, breed) {
     assert(name == "Rex", "name should be Rex");
@@ -142,7 +141,7 @@ test_named_match() `test(allow_leaks: true) {
   }
 }
 
-test_named_no_match() `test(allow_leaks: true) {
+test_named_no_match() `test {
   Animal a = Cat(name: "Luna", color: "black");
   if a is Dog(name, breed) {
     assert(false, "Cat should not match Dog");
@@ -320,7 +319,7 @@ type Simple {
   int y;
 }
 
-test_named_no_inheritance() `test(allow_leaks: true) {
+test_named_no_inheritance() `test {
   Simple s = Simple(x: 10, y: 20);
   if s is Simple(a, b) {
     assert(a == 10, "a should be 10");
@@ -345,7 +344,7 @@ type Leaf is Middle {
   }
 }
 
-test_deep_inheritance_chain() `test(allow_leaks: true) {
+test_deep_inheritance_chain() `test {
   Base x = Leaf(a: "aa", b: "bb", c: "cc");
   if x is Leaf(a, b, c) {
     assert(a == "aa", "a should be aa");
@@ -502,19 +501,19 @@ type Container[T] {
   }
 }
 
-test_generic_method_destructure_enum_int() `test(allow_leaks: true) {
+test_generic_method_destructure_enum_int() `test {
   c := Container[int](inner: Maybe[int].Just(value: 42));
   assert(c.unwrap_or(0) == 42, "should unwrap 42");
   assert(c.has_value(), "should have value");
 }
 
-test_generic_method_destructure_enum_string() `test(allow_leaks: true) {
+test_generic_method_destructure_enum_string() `test {
   c := Container[string](inner: Maybe[string].Just(value: "hello"));
   assert(c.unwrap_or("") == "hello", "should unwrap hello");
   assert(c.has_value(), "should have value");
 }
 
-test_generic_method_destructure_enum_none() `test(allow_leaks: true) {
+test_generic_method_destructure_enum_none() `test {
   c := Container[int](inner: Maybe[int].Nothing);
   assert(c.unwrap_or(99) == 99, "should return default");
   assert(!c.has_value(), "should not have value");

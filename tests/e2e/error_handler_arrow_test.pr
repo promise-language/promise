@@ -163,7 +163,7 @@ test_arrow_getter() `test(allow_leaks: true) {
   assert(v == -1, "arrow on failable getter error");
 }
 
-test_arrow_getter_success() `test(allow_leaks: true) {
+test_arrow_getter_success() `test {
   Sensor s = Sensor(_raw: 42);
   int v = s.value? e => -1;
   assert(v == 42, "arrow on failable getter success");

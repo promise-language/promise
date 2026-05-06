@@ -1686,6 +1686,8 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 				c.clearDropFlag(ident.Name)
 			}
+			// B0164: Untrack string temp — value is now owned by the constructor field
+			c.untrackStringTemp(val)
 		}
 
 		// Initialize omitted fields: evaluate default expression if present, otherwise zero-init.
@@ -6038,7 +6040,6 @@ func (c *Compiler) genGoCallExprViaBlock(callExpr *ast.CallExpr) value.Value {
 	savedCoroCleanup := c.coroCleanupBlk
 	savedCoroSuspend := c.coroSuspendBlk
 	savedGoExprFF := c.goExprFireAndForget
-
 	c.fn = coroFn
 	c.locals = make(map[string]*ir.InstAlloca)
 	c.localNameCount = make(map[string]int)

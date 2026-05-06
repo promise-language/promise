@@ -155,6 +155,13 @@ type Compiler struct {
 	// Drop binding tracking: maps variable name to its scope binding (for reassignment drop)
 	dropBindings map[string]scopeBinding
 
+	// B0164: String temp tracking. Maps SSA values produced by function/method calls
+	// and string concat to their temp variable names (for drop flag management).
+	// When a temp's value is assigned to a variable, the temp's drop flag is cleared.
+	stringTempMap   map[value.Value]string
+	tempCounter     int
+	branchExprDepth int // >0 = inside match/if expr branch, suppress temp tracking
+
 	// PAL (Platform Abstraction Layer) function references
 	palWrite   *ir.Func // @pal_write(i32 fd, i8* buf, i64 len) → i64
 	palExit    *ir.Func // @pal_exit(i32 code) → void [noreturn]
@@ -325,6 +332,7 @@ const (
 	bindingClose      scopeBindingKind = iota // use-bound: call close() at scope exit
 	bindingDrop                               // droppable: call drop() at scope exit
 	bindingDropString                         // string: call promise_string_drop (alloca is i8*, not value struct)
+	bindingFree                               // heap-only: call pal_free (no drop method, just free the instance)
 	bindingFreeEnv                            // closure env: free env pointer at scope exit
 	bindingGenerator                          // generator: destroy coroutine + free yield slot at scope exit
 )

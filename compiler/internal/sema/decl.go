@@ -436,7 +436,10 @@ func (c *Checker) propagateDrops(file *ast.File) {
 }
 
 // fieldTypeHasDrop returns true if the type (possibly wrapped in Instance/SharedRef/MutRef)
-// resolves to a Named type with HasDrop().
+// resolves to a Named type with HasDrop(), or is a string/vector type (which have
+// codegen-managed drop but not HasDrop() on the Named type).
+// B0164: string and vector fields need to be recognized as droppable so that
+// propagateDrops marks containing types for synthesized drop.
 func fieldTypeHasDrop(typ types.Type) bool {
 	switch t := typ.(type) {
 	case *types.Named:

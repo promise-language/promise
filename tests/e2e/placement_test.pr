@@ -12,12 +12,12 @@ type Counter {
   }
 }
 
-test_global_basic() `test(allow_leaks: true) {
+test_global_basic() `test {
   c := Counter.create(42);
   assert(c.value == 42, "global create");
 }
 
-test_global_zero() `test(allow_leaks: true) {
+test_global_zero() `test {
   c := Counter.zero();
   assert(c.value == 0, "global zero");
 }
@@ -95,7 +95,7 @@ type Pair {
   }
 }
 
-test_mono_self() `test(allow_leaks: true) {
+test_mono_self() `test {
   p := Pair.zeros();
   assert(p.a == 0, "mono self a");
   assert(p.b == 0, "mono self b");

@@ -56,7 +56,6 @@ doubles(int n) stream[int] {
 
 // --- Tests ---
 
-// flaky leak — sometimes leaks depending on timing
 test_basic_generator() `test {
   int sum = 0;
   for x in count_to(5) {
@@ -166,7 +165,7 @@ type Stepper {
   }
 }
 
-test_method_generator() `test(allow_leaks: true) {
+test_method_generator() `test {
   c := Counter(limit: 5);
   int sum = 0;
   for x in c.values() {
@@ -175,7 +174,7 @@ test_method_generator() `test(allow_leaks: true) {
   assert(sum == 10, "Counter(5).values() should yield 0+1+2+3+4=10");
 }
 
-test_method_generator_with_params() `test(allow_leaks: true) {
+test_method_generator_with_params() `test {
   s := Stepper(start: 10, step: 3);
   int sum = 0;
   for x in s.take(4) {

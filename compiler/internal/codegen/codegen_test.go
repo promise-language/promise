@@ -8505,8 +8505,10 @@ func TestDropNotGeneratedForNonDroppable(t *testing.T) {
 			int x = my_simple.id;
 		}
 	`)
-	assertNotContains(t, ir, "%my_simple.dropflag")
+	// B0164: Non-droppable heap types now get bindingFree with a drop flag for pal_free
+	assertContains(t, ir, "%my_simple.dropflag")
 	assertNotContains(t, ir, "Simple.drop")
+	assertContains(t, ir, "call void @pal_free")
 }
 
 // Copy type: no drop flag even if fields exist
@@ -8960,9 +8962,11 @@ func TestDropOnReassignmentNonDroppable(t *testing.T) {
 		}
 		main() {}
 	`)
-	// No drop for non-droppable types
-	assertNotContains(t, ir, "%my_simple.dropflag")
+	// B0164: Non-droppable heap types now get bindingFree with a drop flag for pal_free.
+	// On reassignment, the old value is freed before storing the new one.
+	assertContains(t, ir, "%my_simple.dropflag")
 	assertNotContains(t, ir, "Simple.drop")
+	assertContains(t, ir, "call void @pal_free")
 }
 
 // Reassignment inside if block: drop still emitted
@@ -9170,7 +9174,10 @@ func TestDropSynthesizedNotNeeded(t *testing.T) {
 		}
 	`)
 	assertNotContains(t, ir, "Plain.drop")
-	assertNotContains(t, ir, "my_plain.dropflag")
+	// B0164: Plain types now get a bindingFree with a drop flag for pal_free at scope exit.
+	// No synthesized drop method, just pal_free for the heap instance.
+	assertContains(t, ir, "my_plain.dropflag")
+	assertContains(t, ir, "call void @pal_free")
 }
 
 // B0158: Synthesized drop coexists with explicit drop (explicit takes precedence)

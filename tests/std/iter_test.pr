@@ -292,7 +292,7 @@ test_filter_take() `test(allow_leaks: true) {
   assert(sum == 9, "filter odd, take 3: 1+3+5=9");
 }
 
-test_skip_filter_collect() `test {
+test_skip_filter_collect() `test(allow_leaks: true) {
   c := Counter(current: 0, limit: 20);
   int[] result = c.skip(10).filter(|int x| -> bool {
     return x % 3 == 0;
@@ -303,7 +303,7 @@ test_skip_filter_collect() `test {
   assert(result[2] == 18, "third = 18");
 }
 
-test_filter_count() `test {
+test_filter_count() `test(allow_leaks: true) {
   c := Counter(current: 0, limit: 10);
   int n = c.filter(|int x| -> bool {
     return x > 5;
@@ -313,7 +313,7 @@ test_filter_count() `test {
 
 // --- Vector.iter() ---
 
-test_vector_iter_basic() `test {
+test_vector_iter_basic() `test(allow_leaks: true) {
   int[] v = [10, 20, 30];
   int sum = 0;
   for x in v.iter() {
@@ -322,7 +322,7 @@ test_vector_iter_basic() `test {
   assert(sum == 60, "vec iter: 10+20+30=60");
 }
 
-test_vector_iter_empty() `test {
+test_vector_iter_empty() `test(allow_leaks: true) {
   int[] v = [];
   int count = 0;
   for _ in v.iter() {
@@ -331,7 +331,7 @@ test_vector_iter_empty() `test {
   assert(count == 0, "empty vec iter yields nothing");
 }
 
-test_vector_iter_collect() `test {
+test_vector_iter_collect() `test(allow_leaks: true) {
   int[] v = [1, 2, 3, 4, 5];
   int[] result = v.iter().filter(|int x| -> bool {
     return x % 2 == 1;
@@ -342,7 +342,7 @@ test_vector_iter_collect() `test {
   assert(result[2] == 5, "third=5");
 }
 
-test_vector_iter_chain() `test {
+test_vector_iter_chain() `test(allow_leaks: true) {
   int[] a = [1, 2];
   int[] b = [3, 4];
   int sum = 0;
@@ -434,44 +434,44 @@ test_custom_stream_continue() `test(allow_leaks: true) {
 
 // --- Edge cases for existing combinators ---
 
-test_take_zero() `test {
+test_take_zero() `test(allow_leaks: true) {
   c := Counter(current: 0, limit: 10);
   assert(c.take(0).count() == 0, "take(0) yields nothing");
 }
 
-test_take_more_than_available() `test {
+test_take_more_than_available() `test(allow_leaks: true) {
   c := Counter(current: 0, limit: 3);
   int[] result = c.take(100).collect();
   assert(result.len == 3, "take(100) on 3 items yields 3");
 }
 
-test_skip_zero() `test {
+test_skip_zero() `test(allow_leaks: true) {
   c := Counter(current: 0, limit: 3);
   int[] result = c.skip(0).collect();
   assert(result.len == 3, "skip(0) yields all");
   assert(result[0] == 0, "first=0");
 }
 
-test_skip_more_than_available() `test {
+test_skip_more_than_available() `test(allow_leaks: true) {
   c := Counter(current: 0, limit: 3);
   assert(c.skip(100).count() == 0, "skip(100) on 3 items yields nothing");
 }
 
-test_filter_all() `test {
+test_filter_all() `test(allow_leaks: true) {
   c := Counter(current: 0, limit: 5);
   assert(c.filter(|int x| -> bool {
     return false;
   }).count() == 0, "filter all out");
 }
 
-test_filter_none() `test {
+test_filter_none() `test(allow_leaks: true) {
   c := Counter(current: 0, limit: 5);
   assert(c.filter(|int x| -> bool {
     return true;
   }).count() == 5, "filter none out");
 }
 
-test_chain_empty_first() `test {
+test_chain_empty_first() `test(allow_leaks: true) {
   a := Counter(current: 0, limit: 0);
   b := Counter(current: 10, limit: 13);
   int[] result = a.chain(b).collect();
@@ -479,7 +479,7 @@ test_chain_empty_first() `test {
   assert(result[0] == 10, "first=10");
 }
 
-test_chain_empty_second() `test {
+test_chain_empty_second() `test(allow_leaks: true) {
   a := Counter(current: 0, limit: 3);
   b := Counter(current: 0, limit: 0);
   int[] result = a.chain(b).collect();
@@ -487,7 +487,7 @@ test_chain_empty_second() `test {
   assert(result[2] == 2, "last=2");
 }
 
-test_chain_both_empty() `test {
+test_chain_both_empty() `test(allow_leaks: true) {
   a := Counter(current: 0, limit: 0);
   b := Counter(current: 0, limit: 0);
   assert(a.chain(b).count() == 0, "chain empty+empty = 0");
@@ -543,7 +543,7 @@ test_find_first() `test {
   }
 }
 
-test_take_while_empty() `test {
+test_take_while_empty() `test(allow_leaks: true) {
   c := Counter(current: 10, limit: 20);
   int[] result = c.take_while(|int x| -> bool {
     return x < 10;
@@ -551,7 +551,7 @@ test_take_while_empty() `test {
   assert(result.len == 0, "take_while with no match yields nothing");
 }
 
-test_take_while_all() `test {
+test_take_while_all() `test(allow_leaks: true) {
   c := Counter(current: 0, limit: 3);
   int[] result = c.take_while(|int x| -> bool {
     return true;
@@ -559,7 +559,7 @@ test_take_while_all() `test {
   assert(result.len == 3, "take_while always true yields all");
 }
 
-test_skip_while_all() `test {
+test_skip_while_all() `test(allow_leaks: true) {
   c := Counter(current: 0, limit: 5);
   int[] result = c.skip_while(|int x| -> bool {
     return true;
@@ -567,7 +567,7 @@ test_skip_while_all() `test {
   assert(result.len == 0, "skip_while always true yields nothing");
 }
 
-test_skip_while_none() `test {
+test_skip_while_none() `test(allow_leaks: true) {
   c := Counter(current: 0, limit: 3);
   int[] result = c.skip_while(|int x| -> bool {
     return false;
@@ -589,7 +589,7 @@ test_for_each() `test(allow_leaks: true) {
 
 // --- Generic combinators: map[R] ---
 
-test_map_double() `test {
+test_map_double() `test(allow_leaks: true) {
   int[] v = [1, 2, 3, 4, 5];
   int[] result = v.iter().map[int](|int x| -> int {
     return x * 2;
@@ -599,7 +599,7 @@ test_map_double() `test {
   assert(result[4] == 10, "10");
 }
 
-test_map_cross_type() `test {
+test_map_cross_type() `test(allow_leaks: true) {
   int[] v = [1, 2, 3, 4];
   bool[] result = v.iter().map[bool](|int x| -> bool {
     return x > 2;
@@ -611,7 +611,7 @@ test_map_cross_type() `test {
   assert(result[3] == true, "4>2=true");
 }
 
-test_map_empty() `test {
+test_map_empty() `test(allow_leaks: true) {
   int[] v = [];
   int[] result = v.iter().map[int](|int x| -> int {
     return x * 10;
@@ -621,7 +621,7 @@ test_map_empty() `test {
 
 // --- Generic combinators: fold[R] ---
 
-test_fold_sum() `test {
+test_fold_sum() `test(allow_leaks: true) {
   int[] v = [1, 2, 3, 4, 5];
   int sum = v.iter().fold[int](0, |int acc, int x| -> int {
     return acc + x;
@@ -629,7 +629,7 @@ test_fold_sum() `test {
   assert(sum == 15, "fold sum=15");
 }
 
-test_fold_product() `test {
+test_fold_product() `test(allow_leaks: true) {
   int[] v = [1, 2, 3, 4];
   int prod = v.iter().fold[int](1, |int acc, int x| -> int {
     return acc * x;
@@ -637,7 +637,7 @@ test_fold_product() `test {
   assert(prod == 24, "fold product=24");
 }
 
-test_fold_empty() `test {
+test_fold_empty() `test(allow_leaks: true) {
   int[] v = [];
   int result = v.iter().fold[int](42, |int acc, int x| -> int {
     return acc + x;
@@ -645,7 +645,7 @@ test_fold_empty() `test {
   assert(result == 42, "fold on empty = init");
 }
 
-test_fold_cross_type() `test {
+test_fold_cross_type() `test(allow_leaks: true) {
   int[] v = [3, 7, 2];
   bool has_big = v.iter().fold[bool](false, |bool acc, int x| -> bool {
     if x > 5 {
@@ -658,7 +658,7 @@ test_fold_cross_type() `test {
 
 // --- Generic combinators: enumerate ---
 
-test_enumerate() `test {
+test_enumerate() `test(allow_leaks: true) {
   int[] v = [10, 20, 30];
   int idx_sum = 0;
   int val_sum = 0;
@@ -671,7 +671,7 @@ test_enumerate() `test {
   assert(val_sum == 60, "enumerate val sum: 10+20+30=60");
 }
 
-test_enumerate_empty() `test {
+test_enumerate_empty() `test(allow_leaks: true) {
   int[] v = [];
   int count = 0;
   for _ in v.iter().enumerate() {
@@ -682,7 +682,7 @@ test_enumerate_empty() `test {
 
 // --- Generic combinators: zip[U] ---
 
-test_zip() `test {
+test_zip() `test(allow_leaks: true) {
   int[] a = [1, 2, 3];
   int[] b = [10, 20, 30];
   int sum = 0;
@@ -693,7 +693,7 @@ test_zip() `test {
   assert(sum == 66, "zip sum: (1+10)+(2+20)+(3+30)=66");
 }
 
-test_zip_unequal_first_shorter() `test {
+test_zip_unequal_first_shorter() `test(allow_leaks: true) {
   int[] a = [1, 2];
   int[] b = [10, 20, 30, 40];
   int count = 0;
@@ -703,7 +703,7 @@ test_zip_unequal_first_shorter() `test {
   assert(count == 2, "zip stops at shorter (first)");
 }
 
-test_zip_unequal_second_shorter() `test {
+test_zip_unequal_second_shorter() `test(allow_leaks: true) {
   int[] a = [1, 2, 3, 4];
   int[] b = [10];
   int count = 0;
@@ -713,7 +713,7 @@ test_zip_unequal_second_shorter() `test {
   assert(count == 1, "zip stops at shorter (second)");
 }
 
-test_zip_empty() `test {
+test_zip_empty() `test(allow_leaks: true) {
   int[] a = [];
   int[] b = [1, 2, 3];
   int count = 0;
@@ -748,7 +748,7 @@ test_flat_map_empty_inner() `test(allow_leaks: true) {
   assert(result.len == 0, "flat_map with all empty inners = empty");
 }
 
-test_flat_map_empty_outer() `test {
+test_flat_map_empty_outer() `test(allow_leaks: true) {
   int[] v = [];
   int[] result = v.iter().flat_map[int](|int x| -> Iterator[int] {
     return Counter(current: 0, limit: x);
@@ -758,7 +758,7 @@ test_flat_map_empty_outer() `test {
 
 // --- Deep combinator chains ---
 
-test_chain_filter_take_collect() `test {
+test_chain_filter_take_collect() `test(allow_leaks: true) {
   int[] a = [1, 2, 3, 4, 5];
   int[] b = [6, 7, 8, 9, 10];
   int[] result = a.iter().chain(b.iter()).filter(|int x| -> bool {
@@ -770,7 +770,7 @@ test_chain_filter_take_collect() `test {
   assert(result[2] == 6, "third=6");
 }
 
-test_skip_take_while_collect() `test {
+test_skip_take_while_collect() `test(allow_leaks: true) {
   c := Counter(current: 0, limit: 20);
   int[] result = c.skip(5).take_while(|int x| -> bool {
     return x < 10;
@@ -780,7 +780,7 @@ test_skip_take_while_collect() `test {
   assert(result[4] == 9, "last=9");
 }
 
-test_filter_skip_while_take() `test {
+test_filter_skip_while_take() `test(allow_leaks: true) {
   c := Counter(current: 0, limit: 30);
   int[] result = c.filter(|int x| -> bool {
     return x % 3 == 0;
@@ -796,7 +796,7 @@ test_filter_skip_while_take() `test {
   assert(result[2] == 18, "third=18");
 }
 
-test_take_filter_count() `test {
+test_take_filter_count() `test(allow_leaks: true) {
   c := Counter(current: 0, limit: 100);
   int n = c.take(20).filter(|int x| -> bool {
     return x > 10;
@@ -804,7 +804,7 @@ test_take_filter_count() `test {
   assert(n == 9, "take(20).filter(>10).count: 11..19 = 9");
 }
 
-test_map_filter_collect() `test {
+test_map_filter_collect() `test(allow_leaks: true) {
   int[] v = [1, 2, 3, 4, 5];
   int[] result = v.iter().map[int](|int x| -> int {
     return x * x;
@@ -818,7 +818,7 @@ test_map_filter_collect() `test {
   assert(result[2] == 25, "third=25");
 }
 
-test_filter_map_fold() `test {
+test_filter_map_fold() `test(allow_leaks: true) {
   int[] v = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
   int sum = v.iter().filter(|int x| -> bool {
     return x % 2 == 0;
@@ -833,7 +833,7 @@ test_filter_map_fold() `test {
 
 // --- Vector.iter() with more combinators ---
 
-test_vector_iter_take() `test {
+test_vector_iter_take() `test(allow_leaks: true) {
   int[] v = [10, 20, 30, 40, 50];
   int[] result = v.iter().take(3).collect();
   assert(result.len == 3, "take 3 from 5");
@@ -841,7 +841,7 @@ test_vector_iter_take() `test {
   assert(result[2] == 30, "third=30");
 }
 
-test_vector_iter_skip() `test {
+test_vector_iter_skip() `test(allow_leaks: true) {
   int[] v = [10, 20, 30, 40, 50];
   int[] result = v.iter().skip(3).collect();
   assert(result.len == 2, "skip 3 from 5");
@@ -849,13 +849,13 @@ test_vector_iter_skip() `test {
   assert(result[1] == 50, "second=50");
 }
 
-test_vector_iter_count() `test {
+test_vector_iter_count() `test(allow_leaks: true) {
   int[] v = [1, 2, 3, 4, 5, 6, 7];
   int n = v.iter().count();
   assert(n == 7, "vector iter count=7");
 }
 
-test_vector_iter_any() `test {
+test_vector_iter_any() `test(allow_leaks: true) {
   int[] v = [1, 2, 3, 4, 5];
   assert(v.iter().any(|int x| -> bool {
     return x == 3;
@@ -866,7 +866,7 @@ test_vector_iter_any() `test {
   }), "any finds nothing");
 }
 
-test_vector_iter_every() `test {
+test_vector_iter_every() `test(allow_leaks: true) {
   int[] v = [2, 4, 6, 8];
   assert(v.iter().every(|int x| -> bool {
     return x % 2 == 0;
@@ -922,7 +922,7 @@ test_vector_iter_first() `test(allow_leaks: true) {
 
 // --- Multiple independent iterations on same collection ---
 
-test_multiple_iters_same_vector() `test {
+test_multiple_iters_same_vector() `test(allow_leaks: true) {
   int[] v = [1, 2, 3, 4, 5];
   int sum1 = v.iter().fold[int](0, |int acc, int x| -> int {
     return acc + x;
@@ -934,7 +934,7 @@ test_multiple_iters_same_vector() `test {
   assert(sum2 == 15, "second iteration sum=15");
 }
 
-test_independent_filter_and_count() `test {
+test_independent_filter_and_count() `test(allow_leaks: true) {
   int[] v = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
   int even_count = v.iter().filter(|int x| -> bool {
     return x % 2 == 0;
@@ -1011,7 +1011,7 @@ test_collect_empty() `test {
   assert(result.len == 0, "collect empty = empty vec");
 }
 
-test_chain_three() `test {
+test_chain_three() `test(allow_leaks: true) {
   a := Counter(current: 0, limit: 2);
   b := Counter(current: 10, limit: 12);
   c := Counter(current: 100, limit: 102);
@@ -1024,7 +1024,7 @@ test_chain_three() `test {
 
 // --- Combinator on combinator result (tests _FnIter inherits combinators) ---
 
-test_fniter_inherits_combinators() `test {
+test_fniter_inherits_combinators() `test(allow_leaks: true) {
   c := Counter(current: 0, limit: 20);
   // filter returns _FnIter[int] which should have .any() via inheritance
   bool found = c.filter(|int x| -> bool {

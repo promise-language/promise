@@ -143,6 +143,53 @@ func TestDirSize(t *testing.T) {
 	}
 }
 
+func TestPrintVersionWithLdflags(t *testing.T) {
+	// When version is set via -ldflags, printVersion uses it.
+	old := version
+	version = "2026.3-abc1234"
+	defer func() { version = old }()
+
+	// Capture stdout.
+	r, w, _ := os.Pipe()
+	oldStdout := os.Stdout
+	os.Stdout = w
+	printVersion()
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf [256]byte
+	n, _ := r.Read(buf[:])
+	output := string(buf[:n])
+	if output != "promise version 2026.3-abc1234\n" {
+		t.Fatalf("expected 'promise version 2026.3-abc1234\\n', got %q", output)
+	}
+}
+
+func TestPrintVersionFallback(t *testing.T) {
+	// When version is empty, printVersion falls back to embedded catalog epoch.
+	old := version
+	version = ""
+	defer func() { version = old }()
+
+	r, w, _ := os.Pipe()
+	oldStdout := os.Stdout
+	os.Stdout = w
+	printVersion()
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf [256]byte
+	n, _ := r.Read(buf[:])
+	output := string(buf[:n])
+	if !strings.HasPrefix(output, "promise version ") {
+		t.Fatalf("expected output starting with 'promise version ', got %q", output)
+	}
+	// Should not be "unknown" since we have an embedded catalog.
+	if strings.Contains(output, "unknown") {
+		t.Fatal("expected a real epoch, got 'unknown'")
+	}
+}
+
 func TestFormatSize(t *testing.T) {
 	tests := []struct {
 		bytes int64

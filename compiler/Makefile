@@ -18,6 +18,12 @@ LLVM_DST      := $(RESOURCES)/llvm/linux-amd64
 GOARCH        := $(shell go env GOARCH 2>/dev/null || echo amd64)
 LLVM_DST_DARWIN := $(RESOURCES)/llvm/darwin-$(GOARCH)
 
+# Version: epoch-gitsha7
+EPOCH         := $(shell grep '^epoch' ../catalog.toml 2>/dev/null | head -1 | sed 's/.*"\(.*\)"/\1/' || echo unknown)
+GIT_SHA       := $(shell git rev-parse --short=7 HEAD 2>/dev/null || echo unknown)
+VERSION       := $(EPOCH)-$(GIT_SHA)
+LDFLAGS       := -X main.version=$(VERSION)
+
 .PHONY: all generate build test clean download-antlr fmt install resources musl-crt llvm-bundle llvm-bundle-darwin release wasm-alloc
 
 all: generate build
@@ -71,7 +77,7 @@ else
 build: generate resources
 endif
 	@mkdir -p $(dir $(BINARY))
-	go build -o $(BINARY) ./cmd/promise
+	go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/promise
 	@shasum -a 256 $(BINARY) | cut -d' ' -f1 > $(dir $(BINARY)).promise.hash
 
 ifeq ($(UNAME),Linux)
@@ -155,7 +161,7 @@ llvm-bundle-darwin:
 ifeq ($(UNAME),Linux)
 release: generate resources musl-crt llvm-bundle
 	@mkdir -p $(dir $(BINARY))
-	go build -tags embed_llvm -o $(BINARY) ./cmd/promise
+	go build -tags embed_llvm -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/promise
 	@shasum -a 256 $(BINARY) | cut -d' ' -f1 > $(dir $(BINARY)).promise.hash
 	@echo "Release binary: $$(du -h $(BINARY) | cut -f1) (self-contained)"
 endif
@@ -163,7 +169,7 @@ endif
 ifeq ($(UNAME),Darwin)
 release: generate resources llvm-bundle-darwin
 	@mkdir -p $(dir $(BINARY))
-	go build -tags embed_llvm -o $(BINARY) ./cmd/promise
+	go build -tags embed_llvm -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/promise
 	@shasum -a 256 $(BINARY) | cut -d' ' -f1 > $(dir $(BINARY)).promise.hash
 	@echo "Release binary: $$(du -h $(BINARY) | cut -f1) (self-contained, requires macOS SDK)"
 endif

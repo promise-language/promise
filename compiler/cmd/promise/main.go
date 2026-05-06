@@ -31,6 +31,10 @@ import (
 	"djabi.dev/go/promise_lang/internal/types"
 )
 
+// version is set at build time via -ldflags. Format: "<epoch>-<gitsha7>" for dev
+// builds, "<epoch>" for release builds. Falls back to embedded catalog epoch.
+var version string
+
 //go:embed resources/catalog.toml
 var embeddedCatalog []byte
 
@@ -62,7 +66,9 @@ Commands:
   install   Install Promise to PROMISE_HOME (default: ~/.promise/)
   sync      Download and install a compiler epoch from GitHub releases
   epochs    List installed epochs
+  remove    Remove an installed epoch
   use       Set the active epoch (e.g., promise use 2026.3)
+  version   Print compiler version
 
 Options (build):
   -o <output>   Output file name (default: input file without extension)
@@ -105,6 +111,19 @@ Inline execution:
 `)
 }
 
+func printVersion() {
+	v := version
+	if v == "" {
+		// Fallback: use embedded catalog epoch.
+		if epoch, err := module.CompilerEpoch(embeddedCatalog); err == nil {
+			v = epoch
+		} else {
+			v = "unknown"
+		}
+	}
+	fmt.Printf("promise version %s\n", v)
+}
+
 func main() {
 	shimDispatch()
 
@@ -120,6 +139,12 @@ func main() {
 
 	cmd := os.Args[1]
 
+	// --version flag (before legacy dispatch).
+	if cmd == "--version" {
+		printVersion()
+		return
+	}
+
 	// Legacy flag-based interface for backwards compatibility
 	if strings.HasPrefix(cmd, "-") {
 		runLegacy(os.Args[1:])
@@ -127,6 +152,9 @@ func main() {
 	}
 
 	switch cmd {
+	case "version":
+		printVersion()
+		return
 	case "build":
 		runBuild(os.Args[2:])
 	case "run":

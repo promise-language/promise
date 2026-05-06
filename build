@@ -113,11 +113,22 @@ if [ "${1:-}" = "--release" ]; then
       ;;
   esac
   BUILD_TAGS="-tags embed_llvm"
+  RELEASE=1
 fi
+
+# Compute version string: <epoch>-<gitsha7> for dev, <epoch> for release.
+EPOCH=$(grep '^epoch' "$ROOT/catalog.toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
+GIT_SHA=$(git -C "$ROOT" rev-parse --short=7 HEAD 2>/dev/null || echo "unknown")
+if [ "${RELEASE:-}" = "1" ]; then
+  BUILD_VERSION="$EPOCH"
+else
+  BUILD_VERSION="$EPOCH-$GIT_SHA"
+fi
+LDFLAGS="-X main.version=$BUILD_VERSION"
 
 # Build
 mkdir -p "$ROOT/bin"
-go build -buildvcs=false $BUILD_TAGS -o "$ROOT/bin/promise" ./cmd/promise
+go build -buildvcs=false $BUILD_TAGS -ldflags "$LDFLAGS" -o "$ROOT/bin/promise" ./cmd/promise
 
 # Write compiler fingerprint sidecar. CompilerHash() reads this tiny file
 # instead of hashing the full binary (14MB dev / 60-70MB release).

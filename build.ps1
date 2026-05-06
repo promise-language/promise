@@ -183,9 +183,19 @@ Write-Step "Building..."
 
 if (-not (Test-Path $BinDir)) { New-Item -ItemType Directory -Path $BinDir | Out-Null }
 
+# Compute version string: <epoch>-<gitsha7> for dev builds.
+$catalogPath = Join-Path $Resources "catalog.toml"
+$epoch = "unknown"
+$catalogContent = Get-Content $catalogPath -Raw -ErrorAction SilentlyContinue
+if ($catalogContent -match 'epoch\s*=\s*"([^"]+)"') { $epoch = $Matches[1] }
+$gitSha = "unknown"
+try { $gitSha = (git -C $Root rev-parse --short=7 HEAD 2>$null) } catch { }
+$buildVersion = "$epoch-$gitSha"
+$ldflags = "-X main.version=$buildVersion"
+
 Push-Location $CompilerDir
 try {
-    & go build -buildvcs=false -o $Binary ./cmd/promise
+    & go build -buildvcs=false -ldflags $ldflags -o $Binary ./cmd/promise
     if ($LASTEXITCODE -ne 0) { throw "go build failed" }
 } finally {
     Pop-Location

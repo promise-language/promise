@@ -164,6 +164,7 @@ func (p *WasmPAL) EmitFree(module *ir.Module) *ir.Func {
 }
 
 // EmitRealloc declares extern @realloc and defines @pal_realloc as a wrapper.
+// Includes allocation count tracking for leak detection (T0066).
 func (p *WasmPAL) EmitRealloc(module *ir.Module) *ir.Func {
 	// declare noalias i8* @realloc(i8* nocapture noundef, i32 noundef) nounwind
 	reallocPtr := ir.NewParam("ptr", irtypes.I8Ptr)
@@ -174,6 +175,11 @@ func (p *WasmPAL) EmitRealloc(module *ir.Module) *ir.Func {
 	reallocFn.ReturnAttrs = append(reallocFn.ReturnAttrs, enum.ReturnAttrNoAlias)
 	addFuncAttr(reallocFn, enum.FuncAttrWillReturn)
 
+	allocCount := getOrCreateAllocCountGlobal(module)
+	zero64 := constant.NewInt(irtypes.I64, 0)
+	one64 := constant.NewInt(irtypes.I64, 1)
+	nullPtr := constant.NewNull(irtypes.I8Ptr)
+
 	// define noalias i8* @pal_realloc(i8* %ptr, i64 %size) nounwind
 	fn := module.NewFunc("pal_realloc", irtypes.I8Ptr,
 		ir.NewParam("ptr", irtypes.I8Ptr),
@@ -182,9 +188,31 @@ func (p *WasmPAL) EmitRealloc(module *ir.Module) *ir.Func {
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
 	entry := fn.NewBlock(".entry")
 
+	ptrIsNull := entry.NewICmp(enum.IPredEQ, fn.Params[0], nullPtr)
+	sizeIsZero := entry.NewICmp(enum.IPredEQ, fn.Params[1], zero64)
+
 	size32 := entry.NewTrunc(fn.Params[1], irtypes.I32)
 	ret := entry.NewCall(reallocFn, fn.Params[0], size32)
-	entry.NewRet(ret)
+
+	// realloc(NULL, size) with non-null result → new allocation
+	newAllocBlk := fn.NewBlock(".new_alloc")
+	checkFreeBlk := fn.NewBlock(".check_free")
+	entry.NewCondBr(ptrIsNull, newAllocBlk, checkFreeBlk)
+
+	retNonNull := newAllocBlk.NewICmp(enum.IPredNE, ret, nullPtr)
+	incBlk := fn.NewBlock(".inc")
+	doneBlk := fn.NewBlock(".done")
+	newAllocBlk.NewCondBr(retNonNull, incBlk, doneBlk)
+	incBlk.NewAtomicRMW(enum.AtomicOpAdd, allocCount, one64, enum.AtomicOrderingMonotonic)
+	incBlk.NewBr(doneBlk)
+
+	// realloc(ptr, 0) with non-null ptr → deallocation
+	decBlk := fn.NewBlock(".dec")
+	checkFreeBlk.NewCondBr(sizeIsZero, decBlk, doneBlk)
+	decBlk.NewAtomicRMW(enum.AtomicOpSub, allocCount, one64, enum.AtomicOrderingMonotonic)
+	decBlk.NewBr(doneBlk)
+
+	doneBlk.NewRet(ret)
 
 	return fn
 }

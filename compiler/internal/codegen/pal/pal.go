@@ -284,6 +284,10 @@ func emitLibcFree(module *ir.Module) *ir.Func {
 }
 
 // emitLibcRealloc declares libc @realloc and defines @pal_realloc as a wrapper.
+// Includes allocation count tracking for leak detection (T0066):
+// - realloc(NULL, size) acts like malloc → increment alloc count
+// - realloc(ptr, 0) acts like free → decrement alloc count
+// - realloc(ptr, size) resizes → no count change
 func emitLibcRealloc(module *ir.Module) *ir.Func {
 	// declare noalias i8* @realloc(i8* nocapture noundef, i64 noundef) nounwind willreturn
 	reallocPtr := ir.NewParam("ptr", irtypes.I8Ptr)
@@ -294,6 +298,11 @@ func emitLibcRealloc(module *ir.Module) *ir.Func {
 	reallocFn.ReturnAttrs = append(reallocFn.ReturnAttrs, enum.ReturnAttrNoAlias)
 	addFuncAttr(reallocFn, enum.FuncAttrWillReturn)
 
+	allocCount := getOrCreateAllocCountGlobal(module)
+	zero64 := constant.NewInt(irtypes.I64, 0)
+	one64 := constant.NewInt(irtypes.I64, 1)
+	nullPtr := constant.NewNull(irtypes.I8Ptr)
+
 	// define noalias i8* @pal_realloc(i8* %ptr, i64 %size) nounwind willreturn
 	fn := module.NewFunc("pal_realloc", irtypes.I8Ptr,
 		ir.NewParam("ptr", irtypes.I8Ptr),
@@ -301,8 +310,34 @@ func emitLibcRealloc(module *ir.Module) *ir.Func {
 	fn.ReturnAttrs = append(fn.ReturnAttrs, enum.ReturnAttrNoAlias)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
 	entry := fn.NewBlock(".entry")
+
+	// Check if old ptr is null (realloc(NULL, size) = malloc)
+	ptrIsNull := entry.NewICmp(enum.IPredEQ, fn.Params[0], nullPtr)
+	// Check if new size is zero (realloc(ptr, 0) = free)
+	sizeIsZero := entry.NewICmp(enum.IPredEQ, fn.Params[1], zero64)
+
 	ret := entry.NewCall(reallocFn, fn.Params[0], fn.Params[1])
-	entry.NewRet(ret)
+
+	// Case 1: realloc(NULL, size) with non-null result → new allocation
+	newAllocBlk := fn.NewBlock(".new_alloc")
+	checkFreeBlk := fn.NewBlock(".check_free")
+	entry.NewCondBr(ptrIsNull, newAllocBlk, checkFreeBlk)
+
+	retNonNull := newAllocBlk.NewICmp(enum.IPredNE, ret, nullPtr)
+	incBlk := fn.NewBlock(".inc")
+	doneBlk := fn.NewBlock(".done")
+	newAllocBlk.NewCondBr(retNonNull, incBlk, doneBlk)
+	incBlk.NewAtomicRMW(enum.AtomicOpAdd, allocCount, one64, enum.AtomicOrderingMonotonic)
+	incBlk.NewBr(doneBlk)
+
+	// Case 2: realloc(ptr, 0) with non-null ptr → deallocation
+	decBlk := fn.NewBlock(".dec")
+	checkFreeBlk.NewCondBr(sizeIsZero, decBlk, doneBlk)
+	decBlk.NewAtomicRMW(enum.AtomicOpSub, allocCount, one64, enum.AtomicOrderingMonotonic)
+	decBlk.NewBr(doneBlk)
+
+	// Normal case: resize — no count change
+	doneBlk.NewRet(ret)
 
 	return fn
 }

@@ -93,3 +93,55 @@ func TestComputeTestFileCacheKeyIncludesTimeout(t *testing.T) {
 		t.Error("same config should produce the same cache key")
 	}
 }
+
+func TestComputeParentTimeout(t *testing.T) {
+	tests := []struct {
+		name        string
+		perTest     time.Duration
+		target      string
+		wantAtLeast time.Duration
+	}{
+		{
+			name:        "native default timeout",
+			perTest:     60 * time.Second,
+			target:      "x86_64-unknown-linux-gnu",
+			wantAtLeast: 600 * time.Second, // 60s * 10
+		},
+		{
+			name:        "native small timeout uses 2min minimum",
+			perTest:     10 * time.Second,
+			target:      "x86_64-unknown-linux-gnu",
+			wantAtLeast: 2 * time.Minute,
+		},
+		{
+			name:        "wasm small timeout uses 5min minimum",
+			perTest:     10 * time.Second,
+			target:      "wasm32-wasi",
+			wantAtLeast: 5 * time.Minute,
+		},
+		{
+			name:        "wasm large timeout uses multiplier",
+			perTest:     60 * time.Second,
+			target:      "wasm32-wasi",
+			wantAtLeast: 600 * time.Second, // 60s * 10
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := computeParentTimeout(tt.perTest, tt.target)
+			if got < tt.wantAtLeast {
+				t.Errorf("computeParentTimeout(%v, %q) = %v, want at least %v",
+					tt.perTest, tt.target, got, tt.wantAtLeast)
+			}
+		})
+	}
+
+	// Verify WASM minimum is strictly greater than native minimum
+	// when per-test timeout is small (the B0108 scenario).
+	nativeTimeout := computeParentTimeout(10*time.Second, "x86_64-unknown-linux-gnu")
+	wasmTimeout := computeParentTimeout(10*time.Second, "wasm32-wasi")
+	if wasmTimeout <= nativeTimeout {
+		t.Errorf("WASM parent timeout (%v) should exceed native (%v) for small per-test timeout",
+			wasmTimeout, nativeTimeout)
+	}
+}

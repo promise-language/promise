@@ -1268,10 +1268,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 			// The parent context is a generous backstop that must account
 			// for compilation time (which can exceed the per-test timeout
 			// under parallel load or cross-compilation to WASM).
-			parentTimeout := cfg.defaultTimeout * 10
-			if parentTimeout < 2*time.Minute {
-				parentTimeout = 2 * time.Minute
-			}
+			parentTimeout := computeParentTimeout(cfg.defaultTimeout, targetTriple)
 			ctx, cancel := context.WithTimeout(context.Background(), parentTimeout)
 			defer cancel()
 			testArgs := []string{"test", "-timeout", fmt.Sprintf("%gs", cfg.defaultTimeout.Seconds())}
@@ -1690,6 +1687,22 @@ func lastLine(s string) string {
 func atoi(s string) int {
 	n, _ := strconv.Atoi(s)
 	return n
+}
+
+// computeParentTimeout returns the backstop timeout for a subprocess that compiles
+// and runs a single test file. WASM cross-compilation is significantly slower than
+// native, so it uses a higher minimum (5 min vs 2 min) to avoid flaky timeouts on
+// heavy files under parallel load (B0108).
+func computeParentTimeout(perTestTimeout time.Duration, target string) time.Duration {
+	parentTimeout := perTestTimeout * 10
+	minTimeout := 2 * time.Minute
+	if isWasmTarget(target) {
+		minTimeout = 5 * time.Minute
+	}
+	if parentTimeout < minTimeout {
+		parentTimeout = minTimeout
+	}
+	return parentTimeout
 }
 
 // parseTimeoutArg parses a timeout string as a Go duration ("60s", "2m") or plain seconds ("60").

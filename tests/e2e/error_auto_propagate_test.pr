@@ -249,7 +249,7 @@ test_auto_prop_void_then_fail() `test(allow_leaks: true) {
 // Section 8: Error handler as statement (value discarded) — no recovery needed
 // ============================================================
 
-test_handler_stmt_no_recovery() `test(allow_leaks: true) {
+test_handler_stmt_no_recovery() `test {
   bool caught = false;
   always_fail()? e {
     caught = true;
@@ -283,7 +283,7 @@ test_handler_recovery_int_success() `test {
   assert(v == 42, "int success value through handler");
 }
 
-test_handler_recovery_string() `test(allow_leaks: true) {
+test_handler_recovery_string() `test {
   string s = get_string(true)? e {
     "fallback";
   };
@@ -521,7 +521,7 @@ make_point(bool fail) Point! {
   return Point(x: 10, y: 20);
 }
 
-test_handler_recovery_user_type() `test(allow_leaks: true) {
+test_handler_recovery_user_type() `test {
   Point p = make_point(true)? e {
     Point(x: 0, y: 0);
   };
@@ -549,7 +549,7 @@ fail_with_io(bool use_io) int! {
 }
 
 // Typed handler matches IoError, else catches generic error
-test_typed_handler_else_match() `test(allow_leaks: true) {
+test_typed_handler_else_match() `test {
   int v = fail_with_io(true)? e is IoError {
     e.code;
   } else e {
@@ -558,7 +558,7 @@ test_typed_handler_else_match() `test(allow_leaks: true) {
   assert(v == 42, "typed handler matched IoError, got code");
 }
 
-test_typed_handler_else_nomatch() `test(allow_leaks: true) {
+test_typed_handler_else_nomatch() `test {
   int v = fail_with_io(false)? e is IoError {
     e.code;
   } else e {
@@ -595,13 +595,13 @@ test_typed_handler_else_diverge() `test(allow_leaks: true) {
   assert(r == -99, "else clause diverges with return");
 }
 
-test_typed_handler_else_match_no_diverge() `test(allow_leaks: true) {
+test_typed_handler_else_match_no_diverge() `test {
   int r = try_typed_else_diverge(true);
   assert(r == 42, "typed handler matches, else not reached");
 }
 
 // Typed handler with else: non-recovering → optional
-test_typed_handler_else_optional_inferred() `test(allow_leaks: true) {
+test_typed_handler_else_optional_inferred() `test {
   v := fail_with_io(true)? e is IoError {
     e.code;
   } else e {
@@ -620,7 +620,7 @@ test_typed_handler_else_optional_nomatch() `test(allow_leaks: true) {
 }
 
 // Typed handler with ! (panic on non-match)
-test_typed_handler_bang_match() `test(allow_leaks: true) {
+test_typed_handler_bang_match() `test {
   int v = fail_with_io(true)? e is IoError {
     e.code;
   }!;

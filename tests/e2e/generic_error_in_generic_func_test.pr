@@ -26,13 +26,13 @@ maybe_wrap[T](T v, bool do_wrap) Wrapper[T]? {
   return none;
 }
 
-test_generic_error_raise() `test(allow_leaks: true) {
+test_generic_error_raise() `test {
   make_error[int](42)? e is AppError[int] {
     assert(e.message == "app error", "message matches");
   }!;
 }
 
-test_generic_error_catch_detail() `test(allow_leaks: true) {
+test_generic_error_catch_detail() `test {
   make_error[string]("oops")? e is AppError[string] {
     assert(e.detail == "oops", "detail matches");
   }!;

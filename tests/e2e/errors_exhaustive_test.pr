@@ -378,7 +378,7 @@ void_success() void! {
   // no raise
 }
 
-test_void_failable_handler_on_error() `test(allow_leaks: true) {
+test_void_failable_handler_on_error() `test {
   bool caught = false;
   void_fail()? e {
     caught = true;
@@ -469,7 +469,7 @@ test_exact_child_handler() `test(allow_leaks: true) {
 // Section 11: Discard binding variants
 // ============================================================
 
-test_discard_binding_untyped() `test(allow_leaks: true) {
+test_discard_binding_untyped() `test {
   bool caught = false;
   void_fail()? _ {
     caught = true;
@@ -489,7 +489,7 @@ test_discard_binding_typed() `test(allow_leaks: true) {
   assert(caught, "discard binding typed handler works");
 }
 
-test_no_binding_handler() `test(allow_leaks: true) {
+test_no_binding_handler() `test {
   bool caught = false;
   void_fail()? {
     caught = true;

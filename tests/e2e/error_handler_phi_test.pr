@@ -7,7 +7,7 @@ parse(string s) int! {
   raise error(message: "bad");
 }
 
-test_handler_int_recovery() `test(allow_leaks: true) {
+test_handler_int_recovery() `test {
   int v = parse("bad")? e {
     42;
   };
@@ -25,7 +25,7 @@ get_name() string! {
   raise error(message: "no name");
 }
 
-test_handler_string_recovery() `test(allow_leaks: true) {
+test_handler_string_recovery() `test {
   string s = get_name()? e {
     "anonymous";
   };
@@ -53,7 +53,7 @@ type Parser {
   }
 }
 
-test_method_handler_recovery() `test(allow_leaks: true) {
+test_method_handler_recovery() `test {
   Parser p = Parser();
   int v = p.parse("bad")? e {
     -1;
@@ -83,7 +83,7 @@ type Factory {
   }
 }
 
-test_method_user_type_handler() `test(allow_leaks: true) {
+test_method_user_type_handler() `test {
   Factory f = Factory();
   Result r = f.make(true)? e {
     Result(value: 0);
@@ -100,7 +100,7 @@ test_method_user_type_success() `test {
 }
 
 // Handler with expression (not just literal)
-test_handler_expression() `test(allow_leaks: true) {
+test_handler_expression() `test {
   int base = 40;
   int v = parse("bad")? e {
     base + 2;
@@ -113,7 +113,7 @@ void_fail()! {
   raise error(message: "void fail");
 }
 
-test_void_handler() `test(allow_leaks: true) {
+test_void_handler() `test {
   bool caught = false;
   void_fail()? e {
     caught = true;
@@ -126,7 +126,7 @@ get_flag() bool! {
   raise error(message: "no flag");
 }
 
-test_handler_bool_recovery() `test(allow_leaks: true) {
+test_handler_bool_recovery() `test {
   bool v = get_flag()? e {
     false;
   };
@@ -145,7 +145,7 @@ test_handler_bool_success() `test {
 }
 
 // Handler in a loop (repeated phi merge)
-test_handler_in_loop() `test(allow_leaks: true) {
+test_handler_in_loop() `test {
   int sum = 0;
   int i = 0;
   while i < 5 {
@@ -164,7 +164,7 @@ get_int() int! {
   raise error(message: "fail");
 }
 
-test_nested_handlers() `test(allow_leaks: true) {
+test_nested_handlers() `test {
   int a = get_int()? e {
     10;
   };
@@ -175,7 +175,7 @@ test_nested_handlers() `test(allow_leaks: true) {
 }
 
 // Handler with variable from outer scope
-test_handler_outer_scope() `test(allow_leaks: true) {
+test_handler_outer_scope() `test {
   int fallback = 99;
   int v = parse("bad")? e {
     fallback;
@@ -184,7 +184,7 @@ test_handler_outer_scope() `test(allow_leaks: true) {
 }
 
 // Multiple handlers in same function
-test_multiple_handlers_same_func() `test(allow_leaks: true) {
+test_multiple_handlers_same_func() `test {
   int a = parse("bad")? e {
     1;
   };
@@ -208,7 +208,7 @@ get_opt_ok() int?! {
   return 42;
 }
 
-test_handler_optional_recovery() `test(allow_leaks: true) {
+test_handler_optional_recovery() `test {
   int? v = get_opt()? e {
     none;
   };

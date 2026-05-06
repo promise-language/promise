@@ -237,7 +237,7 @@ typed_handler_else_recovery() int {
   return v;
 }
 
-test_typed_handler_else_recovery() `test(allow_leaks: true) {
+test_typed_handler_else_recovery() `test {
   int r = typed_handler_else_recovery();
   assert(r == 0, "else clause provides recovery value for non-matching");
 }
@@ -251,7 +251,7 @@ typed_handler_match_recovery() int {
   return v;
 }
 
-test_typed_handler_match_recovery() `test(allow_leaks: true) {
+test_typed_handler_match_recovery() `test {
   int r = typed_handler_match_recovery();
   assert(r == 28, "typed match provides recovery value");
 }
@@ -333,7 +333,7 @@ bang_ok()! {
   // does not raise
 }
 
-test_bang_shorthand_raise() `test(allow_leaks: true) {
+test_bang_shorthand_raise() `test {
   bool caught = false;
   bang_void()? e {
     caught = true;

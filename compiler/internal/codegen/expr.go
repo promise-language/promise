@@ -3937,6 +3937,7 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 			noMatchVal = c.genBlockValue(e.ElseBody)
 			elseDiverged := c.block.Term != nil
 			if !elseDiverged {
+				c.emitErrorInstanceFree(errVal) // T0083
 				noMatchEnd = c.block
 				c.block.NewBr(mergeBlock)
 			}
@@ -3971,6 +3972,10 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 		c.locals[e.Binding] = alloca
 	}
 	handlerVal := c.genBlockValue(e.Body)
+	// T0083: Free the caught error instance after the handler body completes.
+	if c.block.Term == nil {
+		c.emitErrorInstanceFree(errVal)
+	}
 	handlerEnd := c.block
 	if c.block.Term == nil {
 		c.block.NewBr(mergeBlock)
@@ -4111,6 +4116,18 @@ func (c *Compiler) reconstructErrorValue(errPtr value.Value) value.Value {
 	valStruct = c.block.NewInsertValue(valStruct, vtablePtr, 0)
 	valStruct = c.block.NewInsertValue(valStruct, errPtr, 1)
 	return valStruct
+}
+
+// emitErrorInstanceFree frees a caught error instance (T0083).
+// Only frees the instance struct itself — the message string field is NOT
+// dropped because the handler body may return a reference to e.message
+// (e.g., "{e.message}" optimizes to the raw message pointer, and dropping
+// it would cause use-after-free when the handler value is consumed).
+// For literal message strings (the common case), no leak occurs since
+// they live in .rodata. Heap-allocated messages leak — tracked as a
+// follow-up in T0086.
+func (c *Compiler) emitErrorInstanceFree(errVal value.Value) {
+	c.block.NewCall(c.palFree, errVal)
 }
 
 // --- Tuple ---

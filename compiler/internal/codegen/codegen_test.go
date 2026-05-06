@@ -9348,6 +9348,35 @@ func TestSynthDropExcludesErrorTypes(t *testing.T) {
 	assertNotContains(t, ir, "define void @error.drop")
 }
 
+// T0083: Caught error instances are freed after handler blocks
+func TestErrorHandlerFreesInstance(t *testing.T) {
+	ir := generateIR(t, `
+		fail() int! {
+			raise error(message: "boom");
+		}
+		main() {
+			int v = fail()? e => 0;
+		}
+	`)
+	// Handler block should free the error instance
+	assertContains(t, ir, "call void @pal_free")
+}
+
+// T0083: Typed error handler frees instance after handler body
+func TestTypedErrorHandlerFreesInstance(t *testing.T) {
+	ir := generateIR(t, `
+		type IoError is error { int code; }
+		fail() int! {
+			raise IoError(code: 1, message: "io");
+		}
+		main() {
+			int v = fail()? e is IoError { 0; } else { -1; };
+		}
+	`)
+	// Both match and else paths should free the error instance
+	assertContains(t, ir, "call void @pal_free")
+}
+
 // B0158: Synthesized drop coexists with explicit drop (explicit takes precedence)
 func TestDropExplicitTakesPrecedence(t *testing.T) {
 	ir := generateIR(t, `

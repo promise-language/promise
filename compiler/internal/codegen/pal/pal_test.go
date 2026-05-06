@@ -2104,6 +2104,53 @@ func TestEmitSignalRegisterPosix(t *testing.T) {
 	assertContains(t, out, "ret i32 -1", "returns -1 on error")
 }
 
+func TestEmitSignalInitWindows(t *testing.T) {
+	p := &WindowsPAL{}
+	module := newModuleWithAlloc(p)
+	p.EmitWrite(module)
+	p.EmitSignalInit(module)
+	out := module.String()
+
+	// Should use UCRT _pipe for signal delivery
+	assertContains(t, out, "@_pipe(", "declares _pipe()")
+	// Should use UCRT _write in the handler
+	assertContains(t, out, "@_write(", "declares _write()")
+	// Should register SetConsoleCtrlHandler
+	assertContains(t, out, "@SetConsoleCtrlHandler(", "declares SetConsoleCtrlHandler")
+	// Should define the console control handler
+	assertContains(t, out, "define i32 @promise_console_ctrl_handler(i32 %dwCtrlType)", "defines console ctrl handler")
+	// Write fd stored in global
+	assertContains(t, out, "@__promise_signal_pipe_wr", "defines write fd global")
+	// Per-signal enable flags
+	assertContains(t, out, "@__promise_signal_int_enabled", "defines SIGINT enable flag")
+	assertContains(t, out, "@__promise_signal_term_enabled", "defines SIGTERM enable flag")
+	// pal_signal_init returns i32 (read fd)
+	assertContains(t, out, "define i32 @pal_signal_init()", "defines pal_signal_init")
+}
+
+func TestEmitSignalRegisterWindows(t *testing.T) {
+	p := &WindowsPAL{}
+	module := newModuleWithAlloc(p)
+	p.EmitWrite(module)
+	p.EmitSignalInit(module)
+	p.EmitSignalRegister(module)
+	out := module.String()
+
+	// pal_signal_register takes signum parameter
+	assertContains(t, out, "define i32 @pal_signal_register(i32 %signum)", "defines pal_signal_register")
+	// Returns 0 for supported signals
+	assertContains(t, out, "ret i32 0", "returns 0 on success")
+	// Returns -1 for unsupported signals
+	assertContains(t, out, "ret i32 -1", "returns -1 for unsupported")
+	// Checks for SIGINT (2) and SIGTERM (15)
+	if !strings.Contains(out, "icmp eq i32 %signum, 2") {
+		t.Error("should check for SIGINT (signal 2)")
+	}
+	if !strings.Contains(out, "icmp eq i32 %signum, 15") {
+		t.Error("should check for SIGTERM (signal 15)")
+	}
+}
+
 func TestStubStackOverflowIsNoop(t *testing.T) {
 	// Windows and WASM should emit no-op stubs
 	for _, tc := range []struct {

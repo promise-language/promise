@@ -1746,14 +1746,190 @@ func (p *WindowsPAL) EmitGetHostname(module *ir.Module) *ir.Func {
 	return emitStubGetHostname(module)
 }
 
-// EmitSignalInit stub (not yet implemented on Windows).
+// EmitSignalInit defines @pal_signal_init using UCRT _pipe + SetConsoleCtrlHandler.
+// Creates a CRT pipe for signal delivery and registers a console control handler
+// that maps CTRL_C_EVENT → SIGINT (2), CTRL_BREAK_EVENT → SIGTERM (15).
+// Returns read fd on success, -1 on error.
 func (p *WindowsPAL) EmitSignalInit(module *ir.Module) *ir.Func {
-	return emitStubSignalInit(module)
+	i32PtrType := irtypes.NewPointer(irtypes.I32)
+	zero32 := constant.NewInt(irtypes.I32, 0)
+	one32 := constant.NewInt(irtypes.I32, 1)
+	negOne32 := constant.NewInt(irtypes.I32, -1)
+
+	// UCRT _pipe(int* fds, unsigned int psize, int textmode) → int
+	pipeFn := getOrDeclareFunc(module, "_pipe", irtypes.I32,
+		ir.NewParam("pfds", i32PtrType),
+		ir.NewParam("psize", irtypes.I32),
+		ir.NewParam("textmode", irtypes.I32))
+
+	// UCRT _write(int fd, const void* buf, unsigned int count) → int
+	ucrtWrite := getOrDeclareFunc(module, "_write", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buffer", irtypes.I8Ptr),
+		ir.NewParam("count", irtypes.I32))
+
+	// SetConsoleCtrlHandler(HandlerRoutine, Add) → BOOL
+	setCtrlHandler := getOrDeclareFunc(module, "SetConsoleCtrlHandler", irtypes.I32,
+		ir.NewParam("HandlerRoutine", irtypes.I8Ptr),
+		ir.NewParam("Add", irtypes.I32))
+
+	// Global to store the write fd (shared across threads for handler)
+	wrFdGlobal := module.NewGlobal("__promise_signal_pipe_wr", irtypes.I32)
+	wrFdGlobal.Init = negOne32
+
+	// Per-signal enable flags (checked by handler before writing to pipe)
+	intEnabled := module.NewGlobal("__promise_signal_int_enabled", irtypes.I32)
+	intEnabled.Init = zero32
+	termEnabled := module.NewGlobal("__promise_signal_term_enabled", irtypes.I32)
+	termEnabled.Init = zero32
+
+	// Define the console control handler:
+	// BOOL WINAPI promise_console_ctrl_handler(DWORD dwCtrlType)
+	// Maps CTRL_C_EVENT (0) → 2 (SIGINT), CTRL_BREAK_EVENT (1) → 15 (SIGTERM).
+	// Writes the signal number byte to the pipe if that signal is enabled.
+	handlerFn := module.NewFunc("promise_console_ctrl_handler", irtypes.I32,
+		ir.NewParam("dwCtrlType", irtypes.I32))
+	handlerFn.FuncAttrs = append(handlerFn.FuncAttrs, enum.FuncAttrNoUnwind)
+	{
+		hEntry := handlerFn.NewBlock(".entry")
+		ctrlType := handlerFn.Params[0]
+
+		// Check CTRL_C_EVENT (0) → SIGINT (2)
+		isCtrlC := hEntry.NewICmp(enum.IPredEQ, ctrlType, zero32)
+		ctrlCBlk := handlerFn.NewBlock(".ctrl_c")
+		checkBreakBlk := handlerFn.NewBlock(".check_break")
+		hEntry.NewCondBr(isCtrlC, ctrlCBlk, checkBreakBlk)
+
+		// CTRL_C_EVENT: check if SIGINT is enabled
+		intFlag := ctrlCBlk.NewLoad(irtypes.I32, intEnabled)
+		intIsOn := ctrlCBlk.NewICmp(enum.IPredNE, intFlag, zero32)
+		writeIntBlk := handlerFn.NewBlock(".write_int")
+		unhandledBlk := handlerFn.NewBlock(".unhandled")
+		ctrlCBlk.NewCondBr(intIsOn, writeIntBlk, unhandledBlk)
+
+		// Write SIGINT (2) to pipe
+		sigIntBuf := writeIntBlk.NewAlloca(irtypes.I8)
+		writeIntBlk.NewStore(constant.NewInt(irtypes.I8, 2), sigIntBuf)
+		wrFd := writeIntBlk.NewLoad(irtypes.I32, wrFdGlobal)
+		writeIntBlk.NewCall(ucrtWrite, wrFd, sigIntBuf, one32)
+		writeIntBlk.NewRet(one32) // TRUE = handled
+
+		// Check CTRL_BREAK_EVENT (1) → SIGTERM (15)
+		isCtrlBreak := checkBreakBlk.NewICmp(enum.IPredEQ, ctrlType, one32)
+		ctrlBreakBlk := handlerFn.NewBlock(".ctrl_break")
+		checkBreakBlk.NewCondBr(isCtrlBreak, ctrlBreakBlk, unhandledBlk)
+
+		// CTRL_BREAK_EVENT: check if SIGTERM is enabled
+		termFlag := ctrlBreakBlk.NewLoad(irtypes.I32, termEnabled)
+		termIsOn := ctrlBreakBlk.NewICmp(enum.IPredNE, termFlag, zero32)
+		writeTermBlk := handlerFn.NewBlock(".write_term")
+		ctrlBreakBlk.NewCondBr(termIsOn, writeTermBlk, unhandledBlk)
+
+		// Write SIGTERM (15) to pipe
+		sigTermBuf := writeTermBlk.NewAlloca(irtypes.I8)
+		writeTermBlk.NewStore(constant.NewInt(irtypes.I8, 15), sigTermBuf)
+		wrFd2 := writeTermBlk.NewLoad(irtypes.I32, wrFdGlobal)
+		writeTermBlk.NewCall(ucrtWrite, wrFd2, sigTermBuf, one32)
+		writeTermBlk.NewRet(one32) // TRUE = handled
+
+		// Unhandled: return FALSE so default handler runs
+		unhandledBlk.NewRet(zero32)
+	}
+
+	// Define @pal_signal_init() → i32
+	fn := module.NewFunc("pal_signal_init", irtypes.I32)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	entry := fn.NewBlock(".entry")
+	// _pipe(fds, 256, _O_BINARY=0x8000)
+	pipeFds := entry.NewAlloca(irtypes.NewArray(2, irtypes.I32))
+	pipeFdsPtr := entry.NewBitCast(pipeFds, i32PtrType)
+	pipeRet := entry.NewCall(pipeFn, pipeFdsPtr,
+		constant.NewInt(irtypes.I32, 256),
+		constant.NewInt(irtypes.I32, 0x8000))
+	isPipeErr := entry.NewICmp(enum.IPredNE, pipeRet, zero32)
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".error")
+	entry.NewCondBr(isPipeErr, errBlk, okBlk)
+
+	errBlk.NewRet(negOne32)
+
+	// Load fds, store write fd in global
+	rdFdPtr := okBlk.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), pipeFds, zero32, zero32)
+	wrFdPtr := okBlk.NewGetElementPtr(irtypes.NewArray(2, irtypes.I32), pipeFds, zero32, one32)
+	rdFd := okBlk.NewLoad(irtypes.I32, rdFdPtr)
+	wrFd := okBlk.NewLoad(irtypes.I32, wrFdPtr)
+	okBlk.NewStore(wrFd, wrFdGlobal)
+
+	// Register the console control handler
+	handlerPtr := okBlk.NewBitCast(handlerFn, irtypes.I8Ptr)
+	ctrlRet := okBlk.NewCall(setCtrlHandler, handlerPtr, one32)
+	isCtrlErr := okBlk.NewICmp(enum.IPredEQ, ctrlRet, zero32)
+	registeredBlk := fn.NewBlock(".registered")
+	ctrlErrBlk := fn.NewBlock(".ctrl_err")
+	okBlk.NewCondBr(isCtrlErr, ctrlErrBlk, registeredBlk)
+
+	ctrlErrBlk.NewRet(negOne32)
+	registeredBlk.NewRet(rdFd)
+
+	return fn
 }
 
-// EmitSignalRegister stub (not yet implemented on Windows).
+// EmitSignalRegister defines @pal_signal_register for Windows.
+// Sets the per-signal enable flag for supported signals (SIGINT=2, SIGTERM=15).
+// Returns 0 on success, -1 for unsupported signals.
 func (p *WindowsPAL) EmitSignalRegister(module *ir.Module) *ir.Func {
-	return emitStubSignalRegister(module)
+	zero32 := constant.NewInt(irtypes.I32, 0)
+	one32 := constant.NewInt(irtypes.I32, 1)
+	negOne32 := constant.NewInt(irtypes.I32, -1)
+
+	// Look up the enable globals defined by EmitSignalInit
+	var intEnabled, termEnabled *ir.Global
+	for _, g := range module.Globals {
+		switch g.Name() {
+		case "__promise_signal_int_enabled":
+			intEnabled = g
+		case "__promise_signal_term_enabled":
+			termEnabled = g
+		}
+	}
+
+	fn := module.NewFunc("pal_signal_register", irtypes.I32,
+		ir.NewParam("signum", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	entry := fn.NewBlock(".entry")
+
+	if intEnabled == nil || termEnabled == nil {
+		// EmitSignalInit was not called — shouldn't happen
+		entry.NewRet(negOne32)
+		return fn
+	}
+
+	signum := fn.Params[0]
+
+	// Check SIGINT (2)
+	isInt := entry.NewICmp(enum.IPredEQ, signum, constant.NewInt(irtypes.I32, 2))
+	enableIntBlk := fn.NewBlock(".enable_int")
+	checkTermBlk := fn.NewBlock(".check_term")
+	entry.NewCondBr(isInt, enableIntBlk, checkTermBlk)
+
+	enableIntBlk.NewStore(one32, intEnabled)
+	enableIntBlk.NewRet(zero32)
+
+	// Check SIGTERM (15)
+	isTerm := checkTermBlk.NewICmp(enum.IPredEQ, signum, constant.NewInt(irtypes.I32, 15))
+	enableTermBlk := fn.NewBlock(".enable_term")
+	unsupportedBlk := fn.NewBlock(".unsupported")
+	checkTermBlk.NewCondBr(isTerm, enableTermBlk, unsupportedBlk)
+
+	enableTermBlk.NewStore(one32, termEnabled)
+	enableTermBlk.NewRet(zero32)
+
+	// Unsupported signal
+	unsupportedBlk.NewRet(negOne32)
+
+	return fn
 }
 
 // EmitStackOverflowInit defines @pal_stack_overflow_init() → void

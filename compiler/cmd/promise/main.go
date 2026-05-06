@@ -4228,6 +4228,12 @@ func (ml *moduleLoader) load(modPath string) (*sema.ModuleInfo, error) {
 		return nil, fmt.Errorf("errors in module '%s': %v", modPath, errs[0])
 	}
 
+	// Resolve embed annotations for module implementation files (B0145)
+	embedErrs := sema.ResolveEmbeds(semaInfo, absDir)
+	if len(embedErrs) > 0 {
+		return nil, fmt.Errorf("errors in module '%s': %v", modPath, embedErrs[0])
+	}
+
 	// Compute implementation hash from source files
 	implHash, err := module.HashModuleSources(absDir, false)
 	if err != nil {

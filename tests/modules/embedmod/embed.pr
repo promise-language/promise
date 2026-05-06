@@ -1,0 +1,2 @@
+get text string `public `embed("data.txt");
+get binary u8[] `public `embed("data.bin");

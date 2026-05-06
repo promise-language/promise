@@ -3420,7 +3420,11 @@ func (c *Compiler) declareModuleExterns(moduleName string, externs []*ExternFunc
 func (c *Compiler) declareModuleFuncs(file *ast.File, moduleName string) {
 	for _, decl := range file.Decls {
 		fd, ok := decl.(*ast.FuncDecl)
-		if !ok || fd.Body == nil || len(fd.TypeParams) > 0 {
+		if !ok || len(fd.TypeParams) > 0 {
+			continue
+		}
+		isEmbed := c.info.Embeds[fd] != nil
+		if fd.Body == nil && !isEmbed {
 			continue
 		}
 		if c.info.FilteredDecls[decl] {
@@ -3478,11 +3482,26 @@ func (c *Compiler) declareModuleFuncs(file *ast.File, moduleName string) {
 func (c *Compiler) defineModuleFuncs(file *ast.File, moduleName string) {
 	for _, decl := range file.Decls {
 		fd, ok := decl.(*ast.FuncDecl)
-		if !ok || fd.Body == nil || len(fd.TypeParams) > 0 {
+		if !ok || len(fd.TypeParams) > 0 {
 			continue
 		}
 		if c.info.FilteredDecls[decl] {
 			continue // excluded by `target(cond) annotation for this build target
+		}
+
+		// Handle embed getters — body is nil but we generate it from embedded data (B0145)
+		if embedInfo := c.info.Embeds[fd]; embedInfo != nil {
+			scopeName := fd.Name
+			key := moduleName + "." + scopeName
+			fn, ok := c.moduleFuncs[key]
+			if ok {
+				c.defineEmbedGetter(fd, fn, embedInfo)
+			}
+			continue
+		}
+
+		if fd.Body == nil {
+			continue // native function — no body to generate
 		}
 
 		// Module-level setters are stored under "name$set" in sema scope.

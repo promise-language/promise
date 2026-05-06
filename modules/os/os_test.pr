@@ -54,7 +54,9 @@ test_working_dir_nonempty() `test(exclude: "wasm32") {
 
 test_working_dir_absolute() `test(exclude: "wasm32") {
   string cwd = working_dir!;
-  assert(cwd.starts_with("/"), "working directory should be absolute path");
+  // On POSIX: starts with "/". On Windows: drive letter like "C:\".
+  bool is_abs = cwd.starts_with("/") || (cwd.len >= 3 && cwd[1] == ':');
+  assert(is_abs, "working directory should be absolute path");
 }
 
 test_args_returns_empty_in_test_runner() `test(exclude: "wasm32") {
@@ -79,8 +81,10 @@ test_executable_path_returns_string() `test(exclude: "wasm32") {
 
 test_executable_path_contains_slash() `test(exclude: "wasm32") {
   string exe = executable_path;
-  // The executable path should be an absolute or relative path with a separator
-  assert(exe.contains("/"), "executable_path should contain a path separator");
+  // The executable path should be an absolute or relative path with a separator.
+  // On Windows the separator is "\", on POSIX it is "/".
+  bool has_sep = exe.contains("/") || exe.contains("\\");
+  assert(has_sep, "executable_path should contain a path separator");
 }
 
 test_executable_path_is_stable() `test(exclude: "wasm32") {
@@ -141,11 +145,25 @@ test_execute_process_result_fields() `test(exclude: "wasm32") {
   assert(out.len > 0, "stdout should be non-empty");
 }
 
-test_execute_nonexistent_program() `test(exclude: "wasm32") {
-  // A program that does not exist should still return a ProcessResult
+test_execute_nonexistent_program() `test(exclude: "wasm32") `target(!windows) {
+  // On POSIX, a nonexistent program still returns a ProcessResult
   // with exit code 127 (the execvp-failure convention).
   ProcessResult result = execute("__promise_no_such_program__", [])!;
   assert(result.exit_code == 127, "nonexistent program should exit with 127");
+}
+
+_execute_nonexistent() bool {
+  // Helper: returns true if execute() raises an error for a nonexistent program.
+  execute("__promise_no_such_program__", [])? e {
+    return true;
+  };
+  return false;
+}
+
+test_execute_nonexistent_program_windows() `test(exclude: "wasm32") `target(windows) {
+  // On Windows, CreateProcessA fails for nonexistent programs,
+  // so execute() raises an error instead of returning a ProcessResult.
+  assert(_execute_nonexistent(), "execute of nonexistent program should raise an error on Windows");
 }
 
 test_execute_args_with_spaces() `test(exclude: "wasm32") {

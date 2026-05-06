@@ -10233,6 +10233,31 @@ func TestSelectBlockingPollInNonCoroutine(t *testing.T) {
 	assertContains(t, ir, "br label %select.lock.start")
 }
 
+func TestSelectWakePathSendGuard(t *testing.T) {
+	// B0110: A blocking select with a send case should emit a fullness
+	// re-check on the wake path. Between the wake and re-locking channels,
+	// another sender may have filled the freed slot. The guard branches to
+	// a retry block that unlocks all channels and retries from lock.start.
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 1);
+			go { <-ch; };
+			select {
+				ch.send(42):
+					print_line("sent");
+				v := <-ch:
+					print_line("recv");
+			}
+		}
+	`)
+	// Wake path should have a send.ok block (guard passed)
+	assertContains(t, ir, "select.wk0.send.ok")
+	// Wake retry block should exist for failed guard
+	assertContains(t, ir, "select.wake.retry")
+	// Retry should branch back to lock.start
+	assertContains(t, ir, "br label %select.lock.start")
+}
+
 func TestBuildMatchPhiMixedArms(t *testing.T) {
 	// Match expression where some arms produce values and at least one arm
 	// has an early return. buildMatchPhi must handle missing predecessors

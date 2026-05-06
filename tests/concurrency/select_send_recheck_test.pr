@@ -1,0 +1,120 @@
+// Tests for B0110: Select send case wake-path re-checks the send condition.
+// Verifies that a blocking select with a send case correctly handles the
+// scenario where the channel becomes full again between wake and re-lock.
+// Basic: select send on a capacity-1 channel with a concurrent receiver.
+// The select blocks until the receiver drains, then the send succeeds.
+test_select_send_wake_basic() `test(exclude: "wasm32") {
+  ch := channel[int](capacity: 1);
+  ch.send(1); // fill the channel
+  done := channel[int](capacity: 1);
+
+  go {
+    sleep(Duration.from_millis(10));
+    <-ch; // drain, waking the select's send case
+  };
+
+  select {
+    ch.send(42):
+      done.send(1);
+  }
+
+  result := <-done;
+  if r := result {
+    assert(r == 1, "select send should have succeeded");
+  } else {
+    assert(false, "select send should have produced a value");
+  }
+}
+
+// Select send with multiple concurrent senders racing for the same slot.
+// The select's send case and a goroutine sender compete. Whether select
+// wins or retries, the program must not corrupt the channel buffer.
+test_select_send_concurrent_race() `test(exclude: "wasm32") {
+  ch := channel[int](capacity: 1);
+  ch.send(0); // fill the channel
+  done := channel[int](capacity: 1);
+
+  // Goroutine drains and immediately re-fills, then drains again
+  // so the select can eventually succeed after retrying.
+  go {
+    sleep(Duration.from_millis(5));
+    <-ch; // drain — wakes select's SWN
+    ch.send(99); // race to re-fill before select re-locks
+    sleep(Duration.from_millis(5));
+    <-ch; // drain again so select can succeed on retry
+  };
+
+  // Select blocks on send case; after wake, must re-check fullness.
+  // If slot is taken by goroutine's send(99), select retries.
+  select {
+    ch.send(42):
+      done.send(1);
+  }
+
+  result := <-done;
+  if r := result {
+    assert(r == 1, "select send should eventually succeed");
+  } else {
+    assert(false, "select send should have produced a value");
+  }
+}
+
+// Select send with a recv fallback. If the send case's wake re-check
+// fails, the select retries and may pick the recv case instead.
+test_select_send_retry_picks_recv() `test(exclude: "wasm32") {
+  send_ch := channel[int](capacity: 1);
+  send_ch.send(0); // fill send channel
+  recv_ch := channel[int](capacity: 1);
+
+  // Goroutine: drain send_ch but immediately re-fill it,
+  // then send to recv_ch so the select can pick that case.
+  go {
+    sleep(Duration.from_millis(5));
+    <-send_ch;
+    send_ch.send(99); // re-fill — select send will fail re-check
+    recv_ch.send(7); // make recv case ready
+  };
+
+  int which = 0;
+  select {
+    send_ch.send(42):
+      which = 1;
+    v := <-recv_ch:
+      if val := v {
+        assert(val == 7, "expected 7 from recv_ch");
+        which = 2;
+      }
+  }
+
+  // The select should succeed via either case.
+  assert(which > 0, "select should have picked a case");
+}
+
+// Select send on a closed channel: the wake-path re-check detects
+// the closed state and retries. With a recv fallback on a ready
+// channel, the select completes via the recv case.
+test_select_send_closed_retry() `test(exclude: "wasm32") {
+  send_ch := channel[int](capacity: 1);
+  send_ch.send(0); // fill it
+  recv_ch := channel[int](capacity: 1);
+
+  go {
+    sleep(Duration.from_millis(5));
+    <-send_ch;
+    send_ch.close(); // close — select send will fail re-check
+    recv_ch.send(3);
+  };
+
+  int which = 0;
+  select {
+    send_ch.send(42):
+      which = 1;
+    v := <-recv_ch:
+      if val := v {
+        assert(val == 3, "expected 3");
+        which = 2;
+      }
+  }
+
+  assert(which == 2, "expected recv case after send channel closed");
+}

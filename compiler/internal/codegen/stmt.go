@@ -4135,12 +4135,39 @@ func (c *Compiler) genSelectStmt(s *ast.SelectStmt) {
 		c.block.NewSwitch(wonCase, unreachableBlk, switchCases...)
 		unreachableBlk.NewUnreachable()
 
+		// B0110: Create a retry block for wake-path send cases whose
+		// send condition is no longer valid. Between the wake (receiver
+		// drains a slot) and re-locking channels, another sender may
+		// have filled the freed slot. When this happens, unlock all
+		// channels and retry from the lock+try-check chain.
+		wakeRetryBlk := c.newBlock("select.wake.retry")
+		c.block = wakeRetryBlk
+		unlockAll()
+		c.block.NewBr(lockStartBlk)
+
 		for i, ci := range caseInfos {
 			c.block = wakeCaseBlks[i]
 			savedScopeLen := len(c.scopeBindings)
 
 			prefix := fmt.Sprintf("select.wk%d", i)
 			if ci.isSend {
+				// B0110: Re-check send condition after wake — between wake
+				// and re-lock, another sender may have filled the freed slot.
+				countPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldCount)))
+				count := c.block.NewLoad(irtypes.I64, countPtr)
+				capPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldCapacity)))
+				cap_ := c.block.NewLoad(irtypes.I64, capPtr)
+				notFull := c.block.NewICmp(enum.IPredULT, count, cap_)
+				closedPtr := c.block.NewGetElementPtr(chanType, ci.chPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldClosed)))
+				closedVal := c.block.NewLoad(irtypes.I8, closedPtr)
+				isOpen := c.block.NewICmp(enum.IPredEQ, closedVal, constant.NewInt(irtypes.I8, 0))
+				canSend := c.block.NewAnd(notFull, isOpen)
+				sendOkBlk := c.newBlock(prefix + ".send.ok")
+				c.block.NewCondBr(canSend, sendOkBlk, wakeRetryBlk)
+				c.block = sendOkBlk
 				execSend(ci, prefix)
 			} else {
 				execRecv(ci, prefix)

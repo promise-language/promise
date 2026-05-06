@@ -1296,6 +1296,8 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 			c.targetType = retType
 			val := c.genExpr(s.Value)
 			c.targetType = nil
+			// `this` in methods is an i8* instance pointer; wrap into value struct
+			val = c.wrapThisReturnValue(val, s.Value, retType)
 			// If the expression is itself a failable call, val is already a
 			// failable result struct matching our result type — return directly.
 			if c.info.FailableExprs[s.Value] && val != nil && val.Type().Equal(resultType) {
@@ -1325,6 +1327,8 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		c.targetType = retType
 		val := c.genExpr(s.Value)
 		c.targetType = nil
+		// `this` in methods is an i8* instance pointer; wrap into value struct
+		val = c.wrapThisReturnValue(val, s.Value, retType)
 		// Wrap value in Optional if return type is Optional but expr is not
 		val = c.wrapReturnOptional(val, s.Value, retType)
 		// Coerce value struct vtable when returning through a parent type
@@ -1340,6 +1344,48 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		}
 		c.block.NewRet(val)
 	}
+}
+
+// wrapThisReturnValue wraps a `this` expression (i8* instance pointer) into the
+// appropriate value struct when returning from a method. For heap types, builds
+// { vtable_ptr, instance_ptr }. For value types, loads the full value struct from
+// the pointer. No-op if the return expression is not ThisExpr.
+func (c *Compiler) wrapThisReturnValue(val value.Value, expr ast.Expr, retType types.Type) value.Value {
+	if _, isThis := expr.(*ast.ThisExpr); !isThis {
+		return val
+	}
+	if retType == nil {
+		return val
+	}
+	named := extractNamed(retType)
+	if named == nil {
+		return val
+	}
+	if classify(named) != CatUnknown || named == types.TypString || named == types.TypVoid || named == types.TypNone {
+		return val
+	}
+
+	if named.IsValueType() {
+		// Value type: `this` is i8* pointing to the value struct — load it
+		layout := c.lookupTypeLayout(retType)
+		if layout == nil {
+			return val
+		}
+		typedPtr := c.block.NewBitCast(val, irtypes.NewPointer(layout.Value.LLVMType))
+		return c.block.NewLoad(layout.Value.LLVMType, typedPtr)
+	}
+
+	// Heap type: `this` is i8* instance pointer — build { vtable_ptr, instance_ptr }
+	var vtablePtr value.Value
+	if vtGlobal := c.lookupVtableGlobal(retType); vtGlobal != nil {
+		vtablePtr = constant.NewBitCast(vtGlobal, irtypes.I8Ptr)
+	} else {
+		vtablePtr = constant.NewNull(irtypes.I8Ptr)
+	}
+	var result value.Value = constant.NewUndef(userValueType())
+	result = c.block.NewInsertValue(result, vtablePtr, 0)
+	result = c.block.NewInsertValue(result, val, 1)
+	return result
 }
 
 // --- Raise ---

@@ -6037,6 +6037,56 @@ func TestSaveRestoreLocalNameCountAcrossAdapter(t *testing.T) {
 	assertContains(t, ir, "@promise_vtable_int_as_Showable")
 }
 
+func TestReturnThisWrapsValueStruct(t *testing.T) {
+	// Regression test (B0122): returning `this` from a method produced
+	// `ret i8*` instead of the expected value struct `{ i8*, i8* }`.
+	ir := generateIR(t, `
+		type Counter {
+			int count;
+			iter() Counter { return this; }
+		}
+		main() { c := Counter(count: 0).iter(); }
+	`)
+	// Counter.iter should return { i8*, i8* } (value struct), not i8*
+	assertContains(t, ir, "define { i8*, i8* } @Counter.iter(i8* %this)")
+	// The body should insertvalue to build the value struct
+	assertContains(t, ir, "insertvalue { i8*, i8* }")
+}
+
+func TestReturnThisFailable(t *testing.T) {
+	// Failable method returning `this` should also wrap into value struct.
+	ir := generateIR(t, `
+		type Widget {
+			int id;
+			clone() Widget! { return this; }
+		}
+		main() {
+			w := Widget(id: 1);
+			Widget w2 = w.clone()!;
+		}
+	`)
+	// Result type is { i1, { i8*, i8* }, i8* } (ok flag, value struct, error ptr)
+	assertContains(t, ir, "define { i1, { i8*, i8* }, i8* } @Widget.clone(i8* %this)")
+	assertContains(t, ir, "insertvalue { i8*, i8* }")
+}
+
+func TestReturnThisValueType(t *testing.T) {
+	// Value type: `this` is i8* pointing to value struct — must load the full struct.
+	ir := generateIR(t, `
+		type Point {
+			int x `+"`"+`value;
+			int y `+"`"+`value;
+			clone() Point { return this; }
+		}
+		main() { p := Point(x: 1, y: 2).clone(); }
+	`)
+	// Point is a value type — return type is the wider value struct with embedded fields
+	assertContains(t, ir, "define %promise_Point_v @Point.clone(i8* %this)")
+	// Should bitcast + load the value struct from the i8* this pointer
+	assertContains(t, ir, "bitcast i8* %")
+	assertContains(t, ir, "load %promise_Point_v")
+}
+
 func TestOptionalParamWrapping(t *testing.T) {
 	ir := generateIR(t, `
 		foo(int? x) int {

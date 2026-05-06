@@ -1,0 +1,65 @@
+// Regression tests for B0122: returning `this` from a method must wrap
+// the i8* instance pointer back into a value struct { vtable_ptr, instance_ptr }.
+type Counter {
+  int count;
+  int max_val;
+
+  next() int? {
+    if this.count < this.max_val {
+      c := this.count;
+      this.count = this.count + 1;
+      return c;
+    }
+    return none;
+  }
+
+  iter() Counter {
+    return this;
+  }
+}
+
+type Wrapper {
+  int value;
+
+  self() Wrapper {
+    return this;
+  }
+}
+
+// Basic return this
+test_return_this() `test {
+  w := Wrapper(value: 42);
+  w2 := w.self();
+  assert(w2.value == 42, "return this should preserve field values");
+}
+
+// Return this with custom iter()
+test_custom_iter() `test {
+  c := Counter(count: 0, max_val: 3);
+  sum := 0;
+  for n in c.iter() {
+    sum = sum + n;
+  }
+  assert(sum == 3, "custom iter() returning this should work: expected 3, got " + sum.to_string());
+}
+
+// Custom iter() combined with vector iter() in same function (original B0122 trigger)
+test_custom_and_vector_iter() `test {
+  c := Counter(count: 0, max_val: 3);
+  sum := 0;
+  for n in c.iter() {
+    sum = sum + n;
+  }
+
+  nums := [10, 20, 30];
+  for n in nums.iter() {
+    sum = sum + n;
+  }
+  assert(sum == 63, "combined custom + vector iter should work: expected 63, got " + sum.to_string());
+}
+
+// Chained return this
+test_chained_return_this() `test {
+  w := Wrapper(value: 99).self().self().self();
+  assert(w.value == 99, "chained self() should preserve value");
+}

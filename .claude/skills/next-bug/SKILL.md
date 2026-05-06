@@ -1,6 +1,6 @@
 ---
 name: next-bug
-description: Select the next open bug to fix. If tags are given, focus on the bugs with this tags. Do your best to select the optimal next bug to fix from all open bugs. To minimize merge conflicts, avoid items sharing similar thats with other "in-progress" items.  After selecting the bug for fixing chain to /do.
+description: Select the next open bug to fix. If tags are given, focus on the bugs with this tags. Do your best to select the optimal next bug to fix from all open bugs. To minimize merge conflicts, avoid items sharing similar thats with other "in-progress" items.  Items tagged with platform name (like windows, poxis, linux) can only be worked on if the host matches the platform. After selecting the bug for fixing chain to /do.
 ---
 
 Select the highest-impact, most-actionable open bug and chain to `/do` to fix it.

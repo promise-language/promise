@@ -1,6 +1,6 @@
 ---
 name: next-task
-description: Select the next open task to fix. If tags are given, focus on the tasks with this tags. Do your best to select the optimal next task to work on from all open tasks. To minimize merge conflicts, avoid items sharing similar thats with other "in-progress" items. After selecting the task to work on chain to /do.
+description: Select the next open task to fix. If tags are given, focus on the tasks with this tags. Do your best to select the optimal next task to work on from all open tasks. To minimize merge conflicts, avoid items sharing similar thats with other "in-progress" items. Items tagged with platform name (like windows, poxis, linux) can only be worked on if the host matches the platform. After selecting the task to work on chain to /do.
 ---
 
 Select the highest-impact, most-actionable open bug and chain to `/do` to fix it.

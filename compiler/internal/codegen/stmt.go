@@ -518,9 +518,24 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 		varName:  varName,
 	}
 
-	// Resolve drop function for direct dispatch
-	if !c.needsVtable(named) || named.LookupMethod("drop").IsNative() {
-		ownerName := c.resolveMethodOwner(named, "drop")
+	// Resolve drop function for direct dispatch.
+	// Synthesized drops (B0158) always use direct dispatch — they're not in the vtable.
+	dropMethod := named.LookupMethod("drop")
+	if named.NeedsSynthDrop() || !c.needsVtable(named) || (dropMethod != nil && dropMethod.IsNative()) {
+		// For mono instances (e.g., Wrapper[int]), use the mono-qualified name
+		// (Wrapper[int].drop), not the origin name (Wrapper.drop).
+		// In mono method bodies, type args may contain TypeParams — substitute
+		// with c.typeSubst to get the concrete instance name.
+		resolvedTyp := typ
+		if c.typeSubst != nil {
+			resolvedTyp = types.Substitute(typ, c.typeSubst)
+		}
+		ownerName := named.Obj().Name()
+		if inst, ok := resolvedTyp.(*types.Instance); ok {
+			ownerName = monoName(inst)
+		} else if !named.NeedsSynthDrop() {
+			ownerName = c.resolveMethodOwner(named, "drop")
+		}
 		mangledName := mangleMethodName(ownerName, "drop", false)
 		if fn, ok := c.funcs[mangledName]; ok {
 			binding.dropFunc = fn

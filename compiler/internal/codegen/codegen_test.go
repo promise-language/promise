@@ -8776,6 +8776,162 @@ func TestDropOnReassignmentRHSMoveClears(t *testing.T) {
 	assertContains(t, ir, "store i1 false")
 }
 
+// B0158: Type with droppable field auto-gets a synthesized drop
+func TestDropSynthesizedBasic(t *testing.T) {
+	ir := generateIR(t, `
+		type Inner {
+			int id;
+			drop(~this) { }
+		}
+		type Outer {
+			Inner inner;
+		}
+		main() {
+			o := Outer(inner: Inner(id: 1));
+		}
+	`)
+	assertContains(t, ir, "call void @Outer.drop")
+	assertContains(t, ir, "o.dropflag")
+	// Synthesized drop should call Inner.drop for the field
+	assertContains(t, ir, "call void @Inner.drop")
+	// Synthesized drop should free the instance
+	assertContains(t, ir, "call void @pal_free(")
+}
+
+// B0158: Cascading synthesized drop — Outer contains Middle contains Inner
+func TestDropSynthesizedCascading(t *testing.T) {
+	ir := generateIR(t, `
+		type Inner {
+			int id;
+			drop(~this) { }
+		}
+		type Middle {
+			Inner inner;
+		}
+		type Outer {
+			Middle mid;
+		}
+		main() {
+			o := Outer(mid: Middle(inner: Inner(id: 1)));
+		}
+	`)
+	assertContains(t, ir, "call void @Outer.drop")
+	assertContains(t, ir, "call void @Middle.drop")
+	assertContains(t, ir, "call void @Inner.drop")
+}
+
+// B0158: Synthesized drop with multiple droppable fields
+func TestDropSynthesizedMultipleFields(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int fd;
+			drop(~this) { }
+		}
+		type Pair {
+			Resource a;
+			Resource b;
+		}
+		main() {
+			p := Pair(a: Resource(fd: 1), b: Resource(fd: 2));
+		}
+	`)
+	assertContains(t, ir, "call void @Pair.drop")
+	// Both fields should be dropped
+	count := strings.Count(ir, "call void @Resource.drop")
+	if count < 2 {
+		t.Errorf("expected at least 2 Resource.drop calls (one per field), got %d", count)
+	}
+}
+
+// B0158: Type with mix of droppable and non-droppable fields
+func TestDropSynthesizedMixedFields(t *testing.T) {
+	ir := generateIR(t, `
+		type Inner {
+			int id;
+			drop(~this) { }
+		}
+		type Mixed {
+			int x;
+			Inner inner;
+			bool flag;
+		}
+		main() {
+			m := Mixed(x: 1, inner: Inner(id: 2), flag: true);
+		}
+	`)
+	assertContains(t, ir, "call void @Mixed.drop")
+	assertContains(t, ir, "call void @Inner.drop")
+}
+
+// B0158: Copy type is not auto-synthesized even with droppable-looking fields
+func TestDropSynthesizedNotForCopy(t *testing.T) {
+	ir := generateIR(t, `
+		type Simple `+"`copy"+` {
+			int x;
+		}
+		main() {
+			s := Simple(x: 1);
+		}
+	`)
+	assertNotContains(t, ir, "Simple.drop")
+	assertNotContains(t, ir, "s.dropflag")
+}
+
+// B0158: No synthesized drop when no fields have drop
+func TestDropSynthesizedNotNeeded(t *testing.T) {
+	ir := generateIR(t, `
+		type Plain {
+			int x;
+			bool y;
+		}
+		main() {
+			p := Plain(x: 1, y: true);
+		}
+	`)
+	assertNotContains(t, ir, "Plain.drop")
+	assertNotContains(t, ir, "p.dropflag")
+}
+
+// B0158: Synthesized drop coexists with explicit drop (explicit takes precedence)
+func TestDropExplicitTakesPrecedence(t *testing.T) {
+	ir := generateIR(t, `
+		type Inner {
+			int id;
+			drop(~this) { }
+		}
+		type Outer {
+			Inner inner;
+			drop(~this) { }
+		}
+		main() {
+			o := Outer(inner: Inner(id: 1));
+		}
+	`)
+	assertContains(t, ir, "call void @Outer.drop")
+	assertContains(t, ir, "call void @Inner.drop")
+	// Explicit drop should NOT have pal_free auto-appended (that's a separate concern)
+}
+
+// B0158: Generic type with droppable field gets a mono synthesized drop
+func TestDropSynthesizedGeneric(t *testing.T) {
+	ir := generateIR(t, `
+		type Inner {
+			int id;
+			drop(~this) { }
+		}
+		type Wrapper[T] {
+			Inner inner;
+			T value;
+		}
+		main() {
+			w := Wrapper[int](inner: Inner(id: 1), value: 42);
+		}
+	`)
+	assertContains(t, ir, "Wrapper[int].drop")
+	assertContains(t, ir, "call void @Inner.drop")
+	assertContains(t, ir, "call void @pal_free(")
+}
+
 // Compound assignment on different typed variables exercises namedFromLLVMType branches
 func TestCompoundAssignF64(t *testing.T) {
 	ir := generateIR(t, `

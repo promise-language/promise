@@ -17,7 +17,8 @@ type Named struct {
 	fields         []*Field
 	methods        []*Method
 	isCopy         bool   // `copy meta — bitwise copy on assignment
-	hasDrop        bool   // type has a validated drop(~this) method
+	hasDrop        bool   // type has a validated drop(~this) method or needs synthesized drop
+	needsSynthDrop bool   // compiler should synthesize a drop method (no explicit drop)
 	hasNew         bool   // type has a validated new() constructor method
 	structural     bool   // `structural meta — allows structural interface satisfaction
 	exported       bool   // `public meta — visible to other modules
@@ -44,6 +45,8 @@ func (n *Named) IsCopy() bool             { return n.isCopy }
 func (n *Named) SetCopy(v bool)           { n.isCopy = v }
 func (n *Named) HasDrop() bool            { return n.hasDrop }
 func (n *Named) SetHasDrop(v bool)        { n.hasDrop = v }
+func (n *Named) NeedsSynthDrop() bool     { return n.needsSynthDrop }
+func (n *Named) SetNeedsSynthDrop(v bool) { n.needsSynthDrop = v }
 func (n *Named) HasNew() bool             { return n.hasNew }
 func (n *Named) SetHasNew(v bool)         { n.hasNew = v }
 func (n *Named) IsStructural() bool       { return n.structural }

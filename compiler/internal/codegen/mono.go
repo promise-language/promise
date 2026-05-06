@@ -1332,6 +1332,65 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 	}
 }
 
+// declareSynthesizedMonoDrops declares drop function stubs for monomorphized
+// instances of generic types that need a compiler-synthesized drop (B0158).
+func (c *Compiler) declareSynthesizedMonoDrops(file *ast.File, instances []*types.Instance) {
+	for _, inst := range instances {
+		named, ok := inst.Origin().(*types.Named)
+		if !ok || !named.NeedsSynthDrop() {
+			continue
+		}
+		if named.IsStructural() {
+			continue
+		}
+		name := monoName(inst)
+		mangledName := mangleMethodName(name, "drop", false)
+		if _, exists := c.funcs[mangledName]; exists {
+			continue
+		}
+		fn := c.module.NewFunc(mangledName, irtypes.Void,
+			ir.NewParam("this", irtypes.I8Ptr))
+		c.funcs[mangledName] = fn
+		if c.compilingModule != "" {
+			c.moduleOwnedFuncs[mangledName] = c.compilingModule
+		}
+	}
+}
+
+// defineSynthesizedMonoDrops generates bodies for monomorphized synthesized drops.
+func (c *Compiler) defineSynthesizedMonoDrops(file *ast.File, instances []*types.Instance) {
+	for _, inst := range instances {
+		named, ok := inst.Origin().(*types.Named)
+		if !ok || !named.NeedsSynthDrop() {
+			continue
+		}
+		if named.IsStructural() {
+			continue
+		}
+		name := monoName(inst)
+		mangledName := mangleMethodName(name, "drop", false)
+		fn, ok := c.funcs[mangledName]
+		if !ok || len(fn.Blocks) > 0 {
+			continue
+		}
+		// Tag as instance-owned for SplitInstanceIRs
+		c.instanceOwnedFuncs[mangledName] = name
+		// Skip body generation for cached instances
+		if c.cachedInstances[name] {
+			continue
+		}
+
+		subst := types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
+		mergeParentSubst(named, subst)
+
+		c.typeSubst = subst
+		c.monoCtx = &monoContext{inst: inst, origin: named, name: name}
+		c.defineSynthesizedDropBody(fn, named)
+		c.typeSubst = nil
+		c.monoCtx = nil
+	}
+}
+
 // declareMonoSynthesizedDefaults declares stubs for default methods from structural
 // parents that need to be synthesized for mono instances of concrete types.
 // E.g., _FnIter[int] inherits filter/take/skip from Iterator[T] — these become

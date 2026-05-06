@@ -1,0 +1,17 @@
+// B0158: Verify synthesized drop actually calls inner type's drop at runtime.
+type Inner {
+  string name;
+
+  drop(~this) {
+    print_line("drop: " + this.name);
+  }
+}
+
+type Outer {
+  Inner inner;
+}
+
+main() `test(expected: "value: world\ndrop: world") {
+  o := Outer(inner: Inner(name: "world"));
+  print_line("value: " + o.inner.name);
+}

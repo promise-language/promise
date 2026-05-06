@@ -6862,6 +6862,126 @@ func TestDropMethodAbstract(t *testing.T) {
 	expectError(t, errs, "must not be abstract")
 }
 
+// B0158: Type with droppable field auto-gets HasDrop + NeedsSynthDrop
+func TestDropPropagateToFieldOwner(t *testing.T) {
+	info := checkOK(t, `
+		type Inner {
+			int id;
+			drop(~this) { }
+		}
+		type Outer {
+			Inner inner;
+		}
+		main() {}
+	`)
+	for _, scope := range info.ScopeOrder {
+		if obj := scope.Lookup("Outer"); obj != nil {
+			if tn, ok := obj.(*types.TypeName); ok {
+				if named, ok := tn.Type().(*types.Named); ok {
+					if !named.HasDrop() {
+						t.Error("Outer should have HasDrop() == true")
+					}
+					if !named.NeedsSynthDrop() {
+						t.Error("Outer should have NeedsSynthDrop() == true")
+					}
+					return
+				}
+			}
+		}
+	}
+	t.Fatal("could not find Outer type")
+}
+
+// B0158: Cascading propagation — A contains B contains C (droppable)
+func TestDropPropagateCascading(t *testing.T) {
+	info := checkOK(t, `
+		type C {
+			int id;
+			drop(~this) { }
+		}
+		type B {
+			C c;
+		}
+		type A {
+			B b;
+		}
+		main() {}
+	`)
+	for _, name := range []string{"A", "B"} {
+		found := false
+		for _, scope := range info.ScopeOrder {
+			if obj := scope.Lookup(name); obj != nil {
+				if tn, ok := obj.(*types.TypeName); ok {
+					if named, ok := tn.Type().(*types.Named); ok {
+						if !named.HasDrop() {
+							t.Errorf("%s should have HasDrop() == true", name)
+						}
+						if !named.NeedsSynthDrop() {
+							t.Errorf("%s should have NeedsSynthDrop() == true", name)
+						}
+						found = true
+						break
+					}
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("could not find type %s", name)
+		}
+	}
+}
+
+// B0158: Explicit drop should not set NeedsSynthDrop
+func TestDropExplicitNotSynth(t *testing.T) {
+	info := checkOK(t, `
+		type R {
+			int id;
+			drop(~this) { }
+		}
+		main() {}
+	`)
+	for _, scope := range info.ScopeOrder {
+		if obj := scope.Lookup("R"); obj != nil {
+			if tn, ok := obj.(*types.TypeName); ok {
+				if named, ok := tn.Type().(*types.Named); ok {
+					if !named.HasDrop() {
+						t.Error("R should have HasDrop() == true")
+					}
+					if named.NeedsSynthDrop() {
+						t.Error("R should NOT have NeedsSynthDrop() (has explicit drop)")
+					}
+					return
+				}
+			}
+		}
+	}
+	t.Fatal("could not find R type")
+}
+
+// B0158: Type without droppable fields should not get synthesized drop
+func TestDropNoPropagate(t *testing.T) {
+	info := checkOK(t, `
+		type Plain {
+			int x;
+			bool y;
+		}
+		main() {}
+	`)
+	for _, scope := range info.ScopeOrder {
+		if obj := scope.Lookup("Plain"); obj != nil {
+			if tn, ok := obj.(*types.TypeName); ok {
+				if named, ok := tn.Type().(*types.Named); ok {
+					if named.HasDrop() {
+						t.Error("Plain should NOT have HasDrop()")
+					}
+					return
+				}
+			}
+		}
+	}
+	t.Fatal("could not find Plain type")
+}
+
 // B0034: reference fields are rejected (previously tested as copy-compatible)
 func TestCopyTypeWithRefField(t *testing.T) {
 	errs := checkErrs(t, `

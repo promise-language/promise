@@ -389,6 +389,66 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 
 }
 
+// propagateDrops runs a fixpoint pass after all types are defined: for each type
+// without explicit drop(), if any field's type has HasDrop(), mark it as needing a
+// compiler-synthesized drop. Must be a fixpoint loop since type A may contain type B
+// which contains a droppable type — B gets auto-drop first, then A detects B has drop.
+// B0158: auto-synthesize drop for types with droppable fields.
+func (c *Checker) propagateDrops(file *ast.File) {
+	changed := true
+	for changed {
+		changed = false
+		for _, decl := range file.Decls {
+			td, ok := decl.(*ast.TypeDecl)
+			if !ok {
+				continue
+			}
+			if c.info.FilteredDecls[decl] {
+				continue
+			}
+			obj := c.scope.Lookup(td.Name)
+			if obj == nil {
+				continue
+			}
+			tn, ok := obj.(*types.TypeName)
+			if !ok {
+				continue
+			}
+			named, ok := tn.Type().(*types.Named)
+			if !ok {
+				continue
+			}
+			// Skip types that already have drop, are copy, or are value types
+			if named.HasDrop() || named.IsCopy() || named.IsValueType() {
+				continue
+			}
+			// Check all fields (including inherited) for droppable types
+			for _, f := range named.AllFields() {
+				if fieldTypeHasDrop(f.Type()) {
+					named.SetHasDrop(true)
+					named.SetNeedsSynthDrop(true)
+					changed = true
+					break
+				}
+			}
+		}
+	}
+}
+
+// fieldTypeHasDrop returns true if the type (possibly wrapped in Instance/SharedRef/MutRef)
+// resolves to a Named type with HasDrop().
+func fieldTypeHasDrop(typ types.Type) bool {
+	switch t := typ.(type) {
+	case *types.Named:
+		return t.HasDrop()
+	case *types.Instance:
+		if n, ok := t.Origin().(*types.Named); ok {
+			return n.HasDrop()
+		}
+	}
+	return false
+}
+
 // containsRef reports whether typ is or contains a SharedRef or MutRef.
 // B0034: catches both direct references (string&) and wrapped forms (string&?).
 func containsRef(typ types.Type) bool {

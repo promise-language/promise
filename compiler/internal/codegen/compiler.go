@@ -566,6 +566,8 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	c.declareMonoMethods(file, monoInstances)
 	c.declareMonoEnumMethods(file, monoInstances)
 	c.declareMonoSynthesizedDefaults(file, monoInstances) // structural parent defaults
+	c.declareSynthesizedDrops(file)                       // B0158: auto-synthesized drops (non-generic)
+	c.declareSynthesizedMonoDrops(file, monoInstances)    // B0158: auto-synthesized drops (generic)
 
 	// Compute vtable info and emit vtable globals (after method stubs are declared)
 	c.computeVtableInfo(file)
@@ -601,6 +603,8 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	c.defineMonoMethods(file, monoInstances)
 	c.defineMonoEnumMethods(file, monoInstances)
 	c.defineMonoSynthesizedDefaults(file, monoInstances) // structural parent defaults
+	c.defineSynthesizedDrops(file)                       // B0158: auto-synthesized drops (non-generic)
+	c.defineSynthesizedMonoDrops(file, monoInstances)    // B0158: auto-synthesized drops (generic)
 	c.defineFuncs(file)
 	c.defineMonoFuncs(file, monoFuncInstances)
 	c.defineMonoMethodInstances(file, monoMethodInstances)
@@ -3555,6 +3559,8 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo, extraInstances []*typ
 	c.declareMonoMethods(modFile, monoInstances)
 	c.declareMonoEnumMethods(modFile, monoInstances)
 	c.declareMonoSynthesizedDefaults(modFile, monoInstances)
+	c.declareSynthesizedModuleDrops(modFile, irName)      // B0158
+	c.declareSynthesizedMonoDrops(modFile, monoInstances) // B0158
 
 	// 6. Compute vtable info and emit for module types
 	c.computeVtableInfo(modFile)
@@ -3575,6 +3581,8 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo, extraInstances []*typ
 	c.defineMonoMethods(modFile, monoInstances)
 	c.defineMonoEnumMethods(modFile, monoInstances)
 	c.defineMonoSynthesizedDefaults(modFile, monoInstances)
+	c.defineSynthesizedModuleDrops(modFile, irName)      // B0158
+	c.defineSynthesizedMonoDrops(modFile, monoInstances) // B0158
 
 	// 9. Define module function bodies
 	c.defineModuleFuncs(modFile, irName)
@@ -4488,6 +4496,158 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 			c.block.NewCall(dropFn, fieldInstance)
 		}
 	}
+}
+
+// declareSynthesizedDrops declares drop function stubs for non-generic types
+// that need a compiler-synthesized drop (B0158). These are types without explicit
+// drop() but with fields whose types have HasDrop().
+func (c *Compiler) declareSynthesizedDrops(file *ast.File) {
+	for _, decl := range file.Decls {
+		td, ok := decl.(*ast.TypeDecl)
+		if !ok {
+			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue
+		}
+		named := c.lookupNamedType(td.Name)
+		if named == nil || !named.NeedsSynthDrop() {
+			continue
+		}
+		if len(named.TypeParams()) > 0 {
+			continue // generic — handled by declareSynthesizedMonoDrops
+		}
+		mangledName := mangleMethodName(td.Name, "drop", false)
+		if _, exists := c.funcs[mangledName]; exists {
+			continue
+		}
+		fn := c.module.NewFunc(mangledName, irtypes.Void,
+			ir.NewParam("this", irtypes.I8Ptr))
+		c.funcs[mangledName] = fn
+	}
+}
+
+// defineSynthesizedDrops generates bodies for synthesized drop functions (non-generic).
+// Each body: drop all droppable fields in reverse order, then free the instance.
+func (c *Compiler) defineSynthesizedDrops(file *ast.File) {
+	for _, decl := range file.Decls {
+		td, ok := decl.(*ast.TypeDecl)
+		if !ok {
+			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue
+		}
+		named := c.lookupNamedType(td.Name)
+		if named == nil || !named.NeedsSynthDrop() {
+			continue
+		}
+		if len(named.TypeParams()) > 0 {
+			continue // generic — handled by defineSynthesizedMonoDrops
+		}
+		mangledName := mangleMethodName(td.Name, "drop", false)
+		fn, ok := c.funcs[mangledName]
+		if !ok || len(fn.Blocks) > 0 {
+			continue
+		}
+		c.defineSynthesizedDropBody(fn, named)
+	}
+}
+
+// declareSynthesizedModuleDrops declares drop stubs for non-generic module types (B0158).
+func (c *Compiler) declareSynthesizedModuleDrops(file *ast.File, moduleName string) {
+	for _, decl := range file.Decls {
+		td, ok := decl.(*ast.TypeDecl)
+		if !ok {
+			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue
+		}
+		named := c.lookupNamedType(td.Name)
+		if named == nil || !named.NeedsSynthDrop() {
+			continue
+		}
+		if len(named.TypeParams()) > 0 {
+			continue // handled by declareSynthesizedMonoDrops
+		}
+		mangledName := mangleModuleMethodName(moduleName, td.Name, "drop", false)
+		if _, exists := c.funcs[mangledName]; exists {
+			continue
+		}
+		fn := c.module.NewFunc(mangledName, irtypes.Void,
+			ir.NewParam("this", irtypes.I8Ptr))
+		c.funcs[mangledName] = fn
+		c.moduleOwnedFuncs[mangledName] = moduleName
+		// Also register the non-prefixed method name for dispatch from user code
+		plainName := mangleMethodName(td.Name, "drop", false)
+		if _, exists := c.funcs[plainName]; !exists {
+			c.funcs[plainName] = fn
+		}
+	}
+}
+
+// defineSynthesizedModuleDrops generates bodies for non-generic module synthesized drops.
+func (c *Compiler) defineSynthesizedModuleDrops(file *ast.File, moduleName string) {
+	for _, decl := range file.Decls {
+		td, ok := decl.(*ast.TypeDecl)
+		if !ok {
+			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue
+		}
+		named := c.lookupNamedType(td.Name)
+		if named == nil || !named.NeedsSynthDrop() {
+			continue
+		}
+		if len(named.TypeParams()) > 0 {
+			continue
+		}
+		mangledName := mangleModuleMethodName(moduleName, td.Name, "drop", false)
+		fn, ok := c.funcs[mangledName]
+		if !ok || len(fn.Blocks) > 0 {
+			continue
+		}
+		c.defineSynthesizedDropBody(fn, named)
+	}
+}
+
+// defineSynthesizedDropBody generates the body for a synthesized drop function.
+// It drops all droppable fields in reverse order and frees the instance.
+func (c *Compiler) defineSynthesizedDropBody(fn *ir.Func, named *types.Named) {
+	saved := c.saveState()
+	defer c.restoreState(saved)
+
+	c.fn = fn
+	c.locals = make(map[string]*ir.InstAlloca)
+	c.localNameCount = make(map[string]int)
+	c.dropFlags = make(map[string]*ir.InstAlloca)
+	c.dropBindings = make(map[string]scopeBinding)
+	c.scopeBindings = nil
+	c.blockCounter = 0
+	c.canError = false
+	c.currentRetType = nil
+
+	entry := fn.NewBlock(".entry")
+	c.block = entry
+	c.entryBlock = entry
+
+	// Store %this param into alloca so emitFieldDrops can find it
+	thisParam := fn.Params[0]
+	thisAlloca := entry.NewAlloca(irtypes.I8Ptr)
+	thisAlloca.SetName("this.addr")
+	entry.NewStore(thisParam, thisAlloca)
+	c.locals["this"] = thisAlloca
+
+	// Drop all droppable fields
+	c.emitFieldDrops(named)
+
+	// Free the instance itself
+	c.block.NewCall(c.palFree, thisParam)
+
+	// Return void
+	c.block.NewRet(nil)
 }
 
 // lookupNamedType finds a Named type in sema info by name.

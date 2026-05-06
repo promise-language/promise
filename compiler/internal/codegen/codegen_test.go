@@ -13170,3 +13170,29 @@ func TestCoverageEnumMatchArms(t *testing.T) {
 		t.Errorf("expected 3 match.arm regions, got %d", armCount)
 	}
 }
+
+// B0134: generic error type constructor inside generic function body
+// must be collected for monomorphization via func instance substitution.
+func TestGenericErrorTypeInGenericFuncBody(t *testing.T) {
+	ir := generateIR(t, `
+		type AppError[T] is error { T detail; }
+		make_err[T](T detail) AppError[T]! {
+			raise AppError[T](message: "fail", detail: detail);
+		}
+		main() { make_err[int](42) ? e { }; }
+	`)
+	// B0134: AppError[int] must be monomorphized from the generic function body
+	assertContains(t, ir, "AppError[int]")
+}
+
+// B0134 variant: generic type (non-error) constructed inside generic function body.
+func TestGenericTypeInGenericFuncBody(t *testing.T) {
+	ir := generateIR(t, `
+		type Wrapper[T] { T value; }
+		wrap[T](T v) Wrapper[T] {
+			return Wrapper[T](value: v);
+		}
+		main() { w := wrap[int](42); }
+	`)
+	assertContains(t, ir, "Wrapper[int]")
+}

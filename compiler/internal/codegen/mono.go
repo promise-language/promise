@@ -216,6 +216,94 @@ func collectMonoInstances(info *sema.Info, spiralInstances map[string]bool) []*t
 	return result
 }
 
+// resolveTypeInstancesFromFuncInstances uses substitution maps from concrete
+// generic function/method instances to resolve unresolved type instances that
+// appear in generic function bodies. For example, make_app_error[T]() constructs
+// AppError[T] — when instantiated as make_app_error[int], the subst {T→int}
+// resolves AppError[T] → AppError[int]. (B0134)
+func resolveTypeInstancesFromFuncInstances(
+	info *sema.Info,
+	existing []*types.Instance,
+	funcInstances []*sema.FuncInstance,
+	methodInstances []*sema.MethodInstance,
+	spiralInstances map[string]bool,
+) []*types.Instance {
+	unresolvedInsts := collectUnresolvedInstances(info)
+	if len(unresolvedInsts) == 0 {
+		return nil
+	}
+
+	seen := map[string]bool{}
+	for _, inst := range existing {
+		seen[monoName(inst)] = true
+	}
+
+	var newInstances []*types.Instance
+
+	// Apply substitution maps from concrete func instances.
+	for _, fi := range funcInstances {
+		sig := fi.Func.Type().(*types.Signature)
+		subst := types.BuildSubstMap(sig.TypeParams(), fi.TypeArgs)
+		if len(subst) > 0 {
+			resolveUnresolvedInstances(unresolvedInsts, subst, &newInstances, seen, spiralInstances)
+		}
+	}
+
+	// Apply substitution maps from concrete method instances.
+	for _, mi := range methodInstances {
+		subst := buildMethodInstanceSubst(mi)
+		if len(subst) > 0 {
+			resolveUnresolvedInstances(unresolvedInsts, subst, &newInstances, seen, spiralInstances)
+		}
+	}
+
+	// Transitively expand new instances (their fields/parents may reference
+	// further generic types that need to be resolved).
+	for i := 0; i < len(newInstances); i++ {
+		inst := newInstances[i]
+		instKey := monoName(inst)
+		if spiralInstances[instKey] {
+			continue
+		}
+		switch origin := inst.Origin().(type) {
+		case *types.Named:
+			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+			for _, f := range origin.AllFields() {
+				ft := types.Substitute(f.Type(), subst)
+				discoverInstances(ft, &newInstances, seen)
+			}
+			for _, pr := range origin.Parents() {
+				if len(pr.TypeArgs) > 0 {
+					resolvedArgs := make([]types.Type, len(pr.TypeArgs))
+					for j, ta := range pr.TypeArgs {
+						resolvedArgs[j] = types.Substitute(ta, subst)
+					}
+					parentInst := types.NewInstance(pr.Named, resolvedArgs)
+					if !types.ContainsTypeParam(parentInst) {
+						discoverInstances(parentInst, &newInstances, seen)
+					}
+				}
+			}
+			if len(subst) > 0 {
+				resolveUnresolvedInstances(unresolvedInsts, subst, &newInstances, seen, spiralInstances)
+			}
+		case *types.Enum:
+			subst := types.BuildSubstMap(origin.TypeParams(), inst.TypeArgs())
+			for _, v := range origin.Variants() {
+				for _, f := range v.Fields() {
+					ft := types.Substitute(f.Type(), subst)
+					discoverInstances(ft, &newInstances, seen)
+				}
+			}
+			if len(subst) > 0 {
+				resolveUnresolvedInstances(unresolvedInsts, subst, &newInstances, seen, spiralInstances)
+			}
+		}
+	}
+
+	return newInstances
+}
+
 // collectUnresolvedInstances scans info.Types for Instance types that contain
 // TypeParams. These come from generic method bodies where sema type-checks
 // once with TypeParams unresolved (e.g., _FnIter[T] inside Iterator[T].filter()).

@@ -1,0 +1,63 @@
+// B0134: Generic error type constructor inside generic function body must be
+// collected for monomorphization. Tests that AppError[T] → AppError[int] is
+// resolved when make_error[int]() is called.
+type AppError[T] is error {
+  T detail;
+}
+
+make_error[T](T detail) AppError[T]! {
+  raise AppError[T](message: "app error", detail: detail);
+}
+
+// Generic function returning a generic type (non-error).
+type Wrapper[T] {
+  T value;
+}
+
+wrap[T](T v) Wrapper[T] {
+  return Wrapper[T](value: v);
+}
+
+// Generic function constructing a generic type conditionally.
+maybe_wrap[T](T v, bool do_wrap) Wrapper[T]? {
+  if do_wrap {
+    return Wrapper[T](value: v);
+  }
+  return none;
+}
+
+test_generic_error_raise() `test {
+  make_error[int](42)? e is AppError[int] {
+    assert(e.message == "app error", "message matches");
+  }!;
+}
+
+test_generic_error_catch_detail() `test {
+  make_error[string]("oops")? e is AppError[string] {
+    assert(e.detail == "oops", "detail matches");
+  }!;
+}
+
+test_generic_wrap() `test {
+  w := wrap[int](42);
+  assert(w.value == 42, "wrapped int");
+}
+
+test_generic_wrap_string() `test {
+  w := wrap[string]("hello");
+  assert(w.value == "hello", "wrapped string");
+}
+
+test_maybe_wrap_some() `test {
+  r := maybe_wrap[int](42, true);
+  if v := r {
+    assert(v.value == 42, "value present");
+  } else {
+    assert(false, "expected present");
+  }
+}
+
+test_maybe_wrap_none() `test {
+  r := maybe_wrap[int](42, false);
+  assert(r is absent, "expected none");
+}

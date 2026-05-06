@@ -537,6 +537,15 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	monoMethodInstances := collectMonoMethodInstances(info, monoInstances)
 	crossResolveFuncMethodInstances(info, &monoFuncInstances, &monoMethodInstances)
 
+	// Second pass: resolve type instances that appear inside generic function/method
+	// bodies. Their substitution maps come from func/method instances, not type instances,
+	// so they were missed by collectMonoInstances. (B0134)
+	extraInstances := resolveTypeInstancesFromFuncInstances(info, monoInstances, monoFuncInstances, monoMethodInstances, c.spiralInstances)
+	if len(extraInstances) > 0 {
+		c.computeMonoLayouts(extraInstances)
+		monoInstances = append(monoInstances, extraInstances...)
+	}
+
 	c.declareIntrinsics()
 	c.declareMathIntrinsics()
 	// declareExterns must run after computeUserTypeLayouts so that user type
@@ -3305,6 +3314,13 @@ func (c *Compiler) compileModules() {
 	mainMonoInstances := collectMonoInstances(c.info, c.spiralInstances)
 	mainMonoFuncInstances := collectMonoFuncInstances(c.info, mainMonoInstances)
 	mainMonoMethodInstances := collectMonoMethodInstances(c.info, mainMonoInstances)
+
+	// Second pass: resolve type instances from generic function/method bodies (B0134).
+	extraFromFuncs := resolveTypeInstancesFromFuncInstances(c.info, mainMonoInstances, mainMonoFuncInstances, mainMonoMethodInstances, c.spiralInstances)
+	if len(extraFromFuncs) > 0 {
+		c.computeMonoLayouts(extraFromFuncs)
+		mainMonoInstances = append(mainMonoInstances, extraFromFuncs...)
+	}
 
 	// Also include instances from other modules — a catalog module (e.g., json)
 	// might create instances of std types (e.g., Map[string, JsonValue]) that the

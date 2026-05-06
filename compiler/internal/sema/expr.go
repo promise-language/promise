@@ -898,10 +898,19 @@ func (c *Checker) checkInstanceConstructorCall(e *ast.CallExpr, inst *types.Inst
 	// If the type has an explicit new() constructor, route through parameter checking
 	if origin.HasNew() {
 		c.checkNewConstructorCall(e, origin, subst)
+		c.recordInstance(inst)
+		c.recordType(e.Callee, inst)
 		return inst
 	}
 
 	c.resolveImplicitConstructorArgs(e, origin, subst)
+
+	// Record the Instance so collectUnresolvedInstances can find it in info.Types
+	// when the Instance contains TypeParams (e.g., AppError[T] inside a generic
+	// function body). Also record in info.Instances for concrete instances. (B0134)
+	c.recordInstance(inst)
+	c.recordType(e.Callee, inst)
+
 	return inst
 }
 

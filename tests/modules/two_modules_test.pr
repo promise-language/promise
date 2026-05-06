@@ -1,7 +1,7 @@
 use mathlib "./mathlib";
 use shapes "./shapes";
 
-test_both_modules() `test(allow_leaks: true) {
+test_both_modules() `test {
   int sum = mathlib.add(3, 4);
   p := shapes.Point(x: sum, y: mathlib.square(2));
   assert(p.x == 7, "p.x == add(3,4)");
@@ -15,7 +15,7 @@ test_module_type_in_other() `test(allow_leaks: true) {
   assert(c.describe() == "circle at (1, 2) r=3", "circle from vec2");
 }
 
-test_color_with_shapes() `test(allow_leaks: true) {
+test_color_with_shapes() `test {
   c := mathlib.Color.Green;
   string name = mathlib.color_name(c);
   p := shapes.Point(x: name.len, y: 0);

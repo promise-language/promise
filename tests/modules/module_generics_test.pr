@@ -5,7 +5,7 @@ type Box[T] {
   T value;
 }
 
-test_local_generic_with_module() `test(allow_leaks: true) {
+test_local_generic_with_module() `test {
   b := Box[int](value: square(3));
   assert(b.value == 9, "Box wrapping module square");
 }
@@ -17,13 +17,13 @@ test_module_func_in_generic_context() `test {
   assert(items[2] == 25, "items[2] == square(5)");
 }
 
-test_multi_param_generic_from_module() `test(allow_leaks: true) {
+test_multi_param_generic_from_module() `test {
   p := mathlib.Pair[int, string](first: 42, second: "hello");
   assert(p.first == 42, "Pair.first == 42");
   assert(p.second == "hello", "Pair.second == hello");
 }
 
-test_multi_param_generic_glob() `test(allow_leaks: true) {
+test_multi_param_generic_glob() `test {
   p := Pair[string, int](first: "age", second: 30);
   assert(p.first == "age", "glob Pair.first == age");
   assert(p.second == 30, "glob Pair.second == 30");

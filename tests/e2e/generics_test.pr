@@ -13,21 +13,21 @@ type Box[T] {
   }
 }
 
-test_box_int() `test(allow_leaks: true) {
+test_box_int() `test {
   b := Box[int](value: 42);
   assert(b.get() == 42, "Box[int] get returns 42");
   b.set(100);
   assert(b.get() == 100, "Box[int] set to 100");
 }
 
-test_box_string() `test(allow_leaks: true) {
+test_box_string() `test {
   b := Box[string](value: "hello");
   assert(b.get() == "hello", "Box[string] get returns hello");
   b.set("world");
   assert(b.get() == "world", "Box[string] set to world");
 }
 
-test_box_bool() `test(allow_leaks: true) {
+test_box_bool() `test {
   b := Box[bool](value: true);
   assert(b.get() == true, "Box[bool] get returns true");
   b.set(false);
@@ -131,7 +131,7 @@ test_container_string() `test {
 
 // --- multiple generic instantiations in same function ---
 
-test_multi_instantiation() `test(allow_leaks: true) {
+test_multi_instantiation() `test {
   bi := Box[int](value: 1);
   bs := Box[string](value: "a");
   bb := Box[bool](value: false);
@@ -142,7 +142,7 @@ test_multi_instantiation() `test(allow_leaks: true) {
 
 // --- generic with field mutation ---
 
-test_generic_mutation() `test(allow_leaks: true) {
+test_generic_mutation() `test {
   b := Box[int](value: 0);
   for i in 0..10 {
     int cur = b.get();
@@ -202,7 +202,7 @@ invoke_echo[T](Echo & e, T val) T {
   return e.echo[T](val);
 }
 
-test_generic_func_calls_generic_method() `test(allow_leaks: true) {
+test_generic_func_calls_generic_method() `test {
   e := Echo();
   assert(invoke_echo[int](e, 42) == 42, "invoke_echo[int]");
   assert(invoke_echo[string](e, "hi") == "hi", "invoke_echo[string]");
@@ -222,7 +222,7 @@ type Bar {
   }
 }
 
-test_method_calls_method() `test(allow_leaks: true) {
+test_method_calls_method() `test {
   f := Foo();
   b := Bar();
   assert(b.delegate[int](f, 7) == 7, "delegate[int]");
@@ -242,7 +242,7 @@ type Processor {
   }
 }
 
-test_method_transitive_chain() `test(allow_leaks: true) {
+test_method_transitive_chain() `test {
   p := Processor();
   assert(p.step3[int](99) == 99, "step3[int]");
 }
@@ -260,7 +260,7 @@ type TypeWrapper[T] {
   }
 }
 
-test_type_instance_resolves_func() `test(allow_leaks: true) {
+test_type_instance_resolves_func() `test {
   w := TypeWrapper[int](value: 77);
   assert(w.wrapped() == 77, "TypeWrapper[int].wrapped");
   ws := TypeWrapper[string](value: "hi");
@@ -294,7 +294,7 @@ type Proxy {
   }
 }
 
-test_method_calls_func() `test(allow_leaks: true) {
+test_method_calls_func() `test {
   p := Proxy();
   assert(p.forward[int](33) == 33, "forward[int]");
   assert(p.forward[string]("abc") == "abc", "forward[string]");
@@ -378,7 +378,7 @@ type Combiner {
   }
 }
 
-test_method_calls_both_func_and_method() `test(allow_leaks: true) {
+test_method_calls_both_func_and_method() `test {
   e := Echo();
   c := Combiner();
   assert(c.run[int](e, 42) == 42, "run[int]");
@@ -396,7 +396,7 @@ type Child is Parent {
   int extra;
 }
 
-test_inherited_method_calls_generic_func() `test(allow_leaks: true) {
+test_inherited_method_calls_generic_func() `test {
   c := Child(extra: 10);
   assert(c.parent_invoke[int](42) == 42, "inherited invoke[int]");
   assert(c.parent_invoke[string]("hi") == "hi", "inherited invoke[string]");

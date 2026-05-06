@@ -9,11 +9,11 @@ test_join_trailing_slash() `test(allow_leaks: true) {
   assert(path.join("foo/", "bar") == "foo/bar", "join trailing slash");
 }
 
-test_join_empty_base() `test(allow_leaks: true) {
+test_join_empty_base() `test {
   assert(path.join("", "bar") == "bar", "join empty base");
 }
 
-test_join_empty_child() `test(allow_leaks: true) {
+test_join_empty_child() `test {
   assert(path.join("foo", "") == "foo", "join empty child");
 }
 
@@ -172,7 +172,7 @@ test_normalize_idempotent() `test(allow_leaks: true) {
 
 // --- Additional edge cases ---
 
-test_join_both_empty() `test(allow_leaks: true) {
+test_join_both_empty() `test {
   assert(path.join("", "") == "", "join both empty");
 }
 

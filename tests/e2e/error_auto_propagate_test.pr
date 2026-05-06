@@ -317,7 +317,7 @@ test_optional_recovery_inferred_error() `test(allow_leaks: true) {
   assert("{x}" == "none", "inferred optional recovery on error");
 }
 
-test_optional_recovery_inferred_success() `test(allow_leaks: true) {
+test_optional_recovery_inferred_success() `test {
   x := parse_int("42")? e {
     print_line("handled");
   };
@@ -332,7 +332,7 @@ test_optional_recovery_typed_error() `test(allow_leaks: true) {
   assert("{x}" == "none", "typed optional recovery on error");
 }
 
-test_optional_recovery_typed_success() `test(allow_leaks: true) {
+test_optional_recovery_typed_success() `test {
   int? x = parse_int("42")? e {
     print_line("handled");
   };
@@ -355,7 +355,7 @@ test_optional_recovery_string_success() `test {
 }
 
 // With explicit none; recovery value (still works as before)
-test_handler_recovery_optional_value() `test(allow_leaks: true) {
+test_handler_recovery_optional_value() `test {
   int? v = parse_int("42")? e {
     none;
   };
@@ -529,7 +529,7 @@ test_handler_recovery_user_type() `test(allow_leaks: true) {
   assert(p.y == 0, "user type recovery y");
 }
 
-test_handler_success_user_type() `test(allow_leaks: true) {
+test_handler_success_user_type() `test {
   Point p = make_point(false)? e {
     Point(x: 0, y: 0);
   };

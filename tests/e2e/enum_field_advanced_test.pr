@@ -17,7 +17,7 @@ type OptHolder {
   string name;
 }
 
-test_optional_enum_field_present() `test(allow_leaks: true) {
+test_optional_enum_field_present() `test {
   OptHolder h = OptHolder(name: "with");
   h.maybe = Color.Red;
   if c := h.maybe {
@@ -30,7 +30,7 @@ test_optional_enum_field_present() `test(allow_leaks: true) {
   }
 }
 
-test_optional_enum_field_absent() `test(allow_leaks: true) {
+test_optional_enum_field_absent() `test {
   OptHolder h = OptHolder(name: "without");
   assert(h.maybe is absent, "opt should be absent");
 }
@@ -208,7 +208,7 @@ type MultiEnum {
   int id;
 }
 
-test_multiple_enum_fields() `test(allow_leaks: true) {
+test_multiple_enum_fields() `test {
   MultiEnum me = MultiEnum(color: Color.Blue, dir: Direction.West, id: 42);
   match me.color {
     Color.Blue => {
@@ -264,7 +264,7 @@ type Box[T] {
   T value;
 }
 
-test_generic_type_with_enum() `test(allow_leaks: true) {
+test_generic_type_with_enum() `test {
   Box[Color] b = Box[Color](value: Color.Red);
   match b.value {
     Color.Red => {
@@ -272,7 +272,7 @@ test_generic_type_with_enum() `test(allow_leaks: true) {
   }
 }
 
-test_generic_type_with_data_enum() `test(allow_leaks: true) {
+test_generic_type_with_data_enum() `test {
   Box[Shape] b = Box[Shape](value: Shape.Circle(radius: 3.0));
   match b.value {
     Shape.Circle(r) => assert(r == 3.0, "box shape"),
@@ -323,7 +323,7 @@ type Wrapper {
   Color c;
 }
 
-test_map_struct_with_enum_value() `test(allow_leaks: true) {
+test_map_struct_with_enum_value() `test {
   map[string, Wrapper] m = {
     "a": Wrapper(c: Color.Red)
   };

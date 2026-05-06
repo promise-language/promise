@@ -268,7 +268,7 @@ test_slice_is_copy() `test {
 
 // --- Slice assignment ---
 
-test_slice_assign() `test(allow_leaks: true) {
+test_slice_assign() `test {
   int[] nums = [10, 20, 30, 40, 50];
   nums[1:4] = [200, 300, 400];
   assert(nums[0] == 10, "[0] unchanged");
@@ -278,7 +278,7 @@ test_slice_assign() `test(allow_leaks: true) {
   assert(nums[4] == 50, "[4] unchanged");
 }
 
-test_slice_assign_from_start() `test(allow_leaks: true) {
+test_slice_assign_from_start() `test {
   int[] nums = [10, 20, 30];
   nums[:2] = [100, 200];
   assert(nums[0] == 100, "[0] == 100");
@@ -286,7 +286,7 @@ test_slice_assign_from_start() `test(allow_leaks: true) {
   assert(nums[2] == 30, "[2] unchanged");
 }
 
-test_slice_assign_partial() `test(allow_leaks: true) {
+test_slice_assign_partial() `test {
   // Assigning fewer values than range — only overwrites what's provided
   int[] nums = [10, 20, 30, 40, 50];
   nums[1:4] = [200];

@@ -411,12 +411,12 @@ nested_match_errors(int outer_sel, int inner_val) string! {
   return "default";
 }
 
-test_nested_outer1_inner42() `test(allow_leaks: true) {
+test_nested_outer1_inner42() `test {
   string r = nested_match_errors(1, 42)!;
   assert(r == "found 42", "nested: outer=1, inner=42");
 }
 
-test_nested_outer1_inner0() `test(allow_leaks: true) {
+test_nested_outer1_inner0() `test {
   string r = nested_match_errors(1, 0)!;
   assert(r == "other", "nested: outer=1, inner=0");
 }

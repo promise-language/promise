@@ -1,17 +1,17 @@
 use mathlib "./mathlib";
 
-test_vec2_construct() `test(allow_leaks: true) {
+test_vec2_construct() `test {
   v := mathlib.Vec2(x: 3, y: 4);
   assert(v.x == 3, "v.x == 3");
   assert(v.y == 4, "v.y == 4");
 }
 
-test_vec2_method() `test(allow_leaks: true) {
+test_vec2_method() `test {
   v := mathlib.Vec2(x: 10, y: 20);
   assert(v.sum() == 30, "v.sum() == 30");
 }
 
-test_vec2_mutating_method() `test(allow_leaks: true) {
+test_vec2_mutating_method() `test {
   v := mathlib.Vec2(x: 2, y: 3);
   v.scale(5);
   assert(v.x == 10, "scaled x == 10");

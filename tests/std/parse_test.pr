@@ -1,5 +1,5 @@
 // Tests for Parse interface: int.parse, bool.parse, uint.parse, f64.parse, Vector.filled
-test_int_parse() `test(allow_leaks: true) {
+test_int_parse() `test {
   Scanner r1 = Scanner(s: "42");
   int v1 = int.parse(r1)!;
   assert(v1 == 42, "parse 42");
@@ -20,7 +20,7 @@ test_int_parse_stops_at_non_digit() `test(allow_leaks: true) {
   assert(r.rest() == "bc", "remaining bc");
 }
 
-test_bool_parse() `test(allow_leaks: true) {
+test_bool_parse() `test {
   Scanner r1 = Scanner(s: "true");
   bool v1 = bool.parse(r1)!;
   assert(v1, "parse true");
@@ -76,12 +76,12 @@ test_bool_parse_partial() `test(allow_leaks: true) {
   assert(result == "expected 'true'", "partial true");
 }
 
-test_scan_int() `test(allow_leaks: true) {
+test_scan_int() `test {
   int v = scan[int]("99")!;
   assert(v == 99, "scan int");
 }
 
-test_sequential_parse() `test(allow_leaks: true) {
+test_sequential_parse() `test {
   Scanner r = Scanner(s: "12 34");
   int a = int.parse(r)!;
   assert(a == 12, "first int");
@@ -92,13 +92,13 @@ test_sequential_parse() `test(allow_leaks: true) {
 
 // --- uint.parse ---
 
-test_uint_parse() `test(allow_leaks: true) {
+test_uint_parse() `test {
   Scanner r = Scanner(s: "42");
   uint v = uint.parse(r)!;
   assert((v as! int) == 42, "parse 42");
 }
 
-test_uint_parse_large() `test(allow_leaks: true) {
+test_uint_parse_large() `test {
   Scanner r = Scanner(s: "1000000");
   uint v = uint.parse(r)!;
   assert((v as! int) == 1000000, "parse 1000000");
@@ -129,17 +129,17 @@ test_uint_parse_stops_at_non_digit() `test(allow_leaks: true) {
   assert(r.rest() == "bc", "remaining bc");
 }
 
-test_uint_parse_zero() `test(allow_leaks: true) {
+test_uint_parse_zero() `test {
   uint v = scan[uint]("0")!;
   assert((v as! int) == 0, "parse 0");
 }
 
-test_scan_uint() `test(allow_leaks: true) {
+test_scan_uint() `test {
   uint v = scan[uint]("255")!;
   assert((v as! int) == 255, "scan uint");
 }
 
-test_scan_bool() `test(allow_leaks: true) {
+test_scan_bool() `test {
   bool v1 = scan[bool]("true")!;
   assert(v1, "scan true");
   bool v2 = scan[bool]("false")!;
@@ -148,53 +148,53 @@ test_scan_bool() `test(allow_leaks: true) {
 
 // --- f64.parse ---
 
-test_f64_parse_integer() `test(allow_leaks: true) {
+test_f64_parse_integer() `test {
   f64 v = scan[f64]("42")!;
   assert(v == 42.0, "parse 42");
 }
 
-test_f64_parse_decimal() `test(allow_leaks: true) {
+test_f64_parse_decimal() `test {
   f64 v = scan[f64]("3.14")!;
   // Check with tolerance (floating point)
   assert(v > 3.13 && v < 3.15, "parse 3.14");
 }
 
-test_f64_parse_negative() `test(allow_leaks: true) {
+test_f64_parse_negative() `test {
   f64 v = scan[f64]("-2.5")!;
   assert(v == -2.5, "parse -2.5");
 }
 
-test_f64_parse_zero() `test(allow_leaks: true) {
+test_f64_parse_zero() `test {
   f64 v = scan[f64]("0")!;
   assert(v == 0.0, "parse 0");
 }
 
-test_f64_parse_zero_point() `test(allow_leaks: true) {
+test_f64_parse_zero_point() `test {
   f64 v = scan[f64]("0.0")!;
   assert(v == 0.0, "parse 0.0");
 }
 
-test_f64_parse_scientific() `test(allow_leaks: true) {
+test_f64_parse_scientific() `test {
   f64 v = scan[f64]("1e3")!;
   assert(v == 1000.0, "parse 1e3");
 }
 
-test_f64_parse_scientific_negative_exp() `test(allow_leaks: true) {
+test_f64_parse_scientific_negative_exp() `test {
   f64 v = scan[f64]("5e-2")!;
   assert(v > 0.049 && v < 0.051, "parse 5e-2");
 }
 
-test_f64_parse_scientific_plus() `test(allow_leaks: true) {
+test_f64_parse_scientific_plus() `test {
   f64 v = scan[f64]("2.5e+2")!;
   assert(v == 250.0, "parse 2.5e+2");
 }
 
-test_f64_parse_capital_e() `test(allow_leaks: true) {
+test_f64_parse_capital_e() `test {
   f64 v = scan[f64]("1E3")!;
   assert(v == 1000.0, "parse 1E3");
 }
 
-test_f64_parse_negative_scientific() `test(allow_leaks: true) {
+test_f64_parse_negative_scientific() `test {
   f64 v = scan[f64]("-1.5e2")!;
   assert(v == -150.0, "parse -1.5e2");
 }
@@ -229,22 +229,22 @@ test_f64_parse_minus_only() `test(allow_leaks: true) {
   assert(result == "expected digit", "minus only");
 }
 
-test_f64_parse_leading_dot() `test(allow_leaks: true) {
+test_f64_parse_leading_dot() `test {
   f64 v = scan[f64](".5")!;
   assert(v == 0.5, "parse .5 as 0.5");
 }
 
-test_f64_parse_negative_integer() `test(allow_leaks: true) {
+test_f64_parse_negative_integer() `test {
   f64 v = scan[f64]("-42")!;
   assert(v == -42.0, "parse -42");
 }
 
-test_f64_parse_trailing_dot() `test(allow_leaks: true) {
+test_f64_parse_trailing_dot() `test {
   f64 v = scan[f64]("1.")!;
   assert(v == 1.0, "parse 1.");
 }
 
-test_f64_parse_negative_zero() `test(allow_leaks: true) {
+test_f64_parse_negative_zero() `test {
   f64 v = scan[f64]("-0.0")!;
   // -0.0 == 0.0 in IEEE 754
   assert(v == 0.0, "parse -0.0");
@@ -267,17 +267,17 @@ test_vector_filled_empty() `test {
 
 // --- char.parse ---
 
-test_char_parse() `test(allow_leaks: true) {
+test_char_parse() `test {
   char c = scan[char]("A")!;
   assert(c == 'A', "parse A");
 }
 
-test_char_parse_digit() `test(allow_leaks: true) {
+test_char_parse_digit() `test {
   char c = scan[char]("7")!;
   assert(c == '7', "parse 7");
 }
 
-test_char_parse_space() `test(allow_leaks: true) {
+test_char_parse_space() `test {
   char c = scan[char](" ")!;
   assert(c == ' ', "parse space");
 }
@@ -295,7 +295,7 @@ test_char_parse_empty() `test(allow_leaks: true) {
   assert(result == "unexpected end of input", "empty input");
 }
 
-test_char_parse_from_scanner() `test(allow_leaks: true) {
+test_char_parse_from_scanner() `test {
   Scanner r = Scanner(s: "AB");
   char c1 = char.parse(r)!;
   assert(c1 == 'A', "first char");
@@ -305,17 +305,17 @@ test_char_parse_from_scanner() `test(allow_leaks: true) {
 
 // --- f32.parse ---
 
-test_f32_parse_integer() `test(allow_leaks: true) {
+test_f32_parse_integer() `test {
   f32 v = scan[f32]("42")!;
   assert(v == 42.0f32, "parse 42");
 }
 
-test_f32_parse_decimal() `test(allow_leaks: true) {
+test_f32_parse_decimal() `test {
   f32 v = scan[f32]("3.14")!;
   assert(v > 3.13f32 && v < 3.15f32, "parse 3.14");
 }
 
-test_f32_parse_negative() `test(allow_leaks: true) {
+test_f32_parse_negative() `test {
   f32 v = scan[f32]("-2.5")!;
   assert(v == -2.5f32, "parse -2.5");
 }
@@ -340,22 +340,22 @@ test_f32_parse_non_numeric() `test(allow_leaks: true) {
 
 // --- i8.parse ---
 
-test_i8_parse() `test(allow_leaks: true) {
+test_i8_parse() `test {
   i8 v = scan[i8]("42")!;
   assert(v == 42i8, "parse 42");
 }
 
-test_i8_parse_negative() `test(allow_leaks: true) {
+test_i8_parse_negative() `test {
   i8 v = scan[i8]("-17")!;
   assert(v == -17i8, "parse -17");
 }
 
-test_i8_parse_max() `test(allow_leaks: true) {
+test_i8_parse_max() `test {
   i8 v = scan[i8]("127")!;
   assert(v == 127i8, "parse 127");
 }
 
-test_i8_parse_min() `test(allow_leaks: true) {
+test_i8_parse_min() `test {
   i8 v = scan[i8]("-128")!;
   assert(v == -128i8, "parse -128");
 }
@@ -385,12 +385,12 @@ test_i8_parse_empty() `test(allow_leaks: true) {
 
 // --- i16.parse ---
 
-test_i16_parse() `test(allow_leaks: true) {
+test_i16_parse() `test {
   i16 v = scan[i16]("1234")!;
   assert(v == 1234i16, "parse 1234");
 }
 
-test_i16_parse_negative() `test(allow_leaks: true) {
+test_i16_parse_negative() `test {
   i16 v = scan[i16]("-5000")!;
   assert(v == -5000i16, "parse -5000");
 }
@@ -410,12 +410,12 @@ test_i16_parse_overflow() `test(allow_leaks: true) {
 
 // --- i32.parse ---
 
-test_i32_parse() `test(allow_leaks: true) {
+test_i32_parse() `test {
   i32 v = scan[i32]("100000")!;
   assert(v == 100000i32, "parse 100000");
 }
 
-test_i32_parse_negative() `test(allow_leaks: true) {
+test_i32_parse_negative() `test {
   i32 v = scan[i32]("-100000")!;
   assert(v == -100000i32, "parse -100000");
 }
@@ -435,12 +435,12 @@ test_i32_parse_overflow() `test(allow_leaks: true) {
 
 // --- i64.parse ---
 
-test_i64_parse() `test(allow_leaks: true) {
+test_i64_parse() `test {
   i64 v = scan[i64]("123456789")!;
   assert(v == 123456789i64, "parse 123456789");
 }
 
-test_i64_parse_negative() `test(allow_leaks: true) {
+test_i64_parse_negative() `test {
   i64 v = scan[i64]("-99")!;
   assert(v == -99i64, "parse -99");
 }
@@ -460,7 +460,7 @@ test_i64_parse_empty() `test(allow_leaks: true) {
 
 // --- u8.parse ---
 
-test_u8_parse() `test(allow_leaks: true) {
+test_u8_parse() `test {
   u8 v = scan[u8]("200")!;
   assert(v == 200u8, "parse 200");
 }
@@ -485,7 +485,7 @@ test_u8_parse_empty() `test(allow_leaks: true) {
 
 // --- u16.parse ---
 
-test_u16_parse() `test(allow_leaks: true) {
+test_u16_parse() `test {
   u16 v = scan[u16]("50000")!;
   assert(v == 50000u16, "parse 50000");
 }
@@ -505,7 +505,7 @@ test_u16_parse_overflow() `test(allow_leaks: true) {
 
 // --- u32.parse ---
 
-test_u32_parse() `test(allow_leaks: true) {
+test_u32_parse() `test {
   u32 v = scan[u32]("3000000000")!;
   assert(v == 3000000000u32, "parse 3000000000");
 }
@@ -525,7 +525,7 @@ test_u32_parse_overflow() `test(allow_leaks: true) {
 
 // --- u64.parse ---
 
-test_u64_parse() `test(allow_leaks: true) {
+test_u64_parse() `test {
   u64 v = scan[u64]("123456789")!;
   assert(v == 123456789u64, "parse 123456789");
 }

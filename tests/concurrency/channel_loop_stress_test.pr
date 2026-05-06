@@ -3,7 +3,7 @@
 // Without the fix, each iteration would allocate stack space for the channel
 // memcpy temporary, causing stack overflow at high iteration counts.
 // High-iteration send/recv in goroutine — 10K iterations.
-test_channel_send_loop_10k() `test(allow_leaks: true, exclude: "wasm32") {
+test_channel_send_loop_10k() `test(exclude: "wasm32") {
   ch := channel[int](capacity: 100);
   done := channel[int](capacity: 1);
 
@@ -31,7 +31,7 @@ test_channel_send_loop_10k() `test(allow_leaks: true, exclude: "wasm32") {
 }
 
 // High-iteration with string type (larger element size for memcpy).
-test_channel_string_loop() `test(allow_leaks: true, exclude: "wasm32") {
+test_channel_string_loop() `test(exclude: "wasm32") {
   ch := channel[string](capacity: 50);
   done := channel[int](capacity: 1);
 
@@ -59,7 +59,7 @@ test_channel_string_loop() `test(allow_leaks: true, exclude: "wasm32") {
 }
 
 // Bidirectional: goroutine sends and receives on different channels in same loop.
-test_channel_bidirectional_loop() `test(allow_leaks: true, exclude: "wasm32") {
+test_channel_bidirectional_loop() `test(exclude: "wasm32") {
   request := channel[int](capacity: 10);
   response := channel[int](capacity: 10);
   done := channel[int](capacity: 1);
@@ -95,7 +95,7 @@ test_channel_bidirectional_loop() `test(allow_leaks: true, exclude: "wasm32") {
 }
 
 // Multiple channels with different types in same goroutine loop.
-test_channel_multi_type_loop() `test(allow_leaks: true, exclude: "wasm32") {
+test_channel_multi_type_loop() `test(exclude: "wasm32") {
   int_ch := channel[int](capacity: 50);
   bool_ch := channel[bool](capacity: 50);
   done := channel[int](capacity: 1);
@@ -133,7 +133,7 @@ test_channel_multi_type_loop() `test(allow_leaks: true, exclude: "wasm32") {
 }
 
 // Main thread: tight send/recv loop (non-goroutine path).
-test_channel_main_thread_loop() `test(allow_leaks: true, exclude: "wasm32") {
+test_channel_main_thread_loop() `test(exclude: "wasm32") {
   ch := channel[int](capacity: 1000);
 
   // Fill in a loop

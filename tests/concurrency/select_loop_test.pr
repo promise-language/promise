@@ -2,7 +2,7 @@
 // Note: select in loops is blocked by B0116 (second select-with-default in same
 // function hangs). Select inside go blocks is blocked by B0114.
 // Select recv picks the ready channel.
-test_select_recv_picks_ready() `test(allow_leaks: true, exclude: "wasm32") {
+test_select_recv_picks_ready() `test(exclude: "wasm32") {
   ch1 := channel[int](capacity: 10);
   ch2 := channel[int](capacity: 10);
 
@@ -30,7 +30,7 @@ test_select_recv_picks_ready() `test(allow_leaks: true, exclude: "wasm32") {
 
 // Select recv from multiple channels with different types (exercises
 // multiple entry-block allocas for different element sizes).
-test_select_recv_multi_type() `test(allow_leaks: true, exclude: "wasm32") {
+test_select_recv_multi_type() `test(exclude: "wasm32") {
   ch_int := channel[int](capacity: 1);
   ch_bool := channel[bool](capacity: 1);
 
@@ -50,7 +50,7 @@ test_select_recv_multi_type() `test(allow_leaks: true, exclude: "wasm32") {
 }
 
 // Select send to a buffered channel (exercises send alloca in entry block).
-test_select_send_buffered() `test(allow_leaks: true, exclude: "wasm32") {
+test_select_send_buffered() `test(exclude: "wasm32") {
   ch := channel[int](capacity: 5);
 
   // Select-send to a channel with space

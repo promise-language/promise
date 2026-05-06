@@ -41,31 +41,31 @@ type Sensor {
 // Section 1: Bang unwrap on failable getter
 // ============================================================
 
-test_getter_bang_success() `test(allow_leaks: true) {
+test_getter_bang_success() `test {
   Sensor s = Sensor(_raw: 42);
   int v = s.value!;
   assert(v == 42, "bang unwrap getter success");
 }
 
-test_getter_bang_zero() `test(allow_leaks: true) {
+test_getter_bang_zero() `test {
   Sensor s = Sensor(_raw: 0);
   int v = s.value!;
   assert(v == 0, "bang unwrap getter zero");
 }
 
-test_getter_string_bang() `test(allow_leaks: true) {
+test_getter_string_bang() `test {
   Sensor s = Sensor(_raw: 1);
   string l = s.label!;
   assert(l == "one", "bang unwrap string getter");
 }
 
-test_getter_bool_bang() `test(allow_leaks: true) {
+test_getter_bool_bang() `test {
   Sensor s = Sensor(_raw: 5);
   bool b = s.is_valid!;
   assert(b, "bang unwrap bool getter");
 }
 
-test_getter_bool_bang_false() `test(allow_leaks: true) {
+test_getter_bool_bang_false() `test {
   Sensor s = Sensor(_raw: 0);
   bool b = s.is_valid!;
   assert(!b, "bang unwrap bool getter false");
@@ -83,7 +83,7 @@ test_getter_handler_recovery() `test(allow_leaks: true) {
   assert(v == -99, "handler recovery on getter error");
 }
 
-test_getter_handler_success() `test(allow_leaks: true) {
+test_getter_handler_success() `test {
   Sensor s = Sensor(_raw: 10);
   int v = s.value? e {
     -99;
@@ -99,7 +99,7 @@ test_getter_string_handler() `test(allow_leaks: true) {
   assert(l == "fallback", "string getter handler recovery");
 }
 
-test_getter_string_handler_success() `test(allow_leaks: true) {
+test_getter_string_handler_success() `test {
   Sensor s = Sensor(_raw: 0);
   string l = s.label? e {
     "fallback";
@@ -147,7 +147,7 @@ read_sensor(Sensor s) int! {
   return v * 2;
 }
 
-test_getter_auto_prop_success() `test(allow_leaks: true) {
+test_getter_auto_prop_success() `test {
   Sensor s = Sensor(_raw: 21);
   int r = read_sensor(s)!;
   assert(r == 42, "auto-propagation of getter success");
@@ -168,7 +168,7 @@ read_label(Sensor s) string! {
   return "label: " + l;
 }
 
-test_getter_auto_prop_string() `test(allow_leaks: true) {
+test_getter_auto_prop_string() `test {
   Sensor s = Sensor(_raw: 0);
   string r = read_label(s)!;
   assert(r == "label: zero", "auto-propagation of string getter");
@@ -195,7 +195,7 @@ test_getter_optional_inferred_error() `test(allow_leaks: true) {
   assert("{x}" == "none", "inferred optional recovery on getter error");
 }
 
-test_getter_optional_inferred_success() `test(allow_leaks: true) {
+test_getter_optional_inferred_success() `test {
   Sensor s = Sensor(_raw: 42);
   x := s.value? e {
     print_line("handled");
@@ -211,7 +211,7 @@ test_getter_optional_typed_error() `test(allow_leaks: true) {
   assert("{x}" == "none", "typed optional recovery on getter error");
 }
 
-test_getter_optional_typed_success() `test(allow_leaks: true) {
+test_getter_optional_typed_success() `test {
   Sensor s = Sensor(_raw: 7);
   int? x = s.value? e {
     print_line("handled");
@@ -236,7 +236,7 @@ test_getter_diverge_return_error() `test(allow_leaks: true) {
   assert(r == -1, "getter handler diverges with return on error");
 }
 
-test_getter_diverge_return_success() `test(allow_leaks: true) {
+test_getter_diverge_return_success() `test {
   Sensor s = Sensor(_raw: 50);
   int r = read_or_default(s);
   assert(r == 50, "getter success when handler would diverge");
@@ -305,7 +305,7 @@ test_getter_typed_else_nomatch() `test(allow_leaks: true) {
   assert(v == -1, "typed handler fell through to else on getter");
 }
 
-test_getter_typed_else_success() `test(allow_leaks: true) {
+test_getter_typed_else_success() `test {
   Config c = Config(_mode: 5);
   int v = c.mode? e is ConfigError {
     -99;
@@ -368,7 +368,7 @@ read_source(Source src) int! {
   return src.data;
 }
 
-test_virtual_getter_success() `test(allow_leaks: true) {
+test_virtual_getter_success() `test {
   Source s = GoodSource(_val: 77);
   int v = read_source(s)!;
   assert(v == 77, "virtual getter dispatch success");
@@ -396,7 +396,7 @@ test_virtual_getter_handler() `test(allow_leaks: true) {
 // Section 10: Match on failable getter result
 // ============================================================
 
-test_match_getter_bang() `test(allow_leaks: true) {
+test_match_getter_bang() `test {
   Sensor s = Sensor(_raw: 0);
   string r = match s.label! {
     "zero" => "got zero",
@@ -405,7 +405,7 @@ test_match_getter_bang() `test(allow_leaks: true) {
   assert(r == "got zero", "match on getter! result");
 }
 
-test_match_getter_via_temp() `test(allow_leaks: true) {
+test_match_getter_via_temp() `test {
   Sensor s = Sensor(_raw: 1);
   string l = s.label? e {
     "error";
@@ -446,13 +446,13 @@ classify_reading(Sensor s) string! {
   return "normal";
 }
 
-test_getter_chain_success() `test(allow_leaks: true) {
+test_getter_chain_success() `test {
   Sensor s = Sensor(_raw: 50);
   string r = classify_reading(s)!;
   assert(r == "normal", "getter chain classify normal");
 }
 
-test_getter_chain_high() `test(allow_leaks: true) {
+test_getter_chain_high() `test {
   Sensor s = Sensor(_raw: 200);
   string r = classify_reading(s)!;
   assert(r == "high", "getter chain classify high");
@@ -471,7 +471,7 @@ test_getter_chain_fail() `test(allow_leaks: true) {
 // Section 12: Multiple getters on same object
 // ============================================================
 
-test_multiple_getters_success() `test(allow_leaks: true) {
+test_multiple_getters_success() `test {
   Sensor s = Sensor(_raw: 1);
   int v = s.value!;
   string l = s.label!;

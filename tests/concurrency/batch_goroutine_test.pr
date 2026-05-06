@@ -59,7 +59,7 @@ test_sequential_tasks() `test(exclude: "wasm32") {
 
 // --- Channel recv (cond_wait on notEmpty) ---
 
-test_buffered_channel() `test(allow_leaks: true, exclude: "wasm32") {
+test_buffered_channel() `test(exclude: "wasm32") {
   ch := channel[int](capacity: 1);
   go {
     ch.send(99);
@@ -68,7 +68,7 @@ test_buffered_channel() `test(allow_leaks: true, exclude: "wasm32") {
   assert(v == 99, "buffered channel recv");
 }
 
-test_unbuffered_channel() `test(allow_leaks: true, exclude: "wasm32") {
+test_unbuffered_channel() `test(exclude: "wasm32") {
   ch := channel[int]();
   go {
     ch.send(77);
@@ -79,7 +79,7 @@ test_unbuffered_channel() `test(allow_leaks: true, exclude: "wasm32") {
 
 // --- For-in on channel (cond_wait loop until close) ---
 
-test_for_in_channel() `test(allow_leaks: true, exclude: "wasm32") {
+test_for_in_channel() `test(exclude: "wasm32") {
   ch := channel[int](capacity: 3);
   go {
     ch.send(1);
@@ -105,7 +105,7 @@ test_fire_and_forget() `test(exclude: "wasm32") {
 // When a sender exits the rendezvous wait, it must wake the next sender
 // from send_waiters so it can write to the now-empty buffer.
 
-test_unbuffered_two_senders() `test(allow_leaks: true, exclude: "wasm32") {
+test_unbuffered_two_senders() `test(exclude: "wasm32") {
   ch := channel[int]();
   go {
     ch.send(1);
@@ -118,7 +118,7 @@ test_unbuffered_two_senders() `test(allow_leaks: true, exclude: "wasm32") {
   assert(v1 + v2 == 3, "unbuffered two senders sum");
 }
 
-test_unbuffered_three_senders() `test(allow_leaks: true, exclude: "wasm32") {
+test_unbuffered_three_senders() `test(exclude: "wasm32") {
   ch := channel[int]();
   go {
     ch.send(10);
@@ -138,7 +138,7 @@ test_unbuffered_three_senders() `test(allow_leaks: true, exclude: "wasm32") {
 
 // --- Select with unbuffered channels (B0156) ---
 
-test_select_unbuffered_recv() `test(allow_leaks: true, exclude: "wasm32") {
+test_select_unbuffered_recv() `test(exclude: "wasm32") {
   ch := channel[int]();
   go {
     ch.send(42);
@@ -149,7 +149,7 @@ test_select_unbuffered_recv() `test(allow_leaks: true, exclude: "wasm32") {
   }
 }
 
-test_select_unbuffered_multi_recv() `test(allow_leaks: true, exclude: "wasm32") {
+test_select_unbuffered_multi_recv() `test(exclude: "wasm32") {
   ch := channel[int]();
   go {
     ch.send(1);
@@ -167,7 +167,7 @@ test_select_unbuffered_multi_recv() `test(allow_leaks: true, exclude: "wasm32") 
   assert(sum == 3, "select unbuffered multi recv");
 }
 
-test_select_unbuffered_send() `test(allow_leaks: true, exclude: "wasm32") {
+test_select_unbuffered_send() `test(exclude: "wasm32") {
   ch := channel[int]();
   done := channel[int](capacity: 1);
   go {
@@ -183,7 +183,7 @@ test_select_unbuffered_send() `test(allow_leaks: true, exclude: "wasm32") {
 
 // --- Select with default (non-blocking) ---
 
-test_select_default() `test(allow_leaks: true, exclude: "wasm32") {
+test_select_default() `test(exclude: "wasm32") {
   ch1 := channel[int](capacity: 1);
   ch2 := channel[int](capacity: 1);
   ch1.send(42);
@@ -199,7 +199,7 @@ test_select_default() `test(allow_leaks: true, exclude: "wasm32") {
   assert(result == 42, "select picks ready channel");
 }
 
-test_select_default_noop() `test(allow_leaks: true, exclude: "wasm32") {
+test_select_default_noop() `test(exclude: "wasm32") {
   ch := channel[int](capacity: 1);
   int result = -1;
   select {

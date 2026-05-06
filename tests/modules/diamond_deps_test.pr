@@ -8,17 +8,17 @@
 use geometry "./geometry";
 use physics "./physics";
 
-test_diamond_geometry() `test(allow_leaks: true) {
+test_diamond_geometry() `test {
   a := geometry.Point2D(x: 1, y: 2);
   assert(a.distance_to(4, 6) == 7, "distance works in diamond");
 }
 
-test_diamond_physics() `test(allow_leaks: true) {
+test_diamond_physics() `test {
   v := physics.Velocity(vx: 3, vy: 4);
   assert(v.speed() == 7, "velocity speed works in diamond");
 }
 
-test_diamond_both_together() `test(allow_leaks: true) {
+test_diamond_both_together() `test {
   v := physics.apply_gravity(5, 10, 10);
   assert(v.vy == 0, "gravity applied");
   assert(v.speed() == 5, "speed after gravity");

@@ -1040,16 +1040,18 @@ func (c *Compiler) trackStringTemp(val value.Value) {
 	}
 
 	// Create entry-block allocas via createEntryAlloca (handles coroutine layout).
-	// Initialize alloca to null and flag to false in the CURRENT block — the alloca
-	// values are undefined until we store to them, and we always check the flag
-	// before reading the alloca value (flag false → skip drop → never read alloca).
+	// Initialize alloca to null and flag to false in the ENTRY block so that temps
+	// created inside branches have defined values on untaken paths (B0168).
 	alloca := c.createEntryAlloca(irtypes.I8Ptr)
 	dropFlag := c.createEntryAlloca(irtypes.I1)
 
-	// Initialize flag to false, then store value and set flag to true.
-	// The flag starts false; we set it true AFTER storing the value.
-	// This ensures the flag is never true when the alloca is uninitialized.
-	c.block.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
+	// Entry-block initialization: ensures defined values even if this branch is
+	// never taken at runtime. The entry block's Insts list is separate from its
+	// Term, so appending stores after allocas is safe.
+	c.entryBlock.NewStore(constant.NewNull(irtypes.I8Ptr), alloca)
+	c.entryBlock.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
+
+	// Store value and set flag in current block.
 	c.block.NewStore(val, alloca)
 	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
 

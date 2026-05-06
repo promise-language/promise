@@ -491,7 +491,7 @@ test_match_expression_pattern_int() `test {
   assert(result == "forty-two", "match int expr: 6*7 == 42");
 }
 
-test_match_expression_pattern_string() `test(allow_leaks: true) {
+test_match_expression_pattern_string() `test {
   string s = "hello";
   string result = match s {
     "he" + "llo" => "matched",

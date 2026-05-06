@@ -102,7 +102,7 @@ test_arrow_optional_error() `test(allow_leaks: true) {
   assert("{x}" == "none", "arrow optional recovery on error");
 }
 
-test_arrow_optional_success() `test(allow_leaks: true) {
+test_arrow_optional_success() `test {
   x := parse(5)? e => print_line("handled");
   assert("{x}" == "10", "arrow optional recovery on success");
 }

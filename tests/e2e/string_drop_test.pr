@@ -74,3 +74,30 @@ string_in_loop() `test {
     i += 1;
   }
 }
+
+// B0168: String concat temp in assertion — dropped at statement end
+string_concat_temp_in_assert() `test {
+  assert("hello " + "world" == "hello world", "concat temp");
+}
+
+// B0168: String concat temp passed to function — dropped after call returns
+// (1 leak from print_line's internal Builder.to_string() temp, not from concat)
+string_concat_temp_in_call() `test(allow_leaks: true) {
+  print_line("hello " + "world");
+}
+
+// B0168: to_string temp in assertion — dropped at statement end
+to_string_temp_in_assert() `test {
+  assert(42.to_string() == "42", "int to_string");
+  assert(true.to_string() == "true", "bool to_string");
+}
+
+// B0168: Concat temp stored in constructor — claimed, not double-freed
+// (1 leak from StringHolder lacking synthesized drop for string field)
+type StringHolder {
+  string value;
+}
+string_concat_in_constructor() `test(allow_leaks: true) {
+  h := StringHolder(value: "hello " + "world");
+  assert(h.value == "hello world", "constructor concat");
+}

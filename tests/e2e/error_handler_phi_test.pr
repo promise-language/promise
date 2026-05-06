@@ -61,7 +61,7 @@ test_method_handler_recovery() `test(allow_leaks: true) {
   assert(v == -1, "method call handler recovery");
 }
 
-test_method_handler_success() `test(allow_leaks: true) {
+test_method_handler_success() `test {
   Parser p = Parser();
   int v = p.parse("ok")? e {
     -1;
@@ -91,7 +91,7 @@ test_method_user_type_handler() `test(allow_leaks: true) {
   assert(r.value == 0, "method user type handler recovery");
 }
 
-test_method_user_type_success() `test(allow_leaks: true) {
+test_method_user_type_success() `test {
   Factory f = Factory();
   Result r = f.make(false)? e {
     Result(value: 0);
@@ -215,7 +215,7 @@ test_handler_optional_recovery() `test(allow_leaks: true) {
   assert("{v}" == "none", "optional failable handler recovery");
 }
 
-test_handler_optional_success() `test(allow_leaks: true) {
+test_handler_optional_success() `test {
   int? v = get_opt_ok()? e {
     none;
   };

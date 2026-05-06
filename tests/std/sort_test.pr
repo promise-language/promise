@@ -1,5 +1,5 @@
 // Test sort module: sort[T: Ordered]
-test_sort_empty() `test(allow_leaks: true) {
+test_sort_empty() `test {
   int[] v = [];
   v = sort[int](v);
   assert(v.len == 0, "sort empty");

@@ -15,7 +15,7 @@ type CountUp {
   }
 }
 
-test_custom_iter_for_in() `test(allow_leaks: true) {
+test_custom_iter_for_in() `test {
   c := CountUp(current: 0, limit: 5);
   int sum = 0;
   for x in c {
@@ -24,7 +24,7 @@ test_custom_iter_for_in() `test(allow_leaks: true) {
   assert(sum == 10, "0+1+2+3+4=10");
 }
 
-test_custom_iter_empty() `test(allow_leaks: true) {
+test_custom_iter_empty() `test {
   c := CountUp(current: 5, limit: 5);
   int count = 0;
   for _ in c {
@@ -33,7 +33,7 @@ test_custom_iter_empty() `test(allow_leaks: true) {
   assert(count == 0, "empty iterator yields nothing");
 }
 
-test_custom_iter_single() `test(allow_leaks: true) {
+test_custom_iter_single() `test {
   c := CountUp(current: 42, limit: 43);
   int val = -1;
   for x in c {
@@ -42,7 +42,7 @@ test_custom_iter_single() `test(allow_leaks: true) {
   assert(val == 42, "single element iterator");
 }
 
-test_custom_iter_with_index() `test(allow_leaks: true) {
+test_custom_iter_with_index() `test {
   c := CountUp(current: 10, limit: 13);
   int last_idx = -1;
   int last_val = -1;
@@ -54,7 +54,7 @@ test_custom_iter_with_index() `test(allow_leaks: true) {
   assert(last_val == 12, "last value is 12");
 }
 
-test_custom_iter_break() `test(allow_leaks: true) {
+test_custom_iter_break() `test {
   c := CountUp(current: 0, limit: 100);
   int sum = 0;
   for x in c {
@@ -66,7 +66,7 @@ test_custom_iter_break() `test(allow_leaks: true) {
   assert(sum == 10, "break at 5: 0+1+2+3+4=10");
 }
 
-test_custom_iter_continue() `test(allow_leaks: true) {
+test_custom_iter_continue() `test {
   c := CountUp(current: 0, limit: 10);
   int sum = 0;
   for x in c {
@@ -96,17 +96,17 @@ type Counter is Iterator[int] {
 
 // --- Terminal combinator tests (no _FnIter creation) ---
 
-test_count() `test(allow_leaks: true) {
+test_count() `test {
   c := Counter(current: 0, limit: 5);
   assert(c.count() == 5, "count 0..5 = 5");
 }
 
-test_count_empty() `test(allow_leaks: true) {
+test_count_empty() `test {
   c := Counter(current: 0, limit: 0);
   assert(c.count() == 0, "count empty = 0");
 }
 
-test_first() `test(allow_leaks: true) {
+test_first() `test {
   c := Counter(current: 10, limit: 15);
   if v := c.first() {
     assert(v == 10, "first = 10");
@@ -115,14 +115,14 @@ test_first() `test(allow_leaks: true) {
   }
 }
 
-test_first_empty() `test(allow_leaks: true) {
+test_first_empty() `test {
   c := Counter(current: 0, limit: 0);
   if _ := c.first() {
     assert(false, "first on empty should be none");
   }
 }
 
-test_last() `test(allow_leaks: true) {
+test_last() `test {
   c := Counter(current: 0, limit: 5);
   if v := c.last() {
     assert(v == 4, "last = 4");
@@ -131,35 +131,35 @@ test_last() `test(allow_leaks: true) {
   }
 }
 
-test_any_true() `test(allow_leaks: true) {
+test_any_true() `test {
   c := Counter(current: 0, limit: 10);
   assert(c.any(|int x| -> bool {
     return x == 7;
   }), "any finds 7");
 }
 
-test_any_false() `test(allow_leaks: true) {
+test_any_false() `test {
   c := Counter(current: 0, limit: 5);
   assert(!c.any(|int x| -> bool {
     return x == 99;
   }), "any finds nothing");
 }
 
-test_every_true() `test(allow_leaks: true) {
+test_every_true() `test {
   c := Counter(current: 0, limit: 5);
   assert(c.every(|int x| -> bool {
     return x < 10;
   }), "every < 10");
 }
 
-test_every_false() `test(allow_leaks: true) {
+test_every_false() `test {
   c := Counter(current: 0, limit: 5);
   assert(!c.every(|int x| -> bool {
     return x < 3;
   }), "not every < 3");
 }
 
-test_find() `test(allow_leaks: true) {
+test_find() `test {
   c := Counter(current: 0, limit: 10);
   if v := c.find(|int x| -> bool {
     return x > 5;
@@ -170,7 +170,7 @@ test_find() `test(allow_leaks: true) {
   }
 }
 
-test_find_none() `test(allow_leaks: true) {
+test_find_none() `test {
   c := Counter(current: 0, limit: 5);
   if _ := c.find(|int x| -> bool {
     return x > 100;
@@ -179,7 +179,7 @@ test_find_none() `test(allow_leaks: true) {
   }
 }
 
-test_reduce() `test(allow_leaks: true) {
+test_reduce() `test {
   c := Counter(current: 1, limit: 6);
   if v := c.reduce(|int a, int b| -> int {
     return a + b;
@@ -190,7 +190,7 @@ test_reduce() `test(allow_leaks: true) {
   }
 }
 
-test_reduce_single() `test(allow_leaks: true) {
+test_reduce_single() `test {
   c := Counter(current: 42, limit: 43);
   if v := c.reduce(|int a, int b| -> int {
     return a + b;
@@ -270,7 +270,7 @@ test_chain() `test(allow_leaks: true) {
   assert(sum == 36, "chain: 0+1+2+10+11+12=36");
 }
 
-test_collect() `test(allow_leaks: true) {
+test_collect() `test {
   c := Counter(current: 0, limit: 5);
   int[] v = c.collect();
   assert(v.len == 5, "collect len = 5");
@@ -493,7 +493,7 @@ test_chain_both_empty() `test(allow_leaks: true) {
   assert(a.chain(b).count() == 0, "chain empty+empty = 0");
 }
 
-test_reduce_empty() `test(allow_leaks: true) {
+test_reduce_empty() `test {
   c := Counter(current: 0, limit: 0);
   if _ := c.reduce(|int a, int b| -> int {
     return a + b;
@@ -502,14 +502,14 @@ test_reduce_empty() `test(allow_leaks: true) {
   }
 }
 
-test_last_empty() `test(allow_leaks: true) {
+test_last_empty() `test {
   c := Counter(current: 0, limit: 0);
   if _ := c.last() {
     assert(false, "last on empty should be none");
   }
 }
 
-test_last_single() `test(allow_leaks: true) {
+test_last_single() `test {
   c := Counter(current: 7, limit: 8);
   if v := c.last() {
     assert(v == 7, "last single=7");
@@ -518,21 +518,21 @@ test_last_single() `test(allow_leaks: true) {
   }
 }
 
-test_any_empty() `test(allow_leaks: true) {
+test_any_empty() `test {
   c := Counter(current: 0, limit: 0);
   assert(!c.any(|int x| -> bool {
     return true;
   }), "any on empty is false");
 }
 
-test_every_empty() `test(allow_leaks: true) {
+test_every_empty() `test {
   c := Counter(current: 0, limit: 0);
   assert(c.every(|int x| -> bool {
     return false;
   }), "every on empty is true");
 }
 
-test_find_first() `test(allow_leaks: true) {
+test_find_first() `test {
   c := Counter(current: 0, limit: 10);
   if v := c.find(|int x| -> bool {
     return x >= 0;
@@ -1005,7 +1005,7 @@ test_generator_continue() `test {
 
 // --- Iterator consumed from Counter directly (not via for-in) ---
 
-test_collect_empty() `test(allow_leaks: true) {
+test_collect_empty() `test {
   c := Counter(current: 0, limit: 0);
   int[] result = c.collect();
   assert(result.len == 0, "collect empty = empty vec");

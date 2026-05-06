@@ -190,7 +190,7 @@ decode_object_test() `test(allow_leaks: true) {
   assert(age == 30, "decode object age");
 }
 
-decode_empty_object_test() `test(allow_leaks: true) {
+decode_empty_object_test() `test {
   JsonDecoder dec = JsonDecoder(data: "\{}");
   dec.begin_object()!;
   string? key = dec.next_key()!;
@@ -221,7 +221,7 @@ decode_array_test() `test(allow_leaks: true) {
   assert(c == 30, "decode array[2]");
 }
 
-decode_empty_array_test() `test(allow_leaks: true) {
+decode_empty_array_test() `test {
   JsonDecoder dec = JsonDecoder(data: "[]");
   dec.begin_array()!;
   dec.end_array()!;
@@ -416,7 +416,7 @@ encode_object_with_null_test() `test(allow_leaks: true) {
 
 // ── Decoder edge cases ──────────────────────────────────────────────────────
 
-decode_empty_string_test() `test(allow_leaks: true) {
+decode_empty_string_test() `test {
   JsonDecoder dec = JsonDecoder(data: "\"\"");
   string v = dec.decode_string()!;
   assert(v == "", "decode empty string");
@@ -545,7 +545,7 @@ decode_error_position_test() `test(allow_leaks: true) {
 
 // ── JsonValue tests ─────────────────────────────────────────────────────────
 
-parse_value_null_test() `test(allow_leaks: true) {
+parse_value_null_test() `test {
   JsonValue v = parse_value("null")!;
   match v {
     JsonValue.Null => assert(true, "null"),
@@ -553,7 +553,7 @@ parse_value_null_test() `test(allow_leaks: true) {
   }
 }
 
-parse_value_bool_test() `test(allow_leaks: true) {
+parse_value_bool_test() `test {
   JsonValue v = parse_value("true")!;
   match v {
     JsonValue.Bool(b) => assert(b == true, "true"),
@@ -646,7 +646,7 @@ nested_value_test() `test(allow_leaks: true) {
   }
 }
 
-parse_value_false_test() `test(allow_leaks: true) {
+parse_value_false_test() `test {
   JsonValue v = parse_value("false")!;
   match v {
     JsonValue.Bool(b) => assert(b == false, "false"),
@@ -1081,7 +1081,7 @@ decode_array_has_next_element_test() `test(allow_leaks: true) {
   assert(vals[2] == 30, "has_next: [2]");
 }
 
-decode_array_has_next_empty_test() `test(allow_leaks: true) {
+decode_array_has_next_empty_test() `test {
   JsonDecoder dec = JsonDecoder(data: "[]");
   dec.begin_array()!;
   bool more = dec.has_next_element()!;

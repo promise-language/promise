@@ -40,7 +40,13 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 	case *ast.ParenExpr:
 		return c.genExpr(e.Expr)
 	case *ast.BinaryExpr:
-		return c.genBinaryExpr(e)
+		result := c.genBinaryExpr(e)
+		// B0168: Track string concatenation temporaries. Only string + returns
+		// i8* from genBinaryExpr; comparisons return i1.
+		if result != nil && result.Type() == irtypes.I8Ptr {
+			c.trackStringTemp(result)
+		}
+		return result
 	case *ast.UnaryExpr:
 		return c.genUnaryExpr(e)
 	case *ast.CallExpr:
@@ -230,6 +236,12 @@ func (c *Compiler) genInterpolatedString(e *ast.StringLit) value.Value {
 			// Evaluate expression and convert to string
 			val := c.genExpr(p.Expr)
 			strVal := c.convertToString(val, c.info.Types[p.Expr])
+			// B0168: Track convertToString results (new heap strings for non-string types).
+			// String-typed values return val as-is (no new allocation), so only track
+			// when convertToString produced a different SSA value.
+			if strVal != val {
+				c.trackStringTemp(strVal)
+			}
 			parts = append(parts, strVal)
 		}
 	}
@@ -245,6 +257,11 @@ func (c *Compiler) genInterpolatedString(e *ast.StringLit) value.Value {
 	result := parts[0]
 	for _, part := range parts[1:] {
 		result = c.block.NewCall(c.funcs["promise_string_concat"], result, part)
+		// B0168: Track intermediate concat results. Each concat allocates a new
+		// heap string; all but the final result are dead after the next concat.
+		// The final result is tracked too — claimed if assigned to a variable,
+		// otherwise dropped at statement end.
+		c.trackStringTemp(result)
 	}
 	return result
 }
@@ -307,6 +324,8 @@ func (c *Compiler) convertTupleToString(val value.Value, tup *types.Tuple) value
 	result := parts[0]
 	for _, part := range parts[1:] {
 		result = c.block.NewCall(c.funcs["promise_string_concat"], result, part)
+		// B0168: Track intermediate concat results (same as genInterpolatedString).
+		c.trackStringTemp(result)
 	}
 	return result
 }
@@ -1587,11 +1606,13 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 		var argVals []value.Value
 		var argTypes []types.Type
 		for _, arg := range e.Args {
-			argVals = append(argVals, c.genCallArgExpr(arg.Value))
+			v := c.genCallArgExpr(arg.Value)
+			argVals = append(argVals, v)
 			argTypes = append(argTypes, c.info.Types[arg.Value])
 			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 				c.clearDropFlag(ident.Name)
 			}
+			c.claimStringTemp(v) // B0168: ownership transferred to new() args
 		}
 		newMethod := named.LookupMethod("new")
 		if newMethod != nil {
@@ -1695,6 +1716,8 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 				c.clearDropFlag(ident.Name)
 			}
+			// B0168: Claim string temp — ownership transferred to constructor field.
+			c.claimStringTemp(val)
 		}
 
 		// Initialize omitted fields: evaluate default expression if present, otherwise zero-init.
@@ -1709,6 +1732,7 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 				val := c.genExpr(defExpr)
 				val = maybeWrapOptional(val, defExpr, f.Name(), fieldIdx)
 				c.block.NewStore(val, fieldPtr)
+				c.claimStringTemp(val) // B0168: ownership transferred to field
 			} else {
 				c.block.NewStore(c.zeroValue(layout.Instance.Fields[fieldIdx].LLVMType), fieldPtr)
 			}

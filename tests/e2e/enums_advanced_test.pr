@@ -77,7 +77,7 @@ enum Event {
   Quit,
 }
 
-test_event_click() `test(allow_leaks: true) {
+test_event_click() `test {
   Event e = Event.Click(100, 200);
   string desc = match e {
     Event.Click(x, y) => "click at {x},{y}",

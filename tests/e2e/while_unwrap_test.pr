@@ -92,7 +92,7 @@ test_while_unwrap_mut_reborrow() `test {
 
 // --- if-unwrap re-borrows in body ---
 
-test_if_unwrap_reborrow() `test(allow_leaks: true) {
+test_if_unwrap_reborrow() `test {
   KeyIter it = KeyIter(keys: ["only"], pos: 0);
   string result = "";
   if key := it.next_key() {

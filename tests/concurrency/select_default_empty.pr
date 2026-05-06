@@ -1,5 +1,5 @@
 // B0116: Empty default body must not hang — previously treated as no-default (blocking).
-select_empty_default_single() `test(allow_leaks: true) {
+select_empty_default_single() `test {
   ch := channel[int](capacity: 1);
   select {
     v := <-ch:
@@ -8,7 +8,7 @@ select_empty_default_single() `test(allow_leaks: true) {
   assert(true, "single empty default must not block");
 }
 
-select_empty_default_twice() `test(allow_leaks: true) {
+select_empty_default_twice() `test {
   ch := channel[int](capacity: 1);
   select {
     v := <-ch: default:
@@ -19,7 +19,7 @@ select_empty_default_twice() `test(allow_leaks: true) {
   assert(true, "two consecutive empty defaults must not block");
 }
 
-select_empty_default_in_loop() `test(allow_leaks: true) {
+select_empty_default_in_loop() `test {
   ch := channel[int](capacity: 1);
   int count = 0;
   while count < 5 {
@@ -31,7 +31,7 @@ select_empty_default_in_loop() `test(allow_leaks: true) {
   assert(count == 5, "empty default in loop");
 }
 
-select_empty_default_send() `test(allow_leaks: true) {
+select_empty_default_send() `test {
   ch := channel[int](capacity: 1);
   ch.send(42);
   // Channel is full — send case should not be ready, take default

@@ -63,7 +63,7 @@ auto_prop_method_arg() int! {
   return w.use_int(parse_int("42"));
 }
 
-test_method_arg_success() `test(allow_leaks: true) {
+test_method_arg_success() `test {
   int r = auto_prop_method_arg()!;
   assert(r == 42, "failable arg to method succeeds");
 }
@@ -97,7 +97,7 @@ auto_prop_ctor_arg() int! {
   return h.value;
 }
 
-test_ctor_arg_success() `test(allow_leaks: true) {
+test_ctor_arg_success() `test {
   int r = auto_prop_ctor_arg()!;
   assert(r == 42, "failable arg to constructor succeeds");
 }
@@ -347,7 +347,7 @@ auto_prop_explicit_new() int! {
   return c.value;
 }
 
-test_explicit_new_arg_success() `test(allow_leaks: true) {
+test_explicit_new_arg_success() `test {
   int r = auto_prop_explicit_new()!;
   assert(r == 42, "failable arg to explicit new() succeeds");
 }
@@ -421,7 +421,7 @@ auto_prop_virtual(Shape s) int! {
   return s.accepts(parse_int("7"));
 }
 
-test_virtual_method_arg() `test(allow_leaks: true) {
+test_virtual_method_arg() `test {
   Circle c = Circle();
   int r = auto_prop_virtual(c)!;
   assert(r == 14, "failable arg through virtual dispatch");
@@ -651,7 +651,7 @@ auto_prop_super() int! {
   return c.value;
 }
 
-test_super_arg_success() `test(allow_leaks: true) {
+test_super_arg_success() `test {
   int r = auto_prop_super()!;
   assert(r == 42, "failable arg to super() call succeeds");
 }

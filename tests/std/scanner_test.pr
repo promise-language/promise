@@ -1,5 +1,5 @@
 // Tests for Scanner type
-test_read_byte() `test(allow_leaks: true) {
+test_read_byte() `test {
   Scanner r = Scanner(s: "hi");
   if b := r.read_byte() {
     assert((b as! int) == 104, "h = 104");
@@ -13,14 +13,14 @@ test_read_byte() `test(allow_leaks: true) {
   }
 }
 
-test_read_byte_empty() `test(allow_leaks: true) {
+test_read_byte_empty() `test {
   Scanner r = Scanner(s: "");
   if b := r.read_byte() {
     assert(false, "expected none");
   }
 }
 
-test_position() `test(allow_leaks: true) {
+test_position() `test {
   Scanner r = Scanner(s: "abc");
   assert(r.position == 0, "initial 0");
   r.read_byte();
@@ -29,7 +29,7 @@ test_position() `test(allow_leaks: true) {
   assert(r.position == 2, "after 2 reads");
 }
 
-test_has_next() `test(allow_leaks: true) {
+test_has_next() `test {
   Scanner r = Scanner(s: "x");
   assert(r.has_next, "initially true");
   r.read_byte();
@@ -54,7 +54,7 @@ test_read() `test(allow_leaks: true) {
   assert(r.rest() == "lo", "remaining after read");
 }
 
-test_read_partial() `test(allow_leaks: true) {
+test_read_partial() `test {
   Scanner r = Scanner(s: "hi");
   u8[] buf = Vector[u8].filled(0 as! u8, 5);
   int n = r.read(buf);
@@ -62,7 +62,7 @@ test_read_partial() `test(allow_leaks: true) {
   assert(!r.has_next, "exhausted");
 }
 
-test_read_empty() `test(allow_leaks: true) {
+test_read_empty() `test {
   Scanner r = Scanner(s: "");
   u8[] buf = Vector[u8].filled(0 as! u8, 3);
   int n = r.read(buf);

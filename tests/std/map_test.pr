@@ -153,7 +153,7 @@ test_for_in_single() `test(allow_leaks: true) {
   assert(sum == 30, "for pair sum == 30");
 }
 
-test_for_in_empty() `test(allow_leaks: true) {
+test_for_in_empty() `test {
   map[string, int] m = {:};
   int count = 0;
   for k, v in m {

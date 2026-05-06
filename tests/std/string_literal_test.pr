@@ -14,7 +14,7 @@ test_concat_is_not_literal() `test {
   assert(!c.is_literal, "concat not literal");
 }
 
-test_heap_string_is_not_literal() `test(allow_leaks: true) {
+test_heap_string_is_not_literal() `test {
   assert(!42.to_string().is_literal, "int to_string");
   assert(!true.to_string().is_literal, "bool to_string");
   assert(!3.14.to_string().is_literal, "f64 to_string");
@@ -77,12 +77,12 @@ test_literal_hash() `test {
   assert("hello".hash != "world".hash, "different hash");
 }
 
-test_literal_repeat() `test(allow_leaks: true) {
+test_literal_repeat() `test {
   assert("ab".repeat(3) == "ababab", "repeat");
   assert("ab".repeat(3).is_literal == false, "repeat not literal");
 }
 
-test_literal_to_upper_lower() `test(allow_leaks: true) {
+test_literal_to_upper_lower() `test {
   assert("hello".to_upper() == "HELLO", "to_upper");
   assert("HELLO".to_lower() == "hello", "to_lower");
 }

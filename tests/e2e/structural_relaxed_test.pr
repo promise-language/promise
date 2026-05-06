@@ -129,7 +129,7 @@ test_combined_extra_param_optional_return() `test(allow_leaks: true) {
 
 // --- Direct calls with optional params still work ---
 
-test_direct_call_no_params() `test(allow_leaks: true) {
+test_direct_call_no_params() `test {
   Doc d = Doc();
   assert(d.print() == "doc", "direct call without optional param");
 }
@@ -176,19 +176,19 @@ type Config {
   }
 }
 
-test_constructor_optional_param_with_value() `test(allow_leaks: true) {
+test_constructor_optional_param_with_value() `test {
   Config c = Config(timeout: 10);
   assert(c.timeout == 10, "constructor: optional param with value");
   assert(c.mode == "fast", "constructor: default param used");
 }
 
-test_constructor_optional_param_omitted() `test(allow_leaks: true) {
+test_constructor_optional_param_omitted() `test {
   Config c = Config();
   assert(c.timeout == 30, "constructor: optional param omitted");
   assert(c.mode == "fast", "constructor: default param used");
 }
 
-test_constructor_all_params_provided() `test(allow_leaks: true) {
+test_constructor_all_params_provided() `test {
   Config c = Config(timeout: 5, mode: "slow");
   assert(c.timeout == 5, "constructor: all params provided");
   assert(c.mode == "slow", "constructor: explicit mode");
@@ -215,7 +215,7 @@ test_multiple_extra_params_through_interface() `test(allow_leaks: true) {
   assert(e.execute() == 1, "multiple extra params: defaults used");
 }
 
-test_multiple_extra_params_direct() `test(allow_leaks: true) {
+test_multiple_extra_params_direct() `test {
   Job j = Job();
   assert(j.execute(priority: 10, retries: 3) == 13, "multiple extra params: all provided");
   assert(j.execute(priority: 5) == 6, "multiple extra params: partial");

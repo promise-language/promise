@@ -363,7 +363,7 @@ read_line_empty_file() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_rlef")!;
 }
 
-read_line_long_line() `test(allow_leaks: true, exclude: "wasm32") {
+read_line_long_line() `test(exclude: "wasm32") {
   // Line longer than initial 256-byte buffer to test buffer growth
   string long = "";
   int i = 0;
@@ -915,7 +915,7 @@ buffered_writer_write_string() `test(allow_leaks: true, exclude: "wasm32") {
 
 // ── File.write_line ──────────────────────────────────────────────────────────
 
-file_write_line() `test(allow_leaks: true, exclude: "wasm32") {
+file_write_line() `test(exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_fwl")!;
   f.write_line("hello")!;
   f.write_line("world")!;

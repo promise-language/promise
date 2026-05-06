@@ -3,7 +3,7 @@
 // scenario where the channel becomes full again between wake and re-lock.
 // Basic: select send on a capacity-1 channel with a concurrent receiver.
 // The select blocks until the receiver drains, then the send succeeds.
-test_select_send_wake_basic() `test(allow_leaks: true, exclude: "wasm32") {
+test_select_send_wake_basic() `test(exclude: "wasm32") {
   ch := channel[int](capacity: 1);
   ch.send(1); // fill the channel
   done := channel[int](capacity: 1);
@@ -29,7 +29,7 @@ test_select_send_wake_basic() `test(allow_leaks: true, exclude: "wasm32") {
 // Select send with multiple concurrent senders racing for the same slot.
 // The select's send case and a goroutine sender compete. Whether select
 // wins or retries, the program must not corrupt the channel buffer.
-test_select_send_concurrent_race() `test(allow_leaks: true, exclude: "wasm32") {
+test_select_send_concurrent_race() `test(exclude: "wasm32") {
   ch := channel[int](capacity: 1);
   ch.send(0); // fill the channel
   done := channel[int](capacity: 1);
@@ -61,7 +61,7 @@ test_select_send_concurrent_race() `test(allow_leaks: true, exclude: "wasm32") {
 
 // Select send with a recv fallback. If the send case's wake re-check
 // fails, the select retries and may pick the recv case instead.
-test_select_send_retry_picks_recv() `test(allow_leaks: true, exclude: "wasm32") {
+test_select_send_retry_picks_recv() `test(exclude: "wasm32") {
   send_ch := channel[int](capacity: 1);
   send_ch.send(0); // fill send channel
   recv_ch := channel[int](capacity: 1);
@@ -93,7 +93,7 @@ test_select_send_retry_picks_recv() `test(allow_leaks: true, exclude: "wasm32") 
 // Select send on a closed channel: the wake-path re-check detects
 // the closed state and retries. With a recv fallback on a ready
 // channel, the select completes via the recv case.
-test_select_send_closed_retry() `test(allow_leaks: true, exclude: "wasm32") {
+test_select_send_closed_retry() `test(exclude: "wasm32") {
   send_ch := channel[int](capacity: 1);
   send_ch.send(0); // fill it
   recv_ch := channel[int](capacity: 1);

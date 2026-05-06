@@ -12,19 +12,19 @@ type Color is Equal {
   }
 }
 
-test_equal_same_values() `test(allow_leaks: true) {
+test_equal_same_values() `test {
   Color a = Color(r: 255, g: 0, b: 0);
   Color b = Color(r: 255, g: 0, b: 0);
   assert(a == b, "same color == true");
 }
 
-test_equal_different_values() `test(allow_leaks: true) {
+test_equal_different_values() `test {
   Color a = Color(r: 255, g: 0, b: 0);
   Color b = Color(r: 0, g: 255, b: 0);
   assert(!(a == b), "different color == false");
 }
 
-test_not_equal_inherited_default() `test(allow_leaks: true) {
+test_not_equal_inherited_default() `test {
   // != comes from Equal's default method: !(this == other)
   Color a = Color(r: 255, g: 0, b: 0);
   Color b = Color(r: 0, g: 255, b: 0);
@@ -48,18 +48,18 @@ type Point is Equal {
   }
 }
 
-test_hash_deterministic() `test(allow_leaks: true) {
+test_hash_deterministic() `test {
   Point p = Point(x: 3, y: 4);
   assert(p.hash == p.hash, "hash is deterministic");
 }
 
-test_hash_equal_values_same_hash() `test(allow_leaks: true) {
+test_hash_equal_values_same_hash() `test {
   Point a = Point(x: 3, y: 4);
   Point b = Point(x: 3, y: 4);
   assert(a.hash == b.hash, "equal points have same hash");
 }
 
-test_hash_different_values_different_hash() `test(allow_leaks: true) {
+test_hash_different_values_different_hash() `test {
   Point a = Point(x: 3, y: 4);
   Point b = Point(x: 4, y: 3);
   assert(a.hash != b.hash, "different points have different hash");
@@ -165,7 +165,7 @@ type Priority is Ordered {
   }
 }
 
-test_ordered_less_than() `test(allow_leaks: true) {
+test_ordered_less_than() `test {
   Priority low = Priority(level: 1);
   Priority high = Priority(level: 5);
   assert(low < high, "low < high");
@@ -173,7 +173,7 @@ test_ordered_less_than() `test(allow_leaks: true) {
   assert(!(low < low), "low < low is false");
 }
 
-test_ordered_greater_than_default() `test(allow_leaks: true) {
+test_ordered_greater_than_default() `test {
   // > is a default method from Ordered: other < this
   Priority low = Priority(level: 1);
   Priority high = Priority(level: 5);
@@ -182,7 +182,7 @@ test_ordered_greater_than_default() `test(allow_leaks: true) {
   assert(!(low > low), "low > low is false");
 }
 
-test_ordered_less_equal_default() `test(allow_leaks: true) {
+test_ordered_less_equal_default() `test {
   // <= is a default method from Ordered: !(other < this)
   Priority low = Priority(level: 1);
   Priority mid = Priority(level: 3);
@@ -192,7 +192,7 @@ test_ordered_less_equal_default() `test(allow_leaks: true) {
   assert(!(high <= low), "high <= low is false");
 }
 
-test_ordered_greater_equal_default() `test(allow_leaks: true) {
+test_ordered_greater_equal_default() `test {
   // >= is a default method from Ordered: !(this < other)
   Priority low = Priority(level: 1);
   Priority high = Priority(level: 5);
@@ -201,7 +201,7 @@ test_ordered_greater_equal_default() `test(allow_leaks: true) {
   assert(!(low >= high), "low >= high is false");
 }
 
-test_ordered_not_equal_inherited() `test(allow_leaks: true) {
+test_ordered_not_equal_inherited() `test {
   // != comes from Equal (via Ordered is Equal)
   Priority a = Priority(level: 3);
   Priority b = Priority(level: 5);

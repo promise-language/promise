@@ -10,21 +10,21 @@ type LabeledContainer[T] is Container[T] {
 }
 
 // Basic is-check on generic types
-test_generic_is_check() `test(allow_leaks: true) {
+test_generic_is_check() `test {
   Container[int] c = LabeledContainer[int](value: 42, label: "answer");
   assert(c is LabeledContainer[int], "is LabeledContainer[int]");
   assert(c is Container[int], "is Container[int] (base)");
 }
 
 // Bare origin type still matches generic instances
-test_generic_is_check_bare_origin() `test(allow_leaks: true) {
+test_generic_is_check_bare_origin() `test {
   Container[int] c = LabeledContainer[int](value: 1, label: "x");
   assert(c is LabeledContainer[int], "specific type args match");
   assert(c is LabeledContainer, "bare origin type matches");
 }
 
 // is-check with string type arg
-test_generic_is_check_string_arg() `test(allow_leaks: true) {
+test_generic_is_check_string_arg() `test {
   Container[string] c = LabeledContainer[string](value: "hello", label: "greet");
   assert(c is LabeledContainer[string], "is LabeledContainer[string]");
   assert(c is Container[string], "is Container[string] (base)");
@@ -50,7 +50,7 @@ type TaggedWrapper[T] is Wrapper[T] {
   string tag;
 }
 
-test_generic_is_in_if() `test(allow_leaks: true) {
+test_generic_is_in_if() `test {
   Wrapper[int] w = TaggedWrapper[int](inner: 99, tag: "ninety-nine");
   if w is TaggedWrapper[int] {
     assert(true, "entered generic is-check branch");
@@ -59,7 +59,7 @@ test_generic_is_in_if() `test(allow_leaks: true) {
   }
 }
 
-test_generic_is_in_if_negative() `test(allow_leaks: true) {
+test_generic_is_in_if_negative() `test {
   Wrapper[int] w = Wrapper[int](inner: 5);
   if w is TaggedWrapper[int] {
     assert(false, "should not match base type against derived");
@@ -79,7 +79,7 @@ type LabeledPair[A, B] is Pair[A, B] {
   string label;
 }
 
-test_generic_multi_arg_is() `test(allow_leaks: true) {
+test_generic_multi_arg_is() `test {
   Pair[int, string] p = LabeledPair[int, string](first: 1, second: "one", label: "pair");
   assert(p is LabeledPair[int, string], "is LabeledPair[int, string]");
   assert(p is Pair[int, string], "is Pair[int, string] (base)");

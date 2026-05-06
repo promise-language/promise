@@ -19,7 +19,7 @@ type Accumulator {
   }
 }
 
-test_accumulator() `test(allow_leaks: true) {
+test_accumulator() `test {
   acc := Accumulator(total: 0);
   assert(acc.is_zero(), "starts at zero");
   acc.add(10);
@@ -75,7 +75,7 @@ type Permissions {
   }
 }
 
-test_permissions() `test(allow_leaks: true) {
+test_permissions() `test {
   p := Permissions(read: true, write: false, exec: false);
   assert(p.can_read(), "can read");
   assert(!p.can_write(), "cannot write");
@@ -101,7 +101,7 @@ type Player {
   }
 }
 
-test_player_game() `test(allow_leaks: true) {
+test_player_game() `test {
   p := Player(name: "Alice", score: 0);
   assert(!p.is_winning(100), "not winning at start");
   p.add_score(50);
@@ -140,7 +140,7 @@ type Calculator {
   }
 }
 
-test_calculator() `test(allow_leaks: true) {
+test_calculator() `test {
   c := Calculator(result: 0);
   c.add(10);
   c.add(5);
@@ -175,7 +175,7 @@ type Matrix2x2 {
   }
 }
 
-test_matrix() `test(allow_leaks: true) {
+test_matrix() `test {
   m := Matrix2x2(a: 1, b: 2, c: 3, d: 4);
   assert(m.det() == -2, "det = 1*4 - 2*3 = -2");
   assert(m.trace() == 5, "trace = 1+4 = 5");

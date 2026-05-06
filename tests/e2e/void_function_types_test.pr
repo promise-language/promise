@@ -24,7 +24,7 @@ test_void_fn_param() `test {
 }
 
 // --- Void function type field called through method ---
-test_void_fn_field() `test(allow_leaks: true) {
+test_void_fn_field() `test {
   e := Executor(action: |int x| {
     int _ = x * 2;
   });

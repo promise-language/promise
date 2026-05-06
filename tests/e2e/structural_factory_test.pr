@@ -13,7 +13,7 @@ type My {
   }
 }
 
-test_basic_factory() `test(allow_leaks: true) {
+test_basic_factory() `test {
   My m = My.parse("hello");
   assert(m.value == "hello", "basic factory call");
 }
@@ -24,7 +24,7 @@ load[T: Parseable](string data) T {
   return T.parse(data);
 }
 
-test_generic_factory() `test(allow_leaks: true) {
+test_generic_factory() `test {
   My m = load[My]("world");
   assert(m.value == "world", "generic factory via constraint");
 }
@@ -45,7 +45,7 @@ type Strict {
   }
 }
 
-test_failable_factory_success() `test(allow_leaks: true) {
+test_failable_factory_success() `test {
   Strict s = Strict.tryParse("good")!;
   assert(s.n == 42, "failable factory success");
 }
@@ -64,7 +64,7 @@ tryLoad[T: TryParseable](string data) T! {
   return T.tryParse(data);
 }
 
-test_generic_failable_factory() `test(allow_leaks: true) {
+test_generic_failable_factory() `test {
   Strict s = tryLoad[Strict]("ok")!;
   assert(s.n == 42, "generic failable factory");
 }
@@ -94,14 +94,14 @@ makeWidget[T: Configurable](int v) T {
   return T.create(v);
 }
 
-test_factory_with_params() `test(allow_leaks: true) {
+test_factory_with_params() `test {
   Widget w = makeWidget[Widget](5);
   assert(w.size == 10, "factory with params");
 }
 
 // --- Direct factory call still works ---
 
-test_direct_factory_call() `test(allow_leaks: true) {
+test_direct_factory_call() `test {
   My m = My.parse("direct");
   assert(m.value == "direct", "direct factory call");
 }
@@ -158,7 +158,7 @@ type SafeParser {
   }
 }
 
-test_nonfailable_satisfies_failable_factory() `test(allow_leaks: true) {
+test_nonfailable_satisfies_failable_factory() `test {
   SafeParser s = tryLoad[SafeParser]("x")!;
   assert(s.n == 99, "non-failable factory satisfies failable interface");
 }

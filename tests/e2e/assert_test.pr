@@ -8,6 +8,6 @@ test_math() `test {
   assert(abs(0 - 5) == 5, "abs");
 }
 
-test_strings() `test(allow_leaks: true) {
+test_strings() `test {
   assert("hello" + " world" == "hello world", "string concat");
 }

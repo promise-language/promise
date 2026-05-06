@@ -76,7 +76,7 @@ sum_array(int[] nums) int {
   return total;
 }
 
-test_sum_array() `test(allow_leaks: true) {
+test_sum_array() `test {
   int[] empty = [];
   assert(sum_array(empty) == 0, "empty sum = 0");
   assert(sum_array([42]) == 42, "single element");
@@ -133,7 +133,7 @@ find_first_negative(int[] nums) int {
   return 0;
 }
 
-test_early_return() `test(allow_leaks: true) {
+test_early_return() `test {
   assert(find_first_negative([1, -2, 3]) == -2, "first negative = -2");
   assert(find_first_negative([1, 2, 3]) == 0, "no negative = 0");
   assert(find_first_negative([-5]) == -5, "single negative");

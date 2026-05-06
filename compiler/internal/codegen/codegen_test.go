@@ -9259,6 +9259,49 @@ func TestStringTempInMatchArm(t *testing.T) {
 	assertContains(t, ir, "r.dropflag")
 }
 
+// B0168: String concat temp is tracked and dropped at statement end
+func TestStringConcatTempDrop(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			string name = "world";
+			assert("hello " + name == "hello world", "ok");
+		}
+		main() {}
+	`)
+	// Concat result should be tracked as a temp and dropped
+	assertContains(t, ir, "call i8* @promise_string_concat")
+	assertContains(t, ir, "tmp.drop")
+	assertContains(t, ir, "call void @promise_string_drop")
+}
+
+// B0168: String concat temp claimed when assigned to variable
+func TestStringConcatTempClaimedOnAssign(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			string name = "world";
+			string greeting = "hello " + name;
+			assert(greeting == "hello world", "ok");
+		}
+		main() {}
+	`)
+	// Concat result is claimed (assigned to greeting), variable drop binding handles it
+	assertContains(t, ir, "greeting.dropflag")
+	assertContains(t, ir, "call i8* @promise_string_concat")
+}
+
+// B0168: String concat temp in constructor arg is claimed (no double-free)
+func TestStringConcatTempInConstructor(t *testing.T) {
+	ir := generateIR(t, `
+		type Greeter { string msg; }
+		test() {
+			g := Greeter(msg: "hello " + "world");
+		}
+		main() {}
+	`)
+	// Should compile and run without double-free; concat temp is claimed
+	assertContains(t, ir, "call i8* @promise_string_concat")
+}
+
 // B0158: Synthesized drop coexists with explicit drop (explicit takes precedence)
 func TestDropExplicitTakesPrecedence(t *testing.T) {
 	ir := generateIR(t, `

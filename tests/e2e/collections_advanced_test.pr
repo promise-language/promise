@@ -91,7 +91,7 @@ test_vector_iteration() `test {
 
 // --- vector: for-in with index ---
 
-test_vector_index_iteration() `test(allow_leaks: true) {
+test_vector_index_iteration() `test {
   string[] items = ["a", "b", "c"];
   string result = "";
   for i, item in items {

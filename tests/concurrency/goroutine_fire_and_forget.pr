@@ -21,7 +21,7 @@ test_many_fire_and_forget() `test(exclude: "wasm32") {
   assert(true, "100 fire-and-forget goroutines completed without crash");
 }
 
-test_fire_and_forget_with_channel() `test(allow_leaks: true, exclude: "wasm32") {
+test_fire_and_forget_with_channel() `test(exclude: "wasm32") {
   ch := channel[int](capacity: 1);
   go {
     ch.send(42);
@@ -65,7 +65,7 @@ test_go_call_as_task() `test(exclude: "wasm32") {
   assert(true, "go call as task completed");
 }
 
-test_fire_and_forget_captures() `test(allow_leaks: true, exclude: "wasm32") {
+test_fire_and_forget_captures() `test(exclude: "wasm32") {
   // Fire-and-forget with captured variables — verify no use-after-free
   ch := channel[int](capacity: 1);
   int x = 100;
@@ -76,7 +76,7 @@ test_fire_and_forget_captures() `test(allow_leaks: true, exclude: "wasm32") {
   assert(v == 100, "captured variable delivered correctly");
 }
 
-test_fire_and_forget_in_if_body() `test(allow_leaks: true, exclude: "wasm32") {
+test_fire_and_forget_in_if_body() `test(exclude: "wasm32") {
   // Fire-and-forget go block inside an if body
   ch := channel[int](capacity: 1);
   bool flag = true;
@@ -89,7 +89,7 @@ test_fire_and_forget_in_if_body() `test(allow_leaks: true, exclude: "wasm32") {
   assert(v == 77, "fire-and-forget inside if body works");
 }
 
-test_mixed_fire_and_forget_and_task() `test(allow_leaks: true, exclude: "wasm32") {
+test_mixed_fire_and_forget_and_task() `test(exclude: "wasm32") {
   // Interleave fire-and-forget and task go blocks
   ch := channel[int](capacity: 3);
   go {

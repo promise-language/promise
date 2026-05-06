@@ -275,7 +275,7 @@ test_optional_user_mixed_some() `test(allow_leaks: true) {
   assert("{n} -> {p}" == "99 -> (1, 2)", "optional some in mixed");
 }
 
-test_optional_user_mixed_none() `test(allow_leaks: true) {
+test_optional_user_mixed_none() `test {
   Pt? p = none;
   int n = 99;
   assert("{n} -> {p}" == "99 -> none", "optional none in mixed");

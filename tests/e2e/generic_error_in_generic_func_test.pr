@@ -38,12 +38,12 @@ test_generic_error_catch_detail() `test(allow_leaks: true) {
   }!;
 }
 
-test_generic_wrap() `test(allow_leaks: true) {
+test_generic_wrap() `test {
   w := wrap[int](42);
   assert(w.value == 42, "wrapped int");
 }
 
-test_generic_wrap_string() `test(allow_leaks: true) {
+test_generic_wrap_string() `test {
   w := wrap[string]("hello");
   assert(w.value == "hello", "wrapped string");
 }

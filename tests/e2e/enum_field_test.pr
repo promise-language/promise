@@ -21,7 +21,7 @@ type ShapeHolder {
 
 // --- Fieldless enum as map value ---
 
-test_map_fieldless_enum_lookup() `test(allow_leaks: true) {
+test_map_fieldless_enum_lookup() `test {
   map[string, Color] m = {
     "r": Color.Red, "g": Color.Green, "b": Color.Blue
   };
@@ -201,7 +201,7 @@ test_map_data_enum_get_or() `test {
 
 // --- Enum as field in user type ---
 
-test_enum_field_in_struct() `test(allow_leaks: true) {
+test_enum_field_in_struct() `test {
   Wrapper w = Wrapper(c: Color.Green);
   match w.c {
     Color.Green => {
@@ -210,7 +210,7 @@ test_enum_field_in_struct() `test(allow_leaks: true) {
   }
 }
 
-test_enum_field_modification() `test(allow_leaks: true) {
+test_enum_field_modification() `test {
   Wrapper w = Wrapper(c: Color.Red);
   w.c = Color.Blue;
   match w.c {
@@ -220,7 +220,7 @@ test_enum_field_modification() `test(allow_leaks: true) {
   }
 }
 
-test_data_enum_field_in_struct() `test(allow_leaks: true) {
+test_data_enum_field_in_struct() `test {
   ShapeHolder h = ShapeHolder(s: Shape.Circle(radius: 2.5), label: "circle");
   assert(h.label == "circle", "label");
   match h.s {
@@ -229,7 +229,7 @@ test_data_enum_field_in_struct() `test(allow_leaks: true) {
   }
 }
 
-test_data_enum_field_modification() `test(allow_leaks: true) {
+test_data_enum_field_modification() `test {
   ShapeHolder h = ShapeHolder(s: Shape.Point, label: "p");
   h.s = Shape.Rect(w: 10.0, h: 20.0);
   match h.s {

@@ -176,7 +176,7 @@ narrowing_type_none() `test {
   }
 }
 
-is_present_type() `test(allow_leaks: true) {
+is_present_type() `test {
   Point p = Point(x: 5, y: 6);
   Point? mp = p;
   if mp is present {
@@ -471,7 +471,7 @@ double_unwrap_failable_optional_handler() `test {
 
 // --- is absent narrowing: user-defined types ---
 
-is_absent_narrows_user_type() `test(allow_leaks: true) {
+is_absent_narrows_user_type() `test {
   Point? p = Point(x: 5, y: 6);
   if p is absent {
     return;
@@ -511,7 +511,7 @@ force_unwrap_in_expression() `test {
   assert(y == 15, "x! in arithmetic expression");
 }
 
-force_unwrap_user_type() `test(allow_leaks: true) {
+force_unwrap_user_type() `test {
   Point? p = Point(x: 3, y: 4);
   Point q = p!;
   assert(q.x == 3, "force unwrap user type x");
@@ -532,7 +532,7 @@ as_bang_string_optional() `test {
   assert(v == "world", "as! on string optional");
 }
 
-as_bang_user_type() `test(allow_leaks: true) {
+as_bang_user_type() `test {
   Point? p = Point(x: 8, y: 9);
   Point q = p as! Point;
   assert(q.x == 8, "as! on user type optional x");
@@ -557,7 +557,7 @@ handler_string_present() `test {
   assert(v == "actual", "handler keeps present string");
 }
 
-handler_user_type() `test(allow_leaks: true) {
+handler_user_type() `test {
   Point? p = none;
   Point q = p? _ {
     Point(x: 0, y: 0);
@@ -566,7 +566,7 @@ handler_user_type() `test(allow_leaks: true) {
   assert(q.y == 0, "handler user type recovery y");
 }
 
-handler_user_type_present() `test(allow_leaks: true) {
+handler_user_type_present() `test {
   Point? p = Point(x: 5, y: 6);
   Point q = p? _ {
     Point(x: 0, y: 0);
@@ -587,7 +587,7 @@ type Place {
   Location? location;
 }
 
-optional_user_field_constructor_some() `test(allow_leaks: true) {
+optional_user_field_constructor_some() `test {
   p := Place(name: "home", location: Location(x: 1, y: 2));
   assert(p.name == "home", "name field");
   loc := p.location!;
@@ -595,12 +595,12 @@ optional_user_field_constructor_some() `test(allow_leaks: true) {
   assert(loc.y == 2, "location y");
 }
 
-optional_user_field_constructor_none() `test(allow_leaks: true) {
+optional_user_field_constructor_none() `test {
   p := Place(name: "unknown");
   assert(p.name == "unknown", "name field");
 }
 
-optional_user_field_assign_some() `test(allow_leaks: true) {
+optional_user_field_assign_some() `test {
   p := Place(name: "a");
   p.location = Location(x: 10, y: 20);
   loc := p.location!;
@@ -613,7 +613,7 @@ optional_user_field_assign_none() `test(allow_leaks: true) {
   p.location = none;
 }
 
-optional_user_field_explicit_none_in_constructor() `test(allow_leaks: true) {
+optional_user_field_explicit_none_in_constructor() `test {
   p := Place(name: "nowhere", location: none);
   assert(p.name == "nowhere", "name field");
 }
@@ -623,7 +623,7 @@ type Container {
   Place? inner;
 }
 
-optional_nested_user_field() `test(allow_leaks: true) {
+optional_nested_user_field() `test {
   c := Container(inner: Place(name: "nested", location: Location(x: 5, y: 6)));
   p := c.inner!;
   assert(p.name == "nested", "nested name");

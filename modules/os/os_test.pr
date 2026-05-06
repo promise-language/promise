@@ -479,7 +479,7 @@ test_process_stderr() `test(allow_leaks: true, exclude: "wasm32") {
   assert(err.trim() == "err", "stderr should contain err");
 }
 
-test_process_id() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_id() `test(exclude: "wasm32") {
   Process p = Process.spawn("true")!;
   assert(p.id > 0, "pid should be positive");
   p.wait()!;
@@ -494,7 +494,7 @@ test_process_kill() `test(allow_leaks: true, exclude: "wasm32") {
   assert(code >= 0, "wait after kill should succeed");
 }
 
-test_process_wait_twice() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_wait_twice() `test(exclude: "wasm32") {
   Process p = Process.spawn("true")!;
   int code1 = p.wait()!;
   int code2 = p.wait()!;
@@ -507,7 +507,7 @@ _spawn_and_drop()! {
   // p goes out of scope here, drop should close fds and reap zombie
 }
 
-test_process_drop_cleanup() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_drop_cleanup() `test(exclude: "wasm32") {
   _spawn_and_drop()!;
   assert(true, "drop cleanup should not hang");
 }
@@ -570,7 +570,7 @@ test_process_writer_interface() `test(allow_leaks: true, exclude: "wasm32") {
   assert(out.contains("world"), "output should contain world");
 }
 
-test_process_close_stdin_twice() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_close_stdin_twice() `test(exclude: "wasm32") {
   Process p = Process.spawn("cat")!;
   ProcessInput stdin = p.take_standard_input()!;
   stdin.close()!;
@@ -656,14 +656,14 @@ test_process_multiple_writes() `test(allow_leaks: true, exclude: "wasm32") {
   assert(out == "chunk1-chunk2-chunk3", "multiple writes should be concatenated");
 }
 
-test_process_spawn_nonexistent() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_spawn_nonexistent() `test(exclude: "wasm32") {
   // Nonexistent program: spawn succeeds (fork+exec), but child exits 127
   Process p = Process.spawn("__promise_no_such_program__")!;
   int code = p.wait()!;
   assert(code == 127, "nonexistent program should exit with 127");
 }
 
-test_process_empty_output() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_empty_output() `test(exclude: "wasm32") {
   Process p = Process.spawn("true")!;
   ProcessOutput stdout = p.take_standard_output()!;
   string out = stdout.read_all()!;
@@ -688,7 +688,7 @@ test_process_input_drop_auto_closes() `test(allow_leaks: true, exclude: "wasm32"
   assert(out == "auto-close", "auto-closed stdin should have sent data");
 }
 
-test_process_wait_auto_closes_stdin() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_wait_auto_closes_stdin() `test(exclude: "wasm32") {
   // Don't take stdin — wait() should close it automatically
   Process p = Process.spawn("cat")!;
   ProcessOutput stdout = p.take_standard_output()!;

@@ -1,5 +1,5 @@
 // Test string operations: concat, equality, comparison, methods
-test_concat() `test(allow_leaks: true) {
+test_concat() `test {
   assert("hello" + " " + "world" == "hello world", "string concat");
   assert("" + "a" == "a", "empty + a");
   assert("a" + "" == "a", "a + empty");
@@ -84,7 +84,7 @@ test_index_of() `test {
   assert("hi".index_of("longer") is absent, "index_of sub longer than string");
 }
 
-test_trim() `test(allow_leaks: true) {
+test_trim() `test {
   assert("  hello  ".trim() == "hello", "trim spaces");
   assert("hello".trim() == "hello", "trim no-op");
   assert("   ".trim() == "", "trim all spaces");
@@ -117,7 +117,7 @@ test_indexing() `test {
   assert(t[t.len - 1] == 'z', "last byte");
 }
 
-test_interpolation() `test(allow_leaks: true) {
+test_interpolation() `test {
   int x = 42;
   assert("{x}" == "42", "int interpolation");
   string name = "world";
@@ -233,7 +233,7 @@ test_comparison_case_sensitive() `test {
 
 // --- to_upper / to_lower ---
 
-test_to_upper() `test(allow_leaks: true) {
+test_to_upper() `test {
   assert("hello".to_upper() == "HELLO", "basic to_upper");
   assert("Hello World".to_upper() == "HELLO WORLD", "mixed to_upper");
   assert("ALREADY".to_upper() == "ALREADY", "already upper");
@@ -242,7 +242,7 @@ test_to_upper() `test(allow_leaks: true) {
   assert("a-b_c".to_upper() == "A-B_C", "special chars unchanged");
 }
 
-test_to_lower() `test(allow_leaks: true) {
+test_to_lower() `test {
   assert("HELLO".to_lower() == "hello", "basic to_lower");
   assert("Hello World".to_lower() == "hello world", "mixed to_lower");
   assert("already".to_lower() == "already", "already lower");
@@ -252,7 +252,7 @@ test_to_lower() `test(allow_leaks: true) {
 
 // --- repeat ---
 
-test_repeat() `test(allow_leaks: true) {
+test_repeat() `test {
   assert("ab".repeat(3) == "ababab", "repeat 3");
   assert("x".repeat(1) == "x", "repeat 1");
   assert("hello".repeat(0) == "", "repeat 0 is empty");

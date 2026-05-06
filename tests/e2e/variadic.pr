@@ -110,7 +110,7 @@ tryFirstOrNeg1(...int nums) int {
   return r;
 }
 
-testVariadicFailableError() `test(allow_leaks: true) {
+testVariadicFailableError() `test {
   assert(tryFirstOrNeg1() == -1, "failable variadic should raise on empty");
   assert(tryFirstOrNeg1(5) == 5, "failable variadic success");
 }

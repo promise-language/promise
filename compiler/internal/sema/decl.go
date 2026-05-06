@@ -418,12 +418,8 @@ func (c *Checker) propagateDrops(file *ast.File) {
 			if !ok {
 				continue
 			}
-			// Skip types that already have drop, are copy, value types, or error types.
-			// Error types have special lifecycle (raised/caught/propagated) — B0167.
+			// Skip types that already have drop, are copy, or value types.
 			if named.HasDrop() || named.IsCopy() || named.IsValueType() {
-				continue
-			}
-			if types.TypError != nil && (named == types.TypError || named.InheritsFrom(types.TypError)) {
 				continue
 			}
 			// Check all fields (including inherited) for droppable types

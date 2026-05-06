@@ -734,6 +734,34 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 	c.dropBindings[varName] = binding
 }
 
+// registerErrorDrop registers a caught error instance for drop at scope exit (T0091).
+// Always uses the base error.drop (synthesized), which drops the string message field
+// and pal_free's the instance. This is correct even for error subtypes — the message
+// field is inherited and at the same offset, and pal_free doesn't care about allocation
+// size. Subtype-specific droppable fields (rare) are a progressive improvement.
+// The drop flag enables proper handling of re-raise (genRaiseStmt clears it, T0086).
+func (c *Compiler) registerErrorDrop(varName string, alloca *ir.InstAlloca) {
+	dropFlag := c.createEntryAlloca(irtypes.I1)
+	dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
+	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+	c.dropFlags[varName] = dropFlag
+
+	// Resolve the base error.drop function for direct dispatch.
+	dropFunc := c.funcs[mangleMethodName("__mod_std_error", "drop", false)]
+
+	binding := scopeBinding{
+		kind:     bindingDrop,
+		alloca:   alloca,
+		named:    types.TypError,
+		valType:  types.TypError,
+		dropFlag: dropFlag,
+		dropFunc: dropFunc,
+		varName:  varName,
+	}
+	c.scopeBindings = append(c.scopeBindings, binding)
+	c.dropBindings[varName] = binding
+}
+
 // clearDropFlag sets a variable's drop flag to false (indicating the value has been moved).
 func (c *Compiler) clearDropFlag(name string) {
 	if flag, ok := c.dropFlags[name]; ok {

@@ -5,7 +5,7 @@ test_failable_ok() `test {
   assert(result == 5, "10 / 2 == 5");
 }
 
-test_failable_handler() `test(allow_leaks: true) {
+test_failable_handler() `test {
   mathlib.safe_divide(1, 0)? e {
     assert(e.message == "division by zero", "error message");
     return;
@@ -32,7 +32,7 @@ propagate_divide() int! {
   return mathlib.safe_divide(100, 0);
 }
 
-test_failable_propagation() `test(allow_leaks: true) {
+test_failable_propagation() `test {
   propagate_divide()? e {
     assert(e.message == "division by zero", "propagated error message");
     return;

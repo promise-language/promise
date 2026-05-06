@@ -230,7 +230,7 @@ read_or_default(Sensor s) int {
   return v;
 }
 
-test_getter_diverge_return_error() `test(allow_leaks: true) {
+test_getter_diverge_return_error() `test {
   Sensor s = Sensor(_raw: -5);
   int r = read_or_default(s);
   assert(r == -1, "getter handler diverges with return on error");

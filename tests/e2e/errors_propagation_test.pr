@@ -32,7 +32,7 @@ try_auto_prop_void() bool {
   return false;
 }
 
-test_auto_propagate_void() `test(allow_leaks: true) {
+test_auto_propagate_void() `test {
   assert(try_auto_prop_void(), "void failable auto-propagates");
 }
 
@@ -82,7 +82,7 @@ get_auto_prop_message() string {
   return "";
 }
 
-test_auto_propagate_preserves_message() `test(allow_leaks: true) {
+test_auto_propagate_preserves_message() `test {
   string msg = get_auto_prop_message();
   assert(msg == "void failed", "auto-propagated error preserves message");
 }
@@ -104,7 +104,7 @@ try_loop_auto_prop() bool {
   return false;
 }
 
-test_auto_propagate_in_loop() `test(allow_leaks: true) {
+test_auto_propagate_in_loop() `test {
   assert(try_loop_auto_prop(), "auto-propagate in loop works");
 }
 
@@ -193,7 +193,7 @@ typed_handler_else_match() string {
   return "unreachable";
 }
 
-test_typed_handler_else_match() `test(allow_leaks: true) {
+test_typed_handler_else_match() `test {
   string r = typed_handler_else_match();
   assert(r == "io:disk full", "typed handler catches matching error");
 }
@@ -207,7 +207,7 @@ typed_handler_else_nomatch() string {
   return "unreachable";
 }
 
-test_typed_handler_else_nomatch() `test(allow_leaks: true) {
+test_typed_handler_else_nomatch() `test {
   string r = typed_handler_else_nomatch();
   assert(r == "other", "else clause catches non-matching error");
 }
@@ -222,7 +222,7 @@ typed_handler_else_binding() string {
   return "unreachable";
 }
 
-test_typed_handler_else_binding() `test(allow_leaks: true) {
+test_typed_handler_else_binding() `test {
   string r = typed_handler_else_binding();
   assert(r == "syntax error", "else binding gets error message");
 }
@@ -266,7 +266,7 @@ typed_handler_else_in_failable() string! {
   return "ok";
 }
 
-test_typed_handler_else_in_failable() `test(allow_leaks: true) {
+test_typed_handler_else_in_failable() `test {
   string r = typed_handler_else_in_failable()!;
   assert(r == "syntax error", "else in failable function works");
 }
@@ -283,7 +283,7 @@ typed_handler_bang_match() int {
   return 0;
 }
 
-test_typed_handler_bang_match() `test(allow_leaks: true) {
+test_typed_handler_bang_match() `test {
   int r = typed_handler_bang_match();
   assert(r == 28, "bang typed handler catches matching error");
 }

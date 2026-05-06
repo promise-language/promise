@@ -91,7 +91,7 @@ try_auto_prop_inferred_fail() bool {
   return false;
 }
 
-test_auto_prop_inferred_fail() `test(allow_leaks: true) {
+test_auto_prop_inferred_fail() `test {
   assert(try_auto_prop_inferred_fail(), "auto-prop inferred var decl propagates error");
 }
 
@@ -124,7 +124,7 @@ try_multi_first_fails() string {
   return "";
 }
 
-test_multi_auto_prop_first_fails() `test(allow_leaks: true) {
+test_multi_auto_prop_first_fails() `test {
   string msg = try_multi_first_fails();
   assert(msg == "bad: bad", "first auto-prop fails, propagates immediately");
 }
@@ -143,7 +143,7 @@ try_multi_second_fails() string {
   return "";
 }
 
-test_multi_auto_prop_second_fails() `test(allow_leaks: true) {
+test_multi_auto_prop_second_fails() `test {
   string msg = try_multi_second_fails();
   assert(msg == "bad: bad", "second auto-prop fails, propagates");
 }
@@ -174,7 +174,7 @@ try_auto_prop_string_fail() bool {
   return false;
 }
 
-test_auto_prop_string_fail() `test(allow_leaks: true) {
+test_auto_prop_string_fail() `test {
   assert(try_auto_prop_string_fail(), "auto-prop string failure propagates");
 }
 
@@ -187,7 +187,7 @@ auto_prop_custom_error() int! {
   return x;
 }
 
-test_auto_prop_preserves_custom_error() `test(allow_leaks: true) {
+test_auto_prop_preserves_custom_error() `test {
   auto_prop_custom_error()? e {
     assert(e.message == "always fails", "custom error message preserved");
     return;
@@ -241,7 +241,7 @@ try_auto_prop_void_fails() bool {
   return false;
 }
 
-test_auto_prop_void_then_fail() `test(allow_leaks: true) {
+test_auto_prop_void_then_fail() `test {
   assert(try_auto_prop_void_fails(), "void auto-prop as stmt fails first");
 }
 
@@ -590,7 +590,7 @@ try_typed_else_diverge(bool use_io) int {
   return v;
 }
 
-test_typed_handler_else_diverge() `test(allow_leaks: true) {
+test_typed_handler_else_diverge() `test {
   int r = try_typed_else_diverge(false);
   assert(r == -99, "else clause diverges with return");
 }

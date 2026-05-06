@@ -42,7 +42,7 @@ try_level1() bool {
   return false;
 }
 
-test_propagation_chain() `test(allow_leaks: true) {
+test_propagation_chain() `test {
   assert(try_level1(), "error propagated through 3 levels");
 }
 
@@ -121,12 +121,12 @@ try_safe_get(int[] arr, int idx) bool {
   return false;
 }
 
-test_safe_get_negative() `test(allow_leaks: true) {
+test_safe_get_negative() `test {
   int[] nums = [10, 20, 30];
   assert(try_safe_get(nums, -1), "negative index raises");
 }
 
-test_safe_get_out_of_bounds() `test(allow_leaks: true) {
+test_safe_get_out_of_bounds() `test {
   int[] nums = [10, 20, 30];
   assert(try_safe_get(nums, 5), "out of bounds raises");
 }
@@ -183,7 +183,7 @@ get_error_message() string {
   return "no error";
 }
 
-test_untyped_handler_field_access() `test(allow_leaks: true) {
+test_untyped_handler_field_access() `test {
   string msg = get_error_message();
   assert(msg == "invalid number: bad", "untyped handler can access e.message");
 }
@@ -205,7 +205,7 @@ get_io_error_code() int! {
   return 0;
 }
 
-test_typed_handler_catches() `test(allow_leaks: true) {
+test_typed_handler_catches() `test {
   int code = get_io_error_code()!;
   assert(code == 28, "typed handler catches IoError and accesses code");
 }
@@ -228,7 +228,7 @@ try_typed_propagation() bool! {
   return false;
 }
 
-test_typed_handler_propagates_nonmatch() `test(allow_leaks: true) {
+test_typed_handler_propagates_nonmatch() `test {
   // try_typed_propagation is failable, nomatch propagates
   // Can't easily test panic in e2e, but we can test matching path
   int code = get_io_error_code()!;
@@ -250,7 +250,7 @@ try_propagation_wrapper() bool {
   return false;
 }
 
-test_typed_handler_propagates_in_failable() `test(allow_leaks: true) {
+test_typed_handler_propagates_in_failable() `test {
   assert(try_propagation_wrapper(), "typed handler propagates non-matching error in failable fn");
 }
 
@@ -263,7 +263,7 @@ get_io_message() string {
   return "no error";
 }
 
-test_untyped_handler_catches_subtype() `test(allow_leaks: true) {
+test_untyped_handler_catches_subtype() `test {
   string msg = get_io_message();
   assert(msg == "disk full", "untyped handler catches IoError via error base");
 }

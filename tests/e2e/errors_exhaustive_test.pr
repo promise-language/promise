@@ -68,7 +68,7 @@ catch_as_app_error() int! {
   return 0;
 }
 
-test_catch_deep_as_parent() `test(allow_leaks: true) {
+test_catch_deep_as_parent() `test {
   int status = catch_as_app_error()!;
   assert(status == 504, "catch TimeoutError as AppError gets status");
 }
@@ -81,7 +81,7 @@ catch_as_db_error() string! {
   return "";
 }
 
-test_catch_deep_as_mid_parent() `test(allow_leaks: true) {
+test_catch_deep_as_mid_parent() `test {
   string q = catch_as_db_error()!;
   assert(q == "SELECT 1", "catch TimeoutError as DbError gets query");
 }
@@ -94,7 +94,7 @@ catch_as_timeout() int! {
   return 0;
 }
 
-test_catch_exact_type() `test(allow_leaks: true) {
+test_catch_exact_type() `test {
   int secs = catch_as_timeout()!;
   assert(secs == 30, "catch TimeoutError as itself gets seconds");
 }
@@ -107,7 +107,7 @@ catch_timeout_untyped() string {
   return "";
 }
 
-test_catch_deep_untyped() `test(allow_leaks: true) {
+test_catch_deep_untyped() `test {
   string msg = catch_timeout_untyped();
   assert(msg == "query timeout", "untyped handler gets message from deep error");
 }
@@ -138,7 +138,7 @@ catch_propagated() bool {
   return false;
 }
 
-test_typed_handler_propagates_wrong_type() `test(allow_leaks: true) {
+test_typed_handler_propagates_wrong_type() `test {
   assert(catch_propagated(), "typed handler propagates non-matching error");
 }
 
@@ -150,7 +150,7 @@ get_propagated_message() string {
   return "";
 }
 
-test_propagated_error_retains_message() `test(allow_leaks: true) {
+test_propagated_error_retains_message() `test {
   string msg = get_propagated_message();
   assert(msg == "conn refused", "propagated error keeps message");
 }
@@ -260,7 +260,7 @@ process_auth() string! {
   return "ok";
 }
 
-test_sequential_typed_handler_auth() `test(allow_leaks: true) {
+test_sequential_typed_handler_auth() `test {
   string r = process_auth()!;
   assert(r == "auth:admin", "typed handler catches AuthError");
 }
@@ -272,7 +272,7 @@ process_validation() string! {
   return "ok";
 }
 
-test_sequential_typed_handler_validation() `test(allow_leaks: true) {
+test_sequential_typed_handler_validation() `test {
   string r = process_validation()!;
   assert(r == "field:email", "typed handler catches ValidationError");
 }
@@ -312,15 +312,15 @@ get_http_retryable() bool! {
   return false;
 }
 
-test_multi_field_error_status() `test(allow_leaks: true) {
+test_multi_field_error_status() `test {
   assert(get_http_status()! == 503, "HttpError status is 503");
 }
 
-test_multi_field_error_url() `test(allow_leaks: true) {
+test_multi_field_error_url() `test {
   assert(get_http_url()! == "/api/data", "HttpError url is /api/data");
 }
 
-test_multi_field_error_retryable() `test(allow_leaks: true) {
+test_multi_field_error_retryable() `test {
   assert(get_http_retryable()!, "HttpError retryable is true");
 }
 
@@ -331,7 +331,7 @@ get_http_message() string! {
   return "";
 }
 
-test_multi_field_error_message() `test(allow_leaks: true) {
+test_multi_field_error_message() `test {
   string msg = get_http_message()!;
   assert(msg == "server error", "HttpError message from base");
 }
@@ -361,7 +361,7 @@ catch_made_error() string {
   return "";
 }
 
-test_raise_stored_error() `test(allow_leaks: true) {
+test_raise_stored_error() `test {
   string msg = catch_made_error();
   assert(msg == "from make", "raised stored error preserves message");
 }
@@ -418,7 +418,7 @@ catch_layer1() string {
   return "no error";
 }
 
-test_deep_propagation_4_levels() `test(allow_leaks: true) {
+test_deep_propagation_4_levels() `test {
   string msg = catch_layer1();
   assert(msg == "layer4 error", "error propagates through 4 levels");
 }
@@ -447,7 +447,7 @@ catch_as_base() int! {
   return 0;
 }
 
-test_parent_handler_catches_child() `test(allow_leaks: true) {
+test_parent_handler_catches_child() `test {
   int sev = catch_as_base()!;
   assert(sev == 3, "parent typed handler catches child error");
 }
@@ -460,7 +460,7 @@ catch_as_specific() string! {
   return "";
 }
 
-test_exact_child_handler() `test(allow_leaks: true) {
+test_exact_child_handler() `test {
   string d = catch_as_specific()!;
   assert(d == "details here", "exact typed handler gets child fields");
 }
@@ -484,7 +484,7 @@ discard_binding_typed_helper() bool! {
   return false;
 }
 
-test_discard_binding_typed() `test(allow_leaks: true) {
+test_discard_binding_typed() `test {
   bool caught = discard_binding_typed_helper()!;
   assert(caught, "discard binding typed handler works");
 }
@@ -515,7 +515,7 @@ catch_conditional() bool {
   return false;
 }
 
-test_conditional_fail_true() `test(allow_leaks: true) {
+test_conditional_fail_true() `test {
   assert(catch_conditional(), "conditional fail triggers handler");
 }
 
@@ -545,7 +545,7 @@ catch_generic_int_msg() string {
   return "";
 }
 
-test_generic_error_int_message() `test(allow_leaks: true) {
+test_generic_error_int_message() `test {
   string msg = catch_generic_int_msg();
   assert(msg == "int error", "generic error[int] message works");
 }
@@ -563,7 +563,7 @@ catch_generic_string_msg() string {
   return "";
 }
 
-test_generic_error_string_message() `test(allow_leaks: true) {
+test_generic_error_string_message() `test {
   string msg = catch_generic_string_msg();
   assert(msg == "string error", "generic error[string] message works");
 }
@@ -581,7 +581,7 @@ catch_generic_bool_msg() string {
   return "";
 }
 
-test_generic_error_bool_message() `test(allow_leaks: true) {
+test_generic_error_bool_message() `test {
   string msg = catch_generic_bool_msg();
   assert(msg == "bool error", "generic error[bool] message works");
 }
@@ -600,7 +600,7 @@ catch_propagated_generic() string {
   return "";
 }
 
-test_generic_error_propagation() `test(allow_leaks: true) {
+test_generic_error_propagation() `test {
   string msg = catch_propagated_generic();
   assert(msg == "int error", "generic error propagates correctly");
 }
@@ -628,12 +628,12 @@ catch_either_string() string {
   return "";
 }
 
-test_generic_error_multiple_instantiations_int() `test(allow_leaks: true) {
+test_generic_error_multiple_instantiations_int() `test {
   string msg = catch_either_int();
   assert(msg == "int path", "multiple generic error types: int path");
 }
 
-test_generic_error_multiple_instantiations_string() `test(allow_leaks: true) {
+test_generic_error_multiple_instantiations_string() `test {
   string msg = catch_either_string();
   assert(msg == "string path", "multiple generic error types: string path");
 }

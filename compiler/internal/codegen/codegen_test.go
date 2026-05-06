@@ -9417,19 +9417,19 @@ func TestSynthDropVectorField(t *testing.T) {
 	assertContains(t, ir, "call void @pal_free")
 }
 
-// B0167: Error types are excluded from synthesized drop propagation
-func TestSynthDropExcludesErrorTypes(t *testing.T) {
+// T0091: Error types get synthesized drop (frees message string field + instance)
+func TestSynthDropIncludesErrorTypes(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
 			error e = error(message: "fail");
 		}
 	`)
-	// error should NOT get a synthesized drop (special lifecycle)
-	assertNotContains(t, ir, "define void @error.drop")
+	// error gets a synthesized drop that frees its string message field
+	assertContains(t, ir, "define void @__mod_std_error.drop")
 }
 
-// T0083: Caught error instances are freed after handler blocks
-func TestErrorHandlerFreesInstance(t *testing.T) {
+// T0083/T0091: Caught error instances are dropped after handler blocks
+func TestErrorHandlerDropsInstance(t *testing.T) {
 	ir := generateIR(t, `
 		fail() int! {
 			raise error(message: "boom");
@@ -9438,12 +9438,12 @@ func TestErrorHandlerFreesInstance(t *testing.T) {
 			int v = fail()? e => 0;
 		}
 	`)
-	// Handler block should free the error instance
-	assertContains(t, ir, "call void @pal_free")
+	// Handler block should drop the error instance via synthesized drop
+	assertContains(t, ir, "call void @__mod_std_error.drop")
 }
 
-// T0083: Typed error handler frees instance after handler body
-func TestTypedErrorHandlerFreesInstance(t *testing.T) {
+// T0083/T0091: Typed error handler drops instance after handler body
+func TestTypedErrorHandlerDropsInstance(t *testing.T) {
 	ir := generateIR(t, `
 		type IoError is error { int code; }
 		fail() int! {
@@ -9453,8 +9453,8 @@ func TestTypedErrorHandlerFreesInstance(t *testing.T) {
 			int v = fail()? e is IoError { 0; } else { -1; };
 		}
 	`)
-	// Both match and else paths should free the error instance
-	assertContains(t, ir, "call void @pal_free")
+	// Both match and else paths should drop the error instance via synthesized drop
+	assertContains(t, ir, "call void @__mod_std_error.drop")
 }
 
 // B0158: Synthesized drop coexists with explicit drop (explicit takes precedence)

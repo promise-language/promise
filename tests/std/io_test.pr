@@ -57,7 +57,7 @@ _try_close(Closer ~c) string {
   return "ok";
 }
 
-test_closer_error() `test(allow_leaks: true) {
+test_closer_error() `test {
   FailCloser fc = FailCloser();
   string result = _try_close(fc);
   assert(result == "close failed", "closer error propagated");

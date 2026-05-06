@@ -1519,12 +1519,12 @@ get_parse_location() int {
   return -1;
 }
 
-test_error_inherit_custom_fields() `test(allow_leaks: true) {
+test_error_inherit_custom_fields() `test {
   assert(get_io_code() == 28, "IoError code field");
   assert(get_parse_location() == 1005, "ParseError line*100+col");
 }
 
-test_error_inherit_message() `test(allow_leaks: true) {
+test_error_inherit_message() `test {
   fail_io2()? e {
     assert(e.message == "disk full", "inherited message field");
     return;
@@ -1541,7 +1541,7 @@ check_error_is_type() string {
   return "no error";
 }
 
-test_error_is_check() `test(allow_leaks: true) {
+test_error_is_check() `test {
   assert(check_error_is_type() == "io", "error is-check works");
 }
 
@@ -1564,7 +1564,7 @@ get_detailed_code() int {
   return -1;
 }
 
-test_deep_error_inherit() `test(allow_leaks: true) {
+test_deep_error_inherit() `test {
   assert(get_detailed_device() == "/dev/sda", "deep error own field");
   assert(get_detailed_code() == 5, "deep error parent field");
 }
@@ -1582,7 +1582,7 @@ check_detailed_is_io() string {
   return "no error";
 }
 
-test_deep_error_is_check() `test(allow_leaks: true) {
+test_deep_error_is_check() `test {
   assert(check_detailed_is_io() == "detailed", "deep error is most-specific type");
 }
 

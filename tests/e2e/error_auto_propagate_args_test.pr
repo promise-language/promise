@@ -195,7 +195,7 @@ try_string_arg_fail() bool {
   return false;
 }
 
-test_string_arg_fail() `test(allow_leaks: true) {
+test_string_arg_fail() `test {
   assert(try_string_arg_fail(), "failable string arg propagates error");
 }
 
@@ -595,7 +595,7 @@ auto_prop_custom_error() int! {
   return use_code(get_code());
 }
 
-test_custom_error_preserved() `test(allow_leaks: true) {
+test_custom_error_preserved() `test {
   auto_prop_custom_error()? e is AppError {
     assert(e.code == 99, "custom error code preserved");
     assert(e.message == "app error", "custom error message preserved");

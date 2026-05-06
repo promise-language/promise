@@ -3958,21 +3958,33 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 		// No-match path: else body, panic (!), or propagate
 		c.block = noMatchBlock
 		if e.ElseBody != nil {
-			// else clause: bind error and run else body
+			// else clause: bind error and run else body (T0091: register for drop)
+			savedElseScope := len(c.scopeBindings)
 			if e.ElseBinding != "" && e.ElseBinding != "_" {
 				elseValStruct := c.reconstructErrorValue(errVal)
 				alloca := c.block.NewAlloca(userValueType())
 				alloca.SetName(c.uniqueLocalName(e.ElseBinding))
 				c.block.NewStore(elseValStruct, alloca)
 				c.locals[e.ElseBinding] = alloca
+				c.registerErrorDrop(e.ElseBinding, alloca)
+			} else {
+				// No else binding — temporary for drop
+				alloca := c.block.NewAlloca(userValueType())
+				alloca.SetName(c.uniqueLocalName("_else_err_tmp"))
+				elseValStruct := c.reconstructErrorValue(errVal)
+				c.block.NewStore(elseValStruct, alloca)
+				c.registerErrorDrop("_else_err_tmp", alloca)
 			}
 			noMatchVal = c.genBlockValue(e.ElseBody)
 			elseDiverged := c.block.Term != nil
 			if !elseDiverged {
-				c.emitErrorInstanceFree(errVal) // T0083
+				if len(c.scopeBindings) > savedElseScope {
+					c.emitScopeCleanup(savedElseScope, false)
+				}
 				noMatchEnd = c.block
 				c.block.NewBr(mergeBlock)
 			}
+			c.scopeBindings = c.scopeBindings[:savedElseScope]
 		} else if e.PanicOnNomatch {
 			// Explicit ! suffix: panic on non-matching error
 			c.block.NewCall(c.funcs["promise_panic"], errVal)
@@ -3995,19 +4007,31 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 		c.block = matchBlock
 	}
 
-	// Bind the error variable as a value struct {vtable_ptr, instance_ptr}
+	// T0091: Register error binding for drop so the error instance (and its
+	// string message field) are freed at handler scope exit. For re-raise paths,
+	// genRaiseStmt clears the drop flag (T0086) before scope cleanup.
+	savedHandlerScope := len(c.scopeBindings)
 	if e.Binding != "" && e.Binding != "_" {
 		valStruct := c.reconstructErrorValue(errVal)
 		alloca := c.block.NewAlloca(userValueType())
 		alloca.SetName(c.uniqueLocalName(e.Binding))
 		c.block.NewStore(valStruct, alloca)
 		c.locals[e.Binding] = alloca
+		c.registerErrorDrop(e.Binding, alloca)
+	} else {
+		// No binding — create a temporary alloca so drop machinery can free it.
+		alloca := c.block.NewAlloca(userValueType())
+		alloca.SetName(c.uniqueLocalName("_err_tmp"))
+		valStruct := c.reconstructErrorValue(errVal)
+		c.block.NewStore(valStruct, alloca)
+		c.registerErrorDrop("_err_tmp", alloca)
 	}
 	handlerVal := c.genBlockValue(e.Body)
-	// T0083: Free the caught error instance after the handler body completes.
-	if c.block.Term == nil {
-		c.emitErrorInstanceFree(errVal)
+	// Emit drop for the error binding after handler body (scope cleanup).
+	if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > savedHandlerScope {
+		c.emitScopeCleanup(savedHandlerScope, false)
 	}
+	c.scopeBindings = c.scopeBindings[:savedHandlerScope]
 	handlerEnd := c.block
 	if c.block.Term == nil {
 		c.block.NewBr(mergeBlock)
@@ -4148,18 +4172,6 @@ func (c *Compiler) reconstructErrorValue(errPtr value.Value) value.Value {
 	valStruct = c.block.NewInsertValue(valStruct, vtablePtr, 0)
 	valStruct = c.block.NewInsertValue(valStruct, errPtr, 1)
 	return valStruct
-}
-
-// emitErrorInstanceFree frees a caught error instance (T0083).
-// Only frees the instance struct itself — the message string field is NOT
-// dropped because the handler body may return a reference to e.message
-// (e.g., "{e.message}" optimizes to the raw message pointer, and dropping
-// it would cause use-after-free when the handler value is consumed).
-// For literal message strings (the common case), no leak occurs since
-// they live in .rodata. Heap-allocated messages leak — tracked as a
-// follow-up in T0086.
-func (c *Compiler) emitErrorInstanceFree(errVal value.Value) {
-	c.block.NewCall(c.palFree, errVal)
 }
 
 // --- Tuple ---

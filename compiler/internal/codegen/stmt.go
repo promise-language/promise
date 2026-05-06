@@ -1383,9 +1383,8 @@ func (c *Compiler) maybeTrackIterTemp(e *ast.CallExpr, result value.Value) {
 }
 
 // isTrackedStringCall returns true if the call expression is a known-safe site
-// that produces a NEW heap-allocated string (T0073). We only track these known
-// producers rather than all method calls returning strings, because some methods
-// may return borrows from internal state.
+// that produces a NEW heap-allocated string (T0073, T0099). Only tracks calls
+// guaranteed to return fresh allocations — NOT borrows from internal state.
 func (c *Compiler) isTrackedStringCall(e *ast.CallExpr) bool {
 	member, ok := e.Callee.(*ast.MemberExpr)
 	if !ok {
@@ -1403,25 +1402,18 @@ func (c *Compiler) isTrackedStringCall(e *ast.CallExpr) bool {
 	if isPrimitiveScalar(named) {
 		return true
 	}
+	// T0099: to_string() on ANY type except string always produces a new
+	// heap-allocated string. Every to_string() implementation (Vector, Map, Set,
+	// Duration, user types, enums) creates via Builder. The one exception is
+	// string.to_string() which returns `this` (a borrowed reference).
+	if member.Field == "to_string" && named != types.TypString {
+		return true
+	}
 	// String methods that produce new strings
 	if named == types.TypString {
 		switch member.Field {
 		case "to_upper", "to_lower", "repeat", "replace", "trim",
 			"trim_start", "trim_end", "from_bytes":
-			return true
-		}
-	}
-	// T0084: to_string() on Builder produces a new heap string via from_bytes.
-	// Safe to track because from_bytes copies the bytes into a new allocation.
-	// T0092: JsonEncoder.to_string() also produces a new string from its buffer.
-	if member.Field == "to_string" {
-		builderNamed := c.lookupNamedType("Builder")
-		if builderNamed != nil && named == builderNamed {
-			return true
-		}
-		// JsonEncoder is a catalog module type — lookupNamedType won't find it,
-		// so match by name. Safe because JsonEncoder always copies its buffer.
-		if named.Obj() != nil && named.Obj().Name() == "JsonEncoder" {
 			return true
 		}
 	}

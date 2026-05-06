@@ -666,7 +666,7 @@ type Entity[T] is Identifiable[T], Printable {
   }
 }
 
-test_multi_inherit_generic_basic() `test(allow_leaks: true) {
+test_multi_inherit_generic_basic() `test {
   e := Entity[int](id: 1, name: "Alice");
   assert(e.get_id() == 1, "generic parent method");
   assert(e.to_string() == "Alice", "non-generic parent method");
@@ -677,7 +677,7 @@ test_multi_inherit_generic_first_parent_poly() `test {
   assert(i.get_id() == 42, "generic parent polymorphism");
 }
 
-test_multi_inherit_generic_second_parent_poly() `test(allow_leaks: true) {
+test_multi_inherit_generic_second_parent_poly() `test {
   Printable p = Entity[int](id: 1, name: "Charlie");
   assert(p.to_string() == "Charlie", "non-generic parent polymorphism");
 }
@@ -703,7 +703,7 @@ test_multi_inherit_non_generic_child() `test(allow_leaks: true) {
   assert(se.to_string() == "Alpha Bravo Charlie", "string display");
 }
 
-test_multi_inherit_different_children_same_interfaces() `test(allow_leaks: true) {
+test_multi_inherit_different_children_same_interfaces() `test {
   Identifiable[int] a = Entity[int](id: 1, name: "one");
   Printable b = StringEntity(code: "X", display: "ex");
   assert(a.get_id() == 1, "Entity as Identifiable[int]");

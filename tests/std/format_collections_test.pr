@@ -1,26 +1,26 @@
 // Tests for Vector, Map, and Set formatting (T0018)
 // --- Vector format ---
-test_vector_int_format() `test(allow_leaks: true) {
+test_vector_int_format() `test {
   int[] v = [1, 2, 3];
   assert(v.to_string() == "[1, 2, 3]", "int vector to_string");
 }
 
-test_vector_string_format() `test(allow_leaks: true) {
+test_vector_string_format() `test {
   string[] v = ["hello", "world"];
   assert(v.to_string() == "[hello, world]", "string vector to_string");
 }
 
-test_vector_empty_format() `test(allow_leaks: true) {
+test_vector_empty_format() `test {
   int[] v = [];
   assert(v.to_string() == "[]", "empty vector to_string");
 }
 
-test_vector_single_format() `test(allow_leaks: true) {
+test_vector_single_format() `test {
   int[] v = [42];
   assert(v.to_string() == "[42]", "single element vector to_string");
 }
 
-test_vector_bool_format() `test(allow_leaks: true) {
+test_vector_bool_format() `test {
   bool[] v = [true, false, true];
   assert(v.to_string() == "[true, false, true]", "bool vector to_string");
 }
@@ -41,13 +41,13 @@ test_vector_format_interface() `test {
 
 // --- Map format ---
 
-test_map_single_entry() `test(allow_leaks: true) {
+test_map_single_entry() `test {
   map[string, int] m = map[string, int]();
   m["x"] = 42;
   assert(m.to_string() == "\{x: 42}", "single entry map to_string");
 }
 
-test_map_empty_format() `test(allow_leaks: true) {
+test_map_empty_format() `test {
   map[string, int] m = map[string, int]();
   assert(m.to_string() == "\{}", "empty map to_string");
 }
@@ -67,7 +67,7 @@ test_map_format_interface() `test {
   assert(b.to_string() == "\{k: 7}", "map direct format");
 }
 
-test_map_int_keys() `test(allow_leaks: true) {
+test_map_int_keys() `test {
   map[int, string] m = map[int, string]();
   m[1] = "one";
   assert(m.to_string() == "\{1: one}", "int key map to_string");
@@ -88,7 +88,7 @@ test_set_empty_format() `test(allow_leaks: true) {
 
 // --- Nested collections ---
 
-test_nested_vector() `test(allow_leaks: true) {
+test_nested_vector() `test {
   int[][] nested = [[1, 2], [3, 4]];
   assert(nested.to_string() == "[[1, 2], [3, 4]]", "nested vector to_string");
 }

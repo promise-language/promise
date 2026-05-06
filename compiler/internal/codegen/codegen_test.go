@@ -9433,6 +9433,60 @@ func TestStringTempClaimedOnVectorPush(t *testing.T) {
 	assertContains(t, ir, "call i8* @promise_vector_push")
 }
 
+// T0099: to_string() on user type is tracked as a string temp and freed at stmt end.
+func TestStringTempUserTypeToString(t *testing.T) {
+	ir := generateIR(t, `
+		type Counter {
+			int n;
+			to_string() string { return "count"; }
+		}
+		test() {
+			Counter c = Counter(n: 1);
+			assert(c.to_string() == "count", "ok");
+		}
+		main() {}
+	`)
+	// c.to_string() produces a temp that's freed at statement end
+	assertContains(t, ir, "call i8* @Counter.to_string")
+	assertContains(t, ir, "tmp.drop")
+	assertContains(t, ir, "call void @promise_string_drop")
+}
+
+// T0099: to_string() on string returns `this` (borrow) — NOT tracked as temp.
+func TestStringTempStringToStringNotTracked(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			string s = "hello";
+			assert(s.to_string() == "hello", "ok");
+		}
+		main() {}
+	`)
+	// string.to_string() returns `this` — must NOT be tracked (would double-free).
+	// The test function has only one string variable `s` — its drop handles cleanup.
+	// Verification: s has a drop flag (the variable's own scope cleanup).
+	assertContains(t, ir, "s.dropflag")
+}
+
+// T0099: to_string() on user type assigned to variable is claimed (not freed as temp).
+func TestStringTempUserTypeToStringClaimed(t *testing.T) {
+	ir := generateIR(t, `
+		type Tag {
+			int id;
+			to_string() string { return "tag"; }
+		}
+		test() {
+			Tag t = Tag(id: 1);
+			string s = t.to_string();
+			assert(s == "tag", "ok");
+		}
+		main() {}
+	`)
+	// t.to_string() produces a temp that's tracked then claimed on assignment to s.
+	// s has its own drop binding for cleanup.
+	assertContains(t, ir, "s.dropflag")
+	assertContains(t, ir, "call i8* @Tag.to_string")
+}
+
 // T0092: String return from function with structural interface param is tracked as temp.
 func TestStringTempStructuralParamReturn(t *testing.T) {
 	ir := generateIR(t, `

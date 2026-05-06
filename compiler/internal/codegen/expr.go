@@ -1777,7 +1777,7 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 			if c.typeSubst != nil {
 				fType = types.Substitute(fType, c.typeSubst)
 			}
-			isStringField := extractNamed(fType) == types.TypString && !isErrorType(named)
+			isStringField := extractNamed(fType) == types.TypString
 			if isStringField {
 				if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 					if _, hasFlag := c.dropFlags[ident.Name]; hasFlag {
@@ -2551,18 +2551,17 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 	// Use layout field type (not llvmType(field.Type()) which fails for TypeParams)
 	val := c.block.NewLoad(layout.Instance.Fields[fieldIdx].LLVMType, fieldPtr)
 
-	// T0095: Dup string fields from types with drop to prevent double-free.
+	// T0095/T0110: Dup string fields from types with drop to prevent double-free.
 	// Only dup when the caller needs ownership (VarDecl, block result, etc.),
 	// signaled by c.dupStringFieldAccess. Temporary uses (comparisons, function
 	// args) don't dup — the type is alive during the expression evaluation.
-	// Skip error types — their lifecycle is managed by error handling machinery.
 	if c.dupStringFieldAccess && c.tempTrackingEnabled {
 		fType := field.Type()
 		if c.typeSubst != nil {
 			fType = types.Substitute(fType, c.typeSubst)
 		}
 		ownerNamed := extractNamed(typ)
-		if extractNamed(fType) == types.TypString && ownerNamed != nil && ownerNamed.HasDrop() && !isErrorType(ownerNamed) {
+		if extractNamed(fType) == types.TypString && ownerNamed != nil && ownerNamed.HasDrop() {
 			c.dupStringFieldAccess = false // consume the flag
 			dup := c.dupString(val)
 			c.trackStringTemp(dup)
@@ -4066,14 +4065,14 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 				alloca.SetName(c.uniqueLocalName(e.ElseBinding))
 				c.block.NewStore(elseValStruct, alloca)
 				c.locals[e.ElseBinding] = alloca
-				c.registerErrorDrop(e.ElseBinding, alloca)
+				c.registerErrorDrop(e.ElseBinding, alloca, types.TypError)
 			} else {
 				// No else binding — temporary for drop
 				alloca := c.block.NewAlloca(userValueType())
 				alloca.SetName(c.uniqueLocalName("_else_err_tmp"))
 				elseValStruct := c.reconstructErrorValue(errVal)
 				c.block.NewStore(elseValStruct, alloca)
-				c.registerErrorDrop("_else_err_tmp", alloca)
+				c.registerErrorDrop("_else_err_tmp", alloca, types.TypError)
 			}
 			noMatchVal = c.genBlockValue(e.ElseBody)
 			elseDiverged := c.block.Term != nil
@@ -4107,24 +4106,39 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 		c.block = matchBlock
 	}
 
-	// T0091: Register error binding for drop so the error instance (and its
-	// string message field) are freed at handler scope exit. For re-raise paths,
-	// genRaiseStmt clears the drop flag (T0086) before scope cleanup.
+	// T0091/T0110: Register error binding for drop so the error instance (and its
+	// string fields) are freed at handler scope exit. For typed catches, resolve
+	// the concrete type's drop to free child-specific string fields. For re-raise
+	// paths, genRaiseStmt clears the drop flag (T0086) before scope cleanup.
 	savedHandlerScope := len(c.scopeBindings)
+
+	// T0110: Resolve concrete error type for drop dispatch.
+	// Typed catches use the child type's drop; untyped catches use base error.drop.
+	// For generic error types (e.g., AppError[int]), pass the Instance type so
+	// registerErrorDrop can use the monomorphized drop name.
+	var errorDropType types.Type = types.TypError
+	if e.TypeName != "" {
+		if resolved := c.info.ErrorHandlerTypes[e]; resolved != nil {
+			errorDropType = resolved
+		} else if n := c.lookupNamedType(e.TypeName); n != nil {
+			errorDropType = n
+		}
+	}
+
 	if e.Binding != "" && e.Binding != "_" {
 		valStruct := c.reconstructErrorValue(errVal)
 		alloca := c.block.NewAlloca(userValueType())
 		alloca.SetName(c.uniqueLocalName(e.Binding))
 		c.block.NewStore(valStruct, alloca)
 		c.locals[e.Binding] = alloca
-		c.registerErrorDrop(e.Binding, alloca)
+		c.registerErrorDrop(e.Binding, alloca, errorDropType)
 	} else {
 		// No binding — create a temporary alloca so drop machinery can free it.
 		alloca := c.block.NewAlloca(userValueType())
 		alloca.SetName(c.uniqueLocalName("_err_tmp"))
 		valStruct := c.reconstructErrorValue(errVal)
 		c.block.NewStore(valStruct, alloca)
-		c.registerErrorDrop("_err_tmp", alloca)
+		c.registerErrorDrop("_err_tmp", alloca, errorDropType)
 	}
 	handlerVal := c.genBlockValue(e.Body)
 	// Emit drop for the error binding after handler body (scope cleanup).

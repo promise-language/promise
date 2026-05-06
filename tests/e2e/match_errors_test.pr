@@ -96,7 +96,7 @@ test_match_subject_handler_success() `test {
   assert(r == "got 42", "match on handled subject success");
 }
 
-test_match_subject_handler_error() `test(allow_leaks: true) {
+test_match_subject_handler_error() `test {
   int subject = parse_int("bad")? e {
     0;
   };
@@ -135,7 +135,7 @@ test_match_arm_bang_second() `test {
 // Section 4: Failable call in match arm with ? handler
 // ============================================================
 
-test_match_arm_handler_error() `test(allow_leaks: true) {
+test_match_arm_handler_error() `test {
   int selector = 1;
   int r = match selector {
     1 => parse_int("bad")? e {
@@ -157,7 +157,7 @@ test_match_arm_handler_success() `test {
   assert(r == 42, "handler in match arm, success path");
 }
 
-test_match_arm_handler_multiple() `test(allow_leaks: true) {
+test_match_arm_handler_multiple() `test {
   int selector = 2;
   int r = match selector {
     1 => parse_int("42")? e {
@@ -346,7 +346,7 @@ test_chain_unknown() `test {
   assert(r == "unknown", "chain: parse -> classify -> unknown");
 }
 
-test_chain_parse_fail() `test(allow_leaks: true) {
+test_chain_parse_fail() `test {
   bool caught = false;
   classify_and_parse("bad")? e {
     caught = true;
@@ -426,7 +426,7 @@ test_nested_outer2_success() `test(allow_leaks: true) {
   assert(r == "parsed: 0", "nested: outer=2, success");
 }
 
-test_nested_outer2_fail() `test(allow_leaks: true) {
+test_nested_outer2_fail() `test {
   bool caught = false;
   nested_match_errors(2, 5)? e {
     caught = true;
@@ -539,7 +539,7 @@ test_shape_dispatch_with_handler() `test {
 // Section 13: Mixed error handling strategies in match arms
 // ============================================================
 
-test_mixed_strategies() `test(allow_leaks: true) {
+test_mixed_strategies() `test {
   // Handler recovery
   int sel = 1;
   int r1 = match sel {

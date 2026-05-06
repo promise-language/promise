@@ -406,7 +406,7 @@ test_set_working_dir() `test(exclude: "wasm32") {
   assert(restored == original2, "working directory should be restored");
 }
 
-test_set_working_dir_nonexistent() `test(allow_leaks: true, exclude: "wasm32") {
+test_set_working_dir_nonexistent() `test(exclude: "wasm32") {
   // Changing to a nonexistent path should raise an error
   bool got_error = false;
   set_working_dir("/promise_nonexistent_path_12345")? e {

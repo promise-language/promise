@@ -9664,7 +9664,7 @@ func TestErrorHandlerDropsInstance(t *testing.T) {
 	assertContains(t, ir, "call void @__mod_std_error.drop")
 }
 
-// T0083/T0091: Typed error handler drops instance after handler body
+// T0083/T0091/T0110: Typed error handler uses child type's drop for match path
 func TestTypedErrorHandlerDropsInstance(t *testing.T) {
 	ir := generateIR(t, `
 		type IoError is error { int code; }
@@ -9675,8 +9675,61 @@ func TestTypedErrorHandlerDropsInstance(t *testing.T) {
 			int v = fail()? e is IoError { 0; } else { -1; };
 		}
 	`)
-	// Both match and else paths should drop the error instance via synthesized drop
+	// Match path drops via IoError.drop (resolves child type, T0110)
+	assertContains(t, ir, "call void @IoError.drop")
+	// Else path drops via base error.drop (unknown concrete type)
 	assertContains(t, ir, "call void @__mod_std_error.drop")
+}
+
+// T0110: Error type synthesized drop includes string field drops
+func TestErrorTypeSynthDropIncludesStringFields(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			error e = error(message: "fail");
+		}
+	`)
+	// error.drop should call promise_string_drop for the message field
+	assertContains(t, ir, "define void @__mod_std_error.drop")
+	assertContains(t, ir, "call void @promise_string_drop")
+}
+
+// T0110: Child error type drop frees child-specific string fields
+func TestChildErrorTypeSynthDropFreesChildFields(t *testing.T) {
+	ir := generateIR(t, `
+		type NotFoundError is error { string key; }
+		fail() int! {
+			raise NotFoundError(key: "missing", message: "not found");
+		}
+		main() {
+			int v = fail()? e is NotFoundError { 0; } else { -1; };
+		}
+	`)
+	// NotFoundError.drop should be defined (synthesized)
+	assertContains(t, ir, "define void @NotFoundError.drop")
+	// Match path uses NotFoundError.drop, not error.drop
+	assertContains(t, ir, "call void @NotFoundError.drop")
+	// NotFoundError.drop should have 2 string drops (message + key)
+	dropBody := extractFunction(ir, "NotFoundError.drop")
+	count := strings.Count(dropBody, "call void @promise_string_drop")
+	if count < 2 {
+		t.Errorf("expected at least 2 promise_string_drop calls in NotFoundError.drop (message + key), got %d\nBody:\n%s", count, dropBody)
+	}
+}
+
+// T0110: Dup-on-field-access works for error types (prevents use-after-free)
+func TestErrorFieldAccessDupsString(t *testing.T) {
+	ir := generateIR(t, `
+		type NotFoundError is error { string key; }
+		fail() string! {
+			raise NotFoundError(key: "missing", message: "not found");
+		}
+		main() {
+			string s = fail()? e is NotFoundError { e.key; } else { ""; };
+		}
+	`)
+	// Accessing e.key in error handler should dup the string via string_new (copy)
+	// dupString() calls promise_string_new to create a heap copy of the field data
+	assertContains(t, ir, "strdup.copy")
 }
 
 // B0158: Synthesized drop coexists with explicit drop (explicit takes precedence)

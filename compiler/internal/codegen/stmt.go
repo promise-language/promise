@@ -817,25 +817,50 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 }
 
 // registerErrorDrop registers a caught error instance for drop at scope exit (T0091).
-// Always uses the base error.drop (synthesized), which drops the string message field
-// and pal_free's the instance. This is correct even for error subtypes — the message
-// field is inherited and at the same offset, and pal_free doesn't care about allocation
-// size. Subtype-specific droppable fields (rare) are a progressive improvement.
-// The drop flag enables proper handling of re-raise (genRaiseStmt clears it, T0086).
-func (c *Compiler) registerErrorDrop(varName string, alloca *ir.InstAlloca) {
+// Uses the concrete error type's drop when available (T0110), falling back to the
+// base error.drop for untyped catches. The concrete drop properly frees all string
+// fields (message + child-specific fields like key). The drop flag enables proper
+// handling of re-raise (genRaiseStmt clears it, T0086).
+// concreteType is the resolved type — may be *types.Named or *types.Instance for generics.
+func (c *Compiler) registerErrorDrop(varName string, alloca *ir.InstAlloca, concreteType types.Type) {
 	dropFlag := c.createEntryAlloca(irtypes.I1)
 	dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
 	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
 	c.dropFlags[varName] = dropFlag
 
-	// Resolve the base error.drop function for direct dispatch.
-	dropFunc := c.funcs[mangleMethodName("__mod_std_error", "drop", false)]
+	concreteNamed := extractNamed(concreteType)
+	if concreteNamed == nil {
+		concreteNamed = types.TypError
+	}
+
+	// Resolve the drop function for the concrete error type (T0110).
+	// For typed catches, this is the child type's drop (e.g., NotFoundError.drop).
+	// For generic instances (e.g., AppError[int]), use the monomorphized name.
+	// For untyped catches, this is the base error.drop.
+	var ownerName string
+	if inst, ok := concreteType.(*types.Instance); ok {
+		ownerName = monoName(inst)
+	} else {
+		ownerName = concreteNamed.Obj().Name()
+	}
+	dropName := mangleMethodName(ownerName, "drop", false)
+	dropFunc := c.funcs[dropName]
+	if dropFunc == nil {
+		// Fallback: resolve via method owner chain
+		fallbackOwner := c.resolveMethodOwner(concreteNamed, "drop")
+		dropFunc = c.funcs[mangleMethodName(fallbackOwner, "drop", false)]
+	}
+	if dropFunc == nil {
+		// Last resort: use base error.drop (e.g., bare generic types like AppError
+		// without type args where the monomorphized drop isn't available).
+		dropFunc = c.funcs[mangleMethodName("__mod_std_error", "drop", false)]
+	}
 
 	binding := scopeBinding{
 		kind:     bindingDrop,
 		alloca:   alloca,
-		named:    types.TypError,
-		valType:  types.TypError,
+		named:    concreteNamed,
+		valType:  concreteNamed,
 		dropFlag: dropFlag,
 		dropFunc: dropFunc,
 		varName:  varName,
@@ -1912,7 +1937,7 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				ownerType = types.Substitute(ownerType, c.typeSubst)
 			}
 			ownerNamed := extractNamed(ownerType)
-			if extractNamed(memberType) == types.TypString && ownerNamed != nil && ownerNamed.HasDrop() && !isErrorType(ownerNamed) {
+			if extractNamed(memberType) == types.TypString && ownerNamed != nil && ownerNamed.HasDrop() {
 				if ident, ok := s.Value.(*ast.IdentExpr); ok {
 					if _, hasFlag := c.dropFlags[ident.Name]; hasFlag {
 						// Has drop flag: move ownership
@@ -2471,8 +2496,14 @@ func (c *Compiler) wrapThisReturnValue(val value.Value, expr ast.Expr, retType t
 // --- Raise ---
 
 func (c *Compiler) genRaiseStmt(s *ast.RaiseStmt) {
-	// T0086: If raising a local error variable, clear its drop flag BEFORE cleanup
-	// so emitScopeCleanup won't free the instance we're about to return.
+	// T0110: Generate the raise value expression BEFORE scope cleanup.
+	// Constructor expressions (e.g., raise MyError(message: msg)) move string
+	// fields from local variables (clearing their drop flags). If scope cleanup
+	// ran first, it would free those variables before the constructor could use them.
+	errVal := c.genExpr(s.Value)
+
+	// T0086: If raising a local error variable, clear its drop flag so
+	// emitScopeCleanup won't free the instance we're about to return.
 	if ident, ok := s.Value.(*ast.IdentExpr); ok {
 		c.clearDropFlag(ident.Name)
 	}
@@ -2481,8 +2512,6 @@ func (c *Compiler) genRaiseStmt(s *ast.RaiseStmt) {
 	if len(c.scopeBindings) > 0 {
 		c.emitScopeCleanup(0, true) // error in flight — suppress close errors
 	}
-
-	errVal := c.genExpr(s.Value)
 	// Error types are user types with value struct {vtable_ptr, instance_ptr}.
 	// Extract the instance pointer (i8*) for storage in the result struct's error slot.
 	if st, ok := errVal.Type().(*irtypes.StructType); ok && len(st.Fields) == 2 {

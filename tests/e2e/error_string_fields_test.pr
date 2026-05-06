@@ -1,0 +1,134 @@
+// T0110: Error types with string fields should drop them properly.
+// Tests that child error types with string fields don't leak.
+type NotFoundError is error {
+  string key;
+}
+type ValidationError is error {
+  string field;
+  string detail;
+}
+
+// --- Helper functions that raise errors ---
+
+find_item(string key) int! {
+  raise NotFoundError(key: key, message: "item not found: " + key);
+}
+
+lookup(string key) string! {
+  raise NotFoundError(key: key, message: "not found: " + key);
+}
+
+validate(string field, string detail) bool! {
+  raise ValidationError(field: field, detail: detail, message: "validation failed");
+}
+
+fail_base() int! {
+  raise error(message: "base error");
+}
+
+fail_base_str() string! {
+  raise error(message: "base error");
+}
+
+// --- Typed catch: child type's drop frees all string fields ---
+
+test_typed_catch_child_error() `test {
+  int v = find_item("foo")? e is NotFoundError {
+    assert(e.message == "item not found: foo", "message field");
+    assert(e.key == "foo", "key field");
+    0;
+  } else {
+    -1;
+  };
+  assert(v == 0, "typed catch result");
+}
+
+test_typed_catch_multi_string_fields() `test {
+  bool v = validate("email", "invalid format")? e is ValidationError {
+    assert(e.message == "validation failed", "message field");
+    assert(e.field == "email", "field field");
+    assert(e.detail == "invalid format", "detail field");
+    false;
+  } else {
+    true;
+  };
+  assert(!v, "multi-field catch result");
+}
+
+// --- Untyped catch: base error's drop frees message ---
+
+test_untyped_catch_base_error() `test {
+  int v = fail_base()? e {
+    assert(e.message == "base error", "base message");
+    0;
+  };
+  assert(v == 0, "untyped catch result");
+}
+
+// --- Field access: dup prevents use-after-free ---
+
+test_field_access_dup() `test {
+  string key = lookup("bar")? e is NotFoundError {
+    e.key;
+  } else e2 {
+    e2.message;
+  };
+  assert(key == "bar", "field access dup");
+}
+
+test_field_access_message_dup() `test {
+  string msg = fail_base_str()? e {
+    e.message;
+  };
+  assert(msg == "base error", "message access dup");
+}
+
+// --- No binding: error is still dropped ---
+
+test_no_binding_typed() `test {
+  int v = find_item("baz")? is NotFoundError {
+    42;
+  } else {
+    -1;
+  };
+  assert(v == 42, "no binding typed");
+}
+
+test_no_binding_untyped() `test {
+  int v = fail_base()? {
+    99;
+  };
+  assert(v == 99, "no binding untyped");
+}
+
+// --- Typed catch with else: both paths drop ---
+
+test_typed_catch_with_else() `test {
+  int v = fail_base()? e is NotFoundError {
+    1;
+  } else {
+    2;
+  };
+  assert(v == 2, "else path taken");
+}
+
+// --- Re-raise: drop flag cleared, no double-free ---
+
+rethrow(string key) int! {
+  int v = find_item(key)? e is NotFoundError {
+    raise e;
+  } else e2 {
+    raise e2;
+  };
+  return v;
+}
+
+test_reraise_no_double_free() `test {
+  int v = rethrow("qux")? e is NotFoundError {
+    assert(e.key == "qux", "reraise key");
+    0;
+  } else {
+    -1;
+  };
+  assert(v == 0, "reraise result");
+}

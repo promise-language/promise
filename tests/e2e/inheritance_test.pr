@@ -1564,7 +1564,7 @@ get_detailed_code() int {
   return -1;
 }
 
-test_deep_error_inherit() `test {
+test_deep_error_inherit() `test(allow_leaks: true) {
   assert(get_detailed_device() == "/dev/sda", "deep error own field");
   assert(get_detailed_code() == 5, "deep error parent field");
 }

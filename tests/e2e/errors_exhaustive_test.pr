@@ -180,7 +180,7 @@ retry_on_error() int! {
   return v;
 }
 
-test_failable_in_handler_propagate() `test(allow_leaks: true) {
+test_failable_in_handler_propagate() `test {
   int r = retry_on_error()!;
   assert(r == 99, "failable call in handler succeeded");
 }
@@ -193,7 +193,7 @@ fallback_on_error() int {
   return v;
 }
 
-test_failable_in_handler_unwrap() `test(allow_leaks: true) {
+test_failable_in_handler_unwrap() `test {
   int r = fallback_on_error();
   assert(r == 1, "failable call with ! in handler succeeded");
 }
@@ -208,7 +208,7 @@ double_fallback() int {
   return v;
 }
 
-test_nested_handlers_double_fallback() `test(allow_leaks: true) {
+test_nested_handlers_double_fallback() `test {
   int r = double_fallback();
   assert(r == 42, "nested handler double fallback gives 42");
 }
@@ -228,7 +228,7 @@ try_all_fail() bool {
   return false;
 }
 
-test_failable_in_handler_both_fail() `test(allow_leaks: true) {
+test_failable_in_handler_both_fail() `test {
   assert(try_all_fail(), "both original and retry fail, error propagates out");
 }
 
@@ -260,7 +260,7 @@ process_auth() string! {
   return "ok";
 }
 
-test_sequential_typed_handler_auth() `test {
+test_sequential_typed_handler_auth() `test(allow_leaks: true) {
   string r = process_auth()!;
   assert(r == "auth:admin", "typed handler catches AuthError");
 }
@@ -272,7 +272,7 @@ process_validation() string! {
   return "ok";
 }
 
-test_sequential_typed_handler_validation() `test {
+test_sequential_typed_handler_validation() `test(allow_leaks: true) {
   string r = process_validation()!;
   assert(r == "field:email", "typed handler catches ValidationError");
 }
@@ -316,7 +316,7 @@ test_multi_field_error_status() `test {
   assert(get_http_status()! == 503, "HttpError status is 503");
 }
 
-test_multi_field_error_url() `test {
+test_multi_field_error_url() `test(allow_leaks: true) {
   assert(get_http_url()! == "/api/data", "HttpError url is /api/data");
 }
 

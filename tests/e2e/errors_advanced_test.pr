@@ -72,7 +72,7 @@ try_add_bad_first() bool {
   return false;
 }
 
-test_first_failable_fails() `test(allow_leaks: true) {
+test_first_failable_fails() `test {
   assert(try_add_bad_first(), "first failable raised");
 }
 
@@ -84,7 +84,7 @@ try_add_bad_second() bool {
   return false;
 }
 
-test_second_failable_fails() `test(allow_leaks: true) {
+test_second_failable_fails() `test {
   assert(try_add_bad_second(), "second failable raised");
 }
 
@@ -170,7 +170,7 @@ try_parse_and_sum_bad() bool {
   return false;
 }
 
-test_propagation_in_loop_fail() `test(allow_leaks: true) {
+test_propagation_in_loop_fail() `test {
   assert(try_parse_and_sum_bad(), "bad input causes propagation");
 }
 

@@ -61,7 +61,7 @@ try_auto_prop_typed_fail() bool {
   return false;
 }
 
-test_auto_prop_typed_fail() `test(allow_leaks: true) {
+test_auto_prop_typed_fail() `test {
   assert(try_auto_prop_typed_fail(), "auto-prop typed var decl propagates error");
 }
 
@@ -209,7 +209,7 @@ mixed_handling() int! {
   return a + b;
 }
 
-test_mixed_handling() `test(allow_leaks: true) {
+test_mixed_handling() `test {
   int r = mixed_handling()!;
   assert(r == 142, "auto-prop + explicit handler: 42 + 100");
 }
@@ -269,7 +269,7 @@ test_handler_stmt_no_recovery_success() `test {
 // Section 9: Error handler with recovery values (phi merge)
 // ============================================================
 
-test_handler_recovery_int() `test(allow_leaks: true) {
+test_handler_recovery_int() `test {
   int v = parse_int("bad")? e {
     -1;
   };
@@ -297,7 +297,7 @@ test_handler_recovery_string_success() `test {
   assert(s == "hello", "string success value through handler");
 }
 
-test_handler_recovery_expression() `test(allow_leaks: true) {
+test_handler_recovery_expression() `test {
   int base = 40;
   int v = parse_int("bad")? e {
     base + 2;
@@ -310,7 +310,7 @@ test_handler_recovery_expression() `test(allow_leaks: true) {
 // ============================================================
 
 // Inferred: x becomes int?
-test_optional_recovery_inferred_error() `test(allow_leaks: true) {
+test_optional_recovery_inferred_error() `test {
   x := parse_int("bad")? e {
     print_line("handled");
   };
@@ -325,7 +325,7 @@ test_optional_recovery_inferred_success() `test {
 }
 
 // Typed: int? x
-test_optional_recovery_typed_error() `test(allow_leaks: true) {
+test_optional_recovery_typed_error() `test {
   int? x = parse_int("bad")? e {
     print_line("handled");
   };
@@ -373,7 +373,7 @@ try_diverge_return() int {
   return v;
 }
 
-test_handler_diverge_return() `test(allow_leaks: true) {
+test_handler_diverge_return() `test {
   int r = try_diverge_return();
   assert(r == -1, "handler diverges with return");
 }
@@ -401,7 +401,7 @@ reraise_handler() int! {
   return v;
 }
 
-test_handler_reraise() `test(allow_leaks: true) {
+test_handler_reraise() `test {
   bool caught = false;
   reraise_handler()? e {
     caught = true;
@@ -425,7 +425,7 @@ sum_parsed(int n) int! {
   return sum;
 }
 
-test_auto_prop_in_loop_fails() `test(allow_leaks: true) {
+test_auto_prop_in_loop_fails() `test {
   // parse_int("0") returns 0, parse_int("1") fails (not "42", "0", or "7")
   // So this fails at i=1
   bool caught = false;
@@ -469,7 +469,7 @@ auto_prop_with_drop_fails() int! {
   return v;
 }
 
-test_auto_prop_with_drop_fails() `test(allow_leaks: true) {
+test_auto_prop_with_drop_fails() `test {
   bool caught = false;
   auto_prop_with_drop_fails()? e {
     caught = true;
@@ -496,7 +496,7 @@ outer() int! {
   return z;
 }
 
-test_nested_auto_prop_chain() `test(allow_leaks: true) {
+test_nested_auto_prop_chain() `test {
   bool caught = false;
   outer()? e {
     caught = true;

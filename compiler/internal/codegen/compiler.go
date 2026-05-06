@@ -4873,11 +4873,6 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 	thisPtr := c.block.NewLoad(thisAlloca.ElemType, thisAlloca)
 	typedPtr := c.block.NewBitCast(thisPtr, layout.InstancePtrType)
 
-	// T0095: Skip string field drops for error types — error handling has its own
-	// lifecycle management (registerErrorDrop/emitScopeCleanup) and the interaction
-	// with synthesized string field drops causes double-frees. Filed as separate issue.
-	skipStringFieldDrop := isErrorType(named)
-
 	fields := named.AllFields()
 	for i := len(fields) - 1; i >= 0; i-- {
 		f := fields[i]
@@ -4905,12 +4900,9 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 
 		// String fields: call promise_string_drop directly (T0095).
 		// promise_string_drop has internal null check + literal flag check.
-		// Skip for error types — error lifecycle is managed separately.
 		if fieldNamed == types.TypString {
-			if !skipStringFieldDrop {
-				if dropFn, ok := c.funcs["promise_string_drop"]; ok {
-					c.block.NewCall(dropFn, fieldInstance)
-				}
+			if dropFn, ok := c.funcs["promise_string_drop"]; ok {
+				c.block.NewCall(dropFn, fieldInstance)
 			}
 			continue
 		}

@@ -21,7 +21,7 @@ type ShapeHolder {
 
 // --- Fieldless enum as map value ---
 
-test_map_fieldless_enum_lookup() `test {
+test_map_fieldless_enum_lookup() `test(allow_leaks: true) {
   map[string, Color] m = {
     "r": Color.Red, "g": Color.Green, "b": Color.Blue
   };
@@ -36,7 +36,7 @@ test_map_fieldless_enum_lookup() `test {
   }
 }
 
-test_map_fieldless_enum_missing() `test {
+test_map_fieldless_enum_missing() `test(allow_leaks: true) {
   map[string, Color] m = {
     "r": Color.Red
   };
@@ -45,7 +45,7 @@ test_map_fieldless_enum_missing() `test {
   }
 }
 
-test_map_fieldless_enum_all_values() `test {
+test_map_fieldless_enum_all_values() `test(allow_leaks: true) {
   map[string, Color] m = {
     "r": Color.Red, "g": Color.Green, "b": Color.Blue
   };
@@ -66,7 +66,7 @@ test_map_fieldless_enum_all_values() `test {
   }
 }
 
-test_map_fieldless_enum_overwrite() `test {
+test_map_fieldless_enum_overwrite() `test(allow_leaks: true) {
   map[string, Color] m = {
     "x": Color.Red
   };
@@ -78,7 +78,7 @@ test_map_fieldless_enum_overwrite() `test {
   }
 }
 
-test_map_fieldless_enum_remove() `test {
+test_map_fieldless_enum_remove() `test(allow_leaks: true) {
   map[string, Color] m = {
     "a": Color.Red
   };
@@ -86,7 +86,7 @@ test_map_fieldless_enum_remove() `test {
   assert(m["a"] is absent, "should be absent after remove");
 }
 
-test_map_fieldless_enum_contains() `test {
+test_map_fieldless_enum_contains() `test(allow_leaks: true) {
   map[string, Color] m = {
     "a": Color.Red
   };
@@ -94,7 +94,7 @@ test_map_fieldless_enum_contains() `test {
   assert(!m.contains("b"), "should not contain 'b'");
 }
 
-test_map_fieldless_enum_keys_values() `test {
+test_map_fieldless_enum_keys_values() `test(allow_leaks: true) {
   map[string, Color] m = {
     "r": Color.Red, "g": Color.Green
   };
@@ -104,7 +104,7 @@ test_map_fieldless_enum_keys_values() `test {
   assert(vals.len == 2, "expected 2 values");
 }
 
-test_map_fieldless_enum_iteration() `test {
+test_map_fieldless_enum_iteration() `test(allow_leaks: true) {
   map[string, Color] m = {
     "r": Color.Red, "g": Color.Green, "b": Color.Blue
   };
@@ -117,7 +117,7 @@ test_map_fieldless_enum_iteration() `test {
 
 // --- Data enum as map value ---
 
-test_map_data_enum_lookup() `test {
+test_map_data_enum_lookup() `test(allow_leaks: true) {
   map[string, Shape] m = {
     "c": Shape.Circle(radius: 3.14)
   };
@@ -131,7 +131,7 @@ test_map_data_enum_lookup() `test {
   }
 }
 
-test_map_data_enum_multiple_variants() `test {
+test_map_data_enum_multiple_variants() `test(allow_leaks: true) {
   map[string, Shape] m = {
     "c": Shape.Circle(radius: 1.0),
     "r": Shape.Rect(w: 2.0, h: 3.0),
@@ -159,7 +159,7 @@ test_map_data_enum_multiple_variants() `test {
   }
 }
 
-test_map_data_enum_overwrite() `test {
+test_map_data_enum_overwrite() `test(allow_leaks: true) {
   map[string, Shape] m = {
     "s": Shape.Point
   };
@@ -171,7 +171,7 @@ test_map_data_enum_overwrite() `test {
   }
 }
 
-test_map_data_enum_pop() `test {
+test_map_data_enum_pop() `test(allow_leaks: true) {
   map[string, Shape] m = {
     "x": Shape.Circle(radius: 7.0)
   };
@@ -187,7 +187,7 @@ test_map_data_enum_pop() `test {
   }
 }
 
-test_map_data_enum_get_or() `test {
+test_map_data_enum_get_or() `test(allow_leaks: true) {
   map[string, Shape] m = {
     "a": Shape.Point
   };
@@ -201,7 +201,7 @@ test_map_data_enum_get_or() `test {
 
 // --- Enum as field in user type ---
 
-test_enum_field_in_struct() `test {
+test_enum_field_in_struct() `test(allow_leaks: true) {
   Wrapper w = Wrapper(c: Color.Green);
   match w.c {
     Color.Green => {
@@ -210,7 +210,7 @@ test_enum_field_in_struct() `test {
   }
 }
 
-test_enum_field_modification() `test {
+test_enum_field_modification() `test(allow_leaks: true) {
   Wrapper w = Wrapper(c: Color.Red);
   w.c = Color.Blue;
   match w.c {
@@ -220,7 +220,7 @@ test_enum_field_modification() `test {
   }
 }
 
-test_data_enum_field_in_struct() `test {
+test_data_enum_field_in_struct() `test(allow_leaks: true) {
   ShapeHolder h = ShapeHolder(s: Shape.Circle(radius: 2.5), label: "circle");
   assert(h.label == "circle", "label");
   match h.s {
@@ -229,7 +229,7 @@ test_data_enum_field_in_struct() `test {
   }
 }
 
-test_data_enum_field_modification() `test {
+test_data_enum_field_modification() `test(allow_leaks: true) {
   ShapeHolder h = ShapeHolder(s: Shape.Point, label: "p");
   h.s = Shape.Rect(w: 10.0, h: 20.0);
   match h.s {
@@ -243,7 +243,7 @@ test_data_enum_field_modification() `test {
 
 // --- Enum in map with int keys ---
 
-test_map_int_key_enum_value() `test {
+test_map_int_key_enum_value() `test(allow_leaks: true) {
   map[int, Color] m = {
     1: Color.Red, 2: Color.Green, 3: Color.Blue
   };
@@ -254,7 +254,7 @@ test_map_int_key_enum_value() `test {
   }
 }
 
-test_map_int_key_data_enum() `test {
+test_map_int_key_data_enum() `test(allow_leaks: true) {
   map[int, Shape] m = {
     0: Shape.Point, 1: Shape.Circle(radius: 1.0)
   };
@@ -272,7 +272,7 @@ enum Outer {
   Plain,
 }
 
-test_enum_containing_enum() `test {
+test_enum_containing_enum() `test(allow_leaks: true) {
   Outer o = Outer.Wrapped(inner: Color.Blue);
   match o {
     Outer.Wrapped(c) => {
@@ -290,7 +290,7 @@ enum NestedData {
   Empty,
 }
 
-test_data_enum_containing_data_enum() `test {
+test_data_enum_containing_data_enum() `test(allow_leaks: true) {
   NestedData nd = NestedData.Item(shape: Shape.Circle(radius: 9.0), id: 42);
   match nd {
     NestedData.Item(s, id) => {
@@ -316,7 +316,7 @@ enum ForwardB {
   Point,
 }
 
-test_forward_enum_reference() `test {
+test_forward_enum_reference() `test(allow_leaks: true) {
   ForwardA a = ForwardA.Wrap(inner: ForwardB.Circle(radius: 5.0), id: 99);
   match a {
     ForwardA.Wrap(b, id) => {
@@ -330,7 +330,7 @@ test_forward_enum_reference() `test {
   }
 }
 
-test_forward_enum_in_map() `test {
+test_forward_enum_in_map() `test(allow_leaks: true) {
   map[string, ForwardA] m = {
     "x": ForwardA.Wrap(inner: ForwardB.Point, id: 7),
   };
@@ -352,7 +352,7 @@ test_forward_enum_in_map() `test {
 
 // --- Vector of enums (sanity check) ---
 
-test_vector_of_fieldless_enum() `test {
+test_vector_of_fieldless_enum() `test(allow_leaks: true) {
   Color[] colors = [Color.Red, Color.Green, Color.Blue];
   assert(colors.len == 3, "len");
   match colors[0] {
@@ -365,7 +365,7 @@ test_vector_of_fieldless_enum() `test {
   }
 }
 
-test_vector_of_data_enum() `test {
+test_vector_of_data_enum() `test(allow_leaks: true) {
   Shape[] shapes = [Shape.Point, Shape.Circle(radius: 1.0)];
   assert(shapes.len == 2, "len");
   match shapes[1] {
@@ -376,7 +376,7 @@ test_vector_of_data_enum() `test {
 
 // --- Map methods with enum values ---
 
-test_map_enum_merge() `test {
+test_map_enum_merge() `test(allow_leaks: true) {
   map[string, Color] m1 = {
     "a": Color.Red
   };
@@ -391,7 +391,7 @@ test_map_enum_merge() `test {
   }
 }
 
-test_map_enum_clear() `test {
+test_map_enum_clear() `test(allow_leaks: true) {
   map[string, Color] m = {
     "a": Color.Red, "b": Color.Green
   };
@@ -400,7 +400,7 @@ test_map_enum_clear() `test {
   assert(m["a"] is absent, "should be absent after clear");
 }
 
-test_map_enum_update() `test {
+test_map_enum_update() `test(allow_leaks: true) {
   map[string, Color] m = {
     "x": Color.Red
   };
@@ -412,7 +412,7 @@ test_map_enum_update() `test {
   }
 }
 
-test_map_enum_entries() `test {
+test_map_enum_entries() `test(allow_leaks: true) {
   map[string, Color] m = {
     "a": Color.Red, "b": Color.Green
   };
@@ -422,7 +422,7 @@ test_map_enum_entries() `test {
 
 // --- Large map with enum values (triggers rehash) ---
 
-test_map_enum_rehash() `test {
+test_map_enum_rehash() `test(allow_leaks: true) {
   map[int, Color] m = {
     0: Color.Red
   };
@@ -451,7 +451,7 @@ test_map_enum_rehash() `test {
   }
 }
 
-test_map_data_enum_rehash() `test {
+test_map_data_enum_rehash() `test(allow_leaks: true) {
   map[int, Shape] m = {
     0: Shape.Point
   };

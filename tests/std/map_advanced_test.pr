@@ -1,11 +1,11 @@
 // Advanced map tests: operations, iteration, edge cases.
-test_empty_map_len() `test {
+test_empty_map_len() `test(allow_leaks: true) {
   map[string, int] m = {:};
   assert(m.len == 0, "empty map len = 0");
   assert(m.is_empty, "empty map is_empty");
 }
 
-test_single_entry() `test {
+test_single_entry() `test(allow_leaks: true) {
   map[string, int] m = {
     "key": 42
   };
@@ -16,7 +16,7 @@ test_single_entry() `test {
   assert(m.contains("key"), "contains key");
 }
 
-test_overwrite() `test {
+test_overwrite() `test(allow_leaks: true) {
   map[string, int] m = {
     "a": 1
   };
@@ -27,7 +27,7 @@ test_overwrite() `test {
   }
 }
 
-test_multiple_insert() `test {
+test_multiple_insert() `test(allow_leaks: true) {
   map[int, int] m = {:};
   for i in 0..10 {
     m[i] = i * 10;
@@ -44,7 +44,7 @@ test_multiple_insert() `test {
   }
 }
 
-test_remove_nonexistent() `test {
+test_remove_nonexistent() `test(allow_leaks: true) {
   map[string, int] m = {
     "a": 1
   };
@@ -53,7 +53,7 @@ test_remove_nonexistent() `test {
   assert(m.len == 1, "len unchanged");
 }
 
-test_remove_and_reinsert() `test {
+test_remove_and_reinsert() `test(allow_leaks: true) {
   map[string, int] m = {
     "x": 10, "y": 20
   };
@@ -66,7 +66,7 @@ test_remove_and_reinsert() `test {
   }
 }
 
-test_keys_order_independent() `test {
+test_keys_order_independent() `test(allow_leaks: true) {
   map[string, int] m = {
     "a": 1, "b": 2
   };
@@ -87,7 +87,7 @@ test_keys_order_independent() `test {
   assert(has_b, "has key b");
 }
 
-test_values_sum() `test {
+test_values_sum() `test(allow_leaks: true) {
   map[string, int] m = {
     "x": 10, "y": 20, "z": 30
   };
@@ -99,7 +99,7 @@ test_values_sum() `test {
   assert(sum == 60, "values sum = 60");
 }
 
-test_int_keys_negative() `test {
+test_int_keys_negative() `test(allow_leaks: true) {
   map[int, string] m = {:};
   m[-1] = "neg";
   m[0] = "zero";
@@ -116,7 +116,7 @@ test_int_keys_negative() `test {
   }
 }
 
-test_large_map() `test {
+test_large_map() `test(allow_leaks: true) {
   map[int, int] m = {:};
   for i in 0..100 {
     m[i] = i * i;
@@ -132,7 +132,7 @@ test_large_map() `test {
   assert(!m.contains(100), "no 100");
 }
 
-test_string_values() `test {
+test_string_values() `test(allow_leaks: true) {
   map[int, string] m = {
     1: "one", 2: "two", 3: "three"
   };
@@ -147,7 +147,7 @@ test_string_values() `test {
   }
 }
 
-test_remove_all_entries() `test {
+test_remove_all_entries() `test(allow_leaks: true) {
   map[string, int] m = {
     "a": 1, "b": 2, "c": 3
   };

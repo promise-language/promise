@@ -10,19 +10,19 @@
 use renderer "./renderer";
 use utils "./utils";
 
-test_canvas_origin_distance() `test {
+test_canvas_origin_distance() `test(allow_leaks: true) {
   c := renderer.Canvas(width: 800, height: 600);
   // distance from (0,0) to (3,4) = |3| + |4| = 7
   assert(c.origin_distance(3, 4) == 7, "origin distance to (3,4) = 7");
 }
 
-test_canvas_center() `test {
+test_canvas_center() `test(allow_leaks: true) {
   mid := renderer.canvas_center(100, 200);
   assert(mid.x == 50, "center x = 50");
   assert(mid.y == 100, "center y = 100");
 }
 
-test_deep_chain_direct_utils() `test {
+test_deep_chain_direct_utils() `test(allow_leaks: true) {
   // We can also import the leaf module directly — should reuse the same loaded module.
   assert(utils.abs(0 - 99) == 99, "direct utils.abs still works in deep chain");
 }

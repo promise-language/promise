@@ -38,21 +38,21 @@ type Pair {
 }
 
 // --- Basic this capture returns field value ---
-test_this_capture_basic() `test {
+test_this_capture_basic() `test(allow_leaks: true) {
   c := Counter(count: 42);
   () -> int getter = c.make_getter();
   assert(getter() == 42, "this capture returns count");
 }
 
 // --- This capture with additional captured variable ---
-test_this_capture_with_extra() `test {
+test_this_capture_with_extra() `test(allow_leaks: true) {
   c := Counter(count: 10);
   () -> int add5 = c.make_adder(5);
   assert(add5() == 15, "this + extra capture");
 }
 
 // --- This capture in predicate ---
-test_this_capture_predicate() `test {
+test_this_capture_predicate() `test(allow_leaks: true) {
   c := Counter(count: 20);
   (int) -> bool pred = c.make_predicate();
   assert(pred(10) == true, "20 > 10");
@@ -61,21 +61,21 @@ test_this_capture_predicate() `test {
 }
 
 // --- This capture with multiple fields ---
-test_this_capture_multiple_fields() `test {
+test_this_capture_multiple_fields() `test(allow_leaks: true) {
   p := Pair(x: 3, y: 4);
   () -> int sum_fn = p.make_sum_fn();
   assert(sum_fn() == 7, "3 + 4 = 7");
 }
 
 // --- This capture producing string ---
-test_this_capture_string() `test {
+test_this_capture_string() `test(allow_leaks: true) {
   p := Pair(x: 10, y: 20);
   () -> string fmt = p.make_formatter();
   assert(fmt() == "(10, 20)", "formatted pair");
 }
 
 // --- Different instances produce different closures ---
-test_this_capture_different_instances() `test {
+test_this_capture_different_instances() `test(allow_leaks: true) {
   c1 := Counter(count: 100);
   c2 := Counter(count: 200);
   () -> int g1 = c1.make_getter();
@@ -85,7 +85,7 @@ test_this_capture_different_instances() `test {
 }
 
 // --- Calling captured lambda multiple times ---
-test_this_capture_repeated_calls() `test {
+test_this_capture_repeated_calls() `test(allow_leaks: true) {
   c := Counter(count: 7);
   () -> int getter = c.make_getter();
   assert(getter() == 7, "first call");

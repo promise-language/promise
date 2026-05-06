@@ -27,7 +27,7 @@ season_name(Season s) string {
   };
 }
 
-test_all_seasons() `test {
+test_all_seasons() `test(allow_leaks: true) {
   assert(season_name(Season.Spring) == "spring", "spring");
   assert(season_name(Season.Summer) == "summer", "summer");
   assert(season_name(Season.Autumn) == "autumn", "autumn");
@@ -36,7 +36,7 @@ test_all_seasons() `test {
 
 // --- data enum: Ok and Err ---
 
-test_result_ok() `test {
+test_result_ok() `test(allow_leaks: true) {
   Result r = Result.Ok(42);
   int val = match r {
     Result.Ok(v) => v,
@@ -45,7 +45,7 @@ test_result_ok() `test {
   assert(val == 42, "Ok(42) extracts 42");
 }
 
-test_result_err() `test {
+test_result_err() `test(allow_leaks: true) {
   Result r = Result.Err("oops");
   int val = match r {
     Result.Ok(v) => v,
@@ -56,7 +56,7 @@ test_result_err() `test {
 
 // --- enum in loop ---
 
-test_enum_loop() `test {
+test_enum_loop() `test(allow_leaks: true) {
   Season[] seasons = [Season.Spring, Season.Summer, Season.Autumn, Season.Winter];
   int count = 0;
   for s in seasons {
@@ -77,7 +77,7 @@ enum Event {
   Quit,
 }
 
-test_event_click() `test {
+test_event_click() `test(allow_leaks: true) {
   Event e = Event.Click(100, 200);
   string desc = match e {
     Event.Click(x, y) => "click at {x},{y}",
@@ -88,7 +88,7 @@ test_event_click() `test {
   assert(desc == "click at 100,200", "click event with coords");
 }
 
-test_event_key() `test {
+test_event_key() `test(allow_leaks: true) {
   Event e = Event.Key("a");
   string desc = match e {
     Event.Click(x, y) => "click",
@@ -99,7 +99,7 @@ test_event_key() `test {
   assert(desc == "key:a", "key event");
 }
 
-test_event_quit() `test {
+test_event_quit() `test(allow_leaks: true) {
   Event e = Event.Quit;
   string desc = match e {
     Event.Click(x, y) => "click",
@@ -121,7 +121,7 @@ token_str(Token t) string {
   };
 }
 
-test_token_sequence() `test {
+test_token_sequence() `test(allow_leaks: true) {
   Token[] tokens = [Token.Number(3),
   Token.Plus,
   Token.Number(4),
@@ -147,7 +147,7 @@ make_result(bool ok) Result {
   return Result.Err("failed");
 }
 
-test_enum_from_function() `test {
+test_enum_from_function() `test(allow_leaks: true) {
   Result r1 = make_result(true);
   int v1 = match r1 {
     Result.Ok(v) => v,
@@ -165,7 +165,7 @@ test_enum_from_function() `test {
 
 // --- wildcard in data enum match ---
 
-test_wildcard_data_enum() `test {
+test_wildcard_data_enum() `test(allow_leaks: true) {
   Event e = Event.Resize(800, 600);
   bool is_resize = match e {
     Event.Resize(w, h) => true,
@@ -176,7 +176,7 @@ test_wildcard_data_enum() `test {
 
 // --- chain of matches ---
 
-test_chain_matches() `test {
+test_chain_matches() `test(allow_leaks: true) {
   Result[] items = [Result.Ok(1), Result.Err("x"), Result.Ok(2), Result.Ok(3)];
   int sum = 0;
   int errs = 0;

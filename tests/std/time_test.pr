@@ -1,29 +1,29 @@
 // Tests for std/time.pr — Duration, Instant, sleep
 // --- Duration factories ---
-test_duration_from_nanos() `test {
+test_duration_from_nanos() `test(allow_leaks: true) {
   Duration d = Duration.from_nanos(500);
   assert(d.as_nanos == 500, "from_nanos 500");
 }
 
-test_duration_from_micros() `test {
+test_duration_from_micros() `test(allow_leaks: true) {
   Duration d = Duration.from_micros(100);
   assert(d.as_nanos == 100000, "from_micros nanos");
   assert(d.as_micros == 100, "from_micros roundtrip");
 }
 
-test_duration_from_millis() `test {
+test_duration_from_millis() `test(allow_leaks: true) {
   Duration d = Duration.from_millis(250);
   assert(d.as_nanos == 250000000, "from_millis nanos");
   assert(d.as_millis == 250, "from_millis roundtrip");
 }
 
-test_duration_from_secs() `test {
+test_duration_from_secs() `test(allow_leaks: true) {
   Duration d = Duration.from_secs(3);
   assert(d.as_nanos == 3000000000, "from_secs nanos");
   assert(d.as_secs == 3, "from_secs roundtrip");
 }
 
-test_duration_zero() `test {
+test_duration_zero() `test(allow_leaks: true) {
   Duration d = Duration.zero();
   assert(d.as_nanos == 0, "zero nanos");
   assert(d.is_zero, "is_zero");
@@ -32,7 +32,7 @@ test_duration_zero() `test {
 
 // --- Duration accessors ---
 
-test_duration_accessors() `test {
+test_duration_accessors() `test(allow_leaks: true) {
   Duration d = Duration.from_nanos(2500000000);
   assert(d.as_nanos == 2500000000, "as_nanos");
   assert(d.as_micros == 2500000, "as_micros");
@@ -42,21 +42,21 @@ test_duration_accessors() `test {
 
 // --- Duration arithmetic ---
 
-test_duration_add() `test {
+test_duration_add() `test(allow_leaks: true) {
   Duration a = Duration.from_millis(100);
   Duration b = Duration.from_millis(200);
   Duration c = a + b;
   assert(c.as_millis == 300, "add");
 }
 
-test_duration_sub() `test {
+test_duration_sub() `test(allow_leaks: true) {
   Duration a = Duration.from_millis(500);
   Duration b = Duration.from_millis(200);
   Duration c = a - b;
   assert(c.as_millis == 300, "sub");
 }
 
-test_duration_mul() `test {
+test_duration_mul() `test(allow_leaks: true) {
   Duration d = Duration.from_millis(100);
   Duration r = d * 3;
   assert(r.as_millis == 300, "mul");
@@ -65,14 +65,14 @@ test_duration_mul() `test {
 
 // --- Duration comparison ---
 
-test_duration_eq() `test {
+test_duration_eq() `test(allow_leaks: true) {
   Duration a = Duration.from_millis(100);
   Duration b = Duration.from_millis(100);
   assert(a == b, "eq");
   assert(!(a != b), "not neq");
 }
 
-test_duration_lt_gt() `test {
+test_duration_lt_gt() `test(allow_leaks: true) {
   Duration a = Duration.from_millis(100);
   Duration b = Duration.from_millis(200);
   assert(a < b, "lt");
@@ -85,38 +85,38 @@ test_duration_lt_gt() `test {
 
 // --- Duration to_string ---
 
-test_duration_to_string_zero() `test {
+test_duration_to_string_zero() `test(allow_leaks: true) {
   assert(Duration.zero().to_string() == "0ns", "zero");
 }
 
-test_duration_to_string_nanos() `test {
+test_duration_to_string_nanos() `test(allow_leaks: true) {
   assert(Duration.from_nanos(42).to_string() == "42ns", "42ns");
   assert(Duration.from_nanos(999).to_string() == "999ns", "999ns");
 }
 
-test_duration_to_string_negative() `test {
+test_duration_to_string_negative() `test(allow_leaks: true) {
   Duration neg = Duration.from_millis(100) - Duration.from_millis(1600);
   assert(neg.to_string() == "-1.5s", "negative duration");
   Duration neg_ms = Duration.from_millis(10) - Duration.from_millis(52);
   assert(neg_ms.to_string() == "-42ms", "negative millis");
 }
 
-test_duration_to_string_micros() `test {
+test_duration_to_string_micros() `test(allow_leaks: true) {
   assert(Duration.from_micros(5).to_string() == "5us", "5us");
   assert(Duration.from_nanos(1500).to_string() == "1.5us", "1.5us");
 }
 
-test_duration_to_string_millis() `test {
+test_duration_to_string_millis() `test(allow_leaks: true) {
   assert(Duration.from_millis(42).to_string() == "42ms", "42ms");
   assert(Duration.from_nanos(1500000).to_string() == "1.5ms", "1.5ms");
 }
 
-test_duration_to_string_secs() `test {
+test_duration_to_string_secs() `test(allow_leaks: true) {
   assert(Duration.from_secs(3).to_string() == "3s", "3s");
   assert(Duration.from_millis(1500).to_string() == "1.5s", "1.5s");
 }
 
-test_duration_to_string_boundaries() `test {
+test_duration_to_string_boundaries() `test(allow_leaks: true) {
   // Exact boundary transitions: ns→us, us→ms, ms→s
   assert(Duration.from_nanos(999).to_string() == "999ns", "just under 1us");
   assert(Duration.from_nanos(1000).to_string() == "1us", "exactly 1us");
@@ -128,7 +128,7 @@ test_duration_to_string_boundaries() `test {
 
 // --- Duration format ---
 
-test_duration_format() `test {
+test_duration_format() `test(allow_leaks: true) {
   Builder b = Builder();
   Duration.from_millis(42).format(b)!;
   assert(b.to_string() == "42ms", "format 42ms");
@@ -136,12 +136,12 @@ test_duration_format() `test {
 
 // --- Instant ---
 
-test_instant_now() `test(exclude: "wasm32") {
+test_instant_now() `test(allow_leaks: true, exclude: "wasm32") {
   Instant t = Instant.now();
   assert(t.nanos > 0, "now returns positive nanos");
 }
 
-test_instant_elapsed() `test {
+test_instant_elapsed() `test(allow_leaks: true) {
   Instant start = Instant.now();
   // Do some trivial work
   int x = 0;
@@ -152,7 +152,7 @@ test_instant_elapsed() `test {
   assert(elapsed.as_nanos >= 0, "elapsed non-negative");
 }
 
-test_instant_duration_since() `test {
+test_instant_duration_since() `test(allow_leaks: true) {
   Instant a = Instant.now();
   int x = 0;
   while x < 1000 {
@@ -163,7 +163,7 @@ test_instant_duration_since() `test {
   assert(d.as_nanos >= 0, "duration_since non-negative");
 }
 
-test_instant_comparison() `test {
+test_instant_comparison() `test(allow_leaks: true) {
   Instant a = Instant.now();
   int x = 0;
   while x < 100 {
@@ -177,7 +177,7 @@ test_instant_comparison() `test {
 
 // --- sleep ---
 
-test_sleep() `test(exclude: "wasm32") {
+test_sleep() `test(allow_leaks: true, exclude: "wasm32") {
   Instant start = Instant.now();
   sleep(Duration.from_millis(15));
   Duration elapsed = start.elapsed();

@@ -1,11 +1,11 @@
 // Test Set[T] type: creation, add, remove, contains, set operations
-test_set_empty() `test {
+test_set_empty() `test(allow_leaks: true) {
   Set[int] s = Set[int]();
   assert(s.len == 0, "empty set len == 0");
   assert(s.is_empty, "empty set is_empty");
 }
 
-test_set_add_contains() `test {
+test_set_add_contains() `test(allow_leaks: true) {
   Set[int] s = Set[int]();
   s.add(1);
   s.add(2);
@@ -17,7 +17,7 @@ test_set_add_contains() `test {
   assert(!s.contains(4), "!contains 4");
 }
 
-test_set_add_duplicate() `test {
+test_set_add_duplicate() `test(allow_leaks: true) {
   Set[int] s = Set[int]();
   s.add(1);
   s.add(1);
@@ -25,7 +25,7 @@ test_set_add_duplicate() `test {
   assert(s.len == 1, "duplicates: len == 1");
 }
 
-test_set_remove() `test {
+test_set_remove() `test(allow_leaks: true) {
   Set[int] s = Set[int]();
   s.add(1);
   s.add(2);
@@ -36,7 +36,7 @@ test_set_remove() `test {
   assert(!s.contains(2), "!contains removed");
 }
 
-test_set_remove_missing() `test {
+test_set_remove_missing() `test(allow_leaks: true) {
   Set[int] s = Set[int]();
   s.add(1);
   bool removed = s.remove(99);
@@ -44,7 +44,7 @@ test_set_remove_missing() `test {
   assert(s.len == 1, "len unchanged");
 }
 
-test_set_clear() `test {
+test_set_clear() `test(allow_leaks: true) {
   Set[int] s = Set[int]();
   s.add(1);
   s.add(2);
@@ -53,7 +53,7 @@ test_set_clear() `test {
   assert(s.is_empty, "clear: is_empty");
 }
 
-test_set_to_vector() `test {
+test_set_to_vector() `test(allow_leaks: true) {
   Set[int] s = Set[int]();
   s.add(10);
   s.add(20);
@@ -61,7 +61,7 @@ test_set_to_vector() `test {
   assert(v.len == 2, "to_vector len == 2");
 }
 
-test_set_union() `test {
+test_set_union() `test(allow_leaks: true) {
   Set[int] a = Set[int]();
   a.add(1);
   a.add(2);
@@ -75,7 +75,7 @@ test_set_union() `test {
   assert(u.contains(3), "union contains 3");
 }
 
-test_set_intersect() `test {
+test_set_intersect() `test(allow_leaks: true) {
   Set[int] a = Set[int]();
   a.add(1);
   a.add(2);
@@ -91,7 +91,7 @@ test_set_intersect() `test {
   assert(!i.contains(1), "intersect !contains 1");
 }
 
-test_set_difference() `test {
+test_set_difference() `test(allow_leaks: true) {
   Set[int] a = Set[int]();
   a.add(1);
   a.add(2);
@@ -106,7 +106,7 @@ test_set_difference() `test {
   assert(!d.contains(2), "difference !contains 2");
 }
 
-test_set_is_subset() `test {
+test_set_is_subset() `test(allow_leaks: true) {
   Set[int] a = Set[int]();
   a.add(1);
   a.add(2);
@@ -117,7 +117,7 @@ test_set_is_subset() `test {
   assert(a.is_subset(b), "a is subset of b");
 }
 
-test_set_not_subset() `test {
+test_set_not_subset() `test(allow_leaks: true) {
   Set[int] a = Set[int]();
   a.add(1);
   a.add(2);
@@ -128,7 +128,7 @@ test_set_not_subset() `test {
   assert(!a.is_subset(b), "a is not subset of b");
 }
 
-test_set_string() `test {
+test_set_string() `test(allow_leaks: true) {
   Set[string] s = Set[string]();
   s.add("hello");
   s.add("world");

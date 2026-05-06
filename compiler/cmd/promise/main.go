@@ -819,7 +819,7 @@ func runTestBinary(binaryPath string, timeout time.Duration, start time.Time, ta
 	if targetTriple != "" && targetTriple != codegen.HostTargetTriple() {
 		targetSuffix = fmt.Sprintf(" [%s]", targetTriple)
 	}
-	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?`)
+	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?(?:, (\d+) ignored)?`)
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 		if line == "" {
 			continue
@@ -832,6 +832,9 @@ func runTestBinary(binaryPath string, timeout time.Duration, start time.Time, ta
 			}
 			if len(m) > 4 && m[4] != "" {
 				summary += fmt.Sprintf(", %s leaked", m[4])
+			}
+			if len(m) > 5 && m[5] != "" {
+				summary += fmt.Sprintf(", %s ignored", m[5])
 			}
 			fmt.Printf("%s (%.3fs)%s\n", summary, elapsed.Seconds(), targetSuffix)
 		} else if targetSuffix != "" && (strings.HasPrefix(line, "PASS ") || strings.HasPrefix(line, "FAIL ") || strings.HasPrefix(line, "TIMEOUT ")) {
@@ -904,7 +907,7 @@ func runTestBinaryWithCoverage(binaryPath string, timeout time.Duration, start t
 	testOutput, counters := extractCoverageData(fullOutput)
 
 	// Print test output (same formatting as runTestBinary)
-	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?`)
+	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?(?:, (\d+) ignored)?`)
 	for _, line := range strings.Split(strings.TrimSpace(testOutput), "\n") {
 		if line == "" {
 			continue
@@ -917,6 +920,9 @@ func runTestBinaryWithCoverage(binaryPath string, timeout time.Duration, start t
 			}
 			if len(m) > 4 && m[4] != "" {
 				summary += fmt.Sprintf(", %s leaked", m[4])
+			}
+			if len(m) > 5 && m[5] != "" {
+				summary += fmt.Sprintf(", %s ignored", m[5])
 			}
 			fmt.Printf("%s (%.3fs)\n", summary, elapsed.Seconds())
 		} else {
@@ -1308,7 +1314,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	}
 
 	// Print results in file order, streaming as each slot completes.
-	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?`)
+	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?(?:, (\d+) ignored)?`)
 	failLineRe := regexp.MustCompile(`^(?:FAIL|TIMEOUT) \([\d.]+s\)(?: (.+))?$`)
 	passLineRe := regexp.MustCompile(`^PASS \([\d.]+s\)`)
 	panicContextRe := regexp.MustCompile(`^  (panic:|expected:|actual:|exit:)`)
@@ -1322,6 +1328,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	totalFailed := 0
 	totalSkipped := 0
 	totalLeaked := 0
+	totalIgnored := 0
 	totalFiles := 0
 	failedFiles := 0
 	var failures []failureInfo
@@ -1433,6 +1440,9 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 					if len(m) > 4 && m[4] != "" {
 						totalLeaked += atoi(m[4])
 					}
+					if len(m) > 5 && m[5] != "" {
+						totalIgnored += atoi(m[5])
+					}
 				} else {
 					totalPassed += filePassed
 				}
@@ -1454,6 +1464,9 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				}
 				if len(m) > 4 && m[4] != "" {
 					totalLeaked += atoi(m[4])
+				}
+				if len(m) > 5 && m[5] != "" {
+					totalIgnored += atoi(m[5])
 				}
 			} else if fileFailed > 0 || filePassed > 0 {
 				totalPassed += filePassed
@@ -1507,6 +1520,9 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 			if len(m) > 4 && m[4] != "" {
 				totalLeaked += atoi(m[4])
 			}
+			if len(m) > 5 && m[5] != "" {
+				totalIgnored += atoi(m[5])
+			}
 		}
 
 		totalTests := filePassed + fileFailed
@@ -1531,6 +1547,9 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	}
 	if totalLeaked > 0 {
 		summary += fmt.Sprintf(", %d leaked", totalLeaked)
+	}
+	if totalIgnored > 0 {
+		summary += fmt.Sprintf(", %d ignored", totalIgnored)
 	}
 	fmt.Printf("%s (%d files, %.3fs)%s\n", summary, totalFiles, totalElapsed.Seconds(), targetSuffix)
 

@@ -26,29 +26,29 @@ maybe_wrap[T](T v, bool do_wrap) Wrapper[T]? {
   return none;
 }
 
-test_generic_error_raise() `test {
+test_generic_error_raise() `test(allow_leaks: true) {
   make_error[int](42)? e is AppError[int] {
     assert(e.message == "app error", "message matches");
   }!;
 }
 
-test_generic_error_catch_detail() `test {
+test_generic_error_catch_detail() `test(allow_leaks: true) {
   make_error[string]("oops")? e is AppError[string] {
     assert(e.detail == "oops", "detail matches");
   }!;
 }
 
-test_generic_wrap() `test {
+test_generic_wrap() `test(allow_leaks: true) {
   w := wrap[int](42);
   assert(w.value == 42, "wrapped int");
 }
 
-test_generic_wrap_string() `test {
+test_generic_wrap_string() `test(allow_leaks: true) {
   w := wrap[string]("hello");
   assert(w.value == "hello", "wrapped string");
 }
 
-test_maybe_wrap_some() `test {
+test_maybe_wrap_some() `test(allow_leaks: true) {
   r := maybe_wrap[int](42, true);
   if v := r {
     assert(v.value == 42, "value present");
@@ -57,7 +57,7 @@ test_maybe_wrap_some() `test {
   }
 }
 
-test_maybe_wrap_none() `test {
+test_maybe_wrap_none() `test(allow_leaks: true) {
   r := maybe_wrap[int](42, false);
   assert(r is absent, "expected none");
 }

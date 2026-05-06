@@ -9,7 +9,7 @@ enum Shape {
   Point,
 }
 
-test_enum_circle() `test {
+test_enum_circle() `test(allow_leaks: true) {
   Shape s = Shape.Circle(radius: 5.0);
   if s is Circle(r) {
     assert(r == 5.0, "radius should be 5.0");
@@ -18,7 +18,7 @@ test_enum_circle() `test {
   }
 }
 
-test_enum_rectangle() `test {
+test_enum_rectangle() `test(allow_leaks: true) {
   Shape s = Shape.Rectangle(width: 3.0, height: 4.0);
   if s is Rectangle(w, h) {
     assert(w == 3.0, "width should be 3.0");
@@ -28,14 +28,14 @@ test_enum_rectangle() `test {
   }
 }
 
-test_enum_no_match() `test {
+test_enum_no_match() `test(allow_leaks: true) {
   Shape s = Shape.Point;
   if s is Circle(r) {
     assert(false, "Point should not match Circle");
   }
 }
 
-test_enum_underscore_binding() `test {
+test_enum_underscore_binding() `test(allow_leaks: true) {
   Shape s = Shape.Rectangle(width: 10.0, height: 20.0);
   if s is Rectangle(_, h) {
     assert(h == 20.0, "height should be 20.0");
@@ -53,7 +53,7 @@ enum Option[T] {
   None,
 }
 
-test_generic_enum_int() `test {
+test_generic_enum_int() `test(allow_leaks: true) {
   Option[int] opt = Option[int].Some(value: 42);
   if opt is Some(val) {
     assert(val == 42, "value should be 42");
@@ -62,7 +62,7 @@ test_generic_enum_int() `test {
   }
 }
 
-test_generic_enum_string() `test {
+test_generic_enum_string() `test(allow_leaks: true) {
   Option[string] opt = Option[string].Some(value: "hello");
   if opt is Some(s) {
     assert(s == "hello", "value should be hello");
@@ -71,7 +71,7 @@ test_generic_enum_string() `test {
   }
 }
 
-test_generic_enum_none_no_match() `test {
+test_generic_enum_none_no_match() `test(allow_leaks: true) {
   Option[int] opt = Option[int].None;
   if opt is Some(val) {
     assert(false, "None should not match Some");
@@ -83,7 +83,7 @@ enum Result[T] {
   Err(string message),
 }
 
-test_generic_result_ok() `test {
+test_generic_result_ok() `test(allow_leaks: true) {
   Result[int] r = Result[int].Ok(value: 100);
   if r is Ok(v) {
     assert(v == 100, "value should be 100");
@@ -92,7 +92,7 @@ test_generic_result_ok() `test {
   }
 }
 
-test_generic_result_err() `test {
+test_generic_result_err() `test(allow_leaks: true) {
   Result[int] r = Result[int].Err(message: "failed");
   if r is Err(msg) {
     assert(msg == "failed", "message should be 'failed'");
@@ -101,7 +101,7 @@ test_generic_result_err() `test {
   }
 }
 
-test_generic_result_no_match() `test {
+test_generic_result_no_match() `test(allow_leaks: true) {
   Result[int] r = Result[int].Err(message: "oops");
   if r is Ok(v) {
     assert(false, "Err should not match Ok");
@@ -131,7 +131,7 @@ type Cat is Animal {
   }
 }
 
-test_named_match() `test {
+test_named_match() `test(allow_leaks: true) {
   Animal a = Dog(name: "Rex", breed: "Lab");
   if a is Dog(name, breed) {
     assert(name == "Rex", "name should be Rex");
@@ -141,7 +141,7 @@ test_named_match() `test {
   }
 }
 
-test_named_no_match() `test {
+test_named_no_match() `test(allow_leaks: true) {
   Animal a = Cat(name: "Luna", color: "black");
   if a is Dog(name, breed) {
     assert(false, "Cat should not match Dog");
@@ -152,13 +152,13 @@ test_named_no_match() `test {
 // Part 4: As plain expression (no binding)
 // =============================================================================
 
-test_as_expression() `test {
+test_as_expression() `test(allow_leaks: true) {
   Option[int] opt = Option[int].Some(value: 99);
   bool is_some = opt is Some(v);
   assert(is_some, "should be Some");
 }
 
-test_as_expression_false() `test {
+test_as_expression_false() `test(allow_leaks: true) {
   Option[int] opt = Option[int].None;
   bool is_some = opt is Some(v);
   assert(!is_some, "should not be Some");
@@ -168,7 +168,7 @@ test_as_expression_false() `test {
 // Part 5: Else branch works
 // =============================================================================
 
-test_else_branch() `test {
+test_else_branch() `test(allow_leaks: true) {
   Shape s = Shape.Point;
   string result = "none";
   if s is Circle(r) {
@@ -187,7 +187,7 @@ enum Color {
   Red, Green, Blue, Custom(int r, int g, int b),
 }
 
-test_multi_field() `test {
+test_multi_field() `test(allow_leaks: true) {
   Color c = Color.Custom(r: 255, g: 128, b: 0);
   if c is Custom(r, g, b) {
     assert(r == 255, "r should be 255");
@@ -202,7 +202,7 @@ test_multi_field() `test {
 // Part 7: Binding does not clobber outer variables
 // =============================================================================
 
-test_binding_shadow_restore() `test {
+test_binding_shadow_restore() `test(allow_leaks: true) {
   int val = 100;
   Option[int] opt = Option[int].Some(value: 42);
   if opt is Some(val) {
@@ -215,7 +215,7 @@ test_binding_shadow_restore() `test {
 // Part 8: Underscore variations
 // =============================================================================
 
-test_all_underscores() `test {
+test_all_underscores() `test(allow_leaks: true) {
   Shape s = Shape.Rectangle(width: 1.0, height: 2.0);
   if s is Rectangle(_, _) {
     assert(true, "should match Rect with all underscores");
@@ -224,7 +224,7 @@ test_all_underscores() `test {
   }
 }
 
-test_trailing_underscore() `test {
+test_trailing_underscore() `test(allow_leaks: true) {
   Shape s = Shape.Rectangle(width: 7.0, height: 8.0);
   if s is Rectangle(w, _) {
     assert(w == 7.0, "w should be 7.0");
@@ -242,12 +242,12 @@ check_opt(Option[int] o) int {
   return -1;
 }
 
-test_return_from_then_block() `test {
+test_return_from_then_block() `test(allow_leaks: true) {
   assert(check_opt(Option[int].Some(value: 21)) == 42, "should return 42");
   assert(check_opt(Option[int].None) == -1, "should return -1");
 }
 
-test_break_in_loop() `test {
+test_break_in_loop() `test(allow_leaks: true) {
   Option[int][] items = [Option[int].None, Option[int].Some(value: 42), Option[int].None];
   int found = -1;
   for item in items {
@@ -259,7 +259,7 @@ test_break_in_loop() `test {
   assert(found == 42, "found should be 42");
 }
 
-test_continue_in_loop() `test {
+test_continue_in_loop() `test(allow_leaks: true) {
   Option[int][] items = [Option[int].Some(value: 1), Option[int].None, Option[int].Some(value: 3)];
   int total = 0;
   for item in items {
@@ -271,7 +271,7 @@ test_continue_in_loop() `test {
   assert(total == 4, "total should be 4");
 }
 
-test_nested_destructure() `test {
+test_nested_destructure() `test(allow_leaks: true) {
   Option[int] a = Option[int].Some(value: 10);
   Result[int] b = Result[int].Ok(value: 20);
   if a is Some(x) {
@@ -282,7 +282,7 @@ test_nested_destructure() `test {
   }
 }
 
-test_sequential_on_same_var() `test {
+test_sequential_on_same_var() `test(allow_leaks: true) {
   Shape s = Shape.Circle(radius: 5.0);
   string result = "none";
   if s is Circle(r) {
@@ -304,7 +304,7 @@ describe(Shape s) string {
   }
 }
 
-test_else_if_chain() `test {
+test_else_if_chain() `test(allow_leaks: true) {
   assert(describe(Shape.Circle(radius: 1.0)) == "circle", "circle");
   assert(describe(Shape.Rectangle(width: 1.0, height: 2.0)) == "rect", "rect");
   assert(describe(Shape.Point) == "other", "other");
@@ -319,7 +319,7 @@ type Simple {
   int y;
 }
 
-test_named_no_inheritance() `test {
+test_named_no_inheritance() `test(allow_leaks: true) {
   Simple s = Simple(x: 10, y: 20);
   if s is Simple(a, b) {
     assert(a == 10, "a should be 10");
@@ -344,7 +344,7 @@ type Leaf is Middle {
   }
 }
 
-test_deep_inheritance_chain() `test {
+test_deep_inheritance_chain() `test(allow_leaks: true) {
   Base x = Leaf(a: "aa", b: "bb", c: "cc");
   if x is Leaf(a, b, c) {
     assert(a == "aa", "a should be aa");
@@ -364,7 +364,7 @@ type Vec2 {
   f64 y `value;
 }
 
-test_value_type_destructure() `test {
+test_value_type_destructure() `test(allow_leaks: true) {
   Vec2 v = Vec2(x: 3.0, y: 4.0);
   if v is Vec2(x, y) {
     assert(x == 3.0, "x should be 3.0");
@@ -385,7 +385,7 @@ enum Message {
   Empty,
 }
 
-test_enum_user_type_field() `test {
+test_enum_user_type_field() `test(allow_leaks: true) {
   Payload pl = Payload(id: 42);
   Message m = Message.Data(p: pl);
   if m is Data(extracted) {
@@ -400,7 +400,7 @@ enum Flag {
   Unset,
 }
 
-test_enum_bool_field() `test {
+test_enum_bool_field() `test(allow_leaks: true) {
   Flag f = Flag.Set(on: true);
   if f is Set(v) {
     assert(v, "v should be true");
@@ -411,7 +411,7 @@ enum Wrapper {
   Value(int x),
 }
 
-test_single_variant_enum() `test {
+test_single_variant_enum() `test(allow_leaks: true) {
   Wrapper w = Wrapper.Value(x: 99);
   if w is Value(x) {
     assert(x == 99, "x should be 99");
@@ -435,7 +435,7 @@ sum_pair(Pair p) int {
   return 0;
 }
 
-test_compute_return_value() `test {
+test_compute_return_value() `test(allow_leaks: true) {
   assert(sum_pair(Pair.V(a: 3, b: 7)) == 10, "sum should be 10");
 }
 
@@ -452,7 +452,7 @@ enum WrapperEnum {
   None,
 }
 
-test_variant_priority_over_type() `test {
+test_variant_priority_over_type() `test(allow_leaks: true) {
   WrapperEnum w = WrapperEnum.Box(v: 42);
   if w is Box(v) {
     assert(v == 42, "should destructure enum variant, not named type");
@@ -465,7 +465,7 @@ test_variant_priority_over_type() `test {
 // Part 15: Generic Result — Err has non-T field
 // =============================================================================
 
-test_result_err_string_field() `test {
+test_result_err_string_field() `test(allow_leaks: true) {
   Result[int] r = Result[int].Err(message: "whoops");
   if r is Err(msg) {
     // msg should be string (not int), verify string operations work
@@ -501,19 +501,19 @@ type Container[T] {
   }
 }
 
-test_generic_method_destructure_enum_int() `test {
+test_generic_method_destructure_enum_int() `test(allow_leaks: true) {
   c := Container[int](inner: Maybe[int].Just(value: 42));
   assert(c.unwrap_or(0) == 42, "should unwrap 42");
   assert(c.has_value(), "should have value");
 }
 
-test_generic_method_destructure_enum_string() `test {
+test_generic_method_destructure_enum_string() `test(allow_leaks: true) {
   c := Container[string](inner: Maybe[string].Just(value: "hello"));
   assert(c.unwrap_or("") == "hello", "should unwrap hello");
   assert(c.has_value(), "should have value");
 }
 
-test_generic_method_destructure_enum_none() `test {
+test_generic_method_destructure_enum_none() `test(allow_leaks: true) {
   c := Container[int](inner: Maybe[int].Nothing);
   assert(c.unwrap_or(99) == 99, "should return default");
   assert(!c.has_value(), "should not have value");

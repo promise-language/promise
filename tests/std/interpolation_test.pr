@@ -1,140 +1,140 @@
 // Test string interpolation for all primitive types
 //
-test_int_positive() `test {
+test_int_positive() `test(allow_leaks: true) {
   int x = 42;
   assert("{x}" == "42", "int 42");
 }
 
-test_int_negative() `test {
+test_int_negative() `test(allow_leaks: true) {
   int x = -7;
   assert("{x}" == "-7", "int -7");
 }
 
-test_int_zero() `test {
+test_int_zero() `test(allow_leaks: true) {
   int x = 0;
   assert("{x}" == "0", "int 0");
 }
 
-test_int_large() `test {
+test_int_large() `test(allow_leaks: true) {
   int x = 1000000;
   assert("{x}" == "1000000", "int 1000000");
 }
 
-test_f64() `test {
+test_f64() `test(allow_leaks: true) {
   f64 x = 3.14;
   assert("{x}" == "3.14", "f64 3.14");
 }
 
-test_f64_integer() `test {
+test_f64_integer() `test(allow_leaks: true) {
   f64 x = 42.0;
   assert("{x}" == "42", "f64 42.0 -> 42");
 }
 
-test_f64_zero() `test {
+test_f64_zero() `test(allow_leaks: true) {
   f64 x = 0.0;
   assert("{x}" == "0", "f64 0.0 -> 0");
 }
 
-test_bool_true() `test {
+test_bool_true() `test(allow_leaks: true) {
   bool b = true;
   assert("{b}" == "true", "bool true");
 }
 
-test_bool_false() `test {
+test_bool_false() `test(allow_leaks: true) {
   bool b = false;
   assert("{b}" == "false", "bool false");
 }
 
-test_char_ascii() `test {
+test_char_ascii() `test(allow_leaks: true) {
   char c = 'A';
   assert("{c}" == "A", "char A");
 }
 
-test_char_digit() `test {
+test_char_digit() `test(allow_leaks: true) {
   char c = '0';
   assert("{c}" == "0", "char 0");
 }
 
-test_int_min() `test {
+test_int_min() `test(allow_leaks: true) {
   // INT64_MIN: -9223372036854775808 (edge case for signed negation)
   int x = -9223372036854775807 - 1;
   assert("{x}" == "-9223372036854775808", "INT64_MIN");
 }
 
-test_int_max() `test {
+test_int_max() `test(allow_leaks: true) {
   int x = 9223372036854775807;
   assert("{x}" == "9223372036854775807", "INT64_MAX");
 }
 
-test_f64_negative() `test {
+test_f64_negative() `test(allow_leaks: true) {
   f64 x = -3.14;
   assert("{x}" == "-3.14", "f64 -3.14");
 }
 
-test_char_special() `test {
+test_char_special() `test(allow_leaks: true) {
   char c = '\n';
   string s = "{c}";
   assert(s.len == 1, "newline char is 1 byte");
 }
 
-test_uint_positive() `test {
+test_uint_positive() `test(allow_leaks: true) {
   uint x = 42;
   assert("{x}" == "42", "uint 42");
 }
 
-test_uint_zero() `test {
+test_uint_zero() `test(allow_leaks: true) {
   uint x = 0;
   assert("{x}" == "0", "uint 0");
 }
 
-test_uint_large() `test {
+test_uint_large() `test(allow_leaks: true) {
   // 2^63 = 9223372036854775808 — would be negative if treated as signed
   uint x = 9223372036854775808;
   assert("{x}" == "9223372036854775808", "uint 2^63");
 }
 
-test_uint_max() `test {
+test_uint_max() `test(allow_leaks: true) {
   // UINT64_MAX: 18446744073709551615
   uint x = 18446744073709551615;
   assert("{x}" == "18446744073709551615", "UINT64_MAX");
 }
 
-test_f64_small() `test {
+test_f64_small() `test(allow_leaks: true) {
   f64 x = 0.001;
   assert("{x}" == "0.001", "f64 0.001");
 }
 
-test_f64_scientific() `test {
+test_f64_scientific() `test(allow_leaks: true) {
   f64 x = 1.5e10;
   assert("{x}" == "1.5e+10", "f64 scientific");
 }
 
-test_f64_very_small() `test {
+test_f64_very_small() `test(allow_leaks: true) {
   f64 x = 1.23e-15;
   assert("{x}" == "1.23e-15", "f64 very small");
 }
 
 // --- f64 edge cases: fixed/scientific boundary ---
 
-test_f64_boundary_fixed_max() `test {
+test_f64_boundary_fixed_max() `test(allow_leaks: true) {
   // e10=5 is the last fixed exponent
   f64 x = 999999.0;
   assert("{x}" == "999999", "999999 stays fixed");
 }
 
-test_f64_boundary_sci_min() `test {
+test_f64_boundary_sci_min() `test(allow_leaks: true) {
   // e10=6 triggers scientific
   f64 x = 1e6;
   assert("{x}" == "1e+06", "1e6 -> scientific");
 }
 
-test_f64_boundary_neg_fixed() `test {
+test_f64_boundary_neg_fixed() `test(allow_leaks: true) {
   // e10=-4 is the last negative fixed exponent
   f64 x = 0.0001;
   assert("{x}" == "0.0001", "0.0001 stays fixed");
 }
 
-test_f64_boundary_neg_sci() `test {
+test_f64_boundary_neg_sci() `test(allow_leaks: true) {
   // e10=-5 triggers scientific
   f64 x = 0.00001;
   assert("{x}" == "1e-05", "0.00001 -> scientific");
@@ -142,19 +142,19 @@ test_f64_boundary_neg_sci() `test {
 
 // --- f64 edge cases: rounding ---
 
-test_f64_exact_digits() `test {
+test_f64_exact_digits() `test(allow_leaks: true) {
   // Ryu produces shortest exact representation
   f64 x = 1.23456789;
   assert("{x}" == "1.23456789", "exact digits");
 }
 
-test_f64_exact_sci() `test {
+test_f64_exact_sci() `test(allow_leaks: true) {
   // 1234567.0 -> exact representation in scientific notation
   f64 x = 1234567.0;
   assert("{x}" == "1.234567e+06", "exact sci notation");
 }
 
-test_f64_exact_near_ten() `test {
+test_f64_exact_near_ten() `test(allow_leaks: true) {
   // 9.999995 stays as-is (exact representation)
   f64 x = 9.999995;
   assert("{x}" == "9.999995", "exact near 10");
@@ -162,122 +162,122 @@ test_f64_exact_near_ten() `test {
 
 // --- f64 edge cases: exact integers ---
 
-test_f64_hundred() `test {
+test_f64_hundred() `test(allow_leaks: true) {
   f64 x = 100.0;
   assert("{x}" == "100", "100.0 -> 100");
 }
 
-test_f64_one() `test {
+test_f64_one() `test(allow_leaks: true) {
   f64 x = 1.0;
   assert("{x}" == "1", "1.0 -> 1");
 }
 
-test_f64_half() `test {
+test_f64_half() `test(allow_leaks: true) {
   f64 x = 0.5;
   assert("{x}" == "0.5", "0.5");
 }
 
-test_f64_tenth() `test {
+test_f64_tenth() `test(allow_leaks: true) {
   f64 x = 0.1;
   assert("{x}" == "0.1", "0.1");
 }
 
 // --- f64 edge cases: extreme values ---
 
-test_f64_max() `test {
+test_f64_max() `test(allow_leaks: true) {
   f64 x = 1.7976931348623157e308;
   assert("{x}" == "1.7976931348623157e+308", "DBL_MAX");
 }
 
-test_f64_min_normal() `test {
+test_f64_min_normal() `test(allow_leaks: true) {
   f64 x = 2.2250738585072014e-308;
   assert("{x}" == "2.2250738585072014e-308", "DBL_MIN normal");
 }
 
-test_f64_denormalized() `test {
+test_f64_denormalized() `test(allow_leaks: true) {
   f64 x = 5e-324;
   assert("{x}" == "5e-324", "denormalized");
 }
 
-test_f64_1e100() `test {
+test_f64_1e100() `test(allow_leaks: true) {
   f64 x = 1e100;
   assert("{x}" == "1e+100", "1e100");
 }
 
-test_f64_1e_neg100() `test {
+test_f64_1e_neg100() `test(allow_leaks: true) {
   f64 x = 1e-100;
   assert("{x}" == "1e-100", "1e-100");
 }
 
-test_f64_1e20() `test {
+test_f64_1e20() `test(allow_leaks: true) {
   f64 x = 1e20;
   assert("{x}" == "1e+20", "1e20");
 }
 
-test_f64_1e_neg20() `test {
+test_f64_1e_neg20() `test(allow_leaks: true) {
   f64 x = 1e-20;
   assert("{x}" == "1e-20", "1e-20");
 }
 
 // --- f64 edge cases: negative values ---
 
-test_f64_neg_integer() `test {
+test_f64_neg_integer() `test(allow_leaks: true) {
   f64 x = -42.0;
   assert("{x}" == "-42", "-42.0 -> -42");
 }
 
-test_f64_neg_small() `test {
+test_f64_neg_small() `test(allow_leaks: true) {
   f64 x = -0.001;
   assert("{x}" == "-0.001", "-0.001");
 }
 
-test_f64_neg_sci() `test {
+test_f64_neg_sci() `test(allow_leaks: true) {
   f64 x = -1.5e10;
   assert("{x}" == "-1.5e+10", "-1.5e+10");
 }
 
-test_f64_neg_very_small() `test {
+test_f64_neg_very_small() `test(allow_leaks: true) {
   f64 x = -1e-20;
   assert("{x}" == "-1e-20", "-1e-20");
 }
 
 // --- f64 edge cases: trailing zero stripping ---
 
-test_f64_trailing_zeros_1() `test {
+test_f64_trailing_zeros_1() `test(allow_leaks: true) {
   f64 x = 1.00001;
   assert("{x}" == "1.00001", "no trailing zeros, 6 sig digits");
 }
 
-test_f64_trailing_zeros_2() `test {
+test_f64_trailing_zeros_2() `test(allow_leaks: true) {
   f64 x = 1.10000;
   assert("{x}" == "1.1", "trailing zeros stripped");
 }
 
-test_f64_trailing_zeros_3() `test {
+test_f64_trailing_zeros_3() `test(allow_leaks: true) {
   f64 x = 10.0;
   assert("{x}" == "10", "10.0 -> 10");
 }
 
-test_f64_trailing_zeros_sci() `test {
+test_f64_trailing_zeros_sci() `test(allow_leaks: true) {
   f64 x = 1e15;
   assert("{x}" == "1e+15", "1e15 no trailing zeros");
 }
 
 // --- f64 edge cases: values near 1.0 ---
 
-test_f64_just_above_1() `test {
+test_f64_just_above_1() `test(allow_leaks: true) {
   f64 x = 1.00001;
   assert("{x}" == "1.00001", "just above 1");
 }
 
-test_f64_just_below_1() `test {
+test_f64_just_below_1() `test(allow_leaks: true) {
   f64 x = 0.999999;
   assert("{x}" == "0.999999", "just below 1");
 }
 
 // --- f64 edge cases: powers of 10 ---
 
-test_f64_pow10_pos() `test {
+test_f64_pow10_pos() `test(allow_leaks: true) {
   assert("{1.0}" == "1", "1e0");
   assert("{10.0}" == "10", "1e1");
   assert("{100.0}" == "100", "1e2");
@@ -286,7 +286,7 @@ test_f64_pow10_pos() `test {
   assert("{100000.0}" == "100000", "1e5");
 }
 
-test_f64_pow10_neg() `test {
+test_f64_pow10_neg() `test(allow_leaks: true) {
   f64 a = 0.1;
   assert("{a}" == "0.1", "1e-1");
   f64 b = 0.01;
@@ -297,7 +297,7 @@ test_f64_pow10_neg() `test {
   assert("{d}" == "0.0001", "1e-4");
 }
 
-test_f64_pow10_sci() `test {
+test_f64_pow10_sci() `test(allow_leaks: true) {
   f64 a = 1e6;
   assert("{a}" == "1e+06", "1e6");
   f64 b = 1e10;
@@ -310,7 +310,7 @@ test_f64_pow10_sci() `test {
   assert("{e}" == "1e+200", "1e200");
 }
 
-test_f64_pow10_neg_sci() `test {
+test_f64_pow10_neg_sci() `test(allow_leaks: true) {
   f64 a = 1e-5;
   assert("{a}" == "1e-05", "1e-5");
   f64 b = 1e-10;
@@ -325,74 +325,74 @@ test_f64_pow10_neg_sci() `test {
 
 // --- f64 edge cases: f32 (fpext path) ---
 
-test_f32_interpolation() `test {
+test_f32_interpolation() `test(allow_leaks: true) {
   f32 x = 3.14;
   assert("{x}" == "3.14", "f32 3.14");
 }
 
-test_f32_integer() `test {
+test_f32_integer() `test(allow_leaks: true) {
   f32 x = 42.0;
   assert("{x}" == "42", "f32 42.0");
 }
 
-test_f32_negative() `test {
+test_f32_negative() `test(allow_leaks: true) {
   f32 x = -0.5;
   assert("{x}" == "-0.5", "f32 -0.5");
 }
 
-test_expr_interpolation() `test {
+test_expr_interpolation() `test(allow_leaks: true) {
   assert("{1 + 2}" == "3", "expr 1+2");
   assert("{10 * 5}" == "50", "expr 10*5");
 }
 
-test_mixed_interpolation() `test {
+test_mixed_interpolation() `test(allow_leaks: true) {
   int x = 42;
   string name = "world";
   assert("hello {name}, x={x}" == "hello world, x=42", "mixed interpolation");
 }
 
 // Escaped braces — \{ produces a literal { without triggering interpolation
-test_escaped_brace() `test {
+test_escaped_brace() `test(allow_leaks: true) {
   string s = "literal \{a} here";
   assert(s == "literal \{a} here", "escaped brace not interpolated");
 }
 
-test_escaped_brace_mixed() `test {
+test_escaped_brace_mixed() `test(allow_leaks: true) {
   int x = 42;
   string s = "\{x} is not {x}";
   assert(s == "\{x} is not 42", "escaped vs real interpolation");
 }
 
-test_escaped_brace_at_start() `test {
+test_escaped_brace_at_start() `test(allow_leaks: true) {
   string s = "\{start}";
   assert(s == "\{start}", "escaped brace at string start");
 }
 
-test_multiple_escaped_braces() `test {
+test_multiple_escaped_braces() `test(allow_leaks: true) {
   string s = "\{a} and \{b}";
   assert(s == "\{a} and \{b}", "multiple escaped braces");
 }
 
-test_escaped_adjacent_to_real() `test {
+test_escaped_adjacent_to_real() `test(allow_leaks: true) {
   int x = 5;
   string s = "\{x}={x}";
   assert(s == "\{x}=5", "escaped then real interpolation adjacent");
 }
 
 // Verify \{ produces actual { character (char code 123)
-test_escaped_brace_char_value() `test {
+test_escaped_brace_char_value() `test(allow_leaks: true) {
   string s = "\{";
   assert(s.len == 1, "escaped brace is 1 byte");
   assert(s.byte_at(0) == 123, "escaped brace is char code 123");
 }
 
-test_escaped_brace_len_in_context() `test {
+test_escaped_brace_len_in_context() `test(allow_leaks: true) {
   string s = "a\{b";
   assert(s.len == 3, "a + brace + b = 3 bytes");
 }
 
 // Verify \{ does NOT interpolate — variable name stays literal
-test_escaped_brace_no_interpolation() `test {
+test_escaped_brace_no_interpolation() `test(allow_leaks: true) {
   int x = 999;
   string s = "\{x}";
   assert(s.len == 3, "escaped brace: 3 chars, not interpolated");
@@ -401,21 +401,21 @@ test_escaped_brace_no_interpolation() `test {
 }
 
 // \{ at end of string (no text after)
-test_escaped_brace_at_end() `test {
+test_escaped_brace_at_end() `test(allow_leaks: true) {
   string s = "end\{";
   assert(s.len == 4, "end + brace = 4 bytes");
   assert(s.byte_at(3) == 123, "last byte is open brace");
 }
 
 // \{ only, no other text
-test_escaped_brace_only() `test {
+test_escaped_brace_only() `test(allow_leaks: true) {
   string s = "\{";
   assert(s == "\{", "escaped brace only");
   assert(s.len == 1, "single char");
 }
 
 // \{ immediately before real interpolation
-test_escaped_brace_before_interp() `test {
+test_escaped_brace_before_interp() `test(allow_leaks: true) {
   int v = 7;
   string s = "\{{v}";
   assert(s == "\{7", "escaped brace then interp");
@@ -423,7 +423,7 @@ test_escaped_brace_before_interp() `test {
 }
 
 // Real interpolation then \{
-test_interp_then_escaped_brace() `test {
+test_interp_then_escaped_brace() `test(allow_leaks: true) {
   int v = 3;
   string s = "{v}\{";
   assert(s == "3\{", "interp then escaped brace");
@@ -433,21 +433,21 @@ test_interp_then_escaped_brace() `test {
 // --- Escaped closing brace \} (B0124) ---
 
 // \} produces a literal } character
-test_escaped_close_brace() `test {
+test_escaped_close_brace() `test(allow_leaks: true) {
   string s = "\}";
   assert(s.len == 1, "escaped close brace is 1 byte");
   assert(s.byte_at(0) == 125, "escaped close brace is char code 125");
 }
 
 // \{ and \} together produce literal {…}
-test_escaped_both_braces() `test {
+test_escaped_both_braces() `test(allow_leaks: true) {
   string s = "\{name\}";
   assert(s == "\{name\}", "escaped both braces");
   assert(s.len == 6, "6 bytes total");
 }
 
 // \} mixed with real interpolation
-test_escaped_close_brace_with_interp() `test {
+test_escaped_close_brace_with_interp() `test(allow_leaks: true) {
   int x = 42;
   string s = "{x}\}";
   assert(s == "42\}", "interp then escaped close brace");
@@ -455,14 +455,14 @@ test_escaped_close_brace_with_interp() `test {
 }
 
 // \} at start of string
-test_escaped_close_brace_at_start() `test {
+test_escaped_close_brace_at_start() `test(allow_leaks: true) {
   string s = "\}rest";
   assert(s.len == 5, "} + rest = 5 bytes");
   assert(s.byte_at(0) == 125, "first byte is close brace");
 }
 
 // Multiple \} in a string
-test_multiple_escaped_close_braces() `test {
+test_multiple_escaped_close_braces() `test(allow_leaks: true) {
   string s = "\}\}";
   assert(s.len == 2, "two escaped close braces");
   assert(s.byte_at(0) == 125, "first is }");
@@ -470,7 +470,7 @@ test_multiple_escaped_close_braces() `test {
 }
 
 // JSON-like pattern using \{ and \}
-test_json_pattern() `test {
+test_json_pattern() `test(allow_leaks: true) {
   int val = 10;
   string s = "\{\"key\": {val}\}";
   assert(s == "\{\"key\": 10\}", "JSON-like pattern");
@@ -478,151 +478,151 @@ test_json_pattern() `test {
 
 // --- Small integer types ---
 
-test_i8_interp() `test {
+test_i8_interp() `test(allow_leaks: true) {
   i8 x = 127;
   assert("{x}" == "127", "i8 max");
   i8 y = -128;
   assert("{y}" == "-128", "i8 min");
 }
 
-test_i16_interp() `test {
+test_i16_interp() `test(allow_leaks: true) {
   i16 x = 32767;
   assert("{x}" == "32767", "i16 max");
   i16 y = -32768;
   assert("{y}" == "-32768", "i16 min");
 }
 
-test_i32_interp() `test {
+test_i32_interp() `test(allow_leaks: true) {
   i32 x = 2147483647;
   assert("{x}" == "2147483647", "i32 max");
   i32 y = -2147483648;
   assert("{y}" == "-2147483648", "i32 min");
 }
 
-test_i64_interp() `test {
+test_i64_interp() `test(allow_leaks: true) {
   i64 x = 9223372036854775807;
   assert("{x}" == "9223372036854775807", "i64 max");
 }
 
-test_u8_interp() `test {
+test_u8_interp() `test(allow_leaks: true) {
   u8 x = 0;
   assert("{x}" == "0", "u8 zero");
   u8 y = 255;
   assert("{y}" == "255", "u8 max");
 }
 
-test_u16_interp() `test {
+test_u16_interp() `test(allow_leaks: true) {
   u16 x = 65535;
   assert("{x}" == "65535", "u16 max");
 }
 
-test_u32_interp() `test {
+test_u32_interp() `test(allow_leaks: true) {
   u32 x = 4294967295;
   assert("{x}" == "4294967295", "u32 max");
 }
 
-test_u64_interp() `test {
+test_u64_interp() `test(allow_leaks: true) {
   u64 x = 18446744073709551615;
   assert("{x}" == "18446744073709551615", "u64 max");
 }
 
 // --- Optional primitive types ---
 
-test_optional_int_some() `test {
+test_optional_int_some() `test(allow_leaks: true) {
   int? x = 42;
   assert("{x}" == "42", "optional int some");
 }
 
-test_optional_int_none() `test {
+test_optional_int_none() `test(allow_leaks: true) {
   int? x = none;
   assert("{x}" == "none", "optional int none");
 }
 
-test_optional_bool_some() `test {
+test_optional_bool_some() `test(allow_leaks: true) {
   bool? b = true;
   assert("{b}" == "true", "optional bool some");
 }
 
-test_optional_bool_none() `test {
+test_optional_bool_none() `test(allow_leaks: true) {
   bool? b = none;
   assert("{b}" == "none", "optional bool none");
 }
 
-test_optional_f64_some() `test {
+test_optional_f64_some() `test(allow_leaks: true) {
   f64? x = 3.14;
   assert("{x}" == "3.14", "optional f64 some");
 }
 
-test_optional_f64_none() `test {
+test_optional_f64_none() `test(allow_leaks: true) {
   f64? x = none;
   assert("{x}" == "none", "optional f64 none");
 }
 
-test_optional_string_some() `test {
+test_optional_string_some() `test(allow_leaks: true) {
   string? s = "hi";
   assert("{s}" == "hi", "optional string some");
 }
 
-test_optional_string_none() `test {
+test_optional_string_none() `test(allow_leaks: true) {
   string? s = none;
   assert("{s}" == "none", "optional string none");
 }
 
-test_optional_char_some() `test {
+test_optional_char_some() `test(allow_leaks: true) {
   char? c = 'A';
   assert("{c}" == "A", "optional char some");
 }
 
-test_optional_char_none() `test {
+test_optional_char_none() `test(allow_leaks: true) {
   char? c = none;
   assert("{c}" == "none", "optional char none");
 }
 
-test_optional_u8_some() `test {
+test_optional_u8_some() `test(allow_leaks: true) {
   u8 v = 255;
   u8? x = v;
   assert("{x}" == "255", "optional u8 some");
 }
 
-test_optional_u8_none() `test {
+test_optional_u8_none() `test(allow_leaks: true) {
   u8? x = none;
   assert("{x}" == "none", "optional u8 none");
 }
 
-test_optional_i32_some() `test {
+test_optional_i32_some() `test(allow_leaks: true) {
   i32 v = -100;
   i32? x = v;
   assert("{x}" == "-100", "optional i32 some");
 }
 
-test_optional_i32_none() `test {
+test_optional_i32_none() `test(allow_leaks: true) {
   i32? x = none;
   assert("{x}" == "none", "optional i32 none");
 }
 
 // --- Expressions inside interpolation ---
 
-test_interp_subtraction() `test {
+test_interp_subtraction() `test(allow_leaks: true) {
   int x = 10;
   assert("{x - 3}" == "7", "subtraction in interp");
 }
 
-test_interp_division() `test {
+test_interp_division() `test(allow_leaks: true) {
   int x = 20;
   assert("{x / 4}" == "5", "division in interp");
 }
 
-test_interp_comparison_true() `test {
+test_interp_comparison_true() `test(allow_leaks: true) {
   int x = 10;
   assert("{x > 5}" == "true", "comparison true");
 }
 
-test_interp_comparison_false() `test {
+test_interp_comparison_false() `test(allow_leaks: true) {
   int x = 3;
   assert("{x > 5}" == "false", "comparison false");
 }
 
-test_interp_field_access() `test {
+test_interp_field_access() `test(allow_leaks: true) {
   Duration d = Duration.from_secs(5);
   assert("{d.nanos}" == "5000000000", "field access in interp");
 }
@@ -631,16 +631,16 @@ add_nums(int a, int b) int {
   return a + b;
 }
 
-test_interp_func_call() `test {
+test_interp_func_call() `test(allow_leaks: true) {
   assert("{add_nums(3, 4)}" == "7", "func call in interp");
 }
 
-test_interp_method_call() `test {
+test_interp_method_call() `test(allow_leaks: true) {
   string s = "HELLO";
   assert("{s.to_lower()}" == "hello", "method call in interp");
 }
 
-test_interp_chained() `test {
+test_interp_chained() `test(allow_leaks: true) {
   int x = 10;
   int y = 20;
   assert("{x + y * 2}" == "50", "chained arithmetic in interp");
@@ -648,71 +648,71 @@ test_interp_chained() `test {
 
 // --- Adjacent interpolation segments ---
 
-test_adjacent_two() `test {
+test_adjacent_two() `test(allow_leaks: true) {
   int a = 1;
   int b = 2;
   assert("{a}{b}" == "12", "two adjacent interps");
 }
 
-test_adjacent_three() `test {
+test_adjacent_three() `test(allow_leaks: true) {
   int a = 1;
   int b = 2;
   int c = 3;
   assert("{a}{b}{c}" == "123", "three adjacent interps");
 }
 
-test_adjacent_mixed_types() `test {
+test_adjacent_mixed_types() `test(allow_leaks: true) {
   int n = 42;
   bool b = true;
   string s = "hi";
   assert("{n}{b}{s}" == "42truehi", "adjacent mixed types");
 }
 
-test_alternating_text_interp() `test {
+test_alternating_text_interp() `test(allow_leaks: true) {
   int x = 5;
   assert("a{x}b{x}c{x}d" == "a5b5c5d", "alternating text and interp");
 }
 
 // --- Interpolation positions ---
 
-test_interp_only() `test {
+test_interp_only() `test(allow_leaks: true) {
   int x = 42;
   assert("{x}" == "42", "interpolation only");
 }
 
-test_interp_at_start() `test {
+test_interp_at_start() `test(allow_leaks: true) {
   int x = 42;
   assert("{x} end" == "42 end", "interp at start");
 }
 
-test_interp_at_end() `test {
+test_interp_at_end() `test(allow_leaks: true) {
   int x = 42;
   assert("start {x}" == "start 42", "interp at end");
 }
 
-test_interp_in_middle() `test {
+test_interp_in_middle() `test(allow_leaks: true) {
   int x = 42;
   assert("start {x} end" == "start 42 end", "interp in middle");
 }
 
 // --- Empty and edge cases ---
 
-test_empty_string_no_interp() `test {
+test_empty_string_no_interp() `test(allow_leaks: true) {
   string s = "";
   assert(s == "", "empty string no interp");
 }
 
-test_string_var_interp() `test {
+test_string_var_interp() `test(allow_leaks: true) {
   string name = "world";
   assert("{name}" == "world", "string var in interp");
 }
 
-test_empty_string_var_interp() `test {
+test_empty_string_var_interp() `test(allow_leaks: true) {
   string s = "";
   assert("{s}" == "", "empty string var in interp");
 }
 
-test_multiple_same_var() `test {
+test_multiple_same_var() `test(allow_leaks: true) {
   int x = 7;
   assert("{x}{x}{x}" == "777", "same var three times");
 }

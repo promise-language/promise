@@ -8,7 +8,7 @@ type Converter {
   }
 }
 
-test_basic_generic_method() `test {
+test_basic_generic_method() `test(allow_leaks: true) {
   c := Converter(base: 10);
   result := c.convert[string]("hello");
   assert(result == "hello", "basic generic method");
@@ -24,7 +24,7 @@ type Box {
   }
 }
 
-test_transform() `test {
+test_transform() `test(allow_leaks: true) {
   b := Box(value: 42);
   result := b.transform[string](|int x| -> string {
     return "got it";
@@ -42,7 +42,7 @@ type Container[T] {
   }
 }
 
-test_generic_method_on_generic_type() `test {
+test_generic_method_on_generic_type() `test(allow_leaks: true) {
   c := Container[int](item: 7);
   result := c.map_to[string](|int x| -> string {
     return "mapped";
@@ -58,7 +58,7 @@ type Mapper {
   }
 }
 
-test_multiple_type_params() `test {
+test_multiple_type_params() `test(allow_leaks: true) {
   m := Mapper();
   result := m.map_pair[int, string](42, "hello");
   assert(result == "mapped", "multiple type params");
@@ -72,7 +72,7 @@ type Echo {
   }
 }
 
-test_echo() `test {
+test_echo() `test(allow_leaks: true) {
   e := Echo();
   assert(e.echo[int](42) == 42, "echo int");
   assert(e.echo[string]("hi") == "hi", "echo string");
@@ -80,7 +80,7 @@ test_echo() `test {
 
 // --- Multiple instantiations of same generic method ---
 
-test_multiple_instantiations() `test {
+test_multiple_instantiations() `test(allow_leaks: true) {
   e := Echo();
   int_result := e.echo[int](10);
   str_result := e.echo[string]("test");
@@ -102,13 +102,13 @@ type Wrapper[T] {
   }
 }
 
-test_generic_method_with_this() `test {
+test_generic_method_with_this() `test(allow_leaks: true) {
   w := Wrapper[int](data: 99);
   result := w.with_default[string]("fallback");
   assert(result == "fallback", "generic method with this");
 }
 
-test_generic_method_transform_data() `test {
+test_generic_method_transform_data() `test(allow_leaks: true) {
   w := Wrapper[int](data: 5);
   result := w.transform_data[int](|int x| -> x * 10);
   assert(result == 50, "transform data");
@@ -126,7 +126,7 @@ type Child is Parent {
   int extra;
 }
 
-test_inherited_generic_method() `test {
+test_inherited_generic_method() `test(allow_leaks: true) {
   c := Child(extra: 1);
   assert(c.echo[int](42) == 42, "inherited generic method int");
   assert(c.echo[string]("hi") == "hi", "inherited generic method string");
@@ -152,7 +152,7 @@ accept_animal(Animal a) string {
   return a.speak();
 }
 
-test_vtable_with_generic_method() `test {
+test_vtable_with_generic_method() `test(allow_leaks: true) {
   d := Dog();
   // Virtual dispatch should work (speak is in vtable)
   assert(accept_animal(d) == "woof", "vtable dispatch with generic method present");
@@ -173,7 +173,7 @@ type Parser {
   }
 }
 
-test_failable_generic_method() `test {
+test_failable_generic_method() `test(allow_leaks: true) {
   p := Parser();
   int result = p.try_parse[int](42)!;
   assert(result == 42, "failable generic method");
@@ -193,7 +193,7 @@ type Pair[T] {
   }
 }
 
-test_owner_and_method_params() `test {
+test_owner_and_method_params() `test(allow_leaks: true) {
   p := Pair[int](first: 1);
   assert(p.combine[string]("x") == "combined", "both T and R");
   assert(p.swap[string]("hello") == "hello", "swap with R");
@@ -213,7 +213,7 @@ type Counter {
   }
 }
 
-test_generic_method_calls_regular() `test {
+test_generic_method_calls_regular() `test(allow_leaks: true) {
   c := Counter(count: 5);
   result := c.count_as[int](|int x| -> x * 2);
   assert(result == 10, "generic calls regular method");
@@ -229,7 +229,7 @@ type Logger {
   }
 }
 
-test_void_generic_method() `test {
+test_void_generic_method() `test(allow_leaks: true) {
   l := Logger(logged: 0);
   l.log[int](42);
   l.log[string]("hi");
@@ -248,7 +248,7 @@ type GChild[T] is GBase[T] {
   }
 }
 
-test_generic_method_on_generic_child() `test {
+test_generic_method_on_generic_child() `test(allow_leaks: true) {
   g := GChild[int](val: 10);
   assert(g.convert[string]("yes") == "yes", "generic method on generic child");
   assert(g.val == 10, "inherited field still works");

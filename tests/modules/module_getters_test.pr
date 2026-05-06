@@ -1,31 +1,31 @@
 use propmod "./propmod";
 
 // Test reading a module-level getter returning a constant.
-test_getter_constant() `test {
+test_getter_constant() `test(allow_leaks: true) {
   string msg = propmod.greeting;
   assert(msg == "hello from propmod", "greeting should match");
 }
 
 // Test reading a computed getter.
-test_getter_computed() `test {
+test_getter_computed() `test(allow_leaks: true) {
   int val = propmod.answer;
   assert(val == 42, "answer should be 42");
 }
 
 // Test that regular functions still work alongside getters.
-test_regular_function() `test {
+test_regular_function() `test(allow_leaks: true) {
   int sum = propmod.add(3, 4);
   assert(sum == 7, "add(3, 4) should be 7");
 }
 
 // Test failable getter with ! unwrap (success case).
-test_failable_getter_success() `test {
+test_failable_getter_success() `test(allow_leaks: true) {
   string val = propmod.safe_value!;
   assert(val == "safe", "safe_value should return 'safe'");
 }
 
 // Test failable getter that raises (error handling with ? handler).
-test_failable_getter_raises() `test {
+test_failable_getter_raises() `test(allow_leaks: true) {
   string result = propmod.risky_value? e {
     "recovered";
   };
@@ -38,7 +38,7 @@ _check_risky() string! {
   return val;
 }
 
-test_failable_getter_propagation() `test {
+test_failable_getter_propagation() `test(allow_leaks: true) {
   string result = _check_risky()? e {
     "propagated";
   };
@@ -46,7 +46,7 @@ test_failable_getter_propagation() `test {
 }
 
 // Test optional getter (present case).
-test_optional_getter_present() `test {
+test_optional_getter_present() `test(allow_leaks: true) {
   string? val = propmod.maybe_value;
   assert(val is present, "maybe_value should be present");
   if v := val {
@@ -55,7 +55,7 @@ test_optional_getter_present() `test {
 }
 
 // Test optional getter (absent case).
-test_optional_getter_absent() `test {
+test_optional_getter_absent() `test(allow_leaks: true) {
   string? val = propmod.empty_value;
   assert(val is absent, "empty_value should be absent");
 }

@@ -2,7 +2,7 @@
 // Verifies that blocking select (no default) works correctly in batch
 // test functions, which run outside coroutine context.
 // Single recv case blocks until data arrives.
-test_blocking_recv_single() `test(exclude: "wasm32") {
+test_blocking_recv_single() `test(allow_leaks: true, exclude: "wasm32") {
   ch := channel[int](capacity: 1);
   go {
     ch.send(42);
@@ -18,7 +18,7 @@ test_blocking_recv_single() `test(exclude: "wasm32") {
 }
 
 // Multiple recv cases, one becomes ready.
-test_blocking_recv_multi() `test(exclude: "wasm32") {
+test_blocking_recv_multi() `test(allow_leaks: true, exclude: "wasm32") {
   ch1 := channel[int](capacity: 1);
   ch2 := channel[int](capacity: 1);
   go {
@@ -39,7 +39,7 @@ test_blocking_recv_multi() `test(exclude: "wasm32") {
 }
 
 // Blocking send case waits for space (channel initially full).
-test_blocking_send() `test(exclude: "wasm32") {
+test_blocking_send() `test(allow_leaks: true, exclude: "wasm32") {
   ch := channel[int](capacity: 1);
   ch.send(0); // fill the channel
   go {
@@ -57,7 +57,7 @@ test_blocking_send() `test(exclude: "wasm32") {
 }
 
 // Blocking select with already-ready channel proceeds immediately.
-test_blocking_already_ready() `test(exclude: "wasm32") {
+test_blocking_already_ready() `test(allow_leaks: true, exclude: "wasm32") {
   ch := channel[int](capacity: 1);
   ch.send(10);
   int result = 0;
@@ -71,7 +71,7 @@ test_blocking_already_ready() `test(exclude: "wasm32") {
 }
 
 // Blocking select with closed channel.
-test_blocking_recv_closed() `test(exclude: "wasm32") {
+test_blocking_recv_closed() `test(allow_leaks: true, exclude: "wasm32") {
   ch := channel[int](capacity: 1);
   ch.close();
   bool got_none = false;

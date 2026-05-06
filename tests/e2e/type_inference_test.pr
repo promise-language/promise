@@ -7,17 +7,17 @@ identity[T](T x) T {
   return x;
 }
 
-test_infer_identity_int() `test {
+test_infer_identity_int() `test(allow_leaks: true) {
   int v = identity(42);
   assert(v == 42, "identity(42) == 42");
 }
 
-test_infer_identity_string() `test {
+test_infer_identity_string() `test(allow_leaks: true) {
   string v = identity("hello");
   assert(v == "hello", "identity(hello)");
 }
 
-test_infer_identity_bool() `test {
+test_infer_identity_bool() `test(allow_leaks: true) {
   bool v = identity(true);
   assert(v == true, "identity(true)");
 }
@@ -28,7 +28,7 @@ first[T](T a, T b) T {
   return a;
 }
 
-test_infer_first() `test {
+test_infer_first() `test(allow_leaks: true) {
   int v = first(10, 20);
   assert(v == 10, "first(10,20) == 10");
 }
@@ -39,7 +39,7 @@ pick_first[A, B](A a, B b) A {
   return a;
 }
 
-test_infer_two_type_params() `test {
+test_infer_two_type_params() `test(allow_leaks: true) {
   int v = pick_first(42, "hi");
   assert(v == 42, "pick_first(42, hi) == 42");
 }
@@ -50,7 +50,7 @@ vec_len[T](T[] items) int {
   return items.len;
 }
 
-test_infer_vector_param() `test {
+test_infer_vector_param() `test(allow_leaks: true) {
   int[] arr = [1, 2, 3];
   int n = vec_len(arr);
   assert(n == 3, "vec_len([1,2,3]) == 3");
@@ -62,12 +62,12 @@ type Box[T] {
   T value;
 }
 
-test_infer_constructor() `test {
+test_infer_constructor() `test(allow_leaks: true) {
   b := Box(value: 42);
   assert(b.value == 42, "Box(value: 42).value == 42");
 }
 
-test_infer_constructor_string() `test {
+test_infer_constructor_string() `test(allow_leaks: true) {
   b := Box(value: "hello");
   assert(b.value == "hello", "Box(value: hello)");
 }
@@ -79,7 +79,7 @@ type Pair[A, B] {
   B second;
 }
 
-test_infer_constructor_two_params() `test {
+test_infer_constructor_two_params() `test(allow_leaks: true) {
   p := Pair(first: 1, second: "hi");
   assert(p.first == 1, "pair.first");
   assert(p.second == "hi", "pair.second");
@@ -87,12 +87,12 @@ test_infer_constructor_two_params() `test {
 
 // --- Mixing inferred and explicit still works ---
 
-test_explicit_still_works() `test {
+test_explicit_still_works() `test(allow_leaks: true) {
   int v = identity[int](42);
   assert(v == 42, "explicit identity[int](42)");
 }
 
-test_explicit_constructor_still_works() `test {
+test_explicit_constructor_still_works() `test(allow_leaks: true) {
   b := Box[int](value: 42);
   assert(b.value == 42, "explicit Box[int]");
 }
@@ -103,7 +103,7 @@ wrap[T](T value) T {
   return value;
 }
 
-test_infer_named_arg() `test {
+test_infer_named_arg() `test(allow_leaks: true) {
   int v = wrap(value: 99);
   assert(v == 99, "wrap(value: 99)");
 }

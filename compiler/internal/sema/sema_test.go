@@ -5841,6 +5841,30 @@ func TestTestFuncTimeoutOnExpectedTest(t *testing.T) {
 	}
 }
 
+func TestTestFuncAllowLeaks(t *testing.T) {
+	info, _ := checkSource(t, `myTest() `+"`test(allow_leaks: true)"+` {}`)
+	if !info.TestAllowLeaks["myTest"] {
+		t.Fatal("expected allow_leaks to be true for myTest")
+	}
+}
+
+func TestTestFuncAllowLeaksDefault(t *testing.T) {
+	info, _ := checkSource(t, `myTest() `+"`test"+` {}`)
+	if info.TestAllowLeaks["myTest"] {
+		t.Fatal("expected allow_leaks to be false by default")
+	}
+}
+
+func TestTestFuncAllowLeaksWithTimeout(t *testing.T) {
+	info, _ := checkSource(t, `myTest() `+"`test(timeout: \"5s\", allow_leaks: true)"+` {}`)
+	if !info.TestAllowLeaks["myTest"] {
+		t.Fatal("expected allow_leaks to be true")
+	}
+	if info.TestTimeouts["myTest"] != "5s" {
+		t.Fatalf("expected timeout '5s', got %q", info.TestTimeouts["myTest"])
+	}
+}
+
 func TestStdFuncMissingReturnDetected(t *testing.T) {
 	// Function with missing return should be caught by checkMissingReturn
 	_, errs := checkSourceWithStd(t,

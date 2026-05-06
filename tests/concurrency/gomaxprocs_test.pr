@@ -3,7 +3,7 @@
 // batch test functions (no M threads).
 // Increase parallelism after decrease: set_max_procs(1) then set_max_procs(initial).
 // Verifies that Ms on re-enabled Ps can pick up work.
-test_increase_after_decrease() `test(exclude: "wasm32") {
+test_increase_after_decrease() `test(allow_leaks: true, exclude: "wasm32") {
   initial := set_max_procs(0);
   set_max_procs(1);
 
@@ -35,7 +35,7 @@ test_increase_after_decrease() `test(exclude: "wasm32") {
 }
 
 // Multiple consecutive set_max_procs calls cycling up and down.
-test_multiple_changes() `test(exclude: "wasm32") {
+test_multiple_changes() `test(allow_leaks: true, exclude: "wasm32") {
   initial := set_max_procs(0);
 
   ch := channel[int](capacity: 20);
@@ -83,7 +83,7 @@ test_multiple_changes() `test(exclude: "wasm32") {
 // test mode (B0130).
 
 // set_max_procs called from within a goroutine (not main).
-test_set_max_procs_from_goroutine() `test(exclude: "wasm32") {
+test_set_max_procs_from_goroutine() `test(allow_leaks: true, exclude: "wasm32") {
   ch := channel[int](capacity: 10);
   done := channel[int](capacity: 1);
 

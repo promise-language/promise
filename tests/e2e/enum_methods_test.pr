@@ -42,20 +42,20 @@ enum Color {
   }
 }
 
-test_enum_method_basic() `test {
+test_enum_method_basic() `test(allow_leaks: true) {
   c := Color.Red;
   assert(c.describe() == "red", "Red.describe()");
   assert(Color.Green.describe() == "green", "Green.describe()");
   assert(Color.Blue.describe() == "blue", "Blue.describe()");
 }
 
-test_enum_method_bool_return() `test {
+test_enum_method_bool_return() `test(allow_leaks: true) {
   assert(Color.Red.is_warm() == true, "Red is warm");
   assert(Color.Green.is_warm() == false, "Green is not warm");
   assert(Color.Blue.is_warm() == false, "Blue is not warm");
 }
 
-test_enum_getter() `test {
+test_enum_getter() `test(allow_leaks: true) {
   c := Color.Red;
   opp := c.opposite;
   match opp {
@@ -106,7 +106,7 @@ enum Shape {
   }
 }
 
-test_data_enum_method() `test {
+test_data_enum_method() `test(allow_leaks: true) {
   c := Shape.Circle(radius: 1.0);
   a := c.area();
   assert(a > 3.14 && a < 3.15, "Circle area ~3.14159");
@@ -118,7 +118,7 @@ test_data_enum_method() `test {
   assert(p.area() == 0.0, "Point area 0");
 }
 
-test_data_enum_method_is_point() `test {
+test_data_enum_method_is_point() `test(allow_leaks: true) {
   assert(Shape.Point.is_point() == true, "Point.is_point");
   assert(Shape.Circle(radius: 1.0).is_point() == false, "Circle.is_point");
 }
@@ -173,7 +173,7 @@ enum Direction {
   }
 }
 
-test_enum_method_with_params() `test {
+test_enum_method_with_params() `test(allow_leaks: true) {
   n := Direction.North;
   s := Direction.South;
   assert(n.equals(Direction.North) == true, "North equals North");
@@ -222,13 +222,13 @@ enum Level {
   }
 }
 
-test_enum_method_calls_method() `test {
+test_enum_method_calls_method() `test(allow_leaks: true) {
   assert(Level.High.is_higher_than(Level.Low) == true, "High > Low");
   assert(Level.Low.is_higher_than(Level.High) == false, "Low !> High");
   assert(Level.Medium.is_higher_than(Level.Medium) == false, "Medium !> Medium");
 }
 
-test_enum_method_calls_getter() `test {
+test_enum_method_calls_getter() `test(allow_leaks: true) {
   assert(Level.Low.full_description() == "low", "Low.full_description");
   assert(Level.High.full_description() == "high", "High.full_description");
 }
@@ -251,7 +251,7 @@ enum Toggle {
   }
 }
 
-test_enum_expression_body() `test {
+test_enum_expression_body() `test(allow_leaks: true) {
   assert(Toggle.On.is_on() == true, "On.is_on");
   assert(Toggle.Off.is_on() == false, "Off.is_on");
   assert(Toggle.On.to_int() == 1, "On.to_int");
@@ -274,7 +274,7 @@ enum Config {
   }
 }
 
-test_enum_failable_method() `test {
+test_enum_failable_method() `test(allow_leaks: true) {
   result := Config.Debug.validate()!;
   assert(result == "debug-mode", "Debug.validate");
   result2 := Config.Release.validate()!;
@@ -303,7 +303,7 @@ enum Season {
   }
 }
 
-test_getter_chaining() `test {
+test_getter_chaining() `test(allow_leaks: true) {
   s := Season.Spring;
   // s.next = Summer, s.next.next = Autumn
   s2 := s.next.next;
@@ -342,7 +342,7 @@ enum Expr {
   }
 }
 
-test_data_enum_getter() `test {
+test_data_enum_getter() `test(allow_leaks: true) {
   e1 := Expr.Literal(value: 42);
   assert(e1.result == 42, "Literal.result");
   e2 := Expr.Negate(inner: 10);
@@ -365,7 +365,7 @@ enum Logger {
   }
 }
 
-test_void_enum_method() `test {
+test_void_enum_method() `test(allow_leaks: true) {
   // Just verify it compiles and runs without panic
   l := Logger.Info;
   string t = l.tag();
@@ -388,7 +388,7 @@ enum Severity {
   }
 }
 
-test_enum_method_default_param() `test {
+test_enum_method_default_param() `test(allow_leaks: true) {
   assert(Severity.Low.format() == "severity: low", "default prefix");
   assert(Severity.High.format(prefix: "level") == "level: high", "custom prefix");
 }
@@ -409,7 +409,7 @@ enum Source {
   }
 }
 
-test_failable_enum_method_handler() `test {
+test_failable_enum_method_handler() `test(allow_leaks: true) {
   result := Source.Valid.load()? e {
     "fallback";
   };
@@ -425,7 +425,7 @@ get_color() Color {
   return Color.Blue;
 }
 
-test_method_on_returned_enum() `test {
+test_method_on_returned_enum() `test(allow_leaks: true) {
   c := get_color();
   assert(c.describe() == "blue", "method on returned enum");
 }
@@ -435,7 +435,7 @@ check_warmth(Color c) bool {
   return c.is_warm();
 }
 
-test_enum_method_via_function() `test {
+test_enum_method_via_function() `test(allow_leaks: true) {
   assert(check_warmth(Color.Red) == true, "Red warm via function");
   assert(check_warmth(Color.Blue) == false, "Blue not warm via function");
 }

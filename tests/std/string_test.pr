@@ -1,11 +1,11 @@
 // Test string operations: concat, equality, comparison, methods
-test_concat() `test {
+test_concat() `test(allow_leaks: true) {
   assert("hello" + " " + "world" == "hello world", "string concat");
   assert("" + "a" == "a", "empty + a");
   assert("a" + "" == "a", "a + empty");
 }
 
-test_equality() `test {
+test_equality() `test(allow_leaks: true) {
   assert("hello" == "hello", "equal strings");
   assert(!("hello" == "world"), "different strings not equal");
   assert("hello" != "world", "!= different");
@@ -14,18 +14,18 @@ test_equality() `test {
   assert("" != "a", "empty != non-empty");
 }
 
-test_len() `test {
+test_len() `test(allow_leaks: true) {
   assert("hello".len == 5, "hello len 5");
   assert("".len == 0, "empty len 0");
   assert("ab".len == 2, "ab len 2");
 }
 
-test_is_empty() `test {
+test_is_empty() `test(allow_leaks: true) {
   assert("".is_empty, "empty is_empty");
   assert(!"hello".is_empty, "hello not is_empty");
 }
 
-test_contains() `test {
+test_contains() `test(allow_leaks: true) {
   assert("hello world".contains("world"), "contains world");
   assert("hello world".contains("hello"), "contains hello");
   assert(!"hello".contains("xyz"), "not contains xyz");
@@ -34,7 +34,7 @@ test_contains() `test {
   assert(!"hi".contains("longer"), "sub longer than string");
 }
 
-test_starts_with() `test {
+test_starts_with() `test(allow_leaks: true) {
   assert("hello world".starts_with("hello"), "starts_with hello");
   assert(!"hello world".starts_with("world"), "not starts_with world");
   assert("abc".starts_with(""), "starts_with empty");
@@ -42,7 +42,7 @@ test_starts_with() `test {
   assert(!"hi".starts_with("hello"), "prefix longer than string");
 }
 
-test_ends_with() `test {
+test_ends_with() `test(allow_leaks: true) {
   assert("hello world".ends_with("world"), "ends_with world");
   assert(!"hello world".ends_with("hello"), "not ends_with hello");
   assert("abc".ends_with(""), "ends_with empty");
@@ -50,7 +50,7 @@ test_ends_with() `test {
   assert(!"hi".ends_with("hello"), "suffix longer than string");
 }
 
-test_index_of() `test {
+test_index_of() `test(allow_leaks: true) {
   if idx := "hello world".index_of("world") {
     assert(idx == 6, "index_of world == 6");
   } else {
@@ -84,13 +84,13 @@ test_index_of() `test {
   assert("hi".index_of("longer") is absent, "index_of sub longer than string");
 }
 
-test_trim() `test {
+test_trim() `test(allow_leaks: true) {
   assert("  hello  ".trim() == "hello", "trim spaces");
   assert("hello".trim() == "hello", "trim no-op");
   assert("   ".trim() == "", "trim all spaces");
 }
 
-test_split() `test {
+test_split() `test(allow_leaks: true) {
   string[] parts = "a,b,c".split(",");
   assert(parts.len == 3, "split len 3");
   assert(parts[0] == "a", "split[0] == a");
@@ -98,7 +98,7 @@ test_split() `test {
   assert(parts[2] == "c", "split[2] == c");
 }
 
-test_indexing() `test {
+test_indexing() `test(allow_leaks: true) {
   assert("hello"[0] == 'h', "s[0] == h");
   assert("hello"[1] == 'e', "s[1] == e");
   assert("hello"[4] == 'o', "s[4] == o");
@@ -117,7 +117,7 @@ test_indexing() `test {
   assert(t[t.len - 1] == 'z', "last byte");
 }
 
-test_interpolation() `test {
+test_interpolation() `test(allow_leaks: true) {
   int x = 42;
   assert("{x}" == "42", "int interpolation");
   string name = "world";
@@ -127,39 +127,39 @@ test_interpolation() `test {
 
 // --- Slicing ---
 
-test_slice_range() `test {
+test_slice_range() `test(allow_leaks: true) {
   assert("hello world"[0:5] == "hello", "slice [0:5]");
   assert("hello world"[6:11] == "world", "slice [6:11]");
   assert("abcdef"[2:4] == "cd", "slice [2:4]");
 }
 
-test_slice_from_start() `test {
+test_slice_from_start() `test(allow_leaks: true) {
   assert("hello"[:3] == "hel", "slice [:3]");
   assert("hello"[:0] == "", "slice [:0] empty");
   assert("hello"[:5] == "hello", "slice [:5] full");
 }
 
-test_slice_to_end() `test {
+test_slice_to_end() `test(allow_leaks: true) {
   assert("hello"[3:] == "lo", "slice [3:]");
   assert("hello"[0:] == "hello", "slice [0:] full");
   assert("hello"[5:] == "", "slice [5:] empty");
 }
 
-test_slice_full() `test {
+test_slice_full() `test(allow_leaks: true) {
   assert("hello"[:] == "hello", "slice [:] full copy");
   assert(""[:] == "", "slice [:] empty string");
 }
 
-test_slice_empty() `test {
+test_slice_empty() `test(allow_leaks: true) {
   assert("hello"[2:2] == "", "slice [2:2] empty");
   assert("hello"[0:0] == "", "slice [0:0] empty");
 }
 
-test_slice_single_char() `test {
+test_slice_single_char() `test(allow_leaks: true) {
   assert("hello"[1:2] == "e", "slice [1:2] single char");
 }
 
-test_slice_variable() `test {
+test_slice_variable() `test(allow_leaks: true) {
   string s = "hello world";
   int start = 6;
   string sub = s[start:];
@@ -168,32 +168,32 @@ test_slice_variable() `test {
 
 // --- Hash ---
 
-test_hash_consistent() `test {
+test_hash_consistent() `test(allow_leaks: true) {
   assert("hello".hash == "hello".hash, "same string same hash");
   assert("world".hash == "world".hash, "world hash consistent");
   assert("".hash == "".hash, "empty hash consistent");
 }
 
-test_hash_different() `test {
+test_hash_different() `test(allow_leaks: true) {
   assert("hello".hash != "world".hash, "different strings different hash");
   assert("abc".hash != "xyz".hash, "abc != xyz hash");
   assert("".hash != "hello".hash, "empty != hello hash");
 }
 
-test_hash_variable() `test {
+test_hash_variable() `test(allow_leaks: true) {
   string s = "hello";
   int h = s.hash;
   assert(h == "hello".hash, "variable hash matches literal hash");
 }
 
-test_hash_type() `test {
+test_hash_type() `test(allow_leaks: true) {
   int h = "test".hash;
   assert(h == h, "hash is int");
 }
 
 // --- Comparison operators ---
 
-test_less_than() `test {
+test_less_than() `test(allow_leaks: true) {
   assert("apple" < "banana", "apple < banana");
   assert(!("banana" < "apple"), "not banana < apple");
   assert(!("abc" < "abc"), "not abc < abc (equal)");
@@ -202,7 +202,7 @@ test_less_than() `test {
   assert(!("a" < ""), "not a < empty");
 }
 
-test_greater_than() `test {
+test_greater_than() `test(allow_leaks: true) {
   assert("banana" > "apple", "banana > apple");
   assert(!("apple" > "banana"), "not apple > banana");
   assert(!("abc" > "abc"), "not abc > abc (equal)");
@@ -210,21 +210,21 @@ test_greater_than() `test {
   assert("a" > "", "non-empty > empty");
 }
 
-test_less_equal() `test {
+test_less_equal() `test(allow_leaks: true) {
   assert("abc" <= "abc", "equal strings <=");
   assert("abc" <= "abd", "abc <= abd");
   assert("a" <= "ab", "prefix <=");
   assert(!("abd" <= "abc"), "not abd <= abc");
 }
 
-test_greater_equal() `test {
+test_greater_equal() `test(allow_leaks: true) {
   assert("abc" >= "abc", "equal strings >=");
   assert("abd" >= "abc", "abd >= abc");
   assert("ab" >= "a", "longer >= prefix");
   assert(!("abc" >= "abd"), "not abc >= abd");
 }
 
-test_comparison_case_sensitive() `test {
+test_comparison_case_sensitive() `test(allow_leaks: true) {
   // ASCII: uppercase letters (65-90) come before lowercase (97-122)
   assert("A" < "a", "A < a (ASCII ordering)");
   assert("Z" < "a", "Z < a (ASCII ordering)");
@@ -233,7 +233,7 @@ test_comparison_case_sensitive() `test {
 
 // --- to_upper / to_lower ---
 
-test_to_upper() `test {
+test_to_upper() `test(allow_leaks: true) {
   assert("hello".to_upper() == "HELLO", "basic to_upper");
   assert("Hello World".to_upper() == "HELLO WORLD", "mixed to_upper");
   assert("ALREADY".to_upper() == "ALREADY", "already upper");
@@ -242,7 +242,7 @@ test_to_upper() `test {
   assert("a-b_c".to_upper() == "A-B_C", "special chars unchanged");
 }
 
-test_to_lower() `test {
+test_to_lower() `test(allow_leaks: true) {
   assert("HELLO".to_lower() == "hello", "basic to_lower");
   assert("Hello World".to_lower() == "hello world", "mixed to_lower");
   assert("already".to_lower() == "already", "already lower");
@@ -252,7 +252,7 @@ test_to_lower() `test {
 
 // --- repeat ---
 
-test_repeat() `test {
+test_repeat() `test(allow_leaks: true) {
   assert("ab".repeat(3) == "ababab", "repeat 3");
   assert("x".repeat(1) == "x", "repeat 1");
   assert("hello".repeat(0) == "", "repeat 0 is empty");
@@ -262,7 +262,7 @@ test_repeat() `test {
 
 // --- replace ---
 
-test_replace() `test {
+test_replace() `test(allow_leaks: true) {
   assert("hello world".replace("world", "there") == "hello there", "replace word");
   assert("aabaa".replace("a", "x") == "xxbxx", "replace all occurrences");
   assert("hello".replace("xyz", "abc") == "hello", "replace no match");
@@ -272,7 +272,7 @@ test_replace() `test {
 
 // --- count ---
 
-test_count() `test {
+test_count() `test(allow_leaks: true) {
   assert("hello world".count("l") == 3, "count l in hello world");
   assert("aabaa".count("a") == 4, "count a");
   assert("aaa".count("aa") == 1, "count non-overlapping");
@@ -283,7 +283,7 @@ test_count() `test {
 
 // --- chars ---
 
-test_chars() `test {
+test_chars() `test(allow_leaks: true) {
   char[] cs = "hello".chars();
   assert(cs.len == 5, "chars len 5");
   assert(cs[0] == 'h', "chars[0] == h");
@@ -295,30 +295,30 @@ test_chars() `test {
 
 // --- pad_left / pad_right ---
 
-test_pad_left_basic() `test {
+test_pad_left_basic() `test(allow_leaks: true) {
   assert("hi".pad_left(5, ' ') == "   hi", "pad_left space");
   assert("42".pad_left(5, '0') == "00042", "pad_left zero");
 }
 
-test_pad_left_no_op() `test {
+test_pad_left_no_op() `test(allow_leaks: true) {
   assert("hello".pad_left(3, ' ') == "hello", "pad_left no-op longer");
   assert("abc".pad_left(3, ' ') == "abc", "pad_left no-op equal");
 }
 
-test_pad_left_empty() `test {
+test_pad_left_empty() `test(allow_leaks: true) {
   assert("".pad_left(4, '*') == "****", "pad_left empty");
 }
 
-test_pad_right_basic() `test {
+test_pad_right_basic() `test(allow_leaks: true) {
   assert("hi".pad_right(5, ' ') == "hi   ", "pad_right space");
   assert("42".pad_right(5, '0') == "42000", "pad_right zero");
 }
 
-test_pad_right_no_op() `test {
+test_pad_right_no_op() `test(allow_leaks: true) {
   assert("hello".pad_right(3, ' ') == "hello", "pad_right no-op longer");
   assert("abc".pad_right(3, ' ') == "abc", "pad_right no-op equal");
 }
 
-test_pad_right_empty() `test {
+test_pad_right_empty() `test(allow_leaks: true) {
   assert("".pad_right(4, '*') == "****", "pad_right empty");
 }

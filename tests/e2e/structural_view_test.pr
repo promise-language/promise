@@ -12,99 +12,99 @@ display(Showable s) string {
 
 // --- Basic primitive boxing ---
 
-test_int_to_structural() `test {
+test_int_to_structural() `test(allow_leaks: true) {
   assert(display(42) == "42", "int to Showable");
 }
 
-test_negative_int_to_structural() `test {
+test_negative_int_to_structural() `test(allow_leaks: true) {
   assert(display(-7) == "-7", "negative int to Showable");
 }
 
-test_zero_to_structural() `test {
+test_zero_to_structural() `test(allow_leaks: true) {
   assert(display(0) == "0", "zero to Showable");
 }
 
-test_bool_true_to_structural() `test {
+test_bool_true_to_structural() `test(allow_leaks: true) {
   assert(display(true) == "true", "bool true to Showable");
 }
 
-test_bool_false_to_structural() `test {
+test_bool_false_to_structural() `test(allow_leaks: true) {
   assert(display(false) == "false", "bool false to Showable");
 }
 
-test_f64_to_structural() `test {
+test_f64_to_structural() `test(allow_leaks: true) {
   assert(display(3.14) == "3.14", "f64 to Showable");
 }
 
-test_string_to_structural() `test {
+test_string_to_structural() `test(allow_leaks: true) {
   assert(display("hello") == "hello", "string to Showable");
 }
 
-test_empty_string_to_structural() `test {
+test_empty_string_to_structural() `test(allow_leaks: true) {
   assert(display("") == "", "empty string to Showable");
 }
 
-test_char_to_structural() `test {
+test_char_to_structural() `test(allow_leaks: true) {
   assert(display('A') == "A", "char to Showable");
 }
 
 // --- Primitive variables (not just literals) ---
 
-test_int_var_to_structural() `test {
+test_int_var_to_structural() `test(allow_leaks: true) {
   int x = 99;
   assert(display(x) == "99", "int variable to Showable");
 }
 
-test_bool_var_to_structural() `test {
+test_bool_var_to_structural() `test(allow_leaks: true) {
   bool b = false;
   assert(display(b) == "false", "bool variable to Showable");
 }
 
-test_f64_var_to_structural() `test {
+test_f64_var_to_structural() `test(allow_leaks: true) {
   f64 pi = 3.14;
   assert(display(pi) == "3.14", "f64 variable to Showable");
 }
 
-test_string_var_to_structural() `test {
+test_string_var_to_structural() `test(allow_leaks: true) {
   string s = "world";
   assert(display(s) == "world", "string variable to Showable");
 }
 
 // --- Narrow integer types ---
 
-test_i8_to_structural() `test {
+test_i8_to_structural() `test(allow_leaks: true) {
   i8 v = 42 as! i8;
   assert(display(v) == "42", "i8 to Showable");
 }
 
-test_i16_to_structural() `test {
+test_i16_to_structural() `test(allow_leaks: true) {
   i16 v = 1000 as! i16;
   assert(display(v) == "1000", "i16 to Showable");
 }
 
-test_i32_to_structural() `test {
+test_i32_to_structural() `test(allow_leaks: true) {
   i32 v = 100000 as! i32;
   assert(display(v) == "100000", "i32 to Showable");
 }
 
-test_u8_to_structural() `test {
+test_u8_to_structural() `test(allow_leaks: true) {
   u8 v = 200 as! u8;
   assert(display(v) == "200", "u8 to Showable");
 }
 
-test_u16_to_structural() `test {
+test_u16_to_structural() `test(allow_leaks: true) {
   u16 v = 50000 as! u16;
   assert(display(v) == "50000", "u16 to Showable");
 }
 
-test_u32_to_structural() `test {
+test_u32_to_structural() `test(allow_leaks: true) {
   u32 v = 3000000 as! u32;
   assert(display(v) == "3000000", "u32 to Showable");
 }
 
 // --- Multiple different primitives in sequence ---
 
-test_mixed_primitives_sequential() `test {
+test_mixed_primitives_sequential() `test(allow_leaks: true) {
   assert(display(1) == "1", "first int");
   assert(display(true) == "true", "then bool");
   assert(display("hi") == "hi", "then string");
@@ -122,18 +122,18 @@ type Pair {
   }
 }
 
-test_user_type_to_structural() `test {
+test_user_type_to_structural() `test(allow_leaks: true) {
   Pair p = Pair(x: 3, y: 4);
   assert(display(p) == "(3,4)", "user type to Showable");
 }
 
-test_primitive_then_user_type() `test {
+test_primitive_then_user_type() `test(allow_leaks: true) {
   Pair p = Pair(x: 1, y: 2);
   assert(display(42) == "42", "int before user type");
   assert(display(p) == "(1,2)", "user type after int");
 }
 
-test_user_type_then_primitive() `test {
+test_user_type_then_primitive() `test(allow_leaks: true) {
   Pair p = Pair(x: 5, y: 6);
   assert(display(p) == "(5,6)", "user type before int");
   assert(display(99) == "99", "int after user type");
@@ -145,22 +145,22 @@ both(Showable a, Showable b) string {
   return a.to_string() + "," + b.to_string();
 }
 
-test_two_primitives_structural_params() `test {
+test_two_primitives_structural_params() `test(allow_leaks: true) {
   assert(both(1, 2) == "1,2", "two ints");
 }
 
-test_int_and_string_structural_params() `test {
+test_int_and_string_structural_params() `test(allow_leaks: true) {
   assert(both(42, "hi") == "42,hi", "int and string");
 }
 
-test_int_and_user_type_structural_params() `test {
+test_int_and_user_type_structural_params() `test(allow_leaks: true) {
   Pair p = Pair(x: 7, y: 8);
   assert(both(42, p) == "42,(7,8)", "int and user type");
 }
 
 // --- Primitives in a loop ---
 
-test_primitive_in_loop() `test {
+test_primitive_in_loop() `test(allow_leaks: true) {
   string result = "";
   for i in 0..3 {
     result = result + display(i);
@@ -177,19 +177,19 @@ format_to_string(Format f) string {
   return b.to_string();
 }
 
-test_int_to_format_structural() `test {
+test_int_to_format_structural() `test(allow_leaks: true) {
   assert(format_to_string(42) == "42", "int to Format");
 }
 
-test_bool_to_format_structural() `test {
+test_bool_to_format_structural() `test(allow_leaks: true) {
   assert(format_to_string(true) == "true", "bool to Format");
 }
 
-test_f64_to_format_structural() `test {
+test_f64_to_format_structural() `test(allow_leaks: true) {
   assert(format_to_string(3.14) == "3.14", "f64 to Format");
 }
 
-test_string_to_format_structural() `test {
+test_string_to_format_structural() `test(allow_leaks: true) {
   assert(format_to_string("hello") == "hello", "string to Format");
 }
 
@@ -211,7 +211,7 @@ run_logger(Logger ~l) {
   l.log("world")!;
 }
 
-test_user_type_void_failable_structural() `test {
+test_user_type_void_failable_structural() `test(allow_leaks: true) {
   LogSink sink = LogSink(entries: []);
   run_logger(sink);
   assert(sink.entries.len == 2, "logger received 2 messages");
@@ -221,7 +221,7 @@ test_user_type_void_failable_structural() `test {
 
 // --- Duplicate variable names across scopes (regression for localNameCount) ---
 
-test_duplicate_var_names_with_boxing() `test {
+test_duplicate_var_names_with_boxing() `test(allow_leaks: true) {
   // This triggered the localNameCount bug: emitting an adapter thunk
   // mid-function would reset the name counter, causing duplicate %x allocas
   int? opt = 10;
@@ -233,7 +233,7 @@ test_duplicate_var_names_with_boxing() `test {
   assert(display(x) == "20", "x in outer scope");
 }
 
-test_duplicate_var_names_multiple_scopes() `test {
+test_duplicate_var_names_multiple_scopes() `test(allow_leaks: true) {
   for i in 0..2 {
     int v = i * 10;
     assert(display(v) == display(i * 10), "v in loop iteration {i}");
@@ -254,19 +254,19 @@ type Animal {
   }
 }
 
-test_heap_user_showable_var() `test {
+test_heap_user_showable_var() `test(allow_leaks: true) {
   Animal a = Animal(sound: "woof");
   Showable s = a;
   assert(s.to_string() == "woof", "heap user showable var");
 }
 
-test_heap_user_showable_assign_then_pass() `test {
+test_heap_user_showable_assign_then_pass() `test(allow_leaks: true) {
   Animal a = Animal(sound: "meow");
   Showable s = a;
   assert(display(s) == "meow", "heap user showable assign then pass");
 }
 
-test_heap_user_format_var() `test {
+test_heap_user_format_var() `test(allow_leaks: true) {
   Animal a = Animal(sound: "quack");
   Format f = a;
   Builder b = Builder();
@@ -275,7 +275,7 @@ test_heap_user_format_var() `test {
   assert(b.to_string() == "quack", "heap user format var");
 }
 
-test_heap_user_format_assign_then_pass() `test {
+test_heap_user_format_assign_then_pass() `test(allow_leaks: true) {
   Animal a = Animal(sound: "moo");
   Format f = a;
   assert(format_to_string(f) == "moo", "heap user format assign then pass");
@@ -309,24 +309,24 @@ type Color {
   }
 }
 
-test_value_type_showable_param() `test {
+test_value_type_showable_param() `test(allow_leaks: true) {
   Pos p = Pos(x: 3, y: 4);
   assert(display(p) == "(3,4)", "value type showable param");
 }
 
-test_value_type_showable_var() `test {
+test_value_type_showable_var() `test(allow_leaks: true) {
   Pos p = Pos(x: 5, y: 6);
   Showable s = p;
   assert(s.to_string() == "(5,6)", "value type showable var");
 }
 
-test_value_type_showable_assign_then_pass() `test {
+test_value_type_showable_assign_then_pass() `test(allow_leaks: true) {
   Pos p = Pos(x: 7, y: 8);
   Showable s = p;
   assert(display(s) == "(7,8)", "value type showable assign then pass");
 }
 
-test_value_type_format_var() `test {
+test_value_type_format_var() `test(allow_leaks: true) {
   Color c = Color(r: 10, g: 20, b: 30);
   Format f = c;
   Builder b = Builder();
@@ -335,18 +335,18 @@ test_value_type_format_var() `test {
   assert(b.to_string() == "rgb(10,20,30)", "value type format var");
 }
 
-test_value_type_format_param() `test {
+test_value_type_format_param() `test(allow_leaks: true) {
   Color c = Color(r: 255, g: 128, b: 0);
   assert(format_to_string(c) == "rgb(255,128,0)", "value type format param");
 }
 
-test_value_type_interpolation() `test {
+test_value_type_interpolation() `test(allow_leaks: true) {
   Color c = Color(r: 1, g: 2, b: 3);
   string s = "{c}";
   assert(s == "rgb(1,2,3)", "value type interpolation");
 }
 
-test_value_type_mixed_with_primitives() `test {
+test_value_type_mixed_with_primitives() `test(allow_leaks: true) {
   Pos p = Pos(x: 1, y: 2);
   assert(both(p, 42) == "(1,2),42", "value type and int");
   assert(both(99, p) == "99,(1,2)", "int and value type");

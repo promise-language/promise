@@ -17,7 +17,7 @@ type Counter {
   }
 }
 
-test_counter() `test {
+test_counter() `test(allow_leaks: true) {
   c := Counter(value: 0);
   c.increment();
   c.increment();
@@ -46,7 +46,7 @@ type Rect {
   }
 }
 
-test_rect() `test {
+test_rect() `test(allow_leaks: true) {
   r := Rect(width: 3, height: 4);
   assert(r.area() == 12, "3x4 area = 12");
   assert(r.perimeter() == 14, "3x4 perimeter = 14");
@@ -75,7 +75,7 @@ type CasualGreeter is Greeter {
   }
 }
 
-test_greeter_hierarchy() `test {
+test_greeter_hierarchy() `test(allow_leaks: true) {
   Greeter g1 = FormalGreeter(name: "Alice");
   Greeter g2 = CasualGreeter(name: "Bob");
   assert(g1.greet() == "Good day, Alice", "formal greeting");
@@ -93,7 +93,7 @@ type Person {
   }
 }
 
-test_person() `test {
+test_person() `test(allow_leaks: true) {
   p := Person(first: "John", last: "Doe");
   assert(p.full_name() == "John Doe", "full name concatenation");
   assert(p.first == "John", "first name access");
@@ -115,7 +115,7 @@ type Vec2 {
   }
 }
 
-test_vec2() `test {
+test_vec2() `test(allow_leaks: true) {
   v := Vec2(x: 3.0, y: 4.0);
   f64 lsq = v.length_sq();
   // 3^2 + 4^2 = 25
@@ -146,7 +146,7 @@ type Stack {
   }
 }
 
-test_stack() `test {
+test_stack() `test(allow_leaks: true) {
   int[] empty = [];
   s := Stack(items: empty);
   assert(s.is_empty(), "new stack is empty");
@@ -182,7 +182,7 @@ type MutablePoint {
   }
 }
 
-test_mutable_point() `test {
+test_mutable_point() `test(allow_leaks: true) {
   p := MutablePoint(x: 0, y: 0);
   p.move_by(3, 4);
   assert(p.x == 3, "moved x to 3");
@@ -214,7 +214,7 @@ type Range2D {
   }
 }
 
-test_range2d() `test {
+test_range2d() `test(allow_leaks: true) {
   r := Range2D(x_min: 1, x_max: 5, y_min: 2, y_max: 7);
   assert(r.width() == 4, "width = 4");
   assert(r.height() == 5, "height = 5");

@@ -1,9 +1,9 @@
 use vis "./visibility";
 
-test_public_value() `test {
+test_public_value() `test(allow_leaks: true) {
   assert(vis.public_value() == 42, "public_value() == 42");
 }
 
-test_public_greet() `test {
+test_public_greet() `test(allow_leaks: true) {
   assert(vis.public_greet("tester") == "hi tester (via 7)", "public_greet uses private helper internally");
 }

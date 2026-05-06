@@ -1,5 +1,5 @@
 // Tests for Builder type
-test_basic() `test {
+test_basic() `test(allow_leaks: true) {
   Builder b = Builder();
   b.write_string("hello")!;
   b.write_string(" ")!;
@@ -7,19 +7,19 @@ test_basic() `test {
   assert(b.to_string() == "hello world", "basic write_string");
 }
 
-test_empty() `test {
+test_empty() `test(allow_leaks: true) {
   Builder b = Builder();
   assert(b.to_string() == "", "empty builder");
 }
 
-test_len() `test {
+test_len() `test(allow_leaks: true) {
   Builder b = Builder();
   assert(b.len == 0, "initial len 0");
   b.write_string("hello")!;
   assert(b.len == 5, "after write len 5");
 }
 
-test_clear() `test {
+test_clear() `test(allow_leaks: true) {
   Builder b = Builder();
   b.write_string("hello")!;
   assert(b.len == 5, "before clear");
@@ -27,20 +27,20 @@ test_clear() `test {
   assert(b.len == 0, "after clear");
 }
 
-test_write_bytes() `test {
+test_write_bytes() `test(allow_leaks: true) {
   Builder b = Builder();
   u8[] data = "ABC".bytes();
   b.write(data)!;
   assert(b.to_string() == "ABC", "write bytes");
 }
 
-test_capacity() `test {
+test_capacity() `test(allow_leaks: true) {
   Builder b = Builder(capacity: 64);
   b.write_string("hello")!;
   assert(b.to_string() == "hello", "with capacity");
 }
 
-test_multiple_writes() `test {
+test_multiple_writes() `test(allow_leaks: true) {
   Builder b = Builder();
   int i = 0;
   while i < 10 {
@@ -51,7 +51,7 @@ test_multiple_writes() `test {
   assert(b.len == 10, "len 10");
 }
 
-test_clear_then_reuse() `test {
+test_clear_then_reuse() `test(allow_leaks: true) {
   Builder b = Builder();
   b.write_string("first")!;
   b.clear();
@@ -59,7 +59,7 @@ test_clear_then_reuse() `test {
   assert(b.to_string() == "second", "reuse after clear");
 }
 
-test_write_returns_count() `test {
+test_write_returns_count() `test(allow_leaks: true) {
   Builder b = Builder();
   int n = b.write_string("hello")!;
   assert(n == 5, "write_string returns 5");

@@ -127,6 +127,10 @@ type Info struct {
 	// Values are Go-style duration strings (e.g., "500ms", "2s", "1m").
 	TestTimeouts map[string]string
 
+	// TestAllowLeaks maps test function names that have `test(allow_leaks: true).
+	// Tests with this flag report leaks as warnings but do not cause test failure.
+	TestAllowLeaks map[string]bool
+
 	// FieldDefaults maps fields with default values to their AST default expressions.
 	// Used by codegen to evaluate defaults for omitted constructor arguments.
 	FieldDefaults map[*types.Field]ast.Expr

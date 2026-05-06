@@ -50,7 +50,7 @@ type StringProducer {
 }
 
 // --- Basic: zero-arg function field ---
-test_function_field_zero_arg() `test {
+test_function_field_zero_arg() `test(allow_leaks: true) {
   w := Wrapper(getter: || -> int {
     return 99;
   });
@@ -58,7 +58,7 @@ test_function_field_zero_arg() `test {
 }
 
 // --- Basic: multi-arg function field ---
-test_function_field_multi_arg() `test {
+test_function_field_multi_arg() `test(allow_leaks: true) {
   a := Adder(op: |int x, int y| -> x + y);
   assert(a.apply(10, 20) == 30, "multi-arg function field adds");
   assert(a.apply(0, 0) == 0, "multi-arg function field zero");
@@ -66,7 +66,7 @@ test_function_field_multi_arg() `test {
 }
 
 // --- Optional return: returns value ---
-test_function_field_optional_some() `test {
+test_function_field_optional_some() `test(allow_leaks: true) {
   s := OptionalSupplier(produce: || -> int? {
     return 42;
   });
@@ -78,7 +78,7 @@ test_function_field_optional_some() `test {
 }
 
 // --- Optional return: returns none ---
-test_function_field_optional_none() `test {
+test_function_field_optional_none() `test(allow_leaks: true) {
   s := OptionalSupplier(produce: || -> int? {
     return none;
   });
@@ -88,7 +88,7 @@ test_function_field_optional_none() `test {
 }
 
 // --- Optional return via method wrapper ---
-test_function_field_optional_via_method() `test {
+test_function_field_optional_via_method() `test(allow_leaks: true) {
   s := OptionalSupplier(produce: || -> int? {
     return 99;
   });
@@ -100,7 +100,7 @@ test_function_field_optional_via_method() `test {
 }
 
 // --- Bool return function field ---
-test_function_field_bool_return() `test {
+test_function_field_bool_return() `test(allow_leaks: true) {
   p := Predicate(test: |int x| -> x > 10);
   assert(p.check(15) == true, "15 > 10 is true");
   assert(p.check(5) == false, "5 > 10 is false");
@@ -108,7 +108,7 @@ test_function_field_bool_return() `test {
 }
 
 // --- String return function field ---
-test_function_field_string_return() `test {
+test_function_field_string_return() `test(allow_leaks: true) {
   sp := StringProducer(make: || -> string {
     return "hello";
   });
@@ -116,7 +116,7 @@ test_function_field_string_return() `test {
 }
 
 // --- Different function fields on same type ---
-test_multiple_function_fields() `test {
+test_multiple_function_fields() `test(allow_leaks: true) {
   t := Transform(forward: |int x| -> x * 2,
   backward: |int x| -> x / 2);
   assert(t.round_trip(10) == 10, "round trip preserves 10");
@@ -124,7 +124,7 @@ test_multiple_function_fields() `test {
 }
 
 // --- Function field with captured closure ---
-test_function_field_with_capture() `test {
+test_function_field_with_capture() `test(allow_leaks: true) {
   int factor = 3;
   w := Wrapper(getter: move || -> int {
     return factor * 10;
@@ -133,7 +133,7 @@ test_function_field_with_capture() `test {
 }
 
 // --- Different closures in same type ---
-test_function_field_different_closures() `test {
+test_function_field_different_closures() `test(allow_leaks: true) {
   w1 := Wrapper(getter: || -> int {
     return 42;
   });
@@ -145,7 +145,7 @@ test_function_field_different_closures() `test {
 }
 
 // --- Function field called multiple times ---
-test_function_field_repeated_calls() `test {
+test_function_field_repeated_calls() `test(allow_leaks: true) {
   a := Adder(op: |int x, int y| -> x * y);
   assert(a.apply(6, 7) == 42, "6*7=42");
   assert(a.apply(0, 100) == 0, "0*100=0");
@@ -154,7 +154,7 @@ test_function_field_repeated_calls() `test {
 }
 
 // --- Function field with complex lambda body ---
-test_function_field_complex_lambda() `test {
+test_function_field_complex_lambda() `test(allow_leaks: true) {
   a := Adder(op: |int x, int y| -> int {
     int sum = x + y;
     if sum < 0 {

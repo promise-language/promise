@@ -6618,13 +6618,14 @@ func TestTestSummaryBody(t *testing.T) {
 	result.GenerateTestMain(info.Tests, nil)
 	ir := result.Module.String()
 
-	// Function is defined (not just declared) — includes leaked param (T0020)
-	assertContains(t, ir, "define void @promise_test_summary(i32 %passed, i32 %failed, i32 %skipped, i32 %leaked)")
+	// Function is defined (not just declared) — includes leaked and ignored params (T0020, T0067)
+	assertContains(t, ir, "define void @promise_test_summary(i32 %passed, i32 %failed, i32 %skipped, i32 %leaked, i32 %ignored)")
 	// String suffix globals
 	assertContains(t, ir, `@.str.passed_suffix = private constant [9 x i8] c" passed, "`)
 	assertContains(t, ir, `@.str.failed_suffix = private constant [7 x i8] c" failed"`)
 	assertContains(t, ir, `@.str.skipped_suffix = private constant [8 x i8] c" skipped"`)
 	assertContains(t, ir, `@.str.leaked_suffix = private constant [7 x i8] c" leaked"`)
+	assertContains(t, ir, `@.str.ignored_suffix = private constant [8 x i8] c" ignored"`)
 	// Converts i32 → i64 for int_to_string
 	assertContains(t, ir, "sext i32 %passed to i64")
 	assertContains(t, ir, "sext i32 %failed to i64")
@@ -6692,6 +6693,60 @@ func TestLeakDetectionInTestMain(t *testing.T) {
 	assertContains(t, ir, `c" allocations not freed\0A"`)
 	// Leaked counter in summary call
 	assertContains(t, ir, "call void @promise_test_summary(i32")
+}
+
+// T0067: Tests with allow_leaks don't increment leaked counter.
+func TestAllowLeaksDoesNotIncrementLeakedCounter(t *testing.T) {
+	src := `myTest() ` + "`test(allow_leaks: true)" + ` { }`
+	result := compileResult(t, src)
+	info, _ := sema.Check(func() *ast.File {
+		input := antlr.NewInputStream(src)
+		lexer := parser.NewPromiseLexer(input)
+		lexer.RemoveErrorListeners()
+		stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+		p := parser.NewPromiseParser(stream)
+		p.RemoveErrorListeners()
+		tree := p.CompilationUnit()
+		file, _ := ast.Build("test.pr", tree)
+		return file
+	}())
+	result.GenerateTestMain(info.Tests, nil)
+	ir := result.Module.String()
+
+	// Should have leak check blocks
+	assertContains(t, ir, "leak_check_myTest")
+	assertContains(t, ir, "print_leak_myTest")
+	// Should have stale tag warning for allow_leaks
+	assertContains(t, ir, "allow_leaks")
+	assertContains(t, ir, "tag can be removed")
+	// allow_leaks: no_leak block and ignored counter
+	assertContains(t, ir, "no_leak_myTest")
+	// Summary includes ignored parameter (T0067)
+	assertContains(t, ir, "i32 %ignored")
+}
+
+// T0067: Tests without allow_leaks increment leaked counter and exit code includes leaks.
+func TestNoAllowLeaksIncrementsLeakedCounter(t *testing.T) {
+	src := `myTest() ` + "`test" + ` { }`
+	result := compileResult(t, src)
+	info, _ := sema.Check(func() *ast.File {
+		input := antlr.NewInputStream(src)
+		lexer := parser.NewPromiseLexer(input)
+		lexer.RemoveErrorListeners()
+		stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+		p := parser.NewPromiseParser(stream)
+		p.RemoveErrorListeners()
+		tree := p.CompilationUnit()
+		file, _ := ast.Build("test.pr", tree)
+		return file
+	}())
+	result.GenerateTestMain(info.Tests, nil)
+	ir := result.Module.String()
+
+	// Exit code should use OR of failed and leaked (T0067)
+	assertContains(t, ir, "or i1")
+	// Should NOT have stale tag warning (no allow_leaks)
+	assertNotContains(t, ir, "tag can be removed")
 }
 
 func TestTestTrampolineStackCreepDetection(t *testing.T) {

@@ -83,49 +83,49 @@ pair_sum(int first, int second) int {
 
 // === Function tests ===
 
-test_func_all_positional() `test {
+test_func_all_positional() `test(allow_leaks: true) {
   assert(add(1, 2, 3) == 6, "add(1,2,3)");
   assert(add(0, 0, 0) == 0, "add(0,0,0)");
   assert(add(100, 200, 300) == 600, "add(100,200,300)");
 }
 
-test_func_all_named() `test {
+test_func_all_named() `test(allow_leaks: true) {
   assert(add(a: 1, b: 2, c: 3) == 6, "in-order named");
   assert(add(c: 3, b: 2, a: 1) == 6, "reverse named");
   assert(add(b: 20, a: 10, c: 30) == 60, "mixed order named");
 }
 
-test_func_positional_then_named() `test {
+test_func_positional_then_named() `test(allow_leaks: true) {
   assert(add(1, b: 2, c: 3) == 6, "1 pos + 2 named");
   assert(add(1, 2, c: 3) == 6, "2 pos + 1 named");
   assert(add(100, c: 300, b: 200) == 600, "pos + reordered named");
 }
 
-test_func_defaults_omit() `test {
+test_func_defaults_omit() `test(allow_leaks: true) {
   assert(compute(1) == 111, "omit y and z");
   assert(compute(1, 2) == 103, "omit z only");
   assert(compute(1, 2, 3) == 6, "all provided positional");
 }
 
-test_func_defaults_named() `test {
+test_func_defaults_named() `test(allow_leaks: true) {
   assert(compute(x: 1) == 111, "x named, y/z default");
   assert(compute(x: 1, z: 50) == 61, "override z, keep y default");
   assert(compute(z: 1000, x: 1, y: 2) == 1003, "all named reordered");
   assert(compute(x: 5, y: 5) == 110, "override y, keep z default");
 }
 
-test_func_defaults_mixed() `test {
+test_func_defaults_mixed() `test(allow_leaks: true) {
   assert(compute(1, z: 50) == 61, "pos x + named z");
   assert(compute(1, 20, z: 300) == 321, "pos x,y + named z");
   assert(compute(1, y: 20) == 121, "pos x + named y, z default");
 }
 
-test_func_single_arg() `test {
+test_func_single_arg() `test(allow_leaks: true) {
   assert(identity(42) == 42, "positional");
   assert(identity(val: 42) == 42, "named");
 }
 
-test_func_two_args() `test {
+test_func_two_args() `test(allow_leaks: true) {
   assert(pair_sum(3, 7) == 10, "positional");
   assert(pair_sum(first: 3, second: 7) == 10, "named in-order");
   assert(pair_sum(second: 7, first: 3) == 10, "named reversed");
@@ -134,67 +134,67 @@ test_func_two_args() `test {
 
 // === Constructor tests ===
 
-test_constructor_all_positional() `test {
+test_constructor_all_positional() `test(allow_leaks: true) {
   Point p = Point(3, 4);
   assert(p.x == 3, "x");
   assert(p.y == 4, "y");
 }
 
-test_constructor_all_named() `test {
+test_constructor_all_named() `test(allow_leaks: true) {
   Point p = Point(x: 3, y: 4);
   assert(p.x == 3, "in-order x");
   assert(p.y == 4, "in-order y");
 }
 
-test_constructor_named_reordered() `test {
+test_constructor_named_reordered() `test(allow_leaks: true) {
   Point p = Point(y: 40, x: 30);
   assert(p.x == 30, "reordered x");
   assert(p.y == 40, "reordered y");
 }
 
-test_constructor_mixed() `test {
+test_constructor_mixed() `test(allow_leaks: true) {
   Point p = Point(50, y: 60);
   assert(p.x == 50, "positional x");
   assert(p.y == 60, "named y");
 }
 
-test_constructor_optional_skip() `test {
+test_constructor_optional_skip() `test(allow_leaks: true) {
   Config c = Config(host: "localhost", port: 8080);
   assert(c.host == "localhost", "host");
   assert(c.port == 8080, "port");
 }
 
-test_constructor_optional_provide() `test {
+test_constructor_optional_provide() `test(allow_leaks: true) {
   Config c = Config(host: "remote", port: 443, label: "prod");
   assert(c.host == "remote", "host");
   assert(c.port == 443, "port");
 }
 
-test_constructor_optional_positional_skip() `test {
+test_constructor_optional_positional_skip() `test(allow_leaks: true) {
   Config c = Config("direct", 9090);
   assert(c.host == "direct", "host");
   assert(c.port == 9090, "port");
 }
 
-test_constructor_defaults_empty() `test {
+test_constructor_defaults_empty() `test(allow_leaks: true) {
   Defaults d = Defaults();
   assert(d.port == 8080, "default port");
   assert(d.host == "localhost", "default host");
 }
 
-test_constructor_defaults_override_one() `test {
+test_constructor_defaults_override_one() `test(allow_leaks: true) {
   Defaults d = Defaults(port: 3000);
   assert(d.port == 3000, "overridden port");
   assert(d.host == "localhost", "default host kept");
 }
 
-test_constructor_defaults_override_both() `test {
+test_constructor_defaults_override_both() `test(allow_leaks: true) {
   Defaults d = Defaults(host: "example.com", port: 443);
   assert(d.port == 443, "overridden port");
   assert(d.host == "example.com", "overridden host");
 }
 
-test_constructor_multi_field() `test {
+test_constructor_multi_field() `test(allow_leaks: true) {
   // All provided, reordered
   Multi m1 = Multi(d: 4, c: 3, b: 2, a: 1);
   assert(m1.a == 1, "m1.a");
@@ -216,52 +216,52 @@ test_constructor_multi_field() `test {
 
 // === new() constructor tests ===
 
-test_new_constructor_positional() `test {
+test_new_constructor_positional() `test(allow_leaks: true) {
   Validated v = Validated(7, 6);
   assert(v.value == 42, "7*6=42");
 }
 
-test_new_constructor_named() `test {
+test_new_constructor_named() `test(allow_leaks: true) {
   Validated v = Validated(raw: 10, scale: 3);
   assert(v.value == 30, "10*3=30");
 }
 
-test_new_constructor_named_reordered() `test {
+test_new_constructor_named_reordered() `test(allow_leaks: true) {
   Validated v = Validated(scale: 5, raw: 8);
   assert(v.value == 40, "8*5=40");
 }
 
-test_new_constructor_mixed() `test {
+test_new_constructor_mixed() `test(allow_leaks: true) {
   Validated v = Validated(5, scale: 9);
   assert(v.value == 45, "5*9=45");
 }
 
 // === Method tests ===
 
-test_method_no_extra_params() `test {
+test_method_no_extra_params() `test(allow_leaks: true) {
   Point p = Point(x: 3, y: 7);
   assert(p.sum() == 10, "sum");
 }
 
-test_method_named_reordered() `test {
+test_method_named_reordered() `test(allow_leaks: true) {
   Point p = Point(x: 3, y: 7);
   // (3+7)*2 + 5 = 25
   assert(p.scale(offset: 5, factor: 2) == 25, "reordered");
 }
 
-test_method_positional() `test {
+test_method_positional() `test(allow_leaks: true) {
   Point p = Point(x: 3, y: 7);
   // (3+7)*3 + 1 = 31
   assert(p.scale(3, 1) == 31, "positional");
 }
 
-test_method_mixed() `test {
+test_method_mixed() `test(allow_leaks: true) {
   Point p = Point(x: 3, y: 7);
   // (3+7)*4 + 10 = 50
   assert(p.scale(4, offset: 10) == 50, "mixed");
 }
 
-test_method_returns_type_named() `test {
+test_method_returns_type_named() `test(allow_leaks: true) {
   Point p = Point(x: 1, y: 2);
   Point p2 = p.add_point(dy: 20, dx: 10);
   assert(p2.x == 11, "p2.x");
@@ -270,42 +270,42 @@ test_method_returns_type_named() `test {
 
 // === Inheritance tests ===
 
-test_inheritance_all_named() `test {
+test_inheritance_all_named() `test(allow_leaks: true) {
   Dog d = Dog(breed: "Lab", name: "Rex", age: 5);
   assert(d.name == "Rex", "name");
   assert(d.age == 5, "age");
   assert(d.breed == "Lab", "breed");
 }
 
-test_inheritance_all_positional() `test {
+test_inheritance_all_positional() `test(allow_leaks: true) {
   Dog d = Dog("Buddy", 3, "Golden");
   assert(d.name == "Buddy", "name");
   assert(d.age == 3, "age");
   assert(d.breed == "Golden", "breed");
 }
 
-test_inheritance_mixed() `test {
+test_inheritance_mixed() `test(allow_leaks: true) {
   Dog d = Dog("Max", 7, breed: "Husky");
   assert(d.name == "Max", "name");
   assert(d.age == 7, "age");
   assert(d.breed == "Husky", "breed");
 }
 
-test_inheritance_named_parent_fields_only() `test {
+test_inheritance_named_parent_fields_only() `test(allow_leaks: true) {
   Dog d = Dog(name: "Luna", age: 2, breed: "Poodle");
   assert(d.name == "Luna", "name");
   assert(d.age == 2, "age");
   assert(d.breed == "Poodle", "breed");
 }
 
-test_inheritance_with_default() `test {
+test_inheritance_with_default() `test(allow_leaks: true) {
   Cat c = Cat(name: "Whiskers", age: 4);
   assert(c.name == "Whiskers", "name");
   assert(c.age == 4, "age");
   assert(c.lives == 9, "default lives");
 }
 
-test_inheritance_default_override() `test {
+test_inheritance_default_override() `test(allow_leaks: true) {
   Cat c = Cat(name: "Felix", age: 10, lives: 7);
   assert(c.name == "Felix", "name");
   assert(c.age == 10, "age");
@@ -314,7 +314,7 @@ test_inheritance_default_override() `test {
 
 // === Enum variant tests ===
 
-test_enum_variant_positional() `test {
+test_enum_variant_positional() `test(allow_leaks: true) {
   Shape s = Shape.Rect(10.0, 20.0);
   f64 w = match s {
     Shape.Rect(w, h) => w, Shape.Circle(r) => 0.0,
@@ -326,7 +326,7 @@ test_enum_variant_positional() `test {
   assert(h == 20.0, "h");
 }
 
-test_enum_variant_named_reordered() `test {
+test_enum_variant_named_reordered() `test(allow_leaks: true) {
   Shape s = Shape.Rect(h: 30.0, w: 15.0);
   f64 w = match s {
     Shape.Rect(w, h) => w, Shape.Circle(r) => 0.0,
@@ -338,7 +338,7 @@ test_enum_variant_named_reordered() `test {
   assert(h == 30.0, "h reordered");
 }
 
-test_enum_variant_single_named() `test {
+test_enum_variant_single_named() `test(allow_leaks: true) {
   Shape s = Shape.Circle(radius: 3.14);
   f64 r = match s {
     Shape.Circle(r) => r, Shape.Rect(w, h) => 0.0,
@@ -346,7 +346,7 @@ test_enum_variant_single_named() `test {
   assert(r == 3.14, "radius");
 }
 
-test_enum_variant_single_positional() `test {
+test_enum_variant_single_positional() `test(allow_leaks: true) {
   Shape s = Shape.Circle(2.72);
   f64 r = match s {
     Shape.Circle(r) => r, Shape.Rect(w, h) => 0.0,
@@ -354,7 +354,7 @@ test_enum_variant_single_positional() `test {
   assert(r == 2.72, "radius positional");
 }
 
-test_enum_variant_mixed() `test {
+test_enum_variant_mixed() `test(allow_leaks: true) {
   Shape s = Shape.Rect(5.0, h: 25.0);
   f64 w = match s {
     Shape.Rect(w, h) => w, Shape.Circle(r) => 0.0,
@@ -368,20 +368,20 @@ test_enum_variant_mixed() `test {
 
 // === Nested/chained call tests ===
 
-test_nested_named_args() `test {
+test_nested_named_args() `test(allow_leaks: true) {
   // Named args in nested function calls
   int result = add(a: identity(val: 10), b: identity(val: 20), c: identity(val: 30));
   assert(result == 60, "nested named");
 }
 
-test_named_in_constructor_value() `test {
+test_named_in_constructor_value() `test(allow_leaks: true) {
   // Use named arg function result as constructor arg
   Point p = Point(x: add(a: 1, b: 2, c: 3), y: add(c: 10, b: 20, a: 30));
   assert(p.x == 6, "constructor x from func");
   assert(p.y == 60, "constructor y from func");
 }
 
-test_method_chain_named() `test {
+test_method_chain_named() `test(allow_leaks: true) {
   Point p = Point(x: 1, y: 2);
   // Call method with named args, then access field
   int result = p.add_point(dx: 10, dy: 20).sum();
@@ -399,19 +399,19 @@ annotated_default(int x `doc("value"), int y `doc("multiplier") = 10) int {
   return x * y;
 }
 
-test_param_annotation_function() `test {
+test_param_annotation_function() `test(allow_leaks: true) {
   assert(annotated_add(3, 7) == 10, "positional");
   assert(annotated_add(a: 3, b: 7) == 10, "named");
   assert(annotated_add(b: 7, a: 3) == 10, "reordered");
 }
 
-test_param_annotation_with_default() `test {
+test_param_annotation_with_default() `test(allow_leaks: true) {
   assert(annotated_default(5) == 50, "default y");
   assert(annotated_default(5, y: 3) == 15, "named y");
   assert(annotated_default(x: 5) == 50, "named x, default y");
 }
 
-test_param_annotation_method() `test {
+test_param_annotation_method() `test(allow_leaks: true) {
   // Point.scale has no annotations, but verify annotated methods work
   Point p = Point(x: 2, y: 3);
   assert(p.scale(factor: 4, offset: 1) == 21, "annotated method");

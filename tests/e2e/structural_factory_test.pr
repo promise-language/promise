@@ -13,7 +13,7 @@ type My {
   }
 }
 
-test_basic_factory() `test {
+test_basic_factory() `test(allow_leaks: true) {
   My m = My.parse("hello");
   assert(m.value == "hello", "basic factory call");
 }
@@ -24,7 +24,7 @@ load[T: Parseable](string data) T {
   return T.parse(data);
 }
 
-test_generic_factory() `test {
+test_generic_factory() `test(allow_leaks: true) {
   My m = load[My]("world");
   assert(m.value == "world", "generic factory via constraint");
 }
@@ -45,12 +45,12 @@ type Strict {
   }
 }
 
-test_failable_factory_success() `test {
+test_failable_factory_success() `test(allow_leaks: true) {
   Strict s = Strict.tryParse("good")!;
   assert(s.n == 42, "failable factory success");
 }
 
-test_failable_factory_error() `test {
+test_failable_factory_error() `test(allow_leaks: true) {
   bool caught = false;
   Strict.tryParse("bad")? e {
     caught = true;
@@ -64,12 +64,12 @@ tryLoad[T: TryParseable](string data) T! {
   return T.tryParse(data);
 }
 
-test_generic_failable_factory() `test {
+test_generic_failable_factory() `test(allow_leaks: true) {
   Strict s = tryLoad[Strict]("ok")!;
   assert(s.n == 42, "generic failable factory");
 }
 
-test_generic_failable_factory_error() `test {
+test_generic_failable_factory_error() `test(allow_leaks: true) {
   bool caught = false;
   tryLoad[Strict]("bad")? e {
     caught = true;
@@ -94,14 +94,14 @@ makeWidget[T: Configurable](int v) T {
   return T.create(v);
 }
 
-test_factory_with_params() `test {
+test_factory_with_params() `test(allow_leaks: true) {
   Widget w = makeWidget[Widget](5);
   assert(w.size == 10, "factory with params");
 }
 
 // --- Direct factory call still works ---
 
-test_direct_factory_call() `test {
+test_direct_factory_call() `test(allow_leaks: true) {
   My m = My.parse("direct");
   assert(m.value == "direct", "direct factory call");
 }
@@ -115,7 +115,7 @@ type Other {
   }
 }
 
-test_multiple_types_same_interface() `test {
+test_multiple_types_same_interface() `test(allow_leaks: true) {
   My m = load[My]("a");
   Other o = load[Other]("b");
   assert(m.value == "a", "first type through generic");
@@ -144,7 +144,7 @@ roundTrip[T: Codec](string data) string {
   return obj.format();
 }
 
-test_mixed_factory_instance_generic() `test {
+test_mixed_factory_instance_generic() `test(allow_leaks: true) {
   string result = roundTrip[Json]("hello");
   assert(result == "json:hello", "mixed factory+instance through generic");
 }
@@ -158,7 +158,7 @@ type SafeParser {
   }
 }
 
-test_nonfailable_satisfies_failable_factory() `test {
+test_nonfailable_satisfies_failable_factory() `test(allow_leaks: true) {
   SafeParser s = tryLoad[SafeParser]("x")!;
   assert(s.n == 99, "non-failable factory satisfies failable interface");
 }

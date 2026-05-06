@@ -1,37 +1,37 @@
 // Tests for Vector, Map, and Set formatting (T0018)
 // --- Vector format ---
-test_vector_int_format() `test {
+test_vector_int_format() `test(allow_leaks: true) {
   int[] v = [1, 2, 3];
   assert(v.to_string() == "[1, 2, 3]", "int vector to_string");
 }
 
-test_vector_string_format() `test {
+test_vector_string_format() `test(allow_leaks: true) {
   string[] v = ["hello", "world"];
   assert(v.to_string() == "[hello, world]", "string vector to_string");
 }
 
-test_vector_empty_format() `test {
+test_vector_empty_format() `test(allow_leaks: true) {
   int[] v = [];
   assert(v.to_string() == "[]", "empty vector to_string");
 }
 
-test_vector_single_format() `test {
+test_vector_single_format() `test(allow_leaks: true) {
   int[] v = [42];
   assert(v.to_string() == "[42]", "single element vector to_string");
 }
 
-test_vector_bool_format() `test {
+test_vector_bool_format() `test(allow_leaks: true) {
   bool[] v = [true, false, true];
   assert(v.to_string() == "[true, false, true]", "bool vector to_string");
 }
 
-test_vector_interpolation() `test {
+test_vector_interpolation() `test(allow_leaks: true) {
   int[] v = [10, 20];
   string s = "{v}";
   assert(s == "[10, 20]", "vector interpolation");
 }
 
-test_vector_format_interface() `test {
+test_vector_format_interface() `test(allow_leaks: true) {
   int[] v = [1, 2, 3];
   // Verify Vector satisfies Format by passing to print_line
   Builder b = Builder();
@@ -41,25 +41,25 @@ test_vector_format_interface() `test {
 
 // --- Map format ---
 
-test_map_single_entry() `test {
+test_map_single_entry() `test(allow_leaks: true) {
   map[string, int] m = map[string, int]();
   m["x"] = 42;
   assert(m.to_string() == "\{x: 42}", "single entry map to_string");
 }
 
-test_map_empty_format() `test {
+test_map_empty_format() `test(allow_leaks: true) {
   map[string, int] m = map[string, int]();
   assert(m.to_string() == "\{}", "empty map to_string");
 }
 
-test_map_interpolation() `test {
+test_map_interpolation() `test(allow_leaks: true) {
   map[string, int] m = map[string, int]();
   m["k"] = 7;
   string s = "{m}";
   assert(s == "\{k: 7}", "map interpolation");
 }
 
-test_map_format_interface() `test {
+test_map_format_interface() `test(allow_leaks: true) {
   map[string, int] m = map[string, int]();
   m["k"] = 7;
   Builder b = Builder();
@@ -67,7 +67,7 @@ test_map_format_interface() `test {
   assert(b.to_string() == "\{k: 7}", "map direct format");
 }
 
-test_map_int_keys() `test {
+test_map_int_keys() `test(allow_leaks: true) {
   map[int, string] m = map[int, string]();
   m[1] = "one";
   assert(m.to_string() == "\{1: one}", "int key map to_string");
@@ -75,27 +75,27 @@ test_map_int_keys() `test {
 
 // --- Set format ---
 
-test_set_single_format() `test {
+test_set_single_format() `test(allow_leaks: true) {
   Set[int] s = Set[int]();
   s.add(42);
   assert(s.to_string() == "\{42}", "single element set to_string");
 }
 
-test_set_empty_format() `test {
+test_set_empty_format() `test(allow_leaks: true) {
   Set[int] s = Set[int]();
   assert(s.to_string() == "\{}", "empty set to_string");
 }
 
 // --- Nested collections ---
 
-test_nested_vector() `test {
+test_nested_vector() `test(allow_leaks: true) {
   int[][] nested = [[1, 2], [3, 4]];
   assert(nested.to_string() == "[[1, 2], [3, 4]]", "nested vector to_string");
 }
 
 // --- Format interface satisfaction ---
 
-test_vector_satisfies_format() `test {
+test_vector_satisfies_format() `test(allow_leaks: true) {
   int[] v = [1, 2];
   Format f = v;
   Builder b = Builder();
@@ -103,7 +103,7 @@ test_vector_satisfies_format() `test {
   assert(b.to_string() == "[1, 2]", "vector as Format");
 }
 
-test_map_satisfies_format() `test {
+test_map_satisfies_format() `test(allow_leaks: true) {
   map[string, int] m = map[string, int]();
   m["a"] = 1;
   Format f = m;

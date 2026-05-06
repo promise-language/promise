@@ -314,6 +314,24 @@ func extractTestExclude(annotations []*ast.MetaAnnotation) []string {
 	return nil
 }
 
+// extractTestAllowLeaks extracts the allow_leaks flag from a `test(allow_leaks: true) annotation.
+// Returns true if the annotation has allow_leaks set to true.
+func extractTestAllowLeaks(annotations []*ast.MetaAnnotation) bool {
+	for _, ann := range annotations {
+		if ann.Name != "test" {
+			continue
+		}
+		for _, p := range ann.Params {
+			if p.Name == "allow_leaks" {
+				if bl, ok := p.Value.(*ast.BoolLit); ok && bl.Value {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // extractEmbedPath extracts the file path from a `embed("path") annotation.
 // Returns the path string and true if the annotation is present.
 func extractEmbedPath(annotations []*ast.MetaAnnotation) (string, bool) {

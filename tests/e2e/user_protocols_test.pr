@@ -12,19 +12,19 @@ type Color is Equal {
   }
 }
 
-test_equal_same_values() `test {
+test_equal_same_values() `test(allow_leaks: true) {
   Color a = Color(r: 255, g: 0, b: 0);
   Color b = Color(r: 255, g: 0, b: 0);
   assert(a == b, "same color == true");
 }
 
-test_equal_different_values() `test {
+test_equal_different_values() `test(allow_leaks: true) {
   Color a = Color(r: 255, g: 0, b: 0);
   Color b = Color(r: 0, g: 255, b: 0);
   assert(!(a == b), "different color == false");
 }
 
-test_not_equal_inherited_default() `test {
+test_not_equal_inherited_default() `test(allow_leaks: true) {
   // != comes from Equal's default method: !(this == other)
   Color a = Color(r: 255, g: 0, b: 0);
   Color b = Color(r: 0, g: 255, b: 0);
@@ -48,18 +48,18 @@ type Point is Equal {
   }
 }
 
-test_hash_deterministic() `test {
+test_hash_deterministic() `test(allow_leaks: true) {
   Point p = Point(x: 3, y: 4);
   assert(p.hash == p.hash, "hash is deterministic");
 }
 
-test_hash_equal_values_same_hash() `test {
+test_hash_equal_values_same_hash() `test(allow_leaks: true) {
   Point a = Point(x: 3, y: 4);
   Point b = Point(x: 3, y: 4);
   assert(a.hash == b.hash, "equal points have same hash");
 }
 
-test_hash_different_values_different_hash() `test {
+test_hash_different_values_different_hash() `test(allow_leaks: true) {
   Point a = Point(x: 3, y: 4);
   Point b = Point(x: 4, y: 3);
   assert(a.hash != b.hash, "different points have different hash");
@@ -67,7 +67,7 @@ test_hash_different_values_different_hash() `test {
 
 // --- User type as map key ---
 
-test_user_type_as_map_key_basic() `test {
+test_user_type_as_map_key_basic() `test(allow_leaks: true) {
   map[Point, string] m = {:};
   m[Point(x: 0, y: 0)] = "origin";
   m[Point(x: 1, y: 0)] = "unit x";
@@ -92,7 +92,7 @@ test_user_type_as_map_key_basic() `test {
   }
 }
 
-test_user_type_map_key_overwrite() `test {
+test_user_type_map_key_overwrite() `test(allow_leaks: true) {
   map[Point, int] m = {:};
   m[Point(x: 5, y: 5)] = 1;
   m[Point(x: 5, y: 5)] = 2; // overwrite same key
@@ -103,7 +103,7 @@ test_user_type_map_key_overwrite() `test {
   }
 }
 
-test_user_type_map_key_absent() `test {
+test_user_type_map_key_absent() `test(allow_leaks: true) {
   map[Point, int] m = {:};
   m[Point(x: 1, y: 1)] = 42;
   if _ := m[Point(x: 2, y: 2)] {
@@ -111,7 +111,7 @@ test_user_type_map_key_absent() `test {
   }
 }
 
-test_user_type_map_key_len() `test {
+test_user_type_map_key_len() `test(allow_leaks: true) {
   map[Point, bool] m = {:};
   m[Point(x: 0, y: 0)] = true;
   m[Point(x: 1, y: 0)] = true;
@@ -123,7 +123,7 @@ test_user_type_map_key_len() `test {
 
 // --- User type in Set ---
 
-test_user_type_in_set_basic() `test {
+test_user_type_in_set_basic() `test(allow_leaks: true) {
   Set[Point] s = Set[Point]();
   s.add(Point(x: 1, y: 2));
   s.add(Point(x: 3, y: 4));
@@ -132,7 +132,7 @@ test_user_type_in_set_basic() `test {
   assert(!s.contains(Point(x: 0, y: 0)), "set doesn't have (0,0)");
 }
 
-test_user_type_set_dedup() `test {
+test_user_type_set_dedup() `test(allow_leaks: true) {
   Set[Point] s = Set[Point]();
   s.add(Point(x: 7, y: 8));
   s.add(Point(x: 7, y: 8)); // duplicate
@@ -140,7 +140,7 @@ test_user_type_set_dedup() `test {
   assert(s.len == 1, "set deduplicates equal points");
 }
 
-test_user_type_set_remove() `test {
+test_user_type_set_remove() `test(allow_leaks: true) {
   Set[Point] s = Set[Point]();
   s.add(Point(x: 1, y: 1));
   s.add(Point(x: 2, y: 2));
@@ -165,7 +165,7 @@ type Priority is Ordered {
   }
 }
 
-test_ordered_less_than() `test {
+test_ordered_less_than() `test(allow_leaks: true) {
   Priority low = Priority(level: 1);
   Priority high = Priority(level: 5);
   assert(low < high, "low < high");
@@ -173,7 +173,7 @@ test_ordered_less_than() `test {
   assert(!(low < low), "low < low is false");
 }
 
-test_ordered_greater_than_default() `test {
+test_ordered_greater_than_default() `test(allow_leaks: true) {
   // > is a default method from Ordered: other < this
   Priority low = Priority(level: 1);
   Priority high = Priority(level: 5);
@@ -182,7 +182,7 @@ test_ordered_greater_than_default() `test {
   assert(!(low > low), "low > low is false");
 }
 
-test_ordered_less_equal_default() `test {
+test_ordered_less_equal_default() `test(allow_leaks: true) {
   // <= is a default method from Ordered: !(other < this)
   Priority low = Priority(level: 1);
   Priority mid = Priority(level: 3);
@@ -192,7 +192,7 @@ test_ordered_less_equal_default() `test {
   assert(!(high <= low), "high <= low is false");
 }
 
-test_ordered_greater_equal_default() `test {
+test_ordered_greater_equal_default() `test(allow_leaks: true) {
   // >= is a default method from Ordered: !(this < other)
   Priority low = Priority(level: 1);
   Priority high = Priority(level: 5);
@@ -201,7 +201,7 @@ test_ordered_greater_equal_default() `test {
   assert(!(low >= high), "low >= high is false");
 }
 
-test_ordered_not_equal_inherited() `test {
+test_ordered_not_equal_inherited() `test(allow_leaks: true) {
   // != comes from Equal (via Ordered is Equal)
   Priority a = Priority(level: 3);
   Priority b = Priority(level: 5);
@@ -212,7 +212,7 @@ test_ordered_not_equal_inherited() `test {
 
 // --- User type with sort ---
 
-test_sort_user_type() `test {
+test_sort_user_type() `test(allow_leaks: true) {
   Priority[] tasks = [Priority(level: 3),
   Priority(level: 1),
   Priority(level: 5),
@@ -227,7 +227,7 @@ test_sort_user_type() `test {
   assert(tasks[4].level == 5, "sorted[4] = 5");
 }
 
-test_sort_user_type_duplicates() `test {
+test_sort_user_type_duplicates() `test(allow_leaks: true) {
   Priority[] tasks = [Priority(level: 2),
   Priority(level: 1),
   Priority(level: 2),
@@ -240,13 +240,13 @@ test_sort_user_type_duplicates() `test {
   assert(tasks[3].level == 2, "fourth is 2");
 }
 
-test_sort_user_type_single() `test {
+test_sort_user_type_single() `test(allow_leaks: true) {
   Priority[] tasks = [Priority(level: 42)];
   tasks = sort[Priority](tasks);
   assert(tasks[0].level == 42, "single element unchanged");
 }
 
-test_sort_user_type_empty() `test {
+test_sort_user_type_empty() `test(allow_leaks: true) {
   Priority[] tasks = [];
   tasks = sort[Priority](tasks);
   assert(tasks.len == 0, "empty sort stays empty");
@@ -267,7 +267,7 @@ type Pair is Equal {
   }
 }
 
-test_pair_as_map_key() `test {
+test_pair_as_map_key() `test(allow_leaks: true) {
   map[Pair, string] m = {:};
   m[Pair(first: 1, second: 2)] = "one-two";
   m[Pair(first: 3, second: 4)] = "three-four";
@@ -289,7 +289,7 @@ test_pair_as_map_key() `test {
   }
 }
 
-test_pair_in_set() `test {
+test_pair_in_set() `test(allow_leaks: true) {
   Set[Pair] s = Set[Pair]();
   s.add(Pair(first: 10, second: 20));
   s.add(Pair(first: 10, second: 20)); // duplicate

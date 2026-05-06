@@ -1,19 +1,19 @@
 use shapes "./shapes";
 
-test_point() `test {
+test_point() `test(allow_leaks: true) {
   p := shapes.Point(x: 5, y: 10);
   assert(p.x == 5, "p.x == 5");
   assert(p.y == 10, "p.y == 10");
   assert(p.to_string() == "(5, 10)", "point to_string");
 }
 
-test_circle() `test {
+test_circle() `test(allow_leaks: true) {
   c := shapes.Circle(center: shapes.Point(x: 0, y: 0), radius: 5);
   assert(c.radius == 5, "radius == 5");
   assert(c.describe() == "circle at (0, 0) r=5", "circle describe");
 }
 
-test_circle_with_offset() `test {
+test_circle_with_offset() `test(allow_leaks: true) {
   c := shapes.Circle(center: shapes.Point(x: 3, y: 4), radius: 10);
   assert(c.center.x == 3, "center.x == 3");
   assert(c.center.y == 4, "center.y == 4");

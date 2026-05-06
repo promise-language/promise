@@ -1,68 +1,68 @@
 // json_test.pr — Tests for JSON encoding and decoding
 // ── Encoder tests ───────────────────────────────────────────────────────────
-encode_int_test() `test {
+encode_int_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   enc.encode_int(42)!;
   assert(enc.to_string() == "42", "encode int");
 }
 
-encode_negative_int_test() `test {
+encode_negative_int_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   enc.encode_int(-7)!;
   assert(enc.to_string() == "-7", "encode negative int");
 }
 
-encode_uint_test() `test {
+encode_uint_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   enc.encode_uint(100u)!;
   assert(enc.to_string() == "100", "encode uint");
 }
 
-encode_f64_test() `test {
+encode_f64_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   enc.encode_f64(3.14)!;
   string s = enc.to_string();
   assert(s.starts_with("3.14"), "encode f64: {s}");
 }
 
-encode_bool_true_test() `test {
+encode_bool_true_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   enc.encode_bool(true)!;
   assert(enc.to_string() == "true", "encode true");
 }
 
-encode_bool_false_test() `test {
+encode_bool_false_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   enc.encode_bool(false)!;
   assert(enc.to_string() == "false", "encode false");
 }
 
-encode_string_test() `test {
+encode_string_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   enc.encode_string("hello")!;
   assert(enc.to_string() == "\"hello\"", "encode string");
 }
 
-encode_string_escapes_test() `test {
+encode_string_escapes_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   enc.encode_string("a\"b\\c\nd")!;
   assert(enc.to_string() == "\"a\\\"b\\\\c\\nd\"", "encode string escapes");
 }
 
-encode_none_test() `test {
+encode_none_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   enc.encode_none()!;
   assert(enc.to_string() == "null", "encode none");
 }
 
-encode_empty_object_test() `test {
+encode_empty_object_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   enc.begin_object(0)!;
   enc.end_object()!;
   assert(enc.to_string() == "\{}", "encode empty object");
 }
 
-encode_object_test() `test {
+encode_object_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   enc.begin_object(2)!;
   enc.encode_key("name")!;
@@ -73,14 +73,14 @@ encode_object_test() `test {
   assert(enc.to_string() == "\{\"name\":\"Alice\",\"age\":30}", "encode object");
 }
 
-encode_empty_array_test() `test {
+encode_empty_array_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   enc.begin_array(0)!;
   enc.end_array()!;
   assert(enc.to_string() == "[]", "encode empty array");
 }
 
-encode_array_test() `test {
+encode_array_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   enc.begin_array(3)!;
   enc.encode_int(1)!;
@@ -90,7 +90,7 @@ encode_array_test() `test {
   assert(enc.to_string() == "[1,2,3]", "encode array");
 }
 
-encode_nested_test() `test {
+encode_nested_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   enc.begin_object(1)!;
   enc.encode_key("items")!;
@@ -104,61 +104,61 @@ encode_nested_test() `test {
 
 // ── Decoder tests ───────────────────────────────────────────────────────────
 
-decode_int_test() `test {
+decode_int_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "42");
   int v = dec.decode_int()!;
   assert(v == 42, "decode int");
 }
 
-decode_negative_int_test() `test {
+decode_negative_int_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "-7");
   int v = dec.decode_int()!;
   assert(v == -7, "decode negative int");
 }
 
-decode_uint_test() `test {
+decode_uint_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "100");
   uint v = dec.decode_uint()!;
   assert(v == 100u, "decode uint");
 }
 
-decode_f64_test() `test {
+decode_f64_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "3.14");
   f64 v = dec.decode_f64()!;
   assert(v > 3.13 && v < 3.15, "decode f64");
 }
 
-decode_bool_true_test() `test {
+decode_bool_true_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "true");
   bool v = dec.decode_bool()!;
   assert(v == true, "decode true");
 }
 
-decode_bool_false_test() `test {
+decode_bool_false_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "false");
   bool v = dec.decode_bool()!;
   assert(v == false, "decode false");
 }
 
-decode_string_test() `test {
+decode_string_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "\"hello\"");
   string v = dec.decode_string()!;
   assert(v == "hello", "decode string");
 }
 
-decode_string_escapes_test() `test {
+decode_string_escapes_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "\"a\\\"b\\\\c\\nd\"");
   string v = dec.decode_string()!;
   assert(v == "a\"b\\c\nd", "decode string escapes");
 }
 
-decode_none_test() `test {
+decode_none_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "null");
   bool is_null = dec.decode_none()!;
   assert(is_null, "decode none");
 }
 
-decode_none_not_null_test() `test {
+decode_none_not_null_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "42");
   bool is_null = dec.decode_none()!;
   assert(!is_null, "decode none returns false for non-null");
@@ -166,7 +166,7 @@ decode_none_not_null_test() `test {
   assert(v == 42, "can still read value after decode_none returns false");
 }
 
-decode_object_test() `test {
+decode_object_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "\{\"name\":\"Alice\",\"age\":30}");
   dec.begin_object()!;
   string name = "";
@@ -190,7 +190,7 @@ decode_object_test() `test {
   assert(age == 30, "decode object age");
 }
 
-decode_empty_object_test() `test {
+decode_empty_object_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "\{}");
   dec.begin_object()!;
   string? key = dec.next_key()!;
@@ -198,7 +198,7 @@ decode_empty_object_test() `test {
   dec.end_object()!;
 }
 
-decode_array_test() `test {
+decode_array_test() `test(allow_leaks: true) {
   // Test array via a wrapping object
   JsonDecoder dec = JsonDecoder(data: "[10,20,30]");
   dec.begin_array()!;
@@ -221,20 +221,20 @@ decode_array_test() `test {
   assert(c == 30, "decode array[2]");
 }
 
-decode_empty_array_test() `test {
+decode_empty_array_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "[]");
   dec.begin_array()!;
   dec.end_array()!;
 }
 
-decode_whitespace_test() `test {
+decode_whitespace_test() `test(allow_leaks: true) {
   // Test that decoder handles whitespace around scalar values
   JsonDecoder dec = JsonDecoder(data: "  42  ");
   int v = dec.decode_int()!;
   assert(v == 42, "whitespace: value is 42");
 }
 
-skip_value_test() `test {
+skip_value_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "\{\"a\":1,\"b\":\{\"nested\":true},\"c\":3}");
   dec.begin_object()!;
   int c_val = 0;
@@ -256,28 +256,28 @@ skip_value_test() `test {
 
 // ── Round-trip via Encodable/Decodable on primitives ────────────────────────
 
-round_trip_int_test() `test {
+round_trip_int_test() `test(allow_leaks: true) {
   string s = encode_string[int](42)!;
   assert(s == "42", "round trip int encode");
   int v = decode_string[int](s)!;
   assert(v == 42, "round trip int decode");
 }
 
-round_trip_bool_test() `test {
+round_trip_bool_test() `test(allow_leaks: true) {
   string s = encode_string[bool](true)!;
   assert(s == "true", "round trip bool encode");
   bool v = decode_string[bool](s)!;
   assert(v == true, "round trip bool decode");
 }
 
-round_trip_string_test() `test {
+round_trip_string_test() `test(allow_leaks: true) {
   string s = encode_string[string]("hello world")!;
   assert(s == "\"hello world\"", "round trip string encode");
   string v = decode_string[string](s)!;
   assert(v == "hello world", "round trip string decode");
 }
 
-round_trip_f64_test() `test {
+round_trip_f64_test() `test(allow_leaks: true) {
   string s = encode_string[f64](2.5)!;
   f64 v = decode_string[f64](s)!;
   assert(v == 2.5, "round trip f64");
@@ -285,14 +285,14 @@ round_trip_f64_test() `test {
 
 // ── Round-trip: sized integer types ──────────────────────────────────────────
 
-round_trip_uint_test() `test {
+round_trip_uint_test() `test(allow_leaks: true) {
   string s = encode_string[uint](999u)!;
   assert(s == "999", "round trip uint encode");
   uint v = decode_string[uint](s)!;
   assert(v == 999u, "round trip uint decode");
 }
 
-round_trip_i8_test() `test {
+round_trip_i8_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   i8 val = 42i8;
   val.encode(enc)!;
@@ -303,7 +303,7 @@ round_trip_i8_test() `test {
   assert(v == 42i8, "i8 decode");
 }
 
-round_trip_i32_test() `test {
+round_trip_i32_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   i32 val = -1000i32;
   val.encode(enc)!;
@@ -314,7 +314,7 @@ round_trip_i32_test() `test {
   assert(v == -1000i32, "i32 decode");
 }
 
-round_trip_u8_test() `test {
+round_trip_u8_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   u8 val = 200u8;
   val.encode(enc)!;
@@ -325,7 +325,7 @@ round_trip_u8_test() `test {
   assert(v == 200u8, "u8 decode");
 }
 
-round_trip_f32_test() `test {
+round_trip_f32_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   f32 val = 1.5f32;
   val.encode(enc)!;
@@ -336,7 +336,7 @@ round_trip_f32_test() `test {
   assert(v == 1.5f32, "f32 decode");
 }
 
-round_trip_char_test() `test {
+round_trip_char_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   char val = 'A';
   val.encode(enc)!;
@@ -349,25 +349,25 @@ round_trip_char_test() `test {
 
 // ── Sized type range checking ───────────────────────────────────────────────
 
-decode_i8_overflow_test() `test {
+decode_i8_overflow_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "200");
   (v, err) := i8.decode(dec);
   assert(err is present, "i8 decode 200 should overflow");
 }
 
-decode_i8_underflow_test() `test {
+decode_i8_underflow_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "-200");
   (v, err) := i8.decode(dec);
   assert(err is present, "i8 decode -200 should underflow");
 }
 
-decode_u8_overflow_test() `test {
+decode_u8_overflow_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "300");
   (v, err) := u8.decode(dec);
   assert(err is present, "u8 decode 300 should overflow");
 }
 
-decode_u16_overflow_test() `test {
+decode_u16_overflow_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "70000");
   (v, err) := u16.decode(dec);
   assert(err is present, "u16 decode 70000 should overflow");
@@ -375,25 +375,25 @@ decode_u16_overflow_test() `test {
 
 // ── Encoder edge cases ──────────────────────────────────────────────────────
 
-encode_empty_string_test() `test {
+encode_empty_string_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   enc.encode_string("")!;
   assert(enc.to_string() == "\"\"", "encode empty string");
 }
 
-encode_zero_int_test() `test {
+encode_zero_int_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   enc.encode_int(0)!;
   assert(enc.to_string() == "0", "encode zero int");
 }
 
-encode_negative_f64_test() `test {
+encode_negative_f64_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   enc.encode_f64(-2.5)!;
   assert(enc.to_string() == "-2.5", "encode negative f64");
 }
 
-encode_mixed_array_test() `test {
+encode_mixed_array_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   enc.begin_array(3)!;
   enc.encode_int(1)!;
@@ -403,7 +403,7 @@ encode_mixed_array_test() `test {
   assert(enc.to_string() == "[1,\"two\",true]", "encode mixed array");
 }
 
-encode_object_with_null_test() `test {
+encode_object_with_null_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   enc.begin_object(2)!;
   enc.encode_key("a")!;
@@ -416,31 +416,31 @@ encode_object_with_null_test() `test {
 
 // ── Decoder edge cases ──────────────────────────────────────────────────────
 
-decode_empty_string_test() `test {
+decode_empty_string_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "\"\"");
   string v = dec.decode_string()!;
   assert(v == "", "decode empty string");
 }
 
-decode_negative_f64_test() `test {
+decode_negative_f64_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "-2.5");
   f64 v = dec.decode_f64()!;
   assert(v == -2.5, "decode negative f64");
 }
 
-decode_scientific_notation_test() `test {
+decode_scientific_notation_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "1.5e2");
   f64 v = dec.decode_f64()!;
   assert(v == 150.0, "decode 1.5e2");
 }
 
-decode_zero_test() `test {
+decode_zero_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "0");
   int v = dec.decode_int()!;
   assert(v == 0, "decode zero");
 }
 
-decode_object_with_null_value_test() `test {
+decode_object_with_null_value_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "\{\"x\":null,\"y\":1}");
   dec.begin_object()!;
   bool x_is_null = false;
@@ -464,7 +464,7 @@ decode_object_with_null_value_test() `test {
   assert(y_val == 1, "value after null");
 }
 
-skip_value_array_test() `test {
+skip_value_array_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "\{\"a\":[1,2,3],\"b\":99}");
   dec.begin_object()!;
   int b_val = 0;
@@ -484,7 +484,7 @@ skip_value_array_test() `test {
   assert(b_val == 99, "skip array, got b=99");
 }
 
-skip_value_string_test() `test {
+skip_value_string_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "\{\"a\":\"hello\",\"b\":42}");
   dec.begin_object()!;
   int b_val = 0;
@@ -506,7 +506,7 @@ skip_value_string_test() `test {
 
 // ── Pretty printing ─────────────────────────────────────────────────────────
 
-encode_pretty_object_test() `test {
+encode_pretty_object_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder(pretty: true, indent: 2);
   enc.begin_object(1)!;
   enc.encode_key("x")!;
@@ -520,23 +520,23 @@ encode_pretty_object_test() `test {
 
 // ── Decode error tests ──────────────────────────────────────────────────────
 
-decode_error_invalid_bool_test() `test {
+decode_error_invalid_bool_test() `test(allow_leaks: true) {
   (v, err) := decode_string[int]("abc");
   assert(err is present, "invalid input should error");
 }
 
-decode_error_unterminated_string_test() `test {
+decode_error_unterminated_string_test() `test(allow_leaks: true) {
   (v, err) := decode_string[string]("\"unterminated");
   assert(err is present, "unterminated string should error");
 }
 
-decode_error_negative_uint_test() `test {
+decode_error_negative_uint_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "-5");
   (v, err) := dec.decode_uint();
   assert(err is present, "negative uint should error");
 }
 
-decode_error_position_test() `test {
+decode_error_position_test() `test(allow_leaks: true) {
   // DecodeError should include position information
   JsonDecoder dec = JsonDecoder(data: "   xyz");
   (v, err) := dec.decode_bool();
@@ -545,7 +545,7 @@ decode_error_position_test() `test {
 
 // ── JsonValue tests ─────────────────────────────────────────────────────────
 
-parse_value_null_test() `test {
+parse_value_null_test() `test(allow_leaks: true) {
   JsonValue v = parse_value("null")!;
   match v {
     JsonValue.Null => assert(true, "null"),
@@ -553,7 +553,7 @@ parse_value_null_test() `test {
   }
 }
 
-parse_value_bool_test() `test {
+parse_value_bool_test() `test(allow_leaks: true) {
   JsonValue v = parse_value("true")!;
   match v {
     JsonValue.Bool(b) => assert(b == true, "true"),
@@ -561,7 +561,7 @@ parse_value_bool_test() `test {
   }
 }
 
-parse_value_number_test() `test {
+parse_value_number_test() `test(allow_leaks: true) {
   JsonValue v = parse_value("42")!;
   match v {
     JsonValue.Number(n) => assert(n == 42.0, "number"),
@@ -569,7 +569,7 @@ parse_value_number_test() `test {
   }
 }
 
-parse_value_string_test() `test {
+parse_value_string_test() `test(allow_leaks: true) {
   JsonValue v = parse_value("\"hello\"")!;
   match v {
     JsonValue.Str(s) => assert(s == "hello", "string"),
@@ -577,7 +577,7 @@ parse_value_string_test() `test {
   }
 }
 
-parse_value_array_test() `test {
+parse_value_array_test() `test(allow_leaks: true) {
   JsonValue v = parse_value("[1,2,3]")!;
   match v {
     JsonValue.Array(items) => assert(items.len == 3, "array len"),
@@ -585,7 +585,7 @@ parse_value_array_test() `test {
   }
 }
 
-parse_value_empty_array_test() `test {
+parse_value_empty_array_test() `test(allow_leaks: true) {
   JsonValue v = parse_value("[]")!;
   match v {
     JsonValue.Array(items) => assert(items.len == 0, "empty array"),
@@ -593,7 +593,7 @@ parse_value_empty_array_test() `test {
   }
 }
 
-parse_value_object_test() `test {
+parse_value_object_test() `test(allow_leaks: true) {
   string data = "\{\"a\":1,\"b\":2}";
   JsonValue v = parse_value(data)!;
   match v {
@@ -602,28 +602,28 @@ parse_value_object_test() `test {
   }
 }
 
-format_value_null_test() `test {
+format_value_null_test() `test(allow_leaks: true) {
   string s = format_value(JsonValue.Null)!;
   assert(s == "null", "format null");
 }
 
-format_value_bool_test() `test {
+format_value_bool_test() `test(allow_leaks: true) {
   string s = format_value(JsonValue.Bool(true))!;
   assert(s == "true", "format true");
 }
 
-format_value_string_test() `test {
+format_value_string_test() `test(allow_leaks: true) {
   string s = format_value(JsonValue.Str("hello"))!;
   assert(s == "\"hello\"", "format string");
 }
 
-format_value_array_test() `test {
+format_value_array_test() `test(allow_leaks: true) {
   JsonValue arr = JsonValue.Array([JsonValue.Number(1.0), JsonValue.Number(2.0)]);
   string s = format_value(arr)!;
   assert(s == "[1,2]", "format array");
 }
 
-round_trip_value_test() `test {
+round_trip_value_test() `test(allow_leaks: true) {
   JsonValue arr = JsonValue.Array([JsonValue.Bool(true), JsonValue.Str("x")]);
   string s = format_value(arr)!;
   JsonValue v = parse_value(s)!;
@@ -633,7 +633,7 @@ round_trip_value_test() `test {
   }
 }
 
-nested_value_test() `test {
+nested_value_test() `test(allow_leaks: true) {
   // Nested: object containing array
   string data = "\{\"items\":[1,2],\"ok\":true}";
   JsonValue v = parse_value(data)!;
@@ -646,7 +646,7 @@ nested_value_test() `test {
   }
 }
 
-parse_value_false_test() `test {
+parse_value_false_test() `test(allow_leaks: true) {
   JsonValue v = parse_value("false")!;
   match v {
     JsonValue.Bool(b) => assert(b == false, "false"),
@@ -654,7 +654,7 @@ parse_value_false_test() `test {
   }
 }
 
-parse_value_negative_number_test() `test {
+parse_value_negative_number_test() `test(allow_leaks: true) {
   JsonValue v = parse_value("-7")!;
   match v {
     JsonValue.Number(n) => assert(n == -7.0, "negative"),
@@ -662,7 +662,7 @@ parse_value_negative_number_test() `test {
   }
 }
 
-parse_value_float_test() `test {
+parse_value_float_test() `test(allow_leaks: true) {
   JsonValue v = parse_value("3.14")!;
   match v {
     JsonValue.Number(n) => assert(n > 3.13 && n < 3.15, "float"),
@@ -670,7 +670,7 @@ parse_value_float_test() `test {
   }
 }
 
-parse_value_string_escapes_test() `test {
+parse_value_string_escapes_test() `test(allow_leaks: true) {
   JsonValue v = parse_value("\"a\\nb\"")!;
   match v {
     JsonValue.Str(s) => assert(s == "a\nb", "escape"),
@@ -678,7 +678,7 @@ parse_value_string_escapes_test() `test {
   }
 }
 
-parse_value_whitespace_test() `test {
+parse_value_whitespace_test() `test(allow_leaks: true) {
   JsonValue v = parse_value("  42  ")!;
   match v {
     JsonValue.Number(n) => assert(n == 42.0, "whitespace"),
@@ -686,7 +686,7 @@ parse_value_whitespace_test() `test {
   }
 }
 
-parse_value_nested_arrays_test() `test {
+parse_value_nested_arrays_test() `test(allow_leaks: true) {
   JsonValue v = parse_value("[[1,2],[3]]")!;
   match v {
     JsonValue.Array(items) => {
@@ -696,7 +696,7 @@ parse_value_nested_arrays_test() `test {
   }
 }
 
-parse_value_empty_object_test() `test {
+parse_value_empty_object_test() `test(allow_leaks: true) {
   JsonValue v = parse_value("\{}")!;
   match v {
     JsonValue.Object(fields) => assert(fields.len == 0, "empty obj"),
@@ -704,22 +704,22 @@ parse_value_empty_object_test() `test {
   }
 }
 
-format_value_false_test() `test {
+format_value_false_test() `test(allow_leaks: true) {
   string s = format_value(JsonValue.Bool(false))!;
   assert(s == "false", "format false");
 }
 
-format_value_number_test() `test {
+format_value_number_test() `test(allow_leaks: true) {
   string s = format_value(JsonValue.Number(42.0))!;
   assert(s == "42", "format number");
 }
 
-format_value_empty_array_test() `test {
+format_value_empty_array_test() `test(allow_leaks: true) {
   string s = format_value(JsonValue.Array(JsonValue[]()))!;
   assert(s == "[]", "format empty array");
 }
 
-format_value_object_test() `test {
+format_value_object_test() `test(allow_leaks: true) {
   map[string, JsonValue] f = {
     "a": JsonValue.Number(1.0)
   };
@@ -728,13 +728,13 @@ format_value_object_test() `test {
   assert(s.contains("\"a\":1"), "format object");
 }
 
-format_value_empty_object_test() `test {
+format_value_empty_object_test() `test(allow_leaks: true) {
   JsonValue obj = JsonValue.Object(map[string, JsonValue]());
   string s = format_value(obj)!;
   assert(s == "\{}", "format empty object");
 }
 
-round_trip_object_test() `test {
+round_trip_object_test() `test(allow_leaks: true) {
   map[string, JsonValue] f = {
     "x": JsonValue.Number(1.0), "y": JsonValue.Str("two")
   };
@@ -750,7 +750,7 @@ round_trip_object_test() `test {
   }
 }
 
-deep_nesting_test() `test {
+deep_nesting_test() `test(allow_leaks: true) {
   // array inside object: {"data":[1,true,"x"]}
   string data = "\{\"data\":[1,true,\"x\"]}";
   JsonValue v = parse_value(data)!;
@@ -766,7 +766,7 @@ deep_nesting_test() `test {
 
 // ── Object field value access tests ─────────────────────────────────────────
 
-object_field_value_access_test() `test {
+object_field_value_access_test() `test(allow_leaks: true) {
   // Verify we can look up values by key after parsing
   string data = "\{\"name\":\"Alice\",\"age\":30,\"active\":true}";
   JsonValue v = parse_value(data)!;
@@ -793,7 +793,7 @@ object_field_value_access_test() `test {
   }
 }
 
-nested_object_test() `test {
+nested_object_test() `test(allow_leaks: true) {
   // Object containing another object
   string data = "\{\"user\":\{\"name\":\"Bob\",\"score\":42}}";
   JsonValue v = parse_value(data)!;
@@ -817,7 +817,7 @@ nested_object_test() `test {
   }
 }
 
-round_trip_nested_object_test() `test {
+round_trip_nested_object_test() `test(allow_leaks: true) {
   // Build nested object, format, parse back, verify values
   map[string, JsonValue] inner = {
     "x": JsonValue.Number(1.0)
@@ -839,7 +839,7 @@ round_trip_nested_object_test() `test {
   }
 }
 
-object_duplicate_key_test() `test {
+object_duplicate_key_test() `test(allow_leaks: true) {
   // JSON with duplicate keys — last value wins (map semantics)
   string data = "\{\"a\":1,\"a\":2}";
   JsonValue v = parse_value(data)!;
@@ -856,7 +856,7 @@ object_duplicate_key_test() `test {
   }
 }
 
-object_null_value_test() `test {
+object_null_value_test() `test(allow_leaks: true) {
   string data = "\{\"x\":null}";
   JsonValue v = parse_value(data)!;
   match v {
@@ -873,19 +873,19 @@ object_null_value_test() `test {
 
 // ── String escape coverage ──────────────────────────────────────────────────
 
-encode_string_tab_test() `test {
+encode_string_tab_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   enc.encode_string("a\tb")!;
   assert(enc.to_string() == "\"a\\tb\"", "encode tab");
 }
 
-encode_string_cr_test() `test {
+encode_string_cr_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   enc.encode_string("a\rb")!;
   assert(enc.to_string() == "\"a\\rb\"", "encode cr");
 }
 
-encode_string_control_char_test() `test {
+encode_string_control_char_test() `test(allow_leaks: true) {
   // Control char below 0x20: should be \u00XX
   char nul = 0 as! char;
   JsonEncoder enc = JsonEncoder();
@@ -893,32 +893,32 @@ encode_string_control_char_test() `test {
   assert(enc.to_string() == "\"\\u0000\"", "encode control char");
 }
 
-decode_string_tab_test() `test {
+decode_string_tab_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "\"a\\tb\"");
   string v = dec.decode_string()!;
   assert(v == "a\tb", "decode tab");
 }
 
-decode_string_cr_test() `test {
+decode_string_cr_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "\"a\\rb\"");
   string v = dec.decode_string()!;
   assert(v == "a\rb", "decode cr");
 }
 
-decode_string_slash_test() `test {
+decode_string_slash_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "\"a\\/b\"");
   string v = dec.decode_string()!;
   assert(v == "a/b", "decode escaped slash");
 }
 
-decode_string_unicode_escape_test() `test {
+decode_string_unicode_escape_test() `test(allow_leaks: true) {
   // \u0041 = 'A'
   JsonDecoder dec = JsonDecoder(data: "\"\\u0041\"");
   string v = dec.decode_string()!;
   assert(v == "A", "decode unicode escape");
 }
 
-decode_string_backspace_formfeed_test() `test {
+decode_string_backspace_formfeed_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "\"\\b\\f\"");
   string v = dec.decode_string()!;
   assert(v.len == 2, "decode backspace+formfeed length");
@@ -926,7 +926,7 @@ decode_string_backspace_formfeed_test() `test {
 
 // ── Pretty printing coverage ────────────────────────────────────────────────
 
-encode_pretty_array_test() `test {
+encode_pretty_array_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder(pretty: true, indent: 2);
   enc.begin_array(2)!;
   enc.encode_int(1)!;
@@ -937,7 +937,7 @@ encode_pretty_array_test() `test {
   assert(result.contains("  1"), "pretty array has indented element");
 }
 
-encode_pretty_nested_test() `test {
+encode_pretty_nested_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder(pretty: true, indent: 2);
   enc.begin_object(1)!;
   enc.encode_key("items")!;
@@ -950,7 +950,7 @@ encode_pretty_nested_test() `test {
   assert(result.contains("    42"), "pretty nested: double-indented value");
 }
 
-format_value_pretty_test() `test {
+format_value_pretty_test() `test(allow_leaks: true) {
   map[string, JsonValue] f = {
     "key": JsonValue.Bool(true)
   };
@@ -960,7 +960,7 @@ format_value_pretty_test() `test {
   assert(s.contains("  \"key\""), "format_value_pretty has indented key");
 }
 
-encode_pretty_empty_object_test() `test {
+encode_pretty_empty_object_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder(pretty: true);
   enc.begin_object(0)!;
   enc.end_object()!;
@@ -970,7 +970,7 @@ encode_pretty_empty_object_test() `test {
   assert(!s.contains("  "), "pretty empty object no indented content");
 }
 
-encode_pretty_empty_array_test() `test {
+encode_pretty_empty_array_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder(pretty: true);
   enc.begin_array(0)!;
   enc.end_array()!;
@@ -981,7 +981,7 @@ encode_pretty_empty_array_test() `test {
 
 // ── Mixed structure coverage ────────────────────────────────────────────────
 
-parse_object_in_array_test() `test {
+parse_object_in_array_test() `test(allow_leaks: true) {
   // Array of objects
   JsonValue v = parse_value("[\{\"a\":1},\{\"b\":2}]")!;
   match v {
@@ -1004,7 +1004,7 @@ parse_object_in_array_test() `test {
   }
 }
 
-parse_heterogeneous_array_test() `test {
+parse_heterogeneous_array_test() `test(allow_leaks: true) {
   // Array with all JSON types
   JsonValue v = parse_value("[null,true,42,\"str\",[],\{}]")!;
   match v {
@@ -1039,7 +1039,7 @@ parse_heterogeneous_array_test() `test {
   }
 }
 
-round_trip_complex_test() `test {
+round_trip_complex_test() `test(allow_leaks: true) {
   // Complex structure: object with array of objects
   string data = "\{\"users\":[\{\"name\":\"A\",\"age\":1},\{\"name\":\"B\",\"age\":2}],\"count\":2}";
   JsonValue v = parse_value(data)!;
@@ -1062,7 +1062,7 @@ round_trip_complex_test() `test {
 
 // ── Decoder has_next_element array pattern ───────────────────────────────────
 
-decode_array_has_next_element_test() `test {
+decode_array_has_next_element_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "[10,20,30]");
   dec.begin_array()!;
   int[] vals = int[]();
@@ -1081,7 +1081,7 @@ decode_array_has_next_element_test() `test {
   assert(vals[2] == 30, "has_next: [2]");
 }
 
-decode_array_has_next_empty_test() `test {
+decode_array_has_next_empty_test() `test(allow_leaks: true) {
   JsonDecoder dec = JsonDecoder(data: "[]");
   dec.begin_array()!;
   bool more = dec.has_next_element()!;
@@ -1091,34 +1091,34 @@ decode_array_has_next_empty_test() `test {
 
 // ── parse_value error cases ─────────────────────────────────────────────────
 
-parse_value_error_empty_test() `test {
+parse_value_error_empty_test() `test(allow_leaks: true) {
   (v, err) := parse_value("");
   assert(err is present, "empty input should error");
 }
 
-parse_value_error_invalid_test() `test {
+parse_value_error_invalid_test() `test(allow_leaks: true) {
   (v, err) := parse_value("xyz");
   assert(err is present, "invalid token should error");
 }
 
-parse_value_error_unterminated_array_test() `test {
+parse_value_error_unterminated_array_test() `test(allow_leaks: true) {
   (v, err) := parse_value("[1,2");
   assert(err is present, "unterminated array should error");
 }
 
-parse_value_error_unterminated_object_test() `test {
+parse_value_error_unterminated_object_test() `test(allow_leaks: true) {
   (v, err) := parse_value("\{\"a\":1");
   assert(err is present, "unterminated object should error");
 }
 
-parse_value_error_unterminated_string_test() `test {
+parse_value_error_unterminated_string_test() `test(allow_leaks: true) {
   (v, err) := parse_value("\"hello");
   assert(err is present, "unterminated string should error");
 }
 
 // ── Whitespace tolerance ────────────────────────────────────────────────────
 
-parse_value_whitespace_object_test() `test {
+parse_value_whitespace_object_test() `test(allow_leaks: true) {
   // Generous whitespace
   string data = "  \{  \"a\"  :  1  ,  \"b\"  :  2  }  ";
   JsonValue v = parse_value(data)!;
@@ -1128,7 +1128,7 @@ parse_value_whitespace_object_test() `test {
   }
 }
 
-parse_value_whitespace_array_test() `test {
+parse_value_whitespace_array_test() `test(allow_leaks: true) {
   JsonValue v = parse_value("  [  1  ,  2  ,  3  ]  ")!;
   match v {
     JsonValue.Array(items) => assert(items.len == 3, "whitespace array: 3 items"),
@@ -1138,7 +1138,7 @@ parse_value_whitespace_array_test() `test {
 
 // ── Number edge cases ───────────────────────────────────────────────────────
 
-parse_value_zero_test() `test {
+parse_value_zero_test() `test(allow_leaks: true) {
   JsonValue v = parse_value("0")!;
   match v {
     JsonValue.Number(n) => assert(n == 0.0, "zero"),
@@ -1146,7 +1146,7 @@ parse_value_zero_test() `test {
   }
 }
 
-parse_value_exponent_test() `test {
+parse_value_exponent_test() `test(allow_leaks: true) {
   JsonValue v = parse_value("1e3")!;
   match v {
     JsonValue.Number(n) => assert(n == 1000.0, "1e3"),
@@ -1154,7 +1154,7 @@ parse_value_exponent_test() `test {
   }
 }
 
-parse_value_negative_exponent_test() `test {
+parse_value_negative_exponent_test() `test(allow_leaks: true) {
   JsonValue v = parse_value("1e-2")!;
   match v {
     JsonValue.Number(n) => assert(n > 0.009 && n < 0.011, "1e-2"),
@@ -1162,7 +1162,7 @@ parse_value_negative_exponent_test() `test {
   }
 }
 
-format_value_number_negative_test() `test {
+format_value_number_negative_test() `test(allow_leaks: true) {
   string s = format_value(JsonValue.Number(-3.5))!;
   assert(s == "-3.5", "format negative float");
 }
@@ -1171,37 +1171,37 @@ format_value_number_negative_test() `test {
 
 // Type-check getters
 
-is_null_test() `test {
+is_null_test() `test(allow_leaks: true) {
   assert(JsonValue.Null.is_null, "null is_null");
   assert(!JsonValue.Bool(true).is_null, "bool not is_null");
   assert(!JsonValue.Number(1.0).is_null, "number not is_null");
 }
 
-is_bool_test() `test {
+is_bool_test() `test(allow_leaks: true) {
   assert(JsonValue.Bool(true).is_bool, "bool is_bool");
   assert(!JsonValue.Null.is_bool, "null not is_bool");
   assert(!JsonValue.Str("x").is_bool, "str not is_bool");
 }
 
-is_number_test() `test {
+is_number_test() `test(allow_leaks: true) {
   assert(JsonValue.Number(42.0).is_number, "number is_number");
   assert(!JsonValue.Null.is_number, "null not is_number");
   assert(!JsonValue.Bool(false).is_number, "bool not is_number");
 }
 
-is_string_test() `test {
+is_string_test() `test(allow_leaks: true) {
   assert(JsonValue.Str("hello").is_string, "str is_string");
   assert(!JsonValue.Null.is_string, "null not is_string");
   assert(!JsonValue.Number(0.0).is_string, "number not is_string");
 }
 
-is_array_test() `test {
+is_array_test() `test(allow_leaks: true) {
   assert(JsonValue.Array(JsonValue[]()).is_array, "array is_array");
   assert(!JsonValue.Null.is_array, "null not is_array");
   assert(!JsonValue.Object(map[string, JsonValue]()).is_array, "object not is_array");
 }
 
-is_object_test() `test {
+is_object_test() `test(allow_leaks: true) {
   assert(JsonValue.Object(map[string, JsonValue]()).is_object, "object is_object");
   assert(!JsonValue.Null.is_object, "null not is_object");
   assert(!JsonValue.Array(JsonValue[]()).is_object, "array not is_object");
@@ -1209,7 +1209,7 @@ is_object_test() `test {
 
 // Value extraction methods
 
-as_bool_test() `test {
+as_bool_test() `test(allow_leaks: true) {
   bool? b = JsonValue.Bool(true).as_bool();
   assert(b is present, "as_bool present");
   assert(b! == true, "as_bool value");
@@ -1218,7 +1218,7 @@ as_bool_test() `test {
   assert(b2 is absent, "as_bool absent on null");
 }
 
-as_number_test() `test {
+as_number_test() `test(allow_leaks: true) {
   f64? n = JsonValue.Number(3.14).as_number();
   assert(n is present, "as_number present");
   assert(n! > 3.13 && n! < 3.15, "as_number value");
@@ -1227,7 +1227,7 @@ as_number_test() `test {
   assert(n2 is absent, "as_number absent on string");
 }
 
-as_string_test() `test {
+as_string_test() `test(allow_leaks: true) {
   string? s = JsonValue.Str("hello").as_string();
   assert(s is present, "as_string present");
   assert(s! == "hello", "as_string value");
@@ -1236,7 +1236,7 @@ as_string_test() `test {
   assert(s2 is absent, "as_string absent on number");
 }
 
-as_array_test() `test {
+as_array_test() `test(allow_leaks: true) {
   JsonValue[] items = [JsonValue.Number(1.0), JsonValue.Number(2.0)];
   JsonValue[]? arr = JsonValue.Array(items).as_array();
   assert(arr is present, "as_array present");
@@ -1246,7 +1246,7 @@ as_array_test() `test {
   assert(arr2 is absent, "as_array absent on null");
 }
 
-as_object_test() `test {
+as_object_test() `test(allow_leaks: true) {
   map[string, JsonValue] fields = {
     "a": JsonValue.Number(1.0)
   };
@@ -1260,7 +1260,7 @@ as_object_test() `test {
 
 // Convenience access methods
 
-get_method_test() `test {
+get_method_test() `test(allow_leaks: true) {
   map[string, JsonValue] fields = {
     "name": JsonValue.Str("Alice"),
     "age": JsonValue.Number(30.0),
@@ -1279,7 +1279,7 @@ get_method_test() `test {
   assert(bad is absent, "get on number is none");
 }
 
-at_method_test() `test {
+at_method_test() `test(allow_leaks: true) {
   JsonValue[] items = [JsonValue.Str("a"), JsonValue.Str("b"), JsonValue.Str("c")];
   JsonValue arr = JsonValue.Array(items);
 
@@ -1304,20 +1304,20 @@ at_method_test() `test {
 
 // Encoding/formatting methods
 
-encode_method_test() `test {
+encode_method_test() `test(allow_leaks: true) {
   JsonValue v = JsonValue.Array([JsonValue.Number(1.0), JsonValue.Bool(true)]);
   JsonEncoder enc = JsonEncoder();
   v.encode(enc)!;
   assert(enc.to_string() == "[1,true]", "encode method");
 }
 
-format_method_test() `test {
+format_method_test() `test(allow_leaks: true) {
   JsonValue v = JsonValue.Str("hello");
   string s = v.format()!;
   assert(s == "\"hello\"", "format method");
 }
 
-format_method_object_test() `test {
+format_method_object_test() `test(allow_leaks: true) {
   map[string, JsonValue] fields = {
     "x": JsonValue.Number(1.0)
   };
@@ -1326,7 +1326,7 @@ format_method_object_test() `test {
   assert(s.contains("\"x\":1"), "format object method");
 }
 
-format_pretty_method_test() `test {
+format_pretty_method_test() `test(allow_leaks: true) {
   map[string, JsonValue] fields = {
     "key": JsonValue.Bool(true)
   };
@@ -1336,7 +1336,7 @@ format_pretty_method_test() `test {
   assert(s.contains("  \"key\""), "format_pretty has indented key");
 }
 
-format_pretty_custom_indent_test() `test {
+format_pretty_custom_indent_test() `test(allow_leaks: true) {
   map[string, JsonValue] fields = {
     "a": JsonValue.Number(1.0)
   };
@@ -1347,7 +1347,7 @@ format_pretty_custom_indent_test() `test {
 
 // Round-trip with methods
 
-round_trip_method_test() `test {
+round_trip_method_test() `test(allow_leaks: true) {
   map[string, JsonValue] fields = {
     "items": JsonValue.Array([JsonValue.Number(1.0), JsonValue.Number(2.0)]),
     "ok": JsonValue.Bool(true),
@@ -1362,7 +1362,7 @@ round_trip_method_test() `test {
 
 // Chained method calls
 
-chained_access_test() `test {
+chained_access_test() `test(allow_leaks: true) {
   // Build: {"user": {"name": "Alice", "scores": [10, 20]}}
   map[string, JsonValue] user_fields = {
     "name": JsonValue.Str("Alice"),
@@ -1390,14 +1390,14 @@ chained_access_test() `test {
 
 // ── Edge cases for value extraction ──────────────────────────────────────────
 
-as_bool_false_test() `test {
+as_bool_false_test() `test(allow_leaks: true) {
   // Verify as_bool returns false (not just "present") for Bool(false)
   bool? b = JsonValue.Bool(false).as_bool();
   assert(b is present, "as_bool(false) present");
   assert(b! == false, "as_bool(false) value is false");
 }
 
-as_number_edge_cases_test() `test {
+as_number_edge_cases_test() `test(allow_leaks: true) {
   // Zero
   f64? z = JsonValue.Number(0.0).as_number();
   assert(z is present, "as_number(0) present");
@@ -1409,19 +1409,19 @@ as_number_edge_cases_test() `test {
   assert(neg! == -42.5, "as_number(-42.5) value");
 }
 
-as_string_empty_test() `test {
+as_string_empty_test() `test(allow_leaks: true) {
   string? s = JsonValue.Str("").as_string();
   assert(s is present, "as_string empty present");
   assert(s! == "", "as_string empty value");
 }
 
-as_array_empty_test() `test {
+as_array_empty_test() `test(allow_leaks: true) {
   JsonValue[]? arr = JsonValue.Array(JsonValue[]()).as_array();
   assert(arr is present, "as_array empty present");
   assert(arr!.len == 0, "as_array empty len");
 }
 
-as_object_empty_test() `test {
+as_object_empty_test() `test(allow_leaks: true) {
   map[string, JsonValue]? obj = JsonValue.Object(map[string, JsonValue]()).as_object();
   assert(obj is present, "as_object empty present");
   assert(obj!.len == 0, "as_object empty len");
@@ -1429,13 +1429,13 @@ as_object_empty_test() `test {
 
 // ── Edge cases for get/at ────────────────────────────────────────────────────
 
-get_empty_object_test() `test {
+get_empty_object_test() `test(allow_leaks: true) {
   JsonValue obj = JsonValue.Object(map[string, JsonValue]());
   JsonValue? v = obj.get("anything");
   assert(v is absent, "get on empty object is none");
 }
 
-at_empty_array_test() `test {
+at_empty_array_test() `test(allow_leaks: true) {
   JsonValue arr = JsonValue.Array(JsonValue[]());
   JsonValue? v = arr.at(0);
   assert(v is absent, "at(0) on empty array is none");
@@ -1443,32 +1443,32 @@ at_empty_array_test() `test {
 
 // ── Encode method with all variant types ─────────────────────────────────────
 
-encode_method_null_test() `test {
+encode_method_null_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   JsonValue.Null.encode(enc)!;
   assert(enc.to_string() == "null", "encode null");
 }
 
-encode_method_bool_test() `test {
+encode_method_bool_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   JsonValue.Bool(false).encode(enc)!;
   assert(enc.to_string() == "false", "encode false");
 }
 
-encode_method_number_test() `test {
+encode_method_number_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   JsonValue.Number(-3.14).encode(enc)!;
   string s = enc.to_string();
   assert(s.starts_with("-3.14"), "encode negative number");
 }
 
-encode_method_string_test() `test {
+encode_method_string_test() `test(allow_leaks: true) {
   JsonEncoder enc = JsonEncoder();
   JsonValue.Str("hello\nworld").encode(enc)!;
   assert(enc.to_string() == "\"hello\\nworld\"", "encode string with escape");
 }
 
-encode_method_nested_test() `test {
+encode_method_nested_test() `test(allow_leaks: true) {
   // {"items":[null,true],"count":2}
   map[string, JsonValue] fields = {
     "items": JsonValue.Array([JsonValue.Null, JsonValue.Bool(true)]),
@@ -1484,7 +1484,7 @@ encode_method_nested_test() `test {
 
 // ── format_pretty round-trip ─────────────────────────────────────────────────
 
-format_pretty_round_trip_test() `test {
+format_pretty_round_trip_test() `test(allow_leaks: true) {
   map[string, JsonValue] fields = {
     "name": JsonValue.Str("Alice"),
     "scores": JsonValue.Array([JsonValue.Number(10.0), JsonValue.Number(20.0)]),
@@ -1502,7 +1502,7 @@ format_pretty_round_trip_test() `test {
 
 // ── format for all variant types ─────────────────────────────────────────────
 
-format_method_all_variants_test() `test {
+format_method_all_variants_test() `test(allow_leaks: true) {
   assert(JsonValue.Null.format()! == "null", "format null");
   assert(JsonValue.Bool(true).format()! == "true", "format true");
   assert(JsonValue.Bool(false).format()! == "false", "format false");
@@ -1514,7 +1514,7 @@ format_method_all_variants_test() `test {
 
 // ── Parsed values with methods ───────────────────────────────────────────────
 
-parsed_value_methods_test() `test {
+parsed_value_methods_test() `test(allow_leaks: true) {
   // Verify methods work on values from parse_value, not just constructed values
   string data = "\{\"name\":\"Bob\",\"age\":30,\"tags\":[\"a\",\"b\"],\"active\":true}";
   JsonValue v = parse_value(data)!;

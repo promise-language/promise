@@ -32,7 +32,7 @@ try_auto_prop_void() bool {
   return false;
 }
 
-test_auto_propagate_void() `test {
+test_auto_propagate_void() `test(allow_leaks: true) {
   assert(try_auto_prop_void(), "void failable auto-propagates");
 }
 
@@ -48,7 +48,7 @@ try_auto_prop_nonvoid() bool {
   return false;
 }
 
-test_auto_propagate_nonvoid() `test {
+test_auto_propagate_nonvoid() `test(allow_leaks: true) {
   assert(try_auto_prop_nonvoid(), "non-void failable auto-propagates");
 }
 
@@ -58,7 +58,7 @@ auto_prop_success() int! {
   return 42;
 }
 
-test_auto_propagate_success() `test {
+test_auto_propagate_success() `test(allow_leaks: true) {
   int r = auto_prop_success()!;
   assert(r == 42, "auto-propagate success continues");
 }
@@ -70,7 +70,7 @@ multi_auto_prop() void! {
   void_ok();
 }
 
-test_multi_auto_propagate() `test {
+test_multi_auto_propagate() `test(allow_leaks: true) {
   multi_auto_prop()!;
 }
 
@@ -82,7 +82,7 @@ get_auto_prop_message() string {
   return "";
 }
 
-test_auto_propagate_preserves_message() `test {
+test_auto_propagate_preserves_message() `test(allow_leaks: true) {
   string msg = get_auto_prop_message();
   assert(msg == "void failed", "auto-propagated error preserves message");
 }
@@ -104,7 +104,7 @@ try_loop_auto_prop() bool {
   return false;
 }
 
-test_auto_propagate_in_loop() `test {
+test_auto_propagate_in_loop() `test(allow_leaks: true) {
   assert(try_loop_auto_prop(), "auto-propagate in loop works");
 }
 
@@ -112,7 +112,7 @@ test_auto_propagate_in_loop() `test {
 // Section 2: Failable result capture (val, err) := failable()
 // ============================================================
 
-test_result_capture_success() `test {
+test_result_capture_success() `test(allow_leaks: true) {
   (val, err) := parse_int("42");
   assert(val == 42, "captured value is 42");
   if err is present {
@@ -120,7 +120,7 @@ test_result_capture_success() `test {
   }
 }
 
-test_result_capture_error() `test {
+test_result_capture_error() `test(allow_leaks: true) {
   (val, err) := parse_int("bad");
   // val is zero-initialized on error
   assert(val == 0, "captured value is 0 on error");
@@ -131,7 +131,7 @@ test_result_capture_error() `test {
   }
 }
 
-test_result_capture_discard_value() `test {
+test_result_capture_discard_value() `test(allow_leaks: true) {
   (_, err) := parse_int("bad");
   if err is present {
     assert(err.message == "bad: bad", "discarded value, captured error");
@@ -140,20 +140,20 @@ test_result_capture_discard_value() `test {
   }
 }
 
-test_result_capture_discard_error() `test {
+test_result_capture_discard_error() `test(allow_leaks: true) {
   (val, _) := parse_int("42");
   assert(val == 42, "captured value, discarded error");
 }
 
 // Result capture with void failable
-test_void_result_capture_success() `test {
+test_void_result_capture_success() `test(allow_leaks: true) {
   (_, err) := void_ok();
   if err is present {
     assert(false, "void ok should have no error");
   }
 }
 
-test_void_result_capture_error() `test {
+test_void_result_capture_error() `test(allow_leaks: true) {
   (_, err) := void_fail();
   if err is present {
     assert(err.message == "void failed", "void error captured");
@@ -193,7 +193,7 @@ typed_handler_else_match() string {
   return "unreachable";
 }
 
-test_typed_handler_else_match() `test {
+test_typed_handler_else_match() `test(allow_leaks: true) {
   string r = typed_handler_else_match();
   assert(r == "io:disk full", "typed handler catches matching error");
 }
@@ -207,7 +207,7 @@ typed_handler_else_nomatch() string {
   return "unreachable";
 }
 
-test_typed_handler_else_nomatch() `test {
+test_typed_handler_else_nomatch() `test(allow_leaks: true) {
   string r = typed_handler_else_nomatch();
   assert(r == "other", "else clause catches non-matching error");
 }
@@ -222,7 +222,7 @@ typed_handler_else_binding() string {
   return "unreachable";
 }
 
-test_typed_handler_else_binding() `test {
+test_typed_handler_else_binding() `test(allow_leaks: true) {
   string r = typed_handler_else_binding();
   assert(r == "syntax error", "else binding gets error message");
 }
@@ -237,7 +237,7 @@ typed_handler_else_recovery() int {
   return v;
 }
 
-test_typed_handler_else_recovery() `test {
+test_typed_handler_else_recovery() `test(allow_leaks: true) {
   int r = typed_handler_else_recovery();
   assert(r == 0, "else clause provides recovery value for non-matching");
 }
@@ -251,7 +251,7 @@ typed_handler_match_recovery() int {
   return v;
 }
 
-test_typed_handler_match_recovery() `test {
+test_typed_handler_match_recovery() `test(allow_leaks: true) {
   int r = typed_handler_match_recovery();
   assert(r == 28, "typed match provides recovery value");
 }
@@ -266,7 +266,7 @@ typed_handler_else_in_failable() string! {
   return "ok";
 }
 
-test_typed_handler_else_in_failable() `test {
+test_typed_handler_else_in_failable() `test(allow_leaks: true) {
   string r = typed_handler_else_in_failable()!;
   assert(r == "syntax error", "else in failable function works");
 }
@@ -283,7 +283,7 @@ typed_handler_bang_match() int {
   return 0;
 }
 
-test_typed_handler_bang_match() `test {
+test_typed_handler_bang_match() `test(allow_leaks: true) {
   int r = typed_handler_bang_match();
   assert(r == 28, "bang typed handler catches matching error");
 }
@@ -292,7 +292,7 @@ test_typed_handler_bang_match() `test {
 // Section 5: Custom error tests (continued)
 // ============================================================
 
-test_result_capture_custom_error() `test {
+test_result_capture_custom_error() `test(allow_leaks: true) {
   (val, err) := fail_io();
   assert(val == 0, "value is zero on error");
   if err is present {
@@ -303,7 +303,7 @@ test_result_capture_custom_error() `test {
 }
 
 // Result capture in conditional flow
-test_result_capture_conditional() `test {
+test_result_capture_conditional() `test(allow_leaks: true) {
   (val1, err1) := parse_int("42");
   (val2, err2) := parse_int("bad");
 
@@ -333,7 +333,7 @@ bang_ok()! {
   // does not raise
 }
 
-test_bang_shorthand_raise() `test {
+test_bang_shorthand_raise() `test(allow_leaks: true) {
   bool caught = false;
   bang_void()? e {
     caught = true;
@@ -341,7 +341,7 @@ test_bang_shorthand_raise() `test {
   assert(caught, "bang shorthand function raised");
 }
 
-test_bang_shorthand_ok() `test {
+test_bang_shorthand_ok() `test(allow_leaks: true) {
   bool caught = false;
   bang_ok()? e {
     caught = true;

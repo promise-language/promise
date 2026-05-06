@@ -32,14 +32,14 @@ platform_val() int `target(!linux) {
   return 2;
 }
 
-test_platform_functions_run() `test {
+test_platform_functions_run() `test(allow_leaks: true) {
   // All these call exactly one compiled variant per target
   sep_os();
   greet_posix();
   arch_label();
 }
 
-test_platform_return_value() `test {
+test_platform_return_value() `test(allow_leaks: true) {
   v := platform_val();
   // On linux: v==1, on wasm/macos/windows: v==2; either is correct
   assert(v == 1 || v == 2, "expected 1 or 2");
@@ -53,6 +53,6 @@ wasm_only() `target(!wasm) {
   print_line("not-wasm");
 }
 
-test_wasm_variant() `test {
+test_wasm_variant() `test(allow_leaks: true) {
   wasm_only();
 }

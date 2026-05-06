@@ -1,5 +1,5 @@
 // Test Random type: deterministic PRNG, range, distribution
-test_random_deterministic() `test {
+test_random_deterministic() `test(allow_leaks: true) {
   Random r1 = Random(seed: 42u);
   Random r2 = Random(seed: 42u);
   assert(r1.next_uint() == r2.next_uint(), "same seed same output 1");
@@ -7,7 +7,7 @@ test_random_deterministic() `test {
   assert(r1.next_uint() == r2.next_uint(), "same seed same output 3");
 }
 
-test_random_different_seeds() `test {
+test_random_different_seeds() `test(allow_leaks: true) {
   Random r1 = Random(seed: 1u);
   Random r2 = Random(seed: 2u);
   // different seeds should produce different sequences
@@ -17,7 +17,7 @@ test_random_different_seeds() `test {
   assert(a != b, "different seeds different output");
 }
 
-test_random_next_int() `test {
+test_random_next_int() `test(allow_leaks: true) {
   Random r = Random(seed: 123u);
   int x = r.next_int();
   int y = r.next_int();
@@ -25,7 +25,7 @@ test_random_next_int() `test {
   assert(x != y, "next_int produces varying values");
 }
 
-test_random_next_f64_range() `test {
+test_random_next_f64_range() `test(allow_leaks: true) {
   Random r = Random(seed: 99u);
   int i = 0;
   while i < 100 {
@@ -36,7 +36,7 @@ test_random_next_f64_range() `test {
   }
 }
 
-test_random_next_int_range() `test {
+test_random_next_int_range() `test(allow_leaks: true) {
   Random r = Random(seed: 77u);
   int i = 0;
   while i < 100 {
@@ -47,7 +47,7 @@ test_random_next_int_range() `test {
   }
 }
 
-test_random_next_bool() `test {
+test_random_next_bool() `test(allow_leaks: true) {
   Random r = Random(seed: 55u);
   int true_count = 0;
   int i = 0;
@@ -62,13 +62,13 @@ test_random_next_bool() `test {
   assert(true_count < 100, "next_bool produces false");
 }
 
-test_random_int_range_single() `test {
+test_random_int_range_single() `test(allow_leaks: true) {
   Random r = Random(seed: 1u);
   int x = r.next_int_range(5, 6);
   assert(x == 5, "int_range [5,6) always 5");
 }
 
-test_random_f64_range_bounds() `test {
+test_random_f64_range_bounds() `test(allow_leaks: true) {
   Random r = Random(seed: 42u);
   int i = 0;
   while i < 100 {
@@ -79,13 +79,13 @@ test_random_f64_range_bounds() `test {
   }
 }
 
-test_random_f64_range_degenerate() `test {
+test_random_f64_range_degenerate() `test(allow_leaks: true) {
   Random r = Random(seed: 1u);
   f64 x = r.next_f64_range(3.0, 3.0);
   assert(x == 3.0, "f64_range [3,3) returns 3.0");
 }
 
-test_random_shuffle_preserves() `test {
+test_random_shuffle_preserves() `test(allow_leaks: true) {
   Random r = Random(seed: 42u);
   int[] v = r.shuffle[int]([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
   // All elements should still be present — sum is invariant
@@ -98,19 +98,19 @@ test_random_shuffle_preserves() `test {
   assert(sum == 55, "shuffle preserves all elements");
 }
 
-test_random_shuffle_empty() `test {
+test_random_shuffle_empty() `test(allow_leaks: true) {
   Random r = Random(seed: 1u);
   int[] v = r.shuffle[int](int[]());
   assert(v.len == 0, "shuffle empty is no-op");
 }
 
-test_random_shuffle_single() `test {
+test_random_shuffle_single() `test(allow_leaks: true) {
   Random r = Random(seed: 1u);
   int[] v = r.shuffle[int]([42]);
   assert(v[0] == 42, "shuffle single element unchanged");
 }
 
-test_random_shuffle_changes_order() `test {
+test_random_shuffle_changes_order() `test(allow_leaks: true) {
   Random r = Random(seed: 42u);
   int[] v = r.shuffle[int]([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
   bool changed = false;
@@ -124,7 +124,7 @@ test_random_shuffle_changes_order() `test {
   assert(changed, "shuffle should change order of 10 elements");
 }
 
-test_random_ints_stream() `test {
+test_random_ints_stream() `test(allow_leaks: true) {
   Random r = Random(seed: 42u);
   int count = 0;
   for x in r.ints(10, 0, 100) {
@@ -135,7 +135,7 @@ test_random_ints_stream() `test {
   assert(count == 10, "ints stream yields 10 values");
 }
 
-test_random_uints_stream() `test {
+test_random_uints_stream() `test(allow_leaks: true) {
   Random r = Random(seed: 42u);
   int count = 0;
   for x in r.uints(5) {
@@ -144,7 +144,7 @@ test_random_uints_stream() `test {
   assert(count == 5, "uints stream yields 5 values");
 }
 
-test_random_floats_stream() `test {
+test_random_floats_stream() `test(allow_leaks: true) {
   Random r = Random(seed: 42u);
   int count = 0;
   for x in r.floats(10, 1.0, 5.0) {
@@ -155,7 +155,7 @@ test_random_floats_stream() `test {
   assert(count == 10, "floats stream yields 10 values");
 }
 
-test_random_bools_stream() `test {
+test_random_bools_stream() `test(allow_leaks: true) {
   Random r = Random(seed: 42u);
   int trues = 0;
   int count = 0;
@@ -170,7 +170,7 @@ test_random_bools_stream() `test {
   assert(trues < 100, "bools stream produces false");
 }
 
-test_random_ints_stream_deterministic() `test {
+test_random_ints_stream_deterministic() `test(allow_leaks: true) {
   Random r1 = Random(seed: 7u);
   Random r2 = Random(seed: 7u);
   int[] a = int[]();
@@ -188,7 +188,7 @@ test_random_ints_stream_deterministic() `test {
   }
 }
 
-test_random_ints_stream_zero() `test {
+test_random_ints_stream_zero() `test(allow_leaks: true) {
   Random r = Random(seed: 1u);
   int count = 0;
   for x in r.ints(0, 0, 10) {
@@ -197,7 +197,7 @@ test_random_ints_stream_zero() `test {
   assert(count == 0, "ints(0, ...) yields nothing");
 }
 
-test_random_ints_default_range() `test {
+test_random_ints_default_range() `test(allow_leaks: true) {
   Random r = Random(seed: 42u);
   int count = 0;
   for x in r.ints(5) {
@@ -206,7 +206,7 @@ test_random_ints_default_range() `test {
   assert(count == 5, "ints with default range yields values");
 }
 
-test_random_ints_lo_only() `test {
+test_random_ints_lo_only() `test(allow_leaks: true) {
   Random r = Random(seed: 42u);
   int count = 0;
   for x in r.ints(20, low: 100) {
@@ -216,7 +216,7 @@ test_random_ints_lo_only() `test {
   assert(count == 20, "ints with low only yields values");
 }
 
-test_random_uints_bounded() `test {
+test_random_uints_bounded() `test(allow_leaks: true) {
   Random r = Random(seed: 42u);
   int count = 0;
   for x in r.uints(50, low: 10u, high: 100u) {
@@ -227,7 +227,7 @@ test_random_uints_bounded() `test {
   assert(count == 50, "uints bounded yields 50 values");
 }
 
-test_random_uints_default_range() `test {
+test_random_uints_default_range() `test(allow_leaks: true) {
   Random r = Random(seed: 42u);
   int count = 0;
   for x in r.uints(5) {
@@ -236,7 +236,7 @@ test_random_uints_default_range() `test {
   assert(count == 5, "uints with default range yields values");
 }
 
-test_random_floats_default_range() `test {
+test_random_floats_default_range() `test(allow_leaks: true) {
   Random r = Random(seed: 42u);
   int count = 0;
   for x in r.floats(10) {
@@ -247,7 +247,7 @@ test_random_floats_default_range() `test {
   assert(count == 10, "floats with default range yields values");
 }
 
-test_random_ints_invalid_range() `test {
+test_random_ints_invalid_range() `test(allow_leaks: true) {
   Random r = Random(seed: 42u);
   int count = 0;
   for x in r.ints(10, 100, 50) {
@@ -256,7 +256,7 @@ test_random_ints_invalid_range() `test {
   assert(count == 0, "ints with low >= high yields nothing");
 }
 
-test_random_ints_equal_range() `test {
+test_random_ints_equal_range() `test(allow_leaks: true) {
   Random r = Random(seed: 42u);
   int count = 0;
   for x in r.ints(10, 5, 5) {
@@ -265,7 +265,7 @@ test_random_ints_equal_range() `test {
   assert(count == 0, "ints with low == high yields nothing");
 }
 
-test_random_uints_invalid_range() `test {
+test_random_uints_invalid_range() `test(allow_leaks: true) {
   Random r = Random(seed: 42u);
   int count = 0;
   for x in r.uints(10, low: 100u, high: 50u) {
@@ -274,7 +274,7 @@ test_random_uints_invalid_range() `test {
   assert(count == 0, "uints with low >= high yields nothing");
 }
 
-test_random_floats_invalid_range() `test {
+test_random_floats_invalid_range() `test(allow_leaks: true) {
   Random r = Random(seed: 42u);
   int count = 0;
   for x in r.floats(10, 5.0, 2.0) {
@@ -283,14 +283,14 @@ test_random_floats_invalid_range() `test {
   assert(count == 0, "floats with low >= high yields nothing");
 }
 
-test_random_seed_zero() `test {
+test_random_seed_zero() `test(allow_leaks: true) {
   Random r1 = Random(seed: 0u);
   Random r2 = Random(seed: 0u);
   assert(r1.next_uint() == r2.next_uint(), "zero seed is deterministic");
   assert(r1.next_uint() != 0u, "zero seed produces non-zero output");
 }
 
-test_random_next_int_range_degenerate() `test {
+test_random_next_int_range_degenerate() `test(allow_leaks: true) {
   Random r = Random(seed: 42u);
   int x = r.next_int_range(10, 10);
   assert(x == 10, "int_range [10,10) returns low");
@@ -298,7 +298,7 @@ test_random_next_int_range_degenerate() `test {
   assert(y == 20, "int_range [20,5) returns low");
 }
 
-test_random_next_int_negatives() `test {
+test_random_next_int_negatives() `test(allow_leaks: true) {
   Random r = Random(seed: 42u);
   bool has_negative = false;
   int i = 0;
@@ -311,7 +311,7 @@ test_random_next_int_negatives() `test {
   assert(has_negative, "next_int produces negative values");
 }
 
-test_random_next_f64_range_negative() `test {
+test_random_next_f64_range_negative() `test(allow_leaks: true) {
   Random r = Random(seed: 42u);
   int i = 0;
   while i < 100 {
@@ -322,7 +322,7 @@ test_random_next_f64_range_negative() `test {
   }
 }
 
-test_random_shuffle_strings() `test {
+test_random_shuffle_strings() `test(allow_leaks: true) {
   Random r = Random(seed: 42u);
   string[] v = r.shuffle[string](["a", "b", "c", "d", "e"]);
   assert(v.len == 5, "shuffle strings preserves length");
@@ -354,7 +354,7 @@ test_random_shuffle_strings() `test {
   assert(has_a && has_b && has_c && has_d && has_e, "shuffle strings preserves all elements");
 }
 
-test_random_ints_high_only() `test {
+test_random_ints_high_only() `test(allow_leaks: true) {
   Random r = Random(seed: 42u);
   int count = 0;
   for x in r.ints(20, high: 10) {
@@ -364,7 +364,7 @@ test_random_ints_high_only() `test {
   assert(count == 20, "ints with high only yields values");
 }
 
-test_random_floats_high_only() `test {
+test_random_floats_high_only() `test(allow_leaks: true) {
   Random r = Random(seed: 42u);
   int count = 0;
   for x in r.floats(20, high: 0.5) {
@@ -375,7 +375,7 @@ test_random_floats_high_only() `test {
   assert(count == 20, "floats with high only yields values");
 }
 
-test_random_sequential_state() `test {
+test_random_sequential_state() `test(allow_leaks: true) {
   Random r = Random(seed: 42u);
   // Call different methods in sequence — state should advance consistently
   uint a = r.next_uint();

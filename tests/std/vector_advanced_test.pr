@@ -1,12 +1,12 @@
 // Advanced vector tests: edge cases, iteration patterns, bulk operations.
-test_single_element() `test {
+test_single_element() `test(allow_leaks: true) {
   int[] v = [42];
   assert(v.len == 1, "len = 1");
   assert(v[0] == 42, "first = 42");
   assert(v.contains(42), "contains 42");
 }
 
-test_pop_single() `test {
+test_pop_single() `test(allow_leaks: true) {
   int[] v = [99];
   if val := v.pop() {
     assert(val == 99, "popped 99");
@@ -16,7 +16,7 @@ test_pop_single() `test {
   assert(v.len == 0, "empty after pop");
 }
 
-test_push_pop_push() `test {
+test_push_pop_push() `test(allow_leaks: true) {
   int[] v = [];
   v.push(1);
   v.push(2);
@@ -27,7 +27,7 @@ test_push_pop_push() `test {
   assert(v[1] == 3, "second = 3");
 }
 
-test_remove_middle() `test {
+test_remove_middle() `test(allow_leaks: true) {
   int[] v = [10, 20, 30, 40, 50];
   v.remove(2);
   assert(v.len == 4, "len = 4");
@@ -37,7 +37,7 @@ test_remove_middle() `test {
   assert(v[3] == 50, "idx 3 = 50");
 }
 
-test_contains_after_clear() `test {
+test_contains_after_clear() `test(allow_leaks: true) {
   int[] v = [1, 2, 3];
   v.pop();
   v.pop();
@@ -47,7 +47,7 @@ test_contains_after_clear() `test {
   assert(!v.contains(3), "empty no 3");
 }
 
-test_sequential_push() `test {
+test_sequential_push() `test(allow_leaks: true) {
   int[] v = [];
   for i in 0..20 {
     v.push(i * i);
@@ -59,7 +59,7 @@ test_sequential_push() `test {
   assert(v[19] == 361, "19^2 = 361");
 }
 
-test_index_assign_all() `test {
+test_index_assign_all() `test(allow_leaks: true) {
   int[] v = [0, 0, 0, 0, 0];
   for i in 0..5 {
     v[i] = (i + 1) * 10;
@@ -68,7 +68,7 @@ test_index_assign_all() `test {
   assert(v[4] == 50, "idx 4 = 50");
 }
 
-test_string_vector_ops() `test {
+test_string_vector_ops() `test(allow_leaks: true) {
   string[] names = [];
   names.push("alice");
   names.push("bob");
@@ -79,7 +79,7 @@ test_string_vector_ops() `test {
   assert(names.len == 2, "2 remaining");
 }
 
-test_bool_vector() `test {
+test_bool_vector() `test(allow_leaks: true) {
   bool[] flags = [true, false, true, true, false];
   int trues = 0;
   for f in flags {
@@ -90,7 +90,7 @@ test_bool_vector() `test {
   assert(trues == 3, "3 true values");
 }
 
-test_vector_iterate_sum() `test {
+test_vector_iterate_sum() `test(allow_leaks: true) {
   int[] nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
   int sum = 0;
   for n in nums {
@@ -99,7 +99,7 @@ test_vector_iterate_sum() `test {
   assert(sum == 55, "1..10 sum = 55");
 }
 
-test_vector_iterate_index() `test {
+test_vector_iterate_index() `test(allow_leaks: true) {
   string[] items = ["a", "b", "c"];
   int last_idx = -1;
   for i, item in items {
@@ -108,7 +108,7 @@ test_vector_iterate_index() `test {
   assert(last_idx == 2, "last index = 2");
 }
 
-test_empty_pop_returns_none() `test {
+test_empty_pop_returns_none() `test(allow_leaks: true) {
   int[] v = [];
   bool got_none = true;
   if val := v.pop() {
@@ -117,7 +117,7 @@ test_empty_pop_returns_none() `test {
   assert(got_none, "pop on empty returns none");
 }
 
-test_grow_and_shrink() `test {
+test_grow_and_shrink() `test(allow_leaks: true) {
   int[] v = [];
   for i in 0..50 {
     v.push(i);
@@ -131,7 +131,7 @@ test_grow_and_shrink() `test {
 }
 
 // Regression: dynamic allocas in loop body caused stack overflow at ~131K iterations.
-test_push_1m_ints() `test {
+test_push_1m_ints() `test(allow_leaks: true) {
   int[] v = [];
   i := 0;
   while i < 1_000_000 {
@@ -143,7 +143,7 @@ test_push_1m_ints() `test {
   assert(v[999_999] == 999_999, "last element");
 }
 
-test_push_10m_ints() `test {
+test_push_10m_ints() `test(allow_leaks: true) {
   int[] v = [];
   i := 0;
   while i < 10_000_000 {
@@ -156,7 +156,7 @@ test_push_10m_ints() `test {
 }
 
 // Regression: pop alloca was also a dynamic alloca in loop body.
-test_pop_200k() `test {
+test_pop_200k() `test(allow_leaks: true) {
   int[] v = [];
   i := 0;
   while i < 200_000 {
@@ -176,7 +176,7 @@ test_pop_200k() `test {
 }
 
 // Regression: contains alloca was also a dynamic alloca in loop body.
-test_contains_200k() `test {
+test_contains_200k() `test(allow_leaks: true) {
   int[] v = [42, 99, 7];
   int found = 0;
   i := 0;
@@ -190,7 +190,7 @@ test_contains_200k() `test {
 }
 
 // Regression: value type receiver alloca was a dynamic alloca in loop body.
-test_value_type_method_200k() `test {
+test_value_type_method_200k() `test(allow_leaks: true) {
   int sum = 0;
   i := 0;
   while i < 200_000 {

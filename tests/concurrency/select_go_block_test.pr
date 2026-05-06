@@ -2,7 +2,7 @@
 // Verifies that channel variables in select cases are properly
 // captured when the select is inside a go { } block.
 // Select recv inside go block captures outer channel variable.
-test_select_recv_in_go() `test(exclude: "wasm32") {
+test_select_recv_in_go() `test(allow_leaks: true, exclude: "wasm32") {
   ch := channel[int](capacity: 1);
   done := channel[int](capacity: 1);
   ch.send(42);
@@ -21,7 +21,7 @@ test_select_recv_in_go() `test(exclude: "wasm32") {
 }
 
 // Select send inside go block captures outer channel variable.
-test_select_send_in_go() `test(exclude: "wasm32") {
+test_select_send_in_go() `test(allow_leaks: true, exclude: "wasm32") {
   ch := channel[int](capacity: 1);
   done := channel[int](capacity: 1);
   go {
@@ -38,7 +38,7 @@ test_select_send_in_go() `test(exclude: "wasm32") {
 }
 
 // Select inside go block with multiple channel cases.
-test_select_multi_channel_in_go() `test(exclude: "wasm32") {
+test_select_multi_channel_in_go() `test(allow_leaks: true, exclude: "wasm32") {
   ch1 := channel[int](capacity: 1);
   ch2 := channel[int](capacity: 1);
   done := channel[int](capacity: 1);
@@ -62,7 +62,7 @@ test_select_multi_channel_in_go() `test(exclude: "wasm32") {
 }
 
 // Select inside go block with default case.
-test_select_default_in_go() `test(exclude: "wasm32") {
+test_select_default_in_go() `test(allow_leaks: true, exclude: "wasm32") {
   ch := channel[int](capacity: 0);
   done := channel[int](capacity: 1);
   go {

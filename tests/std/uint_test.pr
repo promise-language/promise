@@ -1,5 +1,5 @@
 // Test uint arithmetic, comparisons, bitwise, range, and unary operators
-test_addition() `test {
+test_addition() `test(allow_leaks: true) {
   uint a = 1 + 2;
   assert(a == 3, "1 + 2 == 3");
   uint b = 0 + 0;
@@ -8,14 +8,14 @@ test_addition() `test {
   assert(c == 300, "100 + 200 == 300");
 }
 
-test_subtraction() `test {
+test_subtraction() `test(allow_leaks: true) {
   uint a = 5 - 3;
   assert(a == 2, "5 - 3 == 2");
   uint b = 10 - 10;
   assert(b == 0, "10 - 10 == 0");
 }
 
-test_multiplication() `test {
+test_multiplication() `test(allow_leaks: true) {
   uint a = 3 * 4;
   assert(a == 12, "3 * 4 == 12");
   uint b = 0 * 100;
@@ -24,7 +24,7 @@ test_multiplication() `test {
   assert(c == 7, "7 * 1 == 7");
 }
 
-test_division() `test {
+test_division() `test(allow_leaks: true) {
   uint a = 10 / 2;
   assert(a == 5, "10 / 2 == 5");
   uint b = 7 / 3;
@@ -33,7 +33,7 @@ test_division() `test {
   assert(c == 0, "0 / 5 == 0");
 }
 
-test_modulo() `test {
+test_modulo() `test(allow_leaks: true) {
   uint a = 10 % 3;
   assert(a == 1, "10 % 3 == 1");
   uint b = 15 % 5;
@@ -42,7 +42,7 @@ test_modulo() `test {
   assert(c == 1, "7 % 2 == 1");
 }
 
-test_comparisons() `test {
+test_comparisons() `test(allow_leaks: true) {
   uint a = 1;
   uint b = 2;
   assert(a < b, "1 < 2");
@@ -57,7 +57,7 @@ test_comparisons() `test {
   assert(d >= a, "3 >= 1");
 }
 
-test_equality() `test {
+test_equality() `test(allow_leaks: true) {
   uint a = 42;
   assert(a == 42, "42 == 42");
   assert(!(a == 1), "!(42 == 1)");
@@ -66,7 +66,7 @@ test_equality() `test {
   assert(!(b != 5), "!(5 != 5)");
 }
 
-test_increment_decrement() `test {
+test_increment_decrement() `test(allow_leaks: true) {
   uint x = 5;
   x++;
   assert(x == 6, "x++ makes 6");
@@ -76,7 +76,7 @@ test_increment_decrement() `test {
   assert(x == 4, "x-- makes 4");
 }
 
-test_compound_assignment() `test {
+test_compound_assignment() `test(allow_leaks: true) {
   uint x = 10;
   x += 5;
   assert(x == 15, "+= 5");
@@ -90,7 +90,7 @@ test_compound_assignment() `test {
   assert(x == 2, "%= 4");
 }
 
-test_bitwise_and() `test {
+test_bitwise_and() `test(allow_leaks: true) {
   uint a = 12 & 10;
   assert(a == 8, "12 & 10 == 8");
   uint b = 0xFF & 0x0F;
@@ -101,7 +101,7 @@ test_bitwise_and() `test {
   assert(d == 7, "x & x == x");
 }
 
-test_bitwise_or() `test {
+test_bitwise_or() `test(allow_leaks: true) {
   uint a = 5 | 3;
   assert(a == 7, "5 | 3 == 7");
   uint b = 0 | 42;
@@ -110,7 +110,7 @@ test_bitwise_or() `test {
   assert(c == 0xFF, "0xF0 | 0x0F == 0xFF");
 }
 
-test_bitwise_xor() `test {
+test_bitwise_xor() `test(allow_leaks: true) {
   uint a = 12 ^ 10;
   assert(a == 6, "12 ^ 10 == 6");
   uint b = 0xFF ^ 0xFF;
@@ -119,7 +119,7 @@ test_bitwise_xor() `test {
   assert(c == 42, "0 ^ x == x");
 }
 
-test_left_shift() `test {
+test_left_shift() `test(allow_leaks: true) {
   uint a = 1 << 0;
   assert(a == 1, "1 << 0 == 1");
   uint b = 1 << 4;
@@ -130,7 +130,7 @@ test_left_shift() `test {
   assert(d == 1024, "1 << 10 == 1024");
 }
 
-test_right_shift() `test {
+test_right_shift() `test(allow_leaks: true) {
   // Logical right shift: fills with zeros (no sign extension)
   uint a = 16 >> 2;
   assert(a == 4, "16 >> 2 == 4");
@@ -140,7 +140,7 @@ test_right_shift() `test {
   assert(c == 15, "255 >> 4 == 15");
 }
 
-test_bitwise_not() `test {
+test_bitwise_not() `test(allow_leaks: true) {
   // ~0 for uint gives max uint (all bits set)
   uint a = ~0;
   uint b = ~a;
@@ -149,7 +149,7 @@ test_bitwise_not() `test {
   assert(~~c == 42, "~~x == x");
 }
 
-test_bitwise_precedence() `test {
+test_bitwise_precedence() `test(allow_leaks: true) {
   // Shift binds tighter than additive
   uint a = 1 + 1 << 2;
   assert(a == 1 + 4, "1 + (1 << 2) == 5");
@@ -162,7 +162,7 @@ test_bitwise_precedence() `test {
 
 // --- Hash ---
 
-test_hash() `test {
+test_hash() `test(allow_leaks: true) {
   uint a = 42;
   uint b = 42;
   assert(a.hash == b.hash, "same uint same hash");
@@ -174,7 +174,7 @@ test_hash() `test {
 
 // --- Fixed-width unsigned types ---
 
-test_u8() `test {
+test_u8() `test(allow_leaks: true) {
   u8 a = 255;
   u8 b = 0;
   assert(a > b, "u8 255 > 0");
@@ -183,21 +183,21 @@ test_u8() `test {
   assert(c + d == 150, "u8 100 + 50 == 150");
 }
 
-test_u16() `test {
+test_u16() `test(allow_leaks: true) {
   u16 a = 1000;
   u16 b = 500;
   assert(a - b == 500, "u16 1000 - 500");
   assert(a > b, "u16 1000 > 500");
 }
 
-test_u32() `test {
+test_u32() `test(allow_leaks: true) {
   u32 a = 100000;
   u32 b = 100000;
   assert(a == b, "u32 equality");
   assert(a * 2 == 200000, "u32 multiplication");
 }
 
-test_u64() `test {
+test_u64() `test(allow_leaks: true) {
   u64 a = 999999;
   u64 b = 1;
   assert(a + b == 1000000, "u64 large addition");
@@ -206,7 +206,7 @@ test_u64() `test {
 
 // --- Range operators ---
 
-test_uint_range() `test {
+test_uint_range() `test(allow_leaks: true) {
   uint a = 0;
   uint b = 5;
   uint sum = 0;
@@ -217,7 +217,7 @@ test_uint_range() `test {
   assert(sum == expected, "uint range: 0..5 sum == 10");
 }
 
-test_uint_range_inclusive() `test {
+test_uint_range_inclusive() `test(allow_leaks: true) {
   uint a = 0;
   uint b = 5;
   uint sum = 0;

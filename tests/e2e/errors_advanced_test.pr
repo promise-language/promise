@@ -13,7 +13,7 @@ parse_int(string s) int! {
   raise error(message: "invalid number: " + s);
 }
 
-test_propagate_success() `test {
+test_propagate_success() `test(allow_leaks: true) {
   int r = parse_int("42")!;
   assert(r == 42, "parse_int 42 succeeds");
 }
@@ -42,7 +42,7 @@ try_level1() bool {
   return false;
 }
 
-test_propagation_chain() `test {
+test_propagation_chain() `test(allow_leaks: true) {
   assert(try_level1(), "error propagated through 3 levels");
 }
 
@@ -54,12 +54,12 @@ add_parsed(string a, string b) int! {
   return x + y;
 }
 
-test_multiple_failable_success() `test {
+test_multiple_failable_success() `test(allow_leaks: true) {
   int r = add_parsed("42", "0")!;
   assert(r == 42, "42 + 0 = 42");
 }
 
-test_multiple_failable_negative() `test {
+test_multiple_failable_negative() `test(allow_leaks: true) {
   int r = add_parsed("42", "-1")!;
   assert(r == 41, "42 + (-1) = 41");
 }
@@ -72,7 +72,7 @@ try_add_bad_first() bool {
   return false;
 }
 
-test_first_failable_fails() `test {
+test_first_failable_fails() `test(allow_leaks: true) {
   assert(try_add_bad_first(), "first failable raised");
 }
 
@@ -84,13 +84,13 @@ try_add_bad_second() bool {
   return false;
 }
 
-test_second_failable_fails() `test {
+test_second_failable_fails() `test(allow_leaks: true) {
   assert(try_add_bad_second(), "second failable raised");
 }
 
 // --- bang unwrap on success ---
 
-test_bang_unwrap_success() `test {
+test_bang_unwrap_success() `test(allow_leaks: true) {
   int r = parse_int("0")!;
   assert(r == 0, "bang unwrap on success gives 0");
 }
@@ -107,7 +107,7 @@ safe_get(int[] arr, int idx) int! {
   return arr[idx];
 }
 
-test_safe_get_valid() `test {
+test_safe_get_valid() `test(allow_leaks: true) {
   int[] nums = [10, 20, 30];
   int v = safe_get(nums, 1)!;
   assert(v == 20, "safe_get at index 1 returns 20");
@@ -121,26 +121,26 @@ try_safe_get(int[] arr, int idx) bool {
   return false;
 }
 
-test_safe_get_negative() `test {
+test_safe_get_negative() `test(allow_leaks: true) {
   int[] nums = [10, 20, 30];
   assert(try_safe_get(nums, -1), "negative index raises");
 }
 
-test_safe_get_out_of_bounds() `test {
+test_safe_get_out_of_bounds() `test(allow_leaks: true) {
   int[] nums = [10, 20, 30];
   assert(try_safe_get(nums, 5), "out of bounds raises");
 }
 
 // --- failable returning zero ---
 
-test_failable_returning_zero() `test {
+test_failable_returning_zero() `test(allow_leaks: true) {
   int r = parse_int("0")!;
   assert(r == 0, "failable can return 0 (not confused with error)");
 }
 
 // --- failable returning negative ---
 
-test_failable_returning_negative() `test {
+test_failable_returning_negative() `test(allow_leaks: true) {
   int r = parse_int("-1")!;
   assert(r == -1, "failable can return -1");
 }
@@ -156,7 +156,7 @@ parse_and_sum(string[] inputs) int! {
   return sum;
 }
 
-test_propagation_in_loop_success() `test {
+test_propagation_in_loop_success() `test(allow_leaks: true) {
   string[] inputs = ["42", "0", "-1"];
   int r = parse_and_sum(inputs)!;
   assert(r == 41, "42 + 0 + (-1) = 41");
@@ -170,7 +170,7 @@ try_parse_and_sum_bad() bool {
   return false;
 }
 
-test_propagation_in_loop_fail() `test {
+test_propagation_in_loop_fail() `test(allow_leaks: true) {
   assert(try_parse_and_sum_bad(), "bad input causes propagation");
 }
 
@@ -183,7 +183,7 @@ get_error_message() string {
   return "no error";
 }
 
-test_untyped_handler_field_access() `test {
+test_untyped_handler_field_access() `test(allow_leaks: true) {
   string msg = get_error_message();
   assert(msg == "invalid number: bad", "untyped handler can access e.message");
 }
@@ -205,7 +205,7 @@ get_io_error_code() int! {
   return 0;
 }
 
-test_typed_handler_catches() `test {
+test_typed_handler_catches() `test(allow_leaks: true) {
   int code = get_io_error_code()!;
   assert(code == 28, "typed handler catches IoError and accesses code");
 }
@@ -228,7 +228,7 @@ try_typed_propagation() bool! {
   return false;
 }
 
-test_typed_handler_propagates_nonmatch() `test {
+test_typed_handler_propagates_nonmatch() `test(allow_leaks: true) {
   // try_typed_propagation is failable, nomatch propagates
   // Can't easily test panic in e2e, but we can test matching path
   int code = get_io_error_code()!;
@@ -250,7 +250,7 @@ try_propagation_wrapper() bool {
   return false;
 }
 
-test_typed_handler_propagates_in_failable() `test {
+test_typed_handler_propagates_in_failable() `test(allow_leaks: true) {
   assert(try_propagation_wrapper(), "typed handler propagates non-matching error in failable fn");
 }
 
@@ -263,7 +263,7 @@ get_io_message() string {
   return "no error";
 }
 
-test_untyped_handler_catches_subtype() `test {
+test_untyped_handler_catches_subtype() `test(allow_leaks: true) {
   string msg = get_io_message();
   assert(msg == "disk full", "untyped handler catches IoError via error base");
 }

@@ -1,6 +1,6 @@
 // Test Range[T] generic value type: creation, iteration, field access, methods
 // --- Basic for-in iteration ---
-test_exclusive_range() `test {
+test_exclusive_range() `test(allow_leaks: true) {
   int sum = 0;
   for i in 0..5 {
     sum += i;
@@ -8,7 +8,7 @@ test_exclusive_range() `test {
   assert(sum == 10, "0..5 sum == 10 (0+1+2+3+4)");
 }
 
-test_inclusive_range() `test {
+test_inclusive_range() `test(allow_leaks: true) {
   int sum = 0;
   for i in 0..=5 {
     sum += i;
@@ -16,7 +16,7 @@ test_inclusive_range() `test {
   assert(sum == 15, "0..=5 sum == 15 (0+1+2+3+4+5)");
 }
 
-test_range_single() `test {
+test_range_single() `test(allow_leaks: true) {
   int count = 0;
   for _ in 0..1 {
     count++;
@@ -24,7 +24,7 @@ test_range_single() `test {
   assert(count == 1, "0..1 iterates once");
 }
 
-test_range_empty() `test {
+test_range_empty() `test(allow_leaks: true) {
   int count = 0;
   for _ in 5..5 {
     count++;
@@ -32,7 +32,7 @@ test_range_empty() `test {
   assert(count == 0, "5..5 iterates zero times");
 }
 
-test_range_in_expressions() `test {
+test_range_in_expressions() `test(allow_leaks: true) {
   int sum = 0;
   for i in 1..4 {
     sum += i * i;
@@ -42,7 +42,7 @@ test_range_in_expressions() `test {
 
 // --- Variable binding ---
 
-test_range_variable() `test {
+test_range_variable() `test(allow_leaks: true) {
   Range[int] r = 1..5;
   int sum = 0;
   for i in r {
@@ -51,7 +51,7 @@ test_range_variable() `test {
   assert(sum == 10, "range variable: 1..5 sum == 10");
 }
 
-test_range_variable_inclusive() `test {
+test_range_variable_inclusive() `test(allow_leaks: true) {
   Range[int] r = 1..=5;
   int sum = 0;
   for i in r {
@@ -62,14 +62,14 @@ test_range_variable_inclusive() `test {
 
 // --- Field access ---
 
-test_range_field_access() `test {
+test_range_field_access() `test(allow_leaks: true) {
   Range[int] r = 3..10;
   assert(r.start == 3, "exclusive range start == 3");
   assert(r.end == 10, "exclusive range end == 10");
   assert(!r.inclusive, "exclusive range inclusive == false");
 }
 
-test_range_field_access_inclusive() `test {
+test_range_field_access_inclusive() `test(allow_leaks: true) {
   Range[int] r = 3..=10;
   assert(r.start == 3, "inclusive range start == 3");
   assert(r.end == 10, "inclusive range end == 10");
@@ -78,7 +78,7 @@ test_range_field_access_inclusive() `test {
 
 // --- contains method ---
 
-test_range_contains() `test {
+test_range_contains() `test(allow_leaks: true) {
   Range[int] r = 1..5;
   assert(r.contains(1), "exclusive contains start");
   assert(r.contains(3), "exclusive contains middle");
@@ -88,7 +88,7 @@ test_range_contains() `test {
   assert(!r.contains(6), "exclusive !contains above");
 }
 
-test_range_contains_inclusive() `test {
+test_range_contains_inclusive() `test(allow_leaks: true) {
   Range[int] r = 1..=5;
   assert(r.contains(1), "inclusive contains start");
   assert(r.contains(3), "inclusive contains middle");
@@ -99,7 +99,7 @@ test_range_contains_inclusive() `test {
 
 // --- is_empty getter ---
 
-test_range_is_empty() `test {
+test_range_is_empty() `test(allow_leaks: true) {
   assert(!(1..5).is_empty, "1..5 not empty");
   assert((5..5).is_empty, "5..5 is empty (exclusive)");
   assert(!(5..=5).is_empty, "5..=5 not empty (inclusive, single element)");
@@ -109,7 +109,7 @@ test_range_is_empty() `test {
 
 // --- Negative ranges ---
 
-test_range_negative() `test {
+test_range_negative() `test(allow_leaks: true) {
   int sum = 0;
   for i in -3..3 {
     sum += i;
@@ -119,7 +119,7 @@ test_range_negative() `test {
 
 // --- Index binding ---
 
-test_range_index() `test {
+test_range_index() `test(allow_leaks: true) {
   int last_idx = -1;
   int last_val = -1;
   for idx, val in 3..6 {
@@ -132,7 +132,7 @@ test_range_index() `test {
 
 // --- Char ranges ---
 
-test_char_range() `test {
+test_char_range() `test(allow_leaks: true) {
   int count = 0;
   for c in 'a'..'e' {
     count++;
@@ -140,7 +140,7 @@ test_char_range() `test {
   assert(count == 4, "char range 'a'..'e' has 4 elements");
 }
 
-test_char_range_inclusive() `test {
+test_char_range_inclusive() `test(allow_leaks: true) {
   int count = 0;
   for c in 'a'..='e' {
     count++;
@@ -150,7 +150,7 @@ test_char_range_inclusive() `test {
 
 // --- Uint ranges ---
 
-test_uint_range() `test {
+test_uint_range() `test(allow_leaks: true) {
   uint a = 0;
   uint b = 5;
   uint sum = 0;
@@ -161,7 +161,7 @@ test_uint_range() `test {
   assert(sum == expected, "uint range: 0..5 sum == 10");
 }
 
-test_uint_range_inclusive() `test {
+test_uint_range_inclusive() `test(allow_leaks: true) {
   uint a = 0;
   uint b = 5;
   uint sum = 0;

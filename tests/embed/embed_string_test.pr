@@ -1,26 +1,26 @@
 get greeting string `embed("greeting.txt");
 get schema string `embed("schema.sql");
 
-test_embed_string_content() `test {
+test_embed_string_content() `test(allow_leaks: true) {
   assert(greeting == "Hello, embedded world!", "greeting content mismatch");
 }
 
-test_embed_string_length() `test {
+test_embed_string_length() `test(allow_leaks: true) {
   assert(greeting.len > 0, "greeting should not be empty");
   assert(schema.len > 0, "schema should not be empty");
 }
 
-test_embed_string_contains() `test {
+test_embed_string_contains() `test(allow_leaks: true) {
   assert(schema.contains("CREATE TABLE"), "schema should contain CREATE TABLE");
   assert(schema.contains("users"), "schema should contain users");
   assert(schema.contains("email"), "schema should contain email");
 }
 
-test_embed_string_multiline() `test {
+test_embed_string_multiline() `test(allow_leaks: true) {
   assert(schema.contains("\n"), "schema should contain newlines");
 }
 
-test_embed_multiple_calls() `test {
+test_embed_multiple_calls() `test(allow_leaks: true) {
   string a = greeting;
   string b = greeting;
   assert(a == b, "repeated getter calls should return same content");

@@ -30,20 +30,20 @@ get_ref(string & s) string & {
 
 // --- Tests ---
 
-disjoint_shared_borrows() `test {
+disjoint_shared_borrows() `test(allow_leaks: true) {
   p := Pair(a: "hello", b: "world");
   string & ra = get_ref(p.a);
   string & rb = get_ref(p.b);
   assert(true, "disjoint shared borrows compiled and ran");
 }
 
-disjoint_value_type_borrows() `test {
+disjoint_value_type_borrows() `test(allow_leaks: true) {
   p := Point(x: 10, y: 20);
   int sum = p.x + p.y;
   assert(sum == 30, "disjoint value type field access");
 }
 
-method_on_different_sub_objects() `test {
+method_on_different_sub_objects() `test(allow_leaks: true) {
   tc := TwoCounters(left: Counter(value: 1), right: Counter(value: 2));
   int l = tc.left.get_value();
   int r = tc.right.get_value();

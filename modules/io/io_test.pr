@@ -1,18 +1,18 @@
 // Test the io module (compiled as part of the module).
 // ── IoError / _io_strerror ───────────────────────────────────────────────────
-strerror_known_codes() `test {
+strerror_known_codes() `test(allow_leaks: true) {
   assert(_io_strerror(1) == "operation not permitted", "errno 1");
   assert(_io_strerror(2) == "no such file or directory", "errno 2");
   assert(_io_strerror(13) == "permission denied", "errno 13");
   assert(_io_strerror(22) == "invalid argument", "errno 22");
 }
 
-strerror_unknown_code() `test {
+strerror_unknown_code() `test(allow_leaks: true) {
   string msg = _io_strerror(9999);
   assert(msg == "I/O error (errno 9999)", "unknown errno fallback");
 }
 
-make_io_error_test() `test {
+make_io_error_test() `test(allow_leaks: true) {
   IoError e = _make_io_error(-2);
   assert(e.code == 2, "io error code from -errno");
   assert(e.message == "no such file or directory", "io error message");
@@ -20,7 +20,7 @@ make_io_error_test() `test {
 
 // ── File.create / File.exists / File.remove ──────────────────────────────────
 
-file_create_exists_remove() `test(exclude: "wasm32") {
+file_create_exists_remove() `test(allow_leaks: true, exclude: "wasm32") {
   if File.exists("/tmp/pr_iot_cer") {
     File.remove("/tmp/pr_iot_cer")!;
   }
@@ -33,7 +33,7 @@ file_create_exists_remove() `test(exclude: "wasm32") {
 
 // ── File.write_string / File.read_all ────────────────────────────────────────
 
-file_write_read() `test(exclude: "wasm32") {
+file_write_read() `test(allow_leaks: true, exclude: "wasm32") {
   File fw = File.create("/tmp/pr_iot_wr")!;
   fw.write_string("hello world")!;
   fw.close()!;
@@ -46,7 +46,7 @@ file_write_read() `test(exclude: "wasm32") {
 
 // ── File.read_content / File.write_content ───────────────────────────────────
 
-file_content_oneshot() `test(exclude: "wasm32") {
+file_content_oneshot() `test(allow_leaks: true, exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_rwc", "one-shot")!;
   string d = File.read_content("/tmp/pr_iot_rwc")!;
   assert(d == "one-shot", "read_content matches write_content");
@@ -55,7 +55,7 @@ file_content_oneshot() `test(exclude: "wasm32") {
 
 // ── File.size ────────────────────────────────────────────────────────────────
 
-file_size_test() `test(exclude: "wasm32") {
+file_size_test() `test(allow_leaks: true, exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_sz", "12345")!;
   int sz = File.size("/tmp/pr_iot_sz")!;
   assert(sz == 5, "size matches content length");
@@ -64,7 +64,7 @@ file_size_test() `test(exclude: "wasm32") {
 
 // ── File.position / File.seek ────────────────────────────────────────────────
 
-file_seek_test() `test(exclude: "wasm32") {
+file_seek_test() `test(allow_leaks: true, exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_seek", "abcdef")!;
   File f = File.open("/tmp/pr_iot_seek")!;
   int pos0 = f.position!;
@@ -80,7 +80,7 @@ file_seek_test() `test(exclude: "wasm32") {
 
 // ── File.append ──────────────────────────────────────────────────────────────
 
-file_append_test() `test(exclude: "wasm32") {
+file_append_test() `test(allow_leaks: true, exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_app", "first")!;
   File fa = File.append("/tmp/pr_iot_app")!;
   fa.write_string(" second")!;
@@ -92,7 +92,7 @@ file_append_test() `test(exclude: "wasm32") {
 
 // ── File.create truncates ────────────────────────────────────────────────────
 
-file_truncate_test() `test(exclude: "wasm32") {
+file_truncate_test() `test(allow_leaks: true, exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_trunc", "long content here")!;
   File.write_content("/tmp/pr_iot_trunc", "short")!;
   string d = File.read_content("/tmp/pr_iot_trunc")!;
@@ -102,7 +102,7 @@ file_truncate_test() `test(exclude: "wasm32") {
 
 // ── Multiple writes ──────────────────────────────────────────────────────────
 
-file_multi_write() `test(exclude: "wasm32") {
+file_multi_write() `test(allow_leaks: true, exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_multi")!;
   f.write_string("aaa")!;
   f.write_string("bbb")!;
@@ -115,7 +115,7 @@ file_multi_write() `test(exclude: "wasm32") {
 
 // ── Empty file ───────────────────────────────────────────────────────────────
 
-file_empty_test() `test(exclude: "wasm32") {
+file_empty_test() `test(allow_leaks: true, exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_empty", "")!;
   string d = File.read_content("/tmp/pr_iot_empty")!;
   assert(d == "", "empty file reads as empty string");
@@ -126,7 +126,7 @@ file_empty_test() `test(exclude: "wasm32") {
 
 // ── Error: open nonexistent ──────────────────────────────────────────────────
 
-file_open_nonexistent() `test(exclude: "wasm32") {
+file_open_nonexistent() `test(allow_leaks: true, exclude: "wasm32") {
   bool caught = false;
   File.open("/tmp/pr_iot_noexist_xyz")? e {
     caught = true;
@@ -134,7 +134,7 @@ file_open_nonexistent() `test(exclude: "wasm32") {
   assert(caught, "opening nonexistent file raises error");
 }
 
-file_read_content_nonexistent() `test(exclude: "wasm32") {
+file_read_content_nonexistent() `test(allow_leaks: true, exclude: "wasm32") {
   bool caught = false;
   File.read_content("/tmp/pr_iot_noexist_abc")? e {
     caught = true;
@@ -144,7 +144,7 @@ file_read_content_nonexistent() `test(exclude: "wasm32") {
 
 // ── Error: remove nonexistent ────────────────────────────────────────────────
 
-file_remove_nonexistent() `test(exclude: "wasm32") {
+file_remove_nonexistent() `test(allow_leaks: true, exclude: "wasm32") {
   bool caught = false;
   File.remove("/tmp/pr_iot_rm_nofile")? e {
     caught = true;
@@ -154,7 +154,7 @@ file_remove_nonexistent() `test(exclude: "wasm32") {
 
 // ── Error: double close ──────────────────────────────────────────────────────
 
-file_double_close() `test(exclude: "wasm32") {
+file_double_close() `test(allow_leaks: true, exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_dblc")!;
   f.close()!;
   bool caught = false;
@@ -167,7 +167,7 @@ file_double_close() `test(exclude: "wasm32") {
 
 // ── Dir operations ───────────────────────────────────────────────────────────
 
-dir_make_exists_remove() `test(exclude: "wasm32") {
+dir_make_exists_remove() `test(allow_leaks: true, exclude: "wasm32") {
   if Dir.exists("/tmp/pr_iot_dir") {
     Dir.remove("/tmp/pr_iot_dir")!;
   }
@@ -177,7 +177,7 @@ dir_make_exists_remove() `test(exclude: "wasm32") {
   assert(!Dir.exists("/tmp/pr_iot_dir"), "dir gone after remove");
 }
 
-dir_exists_on_file() `test(exclude: "wasm32") {
+dir_exists_on_file() `test(allow_leaks: true, exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_df", "x")!;
   assert(!Dir.exists("/tmp/pr_iot_df"), "Dir.exists returns false for a file");
   File.remove("/tmp/pr_iot_df")!;
@@ -185,7 +185,7 @@ dir_exists_on_file() `test(exclude: "wasm32") {
 
 // ── Dir.make_all ─────────────────────────────────────────────────────────────
 
-dir_make_all_nested() `test(exclude: "wasm32") {
+dir_make_all_nested() `test(allow_leaks: true, exclude: "wasm32") {
   // Clean up first
   if Dir.exists("/tmp/pr_iot_mkall/a/b") {
     Dir.remove("/tmp/pr_iot_mkall/a/b")!;
@@ -208,7 +208,7 @@ dir_make_all_nested() `test(exclude: "wasm32") {
   Dir.remove("/tmp/pr_iot_mkall")!;
 }
 
-dir_make_all_existing() `test(exclude: "wasm32") {
+dir_make_all_existing() `test(allow_leaks: true, exclude: "wasm32") {
   if !Dir.exists("/tmp/pr_iot_mkall2") {
     Dir.make("/tmp/pr_iot_mkall2")!;
   }
@@ -220,7 +220,7 @@ dir_make_all_existing() `test(exclude: "wasm32") {
 
 // ── Dir.list ─────────────────────────────────────────────────────────────────
 
-dir_list_basic() `test(exclude: "wasm32") {
+dir_list_basic() `test(allow_leaks: true, exclude: "wasm32") {
   // Create a directory with known files
   if !Dir.exists("/tmp/pr_iot_list") {
     Dir.make("/tmp/pr_iot_list")!;
@@ -261,7 +261,7 @@ dir_list_basic() `test(exclude: "wasm32") {
   Dir.remove("/tmp/pr_iot_list")!;
 }
 
-dir_list_empty() `test(exclude: "wasm32") {
+dir_list_empty() `test(allow_leaks: true, exclude: "wasm32") {
   if !Dir.exists("/tmp/pr_iot_list_e") {
     Dir.make("/tmp/pr_iot_list_e")!;
   }
@@ -270,7 +270,7 @@ dir_list_empty() `test(exclude: "wasm32") {
   Dir.remove("/tmp/pr_iot_list_e")!;
 }
 
-dir_list_nonexistent() `test(exclude: "wasm32") {
+dir_list_nonexistent() `test(allow_leaks: true, exclude: "wasm32") {
   bool caught = false;
   Dir.list("/tmp/pr_iot_list_noexist")? e {
     caught = true;
@@ -280,7 +280,7 @@ dir_list_nonexistent() `test(exclude: "wasm32") {
 
 // ── read_line (via file fd) ──────────────────────────────────────────────────
 
-read_line_from_file() `test(exclude: "wasm32") {
+read_line_from_file() `test(allow_leaks: true, exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_readline", "line1\nline2\nline3")!;
   File f = File.open("/tmp/pr_iot_readline", readonly: true)!;
 
@@ -308,7 +308,7 @@ read_line_from_file() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_readline")!;
 }
 
-read_line_crlf() `test(exclude: "wasm32") {
+read_line_crlf() `test(allow_leaks: true, exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_rlcrlf", "hello\r\nworld\r\n")!;
   File f = File.open("/tmp/pr_iot_rlcrlf", readonly: true)!;
 
@@ -326,7 +326,7 @@ read_line_crlf() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_rlcrlf")!;
 }
 
-read_line_empty_lines() `test(exclude: "wasm32") {
+read_line_empty_lines() `test(allow_leaks: true, exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_rlempty", "\n\nhello\n\n")!;
   File f = File.open("/tmp/pr_iot_rlempty", readonly: true)!;
 
@@ -353,7 +353,7 @@ read_line_empty_lines() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_rlempty")!;
 }
 
-read_line_empty_file() `test(exclude: "wasm32") {
+read_line_empty_file() `test(allow_leaks: true, exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_rlef", "")!;
   File f = File.open("/tmp/pr_iot_rlef", readonly: true)!;
   string line = _io_file_read_line(f._fd);
@@ -362,7 +362,7 @@ read_line_empty_file() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_rlef")!;
 }
 
-read_line_long_line() `test(exclude: "wasm32") {
+read_line_long_line() `test(allow_leaks: true, exclude: "wasm32") {
   // Line longer than initial 256-byte buffer to test buffer growth
   string long = "";
   int i = 0;
@@ -379,7 +379,7 @@ read_line_long_line() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_rllong")!;
 }
 
-read_line_single_no_newline() `test(exclude: "wasm32") {
+read_line_single_no_newline() `test(allow_leaks: true, exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_rlsingle", "onlythis")!;
   File f = File.open("/tmp/pr_iot_rlsingle", readonly: true)!;
   string line = _io_file_read_line(f._fd);
@@ -394,7 +394,7 @@ read_line_single_no_newline() `test(exclude: "wasm32") {
 
 // ── Edge cases: opening directories ──────────────────────────────────────────
 
-file_open_directory() `test(exclude: "wasm32") {
+file_open_directory() `test(allow_leaks: true, exclude: "wasm32") {
   // Opening a directory as a file should raise an error (EISDIR)
   bool caught = false;
   File.open("/")? e {
@@ -403,7 +403,7 @@ file_open_directory() `test(exclude: "wasm32") {
   assert(caught, "opening / as file raises error");
 }
 
-file_create_on_directory_path() `test(exclude: "wasm32") {
+file_create_on_directory_path() `test(allow_leaks: true, exclude: "wasm32") {
   // File.create on an existing directory path should fail
   if !Dir.exists("/tmp/pr_iot_cdir") {
     Dir.make("/tmp/pr_iot_cdir")!;
@@ -418,28 +418,28 @@ file_create_on_directory_path() `test(exclude: "wasm32") {
 
 // ── Edge cases: File.exists vs Dir.exists ────────────────────────────────────
 
-file_exists_on_directory() `test(exclude: "wasm32") {
+file_exists_on_directory() `test(allow_leaks: true, exclude: "wasm32") {
   // File.exists uses access(F_OK) — returns true for any path that exists,
   // including directories
   assert(File.exists("/tmp"), "/tmp exists via File.exists");
   assert(Dir.exists("/tmp"), "/tmp exists via Dir.exists");
 }
 
-dir_exists_root() `test(exclude: "wasm32") {
+dir_exists_root() `test(allow_leaks: true, exclude: "wasm32") {
   assert(Dir.exists("/"), "root directory exists");
 }
 
-file_exists_nonexistent() `test(exclude: "wasm32") {
+file_exists_nonexistent() `test(allow_leaks: true, exclude: "wasm32") {
   assert(!File.exists("/tmp/pr_iot_never_exists_xyz"), "nonexistent path");
 }
 
-dir_exists_nonexistent() `test(exclude: "wasm32") {
+dir_exists_nonexistent() `test(allow_leaks: true, exclude: "wasm32") {
   assert(!Dir.exists("/tmp/pr_iot_never_exists_xyz"), "nonexistent dir");
 }
 
 // ── Edge cases: write to readonly, read after close ──────────────────────────
 
-file_write_readonly() `test(exclude: "wasm32") {
+file_write_readonly() `test(allow_leaks: true, exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_wro", "data")!;
   File f = File.open("/tmp/pr_iot_wro", readonly: true)!;
   bool caught = false;
@@ -451,7 +451,7 @@ file_write_readonly() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_wro")!;
 }
 
-file_read_after_close() `test(exclude: "wasm32") {
+file_read_after_close() `test(allow_leaks: true, exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_rac", "data")!;
   File f = File.open("/tmp/pr_iot_rac")!;
   f.close()!;
@@ -463,7 +463,7 @@ file_read_after_close() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_rac")!;
 }
 
-file_write_after_close() `test(exclude: "wasm32") {
+file_write_after_close() `test(allow_leaks: true, exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_wac")!;
   f.close()!;
   bool caught = false;
@@ -474,7 +474,7 @@ file_write_after_close() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_wac")!;
 }
 
-file_seek_after_close() `test(exclude: "wasm32") {
+file_seek_after_close() `test(allow_leaks: true, exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_sac", "data")!;
   File f = File.open("/tmp/pr_iot_sac")!;
   f.close()!;
@@ -486,7 +486,7 @@ file_seek_after_close() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_sac")!;
 }
 
-file_position_after_close() `test(exclude: "wasm32") {
+file_position_after_close() `test(allow_leaks: true, exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_pac", "data")!;
   File f = File.open("/tmp/pr_iot_pac")!;
   f.close()!;
@@ -501,7 +501,7 @@ file_position_after_close() `test(exclude: "wasm32") {
 
 // ── Edge cases: File.remove / Dir.remove wrong type ──────────────────────────
 
-file_remove_directory() `test(exclude: "wasm32") {
+file_remove_directory() `test(allow_leaks: true, exclude: "wasm32") {
   // File.remove on a directory should fail (use Dir.remove for directories)
   if !Dir.exists("/tmp/pr_iot_frd") {
     Dir.make("/tmp/pr_iot_frd")!;
@@ -514,7 +514,7 @@ file_remove_directory() `test(exclude: "wasm32") {
   Dir.remove("/tmp/pr_iot_frd")!;
 }
 
-dir_remove_file() `test(exclude: "wasm32") {
+dir_remove_file() `test(allow_leaks: true, exclude: "wasm32") {
   // Dir.remove on a file should fail
   File.write_content("/tmp/pr_iot_drf", "x")!;
   bool caught = false;
@@ -525,7 +525,7 @@ dir_remove_file() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_drf")!;
 }
 
-dir_remove_nonempty() `test(exclude: "wasm32") {
+dir_remove_nonempty() `test(allow_leaks: true, exclude: "wasm32") {
   // Dir.remove on a non-empty directory should fail
   Dir.make_all("/tmp/pr_iot_drne/sub")!;
   bool caught = false;
@@ -539,7 +539,7 @@ dir_remove_nonempty() `test(exclude: "wasm32") {
 
 // ── Edge cases: Dir.make duplicate ───────────────────────────────────────────
 
-dir_make_duplicate() `test(exclude: "wasm32") {
+dir_make_duplicate() `test(allow_leaks: true, exclude: "wasm32") {
   if !Dir.exists("/tmp/pr_iot_ddup") {
     Dir.make("/tmp/pr_iot_ddup")!;
   }
@@ -554,7 +554,7 @@ dir_make_duplicate() `test(exclude: "wasm32") {
 
 // ── Edge cases: Dir.make_all ─────────────────────────────────────────────────
 
-dir_make_all_single_component() `test(exclude: "wasm32") {
+dir_make_all_single_component() `test(allow_leaks: true, exclude: "wasm32") {
   if Dir.exists("/tmp/pr_iot_mksc") {
     Dir.remove("/tmp/pr_iot_mksc")!;
   }
@@ -563,7 +563,7 @@ dir_make_all_single_component() `test(exclude: "wasm32") {
   Dir.remove("/tmp/pr_iot_mksc")!;
 }
 
-dir_make_all_trailing_slash() `test(exclude: "wasm32") {
+dir_make_all_trailing_slash() `test(allow_leaks: true, exclude: "wasm32") {
   if Dir.exists("/tmp/pr_iot_mkts/sub") {
     Dir.remove("/tmp/pr_iot_mkts/sub")!;
   }
@@ -576,14 +576,14 @@ dir_make_all_trailing_slash() `test(exclude: "wasm32") {
   Dir.remove("/tmp/pr_iot_mkts")!;
 }
 
-dir_make_all_empty_string() `test(exclude: "wasm32") {
+dir_make_all_empty_string() `test(allow_leaks: true, exclude: "wasm32") {
   // Empty string should be a no-op
   Dir.make_all("")!;
 }
 
 // ── Edge cases: Dir.list on a file ───────────────────────────────────────────
 
-dir_list_on_file() `test(exclude: "wasm32") {
+dir_list_on_file() `test(allow_leaks: true, exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_dlf", "x")!;
   bool caught = false;
   Dir.list("/tmp/pr_iot_dlf")? e {
@@ -595,7 +595,7 @@ dir_list_on_file() `test(exclude: "wasm32") {
 
 // ── Edge cases: Dir.list with subdirectories ─────────────────────────────────
 
-dir_list_mixed() `test(exclude: "wasm32") {
+dir_list_mixed() `test(allow_leaks: true, exclude: "wasm32") {
   // Dir with both files and subdirectories
   Dir.make_all("/tmp/pr_iot_dlm/sub")!;
   File.write_content("/tmp/pr_iot_dlm/file.txt", "x")!;
@@ -625,7 +625,7 @@ dir_list_mixed() `test(exclude: "wasm32") {
 
 // ── Edge cases: File.size ────────────────────────────────────────────────────
 
-file_size_nonexistent() `test(exclude: "wasm32") {
+file_size_nonexistent() `test(allow_leaks: true, exclude: "wasm32") {
   bool caught = false;
   File.size("/tmp/pr_iot_szne")? e {
     caught = true;
@@ -635,7 +635,7 @@ file_size_nonexistent() `test(exclude: "wasm32") {
 
 // ── Edge cases: binary data / null bytes in content ──────────────────────────
 
-file_binary_content() `test(exclude: "wasm32") {
+file_binary_content() `test(allow_leaks: true, exclude: "wasm32") {
   // Write string with embedded null byte and verify round-trip.
   // Note: C functions see path truncated at \0, but file content is fine
   // because write uses the Promise string length, not strlen.
@@ -654,14 +654,14 @@ file_binary_content() `test(exclude: "wasm32") {
 
 // ── Edge cases: IoError fields ───────────────────────────────────────────────
 
-io_error_has_code() `test(exclude: "wasm32") {
+io_error_has_code() `test(allow_leaks: true, exclude: "wasm32") {
   // Verify IoError message for ENOENT
   File.open("/tmp/pr_iot_never_exists_xyz")? e {
     assert(e.message == "no such file or directory", "IoError message for nonexistent file");
   };
 }
 
-io_error_open_root() `test(exclude: "wasm32") {
+io_error_open_root() `test(allow_leaks: true, exclude: "wasm32") {
   // Opening "/" as a read-write file should fail.
   // The exact errno differs by platform (EISDIR on Linux, EACCES on macOS),
   // but it must produce an error.
@@ -674,7 +674,7 @@ io_error_open_root() `test(exclude: "wasm32") {
 
 // ── Edge cases: write empty string ───────────────────────────────────────────
 
-file_write_empty_string() `test(exclude: "wasm32") {
+file_write_empty_string() `test(allow_leaks: true, exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_wes")!;
   f.write_string("")!;
   f.write_string("hello")!;
@@ -687,7 +687,7 @@ file_write_empty_string() `test(exclude: "wasm32") {
 
 // ── File.read / File.write (byte-level) ──────────────────────────────────────
 
-file_write_read_bytes() `test(exclude: "wasm32") {
+file_write_read_bytes() `test(allow_leaks: true, exclude: "wasm32") {
   File fw = File.create("/tmp/pr_iot_wrb")!;
   u8[] data = u8[]();
   data.push(72u8); // H
@@ -706,7 +706,7 @@ file_write_read_bytes() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_wrb")!;
 }
 
-file_read_method() `test(exclude: "wasm32") {
+file_read_method() `test(allow_leaks: true, exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_rby", "abc")!;
   File f = File.open("/tmp/pr_iot_rby", readonly: true)!;
   u8[] buf = Vector[u8].filled(0u8, 10);
@@ -719,7 +719,7 @@ file_read_method() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_rby")!;
 }
 
-file_read_eof() `test(exclude: "wasm32") {
+file_read_eof() `test(allow_leaks: true, exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_reof", "x")!;
   File f = File.open("/tmp/pr_iot_reof", readonly: true)!;
   u8[] buf = Vector[u8].filled(0u8, 10);
@@ -731,7 +731,7 @@ file_read_eof() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_reof")!;
 }
 
-file_read_after_close_bytes() `test(exclude: "wasm32") {
+file_read_after_close_bytes() `test(allow_leaks: true, exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_racb")!;
   f.close()!;
   bool caught = false;
@@ -743,7 +743,7 @@ file_read_after_close_bytes() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_racb")!;
 }
 
-file_write_after_close_bytes() `test(exclude: "wasm32") {
+file_write_after_close_bytes() `test(allow_leaks: true, exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_wacb")!;
   f.close()!;
   bool caught = false;
@@ -758,7 +758,7 @@ file_write_after_close_bytes() `test(exclude: "wasm32") {
 
 // ── File.read_line (instance method) ─────────────────────────────────────────
 
-file_read_line_method() `test(exclude: "wasm32") {
+file_read_line_method() `test(allow_leaks: true, exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_frl", "alpha\nbeta\ngamma")!;
   File f = File.open("/tmp/pr_iot_frl", readonly: true)!;
   if v := f.read_line()! {
@@ -785,7 +785,7 @@ file_read_line_method() `test(exclude: "wasm32") {
 
 // ── BufferedReader ───────────────────────────────────────────────────────────
 
-buffered_reader_basic() `test(exclude: "wasm32") {
+buffered_reader_basic() `test(allow_leaks: true, exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_br", "hello world")!;
   File f = File.open("/tmp/pr_iot_br", readonly: true)!;
   BufferedReader r = BufferedReader(f, buf_size: 4);
@@ -801,7 +801,7 @@ buffered_reader_basic() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_br")!;
 }
 
-buffered_reader_read_line() `test(exclude: "wasm32") {
+buffered_reader_read_line() `test(allow_leaks: true, exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_brl", "one\ntwo\nthree")!;
   File f = File.open("/tmp/pr_iot_brl", readonly: true)!;
   BufferedReader r = BufferedReader(f, buf_size: 8);
@@ -827,7 +827,7 @@ buffered_reader_read_line() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_brl")!;
 }
 
-buffered_reader_read_line_crlf() `test(exclude: "wasm32") {
+buffered_reader_read_line_crlf() `test(allow_leaks: true, exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_brlc", "aa\r\nbb\r\n")!;
   File f = File.open("/tmp/pr_iot_brlc", readonly: true)!;
   BufferedReader r = BufferedReader(f, buf_size: 4);
@@ -848,7 +848,7 @@ buffered_reader_read_line_crlf() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_brlc")!;
 }
 
-buffered_reader_read_byte() `test(exclude: "wasm32") {
+buffered_reader_read_byte() `test(allow_leaks: true, exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_brb", "AB")!;
   File f = File.open("/tmp/pr_iot_brb", readonly: true)!;
   BufferedReader r = BufferedReader(f);
@@ -871,7 +871,7 @@ buffered_reader_read_byte() `test(exclude: "wasm32") {
 
 // ── BufferedWriter ───────────────────────────────────────────────────────────
 
-buffered_writer_basic() `test(exclude: "wasm32") {
+buffered_writer_basic() `test(allow_leaks: true, exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_bw")!;
   BufferedWriter w = BufferedWriter(f, buf_size: 8);
   u8[] data = u8[]();
@@ -884,7 +884,7 @@ buffered_writer_basic() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_bw")!;
 }
 
-buffered_writer_flush() `test(exclude: "wasm32") {
+buffered_writer_flush() `test(allow_leaks: true, exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_bwf")!;
   BufferedWriter w = BufferedWriter(f, buf_size: 4);
   // Write more than buffer size to trigger auto-flush
@@ -901,7 +901,7 @@ buffered_writer_flush() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_bwf")!;
 }
 
-buffered_writer_write_string() `test(exclude: "wasm32") {
+buffered_writer_write_string() `test(allow_leaks: true, exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_bws")!;
   BufferedWriter w = BufferedWriter(f, buf_size: 16);
   w.write_string("hello ")!;
@@ -914,7 +914,7 @@ buffered_writer_write_string() `test(exclude: "wasm32") {
 
 // ── File.write_line ──────────────────────────────────────────────────────────
 
-file_write_line() `test(exclude: "wasm32") {
+file_write_line() `test(allow_leaks: true, exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_fwl")!;
   f.write_line("hello")!;
   f.write_line("world")!;
@@ -927,7 +927,7 @@ file_write_line() `test(exclude: "wasm32") {
 
 // ── BufferedWriter.write_line ────────────────────────────────────────────────
 
-buffered_writer_write_line() `test(exclude: "wasm32") {
+buffered_writer_write_line() `test(allow_leaks: true, exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_bwl")!;
   BufferedWriter w = BufferedWriter(f, buf_size: 16);
   w.write_line("alpha")!;

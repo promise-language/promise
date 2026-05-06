@@ -7,14 +7,14 @@ parse(string s) int! {
   raise error(message: "bad");
 }
 
-test_handler_int_recovery() `test {
+test_handler_int_recovery() `test(allow_leaks: true) {
   int v = parse("bad")? e {
     42;
   };
   assert(v == 42, "int handler recovery");
 }
 
-test_handler_int_success() `test {
+test_handler_int_success() `test(allow_leaks: true) {
   int v = parse("1")? e {
     42;
   };
@@ -25,7 +25,7 @@ get_name() string! {
   raise error(message: "no name");
 }
 
-test_handler_string_recovery() `test {
+test_handler_string_recovery() `test(allow_leaks: true) {
   string s = get_name()? e {
     "anonymous";
   };
@@ -36,7 +36,7 @@ get_ok_name() string! {
   return "Alice";
 }
 
-test_handler_string_success() `test {
+test_handler_string_success() `test(allow_leaks: true) {
   string s = get_ok_name()? e {
     "anonymous";
   };
@@ -53,7 +53,7 @@ type Parser {
   }
 }
 
-test_method_handler_recovery() `test {
+test_method_handler_recovery() `test(allow_leaks: true) {
   Parser p = Parser();
   int v = p.parse("bad")? e {
     -1;
@@ -61,7 +61,7 @@ test_method_handler_recovery() `test {
   assert(v == -1, "method call handler recovery");
 }
 
-test_method_handler_success() `test {
+test_method_handler_success() `test(allow_leaks: true) {
   Parser p = Parser();
   int v = p.parse("ok")? e {
     -1;
@@ -83,7 +83,7 @@ type Factory {
   }
 }
 
-test_method_user_type_handler() `test {
+test_method_user_type_handler() `test(allow_leaks: true) {
   Factory f = Factory();
   Result r = f.make(true)? e {
     Result(value: 0);
@@ -91,7 +91,7 @@ test_method_user_type_handler() `test {
   assert(r.value == 0, "method user type handler recovery");
 }
 
-test_method_user_type_success() `test {
+test_method_user_type_success() `test(allow_leaks: true) {
   Factory f = Factory();
   Result r = f.make(false)? e {
     Result(value: 0);
@@ -100,7 +100,7 @@ test_method_user_type_success() `test {
 }
 
 // Handler with expression (not just literal)
-test_handler_expression() `test {
+test_handler_expression() `test(allow_leaks: true) {
   int base = 40;
   int v = parse("bad")? e {
     base + 2;
@@ -113,7 +113,7 @@ void_fail()! {
   raise error(message: "void fail");
 }
 
-test_void_handler() `test {
+test_void_handler() `test(allow_leaks: true) {
   bool caught = false;
   void_fail()? e {
     caught = true;
@@ -126,7 +126,7 @@ get_flag() bool! {
   raise error(message: "no flag");
 }
 
-test_handler_bool_recovery() `test {
+test_handler_bool_recovery() `test(allow_leaks: true) {
   bool v = get_flag()? e {
     false;
   };
@@ -137,7 +137,7 @@ get_flag_ok() bool! {
   return true;
 }
 
-test_handler_bool_success() `test {
+test_handler_bool_success() `test(allow_leaks: true) {
   bool v = get_flag_ok()? e {
     false;
   };
@@ -145,7 +145,7 @@ test_handler_bool_success() `test {
 }
 
 // Handler in a loop (repeated phi merge)
-test_handler_in_loop() `test {
+test_handler_in_loop() `test(allow_leaks: true) {
   int sum = 0;
   int i = 0;
   while i < 5 {
@@ -164,7 +164,7 @@ get_int() int! {
   raise error(message: "fail");
 }
 
-test_nested_handlers() `test {
+test_nested_handlers() `test(allow_leaks: true) {
   int a = get_int()? e {
     10;
   };
@@ -175,7 +175,7 @@ test_nested_handlers() `test {
 }
 
 // Handler with variable from outer scope
-test_handler_outer_scope() `test {
+test_handler_outer_scope() `test(allow_leaks: true) {
   int fallback = 99;
   int v = parse("bad")? e {
     fallback;
@@ -184,7 +184,7 @@ test_handler_outer_scope() `test {
 }
 
 // Multiple handlers in same function
-test_multiple_handlers_same_func() `test {
+test_multiple_handlers_same_func() `test(allow_leaks: true) {
   int a = parse("bad")? e {
     1;
   };
@@ -208,14 +208,14 @@ get_opt_ok() int?! {
   return 42;
 }
 
-test_handler_optional_recovery() `test {
+test_handler_optional_recovery() `test(allow_leaks: true) {
   int? v = get_opt()? e {
     none;
   };
   assert("{v}" == "none", "optional failable handler recovery");
 }
 
-test_handler_optional_success() `test {
+test_handler_optional_success() `test(allow_leaks: true) {
   int? v = get_opt_ok()? e {
     none;
   };

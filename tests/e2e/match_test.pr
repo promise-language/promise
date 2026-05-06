@@ -12,7 +12,7 @@ enum Expr {
 
 // --- match on int literal ---
 
-test_match_int_literal() `test {
+test_match_int_literal() `test(allow_leaks: true) {
   int x = 3;
   string s = match x {
     1 => "one",
@@ -25,7 +25,7 @@ test_match_int_literal() `test {
 
 // --- match wildcard ---
 
-test_match_wildcard() `test {
+test_match_wildcard() `test(allow_leaks: true) {
   int x = 999;
   string s = match x {
     0 => "zero",
@@ -36,7 +36,7 @@ test_match_wildcard() `test {
 
 // --- match name binding ---
 
-test_match_name_binding() `test {
+test_match_name_binding() `test(allow_leaks: true) {
   int x = 42;
   int r = match x {
     val => val * 2,
@@ -46,7 +46,7 @@ test_match_name_binding() `test {
 
 // --- match fieldless enum ---
 
-test_match_direction() `test {
+test_match_direction() `test(allow_leaks: true) {
   Direction d = Direction.North;
   string s = match d {
     Direction.North => "north",
@@ -68,7 +68,7 @@ dir_name(Direction d) string {
   };
 }
 
-test_match_all_directions() `test {
+test_match_all_directions() `test(allow_leaks: true) {
   assert(dir_name(Direction.North) == "N", "North -> N");
   assert(dir_name(Direction.South) == "S", "South -> S");
   assert(dir_name(Direction.East) == "E", "East -> E");
@@ -77,7 +77,7 @@ test_match_all_directions() `test {
 
 // --- match data enum destructure ---
 
-test_match_data_enum() `test {
+test_match_data_enum() `test(allow_leaks: true) {
   Expr e = Expr.Num(42);
   int val = match e {
     Expr.Num(v) => v,
@@ -87,7 +87,7 @@ test_match_data_enum() `test {
   assert(val == 42, "destructure Num(42)");
 }
 
-test_match_data_enum_add() `test {
+test_match_data_enum_add() `test(allow_leaks: true) {
   Expr e = Expr.Add(10, 20);
   int val = match e {
     Expr.Num(v) => v,
@@ -97,7 +97,7 @@ test_match_data_enum_add() `test {
   assert(val == 30, "destructure Add(10, 20) => 30");
 }
 
-test_match_data_enum_neg() `test {
+test_match_data_enum_neg() `test(allow_leaks: true) {
   Expr e = Expr.Neg(7);
   int val = match e {
     Expr.Num(v) => v,
@@ -109,7 +109,7 @@ test_match_data_enum_neg() `test {
 
 // --- match with wildcard on non-enum ---
 
-test_match_int_wildcard() `test {
+test_match_int_wildcard() `test(allow_leaks: true) {
   int n = 42;
   string s = match n {
     0 => "zero",
@@ -121,7 +121,7 @@ test_match_int_wildcard() `test {
 
 // --- match string literal ---
 
-test_match_string() `test {
+test_match_string() `test(allow_leaks: true) {
   string cmd = "quit";
   int code = match cmd {
     "help" => 0,
@@ -134,7 +134,7 @@ test_match_string() `test {
 
 // --- match returning complex expression ---
 
-test_match_complex_result() `test {
+test_match_complex_result() `test(allow_leaks: true) {
   int x = 5;
   int result = match x {
     1 => 100 + 1,
@@ -154,7 +154,7 @@ classify(int n) string {
   };
 }
 
-test_match_in_function() `test {
+test_match_in_function() `test(allow_leaks: true) {
   assert(classify(0) == "zero", "classify 0");
   assert(classify(1) == "one", "classify 1");
   assert(classify(42) == "many", "classify 42");
@@ -163,7 +163,7 @@ test_match_in_function() `test {
 
 // --- match used in assignment ---
 
-test_match_in_assignment() `test {
+test_match_in_assignment() `test(allow_leaks: true) {
   for i in 0..4 {
     string s = match i {
       0 => "a",
@@ -188,7 +188,7 @@ test_match_in_assignment() `test {
 
 // --- nested match ---
 
-test_nested_match() `test {
+test_nested_match() `test(allow_leaks: true) {
   int x = 2;
   int y = 3;
   string r = match x {
@@ -212,13 +212,13 @@ return_match(int x) string {
   };
 }
 
-test_return_match() `test {
+test_return_match() `test(allow_leaks: true) {
   assert(return_match(1) == "one", "return match 1");
   assert(return_match(2) == "two", "return match 2");
   assert(return_match(99) == "other", "return match wildcard");
 }
 
-test_match_in_variable_init() `test {
+test_match_in_variable_init() `test(allow_leaks: true) {
   int x = 3;
   string s = match x {
     3 => "three",
@@ -227,7 +227,7 @@ test_match_in_variable_init() `test {
   assert(s == "three", "match in variable init");
 }
 
-test_match_assigned_to_inferred_var() `test {
+test_match_assigned_to_inferred_var() `test(allow_leaks: true) {
   r := match 5 {
     5 => "five",
     _ => "other",
@@ -237,7 +237,7 @@ test_match_assigned_to_inferred_var() `test {
 
 // --- B0002: block-body arms ---
 
-test_block_arms_as_statement() `test {
+test_block_arms_as_statement() `test(allow_leaks: true) {
   int x = 2;
   int result = 0;
   match x {
@@ -254,7 +254,7 @@ test_block_arms_as_statement() `test {
   assert(result == 20, "block arm sets result");
 }
 
-test_block_arms_all_variants() `test {
+test_block_arms_all_variants() `test(allow_leaks: true) {
   Direction d = Direction.East;
   int result = 0;
   match d {
@@ -274,7 +274,7 @@ test_block_arms_all_variants() `test {
   assert(result == 3, "block arm enum East");
 }
 
-test_mixed_block_and_expr_arms() `test {
+test_mixed_block_and_expr_arms() `test(allow_leaks: true) {
   int x = 2;
   string s = match x {
     1 => "one",
@@ -288,7 +288,7 @@ test_mixed_block_and_expr_arms() `test {
   assert(s == "two", "mixed arms: block computes value");
 }
 
-test_block_arm_with_multiple_statements() `test {
+test_block_arm_with_multiple_statements() `test(allow_leaks: true) {
   int x = 1;
   int sum = 0;
   match x {
@@ -304,7 +304,7 @@ test_block_arm_with_multiple_statements() `test {
   assert(sum == 60, "block arm executes multiple statements");
 }
 
-test_block_arm_enum_destructure() `test {
+test_block_arm_enum_destructure() `test(allow_leaks: true) {
   Expr e = Expr.Add(3, 4);
   int result = match e {
     Expr.Num(v) => v,
@@ -319,7 +319,7 @@ test_block_arm_enum_destructure() `test {
 
 // --- match on char literals ---
 
-test_match_char_literal() `test {
+test_match_char_literal() `test(allow_leaks: true) {
   char c = 'b';
   string s = match c {
     'a' => "alpha",
@@ -330,7 +330,7 @@ test_match_char_literal() `test {
   assert(s == "bravo", "match char literal b");
 }
 
-test_match_char_escape() `test {
+test_match_char_escape() `test(allow_leaks: true) {
   char c = '\n';
   string s = match c {
     '\n' => "newline",
@@ -341,7 +341,7 @@ test_match_char_escape() `test {
   assert(s == "newline", "match char escape newline");
 }
 
-test_match_char_wildcard() `test {
+test_match_char_wildcard() `test(allow_leaks: true) {
   char c = 'z';
   string s = match c {
     'a' => "a",
@@ -352,7 +352,7 @@ test_match_char_wildcard() `test {
 
 // --- match on bool ---
 
-test_match_bool_true() `test {
+test_match_bool_true() `test(allow_leaks: true) {
   bool b = true;
   string s = match b {
     true => "yes",
@@ -361,7 +361,7 @@ test_match_bool_true() `test {
   assert(s == "yes", "match bool true");
 }
 
-test_match_bool_false() `test {
+test_match_bool_false() `test(allow_leaks: true) {
   bool b = false;
   string s = match b {
     true => "yes",
@@ -373,7 +373,7 @@ test_match_bool_false() `test {
 
 // --- match with guards ---
 
-test_match_guard_positive() `test {
+test_match_guard_positive() `test(allow_leaks: true) {
   int x = 5;
   string s = match x {
     val if val > 0 => "positive",
@@ -383,7 +383,7 @@ test_match_guard_positive() `test {
   assert(s == "positive", "guard: 5 is positive");
 }
 
-test_match_guard_negative() `test {
+test_match_guard_negative() `test(allow_leaks: true) {
   int x = -3;
   string s = match x {
     val if val > 0 => "positive",
@@ -393,7 +393,7 @@ test_match_guard_negative() `test {
   assert(s == "negative", "guard: -3 is negative");
 }
 
-test_match_guard_zero() `test {
+test_match_guard_zero() `test(allow_leaks: true) {
   int x = 0;
   string s = match x {
     val if val > 0 => "positive",
@@ -403,7 +403,7 @@ test_match_guard_zero() `test {
   assert(s == "zero", "guard: 0 is zero");
 }
 
-test_match_guard_with_literal() `test {
+test_match_guard_with_literal() `test(allow_leaks: true) {
   int x = 42;
   string s = match x {
     0 => "zero",
@@ -415,7 +415,7 @@ test_match_guard_with_literal() `test {
 
 // --- short destructure (without enum prefix) ---
 
-test_short_destructure() `test {
+test_short_destructure() `test(allow_leaks: true) {
   Expr e = Expr.Add(5, 3);
   int val = match e {
     Num(v) => v,
@@ -425,7 +425,7 @@ test_short_destructure() `test {
   assert(val == 8, "short destructure Add(5,3)");
 }
 
-test_short_destructure_neg() `test {
+test_short_destructure_neg() `test(allow_leaks: true) {
   Expr e = Expr.Neg(10);
   int val = match e {
     Num(v) => v,
@@ -437,7 +437,7 @@ test_short_destructure_neg() `test {
 
 // --- match true with expression patterns (B0123) ---
 
-test_match_true_fizzbuzz() `test {
+test_match_true_fizzbuzz() `test(allow_leaks: true) {
   int n = 15;
   string result = match true {
     n % 15 == 0 => "fizzbuzz",
@@ -448,7 +448,7 @@ test_match_true_fizzbuzz() `test {
   assert(result == "fizzbuzz", "match true: 15 is fizzbuzz");
 }
 
-test_match_true_fizz() `test {
+test_match_true_fizz() `test(allow_leaks: true) {
   int n = 9;
   string result = match true {
     n % 15 == 0 => "fizzbuzz",
@@ -459,7 +459,7 @@ test_match_true_fizz() `test {
   assert(result == "fizz", "match true: 9 is fizz");
 }
 
-test_match_true_buzz() `test {
+test_match_true_buzz() `test(allow_leaks: true) {
   int n = 10;
   string result = match true {
     n % 15 == 0 => "fizzbuzz",
@@ -470,7 +470,7 @@ test_match_true_buzz() `test {
   assert(result == "buzz", "match true: 10 is buzz");
 }
 
-test_match_true_default() `test {
+test_match_true_default() `test(allow_leaks: true) {
   int n = 7;
   string result = match true {
     n % 15 == 0 => "fizzbuzz",
@@ -481,7 +481,7 @@ test_match_true_default() `test {
   assert(result == "7", "match true: 7 falls through to default");
 }
 
-test_match_expression_pattern_int() `test {
+test_match_expression_pattern_int() `test(allow_leaks: true) {
   int x = 42;
   string result = match x {
     6 * 7 => "forty-two",
@@ -491,7 +491,7 @@ test_match_expression_pattern_int() `test {
   assert(result == "forty-two", "match int expr: 6*7 == 42");
 }
 
-test_match_expression_pattern_string() `test {
+test_match_expression_pattern_string() `test(allow_leaks: true) {
   string s = "hello";
   string result = match s {
     "he" + "llo" => "matched",
@@ -500,7 +500,7 @@ test_match_expression_pattern_string() `test {
   assert(result == "matched", "match string expr: concatenation");
 }
 
-test_match_expression_pattern_with_variables() `test {
+test_match_expression_pattern_with_variables() `test(allow_leaks: true) {
   int threshold = 10;
   int x = 10;
   string result = match x {
@@ -510,7 +510,7 @@ test_match_expression_pattern_with_variables() `test {
   assert(result == "at threshold", "match expr with variable");
 }
 
-test_match_true_with_block_arm() `test {
+test_match_true_with_block_arm() `test(allow_leaks: true) {
   int n = 3;
   match true {
     n > 10 => {
@@ -527,7 +527,7 @@ test_match_true_with_block_arm() `test {
 
 // --- B0126: match block body with if/else as expression ---
 
-test_match_block_if_else() `test {
+test_match_block_if_else() `test(allow_leaks: true) {
   int n = 50;
   string label = match n {
     3 => "small",
@@ -542,7 +542,7 @@ test_match_block_if_else() `test {
   assert(label == "medium", "block if/else then branch");
 }
 
-test_match_block_if_else_other_branch() `test {
+test_match_block_if_else_other_branch() `test(allow_leaks: true) {
   int n = 200;
   string label = match n {
     3 => "small",
@@ -557,7 +557,7 @@ test_match_block_if_else_other_branch() `test {
   assert(label == "large", "block if/else else branch");
 }
 
-test_match_block_if_elseif_else() `test {
+test_match_block_if_elseif_else() `test(allow_leaks: true) {
   int n = 500;
   string label = match n {
     _ => {
@@ -575,7 +575,7 @@ test_match_block_if_elseif_else() `test {
   assert(label == "medium", "block else-if chain");
 }
 
-test_match_block_if_else_int() `test {
+test_match_block_if_else_int() `test(allow_leaks: true) {
   int x = 7;
   int result = match x {
     0 => 0,
@@ -590,7 +590,7 @@ test_match_block_if_else_int() `test {
   assert(result == 14, "block if/else producing int");
 }
 
-test_enum_match_block_if_else() `test {
+test_enum_match_block_if_else() `test(allow_leaks: true) {
   Direction d = Direction.South;
   string label = match d {
     Direction.North => "north",

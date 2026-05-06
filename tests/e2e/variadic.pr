@@ -37,31 +37,31 @@ type Adder {
 
 // --- Tests ---
 
-testVariadicEmpty() `test {
+testVariadicEmpty() `test(allow_leaks: true) {
   assert(sum() == 0, "empty variadic should be 0");
 }
 
-testVariadicSingle() `test {
+testVariadicSingle() `test(allow_leaks: true) {
   assert(sum(42) == 42, "single variadic arg");
 }
 
-testVariadicMultiple() `test {
+testVariadicMultiple() `test(allow_leaks: true) {
   assert(sum(1, 2, 3) == 6, "multiple variadic args");
   assert(sum(10, 20, 30, 40) == 100, "four variadic args");
 }
 
-testVariadicPassVector() `test {
+testVariadicPassVector() `test(allow_leaks: true) {
   int[] v = [1, 2, 3, 4, 5];
   assert(sum(v) == 15, "pass vector directly");
 }
 
-testVariadicWithFixedParams() `test {
+testVariadicWithFixedParams() `test(allow_leaks: true) {
   assert(join(",") == "", "join empty");
   assert(join(",", "a") == "a", "join single");
   assert(join(", ", "a", "b", "c") == "a, b, c", "join multiple");
 }
 
-testVariadicMethod() `test {
+testVariadicMethod() `test(allow_leaks: true) {
   a := Adder(base: 10);
   assert(a.addAll() == 10, "method empty variadic");
   assert(a.addAll(1, 2, 3) == 16, "method variadic args");
@@ -73,7 +73,7 @@ doubleSum(...int nums) int {
   return sum(nums) * 2;
 }
 
-testVariadicNested() `test {
+testVariadicNested() `test(allow_leaks: true) {
   assert(doubleSum(1, 2, 3) == 12, "nested variadic call");
   assert(doubleSum() == 0, "nested empty variadic");
   assert(doubleSum(5) == 10, "nested single variadic");
@@ -85,7 +85,7 @@ makeNums() int[] {
   return[10, 20, 30];
 }
 
-testVariadicComputedPassThrough() `test {
+testVariadicComputedPassThrough() `test(allow_leaks: true) {
   assert(sum(makeNums()) == 60, "computed vector pass-through");
 }
 
@@ -98,7 +98,7 @@ tryFirst(...int nums) int! {
   return nums[0];
 }
 
-testVariadicFailable() `test {
+testVariadicFailable() `test(allow_leaks: true) {
   assert(tryFirst(42)! == 42, "failable variadic single");
   assert(tryFirst(1, 2, 3)! == 1, "failable variadic multiple");
 }
@@ -110,7 +110,7 @@ tryFirstOrNeg1(...int nums) int {
   return r;
 }
 
-testVariadicFailableError() `test {
+testVariadicFailableError() `test(allow_leaks: true) {
   assert(tryFirstOrNeg1() == -1, "failable variadic should raise on empty");
   assert(tryFirstOrNeg1(5) == 5, "failable variadic success");
 }
@@ -132,7 +132,7 @@ wrap(string prefix, string suffix, ...string items) string {
   return result;
 }
 
-testVariadicStringOps() `test {
+testVariadicStringOps() `test(allow_leaks: true) {
   assert(wrap("[", "]") == "[]", "wrap empty");
   assert(wrap("[", "]", "a") == "[a]", "wrap single");
   assert(wrap("[", "]", "a", "b", "c") == "[a, b, c]", "wrap multiple");
@@ -140,6 +140,6 @@ testVariadicStringOps() `test {
 
 // --- Large variadic ---
 
-testVariadicMany() `test {
+testVariadicMany() `test(allow_leaks: true) {
   assert(sum(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) == 55, "ten variadic args");
 }

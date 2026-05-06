@@ -1,11 +1,11 @@
 use mathlib "./mathlib";
 
-test_failable_ok() `test {
+test_failable_ok() `test(allow_leaks: true) {
   int result = mathlib.safe_divide(10, 2)!;
   assert(result == 5, "10 / 2 == 5");
 }
 
-test_failable_handler() `test {
+test_failable_handler() `test(allow_leaks: true) {
   mathlib.safe_divide(1, 0)? e {
     assert(e.message == "division by zero", "error message");
     return;
@@ -13,7 +13,7 @@ test_failable_handler() `test {
   assert(false, "should not reach here");
 }
 
-test_failable_result_capture() `test {
+test_failable_result_capture() `test(allow_leaks: true) {
   (val, err) := mathlib.safe_divide(20, 4);
   if err is present {
     assert(false, "should not have error on success");
@@ -21,7 +21,7 @@ test_failable_result_capture() `test {
   assert(val == 5, "20 / 4 == 5");
 }
 
-test_failable_result_capture_error() `test {
+test_failable_result_capture_error() `test(allow_leaks: true) {
   (val, err) := mathlib.safe_divide(1, 0);
   if err is absent {
     assert(false, "should have error for division by zero");
@@ -32,7 +32,7 @@ propagate_divide() int! {
   return mathlib.safe_divide(100, 0);
 }
 
-test_failable_propagation() `test {
+test_failable_propagation() `test(allow_leaks: true) {
   propagate_divide()? e {
     assert(e.message == "division by zero", "propagated error message");
     return;

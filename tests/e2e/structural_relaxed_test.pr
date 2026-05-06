@@ -16,7 +16,7 @@ type Doc {
   }
 }
 
-test_extra_optional_param() `test {
+test_extra_optional_param() `test(allow_leaks: true) {
   Printable p = Doc();
   assert(p.print() == "doc", "called through interface with none default");
 }
@@ -33,7 +33,7 @@ type Report {
   }
 }
 
-test_extra_default_param() `test {
+test_extra_default_param() `test(allow_leaks: true) {
   Formatter f = Report();
   assert(f.format() == "report(w:80)", "called through interface with default param");
 }
@@ -50,7 +50,7 @@ type Doubler {
   }
 }
 
-test_non_failable_satisfies_failable() `test {
+test_non_failable_satisfies_failable() `test(allow_leaks: true) {
   Processor p = Doubler();
   int result = p.process(5)!;
   assert(result == 10, "non-failable through failable interface");
@@ -68,7 +68,7 @@ type Always42 {
   }
 }
 
-test_non_optional_return() `test {
+test_non_optional_return() `test(allow_leaks: true) {
   Finder f = Always42();
   int? result = f.find();
   if result is present {
@@ -93,7 +93,7 @@ type SimpleParser {
   }
 }
 
-test_combined_adapter() `test {
+test_combined_adapter() `test(allow_leaks: true) {
   Parser p = SimpleParser();
   int result = p.parse("hello")!;
   assert(result == 5, "combined adapter: extra param + failable");
@@ -117,7 +117,7 @@ type Dict {
   }
 }
 
-test_combined_extra_param_optional_return() `test {
+test_combined_extra_param_optional_return() `test(allow_leaks: true) {
   Lookup l = Dict();
   int? result = l.get("x");
   if result is present {
@@ -129,17 +129,17 @@ test_combined_extra_param_optional_return() `test {
 
 // --- Direct calls with optional params still work ---
 
-test_direct_call_no_params() `test {
+test_direct_call_no_params() `test(allow_leaks: true) {
   Doc d = Doc();
   assert(d.print() == "doc", "direct call without optional param");
 }
 
-test_direct_call_with_optional_param() `test {
+test_direct_call_with_optional_param() `test(allow_leaks: true) {
   Doc d = Doc();
   assert(d.print(indent: 4) == "doc(indent:4)", "direct call with optional param");
 }
 
-test_direct_call_default_param() `test {
+test_direct_call_default_param() `test(allow_leaks: true) {
   Report r = Report();
   assert(r.format(width: 120) == "report(w:120)", "direct call with non-default value");
 }
@@ -153,11 +153,11 @@ greet(string? name) string {
   return "hello world";
 }
 
-test_standalone_optional_param_with_value() `test {
+test_standalone_optional_param_with_value() `test(allow_leaks: true) {
   assert(greet("alice") == "hello alice", "standalone fn: optional param with value");
 }
 
-test_standalone_optional_param_omitted() `test {
+test_standalone_optional_param_omitted() `test(allow_leaks: true) {
   assert(greet() == "hello world", "standalone fn: optional param omitted");
 }
 
@@ -176,19 +176,19 @@ type Config {
   }
 }
 
-test_constructor_optional_param_with_value() `test {
+test_constructor_optional_param_with_value() `test(allow_leaks: true) {
   Config c = Config(timeout: 10);
   assert(c.timeout == 10, "constructor: optional param with value");
   assert(c.mode == "fast", "constructor: default param used");
 }
 
-test_constructor_optional_param_omitted() `test {
+test_constructor_optional_param_omitted() `test(allow_leaks: true) {
   Config c = Config();
   assert(c.timeout == 30, "constructor: optional param omitted");
   assert(c.mode == "fast", "constructor: default param used");
 }
 
-test_constructor_all_params_provided() `test {
+test_constructor_all_params_provided() `test(allow_leaks: true) {
   Config c = Config(timeout: 5, mode: "slow");
   assert(c.timeout == 5, "constructor: all params provided");
   assert(c.mode == "slow", "constructor: explicit mode");
@@ -210,12 +210,12 @@ type Job {
   }
 }
 
-test_multiple_extra_params_through_interface() `test {
+test_multiple_extra_params_through_interface() `test(allow_leaks: true) {
   Executor e = Job();
   assert(e.execute() == 1, "multiple extra params: defaults used");
 }
 
-test_multiple_extra_params_direct() `test {
+test_multiple_extra_params_direct() `test(allow_leaks: true) {
   Job j = Job();
   assert(j.execute(priority: 10, retries: 3) == 13, "multiple extra params: all provided");
   assert(j.execute(priority: 5) == 6, "multiple extra params: partial");

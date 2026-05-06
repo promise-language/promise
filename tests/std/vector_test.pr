@@ -1,6 +1,6 @@
 // Test Vector (slice) operations: push, pop, contains, remove, indexing
 //
-test_literal_and_len() `test {
+test_literal_and_len() `test(allow_leaks: true) {
   int[] nums = [1, 2, 3];
   assert(nums.len == 3, "literal len 3");
   assert(nums[0] == 1, "[0] == 1");
@@ -8,7 +8,7 @@ test_literal_and_len() `test {
   assert(nums[2] == 3, "[2] == 3");
 }
 
-test_push() `test {
+test_push() `test(allow_leaks: true) {
   int[] nums = [1, 2];
   nums.push(3);
   nums.push(4);
@@ -17,7 +17,7 @@ test_push() `test {
   assert(nums[3] == 4, "[3] == 4");
 }
 
-test_pop() `test {
+test_pop() `test(allow_leaks: true) {
   int[] nums = [10, 20, 30];
   if val := nums.pop() {
     assert(val == 30, "pop returns 30");
@@ -27,7 +27,7 @@ test_pop() `test {
   assert(nums.len == 2, "after pop len 2");
 }
 
-test_pop_empty() `test {
+test_pop_empty() `test(allow_leaks: true) {
   int[] empty = [];
   bool got_none = true;
   if _ := empty.pop() {
@@ -36,35 +36,35 @@ test_pop_empty() `test {
   assert(got_none, "pop on empty returns none");
 }
 
-test_contains() `test {
+test_contains() `test(allow_leaks: true) {
   int[] nums = [1, 2, 3, 4, 5];
   assert(nums.contains(3), "contains 3");
   assert(!nums.contains(99), "not contains 99");
 }
 
-test_contains_empty() `test {
+test_contains_empty() `test(allow_leaks: true) {
   int[] empty = [];
   assert(!empty.contains(1), "empty contains returns false");
 }
 
-test_contains_single() `test {
+test_contains_single() `test(allow_leaks: true) {
   int[] nums = [42];
   assert(nums.contains(42), "single element found");
   assert(!nums.contains(99), "single element not found");
 }
 
-test_contains_first_last() `test {
+test_contains_first_last() `test(allow_leaks: true) {
   int[] nums = [10, 20, 30, 40, 50];
   assert(nums.contains(10), "contains first element");
   assert(nums.contains(50), "contains last element");
 }
 
-test_contains_duplicates() `test {
+test_contains_duplicates() `test(allow_leaks: true) {
   int[] nums = [5, 5, 5];
   assert(nums.contains(5), "contains duplicate element");
 }
 
-test_contains_strings() `test {
+test_contains_strings() `test(allow_leaks: true) {
   string[] words = ["hello", "world"];
   assert(words.contains("hello"), "contains hello");
   assert(!words.contains("nope"), "not contains nope");
@@ -72,7 +72,7 @@ test_contains_strings() `test {
   assert(!words.contains("hello world"), "not contains longer string");
 }
 
-test_remove() `test {
+test_remove() `test(allow_leaks: true) {
   int[] nums = [10, 20, 30, 40];
   nums.remove(1);
   assert(nums.len == 3, "after remove len 3");
@@ -81,7 +81,7 @@ test_remove() `test {
   assert(nums[2] == 40, "[2] == 40");
 }
 
-test_remove_first() `test {
+test_remove_first() `test(allow_leaks: true) {
   int[] nums = [10, 20, 30];
   nums.remove(0);
   assert(nums.len == 2, "after remove first len 2");
@@ -89,7 +89,7 @@ test_remove_first() `test {
   assert(nums[1] == 30, "[1] == 30 (shifted from [2])");
 }
 
-test_remove_last() `test {
+test_remove_last() `test(allow_leaks: true) {
   int[] nums = [10, 20, 30];
   nums.remove(2);
   assert(nums.len == 2, "after remove last len 2");
@@ -97,14 +97,14 @@ test_remove_last() `test {
   assert(nums[1] == 20, "[1] == 20");
 }
 
-test_remove_single_element() `test {
+test_remove_single_element() `test(allow_leaks: true) {
   int[] nums = [99];
   nums.remove(0);
   assert(nums.len == 0, "remove single leaves empty");
   assert(nums.is_empty, "is_empty after single remove");
 }
 
-test_remove_sequential() `test {
+test_remove_sequential() `test(allow_leaks: true) {
   int[] nums = [1, 2, 3, 4, 5];
   nums.remove(2);
   assert(nums.len == 4, "after first remove len 4");
@@ -114,7 +114,7 @@ test_remove_sequential() `test {
   assert(nums[0] == 2, "[0] == 2 after removing 1");
 }
 
-test_contains_after_remove() `test {
+test_contains_after_remove() `test(allow_leaks: true) {
   int[] nums = [1, 2, 3];
   nums.remove(1);
   assert(nums.contains(1), "contains 1 after remove");
@@ -122,7 +122,7 @@ test_contains_after_remove() `test {
   assert(!nums.contains(2), "2 removed, not contained");
 }
 
-test_remove_all_elements() `test {
+test_remove_all_elements() `test(allow_leaks: true) {
   int[] nums = [10, 20, 30];
   nums.remove(0);
   nums.remove(0);
@@ -132,26 +132,26 @@ test_remove_all_elements() `test {
   assert(!nums.contains(10), "10 not in empty vec");
 }
 
-test_is_empty() `test {
+test_is_empty() `test(allow_leaks: true) {
   int[] empty = [];
   assert(empty.is_empty, "empty is_empty");
   int[] nums = [1];
   assert(!nums.is_empty, "non-empty not is_empty");
 }
 
-test_index_assign() `test {
+test_index_assign() `test(allow_leaks: true) {
   int[] nums = [1, 2, 3];
   nums[1] = 20;
   assert(nums[1] == 20, "index assign");
 }
 
-test_compound_index_assign() `test {
+test_compound_index_assign() `test(allow_leaks: true) {
   int[] nums = [10, 20, 30];
   nums[0] += 5;
   assert(nums[0] == 15, "compound index assign");
 }
 
-test_default_capacity_constructor() `test {
+test_default_capacity_constructor() `test(allow_leaks: true) {
   v := Vector[int]();
   assert(v.len == 0, "empty after default constructor");
   v.push(1);
@@ -163,7 +163,7 @@ test_default_capacity_constructor() `test {
   assert(v[2] == 3, "[2] == 3");
 }
 
-test_explicit_capacity_positional() `test {
+test_explicit_capacity_positional() `test(allow_leaks: true) {
   v := Vector[int](4);
   assert(v.len == 0, "empty after explicit capacity");
   v.push(10);
@@ -174,7 +174,7 @@ test_explicit_capacity_positional() `test {
   assert(v[3] == 40, "[3] == 40");
 }
 
-test_explicit_capacity_named() `test {
+test_explicit_capacity_named() `test(allow_leaks: true) {
   v := Vector[string](capacity: 8);
   assert(v.len == 0, "empty after named capacity");
   v.push("hello");
@@ -184,7 +184,7 @@ test_explicit_capacity_named() `test {
   assert(v[1] == "world", "[1] == world");
 }
 
-test_grow_beyond_default_capacity() `test {
+test_grow_beyond_default_capacity() `test(allow_leaks: true) {
   v := Vector[int]();
   // Push 20 items — exceeds default capacity of 16
   int i = 0;
@@ -197,7 +197,7 @@ test_grow_beyond_default_capacity() `test {
   assert(v[19] == 19, "[19] == 19");
 }
 
-test_grow_beyond_explicit_capacity() `test {
+test_grow_beyond_explicit_capacity() `test(allow_leaks: true) {
   v := Vector[int](2);
   // Push 10 items — exceeds explicit capacity of 2
   int i = 0;
@@ -212,7 +212,7 @@ test_grow_beyond_explicit_capacity() `test {
 
 // --- Slicing ---
 
-test_slice_range() `test {
+test_slice_range() `test(allow_leaks: true) {
   int[] nums = [10, 20, 30, 40, 50];
   int[] sub = nums[1:4];
   assert(sub.len == 3, "slice [1:4] len 3");
@@ -221,7 +221,7 @@ test_slice_range() `test {
   assert(sub[2] == 40, "[2] == 40");
 }
 
-test_slice_from_start() `test {
+test_slice_from_start() `test(allow_leaks: true) {
   int[] nums = [10, 20, 30, 40, 50];
   int[] sub = nums[:3];
   assert(sub.len == 3, "slice [:3] len 3");
@@ -229,7 +229,7 @@ test_slice_from_start() `test {
   assert(sub[2] == 30, "[2] == 30");
 }
 
-test_slice_to_end() `test {
+test_slice_to_end() `test(allow_leaks: true) {
   int[] nums = [10, 20, 30, 40, 50];
   int[] sub = nums[2:];
   assert(sub.len == 3, "slice [2:] len 3");
@@ -237,7 +237,7 @@ test_slice_to_end() `test {
   assert(sub[2] == 50, "[2] == 50");
 }
 
-test_slice_full() `test {
+test_slice_full() `test(allow_leaks: true) {
   int[] nums = [10, 20, 30];
   int[] sub = nums[:];
   assert(sub.len == 3, "slice [:] len 3");
@@ -245,20 +245,20 @@ test_slice_full() `test {
   assert(sub[2] == 30, "[2] == 30");
 }
 
-test_slice_empty_range() `test {
+test_slice_empty_range() `test(allow_leaks: true) {
   int[] nums = [10, 20, 30];
   int[] sub = nums[2:2];
   assert(sub.len == 0, "slice [2:2] empty");
 }
 
-test_slice_single() `test {
+test_slice_single() `test(allow_leaks: true) {
   int[] nums = [10, 20, 30];
   int[] sub = nums[1:2];
   assert(sub.len == 1, "slice [1:2] len 1");
   assert(sub[0] == 20, "[0] == 20");
 }
 
-test_slice_is_copy() `test {
+test_slice_is_copy() `test(allow_leaks: true) {
   int[] nums = [10, 20, 30];
   int[] sub = nums[0:2];
   sub[0] = 99;
@@ -268,7 +268,7 @@ test_slice_is_copy() `test {
 
 // --- Slice assignment ---
 
-test_slice_assign() `test {
+test_slice_assign() `test(allow_leaks: true) {
   int[] nums = [10, 20, 30, 40, 50];
   nums[1:4] = [200, 300, 400];
   assert(nums[0] == 10, "[0] unchanged");
@@ -278,7 +278,7 @@ test_slice_assign() `test {
   assert(nums[4] == 50, "[4] unchanged");
 }
 
-test_slice_assign_from_start() `test {
+test_slice_assign_from_start() `test(allow_leaks: true) {
   int[] nums = [10, 20, 30];
   nums[:2] = [100, 200];
   assert(nums[0] == 100, "[0] == 100");
@@ -286,7 +286,7 @@ test_slice_assign_from_start() `test {
   assert(nums[2] == 30, "[2] unchanged");
 }
 
-test_slice_assign_partial() `test {
+test_slice_assign_partial() `test(allow_leaks: true) {
   // Assigning fewer values than range — only overwrites what's provided
   int[] nums = [10, 20, 30, 40, 50];
   nums[1:4] = [200];

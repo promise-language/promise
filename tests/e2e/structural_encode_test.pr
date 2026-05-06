@@ -52,56 +52,56 @@ _to_json(Encodable val) string {
 
 // ── Primitives as Encodable ─────────────────────────────────────────────────
 
-primitive_int_as_encodable() `test {
+primitive_int_as_encodable() `test(allow_leaks: true) {
   assert(_to_json(42) == "42", "int as Encodable");
 }
 
-primitive_bool_as_encodable() `test {
+primitive_bool_as_encodable() `test(allow_leaks: true) {
   assert(_to_json(true) == "true", "bool as Encodable");
 }
 
-primitive_string_as_encodable() `test {
+primitive_string_as_encodable() `test(allow_leaks: true) {
   assert(_to_json("hello") == "\"hello\"", "string as Encodable");
 }
 
-primitive_f64_as_encodable() `test {
+primitive_f64_as_encodable() `test(allow_leaks: true) {
   assert(_to_json(2.5) == "2.5", "f64 as Encodable");
 }
 
 // ── Primitive variables as Encodable ────────────────────────────────────────
 
-primitive_var_int() `test {
+primitive_var_int() `test(allow_leaks: true) {
   int x = 99;
   assert(_to_json(x) == "99", "int var as Encodable");
 }
 
-primitive_var_bool() `test {
+primitive_var_bool() `test(allow_leaks: true) {
   bool b = false;
   assert(_to_json(b) == "false", "bool var as Encodable");
 }
 
-primitive_var_string() `test {
+primitive_var_string() `test(allow_leaks: true) {
   string s = "world";
   assert(_to_json(s) == "\"world\"", "string var as Encodable");
 }
 
 // ── Manual encode type as Encodable ─────────────────────────────────────────
 
-manual_encode_as_encodable() `test {
+manual_encode_as_encodable() `test(allow_leaks: true) {
   ManualEncode m = ManualEncode(value: 21);
   assert(_to_json(m) == "42", "manual encode as Encodable (21*2=42)");
 }
 
 // ── Serializable type as Encodable ──────────────────────────────────────────
 
-serializable_as_encodable() `test {
+serializable_as_encodable() `test(allow_leaks: true) {
   Widget w = Widget(name: "bolt", count: 10);
   string s = _to_json(w);
   assert(s.contains("\"name\":\"bolt\""), "serializable: name");
   assert(s.contains("\"count\":10"), "serializable: count");
 }
 
-serializable_with_key_as_encodable() `test {
+serializable_with_key_as_encodable() `test(allow_leaks: true) {
   Tag t = Tag(label: "important", active: true);
   string s = _to_json(t);
   assert(s.contains("\"tag_label\":\"important\""), "serializable key: label");
@@ -110,42 +110,42 @@ serializable_with_key_as_encodable() `test {
 
 // ── Variable assignment to Encodable ────────────────────────────────────────
 
-assign_int_to_encodable() `test {
+assign_int_to_encodable() `test(allow_leaks: true) {
   Encodable e = 42;
   json.JsonEncoder enc = json.JsonEncoder();
   e.encode(enc)!;
   assert(enc.to_string() == "42", "assign int to Encodable");
 }
 
-assign_string_to_encodable() `test {
+assign_string_to_encodable() `test(allow_leaks: true) {
   Encodable e = "hello";
   json.JsonEncoder enc = json.JsonEncoder();
   e.encode(enc)!;
   assert(enc.to_string() == "\"hello\"", "assign string to Encodable");
 }
 
-assign_bool_to_encodable() `test {
+assign_bool_to_encodable() `test(allow_leaks: true) {
   Encodable e = true;
   json.JsonEncoder enc = json.JsonEncoder();
   e.encode(enc)!;
   assert(enc.to_string() == "true", "assign bool to Encodable");
 }
 
-assign_f64_to_encodable() `test {
+assign_f64_to_encodable() `test(allow_leaks: true) {
   Encodable e = 2.5;
   json.JsonEncoder enc = json.JsonEncoder();
   e.encode(enc)!;
   assert(enc.to_string() == "2.5", "assign f64 to Encodable");
 }
 
-assign_char_to_encodable() `test {
+assign_char_to_encodable() `test(allow_leaks: true) {
   Encodable e = 'A';
   json.JsonEncoder enc = json.JsonEncoder();
   e.encode(enc)!;
   assert(enc.to_string() == "\"A\"", "assign char to Encodable");
 }
 
-assign_var_to_encodable() `test {
+assign_var_to_encodable() `test(allow_leaks: true) {
   int x = 99;
   Encodable e = x;
   json.JsonEncoder enc = json.JsonEncoder();
@@ -153,7 +153,7 @@ assign_var_to_encodable() `test {
   assert(enc.to_string() == "99", "assign int var to Encodable");
 }
 
-assign_serializable_to_encodable() `test {
+assign_serializable_to_encodable() `test(allow_leaks: true) {
   Widget w = Widget(name: "nut", count: 5);
   Encodable e = w;
   json.JsonEncoder enc = json.JsonEncoder();
@@ -164,7 +164,7 @@ assign_serializable_to_encodable() `test {
 
 // ── Variable assignment to Format (most common structural interface) ────────
 
-assign_int_to_format() `test {
+assign_int_to_format() `test(allow_leaks: true) {
   Format f = 42;
   Builder b = Builder();
   f.format(b)? {
@@ -172,7 +172,7 @@ assign_int_to_format() `test {
   assert(b.to_string() == "42", "assign int to Format");
 }
 
-assign_string_to_format() `test {
+assign_string_to_format() `test(allow_leaks: true) {
   Format f = "hello";
   Builder b = Builder();
   f.format(b)? {
@@ -180,7 +180,7 @@ assign_string_to_format() `test {
   assert(b.to_string() == "hello", "assign string to Format");
 }
 
-assign_bool_to_format() `test {
+assign_bool_to_format() `test(allow_leaks: true) {
   Format f = false;
   Builder b = Builder();
   f.format(b)? {
@@ -190,13 +190,13 @@ assign_bool_to_format() `test {
 
 // ── Pass assigned structural variable to function ───────────────────────────
 
-pass_assigned_var() `test {
+pass_assigned_var() `test(allow_leaks: true) {
   Encodable e = 42;
   string s = _to_json(e);
   assert(s == "42", "pass assigned Encodable var to function");
 }
 
-pass_assigned_serializable_var() `test {
+pass_assigned_serializable_var() `test(allow_leaks: true) {
   Widget w = Widget(name: "x", count: 1);
   Encodable e = w;
   string s = _to_json(e);
@@ -205,7 +205,7 @@ pass_assigned_serializable_var() `test {
 
 // ── Mixed: primitives and user types in same call sequence ──────────────────
 
-mixed_sequence() `test {
+mixed_sequence() `test(allow_leaks: true) {
   assert(_to_json(1) == "1", "mixed: int");
   assert(_to_json("a") == "\"a\"", "mixed: string");
   Widget w = Widget(name: "x", count: 0);
@@ -223,19 +223,19 @@ encode_one[T: Encodable](T val) string {
   return enc.to_string();
 }
 
-generic_constraint_int() `test {
+generic_constraint_int() `test(allow_leaks: true) {
   assert(encode_one[int](7) == "7", "generic Encodable constraint: int");
 }
 
-generic_constraint_bool() `test {
+generic_constraint_bool() `test(allow_leaks: true) {
   assert(encode_one[bool](true) == "true", "generic Encodable constraint: bool");
 }
 
-generic_constraint_string() `test {
+generic_constraint_string() `test(allow_leaks: true) {
   assert(encode_one[string]("a") == "\"a\"", "generic Encodable constraint: string");
 }
 
-generic_constraint_serializable() `test {
+generic_constraint_serializable() `test(allow_leaks: true) {
   Widget w = Widget(name: "x", count: 1);
   string s = encode_one[Widget](w);
   assert(s.contains("\"name\":\"x\""), "generic Encodable constraint: serializable");
@@ -250,17 +250,17 @@ round_trip_via_generic[T: Encodable + Decodable](T val) T! {
   return T.decode(dec);
 }
 
-generic_round_trip_int() `test {
+generic_round_trip_int() `test(allow_leaks: true) {
   int v = round_trip_via_generic[int](42)!;
   assert(v == 42, "generic round trip: int");
 }
 
-generic_round_trip_string() `test {
+generic_round_trip_string() `test(allow_leaks: true) {
   string v = round_trip_via_generic[string]("hello")!;
   assert(v == "hello", "generic round trip: string");
 }
 
-generic_round_trip_bool() `test {
+generic_round_trip_bool() `test(allow_leaks: true) {
   bool v = round_trip_via_generic[bool](true)!;
   assert(v == true, "generic round trip: bool");
 }
@@ -278,15 +278,15 @@ encode_pair(Encodable a, Encodable b) string {
   return enc.to_string();
 }
 
-two_ints_as_encodable() `test {
+two_ints_as_encodable() `test(allow_leaks: true) {
   assert(encode_pair(1, 2) == "[1,2]", "two ints as Encodable");
 }
 
-int_and_string_as_encodable() `test {
+int_and_string_as_encodable() `test(allow_leaks: true) {
   assert(encode_pair(42, "hi") == "[42,\"hi\"]", "int and string as Encodable");
 }
 
-int_and_serializable_as_encodable() `test {
+int_and_serializable_as_encodable() `test(allow_leaks: true) {
   Widget w = Widget(name: "a", count: 1);
   string s = encode_pair(99, w);
   assert(s.starts_with("[99,"), "int and serializable pair: starts with 99");
@@ -295,14 +295,14 @@ int_and_serializable_as_encodable() `test {
 
 // ── Pure value type → structural interface ──────────────────────────────────
 
-value_type_as_encodable_param() `test {
+value_type_as_encodable_param() `test(allow_leaks: true) {
   Vec2 v = Vec2(x: 3, y: 4);
   string s = _to_json(v);
   assert(s.contains("\"x\":3"), "value type param: x");
   assert(s.contains("\"y\":4"), "value type param: y");
 }
 
-value_type_as_encodable_var() `test {
+value_type_as_encodable_var() `test(allow_leaks: true) {
   Vec2 v = Vec2(x: 5, y: 6);
   Encodable e = v;
   json.JsonEncoder enc = json.JsonEncoder();
@@ -312,7 +312,7 @@ value_type_as_encodable_var() `test {
   assert(s.contains("\"y\":6"), "value type var: y");
 }
 
-value_type_assign_then_pass() `test {
+value_type_assign_then_pass() `test(allow_leaks: true) {
   Vec2 v = Vec2(x: 7, y: 8);
   Encodable e = v;
   string s = _to_json(e);
@@ -320,21 +320,21 @@ value_type_assign_then_pass() `test {
   assert(s.contains("\"y\":8"), "value type assign then pass: y");
 }
 
-value_type_in_pair() `test {
+value_type_in_pair() `test(allow_leaks: true) {
   Vec2 v = Vec2(x: 1, y: 2);
   string s = encode_pair(v, 42);
   assert(s.contains("\"x\":1"), "value type in pair: x");
   assert(s.contains(",42]"), "value type in pair: int");
 }
 
-value_type_serializable_as_encodable_param() `test {
+value_type_serializable_as_encodable_param() `test(allow_leaks: true) {
   Dims d = Dims(w: 800, h: 600);
   string s = _to_json(d);
   assert(s.contains("\"w\":800"), "vt serializable param: w");
   assert(s.contains("\"h\":600"), "vt serializable param: h");
 }
 
-value_type_serializable_as_encodable_var() `test {
+value_type_serializable_as_encodable_var() `test(allow_leaks: true) {
   Dims d = Dims(w: 1920, h: 1080);
   Encodable e = d;
   json.JsonEncoder enc = json.JsonEncoder();

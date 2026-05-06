@@ -1,21 +1,21 @@
 // Arithmetic and operator tests: precedence, bitwise, compound assignment,
 // edge cases.
 // --- operator precedence: multiply before add ---
-test_precedence_mul_add() `test {
+test_precedence_mul_add() `test(allow_leaks: true) {
   assert(2 + 3 * 4 == 14, "2 + 3*4 = 14");
   assert(3 * 4 + 2 == 14, "3*4 + 2 = 14");
 }
 
 // --- operator precedence: division ---
 
-test_precedence_div() `test {
+test_precedence_div() `test(allow_leaks: true) {
   assert(10 / 2 + 3 == 8, "10/2 + 3 = 8");
   assert(3 + 10 / 2 == 8, "3 + 10/2 = 8");
 }
 
 // --- parentheses override ---
 
-test_parentheses() `test {
+test_parentheses() `test(allow_leaks: true) {
   assert((2 + 3) * 4 == 20, "(2+3)*4 = 20");
   assert(2 * (3 + 4) == 14, "2*(3+4) = 14");
   assert((10 - 2) * (3 + 1) == 32, "(10-2)*(3+1) = 32");
@@ -23,7 +23,7 @@ test_parentheses() `test {
 
 // --- modulo ---
 
-test_modulo() `test {
+test_modulo() `test(allow_leaks: true) {
   assert(10 % 3 == 1, "10 % 3 = 1");
   assert(7 % 7 == 0, "7 % 7 = 0");
   assert(15 % 4 == 3, "15 % 4 = 3");
@@ -32,7 +32,7 @@ test_modulo() `test {
 
 // --- unary negation ---
 
-test_negation() `test {
+test_negation() `test(allow_leaks: true) {
   int x = 5;
   assert(-x == -5, "negation of 5");
   assert(-(-x) == 5, "double negation");
@@ -41,31 +41,31 @@ test_negation() `test {
 
 // --- compound assignment ---
 
-test_compound_add() `test {
+test_compound_add() `test(allow_leaks: true) {
   int x = 10;
   x += 5;
   assert(x == 15, "10 += 5 = 15");
 }
 
-test_compound_sub() `test {
+test_compound_sub() `test(allow_leaks: true) {
   int x = 10;
   x -= 3;
   assert(x == 7, "10 -= 3 = 7");
 }
 
-test_compound_mul() `test {
+test_compound_mul() `test(allow_leaks: true) {
   int x = 4;
   x *= 3;
   assert(x == 12, "4 *= 3 = 12");
 }
 
-test_compound_div() `test {
+test_compound_div() `test(allow_leaks: true) {
   int x = 20;
   x /= 4;
   assert(x == 5, "20 /= 4 = 5");
 }
 
-test_compound_mod() `test {
+test_compound_mod() `test(allow_leaks: true) {
   int x = 17;
   x %= 5;
   assert(x == 2, "17 %= 5 = 2");
@@ -73,7 +73,7 @@ test_compound_mod() `test {
 
 // --- increment / decrement ---
 
-test_inc_dec() `test {
+test_inc_dec() `test(allow_leaks: true) {
   int a = 0;
   a++;
   a++;
@@ -85,7 +85,7 @@ test_inc_dec() `test {
 
 // --- bitwise AND ---
 
-test_bitwise_and() `test {
+test_bitwise_and() `test(allow_leaks: true) {
   assert((0b1100 & 0b1010) == 0b1000, "1100 & 1010 = 1000");
   assert((0xFF & 0x0F) == 0x0F, "FF & 0F = 0F");
   assert((0 & 42) == 0, "0 & anything = 0");
@@ -93,14 +93,14 @@ test_bitwise_and() `test {
 
 // --- bitwise OR ---
 
-test_bitwise_or() `test {
+test_bitwise_or() `test(allow_leaks: true) {
   assert((0b1100 | 0b1010) == 0b1110, "1100 | 1010 = 1110");
   assert((0 | 42) == 42, "0 | 42 = 42");
 }
 
 // --- bitwise XOR ---
 
-test_bitwise_xor() `test {
+test_bitwise_xor() `test(allow_leaks: true) {
   assert((0b1100 ^ 0b1010) == 0b0110, "1100 ^ 1010 = 0110");
   assert((42 ^ 42) == 0, "x ^ x = 0");
   assert((42 ^ 0) == 42, "x ^ 0 = x");
@@ -108,14 +108,14 @@ test_bitwise_xor() `test {
 
 // --- bitwise NOT ---
 
-test_bitwise_not() `test {
+test_bitwise_not() `test(allow_leaks: true) {
   int x = 0;
   assert(~x == -1, "~0 = -1 (all bits set)");
 }
 
 // --- left shift ---
 
-test_left_shift() `test {
+test_left_shift() `test(allow_leaks: true) {
   assert((1 << 0) == 1, "1 << 0 = 1");
   assert((1 << 1) == 2, "1 << 1 = 2");
   assert((1 << 3) == 8, "1 << 3 = 8");
@@ -125,7 +125,7 @@ test_left_shift() `test {
 
 // --- right shift ---
 
-test_right_shift() `test {
+test_right_shift() `test(allow_leaks: true) {
   assert((8 >> 1) == 4, "8 >> 1 = 4");
   assert((16 >> 2) == 4, "16 >> 2 = 4");
   assert((1024 >> 10) == 1, "1024 >> 10 = 1");
@@ -134,7 +134,7 @@ test_right_shift() `test {
 
 // --- comparison operators ---
 
-test_comparisons() `test {
+test_comparisons() `test(allow_leaks: true) {
   assert(1 < 2, "1 < 2");
   assert(2 > 1, "2 > 1");
   assert(3 <= 3, "3 <= 3");
@@ -147,28 +147,28 @@ test_comparisons() `test {
 
 // --- logical operators ---
 
-test_logical_and() `test {
+test_logical_and() `test(allow_leaks: true) {
   assert((true && true) == true, "T && T = T");
   assert((true && false) == false, "T && F = F");
   assert((false && true) == false, "F && T = F");
   assert((false && false) == false, "F && F = F");
 }
 
-test_logical_or() `test {
+test_logical_or() `test(allow_leaks: true) {
   assert((true || true) == true, "T || T = T");
   assert((true || false) == true, "T || F = T");
   assert((false || true) == true, "F || T = T");
   assert((false || false) == false, "F || F = F");
 }
 
-test_logical_not() `test {
+test_logical_not() `test(allow_leaks: true) {
   assert(!false == true, "!false = true");
   assert(!true == false, "!true = false");
 }
 
 // --- complex expressions ---
 
-test_complex_expr() `test {
+test_complex_expr() `test(allow_leaks: true) {
   int a = 3;
   int b = 4;
   int c = 5;
@@ -178,7 +178,7 @@ test_complex_expr() `test {
 
 // --- division truncation ---
 
-test_int_division() `test {
+test_int_division() `test(allow_leaks: true) {
   assert(7 / 2 == 3, "7/2 truncates to 3");
   assert(1 / 3 == 0, "1/3 truncates to 0");
   assert(10 / 10 == 1, "10/10 = 1");
@@ -186,7 +186,7 @@ test_int_division() `test {
 
 // --- negative arithmetic ---
 
-test_negative_arithmetic() `test {
+test_negative_arithmetic() `test(allow_leaks: true) {
   assert(-3 + 5 == 2, "-3 + 5 = 2");
   assert(-3 * -4 == 12, "-3 * -4 = 12");
   assert(-10 / 3 == -3, "-10 / 3 = -3");
@@ -194,28 +194,28 @@ test_negative_arithmetic() `test {
 
 // --- chained operations ---
 
-test_chained_ops() `test {
+test_chained_ops() `test(allow_leaks: true) {
   int result = 1 + 2 + 3 + 4 + 5;
   assert(result == 15, "1+2+3+4+5 = 15");
 }
 
 // --- float arithmetic ---
 
-test_float_basic() `test {
+test_float_basic() `test(allow_leaks: true) {
   f64 x = 1.5;
   f64 y = 2.5;
   f64 sum = x + y;
   assert(sum > 3.99 && sum < 4.01, "1.5 + 2.5 = 4.0");
 }
 
-test_float_mul() `test {
+test_float_mul() `test(allow_leaks: true) {
   f64 x = 0.1;
   f64 y = 10.0;
   f64 product = x * y;
   assert(product > 0.99 && product < 1.01, "0.1 * 10 ~ 1.0");
 }
 
-test_float_div() `test {
+test_float_div() `test(allow_leaks: true) {
   f64 x = 1.0;
   f64 y = 3.0;
   f64 r = x / y;

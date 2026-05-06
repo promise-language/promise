@@ -16,13 +16,13 @@ _cp3(int a, int b, int c) string {
 
 // --- NFD tests ---
 
-test_nfd_ascii() `test {
+test_nfd_ascii() `test(allow_leaks: true) {
   assert(normalize_nfd("hello") == "hello", "nfd ascii hello");
   assert(normalize_nfd("") == "", "nfd empty");
   assert(normalize_nfd("ABC 123") == "ABC 123", "nfd ascii mixed");
 }
 
-test_nfd_precomposed_latin() `test {
+test_nfd_precomposed_latin() `test(allow_leaks: true) {
   // U+00C0 (À) → U+0041 U+0300 (A + combining grave)
   assert(normalize_nfd(_cp(0x00C0)) == _cp2(0x0041, 0x0300), "nfd A-grave");
   // U+00C9 (É) → U+0045 U+0301 (E + combining acute)
@@ -31,52 +31,52 @@ test_nfd_precomposed_latin() `test {
   assert(normalize_nfd(_cp(0x00F1)) == _cp2(0x006E, 0x0303), "nfd n-tilde");
 }
 
-test_nfd_already_decomposed() `test {
+test_nfd_already_decomposed() `test(allow_leaks: true) {
   string result = normalize_nfd(_cp2(0x0041, 0x0300));
   assert(result == _cp2(0x0041, 0x0300), "nfd already decomposed");
 }
 
-test_nfd_canonical_ordering() `test {
+test_nfd_canonical_ordering() `test(allow_leaks: true) {
   // acute(CCC=230) + cedilla(CCC=202) → reorder to cedilla + acute
   string result = normalize_nfd(_cp3(0x0061, 0x0301, 0x0327));
   assert(result == _cp3(0x0061, 0x0327, 0x0301), "nfd canonical ordering");
 }
 
-test_nfd_hangul_lv() `test {
+test_nfd_hangul_lv() `test(allow_leaks: true) {
   assert(normalize_nfd(_cp(0xAC00)) == _cp2(0x1100, 0x1161), "nfd hangul LV");
 }
 
-test_nfd_hangul_lvt() `test(exclude: "wasm32") {
+test_nfd_hangul_lvt() `test(allow_leaks: true, exclude: "wasm32") {
   // B0149: WASM drops conditional push in nested if
   assert(normalize_nfd(_cp(0xD55C)) == _cp3(0x1112, 0x1161, 0x11AB), "nfd hangul LVT");
 }
 
 // --- NFC tests ---
 
-test_nfc_ascii() `test {
+test_nfc_ascii() `test(allow_leaks: true) {
   assert(normalize_nfc("hello") == "hello", "nfc ascii");
   assert(normalize_nfc("") == "", "nfc empty");
 }
 
-test_nfc_compose_latin() `test {
+test_nfc_compose_latin() `test(allow_leaks: true) {
   assert(normalize_nfc(_cp2(0x0041, 0x0300)) == _cp(0x00C0), "nfc A+grave");
   assert(normalize_nfc(_cp2(0x0045, 0x0301)) == _cp(0x00C9), "nfc E+acute");
 }
 
-test_nfc_already_composed() `test {
+test_nfc_already_composed() `test(allow_leaks: true) {
   string result = normalize_nfc(_cp(0x00C9));
   assert(result == _cp(0x00C9), "nfc already composed");
 }
 
-test_nfc_hangul_lv() `test {
+test_nfc_hangul_lv() `test(allow_leaks: true) {
   assert(normalize_nfc(_cp2(0x1100, 0x1161)) == _cp(0xAC00), "nfc hangul LV");
 }
 
-test_nfc_hangul_lvt() `test {
+test_nfc_hangul_lvt() `test(allow_leaks: true) {
   assert(normalize_nfc(_cp3(0x1112, 0x1161, 0x11AB)) == _cp(0xD55C), "nfc hangul LVT");
 }
 
-test_nfc_blocked_composition() `test {
+test_nfc_blocked_composition() `test(allow_leaks: true) {
   // A + cedilla(CCC=202) + acute(CCC=230)
   // Acute not blocked by cedilla (202 < 230), compose(A, acute) = Á
   // Result: Á + cedilla
@@ -86,14 +86,14 @@ test_nfc_blocked_composition() `test {
 
 // --- is_nfc / is_nfd tests ---
 
-test_is_nfc() `test {
+test_is_nfc() `test(allow_leaks: true) {
   assert(is_nfc("hello"), "is_nfc ascii");
   assert(is_nfc(""), "is_nfc empty");
   assert(is_nfc(_cp(0x00C9)), "is_nfc composed");
   assert(!is_nfc(_cp2(0x0041, 0x0300)), "is_nfc decomposed false");
 }
 
-test_is_nfd() `test {
+test_is_nfd() `test(allow_leaks: true) {
   assert(is_nfd("hello"), "is_nfd ascii");
   assert(is_nfd(""), "is_nfd empty");
   assert(is_nfd(_cp2(0x0041, 0x0300)), "is_nfd decomposed");
@@ -102,13 +102,13 @@ test_is_nfd() `test {
 
 // --- Roundtrip tests ---
 
-test_roundtrip() `test {
+test_roundtrip() `test(allow_leaks: true) {
   string nfd = normalize_nfd(_cp(0x00C0) + _cp(0x00C9) + _cp(0x00F1));
   string nfc = normalize_nfc(nfd);
   assert(nfc == _cp(0x00C0) + _cp(0x00C9) + _cp(0x00F1), "nfc-nfd roundtrip");
 }
 
-test_idempotent() `test {
+test_idempotent() `test(allow_leaks: true) {
   string nfd1 = normalize_nfd(_cp(0x00C0) + _cp(0x00C9));
   string nfd2 = normalize_nfd(nfd1);
   assert(nfd2 == normalize_nfd(_cp(0x00C0) + _cp(0x00C9)), "nfd idempotent");

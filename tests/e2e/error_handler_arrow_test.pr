@@ -25,22 +25,22 @@ get_label(int n) string! {
 // Section 1: Basic arrow recovery
 // ============================================================
 
-test_arrow_basic() `test {
+test_arrow_basic() `test(allow_leaks: true) {
   int v = parse(-1)? e => 0;
   assert(v == 0, "arrow basic recovery");
 }
 
-test_arrow_success() `test {
+test_arrow_success() `test(allow_leaks: true) {
   int v = parse(5)? e => 0;
   assert(v == 10, "arrow success path untouched");
 }
 
-test_arrow_string() `test {
+test_arrow_string() `test(allow_leaks: true) {
   string s = get_label(-1)? e => "fallback";
   assert(s == "fallback", "arrow string recovery");
 }
 
-test_arrow_string_success() `test {
+test_arrow_string_success() `test(allow_leaks: true) {
   string s = get_label(0)? e => "fallback";
   assert(s == "zero", "arrow string success");
 }
@@ -49,13 +49,13 @@ test_arrow_string_success() `test {
 // Section 2: Arrow with expression using outer scope
 // ============================================================
 
-test_arrow_outer_scope() `test {
+test_arrow_outer_scope() `test(allow_leaks: true) {
   int base = 100;
   int v = parse(-1)? e => base + 1;
   assert(v == 101, "arrow uses outer scope");
 }
 
-test_arrow_complex_expr() `test {
+test_arrow_complex_expr() `test(allow_leaks: true) {
   int v = parse(-1)? e => 3 * 7 + 1;
   assert(v == 22, "arrow complex expression");
 }
@@ -64,12 +64,12 @@ test_arrow_complex_expr() `test {
 // Section 3: Arrow without binding / discard binding
 // ============================================================
 
-test_arrow_no_binding() `test {
+test_arrow_no_binding() `test(allow_leaks: true) {
   int v = parse(-1)? => 0;
   assert(v == 0, "arrow without binding name");
 }
 
-test_arrow_discard_binding() `test {
+test_arrow_discard_binding() `test(allow_leaks: true) {
   int v = parse(-1)? _ => 0;
   assert(v == 0, "arrow with _ binding");
 }
@@ -83,12 +83,12 @@ relay_typed(int n) int! {
   return v;
 }
 
-test_arrow_typed_match() `test {
+test_arrow_typed_match() `test(allow_leaks: true) {
   int v = relay_typed(-1)!;
   assert(v == 1, "arrow typed handler match");
 }
 
-test_arrow_typed_success() `test {
+test_arrow_typed_success() `test(allow_leaks: true) {
   int v = relay_typed(5)!;
   assert(v == 10, "arrow typed handler success");
 }
@@ -97,12 +97,12 @@ test_arrow_typed_success() `test {
 // Section 5: Arrow optional recovery (non-recovering)
 // ============================================================
 
-test_arrow_optional_error() `test {
+test_arrow_optional_error() `test(allow_leaks: true) {
   x := parse(-1)? e => print_line("handled");
   assert("{x}" == "none", "arrow optional recovery on error");
 }
 
-test_arrow_optional_success() `test {
+test_arrow_optional_success() `test(allow_leaks: true) {
   x := parse(5)? e => print_line("handled");
   assert("{x}" == "10", "arrow optional recovery on success");
 }
@@ -117,12 +117,12 @@ double_parse(int n) int! {
   return a + b;
 }
 
-test_arrow_with_auto_prop() `test {
+test_arrow_with_auto_prop() `test(allow_leaks: true) {
   int v = double_parse(5)!;
   assert(v == 20, "arrow coexists with auto-propagation");
 }
 
-test_arrow_recovers_auto_prop_fails() `test {
+test_arrow_recovers_auto_prop_fails() `test(allow_leaks: true) {
   bool caught = false;
   double_parse(-1)? e {
     caught = true;
@@ -134,7 +134,7 @@ test_arrow_recovers_auto_prop_fails() `test {
 // Section 7: Arrow in chain
 // ============================================================
 
-test_arrow_chain() `test {
+test_arrow_chain() `test(allow_leaks: true) {
   int a = parse(-1)? e => 0;
   int b = parse(-2)? e => 0;
   int c = parse(3)? e => 0;
@@ -157,13 +157,13 @@ type Sensor {
   }
 }
 
-test_arrow_getter() `test {
+test_arrow_getter() `test(allow_leaks: true) {
   Sensor s = Sensor(_raw: -1);
   int v = s.value? e => -1;
   assert(v == -1, "arrow on failable getter error");
 }
 
-test_arrow_getter_success() `test {
+test_arrow_getter_success() `test(allow_leaks: true) {
   Sensor s = Sensor(_raw: 42);
   int v = s.value? e => -1;
   assert(v == 42, "arrow on failable getter success");
@@ -177,12 +177,12 @@ fallback() int {
   return 99;
 }
 
-test_arrow_call_recovery() `test {
+test_arrow_call_recovery() `test(allow_leaks: true) {
   int v = parse(-1)? e => fallback();
   assert(v == 99, "arrow recovery via function call");
 }
 
-test_arrow_call_success() `test {
+test_arrow_call_success() `test(allow_leaks: true) {
   int v = parse(5)? e => fallback();
   assert(v == 10, "arrow call recovery not triggered on success");
 }

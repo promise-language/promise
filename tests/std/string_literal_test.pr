@@ -1,40 +1,40 @@
 // Tests for static string literals (T0060)
 // String literals are stored directly in .rodata with negative length (sign bit set).
 // Heap-allocated strings (from concat, to_string, etc.) have positive length.
-test_literal_is_literal() `test {
+test_literal_is_literal() `test(allow_leaks: true) {
   assert("hello".is_literal, "string literal");
   assert("".is_literal, "empty literal");
   assert("a longer string with spaces".is_literal, "long literal");
 }
 
-test_concat_is_not_literal() `test {
+test_concat_is_not_literal() `test(allow_leaks: true) {
   string a = "hello";
   string b = " world";
   string c = a + b;
   assert(!c.is_literal, "concat not literal");
 }
 
-test_heap_string_is_not_literal() `test {
+test_heap_string_is_not_literal() `test(allow_leaks: true) {
   assert(!42.to_string().is_literal, "int to_string");
   assert(!true.to_string().is_literal, "bool to_string");
   assert(!3.14.to_string().is_literal, "f64 to_string");
 }
 
-test_literal_len() `test {
+test_literal_len() `test(allow_leaks: true) {
   assert("".len == 0, "empty len");
   assert("a".len == 1, "single char len");
   assert("hello".len == 5, "hello len");
   assert("hello world".len == 11, "hello world len");
 }
 
-test_literal_indexing() `test {
+test_literal_indexing() `test(allow_leaks: true) {
   string s = "abc";
   assert(s[0] == 'a', "index 0");
   assert(s[1] == 'b', "index 1");
   assert(s[2] == 'c', "index 2");
 }
 
-test_literal_slicing() `test {
+test_literal_slicing() `test(allow_leaks: true) {
   string s = "hello world";
   assert(s[0:5] == "hello", "slice 0:5");
   assert(s[6:11] == "world", "slice 6:11");
@@ -42,13 +42,13 @@ test_literal_slicing() `test {
   assert(s[:5] == "hello", "slice :5");
 }
 
-test_literal_equality() `test {
+test_literal_equality() `test(allow_leaks: true) {
   assert("hello" == "hello", "equal literals");
   assert("hello" != "world", "different literals");
   assert("" == "", "empty literals");
 }
 
-test_literal_concat_with_heap() `test {
+test_literal_concat_with_heap() `test(allow_leaks: true) {
   string lit = "hello";
   string heap = 42.to_string();
   string result = lit + heap;
@@ -57,7 +57,7 @@ test_literal_concat_with_heap() `test {
   assert(lit.is_literal, "original still literal");
 }
 
-test_literal_methods() `test {
+test_literal_methods() `test(allow_leaks: true) {
   assert("hello".contains("ell"), "contains");
   assert("hello".starts_with("hel"), "starts_with");
   assert("hello".ends_with("llo"), "ends_with");
@@ -65,36 +65,36 @@ test_literal_methods() `test {
   assert("  hello  ".trim() == "hello", "trim");
 }
 
-test_literal_comparison() `test {
+test_literal_comparison() `test(allow_leaks: true) {
   assert("abc" < "abd", "less than");
   assert("abc" <= "abc", "less or equal");
   assert("abd" > "abc", "greater than");
   assert("abc" >= "abc", "greater or equal");
 }
 
-test_literal_hash() `test {
+test_literal_hash() `test(allow_leaks: true) {
   assert("hello".hash == "hello".hash, "same hash");
   assert("hello".hash != "world".hash, "different hash");
 }
 
-test_literal_repeat() `test {
+test_literal_repeat() `test(allow_leaks: true) {
   assert("ab".repeat(3) == "ababab", "repeat");
   assert("ab".repeat(3).is_literal == false, "repeat not literal");
 }
 
-test_literal_to_upper_lower() `test {
+test_literal_to_upper_lower() `test(allow_leaks: true) {
   assert("hello".to_upper() == "HELLO", "to_upper");
   assert("HELLO".to_lower() == "hello", "to_lower");
 }
 
-test_literal_bytes() `test {
+test_literal_bytes() `test(allow_leaks: true) {
   u8[] b = "hi".bytes();
   assert(b.len == 2, "bytes len");
   assert(b[0] == 104, "byte h");
   assert(b[1] == 105, "byte i");
 }
 
-test_empty_heap_string() `test {
+test_empty_heap_string() `test(allow_leaks: true) {
   // Concatenating two empty literals produces a heap-allocated empty string
   string heap_empty = "" + "";
   assert(!heap_empty.is_literal, "concat empty not literal");

@@ -645,6 +645,7 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 		ir.NewParam("failed", irtypes.I32),
 		ir.NewParam("skipped", irtypes.I32),
 		ir.NewParam("leaked", irtypes.I32),
+		ir.NewParam("ignored", irtypes.I32),
 	)
 
 	// Add codegen bodies (replaces C printf implementations)
@@ -709,6 +710,8 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	}
 	leakedCountAlloca := entry.NewAlloca(irtypes.I32)
 	entry.NewStore(constant.NewInt(irtypes.I32, 0), leakedCountAlloca)
+	ignoredLeaksAlloca := entry.NewAlloca(irtypes.I32)
+	entry.NewStore(constant.NewInt(irtypes.I32, 0), ignoredLeaksAlloca)
 
 	// Leak message string constants (created once, used per-test) (T0020)
 	var leakPrefixGlobal, leakSuffixGlobal *ir.Global
@@ -890,6 +893,8 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 		// Leak detection: check alloc count delta after test (T0020)
 		// Skip for timed-out tests (thread still running → racy read)
 		if allocCountGlobal != nil {
+			allowLeaks := c.info.TestAllowLeaks[nameStr]
+
 			leakCheckBlk := mainFn.NewBlock(fmt.Sprintf("leak_check_%s", nameStr))
 			afterLeakBlk := mainFn.NewBlock(fmt.Sprintf("after_leak_%s", nameStr))
 
@@ -908,18 +913,34 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 			hasLeak := leakCheckBlk.NewICmp(enum.IPredSGT, delta, constant.NewInt(irtypes.I64, 0))
 
 			printLeakBlk := mainFn.NewBlock(fmt.Sprintf("print_leak_%s", nameStr))
-			leakCheckBlk.NewCondBr(hasLeak, printLeakBlk, afterLeakBlk)
+			noLeakBlk := mainFn.NewBlock(fmt.Sprintf("no_leak_%s", nameStr))
+			leakCheckBlk.NewCondBr(hasLeak, printLeakBlk, noLeakBlk)
 
 			// Print "  leak: <N> allocations not freed\n"
 			c.emitLeakMessage(printLeakBlk, delta, leakPrefixGlobal, leakSuffixGlobal)
 
-			// Increment leaked counter
-			curLeaked := printLeakBlk.NewLoad(irtypes.I32, leakedCountAlloca)
-			printLeakBlk.NewStore(
-				printLeakBlk.NewAdd(curLeaked, constant.NewInt(irtypes.I32, 1)),
-				leakedCountAlloca,
-			)
+			if allowLeaks {
+				// allow_leaks: increment ignored counter (T0067)
+				curIgnored := printLeakBlk.NewLoad(irtypes.I32, ignoredLeaksAlloca)
+				printLeakBlk.NewStore(
+					printLeakBlk.NewAdd(curIgnored, constant.NewInt(irtypes.I32, 1)),
+					ignoredLeaksAlloca,
+				)
+			} else {
+				// No allow_leaks: increment leaked counter (T0067)
+				curLeaked := printLeakBlk.NewLoad(irtypes.I32, leakedCountAlloca)
+				printLeakBlk.NewStore(
+					printLeakBlk.NewAdd(curLeaked, constant.NewInt(irtypes.I32, 1)),
+					leakedCountAlloca,
+				)
+			}
 			printLeakBlk.NewBr(afterLeakBlk)
+
+			if allowLeaks {
+				// allow_leaks but no leak: print stale tag warning (T0067)
+				c.emitStaleAllowLeaksWarning(noLeakBlk, nameStr)
+			}
+			noLeakBlk.NewBr(afterLeakBlk)
 
 			skipStoreBlock = afterLeakBlk
 		}
@@ -932,7 +953,8 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	finalPassed := entry.NewLoad(irtypes.I32, passedAlloca)
 	finalFailed := entry.NewLoad(irtypes.I32, failedAlloca)
 	finalLeaked := entry.NewLoad(irtypes.I32, leakedCountAlloca)
-	entry.NewCall(testSummaryFn, finalPassed, finalFailed, constant.NewInt(irtypes.I32, int64(skippedCount)), finalLeaked)
+	finalIgnored := entry.NewLoad(irtypes.I32, ignoredLeaksAlloca)
+	entry.NewCall(testSummaryFn, finalPassed, finalFailed, constant.NewInt(irtypes.I32, int64(skippedCount)), finalLeaked, finalIgnored)
 
 	// Print FAILED: list if any failures
 	failedHeaderData := constant.NewCharArrayFromString("FAILED:\n")
@@ -995,8 +1017,10 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	// Emit coverage data if coverage is enabled (T0030)
 	doneBlock = c.emitCoverageOutput(doneBlock, mainFn)
 
-	// Return 0 if all passed, 1 if any failed
-	retHasFailures := doneBlock.NewICmp(enum.IPredSGT, finalFailed, constant.NewInt(irtypes.I32, 0))
+	// Return 0 if all passed with no leaks, 1 if any failed or leaked (T0067)
+	hasFailed := doneBlock.NewICmp(enum.IPredSGT, finalFailed, constant.NewInt(irtypes.I32, 0))
+	hasLeakedUntagged := doneBlock.NewICmp(enum.IPredSGT, finalLeaked, constant.NewInt(irtypes.I32, 0))
+	retHasFailures := doneBlock.NewOr(hasFailed, hasLeakedUntagged)
 	retVal := doneBlock.NewSelect(retHasFailures, constant.NewInt(irtypes.I32, 1), constant.NewInt(irtypes.I32, 0))
 
 	// On Windows, call ExitProcess to avoid CRT cleanup crashes during

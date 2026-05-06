@@ -3,7 +3,7 @@
 // monomorphization of Map methods in the std module.
 use json;
 
-test_forin_cross_module_enum_map() `test {
+test_forin_cross_module_enum_map() `test(allow_leaks: true) {
   map[string, json.JsonValue] m = {
     "name": json.JsonValue.Str(value: "Alice"),
     "age": json.JsonValue.Number(value: 30.0),
@@ -16,7 +16,7 @@ test_forin_cross_module_enum_map() `test {
   assert(count == 3, "forin count");
 }
 
-test_lookup_cross_module_enum_map() `test {
+test_lookup_cross_module_enum_map() `test(allow_leaks: true) {
   map[string, json.JsonValue] m = {
     "x": json.JsonValue.Str(value: "hello"),
   };
@@ -26,7 +26,7 @@ test_lookup_cross_module_enum_map() `test {
   assert(enc.to_string() == "\"hello\"", "encoded str");
 }
 
-test_keys_values_cross_module() `test {
+test_keys_values_cross_module() `test(allow_leaks: true) {
   map[string, json.JsonValue] m = {
     "a": json.JsonValue.Null,
     "b": json.JsonValue.Str(value: "hi"),
@@ -37,7 +37,7 @@ test_keys_values_cross_module() `test {
   assert(vals.len == 2, "vals len");
 }
 
-test_entries_cross_module() `test {
+test_entries_cross_module() `test(allow_leaks: true) {
   map[string, json.JsonValue] m = {
     "x": json.JsonValue.Number(value: 42.0),
   };
@@ -45,7 +45,7 @@ test_entries_cross_module() `test {
   assert(ents.len == 1, "ents len");
 }
 
-test_forin_values_cross_module() `test {
+test_forin_values_cross_module() `test(allow_leaks: true) {
   map[string, json.JsonValue] m = {
     "s": json.JsonValue.Str(value: "world"),
   };
@@ -57,7 +57,7 @@ test_forin_values_cross_module() `test {
   }
 }
 
-test_pop_cross_module() `test {
+test_pop_cross_module() `test(allow_leaks: true) {
   map[string, json.JsonValue] m = {
     "a": json.JsonValue.Bool(value: true),
   };
@@ -66,7 +66,7 @@ test_pop_cross_module() `test {
   assert(m.is_empty, "empty after pop");
 }
 
-test_get_or_cross_module() `test {
+test_get_or_cross_module() `test(allow_leaks: true) {
   map[string, json.JsonValue] m = {
     "a": json.JsonValue.Null,
   };

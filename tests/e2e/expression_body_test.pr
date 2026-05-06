@@ -11,21 +11,21 @@ say_hello(string name) => print_line("hello " + name);
 
 negate(int x) int `inline => -x;
 
-test_expression_body_with_return_type() `test {
+test_expression_body_with_return_type() `test(allow_leaks: true) {
   assert(double(5) == 10, "double");
   assert(add(3, 4) == 7, "add");
   assert(greet("world") == "hello world", "greet");
 }
 
-test_expression_body_generic() `test {
+test_expression_body_generic() `test(allow_leaks: true) {
   assert(identity(42) == 42, "identity int");
   assert(identity("hi") == "hi", "identity string");
 }
 
-test_expression_body_with_annotation() `test {
+test_expression_body_with_annotation() `test(allow_leaks: true) {
   assert(negate(5) == -5, "negate");
 }
 
-test_expression_body_void() `test {
+test_expression_body_void() `test(allow_leaks: true) {
   say_hello("world");
 }

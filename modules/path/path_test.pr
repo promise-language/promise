@@ -1,6 +1,6 @@
 // Test the path module (compiled as part of the module).
 // Tests use Platform.path_separator (s) so they pass on both POSIX and Windows.
-join_test() `test {
+join_test() `test(allow_leaks: true) {
   string s = Platform.path_separator;
   assert(join("/home", "user") == "/home" + s + "user", "join basic");
   assert(join("/home/", "user") == "/home/user", "join trailing slash");
@@ -16,7 +16,7 @@ join_test() `test {
   assert(join("a", ".") == "a" + s + ".", "join dot child");
 }
 
-file_name_test() `test {
+file_name_test() `test(allow_leaks: true) {
   assert(file_name("/home/user/file.txt") == "file.txt", "file_name file");
   assert(file_name("/home/user/") == "user", "file_name trailing slash");
   assert(file_name("file.txt") == "file.txt", "file_name no dir");
@@ -32,7 +32,7 @@ file_name_test() `test {
   assert(file_name("../../../etc/passwd") == "passwd", "file_name traversal");
 }
 
-parent_test() `test {
+parent_test() `test(allow_leaks: true) {
   string s = Platform.path_separator;
   assert(parent("/home/user/file.txt") == "/home/user", "parent basic");
   assert(parent("file.txt") == ".", "parent no dir");
@@ -47,7 +47,7 @@ parent_test() `test {
   assert(parent("../../../etc/passwd") == "../../../etc", "parent traversal");
 }
 
-extension_test() `test {
+extension_test() `test(allow_leaks: true) {
   assert(extension("file.txt") == ".txt", "ext basic");
   assert(extension("archive.tar.gz") == ".gz", "ext double");
   assert(extension("Makefile") == "", "ext none");
@@ -61,7 +61,7 @@ extension_test() `test {
   assert(extension("..") == ".", "ext double dot");
 }
 
-stem_test() `test {
+stem_test() `test(allow_leaks: true) {
   assert(stem("file.txt") == "file", "stem basic");
   assert(stem("archive.tar.gz") == "archive.tar", "stem double");
   assert(stem("Makefile") == "Makefile", "stem no ext");
@@ -73,7 +73,7 @@ stem_test() `test {
   assert(stem("..") == ".", "stem double dot");
 }
 
-is_absolute_test() `test {
+is_absolute_test() `test(allow_leaks: true) {
   assert(is_absolute("/home"), "abs /home");
   assert(is_absolute("/"), "abs root");
   assert(!is_absolute("home"), "rel home");
@@ -83,7 +83,7 @@ is_absolute_test() `test {
   assert(!is_absolute("./a"), "dot-slash not abs");
 }
 
-is_relative_test() `test {
+is_relative_test() `test(allow_leaks: true) {
   assert(is_relative("home/user"), "rel basic");
   assert(is_relative("."), "dot is rel");
   assert(is_relative(".."), "dotdot is rel");
@@ -92,7 +92,7 @@ is_relative_test() `test {
   assert(!is_relative("/"), "root not rel");
 }
 
-split_test() `test {
+split_test() `test(allow_leaks: true) {
   string s = Platform.path_separator;
 
   string[] r1 = split("/home/user/file.txt");
@@ -156,7 +156,7 @@ split_test() `test {
   assert(r10[3] == ".config", "split hidden 3");
 }
 
-normalize_test() `test {
+normalize_test() `test(allow_leaks: true) {
   string s = Platform.path_separator;
   // Helper: build expected paths with platform separator
   // normalize() always outputs Platform.path_separator between components.

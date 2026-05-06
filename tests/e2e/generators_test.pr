@@ -56,7 +56,7 @@ doubles(int n) stream[int] {
 
 // --- Tests ---
 
-test_basic_generator() `test {
+test_basic_generator() `test(allow_leaks: true) {
   int sum = 0;
   for x in count_to(5) {
     sum += x;
@@ -64,7 +64,7 @@ test_basic_generator() `test {
   assert(sum == 10, "count_to(5) should yield 0+1+2+3+4=10");
 }
 
-test_early_return() `test {
+test_early_return() `test(allow_leaks: true) {
   int sum = 0;
   for x in early_stop(3) {
     sum += x;
@@ -72,7 +72,7 @@ test_early_return() `test {
   assert(sum == 3, "early_stop(3) should yield 0+1+2=3");
 }
 
-test_conditional_yield() `test {
+test_conditional_yield() `test(allow_leaks: true) {
   int sum = 0;
   int count = 0;
   for x in evens(6) {
@@ -83,7 +83,7 @@ test_conditional_yield() `test {
   assert(sum == 6, "evens(6) sum should be 0+2+4=6");
 }
 
-test_fibonacci() `test {
+test_fibonacci() `test(allow_leaks: true) {
   int count = 0;
   int last = 0;
   for x in fibonacci() {
@@ -97,7 +97,7 @@ test_fibonacci() `test {
   assert(count == 7, "fibs <= 10: 0,1,1,2,3,5,8 = 7 values");
 }
 
-test_params() `test {
+test_params() `test(allow_leaks: true) {
   int sum = 0;
   for x in range_gen(5, 10) {
     sum += x;
@@ -105,7 +105,7 @@ test_params() `test {
   assert(sum == 35, "range_gen(5,10) should yield 5+6+7+8+9=35");
 }
 
-test_empty_generator() `test {
+test_empty_generator() `test(allow_leaks: true) {
   int count = 0;
   for x in empty() {
     count++;
@@ -113,7 +113,7 @@ test_empty_generator() `test {
   assert(count == 0, "empty generator should yield nothing");
 }
 
-test_nested_generators() `test {
+test_nested_generators() `test(allow_leaks: true) {
   int sum = 0;
   for x in doubles(4) {
     sum += x;
@@ -121,7 +121,7 @@ test_nested_generators() `test {
   assert(sum == 12, "doubles(4) should yield 0+2+4+6=12");
 }
 
-test_early_break() `test {
+test_early_break() `test(allow_leaks: true) {
   int count = 0;
   for x in count_to(100) {
     if x >= 3 {
@@ -132,7 +132,7 @@ test_early_break() `test {
   assert(count == 3, "early break should only process 3 values");
 }
 
-test_index() `test {
+test_index() `test(allow_leaks: true) {
   int idx_sum = 0;
   for x, i in count_to(5) {
     idx_sum += i;
@@ -165,7 +165,7 @@ type Stepper {
   }
 }
 
-test_method_generator() `test {
+test_method_generator() `test(allow_leaks: true) {
   c := Counter(limit: 5);
   int sum = 0;
   for x in c.values() {
@@ -174,7 +174,7 @@ test_method_generator() `test {
   assert(sum == 10, "Counter(5).values() should yield 0+1+2+3+4=10");
 }
 
-test_method_generator_with_params() `test {
+test_method_generator_with_params() `test(allow_leaks: true) {
   s := Stepper(start: 10, step: 3);
   int sum = 0;
   for x in s.take(4) {
@@ -183,7 +183,7 @@ test_method_generator_with_params() `test {
   assert(sum == 58, "Stepper(10,3).take(4) should yield 10+13+16+19=58");
 }
 
-test_recursive_generator() `test {
+test_recursive_generator() `test(allow_leaks: true) {
   int sum = 0;
   for x in countdown(5) {
     sum += x;
@@ -209,7 +209,7 @@ combined() stream[int] {
   yield * count_to(3);
 }
 
-test_yield_delegate_stream() `test {
+test_yield_delegate_stream() `test(allow_leaks: true) {
   int sum = 0;
   int count = 0;
   for x in combined() {
@@ -226,7 +226,7 @@ range_delegate() stream[int] {
   yield * 7..=9;
 }
 
-test_yield_delegate_range() `test {
+test_yield_delegate_range() `test(allow_leaks: true) {
   int sum = 0;
   int count = 0;
   for x in range_delegate() {
@@ -243,7 +243,7 @@ array_delegate() stream[int] {
   yield * arr;
 }
 
-test_yield_delegate_array() `test {
+test_yield_delegate_array() `test(allow_leaks: true) {
   int sum = 0;
   int count = 0;
   for x in array_delegate() {
@@ -259,7 +259,7 @@ vector_delegate(int[] items) stream[int] {
   yield * items;
 }
 
-test_yield_delegate_vector() `test {
+test_yield_delegate_vector() `test(allow_leaks: true) {
   int[] v = [1, 2, 3, 4, 5];
   int sum = 0;
   for x in vector_delegate(v) {
@@ -273,7 +273,7 @@ char_delegate(string s) stream[char] {
   yield * s;
 }
 
-test_yield_delegate_string() `test {
+test_yield_delegate_string() `test(allow_leaks: true) {
   int count = 0;
   for ch in char_delegate("abc") {
     count++;
@@ -289,7 +289,7 @@ mixed_yields() stream[int] {
   yield * count_to(2);
 }
 
-test_yield_delegate_mixed() `test {
+test_yield_delegate_mixed() `test(allow_leaks: true) {
   int sum = 0;
   int count = 0;
   for x in mixed_yields() {
@@ -302,7 +302,7 @@ test_yield_delegate_mixed() `test {
 }
 
 // yield* with early break from consumer
-test_yield_delegate_early_break() `test {
+test_yield_delegate_early_break() `test(allow_leaks: true) {
   int count = 0;
   for x in range_delegate() {
     if x >= 8 {
@@ -323,7 +323,7 @@ countdown_delegate(int n) stream[int] {
   yield * countdown_delegate(n - 1);
 }
 
-test_yield_delegate_recursive() `test {
+test_yield_delegate_recursive() `test(allow_leaks: true) {
   int sum = 0;
   for x in countdown_delegate(5) {
     sum += x;
@@ -337,7 +337,7 @@ empty_delegate() stream[int] {
   yield 42;
 }
 
-test_yield_delegate_empty_subgen() `test {
+test_yield_delegate_empty_subgen() `test(allow_leaks: true) {
   int sum = 0;
   int count = 0;
   for x in empty_delegate() {

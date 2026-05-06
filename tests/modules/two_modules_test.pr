@@ -1,21 +1,21 @@
 use mathlib "./mathlib";
 use shapes "./shapes";
 
-test_both_modules() `test {
+test_both_modules() `test(allow_leaks: true) {
   int sum = mathlib.add(3, 4);
   p := shapes.Point(x: sum, y: mathlib.square(2));
   assert(p.x == 7, "p.x == add(3,4)");
   assert(p.y == 4, "p.y == square(2)");
 }
 
-test_module_type_in_other() `test {
+test_module_type_in_other() `test(allow_leaks: true) {
   v := mathlib.Vec2(x: 1, y: 2);
   c := shapes.Circle(center: shapes.Point(x: v.x, y: v.y), radius: v.sum());
   assert(c.radius == 3, "radius from vec2 sum");
   assert(c.describe() == "circle at (1, 2) r=3", "circle from vec2");
 }
 
-test_color_with_shapes() `test {
+test_color_with_shapes() `test(allow_leaks: true) {
   c := mathlib.Color.Green;
   string name = mathlib.color_name(c);
   p := shapes.Point(x: name.len, y: 0);

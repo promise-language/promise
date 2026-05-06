@@ -1,6 +1,7 @@
 package codegen
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/llir/llvm/ir"
@@ -921,8 +922,8 @@ func (c *Compiler) defineTestPrintResultBody(fn *ir.Func) {
 	mergeBlock.NewRet(nil)
 }
 
-// defineTestSummaryBody adds a function body to promise_test_summary(i32 %passed, i32 %failed, i32 %skipped, i32 %leaked).
-// Writes "<passed> passed, <failed> failed[, <skipped> skipped][, <leaked> leaked]\n" to stdout via pal_write.
+// defineTestSummaryBody adds a function body to promise_test_summary(i32 %passed, i32 %failed, i32 %skipped, i32 %leaked, i32 %ignored).
+// Writes "<passed> passed, <failed> failed[, <skipped> skipped][, <leaked> leaked][, <ignored> ignored]\n" to stdout via pal_write.
 func (c *Compiler) defineTestSummaryBody(fn *ir.Func) {
 	// Global constants
 	passedSuffixData := constant.NewCharArrayFromString(" passed, ")
@@ -950,11 +951,17 @@ func (c *Compiler) defineTestSummaryBody(fn *ir.Func) {
 	leakedSuffixGlobal.Immutable = true
 	leakedSuffixGlobal.Linkage = enum.LinkagePrivate
 
+	ignoredSuffixData := constant.NewCharArrayFromString(" ignored")
+	ignoredSuffixGlobal := c.module.NewGlobalDef(".str.ignored_suffix", ignoredSuffixData)
+	ignoredSuffixGlobal.Immutable = true
+	ignoredSuffixGlobal.Linkage = enum.LinkagePrivate
+
 	stdout := constant.NewInt(irtypes.I32, 1)
 	passed := fn.Params[0]  // i32
 	failed := fn.Params[1]  // i32
 	skipped := fn.Params[2] // i32
 	leaked := fn.Params[3]  // i32
+	ignored := fn.Params[4] // i32
 
 	entry := fn.NewBlock(".entry")
 
@@ -1022,12 +1029,32 @@ func (c *Compiler) defineTestSummaryBody(fn *ir.Func) {
 	printLeakBlock.NewCall(c.palWrite, stdout, lSuffixPtr, constant.NewInt(irtypes.I64, 7))
 	printLeakBlock.NewBr(afterLeakBlock)
 
-	// Write "\n"
-	nlPtr := afterLeakBlock.NewGetElementPtr(c.newlineGlobal.ContentType, c.newlineGlobal,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	afterLeakBlock.NewCall(c.palWrite, stdout, nlPtr, constant.NewInt(irtypes.I64, 1))
+	// Conditionally write ", <ignored> ignored" if ignored > 0 (T0067)
+	hasIgnored := afterLeakBlock.NewICmp(enum.IPredSGT, ignored, constant.NewInt(irtypes.I32, 0))
+	printIgnoredBlock := fn.NewBlock("print_ignored")
+	afterIgnoredBlock := fn.NewBlock("after_ignored")
+	afterLeakBlock.NewCondBr(hasIgnored, printIgnoredBlock, afterIgnoredBlock)
 
-	afterLeakBlock.NewRet(nil)
+	// Write ", <ignored> ignored"
+	commaPtr3 := printIgnoredBlock.NewGetElementPtr(commaPrefixGlobal.ContentType, commaPrefixGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	printIgnoredBlock.NewCall(c.palWrite, stdout, commaPtr3, constant.NewInt(irtypes.I64, 2))
+	ignoredI64 := printIgnoredBlock.NewSExt(ignored, irtypes.I64)
+	ignoredStr := printIgnoredBlock.NewCall(c.funcs["promise_int_to_string"], ignoredI64)
+	ignoredDataPtr, ignoredDataLen := c.extractStringDataLenFromInstance(printIgnoredBlock, ignoredStr)
+	printIgnoredBlock.NewCall(c.palWrite, stdout, ignoredDataPtr, ignoredDataLen)
+	printIgnoredBlock.NewCall(c.palFree, ignoredStr)
+	iSuffixPtr := printIgnoredBlock.NewGetElementPtr(ignoredSuffixGlobal.ContentType, ignoredSuffixGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	printIgnoredBlock.NewCall(c.palWrite, stdout, iSuffixPtr, constant.NewInt(irtypes.I64, 8))
+	printIgnoredBlock.NewBr(afterIgnoredBlock)
+
+	// Write "\n"
+	nlPtr := afterIgnoredBlock.NewGetElementPtr(c.newlineGlobal.ContentType, c.newlineGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	afterIgnoredBlock.NewCall(c.palWrite, stdout, nlPtr, constant.NewInt(irtypes.I64, 1))
+
+	afterIgnoredBlock.NewRet(nil)
 }
 
 // emitLeakMessage writes "  leak: <N> allocations not freed\n" to stdout (T0020).
@@ -1051,4 +1078,20 @@ func (c *Compiler) emitLeakMessage(blk *ir.Block, delta value.Value, leakPrefixG
 	suffixPtr := blk.NewGetElementPtr(leakSuffixGlobal.ContentType, leakSuffixGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
 	blk.NewCall(c.palWrite, stdout, suffixPtr, constant.NewInt(irtypes.I64, 23))
+}
+
+// emitStaleAllowLeaksWarning writes "  allow_leaks: no leaks detected (tag can be removed)\n"
+// to stdout for tests that have allow_leaks but did not leak (T0067).
+// The block is NOT terminated — caller must add a terminator after this call.
+func (c *Compiler) emitStaleAllowLeaksWarning(blk *ir.Block, testName string) {
+	msg := fmt.Sprintf("  allow_leaks: %s did not leak (tag can be removed)\n", testName)
+	msgData := constant.NewCharArrayFromString(msg)
+	msgGlobal := c.module.NewGlobalDef(fmt.Sprintf(".str.stale_allow_leaks_%s", testName), msgData)
+	msgGlobal.Immutable = true
+	msgGlobal.Linkage = enum.LinkagePrivate
+
+	stdout := constant.NewInt(irtypes.I32, 1)
+	msgPtr := blk.NewGetElementPtr(msgGlobal.ContentType, msgGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	blk.NewCall(c.palWrite, stdout, msgPtr, constant.NewInt(irtypes.I64, int64(len(msg))))
 }

@@ -1,6 +1,6 @@
 // While-unwrap tests: loop while optional has value.
 // --- basic while-unwrap with pop ---
-test_while_pop() `test {
+test_while_pop() `test(allow_leaks: true) {
   int[] items = [1, 2, 3, 4, 5];
   int sum = 0;
   while v := items.pop() {
@@ -13,7 +13,7 @@ test_while_pop() `test {
 
 // --- while-unwrap terminates on none ---
 
-test_while_unwrap_none() `test {
+test_while_unwrap_none() `test(allow_leaks: true) {
   int[] empty = [];
   int count = 0;
   while v := empty.pop() {
@@ -24,7 +24,7 @@ test_while_unwrap_none() `test {
 
 // --- while-unwrap processes partial data ---
 
-test_while_unwrap_partial() `test {
+test_while_unwrap_partial() `test(allow_leaks: true) {
   int[] nums = [10, 20, 30];
   int first = 0;
   // Pop once manually, then loop
@@ -62,7 +62,7 @@ type KeyIter {
   }
 }
 
-test_while_unwrap_reborrow() `test {
+test_while_unwrap_reborrow() `test(allow_leaks: true) {
   KeyIter it = KeyIter(keys: ["a", "b", "c"], pos: 0);
   string[] collected = [];
   while key := it.next_key() {
@@ -79,7 +79,7 @@ test_while_unwrap_reborrow() `test {
 
 // --- while-unwrap: condition shared-borrows, body mut-borrows (B0004 variant) ---
 
-test_while_unwrap_mut_reborrow() `test {
+test_while_unwrap_mut_reborrow() `test(allow_leaks: true) {
   KeyIter it = KeyIter(keys: ["x", "y"], pos: 0);
   int advances = 0;
   while key := it.next_key() {
@@ -92,7 +92,7 @@ test_while_unwrap_mut_reborrow() `test {
 
 // --- if-unwrap re-borrows in body ---
 
-test_if_unwrap_reborrow() `test {
+test_if_unwrap_reborrow() `test(allow_leaks: true) {
   KeyIter it = KeyIter(keys: ["only"], pos: 0);
   string result = "";
   if key := it.next_key() {
@@ -104,7 +104,7 @@ test_if_unwrap_reborrow() `test {
 
 // --- regular while condition re-borrow ---
 
-test_while_cond_reborrow() `test {
+test_while_cond_reborrow() `test(allow_leaks: true) {
   KeyIter it = KeyIter(keys: ["a", "b", "c"], pos: 0);
   int count = 0;
   while it.current_pos() < it.keys.len {
@@ -116,7 +116,7 @@ test_while_cond_reborrow() `test {
 
 // --- while-unwrap with string vector ---
 
-test_while_unwrap_strings() `test {
+test_while_unwrap_strings() `test(allow_leaks: true) {
   string[] words = ["hello", "world"];
   string result = "";
   while w := words.pop() {

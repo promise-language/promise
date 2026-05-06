@@ -7,7 +7,7 @@ type Holder[T] {
 type IntHolder is Holder[int] {
 }
 
-test_non_generic_child() `test {
+test_non_generic_child() `test(allow_leaks: true) {
   h := IntHolder(value: 42);
   assert(h.value == 42, "non-generic child field access");
 }
@@ -26,7 +26,7 @@ type Wrapper[T] is Container[T] {
   string label;
 }
 
-test_forwarded_params() `test {
+test_forwarded_params() `test(allow_leaks: true) {
   w := Wrapper[int](item: 99, label: "test");
   assert(w.item == 99, "forwarded param field");
   assert(w.get() == 99, "inherited method");
@@ -47,12 +47,12 @@ type ConstProducer[T] is Producer[T] {
   }
 }
 
-test_abstract_generic_parent() `test {
+test_abstract_generic_parent() `test(allow_leaks: true) {
   p := ConstProducer[int](value: 7);
   assert(p.produce() == 7, "abstract generic parent");
 }
 
-test_abstract_generic_string() `test {
+test_abstract_generic_string() `test(allow_leaks: true) {
   p := ConstProducer[string](value: "hello");
   assert(p.produce() == "hello", "abstract generic parent string");
 }
@@ -67,7 +67,7 @@ type Pair[A, B] {
 type StringPair[V] is Pair[string, V] {
 }
 
-test_partial_application() `test {
+test_partial_application() `test(allow_leaks: true) {
   sp := StringPair[int](first: "age", second: 30);
   assert(sp.first == "age", "partial app first");
   assert(sp.second == 30, "partial app second");
@@ -90,13 +90,13 @@ type Middle[T] is Base[T] {
 type Leaf is Middle[int] {
 }
 
-test_transitive_field() `test {
+test_transitive_field() `test(allow_leaks: true) {
   leaf := Leaf(data: 100, tag: "leaf");
   assert(leaf.data == 100, "transitive field access");
   assert(leaf.tag == "leaf", "middle field access");
 }
 
-test_transitive_method() `test {
+test_transitive_method() `test(allow_leaks: true) {
   leaf := Leaf(data: 55, tag: "x");
   assert(leaf.get_data() == 55, "transitive inherited method");
 }
@@ -116,7 +116,7 @@ type GMid[T] is GBase[T] {
 type GLeaf[T] is GMid[T] {
 }
 
-test_transitive_generic() `test {
+test_transitive_generic() `test(allow_leaks: true) {
   g := GLeaf[int](val: 77);
   assert(g.val == 77, "transitive generic field");
   assert(g.fetch() == 77, "transitive generic method");
@@ -128,7 +128,7 @@ accept_base(Base[int] b) int {
   return b.get_data();
 }
 
-test_transitive_assignability() `test {
+test_transitive_assignability() `test(allow_leaks: true) {
   leaf := Leaf(data: 33, tag: "t");
   result := accept_base(leaf);
   assert(result == 33, "transitive assignability");
@@ -136,7 +136,7 @@ test_transitive_assignability() `test {
 
 // --- Multiple instantiations of same generic chain ---
 
-test_multiple_instantiations() `test {
+test_multiple_instantiations() `test(allow_leaks: true) {
   gi := GLeaf[int](val: 10);
   gs := GLeaf[string](val: "hi");
   assert(gi.fetch() == 10, "multi inst int");
@@ -149,7 +149,7 @@ accept_container(Container[int] c) int {
   return c.get();
 }
 
-test_instance_to_instance_assignability() `test {
+test_instance_to_instance_assignability() `test(allow_leaks: true) {
   w := Wrapper[int](item: 42, label: "w");
   result := accept_container(w);
   assert(result == 42, "instance to instance assignability");
@@ -172,7 +172,7 @@ type KVPair[K, V] {
 type IntKV[V] is KVPair[int, V] {
 }
 
-test_partial_app_method() `test {
+test_partial_app_method() `test(allow_leaks: true) {
   kv := IntKV[string](key: 1, val: "one");
   assert(kv.get_key() == 1, "partial app inherited method key");
   assert(kv.get_val() == "one", "partial app inherited method val");
@@ -194,7 +194,7 @@ type FancyGreeter[T] is Greeter[T] {
   }
 }
 
-test_concrete_override() `test {
+test_concrete_override() `test(allow_leaks: true) {
   g := FancyGreeter[int](name: 42);
   assert(g.greet() == "greetings", "concrete override");
   assert(g.name == 42, "override preserves fields");
@@ -216,7 +216,7 @@ type Dog[T] is Animal[T] {
   }
 }
 
-test_own_and_inherited_methods() `test {
+test_own_and_inherited_methods() `test(allow_leaks: true) {
   d := Dog[int](id: 7, breed: "lab");
   assert(d.get_id() == 7, "inherited method");
   assert(d.bark() == "woof", "own method");
@@ -233,7 +233,7 @@ type NamedItem is Tagged[int] {
   string name;
 }
 
-test_own_and_inherited_fields() `test {
+test_own_and_inherited_fields() `test(allow_leaks: true) {
   item := NamedItem(payload: 99, name: "item");
   assert(item.payload == 99, "inherited generic field");
   assert(item.name == "item", "own field");
@@ -255,7 +255,7 @@ accept_transformer(Transformer[int] t) int {
   return t.transform(5);
 }
 
-test_assignability() `test {
+test_assignability() `test(allow_leaks: true) {
   d := Doubler();
   result := accept_transformer(d);
   assert(result == 10, "assignability child to parent");
@@ -273,14 +273,14 @@ type IntProducer is Producer[int] {
   }
 }
 
-test_non_generic_child_to_generic_parent() `test {
+test_non_generic_child_to_generic_parent() `test(allow_leaks: true) {
   ip := IntProducer();
   assert(accept_producer(ip) == 42, "non-generic child to generic parent");
 }
 
 // --- Assignability: generic child instance to generic parent instance ---
 
-test_generic_child_to_parent_assignability() `test {
+test_generic_child_to_parent_assignability() `test(allow_leaks: true) {
   cp := ConstProducer[int](value: 5);
   assert(accept_producer(cp) == 5, "generic child instance assignability");
 
@@ -302,7 +302,7 @@ type Tripler is Transformer[int] {
   }
 }
 
-test_polymorphic_dispatch() `test {
+test_polymorphic_dispatch() `test(allow_leaks: true) {
   Transformer[int] a = Doubler();
   Transformer[int] b = Negator();
   Transformer[int] c = Tripler();
@@ -337,7 +337,7 @@ accept_str_adder(Adder[string] a) string {
   return a.add("foo", "bar");
 }
 
-test_multi_instantiation_dispatch() `test {
+test_multi_instantiation_dispatch() `test(allow_leaks: true) {
   assert(accept_int_adder(IntAdder()) == 30, "int adder dispatch");
   assert(accept_str_adder(StrAdder()) == "foobar", "str adder dispatch");
 }
@@ -370,21 +370,21 @@ accept_int_shape(Shape[int] s) int {
   return s.area();
 }
 
-test_deep_chain_virtual_dispatch() `test {
+test_deep_chain_virtual_dispatch() `test(allow_leaks: true) {
   sq := Square(sides: 4, size: 5);
   assert(accept_int_shape(sq) == 25, "deep chain virtual dispatch");
 }
 
 // --- is-check: non-generic child against parent origin ---
 
-test_is_check_non_generic_child() `test {
+test_is_check_non_generic_child() `test(allow_leaks: true) {
   Producer[int] p = ConstProducer[int](value: 10);
   assert(p is Producer, "mono instance is parent");
 }
 
 // --- is-check: non-generic child of generic parent ---
 
-test_is_check_nongeneric_child_of_generic_parent() `test {
+test_is_check_nongeneric_child_of_generic_parent() `test(allow_leaks: true) {
   Producer[int] p = IntProducer();
   assert(p is IntProducer, "nongeneric child is concrete type");
   assert(p is Producer, "nongeneric child is parent");
@@ -396,7 +396,7 @@ accept_greeter(Greeter[int] g) string {
   return g.greet();
 }
 
-test_override_virtual_dispatch() `test {
+test_override_virtual_dispatch() `test(allow_leaks: true) {
   Greeter[int] plain = Greeter[int](name: 1);
   Greeter[int] fancy = FancyGreeter[int](name: 2);
   assert(accept_greeter(plain) == "hello", "parent dispatch");
@@ -409,7 +409,7 @@ accept_kvpair(KVPair[int, string] kv) string {
   return kv.get_val();
 }
 
-test_partial_app_virtual_dispatch() `test {
+test_partial_app_virtual_dispatch() `test(allow_leaks: true) {
   kv := IntKV[string](key: 1, val: "one");
   assert(accept_kvpair(kv) == "one", "partial app virtual dispatch");
 }
@@ -420,7 +420,7 @@ accept_animal(Animal[int] a) int {
   return a.get_id();
 }
 
-test_inherited_method_virtual_dispatch() `test {
+test_inherited_method_virtual_dispatch() `test(allow_leaks: true) {
   d := Dog[int](id: 9, breed: "pug");
   assert(accept_animal(d) == 9, "child dispatched through parent");
 }
@@ -431,7 +431,7 @@ accept_gbase(GBase[int] g) int {
   return g.fetch();
 }
 
-test_transitive_virtual_dispatch() `test {
+test_transitive_virtual_dispatch() `test(allow_leaks: true) {
   g := GLeaf[int](val: 42);
   assert(accept_gbase(g) == 42, "transitive generic virtual dispatch");
 }
@@ -445,7 +445,7 @@ type ConstTransformer is Transformer[int] {
   }
 }
 
-test_mixed_child_polymorphic_dispatch() `test {
+test_mixed_child_polymorphic_dispatch() `test(allow_leaks: true) {
   Transformer[int] a = Doubler();
   Transformer[int] b = ConstTransformer(offset: 100);
   assert(accept_transformer(a) == 10, "non-generic child dispatch");
@@ -454,7 +454,7 @@ test_mixed_child_polymorphic_dispatch() `test {
 
 // --- Generic mono child dispatched alongside non-generic child ---
 
-test_mono_and_nongeneric_siblings() `test {
+test_mono_and_nongeneric_siblings() `test(allow_leaks: true) {
   // ConstProducer[int] (mono) and IntProducer (non-generic) both implement Producer[int]
   Producer[int] a = ConstProducer[int](value: 99);
   Producer[int] b = IntProducer();

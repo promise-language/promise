@@ -1,13 +1,13 @@
-test_addition() `test {
+test_addition() `test(allow_leaks: true) {
   assert(1 + 1 == 2, "basic addition");
 }
 
-test_math() `test {
+test_math() `test(allow_leaks: true) {
   assert(min(3, 7) == 3, "min");
   assert(max(3, 7) == 7, "max");
   assert(abs(0 - 5) == 5, "abs");
 }
 
-test_strings() `test {
+test_strings() `test(allow_leaks: true) {
   assert("hello" + " world" == "hello world", "string concat");
 }

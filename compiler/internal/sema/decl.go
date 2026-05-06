@@ -980,6 +980,12 @@ func (c *Checker) defineFunc(d *ast.FuncDecl) {
 				}
 				c.info.TestExcludes[d.Name] = excludes
 			}
+			if extractTestAllowLeaks(d.Annotations) {
+				if c.info.TestAllowLeaks == nil {
+					c.info.TestAllowLeaks = make(map[string]bool)
+				}
+				c.info.TestAllowLeaks[d.Name] = true
+			}
 		}
 	}
 

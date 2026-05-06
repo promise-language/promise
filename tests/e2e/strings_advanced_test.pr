@@ -1,29 +1,29 @@
 // Advanced string tests: escape sequences, interpolation edge cases,
 // method combinations.
 // --- escape sequences ---
-test_escape_newline() `test {
+test_escape_newline() `test(allow_leaks: true) {
   string s = "a\nb";
   assert(s.len == 3, "a\\nb has length 3");
 }
 
-test_escape_tab() `test {
+test_escape_tab() `test(allow_leaks: true) {
   string s = "a\tb";
   assert(s.len == 3, "a\\tb has length 3");
 }
 
-test_escape_backslash() `test {
+test_escape_backslash() `test(allow_leaks: true) {
   string s = "a\\b";
   assert(s.len == 3, "a\\\\b has length 3");
 }
 
-test_escape_quote() `test {
+test_escape_quote() `test(allow_leaks: true) {
   string s = "say \"hi\"";
   assert(s.contains("hi"), "contains hi after escaped quotes");
 }
 
 // --- string length ---
 
-test_string_length() `test {
+test_string_length() `test(allow_leaks: true) {
   assert("".len == 0, "empty string len = 0");
   assert("a".len == 1, "single char len = 1");
   assert("hello".len == 5, "hello len = 5");
@@ -32,7 +32,7 @@ test_string_length() `test {
 
 // --- string equality ---
 
-test_string_equality() `test {
+test_string_equality() `test(allow_leaks: true) {
   assert("abc" == "abc", "equal strings");
   assert("abc" != "def", "different strings");
   assert("" == "", "empty strings equal");
@@ -41,14 +41,14 @@ test_string_equality() `test {
 
 // --- string concatenation ---
 
-test_string_concat() `test {
+test_string_concat() `test(allow_leaks: true) {
   string a = "hello";
   string b = " ";
   string c = "world";
   assert(a + b + c == "hello world", "triple concat");
 }
 
-test_string_concat_empty() `test {
+test_string_concat_empty() `test(allow_leaks: true) {
   assert("" + "hello" == "hello", "empty + hello");
   assert("hello" + "" == "hello", "hello + empty");
   assert("" + "" == "", "empty + empty");
@@ -56,7 +56,7 @@ test_string_concat_empty() `test {
 
 // --- string indexing ---
 
-test_string_indexing() `test {
+test_string_indexing() `test(allow_leaks: true) {
   string s = "abcdef";
   assert(s[0] == 'a', "index 0 = a");
   assert(s[1] == 'b', "index 1 = b");
@@ -65,19 +65,19 @@ test_string_indexing() `test {
 
 // --- string interpolation basic ---
 
-test_interp_int() `test {
+test_interp_int() `test(allow_leaks: true) {
   int x = 42;
   string s = "value: {x}";
   assert(s == "value: 42", "int interpolation");
 }
 
-test_interp_bool() `test {
+test_interp_bool() `test(allow_leaks: true) {
   bool b = true;
   string s = "flag: {b}";
   assert(s == "flag: true", "bool interpolation");
 }
 
-test_interp_string() `test {
+test_interp_string() `test(allow_leaks: true) {
   string name = "world";
   string s = "hello {name}!";
   assert(s == "hello world!", "string interpolation");
@@ -85,7 +85,7 @@ test_interp_string() `test {
 
 // --- interpolation with expressions ---
 
-test_interp_expr() `test {
+test_interp_expr() `test(allow_leaks: true) {
   int a = 3;
   int b = 4;
   string s = "{a} + {b} = {a + b}";
@@ -94,7 +94,7 @@ test_interp_expr() `test {
 
 // --- multiple interpolations ---
 
-test_interp_multiple() `test {
+test_interp_multiple() `test(allow_leaks: true) {
   string first = "John";
   string last = "Doe";
   int age = 30;
@@ -104,28 +104,28 @@ test_interp_multiple() `test {
 
 // --- string contains edge cases ---
 
-test_contains_empty() `test {
+test_contains_empty() `test(allow_leaks: true) {
   assert("hello".contains(""), "contains empty string");
   assert("".contains("") == true, "empty contains empty");
 }
 
-test_contains_full() `test {
+test_contains_full() `test(allow_leaks: true) {
   assert("hello".contains("hello"), "contains full string");
 }
 
-test_contains_not_found() `test {
+test_contains_not_found() `test(allow_leaks: true) {
   assert("hello".contains("xyz") == false, "does not contain xyz");
 }
 
 // --- starts_with / ends_with ---
 
-test_starts_with_full() `test {
+test_starts_with_full() `test(allow_leaks: true) {
   assert("hello".starts_with("hello"), "starts_with full string");
   assert("hello".starts_with(""), "starts_with empty");
   assert("hello".starts_with("hx") == false, "no match");
 }
 
-test_ends_with_full() `test {
+test_ends_with_full() `test(allow_leaks: true) {
   assert("hello".ends_with("hello"), "ends_with full string");
   assert("hello".ends_with(""), "ends_with empty");
   assert("hello".ends_with("lx") == false, "no match");
@@ -133,7 +133,7 @@ test_ends_with_full() `test {
 
 // --- trim ---
 
-test_trim_spaces() `test {
+test_trim_spaces() `test(allow_leaks: true) {
   assert("  hi  ".trim() == "hi", "trim spaces");
   assert("hi".trim() == "hi", "no trim needed");
   assert("   ".trim() == "", "all spaces");
@@ -141,14 +141,14 @@ test_trim_spaces() `test {
 
 // --- split ---
 
-test_split_comma() `test {
+test_split_comma() `test(allow_leaks: true) {
   string[] parts = "a,b,c,d".split(",");
   assert(parts.len == 4, "4 parts");
   assert(parts[0] == "a", "first = a");
   assert(parts[3] == "d", "last = d");
 }
 
-test_split_space() `test {
+test_split_space() `test(allow_leaks: true) {
   string[] words = "hello world foo".split(" ");
   assert(words.len == 3, "3 words");
   assert(words[0] == "hello", "first word");
@@ -157,7 +157,7 @@ test_split_space() `test {
 
 // --- index_of ---
 
-test_index_of_found() `test {
+test_index_of_found() `test(allow_leaks: true) {
   string s = "hello world";
   if idx := s.index_of("world") {
     assert(idx == 6, "world starts at index 6");
@@ -166,7 +166,7 @@ test_index_of_found() `test {
   }
 }
 
-test_index_of_not_found() `test {
+test_index_of_not_found() `test(allow_leaks: true) {
   string s = "hello";
   bool found = false;
   if idx := s.index_of("xyz") {
@@ -175,7 +175,7 @@ test_index_of_not_found() `test {
   assert(!found, "xyz not in hello");
 }
 
-test_index_of_beginning() `test {
+test_index_of_beginning() `test(allow_leaks: true) {
   if idx := "hello".index_of("hel") {
     assert(idx == 0, "hel starts at 0");
   } else {
@@ -185,7 +185,7 @@ test_index_of_beginning() `test {
 
 // --- string building in loop ---
 
-test_string_building() `test {
+test_string_building() `test(allow_leaks: true) {
   string result = "";
   for i in 0..5 {
     if result.len > 0 {
@@ -198,7 +198,7 @@ test_string_building() `test {
 
 // --- char equality ---
 
-test_char_equality() `test {
+test_char_equality() `test(allow_leaks: true) {
   char a = 'a';
   char b = 'b';
   assert(a == 'a', "char equality");

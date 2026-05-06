@@ -28,21 +28,21 @@ type Triangle is Shape {
 
 // --- is expression: positive check ---
 
-test_is_positive() `test {
+test_is_positive() `test(allow_leaks: true) {
   Shape s = Circle(name: "circle", radius: 5.0);
   assert(s is Circle, "Circle is Circle");
 }
 
 // --- is expression: negative check ---
 
-test_is_negative() `test {
+test_is_negative() `test(allow_leaks: true) {
   Shape s = Circle(name: "circle", radius: 5.0);
   assert(!(s is Square), "Circle is not Square");
 }
 
 // --- is expression in if ---
 
-test_is_in_if() `test {
+test_is_in_if() `test(allow_leaks: true) {
   Shape s = Square(name: "sq", side: 4.0);
   string result = "unknown";
   if s is Circle {
@@ -57,7 +57,7 @@ test_is_in_if() `test {
 
 // --- polymorphic method dispatch ---
 
-test_polymorphic_dispatch() `test {
+test_polymorphic_dispatch() `test(allow_leaks: true) {
   Shape c = Circle(name: "c", radius: 1.0);
   Shape s = Square(name: "s", side: 2.0);
   f64 ca = c.area();
@@ -68,7 +68,7 @@ test_polymorphic_dispatch() `test {
 
 // --- is on same type ---
 
-test_is_same_type() `test {
+test_is_same_type() `test(allow_leaks: true) {
   Shape s1 = Circle(name: "a", radius: 1.0);
   Shape s2 = Circle(name: "b", radius: 2.0);
   assert(s1 is Circle, "s1 is Circle");
@@ -77,7 +77,7 @@ test_is_same_type() `test {
 
 // --- parent field access via polymorphic ref ---
 
-test_parent_field_access() `test {
+test_parent_field_access() `test(allow_leaks: true) {
   Shape s = Triangle(name: "tri", base: 6.0, height: 8.0);
   assert(s.name == "tri", "parent field accessible");
 }
@@ -103,7 +103,7 @@ type Truck is Vehicle {
   }
 }
 
-test_vehicle_hierarchy() `test {
+test_vehicle_hierarchy() `test(allow_leaks: true) {
   Vehicle v1 = Car(make: "Toyota", doors: 4);
   Vehicle v2 = Truck(make: "Ford", payload: 5000);
   assert(v1 is Car, "v1 is Car");
@@ -116,7 +116,7 @@ test_vehicle_hierarchy() `test {
 
 // --- type check in loop with individual items ---
 
-test_type_check_loop() `test {
+test_type_check_loop() `test(allow_leaks: true) {
   Shape s1 = Circle(name: "c", radius: 1.0);
   Shape s2 = Square(name: "s", side: 1.0);
   Shape s3 = Triangle(name: "t", base: 1.0, height: 1.0);

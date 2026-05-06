@@ -12,12 +12,12 @@ type Counter {
   }
 }
 
-test_global_basic() `test {
+test_global_basic() `test(allow_leaks: true) {
   c := Counter.create(42);
   assert(c.value == 42, "global create");
 }
 
-test_global_zero() `test {
+test_global_zero() `test(allow_leaks: true) {
   c := Counter.zero();
   assert(c.value == 0, "global zero");
 }
@@ -43,19 +43,19 @@ type Point {
   }
 }
 
-test_global_value_type() `test {
+test_global_value_type() `test(allow_leaks: true) {
   p := Point.origin();
   assert(p.x == 0, "origin x");
   assert(p.y == 0, "origin y");
 }
 
-test_global_from_xy() `test {
+test_global_from_xy() `test(allow_leaks: true) {
   p := Point.fromXY(3, 4);
   assert(p.x == 3, "fromXY x");
   assert(p.y == 4, "fromXY y");
 }
 
-test_global_static_util() `test {
+test_global_static_util() `test(allow_leaks: true) {
   a := Point.fromXY(0, 0);
   b := Point.fromXY(3, 4);
   d := Point.distance(a, b);
@@ -72,12 +72,12 @@ type Wrapper[T] {
   }
 }
 
-test_mono_basic() `test {
+test_mono_basic() `test(allow_leaks: true) {
   n := Wrapper[int].defaultInt();
   assert(n == 0, "mono defaultInt");
 }
 
-test_mono_different_instantiations() `test {
+test_mono_different_instantiations() `test(allow_leaks: true) {
   a := Wrapper[int].defaultInt();
   b := Wrapper[string].defaultInt();
   assert(a == 0, "mono int instantiation");
@@ -95,7 +95,7 @@ type Pair {
   }
 }
 
-test_mono_self() `test {
+test_mono_self() `test(allow_leaks: true) {
   p := Pair.zeros();
   assert(p.a == 0, "mono self a");
   assert(p.b == 0, "mono self b");

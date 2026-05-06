@@ -1,6 +1,6 @@
 // Test map[K, V] operations: insert, lookup, contains, remove, keys, values, iteration
 //
-test_literal_and_lookup() `test {
+test_literal_and_lookup() `test(allow_leaks: true) {
   map[string, int] m = {
     "a": 1, "b": 2, "c": 3
   };
@@ -12,7 +12,7 @@ test_literal_and_lookup() `test {
   }
 }
 
-test_empty_literal() `test {
+test_empty_literal() `test(allow_leaks: true) {
   map[string, int] m = {:};
   assert(m.is_empty, "empty literal is_empty");
   assert(m.len == 0, "empty literal len 0");
@@ -20,7 +20,7 @@ test_empty_literal() `test {
   assert(m.len == 1, "after insert len 1");
 }
 
-test_insert() `test {
+test_insert() `test(allow_leaks: true) {
   map[string, int] m = {:};
   m["x"] = 10;
   m["y"] = 20;
@@ -30,7 +30,7 @@ test_insert() `test {
   }
 }
 
-test_update() `test {
+test_update() `test(allow_leaks: true) {
   map[string, int] m = {
     "x": 10
   };
@@ -41,7 +41,7 @@ test_update() `test {
   }
 }
 
-test_contains() `test {
+test_contains() `test(allow_leaks: true) {
   map[string, int] m = {
     "a": 1, "b": 2
   };
@@ -49,7 +49,7 @@ test_contains() `test {
   assert(!m.contains("z"), "not contains z");
 }
 
-test_remove() `test {
+test_remove() `test(allow_leaks: true) {
   map[string, int] m = {
     "a": 1, "b": 2, "c": 3
   };
@@ -62,7 +62,7 @@ test_remove() `test {
   assert(!not_found, "remove z returns false");
 }
 
-test_keys_values() `test {
+test_keys_values() `test(allow_leaks: true) {
   map[string, int] m = {
     "x": 10
   };
@@ -75,14 +75,14 @@ test_keys_values() `test {
   assert(vals[0] == 10, "value is 10");
 }
 
-test_is_empty() `test {
+test_is_empty() `test(allow_leaks: true) {
   map[string, int] m = {:};
   assert(m.is_empty, "empty map is_empty");
   m["a"] = 1;
   assert(!m.is_empty, "non-empty not is_empty");
 }
 
-test_missing_key_returns_none() `test {
+test_missing_key_returns_none() `test(allow_leaks: true) {
   map[string, int] m = {
     "a": 1
   };
@@ -93,7 +93,7 @@ test_missing_key_returns_none() `test {
   assert(!found, "missing key returns none");
 }
 
-test_int_keys() `test {
+test_int_keys() `test(allow_leaks: true) {
   map[int, string] m = {:};
   m[1] = "one";
   m[2] = "two";
@@ -103,7 +103,7 @@ test_int_keys() `test {
   }
 }
 
-test_clear() `test {
+test_clear() `test(allow_leaks: true) {
   map[string, int] m = {
     "a": 1, "b": 2, "c": 3
   };
@@ -122,7 +122,7 @@ test_clear() `test {
 
 // --- for-in iteration ---
 
-test_for_in_kv() `test {
+test_for_in_kv() `test(allow_leaks: true) {
   map[string, int] m = {
     "a": 1, "b": 2, "c": 3
   };
@@ -141,7 +141,7 @@ test_for_in_kv() `test {
   assert(seen_keys.contains("c"), "visited key c");
 }
 
-test_for_in_single() `test {
+test_for_in_single() `test(allow_leaks: true) {
   map[string, int] m = {
     "x": 10, "y": 20
   };
@@ -153,7 +153,7 @@ test_for_in_single() `test {
   assert(sum == 30, "for pair sum == 30");
 }
 
-test_for_in_empty() `test {
+test_for_in_empty() `test(allow_leaks: true) {
   map[string, int] m = {:};
   int count = 0;
   for k, v in m {
@@ -162,7 +162,7 @@ test_for_in_empty() `test {
   assert(count == 0, "empty map iterates zero times");
 }
 
-test_for_in_entry_name() `test {
+test_for_in_entry_name() `test(allow_leaks: true) {
   map[string, int] m = {
     "a": 1, "b": 2
   };
@@ -176,7 +176,7 @@ test_for_in_entry_name() `test {
 
 // --- get_or ---
 
-test_get_or() `test {
+test_get_or() `test(allow_leaks: true) {
   map[string, int] m = {
     "a": 1, "b": 2
   };
@@ -186,7 +186,7 @@ test_get_or() `test {
 
 // --- pop ---
 
-test_pop() `test {
+test_pop() `test(allow_leaks: true) {
   map[string, int] m = {
     "a": 1, "b": 2
   };
@@ -199,7 +199,7 @@ test_pop() `test {
   assert(!m.contains("a"), "pop removes key");
 }
 
-test_pop_missing() `test {
+test_pop_missing() `test(allow_leaks: true) {
   map[string, int] m = {
     "a": 1
   };
@@ -213,7 +213,7 @@ test_pop_missing() `test {
 
 // --- update ---
 
-test_update_existing() `test {
+test_update_existing() `test(allow_leaks: true) {
   map[string, int] m = {
     "a": 1, "b": 2
   };
@@ -222,7 +222,7 @@ test_update_existing() `test {
   assert(m.len == 2, "update preserves len");
 }
 
-test_update_missing() `test {
+test_update_missing() `test(allow_leaks: true) {
   map[string, int] m = {
     "a": 1
   };
@@ -233,7 +233,7 @@ test_update_missing() `test {
 
 // --- entries ---
 
-test_entries() `test {
+test_entries() `test(allow_leaks: true) {
   map[string, int] m = {
     "x": 10
   };
@@ -246,7 +246,7 @@ test_entries() `test {
 
 // --- merge ---
 
-test_merge() `test {
+test_merge() `test(allow_leaks: true) {
   map[string, int] m1 = {
     "a": 1, "b": 2
   };
@@ -262,7 +262,7 @@ test_merge() `test {
 
 // --- compound index assignment ---
 
-test_compound_index_assign() `test {
+test_compound_index_assign() `test(allow_leaks: true) {
   map[string, int] m = {
     "a": 10, "b": 20
   };
@@ -276,7 +276,7 @@ test_compound_index_assign() `test {
 
 // --- tombstone probing ---
 
-test_lookup_past_tombstone() `test {
+test_lookup_past_tombstone() `test(allow_leaks: true) {
   // Insert two keys that will occupy consecutive slots,
   // remove the first, verify the second is still found.
   map[int, int] m = {:};
@@ -295,7 +295,7 @@ test_lookup_past_tombstone() `test {
   assert(m.len == 17, "len after 3 removes");
 }
 
-test_pop_creates_tombstone() `test {
+test_pop_creates_tombstone() `test(allow_leaks: true) {
   map[string, int] m = {:};
   m["a"] = 1;
   m["b"] = 2;
@@ -309,7 +309,7 @@ test_pop_creates_tombstone() `test {
 
 // --- entries with multiple entries ---
 
-test_entries_multiple() `test {
+test_entries_multiple() `test(allow_leaks: true) {
   map[string, int] m = {
     "a": 1, "b": 2, "c": 3
   };
@@ -326,7 +326,7 @@ test_entries_multiple() `test {
 
 // --- merge into empty ---
 
-test_merge_into_empty() `test {
+test_merge_into_empty() `test(allow_leaks: true) {
   map[string, int] m1 = {:};
   map[string, int] m2 = {
     "x": 10, "y": 20
@@ -339,7 +339,7 @@ test_merge_into_empty() `test {
 
 // --- for k, v with int keys ---
 
-test_for_in_kv_int_keys() `test {
+test_for_in_kv_int_keys() `test(allow_leaks: true) {
   map[int, string] m = {
     1: "one", 2: "two", 3: "three"
   };
@@ -355,7 +355,7 @@ test_for_in_kv_int_keys() `test {
 
 // --- rehash ---
 
-test_rehash_stress() `test {
+test_rehash_stress() `test(allow_leaks: true) {
   map[int, int] m = {:};
   // Insert enough entries to trigger rehash (initial capacity 16, load factor 75%)
   for i in 0..50 {

@@ -1,35 +1,35 @@
 // Tests for std/platform.pr — Platform constants via global getters
-test_line_separator_not_empty() `test {
+test_line_separator_not_empty() `test(allow_leaks: true) {
   string sep = Platform.line_separator;
   assert(sep.len > 0, "line_separator must not be empty");
 }
 
-test_line_separator_is_newline() `test {
+test_line_separator_is_newline() `test(allow_leaks: true) {
   // On POSIX: "\n", on Windows: "\r\n" — both end with '\n'
   string sep = Platform.line_separator;
   assert(sep[sep.len - 1] == '\n', "line_separator must end with newline");
 }
 
-test_path_separator_not_empty() `test {
+test_path_separator_not_empty() `test(allow_leaks: true) {
   string sep = Platform.path_separator;
   assert(sep.len == 1, "path_separator must be a single character");
 }
 
-test_path_separator_is_slash() `test {
+test_path_separator_is_slash() `test(allow_leaks: true) {
   // On POSIX: "/", on Windows: "\\"
   string sep = Platform.path_separator;
   assert(sep == "/" || sep == "\\", "path_separator must be / or \\");
 }
 
-test_is_path_separator_slash() `test {
+test_is_path_separator_slash() `test(allow_leaks: true) {
   assert(Platform.is_path_separator('/'), "/ is always a path separator");
 }
 
-test_is_path_separator_letter() `test {
+test_is_path_separator_letter() `test(allow_leaks: true) {
   assert(!Platform.is_path_separator('a'), "a is not a path separator");
 }
 
-test_write_line_uses_platform_separator() `test {
+test_write_line_uses_platform_separator() `test(allow_leaks: true) {
   Builder b = Builder();
   b.write_line("hello")!;
   string result = b.to_string();

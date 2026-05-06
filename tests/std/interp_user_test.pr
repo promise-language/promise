@@ -7,27 +7,27 @@ type Pt {
   }
 }
 
-test_user_type_basic() `test {
+test_user_type_basic() `test(allow_leaks: true) {
   Pt p = Pt(x: 3, y: 4);
   assert("{p}" == "(3, 4)", "user type format interp");
 }
 
-test_user_type_mixed() `test {
+test_user_type_mixed() `test(allow_leaks: true) {
   Pt p = Pt(x: 1, y: 2);
   assert("point: {p}" == "point: (1, 2)", "mixed text + user type");
 }
 
-test_optional_user_type_some() `test {
+test_optional_user_type_some() `test(allow_leaks: true) {
   Pt? p = Pt(x: 5, y: 6);
   assert("{p}" == "(5, 6)", "optional user type some");
 }
 
-test_optional_user_type_none() `test {
+test_optional_user_type_none() `test(allow_leaks: true) {
   Pt? p = none;
   assert("{p}" == "none", "optional user type none");
 }
 
-test_multiple_user_types() `test {
+test_multiple_user_types() `test(allow_leaks: true) {
   Pt a = Pt(x: 1, y: 2);
   Pt b = Pt(x: 3, y: 4);
   assert("{a} -> {b}" == "(1, 2) -> (3, 4)", "multiple user types");
@@ -44,12 +44,12 @@ type Name {
   }
 }
 
-test_multi_write_format() `test {
+test_multi_write_format() `test(allow_leaks: true) {
   Name n = Name(first: "John", last: "Doe");
   assert("{n}" == "John Doe", "format with multiple writes");
 }
 
-test_user_type_in_print_line() `test {
+test_user_type_in_print_line() `test(allow_leaks: true) {
   Pt p = Pt(x: 10, y: 20);
   string s = "coords: {p}";
   assert(s == "coords: (10, 20)", "user type in variable");
@@ -69,12 +69,12 @@ type Circle is Shape {
   }
 }
 
-test_polymorphic_interp() `test {
+test_polymorphic_interp() `test(allow_leaks: true) {
   Shape s = Circle(radius: 5);
   assert("{s}" == "circle(5)", "polymorphic format dispatch");
 }
 
-test_direct_child_interp() `test {
+test_direct_child_interp() `test(allow_leaks: true) {
   Circle c = Circle(radius: 3);
   assert("{c}" == "circle(3)", "direct child type interp");
 }
@@ -88,13 +88,13 @@ type Pair {
   }
 }
 
-test_nested_interp_in_format() `test {
+test_nested_interp_in_format() `test(allow_leaks: true) {
   Pair p = Pair(a: 10, b: 20);
   assert("{p}" == "10:20", "nested interpolation in format");
 }
 
 // Duration (value type from std) also has format()
-test_duration_interp() `test {
+test_duration_interp() `test(allow_leaks: true) {
   Duration d = Duration.from_millis(500);
   assert("{d}" == "500ms", "value type interpolation via Duration");
 }
@@ -105,7 +105,7 @@ type Empty {
   }
 }
 
-test_empty_format() `test {
+test_empty_format() `test(allow_leaks: true) {
   Empty e = Empty();
   assert("{e}" == "", "empty format produces empty string");
 }
@@ -120,28 +120,28 @@ type Color `public {
   }
 }
 
-test_value_type_interp() `test {
+test_value_type_interp() `test(allow_leaks: true) {
   Color c = Color(r: 255, g: 128, b: 0);
   assert("{c}" == "rgb(255,128,0)", "pure value type interpolation");
 }
 
-test_value_type_optional_some() `test {
+test_value_type_optional_some() `test(allow_leaks: true) {
   Color? c = Color(r: 0, g: 0, b: 0);
   assert("{c}" == "rgb(0,0,0)", "optional value type some");
 }
 
-test_value_type_optional_none() `test {
+test_value_type_optional_none() `test(allow_leaks: true) {
   Color? c = none;
   assert("{c}" == "none", "optional value type none");
 }
 
-test_value_type_mixed() `test {
+test_value_type_mixed() `test(allow_leaks: true) {
   Color c = Color(r: 10, g: 20, b: 30);
   assert("color: {c}" == "color: rgb(10,20,30)", "value type mixed with text");
 }
 
 // User type mixed with primitives
-test_mixed_primitives_and_user() `test {
+test_mixed_primitives_and_user() `test(allow_leaks: true) {
   Pt p = Pt(x: 1, y: 2);
   int n = 42;
   bool b = true;
@@ -163,12 +163,12 @@ type Outer {
   }
 }
 
-test_nested_type_interp() `test {
+test_nested_type_interp() `test(allow_leaks: true) {
   Outer o = Outer(inner: Inner(v: 42));
   assert("{o}" == "[I42]", "nested type format");
 }
 
-test_nested_type_mixed() `test {
+test_nested_type_mixed() `test(allow_leaks: true) {
   Outer o = Outer(inner: Inner(v: 7));
   assert("result: {o}!" == "result: [I7]!", "nested type with surrounding text");
 }
@@ -192,23 +192,23 @@ type Poodle is Dog {
   }
 }
 
-test_three_level_vtable() `test {
+test_three_level_vtable() `test(allow_leaks: true) {
   Animal a = Poodle();
   assert("{a}" == "poodle", "three-level vtable dispatch");
 }
 
-test_mid_level_vtable() `test {
+test_mid_level_vtable() `test(allow_leaks: true) {
   Animal a = Dog();
   assert("{a}" == "dog", "mid-level vtable dispatch");
 }
 
-test_base_level_vtable() `test {
+test_base_level_vtable() `test(allow_leaks: true) {
   Animal a = Animal();
   assert("{a}" == "animal", "base-level vtable dispatch");
 }
 
 // User type in loop (repeated Builder allocation)
-test_user_type_in_loop() `test {
+test_user_type_in_loop() `test(allow_leaks: true) {
   string result = "";
   int i = 0;
   while i < 5 {
@@ -227,32 +227,32 @@ type Wrapper {
   }
 }
 
-test_special_chars_newline() `test {
+test_special_chars_newline() `test(allow_leaks: true) {
   Wrapper w = Wrapper(text: "line1\nline2");
   string s = "{w}";
   assert(s.len == 11, "newline preserved in format output");
 }
 
-test_special_chars_tab() `test {
+test_special_chars_tab() `test(allow_leaks: true) {
   Wrapper w = Wrapper(text: "a\tb");
   string s = "{w}";
   assert(s.len == 3, "tab preserved in format output");
 }
 
-test_special_chars_empty() `test {
+test_special_chars_empty() `test(allow_leaks: true) {
   Wrapper w = Wrapper(text: "");
   assert("{w}" == "", "empty string field in format");
 }
 
 // User type adjacent to other user types (no text between)
-test_adjacent_user_types() `test {
+test_adjacent_user_types() `test(allow_leaks: true) {
   Pt a = Pt(x: 1, y: 2);
   Pt b = Pt(x: 3, y: 4);
   assert("{a}{b}" == "(1, 2)(3, 4)", "adjacent user types no separator");
 }
 
 // Multiple different user types in one string
-test_mixed_user_types() `test {
+test_mixed_user_types() `test(allow_leaks: true) {
   Pt p = Pt(x: 1, y: 2);
   Name n = Name(first: "Alice", last: "Smith");
   Color c = Color(r: 255, g: 0, b: 0);
@@ -260,7 +260,7 @@ test_mixed_user_types() `test {
 }
 
 // User type interpolation result assigned to variable and reused
-test_interp_result_reuse() `test {
+test_interp_result_reuse() `test(allow_leaks: true) {
   Pt p = Pt(x: 10, y: 20);
   string s1 = "first: {p}";
   string s2 = "second: {p}";
@@ -269,30 +269,30 @@ test_interp_result_reuse() `test {
 }
 
 // Optional user type in mixed context
-test_optional_user_mixed_some() `test {
+test_optional_user_mixed_some() `test(allow_leaks: true) {
   Pt? p = Pt(x: 1, y: 2);
   int n = 99;
   assert("{n} -> {p}" == "99 -> (1, 2)", "optional some in mixed");
 }
 
-test_optional_user_mixed_none() `test {
+test_optional_user_mixed_none() `test(allow_leaks: true) {
   Pt? p = none;
   int n = 99;
   assert("{n} -> {p}" == "99 -> none", "optional none in mixed");
 }
 
 // Duration format edge cases (std value type)
-test_duration_zero() `test {
+test_duration_zero() `test(allow_leaks: true) {
   Duration d = Duration.from_millis(0);
   assert("{d}" == "0ns", "zero duration");
 }
 
-test_duration_seconds() `test {
+test_duration_seconds() `test(allow_leaks: true) {
   Duration d = Duration.from_secs(3);
   assert("{d}" == "3s", "seconds duration");
 }
 
-test_duration_mixed_interp() `test {
+test_duration_mixed_interp() `test(allow_leaks: true) {
   Duration d = Duration.from_millis(1500);
   assert("took {d}" == "took 1.5s", "duration in mixed string");
 }
@@ -311,12 +311,12 @@ type Status {
   }
 }
 
-test_conditional_format_ok() `test {
+test_conditional_format_ok() `test(allow_leaks: true) {
   Status s = Status(ok: true, msg: "");
   assert("{s}" == "OK", "conditional format ok path");
 }
 
-test_conditional_format_err() `test {
+test_conditional_format_err() `test(allow_leaks: true) {
   Status s = Status(ok: false, msg: "timeout");
   assert("{s}" == "ERR: timeout", "conditional format error path");
 }
@@ -331,7 +331,7 @@ type Toggle {
   }
 }
 
-test_format_conditional_write() `test {
+test_format_conditional_write() `test(allow_leaks: true) {
   Toggle t1 = Toggle(on: true);
   assert("{t1}" == "ON", "conditional write active");
   Toggle t2 = Toggle(on: false);
@@ -339,7 +339,7 @@ test_format_conditional_write() `test {
 }
 
 // Polymorphic in a collection context
-test_polymorphic_in_vector() `test {
+test_polymorphic_in_vector() `test(allow_leaks: true) {
   Shape[] shapes = Vector[Shape]();
   shapes.push(Circle(radius: 1));
   shapes.push(Circle(radius: 2));

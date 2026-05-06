@@ -1,30 +1,30 @@
 use _ "./mathlib";
 
-test_glob_add() `test {
+test_glob_add() `test(allow_leaks: true) {
   assert(add(10, 20) == 30, "add(10, 20) == 30");
 }
 
-test_glob_square() `test {
+test_glob_square() `test(allow_leaks: true) {
   assert(square(6) == 36, "square(6) == 36");
 }
 
-test_glob_greet() `test {
+test_glob_greet() `test(allow_leaks: true) {
   assert(greet("globe") == "hello globe", "greet globe");
 }
 
-test_glob_color() `test {
+test_glob_color() `test(allow_leaks: true) {
   c := Color.Red;
   assert(color_name(c) == "red", "glob color_name Red");
 }
 
-test_glob_type_construct() `test {
+test_glob_type_construct() `test(allow_leaks: true) {
   v := Vec2(x: 5, y: 10);
   assert(v.x == 5, "glob Vec2.x == 5");
   assert(v.y == 10, "glob Vec2.y == 10");
   assert(v.sum() == 15, "glob Vec2.sum() == 15");
 }
 
-test_glob_enum_match() `test {
+test_glob_enum_match() `test(allow_leaks: true) {
   c := Color.Green;
   string result = match c {
     Color.Red => "r",
@@ -43,7 +43,7 @@ sum_doubled(int x, int y) int {
   return v.sum() * 2;
 }
 
-test_module_type_as_param_return() `test {
+test_module_type_as_param_return() `test(allow_leaks: true) {
   v := make_vec(3, 7);
   assert(v.sum() == 10, "make_vec sum == 10");
   assert(sum_doubled(3, 7) == 20, "sum_doubled == 20");

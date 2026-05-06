@@ -146,7 +146,7 @@ enumMember
 // ============================================================
 
 funcDecl
-    : IDENT typeParams? LPAREN params RPAREN returnType? metaAnnotation* (block | SEMI)
+    : IDENT typeParams? LPAREN params RPAREN returnType? metaAnnotation* (memberBody | SEMI)
     ;
 
 returnType

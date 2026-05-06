@@ -1,0 +1,31 @@
+// Tests for expression bodies (=>) on free functions (T0057).
+double(int x) int => x * 2;
+
+add(int a, int b) int => a + b;
+
+greet(string name) string => "hello " + name;
+
+identity[T](T x) T => x;
+
+say_hello(string name) => print_line("hello " + name);
+
+negate(int x) int `inline => -x;
+
+test_expression_body_with_return_type() `test {
+  assert(double(5) == 10, "double");
+  assert(add(3, 4) == 7, "add");
+  assert(greet("world") == "hello world", "greet");
+}
+
+test_expression_body_generic() `test {
+  assert(identity(42) == 42, "identity int");
+  assert(identity("hi") == "hi", "identity string");
+}
+
+test_expression_body_with_annotation() `test {
+  assert(negate(5) == -5, "negate");
+}
+
+test_expression_body_void() `test {
+  say_hello("world");
+}

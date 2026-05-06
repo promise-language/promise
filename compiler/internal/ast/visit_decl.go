@@ -420,7 +420,10 @@ func (b *Builder) VisitFuncDecl(ctx *parser.FuncDeclContext) interface{} {
 	for _, ma := range ctx.AllMetaAnnotation() {
 		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))
 	}
-	node.Body = b.visitBlock(ctx.Block())
+	if mb := ctx.MemberBody(); mb != nil {
+		hasReturn := node.ReturnType != nil
+		node.Body = b.visitMemberBody(mb, hasReturn)
+	}
 	return node
 }
 

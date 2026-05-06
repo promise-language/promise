@@ -348,8 +348,8 @@ func promiseparserParserInit() {
 		0, 443, 445, 5, 52, 0, 0, 444, 446, 3, 46, 23, 0, 445, 444, 1, 0, 0, 0,
 		445, 446, 1, 0, 0, 0, 446, 450, 1, 0, 0, 0, 447, 449, 3, 64, 32, 0, 448,
 		447, 1, 0, 0, 0, 449, 452, 1, 0, 0, 0, 450, 448, 1, 0, 0, 0, 450, 451,
-		1, 0, 0, 0, 451, 455, 1, 0, 0, 0, 452, 450, 1, 0, 0, 0, 453, 456, 3, 78,
-		39, 0, 454, 456, 5, 55, 0, 0, 455, 453, 1, 0, 0, 0, 455, 454, 1, 0, 0,
+		1, 0, 0, 0, 451, 455, 1, 0, 0, 0, 452, 450, 1, 0, 0, 0, 453, 456, 3, 32,
+		16, 0, 454, 456, 5, 55, 0, 0, 455, 453, 1, 0, 0, 0, 455, 454, 1, 0, 0,
 		0, 456, 45, 1, 0, 0, 0, 457, 459, 3, 70, 35, 0, 458, 460, 5, 68, 0, 0,
 		459, 458, 1, 0, 0, 0, 459, 460, 1, 0, 0, 0, 460, 463, 1, 0, 0, 0, 461,
 		463, 5, 68, 0, 0, 462, 457, 1, 0, 0, 0, 462, 461, 1, 0, 0, 0, 463, 47,
@@ -6314,7 +6314,7 @@ type IFuncDeclContext interface {
 	LPAREN() antlr.TerminalNode
 	Params() IParamsContext
 	RPAREN() antlr.TerminalNode
-	Block() IBlockContext
+	MemberBody() IMemberBodyContext
 	SEMI() antlr.TerminalNode
 	TypeParams() ITypeParamsContext
 	ReturnType() IReturnTypeContext
@@ -6385,10 +6385,10 @@ func (s *FuncDeclContext) RPAREN() antlr.TerminalNode {
 	return s.GetToken(PromiseParserRPAREN, 0)
 }
 
-func (s *FuncDeclContext) Block() IBlockContext {
+func (s *FuncDeclContext) MemberBody() IMemberBodyContext {
 	var t antlr.RuleContext
 	for _, ctx := range s.GetChildren() {
-		if _, ok := ctx.(IBlockContext); ok {
+		if _, ok := ctx.(IMemberBodyContext); ok {
 			t = ctx.(antlr.RuleContext)
 			break
 		}
@@ -6398,7 +6398,7 @@ func (s *FuncDeclContext) Block() IBlockContext {
 		return nil
 	}
 
-	return t.(IBlockContext)
+	return t.(IMemberBodyContext)
 }
 
 func (s *FuncDeclContext) SEMI() antlr.TerminalNode {
@@ -6597,10 +6597,10 @@ func (p *PromiseParser) FuncDecl() (localctx IFuncDeclContext) {
 	}
 
 	switch p.GetTokenStream().LA(1) {
-	case PromiseParserLBRACE:
+	case PromiseParserFAT_ARROW, PromiseParserLBRACE:
 		{
 			p.SetState(453)
-			p.Block()
+			p.MemberBody()
 		}
 
 	case PromiseParserSEMI:

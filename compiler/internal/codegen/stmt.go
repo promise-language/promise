@@ -1537,7 +1537,7 @@ func (c *Compiler) genIfNarrowStmt(s *ast.IfStmt, narrow *sema.OptionalNarrowing
 	// Then: shadow the variable with the unwrapped inner value
 	c.block = thenBlock
 	innerVal := c.block.NewExtractValue(optVal, 1)
-	innerAlloca := c.block.NewAlloca(innerVal.Type())
+	innerAlloca := c.createEntryAlloca(innerVal.Type()) // B0153: must be in entry block
 	c.block.NewStore(innerVal, innerAlloca)
 	prev := c.locals[v.VarName]
 	c.locals[v.VarName] = innerAlloca
@@ -1592,7 +1592,7 @@ func (c *Compiler) genNegatedNarrowStmt(s *ast.IfStmt, narrow *sema.OptionalNarr
 	if s.Else != nil {
 		c.block = elseBlock
 		innerVal := c.block.NewExtractValue(optVal, 1)
-		innerAlloca := c.block.NewAlloca(innerVal.Type())
+		innerAlloca := c.createEntryAlloca(innerVal.Type()) // B0153: must be in entry block
 		c.block.NewStore(innerVal, innerAlloca)
 		prev := c.locals[v.VarName]
 		c.locals[v.VarName] = innerAlloca
@@ -1611,7 +1611,7 @@ func (c *Compiler) genNegatedNarrowStmt(s *ast.IfStmt, narrow *sema.OptionalNarr
 	// unwrapped inner value for all subsequent code.
 	if narrow.PostNarrow {
 		innerVal := c.block.NewExtractValue(optVal, 1)
-		innerAlloca := c.block.NewAlloca(innerVal.Type())
+		innerAlloca := c.createEntryAlloca(innerVal.Type()) // B0153: must be in entry block
 		c.block.NewStore(innerVal, innerAlloca)
 		c.locals[v.VarName] = innerAlloca
 	}
@@ -1663,7 +1663,7 @@ func (c *Compiler) genCompoundNarrowStmt(s *ast.IfStmt, narrow *sema.OptionalNar
 	prevLocals := make(map[string]*ir.InstAlloca, len(opts))
 	for _, info := range opts {
 		innerVal := c.block.NewExtractValue(info.optVal, 1)
-		innerAlloca := c.block.NewAlloca(innerVal.Type())
+		innerAlloca := c.createEntryAlloca(innerVal.Type()) // B0153: must be in entry block
 		c.block.NewStore(innerVal, innerAlloca)
 		prevLocals[info.v.VarName] = c.locals[info.v.VarName]
 		c.locals[info.v.VarName] = innerAlloca
@@ -1881,7 +1881,7 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 	// Bind the value directly to the unwrap variable name.
 	if _, ok := optVal.Type().(*irtypes.StructType); !ok {
 		if s.Binding != "" && s.Binding != "_" {
-			alloca := c.block.NewAlloca(optVal.Type())
+			alloca := c.createEntryAlloca(optVal.Type()) // B0153: must be in entry block
 			c.block.NewStore(optVal, alloca)
 			prev, had := c.locals[s.Binding]
 			c.locals[s.Binding] = alloca
@@ -1915,7 +1915,7 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 	c.block = thenBlock
 	innerVal := c.block.NewExtractValue(optVal, 1)
 	innerType := innerVal.Type()
-	alloca := c.block.NewAlloca(innerType)
+	alloca := c.createEntryAlloca(innerType) // B0153: must be in entry block
 	alloca.SetName(c.uniqueLocalName(s.Binding))
 	c.block.NewStore(innerVal, alloca)
 	prev, hadPrev := c.locals[s.Binding]
@@ -2011,7 +2011,7 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	c.block = bodyBlock
 	innerVal := c.block.NewExtractValue(optVal, 1)
 	innerType := innerVal.Type()
-	alloca := c.block.NewAlloca(innerType)
+	alloca := c.createEntryAlloca(innerType) // B0153: must be in entry block
 	alloca.SetName(c.uniqueLocalName(s.Binding))
 	c.block.NewStore(innerVal, alloca)
 	prev, hadPrev := c.locals[s.Binding]

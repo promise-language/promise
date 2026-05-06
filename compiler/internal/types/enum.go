@@ -48,6 +48,8 @@ type Enum struct {
 	exported       bool   // `public meta — visible to other modules
 	doc            string // `doc meta — documentation string
 	deprecated     string // `deprecated meta — empty means not deprecated
+	hasDrop        bool   // true if any variant has fields needing cleanup (T0102)
+	needsSynthDrop bool   // true if compiler should synthesize a drop function (T0102)
 }
 
 // NewEnum creates a new enum type and sets the TypeName's type to it.
@@ -74,6 +76,10 @@ func (e *Enum) Doc() string              { return e.doc }
 func (e *Enum) SetDoc(s string)          { e.doc = s }
 func (e *Enum) Deprecated() string       { return e.deprecated }
 func (e *Enum) SetDeprecated(s string)   { e.deprecated = s }
+func (e *Enum) HasDrop() bool            { return e.hasDrop }
+func (e *Enum) SetHasDrop(v bool)        { e.hasDrop = v }
+func (e *Enum) NeedsSynthDrop() bool     { return e.needsSynthDrop }
+func (e *Enum) SetNeedsSynthDrop(v bool) { e.needsSynthDrop = v }
 
 func (e *Enum) String() string {
 	return e.obj.Name()

@@ -166,7 +166,7 @@ enum JsonNode {
   Dict(map[string, JsonNode] fields),
 }
 
-test_map_in_enum_variant_construct() `test(allow_leaks: true) {
+test_map_in_enum_variant_construct() `test {
   map[string, JsonNode] fields = {
     "name": JsonNode.Text(value: "Alice"),
     "age": JsonNode.Num(value: 30.0),
@@ -178,7 +178,7 @@ test_map_in_enum_variant_construct() `test(allow_leaks: true) {
   }
 }
 
-test_map_in_enum_variant_lookup() `test(allow_leaks: true) {
+test_map_in_enum_variant_lookup() `test {
   map[string, JsonNode] fields = {
     "x": JsonNode.Bool(value: true),
     "y": JsonNode.Null,
@@ -263,7 +263,7 @@ test_nested_map_in_enum_variant() `test(allow_leaks: true) {
   }
 }
 
-test_map_in_enum_variant_values() `test(allow_leaks: true) {
+test_map_in_enum_variant_values() `test {
   map[string, JsonNode] fields = {
     "a": JsonNode.Null,
     "b": JsonNode.Bool(value: false),

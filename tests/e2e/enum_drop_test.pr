@@ -1,0 +1,57 @@
+// T0102: Enum variant heap data cleanup — verifies synthesized enum drops
+// properly clean up heap-allocated data in enum variants.
+// Type with synthesized drop (has string field → auto-synthesized drop + pal_free)
+type Resource {
+  string name;
+}
+
+enum Value {
+  Text(string s),
+  Number(int n),
+  Items(int[] items),
+  Res(Resource r),
+}
+
+enum Pair {
+  Both(string a, string b),
+  Single(string s),
+  None,
+}
+
+// Basic: string variant is dropped at scope exit
+test_enum_string_drop() `test {
+  Value v = Value.Text("hello");
+}
+
+// Number variant has no heap data — no drop needed
+test_enum_number_no_drop() `test {
+  Value v = Value.Number(42);
+}
+
+// Vector variant is dropped at scope exit
+test_enum_vector_drop() `test {
+  int[] items = [1, 2, 3];
+  Value v = Value.Items(items);
+}
+
+// User type variant with explicit drop
+test_enum_user_type_drop() `test {
+  Value v = Value.Res(Resource(name: "test"));
+}
+
+// Reassignment drops old value before storing new
+test_enum_reassign() `test {
+  Value v = Value.Text("first");
+  v = Value.Text("second");
+  v = Value.Number(0);
+}
+
+// Multiple string fields in one variant
+test_enum_multi_string() `test {
+  Pair p = Pair.Both("hello", "world");
+}
+
+// Fieldless variant on droppable enum — no crash
+test_enum_fieldless_variant_on_droppable() `test {
+  Pair p = Pair.None;
+}

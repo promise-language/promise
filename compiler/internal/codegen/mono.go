@@ -1469,6 +1469,62 @@ func (c *Compiler) defineSynthesizedMonoDrops(file *ast.File, instances []*types
 	}
 }
 
+// declareSynthesizedMonoEnumDrops declares drop stubs for monomorphized enum instances
+// that need a compiler-synthesized drop (T0102).
+func (c *Compiler) declareSynthesizedMonoEnumDrops(file *ast.File, instances []*types.Instance) {
+	for _, inst := range instances {
+		enum, ok := inst.Origin().(*types.Enum)
+		if !ok || !enum.NeedsSynthDrop() {
+			continue
+		}
+		name := monoName(inst)
+		mangledName := mangleMethodName(name, "drop", false)
+		if _, exists := c.funcs[mangledName]; exists {
+			continue
+		}
+		fn := c.module.NewFunc(mangledName, irtypes.Void,
+			ir.NewParam("this", irtypes.I8Ptr))
+		c.funcs[mangledName] = fn
+		if c.compilingModule != "" {
+			c.moduleOwnedFuncs[mangledName] = c.compilingModule
+		}
+	}
+}
+
+// defineSynthesizedMonoEnumDrops generates bodies for monomorphized enum drops (T0102).
+func (c *Compiler) defineSynthesizedMonoEnumDrops(file *ast.File, instances []*types.Instance) {
+	for _, inst := range instances {
+		enum, ok := inst.Origin().(*types.Enum)
+		if !ok || !enum.NeedsSynthDrop() {
+			continue
+		}
+		name := monoName(inst)
+		mangledName := mangleMethodName(name, "drop", false)
+		fn, ok := c.funcs[mangledName]
+		if !ok || len(fn.Blocks) > 0 {
+			continue
+		}
+		// Tag as instance-owned for SplitInstanceIRs
+		c.instanceOwnedFuncs[mangledName] = name
+		// Skip body generation for cached instances
+		if c.cachedInstances[name] {
+			continue
+		}
+
+		layout := c.monoEnumLayouts[name]
+		if layout == nil {
+			continue
+		}
+
+		subst := types.BuildSubstMap(enum.TypeParams(), inst.TypeArgs())
+		c.typeSubst = subst
+		c.monoCtx = &monoContext{inst: inst, origin: enum, name: name}
+		c.defineSynthesizedEnumDropBody(fn, enum, layout)
+		c.typeSubst = nil
+		c.monoCtx = nil
+	}
+}
+
 // declareMonoSynthesizedDefaults declares stubs for default methods from structural
 // parents that need to be synthesized for mono instances of concrete types.
 // E.g., _FnIter[int] inherits filter/take/skip from Iterator[T] — these become

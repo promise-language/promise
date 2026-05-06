@@ -7006,6 +7006,54 @@ func TestDropNoPropagate(t *testing.T) {
 	t.Fatal("could not find Plain type")
 }
 
+// T0102: Enum with string variant gets synthesized drop
+func TestEnumDropPropagateString(t *testing.T) {
+	info := checkOK(t, `
+		enum Value {
+			Text(string s),
+			Number(int n),
+		}
+		main() {}
+	`)
+	for _, scope := range info.ScopeOrder {
+		if obj := scope.Lookup("Value"); obj != nil {
+			if tn, ok := obj.(*types.TypeName); ok {
+				if enum, ok := tn.Type().(*types.Enum); ok {
+					if !enum.HasDrop() {
+						t.Error("Value should have HasDrop() == true")
+					}
+					if !enum.NeedsSynthDrop() {
+						t.Error("Value should have NeedsSynthDrop() == true")
+					}
+					return
+				}
+			}
+		}
+	}
+	t.Fatal("could not find Value enum")
+}
+
+// T0102: Fieldless enum should NOT get synthesized drop
+func TestEnumDropNotNeeded(t *testing.T) {
+	info := checkOK(t, `
+		enum Color { Red, Green, Blue, }
+		main() {}
+	`)
+	for _, scope := range info.ScopeOrder {
+		if obj := scope.Lookup("Color"); obj != nil {
+			if tn, ok := obj.(*types.TypeName); ok {
+				if enum, ok := tn.Type().(*types.Enum); ok {
+					if enum.HasDrop() {
+						t.Error("Color should NOT have HasDrop()")
+					}
+					return
+				}
+			}
+		}
+	}
+	t.Fatal("could not find Color enum")
+}
+
 // B0034: reference fields are rejected (previously tested as copy-compatible)
 func TestCopyTypeWithRefField(t *testing.T) {
 	errs := checkErrs(t, `

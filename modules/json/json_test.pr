@@ -569,7 +569,7 @@ parse_value_number_test() `test(allow_leaks: true) {
   }
 }
 
-parse_value_string_test() `test(allow_leaks: true) {
+parse_value_string_test() `test {
   JsonValue v = parse_value("\"hello\"")!;
   match v {
     JsonValue.Str(s) => assert(s == "hello", "string"),
@@ -585,7 +585,7 @@ parse_value_array_test() `test(allow_leaks: true) {
   }
 }
 
-parse_value_empty_array_test() `test(allow_leaks: true) {
+parse_value_empty_array_test() `test {
   JsonValue v = parse_value("[]")!;
   match v {
     JsonValue.Array(items) => assert(items.len == 0, "empty array"),
@@ -617,7 +617,7 @@ format_value_string_test() `test {
   assert(s == "\"hello\"", "format string");
 }
 
-format_value_array_test() `test(allow_leaks: true) {
+format_value_array_test() `test {
   JsonValue arr = JsonValue.Array([JsonValue.Number(1.0), JsonValue.Number(2.0)]);
   string s = format_value(arr)!;
   assert(s == "[1,2]", "format array");
@@ -670,7 +670,7 @@ parse_value_float_test() `test(allow_leaks: true) {
   }
 }
 
-parse_value_string_escapes_test() `test(allow_leaks: true) {
+parse_value_string_escapes_test() `test {
   JsonValue v = parse_value("\"a\\nb\"")!;
   match v {
     JsonValue.Str(s) => assert(s == "a\nb", "escape"),
@@ -696,7 +696,7 @@ parse_value_nested_arrays_test() `test(allow_leaks: true) {
   }
 }
 
-parse_value_empty_object_test() `test(allow_leaks: true) {
+parse_value_empty_object_test() `test {
   JsonValue v = parse_value("\{}")!;
   match v {
     JsonValue.Object(fields) => assert(fields.len == 0, "empty obj"),
@@ -728,7 +728,7 @@ format_value_object_test() `test(allow_leaks: true) {
   assert(s.contains("\"a\":1"), "format object");
 }
 
-format_value_empty_object_test() `test(allow_leaks: true) {
+format_value_empty_object_test() `test {
   JsonValue obj = JsonValue.Object(map[string, JsonValue]());
   string s = format_value(obj)!;
   assert(s == "\{}", "format empty object");
@@ -1260,7 +1260,7 @@ as_object_test() `test(allow_leaks: true) {
 
 // Convenience access methods
 
-get_method_test() `test(allow_leaks: true) {
+get_method_test() `test {
   map[string, JsonValue] fields = {
     "name": JsonValue.Str("Alice"),
     "age": JsonValue.Number(30.0),
@@ -1279,7 +1279,7 @@ get_method_test() `test(allow_leaks: true) {
   assert(bad is absent, "get on number is none");
 }
 
-at_method_test() `test(allow_leaks: true) {
+at_method_test() `test {
   JsonValue[] items = [JsonValue.Str("a"), JsonValue.Str("b"), JsonValue.Str("c")];
   JsonValue arr = JsonValue.Array(items);
 
@@ -1304,7 +1304,7 @@ at_method_test() `test(allow_leaks: true) {
 
 // Encoding/formatting methods
 
-encode_method_test() `test(allow_leaks: true) {
+encode_method_test() `test {
   JsonValue v = JsonValue.Array([JsonValue.Number(1.0), JsonValue.Bool(true)]);
   JsonEncoder enc = JsonEncoder();
   v.encode(enc)!;
@@ -1429,13 +1429,13 @@ as_object_empty_test() `test(allow_leaks: true) {
 
 // ── Edge cases for get/at ────────────────────────────────────────────────────
 
-get_empty_object_test() `test(allow_leaks: true) {
+get_empty_object_test() `test {
   JsonValue obj = JsonValue.Object(map[string, JsonValue]());
   JsonValue? v = obj.get("anything");
   assert(v is absent, "get on empty object is none");
 }
 
-at_empty_array_test() `test(allow_leaks: true) {
+at_empty_array_test() `test {
   JsonValue arr = JsonValue.Array(JsonValue[]());
   JsonValue? v = arr.at(0);
   assert(v is absent, "at(0) on empty array is none");

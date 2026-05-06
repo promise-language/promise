@@ -173,7 +173,7 @@ enum Action {
   Done,
 }
 
-test_enum_channel_field() `test(allow_leaks: true, exclude: "wasm32") {
+test_enum_channel_field() `test(exclude: "wasm32") {
   ch := channel[int](capacity: 1);
   a := Action.Send(ch: ch, value: 42);
   match a {

@@ -9681,6 +9681,70 @@ func TestDropSynthesizedGeneric(t *testing.T) {
 	assertContains(t, ir, "Wrapper[int].drop")
 }
 
+// T0102: Enum with string variant gets synthesized drop
+func TestDropSynthesizedEnumString(t *testing.T) {
+	ir := generateIR(t, `
+		enum Value {
+			Text(string s),
+			Number(int n),
+		}
+		main() {
+			v := Value.Text("hello");
+		}
+	`)
+	assertContains(t, ir, "define void @Value.drop")
+	assertContains(t, ir, "enum.drop.Text")
+	assertContains(t, ir, "call void @promise_string_drop(")
+	assertContains(t, ir, "v.dropflag")
+}
+
+// T0102: Fieldless enum does NOT get synthesized drop
+func TestDropSynthesizedEnumFieldless(t *testing.T) {
+	ir := generateIR(t, `
+		enum Color { Red, Green, Blue, }
+		main() {
+			c := Color.Red;
+		}
+	`)
+	assertNotContains(t, ir, "Color.drop")
+}
+
+// T0102: Enum with vector variant gets synthesized drop
+func TestDropSynthesizedEnumVector(t *testing.T) {
+	ir := generateIR(t, `
+		enum Value {
+			Items(int[] items),
+			Single(int n),
+		}
+		main() {
+			v := Value.Single(42);
+		}
+	`)
+	assertContains(t, ir, "define void @Value.drop")
+	assertContains(t, ir, "enum.drop.Items")
+	assertContains(t, ir, "call void @Vector.drop(")
+}
+
+// T0102: Enum with user type variant gets synthesized drop
+func TestDropSynthesizedEnumUserType(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		enum Holder {
+			Has(Resource r),
+			Empty,
+		}
+		main() {
+			h := Holder.Empty;
+		}
+	`)
+	assertContains(t, ir, "define void @Holder.drop")
+	assertContains(t, ir, "enum.drop.Has")
+	assertContains(t, ir, "call void @Resource.drop(")
+}
+
 // Compound assignment on different typed variables exercises namedFromLLVMType branches
 func TestCompoundAssignF64(t *testing.T) {
 	ir := generateIR(t, `

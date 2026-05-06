@@ -399,36 +399,66 @@ func (c *Checker) propagateDrops(file *ast.File) {
 	for changed {
 		changed = false
 		for _, decl := range file.Decls {
-			td, ok := decl.(*ast.TypeDecl)
-			if !ok {
-				continue
-			}
 			if c.info.FilteredDecls[decl] {
 				continue
 			}
-			obj := c.scope.Lookup(td.Name)
-			if obj == nil {
-				continue
-			}
-			tn, ok := obj.(*types.TypeName)
-			if !ok {
-				continue
-			}
-			named, ok := tn.Type().(*types.Named)
-			if !ok {
-				continue
-			}
-			// Skip types that already have drop, are copy, or value types.
-			if named.HasDrop() || named.IsCopy() || named.IsValueType() {
-				continue
-			}
-			// Check all fields (including inherited) for droppable types
-			for _, f := range named.AllFields() {
-				if fieldTypeHasDrop(f.Type()) {
-					named.SetHasDrop(true)
-					named.SetNeedsSynthDrop(true)
-					changed = true
-					break
+			switch d := decl.(type) {
+			case *ast.TypeDecl:
+				obj := c.scope.Lookup(d.Name)
+				if obj == nil {
+					continue
+				}
+				tn, ok := obj.(*types.TypeName)
+				if !ok {
+					continue
+				}
+				named, ok := tn.Type().(*types.Named)
+				if !ok {
+					continue
+				}
+				// Skip types that already have drop, are copy, or value types.
+				if named.HasDrop() || named.IsCopy() || named.IsValueType() {
+					continue
+				}
+				// Check all fields (including inherited) for droppable types
+				for _, f := range named.AllFields() {
+					if fieldTypeHasDrop(f.Type()) {
+						named.SetHasDrop(true)
+						named.SetNeedsSynthDrop(true)
+						changed = true
+						break
+					}
+				}
+			case *ast.EnumDecl:
+				obj := c.scope.Lookup(d.Name)
+				if obj == nil {
+					continue
+				}
+				tn, ok := obj.(*types.TypeName)
+				if !ok {
+					continue
+				}
+				enum, ok := tn.Type().(*types.Enum)
+				if !ok {
+					continue
+				}
+				// Skip enums that already have drop or are copy.
+				if enum.HasDrop() || enum.IsCopy() {
+					continue
+				}
+				// T0102: Check all variant fields for droppable types
+				for _, v := range enum.Variants() {
+					for _, f := range v.Fields() {
+						if fieldTypeHasDrop(f.Type()) {
+							enum.SetHasDrop(true)
+							enum.SetNeedsSynthDrop(true)
+							changed = true
+							break
+						}
+					}
+					if enum.HasDrop() {
+						break
+					}
 				}
 			}
 		}
@@ -450,12 +480,17 @@ func fieldTypeHasDrop(typ types.Type) bool {
 			return true
 		}
 		return t.HasDrop()
+	case *types.Enum:
+		return t.HasDrop()
 	case *types.Instance:
 		if n, ok := t.Origin().(*types.Named); ok {
 			if n == types.TypVector || n == types.TypChannel {
 				return true
 			}
 			return n.HasDrop()
+		}
+		if e, ok := t.Origin().(*types.Enum); ok {
+			return e.HasDrop()
 		}
 	}
 	return false

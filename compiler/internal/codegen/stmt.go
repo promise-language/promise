@@ -648,6 +648,12 @@ func (c *Compiler) genUseVarDecl(s *ast.UseVarDecl) {
 // the drop function, and appends a scopeBinding.
 // Strings are special: they use promise_string_drop (checks literal flag before freeing).
 func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ types.Type) {
+	// T0102: Enum drop — check before extractNamed since enums are *types.Enum, not *types.Named.
+	if enum := extractEnum(typ); enum != nil && enum.HasDrop() {
+		c.maybeRegisterEnumDrop(varName, alloca, typ, enum)
+		return
+	}
+
 	named := extractNamed(typ)
 	if named == nil {
 		return
@@ -833,6 +839,61 @@ func (c *Compiler) registerErrorDrop(varName string, alloca *ir.InstAlloca) {
 	c.dropBindings[varName] = binding
 }
 
+// maybeRegisterEnumDrop registers a drop binding for an enum variable whose variants
+// contain heap-allocated data (T0102). The drop function takes i8* (pointer to the
+// alloca storing the enum internal type) and switches on the tag to drop variant fields.
+func (c *Compiler) maybeRegisterEnumDrop(varName string, alloca *ir.InstAlloca, typ types.Type, enum *types.Enum) {
+	dropFlag := c.createEntryAlloca(irtypes.I1)
+	dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
+	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+	c.dropFlags[varName] = dropFlag
+
+	// Resolve the enum drop function name.
+	enumName := enum.Obj().Name()
+	if c.typeSubst != nil {
+		resolvedTyp := types.Substitute(typ, c.typeSubst)
+		if inst, ok := resolvedTyp.(*types.Instance); ok {
+			enumName = monoName(inst)
+		}
+	}
+	mangledName := mangleMethodName(enumName, "drop", false)
+	var dropFunc *ir.Func
+	if fn, ok := c.funcs[mangledName]; ok {
+		dropFunc = fn
+	}
+
+	binding := scopeBinding{
+		kind:     bindingDropEnum,
+		alloca:   alloca,
+		valType:  typ,
+		dropFlag: dropFlag,
+		dropFunc: dropFunc,
+		varName:  varName,
+	}
+	c.scopeBindings = append(c.scopeBindings, binding)
+	c.dropBindings[varName] = binding
+}
+
+// emitEnumDropCall emits a conditional drop call for an enum variable (T0102).
+// Checks drop flag, then passes the alloca pointer (bitcast to i8*) to the drop function.
+func (c *Compiler) emitEnumDropCall(b scopeBinding) {
+	if b.dropFlag == nil || b.dropFunc == nil {
+		return
+	}
+
+	flag := c.block.NewLoad(irtypes.I1, b.dropFlag)
+	dropBlock := c.newBlock("enum.drop.call")
+	skipBlock := c.newBlock("enum.drop.skip")
+	c.block.NewCondBr(flag, dropBlock, skipBlock)
+
+	c.block = dropBlock
+	ptr := c.block.NewBitCast(b.alloca, irtypes.I8Ptr)
+	c.block.NewCall(b.dropFunc, ptr)
+	c.block.NewBr(skipBlock)
+
+	c.block = skipBlock
+}
+
 // clearDropFlag sets a variable's drop flag to false (indicating the value has been moved).
 func (c *Compiler) clearDropFlag(name string) {
 	if flag, ok := c.dropFlags[name]; ok {
@@ -877,6 +938,8 @@ func (c *Compiler) emitScopeCleanup(fromIdx int, errorInFlight bool) *closeErrCa
 			c.emitDropCall(b)
 		case bindingDropString:
 			c.emitStringDropCall(b)
+		case bindingDropEnum:
+			c.emitEnumDropCall(b)
 		case bindingFree:
 			c.emitFreeCall(b)
 		case bindingFreeEnv:
@@ -1634,6 +1697,8 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 						c.block.NewBr(mergeBlk)
 					}
 					c.block = mergeBlk
+				} else if binding.kind == bindingDropEnum {
+					c.emitEnumDropCall(binding)
 				} else if binding.kind == bindingFree {
 					c.emitFreeCall(binding)
 				} else {

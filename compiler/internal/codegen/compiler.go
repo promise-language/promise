@@ -340,6 +340,7 @@ const (
 	bindingClose      scopeBindingKind = iota // use-bound: call close() at scope exit
 	bindingDrop                               // droppable: call drop() at scope exit
 	bindingDropString                         // string: call promise_string_drop (alloca is i8*, not value struct)
+	bindingDropEnum                           // enum: call enum drop (alloca ptr bitcast to i8*) T0102
 	bindingFree                               // heap-only: call pal_free (no drop method, just free the instance)
 	bindingFreeEnv                            // closure env: free env pointer at scope exit
 	bindingGenerator                          // generator: destroy coroutine + free yield slot at scope exit
@@ -606,9 +607,11 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	c.declareEnumMethods(file)
 	c.declareMonoMethods(file, monoInstances)
 	c.declareMonoEnumMethods(file, monoInstances)
-	c.declareMonoSynthesizedDefaults(file, monoInstances) // structural parent defaults
-	c.declareSynthesizedDrops(file)                       // B0158: auto-synthesized drops (non-generic)
-	c.declareSynthesizedMonoDrops(file, monoInstances)    // B0158: auto-synthesized drops (generic)
+	c.declareMonoSynthesizedDefaults(file, monoInstances)  // structural parent defaults
+	c.declareSynthesizedDrops(file)                        // B0158: auto-synthesized drops (non-generic)
+	c.declareSynthesizedEnumDrops(file)                    // T0102: auto-synthesized enum drops (non-generic)
+	c.declareSynthesizedMonoDrops(file, monoInstances)     // B0158: auto-synthesized drops (generic)
+	c.declareSynthesizedMonoEnumDrops(file, monoInstances) // T0102: auto-synthesized enum drops (generic)
 
 	// Compute vtable info and emit vtable globals (after method stubs are declared)
 	c.computeVtableInfo(file)
@@ -643,9 +646,11 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	c.defineEnumMethods(file)
 	c.defineMonoMethods(file, monoInstances)
 	c.defineMonoEnumMethods(file, monoInstances)
-	c.defineMonoSynthesizedDefaults(file, monoInstances) // structural parent defaults
-	c.defineSynthesizedDrops(file)                       // B0158: auto-synthesized drops (non-generic)
-	c.defineSynthesizedMonoDrops(file, monoInstances)    // B0158: auto-synthesized drops (generic)
+	c.defineMonoSynthesizedDefaults(file, monoInstances)  // structural parent defaults
+	c.defineSynthesizedDrops(file)                        // B0158: auto-synthesized drops (non-generic)
+	c.defineSynthesizedEnumDrops(file)                    // T0102: auto-synthesized enum drops (non-generic)
+	c.defineSynthesizedMonoDrops(file, monoInstances)     // B0158: auto-synthesized drops (generic)
+	c.defineSynthesizedMonoEnumDrops(file, monoInstances) // T0102: auto-synthesized enum drops (generic)
 	c.defineFuncs(file)
 	c.defineMonoFuncs(file, monoFuncInstances)
 	c.defineMonoMethodInstances(file, monoMethodInstances)
@@ -3910,8 +3915,10 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo, extraInstances []*typ
 	c.declareMonoMethods(modFile, monoInstances)
 	c.declareMonoEnumMethods(modFile, monoInstances)
 	c.declareMonoSynthesizedDefaults(modFile, monoInstances)
-	c.declareSynthesizedModuleDrops(modFile, irName)      // B0158
-	c.declareSynthesizedMonoDrops(modFile, monoInstances) // B0158
+	c.declareSynthesizedModuleDrops(modFile, irName)          // B0158
+	c.declareSynthesizedModuleEnumDrops(modFile, irName)      // T0102
+	c.declareSynthesizedMonoDrops(modFile, monoInstances)     // B0158
+	c.declareSynthesizedMonoEnumDrops(modFile, monoInstances) // T0102
 
 	// 6. Compute vtable info and emit for module types
 	c.computeVtableInfo(modFile)
@@ -3932,8 +3939,10 @@ func (c *Compiler) compileModule(modInfo *sema.ModuleInfo, extraInstances []*typ
 	c.defineMonoMethods(modFile, monoInstances)
 	c.defineMonoEnumMethods(modFile, monoInstances)
 	c.defineMonoSynthesizedDefaults(modFile, monoInstances)
-	c.defineSynthesizedModuleDrops(modFile, irName)      // B0158
-	c.defineSynthesizedMonoDrops(modFile, monoInstances) // B0158
+	c.defineSynthesizedModuleDrops(modFile, irName)          // B0158
+	c.defineSynthesizedModuleEnumDrops(modFile, irName)      // T0102
+	c.defineSynthesizedMonoDrops(modFile, monoInstances)     // B0158
+	c.defineSynthesizedMonoEnumDrops(modFile, monoInstances) // T0102
 
 	// 9. Define module function bodies
 	c.defineModuleFuncs(modFile, irName)
@@ -5030,6 +5039,305 @@ func (c *Compiler) defineSynthesizedDropBody(fn *ir.Func, named *types.Named) {
 
 	c.block.NewRet(nil)
 	c.locals = savedLocals
+}
+
+// declareSynthesizedEnumDrops declares drop function stubs for non-generic enums
+// that need a compiler-synthesized drop (T0102).
+func (c *Compiler) declareSynthesizedEnumDrops(file *ast.File) {
+	for _, decl := range file.Decls {
+		ed, ok := decl.(*ast.EnumDecl)
+		if !ok {
+			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue
+		}
+		enum := c.lookupEnumType(ed.Name)
+		if enum == nil || !enum.NeedsSynthDrop() {
+			continue
+		}
+		if len(enum.TypeParams()) > 0 {
+			continue // generic — handled by declareSynthesizedMonoEnumDrops
+		}
+		mangledName := mangleMethodName(ed.Name, "drop", false)
+		if _, exists := c.funcs[mangledName]; exists {
+			continue
+		}
+		fn := c.module.NewFunc(mangledName, irtypes.Void,
+			ir.NewParam("this", irtypes.I8Ptr))
+		c.funcs[mangledName] = fn
+	}
+}
+
+// defineSynthesizedEnumDrops generates bodies for synthesized enum drop functions (T0102).
+func (c *Compiler) defineSynthesizedEnumDrops(file *ast.File) {
+	for _, decl := range file.Decls {
+		ed, ok := decl.(*ast.EnumDecl)
+		if !ok {
+			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue
+		}
+		enum := c.lookupEnumType(ed.Name)
+		if enum == nil || !enum.NeedsSynthDrop() {
+			continue
+		}
+		if len(enum.TypeParams()) > 0 {
+			continue // generic — handled by defineSynthesizedMonoEnumDrops
+		}
+		mangledName := mangleMethodName(ed.Name, "drop", false)
+		fn, ok := c.funcs[mangledName]
+		if !ok || len(fn.Blocks) > 0 {
+			continue
+		}
+		layout := c.enumLayouts[enum]
+		if layout == nil {
+			continue
+		}
+		c.defineSynthesizedEnumDropBody(fn, enum, layout)
+	}
+}
+
+// declareSynthesizedModuleEnumDrops declares enum drop stubs for non-generic module enums (T0102).
+func (c *Compiler) declareSynthesizedModuleEnumDrops(file *ast.File, moduleName string) {
+	for _, decl := range file.Decls {
+		ed, ok := decl.(*ast.EnumDecl)
+		if !ok {
+			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue
+		}
+		enum := c.lookupEnumType(ed.Name)
+		if enum == nil || !enum.NeedsSynthDrop() {
+			continue
+		}
+		if len(enum.TypeParams()) > 0 {
+			continue
+		}
+		mangledName := mangleModuleMethodName(moduleName, ed.Name, "drop", false)
+		if _, exists := c.funcs[mangledName]; exists {
+			continue
+		}
+		fn := c.module.NewFunc(mangledName, irtypes.Void,
+			ir.NewParam("this", irtypes.I8Ptr))
+		c.funcs[mangledName] = fn
+		c.moduleOwnedFuncs[mangledName] = moduleName
+		// Also register the non-prefixed name for dispatch from user code
+		plainName := mangleMethodName(ed.Name, "drop", false)
+		if _, exists := c.funcs[plainName]; !exists {
+			c.funcs[plainName] = fn
+		}
+	}
+}
+
+// defineSynthesizedModuleEnumDrops generates bodies for non-generic module enum drops (T0102).
+func (c *Compiler) defineSynthesizedModuleEnumDrops(file *ast.File, moduleName string) {
+	for _, decl := range file.Decls {
+		ed, ok := decl.(*ast.EnumDecl)
+		if !ok {
+			continue
+		}
+		if c.info.FilteredDecls[decl] {
+			continue
+		}
+		enum := c.lookupEnumType(ed.Name)
+		if enum == nil || !enum.NeedsSynthDrop() {
+			continue
+		}
+		if len(enum.TypeParams()) > 0 {
+			continue
+		}
+		mangledName := mangleModuleMethodName(moduleName, ed.Name, "drop", false)
+		fn, ok := c.funcs[mangledName]
+		if !ok || len(fn.Blocks) > 0 {
+			continue
+		}
+		layout := c.enumLayouts[enum]
+		if layout == nil {
+			continue
+		}
+		c.defineSynthesizedEnumDropBody(fn, enum, layout)
+	}
+}
+
+// defineSynthesizedEnumDropBody generates the body for a synthesized enum drop (T0102).
+// The drop function: loads the tag, switches on it, and for each variant with
+// droppable fields, extracts and drops them. No pal_free — enum data is inline.
+func (c *Compiler) defineSynthesizedEnumDropBody(fn *ir.Func, enum *types.Enum, layout *TypeDeclLayout) {
+	// Only data enums (with variant data) need drop bodies.
+	internalType, ok := layout.EnumInternalType.(*irtypes.StructType)
+	if !ok {
+		// Fieldless enum (i32) — nothing to drop
+		entry := fn.NewBlock(".entry")
+		entry.NewRet(nil)
+		return
+	}
+
+	entry := fn.NewBlock(".entry")
+	c.block = entry
+
+	// this = i8* pointer to the alloca storing the enum internal type
+	typedPtr := entry.NewBitCast(fn.Params[0], irtypes.NewPointer(internalType))
+
+	// Load tag (index 0 of internal type struct)
+	tagPtr := entry.NewGetElementPtr(internalType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	tag := entry.NewLoad(irtypes.I32, tagPtr)
+
+	// Data area pointer (index 1)
+	dataPtr := entry.NewGetElementPtr(internalType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+
+	// Build switch: for each variant, check if it has droppable fields
+	doneBlock := fn.NewBlock("enum.drop.done")
+	doneBlock.NewRet(nil)
+
+	// Collect variants that need cleanup
+	type variantDrop struct {
+		tag      int
+		name     string
+		variant  *types.Variant
+		dataType *irtypes.StructType
+	}
+	var droppableVariants []variantDrop
+	for _, v := range enum.Variants() {
+		if v.NumFields() == 0 {
+			continue
+		}
+		dt := layout.VariantDataTypes[v.Name()]
+		if dt == nil {
+			continue
+		}
+		// Check if any field in this variant needs drop
+		hasDroppable := false
+		for _, f := range v.Fields() {
+			if c.variantFieldNeedsDrop(f.Type()) {
+				hasDroppable = true
+				break
+			}
+		}
+		if hasDroppable {
+			droppableVariants = append(droppableVariants, variantDrop{
+				tag:      layout.VariantTag[v.Name()],
+				name:     v.Name(),
+				variant:  v,
+				dataType: dt,
+			})
+		}
+	}
+
+	if len(droppableVariants) == 0 {
+		// No variants need drop — just return
+		entry.NewBr(doneBlock)
+		return
+	}
+
+	// Create switch cases
+	var cases []*ir.Case
+	for _, vd := range droppableVariants {
+		varBlock := fn.NewBlock(fmt.Sprintf("enum.drop.%s", vd.name))
+		cases = append(cases, &ir.Case{X: constant.NewInt(irtypes.I32, int64(vd.tag)), Target: varBlock})
+
+		c.block = varBlock
+		typedDataPtr := varBlock.NewBitCast(dataPtr, irtypes.NewPointer(vd.dataType))
+
+		// Drop each droppable field in the variant
+		for i, f := range vd.variant.Fields() {
+			if !c.variantFieldNeedsDrop(f.Type()) {
+				continue
+			}
+			fieldPtr := c.block.NewGetElementPtr(vd.dataType, typedDataPtr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
+			fieldVal := c.block.NewLoad(vd.dataType.Fields[i], fieldPtr)
+
+			c.emitVariantFieldDrop(fieldVal, f.Type())
+		}
+		c.block.NewBr(doneBlock)
+	}
+	entry.NewSwitch(tag, doneBlock, cases...)
+}
+
+// variantFieldNeedsDrop returns true if an enum variant field type needs cleanup.
+func (c *Compiler) variantFieldNeedsDrop(typ types.Type) bool {
+	// Apply type substitution for mono contexts
+	if c.typeSubst != nil {
+		typ = types.Substitute(typ, c.typeSubst)
+	}
+	named := extractNamed(typ)
+	if named != nil {
+		if named == types.TypString || named == types.TypVector || named == types.TypChannel {
+			return true
+		}
+		return named.HasDrop()
+	}
+	if enum := extractEnum(typ); enum != nil {
+		return enum.HasDrop()
+	}
+	return false
+}
+
+// emitVariantFieldDrop emits a drop call for a single variant field value.
+func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
+	if c.typeSubst != nil {
+		typ = types.Substitute(typ, c.typeSubst)
+	}
+
+	named := extractNamed(typ)
+	if named != nil {
+		// String: call promise_string_drop directly
+		if named == types.TypString {
+			if dropFn, ok := c.funcs["promise_string_drop"]; ok {
+				c.block.NewCall(dropFn, fieldVal)
+			}
+			return
+		}
+		// Vector: call Vector.drop
+		if _, isVec := types.AsVector(typ); isVec || named == types.TypVector {
+			if dropFn, ok := c.funcs["Vector.drop"]; ok {
+				c.block.NewCall(dropFn, fieldVal)
+			}
+			return
+		}
+		// Channel: call Channel.drop
+		if _, isCh := types.AsChannel(typ); isCh || named == types.TypChannel {
+			if dropFn, ok := c.funcs["Channel.drop"]; ok {
+				c.block.NewCall(dropFn, fieldVal)
+			}
+			return
+		}
+		// User type with drop: extract instance ptr and call drop
+		if named.HasDrop() {
+			instance := c.extractInstancePtr(fieldVal)
+			ownerName := c.resolveMethodOwner(named, "drop")
+			if inst, ok := typ.(*types.Instance); ok {
+				ownerName = monoName(inst)
+			}
+			mangledName := mangleMethodName(ownerName, "drop", false)
+			if dropFn, ok := c.funcs[mangledName]; ok {
+				c.block.NewCall(dropFn, instance)
+			}
+		}
+		return
+	}
+
+	// Enum field: pass pointer to an alloca
+	if enum := extractEnum(typ); enum != nil && enum.HasDrop() {
+		enumName := enum.Obj().Name()
+		if inst, ok := typ.(*types.Instance); ok {
+			enumName = monoName(inst)
+		}
+		mangledName := mangleMethodName(enumName, "drop", false)
+		if dropFn, ok := c.funcs[mangledName]; ok {
+			// Enum drop takes i8* pointing to an alloca with the enum value.
+			// Store the field value to a temp alloca and pass its address.
+			alloca := c.block.NewAlloca(fieldVal.Type())
+			c.block.NewStore(fieldVal, alloca)
+			ptr := c.block.NewBitCast(alloca, irtypes.I8Ptr)
+			c.block.NewCall(dropFn, ptr)
+		}
+	}
 }
 
 // lookupNamedType finds a Named type in sema info by name.

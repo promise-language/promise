@@ -449,8 +449,6 @@ func TestStackOverflowHandler(t *testing.T) {
 		main() {}
 	`)
 	// B0010: Stack overflow detection
-	// Error message constant (all platforms)
-	assertContains(t, ir, `@__promise_stack_overflow_msg = constant [22 x i8]`)
 	// Init function is defined and called from main (all platforms)
 	assertContains(t, ir, "define void @pal_stack_overflow_init()")
 	assertContains(t, ir, "call void @pal_stack_overflow_init()")
@@ -463,11 +461,18 @@ func TestStackOverflowHandler(t *testing.T) {
 		assertContains(t, ir, "define i32 @__promise_veh_handler(i8* %exception_pointers)")
 		assertContains(t, ir, "@AddVectoredExceptionHandler")
 		assertContains(t, ir, "@ExitProcess")
-	} else {
-		// POSIX: SIGSEGV handler
+	} else if runtime.GOOS == "darwin" {
+		// macOS: 1-arg SIGSEGV handler with "fatal: stack overflow" message
+		assertContains(t, ir, `@__promise_stack_overflow_msg = constant [22 x i8]`)
 		assertContains(t, ir, "define void @__promise_sigsegv_handler(i32 %sig)")
 		assertContains(t, ir, "call void @_exit(i32 2)")
-		// Guard page: pthread_attr_setguardsize in thread creation
+		assertContains(t, ir, "call i32 @pthread_attr_setguardsize(")
+	} else {
+		// Linux: 3-arg SA_SIGINFO handler with fault address (B0128)
+		assertContains(t, ir, `@__promise_hex_digits = constant [16 x i8]`)
+		assertContains(t, ir, `@__promise_segfault_prefix = constant [31 x i8]`)
+		assertContains(t, ir, "define void @__promise_sigsegv_handler(i32 %sig, i8* %info, i8* %ucontext)")
+		assertContains(t, ir, "call void @_exit(i32 2)")
 		assertContains(t, ir, "call i32 @pthread_attr_setguardsize(")
 	}
 }

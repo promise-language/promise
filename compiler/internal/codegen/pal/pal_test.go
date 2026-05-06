@@ -1929,36 +1929,116 @@ func TestDarwinThreadInitSetsSigaltstack(t *testing.T) {
 	}
 }
 
-func TestLinuxStackOverflowUsesSignal(t *testing.T) {
+func TestLinuxStackOverflowUsesSigaction(t *testing.T) {
+	// B0128: Linux now uses sigaction(SA_SIGINFO) instead of signal()
 	module := newModuleWithAlloc(&PosixPAL{target: "x86_64-unknown-linux-gnu"})
 	(&PosixPAL{target: "x86_64-unknown-linux-gnu"}).EmitWrite(module)
 	(&PosixPAL{target: "x86_64-unknown-linux-gnu"}).EmitStackOverflowInit(module)
 	out := module.String()
 
-	// Linux uses signal() as best-effort (sigaction struct differs between glibc/musl)
-	if !strings.Contains(out, "call i8* @signal(i32 11,") {
-		t.Error("Linux should use signal() for SIGSEGV (signal 11)")
+	// Linux now uses sigaction with SA_SIGINFO
+	if !strings.Contains(out, "call i32 @sigaction(i32 11,") {
+		t.Error("Linux should use sigaction for SIGSEGV (signal 11)")
 	}
-	// Should NOT use sigaction on Linux
-	if strings.Contains(out, "call i32 @sigaction(") {
-		t.Error("Linux should not use sigaction (glibc/musl struct mismatch)")
+	// Should NOT use signal() on Linux anymore
+	if strings.Contains(out, "call i8* @signal(i32 11,") {
+		t.Error("Linux should not use signal() — must use sigaction with SA_SIGINFO")
 	}
 }
 
-func TestLinuxThreadInitIsNoop(t *testing.T) {
+func TestLinuxStackOverflowGlibcLayout(t *testing.T) {
+	// Glibc sigaction struct: 152 bytes, flags at offset 136
+	module := newModuleWithAlloc(&PosixPAL{target: "x86_64-unknown-linux-gnu"})
+	(&PosixPAL{target: "x86_64-unknown-linux-gnu"}).EmitWrite(module)
+	(&PosixPAL{target: "x86_64-unknown-linux-gnu"}).EmitStackOverflowInit(module)
+	out := module.String()
+
+	// Glibc: 152-byte struct alloca
+	if !strings.Contains(out, "[152 x i8]") {
+		t.Error("glibc sigaction struct should be 152 bytes")
+	}
+	// memset to zero the struct
+	if !strings.Contains(out, "call i8* @memset(") {
+		t.Error("should memset the sigaction struct to zero")
+	}
+}
+
+func TestLinuxStackOverflowMuslLayout(t *testing.T) {
+	// Musl sigaction struct: 40 bytes, flags at offset 24
+	module := newModuleWithAlloc(&PosixPAL{target: "x86_64-unknown-linux-musl"})
+	(&PosixPAL{target: "x86_64-unknown-linux-musl"}).EmitWrite(module)
+	(&PosixPAL{target: "x86_64-unknown-linux-musl"}).EmitStackOverflowInit(module)
+	out := module.String()
+
+	// Musl: 40-byte struct alloca
+	if !strings.Contains(out, "[40 x i8]") {
+		t.Error("musl sigaction struct should be 40 bytes")
+	}
+	if !strings.Contains(out, "call i32 @sigaction(i32 11,") {
+		t.Error("musl should also use sigaction for SIGSEGV")
+	}
+}
+
+func TestLinuxHandlerSASiginfo(t *testing.T) {
+	// B0128: handler should have 3 parameters for SA_SIGINFO
+	module := newModuleWithAlloc(&PosixPAL{target: "x86_64-unknown-linux-gnu"})
+	(&PosixPAL{target: "x86_64-unknown-linux-gnu"}).EmitWrite(module)
+	(&PosixPAL{target: "x86_64-unknown-linux-gnu"}).EmitStackOverflowInit(module)
+	out := module.String()
+
+	// Handler must have 3 parameters: (i32 sig, i8* info, i8* ucontext)
+	if !strings.Contains(out, "define void @__promise_sigsegv_handler(i32 %sig, i8* %info, i8* %ucontext)") {
+		t.Error("Linux handler should have 3 SA_SIGINFO parameters")
+	}
+	// Must have noreturn attribute
+	handlerBody := out[strings.Index(out, "@__promise_sigsegv_handler"):]
+	if !strings.Contains(handlerBody, "noreturn") {
+		t.Error("handler should be noreturn")
+	}
+	// Must load si_addr from siginfo at offset 16
+	if !strings.Contains(handlerBody, "getelementptr i8, i8* %info, i64 16") {
+		t.Error("handler should load si_addr from siginfo at offset 16")
+	}
+	// Must have hex digit table
+	if !strings.Contains(out, "@__promise_hex_digits") {
+		t.Error("missing hex digit lookup table")
+	}
+	// Must have segfault message prefix
+	if !strings.Contains(out, "@__promise_segfault_prefix") {
+		t.Error("missing segfault message prefix")
+	}
+	// Must write to stderr (fd 2)
+	if !strings.Contains(handlerBody, "call i64 @write(i32 2,") {
+		t.Error("handler should write to stderr (fd 2)")
+	}
+	// Must call _exit(2)
+	if !strings.Contains(handlerBody, "call void @_exit(i32 2)") {
+		t.Error("handler should call _exit(2)")
+	}
+	// Must end with unreachable
+	if !strings.Contains(handlerBody, "unreachable") {
+		t.Error("handler should end with unreachable")
+	}
+}
+
+func TestLinuxThreadInitSetsSigaltstack(t *testing.T) {
+	// B0128: Linux now sets up per-thread sigaltstack for reliable delivery
 	p := &PosixPAL{target: "x86_64-unknown-linux-gnu"}
 	module := newModuleWithAlloc(p)
 	p.EmitStackOverflowThreadInit(module)
 	out := module.String()
 
-	// Linux thread init should be a no-op (no sigaltstack setup)
-	if strings.Contains(out, "sigaltstack") {
-		t.Error("Linux thread init should not call sigaltstack")
+	// Linux thread init should call sigaltstack
+	if !strings.Contains(out, "call i32 @sigaltstack(") {
+		t.Error("Linux thread init should call sigaltstack")
 	}
-	// Should just be an empty function with ret void
-	body := out[strings.Index(out, "@pal_stack_overflow_thread_init"):]
-	if !strings.Contains(body, "ret void") {
-		t.Error("Linux thread init should be a simple ret void")
+	// Allocate 65536 bytes for alternate stack
+	if !strings.Contains(out, "call i8* @pal_alloc(i64 65536)") {
+		t.Error("missing 64KB alternate stack allocation")
+	}
+	// Linux stack_t has ss_flags as i32 at field 1 (different from macOS)
+	if !strings.Contains(out, "{ i8*, i32, i64 }") {
+		t.Error("Linux stack_t should be {i8*, i32, i64} (ss_sp, ss_flags, ss_size)")
 	}
 }
 
@@ -1995,9 +2075,9 @@ func TestStackOverflowHandlerBody(t *testing.T) {
 	}
 }
 
-func TestLinuxSignalNoRedefinition(t *testing.T) {
-	// Regression: on Linux, EmitStackOverflowInit declares signal() via
-	// getOrDeclareFunc, then EmitSignalRegister also needs signal().
+func TestLinuxSigactionNoRedefinition(t *testing.T) {
+	// Regression: on Linux, EmitStackOverflowInit declares sigaction() via
+	// getOrDeclareFunc, and EmitSignalRegister declares signal().
 	// Both must use getOrDeclareFunc to avoid "invalid redefinition".
 	p := &PosixPAL{target: "x86_64-unknown-linux-gnu"}
 	module := newModuleWithAlloc(p)
@@ -2007,12 +2087,19 @@ func TestLinuxSignalNoRedefinition(t *testing.T) {
 	p.EmitSignalRegister(module)
 	out := module.String()
 
-	// signal should be declared exactly once
+	// signal should be declared exactly once (only from EmitSignalRegister now)
 	count := strings.Count(out, "define i8* @signal(")
 	declCount := strings.Count(out, "declare i8* @signal(")
 	total := count + declCount
 	if total != 1 {
 		t.Errorf("expected exactly 1 signal declaration, got %d (define=%d, declare=%d)", total, count, declCount)
+	}
+	// sigaction should be declared exactly once (from EmitStackOverflowInit)
+	saCount := strings.Count(out, "define i32 @sigaction(")
+	saDeclCount := strings.Count(out, "declare i32 @sigaction(")
+	saTotal := saCount + saDeclCount
+	if saTotal != 1 {
+		t.Errorf("expected exactly 1 sigaction declaration, got %d (define=%d, declare=%d)", saTotal, saCount, saDeclCount)
 	}
 	// Both pal_stack_overflow_init and pal_signal_register should exist
 	if !strings.Contains(out, "@pal_stack_overflow_init") {

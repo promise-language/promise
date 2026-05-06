@@ -5,9 +5,9 @@ description: Meticulous code review of recent changes. Checks correctness, tests
 
 Review the most recent changes in this project. If $ARGUMENTS is provided, treat it as a file path, directory, commit range, or PR number to scope the review.
 
-## Session name
+## Tracker status
 
-Before starting, update the session name to reflect the current phase. Replace the phase prefix (e.g., `IMPL`) with `REVIEW`, keeping the rest of the name: `/rename REVIEW <ID> <short-title>`. If the session has no name yet, skip this.
+Before starting, update your tracker status: call `mcp__tracker__heartbeat` with `status: "reviewing"` (keep the same agent, item_id, item_title from earlier phases). If you haven't registered yet, determine your agent name via `basename $(pwd)` and hostname via `hostname`.
 
 ## Steps
 

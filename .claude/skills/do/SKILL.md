@@ -7,8 +7,10 @@ Implement the task or fix the bug described in $ARGUMENTS. If $ARGUMENTS referen
 
 ## Steps
 
-1. **Name the session.**
-   - Based on the item being worked on, output a `/rename` command to name this session. Use the format: `/rename PLAN <ID> <short-title>` (e.g., `/rename PLAN B0042 optional-field-crash`). Keep it under 50 characters. Do this before any other work.
+1. **Register with tracker.**
+   - Determine your agent name by running `basename $(pwd)` (e.g., `linux_promise_3`).
+   - Determine your hostname by running `hostname`.
+   - Call `mcp__tracker__heartbeat` with `agent: <dirname>`, `host: <hostname>`, `status: "planning"`, `item_id: "<ID>"`, `item_title: "<short-title>"`. Do this before any other work.
 
 2. **Sync to latest.**
    - Run `git status` to check for uncommitted changes.
@@ -16,8 +18,8 @@ Implement the task or fix the bug described in $ARGUMENTS. If $ARGUMENTS referen
    - If there are existing changes, skip this step — do not pull.
 
 3. **Claim the work.**
-   - If a tracker ID was given, update its status to `in_progress` using `mcp__tracker__update`.
-   - Add a note with the hostname (`hostname` command) and the repo root (`pwd`) so other agents/hosts can see which machine is working on it.
+   - If a tracker ID was given, update its status to `in_progress` and set `assigned_to` to your agent name using `mcp__tracker__update`.
+   - Add a note with the hostname and the repo root so other agents/hosts can see which machine is working on it.
 
 4. **Understand the problem.**
    - If a tracker ID is given, fetch it and read the full description, notes, and any linked context.
@@ -31,7 +33,7 @@ Implement the task or fix the bug described in $ARGUMENTS. If $ARGUMENTS referen
    - If the change is non-trivial, briefly state the plan before starting.
 
 6. **Implement.**
-   - Update the session name to reflect the phase: `/rename IMPL <ID> <short-title>`.
+   - Update your tracker status: call `mcp__tracker__heartbeat` with `status: "implementing"` (keep the same agent, item_id, item_title).
    - Make the code changes. Keep changes minimal and focused — don't refactor, add features, or clean up code beyond what's needed.
    - For compiler changes: update both the implementation and any affected LLVM IR patterns.
    - For Promise/stdlib changes: run `./build` to re-embed updated modules.
@@ -49,6 +51,6 @@ Implement the task or fix the bug described in $ARGUMENTS. If $ARGUMENTS referen
    - If verify fails, fix the issues and re-run until green.
 
 9. **Chain to /review, /coverage, /commit.**
-   - Run `/review` to check your own changes for correctness, missed edge cases, and convention compliance. (Review will update the session name to `REVIEW`.)
-   - Run `/coverage` scoped to the changed code to verify test coverage is adequate. (Coverage will update the session name to `COV`.)
-   - Run `/commit` to verify, commit, sync, and push. (Commit will update the session name to `DONE` when finished.)
+   - Run `/review` to check your own changes for correctness, missed edge cases, and convention compliance.
+   - Run `/coverage` scoped to the changed code to verify test coverage is adequate.
+   - Run `/commit` to verify, commit, sync, and push.

@@ -5,9 +5,9 @@ description: Verify, commit, sync, and push changes. Updates docs and tracker, f
 
 Verify, commit, sync with remote, and push the current changes.
 
-## Session name
+## Tracker status
 
-Before starting, update the session name to reflect the current phase. Replace the phase prefix (e.g., `COV`) with `COMMIT`, keeping the rest of the name: `/rename COMMIT <ID> <short-title>`. If the session has no name yet, skip this.
+Before starting, update your tracker status: call `mcp__tracker__heartbeat` with `status: "committing"` (keep the same agent, item_id, item_title from earlier phases). If you haven't registered yet, determine your agent name via `basename $(pwd)` and hostname via `hostname`.
 
 ## Steps
 
@@ -44,4 +44,4 @@ Before starting, update the session name to reflect the current phase. Replace t
    - Never force-push to master without explicit approval.
 
 9. **Mark done.**
-   - Update the session name: `/rename DONE <ID> <short-title>`.
+   - Call `mcp__tracker__heartbeat` with `status: "done"`, `item_id: ""`, `item_title: ""` to signal completion.

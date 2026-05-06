@@ -51,6 +51,8 @@
       "mcp__tracker__update",
       "mcp__tracker__get",
       "mcp__tracker__search",
+      "mcp__tracker__heartbeat",
+      "mcp__tracker__agents",
       "Bash(bin/stress.sh 1000)",
       "Bash(export TERM=dumb)"
     ],

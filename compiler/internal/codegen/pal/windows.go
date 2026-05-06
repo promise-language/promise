@@ -181,11 +181,11 @@ func (p *WindowsPAL) EmitThreadCreate(module *ir.Module) *ir.Func {
 
 	// _beginthreadex(NULL, 2MB, trampoline, packed, 0, NULL)
 	handle := entry.NewCall(beginThread,
-		constant.NewNull(irtypes.I8Ptr),              // security
-		constant.NewInt(irtypes.I32, 2*1024*1024),    // stack_size (2MB)
-		trampoline,                                    // start_address
-		packed,                                        // arglist
-		constant.NewInt(irtypes.I32, 0),               // initflag (run immediately)
+		constant.NewNull(irtypes.I8Ptr),           // security
+		constant.NewInt(irtypes.I32, 2*1024*1024), // stack_size (2MB)
+		trampoline,                      // start_address
+		packed,                          // arglist
+		constant.NewInt(irtypes.I32, 0), // initflag (run immediately)
 		constant.NewNull(irtypes.NewPointer(irtypes.I32))) // thrdaddr (don't need)
 	entry.NewRet(handle)
 	return fn

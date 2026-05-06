@@ -1,6 +1,7 @@
 package pal
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 
@@ -589,6 +590,9 @@ func TestStubThreadCreateCallsSynchronously(t *testing.T) {
 }
 
 func TestWindowsThreadCreateUsesCreateThread(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-specific thread creation test")
+	}
 	module := newModuleWithAlloc(&WindowsPAL{})
 	(&WindowsPAL{}).EmitThreadCreate(module)
 	out := module.String()
@@ -608,6 +612,9 @@ func TestWindowsThreadCreateUsesCreateThread(t *testing.T) {
 }
 
 func TestWindowsThreadCreateDetails(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-specific thread creation test")
+	}
 	module := newModuleWithAlloc(&WindowsPAL{})
 	(&WindowsPAL{}).EmitThreadCreate(module)
 	out := module.String()

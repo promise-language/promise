@@ -461,13 +461,13 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 	}
 
 	c := &Compiler{
-		module:   module,
-		info:     info,
-		rootInfo: info,
-		target:   target,
+		module:    module,
+		info:      info,
+		rootInfo:  info,
+		target:    target,
 		isWasm:    strings.Contains(target, "wasm"),
 		isWindows: strings.Contains(target, "windows"),
-		funcs:    make(map[string]*ir.Func),
+		funcs:     make(map[string]*ir.Func),
 
 		monoLayouts:         make(map[string]*TypeDeclLayout),
 		monoEnumLayouts:     make(map[string]*TypeDeclLayout),

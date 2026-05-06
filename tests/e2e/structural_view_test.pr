@@ -254,13 +254,13 @@ type Animal {
   }
 }
 
-test_heap_user_showable_var() `test(allow_leaks: true) {
+test_heap_user_showable_var() `test {
   Animal a = Animal(sound: "woof");
   Showable s = a;
   assert(s.to_string() == "woof", "heap user showable var");
 }
 
-test_heap_user_showable_assign_then_pass() `test(allow_leaks: true) {
+test_heap_user_showable_assign_then_pass() `test {
   Animal a = Animal(sound: "meow");
   Showable s = a;
   assert(display(s) == "meow", "heap user showable assign then pass");

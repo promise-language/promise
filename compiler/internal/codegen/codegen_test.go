@@ -9302,6 +9302,10 @@ func TestStringConcatTempInConstructor(t *testing.T) {
 	assertContains(t, ir, "call i8* @promise_string_concat")
 }
 
+// T0082: Structural views are tested at the Promise level (e2e/structural_view_test.pr)
+// because structural interface coercion requires the full std library.
+// The fix: genTypedVarDecl skips clearDropFlag when LHS is a structural interface.
+
 // B0167: Type with string field gets synthesized drop (cascading instance cleanup)
 func TestSynthDropStringFieldCascade(t *testing.T) {
 	ir := generateIR(t, `

@@ -332,8 +332,18 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	}
 
 	// Clear drop flag on RHS if it's a variable being moved into this declaration.
-	if ident, ok := s.Value.(*ast.IdentExpr); ok {
-		c.clearDropFlag(ident.Name)
+	// Skip when LHS is a structural interface — the view borrows the original
+	// value, so the original must retain its drop flag for cleanup. T0082.
+	isStructuralTarget := false
+	if coerceTarget != nil {
+		if cn := extractNamed(coerceTarget); cn != nil && cn.IsStructural() {
+			isStructuralTarget = true
+		}
+	}
+	if !isStructuralTarget {
+		if ident, ok := s.Value.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		}
 	}
 	// T0073: Claim string temp — ownership transferred to this variable.
 	if exprType != nil && extractNamed(exprType) == types.TypString {

@@ -1,6 +1,6 @@
 ---
-name: fix-next
-description: Select the next open bug to fix. If tags are given, focus on the bugs with this tags. Do your best to select the optimal next bug to fix from all open bugs. After selecting the bug for fixing chain to /do.
+name: next-task
+description: Select the next open task to fix. If tags are given, focus on the tasks with this tags. Do your best to select the optimal next task to work on from all open tasks. To minimize merge conflicts, avoid items sharing similar thats with other "in-progress" items. After selecting the task to work on chain to /do.
 ---
 
 Select the highest-impact, most-actionable open bug and chain to `/do` to fix it.

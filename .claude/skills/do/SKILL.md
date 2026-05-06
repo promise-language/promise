@@ -12,20 +12,20 @@ Implement the task or fix the bug described in $ARGUMENTS. If $ARGUMENTS referen
    - If the working tree is clean (no staged, unstaged, or untracked changes), run `git pull` to start from the most up-to-date source code.
    - If there are existing changes, skip this step — do not pull.
 
-2. **Understand the problem.**
+2. **Claim the work.**
+   - If a tracker ID was given, update its status to `in_progress` using `mcp__tracker__update`.
+   - Add a note with the hostname (`hostname` command) and the repo root (`pwd`) so other agents/hosts can see which machine is working on it.
+
+3. **Understand the problem.**
    - If a tracker ID is given, fetch it and read the full description, notes, and any linked context.
    - Read the relevant source files to understand current behavior. For compiler changes, trace the pipeline stage (parser → sema → ownership → codegen). For Promise/stdlib changes, read the module source and its tests.
    - If the problem is a bug, reproduce it first: write a minimal test case or run the failing command to confirm the issue.
 
-3. **Plan the fix or implementation.**
+4. **Plan the fix or implementation.**
    - Identify which files need to change and what the change is. Prefer the simplest approach that solves the problem.
    - For compiler changes: determine which pipeline stage(s) are involved (sema pass number, codegen phase, ownership rule, etc.).
    - For Promise code: follow the implementation philosophy — prefer Promise over IR, full English words in APIs, getters for side-effect-free parameterless access, `doc` annotations on `public` declarations.
    - If the change is non-trivial, briefly state the plan before starting.
-
-4. **Claim the work.**
-   - If a tracker ID was given, update its status to `in_progress` using `mcp__tracker__update`.
-   - Add a note with the hostname (`hostname` command) and the repo root (`pwd`) so other agents/hosts can see which machine is working on it.
 
 5. **Implement.**
    - Make the code changes. Keep changes minimal and focused — don't refactor, add features, or clean up code beyond what's needed.

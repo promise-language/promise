@@ -34,86 +34,6 @@ func (c *Compiler) genBlock(block *ast.Block) {
 	c.scopeBindings = c.scopeBindings[:savedScopeLen]
 }
 
-// maybeTrackStringTemp registers a scope binding for a temporary string value
-// produced by a function/method call or string concat. The temp gets an alloca
-// and drop flag so it's cleaned up at scope exit via normal scope cleanup.
-// B0164: Prevents temporary string values from leaking.
-func (c *Compiler) maybeTrackStringTemp(expr ast.Expr, val value.Value) {
-	if val == nil || c.block == nil || c.block.Term != nil {
-		return
-	}
-	exprType := c.info.Types[expr]
-	if exprType == nil {
-		return
-	}
-	if c.typeSubst != nil {
-		exprType = types.Substitute(exprType, c.typeSubst)
-	}
-	named := extractNamed(exprType)
-	if named != types.TypString {
-		return
-	}
-	// Skip failable calls — their return value is a result struct, not raw i8*.
-	if c.info.FailableExprs[expr] {
-		return
-	}
-	// Skip temps inside branching expressions (match/if) — they would create scope
-	// bindings that double-free with the branch result's variable binding.
-	if c.branchExprDepth > 0 {
-		return
-	}
-	// Create a temp alloca + drop flag and register as a string drop binding.
-	// The alloca and flag are initialized to zero/false in the entry block so that
-	// temps created inside branches (match, if) are safe on untaken paths.
-	tempName := fmt.Sprintf("__strtemp.%d", c.tempCounter)
-	c.tempCounter++
-
-	alloca := c.createEntryAlloca(irtypes.I8Ptr)
-	alloca.SetName(c.uniqueLocalName(tempName))
-	dropFlag := c.createEntryAlloca(irtypes.I1)
-	dropFlag.SetName(c.uniqueLocalName(tempName + ".dropflag"))
-
-	// Initialize to null/false in the entry block — safe for temps created inside
-	// branches (match, if). LLIR appends instructions before the terminator.
-	c.entryBlock.NewStore(constant.NewNull(irtypes.I8Ptr), alloca)
-	c.entryBlock.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
-
-	// Store actual value and set flag in the current block (branch-local)
-	c.block.NewStore(val, alloca)
-	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
-	c.dropFlags[tempName] = dropFlag
-
-	dropFunc := c.funcs["promise_string_drop"]
-	binding := scopeBinding{
-		kind:     bindingDropString,
-		alloca:   alloca,
-		named:    named,
-		valType:  exprType,
-		dropFlag: dropFlag,
-		dropFunc: dropFunc,
-		varName:  tempName,
-	}
-	c.scopeBindings = append(c.scopeBindings, binding)
-	c.dropBindings[tempName] = binding
-
-	if c.stringTempMap == nil {
-		c.stringTempMap = make(map[value.Value]string)
-	}
-	c.stringTempMap[val] = tempName
-}
-
-// untrackStringTemp clears the drop flag for a temp whose value is being assigned
-// to a variable (the variable's own drop binding will handle cleanup instead).
-func (c *Compiler) untrackStringTemp(val value.Value) {
-	if val == nil || c.stringTempMap == nil {
-		return
-	}
-	if tempName, ok := c.stringTempMap[val]; ok {
-		c.clearDropFlag(tempName)
-		delete(c.stringTempMap, val)
-	}
-}
-
 // isDroppableContainerOrString returns true if the type is a string or vector
 // (types that use the i8*-alloca drop mechanism in maybeRegisterDrop).
 func isDroppableContainerOrString(typ types.Type) bool {
@@ -377,10 +297,6 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	val := c.genExpr(s.Value)
 	c.targetType = nil
 
-	// B0164: If the RHS produced a string temp, remove it from stmtStringTemps
-	// since the variable's drop binding will handle cleanup (prevents double-free).
-	c.untrackStringTemp(val)
-
 	// Auto-propagate failable call in assignment: check tag, propagate error, extract ok value.
 	if c.info.AutoPropagateExprs[s.Value] {
 		val = c.genAutoPropagateValue(val)
@@ -440,10 +356,6 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	alloca := c.block.NewAlloca(lt)
 	alloca.SetName(c.uniqueLocalName(s.Name))
 	val := c.genExpr(s.Value)
-
-	// B0164: If the RHS produced a string temp, remove it from stmtStringTemps
-	// since the variable's drop binding will handle cleanup (prevents double-free).
-	c.untrackStringTemp(val)
 
 	// Auto-propagate failable call in assignment: check tag, propagate error, extract ok value.
 	if c.info.AutoPropagateExprs[s.Value] {
@@ -721,7 +633,7 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 		// Only for types with value struct allocas (not raw i8* method receivers/captures),
 		// excluding structural interfaces (their instance ptr may be a stack alloca, not heap).
 		_, isStructAlloca := alloca.ElemType.(*irtypes.StructType)
-		if isStructAlloca && !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() {
+		if isStructAlloca && !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() && !isErrorType(named) {
 			dropFlag := c.createEntryAlloca(irtypes.I1)
 			dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
 			c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
@@ -1134,10 +1046,6 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 	}
 	val := c.genExpr(s.Value)
 	c.targetType = nil
-
-	// B0164: If the RHS produced a string temp, remove it since the variable's
-	// drop binding will handle cleanup.
-	c.untrackStringTemp(val)
 
 	// Auto-propagate failable call in assignment RHS.
 	if c.info.AutoPropagateExprs[s.Value] {
@@ -1698,8 +1606,6 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		c.targetType = retType
 		val = c.genExpr(s.Value)
 		c.targetType = nil
-		// B0164: Don't drop a string temp that's being returned — caller takes ownership.
-		c.untrackStringTemp(val)
 		val = c.wrapThisReturnValue(val, s.Value, retType)
 	}
 

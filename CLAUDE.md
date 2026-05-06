@@ -14,7 +14,7 @@ Promise is a statically-typed programming language with Dart-inspired syntax and
 
 ## Build & Test Commands
 
-**IMPORTANT: Always use `./build` from the repo root to build the compiler. NEVER run `go build` directly — it skips resource embedding and produces a broken binary. The output is always `bin/promise`.**
+**IMPORTANT: Always use `./build` (Linux/macOS) or `.\build.ps1` (Windows) from the repo root to build the compiler. NEVER run `go build` directly — it skips resource embedding and produces a broken binary. The output is `bin/promise` (Linux/macOS) or `bin/promise.exe` (Windows).**
 
 **IMPORTANT: Never commit, push, or create PRs unless the user explicitly asks you to.** Wait for an explicit instruction like "commit", "push", or "create a PR" before performing any git write operations.
 
@@ -23,7 +23,7 @@ Promise is a statically-typed programming language with Dart-inspired syntax and
 **Setup (once per clone):** `bin/setup.sh` — enables git hooks and local dev environment. Also runs automatically on `./build`.
 
 ```bash
-# From repo root:
+# From repo root (Linux/macOS):
 ./build                    # generate parser + embed resources + build → bin/promise
 bin/test.sh                # build + run all tests (go + promise)
 bin/test.sh go             # Go unit tests only
@@ -32,6 +32,13 @@ bin/test.sh --wasm         # include wasm32-wasi target
 bin/test.sh --clean        # clear caches first
 bin/verify.sh              # format + vet + all tests (pre-commit check)
 bin/verify.sh --wasm       # include wasm target
+```
+
+```powershell
+# From repo root (Windows PowerShell):
+.\build.ps1                # embed resources + build → bin\promise.exe
+.\build.ps1 -Generate      # also regenerate ANTLR parser (requires Java)
+# Prerequisites: powershell -ExecutionPolicy Bypass -File bin\install-prereqs.ps1
 ```
 
 The following `make` targets run from `compiler/` and also output to `bin/promise`:

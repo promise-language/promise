@@ -1,7 +1,6 @@
 package pal
 
 import (
-	"runtime"
 	"strings"
 	"testing"
 
@@ -589,17 +588,14 @@ func TestStubThreadCreateCallsSynchronously(t *testing.T) {
 	}
 }
 
-func TestWindowsThreadCreateUsesCreateThread(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("Windows-specific thread creation test")
-	}
+func TestWindowsThreadCreateUsesBeginthreadex(t *testing.T) {
 	module := newModuleWithAlloc(&WindowsPAL{})
 	(&WindowsPAL{}).EmitThreadCreate(module)
 	out := module.String()
 
-	// Should declare CreateThread
-	if !strings.Contains(out, "@CreateThread") {
-		t.Error("missing CreateThread declaration")
+	// Should declare _beginthreadex (not CreateThread — CRT init required for setjmp)
+	if !strings.Contains(out, "@_beginthreadex") {
+		t.Error("missing _beginthreadex declaration")
 	}
 	// Should emit trampoline function
 	if !strings.Contains(out, "@__pal_thread_trampoline") {
@@ -612,16 +608,14 @@ func TestWindowsThreadCreateUsesCreateThread(t *testing.T) {
 }
 
 func TestWindowsThreadCreateDetails(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("Windows-specific thread creation test")
-	}
 	module := newModuleWithAlloc(&WindowsPAL{})
 	(&WindowsPAL{}).EmitThreadCreate(module)
 	out := module.String()
 
-	// 2MB stack size constant passed to CreateThread (0x200000 = 2097152)
-	if !strings.Contains(out, "i64 u0x200000") {
-		t.Error("missing 2MB stack size constant (u0x200000) in CreateThread call")
+	// 2MB stack size constant passed to _beginthreadex (0x200000 = 2097152)
+	// _beginthreadex takes i32 stack_size (not i64 like CreateThread)
+	if !strings.Contains(out, "i32 u0x200000") {
+		t.Error("missing 2MB stack size constant (i32 u0x200000) in _beginthreadex call")
 	}
 	// Allocate 16-byte struct to pack fn+arg for trampoline
 	if !strings.Contains(out, "call i8* @pal_alloc(i64 16)") {

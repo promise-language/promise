@@ -1,0 +1,80 @@
+// Tests for select statement inside go blocks (B0111 fix).
+// Verifies that channel variables in select cases are properly
+// captured when the select is inside a go { } block.
+// Select recv inside go block captures outer channel variable.
+test_select_recv_in_go() `test(exclude: "wasm32") {
+  ch := channel[int](capacity: 1);
+  done := channel[int](capacity: 1);
+  ch.send(42);
+  go {
+    select {
+      v := <-ch:
+        if val := v {
+          done.send(val);
+        }
+    }
+  };
+  result := <-done;
+  if val := result {
+    assert(val == 42, "expected 42");
+  }
+}
+
+// Select send inside go block captures outer channel variable.
+test_select_send_in_go() `test(exclude: "wasm32") {
+  ch := channel[int](capacity: 1);
+  done := channel[int](capacity: 1);
+  go {
+    select {
+      ch.send(99):
+        done.send(1);
+    }
+  };
+  result := <-ch;
+  if val := result {
+    assert(val == 99, "expected 99");
+  }
+  <-done;
+}
+
+// Select inside go block with multiple channel cases.
+test_select_multi_channel_in_go() `test(exclude: "wasm32") {
+  ch1 := channel[int](capacity: 1);
+  ch2 := channel[int](capacity: 1);
+  done := channel[int](capacity: 1);
+  ch1.send(10);
+  go {
+    select {
+      v := <-ch1:
+        if val := v {
+          done.send(val);
+        }
+      v := <-ch2:
+        if val := v {
+          done.send(val + 100);
+        }
+    }
+  };
+  result := <-done;
+  if val := result {
+    assert(val == 10, "expected 10 from ch1");
+  }
+}
+
+// Select inside go block with default case.
+test_select_default_in_go() `test(exclude: "wasm32") {
+  ch := channel[int](capacity: 0);
+  done := channel[int](capacity: 1);
+  go {
+    select {
+      v := <-ch:
+        done.send(1);
+      default:
+        done.send(2);
+    }
+  };
+  result := <-done;
+  if val := result {
+    assert(val == 2, "expected default case");
+  }
+}

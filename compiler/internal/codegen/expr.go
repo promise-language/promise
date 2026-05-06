@@ -6129,6 +6129,17 @@ func collectBlockIdents(block *ast.Block, outerLocals map[string]*ir.InstAlloca)
 			}
 		case *ast.IncDecStmt:
 			walkExpr(s.Target)
+		case *ast.SelectStmt:
+			for _, sc := range s.Cases {
+				walkExpr(sc.Channel)
+				walkExpr(sc.SendValue)
+				for _, st := range sc.Body {
+					walkStmt(st)
+				}
+			}
+			for _, st := range s.Default {
+				walkStmt(st)
+			}
 		case *ast.Block:
 			for _, st := range s.Stmts {
 				walkStmt(st)

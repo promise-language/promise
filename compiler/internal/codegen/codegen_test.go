@@ -9599,6 +9599,27 @@ func TestGoBlockCapturesMultipleVars(t *testing.T) {
 	assertContains(t, ir, "presplitcoroutine")
 }
 
+// B0111: Select inside go block must capture outer channel variables.
+func TestGoBlockCapturesSelectChannelVars(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			ch := channel[int](capacity: 1);
+			ch.send(1);
+			go {
+				select {
+					v := <-ch:
+						print_line("ok");
+				}
+			};
+		}
+	`)
+	// The goroutine coroutine should have a parameter for the captured "ch"
+	assertContains(t, ir, "ch.cap")
+	// Should still generate coroutine infrastructure
+	assertContains(t, ir, "define i8* @.goroutine.")
+	assertContains(t, ir, "presplitcoroutine")
+}
+
 func TestGoBlockNoCapturesStillWorks(t *testing.T) {
 	ir := generateIR(t, `
 		main() {

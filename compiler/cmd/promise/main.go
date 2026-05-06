@@ -5068,37 +5068,79 @@ func runInstall() {
 		fmt.Fprintf(os.Stderr, "error: cannot determine Promise home: %v\n", err)
 		os.Exit(1)
 	}
-	binDir := filepath.Join(promiseDir, "bin")
-	libDir := filepath.Join(promiseDir, "lib")
-	stdDest := filepath.Join(libDir, "std")
 
-	// Create directory structure
-	for _, dir := range []string{binDir, stdDest} {
+	// Determine epoch from embedded catalog.
+	epoch, err := module.CompilerEpoch(embeddedCatalog)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot determine compiler epoch: %v\n", err)
+		os.Exit(1)
+	}
+
+	epochDir, err := module.EpochDir(epoch)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot determine epoch directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	binaryName := "promise"
+	if runtime.GOOS == "windows" {
+		binaryName = "promise.exe"
+	}
+
+	// Epoch subdirectories.
+	epochBinDir := filepath.Join(epochDir, "bin")
+	epochLibDir := filepath.Join(epochDir, "lib")
+	epochStdDest := filepath.Join(epochLibDir, "std")
+	epochCacheDir := filepath.Join(epochDir, "cache", "build")
+
+	// Stub shim directory at top-level ~/.promise/bin/.
+	stubBinDir := filepath.Join(promiseDir, "bin")
+
+	// Create all directories.
+	dirs := []string{epochBinDir, epochStdDest, epochCacheDir, stubBinDir}
+	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			fmt.Fprintf(os.Stderr, "error creating %s: %v\n", dir, err)
 			os.Exit(1)
 		}
 	}
 
-	// Copy binary (promise.exe on Windows, promise on others)
-	binaryName := "promise"
-	if runtime.GOOS == "windows" {
-		binaryName = "promise.exe"
-	}
+	// Copy binary to epoch directory.
 	execPath, err := os.Executable()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: cannot determine executable path: %v\n", err)
 		os.Exit(1)
 	}
-	copyFile(execPath, filepath.Join(binDir, binaryName), 0755)
+	copyFile(execPath, filepath.Join(epochBinDir, binaryName), 0755)
 
-	// Extract embedded std files (now live in resources/modules/std/)
-	extractEmbedded(embeddedModules, "resources/modules/std", stdDest)
+	// Copy binary to stub shim location (~/.promise/bin/promise).
+	copyFile(execPath, filepath.Join(stubBinDir, binaryName), 0755)
 
-	// Extract embedded musl CRT (if available)
+	// Extract embedded std files.
+	extractEmbedded(embeddedModules, "resources/modules/std", epochStdDest)
+
+	// Extract embedded catalog modules (io, json, path, etc.).
+	cat, err := module.ParseCatalog(embeddedCatalog)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error parsing catalog: %v\n", err)
+		os.Exit(1)
+	}
+	for name, entry := range cat.Modules {
+		if name == "std" || !entry.IsEmbedded() {
+			continue
+		}
+		modDest := filepath.Join(epochLibDir, "modules", name)
+		if err := os.MkdirAll(modDest, 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "error creating %s: %v\n", modDest, err)
+			os.Exit(1)
+		}
+		extractEmbedded(embeddedModules, "resources/modules/"+name, modDest)
+	}
+
+	// Extract embedded musl CRT (if available).
 	if hasEmbeddedMuslCRT {
 		arch := "x86_64-linux-musl"
-		crtDest := filepath.Join(libDir, "crt", arch)
+		crtDest := filepath.Join(epochLibDir, "crt", arch)
 		if err := os.MkdirAll(crtDest, 0755); err != nil {
 			fmt.Fprintf(os.Stderr, "error creating %s: %v\n", crtDest, err)
 			os.Exit(1)
@@ -5106,9 +5148,9 @@ func runInstall() {
 		extractEmbedded(embeddedMuslCRT, "resources/crt/"+arch, crtDest)
 	}
 
-	// Extract embedded LLVM tools (if available)
+	// Extract embedded LLVM tools (if available).
 	if hasEmbeddedLLVM {
-		llvmDest := filepath.Join(binDir, "llvm")
+		llvmDest := filepath.Join(epochBinDir, "llvm")
 		if err := os.MkdirAll(llvmDest, 0755); err != nil {
 			fmt.Fprintf(os.Stderr, "error creating %s: %v\n", llvmDest, err)
 			os.Exit(1)
@@ -5116,18 +5158,31 @@ func runInstall() {
 		extractCompressedLLVM(llvmDest)
 	}
 
-	fmt.Printf("Installed Promise to %s\n", promiseDir)
-	fmt.Printf("  binary: %s\n", filepath.Join(binDir, binaryName))
-	fmt.Printf("  std:    %s\n", stdDest)
-	if hasEmbeddedLLVM {
-		fmt.Printf("  llvm:   %s\n", filepath.Join(binDir, "llvm"))
+	// Write active epoch file.
+	if err := module.WriteActiveEpoch(epoch); err != nil {
+		fmt.Fprintf(os.Stderr, "error writing active epoch: %v\n", err)
+		os.Exit(1)
 	}
+
+	fmt.Printf("Installed Promise epoch %s to %s\n", epoch, epochDir)
+	fmt.Printf("  binary:  %s\n", filepath.Join(epochBinDir, binaryName))
+	fmt.Printf("  stub:    %s\n", filepath.Join(stubBinDir, binaryName))
+	fmt.Printf("  std:     %s\n", epochStdDest)
+	fmt.Printf("  modules: %s\n", filepath.Join(epochLibDir, "modules"))
+	if hasEmbeddedLLVM {
+		fmt.Printf("  llvm:    %s\n", filepath.Join(epochBinDir, "llvm"))
+	}
+	if hasEmbeddedMuslCRT {
+		fmt.Printf("  crt:     %s\n", filepath.Join(epochLibDir, "crt"))
+	}
+	fmt.Printf("  cache:   %s\n", epochCacheDir)
+	fmt.Printf("  active:  %s\n", epoch)
 	if runtime.GOOS == "windows" {
 		fmt.Printf("\nAdd to your PATH:\n\n")
-		fmt.Printf("  setx PATH \"%%PATH%%;%s\"\n", binDir)
+		fmt.Printf("  setx PATH \"%%PATH%%;%s\"\n", stubBinDir)
 	} else {
-		fmt.Printf("Add to your shell profile:\n\n")
-		fmt.Printf("  export PATH=\"%s:$PATH\"\n", binDir)
+		fmt.Printf("\nAdd to your shell profile:\n\n")
+		fmt.Printf("  export PATH=\"%s:$PATH\"\n", stubBinDir)
 	}
 }
 

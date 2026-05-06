@@ -37,8 +37,12 @@ Before starting, update your tracker status: call `mcp__tracker__heartbeat` with
    - **Memory leak check**: Verify the leak count hasn't increased compared to pre-rebase. If rebase introduced new leaks (from upstream changes), note them but don't block the commit — file a bug instead.
 
 7. **Update tracker.**
-   - Update any related tracker entries (`mcp__tracker__update`) — mark bugs as done, add notes describing what was done.
-   Include the same content as in the "summary" you provide when the task is done.
+   - Update any related tracker entries (`mcp__tracker__update`) — mark bugs/tasks as done.
+   - **Set the `summary` field** when closing an item (status → `done`/`wontfix`/`works_as_intended`/`cant_reproduce`). The summary is markdown and should contain:
+     - What was changed (one-line description of the fix/implementation)
+     - Key details (files changed, tests added/removed, stale tags cleaned up)
+     - Verify results (host + WASM test counts, 0 failures)
+   - Example summary: `"Removed isErrorType exclusion from bindingFree — error instances now get pal_free at scope exit\n\nAdded clearDropFlag call in genRaiseStmt before emitScopeCleanup to prevent UAF\nAdded 2 Go IR tests\nRemoved 6 stale allow_leaks tags\n\nVerify: 3211 host + 2954 WASM tests passing, 0 failures"`
    - **File any issues discovered during this session.** Specifically check for:
      - Memory leaks: types without drop, allocations without free paths
      - Concurrency bugs: races, deadlocks, missing synchronization

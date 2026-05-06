@@ -21,7 +21,7 @@ Before starting, update your tracker status: call `mcp__tracker__heartbeat` with
    - For sema changes: verify all 4 passes (Declare, Define, Check, Verify) are consistent.
    - For scheduler changes: verify park mutex protocol, lock ordering, and shutdown invariants.
    - **Critical systemic checks** (these are silent — no test will catch them):
-     - **Memory management**: Every type that heap-allocates (native types, types with `pal_alloc`/`malloc`) must have a `drop()` path. Check: does the type have `drop(~this)`? If it has fields with droppable types, does the compiler auto-synthesize drop? If not, file a bug.
+     - **Memory management** (PRIORITY — active leak-reduction phase, baseline ~2170 leaks): Every type that heap-allocates (native types, types with `pal_alloc`/`malloc`) must have a `drop()` path. Check: does the type have `drop(~this)`? If it has fields with droppable types, does the compiler auto-synthesize drop? If not, file a bug. When reviewing any code, actively look for leak sources — even if unrelated to the changes under review, file bugs for any leaks discovered.
      - **Concurrency safety**: Shared mutable state must be mutex-protected. Channel operations must follow the park mutex protocol. Lock acquisition must follow address-ordered lock discipline. Shutdown must join all threads.
      - **Resource lifecycle**: Every `pal_alloc` must have a corresponding `pal_free` path. Every opened file/socket must be closeable. Every spawned goroutine must be reachable by shutdown.
      - **Performance traps**: Allocations inside loops that could be hoisted. Quadratic algorithms on collections. Redundant copies of large data.
@@ -32,6 +32,7 @@ Before starting, update your tracker status: call `mcp__tracker__heartbeat` with
    - For Go changes: check that `codegen_test.go`, `sema_test.go`, or `ownership_test.go` cover the change.
    - For Promise changes: check for corresponding `*_test.pr` files.
    - Run `bin/verify.sh --local --wasm` (Linux/macOS) or `powershell -ExecutionPolicy Bypass -File bin\verify.ps1 -Local` (Windows) to confirm everything passes.
+   - **Memory leak tracking**: After verify completes, check the output for leak counts (lines like `N leaked` in test summaries). Record the total leak count. Compare against the baseline (~2170 leaks). If the changes under review increased leaks, flag this as a blocking issue. If they reduced leaks, note the improvement positively.
 
 4. **Check conventions.**
    - Public Promise APIs: full English words (never abbreviated), getters for side-effect-free parameterless access, `` `doc `` annotations on `` `public `` declarations.

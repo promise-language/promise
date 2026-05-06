@@ -20,6 +20,7 @@ Before starting, update your tracker status: call `mcp__tracker__heartbeat` with
 3. **Pre-commit verification.**
    - Run `bin/verify.sh --local --wasm` (Linux/macOS) or `powershell -ExecutionPolicy Bypass -File bin\verify.ps1 -Local` (Windows) from the repo root.
    - If it fails, fix the issues and re-run until it passes. Do not proceed until green.
+   - **Memory leak tracking**: After verify completes, check the output for leak counts (lines like `N leaked` in test summaries). Record the total leak count. Compare against the baseline (~2170 leaks). If your changes increased the leak count, investigate and fix the regression before proceeding. If your changes reduced the leak count, note the improvement in the commit message.
 
 4. **Commit.**
    - Stage the relevant files (avoid `git add -A`; be specific).
@@ -33,6 +34,7 @@ Before starting, update your tracker status: call `mcp__tracker__heartbeat` with
 6. **Post-rebase verification.**
    - Run `bin/verify.sh --local --wasm` (Linux/macOS) or `powershell -ExecutionPolicy Bypass -File bin\verify.ps1 -Local` (Windows) again to confirm nothing broke during rebase.
    - If it fails, fix and re-run.
+   - **Memory leak check**: Verify the leak count hasn't increased compared to pre-rebase. If rebase introduced new leaks (from upstream changes), note them but don't block the commit — file a bug instead.
 
 7. **Update tracker.**
    - Update any related tracker entries (`mcp__tracker__update`) — mark bugs as done, add notes describing what was done.

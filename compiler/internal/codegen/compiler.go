@@ -4616,38 +4616,16 @@ func (c *Compiler) defineSynthesizedModuleDrops(file *ast.File, moduleName strin
 // defineSynthesizedDropBody generates the body for a synthesized drop function.
 // It drops all droppable fields in reverse order and frees the instance.
 func (c *Compiler) defineSynthesizedDropBody(fn *ir.Func, named *types.Named) {
-	saved := c.saveState()
-	defer c.restoreState(saved)
-
-	c.fn = fn
-	c.locals = make(map[string]*ir.InstAlloca)
-	c.localNameCount = make(map[string]int)
-	c.dropFlags = make(map[string]*ir.InstAlloca)
-	c.dropBindings = make(map[string]scopeBinding)
-	c.scopeBindings = nil
-	c.blockCounter = 0
-	c.canError = false
-	c.currentRetType = nil
-
+	// NOTE: The synthesized drop body is intentionally a no-op for now (B0160).
+	// emitFieldDrops would call Vector.drop on container-typed fields, but
+	// container types don't yet have ownership tracking (T0064). Without move
+	// tracking, containers passed by value create aliases — freeing the field's
+	// buffer here causes use-after-free. Similarly, pal_free on the instance is
+	// unsafe without ownership tracking (B0159).
+	// The type still has HasDrop() for cascade propagation — when ownership
+	// tracking is ready, the body will be enabled to call emitFieldDrops + pal_free.
 	entry := fn.NewBlock(".entry")
-	c.block = entry
-	c.entryBlock = entry
-
-	// Store %this param into alloca so emitFieldDrops can find it
-	thisParam := fn.Params[0]
-	thisAlloca := entry.NewAlloca(irtypes.I8Ptr)
-	thisAlloca.SetName("this.addr")
-	entry.NewStore(thisParam, thisAlloca)
-	c.locals["this"] = thisAlloca
-
-	// Drop all droppable fields
-	c.emitFieldDrops(named)
-
-	// Free the instance itself
-	c.block.NewCall(c.palFree, thisParam)
-
-	// Return void
-	c.block.NewRet(nil)
+	entry.NewRet(nil)
 }
 
 // lookupNamedType finds a Named type in sema info by name.

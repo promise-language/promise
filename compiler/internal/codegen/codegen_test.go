@@ -9213,6 +9213,33 @@ func TestBindingFreeReassignment(t *testing.T) {
 	assertContains(t, ir, "call void @pal_free")
 }
 
+// T0086: Error types now get bindingFree at scope exit (previously excluded)
+func TestBindingFreeErrorType(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			error e = error("test");
+			string msg = e.message;
+		}
+	`)
+	assertContains(t, ir, "e.dropflag")
+	assertContains(t, ir, "call void @pal_free")
+}
+
+// T0086: Raising a local error variable clears its drop flag before scope cleanup
+func TestRaiseLocalErrorClearsDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		fail() void! {
+			error e = error("boom");
+			raise e;
+		}
+		main() { }
+	`)
+	// The error should get a drop flag
+	assertContains(t, ir, "e.dropflag")
+	// The drop flag should be cleared (store false) before scope cleanup
+	assertContains(t, ir, "store i1 false")
+}
+
 // T0073: Primitive to_string temp is dropped at statement end when not assigned
 func TestStringTempDropAtStatementEnd(t *testing.T) {
 	ir := generateIR(t, `

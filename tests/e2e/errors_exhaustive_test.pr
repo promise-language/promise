@@ -4,13 +4,13 @@
 // Section 1: Error construction variants
 // ============================================================
 // Positional construction
-test_error_positional() `test(allow_leaks: true) {
+test_error_positional() `test {
   error e = error("positional msg");
   assert(e.message == "positional msg", "positional error construction");
 }
 
 // Named construction
-test_error_named() `test(allow_leaks: true) {
+test_error_named() `test {
   error e = error(message: "named msg");
   assert(e.message == "named msg", "named error construction");
 }
@@ -20,21 +20,21 @@ type IoError is error {
   int code;
 }
 
-test_io_error_positional() `test(allow_leaks: true) {
+test_io_error_positional() `test {
   IoError e = IoError("disk full", 28);
   assert(e.message == "disk full", "io error positional message");
   assert(e.code == 28, "io error positional code");
 }
 
 // Subtype with mixed construction (positional then named)
-test_io_error_mixed() `test(allow_leaks: true) {
+test_io_error_mixed() `test {
   IoError e = IoError("disk full", code: 28);
   assert(e.message == "disk full", "io error mixed message");
   assert(e.code == 28, "io error mixed code");
 }
 
 // Subtype with all named
-test_io_error_all_named() `test(allow_leaks: true) {
+test_io_error_all_named() `test {
   IoError e = IoError(message: "disk full", code: 28);
   assert(e.message == "disk full", "io error named message");
   assert(e.code == 28, "io error named code");
@@ -344,7 +344,7 @@ make_error(string msg) error {
   return error(msg);
 }
 
-test_error_as_value() `test(allow_leaks: true) {
+test_error_as_value() `test {
   error e = make_error("constructed");
   assert(e.message == "constructed", "error constructed as regular value");
 }

@@ -186,8 +186,6 @@ func isContainerType(typ types.Type) bool {
 }
 
 // isErrorType returns true if the named type is the error base type or inherits from it.
-// Error types have special lifecycle (raised, caught, propagated) and should not be
-// freed via bindingFree at scope exit — they may still be in-flight.
 func isErrorType(named *types.Named) bool {
 	if types.TypError != nil && named == types.TypError {
 		return true

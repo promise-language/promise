@@ -655,7 +655,7 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 		// Only for types with value struct allocas (not raw i8* method receivers/captures),
 		// excluding structural interfaces (their instance ptr may be a stack alloca, not heap).
 		_, isStructAlloca := alloca.ElemType.(*irtypes.StructType)
-		if isStructAlloca && !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() && !isErrorType(named) {
+		if isStructAlloca && !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() {
 			dropFlag := c.createEntryAlloca(irtypes.I1)
 			dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
 			c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
@@ -1889,6 +1889,12 @@ func (c *Compiler) wrapThisReturnValue(val value.Value, expr ast.Expr, retType t
 // --- Raise ---
 
 func (c *Compiler) genRaiseStmt(s *ast.RaiseStmt) {
+	// T0086: If raising a local error variable, clear its drop flag BEFORE cleanup
+	// so emitScopeCleanup won't free the instance we're about to return.
+	if ident, ok := s.Value.(*ast.IdentExpr); ok {
+		c.clearDropFlag(ident.Name)
+	}
+
 	// Emit close() for all active use bindings before raising
 	if len(c.scopeBindings) > 0 {
 		c.emitScopeCleanup(0, true) // error in flight — suppress close errors

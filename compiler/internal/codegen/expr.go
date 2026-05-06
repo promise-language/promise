@@ -3236,8 +3236,9 @@ func (c *Compiler) genStringIsLiteral(e *ast.MemberExpr) value.Value {
 	instType := strInstanceType()
 	typedPtr := c.block.NewBitCast(strPtr, irtypes.NewPointer(instType))
 	rawLen := loadStringLenRaw(c.block, typedPtr, instType)
-	// Sign bit set → negative → literal
-	return c.block.NewICmp(enum.IPredSLT, rawLen, constant.NewInt(irtypes.I64, 0))
+	// Bit 63 set → literal
+	bit63 := c.block.NewAnd(rawLen, constant.NewInt(irtypes.I64, math.MinInt64))
+	return c.block.NewICmp(enum.IPredNE, bit63, constant.NewInt(irtypes.I64, 0))
 }
 
 // genStringBytes creates a Vector[u8] from the string's raw bytes.

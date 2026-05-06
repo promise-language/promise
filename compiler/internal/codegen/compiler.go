@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"runtime"
@@ -1343,8 +1344,9 @@ func (c *Compiler) defineStringDropFunc() {
 	typedPtr := entry.NewBitCast(ptrParam, irtypes.NewPointer(instType))
 	rawLen := loadStringLenRaw(entry, typedPtr, instType)
 
-	// If sign bit is set (negative), it's a literal in .rodata — don't free
-	isLiteral := entry.NewICmp(enum.IPredSLT, rawLen, constant.NewInt(irtypes.I64, 0))
+	// If bit 63 is set, it's a literal in .rodata — don't free
+	bit63 := entry.NewAnd(rawLen, constant.NewInt(irtypes.I64, math.MinInt64))
+	isLiteral := entry.NewICmp(enum.IPredNE, bit63, constant.NewInt(irtypes.I64, 0))
 	freeBlk := fn.NewBlock("free")
 	doneBlk := fn.NewBlock("done")
 	entry.NewCondBr(isLiteral, doneBlk, freeBlk)

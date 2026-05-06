@@ -1165,9 +1165,9 @@ func TestStringLenMasksLiteralBit(t *testing.T) {
 
 func TestStringDropFuncBody(t *testing.T) {
 	ir := generateIR(t, `main() { s := "x"; }`)
-	// promise_string_drop checks sign bit then conditionally frees
+	// promise_string_drop checks bit 63 then conditionally frees
 	assertContains(t, ir, "define void @promise_string_drop(i8* %ptr)")
-	assertContains(t, ir, "icmp slt i64")
+	assertContains(t, ir, "icmp ne i64")
 	assertContains(t, ir, "call void @pal_free(")
 }
 

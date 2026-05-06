@@ -1,5 +1,5 @@
 // Tests for Builder type
-test_basic() `test(allow_leaks: true) {
+test_basic() `test {
   Builder b = Builder();
   b.write_string("hello")!;
   b.write_string(" ")!;
@@ -7,7 +7,7 @@ test_basic() `test(allow_leaks: true) {
   assert(b.to_string() == "hello world", "basic write_string");
 }
 
-test_empty() `test(allow_leaks: true) {
+test_empty() `test {
   Builder b = Builder();
   assert(b.to_string() == "", "empty builder");
 }
@@ -27,20 +27,20 @@ test_clear() `test(allow_leaks: true) {
   assert(b.len == 0, "after clear");
 }
 
-test_write_bytes() `test(allow_leaks: true) {
+test_write_bytes() `test {
   Builder b = Builder();
   u8[] data = "ABC".bytes();
   b.write(data)!;
   assert(b.to_string() == "ABC", "write bytes");
 }
 
-test_capacity() `test(allow_leaks: true) {
+test_capacity() `test {
   Builder b = Builder(capacity: 64);
   b.write_string("hello")!;
   assert(b.to_string() == "hello", "with capacity");
 }
 
-test_multiple_writes() `test(allow_leaks: true) {
+test_multiple_writes() `test {
   Builder b = Builder();
   int i = 0;
   while i < 10 {

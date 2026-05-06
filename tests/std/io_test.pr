@@ -1,13 +1,13 @@
 // Tests for std/io.pr — Reader, Writer, Closer interfaces
 // --- Writer.write_line ---
-test_write_line() `test(allow_leaks: true) {
+test_write_line() `test {
   Builder b = Builder();
   b.write_line("hello")!;
   string sep = Platform.line_separator;
   assert(b.to_string() == "hello" + sep, "write_line appends platform line separator");
 }
 
-test_write_line_multiple() `test(allow_leaks: true) {
+test_write_line_multiple() `test {
   Builder b = Builder();
   b.write_line("first")!;
   b.write_line("second")!;
@@ -15,7 +15,7 @@ test_write_line_multiple() `test(allow_leaks: true) {
   assert(b.to_string() == "first" + sep + "second" + sep, "multiple write_lines");
 }
 
-test_write_line_empty() `test(allow_leaks: true) {
+test_write_line_empty() `test {
   Builder b = Builder();
   b.write_line("")!;
   string sep = Platform.line_separator;
@@ -77,21 +77,21 @@ _write_bytes_through_writer(Writer ~w, u8[]~data) int! {
   return w.write(data);
 }
 
-test_writer_structural_write_string() `test(allow_leaks: true) {
+test_writer_structural_write_string() `test {
   Builder b = Builder();
   int n = _write_through_writer(b, "hello")!;
   assert(n == 5, "write_string returns 5");
   assert(b.to_string() == "hello", "write_string through Writer");
 }
 
-test_writer_structural_write_line() `test(allow_leaks: true) {
+test_writer_structural_write_line() `test {
   Builder b = Builder();
   _write_line_through_writer(b, "hello")!;
   string sep = Platform.line_separator;
   assert(b.to_string() == "hello" + sep, "write_line through Writer");
 }
 
-test_writer_structural_write_bytes() `test(allow_leaks: true) {
+test_writer_structural_write_bytes() `test {
   Builder b = Builder();
   u8[] data = "ABC".bytes();
   int n = _write_bytes_through_writer(b, data)!;

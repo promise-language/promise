@@ -26,6 +26,6 @@ test_expression_body_with_annotation() `test {
   assert(negate(5) == -5, "negate");
 }
 
-test_expression_body_void() `test(allow_leaks: true) {
+test_expression_body_void() `test {
   say_hello("world");
 }

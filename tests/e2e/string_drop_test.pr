@@ -82,7 +82,7 @@ string_concat_temp_in_assert() `test {
 
 // B0168: String concat temp passed to function — dropped after call returns
 // (1 leak from print_line's internal Builder.to_string() temp, not from concat)
-string_concat_temp_in_call() `test(allow_leaks: true) {
+string_concat_temp_in_call() `test {
   print_line("hello " + "world");
 }
 

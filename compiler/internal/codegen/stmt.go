@@ -1161,10 +1161,14 @@ func (c *Compiler) isTrackedStringCall(e *ast.CallExpr) bool {
 			return true
 		}
 	}
-	// Note: to_string()/format() on user types are NOT tracked here because
-	// callFormatToString allocates a Builder that leaks — the Builder and its
-	// returned string share memory, so freeing the string temp would corrupt
-	// the Builder (B0167). Track these when B0167 is fixed.
+	// T0084: to_string() on Builder produces a new heap string via from_bytes.
+	// Safe to track because from_bytes copies the bytes into a new allocation.
+	if member.Field == "to_string" {
+		builderNamed := c.lookupNamedType("Builder")
+		if builderNamed != nil && named == builderNamed {
+			return true
+		}
+	}
 	return false
 }
 

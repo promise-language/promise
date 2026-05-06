@@ -160,7 +160,7 @@ type Compiler struct {
 	// `assert(42.to_string() == "42")`) and drops them at statement end.
 	stmtTemps           []stmtTemp
 	stmtTempMap         map[value.Value]int // SSA value → index in stmtTemps (-1 = claimed)
-	tempTrackingEnabled bool                // true only in user-defined free functions
+	tempTrackingEnabled bool                // T0084: true in free functions + user method bodies
 
 	// PAL (Platform Abstraction Layer) function references
 	palWrite   *ir.Func // @pal_write(i32 fd, i8* buf, i64 len) → i64
@@ -3512,10 +3512,11 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 	c.dropBindings = make(map[string]scopeBinding)
 	c.stmtTemps = nil                         // T0073
 	c.stmtTempMap = make(map[value.Value]int) // T0073
-	// T0073: Enable temp tracking only for user free functions (not module methods,
-	// not coroutine wrappers). Module-internal tests merge module source with the
-	// test file, so compilingModule is empty — we use this flag to opt in explicitly.
-	c.tempTrackingEnabled = c.compilingModule == ""
+	// T0084: Enable temp tracking for all free functions (user and module).
+	// Previously limited to user code only (T0073); now extended to module code
+	// so that statement-level string temps in module methods (e.g., this.to_string()
+	// inside format() methods) are cleaned up.
+	c.tempTrackingEnabled = true
 	c.mutRefPtrs = nil
 	c.mutRefTypes = nil
 	c.scopeBindings = nil // T0085: reset scope bindings for each new function
@@ -3965,7 +3966,7 @@ func (c *Compiler) defineModuleFuncs(file *ast.File, moduleName string) {
 		c.dropBindings = make(map[string]scopeBinding)
 		c.stmtTemps = nil                         // T0073
 		c.stmtTempMap = make(map[value.Value]int) // T0073
-		c.tempTrackingEnabled = false             // T0073
+		c.tempTrackingEnabled = true              // T0084: enable in methods too
 		c.mutRefPtrs = nil
 		c.mutRefTypes = nil
 		c.scopeBindings = nil
@@ -4124,7 +4125,9 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 			c.dropBindings = make(map[string]scopeBinding)
 			c.stmtTemps = nil                         // T0073
 			c.stmtTempMap = make(map[value.Value]int) // T0073
-			c.tempTrackingEnabled = false             // T0073
+			// T0084: Keep disabled for module type methods until claim mechanism
+			// covers all string ownership transfer sites (B0167 follow-up).
+			c.tempTrackingEnabled = false
 			c.scopeBindings = nil
 			c.canError = m.Sig().CanError()
 			c.currentRetType = m.Sig().Result()
@@ -4603,7 +4606,10 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 	c.dropBindings = make(map[string]scopeBinding)
 	c.stmtTemps = nil                         // T0073
 	c.stmtTempMap = make(map[value.Value]int) // T0073
-	c.tempTrackingEnabled = false             // T0073
+	// T0084: Keep disabled for method bodies until claim mechanism covers all
+	// string ownership transfer sites (e.g., strings passed through error handlers,
+	// match arms, closure captures). Enabling causes use-after-free in json tests.
+	c.tempTrackingEnabled = false
 	c.mutRefPtrs = nil
 	c.mutRefTypes = nil
 	c.scopeBindings = nil

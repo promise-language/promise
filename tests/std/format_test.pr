@@ -35,7 +35,7 @@ test_char_format() `test(allow_leaks: true) {
   assert(b.to_string() == "A", "char A");
 }
 
-test_string_format() `test(allow_leaks: true) {
+test_string_format() `test {
   Builder b = Builder();
   "hello".format(b)!;
   assert(b.to_string() == "hello", "string hello");

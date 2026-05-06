@@ -44,7 +44,7 @@ type Name {
   }
 }
 
-test_multi_write_format() `test(allow_leaks: true) {
+test_multi_write_format() `test {
   Name n = Name(first: "John", last: "Doe");
   assert("{n}" == "John Doe", "format with multiple writes");
 }
@@ -105,7 +105,7 @@ type Empty {
   }
 }
 
-test_empty_format() `test(allow_leaks: true) {
+test_empty_format() `test {
   Empty e = Empty();
   assert("{e}" == "", "empty format produces empty string");
 }
@@ -192,17 +192,17 @@ type Poodle is Dog {
   }
 }
 
-test_three_level_vtable() `test(allow_leaks: true) {
+test_three_level_vtable() `test {
   Animal a = Poodle();
   assert("{a}" == "poodle", "three-level vtable dispatch");
 }
 
-test_mid_level_vtable() `test(allow_leaks: true) {
+test_mid_level_vtable() `test {
   Animal a = Dog();
   assert("{a}" == "dog", "mid-level vtable dispatch");
 }
 
-test_base_level_vtable() `test(allow_leaks: true) {
+test_base_level_vtable() `test {
   Animal a = Animal();
   assert("{a}" == "animal", "base-level vtable dispatch");
 }
@@ -227,19 +227,19 @@ type Wrapper {
   }
 }
 
-test_special_chars_newline() `test(allow_leaks: true) {
+test_special_chars_newline() `test {
   Wrapper w = Wrapper(text: "line1\nline2");
   string s = "{w}";
   assert(s.len == 11, "newline preserved in format output");
 }
 
-test_special_chars_tab() `test(allow_leaks: true) {
+test_special_chars_tab() `test {
   Wrapper w = Wrapper(text: "a\tb");
   string s = "{w}";
   assert(s.len == 3, "tab preserved in format output");
 }
 
-test_special_chars_empty() `test(allow_leaks: true) {
+test_special_chars_empty() `test {
   Wrapper w = Wrapper(text: "");
   assert("{w}" == "", "empty string field in format");
 }
@@ -311,12 +311,12 @@ type Status {
   }
 }
 
-test_conditional_format_ok() `test(allow_leaks: true) {
+test_conditional_format_ok() `test {
   Status s = Status(ok: true, msg: "");
   assert("{s}" == "OK", "conditional format ok path");
 }
 
-test_conditional_format_err() `test(allow_leaks: true) {
+test_conditional_format_err() `test {
   Status s = Status(ok: false, msg: "timeout");
   assert("{s}" == "ERR: timeout", "conditional format error path");
 }
@@ -331,7 +331,7 @@ type Toggle {
   }
 }
 
-test_format_conditional_write() `test(allow_leaks: true) {
+test_format_conditional_write() `test {
   Toggle t1 = Toggle(on: true);
   assert("{t1}" == "ON", "conditional write active");
   Toggle t2 = Toggle(on: false);

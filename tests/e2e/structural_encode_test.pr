@@ -172,7 +172,7 @@ assign_int_to_format() `test(allow_leaks: true) {
   assert(b.to_string() == "42", "assign int to Format");
 }
 
-assign_string_to_format() `test(allow_leaks: true) {
+assign_string_to_format() `test {
   Format f = "hello";
   Builder b = Builder();
   f.format(b)? {

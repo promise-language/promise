@@ -502,7 +502,19 @@ func (c *Compiler) callFormatToString(val value.Value, typ types.Type, named *ty
 
 	// 6. Call Builder.to_string(builder_ptr) → string (i8*)
 	toStringFn := c.funcs["Builder.to_string"]
-	return c.block.NewCall(toStringFn, rawPtr)
+	strResult := c.block.NewCall(toStringFn, rawPtr)
+
+	// 7. T0084: Free the Builder after getting the string. Builder.to_string()
+	// creates a NEW string via from_bytes (copies bytes), so the Builder is dead.
+	// Call Builder.drop (synthesized: frees buf vector + instance) if available,
+	// otherwise pal_free the instance directly.
+	if builderDrop := c.funcs["Builder.drop"]; builderDrop != nil {
+		c.block.NewCall(builderDrop, rawPtr)
+	} else {
+		c.block.NewCall(c.palFree, rawPtr)
+	}
+
+	return strResult
 }
 
 // callFormatMethod dispatches the format(Writer ~w)! call on the user type,

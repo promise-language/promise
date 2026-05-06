@@ -32,7 +32,7 @@ platform_val() int `target(!linux) {
   return 2;
 }
 
-test_platform_functions_run() `test(allow_leaks: true) {
+test_platform_functions_run() `test {
   // All these call exactly one compiled variant per target
   sep_os();
   greet_posix();
@@ -53,6 +53,6 @@ wasm_only() `target(!wasm) {
   print_line("not-wasm");
 }
 
-test_wasm_variant() `test(allow_leaks: true) {
+test_wasm_variant() `test {
   wasm_only();
 }

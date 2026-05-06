@@ -11273,6 +11273,35 @@ func TestStringInterpolationUserTypeVtable(t *testing.T) {
 	assertContains(t, ir, "interp.format.ok")
 }
 
+// T0084: Builder is freed after callFormatToString extracts the string
+func TestCallFormatToStringBuilderDrop(t *testing.T) {
+	ir := generateIR(t, `
+		type Pt {
+			int x;
+			format(Writer ~w)! { w.write_string("pt"); }
+		}
+		main() { Pt p = Pt(x: 1); string s = "{p}"; }
+	`)
+	// After Builder.to_string, Builder.drop should be called to free the Builder
+	assertContains(t, ir, "Builder.to_string")
+	assertContains(t, ir, "Builder.drop")
+}
+
+// T0084: Builder.to_string() result is tracked as a string temp
+func TestBuilderToStringTracked(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			Builder b = Builder();
+			b.write_string("hello")!;
+			assert(b.to_string() == "hello", "ok");
+		}
+	`)
+	// Builder.to_string result should be tracked and dropped at statement end
+	assertContains(t, ir, "Builder.to_string")
+	assertContains(t, ir, "tmp.drop")
+	assertContains(t, ir, "promise_string_drop")
+}
+
 // --- Optional narrowing codegen tests ---
 
 func TestOptionalTruthinessNarrowingCodegen(t *testing.T) {

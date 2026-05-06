@@ -2066,6 +2066,9 @@ func (c *Compiler) wrapMainWithScheduler() {
 	c.scopeBindings = nil
 	c.dropFlags = make(map[string]*ir.InstAlloca)
 	c.dropBindings = make(map[string]scopeBinding)
+	c.stmtTemps = nil                         // T0073
+	c.stmtTempMap = make(map[value.Value]int) // T0073
+	c.tempTrackingEnabled = false             // T0073
 	c.loopScopeDepth = 0
 	c.inCoroutine = true
 

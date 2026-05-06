@@ -155,12 +155,12 @@ type Compiler struct {
 	// Drop binding tracking: maps variable name to its scope binding (for reassignment drop)
 	dropBindings map[string]scopeBinding
 
-	// B0164: String temp tracking. Maps SSA values produced by function/method calls
-	// and string concat to their temp variable names (for drop flag management).
-	// When a temp's value is assigned to a variable, the temp's drop flag is cleared.
-	stringTempMap   map[value.Value]string
-	tempCounter     int
-	branchExprDepth int // >0 = inside match/if expr branch, suppress temp tracking
+	// T0073: Statement-level temporary tracking for heap-allocated strings.
+	// Tracks string temporaries from subexpressions (e.g., `42.to_string()` in
+	// `assert(42.to_string() == "42")`) and drops them at statement end.
+	stmtTemps           []stmtTemp
+	stmtTempMap         map[value.Value]int // SSA value → index in stmtTemps (-1 = claimed)
+	tempTrackingEnabled bool                // true only in user-defined free functions
 
 	// PAL (Platform Abstraction Layer) function references
 	palWrite   *ir.Func // @pal_write(i32 fd, i8* buf, i64 len) → i64
@@ -353,6 +353,14 @@ type scopeBinding struct {
 	generatorSlot   *ir.InstAlloca // yield slot alloca (for free)
 }
 
+// stmtTemp tracks a heap-allocated string temporary from a subexpression (T0073).
+// Entry-block allocas are initialized to null/false so branch-produced temps
+// have defined values on all paths.
+type stmtTemp struct {
+	alloca   *ir.InstAlloca // entry-block i8* alloca, initialized to null
+	dropFlag *ir.InstAlloca // entry-block i1, initialized to false
+}
+
 // closeErrCapture holds entry-block allocas used to capture the first failable
 // close() error during scope cleanup. Used only when c.canError && !errorInFlight.
 type closeErrCapture struct {
@@ -507,6 +515,7 @@ func compile(file *ast.File, info *sema.Info, target string, opts *CompileOption
 		valueTypeRTTI:      make(map[*types.Named]*ir.Global),
 		dropFlags:          make(map[string]*ir.InstAlloca),
 		dropBindings:       make(map[string]scopeBinding),
+		stmtTempMap:        make(map[value.Value]int),
 		thunks:             make(map[string]*ir.Func),
 		file:               file,
 		moduleFuncs:        make(map[string]*ir.Func),
@@ -3501,6 +3510,12 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 	c.localNameCount = make(map[string]int)
 	c.dropFlags = make(map[string]*ir.InstAlloca)
 	c.dropBindings = make(map[string]scopeBinding)
+	c.stmtTemps = nil                         // T0073
+	c.stmtTempMap = make(map[value.Value]int) // T0073
+	// T0073: Enable temp tracking only for user free functions (not module methods,
+	// not coroutine wrappers). Module-internal tests merge module source with the
+	// test file, so compilingModule is empty — we use this flag to opt in explicitly.
+	c.tempTrackingEnabled = c.compilingModule == ""
 	c.mutRefPtrs = nil
 	c.mutRefTypes = nil
 	c.blockCounter = 0
@@ -3932,6 +3947,9 @@ func (c *Compiler) defineModuleFuncs(file *ast.File, moduleName string) {
 		c.localNameCount = make(map[string]int)
 		c.dropFlags = make(map[string]*ir.InstAlloca)
 		c.dropBindings = make(map[string]scopeBinding)
+		c.stmtTemps = nil                         // T0073
+		c.stmtTempMap = make(map[value.Value]int) // T0073
+		c.tempTrackingEnabled = false             // T0073
 		c.mutRefPtrs = nil
 		c.mutRefTypes = nil
 		c.scopeBindings = nil
@@ -4088,6 +4106,9 @@ func (c *Compiler) defineModuleTypeMethods(file *ast.File, moduleName string) {
 			c.localNameCount = make(map[string]int)
 			c.dropFlags = make(map[string]*ir.InstAlloca)
 			c.dropBindings = make(map[string]scopeBinding)
+			c.stmtTemps = nil                         // T0073
+			c.stmtTempMap = make(map[value.Value]int) // T0073
+			c.tempTrackingEnabled = false             // T0073
 			c.scopeBindings = nil
 			c.canError = m.Sig().CanError()
 			c.currentRetType = m.Sig().Result()
@@ -4564,6 +4585,9 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 	c.localNameCount = make(map[string]int)
 	c.dropFlags = make(map[string]*ir.InstAlloca)
 	c.dropBindings = make(map[string]scopeBinding)
+	c.stmtTemps = nil                         // T0073
+	c.stmtTempMap = make(map[value.Value]int) // T0073
+	c.tempTrackingEnabled = false             // T0073
 	c.mutRefPtrs = nil
 	c.mutRefTypes = nil
 	c.scopeBindings = nil
@@ -5169,46 +5193,52 @@ func findMonoParentName(named *types.Named, ownerName string, subst map[*types.T
 // compilerState captures the mutable compiler fields that defineMethodFunc overwrites.
 // Used to save/restore state when synthesizing default methods during another function's codegen.
 type compilerState struct {
-	fn               *ir.Func
-	block            *ir.Block
-	entryBlock       *ir.Block
-	locals           map[string]*ir.InstAlloca
-	localNameCount   map[string]int
-	dropFlags        map[string]*ir.InstAlloca
-	dropBindings     map[string]scopeBinding
-	blockCounter     int
-	canError         bool
-	currentRetType   types.Type
-	currentNamed     *types.Named
-	scopeBindings    []scopeBinding
-	loopScopeDepth   int
-	selfSubst        *selfSubstInfo
-	targetType       types.Type
-	typeSubst        map[*types.TypeParam]types.Type
-	monoCtx          *monoContext
-	lambdaWritebacks []lambdaWriteback
+	fn                  *ir.Func
+	block               *ir.Block
+	entryBlock          *ir.Block
+	locals              map[string]*ir.InstAlloca
+	localNameCount      map[string]int
+	dropFlags           map[string]*ir.InstAlloca
+	dropBindings        map[string]scopeBinding
+	blockCounter        int
+	canError            bool
+	currentRetType      types.Type
+	currentNamed        *types.Named
+	scopeBindings       []scopeBinding
+	loopScopeDepth      int
+	selfSubst           *selfSubstInfo
+	targetType          types.Type
+	typeSubst           map[*types.TypeParam]types.Type
+	monoCtx             *monoContext
+	lambdaWritebacks    []lambdaWriteback
+	stmtTemps           []stmtTemp
+	stmtTempMap         map[value.Value]int
+	tempTrackingEnabled bool
 }
 
 func (c *Compiler) saveState() compilerState {
 	return compilerState{
-		fn:               c.fn,
-		block:            c.block,
-		entryBlock:       c.entryBlock,
-		locals:           c.locals,
-		localNameCount:   c.localNameCount,
-		dropFlags:        c.dropFlags,
-		dropBindings:     c.dropBindings,
-		blockCounter:     c.blockCounter,
-		canError:         c.canError,
-		currentRetType:   c.currentRetType,
-		currentNamed:     c.currentNamed,
-		scopeBindings:    c.scopeBindings,
-		loopScopeDepth:   c.loopScopeDepth,
-		selfSubst:        c.selfSubst,
-		targetType:       c.targetType,
-		typeSubst:        c.typeSubst,
-		monoCtx:          c.monoCtx,
-		lambdaWritebacks: c.lambdaWritebacks,
+		fn:                  c.fn,
+		block:               c.block,
+		entryBlock:          c.entryBlock,
+		locals:              c.locals,
+		localNameCount:      c.localNameCount,
+		dropFlags:           c.dropFlags,
+		dropBindings:        c.dropBindings,
+		blockCounter:        c.blockCounter,
+		canError:            c.canError,
+		currentRetType:      c.currentRetType,
+		currentNamed:        c.currentNamed,
+		scopeBindings:       c.scopeBindings,
+		loopScopeDepth:      c.loopScopeDepth,
+		selfSubst:           c.selfSubst,
+		targetType:          c.targetType,
+		typeSubst:           c.typeSubst,
+		monoCtx:             c.monoCtx,
+		lambdaWritebacks:    c.lambdaWritebacks,
+		stmtTemps:           c.stmtTemps,
+		stmtTempMap:         c.stmtTempMap,
+		tempTrackingEnabled: c.tempTrackingEnabled,
 	}
 }
 
@@ -5220,6 +5250,9 @@ func (c *Compiler) restoreState(s compilerState) {
 	c.localNameCount = s.localNameCount
 	c.dropFlags = s.dropFlags
 	c.dropBindings = s.dropBindings
+	c.stmtTemps = s.stmtTemps
+	c.stmtTempMap = s.stmtTempMap
+	c.tempTrackingEnabled = s.tempTrackingEnabled
 	c.blockCounter = s.blockCounter
 	c.canError = s.canError
 	c.currentRetType = s.currentRetType

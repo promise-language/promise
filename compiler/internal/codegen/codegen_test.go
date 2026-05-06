@@ -9213,6 +9213,52 @@ func TestBindingFreeReassignment(t *testing.T) {
 	assertContains(t, ir, "call void @pal_free")
 }
 
+// T0073: Primitive to_string temp is dropped at statement end when not assigned
+func TestStringTempDropAtStatementEnd(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			assert(42.to_string() == "42", "ok");
+		}
+		main() {}
+	`)
+	// Should have temp drop blocks from cleanupStmtTemps
+	assertContains(t, ir, "tmp.drop")
+	assertContains(t, ir, "tmp.skip")
+	assertContains(t, ir, "call void @promise_string_drop")
+}
+
+// T0073: Primitive to_string temp is claimed when assigned to a variable
+func TestStringTempClaimedOnAssign(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			s := 42.to_string();
+			assert(s == "42", "ok");
+		}
+		main() {}
+	`)
+	// The temp is tracked then claimed — the variable's drop binding handles cleanup.
+	// The temp cleanup blocks should still exist but the flag should be cleared.
+	assertContains(t, ir, "s.dropflag")
+	assertContains(t, ir, "call void @promise_string_drop")
+}
+
+// T0073: Match expression with to_string in an arm — temp claimed by phi
+func TestStringTempInMatchArm(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			int n = 7;
+			string r = match n {
+				1 => "one",
+				_ => n.to_string(),
+			};
+			assert(r == "7", "ok");
+		}
+		main() {}
+	`)
+	// Should compile without domination errors; the temp in the _ arm is claimed
+	assertContains(t, ir, "r.dropflag")
+}
+
 // B0158: Synthesized drop coexists with explicit drop (explicit takes precedence)
 func TestDropExplicitTakesPrecedence(t *testing.T) {
 	ir := generateIR(t, `

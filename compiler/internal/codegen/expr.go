@@ -44,7 +44,16 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 	case *ast.UnaryExpr:
 		return c.genUnaryExpr(e)
 	case *ast.CallExpr:
-		return c.genCallExpr(e)
+		result := c.genCallExpr(e)
+		// T0073: Track known-safe string-producing calls (primitive to_string, string methods)
+		if result != nil && result.Type() == irtypes.I8Ptr {
+			if rt := c.info.Types[e]; rt != nil && extractNamed(rt) == types.TypString {
+				if c.isTrackedStringCall(e) {
+					c.trackStringTemp(result)
+				}
+			}
+		}
+		return result
 	case *ast.MemberExpr:
 		return c.genMemberExpr(e)
 	case *ast.ThisExpr:
@@ -3432,6 +3441,7 @@ func (c *Compiler) genEnumMatch(e *ast.MatchExpr, subject value.Value, enum *typ
 		} else if arm.Block != nil {
 			armVal = c.genBlockValue(arm.Block)
 		}
+		c.claimStringTemp(armVal) // T0073: ownership transfers to match phi
 
 		armEnd := c.block
 		if c.block.Term == nil {
@@ -3567,6 +3577,7 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 			} else if arm.Block != nil {
 				armVal = c.genBlockValue(arm.Block)
 			}
+			c.claimStringTemp(armVal) // T0073
 			armEnd := c.block
 			if c.block.Term == nil {
 				c.block.NewBr(mergeBlock)
@@ -3603,6 +3614,7 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 				} else if arm.Block != nil {
 					armVal = c.genBlockValue(arm.Block)
 				}
+				c.claimStringTemp(armVal) // T0073
 				armEnd := c.block
 				if c.block.Term == nil {
 					c.block.NewBr(mergeBlock)
@@ -3619,6 +3631,7 @@ func (c *Compiler) genValueMatch(e *ast.MatchExpr, subject value.Value, subjectT
 				} else if arm.Block != nil {
 					armVal = c.genBlockValue(arm.Block)
 				}
+				c.claimStringTemp(armVal) // T0073
 				armEnd := c.block
 				if c.block.Term == nil {
 					c.block.NewBr(mergeBlock)
@@ -3722,6 +3735,7 @@ func (c *Compiler) genIfExpr(e *ast.IfExpr) value.Value {
 	// Then branch
 	c.block = thenBlock
 	thenVal := c.genBlockValue(e.Then)
+	c.claimStringTemp(thenVal) // T0073
 	thenEnd := c.block
 	if c.block.Term == nil {
 		c.block.NewBr(mergeBlock)
@@ -3730,6 +3744,7 @@ func (c *Compiler) genIfExpr(e *ast.IfExpr) value.Value {
 	// Else branch
 	c.block = elseBlock
 	elseVal := c.genBlockValue(e.Else)
+	c.claimStringTemp(elseVal) // T0073
 	elseEnd := c.block
 	if c.block.Term == nil {
 		c.block.NewBr(mergeBlock)
@@ -4924,7 +4939,10 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	savedLoopScopeDepth := c.loopScopeDepth
 	savedWritebacks := c.lambdaWritebacks
 	savedGoExprFF2 := c.goExprFireAndForget
-	c.goExprFireAndForget = false // reset for inner statements (B0109)
+	savedStmtTemps := c.stmtTemps              // T0073
+	savedStmtTempMap := c.stmtTempMap          // T0073
+	savedTempTracking := c.tempTrackingEnabled // T0073
+	c.goExprFireAndForget = false              // reset for inner statements (B0109)
 
 	// Generate lambda body with fresh scope state
 	c.fn = fn
@@ -4936,6 +4954,9 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.scopeBindings = nil
 	c.dropFlags = make(map[string]*ir.InstAlloca)
 	c.dropBindings = make(map[string]scopeBinding)
+	c.stmtTemps = nil                         // T0073
+	c.stmtTempMap = make(map[value.Value]int) // T0073
+	c.tempTrackingEnabled = false             // T0073
 	c.loopScopeDepth = 0
 	c.lambdaWritebacks = nil
 
@@ -5026,6 +5047,9 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	c.loopScopeDepth = savedLoopScopeDepth
 	c.lambdaWritebacks = savedWritebacks
 	c.goExprFireAndForget = savedGoExprFF2
+	c.stmtTemps = savedStmtTemps              // T0073
+	c.stmtTempMap = savedStmtTempMap          // T0073
+	c.tempTrackingEnabled = savedTempTracking // T0073
 
 	// Return fat pointer: {fn_ptr as i8*, env_ptr}
 	fnPtr := c.block.NewBitCast(fn, irtypes.I8Ptr)

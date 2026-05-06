@@ -9,6 +9,7 @@ import (
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
+	"github.com/llir/llvm/ir/value"
 )
 
 // defineEmbedGetter generates the body of a module-level getter that returns
@@ -21,6 +22,9 @@ func (c *Compiler) defineEmbedGetter(fd *ast.FuncDecl, fn *ir.Func, embed *sema.
 	c.localNameCount = make(map[string]int)
 	c.dropFlags = make(map[string]*ir.InstAlloca)
 	c.dropBindings = make(map[string]scopeBinding)
+	c.stmtTemps = nil                         // T0073
+	c.stmtTempMap = make(map[value.Value]int) // T0073
+	c.tempTrackingEnabled = false             // T0073
 	c.blockCounter = 0
 
 	entry := fn.NewBlock(".entry")

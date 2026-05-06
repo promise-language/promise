@@ -178,6 +178,10 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 	default:
 		panic(fmt.Sprintf("codegen: unhandled statement type %T", stmt))
 	}
+	// T0073: Drop any unclaimed string temps from this statement.
+	if c.block != nil && c.block.Term == nil {
+		c.cleanupStmtTemps()
+	}
 }
 
 // genAutoPropagate generates implicit error propagation for a failable call
@@ -331,6 +335,10 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	if ident, ok := s.Value.(*ast.IdentExpr); ok {
 		c.clearDropFlag(ident.Name)
 	}
+	// T0073: Claim string temp — ownership transferred to this variable.
+	if exprType != nil && extractNamed(exprType) == types.TypString {
+		c.claimStringTemp(val)
+	}
 
 	c.block.NewStore(val, alloca)
 	c.locals[s.Name] = alloca
@@ -366,6 +374,10 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	// Without this, `b := a` would leave both a and b with active drop flags → double-free.
 	if ident, ok := s.Value.(*ast.IdentExpr); ok {
 		c.clearDropFlag(ident.Name)
+	}
+	// T0073: Claim string temp — ownership transferred to this variable.
+	if extractNamed(typ) == types.TypString {
+		c.claimStringTemp(val)
 	}
 
 	c.block.NewStore(val, alloca)
@@ -1002,6 +1014,148 @@ func (c *Compiler) emitEnvFree(b scopeBinding) {
 	c.block = skipBlock
 }
 
+// trackStringTemp registers a heap-allocated string temporary for cleanup at
+// statement end (T0073). Entry-block allocas are initialized to null/false so
+// temps created inside branches have defined values on all paths.
+func (c *Compiler) trackStringTemp(val value.Value) {
+	if val == nil || c.block == nil || c.block.Term != nil {
+		return
+	}
+	if c.entryBlock == nil {
+		return
+	}
+	// Only track values that are actually i8* (string pointers).
+	// Failable calls return structs like {i1, i8*} — those are NOT string temps.
+	if val.Type() != irtypes.I8Ptr {
+		return
+	}
+	// Only track when explicitly enabled for the current function (T0073).
+	// Set to true in defineFunc for user-defined free functions only.
+	if !c.tempTrackingEnabled {
+		return
+	}
+	// Don't double-track the same SSA value
+	if _, ok := c.stmtTempMap[val]; ok {
+		return
+	}
+
+	// Create entry-block allocas via createEntryAlloca (handles coroutine layout).
+	// Initialize alloca to null and flag to false in the CURRENT block — the alloca
+	// values are undefined until we store to them, and we always check the flag
+	// before reading the alloca value (flag false → skip drop → never read alloca).
+	alloca := c.createEntryAlloca(irtypes.I8Ptr)
+	dropFlag := c.createEntryAlloca(irtypes.I1)
+
+	// Initialize flag to false, then store value and set flag to true.
+	// The flag starts false; we set it true AFTER storing the value.
+	// This ensures the flag is never true when the alloca is uninitialized.
+	c.block.NewStore(constant.NewInt(irtypes.I1, 0), dropFlag)
+	c.block.NewStore(val, alloca)
+	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+
+	idx := len(c.stmtTemps)
+	c.stmtTemps = append(c.stmtTemps, stmtTemp{alloca: alloca, dropFlag: dropFlag})
+	c.stmtTempMap[val] = idx
+}
+
+// claimStringTemp marks a tracked string temp as consumed (ownership transferred
+// to a variable, constructor field, or container). Clears the drop flag so the
+// temp won't be freed at statement end.
+func (c *Compiler) claimStringTemp(val value.Value) {
+	if val == nil {
+		return
+	}
+	idx, ok := c.stmtTempMap[val]
+	if !ok || idx < 0 {
+		return
+	}
+	// Clear drop flag — ownership transferred
+	c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.stmtTemps[idx].dropFlag)
+	c.stmtTempMap[val] = -1
+}
+
+// cleanupStmtTemps drops all unclaimed string temps at statement end (T0073).
+// For each temp: check flag → null-check ptr → call promise_string_drop.
+func (c *Compiler) cleanupStmtTemps() {
+	if len(c.stmtTemps) == 0 {
+		return
+	}
+	if c.block == nil || c.block.Term != nil {
+		c.stmtTemps = c.stmtTemps[:0]
+		c.stmtTempMap = make(map[value.Value]int)
+		return
+	}
+
+	dropFunc := c.funcs["promise_string_drop"]
+	if dropFunc == nil {
+		c.stmtTemps = c.stmtTemps[:0]
+		c.stmtTempMap = make(map[value.Value]int)
+		return
+	}
+
+	for _, temp := range c.stmtTemps {
+		flag := c.block.NewLoad(irtypes.I1, temp.dropFlag)
+		dropBlock := c.newBlock("tmp.drop")
+		skipBlock := c.newBlock("tmp.skip")
+		c.block.NewCondBr(flag, dropBlock, skipBlock)
+
+		c.block = dropBlock
+		ptr := c.block.NewLoad(irtypes.I8Ptr, temp.alloca)
+		isNull := c.block.NewICmp(enum.IPredEQ, ptr, constant.NewNull(irtypes.I8Ptr))
+		execBlock := c.newBlock("tmp.exec")
+		doneBlock := c.newBlock("tmp.done")
+		c.block.NewCondBr(isNull, doneBlock, execBlock)
+
+		c.block = execBlock
+		c.block.NewCall(dropFunc, ptr)
+		c.block.NewBr(doneBlock)
+
+		c.block = doneBlock
+		c.block.NewBr(skipBlock)
+
+		c.block = skipBlock
+	}
+
+	c.stmtTemps = c.stmtTemps[:0]
+	c.stmtTempMap = make(map[value.Value]int)
+}
+
+// isTrackedStringCall returns true if the call expression is a known-safe site
+// that produces a NEW heap-allocated string (T0073). We only track these known
+// producers rather than all method calls returning strings, because some methods
+// may return borrows from internal state.
+func (c *Compiler) isTrackedStringCall(e *ast.CallExpr) bool {
+	member, ok := e.Callee.(*ast.MemberExpr)
+	if !ok {
+		return false
+	}
+	targetType := c.info.Types[member.Target]
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+	named := extractNamed(targetType)
+	if named == nil {
+		return false
+	}
+	// Primitive type methods (to_string, format) always produce new strings
+	if isPrimitiveScalar(named) {
+		return true
+	}
+	// String methods that produce new strings
+	if named == types.TypString {
+		switch member.Field {
+		case "to_upper", "to_lower", "repeat", "replace", "trim",
+			"trim_start", "trim_end", "from_bytes":
+			return true
+		}
+	}
+	// Note: to_string()/format() on user types are NOT tracked here because
+	// callFormatToString allocates a Builder that leaks — the Builder and its
+	// returned string share memory, so freeing the string temp would corrupt
+	// the Builder (B0167). Track these when B0167 is fixed.
+	return false
+}
+
 // maybeRegisterEnvFree registers a scope binding to free the closure's env struct
 // at scope exit. Only applies to variables whose type is *types.Signature (function values).
 func (c *Compiler) maybeRegisterEnvFree(varName string, alloca *ir.InstAlloca, typ types.Type) {
@@ -1146,6 +1300,10 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			// Clear drop flag on RHS if it's being moved
 			if ident, ok := s.Value.(*ast.IdentExpr); ok {
 				c.clearDropFlag(ident.Name)
+			}
+			// T0073: Claim string temp — ownership transferred to this variable.
+			if exprType != nil && extractNamed(exprType) == types.TypString {
+				c.claimStringTemp(val)
 			}
 			return
 		}
@@ -1820,6 +1978,7 @@ func (c *Compiler) genIfStmtValue(s *ast.IfStmt) value.Value {
 	// Then branch — capture value
 	c.block = thenBlock
 	thenVal := c.genBlockValue(s.Body)
+	c.claimStringTemp(thenVal) // T0073
 	thenEnd := c.block
 	if c.block.Term == nil {
 		c.block.NewBr(mergeBlock)
@@ -1836,6 +1995,7 @@ func (c *Compiler) genIfStmtValue(s *ast.IfStmt) value.Value {
 	default:
 		c.genStmt(s.Else)
 	}
+	c.claimStringTemp(elseVal) // T0073
 	elseEnd := c.block
 	if c.block.Term == nil {
 		c.block.NewBr(mergeBlock)

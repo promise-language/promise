@@ -9306,6 +9306,26 @@ func TestStringTempDropAtStatementEnd(t *testing.T) {
 	assertContains(t, ir, "call void @promise_string_drop")
 }
 
+// T0103: String temp cleanup on error propagation path
+func TestStringTempCleanupOnErrorPath(t *testing.T) {
+	ir := generateIR(t, `
+		fail() int! {
+			raise error(message: "fail");
+		}
+		use_both(string s, int x) int {
+			return x;
+		}
+		work() int! {
+			return use_both("hello".to_upper(), fail());
+		}
+		main() {}
+	`)
+	// Should have error-path temp cleanup blocks (T0103)
+	assertContains(t, ir, "err.tmp.drop")
+	assertContains(t, ir, "err.tmp.skip")
+	assertContains(t, ir, "call void @promise_string_drop")
+}
+
 // T0073: Primitive to_string temp is claimed when assigned to a variable
 func TestStringTempClaimedOnAssign(t *testing.T) {
 	ir := generateIR(t, `

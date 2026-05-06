@@ -3925,8 +3925,10 @@ func (c *Compiler) genErrorPropagateExpr(e *ast.ErrorPropagateExpr) value.Value 
 	okBlock := c.newBlock("error.ok")
 	c.block.NewCondBr(tag, propagateBlock, okBlock)
 
-	// Error path: cleanup scope bindings, extract error, wrap in caller's result type, early return
+	// Error path: cleanup stmt temps + scope bindings, extract error, wrap in caller's result type, early return
 	c.block = propagateBlock
+	c.emitStmtTempCleanupForErrorPath() // T0103: free string temps before returning
+	c.emitHeapTempCleanupForErrorPath() // T0103: free heap temps before returning
 	if len(c.scopeBindings) > 0 {
 		c.emitScopeCleanup(0, true) // error in flight — suppress close errors
 	}
@@ -3998,8 +4000,10 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 	mergeBlock := c.newBlock("error.merge")
 	c.block.NewCondBr(tag, handlerBlock, okBlock)
 
-	// Handler block
+	// Handler block: clean up stmt temps before running handler body (T0103)
 	c.block = handlerBlock
+	c.emitStmtTempCleanupForErrorPath()
+	c.emitHeapTempCleanupForErrorPath()
 	errVal := c.block.NewExtractValue(result, resultErrIdx(resultType))
 
 	var noMatchVal value.Value

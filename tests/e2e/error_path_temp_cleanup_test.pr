@@ -1,0 +1,90 @@
+// T0103: Tests for failable call error-path string/heap temp cleanup.
+// When a failable call fails, tracked string/heap temps accumulated before
+// the call in the same statement must be cleaned up on the error path.
+// Helper: always fails
+always_fail() int! {
+  raise error(message: "fail");
+}
+
+// Helper: accepts a string and a failable int
+use_both(string s, int x) int {
+  return x;
+}
+
+// Pattern 1: string method creates a tracked temp, then failable call fails.
+// to_upper() produces a tracked string temp. When always_fail() fails, the
+// error propagation path must clean it up via emitStmtTempCleanupForErrorPath.
+pattern_method_temp_then_propagate() int! {
+  return use_both("hello".to_upper(), always_fail());
+}
+
+test_method_temp_then_propagate() `test {
+  pattern_method_temp_then_propagate()? e {
+    assert(e.message == "fail", "error propagated");
+  };
+}
+
+// Pattern 2: string concat creates a tracked temp, then failable call fails.
+pattern_concat_temp_then_propagate() int! {
+  return use_both("hello" + " world", always_fail());
+}
+
+test_concat_temp_then_propagate() `test {
+  pattern_concat_temp_then_propagate()? e {
+    assert(e.message == "fail", "error propagated");
+  };
+}
+
+// Pattern 3: to_string() creates a tracked temp, then failable call fails.
+pattern_to_string_temp_then_propagate() int! {
+  return use_both(42.to_string(), always_fail());
+}
+
+test_to_string_temp_then_propagate() `test {
+  pattern_to_string_temp_then_propagate()? e {
+    assert(e.message == "fail", "error propagated");
+  };
+}
+
+// Pattern 4: multiple tracked temps, failable call fails.
+use_three(string a, string b, int x) int {
+  return x;
+}
+
+pattern_multi_temps_then_propagate() int! {
+  return use_three("hello".to_upper(), 99.to_string(), always_fail());
+}
+
+test_multi_temps_then_propagate() `test {
+  pattern_multi_temps_then_propagate()? e {
+    assert(e.message == "fail", "error propagated");
+  };
+}
+
+// Pattern 5: tracked temp with error handler (? { }) instead of propagation.
+always_fail_str(string s) int! {
+  raise error(message: "fail");
+}
+
+pattern_method_temp_with_handler() string {
+  always_fail_str("hello".to_lower())? e {
+    return "caught";
+  };
+  return "unreachable";
+}
+
+test_method_temp_with_handler() `test {
+  assert(pattern_method_temp_with_handler() == "caught", "handler runs correctly");
+}
+
+// Pattern 6: auto-propagation (no explicit ? or !) with tracked temp.
+auto_prop_with_temp() int! {
+  int result = use_both("test".to_upper(), always_fail());
+  return result;
+}
+
+test_auto_prop_with_temp() `test {
+  auto_prop_with_temp()? e {
+    assert(e.message == "fail", "auto-propagated");
+  };
+}

@@ -245,8 +245,10 @@ func (c *Compiler) genAutoPropagate(expr ast.Expr) {
 	okBlock := c.newBlock("auto.ok")
 	c.block.NewCondBr(tag, propagateBlock, okBlock)
 
-	// Error path: cleanup scope bindings, extract error, wrap in caller's result type, early return
+	// Error path: cleanup stmt temps + scope bindings, extract error, wrap in caller's result type, early return
 	c.block = propagateBlock
+	c.emitStmtTempCleanupForErrorPath() // T0103: free string temps before returning
+	c.emitHeapTempCleanupForErrorPath() // T0103: free heap temps before returning
 	if len(c.scopeBindings) > 0 {
 		c.emitScopeCleanup(0, true) // error in flight — suppress close errors
 	}
@@ -270,8 +272,10 @@ func (c *Compiler) genAutoPropagateValue(result value.Value) value.Value {
 	okBlock := c.newBlock("auto.ok")
 	c.block.NewCondBr(tag, propagateBlock, okBlock)
 
-	// Error path: cleanup scope bindings, extract error, wrap in caller's result type, early return
+	// Error path: cleanup stmt temps + scope bindings, extract error, wrap in caller's result type, early return
 	c.block = propagateBlock
+	c.emitStmtTempCleanupForErrorPath() // T0103: free string temps before returning
+	c.emitHeapTempCleanupForErrorPath() // T0103: free heap temps before returning
 	if len(c.scopeBindings) > 0 {
 		c.emitScopeCleanup(0, true) // error in flight — suppress close errors
 	}
@@ -1240,6 +1244,85 @@ func (c *Compiler) cleanupStmtTemps() {
 
 	c.stmtTemps = c.stmtTemps[:0]
 	c.stmtTempMap = make(map[value.Value]int)
+}
+
+// emitStmtTempCleanupForErrorPath emits cleanup IR for statement-level string
+// temps without resetting the tracking state (T0103). Used on error propagation
+// paths where the error branch terminates (ret/unreachable) but the ok branch
+// continues and still needs cleanup at statement end. The drop flags are stored
+// in allocas, so each path independently checks and clears them at runtime.
+func (c *Compiler) emitStmtTempCleanupForErrorPath() {
+	if len(c.stmtTemps) == 0 {
+		return
+	}
+	if c.block == nil || c.block.Term != nil {
+		return
+	}
+
+	dropFunc := c.funcs["promise_string_drop"]
+	if dropFunc == nil {
+		return
+	}
+
+	for _, temp := range c.stmtTemps {
+		flag := c.block.NewLoad(irtypes.I1, temp.dropFlag)
+		dropBlock := c.newBlock("err.tmp.drop")
+		skipBlock := c.newBlock("err.tmp.skip")
+		c.block.NewCondBr(flag, dropBlock, skipBlock)
+
+		c.block = dropBlock
+		ptr := c.block.NewLoad(irtypes.I8Ptr, temp.alloca)
+		isNull := c.block.NewICmp(enum.IPredEQ, ptr, constant.NewNull(irtypes.I8Ptr))
+		execBlock := c.newBlock("err.tmp.exec")
+		doneBlock := c.newBlock("err.tmp.done")
+		c.block.NewCondBr(isNull, doneBlock, execBlock)
+
+		c.block = execBlock
+		c.block.NewCall(dropFunc, ptr)
+		c.block.NewBr(doneBlock)
+
+		c.block = doneBlock
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), temp.dropFlag)
+		c.block.NewBr(skipBlock)
+
+		c.block = skipBlock
+	}
+}
+
+// emitHeapTempCleanupForErrorPath emits cleanup IR for statement-level heap
+// instance temps without resetting the tracking state (T0103). Same rationale
+// as emitStmtTempCleanupForErrorPath.
+func (c *Compiler) emitHeapTempCleanupForErrorPath() {
+	if len(c.heapTemps) == 0 {
+		return
+	}
+	if c.block == nil || c.block.Term != nil {
+		return
+	}
+
+	for _, temp := range c.heapTemps {
+		flag := c.block.NewLoad(irtypes.I1, temp.dropFlag)
+		dropBlock := c.newBlock("err.heap.drop")
+		skipBlock := c.newBlock("err.heap.skip")
+		c.block.NewCondBr(flag, dropBlock, skipBlock)
+
+		c.block = dropBlock
+		ptr := c.block.NewLoad(irtypes.I8Ptr, temp.alloca)
+		isNull := c.block.NewICmp(enum.IPredEQ, ptr, constant.NewNull(irtypes.I8Ptr))
+		execBlock := c.newBlock("err.heap.exec")
+		doneBlock := c.newBlock("err.heap.done")
+		c.block.NewCondBr(isNull, doneBlock, execBlock)
+
+		c.block = execBlock
+		c.block.NewCall(temp.dropFunc, ptr)
+		c.block.NewBr(doneBlock)
+
+		c.block = doneBlock
+		c.block.NewStore(constant.NewInt(irtypes.I1, 0), temp.dropFlag)
+		c.block.NewBr(skipBlock)
+
+		c.block = skipBlock
+	}
 }
 
 // trackHeapTemp registers a heap-allocated droppable instance for cleanup at

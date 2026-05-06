@@ -2215,8 +2215,10 @@ The following abbreviations are **universally preferred exceptions** to the full
 | `len` | `length` |
 | `max` | `maximum` |
 | `min` | `minimum` |
+| `pos` | `position` |
 | `prev` | `previous` |
 | `src` | `source` |
+| `var` | `variable` |
 
 These abbreviations are so universally recognized that the abbreviated form is more readable than the full word. When a mapping is defined here, the abbreviation is the canonical form — code review should flag uses of the full word.
 

@@ -3,6 +3,7 @@ package codegen
 import (
 	"bytes"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -431,30 +432,44 @@ func TestPALWriteExitDefined(t *testing.T) {
 	`)
 	// PAL primitives are always emitted
 	assertContains(t, ir, "define i64 @pal_write(i32 %fd, i8* %buf, i64 %len)")
-	assertContains(t, ir, "call i64 @write(i32 %fd, i8* %buf, i64 %len)")
 	assertContains(t, ir, "define void @pal_exit(i32 %code)")
-	assertContains(t, ir, "call void @exit(i32 %code)")
+	if runtime.GOOS == "windows" {
+		// Windows PAL uses GetStdHandle+WriteFile and ExitProcess
+		assertContains(t, ir, "@GetStdHandle")
+		assertContains(t, ir, "@WriteFile")
+		assertContains(t, ir, "@ExitProcess")
+	} else {
+		assertContains(t, ir, "call i64 @write(i32 %fd, i8* %buf, i64 %len)")
+		assertContains(t, ir, "call void @exit(i32 %code)")
+	}
 }
 
 func TestStackOverflowHandler(t *testing.T) {
 	ir := generateIR(t, `
 		main() {}
 	`)
-	// B0010: Stack overflow detection — SIGSEGV handler is registered at startup
-	// Error message constant
+	// B0010: Stack overflow detection
+	// Error message constant (all platforms)
 	assertContains(t, ir, `@__promise_stack_overflow_msg = constant [22 x i8]`)
-	// Handler function exists with correct attributes
-	assertContains(t, ir, "define void @__promise_sigsegv_handler(i32 %sig)")
-	// Handler writes to stderr (fd 2) and calls _exit(2)
-	assertContains(t, ir, "call void @_exit(i32 2)")
-	// Init function is defined and called from main
+	// Init function is defined and called from main (all platforms)
 	assertContains(t, ir, "define void @pal_stack_overflow_init()")
 	assertContains(t, ir, "call void @pal_stack_overflow_init()")
-	// Thread init is defined and called from sched_loop
+	// Thread init is defined and called from sched_loop (all platforms)
 	assertContains(t, ir, "define void @pal_stack_overflow_thread_init()")
 	assertContains(t, ir, "call void @pal_stack_overflow_thread_init()")
-	// Guard page: pthread_attr_setguardsize in thread creation
-	assertContains(t, ir, "call i32 @pthread_attr_setguardsize(")
+
+	if runtime.GOOS == "windows" {
+		// Windows: VEH handler via AddVectoredExceptionHandler (B0141)
+		assertContains(t, ir, "define i32 @__promise_veh_handler(i8* %exception_pointers)")
+		assertContains(t, ir, "@AddVectoredExceptionHandler")
+		assertContains(t, ir, "@ExitProcess")
+	} else {
+		// POSIX: SIGSEGV handler
+		assertContains(t, ir, "define void @__promise_sigsegv_handler(i32 %sig)")
+		assertContains(t, ir, "call void @_exit(i32 2)")
+		// Guard page: pthread_attr_setguardsize in thread creation
+		assertContains(t, ir, "call i32 @pthread_attr_setguardsize(")
+	}
 }
 
 func TestPrintNewlineEmission(t *testing.T) {

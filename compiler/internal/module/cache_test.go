@@ -3,6 +3,7 @@ package module
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"djabi.dev/go/promise_lang/internal/types"
@@ -764,13 +765,15 @@ func TestTestBinaryCacheRoundTrip(t *testing.T) {
 		t.Errorf("cached data = %q, want %q", string(data), "fake binary data")
 	}
 
-	// Verify executable permissions.
-	info, err := os.Stat(cached)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode()&0111 == 0 {
-		t.Errorf("cached binary should be executable, mode = %v", info.Mode())
+	// Verify executable permissions (POSIX only — Windows determines executability by extension).
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(cached)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode()&0111 == 0 {
+			t.Errorf("cached binary should be executable, mode = %v", info.Mode())
+		}
 	}
 
 	// Two-level directory structure should exist.

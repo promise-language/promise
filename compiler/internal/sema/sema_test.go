@@ -3,6 +3,7 @@ package sema
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -11548,8 +11549,13 @@ func TestEmbedNoPathRejected(t *testing.T) {
 }
 
 func TestEmbedAbsolutePathRejected(t *testing.T) {
+	// Use a platform-appropriate absolute path
+	absPath := "/etc/passwd"
+	if runtime.GOOS == "windows" {
+		absPath = "C:\\\\Windows\\\\System32\\\\config"
+	}
 	errs := checkErrs(t, `
-		get schema string `+"`embed(\"/etc/passwd\")"+`;
+		get schema string `+"`embed(\""+absPath+"\")"+`;
 	`)
 	expectError(t, errs, "must be relative")
 }

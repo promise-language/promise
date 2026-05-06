@@ -788,22 +788,43 @@ func TestCommonDir_Empty(t *testing.T) {
 }
 
 func TestCommonDir_SameDir(t *testing.T) {
-	got := commonDir([]string{"/tmp/tests/a.pr", "/tmp/tests/b.pr"})
-	if got != "/tmp/tests" {
-		t.Errorf("got %q", got)
+	if runtime.GOOS == "windows" {
+		got := commonDir([]string{`C:\tmp\tests\a.pr`, `C:\tmp\tests\b.pr`})
+		if got != `C:\tmp\tests` {
+			t.Errorf("got %q", got)
+		}
+	} else {
+		got := commonDir([]string{"/tmp/tests/a.pr", "/tmp/tests/b.pr"})
+		if got != "/tmp/tests" {
+			t.Errorf("got %q", got)
+		}
 	}
 }
 
 func TestCommonDir_DifferentDirs(t *testing.T) {
-	got := commonDir([]string{"/tmp/tests/e2e/a.pr", "/tmp/tests/std/b.pr"})
-	if got != "/tmp/tests" {
-		t.Errorf("got %q", got)
+	if runtime.GOOS == "windows" {
+		got := commonDir([]string{`C:\tmp\tests\e2e\a.pr`, `C:\tmp\tests\std\b.pr`})
+		if got != `C:\tmp\tests` {
+			t.Errorf("got %q", got)
+		}
+	} else {
+		got := commonDir([]string{"/tmp/tests/e2e/a.pr", "/tmp/tests/std/b.pr"})
+		if got != "/tmp/tests" {
+			t.Errorf("got %q", got)
+		}
 	}
 }
 
 func TestCommonDir_NoCommonPrefix(t *testing.T) {
-	got := commonDir([]string{"/home/user/a.pr", "/opt/tests/b.pr"})
-	if got != "/" {
-		t.Errorf("got %q", got)
+	if runtime.GOOS == "windows" {
+		got := commonDir([]string{`C:\home\user\a.pr`, `C:\opt\tests\b.pr`})
+		if got != `C:\` {
+			t.Errorf("got %q", got)
+		}
+	} else {
+		got := commonDir([]string{"/home/user/a.pr", "/opt/tests/b.pr"})
+		if got != "/" {
+			t.Errorf("got %q", got)
+		}
 	}
 }

@@ -1030,7 +1030,7 @@ func commonDir(files []string) string {
 	}
 	common := filepath.Dir(abs[0])
 	for _, f := range abs[1:] {
-		for common != "/" && common != "." {
+		for !isRootDir(common) {
 			// Check with trailing separator to avoid /tmp/test matching /tmp/test2/
 			prefix := common + string(filepath.Separator)
 			if strings.HasPrefix(f, prefix) {
@@ -1040,4 +1040,17 @@ func commonDir(files []string) string {
 		}
 	}
 	return common
+}
+
+// isRootDir returns true if the path is a filesystem root.
+// On POSIX: "/". On Windows: "C:\", "D:\", etc.
+func isRootDir(path string) bool {
+	if path == "/" || path == "." {
+		return true
+	}
+	// Windows volume root: "C:\" or "C:/"
+	if len(path) == 3 && path[1] == ':' && (path[2] == '\\' || path[2] == '/') {
+		return true
+	}
+	return false
 }

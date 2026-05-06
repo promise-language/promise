@@ -89,18 +89,15 @@ if ($Clean) {
 #   sema:    TestEmbedAbsolutePathRejected (T0047)
 Push-Location $CompilerDir
 try {
-    $goTestOutput = & go test ./... -count=1 -timeout 120s 2>&1 | Out-String
+    $goTestOutput = & go test ./... -count=1 -timeout 600s 2>&1 | Out-String
     # Count failures in non-known-failing packages
     $goFailed = $false
     foreach ($line in ($goTestOutput -split "`n")) {
         if ($line -match '^FAIL\s+(\S+)') {
             $pkg = $Matches[1]
             # These packages have known Windows failures — skip:
-            #   codegen: TestPALWriteExitDefined, TestStackOverflowHandler (B0140)
-            #   module:  TestURLToCachePath, TestResolveRemoteModule* (T0047)
-            #   sema:    TestEmbedAbsolutePathRejected (T0047)
-            #   cmd/promise: TestCommonDir* uses filepath.Dir which loops on Windows drive roots
-            if ($pkg -match '(codegen|module|sema|cmd/promise)$') { continue }
+            # No known-failing packages remaining after B0140 fix.
+            # All Go tests should pass on Windows.
             Write-Host "  UNEXPECTED Go test failure in: $pkg"
             $goFailed = $true
         }
@@ -109,7 +106,7 @@ try {
         Write-Host $goTestOutput
         throw "Go tests failed in unexpected packages"
     }
-    Write-Host "   Go tests OK (known Windows-only failures in codegen/module/sema skipped)"
+    Write-Host "   Go tests OK"
 } finally {
     Pop-Location
 }

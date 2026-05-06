@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -108,7 +109,7 @@ func TestURLToCachePath(t *testing.T) {
 		{"/cache", "git.corp.com/team/utils", "/cache/git.corp.com/team/utils"},
 	}
 	for _, tt := range tests {
-		got := URLToCachePath(tt.cacheDir, tt.url)
+		got := filepath.ToSlash(URLToCachePath(tt.cacheDir, tt.url))
 		if got != tt.want {
 			t.Errorf("URLToCachePath(%q, %q) = %q, want %q", tt.cacheDir, tt.url, got, tt.want)
 		}
@@ -179,6 +180,9 @@ func TestEnsureBareRepoAndCheckout(t *testing.T) {
 }
 
 func TestResolveRemoteModuleLocalRepo(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("local repo paths contain ':' which is invalid in Windows cache paths")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -219,6 +223,9 @@ func TestResolveRemoteModuleLocalRepo(t *testing.T) {
 }
 
 func TestResolveRemoteModuleTwoCommits(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("local repo paths contain ':' which is invalid in Windows cache paths")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -437,11 +444,16 @@ func TestPinResolveNotFound(t *testing.T) {
 func TestCleanGlobalCache(t *testing.T) {
 	// Override HOME to a temp dir so we don't destroy real cache
 	origHome := os.Getenv("HOME")
+	origUserProfile := os.Getenv("USERPROFILE")
 	origPromiseHome := os.Getenv("PROMISE_HOME")
 	tmpHome := t.TempDir()
 	os.Unsetenv("PROMISE_HOME")
 	os.Setenv("HOME", tmpHome)
+	if runtime.GOOS == "windows" {
+		os.Setenv("USERPROFILE", tmpHome) // Windows uses USERPROFILE for home dir
+	}
 	defer os.Setenv("HOME", origHome)
+	defer os.Setenv("USERPROFILE", origUserProfile)
 	defer os.Setenv("PROMISE_HOME", origPromiseHome)
 
 	// Create cache dir with some content
@@ -469,11 +481,16 @@ func TestCleanGlobalCache(t *testing.T) {
 func TestCleanGlobalCacheNonexistent(t *testing.T) {
 	// Should not error when cache doesn't exist
 	origHome := os.Getenv("HOME")
+	origUserProfile := os.Getenv("USERPROFILE")
 	origPromiseHome := os.Getenv("PROMISE_HOME")
 	tmpHome := t.TempDir()
 	os.Unsetenv("PROMISE_HOME")
 	os.Setenv("HOME", tmpHome)
+	if runtime.GOOS == "windows" {
+		os.Setenv("USERPROFILE", tmpHome)
+	}
 	defer os.Setenv("HOME", origHome)
+	defer os.Setenv("USERPROFILE", origUserProfile)
 	defer os.Setenv("PROMISE_HOME", origPromiseHome)
 
 	if err := CleanGlobalCache(); err != nil {
@@ -482,6 +499,9 @@ func TestCleanGlobalCacheNonexistent(t *testing.T) {
 }
 
 func TestResolveRemoteModuleShortHash(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("local repo paths contain ':' which is invalid in Windows cache paths")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}

@@ -1165,8 +1165,10 @@ func TestStringLenMasksLiteralBit(t *testing.T) {
 
 func TestStringDropFuncBody(t *testing.T) {
 	ir := generateIR(t, `main() { s := "x"; }`)
-	// promise_string_drop checks bit 63 then conditionally frees
+	// T0093: promise_string_drop null-checks the pointer (for null fields in
+	// synthesized drops), then checks bit 63 (literal flag), then conditionally frees
 	assertContains(t, ir, "define void @promise_string_drop(i8* %ptr)")
+	assertContains(t, ir, "icmp eq i8* %ptr, null")
 	assertContains(t, ir, "icmp ne i64")
 	assertContains(t, ir, "call void @pal_free(")
 }

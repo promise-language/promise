@@ -1579,15 +1579,21 @@ func (c *Compiler) defineStringDropFunc() {
 	instType := strInstanceType()
 
 	entry := fn.NewBlock(".entry")
-	typedPtr := entry.NewBitCast(ptrParam, irtypes.NewPointer(instType))
-	rawLen := loadStringLenRaw(entry, typedPtr, instType)
+
+	// Null check: string fields in types may be null (zero-initialized error paths).
+	nullCheck := entry.NewICmp(enum.IPredEQ, ptrParam, constant.NewNull(irtypes.I8Ptr))
+	checkBlk := fn.NewBlock("check")
+	doneBlk := fn.NewBlock("done")
+	entry.NewCondBr(nullCheck, doneBlk, checkBlk)
+
+	typedPtr := checkBlk.NewBitCast(ptrParam, irtypes.NewPointer(instType))
+	rawLen := loadStringLenRaw(checkBlk, typedPtr, instType)
 
 	// If bit 63 is set, it's a literal in .rodata — don't free
-	bit63 := entry.NewAnd(rawLen, constant.NewInt(irtypes.I64, math.MinInt64))
-	isLiteral := entry.NewICmp(enum.IPredNE, bit63, constant.NewInt(irtypes.I64, 0))
+	bit63 := checkBlk.NewAnd(rawLen, constant.NewInt(irtypes.I64, math.MinInt64))
+	isLiteral := checkBlk.NewICmp(enum.IPredNE, bit63, constant.NewInt(irtypes.I64, 0))
 	freeBlk := fn.NewBlock("free")
-	doneBlk := fn.NewBlock("done")
-	entry.NewCondBr(isLiteral, doneBlk, freeBlk)
+	checkBlk.NewCondBr(isLiteral, doneBlk, freeBlk)
 
 	freeBlk.NewCall(c.palFree, ptrParam)
 	freeBlk.NewBr(doneBlk)

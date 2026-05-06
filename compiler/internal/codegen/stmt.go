@@ -490,6 +490,15 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 	// strings requires the ownership system to properly track string moves in
 	// all std module code. This will be done in a follow-up task.
 
+	// NOTE: Container type (Vector, Channel) scope-exit drop is not yet enabled.
+	// Vector.drop is defined and called via emitFieldDrops() for types that own
+	// vector fields, but registering scope-exit drop bindings for container
+	// variables requires the ownership system to properly track container moves
+	// (B0157). Without move tracking, aliased containers would be double-freed.
+	if isContainerType(typ) {
+		return
+	}
+
 	if !named.HasDrop() {
 		return
 	}
@@ -682,9 +691,19 @@ func (c *Compiler) emitDropCall(b scopeBinding) {
 // emitDropCallDirect emits the actual drop() call (direct or virtual dispatch).
 // Guards against null instance pointers (e.g., zero-initialized values from
 // error handler paths that don't produce a recovery value).
+// Container types (Vector, Channel) store raw i8* — not value structs — so we
+// load the i8* directly instead of extracting field 1 from a struct.
 func (c *Compiler) emitDropCallDirect(b scopeBinding) {
 	val := c.block.NewLoad(b.alloca.ElemType, b.alloca)
-	instance := c.extractInstancePtr(val)
+
+	// Container types (Vector, Channel) store raw i8* pointers, not value structs.
+	// Use the loaded i8* directly — extractInstancePtr would crash on a non-struct.
+	var instance value.Value
+	if isContainerType(b.valType) {
+		instance = val
+	} else {
+		instance = c.extractInstancePtr(val)
+	}
 
 	// Null-check instance pointer: zero-initialized values (from error handler
 	// fallthrough) have null instance — skip drop to avoid dereferencing null.

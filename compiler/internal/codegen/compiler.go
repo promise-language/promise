@@ -1105,6 +1105,7 @@ func (c *Compiler) declareIntrinsics() {
 	c.defineVectorPopFunc()
 	c.defineVectorContainsFunc()
 	c.defineVectorRemoveFunc()
+	c.defineVectorDropFunc()
 
 	// String trim/split/case/repeat (codegen-emitted LLVM IR)
 	c.defineStringTrimFunc()
@@ -2785,6 +2786,29 @@ func (c *Compiler) defineVectorRemoveFunc() {
 	c.funcs["promise_vector_remove"] = fn
 }
 
+// defineVectorDropFunc emits an LLVM IR function that frees a vector's heap buffer.
+// Vector layout: {i64 len, i64 cap, [data...]} — a single allocation via pal_alloc.
+// Drop just needs to null-check and free the raw i8* pointer.
+func (c *Compiler) defineVectorDropFunc() {
+	thisParam := ir.NewParam("this", irtypes.I8Ptr)
+	fn := c.module.NewFunc("Vector.drop", irtypes.Void, thisParam)
+
+	entry := fn.NewBlock(".entry")
+
+	// Null-check: zero-initialized values (from error handler fallthrough) may be null
+	isNull := entry.NewICmp(enum.IPredEQ, thisParam, constant.NewNull(irtypes.I8Ptr))
+	freeBlk := fn.NewBlock("free")
+	doneBlk := fn.NewBlock("done")
+	entry.NewCondBr(isNull, doneBlk, freeBlk)
+
+	freeBlk.NewCall(c.palFree, thisParam)
+	freeBlk.NewBr(doneBlk)
+
+	doneBlk.NewRet(nil)
+
+	c.funcs["Vector.drop"] = fn
+}
+
 // defineBoolToStringFunc emits an LLVM IR function that converts a boolean (i8)
 // to its string representation ("true" or "false").
 // Replaces the C runtime promise_bool_to_string.
@@ -4445,11 +4469,17 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 			continue
 		}
 
-		// Load the field value (a value struct: {vtable_ptr, instance_ptr})
+		// Load the field value. Container types (Vector, Channel) are stored as
+		// raw i8* pointers, not value structs — use the loaded value directly.
 		fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
 		fieldVal := c.block.NewLoad(layout.Instance.Fields[fieldIdx].LLVMType, fieldPtr)
-		fieldInstance := c.extractInstancePtr(fieldVal)
+		var fieldInstance value.Value
+		if isContainerType(f.Type()) {
+			fieldInstance = fieldVal
+		} else {
+			fieldInstance = c.extractInstancePtr(fieldVal)
+		}
 
 		// Resolve and call field type's drop() method
 		ownerName := c.resolveMethodOwner(fieldNamed, "drop")

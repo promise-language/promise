@@ -280,6 +280,11 @@ func (c *Checker) defineType(d *ast.TypeDecl) {
 		if newMethod := lookupOwnMethod(named, "new"); newMethod != nil {
 			named.SetHasNew(true)
 		}
+		// Validate and register drop() for native types (B0157)
+		if dropMethod := named.LookupMethod("drop"); dropMethod != nil {
+			c.validateDropMethod(named, dropMethod, d)
+			named.SetHasDrop(true)
+		}
 		c.validateMetas(d.Annotations, TargetType)
 		if c.hasAnnotation(d.Annotations, "public") {
 			named.SetExported(true)

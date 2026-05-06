@@ -3,6 +3,7 @@ type Vector[T] `native `public {
   get len int `native;
 
   new(int capacity = 16) `native;
+  drop(~this) `native;
 
   // Factory: creates a Vector filled with `count` copies of `value`.
   filled(T value, int count) Self `factory `public {

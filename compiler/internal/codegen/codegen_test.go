@@ -8180,7 +8180,36 @@ func TestDropMultipleFieldsAutoCleanup(t *testing.T) {
 	}
 }
 
-// Non-droppable type: no drop flag or call generated
+// Vector field drop: types with Vector fields should emit Vector.drop (B0157)
+func TestDropVectorField(t *testing.T) {
+	ir := generateIR(t, `
+		type Holder {
+			int[] items;
+			drop(~this) {}
+		}
+		main() {
+			h := Holder(items: [1, 2, 3]);
+		}
+	`)
+	// Container fields get dropped via emitFieldDrops in drop() body
+	assertContains(t, ir, "call void @Vector.drop")
+	assertContains(t, ir, "%h.dropflag")
+	assertContains(t, ir, "call void @Holder.drop")
+}
+
+// Standalone vector variables do NOT get scope-exit drop yet (needs ownership tracking)
+func TestDropVectorStandaloneNoDropYet(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[] v = [1, 2, 3];
+			int x = v.len;
+		}
+	`)
+	// No drop flag for standalone vector variables (B0157: requires ownership tracking)
+	assertNotContains(t, ir, "%v.dropflag")
+}
+
+// Non-droppable type: no drop flag or call generated for that variable
 func TestDropNotGeneratedForNonDroppable(t *testing.T) {
 	ir := generateIR(t, `
 		type Simple {
@@ -8191,9 +8220,8 @@ func TestDropNotGeneratedForNonDroppable(t *testing.T) {
 			int x = s.id;
 		}
 	`)
-	assertNotContains(t, ir, "dropflag")
-	assertNotContains(t, ir, "drop.call")
-	assertNotContains(t, ir, "drop.skip")
+	assertNotContains(t, ir, "%s.dropflag")
+	assertNotContains(t, ir, "Simple.drop")
 }
 
 // Copy type: no drop flag even if fields exist
@@ -8208,8 +8236,8 @@ func TestDropNotGeneratedForCopyType(t *testing.T) {
 			int v = p.x;
 		}
 	`)
-	assertNotContains(t, ir, "dropflag")
-	assertNotContains(t, ir, "drop.call")
+	assertNotContains(t, ir, "%p.dropflag")
+	assertNotContains(t, ir, "Point.drop")
 }
 
 // Droppable var in typed var decl
@@ -8633,8 +8661,8 @@ func TestDropCompoundAssignNoExtraDrop(t *testing.T) {
 			x += 5;
 		}
 	`)
-	// No drop blocks for primitive int
-	assertNotContains(t, ir, "drop.call")
+	// No drop blocks for primitive int variable x
+	assertNotContains(t, ir, "%x.dropflag")
 }
 
 // Non-droppable type reassignment should not emit drop
@@ -8647,8 +8675,9 @@ func TestDropOnReassignmentNonDroppable(t *testing.T) {
 		}
 		main() {}
 	`)
-	// No drop.call for non-droppable types
-	assertNotContains(t, ir, "drop.call")
+	// No drop for non-droppable types — check the test() function specifically
+	assertNotContains(t, ir, "%s.dropflag")
+	assertNotContains(t, ir, "Simple.drop")
 }
 
 // Reassignment inside if block: drop still emitted

@@ -1193,40 +1193,43 @@ func winDeclareGetStdHandle(module *ir.Module) *ir.Func {
 }
 
 // STARTUPINFOA layout on x64:
-//   offset  0: cb (i32, 4 bytes)
-//   offset  8: lpReserved (i8*, 8 bytes)
-//   offset 16: lpDesktop (i8*, 8 bytes)
-//   offset 24: lpTitle (i8*, 8 bytes)
-//   offset 32: dwX (i32)
-//   offset 36: dwY (i32)
-//   offset 40: dwXSize (i32)
-//   offset 44: dwYSize (i32)
-//   offset 48: dwXCountChars (i32)
-//   offset 52: dwYCountChars (i32)
-//   offset 56: dwFillAttribute (i32)
-//   offset 60: dwFlags (i32)
-//   offset 64: wShowWindow (i16)
-//   offset 66: cbReserved2 (i16)
-//   offset 72: lpReserved2 (i8*, 8 bytes)
-//   offset 80: hStdInput (i8*, 8 bytes)
-//   offset 88: hStdOutput (i8*, 8 bytes)
-//   offset 96: hStdError (i8*, 8 bytes)
-//   total: 104 bytes
+//
+//	offset  0: cb (i32, 4 bytes)
+//	offset  8: lpReserved (i8*, 8 bytes)
+//	offset 16: lpDesktop (i8*, 8 bytes)
+//	offset 24: lpTitle (i8*, 8 bytes)
+//	offset 32: dwX (i32)
+//	offset 36: dwY (i32)
+//	offset 40: dwXSize (i32)
+//	offset 44: dwYSize (i32)
+//	offset 48: dwXCountChars (i32)
+//	offset 52: dwYCountChars (i32)
+//	offset 56: dwFillAttribute (i32)
+//	offset 60: dwFlags (i32)
+//	offset 64: wShowWindow (i16)
+//	offset 66: cbReserved2 (i16)
+//	offset 72: lpReserved2 (i8*, 8 bytes)
+//	offset 80: hStdInput (i8*, 8 bytes)
+//	offset 88: hStdOutput (i8*, 8 bytes)
+//	offset 96: hStdError (i8*, 8 bytes)
+//	total: 104 bytes
 const startupInfoSize = 104
 
 // SECURITY_ATTRIBUTES layout on x64:
-//   offset  0: nLength (i32, 4 bytes)
-//   offset  8: lpSecurityDescriptor (i8*, 8 bytes)
-//   offset 16: bInheritHandle (i32, 4 bytes)
-//   total: 24 bytes
+//
+//	offset  0: nLength (i32, 4 bytes)
+//	offset  8: lpSecurityDescriptor (i8*, 8 bytes)
+//	offset 16: bInheritHandle (i32, 4 bytes)
+//	total: 24 bytes
 const securityAttrSize = 24
 
 // PROCESS_INFORMATION layout on x64:
-//   offset  0: hProcess (i8*, 8 bytes)
-//   offset  8: hThread (i8*, 8 bytes)
-//   offset 16: dwProcessId (i32)
-//   offset 20: dwThreadId (i32)
-//   total: 24 bytes
+//
+//	offset  0: hProcess (i8*, 8 bytes)
+//	offset  8: hThread (i8*, 8 bytes)
+//	offset 16: dwProcessId (i32)
+//	offset 20: dwThreadId (i32)
+//	total: 24 bytes
 const processInfoSize = 24
 
 // winEmitMemset declares and calls memset to zero a stack-allocated struct.
@@ -1272,8 +1275,8 @@ func emitCreatePipePair(module *ir.Module, fn *ir.Func, blk *ir.Block, errBlk *i
 	// Allocate SECURITY_ATTRIBUTES on stack with bInheritHandle = TRUE
 	saAlloca := blk.NewAlloca(irtypes.NewArray(uint64(securityAttrSize), irtypes.I8))
 	winEmitMemset(module, blk, saAlloca, securityAttrSize)
-	winStoreI32AtOffset(blk, saAlloca, 0, constant.NewInt(irtypes.I32, securityAttrSize))  // nLength
-	winStoreI32AtOffset(blk, saAlloca, 16, constant.NewInt(irtypes.I32, 1))                // bInheritHandle = TRUE
+	winStoreI32AtOffset(blk, saAlloca, 0, constant.NewInt(irtypes.I32, securityAttrSize)) // nLength
+	winStoreI32AtOffset(blk, saAlloca, 16, constant.NewInt(irtypes.I32, 1))               // bInheritHandle = TRUE
 
 	// Allocate HANDLE slots
 	readHandlePtr := blk.NewAlloca(irtypes.I8Ptr)
@@ -1350,7 +1353,7 @@ func (p *WindowsPAL) EmitSpawn(module *ir.Module) *ir.Func {
 	siAlloca := pipe2Ok.NewAlloca(irtypes.NewArray(uint64(startupInfoSize), irtypes.I8))
 	winEmitMemset(module, pipe2Ok, siAlloca, startupInfoSize)
 	winStoreI32AtOffset(pipe2Ok, siAlloca, 0, constant.NewInt(irtypes.I32, startupInfoSize)) // cb
-	winStoreI32AtOffset(pipe2Ok, siAlloca, 60, constant.NewInt(irtypes.I32, 0x100))           // dwFlags = STARTF_USESTDHANDLES
+	winStoreI32AtOffset(pipe2Ok, siAlloca, 60, constant.NewInt(irtypes.I32, 0x100))          // dwFlags = STARTF_USESTDHANDLES
 
 	// hStdInput = GetStdHandle(STD_INPUT_HANDLE = -10)
 	stdinHandle := pipe2Ok.NewCall(getStdHandle, constant.NewInt(irtypes.I32, -10))
@@ -1367,15 +1370,15 @@ func (p *WindowsPAL) EmitSpawn(module *ir.Module) *ir.Func {
 	piPtr := pipe2Ok.NewBitCast(piAlloca, irtypes.I8Ptr)
 	cpRet := pipe2Ok.NewCall(createProcessA,
 		constant.NewNull(irtypes.I8Ptr), // lpApplicationName
-		cmdline,                          // lpCommandLine
+		cmdline,                         // lpCommandLine
 		constant.NewNull(irtypes.I8Ptr), // lpProcessAttributes
 		constant.NewNull(irtypes.I8Ptr), // lpThreadAttributes
 		constant.NewInt(irtypes.I32, 1), // bInheritHandles = TRUE
 		constant.NewInt(irtypes.I32, 0), // dwCreationFlags
 		constant.NewNull(irtypes.I8Ptr), // lpEnvironment
 		constant.NewNull(irtypes.I8Ptr), // lpCurrentDirectory
-		siPtr,                            // lpStartupInfo
-		piPtr)                            // lpProcessInformation
+		siPtr,                           // lpStartupInfo
+		piPtr)                           // lpProcessInformation
 
 	cpFailed := pipe2Ok.NewICmp(enum.IPredEQ, cpRet, constant.NewInt(irtypes.I32, 0))
 	cpOkBlk := fn.NewBlock(".cp_ok")
@@ -1634,9 +1637,9 @@ func (p *WindowsPAL) EmitSpawnStreaming(module *ir.Module) *ir.Func {
 	winEmitMemset(module, stderrPipeOk, siAlloca, startupInfoSize)
 	winStoreI32AtOffset(stderrPipeOk, siAlloca, 0, constant.NewInt(irtypes.I32, startupInfoSize))
 	winStoreI32AtOffset(stderrPipeOk, siAlloca, 60, constant.NewInt(irtypes.I32, 0x100)) // STARTF_USESTDHANDLES
-	winStoreI8PtrAtOffset(stderrPipeOk, siAlloca, 80, stdinRead)    // hStdInput = read end of stdin pipe
-	winStoreI8PtrAtOffset(stderrPipeOk, siAlloca, 88, stdoutWrite)  // hStdOutput
-	winStoreI8PtrAtOffset(stderrPipeOk, siAlloca, 96, stderrWrite)  // hStdError
+	winStoreI8PtrAtOffset(stderrPipeOk, siAlloca, 80, stdinRead)                         // hStdInput = read end of stdin pipe
+	winStoreI8PtrAtOffset(stderrPipeOk, siAlloca, 88, stdoutWrite)                       // hStdOutput
+	winStoreI8PtrAtOffset(stderrPipeOk, siAlloca, 96, stderrWrite)                       // hStdError
 
 	// Set up PROCESS_INFORMATION
 	piAlloca := stderrPipeOk.NewAlloca(irtypes.NewArray(uint64(processInfoSize), irtypes.I8))
@@ -1672,8 +1675,8 @@ func (p *WindowsPAL) EmitSpawnStreaming(module *ir.Module) *ir.Func {
 
 	// Success: close child-side handles + thread handle
 	cpOkBlk.NewCall(closeHandle, stdinRead)   // child reads from stdin
-	cpOkBlk.NewCall(closeHandle, stdoutWrite)  // child writes to stdout
-	cpOkBlk.NewCall(closeHandle, stderrWrite)  // child writes to stderr
+	cpOkBlk.NewCall(closeHandle, stdoutWrite) // child writes to stdout
+	cpOkBlk.NewCall(closeHandle, stderrWrite) // child writes to stderr
 	hThread := winLoadI8PtrAtOffset(cpOkBlk, piAlloca, 8)
 	cpOkBlk.NewCall(closeHandle, hThread)
 	cpOkBlk.NewCall(palFree, cmdline)

@@ -1251,6 +1251,19 @@ func TestStringDropBorrowFromIndex(t *testing.T) {
 	assertContains(t, ir, "strdrop.call")
 }
 
+// T0064: Vector drop binding is registered at scope exit
+func TestVectorDropScopeBinding(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			v := int[]();
+			v.push(1);
+		}
+	`)
+	// Vector drop binding: strdrop.call block (reuses bindingDropString mechanism)
+	assertContains(t, ir, "strdrop.call")
+	assertContains(t, ir, "call void @Vector.drop(")
+}
+
 func TestStringNewFuncBody(t *testing.T) {
 	ir := generateIR(t, `main() { s := "hello"; }`)
 	assertContains(t, ir, "define i8* @promise_string_new(i8* %data, i64 %len)")
@@ -8294,15 +8307,16 @@ func TestDropVectorField(t *testing.T) {
 }
 
 // Standalone vector variables do NOT get scope-exit drop yet (needs ownership tracking)
-func TestDropVectorStandaloneNoDropYet(t *testing.T) {
+// T0064: Standalone vector variables now get drop flags
+func TestDropVectorStandaloneHasDrop(t *testing.T) {
 	ir := generateIR(t, `
 		main() {
-			int[] v = [1, 2, 3];
-			int x = v.len;
+			int[] my_vec = [1, 2, 3];
+			int x = my_vec.len;
 		}
 	`)
-	// No drop flag for standalone vector variables (B0157: requires ownership tracking)
-	assertNotContains(t, ir, "%v.dropflag")
+	assertContains(t, ir, "%my_vec.dropflag")
+	assertContains(t, ir, "call void @Vector.drop(")
 }
 
 // Non-droppable type: no drop flag or call generated for that variable
@@ -8975,11 +8989,11 @@ func TestDropSynthesizedNotNeeded(t *testing.T) {
 			bool y;
 		}
 		main() {
-			p := Plain(x: 1, y: true);
+			my_plain := Plain(x: 1, y: true);
 		}
 	`)
 	assertNotContains(t, ir, "Plain.drop")
-	assertNotContains(t, ir, "p.dropflag")
+	assertNotContains(t, ir, "my_plain.dropflag")
 }
 
 // B0158: Synthesized drop coexists with explicit drop (explicit takes precedence)

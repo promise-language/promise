@@ -34,9 +34,23 @@ func (c *Compiler) genBlock(block *ast.Block) {
 	c.scopeBindings = c.scopeBindings[:savedScopeLen]
 }
 
-// isStringBorrowExpr returns true if the expression borrows an existing string
+// isDroppableContainerOrString returns true if the type is a string or vector
+// (types that use the i8*-alloca drop mechanism in maybeRegisterDrop).
+func isDroppableContainerOrString(typ types.Type) bool {
+	named := extractNamed(typ)
+	if named == types.TypString {
+		return true
+	}
+	if _, ok := types.AsVector(typ); ok || named == types.TypVector {
+		return true
+	}
+	return false
+}
+
+// isStringBorrowExpr returns true if the expression borrows an existing value
 // (e.g., container element access, field access) rather than creating a new one.
-// Borrowed strings should not be freed by the borrower — the owner retains responsibility.
+// Borrowed values should not be freed by the borrower — the owner retains responsibility.
+// Used for both string and vector drop flag management.
 func isStringBorrowExpr(expr ast.Expr) bool {
 	switch expr.(type) {
 	case *ast.IndexExpr:
@@ -323,8 +337,8 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 		dropType = exprType
 	}
 	c.maybeRegisterDrop(s.Name, alloca, dropType)
-	// Clear string drop flag when RHS is a borrow (container element, field access).
-	if extractNamed(dropType) == types.TypString && isStringBorrowExpr(s.Value) {
+	// Clear drop flag when RHS is a borrow (container element, field access).
+	if isDroppableContainerOrString(dropType) && isStringBorrowExpr(s.Value) {
 		c.clearDropFlag(s.Name)
 	}
 	c.maybeRegisterEnvFree(s.Name, alloca, dropType)
@@ -354,9 +368,9 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	c.block.NewStore(val, alloca)
 	c.locals[s.Name] = alloca
 	c.maybeRegisterDrop(s.Name, alloca, typ)
-	// Clear string drop flag when RHS is a borrow (container element, field access).
-	// The container/struct still owns the string — freeing it here would cause use-after-free.
-	if extractNamed(typ) == types.TypString && isStringBorrowExpr(s.Value) {
+	// Clear drop flag when RHS is a borrow (container element, field access).
+	// The container/struct still owns the value — freeing it here would cause use-after-free.
+	if isDroppableContainerOrString(typ) && isStringBorrowExpr(s.Value) {
 		c.clearDropFlag(s.Name)
 	}
 	c.maybeRegisterEnvFree(s.Name, alloca, typ)
@@ -554,11 +568,32 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 		return
 	}
 
-	// NOTE: Container type (Vector, Channel) scope-exit drop is not yet enabled.
-	// Vector.drop is defined and called via emitFieldDrops() for types that own
-	// vector fields, but registering scope-exit drop bindings for container
-	// variables requires the ownership system to properly track container moves
-	// (B0157). Without move tracking, aliased containers would be double-freed.
+	// Vector drop: register bindingDropString (same mechanism — i8* alloca + void(i8*) drop).
+	// Vector.drop null-checks and frees the heap buffer. Drop flag semantics match strings:
+	// cleared at all move sites, borrow detection skips drops for container element access.
+	if _, ok := types.AsVector(typ); ok || named == types.TypVector {
+		dropFlag := c.createEntryAlloca(irtypes.I1)
+		dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
+		c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+		c.dropFlags[varName] = dropFlag
+
+		dropFunc := c.funcs["Vector.drop"]
+		binding := scopeBinding{
+			kind:     bindingDropString, // reuse: same i8* alloca + void(i8*) drop pattern
+			alloca:   alloca,
+			named:    named,
+			valType:  typ,
+			dropFlag: dropFlag,
+			dropFunc: dropFunc,
+			varName:  varName,
+		}
+		c.scopeBindings = append(c.scopeBindings, binding)
+		c.dropBindings[varName] = binding
+		return
+	}
+
+	// NOTE: Channel scope-exit drop is not yet enabled.
+	// Channel cleanup requires reference counting or explicit close semantics.
 	if isContainerType(typ) {
 		return
 	}

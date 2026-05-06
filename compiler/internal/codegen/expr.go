@@ -4817,7 +4817,12 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 					envFieldPtr: fieldPtr,
 					elemType:    captureType,
 				})
-				c.maybeRegisterDrop(cv.Obj.Name(), alloca, cv.Obj.Type())
+				// Register drop for move-captured values — but skip string/vector types.
+				// Lambda captures are borrows from the outer scope; the env-free mechanism
+				// handles cleanup. Registering drops here would free on every lambda call.
+				if !isDroppableContainerOrString(cv.Obj.Type()) {
+					c.maybeRegisterDrop(cv.Obj.Name(), alloca, cv.Obj.Type())
+				}
 			}
 		}
 	}

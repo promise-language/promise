@@ -1,25 +1,49 @@
-// Tests that Vector.drop is defined and called for field cleanup (B0157).
-// Scope-exit drop for vector variables requires ownership tracking (future work).
-// This file tests that types with vector fields correctly free them via drop().
-type VecHolder {
-  int[] items;
-  drop(~this) {
+// T0064: Vector drop at scope exit — verify no leaks for heap-allocated vectors.
+// Vector created and goes out of scope — should be freed
+vector_scope_exit() `test {
+  v := int[]();
+  v.push(1);
+  v.push(2);
+  assert(v.len == 2, "has 2 elements");
+}
+
+// Vector returned from function — ownership transfers
+vector_return_no_double_free() `test {
+  v := make_vector();
+  assert(v.len == 3, "returned vector has 3");
+}
+
+make_vector() int[] {
+  result := int[]();
+  result.push(10);
+  result.push(20);
+  result.push(30);
+  return result;
+}
+
+// Vector assigned to another variable — source flag cleared
+vector_move_on_assignment() `test {
+  a := int[]();
+  a.push(1);
+  b := a;
+  assert(b.len == 1, "moved vector");
+}
+
+// Vector in loop — freed each iteration
+vector_in_loop() `test {
+  i := 0;
+  while i < 3 {
+    v := int[]();
+    v.push(i);
+    assert(v.len == 1, "loop vector");
+    i += 1;
   }
 }
 
-test_vector_field_drop() `test {
-  VecHolder h = VecHolder(items: [1, 2, 3]);
-  assert(h.items.len == 3, "holder items len");
-}
-
-test_vector_field_drop_empty() `test {
-  VecHolder h = VecHolder(items: []);
-  assert(h.items.len == 0, "holder empty items");
-}
-
-test_vector_field_drop_after_mutation() `test {
-  VecHolder h = VecHolder(items: []);
-  h.items.push(10);
-  h.items.push(20);
-  assert(h.items.len == 2, "holder mutated items");
+// Vector with string elements
+vector_string_elements() `test {
+  v := string[]();
+  v.push("hello");
+  v.push("world");
+  assert(v.len == 2, "string vector len");
 }

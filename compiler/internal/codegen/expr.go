@@ -3107,8 +3107,17 @@ func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param)
 				continue
 			}
 		}
-		argVals = append(argVals, c.genCallArgExpr(arg.Value))
+		v := c.genCallArgExpr(arg.Value)
+		argVals = append(argVals, v)
 		argTypes = append(argTypes, c.info.Types[arg.Value])
+		// T0087: For ~ (move) params, transfer ownership to callee.
+		// Clear caller's drop flag and claim string temps so they're not double-freed.
+		if i < len(params) && params[i].Ref() == types.RefMut {
+			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+				c.clearDropFlag(ident.Name)
+			}
+			c.claimStringTemp(v)
+		}
 	}
 	return argVals, argTypes
 }

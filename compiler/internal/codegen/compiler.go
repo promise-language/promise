@@ -3558,6 +3558,16 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 			alloca.SetName(c.uniqueLocalName(p.Name() + ".addr"))
 			entry.NewStore(fn.Params[i], alloca)
 			c.locals[p.Name()] = alloca
+
+			// T0087: Register drop binding for ~ (move) parameters.
+			// The callee takes ownership and must drop at scope exit.
+			if p.Ref() == types.RefMut {
+				paramType := p.Type()
+				if c.typeSubst != nil {
+					paramType = types.Substitute(paramType, c.typeSubst)
+				}
+				c.maybeRegisterDrop(p.Name(), alloca, paramType)
+			}
 		}
 	}
 
@@ -3573,6 +3583,10 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 
 	// Ensure the function ends with a terminator
 	if c.block != nil && c.block.Term == nil {
+		// T0087: Clean up ~ parameter drop bindings on implicit return
+		if len(c.scopeBindings) > 0 {
+			c.emitScopeCleanup(0, false)
+		}
 		if c.canError {
 			resultType := c.currentResultType()
 			if isVoidResult(resultType) {
@@ -4640,6 +4654,15 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 			alloca.SetName(c.uniqueLocalName(p.Name() + ".addr"))
 			entry.NewStore(fn.Params[paramIdx], alloca)
 			c.locals[p.Name()] = alloca
+
+			// T0087: Register drop binding for ~ (move) parameters.
+			if p.Ref() == types.RefMut {
+				paramType := p.Type()
+				if c.typeSubst != nil {
+					paramType = types.Substitute(paramType, c.typeSubst)
+				}
+				c.maybeRegisterDrop(p.Name(), alloca, paramType)
+			}
 		}
 		paramIdx++
 	}
@@ -4662,6 +4685,10 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 
 	// Ensure the function ends with a terminator
 	if c.block != nil && c.block.Term == nil {
+		// T0087: Clean up ~ parameter drop bindings on implicit return
+		if len(c.scopeBindings) > 0 {
+			c.emitScopeCleanup(0, false)
+		}
 		if c.canError {
 			resultType := c.currentResultType()
 			if isVoidResult(resultType) {

@@ -94,6 +94,9 @@ type PromiseParserListener interface {
 	// EnterVariadicParam is called when entering the variadicParam production.
 	EnterVariadicParam(c *VariadicParamContext)
 
+	// EnterMoveParam is called when entering the moveParam production.
+	EnterMoveParam(c *MoveParamContext)
+
 	// EnterRegularParam is called when entering the regularParam production.
 	EnterRegularParam(c *RegularParamContext)
 
@@ -561,6 +564,9 @@ type PromiseParserListener interface {
 
 	// ExitVariadicParam is called when exiting the variadicParam production.
 	ExitVariadicParam(c *VariadicParamContext)
+
+	// ExitMoveParam is called when exiting the moveParam production.
+	ExitMoveParam(c *MoveParamContext)
 
 	// ExitRegularParam is called when exiting the regularParam production.
 	ExitRegularParam(c *RegularParamContext)

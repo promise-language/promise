@@ -123,6 +123,10 @@ func (v *BasePromiseParserVisitor) VisitVariadicParam(ctx *VariadicParamContext)
 	return v.VisitChildren(ctx)
 }
 
+func (v *BasePromiseParserVisitor) VisitMoveParam(ctx *MoveParamContext) interface{} {
+	return v.VisitChildren(ctx)
+}
+
 func (v *BasePromiseParserVisitor) VisitRegularParam(ctx *RegularParamContext) interface{} {
 	return v.VisitChildren(ctx)
 }

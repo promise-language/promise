@@ -521,6 +521,20 @@ func (b *Builder) VisitRegularParam(ctx *parser.RegularParamContext) interface{}
 	return node
 }
 
+// T0087: ~ prefix on parameter type means move (callee takes ownership).
+func (b *Builder) VisitMoveParam(ctx *parser.MoveParamContext) interface{} {
+	node := &Param{
+		nodeBase: b.baseFromContext(ctx),
+		Type:     b.visitTypeRef(ctx.TypeRef()),
+		Name:     b.bindingText(ctx.BindingName()),
+		RefMod:   RefMut, // ~ means move/owned by callee
+	}
+	for _, ma := range ctx.AllMetaAnnotation() {
+		node.Annotations = append(node.Annotations, b.visitMetaAnnotation(ma))
+	}
+	return node
+}
+
 func (b *Builder) VisitVariadicParam(ctx *parser.VariadicParamContext) interface{} {
 	node := &Param{
 		nodeBase:   b.baseFromContext(ctx),

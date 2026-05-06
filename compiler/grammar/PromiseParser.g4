@@ -173,6 +173,7 @@ receiverParam
 
 param
     : ELLIPSIS typeRef bindingName metaAnnotation*               # variadicParam
+    | TILDE typeRef bindingName metaAnnotation*                  # moveParam
     | typeRef refMod? bindingName metaAnnotation* (ASSIGN expression)?  # regularParam
     ;
 

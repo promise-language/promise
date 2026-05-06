@@ -194,6 +194,12 @@ func (s *BasePromiseParserListener) EnterVariadicParam(ctx *VariadicParamContext
 // ExitVariadicParam is called when production variadicParam is exited.
 func (s *BasePromiseParserListener) ExitVariadicParam(ctx *VariadicParamContext) {}
 
+// EnterMoveParam is called when production moveParam is entered.
+func (s *BasePromiseParserListener) EnterMoveParam(ctx *MoveParamContext) {}
+
+// ExitMoveParam is called when production moveParam is exited.
+func (s *BasePromiseParserListener) ExitMoveParam(ctx *MoveParamContext) {}
+
 // EnterRegularParam is called when production regularParam is entered.
 func (s *BasePromiseParserListener) EnterRegularParam(ctx *RegularParamContext) {}
 

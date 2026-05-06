@@ -1,0 +1,154 @@
+// Tests for ~ (move) parameter annotations (T0087).
+// When a parameter is annotated with ~, the callee takes ownership and drops
+// the value at scope exit. The caller transfers ownership and cannot use the
+// variable after passing it.
+// =============================================================================
+// Section 1: Basic move semantics with user types
+// =============================================================================
+type Resource {
+  int id;
+  drop(~this) {
+  }
+}
+
+consume_resource(~Resource r) {
+  // r is owned by this function — dropped at scope exit
+}
+
+test_move_param_basic() `test {
+  Resource r = Resource(id: 1);
+  consume_resource(r);
+}
+
+test_move_param_temp() `test {
+  consume_resource(Resource(id: 2));
+}
+
+// =============================================================================
+// Section 2: Move semantics with strings
+// =============================================================================
+
+consume_string(~string s) {
+  // s is owned — promise_string_drop called at scope exit
+}
+
+test_move_string_named() `test {
+  string s = "hello" + " world";
+  consume_string(s);
+}
+
+test_move_string_literal() `test {
+  // Literal strings have the literal flag — drop is a no-op
+  consume_string("hello");
+}
+
+test_move_string_interpolation() `test {
+  int x = 42;
+  consume_string("{x}");
+}
+
+// =============================================================================
+// Section 3: Mixed move and borrow params
+// =============================================================================
+
+mixed(~string owned, string borrowed) string {
+  return owned + " " + borrowed;
+}
+
+test_mixed_params() `test(allow_leaks: true) {
+  string a = "hello";
+  string b = "world";
+  string result = mixed(a, b);
+  // b is still valid (borrowed), a was moved
+  assert(result == "hello world", "mixed params");
+}
+
+// =============================================================================
+// Section 4: Move param with return value
+// =============================================================================
+
+transform(~string s) string {
+  return s + "!";
+}
+
+test_move_and_return() `test {
+  string s = "hi";
+  string result = transform(s);
+  assert(result == "hi!", "move and return");
+}
+
+// =============================================================================
+// Section 5: Move param in failable function
+// =============================================================================
+
+failable_consume(~string s) int! {
+  if s == "bad" {
+    raise error(message: "bad input");
+  }
+  return s.len;
+}
+
+test_move_param_failable_success() `test {
+  string s = "hello";
+  int len = failable_consume(s)!;
+  assert(len == 5, "failable move success");
+}
+
+test_move_param_failable_error() `test {
+  string s = "bad";
+  bool caught = false;
+  failable_consume(s)? e {
+    caught = true;
+  };
+  assert(caught, "failable move error caught");
+}
+
+// =============================================================================
+// Section 6: Move param in loop
+// =============================================================================
+
+consume_in_loop(~string s) int {
+  return s.len;
+}
+
+test_move_param_loop() `test {
+  int total = 0;
+  int i = 0;
+  while i < 3 {
+    string s = "x" + "{i}";
+    total = total + consume_in_loop(s);
+    i = i + 1;
+  }
+  assert(total == 6, "move in loop: 2+2+2");
+}
+
+test_move_param_loop_temp() `test {
+  // Temporaries from string interpolation passed to ~ param
+  int total = 0;
+  int i = 0;
+  while i < 3 {
+    total = total + consume_in_loop("{i}x");
+    i = i + 1;
+  }
+  assert(total == 6, "move temp in loop: 2+2+2");
+}
+
+// =============================================================================
+// Section 7: Move param with user type that has drop
+// =============================================================================
+
+type Counter {
+  int value;
+  drop(~this) {
+  }
+}
+
+increment_and_consume(~Counter c) int {
+  return c.value + 1;
+}
+
+test_move_user_type_with_drop() `test {
+  Counter c = Counter(value: 10);
+  int result = increment_and_consume(c);
+  assert(result == 11, "move user type with drop");
+}

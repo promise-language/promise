@@ -255,9 +255,9 @@ func TestBorrowConflictDetection(t *testing.T) {
 	c := &Checker{state: make(StateMap)}
 	c.state["s"] = Owned
 
-	// Build a signature: f(string ~a, string &b)
+	// Build a signature: f(string var a, string &b) — MutRef type is a mutable borrow
 	sig := types.NewSignature(nil, []*types.Param{
-		types.NewParam("a", types.TypString, types.RefMut),
+		types.NewParam("a", types.NewMutRef(types.TypString), types.RefNone),
 		types.NewParam("b", types.TypString, types.RefShared),
 	}, nil, false)
 
@@ -282,9 +282,10 @@ func TestBorrowConflictDoubleMut(t *testing.T) {
 	c := &Checker{state: make(StateMap)}
 	c.state["s"] = Owned
 
+	// MutRef type params are mutable borrows (distinct from ~ move params)
 	sig := types.NewSignature(nil, []*types.Param{
-		types.NewParam("a", types.TypString, types.RefMut),
-		types.NewParam("b", types.TypString, types.RefMut),
+		types.NewParam("a", types.NewMutRef(types.TypString), types.RefNone),
+		types.NewParam("b", types.NewMutRef(types.TypString), types.RefNone),
 	}, nil, false)
 
 	callExpr := &ast.CallExpr{}
@@ -423,10 +424,10 @@ func TestBorrowConflictSharedBeforeMut(t *testing.T) {
 	c := &Checker{state: make(StateMap)}
 	c.state["s"] = Owned
 
-	// Signature: f(string &a, string ~b) — shared first, then mutable.
+	// Signature: f(string &a, string var b) — shared first, then mutable borrow.
 	sig := types.NewSignature(nil, []*types.Param{
 		types.NewParam("a", types.TypString, types.RefShared),
-		types.NewParam("b", types.TypString, types.RefMut),
+		types.NewParam("b", types.NewMutRef(types.TypString), types.RefNone),
 	}, nil, false)
 
 	callExpr := &ast.CallExpr{}
@@ -2591,4 +2592,40 @@ func TestPathsOverlap(t *testing.T) {
 			t.Errorf("pathsOverlap(%v, %v) = %v, want %v", tt.a, tt.b, got, tt.expect)
 		}
 	}
+}
+
+// T0087: ~ (move) parameter annotations
+
+func TestMoveParamUseAfterMove(t *testing.T) {
+	errs := ownerErrs(t, `
+		consume(~string s) { }
+		test() {
+			string a = "hello";
+			consume(a);
+			string b = a;
+		}
+	`)
+	expectOwnerError(t, errs, "use of moved variable 'a'")
+}
+
+func TestMoveParamNoError(t *testing.T) {
+	ownerOK(t, `
+		consume(~string s) { }
+		test() {
+			string a = "hello";
+			consume(a);
+		}
+	`)
+}
+
+func TestMoveParamBorrowStillValid(t *testing.T) {
+	// & param is borrowed — variable still valid after call
+	ownerOK(t, `
+		borrow(string &s) int { return 0; }
+		test() {
+			string a = "hello";
+			borrow(a);
+			string b = a;
+		}
+	`)
 }

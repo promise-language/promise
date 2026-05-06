@@ -214,6 +214,10 @@ func (c *Checker) checkCallExpr(e *ast.CallExpr) {
 				kind := paramBorrowKind(params[i])
 				if kind == BorrowNone {
 					c.tryMove(arg.Value)
+				} else if params[i].Ref() == types.RefMut {
+					// T0087: ~ on regular params means move (callee owns).
+					// Distinguished from MutRef type params which are mutable borrows.
+					c.tryMove(arg.Value)
 				} else {
 					c.createBorrowWithKind(arg.Value, kind, e.Pos())
 				}
@@ -360,8 +364,8 @@ func (c *Checker) checkBorrowConflicts(e *ast.CallExpr, sig *types.Signature) {
 			break
 		}
 		kind := paramBorrowKind(params[i])
-		if kind == BorrowNone {
-			continue
+		if kind == BorrowNone || params[i].Ref() == types.RefMut {
+			continue // T0087: ~ params are moves, not borrows
 		}
 		name, path, ok := extractBorrowTarget(arg.Value)
 		if !ok {

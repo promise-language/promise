@@ -171,7 +171,7 @@ WS : [ \t\r\n]+ -> skip;
 mode STRING_MODE;
 
 STRING_TEXT        : ~["\\\r\n{]+;
-STRING_ESCAPE      : '\\' [nrtb\\"0{];
+STRING_ESCAPE      : '\\' [nrtb\\"0{}];
 // Interpolation: captures {expr} as a single token including braces.
 // Handles one level of nested braces for expressions like {map[key]}.
 // Full nested-brace interpolation deferred to a later stage.

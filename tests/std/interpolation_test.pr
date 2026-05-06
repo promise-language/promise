@@ -430,6 +430,52 @@ test_interp_then_escaped_brace() `test {
   assert(s.len == 2, "3 + brace = 2 bytes");
 }
 
+// --- Escaped closing brace \} (B0124) ---
+
+// \} produces a literal } character
+test_escaped_close_brace() `test {
+  string s = "\}";
+  assert(s.len == 1, "escaped close brace is 1 byte");
+  assert(s.byte_at(0) == 125, "escaped close brace is char code 125");
+}
+
+// \{ and \} together produce literal {…}
+test_escaped_both_braces() `test {
+  string s = "\{name\}";
+  assert(s == "\{name\}", "escaped both braces");
+  assert(s.len == 6, "6 bytes total");
+}
+
+// \} mixed with real interpolation
+test_escaped_close_brace_with_interp() `test {
+  int x = 42;
+  string s = "{x}\}";
+  assert(s == "42\}", "interp then escaped close brace");
+  assert(s.len == 3, "42 + } = 3 bytes");
+}
+
+// \} at start of string
+test_escaped_close_brace_at_start() `test {
+  string s = "\}rest";
+  assert(s.len == 5, "} + rest = 5 bytes");
+  assert(s.byte_at(0) == 125, "first byte is close brace");
+}
+
+// Multiple \} in a string
+test_multiple_escaped_close_braces() `test {
+  string s = "\}\}";
+  assert(s.len == 2, "two escaped close braces");
+  assert(s.byte_at(0) == 125, "first is }");
+  assert(s.byte_at(1) == 125, "second is }");
+}
+
+// JSON-like pattern using \{ and \}
+test_json_pattern() `test {
+  int val = 10;
+  string s = "\{\"key\": {val}\}";
+  assert(s == "\{\"key\": 10\}", "JSON-like pattern");
+}
+
 // --- Small integer types ---
 
 test_i8_interp() `test {

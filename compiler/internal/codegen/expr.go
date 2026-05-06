@@ -581,6 +581,8 @@ func resolveEscape(seq string) string {
 		return "\x00"
 	case "{":
 		return "{"
+	case "}":
+		return "}"
 	default:
 		return "\\" + seq
 	}

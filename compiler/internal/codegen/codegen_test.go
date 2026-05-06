@@ -1059,6 +1059,23 @@ func TestStringEscapeBraceAdjacentInterp(t *testing.T) {
 	assertContains(t, ir, "call i8* @promise_int_to_string(")
 }
 
+func TestStringEscapeCloseBrace(t *testing.T) {
+	// B0124: \} should resolve to literal }
+	ir := generateIR(t, `main() { s := "a\}b"; }`)
+	assertContains(t, ir, `c"a}b"`)
+}
+
+func TestStringEscapeCloseBraceOnly(t *testing.T) {
+	ir := generateIR(t, `main() { s := "\}"; }`)
+	assertContains(t, ir, `c"}"`)
+}
+
+func TestStringEscapeBothBraces(t *testing.T) {
+	// \{...\} produces literal {…}
+	ir := generateIR(t, `main() { s := "\{name\}"; }`)
+	assertContains(t, ir, `c"{name}"`)
+}
+
 func TestStringIntrinsicsDeclared(t *testing.T) {
 	ir := generateIR(t, `main() { x := 42; }`)
 	// String intrinsics should always be defined (codegen-emitted LLVM IR)

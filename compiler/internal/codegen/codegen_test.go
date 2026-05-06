@@ -8792,6 +8792,21 @@ func TestVectorPushFuncBody(t *testing.T) {
 	assertContains(t, ir, "call void @llvm.memcpy.p0i8.p0i8.i64(")
 }
 
+// B0147: Vector.push through MutRef parameter must dispatch via container path,
+// not fall through to generic method lookup (which fails for mono instances).
+func TestVectorPushViaMutRefParam(t *testing.T) {
+	ir := generateIR(t, `
+		helper(u8[] ~buf, int val) {
+			buf.push(val as! u8);
+		}
+		main() {
+			u8[] b = Vector[u8](capacity: 4);
+			helper(b, 42);
+		}
+	`)
+	assertContains(t, ir, "call i8* @promise_vector_push(")
+}
+
 func TestVectorPopFuncBody(t *testing.T) {
 	ir := generateIR(t, `
 		main() {

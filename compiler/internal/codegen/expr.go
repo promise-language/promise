@@ -2815,6 +2815,15 @@ func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 func (c *Compiler) genContainerMethodCall(e *ast.CallExpr, member *ast.MemberExpr, targetType types.Type) (value.Value, bool) {
 	methodName := member.Field
 
+	// Unwrap MutRef/SharedRef so types.AsVector etc. can see the Instance.
+	// Parameters declared as `T[] ~buf` have type MutRef{Instance{TypVector, [T]}}.
+	unwrapped := targetType
+	if mr, ok := unwrapped.(*types.MutRef); ok {
+		unwrapped = mr.Elem()
+	} else if sr, ok := unwrapped.(*types.SharedRef); ok {
+		unwrapped = sr.Elem()
+	}
+
 	// Check if the method is native — only native methods are handled here.
 	// Non-native methods fall through to the regular user method path.
 	named := extractNamed(targetType)
@@ -2826,7 +2835,7 @@ func (c *Compiler) genContainerMethodCall(e *ast.CallExpr, member *ast.MemberExp
 	}
 
 	// Vector methods: push, pop, contains, remove
-	if elem, ok := types.AsVector(targetType); ok {
+	if elem, ok := types.AsVector(unwrapped); ok {
 		return c.genVectorMethodCall(e, member, elem, methodName), true
 	}
 	// Bare TypVector (inside a method body on Vector): resolve T from typeSubst
@@ -2837,7 +2846,7 @@ func (c *Compiler) genContainerMethodCall(e *ast.CallExpr, member *ast.MemberExp
 	}
 
 	// Channel methods: send, close
-	if elem, ok := types.AsChannel(targetType); ok {
+	if elem, ok := types.AsChannel(unwrapped); ok {
 		return c.genChannelMethodCall(e, member, elem, methodName), true
 	}
 	if named == types.TypChannel {

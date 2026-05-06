@@ -12697,6 +12697,30 @@ func TestIsDestructureUnderscoreCodegen(t *testing.T) {
 	assertContains(t, ir, "icmp eq i32")
 }
 
+// B0112: destructure is-pattern inside generic method body must apply typeSubst
+func TestIsDestructureInGenericMethodBody(t *testing.T) {
+	ir := generateIR(t, `
+		enum Option[T] { Some(T value), None }
+		type Wrapper[T] {
+			Option[T] opt;
+			unwrap_or(this, T default_val) T {
+				if this.opt is Some(val) {
+					return val;
+				}
+				return default_val;
+			}
+		}
+		main() {
+			w := Wrapper[int](opt: Option[int].Some(value: 42));
+			int result = w.unwrap_or(0);
+		}
+	`)
+	// The monomorphized method should have destructure blocks
+	assertContains(t, ir, "isdestr.then")
+	// Should have the tag comparison for the monomorphized enum Option__int
+	assertContains(t, ir, "icmp eq i32")
+}
+
 func TestIsDestructureAsExprCodegen(t *testing.T) {
 	// When used as a plain expression (not if condition), should just produce the bool check
 	ir := generateIR(t, `

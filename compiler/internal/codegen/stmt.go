@@ -1741,12 +1741,18 @@ func (c *Compiler) genCompoundNarrowStmt(s *ast.IfStmt, narrow *sema.OptionalNar
 func (c *Compiler) genIfDestructureIsStmt(s *ast.IfStmt, narrow *sema.IsDestructureNarrowing) {
 	subject := c.genExpr(narrow.SubjectExpr)
 
+	// B0112: apply type substitution to TargetType for generic method bodies
+	targetType := narrow.TargetType
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+
 	var cond value.Value
 	if narrow.IsEnum {
 		// Enum variant check: compare tag
-		enumLayout := c.lookupEnumLayout(narrow.TargetType)
+		enumLayout := c.lookupEnumLayout(targetType)
 		if enumLayout == nil {
-			panic(fmt.Sprintf("codegen: no enum layout for %s", narrow.TargetType))
+			panic(fmt.Sprintf("codegen: no enum layout for %s", targetType))
 		}
 		var tag value.Value
 		if enumLayout.MaxVariantDataSize == 0 {
@@ -1758,11 +1764,11 @@ func (c *Compiler) genIfDestructureIsStmt(s *ast.IfStmt, narrow *sema.IsDestruct
 		cond = c.block.NewICmp(enum.IPredEQ, tag, expectedTag)
 	} else {
 		// Named/Instance type check via RTTI
-		targetID, ok := c.resolveTypeID(narrow.TargetType)
+		targetID, ok := c.resolveTypeID(targetType)
 		if !ok {
-			targetNamed := extractNamed(narrow.TargetType)
+			targetNamed := extractNamed(targetType)
 			if targetNamed == nil {
-				panic(fmt.Sprintf("codegen: cannot extract Named from %s", narrow.TargetType))
+				panic(fmt.Sprintf("codegen: cannot extract Named from %s", targetType))
 			}
 			targetID = c.assignTypeID(targetNamed)
 		}
@@ -1836,7 +1842,12 @@ func (c *Compiler) genIfDestructureIsStmt(s *ast.IfStmt, narrow *sema.IsDestruct
 
 // bindIsDestructureEnum extracts enum variant data fields and binds them to local variables.
 func (c *Compiler) bindIsDestructureEnum(subject value.Value, narrow *sema.IsDestructureNarrowing) {
-	enumLayout := c.lookupEnumLayout(narrow.TargetType)
+	// B0112: apply type substitution for generic method bodies
+	targetType := narrow.TargetType
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+	enumLayout := c.lookupEnumLayout(targetType)
 	dataType := enumLayout.VariantDataTypes[narrow.VariantName]
 	if dataType == nil {
 		return
@@ -1870,10 +1881,15 @@ func (c *Compiler) bindIsDestructureEnum(subject value.Value, narrow *sema.IsDes
 
 // bindIsDestructureNamed extracts named type fields and binds them to local variables.
 func (c *Compiler) bindIsDestructureNamed(subject value.Value, narrow *sema.IsDestructureNarrowing) {
-	targetNamed := extractNamed(narrow.TargetType)
-	layout := c.lookupTypeLayout(narrow.TargetType)
+	// B0112: apply type substitution for generic method bodies
+	targetType := narrow.TargetType
+	if c.typeSubst != nil {
+		targetType = types.Substitute(targetType, c.typeSubst)
+	}
+	targetNamed := extractNamed(targetType)
+	layout := c.lookupTypeLayout(targetType)
 	if layout == nil {
-		panic(fmt.Sprintf("codegen: no layout for type %s", narrow.TargetType))
+		panic(fmt.Sprintf("codegen: no layout for type %s", targetType))
 	}
 
 	instancePtr := c.extractInstancePtr(subject)

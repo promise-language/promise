@@ -474,3 +474,47 @@ test_result_err_string_field() `test {
     assert(false, "should match Err");
   }
 }
+
+// =============================================================================
+// Part 16: Destructure is-pattern inside generic method body (B0112)
+// =============================================================================
+
+enum Maybe[T] {
+  Just(T value), Nothing,
+}
+
+type Container[T] {
+  Maybe[T] inner;
+
+  unwrap_or(this, T default_val) T {
+    if this.inner is Just(val) {
+      return val;
+    }
+    return default_val;
+  }
+
+  has_value(this) bool {
+    if this.inner is Just(_) {
+      return true;
+    }
+    return false;
+  }
+}
+
+test_generic_method_destructure_enum_int() `test {
+  c := Container[int](inner: Maybe[int].Just(value: 42));
+  assert(c.unwrap_or(0) == 42, "should unwrap 42");
+  assert(c.has_value(), "should have value");
+}
+
+test_generic_method_destructure_enum_string() `test {
+  c := Container[string](inner: Maybe[string].Just(value: "hello"));
+  assert(c.unwrap_or("") == "hello", "should unwrap hello");
+  assert(c.has_value(), "should have value");
+}
+
+test_generic_method_destructure_enum_none() `test {
+  c := Container[int](inner: Maybe[int].Nothing);
+  assert(c.unwrap_or(99) == 99, "should return default");
+  assert(!c.has_value(), "should not have value");
+}

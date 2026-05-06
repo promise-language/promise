@@ -16,12 +16,12 @@ main() `test(expected: "1\n2\n3") {
   for i in 0..3 {
     select {
       v := <-ch:
-      if val := v {
-        print_line(val);
-      }
+        if val := v {
+          print_line(val);
+        }
       v := <-done:
-      // Should not be selected — done only has data after all 3 sends
-      print_line("unexpected");
+        // Should not be selected — done only has data after all 3 sends
+        print_line("unexpected");
     }
   }
 }

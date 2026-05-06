@@ -13,11 +13,11 @@ main() `test(expected: "closed") {
   // Both channels empty — select blocks until ch1 is closed
   select {
     v := <-ch1:
-    // Recv on closed channel returns none
-    if v is absent {
-      print_line("closed");
-    }
+      // Recv on closed channel returns none
+      if v is absent {
+        print_line("closed");
+      }
     v := <-ch2:
-    print_line("unexpected");
+      print_line("unexpected");
   }
 }

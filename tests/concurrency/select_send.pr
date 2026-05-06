@@ -4,9 +4,9 @@ main() `test(expected: "sent\n99") {
 
   select {
     ch.send(99):
-    print_line("sent");
+      print_line("sent");
     default:
-    print_line("default");
+      print_line("default");
   }
 
   // Verify the value was sent

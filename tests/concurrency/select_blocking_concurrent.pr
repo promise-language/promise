@@ -22,11 +22,11 @@ main() `test(expected: "3") {
   for i in 0..3 {
     select {
       v := <-ch:
-      if val := v {
-        total += val;
-      }
+        if val := v {
+          total += val;
+        }
       v := <-dummy:
-      total += 0;
+        total += 0;
     }
   }
   print_line(total);

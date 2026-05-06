@@ -16,13 +16,13 @@ test_select_recv_picks_ready() `test(exclude: "wasm32") {
   int result = -1;
   select {
     v := <-ch1:
-    if val := v {
-      result = val;
-    }
+      if val := v {
+        result = val;
+      }
     v := <-ch2:
-    if val := v {
-      result = val;
-    }
+      if val := v {
+        result = val;
+      }
   }
   // Either ch1 or ch2 value received
   assert(result >= 0, "select recv got a value");
@@ -41,9 +41,9 @@ test_select_recv_multi_type() `test(exclude: "wasm32") {
   int got_int = 0;
   select {
     v := <-ch_int:
-    if val := v {
-      got_int = val;
-    }
+      if val := v {
+        got_int = val;
+      }
     default:
   }
   assert(got_int == 42, "select recv int");

@@ -110,11 +110,11 @@ test_select_default() `test(exclude: "wasm32") {
   int result = 0;
   select {
     v := <-ch1:
-    result = v!;
+      result = v!;
     v := <-ch2:
-    result = v!;
+      result = v!;
     default:
-    result = -1;
+      result = -1;
   }
   assert(result == 42, "select picks ready channel");
 }
@@ -124,9 +124,9 @@ test_select_default_noop() `test(exclude: "wasm32") {
   int result = -1;
   select {
     v := <-ch:
-    result = v!;
+      result = v!;
     default:
-    result = 0;
+      result = 0;
   }
   assert(result == 0, "select falls to default when no channel ready");
 }

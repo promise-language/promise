@@ -13,8 +13,8 @@ main() `test(expected: "done") {
   dummy := channel[int](capacity: 1);
   select {
     ch.send(2):
-    print_line("done");
+      print_line("done");
     v := <-dummy:
-    print_line("unexpected");
+      print_line("unexpected");
   }
 }

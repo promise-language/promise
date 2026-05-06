@@ -19,11 +19,11 @@ no channel ready""") {
 
   select {
     v := <-ch1:
-    if val := v {
-      print_line("got: {val}");
-    }
+      if val := v {
+        print_line("got: {val}");
+      }
     v := <-ch2:
-    print_line("got from ch2");
+      print_line("got from ch2");
   }
 
   // --- Select Default ---
@@ -35,8 +35,8 @@ no channel ready""") {
 
   select {
     v := <-ch3:
-    print_line("got value");
+      print_line("got value");
     default:
-    print_line("no channel ready");
+      print_line("no channel ready");
   }
 }

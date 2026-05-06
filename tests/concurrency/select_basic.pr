@@ -9,10 +9,10 @@ main() `test(expected: "42") {
 
   select {
     v := <-ch1:
-    if val := v {
-      print_line(val);
-    }
+      if val := v {
+        print_line(val);
+      }
     v := <-ch2:
-    print_line(0);
+      print_line(0);
   }
 }

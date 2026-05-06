@@ -393,7 +393,22 @@ func TestFormat(t *testing.T) {
 		{
 			name:     "select statement",
 			input:    "select {\nch.send(v):\nx();\ndefault:\ny();\n}",
-			expected: "select {\n  ch.send(v):\n  x();\n  default:\n  y();\n}\n",
+			expected: "select {\n  ch.send(v):\n    x();\n  default:\n    y();\n}\n",
+		},
+		{
+			name:     "select empty default same line",
+			input:    "select {\nv := <-ch: default:\n}",
+			expected: "select {\n  v := <-ch: default:\n}\n",
+		},
+		{
+			name:     "select with if in body",
+			input:    "select {\nv := <-ch:\nif val := v {\nuse(val);\n}\ndefault:\ny();\n}",
+			expected: "select {\n  v := <-ch:\n    if val := v {\n      use(val);\n    }\n  default:\n    y();\n}\n",
+		},
+		{
+			name:     "select case arm with nested call",
+			input:    "select {\nch.send(foo(bar[0])):\nx();\ndefault:\ny();\n}",
+			expected: "select {\n  ch.send(foo(bar[0])):\n    x();\n  default:\n    y();\n}\n",
 		},
 		{
 			name:     "go expression",
@@ -997,7 +1012,7 @@ func TestIdempotent(t *testing.T) {
 		"if !(a && b) {\n  x();\n}\n",
 		"f := |x| -> x * 2;\n",
 		"assert('\\\\' == '\\\\', \"backslash\");\n",
-		"select {\n  ch.send(v):\n  x();\n  default:\n  y();\n}\n",
+		"select {\n  ch.send(v):\n    x();\n  default:\n    y();\n}\n",
 		"match x {\n  1 => \"one\",\n  _ => \"other\",\n}\n",
 		"string s = \"{match x { 3 => \"three\", _ => \"other\", }}\";\n",
 		"string s = \"{a}{b}\";\n",

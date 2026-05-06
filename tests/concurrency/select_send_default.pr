@@ -5,9 +5,9 @@ main() `test(expected: "sent") {
   // Channel has capacity, send should succeed
   select {
     ch.send(42):
-    print_line("sent");
+      print_line("sent");
     default:
-    print_line("would block");
+      print_line("would block");
   }
 
   // Verify the value was sent

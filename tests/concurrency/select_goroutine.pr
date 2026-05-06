@@ -10,10 +10,10 @@ main() `test(expected: "42") {
   // Select: ch will have data, dummy won't
   select {
     v := <-ch:
-    if val := v {
-      print_line(val);
-    }
+      if val := v {
+        print_line(val);
+      }
     v := <-dummy:
-    print_line("unexpected");
+      print_line("unexpected");
   }
 }

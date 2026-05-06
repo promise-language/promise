@@ -14,16 +14,16 @@ main() `test(expected: "42") {
   // When ch2 gets data, select should wake and pick case 2
   select {
     v := <-ch1:
-    if val := v {
-      print_line("ch1: {val}");
-    }
+      if val := v {
+        print_line("ch1: {val}");
+      }
     v := <-ch2:
-    if val := v {
-      print_line(val);
-    }
+      if val := v {
+        print_line(val);
+      }
     v := <-ch3:
-    if val := v {
-      print_line("ch3: {val}");
-    }
+      if val := v {
+        print_line("ch3: {val}");
+      }
   }
 }

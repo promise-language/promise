@@ -14,10 +14,10 @@ main() `test(expected: "received: 7") {
   // Send case blocks (ch_send full), recv case blocks (ch_recv empty)
   select {
     ch_send.send(1):
-    print_line("sent");
+      print_line("sent");
     v := <-ch_recv:
-    if val := v {
-      print_line("received: {val}");
-    }
+      if val := v {
+        print_line("received: {val}");
+      }
   }
 }

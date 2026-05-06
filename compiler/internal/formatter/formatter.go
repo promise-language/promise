@@ -655,10 +655,17 @@ func isHexDigitOrUnderscore(ch byte) bool {
 type braceContext int
 
 const (
-	ctxBlock braceContext = iota // default: function body, if, for, etc.
-	ctxMatch                     // match { arms... }
-	ctxEnum                      // enum { variants... }
+	ctxBlock  braceContext = iota // default: function body, if, for, etc.
+	ctxMatch                      // match { arms... }
+	ctxEnum                       // enum { variants... }
+	ctxSelect                     // select { case: body... }
 )
+
+// selectSaveState saves select-specific state when entering a nested block.
+type selectSaveState struct {
+	inCaseBody bool
+	depth      int
+}
 
 func reformat(tokens []token) string {
 	f := &formatter{tokens: tokens}
@@ -692,6 +699,11 @@ type formatter struct {
 	pendingBraceContext  braceContext   // context for the next { (set by match/enum keywords)
 	braceStack           []braceContext // stack of brace contexts for trailing comma normalization
 	lastContentPos       int            // output position after last non-comment content write
+
+	// Select case indentation (B0138)
+	inSelectCaseBody bool              // true when inside a select case body (extra indent active)
+	selectDepth      int               // paren+bracket depth within current select block
+	selectSaveStack  []selectSaveState // saved select state for nested blocks
 }
 
 func (f *formatter) peek() token {
@@ -796,6 +808,11 @@ func (f *formatter) emitToken() {
 
 	case tkRBrace:
 		f.consume()
+		// Extra de-indent for select case body before regular indent-- (B0138)
+		if f.inSelectCaseBody && f.currentBraceContext() == ctxSelect {
+			f.indent--
+			f.inSelectCaseBody = false
+		}
 		f.indent--
 		if f.indent < 0 {
 			f.indent = 0
@@ -860,6 +877,13 @@ func (f *formatter) emitToken() {
 		// Don't reset pendingNLs — skipNewlines() above counted source newlines
 		// after }, which the NEXT token needs to decide blank-line insertion.
 		f.afterOpen = false
+		// Restore select state from before this block (B0138)
+		if n := len(f.selectSaveStack); n > 0 {
+			saved := f.selectSaveStack[n-1]
+			f.selectSaveStack = f.selectSaveStack[:n-1]
+			f.inSelectCaseBody = saved.inCaseBody
+			f.selectDepth = saved.depth
+		}
 		return
 
 	case tkLBrace:
@@ -901,6 +925,10 @@ func (f *formatter) emitToken() {
 		f.newline()
 		f.indent++
 		f.braceStack = append(f.braceStack, f.pendingBraceContext)
+		// Save and reset select state for new block (B0138)
+		f.selectSaveStack = append(f.selectSaveStack, selectSaveState{f.inSelectCaseBody, f.selectDepth})
+		f.inSelectCaseBody = false
+		f.selectDepth = 0
 		f.pendingBraceContext = ctxBlock
 		f.prevPrev = f.prev
 		f.prev = tok
@@ -924,6 +952,55 @@ func (f *formatter) emitBlankLineIfNeeded() {
 	}
 }
 
+// currentBraceContext returns the brace context at the top of the stack.
+func (f *formatter) currentBraceContext() braceContext {
+	if n := len(f.braceStack); n > 0 {
+		return f.braceStack[n-1]
+	}
+	return ctxBlock
+}
+
+// isSelectCaseArm checks whether the current line (starting from f.pos) is a
+// select case arm — i.e., it contains a colon at paren/bracket/brace depth 0
+// before any semicolon, opening brace, or closing brace.
+func (f *formatter) isSelectCaseArm() bool {
+	depth := 0
+	for i := f.pos; i < len(f.tokens); i++ {
+		tk := f.tokens[i]
+		if tk.kind == tkNewline {
+			continue
+		}
+		switch tk.kind {
+		case tkLParen, tkLBracket:
+			depth++
+		case tkLBrace:
+			if depth == 0 {
+				return false // block opening — not part of a case arm
+			}
+			depth++
+		case tkRParen, tkRBracket:
+			if depth > 0 {
+				depth--
+			}
+		case tkRBrace:
+			if depth > 0 {
+				depth--
+			} else {
+				return false
+			}
+		case tkColon:
+			if depth == 0 {
+				return true
+			}
+		case tkSemi:
+			if depth == 0 {
+				return false
+			}
+		}
+	}
+	return false
+}
+
 // needsTrailingComma returns true if a trailing comma should be inserted before }.
 func (f *formatter) needsTrailingComma(ctx braceContext) bool {
 	p := f.prev.kind
@@ -942,6 +1019,12 @@ func (f *formatter) needsTrailingComma(ctx braceContext) bool {
 
 func (f *formatter) emitRegular(tok token) {
 	if !f.lineHasContent {
+		// De-indent for select case arm (B0138): if we're in a select case body
+		// and this new line starts a case arm, drop back to case-arm indent level.
+		if f.inSelectCaseBody && f.currentBraceContext() == ctxSelect && f.isSelectCaseArm() {
+			f.indent--
+			f.inSelectCaseBody = false
+		}
 		// Starting a new line
 		f.emitBlankLineIfNeeded()
 		f.writeIndent()
@@ -969,7 +1052,9 @@ func (f *formatter) emitRegular(tok token) {
 			f.pendingBraceContext = ctxMatch
 		case "enum":
 			f.pendingBraceContext = ctxEnum
-		case "if", "for", "while", "else", "select", "go", "unsafe", "type":
+		case "select":
+			f.pendingBraceContext = ctxSelect
+		case "if", "for", "while", "else", "go", "unsafe", "type":
 			f.pendingBraceContext = ctxBlock
 		}
 	}
@@ -993,6 +1078,15 @@ func (f *formatter) emitRegular(tok token) {
 		// Pop if this ] closes a slice bracket
 		if n := len(f.sliceBracketStack); n > 0 && f.sliceBracketStack[n-1] == f.totalBracketDepth {
 			f.sliceBracketStack = f.sliceBracketStack[:n-1]
+		}
+	}
+
+	// Track select paren/bracket depth for case-arm colon detection (B0138)
+	if f.currentBraceContext() == ctxSelect {
+		if tok.kind == tkLParen || tok.kind == tkLBracket {
+			f.selectDepth++
+		} else if (tok.kind == tkRParen || tok.kind == tkRBracket) && f.selectDepth > 0 {
+			f.selectDepth--
 		}
 	}
 
@@ -1044,6 +1138,14 @@ func (f *formatter) emitRegular(tok token) {
 
 	// Colon: newline if source had newlines after it (select cases, but not named args)
 	if tok.kind == tkColon {
+		// Indent case body after select case-arm colon (B0138)
+		if f.currentBraceContext() == ctxSelect && f.selectDepth == 0 {
+			if f.inSelectCaseBody {
+				f.indent-- // close previous case body (same-line colon pair)
+			}
+			f.inSelectCaseBody = true
+			f.indent++
+		}
 		f.skipNewlines()
 		if f.pendingNLs > 0 {
 			f.newline()

@@ -6,10 +6,10 @@ main() `test(expected: "default") {
   // Neither channel has data
   select {
     v := <-ch1:
-    print_line(1);
+      print_line(1);
     v := <-ch2:
-    print_line(2);
+      print_line(2);
     default:
-    print_line("default");
+      print_line("default");
   }
 }

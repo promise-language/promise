@@ -60,6 +60,7 @@ Commands:
   format    Format Promise source files
   clean     Remove build cache (--global also clears module cache)
   install   Install Promise to PROMISE_HOME (default: ~/.promise/)
+  sync      Download and install a compiler epoch from GitHub releases
   epochs    List installed epochs
   use       Set the active epoch (e.g., promise use 2026.3)
 
@@ -90,6 +91,11 @@ Test discovery:
   promise test file.pr          Run tests in a single file
   promise test dir/             Scan directory for test files
   promise test dir/...          Scan directory recursively for test files
+
+Sync:
+  promise sync                    Download latest stable epoch
+  promise sync 2026.3             Download specific epoch
+  promise sync next               Download latest pre-release build
 
 Inline execution:
   promise exec 'print_line("hello")'
@@ -163,6 +169,8 @@ func main() {
 		runPin(os.Args[2:])
 	case "install":
 		runInstall()
+	case "sync":
+		runSync(os.Args[2:])
 	case "catalog":
 		runCatalog(os.Args[2:])
 	case "epochs":

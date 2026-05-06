@@ -1,12 +1,12 @@
 // hash_test.pr — Tests for FNV-1a hash implementation
-test_int_hash_deterministic() `test(allow_leaks: true) {
+test_int_hash_deterministic() `test {
   int x = 42;
   assert(x.hash == x.hash, "same value same hash");
   int y = 42;
   assert(x.hash == y.hash, "equal values equal hash");
 }
 
-test_int_hash_different_values() `test(allow_leaks: true) {
+test_int_hash_different_values() `test {
   int a = 0;
   int b = 1;
   assert(a.hash != b.hash, "0 vs 1");
@@ -15,7 +15,7 @@ test_int_hash_different_values() `test(allow_leaks: true) {
   assert(b.hash != c.hash, "1 vs 100");
 }
 
-test_uint_hash() `test(allow_leaks: true) {
+test_uint_hash() `test {
   uint x = 42;
   uint y = 42;
   assert(x.hash == y.hash, "equal uint same hash");
@@ -23,7 +23,7 @@ test_uint_hash() `test(allow_leaks: true) {
   assert(x.hash != z.hash, "different uint different hash");
 }
 
-test_bool_hash() `test(allow_leaks: true) {
+test_bool_hash() `test {
   bool t = true;
   bool f = false;
   assert(t.hash == t.hash, "true deterministic");
@@ -31,14 +31,14 @@ test_bool_hash() `test(allow_leaks: true) {
   assert(t.hash != f.hash, "true vs false");
 }
 
-test_char_hash() `test(allow_leaks: true) {
+test_char_hash() `test {
   char a = 'a';
   char b = 'b';
   assert(a.hash == a.hash, "char deterministic");
   assert(a.hash != b.hash, "a vs b");
 }
 
-test_string_hash() `test(allow_leaks: true) {
+test_string_hash() `test {
   string s = "hello";
   string t = "hello";
   assert(s.hash == t.hash, "equal strings same hash");
@@ -46,7 +46,7 @@ test_string_hash() `test(allow_leaks: true) {
   assert(s.hash != u.hash, "different strings different hash");
 }
 
-test_hash_as_map_key() `test(allow_leaks: true) {
+test_hash_as_map_key() `test {
   // Verifies hash works end-to-end with map lookups
   map[int, int] m = {:};
   m[1] = 10;
@@ -69,20 +69,20 @@ test_hash_as_map_key() `test(allow_leaks: true) {
   }
 }
 
-test_hash_zero() `test(allow_leaks: true) {
+test_hash_zero() `test {
   int z = 0;
   // Hash of zero should be a valid non-zero hash (FNV-1a property)
   assert(z.hash != 0, "hash of 0 is non-zero");
 }
 
-test_negative_int_hash() `test(allow_leaks: true) {
+test_negative_int_hash() `test {
   int neg = -1;
   int pos = 1;
   assert(neg.hash != pos.hash, "-1 vs 1");
   assert(neg.hash == neg.hash, "-1 deterministic");
 }
 
-test_large_values() `test(allow_leaks: true) {
+test_large_values() `test {
   // Max/min boundaries should produce distinct hashes
   int big = 9223372036854775807;
   int small = -9223372036854775807;
@@ -94,7 +94,7 @@ test_large_values() `test(allow_leaks: true) {
   assert(a.hash != b.hash, "adjacent values");
 }
 
-test_expected_fnv1a_values() `test(allow_leaks: true) {
+test_expected_fnv1a_values() `test {
   // Pin exact FNV-1a 64-bit output to catch algorithmic drift
   assert(0.hash == -6284781860667377211, "fnv1a(0)");
   assert(1.hash == -8517097267634966620, "fnv1a(1)");
@@ -105,14 +105,14 @@ test_expected_fnv1a_values() `test(allow_leaks: true) {
   assert(max_int.hash == -8289549613075766851, "fnv1a(max)");
 }
 
-test_float_hash_deterministic() `test(allow_leaks: true) {
+test_float_hash_deterministic() `test {
   f64 x = 3.14;
   assert(x.hash == x.hash, "f64 deterministic");
   f64 y = 3.14;
   assert(x.hash == y.hash, "equal f64 same hash");
 }
 
-test_float_hash_different_values() `test(allow_leaks: true) {
+test_float_hash_different_values() `test {
   f64 a = 1.0;
   f64 b = 2.0;
   assert(a.hash != b.hash, "1.0 vs 2.0");
@@ -120,7 +120,7 @@ test_float_hash_different_values() `test(allow_leaks: true) {
   assert(a.hash != c.hash, "1.0 vs 0.0");
 }
 
-test_float_hash_as_map_key() `test(allow_leaks: true) {
+test_float_hash_as_map_key() `test {
   map[f64, string] m = {:};
   m[1.5] = "one point five";
   m[2.5] = "two point five";
@@ -136,14 +136,14 @@ test_float_hash_as_map_key() `test(allow_leaks: true) {
   }
 }
 
-test_string_hash_deterministic() `test(allow_leaks: true) {
+test_string_hash_deterministic() `test {
   string a = "hello";
   string b = "hello";
   assert(a.hash == b.hash, "equal strings same hash");
   assert(a.hash == a.hash, "string deterministic");
 }
 
-test_string_hash_different_values() `test(allow_leaks: true) {
+test_string_hash_different_values() `test {
   string a = "hello";
   string b = "world";
   string c = "hello!";
@@ -151,14 +151,14 @@ test_string_hash_different_values() `test(allow_leaks: true) {
   assert(a.hash != c.hash, "hello vs hello!");
 }
 
-test_string_hash_empty() `test(allow_leaks: true) {
+test_string_hash_empty() `test {
   string empty = "";
   // Empty string should have the FNV offset basis as hash (no bytes mixed in)
   assert(empty.hash != 0, "empty string hash non-zero");
   assert(empty.hash == empty.hash, "empty string deterministic");
 }
 
-test_expected_string_hash_values() `test(allow_leaks: true) {
+test_expected_string_hash_values() `test {
   // Pin exact FNV-1a 64-bit output for known strings to catch algorithmic drift
   string empty = "";
   assert(empty.hash == -3750763034362895579, "fnv1a(\"\")");
@@ -174,7 +174,7 @@ test_expected_string_hash_values() `test(allow_leaks: true) {
   assert(abc.hash == -1792535898324117685, "fnv1a(\"abc\")");
 }
 
-test_string_hash_as_map_key() `test(allow_leaks: true) {
+test_string_hash_as_map_key() `test {
   map[string, int] m = {:};
   m["foo"] = 1;
   m["bar"] = 2;

@@ -1,6 +1,6 @@
 // For-in iteration tests: ranges, vectors, strings, with index.
 // --- exclusive range ---
-test_range_exclusive() `test(allow_leaks: true) {
+test_range_exclusive() `test {
   int sum = 0;
   for i in 0..5 {
     sum += i;
@@ -10,7 +10,7 @@ test_range_exclusive() `test(allow_leaks: true) {
 
 // --- inclusive range ---
 
-test_range_inclusive() `test(allow_leaks: true) {
+test_range_inclusive() `test {
   int sum = 0;
   for i in 1..=10 {
     sum += i;
@@ -20,7 +20,7 @@ test_range_inclusive() `test(allow_leaks: true) {
 
 // --- range starting from non-zero ---
 
-test_range_offset() `test(allow_leaks: true) {
+test_range_offset() `test {
   int[] collected = [];
   for i in 5..8 {
     collected.push(i);
@@ -32,7 +32,7 @@ test_range_offset() `test(allow_leaks: true) {
 
 // --- empty range ---
 
-test_range_empty() `test(allow_leaks: true) {
+test_range_empty() `test {
   int count = 0;
   for i in 5..5 {
     count++;
@@ -42,7 +42,7 @@ test_range_empty() `test(allow_leaks: true) {
 
 // --- for-in over vector ---
 
-test_for_in_vector() `test(allow_leaks: true) {
+test_for_in_vector() `test {
   string[] words = ["the", "quick", "brown", "fox"];
   string joined = "";
   for w in words {
@@ -56,7 +56,7 @@ test_for_in_vector() `test(allow_leaks: true) {
 
 // --- for-in with index over vector ---
 
-test_for_in_index_vector() `test(allow_leaks: true) {
+test_for_in_index_vector() `test {
   int[] nums = [10, 20, 30];
   int sum_indices = 0;
   int sum_values = 0;
@@ -70,7 +70,7 @@ test_for_in_index_vector() `test(allow_leaks: true) {
 
 // --- for-in over string chars ---
 
-test_for_in_string() `test(allow_leaks: true) {
+test_for_in_string() `test {
   string s = "abcde";
   int count = 0;
   for ch in s {
@@ -81,7 +81,7 @@ test_for_in_string() `test(allow_leaks: true) {
 
 // --- for-in with index over string ---
 
-test_for_in_index_string() `test(allow_leaks: true) {
+test_for_in_index_string() `test {
   string s = "xyz";
   int last_idx = -1;
   for i, ch in s {
@@ -92,7 +92,7 @@ test_for_in_index_string() `test(allow_leaks: true) {
 
 // --- nested for-in ---
 
-test_nested_for_in() `test(allow_leaks: true) {
+test_nested_for_in() `test {
   int total = 0;
   for i in 0..3 {
     for j in 0..4 {
@@ -104,7 +104,7 @@ test_nested_for_in() `test(allow_leaks: true) {
 
 // --- for-in range collecting to vector ---
 
-test_range_to_vector() `test(allow_leaks: true) {
+test_range_to_vector() `test {
   int[] squares = [];
   for i in 1..=5 {
     squares.push(i * i);
@@ -119,7 +119,7 @@ test_range_to_vector() `test(allow_leaks: true) {
 
 // --- for-in building map from vector ---
 
-test_for_in_build_map() `test(allow_leaks: true) {
+test_for_in_build_map() `test {
   string[] keys = ["a", "b", "c"];
   map[string, int] m = {:};
   for i, k in keys {
@@ -133,7 +133,7 @@ test_for_in_build_map() `test(allow_leaks: true) {
 
 // --- for-in with condition and continue ---
 
-test_for_in_filter() `test(allow_leaks: true) {
+test_for_in_filter() `test {
   int[] nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
   int[] evens = [];
   for n in nums {

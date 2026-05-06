@@ -2,73 +2,73 @@
 // ============================================================
 // char ↔ integer
 // ============================================================
-test_char_to_int() `test(allow_leaks: true) {
+test_char_to_int() `test {
   char c = 'A';
   int code = c as int;
   assert(code == 65, "A = 65");
 }
 
-test_char_to_u8() `test(allow_leaks: true) {
+test_char_to_u8() `test {
   char c = 'z';
   u8 b = c as u8;
   assert((b as int) == 122, "z = 122");
 }
 
-test_u8_to_char() `test(allow_leaks: true) {
+test_u8_to_char() `test {
   u8 b = 65u8;
   char c = b as char;
   assert(c == 'A', "65 = A");
 }
 
-test_int_to_char() `test(allow_leaks: true) {
+test_int_to_char() `test {
   int code = 48;
   char c = code as char;
   assert(c == '0', "48 = 0");
 }
 
-test_char_to_i32() `test(allow_leaks: true) {
+test_char_to_i32() `test {
   char c = 'Z';
   i32 x = c as i32;
   assert((x as int) == 90, "Z = 90");
 }
 
-test_i32_to_char() `test(allow_leaks: true) {
+test_i32_to_char() `test {
   i32 x = 97i32;
   char c = x as char;
   assert(c == 'a', "97 = a");
 }
 
-test_char_to_uint() `test(allow_leaks: true) {
+test_char_to_uint() `test {
   char c = '!';
   uint u = c as uint;
   assert((u as! int) == 33, "! = 33");
 }
 
-test_char_to_i16() `test(allow_leaks: true) {
+test_char_to_i16() `test {
   char c = 'A';
   i16 x = c as i16;
   assert((x as int) == 65, "A as i16 = 65");
 }
 
-test_i16_to_char() `test(allow_leaks: true) {
+test_i16_to_char() `test {
   i16 x = 97i16;
   char c = x as char;
   assert(c == 'a', "97i16 as char = a");
 }
 
-test_char_to_u16() `test(allow_leaks: true) {
+test_char_to_u16() `test {
   char c = 'Z';
   u16 x = c as u16;
   assert((x as int) == 90, "Z as u16 = 90");
 }
 
-test_u16_to_char() `test(allow_leaks: true) {
+test_u16_to_char() `test {
   u16 x = 65u16;
   char c = x as char;
   assert(c == 'A', "65u16 as char = A");
 }
 
-test_uint_to_char() `test(allow_leaks: true) {
+test_uint_to_char() `test {
   uint u = 72 as! uint;
   char c = u as char;
   assert(c == 'H', "72u as char = H");
@@ -78,25 +78,25 @@ test_uint_to_char() `test(allow_leaks: true) {
 // char ↔ float
 // ============================================================
 
-test_char_to_f64() `test(allow_leaks: true) {
+test_char_to_f64() `test {
   char c = 'A';
   f64 f = c as f64;
   assert(f == 65.0, "A as f64 = 65.0");
 }
 
-test_f64_to_char() `test(allow_leaks: true) {
+test_f64_to_char() `test {
   f64 f = 66.0;
   char c = f as char;
   assert(c == 'B', "66.0 as char = B");
 }
 
-test_char_to_f32() `test(allow_leaks: true) {
+test_char_to_f32() `test {
   char c = 'A';
   f32 f = c as f32;
   assert((f as f64) == 65.0, "A as f32 = 65.0");
 }
 
-test_f32_to_char() `test(allow_leaks: true) {
+test_f32_to_char() `test {
   f32 f = 66.0f32;
   char c = f as char;
   assert(c == 'B', "66.0f32 as char = B");
@@ -106,42 +106,42 @@ test_f32_to_char() `test(allow_leaks: true) {
 // bool → integer
 // ============================================================
 
-test_bool_true_to_int() `test(allow_leaks: true) {
+test_bool_true_to_int() `test {
   bool b = true;
   int x = b as int;
   assert(x == 1, "true as int = 1");
 }
 
-test_bool_false_to_int() `test(allow_leaks: true) {
+test_bool_false_to_int() `test {
   bool b = false;
   int x = b as int;
   assert(x == 0, "false as int = 0");
 }
 
-test_bool_to_u8() `test(allow_leaks: true) {
+test_bool_to_u8() `test {
   bool b = true;
   u8 x = b as u8;
   assert((x as int) == 1, "true as u8 = 1");
 }
 
-test_bool_to_char() `test(allow_leaks: true) {
+test_bool_to_char() `test {
   bool b = true;
   char c = b as char;
   int code = c as int;
   assert(code == 1, "true as char = codepoint 1");
 }
 
-test_bool_to_i16() `test(allow_leaks: true) {
+test_bool_to_i16() `test {
   assert((true as i16 as int) == 1, "true as i16 = 1");
   assert((false as i16 as int) == 0, "false as i16 = 0");
 }
 
-test_bool_to_i32() `test(allow_leaks: true) {
+test_bool_to_i32() `test {
   assert((true as i32 as int) == 1, "true as i32 = 1");
   assert((false as i32 as int) == 0, "false as i32 = 0");
 }
 
-test_bool_to_uint() `test(allow_leaks: true) {
+test_bool_to_uint() `test {
   uint x = true as uint;
   assert((x as! int) == 1, "true as uint = 1");
 }
@@ -150,12 +150,12 @@ test_bool_to_uint() `test(allow_leaks: true) {
 // bool ↔ float
 // ============================================================
 
-test_bool_to_f64() `test(allow_leaks: true) {
+test_bool_to_f64() `test {
   assert((true as f64) == 1.0, "true as f64 = 1.0");
   assert((false as f64) == 0.0, "false as f64 = 0.0");
 }
 
-test_bool_to_f32() `test(allow_leaks: true) {
+test_bool_to_f32() `test {
   f32 t = true as f32;
   f32 f = false as f32;
   assert((t as f64) == 1.0, "true as f32 = 1.0");
@@ -166,80 +166,80 @@ test_bool_to_f32() `test(allow_leaks: true) {
 // integer → bool
 // ============================================================
 
-test_int_to_bool_zero() `test(allow_leaks: true) {
+test_int_to_bool_zero() `test {
   int x = 0;
   bool b = x as bool;
   assert(b == false, "0 as bool = false");
 }
 
-test_int_to_bool_one() `test(allow_leaks: true) {
+test_int_to_bool_one() `test {
   int x = 1;
   bool b = x as bool;
   assert(b == true, "1 as bool = true");
 }
 
-test_int_to_bool_nonzero() `test(allow_leaks: true) {
+test_int_to_bool_nonzero() `test {
   int x = 42;
   bool b = x as bool;
   assert(b == true, "42 as bool = true");
 }
 
-test_int_to_bool_negative() `test(allow_leaks: true) {
+test_int_to_bool_negative() `test {
   int x = -1;
   bool b = x as bool;
   assert(b == true, "-1 as bool = true");
 }
 
-test_int_to_bool_two() `test(allow_leaks: true) {
+test_int_to_bool_two() `test {
   // Verifies icmp ne (not trunc, which would give false for 2)
   int x = 2;
   bool b = x as bool;
   assert(b == true, "2 as bool = true");
 }
 
-test_u8_to_bool() `test(allow_leaks: true) {
+test_u8_to_bool() `test {
   u8 x = 0u8;
   assert((x as bool) == false, "0u8 = false");
   u8 y = 255u8;
   assert((y as bool) == true, "255u8 = true");
 }
 
-test_char_to_bool() `test(allow_leaks: true) {
+test_char_to_bool() `test {
   char c = 'A';
   assert((c as bool) == true, "A as bool = true");
   char z = '\0';
   assert((z as bool) == false, "null char as bool = false");
 }
 
-test_i16_to_bool() `test(allow_leaks: true) {
+test_i16_to_bool() `test {
   i16 x = 0i16;
   assert((x as bool) == false, "0i16 = false");
   i16 y = 1000i16;
   assert((y as bool) == true, "1000i16 = true");
 }
 
-test_i32_to_bool() `test(allow_leaks: true) {
+test_i32_to_bool() `test {
   i32 x = 0i32;
   assert((x as bool) == false, "0i32 = false");
   i32 y = -1i32;
   assert((y as bool) == true, "-1i32 = true");
 }
 
-test_u16_to_bool() `test(allow_leaks: true) {
+test_u16_to_bool() `test {
   u16 x = 0u16;
   assert((x as bool) == false, "0u16 = false");
   u16 y = 1u16;
   assert((y as bool) == true, "1u16 = true");
 }
 
-test_u32_to_bool() `test(allow_leaks: true) {
+test_u32_to_bool() `test {
   u32 x = 0u32;
   assert((x as bool) == false, "0u32 = false");
   u32 y = 100u32;
   assert((y as bool) == true, "100u32 = true");
 }
 
-test_uint_to_bool() `test(allow_leaks: true) {
+test_uint_to_bool() `test {
   uint x = 0 as! uint;
   assert((x as bool) == false, "0uint = false");
   uint y = 1 as! uint;
@@ -250,19 +250,19 @@ test_uint_to_bool() `test(allow_leaks: true) {
 // float → bool
 // ============================================================
 
-test_f64_to_bool() `test(allow_leaks: true) {
+test_f64_to_bool() `test {
   assert((0.0 as bool) == false, "0.0 as bool = false");
   assert((1.0 as bool) == true, "1.0 as bool = true");
   assert((0.5 as bool) == true, "0.5 as bool = true");
   assert((-1.0 as bool) == true, "-1.0 as bool = true");
 }
 
-test_nan_to_bool() `test(allow_leaks: true) {
+test_nan_to_bool() `test {
   f64 nan = 0.0 / 0.0;
   assert((nan as bool) == true, "NaN as bool = true");
 }
 
-test_f32_to_bool() `test(allow_leaks: true) {
+test_f32_to_bool() `test {
   f32 z = 0.0f32;
   assert((z as bool) == false, "0.0f32 as bool = false");
   f32 one = 1.0f32;
@@ -275,89 +275,89 @@ test_f32_to_bool() `test(allow_leaks: true) {
 // cross-width integer (sext / zext / trunc)
 // ============================================================
 
-test_i8_to_int() `test(allow_leaks: true) {
+test_i8_to_int() `test {
   i8 x = 127i8;
   int y = x as int;
   assert(y == 127, "i8 127 sext to int");
 }
 
-test_i8_neg_to_int() `test(allow_leaks: true) {
+test_i8_neg_to_int() `test {
   i8 x = -128i8;
   int y = x as int;
   assert(y == -128, "i8 -128 sext to int");
 }
 
-test_u8_to_int() `test(allow_leaks: true) {
+test_u8_to_int() `test {
   u8 x = 255u8;
   int y = x as int;
   assert(y == 255, "u8 255 zext to int");
 }
 
-test_int_to_i8() `test(allow_leaks: true) {
+test_int_to_i8() `test {
   int x = 300;
   i8 y = x as i8;
   // 300 = 0x12C, truncated to i8 = 0x2C = 44
   assert((y as int) == 44, "300 trunc to i8 = 44");
 }
 
-test_i16_to_int() `test(allow_leaks: true) {
+test_i16_to_int() `test {
   i16 x = -1000i16;
   int y = x as int;
   assert(y == -1000, "i16 -1000 sext to int");
 }
 
-test_i32_to_int() `test(allow_leaks: true) {
+test_i32_to_int() `test {
   i32 x = -100000i32;
   int y = x as int;
   assert(y == -100000, "i32 -100000 sext to int");
 }
 
-test_u16_to_int() `test(allow_leaks: true) {
+test_u16_to_int() `test {
   u16 x = 50000u16;
   int y = x as int;
   assert(y == 50000, "u16 50000 zext to int");
 }
 
-test_u32_to_int() `test(allow_leaks: true) {
+test_u32_to_int() `test {
   u32 x = 4000000000u32;
   int y = x as int;
   assert(y == 4000000000, "u32 4B zext to int");
 }
 
-test_int_to_i16() `test(allow_leaks: true) {
+test_int_to_i16() `test {
   int x = 70000;
   i16 y = x as i16;
   // 70000 = 0x11170, truncated to i16 = 0x1170 = 4464
   assert((y as int) == 4464, "70000 trunc to i16 = 4464");
 }
 
-test_int_to_u8() `test(allow_leaks: true) {
+test_int_to_u8() `test {
   int x = 256;
   u8 y = x as u8;
   // 256 = 0x100, truncated to u8 = 0x00 = 0
   assert((y as int) == 0, "256 trunc to u8 = 0");
 }
 
-test_int_to_u16() `test(allow_leaks: true) {
+test_int_to_u16() `test {
   int x = 65536;
   u16 y = x as u16;
   // 65536 = 0x10000, truncated to u16 = 0x0000 = 0
   assert((y as int) == 0, "65536 trunc to u16 = 0");
 }
 
-test_i8_to_i16() `test(allow_leaks: true) {
+test_i8_to_i16() `test {
   i8 x = -1i8;
   i16 y = x as i16;
   assert((y as int) == -1, "i8 -1 sext to i16");
 }
 
-test_u8_to_u16() `test(allow_leaks: true) {
+test_u8_to_u16() `test {
   u8 x = 200u8;
   u16 y = x as u16;
   assert((y as int) == 200, "u8 200 zext to u16");
 }
 
-test_i8_to_u8() `test(allow_leaks: true) {
+test_i8_to_u8() `test {
   i8 x = -1i8;
   u8 y = x as u8;
   // -1 in i8 is 0xFF = 255 as u8
@@ -368,19 +368,19 @@ test_i8_to_u8() `test(allow_leaks: true) {
 // same-width reinterpretation (no-op)
 // ============================================================
 
-test_int_to_uint() `test(allow_leaks: true) {
+test_int_to_uint() `test {
   int x = 42;
   uint u = x as uint;
   assert((u as! int) == 42, "int 42 as uint");
 }
 
-test_uint_to_int() `test(allow_leaks: true) {
+test_uint_to_int() `test {
   uint u = 100 as! uint;
   int x = u as int;
   assert(x == 100, "uint 100 as int");
 }
 
-test_char_to_i32_same_width() `test(allow_leaks: true) {
+test_char_to_i32_same_width() `test {
   // char is i32, i32 is i32: should be no-op
   char c = 'X';
   i32 x = c as i32;
@@ -388,7 +388,7 @@ test_char_to_i32_same_width() `test(allow_leaks: true) {
   assert(c2 == 'X', "char -> i32 -> char roundtrip");
 }
 
-test_bool_to_bool() `test(allow_leaks: true) {
+test_bool_to_bool() `test {
   bool t = true;
   bool b = t as bool;
   assert(b == true, "true as bool = true");
@@ -396,7 +396,7 @@ test_bool_to_bool() `test(allow_leaks: true) {
   assert((f as bool) == false, "false as bool = false");
 }
 
-test_int_to_int() `test(allow_leaks: true) {
+test_int_to_int() `test {
   int x = 42;
   int y = x as int;
   assert(y == 42, "int as int = identity");
@@ -406,19 +406,19 @@ test_int_to_int() `test(allow_leaks: true) {
 // float ↔ float
 // ============================================================
 
-test_f32_to_f64() `test(allow_leaks: true) {
+test_f32_to_f64() `test {
   f32 x = 3.14f32;
   f64 y = x as f64;
   assert(y > 3.13 && y < 3.15, "f32 fpext to f64");
 }
 
-test_f64_to_f32() `test(allow_leaks: true) {
+test_f64_to_f32() `test {
   f64 x = 1.5;
   f32 y = x as f32;
   assert((y as f64) == 1.5, "f64 1.5 fptrunc to f32 exact");
 }
 
-test_f64_to_f32_precision() `test(allow_leaks: true) {
+test_f64_to_f32_precision() `test {
   f64 x = 3.141592653589793;
   f32 y = x as f32;
   f64 back = y as f64;
@@ -426,13 +426,13 @@ test_f64_to_f32_precision() `test(allow_leaks: true) {
   assert(back > 3.141 && back < 3.142, "f64 pi fptrunc to f32 loses precision");
 }
 
-test_f32_to_f32() `test(allow_leaks: true) {
+test_f32_to_f32() `test {
   f32 x = 1.5f32;
   f32 y = x as f32;
   assert((y as f64) == 1.5, "f32 as f32 = identity");
 }
 
-test_f64_to_f64() `test(allow_leaks: true) {
+test_f64_to_f64() `test {
   f64 x = 2.718;
   f64 y = x as f64;
   assert(y == 2.718, "f64 as f64 = identity");
@@ -442,43 +442,43 @@ test_f64_to_f64() `test(allow_leaks: true) {
 // int → float
 // ============================================================
 
-test_int_to_f64() `test(allow_leaks: true) {
+test_int_to_f64() `test {
   int x = 42;
   f64 y = x as f64;
   assert(y == 42.0, "int sitofp to f64");
 }
 
-test_uint_to_f64() `test(allow_leaks: true) {
+test_uint_to_f64() `test {
   uint x = 100 as! uint;
   f64 y = x as f64;
   assert(y == 100.0, "uint uitofp to f64");
 }
 
-test_int_to_f32() `test(allow_leaks: true) {
+test_int_to_f32() `test {
   int x = 42;
   f32 y = x as f32;
   assert((y as f64) == 42.0, "int sitofp to f32");
 }
 
-test_i8_to_f64() `test(allow_leaks: true) {
+test_i8_to_f64() `test {
   i8 x = -50i8;
   f64 y = x as f64;
   assert(y == -50.0, "i8 -50 sitofp to f64");
 }
 
-test_u8_to_f64() `test(allow_leaks: true) {
+test_u8_to_f64() `test {
   u8 x = 200u8;
   f64 y = x as f64;
   assert(y == 200.0, "u8 200 uitofp to f64");
 }
 
-test_negative_int_to_f64() `test(allow_leaks: true) {
+test_negative_int_to_f64() `test {
   int x = -100;
   f64 y = x as f64;
   assert(y == -100.0, "int -100 sitofp to f64");
 }
 
-test_char_to_f64_high() `test(allow_leaks: true) {
+test_char_to_f64_high() `test {
   // High codepoint via cast: € euro sign = U+20AC = 8364
   int code = 8364;
   char euro = code as char;
@@ -490,55 +490,55 @@ test_char_to_f64_high() `test(allow_leaks: true) {
 // float → int
 // ============================================================
 
-test_f64_to_int() `test(allow_leaks: true) {
+test_f64_to_int() `test {
   f64 x = 3.99;
   int y = x as int;
   assert(y == 3, "f64 fptosi to int (truncates)");
 }
 
-test_f64_to_uint() `test(allow_leaks: true) {
+test_f64_to_uint() `test {
   f64 x = 42.9;
   uint y = x as uint;
   assert((y as! int) == 42, "f64 fptoui to uint (truncates)");
 }
 
-test_f64_neg_to_int() `test(allow_leaks: true) {
+test_f64_neg_to_int() `test {
   f64 x = -3.99;
   int y = x as int;
   assert(y == -3, "f64 -3.99 fptosi truncates toward zero");
 }
 
-test_f32_to_int() `test(allow_leaks: true) {
+test_f32_to_int() `test {
   f32 x = 7.5f32;
   int y = x as int;
   assert(y == 7, "f32 7.5 fptosi to int = 7");
 }
 
-test_f64_to_i8() `test(allow_leaks: true) {
+test_f64_to_i8() `test {
   f64 x = 100.9;
   i8 y = x as i8;
   assert((y as int) == 100, "f64 100.9 fptosi to i8 = 100");
 }
 
-test_f64_to_u8() `test(allow_leaks: true) {
+test_f64_to_u8() `test {
   f64 x = 200.5;
   u8 y = x as u8;
   assert((y as int) == 200, "f64 200.5 fptoui to u8 = 200");
 }
 
-test_f64_to_i16() `test(allow_leaks: true) {
+test_f64_to_i16() `test {
   f64 x = -1000.7;
   i16 y = x as i16;
   assert((y as int) == -1000, "f64 -1000.7 fptosi to i16");
 }
 
-test_f64_to_char_truncation() `test(allow_leaks: true) {
+test_f64_to_char_truncation() `test {
   f64 f = 65.9;
   char c = f as char;
   assert(c == 'A', "65.9 fptoui to char truncates to 65 = A");
 }
 
-test_f64_zero_to_int() `test(allow_leaks: true) {
+test_f64_zero_to_int() `test {
   f64 x = 0.0;
   int y = x as int;
   assert(y == 0, "0.0 as int = 0");
@@ -548,37 +548,37 @@ test_f64_zero_to_int() `test(allow_leaks: true) {
 // as! (force cast) for scalar types
 // ============================================================
 
-test_as_bang_char() `test(allow_leaks: true) {
+test_as_bang_char() `test {
   int code = 72;
   char c = code as! char;
   assert(c == 'H', "as! int to char");
 }
 
-test_as_bang_int() `test(allow_leaks: true) {
+test_as_bang_int() `test {
   char c = 'X';
   int x = c as! int;
   assert(x == 88, "as! char to int");
 }
 
-test_as_bang_bool_to_int() `test(allow_leaks: true) {
+test_as_bang_bool_to_int() `test {
   bool b = true;
   int x = b as! int;
   assert(x == 1, "as! bool to int");
 }
 
-test_as_bang_int_to_bool() `test(allow_leaks: true) {
+test_as_bang_int_to_bool() `test {
   int x = 5;
   bool b = x as! bool;
   assert(b == true, "as! int to bool");
 }
 
-test_as_bang_f64_to_bool() `test(allow_leaks: true) {
+test_as_bang_f64_to_bool() `test {
   f64 f = 3.14;
   bool b = f as! bool;
   assert(b == true, "as! f64 to bool");
 }
 
-test_as_bang_char_to_f64() `test(allow_leaks: true) {
+test_as_bang_char_to_f64() `test {
   char c = 'A';
   f64 f = c as! f64;
   assert(f == 65.0, "as! char to f64");
@@ -588,31 +588,31 @@ test_as_bang_char_to_f64() `test(allow_leaks: true) {
 // chained casts
 // ============================================================
 
-test_chain_bool_int_f64() `test(allow_leaks: true) {
+test_chain_bool_int_f64() `test {
   bool b = true;
   f64 f = (b as int) as f64;
   assert(f == 1.0, "true -> int -> f64 = 1.0");
 }
 
-test_chain_f64_int_bool() `test(allow_leaks: true) {
+test_chain_f64_int_bool() `test {
   f64 f = 42.5;
   bool b = (f as int) as bool;
   assert(b == true, "42.5 -> int(42) -> bool(true)");
 }
 
-test_chain_char_int_i8() `test(allow_leaks: true) {
+test_chain_char_int_i8() `test {
   char c = 'A'; // 65
   i8 x = (c as int) as i8;
   assert((x as int) == 65, "A -> int -> i8 = 65");
 }
 
-test_chain_i8_i16_i32_int() `test(allow_leaks: true) {
+test_chain_i8_i16_i32_int() `test {
   i8 x = 42i8;
   int y = ((x as i16) as i32) as int;
   assert(y == 42, "i8 -> i16 -> i32 -> int chain");
 }
 
-test_chain_f32_f64_int() `test(allow_leaks: true) {
+test_chain_f32_f64_int() `test {
   f32 x = 9.9f32;
   int y = (x as f64) as int;
   assert(y == 9, "f32 -> f64 -> int truncates to 9");
@@ -622,18 +622,18 @@ test_chain_f32_f64_int() `test(allow_leaks: true) {
 // cast used in expressions
 // ============================================================
 
-test_cast_in_arithmetic() `test(allow_leaks: true) {
+test_cast_in_arithmetic() `test {
   char c = 'A';
   int x = (c as int) + 1;
   assert(x == 66, "char cast + arithmetic");
 }
 
-test_cast_in_comparison() `test(allow_leaks: true) {
+test_cast_in_comparison() `test {
   bool b = true;
   assert((b as int) > 0, "bool cast in comparison");
 }
 
-test_cast_preserves_value_in_condition() `test(allow_leaks: true) {
+test_cast_preserves_value_in_condition() `test {
   int x = 10;
   if x as bool {
     assert(true, "nonzero int as bool in condition");
@@ -642,13 +642,13 @@ test_cast_preserves_value_in_condition() `test(allow_leaks: true) {
   }
 }
 
-test_cast_both_sides_eq() `test(allow_leaks: true) {
+test_cast_both_sides_eq() `test {
   char c = 'A';
   int x = 65;
   assert((c as int) == x, "char as int == int literal");
 }
 
-test_cast_in_function_call() `test(allow_leaks: true) {
+test_cast_in_function_call() `test {
   char c = 'A';
   check_value(c as int);
 }
@@ -661,7 +661,7 @@ check_value(int v) {
 // edge cases
 // ============================================================
 
-test_zero_char_roundtrip() `test(allow_leaks: true) {
+test_zero_char_roundtrip() `test {
   char c = '\0';
   int x = c as int;
   assert(x == 0, "null char as int = 0");
@@ -669,27 +669,27 @@ test_zero_char_roundtrip() `test(allow_leaks: true) {
   assert(c2 == '\0', "0 as char = null char");
 }
 
-test_max_u8_to_i8() `test(allow_leaks: true) {
+test_max_u8_to_i8() `test {
   u8 x = 255u8;
   i8 y = x as i8;
   // 255 = 0xFF, interpreted as signed i8 = -1
   assert((y as int) == -1, "u8 255 as i8 = -1");
 }
 
-test_negative_i8_to_u8() `test(allow_leaks: true) {
+test_negative_i8_to_u8() `test {
   i8 x = -128i8;
   u8 y = x as u8;
   // -128 = 0x80 as u8 = 128
   assert((y as int) == 128, "i8 -128 as u8 = 128");
 }
 
-test_max_i8_value() `test(allow_leaks: true) {
+test_max_i8_value() `test {
   i8 x = 127i8;
   u8 y = x as u8;
   assert((y as int) == 127, "i8 127 as u8 = 127");
 }
 
-test_bool_false_chain() `test(allow_leaks: true) {
+test_bool_false_chain() `test {
   bool b = false;
   int x = b as int;
   assert(x == 0, "false -> int = 0");
@@ -699,7 +699,7 @@ test_bool_false_chain() `test(allow_leaks: true) {
   assert(f == 0.0, "false -> f64 = 0.0");
 }
 
-test_signed_unsigned_boundary() `test(allow_leaks: true) {
+test_signed_unsigned_boundary() `test {
   // i16 max = 32767, i16 min = -32768
   i16 pos = 32767i16;
   i16 neg = -32768i16;
@@ -709,13 +709,13 @@ test_signed_unsigned_boundary() `test(allow_leaks: true) {
   assert(n == -32768, "i16 min sext");
 }
 
-test_u16_max() `test(allow_leaks: true) {
+test_u16_max() `test {
   u16 x = 65535u16;
   int y = x as int;
   assert(y == 65535, "u16 max zext");
 }
 
-test_multiple_casts_same_var() `test(allow_leaks: true) {
+test_multiple_casts_same_var() `test {
   int x = 65;
   char c = x as char;
   f64 f = x as f64;
@@ -727,13 +727,13 @@ test_multiple_casts_same_var() `test(allow_leaks: true) {
   assert((u as int) == 65, "int 65 as u8 = 65");
 }
 
-test_f64_large_to_int() `test(allow_leaks: true) {
+test_f64_large_to_int() `test {
   f64 x = 1000000.0;
   int y = x as int;
   assert(y == 1000000, "f64 1M as int");
 }
 
-test_negative_float_to_unsigned() `test(allow_leaks: true) {
+test_negative_float_to_unsigned() `test {
   // Behavior is platform-dependent for negative float → unsigned,
   // but should not crash
   f64 x = -1.0;

@@ -1,10 +1,10 @@
 use _ "./mathlib";
 
-test_glob_add() `test(allow_leaks: true) {
+test_glob_add() `test {
   assert(add(10, 20) == 30, "add(10, 20) == 30");
 }
 
-test_glob_square() `test(allow_leaks: true) {
+test_glob_square() `test {
   assert(square(6) == 36, "square(6) == 36");
 }
 
@@ -12,7 +12,7 @@ test_glob_greet() `test(allow_leaks: true) {
   assert(greet("globe") == "hello globe", "greet globe");
 }
 
-test_glob_color() `test(allow_leaks: true) {
+test_glob_color() `test {
   c := Color.Red;
   assert(color_name(c) == "red", "glob color_name Red");
 }
@@ -24,7 +24,7 @@ test_glob_type_construct() `test(allow_leaks: true) {
   assert(v.sum() == 15, "glob Vec2.sum() == 15");
 }
 
-test_glob_enum_match() `test(allow_leaks: true) {
+test_glob_enum_match() `test {
   c := Color.Green;
   string result = match c {
     Color.Red => "r",

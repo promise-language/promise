@@ -1,7 +1,7 @@
 // Test the io module (compiled as part of the module).
 // ── IoError / _io_strerror ───────────────────────────────────────────────────
 // flaky leak — sometimes leaks depending on timing
-strerror_known_codes() `test(allow_leaks: true) {
+strerror_known_codes() `test {
   assert(_io_strerror(1) == "operation not permitted", "errno 1");
   assert(_io_strerror(2) == "no such file or directory", "errno 2");
   assert(_io_strerror(13) == "permission denied", "errno 13");

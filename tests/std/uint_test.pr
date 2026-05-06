@@ -1,6 +1,6 @@
 // Test uint arithmetic, comparisons, bitwise, range, and unary operators
 // flaky leak — sometimes leaks depending on timing
-test_addition() `test(allow_leaks: true) {
+test_addition() `test {
   uint a = 1 + 2;
   assert(a == 3, "1 + 2 == 3");
   uint b = 0 + 0;

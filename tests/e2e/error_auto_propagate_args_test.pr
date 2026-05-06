@@ -28,7 +28,7 @@ auto_prop_func_arg() int! {
   return use_int(parse_int("42"));
 }
 
-test_func_arg_success() `test(allow_leaks: true) {
+test_func_arg_success() `test {
   int r = auto_prop_func_arg()!;
   assert(r == 42, "failable arg to function succeeds");
 }
@@ -130,7 +130,7 @@ auto_prop_multi_args() int! {
   return add(parse_int("42"), parse_int("7"));
 }
 
-test_multi_args_success() `test(allow_leaks: true) {
+test_multi_args_success() `test {
   int r = auto_prop_multi_args()!;
   assert(r == 49, "multiple failable args succeed: 42 + 7");
 }
@@ -179,7 +179,7 @@ auto_prop_string_arg() string! {
   return use_string(get_string(false));
 }
 
-test_string_arg_success() `test(allow_leaks: true) {
+test_string_arg_success() `test {
   string r = auto_prop_string_arg()!;
   assert(r == "hello", "failable string arg succeeds");
 }
@@ -211,7 +211,7 @@ auto_prop_mixed_args() int! {
   return combine(1, parse_int("42"), 100);
 }
 
-test_mixed_args_success() `test(allow_leaks: true) {
+test_mixed_args_success() `test {
   int r = auto_prop_mixed_args()!;
   assert(r == 143, "mixed failable/literal args: 1 + 42 + 100");
 }
@@ -228,7 +228,7 @@ auto_prop_nested() int! {
   return double(use_int(parse_int("7")));
 }
 
-test_nested_failable_arg() `test(allow_leaks: true) {
+test_nested_failable_arg() `test {
   int r = auto_prop_nested()!;
   assert(r == 14, "nested calls with failable arg: double(use_int(7))");
 }
@@ -244,7 +244,7 @@ test_explicit_handler_on_arg() `test(allow_leaks: true) {
   assert(r == 99, "explicit handler on failable arg produces recovery value");
 }
 
-test_explicit_unwrap_on_arg() `test(allow_leaks: true) {
+test_explicit_unwrap_on_arg() `test {
   int r = use_int(parse_int("42")!);
   assert(r == 42, "explicit ! unwrap on failable arg works");
 }
@@ -304,7 +304,7 @@ auto_prop_assign() int! {
   return x;
 }
 
-test_assign_success() `test(allow_leaks: true) {
+test_assign_success() `test {
   int r = auto_prop_assign()!;
   assert(r == 42, "failable call in assignment succeeds");
 }
@@ -382,7 +382,7 @@ auto_prop_value_type() int! {
   return v.x + v.y;
 }
 
-test_value_type_arg_success() `test(allow_leaks: true) {
+test_value_type_arg_success() `test {
   int r = auto_prop_value_type()!;
   assert(r == 49, "failable args to value type: 42 + 7");
 }
@@ -440,7 +440,7 @@ auto_prop_enum_variant() Result! {
   return Result.Ok(value: parse_int("42"));
 }
 
-test_enum_variant_arg_success() `test(allow_leaks: true) {
+test_enum_variant_arg_success() `test {
   Result r = auto_prop_enum_variant()!;
   match r {
     Result.Ok(v) => assert(v == 42, "failable arg to enum variant"),
@@ -475,7 +475,7 @@ auto_prop_generic_func() int! {
   return identity[int](parse_int("42"));
 }
 
-test_generic_func_arg() `test(allow_leaks: true) {
+test_generic_func_arg() `test {
   int r = auto_prop_generic_func()!;
   assert(r == 42, "failable arg to generic function");
 }
@@ -490,7 +490,7 @@ auto_prop_vec_push() int! {
   return nums[0];
 }
 
-test_vec_push_arg() `test(allow_leaks: true) {
+test_vec_push_arg() `test {
   int r = auto_prop_vec_push()!;
   assert(r == 42, "failable arg to vec.push");
 }
@@ -555,7 +555,7 @@ both_failable() int! {
   return outer_failable(parse_int("42"));
 }
 
-test_both_failable_success() `test(allow_leaks: true) {
+test_both_failable_success() `test {
   int r = both_failable()!;
   assert(r == 42, "failable arg to failable function, both succeed");
 }

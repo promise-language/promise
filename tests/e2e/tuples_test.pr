@@ -1,6 +1,6 @@
 // Tuple tests: creation, destructuring, as return values.
 // --- basic tuple creation ---
-test_tuple_basic() `test(allow_leaks: true) {
+test_tuple_basic() `test {
   (int, string) pair = (42, "hello");
   (a, b) := pair;
   assert(a == 42, "first element is 42");
@@ -9,7 +9,7 @@ test_tuple_basic() `test(allow_leaks: true) {
 
 // --- tuple of same types ---
 
-test_tuple_same_type() `test(allow_leaks: true) {
+test_tuple_same_type() `test {
   (int, int) coords = (10, 20);
   (x, y) := coords;
   assert(x == 10, "x = 10");
@@ -22,7 +22,7 @@ swap(int a, int b)(int, int) {
   return (b, a);
 }
 
-test_tuple_return() `test(allow_leaks: true) {
+test_tuple_return() `test {
   (x, y) := swap(1, 2);
   assert(x == 2, "swapped first = 2");
   assert(y == 1, "swapped second = 1");
@@ -30,7 +30,7 @@ test_tuple_return() `test(allow_leaks: true) {
 
 // --- tuple with bool ---
 
-test_tuple_with_bool() `test(allow_leaks: true) {
+test_tuple_with_bool() `test {
   (bool, int) result = (true, 42);
   (ok, val) := result;
   assert(ok == true, "bool element");
@@ -46,7 +46,7 @@ min_max(int a, int b)(int, int) {
   return (b, a);
 }
 
-test_min_max() `test(allow_leaks: true) {
+test_min_max() `test {
   (lo, hi) := min_max(10, 3);
   assert(lo == 3, "min is 3");
   assert(hi == 10, "max is 10");
@@ -69,7 +69,7 @@ test_tuple_strings() `test(allow_leaks: true) {
 
 // --- tuple in loop ---
 
-test_tuple_in_loop() `test(allow_leaks: true) {
+test_tuple_in_loop() `test {
   int sum_x = 0;
   int sum_y = 0;
   for i in 0..5 {
@@ -87,7 +87,7 @@ divmod(int a, int b)(int, int) {
   return (a / b, a % b);
 }
 
-test_divmod() `test(allow_leaks: true) {
+test_divmod() `test {
   (q, r) := divmod(17, 5);
   assert(q == 3, "17 / 5 = 3");
   assert(r == 2, "17 % 5 = 2");

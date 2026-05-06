@@ -1,6 +1,6 @@
 // T0064: Vector drop at scope exit — verify no leaks for heap-allocated vectors.
 // Vector created and goes out of scope — should be freed
-vector_scope_exit() `test(allow_leaks: true) {
+vector_scope_exit() `test {
   v := int[]();
   v.push(1);
   v.push(2);
@@ -8,7 +8,7 @@ vector_scope_exit() `test(allow_leaks: true) {
 }
 
 // Vector returned from function — ownership transfers
-vector_return_no_double_free() `test(allow_leaks: true) {
+vector_return_no_double_free() `test {
   v := make_vector();
   assert(v.len == 3, "returned vector has 3");
 }
@@ -30,7 +30,7 @@ vector_move_on_assignment() `test(allow_leaks: true) {
 }
 
 // Vector in loop — freed each iteration
-vector_in_loop() `test(allow_leaks: true) {
+vector_in_loop() `test {
   i := 0;
   while i < 3 {
     v := int[]();
@@ -41,7 +41,7 @@ vector_in_loop() `test(allow_leaks: true) {
 }
 
 // Vector with string elements
-vector_string_elements() `test(allow_leaks: true) {
+vector_string_elements() `test {
   v := string[]();
   v.push("hello");
   v.push("world");

@@ -57,7 +57,7 @@ doubles(int n) stream[int] {
 // --- Tests ---
 
 // flaky leak — sometimes leaks depending on timing
-test_basic_generator() `test(allow_leaks: true) {
+test_basic_generator() `test {
   int sum = 0;
   for x in count_to(5) {
     sum += x;

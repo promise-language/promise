@@ -5,19 +5,19 @@ test_sort_empty() `test(allow_leaks: true) {
   assert(v.len == 0, "sort empty");
 }
 
-test_sort_single() `test(allow_leaks: true) {
+test_sort_single() `test {
   int[] v = [42];
   v = sort[int](v);
   assert(v[0] == 42, "sort single element");
 }
 
-test_sort_sorted() `test(allow_leaks: true) {
+test_sort_sorted() `test {
   int[] v = [1, 2, 3, 4, 5];
   v = sort[int](v);
   assert(v[0] == 1 && v[4] == 5, "sort already sorted");
 }
 
-test_sort_reversed() `test(allow_leaks: true) {
+test_sort_reversed() `test {
   int[] v = [5, 4, 3, 2, 1];
   v = sort[int](v);
   assert(v[0] == 1, "reversed: first == 1");
@@ -27,7 +27,7 @@ test_sort_reversed() `test(allow_leaks: true) {
   assert(v[4] == 5, "reversed: fifth == 5");
 }
 
-test_sort_duplicates() `test(allow_leaks: true) {
+test_sort_duplicates() `test {
   int[] v = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5];
   v = sort[int](v);
   assert(v[0] == 1, "duplicates: first == 1");
@@ -35,14 +35,14 @@ test_sort_duplicates() `test(allow_leaks: true) {
   assert(v[10] == 9, "duplicates: last == 9");
 }
 
-test_sort_negative() `test(allow_leaks: true) {
+test_sort_negative() `test {
   int[] v = [3, -1, 4, -1, 5, -9];
   v = sort[int](v);
   assert(v[0] == -9, "negative: first == -9");
   assert(v[5] == 5, "negative: last == 5");
 }
 
-test_sort_large() `test(allow_leaks: true) {
+test_sort_large() `test {
   int[] v = [];
   int i = 100;
   while i > 0 {
@@ -60,13 +60,13 @@ test_sort_large() `test(allow_leaks: true) {
   }
 }
 
-test_sort_all_equal() `test(allow_leaks: true) {
+test_sort_all_equal() `test {
   int[] v = [7, 7, 7, 7, 7];
   v = sort[int](v);
   assert(v[0] == 7 && v[4] == 7, "all equal stays 7");
 }
 
-test_sort_strings() `test(allow_leaks: true) {
+test_sort_strings() `test {
   string[] v = ["banana", "apple", "cherry", "date"];
   v = sort[string](v);
   assert(v[0] == "apple", "strings: first == apple");
@@ -75,7 +75,7 @@ test_sort_strings() `test(allow_leaks: true) {
   assert(v[3] == "date", "strings: fourth == date");
 }
 
-test_sort_two_elements() `test(allow_leaks: true) {
+test_sort_two_elements() `test {
   int[] v = [2, 1];
   v = sort[int](v);
   assert(v[0] == 1 && v[1] == 2, "two elements sorted");

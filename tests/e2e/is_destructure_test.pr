@@ -10,7 +10,7 @@ enum Shape {
 }
 
 // flaky leak — sometimes leaks depending on timing
-test_enum_circle() `test(allow_leaks: true) {
+test_enum_circle() `test {
   Shape s = Shape.Circle(radius: 5.0);
   if s is Circle(r) {
     assert(r == 5.0, "radius should be 5.0");

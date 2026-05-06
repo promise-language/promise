@@ -1,6 +1,6 @@
 use mathlib "./mathlib";
 
-test_failable_ok() `test(allow_leaks: true) {
+test_failable_ok() `test {
   int result = mathlib.safe_divide(10, 2)!;
   assert(result == 5, "10 / 2 == 5");
 }
@@ -13,7 +13,7 @@ test_failable_handler() `test(allow_leaks: true) {
   assert(false, "should not reach here");
 }
 
-test_failable_result_capture() `test(allow_leaks: true) {
+test_failable_result_capture() `test {
   (val, err) := mathlib.safe_divide(20, 4);
   if err is present {
     assert(false, "should not have error on success");

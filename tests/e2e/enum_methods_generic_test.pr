@@ -21,7 +21,7 @@ enum Wrapper[T] {
 }
 
 // flaky leak — sometimes leaks depending on timing
-test_generic_enum_getter() `test(allow_leaks: true) {
+test_generic_enum_getter() `test {
   Wrapper[int] s = Wrapper[int].Some(value: 42);
   assert(s.is_some == true, "Some is some");
   assert(s.is_empty == false, "Some not empty");

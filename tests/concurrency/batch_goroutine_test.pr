@@ -19,25 +19,25 @@ do_nothing() {
 
 // --- Task await (usleep spin loop on G.done) ---
 
-test_task_basic() `test(allow_leaks: true, exclude: "wasm32") {
+test_task_basic() `test(exclude: "wasm32") {
   t := go get_int();
   int x = <-t;
   assert(x == 42, "task returns int");
 }
 
-test_task_string() `test(allow_leaks: true, exclude: "wasm32") {
+test_task_string() `test(exclude: "wasm32") {
   t := go get_string();
   string s = <-t;
   assert(s == "hello", "task returns string");
 }
 
-test_task_with_args() `test(allow_leaks: true, exclude: "wasm32") {
+test_task_with_args() `test(exclude: "wasm32") {
   t := go add(10, 20);
   int x = <-t;
   assert(x == 30, "task with args");
 }
 
-test_multiple_tasks() `test(allow_leaks: true, exclude: "wasm32") {
+test_multiple_tasks() `test(exclude: "wasm32") {
   t1 := go get_int();
   t2 := go get_int();
   t3 := go get_string();
@@ -49,7 +49,7 @@ test_multiple_tasks() `test(allow_leaks: true, exclude: "wasm32") {
   assert(s == "hello", "third task");
 }
 
-test_sequential_tasks() `test(allow_leaks: true, exclude: "wasm32") {
+test_sequential_tasks() `test(exclude: "wasm32") {
   t1 := go get_int();
   int x = <-t1;
   t2 := go add(x, 8);
@@ -96,7 +96,7 @@ test_for_in_channel() `test(allow_leaks: true, exclude: "wasm32") {
 
 // --- Fire-and-forget (scheduler handles abandoned G) ---
 
-test_fire_and_forget() `test(allow_leaks: true, exclude: "wasm32") {
+test_fire_and_forget() `test(exclude: "wasm32") {
   go do_nothing();
   assert(true, "fire-and-forget did not crash");
 }

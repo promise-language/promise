@@ -16,7 +16,7 @@ apply_and_count((int) -> void fn, int x) int {
 
 // --- Void function type as parameter ---
 // flaky leak — sometimes leaks depending on timing
-test_void_fn_param() `test(allow_leaks: true) {
+test_void_fn_param() `test {
   int ran = apply_and_count(|int x| {
     int _ = x + 1;
   }, 5);

@@ -1,7 +1,7 @@
 // Advanced collection tests: vectors, maps, nested operations, edge cases.
 // --- vector: push many ---
 // flaky leak — sometimes leaks depending on timing
-test_vector_push_many() `test(allow_leaks: true) {
+test_vector_push_many() `test {
   int[] v = [];
   for i in 0..100 {
     v.push(i);

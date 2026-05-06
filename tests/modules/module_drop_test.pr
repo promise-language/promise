@@ -1,7 +1,7 @@
 use mathlib "./mathlib";
 
 // flaky leak — sometimes leaks depending on timing
-test_drop_basic() `test(allow_leaks: true) {
+test_drop_basic() `test {
   r := mathlib.Resource(id: 1);
   assert(r.id == 1, "resource id == 1");
   // r dropped at scope exit

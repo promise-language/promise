@@ -1,13 +1,13 @@
 // Test f64 arithmetic, comparisons, and unary operators
 //
-test_arithmetic() `test(allow_leaks: true) {
+test_arithmetic() `test {
   assert(1.0 + 2.0 == 3.0, "1.0 + 2.0 == 3.0");
   assert(5.0 - 3.0 == 2.0, "5.0 - 3.0 == 2.0");
   assert(2.5 * 4.0 == 10.0, "2.5 * 4.0 == 10.0");
   assert(10.0 / 4.0 == 2.5, "10.0 / 4.0 == 2.5");
 }
 
-test_comparisons() `test(allow_leaks: true) {
+test_comparisons() `test {
   assert(1.0 < 2.0, "1.0 < 2.0");
   assert(2.0 > 1.0, "2.0 > 1.0");
   assert(1.0 <= 1.0, "1.0 <= 1.0");
@@ -16,19 +16,19 @@ test_comparisons() `test(allow_leaks: true) {
   assert(3.0 >= 1.0, "3.0 >= 1.0");
 }
 
-test_equality() `test(allow_leaks: true) {
+test_equality() `test {
   assert(3.14 == 3.14, "3.14 == 3.14");
   assert(1.0 != 2.0, "1.0 != 2.0");
   assert(!(1.0 == 2.0), "!(1.0 == 2.0)");
 }
 
-test_unary_negation() `test(allow_leaks: true) {
+test_unary_negation() `test {
   f64 x = 3.5;
   assert(-x == 0.0 - 3.5, "-x == -3.5");
   assert(-(-x) == 3.5, "-(-x) == 3.5");
 }
 
-test_compound_assignment() `test(allow_leaks: true) {
+test_compound_assignment() `test {
   f64 x = 10.0;
   x += 2.5;
   assert(x == 12.5, "+= 2.5");
@@ -40,13 +40,13 @@ test_compound_assignment() `test(allow_leaks: true) {
   assert(x == 5.5, "/= 4.0");
 }
 
-test_modulo() `test(allow_leaks: true) {
+test_modulo() `test {
   assert(7.5 % 2.0 == 1.5, "7.5 % 2.0 == 1.5");
   assert(10.0 % 3.0 == 1.0, "10.0 % 3.0 == 1.0");
   assert(5.0 % 5.0 == 0.0, "5.0 % 5.0 == 0.0");
 }
 
-test_increment_decrement() `test(allow_leaks: true) {
+test_increment_decrement() `test {
   f64 x = 1.5;
   x++;
   assert(x == 2.5, "f64 x++ == 2.5");
@@ -56,7 +56,7 @@ test_increment_decrement() `test(allow_leaks: true) {
 
 // --- Hash ---
 
-test_hash() `test(allow_leaks: true) {
+test_hash() `test {
   f64 a = 3.14;
   f64 b = 3.14;
   assert(a.hash == b.hash, "same f64 same hash");
@@ -72,7 +72,7 @@ f32_double(f32 x) f32 {
   return x * 2.0;
 }
 
-test_f32_basic() `test(allow_leaks: true) {
+test_f32_basic() `test {
   f32 a = 1.5;
   assert(f32_double(a) == 3.0, "f32 double");
   f32 b = 0.0;
@@ -80,7 +80,7 @@ test_f32_basic() `test(allow_leaks: true) {
   assert(a != b, "f32 inequality");
 }
 
-test_f32_arithmetic() `test(allow_leaks: true) {
+test_f32_arithmetic() `test {
   f32 a = 10.0;
   f32 b = 3.0;
   assert(a + b == 13.0, "f32 addition");
@@ -90,14 +90,14 @@ test_f32_arithmetic() `test(allow_leaks: true) {
 
 // --- NaN / Infinity ---
 
-test_f64_nan() `test(allow_leaks: true) {
+test_f64_nan() `test {
   f64 n = f64.nan;
   assert(n.is_nan, "f64.nan is_nan");
   assert(!n.is_infinite, "NaN is not infinite");
   assert(!n.is_finite, "NaN is not finite");
 }
 
-test_f64_infinity() `test(allow_leaks: true) {
+test_f64_infinity() `test {
   f64 inf = f64.infinity;
   assert(inf.is_infinite, "f64.infinity is_infinite");
   assert(!inf.is_nan, "infinity is not NaN");
@@ -109,7 +109,7 @@ test_f64_infinity() `test(allow_leaks: true) {
   assert(!neg_inf.is_finite, "negative infinity is not finite");
 }
 
-test_f64_finite() `test(allow_leaks: true) {
+test_f64_finite() `test {
   assert((0.0).is_finite, "0.0 is finite");
   assert((1.0).is_finite, "1.0 is finite");
   assert((-3.14).is_finite, "-3.14 is finite");
@@ -120,14 +120,14 @@ test_f64_finite() `test(allow_leaks: true) {
   assert(!(0.0).is_infinite, "0.0 is not infinite");
 }
 
-test_f32_nan() `test(allow_leaks: true) {
+test_f32_nan() `test {
   f32 n = f32.nan;
   assert(n.is_nan, "f32.nan is_nan");
   assert(!n.is_infinite, "f32 NaN is not infinite");
   assert(!n.is_finite, "f32 NaN is not finite");
 }
 
-test_f32_infinity() `test(allow_leaks: true) {
+test_f32_infinity() `test {
   f32 inf = f32.infinity;
   assert(inf.is_infinite, "f32.infinity is_infinite");
   assert(!inf.is_nan, "f32 infinity is not NaN");
@@ -139,21 +139,21 @@ test_f32_infinity() `test(allow_leaks: true) {
   assert(!neg_inf.is_finite, "f32 negative infinity is not finite");
 }
 
-test_f32_finite() `test(allow_leaks: true) {
+test_f32_finite() `test {
   f32 a = 1.5;
   assert(a.is_finite, "f32 1.5 is finite");
   assert(!a.is_nan, "f32 1.5 is not NaN");
   assert(!a.is_infinite, "f32 1.5 is not infinite");
 }
 
-test_f64_negative_zero() `test(allow_leaks: true) {
+test_f64_negative_zero() `test {
   f64 nz = -0.0;
   assert(nz.is_finite, "negative zero is finite");
   assert(!nz.is_nan, "negative zero is not NaN");
   assert(!nz.is_infinite, "negative zero is not infinite");
 }
 
-test_f64_arithmetic_special() `test(allow_leaks: true) {
+test_f64_arithmetic_special() `test {
   f64 inf = 1.0 / 0.0;
   assert(inf.is_infinite, "1.0/0.0 is infinite");
   f64 nan = 0.0 / 0.0;

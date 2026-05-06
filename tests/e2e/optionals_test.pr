@@ -1,6 +1,6 @@
 // Test functions for optional values.
 // --- Truthiness narrowing ---
-truthiness_string_present() `test(allow_leaks: true) {
+truthiness_string_present() `test {
   string? cc = "hello";
   if cc {
     string s = cc;
@@ -10,14 +10,14 @@ truthiness_string_present() `test(allow_leaks: true) {
   }
 }
 
-truthiness_string_none() `test(allow_leaks: true) {
+truthiness_string_none() `test {
   string? cc = none;
   if cc {
     assert(false, "should not enter then branch");
   }
 }
 
-truthiness_int_present() `test(allow_leaks: true) {
+truthiness_int_present() `test {
   int? x = 42;
   if x {
     int n = x;
@@ -27,7 +27,7 @@ truthiness_int_present() `test(allow_leaks: true) {
   }
 }
 
-truthiness_int_none() `test(allow_leaks: true) {
+truthiness_int_none() `test {
   int? x = none;
   if x {
     assert(false, "should not enter then branch");
@@ -36,7 +36,7 @@ truthiness_int_none() `test(allow_leaks: true) {
 
 // --- is present narrowing ---
 
-is_present_string() `test(allow_leaks: true) {
+is_present_string() `test {
   string? s = "world";
   if s is present {
     string v = s;
@@ -46,7 +46,7 @@ is_present_string() `test(allow_leaks: true) {
   }
 }
 
-is_present_bool() `test(allow_leaks: true) {
+is_present_bool() `test {
   bool? verbose = true;
   if verbose is present {
     bool b = verbose;
@@ -56,7 +56,7 @@ is_present_bool() `test(allow_leaks: true) {
   }
 }
 
-is_present_none() `test(allow_leaks: true) {
+is_present_none() `test {
   int? x = none;
   if x is present {
     assert(false, "should not enter then branch");
@@ -65,7 +65,7 @@ is_present_none() `test(allow_leaks: true) {
 
 // --- is absent ---
 
-is_absent_none() `test(allow_leaks: true) {
+is_absent_none() `test {
   int? x = none;
   if x is absent {
     assert(true, "is absent detects none");
@@ -74,7 +74,7 @@ is_absent_none() `test(allow_leaks: true) {
   }
 }
 
-is_absent_value() `test(allow_leaks: true) {
+is_absent_value() `test {
   int? x = 42;
   if x is absent {
     assert(false, "should not enter then branch");
@@ -83,7 +83,7 @@ is_absent_value() `test(allow_leaks: true) {
 
 // --- if-unwrap ---
 
-if_unwrap_present() `test(allow_leaks: true) {
+if_unwrap_present() `test {
   string? name = "Alice";
   if n := name {
     assert(n == "Alice", "if-unwrap binds value");
@@ -92,7 +92,7 @@ if_unwrap_present() `test(allow_leaks: true) {
   }
 }
 
-if_unwrap_absent() `test(allow_leaks: true) {
+if_unwrap_absent() `test {
   string? name = none;
   if n := name {
     assert(false, "should not enter then branch");
@@ -101,13 +101,13 @@ if_unwrap_absent() `test(allow_leaks: true) {
 
 // --- Elvis operator ---
 
-elvis_none_default() `test(allow_leaks: true) {
+elvis_none_default() `test {
   string? x = none;
   string result = x ?: "default";
   assert(result == "default", "elvis gives default for none");
 }
 
-elvis_value_kept() `test(allow_leaks: true) {
+elvis_value_kept() `test {
   string? x = "actual";
   string result = x ?: "default";
   assert(result == "actual", "elvis keeps present value");
@@ -115,37 +115,37 @@ elvis_value_kept() `test(allow_leaks: true) {
 
 // --- String interpolation with optionals ---
 
-interp_present_int() `test(allow_leaks: true) {
+interp_present_int() `test {
   int? x = 42;
   string s = "{x}";
   assert(s == "42", "interpolate present int?");
 }
 
-interp_none_int() `test(allow_leaks: true) {
+interp_none_int() `test {
   int? x = none;
   string s = "{x}";
   assert(s == "none", "interpolate none int?");
 }
 
-interp_present_string() `test(allow_leaks: true) {
+interp_present_string() `test {
   string? name = "Bob";
   string s = "hello {name}";
   assert(s == "hello Bob", "interpolate present string?");
 }
 
-interp_none_string() `test(allow_leaks: true) {
+interp_none_string() `test {
   string? name = none;
   string s = "hello {name}";
   assert(s == "hello none", "interpolate none string?");
 }
 
-interp_present_bool() `test(allow_leaks: true) {
+interp_present_bool() `test {
   bool? b = true;
   string s = "{b}";
   assert(s == "true", "interpolate present bool?");
 }
 
-interp_none_bool() `test(allow_leaks: true) {
+interp_none_bool() `test {
   bool? b = none;
   string s = "{b}";
   assert(s == "none", "interpolate none bool?");
@@ -169,7 +169,7 @@ narrowing_type_present() `test(allow_leaks: true) {
   }
 }
 
-narrowing_type_none() `test(allow_leaks: true) {
+narrowing_type_none() `test {
   Point? mp = none;
   if mp {
     assert(false, "should not enter then branch");
@@ -202,7 +202,7 @@ narrowing_with_else() `test {
 
 // --- Multiple narrowings in sequence ---
 
-multiple_narrowings() `test(allow_leaks: true) {
+multiple_narrowings() `test {
   string? a = "first";
   string? b = none;
   bool a_ok = false;
@@ -221,7 +221,7 @@ multiple_narrowings() `test(allow_leaks: true) {
 
 // --- Shadowing: same var name in inner scope after narrowing ---
 
-shadowing_after_narrowing() `test(allow_leaks: true) {
+shadowing_after_narrowing() `test {
   int? x = 42;
   if x {
     int n = x;
@@ -234,17 +234,17 @@ shadowing_after_narrowing() `test(allow_leaks: true) {
 
 // --- Uninitialized optional vars ---
 
-uninit_optional_int() `test(allow_leaks: true) {
+uninit_optional_int() `test {
   int? x;
   assert("{x}" == "none", "uninitialized int? is none");
 }
 
-uninit_optional_string() `test(allow_leaks: true) {
+uninit_optional_string() `test {
   string? s;
   assert("{s}" == "none", "uninitialized string? is none");
 }
 
-uninit_optional_then_assign() `test(allow_leaks: true) {
+uninit_optional_then_assign() `test {
   int? x;
   x = 42;
   if x {
@@ -255,7 +255,7 @@ uninit_optional_then_assign() `test(allow_leaks: true) {
 
 // --- Negated narrowing (!cc) ---
 
-negated_narrowing_none() `test(allow_leaks: true) {
+negated_narrowing_none() `test {
   string? cc = none;
   if !cc {
     assert(true, "!cc enters then when cc is none");
@@ -264,7 +264,7 @@ negated_narrowing_none() `test(allow_leaks: true) {
   }
 }
 
-negated_narrowing_present() `test(allow_leaks: true) {
+negated_narrowing_present() `test {
   string? cc = "hello";
   if !cc {
     assert(false, "should not enter then when cc is present");
@@ -274,7 +274,7 @@ negated_narrowing_present() `test(allow_leaks: true) {
   }
 }
 
-negated_narrowing_no_else() `test(allow_leaks: true) {
+negated_narrowing_no_else() `test {
   int? x = none;
   bool entered = false;
   if !x {
@@ -285,7 +285,7 @@ negated_narrowing_no_else() `test(allow_leaks: true) {
 
 // --- Compound narrowing (&&) ---
 
-compound_narrowing_both_present() `test(allow_leaks: true) {
+compound_narrowing_both_present() `test {
   int? a = 10;
   string? b = "world";
   if a && b {
@@ -298,7 +298,7 @@ compound_narrowing_both_present() `test(allow_leaks: true) {
   }
 }
 
-compound_narrowing_first_absent() `test(allow_leaks: true) {
+compound_narrowing_first_absent() `test {
   int? a = none;
   string? b = "hello";
   if a && b {
@@ -306,7 +306,7 @@ compound_narrowing_first_absent() `test(allow_leaks: true) {
   }
 }
 
-compound_narrowing_second_absent() `test(allow_leaks: true) {
+compound_narrowing_second_absent() `test {
   int? a = 42;
   string? b = none;
   if a && b {
@@ -314,7 +314,7 @@ compound_narrowing_second_absent() `test(allow_leaks: true) {
   }
 }
 
-compound_narrowing_both_absent() `test(allow_leaks: true) {
+compound_narrowing_both_absent() `test {
   int? a = none;
   string? b = none;
   if a && b {
@@ -322,7 +322,7 @@ compound_narrowing_both_absent() `test(allow_leaks: true) {
   }
 }
 
-compound_narrowing_with_else() `test(allow_leaks: true) {
+compound_narrowing_with_else() `test {
   int? a = none;
   string? b = "hi";
   bool entered_else = false;
@@ -353,7 +353,7 @@ optional_chain_present() `test(allow_leaks: true) {
   }
 }
 
-optional_chain_none() `test(allow_leaks: true) {
+optional_chain_none() `test {
   Point? mp = none;
   int? px = mp?.x;
   assert("{px}" == "none", "optional chain on none gives none");
@@ -361,7 +361,7 @@ optional_chain_none() `test(allow_leaks: true) {
 
 // --- is absent narrowing (post-divergence) ---
 
-is_absent_narrows_after_diverge() `test(allow_leaks: true) {
+is_absent_narrows_after_diverge() `test {
   int? x = 42;
   if x is absent {
     assert(false, "should not enter then");
@@ -372,7 +372,7 @@ is_absent_narrows_after_diverge() `test(allow_leaks: true) {
   assert(y == 42, "is absent diverge narrows x to int");
 }
 
-negated_narrows_after_diverge() `test(allow_leaks: true) {
+negated_narrows_after_diverge() `test {
   int? x = 10;
   if !x {
     assert(false, "should not enter then");
@@ -383,7 +383,7 @@ negated_narrows_after_diverge() `test(allow_leaks: true) {
   assert(y == 10, "!x diverge narrows x to int");
 }
 
-is_absent_else_narrows() `test(allow_leaks: true) {
+is_absent_else_narrows() `test {
   int? x = 99;
   if x is absent {
     assert(false, "should not enter then");
@@ -395,7 +395,7 @@ is_absent_else_narrows() `test(allow_leaks: true) {
 
 // --- as! on optionals ---
 
-as_bang_optional_present() `test(allow_leaks: true) {
+as_bang_optional_present() `test {
   int? x = 42;
   int y = x as! int;
   assert(y == 42, "as! unwraps present optional");
@@ -403,13 +403,13 @@ as_bang_optional_present() `test(allow_leaks: true) {
 
 // --- Optional force-unwrap (x!) ---
 
-force_unwrap_present() `test(allow_leaks: true) {
+force_unwrap_present() `test {
   int? x = 42;
   int y = x!;
   assert(y == 42, "x! unwraps present optional");
 }
 
-force_unwrap_string() `test(allow_leaks: true) {
+force_unwrap_string() `test {
   string? s = "hello";
   string v = s!;
   assert(v == "hello", "s! unwraps present string optional");
@@ -417,7 +417,7 @@ force_unwrap_string() `test(allow_leaks: true) {
 
 // --- Optional handler (x ? _ { recovery }) ---
 
-optional_handler_none() `test(allow_leaks: true) {
+optional_handler_none() `test {
   int? x = none;
   int y = x? _ {
     0;
@@ -425,7 +425,7 @@ optional_handler_none() `test(allow_leaks: true) {
   assert(y == 0, "handler provides recovery for none");
 }
 
-optional_handler_present() `test(allow_leaks: true) {
+optional_handler_present() `test {
   int? x = 42;
   int y = x? _ {
     0;
@@ -433,7 +433,7 @@ optional_handler_present() `test(allow_leaks: true) {
   assert(y == 42, "handler keeps present value");
 }
 
-optional_handler_diverge() `test(allow_leaks: true) {
+optional_handler_diverge() `test {
   int? x = none;
   int result = -1;
   if true {
@@ -455,13 +455,13 @@ get_none() int?! {
   return none;
 }
 
-double_unwrap_error_then_optional() `test(allow_leaks: true) {
+double_unwrap_error_then_optional() `test {
   int? val = get_value()!;
   int y = val!;
   assert(y == 42, "double unwrap: error then optional");
 }
 
-double_unwrap_failable_optional_handler() `test(allow_leaks: true) {
+double_unwrap_failable_optional_handler() `test {
   int? val = get_none()!;
   int y = val? _ {
     -1;
@@ -493,7 +493,7 @@ is_absent_narrows_user_type_return() `test(allow_leaks: true) {
 }
 
 // narrowing does NOT apply when then-body doesn't diverge
-is_absent_no_post_narrow_without_diverge() `test(allow_leaks: true) {
+is_absent_no_post_narrow_without_diverge() `test {
   int? x = 42;
   if x is absent {
     // does NOT diverge — no post-narrowing
@@ -505,7 +505,7 @@ is_absent_no_post_narrow_without_diverge() `test(allow_leaks: true) {
 
 // --- Force-unwrap: expression positions ---
 
-force_unwrap_in_expression() `test(allow_leaks: true) {
+force_unwrap_in_expression() `test {
   int? x = 10;
   int y = x! + 5;
   assert(y == 15, "x! in arithmetic expression");
@@ -518,7 +518,7 @@ force_unwrap_user_type() `test(allow_leaks: true) {
   assert(q.y == 4, "force unwrap user type y");
 }
 
-force_unwrap_in_call() `test(allow_leaks: true) {
+force_unwrap_in_call() `test {
   int? x = 7;
   string s = "{x!}";
   assert(s == "7", "force unwrap in interpolation");
@@ -526,7 +526,7 @@ force_unwrap_in_call() `test(allow_leaks: true) {
 
 // --- as! on optionals: more types ---
 
-as_bang_string_optional() `test(allow_leaks: true) {
+as_bang_string_optional() `test {
   string? s = "world";
   string v = s as! string;
   assert(v == "world", "as! on string optional");
@@ -541,7 +541,7 @@ as_bang_user_type() `test(allow_leaks: true) {
 
 // --- Optional handler: more types ---
 
-handler_string_recovery() `test(allow_leaks: true) {
+handler_string_recovery() `test {
   string? s = none;
   string v = s? _ {
     "fallback";
@@ -549,7 +549,7 @@ handler_string_recovery() `test(allow_leaks: true) {
   assert(v == "fallback", "handler string recovery on none");
 }
 
-handler_string_present() `test(allow_leaks: true) {
+handler_string_present() `test {
   string? s = "actual";
   string v = s? _ {
     "fallback";

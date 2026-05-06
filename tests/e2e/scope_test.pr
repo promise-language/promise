@@ -1,6 +1,6 @@
 // Scope tests: variable scoping in control flow constructs.
 // --- variable scope in if ---
-test_scope_in_if() `test(allow_leaks: true) {
+test_scope_in_if() `test {
   int x = 10;
   if true {
     int y = 20;
@@ -13,7 +13,7 @@ test_scope_in_if() `test(allow_leaks: true) {
 
 // --- variable scope in if/else ---
 
-test_scope_if_else() `test(allow_leaks: true) {
+test_scope_if_else() `test {
   int x = 0;
   if true {
     int temp = 42;
@@ -27,7 +27,7 @@ test_scope_if_else() `test(allow_leaks: true) {
 
 // --- for loop creates scope per iteration ---
 
-test_for_scope_per_iteration() `test(allow_leaks: true) {
+test_for_scope_per_iteration() `test {
   int last = -1;
   for i in 0..10 {
     int local = i * i;
@@ -38,7 +38,7 @@ test_for_scope_per_iteration() `test(allow_leaks: true) {
 
 // --- variable declared in outer, modified in inner ---
 
-test_outer_modified_inner() `test(allow_leaks: true) {
+test_outer_modified_inner() `test {
   int sum = 0;
   for i in 0..5 {
     sum += i;
@@ -52,7 +52,7 @@ test_outer_modified_inner() `test(allow_leaks: true) {
 
 // --- variable scope in while ---
 
-test_scope_in_while() `test(allow_leaks: true) {
+test_scope_in_while() `test {
   int count = 0;
   int n = 3;
   while n > 0 {
@@ -65,7 +65,7 @@ test_scope_in_while() `test(allow_leaks: true) {
 
 // --- nested if scope ---
 
-test_nested_if_scope() `test(allow_leaks: true) {
+test_nested_if_scope() `test {
   int x = 1;
   if x > 0 {
     int y = x * 2;
@@ -80,7 +80,7 @@ test_nested_if_scope() `test(allow_leaks: true) {
 
 // --- for-in loop variable scoped to body ---
 
-test_for_loop_var_scope() `test(allow_leaks: true) {
+test_for_loop_var_scope() `test {
   int total = 0;
   for i in 0..5 {
     total += i;
@@ -90,7 +90,7 @@ test_for_loop_var_scope() `test(allow_leaks: true) {
 
 // --- while with inner declarations ---
 
-test_while_inner_decl() `test(allow_leaks: true) {
+test_while_inner_decl() `test {
   int n = 5;
   int result = 1;
   while n > 0 {
@@ -104,7 +104,7 @@ test_while_inner_decl() `test(allow_leaks: true) {
 
 // --- sequential if blocks with same-named vars ---
 
-test_sequential_blocks() `test(allow_leaks: true) {
+test_sequential_blocks() `test {
   int x = 0;
   if true {
     int temp = 10;
@@ -123,7 +123,7 @@ test_sequential_blocks() `test(allow_leaks: true) {
 
 // --- classic for loop variable scope ---
 
-test_classic_for_scope() `test(allow_leaks: true) {
+test_classic_for_scope() `test {
   int sum = 0;
   for i := 0; i < 5; i++ {
     int val = i * 10;
@@ -134,7 +134,7 @@ test_classic_for_scope() `test(allow_leaks: true) {
 
 // --- reuse for-in loop variable name across loops ---
 
-test_for_in_var_reuse() `test(allow_leaks: true) {
+test_for_in_var_reuse() `test {
   int sum1 = 0;
   for i in 0..3 {
     sum1 += i;
@@ -149,7 +149,7 @@ test_for_in_var_reuse() `test(allow_leaks: true) {
 
 // --- reuse for-in loop variable with different types ---
 
-test_for_in_var_reuse_different_types() `test(allow_leaks: true) {
+test_for_in_var_reuse_different_types() `test {
   int total = 0;
   string[] items = ["a", "bb", "ccc"];
   for item in items {
@@ -164,7 +164,7 @@ test_for_in_var_reuse_different_types() `test(allow_leaks: true) {
 
 // --- reuse classic for loop variable ---
 
-test_classic_for_var_reuse() `test(allow_leaks: true) {
+test_classic_for_var_reuse() `test {
   int sum1 = 0;
   for i := 0; i < 3; i++ {
     sum1 += i;
@@ -179,7 +179,7 @@ test_classic_for_var_reuse() `test(allow_leaks: true) {
 
 // --- reuse while loop body variable ---
 
-test_while_var_reuse() `test(allow_leaks: true) {
+test_while_var_reuse() `test {
   int n = 3;
   while n > 0 {
     int x = n * 10;
@@ -196,7 +196,7 @@ test_while_var_reuse() `test(allow_leaks: true) {
 
 // --- reuse nested for loop variables ---
 
-test_nested_for_var_reuse() `test(allow_leaks: true) {
+test_nested_for_var_reuse() `test {
   int sum = 0;
   for i in 0..3 {
     for j in 0..3 {
@@ -215,7 +215,7 @@ test_nested_for_var_reuse() `test(allow_leaks: true) {
 
 // --- reuse if block variable ---
 
-test_if_var_reuse() `test(allow_leaks: true) {
+test_if_var_reuse() `test {
   int x = 1;
   if x == 1 {
     int y = 10;
@@ -229,7 +229,7 @@ test_if_var_reuse() `test(allow_leaks: true) {
 
 // --- reuse match block variable ---
 
-test_match_var_reuse() `test(allow_leaks: true) {
+test_match_var_reuse() `test {
   int val = 1;
   string r1 = match val {
     1 => "one",
@@ -252,7 +252,7 @@ type ScopedResource {
   }
 }
 
-test_for_owned_var_reuse() `test(allow_leaks: true) {
+test_for_owned_var_reuse() `test {
   for i in 0..3 {
     r := ScopedResource(id: i);
     assert(r.id == i, "owned var in first loop");
@@ -265,7 +265,7 @@ test_for_owned_var_reuse() `test(allow_leaks: true) {
 
 // --- owned type variable reuse across if blocks ---
 
-test_if_owned_var_reuse() `test(allow_leaks: true) {
+test_if_owned_var_reuse() `test {
   if true {
     r := ScopedResource(id: 1);
     assert(r.id == 1, "owned var in first if");

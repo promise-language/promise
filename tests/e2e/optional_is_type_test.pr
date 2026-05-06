@@ -1,41 +1,41 @@
 // Tests for `is TypeName` on optional types (B0029).
 // --- Optional primitives: is <type> is equivalent to is present ---
-optional_int_is_type() `test(allow_leaks: true) {
+optional_int_is_type() `test {
   int? x = 42;
   int? n = none;
   assert(x is int, "present int? is int");
   assert(!(n is int), "none int? is not int");
 }
 
-optional_u8_is_type() `test(allow_leaks: true) {
+optional_u8_is_type() `test {
   u8? x = 255u8;
   u8? n = none;
   assert(x is u8, "present u8? is u8");
   assert(!(n is u8), "none u8? is not u8");
 }
 
-optional_f64_is_type() `test(allow_leaks: true) {
+optional_f64_is_type() `test {
   f64? x = 3.14;
   f64? n = none;
   assert(x is f64, "present f64? is f64");
   assert(!(n is f64), "none f64? is not f64");
 }
 
-optional_bool_is_type() `test(allow_leaks: true) {
+optional_bool_is_type() `test {
   bool? x = true;
   bool? n = none;
   assert(x is bool, "present bool? is bool");
   assert(!(n is bool), "none bool? is not bool");
 }
 
-optional_char_is_type() `test(allow_leaks: true) {
+optional_char_is_type() `test {
   char? x = 'a';
   char? n = none;
   assert(x is char, "present char? is char");
   assert(!(n is char), "none char? is not char");
 }
 
-optional_string_is_type() `test(allow_leaks: true) {
+optional_string_is_type() `test {
   string? x = "hello";
   string? n = none;
   assert(x is string, "present string? is string");
@@ -92,7 +92,7 @@ type Vec2 {
   f64 y `value;
 }
 
-optional_value_type() `test(allow_leaks: true) {
+optional_value_type() `test {
   Vec2? v = Vec2(x: 1.0, y: 2.0);
   Vec2? n = none;
   assert(v is Vec2, "present Vec2? is Vec2");
@@ -105,7 +105,7 @@ enum Color {
   Red, Green, Blue,
 }
 
-optional_enum_type() `test(allow_leaks: true) {
+optional_enum_type() `test {
   Color? c = Color.Red;
   Color? n = none;
   assert(c is Color, "present Color? is Color");
@@ -114,19 +114,19 @@ optional_enum_type() `test(allow_leaks: true) {
 
 // --- Falsy values that are still present ---
 
-optional_bool_false_is_present() `test(allow_leaks: true) {
+optional_bool_false_is_present() `test {
   bool? b = false;
   assert(b is bool, "false is still present");
   assert(b is present, "false is present");
 }
 
-optional_int_zero_is_present() `test(allow_leaks: true) {
+optional_int_zero_is_present() `test {
   int? x = 0;
   assert(x is int, "zero int is still present");
   assert(x is present, "zero int is present");
 }
 
-optional_string_empty_is_present() `test(allow_leaks: true) {
+optional_string_empty_is_present() `test {
   string? s = "";
   assert(s is string, "empty string is still present");
   assert(s is present, "empty string is present");
@@ -134,7 +134,7 @@ optional_string_empty_is_present() `test(allow_leaks: true) {
 
 // --- is type agrees with is present ---
 
-optional_is_type_matches_is_present() `test(allow_leaks: true) {
+optional_is_type_matches_is_present() `test {
   int? a = 42;
   int? b = none;
   assert((a is int) == (a is present), "is int == is present for 42");
@@ -159,7 +159,7 @@ enum Shape {
   Point,
 }
 
-optional_data_enum_type() `test(allow_leaks: true) {
+optional_data_enum_type() `test {
   Shape? s = Shape.Circle(radius: 3.14);
   Shape? n = none;
   assert(s is Shape, "present Shape? is Shape");
@@ -168,7 +168,7 @@ optional_data_enum_type() `test(allow_leaks: true) {
 
 // --- Negated is-check ---
 
-optional_negated_is_type() `test(allow_leaks: true) {
+optional_negated_is_type() `test {
   int? x = 42;
   int? n = none;
   assert(!(x is int) == false, "negated is type on present");
@@ -177,7 +177,7 @@ optional_negated_is_type() `test(allow_leaks: true) {
 
 // --- is type in if/else branches ---
 
-optional_is_type_if_else() `test(allow_leaks: true) {
+optional_is_type_if_else() `test {
   int? x = 42;
   bool then_branch = false;
   bool else_branch = false;

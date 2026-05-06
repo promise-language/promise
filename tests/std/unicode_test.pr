@@ -16,7 +16,7 @@ _cp3(int a, int b, int c) string {
 
 // --- NFD tests ---
 
-test_nfd_ascii() `test(allow_leaks: true) {
+test_nfd_ascii() `test {
   assert(normalize_nfd("hello") == "hello", "nfd ascii hello");
   assert(normalize_nfd("") == "", "nfd empty");
   assert(normalize_nfd("ABC 123") == "ABC 123", "nfd ascii mixed");
@@ -53,7 +53,7 @@ test_nfd_hangul_lvt() `test(allow_leaks: true, exclude: "wasm32") {
 
 // --- NFC tests ---
 
-test_nfc_ascii() `test(allow_leaks: true) {
+test_nfc_ascii() `test {
   assert(normalize_nfc("hello") == "hello", "nfc ascii");
   assert(normalize_nfc("") == "", "nfc empty");
 }

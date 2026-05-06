@@ -1,16 +1,16 @@
 // Test the math module (compiled as part of the module).
-lerp_test() `test(allow_leaks: true) {
+lerp_test() `test {
   assert(lerp(0.0, 10.0, 0.5) == 5.0, "lerp midpoint");
   assert(lerp(0.0, 10.0, 0.0) == 0.0, "lerp start");
   assert(lerp(0.0, 10.0, 1.0) == 10.0, "lerp end");
 }
 
-map_range_test() `test(allow_leaks: true) {
+map_range_test() `test {
   f64 result = map_range(5.0, 0.0, 10.0, 0.0, 100.0);
   assert(result == 50.0, "map_range midpoint");
 }
 
-deg_rad_test() `test(allow_leaks: true) {
+deg_rad_test() `test {
   f64 rad = deg_to_rad(180.0);
   f64 deg = rad_to_deg(rad);
   // Compare with tolerance
@@ -21,19 +21,19 @@ deg_rad_test() `test(allow_leaks: true) {
   assert(diff < 0.0001, "deg_to_rad round trip");
 }
 
-sign_test() `test(allow_leaks: true) {
+sign_test() `test {
   assert(sign(-5) == -1, "sign negative");
   assert(sign(0) == 0, "sign zero");
   assert(sign(42) == 1, "sign positive");
 }
 
-sign_f64_test() `test(allow_leaks: true) {
+sign_f64_test() `test {
   assert(sign_f64(-3.14) == -1.0, "sign_f64 negative");
   assert(sign_f64(0.0) == 0.0, "sign_f64 zero");
   assert(sign_f64(2.7) == 1.0, "sign_f64 positive");
 }
 
-is_even_odd_test() `test(allow_leaks: true) {
+is_even_odd_test() `test {
   assert(is_even(0), "0 is even");
   assert(is_even(4), "4 is even");
   assert(is_odd(3), "3 is odd");
@@ -41,14 +41,14 @@ is_even_odd_test() `test(allow_leaks: true) {
   assert(!is_odd(8), "8 is not odd");
 }
 
-gcd_test() `test(allow_leaks: true) {
+gcd_test() `test {
   assert(gcd(12, 8) == 4, "gcd 12 8");
   assert(gcd(7, 13) == 1, "gcd primes");
   assert(gcd(0, 5) == 5, "gcd zero");
   assert(gcd(100, 100) == 100, "gcd same");
 }
 
-lcm_test() `test(allow_leaks: true) {
+lcm_test() `test {
   assert(lcm(4, 6) == 12, "lcm 4 6");
   assert(lcm(3, 7) == 21, "lcm primes");
   assert(lcm(0, 5) == 0, "lcm zero");

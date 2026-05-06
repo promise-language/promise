@@ -14,7 +14,7 @@ type Connection {
 
 // --- basic drop on scope exit ---
 
-test_drop_scope_exit() `test(allow_leaks: true) {
+test_drop_scope_exit() `test {
   l := Logger(id: 1);
   int x = l.id;
   assert(x == 1, "logger id is 1");
@@ -22,7 +22,7 @@ test_drop_scope_exit() `test(allow_leaks: true) {
 
 // --- multiple drop bindings ---
 
-test_drop_multiple() `test(allow_leaks: true) {
+test_drop_multiple() `test {
   l1 := Logger(id: 1);
   l2 := Logger(id: 2);
   l3 := Logger(id: 3);
@@ -65,7 +65,7 @@ test_mixed_use_drop() `test(allow_leaks: true) {
 
 // --- drop in if branch ---
 
-test_drop_if_branch() `test(allow_leaks: true) {
+test_drop_if_branch() `test {
   bool flag = true;
   if flag {
     l := Logger(id: 99);
@@ -75,7 +75,7 @@ test_drop_if_branch() `test(allow_leaks: true) {
 
 // --- drop in loop ---
 
-test_drop_in_loop() `test(allow_leaks: true) {
+test_drop_in_loop() `test {
   for i in 0..5 {
     l := Logger(id: i);
     assert(l.id == i, "logger id matches loop var");
@@ -98,7 +98,7 @@ return_with_drop() int {
   return l.id;
 }
 
-test_drop_early_return() `test(allow_leaks: true) {
+test_drop_early_return() `test {
   int r = return_with_drop();
   assert(r == 42, "returned value before drop");
 }
@@ -117,7 +117,7 @@ test_use_early_return() `test(allow_leaks: true) {
 
 // --- deep nesting of drops in if ---
 
-test_deep_nesting_drops() `test(allow_leaks: true) {
+test_deep_nesting_drops() `test {
   l1 := Logger(id: 1);
   if true {
     l2 := Logger(id: 2);
@@ -136,7 +136,7 @@ consume_logger(Logger l) int {
   return l.id;
 }
 
-test_drop_moved() `test(allow_leaks: true) {
+test_drop_moved() `test {
   l := Logger(id: 55);
   int r = consume_logger(l);
   assert(r == 55, "consumed logger id");

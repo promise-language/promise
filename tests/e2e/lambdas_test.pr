@@ -1,6 +1,6 @@
 // Lambda and closure tests: captures, higher-order functions, lambda as args.
 // --- basic lambda creation and call ---
-test_lambda_basic() `test(allow_leaks: true) {
+test_lambda_basic() `test {
   f := |int x| -> x * 2;
   assert(f(5) == 10, "lambda doubles 5 to 10");
   assert(f(0) == 0, "lambda doubles 0 to 0");
@@ -9,7 +9,7 @@ test_lambda_basic() `test(allow_leaks: true) {
 
 // --- lambda with block body ---
 
-test_lambda_block() `test(allow_leaks: true) {
+test_lambda_block() `test {
   f := |int x, int y| -> int {
     int sum = x + y;
     return sum * sum;
@@ -20,7 +20,7 @@ test_lambda_block() `test(allow_leaks: true) {
 
 // --- lambda capturing one variable ---
 
-test_lambda_capture_one() `test(allow_leaks: true) {
+test_lambda_capture_one() `test {
   int factor = 10;
   f := |int x| -> x * factor;
   assert(f(5) == 50, "capture factor: 5 * 10 = 50");
@@ -29,7 +29,7 @@ test_lambda_capture_one() `test(allow_leaks: true) {
 
 // --- lambda capturing multiple variables ---
 
-test_lambda_capture_multi() `test(allow_leaks: true) {
+test_lambda_capture_multi() `test {
   int a = 3;
   int b = 7;
   f := |int x| -> a * x + b;
@@ -40,7 +40,7 @@ test_lambda_capture_multi() `test(allow_leaks: true) {
 
 // --- lambda returning bool ---
 
-test_lambda_predicate() `test(allow_leaks: true) {
+test_lambda_predicate() `test {
   is_even := |int n| -> n % 2 == 0;
   assert(is_even(4) == true, "4 is even");
   assert(is_even(7) == false, "7 is not even");
@@ -61,14 +61,14 @@ apply_int(int x, (int) -> int fn) int {
   return fn(x);
 }
 
-test_lambda_as_arg() `test(allow_leaks: true) {
+test_lambda_as_arg() `test {
   int result = apply_int(5, |int x| -> x * x);
   assert(result == 25, "5^2 = 25 via higher-order function");
 }
 
 // --- multiple lambda calls ---
 
-test_lambda_multi_call() `test(allow_leaks: true) {
+test_lambda_multi_call() `test {
   counter := 0;
   inc := |int n| -> n + 1;
   counter = inc(counter);
@@ -79,7 +79,7 @@ test_lambda_multi_call() `test(allow_leaks: true) {
 
 // --- lambda with captured string ---
 
-test_lambda_capture_int_and_compute() `test(allow_leaks: true) {
+test_lambda_capture_int_and_compute() `test {
   int offset = 100;
   calc := |int n| -> n + offset;
   assert(calc(1) == 101, "1 + 100 = 101");
@@ -88,7 +88,7 @@ test_lambda_capture_int_and_compute() `test(allow_leaks: true) {
 
 // --- lambda stored and reused ---
 
-test_lambda_stored() `test(allow_leaks: true) {
+test_lambda_stored() `test {
   (int) -> int doubled = |int x| -> x * 2;
   int a = doubled(10);
   int b = doubled(20);
@@ -100,7 +100,7 @@ test_lambda_stored() `test(allow_leaks: true) {
 
 // --- lambda composition ---
 
-test_lambda_composition() `test(allow_leaks: true) {
+test_lambda_composition() `test {
   add1 := |int x| -> x + 1;
   mul2 := |int x| -> x * 2;
 
@@ -111,7 +111,7 @@ test_lambda_composition() `test(allow_leaks: true) {
 
 // --- lambda in loop ---
 
-test_lambda_in_loop() `test(allow_leaks: true) {
+test_lambda_in_loop() `test {
   transform := |int x| -> x * x;
   int sum = 0;
   for i in 1..=5 {

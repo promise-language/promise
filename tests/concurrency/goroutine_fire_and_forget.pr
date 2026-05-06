@@ -3,7 +3,7 @@
 noop() {
 }
 
-test_single_fire_and_forget() `test(allow_leaks: true, exclude: "wasm32") {
+test_single_fire_and_forget() `test(exclude: "wasm32") {
   go {
     int x = 1 + 2;
   };
@@ -11,7 +11,7 @@ test_single_fire_and_forget() `test(allow_leaks: true, exclude: "wasm32") {
   assert(true, "fire-and-forget goroutine completed without crash");
 }
 
-test_many_fire_and_forget() `test(allow_leaks: true, exclude: "wasm32") {
+test_many_fire_and_forget() `test(exclude: "wasm32") {
   for i in 0..100 {
     go {
       int x = i * 2;
@@ -30,7 +30,7 @@ test_fire_and_forget_with_channel() `test(allow_leaks: true, exclude: "wasm32") 
   assert(v == 42, "fire-and-forget goroutine sent value through channel");
 }
 
-test_task_go_block_still_works() `test(allow_leaks: true, exclude: "wasm32") {
+test_task_go_block_still_works() `test(exclude: "wasm32") {
   // go { } used as a task (assigned + awaited) should still work
   t := go {
     int x = 10;
@@ -39,14 +39,14 @@ test_task_go_block_still_works() `test(allow_leaks: true, exclude: "wasm32") {
   assert(true, "task go block completed");
 }
 
-test_fire_and_forget_go_call() `test(allow_leaks: true, exclude: "wasm32") {
+test_fire_and_forget_go_call() `test(exclude: "wasm32") {
   // go func() as a statement (void function, fire-and-forget)
   go noop();
   sleep(Duration.from_millis(50));
   assert(true, "fire-and-forget go call completed without crash");
 }
 
-test_nested_fire_and_forget() `test(allow_leaks: true, exclude: "wasm32") {
+test_nested_fire_and_forget() `test(exclude: "wasm32") {
   // Nested go blocks: outer fire-and-forget spawns inner fire-and-forget
   go {
     go {
@@ -58,7 +58,7 @@ test_nested_fire_and_forget() `test(allow_leaks: true, exclude: "wasm32") {
   assert(true, "nested fire-and-forget goroutines completed without crash");
 }
 
-test_go_call_as_task() `test(allow_leaks: true, exclude: "wasm32") {
+test_go_call_as_task() `test(exclude: "wasm32") {
   // go void_func() used as a task — should set sentinel, receiver frees G
   t := go noop();
   <-t;
@@ -111,7 +111,7 @@ test_mixed_fire_and_forget_and_task() `test(allow_leaks: true, exclude: "wasm32"
   assert(total == 6, "mixed fire-and-forget and task");
 }
 
-test_fire_and_forget_many_go_calls() `test(allow_leaks: true, exclude: "wasm32") {
+test_fire_and_forget_many_go_calls() `test(exclude: "wasm32") {
   // Many fire-and-forget go func() calls in a loop
   for i in 0..100 {
     go noop();
@@ -129,14 +129,14 @@ get_string() string {
   return "hello";
 }
 
-test_fire_and_forget_non_void() `test(allow_leaks: true, exclude: "wasm32") {
+test_fire_and_forget_non_void() `test(exclude: "wasm32") {
   // go non_void_func() as fire-and-forget — result discarded, G must be freed
   go compute();
   sleep(Duration.from_millis(50));
   assert(true, "fire-and-forget non-void go call completed without crash");
 }
 
-test_fire_and_forget_non_void_many() `test(allow_leaks: true, exclude: "wasm32") {
+test_fire_and_forget_non_void_many() `test(exclude: "wasm32") {
   // Many fire-and-forget non-void go calls — verifies no accumulating leaks
   for i in 0..100 {
     go compute();
@@ -145,14 +145,14 @@ test_fire_and_forget_non_void_many() `test(allow_leaks: true, exclude: "wasm32")
   assert(true, "100 fire-and-forget non-void go calls completed");
 }
 
-test_fire_and_forget_non_void_string() `test(allow_leaks: true, exclude: "wasm32") {
+test_fire_and_forget_non_void_string() `test(exclude: "wasm32") {
   // Fire-and-forget with string return type
   go get_string();
   sleep(Duration.from_millis(50));
   assert(true, "fire-and-forget non-void string go call completed");
 }
 
-test_non_void_task_still_works() `test(allow_leaks: true, exclude: "wasm32") {
+test_non_void_task_still_works() `test(exclude: "wasm32") {
   // go non_void_func() as task (result received) should still work
   t := go compute();
   int result = <-t;

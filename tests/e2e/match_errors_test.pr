@@ -63,7 +63,7 @@ status_for_code(int code) Status! {
 // Section 1: Match subject is failable call with !
 // ============================================================
 
-test_match_subject_bang_42() `test(allow_leaks: true) {
+test_match_subject_bang_42() `test {
   string r = match parse_int("42")! {
     42 => "got 42",
     _ => "other",
@@ -71,7 +71,7 @@ test_match_subject_bang_42() `test(allow_leaks: true) {
   assert(r == "got 42", "match on failable! subject 42");
 }
 
-test_match_subject_bang_zero() `test(allow_leaks: true) {
+test_match_subject_bang_zero() `test {
   string r = match parse_int("0")! {
     0 => "zero",
     42 => "42",
@@ -84,7 +84,7 @@ test_match_subject_bang_zero() `test(allow_leaks: true) {
 // Section 2: Match subject from ? handler (via temp variable)
 // ============================================================
 
-test_match_subject_handler_success() `test(allow_leaks: true) {
+test_match_subject_handler_success() `test {
   int subject = parse_int("42")? e {
     0;
   };
@@ -112,7 +112,7 @@ test_match_subject_handler_error() `test(allow_leaks: true) {
 // Section 3: Failable call in match arm with ! unwrap
 // ============================================================
 
-test_match_arm_bang_success() `test(allow_leaks: true) {
+test_match_arm_bang_success() `test {
   int selector = 1;
   int r = match selector {
     1 => parse_int("42")!,
@@ -121,7 +121,7 @@ test_match_arm_bang_success() `test(allow_leaks: true) {
   assert(r == 42, "bang in match arm success");
 }
 
-test_match_arm_bang_second() `test(allow_leaks: true) {
+test_match_arm_bang_second() `test {
   int selector = 2;
   int r = match selector {
     1 => 99,
@@ -146,7 +146,7 @@ test_match_arm_handler_error() `test(allow_leaks: true) {
   assert(r == 0, "handler in match arm recovers on error");
 }
 
-test_match_arm_handler_success() `test(allow_leaks: true) {
+test_match_arm_handler_success() `test {
   int selector = 1;
   int r = match selector {
     1 => parse_int("42")? e {
@@ -171,7 +171,7 @@ test_match_arm_handler_multiple() `test(allow_leaks: true) {
   assert(r == 0, "handler in second match arm recovers");
 }
 
-test_match_arm_handler_wildcard() `test(allow_leaks: true) {
+test_match_arm_handler_wildcard() `test {
   int selector = 99;
   int r = match selector {
     1 => parse_int("42")? e {
@@ -199,7 +199,7 @@ match_with_raise(int code) string! {
   };
 }
 
-test_match_raise_success() `test(allow_leaks: true) {
+test_match_raise_success() `test {
   string r = match_with_raise(0)!;
   assert(r == "ok", "match raise: success path");
 }
@@ -222,7 +222,7 @@ test_match_raise_custom() `test(allow_leaks: true) {
   assert(caught, "custom error type from match arm");
 }
 
-test_match_raise_wildcard() `test(allow_leaks: true) {
+test_match_raise_wildcard() `test {
   string r = match_with_raise(99)!;
   assert(r == "unknown", "match wildcard, no raise");
 }
@@ -248,17 +248,17 @@ compute(Op op, int a, int b) int! {
   };
 }
 
-test_compute_add() `test(allow_leaks: true) {
+test_compute_add() `test {
   int r = compute(Op.Add, 10, 3)!;
   assert(r == 13, "enum match add");
 }
 
-test_compute_sub() `test(allow_leaks: true) {
+test_compute_sub() `test {
   int r = compute(Op.Sub, 10, 3)!;
   assert(r == 7, "enum match sub");
 }
 
-test_compute_div_ok() `test(allow_leaks: true) {
+test_compute_div_ok() `test {
   int r = compute(Op.Div, 10, 2)!;
   assert(r == 5, "enum match div ok");
 }
@@ -276,12 +276,12 @@ test_compute_div_zero() `test(allow_leaks: true) {
 // Section 7: Failable function that returns match (non-failable arms)
 // ============================================================
 
-test_get_value_one() `test(allow_leaks: true) {
+test_get_value_one() `test {
   string r = get_value(1)!;
   assert(r == "one", "get_value(1)");
 }
 
-test_get_value_two() `test(allow_leaks: true) {
+test_get_value_two() `test {
   string r = get_value(2)!;
   assert(r == "two", "get_value(2)");
 }
@@ -306,7 +306,7 @@ test_match_result_recovery() `test(allow_leaks: true) {
   assert(s == "fallback", "handler recovery on failable match function");
 }
 
-test_match_result_success() `test(allow_leaks: true) {
+test_match_result_success() `test {
   string s = get_value(1)? e {
     "fallback";
   };
@@ -320,7 +320,7 @@ test_match_result_optional_error() `test(allow_leaks: true) {
   assert("{r}" == "none", "optional recovery on error");
 }
 
-test_match_result_optional_success() `test(allow_leaks: true) {
+test_match_result_optional_success() `test {
   r := get_value(1)? e {
     print_line("caught");
   };
@@ -336,12 +336,12 @@ classify_and_parse(string input) string! {
   return classify_code(code);
 }
 
-test_chain_ok() `test(allow_leaks: true) {
+test_chain_ok() `test {
   string r = classify_and_parse("0")!;
   assert(r == "ok", "chain: parse -> classify -> ok");
 }
 
-test_chain_unknown() `test(allow_leaks: true) {
+test_chain_unknown() `test {
   string r = classify_and_parse("7")!;
   assert(r == "unknown", "chain: parse -> classify -> unknown");
 }
@@ -368,17 +368,17 @@ describe_status(int code) string! {
   };
 }
 
-test_status_ok() `test(allow_leaks: true) {
+test_status_ok() `test {
   string r = describe_status(0)!;
   assert(r == "all good", "status ok");
 }
 
-test_status_warn() `test(allow_leaks: true) {
+test_status_warn() `test {
   string r = describe_status(1)!;
   assert(r == "warning", "status warn");
 }
 
-test_status_err() `test(allow_leaks: true) {
+test_status_err() `test {
   string r = describe_status(5)!;
   assert(r == "error", "status err");
 }
@@ -434,7 +434,7 @@ test_nested_outer2_fail() `test(allow_leaks: true) {
   assert(caught, "nested: outer=2, auto-prop fails");
 }
 
-test_nested_default() `test(allow_leaks: true) {
+test_nested_default() `test {
   string r = nested_match_errors(99, 0)!;
   assert(r == "default", "nested default");
 }
@@ -465,12 +465,12 @@ validate_rect(int width, int height) int! {
   return width * height;
 }
 
-test_circle_ok() `test(allow_leaks: true) {
+test_circle_ok() `test {
   int a = validate_circle(5)!;
   assert(a == 75, "circle 5*5*3");
 }
 
-test_rect_ok() `test(allow_leaks: true) {
+test_rect_ok() `test {
   int a = validate_rect(4, 6)!;
   assert(a == 24, "rect 4*6");
 }
@@ -503,7 +503,7 @@ test_rect_invalid_height() `test(allow_leaks: true) {
 }
 
 // Dispatch via enum match using ! in arm expression
-test_shape_dispatch_circle() `test(allow_leaks: true) {
+test_shape_dispatch_circle() `test {
   Shape s = Shape.Circle(5);
   int r = match s {
     Shape.Circle(rad) => validate_circle(rad)!,
@@ -512,7 +512,7 @@ test_shape_dispatch_circle() `test(allow_leaks: true) {
   assert(r == 75, "shape dispatch circle");
 }
 
-test_shape_dispatch_rect() `test(allow_leaks: true) {
+test_shape_dispatch_rect() `test {
   Shape s = Shape.Rect(3, 4);
   int r = match s {
     Shape.Circle(rad) => validate_circle(rad)!,

@@ -1,29 +1,29 @@
 // Advanced string tests: escape sequences, interpolation edge cases,
 // method combinations.
 // --- escape sequences ---
-test_escape_newline() `test(allow_leaks: true) {
+test_escape_newline() `test {
   string s = "a\nb";
   assert(s.len == 3, "a\\nb has length 3");
 }
 
-test_escape_tab() `test(allow_leaks: true) {
+test_escape_tab() `test {
   string s = "a\tb";
   assert(s.len == 3, "a\\tb has length 3");
 }
 
-test_escape_backslash() `test(allow_leaks: true) {
+test_escape_backslash() `test {
   string s = "a\\b";
   assert(s.len == 3, "a\\\\b has length 3");
 }
 
-test_escape_quote() `test(allow_leaks: true) {
+test_escape_quote() `test {
   string s = "say \"hi\"";
   assert(s.contains("hi"), "contains hi after escaped quotes");
 }
 
 // --- string length ---
 
-test_string_length() `test(allow_leaks: true) {
+test_string_length() `test {
   assert("".len == 0, "empty string len = 0");
   assert("a".len == 1, "single char len = 1");
   assert("hello".len == 5, "hello len = 5");
@@ -32,7 +32,7 @@ test_string_length() `test(allow_leaks: true) {
 
 // --- string equality ---
 
-test_string_equality() `test(allow_leaks: true) {
+test_string_equality() `test {
   assert("abc" == "abc", "equal strings");
   assert("abc" != "def", "different strings");
   assert("" == "", "empty strings equal");
@@ -56,7 +56,7 @@ test_string_concat_empty() `test(allow_leaks: true) {
 
 // --- string indexing ---
 
-test_string_indexing() `test(allow_leaks: true) {
+test_string_indexing() `test {
   string s = "abcdef";
   assert(s[0] == 'a', "index 0 = a");
   assert(s[1] == 'b', "index 1 = b");
@@ -104,28 +104,28 @@ test_interp_multiple() `test(allow_leaks: true) {
 
 // --- string contains edge cases ---
 
-test_contains_empty() `test(allow_leaks: true) {
+test_contains_empty() `test {
   assert("hello".contains(""), "contains empty string");
   assert("".contains("") == true, "empty contains empty");
 }
 
-test_contains_full() `test(allow_leaks: true) {
+test_contains_full() `test {
   assert("hello".contains("hello"), "contains full string");
 }
 
-test_contains_not_found() `test(allow_leaks: true) {
+test_contains_not_found() `test {
   assert("hello".contains("xyz") == false, "does not contain xyz");
 }
 
 // --- starts_with / ends_with ---
 
-test_starts_with_full() `test(allow_leaks: true) {
+test_starts_with_full() `test {
   assert("hello".starts_with("hello"), "starts_with full string");
   assert("hello".starts_with(""), "starts_with empty");
   assert("hello".starts_with("hx") == false, "no match");
 }
 
-test_ends_with_full() `test(allow_leaks: true) {
+test_ends_with_full() `test {
   assert("hello".ends_with("hello"), "ends_with full string");
   assert("hello".ends_with(""), "ends_with empty");
   assert("hello".ends_with("lx") == false, "no match");
@@ -157,7 +157,7 @@ test_split_space() `test(allow_leaks: true) {
 
 // --- index_of ---
 
-test_index_of_found() `test(allow_leaks: true) {
+test_index_of_found() `test {
   string s = "hello world";
   if idx := s.index_of("world") {
     assert(idx == 6, "world starts at index 6");
@@ -166,7 +166,7 @@ test_index_of_found() `test(allow_leaks: true) {
   }
 }
 
-test_index_of_not_found() `test(allow_leaks: true) {
+test_index_of_not_found() `test {
   string s = "hello";
   bool found = false;
   if idx := s.index_of("xyz") {
@@ -175,7 +175,7 @@ test_index_of_not_found() `test(allow_leaks: true) {
   assert(!found, "xyz not in hello");
 }
 
-test_index_of_beginning() `test(allow_leaks: true) {
+test_index_of_beginning() `test {
   if idx := "hello".index_of("hel") {
     assert(idx == 0, "hel starts at 0");
   } else {
@@ -198,7 +198,7 @@ test_string_building() `test(allow_leaks: true) {
 
 // --- char equality ---
 
-test_char_equality() `test(allow_leaks: true) {
+test_char_equality() `test {
   char a = 'a';
   char b = 'b';
   assert(a == 'a', "char equality");

@@ -44,7 +44,7 @@ auto_prop_typed() int! {
   return x;
 }
 
-test_auto_prop_typed_success() `test(allow_leaks: true) {
+test_auto_prop_typed_success() `test {
   int r = auto_prop_typed()!;
   assert(r == 42, "auto-prop typed var decl success");
 }
@@ -74,7 +74,7 @@ auto_prop_inferred() int! {
   return x;
 }
 
-test_auto_prop_inferred_success() `test(allow_leaks: true) {
+test_auto_prop_inferred_success() `test {
   int r = auto_prop_inferred()!;
   assert(r == 42, "auto-prop inferred var decl success");
 }
@@ -105,7 +105,7 @@ multi_auto_prop() int! {
   return a + b;
 }
 
-test_multi_auto_prop_success() `test(allow_leaks: true) {
+test_multi_auto_prop_success() `test {
   int r = multi_auto_prop()!;
   assert(r == 49, "multiple auto-prop success: 42 + 7");
 }
@@ -157,7 +157,7 @@ auto_prop_string() string! {
   return s;
 }
 
-test_auto_prop_string_success() `test(allow_leaks: true) {
+test_auto_prop_string_success() `test {
   string r = auto_prop_string()!;
   assert(r == "hello", "auto-prop string success");
 }
@@ -224,7 +224,7 @@ auto_prop_void_stmt() int! {
   return x;
 }
 
-test_auto_prop_void_stmt_success() `test(allow_leaks: true) {
+test_auto_prop_void_stmt_success() `test {
   int r = auto_prop_void_stmt()!;
   assert(r == 42, "void auto-prop as stmt then assignment");
 }
@@ -257,7 +257,7 @@ test_handler_stmt_no_recovery() `test(allow_leaks: true) {
   assert(caught, "handler as statement catches without recovery value");
 }
 
-test_handler_stmt_no_recovery_success() `test(allow_leaks: true) {
+test_handler_stmt_no_recovery_success() `test {
   bool caught = false;
   parse_int("42")? e {
     caught = true;
@@ -276,7 +276,7 @@ test_handler_recovery_int() `test(allow_leaks: true) {
   assert(v == -1, "int recovery value on error");
 }
 
-test_handler_recovery_int_success() `test(allow_leaks: true) {
+test_handler_recovery_int_success() `test {
   int v = parse_int("42")? e {
     -1;
   };
@@ -290,7 +290,7 @@ test_handler_recovery_string() `test(allow_leaks: true) {
   assert(s == "fallback", "string recovery value on error");
 }
 
-test_handler_recovery_string_success() `test(allow_leaks: true) {
+test_handler_recovery_string_success() `test {
   string s = get_string(false)? e {
     "fallback";
   };
@@ -347,7 +347,7 @@ test_optional_recovery_string_error() `test(allow_leaks: true) {
   assert("{s}" == "none", "string optional recovery on error");
 }
 
-test_optional_recovery_string_success() `test(allow_leaks: true) {
+test_optional_recovery_string_success() `test {
   s := get_string(false)? e {
     print_line("caught");
   };
@@ -385,7 +385,7 @@ try_diverge_return_success() int {
   return v;
 }
 
-test_handler_diverge_return_success() `test(allow_leaks: true) {
+test_handler_diverge_return_success() `test {
   int r = try_diverge_return_success();
   assert(r == 42, "success path when handler would diverge");
 }
@@ -458,7 +458,7 @@ auto_prop_with_drop() int! {
   return v;
 }
 
-test_auto_prop_with_drop_success() `test(allow_leaks: true) {
+test_auto_prop_with_drop_success() `test {
   int r = auto_prop_with_drop()!;
   assert(r == 42, "auto-prop works alongside droppable resources");
 }
@@ -571,7 +571,7 @@ always_succeed() int! {
   return 99;
 }
 
-test_typed_handler_else_success() `test(allow_leaks: true) {
+test_typed_handler_else_success() `test {
   int v = always_succeed()? e is IoError {
     e.code;
   } else e {

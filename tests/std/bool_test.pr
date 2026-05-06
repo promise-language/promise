@@ -1,26 +1,26 @@
 // Test bool logical operators and equality
 //
-test_and() `test(allow_leaks: true) {
+test_and() `test {
   assert(true && true, "true && true");
   assert(!(true && false), "!(true && false)");
   assert(!(false && true), "!(false && true)");
   assert(!(false && false), "!(false && false)");
 }
 
-test_or() `test(allow_leaks: true) {
+test_or() `test {
   assert(true || true, "true || true");
   assert(true || false, "true || false");
   assert(false || true, "false || true");
   assert(!(false || false), "!(false || false)");
 }
 
-test_not() `test(allow_leaks: true) {
+test_not() `test {
   assert(!false, "!false");
   assert(!! true, "!!true");
   assert(!(!true), "!(!true)");
 }
 
-test_equality() `test(allow_leaks: true) {
+test_equality() `test {
   assert(true == true, "true == true");
   assert(false == false, "false == false");
   assert(!(true == false), "!(true == false)");
@@ -28,7 +28,7 @@ test_equality() `test(allow_leaks: true) {
   assert(!(true != true), "!(true != true)");
 }
 
-test_short_circuit() `test(allow_leaks: true) {
+test_short_circuit() `test {
   // && should short-circuit: if left is false, right is not evaluated
   bool reached = false;
   if false && true {
@@ -46,7 +46,7 @@ test_short_circuit() `test(allow_leaks: true) {
 
 // --- Hash ---
 
-test_hash() `test(allow_leaks: true) {
+test_hash() `test {
   assert(true.hash == true.hash, "true hash consistent");
   assert(false.hash == false.hash, "false hash consistent");
   assert(true.hash != false.hash, "true != false hash");

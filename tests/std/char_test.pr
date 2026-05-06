@@ -1,12 +1,12 @@
 // Test char equality, comparisons, and range operators
-test_equality() `test(allow_leaks: true) {
+test_equality() `test {
   assert('a' == 'a', "'a' == 'a'");
   assert(!('a' == 'b'), "!('a' == 'b')");
   assert('a' != 'b', "'a' != 'b'");
   assert(!('x' != 'x'), "!('x' != 'x')");
 }
 
-test_comparisons() `test(allow_leaks: true) {
+test_comparisons() `test {
   assert('a' < 'b', "'a' < 'b'");
   assert('z' > 'a', "'z' > 'a'");
   assert('a' <= 'a', "'a' <= 'a'");
@@ -15,7 +15,7 @@ test_comparisons() `test(allow_leaks: true) {
   assert('z' >= 'a', "'z' >= 'a'");
 }
 
-test_escape_chars() `test(allow_leaks: true) {
+test_escape_chars() `test {
   assert('\n' != '\t', "newline != tab");
   assert('\\' == '\\', "backslash == backslash");
   assert('\'' == '\'', "quote == quote");
@@ -24,7 +24,7 @@ test_escape_chars() `test(allow_leaks: true) {
 
 // --- Hash ---
 
-test_hash() `test(allow_leaks: true) {
+test_hash() `test {
   assert('a'.hash == 'a'.hash, "char hash consistent");
   assert('a'.hash != 'b'.hash, "different chars different hash");
   assert('z'.hash != 'A'.hash, "z != A hash");
@@ -34,7 +34,7 @@ test_hash() `test(allow_leaks: true) {
 
 // --- Char ranges ---
 
-test_char_range() `test(allow_leaks: true) {
+test_char_range() `test {
   int count = 0;
   for c in 'a'..'d' {
     count++;
@@ -42,7 +42,7 @@ test_char_range() `test(allow_leaks: true) {
   assert(count == 3, "char range 'a'..'d' has 3 elements");
 }
 
-test_char_range_inclusive() `test(allow_leaks: true) {
+test_char_range_inclusive() `test {
   int count = 0;
   for c in 'a'..='d' {
     count++;

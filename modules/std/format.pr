@@ -16,3 +16,364 @@ _f64_to_str(f64 x) string {
 _f32_to_str(f32 x) string {
   return _ryu_f32(x.bits);
 }
+
+// _int_format converts a signed integer to a string with the given base, prefix, width, and fill.
+_int_format(int value, int base, bool prefix, int? width, char fill) string {
+  bool negative = value < 0;
+  // Work with the absolute value as uint to avoid issues with int.min
+  uint abs_val = 0u;
+  if negative {
+    // For min int, 0 - value would overflow. Use bitwise trick:
+    // Cast to uint directly (reinterpret bits).
+    abs_val = (0 - (value + 1)) as! uint + 1u;
+  } else {
+    abs_val = value as! uint;
+  }
+  string digits = _uint_format_digits(abs_val, base);
+  return _format_with_prefix_width(digits, negative, base, prefix, width, fill);
+}
+
+// _uint_format converts an unsigned integer to a string with the given base, prefix, width, and fill.
+_uint_format(uint value, int base, bool prefix, int? width, char fill) string {
+  string digits = _uint_format_digits(value, base);
+  return _format_with_prefix_width(digits, false, base, prefix, width, fill);
+}
+
+// _uint_format_digits converts an unsigned integer to digit characters in the given base (2-36).
+_uint_format_digits(uint value, int base) string {
+  if base < 2 {
+    return "0";
+  }
+  if value == 0u {
+    return "0";
+  }
+  // digit chars for bases up to 36
+  string alpha = "0123456789abcdefghijklmnopqrstuvwxyz";
+  uint b = base as! uint;
+  // Max 64 binary digits
+  u8[64] buf = [0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+  0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+  0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+  0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+  0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+  0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+  0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+  0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8];
+  int pos = 63;
+  uint v = value;
+  while v > 0u {
+    int digit = (v % b) as! int;
+    buf[pos] = alpha.byte_at(digit);
+    v = v / b;
+    pos = pos - 1;
+  }
+  // Build string from buf[pos+1..64]
+  Builder out = Builder(capacity: 63 - pos);
+  int i = pos + 1;
+  while i < 64 {
+    out.buf.push(buf[i]);
+    i = i + 1;
+  }
+  return out.to_string();
+}
+
+// _format_with_prefix_width adds sign, base prefix, and width padding to digit string.
+_format_with_prefix_width(string digits, bool negative, int base, bool prefix, int? width, char fill) string {
+  // Build the prefix string
+  string pre = "";
+  if negative {
+    pre = "-";
+  }
+  if prefix {
+    if base == 16 {
+      pre = pre + "0x";
+    } else if base == 8 {
+      pre = pre + "0o";
+    } else if base == 2 {
+      pre = pre + "0b";
+    }
+  }
+
+  string result = pre + digits;
+
+  // Apply width padding
+  if w := width {
+    int pad_needed = w - result.len;
+    if pad_needed > 0 {
+      // For zero-fill, insert zeros between prefix and digits
+      u8[] fill_bytes = fill.to_string().bytes();
+      u8 fill_byte = fill_bytes[0];
+      if fill == '0' && pre.len > 0 {
+        Builder padded = Builder(capacity: w);
+        u8[] pre_bytes = pre.bytes();
+        int pi = 0;
+        while pi < pre_bytes.len {
+          padded.buf.push(pre_bytes[pi]);
+          pi = pi + 1;
+        }
+        int z = 0;
+        while z < pad_needed {
+          padded.buf.push(fill_byte);
+          z = z + 1;
+        }
+        u8[] dig_bytes = digits.bytes();
+        int di = 0;
+        while di < dig_bytes.len {
+          padded.buf.push(dig_bytes[di]);
+          di = di + 1;
+        }
+        return padded.to_string();
+      }
+      // Left-pad with fill character
+      Builder padded = Builder(capacity: w);
+      int z = 0;
+      while z < pad_needed {
+        padded.buf.push(fill_byte);
+        z = z + 1;
+      }
+      u8[] res_bytes = result.bytes();
+      int ri = 0;
+      while ri < res_bytes.len {
+        padded.buf.push(res_bytes[ri]);
+        ri = ri + 1;
+      }
+      return padded.to_string();
+    }
+  }
+
+  return result;
+}
+
+// _f64_format formats an f64 with optional precision and scientific notation.
+_f64_format(f64 value, int? precision, bool scientific) string {
+  // Handle special values
+  uint bits = value.bits;
+  uint sign = bits >> 63u;
+  uint ie = (bits >> 52u) & 2047u;
+  uint im = bits & 4503599627370495u;
+
+  if ie == 2047u {
+    if im != 0u {
+      return "nan";
+    }
+    if sign != 0u {
+      return "-inf";
+    }
+    return "inf";
+  }
+
+  bool negative = sign != 0u;
+  f64 abs_val = value;
+  if negative {
+    abs_val = -value;
+  }
+
+  // Handle negative zero
+  if ie == 0u && im == 0u {
+    if scientific {
+      return _f64_format_sci_fixed(0.0, negative, precision);
+    }
+    return _f64_format_fixed(0.0, negative, precision);
+  }
+
+  if scientific {
+    return _f64_format_sci_fixed(abs_val, negative, precision);
+  }
+  return _f64_format_fixed(abs_val, negative, precision);
+}
+
+// _f64_format_fixed formats an f64 in fixed-point notation with given precision.
+// precision is the number of decimal places. If none, uses Ryu shortest.
+_f64_format_fixed(f64 abs_val, bool negative, int? precision) string {
+  if prec := precision {
+    // Fixed-precision formatting
+    // Compute the rounded value: round(abs_val * 10^prec) as integer digits
+    f64 scale = _f64_pow10(prec);
+    f64 scaled = abs_val * scale + 0.5;
+
+    // Extract digits: integer part and fractional part
+    // Use uint for the scaled integer value
+    uint total = scaled as! uint;
+
+    // Separate into integer digits and fractional digits
+    uint frac_divisor = _uint_pow10(prec);
+    uint int_part = total / frac_divisor;
+    uint frac_part = total % frac_divisor;
+
+    Builder b = Builder(capacity: 32);
+    if negative {
+      b.buf.push(45u8);
+    }
+
+    // Write integer part
+    string int_str = "{int_part}";
+    u8[] int_bytes = int_str.bytes();
+    int i = 0;
+    while i < int_bytes.len {
+      b.buf.push(int_bytes[i]);
+      i = i + 1;
+    }
+
+    if prec > 0 {
+      b.buf.push(46u8); // '.'
+      // Write fractional part with leading zeros
+      string frac_str = "{frac_part}";
+      int frac_zeros = prec - frac_str.len;
+      int z = 0;
+      while z < frac_zeros {
+        b.buf.push(48u8); // '0'
+        z = z + 1;
+      }
+      u8[] frac_bytes = frac_str.bytes();
+      int fi = 0;
+      while fi < frac_bytes.len {
+        b.buf.push(frac_bytes[fi]);
+        fi = fi + 1;
+      }
+    }
+
+    return b.to_string();
+  }
+
+  // No precision specified — use Ryu default
+  if negative {
+    return "-" + _ryu_f64(abs_val.bits);
+  }
+  return _ryu_f64(abs_val.bits);
+}
+
+// _f64_format_sci_fixed formats an f64 in scientific notation.
+// precision is the number of decimal places after the leading digit.
+_f64_format_sci_fixed(f64 abs_val, bool negative, int? precision) string {
+  Builder b = Builder(capacity: 32);
+  if negative {
+    b.buf.push(45u8);
+  }
+
+  // Handle zero
+  if abs_val == 0.0 {
+    b.buf.push(48u8); // '0'
+    if prec := precision {
+      if prec > 0 {
+        b.buf.push(46u8); // '.'
+        int z = 0;
+        while z < prec {
+          b.buf.push(48u8); // '0'
+          z = z + 1;
+        }
+      }
+    }
+    // exponent
+    b.buf.push(101u8); // 'e'
+    b.buf.push(43u8); // '+'
+    b.buf.push(48u8); // '0'
+    b.buf.push(48u8); // '0'
+    return b.to_string();
+  }
+
+  // Find the exponent: floor(log10(abs_val))
+  int exp = 0;
+  f64 normalized = abs_val;
+  if normalized >= 10.0 {
+    while normalized >= 10.0 {
+      normalized = normalized / 10.0;
+      exp = exp + 1;
+    }
+  } else if normalized < 1.0 {
+    while normalized < 1.0 {
+      normalized = normalized * 10.0;
+      exp = exp - 1;
+    }
+  }
+  // normalized is now in [1.0, 10.0)
+
+  if prec := precision {
+    // Fixed precision: format normalized to prec decimal places
+    f64 scale = _f64_pow10(prec);
+    f64 scaled = normalized * scale + 0.5;
+    uint total = scaled as! uint;
+
+    // Check if rounding caused overflow (e.g., 9.999 with prec=2 -> 1000 -> need to adjust)
+    uint max_total = _uint_pow10(prec + 1);
+    if total >= max_total {
+      total = total / 10u;
+      exp = exp + 1;
+    }
+
+    uint frac_divisor = _uint_pow10(prec);
+    uint lead_digit = total / frac_divisor;
+    uint frac_part = total % frac_divisor;
+
+    b.buf.push((48 + (lead_digit as! int)) as! u8);
+    if prec > 0 {
+      b.buf.push(46u8); // '.'
+      string frac_str = "{frac_part}";
+      int frac_zeros = prec - frac_str.len;
+      int z = 0;
+      while z < frac_zeros {
+        b.buf.push(48u8);
+        z = z + 1;
+      }
+      u8[] frac_bytes = frac_str.bytes();
+      int fi = 0;
+      while fi < frac_bytes.len {
+        b.buf.push(frac_bytes[fi]);
+        fi = fi + 1;
+      }
+    }
+  } else {
+    // No precision — use Ryu for the normalized value in scientific notation
+    string norm_str = _ryu_f64(normalized.bits);
+    // Write the normalized Ryu string (already in [1,10) range)
+    u8[] norm_bytes = norm_str.bytes();
+    int ni = 0;
+    while ni < norm_bytes.len {
+      b.buf.push(norm_bytes[ni]);
+      ni = ni + 1;
+    }
+  }
+
+  // Write exponent
+  b.buf.push(101u8); // 'e'
+  if exp >= 0 {
+    b.buf.push(43u8); // '+'
+  } else {
+    b.buf.push(45u8); // '-'
+    exp = 0 - exp;
+  }
+  if exp < 10 {
+    b.buf.push(48u8);
+    b.buf.push((48 + exp) as! u8);
+  } else if exp < 100 {
+    b.buf.push((48 + exp / 10) as! u8);
+    b.buf.push((48 + exp % 10) as! u8);
+  } else {
+    b.buf.push((48 + exp / 100) as! u8);
+    b.buf.push((48 + (exp / 10) % 10) as! u8);
+    b.buf.push((48 + exp % 10) as! u8);
+  }
+
+  return b.to_string();
+}
+
+// _f64_pow10 returns 10.0^n as f64.
+_f64_pow10(int n) f64 {
+  f64 result = 1.0;
+  int i = 0;
+  while i < n {
+    result = result * 10.0;
+    i = i + 1;
+  }
+  return result;
+}
+
+// _uint_pow10 returns 10^n as uint.
+_uint_pow10(int n) uint {
+  uint result = 1u;
+  int i = 0;
+  while i < n {
+    result = result * 10u;
+    i = i + 1;
+  }
+  return result;
+}

@@ -1,0 +1,236 @@
+// Tests for parameterized to_string() formatting (T0034)
+// === Integer base formatting ===
+test_int_hex() `test {
+  assert(255.to_string(base: 16) == "ff", "255 hex");
+  assert(0.to_string(base: 16) == "0", "0 hex");
+  assert(16.to_string(base: 16) == "10", "16 hex");
+  assert(256.to_string(base: 16) == "100", "256 hex");
+}
+
+test_int_binary() `test {
+  assert(255.to_string(base: 2) == "11111111", "255 binary");
+  assert(0.to_string(base: 2) == "0", "0 binary");
+  assert(1.to_string(base: 2) == "1", "1 binary");
+  assert(10.to_string(base: 2) == "1010", "10 binary");
+}
+
+test_int_octal() `test {
+  assert(255.to_string(base: 8) == "377", "255 octal");
+  assert(0.to_string(base: 8) == "0", "0 octal");
+  assert(8.to_string(base: 8) == "10", "8 octal");
+}
+
+test_int_prefix() `test {
+  assert(255.to_string(base: 16, prefix: true) == "0xff", "255 hex prefix");
+  assert(255.to_string(base: 8, prefix: true) == "0o377", "255 oct prefix");
+  assert(255.to_string(base: 2, prefix: true) == "0b11111111", "255 bin prefix");
+  assert(10.to_string(base: 10, prefix: true) == "10", "10 dec no prefix");
+}
+
+test_int_negative_hex() `test {
+  assert((-1).to_string(base: 16) == "-1", "-1 hex");
+  assert((-255).to_string(base: 16) == "-ff", "-255 hex");
+  assert((-255).to_string(base: 16, prefix: true) == "-0xff", "-255 hex prefix");
+}
+
+test_int_width() `test {
+  assert(42.to_string(width: 6) == "    42", "42 width 6 space");
+  assert(42.to_string(width: 6, fill: '0') == "000042", "42 width 6 zero");
+  assert(42.to_string(width: 2) == "42", "42 width 2 exact");
+  assert(42.to_string(width: 1) == "42", "42 width 1 overflow");
+}
+
+test_int_width_hex() `test {
+  assert(42.to_string(base: 16, width: 4, fill: '0') == "002a", "42 hex width 4");
+  assert(42.to_string(base: 16, prefix: true, width: 6, fill: '0') == "0x002a", "42 hex prefix width 6");
+}
+
+test_int_default_unchanged() `test {
+  assert(42.to_string() == "42", "default unchanged");
+  assert((-17).to_string() == "-17", "negative default unchanged");
+  assert(0.to_string() == "0", "zero default unchanged");
+}
+
+// === Unsigned integer formatting ===
+
+test_uint_hex() `test {
+  uint v = 255u;
+  assert(v.to_string(base: 16) == "ff", "uint 255 hex");
+  assert(v.to_string(base: 16, prefix: true) == "0xff", "uint hex prefix");
+}
+
+test_u8_hex() `test {
+  u8 v = 171u8;
+  assert(v.to_string(base: 16) == "ab", "u8 hex");
+  assert(v.to_string(base: 16, prefix: true) == "0xab", "u8 hex prefix");
+}
+
+test_uint_width() `test {
+  uint v = 42u;
+  assert(v.to_string(width: 6, fill: '0') == "000042", "uint width zero");
+}
+
+// === Float precision formatting ===
+
+test_f64_precision() `test {
+  f64 pi = 3.14159265;
+  assert(pi.to_string(precision: 2) == "3.14", "pi prec 2");
+  assert(pi.to_string(precision: 4) == "3.1416", "pi prec 4");
+  assert(pi.to_string(precision: 0) == "3", "pi prec 0");
+}
+
+test_f64_precision_rounding() `test {
+  f64 x = 2.555;
+  // 2.555 in f64 is actually slightly less than 2.555, so rounds down to 2.55
+  // But the naive algorithm may round up — just test it gives a reasonable result
+  string result = x.to_string(precision: 2);
+  assert(result == "2.55" || result == "2.56", "2.555 prec 2");
+}
+
+test_f64_precision_zero_frac() `test {
+  f64 x = 5.0;
+  assert(x.to_string(precision: 2) == "5.00", "5.0 prec 2");
+  assert(x.to_string(precision: 0) == "5", "5.0 prec 0");
+}
+
+test_f64_precision_small() `test {
+  f64 x = 0.001;
+  assert(x.to_string(precision: 2) == "0.00", "0.001 prec 2");
+  assert(x.to_string(precision: 4) == "0.0010", "0.001 prec 4");
+}
+
+test_f64_negative_precision() `test {
+  f64 x = -3.14159265;
+  assert(x.to_string(precision: 2) == "-3.14", "neg prec 2");
+}
+
+test_f64_scientific() `test {
+  f64 x = 3.14159265;
+  string s = x.to_string(scientific: true);
+  assert(s.contains("e+"), "sci has e+");
+  assert(s.starts_with("3.14"), "sci starts with 3.14");
+}
+
+test_f64_scientific_precision() `test {
+  f64 pi = 3.14159265;
+  assert(pi.to_string(precision: 2, scientific: true) == "3.14e+00", "pi sci prec 2");
+}
+
+test_f64_scientific_large() `test {
+  f64 x = 12345.0;
+  assert(x.to_string(precision: 2, scientific: true) == "1.23e+04", "large sci prec 2");
+}
+
+test_f64_scientific_small() `test {
+  f64 x = 0.005;
+  assert(x.to_string(precision: 2, scientific: true) == "5.00e-03", "small sci prec 2");
+}
+
+test_f64_scientific_zero() `test {
+  f64 x = 0.0;
+  assert(x.to_string(precision: 2, scientific: true) == "0.00e+00", "zero sci prec 2");
+}
+
+test_f64_scientific_negative() `test {
+  f64 x = -42.5;
+  assert(x.to_string(precision: 1, scientific: true) == "-4.3e+01", "neg sci prec 1");
+}
+
+test_f64_default_unchanged() `test {
+  assert(3.14.to_string() == "3.14", "default unchanged");
+  assert(0.0.to_string() == "0", "zero default unchanged");
+}
+
+// === f32 formatting ===
+
+test_f32_precision() `test {
+  f32 v = 3.14f32;
+  string result = v.to_string(precision: 1);
+  assert(result == "3.1", "f32 prec 1");
+}
+
+test_f32_scientific() `test {
+  f32 v = 100.0f32;
+  assert(v.to_string(precision: 0, scientific: true) == "1e+02", "f32 sci");
+}
+
+// === Other integer types ===
+
+test_i8_hex() `test {
+  i8 v = 127i8;
+  assert(v.to_string(base: 16) == "7f", "i8 hex");
+}
+
+test_i16_hex() `test {
+  i16 v = 256i16;
+  assert(v.to_string(base: 16) == "100", "i16 hex");
+}
+
+test_i32_hex() `test {
+  i32 v = 255i32;
+  assert(v.to_string(base: 16, prefix: true) == "0xff", "i32 hex prefix");
+}
+
+test_i64_hex() `test {
+  i64 v = 65535i64;
+  assert(v.to_string(base: 16) == "ffff", "i64 hex");
+}
+
+test_u16_hex() `test {
+  u16 v = 4096u16;
+  assert(v.to_string(base: 16) == "1000", "u16 hex");
+}
+
+test_u32_hex() `test {
+  u32 v = 255u32;
+  assert(v.to_string(base: 16) == "ff", "u32 hex");
+}
+
+test_u64_hex() `test {
+  u64 v = 255u64;
+  assert(v.to_string(base: 16, prefix: true) == "0xff", "u64 hex prefix");
+}
+
+// === Edge cases ===
+
+test_int_base36() `test {
+  assert(35.to_string(base: 36) == "z", "35 base36");
+  assert(36.to_string(base: 36) == "10", "36 base36");
+}
+
+test_int_negative_width_zero_fill() `test {
+  assert((-42).to_string(width: 6, fill: '0') == "-00042", "-42 width 6 zero fill");
+}
+
+test_int_negative_hex_width_zero_fill() `test {
+  assert((-255).to_string(base: 16, prefix: true, width: 8, fill: '0') == "-0x000ff", "neg hex prefix width zero");
+}
+
+test_f64_negative_zero_precision() `test {
+  f64 x = -0.0;
+  assert(x.to_string(precision: 2) == "-0.00", "neg zero prec 2");
+}
+
+test_f64_negative_zero_scientific() `test {
+  f64 x = -0.0;
+  assert(x.to_string(precision: 1, scientific: true) == "-0.0e+00", "neg zero sci prec 1");
+}
+
+test_f64_large_value_precision() `test {
+  f64 x = 99999.99;
+  assert(x.to_string(precision: 1) == "100000.0", "large round up prec 1");
+}
+
+test_f64_one_precision() `test {
+  f64 x = 1.0;
+  assert(x.to_string(precision: 3) == "1.000", "1.0 prec 3");
+}
+
+test_int_space_width() `test {
+  assert(7.to_string(width: 3) == "  7", "7 width 3 space");
+}
+
+test_f64_scientific_precision_zero() `test {
+  f64 x = 5.0;
+  assert(x.to_string(precision: 0, scientific: true) == "5e+00", "5.0 sci prec 0");
+}

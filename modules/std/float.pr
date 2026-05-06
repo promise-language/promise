@@ -27,7 +27,9 @@ type f32 `native `public {
     return v as! f32;
   }
 
-  to_string() string `public => "{this}";
+  to_string(int? precision, bool scientific = false) string `public `doc("Converts to string. Optional precision (decimal places) and scientific notation.") {
+    return _f64_format(this as! f64, precision, scientific);
+  }
   format(Writer ~w)! `public {
     w.write_string(this.to_string());
   }
@@ -206,7 +208,9 @@ type f64 `native `public {
     return result;
   }
 
-  to_string() string `public => "{this}";
+  to_string(int? precision, bool scientific = false) string `public `doc("Converts to string. Optional precision (decimal places) and scientific notation.") {
+    return _f64_format(this, precision, scientific);
+  }
   format(Writer ~w)! `public {
     w.write_string(this.to_string());
   }

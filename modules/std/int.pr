@@ -62,7 +62,9 @@ type int `native `public {
     return result;
   }
 
-  to_string() string `public => "{this}";
+  to_string(int base = 10, bool prefix = false, int? width, char fill = ' ') string `public `doc("Converts to string. Optional base (2-36), prefix (0x/0o/0b), width, and fill character.") {
+    return _int_format(this as! int, base, prefix, width, fill);
+  }
   format(Writer ~w)! `public {
     w.write_string(this.to_string());
   }
@@ -109,7 +111,9 @@ type i8 `native `public {
     return v as! i8;
   }
 
-  to_string() string `public => "{this}";
+  to_string(int base = 10, bool prefix = false, int? width, char fill = ' ') string `public `doc("Converts to string. Optional base (2-36), prefix (0x/0o/0b), width, and fill character.") {
+    return _int_format(this as! int, base, prefix, width, fill);
+  }
   format(Writer ~w)! `public {
     w.write_string(this.to_string());
   }
@@ -160,7 +164,9 @@ type i16 `native `public {
     return v as! i16;
   }
 
-  to_string() string `public => "{this}";
+  to_string(int base = 10, bool prefix = false, int? width, char fill = ' ') string `public `doc("Converts to string. Optional base (2-36), prefix (0x/0o/0b), width, and fill character.") {
+    return _int_format(this as! int, base, prefix, width, fill);
+  }
   format(Writer ~w)! `public {
     w.write_string(this.to_string());
   }
@@ -211,7 +217,9 @@ type i32 `native `public {
     return v as! i32;
   }
 
-  to_string() string `public => "{this}";
+  to_string(int base = 10, bool prefix = false, int? width, char fill = ' ') string `public `doc("Converts to string. Optional base (2-36), prefix (0x/0o/0b), width, and fill character.") {
+    return _int_format(this as! int, base, prefix, width, fill);
+  }
   format(Writer ~w)! `public {
     w.write_string(this.to_string());
   }
@@ -259,7 +267,9 @@ type i64 `native `public {
     return v as! i64;
   }
 
-  to_string() string `public => "{this}";
+  to_string(int base = 10, bool prefix = false, int? width, char fill = ' ') string `public `doc("Converts to string. Optional base (2-36), prefix (0x/0o/0b), width, and fill character.") {
+    return _int_format(this as! int, base, prefix, width, fill);
+  }
   format(Writer ~w)! `public {
     w.write_string(this.to_string());
   }

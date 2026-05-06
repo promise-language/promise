@@ -638,10 +638,17 @@ func (c *Compiler) emitViewMethodAdapter(
 		pType := c.resolveType(p.Type())
 
 		if p.HasDefault() {
-			// Compile the default expression
+			// Compile the default expression — check local ParamDefaults first,
+			// then fall back to the default stored on the param (cross-module).
 			if defExpr, ok := c.info.ParamDefaults[p]; ok {
 				args = append(args, c.genExpr(defExpr))
 				continue
+			}
+			if raw := p.DefaultExpr(); raw != nil {
+				if defExpr, ok := raw.(ast.Expr); ok {
+					args = append(args, c.genExpr(defExpr))
+					continue
+				}
 			}
 		}
 		// Optional type or fallback: pass zeroinitializer (none)

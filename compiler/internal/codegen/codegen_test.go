@@ -4112,7 +4112,7 @@ func TestStringInterpolationStringVar(t *testing.T) {
 	assertContains(t, ir, "call i8* @promise_string_concat")
 }
 
-// convertToString: f32 interpolation (fpext to double)
+// convertToString: f32 interpolation (direct f32 to string)
 func TestStringInterpolationF32(t *testing.T) {
 	ir := generateIR(t, `
 		show(f32 x) {
@@ -4120,8 +4120,7 @@ func TestStringInterpolationF32(t *testing.T) {
 		}
 		main() { }
 	`)
-	assertContains(t, ir, "fpext float")
-	assertContains(t, ir, "call i8* @promise_f64_to_string")
+	assertContains(t, ir, "call i8* @promise_f32_to_string")
 }
 
 // convertToString: i32 interpolation (sext to i64)

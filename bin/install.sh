@@ -12,5 +12,5 @@ cd "$ROOT"
 echo "Building compiler (release)..."
 ./build --release
 
-echo "Installing..."
-bin/promise install
+echo "Installing into epochs/dev/..."
+bin/promise install --dev

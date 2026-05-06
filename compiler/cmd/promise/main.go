@@ -168,7 +168,7 @@ func main() {
 	case "pin":
 		runPin(os.Args[2:])
 	case "install":
-		runInstall()
+		runInstall(os.Args[2:])
 	case "sync":
 		runSync(os.Args[2:])
 	case "catalog":
@@ -5109,18 +5109,34 @@ func runInit() {
 	fmt.Printf("Created promise.toml (module: %s, epoch: %s)\n", name, defaultEpoch)
 }
 
-func runInstall() {
+func runInstall(args []string) {
+	// Parse --dev flag: install into epochs/dev/ instead of epochs/<epoch>/
+	devMode := false
+	for _, arg := range args {
+		if arg == "--dev" {
+			devMode = true
+		} else {
+			fmt.Fprintf(os.Stderr, "unknown flag: %s\nusage: promise install [--dev]\n", arg)
+			os.Exit(1)
+		}
+	}
+
 	promiseDir, err := module.PromiseHome()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: cannot determine Promise home: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Determine epoch from embedded catalog.
-	epoch, err := module.CompilerEpoch(embeddedCatalog)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: cannot determine compiler epoch: %v\n", err)
-		os.Exit(1)
+	// Determine epoch: --dev overrides to "dev", otherwise read from embedded catalog.
+	var epoch string
+	if devMode {
+		epoch = "dev"
+	} else {
+		epoch, err = module.CompilerEpoch(embeddedCatalog)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: cannot determine compiler epoch: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	epochDir, err := module.EpochDir(epoch)

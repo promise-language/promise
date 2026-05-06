@@ -48,6 +48,16 @@ func shimDispatch() {
 		return // no epoch could be determined; fall through to normal execution
 	}
 
+	// 3a. PROMISE_EPOCH can be an absolute path to a binary — exec it directly.
+	if filepath.IsAbs(desiredEpoch) {
+		if _, err := os.Stat(desiredEpoch); err != nil {
+			fmt.Fprintf(os.Stderr, "error: PROMISE_EPOCH binary not found: %s\n", desiredEpoch)
+			os.Exit(1)
+		}
+		shimExec(desiredEpoch, os.Args, shimEnv())
+		return // unreachable on Unix (shimExec replaces process)
+	}
+
 	// 4. Determine this binary's epoch.
 	myEpoch, err := module.CompilerEpoch(embeddedCatalog)
 	if err != nil {

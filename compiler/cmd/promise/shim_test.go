@@ -107,6 +107,29 @@ epoch = "2025.1"
 	}
 }
 
+func TestResolveDesiredEpochAbsolutePath(t *testing.T) {
+	// When PROMISE_EPOCH is an absolute path, resolveDesiredEpoch returns it as-is.
+	absPath := filepath.Join(t.TempDir(), "bin", "promise")
+	t.Setenv("PROMISE_EPOCH", absPath)
+	t.Setenv("PROMISE_HOME", t.TempDir())
+
+	epoch := resolveDesiredEpoch()
+	if epoch != absPath {
+		t.Fatalf("expected %s, got %s", absPath, epoch)
+	}
+}
+
+func TestResolveDesiredEpochDevEpoch(t *testing.T) {
+	// "dev" is a valid epoch name (not a path).
+	t.Setenv("PROMISE_EPOCH", "dev")
+	t.Setenv("PROMISE_HOME", t.TempDir())
+
+	epoch := resolveDesiredEpoch()
+	if epoch != "dev" {
+		t.Fatalf("expected dev, got %s", epoch)
+	}
+}
+
 func TestDirSize(t *testing.T) {
 	tmp := t.TempDir()
 	// Write two 100-byte files.

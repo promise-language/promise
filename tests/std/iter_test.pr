@@ -313,7 +313,7 @@ test_filter_count() `test(allow_leaks: true) {
 
 // --- Vector.iter() ---
 
-test_vector_iter_basic() `test(allow_leaks: true) {
+test_vector_iter_basic() `test {
   int[] v = [10, 20, 30];
   int sum = 0;
   for x in v.iter() {
@@ -322,7 +322,7 @@ test_vector_iter_basic() `test(allow_leaks: true) {
   assert(sum == 60, "vec iter: 10+20+30=60");
 }
 
-test_vector_iter_empty() `test(allow_leaks: true) {
+test_vector_iter_empty() `test {
   int[] v = [];
   int count = 0;
   for _ in v.iter() {
@@ -877,7 +877,7 @@ test_vector_iter_every() `test(allow_leaks: true) {
   }), "not all even");
 }
 
-test_vector_iter_find() `test {
+test_vector_iter_find() `test(allow_leaks: true) {
   int[] v = [10, 20, 30, 40];
   if val := v.iter().find(|int x| -> bool {
     return x > 25;
@@ -888,7 +888,7 @@ test_vector_iter_find() `test {
   }
 }
 
-test_vector_iter_reduce() `test {
+test_vector_iter_reduce() `test(allow_leaks: true) {
   int[] v = [3, 1, 4, 1, 5];
   if val := v.iter().reduce(|int a, int b| -> int {
     if a > b {
@@ -902,7 +902,7 @@ test_vector_iter_reduce() `test {
   }
 }
 
-test_vector_iter_last() `test {
+test_vector_iter_last() `test(allow_leaks: true) {
   int[] v = [10, 20, 30];
   if val := v.iter().last() {
     assert(val == 30, "last=30");
@@ -911,7 +911,7 @@ test_vector_iter_last() `test {
   }
 }
 
-test_vector_iter_first() `test {
+test_vector_iter_first() `test(allow_leaks: true) {
   int[] v = [10, 20, 30];
   if val := v.iter().first() {
     assert(val == 10, "first=10");
@@ -1035,7 +1035,7 @@ test_fniter_inherits_combinators() `test(allow_leaks: true) {
   assert(found, "_FnIter has inherited .any()");
 }
 
-test_fniter_chain_find() `test {
+test_fniter_chain_find() `test(allow_leaks: true) {
   a := Counter(current: 0, limit: 5);
   b := Counter(current: 100, limit: 105);
   // chain returns _FnIter — test find on it
@@ -1048,7 +1048,7 @@ test_fniter_chain_find() `test {
   }
 }
 
-test_fniter_reduce() `test {
+test_fniter_reduce() `test(allow_leaks: true) {
   c := Counter(current: 1, limit: 6);
   // filter returns _FnIter, then reduce on it
   if val := c.filter(|int x| -> bool {

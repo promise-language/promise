@@ -404,6 +404,10 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	if extractNamed(typ) == types.TypString {
 		c.claimStringTemp(val)
 	}
+	// B0175: Claim heap temp — ownership transferred to this variable.
+	// Without this, iterator chain results (e.g., c.take(3)) assigned via
+	// auto-typed declarations are freed at statement end, causing use-after-free.
+	c.claimHeapTemp(val)
 
 	c.block.NewStore(val, alloca)
 	c.locals[s.Name] = alloca

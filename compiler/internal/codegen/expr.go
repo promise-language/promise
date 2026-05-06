@@ -1462,6 +1462,8 @@ func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, idx *ast.IndexExpr, mem
 	var args []value.Value
 	if method.Sig().Recv() != nil {
 		target := c.genExpr(member.Target)
+		// B0175: Claim heap temp on the receiver (see genMethodCall comment).
+		c.claimHeapTemp(target)
 		if _, isThis := member.Target.(*ast.ThisExpr); isThis {
 			args = append(args, target)
 		} else if isContainerType(targetType) {
@@ -2584,6 +2586,11 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 	var args []value.Value
 	if method.Sig().Recv() != nil {
 		target := c.genExpr(member.Target)
+		// B0175: Claim heap temp on the receiver. When chaining method calls
+		// (e.g., c.filter(...).take(3)), the intermediate result is tracked as a
+		// heap temp. The method call may capture `this` in a closure env, so the
+		// receiver must not be freed at statement end.
+		c.claimHeapTemp(target)
 		// Container types (Vector, Map, string) are already i8* pointers — pass directly.
 		// `this` in a method body is also i8*.
 		// Primitive scalars (int, f64, bool, char, etc.) are raw values — pass directly.
@@ -2836,6 +2843,8 @@ func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 
 	// 1. Evaluate receiver
 	receiverVal := c.genExpr(member.Target)
+	// B0175: Claim heap temp on the receiver (see genMethodCall comment).
+	c.claimHeapTemp(receiverVal)
 
 	// 2. Extract vtable and instance
 	var vtableRaw, instance value.Value

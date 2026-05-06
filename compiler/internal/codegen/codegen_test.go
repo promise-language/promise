@@ -14439,3 +14439,56 @@ func TestStreamForInIterCleanup(t *testing.T) {
 	// The iterator instance from .iter() should be freed at loop exit.
 	assertContains(t, ir, "call void @pal_free")
 }
+
+// B0175: Heap temp claim in genInferredVarDecl — auto-typed iterator variable
+func TestHeapTempClaimInInferredVarDecl(t *testing.T) {
+	ir := generateIR(t, `
+		type Counter is Iterator[int] {
+			int n;
+			next(~this) int? {
+				if this.n <= 0 { return none; }
+				this.n = this.n - 1;
+				return this.n;
+			}
+		}
+		test() {
+			c := Counter(n: 5);
+			result := c.take(3);
+			int sum = 0;
+			for x in result {
+				sum = sum + x;
+			}
+		}
+		main() {}
+	`)
+	// The auto-typed `result := c.take(3)` must generate a heap.claim block
+	// to prevent the iterator instance from being freed at statement end.
+	assertContains(t, ir, "heap.claim")
+}
+
+// B0175: Heap temp claim on method receiver in chained calls
+func TestHeapTempClaimOnMethodReceiver(t *testing.T) {
+	ir := generateIR(t, `
+		type Counter is Iterator[int] {
+			int n;
+			next(~this) int? {
+				if this.n <= 0 { return none; }
+				this.n = this.n - 1;
+				return this.n;
+			}
+		}
+		test() {
+			c := Counter(n: 100);
+			Iterator[int] result = c.filter(|int x| -> bool { return x % 2 == 0; }).take(3);
+			int sum = 0;
+			for x in result {
+				sum = sum + x;
+			}
+		}
+		main() {}
+	`)
+	// The chained call c.filter(...).take(3) must claim the filter result
+	// (intermediate heap temp) before calling .take(3) on it.
+	// Both the filter result and the take result get heap.claim blocks.
+	assertContains(t, ir, "heap.claim")
+}

@@ -1,18 +1,18 @@
 // json_test.pr — Tests for JSON encoding and decoding
 // ── Encoder tests ───────────────────────────────────────────────────────────
-encode_int_test() `test(allow_leaks: true) {
+encode_int_test() `test {
   JsonEncoder enc = JsonEncoder();
   enc.encode_int(42)!;
   assert(enc.to_string() == "42", "encode int");
 }
 
-encode_negative_int_test() `test(allow_leaks: true) {
+encode_negative_int_test() `test {
   JsonEncoder enc = JsonEncoder();
   enc.encode_int(-7)!;
   assert(enc.to_string() == "-7", "encode negative int");
 }
 
-encode_uint_test() `test(allow_leaks: true) {
+encode_uint_test() `test {
   JsonEncoder enc = JsonEncoder();
   enc.encode_uint(100u)!;
   assert(enc.to_string() == "100", "encode uint");
@@ -25,44 +25,44 @@ encode_f64_test() `test {
   assert(s.starts_with("3.14"), "encode f64: {s}");
 }
 
-encode_bool_true_test() `test(allow_leaks: true) {
+encode_bool_true_test() `test {
   JsonEncoder enc = JsonEncoder();
   enc.encode_bool(true)!;
   assert(enc.to_string() == "true", "encode true");
 }
 
-encode_bool_false_test() `test(allow_leaks: true) {
+encode_bool_false_test() `test {
   JsonEncoder enc = JsonEncoder();
   enc.encode_bool(false)!;
   assert(enc.to_string() == "false", "encode false");
 }
 
-encode_string_test() `test(allow_leaks: true) {
+encode_string_test() `test {
   JsonEncoder enc = JsonEncoder();
   enc.encode_string("hello")!;
   assert(enc.to_string() == "\"hello\"", "encode string");
 }
 
-encode_string_escapes_test() `test(allow_leaks: true) {
+encode_string_escapes_test() `test {
   JsonEncoder enc = JsonEncoder();
   enc.encode_string("a\"b\\c\nd")!;
   assert(enc.to_string() == "\"a\\\"b\\\\c\\nd\"", "encode string escapes");
 }
 
-encode_none_test() `test(allow_leaks: true) {
+encode_none_test() `test {
   JsonEncoder enc = JsonEncoder();
   enc.encode_none()!;
   assert(enc.to_string() == "null", "encode none");
 }
 
-encode_empty_object_test() `test(allow_leaks: true) {
+encode_empty_object_test() `test {
   JsonEncoder enc = JsonEncoder();
   enc.begin_object(0)!;
   enc.end_object()!;
   assert(enc.to_string() == "\{}", "encode empty object");
 }
 
-encode_object_test() `test(allow_leaks: true) {
+encode_object_test() `test {
   JsonEncoder enc = JsonEncoder();
   enc.begin_object(2)!;
   enc.encode_key("name")!;
@@ -73,14 +73,14 @@ encode_object_test() `test(allow_leaks: true) {
   assert(enc.to_string() == "\{\"name\":\"Alice\",\"age\":30}", "encode object");
 }
 
-encode_empty_array_test() `test(allow_leaks: true) {
+encode_empty_array_test() `test {
   JsonEncoder enc = JsonEncoder();
   enc.begin_array(0)!;
   enc.end_array()!;
   assert(enc.to_string() == "[]", "encode empty array");
 }
 
-encode_array_test() `test(allow_leaks: true) {
+encode_array_test() `test {
   JsonEncoder enc = JsonEncoder();
   enc.begin_array(3)!;
   enc.encode_int(1)!;
@@ -90,7 +90,7 @@ encode_array_test() `test(allow_leaks: true) {
   assert(enc.to_string() == "[1,2,3]", "encode array");
 }
 
-encode_nested_test() `test(allow_leaks: true) {
+encode_nested_test() `test {
   JsonEncoder enc = JsonEncoder();
   enc.begin_object(1)!;
   enc.encode_key("items")!;
@@ -336,7 +336,7 @@ round_trip_f32_test() `test(allow_leaks: true) {
   assert(v == 1.5f32, "f32 decode");
 }
 
-round_trip_char_test() `test(allow_leaks: true) {
+round_trip_char_test() `test {
   JsonEncoder enc = JsonEncoder();
   char val = 'A';
   val.encode(enc)!;
@@ -375,13 +375,13 @@ decode_u16_overflow_test() `test(allow_leaks: true) {
 
 // ── Encoder edge cases ──────────────────────────────────────────────────────
 
-encode_empty_string_test() `test(allow_leaks: true) {
+encode_empty_string_test() `test {
   JsonEncoder enc = JsonEncoder();
   enc.encode_string("")!;
   assert(enc.to_string() == "\"\"", "encode empty string");
 }
 
-encode_zero_int_test() `test(allow_leaks: true) {
+encode_zero_int_test() `test {
   JsonEncoder enc = JsonEncoder();
   enc.encode_int(0)!;
   assert(enc.to_string() == "0", "encode zero int");
@@ -393,7 +393,7 @@ encode_negative_f64_test() `test(allow_leaks: true) {
   assert(enc.to_string() == "-2.5", "encode negative f64");
 }
 
-encode_mixed_array_test() `test(allow_leaks: true) {
+encode_mixed_array_test() `test {
   JsonEncoder enc = JsonEncoder();
   enc.begin_array(3)!;
   enc.encode_int(1)!;
@@ -403,7 +403,7 @@ encode_mixed_array_test() `test(allow_leaks: true) {
   assert(enc.to_string() == "[1,\"two\",true]", "encode mixed array");
 }
 
-encode_object_with_null_test() `test(allow_leaks: true) {
+encode_object_with_null_test() `test {
   JsonEncoder enc = JsonEncoder();
   enc.begin_object(2)!;
   enc.encode_key("a")!;
@@ -873,13 +873,13 @@ object_null_value_test() `test(allow_leaks: true) {
 
 // ── String escape coverage ──────────────────────────────────────────────────
 
-encode_string_tab_test() `test(allow_leaks: true) {
+encode_string_tab_test() `test {
   JsonEncoder enc = JsonEncoder();
   enc.encode_string("a\tb")!;
   assert(enc.to_string() == "\"a\\tb\"", "encode tab");
 }
 
-encode_string_cr_test() `test(allow_leaks: true) {
+encode_string_cr_test() `test {
   JsonEncoder enc = JsonEncoder();
   enc.encode_string("a\rb")!;
   assert(enc.to_string() == "\"a\\rb\"", "encode cr");
@@ -1443,13 +1443,13 @@ at_empty_array_test() `test(allow_leaks: true) {
 
 // ── Encode method with all variant types ─────────────────────────────────────
 
-encode_method_null_test() `test(allow_leaks: true) {
+encode_method_null_test() `test {
   JsonEncoder enc = JsonEncoder();
   JsonValue.Null.encode(enc)!;
   assert(enc.to_string() == "null", "encode null");
 }
 
-encode_method_bool_test() `test(allow_leaks: true) {
+encode_method_bool_test() `test {
   JsonEncoder enc = JsonEncoder();
   JsonValue.Bool(false).encode(enc)!;
   assert(enc.to_string() == "false", "encode false");
@@ -1462,7 +1462,7 @@ encode_method_number_test() `test(allow_leaks: true) {
   assert(s.starts_with("-3.14"), "encode negative number");
 }
 
-encode_method_string_test() `test(allow_leaks: true) {
+encode_method_string_test() `test {
   JsonEncoder enc = JsonEncoder();
   JsonValue.Str("hello\nworld").encode(enc)!;
   assert(enc.to_string() == "\"hello\\nworld\"", "encode string with escape");

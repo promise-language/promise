@@ -19,13 +19,13 @@ type Task `serializable {
 
 // ── Simple enum encode/decode ──
 
-encode_color_test() `test(allow_leaks: true) {
+encode_color_test() `test {
   json.JsonEncoder enc = json.JsonEncoder();
   Color.Red.encode(enc)!;
   assert(enc.to_string() == "\"Red\"", "encode Red");
 }
 
-encode_all_variants_test() `test(allow_leaks: true) {
+encode_all_variants_test() `test {
   json.JsonEncoder e1 = json.JsonEncoder();
   Color.Green.encode(e1)!;
   assert(e1.to_string() == "\"Green\"", "encode Green");
@@ -35,7 +35,7 @@ encode_all_variants_test() `test(allow_leaks: true) {
   assert(e2.to_string() == "\"Blue\"", "encode Blue");
 }
 
-decode_color_test() `test(allow_leaks: true) {
+decode_color_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\"Green\"");
   Color c = Color.decode(dec)!;
   json.JsonEncoder enc = json.JsonEncoder();
@@ -49,7 +49,7 @@ decode_error_unknown_variant_test() `test(allow_leaks: true) {
   assert(err is present, "unknown variant should error");
 }
 
-round_trip_all_priorities_test() `test(allow_leaks: true) {
+round_trip_all_priorities_test() `test {
   Priority[] all = [Priority.Low, Priority.Medium, Priority.High];
   string[] expected = ["\"Low\"", "\"Medium\"", "\"High\""];
   int i = 0;
@@ -103,13 +103,13 @@ enum Singleton `serializable `copy {
   Only,
 }
 
-encode_singleton_test() `test(allow_leaks: true) {
+encode_singleton_test() `test {
   json.JsonEncoder enc = json.JsonEncoder();
   Singleton.Only.encode(enc)!;
   assert(enc.to_string() == "\"Only\"", "encode singleton");
 }
 
-decode_singleton_test() `test(allow_leaks: true) {
+decode_singleton_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\"Only\"");
   Singleton s = Singleton.decode(dec)!;
   json.JsonEncoder enc = json.JsonEncoder();
@@ -155,7 +155,7 @@ enum_vector_field_encode_test() `test {
   assert(result.contains("[\"Low\",\"High\",\"Medium\"]"), "enum vector encode: {result}");
 }
 
-enum_vector_field_decode_test() `test(allow_leaks: true) {
+enum_vector_field_decode_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"priorities\":[\"High\",\"Low\"]}");
   Schedule s = Schedule.decode(dec)!;
   assert(s.priorities.len == 2, "enum vector decode: len");
@@ -289,7 +289,7 @@ enum Shape `serializable `copy {
 
 // ── Data enum encode ──
 
-data_enum_encode_circle_test() `test(allow_leaks: true) {
+data_enum_encode_circle_test() `test {
   json.JsonEncoder enc = json.JsonEncoder();
   Shape.Circle(1.5).encode(enc)!;
   assert(enc.to_string() == "\{\"type\":\"Circle\",\"radius\":1.5}", "encode Circle");
@@ -304,7 +304,7 @@ data_enum_encode_rect_test() `test {
   assert(s.contains("\"h\":4"), "encode Rect: h");
 }
 
-data_enum_encode_fieldless_test() `test(allow_leaks: true) {
+data_enum_encode_fieldless_test() `test {
   json.JsonEncoder enc = json.JsonEncoder();
   Shape.Point.encode(enc)!;
   assert(enc.to_string() == "\{\"type\":\"Point\"}", "encode Point");
@@ -378,7 +378,7 @@ enum Message `serializable {
   Ping,
 }
 
-data_enum_string_field_test() `test(allow_leaks: true) {
+data_enum_string_field_test() `test {
   json.JsonEncoder enc = json.JsonEncoder();
   Message.Text("hello").encode(enc)!;
   assert(enc.to_string() == "\{\"type\":\"Text\",\"content\":\"hello\"}", "Text encode");
@@ -452,7 +452,7 @@ enum Toggle `serializable `copy {
   Off,
 }
 
-data_enum_bool_field_test() `test(allow_leaks: true) {
+data_enum_bool_field_test() `test {
   json.JsonEncoder enc = json.JsonEncoder();
   Toggle.On(true).encode(enc)!;
   assert(enc.to_string() == "\{\"type\":\"On\",\"active\":true}", "bool field encode");
@@ -473,7 +473,7 @@ enum Result `serializable {
   Err(int code, string reason),
 }
 
-data_enum_int_field_test() `test(allow_leaks: true) {
+data_enum_int_field_test() `test {
   json.JsonEncoder enc = json.JsonEncoder();
   Result.Ok(200).encode(enc)!;
   assert(enc.to_string() == "\{\"type\":\"Ok\",\"code\":200}", "int field");
@@ -575,13 +575,13 @@ enum InputEvent `serializable(tag: "kind") {
   Scroll,
 }
 
-custom_tag_encode_test() `test(allow_leaks: true) {
+custom_tag_encode_test() `test {
   json.JsonEncoder enc = json.JsonEncoder();
   InputEvent.Click(10, 20).encode(enc)!;
   assert(enc.to_string() == "\{\"kind\":\"Click\",\"x\":10,\"y\":20}", "custom tag encode Click");
 }
 
-custom_tag_encode_fieldless_test() `test(allow_leaks: true) {
+custom_tag_encode_fieldless_test() `test {
   json.JsonEncoder enc = json.JsonEncoder();
   InputEvent.Scroll.encode(enc)!;
   assert(enc.to_string() == "\{\"kind\":\"Scroll\"}", "custom tag encode Scroll");

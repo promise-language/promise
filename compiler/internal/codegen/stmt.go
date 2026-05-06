@@ -1350,9 +1350,29 @@ func (c *Compiler) isTrackedStringCall(e *ast.CallExpr) bool {
 	}
 	// T0084: to_string() on Builder produces a new heap string via from_bytes.
 	// Safe to track because from_bytes copies the bytes into a new allocation.
+	// T0092: JsonEncoder.to_string() also produces a new string from its buffer.
 	if member.Field == "to_string" {
 		builderNamed := c.lookupNamedType("Builder")
 		if builderNamed != nil && named == builderNamed {
+			return true
+		}
+		// JsonEncoder is a catalog module type — lookupNamedType won't find it,
+		// so match by name. Safe because JsonEncoder always copies its buffer.
+		if named.Obj() != nil && named.Obj().Name() == "JsonEncoder" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasStructuralParam returns true if any parameter of sig is a structural interface (T0092).
+func hasStructuralParam(sig *types.Signature, typeSubst map[*types.TypeParam]types.Type) bool {
+	for _, param := range sig.Params() {
+		pt := param.Type()
+		if typeSubst != nil {
+			pt = types.Substitute(pt, typeSubst)
+		}
+		if named := extractNamed(pt); named != nil && named.IsStructural() {
 			return true
 		}
 	}

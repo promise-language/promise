@@ -9382,6 +9382,27 @@ func TestStringTempClaimedOnVectorPush(t *testing.T) {
 	assertContains(t, ir, "call i8* @promise_vector_push")
 }
 
+// T0092: String return from function with structural interface param is tracked as temp.
+func TestStringTempStructuralParamReturn(t *testing.T) {
+	ir := generateIR(t, `
+		type Showable `+"`"+`structural {
+			to_string() string `+"`"+`abstract;
+		}
+		display(Showable s) string {
+			return s.to_string();
+		}
+		test() {
+			assert(display(42) == "42", "ok");
+		}
+		main() {}
+	`)
+	// The return value of display(42) should be tracked as a string temp
+	// and freed at statement end via promise_string_drop.
+	assertContains(t, ir, "call i8* @display")
+	assertContains(t, ir, "tmp.drop")
+	assertContains(t, ir, "call void @promise_string_drop")
+}
+
 // T0082: Structural views are tested at the Promise level (e2e/structural_view_test.pr)
 // because structural interface coercion requires the full std library.
 // The fix: genTypedVarDecl skips clearDropFlag when LHS is a structural interface.

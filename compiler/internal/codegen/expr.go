@@ -1185,7 +1185,27 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 		argVals = c.coerceCallArgs(argVals, argTypes, calleeSig.Params())
 	}
 
-	return c.block.NewCall(fn, argVals...)
+	result := c.block.NewCall(fn, argVals...)
+
+	// T0092: Track string return values from functions with structural interface
+	// parameters. When a function takes a structural interface param and returns
+	// a string, the result is typically a new allocation (from format/encode/
+	// to_string on the structural param). Track it so it's freed at statement end.
+	// Note: if the function internally calls to_string() on a string-typed
+	// structural param, the return aliases the input. This is safe for literals
+	// (promise_string_drop is a no-op) and for encoder-style functions (return
+	// is always a new allocation). A display(heap_string_var) pattern where the
+	// return aliases the variable would require ownership tracking (T0061) for
+	// full safety.
+	if result != nil && result.Type() == irtypes.I8Ptr && c.tempTrackingEnabled {
+		if calleeSig != nil && hasStructuralParam(calleeSig, c.typeSubst) {
+			if rt := c.info.Types[e]; rt != nil && extractNamed(rt) == types.TypString {
+				c.trackStringTemp(result)
+			}
+		}
+	}
+
+	return result
 }
 
 // resolveModuleName checks if an IdentExpr refers to a module and returns

@@ -12,27 +12,27 @@ display(Showable s) string {
 
 // --- Basic primitive boxing ---
 
-test_int_to_structural() `test(allow_leaks: true) {
+test_int_to_structural() `test {
   assert(display(42) == "42", "int to Showable");
 }
 
-test_negative_int_to_structural() `test(allow_leaks: true) {
+test_negative_int_to_structural() `test {
   assert(display(-7) == "-7", "negative int to Showable");
 }
 
-test_zero_to_structural() `test(allow_leaks: true) {
+test_zero_to_structural() `test {
   assert(display(0) == "0", "zero to Showable");
 }
 
-test_bool_true_to_structural() `test(allow_leaks: true) {
+test_bool_true_to_structural() `test {
   assert(display(true) == "true", "bool true to Showable");
 }
 
-test_bool_false_to_structural() `test(allow_leaks: true) {
+test_bool_false_to_structural() `test {
   assert(display(false) == "false", "bool false to Showable");
 }
 
-test_f64_to_structural() `test(allow_leaks: true) {
+test_f64_to_structural() `test {
   assert(display(3.14) == "3.14", "f64 to Showable");
 }
 
@@ -44,23 +44,23 @@ test_empty_string_to_structural() `test {
   assert(display("") == "", "empty string to Showable");
 }
 
-test_char_to_structural() `test(allow_leaks: true) {
+test_char_to_structural() `test {
   assert(display('A') == "A", "char to Showable");
 }
 
 // --- Primitive variables (not just literals) ---
 
-test_int_var_to_structural() `test(allow_leaks: true) {
+test_int_var_to_structural() `test {
   int x = 99;
   assert(display(x) == "99", "int variable to Showable");
 }
 
-test_bool_var_to_structural() `test(allow_leaks: true) {
+test_bool_var_to_structural() `test {
   bool b = false;
   assert(display(b) == "false", "bool variable to Showable");
 }
 
-test_f64_var_to_structural() `test(allow_leaks: true) {
+test_f64_var_to_structural() `test {
   f64 pi = 3.14;
   assert(display(pi) == "3.14", "f64 variable to Showable");
 }
@@ -72,39 +72,39 @@ test_string_var_to_structural() `test {
 
 // --- Narrow integer types ---
 
-test_i8_to_structural() `test(allow_leaks: true) {
+test_i8_to_structural() `test {
   i8 v = 42 as! i8;
   assert(display(v) == "42", "i8 to Showable");
 }
 
-test_i16_to_structural() `test(allow_leaks: true) {
+test_i16_to_structural() `test {
   i16 v = 1000 as! i16;
   assert(display(v) == "1000", "i16 to Showable");
 }
 
-test_i32_to_structural() `test(allow_leaks: true) {
+test_i32_to_structural() `test {
   i32 v = 100000 as! i32;
   assert(display(v) == "100000", "i32 to Showable");
 }
 
-test_u8_to_structural() `test(allow_leaks: true) {
+test_u8_to_structural() `test {
   u8 v = 200 as! u8;
   assert(display(v) == "200", "u8 to Showable");
 }
 
-test_u16_to_structural() `test(allow_leaks: true) {
+test_u16_to_structural() `test {
   u16 v = 50000 as! u16;
   assert(display(v) == "50000", "u16 to Showable");
 }
 
-test_u32_to_structural() `test(allow_leaks: true) {
+test_u32_to_structural() `test {
   u32 v = 3000000 as! u32;
   assert(display(v) == "3000000", "u32 to Showable");
 }
 
 // --- Multiple different primitives in sequence ---
 
-test_mixed_primitives_sequential() `test(allow_leaks: true) {
+test_mixed_primitives_sequential() `test {
   assert(display(1) == "1", "first int");
   assert(display(true) == "true", "then bool");
   assert(display("hi") == "hi", "then string");
@@ -160,7 +160,7 @@ test_int_and_user_type_structural_params() `test(allow_leaks: true) {
 
 // --- Primitives in a loop ---
 
-test_primitive_in_loop() `test(allow_leaks: true) {
+test_primitive_in_loop() `test {
   string result = "";
   for i in 0..3 {
     result = result + display(i);
@@ -177,19 +177,19 @@ format_to_string(Format f) string {
   return b.to_string();
 }
 
-test_int_to_format_structural() `test(allow_leaks: true) {
+test_int_to_format_structural() `test {
   assert(format_to_string(42) == "42", "int to Format");
 }
 
-test_bool_to_format_structural() `test(allow_leaks: true) {
+test_bool_to_format_structural() `test {
   assert(format_to_string(true) == "true", "bool to Format");
 }
 
-test_f64_to_format_structural() `test(allow_leaks: true) {
+test_f64_to_format_structural() `test {
   assert(format_to_string(3.14) == "3.14", "f64 to Format");
 }
 
-test_string_to_format_structural() `test(allow_leaks: true) {
+test_string_to_format_structural() `test {
   assert(format_to_string("hello") == "hello", "string to Format");
 }
 
@@ -221,7 +221,7 @@ test_user_type_void_failable_structural() `test {
 
 // --- Duplicate variable names across scopes (regression for localNameCount) ---
 
-test_duplicate_var_names_with_boxing() `test(allow_leaks: true) {
+test_duplicate_var_names_with_boxing() `test {
   // This triggered the localNameCount bug: emitting an adapter thunk
   // mid-function would reset the name counter, causing duplicate %x allocas
   int? opt = 10;
@@ -233,7 +233,7 @@ test_duplicate_var_names_with_boxing() `test(allow_leaks: true) {
   assert(display(x) == "20", "x in outer scope");
 }
 
-test_duplicate_var_names_multiple_scopes() `test(allow_leaks: true) {
+test_duplicate_var_names_multiple_scopes() `test {
   for i in 0..2 {
     int v = i * 10;
     assert(display(v) == display(i * 10), "v in loop iteration {i}");
@@ -275,7 +275,7 @@ test_heap_user_format_var() `test {
   assert(b.to_string() == "quack", "heap user format var");
 }
 
-test_heap_user_format_assign_then_pass() `test(allow_leaks: true) {
+test_heap_user_format_assign_then_pass() `test {
   Animal a = Animal(sound: "moo");
   Format f = a;
   assert(format_to_string(f) == "moo", "heap user format assign then pass");
@@ -335,7 +335,7 @@ test_value_type_format_var() `test {
   assert(b.to_string() == "rgb(10,20,30)", "value type format var");
 }
 
-test_value_type_format_param() `test(allow_leaks: true) {
+test_value_type_format_param() `test {
   Color c = Color(r: 255, g: 128, b: 0);
   assert(format_to_string(c) == "rgb(255,128,0)", "value type format param");
 }

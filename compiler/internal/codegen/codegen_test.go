@@ -6358,6 +6358,29 @@ func TestGenerateTestMainStoresArgcArgv(t *testing.T) {
 	assertContains(t, ir, "store i8** %argv, i8*** @__promise_argv")
 }
 
+// B0130: Batch test main reserves G.id=0 so goroutine panics recover via scheduler.
+func TestGenerateTestMainReservesGID0(t *testing.T) {
+	result := compileResult(t, `
+		myTest() `+"`test"+` { }
+	`)
+	info, _ := sema.Check(func() *ast.File {
+		input := antlr.NewInputStream(`myTest() ` + "`test" + ` { }`)
+		lexer := parser.NewPromiseLexer(input)
+		lexer.RemoveErrorListeners()
+		stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+		p := parser.NewPromiseParser(stream)
+		p.RemoveErrorListeners()
+		tree := p.CompilationUnit()
+		file, _ := ast.Build("test.pr", tree)
+		return file
+	}())
+	result.GenerateTestMain(info.Tests, nil)
+	ir := result.Module.String()
+	// After sched_init, the goroutine counter must be bumped past 0
+	// so no user goroutine gets G.id=0 (which promise_panic treats as main).
+	assertContains(t, ir, "atomicrmw add i64*")
+}
+
 func TestTestPrintResultBody(t *testing.T) {
 	result := compileResult(t, `
 		myTest() `+"`test"+` { }

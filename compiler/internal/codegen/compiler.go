@@ -669,6 +669,15 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	if !c.isWasm {
 		numCPUs := entry.NewCall(c.palNumCPUs)
 		entry.NewCall(c.funcs["promise_sched_init"], numCPUs)
+
+		// Reserve G.id=0 for the main goroutine. In batch test mode there is
+		// no main goroutine (G0), so bump the counter past 0. Without this,
+		// the first goroutine spawned by a test gets id=0 and promise_panic
+		// treats it as the main goroutine → exits instead of recovering (B0130).
+		schedTy := schedStructType()
+		counterField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGoroutineCounter)))
+		c.emitAtomicAdd(entry, counterField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
 	}
 
 	// Allocate counters: passed and failed

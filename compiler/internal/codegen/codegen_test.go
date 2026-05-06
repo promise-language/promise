@@ -6561,6 +6561,42 @@ func TestGenerateTestMainReservesGID0(t *testing.T) {
 	assertContains(t, ir, "atomicrmw add i64*")
 }
 
+// B0165: Batch test main waits for worker threads to finish init, then resets
+// alloc count to 0 so scheduler allocations don't leak into per-test counts.
+func TestBatchTestResetsAllocCount(t *testing.T) {
+	result := compileResult(t, `
+		myTest() `+"`test"+` { }
+	`)
+	info, _ := sema.Check(func() *ast.File {
+		input := antlr.NewInputStream(`myTest() ` + "`test" + ` { }`)
+		lexer := parser.NewPromiseLexer(input)
+		lexer.RemoveErrorListeners()
+		stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+		p := parser.NewPromiseParser(stream)
+		p.RemoveErrorListeners()
+		tree := p.CompilationUnit()
+		file, _ := ast.Build("test.pr", tree)
+		return file
+	}())
+	result.GenerateTestMain(info.Tests, nil)
+	ir := result.Module.String()
+	// Spin-wait on sched.ready_count
+	assertContains(t, ir, "sched_ready_spin")
+	assertContains(t, ir, "sched_ready_done")
+	// Reset alloc count to 0 via atomic exchange
+	assertContains(t, ir, "atomicrmw xchg i64* @__promise_alloc_count, i64 0 monotonic")
+}
+
+// B0165: Sched struct includes ready_count field (i32 at end).
+func TestSchedStructHasReadyCount(t *testing.T) {
+	ir := generateIR(t, `main() { }`)
+	// The sched global should have the ready_count i32 as the last field
+	// Full type: { i8*, i8*, i64, i8*, i8*, i32, i8*, i8*, i64, i8, i8, i8*, i8*, i8*, i32, i64, i64, i64, i64, i8*, i32 }
+	assertContains(t, ir, "@__promise_sched = global")
+	// Verify sched_loop is defined (it increments ready_count)
+	assertContains(t, ir, "define i8* @promise_sched_loop(")
+}
+
 func TestTestPrintResultBody(t *testing.T) {
 	result := compileResult(t, `
 		myTest() `+"`test"+` { }

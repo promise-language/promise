@@ -136,6 +136,7 @@ const (
 	schedFieldContextSwitches  = 17 // i64  total context switches
 	schedFieldSteals           = 18 // i64  total work steals
 	schedFieldSysmonHandle     = 19 // i8*  sysmon thread handle (for joining at shutdown)
+	schedFieldReadyCount       = 20 // i32  worker threads that completed init (B0165)
 )
 
 // schedStructType returns the LLVM struct type for the global scheduler.
@@ -161,6 +162,7 @@ func schedStructType() *irtypes.StructType {
 		irtypes.I64,   // context_switches
 		irtypes.I64,   // steals
 		irtypes.I8Ptr, // sysmon_handle
+		irtypes.I32,   // ready_count (B0165: worker threads that completed init)
 	)
 }
 
@@ -584,6 +586,14 @@ func (c *Compiler) defineSchedLoopFunc() {
 
 	// Set up per-thread alternate signal stack for stack overflow detection (B0010)
 	entry.NewCall(c.palStackOverflowThreadInit)
+
+	// Signal that this worker thread has completed init (B0165).
+	// Batch test mode spin-waits on this counter before resetting alloc count,
+	// ensuring async pal_stack_overflow_thread_init allocations are excluded
+	// from per-test leak detection.
+	readyField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldReadyCount)))
+	c.emitAtomicAdd(entry, readyField, constant.NewInt(irtypes.I32, 1), irtypes.I32)
 
 	// Alloca for setjmp jmp_buf must be in the entry block so LLVM treats it
 	// as a static alloca. A dynamic alloca in the run_g block would leak 256

@@ -692,6 +692,40 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 		counterField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldGoroutineCounter)))
 		c.emitAtomicAdd(entry, counterField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
+
+		// B0165: Wait for all worker threads to finish init (pal_stack_overflow_thread_init
+		// allocates via pal_alloc on each thread), then reset alloc count to 0.
+		// This excludes all scheduler allocations from per-test leak detection.
+		readyField := entry.NewGetElementPtr(schedTy, c.schedGlobal,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(schedFieldReadyCount)))
+		spinHeader := mainFn.NewBlock("sched_ready_spin")
+		spinDone := mainFn.NewBlock("sched_ready_done")
+		entry.NewBr(spinHeader)
+
+		readyVal := spinHeader.NewAtomicRMW(enum.AtomicOpAdd, readyField, constant.NewInt(irtypes.I32, 0), enum.AtomicOrderingMonotonic)
+		allReady := spinHeader.NewICmp(enum.IPredSGE, readyVal, numCPUs)
+		spinYield := mainFn.NewBlock("sched_ready_yield")
+		spinHeader.NewCondBr(allReady, spinDone, spinYield)
+
+		// Yield briefly (100μs) before re-checking
+		spinYield.NewCall(c.palUsleep, constant.NewInt(irtypes.I32, 100))
+		spinYield.NewBr(spinHeader)
+
+		entry = spinDone
+	}
+
+	// B0165: Reset alloc count to 0 after scheduler init so scheduler
+	// allocations don't leak into per-test leak detection.
+	// This covers both WASM (no scheduler) and native (post-spin-wait).
+	for _, g := range c.module.Globals {
+		if g.Name() == "__promise_alloc_count" {
+			if c.isWasm {
+				entry.NewStore(constant.NewInt(irtypes.I64, 0), g)
+			} else {
+				entry.NewAtomicRMW(enum.AtomicOpXChg, g, constant.NewInt(irtypes.I64, 0), enum.AtomicOrderingMonotonic)
+			}
+			break
+		}
 	}
 
 	// Allocate counters: passed and failed

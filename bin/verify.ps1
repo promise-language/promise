@@ -131,22 +131,23 @@ Write-Step "Running Promise tests..."
 # modules/io: shutdown crash (B0148) tolerated by test harness on Windows
 
 # Note: tests/std/unicode_test.pr has 4 failing Hangul tests (upstream bug, all platforms).
-# Using explicit std file list to exclude it until fixed.
-$stdTests = @(Get-ChildItem "tests/std/*.pr" | Where-Object { $_.Name -ne "unicode_test.pr" } | ForEach-Object { $_.FullName })
+# Build the std file list excluding it, write to a temp file for argument passing.
+$stdTestFiles = Get-ChildItem "tests/std/*.pr" | Where-Object { $_.Name -ne "unicode_test.pr" } | ForEach-Object { $_.Name }
+$stdArgs = $stdTestFiles | ForEach-Object { "tests/std/$_" }
 
-& $Promise test -timeout 10 `
-    tests/e2e/... `
-    @stdTests `
-    tests/concurrency/... `
-    tests/value_types/... `
-    tests/arrays/... `
-    tests/modules/... `
-    modules/io/... `
-    modules/json/... `
-    modules/math/... `
-    modules/path/... `
-    modules/strings/... `
-    examples/...
+$allArgs = @("test", "-timeout", "10", "tests/e2e/...") + $stdArgs + @(
+    "tests/concurrency/..."
+    "tests/value_types/..."
+    "tests/arrays/..."
+    "tests/modules/..."
+    "modules/io/..."
+    "modules/json/..."
+    "modules/math/..."
+    "modules/path/..."
+    "modules/strings/..."
+    "examples/..."
+)
+& $Promise @allArgs
 if ($LASTEXITCODE -ne 0) {
     $failed = $true
     Write-Host ""

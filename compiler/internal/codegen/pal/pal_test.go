@@ -1824,6 +1824,40 @@ func TestEmitStackOverflowInit(t *testing.T) {
 	}
 }
 
+func TestWindowsStackOverflowUsesVEH(t *testing.T) {
+	module := newModuleWithAlloc(&WindowsPAL{})
+	(&WindowsPAL{}).EmitWrite(module)
+	(&WindowsPAL{}).EmitExit(module)
+	(&WindowsPAL{}).EmitStackOverflowInit(module)
+	out := module.String()
+
+	// Should register a VEH handler
+	if !strings.Contains(out, "@AddVectoredExceptionHandler") {
+		t.Error("missing AddVectoredExceptionHandler declaration")
+	}
+	// Should define the VEH handler function
+	if !strings.Contains(out, "@__promise_veh_handler") {
+		t.Error("missing VEH handler function")
+	}
+	// Handler should check STATUS_STACK_OVERFLOW (0xC00000FD = 3221225725)
+	// LLVM IR may render as unsigned hex or signed decimal depending on the library
+	if !strings.Contains(out, "3221225725") && !strings.Contains(out, "0xC00000FD") && !strings.Contains(out, "-1073741571") {
+		t.Error("missing STATUS_STACK_OVERFLOW constant (0xC00000FD)")
+	}
+	// Handler should call ExitProcess
+	if !strings.Contains(out, "@ExitProcess") {
+		t.Error("missing ExitProcess call in handler")
+	}
+	// Handler should write error message
+	if !strings.Contains(out, "fatal: stack overflow") {
+		t.Error("missing 'fatal: stack overflow' message")
+	}
+	// Should NOT use pthreads or signal
+	if strings.Contains(out, "sigaction") || strings.Contains(out, "signal(") {
+		t.Error("Windows should not use POSIX signal handling")
+	}
+}
+
 func TestEmitStackOverflowThreadInit(t *testing.T) {
 	pals := []struct {
 		name string

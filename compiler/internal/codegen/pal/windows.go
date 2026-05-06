@@ -1060,12 +1060,102 @@ func (p *WindowsPAL) EmitSignalRegister(module *ir.Module) *ir.Func {
 	return emitStubSignalRegister(module)
 }
 
-// EmitStackOverflowInit stub — Windows CreateThread sets up guard pages by default
-// and provides its own stack overflow exception message.
+// EmitStackOverflowInit defines @pal_stack_overflow_init() → void
+// Registers a Vectored Exception Handler (VEH) via AddVectoredExceptionHandler
+// that catches STATUS_STACK_OVERFLOW (0xC00000FD), writes "fatal: stack overflow"
+// to stderr, and calls ExitProcess(2).
+//
+// VEH is process-global — all threads are covered by a single registration.
+// The handler must return EXCEPTION_CONTINUE_SEARCH (-1) for non-stack-overflow
+// exceptions so the default handler runs.
 func (p *WindowsPAL) EmitStackOverflowInit(module *ir.Module) *ir.Func {
-	return emitStubStackOverflowInit(module)
+	// Win32 APIs called directly from the VEH handler — minimal stack usage.
+	// GetStdHandle and WriteFile are safe to call with very little stack remaining.
+	getStdHandle := getOrDeclareFunc(module, "GetStdHandle", irtypes.I8Ptr,
+		ir.NewParam("nStdHandle", irtypes.I32))
+	writeFile := getOrDeclareFunc(module, "WriteFile", irtypes.I32,
+		ir.NewParam("hFile", irtypes.I8Ptr),
+		ir.NewParam("lpBuffer", irtypes.I8Ptr),
+		ir.NewParam("nNumberOfBytesToWrite", irtypes.I32),
+		ir.NewParam("lpNumberOfBytesWritten", irtypes.NewPointer(irtypes.I32)),
+		ir.NewParam("lpOverlapped", irtypes.I8Ptr))
+	exitProcess := getOrDeclareFunc(module, "ExitProcess", irtypes.Void,
+		ir.NewParam("uExitCode", irtypes.I32))
+	addFuncAttr(exitProcess, enum.FuncAttrNoReturn)
+
+	// Error message: "fatal: stack overflow\n" (22 bytes)
+	msgStr := "fatal: stack overflow\n"
+	msgConst := constant.NewCharArrayFromString(msgStr)
+	msgGlobal := module.NewGlobal("__promise_stack_overflow_msg", msgConst.Typ)
+	msgGlobal.Init = msgConst
+	msgGlobal.Immutable = true
+
+	// VEH handler signature: i32 @handler(i8* %exception_pointers)
+	// EXCEPTION_POINTERS = { EXCEPTION_RECORD*, CONTEXT* }
+	// EXCEPTION_RECORD.ExceptionCode is at offset 0 (i32)
+	exPtrsType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I8Ptr)
+	handlerFn := module.NewFunc("__promise_veh_handler", irtypes.I32,
+		ir.NewParam("exception_pointers", irtypes.I8Ptr))
+	handlerFn.FuncAttrs = append(handlerFn.FuncAttrs, enum.FuncAttrNoUnwind)
+	{
+		hEntry := handlerFn.NewBlock(".entry")
+
+		// Load ExceptionRecord pointer from EXCEPTION_POINTERS[0]
+		epPtr := hEntry.NewBitCast(handlerFn.Params[0], irtypes.NewPointer(exPtrsType))
+		erField := hEntry.NewGetElementPtr(exPtrsType, epPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		erPtr := hEntry.NewLoad(irtypes.I8Ptr, erField)
+
+		// Load ExceptionCode (i32 at offset 0 of EXCEPTION_RECORD)
+		codePtr := hEntry.NewBitCast(erPtr, irtypes.NewPointer(irtypes.I32))
+		code := hEntry.NewLoad(irtypes.I32, codePtr)
+
+		// Check if STATUS_STACK_OVERFLOW (0xC00000FD)
+		isStackOverflow := hEntry.NewICmp(enum.IPredEQ, code,
+			constant.NewInt(irtypes.I32, 0xC00000FD))
+
+		stackOverflowBlk := handlerFn.NewBlock("stack_overflow")
+		continueBlk := handlerFn.NewBlock("continue_search")
+		hEntry.NewCondBr(isStackOverflow, stackOverflowBlk, continueBlk)
+
+		// Stack overflow: write message directly via Win32 and exit.
+		// Avoid calling pal_write (which allocates locals) — the stack is nearly full.
+		// STD_ERROR_HANDLE = -12
+		stderrHandle := stackOverflowBlk.NewCall(getStdHandle,
+			constant.NewInt(irtypes.I32, -12))
+		msgPtr := stackOverflowBlk.NewBitCast(msgGlobal, irtypes.I8Ptr)
+		stackOverflowBlk.NewCall(writeFile, stderrHandle, msgPtr,
+			constant.NewInt(irtypes.I32, int64(len(msgStr))),
+			constant.NewNull(irtypes.NewPointer(irtypes.I32)),
+			constant.NewNull(irtypes.I8Ptr))
+		stackOverflowBlk.NewCall(exitProcess, constant.NewInt(irtypes.I32, 2))
+		stackOverflowBlk.NewUnreachable()
+
+		// Not stack overflow: return EXCEPTION_CONTINUE_SEARCH (0)
+		continueBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	}
+
+	// declare i8* @AddVectoredExceptionHandler(i32, i8*)
+	addVEH := getOrDeclareFunc(module, "AddVectoredExceptionHandler", irtypes.I8Ptr,
+		ir.NewParam("First", irtypes.I32),
+		ir.NewParam("Handler", irtypes.I8Ptr))
+
+	// Define @pal_stack_overflow_init()
+	fn := module.NewFunc("pal_stack_overflow_init", irtypes.Void)
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+	entry := fn.NewBlock(".entry")
+
+	// AddVectoredExceptionHandler(1, handler) — 1 = first handler in chain
+	handlerPtr := entry.NewBitCast(handlerFn, irtypes.I8Ptr)
+	entry.NewCall(addVEH, constant.NewInt(irtypes.I32, 1), handlerPtr)
+	entry.NewRet(nil)
+
+	return fn
 }
 
+// EmitStackOverflowThreadInit — no-op on Windows.
+// VEH is process-global, so no per-thread setup is needed.
+// Thread guard pages are set up by _beginthreadex automatically.
 func (p *WindowsPAL) EmitStackOverflowThreadInit(module *ir.Module) *ir.Func {
 	return emitStubStackOverflowThreadInit(module)
 }

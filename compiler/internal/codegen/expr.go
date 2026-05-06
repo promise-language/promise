@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -239,11 +240,31 @@ func (c *Compiler) genInterpolatedString(e *ast.StringLit) value.Value {
 	return result
 }
 
-// makeRuntimeString creates a global string constant and calls promise_string_new.
+// makeRuntimeString emits a static string instance global in .rodata.
+// The global contains the full string instance struct: { i8* _variant, i64 len, [N x i8] data }.
+// The length field has bit 63 set (negative) to mark it as a literal string — this
+// prevents promise_string_drop from freeing the .rodata pointer.
 // When compiling module code, names use a per-module counter so the constant
 // names are stable (independent of how many string constants user code has).
 func (c *Compiler) makeRuntimeString(s string) value.Value {
-	data := constant.NewCharArrayFromString(s)
+	n := len(s)
+
+	// Build concrete struct type with actual array size (not [0 x i8] FAM)
+	concreteType := irtypes.NewStruct(
+		irtypes.I8Ptr,                           // _variant
+		irtypes.I64,                             // len (sign bit = literal flag)
+		irtypes.NewArray(uint64(n), irtypes.I8), // data
+	)
+
+	// Length with literal flag (sign bit) set
+	literalLen := int64(n) | math.MinInt64
+
+	init := constant.NewStruct(concreteType,
+		constant.NewNull(irtypes.I8Ptr),
+		constant.NewInt(irtypes.I64, literalLen),
+		constant.NewCharArrayFromString(s),
+	)
+
 	var globalName string
 	if c.compilingModule != "" {
 		globalName = fmt.Sprintf(".str.__mod_%s.%d", c.compilingModule, c.moduleStrCounter)
@@ -252,15 +273,12 @@ func (c *Compiler) makeRuntimeString(s string) value.Value {
 		globalName = fmt.Sprintf(".str.%d", c.strCounter)
 		c.strCounter++
 	}
-	global := c.module.NewGlobalDef(globalName, data)
+	global := c.module.NewGlobalDef(globalName, init)
 	global.Immutable = true
 	global.Linkage = enum.LinkagePrivate
 
-	ptr := c.block.NewGetElementPtr(global.ContentType, global,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-
-	return c.block.NewCall(c.funcs["promise_string_new"],
-		ptr, constant.NewInt(irtypes.I64, int64(len(s))))
+	// Bitcast global pointer to i8* (the string instance pointer type used everywhere)
+	return c.block.NewBitCast(global, irtypes.I8Ptr)
 }
 
 // convertTupleToString formats a tuple value as "(elem0, elem1, ...)".
@@ -1881,6 +1899,14 @@ func (c *Compiler) genMemberExpr(e *ast.MemberExpr) value.Value {
 		}
 	}
 
+	// String .is_literal property — checks sign bit of length field
+	if e.Field == "is_literal" {
+		named := extractNamed(targetType)
+		if named == types.TypString {
+			return c.genStringIsLiteral(e)
+		}
+	}
+
 	// Native hash getter for Hashable interface on primitive types
 	if e.Field == "hash" {
 		named := extractNamed(targetType)
@@ -3198,35 +3224,33 @@ func (c *Compiler) genStringFromBytes(e *ast.CallExpr) value.Value {
 // String instance layout: { i8* _variant, i64 len, [0 x i8] data }
 func (c *Compiler) genStringLen(e *ast.MemberExpr) value.Value {
 	strPtr := c.genExpr(e.Target)
-	// Build string instance struct type: { i8*, i64, [0 x i8] }
-	strInstanceType := irtypes.NewStruct(
-		irtypes.I8Ptr,                   // _variant
-		irtypes.I64,                     // len
-		irtypes.NewArray(0, irtypes.I8), // data (flexible array)
-	)
-	typedPtr := c.block.NewBitCast(strPtr, irtypes.NewPointer(strInstanceType))
-	lenPtr := c.block.NewGetElementPtr(strInstanceType, typedPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	return c.block.NewLoad(irtypes.I64, lenPtr)
+	instType := strInstanceType()
+	typedPtr := c.block.NewBitCast(strPtr, irtypes.NewPointer(instType))
+	return loadStringLen(c.block, typedPtr, instType)
+}
+
+// genStringIsLiteral checks the sign bit of the string length field.
+// Literal strings (in .rodata) have bit 63 set; heap strings do not.
+func (c *Compiler) genStringIsLiteral(e *ast.MemberExpr) value.Value {
+	strPtr := c.genExpr(e.Target)
+	instType := strInstanceType()
+	typedPtr := c.block.NewBitCast(strPtr, irtypes.NewPointer(instType))
+	rawLen := loadStringLenRaw(c.block, typedPtr, instType)
+	// Sign bit set → negative → literal
+	return c.block.NewICmp(enum.IPredSLT, rawLen, constant.NewInt(irtypes.I64, 0))
 }
 
 // genStringBytes creates a Vector[u8] from the string's raw bytes.
 // Allocates a new vector, memcpys string data into it, sets count = string len.
 func (c *Compiler) genStringBytes(strPtr value.Value) value.Value {
-	strInstanceType := irtypes.NewStruct(
-		irtypes.I8Ptr,                   // _variant
-		irtypes.I64,                     // len
-		irtypes.NewArray(0, irtypes.I8), // data (flexible array)
-	)
-	typedPtr := c.block.NewBitCast(strPtr, irtypes.NewPointer(strInstanceType))
+	instType := strInstanceType()
+	typedPtr := c.block.NewBitCast(strPtr, irtypes.NewPointer(instType))
 
-	// Load string length
-	lenPtr := c.block.NewGetElementPtr(strInstanceType, typedPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	strLen := c.block.NewLoad(irtypes.I64, lenPtr)
+	// Load string length (masking off literal flag)
+	strLen := loadStringLen(c.block, typedPtr, instType)
 
 	// Get pointer to string data (field 2)
-	dataPtr := c.block.NewGetElementPtr(strInstanceType, typedPtr,
+	dataPtr := c.block.NewGetElementPtr(instType, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
 		constant.NewInt(irtypes.I32, 0))
 
@@ -3252,15 +3276,11 @@ func (c *Compiler) genStringBytes(strPtr value.Value) value.Value {
 // genStringByteAt returns the raw byte at a given byte offset in the string.
 // Unlike string[], this does NOT do UTF-8 decoding — it returns u8 directly.
 func (c *Compiler) genStringByteAt(strPtr, index value.Value) value.Value {
-	strInstanceType := irtypes.NewStruct(
-		irtypes.I8Ptr,                   // _variant
-		irtypes.I64,                     // len
-		irtypes.NewArray(0, irtypes.I8), // data (flexible array)
-	)
-	typedPtr := c.block.NewBitCast(strPtr, irtypes.NewPointer(strInstanceType))
+	instType := strInstanceType()
+	typedPtr := c.block.NewBitCast(strPtr, irtypes.NewPointer(instType))
 
 	// Get pointer to string data
-	dataPtr := c.block.NewGetElementPtr(strInstanceType, typedPtr,
+	dataPtr := c.block.NewGetElementPtr(instType, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
 		constant.NewInt(irtypes.I32, 0))
 
@@ -4402,17 +4422,11 @@ func (c *Compiler) genNativeSlice(named *types.Named, targetType types.Type, tar
 // genStringSlice implements string[start:end] by extracting a substring.
 // Bounds are optional ints ({i1, i64}). Defaults: start=0, end=len.
 func (c *Compiler) genStringSlice(strPtr, low, high value.Value) value.Value {
-	strInstanceType := irtypes.NewStruct(
-		irtypes.I8Ptr,                   // _variant
-		irtypes.I64,                     // len
-		irtypes.NewArray(0, irtypes.I8), // data (flexible array)
-	)
-	typedPtr := c.block.NewBitCast(strPtr, irtypes.NewPointer(strInstanceType))
+	instType := strInstanceType()
+	typedPtr := c.block.NewBitCast(strPtr, irtypes.NewPointer(instType))
 
-	// Load string length
-	lenPtr := c.block.NewGetElementPtr(strInstanceType, typedPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	length := c.block.NewLoad(irtypes.I64, lenPtr)
+	// Load string length (masking off literal flag)
+	length := loadStringLen(c.block, typedPtr, instType)
 
 	// Resolve start: if present use value, else 0
 	lowPresent := c.block.NewExtractValue(low, 0)
@@ -4428,7 +4442,7 @@ func (c *Compiler) genStringSlice(strPtr, low, high value.Value) value.Value {
 	sliceLen := c.block.NewSub(end, start)
 
 	// Get data pointer offset by start
-	dataPtr := c.block.NewGetElementPtr(strInstanceType, typedPtr,
+	dataPtr := c.block.NewGetElementPtr(instType, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
 		constant.NewInt(irtypes.I32, 0))
 	sliceDataPtr := c.block.NewGetElementPtr(irtypes.I8, dataPtr, start)
@@ -4472,17 +4486,11 @@ func (c *Compiler) genStringIndex(e *ast.IndexExpr) value.Value {
 	strPtr := c.genExpr(e.Target)
 	idx := c.genExpr(e.Index)
 
-	strInstanceType := irtypes.NewStruct(
-		irtypes.I8Ptr,                   // _variant
-		irtypes.I64,                     // len
-		irtypes.NewArray(0, irtypes.I8), // data (flexible array)
-	)
-	typedPtr := c.block.NewBitCast(strPtr, irtypes.NewPointer(strInstanceType))
+	instType := strInstanceType()
+	typedPtr := c.block.NewBitCast(strPtr, irtypes.NewPointer(instType))
 
-	// Load len for bounds check
-	lenPtr := c.block.NewGetElementPtr(strInstanceType, typedPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	length := c.block.NewLoad(irtypes.I64, lenPtr)
+	// Load len for bounds check (masking off literal flag)
+	length := loadStringLen(c.block, typedPtr, instType)
 
 	// Bounds check (unsigned comparison handles negative indices too)
 	inBounds := c.block.NewICmp(enum.IPredULT, idx, length)
@@ -4498,7 +4506,7 @@ func (c *Compiler) genStringIndex(e *ast.IndexExpr) value.Value {
 
 	// In bounds: load byte, zero-extend to i32 (char)
 	c.block = okBlock
-	dataPtr := c.block.NewGetElementPtr(strInstanceType, typedPtr,
+	dataPtr := c.block.NewGetElementPtr(instType, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
 		constant.NewInt(irtypes.I32, 0))
 	bytePtr := c.block.NewGetElementPtr(irtypes.I8, dataPtr, idx)

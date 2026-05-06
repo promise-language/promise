@@ -100,10 +100,8 @@ func (c *Compiler) extractStringDataLen(block *ir.Block, strParam value.Value) (
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 	instPtr := block.NewLoad(instPtrType, instPtrPtr)
 
-	// GEP to instance field 1 (len), load i64
-	lenPtr := block.NewGetElementPtr(instType, instPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	dataLen = block.NewLoad(irtypes.I64, lenPtr)
+	// Load string length (masking off the literal flag bit)
+	dataLen = loadStringLen(block, instPtr, instType)
 
 	// GEP to instance field 2 (data), index 0 → i8*
 	dataPtr = block.NewGetElementPtr(instType, instPtr,
@@ -122,10 +120,8 @@ func (c *Compiler) extractStringDataLenFromInstance(block *ir.Block, instRaw val
 	// Bitcast i8* → %promise_string_i*
 	instPtr := block.NewBitCast(instRaw, irtypes.NewPointer(instType))
 
-	// GEP to instance field 1 (len), load i64
-	lenPtr := block.NewGetElementPtr(instType, instPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	dataLen = block.NewLoad(irtypes.I64, lenPtr)
+	// Load string length (masking off the literal flag bit)
+	dataLen = loadStringLen(block, instPtr, instType)
 
 	// GEP to instance field 2 (data), index 0 → i8*
 	dataPtr = block.NewGetElementPtr(instType, instPtr,

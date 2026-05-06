@@ -315,10 +315,11 @@ func (c *Compiler) typeAlign(typ irtypes.Type) int {
 type scopeBindingKind int
 
 const (
-	bindingClose     scopeBindingKind = iota // use-bound: call close() at scope exit
-	bindingDrop                              // droppable: call drop() at scope exit
-	bindingFreeEnv                           // closure env: free env pointer at scope exit
-	bindingGenerator                         // generator: destroy coroutine + free yield slot at scope exit
+	bindingClose      scopeBindingKind = iota // use-bound: call close() at scope exit
+	bindingDrop                               // droppable: call drop() at scope exit
+	bindingDropString                         // string: call promise_string_drop (alloca is i8*, not value struct)
+	bindingFreeEnv                            // closure env: free env pointer at scope exit
+	bindingGenerator                          // generator: destroy coroutine + free yield slot at scope exit
 )
 
 // scopeBinding tracks a variable that needs cleanup at scope exit.
@@ -997,9 +998,10 @@ func (c *Compiler) declareIntrinsics() {
 		ir.NewParam("len", irtypes.I64),
 		ir.NewParam("isvolatile", irtypes.I1))
 
-	// String new/concat (codegen-emitted LLVM IR, replaces C runtime)
+	// String new/concat/drop (codegen-emitted LLVM IR, replaces C runtime)
 	c.defineStringNewFunc()
 	c.defineStringConcatFunc()
+	c.defineStringDropFunc()
 
 	// Memcmp — used by string equality, vector contains, and string split
 	if c.isWasm {
@@ -1301,6 +1303,60 @@ func (c *Compiler) emitMulti3() {
 	entry.NewRet(result)
 }
 
+// strInstanceType returns the canonical string instance struct type.
+// String instance layout: { i8* _variant, i64 len, [0 x i8] data }
+func strInstanceType() *irtypes.StructType {
+	return irtypes.NewStruct(
+		irtypes.I8Ptr,                   // _variant
+		irtypes.I64,                     // len (sign bit = literal flag)
+		irtypes.NewArray(0, irtypes.I8), // data (flexible array)
+	)
+}
+
+// stringLenMask is 0x7FFFFFFFFFFFFFFF — masks off the literal flag (sign bit).
+var stringLenMask = constant.NewInt(irtypes.I64, 0x7FFFFFFFFFFFFFFF)
+
+// loadStringLenRaw loads the raw i64 length field from a typed string instance
+// pointer, with the literal flag bit intact.
+func loadStringLenRaw(b *ir.Block, typedPtr value.Value, instType irtypes.Type) value.Value {
+	lenPtr := b.NewGetElementPtr(instType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	return b.NewLoad(irtypes.I64, lenPtr)
+}
+
+// loadStringLen loads the string length with the literal flag (sign bit) masked off.
+func loadStringLen(b *ir.Block, typedPtr value.Value, instType irtypes.Type) value.Value {
+	raw := loadStringLenRaw(b, typedPtr, instType)
+	return b.NewAnd(raw, stringLenMask)
+}
+
+// defineStringDropFunc emits an LLVM IR function that conditionally frees a
+// string instance. Literal strings (sign bit set in len field) are in .rodata
+// and must not be freed. Heap-allocated strings (positive len) are freed via pal_free.
+func (c *Compiler) defineStringDropFunc() {
+	ptrParam := ir.NewParam("ptr", irtypes.I8Ptr)
+	fn := c.module.NewFunc("promise_string_drop", irtypes.Void, ptrParam)
+
+	instType := strInstanceType()
+
+	entry := fn.NewBlock(".entry")
+	typedPtr := entry.NewBitCast(ptrParam, irtypes.NewPointer(instType))
+	rawLen := loadStringLenRaw(entry, typedPtr, instType)
+
+	// If sign bit is set (negative), it's a literal in .rodata — don't free
+	isLiteral := entry.NewICmp(enum.IPredSLT, rawLen, constant.NewInt(irtypes.I64, 0))
+	freeBlk := fn.NewBlock("free")
+	doneBlk := fn.NewBlock("done")
+	entry.NewCondBr(isLiteral, doneBlk, freeBlk)
+
+	freeBlk.NewCall(c.palFree, ptrParam)
+	freeBlk.NewBr(doneBlk)
+
+	doneBlk.NewRet(nil)
+
+	c.funcs["promise_string_drop"] = fn
+}
+
 // defineStringNewFunc emits an LLVM IR function that allocates and initializes
 // a string instance. Replaces the C runtime promise_string_new.
 // Allocates header (16 bytes) + data, copies data via @llvm.memcpy intrinsic.
@@ -1388,18 +1444,14 @@ func (c *Compiler) defineStringConcatFunc() {
 	oomGlobal.Immutable = true
 	oomGlobal.Linkage = enum.LinkagePrivate
 
-	// entry: load lengths, compute total, allocate, null-check
+	// entry: load lengths (masking off literal flag), compute total, allocate, null-check
 	entry := fn.NewBlock(".entry")
 
 	typedA := entry.NewBitCast(aParam, irtypes.NewPointer(strInstanceType))
-	lenPtrA := entry.NewGetElementPtr(strInstanceType, typedA,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	lenA := entry.NewLoad(irtypes.I64, lenPtrA)
+	lenA := loadStringLen(entry, typedA, strInstanceType)
 
 	typedB := entry.NewBitCast(bParam, irtypes.NewPointer(strInstanceType))
-	lenPtrB := entry.NewGetElementPtr(strInstanceType, typedB,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	lenB := entry.NewLoad(irtypes.I64, lenPtrB)
+	lenB := loadStringLen(entry, typedB, strInstanceType)
 
 	total := entry.NewAdd(lenA, lenB)
 	allocSize := entry.NewAdd(headerSize, total)
@@ -1477,16 +1529,12 @@ func (c *Compiler) defineStringDirectEqFunc() {
 
 	samePtrBlk.NewRet(trueVal)
 
-	// Compare lengths
+	// Compare lengths (masking off literal flag)
 	typedA := checkLenBlk.NewBitCast(aParam, irtypes.NewPointer(strInstanceType))
-	lenPtrA := checkLenBlk.NewGetElementPtr(strInstanceType, typedA,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	lenA := checkLenBlk.NewLoad(irtypes.I64, lenPtrA)
+	lenA := loadStringLen(checkLenBlk, typedA, strInstanceType)
 
 	typedB := checkLenBlk.NewBitCast(bParam, irtypes.NewPointer(strInstanceType))
-	lenPtrB := checkLenBlk.NewGetElementPtr(strInstanceType, typedB,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	lenB := checkLenBlk.NewLoad(irtypes.I64, lenPtrB)
+	lenB := loadStringLen(checkLenBlk, typedB, strInstanceType)
 
 	lenEq := checkLenBlk.NewICmp(enum.IPredEQ, lenA, lenB)
 	lenNeqBlk := fn.NewBlock("len_neq")
@@ -1543,15 +1591,13 @@ func (c *Compiler) defineStringCompareFunc() {
 
 	samePtrBlk.NewRet(ci32(0))
 
-	// Load lengths and data pointers
+	// Load lengths (masking off literal flag) and data pointers
 	typedA := loadBlk.NewBitCast(aParam, irtypes.NewPointer(strInstanceType))
-	lenPtrA := loadBlk.NewGetElementPtr(strInstanceType, typedA, ci32(0), ci32(1))
-	lenA := loadBlk.NewLoad(irtypes.I64, lenPtrA)
+	lenA := loadStringLen(loadBlk, typedA, strInstanceType)
 	dataPtrA := loadBlk.NewGetElementPtr(strInstanceType, typedA, ci32(0), ci32(2), ci32(0))
 
 	typedB := loadBlk.NewBitCast(bParam, irtypes.NewPointer(strInstanceType))
-	lenPtrB := loadBlk.NewGetElementPtr(strInstanceType, typedB, ci32(0), ci32(1))
-	lenB := loadBlk.NewLoad(irtypes.I64, lenPtrB)
+	lenB := loadStringLen(loadBlk, typedB, strInstanceType)
 	dataPtrB := loadBlk.NewGetElementPtr(strInstanceType, typedB, ci32(0), ci32(2), ci32(0))
 
 	// minLen = min(lenA, lenB)
@@ -1617,10 +1663,9 @@ func (c *Compiler) defineStringCaseFunc(name string, rangeStart, rangeEnd byte, 
 
 	entry := fn.NewBlock(".entry")
 
-	// Load length and data pointer
+	// Load length (masking off literal flag) and data pointer
 	typedS := entry.NewBitCast(sParam, irtypes.NewPointer(strInstanceType))
-	lenPtr := entry.NewGetElementPtr(strInstanceType, typedS, ci32(0), ci32(1))
-	sLen := entry.NewLoad(irtypes.I64, lenPtr)
+	sLen := loadStringLen(entry, typedS, strInstanceType)
 	sDataPtr := entry.NewGetElementPtr(strInstanceType, typedS, ci32(0), ci32(2), ci32(0))
 
 	// Create new string: promise_string_new(data, len) — copies bytes
@@ -1686,10 +1731,9 @@ func (c *Compiler) defineStringRepeatFunc() {
 
 	entry := fn.NewBlock(".entry")
 
-	// Load source length and data pointer
+	// Load source length (masking off literal flag) and data pointer
 	typedS := entry.NewBitCast(sParam, irtypes.NewPointer(strInstanceType))
-	lenPtr := entry.NewGetElementPtr(strInstanceType, typedS, ci32(0), ci32(1))
-	sLen := entry.NewLoad(irtypes.I64, lenPtr)
+	sLen := loadStringLen(entry, typedS, strInstanceType)
 	sDataPtr := entry.NewGetElementPtr(strInstanceType, typedS, ci32(0), ci32(2), ci32(0))
 
 	// If n <= 0 or sLen == 0, return empty string (reuse promise_string_new with len=0)
@@ -1756,12 +1800,10 @@ func (c *Compiler) defineStringTrimFunc() {
 	zero64 := constant.NewInt(irtypes.I64, 0)
 	one64 := constant.NewInt(irtypes.I64, 1)
 
-	// entry: load len, get data pointer, alloca start/end
+	// entry: load len (masking off literal flag), get data pointer, alloca start/end
 	entry := fn.NewBlock(".entry")
 	typedS := entry.NewBitCast(sParam, irtypes.NewPointer(strInstanceType))
-	lenPtr := entry.NewGetElementPtr(strInstanceType, typedS,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	sLen := entry.NewLoad(irtypes.I64, lenPtr)
+	sLen := loadStringLen(entry, typedS, strInstanceType)
 	dataPtr := entry.NewGetElementPtr(strInstanceType, typedS,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
 		constant.NewInt(irtypes.I32, 0))
@@ -1874,21 +1916,17 @@ func (c *Compiler) defineStringSplitFunc() {
 	oomGlobal.Immutable = true
 	oomGlobal.Linkage = enum.LinkagePrivate
 
-	// entry: load string fields, set up allocas
+	// entry: load string fields (masking off literal flag), set up allocas
 	entry := fn.NewBlock(".entry")
 
 	typedS := entry.NewBitCast(sParam, irtypes.NewPointer(strInstanceType))
-	sLenPtr := entry.NewGetElementPtr(strInstanceType, typedS,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	sLen := entry.NewLoad(irtypes.I64, sLenPtr)
+	sLen := loadStringLen(entry, typedS, strInstanceType)
 	sDataPtr := entry.NewGetElementPtr(strInstanceType, typedS,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
 		constant.NewInt(irtypes.I32, 0))
 
 	typedSep := entry.NewBitCast(sepParam, irtypes.NewPointer(strInstanceType))
-	sepLenPtr := entry.NewGetElementPtr(strInstanceType, typedSep,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	sepLen := entry.NewLoad(irtypes.I64, sepLenPtr)
+	sepLen := loadStringLen(entry, typedSep, strInstanceType)
 	sepDataPtr := entry.NewGetElementPtr(strInstanceType, typedSep,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
 		constant.NewInt(irtypes.I32, 0))
@@ -2077,13 +2115,11 @@ func (c *Compiler) defineStringNextCharFunc() {
 
 	one32 := constant.NewInt(irtypes.I32, 1)
 
-	// entry: load len, data pointer, *pos, allocas for cp/n/loopI
+	// entry: load len (masking off literal flag), data pointer, *pos, allocas for cp/n/loopI
 	entry := fn.NewBlock(".entry")
 
 	typedS := entry.NewBitCast(sParam, irtypes.NewPointer(strInstanceType))
-	sLenPtr := entry.NewGetElementPtr(strInstanceType, typedS,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	sLen := entry.NewLoad(irtypes.I64, sLenPtr)
+	sLen := loadStringLen(entry, typedS, strInstanceType)
 	sDataPtr := entry.NewGetElementPtr(strInstanceType, typedS,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
 		constant.NewInt(irtypes.I32, 0))
@@ -2229,11 +2265,9 @@ func (c *Compiler) defineStringHashFunc() {
 	// Null → return 0
 	nullBlk.NewRet(zero64)
 
-	// Init: load len and data pointer, set up loop variables
+	// Init: load len (masking off literal flag) and data pointer, set up loop variables
 	typedPtr := initBlk.NewBitCast(ptrParam, irtypes.NewPointer(strInstanceType))
-	lenPtr := initBlk.NewGetElementPtr(strInstanceType, typedPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	strLen := initBlk.NewLoad(irtypes.I64, lenPtr)
+	strLen := loadStringLen(initBlk, typedPtr, strInstanceType)
 	dataPtr := initBlk.NewGetElementPtr(strInstanceType, typedPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2),
 		constant.NewInt(irtypes.I32, 0))
@@ -2320,16 +2354,12 @@ func (c *Compiler) defineStringEqFunc() {
 
 	nullBlk.NewRet(zero32)
 
-	// Compare lengths
+	// Compare lengths (masking off literal flag)
 	typedA := checkLenBlk.NewBitCast(pa, irtypes.NewPointer(strInstanceType))
-	lenPtrA := checkLenBlk.NewGetElementPtr(strInstanceType, typedA,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	lenA := checkLenBlk.NewLoad(irtypes.I64, lenPtrA)
+	lenA := loadStringLen(checkLenBlk, typedA, strInstanceType)
 
 	typedB := checkLenBlk.NewBitCast(pb, irtypes.NewPointer(strInstanceType))
-	lenPtrB := checkLenBlk.NewGetElementPtr(strInstanceType, typedB,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	lenB := checkLenBlk.NewLoad(irtypes.I64, lenPtrB)
+	lenB := loadStringLen(checkLenBlk, typedB, strInstanceType)
 
 	lenEq := checkLenBlk.NewICmp(enum.IPredEQ, lenA, lenB)
 	lenNeqBlk := fn.NewBlock("len_neq")

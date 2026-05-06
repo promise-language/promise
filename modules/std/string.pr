@@ -184,6 +184,7 @@ type string `native `public {
 
   get hash int `native;
   get is_empty bool => this.len == 0;
+  get is_literal bool `native `doc("Returns true if this string is a compile-time literal stored in .rodata (not heap-allocated).");
   to_string() string `public => this;
   format(Writer ~w)! `public {
     w.write_string(this);

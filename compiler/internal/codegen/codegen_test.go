@@ -955,10 +955,9 @@ func TestStringLiteral(t *testing.T) {
 		print_string(string s) `+"`"+`extern("promise_print_string");
 		main() { print_string("hello"); }
 	`)
-	// Global string constant
+	// Static string instance global in .rodata (not heap-allocated)
 	assertContains(t, ir, `c"hello"`)
-	// Call to promise_string_new
-	assertContains(t, ir, "call i8* @promise_string_new(")
+	assertContains(t, ir, "private constant { i8*, i64, [5 x i8] }")
 	// Packing into value struct
 	assertContains(t, ir, "insertvalue %promise_string_v")
 	// Call to extern
@@ -969,8 +968,8 @@ func TestStringVariable(t *testing.T) {
 	ir := generateIR(t, `main() { s := "hello"; }`)
 	// Alloca for i8* (string pointer)
 	assertContains(t, ir, "alloca i8*")
-	// Call to promise_string_new
-	assertContains(t, ir, "call i8* @promise_string_new(")
+	// Static string instance bitcast (no promise_string_new call for literals)
+	assertContains(t, ir, "bitcast { i8*, i64, [5 x i8] }*")
 	// Store i8* into alloca
 	assertContains(t, ir, "store i8*")
 }
@@ -1138,6 +1137,38 @@ func TestStringIntrinsicsDeclared(t *testing.T) {
 	assertContains(t, ir, "define i8* @promise_string_new(i8* %data, i64 %len)")
 	assertContains(t, ir, "define i8* @promise_string_concat(i8* %a, i8* %b)")
 	assertContains(t, ir, "define i1 @promise_string_eq(i8* %a, i8* %b)")
+	assertContains(t, ir, "define void @promise_string_drop(i8* %ptr)")
+}
+
+func TestStringLiteralStaticGlobal(t *testing.T) {
+	ir := generateIR(t, `main() { s := "hello"; }`)
+	// Static string instance in .rodata: { i8* null, i64 literalLen, [5 x i8] c"hello" }
+	assertContains(t, ir, "private constant { i8*, i64, [5 x i8] }")
+	assertContains(t, ir, `c"hello"`)
+	// Bitcast global to i8* — no promise_string_new call for literals
+	assertContains(t, ir, "bitcast { i8*, i64, [5 x i8] }*")
+}
+
+func TestStringLiteralNegativeLength(t *testing.T) {
+	ir := generateIR(t, `main() { s := "hi"; }`)
+	// Length field should be negative (literal flag = sign bit set)
+	// "hi" is 2 bytes, so literalLen = 2 | (1<<63) = -9223372036854775806
+	assertContains(t, ir, "i64 -9223372036854775806")
+}
+
+func TestStringLenMasksLiteralBit(t *testing.T) {
+	ir := generateIR(t, `main() { s := "ab"; x := s.len; }`)
+	// Length read should mask off sign bit: and i64 %raw, 0x7FFFFFFFFFFFFFFF
+	assertContains(t, ir, "and i64")
+	assertContains(t, ir, "u0x7FFFFFFFFFFFFFFF")
+}
+
+func TestStringDropFuncBody(t *testing.T) {
+	ir := generateIR(t, `main() { s := "x"; }`)
+	// promise_string_drop checks sign bit then conditionally frees
+	assertContains(t, ir, "define void @promise_string_drop(i8* %ptr)")
+	assertContains(t, ir, "icmp slt i64")
+	assertContains(t, ir, "call void @pal_free(")
 }
 
 func TestStringNewFuncBody(t *testing.T) {

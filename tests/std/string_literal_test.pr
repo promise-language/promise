@@ -1,0 +1,95 @@
+// Tests for static string literals (T0060)
+// String literals are stored directly in .rodata with negative length (sign bit set).
+// Heap-allocated strings (from concat, to_string, etc.) have positive length.
+test_literal_is_literal() `test {
+  assert("hello".is_literal, "string literal");
+  assert("".is_literal, "empty literal");
+  assert("a longer string with spaces".is_literal, "long literal");
+}
+
+test_concat_is_not_literal() `test {
+  string a = "hello";
+  string b = " world";
+  string c = a + b;
+  assert(!c.is_literal, "concat not literal");
+}
+
+test_heap_string_is_not_literal() `test {
+  assert(!42.to_string().is_literal, "int to_string");
+  assert(!true.to_string().is_literal, "bool to_string");
+  assert(!3.14.to_string().is_literal, "f64 to_string");
+}
+
+test_literal_len() `test {
+  assert("".len == 0, "empty len");
+  assert("a".len == 1, "single char len");
+  assert("hello".len == 5, "hello len");
+  assert("hello world".len == 11, "hello world len");
+}
+
+test_literal_indexing() `test {
+  string s = "abc";
+  assert(s[0] == 'a', "index 0");
+  assert(s[1] == 'b', "index 1");
+  assert(s[2] == 'c', "index 2");
+}
+
+test_literal_slicing() `test {
+  string s = "hello world";
+  assert(s[0:5] == "hello", "slice 0:5");
+  assert(s[6:11] == "world", "slice 6:11");
+  assert(s[6:] == "world", "slice 6:");
+  assert(s[:5] == "hello", "slice :5");
+}
+
+test_literal_equality() `test {
+  assert("hello" == "hello", "equal literals");
+  assert("hello" != "world", "different literals");
+  assert("" == "", "empty literals");
+}
+
+test_literal_concat_with_heap() `test {
+  string lit = "hello";
+  string heap = 42.to_string();
+  string result = lit + heap;
+  assert(result == "hello42", "concat result");
+  assert(!result.is_literal, "concat not literal");
+  assert(lit.is_literal, "original still literal");
+}
+
+test_literal_methods() `test {
+  assert("hello".contains("ell"), "contains");
+  assert("hello".starts_with("hel"), "starts_with");
+  assert("hello".ends_with("llo"), "ends_with");
+  assert("hello world".split(" ").len == 2, "split len");
+  assert("  hello  ".trim() == "hello", "trim");
+}
+
+test_literal_comparison() `test {
+  assert("abc" < "abd", "less than");
+  assert("abc" <= "abc", "less or equal");
+  assert("abd" > "abc", "greater than");
+  assert("abc" >= "abc", "greater or equal");
+}
+
+test_literal_hash() `test {
+  assert("hello".hash == "hello".hash, "same hash");
+  assert("hello".hash != "world".hash, "different hash");
+}
+
+test_literal_repeat() `test {
+  assert("ab".repeat(3) == "ababab", "repeat");
+  assert("ab".repeat(3).is_literal == false, "repeat not literal");
+}
+
+test_literal_to_upper_lower() `test {
+  assert("hello".to_upper() == "HELLO", "to_upper");
+  assert("HELLO".to_lower() == "hello", "to_lower");
+}
+
+test_literal_bytes() `test {
+  u8[] b = "hi".bytes();
+  assert(b.len == 2, "bytes len");
+  assert(b[0] == 104, "byte h");
+  assert(b[1] == 105, "byte i");
+}

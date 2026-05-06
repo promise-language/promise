@@ -478,9 +478,19 @@ func (c *Compiler) genUseVarDecl(s *ast.UseVarDecl) {
 // maybeRegisterDrop checks if a variable's type has a drop() method and, if so,
 // registers a drop binding: allocates a drop flag (i1, initially true), resolves
 // the drop function, and appends a scopeBinding.
+// Strings are special: they use promise_string_drop (checks literal flag before freeing).
 func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ types.Type) {
 	named := extractNamed(typ)
-	if named == nil || !named.HasDrop() {
+	if named == nil {
+		return
+	}
+
+	// NOTE: String drop is not yet enabled. promise_string_drop is defined
+	// (checks literal flag before freeing), but registering drop bindings for
+	// strings requires the ownership system to properly track string moves in
+	// all std module code. This will be done in a follow-up task.
+
+	if !named.HasDrop() {
 		return
 	}
 
@@ -554,6 +564,8 @@ func (c *Compiler) emitScopeCleanup(fromIdx int, errorInFlight bool) *closeErrCa
 			c.emitCloseCall(b, cap)
 		case bindingDrop:
 			c.emitDropCall(b)
+		case bindingDropString:
+			c.emitStringDropCall(b)
 		case bindingFreeEnv:
 			c.emitEnvFree(b)
 		case bindingGenerator:
@@ -643,7 +655,12 @@ func (c *Compiler) emitCloseErrCheck(cap *closeErrCapture) {
 
 // emitDropCall emits a conditional drop() call for a droppable variable.
 // Checks the drop flag; if true (not moved), calls drop().
+// Dispatches to emitStringDropCall for bindingDropString bindings.
 func (c *Compiler) emitDropCall(b scopeBinding) {
+	if b.kind == bindingDropString {
+		c.emitStringDropCall(b)
+		return
+	}
 	if b.dropFlag == nil {
 		// No drop flag — unconditional drop
 		c.emitDropCallDirect(b)
@@ -698,6 +715,38 @@ func (c *Compiler) emitDropCallDirect(b scopeBinding) {
 	c.block.NewBr(dropDoneBlock)
 
 	c.block = dropDoneBlock
+}
+
+// emitStringDropCall emits a conditional promise_string_drop call for a string variable.
+// String allocas store raw i8* (instance pointer), not a value struct — so we load
+// the i8* directly and pass it to promise_string_drop (which checks the literal flag).
+func (c *Compiler) emitStringDropCall(b scopeBinding) {
+	if b.dropFlag == nil {
+		panic("codegen: string drop binding must have a drop flag")
+	}
+
+	flag := c.block.NewLoad(irtypes.I1, b.dropFlag)
+	dropBlock := c.newBlock("strdrop.call")
+	skipBlock := c.newBlock("strdrop.skip")
+	c.block.NewCondBr(flag, dropBlock, skipBlock)
+
+	c.block = dropBlock
+	ptr := c.block.NewLoad(b.alloca.ElemType, b.alloca)
+
+	// Null-check: zero-initialized values from error handler fallthrough
+	nullCheck := c.block.NewICmp(enum.IPredEQ, ptr, constant.NewNull(irtypes.I8Ptr))
+	execBlock := c.newBlock("strdrop.exec")
+	doneBlock := c.newBlock("strdrop.done")
+	c.block.NewCondBr(nullCheck, doneBlock, execBlock)
+
+	c.block = execBlock
+	c.block.NewCall(b.dropFunc, ptr)
+	c.block.NewBr(doneBlock)
+
+	c.block = doneBlock
+	c.block.NewBr(skipBlock)
+
+	c.block = skipBlock
 }
 
 // emitEnvFree frees a closure's env struct at scope exit.

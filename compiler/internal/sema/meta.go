@@ -93,6 +93,19 @@ func (c *Checker) validateMetas(annotations []*ast.MetaAnnotation, target MetaTa
 		if !targetAllowed(allowed, target) {
 			c.errorf(ann.Pos(), "meta `%s cannot be applied to %s", ann.Name, targetLabel(target))
 		}
+
+		// Check for duplicate named parameters within this annotation.
+		seenParams := make(map[string]bool)
+		for _, p := range ann.Params {
+			if p.Name == "" {
+				continue // positional params don't have names to conflict
+			}
+			if seenParams[p.Name] {
+				c.errorf(p.Pos(), "duplicate annotation parameter '%s' in `%s", p.Name, ann.Name)
+				continue
+			}
+			seenParams[p.Name] = true
+		}
 	}
 }
 

@@ -4938,6 +4938,31 @@ func TestMetaDuplicate(t *testing.T) {
 	expectError(t, errs, "duplicate meta annotation")
 }
 
+func TestMetaDuplicateParam(t *testing.T) {
+	errs := checkErrs(t, `
+		myTest() `+"`test(exclude: \"windows\", exclude: \"wasm32\")"+` {}
+	`)
+	expectError(t, errs, "duplicate annotation parameter 'exclude'")
+}
+
+func TestMetaDuplicateParamExpected(t *testing.T) {
+	errs := checkErrs(t, `
+		main() `+"`test(expected: \"hello\", expected: \"world\")"+` {
+			print_line("hello");
+		}
+	`)
+	expectError(t, errs, "duplicate annotation parameter 'expected'")
+}
+
+func TestMetaNoDuplicatePositional(t *testing.T) {
+	// Positional params (empty name) should not trigger the duplicate check.
+	checkOK(t, `
+		type T {
+			int x `+"`doc(\"first line\")"+`;
+		}
+	`)
+}
+
 // === Copy validation ===
 
 func TestCopyTypeAllPrimitiveFields(t *testing.T) {

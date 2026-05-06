@@ -1352,6 +1352,8 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			if ident, ok := s.Value.(*ast.IdentExpr); ok {
 				c.clearDropFlag(ident.Name)
 			}
+			// B0168: Claim string temp — ownership transferred to field.
+			c.claimStringTemp(val)
 		}
 
 	case *ast.IndexExpr:
@@ -1361,6 +1363,8 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			if ident, ok := s.Value.(*ast.IdentExpr); ok {
 				c.clearDropFlag(ident.Name)
 			}
+			// B0168: Claim string temp — ownership transferred to container.
+			c.claimStringTemp(val)
 		}
 		// Clear drop flag on index key if it's being stored (e.g., map[key] = val).
 		// The map takes ownership of the key pointer.

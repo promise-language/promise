@@ -2370,3 +2370,46 @@ func TestHasDropMethod(t *testing.T) {
 		t.Error("Instance of Named with drop should return true")
 	}
 }
+
+// === Select case channel expression borrow leak (B0103) ===
+
+func TestSelectCaseChannelBorrowDoesNotLeakIntoBody(t *testing.T) {
+	// B0103: borrows from the channel expression in a select case must be expired
+	// before the case body, so the body can re-borrow the same variables.
+	// Channel expr shared-borrows obj; body needs mutable borrow.
+	ownerOK(t, `
+		type Router {
+			channel[int] ch;
+			int count;
+			get_channel(&this) channel[int] { return this.ch; }
+			advance(~this) { this.count += 1; }
+		}
+		test() {
+			r := Router(ch: channel[int](), count: 0);
+			select {
+				v := <-r.get_channel():
+					r.advance();
+			}
+		}
+	`)
+}
+
+func TestSelectCaseSendBorrowDoesNotLeakIntoBody(t *testing.T) {
+	// B0103 variant: send case with method call on channel expression.
+	// Channel expr shared-borrows obj; body needs mutable borrow.
+	ownerOK(t, `
+		type Sender {
+			channel[int] ch;
+			int count;
+			get_channel(&this) channel[int] { return this.ch; }
+			advance(~this) { this.count += 1; }
+		}
+		test() {
+			s := Sender(ch: channel[int](), count: 0);
+			select {
+				s.get_channel().send(42):
+					s.advance();
+			}
+		}
+	`)
+}

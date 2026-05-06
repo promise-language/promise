@@ -393,6 +393,11 @@ func (c *Checker) checkSelectStmt(s *ast.SelectStmt) {
 			c.checkExpr(sc.SendValue)
 			c.tryMove(sc.SendValue)
 		}
+		// Expire call-scoped borrows from channel/send expressions so the case
+		// body can re-borrow the same variables (B0103).
+		if c.borrows != nil {
+			c.borrows.ExpireCallScoped()
+		}
 		if !sc.IsSend && sc.Binding != "_" {
 			c.state[sc.Binding] = Owned
 		}

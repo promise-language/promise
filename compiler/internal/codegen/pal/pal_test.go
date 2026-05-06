@@ -2559,6 +2559,114 @@ func TestEmitKillPosix(t *testing.T) {
 	assertContains(t, out, "call i32 @kill(i32 %pid, i32 %signal)", "calls kill()")
 }
 
+// --- Windows Process Execution Tests ---
+
+func TestEmitSpawnWindows(t *testing.T) {
+	p := &WindowsPAL{}
+	module := newModuleWithAlloc(p)
+	p.EmitFree(module)
+	p.EmitSpawn(module)
+	out := module.String()
+
+	// Verify command line builder is emitted
+	assertContains(t, out, "define i8* @__promise_argv_to_cmdline(i8** %argv)", "emits argv_to_cmdline helper")
+	// Verify CreateProcessA and pipe APIs
+	assertContains(t, out, "@CreatePipe(", "declares CreatePipe")
+	assertContains(t, out, "@CreateProcessA(", "declares CreateProcessA")
+	assertContains(t, out, "@SetHandleInformation(", "declares SetHandleInformation")
+	assertContains(t, out, "@CloseHandle(", "declares CloseHandle")
+	// Verify STARTUPINFOA setup (STARTF_USESTDHANDLES = 0x100 = 256)
+	assertContains(t, out, "i32 256", "sets STARTF_USESTDHANDLES flag")
+	// Verify handle packing: ptrtoint + trunc
+	assertContains(t, out, "ptrtoint i8*", "packs handle to i64")
+	assertContains(t, out, "trunc i64", "truncates handle to i32")
+}
+
+func TestEmitReadPipeWindows(t *testing.T) {
+	p := &WindowsPAL{}
+	module := newModuleForReadPipe(p)
+	p.EmitReadPipe(module)
+	out := module.String()
+
+	assertContains(t, out, "define void @pal_read_pipe(i32 %fd,", "defines pal_read_pipe")
+	// Verify handle unpacking: sext + inttoptr
+	assertContains(t, out, "sext i32 %fd to i64", "sign-extends fd to i64")
+	assertContains(t, out, "inttoptr i64", "converts i64 to handle")
+	// Verify ReadFile call
+	assertContains(t, out, "call i32 @ReadFile(", "calls ReadFile")
+	// Verify buffer management
+	assertContains(t, out, "call i8* @pal_alloc(i64", "initial allocation")
+	assertContains(t, out, "mul i64", "doubles capacity")
+	assertContains(t, out, "call i8* @pal_realloc(", "reallocs on growth")
+	// Closes handle when done
+	assertContains(t, out, "call i32 @CloseHandle(", "closes handle when done")
+}
+
+func TestEmitWaitPidWindows(t *testing.T) {
+	p := &WindowsPAL{}
+	module := newModuleWithAlloc(p)
+	p.EmitWaitPid(module)
+	out := module.String()
+
+	assertContains(t, out, "define i32 @pal_wait_pid(i32 %pid)", "defines pal_wait_pid")
+	// Handle unpacking
+	assertContains(t, out, "sext i32 %pid to i64", "sign-extends pid to i64")
+	assertContains(t, out, "inttoptr i64", "converts i64 to handle")
+	// Wait and get exit code
+	assertContains(t, out, "call i32 @WaitForSingleObject(", "calls WaitForSingleObject")
+	assertContains(t, out, "call i32 @GetExitCodeProcess(", "calls GetExitCodeProcess")
+	assertContains(t, out, "call i32 @CloseHandle(", "closes handle")
+}
+
+func TestEmitSpawnStreamingWindows(t *testing.T) {
+	p := &WindowsPAL{}
+	module := newModuleWithAlloc(p)
+	p.EmitFree(module)
+	p.EmitSpawnStreaming(module)
+	out := module.String()
+
+	assertContains(t, out, "define i32 @pal_spawn_streaming(i8* %program, i8** %argv,", "defines pal_spawn_streaming")
+	// Three pipes: stdin, stdout, stderr
+	if strings.Count(out, "call i32 @CreatePipe(") < 3 {
+		t.Error("expected at least 3 CreatePipe() calls for stdin/stdout/stderr")
+	}
+	assertContains(t, out, "@CreateProcessA(", "calls CreateProcessA")
+	assertContains(t, out, "@SetHandleInformation(", "marks handles non-inheritable")
+}
+
+func TestEmitKillWindows(t *testing.T) {
+	module := ir.NewModule()
+	p := &WindowsPAL{}
+	p.EmitKill(module)
+	out := module.String()
+
+	assertContains(t, out, "define i32 @pal_kill(i32 %pid, i32 %signal)", "defines pal_kill")
+	assertContains(t, out, "@TerminateProcess(", "declares TerminateProcess")
+	// Handle unpacking
+	assertContains(t, out, "sext i32 %pid to i64", "sign-extends pid to i64")
+	assertContains(t, out, "inttoptr i64", "converts i64 to handle")
+}
+
+func TestArgvToCmdline(t *testing.T) {
+	p := &WindowsPAL{}
+	module := newModuleWithAlloc(p)
+	p.EmitFree(module)
+	emitArgvToCmdline(module)
+	out := module.String()
+
+	assertContains(t, out, "define i8* @__promise_argv_to_cmdline(i8** %argv)", "defines argv_to_cmdline")
+	// Two-pass: size calculation then fill
+	assertContains(t, out, "call i8* @pal_alloc(", "allocates buffer")
+	// Quote handling: stores double-quote character (34 = 0x22)
+	if !strings.Contains(out, "i8 34") {
+		t.Error("expected i8 34 (double quote) in output")
+	}
+	// Backslash escape for internal quotes (92 = 0x5C)
+	if !strings.Contains(out, "i8 92") {
+		t.Error("expected i8 92 (backslash) for quote escaping")
+	}
+}
+
 // --- OS Info PAL Tests ---
 
 func TestEmitGetEnviron(t *testing.T) {

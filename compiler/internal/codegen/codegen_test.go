@@ -7257,7 +7257,8 @@ func TestChannelFieldInEnumVariant(t *testing.T) {
 	`)
 	// Data area must be [16 x i8] (channel as i8*), not [24 x i8] (channel as {i8*,i8*})
 	assertContains(t, ir, "%promise_Action_enum = type { i32, [16 x i8] }")
-	assertNotContains(t, ir, "[24 x i8]")
+	// The enum data area specifically must not use [24 x i8]
+	assertNotContains(t, ir, "%promise_Action_enum = type { i32, [24 x i8] }")
 }
 
 func TestGenericTypeWithChannelFieldLayout(t *testing.T) {

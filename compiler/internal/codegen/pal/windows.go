@@ -5,6 +5,7 @@ import (
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
+	"github.com/llir/llvm/ir/value"
 )
 
 // WindowsPAL implements PAL for Windows using Win32 API (kernel32.dll).
@@ -968,22 +969,764 @@ func (p *WindowsPAL) EmitChdir(module *ir.Module) *ir.Func {
 	return fn
 }
 
-// EmitSpawn returns -1 stub (not yet implemented on Windows).
-func (p *WindowsPAL) EmitSpawn(module *ir.Module) *ir.Func { return emitStubSpawn(module) }
+// --- Windows process execution via CreateProcessA + CreatePipe ---
+//
+// Windows HANDLEs are pointer-sized but kernel handles use only the low 32 bits
+// (upper bits are sign-extended on 64-bit). The PAL interface uses i32 for pid/fd,
+// so we pack HANDLEs via ptrtoint+trunc and unpack via sext+inttoptr.
 
-// EmitReadPipe stub (not yet implemented on Windows).
-func (p *WindowsPAL) EmitReadPipe(module *ir.Module) *ir.Func { return emitStubReadPipe(module) }
-
-// EmitWaitPid returns -1 stub (not yet implemented on Windows).
-func (p *WindowsPAL) EmitWaitPid(module *ir.Module) *ir.Func { return emitStubWaitPid(module) }
-
-// EmitSpawnStreaming returns -1 stub (not yet implemented on Windows).
-func (p *WindowsPAL) EmitSpawnStreaming(module *ir.Module) *ir.Func {
-	return emitStubSpawnStreaming(module)
+// winI32ToHandle emits: sext i32 %val to i64, then inttoptr i64 to i8*.
+func winI32ToHandle(blk *ir.Block, val value.Value) *ir.InstIntToPtr {
+	ext := blk.NewSExt(val, irtypes.I64)
+	return blk.NewIntToPtr(ext, irtypes.I8Ptr)
 }
 
-// EmitKill returns -1 stub (not yet implemented on Windows).
-func (p *WindowsPAL) EmitKill(module *ir.Module) *ir.Func { return emitStubKill(module) }
+// emitArgvToCmdline emits @__promise_argv_to_cmdline(i8** argv) → i8*
+// Builds a Windows command line string from a null-terminated argv array.
+// Each argument is double-quoted; internal double quotes are escaped with backslash.
+// Caller must free the returned string.
+func emitArgvToCmdline(module *ir.Module) *ir.Func {
+	if fn := lookupFunc(module, "__promise_argv_to_cmdline"); fn != nil {
+		return fn
+	}
+
+	palAlloc := lookupFunc(module, "pal_alloc")
+	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
+	zero64 := constant.NewInt(irtypes.I64, 0)
+	one64 := constant.NewInt(irtypes.I64, 1)
+
+	fn := module.NewFunc("__promise_argv_to_cmdline", irtypes.I8Ptr,
+		ir.NewParam("argv", i8PtrPtrType))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	// --- Pass 1: calculate total buffer size ---
+	// For each arg: 2 (quotes) + strlen + count of internal quotes (for escaping) + 1 (space)
+	// Plus 1 for null terminator.
+	entry := fn.NewBlock(".entry")
+	totalPtr := entry.NewAlloca(irtypes.I64)
+	entry.NewStore(one64, totalPtr) // 1 for null terminator
+	idxPtr := entry.NewAlloca(irtypes.I64)
+	entry.NewStore(zero64, idxPtr)
+	sizeLoop := fn.NewBlock(".size_loop")
+	entry.NewBr(sizeLoop)
+
+	// Load argv[idx]
+	sizeIdx := sizeLoop.NewLoad(irtypes.I64, idxPtr)
+	argSlotPtr := sizeLoop.NewGetElementPtr(irtypes.I8Ptr, fn.Params[0], sizeIdx)
+	argPtr := sizeLoop.NewLoad(irtypes.I8Ptr, argSlotPtr)
+	isNull := sizeLoop.NewICmp(enum.IPredEQ, argPtr, constant.NewNull(irtypes.I8Ptr))
+	sizeBody := fn.NewBlock(".size_body")
+	sizeDone := fn.NewBlock(".size_done")
+	sizeLoop.NewCondBr(isNull, sizeDone, sizeBody)
+
+	// Count: 3 (two quotes + space) + strlen of arg + number of internal quotes
+	// Inner loop to count string length and internal quotes
+	curTotal := sizeBody.NewLoad(irtypes.I64, totalPtr)
+	added := sizeBody.NewAdd(curTotal, constant.NewInt(irtypes.I64, 3)) // " " + space
+	sizeBody.NewStore(added, totalPtr)
+
+	charIdxPtr := sizeBody.NewAlloca(irtypes.I64)
+	sizeBody.NewStore(zero64, charIdxPtr)
+	charLoop := fn.NewBlock(".char_count_loop")
+	sizeBody.NewBr(charLoop)
+
+	charIdx := charLoop.NewLoad(irtypes.I64, charIdxPtr)
+	chPtr := charLoop.NewGetElementPtr(irtypes.I8, argPtr, charIdx)
+	ch := charLoop.NewLoad(irtypes.I8, chPtr)
+	isEnd := charLoop.NewICmp(enum.IPredEQ, ch, constant.NewInt(irtypes.I8, 0))
+	charBody := fn.NewBlock(".char_count_body")
+	charDone := fn.NewBlock(".char_count_done")
+	charLoop.NewCondBr(isEnd, charDone, charBody)
+
+	// Each char adds 1; if it's a double quote, add 1 more (for backslash escape)
+	isQuote := charBody.NewICmp(enum.IPredEQ, ch, constant.NewInt(irtypes.I8, '"'))
+	extra := charBody.NewZExt(isQuote, irtypes.I64)
+	inc := charBody.NewAdd(extra, one64)
+	t2 := charBody.NewLoad(irtypes.I64, totalPtr)
+	t3 := charBody.NewAdd(t2, inc)
+	charBody.NewStore(t3, totalPtr)
+	nextCharIdx := charBody.NewAdd(charIdx, one64)
+	charBody.NewStore(nextCharIdx, charIdxPtr)
+	charBody.NewBr(charLoop)
+
+	// Advance to next argv entry
+	nextIdx := charDone.NewAdd(sizeIdx, one64)
+	charDone.NewStore(nextIdx, idxPtr)
+	charDone.NewBr(sizeLoop)
+
+	// --- Pass 2: allocate buffer and fill ---
+	totalSize := sizeDone.NewLoad(irtypes.I64, totalPtr)
+	buf := sizeDone.NewCall(palAlloc, totalSize)
+	outPtr := sizeDone.NewAlloca(irtypes.I64)
+	sizeDone.NewStore(zero64, outPtr)
+	sizeDone.NewStore(zero64, idxPtr) // reset index
+	fillLoop := fn.NewBlock(".fill_loop")
+	sizeDone.NewBr(fillLoop)
+
+	fillIdx := fillLoop.NewLoad(irtypes.I64, idxPtr)
+	fillSlotPtr := fillLoop.NewGetElementPtr(irtypes.I8Ptr, fn.Params[0], fillIdx)
+	fillArgPtr := fillLoop.NewLoad(irtypes.I8Ptr, fillSlotPtr)
+	fillIsNull := fillLoop.NewICmp(enum.IPredEQ, fillArgPtr, constant.NewNull(irtypes.I8Ptr))
+	fillBody := fn.NewBlock(".fill_body")
+	fillDone := fn.NewBlock(".fill_done")
+	fillLoop.NewCondBr(fillIsNull, fillDone, fillBody)
+
+	// Add space separator if not first arg
+	isFirst := fillBody.NewICmp(enum.IPredEQ, fillIdx, zero64)
+	addSpace := fn.NewBlock(".add_space")
+	noSpace := fn.NewBlock(".no_space")
+	fillBody.NewCondBr(isFirst, noSpace, addSpace)
+
+	outPos1 := addSpace.NewLoad(irtypes.I64, outPtr)
+	spacePtr := addSpace.NewGetElementPtr(irtypes.I8, buf, outPos1)
+	addSpace.NewStore(constant.NewInt(irtypes.I8, ' '), spacePtr)
+	outPos1Inc := addSpace.NewAdd(outPos1, one64)
+	addSpace.NewStore(outPos1Inc, outPtr)
+	addSpace.NewBr(noSpace)
+
+	// Write opening quote
+	outPos2 := noSpace.NewLoad(irtypes.I64, outPtr)
+	quotePtr1 := noSpace.NewGetElementPtr(irtypes.I8, buf, outPos2)
+	noSpace.NewStore(constant.NewInt(irtypes.I8, '"'), quotePtr1)
+	outPos2Inc := noSpace.NewAdd(outPos2, one64)
+	noSpace.NewStore(outPos2Inc, outPtr)
+
+	// Copy chars, escaping internal quotes
+	fillCharIdxPtr := noSpace.NewAlloca(irtypes.I64)
+	noSpace.NewStore(zero64, fillCharIdxPtr)
+	copyLoop := fn.NewBlock(".copy_loop")
+	noSpace.NewBr(copyLoop)
+
+	fillCharIdx := copyLoop.NewLoad(irtypes.I64, fillCharIdxPtr)
+	fillChPtr := copyLoop.NewGetElementPtr(irtypes.I8, fillArgPtr, fillCharIdx)
+	fillCh := copyLoop.NewLoad(irtypes.I8, fillChPtr)
+	fillIsEnd := copyLoop.NewICmp(enum.IPredEQ, fillCh, constant.NewInt(irtypes.I8, 0))
+	copyBody := fn.NewBlock(".copy_body")
+	copyDone := fn.NewBlock(".copy_done")
+	copyLoop.NewCondBr(fillIsEnd, copyDone, copyBody)
+
+	// If char is double quote, write backslash first
+	fillIsQuote := copyBody.NewICmp(enum.IPredEQ, fillCh, constant.NewInt(irtypes.I8, '"'))
+	escapeBlk := fn.NewBlock(".escape_quote")
+	writeChar := fn.NewBlock(".write_char")
+	copyBody.NewCondBr(fillIsQuote, escapeBlk, writeChar)
+
+	escPos := escapeBlk.NewLoad(irtypes.I64, outPtr)
+	escDst := escapeBlk.NewGetElementPtr(irtypes.I8, buf, escPos)
+	escapeBlk.NewStore(constant.NewInt(irtypes.I8, '\\'), escDst)
+	escPosInc := escapeBlk.NewAdd(escPos, one64)
+	escapeBlk.NewStore(escPosInc, outPtr)
+	escapeBlk.NewBr(writeChar)
+
+	wcPos := writeChar.NewLoad(irtypes.I64, outPtr)
+	wcDst := writeChar.NewGetElementPtr(irtypes.I8, buf, wcPos)
+	writeChar.NewStore(fillCh, wcDst)
+	wcPosInc := writeChar.NewAdd(wcPos, one64)
+	writeChar.NewStore(wcPosInc, outPtr)
+	nextFillCharIdx := writeChar.NewAdd(fillCharIdx, one64)
+	writeChar.NewStore(nextFillCharIdx, fillCharIdxPtr)
+	writeChar.NewBr(copyLoop)
+
+	// Write closing quote
+	cdPos := copyDone.NewLoad(irtypes.I64, outPtr)
+	quotePtr2 := copyDone.NewGetElementPtr(irtypes.I8, buf, cdPos)
+	copyDone.NewStore(constant.NewInt(irtypes.I8, '"'), quotePtr2)
+	cdPosInc := copyDone.NewAdd(cdPos, one64)
+	copyDone.NewStore(cdPosInc, outPtr)
+
+	// Advance to next arg
+	nextFillIdx := copyDone.NewAdd(fillIdx, one64)
+	copyDone.NewStore(nextFillIdx, idxPtr)
+	copyDone.NewBr(fillLoop)
+
+	// Null-terminate
+	finalPos := fillDone.NewLoad(irtypes.I64, outPtr)
+	nullDst := fillDone.NewGetElementPtr(irtypes.I8, buf, finalPos)
+	fillDone.NewStore(constant.NewInt(irtypes.I8, 0), nullDst)
+	fillDone.NewRet(buf)
+
+	return fn
+}
+
+// winDeclareCreatePipe declares CreatePipe(i8**, i8**, i8*, i32) → i32
+func winDeclareCreatePipe(module *ir.Module) *ir.Func {
+	return getOrDeclareFunc(module, "CreatePipe", irtypes.I32,
+		ir.NewParam("hReadPipe", irtypes.NewPointer(irtypes.I8Ptr)),
+		ir.NewParam("hWritePipe", irtypes.NewPointer(irtypes.I8Ptr)),
+		ir.NewParam("lpPipeAttributes", irtypes.I8Ptr),
+		ir.NewParam("nSize", irtypes.I32))
+}
+
+// winDeclareSetHandleInformation declares SetHandleInformation(i8*, i32, i32) → i32
+func winDeclareSetHandleInformation(module *ir.Module) *ir.Func {
+	return getOrDeclareFunc(module, "SetHandleInformation", irtypes.I32,
+		ir.NewParam("hObject", irtypes.I8Ptr),
+		ir.NewParam("dwMask", irtypes.I32),
+		ir.NewParam("dwFlags", irtypes.I32))
+}
+
+// winDeclareCreateProcessA declares CreateProcessA with 10 params → i32
+func winDeclareCreateProcessA(module *ir.Module) *ir.Func {
+	return getOrDeclareFunc(module, "CreateProcessA", irtypes.I32,
+		ir.NewParam("lpApplicationName", irtypes.I8Ptr),
+		ir.NewParam("lpCommandLine", irtypes.I8Ptr),
+		ir.NewParam("lpProcessAttributes", irtypes.I8Ptr),
+		ir.NewParam("lpThreadAttributes", irtypes.I8Ptr),
+		ir.NewParam("bInheritHandles", irtypes.I32),
+		ir.NewParam("dwCreationFlags", irtypes.I32),
+		ir.NewParam("lpEnvironment", irtypes.I8Ptr),
+		ir.NewParam("lpCurrentDirectory", irtypes.I8Ptr),
+		ir.NewParam("lpStartupInfo", irtypes.I8Ptr),
+		ir.NewParam("lpProcessInformation", irtypes.I8Ptr))
+}
+
+// winDeclareCloseHandle declares CloseHandle(i8*) → i32
+func winDeclareCloseHandle(module *ir.Module) *ir.Func {
+	return getOrDeclareFunc(module, "CloseHandle", irtypes.I32,
+		ir.NewParam("hObject", irtypes.I8Ptr))
+}
+
+// winDeclareGetStdHandle declares GetStdHandle(i32) → i8*
+func winDeclareGetStdHandle(module *ir.Module) *ir.Func {
+	return getOrDeclareFunc(module, "GetStdHandle", irtypes.I8Ptr,
+		ir.NewParam("nStdHandle", irtypes.I32))
+}
+
+// STARTUPINFOA layout on x64:
+//   offset  0: cb (i32, 4 bytes)
+//   offset  8: lpReserved (i8*, 8 bytes)
+//   offset 16: lpDesktop (i8*, 8 bytes)
+//   offset 24: lpTitle (i8*, 8 bytes)
+//   offset 32: dwX (i32)
+//   offset 36: dwY (i32)
+//   offset 40: dwXSize (i32)
+//   offset 44: dwYSize (i32)
+//   offset 48: dwXCountChars (i32)
+//   offset 52: dwYCountChars (i32)
+//   offset 56: dwFillAttribute (i32)
+//   offset 60: dwFlags (i32)
+//   offset 64: wShowWindow (i16)
+//   offset 66: cbReserved2 (i16)
+//   offset 72: lpReserved2 (i8*, 8 bytes)
+//   offset 80: hStdInput (i8*, 8 bytes)
+//   offset 88: hStdOutput (i8*, 8 bytes)
+//   offset 96: hStdError (i8*, 8 bytes)
+//   total: 104 bytes
+const startupInfoSize = 104
+
+// SECURITY_ATTRIBUTES layout on x64:
+//   offset  0: nLength (i32, 4 bytes)
+//   offset  8: lpSecurityDescriptor (i8*, 8 bytes)
+//   offset 16: bInheritHandle (i32, 4 bytes)
+//   total: 24 bytes
+const securityAttrSize = 24
+
+// PROCESS_INFORMATION layout on x64:
+//   offset  0: hProcess (i8*, 8 bytes)
+//   offset  8: hThread (i8*, 8 bytes)
+//   offset 16: dwProcessId (i32)
+//   offset 20: dwThreadId (i32)
+//   total: 24 bytes
+const processInfoSize = 24
+
+// winEmitMemset declares and calls memset to zero a stack-allocated struct.
+func winEmitMemset(module *ir.Module, blk *ir.Block, ptr value.Value, size int64) {
+	memset := getOrDeclareFunc(module, "memset", irtypes.I8Ptr,
+		ir.NewParam("dest", irtypes.I8Ptr),
+		ir.NewParam("c", irtypes.I32),
+		ir.NewParam("n", irtypes.I64))
+	p := blk.NewBitCast(ptr, irtypes.I8Ptr)
+	blk.NewCall(memset, p, constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I64, size))
+}
+
+// winStoreI32AtOffset stores an i32 value at a byte offset into a struct via i8* GEP.
+func winStoreI32AtOffset(blk *ir.Block, base value.Value, offset int64, val value.Value) {
+	baseI8 := blk.NewBitCast(base, irtypes.I8Ptr)
+	ptr := blk.NewGetElementPtr(irtypes.I8, baseI8, constant.NewInt(irtypes.I64, offset))
+	i32Ptr := blk.NewBitCast(ptr, irtypes.NewPointer(irtypes.I32))
+	blk.NewStore(val, i32Ptr)
+}
+
+// winStoreI8PtrAtOffset stores an i8* value at a byte offset into a struct.
+func winStoreI8PtrAtOffset(blk *ir.Block, base value.Value, offset int64, val value.Value) {
+	baseI8 := blk.NewBitCast(base, irtypes.I8Ptr)
+	ptr := blk.NewGetElementPtr(irtypes.I8, baseI8, constant.NewInt(irtypes.I64, offset))
+	ptrPtr := blk.NewBitCast(ptr, irtypes.NewPointer(irtypes.I8Ptr))
+	blk.NewStore(val, ptrPtr)
+}
+
+// winLoadI8PtrAtOffset loads an i8* value from a byte offset in a struct.
+func winLoadI8PtrAtOffset(blk *ir.Block, base value.Value, offset int64) *ir.InstLoad {
+	baseI8 := blk.NewBitCast(base, irtypes.I8Ptr)
+	ptr := blk.NewGetElementPtr(irtypes.I8, baseI8, constant.NewInt(irtypes.I64, offset))
+	ptrPtr := blk.NewBitCast(ptr, irtypes.NewPointer(irtypes.I8Ptr))
+	return blk.NewLoad(irtypes.I8Ptr, ptrPtr)
+}
+
+// emitCreatePipePair creates a pair of pipes (read+write HANDLEs) with inheritable write end.
+// Returns (readHandle, writeHandle) loaded into the block. Branches to errBlk on failure.
+func emitCreatePipePair(module *ir.Module, fn *ir.Func, blk *ir.Block, errBlk *ir.Block, okBlkName string) (*ir.Block, *ir.InstLoad, *ir.InstLoad) {
+	createPipe := winDeclareCreatePipe(module)
+	setHandleInfo := winDeclareSetHandleInformation(module)
+
+	// Allocate SECURITY_ATTRIBUTES on stack with bInheritHandle = TRUE
+	saAlloca := blk.NewAlloca(irtypes.NewArray(uint64(securityAttrSize), irtypes.I8))
+	winEmitMemset(module, blk, saAlloca, securityAttrSize)
+	winStoreI32AtOffset(blk, saAlloca, 0, constant.NewInt(irtypes.I32, securityAttrSize))  // nLength
+	winStoreI32AtOffset(blk, saAlloca, 16, constant.NewInt(irtypes.I32, 1))                // bInheritHandle = TRUE
+
+	// Allocate HANDLE slots
+	readHandlePtr := blk.NewAlloca(irtypes.I8Ptr)
+	writeHandlePtr := blk.NewAlloca(irtypes.I8Ptr)
+	blk.NewStore(constant.NewNull(irtypes.I8Ptr), readHandlePtr)
+	blk.NewStore(constant.NewNull(irtypes.I8Ptr), writeHandlePtr)
+
+	saPtr := blk.NewBitCast(saAlloca, irtypes.I8Ptr)
+	ret := blk.NewCall(createPipe, readHandlePtr, writeHandlePtr, saPtr, constant.NewInt(irtypes.I32, 0))
+	isErr := blk.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(okBlkName)
+	blk.NewCondBr(isErr, errBlk, okBlk)
+
+	// Make read handle non-inheritable: SetHandleInformation(readHandle, HANDLE_FLAG_INHERIT=1, 0)
+	readHandle := okBlk.NewLoad(irtypes.I8Ptr, readHandlePtr)
+	okBlk.NewCall(setHandleInfo, readHandle, constant.NewInt(irtypes.I32, 1), constant.NewInt(irtypes.I32, 0))
+	writeHandle := okBlk.NewLoad(irtypes.I8Ptr, writeHandlePtr)
+
+	return okBlk, readHandle, writeHandle
+}
+
+// EmitSpawn defines @pal_spawn using CreateProcessA + CreatePipe on Windows.
+// Signature: @pal_spawn(i8* program, i8** argv, i32* out_stdout_fd, i32* out_stderr_fd) → i32
+// Returns process handle (packed as i32) on success, -1 on error.
+// out_stdout_fd/out_stderr_fd receive read-end pipe handles (packed as i32).
+func (p *WindowsPAL) EmitSpawn(module *ir.Module) *ir.Func {
+	closeHandle := winDeclareCloseHandle(module)
+	getStdHandle := winDeclareGetStdHandle(module)
+	createProcessA := winDeclareCreateProcessA(module)
+	argvToCmdline := emitArgvToCmdline(module)
+	palFree := getOrDeclareFunc(module, "pal_free", irtypes.Void,
+		ir.NewParam("ptr", irtypes.I8Ptr))
+
+	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
+	i32PtrType := irtypes.NewPointer(irtypes.I32)
+	negOne32 := constant.NewInt(irtypes.I32, -1)
+
+	fn := module.NewFunc("pal_spawn", irtypes.I32,
+		ir.NewParam("program", irtypes.I8Ptr),
+		ir.NewParam("argv", i8PtrPtrType),
+		ir.NewParam("out_stdout_fd", i32PtrType),
+		ir.NewParam("out_stderr_fd", i32PtrType))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	storeErrorFds := func(blk *ir.Block) {
+		blk.NewStore(negOne32, fn.Params[2])
+		blk.NewStore(negOne32, fn.Params[3])
+	}
+
+	entry := fn.NewBlock(".entry")
+
+	// Build command line string from argv
+	cmdline := entry.NewCall(argvToCmdline, fn.Params[1])
+
+	// Create stdout pipe
+	errBlk1 := fn.NewBlock(".pipe1_err")
+	storeErrorFds(errBlk1)
+	errBlk1.NewCall(palFree, cmdline)
+	errBlk1.NewRet(negOne32)
+
+	pipe1Ok, stdoutRead, stdoutWrite := emitCreatePipePair(module, fn, entry, errBlk1, ".stdout_pipe_ok")
+
+	// Create stderr pipe
+	errBlk2 := fn.NewBlock(".pipe2_err")
+	errBlk2.NewCall(closeHandle, stdoutRead)
+	errBlk2.NewCall(closeHandle, stdoutWrite)
+	storeErrorFds(errBlk2)
+	errBlk2.NewCall(palFree, cmdline)
+	errBlk2.NewRet(negOne32)
+
+	pipe2Ok, stderrRead, stderrWrite := emitCreatePipePair(module, fn, pipe1Ok, errBlk2, ".stderr_pipe_ok")
+
+	// Set up STARTUPINFOA
+	siAlloca := pipe2Ok.NewAlloca(irtypes.NewArray(uint64(startupInfoSize), irtypes.I8))
+	winEmitMemset(module, pipe2Ok, siAlloca, startupInfoSize)
+	winStoreI32AtOffset(pipe2Ok, siAlloca, 0, constant.NewInt(irtypes.I32, startupInfoSize)) // cb
+	winStoreI32AtOffset(pipe2Ok, siAlloca, 60, constant.NewInt(irtypes.I32, 0x100))           // dwFlags = STARTF_USESTDHANDLES
+
+	// hStdInput = GetStdHandle(STD_INPUT_HANDLE = -10)
+	stdinHandle := pipe2Ok.NewCall(getStdHandle, constant.NewInt(irtypes.I32, -10))
+	winStoreI8PtrAtOffset(pipe2Ok, siAlloca, 80, stdinHandle) // hStdInput
+	winStoreI8PtrAtOffset(pipe2Ok, siAlloca, 88, stdoutWrite) // hStdOutput
+	winStoreI8PtrAtOffset(pipe2Ok, siAlloca, 96, stderrWrite) // hStdError
+
+	// Set up PROCESS_INFORMATION
+	piAlloca := pipe2Ok.NewAlloca(irtypes.NewArray(uint64(processInfoSize), irtypes.I8))
+	winEmitMemset(module, pipe2Ok, piAlloca, processInfoSize)
+
+	// CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)
+	siPtr := pipe2Ok.NewBitCast(siAlloca, irtypes.I8Ptr)
+	piPtr := pipe2Ok.NewBitCast(piAlloca, irtypes.I8Ptr)
+	cpRet := pipe2Ok.NewCall(createProcessA,
+		constant.NewNull(irtypes.I8Ptr), // lpApplicationName
+		cmdline,                          // lpCommandLine
+		constant.NewNull(irtypes.I8Ptr), // lpProcessAttributes
+		constant.NewNull(irtypes.I8Ptr), // lpThreadAttributes
+		constant.NewInt(irtypes.I32, 1), // bInheritHandles = TRUE
+		constant.NewInt(irtypes.I32, 0), // dwCreationFlags
+		constant.NewNull(irtypes.I8Ptr), // lpEnvironment
+		constant.NewNull(irtypes.I8Ptr), // lpCurrentDirectory
+		siPtr,                            // lpStartupInfo
+		piPtr)                            // lpProcessInformation
+
+	cpFailed := pipe2Ok.NewICmp(enum.IPredEQ, cpRet, constant.NewInt(irtypes.I32, 0))
+	cpOkBlk := fn.NewBlock(".cp_ok")
+	cpErrBlk := fn.NewBlock(".cp_err")
+	pipe2Ok.NewCondBr(cpFailed, cpErrBlk, cpOkBlk)
+
+	// CreateProcess error: close all handles
+	cpErrBlk.NewCall(closeHandle, stdoutRead)
+	cpErrBlk.NewCall(closeHandle, stdoutWrite)
+	cpErrBlk.NewCall(closeHandle, stderrRead)
+	cpErrBlk.NewCall(closeHandle, stderrWrite)
+	storeErrorFds(cpErrBlk)
+	cpErrBlk.NewCall(palFree, cmdline)
+	cpErrBlk.NewRet(negOne32)
+
+	// Success: close write ends (child has them), close thread handle
+	cpOkBlk.NewCall(closeHandle, stdoutWrite)
+	cpOkBlk.NewCall(closeHandle, stderrWrite)
+	hThread := winLoadI8PtrAtOffset(cpOkBlk, piAlloca, 8)
+	cpOkBlk.NewCall(closeHandle, hThread)
+	cpOkBlk.NewCall(palFree, cmdline)
+
+	// Pack HANDLEs into i32 and store
+	stdoutReadI64 := cpOkBlk.NewPtrToInt(stdoutRead, irtypes.I64)
+	stdoutReadI32 := cpOkBlk.NewTrunc(stdoutReadI64, irtypes.I32)
+	cpOkBlk.NewStore(stdoutReadI32, fn.Params[2])
+	stderrReadI64 := cpOkBlk.NewPtrToInt(stderrRead, irtypes.I64)
+	stderrReadI32 := cpOkBlk.NewTrunc(stderrReadI64, irtypes.I32)
+	cpOkBlk.NewStore(stderrReadI32, fn.Params[3])
+
+	// Return process handle packed as i32
+	hProcess := winLoadI8PtrAtOffset(cpOkBlk, piAlloca, 0)
+	hProcessI64 := cpOkBlk.NewPtrToInt(hProcess, irtypes.I64)
+	hProcessI32 := cpOkBlk.NewTrunc(hProcessI64, irtypes.I32)
+	cpOkBlk.NewRet(hProcessI32)
+
+	return fn
+}
+
+// EmitReadPipe defines @pal_read_pipe on Windows using ReadFile.
+// Signature: @pal_read_pipe(i32 fd, i8** out_buf, i64* out_len) → void
+// Reads pipe handle to EOF, stores malloc'd buffer + length. Caller must free.
+func (p *WindowsPAL) EmitReadPipe(module *ir.Module) *ir.Func {
+	palAlloc := lookupFunc(module, "pal_alloc")
+	palRealloc := lookupFunc(module, "pal_realloc")
+	closeHandle := winDeclareCloseHandle(module)
+	readFile := getOrDeclareFunc(module, "ReadFile", irtypes.I32,
+		ir.NewParam("hFile", irtypes.I8Ptr),
+		ir.NewParam("lpBuffer", irtypes.I8Ptr),
+		ir.NewParam("nNumberOfBytesToRead", irtypes.I32),
+		ir.NewParam("lpNumberOfBytesRead", irtypes.NewPointer(irtypes.I32)),
+		ir.NewParam("lpOverlapped", irtypes.I8Ptr))
+
+	fn := module.NewFunc("pal_read_pipe", irtypes.Void,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("out_buf", irtypes.NewPointer(irtypes.I8Ptr)),
+		ir.NewParam("out_len", irtypes.NewPointer(irtypes.I64)))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	entry := fn.NewBlock(".entry")
+
+	// Unpack i32 fd → HANDLE
+	handle := winI32ToHandle(entry, fn.Params[0])
+
+	initCap := constant.NewInt(irtypes.I64, 4096)
+	buf := entry.NewCall(palAlloc, initCap)
+	capPtr := entry.NewAlloca(irtypes.I64)
+	entry.NewStore(initCap, capPtr)
+	bufPtr := entry.NewAlloca(irtypes.I8Ptr)
+	entry.NewStore(buf, bufPtr)
+	totalPtr := entry.NewAlloca(irtypes.I64)
+	entry.NewStore(constant.NewInt(irtypes.I64, 0), totalPtr)
+	bytesReadPtr := entry.NewAlloca(irtypes.I32)
+	loopBlk := fn.NewBlock(".loop")
+	entry.NewBr(loopBlk)
+
+	readOkBlk := fn.NewBlock(".read_ok")
+	growBlk := fn.NewBlock(".grow")
+	doneBlk := fn.NewBlock(".done")
+
+	curCap := loopBlk.NewLoad(irtypes.I64, capPtr)
+	curBuf := loopBlk.NewLoad(irtypes.I8Ptr, bufPtr)
+	curTotal := loopBlk.NewLoad(irtypes.I64, totalPtr)
+	space := loopBlk.NewSub(curCap, curTotal)
+	space32 := loopBlk.NewTrunc(space, irtypes.I32)
+	readPtr := loopBlk.NewGetElementPtr(irtypes.I8, curBuf, curTotal)
+
+	loopBlk.NewStore(constant.NewInt(irtypes.I32, 0), bytesReadPtr)
+	ret := loopBlk.NewCall(readFile, handle, readPtr, space32, bytesReadPtr, constant.NewNull(irtypes.I8Ptr))
+	// ReadFile returns 0 on failure (pipe closed = ERROR_BROKEN_PIPE)
+	isFailed := loopBlk.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, 0))
+	checkBytes := fn.NewBlock(".check_bytes")
+	loopBlk.NewCondBr(isFailed, doneBlk, checkBytes)
+
+	bytesRead := checkBytes.NewLoad(irtypes.I32, bytesReadPtr)
+	isZero := checkBytes.NewICmp(enum.IPredEQ, bytesRead, constant.NewInt(irtypes.I32, 0))
+	checkBytes.NewCondBr(isZero, doneBlk, readOkBlk)
+
+	n64 := readOkBlk.NewZExt(bytesRead, irtypes.I64)
+	newTotal := readOkBlk.NewAdd(curTotal, n64)
+	readOkBlk.NewStore(newTotal, totalPtr)
+	isFull := readOkBlk.NewICmp(enum.IPredEQ, newTotal, curCap)
+	readOkBlk.NewCondBr(isFull, growBlk, loopBlk)
+
+	newCap := growBlk.NewMul(curCap, constant.NewInt(irtypes.I64, 2))
+	growBlk.NewStore(newCap, capPtr)
+	newBuf := growBlk.NewCall(palRealloc, curBuf, newCap)
+	growBlk.NewStore(newBuf, bufPtr)
+	growBlk.NewBr(loopBlk)
+
+	// Done: close handle, store results
+	doneBlk.NewCall(closeHandle, handle)
+	finalBuf := doneBlk.NewLoad(irtypes.I8Ptr, bufPtr)
+	finalTotal := doneBlk.NewLoad(irtypes.I64, totalPtr)
+	doneBlk.NewStore(finalBuf, fn.Params[1])
+	doneBlk.NewStore(finalTotal, fn.Params[2])
+	doneBlk.NewRet(nil)
+
+	return fn
+}
+
+// EmitWaitPid defines @pal_wait_pid on Windows using WaitForSingleObject + GetExitCodeProcess.
+// Signature: @pal_wait_pid(i32 pid) → i32
+// Takes a process handle (packed as i32), waits for exit, returns exit code or -1.
+func (p *WindowsPAL) EmitWaitPid(module *ir.Module) *ir.Func {
+	waitForSingleObject := getOrDeclareFunc(module, "WaitForSingleObject", irtypes.I32,
+		ir.NewParam("hHandle", irtypes.I8Ptr),
+		ir.NewParam("dwMilliseconds", irtypes.I32))
+	getExitCodeProcess := getOrDeclareFunc(module, "GetExitCodeProcess", irtypes.I32,
+		ir.NewParam("hProcess", irtypes.I8Ptr),
+		ir.NewParam("lpExitCode", irtypes.NewPointer(irtypes.I32)))
+	closeHandle := winDeclareCloseHandle(module)
+
+	fn := module.NewFunc("pal_wait_pid", irtypes.I32,
+		ir.NewParam("pid", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	entry := fn.NewBlock(".entry")
+	handle := winI32ToHandle(entry, fn.Params[0])
+
+	// WaitForSingleObject(handle, INFINITE=0xFFFFFFFF)
+	waitRet := entry.NewCall(waitForSingleObject, handle, constant.NewInt(irtypes.I32, -1))
+	// WAIT_OBJECT_0 = 0, WAIT_FAILED = 0xFFFFFFFF
+	isFailed := entry.NewICmp(enum.IPredEQ, waitRet, constant.NewInt(irtypes.I32, -1))
+	okBlk := fn.NewBlock(".wait_ok")
+	errBlk := fn.NewBlock(".wait_err")
+	entry.NewCondBr(isFailed, errBlk, okBlk)
+
+	errBlk.NewCall(closeHandle, handle)
+	errBlk.NewRet(constant.NewInt(irtypes.I32, -1))
+
+	// GetExitCodeProcess
+	exitCodePtr := okBlk.NewAlloca(irtypes.I32)
+	okBlk.NewStore(constant.NewInt(irtypes.I32, 0), exitCodePtr)
+	gecpRet := okBlk.NewCall(getExitCodeProcess, handle, exitCodePtr)
+	gecpFailed := okBlk.NewICmp(enum.IPredEQ, gecpRet, constant.NewInt(irtypes.I32, 0))
+	exitBlk := fn.NewBlock(".exit_ok")
+	gecpErrBlk := fn.NewBlock(".gecp_err")
+	okBlk.NewCondBr(gecpFailed, gecpErrBlk, exitBlk)
+
+	gecpErrBlk.NewCall(closeHandle, handle)
+	gecpErrBlk.NewRet(constant.NewInt(irtypes.I32, -1))
+
+	exitCode := exitBlk.NewLoad(irtypes.I32, exitCodePtr)
+	exitBlk.NewCall(closeHandle, handle)
+	exitBlk.NewRet(exitCode)
+
+	return fn
+}
+
+// EmitSpawnStreaming defines @pal_spawn_streaming on Windows using CreateProcessA + CreatePipe.
+// Like EmitSpawn but also creates a stdin pipe.
+// Signature: @pal_spawn_streaming(i8* program, i8** argv, i32* out_stdin_fd, i32* out_stdout_fd, i32* out_stderr_fd) → i32
+func (p *WindowsPAL) EmitSpawnStreaming(module *ir.Module) *ir.Func {
+	closeHandle := winDeclareCloseHandle(module)
+	createProcessA := winDeclareCreateProcessA(module)
+	setHandleInfo := winDeclareSetHandleInformation(module)
+	argvToCmdline := emitArgvToCmdline(module)
+	palFree := getOrDeclareFunc(module, "pal_free", irtypes.Void,
+		ir.NewParam("ptr", irtypes.I8Ptr))
+
+	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
+	i32PtrType := irtypes.NewPointer(irtypes.I32)
+	negOne32 := constant.NewInt(irtypes.I32, -1)
+
+	fn := module.NewFunc("pal_spawn_streaming", irtypes.I32,
+		ir.NewParam("program", irtypes.I8Ptr),
+		ir.NewParam("argv", i8PtrPtrType),
+		ir.NewParam("out_stdin_fd", i32PtrType),
+		ir.NewParam("out_stdout_fd", i32PtrType),
+		ir.NewParam("out_stderr_fd", i32PtrType))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	storeErrorFds := func(blk *ir.Block) {
+		blk.NewStore(negOne32, fn.Params[2])
+		blk.NewStore(negOne32, fn.Params[3])
+		blk.NewStore(negOne32, fn.Params[4])
+	}
+
+	entry := fn.NewBlock(".entry")
+	cmdline := entry.NewCall(argvToCmdline, fn.Params[1])
+
+	// Create stdin pipe (write end inheritable — child reads from it)
+	createPipe := winDeclareCreatePipe(module)
+	stdinSaAlloca := entry.NewAlloca(irtypes.NewArray(uint64(securityAttrSize), irtypes.I8))
+	winEmitMemset(module, entry, stdinSaAlloca, securityAttrSize)
+	winStoreI32AtOffset(entry, stdinSaAlloca, 0, constant.NewInt(irtypes.I32, securityAttrSize))
+	winStoreI32AtOffset(entry, stdinSaAlloca, 16, constant.NewInt(irtypes.I32, 1)) // bInheritHandle
+
+	stdinReadPtr := entry.NewAlloca(irtypes.I8Ptr)
+	stdinWritePtr := entry.NewAlloca(irtypes.I8Ptr)
+	entry.NewStore(constant.NewNull(irtypes.I8Ptr), stdinReadPtr)
+	entry.NewStore(constant.NewNull(irtypes.I8Ptr), stdinWritePtr)
+
+	stdinSaPtr := entry.NewBitCast(stdinSaAlloca, irtypes.I8Ptr)
+	stdinPipeRet := entry.NewCall(createPipe, stdinReadPtr, stdinWritePtr, stdinSaPtr, constant.NewInt(irtypes.I32, 0))
+	stdinPipeFailed := entry.NewICmp(enum.IPredEQ, stdinPipeRet, constant.NewInt(irtypes.I32, 0))
+
+	stdinPipeOk := fn.NewBlock(".stdin_pipe_ok")
+	stdinPipeErr := fn.NewBlock(".stdin_pipe_err")
+	entry.NewCondBr(stdinPipeFailed, stdinPipeErr, stdinPipeOk)
+
+	storeErrorFds(stdinPipeErr)
+	stdinPipeErr.NewCall(palFree, cmdline)
+	stdinPipeErr.NewRet(negOne32)
+
+	// Make the WRITE end of stdin pipe non-inheritable (parent writes to it)
+	stdinRead := stdinPipeOk.NewLoad(irtypes.I8Ptr, stdinReadPtr)
+	stdinWrite := stdinPipeOk.NewLoad(irtypes.I8Ptr, stdinWritePtr)
+	stdinPipeOk.NewCall(setHandleInfo, stdinWrite, constant.NewInt(irtypes.I32, 1), constant.NewInt(irtypes.I32, 0))
+
+	// Create stdout pipe
+	stdoutPipeErr := fn.NewBlock(".stdout_pipe_err")
+	stdoutPipeErr.NewCall(closeHandle, stdinRead)
+	stdoutPipeErr.NewCall(closeHandle, stdinWrite)
+	storeErrorFds(stdoutPipeErr)
+	stdoutPipeErr.NewCall(palFree, cmdline)
+	stdoutPipeErr.NewRet(negOne32)
+
+	stdoutPipeOk, stdoutRead, stdoutWrite := emitCreatePipePair(module, fn, stdinPipeOk, stdoutPipeErr, ".stdout_pipe_ok")
+
+	// Create stderr pipe
+	stderrPipeErr := fn.NewBlock(".stderr_pipe_err")
+	stderrPipeErr.NewCall(closeHandle, stdinRead)
+	stderrPipeErr.NewCall(closeHandle, stdinWrite)
+	stderrPipeErr.NewCall(closeHandle, stdoutRead)
+	stderrPipeErr.NewCall(closeHandle, stdoutWrite)
+	storeErrorFds(stderrPipeErr)
+	stderrPipeErr.NewCall(palFree, cmdline)
+	stderrPipeErr.NewRet(negOne32)
+
+	stderrPipeOk, stderrRead, stderrWrite := emitCreatePipePair(module, fn, stdoutPipeOk, stderrPipeErr, ".stderr_pipe_ok")
+
+	// Set up STARTUPINFOA
+	siAlloca := stderrPipeOk.NewAlloca(irtypes.NewArray(uint64(startupInfoSize), irtypes.I8))
+	winEmitMemset(module, stderrPipeOk, siAlloca, startupInfoSize)
+	winStoreI32AtOffset(stderrPipeOk, siAlloca, 0, constant.NewInt(irtypes.I32, startupInfoSize))
+	winStoreI32AtOffset(stderrPipeOk, siAlloca, 60, constant.NewInt(irtypes.I32, 0x100)) // STARTF_USESTDHANDLES
+	winStoreI8PtrAtOffset(stderrPipeOk, siAlloca, 80, stdinRead)    // hStdInput = read end of stdin pipe
+	winStoreI8PtrAtOffset(stderrPipeOk, siAlloca, 88, stdoutWrite)  // hStdOutput
+	winStoreI8PtrAtOffset(stderrPipeOk, siAlloca, 96, stderrWrite)  // hStdError
+
+	// Set up PROCESS_INFORMATION
+	piAlloca := stderrPipeOk.NewAlloca(irtypes.NewArray(uint64(processInfoSize), irtypes.I8))
+	winEmitMemset(module, stderrPipeOk, piAlloca, processInfoSize)
+
+	siPtr := stderrPipeOk.NewBitCast(siAlloca, irtypes.I8Ptr)
+	piPtr := stderrPipeOk.NewBitCast(piAlloca, irtypes.I8Ptr)
+	cpRet := stderrPipeOk.NewCall(createProcessA,
+		constant.NewNull(irtypes.I8Ptr),
+		cmdline,
+		constant.NewNull(irtypes.I8Ptr),
+		constant.NewNull(irtypes.I8Ptr),
+		constant.NewInt(irtypes.I32, 1),
+		constant.NewInt(irtypes.I32, 0),
+		constant.NewNull(irtypes.I8Ptr),
+		constant.NewNull(irtypes.I8Ptr),
+		siPtr, piPtr)
+
+	cpFailed := stderrPipeOk.NewICmp(enum.IPredEQ, cpRet, constant.NewInt(irtypes.I32, 0))
+	cpOkBlk := fn.NewBlock(".cp_ok")
+	cpErrBlk := fn.NewBlock(".cp_err")
+	stderrPipeOk.NewCondBr(cpFailed, cpErrBlk, cpOkBlk)
+
+	cpErrBlk.NewCall(closeHandle, stdinRead)
+	cpErrBlk.NewCall(closeHandle, stdinWrite)
+	cpErrBlk.NewCall(closeHandle, stdoutRead)
+	cpErrBlk.NewCall(closeHandle, stdoutWrite)
+	cpErrBlk.NewCall(closeHandle, stderrRead)
+	cpErrBlk.NewCall(closeHandle, stderrWrite)
+	storeErrorFds(cpErrBlk)
+	cpErrBlk.NewCall(palFree, cmdline)
+	cpErrBlk.NewRet(negOne32)
+
+	// Success: close child-side handles + thread handle
+	cpOkBlk.NewCall(closeHandle, stdinRead)   // child reads from stdin
+	cpOkBlk.NewCall(closeHandle, stdoutWrite)  // child writes to stdout
+	cpOkBlk.NewCall(closeHandle, stderrWrite)  // child writes to stderr
+	hThread := winLoadI8PtrAtOffset(cpOkBlk, piAlloca, 8)
+	cpOkBlk.NewCall(closeHandle, hThread)
+	cpOkBlk.NewCall(palFree, cmdline)
+
+	// Pack HANDLEs into i32: parent writes to stdin, reads from stdout/stderr
+	stdinWriteI64 := cpOkBlk.NewPtrToInt(stdinWrite, irtypes.I64)
+	stdinWriteI32 := cpOkBlk.NewTrunc(stdinWriteI64, irtypes.I32)
+	cpOkBlk.NewStore(stdinWriteI32, fn.Params[2])
+	stdoutReadI64 := cpOkBlk.NewPtrToInt(stdoutRead, irtypes.I64)
+	stdoutReadI32 := cpOkBlk.NewTrunc(stdoutReadI64, irtypes.I32)
+	cpOkBlk.NewStore(stdoutReadI32, fn.Params[3])
+	stderrReadI64 := cpOkBlk.NewPtrToInt(stderrRead, irtypes.I64)
+	stderrReadI32 := cpOkBlk.NewTrunc(stderrReadI64, irtypes.I32)
+	cpOkBlk.NewStore(stderrReadI32, fn.Params[4])
+
+	hProcess := winLoadI8PtrAtOffset(cpOkBlk, piAlloca, 0)
+	hProcessI64 := cpOkBlk.NewPtrToInt(hProcess, irtypes.I64)
+	hProcessI32 := cpOkBlk.NewTrunc(hProcessI64, irtypes.I32)
+	cpOkBlk.NewRet(hProcessI32)
+
+	return fn
+}
+
+// EmitKill defines @pal_kill on Windows using TerminateProcess.
+// Signature: @pal_kill(i32 pid, i32 signal) → i32
+// Signal is ignored on Windows; TerminateProcess always terminates.
+// Returns 0 on success, -1 on error.
+func (p *WindowsPAL) EmitKill(module *ir.Module) *ir.Func {
+	terminateProcess := getOrDeclareFunc(module, "TerminateProcess", irtypes.I32,
+		ir.NewParam("hProcess", irtypes.I8Ptr),
+		ir.NewParam("uExitCode", irtypes.I32))
+
+	fn := module.NewFunc("pal_kill", irtypes.I32,
+		ir.NewParam("pid", irtypes.I32),
+		ir.NewParam("signal", irtypes.I32))
+	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
+
+	entry := fn.NewBlock(".entry")
+	handle := winI32ToHandle(entry, fn.Params[0])
+
+	// TerminateProcess(handle, 1) — use exit code 1
+	ret := entry.NewCall(terminateProcess, handle, constant.NewInt(irtypes.I32, 1))
+	// Returns nonzero on success, 0 on failure
+	isFailed := entry.NewICmp(enum.IPredEQ, ret, constant.NewInt(irtypes.I32, 0))
+	okBlk := fn.NewBlock(".ok")
+	errBlk := fn.NewBlock(".err")
+	entry.NewCondBr(isFailed, errBlk, okBlk)
+
+	okBlk.NewRet(constant.NewInt(irtypes.I32, 0))
+	errBlk.NewRet(constant.NewInt(irtypes.I32, -1))
+
+	return fn
+}
 
 // EmitGetEnviron stub (not yet implemented on Windows).
 func (p *WindowsPAL) EmitGetEnviron(module *ir.Module) *ir.Func {

@@ -207,9 +207,9 @@ func emitLibcAlloc(module *ir.Module) *ir.Func {
 	// declare noalias i8* @malloc(i64 noundef) nounwind willreturn
 	mallocSize := ir.NewParam("size", irtypes.I64)
 	mallocSize.Attrs = append(mallocSize.Attrs, enum.ParamAttrNoUndef)
-	mallocFn := module.NewFunc("malloc", irtypes.I8Ptr, mallocSize)
+	mallocFn := getOrDeclareFunc(module, "malloc", irtypes.I8Ptr, mallocSize)
 	mallocFn.ReturnAttrs = append(mallocFn.ReturnAttrs, enum.ReturnAttrNoAlias)
-	mallocFn.FuncAttrs = append(mallocFn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
+	addFuncAttr(mallocFn, enum.FuncAttrWillReturn)
 
 	// define noalias i8* @pal_alloc(i64 %size) nounwind willreturn
 	fn := module.NewFunc("pal_alloc", irtypes.I8Ptr,
@@ -228,8 +228,8 @@ func emitLibcFree(module *ir.Module) *ir.Func {
 	// declare void @free(i8* nocapture noundef) nounwind willreturn
 	freePtr := ir.NewParam("ptr", irtypes.I8Ptr)
 	freePtr.Attrs = append(freePtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
-	freeFn := module.NewFunc("free", irtypes.Void, freePtr)
-	freeFn.FuncAttrs = append(freeFn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
+	freeFn := getOrDeclareFunc(module, "free", irtypes.Void, freePtr)
+	addFuncAttr(freeFn, enum.FuncAttrWillReturn)
 
 	// define void @pal_free(i8* %ptr) nounwind willreturn
 	fn := module.NewFunc("pal_free", irtypes.Void,
@@ -249,9 +249,9 @@ func emitLibcRealloc(module *ir.Module) *ir.Func {
 	reallocPtr.Attrs = append(reallocPtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
 	reallocSz := ir.NewParam("size", irtypes.I64)
 	reallocSz.Attrs = append(reallocSz.Attrs, enum.ParamAttrNoUndef)
-	reallocFn := module.NewFunc("realloc", irtypes.I8Ptr, reallocPtr, reallocSz)
+	reallocFn := getOrDeclareFunc(module, "realloc", irtypes.I8Ptr, reallocPtr, reallocSz)
 	reallocFn.ReturnAttrs = append(reallocFn.ReturnAttrs, enum.ReturnAttrNoAlias)
-	reallocFn.FuncAttrs = append(reallocFn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
+	addFuncAttr(reallocFn, enum.FuncAttrWillReturn)
 
 	// define noalias i8* @pal_realloc(i8* %ptr, i64 %size) nounwind willreturn
 	fn := module.NewFunc("pal_realloc", irtypes.I8Ptr,

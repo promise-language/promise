@@ -17,18 +17,16 @@ type WindowsPAL struct{}
 // Signature: @pal_write(i32 %fd, i8* %buf, i64 %len) → i64
 func (p *WindowsPAL) EmitWrite(module *ir.Module) *ir.Func {
 	// declare i8* @GetStdHandle(i32)
-	getStdHandle := module.NewFunc("GetStdHandle", irtypes.I8Ptr,
+	getStdHandle := getOrDeclareFunc(module, "GetStdHandle", irtypes.I8Ptr,
 		ir.NewParam("nStdHandle", irtypes.I32))
-	getStdHandle.FuncAttrs = append(getStdHandle.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// declare i32 @WriteFile(i8*, i8*, i32, i32*, i8*)
-	writeFile := module.NewFunc("WriteFile", irtypes.I32,
+	writeFile := getOrDeclareFunc(module, "WriteFile", irtypes.I32,
 		ir.NewParam("hFile", irtypes.I8Ptr),
 		ir.NewParam("lpBuffer", irtypes.I8Ptr),
 		ir.NewParam("nNumberOfBytesToWrite", irtypes.I32),
 		ir.NewParam("lpNumberOfBytesWritten", irtypes.NewPointer(irtypes.I32)),
 		ir.NewParam("lpOverlapped", irtypes.I8Ptr))
-	writeFile.FuncAttrs = append(writeFile.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// define i64 @pal_write(i32 %fd, i8* %buf, i64 %len)
 	fn := module.NewFunc("pal_write", irtypes.I64,
@@ -68,10 +66,9 @@ func (p *WindowsPAL) EmitWrite(module *ir.Module) *ir.Func {
 // Signature: @pal_exit(i32 %code) → void [noreturn]
 func (p *WindowsPAL) EmitExit(module *ir.Module) *ir.Func {
 	// declare void @ExitProcess(i32) noreturn
-	exitProcess := module.NewFunc("ExitProcess", irtypes.Void,
+	exitProcess := getOrDeclareFunc(module, "ExitProcess", irtypes.Void,
 		ir.NewParam("uExitCode", irtypes.I32))
-	exitProcess.FuncAttrs = append(exitProcess.FuncAttrs,
-		enum.FuncAttrNoReturn, enum.FuncAttrNoUnwind)
+	addFuncAttr(exitProcess, enum.FuncAttrNoReturn)
 
 	// define void @pal_exit(i32 %code) noreturn
 	fn := module.NewFunc("pal_exit", irtypes.Void,
@@ -106,14 +103,13 @@ func (p *WindowsPAL) EmitThreadCreate(module *ir.Module) *ir.Func {
 	// declare i8* @_beginthreadex(i8*, i32, i32(i8*)*, i8*, i32, i32*)
 	// Returns uintptr_t (handle) — modeled as i8* for consistency.
 	// stack_size is unsigned (i32), not SIZE_T (i64) like CreateThread.
-	beginThread := module.NewFunc("_beginthreadex", irtypes.I8Ptr,
+	beginThread := getOrDeclareFunc(module, "_beginthreadex", irtypes.I8Ptr,
 		ir.NewParam("security", irtypes.I8Ptr),
 		ir.NewParam("stack_size", irtypes.I32),
 		ir.NewParam("start_address", winThreadFnType()),
 		ir.NewParam("arglist", irtypes.I8Ptr),
 		ir.NewParam("initflag", irtypes.I32),
 		ir.NewParam("thrdaddr", irtypes.NewPointer(irtypes.I32)))
-	beginThread.FuncAttrs = append(beginThread.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// Emit trampoline: @__pal_thread_trampoline(i8* %arg) → i32
 	// The arg is a 2-pointer struct: {fn_ptr, real_arg}.
@@ -195,15 +191,13 @@ func (p *WindowsPAL) EmitThreadCreate(module *ir.Module) *ir.Func {
 // Waits for thread to finish (INFINITE timeout), then closes the handle.
 func (p *WindowsPAL) EmitThreadJoin(module *ir.Module) *ir.Func {
 	// declare i32 @WaitForSingleObject(i8*, i32) nounwind
-	waitForSingleObject := module.NewFunc("WaitForSingleObject", irtypes.I32,
+	waitForSingleObject := getOrDeclareFunc(module, "WaitForSingleObject", irtypes.I32,
 		ir.NewParam("hHandle", irtypes.I8Ptr),
 		ir.NewParam("dwMilliseconds", irtypes.I32))
-	waitForSingleObject.FuncAttrs = append(waitForSingleObject.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// declare i32 @CloseHandle(i8*) nounwind
-	closeHandle := module.NewFunc("CloseHandle", irtypes.I32,
+	closeHandle := getOrDeclareFunc(module, "CloseHandle", irtypes.I32,
 		ir.NewParam("hObject", irtypes.I8Ptr))
-	closeHandle.FuncAttrs = append(closeHandle.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// define void @pal_thread_join(i8* %handle) nounwind
 	fn := module.NewFunc("pal_thread_join", irtypes.Void,
@@ -227,9 +221,8 @@ func (p *WindowsPAL) EmitMutexInit(module *ir.Module) *ir.Func {
 	palAlloc := lookupFunc(module, "pal_alloc")
 
 	// declare void @InitializeCriticalSection(i8*) nounwind
-	initCS := module.NewFunc("InitializeCriticalSection", irtypes.Void,
+	initCS := getOrDeclareFunc(module, "InitializeCriticalSection", irtypes.Void,
 		ir.NewParam("lpCriticalSection", irtypes.I8Ptr))
-	initCS.FuncAttrs = append(initCS.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// define i8* @pal_mutex_init() nounwind
 	fn := module.NewFunc("pal_mutex_init", irtypes.I8Ptr)
@@ -246,9 +239,8 @@ func (p *WindowsPAL) EmitMutexInit(module *ir.Module) *ir.Func {
 // EmitMutexLock defines @pal_mutex_lock using EnterCriticalSection.
 func (p *WindowsPAL) EmitMutexLock(module *ir.Module) *ir.Func {
 	// declare void @EnterCriticalSection(i8*) nounwind
-	enterCS := module.NewFunc("EnterCriticalSection", irtypes.Void,
+	enterCS := getOrDeclareFunc(module, "EnterCriticalSection", irtypes.Void,
 		ir.NewParam("lpCriticalSection", irtypes.I8Ptr))
-	enterCS.FuncAttrs = append(enterCS.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_mutex_lock", irtypes.Void,
 		ir.NewParam("mutex", irtypes.I8Ptr))
@@ -262,9 +254,8 @@ func (p *WindowsPAL) EmitMutexLock(module *ir.Module) *ir.Func {
 // EmitMutexUnlock defines @pal_mutex_unlock using LeaveCriticalSection.
 func (p *WindowsPAL) EmitMutexUnlock(module *ir.Module) *ir.Func {
 	// declare void @LeaveCriticalSection(i8*) nounwind
-	leaveCS := module.NewFunc("LeaveCriticalSection", irtypes.Void,
+	leaveCS := getOrDeclareFunc(module, "LeaveCriticalSection", irtypes.Void,
 		ir.NewParam("lpCriticalSection", irtypes.I8Ptr))
-	leaveCS.FuncAttrs = append(leaveCS.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_mutex_unlock", irtypes.Void,
 		ir.NewParam("mutex", irtypes.I8Ptr))
@@ -280,9 +271,8 @@ func (p *WindowsPAL) EmitMutexDestroy(module *ir.Module) *ir.Func {
 	palFree := lookupFunc(module, "pal_free")
 
 	// declare void @DeleteCriticalSection(i8*) nounwind
-	deleteCS := module.NewFunc("DeleteCriticalSection", irtypes.Void,
+	deleteCS := getOrDeclareFunc(module, "DeleteCriticalSection", irtypes.Void,
 		ir.NewParam("lpCriticalSection", irtypes.I8Ptr))
-	deleteCS.FuncAttrs = append(deleteCS.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_mutex_destroy", irtypes.Void,
 		ir.NewParam("mutex", irtypes.I8Ptr))
@@ -299,9 +289,8 @@ func (p *WindowsPAL) EmitCondInit(module *ir.Module) *ir.Func {
 	palAlloc := lookupFunc(module, "pal_alloc")
 
 	// declare void @InitializeConditionVariable(i8*) nounwind
-	initCV := module.NewFunc("InitializeConditionVariable", irtypes.Void,
+	initCV := getOrDeclareFunc(module, "InitializeConditionVariable", irtypes.Void,
 		ir.NewParam("lpConditionVariable", irtypes.I8Ptr))
-	initCV.FuncAttrs = append(initCV.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_cond_init", irtypes.I8Ptr)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
@@ -318,11 +307,10 @@ func (p *WindowsPAL) EmitCondInit(module *ir.Module) *ir.Func {
 // INFINITE timeout — blocks until signaled.
 func (p *WindowsPAL) EmitCondWait(module *ir.Module) *ir.Func {
 	// declare i32 @SleepConditionVariableCS(i8*, i8*, i32) nounwind
-	sleepCV := module.NewFunc("SleepConditionVariableCS", irtypes.I32,
+	sleepCV := getOrDeclareFunc(module, "SleepConditionVariableCS", irtypes.I32,
 		ir.NewParam("lpConditionVariable", irtypes.I8Ptr),
 		ir.NewParam("lpCriticalSection", irtypes.I8Ptr),
 		ir.NewParam("dwMilliseconds", irtypes.I32))
-	sleepCV.FuncAttrs = append(sleepCV.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_cond_wait", irtypes.Void,
 		ir.NewParam("cond", irtypes.I8Ptr),
@@ -341,9 +329,8 @@ func (p *WindowsPAL) EmitCondWait(module *ir.Module) *ir.Func {
 // EmitCondSignal defines @pal_cond_signal using WakeConditionVariable.
 func (p *WindowsPAL) EmitCondSignal(module *ir.Module) *ir.Func {
 	// declare void @WakeConditionVariable(i8*) nounwind
-	wakeCV := module.NewFunc("WakeConditionVariable", irtypes.Void,
+	wakeCV := getOrDeclareFunc(module, "WakeConditionVariable", irtypes.Void,
 		ir.NewParam("lpConditionVariable", irtypes.I8Ptr))
-	wakeCV.FuncAttrs = append(wakeCV.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_cond_signal", irtypes.Void,
 		ir.NewParam("cond", irtypes.I8Ptr))
@@ -357,9 +344,8 @@ func (p *WindowsPAL) EmitCondSignal(module *ir.Module) *ir.Func {
 // EmitCondBroadcast defines @pal_cond_broadcast using WakeAllConditionVariable.
 func (p *WindowsPAL) EmitCondBroadcast(module *ir.Module) *ir.Func {
 	// declare void @WakeAllConditionVariable(i8*) nounwind
-	wakeAllCV := module.NewFunc("WakeAllConditionVariable", irtypes.Void,
+	wakeAllCV := getOrDeclareFunc(module, "WakeAllConditionVariable", irtypes.Void,
 		ir.NewParam("lpConditionVariable", irtypes.I8Ptr))
-	wakeAllCV.FuncAttrs = append(wakeAllCV.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_cond_broadcast", irtypes.Void,
 		ir.NewParam("cond", irtypes.I8Ptr))
@@ -389,14 +375,7 @@ func (p *WindowsPAL) EmitCondDestroy(module *ir.Module) *ir.Func {
 // getOrDeclareErrnoFn returns (or declares) the UCRT _errno function.
 // Returns a function with signature () -> i32*.
 func (p *WindowsPAL) getOrDeclareErrnoFn(module *ir.Module) *ir.Func {
-	for _, fn := range module.Funcs {
-		if fn.Name() == "_errno" {
-			return fn
-		}
-	}
-	fn := module.NewFunc("_errno", irtypes.NewPointer(irtypes.I32))
-	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	return fn
+	return getOrDeclareFunc(module, "_errno", irtypes.NewPointer(irtypes.I32))
 }
 
 // emitNegErrnoReturnI32 emits a block that reads errno and returns -errno (i32).
@@ -420,11 +399,10 @@ func (p *WindowsPAL) emitNegErrnoReturnI64(errBlk *ir.Block, errnoFn *ir.Func) {
 // Maps mode (0=open-rw, 1=read, 2=create, 3=append) to _O_* flags.
 func (p *WindowsPAL) EmitFileOpen(module *ir.Module) *ir.Func {
 	// declare i32 @_open(i8*, i32, i32) nounwind
-	ucrtOpen := module.NewFunc("_open", irtypes.I32,
+	ucrtOpen := getOrDeclareFunc(module, "_open", irtypes.I32,
 		ir.NewParam("filename", irtypes.I8Ptr),
 		ir.NewParam("oflag", irtypes.I32),
 		ir.NewParam("pmode", irtypes.I32))
-	ucrtOpen.FuncAttrs = append(ucrtOpen.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// Windows UCRT flags: _O_RDONLY=0, _O_RDWR=2, _O_CREAT=0x100,
 	// _O_TRUNC=0x200, _O_APPEND=0x8, _O_BINARY=0x8000
@@ -466,11 +444,10 @@ func (p *WindowsPAL) EmitFileOpen(module *ir.Module) *ir.Func {
 // EmitFileRead declares UCRT @_read and defines @pal_file_read.
 func (p *WindowsPAL) EmitFileRead(module *ir.Module) *ir.Func {
 	// declare i32 @_read(i32, i8*, i32) nounwind
-	ucrtRead := module.NewFunc("_read", irtypes.I32,
+	ucrtRead := getOrDeclareFunc(module, "_read", irtypes.I32,
 		ir.NewParam("fd", irtypes.I32),
 		ir.NewParam("buffer", irtypes.I8Ptr),
 		ir.NewParam("count", irtypes.I32))
-	ucrtRead.FuncAttrs = append(ucrtRead.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_file_read", irtypes.I64,
 		ir.NewParam("fd", irtypes.I32),
@@ -497,11 +474,10 @@ func (p *WindowsPAL) EmitFileRead(module *ir.Module) *ir.Func {
 // EmitFileWrite declares UCRT @_write and defines @pal_file_write.
 func (p *WindowsPAL) EmitFileWrite(module *ir.Module) *ir.Func {
 	// declare i32 @_write(i32, i8*, i32) nounwind
-	ucrtWrite := module.NewFunc("_write", irtypes.I32,
+	ucrtWrite := getOrDeclareFunc(module, "_write", irtypes.I32,
 		ir.NewParam("fd", irtypes.I32),
 		ir.NewParam("buffer", irtypes.I8Ptr),
 		ir.NewParam("count", irtypes.I32))
-	ucrtWrite.FuncAttrs = append(ucrtWrite.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_file_write", irtypes.I64,
 		ir.NewParam("fd", irtypes.I32),
@@ -526,9 +502,8 @@ func (p *WindowsPAL) EmitFileWrite(module *ir.Module) *ir.Func {
 
 // EmitFileClose declares UCRT @_close and defines @pal_file_close.
 func (p *WindowsPAL) EmitFileClose(module *ir.Module) *ir.Func {
-	ucrtClose := module.NewFunc("_close", irtypes.I32,
+	ucrtClose := getOrDeclareFunc(module, "_close", irtypes.I32,
 		ir.NewParam("fd", irtypes.I32))
-	ucrtClose.FuncAttrs = append(ucrtClose.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_file_close", irtypes.I32,
 		ir.NewParam("fd", irtypes.I32))
@@ -548,11 +523,10 @@ func (p *WindowsPAL) EmitFileClose(module *ir.Module) *ir.Func {
 
 // EmitFileSeek declares UCRT @_lseeki64 and defines @pal_file_seek.
 func (p *WindowsPAL) EmitFileSeek(module *ir.Module) *ir.Func {
-	ucrtLseek := module.NewFunc("_lseeki64", irtypes.I64,
+	ucrtLseek := getOrDeclareFunc(module, "_lseeki64", irtypes.I64,
 		ir.NewParam("fd", irtypes.I32),
 		ir.NewParam("offset", irtypes.I64),
 		ir.NewParam("origin", irtypes.I32))
-	ucrtLseek.FuncAttrs = append(ucrtLseek.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_file_seek", irtypes.I64,
 		ir.NewParam("fd", irtypes.I32),
@@ -608,9 +582,8 @@ func (p *WindowsPAL) EmitFileStatSize(module *ir.Module) *ir.Func {
 
 // EmitFileRemove declares UCRT @_unlink and defines @pal_file_remove.
 func (p *WindowsPAL) EmitFileRemove(module *ir.Module) *ir.Func {
-	ucrtUnlink := module.NewFunc("_unlink", irtypes.I32,
+	ucrtUnlink := getOrDeclareFunc(module, "_unlink", irtypes.I32,
 		ir.NewParam("filename", irtypes.I8Ptr))
-	ucrtUnlink.FuncAttrs = append(ucrtUnlink.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_file_remove", irtypes.I32,
 		ir.NewParam("path", irtypes.I8Ptr))
@@ -630,10 +603,9 @@ func (p *WindowsPAL) EmitFileRemove(module *ir.Module) *ir.Func {
 
 // EmitFileExists declares UCRT @_access and defines @pal_file_exists.
 func (p *WindowsPAL) EmitFileExists(module *ir.Module) *ir.Func {
-	ucrtAccess := module.NewFunc("_access", irtypes.I32,
+	ucrtAccess := getOrDeclareFunc(module, "_access", irtypes.I32,
 		ir.NewParam("path", irtypes.I8Ptr),
 		ir.NewParam("mode", irtypes.I32))
-	ucrtAccess.FuncAttrs = append(ucrtAccess.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_file_exists", irtypes.I32,
 		ir.NewParam("path", irtypes.I8Ptr))
@@ -650,9 +622,8 @@ func (p *WindowsPAL) EmitFileExists(module *ir.Module) *ir.Func {
 // EmitFileMkdir declares UCRT @_mkdir and defines @pal_file_mkdir.
 func (p *WindowsPAL) EmitFileMkdir(module *ir.Module) *ir.Func {
 	// Windows _mkdir takes only path (no mode parameter)
-	ucrtMkdir := module.NewFunc("_mkdir", irtypes.I32,
+	ucrtMkdir := getOrDeclareFunc(module, "_mkdir", irtypes.I32,
 		ir.NewParam("dirname", irtypes.I8Ptr))
-	ucrtMkdir.FuncAttrs = append(ucrtMkdir.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_file_mkdir", irtypes.I32,
 		ir.NewParam("path", irtypes.I8Ptr))
@@ -672,9 +643,8 @@ func (p *WindowsPAL) EmitFileMkdir(module *ir.Module) *ir.Func {
 
 // EmitDirRemove declares UCRT @_rmdir and defines @pal_dir_remove.
 func (p *WindowsPAL) EmitDirRemove(module *ir.Module) *ir.Func {
-	ucrtRmdir := module.NewFunc("_rmdir", irtypes.I32,
+	ucrtRmdir := getOrDeclareFunc(module, "_rmdir", irtypes.I32,
 		ir.NewParam("dirname", irtypes.I8Ptr))
-	ucrtRmdir.FuncAttrs = append(ucrtRmdir.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_dir_remove", irtypes.I32,
 		ir.NewParam("path", irtypes.I8Ptr))
@@ -695,9 +665,8 @@ func (p *WindowsPAL) EmitDirRemove(module *ir.Module) *ir.Func {
 // EmitDirExists declares Win32 @GetFileAttributesA and defines @pal_dir_exists.
 // Checks FILE_ATTRIBUTE_DIRECTORY (0x10).
 func (p *WindowsPAL) EmitDirExists(module *ir.Module) *ir.Func {
-	getFileAttrs := module.NewFunc("GetFileAttributesA", irtypes.I32,
+	getFileAttrs := getOrDeclareFunc(module, "GetFileAttributesA", irtypes.I32,
 		ir.NewParam("lpFileName", irtypes.I8Ptr))
-	getFileAttrs.FuncAttrs = append(getFileAttrs.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_dir_exists", irtypes.I32,
 		ir.NewParam("path", irtypes.I8Ptr))
@@ -735,9 +704,8 @@ func (p *WindowsPAL) EmitErrno(module *ir.Module) *ir.Func {
 // Reads dwNumberOfProcessors from SYSTEM_INFO struct (offset 32 on x64).
 func (p *WindowsPAL) EmitNumCPUs(module *ir.Module) *ir.Func {
 	// declare void @GetSystemInfo(i8*) nounwind
-	getSystemInfo := module.NewFunc("GetSystemInfo", irtypes.Void,
+	getSystemInfo := getOrDeclareFunc(module, "GetSystemInfo", irtypes.Void,
 		ir.NewParam("lpSystemInfo", irtypes.I8Ptr))
-	getSystemInfo.FuncAttrs = append(getSystemInfo.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_num_cpus", irtypes.I32)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
@@ -783,19 +751,14 @@ const winDirCFileNameOffset = 60 // 16 (findData start) + 44 (cFileName within W
 // Returns i8* handle (state struct) or null on error.
 func (p *WindowsPAL) EmitDirOpen(module *ir.Module) *ir.Func {
 	// declare i8* @FindFirstFileA(i8*, i8*) nounwind
-	findFirst := module.NewFunc("FindFirstFileA", irtypes.I8Ptr,
+	findFirst := getOrDeclareFunc(module, "FindFirstFileA", irtypes.I8Ptr,
 		ir.NewParam("lpFileName", irtypes.I8Ptr),
 		ir.NewParam("lpFindFileData", irtypes.I8Ptr))
-	findFirst.FuncAttrs = append(findFirst.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	palAlloc := lookupFunc(module, "pal_alloc")
 	palFree := lookupFunc(module, "pal_free")
-	strlenFn := lookupFunc(module, "strlen")
-	if strlenFn == nil {
-		strlenFn = module.NewFunc("strlen", irtypes.I64,
-			ir.NewParam("s", irtypes.I8Ptr))
-		strlenFn.FuncAttrs = append(strlenFn.FuncAttrs, enum.FuncAttrNoUnwind)
-	}
+	strlenFn := getOrDeclareFunc(module, "strlen", irtypes.I64,
+		ir.NewParam("s", irtypes.I8Ptr))
 
 	fn := module.NewFunc("pal_dir_open", irtypes.I8Ptr,
 		ir.NewParam("path", irtypes.I8Ptr))
@@ -808,14 +771,10 @@ func (p *WindowsPAL) EmitDirOpen(module *ir.Module) *ir.Func {
 	pattern := entry.NewCall(palAlloc, patternSize)
 
 	// memcpy path into pattern buffer
-	memcpyFn := lookupFunc(module, "memcpy")
-	if memcpyFn == nil {
-		memcpyFn = module.NewFunc("memcpy", irtypes.I8Ptr,
-			ir.NewParam("dst", irtypes.I8Ptr),
-			ir.NewParam("src", irtypes.I8Ptr),
-			ir.NewParam("n", irtypes.I64))
-		memcpyFn.FuncAttrs = append(memcpyFn.FuncAttrs, enum.FuncAttrNoUnwind)
-	}
+	memcpyFn := getOrDeclareFunc(module, "memcpy", irtypes.I8Ptr,
+		ir.NewParam("dst", irtypes.I8Ptr),
+		ir.NewParam("src", irtypes.I8Ptr),
+		ir.NewParam("n", irtypes.I64))
 	entry.NewCall(memcpyFn, pattern, fn.Params[0], pathLen)
 
 	// Append "\\*\0"
@@ -866,10 +825,9 @@ func (p *WindowsPAL) EmitDirOpen(module *ir.Module) *ir.Func {
 // Otherwise calls FindNextFileA; returns cFileName or null when done.
 func (p *WindowsPAL) EmitDirNextName(module *ir.Module) *ir.Func {
 	// declare i32 @FindNextFileA(i8*, i8*) nounwind
-	findNext := module.NewFunc("FindNextFileA", irtypes.I32,
+	findNext := getOrDeclareFunc(module, "FindNextFileA", irtypes.I32,
 		ir.NewParam("hFindFile", irtypes.I8Ptr),
 		ir.NewParam("lpFindFileData", irtypes.I8Ptr))
-	findNext.FuncAttrs = append(findNext.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_dir_next_name", irtypes.I8Ptr,
 		ir.NewParam("handle", irtypes.I8Ptr))
@@ -920,9 +878,8 @@ func (p *WindowsPAL) EmitDirNextName(module *ir.Module) *ir.Func {
 // Calls FindClose on the stored HANDLE, then frees the state struct.
 func (p *WindowsPAL) EmitDirClose(module *ir.Module) *ir.Func {
 	// declare i32 @FindClose(i8*) nounwind
-	findClose := module.NewFunc("FindClose", irtypes.I32,
+	findClose := getOrDeclareFunc(module, "FindClose", irtypes.I32,
 		ir.NewParam("hFindFile", irtypes.I8Ptr))
-	findClose.FuncAttrs = append(findClose.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	palFree := lookupFunc(module, "pal_free")
 
@@ -945,9 +902,8 @@ func (p *WindowsPAL) EmitDirClose(module *ir.Module) *ir.Func {
 // EmitGetEnv declares UCRT @getenv and defines @pal_getenv.
 // Signature: @pal_getenv(i8* name) → i8* (value or null)
 func (p *WindowsPAL) EmitGetEnv(module *ir.Module) *ir.Func {
-	getenvFn := module.NewFunc("getenv", irtypes.I8Ptr,
+	getenvFn := getOrDeclareFunc(module, "getenv", irtypes.I8Ptr,
 		ir.NewParam("name", irtypes.I8Ptr))
-	getenvFn.FuncAttrs = append(getenvFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_getenv", irtypes.I8Ptr,
 		ir.NewParam("name", irtypes.I8Ptr))
@@ -961,10 +917,9 @@ func (p *WindowsPAL) EmitGetEnv(module *ir.Module) *ir.Func {
 // EmitSetEnv declares UCRT @_putenv_s and defines @pal_setenv.
 func (p *WindowsPAL) EmitSetEnv(module *ir.Module) *ir.Func {
 	// Windows _putenv_s(name, value) returns 0 on success, errno on error
-	putenvsFn := module.NewFunc("_putenv_s", irtypes.I32,
+	putenvsFn := getOrDeclareFunc(module, "_putenv_s", irtypes.I32,
 		ir.NewParam("name", irtypes.I8Ptr),
 		ir.NewParam("value", irtypes.I8Ptr))
-	putenvsFn.FuncAttrs = append(putenvsFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_setenv", irtypes.I32,
 		ir.NewParam("name", irtypes.I8Ptr),
@@ -981,13 +936,9 @@ func (p *WindowsPAL) EmitSetEnv(module *ir.Module) *ir.Func {
 // EmitUnsetEnv uses _putenv_s with empty string to unset on Windows.
 func (p *WindowsPAL) EmitUnsetEnv(module *ir.Module) *ir.Func {
 	// On Windows, _putenv_s(name, "") removes the variable
-	putenvsFn := lookupFunc(module, "_putenv_s")
-	if putenvsFn == nil {
-		putenvsFn = module.NewFunc("_putenv_s", irtypes.I32,
-			ir.NewParam("name", irtypes.I8Ptr),
-			ir.NewParam("value", irtypes.I8Ptr))
-		putenvsFn.FuncAttrs = append(putenvsFn.FuncAttrs, enum.FuncAttrNoUnwind)
-	}
+	putenvsFn := getOrDeclareFunc(module, "_putenv_s", irtypes.I32,
+		ir.NewParam("name", irtypes.I8Ptr),
+		ir.NewParam("value", irtypes.I8Ptr))
 
 	fn := module.NewFunc("pal_unsetenv", irtypes.I32,
 		ir.NewParam("name", irtypes.I8Ptr))
@@ -1005,9 +956,8 @@ func (p *WindowsPAL) EmitUnsetEnv(module *ir.Module) *ir.Func {
 
 // EmitChdir declares UCRT @_chdir and defines @pal_chdir.
 func (p *WindowsPAL) EmitChdir(module *ir.Module) *ir.Func {
-	chdirFn := module.NewFunc("_chdir", irtypes.I32,
+	chdirFn := getOrDeclareFunc(module, "_chdir", irtypes.I32,
 		ir.NewParam("path", irtypes.I8Ptr))
-	chdirFn.FuncAttrs = append(chdirFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_chdir", irtypes.I32,
 		ir.NewParam("path", irtypes.I8Ptr))
@@ -1164,10 +1114,9 @@ func (p *WindowsPAL) EmitStackOverflowThreadInit(module *ir.Module) *ir.Func {
 // Signature: @pal_getcwd(i8* buf, i64 len) → i8* (buf or null)
 func (p *WindowsPAL) EmitGetCwd(module *ir.Module) *ir.Func {
 	// Windows _getcwd takes (char* buf, int maxlen) — i32 for length
-	getcwdFn := module.NewFunc("_getcwd", irtypes.I8Ptr,
+	getcwdFn := getOrDeclareFunc(module, "_getcwd", irtypes.I8Ptr,
 		ir.NewParam("buf", irtypes.I8Ptr),
 		ir.NewParam("maxlen", irtypes.I32))
-	getcwdFn.FuncAttrs = append(getcwdFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_getcwd", irtypes.I8Ptr,
 		ir.NewParam("buf", irtypes.I8Ptr),

@@ -18,12 +18,12 @@ func (p *WasmPAL) EmitWrite(module *ir.Module) *ir.Func {
 	ciovecType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I32)
 
 	// declare i32 @fd_write(i32, {i8*, i32}*, i32, i32*)
-	fdWrite := module.NewFunc("fd_write", irtypes.I32,
+	fdWrite := getOrDeclareFunc(module, "fd_write", irtypes.I32,
 		ir.NewParam("fd", irtypes.I32),
 		ir.NewParam("iovs", irtypes.NewPointer(ciovecType)),
 		ir.NewParam("iovs_len", irtypes.I32),
 		ir.NewParam("nwritten", irtypes.NewPointer(irtypes.I32)))
-	fdWrite.FuncAttrs = append(fdWrite.FuncAttrs, enum.FuncAttrNoUnwind,
+	fdWrite.FuncAttrs = append(fdWrite.FuncAttrs,
 		ir.AttrPair{Key: "wasm-import-module", Value: "wasi_snapshot_preview1"},
 		ir.AttrPair{Key: "wasm-import-name", Value: "fd_write"})
 
@@ -67,10 +67,10 @@ func (p *WasmPAL) EmitWrite(module *ir.Module) *ir.Func {
 // Signature: @pal_exit(i32 %code) → void [noreturn]
 func (p *WasmPAL) EmitExit(module *ir.Module) *ir.Func {
 	// declare void @proc_exit(i32) noreturn
-	procExit := module.NewFunc("proc_exit", irtypes.Void,
+	procExit := getOrDeclareFunc(module, "proc_exit", irtypes.Void,
 		ir.NewParam("rval", irtypes.I32))
+	addFuncAttr(procExit, enum.FuncAttrNoReturn)
 	procExit.FuncAttrs = append(procExit.FuncAttrs,
-		enum.FuncAttrNoReturn, enum.FuncAttrNoUnwind,
 		ir.AttrPair{Key: "wasm-import-module", Value: "wasi_snapshot_preview1"},
 		ir.AttrPair{Key: "wasm-import-name", Value: "proc_exit"})
 
@@ -97,9 +97,9 @@ func (p *WasmPAL) EmitAlloc(module *ir.Module) *ir.Func {
 	// declare noalias i8* @malloc(i32 noundef) nounwind
 	mallocSize := ir.NewParam("size", irtypes.I32)
 	mallocSize.Attrs = append(mallocSize.Attrs, enum.ParamAttrNoUndef)
-	mallocFn := module.NewFunc("malloc", irtypes.I8Ptr, mallocSize)
+	mallocFn := getOrDeclareFunc(module, "malloc", irtypes.I8Ptr, mallocSize)
 	mallocFn.ReturnAttrs = append(mallocFn.ReturnAttrs, enum.ReturnAttrNoAlias)
-	mallocFn.FuncAttrs = append(mallocFn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
+	addFuncAttr(mallocFn, enum.FuncAttrWillReturn)
 
 	// define noalias i8* @pal_alloc(i64 %size) nounwind
 	fn := module.NewFunc("pal_alloc", irtypes.I8Ptr,
@@ -121,8 +121,8 @@ func (p *WasmPAL) EmitFree(module *ir.Module) *ir.Func {
 	// declare void @free(i8* nocapture noundef) nounwind
 	freePtr := ir.NewParam("ptr", irtypes.I8Ptr)
 	freePtr.Attrs = append(freePtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
-	freeFn := module.NewFunc("free", irtypes.Void, freePtr)
-	freeFn.FuncAttrs = append(freeFn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
+	freeFn := getOrDeclareFunc(module, "free", irtypes.Void, freePtr)
+	addFuncAttr(freeFn, enum.FuncAttrWillReturn)
 
 	// define void @pal_free(i8* %ptr) nounwind willreturn
 	fn := module.NewFunc("pal_free", irtypes.Void,
@@ -142,9 +142,9 @@ func (p *WasmPAL) EmitRealloc(module *ir.Module) *ir.Func {
 	reallocPtr.Attrs = append(reallocPtr.Attrs, enum.ParamAttrNoCapture, enum.ParamAttrNoUndef)
 	reallocSize := ir.NewParam("size", irtypes.I32)
 	reallocSize.Attrs = append(reallocSize.Attrs, enum.ParamAttrNoUndef)
-	reallocFn := module.NewFunc("realloc", irtypes.I8Ptr, reallocPtr, reallocSize)
+	reallocFn := getOrDeclareFunc(module, "realloc", irtypes.I8Ptr, reallocPtr, reallocSize)
 	reallocFn.ReturnAttrs = append(reallocFn.ReturnAttrs, enum.ReturnAttrNoAlias)
-	reallocFn.FuncAttrs = append(reallocFn.FuncAttrs, enum.FuncAttrNoUnwind, enum.FuncAttrWillReturn)
+	addFuncAttr(reallocFn, enum.FuncAttrWillReturn)
 
 	// define noalias i8* @pal_realloc(i8* %ptr, i64 %size) nounwind
 	fn := module.NewFunc("pal_realloc", irtypes.I8Ptr,

@@ -18,11 +18,10 @@ type PosixPAL struct {
 // Signature: @pal_write(i32 %fd, i8* %buf, i64 %len) → i64
 func (p *PosixPAL) EmitWrite(module *ir.Module) *ir.Func {
 	// declare i64 @write(i32, i8*, i64)
-	writeFn := module.NewFunc("write", irtypes.I64,
+	writeFn := getOrDeclareFunc(module, "write", irtypes.I64,
 		ir.NewParam("fd", irtypes.I32),
 		ir.NewParam("buf", irtypes.I8Ptr),
 		ir.NewParam("len", irtypes.I64))
-	writeFn.FuncAttrs = append(writeFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// define i64 @pal_write(i32 %fd, i8* %buf, i64 %len)
 	fn := module.NewFunc("pal_write", irtypes.I64,
@@ -40,9 +39,9 @@ func (p *PosixPAL) EmitWrite(module *ir.Module) *ir.Func {
 // Signature: @pal_exit(i32 %code) → void [noreturn]
 func (p *PosixPAL) EmitExit(module *ir.Module) *ir.Func {
 	// declare void @exit(i32) noreturn
-	exitFn := module.NewFunc("exit", irtypes.Void,
+	exitFn := getOrDeclareFunc(module, "exit", irtypes.Void,
 		ir.NewParam("code", irtypes.I32))
-	exitFn.FuncAttrs = append(exitFn.FuncAttrs, enum.FuncAttrNoReturn, enum.FuncAttrNoUnwind)
+	addFuncAttr(exitFn, enum.FuncAttrNoReturn)
 
 	// define void @pal_exit(i32 %code) noreturn
 	fn := module.NewFunc("pal_exit", irtypes.Void,
@@ -68,36 +67,31 @@ func (p *PosixPAL) EmitThreadCreate(module *ir.Module) *ir.Func {
 	palAlloc := lookupFunc(module, "pal_alloc")
 
 	// declare i32 @pthread_attr_init(i8*) nounwind
-	pthreadAttrInit := module.NewFunc("pthread_attr_init", irtypes.I32,
+	pthreadAttrInit := getOrDeclareFunc(module, "pthread_attr_init", irtypes.I32,
 		ir.NewParam("attr", irtypes.I8Ptr))
-	pthreadAttrInit.FuncAttrs = append(pthreadAttrInit.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// declare i32 @pthread_attr_setstacksize(i8*, i64) nounwind
-	pthreadAttrSetStackSize := module.NewFunc("pthread_attr_setstacksize", irtypes.I32,
+	pthreadAttrSetStackSize := getOrDeclareFunc(module, "pthread_attr_setstacksize", irtypes.I32,
 		ir.NewParam("attr", irtypes.I8Ptr),
 		ir.NewParam("stacksize", irtypes.I64))
-	pthreadAttrSetStackSize.FuncAttrs = append(pthreadAttrSetStackSize.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// declare i32 @pthread_attr_setguardsize(i8*, i64) nounwind
 	// Explicit guard page (B0010) — ensures a PROT_NONE page at the bottom
 	// of the thread stack. Hits SIGSEGV on stack overflow instead of silent corruption.
-	pthreadAttrSetGuardSize := module.NewFunc("pthread_attr_setguardsize", irtypes.I32,
+	pthreadAttrSetGuardSize := getOrDeclareFunc(module, "pthread_attr_setguardsize", irtypes.I32,
 		ir.NewParam("attr", irtypes.I8Ptr),
 		ir.NewParam("guardsize", irtypes.I64))
-	pthreadAttrSetGuardSize.FuncAttrs = append(pthreadAttrSetGuardSize.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// declare i32 @pthread_attr_destroy(i8*) nounwind
-	pthreadAttrDestroy := module.NewFunc("pthread_attr_destroy", irtypes.I32,
+	pthreadAttrDestroy := getOrDeclareFunc(module, "pthread_attr_destroy", irtypes.I32,
 		ir.NewParam("attr", irtypes.I8Ptr))
-	pthreadAttrDestroy.FuncAttrs = append(pthreadAttrDestroy.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// declare i32 @pthread_create(i8*, i8*, i8*(i8*)*, i8*) nounwind
-	pthreadCreate := module.NewFunc("pthread_create", irtypes.I32,
+	pthreadCreate := getOrDeclareFunc(module, "pthread_create", irtypes.I32,
 		ir.NewParam("thread", irtypes.I8Ptr),
 		ir.NewParam("attr", irtypes.I8Ptr),
 		ir.NewParam("start_routine", threadFnPtrType()),
 		ir.NewParam("arg", irtypes.I8Ptr))
-	pthreadCreate.FuncAttrs = append(pthreadCreate.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// define i8* @pal_thread_create(i8* %fn, i8* %arg) nounwind
 	fn := module.NewFunc("pal_thread_create", irtypes.I8Ptr,
@@ -137,10 +131,9 @@ func (p *PosixPAL) EmitThreadJoin(module *ir.Module) *ir.Func {
 
 	// declare i32 @pthread_join(i8*, i8**) nounwind
 	// Using i8* for pthread_t (8 bytes on both macOS and Linux 64-bit)
-	pthreadJoin := module.NewFunc("pthread_join", irtypes.I32,
+	pthreadJoin := getOrDeclareFunc(module, "pthread_join", irtypes.I32,
 		ir.NewParam("thread", irtypes.I8Ptr),
 		ir.NewParam("retval", irtypes.NewPointer(irtypes.I8Ptr)))
-	pthreadJoin.FuncAttrs = append(pthreadJoin.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// define void @pal_thread_join(i8* %handle) nounwind
 	fn := module.NewFunc("pal_thread_join", irtypes.Void,
@@ -168,10 +161,9 @@ func (p *PosixPAL) EmitMutexInit(module *ir.Module) *ir.Func {
 	palAlloc := lookupFunc(module, "pal_alloc")
 
 	// declare i32 @pthread_mutex_init(i8*, i8*) nounwind
-	pthreadMutexInit := module.NewFunc("pthread_mutex_init", irtypes.I32,
+	pthreadMutexInit := getOrDeclareFunc(module, "pthread_mutex_init", irtypes.I32,
 		ir.NewParam("mutex", irtypes.I8Ptr),
 		ir.NewParam("attr", irtypes.I8Ptr))
-	pthreadMutexInit.FuncAttrs = append(pthreadMutexInit.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// define i8* @pal_mutex_init() nounwind
 	fn := module.NewFunc("pal_mutex_init", irtypes.I8Ptr)
@@ -186,9 +178,8 @@ func (p *PosixPAL) EmitMutexInit(module *ir.Module) *ir.Func {
 
 // EmitMutexLock declares pthread_mutex_lock and defines @pal_mutex_lock.
 func (p *PosixPAL) EmitMutexLock(module *ir.Module) *ir.Func {
-	pthreadMutexLock := module.NewFunc("pthread_mutex_lock", irtypes.I32,
+	pthreadMutexLock := getOrDeclareFunc(module, "pthread_mutex_lock", irtypes.I32,
 		ir.NewParam("mutex", irtypes.I8Ptr))
-	pthreadMutexLock.FuncAttrs = append(pthreadMutexLock.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_mutex_lock", irtypes.Void,
 		ir.NewParam("mutex", irtypes.I8Ptr))
@@ -201,9 +192,8 @@ func (p *PosixPAL) EmitMutexLock(module *ir.Module) *ir.Func {
 
 // EmitMutexUnlock declares pthread_mutex_unlock and defines @pal_mutex_unlock.
 func (p *PosixPAL) EmitMutexUnlock(module *ir.Module) *ir.Func {
-	pthreadMutexUnlock := module.NewFunc("pthread_mutex_unlock", irtypes.I32,
+	pthreadMutexUnlock := getOrDeclareFunc(module, "pthread_mutex_unlock", irtypes.I32,
 		ir.NewParam("mutex", irtypes.I8Ptr))
-	pthreadMutexUnlock.FuncAttrs = append(pthreadMutexUnlock.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_mutex_unlock", irtypes.Void,
 		ir.NewParam("mutex", irtypes.I8Ptr))
@@ -218,9 +208,8 @@ func (p *PosixPAL) EmitMutexUnlock(module *ir.Module) *ir.Func {
 func (p *PosixPAL) EmitMutexDestroy(module *ir.Module) *ir.Func {
 	palFree := lookupFunc(module, "pal_free")
 
-	pthreadMutexDestroy := module.NewFunc("pthread_mutex_destroy", irtypes.I32,
+	pthreadMutexDestroy := getOrDeclareFunc(module, "pthread_mutex_destroy", irtypes.I32,
 		ir.NewParam("mutex", irtypes.I8Ptr))
-	pthreadMutexDestroy.FuncAttrs = append(pthreadMutexDestroy.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_mutex_destroy", irtypes.Void,
 		ir.NewParam("mutex", irtypes.I8Ptr))
@@ -237,10 +226,9 @@ func (p *PosixPAL) EmitMutexDestroy(module *ir.Module) *ir.Func {
 func (p *PosixPAL) EmitCondInit(module *ir.Module) *ir.Func {
 	palAlloc := lookupFunc(module, "pal_alloc")
 
-	pthreadCondInit := module.NewFunc("pthread_cond_init", irtypes.I32,
+	pthreadCondInit := getOrDeclareFunc(module, "pthread_cond_init", irtypes.I32,
 		ir.NewParam("cond", irtypes.I8Ptr),
 		ir.NewParam("attr", irtypes.I8Ptr))
-	pthreadCondInit.FuncAttrs = append(pthreadCondInit.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_cond_init", irtypes.I8Ptr)
 	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
@@ -254,10 +242,9 @@ func (p *PosixPAL) EmitCondInit(module *ir.Module) *ir.Func {
 
 // EmitCondWait declares pthread_cond_wait and defines @pal_cond_wait.
 func (p *PosixPAL) EmitCondWait(module *ir.Module) *ir.Func {
-	pthreadCondWait := module.NewFunc("pthread_cond_wait", irtypes.I32,
+	pthreadCondWait := getOrDeclareFunc(module, "pthread_cond_wait", irtypes.I32,
 		ir.NewParam("cond", irtypes.I8Ptr),
 		ir.NewParam("mutex", irtypes.I8Ptr))
-	pthreadCondWait.FuncAttrs = append(pthreadCondWait.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_cond_wait", irtypes.Void,
 		ir.NewParam("cond", irtypes.I8Ptr),
@@ -271,9 +258,8 @@ func (p *PosixPAL) EmitCondWait(module *ir.Module) *ir.Func {
 
 // EmitCondSignal declares pthread_cond_signal and defines @pal_cond_signal.
 func (p *PosixPAL) EmitCondSignal(module *ir.Module) *ir.Func {
-	pthreadCondSignal := module.NewFunc("pthread_cond_signal", irtypes.I32,
+	pthreadCondSignal := getOrDeclareFunc(module, "pthread_cond_signal", irtypes.I32,
 		ir.NewParam("cond", irtypes.I8Ptr))
-	pthreadCondSignal.FuncAttrs = append(pthreadCondSignal.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_cond_signal", irtypes.Void,
 		ir.NewParam("cond", irtypes.I8Ptr))
@@ -286,9 +272,8 @@ func (p *PosixPAL) EmitCondSignal(module *ir.Module) *ir.Func {
 
 // EmitCondBroadcast declares pthread_cond_broadcast and defines @pal_cond_broadcast.
 func (p *PosixPAL) EmitCondBroadcast(module *ir.Module) *ir.Func {
-	pthreadCondBroadcast := module.NewFunc("pthread_cond_broadcast", irtypes.I32,
+	pthreadCondBroadcast := getOrDeclareFunc(module, "pthread_cond_broadcast", irtypes.I32,
 		ir.NewParam("cond", irtypes.I8Ptr))
-	pthreadCondBroadcast.FuncAttrs = append(pthreadCondBroadcast.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_cond_broadcast", irtypes.Void,
 		ir.NewParam("cond", irtypes.I8Ptr))
@@ -303,9 +288,8 @@ func (p *PosixPAL) EmitCondBroadcast(module *ir.Module) *ir.Func {
 func (p *PosixPAL) EmitCondDestroy(module *ir.Module) *ir.Func {
 	palFree := lookupFunc(module, "pal_free")
 
-	pthreadCondDestroy := module.NewFunc("pthread_cond_destroy", irtypes.I32,
+	pthreadCondDestroy := getOrDeclareFunc(module, "pthread_cond_destroy", irtypes.I32,
 		ir.NewParam("cond", irtypes.I8Ptr))
-	pthreadCondDestroy.FuncAttrs = append(pthreadCondDestroy.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_cond_destroy", irtypes.Void,
 		ir.NewParam("cond", irtypes.I8Ptr))
@@ -332,47 +316,25 @@ func (p *PosixPAL) getOrDeclareErrnoLocFn(module *ir.Module) *ir.Func {
 	if p.isMacOS() {
 		name = "__error"
 	}
-	for _, fn := range module.Funcs {
-		if fn.Name() == name {
-			return fn
-		}
-	}
-	fn := module.NewFunc(name, irtypes.NewPointer(irtypes.I32))
-	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	return fn
+	return getOrDeclareFunc(module, name, irtypes.NewPointer(irtypes.I32))
 }
 
 // getOrDeclareOpendir returns (or declares) libc @opendir(i8*) → i8*.
 func (p *PosixPAL) getOrDeclareOpendir(module *ir.Module) *ir.Func {
-	if fn := lookupFunc(module, "opendir"); fn != nil {
-		return fn
-	}
-	fn := module.NewFunc("opendir", irtypes.I8Ptr,
+	return getOrDeclareFunc(module, "opendir", irtypes.I8Ptr,
 		ir.NewParam("dirname", irtypes.I8Ptr))
-	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	return fn
 }
 
 // getOrDeclareClosedir returns (or declares) libc @closedir(i8*) → i32.
 func (p *PosixPAL) getOrDeclareClosedir(module *ir.Module) *ir.Func {
-	if fn := lookupFunc(module, "closedir"); fn != nil {
-		return fn
-	}
-	fn := module.NewFunc("closedir", irtypes.I32,
+	return getOrDeclareFunc(module, "closedir", irtypes.I32,
 		ir.NewParam("dirp", irtypes.I8Ptr))
-	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	return fn
 }
 
 // getOrDeclareReaddir returns (or declares) libc @readdir(i8*) → i8*.
 func (p *PosixPAL) getOrDeclareReaddir(module *ir.Module) *ir.Func {
-	if fn := lookupFunc(module, "readdir"); fn != nil {
-		return fn
-	}
-	fn := module.NewFunc("readdir", irtypes.I8Ptr,
+	return getOrDeclareFunc(module, "readdir", irtypes.I8Ptr,
 		ir.NewParam("dirp", irtypes.I8Ptr))
-	fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoUnwind)
-	return fn
 }
 
 // emitNegErrnoReturn emits a block that reads errno and returns -errno.
@@ -399,11 +361,10 @@ func (p *PosixPAL) EmitFileOpen(module *ir.Module) *ir.Func {
 	// declare i32 @open(i8*, i32, ...) nounwind
 	// open() is variadic: mode_t is a variadic arg, which matters on AArch64
 	// Apple where variadic args are passed on the stack, not in registers.
-	openFn := module.NewFunc("open", irtypes.I32,
+	openFn := getOrDeclareFunc(module, "open", irtypes.I32,
 		ir.NewParam("path", irtypes.I8Ptr),
 		ir.NewParam("oflag", irtypes.I32))
 	openFn.Sig.Variadic = true
-	openFn.FuncAttrs = append(openFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// Platform-specific O_* flag constants
 	var oRDWR, oRDONLY, oCreateTrunc, oCreateAppend int64
@@ -453,11 +414,10 @@ func (p *PosixPAL) EmitFileOpen(module *ir.Module) *ir.Func {
 // EmitFileRead declares libc @read and defines @pal_file_read.
 func (p *PosixPAL) EmitFileRead(module *ir.Module) *ir.Func {
 	// declare i64 @read(i32, i8*, i64) nounwind
-	readFn := module.NewFunc("read", irtypes.I64,
+	readFn := getOrDeclareFunc(module, "read", irtypes.I64,
 		ir.NewParam("fd", irtypes.I32),
 		ir.NewParam("buf", irtypes.I8Ptr),
 		ir.NewParam("nbyte", irtypes.I64))
-	readFn.FuncAttrs = append(readFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_file_read", irtypes.I64,
 		ir.NewParam("fd", irtypes.I32),
@@ -482,14 +442,10 @@ func (p *PosixPAL) EmitFileRead(module *ir.Module) *ir.Func {
 // and defines @pal_file_write.
 func (p *PosixPAL) EmitFileWrite(module *ir.Module) *ir.Func {
 	// Reuse existing write declaration if already emitted by EmitWrite
-	writeFn := lookupFunc(module, "write")
-	if writeFn == nil {
-		writeFn = module.NewFunc("write", irtypes.I64,
-			ir.NewParam("fd", irtypes.I32),
-			ir.NewParam("buf", irtypes.I8Ptr),
-			ir.NewParam("len", irtypes.I64))
-		writeFn.FuncAttrs = append(writeFn.FuncAttrs, enum.FuncAttrNoUnwind)
-	}
+	writeFn := getOrDeclareFunc(module, "write", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("len", irtypes.I64))
 
 	fn := module.NewFunc("pal_file_write", irtypes.I64,
 		ir.NewParam("fd", irtypes.I32),
@@ -512,9 +468,8 @@ func (p *PosixPAL) EmitFileWrite(module *ir.Module) *ir.Func {
 
 // EmitFileClose declares libc @close and defines @pal_file_close.
 func (p *PosixPAL) EmitFileClose(module *ir.Module) *ir.Func {
-	closeFn := module.NewFunc("close", irtypes.I32,
+	closeFn := getOrDeclareFunc(module, "close", irtypes.I32,
 		ir.NewParam("fd", irtypes.I32))
-	closeFn.FuncAttrs = append(closeFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_file_close", irtypes.I32,
 		ir.NewParam("fd", irtypes.I32))
@@ -535,11 +490,10 @@ func (p *PosixPAL) EmitFileClose(module *ir.Module) *ir.Func {
 
 // EmitFileSeek declares libc @lseek and defines @pal_file_seek.
 func (p *PosixPAL) EmitFileSeek(module *ir.Module) *ir.Func {
-	lseekFn := module.NewFunc("lseek", irtypes.I64,
+	lseekFn := getOrDeclareFunc(module, "lseek", irtypes.I64,
 		ir.NewParam("fd", irtypes.I32),
 		ir.NewParam("offset", irtypes.I64),
 		ir.NewParam("whence", irtypes.I32))
-	lseekFn.FuncAttrs = append(lseekFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_file_seek", irtypes.I64,
 		ir.NewParam("fd", irtypes.I32),
@@ -598,9 +552,8 @@ func (p *PosixPAL) EmitFileStatSize(module *ir.Module) *ir.Func {
 
 // EmitFileRemove declares libc @unlink and defines @pal_file_remove.
 func (p *PosixPAL) EmitFileRemove(module *ir.Module) *ir.Func {
-	unlinkFn := module.NewFunc("unlink", irtypes.I32,
+	unlinkFn := getOrDeclareFunc(module, "unlink", irtypes.I32,
 		ir.NewParam("path", irtypes.I8Ptr))
-	unlinkFn.FuncAttrs = append(unlinkFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_file_remove", irtypes.I32,
 		ir.NewParam("path", irtypes.I8Ptr))
@@ -622,10 +575,9 @@ func (p *PosixPAL) EmitFileRemove(module *ir.Module) *ir.Func {
 // EmitFileExists declares libc @access and defines @pal_file_exists.
 // Uses access(path, F_OK=0) to check existence.
 func (p *PosixPAL) EmitFileExists(module *ir.Module) *ir.Func {
-	accessFn := module.NewFunc("access", irtypes.I32,
+	accessFn := getOrDeclareFunc(module, "access", irtypes.I32,
 		ir.NewParam("path", irtypes.I8Ptr),
 		ir.NewParam("amode", irtypes.I32))
-	accessFn.FuncAttrs = append(accessFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_file_exists", irtypes.I32,
 		ir.NewParam("path", irtypes.I8Ptr))
@@ -643,10 +595,9 @@ func (p *PosixPAL) EmitFileExists(module *ir.Module) *ir.Func {
 // EmitFileMkdir declares libc @mkdir and defines @pal_file_mkdir.
 // Uses mode 0755 (493 decimal).
 func (p *PosixPAL) EmitFileMkdir(module *ir.Module) *ir.Func {
-	mkdirFn := module.NewFunc("mkdir", irtypes.I32,
+	mkdirFn := getOrDeclareFunc(module, "mkdir", irtypes.I32,
 		ir.NewParam("path", irtypes.I8Ptr),
 		ir.NewParam("mode", irtypes.I32))
-	mkdirFn.FuncAttrs = append(mkdirFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_file_mkdir", irtypes.I32,
 		ir.NewParam("path", irtypes.I8Ptr))
@@ -667,9 +618,8 @@ func (p *PosixPAL) EmitFileMkdir(module *ir.Module) *ir.Func {
 
 // EmitDirRemove declares libc @rmdir and defines @pal_dir_remove.
 func (p *PosixPAL) EmitDirRemove(module *ir.Module) *ir.Func {
-	rmdirFn := module.NewFunc("rmdir", irtypes.I32,
+	rmdirFn := getOrDeclareFunc(module, "rmdir", irtypes.I32,
 		ir.NewParam("path", irtypes.I8Ptr))
-	rmdirFn.FuncAttrs = append(rmdirFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_dir_remove", irtypes.I32,
 		ir.NewParam("path", irtypes.I8Ptr))
@@ -732,9 +682,8 @@ func (p *PosixPAL) EmitErrno(module *ir.Module) *ir.Func {
 // Uses _SC_NPROCESSORS_ONLN which differs between macOS (58) and Linux (84).
 func (p *PosixPAL) EmitNumCPUs(module *ir.Module) *ir.Func {
 	// declare i64 @sysconf(i32) nounwind
-	sysconfFn := module.NewFunc("sysconf", irtypes.I64,
+	sysconfFn := getOrDeclareFunc(module, "sysconf", irtypes.I64,
 		ir.NewParam("name", irtypes.I32))
-	sysconfFn.FuncAttrs = append(sysconfFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// _SC_NPROCESSORS_ONLN: macOS=58, Linux=84
 	scNprocessorsOnln := int64(84) // Linux default
@@ -836,31 +785,28 @@ func (p *PosixPAL) EmitDirClose(module *ir.Module) *ir.Func {
 // Returns child pid on success, -1 on error.
 // Output params receive the read ends of stdout/stderr pipes (caller must close).
 func (p *PosixPAL) EmitSpawn(module *ir.Module) *ir.Func {
-	closeFn := lookupFunc(module, "close")
+	closeFn := getOrDeclareFunc(module, "close", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
 
 	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
 	i32PtrType := irtypes.NewPointer(irtypes.I32)
 
 	// declare i32 @pipe(i32*) nounwind
-	pipeFn := module.NewFunc("pipe", irtypes.I32,
+	pipeFn := getOrDeclareFunc(module, "pipe", irtypes.I32,
 		ir.NewParam("fds", i32PtrType))
-	pipeFn.FuncAttrs = append(pipeFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// declare i32 @fork() nounwind
-	forkFn := module.NewFunc("fork", irtypes.I32)
-	forkFn.FuncAttrs = append(forkFn.FuncAttrs, enum.FuncAttrNoUnwind)
+	forkFn := getOrDeclareFunc(module, "fork", irtypes.I32)
 
 	// declare i32 @dup2(i32, i32) nounwind
-	dup2Fn := module.NewFunc("dup2", irtypes.I32,
+	dup2Fn := getOrDeclareFunc(module, "dup2", irtypes.I32,
 		ir.NewParam("oldfd", irtypes.I32),
 		ir.NewParam("newfd", irtypes.I32))
-	dup2Fn.FuncAttrs = append(dup2Fn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// declare i32 @execvp(i8*, i8**) nounwind
-	execvpFn := module.NewFunc("execvp", irtypes.I32,
+	execvpFn := getOrDeclareFunc(module, "execvp", irtypes.I32,
 		ir.NewParam("file", irtypes.I8Ptr),
 		ir.NewParam("argv", i8PtrPtrType))
-	execvpFn.FuncAttrs = append(execvpFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// declare void @_exit(i32) noreturn nounwind
 	exitFn := getOrDeclareFunc(module, "_exit", irtypes.Void,
@@ -974,8 +920,12 @@ func (p *PosixPAL) EmitSpawn(module *ir.Module) *ir.Func {
 func (p *PosixPAL) EmitReadPipe(module *ir.Module) *ir.Func {
 	palAlloc := lookupFunc(module, "pal_alloc")
 	palRealloc := lookupFunc(module, "pal_realloc")
-	readFn := lookupFunc(module, "read")
-	closeFn := lookupFunc(module, "close")
+	readFn := getOrDeclareFunc(module, "read", irtypes.I64,
+		ir.NewParam("fd", irtypes.I32),
+		ir.NewParam("buf", irtypes.I8Ptr),
+		ir.NewParam("nbyte", irtypes.I64))
+	closeFn := getOrDeclareFunc(module, "close", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
 
 	fn := module.NewFunc("pal_read_pipe", irtypes.Void,
 		ir.NewParam("fd", irtypes.I32),
@@ -1037,11 +987,10 @@ func (p *PosixPAL) EmitWaitPid(module *ir.Module) *ir.Func {
 	i32PtrType := irtypes.NewPointer(irtypes.I32)
 
 	// declare i32 @waitpid(i32, i32*, i32) nounwind
-	waitpidFn := module.NewFunc("waitpid", irtypes.I32,
+	waitpidFn := getOrDeclareFunc(module, "waitpid", irtypes.I32,
 		ir.NewParam("pid", irtypes.I32),
 		ir.NewParam("status", i32PtrType),
 		ir.NewParam("options", irtypes.I32))
-	waitpidFn.FuncAttrs = append(waitpidFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_wait_pid", irtypes.I32,
 		ir.NewParam("pid", irtypes.I32))
@@ -1087,7 +1036,8 @@ func (p *PosixPAL) EmitWaitPid(module *ir.Module) *ir.Func {
 // Returns child pid on success, -1 on error.
 // out_stdin_fd receives the write end of the stdin pipe; out_stdout/stderr_fd receive read ends.
 func (p *PosixPAL) EmitSpawnStreaming(module *ir.Module) *ir.Func {
-	closeFn := lookupFunc(module, "close")
+	closeFn := getOrDeclareFunc(module, "close", irtypes.I32,
+		ir.NewParam("fd", irtypes.I32))
 
 	i8PtrPtrType := irtypes.NewPointer(irtypes.I8Ptr)
 	i32PtrType := irtypes.NewPointer(irtypes.I32)
@@ -1241,10 +1191,9 @@ func (p *PosixPAL) EmitSpawnStreaming(module *ir.Module) *ir.Func {
 // Signature: @pal_kill(i32 pid, i32 signal) → i32
 // Returns 0 on success, -1 on error.
 func (p *PosixPAL) EmitKill(module *ir.Module) *ir.Func {
-	killFn := module.NewFunc("kill", irtypes.I32,
+	killFn := getOrDeclareFunc(module, "kill", irtypes.I32,
 		ir.NewParam("pid", irtypes.I32),
 		ir.NewParam("sig", irtypes.I32))
-	killFn.FuncAttrs = append(killFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_kill", irtypes.I32,
 		ir.NewParam("pid", irtypes.I32),
@@ -1264,9 +1213,8 @@ func (p *PosixPAL) EmitKill(module *ir.Module) *ir.Func {
 // The returned pointer refers to the process environment — caller must NOT free it.
 func (p *PosixPAL) EmitGetEnv(module *ir.Module) *ir.Func {
 	// declare i8* @getenv(i8* name) nounwind
-	getenvFn := module.NewFunc("getenv", irtypes.I8Ptr,
+	getenvFn := getOrDeclareFunc(module, "getenv", irtypes.I8Ptr,
 		ir.NewParam("name", irtypes.I8Ptr))
-	getenvFn.FuncAttrs = append(getenvFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// define i8* @pal_getenv(i8* %name) nounwind
 	fn := module.NewFunc("pal_getenv", irtypes.I8Ptr,
@@ -1282,11 +1230,10 @@ func (p *PosixPAL) EmitGetEnv(module *ir.Module) *ir.Func {
 // Signature: @pal_setenv(i8* name, i8* value) → i32 (0=ok, -1=error)
 func (p *PosixPAL) EmitSetEnv(module *ir.Module) *ir.Func {
 	// declare i32 @setenv(i8* name, i8* value, i32 overwrite) nounwind
-	setenvFn := module.NewFunc("setenv", irtypes.I32,
+	setenvFn := getOrDeclareFunc(module, "setenv", irtypes.I32,
 		ir.NewParam("name", irtypes.I8Ptr),
 		ir.NewParam("value", irtypes.I8Ptr),
 		ir.NewParam("overwrite", irtypes.I32))
-	setenvFn.FuncAttrs = append(setenvFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_setenv", irtypes.I32,
 		ir.NewParam("name", irtypes.I8Ptr),
@@ -1303,9 +1250,8 @@ func (p *PosixPAL) EmitSetEnv(module *ir.Module) *ir.Func {
 // Signature: @pal_unsetenv(i8* name) → i32 (0=ok, -1=error)
 func (p *PosixPAL) EmitUnsetEnv(module *ir.Module) *ir.Func {
 	// declare i32 @unsetenv(i8* name) nounwind
-	unsetenvFn := module.NewFunc("unsetenv", irtypes.I32,
+	unsetenvFn := getOrDeclareFunc(module, "unsetenv", irtypes.I32,
 		ir.NewParam("name", irtypes.I8Ptr))
-	unsetenvFn.FuncAttrs = append(unsetenvFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_unsetenv", irtypes.I32,
 		ir.NewParam("name", irtypes.I8Ptr))
@@ -1320,9 +1266,8 @@ func (p *PosixPAL) EmitUnsetEnv(module *ir.Module) *ir.Func {
 // Signature: @pal_chdir(i8* path) → i32 (0=ok, -1=error)
 func (p *PosixPAL) EmitChdir(module *ir.Module) *ir.Func {
 	// declare i32 @chdir(i8* path) nounwind
-	chdirFn := module.NewFunc("chdir", irtypes.I32,
+	chdirFn := getOrDeclareFunc(module, "chdir", irtypes.I32,
 		ir.NewParam("path", irtypes.I8Ptr))
-	chdirFn.FuncAttrs = append(chdirFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_chdir", irtypes.I32,
 		ir.NewParam("path", irtypes.I8Ptr))
@@ -1338,10 +1283,9 @@ func (p *PosixPAL) EmitChdir(module *ir.Module) *ir.Func {
 // On success returns buf filled with the cwd path. On failure returns null and sets errno.
 func (p *PosixPAL) EmitGetCwd(module *ir.Module) *ir.Func {
 	// declare i8* @getcwd(i8* buf, i64 size) nounwind
-	getcwdFn := module.NewFunc("getcwd", irtypes.I8Ptr,
+	getcwdFn := getOrDeclareFunc(module, "getcwd", irtypes.I8Ptr,
 		ir.NewParam("buf", irtypes.I8Ptr),
 		ir.NewParam("size", irtypes.I64))
-	getcwdFn.FuncAttrs = append(getcwdFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	// define i8* @pal_getcwd(i8* %buf, i64 %len) nounwind
 	fn := module.NewFunc("pal_getcwd", irtypes.I8Ptr,
@@ -1415,9 +1359,8 @@ func (p *PosixPAL) EmitGetUserInfo(module *ir.Module) *ir.Func {
 	passwdPtrType := irtypes.NewPointer(passwdType)
 
 	// declare %struct.passwd* @getpwuid(i32) nounwind
-	getpwuidFn := module.NewFunc("getpwuid", passwdPtrType,
+	getpwuidFn := getOrDeclareFunc(module, "getpwuid", passwdPtrType,
 		ir.NewParam("uid", irtypes.I32))
-	getpwuidFn.FuncAttrs = append(getpwuidFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_get_user_info", irtypes.I32,
 		ir.NewParam("out_name", irtypes.NewPointer(irtypes.I8Ptr)),
@@ -1471,10 +1414,9 @@ func (p *PosixPAL) EmitGetUserInfo(module *ir.Module) *ir.Func {
 func (p *PosixPAL) EmitGetHostname(module *ir.Module) *ir.Func {
 	// declare i32 @gethostname(i8*, i64) nounwind
 	// Note: POSIX says size_t (i64 on 64-bit), but some systems use int. i64 works.
-	gethostnameFn := module.NewFunc("gethostname", irtypes.I32,
+	gethostnameFn := getOrDeclareFunc(module, "gethostname", irtypes.I32,
 		ir.NewParam("name", irtypes.I8Ptr),
 		ir.NewParam("len", irtypes.I64))
-	gethostnameFn.FuncAttrs = append(gethostnameFn.FuncAttrs, enum.FuncAttrNoUnwind)
 
 	fn := module.NewFunc("pal_get_hostname", irtypes.I8Ptr,
 		ir.NewParam("buf", irtypes.I8Ptr),

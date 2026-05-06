@@ -34,9 +34,26 @@ func (c *Compiler) genBlock(block *ast.Block) {
 	c.scopeBindings = c.scopeBindings[:savedScopeLen]
 }
 
+// isStringBorrowExpr returns true if the expression borrows an existing string
+// (e.g., container element access, field access) rather than creating a new one.
+// Borrowed strings should not be freed by the borrower — the owner retains responsibility.
+func isStringBorrowExpr(expr ast.Expr) bool {
+	switch expr.(type) {
+	case *ast.IndexExpr:
+		return true // vector[i], map[key] — borrows from container
+	case *ast.MemberExpr:
+		return true // obj.field — borrows from struct
+	case *ast.IdentExpr:
+		return true // variable reference — handled by clearDropFlag on RHS
+	default:
+		return false
+	}
+}
+
 // genBlockValue generates a block like genBlock, but returns the value of the
 // last expression statement (if any). Avoids the double-generation that would
 // occur if genBlock + separate genExpr on the last statement were used.
+
 func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 	if block == nil {
 		return nil
@@ -57,6 +74,12 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 					c.genAutoPropagate(es.Expr)
 				} else {
 					result = c.genExpr(es.Expr)
+					// Clear drop flag for ident block result — the value is being
+					// moved out of the block scope. Without this, scope cleanup would
+					// free the string while the outer scope still holds the pointer.
+					if ident, ok := es.Expr.(*ast.IdentExpr); ok {
+						c.clearDropFlag(ident.Name)
+					}
 				}
 				break
 			}
@@ -287,6 +310,11 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 		val = c.coerceToView(val, exprType, coerceTarget)
 	}
 
+	// Clear drop flag on RHS if it's a variable being moved into this declaration.
+	if ident, ok := s.Value.(*ast.IdentExpr); ok {
+		c.clearDropFlag(ident.Name)
+	}
+
 	c.block.NewStore(val, alloca)
 	c.locals[s.Name] = alloca
 	// Use declared type if available, otherwise fall back to expression type
@@ -295,6 +323,10 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 		dropType = exprType
 	}
 	c.maybeRegisterDrop(s.Name, alloca, dropType)
+	// Clear string drop flag when RHS is a borrow (container element, field access).
+	if extractNamed(dropType) == types.TypString && isStringBorrowExpr(s.Value) {
+		c.clearDropFlag(s.Name)
+	}
 	c.maybeRegisterEnvFree(s.Name, alloca, dropType)
 }
 
@@ -313,9 +345,20 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 		val = c.genAutoPropagateValue(val)
 	}
 
+	// Clear drop flag on RHS if it's a variable being moved into this declaration.
+	// Without this, `b := a` would leave both a and b with active drop flags → double-free.
+	if ident, ok := s.Value.(*ast.IdentExpr); ok {
+		c.clearDropFlag(ident.Name)
+	}
+
 	c.block.NewStore(val, alloca)
 	c.locals[s.Name] = alloca
 	c.maybeRegisterDrop(s.Name, alloca, typ)
+	// Clear string drop flag when RHS is a borrow (container element, field access).
+	// The container/struct still owns the string — freeing it here would cause use-after-free.
+	if extractNamed(typ) == types.TypString && isStringBorrowExpr(s.Value) {
+		c.clearDropFlag(s.Name)
+	}
 	c.maybeRegisterEnvFree(s.Name, alloca, typ)
 }
 
@@ -485,10 +528,31 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 		return
 	}
 
-	// NOTE: String drop is not yet enabled. promise_string_drop is defined
-	// (checks literal flag before freeing), but registering drop bindings for
-	// strings requires the ownership system to properly track string moves in
-	// all std module code. This will be done in a follow-up task.
+	// String drop: register bindingDropString with promise_string_drop.
+	// The drop flag is cleared at all move sites (return, assignment, constructor,
+	// function call args) via clearDropFlag. Strings passed to functions have their
+	// flag cleared (callee conceptually borrows/takes ownership), so they won't be
+	// freed at scope exit. Strings that are NOT passed to functions are freed.
+	if named == types.TypString {
+		dropFlag := c.createEntryAlloca(irtypes.I1)
+		dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
+		c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+		c.dropFlags[varName] = dropFlag
+
+		dropFunc := c.funcs["promise_string_drop"]
+		binding := scopeBinding{
+			kind:     bindingDropString,
+			alloca:   alloca,
+			named:    named,
+			valType:  typ,
+			dropFlag: dropFlag,
+			dropFunc: dropFunc,
+			varName:  varName,
+		}
+		c.scopeBindings = append(c.scopeBindings, binding)
+		c.dropBindings[varName] = binding
+		return
+	}
 
 	// NOTE: Container type (Vector, Channel) scope-exit drop is not yet enabled.
 	// Vector.drop is defined and called via emitFieldDrops() for types that own
@@ -503,8 +567,9 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 		return
 	}
 
-	// Allocate drop flag: i1, initialized to true (should drop)
-	dropFlag := c.block.NewAlloca(irtypes.I1)
+	// Allocate drop flag: i1, initialized to true (should drop).
+	// Use entry-block alloca to avoid stack growth in loops.
+	dropFlag := c.createEntryAlloca(irtypes.I1)
 	dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
 	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
 	c.dropFlags[varName] = dropFlag
@@ -998,6 +1063,13 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				c.clearDropFlag(ident.Name)
 			}
 		}
+		// Clear drop flag on index key if it's being stored (e.g., map[key] = val).
+		// The map takes ownership of the key pointer.
+		if s.Op == ast.OpAssign {
+			if ident, ok := target.Index.(*ast.IdentExpr); ok {
+				c.clearDropFlag(ident.Name)
+			}
+		}
 
 	case *ast.SliceExpr:
 		c.genSliceAssign(target, val)
@@ -1373,6 +1445,27 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	// Write back move-captured variables to env struct before returning
 	c.emitLambdaWritebacks()
 
+	// Set targetType so NoneLit can resolve to the correct Optional struct
+	retType := c.currentRetType
+	if retType != nil && c.typeSubst != nil {
+		retType = types.Substitute(retType, c.typeSubst)
+	}
+	if retType != nil && c.selfSubst != nil {
+		retType = types.SubstituteSelf(retType, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+
+	// Evaluate the return expression BEFORE scope cleanup. The expression may
+	// reference local variables with drop bindings (e.g., string variables passed
+	// as function arguments: `return func(str_var)`). Scope cleanup frees those
+	// variables, so we must compute the return value while they're still alive.
+	var val value.Value
+	if s.Value != nil {
+		c.targetType = retType
+		val = c.genExpr(s.Value)
+		c.targetType = nil
+		val = c.wrapThisReturnValue(val, s.Value, retType)
+	}
+
 	// Clear drop flag for returned variable (it's being moved out, not dropped)
 	if s.Value != nil {
 		if ident, ok := s.Value.(*ast.IdentExpr); ok {
@@ -1386,25 +1479,11 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	}
 	c.emitCloseErrCheck(closeCap)
 
-	// Set targetType so NoneLit can resolve to the correct Optional struct
-	retType := c.currentRetType
-	if retType != nil && c.typeSubst != nil {
-		retType = types.Substitute(retType, c.typeSubst)
-	}
-	if retType != nil && c.selfSubst != nil {
-		retType = types.SubstituteSelf(retType, c.selfSubst.iface, c.selfSubst.concrete)
-	}
-
 	if c.canError {
 		resultType := c.currentResultType()
 		if s.Value == nil {
 			c.block.NewRet(c.wrapOk(nil, resultType))
 		} else {
-			c.targetType = retType
-			val := c.genExpr(s.Value)
-			c.targetType = nil
-			// `this` in methods is an i8* instance pointer; wrap into value struct
-			val = c.wrapThisReturnValue(val, s.Value, retType)
 			// If the expression is itself a failable call, val is already a
 			// failable result struct matching our result type — return directly.
 			if c.info.FailableExprs[s.Value] && val != nil && val.Type().Equal(resultType) {
@@ -1431,11 +1510,6 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	if s.Value == nil {
 		c.block.NewRet(nil)
 	} else {
-		c.targetType = retType
-		val := c.genExpr(s.Value)
-		c.targetType = nil
-		// `this` in methods is an i8* instance pointer; wrap into value struct
-		val = c.wrapThisReturnValue(val, s.Value, retType)
 		// Wrap value in Optional if return type is Optional but expr is not
 		val = c.wrapReturnOptional(val, s.Value, retType)
 		// Coerce value struct vtable when returning through a parent type

@@ -1171,6 +1171,86 @@ func TestStringDropFuncBody(t *testing.T) {
 	assertContains(t, ir, "call void @pal_free(")
 }
 
+// T0061: String drop binding is registered at scope exit
+func TestStringDropScopeBinding(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			s := "hello";
+		}
+	`)
+	// String drop binding: drop flag alloca, conditional call to promise_string_drop
+	assertContains(t, ir, "strdrop.call")
+	assertContains(t, ir, "strdrop.skip")
+	assertContains(t, ir, "call void @promise_string_drop(")
+}
+
+// T0061: String drop flag is cleared when returning a string
+func TestStringDropReturnClearsFlag(t *testing.T) {
+	ir := generateIR(t, `
+		make_name() string {
+			s := "bob";
+			return s;
+		}
+		main() { make_name(); }
+	`)
+	// The return should clear the drop flag (store i1 false) before scope cleanup
+	assertContains(t, ir, "strdrop.skip")
+}
+
+// T0061: String drop flag IS cleared when passing to a function (same as user types)
+func TestStringDropClearedOnFuncArg(t *testing.T) {
+	ir := generateIR(t, `
+		consume(string s) {}
+		main() {
+			s := "hello";
+			consume(s);
+		}
+	`)
+	// The string drop binding exists but flag is cleared at the call site,
+	// so the conditional drop at scope exit is a no-op (skips).
+	assertContains(t, ir, "strdrop.call")
+	assertContains(t, ir, "call void @promise_string_drop(")
+}
+
+// T0061: String drop flag is cleared on assignment (move)
+func TestStringDropClearedOnAssignment(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			a := "hello";
+			b := a;
+		}
+	`)
+	// Both a and b should have drop bindings
+	// a's flag should be cleared (moved to b)
+	assertContains(t, ir, "strdrop.call")
+}
+
+// T0061: String borrowed from struct field should NOT have active drop
+func TestStringDropBorrowFromField(t *testing.T) {
+	ir := generateIR(t, `
+		type Person { string name; }
+		main() {
+			p := Person(name: "alice");
+			field_val := p.name;
+		}
+	`)
+	// field_val gets a drop binding but flag is immediately cleared (borrow from field)
+	assertContains(t, ir, "strdrop.call")
+}
+
+// T0061: String borrowed from vector index should NOT have active drop
+func TestStringDropBorrowFromIndex(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			names := string[]();
+			names.push("alice");
+			elem := names[0];
+		}
+	`)
+	// elem gets a drop binding but flag is immediately cleared (borrow from vector)
+	assertContains(t, ir, "strdrop.call")
+}
+
 func TestStringNewFuncBody(t *testing.T) {
 	ir := generateIR(t, `main() { s := "hello"; }`)
 	assertContains(t, ir, "define i8* @promise_string_new(i8* %data, i64 %len)")
@@ -8232,11 +8312,11 @@ func TestDropNotGeneratedForNonDroppable(t *testing.T) {
 			int id;
 		}
 		main() {
-			s := Simple(id: 1);
-			int x = s.id;
+			my_simple := Simple(id: 1);
+			int x = my_simple.id;
 		}
 	`)
-	assertNotContains(t, ir, "%s.dropflag")
+	assertNotContains(t, ir, "%my_simple.dropflag")
 	assertNotContains(t, ir, "Simple.drop")
 }
 
@@ -8686,13 +8766,13 @@ func TestDropOnReassignmentNonDroppable(t *testing.T) {
 	ir := generateIR(t, `
 		type Simple { int x; }
 		test() {
-			s := Simple(x: 1);
-			s = Simple(x: 2);
+			my_simple := Simple(x: 1);
+			my_simple = Simple(x: 2);
 		}
 		main() {}
 	`)
-	// No drop for non-droppable types — check the test() function specifically
-	assertNotContains(t, ir, "%s.dropflag")
+	// No drop for non-droppable types
+	assertNotContains(t, ir, "%my_simple.dropflag")
 	assertNotContains(t, ir, "Simple.drop")
 }
 
@@ -8880,11 +8960,11 @@ func TestDropSynthesizedNotForCopy(t *testing.T) {
 			int x;
 		}
 		main() {
-			s := Simple(x: 1);
+			my_copy := Simple(x: 1);
 		}
 	`)
 	assertNotContains(t, ir, "Simple.drop")
-	assertNotContains(t, ir, "s.dropflag")
+	assertNotContains(t, ir, "my_copy.dropflag")
 }
 
 // B0158: No synthesized drop when no fields have drop

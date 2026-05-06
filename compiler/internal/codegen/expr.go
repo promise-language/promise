@@ -2152,6 +2152,10 @@ func (c *Compiler) genChannelSend(e *ast.CallExpr, chRaw value.Value, chPtr valu
 
 	// Alloca value and store (entry-block alloca to avoid stack growth in loops)
 	argVal := c.genCallArgExpr(e.Args[0].Value)
+	// Clear drop flag: value is moved into the channel buffer
+	if ident, ok := e.Args[0].Value.(*ast.IdentExpr); ok {
+		c.clearDropFlag(ident.Name)
+	}
 	argAlloca := c.createEntryAlloca(elemLLVM)
 	c.block.NewStore(argVal, argAlloca)
 	argAsI8 := c.block.NewBitCast(argAlloca, irtypes.I8Ptr)
@@ -2932,6 +2936,10 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 	switch method {
 	case "push":
 		argVal := c.genCallArgExpr(e.Args[0].Value)
+		// Clear drop flag: element is moved into the vector
+		if ident, ok := e.Args[0].Value.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		}
 		argAlloca := c.createEntryAlloca(elemLLVM)
 		// Zero-initialize before store to clear padding bytes for memcmp correctness
 		c.block.NewStore(constant.NewZeroInitializer(elemLLVM), argAlloca)

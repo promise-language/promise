@@ -6670,14 +6670,15 @@ func TestTestSummaryBody(t *testing.T) {
 	result.GenerateTestMain(info.Tests, nil)
 	ir := result.Module.String()
 
-	// Function is defined (not just declared) — includes leaked and ignored params (T0020, T0067)
-	assertContains(t, ir, "define void @promise_test_summary(i32 %passed, i32 %failed, i32 %skipped, i32 %leaked, i32 %ignored)")
+	// Function is defined (not just declared) — includes leaked, ignored, and stale params (T0020, T0067)
+	assertContains(t, ir, "define void @promise_test_summary(i32 %passed, i32 %failed, i32 %skipped, i32 %leaked, i32 %ignored, i32 %stale)")
 	// String suffix globals
 	assertContains(t, ir, `@.str.passed_suffix = private constant [9 x i8] c" passed, "`)
 	assertContains(t, ir, `@.str.failed_suffix = private constant [7 x i8] c" failed"`)
 	assertContains(t, ir, `@.str.skipped_suffix = private constant [8 x i8] c" skipped"`)
 	assertContains(t, ir, `@.str.leaked_suffix = private constant [7 x i8] c" leaked"`)
-	assertContains(t, ir, `@.str.ignored_suffix = private constant [8 x i8] c" ignored"`)
+	assertContains(t, ir, `@.str.allowed_leaks_suffix = private constant [14 x i8] c" allowed leaks"`)
+	assertContains(t, ir, `@.str.stale_suffix = private constant [18 x i8] c" stale allow_leaks"`)
 	// Converts i32 → i64 for int_to_string
 	assertContains(t, ir, "sext i32 %passed to i64")
 	assertContains(t, ir, "sext i32 %failed to i64")

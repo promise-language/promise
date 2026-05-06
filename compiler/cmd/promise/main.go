@@ -819,7 +819,7 @@ func runTestBinary(binaryPath string, timeout time.Duration, start time.Time, ta
 	if targetTriple != "" && targetTriple != codegen.HostTargetTriple() {
 		targetSuffix = fmt.Sprintf(" [%s]", targetTriple)
 	}
-	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?(?:, (\d+) ignored)?`)
+	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?(?:, (\d+) allowed leaks)?(?:, (\d+) stale allow_leaks)?`)
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 		if line == "" {
 			continue
@@ -834,7 +834,10 @@ func runTestBinary(binaryPath string, timeout time.Duration, start time.Time, ta
 				summary += fmt.Sprintf(", %s leaked", m[4])
 			}
 			if len(m) > 5 && m[5] != "" {
-				summary += fmt.Sprintf(", %s ignored", m[5])
+				summary += fmt.Sprintf(", %s allowed leaks", m[5])
+			}
+			if len(m) > 6 && m[6] != "" {
+				summary += fmt.Sprintf(", %s stale allow_leaks", m[6])
 			}
 			fmt.Printf("%s (%.3fs)%s\n", summary, elapsed.Seconds(), targetSuffix)
 		} else if targetSuffix != "" && (strings.HasPrefix(line, "PASS ") || strings.HasPrefix(line, "FAIL ") || strings.HasPrefix(line, "TIMEOUT ")) {
@@ -1314,7 +1317,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	}
 
 	// Print results in file order, streaming as each slot completes.
-	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?(?:, (\d+) ignored)?`)
+	summaryRe := regexp.MustCompile(`^(\d+) passed, (\d+) failed(?:, (\d+) skipped)?(?:, (\d+) leaked)?(?:, (\d+) allowed leaks)?(?:, (\d+) stale allow_leaks)?`)
 	failLineRe := regexp.MustCompile(`^(?:FAIL|TIMEOUT) \([\d.]+s\)(?: (.+))?$`)
 	passLineRe := regexp.MustCompile(`^PASS \([\d.]+s\)`)
 	panicContextRe := regexp.MustCompile(`^  (panic:|expected:|actual:|exit:|leak:|warning:|fatal:|signal:)`)
@@ -1329,9 +1332,11 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 	totalSkipped := 0
 	totalLeaked := 0
 	totalIgnored := 0
+	totalStale := 0
 	totalFiles := 0
 	failedFiles := 0
 	var failures []failureInfo
+	var staleTests []string
 
 	// Coverage aggregation: collect per-file stats from subprocess formatted output.
 	// Each subprocess prints "total: X% (Y/Z blocks)" which we parse.
@@ -1401,6 +1406,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 		fileFailed := 0
 		var failDetails []string
 
+		var summaryMatch []string
 		for i := 0; i < len(lines); i++ {
 			line := lines[i]
 			if passLineRe.MatchString(line) {
@@ -1419,6 +1425,8 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				if detail != "" {
 					failDetails = append(failDetails, detail)
 				}
+			} else if sm := summaryRe.FindStringSubmatch(line); sm != nil {
+				summaryMatch = sm
 			}
 		}
 
@@ -1431,7 +1439,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				if relErr != nil {
 					relPath = r.file
 				}
-				if m := summaryRe.FindStringSubmatch(lastLine(r.output)); m != nil {
+				if m := summaryMatch; m != nil {
 					totalPassed += atoi(m[1])
 					totalFailed += atoi(m[2])
 					if m[3] != "" {
@@ -1442,6 +1450,9 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 					}
 					if len(m) > 5 && m[5] != "" {
 						totalIgnored += atoi(m[5])
+					}
+					if len(m) > 6 && m[6] != "" {
+						totalStale += atoi(m[6])
 					}
 				} else {
 					totalPassed += filePassed
@@ -1457,7 +1468,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 			failedFiles++
 
 			fileLeaked := 0
-			if m := summaryRe.FindStringSubmatch(lastLine(r.output)); m != nil {
+			if m := summaryMatch; m != nil {
 				totalPassed += atoi(m[1])
 				totalFailed += atoi(m[2])
 				if m[3] != "" {
@@ -1469,6 +1480,9 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 				}
 				if len(m) > 5 && m[5] != "" {
 					totalIgnored += atoi(m[5])
+				}
+				if len(m) > 6 && m[6] != "" {
+					totalStale += atoi(m[6])
 				}
 			} else if fileFailed > 0 || filePassed > 0 {
 				totalPassed += filePassed
@@ -1530,7 +1544,7 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 		}
 
 		// Success
-		if m := summaryRe.FindStringSubmatch(lastLine(r.output)); m != nil {
+		if m := summaryMatch; m != nil {
 			totalPassed += atoi(m[1])
 			totalFailed += atoi(m[2])
 			if m[3] != "" {
@@ -1541,6 +1555,19 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 			}
 			if len(m) > 5 && m[5] != "" {
 				totalIgnored += atoi(m[5])
+			}
+			if len(m) > 6 && m[6] != "" {
+				totalStale += atoi(m[6])
+			}
+		}
+
+		// Parse stale allow_leaks tests from output
+		for j := 0; j < len(lines); j++ {
+			if lines[j] == "STALE ALLOW_LEAKS:" {
+				for j+1 < len(lines) && strings.HasPrefix(lines[j+1], "  ") {
+					j++
+					staleTests = append(staleTests, relPath+": "+strings.TrimSpace(lines[j]))
+				}
 			}
 		}
 
@@ -1568,7 +1595,10 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 		summary += fmt.Sprintf(", %d leaked", totalLeaked)
 	}
 	if totalIgnored > 0 {
-		summary += fmt.Sprintf(", %d ignored", totalIgnored)
+		summary += fmt.Sprintf(", %d allowed leaks", totalIgnored)
+	}
+	if totalStale > 0 {
+		summary += fmt.Sprintf(", %d stale allow_leaks", totalStale)
 	}
 	fmt.Printf("%s (%d files, %.3fs)%s\n", summary, totalFiles, totalElapsed.Seconds(), targetSuffix)
 
@@ -1581,6 +1611,13 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 					fmt.Printf("    %s\n", cl)
 				}
 			}
+		}
+	}
+
+	if len(staleTests) > 0 {
+		fmt.Printf("\nSTALE ALLOW_LEAKS:\n")
+		for _, s := range staleTests {
+			fmt.Printf("  %s\n", s)
 		}
 	}
 

@@ -686,6 +686,7 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 		ir.NewParam("skipped", irtypes.I32),
 		ir.NewParam("leaked", irtypes.I32),
 		ir.NewParam("ignored", irtypes.I32),
+		ir.NewParam("stale", irtypes.I32),
 	)
 
 	// Add codegen bodies (replaces C printf implementations)
@@ -820,6 +821,11 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	failedNamesAlloca := entry.NewAlloca(failedNamesArrayType)
 	failedCountAlloca := entry.NewAlloca(irtypes.I32)
 	entry.NewStore(constant.NewInt(irtypes.I32, 0), failedCountAlloca)
+
+	// Allocate array for stale allow_leaks test name pointers and a counter
+	staleNamesAlloca := entry.NewAlloca(failedNamesArrayType)
+	staleCountAlloca := entry.NewAlloca(irtypes.I32)
+	entry.NewStore(constant.NewInt(irtypes.I32, 0), staleCountAlloca)
 
 	// Shared global for panic context prefix (used by all tests)
 	var panicIndentGlobal *ir.Global
@@ -1013,6 +1019,15 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 			if allowLeaks {
 				// allow_leaks but no leak: print stale tag warning (T0067)
 				c.emitStaleAllowLeaksWarning(noLeakBlk, nameStr)
+				// Store name in stale names array
+				staleIdx := noLeakBlk.NewLoad(irtypes.I32, staleCountAlloca)
+				staleSlot := noLeakBlk.NewGetElementPtr(failedNamesArrayType, staleNamesAlloca,
+					constant.NewInt(irtypes.I32, 0), staleIdx)
+				noLeakBlk.NewStore(namePtr, staleSlot)
+				noLeakBlk.NewStore(
+					noLeakBlk.NewAdd(staleIdx, constant.NewInt(irtypes.I32, 1)),
+					staleCountAlloca,
+				)
 			}
 			noLeakBlk.NewBr(afterLeakBlk)
 
@@ -1028,7 +1043,8 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	finalFailed := entry.NewLoad(irtypes.I32, failedAlloca)
 	finalLeaked := entry.NewLoad(irtypes.I32, leakedCountAlloca)
 	finalIgnored := entry.NewLoad(irtypes.I32, ignoredLeaksAlloca)
-	entry.NewCall(testSummaryFn, finalPassed, finalFailed, constant.NewInt(irtypes.I32, int64(skippedCount)), finalLeaked, finalIgnored)
+	finalStale := entry.NewLoad(irtypes.I32, staleCountAlloca)
+	entry.NewCall(testSummaryFn, finalPassed, finalFailed, constant.NewInt(irtypes.I32, int64(skippedCount)), finalLeaked, finalIgnored, finalStale)
 
 	// Print FAILED: list if any failures
 	failedHeaderData := constant.NewCharArrayFromString("FAILED:\n")
@@ -1039,12 +1055,17 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	failedIndentGlobal := c.module.NewGlobalDef(".str.failed_indent", failedIndentData)
 	failedIndentGlobal.Immutable = true
 	failedIndentGlobal.Linkage = enum.LinkagePrivate
+	staleHeaderData := constant.NewCharArrayFromString("STALE ALLOW_LEAKS:\n")
+	staleHeaderGlobal := c.module.NewGlobalDef(".str.stale_header", staleHeaderData)
+	staleHeaderGlobal.Immutable = true
+	staleHeaderGlobal.Linkage = enum.LinkagePrivate
 	stdout := constant.NewInt(irtypes.I32, 1)
 
 	hasFailures := entry.NewICmp(enum.IPredSGT, finalFailed, constant.NewInt(irtypes.I32, 0))
 	printFailBlock := mainFn.NewBlock("print_failures")
+	checkStaleBlock := mainFn.NewBlock("check_stale")
 	doneBlock := mainFn.NewBlock("done")
-	entry.NewCondBr(hasFailures, printFailBlock, doneBlock)
+	entry.NewCondBr(hasFailures, printFailBlock, checkStaleBlock)
 
 	// Print "FAILED:\n" header
 	headerPtr := printFailBlock.NewGetElementPtr(failedHeaderGlobal.ContentType, failedHeaderGlobal,
@@ -1081,7 +1102,45 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 	idxPhi.Incs = append(idxPhi.Incs, ir.NewIncoming(nextIdx, loopBlock))
 	loopBlock.NewCondBr(loopDone, loopEndBlock, loopBlock)
 
-	loopEndBlock.NewBr(doneBlock)
+	loopEndBlock.NewBr(checkStaleBlock)
+
+	// Print STALE ALLOW_LEAKS: list if any stale tags
+	hasStale := checkStaleBlock.NewICmp(enum.IPredSGT, finalStale, constant.NewInt(irtypes.I32, 0))
+	printStaleBlock := mainFn.NewBlock("print_stale")
+	checkStaleBlock.NewCondBr(hasStale, printStaleBlock, doneBlock)
+
+	// Print "STALE ALLOW_LEAKS:\n" header
+	staleHdrPtr := printStaleBlock.NewGetElementPtr(staleHeaderGlobal.ContentType, staleHeaderGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	printStaleBlock.NewCall(c.palWrite, stdout, staleHdrPtr, constant.NewInt(irtypes.I64, 19))
+
+	// Loop through stale names
+	staleLoopBlock := mainFn.NewBlock("stale_loop")
+	staleLoopEndBlock := mainFn.NewBlock("stale_loop_end")
+	printStaleBlock.NewBr(staleLoopBlock)
+
+	staleIdxPhi := staleLoopBlock.NewPhi(ir.NewIncoming(constant.NewInt(irtypes.I32, 0), printStaleBlock))
+
+	staleNameSlot := staleLoopBlock.NewGetElementPtr(failedNamesArrayType, staleNamesAlloca,
+		constant.NewInt(irtypes.I32, 0), staleIdxPhi)
+	staleNamePtr := staleLoopBlock.NewLoad(irtypes.I8Ptr, staleNameSlot)
+
+	staleIndentPtr := staleLoopBlock.NewGetElementPtr(failedIndentGlobal.ContentType, failedIndentGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	staleLoopBlock.NewCall(c.palWrite, stdout, staleIndentPtr, constant.NewInt(irtypes.I64, 2))
+	staleNameLen := staleLoopBlock.NewCall(c.funcs["strlen"], staleNamePtr)
+	staleLoopBlock.NewCall(c.palWrite, stdout, staleNamePtr, staleNameLen)
+	staleNlPtr := staleLoopBlock.NewGetElementPtr(c.newlineGlobal.ContentType, c.newlineGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	staleLoopBlock.NewCall(c.palWrite, stdout, staleNlPtr, constant.NewInt(irtypes.I64, 1))
+
+	staleNextIdx := staleLoopBlock.NewAdd(staleIdxPhi, constant.NewInt(irtypes.I32, 1))
+	totalStaleCount := staleLoopBlock.NewLoad(irtypes.I32, staleCountAlloca)
+	staleLoopDone := staleLoopBlock.NewICmp(enum.IPredSGE, staleNextIdx, totalStaleCount)
+	staleIdxPhi.Incs = append(staleIdxPhi.Incs, ir.NewIncoming(staleNextIdx, staleLoopBlock))
+	staleLoopBlock.NewCondBr(staleLoopDone, staleLoopEndBlock, staleLoopBlock)
+
+	staleLoopEndBlock.NewBr(doneBlock)
 
 	// Shut down the scheduler (join worker Ms) before exiting
 	if !c.isWasm {

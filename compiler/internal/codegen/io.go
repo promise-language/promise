@@ -922,7 +922,7 @@ func (c *Compiler) defineTestPrintResultBody(fn *ir.Func) {
 	mergeBlock.NewRet(nil)
 }
 
-// defineTestSummaryBody adds a function body to promise_test_summary(i32 %passed, i32 %failed, i32 %skipped, i32 %leaked, i32 %ignored).
+// defineTestSummaryBody adds a function body to promise_test_summary(i32 %passed, i32 %failed, i32 %skipped, i32 %leaked, i32 %ignored, i32 %stale).
 // Writes "<passed> passed, <failed> failed[, <skipped> skipped][, <leaked> leaked][, <ignored> ignored]\n" to stdout via pal_write.
 func (c *Compiler) defineTestSummaryBody(fn *ir.Func) {
 	// Global constants
@@ -951,10 +951,15 @@ func (c *Compiler) defineTestSummaryBody(fn *ir.Func) {
 	leakedSuffixGlobal.Immutable = true
 	leakedSuffixGlobal.Linkage = enum.LinkagePrivate
 
-	ignoredSuffixData := constant.NewCharArrayFromString(" ignored")
-	ignoredSuffixGlobal := c.module.NewGlobalDef(".str.ignored_suffix", ignoredSuffixData)
+	ignoredSuffixData := constant.NewCharArrayFromString(" allowed leaks")
+	ignoredSuffixGlobal := c.module.NewGlobalDef(".str.allowed_leaks_suffix", ignoredSuffixData)
 	ignoredSuffixGlobal.Immutable = true
 	ignoredSuffixGlobal.Linkage = enum.LinkagePrivate
+
+	staleSuffixData := constant.NewCharArrayFromString(" stale allow_leaks")
+	staleSuffixGlobal := c.module.NewGlobalDef(".str.stale_suffix", staleSuffixData)
+	staleSuffixGlobal.Immutable = true
+	staleSuffixGlobal.Linkage = enum.LinkagePrivate
 
 	stdout := constant.NewInt(irtypes.I32, 1)
 	passed := fn.Params[0]  // i32
@@ -962,6 +967,7 @@ func (c *Compiler) defineTestSummaryBody(fn *ir.Func) {
 	skipped := fn.Params[2] // i32
 	leaked := fn.Params[3]  // i32
 	ignored := fn.Params[4] // i32
+	stale := fn.Params[5]   // i32
 
 	entry := fn.NewBlock(".entry")
 
@@ -1046,15 +1052,35 @@ func (c *Compiler) defineTestSummaryBody(fn *ir.Func) {
 	printIgnoredBlock.NewCall(c.palFree, ignoredStr)
 	iSuffixPtr := printIgnoredBlock.NewGetElementPtr(ignoredSuffixGlobal.ContentType, ignoredSuffixGlobal,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	printIgnoredBlock.NewCall(c.palWrite, stdout, iSuffixPtr, constant.NewInt(irtypes.I64, 8))
+	printIgnoredBlock.NewCall(c.palWrite, stdout, iSuffixPtr, constant.NewInt(irtypes.I64, 14))
 	printIgnoredBlock.NewBr(afterIgnoredBlock)
 
-	// Write "\n"
-	nlPtr := afterIgnoredBlock.NewGetElementPtr(c.newlineGlobal.ContentType, c.newlineGlobal,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	afterIgnoredBlock.NewCall(c.palWrite, stdout, nlPtr, constant.NewInt(irtypes.I64, 1))
+	// Conditionally write ", <stale> stale allow_leaks" if stale > 0
+	hasStale := afterIgnoredBlock.NewICmp(enum.IPredSGT, stale, constant.NewInt(irtypes.I32, 0))
+	printStaleBlock := fn.NewBlock("print_stale")
+	afterStaleBlock := fn.NewBlock("after_stale")
+	afterIgnoredBlock.NewCondBr(hasStale, printStaleBlock, afterStaleBlock)
 
-	afterIgnoredBlock.NewRet(nil)
+	// Write ", <stale> stale allow_leaks"
+	commaPtr4 := printStaleBlock.NewGetElementPtr(commaPrefixGlobal.ContentType, commaPrefixGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	printStaleBlock.NewCall(c.palWrite, stdout, commaPtr4, constant.NewInt(irtypes.I64, 2))
+	staleI64 := printStaleBlock.NewSExt(stale, irtypes.I64)
+	staleStr := printStaleBlock.NewCall(c.funcs["promise_int_to_string"], staleI64)
+	staleDataPtr, staleDataLen := c.extractStringDataLenFromInstance(printStaleBlock, staleStr)
+	printStaleBlock.NewCall(c.palWrite, stdout, staleDataPtr, staleDataLen)
+	printStaleBlock.NewCall(c.palFree, staleStr)
+	sStaleSuffixPtr := printStaleBlock.NewGetElementPtr(staleSuffixGlobal.ContentType, staleSuffixGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	printStaleBlock.NewCall(c.palWrite, stdout, sStaleSuffixPtr, constant.NewInt(irtypes.I64, 18))
+	printStaleBlock.NewBr(afterStaleBlock)
+
+	// Write "\n"
+	nlPtr := afterStaleBlock.NewGetElementPtr(c.newlineGlobal.ContentType, c.newlineGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	afterStaleBlock.NewCall(c.palWrite, stdout, nlPtr, constant.NewInt(irtypes.I64, 1))
+
+	afterStaleBlock.NewRet(nil)
 }
 
 // emitLeakMessage writes "  leak: <N> allocations not freed\n" to stdout (T0020).

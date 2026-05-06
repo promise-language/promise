@@ -761,6 +761,20 @@ func (c *Checker) processSerializableEnum(enum *types.Enum, d *ast.EnumDecl) {
 		tagName = "type"
 	}
 
+	// Validate: no variant field name (wire name) may conflict with the discriminator tag.
+	for _, av := range d.Variants {
+		for i, af := range av.Fields {
+			wireName := af.Name
+			if wireName == "" {
+				wireName = fmt.Sprintf("_%d", i)
+			}
+			if wireName == tagName {
+				c.errorf(af.Pos(), "`serializable enum '%s': variant '%s' field '%s' conflicts with discriminator tag '%s'",
+					d.Name, av.Name, wireName, tagName)
+			}
+		}
+	}
+
 	// Synthesize encode method if not user-defined.
 	if lookupOwnEnumMethod(enum, "encode") == nil {
 		var md *ast.MethodDecl

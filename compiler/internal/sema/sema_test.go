@@ -11402,6 +11402,74 @@ func TestFlattenMultipleCollision(t *testing.T) {
 	expectError(t, errs, "wire name 'x'")
 }
 
+// --- Serializable enum discriminator tag conflict (B0133) ---
+
+func TestSerializableEnumTagConflictDefault(t *testing.T) {
+	// Custom tag "name" conflicts with a variant field named "name".
+	errs := checkErrs(t, `
+		enum Foo `+"`"+`serializable(tag: "name") {
+			Bar(string name),
+		}
+		test() {}
+	`)
+	expectError(t, errs, "conflicts with discriminator tag 'name'")
+}
+
+func TestSerializableEnumTagConflictCustom(t *testing.T) {
+	// Custom discriminator tag "kind" conflicts with a variant field named "kind".
+	errs := checkErrs(t, `
+		enum Foo `+"`"+`serializable(tag: "kind") {
+			Bar(string kind),
+		}
+		test() {}
+	`)
+	expectError(t, errs, "conflicts with discriminator tag 'kind'")
+}
+
+func TestSerializableEnumTagNoConflict(t *testing.T) {
+	// No conflict — field names don't match the discriminator tag.
+	checkOK(t, `
+		enum Foo `+"`"+`serializable {
+			Bar(string name),
+		}
+		test() {}
+	`)
+}
+
+func TestSerializableEnumTagConflictCustomAvoidDefault(t *testing.T) {
+	// Custom tag avoids the default "type" — a field named "type" is fine.
+	checkOK(t, `
+		enum Foo `+"`"+`serializable(tag: "kind") {
+			Bar(string type),
+		}
+		test() {}
+	`)
+}
+
+func TestSerializableEnumTagConflictMultiVariant(t *testing.T) {
+	// Conflict in second variant; first variant is fine.
+	errs := checkErrs(t, `
+		enum Shape `+"`"+`serializable(tag: "kind") {
+			Circle(f64 radius),
+			Square(f64 kind),
+		}
+		test() {}
+	`)
+	expectError(t, errs, "variant 'Square' field 'kind' conflicts with discriminator tag 'kind'")
+}
+
+func TestSerializableEnumTagFieldlessVariantOK(t *testing.T) {
+	// Fieldless variants can't conflict.
+	checkOK(t, `
+		enum Color `+"`"+`serializable(tag: "kind") {
+			Red,
+			Green,
+			Blue,
+		}
+		test() {}
+	`)
+}
+
 // --- Match expression pattern tests (B0123) ---
 
 func TestMatchExpressionPatternOK(t *testing.T) {

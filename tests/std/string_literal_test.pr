@@ -93,3 +93,21 @@ test_literal_bytes() `test {
   assert(b[0] == 104, "byte h");
   assert(b[1] == 105, "byte i");
 }
+
+test_empty_heap_string() `test {
+  // Concatenating two empty literals produces a heap-allocated empty string
+  string heap_empty = "" + "";
+  assert(!heap_empty.is_literal, "concat empty not literal");
+  assert(heap_empty.len == 0, "concat empty len");
+  assert(heap_empty == "", "concat empty equals literal empty");
+
+  // Slicing to zero length produces a heap-allocated empty string
+  string sliced = "hello"[0:0];
+  assert(!sliced.is_literal, "sliced empty not literal");
+  assert(sliced.len == 0, "sliced empty len");
+  assert(sliced == "", "sliced empty equals literal empty");
+
+  // Literal empty string is still literal
+  assert("".is_literal, "literal empty");
+  assert("".len == 0, "literal empty len");
+}

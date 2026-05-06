@@ -21,6 +21,25 @@ type f32 `native `public {
   get pi f32 `public `global => 3.14159265f32;
   get e f32 `public `global => 2.71828183f32;
   get tau f32 `public `global => 6.28318531f32;
+  get nan f32 `public `global `doc("Returns IEEE 754 NaN (Not a Number).") => (0.0 / 0.0) as! f32;
+  get infinity f32 `public `global `doc("Returns IEEE 754 positive infinity.") => (1.0 / 0.0) as! f32;
+
+  get is_nan bool `public `doc("Returns true if this value is NaN.") {
+    u32 b = this.bits;
+    u32 exp = (b >> 23u32) & 255u32;
+    u32 mantissa = b & 8388607u32;
+    return exp == 255u32 && mantissa != 0u32;
+  }
+  get is_infinite bool `public `doc("Returns true if this value is positive or negative infinity.") {
+    u32 b = this.bits;
+    u32 exp = (b >> 23u32) & 255u32;
+    u32 mantissa = b & 8388607u32;
+    return exp == 255u32 && mantissa == 0u32;
+  }
+  get is_finite bool `public `doc("Returns true if this value is neither NaN nor infinite.") {
+    u32 exp = (this.bits >> 23u32) & 255u32;
+    return exp != 255u32;
+  }
 
   parse(Reader ~r) f32! `factory `public {
     f64 v = f64.parse(r);
@@ -64,6 +83,25 @@ type f64 `native `public {
   get pi f64 `public `global => 3.14159265358979323846;
   get e f64 `public `global => 2.71828182845904523536;
   get tau f64 `public `global => 6.28318530717958647692;
+  get nan f64 `public `global `doc("Returns IEEE 754 NaN (Not a Number).") => 0.0 / 0.0;
+  get infinity f64 `public `global `doc("Returns IEEE 754 positive infinity.") => 1.0 / 0.0;
+
+  get is_nan bool `public `doc("Returns true if this value is NaN.") {
+    uint b = this.bits;
+    uint exp = (b >> 52u) & 2047u;
+    uint mantissa = b & 4503599627370495u;
+    return exp == 2047u && mantissa != 0u;
+  }
+  get is_infinite bool `public `doc("Returns true if this value is positive or negative infinity.") {
+    uint b = this.bits;
+    uint exp = (b >> 52u) & 2047u;
+    uint mantissa = b & 4503599627370495u;
+    return exp == 2047u && mantissa == 0u;
+  }
+  get is_finite bool `public `doc("Returns true if this value is neither NaN nor infinite.") {
+    uint exp = (this.bits >> 52u) & 2047u;
+    return exp != 2047u;
+  }
 
   parse(Reader ~r) f64! `factory `public {
     f64 result = 0.0;

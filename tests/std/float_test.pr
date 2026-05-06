@@ -87,3 +87,77 @@ test_f32_arithmetic() `test {
   assert(a - b == 7.0, "f32 subtraction");
   assert(a / b > 3.3, "f32 division");
 }
+
+// --- NaN / Infinity ---
+
+test_f64_nan() `test {
+  f64 n = f64.nan;
+  assert(n.is_nan, "f64.nan is_nan");
+  assert(!n.is_infinite, "NaN is not infinite");
+  assert(!n.is_finite, "NaN is not finite");
+}
+
+test_f64_infinity() `test {
+  f64 inf = f64.infinity;
+  assert(inf.is_infinite, "f64.infinity is_infinite");
+  assert(!inf.is_nan, "infinity is not NaN");
+  assert(!inf.is_finite, "infinity is not finite");
+
+  f64 neg_inf = -f64.infinity;
+  assert(neg_inf.is_infinite, "negative infinity is_infinite");
+  assert(!neg_inf.is_nan, "negative infinity is not NaN");
+  assert(!neg_inf.is_finite, "negative infinity is not finite");
+}
+
+test_f64_finite() `test {
+  assert((0.0).is_finite, "0.0 is finite");
+  assert((1.0).is_finite, "1.0 is finite");
+  assert((-3.14).is_finite, "-3.14 is finite");
+  assert(f64.max.is_finite, "f64.max is finite");
+  assert(f64.min.is_finite, "f64.min is finite");
+
+  assert(!(0.0).is_nan, "0.0 is not NaN");
+  assert(!(0.0).is_infinite, "0.0 is not infinite");
+}
+
+test_f32_nan() `test {
+  f32 n = f32.nan;
+  assert(n.is_nan, "f32.nan is_nan");
+  assert(!n.is_infinite, "f32 NaN is not infinite");
+  assert(!n.is_finite, "f32 NaN is not finite");
+}
+
+test_f32_infinity() `test {
+  f32 inf = f32.infinity;
+  assert(inf.is_infinite, "f32.infinity is_infinite");
+  assert(!inf.is_nan, "f32 infinity is not NaN");
+  assert(!inf.is_finite, "f32 infinity is not finite");
+
+  f32 neg_inf = -f32.infinity;
+  assert(neg_inf.is_infinite, "f32 negative infinity is_infinite");
+  assert(!neg_inf.is_nan, "f32 negative infinity is not NaN");
+  assert(!neg_inf.is_finite, "f32 negative infinity is not finite");
+}
+
+test_f32_finite() `test {
+  f32 a = 1.5;
+  assert(a.is_finite, "f32 1.5 is finite");
+  assert(!a.is_nan, "f32 1.5 is not NaN");
+  assert(!a.is_infinite, "f32 1.5 is not infinite");
+}
+
+test_f64_negative_zero() `test {
+  f64 nz = -0.0;
+  assert(nz.is_finite, "negative zero is finite");
+  assert(!nz.is_nan, "negative zero is not NaN");
+  assert(!nz.is_infinite, "negative zero is not infinite");
+}
+
+test_f64_arithmetic_special() `test {
+  f64 inf = 1.0 / 0.0;
+  assert(inf.is_infinite, "1.0/0.0 is infinite");
+  f64 nan = 0.0 / 0.0;
+  assert(nan.is_nan, "0.0/0.0 is NaN");
+  f64 nan2 = f64.infinity - f64.infinity;
+  assert(nan2.is_nan, "inf - inf is NaN");
+}

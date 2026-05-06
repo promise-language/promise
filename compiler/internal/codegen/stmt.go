@@ -746,6 +746,13 @@ func (c *Compiler) emitDropCallDirect(b scopeBinding) {
 		fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))
 		c.block.NewCall(fnTyped, instance)
 	}
+	// B0159: Free the instance struct after drop() completes.
+	// Only for types with explicit drop — synthesized drops (B0158/B0160) are
+	// deferred until ownership tracking prevents aliasing issues.
+	// Container types are excluded — their drop already frees the buffer.
+	if !isContainerType(b.valType) && b.named != nil && !b.named.NeedsSynthDrop() {
+		c.block.NewCall(c.palFree, instance)
+	}
 	c.block.NewBr(dropDoneBlock)
 
 	c.block = dropDoneBlock

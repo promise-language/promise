@@ -7820,6 +7820,22 @@ func TestDropBasicScopeExit(t *testing.T) {
 	assertContains(t, ir, "r.dropflag")
 }
 
+// B0159: Explicit drop methods auto-free instance memory via pal_free
+func TestDropExplicitFreesInstance(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		main() {
+			r := Resource(id: 1);
+		}
+	`)
+	// The drop function body should end with pal_free to free the instance struct
+	assertContains(t, ir, "define void @Resource.drop")
+	assertContains(t, ir, "call void @pal_free(i8* %this)")
+}
+
 // Move to function arg clears drop flag, adds condBr
 func TestDropNotCalledWhenMoved(t *testing.T) {
 	ir := generateIR(t, `

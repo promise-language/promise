@@ -319,3 +319,41 @@ test_generic_enum_expression_body() `test {
   assert(Flag[int].Off.is_on() == false, "Off not on");
   assert(Flag[int].Off.is_off() == true, "Off is off");
 }
+
+// --- Generic enum method calling generic free function (B0102) ---
+
+_b0102_identity[T](T val) T {
+  return val;
+}
+
+enum Holder[T] {
+  Val(T value),
+  Empty,
+
+  unwrap_or(&this, T default_val) T {
+    match this {
+      Holder.Val(v) => {
+        return _b0102_identity[T](v);
+      },
+      Holder.Empty => {
+        return _b0102_identity[T](default_val);
+      },
+    }
+  }
+}
+
+test_generic_enum_calls_generic_free_func() `test {
+  Holder[int] full = Holder[int].Val(value: 42);
+  assert(full.unwrap_or(0) == 42, "Val unwraps via identity");
+
+  Holder[int] empty = Holder[int].Empty;
+  assert(empty.unwrap_or(99) == 99, "Empty uses fallback via identity");
+}
+
+test_generic_enum_calls_generic_free_func_string() `test {
+  Holder[string] full = Holder[string].Val(value: "hello");
+  assert(full.unwrap_or("default") == "hello", "string Val unwraps via identity");
+
+  Holder[string] empty = Holder[string].Empty;
+  assert(empty.unwrap_or("default") == "default", "string Empty uses fallback via identity");
+}

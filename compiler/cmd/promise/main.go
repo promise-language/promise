@@ -60,6 +60,8 @@ Commands:
   format    Format Promise source files
   clean     Remove build cache (--global also clears module cache)
   install   Install Promise to PROMISE_HOME (default: ~/.promise/)
+  epochs    List installed epochs
+  use       Set the active epoch (e.g., promise use 2026.3)
 
 Options (build):
   -o <output>   Output file name (default: input file without extension)
@@ -98,6 +100,8 @@ Inline execution:
 }
 
 func main() {
+	shimDispatch()
+
 	if len(os.Args) < 2 {
 		// If stdin is piped, treat as inline exec
 		if info, err := os.Stdin.Stat(); err == nil && info.Mode()&os.ModeCharDevice == 0 {
@@ -161,6 +165,10 @@ func main() {
 		runInstall()
 	case "catalog":
 		runCatalog(os.Args[2:])
+	case "epochs":
+		runEpochs()
+	case "use":
+		runUse(os.Args[2:])
 	default:
 		// Try treating as a filename for backwards compatibility
 		if strings.HasSuffix(cmd, ".pr") {
@@ -5215,6 +5223,95 @@ func runInstall() {
 		fmt.Printf("\nAdd to your shell profile:\n\n")
 		fmt.Printf("  export PATH=\"%s:$PATH\"\n", stubBinDir)
 	}
+}
+
+// runEpochs lists installed epochs, marking the active one.
+func runEpochs() {
+	epochs, err := module.InstalledEpochs()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error listing epochs: %v\n", err)
+		os.Exit(1)
+	}
+	if len(epochs) == 0 {
+		fmt.Println("No epochs installed.")
+		return
+	}
+
+	active, _ := module.ActiveEpoch()
+
+	for _, ep := range epochs {
+		marker := " "
+		suffix := ""
+		if ep == active {
+			marker = "*"
+			suffix = "  (active)"
+		}
+		epochDir, err := module.EpochDir(ep)
+		if err != nil {
+			fmt.Printf("%s %s\n", marker, ep)
+			continue
+		}
+		size := dirSize(epochDir)
+		fmt.Printf("%s %-12s %s%s\n", marker, ep, formatSize(size), suffix)
+	}
+}
+
+// runUse sets the active epoch to the given argument.
+func runUse(args []string) {
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: promise use <epoch>")
+		os.Exit(1)
+	}
+	epoch := args[0]
+
+	// Validate that the epoch is installed.
+	epochDir, err := module.EpochDir(epoch)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	binPath := filepath.Join(epochDir, "bin", "promise")
+	if runtime.GOOS == "windows" {
+		binPath += ".exe"
+	}
+	if _, err := os.Stat(binPath); err != nil {
+		fmt.Fprintf(os.Stderr, "epoch %q is not installed. Run: promise sync %s\n", epoch, epoch)
+		os.Exit(1)
+	}
+
+	if err := module.WriteActiveEpoch(epoch); err != nil {
+		fmt.Fprintf(os.Stderr, "error writing active epoch: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Active epoch set to %s\n", epoch)
+}
+
+// dirSize computes the total size of all files under a directory.
+func dirSize(path string) int64 {
+	var total int64
+	filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !info.IsDir() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
+}
+
+// formatSize formats a byte count as a human-readable string.
+func formatSize(bytes int64) string {
+	const mb = 1024 * 1024
+	if bytes >= mb {
+		return fmt.Sprintf("%d MB", bytes/mb)
+	}
+	const kb = 1024
+	if bytes >= kb {
+		return fmt.Sprintf("%d KB", bytes/kb)
+	}
+	return fmt.Sprintf("%d B", bytes)
 }
 
 // extractEmbedded writes all files from an embedded FS directory to a destination.

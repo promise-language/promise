@@ -128,7 +128,7 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 					if c.typeSubst != nil && exprType != nil {
 						exprType = types.Substitute(exprType, c.typeSubst)
 					}
-					if extractNamed(exprType) == types.TypString {
+					if extractNamed(exprType) == types.TypString && !isRefType(exprType) {
 						c.dupStringFieldAccess = true
 					}
 					result = c.genExpr(es.Expr)
@@ -353,11 +353,14 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	// T0095: Signal genFieldAccess to dup string fields from droppable types.
 	// The variable will own the copy; without dup, both the var's drop and the
 	// type's synthesized drop would free the same allocation.
+	// B0179: Skip dup for borrow types (SharedRef/MutRef) — borrows don't own
+	// the value, so duping would create a temp that gets freed while the borrow
+	// still points to it (double-free / use-after-free).
 	resolvedExprType := exprType
 	if c.typeSubst != nil && resolvedExprType != nil {
 		resolvedExprType = types.Substitute(resolvedExprType, c.typeSubst)
 	}
-	if extractNamed(resolvedExprType) == types.TypString {
+	if extractNamed(resolvedExprType) == types.TypString && !isRefType(resolvedExprType) {
 		c.dupStringFieldAccess = true
 	}
 	val := c.genExpr(s.Value)
@@ -443,7 +446,8 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	alloca := c.block.NewAlloca(lt)
 	alloca.SetName(c.uniqueLocalName(s.Name))
 	// T0095: Signal genFieldAccess to dup string fields from droppable types.
-	if extractNamed(typ) == types.TypString {
+	// B0179: Skip for borrow types — borrows don't own the value.
+	if extractNamed(typ) == types.TypString && !isRefType(typ) {
 		c.dupStringFieldAccess = true
 	}
 	val := c.genExpr(s.Value)
@@ -2161,7 +2165,8 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		// T0095: Signal genFieldAccess to dup string fields for return values.
 		// Scope cleanup after the return may drop the containing type, freeing the
 		// field — the caller needs an independent copy.
-		if extractNamed(retType) == types.TypString {
+		// B0179: Skip for borrow return types — borrows don't own the value.
+		if extractNamed(retType) == types.TypString && !isRefType(retType) {
 			c.dupStringFieldAccess = true
 		}
 		val = c.genExpr(s.Value)

@@ -9232,6 +9232,28 @@ func TestConstructorDupBorrowedString(t *testing.T) {
 	assertContains(t, ir, "call i8* @promise_string_new(")
 }
 
+// B0179: Shared borrow of string field must NOT dup the string.
+// The borrow doesn't own the value — duping creates a temp that gets freed
+// while the borrow still points to it (use-after-free / double-free).
+func TestStringBorrowFieldNoDup(t *testing.T) {
+	ir := generateIR(t, `
+		type Pair {
+			string a;
+			string b;
+		}
+		get_ref(string & s) string & {
+			return s;
+		}
+		test() {
+			p := Pair(a: "hello", b: "world");
+			string & ra = get_ref(p.a);
+		}
+	`)
+	// The test function should NOT contain a string dup — the param is a borrow.
+	testFn := extractFunction(ir, "test")
+	assertNotContains(t, testFn, "call i8* @promise_string_new(")
+}
+
 // B0164: bindingFree emits pal_free on non-droppable heap types with multiple fields
 func TestBindingFreeMultipleFields(t *testing.T) {
 	ir := generateIR(t, `

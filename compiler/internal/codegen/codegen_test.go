@@ -9644,6 +9644,41 @@ func TestStringTempStructuralParamReturn(t *testing.T) {
 	assertContains(t, ir, "call void @promise_string_drop")
 }
 
+// T0124: Free function call returning string is tracked as temp and freed at stmt end.
+func TestStringTempFreeFunctionCall(t *testing.T) {
+	ir := generateIR(t, `
+		make_greeting(string name) string {
+			return "hello " + name;
+		}
+		test() {
+			assert(make_greeting("world") == "hello world", "ok");
+		}
+		main() {}
+	`)
+	// The return value of make_greeting() should be tracked and freed
+	assertContains(t, ir, "call i8* @make_greeting")
+	assertContains(t, ir, "tmp.drop")
+	assertContains(t, ir, "call void @promise_string_drop")
+}
+
+// T0124: Free function call returning string assigned to variable is claimed (not double-freed).
+func TestStringTempFreeFunctionCallClaimed(t *testing.T) {
+	ir := generateIR(t, `
+		make_label(int n) string {
+			return n.to_string();
+		}
+		test() {
+			s := make_label(42);
+			assert(s == "42", "ok");
+		}
+		main() {}
+	`)
+	// The call result should be tracked but claimed on assignment
+	assertContains(t, ir, "call i8* @make_label")
+	// Drop flag is cleared (claimed) so no free at stmt end for this temp
+	assertContains(t, ir, "store i1 false")
+}
+
 // T0082: Structural views are tested at the Promise level (e2e/structural_view_test.pr)
 // because structural interface coercion requires the full std library.
 // The fix: genTypedVarDecl skips clearDropFlag when LHS is a structural interface.

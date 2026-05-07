@@ -1815,6 +1815,11 @@ func (c *Compiler) maybeTrackIterTemp(e *ast.CallExpr, result value.Value) {
 // that produces a NEW heap-allocated string (T0073, T0099). Only tracks calls
 // guaranteed to return fresh allocations — NOT borrows from internal state.
 func (c *Compiler) isTrackedStringCall(e *ast.CallExpr) bool {
+	// T0124: Free function calls returning string always produce new heap allocations.
+	// The caller already verified the return type is string, so any Ident callee is safe.
+	if _, ok := e.Callee.(*ast.IdentExpr); ok {
+		return true
+	}
 	member, ok := e.Callee.(*ast.MemberExpr)
 	if !ok {
 		return false

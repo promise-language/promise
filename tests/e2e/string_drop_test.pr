@@ -75,6 +75,22 @@ string_in_loop() `test {
   }
 }
 
+// T0124: Free function returning string — temp tracked and freed at statement end
+free_func_string_temp_dropped() `test {
+  // make_greeting returns a new heap string; when used in assert without
+  // assigning to a variable, the temp must be freed at statement end.
+  assert(make_greeting("test") == "hello test", "free func temp");
+}
+
+// T0124: Free function returning string in loop — freed each iteration
+free_func_string_temp_in_loop() `test {
+  i := 0;
+  while i < 10 {
+    assert(make_greeting("x").len == 7, "loop free func temp");
+    i += 1;
+  }
+}
+
 // B0168: String concat temp in assertion — dropped at statement end
 string_concat_temp_in_assert() `test {
   assert("hello " + "world" == "hello world", "concat temp");

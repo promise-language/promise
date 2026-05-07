@@ -87,3 +87,18 @@ test_ctor_alloc_freed_on_propagate() `test {
   };
   assert(false, "should have error");
 }
+
+// B0193: Discarded error binding with _ must still be dropped
+test_result_capture_discard_error_dropped() `test {
+  (val, _) := make_err("discard_err");
+  assert(val == 0, "zero on error path");
+}
+
+test_result_capture_discard_error_ok_path() `test {
+  (val, _) := try_succeed(42);
+  assert(val == 42, "value on ok path");
+}
+
+try_succeed(int n) int! {
+  return n;
+}

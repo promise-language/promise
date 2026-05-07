@@ -696,13 +696,12 @@ func (c *Compiler) genFailableDestructure(s *ast.DestructureVarDecl) {
 			&ir.Incoming{X: okPathVal, Pred: okEnd},
 		)
 	}
-	var mergedErr value.Value
-	if s.Names[1] != "_" {
-		mergedErr = mergeBlock.NewPhi(
-			&ir.Incoming{X: errOpt, Pred: errEnd},
-			&ir.Incoming{X: okOpt, Pred: okEnd},
-		)
-	}
+	// B0193: Always create error PHI — even when discarded with _, the error
+	// instance must be dropped to avoid leaking.
+	mergedErr := mergeBlock.NewPhi(
+		&ir.Incoming{X: errOpt, Pred: errEnd},
+		&ir.Incoming{X: okOpt, Pred: okEnd},
+	)
 
 	// Now emit stores (after all PHIs)
 	if mergedVal != nil {
@@ -711,33 +710,34 @@ func (c *Compiler) genFailableDestructure(s *ast.DestructureVarDecl) {
 		c.block.NewStore(mergedVal, alloca)
 		c.locals[s.Names[0]] = alloca
 	}
-	if mergedErr != nil {
-		errVarName := s.Names[1]
-		alloca := c.block.NewAlloca(errOptType)
-		alloca.SetName(c.uniqueLocalName(errVarName))
-		c.block.NewStore(mergedErr, alloca)
-		c.locals[errVarName] = alloca
 
-		// T0135: Register error optional for drop at scope exit.
-		// The error instance inside the optional needs to be freed when present.
-		dropFlag := c.createEntryAlloca(irtypes.I1)
-		dropFlag.SetName(c.uniqueLocalName(errVarName + ".dropflag"))
-		c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+	// B0193: Always register the error optional for drop at scope exit.
+	errVarName := s.Names[1]
+	errAlloca := c.block.NewAlloca(errOptType)
+	errAlloca.SetName(c.uniqueLocalName(errVarName))
+	c.block.NewStore(mergedErr, errAlloca)
+
+	dropFlag := c.createEntryAlloca(irtypes.I1)
+	dropFlag.SetName(c.uniqueLocalName(errVarName + ".dropflag"))
+	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+
+	dropName := mangleMethodName("__mod_std_error", "drop", false)
+	dropFunc := c.funcs[dropName]
+
+	binding := scopeBinding{
+		kind:     bindingDropOptional,
+		alloca:   errAlloca,
+		named:    types.TypError,
+		valType:  types.TypError,
+		dropFlag: dropFlag,
+		dropFunc: dropFunc,
+		varName:  errVarName,
+	}
+	c.scopeBindings = append(c.scopeBindings, binding)
+
+	if errVarName != "_" {
+		c.locals[errVarName] = errAlloca
 		c.dropFlags[errVarName] = dropFlag
-
-		dropName := mangleMethodName("__mod_std_error", "drop", false)
-		dropFunc := c.funcs[dropName]
-
-		binding := scopeBinding{
-			kind:     bindingDropOptional,
-			alloca:   alloca,
-			named:    types.TypError,
-			valType:  types.TypError,
-			dropFlag: dropFlag,
-			dropFunc: dropFunc,
-			varName:  errVarName,
-		}
-		c.scopeBindings = append(c.scopeBindings, binding)
 		c.dropBindings[errVarName] = binding
 	}
 }

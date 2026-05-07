@@ -7006,6 +7006,32 @@ func TestDropNoPropagate(t *testing.T) {
 	t.Fatal("could not find Plain type")
 }
 
+// B0217: Type with function-typed field gets synthesized drop
+func TestDropPropagateFuncField(t *testing.T) {
+	info := checkOK(t, `
+		type Executor {
+			(int) -> void action;
+		}
+		main() {}
+	`)
+	for _, scope := range info.ScopeOrder {
+		if obj := scope.Lookup("Executor"); obj != nil {
+			if tn, ok := obj.(*types.TypeName); ok {
+				if named, ok := tn.Type().(*types.Named); ok {
+					if !named.HasDrop() {
+						t.Error("Executor should have HasDrop() == true")
+					}
+					if !named.NeedsSynthDrop() {
+						t.Error("Executor should have NeedsSynthDrop() == true")
+					}
+					return
+				}
+			}
+		}
+	}
+	t.Fatal("could not find Executor type")
+}
+
 // T0102: Enum with string variant gets synthesized drop
 func TestEnumDropPropagateString(t *testing.T) {
 	info := checkOK(t, `

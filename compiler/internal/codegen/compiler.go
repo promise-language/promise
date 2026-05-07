@@ -4956,6 +4956,13 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 			continue
 		}
 
+		// B0217: Function-typed fields hold closure fat pointers {fn_ptr, env_ptr}.
+		// Free the env pointer if non-null.
+		if _, isSig := fieldTypeRaw.(*types.Signature); isSig {
+			c.emitFuncFieldEnvFree(f, layout, typedPtr)
+			continue
+		}
+
 		// B0192: Apply type substitution before extracting the named type,
 		// so generic field types (e.g., T in GenericError[T]) resolve to
 		// their concrete types (e.g., Point).
@@ -5105,6 +5112,36 @@ func (c *Compiler) emitOptionalFieldDrop(opt *types.Optional, f *types.Field, la
 
 	// String/container: inner is i8*, call drop directly
 	c.block.NewCall(dropFunc, innerVal)
+	c.block.NewBr(skipBlock)
+
+	c.block = skipBlock
+}
+
+// emitFuncFieldEnvFree frees the env pointer of a function-typed field (B0217).
+// Function values are fat pointers {fn_ptr, env_ptr}. The env_ptr may be a
+// heap-allocated capture struct that needs freeing. Null-checks before freeing.
+func (c *Compiler) emitFuncFieldEnvFree(f *types.Field, layout *TypeDeclLayout, typedPtr value.Value) {
+	fieldIdx, ok := layout.InstanceFieldIndex[f.Name()]
+	if !ok {
+		return
+	}
+
+	// Load the function field value ({i8*, i8*} fat pointer)
+	fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+	fieldVal := c.block.NewLoad(layout.Instance.Fields[fieldIdx].LLVMType, fieldPtr)
+
+	// Extract env pointer (field 1 of fat pointer)
+	envPtr := c.block.NewExtractValue(fieldVal, 1)
+
+	// Null-check: only free if env is non-null (no-capture lambdas have null env)
+	isNull := c.block.NewICmp(enum.IPredEQ, envPtr, constant.NewNull(irtypes.I8Ptr))
+	freeBlock := c.newBlock("funcfield.env.free")
+	skipBlock := c.newBlock("funcfield.env.skip")
+	c.block.NewCondBr(isNull, skipBlock, freeBlock)
+
+	c.block = freeBlock
+	c.block.NewCall(c.palFree, envPtr)
 	c.block.NewBr(skipBlock)
 
 	c.block = skipBlock

@@ -9476,6 +9476,56 @@ func TestDropSynthesizedStringField(t *testing.T) {
 	assertContains(t, ir, "call void @pal_free(")
 }
 
+// B0217: Function-typed field with captured env gets synthesized drop that frees env
+func TestDropSynthesizedFuncFieldEnv(t *testing.T) {
+	ir := generateIR(t, `
+		type Executor {
+			(int) -> void action;
+		}
+		main() {
+			e := Executor(action: move |int x| {
+				int _ = x * 2;
+			});
+		}
+	`)
+	// Executor gets a synthesized drop that null-checks and frees the closure env
+	assertContains(t, ir, "define void @Executor.drop")
+	assertContains(t, ir, "funcfield.env.free")
+	assertContains(t, ir, "funcfield.env.skip")
+	assertContains(t, ir, "call void @pal_free(") // frees env + instance
+}
+
+// B0217: Function-typed field without captures (null env) — synthesized drop with null check
+func TestDropSynthesizedFuncFieldNullEnv(t *testing.T) {
+	ir := generateIR(t, `
+		type Wrapper {
+			() -> int getter;
+		}
+		main() {
+			w := Wrapper(getter: || -> int { return 42; });
+		}
+	`)
+	// Wrapper gets synthesized drop with null-check on env pointer
+	assertContains(t, ir, "define void @Wrapper.drop")
+	assertContains(t, ir, "funcfield.env.free")
+	assertContains(t, ir, "funcfield.env.skip")
+}
+
+// B0217: Type with multiple function fields — both env pointers freed
+func TestDropSynthesizedMultipleFuncFields(t *testing.T) {
+	ir := generateIR(t, `
+		type Transform {
+			(int) -> int forward;
+			(int) -> int backward;
+		}
+		main() {
+			t := Transform(forward: |int x| -> x * 2, backward: |int x| -> x / 2);
+		}
+	`)
+	assertContains(t, ir, "define void @Transform.drop")
+	assertContains(t, ir, "funcfield.env.free")
+}
+
 // B0216: String field reassignment drops old value before storing new.
 func TestStringFieldReassignDrop(t *testing.T) {
 	ir := generateIR(t, `

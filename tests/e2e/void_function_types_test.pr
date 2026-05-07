@@ -44,7 +44,7 @@ test_void_fn_variable() `test {
 }
 
 // --- Void function type with captured int ---
-test_void_fn_capture() `test(allow_leaks: true) {
+test_void_fn_capture() `test {
   int factor = 3;
   e := Executor(action: move |int x| {
     int _ = x * factor;

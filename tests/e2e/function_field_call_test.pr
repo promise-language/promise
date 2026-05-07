@@ -124,7 +124,7 @@ test_multiple_function_fields() `test {
 }
 
 // --- Function field with captured closure ---
-test_function_field_with_capture() `test(allow_leaks: true) {
+test_function_field_with_capture() `test {
   int factor = 3;
   w := Wrapper(getter: move || -> int {
     return factor * 10;

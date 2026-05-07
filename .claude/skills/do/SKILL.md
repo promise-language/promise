@@ -56,6 +56,7 @@ Implement the task or fix the bug described in $ARGUMENTS. If $ARGUMENTS referen
    - Then run `bin/verify.sh --local --wasm` (Linux/macOS) or `powershell -ExecutionPolicy Bypass -File bin\verify.ps1 -Local` (Windows) to confirm nothing else broke.
    - If verify fails, fix the issues and re-run until green.
    - **Memory leak tracking**: After verify completes, check the output for leak counts (lines like `N leaked` in test summaries). Record the total leak count. Compare against the baseline (~2170 leaks). If your changes increased leaks, investigate and fix before proceeding. If your changes reduced leaks, note the improvement. We are in an active leak-reduction phase — all changes should aim to minimize memory leaks.
+   - **No new `allow_leaks: true` tags.** Never add `allow_leaks: true` to tests — it masks leaks and prevents detection of regressions. If a test leaks, fix the leak or file a bug. The only allowed change to `allow_leaks` tags is **removing** them (when a test no longer leaks).
 
 9. **Chain to /review, /coverage, /commit.**
    - Run `/review` to check your own changes for correctness, missed edge cases, and convention compliance.

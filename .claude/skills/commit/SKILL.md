@@ -21,6 +21,7 @@ Before starting, update your tracker status: call `mcp__tracker__heartbeat` with
    - Run `bin/verify.sh --local --wasm` (Linux/macOS) or `powershell -ExecutionPolicy Bypass -File bin\verify.ps1 -Local` (Windows) from the repo root.
    - If it fails, fix the issues and re-run until it passes. Do not proceed until green.
    - **Memory leak tracking**: After verify completes, check the output for leak counts (lines like `N leaked` in test summaries). Record the total leak count. Compare against the baseline (~2170 leaks). If your changes increased the leak count, investigate and fix the regression before proceeding. If your changes reduced the leak count, note the improvement in the commit message.
+   - **No new `allow_leaks: true` tags.** Check `git diff` for any added `allow_leaks: true` — this is a blocking issue. Adding `allow_leaks` masks leaks and prevents regression detection. If a test leaks, fix the leak or file a bug. The only allowed change to `allow_leaks` tags is **removing** them.
 
 4. **Commit.**
    - Stage the relevant files (avoid `git add -A`; be specific).

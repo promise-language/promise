@@ -39,6 +39,7 @@ Before starting, update your tracker status: call `mcp__tracker__heartbeat` with
    - No hidden effects, implicit behaviors, or action-at-a-distance.
    - No workarounds for compiler/language bugs (file a tracker bug instead).
    - Code comments reference tracker IDs where applicable.
+   - **No new `allow_leaks: true` tags.** Adding `allow_leaks` to tests is prohibited — it masks leaks and prevents detection of regressions. If a test leaks, fix the leak or file a bug. The only allowed change to `allow_leaks` tags is **removing** them (when a test no longer leaks). If you see new `allow_leaks` tags in the diff, flag this as a blocking issue.
 
 5. **Fix issues you find.** Make the corrections directly rather than just listing them.
 

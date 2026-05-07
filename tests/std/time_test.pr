@@ -85,38 +85,38 @@ test_duration_lt_gt() `test {
 
 // --- Duration to_string ---
 
-test_duration_to_string_zero() `test(allow_leaks: true) {
+test_duration_to_string_zero() `test {
   assert(Duration.zero().to_string() == "0ns", "zero");
 }
 
-test_duration_to_string_nanos() `test(allow_leaks: true) {
+test_duration_to_string_nanos() `test {
   assert(Duration.from_nanos(42).to_string() == "42ns", "42ns");
   assert(Duration.from_nanos(999).to_string() == "999ns", "999ns");
 }
 
-test_duration_to_string_negative() `test(allow_leaks: true) {
+test_duration_to_string_negative() `test {
   Duration neg = Duration.from_millis(100) - Duration.from_millis(1600);
   assert(neg.to_string() == "-1.5s", "negative duration");
   Duration neg_ms = Duration.from_millis(10) - Duration.from_millis(52);
   assert(neg_ms.to_string() == "-42ms", "negative millis");
 }
 
-test_duration_to_string_micros() `test(allow_leaks: true) {
+test_duration_to_string_micros() `test {
   assert(Duration.from_micros(5).to_string() == "5us", "5us");
   assert(Duration.from_nanos(1500).to_string() == "1.5us", "1.5us");
 }
 
-test_duration_to_string_millis() `test(allow_leaks: true) {
+test_duration_to_string_millis() `test {
   assert(Duration.from_millis(42).to_string() == "42ms", "42ms");
   assert(Duration.from_nanos(1500000).to_string() == "1.5ms", "1.5ms");
 }
 
-test_duration_to_string_secs() `test(allow_leaks: true) {
+test_duration_to_string_secs() `test {
   assert(Duration.from_secs(3).to_string() == "3s", "3s");
   assert(Duration.from_millis(1500).to_string() == "1.5s", "1.5s");
 }
 
-test_duration_to_string_boundaries() `test(allow_leaks: true) {
+test_duration_to_string_boundaries() `test {
   // Exact boundary transitions: ns→us, us→ms, ms→s
   assert(Duration.from_nanos(999).to_string() == "999ns", "just under 1us");
   assert(Duration.from_nanos(1000).to_string() == "1us", "exactly 1us");
@@ -128,7 +128,7 @@ test_duration_to_string_boundaries() `test(allow_leaks: true) {
 
 // --- Duration format ---
 
-test_duration_format() `test(allow_leaks: true) {
+test_duration_format() `test {
   Builder b = Builder();
   Duration.from_millis(42).format(b)!;
   assert(b.to_string() == "42ms", "format 42ms");

@@ -1,6 +1,6 @@
 use shapes "./shapes";
 
-test_point() `test(allow_leaks: true) {
+test_point() `test {
   p := shapes.Point(x: 5, y: 10);
   assert(p.x == 5, "p.x == 5");
   assert(p.y == 10, "p.y == 10");

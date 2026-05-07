@@ -122,18 +122,18 @@ type Pair {
   }
 }
 
-test_user_type_to_structural() `test(allow_leaks: true) {
+test_user_type_to_structural() `test {
   Pair p = Pair(x: 3, y: 4);
   assert(display(p) == "(3,4)", "user type to Showable");
 }
 
-test_primitive_then_user_type() `test(allow_leaks: true) {
+test_primitive_then_user_type() `test {
   Pair p = Pair(x: 1, y: 2);
   assert(display(42) == "42", "int before user type");
   assert(display(p) == "(1,2)", "user type after int");
 }
 
-test_user_type_then_primitive() `test(allow_leaks: true) {
+test_user_type_then_primitive() `test {
   Pair p = Pair(x: 5, y: 6);
   assert(display(p) == "(5,6)", "user type before int");
   assert(display(99) == "99", "int after user type");
@@ -145,15 +145,15 @@ both(Showable a, Showable b) string {
   return a.to_string() + "," + b.to_string();
 }
 
-test_two_primitives_structural_params() `test(allow_leaks: true) {
+test_two_primitives_structural_params() `test {
   assert(both(1, 2) == "1,2", "two ints");
 }
 
-test_int_and_string_structural_params() `test(allow_leaks: true) {
+test_int_and_string_structural_params() `test {
   assert(both(42, "hi") == "42,hi", "int and string");
 }
 
-test_int_and_user_type_structural_params() `test(allow_leaks: true) {
+test_int_and_user_type_structural_params() `test {
   Pair p = Pair(x: 7, y: 8);
   assert(both(42, p) == "42,(7,8)", "int and user type");
 }
@@ -309,18 +309,18 @@ type Color {
   }
 }
 
-test_value_type_showable_param() `test(allow_leaks: true) {
+test_value_type_showable_param() `test {
   Pos p = Pos(x: 3, y: 4);
   assert(display(p) == "(3,4)", "value type showable param");
 }
 
-test_value_type_showable_var() `test(allow_leaks: true) {
+test_value_type_showable_var() `test {
   Pos p = Pos(x: 5, y: 6);
   Showable s = p;
   assert(s.to_string() == "(5,6)", "value type showable var");
 }
 
-test_value_type_showable_assign_then_pass() `test(allow_leaks: true) {
+test_value_type_showable_assign_then_pass() `test {
   Pos p = Pos(x: 7, y: 8);
   Showable s = p;
   assert(display(s) == "(7,8)", "value type showable assign then pass");
@@ -346,7 +346,7 @@ test_value_type_interpolation() `test {
   assert(s == "rgb(1,2,3)", "value type interpolation");
 }
 
-test_value_type_mixed_with_primitives() `test(allow_leaks: true) {
+test_value_type_mixed_with_primitives() `test {
   Pos p = Pos(x: 1, y: 2);
   assert(both(p, 42) == "(1,2),42", "value type and int");
   assert(both(99, p) == "99,(1,2)", "int and value type");

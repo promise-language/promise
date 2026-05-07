@@ -94,7 +94,7 @@ test_nested_interp_in_format() `test {
 }
 
 // Duration (value type from std) also has format()
-test_duration_interp() `test(allow_leaks: true) {
+test_duration_interp() `test {
   Duration d = Duration.from_millis(500);
   assert("{d}" == "500ms", "value type interpolation via Duration");
 }
@@ -282,17 +282,17 @@ test_optional_user_mixed_none() `test {
 }
 
 // Duration format edge cases (std value type)
-test_duration_zero() `test(allow_leaks: true) {
+test_duration_zero() `test {
   Duration d = Duration.from_millis(0);
   assert("{d}" == "0ns", "zero duration");
 }
 
-test_duration_seconds() `test(allow_leaks: true) {
+test_duration_seconds() `test {
   Duration d = Duration.from_secs(3);
   assert("{d}" == "3s", "seconds duration");
 }
 
-test_duration_mixed_interp() `test(allow_leaks: true) {
+test_duration_mixed_interp() `test {
   Duration d = Duration.from_millis(1500);
   assert("took {d}" == "took 1.5s", "duration in mixed string");
 }

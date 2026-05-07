@@ -8,7 +8,7 @@ strerror_known_codes() `test {
   assert(_io_strerror(22) == "invalid argument", "errno 22");
 }
 
-strerror_unknown_code() `test(allow_leaks: true) {
+strerror_unknown_code() `test {
   string msg = _io_strerror(9999);
   assert(msg == "I/O error (errno 9999)", "unknown errno fallback");
 }

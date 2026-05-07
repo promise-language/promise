@@ -260,7 +260,7 @@ process_auth() string! {
   return "ok";
 }
 
-test_sequential_typed_handler_auth() `test(allow_leaks: true) {
+test_sequential_typed_handler_auth() `test {
   string r = process_auth()!;
   assert(r == "auth:admin", "typed handler catches AuthError");
 }
@@ -272,7 +272,7 @@ process_validation() string! {
   return "ok";
 }
 
-test_sequential_typed_handler_validation() `test(allow_leaks: true) {
+test_sequential_typed_handler_validation() `test {
   string r = process_validation()!;
   assert(r == "field:email", "typed handler catches ValidationError");
 }

@@ -2525,6 +2525,21 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 			c.clearDropFlag(ident.Name)
 		}
 	}
+	// T0108: Clean up statement temps before returning. The return expression may
+	// create intermediate string temps (e.g., dupStringFieldAccess dup copies,
+	// string concat intermediaries) that are normally freed at statement end.
+	// Since return terminates the block, the post-statement cleanup never runs.
+	// Claim the return value first so it's not freed — only intermediaries are freed.
+	if s.Value != nil && val != nil {
+		c.claimStringTemp(val)
+		c.claimHeapTemp(val)
+		c.claimEnvTemp(val)
+	}
+	if c.block != nil && c.block.Term == nil {
+		c.cleanupStmtTemps()
+		c.cleanupHeapTemps()
+		c.cleanupEnvTemps()
+	}
 	// Emit cleanup for all active scope bindings before returning
 	var closeCap *closeErrCapture
 	if len(c.scopeBindings) > 0 {

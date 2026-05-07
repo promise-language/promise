@@ -193,7 +193,7 @@ typed_handler_else_match() string {
   return "unreachable";
 }
 
-test_typed_handler_else_match() `test(allow_leaks: true) {
+test_typed_handler_else_match() `test {
   string r = typed_handler_else_match();
   assert(r == "io:disk full", "typed handler catches matching error");
 }

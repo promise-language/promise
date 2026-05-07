@@ -55,7 +55,7 @@ mixed(~string owned, string borrowed) string {
   return owned + " " + borrowed;
 }
 
-test_mixed_params() `test(allow_leaks: true) {
+test_mixed_params() `test {
   string a = "hello";
   string b = "world";
   string result = mixed(a, b);

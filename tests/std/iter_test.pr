@@ -280,7 +280,7 @@ test_collect() `test {
 
 // --- Chaining multiple combinators ---
 
-test_filter_take() `test(allow_leaks: true) {
+test_filter_take() `test {
   c := Counter(current: 0, limit: 100);
   Iterator[int] result = c.filter(|int x| -> bool {
     return x % 2 == 1;
@@ -342,7 +342,7 @@ test_vector_iter_collect() `test(allow_leaks: true) {
   assert(result[2] == 5, "third=5");
 }
 
-test_vector_iter_chain() `test(allow_leaks: true) {
+test_vector_iter_chain() `test {
   int[] a = [1, 2];
   int[] b = [3, 4];
   int sum = 0;
@@ -658,7 +658,7 @@ test_fold_cross_type() `test(allow_leaks: true) {
 
 // --- Generic combinators: enumerate ---
 
-test_enumerate() `test(allow_leaks: true) {
+test_enumerate() `test {
   int[] v = [10, 20, 30];
   int idx_sum = 0;
   int val_sum = 0;
@@ -671,7 +671,7 @@ test_enumerate() `test(allow_leaks: true) {
   assert(val_sum == 60, "enumerate val sum: 10+20+30=60");
 }
 
-test_enumerate_empty() `test(allow_leaks: true) {
+test_enumerate_empty() `test {
   int[] v = [];
   int count = 0;
   for _ in v.iter().enumerate() {
@@ -1098,6 +1098,33 @@ test_nested_closures_in_chain() `test(allow_leaks: true) {
   assert(result.len == 9, "nested closures len=9");
   assert(result[0] == 3, "first=3");
   assert(result[8] == 27, "last=27");
+}
+
+// T0128: Chained combinator cleanup — intermediate _FnIter instances freed via _parent chain.
+test_chained_filter_take_no_leak() `test {
+  int[] v = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+  // 3-deep chain: iter() → filter() → take() — all intermediate _FnIter instances must be freed.
+  int sum = 0;
+  for x in v.iter().filter(|int x| -> bool {
+    return x > 5;
+  }).take(3) {
+    sum = sum + x;
+  }
+  // filter >5: 6,7,8,9,10 → take 3: 6,7,8 → sum=21
+  assert(sum == 21, "filter>5 take 3 = 21");
+}
+
+// T0128: 4-deep combinator chain
+test_deep_chain_no_leak() `test {
+  int[] v = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+  int sum = 0;
+  for x in v.iter().filter(|int x| -> bool {
+    return x % 2 == 0;
+  }).skip(1).take(3) {
+    sum = sum + x;
+  }
+  // even: 2,4,6,8,10 → skip 1: 4,6,8,10 → take 3: 4,6,8 → sum=18
+  assert(sum == 18, "deep chain sum=18");
 }
 
 main() {

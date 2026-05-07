@@ -6255,23 +6255,41 @@ func (c *Compiler) declareCoroIntrinsics() {
 		b.NewRet(nil)
 	}
 
-	// T0088: Generic cleanup for _FnIter instances — frees closure env + instance.
-	// _FnIter layout: { i8* variant, { i8* fn_ptr, i8* env_ptr } _next }
-	// = { i8*, i8*, i8* } at the raw pointer level.
-	// The env_ptr is at offset 2 * ptr_size in the instance struct.
+	// T0088/T0128: Generic cleanup for _FnIter instances — frees parent chain + closure env + instance.
+	// _FnIter layout: { i8* variant, { i8* fn_ptr, i8* env_ptr } _next, i64 _parent }
+	// T0128: _parent stores ptrtoint of upstream _FnIter instance in combinator chains.
+	// If non-zero, recursively calls iterCleanup on the parent before freeing self.
 	c.iterCleanup = c.module.NewFunc("__promise_iter_cleanup", irtypes.Void,
 		ir.NewParam("inst", irtypes.I8Ptr))
 	{
-		ptrArrayType := irtypes.NewArray(3, irtypes.I8Ptr)
+		// Struct type matching _FnIter instance layout
+		iterInstType := irtypes.NewStruct(irtypes.I8Ptr, closureType(), irtypes.I64)
 		entry := c.iterCleanup.NewBlock(".entry")
-		typedPtr := entry.NewBitCast(c.iterCleanup.Params[0], irtypes.NewPointer(ptrArrayType))
-		envField := entry.NewGetElementPtr(ptrArrayType, typedPtr,
+		typedPtr := entry.NewBitCast(c.iterCleanup.Params[0], irtypes.NewPointer(iterInstType))
+
+		// Load _parent (field 2: i64)
+		parentField := entry.NewGetElementPtr(iterInstType, typedPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
-		envPtr := entry.NewLoad(irtypes.I8Ptr, envField)
-		isNull := entry.NewICmp(enum.IPredEQ, envPtr, constant.NewNull(irtypes.I8Ptr))
+		parentInt := entry.NewLoad(irtypes.I64, parentField)
+		parentIsZero := entry.NewICmp(enum.IPredEQ, parentInt, constant.NewInt(irtypes.I64, 0))
+		cleanParentBlk := c.iterCleanup.NewBlock("clean.parent")
+		loadEnvBlk := c.iterCleanup.NewBlock("load.env")
+		entry.NewCondBr(parentIsZero, loadEnvBlk, cleanParentBlk)
+
+		// T0128: Recursively clean parent _FnIter
+		parentPtr := cleanParentBlk.NewIntToPtr(parentInt, irtypes.I8Ptr)
+		cleanParentBlk.NewCall(c.iterCleanup, parentPtr)
+		cleanParentBlk.NewBr(loadEnvBlk)
+
+		// Load env_ptr (field 1, sub-field 1)
+		envField := loadEnvBlk.NewGetElementPtr(iterInstType, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1), constant.NewInt(irtypes.I32, 1))
+		envPtr := loadEnvBlk.NewLoad(irtypes.I8Ptr, envField)
+		isNull := loadEnvBlk.NewICmp(enum.IPredEQ, envPtr, constant.NewNull(irtypes.I8Ptr))
 		freeEnvBlk := c.iterCleanup.NewBlock("free.env")
 		freeInstBlk := c.iterCleanup.NewBlock("free.inst")
-		entry.NewCondBr(isNull, freeInstBlk, freeEnvBlk)
+		loadEnvBlk.NewCondBr(isNull, freeInstBlk, freeEnvBlk)
+
 		freeEnvBlk.NewCall(c.palFree, envPtr)
 		freeEnvBlk.NewBr(freeInstBlk)
 		freeInstBlk.NewCall(c.palFree, c.iterCleanup.Params[0])

@@ -1850,6 +1850,23 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 		}
 	}
 
+	// T0128: In structural default methods on _FnIter, store the receiver (upstream
+	// _FnIter instance) as _parent for chained iterator cleanup. This enables
+	// iterCleanup to recursively free the entire combinator chain.
+	if c.selfSubst != nil && named != nil {
+		if c.selfSubst.concrete.Obj().Name() == "_FnIter" && named.Obj().Name() == "_FnIter" {
+			if parentIdx, ok := layout.InstanceFieldIndex["_parent"]; ok {
+				if thisAlloca, ok := c.locals["this"]; ok {
+					thisPtr := c.block.NewLoad(irtypes.I8Ptr, thisAlloca)
+					thisInt := c.block.NewPtrToInt(thisPtr, irtypes.I64)
+					parentFieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
+						constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(parentIdx)))
+					c.block.NewStore(thisInt, parentFieldPtr)
+				}
+			}
+		}
+	}
+
 	// Build value struct: { vtable_ptr, instance_ptr }
 	var vtablePtr value.Value
 	if vtGlobal := c.lookupVtableGlobal(typ); vtGlobal != nil {

@@ -6,8 +6,6 @@ import (
 	"strings"
 
 	"github.com/llir/llvm/ir"
-	"github.com/llir/llvm/ir/constant"
-	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 
 	"djabi.dev/go/promise_lang/internal/ast"
@@ -1352,62 +1350,18 @@ func (c *Compiler) defineMonoMethods(file *ast.File, instances []*types.Instance
 	}
 }
 
-// defineFnIterDrop synthesizes the body for _FnIter[T].drop (T0088).
-// The drop method frees the closure env of the _next field, then frees the instance.
+// defineFnIterDrop synthesizes the body for _FnIter[T].drop (T0088/T0128).
+// Delegates to __promise_iter_cleanup which handles the full parent chain,
+// closure env cleanup, and instance deallocation.
 //
 //	define void @_FnIter__int.drop(i8* %this) {
-//	    %inst = bitcast i8* %this to %Instance*
-//	    %next_ptr = getelementptr %Instance, %inst, 0, 1  ; _next field
-//	    %next = load {i8*, i8*}, %next_ptr
-//	    %env = extractvalue {i8*, i8*} %next, 1
-//	    if %env != null: call @pal_free(%env)
-//	    call @pal_free(%this)
+//	    call void @__promise_iter_cleanup(i8* %this)
 //	    ret void
 //	}
 func (c *Compiler) defineFnIterDrop(fn *ir.Func, inst *types.Instance) {
-	layout := c.lookupTypeLayout(inst)
-	if layout == nil {
-		return
-	}
-	instStructType := layout.Instance.LLVMType
-	instPtrType := layout.InstancePtrType
-
 	entry := fn.NewBlock(".entry")
-	thisParam := fn.Params[0] // i8*
-
-	// Cast this to typed instance pointer
-	typedThis := entry.NewBitCast(thisParam, instPtrType)
-
-	// Find the _next field index (should be field 1, after _variant)
-	nextIdx, ok2 := layout.InstanceFieldIndex["_next"]
-	if !ok2 {
-		// Fallback: just free the instance
-		entry.NewCall(c.palFree, thisParam)
-		entry.NewRet(nil)
-		return
-	}
-
-	// Load the _next field (closure: {i8*, i8*})
-	nextPtr := entry.NewGetElementPtr(instStructType, typedThis,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(nextIdx)))
-	nextVal := entry.NewLoad(closureType(), nextPtr)
-
-	// Extract env pointer (field 1 of the fat pointer)
-	envPtr := entry.NewExtractValue(nextVal, 1)
-
-	// Free env if non-null
-	isNull := entry.NewICmp(enum.IPredEQ, envPtr, constant.NewNull(irtypes.I8Ptr))
-	freeEnvBlock := fn.NewBlock("free.env")
-	freeInstBlock := fn.NewBlock("free.inst")
-
-	entry.NewCondBr(isNull, freeInstBlock, freeEnvBlock)
-
-	freeEnvBlock.NewCall(c.palFree, envPtr)
-	freeEnvBlock.NewBr(freeInstBlock)
-
-	// Free the instance itself
-	freeInstBlock.NewCall(c.palFree, thisParam)
-	freeInstBlock.NewRet(nil)
+	entry.NewCall(c.iterCleanup, fn.Params[0])
+	entry.NewRet(nil)
 }
 
 // declareSynthesizedMonoDrops declares drop function stubs for monomorphized

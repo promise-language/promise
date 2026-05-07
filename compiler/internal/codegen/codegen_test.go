@@ -14991,3 +14991,44 @@ func TestOptionalFieldInSynthDrop(t *testing.T) {
 	assertContains(t, ir, "optfield.drop")
 	assertContains(t, ir, "optfield.skip")
 }
+
+// T0128: __promise_iter_cleanup handles _parent field (i64) for chained cleanup
+func TestIterCleanupHasParentHandling(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[] v = [1, 2, 3];
+			Iterator[int] it = v.iter();
+		}
+	`)
+	// iterCleanup should load _parent (i64 field), check != 0, and recursively call itself
+	assertContains(t, ir, "define void @__promise_iter_cleanup")
+	assertContains(t, ir, "load i64")     // load _parent
+	assertContains(t, ir, "clean.parent") // branch label for parent cleanup
+	assertContains(t, ir, "inttoptr i64") // convert parent int to ptr
+}
+
+// T0128: __promise_iter_cleanup handles _parent field for chained iterator cleanup
+func TestIterCleanupParentChain(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[] v = [1, 2, 3];
+			Iterator[int] it = v.iter().filter(|int x| -> bool { return x > 1; });
+		}
+	`)
+	// iterCleanup should have parent chain handling (inttoptr + recursive call)
+	assertContains(t, ir, "__promise_iter_cleanup")
+	assertContains(t, ir, "inttoptr")
+	assertContains(t, ir, "clean.parent")
+}
+
+// T0128: _parent is populated via ptrtoint(this) in structural default methods on _FnIter
+func TestFnIterParentPopulated(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[] v = [1, 2, 3];
+			Iterator[int] it = v.iter().filter(|int x| -> bool { return x > 1; });
+		}
+	`)
+	// The filter structural default on _FnIter should store ptrtoint(this) into _parent
+	assertContains(t, ir, "ptrtoint")
+}

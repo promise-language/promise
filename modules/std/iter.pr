@@ -237,6 +237,7 @@ type Stream[T] `structural `public `doc("Structural stream interface. Any type w
 // Internal closure-based iterator. Gets all combinator methods via `is Iterator[T]`.
 type _FnIter[T] is Iterator[T] `doc("Closure-based iterator wrapper.") {
   () -> T? _next;
+  int _parent = 0;
 
   next() T? {
     return this._next();

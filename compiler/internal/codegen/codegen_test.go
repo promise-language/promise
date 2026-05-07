@@ -9346,6 +9346,22 @@ func TestStringFieldAccessDup(t *testing.T) {
 	assertContains(t, ir, "call i8* @promise_string_new(")
 }
 
+// B0181: Optional string field access + unwrap should dup to prevent double-free
+func TestOptionalStringFieldUnwrapDup(t *testing.T) {
+	ir := generateIR(t, `
+		type Wrapper {
+			string? opt_name;
+		}
+		test() {
+			w := Wrapper(opt_name: "hello");
+			string val = w.opt_name!;
+		}
+	`)
+	// Reading w.opt_name should dup the inner string (via promise_string_new)
+	// to prevent double-free between val's drop and Wrapper's synthesized drop
+	assertContains(t, ir, "call i8* @promise_string_new(")
+}
+
 // T0095: Constructor with borrowed string param (no drop flag) dups the string
 func TestConstructorDupBorrowedString(t *testing.T) {
 	ir := generateIR(t, `

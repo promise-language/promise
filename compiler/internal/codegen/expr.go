@@ -2669,6 +2669,18 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 			c.trackStringTemp(dup)
 			return dup
 		}
+		// B0181: Handle string? optional fields — extractNamed returns nil for
+		// *types.Optional, so unwrap first to check the inner type.
+		// Don't trackStringTemp here: the dup flows through genOptionalForceUnwrap's
+		// extractvalue, producing a different LLVM value that claimStringTemp can't match.
+		// The caller (VarDecl) assigns the unwrapped string to a variable with its own
+		// drop flag, so temp tracking is unnecessary.
+		if opt, ok := fType.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString && ownerNamed != nil && ownerNamed.HasDrop() {
+			c.dupStringFieldAccess = false // consume the flag
+			innerStr := c.block.NewExtractValue(val, 1)
+			dup := c.dupString(innerStr)
+			return c.block.NewInsertValue(val, dup, 1)
+		}
 	}
 
 	return val

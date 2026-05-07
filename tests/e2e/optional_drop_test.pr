@@ -41,3 +41,28 @@ test_multi_field_none() `test {
   MultiField m = MultiField(name: "main", extra: none);
   assert(m.name == "main", "regular field with none optional");
 }
+
+// --- B0181: Optional field access + unwrap must dup to prevent double-free ---
+
+test_optional_field_unwrap_no_double_free() `test {
+  Wrapper w = Wrapper(opt_name: "hello" + " world");
+  string val = w.opt_name!;
+  assert(val == "hello world", "unwrapped value matches");
+}
+
+test_optional_field_unwrap_owner_still_valid() `test {
+  Wrapper w = Wrapper(opt_name: "abc" + "def");
+  string val = w.opt_name!;
+  assert(val == "abcdef", "unwrapped value matches");
+  // w is still alive — its field and val should both be valid (independent copies)
+  // B0190: inline w.opt_name! in expression crashes — use variable instead
+  string val2 = w.opt_name!;
+  assert(val2 == "abcdef", "original field still valid after unwrap");
+}
+
+test_optional_field_unwrap_multi_field() `test {
+  MultiField m = MultiField(name: "main" + "!", extra: "extra" + " data");
+  string val = m.extra!;
+  assert(val == "extra data", "unwrapped optional matches");
+  assert(m.name == "main!", "non-optional field still valid");
+}

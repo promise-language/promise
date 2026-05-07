@@ -156,7 +156,7 @@ split_test() `test {
   assert(r10[3] == ".config", "split hidden 3");
 }
 
-normalize_test() `test(allow_leaks: true) {
+normalize_test() `test {
   string s = Platform.path_separator;
   // Helper: build expected paths with platform separator
   // normalize() always outputs Platform.path_separator between components.

@@ -96,7 +96,7 @@ test_split_empty() `test(allow_leaks: true) {
   assert(path.split("").len == 0, "split empty");
 }
 
-test_normalize_dotdot() `test(allow_leaks: true) {
+test_normalize_dotdot() `test {
   string s = Platform.path_separator;
   assert(path.normalize("/a/b/../c") == s + "a" + s + "c", "normalize dotdot");
 }
@@ -122,7 +122,7 @@ test_normalize_root() `test {
 
 // --- Security-critical: normalize traversal clamping ---
 
-test_normalize_abs_traversal_clamped() `test(allow_leaks: true) {
+test_normalize_abs_traversal_clamped() `test {
   string s = Platform.path_separator;
   // Absolute paths must never escape root
   assert(path.normalize("/..") == s, "abs root dotdot");
@@ -131,7 +131,7 @@ test_normalize_abs_traversal_clamped() `test(allow_leaks: true) {
   assert(path.normalize("/home/../../../etc/shadow") == s + "etc" + s + "shadow", "abs escape attempt");
 }
 
-test_normalize_rel_traversal_preserved() `test(allow_leaks: true) {
+test_normalize_rel_traversal_preserved() `test {
   string s = Platform.path_separator;
   // Relative paths preserve leading ".." — caller must validate
   assert(path.normalize("../../etc/passwd") == ".." + s + ".." + s + "etc" + s + "passwd", "rel traversal preserved");
@@ -139,7 +139,7 @@ test_normalize_rel_traversal_preserved() `test(allow_leaks: true) {
   assert(path.normalize("a/b/c/../../../../d") == ".." + s + "d", "rel overshoot");
 }
 
-test_normalize_mixed_dots() `test(allow_leaks: true) {
+test_normalize_mixed_dots() `test {
   string s = Platform.path_separator;
   assert(path.normalize("a/./b/../c/./d/../e") == "a" + s + "c" + s + "e", "mixed dots");
   assert(path.normalize("./././.") == ".", "only dots");
@@ -147,7 +147,7 @@ test_normalize_mixed_dots() `test(allow_leaks: true) {
   assert(path.normalize("a/b/../../c/../d") == "d", "consecutive dotdots");
 }
 
-test_normalize_trailing() `test(allow_leaks: true) {
+test_normalize_trailing() `test {
   string s = Platform.path_separator;
   assert(path.normalize("a/b/.") == "a" + s + "b", "trailing dot");
   assert(path.normalize("a/b/..") == "a", "trailing dotdot");
@@ -164,7 +164,7 @@ test_normalize_dot_prefixed_names() `test {
   assert(path.normalize("..hidden") == "..hidden", "bare dotdot-prefix");
 }
 
-test_normalize_idempotent() `test(allow_leaks: true) {
+test_normalize_idempotent() `test {
   string s = Platform.path_separator;
   assert(path.normalize(path.normalize("/a/b/../c")) == s + "a" + s + "c", "idempotent abs");
   assert(path.normalize(path.normalize("../../a")) == ".." + s + ".." + s + "a", "idempotent rel");

@@ -1,6 +1,5 @@
 // B0163: Channel scope-exit drop — channels are freed when they go out of scope.
 // Tests that channel drop works correctly with reference counting.
-// All tests allow_leaks due to batch test binary sharing scheduler allocations.
 // Single-threaded channel: created and dropped in same scope.
 channel_drop_local() `test {
   ch := channel[int](capacity: 5);

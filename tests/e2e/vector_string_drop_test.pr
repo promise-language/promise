@@ -55,7 +55,7 @@ test_remove_drops_element() `test {
 }
 
 // Normalize-like pattern: pop + push between two vectors.
-// allow_leaks: pop() returns the element as T? — discarded optional leaks the string.
+// B0196: pop() discarded result is now dropped by dropDiscardedOptionalString.
 test_normalize_pattern() `test {
   string[] parts = "a,b,c,d".split(",");
   string[] result = string[]();

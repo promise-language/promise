@@ -15529,3 +15529,30 @@ func TestTerminalOpDoesNotClaimReceiver(t *testing.T) {
 	assertContains(t, ir, "heap.drop")
 	assertContains(t, ir, "__promise_iter_cleanup")
 }
+
+// B0196: Discarded Vector[string].pop() must drop the inner string.
+func TestDropDiscardedOptionalStringPop(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			string[] v = ["a", "b", "c"];
+			v.pop();
+		}
+	`)
+	// The discarded optional string from pop() should trigger a conditional drop.
+	assertContains(t, ir, "discard.drop")
+	assertContains(t, ir, "call void @promise_string_drop")
+}
+
+// B0196: Discarded Vector[int].pop() should NOT emit discard drop (int is not droppable).
+func TestNoDropDiscardedOptionalIntPop(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			int[] v = [1, 2, 3];
+			v.pop();
+		}
+	`)
+	testFn := extractFunction(ir, "test")
+	if strings.Contains(testFn, "discard.drop") {
+		t.Fatalf("expected test function to NOT contain discard.drop\ngot:\n%s", testFn)
+	}
+}

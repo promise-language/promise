@@ -190,18 +190,17 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 		if _, ok := s.Expr.(*ast.GoExpr); ok {
 			c.goExprFireAndForget = true
 		}
+		var discardedResult value.Value
 		if c.info.AutoPropagateExprs[s.Expr] {
 			c.genAutoPropagate(s.Expr)
 		} else {
-			val := c.genExpr(s.Expr)
-			// B0196: Drop discarded optional string values (e.g., v.pop()).
-			// When the return value of a method like pop() is not captured,
-			// the string inside the optional leaks. Extract and drop it.
-			if val != nil && c.block != nil && c.block.Term == nil {
-				c.dropDiscardedOptionalString(s.Expr, val)
-			}
+			discardedResult = c.genExpr(s.Expr)
 		}
 		c.goExprFireAndForget = false
+		// B0196: When a discarded expression returns Optional[string], the inner
+		// string leaks because trackStringTemp only tracks bare i8* values, not
+		// {i1, i8*} optional structs. Extract the tag and conditionally drop.
+		c.dropDiscardedOptionalString(s.Expr, discardedResult)
 	case *ast.ReturnStmt:
 		c.genReturnStmt(s)
 	case *ast.TypedVarDecl:
@@ -1513,6 +1512,45 @@ func (c *Compiler) emitDropCallDirect(b scopeBinding) {
 	c.block = dropDoneBlock
 }
 
+// dropDiscardedOptionalString handles B0196: when an ExprStmt discards an
+// Optional[string] result (e.g. v.pop()), the inner string must be dropped.
+// trackStringTemp only tracks bare i8* values, so {i1, i8*} optionals slip through.
+func (c *Compiler) dropDiscardedOptionalString(expr ast.Expr, result value.Value) {
+	if result == nil || c.block == nil || c.block.Term != nil {
+		return
+	}
+	exprType := c.info.Types[expr]
+	if exprType == nil {
+		return
+	}
+	if c.typeSubst != nil {
+		exprType = types.Substitute(exprType, c.typeSubst)
+	}
+	opt, ok := exprType.(*types.Optional)
+	if !ok {
+		return
+	}
+	if extractNamed(opt.Elem()) != types.TypString {
+		return
+	}
+	dropFunc := c.funcs["promise_string_drop"]
+	if dropFunc == nil {
+		return
+	}
+	// result is {i1, i8*} — extract tag and conditionally drop inner string.
+	tag := c.block.NewExtractValue(result, 0)
+	dropBlock := c.newBlock("discard.drop")
+	skipBlock := c.newBlock("discard.skip")
+	c.block.NewCondBr(tag, dropBlock, skipBlock)
+
+	c.block = dropBlock
+	strPtr := c.block.NewExtractValue(result, 1)
+	c.block.NewCall(dropFunc, strPtr)
+	c.block.NewBr(skipBlock)
+
+	c.block = skipBlock
+}
+
 // emitStringDropCall emits a conditional promise_string_drop call for a string variable.
 // String allocas store raw i8* (instance pointer), not a value struct — so we load
 // the i8* directly and pass it to promise_string_drop (which checks the literal flag).
@@ -1798,37 +1836,6 @@ func (c *Compiler) claimStringTemp(val value.Value) {
 	// Clear drop flag — ownership transferred
 	c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.stmtTemps[idx].dropFlag)
 	c.stmtTempMap[val] = -1
-}
-
-// dropDiscardedOptionalString drops the string inside a discarded Optional[string]
-// value (B0196). When a method like Vector[string].pop() returns T? and the result
-// is not captured, the string inside the optional leaks. This extracts the tag,
-// and if present, drops the inner string value.
-func (c *Compiler) dropDiscardedOptionalString(expr ast.Expr, val value.Value) {
-	exprType := c.info.Types[expr]
-	if c.typeSubst != nil && exprType != nil {
-		exprType = types.Substitute(exprType, c.typeSubst)
-	}
-	opt, ok := exprType.(*types.Optional)
-	if !ok {
-		return
-	}
-	innerNamed := extractNamed(opt.Elem())
-	if innerNamed != types.TypString {
-		return
-	}
-	// Extract tag (field 0) and inner value (field 1) from the optional struct
-	tag := c.block.NewExtractValue(val, 0)
-	dropBlock := c.newBlock("discard.drop")
-	skipBlock := c.newBlock("discard.skip")
-	c.block.NewCondBr(tag, dropBlock, skipBlock)
-
-	c.block = dropBlock
-	inner := c.block.NewExtractValue(val, 1)
-	c.block.NewCall(c.funcs["promise_string_drop"], inner)
-	c.block.NewBr(skipBlock)
-
-	c.block = skipBlock
 }
 
 // cleanupStmtTemps drops all unclaimed string temps at statement end (T0073).

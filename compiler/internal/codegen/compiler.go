@@ -4933,9 +4933,19 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 		// (Map[int, bool]) and use the mono name for the drop function.
 		// Container types (Vector, Channel, String) have native non-mono drops
 		// and must NOT use the mono name.
+		// B0189: Drop vector elements before freeing the buffer.
+		// Vector fields with droppable elements (e.g., Vector[string]) need
+		// their elements dropped before Vector.drop frees the buffer.
+		resolvedFieldType := f.Type()
+		if c.typeSubst != nil {
+			resolvedFieldType = types.Substitute(resolvedFieldType, c.typeSubst)
+		}
+		if elemType, isVec := types.AsVector(resolvedFieldType); isVec {
+			c.emitVectorElementDropLoop(fieldInstance, elemType)
+		}
+
 		ownerName := c.resolveMethodOwner(fieldNamed, "drop")
 		if fieldNamed.NeedsSynthDrop() && c.typeSubst != nil {
-			resolvedFieldType := types.Substitute(f.Type(), c.typeSubst)
 			if inst, ok := resolvedFieldType.(*types.Instance); ok {
 				ownerName = monoName(inst)
 			}
@@ -5131,8 +5141,10 @@ func (c *Compiler) defineSynthesizedDropBody(fn *ir.Func, named *types.Named) {
 	entry := fn.NewBlock(".entry")
 	savedBlock := c.block
 	savedFn := c.fn
+	savedEntry := c.entryBlock // B0189: save for createEntryAlloca in element drop loops
 	c.block = entry
-	c.fn = fn // T0101: ensure c.newBlock() creates blocks in the drop function
+	c.fn = fn            // T0101: ensure c.newBlock() creates blocks in the drop function
+	c.entryBlock = entry // B0189: element drop loops use createEntryAlloca
 
 	// Set up method context for emitFieldDrops (needs locals["this"])
 	savedLocals := c.locals
@@ -5151,6 +5163,7 @@ func (c *Compiler) defineSynthesizedDropBody(fn *ir.Func, named *types.Named) {
 	c.locals = savedLocals
 	c.block = savedBlock
 	c.fn = savedFn
+	c.entryBlock = savedEntry
 }
 
 // declareSynthesizedEnumDrops declares drop function stubs for non-generic enums
@@ -5288,7 +5301,12 @@ func (c *Compiler) defineSynthesizedEnumDropBody(fn *ir.Func, enum *types.Enum, 
 	}
 
 	entry := fn.NewBlock(".entry")
+	savedBlock := c.block
+	savedFn := c.fn
+	savedEntry := c.entryBlock // B0189: save for createEntryAlloca in element drop loops
 	c.block = entry
+	c.fn = fn            // B0189: ensure c.newBlock() creates blocks in the drop function
+	c.entryBlock = entry // B0189: element drop loops use createEntryAlloca
 
 	// this = i8* pointer to the alloca storing the enum internal type
 	typedPtr := entry.NewBitCast(fn.Params[0], irtypes.NewPointer(internalType))
@@ -5369,6 +5387,10 @@ func (c *Compiler) defineSynthesizedEnumDropBody(fn *ir.Func, enum *types.Enum, 
 		c.block.NewBr(doneBlock)
 	}
 	entry.NewSwitch(tag, doneBlock, cases...)
+
+	c.block = savedBlock
+	c.fn = savedFn
+	c.entryBlock = savedEntry
 }
 
 // variantFieldNeedsDrop returns true if an enum variant field type needs cleanup.
@@ -5405,8 +5427,11 @@ func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 			}
 			return
 		}
-		// Vector: call Vector.drop
-		if _, isVec := types.AsVector(typ); isVec || named == types.TypVector {
+		// Vector: drop elements first, then call Vector.drop
+		if elemType, isVec := types.AsVector(typ); isVec || named == types.TypVector {
+			if isVec {
+				c.emitVectorElementDropLoop(fieldVal, elemType)
+			}
 			if dropFn, ok := c.funcs["Vector.drop"]; ok {
 				c.block.NewCall(dropFn, fieldVal)
 			}

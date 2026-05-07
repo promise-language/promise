@@ -90,7 +90,7 @@ test_trim() `test {
   assert("   ".trim() == "", "trim all spaces");
 }
 
-test_split() `test(allow_leaks: true) {
+test_split() `test {
   string[] parts = "a,b,c".split(",");
   assert(parts.len == 3, "split len 3");
   assert(parts[0] == "a", "split[0] == a");

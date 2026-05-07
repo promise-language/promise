@@ -3224,12 +3224,27 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 	switch method {
 	case "push":
 		argVal := c.genCallArgExpr(e.Args[0].Value)
-		// Clear drop flag: element is moved into the vector
-		if ident, ok := e.Args[0].Value.(*ast.IdentExpr); ok {
-			c.clearDropFlag(ident.Name)
+
+		// B0189: For string elements, dup before push to ensure exclusive ownership.
+		// Each vector must independently own its string elements so that the element
+		// drop loop in Vector.drop doesn't cause double-frees when strings are shared
+		// between vectors (e.g., normalize() where parts[i] is pushed into result).
+		resolvedElem := elemType
+		if c.typeSubst != nil {
+			resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
 		}
-		// B0170: claim string temp — ownership transfers to vector
-		c.claimStringTemp(argVal)
+		if extractNamed(resolvedElem) == types.TypString {
+			argVal = c.dupString(argVal)
+			// Don't clear source drop flag — source retains its string.
+			// Don't claim string temp — original temp is freed normally by cleanup.
+		} else {
+			// Clear drop flag: element is moved into the vector
+			if ident, ok := e.Args[0].Value.(*ast.IdentExpr); ok {
+				c.clearDropFlag(ident.Name)
+			}
+			// B0170: claim string temp — ownership transfers to vector
+			c.claimStringTemp(argVal)
+		}
 		// COW: if static (.rodata), copy to heap first (T0062)
 		cowSlice := c.block.NewCall(c.funcs["promise_vector_cow"],
 			slicePtr, constant.NewInt(irtypes.I64, elemSize))
@@ -3300,6 +3315,22 @@ func (c *Compiler) genVectorMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 		cowSlice := c.block.NewCall(c.funcs["promise_vector_cow"],
 			slicePtr, constant.NewInt(irtypes.I64, elemSize))
 		c.storeBackSlicePtr(member.Target, cowSlice)
+
+		// B0189: Drop the element being removed if it's droppable (e.g., string).
+		// The remove operation shifts subsequent elements, overwriting the removed one.
+		resolvedElem := elemType
+		if c.typeSubst != nil {
+			resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
+		}
+		if c.variantFieldNeedsDrop(resolvedElem) {
+			dataBase := c.block.NewGetElementPtr(irtypes.I8, cowSlice,
+				constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
+			dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
+			removedPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, idx)
+			removedVal := c.block.NewLoad(elemLLVM, removedPtr)
+			c.emitVariantFieldDrop(removedVal, resolvedElem)
+		}
+
 		c.block.NewCall(c.funcs["promise_vector_remove"],
 			cowSlice, idx, constant.NewInt(irtypes.I64, elemSize))
 		return nil

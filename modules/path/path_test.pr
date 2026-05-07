@@ -92,7 +92,7 @@ is_relative_test() `test {
   assert(!is_relative("/"), "root not rel");
 }
 
-split_test() `test(allow_leaks: true) {
+split_test() `test {
   string s = Platform.path_separator;
 
   string[] r1 = split("/home/user/file.txt");

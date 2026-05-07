@@ -74,7 +74,7 @@ test_is_relative() `test {
   assert(!path.is_relative("/absolute"), "not relative /absolute");
 }
 
-test_split_absolute() `test(allow_leaks: true) {
+test_split_absolute() `test {
   string s = Platform.path_separator;
   string[] parts = path.split("/usr/local/bin");
   assert(parts.len == 4, "split abs len");
@@ -84,7 +84,7 @@ test_split_absolute() `test(allow_leaks: true) {
   assert(parts[3] == "bin", "split bin");
 }
 
-test_split_relative() `test(allow_leaks: true) {
+test_split_relative() `test {
   string[] parts = path.split("a/b/c");
   assert(parts.len == 3, "split rel len");
   assert(parts[0] == "a", "split a");
@@ -213,7 +213,7 @@ test_stem_edge_cases() `test {
   assert(path.stem(".") == ".", "stem single dot");
 }
 
-test_split_edge_cases() `test(allow_leaks: true) {
+test_split_edge_cases() `test {
   // Single component
   string[] r1 = path.split("file.txt");
   assert(r1.len == 1, "split single len");

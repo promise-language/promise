@@ -141,14 +141,14 @@ test_trim_spaces() `test {
 
 // --- split ---
 
-test_split_comma() `test(allow_leaks: true) {
+test_split_comma() `test {
   string[] parts = "a,b,c,d".split(",");
   assert(parts.len == 4, "4 parts");
   assert(parts[0] == "a", "first = a");
   assert(parts[3] == "d", "last = d");
 }
 
-test_split_space() `test(allow_leaks: true) {
+test_split_space() `test {
   string[] words = "hello world foo".split(" ");
   assert(words.len == 3, "3 words");
   assert(words[0] == "hello", "first word");

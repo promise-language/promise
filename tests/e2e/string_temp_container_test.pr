@@ -1,6 +1,6 @@
 // B0170: String temp tracking must not double-free when temps are stored in containers.
 // Push a string concatenation result into a vector — the temp ownership transfers to the vector.
-push_string_concat_temp() `test(allow_leaks: true) {
+push_string_concat_temp() `test {
   string[] v = string[]();
   v.push("hello " + "world");
   assert(v.len == 1, "len");
@@ -8,7 +8,7 @@ push_string_concat_temp() `test(allow_leaks: true) {
 }
 
 // Push a to_string() result into a vector.
-push_to_string_temp() `test(allow_leaks: true) {
+push_to_string_temp() `test {
   string[] v = string[]();
   v.push(42.to_string());
   assert(v.len == 1, "len");
@@ -16,7 +16,7 @@ push_to_string_temp() `test(allow_leaks: true) {
 }
 
 // Push multiple string temps into a vector.
-push_multiple_string_temps() `test(allow_leaks: true) {
+push_multiple_string_temps() `test {
   string[] v = string[]();
   v.push("a" + "b");
   v.push("c" + "d");
@@ -28,7 +28,7 @@ push_multiple_string_temps() `test(allow_leaks: true) {
 }
 
 // Mix of literal and temp pushes.
-push_mixed_literal_and_temp() `test(allow_leaks: true) {
+push_mixed_literal_and_temp() `test {
   string[] v = string[]();
   v.push("literal");
   v.push("concat" + "ed");

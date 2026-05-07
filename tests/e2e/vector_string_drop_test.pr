@@ -1,0 +1,89 @@
+// B0189: Vector[string] element drop tests.
+// Verifies that string elements inside vectors are properly freed when the
+// vector is dropped, preventing memory leaks.
+// Basic: split result vector drops its string elements.
+test_split_drop() `test {
+  string[] parts = "hello,world,foo".split(",");
+  assert(parts.len == 3, "split len");
+  assert(parts[0] == "hello", "first");
+  assert(parts[1] == "world", "second");
+  assert(parts[2] == "foo", "third");
+}
+
+// Shared strings between vectors: dup-on-push prevents double-free.
+test_shared_strings() `test {
+  string[] source = "a,b,c".split(",");
+  string[] dest = string[]();
+  int i = 0;
+  while i < source.len {
+    dest.push(source[i]);
+    i = i + 1;
+  }
+  assert(dest.len == 3, "dest len");
+  assert(dest[0] == "a", "dest first");
+  assert(dest[2] == "c", "dest third");
+}
+
+// Push string literals into vector.
+test_push_literals() `test {
+  string[] v = string[]();
+  v.push("hello");
+  v.push("world");
+  assert(v.len == 2, "len");
+  assert(v[0] == "hello", "first");
+}
+
+// Push string concat temps into vector.
+test_push_concat_temps() `test {
+  string[] v = string[]();
+  v.push("hello" + " " + "world");
+  v.push("foo" + "bar");
+  assert(v.len == 2, "len");
+  assert(v[0] == "hello world", "first");
+}
+
+// Remove drops the removed string element.
+test_remove_drops_element() `test {
+  string[] v = string[]();
+  v.push("alice");
+  v.push("bob");
+  v.push("charlie");
+  v.remove(1);
+  assert(v.len == 2, "len after remove");
+  assert(v[0] == "alice", "first after remove");
+  assert(v[1] == "charlie", "second after remove");
+}
+
+// Normalize-like pattern: pop + push between two vectors.
+// allow_leaks: pop() returns the element as T? — discarded optional leaks the string.
+test_normalize_pattern() `test(allow_leaks: true) {
+  string[] parts = "a,b,c,d".split(",");
+  string[] result = string[]();
+  int i = 0;
+  while i < parts.len {
+    string part = parts[i];
+    if part == "c" {
+      result.pop();
+    } else {
+      result.push(part);
+    }
+    i = i + 1;
+  }
+  assert(result.len == 2, "result len");
+  assert(result[0] == "a", "result first");
+  assert(result[1] == "d", "result second");
+}
+
+// Return string from function with vector in scope.
+_first_part(string input) string {
+  string[] parts = input.split(",");
+  if parts.len > 0 {
+    return parts[0];
+  }
+  return "";
+}
+
+test_return_from_vector_scope() `test {
+  string result = _first_part("hello,world");
+  assert(result == "hello", "returned first part");
+}

@@ -45,7 +45,7 @@ type Greeting {
   }
 }
 
-test_greeting() `test(allow_leaks: true) {
+test_greeting() `test {
   g := Greeting(template: "Good morning");
   assert(g.format("Alice") == "Good morning, Alice!", "format greeting");
   assert(g.word_count() == 2, "2 words in template");

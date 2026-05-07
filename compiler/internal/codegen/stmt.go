@@ -1488,6 +1488,9 @@ func (c *Compiler) emitDropCallDirect(b scopeBinding) {
 // emitStringDropCall emits a conditional promise_string_drop call for a string variable.
 // String allocas store raw i8* (instance pointer), not a value struct — so we load
 // the i8* directly and pass it to promise_string_drop (which checks the literal flag).
+// B0189: For vectors with droppable elements, emits an element-drop loop before freeing
+// the buffer. This handles Vector[string], Vector[Vector[T]], Vector[Channel[T]], and
+// vectors of user types with drop().
 func (c *Compiler) emitStringDropCall(b scopeBinding) {
 	if b.dropFlag == nil {
 		panic("codegen: string drop binding must have a drop flag")
@@ -1508,6 +1511,10 @@ func (c *Compiler) emitStringDropCall(b scopeBinding) {
 	c.block.NewCondBr(nullCheck, doneBlock, execBlock)
 
 	c.block = execBlock
+
+	// B0189: Drop vector elements before freeing the buffer.
+	c.emitVectorElementDrops(b, ptr)
+
 	c.block.NewCall(b.dropFunc, ptr)
 	c.block.NewBr(doneBlock)
 
@@ -1515,6 +1522,107 @@ func (c *Compiler) emitStringDropCall(b scopeBinding) {
 	c.block.NewBr(skipBlock)
 
 	c.block = skipBlock
+}
+
+// hasVectorStringBinding returns true if there's at least one Vector[string]
+// binding in the current scope that would trigger element drops.
+// B0189: Used to determine if a string return value needs duping.
+func (c *Compiler) hasVectorStringBinding() bool {
+	for _, b := range c.scopeBindings {
+		if b.kind != bindingDropString {
+			continue
+		}
+		valType := b.valType
+		if c.typeSubst != nil {
+			valType = types.Substitute(valType, c.typeSubst)
+		}
+		if elemType, isVec := types.AsVector(valType); isVec {
+			resolvedElem := elemType
+			if c.typeSubst != nil {
+				resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
+			}
+			if extractNamed(resolvedElem) == types.TypString {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// emitVectorElementDrops emits a loop that drops each element in a vector if the
+// element type is droppable. Called before Vector.drop frees the buffer.
+// B0189: Fixes memory leak where Vector[string] drop didn't free string elements.
+func (c *Compiler) emitVectorElementDrops(b scopeBinding, vecPtr value.Value) {
+	valType := b.valType
+	if c.typeSubst != nil {
+		valType = types.Substitute(valType, c.typeSubst)
+	}
+	elemType, isVec := types.AsVector(valType)
+	if !isVec {
+		return
+	}
+	c.emitVectorElementDropLoop(vecPtr, elemType)
+}
+
+// emitVectorElementDropLoop emits a loop that iterates vector elements and drops
+// each one. Shared by scope-exit drops (emitVectorElementDrops) and field drops
+// (emitFieldDrops). The elemType must already have type substitution applied.
+// B0189: Fixes memory leak where Vector[string] drop didn't free string elements.
+func (c *Compiler) emitVectorElementDropLoop(vecPtr value.Value, elemType types.Type) {
+	// B0189: Only drop string elements for now. Other droppable types (vectors,
+	// channels, user types) don't have dup-on-push, so element drops would cause
+	// double-frees when elements are shared (e.g., filled() pushing the same value
+	// multiple times). String elements are safe because push dups them.
+	if c.typeSubst != nil {
+		elemType = types.Substitute(elemType, c.typeSubst)
+	}
+	if extractNamed(elemType) != types.TypString {
+		return
+	}
+
+	elemLLVM := c.resolveType(elemType)
+
+	// Load vector length (masked — clears static flag bit 63)
+	headerType := vectorHeaderType()
+	headerPtr := c.block.NewBitCast(vecPtr, irtypes.NewPointer(headerType))
+	length := loadVectorLen(c.block, headerPtr)
+
+	// Data starts at offset vectorHeaderSize (16 bytes after buffer start)
+	dataBase := c.block.NewGetElementPtr(irtypes.I8, vecPtr,
+		constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
+	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
+
+	// Loop: for i = 0; i < len; i++ { drop(elements[i]); }
+	loopHead := c.newBlock("vecdrop.head")
+	loopBody := c.newBlock("vecdrop.body")
+	loopDone := c.newBlock("vecdrop.done")
+
+	// Initialize counter
+	idxAlloca := c.createEntryAlloca(irtypes.I64)
+	idxAlloca.SetName(c.uniqueLocalName("vecdrop.idx"))
+	c.block.NewStore(constant.NewInt(irtypes.I64, 0), idxAlloca)
+	c.block.NewBr(loopHead)
+
+	// Loop head: check i < len
+	c.block = loopHead
+	idx := c.block.NewLoad(irtypes.I64, idxAlloca)
+	cond := c.block.NewICmp(enum.IPredULT, idx, length)
+	c.block.NewCondBr(cond, loopBody, loopDone)
+
+	// Loop body: drop element[i], increment i
+	c.block = loopBody
+	idx2 := c.block.NewLoad(irtypes.I64, idxAlloca)
+	elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, idx2)
+	elemVal := c.block.NewLoad(elemLLVM, elemPtr)
+
+	c.emitVariantFieldDrop(elemVal, elemType)
+
+	// Increment counter
+	nextIdx := c.block.NewAdd(idx2, constant.NewInt(irtypes.I64, 1))
+	c.block.NewStore(nextIdx, idxAlloca)
+	c.block.NewBr(loopHead)
+
+	c.block = loopDone
 }
 
 // emitFreeCall emits a conditional pal_free call for a heap-allocated user type
@@ -2750,6 +2858,29 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		c.dupStringFieldAccess = false
 		c.targetType = nil
 		val = c.wrapThisReturnValue(val, s.Value, retType)
+	}
+
+	// B0189: Dup return value if it's a string that might be borrowed from a
+	// Vector[string] in the current scope. The element drop loop in scope
+	// cleanup will free the vector's elements — if the return value borrows
+	// one of those elements, it would become a dangling pointer.
+	// Covers: `return strVar` (IdentExpr) and `return vec[i]` (IndexExpr).
+	if s.Value != nil && val != nil && extractNamed(retType) == types.TypString {
+		needsDup := false
+		if _, ok := s.Value.(*ast.IdentExpr); ok {
+			needsDup = c.hasVectorStringBinding()
+		} else if idx, ok := s.Value.(*ast.IndexExpr); ok {
+			targetType := c.info.Types[idx.Target]
+			if c.typeSubst != nil {
+				targetType = types.Substitute(targetType, c.typeSubst)
+			}
+			if _, isVec := types.AsVector(targetType); isVec {
+				needsDup = true
+			}
+		}
+		if needsDup {
+			val = c.dupString(val)
+		}
 	}
 
 	// Clear drop flag for returned variable (it's being moved out, not dropped)

@@ -1,0 +1,20 @@
+// std/geometry.pr — Generic geometry types for 2D coordinates, sizes, and rectangles
+type Point[T] `public `doc("A 2D point with x and y coordinates. Pure value type.") {
+  T x `value;
+  T y `value;
+}
+
+type Size[T] `public `doc("A 2D size with width and height. Pure value type.") {
+  T width `value;
+  T height `value;
+}
+
+type Rect[T] `public `doc("A 2D rectangle defined by position (x, y) and dimensions (width, height). Pure value type.") {
+  T x `value;
+  T y `value;
+  T width `value;
+  T height `value;
+
+  get origin Point[T] `doc("The top-left corner as a Point.") => Point[T](x: this.x, y: this.y);
+  get size Size[T] `doc("The dimensions as a Size.") => Size[T](width: this.width, height: this.height);
+}

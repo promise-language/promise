@@ -1,0 +1,82 @@
+// Tests for std/geometry.pr — Point, Size, Rect
+// --- Point ---
+test_point_construction() `test {
+  p := Point[int](x: 3, y: 5);
+  assert(p.x == 3, "x field");
+  assert(p.y == 5, "y field");
+}
+
+test_point_float() `test {
+  p := Point[f64](x: 1.5, y: 2.5);
+  assert(p.x == 1.5, "f64 x");
+  assert(p.y == 2.5, "f64 y");
+}
+
+test_point_copy() `test {
+  a := Point[int](x: 1, y: 2);
+  b := a;
+  assert(b.x == 1, "copy x");
+  assert(b.y == 2, "copy y");
+}
+
+// --- Size ---
+
+test_size_construction() `test {
+  s := Size[int](width: 100, height: 200);
+  assert(s.width == 100, "width field");
+  assert(s.height == 200, "height field");
+}
+
+test_size_float() `test {
+  s := Size[f64](width: 3.14, height: 2.71);
+  assert(s.width == 3.14, "f64 width");
+  assert(s.height == 2.71, "f64 height");
+}
+
+test_size_copy() `test {
+  a := Size[int](width: 10, height: 20);
+  b := a;
+  assert(b.width == 10, "copy width");
+  assert(b.height == 20, "copy height");
+}
+
+// --- Rect ---
+
+test_rect_construction() `test {
+  r := Rect[int](x: 10, y: 20, width: 100, height: 200);
+  assert(r.x == 10, "x field");
+  assert(r.y == 20, "y field");
+  assert(r.width == 100, "width field");
+  assert(r.height == 200, "height field");
+}
+
+test_rect_origin() `test {
+  r := Rect[int](x: 5, y: 10, width: 100, height: 200);
+  p := r.origin;
+  assert(p.x == 5, "origin x");
+  assert(p.y == 10, "origin y");
+}
+
+test_rect_size() `test {
+  r := Rect[int](x: 5, y: 10, width: 100, height: 200);
+  s := r.size;
+  assert(s.width == 100, "size width");
+  assert(s.height == 200, "size height");
+}
+
+test_rect_float() `test {
+  r := Rect[f64](x: 1.5, y: 2.5, width: 10.0, height: 20.0);
+  assert(r.x == 1.5, "f64 x");
+  assert(r.y == 2.5, "f64 y");
+  assert(r.width == 10.0, "f64 width");
+  assert(r.height == 20.0, "f64 height");
+}
+
+test_rect_copy() `test {
+  a := Rect[int](x: 1, y: 2, width: 3, height: 4);
+  b := a;
+  assert(b.x == 1, "copy x");
+  assert(b.y == 2, "copy y");
+  assert(b.width == 3, "copy width");
+  assert(b.height == 4, "copy height");
+}

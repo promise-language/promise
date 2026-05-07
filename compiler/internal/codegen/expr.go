@@ -1125,10 +1125,10 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 				}
 			}
 		}
-		heapBefore := len(c.heapTemps)               // T0100
 		savedReceiverClaim := c.pendingReceiverClaim // T0130: save across nested calls
 		c.pendingReceiverClaim = nil
 		result := c.genMethodCall(e, member)
+		heapBeforeTrack := len(c.heapTemps) // B0213: capture before maybeTrackIterTemp
 		c.maybeTrackIterTemp(e, result)
 		// T0130: Claim the receiver's heap temp ONLY when the method returns a
 		// structural interface (combinator like filter/take/skip). Terminal operations
@@ -1143,8 +1143,11 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 				c.claimHeapTemp(c.pendingReceiverClaim)
 			}
 		}
-		// T0100: Claim env temps when a new iter was created
-		if len(c.heapTemps) > heapBefore {
+		// T0100/B0213: Claim env temps only when THIS call's result was tracked
+		// as a new heapTemp (combinator that stores the lambda in the returned
+		// iterator). Don't claim when the receiver evaluation created heapTemps —
+		// terminal operations (for_each, any, fold) don't store lambdas.
+		if len(c.heapTemps) > heapBeforeTrack {
 			c.claimAllEnvTemps()
 		}
 		c.pendingReceiverClaim = savedReceiverClaim // T0130: restore
@@ -1185,21 +1188,18 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 					return c.genModuleGenericFuncCall(e, idx, member.Field)
 				}
 			}
-			heapBefore2 := len(c.heapTemps)               // T0100
 			savedReceiverClaim2 := c.pendingReceiverClaim // T0130
 			c.pendingReceiverClaim = nil
 			result := c.genGenericMethodCall(e, idx, member)
+			heapBeforeTrack2 := len(c.heapTemps) // B0213: capture before maybeTrackIterTemp
 			c.maybeTrackIterTemp(e, result)
-			if c.pendingReceiverClaim != nil {
-				callResultType := c.info.Types[e]
-				if c.typeSubst != nil {
-					callResultType = types.Substitute(callResultType, c.typeSubst)
-				}
-				if resultNamed := extractNamed(callResultType); resultNamed != nil && resultNamed.IsStructural() {
-					c.claimHeapTemp(c.pendingReceiverClaim)
-				}
-			}
-			if len(c.heapTemps) > heapBefore2 {
+			// B0213: Don't claim receiver for generic method calls. Generic structural
+			// default methods (map[R], zip[U], flat_map[R]) are compiled without selfSubst,
+			// so _parent is not set on the returned _FnIter. The receiver stays as an
+			// unclaimed heapTemp and is cleaned independently at statement end.
+			// B0213: Only claim env temps when THIS call's result was tracked as a new
+			// heapTemp (not when the receiver evaluation created heapTemps).
+			if len(c.heapTemps) > heapBeforeTrack2 {
 				c.claimAllEnvTemps()
 			}
 			c.pendingReceiverClaim = savedReceiverClaim2 // T0130
@@ -1210,21 +1210,15 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 
 	// Inferred generic function call: sema recorded the inferred type args.
 	if inferred, ok := c.info.InferredTypeArgs[e]; ok {
-		heapBefore3 := len(c.heapTemps)               // T0100
 		savedReceiverClaim3 := c.pendingReceiverClaim // T0130
 		c.pendingReceiverClaim = nil
 		result := c.genInferredGenericCall(e, inferred)
+		heapBeforeTrack3 := len(c.heapTemps) // B0213: capture before maybeTrackIterTemp
 		c.maybeTrackIterTemp(e, result)
-		if c.pendingReceiverClaim != nil {
-			callResultType := c.info.Types[e]
-			if c.typeSubst != nil {
-				callResultType = types.Substitute(callResultType, c.typeSubst)
-			}
-			if resultNamed := extractNamed(callResultType); resultNamed != nil && resultNamed.IsStructural() {
-				c.claimHeapTemp(c.pendingReceiverClaim)
-			}
-		}
-		if len(c.heapTemps) > heapBefore3 {
+		// B0213: Don't claim receiver for inferred generic calls (same rationale as
+		// genGenericMethodCall — _parent not set for generic structural defaults).
+		// Only claim env temps when THIS call's result was tracked.
+		if len(c.heapTemps) > heapBeforeTrack3 {
 			c.claimAllEnvTemps()
 		}
 		c.pendingReceiverClaim = savedReceiverClaim3 // T0130

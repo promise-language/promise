@@ -589,7 +589,7 @@ test_for_each() `test(allow_leaks: true) {
 
 // --- Generic combinators: map[R] ---
 
-test_map_double() `test(allow_leaks: true) {
+test_map_double() `test {
   int[] v = [1, 2, 3, 4, 5];
   int[] result = v.iter().map[int](|int x| -> int {
     return x * 2;
@@ -599,7 +599,7 @@ test_map_double() `test(allow_leaks: true) {
   assert(result[4] == 10, "10");
 }
 
-test_map_cross_type() `test(allow_leaks: true) {
+test_map_cross_type() `test {
   int[] v = [1, 2, 3, 4];
   bool[] result = v.iter().map[bool](|int x| -> bool {
     return x > 2;
@@ -611,7 +611,7 @@ test_map_cross_type() `test(allow_leaks: true) {
   assert(result[3] == true, "4>2=true");
 }
 
-test_map_empty() `test(allow_leaks: true) {
+test_map_empty() `test {
   int[] v = [];
   int[] result = v.iter().map[int](|int x| -> int {
     return x * 10;
@@ -682,7 +682,7 @@ test_enumerate_empty() `test {
 
 // --- Generic combinators: zip[U] ---
 
-test_zip() `test(allow_leaks: true) {
+test_zip() `test {
   int[] a = [1, 2, 3];
   int[] b = [10, 20, 30];
   int sum = 0;
@@ -693,7 +693,7 @@ test_zip() `test(allow_leaks: true) {
   assert(sum == 66, "zip sum: (1+10)+(2+20)+(3+30)=66");
 }
 
-test_zip_unequal_first_shorter() `test(allow_leaks: true) {
+test_zip_unequal_first_shorter() `test {
   int[] a = [1, 2];
   int[] b = [10, 20, 30, 40];
   int count = 0;
@@ -703,7 +703,7 @@ test_zip_unequal_first_shorter() `test(allow_leaks: true) {
   assert(count == 2, "zip stops at shorter (first)");
 }
 
-test_zip_unequal_second_shorter() `test(allow_leaks: true) {
+test_zip_unequal_second_shorter() `test {
   int[] a = [1, 2, 3, 4];
   int[] b = [10];
   int count = 0;
@@ -713,7 +713,7 @@ test_zip_unequal_second_shorter() `test(allow_leaks: true) {
   assert(count == 1, "zip stops at shorter (second)");
 }
 
-test_zip_empty() `test(allow_leaks: true) {
+test_zip_empty() `test {
   int[] a = [];
   int[] b = [1, 2, 3];
   int count = 0;
@@ -748,7 +748,7 @@ test_flat_map_empty_inner() `test(allow_leaks: true) {
   assert(result.len == 0, "flat_map with all empty inners = empty");
 }
 
-test_flat_map_empty_outer() `test(allow_leaks: true) {
+test_flat_map_empty_outer() `test {
   int[] v = [];
   int[] result = v.iter().flat_map[int](|int x| -> Iterator[int] {
     return Counter(current: 0, limit: x);
@@ -804,7 +804,7 @@ test_take_filter_count() `test {
   assert(n == 9, "take(20).filter(>10).count: 11..19 = 9");
 }
 
-test_map_filter_collect() `test(allow_leaks: true) {
+test_map_filter_collect() `test {
   int[] v = [1, 2, 3, 4, 5];
   int[] result = v.iter().map[int](|int x| -> int {
     return x * x;
@@ -818,7 +818,7 @@ test_map_filter_collect() `test(allow_leaks: true) {
   assert(result[2] == 25, "third=25");
 }
 
-test_filter_map_fold() `test(allow_leaks: true) {
+test_filter_map_fold() `test {
   int[] v = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
   int sum = v.iter().filter(|int x| -> bool {
     return x % 2 == 0;

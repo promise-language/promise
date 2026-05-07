@@ -373,6 +373,16 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 		val = c.genAutoPropagateValue(val)
 	}
 
+	// T0111: Claim string temp BEFORE optional wrapping. After wrapOptional, the
+	// value identity changes and claimStringTemp can't find the tracked temp.
+	if declType != nil {
+		if _, isOpt := declType.(*types.Optional); isOpt {
+			if exprType != nil && extractNamed(exprType) == types.TypString {
+				c.claimStringTemp(val)
+			}
+		}
+	}
+
 	// Wrap value in Optional if declared type is Optional but expr is not
 	if declType != nil {
 		if _, isOpt := declType.(*types.Optional); isOpt {
@@ -440,6 +450,10 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 		dropType = exprType
 	}
 	c.maybeRegisterDrop(s.Name, alloca, dropType)
+	// T0111: Register optional drop for explicitly declared optional locals (string? s = ...).
+	if opt, ok := dropType.(*types.Optional); ok {
+		c.maybeRegisterOptionalDrop(s.Name, alloca, opt)
+	}
 	// T0127: Register bindingFree for structural interface variables owning a heap allocation.
 	c.maybeRegisterStructuralFree(s.Name, alloca, dropType, s.Value)
 	// Clear drop flag when RHS is a borrow (container element, field access).
@@ -1091,6 +1105,73 @@ func (c *Compiler) emitOptionalDropCall(b scopeBinding) {
 	c.block.NewBr(skipBlock)
 
 	c.block = skipBlock
+}
+
+// maybeRegisterOptionalDrop registers a bindingDropOptional for an explicitly declared
+// optional local variable (T0111). Only called for typed declarations (string? s = ...)
+// where the inner type is droppable (string, vector, channel, user type with drop).
+// Inferred optional variables (s := func_returning_optional()) are NOT registered —
+// they are consumed via if-let/while-let/force-unwrap patterns.
+func (c *Compiler) maybeRegisterOptionalDrop(varName string, alloca *ir.InstAlloca, opt *types.Optional) {
+	// Don't double-register if maybeRegisterDrop already handled this variable.
+	if _, exists := c.dropBindings[varName]; exists {
+		return
+	}
+
+	elem := opt.Elem()
+	if c.typeSubst != nil {
+		elem = types.Substitute(elem, c.typeSubst)
+	}
+	innerNamed := extractNamed(elem)
+
+	// Determine the drop function for the inner type.
+	var dropFunc *ir.Func
+
+	switch {
+	case innerNamed == types.TypString:
+		dropFunc = c.funcs["promise_string_drop"]
+	case innerNamed != nil && (func() bool { _, ok := types.AsVector(elem); return ok }() || innerNamed == types.TypVector):
+		dropFunc = c.funcs["Vector.drop"]
+	case innerNamed != nil && (func() bool { _, ok := types.AsChannel(elem); return ok }() || innerNamed == types.TypChannel):
+		dropFunc = c.funcs["Channel.drop"]
+	case innerNamed != nil && (innerNamed.HasDrop() || innerNamed.NeedsSynthDrop()):
+		// User type with explicit or synthesized drop
+		ownerName := innerNamed.Obj().Name()
+		resolvedElem := elem
+		if c.typeSubst != nil {
+			resolvedElem = types.Substitute(elem, c.typeSubst)
+		}
+		if inst, ok := resolvedElem.(*types.Instance); ok {
+			ownerName = monoName(inst)
+		} else if innerNamed.HasDrop() && !innerNamed.NeedsSynthDrop() {
+			ownerName = c.resolveMethodOwner(innerNamed, "drop")
+		}
+		mangledName := mangleMethodName(ownerName, "drop", false)
+		dropFunc = c.funcs[mangledName]
+	default:
+		return // inner type not droppable
+	}
+
+	if dropFunc == nil {
+		return
+	}
+
+	dropFlag := c.createEntryAlloca(irtypes.I1)
+	dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
+	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+	c.dropFlags[varName] = dropFlag
+
+	binding := scopeBinding{
+		kind:     bindingDropOptional,
+		alloca:   alloca,
+		named:    innerNamed,
+		valType:  elem,
+		dropFlag: dropFlag,
+		dropFunc: dropFunc,
+		varName:  varName,
+	}
+	c.scopeBindings = append(c.scopeBindings, binding)
+	c.dropBindings[varName] = binding
 }
 
 // clearDropFlag sets a variable's drop flag to false (indicating the value has been moved).
@@ -2073,6 +2154,14 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			}
 			val = c.coerceToView(val, exprType, targetType)
 
+			// T0111: Claim string temp BEFORE optional wrapping — after wrap,
+			// value identity changes and claimStringTemp can't match the temp.
+			if _, isOpt := targetType.(*types.Optional); isOpt {
+				if exprType != nil && extractNamed(exprType) == types.TypString {
+					c.claimStringTemp(val)
+				}
+			}
+
 			// Wrap value in Optional if target is Optional but expr is not
 			if _, isOpt := targetType.(*types.Optional); isOpt {
 				if exprType == types.TypNone {
@@ -2088,6 +2177,7 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 				c.clearDropFlag(ident.Name)
 			}
 			// T0073: Claim string temp — ownership transferred to this variable.
+			// Skip if already claimed above (optional target).
 			if exprType != nil && extractNamed(exprType) == types.TypString {
 				c.claimStringTemp(val)
 			}

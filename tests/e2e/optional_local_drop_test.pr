@@ -1,0 +1,83 @@
+// T0111: Scope-exit drop for optional locals containing heap types.
+// Tests that optional local variables with droppable inner types are freed at scope exit.
+// --- Optional string locals ---
+test_optional_local_string_dynamic() `test {
+  string? s = "hello" + " world";
+  assert(s! == "hello world", "dynamic string in optional local");
+  // s should be freed at scope exit via optdrop
+}
+
+test_optional_local_string_literal() `test {
+  string? s = "static";
+  assert(s! == "static", "literal in optional local");
+  // literal flag prevents free — safe
+}
+
+test_optional_local_none() `test {
+  string? s = none;
+  assert(s is absent, "none optional");
+  // has-value flag is false — skip inner drop
+}
+
+// --- Force unwrap transfers ownership (clears drop flag) ---
+
+test_force_unwrap_no_double_free() `test {
+  string? s = "hello" + " world";
+  string val = s!;
+  assert(val == "hello world", "unwrapped value");
+  // After s!, the drop flag for s is cleared. val owns the string.
+  // At scope exit, only val is freed — no double-free.
+}
+
+// --- Reassignment drops old value ---
+
+test_optional_reassign() `test {
+  string? s = "first" + " value";
+  s = "second" + " value";
+  assert(s! == "second value", "reassigned optional");
+  // Old "first value" is dropped on reassignment; "second value" at scope exit.
+}
+
+test_optional_reassign_to_none() `test {
+  string? s = "hello" + " world";
+  s = none;
+  assert(s is absent, "reassigned to none");
+  // Old "hello world" is dropped on reassignment; none at scope exit is safe.
+}
+
+// --- Optional in if scope ---
+
+test_optional_in_if_scope() `test {
+  if true {
+    string? s = "scoped" + " string";
+    assert(s! == "scoped string", "if scope optional");
+    // s freed when if scope exits
+  }
+  assert(true, "outer scope reached");
+}
+
+// --- Optional vector local ---
+
+test_optional_local_vector() `test {
+  int[]? v = [1, 2, 3];
+  assert(v!.len == 3, "vector in optional local");
+  // v freed at scope exit via optdrop → Vector.drop
+}
+
+test_optional_local_vector_none() `test {
+  int[]? v = none;
+  assert(v is absent, "none vector optional");
+}
+
+// --- Force unwrap of field access dups the string ---
+
+type Wrapper {
+  string? opt;
+}
+
+test_field_unwrap_dup() `test {
+  Wrapper w = Wrapper(opt: "hello" + " world");
+  string val = w.opt!;
+  assert(val == "hello world", "unwrapped field value");
+  // val gets a dup of the string — both w.opt and val are freed independently.
+}

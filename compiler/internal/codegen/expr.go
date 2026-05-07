@@ -75,8 +75,17 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		// T0125: Track string temps from failable call unwrap paths.
 		// When func()! returns a string, the unwrapped i8* is a heap-allocated
 		// temp that must be freed at statement end if not claimed by a variable.
+		// T0111: Only track when the unwrapped type is actually string — not all
+		// i8* values are strings (vectors, channels also use i8*). For optional
+		// unwraps, check the inner type; for error unwraps, check the result type.
 		if result != nil && result.Type() == irtypes.I8Ptr {
-			c.trackStringTemp(result)
+			exprType := c.info.Types[e]
+			if c.typeSubst != nil && exprType != nil {
+				exprType = types.Substitute(exprType, c.typeSubst)
+			}
+			if extractNamed(exprType) == types.TypString {
+				c.trackStringTemp(result)
+			}
 		}
 		return result
 	case *ast.ErrorHandlerExpr:
@@ -6024,6 +6033,9 @@ func (c *Compiler) genOptionalHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 
 // genOptionalForceUnwrap generates code for T? → T, panicking on none.
 // Used by `as!` on optionals and `x!` on optionals.
+// T0111: When source is an identifier with a drop binding, clears the drop flag
+// (ownership transfers to the unwrapped value). Field access dup is handled by
+// the dupStringFieldAccess mechanism in genTypedVarDecl/genInferredVarDecl.
 func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
 	optVal := c.genExpr(expr)
 	flag := c.block.NewExtractValue(optVal, 0)
@@ -6038,7 +6050,21 @@ func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
 	c.block.NewUnreachable()
 
 	c.block = okBlock
-	return c.block.NewExtractValue(optVal, 1)
+	var result value.Value
+	result = c.block.NewExtractValue(optVal, 1)
+
+	// T0111: Clear drop flag on force unwrap of optional identifier.
+	// After `val = opt!`, the inner value is extracted — the optional's drop
+	// binding should NOT also free it. Clear the flag to prevent double-free.
+	if ident, ok := expr.(*ast.IdentExpr); ok {
+		c.clearDropFlag(ident.Name)
+	}
+
+	// Note: dup for field access unwrap (w.opt_field!) is handled by the
+	// dupStringFieldAccess mechanism in genTypedVarDecl/genInferredVarDecl,
+	// which dups the string during field access before the unwrap extracts it.
+
+	return result
 }
 
 // emitScalarCast emits LLVM IR for a primitive scalar type conversion.

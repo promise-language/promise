@@ -15155,6 +15155,59 @@ func TestOptionalFieldInSynthDrop(t *testing.T) {
 	assertContains(t, ir, "optfield.skip")
 }
 
+// T0111: Optional local with droppable inner type gets scope-exit drop
+func TestOptionalLocalStringDrop(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string? s = "hello";
+		}
+	`)
+	// Optional local should get a drop binding with optdrop blocks
+	assertContains(t, ir, "optdrop.check")
+	assertContains(t, ir, "optdrop.inner")
+	assertContains(t, ir, "promise_string_drop")
+}
+
+// T0111: Force unwrap of optional identifier clears drop flag
+func TestOptionalForceUnwrapClearsDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string? s = "hello";
+			string val = s!;
+		}
+	`)
+	// Should have optdrop blocks (drop registered for s)
+	assertContains(t, ir, "optdrop.check")
+	// The drop flag should be cleared (store i1 false) after unwrap
+	assertContains(t, ir, "store i1 false")
+}
+
+// T0111: Optional local with vector inner type gets scope-exit drop
+func TestOptionalLocalVectorDrop(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[]? v = [1, 2, 3];
+		}
+	`)
+	assertContains(t, ir, "optdrop.check")
+	assertContains(t, ir, "optdrop.inner")
+	assertContains(t, ir, "Vector.drop")
+}
+
+// T0111: Force unwrap of optional field access dups the string via dupStringFieldAccess
+func TestOptionalFieldForceUnwrapDupsString(t *testing.T) {
+	ir := generateIR(t, `
+		type Wrapper { string? opt; }
+		main() {
+			Wrapper w = Wrapper(opt: "hello");
+			string val = w.opt!;
+		}
+	`)
+	// dupStringFieldAccess mechanism dups the string during field access
+	assertContains(t, ir, "strdup.copy")
+	assertContains(t, ir, "promise_string_new")
+}
+
 // T0128: __promise_iter_cleanup handles _parent field (i64) for chained cleanup
 func TestIterCleanupHasParentHandling(t *testing.T) {
 	ir := generateIR(t, `

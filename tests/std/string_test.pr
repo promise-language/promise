@@ -127,35 +127,35 @@ test_interpolation() `test {
 
 // --- Slicing ---
 
-test_slice_range() `test(allow_leaks: true) {
+test_slice_range() `test {
   assert("hello world"[0:5] == "hello", "slice [0:5]");
   assert("hello world"[6:11] == "world", "slice [6:11]");
   assert("abcdef"[2:4] == "cd", "slice [2:4]");
 }
 
-test_slice_from_start() `test(allow_leaks: true) {
+test_slice_from_start() `test {
   assert("hello"[:3] == "hel", "slice [:3]");
   assert("hello"[:0] == "", "slice [:0] empty");
   assert("hello"[:5] == "hello", "slice [:5] full");
 }
 
-test_slice_to_end() `test(allow_leaks: true) {
+test_slice_to_end() `test {
   assert("hello"[3:] == "lo", "slice [3:]");
   assert("hello"[0:] == "hello", "slice [0:] full");
   assert("hello"[5:] == "", "slice [5:] empty");
 }
 
-test_slice_full() `test(allow_leaks: true) {
+test_slice_full() `test {
   assert("hello"[:] == "hello", "slice [:] full copy");
   assert(""[:] == "", "slice [:] empty string");
 }
 
-test_slice_empty() `test(allow_leaks: true) {
+test_slice_empty() `test {
   assert("hello"[2:2] == "", "slice [2:2] empty");
   assert("hello"[0:0] == "", "slice [0:0] empty");
 }
 
-test_slice_single_char() `test(allow_leaks: true) {
+test_slice_single_char() `test {
   assert("hello"[1:2] == "e", "slice [1:2] single char");
 }
 
@@ -262,7 +262,7 @@ test_repeat() `test {
 
 // --- replace ---
 
-test_replace() `test(allow_leaks: true) {
+test_replace() `test {
   assert("hello world".replace("world", "there") == "hello there", "replace word");
   assert("aabaa".replace("a", "x") == "xxbxx", "replace all occurrences");
   assert("hello".replace("xyz", "abc") == "hello", "replace no match");

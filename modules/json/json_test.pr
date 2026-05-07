@@ -128,7 +128,7 @@ decode_f64_test() `test(allow_leaks: true) {
   assert(v > 3.13 && v < 3.15, "decode f64");
 }
 
-decode_bool_true_test() `test(allow_leaks: true) {
+decode_bool_true_test() `test {
   JsonDecoder dec = JsonDecoder(data: "true");
   bool v = dec.decode_bool()!;
   assert(v == true, "decode true");
@@ -152,7 +152,7 @@ decode_string_escapes_test() `test {
   assert(v == "a\"b\\c\nd", "decode string escapes");
 }
 
-decode_none_test() `test(allow_leaks: true) {
+decode_none_test() `test {
   JsonDecoder dec = JsonDecoder(data: "null");
   bool is_null = dec.decode_none()!;
   assert(is_null, "decode none");
@@ -263,7 +263,7 @@ round_trip_int_test() `test(allow_leaks: true) {
   assert(v == 42, "round trip int decode");
 }
 
-round_trip_bool_test() `test(allow_leaks: true) {
+round_trip_bool_test() `test {
   string s = encode_string[bool](true)!;
   assert(s == "true", "round trip bool encode");
   bool v = decode_string[bool](s)!;

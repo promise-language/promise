@@ -209,7 +209,7 @@ dir_make_all_nested() `test(allow_leaks: true, exclude: "wasm32") {
   Dir.remove("/tmp/pr_iot_mkall")!;
 }
 
-dir_make_all_existing() `test(allow_leaks: true, exclude: "wasm32") {
+dir_make_all_existing() `test(exclude: "wasm32") {
   if !Dir.exists("/tmp/pr_iot_mkall2") {
     Dir.make("/tmp/pr_iot_mkall2")!;
   }
@@ -588,7 +588,7 @@ file_size_nonexistent() `test(exclude: "wasm32") {
 
 // ── Edge cases: binary data / null bytes in content ──────────────────────────
 
-file_binary_content() `test(allow_leaks: true, exclude: "wasm32") {
+file_binary_content() `test(exclude: "wasm32") {
   // Write string with embedded null byte and verify round-trip.
   // Note: C functions see path truncated at \0, but file content is fine
   // because write uses the Promise string length, not strlen.

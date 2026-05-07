@@ -34,7 +34,7 @@ test_literal_indexing() `test {
   assert(s[2] == 'c', "index 2");
 }
 
-test_literal_slicing() `test(allow_leaks: true) {
+test_literal_slicing() `test {
   string s = "hello world";
   assert(s[0:5] == "hello", "slice 0:5");
   assert(s[6:11] == "world", "slice 6:11");

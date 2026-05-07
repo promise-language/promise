@@ -24,7 +24,7 @@ join_two_args() `test(allow_leaks: true) {
   assert(join("|", "x", "y") == "x|y", "join two args");
 }
 
-reverse_basic() `test(allow_leaks: true) {
+reverse_basic() `test {
   assert(reverse("hello") == "olleh", "reverse basic");
 }
 

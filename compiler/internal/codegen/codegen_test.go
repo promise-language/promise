@@ -9721,6 +9721,38 @@ func TestStringTempUserTypeToStringClaimed(t *testing.T) {
 	assertContains(t, ir, "call i8* @Tag.to_string")
 }
 
+// T0133: String slice expressions are tracked as temps and freed at statement end.
+func TestStringSliceTempDrop(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			string s = "hello world";
+			assert(s[0:5] == "hello", "ok");
+		}
+		main() {}
+	`)
+	// s[0:5] produces a heap-allocated string via native slice (promise_string_new).
+	// The slice result must be tracked as a temp and freed at statement end.
+	assertContains(t, ir, "call i8* @promise_string_new")
+	assertContains(t, ir, "tmp.drop")
+	assertContains(t, ir, "call void @promise_string_drop")
+}
+
+// T0133: String slice assigned to variable is claimed (not double-freed).
+func TestStringSliceTempClaimedOnAssign(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			string s = "hello world";
+			string sub = s[0:5];
+			assert(sub == "hello", "ok");
+		}
+		main() {}
+	`)
+	// s[0:5] is tracked as temp, then claimed when assigned to sub.
+	// sub has its own drop binding for scope cleanup.
+	assertContains(t, ir, "sub.dropflag")
+	assertContains(t, ir, "call i8* @promise_string_new")
+}
+
 // T0092: String return from function with structural interface param is tracked as temp.
 func TestStringTempStructuralParamReturn(t *testing.T) {
 	ir := generateIR(t, `

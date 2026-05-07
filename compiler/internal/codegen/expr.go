@@ -92,7 +92,20 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 	case *ast.IndexExpr:
 		return c.genIndexExpr(e)
 	case *ast.SliceExpr:
-		return c.genSliceExpr(e)
+		result := c.genSliceExpr(e)
+		// T0133: Track string slice results as temps. String slicing allocates a
+		// new heap string (via native [:] method). Without tracking, the slice
+		// result leaks when used as an intermediate in concatenation or comparison.
+		if result != nil && result.Type() == irtypes.I8Ptr {
+			rt := c.info.Types[e]
+			if c.typeSubst != nil && rt != nil {
+				rt = types.Substitute(rt, c.typeSubst)
+			}
+			if rt != nil && extractNamed(rt) == types.TypString {
+				c.trackStringTemp(result)
+			}
+		}
+		return result
 	case *ast.SliceTypeExpr:
 		// Type expression in expression position; only used as constructor callee.
 		// genCallExpr handles this via c.info.Types lookup, not genExpr.
@@ -3434,10 +3447,8 @@ func (c *Compiler) genStringMethodCall(e *ast.CallExpr, member *ast.MemberExpr, 
 // Reads the vector's count and data pointer, calls promise_string_new.
 func (c *Compiler) genStringFromBytes(e *ast.CallExpr) value.Value {
 	vecPtr := c.genCallArgExpr(e.Args[0].Value)
-	// Clear drop flag for moved argument
-	if ident, ok := e.Args[0].Value.(*ast.IdentExpr); ok {
-		c.clearDropFlag(ident.Name)
-	}
+	// T0133: Don't clear drop flag — from_bytes borrows the vector data (copies bytes
+	// into a new string via promise_string_new). The caller still owns the vector.
 
 	// Vector layout: {i64 count, i64 capacity} header, then data at offset 16
 	headerType := vectorHeaderType() // {i64, i64}

@@ -184,7 +184,7 @@ optional_enum_decode_present_test() `test(allow_leaks: true) {
   }
 }
 
-optional_enum_decode_null_test() `test(allow_leaks: true) {
+optional_enum_decode_null_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"name\":\"dev\",\"level\":null}");
   Config c = Config.decode(dec)!;
   assert(c.name == "dev", "opt enum decode null: name");

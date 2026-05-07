@@ -14,19 +14,19 @@ test_string_to_string() `test {
   assert("hello".to_string() == "hello", "string identity");
 }
 
-test_from_bytes() `test(allow_leaks: true) {
+test_from_bytes() `test {
   u8[] bytes = "hello".bytes();
   string s = string.from_bytes(bytes);
   assert(s == "hello", "from_bytes hello");
 }
 
-test_from_bytes_empty() `test(allow_leaks: true) {
+test_from_bytes_empty() `test {
   u8[] bytes = "".bytes();
   string s = string.from_bytes(bytes);
   assert(s == "", "from_bytes empty");
 }
 
-test_from_bytes_roundtrip() `test(allow_leaks: true) {
+test_from_bytes_roundtrip() `test {
   string original = "Hello, World! 123";
   u8[] bytes = original.bytes();
   string result = string.from_bytes(bytes);

@@ -1285,6 +1285,16 @@ func TestStringConcatFuncBody(t *testing.T) {
 	assertContains(t, ir, "call void @llvm.memcpy.p0i8.p0i8.i64(")
 }
 
+// B0227: string.from_bytes must mask bit 63 of the vector count field
+// to handle static vector literals (T0062).
+func TestStringFromBytesMasksStaticFlag(t *testing.T) {
+	ir := generateIR(t, `main() { string s = string.from_bytes([65u8]); }`)
+	// The from_bytes codegen should use loadVectorLen which ANDs with 0x7FFFFFFFFFFFFFFF
+	assertContains(t, ir, "and i64")
+	assertContains(t, ir, "u0x7FFFFFFFFFFFFFFF")
+	assertContains(t, ir, "call i8* @promise_string_new(")
+}
+
 func TestLLVMMemcpyDeclared(t *testing.T) {
 	ir := generateIR(t, `main() { x := 42; }`)
 	assertContains(t, ir, "declare void @llvm.memcpy.p0i8.p0i8.i64(")

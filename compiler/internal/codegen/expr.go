@@ -3704,11 +3704,10 @@ func (c *Compiler) genStringFromBytes(e *ast.CallExpr) value.Value {
 	// into a new string via promise_string_new). The caller still owns the vector.
 
 	// Vector layout: {i64 count, i64 capacity} header, then data at offset 16
+	// Use loadVectorLen to mask off bit 63 (static vector flag, T0062/B0227).
 	headerType := vectorHeaderType() // {i64, i64}
 	hdrPtr := c.block.NewBitCast(vecPtr, irtypes.NewPointer(headerType))
-	countPtr := c.block.NewGetElementPtr(headerType, hdrPtr,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	count := c.block.NewLoad(irtypes.I64, countPtr)
+	count := loadVectorLen(c.block, hdrPtr)
 
 	// Data starts at offset vectorHeaderSize (16)
 	dataPtr := c.block.NewGetElementPtr(irtypes.I8, vecPtr,

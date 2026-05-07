@@ -33,6 +33,23 @@ test_from_bytes_roundtrip() `test {
   assert(result == original, "roundtrip");
 }
 
+// B0227: from_bytes with static vector literals (bit 63 static flag)
+test_from_bytes_static_vector_single() `test {
+  string s = string.from_bytes([27u8]);
+  assert(s.len == 1, "len 1");
+}
+
+test_from_bytes_static_vector_multi() `test {
+  string s = string.from_bytes([65u8, 66u8, 67u8]);
+  assert(s == "ABC", "ABC from static vector");
+}
+
+test_from_bytes_static_vector_empty() `test {
+  u8[] empty = [];
+  string s = string.from_bytes(empty);
+  assert(s == "", "empty static vector");
+}
+
 test_char_to_string() `test {
   assert('A'.to_string() == "A", "char A");
   assert('0'.to_string() == "0", "char 0");

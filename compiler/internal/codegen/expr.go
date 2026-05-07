@@ -5460,7 +5460,11 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	var envStructType *irtypes.StructType
 	var envPtr value.Value
 	if len(captures) > 0 {
-		envFieldTypes := make([]irtypes.Type, len(captures))
+		// B0221: Field 0 is the env drop function pointer (i8*). Captures start at field 1.
+		// This makes the env self-describing — cleanup code can load field 0 and call the
+		// drop function to properly drop captured values before freeing the env struct.
+		envFieldTypes := make([]irtypes.Type, len(captures)+1)
+		envFieldTypes[0] = irtypes.I8Ptr // env drop fn pointer
 		captureVals := make([]value.Value, len(captures))
 		for i, cv := range captures {
 			captureType := c.resolveType(cv.Obj.Type())
@@ -5475,7 +5479,7 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 			} else {
 				captureVals[i] = constant.NewZeroInitializer(captureType)
 			}
-			envFieldTypes[i] = captureType
+			envFieldTypes[i+1] = captureType // +1 for header (B0221)
 			// For move captures, clear the drop flag in the enclosing scope
 			if cv.ByMove {
 				c.clearDropFlag(cv.Obj.Name())
@@ -5483,15 +5487,29 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 		}
 		envStructType = irtypes.NewStruct(envFieldTypes...)
 
+		// B0221: Generate env drop function if any captures need dropping
+		envDropFn := c.genEnvDropFunc(lambdaName, envStructType, captures)
+
 		// Allocate env struct on heap
 		envSize := int64(c.typeSize(envStructType))
 		rawPtr := c.block.NewCall(c.palAlloc, constant.NewInt(irtypes.I64, envSize))
 		typedEnvPtr := c.block.NewBitCast(rawPtr, irtypes.NewPointer(envStructType))
 
-		// Store captured values into env struct
+		// B0221: Store env drop fn pointer as field 0
+		var envDropFnVal value.Value
+		if envDropFn != nil {
+			envDropFnVal = c.block.NewBitCast(envDropFn, irtypes.I8Ptr)
+		} else {
+			envDropFnVal = constant.NewNull(irtypes.I8Ptr)
+		}
+		dropFnField := c.block.NewGetElementPtr(envStructType, typedEnvPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		c.block.NewStore(envDropFnVal, dropFnField)
+
+		// Store captured values into env struct (offset by 1 for header, B0221)
 		for i, val := range captureVals {
 			fieldPtr := c.block.NewGetElementPtr(envStructType, typedEnvPtr,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i+1)))
 			c.block.NewStore(val, fieldPtr)
 		}
 		envPtr = rawPtr // i8*
@@ -5550,9 +5568,10 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 		typedEnvPtr := entry.NewBitCast(fn.Params[0], irtypes.NewPointer(envStructType))
 		for i, cv := range captures {
 			// Use the env struct's field type — matches what was stored during capture
-			captureType := envStructType.Fields[i]
+			// B0221: Field 0 is env drop fn; captures start at field i+1
+			captureType := envStructType.Fields[i+1]
 			fieldPtr := entry.NewGetElementPtr(envStructType, typedEnvPtr,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i)))
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(i+1)))
 			val := entry.NewLoad(captureType, fieldPtr)
 			alloca := entry.NewAlloca(captureType)
 			alloca.SetName(c.uniqueLocalName(cv.Obj.Name() + ".cap"))
@@ -5649,6 +5668,180 @@ func (c *Compiler) genLambdaExpr(e *ast.LambdaExpr) value.Value {
 	closure = c.block.NewInsertValue(closure, fnPtr, 0)
 	closure = c.block.NewInsertValue(closure, envPtr, 1)
 	return closure
+}
+
+// --- Env Drop Function Generation (B0221) ---
+
+// envDropAction describes what cleanup a captured value needs in the env drop function.
+type envDropAction int
+
+const (
+	envDropNone          envDropAction = iota
+	envDropCallFn                      // call dropFn(i8*) — string, vector, channel (handles free internally)
+	envDropClosureEnv                  // extract env from closure {i8*,i8*}, env-drop-or-free
+	envDropUserValue                   // extract inst from value {i8*,i8*}, pal_free — heap user type without drop
+	envDropUserValueDrop               // extract inst from value {i8*,i8*}, call drop + pal_free
+)
+
+type envFieldDrop struct {
+	action envDropAction
+	dropFn *ir.Func
+}
+
+// analyzeEnvCaptureDrop determines the drop action for a single captured variable.
+// Applies type substitution so the analysis uses concrete (monomorphized) types.
+func (c *Compiler) analyzeEnvCaptureDrop(cv *sema.CapturedVar) envFieldDrop {
+	typ := cv.Obj.Type()
+	if c.typeSubst != nil {
+		typ = types.Substitute(typ, c.typeSubst)
+	}
+	if c.selfSubst != nil {
+		typ = types.SubstituteSelf(typ, c.selfSubst.iface, c.selfSubst.concrete)
+	}
+
+	// String/Vector/Channel → call specific drop function (i8* field, drop handles free)
+	named := extractNamed(typ)
+	if named == types.TypString {
+		if fn := c.funcs["promise_string_drop"]; fn != nil {
+			return envFieldDrop{envDropCallFn, fn}
+		}
+	}
+	if _, ok := types.AsVector(typ); ok || (named != nil && named == types.TypVector) {
+		if fn := c.funcs["Vector.drop"]; fn != nil {
+			return envFieldDrop{envDropCallFn, fn}
+		}
+	}
+	if _, ok := types.AsChannel(typ); ok || (named != nil && named == types.TypChannel) {
+		if fn := c.funcs["Channel.drop"]; fn != nil {
+			return envFieldDrop{envDropCallFn, fn}
+		}
+	}
+
+	// Closure (Signature) → free inner env
+	if _, ok := typ.(*types.Signature); ok {
+		return envFieldDrop{envDropClosureEnv, nil}
+	}
+
+	// Heap user type — need to free instance (and call drop if it has one).
+	// Skip `this` captures: method receivers are borrowed from the caller, which
+	// handles cleanup via its own scope binding. Freeing here would double-free.
+	if named != nil && cv.Obj.Name() != "this" && !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() {
+		if named.HasDrop() {
+			dropName := mangleMethodName(c.resolveTypeName(typ), "drop", false)
+			if fn, ok := c.funcs[dropName]; ok {
+				return envFieldDrop{envDropUserValueDrop, fn}
+			}
+		}
+		return envFieldDrop{envDropUserValue, nil}
+	}
+
+	return envFieldDrop{envDropNone, nil}
+}
+
+// genEnvDropFunc generates a per-closure env drop function that drops each captured
+// value that needs dropping before freeing the env struct. Returns nil if no captures
+// need dropping (callers will use pal_free directly via the null header check).
+// The env struct layout is: { i8* env_drop_fn, capture0, capture1, ... }.
+//
+// Handles: strings, vectors, channels, heap user types (with/without drop),
+// and closure captures (frees inner env). Skips `this` captures (borrowed, not owned).
+func (c *Compiler) genEnvDropFunc(lambdaName string, envStructType *irtypes.StructType, captures []*sema.CapturedVar) *ir.Func {
+	// Analyze each capture to determine drop action
+	actions := make([]envFieldDrop, len(captures))
+	hasAnyAction := false
+	for i, cv := range captures {
+		actions[i] = c.analyzeEnvCaptureDrop(cv)
+		if actions[i].action != envDropNone {
+			hasAnyAction = true
+		}
+	}
+	if !hasAnyAction {
+		return nil
+	}
+
+	dropFnName := lambdaName + ".env_drop"
+	dropFn := c.module.NewFunc(dropFnName, irtypes.Void, ir.NewParam("env", irtypes.I8Ptr))
+
+	curBlock := dropFn.NewBlock(".entry")
+	typedPtr := curBlock.NewBitCast(dropFn.Params[0], irtypes.NewPointer(envStructType))
+
+	blockIdx := 0
+	for i := range captures {
+		act := actions[i]
+		if act.action == envDropNone {
+			continue
+		}
+
+		fieldIdx := int64(i + 1) // +1 for env_drop_fn header
+		fieldPtr := curBlock.NewGetElementPtr(envStructType, typedPtr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, fieldIdx))
+		fieldVal := curBlock.NewLoad(envStructType.Fields[i+1], fieldPtr)
+
+		nextBlk := dropFn.NewBlock(fmt.Sprintf("next.%d", blockIdx))
+
+		switch act.action {
+		case envDropCallFn:
+			// i8* field (string/vector/channel): null-check, call drop fn
+			isNull := curBlock.NewICmp(enum.IPredEQ, fieldVal, constant.NewNull(irtypes.I8Ptr))
+			dropBlk := dropFn.NewBlock(fmt.Sprintf("drop.%d", blockIdx))
+			curBlock.NewCondBr(isNull, nextBlk, dropBlk)
+			dropBlk.NewCall(act.dropFn, fieldVal)
+			dropBlk.NewBr(nextBlk)
+
+		case envDropClosureEnv:
+			// Closure fat pointer {fn_ptr, env_ptr}: extract env, env-drop-or-free
+			innerEnvPtr := curBlock.NewExtractValue(fieldVal, 1)
+			isNull := curBlock.NewICmp(enum.IPredEQ, innerEnvPtr, constant.NewNull(irtypes.I8Ptr))
+			checkBlk := dropFn.NewBlock(fmt.Sprintf("clo.check.%d", blockIdx))
+			curBlock.NewCondBr(isNull, nextBlk, checkBlk)
+			// Load inner env's drop fn header
+			envHeaderType := irtypes.NewStruct(irtypes.I8Ptr)
+			typedHdr := checkBlk.NewBitCast(innerEnvPtr, irtypes.NewPointer(envHeaderType))
+			hdrField := checkBlk.NewGetElementPtr(envHeaderType, typedHdr,
+				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+			innerDropRaw := checkBlk.NewLoad(irtypes.I8Ptr, hdrField)
+			hasInnerDrop := checkBlk.NewICmp(enum.IPredNE, innerDropRaw, constant.NewNull(irtypes.I8Ptr))
+			deepBlk := dropFn.NewBlock(fmt.Sprintf("clo.deep.%d", blockIdx))
+			shallowBlk := dropFn.NewBlock(fmt.Sprintf("clo.free.%d", blockIdx))
+			checkBlk.NewCondBr(hasInnerDrop, deepBlk, shallowBlk)
+			// Deep drop: call inner env's drop function
+			innerDropFnType := irtypes.NewFunc(irtypes.Void, irtypes.I8Ptr)
+			typedInnerDrop := deepBlk.NewBitCast(innerDropRaw, irtypes.NewPointer(innerDropFnType))
+			deepBlk.NewCall(typedInnerDrop, innerEnvPtr)
+			deepBlk.NewBr(nextBlk)
+			// Shallow free: just pal_free the inner env
+			shallowBlk.NewCall(c.palFree, innerEnvPtr)
+			shallowBlk.NewBr(nextBlk)
+
+		case envDropUserValue:
+			// User type value struct {vtable, instance}: extract instance, null-check, pal_free
+			instPtr := curBlock.NewExtractValue(fieldVal, 1)
+			isNull := curBlock.NewICmp(enum.IPredEQ, instPtr, constant.NewNull(irtypes.I8Ptr))
+			freeBlk := dropFn.NewBlock(fmt.Sprintf("ufree.%d", blockIdx))
+			curBlock.NewCondBr(isNull, nextBlk, freeBlk)
+			freeBlk.NewCall(c.palFree, instPtr)
+			freeBlk.NewBr(nextBlk)
+
+		case envDropUserValueDrop:
+			// User type value struct {vtable, instance}: extract instance, null-check, drop + pal_free
+			instPtr := curBlock.NewExtractValue(fieldVal, 1)
+			isNull := curBlock.NewICmp(enum.IPredEQ, instPtr, constant.NewNull(irtypes.I8Ptr))
+			dropBlk := dropFn.NewBlock(fmt.Sprintf("udrop.%d", blockIdx))
+			curBlock.NewCondBr(isNull, nextBlk, dropBlk)
+			dropBlk.NewCall(act.dropFn, instPtr)
+			dropBlk.NewCall(c.palFree, instPtr)
+			dropBlk.NewBr(nextBlk)
+		}
+
+		curBlock = nextBlk
+		blockIdx++
+	}
+
+	// Free the env struct itself
+	curBlock.NewCall(c.palFree, dropFn.Params[0])
+	curBlock.NewRet(nil)
+
+	return dropFn
 }
 
 // --- Optional Chaining ---

@@ -578,7 +578,7 @@ test_skip_while_none() `test {
 
 // --- for_each combinator ---
 
-test_for_each() `test(allow_leaks: true) {
+test_for_each() `test {
   int[] v = [10, 20, 30];
   int[] collected = [];
   v.iter().for_each(move |int x| {
@@ -1064,7 +1064,7 @@ test_fniter_reduce() `test {
 
 // --- Lambda closure captures in combinator context ---
 
-test_closure_captures_outer_var() `test(allow_leaks: true) {
+test_closure_captures_outer_var() `test {
   int threshold = 5;
   c := Counter(current: 0, limit: 10);
   int n = c.filter(|int x| -> bool {
@@ -1073,7 +1073,7 @@ test_closure_captures_outer_var() `test(allow_leaks: true) {
   assert(n == 4, "closure captures threshold: 6,7,8,9 = 4");
 }
 
-test_closure_captures_multiple_vars() `test(allow_leaks: true) {
+test_closure_captures_multiple_vars() `test {
   int lo = 3;
   int hi = 7;
   c := Counter(current: 0, limit: 10);
@@ -1085,7 +1085,7 @@ test_closure_captures_multiple_vars() `test(allow_leaks: true) {
   assert(result[4] == 7, "last=7");
 }
 
-test_nested_closures_in_chain() `test(allow_leaks: true) {
+test_nested_closures_in_chain() `test {
   int multiplier = 3;
   int limit = 30;
   c := Counter(current: 1, limit: 10);
@@ -1098,6 +1098,16 @@ test_nested_closures_in_chain() `test(allow_leaks: true) {
   assert(result.len == 9, "nested closures len=9");
   assert(result[0] == 3, "first=3");
   assert(result[8] == 27, "last=27");
+}
+
+// B0221: Move-captured vector dropped when closure env is freed.
+test_move_captured_vector_no_leak() `test {
+  int[] accum = [];
+  int[] v = [10, 20, 30];
+  v.iter().for_each(move |int x| {
+    accum.push(x);
+  });
+  // accum is moved into closure, pushed to, and dropped when env is freed
 }
 
 // T0128: Chained combinator cleanup — intermediate _FnIter instances freed via _parent chain.

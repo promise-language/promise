@@ -6524,12 +6524,31 @@ func (c *Compiler) declareCoroIntrinsics() {
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1), constant.NewInt(irtypes.I32, 1))
 		envPtr := loadEnvBlk.NewLoad(irtypes.I8Ptr, envField)
 		isNull := loadEnvBlk.NewICmp(enum.IPredEQ, envPtr, constant.NewNull(irtypes.I8Ptr))
-		freeEnvBlk := c.iterCleanup.NewBlock("free.env")
+		checkDropBlk := c.iterCleanup.NewBlock("check.env_drop")
 		freeInstBlk := c.iterCleanup.NewBlock("free.inst")
-		loadEnvBlk.NewCondBr(isNull, freeInstBlk, freeEnvBlk)
+		loadEnvBlk.NewCondBr(isNull, freeInstBlk, checkDropBlk)
 
-		freeEnvBlk.NewCall(c.palFree, envPtr)
-		freeEnvBlk.NewBr(freeInstBlk)
+		// B0221: Load env drop fn from field 0 of env struct header.
+		// If non-null, call it (handles dropping captured values + freeing env).
+		// If null, just free the env struct.
+		envHeaderType := irtypes.NewStruct(irtypes.I8Ptr)
+		typedHdr := checkDropBlk.NewBitCast(envPtr, irtypes.NewPointer(envHeaderType))
+		dropFnField := checkDropBlk.NewGetElementPtr(envHeaderType, typedHdr,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+		dropFnRaw := checkDropBlk.NewLoad(irtypes.I8Ptr, dropFnField)
+		hasDrop := checkDropBlk.NewICmp(enum.IPredNE, dropFnRaw, constant.NewNull(irtypes.I8Ptr))
+		callDropBlk := c.iterCleanup.NewBlock("env.deep_drop")
+		justFreeBlk := c.iterCleanup.NewBlock("env.shallow_free")
+		checkDropBlk.NewCondBr(hasDrop, callDropBlk, justFreeBlk)
+
+		envDropFnType := irtypes.NewFunc(irtypes.Void, irtypes.I8Ptr)
+		typedDropFn := callDropBlk.NewBitCast(dropFnRaw, irtypes.NewPointer(envDropFnType))
+		callDropBlk.NewCall(typedDropFn, envPtr)
+		callDropBlk.NewBr(freeInstBlk)
+
+		justFreeBlk.NewCall(c.palFree, envPtr)
+		justFreeBlk.NewBr(freeInstBlk)
+
 		freeInstBlk.NewCall(c.palFree, c.iterCleanup.Params[0])
 		freeInstBlk.NewRet(nil)
 	}

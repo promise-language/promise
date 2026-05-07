@@ -1996,10 +1996,44 @@ func (c *Compiler) emitEnvFree(b scopeBinding) {
 	c.block.NewCondBr(isNull, skipBlock, callBlock)
 
 	c.block = callBlock
-	c.block.NewCall(c.palFree, envPtr)
+	c.emitEnvDropOrFree(envPtr)
 	c.block.NewBr(skipBlock)
 
 	c.block = skipBlock
+}
+
+// emitEnvDropOrFree loads the env drop function from the env struct header (field 0)
+// and calls it if non-null, otherwise calls pal_free. B0221: env structs now store
+// a drop function pointer as their first field so captured moved values can be
+// properly dropped (not just the env struct freed).
+// The env pointer must be non-null (caller is responsible for null-checking).
+func (c *Compiler) emitEnvDropOrFree(envPtr value.Value) {
+	// Load env drop fn pointer from field 0 (env struct header)
+	envHeaderType := irtypes.NewStruct(irtypes.I8Ptr)
+	typedHdr := c.block.NewBitCast(envPtr, irtypes.NewPointer(envHeaderType))
+	dropFnField := c.block.NewGetElementPtr(envHeaderType, typedHdr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	dropFnRaw := c.block.NewLoad(irtypes.I8Ptr, dropFnField)
+
+	hasDrop := c.block.NewICmp(enum.IPredNE, dropFnRaw, constant.NewNull(irtypes.I8Ptr))
+	callDropBlk := c.newBlock("env.deep_drop")
+	justFreeBlk := c.newBlock("env.shallow_free")
+	mergeBlk := c.newBlock("env.drop_done")
+	c.block.NewCondBr(hasDrop, callDropBlk, justFreeBlk)
+
+	// Call env drop function (drops captured values + frees env struct)
+	c.block = callDropBlk
+	envDropFnType := irtypes.NewFunc(irtypes.Void, irtypes.I8Ptr)
+	typedDropFn := c.block.NewBitCast(dropFnRaw, irtypes.NewPointer(envDropFnType))
+	c.block.NewCall(typedDropFn, envPtr)
+	c.block.NewBr(mergeBlk)
+
+	// No droppable captures — just free the env struct
+	c.block = justFreeBlk
+	c.block.NewCall(c.palFree, envPtr)
+	c.block.NewBr(mergeBlk)
+
+	c.block = mergeBlk
 }
 
 // trackStringTemp registers a heap-allocated string temporary for cleanup at
@@ -2393,7 +2427,7 @@ func (c *Compiler) claimAllEnvTemps() {
 }
 
 // cleanupEnvTemps frees all unclaimed closure env temps at statement end (T0100).
-// For each temp: check flag → null-check ptr → call pal_free.
+// For each temp: check flag → null-check ptr → call env drop fn or pal_free (B0221).
 func (c *Compiler) cleanupEnvTemps() {
 	if len(c.envTemps) == 0 {
 		return
@@ -2418,7 +2452,8 @@ func (c *Compiler) cleanupEnvTemps() {
 		c.block.NewCondBr(isNull, doneBlock, execBlock)
 
 		c.block = execBlock
-		c.block.NewCall(c.palFree, ptr)
+		// B0221: Use emitEnvDropOrFree to properly drop captured values
+		c.emitEnvDropOrFree(ptr)
 		c.block.NewBr(doneBlock)
 
 		c.block = doneBlock

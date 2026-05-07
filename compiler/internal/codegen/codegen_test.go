@@ -14810,3 +14810,17 @@ func TestHeapTempClaimOnMethodReceiver(t *testing.T) {
 	// Both the filter result and the take result get heap.claim blocks.
 	assertContains(t, ir, "heap.claim")
 }
+
+// T0101: Optional field in type with synthesized drop
+func TestOptionalFieldInSynthDrop(t *testing.T) {
+	ir := generateIR(t, `
+		type Wrapper { string? opt; }
+		main() {
+			Wrapper w = Wrapper(opt: "hello");
+		}
+	`)
+	// Wrapper gets synthesized drop that checks optional field
+	assertContains(t, ir, "define void @Wrapper.drop")
+	assertContains(t, ir, "optfield.drop")
+	assertContains(t, ir, "optfield.skip")
+}

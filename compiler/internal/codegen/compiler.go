@@ -343,13 +343,14 @@ func (c *Compiler) typeAlign(typ irtypes.Type) int {
 type scopeBindingKind int
 
 const (
-	bindingClose      scopeBindingKind = iota // use-bound: call close() at scope exit
-	bindingDrop                               // droppable: call drop() at scope exit
-	bindingDropString                         // string: call promise_string_drop (alloca is i8*, not value struct)
-	bindingDropEnum                           // enum: call enum drop (alloca ptr bitcast to i8*) T0102
-	bindingFree                               // heap-only: call pal_free (no drop method, just free the instance)
-	bindingFreeEnv                            // closure env: free env pointer at scope exit
-	bindingGenerator                          // generator: destroy coroutine + free yield slot at scope exit
+	bindingClose        scopeBindingKind = iota // use-bound: call close() at scope exit
+	bindingDrop                                 // droppable: call drop() at scope exit
+	bindingDropString                           // string: call promise_string_drop (alloca is i8*, not value struct)
+	bindingDropEnum                             // enum: call enum drop (alloca ptr bitcast to i8*) T0102
+	bindingDropOptional                         // optional: check has-value flag, then drop inner value (T0101)
+	bindingFree                                 // heap-only: call pal_free (no drop method, just free the instance)
+	bindingFreeEnv                              // closure env: free env pointer at scope exit
+	bindingGenerator                            // generator: destroy coroutine + free yield slot at scope exit
 )
 
 // scopeBinding tracks a variable that needs cleanup at scope exit.
@@ -4876,6 +4877,13 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 	fields := named.AllFields()
 	for i := len(fields) - 1; i >= 0; i-- {
 		f := fields[i]
+
+		// T0101: Handle optional fields wrapping droppable types.
+		if opt, ok := f.Type().(*types.Optional); ok {
+			c.emitOptionalFieldDrop(opt, f, layout, typedPtr)
+			continue
+		}
+
 		fieldNamed := extractNamed(f.Type())
 		if fieldNamed == nil || (!fieldNamed.HasDrop() && fieldNamed != types.TypChannel && fieldNamed != types.TypString) {
 			continue
@@ -4914,6 +4922,60 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 			c.block.NewCall(dropFn, fieldInstance)
 		}
 	}
+}
+
+// emitOptionalFieldDrop emits a conditional drop for an optional-typed field (T0101).
+// Checks the has-value flag, then drops the inner value if present.
+// Layout: optional field is {i1 flag, T value} stored in the instance struct.
+func (c *Compiler) emitOptionalFieldDrop(opt *types.Optional, f *types.Field, layout *TypeDeclLayout, typedPtr value.Value) {
+	elem := opt.Elem()
+	innerNamed := extractNamed(elem)
+
+	// Determine drop function for inner type (string/container only — i8* drops).
+	var dropFunc *ir.Func
+
+	switch {
+	case innerNamed == types.TypString:
+		dropFunc = c.funcs["promise_string_drop"]
+	case innerNamed == types.TypVector:
+		dropFunc = c.funcs["Vector.drop"]
+	case innerNamed == types.TypChannel:
+		dropFunc = c.funcs["Channel.drop"]
+	// Note: user types with HasDrop() are intentionally excluded here (B0181).
+	// Dropping a user type inside an optional requires dup-on-unwrap to prevent
+	// double-free when the inner value is also extracted elsewhere. Tracked as T0111.
+	default:
+		return // inner type not droppable
+	}
+
+	if dropFunc == nil {
+		return
+	}
+
+	fieldIdx, ok := layout.InstanceFieldIndex[f.Name()]
+	if !ok {
+		return
+	}
+
+	// Load the optional field value
+	fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
+	fieldVal := c.block.NewLoad(layout.Instance.Fields[fieldIdx].LLVMType, fieldPtr)
+
+	// Extract has-value flag (field 0 of the optional struct)
+	hasVal := c.block.NewExtractValue(fieldVal, 0)
+	dropBlock := c.newBlock("optfield.drop")
+	skipBlock := c.newBlock("optfield.skip")
+	c.block.NewCondBr(hasVal, dropBlock, skipBlock)
+
+	c.block = dropBlock
+	innerVal := c.block.NewExtractValue(fieldVal, 1)
+
+	// String/container: inner is i8*, call drop directly
+	c.block.NewCall(dropFunc, innerVal)
+	c.block.NewBr(skipBlock)
+
+	c.block = skipBlock
 }
 
 // declareSynthesizedDrops declares drop function stubs for non-generic types
@@ -5037,7 +5099,10 @@ func (c *Compiler) defineSynthesizedModuleDrops(file *ast.File, moduleName strin
 // since drop flags + clearDropFlag at move sites prevent double-free of aliased values.
 func (c *Compiler) defineSynthesizedDropBody(fn *ir.Func, named *types.Named) {
 	entry := fn.NewBlock(".entry")
+	savedBlock := c.block
+	savedFn := c.fn
 	c.block = entry
+	c.fn = fn // T0101: ensure c.newBlock() creates blocks in the drop function
 
 	// Set up method context for emitFieldDrops (needs locals["this"])
 	savedLocals := c.locals
@@ -5054,6 +5119,8 @@ func (c *Compiler) defineSynthesizedDropBody(fn *ir.Func, named *types.Named) {
 
 	c.block.NewRet(nil)
 	c.locals = savedLocals
+	c.block = savedBlock
+	c.fn = savedFn
 }
 
 // declareSynthesizedEnumDrops declares drop function stubs for non-generic enums

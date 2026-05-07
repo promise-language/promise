@@ -1764,6 +1764,8 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 			}
 			val := c.genCallArgExpr(arg.Value)
 			c.targetType = nil
+			// T0101: Save pre-wrap value for string temp claiming on optional fields
+			preWrapVal := val
 			val = maybeWrapOptional(val, arg.Value, arg.Name, fieldIdx)
 			fieldPtr := c.block.NewGetElementPtr(instanceStructType, typedPtr,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
@@ -1777,21 +1779,37 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 			if c.typeSubst != nil {
 				fType = types.Substitute(fType, c.typeSubst)
 			}
+			// T0101: Also handle string? fields — the inner string temp must be claimed.
+			isOptionalString := false
 			isStringField := extractNamed(fType) == types.TypString
+			if !isStringField {
+				if opt, ok := fType.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString {
+					isStringField = true
+					isOptionalString = true
+				}
+			}
 			if isStringField {
 				if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 					if _, hasFlag := c.dropFlags[ident.Name]; hasFlag {
 						// Has drop flag: move ownership (existing behavior)
 						c.block.NewStore(val, fieldPtr)
 						c.clearDropFlag(ident.Name)
-					} else {
+					} else if !isOptionalString {
 						// No drop flag (function param without ~): dup for exclusive ownership
+						// Skip dup for optional strings — the inner value is already owned
 						c.block.NewStore(c.dupString(val), fieldPtr)
+					} else {
+						c.block.NewStore(val, fieldPtr)
 					}
 				} else {
 					// Expression result: claim temp, store directly
 					c.block.NewStore(val, fieldPtr)
-					c.claimStringTemp(val)
+					// For optional strings, claim the pre-wrap value (the raw i8* temp)
+					if isOptionalString {
+						c.claimStringTemp(preWrapVal)
+					} else {
+						c.claimStringTemp(val)
+					}
 				}
 			} else {
 				c.block.NewStore(val, fieldPtr)

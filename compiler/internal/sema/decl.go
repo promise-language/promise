@@ -492,6 +492,9 @@ func fieldTypeHasDrop(typ types.Type) bool {
 		if e, ok := t.Origin().(*types.Enum); ok {
 			return e.HasDrop()
 		}
+	case *types.Optional:
+		// T0101: Optional wrapping a droppable type needs synthesized drop
+		return fieldTypeHasDrop(t.Elem())
 	}
 	return false
 }

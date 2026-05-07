@@ -924,6 +924,60 @@ func (c *Compiler) emitEnumDropCall(b scopeBinding) {
 	c.block = skipBlock
 }
 
+// emitOptionalDropCall emits a conditional drop for an optional value (T0101).
+// Checks: drop flag → has-value flag → drop inner value.
+// Layout: optional is {i1 flag, T value} — field 0 is has-value, field 1 is inner.
+func (c *Compiler) emitOptionalDropCall(b scopeBinding) {
+	if b.dropFlag == nil {
+		return
+	}
+
+	flag := c.block.NewLoad(irtypes.I1, b.dropFlag)
+	dropBlock := c.newBlock("optdrop.check")
+	skipBlock := c.newBlock("optdrop.skip")
+	c.block.NewCondBr(flag, dropBlock, skipBlock)
+
+	c.block = dropBlock
+	optVal := c.block.NewLoad(b.alloca.ElemType, b.alloca)
+
+	// Check has-value flag (field 0 of the optional struct)
+	hasVal := c.block.NewExtractValue(optVal, 0)
+	dropInnerBlock := c.newBlock("optdrop.inner")
+	doneBlock := c.newBlock("optdrop.done")
+	c.block.NewCondBr(hasVal, dropInnerBlock, doneBlock)
+
+	c.block = dropInnerBlock
+	innerVal := c.block.NewExtractValue(optVal, 1)
+
+	// Dispatch inner drop based on stored type info
+	if b.dropFunc != nil {
+		// String, vector, channel: inner is i8*, call drop directly
+		// Also covers user types with resolved direct drop
+		if isContainerType(b.valType) || b.named == types.TypString {
+			c.block.NewCall(b.dropFunc, innerVal)
+		} else {
+			// User type: inner is value struct {vtable, instance}, extract instance ptr
+			instance := c.extractInstancePtr(innerVal)
+			nullCheck := c.block.NewICmp(enum.IPredEQ, instance, constant.NewNull(irtypes.I8Ptr))
+			execBlock := c.newBlock("optdrop.exec")
+			nullSkip := c.newBlock("optdrop.null")
+			c.block.NewCondBr(nullCheck, nullSkip, execBlock)
+
+			c.block = execBlock
+			c.block.NewCall(b.dropFunc, instance)
+			c.block.NewBr(nullSkip)
+
+			c.block = nullSkip
+		}
+	}
+	c.block.NewBr(doneBlock)
+
+	c.block = doneBlock
+	c.block.NewBr(skipBlock)
+
+	c.block = skipBlock
+}
+
 // clearDropFlag sets a variable's drop flag to false (indicating the value has been moved).
 func (c *Compiler) clearDropFlag(name string) {
 	if flag, ok := c.dropFlags[name]; ok {
@@ -970,6 +1024,8 @@ func (c *Compiler) emitScopeCleanup(fromIdx int, errorInFlight bool) *closeErrCa
 			c.emitStringDropCall(b)
 		case bindingDropEnum:
 			c.emitEnumDropCall(b)
+		case bindingDropOptional:
+			c.emitOptionalDropCall(b)
 		case bindingFree:
 			c.emitFreeCall(b)
 		case bindingFreeEnv:
@@ -1065,6 +1121,10 @@ func (c *Compiler) emitCloseErrCheck(cap *closeErrCapture) {
 func (c *Compiler) emitDropCall(b scopeBinding) {
 	if b.kind == bindingDropString {
 		c.emitStringDropCall(b)
+		return
+	}
+	if b.kind == bindingDropOptional {
+		c.emitOptionalDropCall(b)
 		return
 	}
 	if b.dropFlag == nil {

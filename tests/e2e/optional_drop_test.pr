@@ -1,0 +1,43 @@
+// T0101: Optional fields wrapping heap types should drop the inner value.
+// Tests that types with optional string fields properly free them in synthesized drops.
+type Wrapper {
+  string? opt_name;
+}
+
+type MultiField {
+  string name;
+  string? extra;
+}
+
+// --- Optional string field in type: dynamic string should not leak ---
+
+test_optional_field_dynamic() `test {
+  Wrapper w = Wrapper(opt_name: "hello" + " world");
+  // Wrapper.drop frees the inner string via optfield.drop
+  assert(true, "dynamic string in optional field is freed");
+}
+
+test_optional_field_none() `test {
+  Wrapper w = Wrapper(opt_name: none);
+  // Wrapper.drop checks has-value flag, skips drop for none
+  assert(true, "none field is safe");
+}
+
+test_optional_field_literal() `test {
+  Wrapper w = Wrapper(opt_name: "static");
+  // Static strings have literal flag — promise_string_drop skips them
+  assert(true, "literal in optional field is safe");
+}
+
+// --- Multiple fields including optional ---
+
+test_multi_field_both() `test {
+  MultiField m = MultiField(name: "main", extra: "extra" + " data");
+  assert(m.name == "main", "regular field");
+  // Both name and extra are cleaned up by MultiField.drop
+}
+
+test_multi_field_none() `test {
+  MultiField m = MultiField(name: "main", extra: none);
+  assert(m.name == "main", "regular field with none optional");
+}

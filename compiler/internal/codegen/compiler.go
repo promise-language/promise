@@ -4925,8 +4925,19 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 			continue
 		}
 
-		// Resolve and call field type's drop() method
+		// Resolve and call field type's drop() method.
+		// T0132: For generic fields with synthesized drops (e.g., Map[T, bool]
+		// inside Set[T]), apply type substitution to get the concrete instance
+		// (Map[int, bool]) and use the mono name for the drop function.
+		// Container types (Vector, Channel, String) have native non-mono drops
+		// and must NOT use the mono name.
 		ownerName := c.resolveMethodOwner(fieldNamed, "drop")
+		if fieldNamed.NeedsSynthDrop() && c.typeSubst != nil {
+			resolvedFieldType := types.Substitute(f.Type(), c.typeSubst)
+			if inst, ok := resolvedFieldType.(*types.Instance); ok {
+				ownerName = monoName(inst)
+			}
+		}
 		mangledName := mangleMethodName(ownerName, "drop", false)
 		if dropFn, ok := c.funcs[mangledName]; ok {
 			c.block.NewCall(dropFn, fieldInstance)

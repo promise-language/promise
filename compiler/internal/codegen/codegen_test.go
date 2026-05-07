@@ -9961,6 +9961,30 @@ func TestDropSynthesizedGeneric(t *testing.T) {
 	assertContains(t, ir, "Wrapper[int].drop")
 }
 
+// T0132: Generic type with generic droppable field gets cascading mono drop.
+// Set[T] has a Map[T, bool] field — the synthesized Set[int].drop must call
+// Map[int, bool].drop (mono name), not Map.drop (origin name which doesn't exist).
+func TestDropSynthesizedGenericCascading(t *testing.T) {
+	ir := generateIR(t, `
+		type Inner {
+			int id;
+			drop(~this) { }
+		}
+		type Box[T] {
+			Inner inner;
+		}
+		type Outer[T] {
+			Box[T] box;
+		}
+		main() {
+			o := Outer[int](box: Box[int](inner: Inner(id: 1)));
+		}
+	`)
+	// Outer[int].drop must call Box[int].drop, not Box.drop
+	assertContains(t, ir, `call void @"Box[int].drop"`)
+	assertContains(t, ir, "Outer[int].drop")
+}
+
 // T0102: Enum with string variant gets synthesized drop
 func TestDropSynthesizedEnumString(t *testing.T) {
 	ir := generateIR(t, `

@@ -75,13 +75,13 @@ test_map_int_keys() `test {
 
 // --- Set format ---
 
-test_set_single_format() `test(allow_leaks: true) {
+test_set_single_format() `test {
   Set[int] s = Set[int]();
   s.add(42);
   assert(s.to_string() == "\{42}", "single element set to_string");
 }
 
-test_set_empty_format() `test(allow_leaks: true) {
+test_set_empty_format() `test {
   Set[int] s = Set[int]();
   assert(s.to_string() == "\{}", "empty set to_string");
 }

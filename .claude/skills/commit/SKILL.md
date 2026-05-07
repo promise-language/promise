@@ -1,9 +1,9 @@
 ---
 name: commit
-description: Verify, commit, sync, and push changes. Updates docs and tracker, files bugs for any issues noticed, runs full verification before and after rebase.
+description: Verify, commit, and sync changes. Updates docs and tracker, files bugs for any issues noticed, runs full verification before and after rebase.
 ---
 
-Verify, commit, sync with remote, and push the current changes.
+Verify, commit, and sync the current changes with remote.
 
 ## Tracker status
 
@@ -50,9 +50,5 @@ Before starting, update your tracker status: call `mcp__tracker__heartbeat` with
      - Missing tests for critical invariants (cleanup, thread safety, error recovery)
    - Use `mcp__tracker__create` with priority **critical** for memory/concurrency issues, **high** for performance, **medium** for missing tests.
 
-8. **Push.**
-   - `git push` (or `git push -u origin <branch>` if on a new branch).
-   - Never force-push to master without explicit approval.
-
-9. **Mark done.**
+8. **Mark done.**
    - Call `mcp__tracker__heartbeat` with `status: "done"`, `item_id: ""`, `item_title: ""` to signal completion.

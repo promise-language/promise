@@ -9641,6 +9641,28 @@ func TestStructuralInterfaceVarBorrow(t *testing.T) {
 	assertNotContains(t, ir, "it2.dropflag")
 }
 
+// B0199: Constructor call sites keep caller's drop flag for string-typed borrow
+// parameters on types with HasDrop(). The constructor body strdups the string
+// (genAssignment detects no drop flag on the param), so the caller must keep
+// its drop flag to free the original string.
+func TestConstructorBorrowParamKeepsDropFlag(t *testing.T) {
+	ir := generateIR(t, `
+		type Holder {
+			string data;
+			new(~this, string s) {
+				this.data = s;
+			}
+		}
+		test() {
+			string mystr_b0199 = "hello";
+			h := Holder(s: mystr_b0199);
+		}
+		main() {}
+	`)
+	// mystr_b0199's drop flag should NOT be cleared (new() borrows, not moves)
+	assertNotContains(t, ir, "store i1 false, i1* %mystr_b0199.dropflag")
+}
+
 // T0086: Raising a local error variable clears its drop flag before scope cleanup
 func TestRaiseLocalErrorClearsDropFlag(t *testing.T) {
 	ir := generateIR(t, `

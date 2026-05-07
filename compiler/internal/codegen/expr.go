@@ -1770,14 +1770,40 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 		if !ok {
 			panic(fmt.Sprintf("codegen: undeclared new() for type %s (mangled: %s)", typ, mangledName))
 		}
+		// B0199: Look up new() method BEFORE processing args so we can check
+		// parameter move semantics. Only clear caller's drop flag for move (~)
+		// parameters. Borrow parameters get a copy (strdup for strings), so the
+		// caller must keep its drop flag to free the original.
+		newMethod := named.LookupMethod("new")
+		var newParams []*types.Param
+		if newMethod != nil {
+			newParams = newMethod.Sig().Params()
+		}
+
 		var argVals []value.Value
 		var argTypes []types.Type
-		for _, arg := range e.Args {
+		for i, arg := range e.Args {
 			v := c.genCallArgExpr(arg.Value)
 			argVals = append(argVals, v)
 			argTypes = append(argTypes, c.info.Types[arg.Value])
-			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
-				c.clearDropFlag(ident.Name)
+			// B0199: For string-typed borrow params on types with HasDrop(),
+			// the constructor body strdups the string (genAssignment detects no
+			// drop flag on the param → dupString). The caller must keep its drop
+			// flag so the original string is freed. For move params and non-string
+			// params, clear the drop flag as before (direct pointer store).
+			skipClear := false
+			if newMethod != nil && i < len(newParams) {
+				paramType := newParams[i].Type()
+				_, isMutRef := paramType.(*types.MutRef)
+				isMove := isMutRef || newParams[i].Ref() == types.RefMut
+				if !isMove && extractNamed(paramType) == types.TypString && named.HasDrop() {
+					skipClear = true
+				}
+			}
+			if !skipClear {
+				if ident, ok := arg.Value.(*ast.IdentExpr); ok {
+					c.clearDropFlag(ident.Name)
+				}
 			}
 			c.claimStringTemp(v) // B0168: ownership transferred to new() args
 			c.claimEnvTemp(v)    // T0100: claim env temp for closure args
@@ -1785,7 +1811,6 @@ func (c *Compiler) genConstructorCallMono(e *ast.CallExpr, typ types.Type) value
 		// T0135: Claim heap temp before calling new() — args evaluated successfully.
 		c.claimHeapTemp(rawPtr)
 
-		newMethod := named.LookupMethod("new")
 		if newMethod != nil {
 			argVals = c.coerceCallArgs(argVals, argTypes, newMethod.Sig().Params())
 		}

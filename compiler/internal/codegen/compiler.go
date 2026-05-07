@@ -166,9 +166,10 @@ type Compiler struct {
 	// T0088: Statement-level tracking for heap-allocated droppable instances.
 	// Tracks constructor results (e.g., _FnIter[T]) in iterator chains and drops
 	// unclaimed instances at statement end to prevent memory leaks.
-	heapTemps           []heapTemp
-	heapTempMap         map[value.Value]int // instance i8* → index in heapTemps (-1 = claimed)
-	lastClaimedDropFunc *ir.Func            // T0127: drop func from last claimHeapTemp (nil if none claimed)
+	heapTemps            []heapTemp
+	heapTempMap          map[value.Value]int // instance i8* → index in heapTemps (-1 = claimed)
+	lastClaimedDropFunc  *ir.Func            // T0127: drop func from last claimHeapTemp (nil if none claimed)
+	pendingReceiverClaim value.Value         // T0130: deferred receiver claim from method dispatch
 
 	// T0100: Statement-level tracking for closure env pointers.
 	// Tracks env structs from lambda expressions passed directly as function

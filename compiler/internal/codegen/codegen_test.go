@@ -15084,3 +15084,28 @@ func TestFnIterParentPopulated(t *testing.T) {
 	// The filter structural default on _FnIter should store ptrtoint(this) into _parent
 	assertContains(t, ir, "ptrtoint")
 }
+
+// T0130: Terminal operations (count, collect, find) should NOT claim the receiver's
+// heap temp — the temp should be freed at statement end via cleanupHeapTemps.
+func TestTerminalOpDoesNotClaimReceiver(t *testing.T) {
+	ir := generateIR(t, `
+		type Counter is Iterator[int] {
+			int current;
+			int limit;
+			next() int? {
+				if this.current >= this.limit { return none; }
+				int val = this.current;
+				this.current = this.current + 1;
+				return val;
+			}
+		}
+		main() {
+			c := Counter(current: 0, limit: 5);
+			int n = c.filter(|int x| -> bool { return x > 2; }).count();
+		}
+	`)
+	// The _FnIter from filter() should be cleaned up at statement end (not claimed).
+	// Verify iterCleanup appears in the heap cleanup section after the count() call.
+	assertContains(t, ir, "heap.drop")
+	assertContains(t, ir, "__promise_iter_cleanup")
+}

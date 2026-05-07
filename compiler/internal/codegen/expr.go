@@ -1083,15 +1083,29 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 				}
 			}
 		}
-		heapBefore := len(c.heapTemps) // T0100
+		heapBefore := len(c.heapTemps)               // T0100
+		savedReceiverClaim := c.pendingReceiverClaim // T0130: save across nested calls
+		c.pendingReceiverClaim = nil
 		result := c.genMethodCall(e, member)
 		c.maybeTrackIterTemp(e, result)
-		// T0100: If the call returned a structural interface (tracked as heap temp),
-		// the callee likely stored our closure envs in the returned instance (e.g.,
-		// _FnIter). Claim env temps to prevent double-free with __promise_iter_cleanup.
+		// T0130: Claim the receiver's heap temp ONLY when the method returns a
+		// structural interface (combinator like filter/take/skip). Terminal operations
+		// (count, collect, find) return non-structural types — their receiver should
+		// be freed at statement end, not claimed.
+		if c.pendingReceiverClaim != nil {
+			callResultType := c.info.Types[e]
+			if c.typeSubst != nil {
+				callResultType = types.Substitute(callResultType, c.typeSubst)
+			}
+			if resultNamed := extractNamed(callResultType); resultNamed != nil && resultNamed.IsStructural() {
+				c.claimHeapTemp(c.pendingReceiverClaim)
+			}
+		}
+		// T0100: Claim env temps when a new iter was created
 		if len(c.heapTemps) > heapBefore {
 			c.claimAllEnvTemps()
 		}
+		c.pendingReceiverClaim = savedReceiverClaim // T0130: restore
 		return result
 	}
 
@@ -1129,12 +1143,24 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 					return c.genModuleGenericFuncCall(e, idx, member.Field)
 				}
 			}
-			heapBefore2 := len(c.heapTemps) // T0100
+			heapBefore2 := len(c.heapTemps)               // T0100
+			savedReceiverClaim2 := c.pendingReceiverClaim // T0130
+			c.pendingReceiverClaim = nil
 			result := c.genGenericMethodCall(e, idx, member)
 			c.maybeTrackIterTemp(e, result)
+			if c.pendingReceiverClaim != nil {
+				callResultType := c.info.Types[e]
+				if c.typeSubst != nil {
+					callResultType = types.Substitute(callResultType, c.typeSubst)
+				}
+				if resultNamed := extractNamed(callResultType); resultNamed != nil && resultNamed.IsStructural() {
+					c.claimHeapTemp(c.pendingReceiverClaim)
+				}
+			}
 			if len(c.heapTemps) > heapBefore2 {
 				c.claimAllEnvTemps()
 			}
+			c.pendingReceiverClaim = savedReceiverClaim2 // T0130
 			return result
 		}
 		return c.genGenericFuncCall(e, idx)
@@ -1142,12 +1168,24 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 
 	// Inferred generic function call: sema recorded the inferred type args.
 	if inferred, ok := c.info.InferredTypeArgs[e]; ok {
-		heapBefore3 := len(c.heapTemps) // T0100
+		heapBefore3 := len(c.heapTemps)               // T0100
+		savedReceiverClaim3 := c.pendingReceiverClaim // T0130
+		c.pendingReceiverClaim = nil
 		result := c.genInferredGenericCall(e, inferred)
 		c.maybeTrackIterTemp(e, result)
+		if c.pendingReceiverClaim != nil {
+			callResultType := c.info.Types[e]
+			if c.typeSubst != nil {
+				callResultType = types.Substitute(callResultType, c.typeSubst)
+			}
+			if resultNamed := extractNamed(callResultType); resultNamed != nil && resultNamed.IsStructural() {
+				c.claimHeapTemp(c.pendingReceiverClaim)
+			}
+		}
 		if len(c.heapTemps) > heapBefore3 {
 			c.claimAllEnvTemps()
 		}
+		c.pendingReceiverClaim = savedReceiverClaim3 // T0130
 		return result
 	}
 
@@ -1484,8 +1522,10 @@ func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, idx *ast.IndexExpr, mem
 	var args []value.Value
 	if method.Sig().Recv() != nil {
 		target := c.genExpr(member.Target)
-		// B0175: Claim heap temp on the receiver (see genMethodCall comment).
-		c.claimHeapTemp(target)
+		// T0130: Defer receiver claim — only claim if method produces a new iterator
+		// (combinator). Terminal operations (count, collect, find) don't capture the
+		// receiver, so the heap temp should be freed at statement end.
+		c.pendingReceiverClaim = target
 		if _, isThis := member.Target.(*ast.ThisExpr); isThis {
 			args = append(args, target)
 		} else if isContainerType(targetType) {
@@ -2694,11 +2734,8 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 	var args []value.Value
 	if method.Sig().Recv() != nil {
 		target := c.genExpr(member.Target)
-		// B0175: Claim heap temp on the receiver. When chaining method calls
-		// (e.g., c.filter(...).take(3)), the intermediate result is tracked as a
-		// heap temp. The method call may capture `this` in a closure env, so the
-		// receiver must not be freed at statement end.
-		c.claimHeapTemp(target)
+		// T0130: Defer receiver claim — only claim if method produces a new iterator.
+		c.pendingReceiverClaim = target
 		// Container types (Vector, Map, string) are already i8* pointers — pass directly.
 		// `this` in a method body is also i8*.
 		// Primitive scalars (int, f64, bool, char, etc.) are raw values — pass directly.
@@ -2951,8 +2988,8 @@ func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 
 	// 1. Evaluate receiver
 	receiverVal := c.genExpr(member.Target)
-	// B0175: Claim heap temp on the receiver (see genMethodCall comment).
-	c.claimHeapTemp(receiverVal)
+	// T0130: Defer receiver claim — only claim if method produces a new iterator.
+	c.pendingReceiverClaim = receiverVal
 
 	// 2. Extract vtable and instance
 	var vtableRaw, instance value.Value

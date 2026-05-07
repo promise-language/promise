@@ -1378,13 +1378,23 @@ func monoInstNeedsSynthDrop(inst *types.Instance) bool {
 	if named.NeedsSynthDrop() || named.HasDrop() || named.IsCopy() || named.IsValueType() || named.IsStructural() {
 		return false
 	}
-	// Check if any TypeParam field resolves to a type needing drop after substitution
+	// Check if any TypeParam field resolves to a type needing drop after substitution.
+	// Also handles Optional[TypeParam] (B0209) — sema can't resolve T? when T is a TypeParam.
 	subst := types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
 	for _, f := range named.AllFields() {
-		if _, isTP := f.Type().(*types.TypeParam); !isTP {
+		fType := f.Type()
+		// Unwrap Optional to check inner type (B0209)
+		if opt, isOpt := fType.(*types.Optional); isOpt {
+			fType = opt.Elem()
+		}
+		if _, isTP := fType.(*types.TypeParam); !isTP {
 			continue // non-TypeParam fields already checked by sema
 		}
 		ft := types.Substitute(f.Type(), subst)
+		// Unwrap Optional after substitution (B0209): T? with T=string → Optional[string]
+		if opt, isOpt := ft.(*types.Optional); isOpt {
+			ft = opt.Elem()
+		}
 		fNamed := extractNamed(ft)
 		if fNamed == nil {
 			continue

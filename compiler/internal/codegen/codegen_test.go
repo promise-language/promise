@@ -10098,6 +10098,54 @@ func TestSynthDropMonoTypeParamString(t *testing.T) {
 	assertContains(t, wrapperDrop, "call void @promise_string_drop(")
 }
 
+// B0209: Generic type with Optional[TypeParam] field instantiated with string — gets synth drop
+func TestSynthDropMonoOptionalTypeParamString(t *testing.T) {
+	ir := generateIR(t, `
+		type MaybeVal[T] { T? val; }
+		main() {
+			m := MaybeVal[string](val: "hello");
+		}
+	`)
+	// MaybeVal[string] gets a mono synthesized drop for the optional string field
+	drop := extractFunction(ir, `"MaybeVal[string].drop"`)
+	if drop == "" {
+		t.Fatal("expected MaybeVal[string].drop function in IR")
+	}
+	assertContains(t, drop, "call void @promise_string_drop(")
+}
+
+// B0209: Generic type with Optional[TypeParam] field instantiated with primitive — no synth drop
+func TestSynthDropMonoOptionalTypeParamPrimitive(t *testing.T) {
+	ir := generateIR(t, `
+		type MaybeVal[T] { T? val; }
+		main() {
+			m := MaybeVal[int](val: 42);
+		}
+	`)
+	// MaybeVal[int] should NOT get a synthesized drop — int is primitive
+	drop := extractFunction(ir, `"MaybeVal[int].drop"`)
+	if drop != "" {
+		t.Fatal("MaybeVal[int] should not have a synthesized drop")
+	}
+}
+
+// B0209: Generic type with Optional[TypeParam] field instantiated with heap user type — gets synth drop
+func TestSynthDropMonoOptionalTypeParamUserType(t *testing.T) {
+	ir := generateIR(t, `
+		type Point { int x; int y; }
+		type MaybeVal[T] { T? val; }
+		main() {
+			m := MaybeVal[Point](val: Point(x: 1, y: 2));
+		}
+	`)
+	// MaybeVal[Point] gets a mono synthesized drop (at minimum for pal_free of the instance)
+	drop := extractFunction(ir, `"MaybeVal[Point].drop"`)
+	if drop == "" {
+		t.Fatal("expected MaybeVal[Point].drop function in IR")
+	}
+	assertContains(t, drop, "call void @pal_free(")
+}
+
 // T0091: Error types get synthesized drop (frees message string field + instance)
 func TestSynthDropIncludesErrorTypes(t *testing.T) {
 	ir := generateIR(t, `

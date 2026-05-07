@@ -4941,7 +4941,13 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 		f := fields[i]
 
 		// T0101: Handle optional fields wrapping droppable types.
-		if opt, ok := f.Type().(*types.Optional); ok {
+		// B0209: Apply type substitution so Optional[TypeParam] resolves to
+		// the concrete inner type (e.g., T? → string? when T=string).
+		fieldTypeRaw := f.Type()
+		if c.typeSubst != nil {
+			fieldTypeRaw = types.Substitute(fieldTypeRaw, c.typeSubst)
+		}
+		if opt, ok := fieldTypeRaw.(*types.Optional); ok {
 			c.emitOptionalFieldDrop(opt, f, layout, typedPtr)
 			continue
 		}

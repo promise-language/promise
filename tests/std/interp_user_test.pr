@@ -163,12 +163,12 @@ type Outer {
   }
 }
 
-test_nested_type_interp() `test(allow_leaks: true) {
+test_nested_type_interp() `test {
   Outer o = Outer(inner: Inner(v: 42));
   assert("{o}" == "[I42]", "nested type format");
 }
 
-test_nested_type_mixed() `test(allow_leaks: true) {
+test_nested_type_mixed() `test {
   Outer o = Outer(inner: Inner(v: 7));
   assert("result: {o}!" == "result: [I7]!", "nested type with surrounding text");
 }

@@ -4916,8 +4916,28 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 			continue
 		}
 
-		fieldNamed := extractNamed(f.Type())
-		if fieldNamed == nil || (!fieldNamed.HasDrop() && fieldNamed != types.TypChannel && fieldNamed != types.TypString) {
+		// B0192: Apply type substitution before extracting the named type,
+		// so generic field types (e.g., T in GenericError[T]) resolve to
+		// their concrete types (e.g., Point).
+		fieldType := f.Type()
+		if c.typeSubst != nil {
+			fieldType = types.Substitute(fieldType, c.typeSubst)
+		}
+		fieldNamed := extractNamed(fieldType)
+		if fieldNamed == nil {
+			continue
+		}
+
+		// B0192: Determine if this is a heap-allocated user type that needs pal_free
+		// even without a drop method (e.g., Point with only int fields inside
+		// GenericError[Point]). Skip value types, copy types, primitive scalars,
+		// structural interfaces, and opaque container types (Vector, Channel, Task)
+		// which manage their own memory.
+		needsFreeOnly := !fieldNamed.HasDrop() && fieldNamed != types.TypChannel && fieldNamed != types.TypString &&
+			!fieldNamed.IsValueType() && !fieldNamed.IsCopy() && !isPrimitiveScalar(fieldNamed) &&
+			!fieldNamed.IsStructural() && !isOpaqueContainerType(fieldType)
+
+		if !fieldNamed.HasDrop() && fieldNamed != types.TypChannel && fieldNamed != types.TypString && !needsFreeOnly {
 			continue
 		}
 
@@ -4926,16 +4946,22 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 			continue
 		}
 
-		// Load the field value. Container types (Vector, Channel, String) are stored as
-		// raw i8* pointers, not value structs — use the loaded value directly.
+		// Load the field value. Container/opaque types (Vector, Channel, String, Task)
+		// are stored as raw i8* pointers, not value structs — use the loaded value directly.
 		fieldPtr := c.block.NewGetElementPtr(layout.Instance.LLVMType, typedPtr,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
 		fieldVal := c.block.NewLoad(layout.Instance.Fields[fieldIdx].LLVMType, fieldPtr)
 		var fieldInstance value.Value
-		if isContainerType(f.Type()) {
+		if isContainerType(fieldType) || isOpaqueContainerType(fieldType) {
 			fieldInstance = fieldVal
 		} else {
 			fieldInstance = c.extractInstancePtr(fieldVal)
+		}
+
+		// B0192: Non-droppable heap user types — just free the instance.
+		if needsFreeOnly {
+			c.block.NewCall(c.palFree, fieldInstance)
+			continue
 		}
 
 		// String fields: call promise_string_drop directly (T0095).
@@ -4956,17 +4982,18 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 		// B0189: Drop vector elements before freeing the buffer.
 		// Vector fields with droppable elements (e.g., Vector[string]) need
 		// their elements dropped before Vector.drop frees the buffer.
-		resolvedFieldType := f.Type()
-		if c.typeSubst != nil {
-			resolvedFieldType = types.Substitute(resolvedFieldType, c.typeSubst)
-		}
-		if elemType, isVec := types.AsVector(resolvedFieldType); isVec {
+		// fieldType already has type substitution applied from above.
+		if elemType, isVec := types.AsVector(fieldType); isVec {
 			c.emitVectorElementDropLoop(fieldInstance, elemType)
 		}
 
 		ownerName := c.resolveMethodOwner(fieldNamed, "drop")
-		if fieldNamed.NeedsSynthDrop() && c.typeSubst != nil {
-			if inst, ok := resolvedFieldType.(*types.Instance); ok {
+		// B0192/T0132: For generic field instances with synthesized drops,
+		// use the monomorphized name. Check the resolved fieldType (not just
+		// when c.typeSubst is set) so non-generic types containing generic
+		// instances also get the right drop name (e.g., Outer containing Box[Point]).
+		if fieldNamed.NeedsSynthDrop() {
+			if inst, ok := fieldType.(*types.Instance); ok {
 				ownerName = monoName(inst)
 			}
 		}
@@ -4978,7 +5005,7 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 		// T0106: Free the field instance after calling its drop().
 		// Synthesized drops already include pal_free; explicit drops do not.
 		// Container types manage their own memory in their drop functions.
-		if !fieldNamed.NeedsSynthDrop() && !isContainerType(f.Type()) {
+		if !fieldNamed.NeedsSynthDrop() && !isContainerType(fieldType) && !isOpaqueContainerType(fieldType) {
 			c.block.NewCall(c.palFree, fieldInstance)
 		}
 	}

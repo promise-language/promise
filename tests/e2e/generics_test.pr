@@ -277,7 +277,7 @@ type TypeMethodWrapper[T] {
   }
 }
 
-test_type_instance_resolves_method() `test(allow_leaks: true) {
+test_type_instance_resolves_method() `test {
   w := TypeMethodWrapper[int](value: 55, echoer: Echo());
   assert(w.echoed() == 55, "TypeMethodWrapper[int].echoed");
 }

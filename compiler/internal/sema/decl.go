@@ -466,20 +466,27 @@ func (c *Checker) propagateDrops(file *ast.File) {
 }
 
 // fieldTypeHasDrop returns true if the type (possibly wrapped in Instance/SharedRef/MutRef)
-// resolves to a Named type with HasDrop(), or is a string/vector type. B0167.
+// resolves to a Named type with HasDrop(), or is a string/vector type, or is a
+// heap-allocated user type that needs pal_free (B0192). B0167.
 // String/vector types don't have HasDrop() on the Named type, but their presence
 // triggers synthesized drop for the containing type. The synthesized drop body
-// does NOT free string/vector fields (emitFieldDrops skips them since they lack
-// HasDrop) — it only pal_free's the instance and drops Named droppable fields.
-// This enables cascading: types containing types with string fields get proper
-// instance struct cleanup via the synthesized drop chain.
+// handles string/vector fields and also pal_free's non-droppable heap user type
+// fields (B0192). This enables cascading: types containing types with string
+// fields or heap user type fields get proper instance struct cleanup via the
+// synthesized drop chain.
 func fieldTypeHasDrop(typ types.Type) bool {
 	switch t := typ.(type) {
 	case *types.Named:
 		if t == types.TypString || t == types.TypVector || t == types.TypChannel {
 			return true
 		}
-		return t.HasDrop()
+		if t.HasDrop() {
+			return true
+		}
+		// B0192: Non-droppable heap user types still need pal_free.
+		// Value types have inline data (no heap pointer), and structural
+		// interfaces aren't concrete instances.
+		return !t.IsValueType() && !t.IsStructural() && !isPrimitive(t)
 	case *types.Enum:
 		return t.HasDrop()
 	case *types.Instance:
@@ -487,7 +494,11 @@ func fieldTypeHasDrop(typ types.Type) bool {
 			if n == types.TypVector || n == types.TypChannel {
 				return true
 			}
-			return n.HasDrop()
+			if n.HasDrop() {
+				return true
+			}
+			// B0192: Same as above for generic instances.
+			return !n.IsValueType() && !n.IsStructural() && !isPrimitive(n)
 		}
 		if e, ok := t.Origin().(*types.Enum); ok {
 			return e.HasDrop()
@@ -497,6 +508,17 @@ func fieldTypeHasDrop(typ types.Type) bool {
 		return fieldTypeHasDrop(t.Elem())
 	}
 	return false
+}
+
+// isPrimitive returns true for built-in primitive scalar types (int, bool, etc.)
+// that are never heap-allocated as standalone instances.
+func isPrimitive(n *types.Named) bool {
+	return n == types.TypInt || n == types.TypUint ||
+		n == types.TypBool || n == types.TypChar ||
+		n == types.TypI8 || n == types.TypI16 || n == types.TypI32 || n == types.TypI64 ||
+		n == types.TypU8 || n == types.TypU16 || n == types.TypU32 || n == types.TypU64 ||
+		n == types.TypF32 || n == types.TypF64 ||
+		n == types.TypVoid || n == types.TypNone
 }
 
 // containsRef reports whether typ is or contains a SharedRef or MutRef.

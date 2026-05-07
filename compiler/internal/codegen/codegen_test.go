@@ -9976,6 +9976,44 @@ func TestSynthDropChannelField(t *testing.T) {
 	assertContains(t, withChanDrop, "call void @Channel.drop(")
 }
 
+// B0192: Non-droppable heap user type fields inside synthesized drop get pal_free
+func TestSynthDropFreesNonDroppableHeapField(t *testing.T) {
+	ir := generateIR(t, `
+		type Point { int x; int y; }
+		type Wrapper { Point p; string name; }
+		main() {
+			w := Wrapper(p: Point(x: 1, y: 2), name: "test");
+		}
+	`)
+	wrapperDrop := extractFunction(ir, "Wrapper.drop")
+	if wrapperDrop == "" {
+		t.Fatal("expected Wrapper.drop function in IR")
+	}
+	// Synthesized drop should free the Point instance via pal_free
+	assertContains(t, wrapperDrop, "call void @pal_free(")
+	// And drop the string field
+	assertContains(t, wrapperDrop, "call void @promise_string_drop(")
+}
+
+// B0192: Generic type with type-param field gets NeedsSynthDrop
+// so its synthesized drop can free heap-allocated type-param fields.
+func TestSynthDropGenericTypeParamField(t *testing.T) {
+	ir := generateIR(t, `
+		type Point { int x; int y; }
+		type Holder { Point p; }
+		main() {
+			Holder h = Holder(p: Point(x: 1, y: 2));
+		}
+	`)
+	// Holder gets a synthesized drop that frees the Point instance
+	holderDrop := extractFunction(ir, "Holder.drop")
+	if holderDrop == "" {
+		t.Fatal("expected Holder.drop function in IR")
+	}
+	// Should pal_free the Point field instance (B0192 needsFreeOnly path)
+	assertContains(t, holderDrop, "call void @pal_free(")
+}
+
 // T0091: Error types get synthesized drop (frees message string field + instance)
 func TestSynthDropIncludesErrorTypes(t *testing.T) {
 	ir := generateIR(t, `

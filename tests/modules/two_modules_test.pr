@@ -8,7 +8,7 @@ test_both_modules() `test {
   assert(p.y == 4, "p.y == square(2)");
 }
 
-test_module_type_in_other() `test(allow_leaks: true) {
+test_module_type_in_other() `test {
   v := mathlib.Vec2(x: 1, y: 2);
   c := shapes.Circle(center: shapes.Point(x: v.x, y: v.y), radius: v.sum());
   assert(c.radius == 3, "radius from vec2 sum");

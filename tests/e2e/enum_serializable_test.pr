@@ -83,7 +83,7 @@ decode_task_with_enum_test() `test {
 
 // ── Full Task round-trip ──
 
-round_trip_task_test() `test(allow_leaks: true) {
+round_trip_task_test() `test {
   Task t = Task(name: "Ship", priority: Priority.Medium);
   json.JsonEncoder enc = json.JsonEncoder();
   t.encode(enc)!;
@@ -169,7 +169,7 @@ enum_vector_field_decode_test() `test {
 
 // ── Optional enum field decode ──
 
-optional_enum_decode_present_test() `test(allow_leaks: true) {
+optional_enum_decode_present_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"name\":\"prod\",\"level\":\"High\"}");
   Config c = Config.decode(dec)!;
   assert(c.name == "prod", "opt enum decode: name");
@@ -246,7 +246,7 @@ multiple_enum_fields_decode_test() `test {
 
 // ── Decode with extra keys ──
 
-decode_extra_keys_test() `test(allow_leaks: true) {
+decode_extra_keys_test() `test {
   // Extra keys should be silently skipped
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"name\":\"x\",\"unknown\":true,\"priority\":\"Low\",\"extra\":[1,2]}");
   Task t = Task.decode(dec)!;
@@ -312,7 +312,7 @@ data_enum_encode_fieldless_test() `test {
 
 // ── Data enum decode ──
 
-data_enum_decode_circle_test() `test(allow_leaks: true) {
+data_enum_decode_circle_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"Circle\",\"radius\":2.5}");
   Shape s = Shape.decode(dec)!;
   json.JsonEncoder enc = json.JsonEncoder();
@@ -320,7 +320,7 @@ data_enum_decode_circle_test() `test(allow_leaks: true) {
   assert(enc.to_string() == "\{\"type\":\"Circle\",\"radius\":2.5}", "decode Circle rt");
 }
 
-data_enum_decode_rect_test() `test(allow_leaks: true) {
+data_enum_decode_rect_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"Rect\",\"w\":10,\"h\":20}");
   Shape s = Shape.decode(dec)!;
   json.JsonEncoder enc = json.JsonEncoder();
@@ -362,7 +362,7 @@ data_enum_decode_wrong_first_key_test() `test {
 
 // ── Data enum decode with extra keys ──
 
-data_enum_decode_extra_keys_test() `test(allow_leaks: true) {
+data_enum_decode_extra_keys_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"Circle\",\"radius\":1.0,\"extra\":true}");
   Shape s = Shape.decode(dec)!;
   json.JsonEncoder enc = json.JsonEncoder();
@@ -402,7 +402,7 @@ data_enum_decode_string_field_test() `test {
   assert(enc.to_string() == "\{\"type\":\"Text\",\"content\":\"world\"}", "Text decode rt");
 }
 
-data_enum_decode_multi_field_test() `test(allow_leaks: true) {
+data_enum_decode_multi_field_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"Image\",\"url\":\"x.jpg\",\"width\":100,\"height\":200}");
   Message m = Message.decode(dec)!;
   json.JsonEncoder enc = json.JsonEncoder();
@@ -458,7 +458,7 @@ data_enum_bool_field_test() `test {
   assert(enc.to_string() == "\{\"type\":\"On\",\"active\":true}", "bool field encode");
 }
 
-data_enum_bool_field_decode_test() `test(allow_leaks: true) {
+data_enum_bool_field_decode_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"On\",\"active\":false}");
   Toggle t = Toggle.decode(dec)!;
   json.JsonEncoder enc = json.JsonEncoder();
@@ -488,7 +488,7 @@ data_enum_mixed_field_types_test() `test {
   assert(s.contains("\"reason\":\"not found\""), "mixed: reason");
 }
 
-data_enum_mixed_decode_test() `test(allow_leaks: true) {
+data_enum_mixed_decode_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"Err\",\"code\":500,\"reason\":\"internal\"}");
   Result r = Result.decode(dec)!;
   json.JsonEncoder enc = json.JsonEncoder();
@@ -538,7 +538,7 @@ data_enum_vector_encode_test() `test {
   assert(s.contains("\{\"type\":\"Circle\""), "vector data enum: Circle");
 }
 
-data_enum_vector_decode_test() `test(allow_leaks: true) {
+data_enum_vector_decode_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"shapes\":[\{\"type\":\"Point\"},\{\"type\":\"Circle\",\"radius\":3}]}");
   Gallery g = Gallery.decode(dec)!;
   assert(g.shapes.len == 2, "vector data enum decode: len");

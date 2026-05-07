@@ -218,7 +218,7 @@ deep_nested_round_trip_test() `test(allow_leaks: true) {
   assert(p2.address.city == "B", "deep nested: city");
 }
 
-nested_with_key_test() `test(allow_leaks: true) {
+nested_with_key_test() `test {
   Located l1 = Located(name: "X", pos: Point(x: 3, y: 4));
   json.JsonEncoder enc = json.JsonEncoder();
   l1.encode(enc)!;
@@ -658,14 +658,14 @@ encode_string_point_test() `test(allow_leaks: true) {
   assert(s.contains("\"y\":2"), "encode_string point y");
 }
 
-decode_string_point_test() `test(allow_leaks: true) {
+decode_string_point_test() `test {
   string data = "\{\"x\":10,\"y\":20}";
   Point p = json.decode_string[Point](data)!;
   assert(p.x == 10, "decode_string point x");
   assert(p.y == 20, "decode_string point y");
 }
 
-encode_decode_round_trip_test() `test(allow_leaks: true) {
+encode_decode_round_trip_test() `test {
   MixedFields orig = MixedFields(label: "test", count: 42, score: 3.14, active: true);
   string s = json.encode_string[MixedFields](orig)!;
   MixedFields copy = json.decode_string[MixedFields](s)!;
@@ -682,7 +682,7 @@ encode_string_pretty_test() `test(allow_leaks: true) {
 }
 
 // Round-trip with optional fields
-encode_decode_optionals_test() `test(allow_leaks: true) {
+encode_decode_optionals_test() `test {
   // present optional
   WithOptionals w1 = WithOptionals(name: "Alice", bio: "hi", level: 5);
   string s1 = json.encode_string[WithOptionals](w1)!;
@@ -704,7 +704,7 @@ encode_decode_optionals_test() `test(allow_leaks: true) {
 }
 
 // Round-trip with nested serializable type
-encode_decode_nested_test() `test(allow_leaks: true) {
+encode_decode_nested_test() `test {
   Person p = Person(name: "Eve", age: 25, address: Address(street: "123 Main", city: "NYC"));
   string s = json.encode_string[Person](p)!;
   assert(s.contains("\"name\":\"Eve\""), "nested enc: name");
@@ -729,7 +729,7 @@ encode_decode_array_field_test() `test(allow_leaks: true) {
 }
 
 // Round-trip with key remapping
-encode_decode_key_remap_test() `test(allow_leaks: true) {
+encode_decode_key_remap_test() `test {
   User u = User(name: "Grace", age: 28, _internal: "x");
   string s = json.encode_string[User](u)!;
   assert(s.contains("\"user_name\":\"Grace\""), "key remap enc: user_name");
@@ -740,7 +740,7 @@ encode_decode_key_remap_test() `test(allow_leaks: true) {
 }
 
 // Pretty encode round-trip (pretty output is valid JSON)
-encode_string_pretty_round_trip_test() `test(allow_leaks: true) {
+encode_string_pretty_round_trip_test() `test {
   Person p = Person(name: "Zoe", age: 30, address: Address(street: "456 Oak", city: "LA"));
   string pretty = json.encode_string_pretty[Person](p)!;
   assert(pretty.contains("\n"), "pretty rt: has newlines");
@@ -807,7 +807,7 @@ flatten_encode_test() `test {
   assert(!s.contains("\"meta\""), "flatten enc: no wrapper key");
 }
 
-flatten_decode_test() `test(allow_leaks: true) {
+flatten_decode_test() `test {
   // Decode from flat JSON — keys are at the top level
   string data = "\{\"title\":\"Doc\",\"author\":\"Bob\",\"version\":3}";
   FlatDoc doc = json.decode_string[FlatDoc](data)!;
@@ -816,7 +816,7 @@ flatten_decode_test() `test(allow_leaks: true) {
   assert(doc.meta.version == 3, "flatten dec: version");
 }
 
-flatten_round_trip_test() `test(allow_leaks: true) {
+flatten_round_trip_test() `test {
   FlatDoc doc1 = FlatDoc(title: "RT", meta: Metadata(author: "Carol", version: 1));
   string s = json.encode_string[FlatDoc](doc1)!;
   FlatDoc doc2 = json.decode_string[FlatDoc](s)!;
@@ -825,7 +825,7 @@ flatten_round_trip_test() `test(allow_leaks: true) {
   assert(doc2.meta.version == 1, "flatten rt: version");
 }
 
-flatten_with_optional_sibling_test() `test(allow_leaks: true) {
+flatten_with_optional_sibling_test() `test {
   Location loc1 = Location(name: "Park", position: Coords(lat: 37.7749, lon: -122.4194), description: "Nice park");
   string s = json.encode_string[Location](loc1)!;
   assert(s.contains("\"name\":\"Park\""), "flatten opt: name");
@@ -840,7 +840,7 @@ flatten_with_optional_sibling_test() `test(allow_leaks: true) {
   assert(loc2.description is present, "flatten opt dec: description present");
 }
 
-flatten_with_optional_subfields_test() `test(allow_leaks: true) {
+flatten_with_optional_subfields_test() `test {
   // Inner type has optional fields
   WithOptionalFields w1 = WithOptionalFields(label: "test", inner: WithOptionals(name: "Alice", bio: "hi", level: 5));
   string s = json.encode_string[WithOptionalFields](w1)!;
@@ -869,7 +869,7 @@ flatten_with_absent_optional_subfields_test() `test {
   assert(w2.inner.level is absent, "flatten absent dec: level absent");
 }
 
-flatten_with_key_annotation_test() `test(allow_leaks: true) {
+flatten_with_key_annotation_test() `test {
   FlatKeyed fk1 = FlatKeyed(id: 42, details: KeyedInner(first_name: "John", last_name: "Doe"));
   string s = json.encode_string[FlatKeyed](fk1)!;
   assert(s.contains("\"id\":42"), "flatten key: id");
@@ -884,7 +884,7 @@ flatten_with_key_annotation_test() `test(allow_leaks: true) {
   assert(fk2.details.last_name == "Doe", "flatten key dec: last_name");
 }
 
-flatten_with_skip_subfield_test() `test(allow_leaks: true) {
+flatten_with_skip_subfield_test() `test {
   FlatWithSkip fw1 = FlatWithSkip(code: 200, info: SkipInner(visible: "ok", hidden: "secret"));
   string s = json.encode_string[FlatWithSkip](fw1)!;
   assert(s.contains("\"code\":200"), "flatten skip: code");
@@ -915,7 +915,7 @@ type MultiFlat `serializable {
   Style style `flatten;
 }
 
-flatten_multiple_test() `test(allow_leaks: true) {
+flatten_multiple_test() `test {
   MultiFlat mf1 = MultiFlat(name: "box",
   size: Dimensions(width: 100, height: 50),
   style: Style(color: "red", bold: true));

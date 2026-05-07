@@ -104,25 +104,25 @@ encode_nested_test() `test {
 
 // ── Decoder tests ───────────────────────────────────────────────────────────
 
-decode_int_test() `test(allow_leaks: true) {
+decode_int_test() `test {
   JsonDecoder dec = JsonDecoder(data: "42");
   int v = dec.decode_int()!;
   assert(v == 42, "decode int");
 }
 
-decode_negative_int_test() `test(allow_leaks: true) {
+decode_negative_int_test() `test {
   JsonDecoder dec = JsonDecoder(data: "-7");
   int v = dec.decode_int()!;
   assert(v == -7, "decode negative int");
 }
 
-decode_uint_test() `test(allow_leaks: true) {
+decode_uint_test() `test {
   JsonDecoder dec = JsonDecoder(data: "100");
   uint v = dec.decode_uint()!;
   assert(v == 100u, "decode uint");
 }
 
-decode_f64_test() `test(allow_leaks: true) {
+decode_f64_test() `test {
   JsonDecoder dec = JsonDecoder(data: "3.14");
   f64 v = dec.decode_f64()!;
   assert(v > 3.13 && v < 3.15, "decode f64");
@@ -134,7 +134,7 @@ decode_bool_true_test() `test {
   assert(v == true, "decode true");
 }
 
-decode_bool_false_test() `test(allow_leaks: true) {
+decode_bool_false_test() `test {
   JsonDecoder dec = JsonDecoder(data: "false");
   bool v = dec.decode_bool()!;
   assert(v == false, "decode false");
@@ -158,7 +158,7 @@ decode_none_test() `test {
   assert(is_null, "decode none");
 }
 
-decode_none_not_null_test() `test(allow_leaks: true) {
+decode_none_not_null_test() `test {
   JsonDecoder dec = JsonDecoder(data: "42");
   bool is_null = dec.decode_none()!;
   assert(!is_null, "decode none returns false for non-null");
@@ -166,7 +166,7 @@ decode_none_not_null_test() `test(allow_leaks: true) {
   assert(v == 42, "can still read value after decode_none returns false");
 }
 
-decode_object_test() `test(allow_leaks: true) {
+decode_object_test() `test {
   JsonDecoder dec = JsonDecoder(data: "\{\"name\":\"Alice\",\"age\":30}");
   dec.begin_object()!;
   string name = "";
@@ -198,7 +198,7 @@ decode_empty_object_test() `test {
   dec.end_object()!;
 }
 
-decode_array_test() `test(allow_leaks: true) {
+decode_array_test() `test {
   // Test array via a wrapping object
   JsonDecoder dec = JsonDecoder(data: "[10,20,30]");
   dec.begin_array()!;
@@ -227,7 +227,7 @@ decode_empty_array_test() `test {
   dec.end_array()!;
 }
 
-decode_whitespace_test() `test(allow_leaks: true) {
+decode_whitespace_test() `test {
   // Test that decoder handles whitespace around scalar values
   JsonDecoder dec = JsonDecoder(data: "  42  ");
   int v = dec.decode_int()!;
@@ -256,7 +256,7 @@ skip_value_test() `test(allow_leaks: true) {
 
 // ── Round-trip via Encodable/Decodable on primitives ────────────────────────
 
-round_trip_int_test() `test(allow_leaks: true) {
+round_trip_int_test() `test {
   string s = encode_string[int](42)!;
   assert(s == "42", "round trip int encode");
   int v = decode_string[int](s)!;
@@ -277,7 +277,7 @@ round_trip_string_test() `test {
   assert(v == "hello world", "round trip string decode");
 }
 
-round_trip_f64_test() `test(allow_leaks: true) {
+round_trip_f64_test() `test {
   string s = encode_string[f64](2.5)!;
   f64 v = decode_string[f64](s)!;
   assert(v == 2.5, "round trip f64");
@@ -285,14 +285,14 @@ round_trip_f64_test() `test(allow_leaks: true) {
 
 // ── Round-trip: sized integer types ──────────────────────────────────────────
 
-round_trip_uint_test() `test(allow_leaks: true) {
+round_trip_uint_test() `test {
   string s = encode_string[uint](999u)!;
   assert(s == "999", "round trip uint encode");
   uint v = decode_string[uint](s)!;
   assert(v == 999u, "round trip uint decode");
 }
 
-round_trip_i8_test() `test(allow_leaks: true) {
+round_trip_i8_test() `test {
   JsonEncoder enc = JsonEncoder();
   i8 val = 42i8;
   val.encode(enc)!;
@@ -303,7 +303,7 @@ round_trip_i8_test() `test(allow_leaks: true) {
   assert(v == 42i8, "i8 decode");
 }
 
-round_trip_i32_test() `test(allow_leaks: true) {
+round_trip_i32_test() `test {
   JsonEncoder enc = JsonEncoder();
   i32 val = -1000i32;
   val.encode(enc)!;
@@ -314,7 +314,7 @@ round_trip_i32_test() `test(allow_leaks: true) {
   assert(v == -1000i32, "i32 decode");
 }
 
-round_trip_u8_test() `test(allow_leaks: true) {
+round_trip_u8_test() `test {
   JsonEncoder enc = JsonEncoder();
   u8 val = 200u8;
   val.encode(enc)!;
@@ -325,7 +325,7 @@ round_trip_u8_test() `test(allow_leaks: true) {
   assert(v == 200u8, "u8 decode");
 }
 
-round_trip_f32_test() `test(allow_leaks: true) {
+round_trip_f32_test() `test {
   JsonEncoder enc = JsonEncoder();
   f32 val = 1.5f32;
   val.encode(enc)!;
@@ -349,25 +349,25 @@ round_trip_char_test() `test {
 
 // ── Sized type range checking ───────────────────────────────────────────────
 
-decode_i8_overflow_test() `test(allow_leaks: true) {
+decode_i8_overflow_test() `test {
   JsonDecoder dec = JsonDecoder(data: "200");
   (v, err) := i8.decode(dec);
   assert(err is present, "i8 decode 200 should overflow");
 }
 
-decode_i8_underflow_test() `test(allow_leaks: true) {
+decode_i8_underflow_test() `test {
   JsonDecoder dec = JsonDecoder(data: "-200");
   (v, err) := i8.decode(dec);
   assert(err is present, "i8 decode -200 should underflow");
 }
 
-decode_u8_overflow_test() `test(allow_leaks: true) {
+decode_u8_overflow_test() `test {
   JsonDecoder dec = JsonDecoder(data: "300");
   (v, err) := u8.decode(dec);
   assert(err is present, "u8 decode 300 should overflow");
 }
 
-decode_u16_overflow_test() `test(allow_leaks: true) {
+decode_u16_overflow_test() `test {
   JsonDecoder dec = JsonDecoder(data: "70000");
   (v, err) := u16.decode(dec);
   assert(err is present, "u16 decode 70000 should overflow");
@@ -422,25 +422,25 @@ decode_empty_string_test() `test {
   assert(v == "", "decode empty string");
 }
 
-decode_negative_f64_test() `test(allow_leaks: true) {
+decode_negative_f64_test() `test {
   JsonDecoder dec = JsonDecoder(data: "-2.5");
   f64 v = dec.decode_f64()!;
   assert(v == -2.5, "decode negative f64");
 }
 
-decode_scientific_notation_test() `test(allow_leaks: true) {
+decode_scientific_notation_test() `test {
   JsonDecoder dec = JsonDecoder(data: "1.5e2");
   f64 v = dec.decode_f64()!;
   assert(v == 150.0, "decode 1.5e2");
 }
 
-decode_zero_test() `test(allow_leaks: true) {
+decode_zero_test() `test {
   JsonDecoder dec = JsonDecoder(data: "0");
   int v = dec.decode_int()!;
   assert(v == 0, "decode zero");
 }
 
-decode_object_with_null_value_test() `test(allow_leaks: true) {
+decode_object_with_null_value_test() `test {
   JsonDecoder dec = JsonDecoder(data: "\{\"x\":null,\"y\":1}");
   dec.begin_object()!;
   bool x_is_null = false;
@@ -464,7 +464,7 @@ decode_object_with_null_value_test() `test(allow_leaks: true) {
   assert(y_val == 1, "value after null");
 }
 
-skip_value_array_test() `test(allow_leaks: true) {
+skip_value_array_test() `test {
   JsonDecoder dec = JsonDecoder(data: "\{\"a\":[1,2,3],\"b\":99}");
   dec.begin_object()!;
   int b_val = 0;
@@ -520,7 +520,7 @@ encode_pretty_object_test() `test {
 
 // ── Decode error tests ──────────────────────────────────────────────────────
 
-decode_error_invalid_bool_test() `test(allow_leaks: true) {
+decode_error_invalid_bool_test() `test {
   (v, err) := decode_string[int]("abc");
   assert(err is present, "invalid input should error");
 }
@@ -530,7 +530,7 @@ decode_error_unterminated_string_test() `test {
   assert(err is present, "unterminated string should error");
 }
 
-decode_error_negative_uint_test() `test(allow_leaks: true) {
+decode_error_negative_uint_test() `test {
   JsonDecoder dec = JsonDecoder(data: "-5");
   (v, err) := dec.decode_uint();
   assert(err is present, "negative uint should error");
@@ -561,7 +561,7 @@ parse_value_bool_test() `test {
   }
 }
 
-parse_value_number_test() `test(allow_leaks: true) {
+parse_value_number_test() `test {
   JsonValue v = parse_value("42")!;
   match v {
     JsonValue.Number(n) => assert(n == 42.0, "number"),
@@ -577,7 +577,7 @@ parse_value_string_test() `test {
   }
 }
 
-parse_value_array_test() `test(allow_leaks: true) {
+parse_value_array_test() `test {
   JsonValue v = parse_value("[1,2,3]")!;
   match v {
     JsonValue.Array(items) => assert(items.len == 3, "array len"),
@@ -654,7 +654,7 @@ parse_value_false_test() `test {
   }
 }
 
-parse_value_negative_number_test() `test(allow_leaks: true) {
+parse_value_negative_number_test() `test {
   JsonValue v = parse_value("-7")!;
   match v {
     JsonValue.Number(n) => assert(n == -7.0, "negative"),
@@ -662,7 +662,7 @@ parse_value_negative_number_test() `test(allow_leaks: true) {
   }
 }
 
-parse_value_float_test() `test(allow_leaks: true) {
+parse_value_float_test() `test {
   JsonValue v = parse_value("3.14")!;
   match v {
     JsonValue.Number(n) => assert(n > 3.13 && n < 3.15, "float"),
@@ -678,7 +678,7 @@ parse_value_string_escapes_test() `test {
   }
 }
 
-parse_value_whitespace_test() `test(allow_leaks: true) {
+parse_value_whitespace_test() `test {
   JsonValue v = parse_value("  42  ")!;
   match v {
     JsonValue.Number(n) => assert(n == 42.0, "whitespace"),
@@ -1062,7 +1062,7 @@ round_trip_complex_test() `test(allow_leaks: true) {
 
 // ── Decoder has_next_element array pattern ───────────────────────────────────
 
-decode_array_has_next_element_test() `test(allow_leaks: true) {
+decode_array_has_next_element_test() `test {
   JsonDecoder dec = JsonDecoder(data: "[10,20,30]");
   dec.begin_array()!;
   int[] vals = int[]();
@@ -1096,12 +1096,12 @@ parse_value_error_empty_test() `test {
   assert(err is present, "empty input should error");
 }
 
-parse_value_error_invalid_test() `test(allow_leaks: true) {
+parse_value_error_invalid_test() `test {
   (v, err) := parse_value("xyz");
   assert(err is present, "invalid token should error");
 }
 
-parse_value_error_unterminated_array_test() `test(allow_leaks: true) {
+parse_value_error_unterminated_array_test() `test {
   (v, err) := parse_value("[1,2");
   assert(err is present, "unterminated array should error");
 }
@@ -1128,7 +1128,7 @@ parse_value_whitespace_object_test() `test(allow_leaks: true) {
   }
 }
 
-parse_value_whitespace_array_test() `test(allow_leaks: true) {
+parse_value_whitespace_array_test() `test {
   JsonValue v = parse_value("  [  1  ,  2  ,  3  ]  ")!;
   match v {
     JsonValue.Array(items) => assert(items.len == 3, "whitespace array: 3 items"),
@@ -1138,7 +1138,7 @@ parse_value_whitespace_array_test() `test(allow_leaks: true) {
 
 // ── Number edge cases ───────────────────────────────────────────────────────
 
-parse_value_zero_test() `test(allow_leaks: true) {
+parse_value_zero_test() `test {
   JsonValue v = parse_value("0")!;
   match v {
     JsonValue.Number(n) => assert(n == 0.0, "zero"),
@@ -1146,7 +1146,7 @@ parse_value_zero_test() `test(allow_leaks: true) {
   }
 }
 
-parse_value_exponent_test() `test(allow_leaks: true) {
+parse_value_exponent_test() `test {
   JsonValue v = parse_value("1e3")!;
   match v {
     JsonValue.Number(n) => assert(n == 1000.0, "1e3"),
@@ -1154,7 +1154,7 @@ parse_value_exponent_test() `test(allow_leaks: true) {
   }
 }
 
-parse_value_negative_exponent_test() `test(allow_leaks: true) {
+parse_value_negative_exponent_test() `test {
   JsonValue v = parse_value("1e-2")!;
   match v {
     JsonValue.Number(n) => assert(n > 0.009 && n < 0.011, "1e-2"),

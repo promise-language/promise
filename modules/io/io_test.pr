@@ -186,7 +186,7 @@ dir_exists_on_file() `test(exclude: "wasm32") {
 
 // ── Dir.make_all ─────────────────────────────────────────────────────────────
 
-dir_make_all_nested() `test(allow_leaks: true, exclude: "wasm32") {
+dir_make_all_nested() `test(exclude: "wasm32") {
   // Clean up first
   if Dir.exists("/tmp/pr_iot_mkall/a/b") {
     Dir.remove("/tmp/pr_iot_mkall/a/b")!;
@@ -516,7 +516,7 @@ dir_remove_file() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_drf")!;
 }
 
-dir_remove_nonempty() `test(allow_leaks: true, exclude: "wasm32") {
+dir_remove_nonempty() `test(exclude: "wasm32") {
   // Dir.remove on a non-empty directory should fail
   Dir.make_all("/tmp/pr_iot_drne/sub")!;
   bool caught = false;
@@ -545,7 +545,7 @@ dir_make_duplicate() `test(exclude: "wasm32") {
 
 // ── Edge cases: Dir.make_all ─────────────────────────────────────────────────
 
-dir_make_all_single_component() `test(allow_leaks: true, exclude: "wasm32") {
+dir_make_all_single_component() `test(exclude: "wasm32") {
   if Dir.exists("/tmp/pr_iot_mksc") {
     Dir.remove("/tmp/pr_iot_mksc")!;
   }
@@ -554,7 +554,7 @@ dir_make_all_single_component() `test(allow_leaks: true, exclude: "wasm32") {
   Dir.remove("/tmp/pr_iot_mksc")!;
 }
 
-dir_make_all_trailing_slash() `test(allow_leaks: true, exclude: "wasm32") {
+dir_make_all_trailing_slash() `test(exclude: "wasm32") {
   if Dir.exists("/tmp/pr_iot_mkts/sub") {
     Dir.remove("/tmp/pr_iot_mkts/sub")!;
   }

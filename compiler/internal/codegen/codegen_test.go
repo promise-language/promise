@@ -12800,6 +12800,39 @@ func TestVariadicMultipleArgsArrayLit(t *testing.T) {
 	assertContains(t, ir, "call i64 @sum(i8*")
 }
 
+func TestVariadicParamDropAtScopeExit(t *testing.T) {
+	// B0191: Variadic parameter vectors must be freed at scope exit.
+	ir := generateIR(t, `
+		sum(...int nums) int {
+			int total = 0;
+			for n in nums { total += n; }
+			return total;
+		}
+		main() {
+			sum(1, 2, 3);
+		}
+	`)
+	assertContains(t, ir, "call void @Vector.drop(i8*")
+}
+
+func TestVariadicMethodParamDropAtScopeExit(t *testing.T) {
+	// B0191: Variadic method parameter vectors must be freed at scope exit.
+	ir := generateIR(t, `
+		type Adder {
+			int base;
+
+			addAll(&this, ...int values) int {
+				return this.base;
+			}
+		}
+		main() {
+			a := Adder(base: 10);
+			a.addAll(1, 2, 3);
+		}
+	`)
+	assertContains(t, ir, "call void @Vector.drop(i8*")
+}
+
 // --- Numeric Suffix Tests ---
 
 func TestNumericSuffixU8IR(t *testing.T) {

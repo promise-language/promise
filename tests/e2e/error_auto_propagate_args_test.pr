@@ -265,7 +265,7 @@ auto_prop_variadic() int! {
   return sum(parse_int("42"), parse_int("7"));
 }
 
-test_variadic_args_success() `test(allow_leaks: true) {
+test_variadic_args_success() `test {
   int r = auto_prop_variadic()!;
   assert(r == 49, "failable variadic args: 42 + 7");
 }
@@ -289,7 +289,7 @@ auto_prop_variadic_mixed() int! {
   return sum(10, parse_int("42"), 100);
 }
 
-test_variadic_mixed() `test(allow_leaks: true) {
+test_variadic_mixed() `test {
   int r = auto_prop_variadic_mixed()!;
   assert(r == 152, "mixed variadic: 10 + 42 + 100");
 }
@@ -520,7 +520,7 @@ auto_prop_single_variadic() int! {
   return sum(parse_int("42"));
 }
 
-test_single_variadic_success() `test(allow_leaks: true) {
+test_single_variadic_success() `test {
   int r = auto_prop_single_variadic()!;
   assert(r == 42, "single failable variadic arg");
 }

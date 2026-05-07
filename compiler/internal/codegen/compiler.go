@@ -3719,6 +3719,16 @@ func (c *Compiler) defineFunc(fd *ast.FuncDecl, fn *ir.Func) {
 				}
 				c.maybeRegisterDrop(p.Name(), alloca, paramType)
 			}
+
+			// B0191: Register drop binding for variadic parameters.
+			// Variadic params receive an owned Vector[T] that must be freed at scope exit.
+			if p.IsVariadic() {
+				paramType := p.Type()
+				if c.typeSubst != nil {
+					paramType = types.Substitute(paramType, c.typeSubst)
+				}
+				c.maybeRegisterDrop(p.Name(), alloca, paramType)
+			}
 		}
 	}
 
@@ -4822,6 +4832,16 @@ func (c *Compiler) defineMethodFunc(md *ast.MethodDecl, m *types.Method, fn *ir.
 
 			// T0087: Register drop binding for ~ (move) parameters.
 			if p.Ref() == types.RefMut {
+				paramType := p.Type()
+				if c.typeSubst != nil {
+					paramType = types.Substitute(paramType, c.typeSubst)
+				}
+				c.maybeRegisterDrop(p.Name(), alloca, paramType)
+			}
+
+			// B0191: Register drop binding for variadic parameters.
+			// Variadic params receive an owned Vector[T] that must be freed at scope exit.
+			if p.IsVariadic() {
 				paramType := p.Type()
 				if c.typeSubst != nil {
 					paramType = types.Substitute(paramType, c.typeSubst)

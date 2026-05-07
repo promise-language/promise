@@ -159,12 +159,13 @@ type Compiler struct {
 	// T0073: Statement-level temporary tracking for heap-allocated strings.
 	// Tracks string temporaries from subexpressions (e.g., `42.to_string()` in
 	// `assert(42.to_string() == "42")`) and drops them at statement end.
-	stmtTemps            []stmtTemp
-	stmtTempMap          map[value.Value]int // SSA value → index in stmtTemps (-1 = claimed)
-	tempTrackingEnabled  bool                // T0084: true in free functions + user method bodies
-	dupStringFieldAccess bool                // T0095: when true, genFieldAccess dups string fields from droppable types
-	optionalStringDup    value.Value         // B0190: pending dup from B0181 optional path; consumed by genOptionalForceUnwrap
-	optionalFieldString  bool                // B0190: set by genFieldAccess when loading a string? field from a droppable type
+	stmtTemps               []stmtTemp
+	stmtTempMap             map[value.Value]int // SSA value → index in stmtTemps (-1 = claimed)
+	tempTrackingEnabled     bool                // T0084: true in free functions + user method bodies
+	dupStringFieldAccess    bool                // T0095: when true, genFieldAccess dups string fields from droppable types
+	dupContainerFieldAccess bool                // B0219: when true, genFieldAccess dups vector/channel fields from droppable types
+	optionalStringDup       value.Value         // B0190: pending dup from B0181 optional path; consumed by genOptionalForceUnwrap
+	optionalFieldString     bool                // B0190: set by genFieldAccess when loading a string? field from a droppable type
 
 	// T0088: Statement-level tracking for heap-allocated droppable instances.
 	// Tracks constructor results (e.g., _FnIter[T]) in iterator chains and drops
@@ -376,12 +377,13 @@ type scopeBinding struct {
 	generatorSlot   *ir.InstAlloca // yield slot alloca (for free)
 }
 
-// stmtTemp tracks a heap-allocated string temporary from a subexpression (T0073).
+// stmtTemp tracks a heap-allocated string/vector/channel temporary from a subexpression (T0073).
 // Entry-block allocas are initialized to null/false so branch-produced temps
 // have defined values on all paths.
 type stmtTemp struct {
 	alloca   *ir.InstAlloca // entry-block i8* alloca, initialized to null
 	dropFlag *ir.InstAlloca // entry-block i1, initialized to false
+	dropFunc *ir.Func       // B0219: drop function to call (promise_string_drop, Vector.drop, Channel.drop)
 }
 
 // heapTemp tracks a heap-allocated droppable instance from a constructor call (T0088).
@@ -1633,6 +1635,98 @@ func (c *Compiler) dupString(ptr value.Value) value.Value {
 	return c.block.NewPhi(
 		ir.NewIncoming(constant.NewNull(irtypes.I8Ptr), entryBlock),
 		ir.NewIncoming(newPtr, dupBlock),
+	)
+}
+
+// dupVector duplicates a vector instance (i8* → i8*) by allocating a fresh heap copy.
+// Handles null (returns null) and static vectors (clears bit 63 in copy).
+// B0219: Used to prevent use-after-free when a vector field is read from a type with
+// drop and later the field is reassigned (dropping the old value).
+func (c *Compiler) dupVector(ptr value.Value, elemSize int64) value.Value {
+	entryBlock := c.block
+	nullCheck := c.block.NewICmp(enum.IPredEQ, ptr, constant.NewNull(irtypes.I8Ptr))
+	dupBlock := c.newBlock("vecdup.copy")
+	mergeBlock := c.newBlock("vecdup.merge")
+	entryBlock.NewCondBr(nullCheck, mergeBlock, dupBlock)
+
+	c.block = dupBlock
+	headerType := vectorHeaderType()
+	headerSizeConst := constant.NewInt(irtypes.I64, int64(vectorHeaderSize))
+	elemSizeConst := constant.NewInt(irtypes.I64, elemSize)
+
+	hdrPtr := c.block.NewBitCast(ptr, irtypes.NewPointer(headerType))
+	rawLen := loadVectorLenRaw(c.block, hdrPtr)
+	realLen := c.block.NewAnd(rawLen, vectorLenMask)
+
+	// Load capacity
+	capPtr := c.block.NewGetElementPtr(headerType, hdrPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	cap := c.block.NewLoad(irtypes.I64, capPtr)
+
+	// Allocate: header + cap * elem_size
+	dataSize := c.block.NewMul(cap, elemSizeConst)
+	allocSize := c.block.NewAdd(headerSizeConst, dataSize)
+	newPtr := c.block.NewCall(c.palAlloc, allocSize)
+
+	// OOM check
+	isOOM := c.block.NewICmp(enum.IPredEQ, newPtr, constant.NewNull(irtypes.I8Ptr))
+	oomBlock := c.newBlock("vecdup.oom")
+	initBlock := c.newBlock("vecdup.init")
+	c.block.NewCondBr(isOOM, oomBlock, initBlock)
+
+	c.block = oomBlock
+	panicGlobal := c.getCStrGlobal("out of memory")
+	msgPtr := c.block.NewGetElementPtr(panicGlobal.ContentType, panicGlobal,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	c.block.NewCall(c.funcs["promise_panic"], msgPtr)
+	c.block.NewUnreachable()
+
+	// Init: store len (without static flag), cap, memcpy data
+	c.block = initBlock
+	newHdrPtr := c.block.NewBitCast(newPtr, irtypes.NewPointer(headerType))
+	newLenPtr := c.block.NewGetElementPtr(headerType, newHdrPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	c.block.NewStore(realLen, newLenPtr)
+	newCapPtr := c.block.NewGetElementPtr(headerType, newHdrPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	c.block.NewStore(cap, newCapPtr)
+
+	// memcpy element data (only len elements, not full cap)
+	copySize := c.block.NewMul(realLen, elemSizeConst)
+	srcData := c.block.NewGetElementPtr(irtypes.I8, ptr, headerSizeConst)
+	dstData := c.block.NewGetElementPtr(irtypes.I8, newPtr, headerSizeConst)
+	c.block.NewCall(c.funcs["llvm.memcpy"], dstData, srcData, copySize, constant.False)
+	initBlock.NewBr(mergeBlock)
+
+	c.block = mergeBlock
+	return c.block.NewPhi(
+		ir.NewIncoming(constant.NewNull(irtypes.I8Ptr), entryBlock),
+		ir.NewIncoming(newPtr, initBlock),
+	)
+}
+
+// dupChannel duplicates a channel reference (i8* → i8*) by atomically incrementing
+// the reference count. B0219: Used to prevent use-after-free when a channel field
+// is read from a type with drop and later the field is reassigned.
+func (c *Compiler) dupChannel(ptr value.Value) value.Value {
+	entryBlock := c.block
+	nullCheck := c.block.NewICmp(enum.IPredEQ, ptr, constant.NewNull(irtypes.I8Ptr))
+	incBlock := c.newBlock("chdup.inc")
+	mergeBlock := c.newBlock("chdup.merge")
+	entryBlock.NewCondBr(nullCheck, mergeBlock, incBlock)
+
+	c.block = incBlock
+	chanType := channelStructType()
+	chPtr := c.block.NewBitCast(ptr, irtypes.NewPointer(chanType))
+	rcField := c.block.NewGetElementPtr(chanType, chPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(chanFieldRefcount)))
+	c.emitAtomicAdd(c.block, rcField, constant.NewInt(irtypes.I64, 1), irtypes.I64)
+	incBlock.NewBr(mergeBlock)
+
+	c.block = mergeBlock
+	return c.block.NewPhi(
+		ir.NewIncoming(constant.NewNull(irtypes.I8Ptr), entryBlock),
+		ir.NewIncoming(ptr, incBlock),
 	)
 }
 

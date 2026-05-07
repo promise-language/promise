@@ -91,13 +91,15 @@ func (c *Compiler) isOwnedOptionalExpr(expr ast.Expr) bool {
 }
 
 // isStringFieldDup returns true if the expression is a MemberExpr accessing a
-// string field from a type with HasDrop(). In that case, genFieldAccess dups the
-// string (T0095), so the result is an owned copy, not a borrow.
+// string/vector/channel field from a type with HasDrop(). In that case,
+// genFieldAccess dups the value (T0095/B0219), so the result is an owned copy.
 func (c *Compiler) isStringFieldDup(expr ast.Expr, dropType types.Type) bool {
-	if extractNamed(dropType) != types.TypString {
+	isString := extractNamed(dropType) == types.TypString
+	isVecOrChan := types.IsVector(dropType) || types.IsChannel(dropType)
+	if !isString && !isVecOrChan {
 		return false
 	}
-	// MemberExpr: field access on droppable type → string is dup'd by dupStringFieldAccess.
+	// MemberExpr: field access on droppable type → dup'd by dupStringFieldAccess/dupContainerFieldAccess.
 	if member, ok := expr.(*ast.MemberExpr); ok {
 		targetType := c.info.Types[member.Target]
 		if c.typeSubst != nil {
@@ -107,17 +109,19 @@ func (c *Compiler) isStringFieldDup(expr ast.Expr, dropType types.Type) bool {
 		return ownerNamed != nil && ownerNamed.HasDrop()
 	}
 	// B0204: IndexExpr on Vector[string] → string is dup'd by dup-on-read in genVectorIndex.
-	if idx, ok := expr.(*ast.IndexExpr); ok {
-		targetType := c.info.Types[idx.Target]
-		if c.typeSubst != nil {
-			targetType = types.Substitute(targetType, c.typeSubst)
-		}
-		if elem, isVec := types.AsVector(targetType); isVec {
-			resolvedElem := elem
+	if isString {
+		if idx, ok := expr.(*ast.IndexExpr); ok {
+			targetType := c.info.Types[idx.Target]
 			if c.typeSubst != nil {
-				resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
+				targetType = types.Substitute(targetType, c.typeSubst)
 			}
-			return extractNamed(resolvedElem) == types.TypString
+			if elem, isVec := types.AsVector(targetType); isVec {
+				resolvedElem := elem
+				if c.typeSubst != nil {
+					resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
+				}
+				return extractNamed(resolvedElem) == types.TypString
+			}
 		}
 	}
 	return false
@@ -174,8 +178,13 @@ func (c *Compiler) genBlockValue(block *ast.Block) value.Value {
 					if extractNamed(exprType) == types.TypString && !isRefType(exprType) {
 						c.dupStringFieldAccess = true
 					}
+					// B0219: Signal genFieldAccess to dup vector/channel fields for block results.
+					if (types.IsVector(exprType) || types.IsChannel(exprType)) && !isRefType(exprType) {
+						c.dupContainerFieldAccess = true
+					}
 					result = c.genExpr(es.Expr)
 					c.dupStringFieldAccess = false
+					c.dupContainerFieldAccess = false
 					// Clear drop flag for ident block result — the value is being
 					// moved out of the block scope. Without this, scope cleanup would
 					// free the string while the outer scope still holds the pointer.
@@ -415,8 +424,13 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	if extractNamed(resolvedExprType) == types.TypString && !isRefType(resolvedExprType) {
 		c.dupStringFieldAccess = true
 	}
+	// B0219: Signal genFieldAccess to dup vector/channel fields from droppable types.
+	if (types.IsVector(resolvedExprType) || types.IsChannel(resolvedExprType)) && !isRefType(resolvedExprType) {
+		c.dupContainerFieldAccess = true
+	}
 	val := c.genExpr(s.Value)
 	c.dupStringFieldAccess = false
+	c.dupContainerFieldAccess = false
 	c.targetType = nil
 
 	// Auto-propagate failable call in assignment: check tag, propagate error, extract ok value.
@@ -487,6 +501,10 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	// T0073: Claim string temp — ownership transferred to this variable.
 	// B0204: Use resolvedExprType (substituted) so that generic T=string is handled.
 	if resolvedExprType != nil && extractNamed(resolvedExprType) == types.TypString {
+		c.claimStringTemp(val)
+	}
+	// B0219: Claim vector/channel temp — ownership transferred to this variable.
+	if resolvedExprType != nil && (types.IsVector(resolvedExprType) || types.IsChannel(resolvedExprType)) {
 		c.claimStringTemp(val)
 	}
 	// T0088: Claim heap temp — ownership transferred to this variable.
@@ -576,8 +594,13 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	if extractNamed(typ) == types.TypString && !isRefType(typ) {
 		c.dupStringFieldAccess = true
 	}
+	// B0219: Signal genFieldAccess to dup vector/channel fields from droppable types.
+	if (types.IsVector(typ) || types.IsChannel(typ)) && !isRefType(typ) {
+		c.dupContainerFieldAccess = true
+	}
 	val := c.genExpr(s.Value)
 	c.dupStringFieldAccess = false
+	c.dupContainerFieldAccess = false
 
 	// Auto-propagate failable call in assignment: check tag, propagate error, extract ok value.
 	if c.info.AutoPropagateExprs[s.Value] {
@@ -600,6 +623,10 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	}
 	// T0073: Claim string temp — ownership transferred to this variable.
 	if extractNamed(typ) == types.TypString {
+		c.claimStringTemp(val)
+	}
+	// B0219: Claim vector/channel temp — ownership transferred to this variable.
+	if types.IsVector(typ) || types.IsChannel(typ) {
 		c.claimStringTemp(val)
 	}
 	// B0175: Claim heap temp — ownership transferred to this variable.
@@ -2150,14 +2177,32 @@ func (c *Compiler) emitEnvDropOrFree(envPtr value.Value) {
 // statement end (T0073). Entry-block allocas are initialized to null/false so
 // temps created inside branches have defined values on all paths.
 func (c *Compiler) trackStringTemp(val value.Value) {
+	c.trackTempWithDrop(val, c.funcs["promise_string_drop"])
+}
+
+// trackVectorTemp registers a vector temporary for cleanup at statement end.
+// B0219: Used for vector field-read dups from droppable types.
+func (c *Compiler) trackVectorTemp(val value.Value) {
+	c.trackTempWithDrop(val, c.funcs["Vector.drop"])
+}
+
+// trackChannelTemp registers a channel temporary for cleanup at statement end.
+// B0219: Used for channel field-read dups from droppable types.
+func (c *Compiler) trackChannelTemp(val value.Value) {
+	c.trackTempWithDrop(val, c.funcs["Channel.drop"])
+}
+
+// trackTempWithDrop registers a heap-allocated temporary (string/vector/channel)
+// for cleanup at statement end using the specified drop function.
+func (c *Compiler) trackTempWithDrop(val value.Value, dropFn *ir.Func) {
 	if val == nil || c.block == nil || c.block.Term != nil {
 		return
 	}
 	if c.entryBlock == nil {
 		return
 	}
-	// Only track values that are actually i8* (string pointers).
-	// Failable calls return structs like {i1, i8*} — those are NOT string temps.
+	// Only track values that are actually i8* (string/vector/channel pointers).
+	// Failable calls return structs like {i1, i8*} — those are NOT temps.
 	if val.Type() != irtypes.I8Ptr {
 		return
 	}
@@ -2188,7 +2233,7 @@ func (c *Compiler) trackStringTemp(val value.Value) {
 	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
 
 	idx := len(c.stmtTemps)
-	c.stmtTemps = append(c.stmtTemps, stmtTemp{alloca: alloca, dropFlag: dropFlag})
+	c.stmtTemps = append(c.stmtTemps, stmtTemp{alloca: alloca, dropFlag: dropFlag, dropFunc: dropFn})
 	c.stmtTempMap[val] = idx
 }
 
@@ -2208,8 +2253,8 @@ func (c *Compiler) claimStringTemp(val value.Value) {
 	c.stmtTempMap[val] = -1
 }
 
-// cleanupStmtTemps drops all unclaimed string temps at statement end (T0073).
-// For each temp: check flag → null-check ptr → call promise_string_drop.
+// cleanupStmtTemps drops all unclaimed string/vector/channel temps at statement end (T0073).
+// For each temp: check flag → null-check ptr → call temp-specific drop function.
 func (c *Compiler) cleanupStmtTemps() {
 	// B0190: Clear per-statement flags that must not leak across statements.
 	// Done before early returns so flags are always reset.
@@ -2224,14 +2269,11 @@ func (c *Compiler) cleanupStmtTemps() {
 		return
 	}
 
-	dropFunc := c.funcs["promise_string_drop"]
-	if dropFunc == nil {
-		c.stmtTemps = c.stmtTemps[:0]
-		c.stmtTempMap = make(map[value.Value]int)
-		return
-	}
-
 	for _, temp := range c.stmtTemps {
+		// B0219: Each temp has its own drop function (string/vector/channel).
+		if temp.dropFunc == nil {
+			continue
+		}
 		flag := c.block.NewLoad(irtypes.I1, temp.dropFlag)
 		dropBlock := c.newBlock("tmp.drop")
 		skipBlock := c.newBlock("tmp.skip")
@@ -2245,7 +2287,7 @@ func (c *Compiler) cleanupStmtTemps() {
 		c.block.NewCondBr(isNull, doneBlock, execBlock)
 
 		c.block = execBlock
-		c.block.NewCall(dropFunc, ptr)
+		c.block.NewCall(temp.dropFunc, ptr)
 		c.block.NewBr(doneBlock)
 
 		c.block = doneBlock
@@ -2262,7 +2304,7 @@ func (c *Compiler) cleanupStmtTemps() {
 	c.stmtTempMap = make(map[value.Value]int)
 }
 
-// emitStmtTempCleanupForErrorPath emits cleanup IR for statement-level string
+// emitStmtTempCleanupForErrorPath emits cleanup IR for statement-level
 // temps without resetting the tracking state (T0103). Used on error propagation
 // paths where the error branch terminates (ret/unreachable) but the ok branch
 // continues and still needs cleanup at statement end. The drop flags are stored
@@ -2275,12 +2317,11 @@ func (c *Compiler) emitStmtTempCleanupForErrorPath() {
 		return
 	}
 
-	dropFunc := c.funcs["promise_string_drop"]
-	if dropFunc == nil {
-		return
-	}
-
 	for _, temp := range c.stmtTemps {
+		// B0219: Each temp has its own drop function (string/vector/channel).
+		if temp.dropFunc == nil {
+			continue
+		}
 		flag := c.block.NewLoad(irtypes.I1, temp.dropFlag)
 		dropBlock := c.newBlock("err.tmp.drop")
 		skipBlock := c.newBlock("err.tmp.skip")
@@ -2294,7 +2335,7 @@ func (c *Compiler) emitStmtTempCleanupForErrorPath() {
 		c.block.NewCondBr(isNull, doneBlock, execBlock)
 
 		c.block = execBlock
-		c.block.NewCall(dropFunc, ptr)
+		c.block.NewCall(temp.dropFunc, ptr)
 		c.block.NewBr(doneBlock)
 
 		c.block = doneBlock
@@ -3009,14 +3050,9 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 	fieldPtr := c.genFieldPtr(target)
 
 	if op == ast.OpAssign {
-		// B0216: Drop old string field value before reassignment.
-		// Without this, overwriting a heap-allocated string field leaks the old value.
-		// promise_string_drop handles null and literal checks internally.
-		// NOTE: Only safe for strings because string field reads that save to locals
-		// create dups (T0095 for HasDrop types) or are consumed by operators (concat).
-		// Vector/channel fields are NOT dropped here because code patterns like
-		// `old = this._buckets; this._buckets = new_vec` save the old pointer to
-		// a local before reassigning — dropping would cause use-after-free.
+		// B0216/B0219: Drop old field value before reassignment for types that own heap memory.
+		// Without this, overwriting a heap-allocated field leaks the old value.
+		// Safe because field reads that save to locals create dups (T0095/B0219).
 		if named != nil {
 			field := named.LookupField(target.Field)
 			if field != nil {
@@ -3024,13 +3060,41 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 				if c.typeSubst != nil {
 					fieldType = types.Substitute(fieldType, c.typeSubst)
 				}
+				// String: call promise_string_drop (handles null + literal checks).
 				if extractNamed(fieldType) == types.TypString {
 					if dropFunc, ok := c.funcs["promise_string_drop"]; ok {
 						oldVal := c.block.NewLoad(irtypes.I8Ptr, fieldPtr)
-						// Skip if old == new (aliasing: b.val = b.val)
 						isSame := c.block.NewICmp(enum.IPredEQ, oldVal, val)
 						dropBlock := c.newBlock("field.strdrop")
 						mergeBlock := c.newBlock("field.strdrop.done")
+						c.block.NewCondBr(isSame, mergeBlock, dropBlock)
+						c.block = dropBlock
+						c.block.NewCall(dropFunc, oldVal)
+						c.block.NewBr(mergeBlock)
+						c.block = mergeBlock
+					}
+				}
+				// B0219: Vector: call Vector.drop (handles null + static flag).
+				if types.IsVector(fieldType) {
+					if dropFunc, ok := c.funcs["Vector.drop"]; ok {
+						oldVal := c.block.NewLoad(irtypes.I8Ptr, fieldPtr)
+						isSame := c.block.NewICmp(enum.IPredEQ, oldVal, val)
+						dropBlock := c.newBlock("field.vecdrop")
+						mergeBlock := c.newBlock("field.vecdrop.done")
+						c.block.NewCondBr(isSame, mergeBlock, dropBlock)
+						c.block = dropBlock
+						c.block.NewCall(dropFunc, oldVal)
+						c.block.NewBr(mergeBlock)
+						c.block = mergeBlock
+					}
+				}
+				// B0219: Channel: call Channel.drop (handles null + refcount).
+				if types.IsChannel(fieldType) {
+					if dropFunc, ok := c.funcs["Channel.drop"]; ok {
+						oldVal := c.block.NewLoad(irtypes.I8Ptr, fieldPtr)
+						isSame := c.block.NewICmp(enum.IPredEQ, oldVal, val)
+						dropBlock := c.newBlock("field.chdrop")
+						mergeBlock := c.newBlock("field.chdrop.done")
 						c.block.NewCondBr(isSame, mergeBlock, dropBlock)
 						c.block = dropBlock
 						c.block.NewCall(dropFunc, oldVal)
@@ -3398,8 +3462,13 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		if extractNamed(retType) == types.TypString && !isRefType(retType) {
 			c.dupStringFieldAccess = true
 		}
+		// B0219: Signal genFieldAccess to dup vector/channel fields for return values.
+		if (types.IsVector(retType) || types.IsChannel(retType)) && !isRefType(retType) {
+			c.dupContainerFieldAccess = true
+		}
 		val = c.genExpr(s.Value)
 		c.dupStringFieldAccess = false
+		c.dupContainerFieldAccess = false
 		c.targetType = nil
 		val = c.wrapThisReturnValue(val, s.Value, retType)
 	}

@@ -9581,6 +9581,38 @@ func TestStringFieldAccessDup(t *testing.T) {
 	assertContains(t, ir, "call i8* @promise_string_new(")
 }
 
+// B0219: Vector field reassignment drops old value before storing new.
+func TestVectorFieldReassignDrop(t *testing.T) {
+	ir := generateIR(t, `
+		type Container {
+			int[] items;
+		}
+		main() {
+			c := Container(items: []);
+			c.items = [];
+		}
+	`)
+	// Field reassignment should emit old-value drop before store
+	assertContains(t, ir, "field.vecdrop")
+	assertContains(t, ir, "call void @Vector.drop(")
+}
+
+// B0219: Vector field read from droppable type creates a dup (via vecdup).
+func TestVectorFieldAccessDup(t *testing.T) {
+	ir := generateIR(t, `
+		type Holder {
+			int[] data;
+		}
+		test() {
+			h := Holder(data: []);
+			int[] x = h.data;
+		}
+	`)
+	// Reading h.data should dup the vector to prevent double-free
+	assertContains(t, ir, "vecdup.copy")
+	assertContains(t, ir, "call i8* @pal_alloc(")
+}
+
 // B0181: Optional string field access + unwrap should dup to prevent double-free
 func TestOptionalStringFieldUnwrapDup(t *testing.T) {
 	ir := generateIR(t, `

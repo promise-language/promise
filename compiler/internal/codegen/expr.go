@@ -2817,6 +2817,24 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 				return c.block.NewInsertValue(val, dup, 1)
 			}
 		}
+		// B0219: Dup vector/channel fields from types with drop.
+		// Vector: shallow copy (allocate + memcpy). Channel: incref.
+		if c.dupContainerFieldAccess && ownerNamed != nil && ownerNamed.HasDrop() {
+			if elemType, ok := types.AsVector(fType); ok {
+				c.dupContainerFieldAccess = false // consume the flag
+				elemLLVM := c.resolveType(elemType)
+				elemSize := int64(c.typeSize(elemLLVM))
+				dup := c.dupVector(val, elemSize)
+				c.trackVectorTemp(dup)
+				return dup
+			}
+			if types.IsChannel(fType) {
+				c.dupContainerFieldAccess = false // consume the flag
+				dup := c.dupChannel(val)
+				c.trackChannelTemp(dup)
+				return dup
+			}
+		}
 		// B0190: Signal that this field access loaded a string? field from a
 		// droppable type. genOptionalForceUnwrap's result should NOT be tracked
 		// as a temp (the owner's drop handles the string's lifetime).

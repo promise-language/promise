@@ -276,7 +276,7 @@ test_compound_index_assign() `test {
 
 // --- tombstone probing ---
 
-test_lookup_past_tombstone() `test(allow_leaks: true) {
+test_lookup_past_tombstone() `test {
   // Insert two keys that will occupy consecutive slots,
   // remove the first, verify the second is still found.
   map[int, int] m = {:};
@@ -355,7 +355,7 @@ test_for_in_kv_int_keys() `test {
 
 // --- rehash ---
 
-test_rehash_stress() `test(allow_leaks: true) {
+test_rehash_stress() `test {
   map[int, int] m = {:};
   // Insert enough entries to trigger rehash (initial capacity 16, load factor 75%)
   for i in 0..50 {

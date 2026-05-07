@@ -170,7 +170,7 @@ test_map_int_keys() `test {
 
 // --- map: large insertions ---
 
-test_map_large() `test(allow_leaks: true) {
+test_map_large() `test {
   map[int, int] m = {:};
   for i in 0..50 {
     m[i] = i * i;

@@ -116,7 +116,7 @@ test_int_keys_negative() `test {
   }
 }
 
-test_large_map() `test(allow_leaks: true) {
+test_large_map() `test {
   map[int, int] m = {:};
   for i in 0..100 {
     m[i] = i * i;

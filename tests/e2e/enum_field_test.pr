@@ -422,7 +422,7 @@ test_map_enum_entries() `test {
 
 // --- Large map with enum values (triggers rehash) ---
 
-test_map_enum_rehash() `test(allow_leaks: true) {
+test_map_enum_rehash() `test {
   map[int, Color] m = {
     0: Color.Red
   };
@@ -451,7 +451,7 @@ test_map_enum_rehash() `test(allow_leaks: true) {
   }
 }
 
-test_map_data_enum_rehash() `test(allow_leaks: true) {
+test_map_data_enum_rehash() `test {
   map[int, Shape] m = {
     0: Shape.Point
   };

@@ -1,0 +1,54 @@
+// B0219: Vector and channel field reassignment drops old value.
+// Tests that reassigning a vector/channel field drops the old value
+// (preventing leaks) and that field reads create independent copies
+// (preventing use-after-free in patterns like Map._rehash).
+type VecHolder {
+  int[] items;
+
+  clear(~this) {
+    this.items = [];
+  }
+
+  add(~this, int x) {
+    this.items.push(x);
+  }
+
+  // Simulates the Map._rehash pattern: read old field into local,
+  // then reassign the field. The local must still be valid after.
+  swap_and_return_old(~this) int[] {
+    int[] old = this.items;
+    this.items = [];
+    return old;
+  }
+}
+
+test_vec_field_clear() `test {
+  VecHolder h = VecHolder(items: []);
+  h.add(1);
+  h.add(2);
+  h.add(3);
+  h.clear();
+  assert(h.items.len == 0, "cleared");
+}
+
+test_vec_field_reassign() `test {
+  VecHolder h = VecHolder(items: []);
+  h.add(10);
+  h.add(20);
+  h.items = [];
+  h.add(30);
+  assert(h.items.len == 1, "after reassign");
+  assert(h.items[0] == 30, "correct value");
+}
+
+test_vec_field_read_then_reassign() `test {
+  VecHolder h = VecHolder(items: []);
+  h.add(1);
+  h.add(2);
+  h.add(3);
+  int[] old = h.swap_and_return_old();
+  assert(old.len == 3, "old has 3 elements");
+  assert(old[0] == 1, "old[0]");
+  assert(old[2] == 3, "old[2]");
+  assert(h.items.len == 0, "new is empty");
+}

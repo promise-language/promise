@@ -1,0 +1,10 @@
+// B0200: Verify that error panic messages display correctly.
+// When a failable function raises an error type and the caller uses !,
+// the panic should show the error's message field, not garbled bytes.
+fail_with_error()! {
+  raise error(message: "something went wrong");
+}
+
+main() `test(expected: "panic: something went wrong") {
+  fail_with_error()!;
+}

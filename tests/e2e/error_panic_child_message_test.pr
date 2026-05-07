@@ -1,0 +1,12 @@
+// B0200: Verify that child error type panic messages display correctly.
+type AppError is error {
+  int code;
+}
+
+fail_with_child_error()! {
+  raise AppError(message: "app failure", code: 42);
+}
+
+main() `test(expected: "panic: app failure") {
+  fail_with_child_error()!;
+}

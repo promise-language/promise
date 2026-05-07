@@ -2291,9 +2291,13 @@ func TestErrorUnwrap(t *testing.T) {
 	// Should have panic and ok blocks
 	assertContains(t, ir, "error.panic")
 	assertContains(t, ir, "error.ok")
-	// Should call promise_panic
+	// B0200: Should extract message string from error instance before panicking.
+	// The error.panic block must bitcast the error instance to load the message
+	// field, then create a C string copy for promise_panic.
 	assertContains(t, ir, "call void @promise_panic(")
 	assertContains(t, ir, "unreachable")
+	// Verify message extraction: bitcast to error instance type, GEP to message field
+	assertContains(t, ir, "getelementptr %promise_error_i")
 }
 
 // T0125: When func()! returns a string, the unwrapped i8* must be tracked

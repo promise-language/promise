@@ -153,6 +153,37 @@ func (c *Compiler) definePrintStringBody(fn *ir.Func) {
 	entry.NewRet(nil)
 }
 
+// emitErrorPanic extracts the message string from an error instance pointer
+// and calls promise_panic with a null-terminated C string copy.
+// The errInstPtr is an i8* pointing to the error instance struct (field 0 = _variant,
+// field 1 = message string instance pointer).
+func (c *Compiler) emitErrorPanic(errInstPtr value.Value) {
+	errorLayout := c.layouts[types.TypError]
+	instType := errorLayout.Instance.LLVMType
+	instPtrType := errorLayout.InstancePtrType
+
+	// Cast error instance pointer to typed pointer
+	typedPtr := c.block.NewBitCast(errInstPtr, instPtrType)
+
+	// Load the message field (field 1 = string instance pointer, i8*)
+	msgFieldPtr := c.block.NewGetElementPtr(instType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	msgInstPtr := c.block.NewLoad(irtypes.I8Ptr, msgFieldPtr)
+
+	// Extract data pointer and length from the string instance
+	dataPtr, dataLen := c.extractStringDataLenFromInstance(c.block, msgInstPtr)
+
+	// Allocate a null-terminated C string copy: malloc(len+1), memcpy, null-terminate
+	allocSize := c.block.NewAdd(dataLen, constant.NewInt(irtypes.I64, 1))
+	cstr := c.block.NewCall(c.palAlloc, allocSize)
+	c.block.NewCall(c.funcs["llvm.memcpy"], cstr, dataPtr, dataLen, constant.False)
+	nullPos := c.block.NewGetElementPtr(irtypes.I8, cstr, dataLen)
+	c.block.NewStore(constant.NewInt(irtypes.I8, 0), nullPos)
+
+	c.block.NewCall(c.funcs["promise_panic"], cstr)
+	c.block.NewUnreachable()
+}
+
 // definePanicBody adds a function body to promise_panic(i8* %msg).
 // msg is a null-terminated C string.
 // Recovery priority: (1) goroutine recovery via scheduler longjmp, (2) test recovery

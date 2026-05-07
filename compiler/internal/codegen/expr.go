@@ -539,8 +539,7 @@ func (c *Compiler) callFormatToString(val value.Value, typ types.Type, named *ty
 
 	c.block = errBlock
 	errPtr := c.block.NewExtractValue(formatResult, 1)
-	c.block.NewCall(c.funcs["promise_panic"], errPtr)
-	c.block.NewUnreachable()
+	c.emitErrorPanic(errPtr)
 
 	c.block = okBlock
 
@@ -4168,11 +4167,10 @@ func (c *Compiler) genErrorUnwrapExpr(e *ast.ErrorUnwrapExpr) value.Value {
 	okBlock := c.newBlock("error.ok")
 	c.block.NewCondBr(tag, panicBlock, okBlock)
 
-	// Error: call promise_panic, unreachable
+	// Error: extract message from error instance, panic with it
 	c.block = panicBlock
 	errMsg := c.block.NewExtractValue(result, resultErrIdx(resultType))
-	c.block.NewCall(c.funcs["promise_panic"], errMsg)
-	c.block.NewUnreachable()
+	c.emitErrorPanic(errMsg)
 
 	// Ok: extract value
 	c.block = okBlock
@@ -4275,8 +4273,7 @@ func (c *Compiler) genErrorHandlerExpr(e *ast.ErrorHandlerExpr) value.Value {
 			c.scopeBindings = c.scopeBindings[:savedElseScope]
 		} else if e.PanicOnNomatch {
 			// Explicit ! suffix: panic on non-matching error
-			c.block.NewCall(c.funcs["promise_panic"], errVal)
-			c.block.NewUnreachable()
+			c.emitErrorPanic(errVal)
 		} else if c.canError {
 			if len(c.scopeBindings) > 0 {
 				c.emitScopeCleanup(0, true) // error in flight — suppress close errors

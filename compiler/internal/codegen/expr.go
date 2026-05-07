@@ -1253,8 +1253,9 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 	// Evaluate arguments — pass address for MutRef params (B0149)
 	var argVals []value.Value
 	var argTypes []types.Type
+	var variadicPTs []variadicPassthrough // B0203
 	if calleeSig != nil {
-		argVals, argTypes = c.genCallArgsWithMutRef(e.Args, calleeSig.Params())
+		argVals, argTypes, variadicPTs = c.genCallArgsWithMutRef(e.Args, calleeSig.Params())
 	} else {
 		for _, arg := range e.Args {
 			argVals = append(argVals, c.genCallArgExpr(arg.Value))
@@ -1267,13 +1268,17 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 		calleeType := c.info.Types[e.Callee]
 		if sig, ok := calleeType.(*types.Signature); ok {
 			closure := c.block.NewLoad(alloca.ElemType, alloca)
-			return c.genIndirectCall(closure, sig, argVals)
+			result := c.genIndirectCall(closure, sig, argVals)
+			c.clearVariadicStaticFlags(variadicPTs)
+			return result
 		}
 	}
 
 	// Extern function — pack args into value structs, call, unpack return
 	if isExtern {
-		return c.genExternCall(c.externs[ident.Name], argVals, argTypes)
+		result := c.genExternCall(c.externs[ident.Name], argVals, argTypes)
+		c.clearVariadicStaticFlags(variadicPTs)
+		return result
 	}
 
 	// Regular function call
@@ -1288,6 +1293,7 @@ func (c *Compiler) genCallExpr(e *ast.CallExpr) value.Value {
 	}
 
 	result := c.block.NewCall(fn, argVals...)
+	c.clearVariadicStaticFlags(variadicPTs)
 
 	// T0092: Track string return values from functions with structural interface
 	// parameters. When a function takes a structural interface param and returns
@@ -1352,8 +1358,9 @@ func (c *Compiler) genModuleCall(e *ast.CallExpr, moduleName, funcName string) v
 
 	var argVals []value.Value
 	var argTypes []types.Type
+	var variadicPTs []variadicPassthrough // B0203
 	if calleeSig != nil {
-		argVals, argTypes = c.genCallArgsWithMutRef(e.Args, calleeSig.Params())
+		argVals, argTypes, variadicPTs = c.genCallArgsWithMutRef(e.Args, calleeSig.Params())
 	} else {
 		for _, arg := range e.Args {
 			argVals = append(argVals, c.genCallArgExpr(arg.Value))
@@ -1363,7 +1370,9 @@ func (c *Compiler) genModuleCall(e *ast.CallExpr, moduleName, funcName string) v
 
 	// Try module extern first
 	if ext, ok := c.moduleExterns[key]; ok {
-		return c.genExternCall(ext, argVals, argTypes)
+		result := c.genExternCall(ext, argVals, argTypes)
+		c.clearVariadicStaticFlags(variadicPTs)
+		return result
 	}
 
 	// Try module function
@@ -1377,7 +1386,9 @@ func (c *Compiler) genModuleCall(e *ast.CallExpr, moduleName, funcName string) v
 		argVals = c.coerceCallArgs(argVals, argTypes, calleeSig.Params())
 	}
 
-	return c.block.NewCall(fn, argVals...)
+	result := c.block.NewCall(fn, argVals...)
+	c.clearVariadicStaticFlags(variadicPTs)
+	return result
 }
 
 // genModuleGetterCall handles mod.property access — calls the getter function with no args.
@@ -1588,11 +1599,13 @@ func (c *Compiler) genGenericMethodCall(e *ast.CallExpr, idx *ast.IndexExpr, mem
 	}
 
 	// Generate arguments
-	argVals, argTypes := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
+	argVals, argTypes, variadicPTs := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params())
 	args = append(args, argVals...)
 
-	return c.block.NewCall(fn, args...)
+	result := c.block.NewCall(fn, args...)
+	c.clearVariadicStaticFlags(variadicPTs)
+	return result
 }
 
 // --- super() calls ---
@@ -2833,11 +2846,13 @@ func (c *Compiler) genMethodCall(e *ast.CallExpr, member *ast.MemberExpr) value.
 			args = append(args, c.extractInstancePtr(target))
 		}
 	}
-	argVals, argTypes := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
+	argVals, argTypes, variadicPTs := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params())
 	args = append(args, argVals...)
 
-	return c.block.NewCall(fn, args...)
+	result := c.block.NewCall(fn, args...)
+	c.clearVariadicStaticFlags(variadicPTs)
+	return result
 }
 
 // genEnumGetterAccess emits a getter call on an enum value (e.g., s.name where name is a getter on enum Shape).
@@ -2947,11 +2962,13 @@ func (c *Compiler) genEnumMethodCall(e *ast.CallExpr, member *ast.MemberExpr, ta
 			args = append(args, ptr)
 		}
 	}
-	argVals, argTypes := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
+	argVals, argTypes, variadicPTs := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params())
 	args = append(args, argVals...)
 
-	return c.block.NewCall(fn, args...), true
+	result := c.block.NewCall(fn, args...)
+	c.clearVariadicStaticFlags(variadicPTs)
+	return result, true
 }
 
 // genGetterCall emits a call to a getter method (zero args beyond receiver).
@@ -3142,10 +3159,12 @@ func (c *Compiler) genVirtualMethodCall(e *ast.CallExpr, member *ast.MemberExpr,
 	if method.Sig().Recv() != nil {
 		args = append(args, instance)
 	}
-	argVals, argTypes := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
+	argVals, argTypes, variadicPTs := c.genCallArgsWithMutRef(e.Args, method.Sig().Params())
 	argVals = c.coerceCallArgs(argVals, argTypes, method.Sig().Params())
 	args = append(args, argVals...)
-	return c.block.NewCall(fnTyped, args...)
+	result := c.block.NewCall(fnTyped, args...)
+	c.clearVariadicStaticFlags(variadicPTs)
+	return result
 }
 
 // genContainerMethodCall dispatches native method calls on Vector, Map, and string.
@@ -3389,9 +3408,10 @@ func (c *Compiler) genMutRefArg(expr ast.Expr) value.Value {
 // For MutRef params, passes the address of the caller's storage instead of the value.
 // When the arg needs no coercion and is a simple lvalue, passes the alloca directly.
 // Otherwise, evaluates the value, stores in a temp alloca, and passes the temp.
-func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param) ([]value.Value, []types.Type) {
+func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param) ([]value.Value, []types.Type, []variadicPassthrough) {
 	var argVals []value.Value
 	var argTypes []types.Type
+	var variadicPTs []variadicPassthrough // B0203: passthrough vectors needing len restored after call
 	for i, arg := range args {
 		if i < len(params) {
 			if _, isMutRef := params[i].Type().(*types.MutRef); isMutRef {
@@ -3426,8 +3446,64 @@ func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param)
 			}
 			c.claimStringTemp(v)
 		}
+		// B0203: Variadic passthrough — set static flag (bit 63) on the vector's
+		// len field so the callee's scope-exit drop skips element drops and buffer free.
+		// Passthrough is detected when the arg is NOT an ArrayLit (ArrayLit means
+		// sema synthesized a fresh vector for inline variadic args).
+		// Skip if the vector is already static (.rodata) — the memory is read-only
+		// and bit 63 is already set, so the callee's drop will skip anyway.
+		if i < len(params) && params[i].IsVariadic() {
+			if _, isArrayLit := arg.Value.(*ast.ArrayLit); !isArrayLit {
+				headerType := vectorHeaderType()
+				headerPtr := c.block.NewBitCast(v, irtypes.NewPointer(headerType))
+				lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
+					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+				rawLen := c.block.NewLoad(irtypes.I64, lenPtr)
+				// Check if already static (bit 63 set) — skip if so
+				bit63 := c.block.NewAnd(rawLen, constant.NewInt(irtypes.I64, math.MinInt64))
+				isStatic := c.block.NewICmp(enum.IPredNE, bit63, constant.NewInt(irtypes.I64, 0))
+				setBlock := c.newBlock("variadic.setflag")
+				skipBlock := c.newBlock("variadic.skipflag")
+				c.block.NewCondBr(isStatic, skipBlock, setBlock)
+				// Set bit 63
+				c.block = setBlock
+				flaggedLen := c.block.NewOr(rawLen, constant.NewInt(irtypes.I64, math.MinInt64))
+				c.block.NewStore(flaggedLen, lenPtr)
+				c.block.NewBr(skipBlock)
+				// Continue
+				c.block = skipBlock
+				variadicPTs = append(variadicPTs, variadicPassthrough{lenPtr: lenPtr, savedLen: rawLen})
+			}
+		}
 	}
-	return argVals, argTypes
+	return argVals, argTypes, variadicPTs
+}
+
+// variadicPassthrough tracks a vector whose static flag was temporarily set
+// for variadic passthrough (B0203).
+type variadicPassthrough struct {
+	lenPtr   value.Value // pointer to the vector's len field
+	savedLen value.Value // original len value before setting bit 63
+}
+
+// clearVariadicStaticFlags restores original len values on vectors that were
+// temporarily marked static for variadic passthrough (B0203). Only restores
+// vectors that were originally non-static (static vectors in .rodata are
+// read-only and were never modified).
+func (c *Compiler) clearVariadicStaticFlags(passthroughs []variadicPassthrough) {
+	for _, pt := range passthroughs {
+		// Check if the saved len had bit 63 set (originally static). If so,
+		// the vector is .rodata and we never modified it — skip the store.
+		bit63 := c.block.NewAnd(pt.savedLen, constant.NewInt(irtypes.I64, math.MinInt64))
+		wasStatic := c.block.NewICmp(enum.IPredNE, bit63, constant.NewInt(irtypes.I64, 0))
+		restoreBlock := c.newBlock("variadic.restore")
+		doneBlock := c.newBlock("variadic.restored")
+		c.block.NewCondBr(wasStatic, doneBlock, restoreBlock)
+		c.block = restoreBlock
+		c.block.NewStore(pt.savedLen, pt.lenPtr)
+		c.block.NewBr(doneBlock)
+		c.block = doneBlock
+	}
 }
 
 // genFieldPtr computes a pointer to a field on a user type instance.

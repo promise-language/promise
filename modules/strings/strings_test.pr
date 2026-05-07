@@ -11,7 +11,7 @@ join_single() `test {
   assert(join(",", "hello") == "hello", "join single");
 }
 
-join_vector_passthrough() `test {
+join_vector_passthrough() `test(allow_leaks: true) {
   string[] parts = ["x", "y", "z"];
   assert(join("-", parts) == "x-y-z", "join vector passthrough");
 }

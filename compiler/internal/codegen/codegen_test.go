@@ -12883,6 +12883,29 @@ func TestVariadicMethodParamDropAtScopeExit(t *testing.T) {
 	assertContains(t, ir, "call void @Vector.drop(i8*")
 }
 
+func TestVariadicPassthroughStaticFlag(t *testing.T) {
+	// B0203: Variadic passthrough sets bit 63 on the vector's len field
+	// so the callee's scope-exit drop skips the free. The caller restores
+	// the original len after the call. Static .rodata vectors are never modified.
+	ir := generateIR(t, `
+		sum(...int nums) int {
+			int total = 0;
+			for n in nums { total += n; }
+			return total;
+		}
+		doubleSum(...int nums) int {
+			return sum(nums) * 2;
+		}
+		main() {
+			int x = doubleSum(1, 2, 3);
+		}
+	`)
+	// doubleSum should set bit 63 before calling sum (passthrough)
+	assertContains(t, ir, "or i64")
+	// The callee (sum) should check bit 63 at scope exit (vecdrop.nonstatic block)
+	assertContains(t, ir, "vecdrop.nonstatic")
+}
+
 // --- Numeric Suffix Tests ---
 
 func TestNumericSuffixU8IR(t *testing.T) {

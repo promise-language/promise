@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -1511,6 +1512,25 @@ func (c *Compiler) emitStringDropCall(b scopeBinding) {
 	c.block.NewCondBr(nullCheck, doneBlock, execBlock)
 
 	c.block = execBlock
+
+	// B0203: For vectors, check the static flag (bit 63 of len). Passthrough
+	// variadic vectors are marked static at the call site to prevent the callee
+	// from dropping the caller's vector and its elements. Static .rodata vectors
+	// also benefit (Vector.drop already checked bit 63, but element drops did not).
+	valType := b.valType
+	if c.typeSubst != nil {
+		valType = types.Substitute(valType, c.typeSubst)
+	}
+	if _, isVec := types.AsVector(valType); isVec || (b.named != nil && b.named == types.TypVector) {
+		headerType := vectorHeaderType()
+		headerPtr := c.block.NewBitCast(ptr, irtypes.NewPointer(headerType))
+		rawLen := loadVectorLenRaw(c.block, headerPtr)
+		bit63 := c.block.NewAnd(rawLen, constant.NewInt(irtypes.I64, math.MinInt64))
+		isStatic := c.block.NewICmp(enum.IPredNE, bit63, constant.NewInt(irtypes.I64, 0))
+		nonStaticBlock := c.newBlock("vecdrop.nonstatic")
+		c.block.NewCondBr(isStatic, doneBlock, nonStaticBlock)
+		c.block = nonStaticBlock
+	}
 
 	// B0189: Drop vector elements before freeing the buffer.
 	c.emitVectorElementDrops(b, ptr)

@@ -2912,8 +2912,8 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 	// cleanup will free the vector's elements — if the return value borrows
 	// one of those elements, it would become a dangling pointer.
 	// Covers: `return strVar` (IdentExpr) and `return vec[i]` (IndexExpr).
+	needsDup := false
 	if s.Value != nil && val != nil && extractNamed(retType) == types.TypString {
-		needsDup := false
 		if _, ok := s.Value.(*ast.IdentExpr); ok {
 			needsDup = c.hasVectorStringBinding()
 		} else if idx, ok := s.Value.(*ast.IndexExpr); ok {
@@ -2930,8 +2930,11 @@ func (c *Compiler) genReturnStmt(s *ast.ReturnStmt) {
 		}
 	}
 
-	// Clear drop flag for returned variable (it's being moved out, not dropped)
-	if s.Value != nil {
+	// Clear drop flag for returned variable (it's being moved out, not dropped).
+	// B0205: When the return value was dup'd (B0189), the original variable must
+	// still be dropped at scope exit — the caller receives the dup, not the original.
+	// Only clear the flag when we're returning the original (no dup).
+	if s.Value != nil && !needsDup {
 		if ident, ok := s.Value.(*ast.IdentExpr); ok {
 			c.clearDropFlag(ident.Name)
 		}

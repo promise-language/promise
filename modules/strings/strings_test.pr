@@ -11,16 +11,16 @@ join_single() `test {
   assert(join(",", "hello") == "hello", "join single");
 }
 
-join_vector_passthrough() `test(allow_leaks: true) {
+join_vector_passthrough() `test {
   string[] parts = ["x", "y", "z"];
   assert(join("-", parts) == "x-y-z", "join vector passthrough");
 }
 
-join_empty_separator() `test(allow_leaks: true) {
+join_empty_separator() `test {
   assert(join("", "a", "b", "c") == "abc", "join empty separator");
 }
 
-join_two_args() `test(allow_leaks: true) {
+join_two_args() `test {
   assert(join("|", "x", "y") == "x|y", "join two args");
 }
 

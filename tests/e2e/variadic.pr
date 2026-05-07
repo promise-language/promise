@@ -55,7 +55,7 @@ testVariadicPassVector() `test {
   assert(sum(v) == 15, "pass vector directly");
 }
 
-testVariadicWithFixedParams() `test(allow_leaks: true) {
+testVariadicWithFixedParams() `test {
   assert(join(",") == "", "join empty");
   assert(join(",", "a") == "a", "join single");
   assert(join(", ", "a", "b", "c") == "a, b, c", "join multiple");
@@ -132,7 +132,7 @@ wrap(string prefix, string suffix, ...string items) string {
   return result;
 }
 
-testVariadicStringOps() `test(allow_leaks: true) {
+testVariadicStringOps() `test {
   assert(wrap("[", "]") == "[]", "wrap empty");
   assert(wrap("[", "]", "a") == "[a]", "wrap single");
   assert(wrap("[", "]", "a", "b", "c") == "[a, b, c]", "wrap multiple");

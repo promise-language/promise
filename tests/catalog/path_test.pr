@@ -1,11 +1,11 @@
 use path;
 
-test_join_basic() `test(allow_leaks: true) {
+test_join_basic() `test {
   string s = Platform.path_separator;
   assert(path.join("foo", "bar") == "foo" + s + "bar", "join basic");
 }
 
-test_join_trailing_slash() `test(allow_leaks: true) {
+test_join_trailing_slash() `test {
   assert(path.join("foo/", "bar") == "foo/bar", "join trailing slash");
 }
 
@@ -17,12 +17,12 @@ test_join_empty_child() `test {
   assert(path.join("foo", "") == "foo", "join empty child");
 }
 
-test_join_three() `test(allow_leaks: true) {
+test_join_three() `test {
   string s = Platform.path_separator;
   assert(path.join("home", "user", "docs") == "home" + s + "user" + s + "docs", "join three segments");
 }
 
-test_join_four() `test(allow_leaks: true) {
+test_join_four() `test {
   string s = Platform.path_separator;
   assert(path.join("/", "usr", "local", "bin") == "/usr" + s + "local" + s + "bin", "join four segments");
 }
@@ -101,12 +101,12 @@ test_normalize_dotdot() `test(allow_leaks: true) {
   assert(path.normalize("/a/b/../c") == s + "a" + s + "c", "normalize dotdot");
 }
 
-test_normalize_dot() `test(allow_leaks: true) {
+test_normalize_dot() `test {
   string s = Platform.path_separator;
   assert(path.normalize("./a/./b") == "a" + s + "b", "normalize dot");
 }
 
-test_normalize_redundant() `test(allow_leaks: true) {
+test_normalize_redundant() `test {
   string s = Platform.path_separator;
   assert(path.normalize("a//b///c") == "a" + s + "b" + s + "c", "normalize redundant separators");
 }
@@ -155,7 +155,7 @@ test_normalize_trailing() `test(allow_leaks: true) {
   assert(path.normalize("///a///b///") == s + "a" + s + "b", "heavy redundant seps");
 }
 
-test_normalize_dot_prefixed_names() `test(allow_leaks: true) {
+test_normalize_dot_prefixed_names() `test {
   string s = Platform.path_separator;
   // Dot-prefixed filenames must NOT be treated as "." or ".."
   assert(path.normalize("/home/.hidden/file") == s + "home" + s + ".hidden" + s + "file", "dot-prefix not dot");
@@ -176,7 +176,7 @@ test_join_both_empty() `test {
   assert(path.join("", "") == "", "join both empty");
 }
 
-test_join_dotdot_child() `test(allow_leaks: true) {
+test_join_dotdot_child() `test {
   string s = Platform.path_separator;
   assert(path.join("a", "..") == "a" + s + "..", "join dotdot child");
   assert(path.join("a", ".") == "a" + s + ".", "join dot child");

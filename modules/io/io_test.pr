@@ -711,7 +711,7 @@ file_write_after_close_bytes() `test(exclude: "wasm32") {
 
 // ── File.read_line (instance method) ─────────────────────────────────────────
 
-file_read_line_method() `test(allow_leaks: true, exclude: "wasm32") {
+file_read_line_method() `test(exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_frl", "alpha\nbeta\ngamma")!;
   File f = File.open("/tmp/pr_iot_frl", readonly: true)!;
   if v := f.read_line()! {
@@ -754,7 +754,7 @@ buffered_reader_basic() `test(exclude: "wasm32") {
   File.remove("/tmp/pr_iot_br")!;
 }
 
-buffered_reader_read_line() `test(allow_leaks: true, exclude: "wasm32") {
+buffered_reader_read_line() `test(exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_brl", "one\ntwo\nthree")!;
   File f = File.open("/tmp/pr_iot_brl", readonly: true)!;
   BufferedReader r = BufferedReader(f, buf_size: 8);
@@ -780,7 +780,7 @@ buffered_reader_read_line() `test(allow_leaks: true, exclude: "wasm32") {
   File.remove("/tmp/pr_iot_brl")!;
 }
 
-buffered_reader_read_line_crlf() `test(allow_leaks: true, exclude: "wasm32") {
+buffered_reader_read_line_crlf() `test(exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_brlc", "aa\r\nbb\r\n")!;
   File f = File.open("/tmp/pr_iot_brlc", readonly: true)!;
   BufferedReader r = BufferedReader(f, buf_size: 4);

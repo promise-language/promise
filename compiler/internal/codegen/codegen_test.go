@@ -15936,3 +15936,55 @@ func TestStringTempNotClaimedForSynthDrop(t *testing.T) {
 	// Look for promise_string_drop in the test function — indicates the temp is freed.
 	assertContains(t, ir, "promise_string_drop")
 }
+
+// B0215: If-let unwrap should drop the inner string value at scope exit.
+func TestIfUnwrapStringDrop(t *testing.T) {
+	ir := generateIR(t, `
+		get_optional() string? {
+			return "hello";
+		}
+		test() {
+			if v := get_optional() {
+				int x = v.len;
+			}
+		}
+	`)
+	// The unwrapped string v must be dropped in the then-block.
+	assertContains(t, ir, "strdrop.call")
+}
+
+// B0215: If-let unwrap from a local optional should emit string drop for the unwrapped value.
+func TestIfUnwrapLocalOptionalStringDrop(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			string? s = "hello";
+			if v := s {
+				int x = v.len;
+			}
+		}
+	`)
+	// The unwrapped string v must be dropped in the then-block.
+	assertContains(t, ir, "strdrop.call")
+}
+
+// B0215: While-let unwrap should drop the inner string value at each iteration end.
+func TestWhileUnwrapStringDrop(t *testing.T) {
+	ir := generateIR(t, `
+		type Counter {
+			int n;
+			next(~this) string? {
+				if this.n <= 0 { return none; }
+				this.n = this.n - 1;
+				return "item";
+			}
+		}
+		test() {
+			Counter c = Counter(n: 3);
+			while v := c.next() {
+				int x = v.len;
+			}
+		}
+	`)
+	// The unwrapped string v must be dropped at end of each iteration.
+	assertContains(t, ir, "strdrop.call")
+}

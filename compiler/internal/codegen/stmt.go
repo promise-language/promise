@@ -62,6 +62,34 @@ func isDroppableContainerOrString(typ types.Type) bool {
 	return false
 }
 
+// isOwnedOptionalExpr returns true if the expression produces a uniquely owned
+// optional value — meaning the unwrapped inner value can safely be dropped by
+// the if-let/while-let binding. Returns false for MemberExpr/IndexExpr on
+// droppable types where the parent owns the field's inner value. B0215.
+func (c *Compiler) isOwnedOptionalExpr(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.IdentExpr:
+		return true // local variable — ownership transferred via clearDropFlag
+	case *ast.CallExpr:
+		return true // function call returns owned value
+	case *ast.ErrorUnwrapExpr:
+		return true // failable unwrap (!) of a call/expression returns owned value
+	case *ast.MemberExpr:
+		// Field access on a droppable type — parent's drop handles the field.
+		targetType := c.info.Types[e.Target]
+		if c.typeSubst != nil {
+			targetType = types.Substitute(targetType, c.typeSubst)
+		}
+		ownerNamed := extractNamed(targetType)
+		if ownerNamed != nil && ownerNamed.HasDrop() {
+			return false
+		}
+		return true // non-droppable parent — we own the field value
+	default:
+		return true // conservative: assume owned for other expression types
+	}
+}
+
 // isStringFieldDup returns true if the expression is a MemberExpr accessing a
 // string field from a type with HasDrop(). In that case, genFieldAccess dups the
 // string (T0095), so the result is an owned copy, not a borrow.
@@ -4015,7 +4043,37 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 	prev, hadPrev := c.locals[s.Binding]
 	c.locals[s.Binding] = alloca
 
+	// B0215: Register drop binding for the unwrapped inner value when uniquely
+	// owned. Function calls and force-unwraps return owned values; local
+	// IdentExpr variables transfer ownership (we clear their drop flag).
+	// Field access (MemberExpr) on droppable types is skipped — the parent
+	// type's drop handles cleanup of the field's inner value.
+	unwrapScopeLen := len(c.scopeBindings)
+	savedDropFlag, hadDropFlag := c.dropFlags[s.Binding]
+	savedDropBinding, hadDropBinding := c.dropBindings[s.Binding]
+	initType := c.info.Types[s.Init]
+	if c.typeSubst != nil {
+		initType = types.Substitute(initType, c.typeSubst)
+	}
+	if opt, ok := initType.(*types.Optional); ok && c.isOwnedOptionalExpr(s.Init) {
+		c.maybeRegisterDrop(s.Binding, alloca, opt.Elem())
+		// Clear source variable's drop flag to transfer ownership.
+		if ident, ok := s.Init.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		}
+	}
+
 	c.genBlock(s.Body)
+
+	// B0215: Emit drop for the unwrapped value on the fall-through path.
+	// Return/break/raise paths handle this via emitScopeCleanup from their
+	// respective base depths (which include this binding).
+	if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > unwrapScopeLen {
+		cap := c.emitScopeCleanup(unwrapScopeLen, false)
+		c.emitCloseErrCheck(cap)
+	}
+	c.scopeBindings = c.scopeBindings[:unwrapScopeLen]
+
 	if c.block.Term == nil {
 		c.block.NewBr(mergeBlock)
 	}
@@ -4025,6 +4083,17 @@ func (c *Compiler) genIfUnwrapStmt(s *ast.IfStmt) {
 		c.locals[s.Binding] = prev
 	} else {
 		delete(c.locals, s.Binding)
+	}
+	// B0215: Restore drop flag/binding state from before the if-let.
+	if hadDropFlag {
+		c.dropFlags[s.Binding] = savedDropFlag
+	} else {
+		delete(c.dropFlags, s.Binding)
+	}
+	if hadDropBinding {
+		c.dropBindings[s.Binding] = savedDropBinding
+	} else {
+		delete(c.dropBindings, s.Binding)
 	}
 
 	// Else (optional)
@@ -4120,7 +4189,34 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 	prev, hadPrev := c.locals[s.Binding]
 	c.locals[s.Binding] = alloca
 
+	// B0215: Register drop binding for the unwrapped inner value. Each iteration
+	// gets a new value; the drop flag is set to 1 in the body block (via
+	// maybeRegisterDrop's store in c.block) so it resets correctly per iteration.
+	// The binding is above loopScopeDepth, so break/continue paths include it.
+	unwrapScopeLen := len(c.scopeBindings)
+	savedDropFlag, hadDropFlag := c.dropFlags[s.Binding]
+	savedDropBinding, hadDropBinding := c.dropBindings[s.Binding]
+	valType := c.info.Types[s.Value]
+	if c.typeSubst != nil {
+		valType = types.Substitute(valType, c.typeSubst)
+	}
+	if opt, ok := valType.(*types.Optional); ok && c.isOwnedOptionalExpr(s.Value) {
+		c.maybeRegisterDrop(s.Binding, alloca, opt.Elem())
+		// Clear source variable's drop flag to transfer ownership.
+		if ident, ok := s.Value.(*ast.IdentExpr); ok {
+			c.clearDropFlag(ident.Name)
+		}
+	}
+
 	c.genBlock(s.Body)
+
+	// B0215: Emit drop for the unwrapped value at iteration end (fall-through).
+	if c.block != nil && c.block.Term == nil && len(c.scopeBindings) > unwrapScopeLen {
+		cap := c.emitScopeCleanup(unwrapScopeLen, false)
+		c.emitCloseErrCheck(cap)
+	}
+	c.scopeBindings = c.scopeBindings[:unwrapScopeLen]
+
 	if c.block.Term == nil {
 		c.block.NewBr(headerBlock)
 	}
@@ -4130,6 +4226,17 @@ func (c *Compiler) genWhileUnwrapStmt(s *ast.WhileUnwrapStmt) {
 		c.locals[s.Binding] = prev
 	} else {
 		delete(c.locals, s.Binding)
+	}
+	// B0215: Restore drop flag/binding state.
+	if hadDropFlag {
+		c.dropFlags[s.Binding] = savedDropFlag
+	} else {
+		delete(c.dropFlags, s.Binding)
+	}
+	if hadDropBinding {
+		c.dropBindings[s.Binding] = savedDropBinding
+	} else {
+		delete(c.dropBindings, s.Binding)
 	}
 
 	c.breakTarget = savedBreak

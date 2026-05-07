@@ -631,3 +631,36 @@ optional_nested_user_field() `test {
   assert(loc.x == 5, "nested location x");
   assert(loc.y == 6, "nested location y");
 }
+
+// B0215: If-let unwrap must drop the inner string value at scope exit.
+_get_optional_string() string? {
+  return "a".repeat(10);
+}
+
+if_let_string_drop() `test {
+  if v := _get_optional_string() {
+    assert(v.len == 10, "unwrapped string length");
+  }
+}
+
+// B0215: While-let unwrap must drop the inner string value at each iteration end.
+type _StringIter {
+  int _n;
+  next(~this) string? {
+    if this._n <= 0 {
+      return none;
+    }
+    this._n = this._n - 1;
+    return "x".repeat(5);
+  }
+}
+
+while_let_string_drop() `test {
+  _StringIter iter = _StringIter(_n: 3);
+  int count = 0;
+  while v := iter.next() {
+    assert(v.len == 5, "each string is 5 chars");
+    count = count + 1;
+  }
+  assert(count == 3, "iterated 3 times");
+}

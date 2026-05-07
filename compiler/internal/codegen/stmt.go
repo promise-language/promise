@@ -2317,9 +2317,15 @@ func (c *Compiler) claimHeapTemp(val value.Value) {
 	// where maybeTrackIterTemp tracked the extractvalue but the caller has the
 	// full value struct (different SSA value, same runtime pointer).
 	if _, ok := val.Type().(*irtypes.StructType); ok {
-		instPtr := c.block.NewExtractValue(val, 1)
+		var instPtr value.Value = c.block.NewExtractValue(val, 1)
+		// B0218: Bitcast typed instance pointers (e.g., promise_Point_i*) to i8*
+		// so we can compare against tracked temps (which are always i8*).
 		if instPtr.Type() != irtypes.I8Ptr {
-			return
+			if _, isPtr := instPtr.Type().(*irtypes.PointerType); isPtr {
+				instPtr = c.block.NewBitCast(instPtr, irtypes.I8Ptr)
+			} else {
+				return
+			}
 		}
 		for _, temp := range c.heapTemps {
 			if c.lastClaimedDropFunc == nil {

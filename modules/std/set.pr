@@ -9,7 +9,7 @@ type Set[T: Hashable + Equal] `public {
   get len int => this._map.len;
   get is_empty bool => this._map.is_empty;
 
-  add(T elem) {
+  add(~T elem) {
     this._map[elem] = true;
   }
 

@@ -385,7 +385,7 @@ enum Message {
   Empty,
 }
 
-test_enum_user_type_field() `test(allow_leaks: true) {
+test_enum_user_type_field() `test {
   Payload pl = Payload(id: 42);
   Message m = Message.Data(p: pl);
   if m is Data(extracted) {

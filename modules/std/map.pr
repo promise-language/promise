@@ -43,7 +43,7 @@ type Map[K: Hashable + Equal, V] `public {
     }
   }
 
-  []=(K key, V value) {
+  []=(~K key, ~V value) {
     if this._count * 4 >= this._buckets.len * 3 {
       this._rehash();
     }
@@ -195,7 +195,7 @@ type Map[K: Hashable + Equal, V] `public {
     }
   }
 
-  update(K key, V value) bool {
+  update(~K key, ~V value) bool {
     int cap = this._buckets.len;
     int h = key.hash % cap;
     if h < 0 {
@@ -296,7 +296,7 @@ type Map[K: Hashable + Equal, V] `public {
     }
   }
 
-  _set(K key, V value) {
+  _set(~K key, ~V value) {
     int cap = this._buckets.len;
     int h = key.hash % cap;
     if h < 0 {

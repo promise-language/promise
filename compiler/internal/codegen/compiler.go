@@ -5035,12 +5035,18 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 		// fieldType (not just when c.typeSubst is set) so non-generic types
 		// containing generic instances also get the right drop name.
 		// B0189: Drop string vector elements before freeing the buffer.
-		// B0212: Only drop string elements in synthesized type drops. Types like Map
-		// have [] operators that create shared copies of values — dropping enum/droppable
-		// elements here would double-free. Safe enum element drops happen at scope exit
-		// for user-owned vectors (emitVectorElementDrops).
+		// B0218: Also drop enum elements with synthesized drops, but ONLY when all
+		// variant fields are safe to drop (no heap user types that could be aliased
+		// via Map.[] / match destructure). String, primitive, value-type, and enum
+		// fields are safe. Heap user types are NOT safe — Map.[] returns copies that
+		// share instance pointers, so dropping at destruction would double-free.
 		if elemType, isVec := types.AsVector(fieldType); isVec {
 			c.emitVectorStringElementDropLoop(fieldInstance, elemType)
+			// B0218: TODO — also drop enum elements in vectors (e.g., Slot[K,V] in Map._buckets)
+			// using emitVectorElementDropLoopBody + enumVariantFieldsSafeForDrop guard.
+			// Currently disabled: Map.[] returns copies that share instance pointers with
+			// stored Slot data, so dropping at destruction causes double-free for heap user
+			// type values. Needs deep-copy on Map.[] or borrow tracking to enable safely.
 		}
 
 		ownerName := c.resolveMethodOwner(fieldNamed, "drop")
@@ -5533,7 +5539,26 @@ func (c *Compiler) variantFieldNeedsDrop(typ types.Type) bool {
 		if named == types.TypString || named == types.TypVector || named == types.TypChannel {
 			return true
 		}
-		return named.HasDrop()
+		if named.HasDrop() || named.NeedsSynthDrop() {
+			return true
+		}
+		// B0218: Heap-allocated user types without explicit/synthesized drop still need
+		// pal_free. Value types have inline data (no heap pointer), primitives and
+		// structural interfaces don't need cleanup.
+		if !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() {
+			return true
+		}
+		// B0202: Check for mono instance with codegen-time synthesized drop.
+		if inst, ok := typ.(*types.Instance); ok {
+			if n, ok2 := inst.Origin().(*types.Named); ok2 && n.NeedsSynthDrop() {
+				return true
+			}
+			mangledName := mangleMethodName(monoName(inst), "drop", false)
+			if _, ok := c.funcs[mangledName]; ok {
+				return true
+			}
+		}
+		return false
 	}
 	if enum := extractEnum(typ); enum != nil {
 		if enum.HasDrop() {
@@ -5587,8 +5612,8 @@ func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 			}
 			return
 		}
-		// User type with drop: extract instance ptr and call drop
-		if named.HasDrop() {
+		// User type with explicit or synthesized drop: extract instance ptr and call drop
+		if named.HasDrop() || named.NeedsSynthDrop() {
 			instance := c.extractInstancePtr(fieldVal)
 			ownerName := c.resolveMethodOwner(named, "drop")
 			if inst, ok := typ.(*types.Instance); ok {
@@ -5598,6 +5623,29 @@ func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 			if dropFn, ok := c.funcs[mangledName]; ok {
 				c.block.NewCall(dropFn, instance)
 			}
+			return
+		}
+		// B0202: Mono instance with codegen-time synthesized drop
+		if inst, ok := typ.(*types.Instance); ok {
+			mangledName := mangleMethodName(monoName(inst), "drop", false)
+			if dropFn, ok := c.funcs[mangledName]; ok {
+				instance := c.extractInstancePtr(fieldVal)
+				c.block.NewCall(dropFn, instance)
+				return
+			}
+		}
+		// B0218: Heap-allocated user type without any drop — just pal_free the instance.
+		if !named.IsValueType() && !named.IsCopy() && !isPrimitiveScalar(named) && !named.IsStructural() {
+			instance := c.extractInstancePtr(fieldVal)
+			// Null-check to avoid freeing zero-initialized fields
+			isNull := c.block.NewICmp(enum.IPredEQ, instance, constant.NewNull(irtypes.I8Ptr))
+			freeBlock := c.newBlock("varfield.free")
+			skipBlock := c.newBlock("varfield.skip")
+			c.block.NewCondBr(isNull, skipBlock, freeBlock)
+			c.block = freeBlock
+			c.block.NewCall(c.palFree, instance)
+			c.block.NewBr(skipBlock)
+			c.block = skipBlock
 		}
 		return
 	}

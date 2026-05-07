@@ -67,3 +67,23 @@ test_write_returns_count() `test {
   int m = b.write(data)!;
   assert(m == 2, "write returns 2");
 }
+
+// B0223: Vector slice intermediate in from_bytes must not leak.
+test_write_from_bytes_loop() `test {
+  Builder b = Builder();
+  u8[] buf = u8[].filled(65u8, 10);
+  int i = 0;
+  while i < 3 {
+    b.write_string(string.from_bytes(buf[0:5]))? {
+    };
+    i = i + 1;
+  }
+  assert(b.to_string() == "AAAAAAAAAAAAAAA", "3x5 A's");
+}
+
+// B0223: Vector slice passed to from_bytes as simple expression.
+test_from_bytes_slice_temp() `test {
+  u8[] buf = u8[].filled(66u8, 10);
+  string s = string.from_bytes(buf[0:3]);
+  assert(s == "BBB", "from_bytes with slice");
+}

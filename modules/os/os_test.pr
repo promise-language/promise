@@ -427,7 +427,7 @@ test_set_working_dir_preserves_env() `test(exclude: "wasm32") {
 
 // ── Streaming Process tests ──────────────────────────────────────────────────
 
-test_process_spawn_and_wait() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_spawn_and_wait() `test(exclude: "wasm32") {
   Process p = Process.spawn("echo", "hello")!;
   ProcessOutput stdout = p.take_standard_output()!;
   string out = stdout.read_all()!;
@@ -436,7 +436,7 @@ test_process_spawn_and_wait() `test(allow_leaks: true, exclude: "wasm32") {
   assert(out.trim() == "hello", "stdout should contain hello");
 }
 
-test_process_stdin_write() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_stdin_write() `test(exclude: "wasm32") {
   Process p = Process.spawn("cat")!;
   ProcessInput stdin = p.take_standard_input()!;
   ProcessOutput stdout = p.take_standard_output()!;
@@ -450,7 +450,7 @@ test_process_stdin_write() `test(allow_leaks: true, exclude: "wasm32") {
   assert(out == "hello from stdin", "cat should echo stdin to stdout");
 }
 
-test_process_streaming_read() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_streaming_read() `test(exclude: "wasm32") {
   Process p = Process.spawn("sh", "-c", "seq 1 100")!;
   ProcessOutput stdout = p.take_standard_output()!;
 
@@ -470,7 +470,7 @@ test_process_streaming_read() `test(allow_leaks: true, exclude: "wasm32") {
   assert(total.ends_with("100\n"), "should end with 100");
 }
 
-test_process_stderr() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_stderr() `test(exclude: "wasm32") {
   Process p = Process.spawn("sh", "-c", "echo err >&2")!;
   ProcessOutput stderr = p.take_standard_error()!;
   string err = stderr.read_all()!;
@@ -512,7 +512,7 @@ test_process_drop_cleanup() `test(exclude: "wasm32") {
   assert(true, "drop cleanup should not hang");
 }
 
-test_process_large_bidirectional() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_large_bidirectional() `test(exclude: "wasm32") {
   Process p = Process.spawn("cat")!;
   ProcessInput stdin = p.take_standard_input()!;
   ProcessOutput stdout = p.take_standard_output()!;
@@ -527,7 +527,7 @@ test_process_large_bidirectional() `test(allow_leaks: true, exclude: "wasm32") {
   assert(out.len == 8192, "cat should echo all 8192 bytes");
 }
 
-test_process_close_stdin_eof() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_close_stdin_eof() `test(exclude: "wasm32") {
   Process p = Process.spawn("wc", "-l")!;
   ProcessInput stdin = p.take_standard_input()!;
   ProcessOutput stdout = p.take_standard_output()!;
@@ -553,7 +553,7 @@ test_process_take_already_taken() `test(exclude: "wasm32") {
   p.wait()!;
 }
 
-test_process_writer_interface() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_writer_interface() `test(exclude: "wasm32") {
   // Verify ProcessInput write_line works end-to-end
   Process p = Process.spawn("cat")!;
   ProcessInput stdin = p.take_standard_input()!;
@@ -624,7 +624,7 @@ test_process_take_stderr_twice() `test(exclude: "wasm32") {
   p.wait()!;
 }
 
-test_process_spawn_variadic() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_spawn_variadic() `test(exclude: "wasm32") {
   // Variadic inline args (not string[])
   Process p = Process.spawn("echo", "one", "two", "three")!;
   ProcessOutput stdout = p.take_standard_output()!;
@@ -640,7 +640,7 @@ test_process_nonzero_exit() `test(exclude: "wasm32") {
   assert(code == 42, "should capture exit code 42");
 }
 
-test_process_multiple_writes() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_multiple_writes() `test(exclude: "wasm32") {
   Process p = Process.spawn("cat")!;
   ProcessInput stdin = p.take_standard_input()!;
   ProcessOutput stdout = p.take_standard_output()!;
@@ -678,7 +678,7 @@ _drop_process_input(Process ~p)! {
   // stdin goes out of scope without explicit close — drop should handle it
 }
 
-test_process_input_drop_auto_closes() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_input_drop_auto_closes() `test(exclude: "wasm32") {
   Process p = Process.spawn("cat")!;
   _drop_process_input(p)!;
   ProcessOutput stdout = p.take_standard_output()!;
@@ -699,7 +699,7 @@ test_process_wait_auto_closes_stdin() `test(exclude: "wasm32") {
   assert(out.len == 0, "no input was written");
 }
 
-test_process_sequential_spawns() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_sequential_spawns() `test(exclude: "wasm32") {
   // Verify TLS globals reset between sequential Process.spawn calls
   Process p1 = Process.spawn("echo", "first")!;
   ProcessOutput stdout1 = p1.take_standard_output()!;
@@ -715,7 +715,7 @@ test_process_sequential_spawns() `test(allow_leaks: true, exclude: "wasm32") {
   assert(out2.trim() == "second", "second spawn output should be correct");
 }
 
-test_process_stdout_and_stderr_concurrent() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_stdout_and_stderr_concurrent() `test(exclude: "wasm32") {
   // Read both stdout and stderr from the same process
   Process p = Process.spawn("sh", "-c", "echo out; echo err >&2")!;
   ProcessOutput stdout = p.take_standard_output()!;
@@ -739,7 +739,7 @@ _read_from_reader(Reader ~r) string! {
   return string.from_bytes(buf[0:n]);
 }
 
-test_process_input_structural_writer() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_input_structural_writer() `test(exclude: "wasm32") {
   Process p = Process.spawn("cat")!;
   ProcessInput stdin = p.take_standard_input()!;
   ProcessOutput stdout = p.take_standard_output()!;
@@ -753,7 +753,7 @@ test_process_input_structural_writer() `test(allow_leaks: true, exclude: "wasm32
   assert(out == "structural", "should receive what was written via Writer interface");
 }
 
-test_process_output_structural_reader() `test(allow_leaks: true, exclude: "wasm32") {
+test_process_output_structural_reader() `test(exclude: "wasm32") {
   Process p = Process.spawn("echo", "from_reader")!;
   ProcessOutput stdout = p.take_standard_output()!;
 

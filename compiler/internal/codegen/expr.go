@@ -127,6 +127,13 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 			}
 			if rt != nil && extractNamed(rt) == types.TypString {
 				c.trackStringTemp(result)
+			} else if rt != nil && extractNamed(rt) == types.TypVector {
+				// B0223: Track vector slice results as heap temps. Vector slicing
+				// allocates a new heap vector. Without tracking, the slice result
+				// leaks when used as an intermediate (e.g., in string.from_bytes).
+				if fn := c.funcs["Vector.drop"]; fn != nil {
+					c.trackHeapTemp(result, fn)
+				}
 			}
 		}
 		return result

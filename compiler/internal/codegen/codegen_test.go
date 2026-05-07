@@ -1295,6 +1295,20 @@ func TestStringFromBytesMasksStaticFlag(t *testing.T) {
 	assertContains(t, ir, "call i8* @promise_string_new(")
 }
 
+// B0223: Vector slice intermediate in from_bytes must be tracked as a heap temp
+// and dropped at statement end (via Vector.drop).
+func TestVectorSliceTempDroppedInFromBytes(t *testing.T) {
+	ir := generateIR(t, `
+		take(string s) {}
+		main() {
+			u8[] buf = u8[].filled(65u8, 10);
+			take(string.from_bytes(buf[0:5]));
+		}
+	`)
+	// The vector slice result should be dropped via Vector.drop at statement end
+	assertContains(t, ir, "call void @Vector.drop(")
+}
+
 func TestLLVMMemcpyDeclared(t *testing.T) {
 	ir := generateIR(t, `main() { x := 42; }`)
 	assertContains(t, ir, "declare void @llvm.memcpy.p0i8.p0i8.i64(")

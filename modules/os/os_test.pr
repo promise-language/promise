@@ -1,10 +1,10 @@
 // Tests for os module: env vars, working dir, exit, args, executable_path, execute.
-test_get_env_var_path() `test(allow_leaks: true, exclude: "wasm32") {
+test_get_env_var_path() `test(exclude: "wasm32") {
   string? path = get_env_var("PATH");
   assert(path is present, "PATH should be present");
 }
 
-test_get_env_var_home() `test(allow_leaks: true, exclude: "wasm32") {
+test_get_env_var_home() `test(exclude: "wasm32") {
   string? home = get_env_var("HOME");
   assert(home is present, "HOME should be present");
   if h := home {
@@ -17,7 +17,7 @@ test_get_env_var_absent() `test(exclude: "wasm32") {
   assert(val is absent, "absent variable returns none");
 }
 
-test_get_env_var_unwrap() `test(allow_leaks: true, exclude: "wasm32") {
+test_get_env_var_unwrap() `test(exclude: "wasm32") {
   string? path = get_env_var("PATH");
   if p := path {
     assert(p.len > 0, "PATH value should be non-empty");
@@ -26,7 +26,7 @@ test_get_env_var_unwrap() `test(allow_leaks: true, exclude: "wasm32") {
   }
 }
 
-test_get_env_var_empty_value() `test(allow_leaks: true, exclude: "wasm32") {
+test_get_env_var_empty_value() `test(exclude: "wasm32") {
   // PROMISE_EMPTY_TEST_VAR is set to "" by the test harness setup below.
   // We can't set env vars from Promise yet, so test using a var that is
   // commonly empty or use PATH which is guaranteed present and non-empty.
@@ -337,7 +337,7 @@ test_execute_inherits_cwd() `test(allow_leaks: true, exclude: "wasm32") {
 
 // ── set_env_var tests ──────────────────────────────────────────
 
-test_set_env_var_new() `test(allow_leaks: true, exclude: "wasm32") {
+test_set_env_var_new() `test(exclude: "wasm32") {
   // Set a new variable and read it back
   set_env_var("PROMISE_TEST_SET_ENV_1", "hello");
   string? val = get_env_var("PROMISE_TEST_SET_ENV_1");
@@ -347,7 +347,7 @@ test_set_env_var_new() `test(allow_leaks: true, exclude: "wasm32") {
   }
 }
 
-test_set_env_var_overwrite() `test(allow_leaks: true, exclude: "wasm32") {
+test_set_env_var_overwrite() `test(exclude: "wasm32") {
   // Set, then overwrite with a different value
   set_env_var("PROMISE_TEST_SET_ENV_2", "first");
   set_env_var("PROMISE_TEST_SET_ENV_2", "second");
@@ -359,7 +359,7 @@ test_set_env_var_overwrite() `test(allow_leaks: true, exclude: "wasm32") {
   }
 }
 
-test_set_env_var_empty() `test(allow_leaks: true, exclude: "wasm32") {
+test_set_env_var_empty() `test(exclude: "wasm32") {
   // Set to empty string — should be present but empty
   set_env_var("PROMISE_TEST_SET_ENV_3", "");
   string? val = get_env_var("PROMISE_TEST_SET_ENV_3");
@@ -369,7 +369,7 @@ test_set_env_var_empty() `test(allow_leaks: true, exclude: "wasm32") {
   }
 }
 
-test_set_env_var_unset() `test(allow_leaks: true, exclude: "wasm32") {
+test_set_env_var_unset() `test(exclude: "wasm32") {
   // Set a variable then unset it
   set_env_var("PROMISE_TEST_SET_ENV_4", "temp");
   string? val1 = get_env_var("PROMISE_TEST_SET_ENV_4");
@@ -415,7 +415,7 @@ test_set_working_dir_nonexistent() `test(exclude: "wasm32") {
   assert(got_error, "set_working_dir to nonexistent path should raise error");
 }
 
-test_set_working_dir_preserves_env() `test(allow_leaks: true, exclude: "wasm32") {
+test_set_working_dir_preserves_env() `test(exclude: "wasm32") {
   // Verify that changing cwd doesn't affect environment variables
   set_env_var("PROMISE_TEST_CWD_ENV", "keep");
   string original = working_dir!;
@@ -817,7 +817,7 @@ test_home_dir_absolute() `test(exclude: "wasm32") {
   assert(home.starts_with("/"), "home_dir should be an absolute path");
 }
 
-test_home_dir_matches_env() `test(allow_leaks: true, exclude: "wasm32") {
+test_home_dir_matches_env() `test(exclude: "wasm32") {
   string home = home_dir;
   string? env_home = get_env_var("HOME");
   if h := env_home {
@@ -835,7 +835,7 @@ test_hostname_no_newline() `test(exclude: "wasm32") {
   assert(!host.contains("\n"), "hostname should not contain newline");
 }
 
-test_user_name_matches_env() `test(allow_leaks: true, exclude: "wasm32") {
+test_user_name_matches_env() `test(exclude: "wasm32") {
   string name = user_name;
   string? env_user = get_env_var("USER");
   if u := env_user {

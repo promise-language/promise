@@ -61,7 +61,7 @@ type Cat is Animal {
   }
 }
 
-optional_user_type_is_subtype() `test(allow_leaks: true) {
+optional_user_type_is_subtype() `test {
   Animal d = Dog(name: "Rex");
   Animal? a = d;
   Animal? n = none;
@@ -143,7 +143,7 @@ optional_is_type_matches_is_present() `test {
 
 // --- Base type check on polymorphic optional ---
 
-optional_user_type_is_base() `test(allow_leaks: true) {
+optional_user_type_is_base() `test {
   Animal d = Dog(name: "Rex");
   Animal? a = d;
   Animal? n = none;

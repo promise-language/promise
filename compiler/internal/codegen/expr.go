@@ -3439,12 +3439,13 @@ func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param)
 		argVals = append(argVals, v)
 		argTypes = append(argTypes, c.info.Types[arg.Value])
 		// T0087: For ~ (move) params, transfer ownership to callee.
-		// Clear caller's drop flag and claim string temps so they're not double-freed.
+		// Clear caller's drop flag and claim string/heap temps so they're not double-freed.
 		if i < len(params) && params[i].Ref() == types.RefMut {
 			if ident, ok := arg.Value.(*ast.IdentExpr); ok {
 				c.clearDropFlag(ident.Name)
 			}
 			c.claimStringTemp(v)
+			c.claimHeapTemp(v) // B0201: prevent double-free for vector literals passed to ~ params
 		}
 		// B0203: Variadic passthrough — set static flag (bit 63) on the vector's
 		// len field so the callee's scope-exit drop skips element drops and buffer free.
@@ -3453,7 +3454,11 @@ func (c *Compiler) genCallArgsWithMutRef(args []*ast.Arg, params []*types.Param)
 		// Skip if the vector is already static (.rodata) — the memory is read-only
 		// and bit 63 is already set, so the callee's drop will skip anyway.
 		if i < len(params) && params[i].IsVariadic() {
-			if _, isArrayLit := arg.Value.(*ast.ArrayLit); !isArrayLit {
+			if _, isArrayLit := arg.Value.(*ast.ArrayLit); isArrayLit {
+				// B0201: Claim the heap temp for freshly synthesized variadic vectors.
+				// The callee takes ownership and drops the vector at scope exit.
+				c.claimHeapTemp(v)
+			} else {
 				headerType := vectorHeaderType()
 				headerPtr := c.block.NewBitCast(v, irtypes.NewPointer(headerType))
 				lenPtr := c.block.NewGetElementPtr(headerType, headerPtr,
@@ -4709,6 +4714,21 @@ func (c *Compiler) genArrayLit(e *ast.ArrayLit) value.Value {
 	// malloc
 	rawPtr := c.block.NewCall(c.palAlloc,
 		constant.NewInt(irtypes.I64, totalSize))
+
+	// B0201: Track the vector allocation as a heap temp so that if a failable
+	// element evaluation triggers error auto-propagation, the vector is freed.
+	// Only track when at least one element has auto-propagation, to avoid
+	// interfering with normal vector lifecycle in non-failable contexts.
+	hasFailableElem := false
+	for _, elemExpr := range e.Elements {
+		if c.info.AutoPropagateExprs[elemExpr] {
+			hasFailableElem = true
+			break
+		}
+	}
+	if hasFailableElem {
+		c.trackHeapTemp(rawPtr, c.palFree)
+	}
 
 	// Store len and cap via header GEP
 	headerType := vectorHeaderType()

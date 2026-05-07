@@ -13054,6 +13054,29 @@ func TestVariadicPassthroughStaticFlag(t *testing.T) {
 	assertContains(t, ir, "vecdrop.nonstatic")
 }
 
+func TestVariadicVectorHeapTempOnFailableArg(t *testing.T) {
+	// B0201: When a failable arg inside a variadic call fails, the vector
+	// allocated for variadic args must be freed on the error path.
+	ir := generateIR(t, `
+		sum(...int nums) int {
+			int total = 0;
+			for n in nums { total += n; }
+			return total;
+		}
+		parse(string s) int! {
+			raise error(message: s);
+		}
+		foo() int! {
+			return sum(parse("a"), parse("b"));
+		}
+		main() { foo()!; }
+	`)
+	// The variadic vector should be tracked as a heap temp (pal_alloc + store to alloca)
+	// and freed on the error propagation path (err.heap.drop block calls pal_free)
+	assertContains(t, ir, "err.heap.drop")
+	assertContains(t, ir, "call void @pal_free")
+}
+
 // --- Numeric Suffix Tests ---
 
 func TestNumericSuffixU8IR(t *testing.T) {

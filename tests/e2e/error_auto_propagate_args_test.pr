@@ -281,7 +281,7 @@ try_variadic_fail() bool {
   return false;
 }
 
-test_variadic_arg_fail() `test(allow_leaks: true) {
+test_variadic_arg_fail() `test {
   assert(try_variadic_fail(), "failable variadic arg propagates error");
 }
 
@@ -536,7 +536,7 @@ try_single_variadic_fail() bool {
   return false;
 }
 
-test_single_variadic_fail() `test(allow_leaks: true) {
+test_single_variadic_fail() `test {
   assert(try_single_variadic_fail(), "single failable variadic arg propagates");
 }
 

@@ -55,9 +55,7 @@ test_optional_field_unwrap_owner_still_valid() `test {
   string val = w.opt_name!;
   assert(val == "abcdef", "unwrapped value matches");
   // w is still alive — its field and val should both be valid (independent copies)
-  // B0190: inline w.opt_name! in expression crashes — use variable instead
-  string val2 = w.opt_name!;
-  assert(val2 == "abcdef", "original field still valid after unwrap");
+  assert(w.opt_name! == "abcdef", "original field still valid after unwrap");
 }
 
 test_optional_field_unwrap_multi_field() `test {
@@ -65,4 +63,36 @@ test_optional_field_unwrap_multi_field() `test {
   string val = m.extra!;
   assert(val == "extra data", "unwrapped optional matches");
   assert(m.name == "main!", "non-optional field still valid");
+}
+
+// --- B0190: Inline optional unwrap must not track field string as temp ---
+
+test_inline_optional_unwrap_dynamic() `test {
+  Wrapper w = Wrapper(opt_name: "abc" + "def");
+  assert(w.opt_name! == "abcdef", "inline unwrap dynamic string");
+}
+
+test_inline_optional_unwrap_field_access() `test {
+  Wrapper w = Wrapper(opt_name: "hello" + " world");
+  int len = w.opt_name!.len;
+  assert(len == 11, "inline unwrap field access");
+}
+
+test_inline_optional_unwrap_concat() `test {
+  Wrapper w = Wrapper(opt_name: "hello" + " ");
+  string result = w.opt_name! + "world";
+  assert(result == "hello world", "inline unwrap in concat");
+}
+
+// B0190: Ensure optionalFieldString flag doesn't leak across statements.
+// A field access on one statement must not suppress temp tracking on the next.
+make_string() string! {
+  return "hello" + " world";
+}
+
+test_field_access_then_failable_unwrap() `test {
+  Wrapper w = Wrapper(opt_name: "abc");
+  string? maybe = w.opt_name;
+  string val = make_string()!;
+  assert(val == "hello world", "failable unwrap after field access");
 }

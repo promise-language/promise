@@ -162,6 +162,8 @@ type Compiler struct {
 	stmtTempMap          map[value.Value]int // SSA value → index in stmtTemps (-1 = claimed)
 	tempTrackingEnabled  bool                // T0084: true in free functions + user method bodies
 	dupStringFieldAccess bool                // T0095: when true, genFieldAccess dups string fields from droppable types
+	optionalStringDup    value.Value         // B0190: pending dup from B0181 optional path; consumed by genOptionalForceUnwrap
+	optionalFieldString  bool                // B0190: set by genFieldAccess when loading a string? field from a droppable type
 
 	// T0088: Statement-level tracking for heap-allocated droppable instances.
 	// Tracks constructor results (e.g., _FnIter[T]) in iterator chains and drops

@@ -78,13 +78,21 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		// T0111: Only track when the unwrapped type is actually string — not all
 		// i8* values are strings (vectors, channels also use i8*). For optional
 		// unwraps, check the inner type; for error unwraps, check the result type.
+		// B0190: Skip tracking when the unwrapped string comes from a field on a
+		// droppable type (signaled by optionalFieldString). The owner's drop
+		// handles the string's lifetime — tracking would free it as a temp while
+		// the owner still holds it.
 		if result != nil && result.Type() == irtypes.I8Ptr {
 			exprType := c.info.Types[e]
 			if c.typeSubst != nil && exprType != nil {
 				exprType = types.Substitute(exprType, c.typeSubst)
 			}
 			if extractNamed(exprType) == types.TypString {
-				c.trackStringTemp(result)
+				if c.optionalFieldString {
+					c.optionalFieldString = false
+				} else {
+					c.trackStringTemp(result)
+				}
 			}
 		}
 		return result
@@ -2689,29 +2697,38 @@ func (c *Compiler) genFieldAccess(e *ast.MemberExpr, typ types.Type, field *type
 	// Only dup when the caller needs ownership (VarDecl, block result, etc.),
 	// signaled by c.dupStringFieldAccess. Temporary uses (comparisons, function
 	// args) don't dup — the type is alive during the expression evaluation.
-	if c.dupStringFieldAccess && c.tempTrackingEnabled {
+	if c.tempTrackingEnabled {
 		fType := field.Type()
 		if c.typeSubst != nil {
 			fType = types.Substitute(fType, c.typeSubst)
 		}
 		ownerNamed := extractNamed(typ)
-		if extractNamed(fType) == types.TypString && ownerNamed != nil && ownerNamed.HasDrop() {
-			c.dupStringFieldAccess = false // consume the flag
-			dup := c.dupString(val)
-			c.trackStringTemp(dup)
-			return dup
+		if c.dupStringFieldAccess {
+			if extractNamed(fType) == types.TypString && ownerNamed != nil && ownerNamed.HasDrop() {
+				c.dupStringFieldAccess = false // consume the flag
+				dup := c.dupString(val)
+				c.trackStringTemp(dup)
+				return dup
+			}
+			// B0181: Handle string? optional fields — extractNamed returns nil for
+			// *types.Optional, so unwrap first to check the inner type.
+			// B0190: Track the dup as a temp AND store it in optionalStringDup so
+			// genOptionalForceUnwrap can return it directly (bypassing extractvalue
+			// which creates a different value.Value that claimStringTemp can't match).
+			if opt, ok := fType.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString && ownerNamed != nil && ownerNamed.HasDrop() {
+				c.dupStringFieldAccess = false // consume the flag
+				innerStr := c.block.NewExtractValue(val, 1)
+				dup := c.dupString(innerStr)
+				c.trackStringTemp(dup)
+				c.optionalStringDup = dup
+				return c.block.NewInsertValue(val, dup, 1)
+			}
 		}
-		// B0181: Handle string? optional fields — extractNamed returns nil for
-		// *types.Optional, so unwrap first to check the inner type.
-		// Don't trackStringTemp here: the dup flows through genOptionalForceUnwrap's
-		// extractvalue, producing a different LLVM value that claimStringTemp can't match.
-		// The caller (VarDecl) assigns the unwrapped string to a variable with its own
-		// drop flag, so temp tracking is unnecessary.
+		// B0190: Signal that this field access loaded a string? field from a
+		// droppable type. genOptionalForceUnwrap's result should NOT be tracked
+		// as a temp (the owner's drop handles the string's lifetime).
 		if opt, ok := fType.(*types.Optional); ok && extractNamed(opt.Elem()) == types.TypString && ownerNamed != nil && ownerNamed.HasDrop() {
-			c.dupStringFieldAccess = false // consume the flag
-			innerStr := c.block.NewExtractValue(val, 1)
-			dup := c.dupString(innerStr)
-			return c.block.NewInsertValue(val, dup, 1)
+			c.optionalFieldString = true
 		}
 	}
 
@@ -6061,6 +6078,14 @@ func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
 	c.block.NewUnreachable()
 
 	c.block = okBlock
+	// B0190: If genFieldAccess (B0181) created a dup for the inner string,
+	// return the dup directly instead of extractvalue. This preserves the
+	// value.Value identity so claimStringTemp can match it in VarDecl.
+	if c.optionalStringDup != nil {
+		dup := c.optionalStringDup
+		c.optionalStringDup = nil
+		return dup
+	}
 	var result value.Value
 	result = c.block.NewExtractValue(optVal, 1)
 
@@ -6070,10 +6095,6 @@ func (c *Compiler) genOptionalForceUnwrap(expr ast.Expr) value.Value {
 	if ident, ok := expr.(*ast.IdentExpr); ok {
 		c.clearDropFlag(ident.Name)
 	}
-
-	// Note: dup for field access unwrap (w.opt_field!) is handled by the
-	// dupStringFieldAccess mechanism in genTypedVarDecl/genInferredVarDecl,
-	// which dups the string during field access before the unwrap extracts it.
 
 	return result
 }

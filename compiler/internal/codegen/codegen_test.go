@@ -9439,6 +9439,23 @@ func TestOptionalStringFieldUnwrapDup(t *testing.T) {
 	assertContains(t, ir, "call i8* @promise_string_new(")
 }
 
+// B0190: Inline optional unwrap must not track field string as a temp.
+// The unwrapped i8* from `w.opt_name!` is a field reference (not a new allocation),
+// so tracking it would cause the field's string to be freed at statement end.
+func TestInlineOptionalUnwrapNoTempTrack(t *testing.T) {
+	// This should compile without errors. At runtime, the inline unwrap
+	// must not free the field string as a temp — only Wrapper.drop should.
+	generateIR(t, `
+		type Wrapper {
+			string? opt_name;
+		}
+		test() {
+			w := Wrapper(opt_name: "hello");
+			bool b = w.opt_name! == "hello";
+		}
+	`)
+}
+
 // T0095: Constructor with borrowed string param (no drop flag) dups the string
 func TestConstructorDupBorrowedString(t *testing.T) {
 	ir := generateIR(t, `

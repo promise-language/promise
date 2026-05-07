@@ -1648,6 +1648,10 @@ func (c *Compiler) claimStringTemp(val value.Value) {
 // cleanupStmtTemps drops all unclaimed string temps at statement end (T0073).
 // For each temp: check flag → null-check ptr → call promise_string_drop.
 func (c *Compiler) cleanupStmtTemps() {
+	// B0190: Clear per-statement flags that must not leak across statements.
+	// Done before early returns so flags are always reset.
+	c.optionalFieldString = false
+	c.optionalStringDup = nil
 	if len(c.stmtTemps) == 0 {
 		return
 	}

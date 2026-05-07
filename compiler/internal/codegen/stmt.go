@@ -620,6 +620,11 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	c.block.NewStore(val, alloca)
 	c.locals[s.Name] = alloca
 	c.maybeRegisterDrop(s.Name, alloca, typ)
+	// B0226: Register optional drop for inferred optional locals (r := factory_returning_optional()).
+	// Without this, optional values from inferred declarations leak their inner value at scope exit.
+	if opt, ok := typ.(*types.Optional); ok {
+		c.maybeRegisterOptionalDrop(s.Name, alloca, opt)
+	}
 	// T0127: Register bindingFree for structural interface variables owning a heap allocation.
 	c.maybeRegisterStructuralFree(s.Name, alloca, typ, s.Value)
 	// Clear drop flag when RHS is a borrow (container element, field access).
@@ -1083,6 +1088,11 @@ func (c *Compiler) maybeRegisterStructuralFree(varName string, alloca *ir.InstAl
 // fields (message + child-specific fields like key). The drop flag enables proper
 // handling of re-raise (genRaiseStmt clears it, T0086).
 // concreteType is the resolved type — may be *types.Named or *types.Instance for generics.
+//
+// B0226: For untyped catches (concreteType == types.TypError), uses RTTI-based dispatch:
+// loads the drop function pointer from the typeinfo (field 1) of the actual error
+// instance at runtime, enabling correct drop for generic error subtypes like
+// GenericError[Point] even when caught as bare `error`.
 func (c *Compiler) registerErrorDrop(varName string, alloca *ir.InstAlloca, concreteType types.Type) {
 	dropFlag := c.createEntryAlloca(irtypes.I1)
 	dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
@@ -1094,10 +1104,27 @@ func (c *Compiler) registerErrorDrop(varName string, alloca *ir.InstAlloca, conc
 		concreteNamed = types.TypError
 	}
 
+	// B0226: For untyped catches where the concrete type is the base error type,
+	// use RTTI-based dispatch to call the actual error subtype's drop at runtime.
+	// This handles cases like GenericError[Point] caught via untyped `? e { ... }`.
+	if concreteNamed == types.TypError {
+		binding := scopeBinding{
+			kind:     bindingDrop,
+			alloca:   alloca,
+			named:    concreteNamed,
+			valType:  concreteNamed,
+			dropFlag: dropFlag,
+			rttiDrop: true,
+			varName:  varName,
+		}
+		c.scopeBindings = append(c.scopeBindings, binding)
+		c.dropBindings[varName] = binding
+		return
+	}
+
 	// Resolve the drop function for the concrete error type (T0110).
 	// For typed catches, this is the child type's drop (e.g., NotFoundError.drop).
 	// For generic instances (e.g., AppError[int]), use the monomorphized name.
-	// For untyped catches, this is the base error.drop.
 	var ownerName string
 	if inst, ok := concreteType.(*types.Instance); ok {
 		ownerName = monoName(inst)
@@ -1567,7 +1594,12 @@ func (c *Compiler) emitDropCallDirect(b scopeBinding) {
 	c.block.NewCondBr(nullCheck, dropDoneBlock, dropExecBlock)
 
 	c.block = dropExecBlock
-	if b.dropFunc != nil {
+	if b.rttiDrop {
+		// B0226: RTTI-based drop dispatch for untyped error catches.
+		// Load the drop function pointer from the error instance's typeinfo (field 1)
+		// and call it. The drop function handles pal_free internally.
+		c.emitRttiDropDispatch(instance)
+	} else if b.dropFunc != nil {
 		c.block.NewCall(b.dropFunc, instance)
 	} else if b.named != nil {
 		vtableRaw := c.extractVtablePtr(val)
@@ -1589,12 +1621,59 @@ func (c *Compiler) emitDropCallDirect(b scopeBinding) {
 	// Only for types with explicit drop — synthesized drops (B0158/B0160/B0202) are
 	// deferred until ownership tracking prevents aliasing issues.
 	// Container types are excluded — their drop already frees the buffer.
-	if !isContainerType(b.valType) && b.named != nil && !b.named.NeedsSynthDrop() && !b.monoSynthDrop {
+	// B0226: rttiDrop dispatch calls the concrete drop which handles pal_free internally.
+	if !b.rttiDrop && !isContainerType(b.valType) && b.named != nil && !b.named.NeedsSynthDrop() && !b.monoSynthDrop {
 		c.block.NewCall(c.palFree, instance)
 	}
 	c.block.NewBr(dropDoneBlock)
 
 	c.block = dropDoneBlock
+}
+
+// emitRttiDropDispatch loads the drop function pointer from the error instance's
+// typeinfo and calls it. Falls back to base error.drop if the typeinfo drop_fn_ptr
+// is null.
+// B0226: Enables correct drop for generic error subtypes (e.g., GenericError[Point])
+// caught via untyped error handlers (? e { ... }).
+func (c *Compiler) emitRttiDropDispatch(instance value.Value) {
+	// Load variant pointer from instance (field 0 of instance struct)
+	variantPtr := c.loadVariantPtr(instance)
+
+	// Typeinfo struct type (only need first 2 fields for drop_fn_ptr access)
+	typeinfoType := irtypes.NewStruct(
+		irtypes.I8Ptr, // field 0: vtable_ptr
+		irtypes.I8Ptr, // field 1: drop_fn_ptr
+	)
+
+	// Load drop_fn_ptr (field 1 of typeinfo)
+	typedPtr := c.block.NewBitCast(variantPtr, irtypes.NewPointer(typeinfoType))
+	dropFnPtr := c.block.NewGetElementPtr(typeinfoType, typedPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	dropFn := c.block.NewLoad(irtypes.I8Ptr, dropFnPtr)
+
+	// If non-null, call the concrete drop; otherwise fall back to base error.drop
+	isNull := c.block.NewICmp(enum.IPredEQ, dropFn, constant.NewNull(irtypes.I8Ptr))
+	callBlock := c.newBlock("rtti.drop.call")
+	fallbackBlock := c.newBlock("rtti.drop.fallback")
+	doneBlock := c.newBlock("rtti.drop.done")
+	c.block.NewCondBr(isNull, fallbackBlock, callBlock)
+
+	// Concrete drop via typeinfo
+	c.block = callBlock
+	dropFnType := irtypes.NewFunc(irtypes.Void, irtypes.I8Ptr)
+	typedFn := c.block.NewBitCast(dropFn, irtypes.NewPointer(dropFnType))
+	c.block.NewCall(typedFn, instance)
+	c.block.NewBr(doneBlock)
+
+	// Fallback: base error.drop
+	c.block = fallbackBlock
+	baseDropName := mangleMethodName("__mod_std_error", "drop", false)
+	if baseDropFn, ok := c.funcs[baseDropName]; ok {
+		c.block.NewCall(baseDropFn, instance)
+	}
+	c.block.NewBr(doneBlock)
+
+	c.block = doneBlock
 }
 
 // dropDiscardedOptional handles B0196/B0208: when an ExprStmt discards an

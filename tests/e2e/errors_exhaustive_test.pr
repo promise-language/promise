@@ -656,7 +656,7 @@ catch_generic_point_msg() string {
   return "";
 }
 
-test_generic_error_user_type() `test(allow_leaks: true) {
+test_generic_error_user_type() `test {
   string msg = catch_generic_point_msg();
   assert(msg == "point error", "generic error[Point] message works");
 }

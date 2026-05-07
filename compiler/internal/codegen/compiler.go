@@ -370,6 +370,7 @@ type scopeBinding struct {
 	dropFlag        *ir.InstAlloca // i1: true=should drop (nil for close bindings)
 	varName         string         // variable name (for drop flag lookup)
 	monoSynthDrop   bool           // B0202: mono-time synthesized drop (skip post-drop pal_free)
+	rttiDrop        bool           // B0226: dispatch drop via RTTI typeinfo drop_fn_ptr
 	// Generator cleanup
 	generatorHandle *ir.InstAlloca // coro handle alloca (for destroy)
 	generatorSlot   *ir.InstAlloca // yield slot alloca (for free)

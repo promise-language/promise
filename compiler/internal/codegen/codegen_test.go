@@ -16110,3 +16110,66 @@ func TestGenericCombinatorInVariable(t *testing.T) {
 	assertContains(t, ir, "free.call")
 	assertContains(t, ir, "__promise_iter_cleanup")
 }
+
+// B0226: Typeinfo should include drop_fn_ptr at field 1.
+func TestTypeInfoDropFnPtr(t *testing.T) {
+	ir := generateIR(t, `
+		type Droppable {
+			int x;
+			drop(~this) {}
+		}
+		main() {
+			Droppable d = Droppable(x: 1);
+		}
+	`)
+	// Typeinfo should reference the drop function
+	assertContains(t, ir, "promise_typeinfo_Droppable")
+	assertContains(t, ir, "@Droppable.drop")
+}
+
+// B0226: Inferred optional declaration should register optional drop.
+func TestInferredOptionalDrop(t *testing.T) {
+	ir := generateIR(t, `
+		type Box {
+			int value;
+			new(~this, int v) { this.value = v; }
+			try_make(int v, bool ok) Self? `+"`factory"+` {
+				if !ok { return none; }
+				return Self(v: v);
+			}
+		}
+		main() {
+			r := Box.try_make(v: 10, ok: true);
+		}
+	`)
+	// B0226: Inferred optional should register drop (optdrop block)
+	assertContains(t, ir, "optdrop")
+}
+
+// B0226: Untyped error handler should use RTTI-based drop dispatch.
+func TestUntypedErrorRttiDrop(t *testing.T) {
+	ir := generateIR(t, `
+		type MyError is error { int code; }
+		fail_my() void! { raise MyError(message: "err", code: 42); }
+		main() {
+			fail_my()? e {
+			};
+		}
+	`)
+	// B0226: Should emit RTTI-based drop dispatch (loads drop fn from typeinfo)
+	assertContains(t, ir, "rtti.drop")
+}
+
+// B0226: promise_type_is should use updated field indices (typeID at field 2).
+func TestTypeIsFieldIndicesB0226(t *testing.T) {
+	ir := generateIR(t, `
+		type Animal { string name; speak(&this) string `+"`abstract"+`; }
+		type Dog is Animal { speak(&this) string { return "woof"; } }
+		main() {
+			Animal a = Dog(name: "Rex");
+			if a is Dog { }
+		}
+	`)
+	assertContains(t, ir, "define i32 @promise_type_is")
+	assertContains(t, ir, "call i32 @promise_type_is")
+}

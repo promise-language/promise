@@ -197,7 +197,7 @@ type MaybeBox[T] {
   }
 }
 
-test_self_optional_factory_some() `test(allow_leaks: true) {
+test_self_optional_factory_some() `test {
   r := MaybeBox[int].try_wrap(v: 10, succeed: true);
   assert(r is present, "should be present");
 }

@@ -66,19 +66,33 @@ func isDroppableContainerOrString(typ types.Type) bool {
 // string field from a type with HasDrop(). In that case, genFieldAccess dups the
 // string (T0095), so the result is an owned copy, not a borrow.
 func (c *Compiler) isStringFieldDup(expr ast.Expr, dropType types.Type) bool {
-	member, ok := expr.(*ast.MemberExpr)
-	if !ok {
-		return false
-	}
 	if extractNamed(dropType) != types.TypString {
 		return false
 	}
-	targetType := c.info.Types[member.Target]
-	if c.typeSubst != nil {
-		targetType = types.Substitute(targetType, c.typeSubst)
+	// MemberExpr: field access on droppable type → string is dup'd by dupStringFieldAccess.
+	if member, ok := expr.(*ast.MemberExpr); ok {
+		targetType := c.info.Types[member.Target]
+		if c.typeSubst != nil {
+			targetType = types.Substitute(targetType, c.typeSubst)
+		}
+		ownerNamed := extractNamed(targetType)
+		return ownerNamed != nil && ownerNamed.HasDrop()
 	}
-	ownerNamed := extractNamed(targetType)
-	return ownerNamed != nil && ownerNamed.HasDrop()
+	// B0204: IndexExpr on Vector[string] → string is dup'd by dup-on-read in genVectorIndex.
+	if idx, ok := expr.(*ast.IndexExpr); ok {
+		targetType := c.info.Types[idx.Target]
+		if c.typeSubst != nil {
+			targetType = types.Substitute(targetType, c.typeSubst)
+		}
+		if elem, isVec := types.AsVector(targetType); isVec {
+			resolvedElem := elem
+			if c.typeSubst != nil {
+				resolvedElem = types.Substitute(resolvedElem, c.typeSubst)
+			}
+			return extractNamed(resolvedElem) == types.TypString
+		}
+	}
+	return false
 }
 
 // isStringBorrowExpr returns true if the expression borrows an existing value
@@ -435,7 +449,8 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 		}
 	}
 	// T0073: Claim string temp — ownership transferred to this variable.
-	if exprType != nil && extractNamed(exprType) == types.TypString {
+	// B0204: Use resolvedExprType (substituted) so that generic T=string is handled.
+	if resolvedExprType != nil && extractNamed(resolvedExprType) == types.TypString {
 		c.claimStringTemp(val)
 	}
 	// T0088: Claim heap temp — ownership transferred to this variable.
@@ -449,6 +464,12 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	dropType := declType
 	if dropType == nil {
 		dropType = exprType
+	}
+	// B0204: In monomorphized generic code, dropType may be a TypeParam (e.g., T).
+	// Substitute to the concrete type so maybeRegisterDrop can register the correct
+	// drop binding (e.g., string drop when T=string).
+	if c.typeSubst != nil && dropType != nil {
+		dropType = types.Substitute(dropType, c.typeSubst)
 	}
 	c.maybeRegisterDrop(s.Name, alloca, dropType)
 	// T0111: Register optional drop for explicitly declared optional locals (string? s = ...).
@@ -4496,10 +4517,16 @@ func (c *Compiler) genVectorIndexAssign(target *ast.IndexExpr, elemType types.Ty
 
 	if op == ast.OpAssign {
 		// B0195: New value is dup'd at the call site (like push, B0189) so the
-		// vector owns an independent copy. We do NOT drop the old element here
-		// because it may still be aliased by a local variable (e.g., swap pattern:
-		// tmp = vec[i]; vec[i] = vec[j]; vec[j] = tmp). Dropping old elements
-		// safely requires dup-on-read infrastructure — tracked separately.
+		// vector owns an independent copy.
+		// B0204: Drop old string element before storing new value. This is safe
+		// because dup-on-read (B0204 in genVectorIndex) ensures any local variable
+		// that captured the old value via vec[i] owns an independent copy.
+		if extractNamed(elemType) == types.TypString {
+			if dropFn, ok := c.funcs["promise_string_drop"]; ok {
+				oldVal := c.block.NewLoad(elemLLVM, elemPtr)
+				c.block.NewCall(dropFn, oldVal)
+			}
+		}
 		c.block.NewStore(val, elemPtr)
 		return
 	}

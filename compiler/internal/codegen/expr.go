@@ -5180,7 +5180,20 @@ func (c *Compiler) genVectorIndex(e *ast.IndexExpr, elemType types.Type) value.V
 		constant.NewInt(irtypes.I64, int64(vectorHeaderSize)))
 	dataTypedPtr := c.block.NewBitCast(dataBase, irtypes.NewPointer(elemLLVM))
 	elemPtr := c.block.NewGetElementPtr(elemLLVM, dataTypedPtr, idx)
-	return c.block.NewLoad(elemLLVM, elemPtr)
+	val := c.block.NewLoad(elemLLVM, elemPtr)
+
+	// B0204: Dup-on-read for Vector[string] index access. When the result will
+	// be stored in a variable (signaled by dupStringFieldAccess), dup the string
+	// so the variable owns an independent copy. This makes it safe to drop old
+	// elements on overwrite without use-after-free through aliased locals.
+	if c.dupStringFieldAccess && c.tempTrackingEnabled && extractNamed(elemType) == types.TypString {
+		c.dupStringFieldAccess = false // consume the flag
+		dup := c.dupString(val)
+		c.trackStringTemp(dup)
+		return dup
+	}
+
+	return val
 }
 
 // makeGlobalString creates a global null-terminated string constant and returns an i8* to it.

@@ -9069,6 +9069,30 @@ func TestVectorStringIndexAssignDup(t *testing.T) {
 	assertContains(t, ir, "call i8* @promise_string_new")
 }
 
+// B0204: Vector[string] index assign drops old element before storing new value
+func TestVectorStringIndexAssignDropsOld(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string[] v = ["hello", "world"];
+			v[0] = "replaced";
+		}
+	`)
+	// Should drop old string element before storing the new one
+	assertContains(t, ir, "call void @promise_string_drop")
+}
+
+// B0204: Vector[string] index read dups when stored in variable
+func TestVectorStringIndexReadDup(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			string[] v = ["hello", "world"];
+			string s = v[0];
+		}
+	`)
+	// Should dup the string read from vector index (dup-on-read)
+	assertContains(t, ir, "call i8* @promise_string_new")
+}
+
 // Error propagation triggers scope cleanup
 func TestDropErrorPropagateCleansUp(t *testing.T) {
 	ir := generateIR(t, `

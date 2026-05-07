@@ -144,7 +144,7 @@ roundTrip[T: Codec](string data) string {
   return obj.format();
 }
 
-test_mixed_factory_instance_generic() `test(allow_leaks: true) {
+test_mixed_factory_instance_generic() `test {
   string result = roundTrip[Json]("hello");
   assert(result == "json:hello", "mixed factory+instance through generic");
 }

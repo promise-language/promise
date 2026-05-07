@@ -12,7 +12,7 @@ test_qualified_square() `test {
   assert(mathlib.square(-3) == 9, "mathlib.square(-3) == 9");
 }
 
-test_qualified_greet() `test(allow_leaks: true) {
+test_qualified_greet() `test {
   assert(mathlib.greet("world") == "hello world", "greet world");
   assert(mathlib.greet("promise") == "hello promise", "greet promise");
 }

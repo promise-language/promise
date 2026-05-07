@@ -1,11 +1,11 @@
 use path;
 
-test_join_basic() `test(allow_leaks: true) {
+test_join_basic() `test {
   string s = Platform.path_separator;
   assert(path.join("foo", "bar") == "foo" + s + "bar", "join basic");
 }
 
-test_join_trailing_slash() `test(allow_leaks: true) {
+test_join_trailing_slash() `test {
   assert(path.join("foo/", "bar") == "foo/bar", "join trailing slash");
 }
 
@@ -27,15 +27,15 @@ test_join_four() `test(allow_leaks: true) {
   assert(path.join("/", "usr", "local", "bin") == "/usr" + s + "local" + s + "bin", "join four segments");
 }
 
-test_file_name() `test(allow_leaks: true) {
+test_file_name() `test {
   assert(path.file_name("/usr/local/bin") == "bin", "file_name");
 }
 
-test_file_name_trailing_slash() `test(allow_leaks: true) {
+test_file_name_trailing_slash() `test {
   assert(path.file_name("/usr/local/") == "local", "file_name trailing slash");
 }
 
-test_parent() `test(allow_leaks: true) {
+test_parent() `test {
   assert(path.parent("/usr/local/bin") == "/usr/local", "parent");
 }
 
@@ -48,7 +48,7 @@ test_parent_bare() `test {
   assert(path.parent("file.txt") == ".", "parent bare filename");
 }
 
-test_extension() `test(allow_leaks: true) {
+test_extension() `test {
   assert(path.extension("file.txt") == ".txt", "extension");
 }
 
@@ -56,11 +56,11 @@ test_extension_none() `test {
   assert(path.extension("Makefile") == "", "extension none");
 }
 
-test_stem() `test(allow_leaks: true) {
+test_stem() `test {
   assert(path.stem("file.txt") == "file", "stem");
 }
 
-test_stem_multi_dot() `test(allow_leaks: true) {
+test_stem_multi_dot() `test {
   assert(path.stem("archive.tar.gz") == "archive.tar", "stem multi dot");
 }
 
@@ -176,20 +176,20 @@ test_join_both_empty() `test {
   assert(path.join("", "") == "", "join both empty");
 }
 
-test_join_dotdot_child() `test(allow_leaks: true) {
+test_join_dotdot_child() `test {
   string s = Platform.path_separator;
   assert(path.join("a", "..") == "a" + s + "..", "join dotdot child");
   assert(path.join("a", ".") == "a" + s + ".", "join dot child");
 }
 
-test_file_name_edge_cases() `test(allow_leaks: true) {
+test_file_name_edge_cases() `test {
   assert(path.file_name(".") == ".", "file_name dot");
   assert(path.file_name("..") == "..", "file_name dotdot");
   assert(path.file_name(".hidden") == ".hidden", "file_name dot file");
   assert(path.file_name("../../../etc/passwd") == "passwd", "file_name traversal");
 }
 
-test_parent_edge_cases() `test(allow_leaks: true) {
+test_parent_edge_cases() `test {
   string s = Platform.path_separator;
   assert(path.parent("/") == s, "parent root");
   assert(path.parent(".") == ".", "parent dot");
@@ -198,7 +198,7 @@ test_parent_edge_cases() `test(allow_leaks: true) {
   assert(path.parent("../../../etc/passwd") == "../../../etc", "parent traversal");
 }
 
-test_extension_edge_cases() `test(allow_leaks: true) {
+test_extension_edge_cases() `test {
   assert(path.extension(".hidden") == "", "ext dot file");
   assert(path.extension("..hidden") == ".hidden", "ext double dot prefix");
   assert(path.extension("file.") == ".", "ext trailing dot");
@@ -206,7 +206,7 @@ test_extension_edge_cases() `test(allow_leaks: true) {
   assert(path.extension(".") == "", "ext single dot");
 }
 
-test_stem_edge_cases() `test(allow_leaks: true) {
+test_stem_edge_cases() `test {
   assert(path.stem(".hidden") == ".hidden", "stem dot file");
   assert(path.stem("file.") == "file", "stem trailing dot");
   assert(path.stem("") == "", "stem empty");

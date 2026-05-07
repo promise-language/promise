@@ -36,7 +36,7 @@ test_has_next() `test {
   assert(!r.has_next, "after reading all");
 }
 
-test_rest() `test(allow_leaks: true) {
+test_rest() `test {
   Scanner r = Scanner(s: "hello");
   assert(r.rest() == "hello", "full rest");
   r.read_byte();
@@ -45,7 +45,7 @@ test_rest() `test(allow_leaks: true) {
   assert(r.rest() == "llo", "after 2 reads");
 }
 
-test_read() `test(allow_leaks: true) {
+test_read() `test {
   Scanner r = Scanner(s: "hello");
   u8[] buf = Vector[u8].filled(0 as! u8, 3);
   int n = r.read(buf);

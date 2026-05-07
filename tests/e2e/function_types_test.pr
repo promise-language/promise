@@ -65,7 +65,7 @@ test_fn_type_return_bool() `test {
 }
 
 // --- Function type returning string ---
-test_fn_type_return_string() `test(allow_leaks: true) {
+test_fn_type_return_string() `test {
   (int) -> string formatter = |int x| -> x.to_string();
   assert(formatter(42) == "42", "formats 42");
   assert(formatter(0) == "0", "formats 0");

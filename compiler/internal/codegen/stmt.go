@@ -1811,47 +1811,28 @@ func (c *Compiler) maybeTrackIterTemp(e *ast.CallExpr, result value.Value) {
 	c.trackHeapTemp(instancePtr, c.iterCleanup)
 }
 
-// isTrackedStringCall returns true if the call expression is a known-safe site
-// that produces a NEW heap-allocated string (T0073, T0099). Only tracks calls
-// guaranteed to return fresh allocations — NOT borrows from internal state.
+// isTrackedStringCall returns true if the call expression produces a NEW
+// heap-allocated string (T0073, T0099, T0123). Tracks ALL calls returning
+// string type, with a narrow exclusion list for known borrows.
+// The only known borrow: string.to_string() returns `this`.
 func (c *Compiler) isTrackedStringCall(e *ast.CallExpr) bool {
-	// T0124: Free function calls returning string always produce new heap allocations.
-	// The caller already verified the return type is string, so any Ident callee is safe.
-	if _, ok := e.Callee.(*ast.IdentExpr); ok {
-		return true
-	}
+	// T0123: Track all string-returning calls by default. Only exclude known
+	// borrows where the return value aliases an existing string (not a fresh alloc).
 	member, ok := e.Callee.(*ast.MemberExpr)
 	if !ok {
-		return false
+		// Free function calls returning string always produce fresh allocations
+		return true
 	}
 	targetType := c.info.Types[member.Target]
 	if c.typeSubst != nil {
 		targetType = types.Substitute(targetType, c.typeSubst)
 	}
 	named := extractNamed(targetType)
-	if named == nil {
+	// string.to_string() returns `this` (borrow, not a fresh allocation)
+	if named == types.TypString && member.Field == "to_string" {
 		return false
 	}
-	// Primitive type methods (to_string, format) always produce new strings
-	if isPrimitiveScalar(named) {
-		return true
-	}
-	// T0099: to_string() on ANY type except string always produces a new
-	// heap-allocated string. Every to_string() implementation (Vector, Map, Set,
-	// Duration, user types, enums) creates via Builder. The one exception is
-	// string.to_string() which returns `this` (a borrowed reference).
-	if member.Field == "to_string" && named != types.TypString {
-		return true
-	}
-	// String methods that produce new strings
-	if named == types.TypString {
-		switch member.Field {
-		case "to_upper", "to_lower", "repeat", "replace", "trim",
-			"trim_start", "trim_end", "from_bytes":
-			return true
-		}
-	}
-	return false
+	return true
 }
 
 // hasStructuralParam returns true if any parameter of sig is a structural interface (T0092).

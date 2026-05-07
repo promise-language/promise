@@ -387,7 +387,7 @@ encode_zero_int_test() `test {
   assert(enc.to_string() == "0", "encode zero int");
 }
 
-encode_negative_f64_test() `test(allow_leaks: true) {
+encode_negative_f64_test() `test {
   JsonEncoder enc = JsonEncoder();
   enc.encode_f64(-2.5)!;
   assert(enc.to_string() == "-2.5", "encode negative f64");
@@ -885,7 +885,7 @@ encode_string_cr_test() `test {
   assert(enc.to_string() == "\"a\\rb\"", "encode cr");
 }
 
-encode_string_control_char_test() `test(allow_leaks: true) {
+encode_string_control_char_test() `test {
   // Control char below 0x20: should be \u00XX
   char nul = 0 as! char;
   JsonEncoder enc = JsonEncoder();
@@ -1162,7 +1162,7 @@ parse_value_negative_exponent_test() `test(allow_leaks: true) {
   }
 }
 
-format_value_number_negative_test() `test(allow_leaks: true) {
+format_value_number_negative_test() `test {
   string s = format_value(JsonValue.Number(-3.5))!;
   assert(s == "-3.5", "format negative float");
 }
@@ -1236,7 +1236,7 @@ as_string_test() `test {
   assert(s2 is absent, "as_string absent on number");
 }
 
-as_array_test() `test(allow_leaks: true) {
+as_array_test() `test {
   JsonValue[] items = [JsonValue.Number(1.0), JsonValue.Number(2.0)];
   JsonValue[]? arr = JsonValue.Array(items).as_array();
   assert(arr is present, "as_array present");
@@ -1415,7 +1415,7 @@ as_string_empty_test() `test {
   assert(s! == "", "as_string empty value");
 }
 
-as_array_empty_test() `test(allow_leaks: true) {
+as_array_empty_test() `test {
   JsonValue[]? arr = JsonValue.Array(JsonValue[]()).as_array();
   assert(arr is present, "as_array empty present");
   assert(arr!.len == 0, "as_array empty len");
@@ -1455,7 +1455,7 @@ encode_method_bool_test() `test {
   assert(enc.to_string() == "false", "encode false");
 }
 
-encode_method_number_test() `test(allow_leaks: true) {
+encode_method_number_test() `test {
   JsonEncoder enc = JsonEncoder();
   JsonValue.Number(-3.14).encode(enc)!;
   string s = enc.to_string();

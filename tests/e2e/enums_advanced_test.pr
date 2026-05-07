@@ -121,7 +121,7 @@ token_str(Token t) string {
   };
 }
 
-test_token_sequence() `test(allow_leaks: true) {
+test_token_sequence() `test {
   Token[] tokens = [Token.Number(3),
   Token.Plus,
   Token.Number(4),

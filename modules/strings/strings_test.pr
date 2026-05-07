@@ -11,7 +11,7 @@ join_single() `test(allow_leaks: true) {
   assert(join(",", "hello") == "hello", "join single");
 }
 
-join_vector_passthrough() `test(allow_leaks: true) {
+join_vector_passthrough() `test {
   string[] parts = ["x", "y", "z"];
   assert(join("-", parts) == "x-y-z", "join vector passthrough");
 }
@@ -53,12 +53,12 @@ is_blank_false() `test {
   assert(!is_blank(" x "), "not blank x");
 }
 
-spaces_test() `test(allow_leaks: true) {
+spaces_test() `test {
   assert(spaces(0) == "", "spaces 0");
   assert(spaces(3) == "   ", "spaces 3");
 }
 
-repeat_join_test() `test(allow_leaks: true) {
+repeat_join_test() `test {
   assert(repeat_join("ab", 3, "-") == "ab-ab-ab", "repeat_join 3");
   assert(repeat_join("x", 1, ",") == "x", "repeat_join 1");
   assert(repeat_join("x", 0, ",") == "", "repeat_join 0");

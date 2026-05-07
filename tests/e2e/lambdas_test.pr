@@ -49,7 +49,7 @@ test_lambda_predicate() `test {
 
 // --- lambda returning string ---
 
-test_lambda_string() `test(allow_leaks: true) {
+test_lambda_string() `test {
   greet := |string name| -> "hello " + name;
   assert(greet("world") == "hello world", "greeting works");
   assert(greet("") == "hello ", "greet empty string");

@@ -388,7 +388,7 @@ enum Severity {
   }
 }
 
-test_enum_method_default_param() `test(allow_leaks: true) {
+test_enum_method_default_param() `test {
   assert(Severity.Low.format() == "severity: low", "default prefix");
   assert(Severity.High.format(prefix: "level") == "level: high", "custom prefix");
 }

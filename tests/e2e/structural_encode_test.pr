@@ -223,15 +223,15 @@ encode_one[T: Encodable](T val) string {
   return enc.to_string();
 }
 
-generic_constraint_int() `test(allow_leaks: true) {
+generic_constraint_int() `test {
   assert(encode_one[int](7) == "7", "generic Encodable constraint: int");
 }
 
-generic_constraint_bool() `test(allow_leaks: true) {
+generic_constraint_bool() `test {
   assert(encode_one[bool](true) == "true", "generic Encodable constraint: bool");
 }
 
-generic_constraint_string() `test(allow_leaks: true) {
+generic_constraint_string() `test {
   assert(encode_one[string]("a") == "\"a\"", "generic Encodable constraint: string");
 }
 

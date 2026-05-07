@@ -67,17 +67,17 @@ type SimpleLogger is Logger {
   // Inherits log() without override
 }
 
-test_concrete_parent_method_inherited() `test(allow_leaks: true) {
+test_concrete_parent_method_inherited() `test {
   s := SimpleLogger(prefix: "INFO");
   assert(s.log("hello") == "INFO: hello", "inherited concrete method");
 }
 
-test_concrete_parent_method_overridden() `test(allow_leaks: true) {
+test_concrete_parent_method_overridden() `test {
   t := TimestampLogger(prefix: "WARN");
   assert(t.log("danger") == "[TS] WARN: danger", "overridden concrete method");
 }
 
-test_concrete_override_polymorphic() `test(allow_leaks: true) {
+test_concrete_override_polymorphic() `test {
   Logger a = SimpleLogger(prefix: "A");
   Logger b = TimestampLogger(prefix: "B");
   assert(a.log("x") == "A: x", "polymorphic inherited method");
@@ -130,14 +130,14 @@ type ImageBox is Renderable {
   }
 }
 
-test_interface_implementation() `test(allow_leaks: true) {
+test_interface_implementation() `test {
   t := TextBox(content: "hello", w: 100, h: 20);
   assert(t.render() == "TextBox(hello)", "TextBox render");
   assert(t.width() == 100, "TextBox width");
   assert(t.height() == 20, "TextBox height");
 }
 
-test_interface_polymorphism() `test(allow_leaks: true) {
+test_interface_polymorphism() `test {
   Renderable a = TextBox(content: "hi", w: 50, h: 10);
   Renderable b = ImageBox(src: "logo.png", w: 200, h: 150);
   assert(a.render() == "TextBox(hi)", "polymorphic TextBox");
@@ -174,13 +174,13 @@ type StringFormatter is Formatter {
   }
 }
 
-test_abstract_with_concrete_default() `test(allow_leaks: true) {
+test_abstract_with_concrete_default() `test {
   n := NumberFormatter(value: 42);
   assert(n.format() == "42", "abstract method implemented");
   assert(n.display() == "[42]", "concrete method uses abstract override");
 }
 
-test_abstract_with_concrete_polymorphic() `test(allow_leaks: true) {
+test_abstract_with_concrete_polymorphic() `test {
   Formatter a = NumberFormatter(value: 7);
   Formatter b = StringFormatter(value: "hi");
   assert(a.display() == "[7]", "polymorphic display for number");
@@ -212,13 +212,13 @@ type Widget is Describable, Measurable {
   }
 }
 
-test_multiple_inheritance_basic() `test(allow_leaks: true) {
+test_multiple_inheritance_basic() `test {
   w := Widget(label: "btn", size: 42);
   assert(w.describe() == "Widget:btn", "first parent method");
   assert(w.measure() == 42, "second parent method");
 }
 
-test_multiple_inheritance_first_parent_polymorphism() `test(allow_leaks: true) {
+test_multiple_inheritance_first_parent_polymorphism() `test {
   Describable d = Widget(label: "input", size: 10);
   assert(d.describe() == "Widget:input", "viewed as Describable");
 }
@@ -242,7 +242,7 @@ type Button is Describable, Measurable {
   }
 }
 
-test_multiple_children_same_interfaces() `test(allow_leaks: true) {
+test_multiple_children_same_interfaces() `test {
   Describable a = Widget(label: "w", size: 5);
   Describable b = Button(text: "click");
   assert(a.describe() == "Widget:w", "Widget as Describable");
@@ -286,13 +286,13 @@ type Person is Greetable, Farewell {
   }
 }
 
-test_multi_inherit_default_methods() `test(allow_leaks: true) {
+test_multi_inherit_default_methods() `test {
   p := Person(full_name: "Alice");
   assert(p.greet() == "Hello, Alice", "default from first parent");
   assert(p.farewell() == "Goodbye, Alice", "default from second parent");
 }
 
-test_multi_inherit_defaults_polymorphic() `test(allow_leaks: true) {
+test_multi_inherit_defaults_polymorphic() `test {
   Greetable g = Person(full_name: "Bob");
   assert(g.greet() == "Hello, Bob", "default method via first parent type");
   Farewell f = Person(full_name: "Bob");
@@ -339,19 +339,19 @@ test_deep_chain_field_access() `test {
   assert(d.active == true, "own field");
 }
 
-test_deep_chain_method_access() `test(allow_leaks: true) {
+test_deep_chain_method_access() `test {
   d := Derived(id: "r1", level: 2, tag: "leaf");
   assert(d.get_id() == "r1", "grandparent method");
   assert(d.get_level() == 2, "parent method");
   assert(d.get_tag() == "leaf", "own method");
 }
 
-test_deep_chain_assignability() `test(allow_leaks: true) {
+test_deep_chain_assignability() `test {
   Base b = DeepDerived(id: "dd", level: 1, tag: "t", active: false);
   assert(b.get_id() == "dd", "deep child assignable to root");
 }
 
-test_deep_chain_mid_assignability() `test(allow_leaks: true) {
+test_deep_chain_mid_assignability() `test {
   Mid m = Derived(id: "d", level: 5, tag: "mid");
   assert(m.get_id() == "d", "derived assignable to mid");
   assert(m.get_level() == 5, "inherited method via mid ref");
@@ -518,12 +518,12 @@ accept_int_mapper(Mapper[int, string] m) string {
   return m.apply(42);
 }
 
-test_generic_abstract_implement() `test(allow_leaks: true) {
+test_generic_abstract_implement() `test {
   m := IntToString();
   assert(m.apply(7) == "7", "non-generic child of generic abstract");
 }
 
-test_generic_abstract_polymorphic() `test(allow_leaks: true) {
+test_generic_abstract_polymorphic() `test {
   Mapper[int, string] m = IntToString();
   assert(m.apply(100) == "100", "polymorphic generic abstract dispatch");
 }
@@ -550,12 +550,12 @@ int_to_str_fn(int x) string {
   return "{x}";
 }
 
-test_generic_child_of_generic_abstract() `test(allow_leaks: true) {
+test_generic_child_of_generic_abstract() `test {
   m := GenericMapper[int, string](fn: int_to_str_fn);
   assert(m.apply(55) == "55", "generic child implements generic abstract");
 }
 
-test_generic_child_polymorphic() `test(allow_leaks: true) {
+test_generic_child_polymorphic() `test {
   Mapper[int, string] m = GenericMapper[int, string](fn: int_to_str_fn);
   assert(m.apply(33) == "33", "generic child polymorphic through generic parent");
 }
@@ -697,7 +697,7 @@ type StringEntity is Identifiable[string], Printable {
   }
 }
 
-test_multi_inherit_non_generic_child() `test(allow_leaks: true) {
+test_multi_inherit_non_generic_child() `test {
   se := StringEntity(code: "ABC", display: "Alpha Bravo Charlie");
   assert(se.get_id() == "ABC", "string id");
   assert(se.to_string() == "Alpha Bravo Charlie", "string display");
@@ -830,7 +830,7 @@ test_generic_virtual_dispatch() `test(allow_leaks: true) {
   assert(apply_transform(Negator(), 5) == -5, "negator dispatch");
 }
 
-test_generic_virtual_different_instantiations() `test(allow_leaks: true) {
+test_generic_virtual_different_instantiations() `test {
   Transformer[int] a = Doubler();
   Transformer[string] b = StringPrefixer();
   assert(a.transform(3) == 6, "int transformer");
@@ -858,7 +858,7 @@ type Event is Timestamped {
   }
 }
 
-test_child_adds_fields_and_methods() `test(allow_leaks: true) {
+test_child_adds_fields_and_methods() `test {
   e := Event(created_at: 100, title: "Conf", location: "NYC");
   assert(e.age(150) == 50, "inherited method with parent field");
   assert(e.summary() == "Conf @ NYC", "own method with own fields");
@@ -933,22 +933,22 @@ type ExtendedConfig is Config {
   }
 }
 
-test_concrete_parent_no_abstract() `test(allow_leaks: true) {
+test_concrete_parent_no_abstract() `test {
   c := Config(name: "app", version: 1);
   assert(c.info() == "app v1", "parent concrete method");
 }
 
-test_concrete_child_override() `test(allow_leaks: true) {
+test_concrete_child_override() `test {
   e := ExtendedConfig(name: "app", version: 2, debug: true);
   assert(e.info() == "app v2 [DEBUG]", "child override with extra field");
 }
 
-test_concrete_child_override_false() `test(allow_leaks: true) {
+test_concrete_child_override_false() `test {
   e := ExtendedConfig(name: "app", version: 2, debug: false);
   assert(e.info() == "app v2", "child override without debug");
 }
 
-test_concrete_hierarchy_polymorphic() `test(allow_leaks: true) {
+test_concrete_hierarchy_polymorphic() `test {
   Config a = Config(name: "base", version: 1);
   Config b = ExtendedConfig(name: "ext", version: 3, debug: true);
   assert(a.info() == "base v1", "polymorphic parent");
@@ -1044,7 +1044,7 @@ type IntDoubler is Converter[int, int] {
   }
 }
 
-test_converter_int_to_str() `test(allow_leaks: true) {
+test_converter_int_to_str() `test {
   c := IntToStr();
   assert(c.convert(42) == "42", "int to string");
 }
@@ -1059,7 +1059,7 @@ test_converter_int_to_int() `test {
   assert(c.convert(21) == 42, "int doubler");
 }
 
-test_converter_polymorphic() `test(allow_leaks: true) {
+test_converter_polymorphic() `test {
   Converter[int, string] c = IntToStr();
   assert(c.convert(7) == "7", "polymorphic int to string");
   Converter[int, int] d = IntDoubler();
@@ -1090,7 +1090,7 @@ get_all_descriptions(Describable a, Describable b, Describable c) string {
   return a.describe() + "," + b.describe() + "," + c.describe();
 }
 
-test_polymorphic_multiple_dispatch() `test(allow_leaks: true) {
+test_polymorphic_multiple_dispatch() `test {
   Describable x = Widget(label: "w1", size: 1);
   Describable y = Button(text: "b1");
   Describable z = Widget(label: "w2", size: 2);
@@ -1465,7 +1465,7 @@ make_describable(int which) Describable {
   return Button(text: "b");
 }
 
-test_return_multi_parent() `test(allow_leaks: true) {
+test_return_multi_parent() `test {
   Describable d1 = make_describable(0);
   assert(d1.describe() == "Widget:w", "widget via multi-parent return");
   Describable d2 = make_describable(1);
@@ -1564,7 +1564,7 @@ get_detailed_code() int {
   return -1;
 }
 
-test_deep_error_inherit() `test(allow_leaks: true) {
+test_deep_error_inherit() `test {
   assert(get_detailed_device() == "/dev/sda", "deep error own field");
   assert(get_detailed_code() == 5, "deep error parent field");
 }
@@ -1616,17 +1616,17 @@ type SimpleMetric is Metric {
   // inherits format
 }
 
-test_metric_inheritance() `test(allow_leaks: true) {
+test_metric_inheritance() `test {
   m := SimpleMetric(name: "cpu", value: 80);
   assert(m.format() == "cpu=80", "inherited format");
 }
 
-test_metric_override() `test(allow_leaks: true) {
+test_metric_override() `test {
   tm := TaggedMetric(name: "mem", value: 60, tag: "host1");
   assert(tm.format() == "host1:mem=60", "overridden format with extra field");
 }
 
-test_metric_polymorphic() `test(allow_leaks: true) {
+test_metric_polymorphic() `test {
   Metric a = SimpleMetric(name: "disk", value: 90);
   Metric b = TaggedMetric(name: "net", value: 50, tag: "eth0");
   assert(a.format() == "disk=90", "polymorphic inherited");

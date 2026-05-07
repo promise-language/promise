@@ -295,7 +295,7 @@ test_chars() `test {
 
 // --- pad_left / pad_right ---
 
-test_pad_left_basic() `test(allow_leaks: true) {
+test_pad_left_basic() `test {
   assert("hi".pad_left(5, ' ') == "   hi", "pad_left space");
   assert("42".pad_left(5, '0') == "00042", "pad_left zero");
 }
@@ -305,11 +305,11 @@ test_pad_left_no_op() `test {
   assert("abc".pad_left(3, ' ') == "abc", "pad_left no-op equal");
 }
 
-test_pad_left_empty() `test(allow_leaks: true) {
+test_pad_left_empty() `test {
   assert("".pad_left(4, '*') == "****", "pad_left empty");
 }
 
-test_pad_right_basic() `test(allow_leaks: true) {
+test_pad_right_basic() `test {
   assert("hi".pad_right(5, ' ') == "hi   ", "pad_right space");
   assert("42".pad_right(5, '0') == "42000", "pad_right zero");
 }
@@ -319,6 +319,6 @@ test_pad_right_no_op() `test {
   assert("abc".pad_right(3, ' ') == "abc", "pad_right no-op equal");
 }
 
-test_pad_right_empty() `test(allow_leaks: true) {
+test_pad_right_empty() `test {
   assert("".pad_right(4, '*') == "****", "pad_right empty");
 }

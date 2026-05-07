@@ -11,7 +11,7 @@ say_hello(string name) => print_line("hello " + name);
 
 negate(int x) int `inline => -x;
 
-test_expression_body_with_return_type() `test(allow_leaks: true) {
+test_expression_body_with_return_type() `test {
   assert(double(5) == 10, "double");
   assert(add(3, 4) == 7, "add");
   assert(greet("world") == "hello world", "greet");

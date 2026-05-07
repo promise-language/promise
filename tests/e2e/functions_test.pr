@@ -37,7 +37,7 @@ greet(string name, string greeting = "Hello") string {
   return greeting + " " + name;
 }
 
-test_default_params() `test(allow_leaks: true) {
+test_default_params() `test {
   assert(greet("Alice") == "Hello Alice", "default greeting");
   assert(greet("Bob", greeting: "Hi") == "Hi Bob", "custom greeting");
 }

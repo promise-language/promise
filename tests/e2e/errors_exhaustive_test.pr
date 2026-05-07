@@ -316,7 +316,7 @@ test_multi_field_error_status() `test {
   assert(get_http_status()! == 503, "HttpError status is 503");
 }
 
-test_multi_field_error_url() `test(allow_leaks: true) {
+test_multi_field_error_url() `test {
   assert(get_http_url()! == "/api/data", "HttpError url is /api/data");
 }
 

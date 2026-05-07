@@ -233,7 +233,7 @@ enum Tagged[T] {
   }
 }
 
-test_generic_enum_default_param() `test(allow_leaks: true) {
+test_generic_enum_default_param() `test {
   Tagged[int] v = Tagged[int].Value(data: 10);
   assert(v.describe() == "tag: value", "default prefix");
   assert(v.describe(prefix: "item") == "item: value", "custom prefix");
@@ -280,7 +280,7 @@ enum Status[T] {
   }
 }
 
-test_generic_enum_method_calls_method() `test(allow_leaks: true) {
+test_generic_enum_method_calls_method() `test {
   Status[int] ok = Status[int].Ok(data: 42);
   assert(ok.is_ok == true, "Ok is ok");
   assert(ok.is_err == false, "Ok not err");

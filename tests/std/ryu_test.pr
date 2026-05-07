@@ -13,7 +13,7 @@ test_special_values() `test {
   assert(neg_inf.to_string() == "-inf", "-inf -> {neg_inf.to_string()}");
 }
 
-test_small_integers() `test(allow_leaks: true) {
+test_small_integers() `test {
   assert(1.0.to_string() == "1", "1.0 -> {1.0.to_string()}");
   assert(2.0.to_string() == "2", "2.0 -> {2.0.to_string()}");
   assert((-1.0).to_string() == "-1", "-1.0 -> {(-1.0).to_string()}");
@@ -38,7 +38,7 @@ test_common_values() `test {
   assert(99.99.to_string() == "99.99", "99.99 -> {99.99.to_string()}");
 }
 
-test_negative_values() `test(allow_leaks: true) {
+test_negative_values() `test {
   assert((-0.1).to_string() == "-0.1", "-0.1 -> {(-0.1).to_string()}");
   assert((-3.14).to_string() == "-3.14", "-3.14 -> {(-3.14).to_string()}");
   assert((-100.0).to_string() == "-100", "-100.0 -> {(-100.0).to_string()}");

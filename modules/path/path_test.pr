@@ -16,7 +16,7 @@ join_test() `test(allow_leaks: true) {
   assert(join("a", ".") == "a" + s + ".", "join dot child");
 }
 
-file_name_test() `test(allow_leaks: true) {
+file_name_test() `test {
   assert(file_name("/home/user/file.txt") == "file.txt", "file_name file");
   assert(file_name("/home/user/") == "user", "file_name trailing slash");
   assert(file_name("file.txt") == "file.txt", "file_name no dir");
@@ -32,7 +32,7 @@ file_name_test() `test(allow_leaks: true) {
   assert(file_name("../../../etc/passwd") == "passwd", "file_name traversal");
 }
 
-parent_test() `test(allow_leaks: true) {
+parent_test() `test {
   string s = Platform.path_separator;
   assert(parent("/home/user/file.txt") == "/home/user", "parent basic");
   assert(parent("file.txt") == ".", "parent no dir");
@@ -47,7 +47,7 @@ parent_test() `test(allow_leaks: true) {
   assert(parent("../../../etc/passwd") == "../../../etc", "parent traversal");
 }
 
-extension_test() `test(allow_leaks: true) {
+extension_test() `test {
   assert(extension("file.txt") == ".txt", "ext basic");
   assert(extension("archive.tar.gz") == ".gz", "ext double");
   assert(extension("Makefile") == "", "ext none");
@@ -61,7 +61,7 @@ extension_test() `test(allow_leaks: true) {
   assert(extension("..") == ".", "ext double dot");
 }
 
-stem_test() `test(allow_leaks: true) {
+stem_test() `test {
   assert(stem("file.txt") == "file", "stem basic");
   assert(stem("archive.tar.gz") == "archive.tar", "stem double");
   assert(stem("Makefile") == "Makefile", "stem no ext");

@@ -8,7 +8,7 @@ test_glob_square() `test {
   assert(square(6) == 36, "square(6) == 36");
 }
 
-test_glob_greet() `test(allow_leaks: true) {
+test_glob_greet() `test {
   assert(greet("globe") == "hello globe", "greet globe");
 }
 

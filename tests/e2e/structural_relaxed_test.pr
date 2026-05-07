@@ -134,12 +134,12 @@ test_direct_call_no_params() `test {
   assert(d.print() == "doc", "direct call without optional param");
 }
 
-test_direct_call_with_optional_param() `test(allow_leaks: true) {
+test_direct_call_with_optional_param() `test {
   Doc d = Doc();
   assert(d.print(indent: 4) == "doc(indent:4)", "direct call with optional param");
 }
 
-test_direct_call_default_param() `test(allow_leaks: true) {
+test_direct_call_default_param() `test {
   Report r = Report();
   assert(r.format(width: 120) == "report(w:120)", "direct call with non-default value");
 }
@@ -153,7 +153,7 @@ greet(string? name) string {
   return "hello world";
 }
 
-test_standalone_optional_param_with_value() `test(allow_leaks: true) {
+test_standalone_optional_param_with_value() `test {
   assert(greet("alice") == "hello alice", "standalone fn: optional param with value");
 }
 

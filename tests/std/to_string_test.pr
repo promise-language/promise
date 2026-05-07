@@ -60,7 +60,7 @@ test_uint_to_string() `test {
   assert(zero.to_string() == "0", "uint 0");
 }
 
-test_f64_to_string() `test(allow_leaks: true) {
+test_f64_to_string() `test {
   assert(3.14.to_string() == "3.14", "f64 3.14");
   assert(0.0.to_string() == "0", "f64 0.0");
   assert((-1.5).to_string() == "-1.5", "f64 -1.5");

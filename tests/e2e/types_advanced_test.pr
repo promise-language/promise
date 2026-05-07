@@ -75,7 +75,7 @@ type CasualGreeter is Greeter {
   }
 }
 
-test_greeter_hierarchy() `test(allow_leaks: true) {
+test_greeter_hierarchy() `test {
   Greeter g1 = FormalGreeter(name: "Alice");
   Greeter g2 = CasualGreeter(name: "Bob");
   assert(g1.greet() == "Good day, Alice", "formal greeting");
@@ -93,7 +93,7 @@ type Person {
   }
 }
 
-test_person() `test(allow_leaks: true) {
+test_person() `test {
   p := Person(first: "John", last: "Doe");
   assert(p.full_name() == "John Doe", "full name concatenation");
   assert(p.first == "John", "first name access");

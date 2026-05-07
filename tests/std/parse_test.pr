@@ -13,7 +13,7 @@ test_int_parse() `test {
   assert(v3 == 0, "parse 0");
 }
 
-test_int_parse_stops_at_non_digit() `test(allow_leaks: true) {
+test_int_parse_stops_at_non_digit() `test {
   Scanner r = Scanner(s: "123abc");
   int v = int.parse(r)!;
   assert(v == 123, "parse 123 from 123abc");
@@ -122,7 +122,7 @@ test_uint_parse_non_digit() `test {
   assert(result == "expected digit", "non-digit");
 }
 
-test_uint_parse_stops_at_non_digit() `test(allow_leaks: true) {
+test_uint_parse_stops_at_non_digit() `test {
   Scanner r = Scanner(s: "123abc");
   uint v = uint.parse(r)!;
   assert((v as! int) == 123, "parse 123 from 123abc");
@@ -199,7 +199,7 @@ test_f64_parse_negative_scientific() `test {
   assert(v == -150.0, "parse -1.5e2");
 }
 
-test_f64_parse_stops_at_non_digit() `test(allow_leaks: true) {
+test_f64_parse_stops_at_non_digit() `test {
   Scanner r = Scanner(s: "3.14abc");
   f64 v = f64.parse(r)!;
   assert(v > 3.13 && v < 3.15, "parse 3.14 from 3.14abc");

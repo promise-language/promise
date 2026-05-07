@@ -2061,6 +2061,12 @@ func (c *Compiler) genAssignStmt(s *ast.AssignStmt) {
 			if exprType != nil && extractNamed(exprType) == types.TypString {
 				c.claimStringTemp(val)
 			}
+			// B0187: Claim heap temp — ownership transferred to reassigned variable.
+			// Without this, structural interface reassignment (e.g., iter = c.map(...))
+			// leaves the heap temp unclaimed, causing double-free at statement end + scope exit.
+			c.claimHeapTemp(val)
+			// Claim env temp — ownership transferred to reassigned variable.
+			c.claimEnvTemp(val)
 			return
 		}
 		// Compound assignment: load current value, apply operator, store result

@@ -15002,6 +15002,34 @@ func TestHeapTempClaimOnMethodReceiver(t *testing.T) {
 	assertContains(t, ir, "heap.claim")
 }
 
+// B0187: Reassignment of structural interface variable must claim heap temp
+func TestHeapTempClaimOnReassignment(t *testing.T) {
+	ir := generateIR(t, `
+		type Counter is Iterator[int] {
+			int n;
+			next(~this) int? {
+				if this.n <= 0 { return none; }
+				this.n = this.n - 1;
+				return this.n;
+			}
+		}
+		test() {
+			c := Counter(n: 10);
+			Iterator[int] it = c.take(5);
+			it = c.take(3);
+			int sum = 0;
+			for x in it {
+				sum = sum + x;
+			}
+		}
+		main() {}
+	`)
+	// The reassignment `it = c.take(3)` must generate a heap.claim block
+	// to prevent the new iterator instance from being double-freed
+	// (once at statement end via cleanupHeapTemps, again at scope exit via emitFreeCall).
+	assertContains(t, ir, "heap.claim")
+}
+
 // T0101: Optional field in type with synthesized drop
 func TestOptionalFieldInSynthDrop(t *testing.T) {
 	ir := generateIR(t, `

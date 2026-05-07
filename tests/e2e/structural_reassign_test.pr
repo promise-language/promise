@@ -1,0 +1,48 @@
+// B0187: Reassignment of structural interface variables must claim heap temps
+// to prevent double-free (cleanupHeapTemps + emitFreeCall).
+type Counter is Iterator[int] {
+  int current;
+  int limit;
+
+  next() int? {
+    if this.current >= this.limit {
+      return none;
+    }
+    int val = this.current;
+    this.current = this.current + 1;
+    return val;
+  }
+}
+
+reassign_iterator() `test {
+  c := Counter(current: 0, limit: 20);
+  // First assignment — claims heap temp via genTypedVarDecl
+  Iterator[int] it = c.take(5);
+  // Consume the first iterator
+  int discard = 0;
+  for x in it {
+    discard = discard + x;
+  }
+  // Reassignment — must claim heap temp via genAssignStmt (B0187 fix)
+  it = c.take(3);
+  int sum = 0;
+  for x in it {
+    sum = sum + x;
+  }
+  // take(5) consumed 0..4, take(3) consumes 5,6,7
+  assert(sum == 5 + 6 + 7, "reassigned iterator sum");
+}
+
+reassign_iterator_no_consume() `test {
+  c := Counter(current: 0, limit: 20);
+  // Assign and immediately reassign without consuming — tests that the
+  // old heap allocation is freed and the new one is properly claimed.
+  Iterator[int] it = c.take(10);
+  it = c.take(3);
+  int sum = 0;
+  for x in it {
+    sum = sum + x;
+  }
+  // Neither take was consumed before reassignment, c.current is still 0
+  assert(sum == 0 + 1 + 2, "reassigned without consuming");
+}

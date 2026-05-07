@@ -2762,6 +2762,37 @@ func (c *Compiler) genMemberAssign(target *ast.MemberExpr, op ast.AssignOp, val 
 	fieldPtr := c.genFieldPtr(target)
 
 	if op == ast.OpAssign {
+		// B0216: Drop old string field value before reassignment.
+		// Without this, overwriting a heap-allocated string field leaks the old value.
+		// promise_string_drop handles null and literal checks internally.
+		// NOTE: Only safe for strings because string field reads that save to locals
+		// create dups (T0095 for HasDrop types) or are consumed by operators (concat).
+		// Vector/channel fields are NOT dropped here because code patterns like
+		// `old = this._buckets; this._buckets = new_vec` save the old pointer to
+		// a local before reassigning — dropping would cause use-after-free.
+		if named != nil {
+			field := named.LookupField(target.Field)
+			if field != nil {
+				fieldType := field.Type()
+				if c.typeSubst != nil {
+					fieldType = types.Substitute(fieldType, c.typeSubst)
+				}
+				if extractNamed(fieldType) == types.TypString {
+					if dropFunc, ok := c.funcs["promise_string_drop"]; ok {
+						oldVal := c.block.NewLoad(irtypes.I8Ptr, fieldPtr)
+						// Skip if old == new (aliasing: b.val = b.val)
+						isSame := c.block.NewICmp(enum.IPredEQ, oldVal, val)
+						dropBlock := c.newBlock("field.strdrop")
+						mergeBlock := c.newBlock("field.strdrop.done")
+						c.block.NewCondBr(isSame, mergeBlock, dropBlock)
+						c.block = dropBlock
+						c.block.NewCall(dropFunc, oldVal)
+						c.block.NewBr(mergeBlock)
+						c.block = mergeBlock
+					}
+				}
+			}
+		}
 		c.block.NewStore(val, fieldPtr)
 		return
 	}

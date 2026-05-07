@@ -9448,6 +9448,22 @@ func TestDropSynthesizedStringField(t *testing.T) {
 	assertContains(t, ir, "call void @pal_free(")
 }
 
+// B0216: String field reassignment drops old value before storing new.
+func TestStringFieldReassignDrop(t *testing.T) {
+	ir := generateIR(t, `
+		type Box {
+			string val;
+		}
+		main() {
+			b := Box(val: "hello");
+			b.val = "world";
+		}
+	`)
+	// Field reassignment should emit old-value drop before store
+	assertContains(t, ir, "field.strdrop")
+	assertContains(t, ir, "call void @promise_string_drop(")
+}
+
 // T0095: String field access on droppable type creates a dup (via promise_string_new)
 func TestStringFieldAccessDup(t *testing.T) {
 	ir := generateIR(t, `

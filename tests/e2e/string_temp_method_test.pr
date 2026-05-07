@@ -36,7 +36,7 @@ escape_single_char_test() `test {
 }
 
 // Two chars, both through default arm
-escape_two_default_test() `test(allow_leaks: true) {
+escape_two_default_test() `test {
   EscapeBuilder b = EscapeBuilder(result: "");
   b.escape("ab");
   assert(b.result == "ab", "two default");
@@ -50,28 +50,28 @@ escape_quote_only_test() `test {
 }
 
 // Mixed: default then non-default — the failing pattern before B0172 fix
-escape_mixed_test() `test(allow_leaks: true) {
+escape_mixed_test() `test {
   EscapeBuilder b = EscapeBuilder(result: "");
   b.escape("a\"b");
   assert(b.result == "a\\\"b", "mixed a-quote-b");
 }
 
 // Reverse: non-default then default
-escape_reverse_test() `test(allow_leaks: true) {
+escape_reverse_test() `test {
   EscapeBuilder b = EscapeBuilder(result: "");
   b.escape("\"a");
   assert(b.result == "\\\"a", "reverse quote-a");
 }
 
 // Multiple escape chars
-escape_multiple_test() `test(allow_leaks: true) {
+escape_multiple_test() `test {
   EscapeBuilder b = EscapeBuilder(result: "");
   b.escape("a\"b\\c");
   assert(b.result == "a\\\"b\\\\c", "multiple escapes");
 }
 
 // Method body to_string temp — no match, just loop
-loop_to_string_test() `test(allow_leaks: true) {
+loop_to_string_test() `test {
   EscapeBuilder b = EscapeBuilder(result: "");
   int i = 0;
   while i < 3 {

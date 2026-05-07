@@ -193,7 +193,13 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 		if c.info.AutoPropagateExprs[s.Expr] {
 			c.genAutoPropagate(s.Expr)
 		} else {
-			c.genExpr(s.Expr)
+			val := c.genExpr(s.Expr)
+			// B0196: Drop discarded optional string values (e.g., v.pop()).
+			// When the return value of a method like pop() is not captured,
+			// the string inside the optional leaks. Extract and drop it.
+			if val != nil && c.block != nil && c.block.Term == nil {
+				c.dropDiscardedOptionalString(s.Expr, val)
+			}
 		}
 		c.goExprFireAndForget = false
 	case *ast.ReturnStmt:
@@ -1792,6 +1798,37 @@ func (c *Compiler) claimStringTemp(val value.Value) {
 	// Clear drop flag — ownership transferred
 	c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.stmtTemps[idx].dropFlag)
 	c.stmtTempMap[val] = -1
+}
+
+// dropDiscardedOptionalString drops the string inside a discarded Optional[string]
+// value (B0196). When a method like Vector[string].pop() returns T? and the result
+// is not captured, the string inside the optional leaks. This extracts the tag,
+// and if present, drops the inner string value.
+func (c *Compiler) dropDiscardedOptionalString(expr ast.Expr, val value.Value) {
+	exprType := c.info.Types[expr]
+	if c.typeSubst != nil && exprType != nil {
+		exprType = types.Substitute(exprType, c.typeSubst)
+	}
+	opt, ok := exprType.(*types.Optional)
+	if !ok {
+		return
+	}
+	innerNamed := extractNamed(opt.Elem())
+	if innerNamed != types.TypString {
+		return
+	}
+	// Extract tag (field 0) and inner value (field 1) from the optional struct
+	tag := c.block.NewExtractValue(val, 0)
+	dropBlock := c.newBlock("discard.drop")
+	skipBlock := c.newBlock("discard.skip")
+	c.block.NewCondBr(tag, dropBlock, skipBlock)
+
+	c.block = dropBlock
+	inner := c.block.NewExtractValue(val, 1)
+	c.block.NewCall(c.funcs["promise_string_drop"], inner)
+	c.block.NewBr(skipBlock)
+
+	c.block = skipBlock
 }
 
 // cleanupStmtTemps drops all unclaimed string temps at statement end (T0073).

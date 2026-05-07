@@ -10450,6 +10450,34 @@ func TestVectorPop(t *testing.T) {
 	assertContains(t, ir, "pop.none")
 }
 
+func TestDiscardedStringPopDropsOptionalInner(t *testing.T) {
+	// B0196: When v.pop() result is discarded and element type is string,
+	// the string inside the optional must be dropped.
+	ir := generateIR(t, `
+		main() {
+			string[] v = [];
+			v.push("hello");
+			v.pop();
+		}
+	`)
+	// Should have a discard.drop block that calls promise_string_drop
+	assertContains(t, ir, "discard.drop")
+	assertContains(t, ir, "discard.skip")
+	assertContains(t, ir, "call void @promise_string_drop(i8*")
+}
+
+func TestDiscardedIntPopNoDropBlock(t *testing.T) {
+	// B0196: int pop should NOT emit discard.drop block (only strings need it).
+	ir := generateIR(t, `
+		main() {
+			int[] v = [1, 2, 3];
+			v.pop();
+		}
+	`)
+	mainFn := extractFunction(ir, "main")
+	assertNotContains(t, mainFn, "discard.drop")
+}
+
 func TestVectorContainsInt(t *testing.T) {
 	ir := generateIR(t, `
 		main() {

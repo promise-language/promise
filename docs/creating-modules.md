@@ -11,7 +11,8 @@ A step-by-step guide to proposing, implementing, and shipping new catalog module
 3. [Phase 2: Set Up the Module](#3-phase-2-set-up-the-module)
 4. [Phase 3: Implement the Module](#4-phase-3-implement-the-module)
 5. [Phase 4: Validate](#5-phase-4-validate)
-6. [Reference: Module Types](#6-reference-module-types)
+6. [Reference: Language Constraints for Module Design](#6-reference-language-constraints-for-module-design)
+7. [Reference: Module Types](#7-reference-module-types)
 
 ---
 
@@ -49,8 +50,9 @@ Proposal → Setup → Implement → Validate → Ship
 
 ## 2. Phase 1: Write the Proposal
 
-Before writing code, write a design document in `docs/`. The proposal establishes the API
-contract that implementation must satisfy.
+Before writing code, write a design document. The proposal establishes the API contract
+that implementation must satisfy. Place it inside the module directory from the start
+(`modules/<name>/proposal.md`) — see [Phase 2](#3-phase-2-set-up-the-module) for setup.
 
 ### What to include
 
@@ -62,20 +64,22 @@ established, not speculative.
 - Idiomatic Promise patterns used (`use` binding, enums, value types, `!` functions, channels)
 - The abstraction model (e.g., cell-buffer vs. streaming for a TUI module)
 - Layering strategy (low-level primitives now, high-level widgets later)
-- Cross-platform story (what platform differences are abstracted away)
+- Cross-platform story (what platform differences are abstracted away, what is excluded on WASM)
 
 **3. Quick start** — A minimal, runnable example (10-20 lines) showing the module in action.
 This is the first thing an AI agent or new user will read — make it self-explanatory.
 
-**4. Assumed dependencies** — Types from `std` or other modules that the API uses. Call out
-any new `std` types that would need to be added (e.g., `Point`, `Size`, `Rect`).
+**4. Assumed dependencies** — Types from `std` that the API uses. Call out any new `std`
+types that would need to be added (e.g., `Point`, `Size`, `Rect`). Note: catalog modules
+can only depend on `std` (auto-imported) — they cannot import other catalog modules.
 
 **5. Full API surface** — Every public type, enum, and function with:
 - Type signatures using Promise syntax
 - `~this` / `&this` annotations (mutability contract)
 - Failable markers (`!`, `?!`)
 - Default parameter values
-- Brief doc comment per method
+- `\`doc` annotation per declaration
+- `\`target` conditions for platform-specific declarations
 
 Group by type, use Promise code blocks. This is the spec — implementation will match it 1:1.
 
@@ -90,9 +94,10 @@ This helps reviewers verify completeness and helps implementors find reference i
 **8. Implementation notes** — Platform-specific details:
 - What PAL (Platform Abstraction Layer) functions are needed
 - What system calls or APIs will be used on each platform (POSIX, Windows, WASM)
+- What is excluded on WASM and why (no filesystem, no subprocesses, no real threading)
 - Performance considerations (buffering, diff-based rendering, etc.)
 - Thread safety model
-- Cleanup guarantees
+- Cleanup guarantees (`close()` vs `drop()` — see [section 6.5](#65-resource-cleanup-close-vs-drop))
 
 **9. Future extensions** — Things explicitly out of scope for v1, but designed to layer on top.
 This proves the API won't need breaking changes when these are added.
@@ -109,12 +114,17 @@ For example: `modules/console/proposal.md`.
 
 Before moving to implementation, verify:
 
-- [ ] Every public function uses full English words (with approved abbreviations from `docs/language-design.md` section 9.3a)
+- [ ] Every public identifier uses full English words (with approved abbreviations from `docs/language-design.md` section 9.3a)
+- [ ] Naming follows conventions: `snake_case` for functions/methods/fields, `PascalCase` for types/enums/variants
+- [ ] No function overloading — use default/optional parameters instead (see [section 6.1](#61-no-function-overloading))
 - [ ] Side-effect-free parameterless access uses getters (`get name Type`), not functions
-- [ ] All `public` declarations have `\`doc` annotations in the API spec
-- [ ] Value types are marked `\`value` where appropriate
+- [ ] All `\`public` declarations have `\`doc` annotations
+- [ ] Value types have all fields marked `\`value`
+- [ ] Error types inherit from `error` with an `int code` field (see [section 4.3](#43-define-error-types))
 - [ ] Error-raising functions are marked `!`
-- [ ] Cleanup resources use `use` binding pattern (not manual close)
+- [ ] Cleanup resources use `use` binding with `close()` (not manual close)
+- [ ] Platform-specific APIs use `\`target` conditions (see [section 4.4](#44-handle-cross-platform-differences))
+- [ ] WASM-incompatible APIs are excluded with `\`target(!wasm)` (see [section 4.5](#45-wasm-considerations))
 - [ ] The quick start example compiles (mentally) against the API spec
 
 ---
@@ -147,7 +157,7 @@ and always match its epoch. The `epoch` field is only used by local and remote m
 to detect version mismatches with the project.
 
 Catalog modules also **cannot** have `[require]` entries (no remote dependencies). They can
-only depend on other catalog modules.
+only depend on `std` (which is auto-imported). They cannot import other catalog modules.
 
 ### 3.3 Create the source file
 
@@ -221,8 +231,9 @@ _console_enter_raw_mode() int `extern("promise_console_enter_raw_mode");
 _console_exit_raw_mode() int `extern("promise_console_exit_raw_mode");
 ```
 
-Convention: prefix private externs with `_<module>_` (e.g., `_io_file_open`, `_console_enter_raw_mode`).
-The `\`extern` string is the LLVM symbol name that codegen will emit.
+Convention: prefix private externs with `_<module>_` (e.g., `_io_file_open`,
+`_console_enter_raw_mode`). The `\`extern` string is the LLVM symbol name that codegen
+will emit.
 
 **b) Implement the PAL function in codegen:**
 
@@ -244,76 +255,202 @@ Add the LLVM IR implementation for each platform. Follow existing patterns — l
 
 Implement types and functions in `modules/<name>/<name>.pr`, following the proposal spec.
 
-Key conventions:
+**Naming conventions:**
 
-- **`\`public` + `\`doc` on every exported declaration:**
-  ```promise
-  type Screen `public `doc("Main terminal handle — owns raw mode and alternate screen buffer.") {
+| Element | Convention | Examples |
+|---------|-----------|----------|
+| Types, enums | `PascalCase` | `File`, `IoError`, `MouseEvent` |
+| Enum variants | `PascalCase` | `Key.Enter`, `Color.BrightRed` |
+| Functions, methods | `snake_case` | `read_all`, `poll_event`, `set_cell` |
+| Fields | `snake_case` | `exit_code`, `has_ctrl` |
+| Getters | `snake_case` | `get size`, `get is_empty` |
+| Private members | `_` prefix | `int _fd`, `_make_error()` |
+| Extern wrappers | `_<module>_` prefix | `_io_file_open`, `_console_enter_raw_mode` |
+
+Use full English words in all identifiers. The only allowed abbreviations are those in the
+approved dictionary (`docs/language-design.md` section 9.3a): `abs`, `arg`, `attr`, `ch`,
+`config`, `dest`, `dir`, `env`, `func`, `id`, `info`, `init`, `len`, `max`, `millis`,
+`min`, `pos`, `prev`, `src`, `var`.
+
+**Visibility conventions:**
+
+- Top-level declarations are **private by default** — add `\`public` to export
+- Members of a `\`public` type are **public by default**
+- Use `_` prefix to mark members as private (e.g., `int _fd;`)
+- Operators (`+`, `==`, `[]`, etc.) are always public
+- Extern wrappers and internal helpers should be private (no `\`public`, `_` prefix)
+
+**Key annotation patterns:**
+
+```promise
+// Public type with doc
+type Screen `public `doc("Main terminal handle — owns raw mode and alternate screen buffer.") {
+  int _fd;               // private field (underscore prefix)
+  int _width;
+
+  // Public factory with doc
+  open(ScreenOptions options = ScreenOptions()) Self! `factory
+      `doc("Opens the terminal in raw mode with alternate screen buffer.") {
     // ...
   }
-  ```
 
-- **Use `\`value` for types that should be stack-allocated and auto-copied:**
-  ```promise
-  type Style `public `doc("Text styling: foreground, background, attributes.") {
-    Color? fg `value;
-    Color? bg `value;
-    Attribute attr `value;
+  // Public getter (side-effect-free, no params — use getter, not function)
+  get size Size[int] `doc("Terminal dimensions in character cells.");
+
+  // Mutating method
+  write(~this, Point[int] pos, string text, Style style)
+      `doc("Write a styled string starting at pos. Clips at screen edge.");
+
+  // Read-only method
+  get_cell(&this, Point[int] pos) Cell
+      `doc("Read back a cell from the buffer.");
+}
+
+// Value type — all fields `value, stack-allocated, auto-copied
+type Cell `public `doc("One character cell in the screen buffer.") {
+  char ch `value;
+  Style style `value;
+}
+```
+
+### 4.3 Define error types
+
+Every module that can fail needs an error type. Follow the established pattern:
+
+```promise
+// Error type inherits from error, includes errno code
+type ConsoleError is error `public `doc("A terminal I/O error.") {
+  int code;
+}
+
+// Helper to wrap PAL return codes (PAL returns -errno on failure)
+_make_console_error(int rc) ConsoleError {
+  int c = 0 - rc;
+  return ConsoleError(code: c, message: _console_strerror(c));
+}
+
+// Human-readable messages for common errno values
+_console_strerror(int code) string {
+  return match code {
+    5 => "input/output error",
+    9 => "bad file descriptor",
+    22 => "invalid argument",
+    25 => "inappropriate ioctl for device",  // ENOTTY
+    _ => "console error (errno {code})",
+  };
+}
+```
+
+Usage in API methods:
+
+```promise
+open() Self! `factory {
+  int rc = _console_enter_raw_mode();
+  if rc < 0 {
+    raise _make_console_error(rc);
   }
-  ```
+  // ...
+}
+```
 
-- **Use `\`factory` for constructors:**
-  ```promise
-  open() Self! `factory `public `doc("Opens the terminal in raw mode with alternate screen buffer.");
-  ```
+### 4.4 Handle cross-platform differences
 
-- **Use `~this` for mutating methods, `&this` for read-only:**
-  ```promise
-  write(~this, Point[int] pos, string text, Style style);
-  get_cell(&this, Point[int] pos) Cell;
-  ```
+Promise uses the `\`target` annotation for compile-time platform filtering. Only the
+matching variant is compiled — the other is invisible to the type checker and codegen.
 
-- **Wrap extern calls in Promise functions** that provide error handling:
-  ```promise
-  _make_console_error(int rc) ConsoleError {
-    int c = 0 - rc;
-    return ConsoleError(code: c, message: _console_strerror(c));
-  }
+**Supported conditions:**
 
-  open() Self! `factory {
-    int rc = _console_enter_raw_mode();
-    if rc < 0 {
-      raise _make_console_error(rc);
-    }
-    // ...
-  }
-  ```
+| Identifier | Meaning |
+|------------|---------|
+| `linux` | Linux (any triple) |
+| `macos` | macOS / Darwin |
+| `windows` | Windows (MSVC ABI) |
+| `wasm` | WebAssembly (wasm32-wasi) |
+| `posix` | `linux \|\| macos` |
+| `x86_64` | x86-64 architecture |
+| `aarch64` | AArch64 / ARM64 |
 
-### 4.3 Write tests incrementally
+Conditions combine with `!` (not), `||` (or), `&&` (and), and `()` grouping.
+
+**Pattern: platform-specific function variants**
+
+```promise
+// Different implementations per platform — same signature, different target
+_get_terminal_size() (int, int) `target(posix) {
+  // ioctl(TIOCGWINSZ) on POSIX
+  return (_console_ioctl_rows(), _console_ioctl_cols());
+}
+
+_get_terminal_size() (int, int) `target(windows) {
+  // GetConsoleScreenBufferInfo on Windows
+  return (_console_win_rows(), _console_win_cols());
+}
+```
+
+**Pattern: exclude entire types/functions from a platform**
+
+```promise
+// This type does not exist on WASM at all
+type Screen `public `target(!wasm) `doc("Main terminal handle.") {
+  // ...
+}
+
+// This function is POSIX-only
+suspend(~this)! `target(posix) `doc("Suspend raw mode for subprocess handoff.");
+```
+
+**Rules:**
+- `\`target` applies to `type`, `enum`, and `func`/method declarations
+- Individual fields cannot be filtered — filter the whole type or use separate types
+- Without `\`target`, a declaration is included on all targets
+- This is Promise's **only** form of platform-specific variation — no preprocessor, no `#ifdef`
+
+### 4.5 WASM considerations
+
+WASM (wasm32-wasi) has significant limitations that affect module design:
+
+| Feature | WASM status |
+|---------|-------------|
+| Filesystem I/O | Not available |
+| Subprocess execution | Not available |
+| Real threading | Not available (cooperative scheduling only) |
+| Signal handling | Not available |
+| `sleep()` | No-op |
+| Terminal / TTY | Not available |
+| Environment variables | Limited (runtime-dependent) |
+
+**Design guidance:**
+
+- Exclude WASM-incompatible types/functions with `\`target(!wasm)`
+- Pure computation (data structures, algorithms, formatting, parsing) works on all targets
+- If the entire module is WASM-incompatible (e.g., `console`), document this in the proposal
+- Tests for OS-dependent behavior use `\`test(exclude: "wasm32")`
+- The WASM target is always tested in CI (`bin/verify.sh --wasm`) — if your module compiles
+  on WASM (even with most APIs excluded), the remaining code must be correct
+
+### 4.6 Write tests incrementally
 
 Add tests to `modules/<name>/<name>_test.pr` as you implement each piece.
 
 **Prefer batch tests** (`` `test `` functions with `assert()`):
 
 ```promise
-style_default() `test {
-  Style s = Style.default();
-  assert(s.fg is none, "default fg is none");
-  assert(s.bg is none, "default bg is none");
+error_strerror_known() `test {
+  assert(_console_strerror(22) == "invalid argument", "errno 22");
+  assert(_console_strerror(9999) == "console error (errno 9999)", "unknown errno");
 }
 
-style_builder() `test {
-  Style s = Style.default().fg(Color.Red).bold();
-  assert(s.fg is some, "fg set after builder");
+error_make_error() `test {
+  ConsoleError e = _make_console_error(-22);
+  assert(e.code == 22, "code from -errno");
+  assert(e.message == "invalid argument", "message");
 }
 ```
 
-**Use `` `test(exclude: "wasm32") `` for tests that need real OS interaction** (file I/O,
-terminal control, etc.):
+**Use `` `test(exclude: "wasm32") `` for tests that need real OS interaction:**
 
 ```promise
-raw_mode_roundtrip() `test(exclude: "wasm32") {
-  // This test actually enters/exits raw mode
+screen_open_close() `test(exclude: "wasm32") {
   use screen := Screen.open();
   assert(screen.size.width > 0, "has width");
 }
@@ -333,14 +470,17 @@ poll_event_timeout() `test(exclude: "wasm32", timeout: "5s") {
 leak source is fixed):
 
 ```promise
-screen_open_close() `test(exclude: "wasm32", allow_leaks: true) {
+screen_with_mouse() `test(exclude: "wasm32", allow_leaks: true) {
   use screen := Screen.open();
-  screen.clear();
-  screen.show();
+  screen.enable_mouse();
+  screen.disable_mouse();
 }
 ```
 
-### 4.4 Handle language limitations
+**Temp file naming convention:** Use `/tmp/pr_<mod>t_<suffix>` (e.g., `/tmp/pr_iot_cer`
+for promise_io_test_create_exists_remove). Always clean up temp files at the end of tests.
+
+### 4.7 Handle language limitations
 
 If you hit a compiler bug, language limitation, or missing feature while implementing:
 
@@ -351,7 +491,19 @@ If you hit a compiler bug, language limitation, or missing feature while impleme
 
 This is a hard rule. Module code should never contain workarounds for compiler issues.
 
-### 4.5 Rebuild after changes
+### 4.8 Multiple source files
+
+Small modules typically use a single `.pr` file. Larger modules may split across multiple
+files — all `.pr` files in the module directory (and subdirectories) are merged into a
+**single compilation unit**. This means:
+
+- All declarations across files share the same scope (no need to import between files)
+- Name collisions between files are compile errors
+- File order does not matter — the compiler resolves all names after merging
+- Subdirectories are recursively discovered, but a subdirectory with its own `promise.toml`
+  is treated as a separate module (not merged)
+
+### 4.9 Rebuild after changes
 
 After every change to module source:
 
@@ -393,8 +545,8 @@ This runs:
 
 ### 5.3 Write integration tests
 
-If the module interacts with other modules or language features in interesting ways, add
-integration tests in `tests/catalog/` or `tests/modules/`:
+If the module interacts with language features in interesting ways, add integration tests
+in `tests/catalog/` or `tests/modules/`:
 
 ```promise
 // tests/catalog/console_basic_test.pr
@@ -402,8 +554,8 @@ use console;
 
 console_import() `test {
   // Verify the module loads and basic types are accessible
-  Style s = console.Style.default();
-  assert(s.fg is none);
+  ConsoleError e = ConsoleError(code: 1, message: "test");
+  assert(e.code == 1);
 }
 ```
 
@@ -438,17 +590,120 @@ Before committing:
 
 - [ ] All module tests pass (`bin/promise test modules/<name>/`)
 - [ ] Full verify passes (`bin/verify.sh --local --wasm`)
+- [ ] WASM target compiles (even if most APIs are excluded via `\`target`)
 - [ ] Stress tests show no flakiness (`bin/promise test -stress 100 modules/<name>/`)
 - [ ] Coverage is adequate (`bin/promise test -coverage modules/<name>/`)
 - [ ] `catalog.toml` has the module entry
 - [ ] `promise.toml` exists in the module directory
 - [ ] All `\`public` declarations have `\`doc` annotations
+- [ ] Error types follow convention (`is error`, `int code` field, strerror helper)
+- [ ] Platform-specific APIs use `\`target` conditions
 - [ ] `docs/standard-library.md` is updated
 - [ ] No workarounds for compiler bugs (all filed in tracker)
 
 ---
 
-## 6. Reference: Module Types
+## 6. Reference: Language Constraints for Module Design
+
+These constraints from the language design directly affect how modules are structured.
+
+### 6.1 No function overloading
+
+Promise does **not** support function or method overloading. Each function name within a
+scope must be unique. Use default parameters and optional parameters instead:
+
+```promise
+// WRONG — two functions with same name
+open() Self! `factory;
+open(ScreenOptions options) Self! `factory;
+
+// RIGHT — single function with default parameter
+open(ScreenOptions options = ScreenOptions()) Self! `factory;
+```
+
+For fundamentally different operations, use distinct names:
+
+```promise
+// WRONG — overloaded parse
+parse(string data) Config!;
+parse(u8[] bytes) Config!;
+
+// RIGHT — distinct names
+parse_string(string data) Config!;
+parse_bytes(u8[] bytes) Config!;
+```
+
+### 6.2 No module-level variables
+
+Promise does not support module-level mutable variables (global mutable state). All mutable
+state lives in function-scoped locals, type instances, or is threaded through parameters.
+
+This means modules cannot have global singletons, caches, or registries. If persistent
+state is needed, model it as a type instance the caller creates and passes around (e.g.,
+`Screen` in the console module, `File` in the io module).
+
+### 6.3 No module initializers
+
+No module-level initializer blocks, `init()` functions, or static constructors. No code
+runs automatically when a module is imported — code only executes when something explicitly
+calls it. This makes startup behavior fully predictable from `main()`.
+
+### 6.4 No transitive re-exports
+
+A module's exported scope contains only its own `\`public` declarations. Symbols from
+`std` (auto-imported via `use std as _`) are **not** re-exported. If a consumer needs
+a type from `std`, they get it from `std` directly (which is always available).
+
+### 6.5 Resource cleanup: `close()` vs `drop()`
+
+Promise has two cleanup mechanisms. Modules must choose the right one:
+
+| Mechanism | Method | Trigger | Can fail | Use case |
+|-----------|--------|---------|----------|----------|
+| `use` binding | `close(~this)!` | Scope exit | Yes (propagates in `!` functions) | Explicit resource scoping (files, connections, screens) |
+| `drop` | `drop(~this)` | Owner out of scope (not moved) | No (must not fail) | Automatic cleanup (memory, handles) |
+
+**Rules:**
+- If a variable is bound with `use`, the compiler calls `close()` at scope exit —
+  `drop()` is **not** called (use takes precedence)
+- For variables not bound with `use`, normal `drop()` semantics apply
+- A type can have both `close()` and `drop()` — `close()` for `use`-bound variables,
+  `drop()` for non-`use` variables
+- Multiple `use` bindings in the same scope are closed in reverse declaration order (LIFO)
+- `drop()` must not fail — its signature is `drop(~this)` with no `!`
+
+**Example:**
+
+```promise
+type Screen `public {
+  int _fd;
+
+  // Called by `use` binding at scope exit — can propagate errors
+  close(~this)! `doc("Restores terminal state. Called automatically by use binding.") {
+    int rc = _console_exit_raw_mode(this._fd);
+    if rc < 0 { raise _make_console_error(rc); }
+  }
+
+  // Called when a non-use Screen goes out of scope — best-effort cleanup
+  drop(~this) {
+    _console_exit_raw_mode(this._fd);
+  }
+}
+```
+
+### 6.6 Catalog module dependency rules
+
+Embedded catalog modules:
+- **Can** depend on `std` (auto-imported, always available)
+- **Cannot** import other catalog modules (`use io;` inside a catalog module is an error)
+- **Cannot** have `[require]` entries in `promise.toml` (no remote dependencies)
+- **Cannot** have an `epoch` field in `promise.toml`
+
+This ensures catalog modules are self-contained and have no circular dependency risk.
+
+---
+
+## 7. Reference: Module Types
 
 ### Embedded catalog module
 

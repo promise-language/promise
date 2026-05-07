@@ -197,10 +197,10 @@ func (c *Compiler) genStmt(stmt ast.Stmt) {
 			discardedResult = c.genExpr(s.Expr)
 		}
 		c.goExprFireAndForget = false
-		// B0196: When a discarded expression returns Optional[string], the inner
-		// string leaks because trackStringTemp only tracks bare i8* values, not
-		// {i1, i8*} optional structs. Extract the tag and conditionally drop.
-		c.dropDiscardedOptionalString(s.Expr, discardedResult)
+		// B0196/B0208: When a discarded expression returns an Optional with a
+		// droppable inner type, the inner value leaks because trackStringTemp
+		// only tracks bare i8* values, not {i1, T} optional structs.
+		c.dropDiscardedOptional(s.Expr, discardedResult)
 	case *ast.ReturnStmt:
 		c.genReturnStmt(s)
 	case *ast.TypedVarDecl:
@@ -1539,10 +1539,11 @@ func (c *Compiler) emitDropCallDirect(b scopeBinding) {
 	c.block = dropDoneBlock
 }
 
-// dropDiscardedOptionalString handles B0196: when an ExprStmt discards an
-// Optional[string] result (e.g. v.pop()), the inner string must be dropped.
-// trackStringTemp only tracks bare i8* values, so {i1, i8*} optionals slip through.
-func (c *Compiler) dropDiscardedOptionalString(expr ast.Expr, result value.Value) {
+// dropDiscardedOptional handles B0196/B0208: when an ExprStmt discards an
+// Optional result with a droppable inner type (string, vector, channel, user
+// type with drop), the inner value must be dropped. trackStringTemp only tracks
+// bare i8* values, so {i1, T} optionals slip through.
+func (c *Compiler) dropDiscardedOptional(expr ast.Expr, result value.Value) {
 	if result == nil || c.block == nil || c.block.Term != nil {
 		return
 	}
@@ -1557,22 +1558,76 @@ func (c *Compiler) dropDiscardedOptionalString(expr ast.Expr, result value.Value
 	if !ok {
 		return
 	}
-	if extractNamed(opt.Elem()) != types.TypString {
-		return
+	elem := opt.Elem()
+	if c.typeSubst != nil {
+		elem = types.Substitute(elem, c.typeSubst)
 	}
-	dropFunc := c.funcs["promise_string_drop"]
+	innerNamed := extractNamed(elem)
+
+	// Resolve the drop function for the inner type.
+	var dropFunc *ir.Func
+	var isContainer bool
+
+	switch {
+	case innerNamed == types.TypString:
+		dropFunc = c.funcs["promise_string_drop"]
+	case innerNamed != nil && (func() bool { _, ok := types.AsVector(elem); return ok }() || innerNamed == types.TypVector):
+		dropFunc = c.funcs["Vector.drop"]
+		isContainer = true
+	case innerNamed != nil && (func() bool { _, ok := types.AsChannel(elem); return ok }() || innerNamed == types.TypChannel):
+		dropFunc = c.funcs["Channel.drop"]
+		isContainer = true
+	case innerNamed != nil && (innerNamed.HasDrop() || innerNamed.NeedsSynthDrop()):
+		ownerName := innerNamed.Obj().Name()
+		resolvedElem := elem
+		if c.typeSubst != nil {
+			resolvedElem = types.Substitute(elem, c.typeSubst)
+		}
+		if inst, ok := resolvedElem.(*types.Instance); ok {
+			ownerName = monoName(inst)
+		} else if innerNamed.HasDrop() && !innerNamed.NeedsSynthDrop() {
+			ownerName = c.resolveMethodOwner(innerNamed, "drop")
+		}
+		mangledName := mangleMethodName(ownerName, "drop", false)
+		dropFunc = c.funcs[mangledName]
+	default:
+		return // inner type not droppable
+	}
+
 	if dropFunc == nil {
 		return
 	}
-	// result is {i1, i8*} — extract tag and conditionally drop inner string.
+
+	// result is {i1, T} — extract tag and conditionally drop inner value.
 	tag := c.block.NewExtractValue(result, 0)
 	dropBlock := c.newBlock("discard.drop")
 	skipBlock := c.newBlock("discard.skip")
 	c.block.NewCondBr(tag, dropBlock, skipBlock)
 
 	c.block = dropBlock
-	strPtr := c.block.NewExtractValue(result, 1)
-	c.block.NewCall(dropFunc, strPtr)
+	innerVal := c.block.NewExtractValue(result, 1)
+
+	if innerNamed == types.TypString || isContainer {
+		// String and containers store raw i8* — call drop directly.
+		c.block.NewCall(dropFunc, innerVal)
+	} else {
+		// User type: inner is value struct {vtable, instance} — extract instance ptr.
+		instance := c.extractInstancePtr(innerVal)
+		nullCheck := c.block.NewICmp(enum.IPredEQ, instance, constant.NewNull(irtypes.I8Ptr))
+		execBlock := c.newBlock("discard.exec")
+		nullSkip := c.newBlock("discard.null")
+		c.block.NewCondBr(nullCheck, nullSkip, execBlock)
+
+		c.block = execBlock
+		c.block.NewCall(dropFunc, instance)
+		// B0159: Free the instance struct after drop() completes.
+		if innerNamed != nil && !innerNamed.NeedsSynthDrop() {
+			c.block.NewCall(c.palFree, instance)
+		}
+		c.block.NewBr(nullSkip)
+
+		c.block = nullSkip
+	}
 	c.block.NewBr(skipBlock)
 
 	c.block = skipBlock

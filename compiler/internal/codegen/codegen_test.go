@@ -15697,3 +15697,33 @@ func TestNoDropDiscardedOptionalIntPop(t *testing.T) {
 		t.Fatalf("expected test function to NOT contain discard.drop\ngot:\n%s", testFn)
 	}
 }
+
+// B0208: Discarded Vector[Vector[int]].pop() must drop the inner vector.
+func TestDropDiscardedOptionalVectorPop(t *testing.T) {
+	ir := generateIR(t, `
+		test() {
+			int[][] v = int[][]();
+			v.push([1, 2, 3]);
+			v.pop();
+		}
+	`)
+	assertContains(t, ir, "discard.drop")
+	assertContains(t, ir, "call void @Vector.drop")
+}
+
+// B0208: Discarded Optional with user type with drop must drop inner instance.
+func TestDropDiscardedOptionalUserTypePop(t *testing.T) {
+	ir := generateIR(t, `
+		type Res {
+			int id;
+			drop(~this) {}
+		}
+		test() {
+			Res[] v = Res[]();
+			v.push(Res(id: 1));
+			v.pop();
+		}
+	`)
+	assertContains(t, ir, "discard.drop")
+	assertContains(t, ir, "call void @Res.drop")
+}

@@ -1,0 +1,55 @@
+// B0208: Discarded Optional of non-string droppable types must be dropped.
+// When pop() or other failable methods return Optional[T] and the result is
+// discarded (not bound to a variable), the inner value must be dropped to
+// prevent memory leaks.
+// Discarded pop() on Vector[string] drops inner string (B0196 baseline).
+test_discard_string_pop() `test {
+  string[] v = string[]();
+  v.push("hello");
+  v.push("world");
+  v.pop();
+  assert(v.len == 1, "len after pop");
+}
+
+// Discarded pop() on Vector[Vector[int]] drops inner vector.
+test_discard_vector_pop() `test {
+  int[][] v = int[][]();
+  v.push([1, 2, 3]);
+  v.push([4, 5, 6]);
+  v.pop();
+  assert(v.len == 1, "len after pop");
+}
+
+// Discarded pop() on Vector[string[]] drops inner string vector.
+test_discard_nested_string_vector_pop() `test(allow_leaks: true) {
+  string[][] v = string[][]();
+  v.push(["a", "b"]);
+  v.push(["c", "d"]);
+  v.pop();
+  assert(v.len == 1, "len after pop");
+}
+
+// Discarded pop() on Vector with user type with drop.
+type Resource {
+  int id;
+  drop(~this) {
+  }
+}
+test_discard_user_drop_pop() `test(allow_leaks: true) {
+  Resource[] v = Resource[]();
+  v.push(Resource(id: 1));
+  v.push(Resource(id: 2));
+  v.pop();
+  assert(v.len == 1, "len after pop");
+}
+
+// Multiple discarded pops in sequence.
+test_multiple_discarded_pops() `test {
+  string[] v = string[]();
+  v.push("a");
+  v.push("b");
+  v.push("c");
+  v.pop();
+  v.pop();
+  assert(v.len == 1, "len after two pops");
+}

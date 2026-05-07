@@ -331,7 +331,7 @@ data_enum_decode_rect_test() `test(allow_leaks: true) {
   assert(result.contains("\"h\":20"), "decode Rect: h");
 }
 
-data_enum_decode_fieldless_test() `test(allow_leaks: true) {
+data_enum_decode_fieldless_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"Point\"}");
   Shape s = Shape.decode(dec)!;
   json.JsonEncoder enc = json.JsonEncoder();
@@ -341,7 +341,7 @@ data_enum_decode_fieldless_test() `test(allow_leaks: true) {
 
 // ── Data enum decode error cases ──
 
-data_enum_decode_unknown_variant_test() `test(allow_leaks: true) {
+data_enum_decode_unknown_variant_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"Triangle\"}");
   (v, err) := Shape.decode(dec);
   assert(err is present, "unknown variant error");
@@ -353,7 +353,7 @@ data_enum_decode_empty_object_test() `test {
   assert(err is present, "empty object error");
 }
 
-data_enum_decode_wrong_first_key_test() `test(allow_leaks: true) {
+data_enum_decode_wrong_first_key_test() `test {
   // Discriminator-first constraint: "type" must be the first key
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"radius\":1.5,\"type\":\"Circle\"}");
   (v, err) := Shape.decode(dec);
@@ -394,7 +394,7 @@ data_enum_multi_field_test() `test {
   assert(s.contains("\"height\":600"), "Image: height");
 }
 
-data_enum_decode_string_field_test() `test(allow_leaks: true) {
+data_enum_decode_string_field_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"Text\",\"content\":\"world\"}");
   Message m = Message.decode(dec)!;
   json.JsonEncoder enc = json.JsonEncoder();
@@ -412,7 +412,7 @@ data_enum_decode_multi_field_test() `test(allow_leaks: true) {
   assert(s.contains("\"width\":100"), "Image decode: width");
 }
 
-data_enum_decode_ping_test() `test(allow_leaks: true) {
+data_enum_decode_ping_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"Ping\"}");
   Message m = Message.decode(dec)!;
   json.JsonEncoder enc = json.JsonEncoder();
@@ -436,7 +436,7 @@ data_enum_in_type_encode_test() `test {
   assert(s.contains("\"payload\":\{\"type\":\"Text\",\"content\":\"hi\"}"), "envelope: payload");
 }
 
-data_enum_in_type_decode_test() `test(allow_leaks: true) {
+data_enum_in_type_decode_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"sender\":\"bob\",\"payload\":\{\"type\":\"Ping\"}}");
   Envelope e = Envelope.decode(dec)!;
   assert(e.sender == "bob", "envelope decode: sender");
@@ -500,7 +500,7 @@ data_enum_mixed_decode_test() `test(allow_leaks: true) {
 
 // ── Fieldless variant in data enum (decode) ──
 
-data_enum_decode_off_test() `test(allow_leaks: true) {
+data_enum_decode_off_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"Off\"}");
   Toggle t = Toggle.decode(dec)!;
   json.JsonEncoder enc = json.JsonEncoder();
@@ -510,7 +510,7 @@ data_enum_decode_off_test() `test(allow_leaks: true) {
 
 // ── Missing field in data variant (uses zero value) ──
 
-data_enum_decode_missing_field_test() `test(allow_leaks: true) {
+data_enum_decode_missing_field_test() `test {
   // Circle without radius key — radius should default to 0.0
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"Circle\"}");
   Shape s = Shape.decode(dec)!;
@@ -559,7 +559,7 @@ data_enum_string_escapes_test() `test {
   assert(s.contains("\\n"), "string escapes: newline escaped");
 }
 
-data_enum_string_escapes_decode_test() `test(allow_leaks: true) {
+data_enum_string_escapes_decode_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"Text\",\"content\":\"a\\tb\"}");
   Message m = Message.decode(dec)!;
   json.JsonEncoder enc = json.JsonEncoder();
@@ -587,7 +587,7 @@ custom_tag_encode_fieldless_test() `test {
   assert(enc.to_string() == "\{\"kind\":\"Scroll\"}", "custom tag encode Scroll");
 }
 
-custom_tag_decode_test() `test(allow_leaks: true) {
+custom_tag_decode_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"kind\":\"KeyPress\",\"key\":\"Enter\"}");
   InputEvent ev = InputEvent.decode(dec)!;
   json.JsonEncoder enc = json.JsonEncoder();
@@ -595,7 +595,7 @@ custom_tag_decode_test() `test(allow_leaks: true) {
   assert(enc.to_string() == "\{\"kind\":\"KeyPress\",\"key\":\"Enter\"}", "custom tag decode KeyPress");
 }
 
-custom_tag_decode_fieldless_test() `test(allow_leaks: true) {
+custom_tag_decode_fieldless_test() `test {
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"kind\":\"Scroll\"}");
   InputEvent ev = InputEvent.decode(dec)!;
   json.JsonEncoder enc = json.JsonEncoder();
@@ -618,7 +618,7 @@ custom_tag_roundtrip_test() `test(allow_leaks: true) {
   }
 }
 
-custom_tag_wrong_discriminator_test() `test(allow_leaks: true) {
+custom_tag_wrong_discriminator_test() `test {
   // Using "type" instead of "kind" should fail
   json.JsonDecoder dec = json.JsonDecoder(data: "\{\"type\":\"Click\",\"x\":1,\"y\":2}");
   (v, err) := InputEvent.decode(dec);

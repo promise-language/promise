@@ -3,6 +3,8 @@
 # This is the ONLY correct way to build. Do not run `go build` directly.
 set -euo pipefail
 
+source "$(dirname "$0")/bin/_env.sh"
+
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 # Ensure git hooks are configured (idempotent)

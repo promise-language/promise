@@ -9,6 +9,8 @@
 #   --clean  Clear go test cache + promise build cache first
 set -euo pipefail
 
+source "$(dirname "$0")/_env.sh"
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROMISE="$ROOT/bin/promise"
 cd "$ROOT"

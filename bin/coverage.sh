@@ -16,6 +16,8 @@
 #   bin/coverage.sh all                          # Full Go + Promise coverage
 set -euo pipefail
 
+source "$(dirname "$0")/_env.sh"
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROMISE="$ROOT/bin/promise"
 cd "$ROOT"

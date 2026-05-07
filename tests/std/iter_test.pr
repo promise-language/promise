@@ -203,7 +203,7 @@ test_reduce_single() `test {
 
 // --- Intermediate combinator tests (creates _FnIter[int]) ---
 
-test_filter() `test(allow_leaks: true) {
+test_filter() `test {
   c := Counter(current: 0, limit: 10);
   Iterator[int] evens = c.filter(|int x| -> bool {
     return x % 2 == 0;
@@ -215,7 +215,7 @@ test_filter() `test(allow_leaks: true) {
   assert(sum == 20, "filter evens: 0+2+4+6+8=20");
 }
 
-test_take() `test(allow_leaks: true) {
+test_take() `test {
   c := Counter(current: 0, limit: 100);
   Iterator[int] first3 = c.take(3);
   int sum = 0;
@@ -225,7 +225,7 @@ test_take() `test(allow_leaks: true) {
   assert(sum == 3, "take 3: 0+1+2=3");
 }
 
-test_skip() `test(allow_leaks: true) {
+test_skip() `test {
   c := Counter(current: 0, limit: 5);
   Iterator[int] skipped = c.skip(3);
   int sum = 0;
@@ -235,7 +235,7 @@ test_skip() `test(allow_leaks: true) {
   assert(sum == 7, "skip 3: 3+4=7");
 }
 
-test_take_while() `test(allow_leaks: true) {
+test_take_while() `test {
   c := Counter(current: 0, limit: 100);
   Iterator[int] small = c.take_while(|int x| -> bool {
     return x < 4;
@@ -247,7 +247,7 @@ test_take_while() `test(allow_leaks: true) {
   assert(sum == 6, "take_while < 4: 0+1+2+3=6");
 }
 
-test_skip_while() `test(allow_leaks: true) {
+test_skip_while() `test {
   c := Counter(current: 0, limit: 8);
   Iterator[int] rest = c.skip_while(|int x| -> bool {
     return x < 5;
@@ -259,7 +259,7 @@ test_skip_while() `test(allow_leaks: true) {
   assert(sum == 18, "skip_while < 5: 5+6+7=18");
 }
 
-test_chain() `test(allow_leaks: true) {
+test_chain() `test {
   a := Counter(current: 0, limit: 3);
   b := Counter(current: 10, limit: 13);
   Iterator[int] chained = a.chain(b);

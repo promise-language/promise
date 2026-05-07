@@ -440,6 +440,8 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 		dropType = exprType
 	}
 	c.maybeRegisterDrop(s.Name, alloca, dropType)
+	// T0127: Register bindingFree for structural interface variables owning a heap allocation.
+	c.maybeRegisterStructuralFree(s.Name, alloca, dropType, s.Value)
 	// Clear drop flag when RHS is a borrow (container element, field access).
 	// T0095: Skip for string MemberExpr on droppable types — genFieldAccess
 	// dups the string, so the variable owns the copy (not a borrow).
@@ -507,6 +509,8 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	c.block.NewStore(val, alloca)
 	c.locals[s.Name] = alloca
 	c.maybeRegisterDrop(s.Name, alloca, typ)
+	// T0127: Register bindingFree for structural interface variables owning a heap allocation.
+	c.maybeRegisterStructuralFree(s.Name, alloca, typ, s.Value)
 	// Clear drop flag when RHS is a borrow (container element, field access).
 	// The container/struct still owns the value — freeing it here would cause use-after-free.
 	// T0095: Skip for string MemberExpr on droppable types — genFieldAccess
@@ -848,6 +852,51 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 		}
 	}
 
+	c.scopeBindings = append(c.scopeBindings, binding)
+	c.dropBindings[varName] = binding
+}
+
+// maybeRegisterStructuralFree registers a bindingFree for structural interface variables
+// whose backing instance is heap-allocated from a call/constructor (T0127).
+// Structural types are excluded from maybeRegisterDrop (their instance ptr could be a
+// borrow from a concrete variable). This method is called only when the RHS is NOT a
+// simple identifier, meaning the value comes from a fresh allocation (e.g., vec.iter(),
+// iter.map(f)) and the variable owns the backing instance.
+func (c *Compiler) maybeRegisterStructuralFree(varName string, alloca *ir.InstAlloca, typ types.Type, rhs ast.Expr) {
+	// Only for structural interface types without an existing drop binding.
+	if _, hasBinding := c.dropBindings[varName]; hasBinding {
+		return
+	}
+	named := extractNamed(typ)
+	if named == nil || !named.IsStructural() || named.IsValueType() {
+		return
+	}
+	// Only register when the RHS is a call expression that produces a fresh heap
+	// allocation (e.g., vec.iter(), iter.map(f)). Other RHS expressions — identifiers
+	// (borrow from existing variable), literals (value types, no heap alloc), member
+	// access (borrow) — should NOT get a free binding.
+	if _, isCall := rhs.(*ast.CallExpr); !isCall {
+		return
+	}
+	// Must be a struct alloca ({i8* vtable, i8* instance}) to extract instance ptr.
+	if _, ok := alloca.ElemType.(*irtypes.StructType); !ok {
+		return
+	}
+
+	dropFlag := c.createEntryAlloca(irtypes.I1)
+	dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
+	c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+	c.dropFlags[varName] = dropFlag
+
+	binding := scopeBinding{
+		kind:     bindingFree,
+		alloca:   alloca,
+		named:    named,
+		valType:  typ,
+		dropFlag: dropFlag,
+		dropFunc: c.lastClaimedDropFunc, // T0127: use iter cleanup when available
+		varName:  varName,
+	}
 	c.scopeBindings = append(c.scopeBindings, binding)
 	c.dropBindings[varName] = binding
 }
@@ -1324,7 +1373,14 @@ func (c *Compiler) emitFreeCall(b scopeBinding) {
 	c.block.NewCondBr(nullCheck, doneBlock, execBlock)
 
 	c.block = execBlock
-	c.block.NewCall(c.palFree, instance)
+	if b.dropFunc != nil {
+		// T0127: Custom cleanup function (e.g., __promise_iter_cleanup for structural
+		// interface variables from iterator chains). The cleanup function frees nested
+		// allocations (closure env) and the instance itself.
+		c.block.NewCall(b.dropFunc, instance)
+	} else {
+		c.block.NewCall(c.palFree, instance)
+	}
 	c.block.NewBr(doneBlock)
 
 	c.block = doneBlock
@@ -1587,6 +1643,7 @@ func (c *Compiler) trackHeapTemp(instancePtr value.Value, dropFunc *ir.Func) {
 // Accepts either an i8* instance pointer or a value struct — extracts field 1
 // (the instance pointer) at the LLVM level if needed.
 func (c *Compiler) claimHeapTemp(val value.Value) {
+	c.lastClaimedDropFunc = nil // T0127: reset before each claim attempt
 	if val == nil || len(c.heapTemps) == 0 {
 		return
 	}
@@ -1595,6 +1652,7 @@ func (c *Compiler) claimHeapTemp(val value.Value) {
 	}
 	// Try direct match (i8* instance pointer)
 	if idx, ok := c.heapTempMap[val]; ok && idx >= 0 {
+		c.lastClaimedDropFunc = c.heapTemps[idx].dropFunc // T0127
 		c.block.NewStore(constant.NewInt(irtypes.I1, 0), c.heapTemps[idx].dropFlag)
 		c.heapTempMap[val] = -1
 		return
@@ -1609,6 +1667,9 @@ func (c *Compiler) claimHeapTemp(val value.Value) {
 			return
 		}
 		for _, temp := range c.heapTemps {
+			if c.lastClaimedDropFunc == nil {
+				c.lastClaimedDropFunc = temp.dropFunc // T0127: capture for scope binding
+			}
 			tracked := c.block.NewLoad(irtypes.I8Ptr, temp.alloca)
 			isSame := c.block.NewICmp(enum.IPredEQ, instPtr, tracked)
 			claimBlk := c.newBlock("heap.claim")

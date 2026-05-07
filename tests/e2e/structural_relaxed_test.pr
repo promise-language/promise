@@ -16,7 +16,7 @@ type Doc {
   }
 }
 
-test_extra_optional_param() `test(allow_leaks: true) {
+test_extra_optional_param() `test {
   Printable p = Doc();
   assert(p.print() == "doc", "called through interface with none default");
 }
@@ -33,7 +33,7 @@ type Report {
   }
 }
 
-test_extra_default_param() `test(allow_leaks: true) {
+test_extra_default_param() `test {
   Formatter f = Report();
   assert(f.format() == "report(w:80)", "called through interface with default param");
 }
@@ -50,7 +50,7 @@ type Doubler {
   }
 }
 
-test_non_failable_satisfies_failable() `test(allow_leaks: true) {
+test_non_failable_satisfies_failable() `test {
   Processor p = Doubler();
   int result = p.process(5)!;
   assert(result == 10, "non-failable through failable interface");
@@ -68,7 +68,7 @@ type Always42 {
   }
 }
 
-test_non_optional_return() `test(allow_leaks: true) {
+test_non_optional_return() `test {
   Finder f = Always42();
   int? result = f.find();
   if result is present {
@@ -93,7 +93,7 @@ type SimpleParser {
   }
 }
 
-test_combined_adapter() `test(allow_leaks: true) {
+test_combined_adapter() `test {
   Parser p = SimpleParser();
   int result = p.parse("hello")!;
   assert(result == 5, "combined adapter: extra param + failable");
@@ -117,7 +117,7 @@ type Dict {
   }
 }
 
-test_combined_extra_param_optional_return() `test(allow_leaks: true) {
+test_combined_extra_param_optional_return() `test {
   Lookup l = Dict();
   int? result = l.get("x");
   if result is present {
@@ -210,7 +210,7 @@ type Job {
   }
 }
 
-test_multiple_extra_params_through_interface() `test(allow_leaks: true) {
+test_multiple_extra_params_through_interface() `test {
   Executor e = Job();
   assert(e.execute() == 1, "multiple extra params: defaults used");
 }

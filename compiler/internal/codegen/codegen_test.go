@@ -9407,6 +9407,66 @@ func TestBindingFreeErrorType(t *testing.T) {
 	assertContains(t, ir, "call void @pal_free")
 }
 
+// T0127: Structural interface variables from calls get bindingFree with iter cleanup
+func TestStructuralInterfaceVarFree(t *testing.T) {
+	ir := generateIR(t, `
+		type Counter is Iterator[int] {
+			int current;
+			int limit;
+			next() int? {
+				if this.current < this.limit {
+					v := this.current;
+					this.current = this.current + 1;
+					return v;
+				}
+				return none;
+			}
+		}
+		test() {
+			c := Counter(current: 0, limit: 5);
+			Iterator[int] it = c.filter(|int x| -> bool {
+				return x > 2;
+			});
+		}
+		main() {}
+	`)
+	// Structural interface variable should get a drop flag and free.call block
+	assertContains(t, ir, "it.dropflag")
+	assertContains(t, ir, "free.call")
+	// Should use __promise_iter_cleanup for iterator chain results (frees env + instance)
+	assertContains(t, ir, "__promise_iter_cleanup")
+}
+
+// T0127: Structural interface variables from identifiers should NOT get bindingFree (borrow)
+func TestStructuralInterfaceVarBorrow(t *testing.T) {
+	ir := generateIR(t, `
+		type Counter is Iterator[int] {
+			int current;
+			int limit;
+			next() int? {
+				if this.current < this.limit {
+					v := this.current;
+					this.current = this.current + 1;
+					return v;
+				}
+				return none;
+			}
+		}
+		test() {
+			c := Counter(current: 0, limit: 5);
+			Iterator[int] it = c.filter(|int x| -> bool {
+				return x > 2;
+			});
+			Iterator[int] it2 = it;
+		}
+		main() {}
+	`)
+	// it should have a drop flag (from call result)
+	assertContains(t, ir, "it.dropflag")
+	// it2 should NOT have a drop flag (borrow from it)
+	assertNotContains(t, ir, "it2.dropflag")
+}
+
 // T0086: Raising a local error variable clears its drop flag before scope cleanup
 func TestRaiseLocalErrorClearsDropFlag(t *testing.T) {
 	ir := generateIR(t, `

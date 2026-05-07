@@ -3270,6 +3270,17 @@ func (c *Compiler) genIfStmt(s *ast.IfStmt) {
 	c.envTemps = nil
 	c.envTempMap = make(map[value.Value]int)
 
+	// B0198: Save condition's string temps so branches don't permanently clear them.
+	// Branches see the condition temps (for cleanup on return paths), but after each
+	// branch we restore from the snapshot so the next branch and merge block also
+	// emit flag-guarded cleanup. The flag system prevents double-free: if a branch
+	// already dropped the temp, its flag is cleared and merge-block cleanup is a no-op.
+	savedCondStmtTemps := append([]stmtTemp(nil), c.stmtTemps...)
+	savedCondStmtTempMap := make(map[value.Value]int, len(c.stmtTempMap))
+	for k, v := range c.stmtTempMap {
+		savedCondStmtTempMap[k] = v
+	}
+
 	// Then branch
 	c.block = thenBlock
 	if c.shouldInstrument() {
@@ -3285,6 +3296,12 @@ func (c *Compiler) genIfStmt(s *ast.IfStmt) {
 
 	// Else branch
 	if s.Else != nil {
+		// B0198: Restore condition temps so else-branch can also emit cleanup.
+		c.stmtTemps = append([]stmtTemp(nil), savedCondStmtTemps...)
+		c.stmtTempMap = make(map[value.Value]int, len(savedCondStmtTempMap))
+		for k, v := range savedCondStmtTempMap {
+			c.stmtTempMap[k] = v
+		}
 		c.block = elseBlock
 		if c.shouldInstrument() {
 			pos := s.Else.Pos()
@@ -3299,6 +3316,12 @@ func (c *Compiler) genIfStmt(s *ast.IfStmt) {
 	}
 
 	c.block = mergeBlock
+
+	// B0198: Restore condition's string temps for merge-block cleanup.
+	// The normal statement-end cleanupStmtTemps() will emit flag-guarded
+	// cleanup IR here, covering the false-path where no branch ran.
+	c.stmtTemps = savedCondStmtTemps
+	c.stmtTempMap = savedCondStmtTempMap
 
 	// B0173: Restore heap/env temps and clean up in the merge block.
 	c.heapTemps = savedHeapTemps

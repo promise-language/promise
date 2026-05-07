@@ -9981,6 +9981,27 @@ func TestStringTempFreeFunctionCallClaimed(t *testing.T) {
 	assertContains(t, ir, "store i1 false")
 }
 
+// B0198: String temps in if-condition must be cleaned up in the merge block.
+// When the condition evaluates to false, the then-body never runs but its
+// inner-statement cleanup cleared the Go tracking. The merge block must still
+// emit flag-guarded cleanup IR.
+func TestStringTempIfConditionFalsePath(t *testing.T) {
+	ir := generateIR(t, `
+		check(string s) bool {
+			if s.len >= 4 && s[0:4] == "true" {
+				return true;
+			}
+			return false;
+		}
+		main() { check("no"); }
+	`)
+	// The merge block (if.end) must contain cleanup for the condition temp:
+	// load drop flag → branch to tmp.drop or tmp.skip
+	assertContains(t, ir, "tmp.drop")
+	assertContains(t, ir, "tmp.skip")
+	assertContains(t, ir, "call void @promise_string_drop")
+}
+
 // T0082: Structural views are tested at the Promise level (e2e/structural_view_test.pr)
 // because structural interface coercion requires the full std library.
 // The fix: genTypedVarDecl skips clearDropFlag when LHS is a structural interface.

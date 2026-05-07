@@ -1,0 +1,63 @@
+// B0198: String temporaries in if-condition must be cleaned up when
+// the condition evaluates to false (short-circuit &&).
+test_if_false_path_cleanup() `test {
+  // The substring temp from the false-path if-condition must be freed.
+  string data = "false";
+  int pos = 0;
+
+  if pos + 4 <= data.len && data[pos: pos + 4] == "true" {
+    assert(false, "should not match true");
+  }
+  assert(true, "false path cleanup");
+}
+
+test_if_true_path_cleanup() `test {
+  // When the condition is true, the temp is also cleaned up (via branch cleanup).
+  string data = "true";
+  int pos = 0;
+
+  if pos + 4 <= data.len && data[pos: pos + 4] == "true" {
+    // temp cleaned up via inner statement or return
+  }
+  assert(true, "true path cleanup");
+}
+
+test_consecutive_if_cleanup() `test {
+  // Two consecutive if-statements with string temps in conditions.
+  // Only the second matches — first if's temp must still be freed.
+  string data = "false";
+  int pos = 0;
+
+  if pos + 4 <= data.len && data[pos: pos + 4] == "true" {
+    assert(false, "should not match true");
+  }
+  if pos + 5 <= data.len && data[pos: pos + 5] == "false" {
+    pos = pos + 5;
+  }
+  assert(pos == 5, "consecutive cleanup");
+}
+
+test_if_else_cleanup() `test {
+  // String temp in condition with else branch.
+  string data = "hello";
+  int result = 0;
+
+  if data[0:3] == "bye" {
+    result = 1;
+  } else {
+    result = 2;
+  }
+  assert(result == 2, "if-else cleanup");
+}
+
+test_short_circuit_no_temp() `test {
+  // When && short-circuits on the left (false), the right side is never
+  // evaluated, so no string temp is created. The flag stays false.
+  string data = "hi";
+  int pos = 0;
+
+  if pos + 10 <= data.len && data[pos: pos + 10] == "impossible" {
+    assert(false, "should not match");
+  }
+  assert(true, "short circuit no temp");
+}

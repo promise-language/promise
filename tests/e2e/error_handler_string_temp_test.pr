@@ -1,0 +1,62 @@
+// B0185: Tests for string temp tracking from error handler expressions.
+// When func()! returns a string and a handler is used (? e { ... }),
+// the Ok path string must be tracked as a temp for cleanup at statement end.
+// Helper: returns a heap-allocated string (concat forces heap alloc)
+make_greeting(string name) string! {
+  return "hello " + name;
+}
+
+// Helper: always fails
+make_fail() string! {
+  raise error("fail");
+}
+
+// Pattern 1: handler Ok path string used as temp for .len
+test_handler_ok_string_temp_len() `test {
+  int n = (make_greeting("world")? e {
+    "fallback";
+  }).len;
+  assert(n == 11, "handler ok string temp len");
+}
+
+// Pattern 2: handler recovery path string (both paths produce strings)
+test_handler_recovery_string_temp() `test {
+  int n = (make_fail()? e {
+    "recovered";
+  }).len;
+  assert(n == 9, "handler recovery string temp");
+}
+
+// Pattern 3: handler Ok path string stored in variable (claimed, not leaked)
+test_handler_ok_string_stored() `test {
+  string s = make_greeting("alice")? e {
+    "fallback";
+  };
+  assert(s.len == 11, "handler ok string stored");
+}
+
+// Pattern 4: handler Ok path string used in concatenation
+test_handler_ok_string_concat() `test {
+  string s = (make_greeting("bob")? e {
+    "fallback";
+  }) + "!";
+  assert(s == "hello bob!", "handler ok string concat");
+}
+
+// Pattern 5: handler Ok path string in a loop (repeated temps)
+test_handler_ok_string_loop() `test {
+  int total = 0;
+  for i in 0..5 {
+    total += (make_greeting("x")? e {
+      "y";
+    }).len;
+  }
+  assert(total == 35, "handler ok string loop");
+}
+
+// Pattern 6: handler Ok path string discarded
+test_handler_ok_string_discard() `test {
+  make_greeting("discard")? e {
+    "fallback";
+  };
+}

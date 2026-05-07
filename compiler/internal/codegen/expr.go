@@ -80,7 +80,14 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 		}
 		return result
 	case *ast.ErrorHandlerExpr:
-		return c.genErrorHandlerExpr(e)
+		result := c.genErrorHandlerExpr(e)
+		// B0185: Track string temps from error handler expressions.
+		// The result may be a phi merge of the Ok value and handler recovery value.
+		// If it's an i8* (string), it needs tracking for cleanup at statement end.
+		if result != nil && result.Type() == irtypes.I8Ptr {
+			c.trackStringTemp(result)
+		}
+		return result
 	case *ast.TupleLit:
 		return c.genTupleLit(e)
 	case *ast.NoneLit:

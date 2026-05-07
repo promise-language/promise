@@ -10452,6 +10452,62 @@ func TestDropSynthesizedEnumUserType(t *testing.T) {
 	assertContains(t, ir, "call void @Resource.drop(")
 }
 
+// B0212: Vector[Enum] scope-exit drops enum elements (each element's synthesized drop is called).
+func TestDropVectorEnumElements(t *testing.T) {
+	ir := generateIR(t, `
+		enum Value {
+			Null,
+			Str(string s),
+			List(Value[] items),
+		}
+		main() {
+			v := [Value.Str("a"), Value.Null];
+		}
+	`)
+	// Scope-exit vector drop should iterate elements and call Value.drop
+	assertContains(t, ir, "vecdrop.head")
+	assertContains(t, ir, "call void @Value.drop(")
+}
+
+// B0212: Enum variant with vector field drops enum elements in the vector.
+func TestDropEnumVariantVectorElements(t *testing.T) {
+	ir := generateIR(t, `
+		enum Value {
+			Null,
+			Str(string s),
+			List(Value[] items),
+		}
+		main() {
+			v := Value.List([Value.Str("inner")]);
+		}
+	`)
+	// Value.drop for List variant should drop vector elements before freeing buffer
+	assertContains(t, ir, "define void @Value.drop(")
+	assertContains(t, ir, "enum.drop.List")
+	assertContains(t, ir, "vecdrop.head") // element drop loop in variant field drop
+}
+
+// B0212: Generic enum instances (like Slot[K,V]) get synthesized drops at mono time
+// when sema couldn't detect droppability for TypeParam variant fields.
+func TestDropMonoEnumInstSynthDrop(t *testing.T) {
+	ir := generateIR(t, `
+		enum Wrapper[T] {
+			Some(T value),
+			None,
+		}
+		type Resource {
+			int id;
+			drop(~this) { }
+		}
+		main() {
+			w := Wrapper[Resource].Some(Resource(id: 1));
+		}
+	`)
+	// Wrapper[Resource] should get a synthesized drop that calls Resource.drop
+	assertContains(t, ir, `define void @"Wrapper[Resource].drop"`)
+	assertContains(t, ir, "call void @Resource.drop(")
+}
+
 // Compound assignment on different typed variables exercises namedFromLLVMType branches
 func TestCompoundAssignF64(t *testing.T) {
 	ir := generateIR(t, `

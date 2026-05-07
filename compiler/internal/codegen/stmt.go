@@ -1807,18 +1807,26 @@ func (c *Compiler) emitVectorElementDrops(b scopeBinding, vecPtr value.Value) {
 // each one. Shared by scope-exit drops (emitVectorElementDrops) and field drops
 // (emitFieldDrops). The elemType must already have type substitution applied.
 // B0189: Fixes memory leak where Vector[string] drop didn't free string elements.
+// B0212: Extended to also drop enum elements with synthesized drops.
 func (c *Compiler) emitVectorElementDropLoop(vecPtr value.Value, elemType types.Type) {
-	// B0189: Only drop string elements for now. Other droppable types (vectors,
-	// channels, user types) don't have dup-on-push, so element drops would cause
-	// double-frees when elements are shared (e.g., filled() pushing the same value
-	// multiple times). String elements are safe because push dups them.
 	if c.typeSubst != nil {
 		elemType = types.Substitute(elemType, c.typeSubst)
 	}
+	// B0189: String elements are safe to drop (push dups them).
+	// B0212: Enum elements stored by value in vectors — each element is an
+	// independent copy of the enum internal type, so dropping each is safe.
+	// Other droppable types (vectors, channels, user types) are skipped for now
+	// to avoid double-frees when elements are shared (B0189).
 	if extractNamed(elemType) != types.TypString {
-		return
+		if !c.vecElemNeedsEnumDrop(elemType) {
+			return
+		}
 	}
+	c.emitVectorElementDropLoopBody(vecPtr, elemType)
+}
 
+// emitVectorElementDropLoopBody is the shared implementation for vector element drop loops.
+func (c *Compiler) emitVectorElementDropLoopBody(vecPtr value.Value, elemType types.Type) {
 	elemLLVM := c.resolveType(elemType)
 
 	// Load vector length (masked — clears static flag bit 63)
@@ -1862,6 +1870,42 @@ func (c *Compiler) emitVectorElementDropLoop(vecPtr value.Value, elemType types.
 	c.block.NewBr(loopHead)
 
 	c.block = loopDone
+}
+
+// emitVectorStringElementDropLoop is a string-only version of emitVectorElementDropLoop.
+// Used for Map for-in temporary vectors where values are shared copies — only strings
+// are safe to drop (they are dup'd, making each copy independent). B0212.
+func (c *Compiler) emitVectorStringElementDropLoop(vecPtr value.Value, elemType types.Type) {
+	if c.typeSubst != nil {
+		elemType = types.Substitute(elemType, c.typeSubst)
+	}
+	if extractNamed(elemType) != types.TypString {
+		return
+	}
+	c.emitVectorElementDropLoopBody(vecPtr, elemType)
+}
+
+// vecElemNeedsEnumDrop returns true if a vector element type is an enum that has
+// a drop function available. Checks both sema-time HasDrop (non-generic enums) and
+// codegen-time mono synth drops (generic enum instances like Slot[string, JsonValue]).
+// B0212: Enables vector element drop loop to clean up enum elements.
+func (c *Compiler) vecElemNeedsEnumDrop(elemType types.Type) bool {
+	enum := extractEnum(elemType)
+	if enum == nil {
+		return false
+	}
+	// Non-generic enum with sema-detected drop
+	if enum.HasDrop() {
+		return true
+	}
+	// Generic enum instance — check if the mono drop function was generated
+	if inst, ok := elemType.(*types.Instance); ok {
+		mangledName := mangleMethodName(monoName(inst), "drop", false)
+		if _, ok := c.funcs[mangledName]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // emitFreeCall emits a conditional pal_free call for a heap-allocated user type
@@ -5541,11 +5585,14 @@ func (c *Compiler) genForInMap(s *ast.ForInStmt, mapVal value.Value, keyType, va
 
 	// B0214: Drop the temporary keys and values vectors after the loop.
 	// keys() and values() return freshly heap-allocated vectors that must be freed.
-	// Drop string elements first (emitVectorElementDropLoop is a no-op for non-string).
+	// B0212: Only drop STRING elements here. The values vector contains bitwise copies
+	// of the Map's values (shared pointers), so dropping enum/droppable elements would
+	// cause double-frees when the Map itself is later dropped. Strings are safe because
+	// they are dup'd on push, making each copy independent.
 	vectorDropFn := c.funcs["Vector.drop"]
-	c.emitVectorElementDropLoop(keysVec, keyType)
+	c.emitVectorStringElementDropLoop(keysVec, keyType)
 	c.block.NewCall(vectorDropFn, keysVec)
-	c.emitVectorElementDropLoop(valsVec, valType)
+	c.emitVectorStringElementDropLoop(valsVec, valType)
 	c.block.NewCall(vectorDropFn, valsVec)
 }
 

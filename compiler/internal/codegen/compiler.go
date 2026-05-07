@@ -62,11 +62,12 @@ type Compiler struct {
 	file *ast.File
 
 	// Module codegen state
-	moduleFuncs      map[string]*ir.Func    // "irprefix.funcname" → IR func (cross-module calls)
-	moduleExterns    map[string]*ExternFunc // "irprefix.funcname" → extern (cross-module externs)
-	compilingModule  string                 // non-empty when compiling a module's declarations (IR prefix)
-	moduleOwnedFuncs map[string]string      // IR func name → module IR prefix (for separate compilation)
-	moduleCanonical  map[string]string      // module path → IR prefix (for alias→prefix mapping)
+	moduleFuncs      map[string]*ir.Func         // "irprefix.funcname" → IR func (cross-module calls)
+	moduleExterns    map[string]*ExternFunc      // "irprefix.funcname" → extern (cross-module externs)
+	compilingModule  string                      // non-empty when compiling a module's declarations (IR prefix)
+	moduleOwnedFuncs map[string]string           // IR func name → module IR prefix (for separate compilation)
+	moduleCanonical  map[string]string           // module path → IR prefix (for alias→prefix mapping)
+	moduleInfos      map[string]*sema.ModuleInfo // B0212: cached from main info for cross-module lookups
 
 	// Instance BC codegen state
 	instanceOwnedFuncs map[string]string // IR func name → mono instance name (e.g., "Box[int]")
@@ -3859,6 +3860,9 @@ func (c *Compiler) compileModules() {
 		return
 	}
 
+	// B0212: Cache module infos for cross-module drop function lookups during module compilation.
+	c.moduleInfos = c.info.ModuleInfos
+
 	// Build path → IR prefix mapping for alias resolution in genModuleCall.
 	for _, modInfo := range c.info.ModuleInfos {
 		if modInfo.Path != "" {
@@ -5023,12 +5027,13 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 		// (sema-time or mono-time), use the monomorphized name. Check the resolved
 		// fieldType (not just when c.typeSubst is set) so non-generic types
 		// containing generic instances also get the right drop name.
-		// B0189: Drop vector elements before freeing the buffer.
-		// Vector fields with droppable elements (e.g., Vector[string]) need
-		// their elements dropped before Vector.drop frees the buffer.
-		// fieldType already has type substitution applied from above.
+		// B0189: Drop string vector elements before freeing the buffer.
+		// B0212: Only drop string elements in synthesized type drops. Types like Map
+		// have [] operators that create shared copies of values — dropping enum/droppable
+		// elements here would double-free. Safe enum element drops happen at scope exit
+		// for user-owned vectors (emitVectorElementDrops).
 		if elemType, isVec := types.AsVector(fieldType); isVec {
-			c.emitVectorElementDropLoop(fieldInstance, elemType)
+			c.emitVectorStringElementDropLoop(fieldInstance, elemType)
 		}
 
 		ownerName := c.resolveMethodOwner(fieldNamed, "drop")
@@ -5494,7 +5499,18 @@ func (c *Compiler) variantFieldNeedsDrop(typ types.Type) bool {
 		return named.HasDrop()
 	}
 	if enum := extractEnum(typ); enum != nil {
-		return enum.HasDrop()
+		if enum.HasDrop() {
+			return true
+		}
+		// B0212: Check for mono enum instance with codegen-time synthesized drop.
+		// Generic enums like Slot[K,V] have TypeParam variant fields — sema can't
+		// detect droppability, but the mono drop may have been generated.
+		if inst, ok := typ.(*types.Instance); ok {
+			mangledName := mangleMethodName(monoName(inst), "drop", false)
+			if _, ok := c.funcs[mangledName]; ok {
+				return true
+			}
+		}
 	}
 	return false
 }
@@ -5514,7 +5530,10 @@ func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 			}
 			return
 		}
-		// Vector: drop elements first, then call Vector.drop
+		// Vector: drop elements first, then call Vector.drop.
+		// B0212: Drop enum elements in variant vectors. The variant's vector is owned
+		// by the enum and only accessible through match/destructuring (which doesn't
+		// register drop bindings), so each element is uniquely owned.
 		if elemType, isVec := types.AsVector(typ); isVec || named == types.TypVector {
 			if isVec {
 				c.emitVectorElementDropLoop(fieldVal, elemType)
@@ -5546,22 +5565,70 @@ func (c *Compiler) emitVariantFieldDrop(fieldVal value.Value, typ types.Type) {
 		return
 	}
 
-	// Enum field: pass pointer to an alloca
-	if enum := extractEnum(typ); enum != nil && enum.HasDrop() {
+	// Enum field: pass pointer to an alloca.
+	// B0212: Also handle mono enum instances where HasDrop is false on the origin
+	// (sema couldn't detect droppability for TypeParam variant fields) but a mono
+	// drop function was generated at codegen time.
+	if enum := extractEnum(typ); enum != nil {
 		enumName := enum.Obj().Name()
 		if inst, ok := typ.(*types.Instance); ok {
 			enumName = monoName(inst)
 		}
 		mangledName := mangleMethodName(enumName, "drop", false)
-		if dropFn, ok := c.funcs[mangledName]; ok {
-			// Enum drop takes i8* pointing to an alloca with the enum value.
-			// Store the field value to a temp alloca and pass its address.
+		dropFn := c.funcs[mangledName]
+		// B0212: If the drop function is not found, try module-prefixed names.
+		// During module compilation, cross-module enum drops may not yet be registered
+		// under the plain name. Forward-declare if found in a module's declarations.
+		if dropFn == nil && c.moduleInfos != nil {
+			dropFn = c.forwardDeclareModuleEnumDrop(enum, enumName, mangledName)
+		}
+		if dropFn != nil {
 			alloca := c.block.NewAlloca(fieldVal.Type())
 			c.block.NewStore(fieldVal, alloca)
 			ptr := c.block.NewBitCast(alloca, irtypes.I8Ptr)
 			c.block.NewCall(dropFn, ptr)
 		}
 	}
+}
+
+// forwardDeclareModuleEnumDrop searches module infos for the enum's owning module
+// and forward-declares its drop function with the correct module-prefixed name.
+// Returns the declared function, or nil if not found. B0212.
+func (c *Compiler) forwardDeclareModuleEnumDrop(enum *types.Enum, enumName, plainMangledName string) *ir.Func {
+	savedInfo := c.info
+	defer func() { c.info = savedInfo }()
+
+	for _, modInfo := range c.moduleInfos {
+		c.info = modInfo.SemaInfo
+		irName := modInfo.EffectiveIRPrefix()
+		for _, decl := range modInfo.File.Decls {
+			ed, ok := decl.(*ast.EnumDecl)
+			if !ok || ed.Name != enumName {
+				continue
+			}
+			if modInfo.SemaInfo.FilteredDecls[decl] {
+				continue
+			}
+			foundEnum := c.lookupEnumType(ed.Name)
+			if foundEnum != enum {
+				continue
+			}
+			// Found the module that owns this enum — declare or find its drop
+			moduleMangledName := mangleModuleMethodName(irName, enumName, "drop", false)
+			if fn, ok := c.funcs[moduleMangledName]; ok {
+				c.funcs[plainMangledName] = fn
+				return fn
+			}
+			// Forward-declare with module ownership so IR splitting works correctly
+			fn := c.module.NewFunc(moduleMangledName, irtypes.Void,
+				ir.NewParam("this", irtypes.I8Ptr))
+			c.funcs[moduleMangledName] = fn
+			c.funcs[plainMangledName] = fn
+			c.moduleOwnedFuncs[moduleMangledName] = irName
+			return fn
+		}
+	}
+	return nil
 }
 
 // lookupNamedType finds a Named type in sema info by name.

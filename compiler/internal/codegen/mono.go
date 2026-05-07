@@ -1413,6 +1413,50 @@ func monoInstNeedsSynthDrop(inst *types.Instance) bool {
 	return false
 }
 
+// monoEnumInstNeedsSynthDrop returns true if a mono enum instance needs a synthesized
+// drop that was NOT detected at sema time. Analogous to monoInstNeedsSynthDrop for
+// Named types. Handles generic enums like Slot[K, V] where variant fields are TypeParams
+// — sema's fieldTypeHasDrop returns false for TypeParam, so NeedsSynthDrop is never set.
+// At mono time we check if concrete substituted variant field types need drop. B0212.
+func monoEnumInstNeedsSynthDrop(inst *types.Instance) bool {
+	enum, ok := inst.Origin().(*types.Enum)
+	if !ok {
+		return false
+	}
+	// Already handled by sema-level detection
+	if enum.NeedsSynthDrop() || enum.HasDrop() {
+		return false
+	}
+	// Check if any TypeParam variant field resolves to a droppable type
+	subst := types.BuildSubstMap(enum.TypeParams(), inst.TypeArgs())
+	for _, v := range enum.Variants() {
+		for _, f := range v.Fields() {
+			fType := f.Type()
+			if _, isTP := fType.(*types.TypeParam); !isTP {
+				continue // non-TypeParam fields already checked by sema
+			}
+			ft := types.Substitute(fType, subst)
+			// Check resolved type for droppability
+			if fNamed := extractNamed(ft); fNamed != nil {
+				if fNamed == types.TypString || fNamed == types.TypVector || fNamed == types.TypChannel {
+					return true
+				}
+				if fNamed.HasDrop() {
+					return true
+				}
+				// Heap user type that needs at least pal_free
+				if !fNamed.IsValueType() && !fNamed.IsCopy() && !isPrimitiveScalar(fNamed) && !fNamed.IsStructural() {
+					return true
+				}
+			}
+			if fEnum := extractEnum(ft); fEnum != nil && fEnum.HasDrop() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // declareSynthesizedMonoDrops declares drop function stubs for monomorphized
 // instances of generic types that need a compiler-synthesized drop (B0158/B0202).
 func (c *Compiler) declareSynthesizedMonoDrops(file *ast.File, instances []*types.Instance) {
@@ -1473,11 +1517,11 @@ func (c *Compiler) defineSynthesizedMonoDrops(file *ast.File, instances []*types
 }
 
 // declareSynthesizedMonoEnumDrops declares drop stubs for monomorphized enum instances
-// that need a compiler-synthesized drop (T0102).
+// that need a compiler-synthesized drop (T0102/B0212).
 func (c *Compiler) declareSynthesizedMonoEnumDrops(file *ast.File, instances []*types.Instance) {
 	for _, inst := range instances {
 		enum, ok := inst.Origin().(*types.Enum)
-		if !ok || !enum.NeedsSynthDrop() {
+		if !ok || (!enum.NeedsSynthDrop() && !monoEnumInstNeedsSynthDrop(inst)) {
 			continue
 		}
 		name := monoName(inst)
@@ -1494,11 +1538,11 @@ func (c *Compiler) declareSynthesizedMonoEnumDrops(file *ast.File, instances []*
 	}
 }
 
-// defineSynthesizedMonoEnumDrops generates bodies for monomorphized enum drops (T0102).
+// defineSynthesizedMonoEnumDrops generates bodies for monomorphized enum drops (T0102/B0212).
 func (c *Compiler) defineSynthesizedMonoEnumDrops(file *ast.File, instances []*types.Instance) {
 	for _, inst := range instances {
 		enum, ok := inst.Origin().(*types.Enum)
-		if !ok || !enum.NeedsSynthDrop() {
+		if !ok || (!enum.NeedsSynthDrop() && !monoEnumInstNeedsSynthDrop(inst)) {
 			continue
 		}
 		name := monoName(inst)

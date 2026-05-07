@@ -623,7 +623,7 @@ format_value_array_test() `test {
   assert(s == "[1,2]", "format array");
 }
 
-round_trip_value_test() `test(allow_leaks: true) {
+round_trip_value_test() `test {
   JsonValue arr = JsonValue.Array([JsonValue.Bool(true), JsonValue.Str("x")]);
   string s = format_value(arr)!;
   JsonValue v = parse_value(s)!;
@@ -686,7 +686,7 @@ parse_value_whitespace_test() `test {
   }
 }
 
-parse_value_nested_arrays_test() `test(allow_leaks: true) {
+parse_value_nested_arrays_test() `test {
   JsonValue v = parse_value("[[1,2],[3]]")!;
   match v {
     JsonValue.Array(items) => {
@@ -1004,7 +1004,7 @@ parse_object_in_array_test() `test(allow_leaks: true) {
   }
 }
 
-parse_heterogeneous_array_test() `test(allow_leaks: true) {
+parse_heterogeneous_array_test() `test {
   // Array with all JSON types
   JsonValue v = parse_value("[null,true,42,\"str\",[],\{}]")!;
   match v {

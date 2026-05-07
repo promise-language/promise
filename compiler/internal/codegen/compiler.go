@@ -368,6 +368,7 @@ type scopeBinding struct {
 	valType         types.Type     // original Promise type
 	dropFlag        *ir.InstAlloca // i1: true=should drop (nil for close bindings)
 	varName         string         // variable name (for drop flag lookup)
+	monoSynthDrop   bool           // B0202: mono-time synthesized drop (skip post-drop pal_free)
 	// Generator cleanup
 	generatorHandle *ir.InstAlloca // coro handle alloca (for destroy)
 	generatorSlot   *ir.InstAlloca // yield slot alloca (for free)
@@ -4957,16 +4958,25 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 			continue
 		}
 
+		// B0202: Check if the field is a mono instance with a synthesized drop
+		// detected at codegen time (TypeParam fields → droppable concrete types).
+		// Only match instances that specifically need B0202 mono synth drops — not
+		// instances that already have drops via other paths (Vector, Channel, etc.).
+		hasMonoSynthDrop := false
+		if inst, ok := fieldType.(*types.Instance); ok {
+			hasMonoSynthDrop = monoInstNeedsSynthDrop(inst)
+		}
+
 		// B0192: Determine if this is a heap-allocated user type that needs pal_free
 		// even without a drop method (e.g., Point with only int fields inside
 		// GenericError[Point]). Skip value types, copy types, primitive scalars,
 		// structural interfaces, and opaque container types (Vector, Channel, Task)
 		// which manage their own memory.
-		needsFreeOnly := !fieldNamed.HasDrop() && fieldNamed != types.TypChannel && fieldNamed != types.TypString &&
+		needsFreeOnly := !hasMonoSynthDrop && !fieldNamed.HasDrop() && fieldNamed != types.TypChannel && fieldNamed != types.TypString &&
 			!fieldNamed.IsValueType() && !fieldNamed.IsCopy() && !isPrimitiveScalar(fieldNamed) &&
 			!fieldNamed.IsStructural() && !isOpaqueContainerType(fieldType)
 
-		if !fieldNamed.HasDrop() && fieldNamed != types.TypChannel && fieldNamed != types.TypString && !needsFreeOnly {
+		if !hasMonoSynthDrop && !fieldNamed.HasDrop() && fieldNamed != types.TypChannel && fieldNamed != types.TypString && !needsFreeOnly {
 			continue
 		}
 
@@ -5003,11 +5013,10 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 		}
 
 		// Resolve and call field type's drop() method.
-		// T0132: For generic fields with synthesized drops (e.g., Map[T, bool]
-		// inside Set[T]), apply type substitution to get the concrete instance
-		// (Map[int, bool]) and use the mono name for the drop function.
-		// Container types (Vector, Channel, String) have native non-mono drops
-		// and must NOT use the mono name.
+		// T0132/B0202: For generic field instances with synthesized drops
+		// (sema-time or mono-time), use the monomorphized name. Check the resolved
+		// fieldType (not just when c.typeSubst is set) so non-generic types
+		// containing generic instances also get the right drop name.
 		// B0189: Drop vector elements before freeing the buffer.
 		// Vector fields with droppable elements (e.g., Vector[string]) need
 		// their elements dropped before Vector.drop frees the buffer.
@@ -5017,11 +5026,7 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 		}
 
 		ownerName := c.resolveMethodOwner(fieldNamed, "drop")
-		// B0192/T0132: For generic field instances with synthesized drops,
-		// use the monomorphized name. Check the resolved fieldType (not just
-		// when c.typeSubst is set) so non-generic types containing generic
-		// instances also get the right drop name (e.g., Outer containing Box[Point]).
-		if fieldNamed.NeedsSynthDrop() {
+		if fieldNamed.NeedsSynthDrop() || hasMonoSynthDrop {
 			if inst, ok := fieldType.(*types.Instance); ok {
 				ownerName = monoName(inst)
 			}
@@ -5034,7 +5039,7 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 		// T0106: Free the field instance after calling its drop().
 		// Synthesized drops already include pal_free; explicit drops do not.
 		// Container types manage their own memory in their drop functions.
-		if !fieldNamed.NeedsSynthDrop() && !isContainerType(fieldType) && !isOpaqueContainerType(fieldType) {
+		if !fieldNamed.NeedsSynthDrop() && !hasMonoSynthDrop && !isContainerType(fieldType) && !isOpaqueContainerType(fieldType) {
 			c.block.NewCall(c.palFree, fieldInstance)
 		}
 	}

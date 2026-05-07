@@ -879,6 +879,33 @@ func (c *Compiler) maybeRegisterDrop(varName string, alloca *ir.InstAlloca, typ 
 	}
 
 	if !named.HasDrop() {
+		// B0202: Check if this is a mono instance with a synthesized drop
+		// detected at codegen time (TypeParam fields → droppable concrete types).
+		// Use monoInstNeedsSynthDrop to precisely match only B0202 instances,
+		// not instances that already have drops via other paths.
+		if inst, ok := typ.(*types.Instance); ok && monoInstNeedsSynthDrop(inst) {
+			monoDropName := mangleMethodName(monoName(inst), "drop", false)
+			if dropFn, exists := c.funcs[monoDropName]; exists {
+				dropFlag := c.createEntryAlloca(irtypes.I1)
+				dropFlag.SetName(c.uniqueLocalName(varName + ".dropflag"))
+				c.block.NewStore(constant.NewInt(irtypes.I1, 1), dropFlag)
+				c.dropFlags[varName] = dropFlag
+				binding := scopeBinding{
+					kind:          bindingDrop,
+					alloca:        alloca,
+					named:         named,
+					valType:       typ,
+					dropFlag:      dropFlag,
+					dropFunc:      dropFn,
+					varName:       varName,
+					monoSynthDrop: true,
+				}
+				c.scopeBindings = append(c.scopeBindings, binding)
+				c.dropBindings[varName] = binding
+				return
+			}
+		}
+
 		// B0164: Heap user types without drop methods still need pal_free at scope exit.
 		// Types that are value types, copy types, or primitive scalars don't heap-allocate.
 		// Only register for allocas that store value structs ({i8*, i8*}), not raw i8*
@@ -1501,10 +1528,10 @@ func (c *Compiler) emitDropCallDirect(b scopeBinding) {
 		c.block.NewCall(fnTyped, instance)
 	}
 	// B0159: Free the instance struct after drop() completes.
-	// Only for types with explicit drop — synthesized drops (B0158/B0160) are
+	// Only for types with explicit drop — synthesized drops (B0158/B0160/B0202) are
 	// deferred until ownership tracking prevents aliasing issues.
 	// Container types are excluded — their drop already frees the buffer.
-	if !isContainerType(b.valType) && b.named != nil && !b.named.NeedsSynthDrop() {
+	if !isContainerType(b.valType) && b.named != nil && !b.named.NeedsSynthDrop() && !b.monoSynthDrop {
 		c.block.NewCall(c.palFree, instance)
 	}
 	c.block.NewBr(dropDoneBlock)

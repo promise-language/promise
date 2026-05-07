@@ -1,0 +1,32 @@
+// B0202: Generic types with only TypeParam fields get synthesized drop at mono time.
+// Verifies that Box[Point] properly frees its Point field (no memory leak).
+type Point {
+  int x;
+  int y;
+}
+type Box[T] {
+  T val;
+}
+
+test_box_point_no_leak() `test {
+  b := Box[Point](val: Point(x: 1, y: 2));
+  assert(b.val.x == 1, "x");
+  assert(b.val.y == 2, "y");
+}
+
+test_box_int_no_synth_drop() `test {
+  b := Box[int](val: 42);
+  assert(b.val == 42, "val");
+}
+
+test_box_string_synth_drop() `test {
+  b := Box[string](val: "hello");
+  assert(b.val == "hello", "val");
+}
+
+// Nested: Box[Box[Point]] — both levels need synth drop
+test_nested_box() `test {
+  inner := Box[Point](val: Point(x: 3, y: 4));
+  outer := Box[Box[Point]](val: inner);
+  assert(outer.val.val.x == 3, "nested x");
+}

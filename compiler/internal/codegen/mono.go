@@ -1364,12 +1364,51 @@ func (c *Compiler) defineFnIterDrop(fn *ir.Func, inst *types.Instance) {
 	entry.NewRet(nil)
 }
 
+// monoInstNeedsSynthDrop returns true if a mono instance needs a synthesized drop
+// that was NOT detected at sema time. This handles B0202: generic types where ALL
+// fields are TypeParam — sema's fieldTypeHasDrop returns false for TypeParam, so
+// NeedsSynthDrop is never set. At mono time we can check the concrete substituted
+// types to determine if drop is needed.
+func monoInstNeedsSynthDrop(inst *types.Instance) bool {
+	named, ok := inst.Origin().(*types.Named)
+	if !ok {
+		return false
+	}
+	// Already handled by sema-level NeedsSynthDrop or explicit drop
+	if named.NeedsSynthDrop() || named.HasDrop() || named.IsCopy() || named.IsValueType() || named.IsStructural() {
+		return false
+	}
+	// Check if any TypeParam field resolves to a type needing drop after substitution
+	subst := types.BuildSubstMap(named.TypeParams(), inst.TypeArgs())
+	for _, f := range named.AllFields() {
+		if _, isTP := f.Type().(*types.TypeParam); !isTP {
+			continue // non-TypeParam fields already checked by sema
+		}
+		ft := types.Substitute(f.Type(), subst)
+		fNamed := extractNamed(ft)
+		if fNamed == nil {
+			continue
+		}
+		if fNamed == types.TypString || fNamed == types.TypVector || fNamed == types.TypChannel {
+			return true
+		}
+		if fNamed.HasDrop() {
+			return true
+		}
+		// Heap user type that needs at least pal_free
+		if !fNamed.IsValueType() && !fNamed.IsCopy() && !isPrimitiveScalar(fNamed) && !fNamed.IsStructural() {
+			return true
+		}
+	}
+	return false
+}
+
 // declareSynthesizedMonoDrops declares drop function stubs for monomorphized
-// instances of generic types that need a compiler-synthesized drop (B0158).
+// instances of generic types that need a compiler-synthesized drop (B0158/B0202).
 func (c *Compiler) declareSynthesizedMonoDrops(file *ast.File, instances []*types.Instance) {
 	for _, inst := range instances {
 		named, ok := inst.Origin().(*types.Named)
-		if !ok || !named.NeedsSynthDrop() {
+		if !ok || (!named.NeedsSynthDrop() && !monoInstNeedsSynthDrop(inst)) {
 			continue
 		}
 		if named.IsStructural() {
@@ -1389,11 +1428,11 @@ func (c *Compiler) declareSynthesizedMonoDrops(file *ast.File, instances []*type
 	}
 }
 
-// defineSynthesizedMonoDrops generates bodies for monomorphized synthesized drops.
+// defineSynthesizedMonoDrops generates bodies for monomorphized synthesized drops (B0158/B0202).
 func (c *Compiler) defineSynthesizedMonoDrops(file *ast.File, instances []*types.Instance) {
 	for _, inst := range instances {
 		named, ok := inst.Origin().(*types.Named)
-		if !ok || !named.NeedsSynthDrop() {
+		if !ok || (!named.NeedsSynthDrop() && !monoInstNeedsSynthDrop(inst)) {
 			continue
 		}
 		if named.IsStructural() {

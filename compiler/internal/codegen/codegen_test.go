@@ -10050,6 +10050,54 @@ func TestSynthDropGenericTypeParamField(t *testing.T) {
 	assertContains(t, holderDrop, "call void @pal_free(")
 }
 
+// B0202: Generic type where ALL fields are TypeParam — synthesized drop detected at mono time
+func TestSynthDropMonoTypeParamOnlyFields(t *testing.T) {
+	ir := generateIR(t, `
+		type Point { int x; int y; }
+		type Box[T] { T val; }
+		main() {
+			b := Box[Point](val: Point(x: 1, y: 2));
+		}
+	`)
+	// Box[Point] gets a mono synthesized drop that frees the Point field
+	boxDrop := extractFunction(ir, `"Box[Point].drop"`)
+	if boxDrop == "" {
+		t.Fatal("expected Box[Point].drop function in IR")
+	}
+	assertContains(t, boxDrop, "call void @pal_free(")
+}
+
+// B0202: Generic type with TypeParam field instantiated with primitive — no synth drop needed
+func TestSynthDropMonoTypeParamPrimitive(t *testing.T) {
+	ir := generateIR(t, `
+		type Box[T] { T val; }
+		main() {
+			b := Box[int](val: 42);
+		}
+	`)
+	// Box[int] should NOT get a synthesized drop — int is primitive
+	boxDrop := extractFunction(ir, `"Box[int].drop"`)
+	if boxDrop != "" {
+		t.Fatal("Box[int] should not have a synthesized drop")
+	}
+}
+
+// B0202: Generic type with TypeParam field instantiated with string — gets synth drop
+func TestSynthDropMonoTypeParamString(t *testing.T) {
+	ir := generateIR(t, `
+		type Wrapper[T] { T val; }
+		main() {
+			w := Wrapper[string](val: "hello");
+		}
+	`)
+	// Wrapper[string] gets a mono synthesized drop for the string field
+	wrapperDrop := extractFunction(ir, `"Wrapper[string].drop"`)
+	if wrapperDrop == "" {
+		t.Fatal("expected Wrapper[string].drop function in IR")
+	}
+	assertContains(t, wrapperDrop, "call void @promise_string_drop(")
+}
+
 // T0091: Error types get synthesized drop (frees message string field + instance)
 func TestSynthDropIncludesErrorTypes(t *testing.T) {
 	ir := generateIR(t, `

@@ -31,14 +31,14 @@ test_drop_multiple() `test {
 
 // --- use binding: close on scope exit ---
 
-test_use_basic() `test(allow_leaks: true) {
+test_use_basic() `test {
   use conn := Connection(fd: 42);
   assert(conn.fd == 42, "connection fd = 42");
 }
 
 // --- multiple use bindings ---
 
-test_use_multiple() `test(allow_leaks: true) {
+test_use_multiple() `test {
   use c1 := Connection(fd: 1);
   use c2 := Connection(fd: 2);
   assert(c1.fd + c2.fd == 3, "sum of fds = 3");
@@ -46,7 +46,7 @@ test_use_multiple() `test(allow_leaks: true) {
 
 // --- use in nested if block ---
 
-test_use_nested() `test(allow_leaks: true) {
+test_use_nested() `test {
   use outer := Connection(fd: 10);
   if true {
     use inner := Connection(fd: 20);
@@ -57,7 +57,7 @@ test_use_nested() `test(allow_leaks: true) {
 
 // --- mixed use and drop ---
 
-test_mixed_use_drop() `test(allow_leaks: true) {
+test_mixed_use_drop() `test {
   use c := Connection(fd: 1);
   l := Logger(id: 2);
   assert(c.fd + l.id == 3, "mixed bindings accessible");
@@ -84,7 +84,7 @@ test_drop_in_loop() `test {
 
 // --- use in loop ---
 
-test_use_in_loop() `test(allow_leaks: true) {
+test_use_in_loop() `test {
   for i in 0..5 {
     use c := Connection(fd: i);
     assert(c.fd == i, "connection fd matches loop var");
@@ -110,7 +110,7 @@ return_with_use() int {
   return c.fd;
 }
 
-test_use_early_return() `test(allow_leaks: true) {
+test_use_early_return() `test {
   int r = return_with_use();
   assert(r == 77, "returned value before close");
 }

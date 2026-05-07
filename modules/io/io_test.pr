@@ -786,7 +786,7 @@ file_read_line_method() `test(allow_leaks: true, exclude: "wasm32") {
 
 // ── BufferedReader ───────────────────────────────────────────────────────────
 
-buffered_reader_basic() `test(allow_leaks: true, exclude: "wasm32") {
+buffered_reader_basic() `test(exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_br", "hello world")!;
   File f = File.open("/tmp/pr_iot_br", readonly: true)!;
   BufferedReader r = BufferedReader(f, buf_size: 4);
@@ -849,7 +849,7 @@ buffered_reader_read_line_crlf() `test(allow_leaks: true, exclude: "wasm32") {
   File.remove("/tmp/pr_iot_brlc")!;
 }
 
-buffered_reader_read_byte() `test(allow_leaks: true, exclude: "wasm32") {
+buffered_reader_read_byte() `test(exclude: "wasm32") {
   File.write_content("/tmp/pr_iot_brb", "AB")!;
   File f = File.open("/tmp/pr_iot_brb", readonly: true)!;
   BufferedReader r = BufferedReader(f);
@@ -872,7 +872,7 @@ buffered_reader_read_byte() `test(allow_leaks: true, exclude: "wasm32") {
 
 // ── BufferedWriter ───────────────────────────────────────────────────────────
 
-buffered_writer_basic() `test(allow_leaks: true, exclude: "wasm32") {
+buffered_writer_basic() `test(exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_bw")!;
   BufferedWriter w = BufferedWriter(f, buf_size: 8);
   u8[] data = u8[]();
@@ -885,7 +885,7 @@ buffered_writer_basic() `test(allow_leaks: true, exclude: "wasm32") {
   File.remove("/tmp/pr_iot_bw")!;
 }
 
-buffered_writer_flush() `test(allow_leaks: true, exclude: "wasm32") {
+buffered_writer_flush() `test(exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_bwf")!;
   BufferedWriter w = BufferedWriter(f, buf_size: 4);
   // Write more than buffer size to trigger auto-flush
@@ -902,7 +902,7 @@ buffered_writer_flush() `test(allow_leaks: true, exclude: "wasm32") {
   File.remove("/tmp/pr_iot_bwf")!;
 }
 
-buffered_writer_write_string() `test(allow_leaks: true, exclude: "wasm32") {
+buffered_writer_write_string() `test(exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_bws")!;
   BufferedWriter w = BufferedWriter(f, buf_size: 16);
   w.write_string("hello ")!;
@@ -928,7 +928,7 @@ file_write_line() `test(exclude: "wasm32") {
 
 // ── BufferedWriter.write_line ────────────────────────────────────────────────
 
-buffered_writer_write_line() `test(allow_leaks: true, exclude: "wasm32") {
+buffered_writer_write_line() `test(exclude: "wasm32") {
   File f = File.create("/tmp/pr_iot_bwl")!;
   BufferedWriter w = BufferedWriter(f, buf_size: 16);
   w.write_line("alpha")!;

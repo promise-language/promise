@@ -40,25 +40,25 @@ type Mixed {
 
 // --- Batch tests: verify compilation, construction, and field access ---
 
-test_synth_drop_construct() `test(allow_leaks: true) {
+test_synth_drop_construct() `test {
   o := Outer(inner: Inner(name: "hello"));
   assert(o.inner.name == "hello", "field access works");
 }
 
-test_synth_drop_pair_construct() `test(allow_leaks: true) {
+test_synth_drop_pair_construct() `test {
   p := Pair(a: Inner(name: "A"), b: Inner(name: "B"));
   assert(p.a.name == "A", "pair field a");
   assert(p.b.name == "B", "pair field b");
 }
 
-test_synth_drop_mixed_construct() `test(allow_leaks: true) {
+test_synth_drop_mixed_construct() `test {
   m := Mixed(x: 42, inner: Inner(name: "mix"), flag: true);
   assert(m.x == 42, "mixed int field");
   assert(m.inner.name == "mix", "mixed inner field");
   assert(m.flag, "mixed bool field");
 }
 
-test_synth_drop_cascading_construct() `test(allow_leaks: true) {
+test_synth_drop_cascading_construct() `test {
   t := Top(mid: Middle(inner: Inner(name: "deep"), extra: 99));
   assert(t.mid.inner.name == "deep", "cascading field access");
   assert(t.mid.extra == 99, "cascading extra field");

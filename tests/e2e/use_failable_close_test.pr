@@ -28,7 +28,7 @@ close_propagates() int! {
   return r.id;
 }
 
-test_close_error_propagates() `test(allow_leaks: true) {
+test_close_error_propagates() `test {
   int result = close_propagates()? e {
     assert(e.message == "close failed", "close error message matches");
     return;
@@ -43,7 +43,7 @@ close_ok() int! {
   return r.id;
 }
 
-test_close_ok_returns_value() `test(allow_leaks: true) {
+test_close_ok_returns_value() `test {
   int result = close_ok()!;
   assert(result == 42, "successful close returns normal value");
 }
@@ -120,7 +120,7 @@ close_error_in_block() void! {
   }
 }
 
-test_close_error_in_nested_block() `test(allow_leaks: true) {
+test_close_error_in_nested_block() `test {
   close_error_in_block()? e {
     assert(e.message == "close failed", "close error propagates from nested block");
     return;
@@ -134,7 +134,7 @@ void_failable_close() void! {
   use r := FailResource(id: 1);
 }
 
-test_void_failable_close() `test(allow_leaks: true) {
+test_void_failable_close() `test {
   void_failable_close()? e {
     assert(e.message == "close failed", "void failable propagates close error");
     return;

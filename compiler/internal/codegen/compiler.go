@@ -4921,6 +4921,13 @@ func (c *Compiler) emitFieldDrops(named *types.Named) {
 		if dropFn, ok := c.funcs[mangledName]; ok {
 			c.block.NewCall(dropFn, fieldInstance)
 		}
+
+		// T0106: Free the field instance after calling its drop().
+		// Synthesized drops already include pal_free; explicit drops do not.
+		// Container types manage their own memory in their drop functions.
+		if !fieldNamed.NeedsSynthDrop() && !isContainerType(f.Type()) {
+			c.block.NewCall(c.palFree, fieldInstance)
+		}
 	}
 }
 

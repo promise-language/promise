@@ -407,8 +407,19 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 			isStructuralTarget = true
 		}
 	}
+	// T0106: For droppable containers/strings, save the RHS's old flag value before clearing.
+	var rhsOldDropFlag value.Value
 	if !isStructuralTarget {
 		if ident, ok := s.Value.(*ast.IdentExpr); ok {
+			dropType := declType
+			if dropType == nil {
+				dropType = exprType
+			}
+			if isDroppableContainerOrString(dropType) {
+				if flag, ok := c.dropFlags[ident.Name]; ok {
+					rhsOldDropFlag = c.block.NewLoad(irtypes.I1, flag)
+				}
+			}
 			c.clearDropFlag(ident.Name)
 		}
 	}
@@ -434,7 +445,14 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	// dups the string, so the variable owns the copy (not a borrow).
 	if isDroppableContainerOrString(dropType) && isStringBorrowExpr(s.Value) {
 		if !c.isStringFieldDup(s.Value, dropType) {
-			c.clearDropFlag(s.Name)
+			if rhsOldDropFlag != nil {
+				// T0106: Propagate RHS's ownership state at runtime.
+				if lhsFlag, ok := c.dropFlags[s.Name]; ok {
+					c.block.NewStore(rhsOldDropFlag, lhsFlag)
+				}
+			} else {
+				c.clearDropFlag(s.Name)
+			}
 		}
 	}
 	c.maybeRegisterEnvFree(s.Name, alloca, dropType)
@@ -463,7 +481,16 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 
 	// Clear drop flag on RHS if it's a variable being moved into this declaration.
 	// Without this, `b := a` would leave both a and b with active drop flags → double-free.
+	// T0106: For droppable containers/strings, save the RHS's old flag value before clearing.
+	// This enables runtime ownership propagation: if RHS owned it (flag=true), LHS takes
+	// ownership; if RHS borrowed it (flag=false), LHS also borrows.
+	var rhsOldDropFlag value.Value
 	if ident, ok := s.Value.(*ast.IdentExpr); ok {
+		if isDroppableContainerOrString(typ) {
+			if flag, ok := c.dropFlags[ident.Name]; ok {
+				rhsOldDropFlag = c.block.NewLoad(irtypes.I1, flag)
+			}
+		}
 		c.clearDropFlag(ident.Name)
 	}
 	// T0073: Claim string temp — ownership transferred to this variable.
@@ -486,7 +513,16 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	// dups the string, so the variable owns the copy (not a borrow).
 	if isDroppableContainerOrString(typ) && isStringBorrowExpr(s.Value) {
 		if !c.isStringFieldDup(s.Value, typ) {
-			c.clearDropFlag(s.Name)
+			if rhsOldDropFlag != nil {
+				// T0106: Propagate RHS's ownership state at runtime.
+				// If RHS owned the value (flag was true), LHS takes ownership.
+				// If RHS borrowed it (flag was false), LHS also borrows.
+				if lhsFlag, ok := c.dropFlags[s.Name]; ok {
+					c.block.NewStore(rhsOldDropFlag, lhsFlag)
+				}
+			} else {
+				c.clearDropFlag(s.Name)
+			}
 		}
 	}
 	c.maybeRegisterEnvFree(s.Name, alloca, typ)
@@ -1069,6 +1105,39 @@ func (c *Compiler) emitCloseCall(b scopeBinding, cap *closeErrCapture) {
 		funcType := irtypes.NewFunc(retType, irtypes.I8Ptr)
 		fnTyped := c.block.NewBitCast(fnRaw, irtypes.NewPointer(funcType))
 		result = c.block.NewCall(fnTyped, instance)
+	}
+
+	// T0106: After close(), free the heap instance (and droppable fields).
+	// use-bound types have close() but may not have drop(). Without this, the
+	// heap instance leaks. If the type has a synthesized drop, call that (it handles
+	// field drops + pal_free). If the type has an explicit drop, call that + pal_free.
+	// Otherwise, just pal_free the instance directly.
+	if b.named != nil && !isContainerType(b.valType) && !b.named.IsValueType() {
+		instance := c.extractInstancePtr(val)
+		// Null-check before freeing
+		nullCheck := c.block.NewICmp(enum.IPredEQ, instance, constant.NewNull(irtypes.I8Ptr))
+		freeBlock := c.newBlock("close.free")
+		freeDone := c.newBlock("close.free.done")
+		c.block.NewCondBr(nullCheck, freeDone, freeBlock)
+
+		c.block = freeBlock
+		if b.named.HasDrop() {
+			// Type has drop (explicit or synthesized) — call it to clean up fields + free
+			ownerName := c.resolveMethodOwner(b.named, "drop")
+			mangledName := mangleMethodName(ownerName, "drop", false)
+			if dropFn, ok := c.funcs[mangledName]; ok {
+				c.block.NewCall(dropFn, instance)
+			}
+			// Explicit drop doesn't include pal_free — add it
+			if !b.named.NeedsSynthDrop() {
+				c.block.NewCall(c.palFree, instance)
+			}
+		} else {
+			// No drop at all — just free the instance
+			c.block.NewCall(c.palFree, instance)
+		}
+		c.block.NewBr(freeDone)
+		c.block = freeDone
 	}
 
 	// Capture failable close() error: store the first error into cap's allocas.

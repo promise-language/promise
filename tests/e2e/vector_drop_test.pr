@@ -22,7 +22,7 @@ make_vector() int[] {
 }
 
 // Vector assigned to another variable — source flag cleared
-vector_move_on_assignment() `test(allow_leaks: true) {
+vector_move_on_assignment() `test {
   a := int[]();
   a.push(1);
   b := a;

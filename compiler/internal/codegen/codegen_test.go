@@ -7844,6 +7844,64 @@ func TestUseVarDeclInNestedBlock(t *testing.T) {
 	}
 }
 
+// T0106: use binding frees the instance after close()
+func TestUseVarDeclFreesInstance(t *testing.T) {
+	ir := generateIR(t, `
+		type Resource {
+			int id;
+			close() { }
+		}
+		main() {
+			use r := Resource(id: 1);
+			int x = r.id;
+		}
+	`)
+	// After close(), the instance should be freed via pal_free
+	assertContains(t, ir, "call void @Resource.close")
+	assertContains(t, ir, "close.free")
+	assertContains(t, ir, "call void @pal_free(")
+}
+
+// T0106: emitFieldDrops frees field instances with explicit drop
+func TestFieldDropFreesInstance(t *testing.T) {
+	ir := generateIR(t, `
+		type Inner {
+			int id;
+			drop(~this) { }
+		}
+		type Outer {
+			Inner field;
+			drop(~this) { }
+		}
+		main() {
+			o := Outer(field: Inner(id: 1));
+		}
+	`)
+	// Outer.drop should call Inner.drop on the field AND pal_free the field instance
+	assertContains(t, ir, "call void @Inner.drop")
+	// pal_free should appear in Outer.drop for the Inner field instance
+	outerDrop := extractFunction(ir, "Outer.drop")
+	if !strings.Contains(outerDrop, "call void @pal_free(") {
+		t.Errorf("Outer.drop should pal_free the Inner field instance\nOuter.drop IR:\n%s", outerDrop)
+	}
+}
+
+// T0106: String move via IdentExpr propagates ownership at runtime
+func TestStringMoveDropFlagPropagation(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			a := "hello" + " world";
+			b := a;
+		}
+	`)
+	// a.dropflag should be loaded (saved) before clearing
+	// b.dropflag should be set from the saved value (not unconditionally cleared)
+	assertContains(t, ir, "a.dropflag")
+	assertContains(t, ir, "b.dropflag")
+	// Both should have string drop calls (conditional on flags)
+	assertContains(t, ir, "promise_string_drop")
+}
+
 // --- Failable close() error propagation (B0013) ---
 
 func TestUseFailableCloseErrorCapture(t *testing.T) {

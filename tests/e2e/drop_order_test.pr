@@ -46,7 +46,7 @@ test_basic_lifo_three() `test {
 
 // --- Field drop ordering ---
 
-test_field_drops_reverse_order() `test(allow_leaks: true) {
+test_field_drops_reverse_order() `test {
   c := Container(first: Resource(name: "first"),
   second: Resource(name: "second"),
   third: Resource(name: "third"));
@@ -54,7 +54,7 @@ test_field_drops_reverse_order() `test(allow_leaks: true) {
   assert(c.third.name == "third", "third field");
 }
 
-test_nested_field_drops() `test(allow_leaks: true) {
+test_nested_field_drops() `test {
   n := Nested(inner: Container(first: Resource(name: "f1"),
   second: Resource(name: "f2"),
   third: Resource(name: "f3")));
@@ -111,7 +111,7 @@ test_reassignment_drops_old() `test {
 
 // --- Multiple types interleaved ---
 
-test_interleaved_types() `test(allow_leaks: true) {
+test_interleaved_types() `test {
   a := Resource(name: "A");
   c := Container(first: Resource(name: "f1"),
   second: Resource(name: "f2"),
@@ -177,7 +177,7 @@ type Conn {
   }
 }
 
-test_use_and_drop_ordering() `test(allow_leaks: true) {
+test_use_and_drop_ordering() `test {
   use c := Conn(fd: 1);
   r := Resource(name: "R");
   assert(c.fd + 0 == 1, "use binding accessible");

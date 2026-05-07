@@ -39,7 +39,7 @@ multiple_strings_no_leak() `test {
 }
 
 // String assigned to another variable — source flag cleared, no double free
-string_move_on_assignment() `test(allow_leaks: true) {
+string_move_on_assignment() `test {
   a := "hello" + " world";
   b := a;
   assert(b.len == 11, "move len");

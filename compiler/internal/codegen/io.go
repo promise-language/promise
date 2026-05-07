@@ -229,6 +229,8 @@ func (c *Compiler) definePanicBody(fn *ir.Func) {
 
 	// do_recover: set G.panicked=1, G.panic_msg=msg, longjmp back to scheduler
 	// No stderr output — recovered goroutines are silent.
+	// panicked=1 means C string msg (may be .rodata — goroutine_exit must NOT free it).
+	// promise_panic_msg sets panicked=2 for heap-allocated msgs that goroutine_exit CAN free.
 	panickedField := recoverBlk.NewGetElementPtr(gTy, gPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicked)))
 	recoverBlk.NewStore(constant.NewInt(irtypes.I8, 1), panickedField)
@@ -312,11 +314,13 @@ func (c *Compiler) definePanicMsgBody(fn *ir.Func) {
 	recoverBlk := fn.NewBlock("do_recover")
 	checkIdBlk.NewCondBr(isMain, checkTestBlk, recoverBlk)
 
-	// do_recover: set G.panicked=1, G.panic_msg=cstr, longjmp back to scheduler
+	// do_recover: set G.panicked=2 (heap msg), G.panic_msg=cstr, longjmp back to scheduler
 	// No stderr output — recovered goroutines are silent.
+	// panicked=2 marks panic_msg as heap-allocated so goroutine_exit can free it (B0225).
+	// (panicked=1 from promise_panic means .rodata C string — must NOT free.)
 	panickedField := recoverBlk.NewGetElementPtr(gTy, gPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicked)))
-	recoverBlk.NewStore(constant.NewInt(irtypes.I8, 1), panickedField)
+	recoverBlk.NewStore(constant.NewInt(irtypes.I8, 2), panickedField)
 
 	// Create a null-terminated C string copy from Promise string data for G.panic_msg.
 	allocSize := recoverBlk.NewAdd(dataLen, constant.NewInt(irtypes.I64, 1))

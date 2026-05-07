@@ -25,8 +25,15 @@ const (
 	gFieldParkMutex   = 9  // i8*  mutex to release after coro.suspend completes
 	gFieldPreempt     = 10 // i8   1 when sysmon requests preemption
 	gFieldSelectCase  = 11 // i32  which select case was triggered (-1 = none)
-	gFieldPanicked    = 12 // i8   1 if goroutine panicked
+	gFieldPanicked    = 12 // i8   0=not panicked, 1=panicked (.rodata msg), 2=panicked (heap msg)
 	gFieldPanicMsg    = 13 // i8*  panic message (null-terminated)
+)
+
+// G.panicked field values. promise_panic sets gPanickedRodata (C string, may be .rodata),
+// promise_panic_msg sets gPanickedHeapMsg (heap-allocated copy, must free in goroutine_exit).
+const (
+	gPanickedRodata  = 1 // panic_msg is a C string (may be .rodata — don't free)
+	gPanickedHeapMsg = 2 // panic_msg is a heap-allocated copy (must free, B0225)
 )
 
 // G status values.
@@ -1741,15 +1748,26 @@ func (c *Compiler) defineGoroutineExitFunc() {
 	// so we must NOT access G fields below — use early-loaded values instead.
 	waitersDone.NewCall(c.palMutexUnlock, doneLockExit)
 
-	// Destroy coroutine (skip if panicked — UB to call coro.destroy on non-suspended coro)
+	// Destroy coroutine. Panicked goroutines can't use coro.destroy (UB on non-suspended
+	// coro after longjmp), so free the coroutine frame directly instead (B0225).
 	panickedField := entry.NewGetElementPtr(gTy, gPtr,
 		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicked)))
 	earlyPanicked := entry.NewLoad(irtypes.I8, panickedField)
 
+	// Pre-load panic_msg for cleanup in the non-task free path (B0225).
+	earlyPanicMsgField := entry.NewGetElementPtr(gTy, gPtr,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(gFieldPanicMsg)))
+	earlyPanicMsg := entry.NewLoad(irtypes.I8Ptr, earlyPanicMsgField)
+
 	isPanicked := waitersDone.NewICmp(enum.IPredNE, earlyPanicked, constant.NewInt(irtypes.I8, 0))
 	destroyCoroBlk := fn.NewBlock("destroy_coro")
+	freeFrameBlk := fn.NewBlock("free_coro_frame")
 	afterDestroyBlk := fn.NewBlock("after_destroy")
-	waitersDone.NewCondBr(isPanicked, afterDestroyBlk, destroyCoroBlk)
+	waitersDone.NewCondBr(isPanicked, freeFrameBlk, destroyCoroBlk)
+
+	// free_coro_frame: panicked goroutine — free coroutine frame directly (B0225).
+	freeFrameBlk.NewCall(c.palFree, earlyCoroHandle)
+	freeFrameBlk.NewBr(afterDestroyBlk)
 
 	destroyCoroBlk.NewCall(c.coroDestroy, earlyCoroHandle)
 	destroyCoroBlk.NewBr(afterDestroyBlk)
@@ -1792,9 +1810,19 @@ func (c *Compiler) defineGoroutineExitFunc() {
 	// skipFree: task[T] — caller will free G when they receive the result
 	skipFree.NewRet(nil)
 
-	// doFree: free G
-	doFree.NewCall(c.palFree, gParam)
-	doFree.NewRet(nil)
+	// doFree: free panic_msg if heap-allocated (panicked==2, B0225) then free G.
+	// panicked=1 (promise_panic) means C string that may be .rodata — don't free.
+	// panicked=2 (promise_panic_msg) means heap-allocated copy — must free.
+	isHeapMsg := doFree.NewICmp(enum.IPredEQ, earlyPanicked, constant.NewInt(irtypes.I8, int64(gPanickedHeapMsg)))
+	freePanicMsgBlk := fn.NewBlock("free_panic_msg")
+	doFreeG := fn.NewBlock("do_free_g")
+	doFree.NewCondBr(isHeapMsg, freePanicMsgBlk, doFreeG)
+
+	freePanicMsgBlk.NewCall(c.palFree, earlyPanicMsg)
+	freePanicMsgBlk.NewBr(doFreeG)
+
+	doFreeG.NewCall(c.palFree, gParam)
+	doFreeG.NewRet(nil)
 
 	c.funcs["promise_goroutine_exit"] = fn
 }

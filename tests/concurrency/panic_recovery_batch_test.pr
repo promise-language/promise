@@ -3,7 +3,7 @@
 // so promise_panic treated it as a main-goroutine panic and exited the process
 // instead of recovering via the scheduler.
 // Fire-and-forget goroutine panic should be silently recovered.
-test_goroutine_panic_fire_forget() `test(allow_leaks: true, exclude: "wasm32") {
+test_goroutine_panic_fire_forget() `test(exclude: "wasm32") {
   go {
     assert(false, "boom ff");
   };

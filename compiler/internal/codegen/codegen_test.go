@@ -12293,6 +12293,38 @@ func TestGoroutineExitUsesDoneLock(t *testing.T) {
 	assertContains(t, ir, "waiters_done")
 }
 
+// B0225: goroutine_exit must free the coroutine frame for panicked goroutines
+// (can't call coro.destroy — UB on non-suspended coro after longjmp).
+func TestGoroutineExitFreeCoroFrameOnPanic(t *testing.T) {
+	ir := generateIR(t, `
+		main() { }
+	`)
+	// goroutine_exit should have the free_coro_frame block for panicked goroutines
+	assertContains(t, ir, "free_coro_frame:")
+	// and the normal coro.destroy path for non-panicked goroutines
+	assertContains(t, ir, "destroy_coro:")
+}
+
+// B0225: goroutine_exit frees G.panic_msg when panicked==2 (heap-allocated msg).
+func TestGoroutineExitFreePanicMsg(t *testing.T) {
+	ir := generateIR(t, `
+		main() { }
+	`)
+	// goroutine_exit should have free_panic_msg and do_free_g blocks
+	assertContains(t, ir, "free_panic_msg:")
+	assertContains(t, ir, "do_free_g:")
+}
+
+// B0225: promise_panic_msg sets G.panicked=2 to mark heap-allocated panic_msg.
+func TestPanicMsgSetsHeapPanickedFlag(t *testing.T) {
+	ir := generateIR(t, `
+		panic_msg(string msg) `+"`"+`extern("promise_panic_msg");
+		main() { panic_msg("boom"); }
+	`)
+	// promise_panic_msg should store i8 2 (gPanickedHeapMsg) in the panicked field
+	assertContains(t, ir, "store i8 2,")
+}
+
 // --- Named Arguments Tests ---
 
 func TestNamedArgsConstructorCodegen(t *testing.T) {

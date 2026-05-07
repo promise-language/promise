@@ -16080,3 +16080,19 @@ func TestWhileUnwrapStringDrop(t *testing.T) {
 	// The unwrapped string v must be dropped at end of each iteration.
 	assertContains(t, ir, "strdrop.call")
 }
+
+// B0222: Generic combinator chain result stored in variable — intermediate iterators
+// must be promoted to scope bindings (freed at scope exit, not statement end).
+func TestGenericCombinatorInVariable(t *testing.T) {
+	ir := generateIR(t, `
+		main() {
+			int[] v = [1, 2, 3];
+			Iterator[int] it = v.iter().map[int](|int x| -> int { return x * 2; });
+		}
+	`)
+	// B0222: Intermediate heapTemps promoted to scope bindings should produce
+	// free.call blocks (scope-level cleanup) instead of heap.drop blocks
+	// (statement-level cleanup) for the intermediate _FnIter.
+	assertContains(t, ir, "free.call")
+	assertContains(t, ir, "__promise_iter_cleanup")
+}

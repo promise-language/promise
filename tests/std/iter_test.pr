@@ -1137,5 +1137,59 @@ test_deep_chain_no_leak() `test {
   assert(sum == 18, "deep chain sum=18");
 }
 
+// B0222: Generic combinator chain result stored in variable.
+// Intermediate iterators must survive until scope exit, not be freed at statement end.
+test_generic_combinator_in_variable() `test {
+  int[] v = [1, 2, 3];
+  Iterator[int] it = v.iter().map[int](|int x| -> int {
+    return x * 2;
+  });
+  int sum = 0;
+  for x in it {
+    sum = sum + x;
+  }
+  assert(sum == 12, "map in variable");
+}
+
+test_generic_combinator_in_variable_inferred() `test {
+  int[] v = [10, 20, 30];
+  it := v.iter().map[int](|int x| -> int {
+    return x + 1;
+  });
+  int[] result = it.collect();
+  assert(result.len == 3, "length");
+  assert(result[0] == 11, "first");
+  assert(result[1] == 21, "second");
+  assert(result[2] == 31, "third");
+}
+
+test_filter_then_generic_map_in_variable() `test {
+  int[] v = [1, 2, 3, 4, 5];
+  Iterator[int] it = v.iter().filter(|int x| -> bool {
+    return x > 2;
+  }).map[int](|int x| -> int {
+    return x * 10;
+  });
+  int[] result = it.collect();
+  assert(result.len == 3, "length");
+  assert(result[0] == 30, "first");
+  assert(result[1] == 40, "second");
+  assert(result[2] == 50, "third");
+}
+
+test_double_generic_map_in_variable() `test {
+  int[] v = [1, 2, 3];
+  Iterator[int] it = v.iter().map[int](|int x| -> int {
+    return x + 10;
+  }).map[int](|int x| -> int {
+    return x * 2;
+  });
+  int[] result = it.collect();
+  assert(result.len == 3, "length");
+  assert(result[0] == 22, "first");
+  assert(result[1] == 24, "second");
+  assert(result[2] == 26, "third");
+}
+
 main() {
 }

@@ -491,6 +491,22 @@ func (c *Compiler) genTypedVarDecl(s *ast.TypedVarDecl) {
 	}
 	// T0088: Claim heap temp — ownership transferred to this variable.
 	c.claimHeapTemp(val)
+	// B0222: When storing a structural interface (e.g., Iterator) in a variable,
+	// promote remaining heapTemps to scope bindings. Intermediate iterators in
+	// generic combinator chains must survive until scope exit, not be freed at
+	// statement end. Uses the resolved type (substituted for generics).
+	resolvedDeclType := declType
+	if resolvedDeclType == nil {
+		resolvedDeclType = exprType
+	}
+	if c.typeSubst != nil && resolvedDeclType != nil {
+		resolvedDeclType = types.Substitute(resolvedDeclType, c.typeSubst)
+	}
+	if len(c.heapTemps) > 0 {
+		if n := extractNamed(resolvedDeclType); n != nil && n.IsStructural() {
+			c.promoteHeapTempsToScope()
+		}
+	}
 	// T0100: Claim env temp — the variable's scope binding handles env free.
 	c.claimEnvTemp(val)
 
@@ -590,6 +606,14 @@ func (c *Compiler) genInferredVarDecl(s *ast.InferredVarDecl) {
 	// Without this, iterator chain results (e.g., c.take(3)) assigned via
 	// auto-typed declarations are freed at statement end, causing use-after-free.
 	c.claimHeapTemp(val)
+	// B0222: When storing a structural interface (e.g., Iterator) in a variable,
+	// promote remaining heapTemps to scope bindings so intermediate iterators in
+	// generic combinator chains survive until scope exit.
+	if len(c.heapTemps) > 0 {
+		if n := extractNamed(typ); n != nil && n.IsStructural() {
+			c.promoteHeapTempsToScope()
+		}
+	}
 	// T0100: Claim env temp — the variable's scope binding handles env free.
 	c.claimEnvTemp(val)
 
@@ -1950,7 +1974,14 @@ func (c *Compiler) emitFreeCall(b scopeBinding) {
 
 	c.block = freeBlock
 	val := c.block.NewLoad(b.alloca.ElemType, b.alloca)
-	instance := c.extractInstancePtr(val)
+	// B0222: Raw i8* instance pointer (from promoted heapTemp). Value struct
+	// allocas need extractInstancePtr to get field 1; i8* allocas are the pointer.
+	var instance value.Value
+	if b.alloca.ElemType == irtypes.I8Ptr {
+		instance = val
+	} else {
+		instance = c.extractInstancePtr(val)
+	}
 
 	// Null-check: zero-initialized values from error handler fallthrough
 	nullCheck := c.block.NewICmp(enum.IPredEQ, instance, constant.NewNull(irtypes.I8Ptr))
@@ -2341,6 +2372,30 @@ func (c *Compiler) cleanupHeapTemps() {
 		c.block = skipBlock
 	}
 
+	c.heapTemps = c.heapTemps[:0]
+	c.heapTempMap = make(map[value.Value]int)
+}
+
+// promoteHeapTempsToScope converts remaining heapTemps into scope bindings (B0222).
+// When a generic combinator chain result is stored in a variable, intermediate
+// iterators must survive until scope exit — not be freed at statement end. Each
+// heapTemp's existing drop flag is reused: the one claimed by the variable already
+// has flag=0 (its scope binding won't fire), while unclaimed intermediates have
+// flag=1 and will be freed at scope exit via emitFreeCall.
+func (c *Compiler) promoteHeapTempsToScope() {
+	if len(c.heapTemps) == 0 {
+		return
+	}
+	for _, temp := range c.heapTemps {
+		binding := scopeBinding{
+			kind:     bindingFree,
+			alloca:   temp.alloca,
+			dropFlag: temp.dropFlag,
+			dropFunc: temp.dropFunc,
+		}
+		c.scopeBindings = append(c.scopeBindings, binding)
+	}
+	// Clear heapTemps to prevent cleanupHeapTemps from double-processing.
 	c.heapTemps = c.heapTemps[:0]
 	c.heapTempMap = make(map[value.Value]int)
 }

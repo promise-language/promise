@@ -2296,6 +2296,20 @@ func TestErrorUnwrap(t *testing.T) {
 	assertContains(t, ir, "unreachable")
 }
 
+// T0125: When func()! returns a string, the unwrapped i8* must be tracked
+// as a stmt temp so it gets freed at statement end if not claimed.
+func TestErrorUnwrapStringTemp(t *testing.T) {
+	ir := generateIR(t, `
+		make_str() string! { return "hello"; }
+		main() {
+			int n = make_str()!.len;
+		}
+	`)
+	// Should have string temp tracking: store to alloca + drop flag
+	assertContains(t, ir, "tmp.drop")
+	assertContains(t, ir, "promise_string_drop")
+}
+
 func TestErrorHandler(t *testing.T) {
 	ir := generateIR(t, `
 		parse(string s) int! { return 0; }

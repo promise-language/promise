@@ -71,7 +71,14 @@ func (c *Compiler) genExpr(expr ast.Expr) value.Value {
 	case *ast.ErrorPropagateExpr:
 		return c.genErrorPropagateExpr(e)
 	case *ast.ErrorUnwrapExpr:
-		return c.genErrorUnwrapExpr(e)
+		result := c.genErrorUnwrapExpr(e)
+		// T0125: Track string temps from failable call unwrap paths.
+		// When func()! returns a string, the unwrapped i8* is a heap-allocated
+		// temp that must be freed at statement end if not claimed by a variable.
+		if result != nil && result.Type() == irtypes.I8Ptr {
+			c.trackStringTemp(result)
+		}
+		return result
 	case *ast.ErrorHandlerExpr:
 		return c.genErrorHandlerExpr(e)
 	case *ast.TupleLit:

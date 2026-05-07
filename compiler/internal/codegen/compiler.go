@@ -1005,6 +1005,14 @@ func (r *CompileResult) GenerateTestMain(tests []*types.Func, testTimeouts map[s
 			isNotTimeout := skipStoreBlock.NewICmp(enum.IPredNE, result, constant.NewInt(irtypes.I32, 2))
 			skipStoreBlock.NewCondBr(isNotTimeout, leakCheckBlk, afterLeakBlk)
 
+			// B0188: Brief yield to let scheduler worker threads finish goroutine
+			// cleanup (coro.destroy + pal_free(G)) before reading alloc count.
+			// Without this, goroutines that have set G.done=1 but haven't been
+			// reaped by sched_loop yet appear as false-positive leaks.
+			if !c.isWasm {
+				leakCheckBlk.NewCall(c.palUsleep, constant.NewInt(irtypes.I32, 100))
+			}
+
 			// Read current alloc count
 			var currentAlloc value.Value
 			if c.isWasm {

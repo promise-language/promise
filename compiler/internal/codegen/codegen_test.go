@@ -6655,6 +6655,30 @@ func TestBatchTestResetsAllocCount(t *testing.T) {
 	assertContains(t, ir, "atomicrmw xchg i64* @__promise_alloc_count, i64 0 monotonic")
 }
 
+// B0188: Batch test leak check inserts usleep before reading alloc count
+// to let scheduler worker threads finish goroutine cleanup.
+func TestBatchTestLeakCheckDrainDelay(t *testing.T) {
+	result := compileResult(t, `
+		myTest() `+"`test"+` { }
+	`)
+	info, _ := sema.Check(func() *ast.File {
+		input := antlr.NewInputStream(`myTest() ` + "`test" + ` { }`)
+		lexer := parser.NewPromiseLexer(input)
+		lexer.RemoveErrorListeners()
+		stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+		p := parser.NewPromiseParser(stream)
+		p.RemoveErrorListeners()
+		tree := p.CompilationUnit()
+		file, _ := ast.Build("test.pr", tree)
+		return file
+	}())
+	result.GenerateTestMain(info.Tests, nil)
+	ir := result.Module.String()
+	// Leak check block should call pal_usleep before reading alloc count
+	assertContains(t, ir, "leak_check_myTest")
+	assertContains(t, ir, "call i32 @usleep(i32 100)")
+}
+
 // B0165: Sched struct includes ready_count field (i32 at end).
 func TestSchedStructHasReadyCount(t *testing.T) {
 	ir := generateIR(t, `main() { }`)

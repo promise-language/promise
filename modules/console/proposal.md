@@ -126,11 +126,9 @@ type Screen `public {
 
   // Opens the terminal: enables raw mode, enters alternate screen buffer.
   // Use `use screen := Screen.open();` for automatic cleanup.
+  // Pass options to customize behavior; defaults to alternate screen + raw mode.
   // Errors auto-propagate in a ! function; use open()! only to panic.
-  open() Self! `factory;
-
-  // Opens with explicit options.
-  open(ScreenOptions options) Self! `factory;
+  open(ScreenOptions options = ScreenOptions()) Self! `factory;
 
   // Restores terminal: exits alternate screen, disables raw mode.
   // Called automatically at scope exit when bound with `use`.
@@ -236,12 +234,12 @@ type Screen `public {
 
 ```
 type ScreenOptions `public {
-  bool alternate_screen = true;   // use alternate screen buffer
-  bool raw_mode = true;           // enable raw mode
-  bool mouse = false;             // enable mouse on open
-  bool paste = false;             // enable bracketed paste on open
-  bool focus = false;             // enable focus tracking on open
-  bool tty_fallback = true;       // fall back to /dev/tty when stdio is not a terminal
+  bool alternate_screen `value = true;   // use alternate screen buffer
+  bool raw_mode `value = true;           // enable raw mode
+  bool mouse `value = false;             // enable mouse on open
+  bool paste `value = false;             // enable bracketed paste on open
+  bool focus `value = false;             // enable focus tracking on open
+  bool tty_fallback `value = true;       // fall back to /dev/tty when stdio is not a terminal
 }
 ```
 
@@ -252,11 +250,10 @@ to enable colors, progress bars, or interactive prompts. Equivalent to Rust's
 `std::io::IsTerminal` and Go's `term.IsTerminal(fd)`.
 
 ```
-// Check if stdout is a terminal (most common use)
-console.is_terminal() bool;
-
-// Check a specific file descriptor (0 = stdin, 1 = stdout, 2 = stderr)
-console.is_terminal(int fd) bool;
+// Check if a file descriptor is a terminal.
+// Defaults to stdout (fd 1), the most common use.
+// 0 = stdin, 1 = stdout, 2 = stderr.
+console.is_terminal(int fd = 1) bool;
 ```
 
 Usage:
@@ -266,7 +263,7 @@ use console;
 
 main() {
   if console.is_terminal() {
-    print_line("\x1b[32mGreen text!\x1b[0m");   // safe to use ANSI colors
+    print_line("\x1b[32mGreen text!\x1b[0m");   // safe to use ANSI colors (checks stdout)
   } else {
     print_line("Plain text");                    // piped, no escapes
   }
@@ -296,16 +293,16 @@ auto-copied.
 
 ```
 type Style `public {
-  Color? fg `value;       // none = terminal default
-  Color? bg `value;       // none = terminal default
-  Attribute attr `value;  // bitflag, default = Attribute.None
+  Color? foreground `value;    // none = terminal default
+  Color? background `value;    // none = terminal default
+  Attribute attr `value;       // default = Attribute.none()
 
   // Factory: terminal defaults
   default() Self `factory;
 
   // Builder methods (return new Style, original unchanged)
-  foreground(&this, Color c) Style;
-  background(&this, Color c) Style;
+  foreground(&this, Color color) Style;
+  background(&this, Color color) Style;
   bold(&this) Style;
   dim(&this) Style;
   italic(&this) Style;
@@ -314,10 +311,6 @@ type Style `public {
   reverse(&this) Style;
   strikethrough(&this) Style;
   reset_attributes(&this) Style;
-
-  // Shorthand aliases
-  fg(&this, Color c) Style => this.foreground(c);
-  bg(&this, Color c) Style => this.background(c);
 }
 ```
 
@@ -325,9 +318,9 @@ type Style `public {
 
 ```
 // Styles are value types — chain freely, pass around cheaply
-title_style := console.Style.default().fg(console.Color.Yellow).bold();
-error_style := console.Style.default().fg(console.Color.Red).bg(console.Color.Black).bold();
-subtle      := console.Style.default().fg(console.Color.rgb(128, 128, 128)).dim();
+title_style := console.Style.default().foreground(console.Color.Yellow).bold();
+error_style := console.Style.default().foreground(console.Color.Red).background(console.Color.Black).bold();
+subtle      := console.Style.default().foreground(console.Color.rgb(128, 128, 128)).dim();
 
 screen.write(Point(0, 0), "WARNING", style: error_style);
 ```
@@ -389,24 +382,29 @@ enum Color `public {
 
 ## `Attribute`
 
-Bitflag enum for text decoration. Multiple attributes compose with `|`.
+Text decoration attributes. Modeled as a value type with bool fields — consistent with
+how `Modifier` is designed in this proposal. Multiple attributes compose naturally via
+the builder methods on `Style`.
 
 ```
-enum Attribute `public {
-  None        = 0,
-  Bold        = 1,
-  Dim         = 2,
-  Italic      = 4,
-  Underline   = 8,
-  Blink       = 16,
-  Reverse     = 32,
-  Hidden      = 64,
-  Strikethrough = 128,
+type Attribute `public {
+  bool bold `value;
+  bool dim `value;
+  bool italic `value;
+  bool underline `value;
+  bool blink `value;
+  bool reverse `value;
+  bool hidden `value;
+  bool strikethrough `value;
+
+  none() Self `factory {
+    return Self(
+      bold: false, dim: false, italic: false, underline: false,
+      blink: false, reverse: false, hidden: false, strikethrough: false,
+    );
+  }
 }
 ```
-
-*Note: If Promise doesn't support bitflag enums natively, this could be modeled as
-a set or as methods on an opaque `u16` wrapper.*
 
 ---
 
@@ -449,7 +447,7 @@ Enum of all recognized key codes, modeled after crossterm's `KeyCode` and tcell'
 
 ```
 enum Key `public {
-  Char(char c),        // printable character
+  Char(char ch),       // printable character
   Enter,
   Escape,
   Backspace,
@@ -465,7 +463,7 @@ enum Key `public {
   Down,
   Left,
   Right,
-  F(u8 n),             // F1..F24
+  F(u8 number),        // F1..F24
   Null,                // Ctrl+Space / Ctrl+@
 }
 ```
@@ -710,7 +708,7 @@ main()! {
 | Get size             | `getmaxyx()`            | `terminal::size()?`                | `screen.Size()`                 | `screen.size`                     |
 | Poll event           | `getch()`               | `event::read()?`                   | `screen.PollEvent()`            | `screen.poll_event()`             |
 | Non-blocking poll    | `nodelay()` + `getch()` | `event::poll()` + `read()`        | `HasPendingEvent()` + poll      | `screen.try_poll_event()`         |
-| Style / color        | `COLOR_PAIR` + `attron`  | `SetForegroundColor`, `SetAttribute` | `tcell.Style` builder        | `Style.default().fg(...).bold()`  |
+| Style / color        | `COLOR_PAIR` + `attron`  | `SetForegroundColor`, `SetAttribute` | `tcell.Style` builder        | `Style.default().foreground(...).bold()` |
 | Mouse                | `mousemask()`           | `EnableMouseCapture`               | `screen.EnableMouse()`          | `screen.enable_mouse()`          |
 | Cursor visibility    | `curs_set()`            | `Hide`/`Show` cursor cmds         | `ShowCursor` / `HideCursor`     | `set_cursor()` / `hide_cursor()`  |
 | Subprocess handoff   | `endwin()` / `refresh()`| Manual save/restore                | `Suspend()` / `Resume()`        | `suspend()` / `resume()`          |
@@ -728,12 +726,12 @@ main()! {
 
   string message = "Press any key to continue...";
   console.Style box_style = console.Style.default()
-    .fg(console.Color.White)
-    .bg(console.Color.Blue)
+    .foreground(console.Color.White)
+    .background(console.Color.Blue)
     .bold();
   console.Style border_style = console.Style.default()
-    .fg(console.Color.BrightWhite)
-    .bg(console.Color.Blue);
+    .foreground(console.Color.BrightWhite)
+    .background(console.Color.Blue);
 
   bool running = true;
   while running {

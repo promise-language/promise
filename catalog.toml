@@ -27,3 +27,8 @@ description = "Operating system interface: args, env, exit (placeholder — pend
 
 [modules.time]
 description = "Time and duration operations (placeholder — pending native PAL support)"
+
+# Planned modules — not yet implemented, proposal in modules/<name>/proposal.md
+
+[modules.console]
+description = "Terminal UI: raw mode, cell buffer, styled text, input events, cursor control (planned)"

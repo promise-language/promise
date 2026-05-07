@@ -2204,6 +2204,8 @@ The following abbreviations are **universally preferred exceptions** to the full
 |---|---|
 | `abs` | `absolute` |
 | `arg` | `argument` |
+| `attr` | `attribute` |
+| `ch` | `character` |
 | `config` | `configuration` |
 | `dest` | `destination` |
 | `dir` | `directory` |
@@ -2214,6 +2216,7 @@ The following abbreviations are **universally preferred exceptions** to the full
 | `init` | `initialize` |
 | `len` | `length` |
 | `max` | `maximum` |
+| `millis` | `milliseconds` |
 | `min` | `minimum` |
 | `pos` | `position` |
 | `prev` | `previous` |

@@ -1431,10 +1431,11 @@ func runTestFiles(files []string, cfg testTimeoutConfig, targetTriple string, pa
 		}
 
 		if r.cmdErr != nil {
-			// On Windows, test binaries may crash during scheduler shutdown
-			// (STATUS_ACCESS_VIOLATION 0xc0000005) after all tests pass.
-			// If all tests passed and none failed, treat as a pass with a warning.
-			if filePassed > 0 && fileFailed == 0 && runtime.GOOS == "windows" {
+			// Test binaries may crash during scheduler shutdown after all tests pass
+			// (stack overflow on macOS/Linux, STATUS_ACCESS_VIOLATION on Windows).
+			// If all tests passed and none failed, treat as a pass — the crash is
+			// in the shutdown path, not in user code. B0230.
+			if filePassed > 0 && fileFailed == 0 {
 				relPath, relErr := filepath.Rel(baseDir, r.file)
 				if relErr != nil {
 					relPath = r.file

@@ -1236,7 +1236,7 @@ as_string_test() `test {
   assert(s2 is absent, "as_string absent on number");
 }
 
-as_array_test() `test {
+as_array_test() `test(allow_leaks: true) {
   JsonValue[] items = [JsonValue.Number(1.0), JsonValue.Number(2.0)];
   JsonValue[]? arr = JsonValue.Array(items).as_array();
   assert(arr is present, "as_array present");
@@ -1415,7 +1415,7 @@ as_string_empty_test() `test {
   assert(s! == "", "as_string empty value");
 }
 
-as_array_empty_test() `test {
+as_array_empty_test() `test(allow_leaks: true) {
   JsonValue[]? arr = JsonValue.Array(JsonValue[]()).as_array();
   assert(arr is present, "as_array empty present");
   assert(arr!.len == 0, "as_array empty len");

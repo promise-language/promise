@@ -4553,6 +4553,12 @@ func (c *Compiler) genElvis(e *ast.BinaryExpr) value.Value {
 	// Some path: extract inner value
 	c.block = someBlock
 	someVal := c.block.NewExtractValue(optVal, 1)
+	// B0194/T0111: Clear drop flag on elvis of optional identifier.
+	// The inner value is extracted and transferred to the result — the optional's
+	// scope-exit drop should NOT also free it (double-free).
+	if ident, ok := e.Left.(*ast.IdentExpr); ok {
+		c.clearDropFlag(ident.Name)
+	}
 	c.block.NewBr(mergeBlock)
 	someEnd := c.block
 
